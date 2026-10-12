@@ -54,7 +54,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 @media (prefers-reduced-motion:reduce){.wk-r *{animation:none !important;transition:none !important}}
 </style>
 </helmet>
-<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" class="wk-r" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div ref="{{rootRef}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" class="wk-r" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<header style="flex: none; display: flex; align-items: center; gap: 10px; padding: 14px 10px 10px 18px">
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Recordings</h2>
@@ -93,7 +93,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		</div>
 	</sc-if>
 
-	<div tabindex="0" role="region" aria-label="Kept recordings. Arrows move, Enter opens, Space plays, J K L scrub, I and O trim." onKeyDown="{{listKey}}" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+	<div tabindex="0" role="region" aria-label="Kept recordings. Arrows move, Enter opens, Space plays, J K L scrub, I and O trim." onKeyDown="{{listKey}}" onScroll="{{listScroll}}" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
 
 		<sc-if value="{{liveRec}}" hint-placeholder-val="{{false}}">
 			<div style="display: flex; align-items: center; gap: 12px; margin: 2px 2px 8px; padding: 10px 8px 10px 12px; border-radius: 8px; background: rgba(var(--wk-danger-rgb),.08); border: 1px solid rgba(var(--wk-danger-rgb),.14)">
@@ -249,37 +249,12 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 									<button class="wk-ghost" onClick="{{r.toggleDl}}" aria-haspopup="menu" aria-expanded="{{r.dlOpen}}" style="flex: none; white-space: nowrap; height: 36px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px; display: flex; align-items: center; gap: 7px">
 										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2M7 11l5 5l5 -5M12 4v12"></path></svg>Download
 									</button>
-									<sc-if value="{{r.dlOpen}}" hint-placeholder-val="{{false}}">
-										<div role="menu" aria-label="Download" style="position: absolute; left: 0; bottom: 42px; z-index: 5; width: 272px; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer); backdrop-filter: blur(24px)">
-											<sc-for list="{{r.formats}}" as="f" hint-placeholder-count="2">
-												<button role="menuitem" class="wk-ghost" onClick="{{f.pick}}" style="width: 100%; display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 6px 10px; border-radius: 6px; text-align: left">
-													<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-weight: 700; font-size: 13.5px">{{f.name}}</span><span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.35">{{f.hint}}</span></span>
-													<span style="flex: none; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{f.size}}</span>
-												</button>
-											</sc-for>
-											<sc-if value="{{r.trimmed}}" hint-placeholder-val="{{false}}"><div style="padding: 6px 10px 4px; font-size: 11.5px; color: var(--wk-text-3); border-top: 1px solid rgba(var(--wk-line-rgb),.08); margin-top: 4px">Trimmed: only the kept {{r.keepShort}} is downloaded</div></sc-if>
-										</div>
-									</sc-if>
 								</span>
 								<div style="flex: 1"></div>
 								<span style="position: relative; display: flex">
 									<button class="wk-ghost" onClick="{{r.toggleMore}}" aria-haspopup="menu" aria-expanded="{{r.moreOpen}}" aria-label="More actions" style="width: 36px; height: 36px; border-radius: 6px; color: var(--wk-text-3); display: grid; place-items: center">
 										<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>
 									</button>
-									<sc-if value="{{r.moreOpen}}" hint-placeholder-val="{{false}}">
-										<div role="menu" aria-label="More actions" style="position: absolute; right: 0; bottom: 42px; z-index: 5; width: 264px; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer); backdrop-filter: blur(24px)">
-											<button role="menuitem" class="wk-ghost" onClick="{{r.copyLink}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; display: flex; align-items: center; justify-content: space-between">Copy link<span style="font-size: 12px; color: var(--wk-text-3)">Opens in any WaveKit</span></button>
-											<button role="menuitem" class="wk-ghost" onClick="{{r.tune}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; font-variant-numeric: tabular-nums">Tune to {{r.freqText}}</button>
-											<sc-if value="{{r.inActivity}}" hint-placeholder-val="{{true}}">
-												<button role="menuitem" class="wk-ghost" onClick="{{r.showInActivity}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Show in Activity</button>
-											</sc-if>
-											<div style="height: 1px; margin: 6px 4px; background: rgba(var(--wk-line-rgb),.08)"></div>
-											<button role="menuitem" class="wk-ghost" onClick="{{r.remove}}" style="width: 100%; min-height: 44px; padding: 6px 10px; border-radius: 6px; text-align: left; display: flex; flex-direction: column; gap: 2px">
-												<span style="font-size: 13.5px; color: var(--wk-danger-soft); font-weight: 700">{{r.removeText}}</span>
-												<span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.4">{{r.removeHint}}</span>
-											</button>
-										</div>
-									</sc-if>
 								</span>
 							</div>
 						</div>
@@ -288,6 +263,35 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			</sc-for>
 		</sc-for>
 	</div>
+
+	<sc-if value="{{menuOpen}}" hint-placeholder-val="{{false}}">
+		<div aria-hidden="true" onPointerDown="{{closeMenu}}" style="position: absolute; inset: 0; z-index: 19"></div>
+	</sc-if>
+		<sc-if value="{{mDl}}" hint-placeholder-val="{{false}}">
+			<div role="menu" aria-label="Download" class="wk-scroll" style="position: absolute; left: {{menuX}}px; top: {{menuTop}}; bottom: {{menuBottom}}; z-index: 20; width: {{menuW}}px; max-height: {{menuMaxH}}px; overflow-y: auto; box-sizing: border-box; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer); backdrop-filter: blur(24px)">
+				<sc-for list="{{mFormats}}" as="f" hint-placeholder-count="2">
+					<button role="menuitem" class="wk-ghost" onClick="{{f.pick}}" style="width: 100%; display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 6px 10px; border-radius: 6px; text-align: left">
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-weight: 700; font-size: 13.5px">{{f.name}}</span><span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.35">{{f.hint}}</span></span>
+						<span style="flex: none; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{f.size}}</span>
+					</button>
+				</sc-for>
+				<sc-if value="{{mTrimmed}}" hint-placeholder-val="{{false}}"><div style="padding: 6px 10px 4px; font-size: 11.5px; color: var(--wk-text-3); border-top: 1px solid rgba(var(--wk-line-rgb),.08); margin-top: 4px">Trimmed: only the kept {{mKeepShort}} is downloaded</div></sc-if>
+			</div>
+		</sc-if>
+		<sc-if value="{{mMore}}" hint-placeholder-val="{{false}}">
+			<div role="menu" aria-label="More actions" class="wk-scroll" style="position: absolute; right: {{menuX}}px; top: {{menuTop}}; bottom: {{menuBottom}}; z-index: 20; width: {{menuW}}px; max-height: {{menuMaxH}}px; overflow-y: auto; box-sizing: border-box; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer); backdrop-filter: blur(24px)">
+				<button role="menuitem" class="wk-ghost" onClick="{{mCopyLink}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; display: flex; align-items: center; justify-content: space-between">Copy link<span style="font-size: 12px; color: var(--wk-text-3)">Opens in any WaveKit</span></button>
+				<button role="menuitem" class="wk-ghost" onClick="{{mTune}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; font-variant-numeric: tabular-nums">Tune to {{mFreqText}}</button>
+				<sc-if value="{{mInActivity}}" hint-placeholder-val="{{true}}">
+					<button role="menuitem" class="wk-ghost" onClick="{{mShowInActivity}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Show in Activity</button>
+				</sc-if>
+				<div style="height: 1px; margin: 6px 4px; background: rgba(var(--wk-line-rgb),.08)"></div>
+				<button role="menuitem" class="wk-ghost" onClick="{{mRemove}}" style="width: 100%; min-height: 44px; padding: 6px 10px; border-radius: 6px; text-align: left; display: flex; flex-direction: column; gap: 2px">
+					<span style="font-size: 13.5px; color: var(--wk-danger-soft); font-weight: 700">{{mRemoveText}}</span>
+					<span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.4">{{mRemoveHint}}</span>
+				</button>
+			</div>
+		</sc-if>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
 		<div role="status" style="flex: none; margin: 0 10px 8px; height: 42px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); font-size: 13px">
@@ -404,8 +408,9 @@ class Component extends DCLogic {
 			items: SEED.map(x => Object.assign({ tin: 0, tout: 1 }, x)),
 			sel: props.openFirst === false ? null : 'k1', open: props.openFirst === false ? null : 'k1', play: null, pos: 0, playing: false, speed: 1,
 			q: '', tokens: [], focus: false, sugg: 0,
-			menu: null, toast: null, copied: null, recSecs: 0, fresh: null
+			menu: null, menuPos: null, toast: null, copied: null, recSecs: 0, fresh: null
 		};
+		this.rootRef = el => { this.rootEl = el; };
 		this.drag = null;
 	}
 	componentDidMount() { this.timer = setInterval(() => this.step(), 200); }
@@ -512,6 +517,16 @@ class Component extends DCLogic {
 		return out;
 	}
 	addToken(t) { this.setState({ tokens: this.state.tokens.concat([t]), q: '', sugg: 0 }); }
+	// menus live at the drawer's root, so the list's scroll box never clips them: anchored to their button (Download
+	// left, ⋯ right), opening down when they fit below, else up, always inside the drawer
+	toggleMenu(key, e, side) {
+		if (this.state.menu === key || !e || !e.currentTarget || !this.rootEl) return this.setState({ menu: null });
+		const sc = e.currentTarget.closest('[role="region"]'); this.menuScroll = sc ? sc.scrollTop : 0;
+		const rr = this.rootEl.getBoundingClientRect(), br = e.currentTarget.getBoundingClientRect(), M = 8, H = side === 'left' ? 170 : 220;
+		const w = Math.min(side === 'left' ? 272 : 264, rr.width - 2 * M), below = rr.bottom - br.bottom - M, above = br.top - rr.top - M, down = below >= H || below >= above;
+		const x = side === 'left' ? clamp(br.left - rr.left, M, rr.width - w - M) : clamp(rr.right - br.right, M, rr.width - w - M);
+		this.setState({ menu: key, menuPos: { w, x, top: down ? br.bottom - rr.top + 4 : null, bottom: down ? null : rr.bottom - br.top + 4, maxH: Math.max(120, (down ? below : above) - 4) } });
+	}
 	renderVals() {
 		const s = this.state, empty = this.props.view === 'empty';
 		const vis = this.visible();
@@ -586,8 +601,8 @@ class Component extends DCLogic {
 				onNote: e => this.patch(x.id, { note: e.target.value }),
 				fieldKey: e => { e.stopPropagation(); if (e.key === 'Escape' || (e.key === 'Enter' && e.target.tagName === 'INPUT')) e.target.blur(); },
 				dlOpen: s.menu === 'dl:' + x.id, moreOpen: s.menu === 'more:' + x.id,
-				toggleDl: () => this.setState({ menu: s.menu === 'dl:' + x.id ? null : 'dl:' + x.id }),
-				toggleMore: () => this.setState({ menu: s.menu === 'more:' + x.id ? null : 'more:' + x.id }),
+				toggleDl: e => this.toggleMenu('dl:' + x.id, e, 'left'),
+				toggleMore: e => this.toggleMenu('more:' + x.id, e, 'right'),
 				formats: (iq ? fmtsIq : fmtsAudio).map(f => Object.assign(f, { pick: () => { this.setState({ menu: null }); this.toast('Downloading ' + title(x) + ' · ' + f.name.split(' ')[0] + ' · ' + f.size); } })),
 				copyText: s.copied === x.id ? 'Copied' : 'Copy link', copyC: s.copied === x.id ? 'var(--wk-accent)' : 'var(--wk-text-2)',
 				copyIcon: s.copied === x.id ? ['M5 12l5 5l10 -10'] : ['M9 15l6 -6', 'M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464', 'M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463'],
@@ -601,6 +616,11 @@ class Component extends DCLogic {
 		};
 		const groups = [];
 		vis.forEach(x => { const g = groups[groups.length - 1]; if (g && g.day === x.day) g.rows.push(row(x)); else groups.push({ day: x.day, label: DAYS[x.day], rows: [row(x)] }); });
+		// the open menu's row (its values drive the root-level menu)
+		const mRow = s.menu ? [].concat.apply([], groups.map(g => g.rows)).find(r => r.dlOpen || r.moreOpen) : null, mp = s.menuPos;
+		const menuVals = mRow && mp ? { menuOpen: true, mDl: !!mRow.dlOpen, mMore: !!mRow.moreOpen, menuX: mp.x, menuW: mp.w, menuTop: mp.top == null ? 'auto' : mp.top + 'px', menuBottom: mp.bottom == null ? 'auto' : mp.bottom + 'px', menuMaxH: mp.maxH,
+			mFormats: mRow.formats, mTrimmed: mRow.trimmed, mKeepShort: mRow.keepShort, mCopyLink: mRow.copyLink, mTune: mRow.tune, mFreqText: mRow.freqText, mInActivity: mRow.inActivity, mShowInActivity: mRow.showInActivity,
+			mRemoveText: mRow.removeText, mRemoveHint: mRow.removeHint, mRemove: mRow.remove } : { menuOpen: false, mDl: false, mMore: false };
 		const keptBytes = empty ? 0 : s.items.reduce((a, x) => a + x.bytes, 0);
 		const low = this.props.storage === 'low';
 		const pIq = !!playItem && playItem.kind === 'iq';
@@ -647,6 +667,7 @@ class Component extends DCLogic {
 			},
 			liveRec: this.isRecording(), recLabel: (this.props.recordingLabel || '161.150 NFM') + ' · lands here when you stop', recTime: fmtS(s.recSecs),
 			stopRec: () => this.props.onStopRecording && this.props.onStopRecording(),
+			...menuVals, rootRef: this.rootRef, closeMenu: () => this.setState({ menu: null }), listScroll: e => { if (s.menu && Math.abs(e.currentTarget.scrollTop - (this.menuScroll || 0)) > 4) this.setState({ menu: null }); },
 			hasToast: !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.undo), undo: () => s.toast && s.toast.undo && s.toast.undo(),
 			hasPlayer: !!playItem,
 			pAudio: !pIq, pIq,

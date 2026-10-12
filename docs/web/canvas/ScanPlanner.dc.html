@@ -58,6 +58,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 .wk-pl .wk-seg{display:inline-flex;gap:2px;padding:3px;border-radius:6px;background:var(--wk-well);border:1px solid rgba(var(--wk-line-rgb),.08)}
 .wk-pl .wk-seg>button{height:28px;padding:0 10px;border-radius:4px;font-size:12.5px;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;transition:background .15s,color .15s}
 .wk-pl .wk-seg>button[aria-checked="false"]:hover{color:var(--wk-text)}
+.wk-pl .wk-amb:hover{background:rgba(var(--wk-amber-rgb),.12)}
 .wk-pl .wk-primary{transition:filter .15s}
 .wk-pl .wk-primary:hover:not(:disabled){filter:brightness(1.08)}
 @keyframes wk-pl-pulse{0%{transform:scale(1);opacity:.7}100%{transform:scale(2.6);opacity:0}}
@@ -66,10 +67,16 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 @media (prefers-reduced-motion:reduce){.wk-pl *{transition:none !important}.wk-pl .wk-pulse{animation:none;opacity:.35;transform:scale(1.8)}.wk-pl .wk-new{animation:none}}
 </style>
 </helmet>
-<div class="wk-pl" ref="{{rootRef}}" tabindex="-1" onKeyDown="{{rootKey}}" role="dialog" aria-label="{{dialogLabel}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{rootR}}; overflow: hidden; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div class="wk-pl" ref="{{rootRef}}" tabindex="-1" onKeyDown="{{rootKey}}" role="dialog" aria-label="{{dialogLabel}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{rootR}}; overflow: hidden; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); border-right-color: {{rootEdgeR}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); clip-path: {{rootClip}}; color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<header style="flex: none; display: grid; grid-template-columns: {{hdCols}}; grid-template-areas: {{hdAreas}}; align-items: center; column-gap: 12px; row-gap: 8px; padding: {{hdPad}}">
 		<div style="grid-area: title; display: flex; align-items: center; gap: 9px; min-width: 0">
+			<sc-if value="{{isScreen}}" hint-placeholder-val="{{false}}">
+				<button class="wk-ghost" onClick="{{close}}" aria-label="Back to Scanner" title="Back to Scanner · Esc" style="flex: none; height: 36px; margin-left: -8px; padding: 0 10px 0 4px; border-radius: 6px; display: flex; align-items: center; gap: 2px; font-size: 13.5px; font-weight: 700; color: var(--wk-text-2)">
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg>Scanner
+				</button>
+				<span aria-hidden="true" style="flex: none; width: 1px; height: 18px; background: rgba(var(--wk-line-rgb),.16)"></span>
+			</sc-if>
 			<sc-if value="{{running}}" hint-placeholder-val="{{false}}">
 				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{runC}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>
 			</sc-if>
@@ -92,9 +99,11 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			</button>
 		</sc-if>
 
-		<button class="wk-ghost" onClick="{{close}}" aria-label="Close" title="Close · Esc" style="grid-area: close; width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)">
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
-		</button>
+		<sc-if value="{{showHide}}" hint-placeholder-val="{{true}}">
+			<button class="wk-ghost" onClick="{{close}}" aria-label="Hide the plan" title="{{hideTitle}}" style="grid-area: close; height: 36px; padding: 0 8px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: var(--wk-text-2); white-space: nowrap">
+				Hide<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7l5 5l-5 5M13 7l5 5l-5 5"></path></svg>
+			</button>
+		</sc-if>
 	</header>
 
 	<section aria-label="Ruler" style="flex: none; padding: {{secPad}}">
@@ -135,8 +144,11 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</sc-if>
 
 				<sc-if value="{{running}}" hint-placeholder-val="{{false}}">
-					<sc-for list="{{hopCells}}" as="h" hint-placeholder-count="12">
-						<span aria-hidden="true" style="position: absolute; top: {{h.top}}px; height: {{h.h}}px; left: {{h.left}}px; width: {{h.width}}px; border-radius: 2px; background: {{h.bg}}; box-shadow: {{h.glow}}; opacity: {{h.op}}"></span>
+					<sc-for list="{{rangeBars}}" as="b" hint-placeholder-count="2">
+						<span title="{{b.title}}" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; box-sizing: border-box; border-radius: 3px; background: {{b.bg}}; box-shadow: inset 0 0 0 1px {{b.edge}}"></span>
+					</sc-for>
+					<sc-for list="{{coverBars}}" as="b" hint-placeholder-count="1">
+						<span aria-hidden="true" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; border-radius: 3px; background: {{b.bg}}; pointer-events: none"></span>
 					</sc-for>
 					<sc-for list="{{runSkips}}" as="x" hint-placeholder-count="1">
 						<div title="{{x.title}}" style="position: absolute; top: {{x.top}}px; height: {{x.h}}px; left: {{x.left}}px; width: {{x.width}}px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, var(--wk-well) 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.3)"></div>
@@ -144,9 +156,9 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					<sc-for list="{{segGaps}}" as="g" hint-placeholder-count="0">
 						<span title="{{g.title}}" style="position: absolute; top: {{g.top}}px; height: {{g.h}}px; left: {{g.left}}px; width: {{g.width}}px; display: grid; place-items: center; font-size: 13px; color: var(--wk-text-4)">≈</span>
 					</sc-for>
-					<sc-for list="{{rowBars}}" as="b" hint-placeholder-count="2">
-						<span aria-hidden="true" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; border-radius: 2px; background: {{b.bg}}"></span>
-					</sc-for>
+					<sc-if value="{{winOn}}" hint-placeholder-val="{{true}}">
+						<span role="img" aria-label="{{winAria}}" title="{{winTitle}}" style="position: absolute; left: 0; top: {{winTop}}px; height: {{winH}}px; width: {{winW}}px; box-sizing: border-box; border-radius: 4px; border: 1.5px solid {{winC}}; border-left-width: 3px; border-right-width: 3px; background: {{winBg}}; box-shadow: {{winGlow}}; transform: translateX({{winX}}px); transition: {{winTr}}; will-change: transform; z-index: 2"></span>
+					</sc-if>
 					<sc-for list="{{ticks}}" as="t" hint-placeholder-count="6">
 						<button onClick="{{t.pick}}" onMouseEnter="{{t.enter}}" onMouseLeave="{{tipLeave}}" onFocus="{{t.enter}}" onBlur="{{tipLeave}}" aria-label="{{t.aria}}" style="position: absolute; top: {{t.top}}px; left: {{t.left}}px; width: 18px; height: 22px; margin-left: -9px; border-radius: 4px; display: grid; place-items: center; z-index: 2">
 							<span style="position: relative; width: 8px; height: 8px; display: block">
@@ -198,7 +210,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<div style="flex: none; display: flex; gap: 2px">
 					<button class="wk-ghost" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out · Ctrl + scroll" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
 					<button class="wk-ghost" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in · Ctrl + scroll" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
-					<button class="wk-ghost" onClick="{{zoomFit}}" disabled="{{noFit}}" title="Show every range" style="height: 32px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; opacity: {{fitOp}}">Fit</button>
+					<button class="wk-ghost" onClick="{{zoomFit}}" disabled="{{noFit}}" title="{{fitTitle}}" style="height: 32px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; opacity: {{fitOp}}">Fit</button>
 				</div>
 			</div>
 		</sc-if>
@@ -230,6 +242,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</sc-if>
 					<sc-if value="{{r.notRenaming}}" hint-placeholder-val="{{true}}">
 						<span title="{{r.name}}" onDoubleClick="{{r.rename}}" style="min-width: 0; font-size: 13.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
+							<sc-if value="{{r.pending}}" hint-placeholder-val="{{false}}"><span role="img" aria-label="Change waiting" title="Change waiting for Apply" style="flex: none; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--wk-amber)"></span></sc-if>
 					</sc-if>
 				</span>
 				<span role="cell" style="grid-area: edges; display: flex; align-items: center; gap: 6px; min-width: 0">
@@ -239,7 +252,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 						<input class="wk-box" value="{{r.fb}}" onChange="{{r.onB}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, high edge, MHz" title="{{r.err}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-variant-numeric: tabular-nums; border-color: {{r.bEdge}}">
 					</sc-if>
 					<sc-if value="{{r.readOnly}}" hint-placeholder-val="{{false}}">
-						<span style="font-size: 13.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap">{{r.edgesText}}</span>
+						<span title="Stop to change edges" style="display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-4)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M5 11h14v10h-14z"></path><path d="M8 11v-4a4 4 0 1 1 8 0v4"></path></svg>{{r.edgesText}}</span>
 					</sc-if>
 				</span>
 				<span role="cell" style="grid-area: sp; display: flex; min-width: 0">
@@ -250,17 +263,17 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</button>
 				</span>
 				<span role="cell" style="grid-area: protos; min-width: 0; display: flex">
-					<button class="wk-cell" onClick="{{r.openProtos}}" disabled="{{r.readOnly}}" aria-haspopup="dialog" aria-label="Protocols for {{r.name}}: {{r.protoAll}}" title="{{r.protoAll}}" style="min-width: 0; max-width: 100%; min-height: 30px; padding: 3px; border-radius: 7px; display: flex; flex-wrap: {{protoWrap}}; align-items: center; gap: 4px; overflow: hidden">
+					<button class="wk-cell" onClick="{{r.openProtos}}" disabled="{{r.noEdit}}" aria-haspopup="dialog" aria-label="Protocols for {{r.name}}: {{r.protoAll}}" title="{{r.protoAll}}" style="min-width: 0; max-width: 100%; min-height: 30px; padding: 3px; border-radius: 7px; display: flex; flex-wrap: {{protoWrap}}; align-items: center; gap: 4px; overflow: hidden">
 						<sc-for list="{{r.protos}}" as="c" hint-placeholder-count="3">
 							<span style="flex: none; height: 24px; padding: 0 8px; border-radius: 5px; display: flex; align-items: center; background: var(--wk-sel); color: var(--wk-accent); font-size: 12.5px; font-weight: 700; white-space: nowrap">{{c.label}}</span>
 						</sc-for>
 						<sc-if value="{{r.protoMore}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 24px; padding: 0 7px; border-radius: 5px; display: flex; align-items: center; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.protoMoreText}}</span></sc-if>
 						<sc-if value="{{r.protoNone}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 24px; padding: 0 6px; display: flex; align-items: center; color: var(--wk-text-3); font-size: 12.5px; white-space: nowrap">{{r.protoNoneText}}</span></sc-if>
-						<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}"><span aria-hidden="true" style="flex: none; width: 24px; height: 24px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></span></sc-if>
+						<sc-if value="{{r.canEdit}}" hint-placeholder-val="{{true}}"><span aria-hidden="true" style="flex: none; width: 24px; height: 24px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></span></sc-if>
 					</button>
 				</span>
 				<span role="cell" style="grid-area: skips; min-width: 0; display: flex">
-					<button class="wk-cell" onClick="{{r.openSkips}}" disabled="{{r.readOnly}}" aria-haspopup="dialog" aria-label="Skips in {{r.name}}: {{r.skipText}}" title="{{r.skipTitle}}" style="min-width: 0; max-width: 100%; height: 30px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: {{r.skipFg}}; white-space: nowrap">
+					<button class="wk-cell" onClick="{{r.openSkips}}" disabled="{{r.noEdit}}" aria-haspopup="dialog" aria-label="Skips in {{r.name}}: {{r.skipText}}" title="{{r.skipTitle}}" style="min-width: 0; max-width: 100%; height: 30px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: {{r.skipFg}}; white-space: nowrap">
 						<sc-if value="{{r.hasSkips}}" hint-placeholder-val="{{true}}"><span aria-hidden="true" style="flex: none; width: 12px; height: 12px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, transparent 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.4)"></span></sc-if>
 						<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.skipText}}</span>
 					</button>
@@ -288,7 +301,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		</div>
 	</sc-if>
 
-	<footer style="flex: none; display: flex; flex-wrap: wrap; align-items: center; column-gap: 14px; row-gap: 8px; padding: {{footPad}}; border-top: 1px solid rgba(var(--wk-line-rgb),.1)">
+	<footer style="flex: none; display: {{footDisp}}; flex-wrap: wrap; align-items: center; column-gap: 14px; row-gap: 8px; padding: {{footPad}}; border-top: 1px solid rgba(var(--wk-line-rgb),.1)">
 		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
 			<button class="wk-ghost" onClick="{{openOptions}}" aria-haspopup="dialog" aria-expanded="{{optOpen}}" style="flex: none; height: 40px; padding: 0 10px 0 8px; margin-left: -8px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; color: var(--wk-text-2)">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h4m4 0h8M4 16h10m4 0h2"></path><path d="M8 6v4M14 14v4"></path></svg>Options
@@ -301,32 +314,24 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</span>
 			</sc-if>
 			<span style="flex: 1 1 0; min-width: 0"></span>
-			<button class="wk-primary" onClick="{{start}}" disabled="{{startDisabled}}" title="{{startTitle}}" style="flex: {{startFlex}}; height: 40px; padding: 0 18px; border-radius: 6px; background: {{startBg}}; color: {{startFg}}; font-size: 13.5px; font-weight: 700; white-space: nowrap">Start · takes the receiver</button>
+			<button class="wk-primary" onClick="{{start}}" disabled="{{startDisabled}}" title="{{startTitle}}" style="flex: {{startFlex}}; margin-left: auto; height: 40px; padding: 0 18px; border-radius: 6px; background: {{startBg}}; color: {{startFg}}; font-size: 13.5px; font-weight: 700; white-space: nowrap">Start · takes the receiver</button>
 		</sc-if>
 
-		<sc-if value="{{running}}" hint-placeholder-val="{{false}}">
-			<div role="status" style="flex: 1 1 320px; min-width: 0; display: flex; align-items: center; gap: 14px">
-				<span style="flex: none; font-size: 13px; font-weight: 700; color: {{runC}}; white-space: nowrap">{{runWord}}</span>
-				<span style="flex: none; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{runFreq}}</span>
-				<sc-if value="{{runHasLabel}}" hint-placeholder-val="{{false}}"><span style="flex: none; font-size: 13px; font-weight: 700; color: var(--wk-accent); white-space: nowrap">{{runLabel}}</span></sc-if>
-				<span aria-hidden="true" title="This pass" style="position: relative; flex: 1; min-width: 40px; height: 3px; border-radius: 2px; background: rgba(var(--wk-ink-rgb),.12); overflow: hidden">
-					<span style="position: absolute; left: 0; top: 0; bottom: 0; width: {{passPct}}%; border-radius: 2px; background: {{runC}}; transition: width .3s linear"></span>
-				</span>
-			</div>
-			<div style="flex: none; display: flex; align-items: center; gap: 6px; margin-left: auto">
-				<sc-if value="{{canStay}}" hint-placeholder-val="{{false}}">
-					<button class="wk-ghost" onClick="{{stay}}" style="height: 40px; padding: 0 12px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px; font-weight: 700; white-space: nowrap">Stay here</button>
-				</sc-if>
-				<sc-if value="{{canPause}}" hint-placeholder-val="{{true}}">
-					<button onClick="{{pause}}" title="The scan keeps the receiver until you tune" style="height: 40px; padding: 0 14px 0 11px; border-radius: 6px; display: flex; align-items: center; gap: 7px; background: var(--wk-chip); color: var(--wk-text); font-size: 13px; font-weight: 700; white-space: nowrap"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14h-4zM14 5h4v14h-4z"></path></svg>Pause</button>
-				</sc-if>
-				<sc-if value="{{canResume}}" hint-placeholder-val="{{false}}">
-					<button class="wk-primary" onClick="{{resume}}" style="height: 40px; padding: 0 16px 0 12px; border-radius: 6px; display: flex; align-items: center; gap: 7px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13px; font-weight: 700; white-space: nowrap"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg>Resume</button>
-				</sc-if>
-				<button class="wk-ghost" onClick="{{stopScan}}" title="Ends the scan · the receiver and decoders are yours again" style="height: 40px; padding: 0 14px 0 11px; border-radius: 6px; display: flex; align-items: center; gap: 7px; color: var(--wk-text-2); font-size: 13px; font-weight: 700; white-space: nowrap"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 6h12v12h-12z"></path></svg>Stop</button>
-			</div>
+		<sc-if value="{{runQuiet}}" hint-placeholder-val="{{false}}">
+			<span role="status" title="{{passTitle}}" style="flex: 1; min-width: 0; min-height: 40px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden">
+				<sc-if value="{{runHasWord}}" hint-placeholder-val="{{false}}"><span style="flex: none; font-weight: 700; color: var(--wk-amber)">{{runWord}}</span><span aria-hidden="true" style="flex: none">·</span></sc-if>
+				<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{passText}}</span>
+			</span>
 		</sc-if>
 	</footer>
+	<sc-if value="{{runPending}}" hint-placeholder-val="{{false}}">
+		<div role="region" aria-label="Changes waiting to be applied" style="flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 10px 12px 10px 20px; border-top: 1px solid rgba(var(--wk-amber-rgb),.32); background: var(--wk-amber-glass)">
+			<span aria-hidden="true" style="flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--wk-amber); box-shadow: 0 0 0 3px rgba(var(--wk-amber-rgb),.18)"></span>
+			<span title="Apply re-plans the scan at its next hop" style="flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700; color: var(--wk-amber-soft); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pendTitle}}</span>
+			<button class="wk-amb" onClick="{{discard}}" style="flex: none; height: 36px; padding: 0 12px; border-radius: 6px; color: var(--wk-amber-soft); font-size: 13px">Discard</button>
+			<button onClick="{{applyEdits}}" title="Re-plans at the next hop" style="flex: none; height: 36px; padding: 0 18px; border-radius: 6px; background: var(--wk-amber); color: var(--wk-on-amber); font-size: 13px; font-weight: 700">Apply</button>
+		</div>
+	</sc-if>
 
 	<sc-if value="{{hasPop}}" hint-placeholder-val="{{false}}">
 		<div aria-hidden="true" onPointerDown="{{closePop}}" style="position: absolute; inset: 0; z-index: 20"></div>
@@ -413,7 +418,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["empty","preset","combined","custom","prefilled","running","holding","paused"],"default":"combined"},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"discoveries":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"$preview":{"width":1440,"height":500}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["empty","preset","combined","custom","prefilled","running","running-edits","holding","paused"],"default":"combined"},"layout":{"editor":"enum","options":["pane","screen"],"default":"pane"},"width":{"editor":"range","min":360,"max":1400,"step":10,"unit":"px","default":990},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"discoveries":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"onApply":{"editor":null},"$preview":{"width":990,"height":680}}'>
 // ---------- Protocols (S1 trials; AIS, ACARS, VDL2, LoRa are dedicated decoders) ----------
 // s2: arrives with stage S2 · only + by: lives on fixed channels an always-on decoder covers
 const PROTO = {
@@ -422,6 +427,10 @@ const PROTO = {
 	pocsag: { label: 'POCSAG' }, flex: { label: 'FLEX' }, aprs: { label: 'APRS', only: [144.8], by: 'Direwolf' }, ais: { label: 'AIS', only: [161.975, 162.025], by: 'AIS-catcher' },
 	acars: { label: 'ACARS', only: [131.525, 131.725], by: 'acarsdec' }, vdl2: { label: 'VDL2', only: [136.975], by: 'dumpvdl2' }, ism: { label: 'rtl_433' }, lora: { label: 'LoRa' }
 };
+// core ids (bandplans, job specs) → the board's ids, so a display name always shows, never `analog-fm`
+const PALIAS = { 'analog-fm': 'fm', nfm: 'fm', 'analog-am': 'am', p25p1: 'p25', p25p2: 'p25', nxdn48: 'nxdn', nxdn96: 'nxdn', 'd-star': 'dstar', rtl433: 'ism', rtl_433: 'ism', meshtastic: 'lora', ctcss: 'tones', dcs: 'tones' };
+const pid = p => PALIAS[p] || p;
+const plabel = p => PROTO[pid(p)] ? PROTO[pid(p)].label : String(p).replace(/[-_]/g, ' ').toUpperCase();
 const PORDER = ['dmr', 'p25', 'nxdn', 'dpmr', 'ysf', 'dstar', 'fm', 'am', 'tones', 'pocsag', 'flex', 'aprs', 'ais', 'acars', 'vdl2', 'ism', 'lora'];
 
 // ---------- Presets (region EU; the station is in Toulouse, the mock stays in Brittany) ----------
@@ -451,7 +460,7 @@ const ELSEWHERE = [
 ];
 // What a sweep pauses on this receiver (the Pi receiver at 161.150). ADS-B has its own receiver.
 const PAUSES = ['AIS', 'POCSAG', 'DMR'];
-const LIM = [24, 1766], OV = [100, 900], HOP_MHZ = 1.5;
+const LIM = [24, 1766], OV = [100, 900], HOP_MHZ = 1.5, SR_HZ = 2400000;
 const SPAN = { startHz: 160400000, endHz: 162000000 };
 const DWELLS = { short: 0.15, normal: 0.25, long: 0.6 }, DWELL_PER = 0.025;
 const SP_OPTS = [6250, 8330, 12500, 25000];
@@ -538,7 +547,7 @@ class Component extends DCLogic {
 		this.state = Object.assign({
 			userPresets: USER0.slice(), tool: 'add', findOnly: false, hold: true, rec: true, stopAfter: 'never', dwell: 'normal', sens: 'normal',
 			tw: 0, cw: 0, drag: null, flash: null, pop: null, renaming: null, renameText: '', saveName: '', spCustom: '', toast: null, tip: null,
-			runOff: {}, acc: 0
+			acc: 0
 		}, this.fromTweak(props.state));
 		if (props.prefill) Object.assign(this.state, this.prefillState(props.prefill));
 		this.initRefs();
@@ -550,7 +559,8 @@ class Component extends DCLogic {
 		st = st || 'empty';
 		let ranges = [];
 		if (st === 'preset') ranges = fromPreset(PRESETS[0]);
-		if (st === 'combined' || st === 'running' || st === 'holding' || st === 'paused') ranges = fromPreset(PRESETS[1]).concat(fromPreset(PRESETS[0]));
+		const run = st === 'running' || st === 'running-edits' || st === 'holding' || st === 'paused';
+		if (st === 'combined' || run) ranges = fromPreset(PRESETS[1]).concat(fromPreset(PRESETS[0]));
 		if (st === 'custom') {
 			// ranges drawn, overlapped and skipped by hand: the case whose labels used to stack
 			const mk = (n, a, b) => mkRange({ name: n, a, b, protos: guessProtos(a, b) });
@@ -558,13 +568,20 @@ class Component extends DCLogic {
 			ranges[2].excl.push({ id: 'x' + (++RID), fa: '167.000', fb: '167.200', why: 'Skipped by you' });
 			ranges[0].sp = [12500, 25000];
 		}
-		const o = Object.assign({ ranges, own: null, hop: 1, runOff: {}, pop: null, renaming: null, drag: null, toast: null }, ranges.length ? this.fitRanges(ranges) : { vL: 116, vR: 176 });
+		// never opens on an empty stretch: no ranges → the region's band plans (Fit)
+		const o = Object.assign({ ranges, own: null, hop: 1, pass: 1, ra: null, rd: null, pop: null, renaming: null, drag: null, toast: null }, ranges.length ? this.fitRanges(ranges) : this.fitBands());
 		if (st === 'prefilled') Object.assign(o, this.prefillState((this.props && this.props.prefill) || SPAN));
-		if (st === 'running' || st === 'holding' || st === 'paused') {
+		if (run) {
 			const plan = this.planOf(ranges, { findOnly: false, dwell: 'normal', users: USER0, stage: this.props.stage });
 			const p = this.payload(plan, { findOnly: false, hold: true, rec: true, stopAfter: 'never', dwell: 'normal', sens: 'normal' });
-			o.own = this.runOf(p, st === 'running' ? 'sweeping' : st);
-			o.hop = st === 'running' ? 6 : this.hopAt(o.own, 161150000);
+			o.own = this.runOf(p, st === 'running' || st === 'running-edits' ? 'sweeping' : st);
+			o.hop = st === 'running' || st === 'running-edits' ? 16 : this.hopAt(o.own, 161150000);
+			o.pass = 3;
+			if (st === 'running-edits') {
+				// two edits waiting: Marine VHF taken out, POCSAG dropped from PMR / land mobile
+				const base = this.runBase(o.own), pm = base.protos['PMR / land mobile'] || [];
+				o.rd = Object.assign({}, base, { off: { 'Marine VHF': true }, protos: Object.assign({}, base.protos, { 'PMR / land mobile': pm.filter(x => x !== 'pocsag') }) });
+			}
 			if (st === 'holding') Object.assign(o.own, { holdHz: 161150000, holdLabel: 'DMR · CC 1' });
 		}
 		return o;
@@ -590,10 +607,11 @@ class Component extends DCLogic {
 		if (this.props.sweep || !o || o.state !== 'sweeping') return;
 		const acc = s.acc + 0.125, per = Math.max(0.2, o.sweepS / o.hops);
 		if (acc < per) return this.setState({ acc });
-		const lay = this.runLayout(Object.assign({}, o, { hop: s.hop }), s.tw || 1200), on = c => lay.rows.some(r => !s.runOff[r.name] && (c.a + c.b) / 2 >= r.startHz && (c.a + c.b) / 2 <= r.endHz);
-		let h = s.hop;
-		for (let k = 0; k < lay.cells.length; k++) { h = h % lay.cells.length + 1; if (on(lay.cells[h - 1])) break; }
-		this.setState({ acc: 0, hop: h });
+		const off = this.runApplied(o).off;
+		const lay = this.runLayout(Object.assign({}, o, { hop: s.hop }), s.tw || 1200), on = c => lay.rows.some(r => !off[r.name] && (c.a + c.b) / 2 >= r.startHz && (c.a + c.b) / 2 <= r.endHz);
+		let h = s.hop, wrap = false;
+		for (let k = 0; k < lay.cells.length; k++) { h = h % lay.cells.length + 1; if (h === 1) wrap = true; if (on(lay.cells[h - 1])) break; }
+		this.setState({ acc: 0, hop: h, pass: wrap ? s.pass + 1 : s.pass });
 	}
 
 	// ---------- Refs, ruler pointer and wheel ----------
@@ -674,10 +692,14 @@ class Component extends DCLogic {
 		const a = Math.min.apply(null, as), b = Math.max.apply(null, bs), pad = Math.max(0.1, (b - a) * 0.06);
 		return { vL: Math.max(LIM[0], a - pad), vR: Math.min(LIM[1], b + pad) };
 	}
+	// the region's band plans, for a ruler with no ranges yet: the VHF cluster where five of the six lanes have a band
+	// (118–174 MHz, EU); the whole plan (118–870) would draw every band as a sliver. The overview reaches the rest.
+	fitBands() { const rs = [].concat.apply([], PRESETS.map(p => p.ranges)).filter(r => r[1] <= 200); const a = Math.min.apply(null, rs.map(r => r[0])), b = Math.max.apply(null, rs.map(r => r[1])), pad = (b - a) * 0.02; return { vL: Math.max(LIM[0], a - pad), vR: Math.min(LIM[1], b + pad) }; }
 	// ruler geometry (px inside the track)
 	geo() {
 		const narrow = this.narrow();
-		if (this.running()) return { rulerH: narrow ? 132 : 140, tickTop: 6, hopTop: 30, hopH: narrow ? 30 : 38, rangeTop: narrow ? 66 : 76, axisTop: narrow ? 104 : 112, axisH: 22 };
+		// running: one lane, discovery ticks just above it, no lane labels
+		if (this.running()) return { rulerH: 96, tickTop: 3, laneTop: 32, laneH: 30, axisTop: 70, axisH: 22 };
 		const LH = narrow ? 11 : 13, LG = 2, top = 6, lanesEnd = top + LANES.length * (LH + LG) - LG;
 		return { rulerH: lanesEnd + 54, LH, LG, laneTop: top, lanesEnd, rangeTop: lanesEnd + 5, rangeH: 24, axisTop: lanesEnd + 32, axisH: 22 };
 	}
@@ -799,6 +821,30 @@ class Component extends DCLogic {
 	runOf(p, state) {
 		return { state, preset: p.preset, startHz: p.startHz, endHz: p.endHz, ranges: p.ranges, exclusions: p.exclusions, stretches: p.stretches, hops: p.hops, sweepS: p.sweepS };
 	}
+	// ---------- Mid-run edits: range on/off, protocols, skips wait for Apply; edges and spacing are fixed while it runs ----------
+	runBase(w) {
+		const rows = (w.ranges || []);
+		const protos = {};
+		rows.forEach(r => { protos[r.name] = Array.from(new Set((r.protocols || []).map(pid))); });
+		const excl = (w.exclusions || []).map((x, i) => { const auto = !!x.reason && !/^Skipped/.test(x.reason); return { id: 'e' + i, fa: f3(x.startHz / 1e6), fb: f3(x.endHz / 1e6), auto, why: auto ? x.reason.split(' · ')[0] : 'Skipped by you', by: auto ? (x.reason.split('decoded by ')[1] || 'its own decoder') : '' }; });
+		return { off: {}, protos, excl };
+	}
+	runApplied(w) { return this.state.ra || this.runBase(w); }
+	runDraft(w) { return this.state.rd || this.runApplied(w); }
+	runChanges(w) {
+		const a = this.runApplied(w), d = this.runDraft(w), out = [];
+		if (!this.state.rd) return out;
+		const names = (w.ranges || []).map(r => r.name);
+		names.forEach(n => {
+			if (!!a.off[n] !== !!d.off[n]) out.push({ name: n, kind: 'on' });
+			if ((a.protos[n] || []).slice().sort().join() !== (d.protos[n] || []).slice().sort().join()) out.push({ name: n, kind: 'protos' });
+		});
+		const key = x => pf(x.fa).toFixed(4) + '-' + pf(x.fb).toFixed(4), ak = a.excl.map(key), dk = d.excl.map(key);
+		const exN = dk.filter(k => !ak.includes(k)).length + ak.filter(k => !dk.includes(k)).length;
+		if (exN) d.excl.filter(x => !ak.includes(key(x))).concat(a.excl.filter(x => !dk.includes(key(x)))).forEach(x => { const m = (pf(x.fa) + pf(x.fb)) / 2 * 1e6, r = (w.ranges || []).find(q => m >= q.startHz && m <= q.endHz); out.push({ name: r ? r.name : '', kind: 'skip' }); });
+		return out;
+	}
+	editRun(w, fn) { const d = this.runDraft(w), nd = { off: Object.assign({}, d.off), protos: Object.assign({}, d.protos), excl: d.excl.slice() }; fn(nd); this.setState({ rd: nd }); }
 	// the sweep to show: the shell's when it passes a running one, else the board's own
 	run() {
 		const w = this.props.sweep;
@@ -807,7 +853,12 @@ class Component extends DCLogic {
 		return o ? Object.assign({}, o, { hop: this.state.hop }) : null;
 	}
 	running() { return !!this.run(); }
-	narrow() { const cw = this.state.cw || 1440; return cw < 760; }
+	// the pane's width: the shell's `width` prop, never wider than what is measured
+	paneW() { const p = +this.props.width, cw = this.state.cw; return p > 0 && cw ? Math.min(p, cw) : p > 0 ? p : cw || 990; }
+	screen() { return this.props.layout === 'screen'; }
+	// stacked: phone screen or very narrow · twoLine: pane under 860 px
+	narrow() { return this.screen() || this.paneW() < 560; }
+	twoLine() { return !this.narrow() && this.paneW() < 860; }
 	// the stretches the sweep visits, in order, with their hops (BandStrip's layout, kept readable)
 	stretchesOf(w) {
 		const rows = (w.ranges && w.ranges.length ? w.ranges : [{ startHz: w.startHz, endHz: w.endHz, name: w.preset }]).slice().sort((x, y) => x.startHz - y.startHz);
@@ -923,32 +974,39 @@ class Component extends DCLogic {
 			dragEdge: g && g.alt ? 'var(--wk-text-2)' : 'var(--wk-accent)',
 			dragBg: g && g.alt ? 'repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.35) 0 1.5px, transparent 1.5px 4px)' : 'rgba(var(--wk-accent-rgb),.1)',
 			zoomIn: () => this.zoomAt(0.5), zoomOut: () => this.zoomAt(2),
-			zoomFit: () => { const v = this.fitRanges(s.ranges.filter(r => isFinite(pf(r.fa)) && isFinite(pf(r.fb)))); if (v.vL != null) this.setState(v); },
-			noFit: !ok.length, fitOp: ok.length ? 1 : 0.45,
+			zoomFit: () => { const v = ok.length ? this.fitRanges(s.ranges.filter(r => isFinite(pf(r.fa)) && isFinite(pf(r.fb)))) : this.fitBands(); if (v.vL != null) this.setState(v); },
+			noFit: false, fitOp: 1, fitTitle: ok.length ? 'Show every range' : 'Show the band plans',
 			ovMarks: ok.filter(i => i.b > OV[0] && i.a < OV[1]).map(i => ({ left: ovP(i.a), width: Math.max(0.3, ovP(i.b) - ovP(i.a)) })),
 			ovL: ovP(L), ovW: Math.max(0.8, ovP(R) - ovP(L)), ovNow: Math.round((L + R) / 2), ovText: fmt(L) + ' to ' + fmt(R) + ' MHz',
-			hopCells: [], runSkips: [], segGaps: [], rowBars: [], ticks: [], hasTip: false
+			rangeBars: [], coverBars: [], runSkips: [], segGaps: [], ticks: [], hasTip: false, winOn: false
 		};
 	}
 	runRuler(w, G) {
-		const s = this.state, tw = s.tw || 1200, lay = this.runLayout(w, tw), off = s.runOff;
+		const s = this.state, tw = s.tw || 1200, lay = this.runLayout(w, tw), ap = this.runApplied(w), off = ap.off;
 		const paused = !LIVE(w.state), acc = paused ? 'var(--wk-amber)' : 'var(--wk-accent)', accRgb = paused ? 'var(--wk-amber-rgb)' : 'var(--wk-accent-rgb)';
 		const cur = clamp(w.hop || 1, 1, lay.cells.length);
 		const rowOn = r => !off[r.name];
-		const onAt = f => lay.rows.some(r => rowOn(r) && f >= r.startHz && f <= r.endHz);
-		const hopCells = lay.cells.map((c, i) => {
-			const n = i + 1, on = n === cur;
-			return { top: G.hopTop, h: G.hopH, left: c.x + 0.5, width: Math.max(1, c.w - 1.5), bg: on ? acc : n < cur ? 'rgba(' + accRgb + ',.30)' : 'rgba(var(--wk-accent-rgb),.12)',
-				glow: on && this.props.theme !== 'light' ? '0 0 12px rgba(' + accRgb + ',.5)' : 'none', op: onAt((c.a + c.b) / 2) ? 1 : 0.3 };
-		});
-		const exl = w.exclusions || [];
-		const runSkips = exl.map(x => { const g = lay.segs.find(q => x.endHz > q.a && x.startHz < q.b); if (!g) return null; const x0 = lay.P(Math.max(g.a, x.startHz)), x1 = lay.P(Math.min(g.b, x.endHz)); return { top: G.hopTop - 1, h: G.hopH + 2, left: x0, width: Math.max(3, x1 - x0), title: 'Not scanned · ' + (x.reason || 'skipped') }; }).filter(Boolean);
-		const segGaps = lay.segs.slice(1).map((g, i) => ({ top: G.hopTop, h: G.hopH, left: lay.segs[i].x + lay.segs[i].w, width: lay.GAP, title: 'Not scanned · ' + short(lay.segs[i].b) + '–' + short(g.a) + ' MHz' }));
-		// each range: a thin line under the hops and its numbered tag (same numbers as the table)
+		const LT = G.laneTop, LH = G.laneH;
+		// each range a bar on the frequency scale (overlaps read darker), numbered like the table
 		const rows = lay.rows.map((r, i) => ({ r, num: i + 1, x0: lay.P(r.startHz), x1: lay.P(r.endHz), on: rowOn(r) }));
-		const rowBars = rows.map(o => ({ top: G.rangeTop + 20, h: 3, left: o.x0, width: Math.max(2, o.x1 - o.x0), bg: o.on ? 'rgba(var(--wk-accent-rgb),.5)' : 'rgba(var(--wk-ink-rgb),.15)' }));
-		const tags = placeTags(rows.map(o => ({ x0: o.x0, x1: o.x1, num: o.num, name: o.r.name, on: o.on })), tw, G.rangeTop)
+		const rangeBars = rows.map(o => ({ top: LT, h: LH, left: o.x0, width: Math.max(2, o.x1 - o.x0), bg: o.on ? 'rgba(var(--wk-accent-rgb),.08)' : 'rgba(var(--wk-ink-rgb),.04)', edge: o.on ? 'rgba(var(--wk-line-rgb),.16)' : 'rgba(var(--wk-line-rgb),.08)',
+			title: o.num + ' · ' + o.r.name + ' · ' + short(o.r.startHz) + '–' + short(o.r.endHz) + ' MHz' + (o.on ? '' : ' · off') }));
+		// the capture window at its real width (the source's sample rate), centred on the current hop
+		const c = lay.cells[cur - 1] || lay.cells[0], g = lay.segOf((c.a + c.b) / 2) || lay.segs[0], mid = (c.a + c.b) / 2;
+		const wa = Math.max(g.a, mid - SR_HZ / 2), wb = Math.min(g.b, mid + SR_HZ / 2), wx0 = lay.P(wa), wx1 = lay.P(wb);
+		// covered in this pass: every on range up to the window's far edge
+		const onIv = [];
+		rows.filter(o => o.on).map(o => [o.x0, o.x1]).sort((p, q) => p[0] - q[0]).forEach(iv => { const m = onIv[onIv.length - 1]; if (m && iv[0] <= m[1]) m[1] = Math.max(m[1], iv[1]); else onIv.push(iv.slice()); });
+		const coverBars = onIv.filter(iv => iv[0] < wx1).map(iv => ({ top: LT, h: LH, left: iv[0], width: Math.max(1, Math.min(iv[1], wx1) - iv[0]), bg: 'rgba(var(--wk-accent-rgb),.2)' }));
+		const runSkips = ap.excl.map(x => { const xa = pf(x.fa) * 1e6, xb = pf(x.fb) * 1e6, sg = lay.segs.find(q => xb > q.a && xa < q.b); if (!sg) return null; const x0 = lay.P(Math.max(sg.a, xa)), x1 = lay.P(Math.min(sg.b, xb)); return { top: LT, h: LH, left: x0, width: Math.max(3, x1 - x0), title: 'Not scanned · ' + x.fa + '–' + x.fb + ' · ' + (x.auto ? x.why + ', already decoded by ' + x.by : x.why) }; }).filter(Boolean);
+		const segGaps = lay.segs.slice(1).map((sg, i) => ({ top: LT, h: LH, left: lay.segs[i].x + lay.segs[i].w, width: lay.GAP, title: 'Not scanned · ' + short(lay.segs[i].b) + '–' + short(sg.a) + ' MHz' }));
+		const tags = placeTags(rows.map(o => ({ x0: o.x0, x1: o.x1, num: o.num, name: o.r.name, on: o.on })), tw, LT + 6, runSkips.filter(x => x.width >= 8).map(x => x.left).concat([wx0]))
 			.map(t => Object.assign(t, { bg: t.on ? 'var(--wk-accent)' : 'var(--wk-chip)', fg: t.on ? 'var(--wk-on-accent)' : 'var(--wk-text-3)', op: t.on ? 1 : 0.7, title: t.num + ' · ' + t.name + (t.on ? '' : ' · off') }));
+		const win = { winOn: true, winTop: LT - 4, winH: LH + 8, winX: wx0, winW: Math.max(4, wx1 - wx0), winC: acc,
+			winBg: 'rgba(' + accRgb + ',' + (paused ? '.16' : '.22') + ')', winGlow: paused || this.props.theme === 'light' ? 'none' : '0 0 14px rgba(' + accRgb + ',.45)',
+			// the window glides hop to hop (transform only); it jumps back at the start of a pass
+			winTr: cur === 1 ? 'none' : 'transform .32s cubic-bezier(.2,.7,.3,1)',
+			winAria: (paused ? 'Paused at ' : 'Listening to ') + short(wa) + '–' + short(wb) + ' MHz', winTitle: (paused ? 'Paused · ' : 'Capture window · ') + short(wa) + '–' + short(wb) + ' MHz · ' + (SR_HZ / 1e6) + ' MHz wide' };
 		// discovery ticks: active first, then by confidence; one within 10 px of a placed tick folds into it
 		const own = !w.ext;
 		const discs = (this.props.discoveries || DISCS.map(d => Object.assign({}, d, { active: own && w.state === 'holding' && d.hz === w.holdHz }))).filter(d => !!lay.segOf(d.hz) && !d.ignored);
@@ -978,19 +1036,20 @@ class Component extends DCLogic {
 			if (!step) return;
 			for (let f = Math.ceil(g.a / step) * step; f < g.b; f += step) { const x = lay.P(f); if (x - g.x > 44 && g.x + g.w - x > endW + 30) rTicks.push({ left: x, text: short(f), shift: '-50%' }); }
 		});
-		return { hopCells, runSkips, segGaps, rowBars, tags, ticks, rTicks, laneBars: [], runBars: [], skipBars: [], chanTicks: [], rulerEmpty: false, hasDrag: false,
+		return Object.assign(win, { rangeBars, coverBars, runSkips, segGaps, tags, ticks, rTicks, laneBars: [], runBars: [], skipBars: [], chanTicks: [], rulerEmpty: false, hasDrag: false,
 			rCursor: 'default', axisCursor: 'default', axisTitle: '', rulerAria: 'Scan ruler, ' + short(w.startHz) + ' to ' + short(w.endHz) + ' MHz',
 			hasTip: !!td, tipTop: G.tickTop + 26, tipLeft: td ? clamp(tp.x, 10, tw - 10) : 0, tipShift: td ? (tp.x < 150 ? '0' : tp.x > tw - 150 ? '-100%' : '-50%') : '0',
 			tipFreq: td ? fq(td.hz) : '', tipLabel: td ? td.label : '', tipColor: td && td.conf === 'heard' ? 'var(--wk-text-2)' : 'var(--wk-accent)', tipDecoded: !!td && td.conf === 'decoded',
 			tipSub: td ? td.sub : '', tipHasSub: !!(td && td.sub), tipWhen: td ? (td.active ? 'Active now' : td.recent ? 'Heard in the last hour' : 'Heard earlier') + (tp.more ? ' · +' + tp.more + ' nearby' : '') + ' · click to tune' : '',
-			lay, cur };
+			lay, cur });
 	}
-	protoChips(labels, cw) { const max = cw >= 1320 ? 6 : cw >= 1100 ? 4 : cw >= 760 ? 3 : 99; return { shown: labels.slice(0, max).map(l => ({ label: l })), more: labels.length > max ? '+' + (labels.length - max) : '' }; }
+	protoMax() { const W = this.paneW(); return this.narrow() ? 99 : this.twoLine() ? (W >= 700 ? 4 : 3) : W >= 1320 ? 6 : W >= 1100 ? 4 : 3; }
+	protoChips(labels, max) { return { shown: labels.slice(0, max).map(l => ({ label: l })), more: labels.length > max ? '+' + (labels.length - max) : '' }; }
 	composeRows(plan) {
 		const s = this.state, cw = s.cw || 1440, st = this.stage();
 		return plan.rs.map(i => {
 			const r = i.r, lab = p => (r.labels && r.labels[p]) || PROTO[p].label;
-			const labels = i.on.map(lab), pc = this.protoChips(labels, cw);
+			const labels = i.on.map(lab), pc = this.protoChips(labels, this.protoMax());
 			const user = r.excl.filter(x => !x.auto), auto = r.excl.filter(x => x.auto);
 			const names = auto.map(x => x.why).concat(user.length ? [user.length === 1 ? f3(pf(user[0].fa)) + '–' + f3(pf(user[0].fb)) : user.length + ' yours'] : []);
 			const amber = 'rgba(var(--wk-amber-rgb),.7)', badA = i.err && !(isFinite(i.a) && (!isFinite(i.b) || i.a < i.b)), mine = !!r.sp && !spSame(r.sp, r.spDef);
@@ -999,7 +1058,7 @@ class Component extends DCLogic {
 				bg: s.flash === r.id ? 'var(--wk-sel)' : 'transparent', op: 1,
 				tagBg: i.err ? 'var(--wk-amber)' : 'var(--wk-accent)', tagFg: i.err ? 'var(--wk-on-amber)' : 'var(--wk-on-accent)',
 				renaming: s.renaming === r.id, notRenaming: s.renaming !== r.id, rename: () => this.setState({ renaming: r.id, renameText: r.name, pop: null }),
-				editable: true, readOnly: false, err: i.err || '',
+				editable: true, readOnly: false, noEdit: false, canEdit: true, pending: false, err: i.err || '',
 				fa: r.fa, fb: r.fb, aEdge: i.err && (badA || !isFinite(i.a) || i.a < LIM[0]) ? amber : '', bEdge: i.err && !badA ? amber : '',
 				onA: e => this.patchRange(r.id, { fa: e.target.value }), onB: e => this.patchRange(r.id, { fb: e.target.value }),
 				spText: spText(i.sp), spMine: mine, spTitle: mine ? 'Band plan: ' + spText(r.spDef) : 'Channel spacing',
@@ -1016,23 +1075,54 @@ class Component extends DCLogic {
 		});
 	}
 	runRows(rr) {
-		const s = this.state, cw = s.cw || 1440, w = rr.w, exl = w.exclusions || [];
+		const s = this.state, w = rr.w, d = this.runDraft(w), ch = this.runChanges(w), mx = this.protoMax();
 		return rr.lay.rows.map((r, k) => {
-			const on = !s.runOff[r.name], v = sw(on);
-			const labels = (r.protocols || []).map(p => PROTO[p] ? PROTO[p].label : p), pc = this.protoChips(labels, cw);
-			const sk = exl.filter(x => x.endHz > r.startHz && x.startHz < r.endHz).map(x => !x.reason || /^Skipped/.test(x.reason) ? short(x.startHz) + '–' + short(x.endHz) : x.reason.split(' · ')[0]);
+			const on = !d.off[r.name], v = sw(on);
+			const labels = Array.from(new Set((d.protos[r.name] || []).map(plabel))), pc = this.protoChips(labels, mx);
+			const sk = d.excl.filter(x => pf(x.fb) * 1e6 > r.startHz && pf(x.fa) * 1e6 < r.endHz);
+			const names = Array.from(new Set(sk.map(x => x.auto ? x.why : mt(x.fa) + '–' + mt(x.fb))));
 			return {
 				domId: 'pl-run-' + k, num: k + 1, name: r.name, aria: (k + 1) + ', ' + r.name + (on ? '' : ', off'),
 				bg: 'transparent', op: on ? 1 : 0.55, tagBg: on ? 'var(--wk-accent)' : 'var(--wk-chip)', tagFg: on ? 'var(--wk-on-accent)' : 'var(--wk-text-3)',
-				renaming: false, notRenaming: true, rename: null, editable: false, readOnly: true, err: '',
+				renaming: false, notRenaming: true, rename: null, editable: false, readOnly: true, noEdit: false, canEdit: true, err: '',
+				pending: ch.some(c => c.name === r.name),
 				edgesText: short(r.startHz) + '–' + short(r.endHz),
-				spText: spText(r.spacingHz), spMine: false, spTitle: 'Channel spacing',
+				spText: spText(r.spacingHz), spMine: false, spTitle: 'Stop to change channel spacing',
 				protos: pc.shown, protoMore: !!pc.more, protoMoreText: pc.more, protoNone: !labels.length, protoNoneText: 'Any signal', protoAll: labels.join(', ') || 'Any signal',
-				hasSkips: sk.length > 0, skipText: sk.length ? Array.from(new Set(sk)).join(', ') : 'None', skipFg: sk.length ? 'var(--wk-text-2)' : 'var(--wk-text-4)', skipTitle: '',
-				on, track: v.track, knob: v.knob, swTitle: on ? 'Take it out of the scan for now' : 'Scan it again',
-				toggle: () => { this.setState({ runOff: Object.assign({}, s.runOff, { [r.name]: on }) }); if (this.props.onScan) this.props.onScan({ type: 'range', name: r.name, on: !on }); }
+				openProtos: e => this.openPop('protos', r.name, e, 360),
+				hasSkips: names.length > 0, skipText: names.length ? names.join(', ') : 'None', skipFg: names.length ? 'var(--wk-text-2)' : 'var(--wk-text-4)',
+				skipTitle: sk.length ? sk.map(x => x.fa + '–' + x.fb + ' MHz · ' + (x.auto ? x.why + ', already decoded by ' + x.by : x.why)).join('\n') : 'Skip a part',
+				openSkips: e => this.openPop('skips', r.name, e, 400),
+				on, track: v.track, knob: v.knob, swTitle: on ? 'Take it out of the scan' : 'Scan it again',
+				toggle: () => this.editRun(w, nd => { nd.off[r.name] = on; })
 			};
 		});
+	}
+	// running: protocols and skips of one range, edited into the draft
+	runPopVals(base, p, w) {
+		const st = this.stage(), d = this.runDraft(w), r = (w.ranges || []).find(q => q.name === p.rid);
+		if (!r) return null;
+		const a = r.startHz / 1e6, b = r.endHz / 1e6;
+		if (p.kind === 'protos') {
+			const cur = d.protos[r.name] || [];
+			// a fixed-channel protocol (AIS, VDL2, APRS…) whose channels an always-on decoder already covers is not offered
+			const inR = q => PROTO[q].only.filter(f => f >= a - 0.0125 && f <= b + 0.0125);
+			const elsewhere = q => !!PROTO[q].only && inR(q).every(f => d.excl.some(x => x.auto && pf(x.fa) <= f + 0.0125 && pf(x.fb) >= f - 0.0125));
+			const list = PORDER.filter(q => this.vis(q, st) && (!PROTO[q].only || inR(q).length > 0) && !elsewhere(q));
+			return Object.assign(base, { popProtos: true, popLabel: 'Protocols for ' + r.name, protoFindOnly: false,
+				protoOpts: list.map(q => { const on = cur.includes(q); return Object.assign(chipc(on), { label: PROTO[q].label, title: PROTO[q].title || '', pick: () => this.editRun(w, nd => { nd.protos[r.name] = on ? cur.filter(x => x !== q) : cur.concat([q]); }) }); }) });
+		}
+		if (p.kind === 'skips') {
+			const inR = x => pf(x.fb) > a && pf(x.fa) < b, mine = d.excl.filter(inR);
+			const patch = (id, o) => this.editRun(w, nd => { nd.excl = nd.excl.map(x => x.id === id ? Object.assign({}, x, o) : x); });
+			return Object.assign(base, { popSkips: true, popLabel: 'Skips in ' + r.name, popName: r.name, skipsNone: !mine.length,
+				skipRows: mine.map(x => ({ fa: x.fa, fb: x.fb, auto: !!x.auto, why: x.auto ? x.why + ' · ' + x.by : x.why, title: x.auto ? x.why + ' is already decoded by ' + x.by : x.why, edge: pf(x.fb) > pf(x.fa) ? '' : 'rgba(var(--wk-amber-rgb),.7)',
+					onA: ev => patch(x.id, { fa: ev.target.value }), onB: ev => patch(x.id, { fb: ev.target.value }),
+					removeLabel: x.auto ? 'Scan the ' + x.why + ' channels too' : 'Stop skipping ' + x.fa + '–' + x.fb, remove: () => this.editRun(w, nd => { nd.excl = nd.excl.filter(y => y.id !== x.id); }) })),
+				addSkip: () => { const c = (a + b) / 2, h = Math.max(0.025, snap((b - a) * 0.05)); this.editRun(w, nd => { nd.excl = nd.excl.concat([{ id: 'x' + (++RID), fa: f3(snap(c - h)), fb: f3(snap(c + h)), why: 'Skipped by you' }]); }); }
+			});
+		}
+		return null;
 	}
 	popVals(plan) {
 		const s = this.state, p = s.pop, st = this.stage();
@@ -1040,6 +1130,8 @@ class Component extends DCLogic {
 		if (!p) return none;
 		const r = s.ranges.find(x => x.id === p.rid), i = r && plan.rs.find(x => x.r === r);
 		const base = Object.assign({}, none, { hasPop: true, popLeft: p.left, popW: p.w, popTop: p.top == null ? 'auto' : p.top + 'px', popBottom: p.bottom == null ? 'auto' : p.bottom + 'px', popMaxH: p.maxH, popName: r ? r.name : '' });
+		const w = this.run();
+		if (w) return this.runPopVals(base, p, w) || none;
 		if (p.kind === 'options') {
 			return Object.assign(base, { popOpts: true, popLabel: 'Options',
 				optSwitches: [
@@ -1106,9 +1198,9 @@ class Component extends DCLogic {
 
 	renderVals() {
 		const s = this.state, w = this.run(), runningM = !!w, composing = !runningM, G = this.geo();
-		const cw = s.cw || 1440, narrow = cw < 760, mid = cw < 1240;
+		const W = this.paneW(), narrow = this.narrow(), two = this.twoLine(), mid = W < 1240, scr = this.screen();
 		const plan = this.planNow();
-		const close = () => { if (this.props.onClose) this.props.onClose(); else this.toast('Closes the sheet'); };
+		const close = () => { if (this.props.onClose) this.props.onClose(); else this.toast(scr ? 'Back to the Scanner' : 'Hides the plan'); };
 		const rr = runningM ? Object.assign(this.runRuler(w, G), { w }) : null;
 		const ruler = runningM ? rr : this.composeRuler(plan, G);
 		const sendScan = (type, extra) => {
@@ -1116,49 +1208,53 @@ class Component extends DCLogic {
 			if (this.props.onScan) this.props.onScan(a);
 			if (this.props.sweep && RUNNING(this.props.sweep.state)) return;
 			// standalone: the board runs its own sweep so every control answers
-			const o = s.own;
-			if (type === 'start') this.setState({ own: this.runOf(a, 'sweeping'), hop: 1, acc: 0, runOff: {}, pop: null, tip: null });
-			else if (!o) return;
-			else if (type === 'pause') this.setState({ own: Object.assign({}, o, { state: 'paused', holdHz: null, holdLabel: null }) });
-			else if (type === 'resume' || type === 'stay') this.setState({ own: Object.assign({}, o, { state: type === 'stay' ? 'paused' : 'sweeping' }) });
-			else if (type === 'stop') { this.setState({ own: null, tip: null }); this.toast('Scan stopped · the receiver and decoders are yours again'); }
+			if (type === 'start') this.setState({ own: this.runOf(a, 'sweeping'), hop: 1, pass: 1, acc: 0, ra: null, rd: null, pop: null, tip: null });
 		};
 		// footer: compose summary
 		const valid = plan.valid;
 		const sumText = plan.empty ? 'Pick a preset or drag on the ruler' : !valid ? plan.bad.num + ' · ' + plan.bad.r.name + ' · ' + plan.bad.err : 'Full pass ' + (plan.T < 1 ? 'under 1 s' : '≈ ' + secsText(plan.T)) + ' · ' + plan.hops + (plan.hops === 1 ? ' hop' : ' hops');
 		const optChanged = s.findOnly || !s.hold || !s.rec || s.stopAfter !== 'never' || s.dwell !== 'normal' || s.sens !== 'normal';
-		// footer: running
-		let runWord = '', runFreq = '', runLabel = '', runC = 'var(--wk-accent)', passPct = 0, canPause = false, canResume = false, canStay = false;
+		// footer: running, one quiet line (the Tuner's hold row owns Pause, Stop and the frequency)
+		let runWord = '', passText = '', passTitle = '', changes = [];
 		if (runningM) {
-			const lay = rr.lay, c = lay.cells[rr.cur - 1] || lay.cells[0], here = Math.round((c.a + c.b) / 2 / 12500) * 12500;
-			const st = w.state, live = LIVE(st);
-			runC = live ? 'var(--wk-accent)' : 'var(--wk-amber)';
-			passPct = lay.cells.length > 1 ? Math.round(100 * (rr.cur - (live ? 0.5 : 0.5)) / lay.cells.length) : 100;
-			runWord = st === 'holding' ? 'Holding' : st === 'starting' ? 'Starting' : st === 'sweeping' ? 'Scanning'
-				: st === 'paused-you' ? (w.waiting ? 'Waits while you listen' : w.resumeIn != null ? 'Scan resumes in ' + w.resumeIn + ' s' : 'Paused')
+			const st = w.state, live = LIVE(st), n = rr.lay.cells.length;
+			const pct = n > 1 ? Math.round(100 * rr.cur / n) : 100, pass = w.pass || s.pass || 1;
+			runWord = live ? '' : st === 'paused-you' ? (w.waiting ? 'Waits while you listen' : w.resumeIn != null ? 'Resumes in ' + w.resumeIn + ' s' : 'Paused')
 				: st === 'paused-relay' ? 'Waiting for SDR++' : st === 'paused-job' ? 'Another scan first' : st === 'source-down' ? 'Receiver offline' : st === 'consent' ? 'Waiting for you' : 'Paused';
-			runFreq = fq(st === 'holding' && w.holdHz ? w.holdHz : here);
-			runLabel = st === 'holding' && w.holdLabel ? w.holdLabel : '';
-			canPause = live; canResume = !live && st !== 'source-down' && st !== 'paused-job' && st !== 'paused-relay'; canStay = st === 'paused-you';
+			passText = 'Pass ' + pass + ' · ' + pct + ' % · full pass ≈ ' + secsText(w.sweepS || 10);
+			passTitle = (w.hops || n) + ' hops of ' + (SR_HZ / 1e6) + ' MHz';
+			changes = this.runChanges(w);
 		}
-		const hdAreas = narrow ? (composing ? "'title save close' 'presets presets presets'" : "'title close'") : composing ? "'title presets save close'" : "'title close'";
-		const hdCols = narrow ? (composing ? 'minmax(0,1fr) auto auto' : 'minmax(0,1fr) auto') : composing ? 'auto minmax(0,1fr) auto auto' : 'minmax(0,1fr) auto';
-		const gutW = narrow ? 0 : mid ? 118 : 124;
-		const gutLabels = runningM ? [
-			{ top: G.tickTop, h: 22, text: 'Found', size: 11.5, weight: 400, fg: 'var(--wk-text-3)' },
-			{ top: G.hopTop, h: G.hopH, text: 'Hops', size: 11.5, weight: 400, fg: 'var(--wk-text-3)' },
-			{ top: G.rangeTop, h: 18, text: 'Your ranges', size: 12, weight: 700, fg: 'var(--wk-text-2)' }
-		] : LANES.map((ln, li) => ({ top: G.laneTop + li * (G.LH + G.LG) - 1, h: G.LH + 2, text: ln.name, size: 11, weight: 400, fg: 'var(--wk-text-3)' }))
+		const pendN = changes.length;
+		const applyEdits = () => {
+			const d = this.runDraft(w);
+			const edit = { type: 'edit', ranges: (w.ranges || []).map(r => ({ name: r.name, on: !d.off[r.name], protocols: (d.protos[r.name] || []).slice() })),
+				exclusions: d.excl.filter(x => pf(x.fb) > pf(x.fa)).map(x => ({ startHz: Math.round(pf(x.fa) * 1e6), endHz: Math.round(pf(x.fb) * 1e6), reason: x.auto ? x.why + ' · already decoded by ' + x.by : 'Skipped by you' })) };
+			if (this.props.onApply) this.props.onApply(edit); else if (this.props.onScan) this.props.onScan(edit);
+			this.setState({ ra: d, rd: null, pop: null });
+			this.toast('Applied · the scan re-plans at the next hop');
+		};
+		// header: wide pane one row · pane under 860 and screen: presets get their own row, Save pinned right
+		const chipsRow = narrow || two;
+		const hdAreas = composing ? (chipsRow ? (scr ? "'title title' 'presets save'" : "'title close' 'presets save'") : "'title presets save close'") : scr ? "'title'" : "'title close'";
+		const hdCols = composing ? (chipsRow ? 'minmax(0,1fr) auto' : 'auto minmax(0,1fr) auto auto') : scr ? 'minmax(0,1fr)' : 'minmax(0,1fr) auto';
+		const gutW = narrow || runningM ? 0 : mid ? 118 : 124;
+		const gutLabels = runningM ? [] : LANES.map((ln, li) => ({ top: G.laneTop + li * (G.LH + G.LG) - 1, h: G.LH + 2, text: ln.name, size: 11, weight: 400, fg: 'var(--wk-text-3)' }))
 			.concat([{ top: G.rangeTop, h: G.rangeH, text: 'Your ranges', size: 12, weight: 700, fg: 'var(--wk-text-2)' }]);
-		const gridAreas = narrow ? "'n name sp act' '. edges edges edges' '. protos protos protos' '. skips skips skips'" : "'n name edges sp protos skips act'";
-		const gridCols = narrow ? '24px minmax(0,1fr) auto 40px' : mid ? '24px minmax(100px,1fr) ' + (runningM ? '130px' : '206px') + ' 140px minmax(150px,1.8fr) minmax(90px,.9fr) 48px' : '28px minmax(150px,1.2fr) ' + (runningM ? '170px' : '214px') + ' 150px minmax(220px,2.3fr) minmax(120px,1fr) 52px';
+		// table: one line ≥ 860 px · two lines below (name, edges, spacing / protocols, skips, switch) · stacked on a phone
+		const gridAreas = narrow ? "'n name sp act' '. edges edges edges' '. protos protos protos' '. skips skips skips'" : two ? "'n name edges sp' '. protos skips act'" : "'n name edges sp protos skips act'";
+		const gridCols = narrow ? '24px minmax(0,1fr) auto 40px'
+			: two ? '24px minmax(0,1fr) ' + (runningM ? 'minmax(150px,auto)' : '206px') + ' minmax(120px,auto)'
+			: mid ? '24px minmax(100px,1fr) ' + (runningM ? '150px' : '206px') + ' 140px minmax(150px,1.8fr) minmax(90px,.9fr) 48px' : '28px minmax(150px,1.2fr) ' + (runningM ? '170px' : '214px') + ' 150px minmax(220px,2.3fr) minmax(120px,1fr) 52px';
 		const rows = runningM ? this.runRows(rr) : this.composeRows(plan);
 		const pad = narrow ? 12 : 20;
 		return Object.assign({
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			rootRef: this.rootRef, trackRef: this.trackRef, rulerRef: this.rulerRef, ovRef: this.ovRef, saveRef: this.saveRef, renameRef: this.renameRef,
 			rDown: this.rDown, rMove: this.rMove, rUp: this.rUp, rCancel: this.rCancel, ovDown: this.ovDown, ovMove: this.ovMove, ovUp: this.ovUp, tipLeave: this.tipLeave,
-			rootR: narrow ? '0' : '12px', dialogLabel: composing ? 'Scan a band' : 'Scan · ' + w.preset,
+			// pane: its right edge meets the drawer, so no right border, square right corners and no shadow cast onto the drawer
+			rootR: scr ? '12px' : '12px 0 0 12px', rootEdgeR: scr ? 'rgba(var(--wk-line-rgb),.14)' : 'transparent', rootClip: scr ? 'none' : 'inset(-64px 0 -64px -64px)',
+			dialogLabel: composing ? 'Scan a band' : 'Scan · ' + w.preset,
 			rootKey: e => {
 				if (e.key !== 'Escape') return;
 				e.stopPropagation();
@@ -1167,9 +1263,10 @@ class Component extends DCLogic {
 				if (s.drag) return this.rCancel();
 				close();
 			},
-			running: runningM, composing, title: composing ? 'Scan a band' : w.preset, runC,
-			hdAreas, hdCols, hdPad: narrow ? '10px 8px 8px 14px' : '12px 12px 10px 20px',
-			presets: this.presetVals(plan), chipMask: mid ? 'linear-gradient(90deg, #000 calc(100% - 28px), transparent)' : 'none',
+			running: runningM, composing, title: composing ? 'Scan a band' : w.preset, runC: runningM && !LIVE(w.state) ? 'var(--wk-amber)' : 'var(--wk-accent)',
+			isScreen: scr, showHide: !scr, hideTitle: runningM ? 'Hide the plan · the scan carries on · Esc' : 'Hide the plan · Esc',
+			hdAreas, hdCols, hdPad: narrow ? '10px 10px 8px 14px' : '12px 12px 10px 20px',
+			presets: this.presetVals(plan), chipMask: 'linear-gradient(90deg, #000 calc(100% - 28px), transparent)',
 			saveDisabled: !valid, saveOp: valid ? 1 : 0.45, saveOpen: !!(s.pop && s.pop.kind === 'save'), saveLabel: narrow ? 'Save' : 'Save as preset', saveTitle: 'Save these ranges, spacing, protocols and options as a preset',
 			openSave: e => { if (valid) this.openPop('save', null, e, 300); },
 			close,
@@ -1183,14 +1280,14 @@ class Component extends DCLogic {
 				else if (e.key === '+' || e.key === '=') { e.preventDefault(); this.zoomAt(0.5); }
 				else if (e.key === '-' || e.key === '_') { e.preventDefault(); this.zoomAt(2); }
 			},
-			tablePad: '2px ' + (narrow ? 4 : 12) + 'px 6px', rowPad: narrow ? '8px 8px' : '0 8px', showHead: !narrow && rows.length > 0, noRows: rows.length === 0,
+			tablePad: '2px ' + (narrow ? 4 : 12) + 'px 6px', rowPad: narrow || two ? '8px 8px' : '0 8px', showHead: !narrow && !two && rows.length > 0, noRows: rows.length === 0,
 			gridAreas, gridCols, protoWrap: narrow ? 'wrap' : 'nowrap', actHead: runningM ? 'Scan' : '', rows,
 			renameText: s.renameText, onRename: e => this.setState({ renameText: e.target.value }),
 			commitRename: () => { const id = s.renaming, t = s.renameText.trim(); if (!id) return; this.setState({ renaming: null }); if (t) this.patchRange(id, { name: t, short: t }); },
 			renameKey: e => { e.stopPropagation(); if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') this.setState({ renaming: null }); },
 			fieldKey: e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') e.target.blur(); },
-			hasToast: !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.undo), undo: () => s.toast && s.toast.undo && s.toast.undo(), toastBottom: narrow ? 120 : 74,
-			footPad: narrow ? '10px 12px 12px 16px' : '10px 14px 12px 20px',
+			hasToast: !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.undo), undo: () => s.toast && s.toast.undo && s.toast.undo(), toastBottom: narrow && composing ? 120 : 74,
+			footPad: narrow ? '10px 12px 12px 16px' : '10px 14px 12px 20px', footDisp: pendN ? 'none' : 'flex',
 			openOptions: e => this.openPop('options', null, e, 380), optOpen: !!(s.pop && s.pop.kind === 'options'), optChanged,
 			sumText, sumTitle: valid ? plan.merged.map(m => mt(m.a) + '–' + mt(m.b)).join(', ') + ' MHz · hops and settle time set the speed' : '',
 			sumC: plan.empty ? 'var(--wk-text-3)' : valid ? 'var(--wk-text)' : 'var(--wk-amber)', sumWeight: valid ? 700 : 400, sumFlex: narrow ? '1 0 100%' : '0 1 auto', sumOrder: narrow ? -1 : 0,
@@ -1198,8 +1295,9 @@ class Component extends DCLogic {
 			startDisabled: !valid, startTitle: valid ? '' : plan.empty ? 'Pick a preset or drag on the ruler' : 'Fix range ' + plan.bad.num,
 			startBg: valid ? 'var(--wk-accent)' : 'var(--wk-chip)', startFg: valid ? 'var(--wk-on-accent)' : 'var(--wk-text-3)', startFlex: narrow ? '1 0 100%' : 'none',
 			start: () => { if (valid) sendScan('start', this.payload(plan, s)); },
-			runWord, runFreq, runLabel, runHasLabel: !!runLabel, passPct, canPause, canResume, canStay,
-			pause: () => sendScan('pause'), resume: () => sendScan('resume'), stay: () => sendScan('stay'), stopScan: () => sendScan('stop'),
+			runQuiet: runningM, runWord, runHasWord: !!runWord, passText, passTitle,
+			runPending: pendN > 0, pendTitle: pendN === 1 ? '1 change waiting' : pendN + ' changes waiting',
+			discard: () => this.setState({ rd: null, pop: null }), applyEdits,
 			closePop: () => this.setState({ pop: null })
 		}, ruler, this.popVals(plan));
 	}

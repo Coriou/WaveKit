@@ -66,45 +66,61 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 .wk-sc .wk-chipb[aria-pressed="false"]:hover,.wk-sc .wk-chipb[aria-checked="false"]:hover{background:rgba(var(--wk-ink-rgb),.09) !important}
 .wk-sc .wk-eyebrow{margin:0;font-family:'D-DIN Condensed','Noto Sans',sans-serif;font-weight:700;font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--wk-text-3)}
 .wk-sc .wk-src{flex:none;font-size:11.5px;color:var(--wk-text-4);white-space:nowrap}
+/* discovery action row: never wraps; secondary labels drop to icons as the drawer narrows (⋯ stays pinned right) */
+.wk-sc .wk-acts{container-type:inline-size}
+@container (max-width: 400px){.wk-sc .wk-lbl-id{display:none}.wk-sc .wk-acts .wk-act2:has(.wk-lbl-id){padding:0 9px}}
+@container (max-width: 300px){.wk-sc .wk-lbl-save{display:none}.wk-sc .wk-acts .wk-act2:has(.wk-lbl-save){padding:0 9px}}
 @keyframes wkspin{to{transform:rotate(360deg)}}
 @keyframes wkpulse{0%,100%{opacity:1}50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){.wk-sc *{animation:none !important;transition:none !important}}
 </style>
 </helmet>
-<div class="wk-sc" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: var(--wk-glass-panel); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div class="wk-sc" ref="{{rootRef}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: var(--wk-glass-panel); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<header style="flex: none; display: flex; align-items: center; gap: 6px; padding: 14px 10px 10px 18px">
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">{{headTitle}}</h2>
-		<span style="margin-left: 4px; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{headCount}}</span>
+		<span style="margin-left: 4px; min-width: 0; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{headCount}}</span>
 		<div style="flex: 1"></div>
-		<button class="wk-ghost" onClick="{{close}}" aria-label="Close scanner" style="width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
+		<sc-if value="{{canPlan}}" hint-placeholder-val="{{true}}">
+			<button class="wk-chipb" onClick="{{openPlan}}" aria-pressed="{{planOpen}}" title="{{planTitle}}" style="flex: none; height: 36px; padding: 0 12px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 7px; background: {{planBg}}; color: {{planFg}}; font-size: 13px; font-weight: 700; white-space: nowrap">
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>Scan a band
+			</button>
+		</sc-if>
+		<button class="wk-ghost" onClick="{{close}}" aria-label="Close scanner" title="Close · closes the plan too" style="flex: none; width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
 		</button>
 	</header>
 
-		<div style="flex: none; padding: 0 14px 12px">
-			<sc-if value="{{nowCompact}}" hint-placeholder-val="{{false}}">
-			<section aria-label="Scan status" style="display: flex; flex-direction: column; gap: 8px; padding: 10px 6px 10px 12px; border-radius: 8px; background: {{nowBg}}; box-shadow: inset 0 0 0 1px {{nowRing}}">
-				<div style="display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums">
-					<sc-if value="{{nowLive}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="width: 7px; height: 7px; flex: none; margin: 0 4px; border-radius: 50%; background: var(--wk-accent); animation: wkpulse 1.6s ease-in-out infinite"></span></sc-if>
-					<sc-if value="{{nowNotLive}}" hint-placeholder-val="{{true}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{{nowTileFg}}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; animation: {{nowIconAnim}}"><sc-for list="{{nowIcon}}" as="p" hint-placeholder-count="3"><path d="{{p}}"></path></sc-for></svg></sc-if>
-					<span aria-live="{{nowLiveRegion}}" title="{{nowTitle}}" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--wk-text-2)"><b style="color: {{nowHeadC}}">{{nowHead}}</b><sc-if value="{{nowHasDetail}}" hint-placeholder-val="{{true}}"> · {{nowDetail}}</sc-if></span>
-					<sc-if value="{{canPlan}}" hint-placeholder-val="{{true}}"><button class="wk-ghost" onClick="{{openPlan}}" style="flex: none; height: 30px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700">Open plan</button></sc-if>
-				</div>
-				<sc-if value="{{nowHasSub}}" hint-placeholder-val="{{false}}"><span style="margin-top: -6px; padding-right: 6px; font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{nowSub}}</span></sc-if>
-				<div role="progressbar" aria-label="This pass" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{passPct}}" style="position: relative; height: 3px; margin-right: 6px; border-radius: 1.5px; background: {{passTrack}}; overflow: hidden">
-					<span style="position: absolute; left: 0; top: 0; bottom: 0; width: {{passPct}}%; border-radius: 1.5px; background: {{passFill}}; transition: width .4s ease"></span>
-				</div>
-				<sc-if value="{{nowHasActs}}" hint-placeholder-val="{{false}}">
-					<div style="display: flex; flex-wrap: wrap; gap: 6px">
-						<sc-for list="{{nowActs}}" as="a" hint-placeholder-count="1">
-							<button class="{{a.cls}}" onClick="{{a.act}}" disabled="{{a.disabled}}" title="{{a.title}}" aria-label="{{a.aria}}" style="height: 36px; padding: {{a.pad}}; border-radius: 6px; border: 1px solid {{a.border}}; background: {{a.bg}}; color: {{a.fg}}; opacity: {{a.op}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px; white-space: nowrap">
-								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{a.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>{{a.label}}
-							</button>
-						</sc-for>
+		<div style="flex: none; position: relative; z-index: 4; display: flex; flex-direction: column; gap: 8px; padding: 0 14px 12px">
+			<sc-if value="{{watchRow}}" hint-placeholder-val="{{false}}">
+				<section aria-label="Watch here" style="display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 0 0 12px; border-radius: 8px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),{{watchRing}})">
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{watchIconC}}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{watchIcon}}" as="p" hint-placeholder-count="2"><path d="{{p}}"></path></sc-for></svg>
+					<span id="sc-watch-head" title="Finds signals where you are tuned. Never moves the receiver." style="flex: 0 1 auto; min-width: 0; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums"><b>Watch here</b><span style="color: var(--wk-text-3)"> · {{watchSpan}}</span></span>
+					<span style="flex: 1"></span>
+					<sc-if value="{{nowHasLooks}}" hint-placeholder-val="{{true}}">
+						<button class="wk-ghost" onClick="{{toggleWatchEdit}}" aria-haspopup="dialog" aria-expanded="{{watchEditOpen}}" aria-controls="sc-watch-protos" aria-label="Looks for {{watchLooksAll}} · change" title="Looks for {{watchLooksAll}}" style="flex: none; max-width: 44%; height: 32px; padding: 0 8px; border-radius: 6px; color: var(--wk-text-3); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: underline; text-decoration-color: rgba(var(--wk-ink-3-rgb),.35); text-underline-offset: 3px">{{watchLooks}}</button>
+					</sc-if>
+					<sc-if value="{{nowHasSwitch}}" hint-placeholder-val="{{true}}">
+						<button role="switch" aria-checked="{{watchOn}}" aria-labelledby="sc-watch-head" title="Finds signals where you are tuned. Never moves the receiver." onClick="{{toggleWatch}}" style="flex: none; width: 52px; height: 44px; display: grid; place-items: center; border-radius: 6px">
+							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{watchTrack}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{watchKnob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
+						</button>
+					</sc-if>
+				</section>
+				<sc-if value="{{watchEditOpen}}" hint-placeholder-val="{{false}}">
+					<div id="sc-watch-protos" role="dialog" aria-label="What Watch here looks for" style="position: absolute; left: 14px; right: 14px; top: 50px; z-index: 6; display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer)">
+						<div style="display: flex; align-items: center"><span class="wk-eyebrow" style="flex: 1; font-size: 12px">Looks for</span><button class="wk-ghost" onClick="{{toggleWatchEdit}}" style="height: 30px; margin: -4px -4px -4px 0; padding: 0 10px; border-radius: 6px; color: var(--wk-accent); font-size: 12.5px; font-weight: 700">Done</button></div>
+						<div role="group" aria-label="Protocols" style="display: flex; flex-wrap: wrap; gap: 6px">
+							<sc-for list="{{watchChips}}" as="c" hint-placeholder-count="6">
+								<button class="wk-chipb" aria-pressed="{{c.on}}" onClick="{{c.pick}}" style="height: 32px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{c.bg}}; color: {{c.fg}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{c.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{c.label}}</button>
+							</sc-for>
+						</div>
 					</div>
 				</sc-if>
-			</section>
+			</sc-if>
+			<sc-if value="{{planRow}}" hint-placeholder-val="{{false}}">
+				<button class="wk-out" onClick="{{openPlan}}" aria-expanded="{{planOpen}}" style="width: 100%; height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid rgba(var(--wk-line-rgb),.18); display: flex; align-items: center; gap: 8px; color: var(--wk-text-2); font-size: 13px; font-weight: 700">
+					<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{planChev}}"></path></svg>{{planText}}
+				</button>
 			</sc-if>
 			<sc-if value="{{nowFull}}" hint-placeholder-val="{{true}}">
 			<section aria-label="Scan status" style="display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 8px; background: {{nowBg}}; box-shadow: inset 0 0 0 1px {{nowRing}}; transition: background .2s, box-shadow .2s">
@@ -119,11 +135,6 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 						</span>
 						<sc-if value="{{nowHasSub}}" hint-placeholder-val="{{true}}"><span aria-live="{{nowLiveRegion}}" style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{nowSub}}</span></sc-if>
 					</span>
-					<sc-if value="{{nowHasSwitch}}" hint-placeholder-val="{{false}}">
-						<button role="switch" aria-checked="{{watchOn}}" aria-labelledby="sc-now-head" title="Find signals where you are tuned. Never moves the receiver." onClick="{{toggleWatch}}" style="flex: none; width: 52px; height: 44px; margin-right: -8px; display: grid; place-items: center; border-radius: 6px">
-							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{watchTrack}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{watchKnob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
-						</button>
-					</sc-if>
 				</div>
 				<sc-if value="{{nowHasSegs}}" hint-placeholder-val="{{false}}">
 					<div role="progressbar" aria-label="This pass" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{passPct}}" style="position: relative; height: 3px; border-radius: 1.5px; background: {{passTrack}}; overflow: hidden">
@@ -132,26 +143,6 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</sc-if>
 				<sc-if value="{{nowHasLine}}" hint-placeholder-val="{{true}}">
 					<span style="font-size: 12px; color: var(--wk-text-2); font-variant-numeric: tabular-nums">{{nowLine}}</span>
-				</sc-if>
-				<sc-if value="{{nowHasLooks}}" hint-placeholder-val="{{false}}">
-					<div style="display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 12.5px; line-height: 1.45">
-						<span style="flex: 1; min-width: 0; color: var(--wk-text-soft)"><span style="color: var(--wk-text-3)">Looks for </span>{{watchLooks}}</span>
-						<button class="wk-ghost" onClick="{{toggleWatchEdit}}" aria-expanded="{{watchEditOpen}}" aria-controls="sc-watch-protos" style="flex: none; height: 36px; margin: -2px -6px -2px 0; padding: 0 10px; border-radius: 6px; color: var(--wk-accent); font-size: 12.5px; font-weight: 700">{{watchEditText}}</button>
-					</div>
-					<sc-if value="{{watchEditOpen}}" hint-placeholder-val="{{false}}">
-						<div id="sc-watch-protos" role="group" aria-label="What Watch here looks for" style="display: flex; flex-wrap: wrap; gap: 6px">
-							<sc-for list="{{watchChips}}" as="c" hint-placeholder-count="6">
-								<button class="wk-chipb" aria-pressed="{{c.on}}" onClick="{{c.pick}}" style="height: 32px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{c.bg}}; color: {{c.fg}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{c.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{c.label}}</button>
-							</sc-for>
-						</div>
-					</sc-if>
-				</sc-if>
-				<sc-if value="{{nowHasBanner}}" hint-placeholder-val="{{false}}">
-					<div role="status" style="display: flex; align-items: center; gap: 10px; padding: 8px 6px 8px 10px; border-radius: 6px; background: {{bannerBg}}; font-size: 12.5px; line-height: 1.45; color: {{bannerFg}}">
-						<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{bannerIcon}}" as="p" hint-placeholder-count="2"><path d="{{p}}"></path></sc-for></svg>
-						<span style="flex: 1; min-width: 0; text-wrap: pretty">{{bannerText}}</span>
-						<sc-if value="{{bannerHasAct}}" hint-placeholder-val="{{false}}"><button class="wk-ghost" onClick="{{bannerAct}}" style="flex: none; height: 30px; padding: 0 10px; border-radius: 6px; color: {{bannerFg}}; font-size: 12.5px; font-weight: 700; white-space: nowrap">{{bannerActText}}</button></sc-if>
-					</div>
 				</sc-if>
 				<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
 					<sc-for list="{{hitActs}}" as="a" hint-placeholder-count="0">
@@ -167,6 +158,13 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</sc-for>
 				</div>
 			</section>
+			</sc-if>
+			<sc-if value="{{nowHasBanner}}" hint-placeholder-val="{{false}}">
+				<div role="status" style="display: flex; align-items: center; gap: 10px; padding: 8px 6px 8px 10px; border-radius: 6px; background: {{bannerBg}}; font-size: 12.5px; line-height: 1.45; color: {{bannerFg}}">
+					<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{bannerIcon}}" as="p" hint-placeholder-count="2"><path d="{{p}}"></path></sc-for></svg>
+					<span style="flex: 1; min-width: 0; text-wrap: pretty">{{bannerText}}</span>
+					<sc-if value="{{bannerHasAct}}" hint-placeholder-val="{{false}}"><button class="wk-ghost" onClick="{{bannerAct}}" style="flex: none; height: 30px; padding: 0 10px; border-radius: 6px; color: {{bannerFg}}; font-size: 12.5px; font-weight: 700; white-space: nowrap">{{bannerActText}}</button></sc-if>
+				</div>
 			</sc-if>
 		</div>
 
@@ -230,9 +228,6 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</span>
 					<span style="font-weight: 700; font-size: 15px">Nothing found yet</span>
 					<span style="font-size: 13px; line-height: 1.55; color: var(--wk-text-3); text-wrap: pretty">Signals the scanner finds land here.</span>
-					<button onClick="{{openPlan}}" style="margin-top: 6px; height: 40px; padding: 0 16px 0 13px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px">
-						<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>Scan a band
-					</button>
 				</div>
 			</sc-if>
 			<sc-if value="{{notFirstRun}}" hint-placeholder-val="{{true}}">
@@ -276,7 +271,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</div>
 			</sc-if>
 		</div>
-		<div tabindex="0" role="region" aria-label="Discoveries. Arrows move, Enter opens, L listens, S saves." onKeyDown="{{listKey}}" class="wk-scroll" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px">
+		<div tabindex="0" role="region" aria-label="Discoveries. Arrows move, Enter opens, L listens, S saves." onKeyDown="{{listKey}}" onScroll="{{listScroll}}" class="wk-scroll" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px">
 
 			<sc-if value="{{noMatch}}" hint-placeholder-val="{{false}}">
 				<div style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: 48px 24px 0">
@@ -414,36 +409,19 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 									<p style="margin: -6px 0 0; font-size: 12.5px; color: var(--wk-text-3)">{{r.noTxText}}</p>
 								</sc-if>
 
-								<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0 -4px -2px">
+								<div class="wk-acts" style="display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; margin: 0 -4px -2px; min-width: 0">
 									<button onClick="{{r.listen}}" title="{{r.listenTitle}}" style="flex: none; white-space: nowrap; height: 36px; margin: 0 4px 0 4px; padding: 0 14px 0 11px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px">
 										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM4 15v-3a8 8 0 0 1 16 0v3"></path></svg>Listen
 									</button>
-									<button class="wk-ghost" onClick="{{r.save}}" aria-pressed="{{r.saved}}" title="{{r.saveTitle}}" style="flex: none; white-space: nowrap; height: 36px; padding: 0 10px; border-radius: 6px; color: {{r.saveC}}; font-size: 13px; display: flex; align-items: center; gap: 7px">
-										<svg width="15" height="15" viewBox="0 0 24 24" fill="{{r.saveFill}}" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg>{{r.saveText}}
+									<button class="wk-ghost wk-act2" onClick="{{r.save}}" aria-pressed="{{r.saved}}" aria-label="{{r.saveText}}" title="{{r.saveTitle}}" style="flex: none; white-space: nowrap; height: 36px; padding: 0 10px; border-radius: 6px; color: {{r.saveC}}; font-size: 13px; display: flex; align-items: center; gap: 7px">
+										<svg width="15" height="15" viewBox="0 0 24 24" fill="{{r.saveFill}}" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg><span class="wk-lbl-save">{{r.saveText}}</span>
 									</button>
-									<button class="wk-ghost" onClick="{{r.identify}}" disabled="{{r.identifying}}" title="Runs every decoder on it again. Never moves the receiver." style="flex: none; white-space: nowrap; height: 36px; padding: 0 10px; border-radius: 6px; color: {{r.idC}}; font-size: 13px; display: flex; align-items: center; gap: 7px">
-										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8v-2a2 2 0 0 1 2 -2h2M4 16v2a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v2M16 20h2a2 2 0 0 0 2 -2v-2M7 12h10"></path></svg>{{r.idText}}
+									<button class="wk-ghost wk-act2" onClick="{{r.identify}}" disabled="{{r.identifying}}" aria-label="{{r.idText}}" title="{{r.idText}} · runs every decoder on it again. Never moves the receiver." style="flex: none; white-space: nowrap; height: 36px; padding: 0 10px; border-radius: 6px; color: {{r.idC}}; font-size: 13px; display: flex; align-items: center; gap: 7px">
+										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 8v-2a2 2 0 0 1 2 -2h2M4 16v2a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v2M16 20h2a2 2 0 0 0 2 -2v-2M7 12h10"></path></svg><span class="wk-lbl-id">{{r.idText}}</span>
 									</button>
-									<div style="flex: 1"></div>
-									<span style="position: relative; display: flex">
-										<button class="wk-ghost" onClick="{{r.toggleMore}}" aria-haspopup="menu" aria-expanded="{{r.moreOpen}}" aria-label="More actions" style="width: 36px; height: 36px; border-radius: 6px; color: var(--wk-text-3); display: grid; place-items: center">
-											<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>
-										</button>
-										<sc-if value="{{r.moreOpen}}" hint-placeholder-val="{{false}}">
-											<div role="menu" aria-label="More actions" style="position: absolute; right: 0; bottom: 42px; z-index: 5; width: 272px; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer); backdrop-filter: blur(24px)">
-												<button role="menuitem" class="wk-ghost" onClick="{{r.ignore}}" style="width: 100%; min-height: 44px; padding: 6px 10px; border-radius: 6px; text-align: left; display: flex; flex-direction: column; gap: 2px">
-													<span style="font-size: 13.5px">{{r.ignoreText}}</span>
-													<span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.4">{{r.ignoreHint}}</span>
-												</button>
-												<button role="menuitem" class="wk-ghost" onClick="{{r.copy}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; display: flex; align-items: center; justify-content: space-between; font-variant-numeric: tabular-nums">Copy frequency<span style="font-size: 12px; color: var(--wk-text-3)">{{r.f6}}</span></button>
-												<div style="height: 1px; margin: 6px 4px; background: rgba(var(--wk-accent-rgb),.08)"></div>
-												<button role="menuitem" class="wk-ghost" onClick="{{r.del}}" style="width: 100%; min-height: 44px; padding: 6px 10px; border-radius: 6px; text-align: left; display: flex; flex-direction: column; gap: 2px">
-													<span style="font-size: 13.5px; color: var(--wk-danger-soft); font-weight: 700">Delete</span>
-													<span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.4">Forgets it and its history. It comes back if it is heard again.</span>
-												</button>
-											</div>
-										</sc-if>
-									</span>
+									<button class="wk-ghost" onClick="{{r.toggleMore}}" aria-haspopup="menu" aria-expanded="{{r.moreOpen}}" aria-label="More actions" title="More" style="flex: none; margin-left: auto; width: 36px; height: 36px; border-radius: 6px; color: var(--wk-text-3); display: grid; place-items: center; background: {{r.moreBg}}">
+										<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>
+									</button>
 								</div>
 							</div>
 						</sc-if>
@@ -453,6 +431,22 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		</div>
 			</sc-if>
 		</sc-if>
+
+	<sc-if value="{{menuOpen}}" hint-placeholder-val="{{false}}">
+		<div aria-hidden="true" onPointerDown="{{closeMenu}}" style="position: absolute; inset: 0; z-index: 19"></div>
+		<div role="menu" aria-label="More actions" class="wk-scroll" style="position: absolute; z-index: 20; right: {{menuRight}}px; top: {{menuTop}}; bottom: {{menuBottom}}; width: {{menuW}}px; max-height: {{menuMaxH}}px; overflow-y: auto; box-sizing: border-box; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer)">
+			<button role="menuitem" class="wk-ghost" onClick="{{menuIgnore}}" style="width: 100%; min-height: 44px; padding: 6px 10px; border-radius: 6px; text-align: left; display: flex; flex-direction: column; gap: 2px">
+				<span style="font-size: 13.5px">{{menuIgnoreText}}</span>
+				<span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.4">{{menuIgnoreHint}}</span>
+			</button>
+			<button role="menuitem" class="wk-ghost" onClick="{{menuCopy}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; display: flex; align-items: center; justify-content: space-between; font-variant-numeric: tabular-nums">Copy frequency<span style="font-size: 12px; color: var(--wk-text-3)">{{menuF6}}</span></button>
+			<div style="height: 1px; margin: 6px 4px; background: rgba(var(--wk-line-rgb),.1)"></div>
+			<button role="menuitem" class="wk-ghost" onClick="{{menuDel}}" style="width: 100%; min-height: 44px; padding: 6px 10px; border-radius: 6px; text-align: left; display: flex; flex-direction: column; gap: 2px">
+				<span style="font-size: 13.5px; color: var(--wk-danger-soft); font-weight: 700">Delete</span>
+				<span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.4">Forgets it and its history. It comes back if it is heard again.</span>
+			</button>
+		</div>
+	</sc-if>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
 		<div role="status" style="flex: none; margin: 0 10px 8px; min-height: 42px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi); font-size: 13px">
@@ -467,7 +461,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 </div>
 </x-dc>
 
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["first-run", "watching", "starting", "sweeping", "holding", "paused", "paused-released", "paused-you", "paused-waiting", "consent", "paused-job", "paused-relay", "source-down", "source-removed", "no-tuner", "no-receiver", "finished", "nothing-found", "disk-low", "read-only"],"default":"sweeping"},"openFirst":{"editor":"boolean","default":true},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"onScan":{"editor":null},"onPlan":{"editor":null},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onIdentify":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"onSettings":{"editor":null},"onClose":{"editor":null},"$preview":{"width":420,"height":820}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["first-run", "watching", "starting", "sweeping", "holding", "paused", "paused-released", "paused-you", "paused-waiting", "consent", "paused-job", "paused-relay", "source-down", "source-removed", "no-tuner", "no-receiver", "finished", "nothing-found", "disk-low", "read-only"],"default":"sweeping"},"openFirst":{"editor":"boolean","default":true},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"onScan":{"editor":null},"onPlan":{"editor":null},"planOpen":{"editor":"boolean","default":false},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onIdentify":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"onSettings":{"editor":null},"onClose":{"editor":null},"$preview":{"width":420,"height":820}}'>
 // ---------- Icons (tabler-style stroke paths) ----------
 const I = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
@@ -641,6 +635,17 @@ class Component extends DCLogic {
 			newOnly: false, hitOpen: null, skipped: {}, lastStart: null
 		}, this.fromTweak(props.state));
 		this.acc = 0; this.secAcc = 0;
+		this.rootRef = el => { this.rootEl = el; };
+	}
+	// the ⋯ menu lives at the drawer's root, so the list's scroll box never clips it: anchored to the button's right edge,
+	// opening down when it fits below, else up, always inside the drawer
+	toggleMenu(id, e) {
+		if (this.state.menu === id || !e || !e.currentTarget || !this.rootEl) return this.setState({ menu: null });
+		const sc = e.currentTarget.closest('[role="region"]'); this.menuScroll = sc ? sc.scrollTop : 0;
+		const rr = this.rootEl.getBoundingClientRect(), br = e.currentTarget.getBoundingClientRect(), M = 8, H = 196;
+		const w = Math.min(272, rr.width - 2 * M), below = rr.bottom - br.bottom - M, above = br.top - rr.top - M, down = below >= H || below >= above;
+		const right = clamp(rr.right - br.right, M, rr.width - w - M);
+		this.setState({ menu: id, menuPos: { w, right, top: down ? br.bottom - rr.top + 4 : null, bottom: down ? null : rr.bottom - br.top + 4, maxH: Math.max(120, (down ? below : above) - 4) } });
 	}
 	// ---------- Board tweak: each scanner state, so reviewers can see it without waiting ----------
 	fromTweak(st) {
@@ -674,7 +679,14 @@ class Component extends DCLogic {
 		return o;
 	}
 	// "Scan a band" opens the shell's planner sheet
-	openPlan() { if (this.state.hw === 'no-receiver' || this.state.ro) return; if (this.props.onPlan) this.props.onPlan(); else this.toast('Opens Scan a band'); }
+	// "Scan a band" and "Show plan" toggle the shell's planner pane (planOpen); standalone the board keeps its own
+	openPlan() {
+		if (this.state.hw !== 'ok' || this.state.ro) return;
+		if (this.props.onPlan) return this.props.onPlan();
+		const on = !this.planOpen();
+		this.setState({ planOpen: on && !this.props.planOpen }); this.toast(on ? 'Opens the plan beside the drawer' : 'Hides the plan');
+	}
+	planOpen() { return this.props.onPlan ? !!this.props.planOpen : !!(this.props.planOpen || this.state.planOpen); }
 
 	componentDidMount() { this.timer = setInterval(() => this.step(), 125); }
 	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.tt); clearTimeout(this.st); }
@@ -863,7 +875,7 @@ class Component extends DCLogic {
 			save: () => { const on = !x.saved; this.patch(x.id, { saved: on }); this.toast(on ? 'Saved ' + f3(x.hz / 1e6) + ' as “' + (x.label || autoTitle) + '” · mode and bandwidth filled in' : 'Removed from saved frequencies'); },
 			identifying, idText: identifying ? 'Identifying…' : 'Identify again', idC: identifying ? 'var(--wk-text-3)' : 'var(--wk-text-2)',
 			identify: () => { if (this.props.onIdentify) this.props.onIdentify(x.hz); this.setState({ idUntil: Object.assign({}, s.idUntil, { [x.id]: Date.now() + 5000 }) }); },
-			f6: f, moreOpen: s.menu === x.id, toggleMore: () => this.setState({ menu: s.menu === x.id ? null : x.id }),
+			f6: f, moreOpen: s.menu === x.id, moreBg: s.menu === x.id ? 'var(--wk-chip)' : 'transparent', toggleMore: e => this.toggleMenu(x.id, e),
 			ignoreText: ign ? 'Stop ignoring' : 'Ignore', ignoreHint: ign ? 'Back on the spectrum, in probes and in scans' : 'Never probed, recorded or scanned again · hidden from the spectrum',
 			ignore: () => {
 				close(); this.patch(x.id, { ignored: !ign });
@@ -956,40 +968,20 @@ class Component extends DCLogic {
 		const quiet = { bg: 'var(--wk-well-glass)', ring: 'rgba(var(--wk-line-rgb),.08)', tileBg: 'var(--wk-fill)', tileFg: 'var(--wk-text-3)', headC: 'var(--wk-text)' };
 		const bad = { bg: 'rgba(var(--wk-danger-rgb),.06)', ring: 'rgba(var(--wk-danger-rgb),.2)', tileBg: 'rgba(var(--wk-danger-rgb),.12)', tileFg: 'var(--wk-danger)', headC: 'var(--wk-danger-soft)' };
 		const A = (label, icon, kind, fn, title, o) => Object.assign({ label, icon, kind, act: fn || (() => {}), title: title || '', aria: o && o.iconOnly ? title : label }, o || {});
-		const compose = A('Scan a band', I.scan, 'out', () => this.openPlan());
 		const again = A('Scan again', I.again, 'out', () => s.lastStart ? this.scan('start', s.lastStart) : this.openPlan());
-		// where the sweep is: the frequency, never "stop N of M"
-		const at = this.hopFreq(sw0);
-		const cl = { compact: true, acts: [] };
+		// while a scan holds the receiver the Tuner's hold row is the status and the control (Pause, Stop, frequency,
+		// progress): the drawer keeps one toggle for the plan. Consent keeps its decision here.
+		const plan = { plan: true };
 		switch (sw0.state) {
-			// while a scan holds the receiver the Tuner's scan row is the status and the control: the drawer only says where
-			// it is (one line and the pass line) and opens the plan. Consent keeps its button: the Tuner row only says "Review".
-			case 'starting': return Object.assign({}, live, cl, { icon: I.scan, head: sw0.name, detail: 'starting', segs: 'idle' });
-			case 'sweeping': return Object.assign({}, live, cl, { icon: I.scan, head: sw0.name, detail: at, title: 'A full pass takes about ' + secsText(sw0.sweepS), segs: 'live' });
-			case 'holding': return Object.assign({}, live, cl, { icon: I.scan, live: true, head: f3(sw0.holdHz / 1e6), detail: sw0.holdLabel, title: 'Moves on 2 s after the call ends, at most 60 s', segs: 'hold' });
-			case 'paused': return Object.assign({}, amb, cl, sw0.released
-				? { icon: I.pause, head: 'Scan paused', detail: 'the receiver is yours', sub: 'Paused at ' + at, title: 'Resume asks first if more decoders would pause' }
-				: { icon: I.pause, head: 'Scan paused', detail: 'holding the receiver', sub: 'Paused at ' + at, title: 'Decoders stay paused. Tune anywhere and the receiver is yours.' }, { segs: 'amber' });
-			case 'paused-you': return Object.assign({}, amb, cl, sw0.waiting
-				? { icon: I.pause, head: 'Scan waits while you listen', sub: 'The countdown holds at ' + sw0.resumeIn + ' s while the squelch is open' }
-				: { icon: I.pause, head: 'Scan resumes in ' + sw0.resumeIn + ' s', sub: 'You tuned, so the receiver is yours until then' }, { liveRegion: 'off', segs: 'amber' });
-			case 'consent': return Object.assign({}, amb, cl, { icon: I.warn, head: 'Resume needs your OK', sub: 'APRS started while the scan was paused · resuming pauses it too', segs: 'amber',
+			case 'starting': case 'sweeping': case 'holding': case 'paused': case 'paused-you': case 'paused-job': case 'paused-relay': case 'source-down': return plan;
+			case 'consent': return Object.assign({}, amb, plan, { full: true, icon: I.warn, head: 'Resume needs your OK', sub: 'APRS started while the scan was paused · resuming pauses it too',
 				acts: [A('Resume and pause APRS', I.play, 'amber', () => this.scan('resume', { takeover: true }))] });
-			case 'paused-job': return Object.assign({}, amb, cl, { icon: I.scan, head: 'Waiting for another scan', sub: '“Harbour channels” has the receiver · this scan carries on after it', segs: 'amber' });
-			case 'paused-relay': return Object.assign({}, amb, cl, { icon: I.plug, head: 'SDR++ has the receiver', sub: 'The scan carries on when SDR++ lets go', segs: 'amber' });
-			case 'source-down': return Object.assign({}, amb, cl, { icon: I.plug, iconAnim: 'wkpulse 1.6s ease-in-out infinite', head: 'Pi receiver is offline', sub: 'Reconnecting · the scan carries on once it is back', segs: 'amber' });
-			case 'source-removed': return Object.assign({}, bad, { icon: I.plug, head: 'Scan ended · receiver removed', sub: 'Removed in Settings · what it found is kept', acts: [compose] });
-			case 'finished': return Object.assign({}, quiet, { tileFg: 'var(--wk-accent)', icon: I.check, head: 'Scan finished', sub: sw0.name + ' · 3 full passes in 30 min', acts: [again, Object.assign({}, compose, { kind: 'ghost' })] });
-			case 'nothing-found': return Object.assign({}, quiet, { icon: I.scan, head: 'Scan finished · nothing new', sub: sw0.name + ' · ' + mr(sw0.a, sw0.b), acts: [again, Object.assign({}, compose, { kind: 'ghost' })] });
+			case 'source-removed': return Object.assign({}, bad, { full: true, icon: I.plug, head: 'Scan ended · receiver removed', sub: 'Removed in Settings · what it found is kept', acts: [] });
+			case 'finished': return Object.assign({}, quiet, { full: true, tileFg: 'var(--wk-accent)', icon: I.check, head: 'Scan finished', sub: sw0.name + ' · 3 full passes in 30 min', acts: [again] });
+			case 'nothing-found': return Object.assign({}, quiet, { full: true, icon: I.scan, head: 'Scan finished · nothing new', sub: sw0.name + ' · ' + mr(sw0.a, sw0.b), acts: [again] });
 			default:
-				if (s.hw === 'no-receiver') return Object.assign({}, quiet, { icon: I.plug, head: 'No receiver', sub: 'Connect a receiver to find the signals around you', acts: [A('Open Settings', I.gear, 'out', () => this.props.onSettings ? this.props.onSettings('receivers') : this.toast('Opens Settings › Receivers'))] });
-				return Object.assign({}, this.watchOn() ? live : quiet, {
-					icon: this.watchOn() ? I.eye : I.eyeOff, head: 'Watch here',
-					sub: this.watchOn() ? r1(SPAN.a) + '–' + r1(SPAN.b) + ' MHz' : 'Off',
-					sw: true, looks: this.watchOn(),
-					banner: s.hw === 'no-tuner' ? { tone: 'quiet', icon: I.plug, text: 'This receiver is tuned from SDR++, so it cannot sweep bands. Watch here still works.' } : null,
-					acts: s.hw === 'ok' && !s.firstRun ? [compose] : []
-				});
+				if (s.hw === 'no-receiver') return Object.assign({}, quiet, { full: true, icon: I.plug, head: 'No receiver', sub: 'Connect a receiver to find the signals around you', acts: [A('Open Settings', I.gear, 'out', () => this.props.onSettings ? this.props.onSettings('receivers') : this.toast('Opens Settings › Receivers'))] });
+				return { watch: true, banner: s.hw === 'no-tuner' ? { tone: 'quiet', icon: I.plug, text: 'Tuned from SDR++, so it cannot scan bands. Watch here still works.' } : null };
 		}
 	}
 	// one thin line for the pass: how far this pass has got, never a hop count
@@ -1017,6 +1009,25 @@ class Component extends DCLogic {
 		return (s.ro ? 'View only · ' : '') + t;
 	}
 
+	menuVals() {
+		const s = this.state, x = s.menu && s.items.find(y => y.id === s.menu), p = s.menuPos;
+		if (!x || !p) return { menuOpen: false, closeMenu: () => {} };
+		const f = f6(x.hz), ign = !!x.ignored, close = () => this.setState({ menu: null });
+		return {
+			menuOpen: true, closeMenu: close, menuRight: p.right, menuW: p.w, menuTop: p.top == null ? 'auto' : p.top + 'px', menuBottom: p.bottom == null ? 'auto' : p.bottom + 'px', menuMaxH: p.maxH,
+			menuF6: f, menuIgnoreText: ign ? 'Stop ignoring' : 'Ignore', menuIgnoreHint: ign ? 'Back on the spectrum, in probes and in scans' : 'Never probed, recorded or scanned again · hidden from the spectrum',
+			menuIgnore: () => {
+				close(); this.patch(x.id, { ignored: !ign });
+				if (!ign) { this.setState({ open: null }); this.toast('Ignored ' + f3(x.hz / 1e6) + ' · never probed, recorded or scanned again', () => { this.patch(x.id, { ignored: false }); this.setState({ toast: null }); }); }
+			},
+			menuCopy: () => { try { navigator.clipboard.writeText(f); } catch (e) {} close(); this.toast('Copied ' + f); },
+			menuDel: () => {
+				const idx = s.items.findIndex(y => y.id === x.id), it = s.items[idx];
+				this.setState({ items: s.items.filter(y => y.id !== x.id), open: null, menu: null });
+				this.toast('Deleted ' + f3(x.hz / 1e6), () => { const items = this.state.items.slice(); items.splice(idx, 0, it); this.setState({ items, open: it.id, sel: it.id, toast: null }); });
+			}
+		};
+	}
 	renderVals() {
 		const s = this.state, sw0 = this.sweep(), nw = this.now(sw0);
 		const gs = this.groups(), flat = [].concat.apply([], gs.map(g => g.xs));
@@ -1027,7 +1038,8 @@ class Component extends DCLogic {
 			const k = a.kind, st = k === 'amber' ? { cls: 'wk-amb', border: 'rgba(var(--wk-amber-rgb),.32)', bg: 'transparent', fg: 'var(--wk-amber)' } : k === 'out' ? { cls: 'wk-out', border: 'rgba(var(--wk-line-rgb),.18)', bg: 'transparent', fg: 'var(--wk-accent)' } : { cls: 'wk-ghost', border: 'transparent', bg: 'transparent', fg: 'var(--wk-text-2)' };
 			return Object.assign(st, { pad: a.iconOnly ? '0 11px' : '0 14px 0 11px', op: a.disabled ? 0.45 : 1, disabled: !!a.disabled });
 		};
-		const isSweep = !!nw.segs, wt = sw(this.watchOn());
+		const wOn = this.watchOn(), wt = sw(wOn), pOpen = this.planOpen();
+		const wIds = PORDER.filter(p => s.watchProtos.includes(p) && this.vis(p)), wLab = wIds.map(p => PROTO[p].label);
 		const hasRun = !s.firstRun && sw0.state !== 'watching' && s.hw === 'ok';
 		const tab = hasRun ? s.tab : 'all', hits = this.hitStats();
 		const ro = s.ro;
@@ -1038,29 +1050,36 @@ class Component extends DCLogic {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			// the drawer's one count: this scan's finds while a scan is on, else every discovery
+			rootRef: this.rootRef,
 			headTitle: 'Scanner', headCount: hasRun ? hits.n + ' found · ' + hits.fresh + ' new' : String(count),
 			close: () => this.props.onClose && this.props.onClose(),
-			openPlan: () => this.openPlan(),
 
 			// Now block
-			nowBg: nw.bg, nowRing: nw.ring, nowTileBg: nw.tileBg, nowTileFg: nw.tileFg, nowIcon: nw.icon, nowIconAnim: nw.iconAnim || 'none',
-			nowCompact: !!nw.compact, nowFull: !nw.compact, nowNotLive: !nw.live, nowHasDetail: !!nw.detail, nowDetail: nw.detail || '',
-			canPlan: !!nw.compact && !ro, nowHasActs: !ro && (nw.acts || []).length > 0,
-			nowLive: !!nw.live, nowHead: nw.head, nowHeadC: nw.headC, nowHasSub: !!nw.sub, nowSub: nw.sub || '', nowTitle: nw.title || '', nowLiveRegion: nw.liveRegion || 'polite',
-			nowHasSwitch: !!nw.sw && !ro, watchOn: this.watchOn(), watchTrack: wt.track, watchKnob: wt.knob,
-			toggleWatch: () => { const on = !this.watchOn(); this.setState({ watchOn: on }); if (this.props.onWatch) this.props.onWatch(on); this.toast(on ? 'Watching where you are tuned' : 'Stopped watching · discoveries so far are kept'); },
-			nowHasSegs: isSweep, ...this.passLine(sw0, nw.segs),
-			nowHasLine: !!nw.line, nowLine: nw.line || '',
-			nowHasLooks: !!nw.looks && !ro,
-			watchLooks: (() => { const ids = PORDER.filter(p => s.watchProtos.includes(p) && this.vis(p)); return ids.length ? listText(ids.map(p => PROTO[p].label)) : 'any signal'; })(),
-			watchEditOpen: s.watchEdit, watchEditText: s.watchEdit ? 'Done' : 'Change',
+			nowBg: nw.bg, nowRing: nw.ring, nowTileBg: nw.tileBg, nowTileFg: nw.tileFg, nowIcon: nw.icon || [], nowIconAnim: nw.iconAnim || 'none',
+			nowFull: !!nw.full, nowHasActs: !ro && (nw.acts || []).length > 0,
+			nowLive: !!nw.live, nowHead: nw.head || '', nowHeadC: nw.headC, nowHasSub: !!nw.sub, nowSub: nw.sub || '', nowTitle: nw.title || '', nowLiveRegion: nw.liveRegion || 'polite',
+			nowHasSegs: false, ...this.passLine(sw0, nw.segs), nowHasLine: false, nowLine: '',
+			// header: Scan a band opens the planner pane and reads as selected while it is open; hidden while a scan runs
+			// (Show plan / Hide plan is then the one way to the pane)
+			canPlan: hw === 'ok' && !ro && !nw.plan, planOpen: pOpen, planBg: pOpen ? 'var(--wk-sel)' : 'var(--wk-chip)', planFg: pOpen ? 'var(--wk-accent)' : 'var(--wk-text-2)',
+			planTitle: pOpen ? 'Hide the plan' : 'Plan a scan of one or more bands', openPlan: () => this.openPlan(),
+			planRow: !!nw.plan && hw === 'ok' && !ro, planText: pOpen ? 'Hide plan' : 'Show plan', planChev: pOpen ? 'M9 6l6 6l-6 6' : 'M15 6l-6 6l6 6',
+			// Watch here: one row
+			watchRow: !!nw.watch, watchOn: wOn, watchTrack: wt.track, watchKnob: wt.knob,
+			watchIcon: wOn ? I.eye : I.eyeOff, watchIconC: wOn ? 'var(--wk-accent)' : 'var(--wk-text-3)', watchRing: wOn ? '.14' : '.08',
+			watchSpan: wOn ? r1(SPAN.a) + '–' + r1(SPAN.b) : 'Off',
+			nowHasSwitch: !ro, nowHasLooks: wOn && !ro,
+			toggleWatch: () => { const on = !wOn; this.setState({ watchOn: on, watchEdit: false }); if (this.props.onWatch) this.props.onWatch(on); this.toast(on ? 'Watching where you are tuned' : 'Stopped watching · discoveries so far are kept'); },
+			watchLooks: wIds.length ? wLab.slice(0, 2).join(', ') + (wLab.length > 2 ? ' +' + (wLab.length - 2) : '') : 'Any signal',
+			watchLooksAll: wIds.length ? listText(wLab) : 'any signal',
+			watchEditOpen: s.watchEdit && wOn,
 			toggleWatchEdit: () => this.setState({ watchEdit: !s.watchEdit }),
 			watchChips: WATCH_PROTOS.filter(p => this.vis(p)).map(p => { const on = s.watchProtos.includes(p), c = chipc(on); return { label: PROTO[p].label, on, tick: c.tick, bg: c.bg, fg: c.fg, pick: () => this.setState({ watchProtos: on ? s.watchProtos.filter(y => y !== p) : s.watchProtos.concat([p]) }) }; }),
 			nowHasBanner: !!banner, bannerText: banner ? banner.text : '', bannerIcon: banner ? banner.icon : [],
 			bannerBg: banner && banner.tone === 'amber' ? 'var(--wk-amber-fill)' : 'rgba(var(--wk-ink-rgb),.05)', bannerFg: banner && banner.tone === 'amber' ? 'var(--wk-amber-soft)' : 'var(--wk-text-2)',
 			bannerHasAct: !!(banner && banner.act), bannerActText: banner && banner.act ? banner.act : '', bannerAct: () => banner && banner.fn && banner.fn(),
 			hitActs: ro ? [] : nw.hitActs || [], hasHitActs: !ro && !!(nw.hitActs && nw.hitActs.length),
-			nowActs: (ro ? [] : nw.acts).map(a => Object.assign({}, a, actStyle(a))),
+			nowActs: (ro ? [] : nw.acts || []).map(a => Object.assign({}, a, actStyle(a))),
 
 			// Tabs and hit log
 			hasTabs: hasRun,
@@ -1106,6 +1125,9 @@ class Component extends DCLogic {
 				else if (k === 'l' && cur) this.tuneTo(cur.hz);
 			},
 
+			// ⋯ menu (one at a time, drawn at the root)
+			...this.menuVals(),
+			listScroll: e => { if (s.menu && Math.abs(e.currentTarget.scrollTop - (this.menuScroll || 0)) > 4) this.setState({ menu: null }); },
 			// Toast and footer
 			hasToast: !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.undo), undo: () => s.toast && s.toast.undo && s.toast.undo(),
 			footText: this.footer(sw0), footC: /^paused|consent|source-down/.test(sw0.state) ? 'var(--wk-amber-muted)' : sw0.state === 'source-removed' ? 'var(--wk-danger-soft)' : 'var(--wk-text-3)'

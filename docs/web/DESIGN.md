@@ -64,8 +64,8 @@ Condensed + Noto Sans, Tabler-based icons).
 | Command palette (⌘K) | Tune, change any setting (colour scopes with live preview; every Settings row reachable), act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Wired into C (gear in the dock) | Active, first pass |
 | Settings on a phone | The same Settings, full screen: groups push in as their own screens | Active, first pass |
-| Scanner | Discoveries drawer and live hit log; "Scan a band" opens the planner sheet. Wired into C | Active, third pass |
-| Scan planner | "Scan a band" as a full-width sheet over the plot: presets, full-width ruler, range table with channel spacing, one-line footer; running mode (current hop, ticks, ranges on/off). Wired into C | Active, first pass |
+| Scanner | Discoveries drawer, one-row Watch here and the live hit log; "Scan a band" in the header opens the plan pane beside it. Wired into C | Active, fourth pass |
+| Scan planner | "Scan a band" as a pane attached to the Scanner drawer (pushed in as a screen on narrow windows): presets, one-lane ruler, range table with channel spacing; running mode (capture window, pass fill, ticks, mid-run edits behind Apply). Wired into C | Active, second pass |
 | Identify | Every identify state of the tuned card | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
@@ -700,6 +700,51 @@ Condensed + Noto Sans, Tabler-based icons).
     NXDN, YSF, D-STAR, dPMR, POCSAG, FLEX, APRS, ISM); AIS, ACARS, VDL2 and LoRa are dedicated
     decoders, not trials (core gap); one trial at a time until S2 is enabled.
 
+- **Scanner second pass: the plan as a pane of the Scanner drawer (owner, 2026-10-12, approved in
+  chat one question at a time; canvas v77).** The owner tried the v76 planner sheet and wanted "Scan a
+  band" to feel like an extension of the Scanner panel.
+  - *Shell pattern, "drawer + attached pane":* a drawer may grow **one pane to its left**, from just
+    under the top island row (the Tuner including its scan hold row, and the Receiver) to just above the
+    bottom row (Listen, dock), joined to the drawer with no seam: one outline, one × (the drawer's)
+    closes both, the pane has its own Hide. Tuner, Receiver, Listen and the dock stay visible; the tuned
+    card hides while the pane is open. Built as a generic slot in Immersive. Rejected: the drawer itself
+    widening (at full height it collides with the Tuner and Receiver).
+  - *Surface and performance:* while the pane is open, pane and drawer are opaque `--wk-surface` with no
+    `backdrop-filter` (near-opaque glass without blur let labels and the map read through in dark
+    grounds). Opening the pane adds no blurred surface over the waterfall; the running window moves by
+    transform only, at the progress rate.
+  - *Widths:* the pane attaches only when the shell can keep a full-height drawer with the Receiver
+    clear of the Tuner (measured about 1164 px idle, 1196 px while a scan runs, not the 1100 px first
+    proposed); a pane under 860 px shows the range table on two lines and scrolls the preset chips
+    sideways with Save pinned. Narrower windows and the phone push the plan into the full-width drawer
+    as a screen with "‹ Scanner".
+  - *Running ownership:* the Tuner hold row is the only place with Pause, Stop, the current frequency
+    and progress. The running pane has no Pause or Stop; its footer reads "Pass 3 · 62 % · full pass ≈
+    10 s". Range on/off, protocols and skips can change mid-run and wait in an amber "N changes waiting
+    · Discard · Apply" bar (core applies job edits at the next hop); edges and channel spacing are
+    locked while running ("Stop to change edges"). The drawer's running block is only "Show plan / Hide
+    plan", and its header "Scan a band" button hides while a scan runs.
+  - *One-lane ruler:* running mode draws your ranges as numbered bars on the true frequency scale, the
+    capture window as a bracket at its real width (2.4 MHz), the stretch covered in this pass lightly
+    filled, skips hatched, discovery ticks above (solid decoded, hollow maybe, pulsing active; click
+    tunes); amber when paused; no lane labels. Setup keeps the band-plan lanes above the same range
+    lane and opens fitted on the region's VHF bands (118–174 MHz), never on an empty stretch.
+  - *Tuned card:* hidden while the sweep moves; when the scan holds on a hit it is that signal's normal
+    card with the state line "Held by the scan" (the frequency is already top right). Replaces "Paused ·
+    the scanner has the receiver".
+  - *Scanner drawer top:* header "Scanner · count · Scan a band · ×"; Watch here is one row (eye, span,
+    a quiet "DMR, P25 +3" link to the protocol popover, toggle). The old block and its separate button
+    are gone.
+  - *Fixes from the audit and the owner's screenshot:* the discovery action row never wraps (⋯ pinned
+    right, Identify again and Save frequency fall back to icons when narrow) and the ⋯ menu renders at
+    the drawer root, inside the drawer, never clipped by the list. Recordings' Download and ⋯ menus got
+    the same fix; Activity's narrow header and detail actions no longer overflow at 360 px. Protocol
+    ids (`analog-fm`) no longer leak into the running plan. Mock skips say what already decodes them.
+  - *Seen in the renders, left as they are:* the setup pane has empty space under a short range table
+    (the pane is a fixed box, owner's sketch); with the Mono accent the selected "Scan a band" button is
+    subtle (quiet selection rule); disjoint stretches (169 + 466 MHz) keep the segmented ruler with a
+    break.
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -741,35 +786,32 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after the Scanner UX review (canvas v76). Two sessions are queued, in
+Handoff written 2026-10-12 after the Scanner second pass (canvas v77). Two sessions are queued, in
 this order. Two standing rules from the owner apply to both (see "How we work"): the canvas stays
 the design source after the build starts, and performance is a constraint at every stage.
 
-### 1. Scanner, second pass: the planner as an extension of the Scanner drawer (next)
+### 1. Activity wide mode on the attached pane (next, owner asked for it soon)
 
-The owner tried the planner sheet (screenshots, 2026-10-12) and wants "Scan a band" to feel like an
-**extension of the Scanner panel**, not a separate sheet dropping from the top. Their sketch: a box
-that starts at the drawer's left edge and grows left over the plot, from just under the top islands
-(Tuner / Receiver row) down to the bottom islands (above the Listen / dock row), so the drawer and
-the planner read as one wide panel. If adopted, the same "wide drawer" pattern probably applies to
-**Activity** too (its multi-column view), so design it as a shell pattern, not a Scanner one-off.
-Brainstorm one question at a time; likely questions: does the drawer itself widen (one surface) or
-does a second pane attach to its left edge; what happens to the Tuner hold row, the tuned card and
-the Receiver island it overlaps; running mode in the same place; how Activity's wide mode uses it;
-phone layout. Seen in the owner's screenshot, fix in the same pass: on Paper the planner ruler can
-open on an empty view (176–236 MHz, no bands in the lanes): open on Fit, or on the band plans.
+The Scanner second pass made "drawer + attached pane" a shell pattern (decision log, 2026-10-12): a
+drawer grows one pane to its left between the island rows, one surface, opaque with no blur while open,
+pushed in as a screen on narrow windows. Activity is its second user. Brainstorm one question at a
+time; likely questions: what goes in the pane (pinned-search columns, the detail beside the list, or
+the player and transcript), how it opens (a header button like "Scan a band", or opening a detail),
+whether the pane is remembered per drawer, what the tuned card and Listen do while it is open, and the
+narrow-window push-in. Check that the slot in Immersive (`paneOn`, `paneSolid`, `paneW`, the push-in
+branch) needs no Scanner-specific code for it, and that Recordings could use it later.
 
 **Scanner follow-ups to check with the owner first (short):**
-- How the planner sheet feels in use: its height (about 55 %), the glass-strong surface, and the
-  drawer closing while it is open and coming back after.
-- Consent to resume after a scan grew (`paused(resume-blocked)`): the Tuner row offers only
-  "Review", so the drawer still holds "Resume and pause APRS". Either the Tuner row gets that one
-  button or the drawer keeps it.
-- The holding tuned card still says "Paused · the scanner has the receiver" (unchanged this pass).
-- The mock shell ignores the planner's Options and its pass time; ⌘K presets start a sweep without
-  per-range rows, so running mode falls back to one row.
+- How the attached pane feels in use (fixed height from under the Tuner to above Listen, empty space
+  under a short range table, opaque surface while open).
+- Consent to resume after a scan grew (`paused(resume-blocked)`): the Tuner row offers only "Review",
+  so the drawer still holds "Resume and pause APRS". Either the Tuner row gets that one button or the
+  drawer keeps it.
+- The selected "Scan a band" button is subtle with the Mono accent (quiet selection rule).
+- Mock gaps: the shell ignores the planner's Options and its pass time; ⌘K presets start a sweep
+  without per-range rows, so running mode falls back to one row.
 
-**Core since the last merge (main@7743665, merged 2026-10-12):** two specs with unmounted
+**Core since the last merge (main@7743665, merged 2026-10-12; unchanged at the end of the Scanner second pass):** two specs with unmounted
 foundations, no new endpoint. *Regional display registry* (`/api/regional/*`): sourced channel
 labels and aliases with advisory mode / bandwidth / step hints; only US FRS so far, data pending.
 *Receiver capabilities* (`/api/receiver-capabilities`): per-control availability, tuner type and
@@ -778,7 +820,7 @@ touches the Receiver island, which draws a gain table in dB: when the web app is
 an unknown table (gain index steps, or a dB table only where a reviewed source exists).
 CORE-GAPS records both as "Partly".
 
-### 2. Design system v1 and web app foundation (after the Scanner second pass)
+### 2. Design system v1 and web app foundation (after Activity wide mode)
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
 make it performant and efficient. Guidance agreed in chat (2026-10-11 late):

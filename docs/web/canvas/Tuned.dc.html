@@ -98,7 +98,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			</div>
 			<div style="display: {{stateDisp}}; align-items: center; gap: 6px; font-size: 12.5px; color: {{stateFg}}; white-space: nowrap; overflow: hidden">
 				<span style="width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; opacity: {{dotOpacity}}"></span>
-				<span style="overflow: hidden; text-overflow: ellipsis">{{stateText}}</span>
+				<span title="{{stateText}}" style="overflow: hidden; text-overflow: ellipsis">{{stateText}}</span>
 			</div>
 		</div>
 		<div style="flex: none; display: {{freqColDisp}}; flex-direction: column; align-items: flex-end; gap: 3px" title="{{levelTitle}}">
@@ -405,7 +405,8 @@ const UNKNOWN = freq => ({ kind: 'unknown', proto: 'Unidentified', protoSub: (fr
 	eyebrow: 'Signal', big: 'Not decoded', line: 'About 12 kHz wide · bursts roughly every 10 s', body: 'No decoder is running here. Try the scanner to identify it.', quiet: 'Nothing decoded on this frequency', recent: [] });
 const infoFor = freq => INFO[freq] || UNKNOWN(freq);
 // While a sweep passes through a frequency with nothing on it, the card is one compact line, "Scanning · 146.9625",
-// instead of "Not decoded". scanText is the frequency the shell's sweep is on.
+// instead of "Not decoded". scanText is the frequency the shell's sweep is on (digits only); while the scan holds on a hit
+// (scanHold) it is instead the card's state line, "Held by the scan".
 const SCANNING = text => ({ kind: 'scan', proto: 'Scanning · ' + text, protoSub: '', icon: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'], decoder: 'none', level: -100, snr: 6, live: false,
 	quiet: 'Scanning', recent: [] });
 
@@ -576,24 +577,25 @@ class Component extends DCLogic {
 		const clip = min || Date.now() < (this.clipUntil || 0);
 		const t = this.state.tick;
 		const raw0 = infoFor(freq), v0 = this.idView(freq, raw0);
-		const scanning = !!this.props.scanText && raw0.kind === 'unknown' && !v0;
+		const scanFreq = /^[\d.]+$/.test(this.props.scanText || '');
+		const scanning = scanFreq && raw0.kind === 'unknown' && !v0;
 		const raw = scanning ? SCANNING(this.props.scanText) : raw0;
 		const v = scanning ? null : v0;
 		const ph = v ? v.phase : null;
 		const running = ph === 'waiting' || ph === 'trying';
 		const found = ph === 'identified';
 		const x = found && v.plan.result && v.plan.result.as ? v.plan.result.as : raw;
-		const backed = x.decoder !== 'Audio only' && x.decoder !== 'none';
-		const held = !!this.props.scanHold && backed && !found;
+		// the scan holds on this signal: the normal card, with the state line saying who put the receiver here
+		const held = !!this.props.scanHold && !scanning && !found;
 		const voice = x.kind === 'call' || x.kind === 'tx';
-		const live = !!x.live && !held;
-		const lvl = !held && (live || x.kind === 'count' || x.kind === 'audio') ? x.level : -108;
-		const snr = !held && (live || x.kind === 'count' || x.kind === 'audio') ? x.snr : 3;
+		const live = !!x.live;
+		const lvl = (live || x.kind === 'count' || x.kind === 'audio') ? x.level : -108;
+		const snr = (live || x.kind === 'count' || x.kind === 'audio') ? x.snr : 3;
 		const strength = Math.max(0, Math.min(5, Math.round(snr / 7)));
 		const secs = (x.start || 0) + Math.floor(t * 0.14);
 		let stateText = live ? (x.state || (voice ? (x.kind === 'call' ? 'Call in progress · ' : 'Transmitting · ') + fmt(secs) : 'Receiving')) : x.quiet || 'Quiet';
 		let stateFg = live ? 'var(--wk-accent)' : x.locked ? 'var(--wk-amber)' : 'var(--wk-text-3)';
-		if (held) { stateText = 'Paused · the scanner has the receiver'; stateFg = 'var(--wk-amber)'; }
+		if (held) { stateText = this.props.scanText && !scanFreq ? this.props.scanText : 'Held by the scan'; stateFg = live ? 'var(--wk-accent)' : 'var(--wk-text-2)'; }
 		if (running) { stateText = 'Identifying'; stateFg = 'var(--wk-accent)'; }
 		if (scanning) stateFg = 'var(--wk-accent)';
 		const pulse = live || running || scanning;
@@ -601,7 +603,7 @@ class Component extends DCLogic {
 			const h = live ? 15 + Math.abs(Math.sin(i * 1.7 + t * 0.9) * 55 + Math.sin(i * 0.43 + t * 0.37) * 25) : 6 + Math.abs(Math.sin(i * 1.7) * 30);
 			return { h: Math.min(100, h), c: live ? 'var(--wk-accent)' : 'var(--wk-track)' };
 		});
-		const rateBars = Array.from({ length: 30 }, (_, i) => ({ h: 25 + Math.abs(Math.sin(i * 0.9 + (x.big || '').length) * 55 + Math.sin(i * 0.31) * 20), c: held ? 'var(--wk-track)' : i === 29 ? 'var(--wk-accent)' : 'rgba(var(--wk-accent-rgb),.35)' }));
+		const rateBars = Array.from({ length: 30 }, (_, i) => ({ h: 25 + Math.abs(Math.sin(i * 0.9 + (x.big || '').length) * 55 + Math.sin(i * 0.31) * 20), c: i === 29 ? 'var(--wk-accent)' : 'rgba(var(--wk-accent-rgb),.35)' }));
 		const recent = (x.recent || []).slice(0, floating ? 2 : 4).map((r, i) => {
 			const id = freq + ':' + i, audio = typeof r[3] === 'number', on = this.state.play === id;
 			return {
@@ -721,7 +723,7 @@ class Component extends DCLogic {
 			if (id && x.proto.toLowerCase().indexOf(id.toLowerCase()) >= 0) id = '';
 			return id ? x.proto + ' · ' + id : x.proto;
 		})();
-		const lineState = running ? 'Identifying' : held ? 'Paused' : live && voice ? fmt(secs) : '';
+		const lineState = running ? 'Identifying' : held ? 'Held' : live && voice ? fmt(secs) : '';
 		const msg = x.kind === 'msg';
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
@@ -731,7 +733,7 @@ class Component extends DCLogic {
 			stateText, stateFg, dotOpacity: pulse ? (t % 8 < 5 ? 1 : 0.35) : 1,
 			freqText: MHZ(freq),
 			pinMark: pinned && !pinInRow,
-			levelTitle: 'Signal ' + dbt(lvl) + ' · SNR ' + snr + ' dB · decoder ' + x.decoder + (held ? ' (paused)' : ''),
+			levelTitle: 'Signal ' + dbt(lvl) + ' · SNR ' + snr + ' dB · decoder ' + x.decoder + (held ? ' (held by the scan)' : ''),
 			sigBars: [2, 4, 6, 8, 10].map((h, i) => ({ h, c: i < strength ? 'var(--wk-accent)' : 'var(--wk-track)' })),
 			showNormal: !idOn,
 			// a sweep passing through: the header alone, one line
@@ -761,7 +763,7 @@ class Component extends DCLogic {
 			bodyStyle: x.bodyPending ? 'italic' : 'normal',
 			hasChips: !!((x.chips && x.chips.length) || x.tone), chips: (x.tone ? [x.tone] : []).concat(x.chips || []).map(c => ({ k: c[0], v: c[1] })),
 			hasWave: voice && !x.locked, wave,
-			hasRate: x.kind === 'count', rateBars, rate: held ? 'paused' : x.rate || '',
+			hasRate: x.kind === 'count', rateBars, rate: x.rate || '',
 			hasRecent: recent.length > 0, recent,
 			recentTitle: voice ? 'Earlier on this frequency' : 'Earlier',
 			actions,

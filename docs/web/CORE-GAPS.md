@@ -17,6 +17,9 @@ runs `access.mode: legacy`, where operator data is not mounted; anything marked
 Re-checked 2026-10-12 (Scanner UX review) against `origin/main@7743665`: nothing to tick; the
 new planner sheet needs no new core item (plan preview, impact and `scanner:progress` cover it;
 ranges on/off mid-scan is already listed).
+Re-audited 2026-10-12 (Scanner second pass) item by item against `origin/main@7743665`: nothing new
+landed; one tick withdrawn (per-hop protocols, below) and seven "Partly" texts corrected (the
+regional and receiver-capabilities foundations have no routes yet).
 
 **Owner to decide first** (core specs on main lock these; the web design differs)
 - Activity categories: the decode-envelope spec on main (`docs/specs/decode-envelope/`,
@@ -51,14 +54,16 @@ ranges on/off mid-scan is already listed).
   mode, bandwidth, step and protocols to try; named channels with aliases (marine ch 16 / 12,
   PMR446 ch 1–16, AIS A/B, airband guard, ACARS, VDL2). Today `/api/scanner/bandplans`
   returns `{id, region, name, ranges}` with scan ranges and rasters only. Partly (main@7743665):
-  the regional display registry spec plus unmounted modules (`/api/regional/families`,
-  `/channels`, `/resolve`): sourced channel rows with scoped aliases, simplex / duplex, advisory
-  mode / bandwidth / step hints. Its only family is US FRS and its data is evidence-pending, and it
-  leaves scanner band plans unchanged. Still the gap: EU families (marine VHF, PMR446, airband,
+  the regional display registry spec, a core registry (`src/core/regional/`) and DTOs
+  (`packages/api-types/src/regional.ts`), with no routes yet (`/api/regional/families`, `/channels`,
+  `/resolve` exist only in the spec). The schema has sourced channel rows with scoped aliases,
+  simplex / duplex and advisory mode / bandwidth / step hints, but no rows ship: the only family is
+  US FRS with `dataset: null` (evidence-pending). Scanner band plans are unchanged. Still the gap: EU families (marine VHF, PMR446, airband,
   AIS / ACARS / VDL2 channels), band display groups, and one model shared with the scanner.
-- [ ] Missing plans in `src/core/scanner/bandplan/builtin.ts`: Airband (118–137 MHz), EU
-  pagers 169.4–169.8 MHz and 466.0–466.25 MHz (only `pager-vhf` 137–174 exists), one ISM
-  433 / 868 preset.
+- [ ] Missing plans in `src/core/scanner/bandplan/builtin.ts`: Airband (118–137 MHz) and EU
+  pagers 466.0–466.25 MHz; a named EU 169.4–169.8 MHz pager plan (it sits inside `pager-vhf`
+  137–174 today, on the same raster); a combined ISM 433 / 868 preset if presets stay one per plan.
+  Partly: `ism-433` (433.05–434.79) and `ism-868` (863–870) exist as separate EU plans.
 - [ ] Scan presets in core, shared by every client: built-in presets per region from the
   band plans (name, ranges, protocols, step, dwell, sensitivity; read-only, "Save as new"),
   plus operator presets saved from the composer (name, ranges, skips, protocols, settings)
@@ -69,9 +74,11 @@ ranges on/off mid-scan is already listed).
   provenance), `sampleRatePresets[]`, `tuningRangeHz` (with and without direct sampling),
   `supports: {offsetTuning, biasTee, directSampling}`, unknown values reported as unknown.
   Today `TunerInfo` has `tunerType` and `gainCount` only (ROADMAP §2). Partly (main@7743665):
-  the receiver-capabilities spec plus unmounted modules for `GET /api/receiver-capabilities` and
-  `/:sourceId` (per control: command availability, transport applicability, physical support;
-  peer `tunerType` / `gainCount`; the REST command policy). The spec forbids inferring a gain
+  the receiver-capabilities spec, a core provider (`src/core/tuner-capabilities/`) and DTOs
+  (`packages/api-types/src/receiver-capabilities.ts`), not routed yet (`GET
+  /api/receiver-capabilities` and `/:sourceId` exist only in the spec): per control command
+  availability, transport applicability and physical support, peer `tunerType` / `gainCount`. The
+  REST command policy (`TUNER_REST_COMMAND_POLICY`) is live in the tuner routes. The spec forbids inferring a gain
   table, rate presets or tuning range from the tuner type, so those three stay the gap: they
   need a reviewed per-tuner data source or a hardware readback.
 - [ ] DC removal (`iqDcBlock` is deprecated and ignored), IQ correction, IQ swap. The
@@ -161,22 +168,29 @@ ranges on/off mid-scan is already listed).
      and `resumeHeldBy` (`audio` | `identify` | `recording` | `null`), so every client shows
      the same countdown and "Scan waits while you listen".
   3. "Stay here": `POST …/pause` on a job in `paused(preempted-*)` turns it into
-     `paused(operator)` (no auto-resume) without needing the lease back (verify whether pause
-     is accepted from `preempted-*` today).
+     `paused(operator)` (no auto-resume) without needing the lease back. Needs a new transition:
+     today `pause` is accepted only from running or holding (`job-state.ts`).
 - [ ] Search discoveries by identity: an `identity` (kind:value) filter, and `q` matching
-  identity values as well as labels. Partly: `protocol`, frequency range, confidence,
-  `encrypted`, `since` and `jobId` filters exist.
+  identity values as well as labels. Partly: `protocol`, frequency range, confidence and
+  `minConfidence`, `encrypted`, `since`, `sourceId` and `jobId` filters exist; `q` matches the
+  operator label only.
 - [ ] `ScannerProtocol` values for what the composer offers: `ais`, `acars`, `vdl2`, `lora`
   (Meshtastic); CTCSS/DCS as a searchable feature, not a protocol. DSC has no decoder at all.
 - [ ] Per range: a `name`, `dwellMs` and `sensitivity` with provenance keys
-  (`ranges[i].…`), and exclusions per range (today rasters are per range; dwell,
-  sensitivity and exclusions per job). Partly: job provenance
+  (`ranges[i].…`), and exclusions per range (today rasters, `obwHz`, `protocols` and
+  `bandplanId` are per range; dwell, sensitivity and exclusions per job). Partly: job provenance
   (`operator|bandplan|measured|config|default`) and the plan preview's derived numbers
   (`hops`, `sweepPeriodMs`, estimates) from `POST /api/scanner/plan` have landed.
 - [ ] A job-level "signals only" flag (no decoder trials) for "Find signals, don't decode".
-- [ ] Switch a range on or off in a running job: allow `ranges` (or `ranges[i].enabled`) in
-  `PATCH /api/scanner/jobs/:id` (it live-edits exclusions, protocols, sensitivity and more,
-  not ranges).
+- [ ] Edit ranges in a running job: allow `ranges[i].enabled` and `ranges[i].protocols` in
+  `PATCH /api/scanner/jobs/:id`, applied at the next hop like the other live keys. The running
+  plan pane batches range on/off, per-range protocols and skips behind one Apply; edges and
+  channel spacing stay locked while running ("Stop to change edges"). Partly: the PATCH
+  live-edits `thresholdDb`, `sensitivity`, `exclusions` (skips), `hold`, `revisit`, `record`,
+  `protocols` and `capture`, but `protocols` is job-wide and overrides every range; a `ranges` key
+  passes validation and is silently dropped; `ranges[i].enabled` does not exist. Depends on per-hop
+  protocols (next item). (requested 2026-10-11, widened 2026-10-12, needed for Scanner › running plan pane,
+  priority normal)
 - [ ] Ignore that also skips the frequency in sweeps (Ignore = this signal, always). Today a
   lockout stops probes, recordings and monitor audio, but the planner only honours job
   exclusions. Skip (this scan only) maps to a per-job exclusion.
@@ -196,9 +210,15 @@ ranges on/off mid-scan is already listed).
   listen-scan ("Scan a list") for the later Scanner mode.
 - [x] Decoder IDs in a sweep's impact (`Impact.runningDecoders`, `pinnedDecoders`); the UI
   maps IDs to display names.
-- [x] Overlapping ranges swept once: `rasterItems` dedupes channels and each hop tries the
-  union of the protocols of the ranges covering it (per hop, not per stretch; job-level
-  `protocols` override; add a test).
+- [ ] Per-range protocols honoured per hop: each hop tries the union of the protocols of the
+  ranges covering it (so Marine VHF tries FM voice only while the PMR stretch around it tries DMR,
+  P25, …), with job-level `protocols` as an explicit override; plus a test. The planner's range
+  table and running pane show protocols per range. Partly: overlapping ranges are swept once
+  (`rasterItems` dedupes channels by Hz, `hop-planner.ts`), but at runtime a job without
+  `protocols` gets the union of every range's protocols job-wide (`plan-preview.ts`), and probes use
+  that list (`job-runner.ts`); the per-hop branch of `hopProtocols` only feeds the preview
+  estimate. (Ticked 2026-10-11 in error; reopened 2026-10-12, needed for Scanner › planner range
+  table, priority normal)
 
 **Recordings** (one package with the event store)
 - [ ] Auto-record all audio (analog transmissions and digital calls), global retention and
