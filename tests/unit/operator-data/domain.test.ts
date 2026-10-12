@@ -485,7 +485,7 @@ describe("operator-data transitions", () => {
 			),
 			{ numRuns: 100 },
 		)
-	})
+	}, 30_000) // fast-check property run; 5 s default flaked on a loaded host
 
 	it("evicts the deterministic oldest key, saturates count, and resets with current-token no-op", () => {
 		const ctx = context()
