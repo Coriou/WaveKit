@@ -92,6 +92,10 @@ export function resolveActivityLimits(
 		)
 	if (limits.maxRows < 1000)
 		throw new ActivityUnavailableError("Activity maxRows must be at least 1000")
+	if (limits.maxDbBytes < 16 * MiB)
+		throw new ActivityUnavailableError(
+			"Activity maxDbBytes must be at least 16 MiB",
+		)
 	if (limits.pruneBatchRows < 1)
 		throw new ActivityUnavailableError(
 			"Activity prune batch must be at least 1 row",

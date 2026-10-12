@@ -95,7 +95,8 @@ outputs, classified by an explicit allow-list) are excluded and counted.
 Defaults, provisional and unmeasured: 1,000,000 rows, 2 GiB database, 7 days,
 whichever is reached first; WAL checkpoint (PASSIVE) at 16 MiB, TRUNCATE attempt
 at 48 MiB, writes paused (and counted as `store-paused`) at 64 MiB. `maxRows`
-is an integer of at least 1,000. Age pruning runs only when the oldest
+is an integer of at least 1,000. `maxDbBytes` is an integer of at least
+16 MiB. Age pruning runs only when the oldest
 `receivedAt` is older than `now - maxAge - slack`, where `slack` is
 `max(60 s, 1% of maxAge)`, and then deletes down to `now - maxAge`. The
 writer session keeps hysteresis for the row cap and the byte cap. A cap

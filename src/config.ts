@@ -566,6 +566,7 @@ export const StationConfigSchema = z
 
 /** Operator ceilings. Batch-1 defaults (1e6 rows, 2 GiB, 7 days, 100/s) sit inside. */
 const ACTIVITY_MAX_ROWS = 1_000_000_000
+const ACTIVITY_MIN_DB_BYTES = 16 * 1024 * 1024
 const ACTIVITY_MAX_DB_BYTES = 16 * 1024 * 1024 * 1024 * 1024
 const ACTIVITY_MAX_AGE_MS = 10 * 366 * 24 * 60 * 60 * 1000
 const ACTIVITY_MAX_GLOBAL_PER_SECOND = 1_000_000
@@ -579,7 +580,7 @@ export const ActivityRetentionConfigSchema = z
 		maxDbBytes: z
 			.number()
 			.int()
-			.positive()
+			.min(ACTIVITY_MIN_DB_BYTES)
 			.max(ACTIVITY_MAX_DB_BYTES)
 			.optional(),
 		maxAgeMs: z.number().int().positive().max(ACTIVITY_MAX_AGE_MS).optional(),

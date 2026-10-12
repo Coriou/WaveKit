@@ -525,7 +525,7 @@ describe("activity retention", () => {
 	})
 
 	it("prunes the byte cap in one burst down to the live-byte low-water mark", async () => {
-		const maxDbBytes = 512 * 1024
+		const maxDbBytes = 16 * 1024 * 1024
 		const lowWater = activityLowWater(maxDbBytes)
 		const db = await openSqliteFile(":memory:")
 		const session = createActivitySession(
@@ -545,8 +545,8 @@ describe("activity retention", () => {
 			let sawPrune = false
 			let quiet = 0
 			let second = false
-			for (let index = 0; index < 200; index++) {
-				const wrote = session.write([fatRow(`b-${index}`)], NOW)
+			for (let index = 0; index < 320; index++) {
+				const wrote = session.write([fatRow(`b-${index}`, 80_000)], NOW)
 				expect(wrote.ok).toBe(true)
 				if (!wrote.ok) return
 				if (wrote.prune.deleted === 0) {
@@ -617,7 +617,7 @@ function pragmaValue(db: SqliteDatabase, name: string): number {
 	throw new Error(`missing pragma ${name}`)
 }
 
-function fatRow(eventId: string) {
+function fatRow(eventId: string, blobChars = 3_000) {
 	const stamp = new Date(NOW).toISOString()
 	return buildActivityRow({
 		version: ACTIVITY_RECORD_VERSION,
@@ -630,7 +630,7 @@ function fatRow(eventId: string) {
 			eventId,
 			title: eventId,
 			receivedAt: stamp,
-			decodedData: { blob: "x".repeat(3_000) },
+			decodedData: { blob: "x".repeat(blobChars) },
 		}),
 	})
 }
