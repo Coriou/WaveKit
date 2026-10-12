@@ -48,6 +48,16 @@ export interface ActivityFixture {
 	stampStaleCommitSeq(eventId: string): void
 	pruneThrough(watermark: string): void
 	setIdentity(patch: Partial<StoreIdentity>): void
+	/**
+	 * Advance the on-disk prune watermark and delete those rows without telling
+	 * the cached identity. Models a writer commit the main thread has not seen.
+	 */
+	divergePrune(watermark: string): void
+	/** Change on-disk store identity without updating the cached copy. */
+	divergeMeta(
+		patch: Partial<Pick<StoreIdentity, "storeUuid" | "restoreGeneration">>,
+	): void
+	corruptSummary(eventId: string): void
 	notify(): void
 	listenerCount(): number
 	reset(): void
@@ -66,6 +76,9 @@ export async function createFixture(): Promise<ActivityFixture> {
 	db.exec("PRAGMA foreign_keys = ON")
 	db.exec(ACTIVITY_SCHEMA_V1)
 	const cursorKey = randomBytes(32)
+	const upsertMeta = db.prepare(
+		"INSERT INTO store_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+	)
 	const initial: StoreIdentity = {
 		storeUuid: randomUUID(),
 		restoreGeneration: 1,
@@ -92,9 +105,23 @@ export async function createFixture(): Promise<ActivityFixture> {
 	const deleteRefs = db.prepare("DELETE FROM activity_refs WHERE seq = ?")
 	const deleteFts = db.prepare("DELETE FROM activity_fts WHERE rowid = ?")
 
+	function writeMeta(next: StoreIdentity): void {
+		const rows: readonly (readonly [string, string])[] = [
+			["schemaVersion", "1"],
+			["storeUuid", next.storeUuid],
+			["restoreGeneration", String(next.restoreGeneration)],
+			["pruneWatermark", next.pruneWatermark],
+			["pruneGeneration", String(next.pruneGeneration)],
+			["cursorKey", cursorKey.toString("hex")],
+		]
+		for (const [key, value] of rows) upsertMeta.run(key, value)
+	}
+
 	function snapshot(): StoreIdentity {
 		return { ...identity }
 	}
+
+	writeMeta(initial)
 
 	const store: ActivityStoreQueryHandle = {
 		dbPath,
@@ -232,9 +259,43 @@ export async function createFixture(): Promise<ActivityFixture> {
 			db.prepare("DELETE FROM activity WHERE seq <= ?").run(bound)
 			identity.pruneWatermark = watermark
 			identity.pruneGeneration += 1
+			writeMeta(identity)
 		},
 		setIdentity(patch) {
 			Object.assign(identity, patch)
+		},
+		divergePrune(watermark) {
+			const bound = Number(watermark)
+			db.exec("BEGIN")
+			try {
+				const rows = db
+					.prepare("SELECT seq FROM activity WHERE seq <= ?")
+					.all(bound) as { seq: number | bigint }[]
+				for (const row of rows) {
+					const seq = seqText(row.seq)
+					deleteRefs.run(Number(seq))
+					deleteFts.run(Number(seq))
+				}
+				db.prepare("DELETE FROM activity WHERE seq <= ?").run(bound)
+				upsertMeta.run("pruneWatermark", watermark)
+				db.exec("COMMIT")
+			} catch (error) {
+				db.exec("ROLLBACK")
+				throw error
+			}
+		},
+		divergeMeta(patch) {
+			if (patch.storeUuid !== undefined) {
+				upsertMeta.run("storeUuid", patch.storeUuid)
+			}
+			if (patch.restoreGeneration !== undefined) {
+				upsertMeta.run("restoreGeneration", String(patch.restoreGeneration))
+			}
+		},
+		corruptSummary(eventId) {
+			db.prepare(
+				"UPDATE activity SET summary_json = ? WHERE event_id = ?",
+			).run("{", eventId)
 		},
 		notify() {
 			const current = snapshot()
@@ -250,6 +311,7 @@ export async function createFixture(): Promise<ActivityFixture> {
 			seqs.length = 0
 			listeners.clear()
 			Object.assign(identity, initial)
+			writeMeta(identity)
 		},
 		async close() {
 			db.close()

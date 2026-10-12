@@ -183,7 +183,8 @@ export function normaliseQuery(
 	let fts: FtsConstraint = { kind: "none" }
 	if (raw.text !== undefined) {
 		const match = compileFtsMatch(raw.text, limits)
-		fts = match === null ? { kind: "impossible" } : { kind: "match", match }
+		// No letters or numbers (whitespace, punctuation) is not a filter.
+		if (match !== null) fts = { kind: "match", match }
 	}
 	const query: NormalisedQuery = {
 		kinds: uniqueSorted(raw.kinds ?? []) as ActivityKind[],

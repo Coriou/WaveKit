@@ -21,6 +21,7 @@ import { assembleSummaries, type ReadRequest, type ReadResult } from "./read.js"
 import {
 	cursorBehindWatermark,
 	formatSeq,
+	higherWatermark,
 	parseSeq,
 } from "./seq.js"
 import { hashQuery, normaliseQuery, type QueryLimits } from "./validate.js"
@@ -92,7 +93,7 @@ export function startReplay(
 	const unsubscribe = deps.store.onCommit(() => {
 		if (stopped) return
 		rerun = true
-		if (!pumping && !paused) void pump()
+		if (!pumping && !paused) trackPump()
 	})
 
 	function stop(): void {
@@ -101,6 +102,25 @@ export function startReplay(
 		if (retryTimer) clearTimeout(retryTimer)
 		unsubscribe()
 		deps.unregister(stop)
+	}
+
+	function onPumpFailure(error: unknown): void {
+		if (stopped) return
+		if (error instanceof ActivityQueryError) {
+			const reason = resetReason(error)
+			if (reason) {
+				emitReset(reason)
+				return
+			}
+		}
+		deps.log.error({ err: error }, "Activity replay failed")
+		emitReset("reader-failed")
+	}
+
+	function trackPump(): void {
+		void pump().catch((error: unknown) => {
+			onPumpFailure(error)
+		})
 	}
 
 	function emitReset(reason: ActivityReplayResetFrame["reason"]): void {
@@ -133,6 +153,7 @@ export function startReplay(
 		}
 		pumping = true
 		let retries = 0
+		let failed = false
 		try {
 			while (!stopped && !paused) {
 				if (rerun) rerun = false
@@ -239,6 +260,25 @@ export function startReplay(
 				if (stopped || paused) return
 				retries = 0
 				if (result.op !== "search") throw new ActivityReaderFailedError()
+				const fresh = deps.store.identity()
+				if (
+					storeUuid === undefined ||
+					result.observed.storeUuid !== storeUuid ||
+					result.observed.restoreGeneration !== restoreGeneration ||
+					fresh.storeUuid !== storeUuid ||
+					fresh.restoreGeneration !== restoreGeneration
+				) {
+					emitReset("store-changed")
+					return
+				}
+				const readWatermark = higherWatermark(
+					parseSeq(fresh.pruneWatermark),
+					parseSeq(result.observed.pruneWatermark),
+				)
+				if (cursorBehindWatermark(position, readWatermark)) {
+					emitReset("cursor-gap")
+					return
+				}
 				const page = assembleSummaries(
 					result.rows,
 					deps.limits.replayPage,
@@ -270,28 +310,20 @@ export function startReplay(
 					return
 				}
 			}
+		} catch (error) {
+			failed = true
+			throw error
 		} finally {
 			pumping = false
-			if (!stopped && !paused && rerun) {
+			if (!failed && !stopped && !paused && rerun) {
 				rerun = false
-				void pump()
+				trackPump()
 			}
 		}
 	}
 
 	deps.register(stop)
-	void pump().catch((error: unknown) => {
-		if (stopped) return
-		if (error instanceof ActivityQueryError) {
-			const reason = resetReason(error)
-			if (reason) {
-				emitReset(reason)
-				return
-			}
-		}
-		deps.log.error({ err: error }, "Activity replay failed")
-		stop()
-	})
+	trackPump()
 
 	return {
 		resume(): void {
@@ -300,7 +332,7 @@ export function startReplay(
 			paused = false
 			rerun = true
 			queueMicrotask(() => {
-				if (!stopped && !paused) void pump()
+				if (!stopped && !paused) trackPump()
 			})
 		},
 		stop,

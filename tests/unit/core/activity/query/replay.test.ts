@@ -1,12 +1,15 @@
 import fc from "fast-check"
 import { afterEach, describe, expect, it } from "vitest"
 import { issueCursor } from "../../../../../src/core/activity/query/cursor.js"
+import { ActivityReaderFailedError } from "../../../../../src/core/activity/query/errors.js"
+import { startReplay } from "../../../../../src/core/activity/query/replay.js"
 import { hashQuery, normaliseQuery } from "../../../../../src/core/activity/query/validate.js"
 import { DEFAULT_ACTIVITY_QUERY_LIMITS } from "../../../../../src/core/activity/query/service.js"
 import type {
 	ActivityQuery,
 	ActivityQueryService,
 	ActivityReplayFrame,
+	StoreIdentity,
 } from "../../../../../src/core/activity/storage/contract.js"
 import {
 	collectReplay,
@@ -14,6 +17,7 @@ import {
 	delay,
 	openQueryService,
 	recordEventIds,
+	testLogger,
 	type ActivityFixture,
 } from "./fixture.js"
 
@@ -121,6 +125,17 @@ describe("activity replay", () => {
 		caught.handle.stop()
 
 		store.setIdentity({ pruneWatermark: cursor.scannedThrough })
+		const level = await collectReplay(
+			service,
+			{ query, cursor: cursor.cursor },
+			frames => frames.length >= 1,
+		)
+		expect(level.frames.some(frame => frame.type === "reset")).toBe(false)
+		level.handle.stop()
+
+		store.setIdentity({
+			pruneWatermark: String(BigInt(cursor.scannedThrough) + 1n),
+		})
 		const gapped = await collectReplay(
 			service,
 			{ query, cursor: cursor.cursor },
@@ -173,6 +188,86 @@ describe("activity replay", () => {
 		await delay(30)
 		expect(live.frames).toHaveLength(before)
 		expect(store.listenerCount()).toBe(0)
+	})
+
+	it("treats a prune the cache has not seen as a cursor gap", async () => {
+		fixture = await createFixture()
+		const store = fixture
+		service = openQueryService(store)
+		store.insert({ eventId: "a" })
+		store.insert({ eventId: "b" })
+		store.insert({ eventId: "c" })
+		const cursor = originCursor(store, Date.now())
+		store.divergePrune("2")
+		expect(store.store.identity().pruneWatermark).toBe("0")
+		const gapped = await collectReplay(
+			service,
+			{ query, cursor },
+			frames => frames.some(frame => frame.type === "reset"),
+		)
+		expect(recordEventIds(gapped.frames)).toEqual([])
+		expect(gapped.frames.at(-1)).toMatchObject({ type: "reset", reason: "cursor-gap" })
+		gapped.handle.stop()
+	})
+
+	it("sends reader-failed when a read fails after the commit wakeup", async () => {
+		const key = Buffer.alloc(32, 4)
+		let committed = 0n
+		const listeners = new Set<(identity: StoreIdentity) => void>()
+		const identity = (): StoreIdentity => ({
+			storeUuid: "store",
+			restoreGeneration: 1,
+			pruneWatermark: "0",
+			pruneGeneration: 0,
+			committedMax: committed.toString(),
+		})
+		let reads = 0
+		const frames: ActivityReplayFrame[] = []
+		const handle = startReplay(
+			{
+				store: {
+					identity,
+					cursorKey: () => Buffer.from(key),
+					onCommit(listener) {
+						listeners.add(listener)
+						return () => {
+							listeners.delete(listener)
+						}
+					},
+				},
+				now: () => Date.parse("2026-06-01T00:00:00.000Z"),
+				limits: DEFAULT_ACTIVITY_QUERY_LIMITS,
+				log: testLogger,
+				clientKey: "client",
+				read: () => {
+					reads += 1
+					return Promise.reject(new ActivityReaderFailedError("reader exploded"))
+				},
+				register() {},
+				unregister() {},
+			},
+			{ query },
+			{
+				send(frame) {
+					frames.push(frame)
+					return true
+				},
+			},
+		)
+		await delay(20)
+		expect(frames[0]).toMatchObject({ type: "progress", scannedThrough: "0" })
+		expect(reads).toBe(0)
+		committed = 1n
+		for (const listener of listeners) listener(identity())
+		await waitFor(() => frames.some(frame => frame.type === "reset"))
+		expect(frames.at(-1)).toMatchObject({ type: "reset", reason: "reader-failed" })
+		expect(reads).toBe(1)
+		const before = frames.length
+		committed = 2n
+		for (const listener of listeners) listener(identity())
+		await delay(30)
+		expect(frames).toHaveLength(before)
+		handle.stop()
 	})
 
 	it("sends an invalid-cursor reset when the service is already closed", async () => {

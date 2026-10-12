@@ -47,9 +47,15 @@ export function cursorBehindWatermark(
 	lastSeq: bigint,
 	watermark: bigint,
 ): boolean {
-	// Watermark 0 means nothing has been pruned. A cursor at 0 is the origin.
+	// Watermark 0 means nothing has been pruned. A cursor whose lastSeq equals
+	// the watermark already delivered that seq, so only an earlier seq is a gap.
 	if (watermark === 0n) return false
-	return lastSeq <= watermark
+	return lastSeq < watermark
+}
+
+/** The newer prune watermark. The cached copy can lag the read snapshot. */
+export function higherWatermark(cached: bigint, observed: bigint): bigint {
+	return cached > observed ? cached : observed
 }
 
 export function snapshotLowerBoundPassed(

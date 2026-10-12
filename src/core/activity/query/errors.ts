@@ -83,6 +83,6 @@ export class ActivityQueryClosedError extends ActivityQueryError {
 	}
 }
 
-export function activityRecordCorrupt(message: string): WaveKitError {
-	return new WaveKitError(message, "ACTIVITY_RECORD_CORRUPT")
+export function activityRecordCorrupt(message: string): ActivityQueryError {
+	return new ActivityQueryError(message, "ACTIVITY_RECORD_CORRUPT", 500)
 }

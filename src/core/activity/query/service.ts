@@ -24,12 +24,18 @@ import {
 	ActivitySnapshotResetError,
 	ActivityCursorGapError,
 } from "./errors.js"
-import { assembleSummaries, type ReadRequest, type ReadResult } from "./read.js"
+import {
+	assembleSummaries,
+	type ObservedStore,
+	type ReadRequest,
+	type ReadResult,
+} from "./read.js"
 import { ReaderHost, type ReaderHostEvent } from "./reader-host.js"
 import { startReplay } from "./replay.js"
 import {
 	cursorBehindWatermark,
 	formatSeq,
+	higherWatermark,
 	parseSeq,
 	snapshotLowerBoundPassed,
 } from "./seq.js"
@@ -202,18 +208,24 @@ export function createActivityQueryService(
 		captured: StoreIdentity,
 		low: bigint,
 		continuation: bigint | undefined,
+		observed: ObservedStore,
 	): void {
 		const fresh = store.identity()
 		if (
 			fresh.storeUuid !== captured.storeUuid ||
-			fresh.restoreGeneration !== captured.restoreGeneration
+			fresh.restoreGeneration !== captured.restoreGeneration ||
+			observed.storeUuid !== captured.storeUuid ||
+			observed.restoreGeneration !== captured.restoreGeneration
 		) {
 			throw new ActivitySnapshotResetError(
 				"store-changed",
 				"Activity store changed",
 			)
 		}
-		const watermark = parseSeq(fresh.pruneWatermark)
+		const watermark = higherWatermark(
+			parseSeq(fresh.pruneWatermark),
+			parseSeq(observed.pruneWatermark),
+		)
 		if (
 			continuation !== undefined &&
 			cursorBehindWatermark(continuation, watermark)
@@ -274,7 +286,7 @@ export function createActivityQueryService(
 				before,
 				after,
 			})
-			guardSnapshot(identity, low, continuation)
+			guardSnapshot(identity, low, continuation, result.observed)
 			if (result.op !== "search") throw new ActivityReaderFailedError()
 			const page = assembleSummaries(result.rows, limit, limits.pageBytes)
 			const expiresAt = new Date(expiresAtMs).toISOString()
@@ -343,7 +355,7 @@ export function createActivityQueryService(
 				scanCap: limits.facetScan,
 				valueCap: limits.facetValues,
 			})
-			guardSnapshot(identity, low, undefined)
+			guardSnapshot(identity, low, undefined, result.observed)
 			if (result.op !== "facets") throw new ActivityReaderFailedError()
 			return {
 				facets: result.facets,

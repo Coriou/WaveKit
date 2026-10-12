@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { build } from "esbuild"
@@ -19,9 +19,9 @@ describe("activity query worker", () => {
 		const repository = fileURLToPath(
 			new URL("../../../../../", import.meta.url),
 		)
-		directory = await mkdtemp(
-			join(repository, "node_modules", ".cache", "wk-query-worker-"),
-		)
+		const cache = join(repository, "node_modules", ".cache")
+		await mkdir(cache, { recursive: true })
+		directory = await mkdtemp(join(cache, "wk-query-worker-"))
 		const outfile = join(directory, "activity-query-worker.js")
 		await build({
 			absWorkingDir: repository,
