@@ -1,0 +1,39 @@
+# Reference TLS terminator for the opt-in `protected` compose profile.
+# One hostname from WAVEKIT_PUBLIC_HOST. Three HTTPS origins, each proxied to a
+# loopback HTTP listener in this network namespace. reverse_proxy forwards
+# WebSocket upgrades (Connection and Upgrade) unchanged.
+# Local CA: tls internal. Clients install the root from the Caddy data volume.
+{
+	admin off
+	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://{$WAVEKIT_PUBLIC_HOST}:9443 {
+	bind 0.0.0.0
+	tls internal
+	reverse_proxy 127.0.0.1:9000 {
+		header_up Host {http.request.hostport}
+		flush_interval -1
+	}
+}
+
+https://{$WAVEKIT_PUBLIC_HOST}:9444 {
+	bind 0.0.0.0
+	tls internal
+	reverse_proxy 127.0.0.1:8081 {
+		header_up Host {http.request.hostport}
+		flush_interval -1
+	}
+}
+
+https://{$WAVEKIT_PUBLIC_HOST}:9445 {
+	bind 0.0.0.0
+	tls internal
+	reverse_proxy 127.0.0.1:8082 {
+		header_up Host {http.request.hostport}
+		flush_interval -1
+	}
+}

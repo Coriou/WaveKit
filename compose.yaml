@@ -234,6 +234,83 @@ services:
     tty: true
     networks: [wavekit]
 
+  # ---------- protected profile (opt-in TLS reference) ----------
+  # Caddy shares this service's network namespace, so the three HTTPS ports are
+  # published here. Backend HTTP, raw audio TCP and the RTL-TCP relay are not.
+  wavekit-protected:
+    profiles: ["protected"]
+    image: ${WAVEKIT_APP_IMAGE:-wavekit:local-core}
+    build:
+      context: .
+      target: final-core
+    container_name: wavekit-protected
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      WAVEKIT_CONFIG: /app/config/protected-runtime.yaml
+      WAVEKIT_PUBLIC_HOST: ${WAVEKIT_PUBLIC_HOST:-receiver.example}
+      WAVEKIT_STATE_DIR: /app/data
+      WAVEKIT_ACCESS_PRIVATE_DIRECTORY: /var/lib/wavekit/access
+      WAVEKIT_API__HOST: "127.0.0.1"
+      WAVEKIT_API__PORT: "9000"
+      WAVEKIT_LIVE_DEMOD__HTTP_PORT: "8081"
+      WAVEKIT_DIGITAL_VOICE__HTTP_PORT: "8082"
+      WAVEKIT_TUNER_RELAY__ENABLED: "false"
+      WAVEKIT_ACCESS__MODE: protected
+      WAVEKIT_ACCESS__LISTENER_SCHEME: https
+      WAVEKIT_ACCESS__EXPOSURE: tls-termination
+      WAVEKIT_ACCESS__ALLOWED_AUTHORITIES__0: "${WAVEKIT_PUBLIC_HOST:-receiver.example}:9443"
+      WAVEKIT_ACCESS__ALLOWED_ORIGINS__0: "https://${WAVEKIT_PUBLIC_HOST:-receiver.example}:9443"
+      WAVEKIT_ACCESS__AUDIO__ANALOG__ALLOWED_AUTHORITIES__0: "${WAVEKIT_PUBLIC_HOST:-receiver.example}:9444"
+      WAVEKIT_ACCESS__AUDIO__ANALOG__BIND_HOST: "127.0.0.1"
+      WAVEKIT_ACCESS__AUDIO__DIGITAL__ALLOWED_AUTHORITIES__0: "${WAVEKIT_PUBLIC_HOST:-receiver.example}:9445"
+      WAVEKIT_ACCESS__AUDIO__DIGITAL__BIND_HOST: "127.0.0.1"
+      WAVEKIT_ACCESS__PUBLIC_ORIGINS__API: "https://${WAVEKIT_PUBLIC_HOST:-receiver.example}:9443"
+      WAVEKIT_ACCESS__PUBLIC_ORIGINS__ANALOG_AUDIO: "https://${WAVEKIT_PUBLIC_HOST:-receiver.example}:9444"
+      WAVEKIT_ACCESS__PUBLIC_ORIGINS__DIGITAL_AUDIO: "https://${WAVEKIT_PUBLIC_HOST:-receiver.example}:9445"
+      WAVEKIT_ACCESS__HEALTH_PROBE__TARGET: "http://127.0.0.1:9000"
+      WAVEKIT_ACCESS__HEALTH_PROBE__HOST: "${WAVEKIT_PUBLIC_HOST:-receiver.example}:9443"
+    ports:
+      - "9443:9443"
+      - "9444:9444"
+      - "9445:9445"
+    networks: [wavekit]
+    extra_hosts:
+      - "${WAVEKIT_PUBLIC_HOST:-receiver.example}:127.0.0.1"
+    volumes:
+      - wavekit-protected-access:/var/lib/wavekit/access
+      - wavekit-protected-state:/app/data
+      - wavekit-protected-caddy:/caddy-data:ro
+      - ./docker/caddy/protected-runtime.yaml:/app/config/protected-runtime.yaml:ro
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "/etc/s6-overlay/scripts/healthcheck.sh"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 40s
+    stop_grace_period: 15s
+
+  wavekit-protected-caddy:
+    profiles: ["protected"]
+    image: caddy:2
+    container_name: wavekit-protected-caddy
+    restart: unless-stopped
+    depends_on:
+      - wavekit-protected
+    network_mode: "service:wavekit-protected"
+    environment:
+      WAVEKIT_PUBLIC_HOST: ${WAVEKIT_PUBLIC_HOST:-receiver.example}
+    extra_hosts:
+      - "${WAVEKIT_PUBLIC_HOST:-receiver.example}:127.0.0.1"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - wavekit-protected-caddy:/data
+
 networks:
   wavekit:
     driver: bridge
@@ -242,3 +319,6 @@ volumes:
   wavekit-config:
   wavekit-logs:
   recordings:
+  wavekit-protected-access:
+  wavekit-protected-state:
+  wavekit-protected-caddy:
