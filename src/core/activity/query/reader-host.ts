@@ -30,6 +30,19 @@ function asError(error: unknown): Error {
 	return error instanceof Error ? error : new ActivityReaderFailedError(String(error))
 }
 
+/** A reader that cannot start is a server fault, not a retryable timeout. */
+function startupFailure(error: unknown): Error {
+	if (
+		error instanceof ActivityReaderFailedError ||
+		error instanceof ActivityQueryClosedError
+	) {
+		return error
+	}
+	const message =
+		error instanceof Error ? error.message : "Activity reader did not start"
+	return new ActivityReaderFailedError(message)
+}
+
 function errorFromWorker(code: string, message: string): Error {
 	if (code === "ACTIVITY_QUERY_INVALID") return new ActivityQueryInvalidError(message)
 	if (code === "ACTIVITY_QUERY_TIMEOUT") return new ActivityQueryTimeoutError(message)
@@ -51,6 +64,8 @@ export class ReaderHost {
 	private closed = false
 	private readyReject: ((error: Error) => void) | null = null
 	private activeTicket: object | null = null
+	/** In-flight startup. Callers share it so a prewarm and a query spawn once. */
+	private starting: Promise<Worker> | null = null
 
 	constructor(
 		private readonly dbPath: string,
@@ -59,6 +74,20 @@ export class ReaderHost {
 		private readonly onEvent: ((event: ReaderHostEvent) => void) | undefined,
 		private readonly readyTimeoutMs = 5_000,
 	) {}
+
+	/**
+	 * Resolves when a query can be posted. Inline mode is already ready.
+	 * Worker startup uses `readyTimeoutMs` and is not the query deadline.
+	 */
+	ensureReady(): Promise<void> {
+		if (this.closed) return Promise.reject(new ActivityQueryClosedError())
+		if (this.execution === "inline") return Promise.resolve()
+		try {
+			return this.ensureWorker().then(() => undefined)
+		} catch (error) {
+			return Promise.reject(startupFailure(error))
+		}
+	}
 
 	async execute(
 		request: ReadRequest,
@@ -150,6 +179,7 @@ export class ReaderHost {
 
 	private ensureWorker(): Promise<Worker> {
 		if (this.closed) return Promise.reject(new ActivityQueryClosedError())
+		if (this.starting) return this.starting
 		if (this.worker) return Promise.resolve(this.worker)
 		const worker = new Worker(this.workerUrl, {
 			workerData: { dbPath: this.dbPath },
@@ -164,9 +194,10 @@ export class ReaderHost {
 		worker.on("error", (error: unknown) => {
 			if (this.worker !== worker) return
 			this.worker = null
-			this.readyReject?.(asError(error))
+			const failure = startupFailure(error)
+			this.readyReject?.(failure)
 			this.readyReject = null
-			this.failPending(new ActivityReaderFailedError("Activity reader stopped"))
+			this.failPending(failure)
 		})
 		worker.on("exit", () => {
 			if (this.worker !== worker) return
@@ -176,7 +207,19 @@ export class ReaderHost {
 			this.readyReject = null
 			this.failPending(error)
 		})
-		return this.waitReady(worker, generation)
+		let starting: Promise<Worker>
+		starting = this.waitReady(worker, generation).then(
+			ready => {
+				if (this.starting === starting) this.starting = null
+				return ready
+			},
+			(error: Error) => {
+				if (this.starting === starting) this.starting = null
+				throw error
+			},
+		)
+		this.starting = starting
+		return starting
 	}
 
 	private waitReady(worker: Worker, generation: number): Promise<Worker> {
@@ -194,7 +237,7 @@ export class ReaderHost {
 				if (settled || this.worker !== worker) return
 				// Drop the handle before terminate so a late exit cannot reuse it.
 				this.terminateWorker(
-					new ActivityQueryTimeoutError("Activity reader did not start"),
+					new ActivityReaderFailedError("Activity reader did not start"),
 				)
 			}, this.readyTimeoutMs)
 			timer.unref()
