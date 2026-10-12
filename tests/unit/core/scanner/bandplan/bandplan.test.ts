@@ -12,6 +12,8 @@ import {
 } from "../../../../../src/core/scanner/bandplan/index.js"
 import type { Bandplan } from "../../../../../src/core/scanner/bandplan/index.js"
 
+import { rasterItems } from "../../../../../src/core/scanner/plan/hop-planner.js"
+
 const MHz = (x: number) => Math.round(x * 1e6)
 function plan(id: string, region: "EU" | "US" = "EU"): Bandplan {
 	const p = resolveBandplan(id, region)
@@ -131,9 +133,17 @@ describe("built-in bandplans (spec § 5.1)", () => {
 			{ spacingHz: 25_000, firstChannelHz: MHz(118) },
 			{ spacingHz: 25_000 / 3, firstChannelHz: MHz(118) },
 		])
-		expect(snapToRaster(MHz(118) + 25_000 / 3, r.rasters!, 0).hz).toBeCloseTo(
-			MHz(118) + 25_000 / 3,
-		)
+		const channels = rasterItems([r], [])
+		expect(channels).toHaveLength(2281)
+		expect(channels.every(channel => Number.isInteger(channel.hz))).toBe(true)
+		for (let k = 0; k <= 2280; k++) {
+			const expected = Math.round(MHz(118) + k * (25_000 / 3))
+			const snapped = snapToRaster(expected, r.rasters!, 0)
+			expect(snapped).toEqual({ hz: expected, snapped: true })
+			expect(frequencyKey(snapped.hz, snapped.snapped, 6000)).toBe(
+				`r:${expected}`,
+			)
+		}
 	})
 	it("CB represents exactly 40 CEPT carriers, excluding the five gaps", () => {
 		const ranges = plan("cb").ranges
@@ -156,14 +166,14 @@ describe("built-in bandplans (spec § 5.1)", () => {
 		for (const r of ranges)
 			expect(r.protocols).toEqual(["analog-am", "analog-fm"])
 	})
-	it("EU paging excludes the harmonised 169 MHz SRD band, preserving the non-EU fallback", () => {
+	it("EU paging excludes only metering, preserving the non-EU fallback", () => {
 		const ranges = plan("pager-vhf").ranges
 		const inside = (hz: number) =>
 			ranges.some(r => hz >= r.startHz && hz <= r.endHz)
-		for (const mhz of [169.4, 169.475, 169.6, 169.8125])
-			expect(inside(MHz(mhz))).toBe(false)
+		for (const mhz of [169.4, 169.475]) expect(inside(MHz(mhz))).toBe(false)
 		expect(inside(MHz(169.4) - 1)).toBe(true)
-		expect(inside(MHz(169.8125) + 1)).toBe(true)
+		expect(inside(MHz(169.475) + 1)).toBe(true)
+		expect(inside(MHz(169.65))).toBe(true)
 		expect(bandplansFor("EU").filter(p => p.id === "pager-vhf")).toHaveLength(1)
 		expect(plan("pager-vhf", "US").ranges[0]).toMatchObject({
 			startHz: MHz(137),

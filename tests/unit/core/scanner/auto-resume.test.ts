@@ -3,6 +3,12 @@ import { ResumeActivity } from "../../../../src/core/scanner/auto-resume.js"
 
 const quiet = { audio: false, recording: false, identify: false }
 describe("auto resume activity", () => {
+	it("clamps an elapsed deadline to now instead of exposing an epoch date", () => {
+		const now = Date.parse("2026-10-12T12:00:00Z")
+		expect(new ResumeActivity().status(quiet, 0, 1000, now).resumeAt).toBe(
+			new Date(now).toISOString(),
+		)
+	})
 	it("uses the existing idle clock when no activity occurs", () => {
 		const gate = new ResumeActivity()
 		expect(gate.status(quiet, 100, 1000, 500).resumeAt).toBe(

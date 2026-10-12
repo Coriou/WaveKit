@@ -89,9 +89,10 @@ export function snapToRaster(
 	let best: { hz: number; d: number; spacing: number } | null = null
 	for (const r of rasters) {
 		if (!(r.spacingHz > 0)) continue
-		const ch =
+		const ch = Math.round(
 			r.firstChannelHz +
-			Math.round((corrected - r.firstChannelHz) / r.spacingHz) * r.spacingHz
+				Math.round((corrected - r.firstChannelHz) / r.spacingHz) * r.spacingHz,
+		)
 		const d = Math.abs(corrected - ch)
 		if (d > rasterToleranceHz(r.spacingHz)) continue
 		const better =

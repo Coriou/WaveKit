@@ -492,6 +492,14 @@ describe("JobRunner startup deadline (review F2)", () => {
 })
 
 describe("automatic resume reentry", () => {
+	it("hands back a job lease even while operator activity holds automatic resume", async () => {
+		const h = runnerHarness(() => false)
+		h.record.state = "paused"
+		h.record.reason = "preempted-job"
+		await h.runner.dispatch({ type: "preemptor-idle", impactGrew: false })
+		expect(h.record.state).toBe("running")
+		expect(h.arbiter.holder()).toBeDefined()
+	})
 	it("a queued idle event cannot acquire after activity starts", async () => {
 		let quiet = true
 		const h = runnerHarness(() => quiet)

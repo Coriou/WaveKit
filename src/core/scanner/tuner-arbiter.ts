@@ -366,8 +366,10 @@ export class TunerArbiter extends EventEmitter {
 		},
 		allowed?: () => boolean,
 	): Promise<PendingEpoch> {
+		// Once a command starts, finish the retune; activity cannot leave a partial tuning.
+		let writesStarted = false
 		const guard = () => {
-			if (allowed && !allowed())
+			if (!writesStarted && allowed && !allowed())
 				throw new WaveKitError(
 					"Automatic resume held by activity",
 					"SCANNER_RESUME_HELD",
@@ -396,6 +398,7 @@ export class TunerArbiter extends EventEmitter {
 			guard()
 			clock.suppressExternal(true)
 			try {
+				writesStarted = true
 				await this.deps.tuner.setSampleRate(sourceId, target.sampleRateHz, opts)
 			} catch (err) {
 				throw new WaveKitError(
@@ -461,6 +464,7 @@ export class TunerArbiter extends EventEmitter {
 			if (markers) {
 				this.markerOpen.add(sourceId)
 				guard()
+				writesStarted = true
 				await this.deps.tuner.setTestMode(sourceId, true, {
 					origin: "scanner",
 					accept: false,
@@ -468,6 +472,7 @@ export class TunerArbiter extends EventEmitter {
 				this.assertHeld(lease)
 			}
 			guard()
+			writesStarted = true
 			await this.deps.tuner.setFrequency(sourceId, target.centreHz, opts)
 			if (gainChange && target.gainTenthsDb !== null) {
 				this.assertHeld(lease)

@@ -5,7 +5,10 @@ import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import type { ProbePool } from "../../../../src/core/scanner/probes/probe-pool.js"
 import { probeRequest } from "../../../mocks/scanner/probe-fakes.js"
-import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
+import {
+	chooseLeaseHolder,
+	type JobRecord,
+} from "../../../../src/core/scanner/job-runner.js"
 import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import {
 	ScannerService,
@@ -55,6 +58,65 @@ async function untilRunning(h: Harness, id: string, seed = 20): Promise<void> {
 }
 
 describe("ScannerService", () => {
+	it("preserves external-control resume readiness while the arbiter owns refusal", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		const inspected = h.service as unknown as {
+			jobs: Map<string, JobRecord>
+			arbiter: { operatorIdleSince(sourceId: string): number | null }
+			autoResumeReady(record: JobRecord): boolean
+		}
+		const record = inspected.jobs.get(job.id)!
+		record.state = "paused"
+		record.reason = "preempted-operator"
+		record.spec.resume.autoAfterIdleMs = 1000
+		vi.spyOn(inspected.arbiter, "operatorIdleSince").mockReturnValue(null)
+		expect(inspected.autoResumeReady(record)).toBe(true)
+		await h.service.stop()
+	})
+	it("emits activity updates only when a job's resume view changes", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		let changed = () => {}
+		let audio = false
+		const inspected = h.service as unknown as {
+			deps: ScannerServiceDeps
+			tick(): void
+		}
+		inspected.deps.operatorActivity = {
+			current: () => ({ audio, recording: false }),
+			onChange: cb => {
+				changed = cb
+				return () => {}
+			},
+		}
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			resume: { autoAfterIdleMs: 1000 },
+		})
+		await untilRunning(h, job.id)
+		const emitted: ScanJob[] = []
+		h.service.on("job", (dto: ScanJob) => emitted.push(dto))
+		changed()
+		expect(emitted).toHaveLength(0)
+		h.tuner.external("rtl", "set-frequency", 433920000, "rest")
+		await settled(h.service)
+		emitted.length = 0
+		audio = true
+		changed()
+		expect(emitted.map(dto => dto.id)).toEqual([job.id])
+		changed()
+		expect(emitted).toHaveLength(1)
+		await h.service.pauseJob(job.id)
+		emitted.length = 0
+		inspected.tick()
+		emitted.length = 0
+		audio = false
+		changed()
+		expect(emitted).toHaveLength(0)
+		await h.service.stop()
+	})
 	it("holds automatic resume during operator audio and restarts full idle after hang", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		let clock = Date.now()
@@ -405,6 +467,15 @@ describe("ScannerService", () => {
 			reason: "preempted-job",
 		})
 		expect(holderOf(h)).toBe(high.id)
+		const inspected = h.service as unknown as { deps: ScannerServiceDeps }
+		inspected.deps.operatorActivity = {
+			current: () => ({ audio: true, recording: true }),
+			onChange: () => () => {},
+		}
+		expect(h.service.getJob(low.id)).toMatchObject({
+			resumeAt: null,
+			resumeHeldBy: null,
+		})
 		await h.service.cancelJob(high.id)
 		await settled(h.service)
 		expect(h.service.getJob(low.id)?.state).toBe("running")

@@ -1789,7 +1789,10 @@ Each returns the `ScanJob`. `resume` takes an optional body
 
 A `ScanJob` carries `resumeAt` (ISO time of the automatic resume, `null` when none is
 scheduled or while held) and `resumeHeldBy` (`audio`, `identify`, `recording` or
-`null`). The idle clock is held while an identify trial runs on the job's source and
+`null`). An elapsed deadline is clamped to the current time while resume is pending.
+These activity holds apply to automatic resume after operator or relay preemption;
+job-to-job lease hand-back is unaffected. The idle clock is held while an identify
+trial runs on the job's source and
 while someone listens to live audio on that source through a gating squelch (manual
 threshold below 0, or auto), plus 3 s after the squelch closes; it then restarts
 from the full `resume.autoAfterIdleMs`. Recording activity does not hold it yet.

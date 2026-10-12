@@ -40,7 +40,9 @@ export class ResumeActivity {
 			resumeAt:
 				held !== null || idleSince === null
 					? null
-					: new Date(Math.max(idleSince, this.floor) + delay).toISOString(),
+					: new Date(
+							Math.max(now, Math.max(idleSince, this.floor) + delay),
+						).toISOString(),
 			resumeHeldBy: held,
 		}
 	}

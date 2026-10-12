@@ -1183,6 +1183,32 @@ describe("TunerArbiter lease discipline", () => {
 
 describe("automatic resume write fence", () => {
 	it.each([null, 1024000])(
+		"finishes all retune writes when activity starts after the first write (rate=%s)",
+		async sampleRateHz => {
+			const h = harness()
+			let allowed = true
+			h.tuner.on("command-sent", (_source: string, name: string) => {
+				if (name === "set-frequency" || name === "set-sample-rate")
+					allowed = false
+			})
+			const acquired = h.arbiter.acquire("job", "rtl", 50)
+			if (!acquired.ok) throw new Error("TEST lease refused")
+			await expect(
+				h.arbiter.retune(
+					acquired.lease,
+					{ centreHz: 450000000, gainTenthsDb: 200, sampleRateHz },
+					() => allowed,
+				),
+			).resolves.toMatchObject({ centreHz: 450000000 })
+			expect(h.tuner.getState("rtl")).toMatchObject({
+				frequency: 450000000,
+				gainMode: "manual",
+				gain: 200,
+			})
+			h.arbiter.dispose()
+		},
+	)
+	it.each([null, 1024000])(
 		"activity during journal acknowledgement prevents the tuner command (rate=%s)",
 		async sampleRateHz => {
 			let allowed = true

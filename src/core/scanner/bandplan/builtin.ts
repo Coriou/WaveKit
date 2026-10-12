@@ -94,8 +94,8 @@ export const BUILTIN_BANDPLANS: readonly Bandplan[] = [
 	{
 		id: "pager-vhf",
 		region: "EU",
-		name: "VHF paging (169 MHz SRD band excluded)",
-		// ERC Report 25 (October 2017), p78: 169.4–169.8125 MHz is metering/ALD/SRD.
+		name: "VHF paging (169 MHz metering band excluded)",
+		// ERC Report 25 (October 2017), p78: 169.4–169.475 MHz is meter reading; exclude only that interval.
 		// https://docdb.cept.org/download/2830
 		// Range endpoints are inclusive integer Hz: ±1 Hz below/above these documented edges
 		// excludes both boundary frequencies; those offsets are representation, not channel assignments.
@@ -109,12 +109,12 @@ export const BUILTIN_BANDPLANS: readonly Bandplan[] = [
 				endHz: MHz(169.4) - 1,
 			},
 			{
-				...range("pager-vhf", 169.8125, 174, {
+				...range("pager-vhf", 169.475, 174, {
 					rasters: [raster(12_500, 137)],
 					obwHz: [12_000],
 					protocols: ["pocsag", "flex"],
 				}),
-				startHz: MHz(169.8125) + 1,
+				startHz: MHz(169.475) + 1,
 			},
 		],
 	},

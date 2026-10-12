@@ -896,7 +896,7 @@ export class ScannerService extends EventEmitter {
 			await this.ensurePassiveJobs()
 			if (this.consumerLifecycle.admissionSealed) return
 			this.operatorActivityOff = this.deps.operatorActivity?.onChange(() => {
-				for (const record of this.jobs.values()) this.emitJob(record)
+				for (const record of this.jobs.values()) this.emitResumeChange(record)
 			})
 			this.ambient.start()
 			this.deps.cpuMeter?.start()
@@ -3343,8 +3343,7 @@ export class ScannerService extends EventEmitter {
 			if (idleSince === null) continue
 			const ready = (r: JobRecord): boolean =>
 				r.spec.resume.autoAfterIdleMs !== null &&
-				now - idleSince >= r.spec.resume.autoAfterIdleMs &&
-				this.autoResumeReady(r)
+				now - idleSince >= r.spec.resume.autoAfterIdleMs
 			const any = [...this.jobs.values()].some(
 				j =>
 					j.spec.sourceId === sourceId &&
@@ -3676,12 +3675,18 @@ export class ScannerService extends EventEmitter {
 			this.now(),
 		)
 		return prospective ||
-			(isPreempted(record) && record.spec.resume.autoAfterIdleMs !== null)
+			(record.state === "paused" &&
+				(record.reason === "preempted-operator" ||
+					record.reason === "preempted-relay") &&
+				record.spec.resume.autoAfterIdleMs !== null)
 			? status
 			: { resumeAt: null, resumeHeldBy: null }
 	}
 
 	private autoResumeReady(record: JobRecord): boolean {
+		// External control remains an arbiter refusal, rather than a new activity hold.
+		if (this.arbiter.operatorIdleSince(record.spec.sourceId) === null)
+			return true
 		const status = this.resumeStatus(record, true)
 		return (
 			status.resumeHeldBy === null &&
@@ -3741,7 +3746,15 @@ export class ScannerService extends EventEmitter {
 	/** A deleted (or replaced) job emits nothing more (S1-B final review, finding 4). */
 	private emitJob(record: JobRecord): void {
 		if (this.jobs.get(record.id) !== record) return
-		this.emit("job", this.toDto(record))
+		const dto = this.toDto(record)
+		this.resumeViews.set(
+			record.id,
+			JSON.stringify({
+				resumeAt: dto.resumeAt,
+				resumeHeldBy: dto.resumeHeldBy,
+			}),
+		)
+		this.emit("job", dto)
 	}
 
 	private emitProgressFor(record: JobRecord | null): void {
@@ -3932,16 +3945,19 @@ export class ScannerService extends EventEmitter {
 			.catch((err: unknown) => this.log.warn({ err }, "jobs.json write failed"))
 	}
 
+	private emitResumeChange(record: JobRecord): void {
+		const view = JSON.stringify(this.resumeStatus(record))
+		if (this.resumeViews.get(record.id) === view) return
+		this.resumeViews.set(record.id, view)
+		this.emitJob(record)
+	}
+
 	private tick(): void {
 		if (this.consumerLifecycle.admissionSealed) return
 		this.channelTaps?.tick()
 		const now = this.now()
 		for (const d of this.drivers.values()) {
-			const view = JSON.stringify(this.resumeStatus(d.record))
-			if (this.resumeViews.get(d.record.id) !== view) {
-				this.resumeViews.set(d.record.id, view)
-				this.emitJob(d.record)
-			}
+			this.emitResumeChange(d.record)
 			d.tick(now)
 		}
 		this.resumeIdleWaiters(now)

@@ -812,11 +812,15 @@ export class JobRunner implements JobDriver {
 
 	private async apply(e: JobEvent): Promise<void> {
 		const { record } = this
-		if (e.type === "preemptor-idle" && !(this.deps.autoResumeReady?.() ?? true))
-			return
+		const operatorAutoResume =
+			e.type === "preemptor-idle" &&
+			(record.reason === "preempted-operator" ||
+				record.reason === "preempted-relay")
+		if (operatorAutoResume && !(this.deps.autoResumeReady?.() ?? true)) return
 		if (e.type === "resume" || e.type === "start")
 			this.autoResumeGuardActive = false
-		if (e.type === "preemptor-idle") this.autoResumeGuardActive = true
+		if (e.type === "preemptor-idle")
+			this.autoResumeGuardActive = operatorAutoResume
 		const heldBefore = this.lease !== null
 		// The arbiter has already revoked the lease, whatever this job's state: never keep a stale one.
 		if (LOST_EVENTS.has(e.type)) this.lease = null
@@ -916,15 +920,6 @@ export class JobRunner implements JobDriver {
 			record.consentedImpact = this.deps.impact()
 		try {
 			for (const action of this.ordered(actions)) {
-				if (
-					e.type === "preemptor-idle" &&
-					!(this.deps.autoResumeReady?.() ?? true)
-				)
-					throw new ScannerApiError(
-						"Automatic resume held by activity",
-						"SCANNER_SOURCE_BUSY",
-						409,
-					)
 				await this.run(action)
 			}
 		} catch (err) {
