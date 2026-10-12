@@ -508,8 +508,9 @@ WebSocket and audio origins from `GET /api/access/bootstrap` on that origin.
 Issue a pairing code while the core is running and `/caddy-trust/root.crt`
 exists. If it is missing, check `docker compose logs wavekit-protected-caddy`;
 the sidecar logs when it publishes the file or cannot write it. The code is
-one-time, for the browser shell, and is not a reusable API credential. The machine credential stays in the private volume; these
-commands pass it to the API and do not print it:
+one-time, for the browser shell, and is not a reusable API credential. The
+machine credential stays in the private volume; these commands pass it to the
+API and do not print it:
 
 ```bash
 docker compose -f compose.yaml --profile protected exec \
