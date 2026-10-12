@@ -119,8 +119,9 @@ Existing malformed, symlinked, unsafe or unexpectedly missing initialized state
 fails closed; it never silently provisions a replacement credential. Serialized
 writes use an exclusive same-directory temporary file, file sync, atomic rename
 and directory sync before success. Rotation atomically changes the credential
-binding and rebinds remembered sessions to it (see machine-credential device
-administration); stale authority writes cannot restore the old binding.
+binding and, by default, removes remembered sessions in that same write. An
+explicit keep rebinds them to the new generation (see machine-credential device
+administration). Stale authority writes cannot restore the old binding.
 
 Ownership uses unique immutable process-owner files published before scanning other
 owners. Any other live owner, including another nonce for the same PID, makes the
@@ -345,9 +346,11 @@ Health remains minimal liveness metadata. Legacy is not expanded.
 Explicit GET and HEAD `/api/access/devices` reuse the existing session-only flow
 and bounded route admission/drain. HEAD executes the same checks with no body.
 Safe-read Origin/fetch-metadata rules remain unchanged; safe reads do not add CSRF.
-Machine authority cannot enumerate devices, even with a session cookie alongside
-a preferred machine Authorization credential. Existing pair, refresh, logout,
-individual revoke and revoke-all permissions and operations are reused.
+Machine authority cannot enumerate devices on this session route, even with a
+session cookie alongside a preferred machine Authorization credential.
+Enumeration uses the machine routes (see browser-access-batch1.md Decision 6).
+Existing pair, refresh, logout, individual revoke and revoke-all permissions
+and operations are reused.
 
 ```ts
 interface AccessDeviceDto {
@@ -452,8 +455,9 @@ current semantics. These routes authenticate like `POST /api/access/pairing-code
 canonical Host, an allowed Origin when one is present, and the machine bearer.
 They never accept a cookie as authority, never renew, and do not require CSRF.
 A cookie alongside the bearer is ignored. Missing and invalid bearers stay
-401 `AUTH_REQUIRED`. A cookie request that fails the existing safe-read boundary
-is denied there first. A session principal that passes it is 403 `MACHINE_REQUIRED`.
+401 `AUTH_REQUIRED`. A cookie request that fails the existing cookie boundary
+(safe-read or CSRF) is denied there first. A session principal that passes it
+is 403 `MACHINE_REQUIRED`.
 
 | Route | Success |
 | --- | --- |
@@ -468,13 +472,16 @@ Unavailable storage or a failed authority clock is 503, never an empty success.
 Reads stay synchronous and do not wait for the mutation queue. Revocation uses
 that queue and `SessionStore.revoke` / `revokeAll`, so the same lease invalidation
 closes live WS and audio attachments. Persistence failure latches the authority
-and closes leases. Authenticated attempts use the pairing redemption budget
-(5/minute per connection address, 60/minute globally, 128 address buckets) and
-return 429 `MACHINE_RATE_LIMITED` with `Retry-After: 60`.
+and closes leases. Authenticated attempts use a separate budget with the same
+limits as pairing redemption (5/minute per connection address, 60/minute
+globally, 128 address buckets) and return 429 `MACHINE_RATE_LIMITED` with
+`Retry-After: 60`.
 
 `rotate-credential` is an offline utility, like setup. It refuses with
 `ACCESS_STORAGE_BUSY` while any live owner holds the private directory. On a
 stopped directory it atomically replaces the machine credential under the same
-0600 file and 0700 directory rules and rebinds remembered browser sessions to the
-new credential generation. A previous in-memory
-persistence hook still cannot write the old binding. The command prints no secret.
+0600 file and 0700 directory rules. By default that write removes remembered
+browser sessions. `--keep-sessions` rebinds them to the new credential
+generation; the operator then reviews `devices list` after restart. A previous
+in-memory persistence hook still cannot write the old binding. The command
+prints no secret.

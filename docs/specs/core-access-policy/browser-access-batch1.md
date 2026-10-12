@@ -35,7 +35,10 @@ deployment, image builds and receiver/RF acceptance are out of scope.
    through new exact machine-bearer routes. Cookie and session routes keep their
    current semantics; machine routes never accept cookies, never renew and
    reuse the existing device projection. Machine-credential rotation is an
-   offline utility operation on stopped private state, like setup.
+   offline utility operation on stopped private state, like setup. By default it
+   removes remembered browser sessions in the same atomic write as the new
+   credential. `--keep-sessions` keeps them and rebinds them to the new
+   generation; the operator then reviews `devices list` after restart.
 
 ## Work items
 

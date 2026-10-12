@@ -395,6 +395,10 @@ describe("machine device command", () => {
 		expect(result.lines.join("\n")).toContain("devices revoke DEVICE_ID")
 		expect(result.lines.join("\n")).toContain("revoke-all --yes")
 		expect(result.lines.join("\n")).toContain("rotate-credential")
+		expect(result.lines.join("\n")).toContain("--keep-sessions")
+		expect(result.lines.join("\n")).toContain(
+			"removes remembered browser sessions",
+		)
 		expect(open).not.toHaveBeenCalled()
 		expect(read).not.toHaveBeenCalled()
 	})
@@ -578,7 +582,93 @@ describe("machine device command", () => {
 		expect(result.lines.join("\n")).not.toContain(directory)
 	})
 
-	it("rotates the credential atomically, keeps browser sessions, and prints nothing secret", async () => {
+	it("rejects rotate-credential arguments other than the directory and one --keep-sessions", async () => {
+		const open = vi.spyOn(PrivateAccessStorage, "open")
+		for (const argv of [
+			["rotate-credential"],
+			["rotate-credential", "--keep-sessions"],
+			["rotate-credential", "--private-directory"],
+			["rotate-credential", "--private-directory", "relative"],
+			[
+				"rotate-credential",
+				"--private-directory",
+				directory,
+				"--keep-sessions",
+				"--keep-sessions",
+			],
+			[
+				"rotate-credential",
+				"--keep-sessions",
+				"--keep-sessions",
+				"--private-directory",
+				directory,
+			],
+			["rotate-credential", "--private-directory", directory, "--yes"],
+			[
+				"rotate-credential",
+				"--private-directory",
+				directory,
+				"--private-directory",
+				directory,
+			],
+		]) {
+			const result = await runAccessCommand(argv)
+			expect(result.exitCode).toBe(1)
+			expect(result.lines[0]).toContain("ACCESS_COMMAND_INVALID")
+		}
+		expect(open).not.toHaveBeenCalled()
+	})
+
+	it("rotates the credential and removes remembered browser sessions by default", async () => {
+		await runAccessCommand(setup())
+		const storage = await PrivateAccessStorage.open({
+			directory,
+			ownership,
+			mode: "load",
+		})
+		const sessions = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			persist: storage.persist,
+		})
+		const browser = await sessions.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		expect(storage.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
+		const previous = storage.useMachineCredential(value => value)
+		await storage.close()
+		const result = await runAccessCommand([
+			"rotate-credential",
+			"--private-directory",
+			directory,
+		])
+		expect(result).toEqual({
+			exitCode: 0,
+			lines: [
+				"ACCESS_CREDENTIAL_ROTATED: Machine credential replaced. Remembered browser sessions were removed. Restart the core before using the new credential.",
+			],
+		})
+		expect(
+			(await fs.readdir(directory)).some(entry => entry.startsWith("owner-")),
+		).toBe(false)
+		const reloaded = await PrivateAccessStorage.open({
+			directory,
+			ownership,
+			mode: "load",
+		})
+		owners.push(reloaded)
+		const rotated = reloaded.useMachineCredential(value => value)
+		expect(rotated).not.toBe(previous)
+		expect(result.lines.join("\n")).not.toContain(previous)
+		expect(result.lines.join("\n")).not.toContain(rotated)
+		expect(result.lines.join("\n")).not.toContain(directory)
+		expect(reloaded.startupSnapshot().sessions).toEqual([])
+		expect(
+			(await fs.stat(join(directory, "access-state.json"))).mode & 0o777,
+		).toBe(0o600)
+	})
+
+	it("keeps browser sessions only when --keep-sessions is set, and prints nothing secret", async () => {
 		await runAccessCommand(setup())
 		const storage = await PrivateAccessStorage.open({
 			directory,
@@ -595,13 +685,14 @@ describe("machine device command", () => {
 		await storage.close()
 		const result = await runAccessCommand([
 			"rotate-credential",
+			"--keep-sessions",
 			"--private-directory",
 			directory,
 		])
 		expect(result).toEqual({
 			exitCode: 0,
 			lines: [
-				"ACCESS_CREDENTIAL_ROTATED: Machine credential replaced. Remembered browser sessions were kept. Restart the core before using the new credential.",
+				"ACCESS_CREDENTIAL_ROTATED: Machine credential replaced. Remembered browser sessions were kept. Restart the core before using the new credential, then run `devices list` to review them.",
 			],
 		})
 		expect(
@@ -624,5 +715,24 @@ describe("machine device command", () => {
 		expect(
 			(await fs.stat(join(directory, "access-state.json"))).mode & 0o777,
 		).toBe(0o600)
+		await reloaded.close()
+		const after = await runAccessCommand([
+			"rotate-credential",
+			"--private-directory",
+			directory,
+			"--keep-sessions",
+		])
+		expect(after.exitCode).toBe(0)
+		expect(after.lines[0]).toContain("were kept")
+		expect(after.lines[0]).toContain("devices list")
+		const reread = await PrivateAccessStorage.open({
+			directory,
+			ownership,
+			mode: "load",
+		})
+		owners.push(reread)
+		expect(reread.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
 	})
 })
