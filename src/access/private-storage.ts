@@ -568,7 +568,11 @@ export class PrivateAccessStorage {
 		})
 	}
 
-	/** Explicit stopped-authority rotation. Old-binding persistence hooks reject. */
+	/**
+	 * Stopped-authority rotation. Rebinds remembered sessions to the new
+	 * credential generation instead of deleting them. Old-binding persistence
+	 * hooks still reject, so a live store cannot write the previous generation.
+	 */
 	rotateMachineCredential(random?: AccessRandomBytes): Promise<void> {
 		return this.#serialize(async () => {
 			const current = this.#current()
@@ -582,11 +586,19 @@ export class PrivateAccessStorage {
 			if (machineToken === current.machineToken)
 				throw failure("ACCESS_STORAGE_ROTATION_FAILED")
 			const binding = sessionCredentialBinding(digestMachineToken(machineToken))
+			const sessions = validateSnapshot(
+				{
+					version: 1,
+					credentialBinding: binding,
+					sessions: current.sessions.sessions.map(record => ({ ...record })),
+				},
+				binding,
+			)
 			const next: PrivateState = {
 				version: 1,
 				machineToken,
 				credentialBinding: binding,
-				sessions: { version: 1, credentialBinding: binding, sessions: [] },
+				sessions,
 			}
 			await this.#atomic(STATE, JSON.stringify(next))
 			this.#state = next
