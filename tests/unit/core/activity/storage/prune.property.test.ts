@@ -11,7 +11,10 @@ import {
 	pruneActivityPrefix,
 	readActivityState,
 } from "../../../../../src/core/activity/storage/database.js"
+import { resolveActivityLimits } from "../../../../../src/core/activity/storage/limits.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
+import type { SqliteDatabase } from "../../../../../src/core/activity/storage/sqlite.js"
+import { createActivitySession } from "../../../../../src/core/activity/storage/writer-session.js"
 import {
 	buildActivityRow,
 	truncateUtf8,
@@ -31,129 +34,133 @@ describe("activity retention", () => {
 	it("moves the prune watermark only forward", async () => {
 		// Feature: event-foundation-batch1, Property 1: prune watermark moves only forward
 		// Validates: Requirements retention
-		const dir = await tempDir()
-		let caseId = 0
 		const maxAgeMs = 200_000
-		await fc.assert(
-			fc.asyncProperty(
-				fc.array(fc.boolean(), { minLength: 1, maxLength: 12 }),
-				fc.integer({ min: 1, max: 6 }),
-				async (ancient, pruneBatchRows) => {
-					const dbPath = join(dir, `${caseId++}.db`)
-					const db = await openSqliteFile(dbPath)
-					openActivityDatabase(db)
-					const rows = ancient.map((isAncient, index) => {
-						const receivedAtMs = isAncient
-							? NOW - maxAgeMs - activityAgeSlackMs(maxAgeMs) - 5_000
-							: NOW - 1_000
-						const stamp = new Date(receivedAtMs).toISOString()
-						const eventId = `e-${index}`
-						return buildActivityRow({
-							version: ACTIVITY_RECORD_VERSION,
-							eventId,
-							commitSeq: "0",
-							producedAt: stamp,
-							receivedAt: stamp,
-							kind: "decoder-reception",
-							payload: envelope({
+		const db = await openSqliteFile(":memory:")
+		try {
+			openActivityDatabase(db)
+			fc.assert(
+				fc.property(
+					fc.array(fc.boolean(), { minLength: 1, maxLength: 12 }),
+					fc.integer({ min: 1, max: 6 }),
+					(ancient, pruneBatchRows) => {
+						resetStoredActivity(db)
+						const rows = ancient.map((isAncient, index) => {
+							const receivedAtMs = isAncient
+								? NOW - maxAgeMs - activityAgeSlackMs(maxAgeMs) - 5_000
+								: NOW - 1_000
+							const stamp = new Date(receivedAtMs).toISOString()
+							const eventId = `e-${index}`
+							return buildActivityRow({
+								version: ACTIVITY_RECORD_VERSION,
 								eventId,
-								title: `tok${index}`,
+								commitSeq: "0",
+								producedAt: stamp,
 								receivedAt: stamp,
-							}),
+								kind: "decoder-reception",
+								payload: envelope({
+									eventId,
+									title: `tok${index}`,
+									receivedAt: stamp,
+								}),
+							})
 						})
-					})
-					const committed = commitActivityBatch(db, rows)
-					expect(committed.ok).toBe(true)
-					const before = readActivityState(db, dbPath)
-					const limits = {
-						maxRows: 1_000_000,
-						maxDbBytes: Number.MAX_SAFE_INTEGER,
-						maxAgeMs,
-						pruneBatchRows,
-						incrementalVacuumPages: 0,
-					}
-					const first = pruneActivityPrefix(db, limits, NOW)
-					const expected = leadingAncient(ancient, pruneBatchRows)
-					expect(
-						BigInt(first.watermark) >= BigInt(before.identity.pruneWatermark),
-					).toBe(true)
-					expect(first.deleted).toBe(expected)
-					if (expected === 0) {
-						expect(first.changed).toBe(false)
-						expect(first.watermark).toBe(before.identity.pruneWatermark)
-						expect(first.generation).toBe(before.identity.pruneGeneration)
-					} else {
-						expect(first.changed).toBe(true)
-						expect(first.watermark).toBe(String(expected))
-						expect(first.generation).toBe(before.identity.pruneGeneration + 1)
-					}
-					const remaining = ancient.length - expected
-					expect(
-						db.prepare("SELECT COUNT(*) AS n FROM activity").get()?.["n"],
-					).toBe(remaining)
-					expect(
-						db.prepare("SELECT COUNT(*) AS n FROM activity_fts").get()?.["n"],
-					).toBe(remaining)
-					const second = pruneActivityPrefix(db, limits, NOW)
-					expect(BigInt(second.watermark) >= BigInt(first.watermark)).toBe(true)
-					if (second.changed)
-						expect(second.generation).toBe(first.generation + 1)
-					else expect(second.generation).toBe(first.generation)
-					db.close()
-				},
-			),
-			{ numRuns: 100 },
-		)
+						const committed = commitActivityBatch(db, rows)
+						expect(committed.ok).toBe(true)
+						const before = readActivityState(db, ":memory:")
+						const limits = {
+							maxRows: 1_000_000,
+							maxDbBytes: Number.MAX_SAFE_INTEGER,
+							maxAgeMs,
+							pruneBatchRows,
+							incrementalVacuumPages: 0,
+						}
+						const first = pruneActivityPrefix(db, limits, NOW)
+						const expected = leadingAncient(ancient, pruneBatchRows)
+						expect(
+							BigInt(first.watermark) >= BigInt(before.identity.pruneWatermark),
+						).toBe(true)
+						expect(first.deleted).toBe(expected)
+						if (expected === 0) {
+							expect(first.changed).toBe(false)
+							expect(first.watermark).toBe(before.identity.pruneWatermark)
+							expect(first.generation).toBe(before.identity.pruneGeneration)
+						} else {
+							expect(first.changed).toBe(true)
+							expect(first.watermark).toBe(String(expected))
+							expect(first.generation).toBe(before.identity.pruneGeneration + 1)
+						}
+						const remaining = ancient.length - expected
+						expect(
+							db.prepare("SELECT COUNT(*) AS n FROM activity").get()?.["n"],
+						).toBe(remaining)
+						expect(
+							db.prepare("SELECT COUNT(*) AS n FROM activity_fts").get()?.["n"],
+						).toBe(remaining)
+						const second = pruneActivityPrefix(db, limits, NOW)
+						expect(BigInt(second.watermark) >= BigInt(first.watermark)).toBe(
+							true,
+						)
+						if (second.changed)
+							expect(second.generation).toBe(first.generation + 1)
+						else expect(second.generation).toBe(first.generation)
+					},
+				),
+				{ numRuns: 100 },
+			)
+		} finally {
+			db.close()
+		}
 	}, 10_000)
 
 	it("deletes only the row surplus above the low-water mark", async () => {
 		// Feature: event-foundation-batch1, Property 4: row prune stops at the low-water mark
 		// Validates: Requirements retention hysteresis
-		const dir = await tempDir()
-		let caseId = 0
-		await fc.assert(
-			fc.asyncProperty(
-				fc.integer({ min: 1, max: 24 }),
-				fc.integer({ min: 20, max: 80 }),
-				fc.integer({ min: 1, max: 10 }),
-				async (count, maxRows, pruneBatchRows) => {
-					const dbPath = join(dir, `rows-${caseId++}.db`)
-					const db = await openSqliteFile(dbPath)
-					openActivityDatabase(db)
-					const stamp = new Date(NOW).toISOString()
-					const rows = Array.from({ length: count }, (_, index) => {
-						const eventId = `r-${index}`
-						return buildActivityRow({
-							version: ACTIVITY_RECORD_VERSION,
-							eventId,
-							commitSeq: "0",
-							producedAt: stamp,
-							receivedAt: stamp,
-							kind: "decoder-reception",
-							payload: envelope({ eventId, receivedAt: stamp }),
+		const db = await openSqliteFile(":memory:")
+		try {
+			openActivityDatabase(db)
+			fc.assert(
+				fc.property(
+					fc.integer({ min: 1, max: 24 }),
+					fc.integer({ min: 20, max: 80 }),
+					fc.integer({ min: 1, max: 10 }),
+					(count, maxRows, pruneBatchRows) => {
+						resetStoredActivity(db)
+						const stamp = new Date(NOW).toISOString()
+						const rows = Array.from({ length: count }, (_, index) => {
+							const eventId = `r-${index}`
+							return buildActivityRow({
+								version: ACTIVITY_RECORD_VERSION,
+								eventId,
+								commitSeq: "0",
+								producedAt: stamp,
+								receivedAt: stamp,
+								kind: "decoder-reception",
+								payload: envelope({ eventId, receivedAt: stamp }),
+							})
 						})
-					})
-					expect(commitActivityBatch(db, rows).ok).toBe(true)
-					const limits = {
-						maxRows,
-						maxDbBytes: Number.MAX_SAFE_INTEGER,
-						maxAgeMs: 86_400_000,
-						pruneBatchRows,
-						incrementalVacuumPages: 0,
-					}
-					const pruned = pruneActivityPrefix(db, limits, NOW)
-					const budget =
-						count > maxRows ? count - activityLowWater(maxRows) : 0
-					expect(pruned.deleted).toBe(Math.min(pruneBatchRows, budget))
-					const again = pruneActivityPrefix(db, limits, NOW)
-					expect(BigInt(again.watermark) >= BigInt(pruned.watermark)).toBe(
-						true,
-					)
-					db.close()
-				},
-			),
-			{ numRuns: 100 },
-		)
+						expect(commitActivityBatch(db, rows).ok).toBe(true)
+						const limits = {
+							maxRows,
+							maxDbBytes: Number.MAX_SAFE_INTEGER,
+							maxAgeMs: 86_400_000,
+							pruneBatchRows,
+							incrementalVacuumPages: 0,
+						}
+						const pruned = pruneActivityPrefix(db, limits, NOW)
+						const budget =
+							count > maxRows ? count - activityLowWater(maxRows) : 0
+						expect(pruned.deleted).toBe(Math.min(pruneBatchRows, budget))
+						const again = pruneActivityPrefix(db, limits, NOW)
+						expect(BigInt(again.watermark) >= BigInt(pruned.watermark)).toBe(
+							true,
+						)
+					},
+				),
+				{ numRuns: 100 },
+			)
+		} finally {
+			db.close()
+		}
 	}, 10_000)
 
 	it("does not delete a full batch when the store is one row over the cap", async () => {
@@ -220,9 +227,7 @@ describe("activity retention", () => {
 			}
 			expect(pruneActivityPrefix(db, limits, NOW).deleted).toBe(0)
 			const ancient = NOW - maxAgeMs - slack - 1_000
-			expect(commitActivityBatch(db, [rowAt("ancient", ancient)]).ok).toBe(
-				true,
-			)
+			expect(commitActivityBatch(db, [rowAt("ancient", ancient)]).ok).toBe(true)
 			// Triggered by the ancient row, but it sits behind a fresher seq, so
 			// the prefix deletes only the row already past maxAge and stops.
 			const triggered = pruneActivityPrefix(db, limits, NOW)
@@ -230,10 +235,7 @@ describe("activity retention", () => {
 			const stuck = db
 				.prepare("SELECT event_id FROM activity ORDER BY seq")
 				.all()
-			expect(stuck).toEqual([
-				{ event_id: "fresh" },
-				{ event_id: "ancient" },
-			])
+			expect(stuck).toEqual([{ event_id: "fresh" }, { event_id: "ancient" }])
 			expect(pruneActivityPrefix(db, limits, NOW).deleted).toBe(0)
 		} finally {
 			db.close()
@@ -351,6 +353,113 @@ describe("activity retention", () => {
 		}
 	})
 
+	it("prunes the row cap in one burst per 5% of inflow", async () => {
+		const maxRows = 1_000
+		const pruneBatchRows = 10
+		const lowWater = activityLowWater(maxRows)
+		const surplus = maxRows + 1 - lowWater
+		const db = await openSqliteFile(":memory:")
+		const session = createActivitySession(
+			db,
+			":memory:",
+			resolveActivityLimits({
+				maxRows,
+				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
+				pruneBatchRows,
+				pruneBurstBatches: 20,
+				incrementalVacuumPages: 0,
+			}),
+		)
+		try {
+			const fill = session.write(
+				Array.from({ length: maxRows }, (_, index) => rowAt(`r-${index}`, NOW)),
+				NOW,
+			)
+			expect(fill.ok).toBe(true)
+			if (!fill.ok) return
+			expect(fill.prune.deleted).toBe(0)
+			expect(fill.snapshot.rows).toBe(maxRows)
+			const before = fill.snapshot.identity.pruneGeneration
+			const crossing = session.write([rowAt("cross", NOW)], NOW)
+			expect(crossing.ok).toBe(true)
+			if (!crossing.ok) return
+			expect(crossing.prune.deleted).toBe(surplus)
+			expect(crossing.prune.deleted).toBeGreaterThan(pruneBatchRows)
+			expect(crossing.prune.generation).toBe(
+				before + Math.ceil(surplus / pruneBatchRows),
+			)
+			expect(crossing.snapshot.rows).toBe(lowWater)
+			const held = crossing.snapshot.identity.pruneWatermark
+			const quiet = maxRows - lowWater
+			for (let index = 0; index < quiet; index++) {
+				const wrote = session.write([rowAt(`q-${index}`, NOW)], NOW)
+				expect(wrote.ok).toBe(true)
+				if (!wrote.ok) return
+				expect(wrote.prune.deleted).toBe(0)
+				expect(wrote.prune.watermark).toBe(held)
+			}
+			expect(session.snapshot().rows).toBe(maxRows)
+			const again = session.write([rowAt("cross-2", NOW)], NOW)
+			expect(again.ok).toBe(true)
+			if (!again.ok) return
+			expect(again.prune.deleted).toBe(surplus)
+			expect(again.prune.changed).toBe(true)
+			expect(again.snapshot.rows).toBe(lowWater)
+			expect(BigInt(again.prune.watermark) > BigInt(held)).toBe(true)
+		} finally {
+			session.close()
+		}
+	})
+
+	it("prunes the byte cap in one burst down to the live-byte low-water mark", async () => {
+		const maxDbBytes = 512 * 1024
+		const lowWater = activityLowWater(maxDbBytes)
+		const db = await openSqliteFile(":memory:")
+		const session = createActivitySession(
+			db,
+			":memory:",
+			resolveActivityLimits({
+				maxRows: 100_000,
+				maxDbBytes,
+				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
+				pruneBatchRows: 4,
+				pruneBurstBatches: 40,
+				incrementalVacuumPages: 0,
+			}),
+		)
+		try {
+			let sawPrune = false
+			let quiet = 0
+			let second = false
+			for (let index = 0; index < 200; index++) {
+				const wrote = session.write([fatRow(`b-${index}`)], NOW)
+				expect(wrote.ok).toBe(true)
+				if (!wrote.ok) return
+				if (wrote.prune.deleted === 0) {
+					if (sawPrune) quiet += 1
+					continue
+				}
+				expect(wrote.snapshot.dbBytes).toBeLessThanOrEqual(lowWater)
+				const pages = pragmaValue(db, "page_count")
+				const freelist = pragmaValue(db, "freelist_count")
+				const pageSize = pragmaValue(db, "page_size")
+				expect(wrote.snapshot.dbBytes).toBe((pages - freelist) * pageSize)
+				expect(freelist).toBeGreaterThan(0)
+				if (sawPrune) {
+					expect(quiet).toBeGreaterThan(0)
+					second = true
+					break
+				}
+				sawPrune = true
+				quiet = 0
+			}
+			expect(sawPrune).toBe(true)
+			expect(second).toBe(true)
+		} finally {
+			session.close()
+		}
+	})
+
 	it("truncates indexed text on UTF-8 boundaries", () => {
 		// Feature: event-foundation-batch1, Property 2: UTF-8 truncation stays valid
 		// Validates: Requirements storage indexed text
@@ -368,6 +477,49 @@ describe("activity retention", () => {
 		)
 	})
 })
+
+function resetStoredActivity(db: SqliteDatabase): void {
+	const seqs = db.prepare("SELECT seq FROM activity").all()
+	const dropFts = db.prepare("DELETE FROM activity_fts WHERE rowid = ?")
+	for (const row of seqs) {
+		const seq = row["seq"]
+		if (typeof seq === "number" || typeof seq === "bigint") dropFts.run(seq)
+	}
+	if (seqs.length > 0) db.exec("DELETE FROM activity")
+	db.exec(
+		"UPDATE store_meta SET value = '0' WHERE key IN ('pruneWatermark', 'pruneGeneration')",
+	)
+	const sequence = db
+		.prepare("SELECT 1 AS n FROM sqlite_master WHERE name = 'sqlite_sequence'")
+		.get()
+	if (sequence) db.exec("DELETE FROM sqlite_sequence WHERE name = 'activity'")
+}
+
+function pragmaValue(db: SqliteDatabase, name: string): number {
+	const row = db.prepare(`PRAGMA ${name}`).get()
+	const value = row?.[name]
+	if (typeof value === "number") return value
+	if (typeof value === "bigint") return Number(value)
+	throw new Error(`missing pragma ${name}`)
+}
+
+function fatRow(eventId: string) {
+	const stamp = new Date(NOW).toISOString()
+	return buildActivityRow({
+		version: ACTIVITY_RECORD_VERSION,
+		eventId,
+		commitSeq: "0",
+		producedAt: stamp,
+		receivedAt: stamp,
+		kind: "decoder-reception",
+		payload: envelope({
+			eventId,
+			title: eventId,
+			receivedAt: stamp,
+			decodedData: { blob: "x".repeat(3_000) },
+		}),
+	})
+}
 
 function leadingAncient(ancient: readonly boolean[], batch: number): number {
 	if (!ancient.some(Boolean)) return 0

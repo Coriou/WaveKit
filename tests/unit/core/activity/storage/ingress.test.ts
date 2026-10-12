@@ -244,6 +244,60 @@ describe("activity admission", () => {
 		expect(warnings).toHaveLength(gaps)
 	})
 
+	it("stages a quiet episode from the clock without another admit", () => {
+		let clock = 0
+		const gate = ingress(
+			{
+				globalBurst: 1,
+				globalRatePerSec: 0,
+				decoderBurst: 10,
+				gapQuietMs: 1_000,
+			},
+			() => clock,
+		)
+		expect(gate.admit(envelope({ decoderId: "a" })).admitted).toBe(true)
+		expect(gate.admit(envelope({ decoderId: "a" })).admitted).toBe(false)
+		expect(gate.hasOpenEpisode()).toBe(true)
+		expect(gate.stageDueEpisode(999)).toBe(false)
+		expect(gate.hasOpenEpisode()).toBe(true)
+		expect(gate.stageDueEpisode(1_000)).toBe(true)
+		expect(gate.hasOpenEpisode()).toBe(false)
+		const gap = gate
+			.takeBatch(10, 8 * 1024 * 1024)
+			.find(row => row.kind === "ingestion-gap")
+		const payload = JSON.parse(gap?.recordJson ?? "{}") as {
+			payload: { reason: string; dropped: number }
+		}
+		expect(payload.payload).toMatchObject({
+			reason: "rate-limited",
+			dropped: 1,
+		})
+	})
+
+	it("stages an open episode immediately when shutdown asks", () => {
+		const gate = ingress({
+			globalBurst: 1,
+			globalRatePerSec: 0,
+			decoderBurst: 10,
+			gapQuietMs: 60_000,
+		})
+		expect(gate.admit(envelope({ decoderId: "radio" })).admitted).toBe(true)
+		expect(gate.admit(envelope({ decoderId: "radio" })).admitted).toBe(false)
+		expect(gate.stageDueEpisode(0)).toBe(false)
+		expect(gate.stageOpenEpisode(0)).toBe(true)
+		expect(gate.stageOpenEpisode(0)).toBe(false)
+		const gap = gate.takeBatch(10, 8 * 1024 * 1024)[0]
+		expect(gap?.kind).toBe("ingestion-gap")
+		const payload = JSON.parse(gap?.recordJson ?? "{}") as {
+			payload: { reason: string; dropped: number; decoderIds: string[] }
+		}
+		expect(payload.payload).toMatchObject({
+			reason: "rate-limited",
+			dropped: 1,
+			decoderIds: ["radio"],
+		})
+	})
+
 	it("refills only forward in time", () => {
 		let clock = 5_000
 		const gate = ingress(

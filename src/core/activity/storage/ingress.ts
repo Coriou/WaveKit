@@ -36,7 +36,9 @@ interface GapEpisode {
  * Main-thread admission. Token buckets are integer micro-tokens so refill does
  * not drift. One gap record is held outside the queue cap. An episode closes
  * after gapQuietMs with no drops, or at most once per gapMaxIntervalMs while
- * drops continue. The warn log follows that same close.
+ * drops continue. The store also closes it from a gapQuietMs timer when
+ * admits stop, and on shutdown before the queue is abandoned. The warn log
+ * follows that same close.
  */
 export class ActivityIngress {
 	readonly dropped: IngressCounters["dropped"] = {
@@ -56,7 +58,6 @@ export class ActivityIngress {
 	private inFlightBytes = 0
 	private pendingGap: BuiltActivityRow | undefined
 	private gapHeld = false
-	private gapFlush = false
 	private episode: GapEpisode | undefined
 	private closed = false
 
@@ -100,7 +101,7 @@ export class ActivityIngress {
 			this.noteDrop("queue-full", envelope.receivedAt, envelope.decoderId, now)
 			return { admitted: false, reason: "queue-full" }
 		}
-		this.maybeCloseEpisode(now)
+		this.stageDueEpisode(now)
 		this.queue.push(row)
 		this.queueBytes += row.recordBytes
 		this.admitted++
@@ -180,11 +181,35 @@ export class ActivityIngress {
 		this.inFlightBytes = 0
 	}
 
-	/** True once after a gap record was staged, then clears. */
-	takeGapFlush(): boolean {
-		const staged = this.gapFlush
-		this.gapFlush = false
-		return staged
+	/** An episode is open and has not been staged yet. */
+	hasOpenEpisode(): boolean {
+		return this.episode !== undefined
+	}
+
+	/**
+	 * Closes the open episode once it has been quiet for gapQuietMs, or once
+	 * it has been open for gapMaxIntervalMs. Returns true when a gap row was
+	 * staged.
+	 */
+	stageDueEpisode(now: number): boolean {
+		const episode = this.episode
+		if (!episode || this.gapHeld) return false
+		const quiet = now - episode.lastDropAt >= this.limits.gapQuietMs
+		const aged = now - episode.openedAt >= this.limits.gapMaxIntervalMs
+		if (!quiet && !aged) return false
+		this.commitEpisode(episode, now)
+		return true
+	}
+
+	/**
+	 * Closes the open episode immediately. Shutdown calls this before it
+	 * abandons the queue, and the quiet timer calls it after gapQuietMs.
+	 */
+	stageOpenEpisode(now: number): boolean {
+		const episode = this.episode
+		if (!episode || this.gapHeld) return false
+		this.commitEpisode(episode, now)
+		return true
 	}
 
 	markClosed(): void {
@@ -276,19 +301,12 @@ export class ActivityIngress {
 	}
 
 	/**
-	 * Closes the open episode after a quiet period, or once per max interval
-	 * while drops continue. The gap bypasses the token bucket and the queue
-	 * item cap (one reserved slot).
+	 * Stages the episode outside the token bucket and the queue item cap
+	 * (one reserved slot).
 	 */
-	private maybeCloseEpisode(now: number): void {
-		const episode = this.episode
-		if (!episode || this.gapHeld) return
-		const quiet = now - episode.lastDropAt >= this.limits.gapQuietMs
-		const aged = now - episode.openedAt >= this.limits.gapMaxIntervalMs
-		if (!quiet && !aged) return
+	private commitEpisode(episode: GapEpisode, now: number): void {
 		this.episode = undefined
 		this.gapHeld = true
-		this.gapFlush = true
 		const at = new Date(now).toISOString()
 		this.pendingGap = buildActivityRow({
 			version: ACTIVITY_RECORD_VERSION,

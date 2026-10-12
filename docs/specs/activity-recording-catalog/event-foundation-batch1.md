@@ -70,13 +70,16 @@ outputs, classified by an explicit allow-list) are excluded and counted.
   burst 1,000 global and 50/s burst 200 per decoder instance; batches of at most
   64 items, 512 KiB or 25 ms, each one transaction (activity row, refs, FTS row).
 - Dropped envelopes are counted. One `ingestion-gap` record summarises an
-  episode. The episode closes only after a quiet period with no drops
+  episode. The episode closes after a quiet period with no drops
   (`gapQuietMs`, default 5 s) or, while drops continue, at most one gap
   record per `gapMaxIntervalMs` (default 60 s) aggregating the counts since
-  the previous record. The warn log uses the same limit. Closed, paused and
-  rate tokens are checked before the row is built. The byte cap is checked
-  after the row is built, and tokens taken for a row that does not fit are
-  refunded. A gap record is never itself dropped for rate reasons.
+  the previous record. A `gapQuietMs` timer closes and stages the episode
+  when admits stop. `close()` stages an open episode into the shutdown
+  drain before abandoning the queue. The warn log uses the same limit.
+  Closed, paused and rate tokens are checked before the row is built. The
+  byte cap is checked after the row is built, and tokens taken for a row
+  that does not fit are refunded. A gap record is never itself dropped for
+  rate reasons.
 - Admits rejected because the writer has stopped are counted as
   `dropped.closed`. Status includes `writer: "running" | "stopped"`. Writes
   use their own timeout (default 30 s), separate from the open timeout. A
@@ -94,13 +97,21 @@ whichever is reached first; WAL checkpoint (PASSIVE) at 16 MiB, TRUNCATE attempt
 at 48 MiB, writes paused (and counted as `store-paused`) at 64 MiB. `maxRows`
 is an integer of at least 1,000. Age pruning runs only when the oldest
 `receivedAt` is older than `now - maxAge - slack`, where `slack` is
-`max(60 s, 1% of maxAge)`, and then deletes down to `now - maxAge`. Row and
-byte pruning run only while the store is over that cap, and delete down to a
-low-water mark of 95% of the cap. One prune never deletes more rows than
-`count - lowWater`. Pruning deletes ascending `seq` prefixes in bounded
-transactions that advance `pruneWatermark` to the greatest deleted seq and
-increment `pruneGeneration`, followed by `PRAGMA incremental_vacuum`. Never a
-full VACUUM. Stats report the observed oldest record, not the configured age.
+`max(60 s, 1% of maxAge)`, and then deletes down to `now - maxAge`. The
+writer session keeps hysteresis for the row cap and the byte cap. A cap
+turns on when the store crosses it and stays on until the store is at or
+under a low-water mark of 95% of that cap: once active, rows continue while
+`count > lowWater`, and bytes continue while live bytes are above
+`lowWater(maxDbBytes)`. Live bytes are
+`(page_count - freelist_count) * page_size`, so pages on the freelist do
+not keep the byte cap on. While a cap is active, one write runs consecutive
+prune transactions back to back, at most `pruneBurstBatches` (default 20).
+Each transaction deletes an ascending `seq` prefix of at most
+`pruneBatchRows` and, for the row cap, never more than `count - lowWater`
+rows. It advances `pruneWatermark` to the greatest deleted seq and
+increments `pruneGeneration`, then runs `PRAGMA incremental_vacuum`. Never
+a full VACUUM. Stats report the observed oldest record, not the configured
+age.
 
 ## Search, detail and facets
 

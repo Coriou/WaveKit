@@ -1,6 +1,6 @@
 import { rm, stat } from "node:fs/promises"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { ACTIVITY_RECORD_VERSION } from "../../../../../src/core/activity/storage/contract.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
 import { buildActivityRow } from "../../../../../src/core/activity/storage/row.js"
@@ -252,4 +252,86 @@ describe("activity store", () => {
 		expect(records.some(record => record.eventId === "resumed")).toBe(true)
 		expect(store.stats().dropped["store-paused"]).toBeGreaterThan(0)
 	}, 5_000)
+
+	it("stages an open ingestion gap when admits stop", async () => {
+		const store = await openStore({
+			limits: {
+				batchWindowMs: 0,
+				globalBurst: 1,
+				globalRatePerSec: 0,
+				decoderBurst: 10,
+				decoderRatePerSec: 10,
+				gapQuietMs: 5_000,
+			},
+		})
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		try {
+			expect(
+				store.admit(envelope({ eventId: "kept", decoderId: "radio" })).admitted,
+			).toBe(true)
+			expect(
+				store.admit(envelope({ eventId: "dropped", decoderId: "radio" })),
+			).toEqual({ admitted: false, reason: "rate-limited" })
+			await vi.advanceTimersByTimeAsync(4_999)
+			expect(
+				(await readRecords(store.dbPath)).some(
+					record => record.kind === "ingestion-gap",
+				),
+			).toBe(false)
+			await vi.advanceTimersByTimeAsync(1)
+			const records = await readRecords(store.dbPath)
+			expect(records.map(record => record.kind)).toEqual([
+				"decoder-reception",
+				"ingestion-gap",
+			])
+			const gap = records[1]
+			expect(gap?.kind).toBe("ingestion-gap")
+			if (gap?.kind === "ingestion-gap") {
+				expect(gap.payload).toMatchObject({
+					reason: "rate-limited",
+					dropped: 1,
+					decoderIds: ["radio"],
+				})
+			}
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("writes an open ingestion gap during close before abandoning it", async () => {
+		let clock = 10_000
+		const store = await openStore({
+			now: () => clock,
+			limits: {
+				batchWindowMs: 0,
+				globalBurst: 1,
+				globalRatePerSec: 0,
+				decoderBurst: 10,
+				gapQuietMs: 60_000,
+			},
+		})
+		expect(
+			store.admit(envelope({ eventId: "kept", decoderId: "radio" })).admitted,
+		).toBe(true)
+		expect(
+			store.admit(envelope({ eventId: "dropped", decoderId: "radio" })),
+		).toEqual({ admitted: false, reason: "rate-limited" })
+		expect(
+			(await readRecords(store.dbPath)).some(
+				record => record.kind === "ingestion-gap",
+			),
+		).toBe(false)
+		await store.close()
+		const records = await readRecords(store.dbPath)
+		expect(records.some(record => record.eventId === "kept")).toBe(true)
+		const gap = records.find(record => record.kind === "ingestion-gap")
+		expect(gap?.kind).toBe("ingestion-gap")
+		if (gap?.kind === "ingestion-gap") {
+			expect(gap.payload).toMatchObject({
+				reason: "rate-limited",
+				dropped: 1,
+				decoderIds: ["radio"],
+			})
+		}
+	})
 })
