@@ -48,10 +48,38 @@ regional and receiver-capabilities foundations have no routes yet).
 - [ ] Low-latency tuner control over WebSocket (`ClientMessage` is subscribe/unsubscribe only)
   for drag-to-pan. Depends on the ROADMAP §8 measurement of coalesced REST drag-to-tune.
 
-**Band plans and presets** (one package: Spectrum labels, typed entry, ⌘K, Scanner)
-- [ ] One regional band plan model served by core and shared with the scanner: bands with
-  name, edges, display group (Air, Marine, Amateur, PMR / land mobile, Pagers, ISM), default
-  mode, bandwidth, step and protocols to try; named channels with aliases (marine ch 16 / 12,
+**Band plans and presets** (one package: Spectrum labels, typed entry, ⌘K, Scanner).
+Owner, 2026-10-12: band plans adapt to the user, configurable in core and in the UI, and WaveKit
+ships strong defaults for popular countries. Labels must be right per country: in France "PMR"
+means PMR446, so "PMR / land mobile 136–174 MHz" (today's canvas and core naming) is wrong there.
+Plans like https://github.com/Arrin-KN1E/SDR-Band-Plans (CC0; SDR++ JSON, SDR# XML, Gqrx CSV;
+US, France, International) must import cleanly. The design session that draws this is queued
+(DESIGN.md › Next session).
+- [ ] Configurable band plans in core, layered and resolved user edits > imports > built-in:
+  built-in country packs (a CEPT / EU baseline and France first; then UK, DE, IT, ES, NL / BE, US,
+  CA, AU, JP), imported plans (SDR++ JSON first, then SDR# XML, which carries mode and step, and
+  Gqrx CSV) with provenance (source file or URL, author, licence, imported at, shown as
+  "community, unverified"), and operator overrides (rename, re-edge, hide, add) kept as a layer
+  over a plan so pack updates still apply. Several plans can be active, in order. A band has
+  name, edges, display group (an open set coloured by group; imported colours are hints), mode /
+  bandwidth / step for tuning, scan hints (channel spacing, protocols, OBW, skip by default with
+  a reason such as encrypted or already decoded), named channels with aliases and a nesting
+  parent. Scan presets, spectrum lanes, Tuner suggestions and ⌘K all derive from the active
+  plans; the scanner's `Bandplan` / `ScanRange` become a projection of them. CRUD, ordering and
+  import endpoints; the choice of plans persisted in core. Import notes: SDR++ files put a colour
+  in `type` (not a category) and lose mode / step; many rows are unnamed fillers; SDR++'s own
+  plans are GPL-3.0 (compatible with AGPL-3.0, needs a notice) and uneven (its `france.json` has
+  FM 80–108 and 70 cm 420–450). Prefer packs transcribed from regulator documents (ERC Report 25 /
+  ECC Rec 70-03, ANFR TNRBF) and credit community files. Relation to the regional display
+  registry (strict primary-source channel rows) is an open owner decision: keep it as the
+  "verified" layer that plan channels reference, or extend it.
+- [ ] Station country (ISO 3166) next to the coarse `region` enum (`EU|US|CA|AU|NZ|JP|CN`,
+  `src/config.ts`), from config, the station location or the UI, with provenance; it picks the
+  default pack. Today there is no country and no station lat / lon in core.
+- [ ] Band plan model shared with the scanner (the original gap, now part of the layered model
+  above): bands with
+  name, edges, display group (Air, Marine, Amateur, Land mobile, PMR446, Pagers, ISM / SRD, named
+  per country), default mode, bandwidth, step and protocols to try; named channels with aliases (marine ch 16 / 12,
   PMR446 ch 1–16, AIS A/B, airband guard, ACARS, VDL2). Today `/api/scanner/bandplans`
   returns `{id, region, name, ranges}` with scan ranges and rasters only. Partly (main@7743665):
   the regional display registry spec, a core registry (`src/core/regional/`) and DTOs
@@ -60,10 +88,15 @@ regional and receiver-capabilities foundations have no routes yet).
   simplex / duplex and advisory mode / bandwidth / step hints, but no rows ship: the only family is
   US FRS with `dataset: null` (evidence-pending). Scanner band plans are unchanged. Still the gap: EU families (marine VHF, PMR446, airband,
   AIS / ACARS / VDL2 channels), band display groups, and one model shared with the scanner.
-- [ ] Missing plans in `src/core/scanner/bandplan/builtin.ts`: Airband (118–137 MHz) and EU
-  pagers 466.0–466.25 MHz; a named EU 169.4–169.8 MHz pager plan (it sits inside `pager-vhf`
-  137–174 today, on the same raster); a combined ISM 433 / 868 preset if presets stay one per plan.
-  Partly: `ism-433` (433.05–434.79) and `ism-868` (863–870) exist as separate EU plans.
+- [ ] Missing or wrong plans in `src/core/scanner/bandplan/builtin.ts`: Airband (118–137 MHz,
+  8.33 kHz) and EU pagers 466.0–466.25 MHz (France: e*Message 466.025–466.230); 169.4–169.8 MHz
+  split by use (France: 169.4–169.475 is mostly Wize, wM-Bus mode N meters, not paging; it sits
+  inside `pager-vhf` 137–174 today, on the same raster); `vhf-land-mobile` 136–174 must not be
+  labelled "PMR" in EU packs; `dpmr446` covers 446.1–446.2 (pre-2018 rule): PMR446 is 446.0–446.2,
+  16 analogue channels at 12.5 kHz, digital at 6.25 kHz; CB 26.965–27.405 MHz (40 ch, AM / FM /
+  SSB); 380–400 MHz (TETRA / INPT, encrypted) as skip by default, not a preset; a combined ISM
+  433 / 868 preset if presets stay one per plan. Partly: `ism-433` (433.05–434.79) and `ism-868`
+  (863–870) exist as separate EU plans.
 - [ ] Scan presets in core, shared by every client: built-in presets per region from the
   band plans (name, ranges, protocols, step, dwell, sensitivity; read-only, "Save as new"),
   plus operator presets saved from the composer (name, ranges, skips, protocols, settings)

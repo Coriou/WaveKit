@@ -823,6 +823,8 @@ Condensed + Noto Sans, Tabler-based icons).
   a setting. Signed-in devices needs the auth design.
 - Scanner listen-scan (S3, "Scan a list"), right-click signal menu with Identify first,
   the `I` key in the keymap pass.
+- Band plans (queued, see Next session): per-country packs, imports (SDR++ / SDR# / Gqrx),
+  user edits, station country; PMR naming per country.
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
 - Theme follow-ups: the owner liked the themes (2026-10-11); confirm the Paper waterfall ramp (a / b / c on the Spectrum board) and
@@ -838,9 +840,10 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after Activity wide mode (canvas v81, with the owner's sideways-swipe fix). One session is queued. Two standing
-rules from the owner apply (see "How we work"): the canvas stays the design source after the build
-starts, and performance is a constraint at every stage.
+Handoff written 2026-10-12 after Activity wide mode (canvas v81, with the owner's sideways-swipe fix). Two sessions are queued, in
+this order: band plans, then the design system v1 and web app foundation. Two standing rules from the
+owner apply (see "How we work"): the canvas stays the design source after the build starts, and
+performance is a constraint at every stage.
 
 **Check with the owner first (short):** how the Activity columns pane feels in use (sideways swipes
 over the cards after the v81 fix, the peeking columns with "+N", "Pin as column" in the search field, the recording state shrinking to a dot beside
@@ -855,7 +858,45 @@ range. That last point touches the Receiver island, which draws a gain table in 
 is built, plan for an unknown table (gain index steps, or a dB table only where a reviewed source
 exists). CORE-GAPS records both as "Partly".
 
-### Design system v1 and web app foundation (next)
+### 1. Band plans (next, owner asked 2026-10-12)
+
+Owner rule: band plans adapt to the user, configurable in core and in the UI, and WaveKit ships strong
+defaults for popular countries. Plans like https://github.com/Arrin-KN1E/SDR-Band-Plans must work
+(CC0; SDR# XML, Gqrx CSV and SDR++ JSON for US and France, XML / CSV for International). The canvas
+labels are US-shaped today: in France "PMR" means PMR446, so "PMR / land mobile 136–174 MHz" in Scan a
+band (presets and lanes), ⌘K and the "Marine + PMR" mock sweep must go. Design only plus the core
+gap; the core team builds it later. CORE-GAPS › "Band plans and presets" now holds the full core
+side (layered plans, station country, builtin fixes), written from a research pass on 2026-10-12.
+
+What core has (main@7743665): scanner band plans in `src/core/scanner/bandplan/builtin.ts` (`Bandplan
+{id, region, name, ranges}` with rasters, protocols; EU / US variants only via `variantFor`), served by
+`GET /api/scanner/bandplans`; a coarse `region` enum (`EU|US|CA|AU|NZ|JP|CN`, guessed from TZ when
+unset), no country and no station lat / lon; the regional display registry (strict, primary-source
+channel rows, US FRS only, no rows, no routes, not linked to the scanner).
+
+Recommended shape to bring to the owner (from the research): one plan model, two uses (display and
+scanning). A plan has provenance and ordered bands; a band has edges, a display group, tuning hints,
+scan hints (spacing, protocols, skip by default with a reason) and named channels with aliases. Three
+layers resolved user edits > imports > built-in packs (CEPT / EU baseline and France first). Scan a
+band presets, spectrum lanes, Tuner `bandOf` / channels and ⌘K all read the active plans.
+
+Ask the owner one question at a time: (1) station country as its own setting, or derived from the
+location (with the coarse region as fallback)? (2) which packs ship first, and are they transcribed
+from regulator documents only or seeded from community files? (3) fixed display groups for the lanes,
+or groups from the plan with a colour map (and do imported colours win)? (4) imports: file only, or
+file and URL fetched by core? (5) several active plans in an order? (6) band editor scope (edges,
+group, mode, step, spacing, protocols, skip)? (7) how community data shows as unverified; (8) keep the
+regional registry as the verified layer, or extend it into the plan store?
+
+Boards to touch: Settings (a Band plans page beside Station › Region at `Settings.dc.html:591`: country
+pack, active plans with provenance, Import, band editor; SettingsPhone too); ScanPlanner (`PRESETS`,
+`LANES`, `ELSEWHERE` at `:438-460` derived from the active plan, plan name and "Edit band plan" link);
+Palette (`BANDS`, `CHANNELS`, `SCAN_PRESETS` at `:172` / `:316`); Tuner (`BANDS`, `CHANNELS`, `bandOf`
+at `:214-253`; PMR446 ch 1–16, not 1–8); Spectrum (`BANDS` at `:218`, lanes follow the plan);
+Immersive / Scanner mock sweep (rename "Marine + PMR"). Keep the mocks in Brittany with French
+labels: CB 27 MHz, LPD433, Wize 169.4, e*Message 466, DAB+, 380–400 MHz INPT as an encrypted skip.
+
+### 2. Design system v1 and web app foundation (after band plans)
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
 make it performant and efficient. Guidance agreed in chat (2026-10-11 late):
