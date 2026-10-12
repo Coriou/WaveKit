@@ -6,9 +6,9 @@ import pino from "pino"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { ActivityReaderFailedError } from "../../../../../src/core/activity/query/errors.js"
 import type { ReaderHostEvent } from "../../../../../src/core/activity/query/reader-host.js"
-import { createActivityQueryService } from "../../../../../src/core/activity/query/service.js"
+import type { ActivityQueryService } from "../../../../../src/core/activity/storage/contract.js"
 import type { Logger } from "../../../../../src/utils/logger.js"
-import { createFixture, delay, type ActivityFixture } from "./fixture.js"
+import { createFixture, delay, openQueryService, type ActivityFixture } from "./fixture.js"
 
 function captureLogger(): { logger: Logger; text: () => string } {
 	let body = ""
@@ -48,6 +48,7 @@ function answerSearch(observed: string): string {
 describe("activity reader startup", () => {
 	let directory: string
 	let fixture: ActivityFixture
+	let service: ActivityQueryService | undefined
 
 	beforeAll(async () => {
 		const repository = fileURLToPath(new URL("../../../../../", import.meta.url))
@@ -58,6 +59,7 @@ describe("activity reader startup", () => {
 	})
 
 	afterAll(async () => {
+		await service?.close()
 		await fixture.close()
 		await rm(directory, { recursive: true, force: true })
 	})
@@ -83,8 +85,7 @@ describe("activity reader startup", () => {
 			].join("\n"),
 		)
 		const events: ReaderHostEvent[] = []
-		const service = createActivityQueryService({
-			store: fixture.store,
+		service = openQueryService(fixture, {
 			logger: captureLogger().logger,
 			execution: "worker",
 			workerUrl: url,
@@ -132,8 +133,7 @@ describe("activity reader startup", () => {
 		)
 		const events: ReaderHostEvent[] = []
 		const logs = captureLogger()
-		const service = createActivityQueryService({
-			store: fixture.store,
+		service = openQueryService(fixture, {
 			logger: logs.logger,
 			execution: "worker",
 			workerUrl: url,
@@ -171,8 +171,7 @@ describe("activity reader startup", () => {
 			].join("\n"),
 		)
 		const logs = captureLogger()
-		const service = createActivityQueryService({
-			store: fixture.store,
+		service = openQueryService(fixture, {
 			logger: logs.logger,
 			execution: "worker",
 			workerUrl: url,

@@ -8,7 +8,6 @@ import { DEFAULT_ACTIVITY_QUERY_LIMITS } from "../../../../../src/core/activity/
 import type { ActivityQueryService } from "../../../../../src/core/activity/storage/contract.js"
 import {
 	createFixture,
-	delay,
 	openQueryService,
 	type ActivityFixture,
 } from "./fixture.js"
@@ -203,18 +202,20 @@ describe("activity search and detail", () => {
 		await expect(query.detail("bad\nid")).rejects.toBeInstanceOf(ActivityQueryInvalidError)
 	})
 
+	it("finishes an in-flight search before closing the reader", async () => {
+		const store = await createFixture({ memory: true })
+		fixture = store
+		service = openQueryService(store, { readerDelayMs: 30 })
+		const pending = service.search({ query: {} })
+		await service.close()
+		await expect(pending).resolves.toMatchObject({ items: [] })
+	})
+
 	// Feature: event-foundation-batch1, Property 2: keyset paging stability under concurrent inserts
 	it("pages a snapshot that ignores rows committed after the first read", async () => {
-		const store = await createFixture()
+		const store = await createFixture({ memory: true })
 		fixture = store
-		let arm = false
-		service = openQueryService(store, {
-			readerDelayMs: () => {
-				if (!arm) return 0
-				arm = false
-				return 15
-			},
-		})
+		service = openQueryService(store)
 		const query = service
 		await fc.assert(
 			fc.asyncProperty(
@@ -229,9 +230,9 @@ describe("activity search and detail", () => {
 						expected.push(store.insert({ eventId, text: "alpha" }))
 					}
 					const snapshot = order === "desc" ? [...expected].reverse() : expected
-					arm = true
+					// search() copies the high water before its first await, so this
+					// insert is committed after the snapshot and before the read.
 					const pending = query.search({ query: {}, order, limit })
-					await delay(5)
 					const extra = store.insert({ eventId: "extra", text: "alpha" })
 					const collected: string[] = []
 					let token: string | null = null

@@ -5,13 +5,14 @@ import { build } from "esbuild"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { ActivityQueryTimeoutError } from "../../../../../src/core/activity/query/errors.js"
 import type { ReaderHostEvent } from "../../../../../src/core/activity/query/reader-host.js"
-import { createActivityQueryService } from "../../../../../src/core/activity/query/service.js"
-import { createFixture, testLogger, type ActivityFixture } from "./fixture.js"
+import type { ActivityQueryService } from "../../../../../src/core/activity/storage/contract.js"
+import { createFixture, openQueryService, type ActivityFixture } from "./fixture.js"
 
 describe("activity query worker", () => {
 	let directory: string
 	let workerUrl: URL
 	let fixture: ActivityFixture
+	let service: ActivityQueryService | undefined
 
 	beforeAll(async () => {
 		// Repository-local so Node can resolve external packages the same way
@@ -38,15 +39,14 @@ describe("activity query worker", () => {
 	})
 
 	afterAll(async () => {
+		await service?.close()
 		await fixture.close()
 		await rm(directory, { recursive: true, force: true })
 	})
 
 	it("reads committed rows through a real worker and sees a later commit", async () => {
 		fixture.insert({ eventId: "first", text: "alpha" })
-		const service = createActivityQueryService({
-			store: fixture.store,
-			logger: testLogger,
+		service = openQueryService(fixture, {
 			execution: "worker",
 			workerUrl,
 			limits: { deadlineMs: 5_000 },
@@ -68,9 +68,7 @@ describe("activity query worker", () => {
 	it("terminates the worker when a read passes the deadline and then reads again", async () => {
 		const events: ReaderHostEvent[] = []
 		let calls = 0
-		const service = createActivityQueryService({
-			store: fixture.store,
-			logger: testLogger,
+		service = openQueryService(fixture, {
 			execution: "worker",
 			workerUrl,
 			readerDelayMs: () => {
