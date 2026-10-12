@@ -18,13 +18,6 @@ type Same<A, B> =
 		? true
 		: false
 
-type Either<Current, Next, Legacy> =
-	Same<Current, Next> extends true
-		? true
-		: Same<Current, Legacy> extends true
-			? true
-			: false
-
 type ExpectedSubscribe = {
 	type: "activity:subscribe"
 	id: string
@@ -36,15 +29,6 @@ type ExpectedUnsubscribe = {
 	id: string
 }
 
-type LegacyReset = {
-	type: "reset"
-	reason:
-		| "cursor-gap"
-		| "cursor-expired"
-		| "store-changed"
-		| "query-changed"
-		| "invalid-cursor"
-}
 type NextReset = {
 	type: "reset"
 	reason:
@@ -55,33 +39,11 @@ type NextReset = {
 		| "invalid-cursor"
 		| "reader-failed"
 }
-type LegacyReplay =
-	| Api.ActivityReplayRecordsFrame
-	| Api.ActivityReplayProgressFrame
-	| LegacyReset
 type NextReplay =
 	| Api.ActivityReplayRecordsFrame
 	| Api.ActivityReplayProgressFrame
 	| NextReset
 
-type LegacyStats = {
-	admitted: number
-	committed: number
-	duplicates: number
-	dropped: Record<
-		"rate-limited" | "queue-full" | "store-paused" | "write-failed",
-		number
-	>
-	excludedTelemetry: number
-	queueDepth: number
-	queueBytes: number
-	dbBytes: number
-	walBytes: number
-	rows: number
-	oldestReceivedAt: string | null
-	pruneWatermark: string
-	paused: boolean
-}
 type NextStats = {
 	admitted: number
 	committed: number
@@ -230,11 +192,11 @@ const sameShapes: [
 	Same<Api.ActivityReplayRecordsFrame, Contract.ActivityReplayRecordsFrame>,
 	Same<Api.ActivityReplayProgressFrame, Contract.ActivityReplayProgressFrame>,
 	Same<Api.ActivityReplayResetFrame, NextReset>,
-	Either<Contract.ActivityReplayResetFrame, NextReset, LegacyReset>,
+	Same<Contract.ActivityReplayResetFrame, NextReset>,
 	Same<Api.ActivityReplayFrame, NextReplay>,
-	Either<Contract.ActivityReplayFrame, NextReplay, LegacyReplay>,
+	Same<Contract.ActivityReplayFrame, NextReplay>,
 	Same<Api.ActivityStoreStats, NextStats>,
-	Either<Contract.ActivityStoreStats, NextStats, LegacyStats>,
+	Same<Contract.ActivityStoreStats, NextStats>,
 	Same<
 		typeof Api.ACTIVITY_RECORD_VERSION,
 		typeof Contract.ACTIVITY_RECORD_VERSION
