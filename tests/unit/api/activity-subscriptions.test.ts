@@ -8,7 +8,9 @@ import {
 } from "../../../src/api/activity-subscriptions.js"
 import type {
 	ActivityQueryService,
+	ActivityReplayFrame,
 	ActivityReplayHandle,
+	ActivityReplaySink,
 } from "../../../src/core/activity/storage/contract.js"
 import { createFixture, delay, openQueryService } from "../core/activity/query/fixture.js"
 import { issueCursor } from "../../../src/core/activity/query/cursor.js"
@@ -128,7 +130,7 @@ describe("activity subscriptions", () => {
 		hub.close()
 	})
 
-	it("closes resumable when the queue overflows and keeps the last delivered cursor", () => {
+	it("does not advertise a cursor for a frame the transport never accepted", () => {
 		const hub = createActivitySubscriptions({
 			service: fakeService(),
 			enabled: true,
@@ -142,11 +144,59 @@ describe("activity subscriptions", () => {
 			reason: ACTIVITY_RESUMABLE_CLOSE_REASON,
 		})
 		const notice = transport.attempts.find(message => message.type === "activity:closed")
-		expect(notice?.data).toMatchObject({ reason: "resumable", cursor: "cursor-0" })
+		expect(notice?.data).toEqual({ reason: "resumable", cursors: {} })
 		hub.close()
 	})
 
-	it("closes resumable with a null cursor when the first frame does not fit", () => {
+	it("advertises each subscription's last delivered cursor", () => {
+		const sinks: ActivityReplaySink[] = []
+		const service: ActivityQueryService = {
+			async search() {
+				throw new Error("not used")
+			},
+			async detail() {
+				return null
+			},
+			async facets() {
+				throw new Error("not used")
+			},
+			replay(_input, sink) {
+				sinks.push(sink)
+				const cursor = `cursor-${sinks.length}`
+				sink.send({ type: "progress", scannedThrough: String(sinks.length), cursor })
+				return { resume() {}, stop() {} }
+			},
+			async close() {},
+		}
+		const hub = createActivitySubscriptions({
+			service,
+			enabled: true,
+			limits: { maxMessages: 1, perClient: 2 },
+		})
+		const transport = new FakeTransport("client-a")
+		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(transport, { type: "activity:subscribe", id: "two", query: {} })
+		expect(transport.closed).toBeNull()
+		transport.accept = false
+		const first = sinks[0]
+		if (!first) throw new Error("missing sink")
+		const undelivered: ActivityReplayFrame = {
+			type: "records",
+			items: [],
+			scannedThrough: "9",
+			cursor: "cursor-undelivered",
+		}
+		first.send(undelivered)
+		first.send({ ...undelivered, scannedThrough: "10", cursor: "cursor-overflow" })
+		const notice = transport.attempts.find(message => message.type === "activity:closed")
+		expect(notice?.data).toEqual({
+			reason: "resumable",
+			cursors: { one: "cursor-1", two: "cursor-2" },
+		})
+		hub.close()
+	})
+
+	it("closes resumable with no cursors when the first frame does not fit", () => {
 		const hub = createActivitySubscriptions({
 			service: fakeService(),
 			enabled: true,
@@ -155,8 +205,46 @@ describe("activity subscriptions", () => {
 		const transport = new FakeTransport("client-a")
 		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
 		const notice = transport.attempts.find(message => message.type === "activity:closed")
-		expect(notice?.data).toMatchObject({ reason: "resumable", cursor: null })
+		expect(notice?.data).toEqual({ reason: "resumable", cursors: {} })
 		expect(transport.closed?.code).toBe(4001)
+		hub.close()
+	})
+
+	it("releases the global slot after a reader-failed reset", async () => {
+		const service: ActivityQueryService = {
+			async search() {
+				throw new Error("not used")
+			},
+			async detail() {
+				return null
+			},
+			async facets() {
+				throw new Error("not used")
+			},
+			replay(_input, sink) {
+				sink.send({ type: "reset", reason: "reader-failed" })
+				return { resume() {}, stop() {} }
+			},
+			async close() {},
+		}
+		const hub = createActivitySubscriptions({
+			service,
+			enabled: true,
+			limits: { global: 1 },
+		})
+		const first = new FakeTransport("client-a")
+		hub.handleMessage(first, { type: "activity:subscribe", id: "one", query: {} })
+		await delay(0)
+		const second = new FakeTransport("client-b")
+		hub.handleMessage(second, { type: "activity:subscribe", id: "one", query: {} })
+		expect(codes(second)).toEqual([])
+		expect(
+			first.delivered.some(message => {
+				if (message.type !== "activity:reset") return false
+				const data = message.data as { reason?: string }
+				return data.reason === "reader-failed"
+			}),
+		).toBe(true)
 		hub.close()
 	})
 

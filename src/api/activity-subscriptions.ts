@@ -75,6 +75,8 @@ const unsubscribeSchema = z
 interface Queued {
 	message: ActivityWireMessage
 	bytes: number
+	/** Set for a records/progress frame. Applied only after the transport accepts it. */
+	delivery?: { id: string; cursor: string }
 }
 
 interface Subscription {
@@ -187,12 +189,12 @@ export function createActivitySubscriptions(options: {
 		return created
 	}
 
-	function latestCursor(slot: Slot): string | null {
-		let cursor: string | null = null
+	function deliveredCursors(slot: Slot): Record<string, string> {
+		const cursors: Record<string, string> = {}
 		for (const sub of slot.subs.values()) {
-			if (sub.lastCursor !== null) cursor = sub.lastCursor
+			if (sub.lastCursor !== null) cursors[sub.id] = sub.lastCursor
 		}
-		return cursor
+		return cursors
 	}
 
 	function overflow(slot: Slot): void {
@@ -201,7 +203,7 @@ export function createActivitySubscriptions(options: {
 		const notice: ActivityWireMessage = {
 			type: "activity:closed",
 			channel: "activity",
-			data: { reason: "resumable", cursor: latestCursor(slot) },
+			data: { reason: "resumable", cursors: deliveredCursors(slot) },
 		}
 		try {
 			slot.transport.send(notice)
@@ -244,6 +246,10 @@ export function createActivitySubscriptions(options: {
 					slot.blocked = true
 					return
 				}
+				if (next.delivery) {
+					const sub = slot.subs.get(next.delivery.id)
+					if (sub) sub.lastCursor = next.delivery.cursor
+				}
 				slot.queue.shift()
 				slot.queuedBytes -= next.bytes
 			}
@@ -256,6 +262,7 @@ export function createActivitySubscriptions(options: {
 	function enqueue(
 		slot: Slot,
 		message: ActivityWireMessage,
+		delivery?: { id: string; cursor: string },
 	): "queued" | "pause" | "closed" {
 		if (slot.closing) return "closed"
 		const bytes = Buffer.byteLength(JSON.stringify(message))
@@ -266,7 +273,9 @@ export function createActivitySubscriptions(options: {
 			overflow(slot)
 			return "closed"
 		}
-		slot.queue.push({ message, bytes })
+		const queued: Queued = { message, bytes }
+		if (delivery !== undefined) queued.delivery = delivery
+		slot.queue.push(queued)
 		slot.queuedBytes += bytes
 		flush(slot)
 		if (slot.closing) return "closed"
@@ -367,13 +376,11 @@ export function createActivitySubscriptions(options: {
 				options.service.replay(request, {
 					send(frame) {
 						if (slot.closing) return false
-						const outcome = enqueue(slot, frameMessage(id, frame))
-						if (
-							outcome !== "closed" &&
-							(frame.type === "records" || frame.type === "progress")
-						) {
-							sub.lastCursor = frame.cursor
-						}
+						const delivery =
+							frame.type === "records" || frame.type === "progress"
+								? { id, cursor: frame.cursor }
+								: undefined
+						const outcome = enqueue(slot, frameMessage(id, frame), delivery)
 						if (frame.type === "reset") queueMicrotask(release)
 						if (outcome !== "queued") sub.paused = true
 						return outcome === "queued"
