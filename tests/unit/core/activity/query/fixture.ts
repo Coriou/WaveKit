@@ -68,9 +68,22 @@ function seqText(value: number | bigint): string {
 	return typeof value === "bigint" ? value.toString(10) : String(value)
 }
 
-export async function createFixture(): Promise<ActivityFixture> {
+export interface FixtureOptions {
+	/**
+	 * Shared in-memory database (`file:name?mode=memory&cache=shared`).
+	 * A query property reuses one of these and resets between runs. Another
+	 * thread cannot open it, so worker tests stay on a file.
+	 */
+	memory?: boolean
+}
+
+export async function createFixture(
+	options: FixtureOptions = {},
+): Promise<ActivityFixture> {
 	const dir = await mkdtemp(join(tmpdir(), "wavekit-activity-query-"))
-	const dbPath = join(dir, "activity.db")
+	const dbPath = options.memory
+		? `file:wavekit-activity-${randomBytes(8).toString("hex")}?mode=memory&cache=shared`
+		: join(dir, "activity.db")
 	const db = new DatabaseSync(dbPath)
 	db.exec("PRAGMA journal_mode = WAL")
 	db.exec("PRAGMA foreign_keys = ON")
@@ -320,21 +333,52 @@ export async function createFixture(): Promise<ActivityFixture> {
 	}
 }
 
+/**
+ * Test services record every search, detail and facet promise and finish
+ * those reads before `close`. A timed-out test can drop its await; settling
+ * here keeps that rejection off the process.
+ */
 export function openQueryService(
 	fixture: ActivityFixture,
-	overrides: Partial<Omit<ActivityQueryServiceOptions, "store" | "logger">> = {},
+	overrides: Partial<Omit<ActivityQueryServiceOptions, "store">> = {},
 ): ActivityQueryService {
 	const limits = {
 		deadlineMs: 2_000,
 		...overrides.limits,
 	}
-	return createActivityQueryService({
+	const service = createActivityQueryService({
 		store: fixture.store,
 		logger: testLogger,
 		execution: "inline",
 		...overrides,
 		limits,
 	})
+	const inflight = new Set<Promise<unknown>>()
+	let draining = false
+
+	function track<T>(promise: Promise<T>): Promise<T> {
+		const settled = promise.finally(() => {
+			inflight.delete(settled)
+		})
+		inflight.add(settled)
+		if (draining) void settled.catch(() => {})
+		return settled
+	}
+
+	return {
+		search: input => track(service.search(input)),
+		detail: eventId => track(service.detail(eventId)),
+		facets: input => track(service.facets(input)),
+		replay: (input, sink) => service.replay(input, sink),
+		async close() {
+			draining = true
+			while (inflight.size > 0) {
+				const pending = [...inflight]
+				await Promise.allSettled(pending)
+			}
+			await service.close()
+		},
+	}
 }
 
 export function delay(ms: number): Promise<void> {
