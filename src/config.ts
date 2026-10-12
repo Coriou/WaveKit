@@ -564,6 +564,70 @@ export const StationConfigSchema = z
 	})
 	.strict()
 
+/** Operator ceilings. Batch-1 defaults (1e6 rows, 2 GiB, 7 days, 100/s) sit inside. */
+const ACTIVITY_MAX_ROWS = 1_000_000_000
+const ACTIVITY_MAX_DB_BYTES = 16 * 1024 * 1024 * 1024 * 1024
+const ACTIVITY_MAX_AGE_MS = 10 * 366 * 24 * 60 * 60 * 1000
+const ACTIVITY_MAX_GLOBAL_PER_SECOND = 1_000_000
+const ACTIVITY_MAX_GLOBAL_BURST = 10_000_000
+const ACTIVITY_MAX_DECODER_PER_SECOND = 100_000
+const ACTIVITY_MAX_DECODER_BURST = 1_000_000
+
+export const ActivityRetentionConfigSchema = z
+	.object({
+		maxRows: z.number().int().positive().max(ACTIVITY_MAX_ROWS).optional(),
+		maxDbBytes: z
+			.number()
+			.int()
+			.positive()
+			.max(ACTIVITY_MAX_DB_BYTES)
+			.optional(),
+		maxAgeMs: z.number().int().positive().max(ACTIVITY_MAX_AGE_MS).optional(),
+	})
+	.strict()
+
+export const ActivityAdmissionConfigSchema = z
+	.object({
+		globalPerSecond: z
+			.number()
+			.finite()
+			.positive()
+			.max(ACTIVITY_MAX_GLOBAL_PER_SECOND)
+			.optional(),
+		globalBurst: z
+			.number()
+			.int()
+			.positive()
+			.max(ACTIVITY_MAX_GLOBAL_BURST)
+			.optional(),
+		perDecoderPerSecond: z
+			.number()
+			.finite()
+			.positive()
+			.max(ACTIVITY_MAX_DECODER_PER_SECOND)
+			.optional(),
+		perDecoderBurst: z
+			.number()
+			.int()
+			.positive()
+			.max(ACTIVITY_MAX_DECODER_BURST)
+			.optional(),
+	})
+	.strict()
+
+/**
+ * Persistent activity store. Absent or defaulted means disabled: no database
+ * file and no worker. Retention and admission stay unset until an operator
+ * overrides them.
+ */
+export const ActivityConfigSchema = z
+	.object({
+		enabled: z.boolean().default(false),
+		retention: ActivityRetentionConfigSchema.optional(),
+		admission: ActivityAdmissionConfigSchema.optional(),
+	})
+	.strict()
+
 /** Main configuration schema (Requirements: 12.5, 15.4, 17.1–17.4). */
 export const ConfigSchema = z
 	.object({
@@ -589,6 +653,11 @@ export const ConfigSchema = z
 		 */
 		region: RegionSchema.optional(),
 		station: StationConfigSchema.default({}),
+		/**
+		 * Persistent activity store. Off by default, so current decoder output
+		 * behaviour is unchanged until an operator enables it.
+		 */
+		activity: ActivityConfigSchema.default({}),
 		/**
 		 * Directory for runtime state (API band overrides). Relative paths
 		 * resolve against the process working directory.
@@ -681,6 +750,13 @@ export type CsdrConfig = z.infer<typeof CsdrConfigSchema>
 export type ChannelizerConfig = z.infer<typeof ChannelizerConfigSchema>
 export type SourceScannerConfig = z.infer<typeof SourceScannerConfigSchema>
 export type ScannerConfig = z.infer<typeof ScannerConfigSchema>
+export type ActivityRetentionConfig = z.infer<
+	typeof ActivityRetentionConfigSchema
+>
+export type ActivityAdmissionConfig = z.infer<
+	typeof ActivityAdmissionConfigSchema
+>
+export type ActivityConfig = z.infer<typeof ActivityConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================
@@ -719,6 +795,7 @@ const LEGACY_ENV_MAPPINGS: Record<
 	WAVEKIT_REGION: { path: ["region"], type: "string" },
 	WAVEKIT_COUNTRY: { path: ["station", "country"], type: "string" },
 	WAVEKIT_STATE_DIR: { path: ["stateDir"], type: "string" },
+	WAVEKIT_ACTIVITY__ENABLED: { path: ["activity", "enabled"], type: "boolean" },
 }
 
 /**
@@ -1234,6 +1311,13 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_SCANNER__MAX_PROBES__OFFSET",
 		"WAVEKIT_SCANNER__STORAGE__DIR",
 		"WAVEKIT_SOURCES__<INDEX>__SCANNER__ROLE",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS",
+		"WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND",
+		"WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST",
+		"WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND",
+		"WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_BURST",
 	]
 	return ["WAVEKIT_CONFIG", ...legacyVars, ...nestedExamples]
 }
