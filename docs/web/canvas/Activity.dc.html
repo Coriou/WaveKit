@@ -71,7 +71,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 				</div>
 			</sc-if>
 			<sc-if value="{{paneHasCols}}" hint-placeholder-val="{{true}}">
-				<div data-act-cols="" onScroll="{{onPaneScroll}}" style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; scroll-padding: 0 10px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+				<div data-act-cols="" onScroll="{{onPaneScroll}}" style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scroll-padding: 0 10px 0 {{snapL}}px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
 					<sc-for list="{{paneCols}}" as="col" hint-placeholder-count="3">
 						<section data-act-col="{{col.id}}" aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" onDragOver="{{col.over}}" onDrop="{{col.drop}}" title="↑ ↓ move · ← → other columns · Space play · S keep · Enter open · Esc close" style="position: relative; flex: {{colGrow}} 0 {{colW}}px; min-width: 0; max-width: 420px; scroll-snap-align: start; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--wk-well-glass); box-shadow: {{col.ring}}; opacity: {{col.op}}">
 							<header draggable="true" onDragStart="{{col.dragStart}}" onDragEnd="{{col.dragEnd}}" title="Drag to reorder" style="flex: none; display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 4px 0 6px; cursor: grab">
@@ -96,7 +96,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 							<sc-if value="{{col.hasNew}}" hint-placeholder-val="{{false}}">
 								<button onClick="{{col.toTop}}" style="font: inherit; cursor: pointer; position: absolute; z-index: 2; top: 50px; left: 50%; transform: translateX(-50%); height: 28px; padding: 0 12px; border: 0; border-radius: 14px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 12px; font-weight: 700; white-space: nowrap; box-shadow: var(--wk-shadow-tip)">↑ {{col.newText}}</button>
 							</sc-if>
-							<div data-act-list="" onScroll="{{col.scroll}}" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+							<div data-act-list="" onScroll="{{col.scroll}}" style="flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: auto contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
 								<sc-if value="{{col.empty}}" hint-placeholder-val="{{false}}">
 									<div style="display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 16px; text-align: center">
 										<span style="font-weight: 700; color: var(--wk-text-2)">{{col.emptyTitle}}</span>
@@ -514,7 +514,7 @@ class Component extends DCLogic {
 			if (it) this.setState({ sel: it.id, play: it.id, pos: 0, playing: true });
 		});
 	}
-	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.ct); SHARED.subs = SHARED.subs.filter(c => c !== this); }
+	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.ct); clearTimeout(this.sx); SHARED.subs = SHARED.subs.filter(c => c !== this); }
 	step() {
 		const s = this.state, next = {};
 		const tick = s.tick + 1;
@@ -691,7 +691,8 @@ class Component extends DCLogic {
 		const over = cols.length * (COL_W + GAP) - GAP > paneW - 20;
 		const fit = Math.max(1, Math.floor((paneW - 20 - (over ? PEEK : 0) + GAP) / (COL_W + GAP)));
 		const colW = over ? Math.floor((paneW - 20 - PEEK - fit * GAP) / fit) : COL_W;
-		const first = Math.round(s.paneX / (colW + GAP));
+		// columns hidden on the left, the one partly hidden behind the left peek included
+		const first = Math.max(0, Math.ceil((s.paneX - PEEK - 1) / (colW + GAP)));
 		const paneCols = cols.map((id, ci) => {
 			const p = this.col(id), L = listOf(id, p), pausedAt = s.colPause[id] || 0;
 			const fresh = pausedAt ? L.list.filter(x => x.at > pausedAt).length : 0;
@@ -752,8 +753,15 @@ class Component extends DCLogic {
 			drawerFlex: framed ? '0 0 420px' : '1 1 0', drawerR: '0', drawerBg: 'transparent', drawerBorder: '0', drawerShadow: framed ? '-1px 0 0 rgba(var(--wk-line-rgb),.10)' : 'none',
 			paneCount: cols.length ? cols.length + ' of ' + MAX_COLS : '', paneEmpty: cols.length === 0, paneHasCols: cols.length > 0,
 			hidePane: () => this.setMode('drawer'),
-			paneCols, colW, colGrow: over ? 0 : 1, canAdd: cols.length < MAX_COLS,
-			onPaneScroll: e => { const x = Math.round(e.target.scrollLeft / (colW + GAP)) * (colW + GAP); if (x !== s.paneX) this.setState({ paneX: x }); },
+			paneCols, colW, colGrow: over ? 0 : 1, snapL: over ? 10 + PEEK + GAP : 10, canAdd: cols.length < MAX_COLS,
+			// a swipe owns the scroll: snapping is off while it moves (any render mid-gesture, like the live feed's, would
+			// re-snap and pull it back) and comes back when it settles, which lands on the nearest column; state updates then too
+			onPaneScroll: e => {
+				const box = e.target;
+				if (box.style.scrollSnapType !== 'none') box.style.scrollSnapType = 'none';
+				clearTimeout(this.sx);
+				this.sx = setTimeout(() => { box.style.scrollSnapType = 'x proximity'; const x = Math.round(box.scrollLeft); if (x !== this.state.paneX) this.setState({ paneX: x }); }, 160);
+			},
 			moreLeft: moreL > 0, moreLeftN: String(moreL), moreRight: moreR > 0, moreRightN: String(moreR),
 			scrollLeftCol: scrollBy(-1), scrollRightCol: scrollBy(1),
 			heard: heard.map(h => ({ title: h.title, count: h.n + (h.n === 1 ? ' item' : ' items'), add: () => this.addCol({ title: h.title, tokens: h.tokens }, true) })),

@@ -765,7 +765,16 @@ Condensed + Noto Sans, Tabler-based icons).
     column. Up to five columns; default mock: TG 2081, Marine ch 16, Messages, Positions.
   - *Overflow:* columns are 280–420 px and fill the pane; with more than fit, the next column peeks in at
     the edge (52 px) under a fade with "+N" that scrolls one column (and "+N" on the left once scrolled).
-    Scroll snap. The first draft put the fade over the last full column and hid its timestamps.
+    Scroll snap. The first draft put the fade over the last full column and hid its timestamps. Once
+    scrolled, the previous column peeks in on the left the same way (its "+N" counts the partly hidden
+    one too).
+  - *Sideways swipes (owner's test in the canvas, v81):* a trackpad swipe over the cards must move the
+    pane, not stop at the column. Rules for the real app too: a column list contains vertical overscroll
+    only (`overscroll-behavior: auto contain`, `overflow-x: hidden`), the pane contains horizontal
+    overscroll (no browser back-swipe); snapping is off while a swipe moves and comes back when it
+    settles (a render mid-gesture, like a live list update, otherwise re-snaps and pulls the swipe back);
+    the pane re-renders only when the swipe settles. Measured in the harness: before, a sideways wheel
+    over a card moved the pane 0 px in 5 of 5 runs; after, every run lands on a column.
   - *Narrow windows and phones:* no pane and no push-in screen. The pinned columns become a chip row
     under the quick filters ("All · TG 2081 · Marine ch 16 …", with new-item counts) that switches the
     drawer's list; the Columns button hides.
@@ -829,12 +838,12 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after Activity wide mode (canvas v80). One session is queued. Two standing
+Handoff written 2026-10-12 after Activity wide mode (canvas v81, with the owner's sideways-swipe fix). One session is queued. Two standing
 rules from the owner apply (see "How we work"): the canvas stays the design source after the build
 starts, and performance is a constraint at every stage.
 
-**Check with the owner first (short):** how the Activity columns pane feels in use (the peeking next
-column with "+N", "Pin as column" in the search field, the recording state shrinking to a dot beside
+**Check with the owner first (short):** how the Activity columns pane feels in use (sideways swipes
+over the cards after the v81 fix, the peeking columns with "+N", "Pin as column" in the search field, the recording state shrinking to a dot beside
 Columns), and the open Activity follow-ups (per-column Live / audio follow; Recordings using the pane).
 
 **Core since the last merge (main@7743665, merged 2026-10-12; origin/main unchanged at the end of the
