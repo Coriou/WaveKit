@@ -101,6 +101,9 @@ describe("activity schema", () => {
 		await expect(
 			stat(join(stateDir, "activity", "activity.lock")),
 		).rejects.toThrow()
+		await expect(
+			stat(join(stateDir, "activity", "activity.lock.db")),
+		).resolves.toBeTruthy()
 	})
 
 	it("creates the schema inside the database opened by openActivityDatabase", async () => {

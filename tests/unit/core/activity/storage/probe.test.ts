@@ -44,6 +44,8 @@ describe("activity runtime probe", () => {
 		expect(limits.queueMaxBytes).toBe(8 * 1024 * 1024)
 		expect(limits.maxRows).toBe(1_000_000)
 		expect(limits.maxAgeMs).toBe(7 * 24 * 60 * 60 * 1000)
+		expect(limits.gapQuietMs).toBe(5_000)
+		expect(limits.gapMaxIntervalMs).toBe(60_000)
 		expect(limits.walPassiveBytes).toBe(16 * 1024 * 1024)
 		expect(limits.walTruncateBytes).toBe(48 * 1024 * 1024)
 		expect(limits.walPauseBytes).toBe(64 * 1024 * 1024)
@@ -55,5 +57,11 @@ describe("activity runtime probe", () => {
 				walPauseBytes: 5,
 			}),
 		).toThrow(ActivityUnavailableError)
+		expect(() => resolveActivityLimits({ maxRows: 999 })).toThrow(
+			/maxRows must be at least 1000/,
+		)
+		expect(() => resolveActivityLimits({ gapMaxIntervalMs: 0 })).toThrow(
+			/gap interval/,
+		)
 	})
 })

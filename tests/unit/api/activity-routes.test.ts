@@ -18,6 +18,7 @@ const stats: ActivityStoreStats = {
 		"queue-full": 0,
 		"store-paused": 0,
 		"write-failed": 0,
+		closed: 0,
 	},
 	excludedTelemetry: 0,
 	queueDepth: 0,
@@ -28,6 +29,7 @@ const stats: ActivityStoreStats = {
 	oldestReceivedAt: null,
 	pruneWatermark: "0",
 	paused: false,
+	writer: "running",
 }
 
 function throwingService(): ActivityQueryService {

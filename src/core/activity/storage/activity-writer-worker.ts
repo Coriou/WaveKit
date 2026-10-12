@@ -6,8 +6,11 @@
 import { parentPort } from "node:worker_threads"
 import {
 	ActivitySchemaMismatchError,
+	ActivityStoreLockedError,
 	ActivityUnavailableError,
 } from "./errors.js"
+import { acquireActivityLock } from "./lock.js"
+import type { ActivityLock } from "./lock.js"
 import { openSqliteFile } from "./probe.js"
 import { isActivityWorkerRequest, requestId } from "./writer-protocol.js"
 import type {
@@ -26,6 +29,8 @@ if (!port) {
 }
 
 let session: ActivitySession | undefined
+let lock: ActivityLock | undefined
+let writeDelayMs = 0
 let chain: Promise<void> = Promise.resolve()
 
 port.on("message", (raw: unknown) => {
@@ -52,6 +57,7 @@ async function dispatch(raw: unknown): Promise<void> {
 		if (!session)
 			throw new ActivityUnavailableError("activity writer is not open")
 		if (raw.type === "write") {
+			if (writeDelayMs > 0) await delay(writeDelayMs)
 			post({
 				id: raw.id,
 				type: "wrote",
@@ -69,11 +75,17 @@ async function dispatch(raw: unknown): Promise<void> {
 		}
 		session.close()
 		session = undefined
+		await releaseLock()
 		post({ id: raw.id, type: "closed" })
 	} catch (error) {
 		if (raw.type === "open") {
-			session?.close()
+			try {
+				session?.close()
+			} catch {
+				// The open error is the one the parent needs.
+			}
 			session = undefined
+			await releaseLock()
 		}
 		post(errorResponse(raw.id, error))
 	}
@@ -84,6 +96,8 @@ async function openSession(
 ): Promise<void> {
 	if (session)
 		throw new ActivityUnavailableError("activity writer is already open")
+	writeDelayMs = request.writeDelayMs
+	lock = await acquireActivityLock(request.lockPath)
 	const db = await openSqliteFile(request.dbPath)
 	try {
 		session = createActivitySession(
@@ -91,6 +105,7 @@ async function openSession(
 			request.dbPath,
 			request.limits as ActivityLimits,
 			request.failNextWrites,
+			request.throwNextWrites,
 		)
 	} catch (error) {
 		try {
@@ -98,6 +113,7 @@ async function openSession(
 		} catch {
 			// The open error is the one the parent needs.
 		}
+		await releaseLock()
 		throw error
 	}
 	post({
@@ -118,12 +134,34 @@ function errorResponse(id: number, error: unknown): ActivityWorkerResponse {
 			found: error.found,
 		}
 	}
+	if (error instanceof ActivityStoreLockedError) {
+		return {
+			id,
+			type: "error",
+			code: "ACTIVITY_STORE_LOCKED",
+			message: error.message,
+			lockPath: error.lockPath,
+		}
+	}
 	return {
 		id,
 		type: "error",
 		code: "ACTIVITY_UNAVAILABLE",
 		message: error instanceof Error ? error.message : String(error),
 	}
+}
+
+async function releaseLock(): Promise<void> {
+	const held = lock
+	lock = undefined
+	if (!held) return
+	await held.release()
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise(resolve => {
+		setTimeout(resolve, ms)
+	})
 }
 
 function post(message: ActivityWorkerResponse): void {

@@ -1,7 +1,9 @@
 import { rm, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { ACTIVITY_RECORD_VERSION } from "../../../../../src/core/activity/storage/contract.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
+import { buildActivityRow } from "../../../../../src/core/activity/storage/row.js"
 import { TELEMETRY_OUTPUT_TYPES } from "../../../../../src/core/activity/storage/telemetry.js"
 import {
 	countFts,
@@ -51,10 +53,15 @@ describe("activity store", () => {
 		})
 		expect(await countFts(store.dbPath, "alphaunique")).toBe(1)
 		expect(await countFts(store.dbPath, "leafunique")).toBe(1)
+		expect(store.stats().writer).toBe("running")
 		await store.close()
+		expect(store.stats().writer).toBe("stopped")
 		await expect(
 			stat(join(stateDir, "activity", "activity.lock")),
 		).rejects.toThrow()
+		await expect(
+			stat(join(stateDir, "activity", "activity.lock.db")),
+		).resolves.toBeTruthy()
 	})
 
 	it("does not store telemetry output", async () => {
@@ -72,7 +79,7 @@ describe("activity store", () => {
 			expect(records[0].payload.outputType).toBe("future-type")
 	})
 
-	it("writes one gap record when admission recovers", async () => {
+	it("writes one gap record after the quiet period, not on the next admit", async () => {
 		let clock = 1_000
 		const store = await openStore({
 			now: () => clock,
@@ -94,13 +101,23 @@ describe("activity store", () => {
 		expect(
 			store.admit(envelope({ eventId: "second", decoderId: "other" })).admitted,
 		).toBe(true)
+		const early = await readRecords(store.dbPath)
+		expect(early.map(record => record.kind)).toEqual([
+			"decoder-reception",
+			"decoder-reception",
+		])
+		clock += 5_000
+		expect(
+			store.admit(envelope({ eventId: "third", decoderId: "other" })).admitted,
+		).toBe(true)
 		const records = await readRecords(store.dbPath)
 		expect(records.map(record => record.kind)).toEqual([
+			"decoder-reception",
 			"decoder-reception",
 			"ingestion-gap",
 			"decoder-reception",
 		])
-		const gap = records[1]
+		const gap = records[2]
 		expect(gap?.kind).toBe("ingestion-gap")
 		if (gap?.kind === "ingestion-gap") {
 			expect(gap.payload.reason).toBe("rate-limited")
@@ -113,7 +130,12 @@ describe("activity store", () => {
 	it("records a write failure and stores the gap on the next admit", async () => {
 		const store = await openStore({
 			failNextWrites: 1,
-			limits: { batchWindowMs: 0, globalBurst: 10, decoderBurst: 10 },
+			limits: {
+				batchWindowMs: 0,
+				globalBurst: 10,
+				decoderBurst: 10,
+				gapQuietMs: 0,
+			},
 		})
 		expect(store.admit(envelope({ eventId: "lost" })).admitted).toBe(true)
 		expect(store.stats().dropped["write-failed"]).toBe(1)
@@ -131,6 +153,37 @@ describe("activity store", () => {
 				dropped: 1,
 			})
 		}
+	})
+
+	it("flushes the queued backlog after a thrown write without another admit", async () => {
+		const stamp = "2026-10-12T00:00:00.000Z"
+		const sample = buildActivityRow({
+			version: ACTIVITY_RECORD_VERSION,
+			eventId: "a",
+			commitSeq: "0",
+			producedAt: stamp,
+			receivedAt: stamp,
+			kind: "decoder-reception",
+			payload: envelope({ eventId: "a", receivedAt: stamp }),
+		})
+		const store = await openStore({
+			throwNextWrites: 1,
+			limits: {
+				batchWindowMs: 40,
+				batchMaxItems: 10,
+				batchMaxBytes: sample.recordBytes + 1,
+				globalBurst: 10,
+				decoderBurst: 10,
+			},
+		})
+		expect(store.admit(envelope({ eventId: "a" })).admitted).toBe(true)
+		expect(store.admit(envelope({ eventId: "b" })).admitted).toBe(true)
+		expect(store.stats().dropped["write-failed"]).toBe(1)
+		await new Promise(resolve => {
+			setTimeout(resolve, 150)
+		})
+		const records = await readRecords(store.dbPath)
+		expect(records.map(record => record.eventId)).toEqual(["b"])
 	})
 
 	it("flushes on the batch cap and on the batch window", async () => {
@@ -173,6 +226,7 @@ describe("activity store", () => {
 				walTruncateBytes: 1,
 				walPauseBytes: 1,
 				pauseRetryMs: 30,
+				gapQuietMs: 0,
 			},
 		})
 		expect(store.admit(envelope({ eventId: "visible" })).admitted).toBe(true)
