@@ -26,6 +26,9 @@ export function toApiDecoderStatus(
 		...(status.pid !== undefined ? { pid: status.pid } : {}),
 		uptime: status.uptime,
 		stats: status.stats,
+		...(status.rateHistory !== undefined
+			? { rateHistory: [...status.rateHistory] }
+			: {}),
 		lastOutputAt: status.lastOutputAt
 			? status.lastOutputAt.toISOString()
 			: null,

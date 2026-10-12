@@ -86,6 +86,34 @@ describe("Live Audio Routes", () => {
 		expect(mockLiveDemod.getStatus).toHaveBeenCalled()
 	})
 
+	it("accepts manual/auto squelch updates and bounds the margin", async () => {
+		const response = await app.inject({
+			method: "PATCH",
+			url: "/api/live-audio/config",
+			payload: { squelchMode: "auto", autoMarginDb: 8 },
+		})
+		expect(response.statusCode).toBe(200)
+		expect(mockLiveDemod.reconfigure).toHaveBeenCalledWith({
+			squelchMode: "auto",
+			autoMarginDb: 8,
+		})
+		for (const payload of [
+			{ squelchMode: "noise" },
+			{ autoMarginDb: -1 },
+			{ autoMarginDb: 41 },
+		]) {
+			expect(
+				(
+					await app.inject({
+						method: "PATCH",
+						url: "/api/live-audio/config",
+						payload,
+					})
+				).statusCode,
+			).toBe(400)
+		}
+	})
+
 	it("POST /api/live-audio/start starts the pipeline", async () => {
 		const response = await app.inject({
 			method: "POST",

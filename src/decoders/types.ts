@@ -296,6 +296,7 @@ export interface DecoderStats {
  * Status information for a decoder (Requirements 4.5, 20.1, 20.2, 20.3).
  */
 export interface DecoderStatus {
+	rateHistory?: number[]
 	/** Unique identifier for this decoder */
 	id: string
 	/** Type of decoder */
@@ -391,6 +392,8 @@ export interface DecoderEvents {
  * and parsing output into structured DecoderOutput objects.
  */
 export interface Decoder extends EventEmitter {
+	/** Raw bounded stdout/stderr output when supported by this adapter. */
+	getLog?(lines?: number): Array<{ stream: "stdout" | "stderr"; line: string }>
 	/** Unique identifier for this decoder instance */
 	readonly id: string
 	/** Type of decoder (e.g., 'dsd-fme', 'multimon-ng', 'rtl433') */

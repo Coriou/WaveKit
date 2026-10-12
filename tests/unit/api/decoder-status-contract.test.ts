@@ -35,6 +35,7 @@ function fullStatus(): DecoderStatus {
 		health: "restarting",
 		uptime: 0,
 		stats: { bytesIn: 1, eventsOut: 0, errors: 0 },
+		rateHistory: [...Array<number>(14).fill(0), 3],
 		restartCount: 8,
 		nextRestartAt: new Date("2026-10-08T12:00:30.000Z"),
 		desiredRunning: true,
@@ -56,6 +57,7 @@ function fullStatus(): DecoderStatus {
 }
 
 const expectedFields = {
+	rateHistory: [...Array<number>(14).fill(0), 3],
 	health: "restarting",
 	nextRestartAt: "2026-10-08T12:00:30.000Z",
 	desiredRunning: true,

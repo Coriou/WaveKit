@@ -213,7 +213,20 @@ export interface DecoderLastError {
 	at: string
 }
 
+/** Raw stdout/stderr output, capped to 4096 UTF-16 code units per line. */
+export interface DecoderLogLine {
+	stream: "stdout" | "stderr"
+	line: string
+}
+
+export interface DecoderLog {
+	decoderId: string
+	lines: DecoderLogLine[]
+}
+
 export interface DecoderStatus {
+	/** Messages per wall-clock minute, oldest first, last 15 including the current partial minute. */
+	rateHistory?: number[]
 	id: string
 	type: string
 	running: boolean

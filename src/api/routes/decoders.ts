@@ -177,6 +177,40 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 ) => {
 	const { decoderManager, decoderRegistry } = options
 
+	fastify.get<{
+		Params: { id: string }
+		Querystring: { lines?: number }
+	}>(
+		"/api/decoders/:id/log",
+		{
+			schema: {
+				tags: ["decoders"],
+				description:
+					"Raw decoder stdout/stderr output; lines are capped at 4096 characters and may contain sensitive decoder output.",
+				querystring: {
+					type: "object",
+					properties: {
+						lines: { type: "integer", minimum: 1, maximum: 500, default: 200 },
+					},
+					additionalProperties: false,
+				},
+			},
+		},
+		async (request, reply) => {
+			const decoder = decoderManager.getDecoder(request.params.id)
+			if (!decoder)
+				return reply.status(404).send({
+					error: "NotFound",
+					code: "DECODER_NOT_FOUND",
+					message: `Decoder with id '${request.params.id}' not found`,
+				})
+			return {
+				decoderId: decoder.id,
+				lines: decoder.getLog?.(request.query.lines ?? 200) ?? [],
+			}
+		},
+	)
+
 	const enrichWithCaps = (status: InternalDecoderStatus): DecoderInfo =>
 		toApiDecoderInfo(status, decoderRegistry)
 
