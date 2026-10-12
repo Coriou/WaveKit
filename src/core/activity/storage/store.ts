@@ -282,25 +282,23 @@ class ActivityWriterClient {
 			{ type: "write", rows: [...rows], nowMs },
 			this.writeTimeoutMs,
 			() => new ActivityWriteTimeoutError(),
-		).then(
-			response => {
-				if (response.type !== "wrote")
-					throw new ActivityUnavailableError(
-						"activity writer write was not acknowledged",
-					)
-				return response.result
-			},
-		)
+		).then(response => {
+			if (response.type !== "wrote")
+				throw new ActivityUnavailableError(
+					"activity writer write was not acknowledged",
+				)
+			return response.result
+		})
 	}
 
 	checkpoint(reason: "threshold" | "close"): Promise<ActivityWorkerSnapshot> {
 		return this.request({ type: "checkpoint", reason }, this.timeoutMs).then(
 			response => {
-			if (response.type !== "checkpointed")
-				throw new ActivityUnavailableError(
-					"activity writer checkpoint was not acknowledged",
-				)
-			return response.snapshot
+				if (response.type !== "checkpointed")
+					throw new ActivityUnavailableError(
+						"activity writer checkpoint was not acknowledged",
+					)
+				return response.snapshot
 			},
 		)
 	}
@@ -383,6 +381,7 @@ class ActivityStore implements ActivityStoreHandle {
 	private draining = false
 	private batchTimer: ReturnType<typeof setTimeout> | undefined
 	private pauseTimer: ReturnType<typeof setTimeout> | undefined
+	private gapTimer: ReturnType<typeof setTimeout> | undefined
 	private flight: Promise<void> | undefined
 	private closing: Promise<void> | undefined
 
@@ -427,7 +426,12 @@ class ActivityStore implements ActivityStoreHandle {
 
 	admit(envelope: DecodeEnvelope): AdmitResult {
 		const result = this.ingress.admit(envelope)
-		if (result.admitted || this.ingress.takeGapFlush()) this.onQueued()
+		if (result.admitted) {
+			this.onQueued()
+			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
+		} else if (result.reason !== "telemetry" && result.reason !== "closed") {
+			this.armGapTimer()
+		}
 		return result
 	}
 
@@ -480,10 +484,11 @@ class ActivityStore implements ActivityStoreHandle {
 		if (this.stopped) return
 		this.writerState = "stopped"
 		this.stopped = true
-		this.ingress.nack()
+		this.nackInFlight()
 		this.ingress.markClosed()
 		this.clearBatchTimer()
 		this.clearPause()
+		this.clearGapTimer()
 		this.logger.error("activity writer stopped")
 	}
 
@@ -495,6 +500,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.ingress.markClosed()
 		this.clearBatchTimer()
 		this.clearPause()
+		this.clearGapTimer()
 		this.logger.error("activity write timed out")
 	}
 
@@ -540,7 +546,7 @@ class ActivityStore implements ActivityStoreHandle {
 					result = session.write(batch, this.now())
 				} catch (error) {
 					if (!this.stopped) {
-						this.ingress.nack()
+						this.nackInFlight()
 						this.logger.error({ err: error }, "activity write failed")
 						if (!this.draining) this.armTimer()
 					}
@@ -548,7 +554,7 @@ class ActivityStore implements ActivityStoreHandle {
 					break
 				}
 				if (!result.ok) {
-					this.ingress.nack()
+					this.nackInFlight()
 					this.logger.error({ err: result.message }, "activity write failed")
 					if (!this.draining && !this.stopped) this.armTimer()
 					ok = false
@@ -612,7 +618,7 @@ class ActivityStore implements ActivityStoreHandle {
 		try {
 			const result = await client.write(batch, this.now())
 			if (!result.ok) {
-				this.ingress.nack()
+				this.nackInFlight()
 				this.logger.error({ err: result.message }, "activity write failed")
 				if (!this.draining && !this.stopped) this.armTimer()
 				return "failed"
@@ -626,7 +632,7 @@ class ActivityStore implements ActivityStoreHandle {
 				return "failed"
 			}
 			if (this.stopped) return "failed"
-			this.ingress.nack()
+			this.nackInFlight()
 			this.logger.error({ err: error }, "activity write failed")
 			if (!this.draining) this.armTimer()
 			return "failed"
@@ -674,6 +680,23 @@ class ActivityStore implements ActivityStoreHandle {
 				this.logger.error({ err: error }, "activity commit listener failed")
 			}
 		}
+	}
+
+	private nackInFlight(): void {
+		this.ingress.nack()
+		this.armGapTimer()
+	}
+
+	private armGapTimer(): void {
+		this.clearGapTimer()
+		if (this.stopped || this.draining || !this.ingress.hasOpenEpisode()) return
+		this.gapTimer = setTimeout(() => {
+			this.gapTimer = undefined
+			if (this.stopped || this.draining) return
+			if (this.ingress.stageOpenEpisode(this.now())) this.onQueued()
+			else if (this.ingress.hasOpenEpisode()) this.armGapTimer()
+		}, this.limits.gapQuietMs)
+		this.gapTimer.unref()
 	}
 
 	private armTimer(): void {
@@ -725,6 +748,12 @@ class ActivityStore implements ActivityStoreHandle {
 		this.pauseTimer = undefined
 	}
 
+	private clearGapTimer(): void {
+		if (!this.gapTimer) return
+		clearTimeout(this.gapTimer)
+		this.gapTimer = undefined
+	}
+
 	private async shutdown(): Promise<void> {
 		this.writerState = "stopped"
 		this.stopped = true
@@ -732,17 +761,24 @@ class ActivityStore implements ActivityStoreHandle {
 		this.ingress.markClosed()
 		this.clearBatchTimer()
 		this.clearPause()
+		this.clearGapTimer()
 		try {
 			if (this.flight) await this.flight
 			const deadline = Date.now() + this.limits.closeTimeoutMs
-			while (this.ingress.hasPending() && Date.now() < deadline) {
-				if (this.inline) {
-					if (!this.flushInline(true)) break
-				} else {
-					const step = await this.flushOne()
-					if (step !== "wrote") break
+			const drain = async (): Promise<void> => {
+				while (this.ingress.hasPending() && Date.now() < deadline) {
+					if (this.inline) {
+						if (!this.flushInline(true)) break
+					} else {
+						const step = await this.flushOne()
+						if (step !== "wrote") break
+					}
 				}
 			}
+			this.ingress.stageOpenEpisode(this.now())
+			await drain()
+			this.ingress.stageOpenEpisode(this.now())
+			await drain()
 			this.ingress.abandonQueued()
 			try {
 				const snapshot = this.inline
