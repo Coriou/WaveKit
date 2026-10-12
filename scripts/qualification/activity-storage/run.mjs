@@ -545,7 +545,7 @@ export async function run(
 	}
 	if (config.scenario === "disabled") return { ...report, status: "disabled" }
 	if (!supportedRuntime(version))
-		throw new Error("Unsupported enabled runtime: requires Node >=22.13.0")
+		throw new Error("Unsupported enabled runtime: requires Node >=24")
 	if (LONG.includes(config.scenario))
 		return {
 			...report,
