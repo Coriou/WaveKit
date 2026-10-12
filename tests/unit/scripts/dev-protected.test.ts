@@ -242,9 +242,39 @@ async function pairedSession(origin: string, code: string) {
 	return body.deviceId
 }
 
+function withDefaultPorts(text: string): string {
+	const defaults =
+		/^# wavekit-dev-protected-defaults: api=(\d+) analog=(\d+) digital=(\d+)$/m.exec(
+			text,
+		)
+	if (!defaults?.[1] || !defaults[2] || !defaults[3])
+		throw new Error("missing dev-protected port defaults")
+	return text
+		.replaceAll("__WAVEKIT_DEV_API_PORT__", defaults[1])
+		.replaceAll("__WAVEKIT_DEV_ANALOG_PORT__", defaults[2])
+		.replaceAll("__WAVEKIT_DEV_DIGITAL_PORT__", defaults[3])
+}
+
 describe("protected development config", () => {
+	it("substitutes explicit port placeholders and leaves default digits in place", () => {
+		const text = readFileSync(template, "utf8")
+		expect(text).toContain(
+			"# wavekit-dev-protected-defaults: api=9473 analog=9474 digital=9475",
+		)
+		expect(text).toContain("port: __WAVEKIT_DEV_API_PORT__")
+		expect(text).toContain("httpPort: __WAVEKIT_DEV_ANALOG_PORT__")
+		expect(text).toContain("httpPort: __WAVEKIT_DEV_DIGITAL_PORT__")
+		expect(text).toContain("9473, 9474 and 9475")
+		const source = readFileSync(script, "utf8")
+		expect(source).not.toContain("replaceAll(String(port)")
+		expect(source).toContain('process.on("SIGHUP"')
+		expect(source).toContain('process.on("SIGQUIT"')
+	})
+
 	it("is valid local-http protected configuration with three origins", () => {
-		const config = ConfigSchema.parse(parse(readFileSync(template, "utf8")))
+		const config = ConfigSchema.parse(
+			parse(withDefaultPorts(readFileSync(template, "utf8"))),
+		)
 		expect(config.access.mode).toBe("protected")
 		if (config.access.mode !== "protected") return
 		expect(config.access.exposure).toBe("local-http")
@@ -269,6 +299,10 @@ describe("protected development config", () => {
 		expect(config.access.allowedOrigins).toEqual([
 			`http://127.0.0.1:${config.api.port}`,
 		])
+		expect(config.api.port).toBe(9473)
+		expect(config.liveDemod?.httpPort).toBe(9474)
+		expect(config.digitalVoice?.httpPort).toBe(9475)
+		expect(config.audio.tcpPort).toBe(9472)
 	})
 })
 
@@ -393,12 +427,90 @@ describe("protected development server", () => {
 		)
 		const mode = await stat(server.directory)
 		expect(mode.mode & 0o777).toBe(0o700)
+		const rendered = await readFile(
+			join(dirname(server.directory), "runtime.yaml"),
+			"utf8",
+		)
+		expect(rendered).toContain(
+			"# wavekit-dev-protected-defaults: api=9473 analog=9474 digital=9475",
+		)
+		expect(rendered).toContain("9473, 9474 and 9475")
+		expect(rendered).not.toContain("__WAVEKIT_DEV_")
+		expect(rendered).toContain(`port: ${portOf(server.apiOrigin)}`)
+		expect(rendered).toContain(`httpPort: ${portOf(server.analogOrigin)}`)
+		expect(rendered).toContain(`httpPort: ${portOf(server.digitalOrigin)}`)
 		await shutdown(proc)
 		expect((await stat(server.directory)).isDirectory()).toBe(true)
 		const token = await machineToken(server.directory)
 		expect(`${proc.stdout()}${proc.stderr()}`).not.toContain(token)
 	}, 60_000)
+
+	it("stops the detached server and deletes the private directory on SIGHUP and SIGQUIT", async () => {
+		for (const signal of ["SIGHUP", "SIGQUIT"] as const) {
+			const proc = spawnScript(
+				["--api-port", "0", "--analog-port", "0", "--digital-port", "0"],
+				true,
+			)
+			const server = await ready(proc)
+			leftovers.push(dirname(server.directory))
+			const port = portOf(server.apiOrigin)
+			try {
+				proc.child.kill(signal)
+				const result = await proc.exited
+				expect(result.signal).toBeNull()
+				expect(result.code).toBe(143)
+				await expect(access(server.directory)).rejects.toMatchObject({
+					code: "ENOENT",
+				})
+				await expect(access(dirname(server.directory))).rejects.toMatchObject({
+					code: "ENOENT",
+				})
+				await expectPortClosed(port)
+			} finally {
+				await releaseListener(port)
+			}
+		}
+	}, 90_000)
 })
+
+async function expectPortClosed(port: number): Promise<void> {
+	const deadline = Date.now() + 3_000
+	while (Date.now() < deadline) {
+		try {
+			await http(port, "/health")
+		} catch {
+			return
+		}
+		await delay(50)
+	}
+	throw new Error(`port ${port} still accepting connections`)
+}
+
+async function releaseListener(port: number): Promise<void> {
+	try {
+		await http(port, "/health")
+	} catch {
+		return
+	}
+	try {
+		const { stdout } = await execFileAsync("lsof", [
+			"-nP",
+			`-iTCP:${port}`,
+			"-sTCP:LISTEN",
+			"-t",
+		])
+		for (const pid of stdout.split(/\s+/)) {
+			if (!/^\d+$/.test(pid)) continue
+			try {
+				process.kill(Number(pid), "SIGKILL")
+			} catch {
+				// The listener exited between discovery and the signal.
+			}
+		}
+	} catch {
+		// lsof exits non-zero when nothing is listening.
+	}
+}
 
 async function pairingLine(proc: Running): Promise<string> {
 	const deadline = Date.now() + 15_000

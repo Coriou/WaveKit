@@ -174,25 +174,31 @@ async function assertBuilt() {
 }
 
 function readTemplatePorts(template) {
-	const api = /^api:\n  host: 127\.0\.0\.1\n  port: ([1-9]\d{0,4})$/m.exec(
-		template,
-	)
-	const audio = /^audio:\n  tcpPort: ([1-9]\d{0,4})$/m.exec(template)
-	const analog =
-		/^liveDemod:\n  enabled: false\n  httpPort: ([1-9]\d{0,4})$/m.exec(template)
-	const digital =
-		/^digitalVoice:\n  enabled: false\n  httpPort: ([1-9]\d{0,4})$/m.exec(
+	const defaults =
+		/^# wavekit-dev-protected-defaults: api=([1-9]\d{0,4}) analog=([1-9]\d{0,4}) digital=([1-9]\d{0,4})$/m.exec(
 			template,
 		)
-	if (!api?.[1] || !audio?.[1] || !analog?.[1] || !digital?.[1])
+	const audio = /^audio:\n  tcpPort: ([1-9]\d{0,4})$/m.exec(template)
+	const shapes = [
+		/^api:\n  host: 127\.0\.0\.1\n  port: __WAVEKIT_DEV_API_PORT__$/m,
+		/^liveDemod:\n  enabled: false\n  httpPort: __WAVEKIT_DEV_ANALOG_PORT__$/m,
+		/^digitalVoice:\n  enabled: false\n  httpPort: __WAVEKIT_DEV_DIGITAL_PORT__$/m,
+	]
+	if (
+		!defaults?.[1] ||
+		!defaults[2] ||
+		!defaults[3] ||
+		!audio?.[1] ||
+		shapes.some(pattern => !pattern.test(template))
+	)
 		throw new Error(
-			"config/dev-protected.yaml must bind local-http on 127.0.0.1 with api.port, audio.tcpPort, liveDemod.httpPort and digitalVoice.httpPort",
+			"config/dev-protected.yaml must bind local-http on 127.0.0.1 with audio.tcpPort, the wavekit-dev-protected-defaults line, and __WAVEKIT_DEV_API_PORT__, __WAVEKIT_DEV_ANALOG_PORT__ and __WAVEKIT_DEV_DIGITAL_PORT__ placeholders",
 		)
 	const ports = {
-		api: Number(api[1]),
+		api: Number(defaults[1]),
 		audio: Number(audio[1]),
-		analog: Number(analog[1]),
-		digital: Number(digital[1]),
+		analog: Number(defaults[2]),
+		digital: Number(defaults[3]),
 	}
 	if (
 		new Set([ports.api, ports.audio, ports.analog, ports.digital]).size !== 4 ||
@@ -242,19 +248,17 @@ function origin(port) {
 	return `http://127.0.0.1:${port}`
 }
 
-function renderConfig(template, defaults, ports, stateDir) {
-	let rendered = template
-	const tokens = [
-		[defaults.api, "__WAVEKIT_DEV_API_PORT__"],
-		[defaults.analog, "__WAVEKIT_DEV_ANALOG_PORT__"],
-		[defaults.digital, "__WAVEKIT_DEV_DIGITAL_PORT__"],
+function renderConfig(template, ports, stateDir) {
+	const replacements = [
+		["__WAVEKIT_DEV_API_PORT__", ports.api],
+		["__WAVEKIT_DEV_ANALOG_PORT__", ports.analog],
+		["__WAVEKIT_DEV_DIGITAL_PORT__", ports.digital],
 	]
-	for (const [port, token] of tokens)
-		rendered = rendered.replaceAll(String(port), token)
-	rendered = rendered
-		.replaceAll("__WAVEKIT_DEV_API_PORT__", String(ports.api))
-		.replaceAll("__WAVEKIT_DEV_ANALOG_PORT__", String(ports.analog))
-		.replaceAll("__WAVEKIT_DEV_DIGITAL_PORT__", String(ports.digital))
+	let rendered = template
+	for (const [token, port] of replacements) {
+		if (!rendered.includes(token)) throw new Error("Port substitution failed")
+		rendered = rendered.replaceAll(token, String(port))
+	}
 	if (rendered.includes("__WAVEKIT_DEV_"))
 		throw new Error("Port substitution failed")
 	for (const value of [
@@ -385,6 +389,10 @@ async function main() {
 	}
 	process.on("SIGINT", () => requestStop("SIGINT"))
 	process.on("SIGTERM", () => requestStop("SIGTERM"))
+	// The server child is detached, so a terminal close (SIGHUP) or SIGQUIT
+	// would otherwise leave it and the private directory behind.
+	process.on("SIGHUP", () => requestStop("SIGTERM"))
+	process.on("SIGQUIT", () => requestStop("SIGTERM"))
 	if (options.pair) {
 		if (!options.directory) fail("Invalid dev-protected arguments.")
 		const apiOrigin = options.apiOrigin ?? origin(defaults.api)
@@ -417,11 +425,9 @@ async function main() {
 		await mkdir(stateDir, { mode: 0o700 })
 		await chmod(stateDir, 0o700)
 		const configPath = join(workspace, "runtime.yaml")
-		await writeFile(
-			configPath,
-			renderConfig(template, defaults, ports, stateDir),
-			{ mode: 0o600 },
-		)
+		await writeFile(configPath, renderConfig(template, ports, stateDir), {
+			mode: 0o600,
+		})
 		if (stopped()) return
 		const setup = await runCommand([
 			"setup",
