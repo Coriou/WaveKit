@@ -1,0 +1,46 @@
+# Protected reference runtime. Compose overrides every public host field from
+# WAVEKIT_PUBLIC_HOST (default receiver.example). The arrays below are the
+# slots those overrides update. No receiver and no decoders: this profile does
+# not tune or claim a dongle.
+sources: []
+decoders: []
+api:
+  host: 127.0.0.1
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: false
+liveDemod:
+  enabled: false
+  httpPort: 8081
+digitalVoice:
+  enabled: true
+  httpPort: 8082
+logging:
+  level: info
+access:
+  mode: protected
+  listenerScheme: https
+  exposure: tls-termination
+  allowedAuthorities:
+    - "receiver.example:9443"
+  allowedOrigins:
+    - "https://receiver.example:9443"
+  audio:
+    analog:
+      allowedAuthorities:
+        - "receiver.example:9444"
+      bindHost: 127.0.0.1
+    digital:
+      allowedAuthorities:
+        - "receiver.example:9445"
+      bindHost: 127.0.0.1
+  publicOrigins:
+    api: "https://receiver.example:9443"
+    analogAudio: "https://receiver.example:9444"
+    digitalAudio: "https://receiver.example:9445"
+  healthProbe:
+    target: "http://127.0.0.1:9000"
+    host: "receiver.example:9443"
