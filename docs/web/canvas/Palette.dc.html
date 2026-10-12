@@ -306,17 +306,23 @@ const SCOPES = {
 	scan: { title: 'Scan a band', ph: 'Choose a band to sweep' }
 };
 // Scanner presets (region EU), the same list as Scanner's "Scan a band" (and core's band plans where core has one).
-// Several ranges (Pagers, ISM) take their own stops and skip what lies between.
+// Every preset carries its ranges as ScanPlanner's PRESETS do (name, spacing, protocols), so the running plan shows
+// one row per range; several ranges (Pagers, ISM) take their own stops and skip what lies between. Exclusions are the
+// channels the always-on decoders already cover inside those ranges (ScanPlanner's ELSEWHERE, clamped to the range).
+const AIS_X = { startHz: 161.95e6, endHz: 162.05e6, reason: 'AIS · already decoded by AIS-catcher' };
+const ACARS_X = { startHz: 131.5125e6, endHz: 131.7375e6, reason: 'ACARS · already decoded by acarsdec' };
+const VDL2_X = { startHz: 136.9625e6, endHz: 136.9875e6, reason: 'VDL2 · already decoded by dumpvdl2' };
+const APRS_X = { startHz: 144.7875e6, endHz: 144.8125e6, reason: 'APRS · already decoded by Direwolf' };
 const SCAN_PRESETS = [
-	{ id: 'marine', label: 'Marine VHF', from: 156.0e6, to: 162.025e6, decodes: 'FM voice · skips AIS', keys: ['boats', 'ships', 'ch 16'] },
-	{ id: 'pmr', label: 'PMR / land mobile', from: 136e6, to: 174e6, decodes: 'DMR, P25, NXDN, FM voice, POCSAG', keys: ['business', 'dmr', 'vhf land mobile'] },
-	{ id: 'pagers', label: 'Pagers', from: 169.4e6, to: 466.25e6, ranges: [{ startHz: 169.4e6, endHz: 169.8e6 }, { startHz: 466e6, endHz: 466.25e6 }], decodes: 'POCSAG, FLEX', keys: ['pocsag', 'flex', 'paging'] },
-	{ id: 'air', label: 'Airband', from: 118e6, to: 137e6, decodes: 'AM voice · skips ACARS, VDL2', keys: ['aviation', 'atc', 'aircraft'] },
-	{ id: 'pmr446', label: 'PMR446', from: 446.0e6, to: 446.2e6, decodes: 'FM voice, dPMR, DMR Tier I', keys: ['pmr', 'walkie'] },
-	{ id: 'ism', label: 'ISM 433 / 868', from: 433.05e6, to: 870e6, ranges: [{ startHz: 433.05e6, endHz: 434.79e6 }, { startHz: 863e6, endHz: 870e6 }], decodes: 'rtl_433 devices, LoRa · Meshtastic', keys: ['sensors', 'lora', 'srd', 'lpd'] },
-	{ id: 'uhf', label: 'UHF land mobile', from: 400e6, to: 470e6, decodes: 'DMR, P25, NXDN, FM voice', keys: ['business', 'uhf', 'pmr uhf'] },
-	{ id: '2m', label: '2 m amateur', from: 144e6, to: 146e6, decodes: 'FM voice, DMR, YSF, D-STAR · skips APRS', keys: ['amateur', 'ham', 'vhf ham'] },
-	{ id: '70cm', label: '70 cm amateur', from: 430e6, to: 440e6, decodes: 'FM voice, DMR, YSF, D-STAR, P25', keys: ['amateur', 'ham', 'uhf ham'] }
+	{ id: 'marine', label: 'Marine VHF', from: 156.0e6, to: 162.025e6, ranges: [{ name: 'Marine VHF', startHz: 156.0e6, endHz: 162.025e6, spacingHz: [25000], protocols: ['fm', 'ais'] }], exclusions: [Object.assign({}, AIS_X, { endHz: 162.025e6 })], decodes: 'FM voice · skips AIS', keys: ['boats', 'ships', 'ch 16'] },
+	{ id: 'pmr', label: 'PMR / land mobile', from: 136e6, to: 174e6, ranges: [{ name: 'PMR / land mobile', startHz: 136e6, endHz: 174e6, spacingHz: [12500, 6250], protocols: ['dmr', 'p25', 'nxdn', 'fm', 'pocsag'] }], exclusions: [VDL2_X, AIS_X], decodes: 'DMR, P25, NXDN, FM voice, POCSAG', keys: ['business', 'dmr', 'vhf land mobile'] },
+	{ id: 'pagers', label: 'Pagers', from: 169.4e6, to: 466.25e6, ranges: [{ name: 'Pagers 169', startHz: 169.4e6, endHz: 169.8e6, spacingHz: [12500], protocols: ['pocsag', 'flex'] }, { name: 'Pagers 466', startHz: 466e6, endHz: 466.25e6, spacingHz: [12500], protocols: ['pocsag', 'flex'] }], exclusions: [], decodes: 'POCSAG, FLEX', keys: ['pocsag', 'flex', 'paging'] },
+	{ id: 'air', label: 'Airband', from: 118e6, to: 137e6, ranges: [{ name: 'Airband', startHz: 118e6, endHz: 137e6, spacingHz: [8330], protocols: ['am', 'acars', 'vdl2'] }], exclusions: [ACARS_X, VDL2_X], decodes: 'AM voice · skips ACARS, VDL2', keys: ['aviation', 'atc', 'aircraft'] },
+	{ id: 'pmr446', label: 'PMR446', from: 446.0e6, to: 446.2e6, ranges: [{ name: 'PMR446', startHz: 446.0e6, endHz: 446.2e6, spacingHz: [6250], protocols: ['fm', 'dpmr', 'dmr'] }], exclusions: [], decodes: 'FM voice, dPMR, DMR Tier I', keys: ['pmr', 'walkie'] },
+	{ id: 'ism', label: 'ISM 433 / 868', from: 433.05e6, to: 870e6, ranges: [{ name: 'ISM 433', startHz: 433.05e6, endHz: 434.79e6, spacingHz: [0], protocols: ['ism', 'lora'] }, { name: 'ISM 868', startHz: 863e6, endHz: 870e6, spacingHz: [0], protocols: ['ism', 'lora'] }], exclusions: [], decodes: 'rtl_433 devices, LoRa · Meshtastic', keys: ['sensors', 'lora', 'srd', 'lpd'] },
+	{ id: 'uhf', label: 'UHF land mobile', from: 400e6, to: 470e6, ranges: [{ name: 'UHF land mobile', startHz: 400e6, endHz: 470e6, spacingHz: [12500, 6250], protocols: ['dmr', 'p25', 'nxdn', 'fm'] }], exclusions: [], decodes: 'DMR, P25, NXDN, FM voice', keys: ['business', 'uhf', 'pmr uhf'] },
+	{ id: '2m', label: '2 m amateur', from: 144e6, to: 146e6, ranges: [{ name: '2 m amateur', startHz: 144e6, endHz: 146e6, spacingHz: [12500], protocols: ['fm', 'dmr', 'ysf', 'dstar', 'aprs'] }], exclusions: [APRS_X], decodes: 'FM voice, DMR, YSF, D-STAR · skips APRS', keys: ['amateur', 'ham', 'vhf ham'] },
+	{ id: '70cm', label: '70 cm amateur', from: 430e6, to: 440e6, ranges: [{ name: '70 cm amateur', startHz: 430e6, endHz: 440e6, spacingHz: [12500], protocols: ['fm', 'dmr', 'ysf', 'dstar', 'p25'] }], exclusions: [], decodes: 'FM voice, DMR, YSF, D-STAR, P25', keys: ['amateur', 'ham', 'uhf ham'] }
 ];
 const HOP_HZ = 1.5e6;
 const SCAN_COST = 'Takes the Pi receiver · pauses AIS-catcher, POCSAG and DMR decoding until the scan ends · live audio follows the scan';
@@ -606,7 +612,7 @@ class Component extends DCLogic {
 		if (st === 'off') return null;
 		const pr = SCAN_PRESETS.find(x => x.label === this.state.scanPreset);
 		if (st === 'watching') return Object.assign({}, SCAN_MOCK, { preset: 'This span', state: st, hop: 1, hops: 1 });
-		return Object.assign({}, SCAN_MOCK, pr ? { preset: pr.label, startHz: pr.from, endHz: pr.to, hops: pr.ranges ? pr.ranges.length : Math.max(1, Math.ceil((pr.to - pr.from) / HOP_HZ)), ranges: pr.ranges, hop: 1 } : null, { state: st, resumeIn: st === 'paused-you' ? 58 : undefined });
+		return Object.assign({}, SCAN_MOCK, pr ? { preset: pr.label, startHz: pr.from, endHz: pr.to, hops: pr.ranges.reduce((t, r) => t + Math.max(1, Math.ceil((r.endHz - r.startHz) / HOP_HZ)), 0), ranges: pr.ranges, exclusions: pr.exclusions, hop: 1 } : null, { state: st, resumeIn: st === 'paused-you' ? 58 : undefined });
 	}
 	recent() { return this.embedded() && this.props.recent ? this.props.recent : this.state.recent; }
 	boost(id) { const r = this.recent().find(x => x.id === id); return r ? Math.min(24, 9 * Math.log2(1 + r.n)) : 0; }
@@ -707,14 +713,15 @@ class Component extends DCLogic {
 			return { id: 'scan:span', title: 'Watch here', sub: mhzRange(a, b) + ' · finds signals where you are tuned, never moves the receiver', icon: P.scan, cur: !!sw && sw.state === 'watching', act: () => this.scan({ type: 'start', preset: 'This span', startHz: a, endHz: b }, 'Watching this span'), does: 'Lists what appears in this span · keeps the receiver where it is' };
 		}
 		if (pr === 'custom') return { id: 'scan:custom', title: 'Your own range…', sub: 'Drag or type the edges', icon: P.scan, act: () => this.nav('planner', 'Scan a band'), does: 'Opens Scan a band' };
-		// separate ranges (Pagers, ISM) take their own stops and skip what lies between
-		const hops = pr.ranges ? pr.ranges.reduce((t, r) => t + Math.max(1, Math.ceil((r.endHz - r.startHz) / HOP_HZ)), 0) : Math.max(1, Math.ceil((pr.to - pr.from) / HOP_HZ));
-		const range = pr.ranges ? pr.ranges.map(r => mhzRange(r.startHz, r.endHz).replace(' MHz', '')).join(' and ') + ' MHz' : mhzRange(pr.from, pr.to);
+		// every range takes its own stops; separate ranges (Pagers, ISM) skip what lies between
+		const ranges = (pr.ranges || [{ name: pr.label, startHz: pr.from, endHz: pr.to }]).map(r => Object.assign({}, r, { hops: Math.max(1, Math.ceil((r.endHz - r.startHz) / HOP_HZ)) }));
+		const hops = ranges.reduce((t, r) => t + r.hops, 0);
+		const range = ranges.length > 1 ? ranges.map(r => mhzRange(r.startHz, r.endHz).replace(' MHz', '')).join(' and ') + ' MHz' : mhzRange(pr.from, pr.to);
 		return {
 			id: 'scan:' + pr.id, title: pr.label, keys: pr.keys,
 			sub: range + ' · ' + pr.decodes,
 			icon: P.scan, cur: !!sw && sw.preset === pr.label && sw.state !== 'watching',
-			act: () => this.scan(Object.assign({ type: 'start', preset: pr.label, startHz: pr.from, endHz: pr.to, hops }, pr.ranges ? { ranges: pr.ranges } : null), 'Scanning ' + pr.label),
+			act: () => this.scan({ type: 'start', preset: pr.label, startHz: pr.from, endHz: pr.to, hops, ranges, exclusions: pr.exclusions || [] }, 'Scanning ' + pr.label),
 			does: 'Sweeps ' + pr.label + ' · ' + range, warn: SCAN_COST
 		};
 	}

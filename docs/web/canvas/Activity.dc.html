@@ -43,16 +43,154 @@ section[tabindex]:focus-visible{outline:none;box-shadow:inset 0 2px 0 var(--wk-f
 button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus);outline-offset:2px}
 </style>
 </helmet>
-<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; gap: 0; border-radius: {{rootR}}; overflow: hidden; background: {{rootBg}}; border: {{rootBorder}}; box-shadow: {{rootShadow}}; backdrop-filter: {{rootFx}}; color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
+	<!-- the columns pane: pinned searches side by side, left of the drawer (the shell's attached pane, or the board's own frame) -->
+	<sc-if value="{{showPane}}" hint-placeholder-val="{{true}}">
+		<section aria-label="Activity columns" style="position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: {{paneR}}; background: {{paneBg}}; border: {{paneBorder}}; border-right: 0">
+			<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 54px; box-sizing: border-box; padding: 8px 10px 2px 18px">
+				<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Columns</h2>
+				<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{paneCount}}</span>
+				<div style="flex: 1"></div>
+				<button onClick="{{hidePane}}" title="Hide the columns. Columns in the Activity header brings them back." style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-2); font-size: 13px">Hide</button>
+			</header>
+			<sc-if value="{{paneEmpty}}" hint-placeholder-val="{{false}}">
+				<div style="flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center">
+					<span style="font-weight: 700; font-size: 15px; color: var(--wk-text-2)">Pin a search to watch it side by side</span>
+					<span style="max-width: 380px; font-size: 13px; line-height: 1.5; color: var(--wk-text-3)">Search a talkgroup, channel, capcode or name in Activity, then Pin as column. Or start from what you hear most:</span>
+					<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 520px">
+						<sc-for list="{{heard}}" as="h" hint-placeholder-count="3">
+							<button onClick="{{h.add}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 12px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.10); color: var(--wk-accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; white-space: nowrap">+ {{h.title}}<span style="font-weight: 400; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{h.count}}</span></button>
+						</sc-for>
+					</div>
+					<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 520px">
+						<sc-for list="{{presets}}" as="p" hint-placeholder-count="3">
+							<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: var(--wk-chip); color: var(--wk-text-2); font-size: 12.5px">+ {{p.title}}</button>
+						</sc-for>
+					</div>
+				</div>
+			</sc-if>
+			<sc-if value="{{paneHasCols}}" hint-placeholder-val="{{true}}">
+				<div data-act-cols="" onScroll="{{onPaneScroll}}" style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; scroll-padding: 0 10px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+					<sc-for list="{{paneCols}}" as="col" hint-placeholder-count="3">
+						<section data-act-col="{{col.id}}" aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" onDragOver="{{col.over}}" onDrop="{{col.drop}}" title="↑ ↓ move · ← → other columns · Space play · S keep · Enter open · Esc close" style="position: relative; flex: {{colGrow}} 0 {{colW}}px; min-width: 0; max-width: 420px; scroll-snap-align: start; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--wk-well-glass); box-shadow: {{col.ring}}; opacity: {{col.op}}">
+							<header draggable="true" onDragStart="{{col.dragStart}}" onDragEnd="{{col.dragEnd}}" title="Drag to reorder" style="flex: none; display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 4px 0 6px; cursor: grab">
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wka-hint)" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="flex: none"><path d="M9 6m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M9 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M9 18m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M15 6m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M15 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M15 18m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg>
+								<sc-if value="{{col.renaming}}" hint-placeholder-val="{{false}}">
+									<input value="{{renameText}}" onChange="{{onRename}}" onKeyDown="{{renameKey}}" onBlur="{{renameCommit}}" aria-label="Column name" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 30px; box-sizing: border-box; padding: 0 8px; border: 1px solid rgba(var(--wk-line-rgb),.3); border-radius: 6px; outline: none; background: var(--wk-well); color: var(--wk-text); font: inherit; font-size: 13px; font-weight: 700">
+								</sc-if>
+								<sc-if value="{{col.titled}}" hint-placeholder-val="{{true}}">
+									<h3 style="margin: 0; min-width: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: var(--wk-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
+									<span style="flex: none; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{col.count}}</span>
+								</sc-if>
+								<div style="flex: 1"></div>
+								<button onClick="{{col.menu}}" aria-label="Options for column {{col.title}}" aria-haspopup="menu" aria-expanded="{{col.menuExp}}" style="font: inherit; cursor: pointer; flex: none; width: 30px; height: 30px; border: 0; border-radius: 6px; background: {{col.menuBg}}; color: var(--wk-text-3); display: grid; place-items: center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M12 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M19 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg></button>
+							</header>
+							<sc-if value="{{col.menuOpen}}" hint-placeholder-val="{{false}}">
+								<div role="menu" aria-label="Column {{col.title}}" style="position: absolute; z-index: 3; top: 40px; right: 6px; min-width: 190px; padding: 6px; border-radius: 10px; background: var(--wk-surface); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: var(--wk-shadow-pop)">
+									<sc-for list="{{col.items}}" as="m" hint-placeholder-count="4">
+										<button role="menuitem" aria-disabled="{{m.off}}" onClick="{{m.act}}" style="font: inherit; cursor: pointer; width: 100%; height: 36px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: {{m.fg}}; font-size: 13px; text-align: left; display: flex; align-items: center; gap: 10px">{{m.label}}<span style="flex: 1"></span><span style="font-size: 12px; color: var(--wka-hint)">{{m.hint}}</span></button>
+									</sc-for>
+								</div>
+							</sc-if>
+							<sc-if value="{{col.hasNew}}" hint-placeholder-val="{{false}}">
+								<button onClick="{{col.toTop}}" style="font: inherit; cursor: pointer; position: absolute; z-index: 2; top: 50px; left: 50%; transform: translateX(-50%); height: 28px; padding: 0 12px; border: 0; border-radius: 14px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 12px; font-weight: 700; white-space: nowrap; box-shadow: var(--wk-shadow-tip)">↑ {{col.newText}}</button>
+							</sc-if>
+							<div data-act-list="" onScroll="{{col.scroll}}" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+								<sc-if value="{{col.empty}}" hint-placeholder-val="{{false}}">
+									<div style="display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 16px; text-align: center">
+										<span style="font-weight: 700; color: var(--wk-text-2)">{{col.emptyTitle}}</span>
+										<span style="font-size: 13px; color: var(--wk-text-3); line-height: 1.5">{{col.emptyText}}</span>
+										<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
+											<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 14px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 6px; background: transparent; color: var(--wk-accent); font-size: 13px; font-weight: 700">Clear filters</button>
+										</sc-if>
+									</div>
+								</sc-if>
+								<sc-for list="{{col.groups}}" as="g" hint-placeholder-count="2">
+									<div class="wk-act-stick" style="position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; font-size: 11.5px; font-weight: 700; letter-spacing: .04em; color: var(--wk-text-3); font-variant-numeric: tabular-nums; background: linear-gradient(var(--wka-sticky) 70%, transparent)">{{g.label}}</div>
+									<sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
+										<div style="display: flex; align-items: stretch; margin-bottom: 2px; border-radius: 6px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .8s ease">
+											<button onClick="{{r.pick}}" aria-current="{{r.selected}}" style="font: inherit; color: inherit; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; border: 0; background: transparent; text-align: left; border-radius: 6px">
+												<span style="position: relative; width: 32px; height: 32px; flex: none; border-radius: 6px; background: var(--wk-fill); display: grid; place-items: center">
+													<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+													<sc-if value="{{r.rec}}" hint-placeholder-val="{{false}}"><span title="Recording now" style="position: absolute; top: -2px; right: -2px; width: 10px; height: 10px; border-radius: 50%; background: var(--wk-danger); box-shadow: 0 0 0 2px var(--wk-surface)"></span></sc-if>
+												</span>
+												<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+													<span style="display: flex; align-items: baseline; gap: 10px; min-width: 0">
+														<span style="flex: 0 1 auto; min-width: 0; font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
+														<span style="flex: 1"></span>
+														<sc-if value="{{r.kept}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="var(--wk-accent)" stroke="var(--wk-accent)" stroke-width="1.5" stroke-linejoin="round" role="img" aria-label="Kept in Recordings" style="flex: none; align-self: center"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg></sc-if>
+														<span style="flex: none; font-size: 12px; color: {{r.timeC}}; font-variant-numeric: tabular-nums">{{r.time}}</span>
+													</span>
+													<span style="display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 1px; font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden">
+														<sc-if value="{{r.locked}}" hint-placeholder-val="{{false}}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--wk-amber)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-label="Encrypted"><path d="M5 11h14v10h-14zM8 11v-4a4 4 0 1 1 8 0v4"></path></svg></sc-if>
+														<span style="overflow: hidden; text-overflow: ellipsis">{{r.meta}}</span>
+													</span>
+													<span style="margin-top: 5px; font-size: 13.5px; line-height: 1.45; color: {{r.prevC}}; font-style: {{r.prevI}}; font-family: {{r.prevF}}; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{r.preview}}</span>
+													<sc-if value="{{r.isCurrent}}" hint-placeholder-val="{{false}}">
+														<span style="display: block; height: 3px; border-radius: 2px; background: var(--wk-line-solid); margin-top: 8px; overflow: hidden"><span style="display: block; height: 100%; width: {{r.pos}}%; background: var(--wk-accent)"></span></span>
+													</sc-if>
+												</span>
+											</button>
+											<sc-if value="{{r.hasAudio}}" hint-placeholder-val="{{false}}">
+												<button class="wk-play" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 54px; border: 0; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 6px">
+													<span style="width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; border: 1px solid {{r.pBorder}}; background: {{r.pBg}}; color: {{r.pFg}}">
+														<sc-if value="{{r.playing}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
+														<sc-if value="{{r.notPlaying}}" hint-placeholder-val="{{true}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
+													</span>
+													<span style="font-size: 11px; color: {{r.durC}}; font-variant-numeric: tabular-nums">{{r.dur}}</span>
+												</button>
+											</sc-if>
+											<sc-if value="{{r.notRecorded}}" hint-placeholder-val="{{false}}">
+												<span title="Recording was off" style="flex: none; width: 54px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--wka-hint); text-align: center; line-height: 1.2">Not<br>recorded</span>
+											</sc-if>
+										</div>
+									</sc-for>
+								</sc-for>
+							</div>
+						</section>
+					</sc-for>
+					<sc-if value="{{canAdd}}" hint-placeholder-val="{{false}}">
+						<div style="flex: none; width: 184px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; border: 1px dashed rgba(var(--wk-line-rgb),.18); overflow-y: auto">
+							<span style="font-size: 12px; font-weight: 700; color: var(--wk-text-2); padding: 4px 4px 2px">Add a column</span>
+							<sc-if value="{{canPin}}" hint-placeholder-val="{{false}}">
+								<button onClick="{{pinSearch}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-size: 13px; font-weight: 700; text-align: left">Pin current search</button>
+							</sc-if>
+							<sc-for list="{{heard}}" as="h" hint-placeholder-count="2">
+								<button onClick="{{h.add}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: 13px; text-align: left">+ {{h.title}}</button>
+							</sc-for>
+							<sc-for list="{{presets}}" as="p" hint-placeholder-count="2">
+								<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: 13px; text-align: left">+ {{p.title}}</button>
+							</sc-for>
+							<span style="font-size: 12px; color: var(--wka-hint); padding: 4px; line-height: 1.45">Up to five columns. They sync to every device signed in to this WaveKit.</span>
+						</div>
+					</sc-if>
+				</div>
+				<sc-if value="{{moreLeft}}" hint-placeholder-val="{{false}}">
+					<div style="position: absolute; left: 10px; top: 54px; bottom: 10px; width: 64px; pointer-events: none; display: flex; align-items: center; justify-content: flex-start; padding-left: 6px; box-sizing: border-box; border-radius: 8px 0 0 8px; background: linear-gradient(270deg, transparent, {{fadeC}} 75%)">
+						<button onClick="{{scrollLeftCol}}" aria-label="Show {{moreLeftN}} more columns to the left" style="font: inherit; cursor: pointer; pointer-events: auto; height: 30px; padding: 0 10px 0 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 15px; background: var(--wk-surface); color: var(--wk-text-2); font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 2px; box-shadow: var(--wk-shadow-tip)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg>+{{moreLeftN}}</button>
+					</div>
+				</sc-if>
+				<sc-if value="{{moreRight}}" hint-placeholder-val="{{false}}">
+					<div style="position: absolute; right: 10px; top: 54px; bottom: 10px; width: 64px; pointer-events: none; display: flex; align-items: center; justify-content: flex-end; padding-right: 6px; box-sizing: border-box; border-radius: 0 8px 8px 0; background: linear-gradient(90deg, transparent, {{fadeC}} 75%)">
+						<button onClick="{{scrollRightCol}}" aria-label="Show {{moreRightN}} more columns to the right" style="font: inherit; cursor: pointer; pointer-events: auto; height: 30px; padding: 0 6px 0 10px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 15px; background: var(--wk-surface); color: var(--wk-text-2); font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 2px; box-shadow: var(--wk-shadow-tip)">+{{moreRightN}}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
+					</div>
+				</sc-if>
+			</sc-if>
+		</section>
+	</sc-if>
+
+	<!-- the drawer: search, the list, the detail pushed in with Back, the player -->
+	<sc-if value="{{showDrawer}}" hint-placeholder-val="{{true}}">
+	<div style="position: relative; flex: {{drawerFlex}}; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: {{drawerR}}; overflow: hidden; background: {{drawerBg}}; border: {{drawerBorder}}; box-shadow: {{drawerShadow}}">
 	<header style="flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 10px 10px 18px">
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Activity</h2>
 		<button onClick="{{togglePause}}" aria-pressed="{{paused}}" title="{{pauseTitle}}" style="font: inherit; cursor: pointer; flex: none; height: 26px; padding: 0 10px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; background: {{liveBg}}; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</button>
-		<button onClick="{{toggleRec}}" aria-pressed="{{recording}}" title="{{recTitle}}" aria-label="{{recText}}" style="font: inherit; cursor: pointer; flex: 0 1 auto; min-width: 29px; height: 26px; padding: 0 10px; border: 1px solid {{recBorder}}; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; overflow: hidden; background: transparent; color: var(--wk-text-2)"><span style="flex: none; width: 7px; height: 7px; border-radius: 50%; background: {{recDot}}"></span><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{recText}}</span></button>
+		<button onClick="{{toggleRec}}" aria-pressed="{{recording}}" title="{{recTitle}}" aria-label="{{recText}}" style="font: inherit; cursor: pointer; flex: 0 1 auto; min-width: 29px; height: 26px; padding: 0 10px; border: 1px solid {{recBorder}}; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; overflow: hidden; background: transparent; color: var(--wk-text-2)"><span style="flex: none; width: 7px; height: 7px; border-radius: 50%; background: {{recDot}}"></span><sc-if value="{{recLabel}}" hint-placeholder-val="{{true}}"><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{recText}}</span></sc-if></button>
 		<div style="flex: 1"></div>
-		<button onClick="{{toggleMode}}" aria-label="{{modeLabel}}" title="{{modeLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 36px; height: 36px; border: 0; border-radius: 6px; display: grid; place-items: center; background: transparent; color: var(--wk-text-3)">
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{modeIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
-		</button>
+		<sc-if value="{{showColsBtn}}" hint-placeholder-val="{{true}}">
+			<button onClick="{{toggleCols}}" aria-pressed="{{paneOpen}}" title="{{colsTitle}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 10px 0 8px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{colsBg}}; color: {{colsFg}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16h-16zM9.33 4v16M14.67 4v16"></path></svg>Columns</button>
+		</sc-if>
 		<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; flex: none; width: 36px; height: 36px; border: 0; border-radius: 6px; display: grid; place-items: center; background: transparent; color: var(--wk-text-3)">
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
 		</button>
@@ -70,6 +208,9 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
 				<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap">{{resultCount}}</span>
 				<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: 12.5px">Clear all</button>
+			</sc-if>
+			<sc-if value="{{canPin}}" hint-placeholder-val="{{false}}">
+				<button onClick="{{pinSearch}}" title="{{pinTitle}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 10px 0 8px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4M9 15l-4.5 4.5M14.5 4l5.5 5.5"></path></svg>{{pinText}}</button>
 			</sc-if>
 		</div>
 		<sc-if value="{{showSugg}}" hint-placeholder-val="{{false}}">
@@ -90,11 +231,11 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 		<sc-for list="{{cats}}" as="c" hint-placeholder-count="8">
 			<button aria-pressed="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.aria}}" title="{{c.label}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}; opacity: {{c.op}}">
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
-				<sc-if value="{{wide}}" hint-placeholder-val="{{true}}"><span>{{c.label}}</span></sc-if>
+				<sc-if value="{{catLabels}}" hint-placeholder-val="{{true}}"><span>{{c.label}}</span></sc-if>
 				<span style="font-weight: 400; font-size: 11.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{c.count}}</span>
 			</button>
 		</sc-for>
-		<sc-if value="{{wide}}" hint-placeholder-val="{{true}}"><div style="width: 1px; height: 20px; background: rgba(var(--wk-line-rgb),.08); flex: none; margin: 0 2px"></div></sc-if>
+		<sc-if value="{{catLabels}}" hint-placeholder-val="{{true}}"><div style="width: 1px; height: 20px; background: rgba(var(--wk-line-rgb),.08); flex: none; margin: 0 2px"></div></sc-if>
 		<button aria-pressed="{{audioOnly}}" onClick="{{toggleAudio}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{audioBorder}}; background: {{audioBg}}; color: {{audioFg}}">
 			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM4 15v-3a8 8 0 0 1 16 0v3"></path></svg>With audio
 		</button>
@@ -103,20 +244,23 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 		</button>
 	</div>
 
+	<sc-if value="{{showSwitch}}" hint-placeholder-val="{{false}}">
+		<div role="tablist" aria-label="Pinned columns" style="flex: none; display: flex; align-items: center; gap: 6px; padding: 0 14px 10px; overflow-x: auto; scrollbar-width: none">
+			<sc-for list="{{switcher}}" as="w" hint-placeholder-count="4">
+				<button role="tab" aria-selected="{{w.on}}" onClick="{{w.pick}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 10px; border-radius: 15px; border: 1px solid {{w.border}}; background: {{w.bg}}; color: {{w.fg}}; font-size: 12.5px; font-weight: 700; display: flex; align-items: center; gap: 6px; white-space: nowrap">{{w.title}}<sc-if value="{{w.hasNew}}" hint-placeholder-val="{{false}}"><span aria-label="{{w.newN}} new" style="min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 11px; display: grid; place-items: center; font-variant-numeric: tabular-nums">{{w.newN}}</span></sc-if></button>
+			</sc-for>
+		</div>
+	</sc-if>
+
 	<div style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px">
 		<sc-if value="{{showLists}}" hint-placeholder-val="{{true}}">
-			<div style="flex: 1; min-width: 0; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
-				<sc-for list="{{columns}}" as="col" hint-placeholder-count="1">
-					<section aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · S keep · Enter open · Esc close" style="flex: 1 1 0; min-width: {{colMin}}; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--wk-well-glass)">
-						<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px 0 14px">
-							<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: var(--wk-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
-							<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{col.count}}</span>
-							<div style="flex: 1"></div>
-							<sc-if value="{{col.removable}}" hint-placeholder-val="{{false}}">
-								<button onClick="{{col.remove}}" aria-label="Remove column {{col.title}}" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--wka-hint); display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
-							</sc-if>
-						</header>
-						<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+			<sc-for list="{{drawerCols}}" as="col" hint-placeholder-count="1">
+				<section data-act-col="drawer" aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · S keep · Enter open · Esc close" style="position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--wk-well-glass)">
+					<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px 0 14px">
+						<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: var(--wk-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
+						<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{col.count}}</span>
+					</header>
+					<div data-act-list="" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
 							<sc-if value="{{col.empty}}" hint-placeholder-val="{{false}}">
 								<div style="display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 16px; text-align: center">
 									<span style="font-weight: 700; color: var(--wk-text-2)">{{col.emptyTitle}}</span>
@@ -167,22 +311,9 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 									</div>
 								</sc-for>
 							</sc-for>
-						</div>
-					</section>
-				</sc-for>
-				<sc-if value="{{canAdd}}" hint-placeholder-val="{{false}}">
-					<div style="flex: none; width: 176px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; border: 1px dashed rgba(var(--wk-line-rgb),.18)">
-						<span style="font-size: 12px; font-weight: 700; color: var(--wk-text-2); padding: 4px 4px 2px">Add a column</span>
-						<sc-if value="{{canPin}}" hint-placeholder-val="{{false}}">
-							<button onClick="{{pinSearch}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-size: 13px; font-weight: 700; text-align: left">Pin current search</button>
-						</sc-if>
-						<sc-for list="{{presets}}" as="p" hint-placeholder-count="2">
-							<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: 13px; text-align: left">+ {{p.title}}</button>
-						</sc-for>
-						<span style="font-size: 12px; color: var(--wka-hint); padding: 4px; line-height: 1.45">Columns sync to every device signed in to this WaveKit.</span>
 					</div>
-				</sc-if>
-			</div>
+				</section>
+			</sc-for>
 		</sc-if>
 
 		<sc-if value="{{showDetail}}" hint-placeholder-val="{{false}}">
@@ -253,9 +384,11 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			</div>
 		</div>
 	</sc-if>
+	</div>
+	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"mode":{"editor":"enum","options":["drawer","wide"],"default":"wide"},"onMode":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"command":{"editor":null},"$preview":{"width":1240,"height":820}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"mode":{"editor":"enum","options":["wide","drawer","narrow"],"default":"wide"},"onMode":{"editor":null},"part":{"editor":null},"paneRoom":{"editor":null},"width":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"command":{"editor":null},"$preview":{"width":1240,"height":820}}'>
 const I = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
 	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
@@ -272,7 +405,10 @@ const PRESETS = [
 	{ id: 'voice', title: 'Voice', cats: ['voice'] },
 	{ id: 'msgs', title: 'Messages', cats: ['paging', 'aviation', 'mesh'] },
 	{ id: 'pos', title: 'Positions', cats: ['aircraft', 'marine', 'aprs'] },
-	{ id: 'sensors', title: 'Sensors', cats: ['sensors'] }
+	{ id: 'sensors', title: 'Sensors', cats: ['sensors'] },
+	// pinned searches (core keeps them per operator and syncs them: CORE GAPS)
+	{ id: 'tg2081', title: 'TG 2081', tokens: [{ type: 'tg', v: '2081', kind: 'Talkgroup', value: '2081' }] },
+	{ id: 'ch16', title: 'Marine ch 16', tokens: [{ type: 'freq', v: '156.800', kind: 'Frequency', value: '156.800 MHz' }] }
 ];
 const tg = (n, src, dur, t, time, extra) => Object.assign({ kind: 'call', cat: 'voice', proto: 'DMR', title: 'TG ' + n, sub: 'From radio ' + src + ' · slot 1', time, freq: '161.150', audio: dur, transcript: t, raw: { type: 'call_end', protocol: 'DMR', talkgroup: n, source: src, slot: 1, durationMs: dur * 1000, encrypted: false } }, extra || {});
 const SEED = [
@@ -332,22 +468,40 @@ function tokenMatch(t, x) {
 }
 const clock = s => { const t = 14 * 3600 + 2 * 60 + 45 + s; return [Math.floor(t / 3600), Math.floor(t / 60) % 60, t % 60].map(n => String(n).padStart(2, '0')).join(':'); };
 
+// One Activity, two parts: the shell mounts the drawer and its columns pane as two instances, and both read and write
+// this one store (the board's script runs once per page). The first mounted instance runs the live feed.
+const SHARED = { s: null, subs: [] };
+const COL_W = 280, GAP = 8, PEEK = 52, MAX_COLS = 5;
+const MODES = ['wide', 'drawer', 'narrow'];
+
 class Component extends DCLogic {
 	constructor(props) {
 		super(props);
-		this.state = {
-			items: SEED.map((x, i) => Object.assign({ id: 'm' + i }, x)), pending: [], tick: 0, later: 0,
+		if (!SHARED.s) SHARED.s = {
+			items: SEED.map((x, i) => Object.assign({ id: 'm' + i, at: 0 }, x)), pending: [], tick: 0, later: 0,
 			q: '', tokens: [], focus: false, sugg: 0, cats: [], audioOnly: false, paused: false, recording: true,
-			cols: ['all', 'voice', 'msgs'], kept: ['m8'], sel: null, play: null, pos: 0, playing: false, speed: 1, autoNext: true, mode: props.mode === 'drawer' ? 'drawer' : 'wide', copied: false
+			// the columns pane: pinned searches (All is the drawer's own list); per-column scroll pause; the narrow switcher
+			cols: ['tg2081', 'ch16', 'msgs', 'pos'], pins: {}, names: {}, colPause: {}, menu: null, renaming: null, renameText: '', editing: null, drag: null, over: null, paneX: 0,
+			nview: 'all', seen: {},
+			kept: ['m8'], sel: null, play: null, pos: 0, playing: false, speed: 1, autoNext: true, mode: MODES.indexOf(props.mode) >= 0 ? props.mode : 'wide', copied: false
 		};
+		this.state = SHARED.s;
+	}
+	// every change goes to the store and to each mounted part
+	setState(patch, cb) {
+		SHARED.s = Object.assign({}, SHARED.s, patch);
+		SHARED.subs.forEach(c => DCLogic.prototype.setState.call(c, patch, c === this ? cb : undefined));
+		if (SHARED.subs.indexOf(this) < 0) DCLogic.prototype.setState.call(this, patch, cb);
 	}
 	componentDidMount() {
-		this.timer = setInterval(() => this.step(), 200);
+		SHARED.subs.push(this);
+		DCLogic.prototype.setState.call(this, SHARED.s);
+		this.timer = setInterval(() => { if (SHARED.subs[0] === this) this.step(); }, 200);
 		this.applyCommand(this.props.command);
 	}
 	componentDidUpdate(prev) {
 		// standalone: the board's mode tweak switches the layout too
-		if (prev.mode !== this.props.mode && !this.props.onMode && this.props.mode) this.setState({ mode: this.props.mode });
+		if (prev.mode !== this.props.mode && !this.props.onMode && MODES.indexOf(this.props.mode) >= 0) this.setState({ mode: this.props.mode });
 		const c = this.props.command;
 		if (c && (!prev.command || prev.command.n !== c.n)) this.applyCommand(c);
 	}
@@ -360,7 +514,7 @@ class Component extends DCLogic {
 			if (it) this.setState({ sel: it.id, play: it.id, pos: 0, playing: true });
 		});
 	}
-	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.ct); }
+	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.ct); SHARED.subs = SHARED.subs.filter(c => c !== this); }
 	step() {
 		const s = this.state, next = {};
 		const tick = s.tick + 1;
@@ -382,7 +536,7 @@ class Component extends DCLogic {
 			});
 		}
 		if (tick % 45 === 0 && s.later < LATER.length) {
-			const it = Object.assign({ id: 'n' + tick, time: clock(Math.round(tick / 5)), fresh: tick }, LATER[s.later]);
+			const it = Object.assign({ id: 'n' + tick, time: clock(Math.round(tick / 5)), fresh: tick, at: tick }, LATER[s.later]);
 			next.later = s.later + 1;
 			if (s.paused) next.pending = s.pending.concat([it]);
 			else next.items = [it].concat(next.items || s.items);
@@ -390,6 +544,47 @@ class Component extends DCLogic {
 		this.setState(next);
 	}
 	mode() { return this.props.onMode ? (this.props.mode || 'drawer') : this.state.mode; }
+	col(id) { const p = this.state.pins[id] || PRESETS.find(x => x.id === id) || PRESETS[0]; return this.state.names[id] ? Object.assign({}, p, { title: this.state.names[id] }) : p; }
+	searchTitle() { const s = this.state; const pre = { Talkgroup: 'TG ', Capcode: 'Capcode ', MMSI: 'MMSI ', CTCSS: 'CTCSS ', DCS: 'DCS ' }; return s.tokens.map(t => (pre[t.kind] || '') + t.value).concat(s.cats.map(c => CATS.find(x => x[0] === c)[1])).join(' + '); }
+	// what you hear most, as ready-made columns (talkgroups, channels, capcodes)
+	heard() {
+		const by = {};
+		this.state.items.forEach(x => {
+			const r = x.raw || {};
+			let k = null;
+			if (r.talkgroup) k = { title: 'TG ' + r.talkgroup, tokens: [{ type: 'tg', v: String(r.talkgroup), kind: 'Talkgroup', value: String(r.talkgroup) }] };
+			else if (r.address && /^Capcode/.test(x.title)) k = { title: x.title, tokens: [{ type: 'cap', v: String(r.address), kind: 'Capcode', value: String(r.address) }] };
+			else if (x.cat === 'voice' && typeof x.audio === 'number' && !/^Analog/.test(x.title)) k = { title: x.title, tokens: [{ type: 'freq', v: x.freq, kind: 'Frequency', value: x.freq + ' MHz' }] };
+			if (!k) return;
+			by[k.title] = by[k.title] || Object.assign(k, { n: 0 });
+			by[k.title].n++;
+		});
+		const taken = this.state.cols.map(id => this.col(id).title);
+		return Object.keys(by).map(k => by[k]).filter(h => h.n > 1 && taken.indexOf(h.title) < 0).sort((a, b) => b.n - a.n).slice(0, 3);
+	}
+	addCol(def, open) {
+		const s = this.state;
+		if (s.cols.length >= MAX_COLS) return;
+		const id = def.id && !def.tokens && !def.cats ? def.id : 'pin' + s.tick + '-' + s.cols.length;
+		const pins = def.id && !def.tokens && !def.cats ? s.pins : Object.assign({}, s.pins, { [id]: { id, title: def.title, tokens: def.tokens || [], cats: def.cats } });
+		const next = { cols: s.cols.concat([id]), pins };
+		// no room for the pane: the new column shows in the switcher instead
+		if (!this.room()) Object.assign(next, { nview: id, seen: Object.assign({}, s.seen, { [id]: s.tick }) });
+		this.setState(next);
+		if (open && this.room() && this.mode() !== 'wide') this.setMode('wide');
+		// the new column is the last one: bring it into view
+		if (this.room()) setTimeout(() => { const box = document.querySelector('[data-act-cols]'); if (box) box.scrollTo({ left: box.scrollWidth, behavior: 'smooth' }); }, 60);
+	}
+	setMode(m) { if (this.props.onMode) this.props.onMode(m); else this.setState({ mode: m }); }
+	room() { return this.props.part ? this.props.paneRoom !== false : this.state.mode !== 'narrow'; }
+	moveCol(id, d) { const c = this.state.cols.slice(), i = c.indexOf(id), j = i + d; if (i < 0 || j < 0 || j >= c.length) return; c.splice(i, 1); c.splice(j, 0, id); this.setState({ cols: c, menu: null }); }
+	removeCol(id) { const s = this.state; this.setState({ cols: s.cols.filter(c => c !== id), menu: null, nview: s.nview === id ? 'all' : s.nview, editing: s.editing === id ? null : s.editing }); }
+	focusCol(from, d) {
+		const all = Array.prototype.slice.call(document.querySelectorAll('section[data-act-col]'));
+		const panes = all.filter(n => n.getAttribute('data-act-col') !== 'drawer'), drawer = all.find(n => n.getAttribute('data-act-col') === 'drawer');
+		const order = panes.concat(drawer ? [drawer] : []), i = order.indexOf(from), n = order[i + d];
+		if (n) { n.focus(); if (n.scrollIntoView) n.scrollIntoView({ block: 'nearest', inline: 'nearest' }); }
+	}
 	matches(x, extra) {
 		const s = this.state;
 		if (s.cats.length && !s.cats.includes(x.cat)) return false;
@@ -430,12 +625,15 @@ class Component extends DCLogic {
 	addToken(t) { this.setState({ tokens: this.state.tokens.concat([t]), q: '', sugg: 0 }); }
 	resume() { const s = this.state; this.setState({ paused: false, pending: [], items: s.pending.slice().reverse().concat(s.items) }); }
 	renderVals() {
-		const s = this.state, mode = this.mode(), wide = mode === 'wide';
+		const s = this.state, mode = this.mode(), part = this.props.part || '';
+		// where the pane can go: the shell says whether it has room (a full-height drawer with the Receiver clear of the
+		// Tuner); standalone, the board's mode tweak plays both: wide (pane open), drawer (pane shut), narrow (no room)
+		const room = this.room(), paneOpen = room && mode === 'wide';
+		const showPane = part === 'pane' || (!part && paneOpen), showDrawer = part !== 'pane';
+		const framed = !part && paneOpen;
 		const items = s.items;
 		const sugg = this.suggestions();
 		const selItem = s.sel ? items.find(x => x.id === s.sel) : null;
-		const colIds = wide ? s.cols : ['all'];
-		const pre = id => PRESETS.find(p => p.id === id) || PRESETS[0];
 		const hasQuery = !!(s.q.trim() || s.tokens.length || s.cats.length || s.audioOnly);
 		const row = x => {
 			const isCur = s.play === x.id, isPlay = isCur && s.playing;
@@ -462,54 +660,131 @@ class Component extends DCLogic {
 				play: () => this.playId(x.id)
 			};
 		};
-		const columns = colIds.map(id => {
-			const p = pre(id);
-			const list = items.filter(x => this.matches(x, p));
+		// one list: the drawer's (All, or the switcher's pick) or a pane column; the drawer's search narrows every list
+		const listOf = (id, p) => {
+			const list = items.filter(x => this.matches(x, id === 'all' ? null : p));
 			const groups = [];
 			list.forEach(x => {
 				const label = x.time.slice(0, 5);
 				const g = groups[groups.length - 1];
 				if (g && g.key === label) g.rows.push(row(x)); else groups.push({ key: label, label: groups.length === 0 && label >= clock(Math.round(s.tick / 5)).slice(0, 5) ? 'Just now' : label, rows: [row(x)] });
 			});
-			return {
-				title: p.title, count: String(list.length), groups, empty: list.length === 0,
-				emptyTitle: hasQuery ? 'Nothing matches' : 'Quiet so far',
-				emptyText: hasQuery ? 'No ' + p.title.toLowerCase() + ' matches these filters.' : 'New ' + p.title.toLowerCase() + ' will appear here as WaveKit decodes it.',
-				removable: wide && colIds.length > 1,
-				remove: () => this.setState({ cols: s.cols.filter(c => c !== id) }),
-				key: e => {
-					const i = list.findIndex(x => x.id === s.sel);
-					if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const n = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; if (n) this.setState({ sel: n.id }); }
-					else if (e.key === ' ' && i >= 0 && this.playable(list[i])) { e.preventDefault(); this.playId(list[i].id); }
-					else if ((e.key === 's' || e.key === 'S') && i >= 0 && this.playable(list[i])) { e.preventDefault(); this.toggleKeep(list[i].id); }
-					else if (e.key === 'Escape') this.setState({ sel: null });
-				}
+			const key = e => {
+				const i = list.findIndex(x => x.id === s.sel);
+				if (e.target !== e.currentTarget && e.key !== 'Escape') return;
+				if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const n = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; if (n) this.setState({ sel: n.id }); }
+				else if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); this.focusCol(e.currentTarget, e.key === 'ArrowRight' ? 1 : -1); }
+				else if (e.key === ' ' && i >= 0 && this.playable(list[i])) { e.preventDefault(); this.playId(list[i].id); }
+				else if ((e.key === 's' || e.key === 'S') && i >= 0 && this.playable(list[i])) { e.preventDefault(); this.toggleKeep(list[i].id); }
+				else if (e.key === 'Escape') this.setState({ sel: null, menu: null });
 			};
+			return {
+				id, title: p.title, count: String(list.length), groups, empty: list.length === 0, list, key,
+				emptyTitle: hasQuery ? 'Nothing matches' : 'Quiet so far',
+				emptyText: hasQuery ? 'Nothing in ' + p.title + ' matches the search.' : 'New ' + (id === 'all' ? 'activity' : p.title) + ' will appear here as WaveKit decodes it.'
+			};
+		};
+		// the columns pane
+		const cols = s.cols;
+		const paneW = part === 'pane' ? (this.props.width || 900) : 1240 - 420;
+		// columns fill the pane; when there are more than fit, the next one peeks in at the edge (that is where "+N" sits)
+		const over = cols.length * (COL_W + GAP) - GAP > paneW - 20;
+		const fit = Math.max(1, Math.floor((paneW - 20 - (over ? PEEK : 0) + GAP) / (COL_W + GAP)));
+		const colW = over ? Math.floor((paneW - 20 - PEEK - fit * GAP) / fit) : COL_W;
+		const first = Math.round(s.paneX / (colW + GAP));
+		const paneCols = cols.map((id, ci) => {
+			const p = this.col(id), L = listOf(id, p), pausedAt = s.colPause[id] || 0;
+			const fresh = pausedAt ? L.list.filter(x => x.at > pausedAt).length : 0;
+			const menuOpen = s.menu === id;
+			const item = (label, act, hint, off) => ({ label, hint: hint || '', off: off ? 'true' : 'false', fg: off ? 'var(--wk-text-5)' : 'var(--wk-text)', act: off ? () => {} : act });
+			return Object.assign(L, {
+				renaming: s.renaming === id, titled: s.renaming !== id,
+				menuOpen, menuExp: menuOpen ? 'true' : 'false', menuBg: menuOpen ? 'var(--wk-fill)' : 'transparent',
+				menu: e => { e.stopPropagation(); this.setState({ menu: menuOpen ? null : id }); },
+				items: [
+					item('Rename', () => this.setState({ renaming: id, renameText: p.title, menu: null })),
+					item('Edit search', () => this.setState({ tokens: (p.tokens || []).slice(), cats: (p.cats || []).slice(), q: '', editing: id, menu: null }), 'in Activity'),
+					item('Move left', () => this.moveCol(id, -1), '', ci === 0),
+					item('Move right', () => this.moveCol(id, 1), '', ci === cols.length - 1),
+					item('Remove', () => this.removeCol(id))
+				].map(m => m.label === 'Remove' ? Object.assign(m, { fg: 'var(--wk-danger-soft)' }) : m),
+				hasNew: fresh > 0, newText: fresh + ' new',
+				// scrolled away from the top: the column holds its place and counts what arrives above
+				scroll: e => { const top = e.target.scrollTop > 24; if (top !== !!pausedAt) this.setState({ colPause: Object.assign({}, s.colPause, { [id]: top ? s.tick || 1 : 0 }) }); },
+				toTop: e => { const sec = e.currentTarget.closest('section'), l = sec && sec.querySelector('[data-act-list]'); if (l) l.scrollTo({ top: 0, behavior: 'smooth' }); },
+				// drag a column's header onto another to reorder (Move left / right in its menu does the same)
+				dragStart: e => { try { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; } catch (err) {} this.setState({ drag: id, menu: null }); },
+				dragEnd: () => this.setState({ drag: null, over: null }),
+				over: e => { if (!s.drag || s.drag === id) return; e.preventDefault(); if (s.over !== id) this.setState({ over: id }); },
+				drop: e => { e.preventDefault(); if (!s.drag || s.drag === id) return; const c = cols.filter(x => x !== s.drag); c.splice(c.indexOf(id) + (cols.indexOf(s.drag) < ci ? 1 : 0), 0, s.drag); this.setState({ cols: c, drag: null, over: null }); },
+				ring: s.over === id ? 'inset 0 0 0 1.5px rgba(var(--wk-accent-rgb),.6)' : s.editing === id ? 'inset 0 0 0 1px rgba(var(--wk-accent-rgb),.35)' : 'none',
+				op: s.drag === id ? 0.5 : 1
+			});
 		});
+		const scrollBy = d => e => { const sec = e.currentTarget.closest('section'), box = sec && sec.querySelector('[data-act-cols]'); if (box) box.scrollBy({ left: d * (colW + GAP), behavior: 'smooth' }); };
+		const moreL = Math.min(first, cols.length), moreR = Math.max(0, cols.length - fit - first);
+		const heard = this.heard();
+		// the drawer: All, or (no room for the pane) the column picked in the switcher
+		const nview = !room && s.nview !== 'all' && cols.indexOf(s.nview) >= 0 ? s.nview : 'all';
+		const dcol = listOf(nview, nview === 'all' ? { title: 'All activity' } : this.col(nview));
+		const pickView = id => this.setState({ nview: id, seen: Object.assign({}, s.seen, { [nview]: s.tick, [id]: s.tick }), sel: null });
+		const switcher = ['all'].concat(cols).map(id => {
+			const on = id === nview, p = id === 'all' ? { title: 'All' } : this.col(id);
+			const newN = on || id === 'all' ? 0 : items.filter(x => x.at > (s.seen[id] || 0) && this.matches(x, p)).length;
+			return { title: p.title, on: on ? 'true' : 'false', hasNew: newN > 0, newN: String(newN), pick: () => pickView(id),
+				border: on ? 'transparent' : 'rgba(var(--wk-line-rgb),.18)', bg: on ? 'var(--wk-sel)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-2)' };
+		});
+		const editing = s.editing && cols.indexOf(s.editing) >= 0 ? s.editing : null;
+		const canPin = (s.tokens.length > 0 || s.cats.length > 0) && (!!editing || cols.length < MAX_COLS);
 		const related = selItem ? items.filter(x => x !== selItem && x.title === selItem.title && x.proto === selItem.proto) : [];
 		const playItem = s.play ? items.find(x => x.id === s.play) : null;
 		const total = items.filter(x => this.matches(x)).length;
+		// surfaces: in the shell the drawer is the board's root and the slot draws the pane's surface; framed on the board,
+		// pane and drawer are one opaque surface (as in the shell while the pane is open)
+		const glass = { bg: 'var(--wk-glass)', border: '1px solid rgba(var(--wk-line-rgb),.14)', shadow: 'inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl)', fx: 'blur(26px) var(--wk-glass-fx)' };
+		const root = part === 'pane' || framed ? { bg: framed ? 'var(--wk-surface)' : 'transparent', border: framed ? glass.border : '0', shadow: framed ? 'var(--wk-shadow-xl)' : 'none', fx: 'none' } : glass;
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
-			wide, hasQuery,
+			rootR: part === 'pane' ? '12px 0 0 12px' : '12px', rootBg: root.bg, rootBorder: root.border, rootShadow: root.shadow, rootFx: root.fx,
+			showPane, showDrawer,
+			paneR: '0', paneBg: 'transparent', paneBorder: '0', fadeC: framed || part === 'pane' ? 'var(--wk-surface)' : 'var(--wk-glass-strong)',
+			drawerFlex: framed ? '0 0 420px' : '1 1 0', drawerR: '0', drawerBg: 'transparent', drawerBorder: '0', drawerShadow: framed ? '-1px 0 0 rgba(var(--wk-line-rgb),.10)' : 'none',
+			paneCount: cols.length ? cols.length + ' of ' + MAX_COLS : '', paneEmpty: cols.length === 0, paneHasCols: cols.length > 0,
+			hidePane: () => this.setMode('drawer'),
+			paneCols, colW, colGrow: over ? 0 : 1, canAdd: cols.length < MAX_COLS,
+			onPaneScroll: e => { const x = Math.round(e.target.scrollLeft / (colW + GAP)) * (colW + GAP); if (x !== s.paneX) this.setState({ paneX: x }); },
+			moreLeft: moreL > 0, moreLeftN: String(moreL), moreRight: moreR > 0, moreRightN: String(moreR),
+			scrollLeftCol: scrollBy(-1), scrollRightCol: scrollBy(1),
+			heard: heard.map(h => ({ title: h.title, count: h.n + (h.n === 1 ? ' item' : ' items'), add: () => this.addCol({ title: h.title, tokens: h.tokens }, true) })),
+			presets: PRESETS.filter(p => p.id !== 'all' && cols.indexOf(p.id) < 0 && !p.tokens).map(p => ({ title: p.title, add: () => this.addCol(p, true) })),
+			renameText: s.renameText,
+			onRename: e => this.setState({ renameText: e.target.value }),
+			renameKey: e => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } else if (e.key === 'Escape') { e.preventDefault(); this.setState({ renaming: null }); } },
+			renameCommit: () => { if (!s.renaming) return; const t = s.renameText.trim(); this.setState({ renaming: null, names: t ? Object.assign({}, s.names, { [s.renaming]: t }) : s.names }); },
+			// the drawer
+			showColsBtn: room && part !== 'pane', paneOpen: paneOpen ? 'true' : 'false',
+			colsTitle: paneOpen ? 'Hide the columns' : 'Show your pinned searches as columns beside Activity',
+			colsBg: paneOpen ? 'var(--wk-sel)' : 'transparent', colsFg: paneOpen ? 'var(--wk-accent)' : 'var(--wk-text-2)',
+			toggleCols: () => this.setMode(paneOpen ? 'drawer' : 'wide'),
+			showSwitch: !room && cols.length > 0, switcher,
+			catLabels: false, hasQuery,
 			paused: s.paused,
 			liveText: s.paused ? (s.pending.length ? 'Paused · ' + s.pending.length + ' new' : 'Paused') : 'Live',
 			pauseTitle: s.paused ? 'Resume and show new activity' : 'Pause the feed while you read',
 			liveBg: s.paused ? 'rgba(var(--wk-amber-rgb),.14)' : 'rgba(var(--wk-accent-rgb),.12)', liveFg: s.paused ? 'var(--wk-amber)' : 'var(--wk-accent)',
 			togglePause: () => s.paused ? this.resume() : this.setState({ paused: true }),
-			recording: s.recording, recText: s.recording ? 'Recording all audio' : 'Recording off',
-			recTitle: s.recording ? 'Every analog transmission and digital call is saved' : 'Audio is not being saved',
+			recording: s.recording, recText: s.recording ? 'Recording' : 'Recording off',
+			recTitle: s.recording ? 'Recording all audio. Every analog transmission and digital call is saved' : 'Recording off. Audio is not being saved',
+			// beside the Columns button the recording state is its dot (the title says it)
+			recLabel: !(room && part !== 'pane'),
 			recDot: s.recording ? 'var(--wk-danger)' : 'var(--wk-text-5)', recBorder: 'transparent',
 			toggleRec: () => this.setState({ recording: !s.recording }),
-			modeIcon: wide ? ['M4 4h16v16h-16z', 'M14 4v16'] : ['M4 4h16v16h-16z', 'M9 4v16', 'M15 4v16'],
-			modeLabel: wide ? 'Narrow to one list' : 'Widen to columns',
-			toggleMode: () => this.props.onMode ? this.props.onMode(wide ? 'drawer' : 'wide') : this.setState({ mode: wide ? 'drawer' : 'wide' }),
 			close: () => this.props.onClose && this.props.onClose(),
 			q: s.q,
 			resultCount: total + (total === 1 ? ' result' : ' results'),
 			placeholder: s.tokens.length ? 'Narrow further…' : 'Search talkgroups, callsigns, messages, transcripts…',
-			searchBorder: s.focus ? 'rgba(var(--wk-line-rgb),.3)' : 'rgba(var(--wk-line-rgb),.18)',
+			searchBorder: editing ? 'rgba(var(--wk-accent-rgb),.45)' : s.focus ? 'rgba(var(--wk-line-rgb),.3)' : 'rgba(var(--wk-line-rgb),.18)',
 			onQ: e => this.setState({ q: e.target.value, sugg: 0 }),
 			onFocus: () => this.setState({ focus: true }),
 			onBlur: () => this.setState({ focus: false }),
@@ -518,35 +793,38 @@ class Component extends DCLogic {
 				else if (e.key === 'ArrowDown' && sugg.length) { e.preventDefault(); this.setState({ sugg: (s.sugg + 1) % sugg.length }); }
 				else if (e.key === 'ArrowUp' && sugg.length) { e.preventDefault(); this.setState({ sugg: (s.sugg - 1 + sugg.length) % sugg.length }); }
 				else if (e.key === 'Backspace' && !s.q && s.tokens.length) this.setState({ tokens: s.tokens.slice(0, -1) });
-				else if (e.key === 'Escape') { if (s.q) this.setState({ q: '' }); else e.target.blur(); }
+				else if (e.key === 'Escape') { if (s.q) this.setState({ q: '' }); else if (editing) this.setState({ editing: null, tokens: [], cats: [] }); else e.target.blur(); }
 			},
 			tokens: s.tokens.map(t => ({ kind: t.kind, value: t.value, remove: () => this.setState({ tokens: s.tokens.filter(x => x !== t) }) })),
 			showSugg: s.focus && sugg.length > 0,
 			sugg: sugg.map((x, i) => ({ kind: x.kind, value: x.value, count: x.n + (x.n === 1 ? ' result' : ' results'), on: i === s.sugg, bg: i === s.sugg ? 'rgba(var(--wk-accent-rgb),.10)' : 'transparent', enter: () => this.setState({ sugg: i }), pick: e => { e.preventDefault(); this.addToken(x.t); } })),
-			clearAll: () => this.setState({ q: '', tokens: [], cats: [], audioOnly: false }),
+			clearAll: () => this.setState({ q: '', tokens: [], cats: [], audioOnly: false, editing: null }),
+			// Pin as column: the search becomes a column (and opens the pane); editing a column's search updates it instead
+			canPin, pinText: editing ? 'Update column' : 'Pin as column',
+			pinTitle: editing ? 'Save this search to the column ' + this.col(editing).title : room ? 'Keep this search as a column beside Activity' : 'Keep this search as a column you can switch to',
+			pinSearch: () => {
+				if (editing) {
+					const p = this.col(editing);
+					return this.setState({ pins: Object.assign({}, s.pins, { [editing]: Object.assign({}, p, { tokens: s.tokens, cats: s.cats.length ? s.cats : undefined }) }), editing: null, tokens: [], cats: [], q: '' });
+				}
+				const def = { title: this.searchTitle(), tokens: s.tokens, cats: s.cats.length ? s.cats : undefined };
+				this.setState({ tokens: [], cats: [], q: '' });
+				this.addCol(def, true);
+			},
 			cats: CATS.map(([id, label]) => {
 				const on = s.cats.includes(id), n = items.filter(x => x.cat === id).length;
 				return { label, aria: label + ', ' + n, icon: I[id], count: String(n), on, op: n ? 1 : 0.45, border: 'transparent', bg: on ? 'var(--wk-sel)' : 'var(--wk-chip)', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-2)', pick: () => this.setState({ cats: on ? s.cats.filter(c => c !== id) : s.cats.concat([id]) }) };
 			}),
 			audioOnly: s.audioOnly, toggleAudio: () => this.setState({ audioOnly: !s.audioOnly }),
 			audioBorder: 'transparent', audioBg: s.audioOnly ? 'var(--wk-sel)' : 'var(--wk-chip)', audioFg: s.audioOnly ? 'var(--wk-accent)' : 'var(--wk-text-2)',
-			showLists: wide || !selItem,
-			columns,
-			colMin: wide ? '250px' : '0',
-			chipWrap: wide ? 'nowrap' : 'wrap',
-			canAdd: wide && s.cols.length < 5,
-			presets: PRESETS.filter(p => !s.cols.includes(p.id)).map(p => ({ title: p.title, add: () => this.setState({ cols: s.cols.concat([p.id]) }) })),
-			canPin: s.tokens.length > 0 || s.cats.length > 0,
-			pinSearch: () => {
-				const id = 'pin' + s.tick;
-				const title = s.tokens.map(t => t.value).concat(s.cats.map(c => CATS.find(x => x[0] === c)[1])).join(' + ');
-				PRESETS.push({ id, title, tokens: s.tokens, cats: s.cats.length ? s.cats : undefined });
-				this.setState({ cols: s.cols.concat([id]), tokens: [], cats: [] });
-			},
+			chipWrap: 'wrap',
+			// an item picked in any list, pane columns included, opens here in place of the list
+			showLists: !selItem,
+			drawerCols: [dcol],
 			showDetail: !!selItem,
-			detailFlex: wide ? '0 0 380px' : '1 1 0',
-			backText: wide ? '' : 'Back', backLabel: wide ? 'Close details' : 'Back to the list',
-			backIcon: wide ? 'M6 6l12 12M18 6l-12 12' : 'M15 6l-6 6l6 6',
+			detailFlex: '1 1 0',
+			backText: 'Back', backLabel: 'Back to the list',
+			backIcon: 'M15 6l-6 6l6 6',
 			closeDetail: () => this.setState({ sel: null }),
 			sel: selItem || items[0],
 			selFreq: selItem ? selItem.freq : '',

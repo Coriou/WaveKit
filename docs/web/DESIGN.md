@@ -58,7 +58,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Listen island | Listen, squelch meter with auto/off, volume, analog vs decoded voice, AGC, filters, record | Active |
 | Decoded messages + Decode card | One card anatomy for every decoder; JSON fallback for unknown rtl_433 models | Active |
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
-| Activity | Search with typed chips, multi-column, detail pane, audio replay, transcripts, live feed | Active, polished once |
+| Activity | The drawer (search with typed chips, one list, detail pushed in with Back, audio replay, transcripts, live feed) plus its columns pane: pinned searches side by side, attached to the drawer's left; a switcher row when there is no room. `mode` tweak: wide / drawer / narrow | Active, wide mode reworked |
 | Map | Everything with a position around the station on a real Brittany coastline: layer rail, overlays and legend, collision-free labels, cluster chooser, location setup, last-hour replay chip, tile source. Wired into C (Map in the dock) | Active, second pass |
 | Recordings | What you kept: day-grouped list, rows that open in place with waveform + trim (or an IQ thumbnail), name and note, transcript, download / copy link; shared player; IQ "play as source"; storage line; live manual recording. Wired into C (Recordings in the dock); Keep (S) added to Activity | Active, first pass |
 | Command palette (⌘K) | Tune, change any setting (colour scopes with live preview; every Settings row reachable), act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
@@ -745,11 +745,54 @@ Condensed + Noto Sans, Tabler-based icons).
     subtle (quiet selection rule); disjoint stretches (169 + 466 MHz) keep the segmented ruler with a
     break.
 
+- **Activity wide mode: the columns pane (owner, 2026-10-12, approved in chat one question at a time;
+  canvas v80).** Activity is the second user of "drawer + attached pane". The old wide mode (an overlay up
+  to 1240 px between the island rows, columns plus a 380 px detail) is gone.
+  - *What goes where:* the drawer stays exactly the narrow Activity (search, the All list, the detail
+    pushed in with Back, the player). The pane to its left holds the pinned-search columns. An item picked
+    in any column opens in the drawer and stays highlighted in its column. Rejected: the detail in the pane
+    (no columns in this mode), and every list in the pane with the drawer as a detail-only surface.
+  - *Opening:* a labelled "Columns" button in the drawer header (it replaces the widen icon; quiet
+    selection like "Scan a band") and "Pin as column" in the search field, which turns the current search
+    into a column and opens the pane. An empty pane says how to pin and offers what you hear most
+    (talkgroups, channels, capcodes heard more than once) plus the preset columns.
+  - *Remembered:* the pane's open state is kept per drawer and synced through core with the columns
+    (CORE-GAPS, operator settings). Scanner's plan pane stays a task and is not remembered.
+  - *Columns:* header with a drag grip (drag to reorder), the search's name, a count and ⋯ (Rename, Edit
+    search, Move left / right, Remove). Edit search loads the column's chips into the drawer search, whose
+    pin button becomes "Update column". A column scrolled away from the top holds its place and shows
+    "↑ N new". ← / → move focus across columns and the drawer list. The drawer's search narrows every
+    column. Up to five columns; default mock: TG 2081, Marine ch 16, Messages, Positions.
+  - *Overflow:* columns are 280–420 px and fill the pane; with more than fit, the next column peeks in at
+    the edge (52 px) under a fade with "+N" that scrolls one column (and "+N" on the left once scrolled).
+    Scroll snap. The first draft put the fade over the last full column and hid its timestamps.
+  - *Narrow windows and phones:* no pane and no push-in screen. The pinned columns become a chip row
+    under the quick filters ("All · TG 2081 · Marine ch 16 …", with new-item counts) that switches the
+    drawer's list; the Columns button hides.
+  - *Shell:* the pane slot in Immersive is generic: each drawer declares whether it wants its pane, its
+    label and whether it pushes in when narrow (Scanner yes, Activity no). Opaque, no blur, tuned card
+    hidden while the pane is open, as for the Scanner. Recordings can use the same slot later.
+  - *Canvas mechanics:* the drawer and the pane are two instances of the Activity board sharing one
+    module-level store (the canvas runtime compiles a board's script once per page), so selection,
+    playback and the feed stay in sync. The real app has one Activity state; this is a prototype device.
+  - *Header:* next to the Columns button the recording state shrinks to its dot (the title says
+    "Recording all audio"), because the full label truncated at 420 px.
+  - *Performance:* no new blurred surface (pane and drawer opaque while open); only rendered columns hold
+    rows, and the real app virtualises each column (the five-column cap bounds the work).
+- **Scanner follow-ups (owner, 2026-10-12).** The attached pane "feels right, keep it". Consent to resume
+  after a scan grew moved to the Tuner hold row ("Resume needs your OK" · "Resume and pause APRS" · stop);
+  the Scanner drawer no longer holds that block. The quiet selected state of "Scan a band" in Mono stays.
+  Mock gaps fixed: the shell keeps the planner's pass time and Options (Hold on activity off and Find
+  only never hold; "Stop after 1 pass" finishes the scan, which leaves the Tuner row); ⌘K presets start
+  with one row per range (names, spacing, protocols) and the skips for channels decoded elsewhere.
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
 - Activity follow-ups: unread state and watched talkgroups/capcodes, real time-range
-  picker and jump-to-time, bulk actions (export, copy, audio clip).
+  picker and jump-to-time, bulk actions (export, copy, audio clip). Columns pane: whether a
+  column can have its own Live/Pause and audio follow (auto-play new calls in one column only);
+  whether Recordings wants the pane (a player and trim beside the list?).
 - Right-click menus on signals (Listen, Decode as…, Save). Should reuse palette
   commands so both stay in sync.
 - Tuned card placement: answered 2026-10-11 (drag by the type tile, magnetic snap to
@@ -786,41 +829,24 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after the Scanner second pass (canvas v77). Two sessions are queued, in
-this order. Two standing rules from the owner apply to both (see "How we work"): the canvas stays
-the design source after the build starts, and performance is a constraint at every stage.
+Handoff written 2026-10-12 after Activity wide mode (canvas v80). One session is queued. Two standing
+rules from the owner apply (see "How we work"): the canvas stays the design source after the build
+starts, and performance is a constraint at every stage.
 
-### 1. Activity wide mode on the attached pane (next, owner asked for it soon)
+**Check with the owner first (short):** how the Activity columns pane feels in use (the peeking next
+column with "+N", "Pin as column" in the search field, the recording state shrinking to a dot beside
+Columns), and the open Activity follow-ups (per-column Live / audio follow; Recordings using the pane).
 
-The Scanner second pass made "drawer + attached pane" a shell pattern (decision log, 2026-10-12): a
-drawer grows one pane to its left between the island rows, one surface, opaque with no blur while open,
-pushed in as a screen on narrow windows. Activity is its second user. Brainstorm one question at a
-time; likely questions: what goes in the pane (pinned-search columns, the detail beside the list, or
-the player and transcript), how it opens (a header button like "Scan a band", or opening a detail),
-whether the pane is remembered per drawer, what the tuned card and Listen do while it is open, and the
-narrow-window push-in. Check that the slot in Immersive (`paneOn`, `paneSolid`, `paneW`, the push-in
-branch) needs no Scanner-specific code for it, and that Recordings could use it later.
+**Core since the last merge (main@7743665, merged 2026-10-12; origin/main unchanged at the end of the
+Activity pass):** two specs with unmounted foundations, no new endpoint. *Regional display registry*
+(`/api/regional/*`): sourced channel labels and aliases with advisory mode / bandwidth / step hints;
+only US FRS so far, data pending. *Receiver capabilities* (`/api/receiver-capabilities`): per-control
+availability, tuner type and gain count, and by design no gain table in dB, rate presets or tuning
+range. That last point touches the Receiver island, which draws a gain table in dB: when the web app
+is built, plan for an unknown table (gain index steps, or a dB table only where a reviewed source
+exists). CORE-GAPS records both as "Partly".
 
-**Scanner follow-ups to check with the owner first (short):**
-- How the attached pane feels in use (fixed height from under the Tuner to above Listen, empty space
-  under a short range table, opaque surface while open).
-- Consent to resume after a scan grew (`paused(resume-blocked)`): the Tuner row offers only "Review",
-  so the drawer still holds "Resume and pause APRS". Either the Tuner row gets that one button or the
-  drawer keeps it.
-- The selected "Scan a band" button is subtle with the Mono accent (quiet selection rule).
-- Mock gaps: the shell ignores the planner's Options and its pass time; ⌘K presets start a sweep
-  without per-range rows, so running mode falls back to one row.
-
-**Core since the last merge (main@7743665, merged 2026-10-12; unchanged at the end of the Scanner second pass):** two specs with unmounted
-foundations, no new endpoint. *Regional display registry* (`/api/regional/*`): sourced channel
-labels and aliases with advisory mode / bandwidth / step hints; only US FRS so far, data pending.
-*Receiver capabilities* (`/api/receiver-capabilities`): per-control availability, tuner type and
-gain count, and by design no gain table in dB, rate presets or tuning range. That last point
-touches the Receiver island, which draws a gain table in dB: when the web app is built, plan for
-an unknown table (gain index steps, or a dB table only where a reviewed source exists).
-CORE-GAPS records both as "Partly".
-
-### 2. Design system v1 and web app foundation (after Activity wide mode)
+### Design system v1 and web app foundation (next)
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
 make it performant and efficient. Guidance agreed in chat (2026-10-11 late):
@@ -828,7 +854,8 @@ make it performant and efficient. Guidance agreed in chat (2026-10-11 late):
   format, inline styles, mock state, one class per board), so speeding them up is wasted
   work. What carries over: the tokens (plain CSS custom properties), the focus / selection
   rules, copy, mock data shapes, and every component's states and interactions as acceptance
-  criteria.
+  criteria. Prototype devices that must not carry over: Activity's module-level shared store (two
+  board instances for drawer and pane), the per-board token copies.
 - **Normalise the design system on the canvas** (cheap, and what the real app copies): one
   recipe per component (chip, toggle, segmented control, island, drawer, row, field, toast,
   tooltip), one shared helmet instead of rules copied in every board, a component inventory

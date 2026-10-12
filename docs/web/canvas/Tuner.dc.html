@@ -296,8 +296,8 @@ class Component extends DCLogic {
 		const s2 = { 'paused-released': ['paused', { released: true }], 'paused-waiting': ['paused-you', { waiting: true }] }[st];
 		return Object.assign({}, HOLD_MOCK, { state: s2 ? s2[0] : st }, s2 ? s2[1] : null, st === 'holding' ? { holdHz: 161150000, holdLabel: 'DMR · CC 1' } : null, /^paused-(you|waiting)/.test(st) ? { resumeIn: 42 } : null);
 	}
-	holdAct(a) {
-		if (this.props.onHold) return this.props.onHold({ type: a });
+	holdAct(a, extra) {
+		if (this.props.onHold) return this.props.onHold(Object.assign({ type: a }, extra));
 		const st = this.state.holdLocal || this.props.holdDemo;
 		this.setState({ holdLocal: a === 'stop' ? 'off' : a === 'pause' ? 'paused' : a === 'stay' ? 'paused-released' : a === 'skip' || a === 'ignore' ? 'sweeping' : a === 'save' ? st : 'sweeping', holdSaved: a === 'save' ? !this.state.holdSaved : this.state.holdSaved });
 	}
@@ -371,7 +371,7 @@ class Component extends DCLogic {
 		const hs = hold ? hold.state : '';
 		const live = hs === 'sweeping' || hs === 'holding';
 		// the scan's hold, in words: running, holding on a hit (with its actions), paused, waiting
-		const B = (label, icon, act, kind, o) => Object.assign({ label, icon: icon || [], hasIcon: !!icon, act: e => { if (e && e.stopPropagation) e.stopPropagation(); this.holdAct(act); }, aria: label || (o && o.aria) || act, title: '', fill: 'none',
+		const B = (label, icon, act, kind, o) => Object.assign({ label, icon: icon || [], hasIcon: !!icon, act: e => { if (e && e.stopPropagation) e.stopPropagation(); this.holdAct(act, o && o.extra); }, aria: label || (o && o.aria) || act, title: '', fill: 'none',
 			pad: label ? (icon ? '0 9px 0 7px' : '0 9px') : '0 8px', bg: kind === 'primary' ? (live ? 'rgba(var(--wk-accent-rgb),.12)' : 'rgba(var(--wk-amber-rgb),.18)') : kind === 'chip' ? 'var(--wk-chip)' : 'transparent', fg: kind === 'primary' ? (live ? 'var(--wk-accent)' : 'var(--wk-amber)') : 'var(--wk-text-2)' }, o || {});
 		const stopB = B('', HI.stop, 'stop', 'ghost', { aria: 'Stop the scan', title: 'End the scan. The receiver and decoders are yours again.' });
 		const hSaved = !!this.state.holdSaved;
@@ -383,7 +383,7 @@ class Component extends DCLogic {
 			else if (hs === 'holding') { holdTitle = sfmt(hold.holdHz || freq); holdDetail = ' · ' + (hold.holdLabel || 'Activity'); holdBtns = [B('Skip', HI.skip, 'skip', 'chip', { title: 'Move on and leave it out for the rest of this scan' }), B('Ignore', HI.ignore, 'ignore', 'chip', { title: 'Always: never probed, recorded or scanned again' }), B('', HI.star, 'save', 'chip', { aria: hSaved ? 'Saved' : 'Save frequency', title: 'Save frequency', fill: hSaved ? 'currentColor' : 'none', fg: hSaved ? 'var(--wk-accent)' : 'var(--wk-text-2)' }), stopB]; }
 			else if (hs === 'paused-you') { holdIcon = HI.pause; holdTitle = hold.waiting ? 'Scan waits while you listen' : 'Scan resumes in ' + hold.resumeIn + ' s'; holdDetail = ''; holdBtns = [B('Stay here', null, 'stay', 'primary', { title: 'Keep the scan paused. It will not resume on its own.' }), B('Resume now', null, 'resume', 'ghost'), stopB]; }
 			else if (hs === 'paused') { holdIcon = HI.pause; holdTitle = 'Scan paused'; holdDetail = hold.released ? ' · the receiver is yours' : ' · holding the receiver'; holdBtns = [B('Resume', HI.play, 'resume', 'primary', { title: hold.released ? 'Takes the receiver again. Asks first if more decoders would pause.' : 'Carry on where it left off' }), stopB]; }
-			else if (hs === 'consent') { holdIcon = HI.warn; holdTitle = 'Resume needs your OK'; holdDetail = ' · APRS would pause too'; holdBtns = [B('Review', null, 'review', 'primary', { title: 'Open the Scanner to decide' }), stopB]; }
+			else if (hs === 'consent') { holdIcon = HI.warn; holdTitle = 'Resume needs your OK'; holdDetail = ''; holdBtns = [B('Resume and pause APRS', HI.play, 'resume', 'primary', { title: 'Resumes the scan. APRS pauses until the scan ends.', extra: { takeover: true } }), stopB]; }
 			else if (hs === 'paused-job') { holdTitle = 'Waiting for another scan'; holdDetail = ' · ' + hold.preset; holdBtns = [stopB]; }
 			else if (hs === 'paused-relay') { holdIcon = HI.plug; holdTitle = 'SDR++ has the receiver'; holdDetail = ' · the scan waits'; holdBtns = [stopB]; }
 			else if (hs === 'source-down') { holdIcon = HI.plug; holdTitle = 'Receiver offline'; holdDetail = ' · the scan waits'; holdBtns = [stopB]; }

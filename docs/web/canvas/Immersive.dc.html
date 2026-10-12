@@ -150,7 +150,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	<sc-if value="{{hasDrawer}}" hint-placeholder-val="{{false}}">
 		<div class="wk-drawer" data-pane="{{paneSolid}}" style="position: absolute; z-index: 4; top: {{drTop}}px; bottom: {{drBottom}}px; right: 16px; left: {{drLeft}}; width: {{drWidth}}; transition: {{drTr}}">
 			<sc-if value="{{showActivity}}" hint-placeholder-val="{{false}}">
-				<dc-import name="Activity" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" command="{{actCmd}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
+				<dc-import name="Activity" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" part="drawer" pane-room="{{actPaneRoom}}" command="{{actCmd}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
 			</sc-if>
 			<sc-if value="{{showRecordings}}" hint-placeholder-val="{{false}}">
 				<dc-import name="Recordings" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" open-first="{{false}}" recording="{{recOn}}" recording-label="{{recLabel}}" stop-signal="{{srcStop}}" on-close="{{closeActivity}}" on-tune="{{tune}}" on-source="{{setSource}}" on-stop-recording="{{stopRec}}" on-activity="{{recActivity}}" on-storage="{{openStorage}}" hint-size="100%,100%"></dc-import>
@@ -179,6 +179,9 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			<div aria-hidden="true" style="position: absolute; right: 0; top: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 0, transparent 11.6px, rgba(var(--wk-line-rgb),.14) 12.2px, rgba(var(--wk-line-rgb),.14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 0, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
 			<div aria-hidden="true" style="position: absolute; right: 0; bottom: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 100%, transparent 11.6px, rgba(var(--wk-line-rgb),.14) 12.2px, rgba(var(--wk-line-rgb),.14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 100%, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
 			<div class="wk-pane-body" style="position: absolute; inset: 0; display: grid; border-radius: 12px 0 0 12px; overflow: hidden">
+				<sc-if value="{{paneActivity}}" hint-placeholder-val="{{false}}">
+					<dc-import name="Activity" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" part="pane" width="{{paneW}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
+				</sc-if>
 				<sc-if value="{{paneScanPlan}}" hint-placeholder-val="{{true}}">
 					<dc-import name="ScanPlanner" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" layout="pane" width="{{paneW}}" state="{{plannerState}}" sweep="{{plannerSweep}}" prefill="{{scanPrefill}}" discoveries="{{discs}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-close="{{closePlanner}}" hint-size="100%,100%"></dc-import>
 				</sc-if>
@@ -326,8 +329,9 @@ class Component extends DCLogic {
 				const span = a.endHz - a.startHz, watch = a.preset === 'This span';
 				const next = watch
 					? { preset: a.preset || 'This span', startHz: a.startHz, endHz: a.endHz, hops: 1, hop: 1, sweepS: 0, coverage: 100, state: 'watching' }
-					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, ranges: a.ranges || null, stretches: a.stretches && a.stretches.length ? a.stretches : null, exclusions: a.exclusions && a.exclusions.length ? a.exclusions : null, hops: a.hops || Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0 });
-				if (!watch) { next.hops = hopList(next).length; next.sweepS = Math.max(1, Math.round(next.hops * 0.375)); }
+					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, ranges: a.ranges || null, stretches: a.stretches && a.stretches.length ? a.stretches : null, exclusions: a.exclusions && a.exclusions.length ? a.exclusions : null, hops: a.hops || Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0, options: a.options || null });
+				// the planner's pass time (time per hop and the ranges' channels) wins over the mock's estimate
+				if (!watch) { next.hops = hopList(next).length; next.sweepS = a.sweepS || Math.max(1, Math.round(next.hops * 0.375)); }
 				this.commit(null, watch ? 'Watching this span' : 'Scanning ' + next.preset + ' · the scanner has the receiver');
 				// starting a scan closes the pane; the Scanner drawer stays on the running scan
 				return this.setState({ sw: next, scanPrefill: null, planner: null });
@@ -346,7 +350,7 @@ class Component extends DCLogic {
 			if (a.type === 'pause' && LIVE(sw.state)) { this.commit(null, 'Scan paused · it keeps the receiver until you tune'); return this.setState(Object.assign(here, { sw: Object.assign({}, sw, { state: 'paused', released: false, resumeAt: null, holdHz: null, holdLabel: null }) })); }
 			// Stay here: the countdown after you tuned becomes a plain Pause (the receiver stays yours)
 			if (a.type === 'stay' && sw.state === 'paused-you') { this.commit(null, 'Staying here · the scan waits until you resume it'); return this.setState({ sw: Object.assign({}, sw, { state: 'paused', released: true, resumeAt: null }) }); }
-			if (a.type === 'resume' && /^paused|consent/.test(sw.state)) { this.commit(null, 'Scan resumed · the scanner has the receiver'); return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', released: false, resumeAt: null }) }); }
+			if (a.type === 'resume' && /^paused|consent/.test(sw.state)) { this.commit(null, a.takeover ? 'Scan resumed · APRS pauses until the scan ends' : 'Scan resumed · the scanner has the receiver'); return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', released: false, resumeAt: null }) }); }
 			// a hit the sweep holds on: Skip (this scan), Ignore (always), Save (saved frequency)
 			if (sw.state === 'holding' && (a.type === 'skip' || a.type === 'ignore' || a.type === 'save')) {
 				const hz = sw.holdHz, fv = (hz / 1e6).toFixed(3);
@@ -578,26 +582,26 @@ class Component extends DCLogic {
 	shellLayout(s, flags) {
 		const g0 = { W: 1440, H: 900, tuner: { w: 440, h: 56 }, rx: { w: 300, h: 56 }, listen: { w: 340, h: 64 }, dockW: 0, cardH: 300 };
 		const g = s.geo || g0, live = g.live || { tuner: g.tuner, rx: g.rx, listen: g.listen };
-		const W = g.W, H = g.H, id = flags.drawer, wide = id === 'activity' && flags.actWide;
+		const W = g.W, H = g.H, id = flags.drawer;
 		// widest drawer that still leaves the Tuner and the slid Receiver on the top row, and Listen and a compact dock on
 		// the bottom row, each one gutter apart
 		const minX = G + g.listen.w + G;
 		const drMax = W - G - Math.max(G + g.tuner.w + G + g.rx.w + G, minX + DOCK_COMPACT + G);
 		const dW = id ? Math.min(this.drawerW(id), drMax) : 0;
-		const full = !!id && !wide && W >= FULL_MIN_VW && dW >= DR_MIN;
+		const full = !!id && W >= FULL_MIN_VW && dW >= DR_MIN;
 		const clearR = full ? dW + G : 0, freeW = W - clearR;
 		// the Tuner's height includes its scan hold row while a scan is on
 		const topRow = G + Math.max(g.tuner.h, g.rx.h) + G;
 		// an attached pane sits between the island rows: from under the top row to one gutter above Listen and the dock
 		const paneBottom = G + Math.max(g.listen.h, DOCK_H) + G;
-		// drawer slot: full height on the right, or an overlay between the island rows (narrow window, Activity wide)
+		// drawer slot: full height on the right, or an overlay between the island rows (narrow window)
 		// a drawer with its pane open but no room for a full-height drawer is full width, so the pane can be pushed into it
 		const overlayAll = W < FULL_MIN_VW || (!!flags.pane && !full);
 		const dr = !id ? null : full
 			? { top: G, bottom: G, left: 'auto', width: dW + 'px', resize: true }
 			: overlayAll
 				? { top: topRow, bottom: G + DOCK_H + G, left: G + 'px', width: 'auto', resize: false }
-				: { top: G + g.rx.h + G, bottom: G + DOCK_H + G, left: 'auto', width: wide ? 'min(1240px, calc(100% - 32px))' : 'min(' + this.drawerW(id) + 'px, calc(100% - 32px))', resize: !wide };
+				: { top: G + g.rx.h + G, bottom: G + DOCK_H + G, left: 'auto', width: 'min(' + this.drawerW(id) + 'px, calc(100% - 32px))', resize: true };
 		// dock: centred on the window and never closer than one gutter to Listen; a full-height drawer only shifts it
 		// (and drops the active label) when the two would touch
 		const compact = W < 1180 || (full && freeW - G - minX < DOCK_WIDE);
@@ -615,7 +619,7 @@ class Component extends DCLogic {
 		// a drawer between the island rows covers the plot: the card keeps clear of it too (or hides if nothing is left).
 		// It only shows when the Receiver panel is shut, so an open Receiver lifts it.
 		if (dr && !full && !flags.rxOpen) {
-			const ow = overlayAll ? W - 2 * G : Math.min(wide ? 1240 : this.drawerW(id), W - 2 * G);
+			const ow = overlayAll ? W - 2 * G : Math.min(this.drawerW(id), W - 2 * G);
 			islands.push({ x: W - G - ow, y: dr.top, w: ow, h: H - dr.top - dr.bottom });
 		}
 		// anchors use the card's current height (one line when minimised) and stay in the free area left of the drawer
@@ -639,7 +643,7 @@ class Component extends DCLogic {
 			if (anchors.some(o => Math.hypot(o.x - r.x, o.y - r.y) < 48)) return;
 			anchors.push({ id: A.id, name: A.name, x: r.x, y: r.y });
 		});
-		return { W, H, freeW, clearR, full, dW, drMax, dr, compact, dockX, anchors, spots, cardH, wide, topRow, paneBottom };
+		return { W, H, freeW, clearR, full, dW, drMax, dr, compact, dockX, anchors, spots, cardH, topRow, paneBottom };
 	}
 	// board tweak: jump straight to a sweep state so reviewers don't have to wait for one
 	applySweepTweak() {
@@ -669,9 +673,12 @@ class Component extends DCLogic {
 		}
 		if (sw.state !== 'sweeping') return;
 		const hop = sw.hop % sw.hops + 1, pass = (sw.pass || 0) + (hop === 1 ? 1 : 0);
+		const o = sw.options || {};
+		// Options from the planner: Stop after one pass ends the scan; "Find only" and Hold on activity off never hold
+		if (o.stopAfter === 'pass' && pass >= 2) return this.setState({ sw: Object.assign({}, sw, { state: 'finished', passes: 1, holdHz: null, holdLabel: null }) });
 		const h = hopList(sw)[hop - 1] || [0, 0];
 		const target = HOLDS[pass % HOLDS.length];
-		const hold = target.hz >= h[0] && target.hz < h[1] ? target : null;
+		const hold = o.holdOnActivity !== false && !o.findOnly && target.hz >= h[0] && target.hz < h[1] ? target : null;
 		this.setState({ sw: Object.assign({}, sw, { hop, pass, held: false }, hold ? { state: 'holding', holdHz: hold.hz, holdLabel: hold.label, holdLeft: HOLD_S } : null) });
 	}
 	renderVals() {
@@ -698,7 +705,7 @@ class Component extends DCLogic {
 		const stage = this.props.stage || 'S1';
 		const ign = base.ignored || {};
 		const discs = DISCOVERIES.filter(d => !ign[d.hz]).map(d => Object.assign({}, d, stage === 'S2' ? d.s2 : null, { active: live ? sw.state === 'holding' && sw.holdHz === d.hz : d.hz === 161150000 }));
-		const hold = sw && sw.state !== 'watching' ? {
+		const hold = sw && sw.state !== 'watching' && sw.state !== 'finished' ? {
 			state: sw.state, preset: sw.preset, startHz: sw.startHz, endHz: sw.endHz, ranges: sw.ranges || undefined, stretches: sw.stretches || undefined, exclusions: sw.exclusions || undefined, hop: sw.hop, hops: sw.hops, pass: (sw.pass || 0) + 1, sweepS: sw.sweepS, coverage: sw.coverage,
 			holdHz: sw.holdHz || undefined, holdLabel: sw.holdLabel || undefined, released: !!sw.released,
 			resumeIn: sw.state === 'paused-you' && sw.resumeAt ? Math.max(0, Math.ceil((sw.resumeAt - Date.now()) / 1000)) : undefined
@@ -718,7 +725,7 @@ class Component extends DCLogic {
 		// ---- shell grid
 		const drawer = this.drawerId();
 		const view = base.view === 'map' ? 'map' : 'spectrum';
-		const L = this.shellLayout(base, { drawer, actWide: (s.actMode || 'drawer') === 'wide', rxOpen: s.open === 'rx', pane: drawer === 'scanner' && (base.planner === 'compose' || (base.planner === 'running' && !!hold)) });
+		const L = this.shellLayout(base, { drawer, rxOpen: s.open === 'rx', pane: drawer === 'scanner' && (base.planner === 'compose' || (base.planner === 'running' && !!hold)) });
 		this.layout = L;
 		// a between-rows drawer shares the right side with the Receiver panel, so the open panel wins; a full-height one
 		// has the Receiver and the card beside it
@@ -737,10 +744,17 @@ class Component extends DCLogic {
 		const plannerOn = !!base.planner && (base.planner === 'compose' || !!hold);
 		// drawer + attached pane: from 1100 px with a full-height drawer the pane grows left from the drawer's edge (its right
 		// edge 1 px over the drawer's border, so the two read as one surface); otherwise the drawer is full width and the
-		// pane's content is pushed into it as a screen with a back button
-		const paneWant = plannerOn && drawerOn && drawer === 'scanner';
+		// pane's content is pushed into it as a screen with a back button. Each drawer says whether it wants its pane and what
+		// fills it: Scanner, the scan plan (a task: not remembered, pushed in when narrow); Activity, its columns (remembered
+		// in actMode; with no room the drawer shows them as a switcher row instead, so nothing is pushed in)
+		const PANES = {
+			scanner: { want: plannerOn, label: 'Scan a band', pushIn: true },
+			activity: { want: (s.actMode || 'drawer') === 'wide', label: 'Activity columns', pushIn: false }
+		};
+		const pane = drawerOn && PANES[drawer] && PANES[drawer].want ? Object.assign({ id: drawer }, PANES[drawer]) : null;
+		const paneWant = !!pane;
 		const paneOn = paneWant && L.full;
-		const pushIn = paneWant && !L.full;
+		const pushIn = paneWant && !L.full && pane.pushIn;
 		const paneW = paneOn ? L.W - 2 * G - L.dW : 0;
 		// the tuned card hides while the sweep moves and while a pane covers the plot
 		const sweepMoving = !!sw && (sw.state === 'sweeping' || sw.state === 'starting');
@@ -758,7 +772,9 @@ class Component extends DCLogic {
 			plannerSweep: plannerOn && base.planner === 'running' ? hold : null,
 			plannerState: base.planner === 'running' ? 'running' : base.scanPrefill ? 'prefilled' : 'empty',
 			closePlanner: this.closePlanner, planScan: this.planScan, holdPlan: this.holdPlan,
-			paneOn, paneSolid: paneOn || pushIn, paneScanPlan: paneOn, paneLabel: 'Scan a band', paneW,
+			paneOn, paneSolid: paneOn || pushIn, paneScanPlan: paneOn && pane.id === 'scanner', paneActivity: paneOn && pane.id === 'activity', paneLabel: pane ? pane.label : '', paneW,
+			// Activity asks whether a pane fits; without room its columns become a switcher row in the drawer
+			actPaneRoom: L.full,
 			paneTop: L.topRow, paneBottom: L.paneBottom, paneRight: G + L.dW - 1, paneTr: moving ? 'none' : 'right .26s cubic-bezier(.2,.8,.2,1)',
 			showPushPlan: pushIn, pushW: Math.max(0, L.W - 2 * G),
 			drawerGrip: !!(L.dr && L.dr.resize) && !paneOn,
@@ -825,7 +841,7 @@ class Component extends DCLogic {
 			// dock centred on the window
 			dockX: L.dockX, dockTr: moving ? 'none' : 'left .26s cubic-bezier(.2,.8,.2,1)',
 			// tuned card: anchored in the free plot area, dragged by its type tile
-			showCard: cardOn && !paneWant && !sweepMoving,
+			showCard: cardOn && !paneOn && !pushIn && !sweepMoving,
 			cardX: drag ? drag.x : home ? home.x : 0, cardY: drag ? drag.y : home ? home.y : 0, cardScale: drag ? 1.02 : 1,
 			cardTr: drag || moving || base.minAnim ? 'none' : 'transform .24s cubic-bezier(.34,1.32,.64,1)',
 			cardZ: drag ? 8 : 1, cardH: L.cardH, cardMin: !!base.cardMin, setCardMin: this.setCardMin,

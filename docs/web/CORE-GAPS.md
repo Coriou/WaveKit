@@ -273,7 +273,9 @@ regional and receiver-capabilities foundations have no routes yet).
 - [ ] Operator settings synced to every client including mobile. Partly (protected mode only):
   preferences `units, timeFormat, waterfallPalette, showSavedFrequencyLabels` and command
   usage for tune, identify, listen and open-saved. Missing: Activity columns and pinned
-  searches, usage for every palette command, scope and value (frecency ranks them all).
+  searches (order, names, each column's search), whether a drawer's attached pane is open
+  (Activity's columns pane reopens as you left it), usage for every palette command, scope
+  and value (frecency ranks them all).
 - [ ] One settings schema for core and every decoder: Zod plus UI hints (label, help, group,
   essential or More, effect: live / restarts X / reconnects / hardware, aliases, widget,
   unit), served as JSON Schema so a new decoder needs no UI work.

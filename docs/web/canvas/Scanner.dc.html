@@ -703,7 +703,7 @@ class Component extends DCLogic {
 			const st = p.state === 'paused-you' && p.resumeIn == null ? 'paused' : p.state;
 			const a = p.startHz / 1e6, b = p.endHz / 1e6;
 			return { state: st, name: p.preset, a, b, ranges: p.ranges && p.ranges.length ? p.ranges.map((r, i) => ({ id: 'p' + i, name: r.name || mr(r.startHz / 1e6, r.endHz / 1e6), a: r.startHz / 1e6, b: r.endHz / 1e6 })) : [{ id: 'p0', name: p.preset, a, b }],
-				hop: p.hop, hops: p.hops, sweepS: p.sweepS, cov: p.coverage, holdHz: p.holdHz || 161150000, holdLabel: p.holdLabel || 'DMR · CC 1', resumeIn: p.resumeIn, released: !!p.released, waiting: !!p.waiting, elapsed: s.elapsed, ext: true };
+				hop: p.hop, hops: p.hops, sweepS: p.sweepS, cov: p.coverage, holdHz: p.holdHz || 161150000, holdLabel: p.holdLabel || 'DMR · CC 1', resumeIn: p.resumeIn, released: !!p.released, waiting: !!p.waiting, passes: p.passes, elapsed: s.elapsed, ext: true };
 		}
 		return { state: s.mode, name: s.run.name, a: s.run.a, b: s.run.b, ranges: s.run.ranges, hop: s.hop, hops: s.run.hops, sweepS: s.run.sweepS, cov: s.cov, holdHz: 161150000, holdLabel: 'DMR · CC 1', resumeIn: s.resumeIn, released: s.released, waiting: s.waiting, elapsed: s.elapsed };
 	}
@@ -964,20 +964,17 @@ class Component extends DCLogic {
 	now(sw0) {
 		const s = this.state;
 		const live = { bg: 'var(--wk-well-glass)', ring: 'rgba(var(--wk-line-rgb),.14)', tileBg: 'var(--wk-fill)', tileFg: 'var(--wk-accent)', headC: 'var(--wk-text)' };
-		const amb = { bg: 'rgba(var(--wk-amber-rgb),.06)', ring: 'rgba(var(--wk-amber-rgb),.18)', tileBg: 'rgba(var(--wk-amber-rgb),.12)', tileFg: 'var(--wk-amber)', headC: 'var(--wk-amber)' };
 		const quiet = { bg: 'var(--wk-well-glass)', ring: 'rgba(var(--wk-line-rgb),.08)', tileBg: 'var(--wk-fill)', tileFg: 'var(--wk-text-3)', headC: 'var(--wk-text)' };
 		const bad = { bg: 'rgba(var(--wk-danger-rgb),.06)', ring: 'rgba(var(--wk-danger-rgb),.2)', tileBg: 'rgba(var(--wk-danger-rgb),.12)', tileFg: 'var(--wk-danger)', headC: 'var(--wk-danger-soft)' };
 		const A = (label, icon, kind, fn, title, o) => Object.assign({ label, icon, kind, act: fn || (() => {}), title: title || '', aria: o && o.iconOnly ? title : label }, o || {});
 		const again = A('Scan again', I.again, 'out', () => s.lastStart ? this.scan('start', s.lastStart) : this.openPlan());
 		// while a scan holds the receiver the Tuner's hold row is the status and the control (Pause, Stop, frequency,
-		// progress): the drawer keeps one toggle for the plan. Consent keeps its decision here.
+		// progress, and the OK to resume when that would pause another decoder): the drawer keeps one toggle for the plan.
 		const plan = { plan: true };
 		switch (sw0.state) {
-			case 'starting': case 'sweeping': case 'holding': case 'paused': case 'paused-you': case 'paused-job': case 'paused-relay': case 'source-down': return plan;
-			case 'consent': return Object.assign({}, amb, plan, { full: true, icon: I.warn, head: 'Resume needs your OK', sub: 'APRS started while the scan was paused · resuming pauses it too',
-				acts: [A('Resume and pause APRS', I.play, 'amber', () => this.scan('resume', { takeover: true }))] });
+			case 'starting': case 'sweeping': case 'holding': case 'paused': case 'paused-you': case 'consent': case 'paused-job': case 'paused-relay': case 'source-down': return plan;
 			case 'source-removed': return Object.assign({}, bad, { full: true, icon: I.plug, head: 'Scan ended · receiver removed', sub: 'Removed in Settings · what it found is kept', acts: [] });
-			case 'finished': return Object.assign({}, quiet, { full: true, tileFg: 'var(--wk-accent)', icon: I.check, head: 'Scan finished', sub: sw0.name + ' · 3 full passes in 30 min', acts: [again] });
+			case 'finished': return Object.assign({}, quiet, { full: true, tileFg: 'var(--wk-accent)', icon: I.check, head: 'Scan finished', sub: sw0.name + ' · ' + (sw0.passes === 1 ? '1 full pass' : '3 full passes in 30 min'), acts: [again] });
 			case 'nothing-found': return Object.assign({}, quiet, { full: true, icon: I.scan, head: 'Scan finished · nothing new', sub: sw0.name + ' · ' + mr(sw0.a, sw0.b), acts: [again] });
 			default:
 				if (s.hw === 'no-receiver') return Object.assign({}, quiet, { full: true, icon: I.plug, head: 'No receiver', sub: 'Connect a receiver to find the signals around you', acts: [A('Open Settings', I.gear, 'out', () => this.props.onSettings ? this.props.onSettings('receivers') : this.toast('Opens Settings › Receivers'))] });
