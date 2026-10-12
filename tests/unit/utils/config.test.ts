@@ -1244,7 +1244,7 @@ describe("activity config", () => {
 		process.env["WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS"] = "1000000"
 		process.env["WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES"] = "2147483648"
 		process.env["WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS"] = "604800000"
-		process.env["WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND"] = "100.5"
+		process.env["WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND"] = "100"
 		process.env["WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST"] = "1000"
 		process.env["WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND"] = "50"
 		process.env["WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_BURST"] = "200"
@@ -1259,7 +1259,7 @@ describe("activity config", () => {
 				maxAgeMs: 604_800_000,
 			},
 			admission: {
-				globalPerSecond: 100.5,
+				globalPerSecond: 100,
 				globalBurst: 1000,
 				perDecoderPerSecond: 50,
 				perDecoderBurst: 200,
@@ -1281,6 +1281,8 @@ describe("activity config", () => {
 		for (const activity of [
 			{ enabled: false, extra: true },
 			{ retention: { maxRows: 0 } },
+			{ retention: { maxRows: 1 } },
+			{ retention: { maxRows: 999 } },
 			{ retention: { maxRows: 1.5 } },
 			{ retention: { maxRows: maxRows + 1 } },
 			{ retention: { maxDbBytes: 0 } },
@@ -1289,8 +1291,11 @@ describe("activity config", () => {
 			{ retention: { maxAgeMs: maxAgeMs + 1 } },
 			{ admission: { globalPerSecond: 0 } },
 			{ admission: { globalPerSecond: -1 } },
+			{ admission: { globalPerSecond: 0.5 } },
+			{ admission: { globalPerSecond: 1.5 } },
 			{ admission: { globalPerSecond: Number.POSITIVE_INFINITY } },
 			{ admission: { globalBurst: 1.5 } },
+			{ admission: { perDecoderPerSecond: 0.5 } },
 			{ admission: { perDecoderPerSecond: 100_001 } },
 			{ admission: { perDecoderBurst: 0 } },
 			{ admission: { other: 1 } },
@@ -1302,12 +1307,15 @@ describe("activity config", () => {
 		}
 		expect(
 			ConfigSchema.parse({
-				activity: { retention: {}, admission: { globalPerSecond: 0.5 } },
+				activity: {
+					retention: { maxRows: 1000 },
+					admission: { globalPerSecond: 1, perDecoderPerSecond: 1 },
+				},
 			}).activity,
 		).toEqual({
 			enabled: false,
-			retention: {},
-			admission: { globalPerSecond: 0.5 },
+			retention: { maxRows: 1000 },
+			admission: { globalPerSecond: 1, perDecoderPerSecond: 1 },
 		})
 		expect(() =>
 			loadConfig(write("activity:\n  enabled: false\n  nope: 1\n")),

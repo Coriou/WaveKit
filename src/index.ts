@@ -1108,8 +1108,9 @@ async function main(): Promise<void> {
 				? { admission: config.activity.admission }
 				: {}),
 		})
-		checkpoint()
+		// Own before checkpoint: a stop during open must still close the workers.
 		own(8, () => activity.close())
+		checkpoint()
 
 		// Step 9: Initialize API server
 		const apiServer = new ApiServer(

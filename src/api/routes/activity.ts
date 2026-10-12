@@ -19,6 +19,14 @@ import { withActivityClient } from "../../core/activity/query/service.js"
 import type { ActivityUnavailableState } from "../../core/activity/runtime.js"
 import { errorResponseSchema, looseObjectSchema } from "./scanner-schemas.js"
 
+export interface ActivityAccessContext {
+	/**
+	 * Admitted access principal or device id. Undefined when the request was
+	 * not authenticated. Client-chosen headers are not an identity.
+	 */
+	principalId(request: FastifyRequest): string | undefined
+}
+
 export interface ActivityRoutesOptions {
 	service: ActivityQueryService
 	enabled: boolean
@@ -29,6 +37,13 @@ export interface ActivityRoutesOptions {
 	 * Routes answer 503 ACTIVITY_UNAVAILABLE and do not call the service.
 	 */
 	unavailable?: ActivityUnavailableState
+	/**
+	 * When false, the 503 body keeps `reason` and replaces `message` with
+	 * "Request failed". Defaults to the unavailable state's flag, then true.
+	 */
+	discloseErrors?: boolean
+	/** Admission key. Absent means the request IP. */
+	access?: ActivityAccessContext
 }
 
 const REF_TYPES = new Set<ActivityRefType>([
@@ -95,15 +110,23 @@ function disabled(reply: FastifyReply): FastifyReply {
 	})
 }
 
+function disclosed(options: ActivityRoutesOptions): boolean {
+	if (options.discloseErrors !== undefined) return options.discloseErrors
+	const onState = options.unavailable?.discloseErrors
+	if (onState !== undefined) return onState
+	return true
+}
+
 function unavailable(
 	reply: FastifyReply,
+	options: ActivityRoutesOptions,
 	state: ActivityUnavailableState,
 ): FastifyReply {
 	return reply.code(503).send({
 		error: "ServiceUnavailable",
 		code: "ACTIVITY_UNAVAILABLE",
 		reason: state.reason,
-		message: state.message,
+		message: disclosed(options) ? state.message : "Request failed",
 	})
 }
 
@@ -112,17 +135,24 @@ function blocked(
 	options: ActivityRoutesOptions,
 	reply: FastifyReply,
 ): FastifyReply | undefined {
-	if (options.unavailable) return unavailable(reply, options.unavailable)
+	if (options.unavailable)
+		return unavailable(reply, options, options.unavailable)
 	if (!options.enabled) return disabled(reply)
 	return undefined
 }
 
-/** Stable per caller. `x-activity-client` wins; otherwise the request IP. */
-export function activityClientKey(request: FastifyRequest): string {
-	const header = request.headers["x-activity-client"]
-	if (typeof header === "string" && header.length > 0 && header.length <= 128) {
-		return `client:${header}`
-	}
+/**
+ * Stable per caller. The admitted access principal (device id when that is
+ * the principal) wins. Otherwise the request IP. Client-chosen headers,
+ * including `x-activity-client`, are ignored.
+ */
+export function activityClientKey(
+	request: FastifyRequest,
+	access?: ActivityAccessContext,
+): string {
+	const principalId = access?.principalId(request)
+	if (typeof principalId === "string" && principalId.length > 0)
+		return `principal:${principalId}`
 	return `ip:${request.ip}`
 }
 
@@ -330,8 +360,9 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 			if (blockedReply) return blockedReply
 			try {
 				const params = request.query as Record<string, unknown>
-				return await withActivityClient(activityClientKey(request), () =>
-					options.service.search(searchRequest(params)),
+				return await withActivityClient(
+					activityClientKey(request, options.access),
+					() => options.service.search(searchRequest(params)),
 				)
 			} catch (error) {
 				return sendError(reply, request, error)
@@ -383,11 +414,13 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 			if (blockedReply) return blockedReply
 			try {
 				const body = request.body as { query?: unknown; dimensions?: unknown }
-				return await withActivityClient(activityClientKey(request), () =>
-					options.service.facets({
-						query: (body?.query ?? {}) as ActivityQuery,
-						dimensions: (body?.dimensions ?? []) as ActivityFacetDimensions,
-					}),
+				return await withActivityClient(
+					activityClientKey(request, options.access),
+					() =>
+						options.service.facets({
+							query: (body?.query ?? {}) as ActivityQuery,
+							dimensions: (body?.dimensions ?? []) as ActivityFacetDimensions,
+						}),
 				)
 			} catch (error) {
 				return sendError(reply, request, error)
@@ -419,7 +452,7 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 			if (blockedReply) return blockedReply
 			try {
 				const record = await withActivityClient(
-					activityClientKey(request),
+					activityClientKey(request, options.access),
 					() => options.service.detail(request.params.eventId),
 				)
 				if (!record) {

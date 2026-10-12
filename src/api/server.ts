@@ -1160,6 +1160,17 @@ export class ApiServer {
 		await this.app.register(activityRoutes, {
 			service: this.activityService,
 			enabled: this.activityReady,
+			...(activityRuntime
+				? { discloseErrors: activityRuntime.discloseErrors }
+				: {}),
+			...(this.accessController
+				? {
+						access: {
+							principalId: request =>
+								this.accessController?.principalOf(request)?.id,
+						},
+					}
+				: {}),
 			...(this.activityUnavailable
 				? { unavailable: this.activityUnavailable }
 				: {}),

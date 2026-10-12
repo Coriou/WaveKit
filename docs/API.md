@@ -2205,8 +2205,11 @@ WebSocket channels are unchanged.
 
 Opening the store needs Node 24 and `node:sqlite` with FTS5
 (`contentless_delete`). A failed probe creates no files. A lock or a
-schema mismatch means a database is already there. WaveKit keeps running
-either way. The activity routes then answer 503:
+schema mismatch means a database is already there. The lock is
+`<stateDir>/activity/activity.lock.db`, held by the writer worker with
+`PRAGMA locking_mode=EXCLUSIVE` until close or process death. A second
+opener gets `ACTIVITY_STORE_LOCKED`. WaveKit keeps running either way.
+The activity routes then answer 503:
 
 ```json
 {
@@ -2218,7 +2221,9 @@ either way. The activity routes then answer 503:
 ```
 
 `reason` is `ACTIVITY_UNAVAILABLE` (runtime, FTS5 or an invalid limit),
-`ACTIVITY_STORE_LOCKED`, or `ACTIVITY_SCHEMA_MISMATCH`.
+`ACTIVITY_STORE_LOCKED`, or `ACTIVITY_SCHEMA_MISMATCH`. When error
+disclosure is off (protected mode), `message` is `Request failed` and
+`reason` is still set. The response does not include the open error text.
 
 Batch 1 stores `decoder-reception` envelopes and, when rows are dropped,
 `ingestion-gap` records. Output types `sync`, `rates`, `stats`, `status`
@@ -2230,8 +2235,12 @@ than those two, receipts, recordings and transcripts are not written.
 
 Commented in `config/default.yaml`. Omitted retention and admission fields
 keep the defaults: 1,000,000 rows, 2 GiB, 7 days, 100 events/s with a burst
-of 1000 globally, and 50/s with a burst of 200 per decoder. Commits are
-batched (about 25 ms).
+of 1000 globally, and 50/s with a burst of 200 per decoder. `maxRows` is an
+integer of at least 1,000. `globalPerSecond` and `perDecoderPerSecond` are
+positive integers. Commits are batched (about 25 ms). Age pruning runs only
+when the oldest row is past the age cap by a slack of `max(60 s, 1% of
+maxAge)`, then deletes down to the cap. Row and byte pruning delete down to
+95% of the cap and never remove more than the surplus above that mark.
 
 ```yaml
 activity:
@@ -2267,9 +2276,15 @@ Query parameters: `kinds`, `sourceIds`, `decoderIds`, `protocols`,
 `desc`), `limit`, `pageToken`. An unknown parameter is 400
 `ACTIVITY_QUERY_INVALID`.
 
-`text` is an FTS5 query over the title, protocol, field labels and string
-values, and string leaves of the decoded JSON. It is a bounded projection
+`text` is plain text. The server tokenises it and quotes each token; it is
+not a raw FTS5 query. Indexed text is the title, the protocol, field labels,
+string, numeric and boolean field values, and string leaves of the decoded
+JSON. Whitespace- or punctuation-only text applies no text filter. The
+search is a bounded projection
 (`searchCoverage: "bounded-projection"`), not a search of every raw byte.
+One search, detail or facet request may be in flight per caller. The caller
+is the admitted access principal (a session's device id, or the machine
+principal), or else the request IP. `x-activity-client` is ignored.
 
 **Response** (200): `items` (summaries), `nextPageToken`, `replayCursor`,
 `snapshot` (`lowBarrier`, `highWater`, `expiresAt`), `searchCoverage`.
@@ -2292,9 +2307,12 @@ stops at 50,000 rows and 32 values per dimension.
 ### GET /api/activity/status
 
 **Response** (200): `{ "enabled": true, "stats": { ... } }` with admitted,
-committed, dropped, `excludedTelemetry`, queue depth, `rows`, `dbBytes` and
-`paused`. 500 `ACTIVITY_STATUS_UNAVAILABLE` only if a ready store has no
-stats provider.
+committed, dropped (`rate-limited`, `queue-full`, `store-paused`,
+`write-failed`, `closed`), `excludedTelemetry`, queue depth, `rows`,
+`dbBytes`, `paused` and `writer` (`running` or `stopped`). `closed` counts
+admits rejected after the writer has stopped. A write timeout stops the
+writer for the session and does not count those rows as lost. 500
+`ACTIVITY_STATUS_UNAVAILABLE` only if a ready store has no stats provider.
 
 ### Query and cursor errors
 
@@ -2306,12 +2324,12 @@ stats provider.
 | `ACTIVITY_QUERY_INVALID`     | 400  | Bad query, facet list, event id or subscribe message |
 | `ACTIVITY_CURSOR_INVALID`    | 400  | Cursor does not verify. `reason`: `invalid-cursor` |
 | `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
-| `ACTIVITY_CURSOR_GAP`        | 410  | Cursor is behind the prune watermark. `reason`: `cursor-gap` |
+| `ACTIVITY_CURSOR_GAP`        | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
 | `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
 | `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms) |
-| `ACTIVITY_QUERY_FAILED`      | 500  | The reader failed |
+| `ACTIVITY_QUERY_FAILED`      | 500  | The reader failed, or the store read failed |
 | `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
-| `ACTIVITY_RECORD_CORRUPT`    | 400  | A stored record failed validation |
+| `ACTIVITY_RECORD_CORRUPT`    | 500  | A stored record failed validation |
 | `ACTIVITY_STATUS_UNAVAILABLE`| 500  | Status was requested without a stats provider |
 
 Cursor failures include `reason`. A query hash ignores `order` and paging, so
@@ -2337,17 +2355,23 @@ search query. `cursor` is a `replayCursor` or a cursor from an earlier
 only.
 
 Server frames use `channel: "activity"` and are sent on the socket directly.
-They do not enter the replaceable telemetry queue. Types:
+They do not enter the replaceable telemetry queue. Each message is
+`{ type, channel: "activity", data }`. There is no `activity:frame` wrapper.
+Types:
 
 - `activity:subscribed` — `{ id }`
 - `activity:records` — `{ id, items, scannedThrough, cursor }`
 - `activity:progress` — `{ id, scannedThrough, cursor }` when a page was empty
 - `activity:reset` — `{ id, reason }` (`invalid-cursor`, `cursor-expired`,
-  `store-changed`, `query-changed`, `cursor-gap`, `snapshot-reset`). The
-  subscription ends.
-- `activity:closed` — `{ reason: "resumable", cursor }` when this client's
-  activity queue passes 256 messages or 1 MiB. The socket then closes.
-  Reconnect with that cursor.
+  `store-changed`, `query-changed`, `cursor-gap`, `reader-failed`).
+  `snapshot-reset` is not sent; replay reports that case as `cursor-gap`.
+  `reader-failed` ends the subscription when a read fails. The subscription
+  ends.
+- `activity:unsubscribed` — `{ id }`
+- `activity:closed` — `{ reason: "resumable", cursors: { "<id>": "<cursor>" } }`
+  when this client's activity queue passes 256 messages or 1 MiB. `cursors`
+  maps each subscription id to the last cursor that subscription delivered.
+  The socket then closes. Reconnect each subscription with its own cursor.
 - `error` — `{ code, message, id? }`. Disabled sockets get
   `ACTIVITY_DISABLED`. An enabled store that did not open gets
   `ACTIVITY_UNAVAILABLE`. A bad message gets `ACTIVITY_QUERY_INVALID`. A

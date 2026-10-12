@@ -1,6 +1,10 @@
+import type { FastifyRequest } from "fastify"
 import Fastify from "fastify"
 import { afterEach, describe, expect, it } from "vitest"
-import { activityRoutes } from "../../../src/api/routes/activity.js"
+import {
+	activityClientKey,
+	activityRoutes,
+} from "../../../src/api/routes/activity.js"
 import type { ActivityQueryService } from "../../../src/core/activity/storage/contract.js"
 import type { ActivityStoreStats } from "../../../src/core/activity/storage/contract.js"
 import {
@@ -9,26 +13,33 @@ import {
 	type ActivityFixture,
 } from "../core/activity/query/fixture.js"
 
-const stats: ActivityStoreStats = {
-	admitted: 1,
-	committed: 1,
-	duplicates: 0,
-	dropped: {
-		"rate-limited": 0,
-		"queue-full": 0,
-		"store-paused": 0,
-		"write-failed": 0,
-	},
-	excludedTelemetry: 0,
-	queueDepth: 0,
-	queueBytes: 0,
-	dbBytes: 10,
-	walBytes: 0,
-	rows: 1,
-	oldestReceivedAt: null,
-	pruneWatermark: "0",
-	paused: false,
+function storeStats(): ActivityStoreStats {
+	const stats = {
+		admitted: 1,
+		committed: 1,
+		duplicates: 0,
+		dropped: {
+			"rate-limited": 0,
+			"queue-full": 0,
+			"store-paused": 0,
+			"write-failed": 0,
+			closed: 0,
+		},
+		excludedTelemetry: 0,
+		queueDepth: 0,
+		queueBytes: 0,
+		dbBytes: 10,
+		walBytes: 0,
+		rows: 1,
+		oldestReceivedAt: null,
+		pruneWatermark: "0",
+		paused: false,
+		writer: "running" as const,
+	}
+	return stats
 }
+
+const stats = storeStats()
 
 function throwingService(): ActivityQueryService {
 	const fail = (): never => {
@@ -111,6 +122,60 @@ describe("activity routes", () => {
 			})
 		}
 		await app.close()
+	})
+
+	it("hides the open error when discloseErrors is false and still returns reason", async () => {
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, {
+			service: throwingService(),
+			enabled: true,
+			discloseErrors: false,
+			unavailable: {
+				reason: "ACTIVITY_UNAVAILABLE",
+				message: "EACCES /data/activity/activity.db",
+			},
+		})
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/activity/status",
+		})
+		expect(response.statusCode).toBe(503)
+		expect(response.json()).toEqual({
+			error: "ServiceUnavailable",
+			code: "ACTIVITY_UNAVAILABLE",
+			reason: "ACTIVITY_UNAVAILABLE",
+			message: "Request failed",
+		})
+		expect(response.body).not.toContain("/data/activity")
+		await app.close()
+	})
+
+	it("ignores x-activity-client and keys admission on the access principal", () => {
+		const request = {
+			ip: "203.0.113.8",
+			headers: { "x-activity-client": "rotate-me" },
+		} as unknown as FastifyRequest
+		expect(activityClientKey(request)).toBe("ip:203.0.113.8")
+		expect(
+			activityClientKey(request, {
+				principalId: () => "device_abc",
+			}),
+		).toBe("principal:device_abc")
+		expect(
+			activityClientKey(
+				{
+					ip: "203.0.113.9",
+					headers: { "x-activity-client": "other" },
+				} as unknown as FastifyRequest,
+				{ principalId: () => "device_abc" },
+			),
+		).toBe("principal:device_abc")
+		expect(activityClientKey(request, { principalId: () => undefined })).toBe(
+			"ip:203.0.113.8",
+		)
+		expect(activityClientKey(request, { principalId: () => "" })).toBe(
+			"ip:203.0.113.8",
+		)
 	})
 
 	it("searches, reads detail, counts facets, and reports status", async () => {
