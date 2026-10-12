@@ -2284,7 +2284,10 @@ search is a bounded projection
 (`searchCoverage: "bounded-projection"`), not a search of every raw byte.
 One search, detail or facet request may be in flight per caller. The caller
 is the admitted access principal (a session's device id, or the machine
-principal), or else the request IP. `x-activity-client` is ignored.
+principal), or else the request IP. Without an access controller, admission
+keys on `request.ip`. A reverse proxy without `trustProxy` shares that one
+key, so every client shares one in-flight slot. `x-activity-client` is
+ignored.
 
 **Response** (200): `items` (summaries), `nextPageToken`, `replayCursor`,
 `snapshot` (`lowBarrier`, `highWater`, `expiresAt`), `searchCoverage`.
@@ -2316,6 +2319,10 @@ writer for the session and does not count those rows as lost. 500
 
 ### Query and cursor errors
 
+The reader worker has its own 5 s startup budget. The 250 ms deadline starts
+only after the reader is ready. A reader that cannot start is
+`ACTIVITY_QUERY_FAILED`.
+
 | Code                         | HTTP | When |
 | ---------------------------- | ---- | ---- |
 | `ACTIVITY_DISABLED`          | 404  | `activity.enabled` is false |
@@ -2326,8 +2333,8 @@ writer for the session and does not count those rows as lost. 500
 | `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
 | `ACTIVITY_CURSOR_GAP`        | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
 | `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
-| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms) |
-| `ACTIVITY_QUERY_FAILED`      | 500  | The reader failed, or the store read failed |
+| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms) after the reader was ready |
+| `ACTIVITY_QUERY_FAILED`      | 500  | The reader did not start, the reader failed, or the store read failed |
 | `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
 | `ACTIVITY_RECORD_CORRUPT`    | 500  | A stored record failed validation |
 | `ACTIVITY_STATUS_UNAVAILABLE`| 500  | Status was requested without a stats provider |
