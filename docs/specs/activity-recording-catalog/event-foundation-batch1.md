@@ -55,8 +55,13 @@ outputs, classified by an explicit allow-list) are excluded and counted.
 
 - One SQLite file `<stateDir>/activity/activity.db`, WAL, `synchronous=FULL`,
   `busy_timeout=100`, `foreign_keys=ON`, `auto_vacuum=INCREMENTAL` set before
-  the schema is created. A lock file held for the process lifetime rejects a
-  second writer process with `ACTIVITY_STORE_LOCKED`.
+  the schema is created. The writer worker holds the store lock in a separate
+  `<stateDir>/activity/activity.lock.db`, opened with
+  `PRAGMA locking_mode=EXCLUSIVE` and a write lock kept for the session
+  (`BEGIN EXCLUSIVE`, or a write that takes the exclusive lock and holds it).
+  The kernel releases that lock on close or process death. A second opener,
+  in this process or another, gets `ACTIVITY_STORE_LOCKED`. There is no PID
+  file and no rename-aside recovery.
 - Schema v1 is `ACTIVITY_SCHEMA_V1` in the contract. `store_meta` holds
   schemaVersion, storeUuid, restoreGeneration (starts 1), pruneWatermark,
   pruneGeneration and the 32-byte cursor key (hex). The key never leaves the
@@ -64,30 +69,53 @@ outputs, classified by an explicit allow-list) are excluded and counted.
 - One writer worker. Ingress queue 1,024 items / 8 MiB; token buckets 100/s
   burst 1,000 global and 50/s burst 200 per decoder instance; batches of at most
   64 items, 512 KiB or 25 ms, each one transaction (activity row, refs, FTS row).
-- Dropped envelopes are counted and summarised by one `ingestion-gap` record per
-  gap episode once admission recovers. A gap record is never itself dropped for
-  rate reasons.
-- Indexed FTS text: title, protocol, field labels and scalar values, and decoded
-  string leaves, truncated to 8 KiB UTF-8 per event.
+- Dropped envelopes are counted. One `ingestion-gap` record summarises an
+  episode. The episode closes only after a quiet period with no drops
+  (`gapQuietMs`, default 5 s) or, while drops continue, at most one gap
+  record per `gapMaxIntervalMs` (default 60 s) aggregating the counts since
+  the previous record. The warn log uses the same limit. Closed, paused and
+  rate tokens are checked before the row is built. The byte cap is checked
+  after the row is built, and tokens taken for a row that does not fit are
+  refunded. A gap record is never itself dropped for rate reasons.
+- Admits rejected because the writer has stopped are counted as
+  `dropped.closed`. Status includes `writer: "running" | "stopped"`. Writes
+  use their own timeout (default 30 s), separate from the open timeout. A
+  write timeout stops the writer for the session: one error is logged, and
+  those rows are not nacked as lost, because the worker may still commit
+  them. This batch does not restart the writer.
+- Indexed FTS text: title, protocol, field labels, string, numeric and
+  boolean field values, and decoded string leaves, truncated to 8 KiB UTF-8
+  per event.
 
 ## Retention
 
 Defaults, provisional and unmeasured: 1,000,000 rows, 2 GiB database, 7 days,
 whichever is reached first; WAL checkpoint (PASSIVE) at 16 MiB, TRUNCATE attempt
-at 48 MiB, writes paused (and counted as `store-paused`) at 64 MiB. Pruning
-deletes ascending `seq` prefixes in bounded transactions that advance
-`pruneWatermark` to the greatest deleted seq and increment `pruneGeneration`,
-followed by `PRAGMA incremental_vacuum`. Never a full VACUUM. Stats report the
-observed oldest record, not the configured age.
+at 48 MiB, writes paused (and counted as `store-paused`) at 64 MiB. `maxRows`
+is an integer of at least 1,000. Age pruning runs only when the oldest
+`receivedAt` is older than `now - maxAge - slack`, where `slack` is
+`max(60 s, 1% of maxAge)`, and then deletes down to `now - maxAge`. Row and
+byte pruning run only while the store is over that cap, and delete down to a
+low-water mark of 95% of the cap. One prune never deletes more rows than
+`count - lowWater`. Pruning deletes ascending `seq` prefixes in bounded
+transactions that advance `pruneWatermark` to the greatest deleted seq and
+increment `pruneGeneration`, followed by `PRAGMA incremental_vacuum`. Never a
+full VACUUM. Stats report the observed oldest record, not the configured age.
 
 ## Search, detail and facets
 
 As design.md "Search and replay protocol" (filters, 16 terms, 256-byte text,
 8 quoted tokens, page 100/200/512 KiB, keyset by seq, 250 ms reader deadline,
-one in-flight request per client, four queued and one executing globally, 429
+one in-flight request per admitted access principal, or per request IP when
+the request has no principal, four queued and one executing globally, 429
 `ACTIVITY_QUERY_BUSY` / `ACTIVITY_QUERY_TIMEOUT`), with one reader worker that
-is terminated and recreated on deadline. Plain text is tokenised by the server
-and quoted; user FTS operators are never passed through.
+is terminated and recreated on deadline. The key is that principal's id:
+the device id for a session, otherwise the machine id. A client-chosen
+header is not the key.
+Plain text is tokenised by the server and quoted; user FTS operators are
+never passed through. Whitespace- or punctuation-only text is no text filter.
+A corrupt stored record or a failed read is HTTP 500
+(`ACTIVITY_RECORD_CORRUPT` or `ACTIVITY_QUERY_FAILED`).
 
 Facets: `dimensions` from category, protocol, decoderId, sourceId, kind, at most
 5 per request. Counts are computed over the same filter inside `(L, H]`, examining
@@ -100,19 +128,25 @@ admission as search.
 Page tokens and replay cursors are base64url `payload.mac` tokens with an
 HMAC-SHA256 over the payload fields listed in design.md; `queryHash` is
 SHA-256 of the canonical (sorted, normalised) query. Validation failure,
-expiry, a changed store UUID or restore generation, a changed query hash, or a
-cursor at or below the prune watermark yield explicit resets (REST 410
-`ACTIVITY_CURSOR_GAP`, 400 `ACTIVITY_CURSOR_INVALID`, 409 `ACTIVITY_SNAPSHOT_RESET`;
-WS `reset` frames). Replay: subscribe to commit wakeups first, read committed
+expiry, a changed store UUID or restore generation, or a changed query hash
+yield explicit resets (400 `ACTIVITY_CURSOR_INVALID`, 409
+`ACTIVITY_SNAPSHOT_RESET`; WS `reset` frames). A cursor is a gap only when
+`lastSeq < watermark`. A cursor exactly at the watermark missed nothing and
+is not a gap (REST 410 `ACTIVITY_CURSOR_GAP`, WS `cursor-gap`). Replay maps
+a snapshot reset to `cursor-gap` and does not send `snapshot-reset`. A read
+that fails sends WS `reset` with `reader-failed` and releases the
+subscription. Replay: subscribe to commit wakeups first, read committed
 max, catch up ascending in bounded pages, then follow; every frame carries
-`scannedThrough`. WS limits: 2 subscriptions per client, 8 global, 256 messages
-or 1 MiB queued per client; overflow pauses the replay (not a durable buffer)
-and closes with a resumable reason and the last delivered cursor.
+`scannedThrough`. WS limits: 2 subscriptions per client, 8 global, 256
+messages or 1 MiB queued per client; overflow pauses the replay (not a
+durable buffer) and closes with a resumable reason and the last delivered
+cursor of each subscription, `{ reason, cursors: { [id]: cursor } }`.
 
 ## Routes (mounted, disabled by default)
 
 - `GET /api/activity` search page; `GET /api/activity/:eventId` detail;
-  `POST /api/activity/facets`; `GET /api/activity/status` (enabled, stats).
+  `POST /api/activity/facets`; `GET /api/activity/status` (enabled, stats,
+  including `writer` and `dropped.closed`).
 - WS `activity` subscription with `{ query, cursor? }` and frames as the contract.
 - Access policy: read routes follow the existing read permission for decoder
   data; no new write routes.
