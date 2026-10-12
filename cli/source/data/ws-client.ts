@@ -99,6 +99,16 @@ export function createNodeWsFactory(opts: NodeWsOptions = {}): WsFactory {
 
 export const nodeWsFactory: WsFactory = createNodeWsFactory()
 
+function isActivityFrame(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null) return false
+	if ("channel" in raw && raw.channel === "activity") return true
+	return (
+		"type" in raw &&
+		typeof raw.type === "string" &&
+		raw.type.startsWith("activity:")
+	)
+}
+
 export const CHANNELS = [
 	"decoders",
 	"health",
@@ -224,6 +234,10 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 						deps.emit({ kind: "ws:invalid", at: deps.now() })
 						return
 					}
+					// Activity is a separate subscription. The CLI never joins it.
+					// Its records and its error frames (type "error", channel
+					// "activity") must not count as invalid or as a server error.
+					if (isActivityFrame(raw)) return
 					const event = parseServerMessage(raw)
 					if (!event) {
 						const scan =
