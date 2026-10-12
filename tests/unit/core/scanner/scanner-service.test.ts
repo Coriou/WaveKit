@@ -1433,7 +1433,7 @@ describe("R14 immutable scanner component phase", () => {
 		h.sources.off("newListener", failRegistration)
 		// Explicit fixture cleanup; the owner did not claim this unresolved listener settled.
 		for (const listener of h.tuner.listeners("command-sent"))
-			h.tuner.off("command-sent", listener)
+			h.tuner.off("command-sent", listener as (...args: unknown[]) => void)
 	})
 	it("an early own failure cannot complete40 while an independent component remains held", async () => {
 		const h = serviceHarness({

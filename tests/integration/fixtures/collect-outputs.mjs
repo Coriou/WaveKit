@@ -1,5 +1,5 @@
 // tests/integration/fixtures/collect-outputs.mjs
-// Runs INSIDE the container (Node 22: global fetch + WebSocket). Usage:
+// Runs INSIDE the container (Node 24: global fetch + WebSocket). Usage:
 //   node collect-outputs.mjs <apiPort> <seconds> <decoderId>
 // Prints {"kind":"output",...} lines for that decoder, then one {"kind":"status",...}.
 // Exits 2 when the app never comes up, 3 when the WebSocket errors or closes before the window ends.

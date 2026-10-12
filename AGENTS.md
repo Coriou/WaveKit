@@ -51,7 +51,7 @@ A new `packages/*` manifest must also be copied in the root `Dockerfile` node-bu
 
 ## Commands
 
-Node 20+ (`.nvmrc` pins the dev version), pnpm 10 (`packageManager`). `pnpm install` at root.
+Node 24+ (`.nvmrc` pins the dev version), pnpm 10 (`packageManager`). `pnpm install` at root.
 
 ```bash
 pnpm run build         # shared + api-types via tsc, then esbuild bundle of src/

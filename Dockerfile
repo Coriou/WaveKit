@@ -509,7 +509,7 @@ RUN git clone --no-checkout https://github.com/tapparelj/gr-lora_sdr.git repo &&
 # Purpose: Compile the WaveKit TypeScript app. Single pnpm install honoring
 #          the project's .npmrc node-linker=isolated. No double install.
 # ============================================================================
-FROM node:22-bookworm-slim AS node-build
+FROM node:24-bookworm-slim AS node-build
 
 WORKDIR /app
 

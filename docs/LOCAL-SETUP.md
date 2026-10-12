@@ -10,7 +10,7 @@ commands below are optional native development and diagnostic paths.
 
 ## Start native development without hardware
 
-Install Node.js 20+ and pnpm 10.28.0, then from the repository root:
+Install Node.js 24 LTS (24.x or newer) and pnpm 10.28.0, then from the repository root:
 
 ```sh
 pnpm install --frozen-lockfile
