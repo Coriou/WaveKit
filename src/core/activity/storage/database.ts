@@ -47,6 +47,15 @@ export interface PruneResult {
 	changed: boolean
 }
 
+/**
+ * Cap hysteresis owned by the writer session. When a flag is true the cap
+ * stays on until the store is back at or under its low-water mark.
+ */
+export interface ActivityPrunePressure {
+	rowCap: boolean
+	byteCap: boolean
+}
+
 export interface ActivityDatabaseState {
 	identity: StoreIdentity
 	cursorKey: Buffer
@@ -226,7 +235,10 @@ export function activityLowWater(cap: number): number {
  * in that same transaction. Age runs only when the oldest row is older than
  * maxAge plus slack, and then only deletes rows older than maxAge. Row and byte
  * pressure delete down to 95% of the cap and never remove more than
- * count - lowWater rows for the row cap. A row that qualifies for none of
+ * count - lowWater rows for the row cap. Pass the session's hysteresis
+ * flags so a cap that has started keeps deleting until the low-water mark,
+ * including after the store has fallen back under the cap. Omit them for a
+ * one-shot check against the cap itself. A row that qualifies for none of
  * these stops the prefix, so a prune never opens a hole.
  */
 export function pruneActivityPrefix(
@@ -240,6 +252,7 @@ export function pruneActivityPrefix(
 		| "incrementalVacuumPages"
 	>,
 	nowMs: number,
+	pressure?: ActivityPrunePressure,
 ): PruneResult {
 	const meta = readRequiredMeta(db)
 	const unchanged: PruneResult = {
@@ -250,12 +263,11 @@ export function pruneActivityPrefix(
 	}
 	const rowCount = countRows(db)
 	const dbBytes = databaseBytes(db)
-	const overRows = rowCount > limits.maxRows
-	const overBytes = dbBytes > limits.maxDbBytes
+	const overRows = pressure ? pressure.rowCap : rowCount > limits.maxRows
+	const overBytes = pressure ? pressure.byteCap : dbBytes > limits.maxDbBytes
 	const oldest = oldestReceivedMs(db)
 	const slack = activityAgeSlackMs(limits.maxAgeMs)
-	const ageActive =
-		oldest !== null && oldest < nowMs - limits.maxAgeMs - slack
+	const ageActive = oldest !== null && oldest < nowMs - limits.maxAgeMs - slack
 	const cutoff = nowMs - limits.maxAgeMs
 	if (!overRows && !overBytes && !ageActive) return unchanged
 	const rowBudget = overRows
@@ -495,11 +507,16 @@ function oldestReceivedAt(db: SqliteDatabase): string | null {
 	return new Date(oldest).toISOString()
 }
 
+/**
+ * Pages that still hold data. Freelist pages stay in `page_count` until
+ * incremental_vacuum returns them, and must not keep the byte cap on.
+ */
 function databaseBytes(db: SqliteDatabase): number {
-	return (
-		pragmaNumber(db, "PRAGMA page_size", "page_size") *
-		pragmaNumber(db, "PRAGMA page_count", "page_count")
-	)
+	const pageSize = pragmaNumber(db, "PRAGMA page_size", "page_size")
+	const pageCount = pragmaNumber(db, "PRAGMA page_count", "page_count")
+	const freelist = pragmaNumber(db, "PRAGMA freelist_count", "freelist_count")
+	const live = pageCount > freelist ? pageCount - freelist : 0
+	return live * pageSize
 }
 
 function userTableNames(db: SqliteDatabase): string[] {

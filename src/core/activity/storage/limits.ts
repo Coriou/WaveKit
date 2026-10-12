@@ -18,6 +18,8 @@ export interface ActivityLimits {
 	walTruncateBytes: number
 	walPauseBytes: number
 	pruneBatchRows: number
+	/** Consecutive prune transactions one write may run while a cap stays active. */
+	pruneBurstBatches: number
 	incrementalVacuumPages: number
 	closeTimeoutMs: number
 	/** How often a paused store retries a TRUNCATE checkpoint. */
@@ -47,6 +49,7 @@ export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
 	walTruncateBytes: 48 * MiB,
 	walPauseBytes: 64 * MiB,
 	pruneBatchRows: 500,
+	pruneBurstBatches: 20,
 	incrementalVacuumPages: 64,
 	closeTimeoutMs: 2000,
 	pauseRetryMs: 250,
@@ -85,12 +88,14 @@ export function resolveActivityLimits(
 			"Activity queue and batch byte caps must be at least 1",
 		)
 	if (limits.maxRows < 1000)
-		throw new ActivityUnavailableError(
-			"Activity maxRows must be at least 1000",
-		)
+		throw new ActivityUnavailableError("Activity maxRows must be at least 1000")
 	if (limits.pruneBatchRows < 1)
 		throw new ActivityUnavailableError(
 			"Activity prune batch must be at least 1 row",
+		)
+	if (limits.pruneBurstBatches < 1)
+		throw new ActivityUnavailableError(
+			"Activity prune burst must be at least 1 batch",
 		)
 	if (limits.gapMaxIntervalMs < 1)
 		throw new ActivityUnavailableError(

@@ -1,5 +1,6 @@
 import type { StoreIdentity } from "./contract.js"
 import {
+	activityLowWater,
 	commitActivityBatch,
 	openActivityDatabase,
 	pruneActivityPrefix,
@@ -59,6 +60,8 @@ export function createActivitySession(
 	let throws = throwNextWrites
 	let state = readActivityState(db, dbPath)
 	let paused = state.walBytes >= limits.walPauseBytes
+	let rowCapPruning = false
+	let byteCapPruning = false
 	if (state.walBytes >= limits.walPassiveBytes || paused) {
 		const wal = syncActivityWal(db, dbPath, limits)
 		paused = wal.paused
@@ -81,6 +84,18 @@ export function createActivitySession(
 		paused = wal.paused
 		state = readActivityState(db, dbPath)
 		paused = state.walBytes >= limits.walPauseBytes
+	}
+
+	const refreshCaps = (): void => {
+		const observed = readActivityState(db, dbPath)
+		const rowLow = activityLowWater(limits.maxRows)
+		const byteLow = activityLowWater(limits.maxDbBytes)
+		rowCapPruning = rowCapPruning
+			? observed.rows > rowLow
+			: observed.rows > limits.maxRows
+		byteCapPruning = byteCapPruning
+			? observed.dbBytes > byteLow
+			: observed.dbBytes > limits.maxDbBytes
 	}
 
 	return {
@@ -106,7 +121,21 @@ export function createActivitySession(
 			}
 			let note: string | undefined
 			try {
-				prune = pruneActivityPrefix(db, limits, nowMs)
+				const burst = limits.pruneBurstBatches
+				for (let batch = 0; batch < burst; batch++) {
+					refreshCaps()
+					const step = pruneActivityPrefix(db, limits, nowMs, {
+						rowCap: rowCapPruning,
+						byteCap: byteCapPruning,
+					})
+					if (!step.changed) break
+					prune = {
+						deleted: prune.deleted + step.deleted,
+						watermark: step.watermark,
+						generation: step.generation,
+						changed: true,
+					}
+				}
 			} catch (error) {
 				note = messageOf(error)
 			}
