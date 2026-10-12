@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import {
 	ActivityQueryError,
-	ActivityQueryTimeoutError,
+	ActivityReaderFailedError,
 } from "../../../../../src/core/activity/query/errors.js"
 import type { ReadRequest } from "../../../../../src/core/activity/query/read.js"
 import {
@@ -70,12 +70,29 @@ describe("activity reader host", () => {
 			40,
 		)
 		try {
-			await expect(host.execute(searchRequest("1"), 0, {})).rejects.toBeInstanceOf(
-				ActivityQueryTimeoutError,
-			)
-			await expect(host.execute(searchRequest("1"), 0, {})).rejects.toBeInstanceOf(
-				ActivityQueryTimeoutError,
-			)
+			const first: unknown = await host
+				.execute(searchRequest("1"), 0, {})
+				.then(
+					() => null,
+					(error: unknown) => error,
+				)
+			expect(first).toBeInstanceOf(ActivityReaderFailedError)
+			expect(first).toMatchObject({
+				code: "ACTIVITY_QUERY_FAILED",
+				statusCode: 500,
+				message: "Activity reader did not start",
+			})
+			const second: unknown = await host
+				.execute(searchRequest("1"), 0, {})
+				.then(
+					() => null,
+					(error: unknown) => error,
+				)
+			expect(second).toBeInstanceOf(ActivityReaderFailedError)
+			expect(second).toMatchObject({
+				code: "ACTIVITY_QUERY_FAILED",
+				statusCode: 500,
+			})
 			expect(events.filter(event => event.type === "spawn")).toHaveLength(2)
 		} finally {
 			await host.close()

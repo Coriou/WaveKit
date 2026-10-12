@@ -114,7 +114,14 @@ export interface ActivityQueryServiceOptions {
 	/** Test hook. A number, or a function sampled once per read. */
 	readerDelayMs?: number | (() => number)
 	onReaderEvent?: (event: ReaderHostEvent) => void
+	/**
+	 * Reader startup budget. The query deadline starts only after the reader
+	 * is ready. Defaults to 5 s.
+	 */
+	readyTimeoutMs?: number
 }
+
+const READER_READY_TIMEOUT_MS = 5_000
 
 export function defaultActivityQueryWorkerUrl(): URL {
 	return new URL("./activity-query-worker.js", import.meta.url)
@@ -155,6 +162,7 @@ export function createActivityQueryService(
 		execution,
 		options.workerUrl ?? defaultActivityQueryWorkerUrl(),
 		options.onReaderEvent,
+		options.readyTimeoutMs ?? READER_READY_TIMEOUT_MS,
 	)
 	const admission = new QueryAdmission(
 		limits.maxExecuting,
@@ -179,6 +187,8 @@ export function createActivityQueryService(
 		const ticket = {}
 		let timer: ReturnType<typeof setTimeout> | undefined
 		try {
+			await host.ensureReady()
+			if (closed) throw new ActivityQueryClosedError()
 			return await new Promise((resolve, reject) => {
 				timer = setTimeout(() => {
 					host.invalidate(ticket)
@@ -404,6 +414,13 @@ export function createActivityQueryService(
 			admission.close()
 			await host.close()
 		},
+	}
+
+	if (execution === "worker") {
+		void host.ensureReady().catch((error: unknown) => {
+			if (closed) return
+			log.warn({ err: error }, "Activity reader prewarm failed")
+		})
 	}
 
 	log.debug("Activity query service created")

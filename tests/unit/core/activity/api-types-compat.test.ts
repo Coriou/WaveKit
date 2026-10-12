@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from "vitest"
 import type * as Api from "@wavekit/api-types"
+import { frameMessage } from "../../../../src/api/activity-subscriptions.js"
 import type * as Contract from "../../../../src/core/activity/storage/contract.js"
 import type * as Core from "../../../../src/core/activity/types.js"
 
@@ -116,47 +117,6 @@ type ExpectedServer =
 	| ExpectedClosed
 	| ExpectedError
 
-/**
- * Same mapping as `frameMessage` in src/api/activity-subscriptions.ts.
- * That function is private to the query lane, so this copy is what the
- * typecheck locks to ActivityServerMessage. Subscribed, unsubscribed,
- * closed and error are the other server messages that builder's neighbours
- * send. Closed uses per-subscription cursors.
- */
-function replayWire(
-	id: string,
-	frame: Api.ActivityReplayFrame,
-): Api.ActivityServerMessage {
-	if (frame.type === "records") {
-		return {
-			type: "activity:records",
-			channel: "activity",
-			data: {
-				id,
-				items: frame.items,
-				scannedThrough: frame.scannedThrough,
-				cursor: frame.cursor,
-			},
-		}
-	}
-	if (frame.type === "progress") {
-		return {
-			type: "activity:progress",
-			channel: "activity",
-			data: {
-				id,
-				scannedThrough: frame.scannedThrough,
-				cursor: frame.cursor,
-			},
-		}
-	}
-	return {
-		type: "activity:reset",
-		channel: "activity",
-		data: { id, reason: frame.reason },
-	}
-}
-
 const optionalCanary: Same<{ a?: number }, Record<never, never>> = false
 const noFrameWrapper: Same<
 	Extract<Api.ActivityServerMessage, { type: "activity:frame" }>,
@@ -250,14 +210,13 @@ describe("activity api-types compatibility", () => {
 	})
 
 	it("types frameMessage output as the activity websocket messages", () => {
-		expect(
-			replayWire("live", {
-				type: "records",
-				items: [],
-				scannedThrough: "4",
-				cursor: "cursor-4",
-			}),
-		).toEqual({
+		const records: Api.ActivityServerMessage = frameMessage("live", {
+			type: "records",
+			items: [],
+			scannedThrough: "4",
+			cursor: "cursor-4",
+		})
+		expect(records).toEqual({
 			type: "activity:records",
 			channel: "activity",
 			data: {
@@ -267,18 +226,17 @@ describe("activity api-types compatibility", () => {
 				cursor: "cursor-4",
 			},
 		})
-		expect(
-			replayWire("live", {
-				type: "progress",
-				scannedThrough: "4",
-				cursor: "cursor-4",
-			}),
-		).toEqual({
+		const progress: Api.ActivityServerMessage = frameMessage("live", {
+			type: "progress",
+			scannedThrough: "4",
+			cursor: "cursor-4",
+		})
+		expect(progress).toEqual({
 			type: "activity:progress",
 			channel: "activity",
 			data: { id: "live", scannedThrough: "4", cursor: "cursor-4" },
 		})
-		const reset: Api.ActivityServerMessage = replayWire("live", {
+		const reset: Api.ActivityServerMessage = frameMessage("live", {
 			type: "reset",
 			reason: "reader-failed",
 		})
