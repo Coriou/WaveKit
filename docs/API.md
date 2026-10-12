@@ -1789,7 +1789,7 @@ Each returns the `ScanJob`. `resume` takes an optional body
 
 A `ScanJob` carries `resumeAt` (ISO time of the automatic resume, `null` when none is
 scheduled or while held) and `resumeHeldBy` (`audio`, `identify`, `recording` or
-`null`). An elapsed deadline is clamped to the current time while resume is pending.
+`null`). An elapsed deadline reads as the time it was first seen elapsed and stays fixed while resume is pending.
 These activity holds apply to automatic resume after operator or relay preemption;
 job-to-job lease hand-back is unaffected. The idle clock is held while an identify
 trial runs on the job's source and

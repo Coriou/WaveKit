@@ -11,6 +11,8 @@ export class ResumeActivity {
 	private previous = { audio: false, recording: false, identify: false }
 	private floor = -Infinity
 	private audioHangUntil = -Infinity
+	/** First time an unchanged elapsed deadline was reported, so it stays stable. */
+	private elapsed: { deadline: number; at: number } | null = null
 
 	status(
 		activity: { audio: boolean; recording: boolean; identify: boolean },
@@ -36,14 +38,23 @@ export class ResumeActivity {
 				: activity.audio || now < this.audioHangUntil
 					? "audio"
 					: null
+		if (held !== null || idleSince === null) {
+			this.elapsed = null
+			return { resumeAt: null, resumeHeldBy: held }
+		}
+		const deadline = Math.max(idleSince, this.floor) + delay
+		if (deadline > now) {
+			this.elapsed = null
+			return { resumeAt: new Date(deadline).toISOString(), resumeHeldBy: null }
+		}
+		// A deadline already passed (resume still pending, e.g. the lease is held
+		// elsewhere) reads as the moment it was first seen elapsed: never an epoch
+		// date, and constant across ticks so unchanged jobs are not re-broadcast.
+		if (this.elapsed?.deadline !== deadline)
+			this.elapsed = { deadline, at: now }
 		return {
-			resumeAt:
-				held !== null || idleSince === null
-					? null
-					: new Date(
-							Math.max(now, Math.max(idleSince, this.floor) + delay),
-						).toISOString(),
-			resumeHeldBy: held,
+			resumeAt: new Date(this.elapsed.at).toISOString(),
+			resumeHeldBy: null,
 		}
 	}
 }

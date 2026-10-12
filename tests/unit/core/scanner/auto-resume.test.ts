@@ -9,6 +9,13 @@ describe("auto resume activity", () => {
 			new Date(now).toISOString(),
 		)
 	})
+	it("keeps an elapsed deadline stable across ticks", () => {
+		const gate = new ResumeActivity()
+		const first = gate.status(quiet, 0, 1000, 5000).resumeAt
+		expect(first).toBe(new Date(5000).toISOString())
+		expect(gate.status(quiet, 0, 1000, 5100).resumeAt).toBe(first)
+		expect(gate.status(quiet, 0, 1000, 9000).resumeAt).toBe(first)
+	})
 	it("uses the existing idle clock when no activity occurs", () => {
 		const gate = new ResumeActivity()
 		expect(gate.status(quiet, 100, 1000, 500).resumeAt).toBe(
