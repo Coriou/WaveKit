@@ -24,6 +24,7 @@
 import { EventEmitter } from "node:events"
 import * as net from "node:net"
 import * as fs from "node:fs"
+import { types as utilTypes } from "node:util"
 import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
 import type { SourceActivity } from "@wavekit/api-types"
@@ -42,6 +43,17 @@ import {
 	iqComponentFormatFor,
 	type SignalFlat,
 } from "./signal-level.js"
+
+import {
+	isReceiverSourceId,
+	isReceiverTime,
+	isReceiverToken,
+} from "./tuner-capabilities/types.js"
+import type {
+	ReceiverEvidenceRead,
+	ReceiverEvidencePageRead,
+	SourceReceiverEvidence,
+} from "./tuner-capabilities/types.js"
 
 // Bound startup/reconnect waits without treating quiet connected sources as failures.
 export const SOURCE_CONNECT_TIMEOUT_MS = 5000
@@ -182,7 +194,24 @@ function parseRtlTcpHeader(buffer: Buffer): RtlTcpHeaderInfo | null {
 	}
 }
 
+interface SourceAttempt {
+	socket: net.Socket
+	phase: "connecting" | "connected" | "failed" | "closed"
+	sessionId: string | null
+	lastSampleAt: number | null
+	expectedSince: number
+	paused: boolean
+	header: Buffer | null
+	headerBuffer: Buffer | null
+	headerAt: number | null
+	watchdog: ReturnType<typeof setInterval> | null
+}
+
 interface SourceState {
+	incarnation: string | null
+	attempt: SourceAttempt | null
+	evidencePaused: boolean
+
 	config: SourceConfig
 	socket: net.Socket | null
 	stream: PassThrough
@@ -313,6 +342,8 @@ export function alignIqChunk(
 
 export class SourceManager extends EventEmitter {
 	private sources: Map<string, SourceState> = new Map()
+	private evidenceCounter: bigint = 1n
+	private evidenceFailed = false
 	private decoderAssignments: Map<string, DecoderAssignment> = new Map()
 	private logger: Logger
 	private readonly options: SourceManagerOptions
@@ -323,6 +354,319 @@ export class SourceManager extends EventEmitter {
 		this.options = options
 	}
 
+	private plainSourceData<T>(value: T): T {
+		let nodes = 0
+		const copy = (item: unknown, depth: number): unknown => {
+			if (++nodes > 128 || depth > 4)
+				throw new WaveKitError("Invalid source data", "SOURCE_CONFIG_INVALID")
+			if (
+				item === null ||
+				item === undefined ||
+				typeof item === "string" ||
+				typeof item === "number" ||
+				typeof item === "boolean"
+			)
+				return item
+			if (
+				typeof item !== "object" ||
+				utilTypes.isProxy(item) ||
+				(Object.getPrototypeOf(item) !== Object.prototype &&
+					Object.getPrototypeOf(item) !== null)
+			)
+				throw new WaveKitError("Invalid source data", "SOURCE_CONFIG_INVALID")
+			const keys = Reflect.ownKeys(item)
+			if (keys.length > 32)
+				throw new WaveKitError("Invalid source data", "SOURCE_CONFIG_INVALID")
+			const result: Record<string, unknown> = {}
+			for (const key of keys) {
+				if (typeof key !== "string")
+					throw new WaveKitError("Invalid source data", "SOURCE_CONFIG_INVALID")
+				const descriptor = Object.getOwnPropertyDescriptor(item, key)
+				if (!descriptor || !("value" in descriptor) || !descriptor.enumerable)
+					throw new WaveKitError("Invalid source data", "SOURCE_CONFIG_INVALID")
+				Object.defineProperty(result, key, {
+					value: copy(descriptor.value, depth + 1),
+					enumerable: true,
+					writable: true,
+					configurable: true,
+				})
+			}
+			return result
+		}
+		return copy(value, 0) as T
+	}
+
+	private isCurrent(state: SourceState): boolean {
+		return !state.stopping && this.sources.get(state.config.id) === state
+	}
+
+	private isActiveAttempt(state: SourceState, attempt: SourceAttempt): boolean {
+		return (
+			this.isCurrent(state) &&
+			state.attempt === attempt &&
+			state.socket === attempt.socket &&
+			(attempt.phase === "connecting" || attempt.phase === "connected")
+		)
+	}
+
+	private allocateEvidenceToken(): string | null {
+		if (this.evidenceFailed) return null
+		if (
+			typeof this.evidenceCounter !== "bigint" ||
+			this.evidenceCounter < 1n ||
+			this.evidenceCounter > (1n << 128n) - 1n
+		) {
+			this.evidenceFailed = true
+			return null
+		}
+		try {
+			const token = this.evidenceCounter.toString(16).padStart(32, "0")
+			this.evidenceCounter += 1n
+			return token
+		} catch {
+			this.evidenceFailed = true
+			return null
+		}
+	}
+
+	/** Data descriptors only: a capture never invokes a config/caps getter. */
+	private evidencePrimitive(object: object, key: string): unknown {
+		const descriptor = Object.getOwnPropertyDescriptor(object, key)
+		return descriptor && "value" in descriptor ? descriptor.value : undefined
+	}
+
+	private evidencePrecheck(
+		id: string,
+		state: SourceState,
+	): "unavailable" | "conflict" | "limit" | null {
+		if (!isReceiverSourceId(id)) return "limit"
+		if (!this.isCurrent(state)) return "conflict"
+		if (state.incarnation === null) return "unavailable"
+		if (!isReceiverToken(state.incarnation)) return "conflict"
+		const config = state.config
+		const type = this.evidencePrimitive(config, "type")
+		const caps: unknown = this.evidencePrimitive(config, "caps")
+		if (caps === null || typeof caps !== "object") return "conflict"
+		const kind = this.evidencePrimitive(caps, "kind")
+		const format = this.evidencePrimitive(caps, "format")
+		const sampleRate = this.evidencePrimitive(caps, "sampleRate")
+		const centerFreq = this.evidencePrimitive(caps, "centerFreq")
+		if (
+			typeof type !== "string" ||
+			typeof kind !== "string" ||
+			typeof format !== "string" ||
+			!["rtl_tcp", "sdrpp-network", "recording"].includes(type) ||
+			!["iq", "audio_pcm", "recording"].includes(kind) ||
+			!["U8_IQ", "S16_IQ", "S16LE", "FLOAT32LE", "auto"].includes(format)
+		)
+			return "conflict"
+		if (
+			typeof sampleRate !== "number" ||
+			!Number.isSafeInteger(sampleRate) ||
+			sampleRate <= 0 ||
+			(centerFreq !== undefined &&
+				(typeof centerFreq !== "number" ||
+					!Number.isSafeInteger(centerFreq) ||
+					centerFreq <= 0))
+		)
+			return "conflict"
+		if (
+			!isReceiverTime(state.expectedSince) ||
+			(state.lastSampleAt !== null && !isReceiverTime(state.lastSampleAt))
+		)
+			return "conflict"
+		const attempt = state.attempt
+		if (
+			type !== "recording" &&
+			attempt &&
+			(attempt.phase === "connecting" || attempt.phase === "connected")
+		) {
+			if (attempt.sessionId === null) return "unavailable"
+			if (
+				!isReceiverToken(attempt.sessionId) ||
+				!isReceiverTime(attempt.expectedSince) ||
+				(attempt.lastSampleAt !== null && !isReceiverTime(attempt.lastSampleAt))
+			)
+				return "conflict"
+			if (
+				state.socket !== attempt.socket ||
+				(attempt.headerAt !== null && !isReceiverTime(attempt.headerAt))
+			)
+				return "conflict"
+		}
+		return null
+	}
+
+	private copyReceiverEvidence(
+		id: string,
+		state: SourceState,
+		now: number,
+		snapshotId: string,
+	): SourceReceiverEvidence {
+		// Preflight has checked descriptors/types. No user callback occurs in this copy.
+		const caps = this.evidencePrimitive(state.config, "caps") as SourceCaps
+		const type = this.evidencePrimitive(
+			state.config,
+			"type",
+		) as SourceConfig["type"]
+		const source = {
+			type,
+			kind: this.evidencePrimitive(caps, "kind") as SourceCaps["kind"],
+			format: this.evidencePrimitive(caps, "format") as SourceCaps["format"],
+		}
+		const attempt = state.attempt
+		const phase =
+			type === "recording"
+				? state.recordingEnded
+					? "ended"
+					: state.connected
+						? "connected"
+						: "disconnected"
+				: attempt?.phase === "connected"
+					? "connected"
+					: attempt?.phase === "connecting"
+						? "connecting"
+						: "disconnected"
+		const sample =
+			phase === "connected"
+				? type === "recording"
+					? state.lastSampleAt
+					: attempt!.lastSampleAt
+				: null
+		const expectedSince =
+			type === "recording"
+				? state.expectedSince
+				: (attempt?.expectedSince ?? state.expectedSince)
+		const paused =
+			type === "recording" ? state.evidencePaused : (attempt?.paused ?? false)
+		const age = sample === null ? null : Math.max(0, now - sample)
+		const delivery =
+			phase === "ended"
+				? "ended"
+				: phase === "disconnected"
+					? "disconnected"
+					: phase === "connecting"
+						? "waiting"
+						: paused
+							? "paused"
+							: age !== null && age < SAMPLE_TIMEOUT_MS
+								? "streaming"
+								: now - Math.max(sample ?? 0, expectedSince) >=
+									SAMPLE_TIMEOUT_MS
+									? "stale"
+									: "waiting"
+		const headerApplicable =
+			type === "rtl_tcp" && source.kind === "iq" && source.format === "U8_IQ"
+		const complete =
+			headerApplicable && phase === "connected" && attempt!.header !== null
+		const partial =
+			headerApplicable &&
+			phase === "connected" &&
+			(attempt!.headerBuffer?.length ?? 0) > 0
+		return {
+			sourceId: id,
+			sourceStateToken: state,
+			sourceIncarnation: state.incarnation!,
+			sessionId:
+				type !== "recording" &&
+				(phase === "connecting" || phase === "connected")
+					? attempt!.sessionId
+					: null,
+			snapshotId,
+			capturedAt: now,
+			source,
+			caps: {
+				sampleRate: this.evidencePrimitive(caps, "sampleRate") as number,
+				centerFreq:
+					(this.evidencePrimitive(caps, "centerFreq") as number | undefined) ??
+					null,
+			},
+			connection: phase,
+			delivery: {
+				state: delivery,
+				lastSampleAt: sample,
+				sampleAgeMs: age,
+				timeoutMs: 10000,
+			},
+			header: {
+				capture: !headerApplicable
+					? "not-applicable"
+					: complete
+						? "complete"
+						: partial
+							? "partial"
+							: "missing",
+				bytes: complete ? Buffer.from(attempt!.header!) : null,
+				capturedAt: complete ? attempt!.headerAt : null,
+			},
+		}
+	}
+
+	getReceiverEvidence(id: string): ReceiverEvidenceRead {
+		const state = this.sources.get(id)
+		if (!state) return { kind: "missing" }
+		const failure = this.evidencePrecheck(id, state)
+		if (failure !== null) return { kind: failure }
+		const now = Date.now()
+		if (!isReceiverTime(now)) return { kind: "conflict" }
+		const snapshotId = this.allocateEvidenceToken()
+		if (snapshotId === null) return { kind: "unavailable" }
+		return {
+			kind: "present",
+			evidence: this.copyReceiverEvidence(id, state, now, snapshotId),
+		}
+	}
+
+	getReceiverEvidencePage(
+		after: string | null,
+		limit: number,
+	): ReceiverEvidencePageRead {
+		if (
+			(after !== null && !isReceiverSourceId(after)) ||
+			!Number.isInteger(limit) ||
+			limit < 1 ||
+			limit > 16
+		)
+			return { kind: "conflict" }
+		const selected: { id: string; state: SourceState }[] = []
+		const compare = (a: string, b: string) =>
+			Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"))
+		for (const [id, state] of this.sources) {
+			if (!isReceiverSourceId(id)) return { kind: "limit" }
+			if (after !== null && compare(id, after) <= 0) continue
+			let index = 0
+			while (index < selected.length && compare(selected[index]!.id, id) < 0)
+				index++
+			if (index <= limit) {
+				if (selected.length === limit + 1) selected.pop()
+				selected.splice(index, 0, { id, state })
+			}
+		}
+		for (const { id, state } of selected) {
+			const failure = this.evidencePrecheck(id, state)
+			if (failure !== null) return { kind: failure }
+		}
+		const now = Date.now()
+		if (!isReceiverTime(now)) return { kind: "conflict" }
+		if (selected.length === 0)
+			return {
+				kind: "candidates",
+				candidates: [],
+				capturedAt: now,
+				snapshotId: null,
+			}
+		const snapshotId = this.allocateEvidenceToken()
+		if (snapshotId === null) return { kind: "unavailable" }
+		return {
+			kind: "candidates",
+			candidates: selected.map(({ id, state }) =>
+				this.copyReceiverEvidence(id, state, now, snapshotId),
+			),
+			capturedAt: now,
+			snapshotId,
+		}
+	}
+
 	/**
 	 * Connects to an SDR source over TCP.
 	 * Returns a Readable stream that emits audio data.
@@ -331,6 +675,7 @@ export class SourceManager extends EventEmitter {
 	 * @returns Readable stream for the source data
 	 */
 	async connect(config: SourceConfig): Promise<Readable> {
+		config = this.plainSourceData(config)
 		if (this.sources.has(config.id)) {
 			throw new Error(`Source ${config.id} already exists`)
 		}
@@ -351,6 +696,9 @@ export class SourceManager extends EventEmitter {
 		})
 
 		const state: SourceState = {
+			incarnation: this.allocateEvidenceToken(),
+			attempt: null,
+			evidencePaused: false,
 			config,
 			socket: null,
 			stream,
@@ -386,25 +734,32 @@ export class SourceManager extends EventEmitter {
 
 		this.sources.set(config.id, state)
 		stream.on("drain", () => {
-			if (state.stopping) return
+			if (!this.isCurrent(state)) return
+			state.evidencePaused = false
 			state.expectedSince = Date.now()
-			state.socket?.resume()
-			if (state.recordingState) this.scheduleNextChunk(config.id)
+			const attempt = state.attempt
+			if (attempt && this.isActiveAttempt(state, attempt)) {
+				attempt.paused = false
+				attempt.expectedSince = state.expectedSince
+				attempt.socket.resume()
+			}
+			if (!this.isCurrent(state)) return
+			if (state.recordingState)
+				this.scheduleNextChunk(config.id, state, state.recordingState)
 		})
 
 		// Start metrics emission interval (Requirement 1.5)
 		state.metricsTimer = setInterval(() => {
-			this.emitMetrics(config.id)
+			this.emitMetrics(config.id, state)
 		}, METRICS_INTERVAL_MS)
 
 		// Handle recording sources (Requirement 21)
 		if (config.type === "recording") {
 			try {
-				await this.startRecordingSource(config.id)
+				await this.startRecordingSource(config.id, state)
 			} catch (err) {
-				// Clean up on failure
-				this.cleanupState(state)
-				this.sources.delete(config.id)
+				// Startup owns its resources and retains a current failed registration.
+				// This continuation must never re-fetch or delete a replacement.
 				throw err
 			}
 		} else {
@@ -416,9 +771,10 @@ export class SourceManager extends EventEmitter {
 				// This allows the built-in reconnection loop to bring the source back when
 				// the remote (e.g. pi-iq) reboots or becomes temporarily unavailable.
 				// We only tear down the source for non-connection failures.
-				if (!(err instanceof SourceConnectionError)) {
-					this.cleanupState(state)
+				if (!(err instanceof SourceConnectionError) && this.isCurrent(state)) {
+					state.stopping = true
 					this.sources.delete(config.id)
+					this.cleanupState(state)
 				}
 				throw err
 			}
@@ -428,6 +784,14 @@ export class SourceManager extends EventEmitter {
 	}
 
 	private forwardData(id: string, state: SourceState, chunk: Buffer): boolean {
+		const attempt = state.attempt
+		const recording = state.recordingState
+		const current = () =>
+			this.isCurrent(state) &&
+			(recording
+				? state.recordingState === recording && recording.isPlaying
+				: attempt !== null && this.isActiveAttempt(state, attempt))
+		if (!current()) return false
 		// TCP boundaries are arbitrary. Fanout may shed complete chunks, so each
 		// IQ chunk must contain whole complex samples before reaching its branches.
 		const frameBytes = iqFrameBytes(state.config.caps)
@@ -445,16 +809,24 @@ export class SourceManager extends EventEmitter {
 		if (state.config.type !== "recording") state.signalLevel.feed(chunk)
 
 		const firstPayload = chunk.length > 0 && state.lastSampleAt === null
-		if (chunk.length > 0) state.lastSampleAt = Date.now()
+		if (chunk.length > 0) {
+			state.lastSampleAt = Date.now()
+			if (attempt) attempt.lastSampleAt = state.lastSampleAt
+		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
 			canWrite = state.stream.write(chunk)
+			if (!current()) return false
 			if (!canWrite) {
-				state.socket?.pause()
+				state.evidencePaused = true
+				if (attempt) attempt.paused = true
 				state.pausedSinceLastMetric = true
+				state.socket?.pause()
+				if (!current()) return false
 			}
 		}
 		this.emit("data", id, chunk)
+		if (!current()) return false
 		if (firstPayload) this.emit("payload-started", id)
 		return canWrite
 	}
@@ -483,8 +855,9 @@ export class SourceManager extends EventEmitter {
 		this.stopStallWatchdog(state)
 		// Clean up recording source resources
 		if (state.recordingState) {
-			this.cleanupRecordingState(state.recordingState)
+			const recording = state.recordingState
 			state.recordingState = undefined
+			this.cleanupRecordingState(recording)
 		}
 	}
 
@@ -497,8 +870,11 @@ export class SourceManager extends EventEmitter {
 			recordingState.playbackTimer = null
 		}
 		if (recordingState.fileDescriptor !== null) {
+			const fd = recordingState.fileDescriptor
+			recordingState.fileDescriptor = null
+			recordingState.isPlaying = false
 			try {
-				fs.closeSync(recordingState.fileDescriptor)
+				fs.closeSync(fd)
 			} catch {
 				// Ignore close errors
 			}
@@ -513,69 +889,112 @@ export class SourceManager extends EventEmitter {
 	 *
 	 * @param id - Source ID
 	 */
-	private async startRecordingSource(id: string): Promise<void> {
-		const state = this.sources.get(id)
-		if (!state || state.stopping) {
-			return
+	private async startRecordingSource(
+		id: string,
+		state: SourceState,
+	): Promise<void> {
+		let ownedFd: number | null = null
+		let recording: RecordingState | null = null
+		const current = () =>
+			this.isCurrent(state) &&
+			(recording === null || state.recordingState === recording)
+		try {
+			if (!current()) return
+			const { config } = state
+			if (!config.filePath)
+				throw new WaveKitError(
+					`Recording source ${id} requires filePath`,
+					"RECORDING_START_FAILED",
+				)
+			const exists = fs.existsSync(config.filePath)
+			if (!current()) return
+			if (!exists)
+				throw new WaveKitError(
+					`Recording file not found: ${config.filePath}`,
+					"RECORDING_START_FAILED",
+				)
+			const stats = fs.statSync(config.filePath)
+			if (!current()) return
+			if (stats.size === 0)
+				throw new WaveKitError(
+					`Recording file is empty: ${config.filePath}`,
+					"RECORDING_START_FAILED",
+				)
+			ownedFd = fs.openSync(config.filePath, "r")
+			if (!current()) return
+			recording = {
+				fileDescriptor: ownedFd,
+				playbackTimer: null,
+				position: 0,
+				fileSize: stats.size,
+				chunkSize: this.calculateChunkSize(config.caps),
+				isPlaying: true,
+			}
+			ownedFd = null
+			state.recordingState = recording
+			state.connected = true
+			state.recordingEnded = false
+			state.lastSampleAt = null
+			state.expectedSince = Date.now()
+			this.logger.info(
+				{
+					sourceId: id,
+					filePath: config.filePath,
+					fileSize: stats.size,
+					loop: config.loop,
+					playbackSpeed: config.playbackSpeed,
+				},
+				"Recording source started",
+			)
+			if (!current()) return
+			this.emit("connected", id)
+			if (!current()) return
+			this.scheduleNextChunk(id, state, recording)
+		} catch (err) {
+			if (current()) {
+				state.connected = false
+				state.recordingEnded = false
+				state.lastSampleAt = null
+				state.evidencePaused = false
+				state.lastError =
+					err instanceof Error ? err.message : "Recording startup failed"
+				if (recording) {
+					state.recordingState = undefined
+					this.cleanupRecordingState(recording)
+				}
+				if (ownedFd !== null) {
+					const fd = ownedFd
+					ownedFd = null
+					try {
+						fs.closeSync(fd)
+					} catch {
+						/* Preserve the startup error. */
+					}
+				}
+				try {
+					if (this.isCurrent(state))
+						this.logger.error(
+							{ sourceId: id, err },
+							"Recording source startup failed",
+						)
+					if (this.isCurrent(state) && this.listenerCount("error") > 0)
+						this.emit("error", id, err)
+				} catch {
+					// Notification cannot replace the original startup rejection.
+				}
+			} else if (recording) this.cleanupRecordingState(recording)
+			throw err
+		} finally {
+			if (ownedFd !== null) {
+				const fd = ownedFd
+				ownedFd = null
+				try {
+					fs.closeSync(fd)
+				} catch {
+					/* Own local descriptor only. */
+				}
+			}
 		}
-
-		const { config } = state
-
-		if (!config.filePath) {
-			throw new Error(`Recording source ${id} requires filePath`)
-		}
-
-		// Check if file exists
-		if (!fs.existsSync(config.filePath)) {
-			throw new Error(`Recording file not found: ${config.filePath}`)
-		}
-
-		// Get file stats
-		const stats = fs.statSync(config.filePath)
-		const fileSize = stats.size
-
-		if (fileSize === 0) {
-			throw new Error(`Recording file is empty: ${config.filePath}`)
-		}
-
-		// Open file for reading
-		const fd = fs.openSync(config.filePath, "r")
-
-		// Calculate chunk size based on sample rate and format
-		// We want to emit data at approximately the real-time rate adjusted by playbackSpeed
-		// Default to 4096 bytes per chunk (good balance for most formats)
-		const chunkSize = this.calculateChunkSize(config.caps)
-
-		// Initialize recording state
-		state.recordingState = {
-			fileDescriptor: fd,
-			playbackTimer: null,
-			position: 0,
-			fileSize,
-			chunkSize,
-			isPlaying: true,
-		}
-
-		// Mark as connected
-		state.connected = true
-		state.expectedSince = Date.now()
-
-		this.logger.info(
-			{
-				sourceId: id,
-				filePath: config.filePath,
-				fileSize,
-				loop: config.loop,
-				playbackSpeed: config.playbackSpeed,
-			},
-			"Recording source started",
-		)
-
-		// Emit connected event
-		this.emit("connected", id)
-
-		// Start playback
-		this.scheduleNextChunk(id)
 	}
 
 	/**
@@ -669,9 +1088,18 @@ export class SourceManager extends EventEmitter {
 	/**
 	 * Schedules the next chunk to be read and emitted.
 	 */
-	private scheduleNextChunk(id: string): void {
-		const state = this.sources.get(id)
-		if (!state || state.stopping || !state.recordingState) {
+	private scheduleNextChunk(
+		id: string,
+		captured?: SourceState,
+		resource?: RecordingState,
+	): void {
+		const state = captured ?? this.sources.get(id)
+		if (
+			!state ||
+			!this.isCurrent(state) ||
+			!state.recordingState ||
+			(resource !== undefined && state.recordingState !== resource)
+		) {
 			return
 		}
 
@@ -688,18 +1116,35 @@ export class SourceManager extends EventEmitter {
 			config.playbackSpeed ?? 1.0,
 		)
 
-		recordingState.playbackTimer = setTimeout(() => {
+		if (recordingState.playbackTimer !== null) return
+		const timer = setTimeout(() => {
+			if (
+				!this.isCurrent(state) ||
+				state.recordingState !== recordingState ||
+				recordingState.playbackTimer !== timer
+			)
+				return
 			recordingState.playbackTimer = null
-			this.readAndEmitChunk(id)
+			this.readAndEmitChunk(id, state, recordingState)
 		}, interval)
+		recordingState.playbackTimer = timer
 	}
 
 	/**
 	 * Reads a chunk from the recording file and emits it.
 	 */
-	private readAndEmitChunk(id: string): void {
-		const state = this.sources.get(id)
-		if (!state || state.stopping || !state.recordingState) {
+	private readAndEmitChunk(
+		id: string,
+		captured?: SourceState,
+		resource?: RecordingState,
+	): void {
+		const state = captured ?? this.sources.get(id)
+		if (
+			!state ||
+			!this.isCurrent(state) ||
+			!state.recordingState ||
+			(resource !== undefined && state.recordingState !== resource)
+		) {
 			return
 		}
 
@@ -715,7 +1160,7 @@ export class SourceManager extends EventEmitter {
 
 		if (bytesToRead <= 0) {
 			// End of file reached
-			this.handleRecordingEnd(id)
+			this.handleRecordingEnd(id, true, state, recordingState)
 			return
 		}
 
@@ -730,9 +1175,12 @@ export class SourceManager extends EventEmitter {
 				recordingState.position,
 			)
 
+			if (!this.isCurrent(state) || state.recordingState !== recordingState)
+				return
+
 			if (bytesRead === 0) {
 				// End of file
-				this.handleRecordingEnd(id)
+				this.handleRecordingEnd(id, true, state, recordingState)
 				return
 			}
 
@@ -749,19 +1197,22 @@ export class SourceManager extends EventEmitter {
 				state,
 				buffer.subarray(0, bytesRead),
 			)
+			if (!this.isCurrent(state) || state.recordingState !== recordingState)
+				return
 			if (
 				recordingState.position >= recordingState.fileSize &&
 				!state.config.loop
 			) {
-				this.handleRecordingEnd(id)
+				this.handleRecordingEnd(id, true, state, recordingState)
 			} else if (canWrite) {
-				this.scheduleNextChunk(id)
+				this.scheduleNextChunk(id, state, recordingState)
 			}
 		} catch (err) {
-			this.logger.error({ sourceId: id, err }, "Error reading recording file")
+			if (!this.isCurrent(state) || state.recordingState !== recordingState)
+				return
 			state.lastError =
 				err instanceof Error ? err.message : "Unknown read error"
-			this.handleRecordingEnd(id, false)
+			this.handleRecordingEnd(id, false, state, recordingState, err)
 		}
 	}
 
@@ -769,36 +1220,49 @@ export class SourceManager extends EventEmitter {
 	 * Handles the end of a recording file.
 	 * Requirements: 21.2
 	 */
-	private handleRecordingEnd(id: string, allowLoop = true): void {
-		const state = this.sources.get(id)
-		if (!state || !state.recordingState) {
+	private handleRecordingEnd(
+		id: string,
+		allowLoop = true,
+		captured?: SourceState,
+		resource?: RecordingState,
+		readError?: unknown,
+	): void {
+		const state = captured ?? this.sources.get(id)
+		if (
+			!state ||
+			!this.isCurrent(state) ||
+			!state.recordingState ||
+			(resource !== undefined && state.recordingState !== resource)
+		)
 			return
-		}
-
-		const { config } = state
-		const recordingState = state.recordingState
-
-		if (config.loop && allowLoop) {
-			// Loop: reset position and continue
-			recordingState.position = 0
+		const recording = state.recordingState
+		if (state.config.loop && allowLoop) {
+			recording.position = 0
 			state.iqRemainder = Buffer.alloc(0)
-
+			state.lastSampleAt = null
+			state.expectedSince = Date.now()
+			state.evidencePaused = false
 			this.logger.debug({ sourceId: id }, "Recording source looping")
-
-			// Schedule next chunk
-			this.scheduleNextChunk(id)
+			if (this.isCurrent(state) && state.recordingState === recording)
+				this.scheduleNextChunk(id, state, recording)
 		} else {
-			// Retain status/assignments, but release the file and timers at EOF.
-			this.cleanupState(state)
 			state.connected = false
 			state.recordingEnded = true
+			state.lastSampleAt = null
+			state.evidencePaused = false
 			state.dataRate = 0
+			this.cleanupState(state)
+			if (!this.isCurrent(state)) return
 			state.stream.end()
-
+			if (!this.isCurrent(state)) return
+			if (readError !== undefined)
+				this.logger.error(
+					{ sourceId: id, err: readError },
+					"Error reading recording file",
+				)
+			if (!this.isCurrent(state)) return
 			this.logger.info({ sourceId: id }, "Recording source ended")
-
-			// Emit ended event (Requirement 21.2)
-			this.emit("ended", id)
+			if (this.isCurrent(state)) this.emit("ended", id)
 		}
 	}
 
@@ -808,20 +1272,38 @@ export class SourceManager extends EventEmitter {
 	 */
 	private attemptConnection(id: string): Promise<void> {
 		const state = this.sources.get(id)
-		if (!state || state.stopping) {
+		if (!state || !this.isCurrent(state) || state.config.type === "recording")
 			return Promise.resolve()
-		}
-
+		if (state.attempt && this.isActiveAttempt(state, state.attempt))
+			return Promise.resolve()
 		const { config } = state
-
-		// Recording sources don't use TCP connections
-		if (config.type === "recording") {
-			return Promise.resolve()
-		}
-
 		return new Promise<void>((resolve, reject) => {
 			const socket = new net.Socket()
+			if (!this.isCurrent(state)) {
+				socket.destroy()
+				resolve()
+				return
+			}
+			const attempt: SourceAttempt = {
+				socket,
+				phase: "connecting",
+				sessionId: this.allocateEvidenceToken(),
+				lastSampleAt: null,
+				expectedSince: Date.now(),
+				paused: false,
+				header: null,
+				headerBuffer:
+					config.type === "rtl_tcp" && config.caps.format === "U8_IQ"
+						? Buffer.alloc(0)
+						: null,
+				headerAt: null,
+				watchdog: null,
+			}
+			state.attempt = attempt
 			state.socket = socket
+			state.connected = false
+			state.lastSampleAt = null
+			state.evidencePaused = false
 			state.sessionBytesReceived = 0
 			state.conversionRemainder = Buffer.alloc(0)
 			state.iqRemainder = Buffer.alloc(0)
@@ -831,61 +1313,88 @@ export class SourceManager extends EventEmitter {
 				config.type === "rtl_tcp" && config.caps.format === "U8_IQ"
 					? Buffer.alloc(0)
 					: null
-
-			// Track if this is the initial connection attempt
 			const isInitialAttempt = state.reconnectAttempts === 0
-
 			let settled = false
 			const safeResolve = () => {
-				if (settled) return
-				settled = true
-				resolve()
+				if (!settled) {
+					settled = true
+					resolve()
+				}
 			}
 			const safeReject = (err: Error) => {
-				if (settled) return
-				settled = true
-				reject(err)
+				if (!settled) {
+					settled = true
+					reject(err)
+				}
 			}
-
+			const stopOwnWatchdog = () => {
+				const timer = attempt.watchdog
+				attempt.watchdog = null
+				if (timer !== null) clearInterval(timer)
+				if (timer !== null && state.stallTimer === timer)
+					state.stallTimer = null
+			}
 			const cleanup = () => {
-				this.stopStallWatchdog(state)
+				stopOwnWatchdog()
 				socket.removeAllListeners()
+				// A retired socket can still report a transport error during destruction.
+				socket.on("error", () => {})
 			}
-
 			const onConnect = () => {
-				socket.setTimeout(0)
-				socket.setKeepAlive(true, SOURCE_KEEPALIVE_DELAY_MS)
-				state.connected = true
-				state.lastSampleAt = null
-				state.expectedSince = Date.now()
-				state.dataRate = 0
-				state.bytesReceivedSinceLastMetric = 0
-				state.lastMetricTime = Date.now()
-				state.metricTicksSinceConnect = 0
-				state.pausedSinceLastMetric = false
-				this.resetRateTruth(id, state)
-				this.resetSignalLevel(id, state)
-				state.reconnectAttempts = 0
-				state.lastError = undefined
-
-				this.logger.info(
-					{ sourceId: id, host: config.host, port: config.port },
-					"Connected to source",
-				)
-
-				this.startStallWatchdog(state, socket, onError)
-
-				// Emit connected event (Requirement 1.3)
-				this.emit("connected", id)
-				safeResolve()
+				if (
+					!this.isActiveAttempt(state, attempt) ||
+					attempt.phase !== "connecting"
+				) {
+					safeResolve()
+					return
+				}
+				try {
+					socket.setTimeout(0)
+					if (!this.isActiveAttempt(state, attempt)) return
+					socket.setKeepAlive(true, SOURCE_KEEPALIVE_DELAY_MS)
+					if (!this.isActiveAttempt(state, attempt)) return
+					attempt.phase = "connected"
+					state.connected = true
+					state.lastSampleAt = null
+					state.expectedSince = Date.now()
+					attempt.expectedSince = state.expectedSince
+					state.dataRate = 0
+					state.bytesReceivedSinceLastMetric = 0
+					state.lastMetricTime = Date.now()
+					state.metricTicksSinceConnect = 0
+					state.pausedSinceLastMetric = false
+					state.reconnectAttempts = 0
+					state.lastError = undefined
+					// Connected settlement precedes reentrant lifecycle notifications.
+					safeResolve()
+					this.resetRateTruth(id, state)
+					if (!this.isActiveAttempt(state, attempt)) return
+					this.resetSignalLevel(id, state)
+					if (!this.isActiveAttempt(state, attempt)) return
+					this.logger.info(
+						{ sourceId: id, host: config.host, port: config.port },
+						"Connected to source",
+					)
+					if (!this.isActiveAttempt(state, attempt)) return
+					this.startStallWatchdog(state, socket, onError)
+					if (!this.isActiveAttempt(state, attempt)) return
+					this.emit("connected", id)
+				} finally {
+					safeResolve()
+				}
 			}
-
 			const onData = (chunk: Buffer) => {
+				if (
+					!this.isActiveAttempt(state, attempt) ||
+					attempt.phase !== "connected"
+				)
+					return
 				if (state.sessionBytesReceived === 0) {
 					this.logger.info(
 						{ sourceId: id, firstChunkSize: chunk.length },
 						"First data chunk received from source",
 					)
+					if (!this.isActiveAttempt(state, attempt)) return
 				}
 				state.bytesReceived += chunk.length
 				state.sessionBytesReceived += chunk.length
@@ -908,12 +1417,14 @@ export class SourceManager extends EventEmitter {
 							state.detectionBuffer,
 							this.logger,
 						)
+						if (!this.isActiveAttempt(state, attempt)) return
 
 						if (detected !== "UNKNOWN") {
 							this.logger.info(
 								{ sourceId: id, detected },
 								`Auto-detected source format`,
 							)
+							if (!this.isActiveAttempt(state, attempt)) return
 							state.activeFormat = detected
 
 							// Flush the buffer based on detected format
@@ -928,6 +1439,7 @@ export class SourceManager extends EventEmitter {
 							}
 
 							this.forwardData(id, state, dataToProcess)
+							if (!this.isActiveAttempt(state, attempt)) return
 
 							state.detectionBuffer = null
 						} else {
@@ -938,9 +1450,11 @@ export class SourceManager extends EventEmitter {
 									{ sourceId: id },
 									"Could not detect format after 1MB, defaulting to S16LE",
 								)
+								if (!this.isActiveAttempt(state, attempt)) return
 								state.activeFormat = "S16LE"
 								// Flush as S16LE
 								this.forwardData(id, state, state.detectionBuffer)
+								if (!this.isActiveAttempt(state, attempt)) return
 								state.detectionBuffer = null
 							}
 						}
@@ -971,18 +1485,23 @@ export class SourceManager extends EventEmitter {
 								headerSlice,
 							])
 
+							attempt.headerBuffer = state.rtlTcpHeaderBuffer
 							if (state.rtlTcpHeaderBuffer.length >= RTL_TCP_HEADER_SIZE) {
 								const header = state.rtlTcpHeaderBuffer.subarray(
 									0,
 									RTL_TCP_HEADER_SIZE,
 								)
-								state.rtlTcpHeader = header
+								state.rtlTcpHeader = Buffer.from(header)
+								attempt.header = Buffer.from(header)
+								attempt.headerBuffer = null
+								attempt.headerAt = Date.now()
 								state.rtlTcpHeaderInfo = parseRtlTcpHeader(header)
 								state.rtlTcpHeaderBuffer = null
 								this.logger.debug(
 									{ sourceId: id, header: state.rtlTcpHeaderInfo },
 									"Captured RTL-TCP header from source",
 								)
+								if (!this.isActiveAttempt(state, attempt)) return
 							}
 						}
 
@@ -996,6 +1515,7 @@ export class SourceManager extends EventEmitter {
 							{ sourceId: id },
 							"Stripping RTL-TCP header from stream",
 						)
+						if (!this.isActiveAttempt(state, attempt)) return
 						dataToProcess = chunk.subarray(headerRemaining)
 					}
 				}
@@ -1011,97 +1531,118 @@ export class SourceManager extends EventEmitter {
 				}
 
 				this.forwardData(id, state, dataToProcess)
+				if (!this.isActiveAttempt(state, attempt)) return
 			}
-
-			// disconnect() removes the state before this socket's close/error land,
-			// and reconnect() or a recreate can register a new state under the same
-			// id in between. A superseded socket must never touch the new state or
-			// emit lifecycle events for it (a late "disconnected" detaches the new
-			// stream from its fanout and silently starves every decoder). A plain
-			// removal (no successor) keeps its trailing "disconnected" as before.
-			const isSuperseded = () => {
-				const current = this.sources.get(id)
-				return current !== undefined && current !== state
-			}
-
 			const onError = (err: Error) => {
-				if (!isSuperseded()) this.handleConnectionError(id, err)
-
-				// For the initial attempt, surface the failure to the caller (API/startup)
-				// while still keeping the source registered for background retries.
-				if (isInitialAttempt && !state.connected) {
-					safeReject(new SourceConnectionError(config.host!, config.port!, err))
+				const current = this.isActiveAttempt(state, attempt)
+				const hadConnected = attempt.phase === "connected"
+				if (current) {
+					attempt.phase = "failed"
+					attempt.sessionId = null
+					attempt.lastSampleAt = null
+					attempt.paused = false
+					attempt.header = null
+					attempt.headerBuffer = null
+					attempt.headerAt = null
+					state.lastSampleAt = null
+					state.evidencePaused = false
+					stopOwnWatchdog()
 				}
-
-				// Ensure we transition to 'close' so reconnection scheduling is consistent.
-				// (Do not remove listeners here; onClose will clean up.)
 				try {
-					socket.destroy()
-				} catch {
-					// Ignore destroy errors
+					if (current) this.handleConnectionError(id, err, state, attempt)
+				} finally {
+					if (isInitialAttempt && !hadConnected)
+						safeReject(
+							new SourceConnectionError(config.host!, config.port!, err),
+						)
+					else safeResolve()
+					try {
+						socket.destroy()
+					} catch {
+						/* Only this attempt's socket. */
+					}
 				}
 			}
-
 			const onClose = () => {
-				cleanup()
-
+				const owns =
+					this.isCurrent(state) &&
+					state.attempt === attempt &&
+					state.socket === socket
 				const wasConnected = state.connected
-				state.connected = false
-				state.dataRate = 0
-				state.bytesReceivedSinceLastMetric = 0
-				state.socket = null
-
-				if (wasConnected && !isSuperseded()) {
-					this.logger.info({ sourceId: id }, "Disconnected from source")
-
-					// Emit disconnected event (Requirement 1.4)
-					this.emit(
-						"disconnected",
-						id,
-						state.lastError ? new Error(state.lastError) : undefined,
-					)
+				if (owns) {
+					attempt.phase = "closed"
+					attempt.sessionId = null
+					attempt.lastSampleAt = null
+					attempt.paused = false
+					attempt.header = null
+					attempt.headerBuffer = null
+					attempt.headerAt = null
+					state.connected = false
+					state.lastSampleAt = null
+					state.evidencePaused = false
+					state.dataRate = 0
+					state.bytesReceivedSinceLastMetric = 0
+					state.socket = null
 				}
-
-				// Always schedule reconnection when a source socket closes, unless we're
-				// explicitly stopping/removing the source.
-				if (!state.stopping && !isSuperseded()) {
-					this.scheduleReconnect(id)
-				}
-
-				// Ensure reconnect-attempt promises do not leak.
-				// Initial attempts should reject so callers can return a 400, but background
-				// reconnect attempts should resolve.
-				if (!wasConnected && isInitialAttempt) {
-					const reason = state.lastError
-						? new Error(state.lastError)
-						: new Error("Socket closed before establishing a connection")
-					safeReject(
-						new SourceConnectionError(config.host!, config.port!, reason),
-					)
-				} else {
-					safeResolve()
+				cleanup()
+				const closedCurrent = () =>
+					this.isCurrent(state) &&
+					state.attempt === attempt &&
+					attempt.phase === "closed" &&
+					state.socket === null
+				try {
+					if (owns && wasConnected && closedCurrent()) {
+						this.logger.info({ sourceId: id }, "Disconnected from source")
+						if (closedCurrent())
+							this.emit(
+								"disconnected",
+								id,
+								state.lastError
+									? new WaveKitError(state.lastError, "SOURCE_DISCONNECTED")
+									: undefined,
+							)
+					}
+					if (closedCurrent()) this.scheduleReconnect(id, state, attempt)
+				} finally {
+					if (!wasConnected && isInitialAttempt)
+						safeReject(
+							new SourceConnectionError(
+								config.host!,
+								config.port!,
+								new WaveKitError(
+									state.lastError ??
+										"Socket closed before establishing a connection",
+									"SOURCE_DISCONNECTED",
+								),
+							),
+						)
+					else safeResolve()
 				}
 			}
-
 			socket.on("connect", onConnect)
 			socket.on("data", onData)
 			socket.on("error", onError)
 			socket.on("close", onClose)
-			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
 			socket.on("timeout", () => {
-				if (state.connected || state.stopping) return
+				if (
+					!this.isActiveAttempt(state, attempt) ||
+					attempt.phase !== "connecting"
+				)
+					return
 				onError(
 					Object.assign(
-						new Error(
+						new WaveKitError(
 							`Source connection timed out after ${SOURCE_CONNECT_TIMEOUT_MS}ms`,
+							"SOURCE_CONNECT_TIMEOUT",
 						),
 						{ code: "ETIMEDOUT" },
 					),
 				)
 			})
-
-			// Attempt connection
-			socket.connect(config.port!, config.host!)
+			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
+			if (this.isActiveAttempt(state, attempt))
+				socket.connect(config.port!, config.host!)
+			else safeResolve()
 		})
 	}
 
@@ -1124,6 +1665,13 @@ export class SourceManager extends EventEmitter {
 		socket: net.Socket,
 		fail: (err: Error) => void,
 	): void {
+		const attempt = state.attempt
+		if (
+			!attempt ||
+			!this.isActiveAttempt(state, attempt) ||
+			attempt.socket !== socket
+		)
+			return
 		this.stopStallWatchdog(state)
 		const { config } = state
 		if (
@@ -1138,28 +1686,33 @@ export class SourceManager extends EventEmitter {
 				{ sourceId: config.id, stallTimeoutMs: config.stallTimeoutMs },
 				"Invalid stallTimeoutMs; using the default stall watchdog timeout",
 			)
+			if (!this.isActiveAttempt(state, attempt)) return
 			timeoutMs = SOURCE_STALL_TIMEOUT_MS
 		}
 		if (timeoutMs <= 0) return
 
 		const checkEveryMs = Math.max(50, Math.min(1000, Math.floor(timeoutMs / 4)))
-		state.stallTimer = setInterval(() => {
-			if (state.socket !== socket || !state.connected || state.stopping) {
-				this.stopStallWatchdog(state)
+		const timer = setInterval(() => {
+			if (
+				!this.isActiveAttempt(state, attempt) ||
+				attempt.phase !== "connected" ||
+				attempt.watchdog !== timer
+			) {
+				clearInterval(timer)
 				return
 			}
 			// Not armed until this session delivered payload; paused is local.
 			if (state.lastSampleAt === null) return
 			if (state.stream.writableNeedDrain || socket.isPaused()) return
+			if (!this.isActiveAttempt(state, attempt) || attempt.watchdog !== timer) {
+				clearInterval(timer)
+				return
+			}
 			const idleMs =
 				Date.now() - Math.max(state.lastSampleAt, state.expectedSince)
 			if (idleMs < timeoutMs) return
 
 			this.stopStallWatchdog(state)
-			this.logger.warn(
-				{ sourceId: config.id, idleMs, timeoutMs },
-				"Source stream stalled; dropping connection to reconnect",
-			)
 			fail(
 				new WaveKitError(
 					`No data from source for ${idleMs}ms (stall watchdog ${timeoutMs}ms); reconnecting`,
@@ -1167,21 +1720,34 @@ export class SourceManager extends EventEmitter {
 				),
 			)
 		}, checkEveryMs)
+		attempt.watchdog = timer
+		state.stallTimer = timer
 	}
 
 	private stopStallWatchdog(state: SourceState): void {
 		if (!state.stallTimer) return
-		clearInterval(state.stallTimer)
+		const timer = state.stallTimer
 		state.stallTimer = null
+		if (state.attempt?.watchdog === timer) state.attempt.watchdog = null
+		clearInterval(timer)
 	}
 
 	/**
 	 * Handles connection errors gracefully (Requirement 1.6).
 	 * Logs the error and prepares for reconnection.
 	 */
-	private handleConnectionError(id: string, err: Error): void {
-		const state = this.sources.get(id)
-		if (!state) return
+	private handleConnectionError(
+		id: string,
+		err: Error,
+		state: SourceState,
+		attempt: SourceAttempt,
+	): void {
+		const current = () =>
+			this.isCurrent(state) &&
+			state.attempt === attempt &&
+			state.socket === attempt.socket &&
+			attempt.phase === "failed"
+		if (!current()) return
 
 		const errorCode = (err as NodeJS.ErrnoException).code
 
@@ -1204,7 +1770,7 @@ export class SourceManager extends EventEmitter {
 		}
 
 		// Only emit error event if there are listeners (Requirement 1.6)
-		if (this.listenerCount("error") > 0) {
+		if (current() && this.listenerCount("error") > 0) {
 			this.emit("error", id, err)
 		}
 	}
@@ -1212,9 +1778,17 @@ export class SourceManager extends EventEmitter {
 	/**
 	 * Schedules a reconnection attempt with exponential backoff (Requirement 1.2).
 	 */
-	private scheduleReconnect(id: string): void {
-		const state = this.sources.get(id)
-		if (!state || state.stopping) return
+	private scheduleReconnect(
+		id: string,
+		state: SourceState,
+		attempt: SourceAttempt,
+	): void {
+		const current = () =>
+			this.isCurrent(state) &&
+			state.attempt === attempt &&
+			attempt.phase === "closed" &&
+			state.socket === null
+		if (!current()) return
 		if (state.reconnectTimer) return
 
 		state.reconnectAttempts++
@@ -1232,21 +1806,28 @@ export class SourceManager extends EventEmitter {
 			"Scheduling reconnection",
 		)
 
-		state.reconnectTimer = setTimeout(() => {
+		if (!current()) return
+		const timer = setTimeout(() => {
+			if (!current() || state.reconnectTimer !== timer) return
 			state.reconnectTimer = null
 			this.attemptConnection(id).catch(() => {
 				// Error already handled in attemptConnection
 			})
 		}, delay)
+		state.reconnectTimer = timer
 	}
 
 	/**
 	 * Emits metrics for a source (Requirement 1.5).
 	 * Calculates data rate based on bytes received since last metric.
 	 */
-	private emitMetrics(id: string): void {
-		const state = this.sources.get(id)
-		if (!state) return
+	private emitMetrics(
+		id: string,
+		state: SourceState | undefined = this.sources.get(id),
+	): void {
+		if (!state || !this.isCurrent(state)) return
+		const attempt = state.attempt
+		const current = () => this.isCurrent(state) && state.attempt === attempt
 
 		const now = Date.now()
 		const elapsed = (now - state.lastMetricTime) / 1000 // seconds
@@ -1263,7 +1844,9 @@ export class SourceManager extends EventEmitter {
 			now - state.lastMetricTime,
 			now,
 		)
+		if (!current()) return
 		this.checkSignalLevel(id, state, now - state.lastMetricTime, now)
+		if (!current()) return
 		state.bytesReceivedSinceLastMetric = 0
 		state.lastMetricTime = now
 
@@ -1285,17 +1868,21 @@ export class SourceManager extends EventEmitter {
 		elapsedMs: number,
 		now: number,
 	): void {
-		if (state.config.type === "recording") return
+		if (!this.isCurrent(state) || state.config.type === "recording") return
+		const attempt = state.attempt
+		const current = () => this.isCurrent(state) && state.attempt === attempt
 		if (!state.connected) {
 			this.resetRateTruth(id, state)
 			return
 		}
 		const caps = state.config.caps
 		const bytesPerSample = bytesPerSampleFor(caps)
+		const paused = state.socket?.isPaused()
+		if (!current()) return
 		const stable =
 			state.metricTicksSinceConnect > 0 &&
 			!state.pausedSinceLastMetric &&
-			!state.socket?.isPaused()
+			!paused
 		state.metricTicksSinceConnect++
 		state.pausedSinceLastMetric = false
 		if (bytesPerSample === undefined) return
@@ -1319,11 +1906,12 @@ export class SourceManager extends EventEmitter {
 				"Source rate matches its caps again",
 			)
 		}
-		if (transition) this.emit("rate-truth-changed", id)
+		if (transition && current()) this.emit("rate-truth-changed", id)
 	}
 
 	private resetRateTruth(id: string, state: SourceState): void {
-		if (state.rateTruth.reset()) this.emit("rate-truth-changed", id)
+		if (this.isCurrent(state) && state.rateTruth.reset())
+			this.emit("rate-truth-changed", id)
 	}
 
 	private createSignalLevelTracker(config: SourceConfig): SignalLevelTracker {
@@ -1348,7 +1936,9 @@ export class SourceManager extends EventEmitter {
 		elapsedMs: number,
 		now: number,
 	): void {
-		if (state.config.type === "recording") return
+		if (!this.isCurrent(state) || state.config.type === "recording") return
+		const attempt = state.attempt
+		const current = () => this.isCurrent(state) && state.attempt === attempt
 		if (!state.connected) {
 			this.resetSignalLevel(id, state)
 			return
@@ -1365,11 +1955,12 @@ export class SourceManager extends EventEmitter {
 				"Source IQ level recovered",
 			)
 		}
-		if (transition) this.emit("signal-flat-changed", id)
+		if (transition && current()) this.emit("signal-flat-changed", id)
 	}
 
 	private resetSignalLevel(id: string, state: SourceState): void {
-		if (state.signalLevel.reset()) this.emit("signal-flat-changed", id)
+		if (this.isCurrent(state) && state.signalLevel.reset())
+			this.emit("signal-flat-changed", id)
 	}
 
 	/** A rate, format or kind change restarts the signal-flat check. */
@@ -1418,6 +2009,17 @@ export class SourceManager extends EventEmitter {
 		if (!state) return false
 
 		state.stopping = true
+		if (state.attempt) {
+			state.attempt.phase = "closed"
+			state.attempt.sessionId = null
+			state.attempt.headerAt = null
+		}
+		state.lastSampleAt = null
+		this.sources.delete(id)
+		// Decoder assignments belong to the removed registration.
+		for (const [decoderId, assignment] of this.decoderAssignments) {
+			if (assignment.sourceId === id) this.decoderAssignments.delete(decoderId)
+		}
 
 		// Clear timers and recording state
 		this.cleanupState(state)
@@ -1434,18 +2036,11 @@ export class SourceManager extends EventEmitter {
 			state.stream.destroy()
 		}
 
-		// Remove any decoder assignments for this source
-		for (const [decoderId, assignment] of this.decoderAssignments) {
-			if (assignment.sourceId === id) {
-				this.decoderAssignments.delete(decoderId)
-			}
-		}
-
-		this.sources.delete(id)
-
+		if (this.sources.has(id)) return false
 		this.logger.info({ sourceId: id }, "Source disconnected and cleaned up")
+		if (this.sources.has(id)) return false
 		this.emit("removed", id)
-		return true
+		return !this.sources.has(id)
 	}
 
 	/**
@@ -1464,7 +2059,8 @@ export class SourceManager extends EventEmitter {
 		// Tear down first (not a removal: the same id comes straight back)
 		this.teardown(id)
 
-		// Reconnect with same config
+		// A reentrant teardown consumer may already have recreated the source.
+		if (this.sources.has(id)) return
 		await this.connect(config)
 	}
 
@@ -1641,12 +2237,15 @@ export class SourceManager extends EventEmitter {
 		id: string,
 		updates: Partial<SourceCaps>,
 	): SourceCaps | undefined {
+		updates = this.plainSourceData(updates)
 		const state = this.sources.get(id)
 		if (!state) {
 			this.logger.warn({ sourceId: id }, "Cannot update caps: source not found")
 			return undefined
 		}
 
+		const attempt = state.attempt
+		const current = () => this.isCurrent(state) && state.attempt === attempt
 		const oldCaps = state.config.caps
 		const nextCaps: SourceCaps = {
 			...oldCaps,
@@ -1690,7 +2289,9 @@ export class SourceManager extends EventEmitter {
 			)
 		}
 
+		if (!current()) return undefined
 		this.onCapsChangedForSignalLevel(id, state, oldCaps)
+		if (!current()) return undefined
 		this.emit("caps-changed", id, nextCaps)
 		return nextCaps
 	}
@@ -1705,12 +2306,15 @@ export class SourceManager extends EventEmitter {
 		id: string,
 		tuning: { sampleRate: number; centerFreq?: number | undefined },
 	): SourceCaps | undefined {
+		tuning = this.plainSourceData(tuning)
 		const state = this.sources.get(id)
 		if (!state) {
 			this.logger.warn({ sourceId: id }, "Cannot set tuning: source not found")
 			return undefined
 		}
 
+		const attempt = state.attempt
+		const current = () => this.isCurrent(state) && state.attempt === attempt
 		const oldCaps = state.config.caps
 		if (
 			oldCaps.sampleRate === tuning.sampleRate &&
@@ -1733,7 +2337,9 @@ export class SourceManager extends EventEmitter {
 			},
 			"Source tuning metadata reconciled",
 		)
+		if (!current()) return undefined
 		this.onCapsChangedForSignalLevel(id, state, oldCaps)
+		if (!current()) return undefined
 		this.emit("caps-changed", id, nextCaps)
 		return nextCaps
 	}
