@@ -186,6 +186,13 @@ export class ActivityIngress {
 		return this.episode !== undefined
 	}
 
+	/** When the open episode has been quiet for gapQuietMs, if one is open. */
+	gapQuietDueAt(): number | undefined {
+		const episode = this.episode
+		if (!episode) return undefined
+		return episode.lastDropAt + this.limits.gapQuietMs
+	}
+
 	/**
 	 * Closes the open episode once it has been quiet for gapQuietMs, or once
 	 * it has been open for gapMaxIntervalMs. Returns true when a gap row was

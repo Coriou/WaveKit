@@ -264,7 +264,10 @@ describe("activity store", () => {
 				gapQuietMs: 5_000,
 			},
 		})
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "Date"],
+			now: Date.now(),
+		})
 		try {
 			expect(
 				store.admit(envelope({ eventId: "kept", decoderId: "radio" })).admitted,
@@ -290,6 +293,61 @@ describe("activity store", () => {
 				expect(gap.payload).toMatchObject({
 					reason: "rate-limited",
 					dropped: 1,
+					decoderIds: ["radio"],
+				})
+			}
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("re-arms the gap quiet timer for drops that arrive while it waits", async () => {
+		const store = await openStore({
+			now: () => Date.now(),
+			limits: {
+				batchWindowMs: 0,
+				globalBurst: 1,
+				globalRatePerSec: 0,
+				decoderBurst: 10,
+				decoderRatePerSec: 10,
+				gapQuietMs: 5_000,
+			},
+		})
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "Date"],
+			now: Date.now(),
+		})
+		try {
+			expect(
+				store.admit(envelope({ eventId: "kept", decoderId: "radio" })).admitted,
+			).toBe(true)
+			expect(
+				store.admit(envelope({ eventId: "dropped-1", decoderId: "radio" })),
+			).toEqual({ admitted: false, reason: "rate-limited" })
+			await vi.advanceTimersByTimeAsync(1_000)
+			expect(
+				store.admit(envelope({ eventId: "dropped-2", decoderId: "radio" })),
+			).toEqual({ admitted: false, reason: "rate-limited" })
+			await vi.advanceTimersByTimeAsync(4_000)
+			expect(
+				(await readRecords(store.dbPath)).some(
+					record => record.kind === "ingestion-gap",
+				),
+			).toBe(false)
+			await vi.advanceTimersByTimeAsync(999)
+			expect(
+				(await readRecords(store.dbPath)).some(
+					record => record.kind === "ingestion-gap",
+				),
+			).toBe(false)
+			await vi.advanceTimersByTimeAsync(1)
+			const records = await readRecords(store.dbPath)
+			const gap = records.find(record => record.kind === "ingestion-gap")
+			expect(gap?.kind).toBe("ingestion-gap")
+			if (gap?.kind === "ingestion-gap") {
+				expect(gap.payload).toMatchObject({
+					reason: "rate-limited",
+					dropped: 2,
 					decoderIds: ["radio"],
 				})
 			}

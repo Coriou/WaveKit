@@ -73,8 +73,9 @@ outputs, classified by an explicit allow-list) are excluded and counted.
   episode. The episode closes after a quiet period with no drops
   (`gapQuietMs`, default 5 s) or, while drops continue, at most one gap
   record per `gapMaxIntervalMs` (default 60 s) aggregating the counts since
-  the previous record. A `gapQuietMs` timer closes and stages the episode
-  when admits stop. `close()` stages an open episode into the shutdown
+  the previous record. A `gapQuietMs` timer is armed once and, when it
+  fires, stages the episode or re-arms for the quiet time still left.
+  `close()` stages an open episode into the shutdown
   drain before abandoning the queue. The warn log uses the same limit.
   Closed, paused and rate tokens are checked before the row is built. The
   byte cap is checked after the row is built, and tokens taken for a row

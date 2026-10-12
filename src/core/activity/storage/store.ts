@@ -689,14 +689,34 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	private armGapTimer(): void {
-		this.clearGapTimer()
-		if (this.stopped || this.draining || !this.ingress.hasOpenEpisode()) return
+		if (this.gapTimer || this.stopped || this.draining) return
+		const due = this.ingress.gapQuietDueAt()
+		if (due === undefined) return
+		this.scheduleGapTimer(Math.max(0, due - this.now()))
+	}
+
+	private onGapTimer(): void {
+		this.gapTimer = undefined
+		if (this.stopped || this.draining) return
+		const due = this.ingress.gapQuietDueAt()
+		if (due === undefined) return
+		const remaining = due - this.now()
+		if (remaining > 0) {
+			this.scheduleGapTimer(remaining)
+			return
+		}
+		if (this.ingress.stageOpenEpisode(this.now())) {
+			this.onQueued()
+			return
+		}
+		if (this.ingress.hasOpenEpisode())
+			this.scheduleGapTimer(this.limits.gapQuietMs)
+	}
+
+	private scheduleGapTimer(waitMs: number): void {
 		this.gapTimer = setTimeout(() => {
-			this.gapTimer = undefined
-			if (this.stopped || this.draining) return
-			if (this.ingress.stageOpenEpisode(this.now())) this.onQueued()
-			else if (this.ingress.hasOpenEpisode()) this.armGapTimer()
-		}, this.limits.gapQuietMs)
+			this.onGapTimer()
+		}, waitMs)
 		this.gapTimer.unref()
 	}
 
