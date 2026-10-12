@@ -356,6 +356,13 @@ const INFO = {
 	446006250: { kind: 'tx', proto: 'PMR446', protoSub: 'Channel 1 · NFM', icon: ICON.analog, decoder: 'Audio only', level: -60, snr: 29, live: false,
 		eyebrow: 'Last transmission', big: 'Ch 1', line: '14:01:40 · 0:14', tone: ['CTCSS', '77.0 Hz · code 4'], body: 'Transcribing…', bodyPending: true, quiet: 'Quiet · last heard 1 min ago',
 		recent: [['14:01', 'Transmission', '0:14', 14], ['13:55', 'Transmission', '0:07', 7]] },
+	// PMR446 channels a one-hop scan watch follows (the audio moves to them, the receiver stays at 446.100)
+	446031250: { kind: 'tx', proto: 'PMR446', protoSub: 'Channel 3 · NFM', icon: ICON.analog, decoder: 'Audio only', level: -71, snr: 21, live: true,
+		eyebrow: 'Transmission', big: 'Ch 3', line: 'Squelch open · auto threshold −102 dB', start: 2,
+		recent: [['Now', 'Transmission', '', 0]] },
+	446093750: { kind: 'tx', proto: 'PMR446', protoSub: 'Channel 8 · NFM', icon: ICON.analog, decoder: 'Audio only', level: -77, snr: 15, live: true,
+		eyebrow: 'Transmission', big: 'Ch 8', line: 'Squelch open · auto threshold −102 dB', start: 1,
+		recent: [['Now', 'Transmission', '', 0]] },
 	161425000: { kind: 'tx', proto: 'NFM', protoSub: 'Analog voice · 12.5 kHz', icon: ICON.analog, decoder: 'Audio only', level: -76, snr: 14, live: false,
 		eyebrow: 'Last transmission', big: 'Analog voice', line: '13:59:31 · 0:07', tone: ['DCS', '023 normal'], body: 'Transcribing…', bodyPending: true, quiet: 'Quiet · last heard 3 min ago',
 		recent: [['13:59', 'Transmission · DCS 023N', '0:07', 7], ['13:41', 'Transmission · DCS 023N', '0:05', 5]] },

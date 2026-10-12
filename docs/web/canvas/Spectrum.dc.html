@@ -56,6 +56,19 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			<sc-for list="{{dbLabels}}" as="l" hint-placeholder-count="4">
 				<span style="position: absolute; left: 10px; top: {{l.top}}px; transform: translateY(-50%); font-size: 11px; color: rgba(var(--wk-ink-2-rgb),.5); font-variant-numeric: tabular-nums; pointer-events: none">{{l.text}}</span>
 			</sc-for>
+			<sc-if value="{{scanOn}}" hint-placeholder-val="{{false}}">
+				<div title="{{scanTitle}}" style="position: absolute; top: 0; bottom: 0; left: {{scanLeft}}%; width: {{scanWidth}}%; box-sizing: border-box; background: rgba({{scanRgb}},.05); border-left: 1px dashed rgba({{scanRgb}},.4); border-right: 1px dashed rgba({{scanRgb}},.4); pointer-events: none">
+					<span style="position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba({{scanRgb}},.55)"></span>
+				</div>
+				<span class="wk-scan-name" style="position: absolute; top: 6px; left: {{scanLabelX}}px; display: flex; flex-direction: column; gap: 1px; line-height: 15px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: {{scanC}}; white-space: nowrap; pointer-events: none">{{scanName}}<sc-if value="{{scanHasSub}}" hint-placeholder-val="{{false}}"><span style="font-size: 11px; color: var(--wk-text-3)">{{scanSub}}</span></sc-if></span>
+				<sc-for list="{{scanChans}}" as="c" hint-placeholder-count="0">
+					<span aria-hidden="true" style="position: absolute; left: {{c.left}}%; bottom: 3px; width: 1px; height: 6px; background: rgba({{scanRgb}},.5); pointer-events: none"></span>
+				</sc-for>
+				<sc-if value="{{scanHit}}" hint-placeholder-val="{{false}}">
+					<sc-if value="{{scanHitLine}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="position: absolute; top: 0; bottom: 0; left: {{scanHitLeft}}%; width: 1px; background: rgba({{scanRgb}},.6); pointer-events: none"></span></sc-if>
+					<span role="status" aria-label="{{scanHitAria}}" style="position: absolute; left: {{scanHitLeft}}%; bottom: 12px; transform: translateX(-50%); height: 20px; display: flex; align-items: center; padding: 0 7px; border-radius: 4px; background: {{scanHitBg}}; box-shadow: inset 0 0 0 1px rgba({{scanRgb}},.5); color: {{scanHitFg}}; font-size: 11.5px; font-weight: 700; white-space: nowrap; pointer-events: none">{{scanHitText}}</span>
+				</sc-if>
+			</sc-if>
 			<sc-for list="{{markers}}" as="m" hint-placeholder-count="4">
 				<div style="position: absolute; left: {{m.left}}%; top: {{m.top}}px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center">
 					<button class="wk-sig" onPointerDown="{{stop}}" onClick="{{m.pick}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="font: inherit; cursor: pointer; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 8px; border-radius: 6px; background: var(--wk-glass); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi); color: var(--wk-text); font-size: 12px; white-space: nowrap; backdrop-filter: blur(10px) var(--wk-glass-fx)">
@@ -153,7 +166,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match"},"paperRamp":{"editor":"enum","options":["a","b","c"],"default":"a","section":"Theme"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"discoveries":{"editor":null},"discoveryTags":{"editor":"enum","options":["all","decoded","off"],"default":"all"},"trust":{"editor":"enum","options":["ok","unverified"],"default":"ok"},"onView":{"editor":null},"onScanRange":{"editor":null},"$preview":{"width":1440,"height":640}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match"},"paperRamp":{"editor":"enum","options":["a","b","c"],"default":"a","section":"Theme"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"discoveries":{"editor":null},"discoveryTags":{"editor":"enum","options":["all","decoded","off"],"default":"all"},"trust":{"editor":"enum","options":["ok","unverified"],"default":"ok"},"onView":{"editor":null},"onScanRange":{"editor":null},"scan":{"editor":null},"scanDemo":{"editor":"enum","options":["off","watch","watch-hit","sweep"],"default":"off"},"$preview":{"width":1440,"height":640}}'>
 const BINS = 4096, HIST = 900, RATE = 24, MIN_SPAN = 100e3, LO = 24e6, HI = 1.9e9;
 const ICON = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
@@ -503,7 +516,7 @@ class Component extends DCLogic {
 			this.tuneTo(Math.round((this.vfo() + dir * step) / step) * step);
 		}
 	}
-	componentDidMount() { this.raf = requestAnimationFrame(this.frame); this.emitView(); }
+	componentDidMount() { this.syncKeyed(); this.raf = requestAnimationFrame(this.frame); this.emitView(); }
 	componentWillUnmount() { clearTimeout(this.sentT); cancelAnimationFrame(this.raf); if (this.ro) this.ro.disconnect(); if (this.boxEl) this.boxEl.removeEventListener('wheel', this.onWheel); }
 	measureBox() { const w = this.boxEl ? this.boxEl.clientWidth : 0; if (w && w !== this.state.boxW) { this.dirty = true; this.setState({ boxW: w }); } }
 	// tells the shell which part of the band is on screen (optional; the shell no longer uses it since the band strip went)
@@ -514,7 +527,25 @@ class Component extends DCLogic {
 		this.lastView = key;
 		this.props.onView({ startHz: s.viewL, endHz: s.viewL + s.viewSpan });
 	}
+	// the scan the shell passes (or the board's scanDemo tweak): where it looks, its channels, the hit
+	scan() {
+		if (this.props.scan !== undefined) return this.props.scan;
+		const d = this.props.scanDemo || 'off';
+		if (d === 'off') return null;
+		if (d === 'sweep') return { a: 160.4e6, b: 161.9e6, watch: false, name: 'Land mobile + Marine', paused: false, hitHz: null, hitName: '', hear: false };
+		const hit = d === 'watch-hit';
+		return { a: 446e6, b: 446.2e6, watch: true, name: 'PMR446', paused: false, centreHz: 446.1e6, chans: Array.from({ length: 16 }, (_, i) => Math.round(446.00625e6 + i * 12500)),
+			hitHz: hit ? 446031250 : null, hitName: hit ? 'PMR446 ch 3' : '', hear: hit, keyed: hit ? [446031250] : [] };
+	}
+	syncKeyed() {
+		const sc = this.scan(), key = sc && sc.keyed ? sc.a + '|' + sc.b + '|' + sc.keyed.join(',') : '';
+		if (key === this.keyedKey) return;
+		this.keyedKey = key;
+		this.keyedBand = key ? { a: sc.a, b: sc.b, on: new Set(sc.keyed.map(Math.round)) } : null;
+	}
 	componentDidUpdate(prev) {
+		this.syncKeyed();
+		if (this.props.scanDemo !== prev.scanDemo && this.props.scanDemo && this.props.scanDemo !== 'off' && this.props.scan === undefined) { const c = this.scan(), m = Math.round((c.a + c.b) / 2); this.setView(m - this.cap() / 2, this.cap(), m); }
 		this.emitView();
 		if ((prev.sampleRate ?? 2.4e6) !== this.cap()) {
 			this.count = 0; this.avg = null;
@@ -526,6 +557,9 @@ class Component extends DCLogic {
 
 	active(s, t) {
 		const ph = s.ph || 0;
+		// a one-hop scan watch keys its channels from the shell's mock (the hit it reports), so the trace and the hit agree
+		const k = this.keyedBand;
+		if (k && s.f >= k.a && s.f <= k.b) return k.on.has(Math.round(s.f));
 		if (s.kind === 'steady' || s.kind === 'wfm') return true;
 		if (s.kind === 'pulse') return Math.random() < 0.5;
 		if (s.kind === 'ais') return ((t + ph) * 1000) % 2300 < 45;
@@ -768,6 +802,15 @@ class Component extends DCLogic {
 		// signal tags: tuned first, then strongest; each tries its spot above the peak, then
 		// higher rows, then a compact form without the detail; one that still clashes is dropped
 		const taken = [];
+		// where the scan looks: a quiet shade over its window, a name at its top left (signal tags keep clear of it), the
+		// band's channel raster as ticks at the foot, and the channel that came alive named on a chip
+		const sc = this.scan(), scOn = !!sc && sc.b > L && sc.a < R;
+		const scL = scOn ? pct(Math.max(L, sc.a)) : 0, scW = scOn ? (Math.min(R, sc.b) - Math.max(L, sc.a)) / span * 100 : 0;
+		const scName = !sc ? '' : sc.watch ? (sc.paused ? 'Paused · ' : 'Watching ') + sc.name + (sc.chans && sc.chans.length ? ' · ' + sc.chans.length + ' channels' : '') : (sc.paused ? 'Paused · ' : 'Scanning · ') + (sc.a / 1e6).toFixed(1) + '–' + (sc.b / 1e6).toFixed(1) + ' MHz';
+		const scSub = sc && sc.watch && sc.centreHz ? 'receiver at ' + (sc.centreHz / 1e6).toFixed(3) : '';
+		const scLabelX = scOn ? Math.max(40, scL / 100 * w + 8) : 0;
+		if (scOn) taken.push([scLabelX - 4, 2, scLabelX + 10 + scName.length * 6.4, scSub ? 40 : 26]);
+		const hitIn = scOn && sc.hitHz && inView(sc.hitHz);
 		const clash = r => r[0] < 34 || taken.some(o => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]);
 		const markers = (this.props.showMarkers ?? true) ? SIG.filter(x => x.label && inView(x.f)).sort((a, b) => (b.f === vfo) - (a.f === vfo) || b.p - a.p).map(x => {
 			const px = pct(x.f) / 100 * w, pref = Math.max(4, yOf(x.p, specH) - 46);
@@ -825,6 +868,13 @@ class Component extends DCLogic {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			hasDiscRow: tagMode !== 'off' && discAll.length > 0,
+			scanOn: scOn, scanLeft: scL, scanWidth: scW, scanName: scName, scanSub: scSub, scanHasSub: !!scSub, scanLabelX: scLabelX,
+			scanC: sc && sc.paused ? 'var(--wk-amber)' : 'var(--wk-accent)', scanRgb: sc && sc.paused ? 'var(--wk-amber-rgb)' : 'var(--wk-accent-rgb)',
+			scanTitle: sc ? (sc.watch ? sc.name + ' fits in one hop: the receiver stays at ' + ((sc.centreHz || 0) / 1e6).toFixed(3) + ' and watches every channel at once' : 'This hop · ' + (sc.a / 1e6).toFixed(3) + '–' + (sc.b / 1e6).toFixed(3) + ' MHz · the scan steps on') : '',
+			scanChans: scOn && sc.chans && sc.chans.length <= 400 ? sc.chans.filter(inView).map(f => ({ left: pct(f) })) : [],
+			scanHit: !!hitIn, scanHitLeft: hitIn ? pct(sc.hitHz) : 0, scanHitText: hitIn ? sc.hitName || (sc.hitHz / 1e6).toFixed(5) : '',
+			scanHitBg: hitIn && sc.hear ? 'var(--wk-accent)' : 'var(--wk-surface)', scanHitFg: hitIn && sc.hear ? 'var(--wk-on-accent)' : 'var(--wk-accent)',
+			scanHitLine: hitIn && !sc.hear, scanHitAria: hitIn ? (sc.hear ? 'Hearing ' : 'Active, logged: ') + (sc.hitName || '') + ' ' + (sc.hitHz / 1e6).toFixed(5) + ' MHz' : '',
 			// every discovery in view also marks the frequency scale, so a sweep that moves the view still shows what it found
 			scaleTicks: tagMode === 'off' ? [] : discAll.filter(d => inView(d.hz)).map(d => ({ left: pct(d.hz), fresh: !!d.fresh, c: d.active || d.fresh ? 'var(--wk-accent)' : d.conf === 'heard' ? 'rgba(var(--wk-ink-3-rgb),.7)' : 'rgba(var(--wk-accent-rgb),.6)', title: d.label + ' · ' + (d.hz / 1e6).toFixed(4) + ' MHz' + (d.fresh ? ' · new in this scan' : '') })),
 			discTags,

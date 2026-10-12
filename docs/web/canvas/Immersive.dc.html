@@ -63,7 +63,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 </helmet>
 <div ref="{{refs.root}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: relative; height: 100vh; min-height: 760px; background: var(--wk-plot-bg); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
 	<div style="position: absolute; inset: 0">
-		<dc-import name="Spectrum" on-settings="{{openSetting}}" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
+		<dc-import name="Spectrum" on-settings="{{openSetting}}" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" scan="{{specScan}}" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
 
 		<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; inset: 0; z-index: 1">
@@ -103,7 +103,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 		</sc-if>
 
 		<div ref="{{refs.listen}}" style="position: absolute; left: 16px; bottom: 16px; z-index: {{listenZ}}">
-			<dc-import name="Listen" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" hint-size="340px,64px"></dc-import>
+			<dc-import name="Listen" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" following-text="{{followingText}}" hint-size="340px,64px"></dc-import>
 		</div>
 
 		<nav ref="{{refs.dock}}" class="wk-dock" aria-label="Primary" style="position: absolute; left: {{dockX}}px; bottom: 16px; height: 64px; box-sizing: border-box; display: flex; align-items: center; gap: 4px; padding: 0 9px; border-radius: 12px; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); z-index: 2; transition: {{dockTr}}">
@@ -233,6 +233,13 @@ const DISCOVERIES = [
 // The mock sweep: one hop a second; each pass holds a few seconds on the next active signal in this list
 const HOLDS = [{ hz: 161150000, label: 'DMR · CC 1' }, { hz: 160625000, label: 'FM voice' }, { hz: 163087500, label: 'P25 · NAC 293' }];
 const HOLD_S = 3, RESUME_S = 60, HOP_HZ = 1.5e6;
+// A one-hop plan (PMR446 is 200 kHz) never moves the receiver: it parks at the centre and the FFT watches every channel.
+// Which channels come alive, on a loop (seconds from the start of the watch); after a call the audio stays HANG_S on it.
+// The Spectrum keys the same three PMR446 signals from this list, so the waterfall and the hit agree.
+const CH_ACT = [{ hz: 446031250, at: 3, on: 5 }, { hz: 446093750, at: 15, on: 4 }, { hz: 446006250, at: 25, on: 6 }], CH_LOOP = 36, HANG_S = 2;
+const hhmm = () => { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+// the plan's name for a channel (the planner sends its raster, named from the band plan), else its frequency
+const chName = (sw, hz) => { const c = (sw.channels || []).find(x => Math.abs(x.hz - hz) < 3200); return c && c.name ? c.name : (hz / 1e6).toFixed(5).replace(/0+$/, ''); };
 // "Land mobile + Marine": the band plan's presets Land mobile VHF (146–174) and Marine VHF (156–162.025), as Scan a band
 // builds them: 19 hops of 1.5 MHz, full pass ≈ 8 s. Every board that copies the sweep uses these numbers.
 const SWEEP_MOCK = { preset: 'Land mobile + Marine', startHz: 146000000, endHz: 174000000, hops: 19, sweepS: 8, coverage: 84,
@@ -259,7 +266,7 @@ const hopList = w => {
 	return out;
 };
 const hopCentre = w => { const h = hopList(w)[w.hop - 1] || hopList(w)[0]; return Math.round((h[0] + h[1]) / 2 / 12500) * 12500; };
-const LEVEL = { 161150000: -57, 161975000: -61, 162025000: -63, 160450000: -60, 160625000: -65, 160900000: -84, 161425000: -76, 162400000: -70, 163087500: -66, 156800000: -62, 144800000: -63, 118100000: -66, 131725000: -64, 136975000: -66, 93500000: -50, 433920000: -58, 446006250: -60, 868300000: -70, 868950000: -72, 869525000: -75, 1090000000: -62, 466025000: -62 };
+const LEVEL = { 161150000: -57, 161975000: -61, 162025000: -63, 160450000: -60, 160625000: -65, 160900000: -84, 161425000: -76, 162400000: -70, 163087500: -66, 156800000: -62, 144800000: -63, 118100000: -66, 131725000: -64, 136975000: -66, 93500000: -50, 433920000: -58, 446006250: -60, 446031250: -71, 446093750: -77, 868300000: -70, 868950000: -72, 869525000: -75, 1090000000: -62, 466025000: -62 };
 
 // Shell grid: one 16 px gutter. Top row (Tuner, Receiver) on the top gutter; bottom row (Listen, dock, tuned card home) on the bottom gutter.
 const G = 16, DOCK_H = 64, CARD_W = 320;
@@ -334,7 +341,9 @@ class Component extends DCLogic {
 					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, ranges: a.ranges || null, stretches: a.stretches && a.stretches.length ? a.stretches : null, exclusions: a.exclusions && a.exclusions.length ? a.exclusions : null, hops: a.hops || Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0, options: a.options || null });
 				// the planner's pass time (time per hop and the ranges' channels) wins over the mock's estimate
 				if (!watch) { next.hops = hopList(next).length; next.sweepS = a.sweepS || Math.max(1, Math.round(next.hops * 0.375)); }
-				this.commit(null, watch ? 'Watching this span' : 'Scanning ' + next.preset + ' · the scanner has the receiver');
+				// one hop: the planner's channel raster and centre; t counts seconds, heard lists the channels that came alive
+				if (!watch) Object.assign(next, { startedAt: Date.now(), channels: a.channels || null, centreHz: next.hops === 1 ? (a.centreHz || hopCentre(next)) : null, t: 0, heard: [], skipped: {} });
+				this.commit(null, watch ? 'Watching this span' : next.hops === 1 ? 'Watching ' + next.preset + ' · the receiver stays at ' + (next.centreHz / 1e6).toFixed(3) : 'Scanning ' + next.preset + ' · the scanner has the receiver');
 				// starting a scan closes the pane; the Scanner drawer stays on the running scan
 				return this.setState({ sw: next, scanPrefill: null, planner: null });
 			}
@@ -358,7 +367,7 @@ class Component extends DCLogic {
 				const hz = sw.holdHz, fv = (hz / 1e6).toFixed(3);
 				if (a.type === 'save') return this.commit(this.state.saved.some(x => x.f === hz) ? null : { saved: this.state.saved.concat([{ f: hz, label: sw.holdLabel || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' · the scan carries on');
 				this.commit(a.type === 'ignore' ? { ignored: Object.assign({}, this.state.ignored, { [hz]: true }) } : null, a.type === 'ignore' ? 'Ignored ' + fv + ' · never probed, recorded or scanned again' : 'Skipped ' + fv + ' for this scan');
-				return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', holdHz: null, holdLabel: null, held: true }) });
+				return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', holdHz: null, holdLabel: null, hear: false, held: true }, a.type === 'save' ? null : { skipped: Object.assign({}, sw.skipped, { [hz]: true }) }) });
 			}
 		};
 		// identify works on the tuned frequency; asked for another one (from the Scanner), tune there first
@@ -669,6 +678,7 @@ class Component extends DCLogic {
 			else if (sw.resumeAt) this.forceUpdate();
 			return;
 		}
+		if (sw.hops === 1 && (sw.state === 'sweeping' || sw.state === 'holding')) return this.watchTick(sw);
 		if (sw.state === 'holding') {
 			if (sw.holdLeft > 1) return this.setState({ sw: Object.assign({}, sw, { holdLeft: sw.holdLeft - 1 }) });
 			return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', holdHz: null, holdLabel: null, held: true }) });
@@ -682,6 +692,31 @@ class Component extends DCLogic {
 		const target = HOLDS[pass % HOLDS.length];
 		const hold = o.holdOnActivity !== false && !o.findOnly && target.hz >= h[0] && target.hz < h[1] ? target : null;
 		this.setState({ sw: Object.assign({}, sw, { hop, pass, held: false }, hold ? { state: 'holding', holdHz: hold.hz, holdLabel: hold.label, holdLeft: HOLD_S } : null) });
+	}
+	// a one-hop watch: the receiver stays put; a channel that comes alive is logged, and with Follow hits the audio moves to it
+	// and plays it until it goes quiet plus HANG_S. Skipped or ignored channels are never followed.
+	watchTick(sw) {
+		const t = (sw.t || 0) + 1, ph = t % CH_LOOP, o = sw.options || {}, ign = this.state.ignored || {};
+		const act = CH_ACT.find(c => c.hz >= sw.startHz && c.hz <= sw.endHz && ph >= c.at && ph < c.at + c.on && !(sw.skipped || {})[c.hz] && !ign[c.hz]) || null;
+		const hang = !act && sw.state === 'holding' && CH_ACT.some(c => c.hz === sw.holdHz && ph >= c.at + c.on && ph < c.at + c.on + HANG_S);
+		let heard = sw.heard || [];
+		if (act && sw.hitHz !== act.hz) {
+			const h = heard.find(x => x.hz === act.hz);
+			heard = h ? heard.map(x => x === h ? Object.assign({}, x, { n: x.n + 1, last: 'now' }) : Object.assign({}, x, { last: x.last === 'now' ? hhmm() : x.last })) : heard.concat([{ hz: act.hz, name: chName(sw, act.hz), n: 1, first: hhmm(), last: 'now' }]);
+		} else if (!act && sw.hitHz) heard = heard.map(x => x.last === 'now' ? Object.assign({}, x, { last: hhmm() }) : x);
+		const follow = o.followHits !== false && !o.findOnly;
+		const next = { t, heard, hitHz: act ? act.hz : null, hitName: act ? chName(sw, act.hz) : null, keyed: act ? act.hz : null };
+		if (follow && act) Object.assign(next, { state: 'holding', holdHz: act.hz, holdLabel: chName(sw, act.hz), hear: true });
+		else if (!hang) Object.assign(next, { state: 'sweeping', holdHz: null, holdLabel: null, hear: false });
+		this.setState({ sw: Object.assign({}, sw, next) });
+	}
+	specScan(sw, hold) {
+		if (!hold || !/^(sweeping|holding|paused)/.test(sw.state)) return null;
+		const one = sw.hops === 1, h = one ? [sw.startHz, sw.endHz] : hopList(sw)[(sw.hop || 1) - 1] || [sw.startHz, sw.endHz];
+		const hitHz = sw.state === 'holding' ? sw.holdHz : sw.hitHz || null;
+		return { a: h[0], b: h[1], watch: one, name: sw.preset, paused: !LIVE(sw.state), centreHz: one ? sw.centreHz : null,
+			chans: one ? (sw.channels || []).map(c => c.hz) : null, hitHz, hitName: hitHz ? (sw.state === 'holding' ? sw.holdLabel : sw.hitName) || '' : '', hear: !!sw.hear || (!one && sw.state === 'holding'),
+			keyed: one ? (sw.keyed ? [sw.keyed] : []) : null };
 	}
 	renderVals() {
 		const base = this.state;
@@ -706,10 +741,14 @@ class Component extends DCLogic {
 		const s = Object.assign({}, base, swFreq ? { freq: swFreq } : {}, base.preview || {});
 		const stage = this.props.stage || 'S1';
 		const ign = base.ignored || {};
-		const discs = DISCOVERIES.filter(d => !ign[d.hz]).map(d => Object.assign({}, d, stage === 'S2' ? d.s2 : null, { active: live ? sw.state === 'holding' && sw.holdHz === d.hz : d.hz === 161150000 }));
+		const heardNew = (sw && sw.heard || []).filter(h => !DISCOVERIES.some(d => d.hz === h.hz)).map(h => ({ hz: h.hz, bw: 12500, label: 'Maybe FM voice', sub: h.name, conf: 'maybe', recent: true, fresh: true }));
+		const discs = DISCOVERIES.concat(heardNew).filter(d => !ign[d.hz]).map(d => Object.assign({}, d, stage === 'S2' ? d.s2 : null, { active: live ? (sw.state === 'holding' && sw.holdHz === d.hz) || sw.hitHz === d.hz : d.hz === 161150000 }));
 		const hold = sw && sw.state !== 'watching' && sw.state !== 'finished' ? {
 			state: sw.state, preset: sw.preset, startHz: sw.startHz, endHz: sw.endHz, ranges: sw.ranges || undefined, stretches: sw.stretches || undefined, exclusions: sw.exclusions || undefined, hop: sw.hop, hops: sw.hops, pass: (sw.pass || 0) + 1, sweepS: sw.sweepS, coverage: sw.coverage,
 			holdHz: sw.holdHz || undefined, holdLabel: sw.holdLabel || undefined, released: !!sw.released,
+			// one hop: the receiver's centre, the channel raster, what is alive (hitHz, logged) and what you hear (hear: the audio moved)
+			centreHz: sw.centreHz || undefined, channels: sw.channels || undefined, hear: !!sw.hear, hitHz: sw.hitHz || undefined, hitName: sw.hitName || undefined,
+			heard: sw.hops === 1 ? sw.heard || [] : undefined, startedAt: sw.startedAt || undefined, followHits: !!(sw.options ? sw.options.followHits !== false && !sw.options.findOnly : true),
 			resumeIn: sw.state === 'paused-you' && sw.resumeAt ? Math.max(0, Math.ceil((sw.resumeAt - Date.now()) / 1000)) : undefined
 		} : null;
 		const capHz = base.rate * 1e6;
@@ -788,11 +827,15 @@ class Component extends DCLogic {
 			idRun: base.idRun || 0,
 			scanHold: live,
 			// the card hides while the sweep moves; on a hit it is that signal's card, "Held by the scan" (the frequency shows top right)
-			scanText: live && sw.state === 'holding' ? 'Held by the scan' : '',
+			scanText: live && sw.state === 'holding' ? (sw.hear ? 'Heard by the scan' : 'Held by the scan') : '',
 			// the countdown after you tuned during a scan, on the tuned card (Stay here keeps it paused)
 			scanResume: sw && sw.state === 'paused-you' && sw.resumeAt ? { resumeIn: Math.max(0, Math.ceil((sw.resumeAt - Date.now()) / 1000)) } : null,
 			watchOn: base.watchOn !== false, setWatch: this.setWatch,
 			following: live,
+			// what the scan plays: a one-hop watch names the channel it moved the audio to, or says hits are only logged
+			followingText: !live ? '' : sw.state === 'holding' ? sw.holdLabel || (sw.holdHz / 1e6).toFixed(4) : sw.hops !== 1 ? 'Following the scan' : sw.options && (sw.options.followHits === false || sw.options.findOnly) ? 'Hits only logged' : 'Waits for a channel',
+			// the Spectrum shades where the scan is looking (the hop's window, or the band a one-hop plan watches) and names the hit
+			specScan: this.specScan(sw, hold),
 			showScanner: drawerOn && drawer === 'scanner' && !pushIn,
 			freq: s.freq, bw: s.bw, step: s.step,
 			palOpen: base.pal, openPal: this.openPal, closePal: this.closePal,

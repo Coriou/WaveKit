@@ -164,6 +164,12 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					<sc-if value="{{winOn}}" hint-placeholder-val="{{true}}">
 						<span role="img" aria-label="{{winAria}}" title="{{winTitle}}" style="position: absolute; left: 0; top: {{winTop}}px; height: {{winH}}px; width: {{winW}}px; box-sizing: border-box; border-radius: 4px; border: 1.5px solid {{winC}}; border-left-width: 3px; border-right-width: 3px; background: {{winBg}}; box-shadow: {{winGlow}}; transform: translateX({{winX}}px); transition: {{winTr}}; will-change: transform; z-index: 2"></span>
 					</sc-if>
+					<sc-for list="{{runChans}}" as="c" hint-placeholder-count="0">
+						<span aria-hidden="true" style="position: absolute; left: {{c.left}}px; top: {{c.top}}px; width: {{c.w}}px; height: {{c.h}}px; margin-left: -1px; border-radius: 1px; background: {{c.c}}; z-index: 3; pointer-events: none"></span>
+					</sc-for>
+					<sc-if value="{{hasHit}}" hint-placeholder-val="{{false}}">
+						<span role="status" style="position: absolute; left: {{hitLeft}}px; top: {{hitTop}}px; transform: translateX({{hitShift}}); height: 20px; display: flex; align-items: center; padding: 0 6px; border-radius: 4px; background: var(--wk-surface); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.16); font-size: 12px; font-weight: 700; color: {{hitC}}; white-space: nowrap; z-index: 3; pointer-events: none">{{hitText}}</span>
+					</sc-if>
 					<sc-for list="{{ticks}}" as="t" hint-placeholder-count="6">
 						<button onClick="{{t.pick}}" onMouseEnter="{{t.enter}}" onMouseLeave="{{tipLeave}}" onFocus="{{t.enter}}" onBlur="{{tipLeave}}" aria-label="{{t.aria}}" style="position: absolute; top: {{t.top}}px; left: {{t.left}}px; width: 18px; height: 22px; margin-left: -9px; border-radius: 4px; display: grid; place-items: center; z-index: 2">
 							<span style="position: relative; width: 8px; height: 8px; display: block">
@@ -325,7 +331,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</span>
 			</sc-if>
 			<span style="flex: 1 1 0; min-width: 0"></span>
-			<button class="wk-primary" onClick="{{start}}" disabled="{{startDisabled}}" title="{{startTitle}}" style="flex: {{startFlex}}; margin-left: auto; height: 40px; padding: 0 18px; border-radius: 6px; background: {{startBg}}; color: {{startFg}}; font-size: 13.5px; font-weight: 700; white-space: nowrap">Start · takes the receiver</button>
+			<button class="wk-primary" onClick="{{start}}" disabled="{{startDisabled}}" title="{{startTitle}}" style="flex: {{startFlex}}; margin-left: auto; height: 40px; padding: 0 18px; border-radius: 6px; background: {{startBg}}; color: {{startFg}}; font-size: 13.5px; font-weight: 700; white-space: nowrap">{{startText}}</button>
 		</sc-if>
 
 		<sc-if value="{{runQuiet}}" hint-placeholder-val="{{false}}">
@@ -430,7 +436,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["empty","preset","combined","custom","prefilled","running","running-edits","holding","paused"],"default":"combined"},"layout":{"editor":"enum","options":["pane","screen"],"default":"pane"},"width":{"editor":"range","min":360,"max":1400,"step":10,"unit":"px","default":990},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"discoveries":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"onApply":{"editor":null},"onSettings":{"editor":null},"$preview":{"width":990,"height":680}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["empty","preset","one-hop-preset","combined","custom","prefilled","running","running-edits","holding","paused","one-hop","one-hop-hit"],"default":"combined"},"layout":{"editor":"enum","options":["pane","screen"],"default":"pane"},"width":{"editor":"range","min":360,"max":1400,"step":10,"unit":"px","default":990},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"discoveries":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"onApply":{"editor":null},"onSettings":{"editor":null},"$preview":{"width":990,"height":680}}'>
 // ---------- Protocols (S1 trials; AIS, ACARS, VDL2, LoRa are dedicated decoders) ----------
 // s2: arrives with stage S2 · only + by: lives on fixed channels an always-on decoder covers
 const PROTO = {
@@ -581,6 +587,7 @@ const DISCS = [
 	{ hz: 161162500, bw: 12500, label: 'Heard', sub: 'Maybe a neighbour’s leak', conf: 'heard', recent: true },
 	{ hz: 162400000, bw: 12500, label: 'Heard', sub: 'Steady carrier', conf: 'heard', recent: true },
 	{ hz: 446006250, bw: 12500, label: 'Maybe FM voice', sub: 'PMR446 ch 1', conf: 'maybe', recent: false },
+	{ hz: 446031250, bw: 12500, label: 'Maybe FM voice', sub: 'PMR446 ch 3', conf: 'maybe', recent: true, fresh: true },
 	{ hz: 466025000, bw: 12500, label: 'Maybe FLEX', sub: 'No sync yet · Pager network, Morlaix?', conf: 'maybe', recent: false },
 	{ hz: 433075000, bw: 12500, label: 'Heard', sub: 'LPD', conf: 'heard', recent: false }
 ];
@@ -621,6 +628,19 @@ const fromPreset = p => p.ranges.map(r => { const bd = r[3] && bpBand(r[3]); ret
 // the band a range sits in: its own, else the narrowest visible band holding both edges
 const bandOfRange = r => (r.band && bpBand(r.band)) || BP_BANDS.filter(b => b.edit !== 'hidden' && pf(r.fa) >= b.a && pf(r.fb) <= b.b).sort((x, y) => (x.b - x.a) - (y.b - y.a))[0] || null;
 const presetById = (id, users) => (users || []).concat(PRESETS).find(p => p.id === id);
+// The channels a range covers, for words and ticks: the band plan's own channels when it lists them (PMR446 ch 1–16),
+// else the raster of its widest spacing (12.5 + 6.25 counts 12.5 kHz channels); 'Any' spacing has no count.
+function chansOf(i) {
+	const bd = bandOfRange(i.r), inR = c => c.f >= i.a - 1e-6 && c.f <= i.b + 1e-6;
+	const named = bd && bd.ch ? bd.ch.filter(c => !c.by && inR(c)) : [];
+	if (named.length >= 2) return named.map(c => ({ hz: Math.round(c.f * 1e6), name: c.name }));
+	const st = Math.max.apply(null, i.sp.concat([0]));
+	if (!(st > 0)) return null;
+	const n = Math.floor((i.b - i.a) * 1e6 / st + 1e-6);
+	return n > 0 && n <= 400 ? Array.from({ length: n }, (_, k) => ({ hz: Math.round(i.a * 1e6 + (k + 0.5) * st), name: '' })) : null;
+}
+// Follow hits: on by default when the plan listens for voice (FM or AM), off for data bands (ISM, pagers)
+const voicePlan = plan => plan.rs.some(i => i.r.protos.some(p => p === 'fm' || p === 'am'));
 
 // Tags: one numbered tag per range at its low edge; tags never overlap (a later one moves right), and a name is drawn
 // only in the free room between its tag and the next tag (or its own high edge). Nothing stacks.
@@ -648,7 +668,7 @@ class Component extends DCLogic {
 	constructor(props) {
 		super(props);
 		this.state = Object.assign({
-			userPresets: USER0.slice(), tool: 'add', findOnly: false, hold: true, rec: true, stopAfter: 'never', dwell: 'normal', sens: 'normal',
+			userPresets: USER0.slice(), tool: 'add', findOnly: false, hold: true, rec: true, follow: null, stopAfter: 'never', dwell: 'normal', sens: 'normal',
 			tw: 0, cw: 0, drag: null, flash: null, pop: null, renaming: null, renameText: '', saveName: '', spCustom: '', toast: null, tip: null,
 			acc: 0
 		}, this.fromTweak(props.state));
@@ -662,8 +682,11 @@ class Component extends DCLogic {
 		st = st || 'empty';
 		let ranges = [];
 		if (st === 'preset') ranges = fromPreset(presetById('marine'));
-		const run = st === 'running' || st === 'running-edits' || st === 'holding' || st === 'paused';
-		if (st === 'combined' || run) ranges = fromPreset(presetById('lmv')).concat(fromPreset(presetById('marine')));
+		// PMR446: 200 kHz, one hop: the receiver parks at 446.100 and watches all 16 channels at once
+		const one = st === 'one-hop' || st === 'one-hop-hit';
+		if (st === 'one-hop-preset' || one) ranges = fromPreset(presetById('pmr446'));
+		const run = st === 'running' || st === 'running-edits' || st === 'holding' || st === 'paused' || one;
+		if (st === 'combined' || (run && !one)) ranges = fromPreset(presetById('lmv')).concat(fromPreset(presetById('marine')));
 		if (st === 'custom') {
 			// ranges drawn, overlapped and skipped by hand: the case whose labels used to stack
 			const mk = (n, a, b) => mkRange({ name: n, a, b, protos: guessProtos(a, b) });
@@ -677,7 +700,8 @@ class Component extends DCLogic {
 		if (run) {
 			const plan = this.planOf(ranges, { findOnly: false, dwell: 'normal', users: USER0, stage: this.props.stage });
 			const p = this.payload(plan, { findOnly: false, hold: true, rec: true, stopAfter: 'never', dwell: 'normal', sens: 'normal' });
-			o.own = this.runOf(p, st === 'running' || st === 'running-edits' ? 'sweeping' : st);
+			o.own = this.runOf(p, st === 'running' || st === 'running-edits' || st === 'one-hop' ? 'sweeping' : st === 'one-hop-hit' ? 'holding' : st);
+			if (one) { o.hop = 1; o.pass = 1; if (st === 'one-hop-hit') Object.assign(o.own, { holdHz: 446031250, holdLabel: 'PMR446 ch 3', hear: true }); return o; }
 			o.hop = st === 'running' || st === 'running-edits' ? 16 : this.hopAt(o.own, 161150000);
 			o.pass = 3;
 			if (st === 'running-edits') {
@@ -911,7 +935,10 @@ class Component extends DCLogic {
 		const lo = id => { const p = presetById(id, users); return p ? p.ranges[0][0] : 0; };
 		const names = srcs.slice().sort((x, y) => lo(x) - lo(y) || order.indexOf(x) - order.indexOf(y)).map(id => { const p = presetById(id, users); return p ? p.short || p.name : id; }).concat(nC ? [nC > 1 ? 'your ranges' : 'your range'] : []);
 		const name0 = names.length <= 2 ? names.join(' + ') : names[0] + ' + ' + (names.length - 1) + ' more';
-		return { valid: true, rs, merged, uniq, hops, T, srcs, name: name0.charAt(0).toUpperCase() + name0.slice(1) };
+		// one hop: the receiver parks at the centre and the FFT watches every channel at once; spacing only names the hits
+		const oneHop = hops === 1, cl = rs.map(chansOf), chans = cl.every(Boolean) ? [].concat.apply([], cl) : null;
+		const centreHz = oneHop ? Math.round((merged[0].a + merged[0].b) / 2 * 1e6 / 12500) * 12500 : 0;
+		return { valid: true, rs, merged, uniq, hops, T, srcs, oneHop, chans, centreHz, voice: voicePlan({ rs }), name: name0.charAt(0).toUpperCase() + name0.slice(1) };
 	}
 	planNow() { const s = this.state; return this.planOf(s.ranges, { findOnly: s.findOnly, dwell: s.dwell, users: s.userPresets, stage: this.props.stage }); }
 	// on-scan start: one entry per range (the table's rows), plus the merged stretches the sweep visits
@@ -920,14 +947,19 @@ class Component extends DCLogic {
 		const ranges = plan.rs.map(i => ({ name: i.r.name, startHz: hz(i.a), endHz: hz(i.b), hops: i.hops, spacingHz: i.sp.slice(), protocols: o.findOnly ? [] : i.on.slice() }));
 		const exclusions = plan.uniq.map(e => ({ startHz: hz(e.ca), endHz: hz(e.cb), reason: e.x.auto ? xWhy(e.x, ' · ') : 'Skipped by you' }));
 		const stretches = plan.merged.map(m => ({ startHz: hz(m.a), endHz: hz(m.b), hops: m.hops, name: m.items.map(i => i.r.short).join(' + ') }));
+		// channels: the plan raster (named from the band plan where it has names), so the shell can name a hit "PMR446 ch 3"
+		const channels = plan.chans ? plan.chans.filter(c => !plan.uniq.some(e => c.hz >= hz(e.ca) && c.hz <= hz(e.cb))) : null;
 		return { preset: plan.name, startHz: hz(plan.merged[0].a), endHz: hz(plan.merged[plan.merged.length - 1].b), ranges, exclusions, hops: plan.hops, sweepS: Math.max(1, Math.round(plan.T)), stretches,
-			options: { holdOnActivity: o.hold, findOnly: o.findOnly, record: o.rec, stopAfter: o.stopAfter, timePerHop: o.dwell, sensitivity: o.sens } };
+			oneHop: plan.oneHop, centreHz: plan.oneHop ? plan.centreHz : undefined, channels: channels || undefined,
+			options: { holdOnActivity: o.hold, findOnly: o.findOnly, record: o.rec, stopAfter: o.stopAfter, timePerHop: o.dwell, sensitivity: o.sens, followHits: this.followOn(plan, o) } };
 	}
 
 	// ---------- Running mode ----------
 	runOf(p, state) {
-		return { state, preset: p.preset, startHz: p.startHz, endHz: p.endHz, ranges: p.ranges, exclusions: p.exclusions, stretches: p.stretches, hops: p.hops, sweepS: p.sweepS };
+		return { state, preset: p.preset, startHz: p.startHz, endHz: p.endHz, ranges: p.ranges, exclusions: p.exclusions, stretches: p.stretches, hops: p.hops, sweepS: p.sweepS, centreHz: p.centreHz, channels: p.channels };
 	}
+	// Follow hits: your choice, else the plan's default (voice bands on, data bands off)
+	followOn(plan, o) { const v = (o || this.state).follow; return v == null ? !!(plan && plan.voice) : !!v; }
 	// ---------- Mid-run edits: range on/off, protocols, skips wait for Apply; edges and spacing are fixed while it runs ----------
 	runBase(w) {
 		const rows = (w.ranges || []);
@@ -1090,7 +1122,7 @@ class Component extends DCLogic {
 			noFit: false, fitOp: 1, fitTitle: ok.length ? 'Show every range' : 'Show the band plans',
 			ovMarks: ok.filter(i => i.b > OV[0] && i.a < OV[1]).map(i => ({ left: ovP(i.a), width: Math.max(0.3, ovP(i.b) - ovP(i.a)) })),
 			ovL: ovP(L), ovW: Math.max(0.8, ovP(R) - ovP(L)), ovNow: Math.round((L + R) / 2), ovText: fmt(L) + ' to ' + fmt(R) + ' MHz',
-			rangeBars: [], coverBars: [], runSkips: [], segGaps: [], ticks: [], hasTip: false, winOn: false
+			rangeBars: [], coverBars: [], runSkips: [], segGaps: [], ticks: [], hasTip: false, winOn: false, runChans: [], hasHit: false
 		};
 	}
 	runRuler(w, G) {
@@ -1109,13 +1141,14 @@ class Component extends DCLogic {
 		// covered in this pass: every on range up to the window's far edge
 		const onIv = [];
 		rows.filter(o => o.on).map(o => [o.x0, o.x1]).sort((p, q) => p[0] - q[0]).forEach(iv => { const m = onIv[onIv.length - 1]; if (m && iv[0] <= m[1]) m[1] = Math.max(m[1], iv[1]); else onIv.push(iv.slice()); });
-		const coverBars = onIv.filter(iv => iv[0] < wx1).map(iv => ({ top: LT, h: LH, left: iv[0], width: Math.max(1, Math.min(iv[1], wx1) - iv[0]), bg: 'rgba(var(--wk-accent-rgb),.2)' }));
+		const coverBars = lay.cells.length === 1 ? [] : onIv.filter(iv => iv[0] < wx1).map(iv => ({ top: LT, h: LH, left: iv[0], width: Math.max(1, Math.min(iv[1], wx1) - iv[0]), bg: 'rgba(var(--wk-accent-rgb),.2)' }));
 		const runSkips = ap.excl.map(x => { const xa = pf(x.fa) * 1e6, xb = pf(x.fb) * 1e6, sg = lay.segs.find(q => xb > q.a && xa < q.b); if (!sg) return null; const x0 = lay.P(Math.max(sg.a, xa)), x1 = lay.P(Math.min(sg.b, xb)); return { top: LT, h: LH, left: x0, width: Math.max(3, x1 - x0), title: 'Not scanned · ' + x.fa + '–' + x.fb + ' · ' + xWhy(x) }; }).filter(Boolean);
 		const segGaps = lay.segs.slice(1).map((sg, i) => ({ top: LT, h: LH, left: lay.segs[i].x + lay.segs[i].w, width: lay.GAP, title: 'Not scanned · ' + short(lay.segs[i].b) + '–' + short(sg.a) + ' MHz' }));
 		const tags = placeTags(rows.map(o => ({ x0: o.x0, x1: o.x1, num: o.num, name: o.r.name, on: o.on })), tw, LT + 6, runSkips.filter(x => x.width >= 8).map(x => x.left).concat([wx0]))
 			.map(t => Object.assign(t, { bg: t.on ? 'var(--wk-accent)' : 'var(--wk-chip)', fg: t.on ? 'var(--wk-on-accent)' : 'var(--wk-text-3)', op: t.on ? 1 : 0.7, title: t.num + ' · ' + t.name + (t.on ? '' : ' · off') }));
 		const win = { winOn: true, winTop: LT - 4, winH: LH + 8, winX: wx0, winW: Math.max(4, wx1 - wx0), winC: acc,
-			winBg: 'rgba(' + accRgb + ',' + (paused ? '.16' : '.22') + ')', winGlow: paused || this.props.theme === 'light' ? 'none' : '0 0 14px rgba(' + accRgb + ',.45)',
+			// one hop: the window is the whole band and never moves, so it is drawn quietly (no glow, a light fill)
+			winBg: 'rgba(' + accRgb + ',' + (lay.cells.length === 1 ? '.07' : paused ? '.16' : '.22') + ')', winGlow: paused || lay.cells.length === 1 || this.props.theme === 'light' ? 'none' : '0 0 14px rgba(' + accRgb + ',.45)',
 			// the window glides hop to hop (transform only); it jumps back at the start of a pass
 			winTr: cur === 1 ? 'none' : 'transform .32s cubic-bezier(.2,.7,.3,1)',
 			winAria: (paused ? 'Paused at ' : 'Listening to ') + short(wa) + '–' + short(wb) + ' MHz', winTitle: (paused ? 'Paused · ' : 'Capture window · ') + short(wa) + '–' + short(wb) + ' MHz · ' + (SR_HZ / 1e6) + ' MHz wide' };
@@ -1135,6 +1168,12 @@ class Component extends DCLogic {
 				enter: () => this.setState({ tip: { hz: d.hz } }),
 				pick: () => { if (this.props.onTune) this.props.onTune(d.hz); else this.toast('Tunes to ' + short(d.hz) + ' MHz'); } };
 		});
+		// one hop: the plan's channel raster as faint ticks along the lane; the channel being heard is lit and named
+		const one = lay.cells.length === 1, hitHz = w.holdHz && (w.state === 'holding' || w.hitHz) ? w.holdHz : w.hitHz || 0;
+		const hitName = w.holdHz === hitHz ? w.holdLabel : w.hitName;
+		const runChans = one ? (w.channels || []).filter(ch => lay.segOf(ch.hz)).map(ch => { const on = Math.abs(ch.hz - hitHz) < 3200; return { left: lay.P(ch.hz), top: on ? LT - 4 : LT + LH - 9, h: on ? LH + 8 : 7, w: on ? 2 : 1, c: on ? acc : 'rgba(var(--wk-ink-rgb),.3)' }; }) : [];
+		const hx = hitHz && lay.segOf(hitHz) ? lay.P(hitHz) : null, hitText = hitName || (hitHz ? short(hitHz) : '');
+		const hitFlip = hx != null && hx + 14 + textW(hitText, 12) > tw;
 		const tp = s.tip && placed.find(p => p.d.hz === s.tip.hz), td = tp ? tp.d : null;
 		// axis: each stretch's ends, plus round steps inside a wide one
 		const rTicks = [];
@@ -1149,6 +1188,7 @@ class Component extends DCLogic {
 			for (let f = Math.ceil(g.a / step) * step; f < g.b; f += step) { const x = lay.P(f); if (x - g.x > 44 && g.x + g.w - x > endW + 30) rTicks.push({ left: x, text: short(f), shift: '-50%' }); }
 		});
 		return Object.assign(win, { rangeBars, coverBars, runSkips, segGaps, tags, ticks, rTicks, laneBars: [], runBars: [], skipBars: [], chanTicks: [], rulerEmpty: false, hasDrag: false,
+			runChans, hasHit: hx != null && !!hitText, hitLeft: hx == null ? 0 : hitFlip ? hx - 12 : hx + 12, hitShift: hitFlip ? '-100%' : '0', hitText, hitTop: G.tickTop + 1, hitC: acc,
 			rCursor: 'default', axisCursor: 'default', axisTitle: '', rulerAria: 'Scan ruler, ' + short(w.startHz) + ' to ' + short(w.endHz) + ' MHz',
 			hasTip: !!td, tipTop: G.tickTop + 26, tipLeft: td ? clamp(tp.x, 10, tw - 10) : 0, tipShift: td ? (tp.x < 150 ? '0' : tp.x > tw - 150 ? '-100%' : '-50%') : '0',
 			tipFreq: td ? fq(td.hz) : '', tipLabel: td ? td.label : '', tipColor: td && td.conf === 'heard' ? 'var(--wk-text-2)' : 'var(--wk-accent)', tipDecoded: !!td && td.conf === 'decoded',
@@ -1245,12 +1285,19 @@ class Component extends DCLogic {
 		const w = this.run();
 		if (w) return this.runPopVals(base, p, w) || none;
 		if (p.kind === 'options') {
+			// Follow hits: the audio (not the receiver) moves to a channel that comes alive and plays it until it goes quiet;
+			// on a one-hop plan the receiver never moves, so "Stop on activity" has nothing to stop and is not offered
+			const fOn = this.followOn(plan), fDef = plan.valid ? (plan.voice ? 'on for voice bands' : 'off for data bands') : '';
 			return Object.assign(base, { popOpts: true, popLabel: 'Options',
 				optSwitches: [
+					['pl-o-follow', 'Follow hits', 'Plays a channel that comes alive until it goes quiet, plus 2 s. The receiver stays where it is' + (fDef ? ' · default ' + fDef : ''), 'follow'],
 					['pl-o-hold', 'Stop on activity', 'Stays on a call until 2 s after it ends, up to 60 s', 'hold'],
 					['pl-o-find', 'Find signals only', 'Lists what transmits without trying a decoder · fastest', 'findOnly'],
 					['pl-o-rec', 'Record calls', 'Decoded calls go to Activity like any other', 'rec']
-				].map(o => { const v = sw(!!s[o[3]]); return { id: o[0], label: o[1], hint: o[2], on: v.on, track: v.track, knob: v.knob, toggle: () => this.setState({ [o[3]]: !s[o[3]] }) }; }),
+				].filter(o => !(o[3] === 'hold' && plan.oneHop)).map(o => {
+					const cur = o[3] === 'follow' ? fOn : !!s[o[3]], v = sw(cur);
+					return { id: o[0], label: o[1], hint: o[2], on: v.on, track: v.track, knob: v.knob, toggle: () => this.setState({ [o[3]]: !cur }) };
+				}),
 				optSegs: [
 					['pl-o-stop', 'Stop after', 'Ends the scan on its own', 'stopAfter', STOPS],
 					['pl-o-dwell', 'Time per hop', 'How long each hop listens · for every range', 'dwell', DWELL_OPTS],
@@ -1326,8 +1373,17 @@ class Component extends DCLogic {
 		};
 		// footer: compose summary
 		const valid = plan.valid;
-		const sumText = plan.empty ? 'Pick a preset or drag on the ruler' : !valid ? plan.bad.num + ' · ' + plan.bad.r.name + ' · ' + plan.bad.err : 'Full pass ' + (plan.T < 1 ? 'under 1 s' : '≈ ' + secsText(plan.T)) + ' · ' + plan.hops + (plan.hops === 1 ? ' hop' : ' hops');
-		const optChanged = s.findOnly || !s.hold || !s.rec || s.stopAfter !== 'never' || s.dwell !== 'normal' || s.sens !== 'normal';
+		// one hop reads as watching (the receiver parks, the FFT sees every channel); more hops read as a sweep, with its hops and pass
+		const nCh = plan.valid && plan.chans ? plan.chans.length : 0;
+		const chWords = nCh ? (nCh === 2 ? 'Both' : 'All ' + nCh) + ' channels at once' : 'The whole range at once';
+		const sumText = plan.empty ? 'Pick a preset or drag on the ruler' : !valid ? plan.bad.num + ' · ' + plan.bad.r.name + ' · ' + plan.bad.err
+			: plan.oneHop ? chWords + ' · parks at ' + f3(plan.centreHz / 1e6)
+			: 'Steps through ' + plan.hops + ' hops of ≈' + HOP_MHZ + ' MHz · full pass ' + (plan.T < 1 ? 'under 1 s' : '≈ ' + secsText(plan.T));
+		const sumTitle = !valid ? '' : plan.oneHop
+			? plan.name + ' fits in one hop: the receiver parks at ' + f3(plan.centreHz / 1e6) + ' MHz and watches ' + (nCh ? 'all ' + nCh + ' channels' : 'the whole range') + ' through the FFT. Channel spacing names what it hears; the receiver never steps through it.'
+			: plan.merged.map(m => mt(m.a) + '–' + mt(m.b)).join(', ') + ' MHz · the receiver steps through ' + plan.hops + ' hops of about ' + HOP_MHZ + ' MHz · hops and settle time set the speed';
+		const startText = !valid ? 'Start · takes the receiver' : !plan.oneHop ? 'Start sweep · takes the receiver' : plan.name.length <= 16 ? 'Watch ' + plan.name + ' · takes the receiver' : 'Watch · takes the receiver';
+		const optChanged = s.findOnly || (!s.hold && !plan.oneHop) || !s.rec || s.stopAfter !== 'never' || s.dwell !== 'normal' || s.sens !== 'normal' || (s.follow != null && s.follow !== !!plan.voice);
 		// footer: running, one quiet line (the Tuner's hold row owns Pause, Stop and the frequency)
 		let runWord = '', passText = '', passTitle = '', changes = [];
 		if (runningM) {
@@ -1335,8 +1391,15 @@ class Component extends DCLogic {
 			const pct = n > 1 ? Math.round(100 * rr.cur / n) : 100, pass = w.pass || s.pass || 1;
 			runWord = live ? '' : st === 'paused-you' ? (w.waiting ? 'Waits while you listen' : w.resumeIn != null ? 'Resumes in ' + w.resumeIn + ' s' : 'Paused')
 				: st === 'paused-relay' ? 'Waiting for SDR++' : st === 'paused-job' ? 'Another scan first' : st === 'source-down' ? 'Receiver offline' : st === 'consent' ? 'Waiting for you' : 'Paused';
-			passText = 'Pass ' + pass + ' · ' + pct + ' % · full pass ≈ ' + secsText(w.sweepS || 10);
-			passTitle = (w.hops || n) + ' hops of ' + (SR_HZ / 1e6) + ' MHz';
+			if (n === 1) {
+				// one hop: no pass and no progress, it watches every channel at once
+				const nc = (w.channels || []).length, ctr = w.centreHz || Math.round((w.startHz + w.endHz) / 2);
+				passText = (w.holdHz && w.hear ? 'Hearing ' + (w.holdLabel || short(w.holdHz)) + ' · ' : '') + (nc ? 'All ' + nc + ' channels at once' : 'The whole range at once') + ' · the receiver stays at ' + f3(ctr / 1e6);
+				passTitle = 'One hop: the receiver parks at ' + f3(ctr / 1e6) + ' MHz and the FFT watches ' + short(w.startHz) + '–' + short(w.endHz) + ' MHz';
+			} else {
+				passText = 'Steps through ' + (w.hops || n) + ' hops of ≈' + HOP_MHZ + ' MHz · pass ' + pass + ' · ' + pct + ' % · full pass ≈ ' + secsText(w.sweepS || 10);
+				passTitle = (w.hops || n) + ' hops of about ' + HOP_MHZ + ' MHz, inside a ' + (SR_HZ / 1e6) + ' MHz capture';
+			}
 			changes = this.runChanges(w);
 		}
 		const pendN = changes.length;
@@ -1403,7 +1466,7 @@ class Component extends DCLogic {
 			hasToast: !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.undo), undo: () => s.toast && s.toast.undo && s.toast.undo(), toastBottom: narrow && composing ? 120 : 74,
 			footPad: narrow ? '10px 12px 12px 16px' : '10px 14px 12px 20px', footDisp: pendN ? 'none' : 'flex',
 			openOptions: e => this.openPop('options', null, e, 380), optOpen: !!(s.pop && s.pop.kind === 'options'), optChanged,
-			sumText, sumTitle: valid ? plan.merged.map(m => mt(m.a) + '–' + mt(m.b)).join(', ') + ' MHz · hops and settle time set the speed' : '',
+			sumText, sumTitle, startText,
 			sumC: plan.empty ? 'var(--wk-text-3)' : valid ? 'var(--wk-text)' : 'var(--wk-amber)', sumWeight: valid ? 700 : 400, sumFlex: narrow ? '1 0 100%' : '0 1 auto', sumOrder: narrow ? -1 : 0,
 			showConsent: valid, consentText: 'Pauses ' + PAUSES.join(', '),
 			startDisabled: !valid, startTitle: valid ? '' : plan.empty ? 'Pick a preset or drag on the ruler' : 'Fix range ' + plan.bad.num,

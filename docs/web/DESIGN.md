@@ -834,6 +834,27 @@ Condensed + Noto Sans, Tabler-based icons).
   - *Performance:* lanes are plain DOM cached per view and width, nothing per frame, no new blurred
     surface; long lists (imports, channels) are capped behind "Show all".
 
+- **Scanner: one-hop watch and follow hits (owner tried PMR446, 2026-10-12; canvas v85).** A PMR446
+  scan looked stuck: the Tuner stayed at 446.100. That is right (200 kHz fits in one hop, so the
+  receiver parks at the centre and watches all 16 channels through the FFT; spacing is the raster
+  that names hits, not a tuning step), but the UI did not say so. Owner: "the UI needs to be more
+  explicit".
+  - *One hop reads as watching:* "Watch PMR446 · takes the receiver", "All 16 channels at once · parks
+    at 446.100"; the Tuner row "Watching PMR446 · 16 channels 446.000–446.200" with Pause / Stop and no
+    progress bar; Scanner header "Watching PMR446 · 1 found". Multi-hop plans say "Steps through 19
+    hops of ≈1.5 MHz · full pass ≈ 8 s" and "Start sweep". Channel count from the plan's named
+    channels, else the raster.
+  - *Where it looks:* the Spectrum shades the watched band (one hop) or the current hop's window
+    (sweep), amber when paused, with channel ticks and a chip naming the hit ("PMR446 ch 3"), filled
+    when heard, outlined when only logged.
+  - *Follow hits (orchestrator's recommendation, owner to confirm):* on a voice band a hit moves the
+    demodulator to the channel, the hardware stays put, and it plays until quiet plus a 2 s hang;
+    Tuner digits show the channel, the row reads "Hearing PMR446 ch 3" with Skip / Ignore / ☆ / Stop,
+    Listen and the tuned card say "Heard by the scan". Option in the planner: on when the plan tries
+    FM or AM, off for data bands; "Stop on activity" is hidden for one-hop plans.
+  - *Fixed on the way:* "This scan" only lists hits inside the scan's ranges; scan duration uses the
+    shell's start time; the one-hop running ruler lost its glow and "covered" fill.
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -862,6 +883,10 @@ Condensed + Noto Sans, Tabler-based icons).
   a setting. Signed-in devices needs the auth design.
 - Scanner listen-scan (S3, "Scan a list"), right-click signal menu with Identify first,
   the `I` key in the keymap pass.
+- Scanner follow-ups (2026-10-12): confirm Follow hits (default on for voice incl. Airband AM?);
+  hop size copy: the canvas uses 1.5 MHz hops (19 for 146–174) while SCANNER.md says about 80 % of the
+  sample rate (≈1.9 MHz at 2.4 MS/s): the real app shows `POST /api/scanner/plan` numbers; should the
+  running pane title read "Watching PMR446"? Should the hold row also say "receiver at 446.100"?
 - Band plans follow-ups (2026-10-12): approve the `--wk-grp-*` hues; when the country has no pack
   (or there is no location), should France switch off by itself (today the row says "No Germany pack
   yet" and France stays on)? A custom group picker with swatches instead of the native select? Should
@@ -883,12 +908,14 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after the band plans pass (canvas v83, sticky v84). Next: the design
+Handoff written 2026-10-12 after the band plans pass (canvas v83, sticky v84) and the scanner
+one-hop / follow-hits polish (v85). Next: the design
 system v1 and web app foundation. Two standing rules from the owner apply (see "How we work"): the
 canvas stays the design source after the build starts, and performance is a constraint at every
 stage.
 
-**Check with the owner first (short):** approve the band group hues (`--wk-grp-*`, THEME-TOKENS
+**Check with the owner first (short):** Follow hits and the scanner follow-ups in "Open
+questions"; approve the band group hues (`--wk-grp-*`, THEME-TOKENS
 §3.6; seen in Settings › Band plans and the spectrum lanes), then the band plans follow-ups in "Open
 questions" (France pack when the country has none, group picker, Wize preset, Harbour lane, lane
 names hidden under the tuned card).

@@ -370,7 +370,9 @@ const SCAN_PRESETS = PRESET_DEF.map(([id, label, ids, keys]) => {
 	});
 	const skips = exclusions.map(x => x.reason.split(' ')[0]).filter((x, i, a) => a.indexOf(x) === i);
 	const protos = ranges.reduce((t, r) => t.concat(r.protocols.filter(p => t.indexOf(p) < 0)), []).filter(p => skips.indexOf(PROTO_NAME[p]) < 0);
-	return { id, label, from: ranges[0].startHz, to: ranges[ranges.length - 1].endHz, ranges, exclusions, keys, decodes: protos.map(p => PROTO_NAME[p] || p).join(', ') + (skips.length ? ' · skips ' + skips.join(', ') : '') };
+	// the plan's named channels (PMR446 ch 1–16), so a one-hop watch names what it hears
+	const channels = bpChannels().filter(c => !c.by && bands.some(b => b.id === c.band)).map(c => ({ hz: Math.round(c.f * 1e6), name: c.name }));
+	return { id, label, from: ranges[0].startHz, to: ranges[ranges.length - 1].endHz, ranges, exclusions, keys, channels, decodes: protos.map(p => PROTO_NAME[p] || p).join(', ') + (skips.length ? ' · skips ' + skips.join(', ') : '') };
 });
 const HOP_HZ = 1.5e6;
 const SCAN_COST = 'Takes the Pi receiver · pauses AIS-catcher, POCSAG and DMR decoding until the scan ends · live audio follows the scan';
@@ -770,12 +772,15 @@ class Component extends DCLogic {
 		const ranges = (pr.ranges || [{ name: pr.label, startHz: pr.from, endHz: pr.to }]).map(r => Object.assign({}, r, { hops: Math.max(1, Math.ceil((r.endHz - r.startHz) / HOP_HZ)) }));
 		const hops = ranges.reduce((t, r) => t + r.hops, 0);
 		const range = ranges.length > 1 ? ranges.map(r => mhzRange(r.startHz, r.endHz).replace(' MHz', '')).join(' and ') + ' MHz' : mhzRange(pr.from, pr.to);
+		// one hop (PMR446): the receiver parks at the centre and watches every channel; more hops sweep
+		const one = hops === 1, nCh = pr.channels.length, centreHz = Math.round((pr.from + pr.to) / 2 / 12500) * 12500;
+		const extra = one ? { oneHop: true, centreHz, channels: nCh ? pr.channels : undefined, options: { followHits: ranges.some(r => r.protocols.some(q => q === 'fm' || q === 'am')) } } : {};
 		return {
 			id: 'scan:' + pr.id, title: pr.label, keys: pr.keys,
 			sub: range + ' · ' + pr.decodes,
 			icon: P.scan, cur: !!sw && sw.preset === pr.label && sw.state !== 'watching',
-			act: () => this.scan({ type: 'start', preset: pr.label, startHz: pr.from, endHz: pr.to, hops, ranges, exclusions: pr.exclusions || [] }, 'Scanning ' + pr.label),
-			does: 'Sweeps ' + pr.label + ' · ' + range, warn: SCAN_COST
+			act: () => this.scan(Object.assign({ type: 'start', preset: pr.label, startHz: pr.from, endHz: pr.to, hops, ranges, exclusions: pr.exclusions || [] }, extra), (one ? 'Watching ' : 'Scanning ') + pr.label),
+			does: one ? 'Watches ' + pr.label + ' · ' + (nCh ? 'all ' + nCh + ' channels at once' : 'the whole range at once') + ', the receiver stays at ' + (centreHz / 1e6).toFixed(3) : 'Sweeps ' + pr.label + ' · ' + range + ' · ' + hops + ' hops', warn: SCAN_COST
 		};
 	}
 	// Band plans: the page, an import, and the band you are tuned in (opens its editor)

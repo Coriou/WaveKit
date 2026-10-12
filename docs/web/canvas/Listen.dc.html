@@ -49,7 +49,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			<div style="display: flex; align-items: baseline; gap: 8px; white-space: nowrap">
 				<span style="font-weight: 700">{{title}}</span>
 				<sc-if value="{{notFollowing}}" hint-placeholder-val="{{true}}"><span style="font-size: 12.5px; color: var(--wk-text-3); overflow: hidden; text-overflow: ellipsis">{{subtitle}}</span></sc-if>
-				<sc-if value="{{following}}" hint-placeholder-val="{{false}}"><span title="Live audio follows the scan: you hear each hop and every signal it holds on" style="display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--wk-accent); overflow: hidden; text-overflow: ellipsis"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>Following the scan</span></sc-if>
+				<sc-if value="{{following}}" hint-placeholder-val="{{false}}"><span title="{{followTitle}}" style="display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--wk-accent); overflow: hidden; text-overflow: ellipsis"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg><span style="overflow: hidden; text-overflow: ellipsis">{{followText}}</span></span></sc-if>
 			</div>
 			<div style="position: relative; height: 6px; border-radius: 3px; background: var(--wk-fill); overflow: hidden" aria-hidden="true">
 				<div style="position: absolute; left: 0; top: 0; bottom: 0; width: {{lvlPct}}%; background: {{lvlColor}}; transition: width .09s linear"></div>
@@ -158,7 +158,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"onSettings":{"editor":null},"expanded":{"editor":"boolean","default":true},"direction":{"editor":"enum","options":["down","up"],"default":"down"},"following":{"editor":"boolean","default":false},"$preview":{"width":440,"height":760}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"onSettings":{"editor":null},"expanded":{"editor":"boolean","default":true},"direction":{"editor":"enum","options":["down","up"],"default":"down"},"following":{"editor":"boolean","default":false},"followingText":{"editor":null},"$preview":{"width":440,"height":760}}'>
 const FLOOR = -108;
 const pc = db => Math.max(0, Math.min(100, (db + 120) / 100 * 100));
 const dbt = db => String(Math.round(db)).replace('-', '−') + ' dB';
@@ -211,6 +211,11 @@ class Component extends DCLogic {
 			btnBorder: listening ? 'var(--wk-accent)' : 'rgba(var(--wk-line-rgb),.18)',
 			title: !listening ? 'Listen' : open ? 'Listening' : 'Squelched',
 			following: listening && !!this.props.following,
+			// the shell says what the scan plays: "Hearing PMR446 ch 3", or a one-hop watch waiting for a channel to come alive
+			followText: this.props.followingText || 'Following the scan',
+			followTitle: !this.props.followingText || this.props.followingText === 'Following the scan' ? 'Live audio follows the scan: you hear each hop and every signal it holds on'
+				: /^(Waits for a channel|Hits only logged)$/.test(this.props.followingText) ? this.props.followingText + ' · the scan keeps the receiver where it is'
+				: 'The scan moved the audio to ' + this.props.followingText + ' and plays it until it goes quiet, plus 2 s. The receiver stays where it is.',
 			notFollowing: !(listening && this.props.following),
 			subtitle: !listening ? 'Audio is off' : playsDigital ? (digital ? 'DMR voice · ' + this.get('call') : 'Waiting for digital voice') : this.get('modeLabel') + ' audio',
 			lvlPct: pc(lvl),

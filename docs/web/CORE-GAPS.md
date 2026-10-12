@@ -122,6 +122,12 @@ registry stays the verified layer that plan bands and channels link to.
   and channels covered by a running decoder become automatic exclusions; the fixed-channel list
   (AIS, ACARS, VDL2, APRS, Meshtastic) comes from plan channels, not a hard-coded table; a preset
   carries protocols and spacing per range (ISM 433 / 868, Pagers 169 + 466).
+- [ ] Scanner follow hits (canvas v85): the demodulator follows a hit inside the current window or
+  hop without retuning the hardware and returns after a hang time (today Listen only moves
+  `offsetHz` on request via `/discoveries/:id/listen`); a per-job Follow hits option with a per-band
+  default from the plan (voice on, data off); hits named from the plan (nearest named channel, else
+  the range's raster point); `POST /api/scanner/plan` states one-hop plans explicitly (centre,
+  channel count) so clients say "watching", not "sweeping".
 - [ ] Scan presets in core, shared by every client: built-in presets per region from the
   band plans (name, ranges, protocols, step, dwell, sensitivity; read-only, "Save as new"),
   plus operator presets saved from the composer (name, ranges, skips, protocols, settings)

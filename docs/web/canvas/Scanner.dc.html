@@ -81,7 +81,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 
 	<header style="flex: none; display: flex; align-items: center; gap: 6px; padding: 14px 10px 10px 18px">
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">{{headTitle}}</h2>
-		<span style="margin-left: 4px; min-width: 0; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{headCount}}</span>
+		<span title="{{headCountTitle}}" style="margin-left: 4px; min-width: 0; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{headCount}}</span>
 		<div style="flex: 1"></div>
 		<sc-if value="{{canPlan}}" hint-placeholder-val="{{true}}">
 			<button class="wk-chipb" onClick="{{openPlan}}" aria-pressed="{{planOpen}}" title="{{planTitle}}" style="flex: none; height: 36px; padding: 0 12px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 7px; background: {{planBg}}; color: {{planFg}}; font-size: 13px; font-weight: 700; white-space: nowrap">
@@ -599,6 +599,7 @@ const r1 = mhz => mhz.toFixed(1);
 const mt = x => String(+(+x).toFixed(3));
 const mr = (a, b) => mt(a) + '–' + mt(b) + ' MHz';
 const secsText = t => t < 1 ? 'under 1 s' : t < 60 ? Math.round(t) + ' s' : (Math.round(t / 6) / 10) + ' min';
+const hm = ms => { const d = new Date(ms); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
 const durText = s => s < 60 ? 'under 1 min' : s < 3600 ? Math.round(s / 60) + ' min' : Math.floor(s / 3600) + ' h ' + Math.round((s % 3600) / 60) + ' min';
 const rnd = seed => { let x = seed * 9301 + 49297; return () => { x = (x * 9301 + 49297) % 233280; return x / 233280; }; };
 const sw = on => ({ on, track: on ? 'var(--wk-accent)' : 'var(--wk-track)', knob: on ? 18 : 2 });
@@ -691,10 +692,19 @@ class Component extends DCLogic {
 	}
 	planOpen() { return this.props.onPlan ? !!this.props.planOpen : !!(this.props.planOpen || this.state.planOpen); }
 
-	componentDidMount() { this.timer = setInterval(() => this.step(), 125); }
+	componentDidMount() { this.timer = setInterval(() => this.step(), 125); const fresh = this.heardItems(this.state.items); if (fresh.length) this.setState({ items: this.state.items.concat(fresh) }); }
+	// a channel a one-hop watch heard for the first time becomes a discovery like any other (also when the drawer opens later)
+	heardItems(items) {
+		const p = this.props.sweep;
+		return (p && p.heard || []).filter(h => !items.some(x => Math.abs(x.hz - h.hz) < 1000)).map(h => ({ id: 'h' + h.hz, hz: h.hz, icon: 'voice', proto: 'FM voice', conf: 'maybe', ident: h.name, heard: 'Now', mins: 0, audio: 'analog',
+			label: '', note: '', saved: false, ignored: false, why: 'Looks like 12.5 kHz FM · ' + h.name + ' in the band plan', measured: '12.5 kHz wide · found by this ' + (p.preset || 'scan') + ' watch', chips: [h.name],
+			n24: 1, shape: 'sparse', seed: 43, tx: [{ t: h.first, d: '0:05', who: 'Voice' }] }));
+	}
 	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.tt); clearTimeout(this.st); }
 	componentDidUpdate(prev) {
 		if (prev.state !== this.props.state) this.setState(this.fromTweak(this.props.state));
+		const fresh = this.heardItems(this.state.items);
+		if (fresh.length) this.setState({ items: this.state.items.concat(fresh) });
 		if (prev.openFirst !== this.props.openFirst) { const o = this.props.openFirst === false ? null : 'd1'; this.setState({ open: o, sel: o }); }
 	}
 
@@ -706,9 +716,11 @@ class Component extends DCLogic {
 			const st = p.state === 'paused-you' && p.resumeIn == null ? 'paused' : p.state;
 			const a = p.startHz / 1e6, b = p.endHz / 1e6;
 			return { state: st, name: p.preset, a, b, ranges: p.ranges && p.ranges.length ? p.ranges.map((r, i) => ({ id: 'p' + i, name: r.name || mr(r.startHz / 1e6, r.endHz / 1e6), a: r.startHz / 1e6, b: r.endHz / 1e6 })) : [{ id: 'p0', name: p.preset, a, b }],
-				hop: p.hop, hops: p.hops, sweepS: p.sweepS, cov: p.coverage, holdHz: p.holdHz || 161150000, holdLabel: p.holdLabel || 'DMR · CC 1', resumeIn: p.resumeIn, released: !!p.released, waiting: !!p.waiting, passes: p.passes, elapsed: s.elapsed, ext: true };
+				hop: p.hop, hops: p.hops, sweepS: p.sweepS, cov: p.coverage, holdHz: p.holdHz || 161150000, holdLabel: p.holdLabel || 'DMR · CC 1', resumeIn: p.resumeIn, released: !!p.released, waiting: !!p.waiting, passes: p.passes, elapsed: p.startedAt ? Math.max(0, Math.floor((Date.now() - p.startedAt) / 1000)) : s.elapsed, ext: true,
+				// one hop (PMR446): the channels it watches, what came alive (heard, with hit counts) and what is alive now
+				channels: p.channels || null, heard: p.heard || null, hitHz: p.state === 'holding' ? p.holdHz : p.hitHz || null, started: p.startedAt ? hm(p.startedAt) : '13:50' };
 		}
-		return { state: s.mode, name: s.run.name, a: s.run.a, b: s.run.b, ranges: s.run.ranges, hop: s.hop, hops: s.run.hops, sweepS: s.run.sweepS, cov: s.cov, holdHz: 161150000, holdLabel: 'DMR · CC 1', resumeIn: s.resumeIn, released: s.released, waiting: s.waiting, elapsed: s.elapsed };
+		return { started: '13:50', state: s.mode, name: s.run.name, a: s.run.a, b: s.run.b, ranges: s.run.ranges, hop: s.hop, hops: s.run.hops, sweepS: s.run.sweepS, cov: s.cov, holdHz: 161150000, holdLabel: 'DMR · CC 1', resumeIn: s.resumeIn, released: s.released, waiting: s.waiting, elapsed: s.elapsed };
 	}
 	step() {
 		const s = this.state, next = {}, dt = 0.125, sw0 = this.sweep();
@@ -918,9 +930,13 @@ class Component extends DCLogic {
 
 	// ---------- Hit log (this scan) ----------
 	hitList() {
-		const s = this.state, stage = this.stage();
-		if (this.sweep().state === 'starting') return [];
-		return s.items.filter(x => HITS[x.id]).map(x => Object.assign({}, staged(x, stage), { h: HITS[x.id] }))
+		const s = this.state, stage = this.stage(), sw0 = this.sweep();
+		if (sw0.state === 'starting') return [];
+		// a one-hop watch reports what it heard; otherwise the mock log, kept to the ranges of the scan that runs
+		if (sw0.heard) return sw0.heard.map(h => { const x = s.items.find(y => Math.abs(y.hz - h.hz) < 1000); return x ? Object.assign({}, staged(x, stage), { live: sw0.hitHz === h.hz, h: { n: h.n, first: h.first, last: h.last, by: 'No decoder synced', fresh: true } }) : null; }).filter(Boolean)
+			.sort((a, b) => (!!b.live - !!a.live) || b.h.n - a.h.n);
+		const inRun = x => !sw0.ext || (sw0.ranges || []).some(r => x.hz >= r.a * 1e6 - 1 && x.hz <= r.b * 1e6 + 1);
+		return s.items.filter(x => HITS[x.id] && inRun(x)).map(x => Object.assign({}, staged(x, stage), { h: HITS[x.id] }))
 			.sort((a, b) => (!!b.live - !!a.live) || (!!b.h.fresh - !!a.h.fresh) || b.h.n - a.h.n);
 	}
 	hitStats() { const hs = this.hitList().filter(x => !x.ignored); return { n: hs.length, fresh: hs.filter(x => x.h.fresh).length }; }
@@ -931,7 +947,7 @@ class Component extends DCLogic {
 		return {
 			newOnly: s.newOnly, newOnlyBg: chipc(s.newOnly).bg, newOnlyFg: chipc(s.newOnly).fg, newOnlyTick: chipc(s.newOnly).tick,
 			toggleNewOnly: () => this.setState({ newOnly: !s.newOnly }),
-			hitsEmpty: list.length === 0, hitsEmptyText: s.newOnly ? 'Nothing new yet' : 'Nothing heard yet',
+			hitsEmpty: list.length === 0, hitsEmptyText: s.newOnly ? 'Nothing new yet' : sw0.hops === 1 && sw0.channels ? 'Nothing heard yet · watching all ' + sw0.channels.length + ' channels' : 'Nothing heard yet',
 			hits: list.map(x => {
 				const open = s.hitOpen === x.id, skipped = !!s.skipped[x.id], f = f6(x.hz);
 				const tone = x.conf === 'decoded' ? { bg: 'var(--wk-fill)', fg: 'var(--wk-accent)', c: 'var(--wk-accent)', w: 700 } : x.conf === 'heard' ? { bg: 'var(--wk-surface)', fg: 'var(--wk-text-3)', c: 'var(--wk-text-3)', w: 400 } : { bg: 'var(--wk-fill)', fg: 'var(--wk-text-2)', c: 'var(--wk-text-2)', w: 400 };
@@ -994,7 +1010,7 @@ class Component extends DCLogic {
 		const s = this.state, el = durText(sw0.elapsed);
 		const t = (() => { switch (sw0.state) {
 			case 'starting': return 'Starting · the receiver moves in a moment';
-			case 'sweeping': case 'holding': return 'Scanning for ' + el + ' · started 13:50';
+			case 'sweeping': case 'holding': return (sw0.hops === 1 ? 'Watching for ' : 'Scanning for ') + el + ' · started ' + sw0.started;
 			case 'paused': return 'Paused after ' + el;
 			case 'paused-you': return 'Paused after ' + el + ' · you tuned';
 			case 'consent': return 'Paused after ' + el + ' · waiting for your OK';
@@ -1051,7 +1067,9 @@ class Component extends DCLogic {
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			// the drawer's one count: this scan's finds while a scan is on, else every discovery
 			rootRef: this.rootRef,
-			headTitle: 'Scanner', headCount: hasRun ? hits.n + ' found · ' + hits.fresh + ' new' : String(count),
+			// the running header says how the scan moves, like the Tuner's row: one hop watches, more hops sweep
+			headTitle: 'Scanner', headCount: hasRun ? (/^(sweeping|holding|starting)$/.test(sw0.state) ? (sw0.hops === 1 ? 'Watching ' + sw0.name + ' · ' : 'Sweeping · ') : '') + hits.n + ' found' + (sw0.hops === 1 ? '' : ' · ' + hits.fresh + ' new') : String(count),
+			headCountTitle: !hasRun ? '' : sw0.hops === 1 ? sw0.name + ' fits in one hop: the receiver stays put and watches ' + (sw0.channels ? 'all ' + sw0.channels.length + ' channels' : 'the whole range') + ' at once' : 'Steps through ' + sw0.hops + ' hops · full pass ≈ ' + secsText(sw0.sweepS || 10),
 			close: () => this.props.onClose && this.props.onClose(),
 
 			// Now block
