@@ -1,5 +1,8 @@
 # Decode envelope — design
 
+Owner decision amendment — 2026-10-12: align categories with the eight brand IDs,
+add nullable entityKey and optional position; the foundation remains unmounted.
+
 Status: reviewed; the authorized unmounted foundation is implemented and its
 validation checkpoint is complete. Runtime publishing, shared DTO promotion and
 persistent storage remain deferred. This decoder-event envelope is useful for
@@ -74,7 +77,9 @@ export interface DecodeEnvelope {
 	decoderType?: string
 	outputType: string
 	protocol: string | null
-	category: "aircraft" | "voice" | "pager" | "data" | "other"
+	category: "aircraft" | "marine" | "aviation-data" | "voice" | "paging" | "aprs" | "sensors" | "mesh" | "other"
+	entityKey: string | null
+	position?: { lat: number; lon: number; altM?: number }
 	title: string | null
 	fields: readonly DecodeField[]
 	provenance: DecodeProvenance
@@ -123,7 +128,13 @@ Context requires eventId, receivedAt (Date) and authoritative decoderId. Its ID
 must equal output.decoder; conflicting producer attribution is invalid. It may
 supply decoderType, provenance and refs. Omitted provenance creates
 {sourceId: null, frequency: null}. Presentation may supply protocol/category/title
-and fields; omission uses the unknown defaults. It must be grounded by its caller,
+and fields, entityKey and position; omission uses the unknown defaults (entityKey
+null, position omitted). Entity keys are 1–128 UTF-8 bytes with a lowercase
+kind token followed by a colon and a nonempty value without additional colons.
+Kinds may represent ICAO, MMSI, callsign, node id, capcode or talkgroup+radio
+(e.g. talkgroup-radio:7+42); no protocol inference or registry is performed.
+Position is a strict object with finite lat [-90, 90], lon [-180, 180] degrees
+and optional finite altM metres. It must be grounded by its caller,
 but this generic helper does not perform protocol confirmation or semantic RF
 classification. The validator returns a detached canonical envelope, accepts
 canonical wire JSON only, and does not accept Date instances or undefined values

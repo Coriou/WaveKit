@@ -1,5 +1,8 @@
 # Decode envelope — requirements
 
+Owner decision amendment — 2026-10-12: align categories with the eight brand IDs,
+add nullable entityKey and optional position; the foundation remains unmounted.
+
 Status: reviewed and implemented as an unmounted foundation for Roadmap §4a
 and the spectrum → tune → identify → inspect milestone. Existing decoder output,
 REST, WebSocket, CLI and scanner behavior are unchanged. Runtime publishing,
@@ -59,8 +62,17 @@ CLI presentation modules into core.
 4.3 Preserve typed finite numbers, booleans, strings and null in fields; require
 unique field keys and bounded labels and units. Do not fabricate unit conversion,
 coordinates, frequency or a successfully identified protocol in the generic path.
-4.4 The category vocabulary matches existing CLI concepts: aircraft, voice, pager,
-data and other. It does not replace scanner protocol families or confidence.
+4.4 The category vocabulary matches packages/brand/icons/categories.json: aircraft,
+marine, aviation-data, voice, paging, aprs, sensors and mesh, plus other fallback.
+It does not replace scanner protocol families or confidence. This supersedes the
+original CLI category vocabulary by owner decision on 2026-10-12.
+4.5 Expose nullable entityKey as a bounded kind:value correlation key supplied by
+an evidence-owning adapter (e.g. icao:ABC123, mmsi:123456789, callsign:F1ABC,
+node:123, capcode:456, talkgroup-radio:7+42). It is not event identity or proof of
+scanner acceptance. Default null; never infer it from arbitrary decodedData.
+4.6 Accept optional position {lat, lon, altM?} from validated caller presentation.
+Latitude and longitude are finite degrees in [-90, 90] and [-180, 180]; altitude
+is finite metres. Omit unknown position; never fabricate it from RF context.
 
 ## 5. Complete bounded decoded data
 

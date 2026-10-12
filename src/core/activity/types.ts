@@ -26,9 +26,25 @@ export interface DecodeReferences {
 	discoveryId?: string
 	observationId?: string
 }
+export interface DecodePosition {
+	lat: number
+	lon: number
+	altM?: number
+}
 export interface DecodePresentation {
+	entityKey?: string | null
+	position?: DecodePosition
 	protocol?: string | null
-	category?: "aircraft" | "voice" | "pager" | "data" | "other"
+	category?:
+		| "aircraft"
+		| "marine"
+		| "aviation-data"
+		| "voice"
+		| "paging"
+		| "aprs"
+		| "sensors"
+		| "mesh"
+		| "other"
 	title?: string | null
 	fields?: readonly DecodeField[]
 }
@@ -54,7 +70,18 @@ export interface DecodeEnvelope {
 	decoderType?: string
 	outputType: string
 	protocol: string | null
-	category: "aircraft" | "voice" | "pager" | "data" | "other"
+	category:
+		| "aircraft"
+		| "marine"
+		| "aviation-data"
+		| "voice"
+		| "paging"
+		| "aprs"
+		| "sensors"
+		| "mesh"
+		| "other"
+	entityKey: string | null
+	position?: DecodePosition
 	title: string | null
 	fields: readonly DecodeField[]
 	provenance: DecodeProvenance

@@ -1,5 +1,8 @@
 # Decode envelope — tasks
 
+Owner decision amendment — 2026-10-12: align categories with the eight brand IDs,
+add nullable entityKey and optional position; the foundation remains unmounted.
+
 Status: design approved; the authorized internal foundation is implemented.
 The source-review and repository-check checkpoint is complete. Runtime admission,
 subscriptions, public exports and persistence remain unchanged.
@@ -54,3 +57,8 @@ result ownership and stable target revisions; ingress ID allocation and immutabl
 broadcast events; admission policy for telemetry; persistent events/search/replay;
 recording/transcript links and lifecycle updates. Design those together before
 mounting or storage rather than interpreting scanner recovery stores as Activity.
+
+- [x] **6. Owner amendment (2026-10-12).** Align the unmounted category vocabulary
+      with the eight brand IDs plus other; add validated caller-supplied entityKey
+      and optional position with defaults, bounds and round-trip tests.
+      _Requirements: 4.1, 4.2, 4.4, 4.5, 4.6, 6.1._

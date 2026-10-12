@@ -43,6 +43,55 @@ function nodes(count: number): unknown[] {
 }
 
 describe("unmounted decoder event envelope", () => {
+	it.each([
+		"aircraft",
+		"marine",
+		"aviation-data",
+		"voice",
+		"paging",
+		"aprs",
+		"sensors",
+		"mesh",
+		"other",
+	] as const)("accepts brand category %s", category => {
+		const envelope = createDecodeEnvelope(output({}), context(), { category })
+		expect(validateDecodeEnvelope(wire(envelope)).category).toBe(category)
+	})
+	it("preserves explicit entity and position without inference or shared references", () => {
+		const position = { lat: 48, lon: 2, altM: 100 }
+		const envelope = createDecodeEnvelope(
+			output({ lat: 0, icao: "abc123" }),
+			context(),
+			{ entityKey: "icao:ABC123", position },
+		)
+		expect(envelope.entityKey).toBe("icao:ABC123")
+		position.lat = 0
+		expect(envelope.position).toEqual({ lat: 48, lon: 2, altM: 100 })
+		expect(validateDecodeEnvelope(wire(envelope))).toEqual(envelope)
+		const unknown = createDecodeEnvelope(
+			output({ lat: 48, lon: 2, mmsi: 123 }),
+			context(),
+		)
+		expect(unknown.entityKey).toBeNull()
+		expect(unknown).not.toHaveProperty("position")
+	})
+	it("rejects retired categories and malformed entity/position", () => {
+		const envelope = createDecodeEnvelope(output({}), context())
+		for (const patch of [
+			{ category: "pager" },
+			{ category: "data" },
+			{ entityKey: "icao" },
+			{ entityKey: "icao:" },
+			{ entityKey: ":value" },
+			{ position: { lat: 91, lon: 0 } },
+			{ position: { lat: 0, lon: NaN } },
+			{ position: { lat: 0 } },
+			{ position: { lat: 0, lon: 0, altM: Infinity } },
+		])
+			expect(() => validateDecodeEnvelope({ ...envelope, ...patch })).toThrow(
+				"Invalid decoder event envelope",
+			)
+	})
 	// Feature: decode-envelope, Property 1: Immutable caller identity
 	// Validates: Requirements 1.2, 1.3, 1.4
 	it("preserves caller identity across equal receptions and changed presentation", () => {

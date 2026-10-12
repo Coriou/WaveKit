@@ -79,11 +79,33 @@ const fieldsSchema = z
 	.refine(
 		fields => new Set(fields.map(field => field.key)).size === fields.length,
 	)
+const entityKeySchema = text(128)
+	.refine(value => /^[a-z][a-z0-9-]*:[^:]+$/.test(value))
+	.nullable()
+const positionSchema = z
+	.object({
+		lat: z.number().finite().min(-90).max(90),
+		lon: z.number().finite().min(-180).max(180),
+		altM: z.number().finite().optional(),
+	})
+	.strict()
 const presentationSchema = z
 	.object({
+		entityKey: entityKeySchema.optional(),
+		position: positionSchema.optional(),
 		protocol: text(64).nullable().optional(),
 		category: z
-			.enum(["aircraft", "voice", "pager", "data", "other"])
+			.enum([
+				"aircraft",
+				"marine",
+				"aviation-data",
+				"voice",
+				"paging",
+				"aprs",
+				"sensors",
+				"mesh",
+				"other",
+			])
 			.optional(),
 		title: text(256).nullable().optional(),
 		fields: fieldsSchema.optional(),
@@ -116,7 +138,19 @@ const metadataSchema = z
 		decoderType: id.optional(),
 		outputType: text(64),
 		protocol: text(64).nullable(),
-		category: z.enum(["aircraft", "voice", "pager", "data", "other"]),
+		category: z.enum([
+			"aircraft",
+			"marine",
+			"aviation-data",
+			"voice",
+			"paging",
+			"aprs",
+			"sensors",
+			"mesh",
+			"other",
+		]),
+		entityKey: entityKeySchema,
+		position: positionSchema.optional(),
 		title: text(256).nullable(),
 		fields: fieldsSchema,
 		provenance: provenanceSchema,
@@ -193,6 +227,10 @@ export function createDecodeEnvelope(
 				outputType: origin.type,
 				protocol: display.protocol ?? null,
 				category: display.category ?? "other",
+				entityKey: display.entityKey ?? null,
+				...(display.position === undefined
+					? {}
+					: { position: display.position }),
 				title: display.title ?? null,
 				fields: display.fields ?? [],
 				provenance: supplied.provenance ?? { sourceId: null, frequency: null },
