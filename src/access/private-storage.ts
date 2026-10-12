@@ -569,11 +569,17 @@ export class PrivateAccessStorage {
 	}
 
 	/**
-	 * Stopped-authority rotation. Rebinds remembered sessions to the new
-	 * credential generation instead of deleting them. Old-binding persistence
-	 * hooks still reject, so a live store cannot write the previous generation.
+	 * Stopped-authority rotation. The same durable write replaces the credential
+	 * and, by default, removes remembered sessions. `keepSessions` rebinds them
+	 * to the new generation instead. Old-binding persistence hooks still reject,
+	 * so a live store cannot write the previous generation.
 	 */
-	rotateMachineCredential(random?: AccessRandomBytes): Promise<void> {
+	rotateMachineCredential(options?: {
+		random?: AccessRandomBytes
+		keepSessions?: boolean
+	}): Promise<void> {
+		const random = options?.random
+		const keepSessions = options?.keepSessions === true
 		return this.#serialize(async () => {
 			const current = this.#current()
 			let machineToken = generateMachineToken(random)
@@ -590,7 +596,9 @@ export class PrivateAccessStorage {
 				{
 					version: 1,
 					credentialBinding: binding,
-					sessions: current.sessions.sessions.map(record => ({ ...record })),
+					sessions: keepSessions
+						? current.sessions.sessions.map(record => ({ ...record }))
+						: [],
 				},
 				binding,
 			)

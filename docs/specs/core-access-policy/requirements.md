@@ -68,7 +68,8 @@ expiry together. Retain the opaque cookie across refresh to avoid tab/audio/WS
 races. Passive stream frames alone do not renew a session.
 4.3 Default to at most 32 remembered sessions, reject capacity exhaustion explicitly, and allow
 individual-device/all-device revocation. Machine credential rotation invalidates
-persisted browser sessions bound to the old credential generation.
+persisted browser sessions bound to the old credential generation, unless the operator
+explicitly keeps them (see browser-access-batch1.md).
 4.4 Persist only hashed cookie tokens and private session metadata through a
 validated bounded snapshot. Serialize mutations and persist before acknowledging
 issuance, renewal or revocation. Do not fall back silently to memory-only sessions.
@@ -76,7 +77,8 @@ issuance, renewal or revocation. Do not fall back silently to memory-only sessio
 close browser leases and avoid misleading login prompts or durable-success claims.
 
 4.6 Provide explicit session-only GET/HEAD `/api/access/devices` under existing
-safe-read rules. Machine authority cannot enumerate devices. Reuse existing
+safe-read rules. Machine authority enumerates devices through the machine routes
+(see browser-access-batch1.md Decision 6). Reuse existing
 pairing, refresh, logout and revocation operations without expanding permissions.
 4.7 Project a bounded deterministic snapshot of active committed sessions using
 one SessionStore authority-clock observation per snapshot. Include only existing

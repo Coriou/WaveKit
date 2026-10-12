@@ -11,6 +11,7 @@ const optionsSchema = z
 			.max(4096)
 			.refine(isAbsolute)
 			.refine(value => !value.includes("\0")),
+		keepSessions: z.boolean().optional(),
 	})
 	.strict()
 
@@ -20,11 +21,13 @@ export type MachineRotationResult =
 
 /**
  * Offline replacement of the machine credential. Refuses while another live
- * owner holds the private directory. Remembered browser sessions stay in the
- * 0600 state file under the new binding. Nothing secret is returned.
+ * owner holds the private directory. By default the same durable write removes
+ * remembered browser sessions. `keepSessions` rebinds them under the new
+ * binding. Nothing secret is returned.
  */
 export async function rotateLocalMachineCredential(options: {
 	directory: string
+	keepSessions?: boolean
 }): Promise<MachineRotationResult> {
 	const parsed = optionsSchema.safeParse(options)
 	if (!parsed.success)
@@ -36,7 +39,9 @@ export async function rotateLocalMachineCredential(options: {
 			mode: "load",
 			ownership: "single-host-pid-namespace",
 		})
-		await storage.rotateMachineCredential()
+		await storage.rotateMachineCredential({
+			keepSessions: parsed.data.keepSessions === true,
+		})
 		return { kind: "rotated" }
 	} catch (error) {
 		const code =

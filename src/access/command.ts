@@ -43,7 +43,7 @@ interface RemoteOptions {
 type CommandOptions =
 	| SetupOptions
 	| PairOptions
-	| { command: "rotate-credential"; directory: string }
+	| { command: "rotate-credential"; directory: string; keepSessions: boolean }
 	| ({ command: "devices-list"; json: boolean } & RemoteOptions)
 	| ({ command: "devices-revoke"; deviceId: string } & RemoteOptions)
 	| ({ command: "devices-revoke-all" } & RemoteOptions)
@@ -54,11 +54,11 @@ const help = [
 	"       node dist/access-command.js devices list --private-directory ABS --api-origin ORIGIN [--json] [--timeout-ms 1..30000]",
 	"       node dist/access-command.js devices revoke DEVICE_ID --private-directory ABS --api-origin ORIGIN [--timeout-ms 1..30000]",
 	"       node dist/access-command.js devices revoke-all --yes --private-directory ABS --api-origin ORIGIN [--timeout-ms 1..30000]",
-	"       node dist/access-command.js rotate-credential --private-directory ABS",
+	"       node dist/access-command.js rotate-credential --private-directory ABS [--keep-sessions]",
 	"Setup runs with the core stopped. It provisions private state and prints a public access plan; it does not enable runtime protection.",
 	"Setup uses one canonical hostname and scheme for browser/API/audio origins, with explicit ports. LAN browser use requires HTTPS; HTTP is available only for explicit loopback targets.",
 	"Pair requests a one-time code from a running core with the access service mounted. Browser pairing and rolling 30-day renewal need the connected web UI.",
-	"Device commands use the machine credential against a running core. They never send a browser cookie. rotate-credential runs with the core stopped, replaces that credential, and keeps remembered browser sessions.",
+	"Device commands use the machine credential against a running core. They never send a browser cookie. rotate-credential runs with the core stopped and replaces that credential. By default it removes remembered browser sessions; --keep-sessions keeps them.",
 ]
 const deviceIdPattern = /^device_[A-Za-z0-9_-]{43}$/
 function invalid(): AccessCommandResult {
@@ -149,10 +149,27 @@ function parseArguments(input: readonly string[]): CommandOptions | undefined {
 }
 
 function parseRotate(args: readonly string[]): CommandOptions | undefined {
-	if (args.length !== 2 || args[0] !== "--private-directory") return undefined
-	const directory = directoryOption(args[1])
+	const single = new Map<string, string>()
+	let keepSessions = false
+	for (let index = 0; index < args.length; index++) {
+		const flag = args[index]
+		if (!flag) return undefined
+		if (flag === "--keep-sessions") {
+			if (keepSessions) return undefined
+			keepSessions = true
+			continue
+		}
+		if (flag === "--private-directory") {
+			const value = args[++index]
+			if (!value || value.startsWith("--") || single.has(flag)) return undefined
+			single.set(flag, value)
+			continue
+		}
+		return undefined
+	}
+	const directory = directoryOption(single.get("--private-directory"))
 	if (!directory) return undefined
-	return { command: "rotate-credential", directory }
+	return { command: "rotate-credential", directory, keepSessions }
 }
 
 function parseDevices(args: readonly string[]): CommandOptions | undefined {
@@ -288,6 +305,7 @@ export async function runAccessCommand(
 	if (options.command === "rotate-credential") {
 		const rotated = await rotateLocalMachineCredential({
 			directory: options.directory,
+			keepSessions: options.keepSessions,
 		})
 		if (rotated.kind !== "rotated")
 			return {
@@ -301,7 +319,9 @@ export async function runAccessCommand(
 		return {
 			exitCode: 0,
 			lines: [
-				"ACCESS_CREDENTIAL_ROTATED: Machine credential replaced. Remembered browser sessions were kept. Restart the core before using the new credential.",
+				options.keepSessions
+					? "ACCESS_CREDENTIAL_ROTATED: Machine credential replaced. Remembered browser sessions were kept. Restart the core before using the new credential, then run `devices list` to review them."
+					: "ACCESS_CREDENTIAL_ROTATED: Machine credential replaced. Remembered browser sessions were removed. Restart the core before using the new credential.",
 			],
 		}
 	}

@@ -507,7 +507,7 @@ describe("private single-operator persistence", () => {
 		})
 	})
 
-	it("atomically rotates machine credentials and rejects writes from an old session authority", async () => {
+	it("atomically rotates machine credentials, removes remembered sessions, and rejects writes from an old session authority", async () => {
 		const { directory } = await location()
 		const storage = await open(directory)
 		const oldDigest = storage.machineSecretDigest()
@@ -519,6 +519,36 @@ describe("private single-operator persistence", () => {
 		if (browser.kind !== "created") throw new Error("Expected browser")
 		await storage.rotateMachineCredential()
 		expect(storage.machineSecretDigest()).not.toEqual(oldDigest)
+		expect(storage.startupSnapshot().sessions).toEqual([])
+		expect(storage.startupSnapshot().credentialBinding).toBe(
+			storage.credentialBinding,
+		)
+		expect(storage.startupSnapshot().credentialBinding).not.toBe(
+			old.credentialBinding,
+		)
+		await expect(old.renew(browser.principalId)).rejects.toMatchObject({
+			code: "ACCESS_UNAVAILABLE",
+		})
+		expect(storage.startupSnapshot().sessions).toEqual([])
+		const digest = storage.machineSecretDigest()
+		const mode = (await fs.stat(join(directory, "access-state.json"))).mode
+		expect(mode & 0o777).toBe(0o600)
+		await storage.close()
+		const reloaded = await open(directory, "load")
+		expect(reloaded.machineSecretDigest()).toEqual(digest)
+		expect(reloaded.startupSnapshot().sessions).toEqual([])
+	})
+
+	it("rebinds remembered sessions when rotation keeps them, and still rejects the old binding", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const old = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			persist: storage.persist,
+		})
+		const browser = await old.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		await storage.rotateMachineCredential({ keepSessions: true })
 		expect(storage.startupSnapshot().sessions).toEqual([
 			expect.objectContaining({ deviceId: browser.principalId }),
 		])
@@ -534,15 +564,15 @@ describe("private single-operator persistence", () => {
 		expect(storage.startupSnapshot().sessions).toEqual([
 			expect.objectContaining({ deviceId: browser.principalId }),
 		])
-		const digest = storage.machineSecretDigest()
 		const mode = (await fs.stat(join(directory, "access-state.json"))).mode
 		expect(mode & 0o777).toBe(0o600)
+		const binding = storage.credentialBinding
 		await storage.close()
 		const reloaded = await open(directory, "load")
-		expect(reloaded.machineSecretDigest()).toEqual(digest)
 		expect(reloaded.startupSnapshot().sessions).toEqual([
 			expect.objectContaining({ deviceId: browser.principalId }),
 		])
+		expect(reloaded.startupSnapshot().credentialBinding).toBe(binding)
 	})
 
 	it("keeps the previous credential and sessions when rotation fails before rename", async () => {
