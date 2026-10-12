@@ -174,5 +174,65 @@ export function registerAccessRoutes(
 			services.flows.revokeAll(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
+	app.route({
+		method: ["GET", "HEAD"],
+		url: "/api/access/machine/devices",
+		...options,
+		exposeHeadRoute: false,
+		errorHandler(error, request, reply) {
+			reply.serializer(JSON.stringify)
+			void options.errorHandler(error, request, reply)
+		},
+		preHandler(
+			request: FastifyRequest,
+			reply: FastifyReply,
+			done: (error?: Error) => void,
+		) {
+			reply.serializer(JSON.stringify)
+			const original = accessRequestFromHttp(request.raw, "api")
+			if (
+				original.transport !== "http" ||
+				original.rawTarget !== "/api/access/machine/devices" ||
+				(original.method !== "GET" && original.method !== "HEAD")
+			) {
+				void reply
+					.header("Cache-Control", "no-store")
+					.code(400)
+					.send({ code: "MALFORMED_REQUEST" })
+				return
+			}
+			done()
+		},
+		handler(request, reply) {
+			reply.serializer(JSON.stringify)
+			return run(reply, () =>
+				services.flows.machineDevices(
+					accessRequestFromHttp(request.raw, "api"),
+				),
+			)
+		},
+	})
+	const machinePost = (
+		url: "/api/access/machine/devices/revoke" | "/api/access/machine/devices/revoke-all",
+		invoke: (
+			request: FastifyRequest,
+		) => Promise<AccessFlowResult<unknown>>,
+	): void => {
+		app.post(url, options, async (request, reply) => {
+			reply.serializer(JSON.stringify)
+			return run(reply, () => invoke(request))
+		})
+	}
+	machinePost("/api/access/machine/devices/revoke", request =>
+		services.flows.machineRevoke(
+			accessRequestFromHttp(request.raw, "api"),
+			request.body,
+		),
+	)
+	machinePost("/api/access/machine/devices/revoke-all", request =>
+		services.flows.machineRevokeAll(
+			accessRequestFromHttp(request.raw, "api"),
+		),
+	)
 	return controller
 }

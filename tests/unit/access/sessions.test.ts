@@ -584,6 +584,58 @@ describe("device snapshot ordering and clock failures", () => {
 		])
 	})
 
+	it("returns every unexpired remembered device with no current requester", async () => {
+		// Feature: browser-access-batch1, Property 1: Remembered-device inventory
+		// Validates: browser-access-batch1 Decision 6
+		await fc.assert(
+			fc.asyncProperty(fc.integer({ min: 0, max: 32 }), async count => {
+				const env = await setup({ maxSessions: Math.max(count, 1) })
+				const identities: string[] = []
+				for (let i = 0; i < count; i++) {
+					identities.push(created(await env.store.create()).principalId)
+					if (i % 2 === 0) env.advance(1)
+				}
+				env.persist.mockClear()
+				const devices = env.store.snapshotRememberedDevices()
+				expect(devices).toHaveLength(count)
+				expect(devices.every(device => device.current === false)).toBe(true)
+				expect(devices.map(device => device.deviceId)).toEqual(
+					identities.toSorted((a, b) => {
+						const groupA = Math.floor((identities.indexOf(a) + 1) / 2)
+						const groupB = Math.floor((identities.indexOf(b) + 1) / 2)
+						return groupA - groupB || (a < b ? -1 : a > b ? 1 : 0)
+					}),
+				)
+				const first = devices[0]
+				if (first) {
+					first.expiresAt = 0
+					expect(env.store.snapshotRememberedDevices()).not.toEqual(devices)
+				} else {
+					expect(env.store.snapshotRememberedDevices()).toEqual([])
+				}
+				expect(env.persist).not.toHaveBeenCalled()
+			}),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("omits expired rows from the machine inventory without pruning them", async () => {
+		let now = 0
+		const env = await setup({ ttlMs: 100, monotonicNow: () => now })
+		const expired = created(await env.store.create())
+		now = 50
+		const live = created(await env.store.create())
+		now = 100
+		env.persist.mockClear()
+		expect(env.store.snapshotRememberedDevices()).toEqual([
+			expect.objectContaining({ deviceId: live.principalId, current: false }),
+		])
+		expect(
+			env.store.exportSnapshot().sessions.map(record => record.deviceId),
+		).toEqual([expired.principalId, live.principalId])
+		expect(env.persist).not.toHaveBeenCalled()
+	})
+
 	it.each([NaN, Infinity, Number.MAX_SAFE_INTEGER])(
 		"fails closed for an unusable clock value (%#)",
 		async invalid => {

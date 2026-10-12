@@ -442,3 +442,38 @@ native/RF settlement or measured capacity. Existing production binding remains o
 scanner tier disabled with 500 ms default and 300–2000 ms bounds, private profile
 absent/direct-only; analog filesystem uncertainty, deferred reuse and required
 incomplete guarded IQ remain separate acceptance gaps.
+
+## Machine-credential device administration
+
+Lost-browser recovery does not require a browser session. Exact machine-bearer
+routes list and revoke remembered sessions. Cookie and session routes keep their
+current semantics. These routes authenticate like `POST /api/access/pairing-codes`:
+canonical Host, an allowed Origin when one is present, and the machine bearer.
+They never accept a cookie as authority, never renew, and do not require CSRF.
+A cookie alongside the bearer is ignored. Missing and invalid bearers stay
+401 `AUTH_REQUIRED`. A session principal is 403 `MACHINE_REQUIRED`.
+
+| Route | Success |
+| --- | --- |
+| `GET`/`HEAD /api/access/machine/devices` | 200 inventory; HEAD has no wire body |
+| `POST /api/access/machine/devices/revoke` | 200 `{ "revoked": boolean }` |
+| `POST /api/access/machine/devices/revoke-all` | 200 `{ "revoked": true }` |
+
+The inventory reuses each `AccessDeviceDto` row and the same ordering, expiry and
+allowlist rules. It is not the browser `AccessDevicesDto`: there is no requester,
+so `current` is false on every row, and zero rows is a successful empty inventory.
+Unavailable storage or a failed authority clock is 503, never an empty success.
+Reads stay synchronous and do not wait for the mutation queue. Revocation uses
+that queue and `SessionStore.revoke` / `revokeAll`, so the same lease invalidation
+closes live WS and audio attachments. Persistence failure latches the authority
+and closes leases. Authenticated attempts use the pairing redemption budget
+(5/minute per connection address, 60/minute globally, 128 address buckets) and
+return 429 `MACHINE_RATE_LIMITED` with `Retry-After: 60`.
+
+`rotate-credential` is an offline utility, like setup. It refuses with
+`ACCESS_STORAGE_BUSY` while any live owner holds the private directory. On a
+stopped directory it atomically replaces the machine credential under the same
+0600 file and 0700 directory rules and rebinds remembered browser sessions to the
+new credential generation. Earlier text in this document that describes rotation
+as emptying sessions is superseded for this utility. A previous in-memory
+persistence hook still cannot write the old binding. The command prints no secret.

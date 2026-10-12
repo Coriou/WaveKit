@@ -265,8 +265,7 @@ export class SessionStore {
 		return record ? this.#metadata(record) : undefined
 	}
 
-	/** Detached active committed inventory. Reads never queue, prune, persist or renew. */
-	snapshotActiveDevices(requesterId: string): ActiveDevicesSnapshot {
+	#capturedNow(): number {
 		if (this.#unavailable)
 			throw new WaveKitError(
 				"Session authority unavailable",
@@ -279,18 +278,20 @@ export class SessionStore {
 				"Session authority unavailable",
 				"ACCESS_UNAVAILABLE",
 			)
-		const records = this.#records
-		const requester = records.get(requesterId)
-		if (!requester || requester.expiresAt <= now) return { kind: "missing" }
+		return now
+	}
+
+	/** Detached rows from the committed map. Reads never queue, prune, persist or renew. */
+	#inventory(now: number, requesterId: string | undefined): AccessDeviceDto[] {
 		const devices: AccessDeviceDto[] = []
-		for (const record of records.values()) {
+		for (const record of this.#records.values()) {
 			if (record.expiresAt <= now) continue
 			devices.push({
 				deviceId: record.deviceId,
 				createdAt: record.createdAt,
 				renewedAt: record.renewedAt,
 				expiresAt: record.expiresAt,
-				current: record.deviceId === requesterId,
+				current: requesterId !== undefined && record.deviceId === requesterId,
 			})
 		}
 		devices.sort(
@@ -298,7 +299,23 @@ export class SessionStore {
 				a.createdAt - b.createdAt ||
 				(a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0),
 		)
-		return { kind: "active", devices }
+		return devices
+	}
+
+	/** Detached active committed inventory. Reads never queue, prune, persist or renew. */
+	snapshotActiveDevices(requesterId: string): ActiveDevicesSnapshot {
+		const now = this.#capturedNow()
+		const requester = this.#records.get(requesterId)
+		if (!requester || requester.expiresAt <= now) return { kind: "missing" }
+		return { kind: "active", devices: this.#inventory(now, requesterId) }
+	}
+
+	/**
+	 * Committed remembered browsers for a machine principal. No row is current.
+	 * Empty is a real inventory; unavailable and clock failure throw.
+	 */
+	snapshotRememberedDevices(): AccessDeviceDto[] {
+		return this.#inventory(this.#capturedNow(), undefined)
 	}
 
 	/** Explicit export is intentionally sensitive; instance JSON contains no state. */
