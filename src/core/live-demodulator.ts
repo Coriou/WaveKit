@@ -62,8 +62,8 @@ export const LiveDemodRuntimeConfigSchema = LiveDemodConfigSchema.and(
 	}),
 )
 export type LiveDemodConfig = BaseLiveDemodConfig & {
-	squelchMode?: "manual" | "auto"
-	autoMarginDb?: number
+	squelchMode?: "manual" | "auto" | undefined
+	autoMarginDb?: number | undefined
 }
 export interface LiveAudioLevel {
 	sourceId: string

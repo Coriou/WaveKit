@@ -401,6 +401,31 @@ Local errors have fixed `{error, code, message}` fields: 400
 keeps its existing code-only body and headers. Full contract and evidence gates:
 [regional registry specification](specs/regional-display-registry/design.md).
 
+### Station
+
+#### GET /api/station
+
+Read-only station identity from config (`station.*` in YAML, `WAVEKIT_STATION__*`
+in the environment; `WAVEKIT_COUNTRY` sets `station.country`). Every field carries
+`{ value, provenance }` with provenance `default`, `yaml` or `env`; unset values are
+`null`. `country` is ISO 3166-1 alpha-2 (uppercase). `effectiveCountry` is the
+configured country or `null`: it is never derived from the coordinates. `region` is
+the existing coarse band region. `HEAD` returns the headers only. Mounted in protected
+and legacy composition under the normal API admission. Not passed to decoders yet.
+
+```json
+{
+	"name": { "value": "Home", "provenance": "yaml" },
+	"lat": { "value": 48.85, "provenance": "yaml" },
+	"lon": { "value": 2.35, "provenance": "yaml" },
+	"altM": { "value": null, "provenance": "default" },
+	"callsign": { "value": null, "provenance": "default" },
+	"country": { "value": "FR", "provenance": "env" },
+	"effectiveCountry": "FR",
+	"region": "EU"
+}
+```
+
 ### Receiver capabilities
 
 `GET /api/receiver-capabilities` lists a page; `GET
@@ -688,9 +713,15 @@ Fields:
   `squelch` threshold compares against.
 - `squelchOpen` — squelch gate state while the pipeline runs (`true` with squelch
   off).
+- `noiseFloorDbfs`, `thresholdDbfs` — the auto-squelch floor estimate and the
+  threshold in effect (the manual `squelch`, or floor + `autoMarginDb` in auto mode).
 
 Configuration notes:
 
+- `squelchMode` — `manual` (default: `squelch` is the threshold) or `auto` (an
+  estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB, default 6). The
+  floor is a running lower envelope, not a calibrated noise measurement. There is
+  no `noise` mode.
 - `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
@@ -776,8 +807,8 @@ curl -X POST http://localhost:9000/api/live-audio/stop
 
 #### PATCH /api/live-audio/config
 
-Update live demodulator configuration. DSP changes restart the pipeline; a `squelch`
-change applies immediately without a restart; an `httpPort` change moves the stream
+Update live demodulator configuration. DSP changes restart the pipeline; `squelch`,
+`squelchMode` and `autoMarginDb` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
 
@@ -929,6 +960,7 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 
 | Field                 | Meaning                                                                                                                                                                                                                                                                                                        |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rateHistory`         | Messages per minute for the last 15 minutes, oldest first, including the current partial minute; empty minutes are 0. Kept across the instance's own process restarts.                                                                                                                                    |
 | `sourceId`            | WaveKit source the decoder reads: the live assignment while wired, otherwise the configured `sourceId`. Absent for external-input decoders (they own their device) and for unwired decoders relying on the default source.                                                                                     |
 | `deviceSerial`        | Configured device serial of an external-input decoder (`caps.input: "external"`). Never inferred; absent when not configured and always absent for stdin decoders (their serial options are ignored in stdin mode).                                                                                            |
 | `targetFrequenciesHz` | Target frequencies declared in config: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Absent when the config declares none (the decoder then decodes whatever its source is tuned to, or a built-in default that is not reported).                                             |
@@ -1229,6 +1261,14 @@ curl -X POST http://localhost:9000/api/decoders/dsd-main/restart
 	"message": "Decoder restarted"
 }
 ```
+
+#### GET /api/decoders/:id/log
+
+`?lines=N` (1–500, default 200) returns the newest captured lines of the decoder
+process's stdout and stderr: `{ decoderId, lines: [{ stream: "stdout" | "stderr",
+line }] }`, oldest first. Each decoder keeps at most 500 lines of 4096 characters.
+These are raw decoder output and can contain decoded data; network frames from
+producers such as readsb are not turned into log lines. 404 for an unknown id.
 
 #### PATCH /api/decoders/:id
 
@@ -1737,6 +1777,16 @@ Each returns the `ScanJob`. `resume` takes an optional body
   `SCANNER_SOURCE_BUSY` while another job holds the lease
   (`details.holderJobId`) or a better-placed job waits for it
   (`details.waiter`).
+
+`pause` on `paused(preempted-*)` is **Stay here**: the job becomes
+`paused(operator)` without taking the lease back and no longer auto-resumes.
+
+A `ScanJob` carries `resumeAt` (ISO time of the automatic resume, `null` when none is
+scheduled or while held) and `resumeHeldBy` (`audio`, `identify`, `recording` or
+`null`). The idle clock is held while an identify trial runs on the job's source and
+while someone listens to live audio on that source through a gating squelch (manual
+threshold below 0, or auto), plus 3 s after the squelch closes; it then restarts
+from the full `resume.autoAfterIdleMs`. Recording activity does not hold it yet.
 
 409 `SCANNER_INVALID_TRANSITION` when the action does not apply to the
 current state, 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
@@ -2640,6 +2690,26 @@ Backpressure status snapshot.
 				"backpressure": false
 			}
 		]
+	}
+}
+```
+
+#### live-audio:level
+
+On the `live-audio` channel while the live demodulator runs, 10 times a second by
+default (10–20 Hz). `channelPowerDbfs` and `noiseFloorDbfs` are `null` until the
+first complete IQ block; `thresholdDbfs` is the threshold in effect.
+
+```json
+{
+	"type": "live-audio:level",
+	"channel": "live-audio",
+	"data": {
+		"sourceId": "rtl0",
+		"channelPowerDbfs": -52.3,
+		"noiseFloorDbfs": -61.8,
+		"squelchOpen": true,
+		"thresholdDbfs": -55.8
 	}
 }
 ```

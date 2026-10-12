@@ -228,6 +228,9 @@ export const LiveDemodConfigSchema = z
 		 * demodulation (|IQ| = 1 is 0 dBFS). 0 disables squelch (open).
 		 */
 		squelch: z.number().min(-160).max(0).default(0),
+		/** manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`. */
+		squelchMode: z.enum(["manual", "auto"]).optional(),
+		autoMarginDb: z.number().finite().min(0).max(40).optional(),
 		noiseReduction: z
 			.enum(["off", "voice", "noaa-apt", "narrow-band"])
 			.default("off"),

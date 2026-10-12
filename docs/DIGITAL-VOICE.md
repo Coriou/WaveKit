@@ -346,5 +346,6 @@ squelch is not offered because there is no discriminator-noise measurement here.
 Threshold, mode and margin updates keep the running CSDR processes and streams.
 Level publication defaults to 10 Hz, with a bounded 10–20 Hz runtime option; before
 the first complete IQ block its power/floor values are null. Gate changes are
-reported immediately, and stopped/failed pipelines report inactive audio. Shared
-WebSocket/startup configuration wiring is a separate composition step.
+reported immediately, and stopped/failed pipelines report inactive audio. Levels are
+published on the `live-audio` WebSocket channel as `live-audio:level`; `squelchMode`
+and `autoMarginDb` are also accepted in the `liveDemod` YAML section.

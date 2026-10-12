@@ -17,6 +17,7 @@ import { createComponentLogger } from "../../utils/logger.js"
 import type { DecoderOutput } from "../../decoders/types.js"
 import type { FanoutStatus } from "../../core/fanout-manager.js"
 import type {
+	LiveAudioLevel,
 	LiveDemodConfig,
 	LiveDemodStatus,
 } from "../../core/live-demodulator.js"
@@ -110,6 +111,7 @@ interface ExistingServerMessage {
 		| "fanout:backpressure"
 		| "fanout:drain"
 		| "live-audio:status"
+		| "live-audio:level"
 		| "live-audio:config"
 		| "live-audio:started"
 		| "live-audio:stopped"
@@ -872,6 +874,16 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("live-audio", {
 			type: "live-audio:status",
 			data: status,
+		})
+	}
+
+	/**
+	 * Broadcasts the live audio meter (10–20 Hz while running).
+	 */
+	broadcastLiveAudioLevel(level: LiveAudioLevel): void {
+		this.broadcast("live-audio", {
+			type: "live-audio:level",
+			data: level,
 		})
 	}
 

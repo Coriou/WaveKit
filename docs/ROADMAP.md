@@ -6,7 +6,7 @@ Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
 
-## Immediate priorities (re-ordered 2026-10-11)
+## Immediate priorities (re-ordered 2026-10-12)
 
 Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
 and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
@@ -28,11 +28,44 @@ acceptance still need measurement.
 
 The next connected web milestone is **spectrum → tune → identify → inspect →
 listen**. The web dashboard is in design on `design/web-dashboard`; its
-`docs/web/CORE-GAPS.md` (audited at `df1346b`, 2026-10-11) supplies the feature
-inventory mapped below. That design remains separately owned and in progress;
-the current core scope is backend gap analysis and contracts. Web UI implementation
-requires a separate decision. Software,
-local-receiver acceptance and optional Pi acceptance have separate gates.
+`docs/web/CORE-GAPS.md` (re-checked at `49aa3fe`, 2026-10-12, against main at
+`6b4e5dc`) supplies the feature inventory mapped below. Since the previous audit it
+adds a layered band-plan package (country packs, imports with provenance, operator
+edits, station country), per-client FFT size and averaging, analog transmission
+events and more precise scanner items. That design remains separately owned and in
+progress; web UI implementation requires a separate decision.
+
+Owner decisions on 2026-10-12: the decode envelope uses the eight web/brand
+categories (aircraft, marine, aviation data, voice, paging, APRS, sensors, mesh,
+plus `other`) with an entity key and an optional position; the regional registry
+stays the verified layer that band plans link to; built-in scan band plans are
+corrected from cited regulator documents.
+
+Landed in the 2026-10-12 web-gap batch: station identity with provenance
+(`GET /api/station`), the amended envelope spec and helper, `live-audio:level` and
+manual/auto squelch without pipeline restarts, per-decoder `rateHistory` and a
+bounded `GET /api/decoders/:id/log`, per-hop scanner protocols, automatic resume
+held by identify and live listening (`resumeAt`, `resumeHeldBy`, Stay here), and
+cited built-in band plan corrections (EU airband, PMR446/dPMR446, CB, 169 MHz
+metering). Still open from that list: noise squelch, recording activity as a resume
+hold and an EU 466 MHz pager plan without a citable primary source.
+
+Order of the remaining core gaps, by what they unblock in the dashboard:
+
+1. **Event foundation**: envelope publication, a persistent event store with
+   search and facets, and replay from a cursor for activity and scanner events
+   (Activity, Recordings, map history; §4, §4a, §5c).
+2. **Browser access end to end** before browser controls touch the receiver
+   (onboarding, renewal, TLS/proxy acceptance, operator data in the default
+   deployment; §4). Read-only views and a mock data server do not wait for it.
+3. **Band plans and settings**: the layered band-plan model fed to the scanner and
+   spectrum labels, a persisted settings store with provenance, and core scan
+   presets.
+4. **Scanner and listening follow-ups**: running-range edits, identity search,
+   recording activity, then S2/S3 acceptance (§5, §5b).
+
+Software, local-receiver acceptance and optional Pi acceptance have separate
+gates. The detailed workstreams:
 
 1. **Connect clients to the accepted S1 contracts** (§5, §8). S1-A and S1-B
    landed locally, including identification, bounded burst capture and shared

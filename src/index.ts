@@ -53,6 +53,7 @@ import { createRegionalRegistration } from "./core/regional/data.js"
 import { createReceiverCapabilitiesProvider } from "./core/tuner-capabilities/provider.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
+import { liveDemodOperatorActivity } from "./core/live-demod-activity.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
 import { ChannelizerManager } from "./core/channelizer/channelizer-manager.js"
 import { SettlementRegistry } from "./core/channelizer/settlement-observer.js"
@@ -896,6 +897,7 @@ async function main(): Promise<void> {
 				decoders: decoderManager,
 				digitalVoice,
 				liveDemod,
+				operatorActivity: liveDemodOperatorActivity(liveDemod),
 				logger,
 				cpuMeter: new CpuMeter({ sampleMs: 5000 }),
 			})
@@ -1319,6 +1321,9 @@ async function main(): Promise<void> {
 		const wsBroadcaster = apiServer.getWebSocketBroadcaster()
 
 		// Wire live demodulator events to WebSocket broadcaster
+		liveDemod.on("level", level => {
+			wsBroadcaster.broadcastLiveAudioLevel(level)
+		})
 		liveDemod.on("started", () => {
 			wsBroadcaster.broadcast("live-audio", {
 				type: "live-audio:started",

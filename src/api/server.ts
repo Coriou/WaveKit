@@ -1,5 +1,3 @@
-import type { StationIdentity } from "@wavekit/api-types"
-import { stationRoutes } from "./routes/station.js"
 /**
  * API Server - Fastify-based REST and WebSocket server
  *
@@ -13,6 +11,8 @@ import { stationRoutes } from "./routes/station.js"
  * - Centralized error handling
  */
 
+import type { StationIdentity } from "@wavekit/api-types"
+import { stationRoutes } from "./routes/station.js"
 import type { FanoutTelemetryProvider } from "../core/source-fanout-router.js"
 import Fastify, { type FastifyInstance, type FastifyError } from "fastify"
 import fastifyCors from "@fastify/cors"
