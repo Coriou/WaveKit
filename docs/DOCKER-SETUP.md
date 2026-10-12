@@ -37,8 +37,8 @@ expects rtl_tcp or SDR++ to already be listening, locally or remotely.
 
 ## Container integration via compose profiles
 
-One file: `compose.yaml` at the repo root. Four profiles, mutually
-exclusive.
+One file: `compose.yaml` at the repo root. Five profiles, mutually
+exclusive. `protected` is the opt-in TLS reference deployment.
 
 | Profile             | Services                                  | Purpose                                           |
 | ------------------- | ----------------------------------------- | ------------------------------------------------- |
@@ -46,6 +46,7 @@ exclusive.
 | `prod-single-host`  | `wavekit-full`                            | Single-container production (e.g. Raspberry Pi)   |
 | `prod-distributed`  | `wavekit-sdrpp-prod` + `wavekit-core-prod`| Two-host production: dedicated SDR host + core    |
 | `demod-test`        | `demod-test`                              | Interactive shell with decoder + audio tooling    |
+| `protected`         | `wavekit-protected` + `wavekit-protected-caddy` | Opt-in protected mode behind Caddy TLS ([reference](#protected-reference-profile)) |
 
 ### dev profile
 
