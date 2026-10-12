@@ -100,7 +100,7 @@ export interface ActivityQueryServiceOptions {
 	store: ActivityStoreQueryHandle
 	logger: Logger
 	now?: () => number
-	/** Defaults to dist/query-worker.js next to the bundled entry. */
+	/** Defaults to dist/activity-query-worker.js next to the bundled entry. */
 	workerUrl?: URL
 	/** Tests pass "inline" so they do not need the built worker. */
 	execution?: "worker" | "inline"
@@ -111,10 +111,12 @@ export interface ActivityQueryServiceOptions {
 }
 
 export function defaultActivityQueryWorkerUrl(): URL {
-	return new URL("./query-worker.js", import.meta.url)
+	return new URL("./activity-query-worker.js", import.meta.url)
 }
 
-function resolveLimits(overrides: Partial<ActivityQueryLimits> | undefined): ActivityQueryLimits {
+function resolveLimits(
+	overrides: Partial<ActivityQueryLimits> | undefined,
+): ActivityQueryLimits {
 	const limits: ActivityQueryLimits = { ...DEFAULT_ACTIVITY_QUERY_LIMITS }
 	if (!overrides) return limits
 	for (const key of Object.keys(overrides) as (keyof ActivityQueryLimits)[]) {
@@ -127,7 +129,11 @@ function resolveLimits(overrides: Partial<ActivityQueryLimits> | undefined): Act
 }
 
 function isEventId(value: string): boolean {
-	return value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value)
+	return (
+		value.length > 0 &&
+		value.length <= 128 &&
+		!/[\u0000-\u001f\u007f]/.test(value)
+	)
 }
 
 export function createActivityQueryService(
@@ -158,7 +164,10 @@ export function createActivityQueryService(
 		return value ?? 0
 	}
 
-	async function perform(clientKey: string, request: ReadRequest): Promise<ReadResult> {
+	async function perform(
+		clientKey: string,
+		request: ReadRequest,
+	): Promise<ReadResult> {
 		if (closed) throw new ActivityQueryClosedError()
 		const release = await admission.acquire(clientKey)
 		const ticket = {}
@@ -177,7 +186,9 @@ export function createActivityQueryService(
 					},
 					(error: unknown) => {
 						if (timer) clearTimeout(timer)
-						reject(error instanceof Error ? error : new ActivityReaderFailedError())
+						reject(
+							error instanceof Error ? error : new ActivityReaderFailedError(),
+						)
 					},
 				)
 			})
@@ -197,7 +208,10 @@ export function createActivityQueryService(
 			fresh.storeUuid !== captured.storeUuid ||
 			fresh.restoreGeneration !== captured.restoreGeneration
 		) {
-			throw new ActivitySnapshotResetError("store-changed", "Activity store changed")
+			throw new ActivitySnapshotResetError(
+				"store-changed",
+				"Activity store changed",
+			)
 		}
 		const watermark = parseSeq(fresh.pruneWatermark)
 		if (
@@ -239,7 +253,9 @@ export function createActivityQueryService(
 					mode: "page",
 				})
 				if (payload.L === undefined || payload.H === undefined) {
-					throw new ActivityQueryInvalidError("Activity page token is incomplete")
+					throw new ActivityQueryInvalidError(
+						"Activity page token is incomplete",
+					)
 				}
 				low = parseSeq(payload.L)
 				high = parseSeq(payload.H)
@@ -311,7 +327,10 @@ export function createActivityQueryService(
 		async facets(input: ActivityFacetRequest): Promise<ActivityFacetResult> {
 			if (closed) throw new ActivityQueryClosedError()
 			const query = normaliseQuery(input.query, limits)
-			const dimensions = parseDimensions(input.dimensions, limits.facetDimensions)
+			const dimensions = parseDimensions(
+				input.dimensions,
+				limits.facetDimensions,
+			)
 			const identity = store.identity()
 			const low = parseSeq(identity.pruneWatermark)
 			const high = parseSeq(identity.committedMax)
@@ -337,7 +356,10 @@ export function createActivityQueryService(
 			}
 		},
 
-		replay(input: ActivityReplayRequest, sink: ActivityReplaySink): ActivityReplayHandle {
+		replay(
+			input: ActivityReplayRequest,
+			sink: ActivityReplaySink,
+		): ActivityReplayHandle {
 			if (closed) {
 				sink.send({ type: "reset", reason: "invalid-cursor" })
 				return { resume() {}, stop() {} }

@@ -16,12 +16,16 @@ describe("activity query worker", () => {
 	beforeAll(async () => {
 		// Repository-local so Node can resolve external packages the same way
 		// scripts/build-file.mjs does. os.tmpdir() cannot see this workspace.
-		const repository = fileURLToPath(new URL("../../../../../", import.meta.url))
-		directory = await mkdtemp(join(repository, "node_modules", ".cache", "wk-query-worker-"))
-		const outfile = join(directory, "query-worker.js")
+		const repository = fileURLToPath(
+			new URL("../../../../../", import.meta.url),
+		)
+		directory = await mkdtemp(
+			join(repository, "node_modules", ".cache", "wk-query-worker-"),
+		)
+		const outfile = join(directory, "activity-query-worker.js")
 		await build({
 			absWorkingDir: repository,
-			entryPoints: ["src/core/activity/query/query-worker.ts"],
+			entryPoints: ["src/core/activity/query/activity-query-worker.ts"],
 			bundle: true,
 			outfile,
 			platform: "node",
@@ -52,7 +56,10 @@ describe("activity query worker", () => {
 			expect(first.items.map(item => item.eventId)).toEqual(["first"])
 			fixture.insert({ eventId: "second", text: "alpha" })
 			const second = await service.search({ query: { text: "alpha" } })
-			expect(second.items.map(item => item.eventId)).toEqual(["second", "first"])
+			expect(second.items.map(item => item.eventId)).toEqual([
+				"second",
+				"first",
+			])
 		} finally {
 			await service.close()
 		}
@@ -82,7 +89,9 @@ describe("activity query worker", () => {
 			expect(events.some(event => event.type === "terminate")).toBe(true)
 			const page = await service.search({ query: {} })
 			expect(page.items.length).toBeGreaterThan(0)
-			expect(events.filter(event => event.type === "spawn").length).toBeGreaterThanOrEqual(2)
+			expect(
+				events.filter(event => event.type === "spawn").length,
+			).toBeGreaterThanOrEqual(2)
 		} finally {
 			await service.close()
 		}

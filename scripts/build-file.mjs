@@ -14,7 +14,8 @@ for (const arg of args) {
 	}
 	if (arg.startsWith("-")) continue
 	// Flat output: dist/<name>.js for every entry, so dist/index.js can load
-	// dist/spectrum-worker.js with new URL("./spectrum-worker.js", import.meta.url).
+	// dist/spectrum-worker.js, dist/activity-writer-worker.js and
+	// dist/activity-query-worker.js with new URL("./<name>.js", import.meta.url).
 	entryPoints.push({ in: arg, out: basename(arg, extname(arg)) })
 }
 

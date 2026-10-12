@@ -1,5 +1,5 @@
 /**
- * Thin reader-worker entry. Built flat to dist/query-worker.js.
+ * Thin reader-worker entry. Built flat to dist/activity-query-worker.js.
  * All query logic lives in read.ts so tests can run it in-process.
  */
 import { parentPort, workerData } from "node:worker_threads"
@@ -23,10 +23,7 @@ function delay(ms: number): Promise<void> {
 	})
 }
 
-export function startQueryWorker(
-	port: WorkerPort,
-	dbPath: string,
-): void {
+export function startQueryWorker(port: WorkerPort, dbPath: string): void {
 	port.on("message", message => {
 		void handle(port, dbPath, message)
 	})
@@ -49,8 +46,10 @@ async function handle(
 		const value = await withReadOnly(dbPath, db => runRead(db, request))
 		port.postMessage({ type: "result", id, generation, ok: true, value })
 	} catch (error) {
-		const code = error instanceof WaveKitError ? error.code : "ACTIVITY_QUERY_FAILED"
-		const text = error instanceof Error ? error.message : "Activity reader failed"
+		const code =
+			error instanceof WaveKitError ? error.code : "ACTIVITY_QUERY_FAILED"
+		const text =
+			error instanceof Error ? error.message : "Activity reader failed"
 		port.postMessage({
 			type: "result",
 			id,

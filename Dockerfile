@@ -547,7 +547,7 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
     CI=true pnpm prune --prod \
         --config.enable-global-virtual-store=false
 
-RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js
+RUN ls -la dist/ && head -1 dist/index.js && test -f dist/spectrum-worker.js && test -f dist/activity-writer-worker.js && test -f dist/activity-query-worker.js
 
 # ============================================================================
 # Stage: chan-build
