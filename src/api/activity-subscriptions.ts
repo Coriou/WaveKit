@@ -4,6 +4,7 @@
  * the activity messages, and applies the per-client queue limit. It does not
  * register a route and it does not edit the broadcaster.
  */
+import type { ActivityServerMessage } from "@wavekit/api-types"
 import { z } from "zod"
 import type {
 	ActivityQuery,
@@ -129,10 +130,10 @@ function parseRaw(raw: unknown): unknown {
 	return raw
 }
 
-function frameMessage(
+export function frameMessage(
 	id: string,
 	frame: ActivityReplayFrame,
-): ActivityWireMessage {
+): ActivityServerMessage {
 	if (frame.type === "records") {
 		return {
 			type: "activity:records",
