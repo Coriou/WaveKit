@@ -1,11 +1,15 @@
 # Decode envelope — tasks
 
 Owner decision amendment — 2026-10-12: align categories with the eight brand IDs,
-add nullable entityKey and optional position; the foundation remains unmounted.
+add nullable entityKey and optional position. Event foundation batch 1 mounts
+publication and the store when `activity.enabled` is true. The foundation
+files themselves do not import `node:sqlite`.
 
 Status: design approved; the authorized internal foundation is implemented.
-The source-review and repository-check checkpoint is complete. Runtime admission,
-subscriptions, public exports and persistence remain unchanged.
+The source-review and repository-check checkpoint is complete. Batch 1 publishes
+envelopes from decoder output into the activity store when `activity.enabled`
+is true, with unknown RF provenance. Public api-types exports, receipts, other
+kinds and recording links remain unchanged.
 
 - [x] **1. Design and ownership checkpoint.** Review requirements, exact v1 shape,
       bounds, JSON projection semantics, caller ID ownership and event-time RF context
@@ -51,12 +55,13 @@ properties at 100 runs). Repository `pnpm run typecheck` passes, and repository
 paths. Focused ESLint, formatting and diff checks pass. Independent source review
 and the implementation owner review approve the foundation.
 
-Deferred follow-up, not authorized by this task list: shared DTO publication and
-consumer coordination; event-time source/channel binding APIs; scanner terminal
-result ownership and stable target revisions; ingress ID allocation and immutable
-broadcast events; admission policy for telemetry; persistent events/search/replay;
-recording/transcript links and lifecycle updates. Design those together before
-mounting or storage rather than interpreting scanner recovery stores as Activity.
+Deferred follow-up, not closed by batch 1: shared DTO publication and consumer
+coordination; event-time source/channel binding APIs; scanner terminal result
+ownership and stable target revisions; receipts; kinds other than
+decoder-reception and ingestion-gap; recording/transcript links and lifecycle
+updates. Batch 1 did mount ingress id allocation, telemetry exclusion
+(`sync`, `rates`, `stats`, `status`, `error`) and persistent search/replay
+for decoder receptions. Do not treat scanner recovery stores as Activity.
 
 - [x] **6. Owner amendment (2026-10-12).** Align the unmounted category vocabulary
       with the eight brand IDs plus other; add validated caller-supplied entityKey

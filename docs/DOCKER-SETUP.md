@@ -276,6 +276,7 @@ Common runtime env vars consumed by the wavekit-api container:
 | `NODE_ENV`                       | -       | `development` or `production`          |
 | `WAVEKIT_REGION`                 | guessed | Band plan region (EU, US, CA, AU, NZ, JP, CN) |
 | `WAVEKIT_STATE_DIR`              | data    | Runtime state directory (`/app/data` in compose) |
+| `WAVEKIT_ACTIVITY__ENABLED`      | false   | Persistent activity store (Node 24 and SQLite FTS5) |
 
 YAML config under `config/` is the canonical source of truth; env vars
 override per-key via the `WAVEKIT_` prefix with `__` as nested separator
@@ -290,9 +291,13 @@ band overrides from `PUT /api/decoders/:id/band`, file
 so overrides survive a container restart (`data/` is git-ignored). If the
 directory is missing or not writable (read-only mount, permissions), core keeps
 running: overrides apply in memory only, a warning is logged and
-`GET /api/decoders/:id/band` reports `persisted: false`. Inside a container
-without `TZ` or a locale, the region guess falls back to `EU`; set
-`WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
+`GET /api/decoders/:id/band` reports `persisted: false`. When
+`activity.enabled` is true, the same directory holds `activity/activity.db`.
+Activity stays off unless that flag is set. Opening the store needs Node 24
+with SQLite FTS5; a failed open leaves the API up and the activity routes
+answer 503. This batch does not re-verify the image's Node base for that
+builtin. Inside a container without `TZ` or a locale, the region guess falls
+back to `EU`; set `WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
 
 ## Health checks
 

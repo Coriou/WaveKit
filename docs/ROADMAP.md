@@ -318,7 +318,8 @@ snapshots are design references, not production consumers yet.
 REST routes have Fastify schemas and Swagger; `/ws` supports channel subscriptions
 and caps incoming messages at 1 MiB. Outgoing payloads are now bounded per client
 at 1 MiB/256 queued messages, with heartbeat and slow/dead-client cleanup. There
-is no general durable event replay contract or SSE endpoint. Operator data has
+is no general durable event replay contract or SSE endpoint. Activity search,
+when enabled, has its own cursor; see §4a. Operator data has
 its own store-ID/revision snapshot contract; spectrum snapshots do not provide
 durable Activity replay. Audio and IQ use separate bounded streaming servers.
 Protected mode enforces authentication and explicit origins; legacy mode remains
@@ -367,22 +368,40 @@ qualification. Recording integration still follows S2/S3 and deletion-owner gate
 Existing `DecoderOutput` has decoder/type/time/raw data; scanner recovery
 journals, discovery search and settings are separate domain foundations.
 
-The [decode envelope spec](specs/decode-envelope/design.md) defines the
-next unmounted foundation: caller-owned reception IDs, separate producer/ingestion
-clocks, explicit unknown RF context and complete bounded decoded JSON. Public
-publication and Activity persistence remain separate checkpoints; parser fallback
-frequencies cannot establish event-time RF provenance.
+The [decode envelope spec](specs/decode-envelope/design.md) defines
+caller-owned reception IDs, separate producer/ingestion clocks, explicit
+unknown RF context and complete bounded decoded JSON. Batch 1 publishes that
+envelope into the activity store when Activity is enabled. Parser fallback
+frequencies still cannot establish event-time RF provenance.
 
+Event foundation batch 1 is mounted. With `activity.enabled` (off by default),
+decoder output is published as a decode envelope, stored in
+`<stateDir>/activity/activity.db`, and served as search, facets and cursor
+replay. Telemetry outputs (`sync`, `rates`, `stats`, `status`, `error`) are
+not stored. Still deferred: ingestion receipts, kinds other than
+decoder-reception and ingestion-gap, recordings and the catalog, CLI and web
+views, Docker image verification of the Node 24 base, and measured retention.
+
+- [x] Event foundation batch 1: envelope publication, the SQLite/FTS5 store,
+      search, facets and cursor replay, off unless `activity.enabled`.
+      Receipts, other kinds, recordings/catalog, CLI/web views, image
+      verification and measured retention remain open.
 - [ ] Add a common decode envelope with stable identity, category, title, fields,
       actual channel frequency, source/decoder/job provenance and raw JSON.
       Preserve existing decoder payloads; source centre alone cannot locate an
-      offset probe's decode.
+      offset probe's decode. Batch 1 publishes the envelope on the enabled
+      path with unknown RF provenance (`sourceId` and `frequency` null).
+      Event-time channel frequency is still open.
 - [ ] Provide persistent, searchable events with paging and full-text indexing,
       including transcripts when available. Link discoveries, observations and
       recordings without making scanner recovery journals a public event API.
+      Batch 1 stores and searches decoder receptions. Transcripts, discoveries,
+      observations and recording links are not stored yet.
 - [ ] Define live event replay from a cursor with snapshot ordering, duplicate
       handling, restart/retention gaps and filtered subscriptions. Separate
       durable Activity events from replaceable spectrum/status telemetry.
+      Batch 1 replays Activity from a cursor and keeps telemetry off that log.
+      General SSE and replay of every event kind remain open.
 - [ ] Store saved frequencies in core: name, frequency, mode, bandwidth and tone
       settings, shared by all clients. Decoder band overrides and automatically
       observed discoveries remain distinct objects.

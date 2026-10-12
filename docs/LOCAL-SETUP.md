@@ -96,6 +96,11 @@ Without an explicit selection, WaveKit loads `config/default.yaml` then
 contains the historical Pi address and container paths; it is an example for
 that setup and is not selected automatically.
 
+Activity recording stays off unless `activity.enabled` is true (or
+`WAVEKIT_ACTIVITY__ENABLED=true`). The database is
+`<stateDir>/activity/activity.db` (`stateDir` defaults to `data`, override
+`WAVEKIT_STATE_DIR`) and needs Node 24 with SQLite FTS5. See `docs/API.md`.
+
 ## Decoder capabilities
 
 `pnpm run doctor` shows which executables are available in your current PATH;

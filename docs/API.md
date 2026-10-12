@@ -2194,6 +2194,171 @@ curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=44600000
 schema violations (a missing or unknown parameter, a negative Hz, `sinceMs`
 below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
+## Activity
+
+Persistent decoder-event search. Off unless `activity.enabled` is true
+(`WAVEKIT_ACTIVITY__ENABLED=true`). The database is
+`<stateDir>/activity/activity.db` (`stateDir` defaults to `data`,
+`WAVEKIT_STATE_DIR`). Disabled mode creates no `activity` directory. The
+routes stay registered and answer 404 `ACTIVITY_DISABLED`. The other
+WebSocket channels are unchanged.
+
+Opening the store needs Node 24 and `node:sqlite` with FTS5
+(`contentless_delete`). A failed probe creates no files. A lock or a
+schema mismatch means a database is already there. WaveKit keeps running
+either way. The activity routes then answer 503:
+
+```json
+{
+	"error": "ServiceUnavailable",
+	"code": "ACTIVITY_UNAVAILABLE",
+	"reason": "ACTIVITY_STORE_LOCKED",
+	"message": "activity store is locked"
+}
+```
+
+`reason` is `ACTIVITY_UNAVAILABLE` (runtime, FTS5 or an invalid limit),
+`ACTIVITY_STORE_LOCKED`, or `ACTIVITY_SCHEMA_MISMATCH`.
+
+Batch 1 stores `decoder-reception` envelopes and, when rows are dropped,
+`ingestion-gap` records. Output types `sync`, `rates`, `stats`, `status`
+and `error` are counted as excluded telemetry and are not stored. Provenance
+on this path is unknown RF: `sourceId` and `frequency` are null. Kinds other
+than those two, receipts, recordings and transcripts are not written.
+
+### Configuration
+
+Commented in `config/default.yaml`. Omitted retention and admission fields
+keep the defaults: 1,000,000 rows, 2 GiB, 7 days, 100 events/s with a burst
+of 1000 globally, and 50/s with a burst of 200 per decoder. Commits are
+batched (about 25 ms).
+
+```yaml
+activity:
+  enabled: false
+  retention:
+    maxRows: 1000000
+    maxDbBytes: 2147483648
+    maxAgeMs: 604800000
+  admission:
+    globalPerSecond: 100
+    globalBurst: 1000
+    perDecoderPerSecond: 50
+    perDecoderBurst: 200
+```
+
+Environment overrides, in addition to `WAVEKIT_ACTIVITY__ENABLED`:
+
+- `WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS`
+- `WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES`
+- `WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS`
+- `WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND`
+- `WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST`
+- `WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND`
+- `WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_BURST`
+
+### GET /api/activity
+
+Search summaries inside one snapshot.
+
+Query parameters: `kinds`, `sourceIds`, `decoderIds`, `protocols`,
+`categories`, `frequencyMin`, `frequencyMax`, `producedFrom`, `producedTo`,
+`entityKey`, `text`, `refs` (`type:value`, repeated), `order` (`asc` or
+`desc`), `limit`, `pageToken`. An unknown parameter is 400
+`ACTIVITY_QUERY_INVALID`.
+
+`text` is an FTS5 query over the title, protocol, field labels and string
+values, and string leaves of the decoded JSON. It is a bounded projection
+(`searchCoverage: "bounded-projection"`), not a search of every raw byte.
+
+**Response** (200): `items` (summaries), `nextPageToken`, `replayCursor`,
+`snapshot` (`lowBarrier`, `highWater`, `expiresAt`), `searchCoverage`.
+Default page size is 100 and the maximum is 200. A page token is bound to
+the same query and expires with the snapshot (5 minutes).
+
+### GET /api/activity/:eventId
+
+One stored record: `kind`, decimal `commitSeq`, and `payload` (the envelope,
+including `outputType` and `decodedData`). 404 `NOT_FOUND` when the id is
+absent. 400 `ACTIVITY_QUERY_INVALID` when the id is not a valid event id.
+
+### POST /api/activity/facets
+
+Body `{ "query": { }, "dimensions": ["kind"] }`. Dimensions are `category`,
+`protocol`, `decoderId`, `sourceId` and `kind` (at most five, unique).
+**Response** (200): `facets`, `scanned`, `truncated`, `snapshot`. The scan
+stops at 50,000 rows and 32 values per dimension.
+
+### GET /api/activity/status
+
+**Response** (200): `{ "enabled": true, "stats": { ... } }` with admitted,
+committed, dropped, `excludedTelemetry`, queue depth, `rows`, `dbBytes` and
+`paused`. 500 `ACTIVITY_STATUS_UNAVAILABLE` only if a ready store has no
+stats provider.
+
+### Query and cursor errors
+
+| Code                         | HTTP | When |
+| ---------------------------- | ---- | ---- |
+| `ACTIVITY_DISABLED`          | 404  | `activity.enabled` is false |
+| `NOT_FOUND`                  | 404  | Detail id is not in the store |
+| `ACTIVITY_UNAVAILABLE`       | 503  | Enabled, but the store did not open. `reason` says why |
+| `ACTIVITY_QUERY_INVALID`     | 400  | Bad query, facet list, event id or subscribe message |
+| `ACTIVITY_CURSOR_INVALID`    | 400  | Cursor does not verify. `reason`: `invalid-cursor` |
+| `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
+| `ACTIVITY_CURSOR_GAP`        | 410  | Cursor is behind the prune watermark. `reason`: `cursor-gap` |
+| `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
+| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms) |
+| `ACTIVITY_QUERY_FAILED`      | 500  | The reader failed |
+| `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
+| `ACTIVITY_RECORD_CORRUPT`    | 400  | A stored record failed validation |
+| `ACTIVITY_STATUS_UNAVAILABLE`| 500  | Status was requested without a stats provider |
+
+Cursor failures include `reason`. A query hash ignores `order` and paging, so
+a reconnect must send the same `query` as the cursor. A changed query is
+`query-changed`, not a silent filter change. Delivering a row twice is
+harmless; losing one is not.
+
+### WebSocket
+
+`activity` is not a channel of `subscribe`. Clients send:
+
+```json
+{ "type": "activity:subscribe", "id": "live", "query": {}, "cursor": "<optional>" }
+```
+
+```json
+{ "type": "activity:unsubscribe", "id": "live" }
+```
+
+`id` matches `^[A-Za-z0-9_-]{1,64}$`. `query` is the same object as the REST
+search query. `cursor` is a `replayCursor` or a cursor from an earlier
+`activity:records` / `activity:progress` frame. Omit it to follow new commits
+only.
+
+Server frames use `channel: "activity"` and are sent on the socket directly.
+They do not enter the replaceable telemetry queue. Types:
+
+- `activity:subscribed` — `{ id }`
+- `activity:records` — `{ id, items, scannedThrough, cursor }`
+- `activity:progress` — `{ id, scannedThrough, cursor }` when a page was empty
+- `activity:reset` — `{ id, reason }` (`invalid-cursor`, `cursor-expired`,
+  `store-changed`, `query-changed`, `cursor-gap`, `snapshot-reset`). The
+  subscription ends.
+- `activity:closed` — `{ reason: "resumable", cursor }` when this client's
+  activity queue passes 256 messages or 1 MiB. The socket then closes.
+  Reconnect with that cursor.
+- `error` — `{ code, message, id? }`. Disabled sockets get
+  `ACTIVITY_DISABLED`. An enabled store that did not open gets
+  `ACTIVITY_UNAVAILABLE`. A bad message gets `ACTIVITY_QUERY_INVALID`. A
+  second subscription with the same id, or more than 2 per connection or 8
+  on the process, gets `ACTIVITY_QUERY_BUSY`.
+
+These frames are not "Invalid message format". The CLI never sends
+`activity:subscribe`. A frame with `channel: "activity"` or a type starting
+with `activity:` is ignored there and does not increment its invalid-frame
+count.
+
 ## WebSocket API
 
 Each connection has a 1 MiB outbound payload budget across the application queue
@@ -2208,9 +2373,10 @@ WebSocket libraries normally answer protocol pings automatically. This does not
 require a new JSON message type.
 
 After disconnecting, reconnect and resubscribe, then refresh state through REST.
-Events missed during disconnection are not replayed, and snapshot/event ordering
-is not yet guaranteed. SSE and resumable event history are planned, not currently
-implemented. See [the API roadmap](ROADMAP.md#4-api-and-event-foundation-for-multiple-clients).
+Events missed on these telemetry channels are not replayed, and snapshot/event
+ordering is not yet guaranteed. SSE is not implemented. Activity, when enabled,
+replays from a cursor on its own channel; see [Activity](#activity). See
+[the API roadmap](ROADMAP.md#4-api-and-event-foundation-for-multiple-clients).
 
 ### Connection
 
@@ -2271,6 +2437,8 @@ ws.onmessage = event => {
 Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
 [SCANNER.md](SCANNER.md)) and `spectrum` (core waterfall frames, opt-in).
+`activity` is not one of these channels. It uses `activity:subscribe` and
+`activity:unsubscribe`. See [Activity](#activity).
 
 `spectrum` takes optional per-client options on `subscribe`. Without options
 the client gets the default profile (`scanner.ws.spectrumHz` ×
@@ -3034,6 +3202,7 @@ the status code.
 | `INVALID_CONFIG`          | 400         | Invalid configuration provided |
 | `SOURCE_CONNECTION_ERROR` | 503         | Cannot connect to source       |
 | `INTERNAL_ERROR`          | 500         | Internal server error          |
+| Activity codes            |             | See [Activity](#activity)      |
 | `DECODER_OWNED_BY_SCANNER` | 409        | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`) |
 | `SOURCE_HELD_BY_SCANNER`  | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`) |
 
