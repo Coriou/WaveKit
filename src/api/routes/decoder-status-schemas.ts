@@ -23,6 +23,11 @@ export const decoderStatsSchema = {
 
 /** Optional fields from CLI-COORDINATION requests 2-4. */
 export const decoderStatusExtensionProperties = {
+	rateHistory: {
+		type: "array",
+		maxItems: 15,
+		items: { type: "integer", minimum: 0 },
+	},
 	sourceId: { type: "string" },
 	deviceSerial: { type: "string" },
 	targetFrequenciesHz: {

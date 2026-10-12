@@ -5,6 +5,10 @@ export interface LiveAudioConfig {
 	modulation: "nfm" | "wfm" | "am" | "usb" | "lsb" | "dsb" | "cw" | "raw"
 	bandwidth: number
 	squelch: number
+	/** Manual preserves the configured threshold; auto uses a channel-power floor estimate. */
+	squelchMode?: "manual" | "auto"
+	/** Auto threshold margin above the estimate, 0–40 dB; default 6. */
+	autoMarginDb?: number
 	noiseReduction: "off" | "voice" | "noaa-apt" | "narrow-band"
 	lowPass: number
 	highPass: number
@@ -43,7 +47,18 @@ export interface LiveAudioStatus {
 	channelPowerDbfs?: number
 	/** Squelch gate state (while running; true when squelch is off). */
 	squelchOpen?: boolean
+	noiseFloorDbfs?: number
+	thresholdDbfs?: number
 }
 
 export type LiveDemodConfig = LiveAudioConfig
 export type LiveDemodStatus = LiveAudioStatus
+
+/** Payload for live-audio:level; null measurements precede the first IQ block. */
+export interface LiveAudioLevel {
+	sourceId: string
+	channelPowerDbfs: number | null
+	noiseFloorDbfs: number | null
+	squelchOpen: boolean
+	thresholdDbfs: number
+}

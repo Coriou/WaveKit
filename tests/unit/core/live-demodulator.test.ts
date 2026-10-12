@@ -355,6 +355,102 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.getStatus().squelchOpen).toBe(false)
 	})
 
+	it("emits bounded 10 Hz measured levels and immediate gate changes, then stops", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		const levels = vi.fn()
+		const gates = vi.fn()
+		liveDemod.on("level", levels)
+		liveDemod.on("squelch-changed", gates)
+		await liveDemod.start()
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		await liveDemod.reconfigure({ squelch: -50 })
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		expect(gates).toHaveBeenLastCalledWith(false)
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(levels).toHaveBeenCalledTimes(10)
+		expect(levels.mock.lastCall?.[0]).toMatchObject({
+			sourceId: "rtl-pi",
+			squelchOpen: false,
+			thresholdDbfs: -50,
+		})
+		expect(levels.mock.lastCall?.[0].noiseFloorDbfs).toBeCloseTo(-80)
+		await liveDemod.stop()
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(levels).toHaveBeenCalledTimes(10)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+	})
+
+	it("changes auto squelch live, retaining processes and rejecting unsupported noise mode", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto", autoMarginDb: 6 })
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet)
+		expect(liveDemod.getStatus().thresholdDbfs).toBeCloseTo(-74)
+		const signal = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) signal.writeFloatLE(0.01, i * 8)
+		processes[0]!.stdout.write(signal)
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		await liveDemod.reconfigure({ autoMarginDb: 10 })
+		expect(liveDemod.getStatus().thresholdDbfs).toBeCloseTo(-70)
+		await liveDemod.reconfigure({ squelchMode: "manual", squelch: 0 })
+		expect(liveDemod.getStatus().thresholdDbfs).toBe(0)
+		expect(spawnMock).toHaveBeenCalledTimes(2)
+		await expect(
+			liveDemod.reconfigure({
+				squelchMode: "noise",
+			} as unknown as Partial<LiveDemodConfig>),
+		).rejects.toThrow()
+		await expect(liveDemod.reconfigure({ autoMarginDb: 41 })).rejects.toThrow()
+	})
+
+	it("publishes null measurements at 20 Hz until input and clears activity on failure", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		liveDemod = create({}, { levelHz: 20, restartBaseDelayMs: 10_000 })
+		const levels = vi.fn()
+		const gates = vi.fn()
+		liveDemod.on("level", levels)
+		liveDemod.on("squelch-changed", gates)
+		await liveDemod.start()
+		await vi.advanceTimersByTimeAsync(100)
+		expect(levels).toHaveBeenCalledTimes(2)
+		expect(levels.mock.lastCall?.[0]).toMatchObject({
+			channelPowerDbfs: null,
+			noiseFloorDbfs: null,
+			thresholdDbfs: 0,
+			squelchOpen: true,
+		})
+		processes[0]!.exit(1)
+		expect(gates).toHaveBeenLastCalledWith(false)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		await vi.advanceTimersByTimeAsync(100)
+		expect(levels).toHaveBeenCalledTimes(2)
+	})
+
+	it("measures split IQ blocks once and emits no duplicate unchanged gate notifications", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelch: -50 })
+		const gates = vi.fn()
+		liveDemod.on("squelch-changed", gates)
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet.subarray(0, 3))
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
+		processes[0]!.stdout.write(quiet.subarray(3))
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeCloseTo(-80)
+		processes[0]!.stdout.write(Buffer.concat([quiet, quiet, quiet]))
+		expect(gates).toHaveBeenCalledTimes(1)
+		expect(gates).toHaveBeenLastCalledWith(false)
+	})
+
+	it("bounds level publishing rate to 10–20 Hz", () => {
+		expect(() => create({}, { levelHz: 9 })).toThrow()
+		expect(() => create({}, { levelHz: 21 })).toThrow()
+	})
+
 	it("restarts the pipeline when a DSP setting changes", async () => {
 		await liveDemod.start()
 		await liveDemod.reconfigure({ gain: 5 })

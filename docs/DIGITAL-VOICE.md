@@ -322,3 +322,29 @@ analog interference.
   the live audio latency item in the roadmap).
 - The core channelizer plan rewrites dsd-fme's input stages; this feature only
   touched dsd-fme's output arguments, call state and the new audio path.
+
+## Decoder diagnostics and live analog activity
+
+Decoder status includes `rateHistory`: fifteen one-minute message-count buckets,
+oldest first, including the current partial minute. Empty minutes are zero. This
+is a bounded wall-clock history, independent of audio or RF calibration.
+
+`GET /api/decoders/:id/log?lines=200` returns the newest captured stdout/stderr
+lines (1–500 requested). Each decoder retains at most 500 lines, with long lines
+capped. These are **raw decoder output**, which may contain receiver/decoded data;
+configuration environment variables are not added to the tail. Access follows
+the ordinary API admission rules. Unknown decoder IDs return 404.
+
+Live analog audio exposes measured channel-power levels and gate changes for
+operator activity. `manual` squelch keeps the existing negative dBFS threshold
+(`0` disables gating). `auto` uses a constant-memory lower-envelope estimate of
+the same pre-demodulation channel power plus `autoMarginDb` (0–40 dB, default 6).
+The estimate follows lower power immediately and rises slowly while the gate is
+closed; it is not a measured receiver noise calibration. A signal already present
+when auto mode starts can be included in its initial floor estimate. `noise`
+squelch is not offered because there is no discriminator-noise measurement here.
+Threshold, mode and margin updates keep the running CSDR processes and streams.
+Level publication defaults to 10 Hz, with a bounded 10–20 Hz runtime option; before
+the first complete IQ block its power/floor values are null. Gate changes are
+reported immediately, and stopped/failed pipelines report inactive audio. Shared
+WebSocket/startup configuration wiring is a separate composition step.
