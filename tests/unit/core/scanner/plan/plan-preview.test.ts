@@ -4,6 +4,7 @@ import {
 	DEFAULT_CONFIRM_HOLD_MS,
 	previewPlan,
 	probeTransportFor,
+	toJobSpec,
 } from "../../../../../src/core/scanner/plan/plan-preview.js"
 import type {
 	PreviewContext,
@@ -200,7 +201,10 @@ describe("previewPlan derived defaults", () => {
 		)
 		expect(p.spec.mode).toBe("in-window")
 		expect(p.spec.ranges[0]).toMatchObject({
-			rasters: [{ spacingHz: 12_500, firstChannelHz: MHz(446.00625) }],
+			rasters: [
+				{ spacingHz: 12_500, firstChannelHz: MHz(446.00625) },
+				{ spacingHz: 6250, firstChannelHz: MHz(446.003125) },
+			],
 			obwHz: [9000, 11_000],
 			bandplanId: "pmr446",
 		})
@@ -579,4 +583,40 @@ describe("preview helpers", () => {
 		expect(probeCores("channel", "dsd-fme")).toBeCloseTo(0.095, 9)
 		expect(probeCores("channel", "something-new")).toBeCloseTo(0.15, 9)
 	})
+})
+
+describe("per-range protocol selection", () => {
+	const ranges = [
+		{ startHz: MHz(156), endHz: MHz(156.5), protocols: ["analog-fm" as const] },
+		{ startHz: MHz(157), endHz: MHz(157.5), protocols: ["dmr" as const] },
+	]
+
+	it("does not give a Marine VHF hop the adjacent range's DMR decode POI", () => {
+		const p = previewPlan(
+			{ sourceId: "pi", mode: "sweep", ranges, txDurationHintMs: 2500 },
+			ctx({ sources: [{ ...PI, sampleRateHz: 500_000 }] }),
+		)
+		const marine = p.plan.hops.filter(h => h.covered.endHz < MHz(157))
+		expect(marine.length).toBeGreaterThan(0)
+		for (const hop of marine)
+			expect(p.poi.find(poi => poi.hopIndex === hop.index)?.decode).toBe(0)
+		expect(p.poi.some(poi => poi.decode > 0)).toBe(true)
+	})
+
+	it("keeps range protocols local after a normalised job round trip", () => {
+		const first = previewPlan({ sourceId: "pi", ranges }, ctx())
+		const raw = toJobSpec(first.spec)
+		expect(raw.protocols).toBeUndefined()
+		expect(previewPlan(raw, ctx()).spec.provenance["protocols"]).toBe(
+			"bandplan",
+		)
+	})
+
+	it.each([{ protocols: ["dmr" as const] }, { protocols: [] }])(
+		"preserves explicit job override %j",
+		({ protocols }) => {
+			const first = previewPlan({ sourceId: "pi", ranges, protocols }, ctx())
+			expect(toJobSpec(first.spec).protocols).toEqual(protocols)
+		},
+	)
 })

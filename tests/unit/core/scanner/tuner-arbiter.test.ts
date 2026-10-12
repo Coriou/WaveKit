@@ -1180,3 +1180,32 @@ describe("TunerArbiter lease discipline", () => {
 		expect(calls).toEqual(["sweep-a", undefined])
 	})
 })
+
+describe("automatic resume write fence", () => {
+	it.each([null, 1024000])(
+		"activity during journal acknowledgement prevents the tuner command (rate=%s)",
+		async sampleRateHz => {
+			let allowed = true
+			let arming = false
+			const h = harness([], {
+				persistLease: () => {
+					if (arming) allowed = false
+					return Promise.resolve()
+				},
+			})
+			const acquired = h.arbiter.acquire("job", "rtl", 50)
+			if (!acquired.ok) throw new Error("TEST lease refused")
+			const before = h.tuner.sent.length
+			arming = true
+			await expect(
+				h.arbiter.retune(
+					acquired.lease,
+					{ centreHz: 450000000, gainTenthsDb: null, sampleRateHz },
+					() => allowed,
+				),
+			).rejects.toMatchObject({ code: "SCANNER_RESUME_HELD" })
+			expect(h.tuner.sent.length).toBe(before)
+			h.arbiter.dispose()
+		},
+	)
+})

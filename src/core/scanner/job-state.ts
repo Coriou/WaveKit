@@ -125,6 +125,7 @@ function pausedLeaseLost(
  */
 export interface TransitionContext {
 	leaseHeld?: boolean
+	engineOpened?: boolean
 }
 
 export function transition(
@@ -166,7 +167,11 @@ export function transition(
 		case "hold-done":
 			return s.state === "holding" ? to("running", []) : INVALID
 		case "pause":
-			return active ? to("paused", ["stop-probes"], "operator") : INVALID
+			return preempted
+				? to("paused", ["stop-probes", "release-decoders"], "operator")
+				: active
+					? to("paused", ["stop-probes"], "operator")
+					: INVALID
 		case "rest-write":
 			return active
 				? to(
@@ -212,7 +217,12 @@ export function transition(
 		case "resume":
 			if (pausedFor("operator"))
 				return ctx.leaseHeld === false
-					? to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
+					? to("running", [
+							"acquire-lease",
+							"hold-decoders",
+							...(ctx.engineOpened === false ? ["open-engine" as const] : []),
+							"resend-hop",
+						])
 					: to("running", ["resend-hop"])
 			if (pausedFor("resume-blocked"))
 				return e.takeover

@@ -21,6 +21,7 @@ import type {
 	ScanRange,
 } from "../types.js"
 import { CPU_COST, probeCores } from "./cost.js"
+import { protocolsForHop } from "./protocols.js"
 import { describeHop, planHops } from "./hop-planner.js"
 import { normaliseCapture } from "../evidence/capture-spec.js"
 import type { HopPlanInput } from "./hop-planner.js"
@@ -720,14 +721,6 @@ function sweepPeriod(hops: number, dwellMs: number, share: number): number {
 	return (hops + revisits) * dwellMs
 }
 
-function hopProtocols(hop: Hop, n: NormalisedJobSpec): ScannerProtocol[] {
-	if (n.protocols.length > 0) return n.protocols
-	const inHop = n.ranges.filter(
-		r => r.endHz >= hop.covered.startHz && r.startHz <= hop.covered.endHz,
-	)
-	return unique(inHop.flatMap(r => r.protocols ?? []))
-}
-
 function poiFor(
 	hop: Hop,
 	n: NormalisedJobSpec,
@@ -738,7 +731,7 @@ function poiFor(
 	const T = n.integrationMs
 	const D = n.txDurationHintMs
 	const classes = decodableClasses(
-		hopProtocols(hop, n),
+		protocolsForHop(n, hop),
 		source.format,
 		channelizer,
 	)
@@ -898,7 +891,7 @@ export function previewPlan(
 	return { spec: n, plan, sweepPeriodMs, poi, estimates, impact, issues }
 }
 
-/** Inverse of normaliseSpec for create/PATCH round trips (everything explicit; provenance is lost). */
+/** Inverse of normaliseSpec for create/PATCH round trips, preserving protocol override intent. */
 export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 	const holds = Object.values(n.hold.confirmHoldMs)
 	const first = holds[0]
@@ -912,7 +905,6 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 		kind: n.kind,
 		ranges: n.ranges.map(copyRange),
 		exclusions: n.exclusions.map(x => ({ ...x })),
-		protocols: [...n.protocols],
 		sensitivity: n.sensitivity,
 		fftSize: n.fftSize,
 		integrationMs: n.integrationMs,
@@ -937,6 +929,7 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 		txDurationHintMs: n.txDurationHintMs,
 		capture: { ...n.capture },
 	}
+	if (n.provenance["protocols"] === "operator") out.protocols = [...n.protocols]
 	if (uniform && out.hold && first !== undefined) out.hold.confirmHoldMs = first
 	if (n.revisit.maxIntervalMs !== null && out.revisit)
 		out.revisit.maxIntervalMs = n.revisit.maxIntervalMs

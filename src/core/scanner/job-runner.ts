@@ -1,3 +1,4 @@
+import { protocolsForFrequency } from "./plan/protocols.js"
 /**
  * One discovery job (spec § 10.1–§ 10.5): the transition table, the sweep
  * scheduler, the lease and decoder hold, probe requests and progress.
@@ -214,6 +215,8 @@ export function undecodedForProbe(
 }
 
 export interface JobRunnerDeps {
+	/** Rechecked on the serial dispatch chain before an automatic acquisition. */
+	autoResumeReady?: () => boolean
 	record: JobRecord
 	arbiter: Pick<
 		TunerArbiter,
@@ -342,6 +345,8 @@ export class JobRunner implements JobDriver {
 		return this.record.spec.mode === "sweep"
 	}
 
+	private autoResumeGuardActive = false
+
 	private get sourceId(): string {
 		return this.record.spec.sourceId
 	}
@@ -463,6 +468,7 @@ export class JobRunner implements JobDriver {
 			if (
 				idleSince !== null &&
 				now - idleSince >= spec.resume.autoAfterIdleMs &&
+				(this.deps.autoResumeReady?.() ?? true) &&
 				!this.deps.arbiter.holder(this.sourceId)
 			) {
 				this.queueEvent({
@@ -806,6 +812,11 @@ export class JobRunner implements JobDriver {
 
 	private async apply(e: JobEvent): Promise<void> {
 		const { record } = this
+		if (e.type === "preemptor-idle" && !(this.deps.autoResumeReady?.() ?? true))
+			return
+		if (e.type === "resume" || e.type === "start")
+			this.autoResumeGuardActive = false
+		if (e.type === "preemptor-idle") this.autoResumeGuardActive = true
 		const heldBefore = this.lease !== null
 		// The arbiter has already revoked the lease, whatever this job's state: never keep a stale one.
 		if (LOST_EVENTS.has(e.type)) this.lease = null
@@ -814,7 +825,10 @@ export class JobRunner implements JobDriver {
 				? { state: record.state }
 				: { state: record.state, reason: record.reason }
 		const leaseHeld = this.lease !== null
-		const t = transition(from, e, this.sweep ? { leaseHeld } : {})
+		const t = transition(from, e, {
+			leaseHeld,
+			engineOpened: this.engineOpened,
+		})
 		if ("invalid" in t) {
 			throw new ScannerApiError(
 				`Job ${record.id} cannot handle "${e.type}" in state ${record.state}`,
@@ -901,7 +915,18 @@ export class JobRunner implements JobDriver {
 		if (e.type === "resume" && e.takeover)
 			record.consentedImpact = this.deps.impact()
 		try {
-			for (const action of this.ordered(actions)) await this.run(action)
+			for (const action of this.ordered(actions)) {
+				if (
+					e.type === "preemptor-idle" &&
+					!(this.deps.autoResumeReady?.() ?? true)
+				)
+					throw new ScannerApiError(
+						"Automatic resume held by activity",
+						"SCANNER_SOURCE_BUSY",
+						409,
+					)
+				await this.run(action)
+			}
 		} catch (err) {
 			// A failed action (e.g. the engine cannot start before the source has caps) must not
 			// leave the job in "starting" holding a lease or a decoder hold.
@@ -1131,13 +1156,24 @@ export class JobRunner implements JobDriver {
 		if (!this.driving) return
 		this.retunes += 1
 		try {
-			const pending = await this.deps.arbiter.retune(lease, {
-				centreHz: a.centreHz,
-				gainTenthsDb: a.gainTenthsDb,
-				sampleRateHz: this.record.spec.tuner.sampleRateHz,
-			})
+			const pending = await this.deps.arbiter.retune(
+				lease,
+				{
+					centreHz: a.centreHz,
+					gainTenthsDb: a.gainTenthsDb,
+					sampleRateHz: this.record.spec.tuner.sampleRateHz,
+				},
+				this.autoResumeGuardActive
+					? () => this.deps.autoResumeReady?.() ?? true
+					: undefined,
+			)
+			this.autoResumeGuardActive = false
 			this.addOwnEpoch(pending.epoch)
 		} catch (err) {
+			if (err instanceof WaveKitError && err.code === "SCANNER_RESUME_HELD") {
+				this.queueEvent({ type: "rest-write" })
+				return
+			}
 			if (err instanceof WaveKitError && err.code === "SCANNER_LEASE_LOST")
 				return
 			this.log.warn({ err, hopIndex: a.hopIndex }, "Retune failed")
@@ -1167,6 +1203,7 @@ export class JobRunner implements JobDriver {
 		if (this.record.passive && !s.passive.offsetProbes) return null
 		const engine = this.deps.engine(this.sourceId)
 		const fs = engine?.currentEpoch().sampleRateHz ?? 0
+		const protocols = protocolsForFrequency(this.record.spec, track.centreHz)
 		const req: ProbeRequest = {
 			jobId: this.record.id,
 			priority: this.record.spec.priority,
@@ -1177,7 +1214,7 @@ export class JobRunner implements JobDriver {
 			targetHz: track.centreHz,
 			epoch: live.epoch,
 			cls: live.classification.class,
-			protocols: this.record.spec.protocols,
+			protocols,
 			preRollFromSample: Math.max(
 				0,
 				track.startSample - Math.round((s.hold.preRollMs * fs) / 1000),
@@ -1186,7 +1223,7 @@ export class JobRunner implements JobDriver {
 			record: this.record.spec.record.voice,
 			admission: {
 				kind:
-					this.record.spec.protocols.length > 0
+					protocols.length > 0
 						? "protocol-target"
 						: live.decoded
 							? "reconfirm"

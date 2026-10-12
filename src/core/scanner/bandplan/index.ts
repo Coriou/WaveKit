@@ -38,8 +38,11 @@ function variantFor(region: BandRegionCode): BandRegionCode | null {
 
 export function bandplansFor(region: BandRegionCode): Bandplan[] {
 	const variant = variantFor(region)
+	const specificIds = new Set(
+		BUILTIN_BANDPLANS.filter(p => p.region === variant).map(p => p.id),
+	)
 	return BUILTIN_BANDPLANS.filter(
-		p => p.region === "all" || p.region === variant,
+		p => p.region === variant || (p.region === "all" && !specificIds.has(p.id)),
 	)
 }
 

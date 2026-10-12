@@ -1,3 +1,9 @@
+import { protocolsForFrequency } from "./plan/protocols.js"
+import {
+	ResumeActivity,
+	type OperatorActivityPort,
+	type ResumeStatus,
+} from "./auto-resume.js"
 /**
  * Composition root of the scanner (spec § 3): engines per source, the
  * arbiter, the probe pool, ambient evidence, the discovery/evidence stores
@@ -216,6 +222,7 @@ export interface ScannerServiceDeps {
 		readonly mode?: "os" | "cgroup"
 	}
 	tickMs?: number
+	operatorActivity?: OperatorActivityPort
 	hostCentre?: HostCentreReader
 }
 
@@ -888,6 +895,9 @@ export class ScannerService extends EventEmitter {
 		if (!this.consumerLifecycle.admissionSealed && this.settings().enabled) {
 			await this.ensurePassiveJobs()
 			if (this.consumerLifecycle.admissionSealed) return
+			this.operatorActivityOff = this.deps.operatorActivity?.onChange(() => {
+				for (const record of this.jobs.values()) this.emitJob(record)
+			})
 			this.ambient.start()
 			this.deps.cpuMeter?.start()
 			this.timer = setInterval(() => this.tick(), this.deps.tickMs ?? 100)
@@ -1003,6 +1013,10 @@ export class ScannerService extends EventEmitter {
 		}
 		// Probe teardown may emit cleanup-only recording settlement. Wait that actual component
 		// before snapshotting its publication chains; this never depends on native phase66.
+		await attempt(() => {
+			this.operatorActivityOff?.()
+			this.operatorActivityOff = undefined
+		})
 		await attempt(() => this.drainProbeComponents())
 		for (const outcome of await Promise.allSettled([
 			...this.background,
@@ -1337,6 +1351,7 @@ export class ScannerService extends EventEmitter {
 				409,
 			)
 		this.jobs.delete(id)
+		this.resumeViews.delete(id)
 		this.drivers.delete(id)
 		void this.persistJobs()
 	}
@@ -1930,8 +1945,9 @@ export class ScannerService extends EventEmitter {
 		const specs = this.driversOn(sourceId)
 			.filter(d => d.covers(sourceId, centreHz))
 			.map(d => d.record.spec)
-		const all = specs.length === 0 || specs.some(s => s.protocols.length === 0)
-		const protocols = all ? [] : [...new Set(specs.flatMap(s => s.protocols))]
+		const selections = specs.map(s => protocolsForFrequency(s, centreHz))
+		const all = selections.length === 0 || selections.some(p => p.length === 0)
+		const protocols = all ? [] : [...new Set(selections.flat())]
 		const priors: Partial<Record<ScannerProtocol, number>> = {}
 		const bandProtocols = specs
 			.flatMap(s => s.ranges)
@@ -2310,13 +2326,17 @@ export class ScannerService extends EventEmitter {
 		})
 	}
 
-	private protocolsFor(live: LiveObservation): ScannerProtocol[] {
+	private protocolsFor(
+		live: LiveObservation,
+		centreHz: number,
+	): ScannerProtocol[] {
 		const specs = live.jobIds
 			.map(id => this.jobs.get(id)?.spec)
 			.filter((s): s is NormalisedJobSpec => s !== undefined)
-		if (specs.length === 0 || specs.some(s => s.protocols.length === 0))
+		const selections = specs.map(s => protocolsForFrequency(s, centreHz))
+		if (selections.length === 0 || selections.some(p => p.length === 0))
 			return []
-		return [...new Set(specs.flatMap(s => s.protocols))]
+		return [...new Set(selections.flat())]
 	}
 
 	private needsConfirm(live: LiveObservation, track: TrackSnapshot): boolean {
@@ -2338,8 +2358,10 @@ export class ScannerService extends EventEmitter {
 		const d = live.discoveryId ? this.store.get(live.discoveryId) : undefined
 		if (d?.operator?.lockout) return false
 		if (
-			probeModesFor(live.classification.class, this.protocolsFor(live))
-				.length === 0
+			probeModesFor(
+				live.classification.class,
+				this.protocolsFor(live, track.centreHz),
+			).length === 0
 		)
 			return false
 		if (!d || d.confidence !== "decoded") return true
@@ -3005,6 +3027,7 @@ export class ScannerService extends EventEmitter {
 	private createDriver(record: JobRecord): JobDriver {
 		return new JobRunner({
 			record,
+			autoResumeReady: () => this.autoResumeReady(record),
 			arbiter: this.arbiter,
 			probes: this.probes,
 			decoders: this.deps.decoders,
@@ -3320,7 +3343,8 @@ export class ScannerService extends EventEmitter {
 			if (idleSince === null) continue
 			const ready = (r: JobRecord): boolean =>
 				r.spec.resume.autoAfterIdleMs !== null &&
-				now - idleSince >= r.spec.resume.autoAfterIdleMs
+				now - idleSince >= r.spec.resume.autoAfterIdleMs &&
+				this.autoResumeReady(r)
 			const any = [...this.jobs.values()].some(
 				j =>
 					j.spec.sourceId === sourceId &&
@@ -3369,6 +3393,8 @@ export class ScannerService extends EventEmitter {
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
 		if (isTerminal(record.state)) return
+		// An explicit Stay-here choice survives restart, even with onBoot enabled.
+		if (record.state === "paused" && record.reason === "operator") return
 		await driver
 			.dispatch({ type: "boot" })
 			.catch((err: unknown) =>
@@ -3604,10 +3630,71 @@ export class ScannerService extends EventEmitter {
 		return counts
 	}
 
+	private readonly resumeActivities = new Map<string, ResumeActivity>()
+	private readonly resumeViews = new Map<string, string>()
+	private operatorActivityOff: (() => void) | undefined
+
+	private resumeStatus(record: JobRecord, prospective = false): ResumeStatus {
+		const sourceId = record.spec.sourceId
+		let operator: ReturnType<OperatorActivityPort["current"]> = {
+			audio: false,
+			recording: false,
+		}
+		try {
+			operator = this.deps.operatorActivity?.current() ?? operator
+		} catch {
+			operator = { audio: false, recording: true }
+		}
+		if (
+			operator.sourceId !== undefined &&
+			operator.sourceId !== null &&
+			operator.sourceId !== sourceId
+		)
+			operator = { audio: false, recording: false }
+		const identify = [...this.drivers.values()].some(
+			driver =>
+				driver instanceof IdentifyRunner &&
+				driver.record.spec.sourceId === sourceId &&
+				driver
+					.view()
+					.targets.some(target =>
+						target.trials.some(
+							trial =>
+								trial.outcome === "running" || trial.outcome === "pending",
+						),
+					),
+		)
+		let activity = this.resumeActivities.get(sourceId)
+		if (!activity) {
+			activity = new ResumeActivity()
+			this.resumeActivities.set(sourceId, activity)
+		}
+		const status = activity.status(
+			{ ...operator, identify },
+			this.arbiter.operatorIdleSince(sourceId),
+			record.spec.resume.autoAfterIdleMs ?? 0,
+			this.now(),
+		)
+		return prospective ||
+			(isPreempted(record) && record.spec.resume.autoAfterIdleMs !== null)
+			? status
+			: { resumeAt: null, resumeHeldBy: null }
+	}
+
+	private autoResumeReady(record: JobRecord): boolean {
+		const status = this.resumeStatus(record, true)
+		return (
+			status.resumeHeldBy === null &&
+			(record.spec.resume.autoAfterIdleMs === null ||
+				(status.resumeAt !== null && this.now() >= Date.parse(status.resumeAt)))
+		)
+	}
+
 	private toDto(record: JobRecord): ScanJob {
 		const driver = this.drivers.get(record.id)
 		return {
 			id: record.id,
+			...this.resumeStatus(record),
 			name: record.name,
 			state: record.state,
 			...(record.reason ? { reason: record.reason } : {}),
@@ -3849,7 +3936,14 @@ export class ScannerService extends EventEmitter {
 		if (this.consumerLifecycle.admissionSealed) return
 		this.channelTaps?.tick()
 		const now = this.now()
-		for (const d of this.drivers.values()) d.tick(now)
+		for (const d of this.drivers.values()) {
+			const view = JSON.stringify(this.resumeStatus(d.record))
+			if (this.resumeViews.get(d.record.id) !== view) {
+				this.resumeViews.set(d.record.id, view)
+				this.emitJob(d.record)
+			}
+			d.tick(now)
+		}
 		this.resumeIdleWaiters(now)
 		// cpu- and budget-deferred probe requests start once the meter drops, not only when another probe stops
 		this.probes.pump()

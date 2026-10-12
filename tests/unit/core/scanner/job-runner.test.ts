@@ -202,7 +202,7 @@ const pendingFor = (epoch: number, centreHz: number): PendingEpoch => ({
 })
 const flush = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
 
-function runnerHarness() {
+function runnerHarness(autoResumeReady?: () => boolean) {
 	const arbiter = new RunnerArbiter()
 	const record: JobRecord = {
 		id: "j_test",
@@ -232,6 +232,7 @@ function runnerHarness() {
 	}
 	const runner = new JobRunner({
 		record,
+		...(autoResumeReady ? { autoResumeReady } : {}),
 		arbiter: arbiter as never,
 		probes: {
 			request: () => ({ deferred: "budget" as const }),
@@ -487,5 +488,23 @@ describe("JobRunner startup deadline (review F2)", () => {
 		runner.onEpochStarted(epochAt(11, HOP0))
 		await flush()
 		expect(record.state).toBe("failed")
+	})
+})
+
+describe("automatic resume reentry", () => {
+	it("a queued idle event cannot acquire after activity starts", async () => {
+		let quiet = true
+		const h = runnerHarness(() => quiet)
+		h.record.state = "paused"
+		h.record.reason = "preempted-operator"
+		const queued = h.runner.dispatch({
+			type: "preemptor-idle",
+			impactGrew: false,
+		})
+		quiet = false
+		await queued
+		expect(h.record.state).toBe("paused")
+		expect(h.arbiter.holder()).toBeUndefined()
+		expect(h.arbiter.retunes).toHaveLength(0)
 	})
 })
