@@ -131,6 +131,41 @@ refresh/logout/revoke permissions and bounded flow/drain ownership remain unchan
 capacity denial returns 429. GET/HEAD use safe serializers, no-store and the existing
 origin policy, with no HEAD wire body. Informational success grants no RF operation.
 
+`GET` and `HEAD /api/access/machine/devices`, `POST /api/access/machine/devices/revoke`,
+and `POST /api/access/machine/devices/revoke-all` are exact machine-bearer routes.
+They use the same Host, Origin and bearer checks as `POST /api/access/pairing-codes`.
+A browser cookie is never sufficient and is never issued or renewed. CSRF is not
+required. A cookie request that fails the existing safe-read boundary is denied
+there first (`ORIGIN_FORBIDDEN` when Origin and qualifying `Sec-Fetch-Site` are
+both absent). A session principal that passes that boundary returns 403
+`MACHINE_REQUIRED`. A cookie alongside a valid bearer is ignored. Missing or
+invalid bearers return 401 `AUTH_REQUIRED`. The wrong Host or a present disallowed
+Origin keeps the existing 403. Queries, encoded paths and non-HTTP transports
+return 400.
+
+The list reuses each `AccessDeviceDto` row (`deviceId`, `createdAt`, `renewedAt`,
+`expiresAt`, `current`) but is not the browser `AccessDevicesDto`: a machine
+principal is not a remembered browser, so every `current` value is false and the
+list may be empty. Rows are the unexpired committed sessions, sorted by creation
+time then ASCII device ID, at most 32. An empty inventory is 200 `{ "devices": [] }`,
+not a 401. Reads do not queue, renew, prune or persist. Pending mutations stay
+invisible until commit. HEAD matches GET status and headers and has no wire body.
+
+Revoke accepts the same strict `{ "deviceId" }` body as the session revoke route and
+returns `{ "revoked": true | false }`. Revoke-all returns `{ "revoked": true }`.
+Both call the session revoke path, so that device's live WS and audio leases close,
+and a persistence failure fail-closes the authority with 503 `ACCESS_UNAVAILABLE`
+instead of reporting success. No response sets a cookie. Authenticated machine
+attempts share one budget with pairing redemption: 5 per minute for each connection
+address, 60 per minute globally, and 128 address buckets. Excess attempts return
+429 `MACHINE_RATE_LIMITED` with `Retry-After: 60`.
+
+The offline `rotate-credential` command refuses while a live owner holds the private
+directory. It atomically replaces the machine credential in the existing 0600 state
+file and rebinds remembered browser sessions to that new generation instead of
+deleting them. It prints no credential. Restart the core before the new credential
+is used. A running server's old persistence hook cannot write the previous binding.
+
 ## REST Endpoints
 
 ### Health & Status

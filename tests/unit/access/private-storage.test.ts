@@ -519,16 +519,64 @@ describe("private single-operator persistence", () => {
 		if (browser.kind !== "created") throw new Error("Expected browser")
 		await storage.rotateMachineCredential()
 		expect(storage.machineSecretDigest()).not.toEqual(oldDigest)
-		expect(storage.startupSnapshot().sessions).toHaveLength(0)
+		expect(storage.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
+		expect(storage.startupSnapshot().credentialBinding).toBe(
+			storage.credentialBinding,
+		)
+		expect(storage.startupSnapshot().credentialBinding).not.toBe(
+			old.credentialBinding,
+		)
 		await expect(old.renew(browser.principalId)).rejects.toMatchObject({
 			code: "ACCESS_UNAVAILABLE",
 		})
-		expect(storage.startupSnapshot().sessions).toHaveLength(0)
+		expect(storage.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
 		const digest = storage.machineSecretDigest()
+		const mode = (await fs.stat(join(directory, "access-state.json"))).mode
+		expect(mode & 0o777).toBe(0o600)
 		await storage.close()
-		expect((await open(directory, "load")).machineSecretDigest()).toEqual(
-			digest,
+		const reloaded = await open(directory, "load")
+		expect(reloaded.machineSecretDigest()).toEqual(digest)
+		expect(reloaded.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
+	})
+
+	it("keeps the previous credential and sessions when rotation fails before rename", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const sessions = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			persist: storage.persist,
+		})
+		const browser = await sessions.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		const before = await fs.readFile(
+			join(directory, "access-state.json"),
+			"utf8",
 		)
+		vi.spyOn(fs, "rename").mockRejectedValueOnce(new Error("secret-rename"))
+		try {
+			await storage.rotateMachineCredential()
+			expect.fail("Expected rotation to fail closed")
+		} catch (error) {
+			expect(error).toMatchObject({
+				code: "ACCESS_STORAGE_UNAVAILABLE",
+				cause: undefined,
+			})
+			expect(String(error)).not.toContain("secret-rename")
+		}
+		expect(
+			await fs.readFile(join(directory, "access-state.json"), "utf8"),
+		).toBe(before)
+		await storage.close()
+		const reloaded = await open(directory, "load")
+		expect(reloaded.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
 	})
 
 	it("persists monotonic renewals after a wall-clock backward jump", async () => {

@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { runAccessCommand } from "../../../src/access/command.js"
 import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
+import { SessionStore } from "../../../src/access/sessions.js"
 
 let root: string
 let directory: string
@@ -380,5 +381,245 @@ describe("standalone first-use access utility", () => {
 			"http://192.0.2.10:9000/api/access/pairing-codes",
 			expect.objectContaining({ method: "POST" }),
 		)
+	})
+})
+
+const deviceId = `device_${"A".repeat(43)}`
+describe("machine device command", () => {
+	it("shows device and rotation usage without touching private state", async () => {
+		const open = vi.spyOn(PrivateAccessStorage, "open")
+		const read = vi.spyOn(PrivateAccessStorage, "readMachineCredential")
+		const result = await runAccessCommand(["--help"])
+		expect(result.exitCode).toBe(0)
+		expect(result.lines.join("\n")).toContain("devices list")
+		expect(result.lines.join("\n")).toContain("devices revoke DEVICE_ID")
+		expect(result.lines.join("\n")).toContain("revoke-all --yes")
+		expect(result.lines.join("\n")).toContain("rotate-credential")
+		expect(open).not.toHaveBeenCalled()
+		expect(read).not.toHaveBeenCalled()
+	})
+
+	it("prints a table or json inventory and never the machine credential", async () => {
+		await runAccessCommand(setup())
+		const storage = await PrivateAccessStorage.open({
+			directory,
+			ownership,
+			mode: "load",
+		})
+		owners.push(storage)
+		const token = storage.useMachineCredential(value => value)
+		const inventory = {
+			devices: [
+				{
+					deviceId,
+					createdAt: 10,
+					renewedAt: 12,
+					expiresAt: 20,
+					current: false,
+				},
+			],
+		}
+		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
+			async () =>
+				new Response(JSON.stringify(inventory), { status: 200 }),
+		)
+		const table = await runAccessCommand([
+			"devices",
+			"list",
+			"--private-directory",
+			directory,
+			"--api-origin",
+			origin,
+		])
+		expect(table.exitCode).toBe(0)
+		expect(table.lines[0]).toContain("deviceId")
+		expect(table.lines[1]).toContain(deviceId)
+		expect(table.lines[1]).toContain("false")
+		expect(table.lines.join("\n")).not.toContain(token)
+		expect(table.lines.join("\n")).not.toContain(directory)
+		const json = await runAccessCommand([
+			"devices",
+			"list",
+			"--json",
+			"--private-directory",
+			directory,
+			"--api-origin",
+			origin,
+		])
+		expect(json).toEqual({
+			exitCode: 0,
+			lines: [JSON.stringify(inventory)],
+		})
+		expect(fetch).toHaveBeenCalledTimes(2)
+		const init = fetch.mock.calls[0]?.[1]
+		expect(init).toMatchObject({
+			method: "GET",
+			credentials: "omit",
+			redirect: "error",
+		})
+		expect(fetch.mock.calls[0]?.[0]).toBe(
+			`${origin}/api/access/machine/devices`,
+		)
+	})
+
+	it("revokes one device and refuses revoke-all without --yes", async () => {
+		await runAccessCommand(setup())
+		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
+			async () =>
+				new Response(JSON.stringify({ revoked: true }), { status: 200 }),
+		)
+		const unconfirmed = await runAccessCommand([
+			"devices",
+			"revoke-all",
+			"--private-directory",
+			directory,
+			"--api-origin",
+			origin,
+		])
+		expect(unconfirmed).toEqual({
+			exitCode: 1,
+			lines: [
+				"ACCESS_CONFIRMATION_REQUIRED: Pass --yes to revoke every remembered device.",
+			],
+		})
+		expect(fetch).not.toHaveBeenCalled()
+		const revoked = await runAccessCommand([
+			"devices",
+			"revoke",
+			deviceId,
+			"--private-directory",
+			directory,
+			"--api-origin",
+			origin,
+		])
+		expect(revoked).toEqual({
+			exitCode: 0,
+			lines: [`Revoked ${deviceId}.`],
+		})
+		expect(fetch).toHaveBeenCalledWith(
+			`${origin}/api/access/machine/devices/revoke`,
+			expect.objectContaining({
+				method: "POST",
+				body: JSON.stringify({ deviceId }),
+				credentials: "omit",
+			}),
+		)
+		fetch.mockResolvedValueOnce(
+			new Response(JSON.stringify({ revoked: false }), { status: 200 }),
+		)
+		const missing = await runAccessCommand([
+			"devices",
+			"revoke",
+			deviceId,
+			"--private-directory",
+			directory,
+			"--api-origin",
+			origin,
+		])
+		expect(missing.exitCode).toBe(1)
+		expect(missing.lines[0]).toContain("ACCESS_DEVICE_NOT_FOUND")
+		const all = await runAccessCommand([
+			"devices",
+			"revoke-all",
+			"--yes",
+			"--private-directory",
+			directory,
+			"--api-origin",
+			origin,
+		])
+		expect(all).toEqual({
+			exitCode: 0,
+			lines: ["Revoked every remembered device."],
+		})
+	})
+
+	it("rejects a malformed device id before reading the credential", async () => {
+		await runAccessCommand(setup())
+		const read = vi.spyOn(PrivateAccessStorage, "readMachineCredential")
+		const result = await runAccessCommand([
+			"devices",
+			"revoke",
+			"not-a-device",
+			"--private-directory",
+			directory,
+			"--api-origin",
+			origin,
+		])
+		expect(result.exitCode).toBe(1)
+		expect(read).not.toHaveBeenCalled()
+	})
+
+	it("refuses rotation while the core owns private state", async () => {
+		await runAccessCommand(setup())
+		const storage = await PrivateAccessStorage.open({
+			directory,
+			ownership,
+			mode: "load",
+		})
+		owners.push(storage)
+		const digest = Buffer.from(storage.machineSecretDigest())
+		const fetch = vi.spyOn(globalThis, "fetch")
+		const result = await runAccessCommand([
+			"rotate-credential",
+			"--private-directory",
+			directory,
+		])
+		expect(result).toEqual({
+			exitCode: 1,
+			lines: [
+				"ACCESS_STORAGE_BUSY: Stop the core and retry credential rotation.",
+			],
+		})
+		expect(storage.machineSecretDigest()).toEqual(digest)
+		expect(fetch).not.toHaveBeenCalled()
+		expect(result.lines.join("\n")).not.toContain(directory)
+	})
+
+	it("rotates the credential atomically, keeps browser sessions, and prints nothing secret", async () => {
+		await runAccessCommand(setup())
+		const storage = await PrivateAccessStorage.open({
+			directory,
+			ownership,
+			mode: "load",
+		})
+		const sessions = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			persist: storage.persist,
+		})
+		const browser = await sessions.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		const previous = storage.useMachineCredential(value => value)
+		await storage.close()
+		const result = await runAccessCommand([
+			"rotate-credential",
+			"--private-directory",
+			directory,
+		])
+		expect(result).toEqual({
+			exitCode: 0,
+			lines: [
+				"ACCESS_CREDENTIAL_ROTATED: Machine credential replaced. Remembered browser sessions were kept. Restart the core before using the new credential.",
+			],
+		})
+		expect(
+			(await fs.readdir(directory)).some(entry => entry.startsWith("owner-")),
+		).toBe(false)
+		const reloaded = await PrivateAccessStorage.open({
+			directory,
+			ownership,
+			mode: "load",
+		})
+		owners.push(reloaded)
+		const rotated = reloaded.useMachineCredential(value => value)
+		expect(rotated).not.toBe(previous)
+		expect(result.lines.join("\n")).not.toContain(previous)
+		expect(result.lines.join("\n")).not.toContain(rotated)
+		expect(result.lines.join("\n")).not.toContain(directory)
+		expect(reloaded.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
+		expect(
+			(await fs.stat(join(directory, "access-state.json"))).mode & 0o777,
+		).toBe(0o600)
 	})
 })
