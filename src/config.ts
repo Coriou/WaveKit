@@ -1,3 +1,8 @@
+import type {
+	StationIdentity,
+	StationProvenance,
+	BandRegion,
+} from "@wavekit/api-types"
 import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
@@ -535,10 +540,28 @@ export function sourceScannerConfig(
 	return source.scanner ?? { role: "shared", passive: true }
 }
 
-/**
- * Main configuration schema for WaveKit.
- * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
- */
+/** ISO 3166-1 assigned alpha-2 codes; reserved/user-assigned codes are rejected. */
+const stationCountries = new Set(
+	"AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW".split(
+		" ",
+	),
+)
+export const StationConfigSchema = z
+	.object({
+		name: z.string().trim().min(1).max(256).optional(),
+		lat: z.number().finite().min(-90).max(90).optional(),
+		lon: z.number().finite().min(-180).max(180).optional(),
+		altM: z.number().finite().optional(),
+		callsign: z.string().trim().min(1).max(128).optional(),
+		country: z
+			.string()
+			.regex(/^[A-Z]{2}$/)
+			.refine(value => stationCountries.has(value))
+			.optional(),
+	})
+	.strict()
+
+/** Main configuration schema (Requirements: 12.5, 15.4, 17.1–17.4). */
 export const ConfigSchema = z
 	.object({
 		sources: z.array(SourceConfigSchema).default([]),
@@ -562,6 +585,7 @@ export const ConfigSchema = z
 		 * case-insensitive). Absent: guessed from TZ / locale, else EU.
 		 */
 		region: RegionSchema.optional(),
+		station: StationConfigSchema.default({}),
 		/**
 		 * Directory for runtime state (API band overrides). Relative paths
 		 * resolve against the process working directory.
@@ -690,6 +714,7 @@ const LEGACY_ENV_MAPPINGS: Record<
 	WAVEKIT_LOG_LEVEL: { path: ["logging", "level"], type: "string" },
 	WAVEKIT_LOG_DIR: { path: ["logging", "dir"], type: "string" },
 	WAVEKIT_REGION: { path: ["region"], type: "string" },
+	WAVEKIT_COUNTRY: { path: ["station", "country"], type: "string" },
 	WAVEKIT_STATE_DIR: { path: ["stateDir"], type: "string" },
 }
 
@@ -829,7 +854,13 @@ export function parseEnvironmentVariables(): Record<string, unknown> {
 				// Use new double-underscore format for nested keys
 				try {
 					const path = envVarToConfigPath(key)
-					const parsedValue = parseEnvValue(value)
+					const parsedValue = parseEnvValue(
+						value,
+						key.startsWith("WAVEKIT_STATION__") &&
+							["name", "callsign", "country"].includes(path[1] ?? "")
+							? "string"
+							: undefined,
+					)
 					setNestedValue(result, path, parsedValue)
 				} catch {
 					// Skip invalid env values - validation will catch them later
@@ -838,6 +869,9 @@ export function parseEnvironmentVariables(): Record<string, unknown> {
 		}
 	}
 
+	const country = process.env["WAVEKIT_COUNTRY"]
+	if (country !== undefined)
+		setNestedValue(result, ["station", "country"], country)
 	return result
 }
 
@@ -1097,6 +1131,18 @@ export function loadConfig(configPath?: string): Config {
 		throw new ConfigValidationError(result.error)
 	}
 
+	const env = parseEnvironmentVariables()["station"]
+	const provenance: Partial<
+		Record<keyof Config["station"], StationProvenance>
+	> = {}
+	for (const key of stationKeys) {
+		if (result.data.station[key] !== undefined)
+			provenance[key] =
+				env !== null && typeof env === "object" && Object.hasOwn(env, key)
+					? "env"
+					: "yaml"
+	}
+	stationOrigins.set(result.data, provenance)
 	return result.data
 }
 
@@ -1156,6 +1202,12 @@ export function validateConfigSafe(config: unknown): {
 export function getSupportedEnvVars(): string[] {
 	const legacyVars = Object.keys(LEGACY_ENV_MAPPINGS)
 	const nestedExamples = [
+		"WAVEKIT_STATION__NAME",
+		"WAVEKIT_STATION__LAT",
+		"WAVEKIT_STATION__LON",
+		"WAVEKIT_STATION__ALT_M",
+		"WAVEKIT_STATION__CALLSIGN",
+		"WAVEKIT_STATION__COUNTRY",
 		"WAVEKIT_API__HOST",
 		"WAVEKIT_API__PORT",
 		"WAVEKIT_AUDIO__TCP_PORT",
@@ -1181,4 +1233,41 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_SOURCES__<INDEX>__SCANNER__ROLE",
 	]
 	return ["WAVEKIT_CONFIG", ...legacyVars, ...nestedExamples]
+}
+
+const stationKeys = [
+	"name",
+	"lat",
+	"lon",
+	"altM",
+	"callsign",
+	"country",
+] as const
+const stationOrigins = new WeakMap<
+	Config,
+	Partial<Record<keyof Config["station"], StationProvenance>>
+>()
+
+/** Snapshot provenance at load time; subsequent process.env mutations cannot change it. */
+export function stationIdentity(
+	config: Config,
+	region: BandRegion,
+): StationIdentity {
+	const origins = stationOrigins.get(config)
+	function field<K extends keyof Config["station"]>(key: K) {
+		const provenance: StationProvenance =
+			origins?.[key] ?? (config.station[key] === undefined ? "default" : "yaml")
+		return { value: config.station[key] ?? null, provenance }
+	}
+
+	return {
+		name: field("name"),
+		lat: field("lat"),
+		lon: field("lon"),
+		altM: field("altM"),
+		callsign: field("callsign"),
+		country: field("country"),
+		effectiveCountry: config.station.country ?? null,
+		region,
+	}
 }

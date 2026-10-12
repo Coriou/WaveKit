@@ -15,3 +15,9 @@ export * from "./access-bootstrap.js"
 export * from "./access-devices.js"
 export * from "./regional.js"
 export * from "./receiver-capabilities.js"
+
+export type {
+	StationIdentity,
+	StationProvenance,
+	StationValue,
+} from "./station.js"

@@ -1,3 +1,5 @@
+import type { StationIdentity } from "@wavekit/api-types"
+import { stationRoutes } from "./routes/station.js"
 /**
  * API Server - Fastify-based REST and WebSocket server
  *
@@ -96,6 +98,7 @@ export interface AudioConfig {
 }
 
 export interface ApiServerDependencies {
+	station?: StationIdentity
 	access?: NamedAccessRuntimeContext
 	regionalRegistry?: RegionalRegistry | null
 	receiverCapabilitiesProvider?: ReceiverCapabilitiesProvider | null | undefined
@@ -128,6 +131,7 @@ export interface ApiServerDependencies {
  * - CORS support for browser clients
  */
 export class ApiServer {
+	private readonly station: StationIdentity | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
 	private readonly receiverCapabilitiesProvider:
 		| ReceiverCapabilitiesProvider
@@ -173,6 +177,7 @@ export class ApiServer {
 	private spectrumWiring: { dispose(): void } | null = null
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
+		this.station = dependencies.station
 		this.regionalRegistry = dependencies.regionalRegistry
 		this.receiverCapabilitiesProvider =
 			dependencies.receiverCapabilitiesProvider
@@ -1003,6 +1008,8 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		if (this.station)
+			await this.app.register(stationRoutes, { station: this.station })
 		// These child plugins inherit normal root admission in both access modes.
 		// Providers are borrowed; the composing runtime owns receiver disposal.
 		if (this.regionalRegistry !== undefined)

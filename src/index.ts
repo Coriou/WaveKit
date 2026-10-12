@@ -1,3 +1,4 @@
+import { stationIdentity } from "./config.js"
 /**
  * WaveKit - SDR Stream Processing Framework
  *
@@ -1091,6 +1092,7 @@ async function main(): Promise<void> {
 		const apiServer = new ApiServer(
 			{
 				...(access ? { access } : {}),
+				station: stationIdentity(config, bandRegion.code),
 				regionalRegistry,
 				receiverCapabilitiesProvider,
 				sourceManager,

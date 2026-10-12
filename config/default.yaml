@@ -736,3 +736,12 @@ csdr:
 # Public listener mappings are validated separately from private state.
 access:
   mode: legacy
+
+# Optional operator station identity (no geolocation or decoder effects).
+# station:
+#   name: Home
+#   lat: 48.8566
+#   lon: 2.3522
+#   altM: 35
+#   callsign: F1ABC
+#   country: FR # uppercase ISO 3166-1 alpha-2; WAVEKIT_COUNTRY locks this value
