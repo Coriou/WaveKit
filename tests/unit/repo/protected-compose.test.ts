@@ -205,6 +205,31 @@ describe("protected compose profile", () => {
 		}
 	})
 
+	it("sets no daemon-rejected options on services sharing a network namespace", () => {
+		const raw = parse(read("compose.yaml")) as {
+			services: Record<string, Record<string, unknown>>
+		}
+		const shared = Object.entries(raw.services).filter(([, service]) =>
+			String(service["network_mode"] ?? "").startsWith("service:"),
+		)
+		expect(shared.map(([name]) => name)).toContain("wavekit-protected-caddy")
+		for (const [, service] of shared) {
+			for (const key of [
+				"extra_hosts",
+				"ports",
+				"expose",
+				"dns",
+				"dns_search",
+				"hostname",
+				"mac_address",
+				"links",
+				"networks",
+			]) {
+				expect(service[key]).toBeUndefined()
+			}
+		}
+	})
+
 	it("keeps backends on loopback and the private volume dedicated", () => {
 		const core = composeFile().services["wavekit-protected"]
 		const caddy = composeFile().services["wavekit-protected-caddy"]
@@ -235,7 +260,7 @@ describe("protected compose profile", () => {
 			"/etc/s6-overlay/scripts/healthcheck.sh",
 		])
 		expect(core?.extra_hosts).toEqual([`${HOST_TOKEN}:127.0.0.1`])
-		expect(caddy?.extra_hosts).toEqual([`${HOST_TOKEN}:127.0.0.1`])
+		expect(caddy?.extra_hosts).toBeUndefined()
 		expect(stringifyEnv(caddy?.environment)["WAVEKIT_PUBLIC_HOST"]).toBe(
 			HOST_TOKEN,
 		)

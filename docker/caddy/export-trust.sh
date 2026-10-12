@@ -8,22 +8,32 @@ trust_dir=/trust
 cert_src=/data/caddy/pki/authorities/local/root.crt
 cert_dst="$trust_dir/root.crt"
 
-caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
-caddy_pid=$!
-
+caddy_pid=
 stop() {
-	kill -TERM "$caddy_pid" 2>/dev/null || true
-	wait "$caddy_pid" 2>/dev/null || true
+	if [ -n "$caddy_pid" ]; then
+		kill -TERM "$caddy_pid" 2>/dev/null || true
+		wait "$caddy_pid" 2>/dev/null || true
+	fi
 	exit 0
 }
 trap stop TERM INT
+
+caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
+caddy_pid=$!
 
 publish_root() {
 	if [ ! -f "$cert_src" ]; then
 		return 0
 	fi
+	if [ -f "$cert_dst" ] && cmp -s "$cert_src" "$cert_dst"; then
+		return 0
+	fi
 	tmp="$trust_dir/root.crt.tmp"
-	cp "$cert_src" "$tmp"
+	if ! cp "$cert_src" "$tmp"; then
+		rm -f "$tmp"
+		echo "wavekit: cannot write $tmp; root.crt not published" >&2
+		return 0
+	fi
 	if grep -q "PRIVATE KEY" "$tmp"; then
 		rm -f "$tmp"
 		echo "wavekit: refusing to publish private key material" >&2
@@ -35,6 +45,7 @@ publish_root() {
 	fi
 	chmod 644 "$tmp"
 	mv -f "$tmp" "$cert_dst"
+	echo "wavekit: published $cert_dst" >&2
 }
 
 while kill -0 "$caddy_pid" 2>/dev/null; do

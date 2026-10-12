@@ -6,6 +6,7 @@
 # export-trust.sh publishes only root.crt on the trust volume.
 {
 	admin off
+	skip_install_trust
 	auto_https disable_redirects
 	servers {
 		protocols h1 h2

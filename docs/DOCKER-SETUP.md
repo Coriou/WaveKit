@@ -506,8 +506,9 @@ The browser shell's canonical API origin is `https://<host>:9443`. It takes
 WebSocket and audio origins from `GET /api/access/bootstrap` on that origin.
 
 Issue a pairing code while the core is running and `/caddy-trust/root.crt`
-exists. The code is one-time, for the browser shell, and is not a reusable
-API credential. The machine credential stays in the private volume; these
+exists. If it is missing, check `docker compose logs wavekit-protected-caddy`;
+the sidecar logs when it publishes the file or cannot write it. The code is
+one-time, for the browser shell, and is not a reusable API credential. The machine credential stays in the private volume; these
 commands pass it to the API and do not print it:
 
 ```bash
