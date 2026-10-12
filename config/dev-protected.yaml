@@ -1,0 +1,51 @@
+# Protected loopback development. scripts/dev-protected.mjs selects this file,
+# provisions throwaway private state, and can substitute the three HTTP ports.
+# No receiver, dongle, Docker, or decoders. local-http is development-only.
+sources: []
+decoders: []
+api:
+  host: 127.0.0.1
+  port: 9473
+audio:
+  tcpPort: 9472
+  monitoring: false
+tunerRelay:
+  enabled: false
+liveDemod:
+  enabled: false
+  httpPort: 9474
+digitalVoice:
+  enabled: false
+  httpPort: 9475
+resources:
+  enabled: false
+scanner:
+  enabled: false
+channelizer:
+  enabled: false
+logging:
+  level: info
+access:
+  mode: protected
+  listenerScheme: http
+  exposure: local-http
+  allowedAuthorities:
+    - 127.0.0.1:9473
+  allowedOrigins:
+    - http://127.0.0.1:9473
+  audio:
+    analog:
+      allowedAuthorities:
+        - 127.0.0.1:9474
+      bindHost: 127.0.0.1
+    digital:
+      allowedAuthorities:
+        - 127.0.0.1:9475
+      bindHost: 127.0.0.1
+  publicOrigins:
+    api: http://127.0.0.1:9473
+    analogAudio: http://127.0.0.1:9474
+    digitalAudio: http://127.0.0.1:9475
+  healthProbe:
+    target: http://127.0.0.1:9473
+    host: 127.0.0.1:9473

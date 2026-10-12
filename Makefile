@@ -6,7 +6,7 @@
 
 .PHONY: help \
 	app-up app-down app-logs app-status \
-	dev dev-local dev-rtl rtl-serve doctor dev-dashboard dev-dashboard-build dev-configs \
+	dev dev-local dev-protected dev-rtl rtl-serve doctor dev-dashboard dev-dashboard-build dev-configs \
 	dev-stack dev-stack-down dev-stack-logs dev-shell dev-status \
 	docker-init docker-build docker-push docker-clean docker-prune \
 	demod-test \
@@ -64,6 +64,9 @@ dev: ## Run app natively with hot-reload (esbuild watch + node --watch, no Docke
 
 dev-local: ## Run natively without a Pi, dongle, Docker, or decoder binaries
 	@pnpm dev:local
+
+dev-protected: ## Run protected mode on loopback with throwaway access state (no Pi, dongle, Docker, or decoders)
+	@node ./scripts/dev-protected.mjs
 
 dev-rtl: ## Run natively with IQ from local rtl_tcp (start rtl-serve first)
 	@pnpm dev:rtl
