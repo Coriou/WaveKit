@@ -17,7 +17,8 @@ export interface FtsLimits {
 
 /**
  * Turn plain text into a MATCH string of quoted tokens.
- * Returns null when the text has no searchable tokens (the caller matches nothing).
+ * Returns null when the text has no searchable tokens. The caller treats that
+ * as no text filter, including whitespace-only and punctuation-only text.
  * Never returns user operators, column filters, or prefix stars.
  */
 export function compileFtsMatch(text: string, limits: FtsLimits): string | null {

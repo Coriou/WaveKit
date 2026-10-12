@@ -83,9 +83,21 @@ describe("activity cursors", () => {
 		})
 	})
 
-	it("reports a gap when the continuation seq is at the prune watermark", async () => {
+	it("does not treat a continuation sitting on the prune watermark as a gap", async () => {
 		const { fixture: store, service: query, token } = await pageToken()
 		store.setIdentity({ pruneWatermark: "1" })
+		await expect(
+			query.search({ query: {}, order: "asc", limit: 1, pageToken: token }),
+		).rejects.toMatchObject({
+			code: "ACTIVITY_SNAPSHOT_RESET",
+			reason: "snapshot-reset",
+			statusCode: 409,
+		})
+	})
+
+	it("reports a gap when the continuation seq is behind the prune watermark", async () => {
+		const { fixture: store, service: query, token } = await pageToken()
+		store.setIdentity({ pruneWatermark: "2" })
 		await expect(
 			query.search({ query: {}, order: "asc", limit: 1, pageToken: token }),
 		).rejects.toMatchObject({

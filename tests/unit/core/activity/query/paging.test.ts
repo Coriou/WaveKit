@@ -1,6 +1,9 @@
 import fc from "fast-check"
 import { afterEach, describe, expect, it } from "vitest"
-import { ActivityQueryInvalidError } from "../../../../../src/core/activity/query/errors.js"
+import {
+	ActivityQueryError,
+	ActivityQueryInvalidError,
+} from "../../../../../src/core/activity/query/errors.js"
 import { DEFAULT_ACTIVITY_QUERY_LIMITS } from "../../../../../src/core/activity/query/service.js"
 import type { ActivityQueryService } from "../../../../../src/core/activity/storage/contract.js"
 import {
@@ -102,7 +105,69 @@ describe("activity search and detail", () => {
 		})
 		expect(filtered.items.map(item => item.eventId)).toEqual(["keep"])
 		const punctuation = await query.search({ query: { text: "..." } })
-		expect(punctuation.items).toEqual([])
+		const whitespace = await query.search({ query: { text: "   " } })
+		expect(punctuation.items.map(item => item.eventId)).toEqual(["drop", "keep"])
+		expect(whitespace.items.map(item => item.eventId)).toEqual(["drop", "keep"])
+	})
+
+	it("rejects a page when the read sees a newer prune than the cache", async () => {
+		const { fixture: store, service: query } = await setup()
+		store.insert({ eventId: "a" })
+		store.insert({ eventId: "b" })
+		store.insert({ eventId: "c" })
+		const first = await query.search({ query: {}, order: "asc", limit: 1 })
+		expect(first.items.map(item => item.eventId)).toEqual(["a"])
+		if (!first.nextPageToken) throw new Error("expected a page token")
+		store.divergePrune("2")
+		expect(store.store.identity().pruneWatermark).toBe("0")
+		await expect(
+			query.search({
+				query: {},
+				order: "asc",
+				limit: 1,
+				pageToken: first.nextPageToken,
+			}),
+		).rejects.toMatchObject({
+			code: "ACTIVITY_CURSOR_GAP",
+			reason: "cursor-gap",
+			statusCode: 410,
+		})
+	})
+
+	it("resets when the read sees a store change the cache has not", async () => {
+		const { fixture: store, service: query } = await setup()
+		store.insert({ eventId: "a" })
+		store.insert({ eventId: "b" })
+		const first = await query.search({ query: {}, order: "asc", limit: 1 })
+		if (!first.nextPageToken) throw new Error("expected a page token")
+		store.divergeMeta({ storeUuid: "00000000-0000-4000-8000-000000000099" })
+		await expect(
+			query.search({
+				query: {},
+				order: "asc",
+				limit: 1,
+				pageToken: first.nextPageToken,
+			}),
+		).rejects.toMatchObject({
+			code: "ACTIVITY_SNAPSHOT_RESET",
+			reason: "store-changed",
+			statusCode: 409,
+		})
+	})
+
+	it("reports a corrupt summary as a query error with status 500", async () => {
+		const { fixture: store, service: query } = await setup()
+		store.insert({ eventId: "bad" })
+		store.corruptSummary("bad")
+		const error: unknown = await query.search({ query: {} }).then(
+			() => null,
+			(caught: unknown) => caught,
+		)
+		expect(error).toBeInstanceOf(ActivityQueryError)
+		expect(error).toMatchObject({
+			code: "ACTIVITY_RECORD_CORRUPT",
+			statusCode: 500,
+		})
 	})
 
 	it("stops a page on the byte budget and continues with the keyset token", async () => {

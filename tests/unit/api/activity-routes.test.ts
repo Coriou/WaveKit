@@ -251,7 +251,7 @@ describe("activity routes", () => {
 			reason: "invalid-cursor",
 		})
 
-		store.setIdentity({ pruneWatermark: "1" })
+		store.setIdentity({ pruneWatermark: "2" })
 		const gap = await app.inject({
 			method: "GET",
 			url: `/api/activity?limit=1&order=asc&pageToken=${encodeURIComponent(token ?? "")}`,

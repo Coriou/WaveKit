@@ -77,6 +77,21 @@ describe("activity facets", () => {
 		expect(result.snapshot.lowBarrier).toBe("0")
 	})
 
+	it("does not mark a scan truncated when the row count equals the cap", async () => {
+		fixture = await createFixture()
+		service = openQueryService(fixture, { limits: { facetScan: 3, facetValues: 32 } })
+		fixture.insert({ eventId: "a", protocol: "ais" })
+		fixture.insert({ eventId: "b", protocol: "ais" })
+		fixture.insert({ eventId: "c", protocol: "acars" })
+		const result = await service.facets({ query: {}, dimensions: ["protocol"] })
+		expect(result.truncated).toBe(false)
+		expect(result.scanned).toBe(3)
+		expect(result.facets["protocol"]).toEqual([
+			{ value: "ais", count: 2 },
+			{ value: "acars", count: 1 },
+		])
+	})
+
 	it("examines only the open snapshot and resets when the lower bound moves", async () => {
 		fixture = await createFixture()
 		const store = fixture

@@ -2,7 +2,11 @@ import type {
 	ActivityRecord,
 	ActivitySummary,
 } from "../storage/contract.js"
-import { activityRecordCorrupt, ActivityQueryInvalidError } from "./errors.js"
+import {
+	activityRecordCorrupt,
+	ActivityQueryInvalidError,
+	ActivityReaderFailedError,
+} from "./errors.js"
 import { bindSeq, formatSeq, parseSeq, seqFromSqlite } from "./seq.js"
 import type { SqlDatabase, SqlValue } from "./sqlite.js"
 import type { FacetDimension, NormalisedQuery } from "./validate.js"
@@ -34,15 +38,36 @@ export type ReadRequest =
 		valueCap: number
 	}
 
+/** Store identity read in the same transaction as the rows. */
+export interface ObservedStore {
+	storeUuid: string
+	restoreGeneration: number
+	pruneWatermark: string
+}
+
+interface SearchBody {
+	op: "search"
+	rows: SummaryRow[]
+}
+
+interface DetailBody {
+	op: "detail"
+	record: ActivityRecord | null
+}
+
+interface FacetsBody {
+	op: "facets"
+	facets: Record<string, { value: string | null; count: number }[]>
+	scanned: number
+	truncated: boolean
+}
+
+type ReadBody = SearchBody | DetailBody | FacetsBody
+
 export type ReadResult =
-	| { op: "search"; rows: SummaryRow[] }
-	| { op: "detail"; record: ActivityRecord | null }
-	| {
-		op: "facets"
-		facets: Record<string, { value: string | null; count: number }[]>
-		scanned: number
-		truncated: boolean
-	}
+	| (SearchBody & { observed: ObservedStore })
+	| (DetailBody & { observed: ObservedStore })
+	| (FacetsBody & { observed: ObservedStore })
 
 const FACET_COLUMN: Record<FacetDimension, string> = {
 	category: "category",
@@ -219,7 +244,7 @@ function facetValue(value: unknown): string | null {
 function facets(
 	db: SqlDatabase,
 	request: Extract<ReadRequest, { op: "facets" }>,
-): Extract<ReadResult, { op: "facets" }> {
+): FacetsBody {
 	if (parseSeq(request.high) <= parseSeq(request.low)) {
 		return {
 			op: "facets",
@@ -238,13 +263,16 @@ function facets(
 	const selected = request.dimensions
 		.map(dimension => `${FACET_COLUMN[dimension]} AS ${dimension}`)
 		.join(", ")
-	params.push(request.scanCap)
+	// One extra row distinguishes "exactly scanCap matches" from a truncated scan.
+	params.push(request.scanCap + 1)
 	const sql = `SELECT ${selected} FROM activity WHERE ${where.join(" AND ")} ORDER BY seq DESC LIMIT ?`
 	const found = db.prepare(sql).all(...params)
+	const truncated = found.length > request.scanCap
+	const scannedRows = truncated ? found.slice(0, request.scanCap) : found
 	const facetsOut = emptyFacets(request.dimensions)
 	const counts = new Map<FacetDimension, Map<string | null, number>>()
 	for (const dimension of request.dimensions) counts.set(dimension, new Map())
-	for (const row of found) {
+	for (const row of scannedRows) {
 		for (const dimension of request.dimensions) {
 			const bucket = counts.get(dimension)
 			if (!bucket) continue
@@ -267,13 +295,44 @@ function facets(
 	return {
 		op: "facets",
 		facets: facetsOut,
-		scanned: found.length,
-		truncated: found.length >= request.scanCap,
+		scanned: scannedRows.length,
+		truncated,
 	}
 }
 
-/** Synchronous read against an open database. Safe to call on the main thread in tests. */
-export function runRead(db: SqlDatabase, request: ReadRequest): ReadResult {
+function readObserved(db: SqlDatabase): ObservedStore {
+	const rows = db
+		.prepare(
+			"SELECT key, value FROM store_meta WHERE key IN ('storeUuid', 'restoreGeneration', 'pruneWatermark')",
+		)
+		.all()
+	const map = new Map<string, string>()
+	for (const row of rows) {
+		const key = row["key"]
+		const value = row["value"]
+		if (typeof key === "string" && typeof value === "string") map.set(key, value)
+	}
+	const storeUuid = map.get("storeUuid")
+	const generation = map.get("restoreGeneration")
+	const pruneWatermark = map.get("pruneWatermark")
+	if (
+		storeUuid === undefined ||
+		storeUuid.length === 0 ||
+		generation === undefined ||
+		!/^\d+$/.test(generation) ||
+		pruneWatermark === undefined ||
+		!/^\d+$/.test(pruneWatermark)
+	) {
+		throw new ActivityReaderFailedError("Activity store meta is unreadable")
+	}
+	const restoreGeneration = Number(generation)
+	if (!Number.isSafeInteger(restoreGeneration)) {
+		throw new ActivityReaderFailedError("Activity store meta is unreadable")
+	}
+	return { storeUuid, restoreGeneration, pruneWatermark }
+}
+
+function readBody(db: SqlDatabase, request: ReadRequest): ReadBody {
 	switch (request.op) {
 		case "search":
 			return { op: "search", rows: search(db, request) }
@@ -283,6 +342,37 @@ export function runRead(db: SqlDatabase, request: ReadRequest): ReadResult {
 			return facets(db, request)
 		default:
 			throw new ActivityQueryInvalidError("Unknown activity read")
+	}
+}
+
+/**
+ * Synchronous read against an open database. Meta and rows share one deferred
+ * transaction so a prune cannot hide rows that this snapshot still returns.
+ * Safe to call on the main thread in tests.
+ */
+export function runRead(db: SqlDatabase, request: ReadRequest): ReadResult {
+	try {
+		db.exec("BEGIN")
+		const observed = readObserved(db)
+		const body = readBody(db, request)
+		db.exec("COMMIT")
+		switch (body.op) {
+			case "search":
+				return { ...body, observed }
+			case "detail":
+				return { ...body, observed }
+			case "facets":
+				return { ...body, observed }
+			default:
+				throw new ActivityQueryInvalidError("Unknown activity read")
+		}
+	} catch (error) {
+		try {
+			db.exec("ROLLBACK")
+		} catch {
+			// BEGIN may have failed, or the connection already rolled back.
+		}
+		throw error
 	}
 }
 

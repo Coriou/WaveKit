@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads"
-import { WaveKitError } from "../../../utils/errors.js"
 import {
+	activityRecordCorrupt,
 	ActivityQueryClosedError,
 	ActivityQueryInvalidError,
 	ActivityQueryTimeoutError,
@@ -33,9 +33,7 @@ function asError(error: unknown): Error {
 function errorFromWorker(code: string, message: string): Error {
 	if (code === "ACTIVITY_QUERY_INVALID") return new ActivityQueryInvalidError(message)
 	if (code === "ACTIVITY_QUERY_TIMEOUT") return new ActivityQueryTimeoutError(message)
-	if (code === "ACTIVITY_RECORD_CORRUPT" || code === "ACTIVITY_QUERY_FAILED") {
-		return new WaveKitError(message, code)
-	}
+	if (code === "ACTIVITY_RECORD_CORRUPT") return activityRecordCorrupt(message)
 	return new ActivityReaderFailedError(message)
 }
 
@@ -59,6 +57,7 @@ export class ReaderHost {
 		private readonly execution: "inline" | "worker",
 		private readonly workerUrl: URL,
 		private readonly onEvent: ((event: ReaderHostEvent) => void) | undefined,
+		private readonly readyTimeoutMs = 5_000,
 	) {}
 
 	async execute(
@@ -182,21 +181,30 @@ export class ReaderHost {
 
 	private waitReady(worker: Worker, generation: number): Promise<Worker> {
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			let settled = false
+			const finish = (error?: Error): void => {
+				if (settled) return
+				settled = true
+				clearTimeout(timer)
 				this.readyReject = null
-				reject(new ActivityQueryTimeoutError("Activity reader did not start"))
-			}, 5_000)
+				worker.off("message", onMessage)
+				if (error) reject(error)
+			}
+			const timer = setTimeout(() => {
+				if (settled || this.worker !== worker) return
+				// Drop the handle before terminate so a late exit cannot reuse it.
+				this.terminateWorker(
+					new ActivityQueryTimeoutError("Activity reader did not start"),
+				)
+			}, this.readyTimeoutMs)
 			timer.unref()
 			this.readyReject = error => {
-				clearTimeout(timer)
-				reject(error)
+				finish(error)
 			}
 			const onMessage = (raw: unknown) => {
 				if (!isRecord(raw) || raw["type"] !== "ready") return
 				if (this.generation !== generation || this.worker !== worker) return
-				clearTimeout(timer)
-				this.readyReject = null
-				worker.off("message", onMessage)
+				finish()
 				resolve(worker)
 			}
 			worker.on("message", onMessage)

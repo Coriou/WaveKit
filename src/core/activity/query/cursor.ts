@@ -186,7 +186,8 @@ export interface VerifyCursorInput {
 
 /**
  * Page tokens reset with 409 when the captured lower bound is stale, and with
- * 410 when the continuation seq itself is at or below the prune watermark.
+ * 410 when the continuation seq itself is below the prune watermark. A cursor
+ * sitting exactly on the watermark has already delivered that seq.
  * Replay cursors use the gap rule only (live follow must survive earlier prunes).
  */
 export function verifyCursor(input: VerifyCursorInput): CursorPayload {

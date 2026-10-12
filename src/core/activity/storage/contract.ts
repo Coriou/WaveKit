@@ -299,6 +299,7 @@ export interface ActivityReplayResetFrame {
 		| "store-changed"
 		| "query-changed"
 		| "invalid-cursor"
+		| "reader-failed"
 }
 
 export interface ActivityReplaySink {

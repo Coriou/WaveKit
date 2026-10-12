@@ -69,9 +69,18 @@ describe("activity FTS compilation", () => {
 		const lower = hashQuery(normaliseQuery({ text: "hello" }, DEFAULT_ACTIVITY_QUERY_LIMITS))
 		const dots = hashQuery(normaliseQuery({ text: "..." }, DEFAULT_ACTIVITY_QUERY_LIMITS))
 		const bangs = hashQuery(normaliseQuery({ text: "!!!" }, DEFAULT_ACTIVITY_QUERY_LIMITS))
+		const absent = hashQuery(normaliseQuery({}, DEFAULT_ACTIVITY_QUERY_LIMITS))
+		const spaces = hashQuery(
+			normaliseQuery({ text: "   " }, DEFAULT_ACTIVITY_QUERY_LIMITS),
+		)
 		expect(hello).toBe(punctuated)
 		expect(lower).not.toBe(hello)
 		expect(dots).toBe(bangs)
+		expect(dots).toBe(absent)
+		expect(spaces).toBe(absent)
+		expect(normaliseQuery({ text: "..." }, DEFAULT_ACTIVITY_QUERY_LIMITS).fts).toEqual({
+			kind: "none",
+		})
 	})
 
 	it("rejects an unpaired surrogate as an invalid query rather than a TypeError", () => {
