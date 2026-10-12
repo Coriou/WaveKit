@@ -1,6 +1,6 @@
 # Reliability and portable receiver roadmap
 
-Updated 2026-10-11. The immediate software sequence is below; numbered sections
+Updated 2026-10-12. The immediate software sequence is below; numbered sections
 track related work and acceptance rather than blocking all work on hardware.
 Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
@@ -50,9 +50,11 @@ local-receiver acceptance and optional Pi acceptance have separate gates.
    implemented. Browser onboarding/renewal consumption, trusted canonical delivery
    and TLS/proxy acceptance remain open.
    Operator data is protected-only while the default deployment remains legacy;
-   changing that default is a separate decision. Regional display bands/channel
-   aliases and receiver-provenanced tuner capabilities are independent backend
-   foundations; preserve unknown hardware facts and existing scanner ranges.
+   changing that default is a separate decision. Regional registry and
+   receiver-capability read-only routes are implemented and software-validated in protected and legacy modes, including API drain,
+   provider disposal and source teardown ordering.
+   US FRS numeric data remains evidence-pending, and physical support/current
+   values remain unknown. Preserve existing scanner ranges and defaults.
    The genuine higher-resolution viewed-slice FFT design is landed, with raw-seam,
    budget and transport feasibility gates before implementation; cropping existing
    display bins is insufficient. Measure coalesced REST drag-to-tune latency before

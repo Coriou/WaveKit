@@ -1,6 +1,6 @@
 # Regional display registry requirements
 
-Status: reviewed design; not implemented or mounted. The complete public assembly must pass independent review before implementation allocation. No test or hardware qualification is implied.
+Status: read-only foundations and route composition implemented and software-validated in protected and legacy modes. Current numerical regional data and physical receiver support/readback remain unavailable or unknown. No browser, regulatory or hardware qualification is implied.
 
 See [requirements](requirements.md), [design](design.md) and [tasks](tasks.md).
 

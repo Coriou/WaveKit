@@ -232,6 +232,36 @@ Fastify-based REST and WebSocket server.
 - Handle WebSocket connections for real-time events
 - Broadcast decoder output to subscribed clients
 
+### Read-only regional and receiver metadata
+
+The API registers encapsulated regional and receiver plugins beneath normal
+root access hooks in both protected and legacy compositions. They have no
+bootstrap exception, write operation, WebSocket bus or receiver consumer.
+Strict raw input validation and explicit closed output serialization preserve
+root denials and keep feature errors bounded. Regional framing precedes method
+denial; receiver matched method denial precedes feature framing/input checks.
+
+`createRegionalRegistry(createRegionalRegistration())` supplies one immutable
+FRS evidence-pending manifest with null data. Explicit query region, optional
+coarse context and national applicability remain distinct. It imports no
+scanner/decoder bandplan data; numeric publication still needs current evidence.
+
+`createReceiverCapabilitiesProvider` reads the SourceManager's synchronous
+coherent accessors and the shared admitted REST command-policy descriptor.
+Source incarnation, attempt and snapshot tokens share one bounded lifetime
+namespace; old socket/recording callbacks cannot revive successor evidence.
+At most 17 page candidates are captured/projected, including validated
+lookahead. Literal RTL0 advertisement never supplies physical RF limits or
+readback; all control physical/current values remain unknown.
+
+Index owns receiver-provider disposal immediately after construction; ApiServer
+borrows it. Shutdown and startup-failure cleanup wait actual API drain before
+idempotent disposal, including legacy mode and constructor/bind failures.
+Source teardown follows that dependency even when a generic shutdown handler
+times out. The pure regional provider retains no active lifecycle resources.
+These backend boundaries do not qualify browser TLS/proxy exposure, live RF,
+receiver platforms, deployment or scanner activation.
+
 ### AudioOutput
 
 TCP server for streaming decoded audio.
