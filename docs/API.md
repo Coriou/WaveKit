@@ -720,8 +720,14 @@ Configuration notes:
 
 - `squelchMode` — `manual` (default: `squelch` is the threshold) or `auto` (an
   estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB, default 6). The
-  floor is a running lower envelope, not a calibrated noise measurement. There is
-  no `noise` mode.
+  floor is a constant-memory running lower envelope: falls are immediate; rises
+  are limited to 1 dB/s while closed and 0.4 dB/s while open, measured in 10 ms
+  stream-time blocks. With margin 6 dB, a sustained 20 dB noise step closes within
+  60 s, while a signal 20 dB above a stable floor stays open for at least 20 s.
+  Long continuous signals can eventually enter the floor estimate. Pipeline
+  rebuilds, source capability changes (including retained-pipeline retunes), and
+  mode changes reset the estimate. This is not calibrated noise measurement.
+  There is no `noise` mode.
 - `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
@@ -2696,8 +2702,8 @@ Backpressure status snapshot.
 
 #### live-audio:level
 
-On the `live-audio` channel while the live demodulator runs, 10 times a second by
-default (10–20 Hz). `channelPowerDbfs` and `noiseFloorDbfs` are `null` until the
+On the `live-audio` channel while the live demodulator runs, published at
+10 Hz. `channelPowerDbfs` and `noiseFloorDbfs` are `null` until the
 first complete IQ block; `thresholdDbfs` is the threshold in effect.
 
 ```json
