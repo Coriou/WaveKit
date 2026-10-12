@@ -59,9 +59,13 @@ interface RunningCore {
 }
 
 beforeAll(async () => {
-	const agentsDirectory = join(repository, ".agents")
-	await mkdir(agentsDirectory, { recursive: true })
-	buildDirectory = await mkdtemp(join(agentsDirectory, "browser-lease-build-"))
+	// .agents is private memory. This cache stays git-ignored and still resolves
+	// external packages from the repository node_modules.
+	const cacheDirectory = join(repository, "node_modules/.cache/wavekit-tests")
+	await mkdir(cacheDirectory, { recursive: true })
+	buildDirectory = await mkdtemp(join(cacheDirectory, "browser-lease-build-"))
+	if (buildDirectory.startsWith(join(repository, ".agents")))
+		throw new Error("process bundle must not be written under .agents")
 	entry = join(buildDirectory, "index.js")
 	await build({
 		absWorkingDir: repository,
@@ -338,36 +342,43 @@ describe("compiled protected process browser leases", () => {
 		expect(core.stdout() + core.stderr()).not.toContain(env.directory)
 	}, 30_000)
 
-	it("fail-closes the live WebSocket when private persistence breaks", async () => {
-		const env = await fixture()
-		const core = run(env.configFile, env.directory)
-		await started(core)
-		const client = browserFor(env)
-		const bootstrap = z
-			.object({ webSocketUrl: z.string() })
-			.parse((await client.fetch(`${env.origin}/api/access/bootstrap`)).json())
-		await signIn(env, client)
-		const socket = await client.openSocket(bootstrap.webSocketUrl)
-		expect(socket.opened).toBe(true)
-		await chmod(env.directory, 0o555)
-		try {
-			const failed = await client.fetch(
-				`${env.origin}/api/access/session/refresh`,
-				{ method: "POST" },
-			)
-			expect(failed.status).toBe(503)
-			expect(failed.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
-			expect(failed.networkBody).not.toContain(env.directory)
-			expect(failed.networkBody).not.toContain(env.token)
-			await expectClosed(socket)
-			expect(
-				(await client.fetch(`${env.origin}/api/access/session`)).status,
-			).toBe(503)
-		} finally {
-			await chmod(env.directory, 0o700)
-		}
-		expect(await stop(core)).toEqual({ code: 0, signal: null })
-	}, 30_000)
+	// uid 0 ignores the mode bits, so chmod 0555 does not fail the write.
+	it.skipIf(process.getuid?.() === 0)(
+		"fail-closes the live WebSocket when private persistence breaks",
+		async () => {
+			const env = await fixture()
+			const core = run(env.configFile, env.directory)
+			await started(core)
+			const client = browserFor(env)
+			const bootstrap = z
+				.object({ webSocketUrl: z.string() })
+				.parse(
+					(await client.fetch(`${env.origin}/api/access/bootstrap`)).json(),
+				)
+			await signIn(env, client)
+			const socket = await client.openSocket(bootstrap.webSocketUrl)
+			expect(socket.opened).toBe(true)
+			await chmod(env.directory, 0o555)
+			try {
+				const failed = await client.fetch(
+					`${env.origin}/api/access/session/refresh`,
+					{ method: "POST" },
+				)
+				expect(failed.status).toBe(503)
+				expect(failed.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+				expect(failed.networkBody).not.toContain(env.directory)
+				expect(failed.networkBody).not.toContain(env.token)
+				await expectClosed(socket)
+				expect(
+					(await client.fetch(`${env.origin}/api/access/session`)).status,
+				).toBe(503)
+			} finally {
+				await chmod(env.directory, 0o700)
+			}
+			expect(await stop(core)).toEqual({ code: 0, signal: null })
+		},
+		30_000,
+	)
 
 	it("keeps a paired browser session across a compiled restart", async () => {
 		const env = await fixture()

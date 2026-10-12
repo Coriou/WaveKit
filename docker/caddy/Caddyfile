@@ -2,7 +2,8 @@
 # One hostname from WAVEKIT_PUBLIC_HOST. Three HTTPS origins, each proxied to a
 # loopback HTTP listener in this network namespace. reverse_proxy forwards
 # WebSocket upgrades (Connection and Upgrade) unchanged.
-# Local CA: tls internal. Clients install the root from the Caddy data volume.
+# Local CA: tls internal. The data directory is CA key material.
+# export-trust.sh publishes only root.crt on the trust volume.
 {
 	admin off
 	auto_https disable_redirects

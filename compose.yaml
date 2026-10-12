@@ -280,7 +280,8 @@ services:
     volumes:
       - wavekit-protected-access:/var/lib/wavekit/access
       - wavekit-protected-state:/app/data
-      - wavekit-protected-caddy:/caddy-data:ro
+      # Public root only. The Caddy data volume (CA private keys) stays on the sidecar.
+      - wavekit-protected-trust:/caddy-trust:ro
       - ./docker/caddy/protected-runtime.yaml:/app/config/protected-runtime.yaml:ro
     logging:
       driver: local
@@ -307,9 +308,15 @@ services:
       WAVEKIT_PUBLIC_HOST: ${WAVEKIT_PUBLIC_HOST:-receiver.example}
     extra_hosts:
       - "${WAVEKIT_PUBLIC_HOST:-receiver.example}:127.0.0.1"
+    # The image command would be appended to this shell. export-trust.sh starts
+    # Caddy itself and ignores its arguments. It copies only root.crt to /trust.
+    entrypoint: ["/bin/sh", "/etc/caddy/export-trust.sh"]
+    command: ["export-trust"]
     volumes:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./docker/caddy/export-trust.sh:/etc/caddy/export-trust.sh:ro
       - wavekit-protected-caddy:/data
+      - wavekit-protected-trust:/trust
 
 networks:
   wavekit:
@@ -322,3 +329,4 @@ volumes:
   wavekit-protected-access:
   wavekit-protected-state:
   wavekit-protected-caddy:
+  wavekit-protected-trust:

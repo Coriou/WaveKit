@@ -50,8 +50,10 @@ fields.
 
 When the server is healthy the command prints the three origins, the bootstrap
 URL (`/api/access/bootstrap` on the API origin), a one-time pairing code, and
-the private directory path. It does not print the machine credential. Ctrl-C
-or SIGTERM stops the server and deletes that directory.
+the private directory path. It does not print the machine credential. Ctrl-C,
+SIGHUP, SIGQUIT, or SIGTERM stops the server and deletes that directory.
+Closing the terminal sends SIGHUP; the command still stops the server and
+deletes the directory.
 
 `--keep` leaves the directory in place and prints its path. While that server
 is still running, another terminal can request a new code:
@@ -60,10 +62,12 @@ is still running, another terminal can request a new code:
 node scripts/dev-protected.mjs --pair --private-directory /path/printed/by/the/server --api-origin http://127.0.0.1:9473
 ```
 
-`--api-port`, `--analog-port`, and `--digital-port` override the ports in
-`config/dev-protected.yaml`. `0` chooses an ephemeral port. Empty sources and
-decoders are expected. Enter the printed code in a browser client that trusts
-the printed API origin; this command does not serve a web UI.
+`--api-port`, `--analog-port`, and `--digital-port` override the default ports
+(API `9473`, analog `9474`, digital `9475`). `config/dev-protected.yaml` stores
+those three as placeholders, which the script replaces. `0` chooses an
+ephemeral port. Empty sources and decoders are expected. Enter the printed
+code in a browser client that trusts the printed API origin; this command does
+not serve a web UI.
 
 ## Use a USB RTL-SDR dongle on macOS or Linux
 

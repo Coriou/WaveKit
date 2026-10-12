@@ -957,36 +957,40 @@ describe("browser lifecycle against the assembled access server", () => {
 		expect(body.deviceId).not.toBe(revoked.body.deviceId)
 	})
 
-	it("fail-closes open leases when persistence stops accepting writes", async () => {
-		const env = await setup()
-		const client = env.browser()
-		const { bootstrap } = await signIn(env, client)
-		const socket = await client.openSocket(bootstrap.webSocketUrl)
-		const analog = await client.openStream(`${env.analogOrigin}/stream.wav`)
-		expect(socket.opened).toBe(true)
-		expect(analog.status).toBe(200)
-		await chmod(env.privateDirectory, 0o555)
-		try {
-			const failed = await client.fetch(
-				`${env.apiOrigin}/api/access/session/refresh`,
-				{ method: "POST" },
-			)
-			expect(failed.status).toBe(503)
-			expect(failed.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
-			assertNoPrivate(failed, [
-				env.token,
-				env.privateDirectory,
-				cookieValue(client),
-			])
-			await expectSocketClosed(socket, 1008)
-			await expectStreamClosed(analog)
-			const later = await client.fetch(`${env.apiOrigin}/api/access/session`)
-			expect(later.status).toBe(503)
-			expect(later.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
-		} finally {
-			await chmod(env.privateDirectory, 0o700)
-		}
-	})
+	// uid 0 ignores the mode bits, so chmod 0555 does not fail the write.
+	it.skipIf(process.getuid?.() === 0)(
+		"fail-closes open leases when persistence stops accepting writes",
+		async () => {
+			const env = await setup()
+			const client = env.browser()
+			const { bootstrap } = await signIn(env, client)
+			const socket = await client.openSocket(bootstrap.webSocketUrl)
+			const analog = await client.openStream(`${env.analogOrigin}/stream.wav`)
+			expect(socket.opened).toBe(true)
+			expect(analog.status).toBe(200)
+			await chmod(env.privateDirectory, 0o555)
+			try {
+				const failed = await client.fetch(
+					`${env.apiOrigin}/api/access/session/refresh`,
+					{ method: "POST" },
+				)
+				expect(failed.status).toBe(503)
+				expect(failed.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+				assertNoPrivate(failed, [
+					env.token,
+					env.privateDirectory,
+					cookieValue(client),
+				])
+				await expectSocketClosed(socket, 1008)
+				await expectStreamClosed(analog)
+				const later = await client.fetch(`${env.apiOrigin}/api/access/session`)
+				expect(later.status).toBe(503)
+				expect(later.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+			} finally {
+				await chmod(env.privateDirectory, 0o700)
+			}
+		},
+	)
 
 	it("keeps a paired session across a restart of the private snapshot", async () => {
 		const env = await setup()
