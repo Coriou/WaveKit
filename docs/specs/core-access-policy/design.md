@@ -119,7 +119,8 @@ Existing malformed, symlinked, unsafe or unexpectedly missing initialized state
 fails closed; it never silently provisions a replacement credential. Serialized
 writes use an exclusive same-directory temporary file, file sync, atomic rename
 and directory sync before success. Rotation atomically changes the credential
-binding and empties sessions; stale authority writes cannot restore the old binding.
+binding and rebinds remembered sessions to it (see machine-credential device
+administration); stale authority writes cannot restore the old binding.
 
 Ownership uses unique immutable process-owner files published before scanning other
 owners. Any other live owner, including another nonce for the same PID, makes the
@@ -475,6 +476,5 @@ return 429 `MACHINE_RATE_LIMITED` with `Retry-After: 60`.
 `ACCESS_STORAGE_BUSY` while any live owner holds the private directory. On a
 stopped directory it atomically replaces the machine credential under the same
 0600 file and 0700 directory rules and rebinds remembered browser sessions to the
-new credential generation. Earlier text in this document that describes rotation
-as emptying sessions is superseded for this utility. A previous in-memory
+new credential generation. A previous in-memory
 persistence hook still cannot write the old binding. The command prints no secret.
