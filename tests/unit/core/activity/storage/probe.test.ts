@@ -43,11 +43,13 @@ describe("activity runtime probe", () => {
 		expect(limits.queueMaxItems).toBe(1024)
 		expect(limits.queueMaxBytes).toBe(8 * 1024 * 1024)
 		expect(limits.maxRows).toBe(1_000_000)
+		expect(limits.maxDbBytes).toBe(2 * 1024 * 1024 * 1024)
 		expect(limits.maxAgeMs).toBe(7 * 24 * 60 * 60 * 1000)
 		expect(limits.gapQuietMs).toBe(5_000)
 		expect(limits.gapMaxIntervalMs).toBe(60_000)
 		expect(limits.pruneBatchRows).toBe(500)
 		expect(limits.pruneBurstBatches).toBe(20)
+		expect(limits.pruneBurstMs).toBe(300)
 		expect(limits.walPassiveBytes).toBe(16 * 1024 * 1024)
 		expect(limits.walTruncateBytes).toBe(48 * 1024 * 1024)
 		expect(limits.walPauseBytes).toBe(64 * 1024 * 1024)
@@ -62,10 +64,19 @@ describe("activity runtime probe", () => {
 		expect(() => resolveActivityLimits({ maxRows: 999 })).toThrow(
 			/maxRows must be at least 1000/,
 		)
+		expect(() =>
+			resolveActivityLimits({ maxDbBytes: 16 * 1024 * 1024 - 1 }),
+		).toThrow(/16 MiB/)
+		expect(
+			resolveActivityLimits({ maxDbBytes: 16 * 1024 * 1024 }).maxDbBytes,
+		).toBe(16 * 1024 * 1024)
 		expect(() => resolveActivityLimits({ gapMaxIntervalMs: 0 })).toThrow(
 			/gap interval/,
 		)
 		expect(() => resolveActivityLimits({ pruneBurstBatches: 0 })).toThrow(
+			/prune burst/,
+		)
+		expect(() => resolveActivityLimits({ pruneBurstMs: 0 })).toThrow(
 			/prune burst/,
 		)
 	})

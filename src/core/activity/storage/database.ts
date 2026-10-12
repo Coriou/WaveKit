@@ -45,11 +45,15 @@ export interface PruneResult {
 	watermark: string
 	generation: number
 	changed: boolean
+	/** Rows read before this call deleted anything. */
+	rowCount: number
+	/** Live bytes read before this call deleted anything. */
+	dbBytes: number
 }
 
 /**
- * Cap hysteresis owned by the writer session. When a flag is true the cap
- * stays on until the store is back at or under its low-water mark.
+ * Previous cap decision from the writer session. A true flag keeps that cap
+ * on until the count just read is back at or under its low-water mark.
  */
 export interface ActivityPrunePressure {
 	rowCap: boolean
@@ -229,17 +233,27 @@ export function activityLowWater(cap: number): number {
 	return Math.floor((cap * 95) / 100)
 }
 
+/** Once a cap is on, it stays on until the value is back at its low-water mark. */
+export function activityCapActive(
+	active: boolean,
+	value: number,
+	cap: number,
+): boolean {
+	return active ? value > activityLowWater(cap) : value > cap
+}
+
 /**
  * Deletes an ascending seq prefix in one transaction, then incremental_vacuum.
  * The watermark moves to the greatest deleted seq and the generation increments
  * in that same transaction. Age runs only when the oldest row is older than
  * maxAge plus slack, and then only deletes rows older than maxAge. Row and byte
  * pressure delete down to 95% of the cap and never remove more than
- * count - lowWater rows for the row cap. Pass the session's hysteresis
- * flags so a cap that has started keeps deleting until the low-water mark,
- * including after the store has fallen back under the cap. Omit them for a
- * one-shot check against the cap itself. A row that qualifies for none of
- * these stops the prefix, so a prune never opens a hole.
+ * count - lowWater rows for the row cap. Pass the session's previous
+ * hysteresis flags; this call recomputes them from the row count and live
+ * bytes it already reads, so a cap that has started keeps deleting until
+ * the low-water mark. Omit them for a one-shot check against the cap
+ * itself. A row that qualifies for none of these stops the prefix, so a
+ * prune never opens a hole.
  */
 export function pruneActivityPrefix(
 	db: SqliteDatabase,
@@ -255,16 +269,22 @@ export function pruneActivityPrefix(
 	pressure?: ActivityPrunePressure,
 ): PruneResult {
 	const meta = readRequiredMeta(db)
+	const rowCount = countRows(db)
+	const dbBytes = databaseBytes(db)
 	const unchanged: PruneResult = {
 		deleted: 0,
 		watermark: meta.pruneWatermark,
 		generation: meta.pruneGeneration,
 		changed: false,
+		rowCount,
+		dbBytes,
 	}
-	const rowCount = countRows(db)
-	const dbBytes = databaseBytes(db)
-	const overRows = pressure ? pressure.rowCap : rowCount > limits.maxRows
-	const overBytes = pressure ? pressure.byteCap : dbBytes > limits.maxDbBytes
+	const overRows = pressure
+		? activityCapActive(pressure.rowCap, rowCount, limits.maxRows)
+		: rowCount > limits.maxRows
+	const overBytes = pressure
+		? activityCapActive(pressure.byteCap, dbBytes, limits.maxDbBytes)
+		: dbBytes > limits.maxDbBytes
 	const oldest = oldestReceivedMs(db)
 	const slack = activityAgeSlackMs(limits.maxAgeMs)
 	const ageActive = oldest !== null && oldest < nowMs - limits.maxAgeMs - slack
@@ -334,7 +354,14 @@ export function pruneActivityPrefix(
 		throw error
 	}
 	if (vacuumPages > 0) db.exec(`PRAGMA incremental_vacuum(${vacuumPages})`)
-	return { deleted: seqs.length, watermark, generation, changed: true }
+	return {
+		deleted: seqs.length,
+		watermark,
+		generation,
+		changed: true,
+		rowCount,
+		dbBytes,
+	}
 }
 
 export function syncActivityWal(

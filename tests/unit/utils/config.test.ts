@@ -1286,6 +1286,7 @@ describe("activity config", () => {
 			{ retention: { maxRows: 1.5 } },
 			{ retention: { maxRows: maxRows + 1 } },
 			{ retention: { maxDbBytes: 0 } },
+			{ retention: { maxDbBytes: 16 * 1024 * 1024 - 1 } },
 			{ retention: { maxDbBytes: maxDbBytes + 1 } },
 			{ retention: { maxAgeMs: 0 } },
 			{ retention: { maxAgeMs: maxAgeMs + 1 } },
@@ -1320,5 +1321,10 @@ describe("activity config", () => {
 		expect(() =>
 			loadConfig(write("activity:\n  enabled: false\n  nope: 1\n")),
 		).toThrow(ConfigValidationError)
+		expect(
+			ConfigSchema.parse({
+				activity: { retention: { maxDbBytes: 16 * 1024 * 1024 } },
+			}).activity.retention,
+		).toEqual({ maxDbBytes: 16 * 1024 * 1024 })
 	})
 })

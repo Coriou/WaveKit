@@ -73,8 +73,9 @@ outputs, classified by an explicit allow-list) are excluded and counted.
   episode. The episode closes after a quiet period with no drops
   (`gapQuietMs`, default 5 s) or, while drops continue, at most one gap
   record per `gapMaxIntervalMs` (default 60 s) aggregating the counts since
-  the previous record. A `gapQuietMs` timer closes and stages the episode
-  when admits stop. `close()` stages an open episode into the shutdown
+  the previous record. A `gapQuietMs` timer is armed once and, when it
+  fires, stages the episode or re-arms for the quiet time still left.
+  `close()` stages an open episode into the shutdown
   drain before abandoning the queue. The warn log uses the same limit.
   Closed, paused and rate tokens are checked before the row is built. The
   byte cap is checked after the row is built, and tokens taken for a row
@@ -95,7 +96,8 @@ outputs, classified by an explicit allow-list) are excluded and counted.
 Defaults, provisional and unmeasured: 1,000,000 rows, 2 GiB database, 7 days,
 whichever is reached first; WAL checkpoint (PASSIVE) at 16 MiB, TRUNCATE attempt
 at 48 MiB, writes paused (and counted as `store-paused`) at 64 MiB. `maxRows`
-is an integer of at least 1,000. Age pruning runs only when the oldest
+is an integer of at least 1,000. `maxDbBytes` is an integer of at least
+16 MiB. Age pruning runs only when the oldest
 `receivedAt` is older than `now - maxAge - slack`, where `slack` is
 `max(60 s, 1% of maxAge)`, and then deletes down to `now - maxAge`. The
 writer session keeps hysteresis for the row cap and the byte cap. A cap
@@ -105,8 +107,8 @@ under a low-water mark of 95% of that cap: once active, rows continue while
 `lowWater(maxDbBytes)`. Live bytes are
 `(page_count - freelist_count) * page_size`, so pages on the freelist do
 not keep the byte cap on. While a cap is active, one write runs consecutive
-prune transactions back to back, at most `pruneBurstBatches` (default 20).
-Each transaction deletes an ascending `seq` prefix of at most
+prune transactions back to back, stopping at `pruneBurstBatches` (default 20) or `pruneBurstMs` (default 300 ms), whichever comes first. Each
+transaction deletes an ascending `seq` prefix of at most
 `pruneBatchRows` and, for the row cap, never more than `count - lowWater`
 rows. It advances `pruneWatermark` to the greatest deleted seq and
 increments `pruneGeneration`, then runs `PRAGMA incremental_vacuum`. Never

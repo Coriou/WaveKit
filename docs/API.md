@@ -2236,7 +2236,8 @@ than those two, receipts, recordings and transcripts are not written.
 Commented in `config/default.yaml`. Omitted retention and admission fields
 keep the defaults: 1,000,000 rows, 2 GiB, 7 days, 100 events/s with a burst
 of 1000 globally, and 50/s with a burst of 200 per decoder. `maxRows` is an
-integer of at least 1,000. `globalPerSecond` and `perDecoderPerSecond` are
+integer of at least 1,000. `maxDbBytes` is an integer of at least 16 MiB.
+`globalPerSecond` and `perDecoderPerSecond` are
 positive integers. Commits are batched (about 25 ms). Age pruning runs only
 when the oldest row is past the age cap by a slack of `max(60 s, 1% of
 maxAge)`, then deletes down to the cap. Row and byte pruning delete down to
