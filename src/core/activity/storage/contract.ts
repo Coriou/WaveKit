@@ -175,6 +175,8 @@ export type AdmitRejection =
 	| "queue-full"
 	| "store-paused"
 	| "closed"
+	/** Excluded telemetry output; counted, not a loss. */
+	| "telemetry"
 
 export type AdmitResult =
 	| { admitted: true }

@@ -71,9 +71,7 @@ export class ActivityIngress {
 		if (this.closed) return { admitted: false, reason: "closed" }
 		if (isTelemetryOutput(envelope.outputType)) {
 			this.excludedTelemetry++
-			// The frozen AdmitResult has no telemetry reason. The value is real;
-			// Main is asked to add "telemetry" to AdmitRejection.
-			return { admitted: false, reason: "telemetry" as AdmitRejection }
+			return { admitted: false, reason: "telemetry" }
 		}
 		const row = buildActivityRow({
 			version: ACTIVITY_RECORD_VERSION,
@@ -210,7 +208,7 @@ export class ActivityIngress {
 
 	private reject(
 		row: BuiltActivityRow,
-		reason: Exclude<AdmitRejection, "closed">,
+		reason: Exclude<AdmitRejection, "closed" | "telemetry">,
 	): AdmitResult {
 		this.noteDrop(
 			reason,
