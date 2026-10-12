@@ -12,6 +12,7 @@ import {
 	ActivitySchemaMismatchError,
 	ActivityStoreLockedError,
 	ActivityUnavailableError,
+	ActivityWriteTimeoutError,
 	errnoCode,
 } from "./errors.js"
 import { ActivityIngress } from "./ingress.js"
@@ -46,14 +47,23 @@ export interface OpenActivityStoreOptions {
 	probe?: () => Promise<ActivityProbeResult>
 	/** Test seam: the next N write batches fail before SQLite is touched. */
 	failNextWrites?: number
+	/** Test seam: the next N write batches throw before SQLite is touched. */
+	throwNextWrites?: number
+	/** Test seam: the worker waits this long before applying a write. */
+	writeDelayMs?: number
 	openTimeoutMs?: number
+	/** Acknowledgement budget for a write. Distinct from openTimeoutMs. */
+	writeTimeoutMs?: number
 }
 
 interface OpenWorkerRequest {
 	type: "open"
 	dbPath: string
+	lockPath: string
 	limits: ActivityLimits
 	failNextWrites: number
+	throwNextWrites: number
+	writeDelayMs: number
 }
 
 type WorkerRequestBody =
@@ -76,13 +86,22 @@ export async function openActivityStore(
 ): Promise<ActivityStoreHandle> {
 	const limits = resolveActivityLimits(options.limits)
 	const failNextWrites = options.failNextWrites ?? 0
+	const throwNextWrites = options.throwNextWrites ?? 0
+	const writeDelayMs = options.writeDelayMs ?? 0
 	const openTimeoutMs = options.openTimeoutMs ?? 5_000
+	const writeTimeoutMs = options.writeTimeoutMs ?? 30_000
 	const execution = options.execution ?? "thread"
 	if (
 		!Number.isSafeInteger(failNextWrites) ||
 		failNextWrites < 0 ||
+		!Number.isSafeInteger(throwNextWrites) ||
+		throwNextWrites < 0 ||
+		!Number.isSafeInteger(writeDelayMs) ||
+		writeDelayMs < 0 ||
 		!Number.isSafeInteger(openTimeoutMs) ||
 		openTimeoutMs < 1 ||
+		!Number.isSafeInteger(writeTimeoutMs) ||
+		writeTimeoutMs < 1 ||
 		(execution !== "thread" && execution !== "inline")
 	)
 		throw new ActivityUnavailableError("Invalid activity store options")
@@ -94,14 +113,21 @@ export async function openActivityStore(
 	await mkdir(activityDir, { recursive: true, mode: 0o700 })
 	await restrictPrivate(activityDir, 0o700)
 	const dbPath = join(activityDir, "activity.db")
-	const lock = await acquireActivityLock(join(activityDir, "activity.lock"))
+	const lockPath = join(activityDir, "activity.lock.db")
 	const now = options.now ?? (() => Date.now())
-	try {
-		if (execution === "inline") {
+	if (execution === "inline") {
+		const lock = await acquireActivityLock(lockPath)
+		try {
 			const db = await openSqliteFile(dbPath)
 			let session: ActivitySession
 			try {
-				session = createActivitySession(db, dbPath, limits, failNextWrites)
+				session = createActivitySession(
+					db,
+					dbPath,
+					limits,
+					failNextWrites,
+					throwNextWrites,
+				)
 			} catch (error) {
 				try {
 					db.close()
@@ -122,31 +148,35 @@ export async function openActivityStore(
 			)
 			store.restrictFiles()
 			return store
+		} catch (error) {
+			await lock.release()
+			throw wrapOpenError(error)
 		}
-		const client = await ActivityWriterClient.open(
-			options.workerUrl ?? defaultActivityWorkerUrl(),
-			dbPath,
-			limits,
-			failNextWrites,
-			openTimeoutMs,
-			options.logger,
-		)
-		const store = new ActivityStore(
-			dbPath,
-			options.logger,
-			limits,
-			now,
-			lock,
-			undefined,
-			client,
-			client.ready(),
-		)
-		store.restrictFiles()
-		return store
-	} catch (error) {
-		await lock.release()
-		throw wrapOpenError(error)
 	}
+	const client = await ActivityWriterClient.open(
+		options.workerUrl ?? defaultActivityWorkerUrl(),
+		dbPath,
+		lockPath,
+		limits,
+		failNextWrites,
+		throwNextWrites,
+		writeDelayMs,
+		openTimeoutMs,
+		writeTimeoutMs,
+		options.logger,
+	)
+	const store = new ActivityStore(
+		dbPath,
+		options.logger,
+		limits,
+		now,
+		undefined,
+		undefined,
+		client,
+		client.ready(),
+	)
+	store.restrictFiles()
+	return store
 }
 
 class ActivityWriterClient {
@@ -167,6 +197,7 @@ class ActivityWriterClient {
 	private constructor(
 		private readonly worker: Worker,
 		private readonly timeoutMs: number,
+		private readonly writeTimeoutMs: number,
 		private readonly logger: Logger,
 	) {
 		this.worker.on("message", (raw: unknown) => {
@@ -190,20 +221,35 @@ class ActivityWriterClient {
 	static async open(
 		workerUrl: URL,
 		dbPath: string,
+		lockPath: string,
 		limits: ActivityLimits,
 		failNextWrites: number,
+		throwNextWrites: number,
+		writeDelayMs: number,
 		timeoutMs: number,
+		writeTimeoutMs: number,
 		logger: Logger,
 	): Promise<ActivityWriterClient> {
 		const worker = new Worker(workerUrl, { name: "activity-writer" })
-		const client = new ActivityWriterClient(worker, timeoutMs, logger)
+		const client = new ActivityWriterClient(
+			worker,
+			timeoutMs,
+			writeTimeoutMs,
+			logger,
+		)
 		try {
-			const response = await client.request({
-				type: "open",
-				dbPath,
-				limits,
-				failNextWrites,
-			})
+			const response = await client.request(
+				{
+					type: "open",
+					dbPath,
+					lockPath,
+					limits,
+					failNextWrites,
+					throwNextWrites,
+					writeDelayMs,
+				},
+				timeoutMs,
+			)
 			if (response.type !== "ready")
 				throw new ActivityUnavailableError(
 					"activity writer did not become ready",
@@ -232,7 +278,11 @@ class ActivityWriterClient {
 		rows: readonly BuiltActivityRow[],
 		nowMs: number,
 	): Promise<WriterWorkResult> {
-		return this.request({ type: "write", rows: [...rows], nowMs }).then(
+		return this.request(
+			{ type: "write", rows: [...rows], nowMs },
+			this.writeTimeoutMs,
+			() => new ActivityWriteTimeoutError(),
+		).then(
 			response => {
 				if (response.type !== "wrote")
 					throw new ActivityUnavailableError(
@@ -244,20 +294,22 @@ class ActivityWriterClient {
 	}
 
 	checkpoint(reason: "threshold" | "close"): Promise<ActivityWorkerSnapshot> {
-		return this.request({ type: "checkpoint", reason }).then(response => {
+		return this.request({ type: "checkpoint", reason }, this.timeoutMs).then(
+			response => {
 			if (response.type !== "checkpointed")
 				throw new ActivityUnavailableError(
 					"activity writer checkpoint was not acknowledged",
 				)
 			return response.snapshot
-		})
+			},
+		)
 	}
 
 	async close(): Promise<void> {
 		this.closing = true
 		try {
 			if (!this.exited) {
-				const response = await this.request({ type: "close" })
+				const response = await this.request({ type: "close" }, this.timeoutMs)
 				if (response.type !== "closed")
 					throw new ActivityUnavailableError("activity writer did not close")
 			}
@@ -267,7 +319,12 @@ class ActivityWriterClient {
 		}
 	}
 
-	private request(body: WorkerRequestBody): Promise<ActivityWorkerResponse> {
+	private request(
+		body: WorkerRequestBody,
+		timeoutMs: number,
+		timeoutError: () => Error = () =>
+			new ActivityUnavailableError("activity writer timed out"),
+	): Promise<ActivityWorkerResponse> {
 		if (this.exited)
 			return Promise.reject(
 				new ActivityUnavailableError("activity writer is gone"),
@@ -277,8 +334,8 @@ class ActivityWriterClient {
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id)
-				reject(new ActivityUnavailableError("activity writer timed out"))
-			}, this.timeoutMs)
+				reject(timeoutError())
+			}, timeoutMs)
 			this.pending.set(id, { resolve, reject, timer })
 			this.worker.postMessage({ ...body, id })
 		})
@@ -321,6 +378,7 @@ class ActivityStore implements ActivityStoreHandle {
 	private duplicates = 0
 	private flushing = false
 	private needsFlush = false
+	private writerState: "running" | "stopped" = "running"
 	private stopped = false
 	private draining = false
 	private batchTimer: ReturnType<typeof setTimeout> | undefined
@@ -333,7 +391,7 @@ class ActivityStore implements ActivityStoreHandle {
 		private readonly logger: Logger,
 		private readonly limits: ActivityLimits,
 		private readonly now: () => number,
-		private readonly lock: ActivityLock,
+		private readonly lock: ActivityLock | undefined,
 		private readonly inline: ActivitySession | undefined,
 		private readonly threaded: ActivityWriterClient | undefined,
 		snapshot: ActivityWorkerSnapshot,
@@ -369,7 +427,7 @@ class ActivityStore implements ActivityStoreHandle {
 
 	admit(envelope: DecodeEnvelope): AdmitResult {
 		const result = this.ingress.admit(envelope)
-		if (result.admitted) this.onQueued()
+		if (result.admitted || this.ingress.takeGapFlush()) this.onQueued()
 		return result
 	}
 
@@ -383,6 +441,7 @@ class ActivityStore implements ActivityStoreHandle {
 				"queue-full": this.ingress.dropped["queue-full"],
 				"store-paused": this.ingress.dropped["store-paused"],
 				"write-failed": this.ingress.dropped["write-failed"],
+				closed: this.ingress.dropped.closed,
 			},
 			excludedTelemetry: this.ingress.excludedTelemetry,
 			queueDepth: this.ingress.queueDepth(),
@@ -393,6 +452,7 @@ class ActivityStore implements ActivityStoreHandle {
 			oldestReceivedAt: this.oldestReceivedAt,
 			pruneWatermark: this.identityCache.pruneWatermark,
 			paused: this.ingress.paused,
+			writer: this.writerState,
 		}
 	}
 
@@ -418,12 +478,24 @@ class ActivityStore implements ActivityStoreHandle {
 
 	private onWriterGone(): void {
 		if (this.stopped) return
+		this.writerState = "stopped"
 		this.stopped = true
 		this.ingress.nack()
 		this.ingress.markClosed()
 		this.clearBatchTimer()
 		this.clearPause()
 		this.logger.error("activity writer stopped")
+	}
+
+	private stopForWriteTimeout(): void {
+		if (this.writerState === "stopped") return
+		this.writerState = "stopped"
+		this.stopped = true
+		this.ingress.forgetInFlight()
+		this.ingress.markClosed()
+		this.clearBatchTimer()
+		this.clearPause()
+		this.logger.error("activity write timed out")
 	}
 
 	private onQueued(): void {
@@ -467,8 +539,11 @@ class ActivityStore implements ActivityStoreHandle {
 				try {
 					result = session.write(batch, this.now())
 				} catch (error) {
-					this.ingress.nack()
-					this.logger.error({ err: error }, "activity write failed")
+					if (!this.stopped) {
+						this.ingress.nack()
+						this.logger.error({ err: error }, "activity write failed")
+						if (!this.draining) this.armTimer()
+					}
 					ok = false
 					break
 				}
@@ -546,8 +621,14 @@ class ActivityStore implements ActivityStoreHandle {
 			this.restrictFiles()
 			return "wrote"
 		} catch (error) {
+			if (error instanceof ActivityWriteTimeoutError) {
+				this.stopForWriteTimeout()
+				return "failed"
+			}
+			if (this.stopped) return "failed"
 			this.ingress.nack()
 			this.logger.error({ err: error }, "activity write failed")
+			if (!this.draining) this.armTimer()
 			return "failed"
 		}
 	}
@@ -645,6 +726,7 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	private async shutdown(): Promise<void> {
+		this.writerState = "stopped"
 		this.stopped = true
 		this.draining = true
 		this.ingress.markClosed()
@@ -678,7 +760,7 @@ class ActivityStore implements ActivityStoreHandle {
 			}
 		} finally {
 			this.draining = false
-			await this.lock.release()
+			await this.lock?.release()
 		}
 	}
 }
@@ -688,6 +770,8 @@ function errorFromResponse(
 ): Error {
 	if (response.code === "ACTIVITY_SCHEMA_MISMATCH")
 		return new ActivitySchemaMismatchError(response.found ?? "missing")
+	if (response.code === "ACTIVITY_STORE_LOCKED")
+		return new ActivityStoreLockedError(response.lockPath ?? "")
 	return new ActivityUnavailableError(response.message)
 }
 

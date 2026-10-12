@@ -18,7 +18,7 @@ const MAX_GAP_DECODERS = 32
 export interface IngressCounters {
 	admitted: number
 	excludedTelemetry: number
-	dropped: Record<IngestionGapPayload["reason"], number>
+	dropped: Record<IngestionGapPayload["reason"] | "closed", number>
 }
 
 interface GapEpisode {
@@ -28,12 +28,15 @@ interface GapEpisode {
 	fromReceivedAt: string
 	toReceivedAt: string
 	eventId: string
+	openedAt: number
+	lastDropAt: number
 }
 
 /**
  * Main-thread admission. Token buckets are integer micro-tokens so refill does
- * not drift. One gap record is held outside the queue cap and is never refused
- * for rate; it is emitted on the next successful admit.
+ * not drift. One gap record is held outside the queue cap. An episode closes
+ * after gapQuietMs with no drops, or at most once per gapMaxIntervalMs while
+ * drops continue. The warn log follows that same close.
  */
 export class ActivityIngress {
 	readonly dropped: IngressCounters["dropped"] = {
@@ -41,6 +44,7 @@ export class ActivityIngress {
 		"queue-full": 0,
 		"store-paused": 0,
 		"write-failed": 0,
+		closed: 0,
 	}
 	admitted = 0
 	excludedTelemetry = 0
@@ -52,6 +56,7 @@ export class ActivityIngress {
 	private inFlightBytes = 0
 	private pendingGap: BuiltActivityRow | undefined
 	private gapHeld = false
+	private gapFlush = false
 	private episode: GapEpisode | undefined
 	private closed = false
 
@@ -68,11 +73,19 @@ export class ActivityIngress {
 	}
 
 	admit(envelope: DecodeEnvelope): AdmitResult {
-		if (this.closed) return { admitted: false, reason: "closed" }
+		if (this.closed) {
+			this.dropped.closed++
+			return { admitted: false, reason: "closed" }
+		}
 		if (isTelemetryOutput(envelope.outputType)) {
 			this.excludedTelemetry++
 			return { admitted: false, reason: "telemetry" }
 		}
+		const now = this.now()
+		if (this.paused) return this.rejectEnvelope(envelope, "store-paused")
+		if (this.itemOverflow()) return this.rejectEnvelope(envelope, "queue-full")
+		if (!this.takeTokens(envelope.decoderId, now))
+			return this.rejectEnvelope(envelope, "rate-limited")
 		const row = buildActivityRow({
 			version: ACTIVITY_RECORD_VERSION,
 			eventId: envelope.eventId,
@@ -82,11 +95,12 @@ export class ActivityIngress {
 			kind: "decoder-reception",
 			payload: envelope,
 		})
-		if (this.paused) return this.reject(row, "store-paused")
-		if (this.wouldOverflow(row)) return this.reject(row, "queue-full")
-		if (!this.takeTokens(envelope.decoderId, this.now()))
-			return this.reject(row, "rate-limited")
-		this.stageGap()
+		if (this.byteOverflow(row)) {
+			this.refundTokens(envelope.decoderId)
+			this.noteDrop("queue-full", envelope.receivedAt, envelope.decoderId, now)
+			return { admitted: false, reason: "queue-full" }
+		}
+		this.maybeCloseEpisode(now)
 		this.queue.push(row)
 		this.queueBytes += row.recordBytes
 		this.admitted++
@@ -140,6 +154,7 @@ export class ActivityIngress {
 				"write-failed",
 				new Date(row.receivedAtMs).toISOString(),
 				row.decoderId,
+				this.now(),
 			)
 	}
 
@@ -154,8 +169,22 @@ export class ActivityIngress {
 				"write-failed",
 				new Date(row.receivedAtMs).toISOString(),
 				row.decoderId,
+				this.now(),
 			)
 		}
+	}
+
+	/** Clears an in-flight batch without counting it. A timed-out write may still commit. */
+	forgetInFlight(): void {
+		this.inFlight = []
+		this.inFlightBytes = 0
+	}
+
+	/** True once after a gap record was staged, then clears. */
+	takeGapFlush(): boolean {
+		const staged = this.gapFlush
+		this.gapFlush = false
+		return staged
 	}
 
 	markClosed(): void {
@@ -206,15 +235,11 @@ export class ActivityIngress {
 		)
 	}
 
-	private reject(
-		row: BuiltActivityRow,
+	private rejectEnvelope(
+		envelope: DecodeEnvelope,
 		reason: Exclude<AdmitRejection, "closed" | "telemetry">,
 	): AdmitResult {
-		this.noteDrop(
-			reason,
-			new Date(row.receivedAtMs).toISOString(),
-			row.decoderId,
-		)
+		this.noteDrop(reason, envelope.receivedAt, envelope.decoderId, this.now())
 		return { admitted: false, reason }
 	}
 
@@ -222,6 +247,7 @@ export class ActivityIngress {
 		reason: IngestionGapPayload["reason"],
 		receivedAt: string,
 		decoderId: string | null,
+		now: number,
 	): void {
 		this.dropped[reason]++
 		if (!this.episode) {
@@ -232,9 +258,12 @@ export class ActivityIngress {
 				fromReceivedAt: receivedAt,
 				toReceivedAt: receivedAt,
 				eventId: randomUUID(),
+				openedAt: now,
+				lastDropAt: now,
 			}
 		}
 		this.episode.dropped++
+		this.episode.lastDropAt = now
 		this.episode.toReceivedAt = receivedAt
 		if (
 			decoderId &&
@@ -246,13 +275,21 @@ export class ActivityIngress {
 		}
 	}
 
-	/** A gap bypasses the token bucket and the queue item cap (one reserved slot). */
-	private stageGap(): void {
-		if (!this.episode || this.gapHeld) return
+	/**
+	 * Closes the open episode after a quiet period, or once per max interval
+	 * while drops continue. The gap bypasses the token bucket and the queue
+	 * item cap (one reserved slot).
+	 */
+	private maybeCloseEpisode(now: number): void {
 		const episode = this.episode
+		if (!episode || this.gapHeld) return
+		const quiet = now - episode.lastDropAt >= this.limits.gapQuietMs
+		const aged = now - episode.openedAt >= this.limits.gapMaxIntervalMs
+		if (!quiet && !aged) return
 		this.episode = undefined
 		this.gapHeld = true
-		const at = new Date(this.now()).toISOString()
+		this.gapFlush = true
+		const at = new Date(now).toISOString()
 		this.pendingGap = buildActivityRow({
 			version: ACTIVITY_RECORD_VERSION,
 			eventId: episode.eventId,
@@ -278,9 +315,13 @@ export class ActivityIngress {
 		)
 	}
 
-	private wouldOverflow(row: BuiltActivityRow): boolean {
-		const depth = this.queue.length + this.inFlight.length
-		if (depth + 1 > this.limits.queueMaxItems) return true
+	private itemOverflow(): boolean {
+		return (
+			this.queue.length + this.inFlight.length + 1 > this.limits.queueMaxItems
+		)
+	}
+
+	private byteOverflow(row: BuiltActivityRow): boolean {
 		return (
 			this.queueBytes + this.inFlightBytes + row.recordBytes >
 			this.limits.queueMaxBytes
@@ -295,6 +336,11 @@ export class ActivityIngress {
 		this.global.take()
 		decoder.take()
 		return true
+	}
+
+	private refundTokens(decoderId: string): void {
+		this.global.refund()
+		this.bucketFor(decoderId, this.now()).refund()
 	}
 
 	private bucketFor(decoderId: string, now: number): TokenBucket {
@@ -347,6 +393,11 @@ class TokenBucket {
 
 	take(): void {
 		this.tokens -= TOKEN
+	}
+
+	refund(): void {
+		const next = this.tokens + TOKEN
+		this.tokens = next > this.capacity ? this.capacity : next
 	}
 
 	full(): boolean {

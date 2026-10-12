@@ -1,5 +1,13 @@
 import { WaveKitError } from "../../../utils/errors.js"
 
+/** A write acknowledgement did not arrive. The worker may still commit. */
+export class ActivityWriteTimeoutError extends WaveKitError {
+	constructor() {
+		super("activity write timed out", "ACTIVITY_UNAVAILABLE")
+		this.name = "ActivityWriteTimeoutError"
+	}
+}
+
 /** node:sqlite or FTS5 is missing, or the store cannot be opened. */
 export class ActivityUnavailableError extends WaveKitError {
 	constructor(message: string, cause?: Error) {

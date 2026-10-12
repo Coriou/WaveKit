@@ -187,7 +187,7 @@ export interface ActivityStoreStats {
 	committed: number
 	duplicates: number
 	dropped: Record<
-		"rate-limited" | "queue-full" | "store-paused" | "write-failed",
+		"rate-limited" | "queue-full" | "store-paused" | "write-failed" | "closed",
 		number
 	>
 	excludedTelemetry: number
@@ -199,6 +199,8 @@ export interface ActivityStoreStats {
 	oldestReceivedAt: string | null
 	pruneWatermark: string
 	paused: boolean
+	/** `stopped` after the writer exits or a write times out. No restart in this batch. */
+	writer: "running" | "stopped"
 }
 
 /** Query filters shared by REST, facets and WS replay (query lane). */

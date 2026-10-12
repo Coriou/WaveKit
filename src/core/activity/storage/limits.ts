@@ -22,6 +22,10 @@ export interface ActivityLimits {
 	closeTimeoutMs: number
 	/** How often a paused store retries a TRUNCATE checkpoint. */
 	pauseRetryMs: number
+	/** Quiet time with no drops before an ingestion-gap episode closes. */
+	gapQuietMs: number
+	/** Sustained overload emits at most one ingestion-gap row per this interval. */
+	gapMaxIntervalMs: number
 }
 
 const MiB = 1024 * 1024
@@ -46,6 +50,8 @@ export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
 	incrementalVacuumPages: 64,
 	closeTimeoutMs: 2000,
 	pauseRetryMs: 250,
+	gapQuietMs: 5_000,
+	gapMaxIntervalMs: 60_000,
 })
 
 const LIMIT_KEYS = Object.keys(
@@ -78,9 +84,17 @@ export function resolveActivityLimits(
 		throw new ActivityUnavailableError(
 			"Activity queue and batch byte caps must be at least 1",
 		)
+	if (limits.maxRows < 1000)
+		throw new ActivityUnavailableError(
+			"Activity maxRows must be at least 1000",
+		)
 	if (limits.pruneBatchRows < 1)
 		throw new ActivityUnavailableError(
 			"Activity prune batch must be at least 1 row",
+		)
+	if (limits.gapMaxIntervalMs < 1)
+		throw new ActivityUnavailableError(
+			"Activity gap interval must be at least 1 ms",
 		)
 	if (limits.pauseRetryMs < 1)
 		throw new ActivityUnavailableError(

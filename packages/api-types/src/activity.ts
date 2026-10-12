@@ -263,6 +263,7 @@ export interface ActivityStoreStats {
 	oldestReceivedAt: string | null
 	pruneWatermark: string
 	paused: boolean
+	/** `stopped` after the writer exits or a write times out. No restart in this batch. */
 	writer: "running" | "stopped"
 }
 

@@ -6,6 +6,7 @@ import {
 	readActivityState,
 	syncActivityWal,
 } from "./database.js"
+import { ActivityUnavailableError } from "./errors.js"
 import type { CommitBatchSuccess, PruneResult } from "./database.js"
 import type { ActivityLimits } from "./limits.js"
 import type { BuiltActivityRow } from "./row.js"
@@ -51,9 +52,11 @@ export function createActivitySession(
 	dbPath: string,
 	limits: ActivityLimits,
 	failNextWrites = 0,
+	throwNextWrites = 0,
 ): ActivitySession {
 	const opened = openActivityDatabase(db)
 	let failures = failNextWrites
+	let throws = throwNextWrites
 	let state = readActivityState(db, dbPath)
 	let paused = state.walBytes >= limits.walPauseBytes
 	if (state.walBytes >= limits.walPassiveBytes || paused) {
@@ -84,6 +87,10 @@ export function createActivitySession(
 		created: opened.created,
 		snapshot,
 		write(rows, nowMs) {
+			if (throws > 0) {
+				throws -= 1
+				throw new ActivityUnavailableError("injected write throw")
+			}
 			if (failures > 0) {
 				failures -= 1
 				return { ok: false, message: "injected write failure" }

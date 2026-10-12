@@ -206,11 +206,28 @@ export function commitActivityBatch(
 	}
 }
 
+const AGE_SLACK_MIN_MS = 60_000
+
+/** max(60s, 1% of maxAge). Age pruning waits until the oldest row is past this cushion. */
+export function activityAgeSlackMs(maxAgeMs: number): number {
+	const percent = Number.isFinite(maxAgeMs) ? Math.floor(maxAgeMs / 100) : 0
+	return Math.max(AGE_SLACK_MIN_MS, percent)
+}
+
+/** 95% of a row or byte cap. Zero or negative caps have no retained floor. */
+export function activityLowWater(cap: number): number {
+	if (!Number.isSafeInteger(cap) || cap <= 0) return 0
+	return Math.floor((cap * 95) / 100)
+}
+
 /**
  * Deletes an ascending seq prefix in one transaction, then incremental_vacuum.
  * The watermark moves to the greatest deleted seq and the generation increments
- * in that same transaction. Age uses received_at_ms and never opens a hole:
- * a fresh row stops an age-only prune.
+ * in that same transaction. Age runs only when the oldest row is older than
+ * maxAge plus slack, and then only deletes rows older than maxAge. Row and byte
+ * pressure delete down to 95% of the cap and never remove more than
+ * count - lowWater rows for the row cap. A row that qualifies for none of
+ * these stops the prefix, so a prune never opens a hole.
  */
 export function pruneActivityPrefix(
 	db: SqliteDatabase,
@@ -231,24 +248,52 @@ export function pruneActivityPrefix(
 		generation: meta.pruneGeneration,
 		changed: false,
 	}
-	const overRows = countRows(db) > limits.maxRows
-	const overBytes = databaseBytes(db) > limits.maxDbBytes
+	const rowCount = countRows(db)
+	const dbBytes = databaseBytes(db)
+	const overRows = rowCount > limits.maxRows
+	const overBytes = dbBytes > limits.maxDbBytes
+	const oldest = oldestReceivedMs(db)
+	const slack = activityAgeSlackMs(limits.maxAgeMs)
+	const ageActive =
+		oldest !== null && oldest < nowMs - limits.maxAgeMs - slack
 	const cutoff = nowMs - limits.maxAgeMs
+	if (!overRows && !overBytes && !ageActive) return unchanged
+	const rowBudget = overRows
+		? Math.max(0, rowCount - activityLowWater(limits.maxRows))
+		: 0
+	const byteExcess = overBytes
+		? Math.max(0, dbBytes - activityLowWater(limits.maxDbBytes))
+		: 0
 	const candidates = db
 		.prepare(
-			`SELECT CAST(activity.seq AS TEXT) AS seq_text, activity.received_at_ms AS received_at_ms
+			`SELECT CAST(activity.seq AS TEXT) AS seq_text,
+			        activity.received_at_ms AS received_at_ms,
+			        activity.record_bytes AS record_bytes
 			 FROM activity ORDER BY activity.seq ASC LIMIT ?`,
 		)
 		.all(limits.pruneBatchRows)
 	const seqs: bigint[] = []
+	let capDeletes = 0
+	let bytesFreed = 0
 	for (const candidate of candidates) {
 		const seqText = cell(candidate, "seq_text")
 		if (typeof seqText !== "string" || !/^\d+$/.test(seqText))
 			throw new ActivityUnavailableError("Activity seq is invalid")
-		const expired =
-			sqlNumber(cell(candidate, "received_at_ms"), "received_at_ms") < cutoff
-		if (!(overRows || overBytes || expired)) break
+		const received = sqlNumber(
+			cell(candidate, "received_at_ms"),
+			"received_at_ms",
+		)
+		const recordBytes = sqlNumber(
+			cell(candidate, "record_bytes") ?? 0,
+			"record_bytes",
+		)
+		const forAge = ageActive && received < cutoff
+		const forRows = capDeletes < rowBudget
+		const forBytes = byteExcess > 0 && bytesFreed < byteExcess
+		if (!forAge && !forRows && !forBytes) break
 		seqs.push(BigInt(seqText))
+		capDeletes += 1
+		bytesFreed += Math.max(0, recordBytes)
 	}
 	const greatest = seqs[seqs.length - 1]
 	if (greatest === undefined || greatest <= BigInt(meta.pruneWatermark))
@@ -435,13 +480,19 @@ function countRows(db: SqliteDatabase): number {
 	)
 }
 
-function oldestReceivedAt(db: SqliteDatabase): string | null {
+function oldestReceivedMs(db: SqliteDatabase): number | null {
 	const oldest = cell(
 		db.prepare("SELECT MIN(received_at_ms) AS oldest FROM activity").get(),
 		"oldest",
 	)
 	if (oldest === undefined || oldest === null) return null
-	return new Date(sqlNumber(oldest, "oldest")).toISOString()
+	return sqlNumber(oldest, "oldest")
+}
+
+function oldestReceivedAt(db: SqliteDatabase): string | null {
+	const oldest = oldestReceivedMs(db)
+	if (oldest === null) return null
+	return new Date(oldest).toISOString()
 }
 
 function databaseBytes(db: SqliteDatabase): number {

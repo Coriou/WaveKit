@@ -9,8 +9,11 @@ interface OpenActivityWorkerRequest {
 	id: number
 	type: "open"
 	dbPath: string
+	lockPath: string
 	limits: ActivityLimits
 	failNextWrites: number
+	throwNextWrites: number
+	writeDelayMs: number
 }
 
 interface ReadyActivityWorkerResponse {
@@ -26,6 +29,7 @@ interface ErrorActivityWorkerResponse {
 	code: string
 	message: string
 	found?: string
+	lockPath?: string
 }
 
 export type ActivityWorkerRequest =
@@ -54,8 +58,11 @@ export function isActivityWorkerRequest(
 	if (type === "open") {
 		return (
 			typeof value["dbPath"] === "string" &&
+			typeof value["lockPath"] === "string" &&
 			isRecord(value["limits"]) &&
-			typeof value["failNextWrites"] === "number"
+			typeof value["failNextWrites"] === "number" &&
+			typeof value["throwNextWrites"] === "number" &&
+			typeof value["writeDelayMs"] === "number"
 		)
 	}
 	if (type === "write")

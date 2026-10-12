@@ -89,6 +89,7 @@ describe("activity admission", () => {
 			globalBurst: 5,
 			decoderBurst: 5,
 			queueMaxItems: 1,
+			gapQuietMs: 0,
 		})
 		expect(gate.admit(envelope({ decoderId: "a" })).admitted).toBe(true)
 		expect(gate.admit(envelope({ decoderId: "c" })).admitted).toBe(false)
@@ -120,6 +121,7 @@ describe("activity admission", () => {
 				decoderBurst: 100,
 				decoderRatePerSec: 100,
 				queueMaxItems: 100,
+				gapQuietMs: 1_000,
 			},
 			() => clock,
 		)
@@ -162,6 +164,84 @@ describe("activity admission", () => {
 		expect(gate.dropped["write-failed"]).toBe(2)
 		expect(gate.dropped["store-paused"]).toBe(1)
 		expect(gate.queueDepth()).toBe(0)
+	})
+
+	it("refunds a token when the built row exceeds the byte cap", () => {
+		const gate = ingress({
+			globalBurst: 2,
+			globalRatePerSec: 0,
+			decoderBurst: 10,
+			queueMaxItems: 10,
+			queueMaxBytes: 1,
+		})
+		expect(gate.admit(envelope())).toEqual({
+			admitted: false,
+			reason: "queue-full",
+		})
+		expect(gate.admit(envelope())).toEqual({
+			admitted: false,
+			reason: "queue-full",
+		})
+		expect(gate.dropped["queue-full"]).toBe(2)
+		expect(gate.dropped["rate-limited"]).toBe(0)
+	})
+
+	it("counts admits rejected because the writer is closed", () => {
+		const gate = ingress({ globalBurst: 10, decoderBurst: 10 })
+		gate.markClosed()
+		expect(gate.admit(envelope())).toEqual({
+			admitted: false,
+			reason: "closed",
+		})
+		expect(gate.admit(envelope())).toEqual({
+			admitted: false,
+			reason: "closed",
+		})
+		expect(gate.dropped.closed).toBe(2)
+		expect(gate.dropped["rate-limited"]).toBe(0)
+		expect(gate.admitted).toBe(0)
+	})
+
+	it("emits at most one gap per minute under a sustained offered load", () => {
+		let clock = 0
+		const warnings: string[] = []
+		const gate = new ActivityIngress(
+			resolveActivityLimits({
+				globalRatePerSec: 1_000,
+				globalBurst: 1_000,
+				decoderRatePerSec: 50,
+				decoderBurst: 200,
+				queueMaxItems: 1024,
+				batchWindowMs: 0,
+			}),
+			() => clock,
+			{
+				warn(_object: unknown, message?: string) {
+					warnings.push(message ?? "")
+				},
+			} as unknown as typeof logger,
+		)
+		const durationMs = 180_000
+		let gaps = 0
+		let real = 0
+		for (let step = 0; step < durationMs; step++) {
+			clock += 1
+			const result = gate.admit(
+				envelope({ decoderId: "adsb", eventId: `e${step}` }),
+			)
+			if (!result.admitted && gate.pendingCount() === 0) continue
+			const batch = gate.takeBatch(64, 8 * 1024 * 1024)
+			for (const row of batch) {
+				if (row.kind === "ingestion-gap") gaps += 1
+				else real += 1
+			}
+			gate.ack(new Set(batch.map(row => row.eventId)))
+		}
+		expect(gaps).toBeGreaterThan(0)
+		expect(gaps).toBeLessThanOrEqual(durationMs / 60_000)
+		expect(real).toBeGreaterThanOrEqual(9_000)
+		expect(real).toBeLessThanOrEqual(9_400)
+		expect(warnings).toHaveLength(gaps)
 	})
 
 	it("refills only forward in time", () => {
