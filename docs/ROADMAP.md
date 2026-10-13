@@ -50,6 +50,16 @@ cited built-in band plan corrections (EU airband, PMR446/dPMR446, CB, 169 MHz
 metering). Still open from that list: noise squelch, recording activity as a resume
 hold and an EU 466 MHz pager plan without a citable primary source.
 
+Landed in the 2026-10-13 web-gap batch 2 (WG2, core only, [spec](specs/web-gaps-2/requirements.md)):
+Activity presentation (category, protocol, entity key, title, fields, position)
+with APRS and Meshtastic position coalescing; APRS station/object/item and
+Meshtastic node trackers with REST routes and `aprs`/`mesh` channels; a 2 s
+per-entity throttle on vessel, APRS and mesh updates; CTCSS and DTMF on analog
+transmissions; strict AIS NMEA checksums; DMR/P25/NXDN call metadata; device
+names, kinds and coarse last-seen; Ignore (lockout) skips sweeps; per-job scanner
+hit statistics; a Mic-E position fix (West longitudes were decoded as East, and
+the speed/course offsets were missing). No CLI or web change.
+
 Order of the remaining core gaps, by what they unblock in the dashboard:
 
 1. **Event foundation**: envelope publication, a persistent event store with
@@ -355,6 +365,9 @@ session-only GET/HEAD device inventory publishes committed ID/clocks/current met
 without renewal or online-presence claims. See the
 [access implementation checklist](specs/core-access-policy/tasks.md).
 
+- [x] Device names, kinds and coarse last-seen (WG2, access amendment 4.9–4.12):
+      operator labels via `POST /api/access/devices/label`, `lastSeenAt` as a UTC
+      hour, at most 768 writes a day.
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
       bounded replay and explicit gaps when history is unavailable.
@@ -413,6 +426,15 @@ Activity `unavailable` and the rest running), and measured retention.
       since WG1; `analog-transmission` records from the live demodulator.
       Receipts, other kinds, recordings/catalog, CLI/web views, image
       verification and measured retention remain open.
+- [x] Activity presentation (WG2): decoder receptions carry category, protocol,
+      entity key, title, fields and position from their own payload; APRS and
+      Meshtastic positions join the 60 s coalescing. Rows stored before WG2 are
+      not backfilled.
+- [ ] Backfill presentation onto rows stored before WG2 (deferred; old rows keep
+      category `other` and no entity key).
+- [ ] Filter Meshtastic flood copies of non-position ports (telemetry, node
+      info) in Activity by `(from, id)` (deferred; about 600 rows/h on a
+      100-node mesh are still stored).
 - [ ] Add a common decode envelope with stable identity, category, title, fields,
       actual channel frequency, source/decoder/job provenance and raw JSON.
       Preserve existing decoder payloads; source centre alone cannot locate an
@@ -467,6 +489,12 @@ open. Missing proof retains ownership rather than admitting a successor.
       compatible in-window searches and additional-receiver options explicitly. (S1: docs/SCANNER.md)
 - [x] Expose scan jobs, progress, cancellation and discovery reports through the
       shared API/events so CLI and future web clients have equivalent capabilities. (S1: docs/SCANNER.md)
+- [x] Ignore (lockout) skips sweeps (WG2, D2): a locked discovery becomes a runtime
+      exclusion on sweeps of its sources, at most 256 per job, never emptying a
+      plan; probe, recording and monitor gating unchanged. (docs/SCANNER.md)
+- [x] Per-job hit statistics (WG2): hits per discovery, `GET /api/scanner/jobs/:id/hits`,
+      `hitStats` on progress and `jobHits` on discovery events; in memory,
+      best-effort past 2,000 discoveries or 4,096 credited observations.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
@@ -510,15 +538,20 @@ and status. Shared browser audio and richer controls remain open.
 - [ ] Expose AGC off/slow/fast where supported, including FM; implement real noise
       reduction, audio noise blanker, notch, CW BFO and DSB demodulation.
       Current filter presets and AM-based CW/DSB do not fulfill these controls.
-- [ ] Detect CTCSS and decode DCS code/polarity; expose tones on live status and
-      transmission events, saved frequencies and tone squelch. Reuse scanner
-      Task 41 channel features; its DCS presence boolean is not a decoded code.
+- [x] Detect CTCSS and DTMF on analog transmissions (WG2): `tone` on closed
+      `live-audio:transmission` events and `analog-transmission` Activity rows.
+- [ ] Decode DCS code/polarity; expose tones on live status, saved frequencies and
+      tone squelch (deferred from WG2). Reuse scanner Task 41 channel features; its
+      DCS presence boolean is not a decoded code.
 - [ ] Emit analog transmission start/end/duration events from squelch with stable
       identity and recording links. Detector tracks and squelch transmissions
       have different boundaries; reconcile them explicitly.
+- [x] Digital call metadata (WG2): `colourCode`, `nac`, `ran`, `algorithmId`,
+      `keyId` and CRC/FEC `errors` counts on `digital-voice:call` when dsd-fme
+      reports them.
 - [ ] Expose DMR talker alias and a defined error-rate measure after verifying
-      pinned dsd-fme output. Existing CRC/FEC counts and internal bad-signal
-      ratio do not establish voice BER or an alias parser.
+      pinned dsd-fme output (talker alias deferred from WG2). The CRC/FEC counts
+      and internal bad-signal ratio do not establish voice BER or an alias parser.
 
 ## 5c. Recording catalog, capture and playback
 
@@ -754,18 +787,23 @@ separate from scanner RF sweep coverage.
 - [x] AIS vessel current state (WG1): an in-memory tracker of AIS reports
       (NMEA positions from types 1–3, 18, 19; static data from 5, 19, 24), `GET /api/vessels`, `/api/vessels/stats`,
       `/api/vessels/:mmsi` and the `vessels` WebSocket channel. No position
-      history. APRS and Meshtastic current state remain open.
-- [ ] Coalesce `vessel:update` per MMSI on the `vessels` channel (today every
-      merged report is sent; aircraft have the same shape).
-- [ ] `liveDemodTransmissionConfigChanged` treats an absent `sourceId` and an
-      explicit default source as different, so switching between them closes
-      an open transmission as `config` though the radio did not change.
-- [ ] AIS NMEA checksums are not verified: the decoder accepts sentences with a
-      wrong XOR checksum, and every `!` sentence in
-      `tests/mocks/fixtures/ais/nmea-sample.txt` (and the `!AIVDO` sample in
-      `tests/unit/decoders/ais-catcher.test.ts`) carries a bad checksum. Verify
-      checksums in the decoder and regenerate those fixtures with the test
-      encoder.
+      history.
+- [x] APRS and Meshtastic current state (WG2): in-memory trackers,
+      `/api/aprs/*`, `/api/mesh/*` and the `aprs` and `mesh` channels.
+- [ ] Meshtastic telemetry, neighbour links and GPS time on nodes (deferred from
+      WG2).
+- [x] Throttle `vessel:update`, `aprs:update` and `mesh:update` per entity, 2 s
+      (WG2); identity changes and new/lost are immediate. Aircraft keep today's
+      shape.
+- [x] An absent `sourceId` and an explicit id for the same source no longer
+      restart live demodulation or close a transmission as `config` (WG2 req 7.7).
+- [x] AIS NMEA checksums are verified (WG2); the fixtures were regenerated with
+      the test encoder.
+- [x] Mic-E positions (WG2): West longitudes were decoded as East and the
+      800 kn / 400° offsets were missing; fixed with spec vectors.
+- [ ] The CLI WebSocket client treats a frame on an unknown channel as
+      `ws:invalid` (pre-existing). Not triggered today because the CLI never
+      subscribes to `aprs` or `mesh`; tolerate unknown channels before it does.
 - [ ] Serve aircraft, vessel, APRS and mesh position trails with persistent
       last-hour replay and a time cursor; reuse existing ADS-B tracking.
 - [ ] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
