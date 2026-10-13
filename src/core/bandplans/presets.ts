@@ -79,9 +79,17 @@ export const builtinPresetsFor: BuiltinPresetsFor = region => {
 	return presets
 }
 
-export const presetIssuesFor: PresetIssuesFor = (preset, region) =>
+export const presetIssuesFor: PresetIssuesFor = (
+	preset,
+	region,
+	effectiveIds,
+) =>
 	preset.job.bandplans
-		.filter(id => resolveBandplan(id, region) === undefined)
+		.filter(id =>
+			effectiveIds === undefined
+				? resolveBandplan(id, region) === undefined
+				: !effectiveIds.has(id),
+		)
 		.map(
 			(bandplanId): ScanPresetIssue => ({
 				code: "unknown-bandplan",
