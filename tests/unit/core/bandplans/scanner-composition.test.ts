@@ -337,6 +337,72 @@ describe("scanner fed by the band-plan stack", () => {
 	})
 
 	// Feature: band-plans, Property 17: Hidden removal
+	// Validates: Requirements 11.3 (scanner-followups requirement 6.4)
+	it("running and operator-paused sweeps restored at boot keep their admitted plans after a hide", async () => {
+		const service = await openService()
+		const provider = feedFrom(() => service)
+		const spec: ScanJobSpec = {
+			sourceId: "rtl",
+			mode: "sweep",
+			bandplans: [PLAN],
+			priority: 50,
+			takeover: true,
+			resume: { autoAfterIdleMs: null },
+		}
+		// One job per state directory: a second sweep on the same source would wait for the lease.
+		const boots = []
+		for (const pause of [false, true]) {
+			const first = serviceHarness({ patch: noPassive, bandplans: provider })
+			cleanups.push(() => rm(first.dir, { recursive: true, force: true }))
+			await first.service.start()
+			const job = await first.service.createJob(spec)
+			await untilRunning(first, job.id)
+			if (pause) await first.service.pauseJob(job.id)
+			await settled(first.service)
+			expect(first.service.getJob(job.id)).toMatchObject(
+				pause ? { state: "paused", reason: "operator" } : { state: "running" },
+			)
+			boots.push({ dir: first.dir, id: job.id, pause, admitted: pinned(job) })
+			expect(pinned(first.service.getJob(job.id))).toEqual(pinned(job))
+			await first.service.stop()
+		}
+
+		const view = service.view()
+		await service.mutate({
+			type: "patch-band-edit",
+			expected: expectedOf(view),
+			packId: builtinPackId(view),
+			bandId: PLAN,
+			set: { hidden: true },
+			reset: [],
+		})
+
+		for (const boot of boots) {
+			const h = serviceHarness({
+				dir: boot.dir,
+				patch: noPassive,
+				bandplans: provider,
+			})
+			cleanups.push(() => h.service.stop())
+			await h.service.start()
+			await settled(h.service)
+			expect(h.service.bandplans().map(plan => plan.id)).not.toContain(PLAN)
+			const restored = h.service.getJob(boot.id)
+			expect(restored).toMatchObject({
+				state: "paused",
+				reason: boot.pause ? "operator" : "core-restart",
+				issues: [],
+			})
+			expect(pinned(restored)).toEqual(boot.admitted)
+			// Resumed after the restore: still the admitted plan.
+			await h.service.resumeJob(boot.id, { takeover: true })
+			await untilRunning(h, boot.id)
+			expect(h.service.getJob(boot.id)?.state).toBe("running")
+			expect(pinned(h.service.getJob(boot.id))).toEqual(boot.admitted)
+		}
+	})
+
+	// Feature: band-plans, Property 17: Hidden removal
 	// Validates: Requirements 11.1, 11.3
 	it("identify priors follow the effective list: default unchanged, a hidden band drops its priors", async () => {
 		const service = await openService()
