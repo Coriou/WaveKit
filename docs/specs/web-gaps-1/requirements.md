@@ -185,7 +185,10 @@ update.
 7.8 Under a busy position feed at the row cap, rare events (pages, analog transmissions)
 shall survive far longer than without coalescing.
 7.9 A reception whose write fails (write failure or failed batch) shall not count as stored:
-the entity's coalescing state is rolled back, so its retransmission is stored. The tracked
+the entity's coalescing state is rolled back, so its retransmission is stored. Each row
+undoes only the window and identity values it set and later rows did not replace, newest
+first; a later written row never inherits a failed row's identity. A write that times out
+(`forgetInFlight`) may still commit, so its rows keep their coalescing state. The tracked
 entity bound shall be at least 1 while coalescing is on.
 
 ## 8. Scanner extras

@@ -102,11 +102,17 @@ const SPECS: Readonly<Record<string, CoalesceSpec>> = {
 	ship: SHIP,
 }
 
+/** A value and the commit (reception) that set it, so one failed row undoes only its own part. */
+interface Stamped<T> {
+	value: T
+	by: number
+}
+
 interface EntityState {
-	/** receivedAt (ms) of the last stored reception. */
-	storedAt: number
+	/** receivedAt (ms) of the last stored reception; -Infinity when none is left. */
+	storedAt: Stamped<number>
 	/** Last known value per identity field, as JSON text. */
-	identity: Map<string, string>
+	identity: Map<string, Stamped<string>>
 }
 
 export interface CoalesceDecision {
@@ -129,6 +135,7 @@ function asObject(value: JsonValue): JsonObject | null {
 
 export class PositionCoalescer {
 	private readonly entities = new Map<string, EntityState>()
+	private seq = 0
 	coalesced = 0
 
 	/**
@@ -174,15 +181,17 @@ export class PositionCoalescer {
 			)
 		const changed =
 			state === undefined ||
-			[...seen].some(([field, value]) => state.identity.get(field) !== value)
+			[...seen].some(
+				([field, value]) => state.identity.get(field)?.value !== value,
+			)
 		// A clock step backwards (at < storedAt) also stores, so it cannot mute an entity.
 		const due =
 			state === undefined ||
-			at - state.storedAt >= this.windowMs ||
-			at < state.storedAt
+			at - state.storedAt.value >= this.windowMs ||
+			at < state.storedAt.value
 		if (!informative && !changed && !due)
 			return { store: false, commit: () => NOOP }
-		return { store: true, commit: () => this.record(key, state, seen, at) }
+		return { store: true, commit: () => this.record(key, seen, at) }
 	}
 
 	/** Counts a reception that was not stored because of the window. */
@@ -192,24 +201,41 @@ export class PositionCoalescer {
 
 	private record(
 		key: string,
-		previous: EntityState | undefined,
 		seen: ReadonlyMap<string, string>,
 		at: number,
 	): () => void {
-		const identity = new Map(previous?.identity)
-		for (const [field, value] of seen) identity.set(field, value)
-		const next: EntityState = { storedAt: at, identity }
+		const by = ++this.seq
+		const state: EntityState = this.entities.get(key) ?? {
+			storedAt: { value: Number.NEGATIVE_INFINITY, by: 0 },
+			identity: new Map(),
+		}
+		const priorStoredAt = state.storedAt
+		const priorFields = new Map<string, Stamped<string> | undefined>()
+		for (const [field, value] of seen) {
+			priorFields.set(field, state.identity.get(field))
+			state.identity.set(field, { value, by })
+		}
+		state.storedAt = { value: at, by }
 		this.entities.delete(key)
-		this.entities.set(key, next)
+		this.entities.set(key, state)
 		this.evict()
+		// Undo touches only what this reception set and nothing later rows
+		// replaced, so a later stored row never inherits a failed row's identity.
+		// The ingress undoes failed rows newest first.
 		return () => {
-			// Only while this reception is still the entity's latest stored one.
-			if (this.entities.get(key) !== next) return
-			this.entities.delete(key)
-			if (previous) {
-				this.entities.set(key, previous)
-				this.evict()
+			const current = this.entities.get(key)
+			if (!current) return
+			for (const [field, prior] of priorFields) {
+				if (current.identity.get(field)?.by !== by) continue
+				if (prior) current.identity.set(field, prior)
+				else current.identity.delete(field)
 			}
+			if (current.storedAt.by === by) current.storedAt = priorStoredAt
+			if (
+				current.identity.size === 0 &&
+				current.storedAt.value === Number.NEGATIVE_INFINITY
+			)
+				this.entities.delete(key)
 		}
 	}
 

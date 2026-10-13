@@ -177,7 +177,10 @@ identity fields compared with the last stored values, and (ship) an AIS message-
 any other field makes the reception informative and stored. Key `decoderId + outputType +
 entity id`; window by the envelope's `receivedAt` (the ingest clock); the entity state is
 committed only when the row is queued, so a rate-limited or dropped reception does not
-mute the next one, and the commit's undo runs when the write fails (`nack`, skipped rows). Bounded by `positionCoalesceMaxEntities`
+mute the next one, and the commit's undo runs when the write fails (`nack`, skipped rows).
+Values carry the commit that set them; an undo restores only fields and the window still
+stamped by its own commit, and the ingress undoes failed rows newest first. A timed-out
+write keeps its state (it may have committed). Bounded by `positionCoalesceMaxEntities`
 (20 000) with LRU eviction; an evicted entity's next reception counts as a first sighting.
 A backwards clock step stores. Rejection reason `coalesced`; `coalescedPositions` in stats.
 

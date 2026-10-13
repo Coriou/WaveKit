@@ -218,7 +218,9 @@ export class ActivityIngress {
 		this.inFlight = []
 		this.inFlightBytes = 0
 		if (gap) this.pendingGap = gap
-		for (const row of failed) this.rollBackCoalescing(row.eventId)
+		// Newest first, so each undo sees the state its own commit left.
+		for (const row of [...failed].reverse())
+			this.rollBackCoalescing(row.eventId)
 		for (const row of failed)
 			this.noteDrop(
 				"write-failed",
@@ -233,9 +235,10 @@ export class ActivityIngress {
 		eventIds: readonly string[],
 	): void {
 		const skipped = new Set(eventIds)
+		for (const row of [...batch].reverse())
+			if (skipped.has(row.eventId)) this.rollBackCoalescing(row.eventId)
 		for (const row of batch) {
 			if (!skipped.has(row.eventId) || row.kind === "ingestion-gap") continue
-			this.rollBackCoalescing(row.eventId)
 			this.noteDrop(
 				"write-failed",
 				new Date(row.receivedAtMs).toISOString(),
