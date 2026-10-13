@@ -133,11 +133,16 @@ interface FragmentGroup {
 
 const FRAGMENT_TIMEOUT_MS = 2_000
 const MAX_PENDING_FRAGMENTS = 8
+/** At most one checksum debug line per minute (WG2 req 8.1). */
+const CHECKSUM_LOG_INTERVAL_MS = 60_000
 
 export class AisCatcherDecoder extends IqDecimateDecoder {
 	private options: AisCatcherOptions
 	/** Pending multi-sentence groups, keyed by `${talker}:${seqId}:${channel}`. */
 	private readonly fragmentGroups = new Map<string, FragmentGroup>()
+	/** Sentences dropped for a missing or wrong NMEA checksum (WG2 req 8.1). */
+	private checksumErrorCount = 0
+	private lastChecksumLogAt = Number.NEGATIVE_INFINITY
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -199,16 +204,45 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 	}
 
 	/**
+	 * Sentences dropped because the NMEA XOR checksum was missing or wrong.
+	 * Read-only. Also counted in `stats.errors`.
+	 */
+	get checksumErrors(): number {
+		return this.checksumErrorCount
+	}
+
+	/**
 	 * Reassemble `!AIVDM` / `!AIVDO` groups. At most 8 groups, each dropped
 	 * after 2 s. Fragments must arrive in order; a gap drops the group.
-	 * Checksums are not checked, matching parseNmeaSentence.
+	 * The checksum is verified before a sentence can enter the fragment buffer.
+	 * A bad fragment never enters, so a group that is missing it times out.
 	 */
 	private consumeNmea(sentence: string): ShipData | null {
 		const now = Date.now()
 		this.expireFragments(now)
+		if (
+			(sentence.startsWith("!") || sentence.startsWith("$")) &&
+			!nmeaChecksumValid(sentence)
+		) {
+			this.noteChecksumFailure()
+			return null
+		}
 		const parts = inspectNmea(sentence)
 		if (!parts || parts.total <= 1) return parseNmeaSentence(sentence)
 		return this.consumeFragment(parts, now)
+	}
+
+	/** Count a checksum drop and debug-log at most once per minute. */
+	private noteChecksumFailure(): void {
+		this.stats.errors++
+		this.checksumErrorCount++
+		const now = Date.now()
+		if (now - this.lastChecksumLogAt < CHECKSUM_LOG_INTERVAL_MS) return
+		this.lastChecksumLogAt = now
+		this.logger.debug(
+			{ checksumErrors: this.checksumErrorCount },
+			"Dropped an AIS NMEA sentence with a missing or wrong checksum",
+		)
 	}
 
 	private consumeFragment(parts: NmeaParts, now: number): ShipData | null {
@@ -442,9 +476,28 @@ interface NmeaParts {
 }
 
 /**
+ * NMEA 0183 checksum. XOR of the characters strictly between the leading
+ * `!` or `$` and `*`, compared with the two hex digits after `*`
+ * (case-insensitive). Nothing may follow those two digits.
+ */
+export function nmeaChecksumValid(sentence: string): boolean {
+	const lead = sentence.charCodeAt(0)
+	if (lead !== 0x21 && lead !== 0x24) return false
+	const star = sentence.indexOf("*")
+	if (star < 1) return false
+	const hex = sentence.slice(star + 1)
+	if (!/^[0-9A-Fa-f]{2}$/.test(hex)) return false
+	let checksum = 0
+	for (let i = 1; i < star; i++) checksum ^= sentence.charCodeAt(i)
+	return checksum === Number.parseInt(hex, 16)
+}
+
+/**
  * Split an AIS sentence. Returns null unless it has the same shape
  * parseNmeaSentence has always required (prefix and at least 7 fields).
- * The checksum is not verified.
+ * The NMEA ingest path verifies the checksum before calling this.
+ * This function does not check it again, so a direct caller can still
+ * decode a payload whose fixture checksum is wrong.
  */
 function inspectNmea(sentence: string): NmeaParts | null {
 	if (!sentence.startsWith("!AIVDM") && !sentence.startsWith("!AIVDO")) {

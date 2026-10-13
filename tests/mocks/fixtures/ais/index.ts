@@ -63,6 +63,20 @@ export function loadNmeaSampleRaw(): string {
 }
 
 /**
+ * Loads the intentionally invalid checksum fixture.
+ * Every returned line must be rejected by the NMEA checksum check.
+ */
+export function loadNmeaBadChecksum(): string[] {
+	const content = readFileSync(
+		join(__dirname, "nmea-bad-checksum.txt"),
+		"utf-8",
+	)
+	return content
+		.split("\n")
+		.filter(line => line.trim() && !line.startsWith("#"))
+}
+
+/**
  * Loads the JSON sample data as an array of parsed objects.
  */
 export function loadJsonSample(): AisCatcherJsonOutput[] {

@@ -5,9 +5,11 @@
  */
 
 import { describe, it, expect } from "vitest"
+import { nmeaChecksumValid } from "../../../src/decoders/builtin/ais-catcher.js"
 import {
 	loadJsonSample,
 	loadJsonSampleRaw,
+	loadNmeaBadChecksum,
 	loadNmeaSample,
 	loadNmeaSampleRaw,
 	SAMPLE_MMSI_NUMBERS,
@@ -96,6 +98,24 @@ describe("AIS Fixtures", () => {
 			const sentences = loadNmeaSample()
 			for (const sentence of sentences) {
 				expect(sentence.startsWith("#")).toBe(false)
+			}
+		})
+
+		it("should carry a valid NMEA checksum on every sentence", () => {
+			const sentences = loadNmeaSample()
+			expect(sentences.length).toBeGreaterThan(0)
+			for (const sentence of sentences) {
+				expect(nmeaChecksumValid(sentence)).toBe(true)
+			}
+		})
+	})
+
+	describe("loadNmeaBadChecksum", () => {
+		it("should reject every sentence", () => {
+			const sentences = loadNmeaBadChecksum()
+			expect(sentences.length).toBeGreaterThan(0)
+			for (const sentence of sentences) {
+				expect(nmeaChecksumValid(sentence)).toBe(false)
 			}
 		})
 	})
