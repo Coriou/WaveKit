@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
-import { lstat, mkdir, open, rename, rmdir, unlink } from "node:fs/promises"
+import type { Dirent } from "node:fs"
+import { lstat, mkdir, open, readdir, rename, rmdir, unlink } from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 import { BANDPLANS_LIMITS, bandPlanStateSchema } from "@wavekit/api-types"
 import type { BandPlanState } from "@wavekit/api-types"
 import type { ZodIssue } from "zod"
-import { BandPlansError } from "./contract.js"
+import {
+	BandPlansError,
+	type BandPlanStoreUnavailableReason,
+} from "./contract.js"
 
 export type StorageStage =
 	| "parent-open"
@@ -27,21 +31,78 @@ export type StorageStage =
 	| "lock-release"
 export interface BandPlanStorageOptions {
 	stateDir: string
+	/** False skips mkdir, the writer lock, the init write, and the temp sweep. */
+	writable?: boolean
+	/** Once after a post-rename failure latches a store that had opened. */
+	onStoreUnavailable?: (reason: BandPlanStoreUnavailableReason) => void
 	/** Test-only lifecycle observation and fault injection around local I/O. */
 	stage?: (
 		stage: StorageStage,
 		phase: "before" | "after",
 	) => void | Promise<void>
 }
-const unavailable = () => new BandPlansError("BANDPLANS_UNAVAILABLE")
-function missing(error: unknown): boolean {
-	return (
+
+/**
+ * storeId served when a read-only open finds no state.json.
+ * AvailableBandPlanStore requires a storeId, and nothing is written.
+ * A later writable open mints a new id and persists it.
+ */
+export const BANDPLAN_READ_ONLY_EMPTY_STORE_ID =
+	"00000000-0000-0000-0000-000000000000"
+
+const LEFTOVER_TEMP = /^\.state-.*\.tmp$/
+const READ_FLAGS =
+	constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+
+class StorageUnavailable extends BandPlansError {
+	readonly reason: BandPlanStoreUnavailableReason
+	constructor(reason: BandPlanStoreUnavailableReason) {
+		super("BANDPLANS_UNAVAILABLE")
+		this.name = "StorageUnavailable"
+		this.reason = reason
+	}
+}
+
+export function bandPlanStorageFailureReason(
+	error: unknown,
+): BandPlanStoreUnavailableReason {
+	return classifyFailure(error)
+}
+
+function errno(error: unknown): string | undefined {
+	if (
 		typeof error === "object" &&
 		error !== null &&
 		"code" in error &&
-		error.code === "ENOENT"
+		typeof error.code === "string"
 	)
+		return error.code
+	return undefined
 }
+
+function classifyFailure(error: unknown): BandPlanStoreUnavailableReason {
+	if (error instanceof StorageUnavailable) return error.reason
+	if (error instanceof BandPlansError) {
+		if (error.code === "BANDPLANS_QUOTA") return "oversized"
+		if (error.code === "BANDPLANS_INVALID") return "invalid"
+		return "io"
+	}
+	const code = errno(error)
+	if (
+		code === "EACCES" ||
+		code === "EPERM" ||
+		code === "ELOOP" ||
+		code === "ENOTDIR" ||
+		code === "EISDIR"
+	)
+		return "permissions"
+	return "io"
+}
+
+function missing(error: unknown): boolean {
+	return errno(error) === "ENOENT"
+}
+
 function isQuota(issue: ZodIssue): boolean {
 	if (issue.code !== "custom") return false
 	const params: unknown = issue.params
@@ -52,6 +113,7 @@ function isQuota(issue: ZodIssue): boolean {
 		params.quota === true
 	)
 }
+
 /** Detached schema-valid state. Quota and shape failures throw; nothing is repaired. */
 export function validateBandPlanState(value: unknown): BandPlanState {
 	const result = bandPlanStateSchema.safeParse(value)
@@ -63,6 +125,7 @@ export function validateBandPlanState(value: unknown): BandPlanState {
 		)
 	return result.data
 }
+
 function createEmptyState(storeId: string): BandPlanState {
 	return validateBandPlanState({
 		version: 1,
@@ -77,7 +140,10 @@ function createEmptyState(storeId: string): BandPlanState {
 }
 
 /** Local Unix only: stateDir must already be durable, with trustworthy stable parents.
- * Crash locks require offline repair. Filesystem sync success is not a hardware guarantee.
+ * Writable opens take a no-stealing mkdir lock for the process lifetime.
+ * A lock left by a crash stays held until offline repair; the next writable
+ * open reports unavailable. Read-only opens do not create, lock, write, or sweep.
+ * Filesystem sync success is not a hardware guarantee.
  * The service owns CAS and publication; storage rejects overlapping writes.
  * Invalid, oversized or unknown-version bytes are left untouched.
  */
@@ -85,6 +151,7 @@ export class BandPlanStorage {
 	private readonly directory: string
 	private readonly lock: string
 	private readonly file: string
+	private readonly writable: boolean
 	private directoryHandle: FileHandle | undefined
 	private ownsLock = false
 	private unsafeIO = false
@@ -97,6 +164,7 @@ export class BandPlanStorage {
 		this.directory = join(options.stateDir, "bandplans")
 		this.lock = join(this.directory, ".writer-lock")
 		this.file = join(this.directory, "state.json")
+		this.writable = options.writable !== false
 	}
 	static async open(options: BandPlanStorageOptions): Promise<BandPlanStorage> {
 		const storage = new BandPlanStorage(options)
@@ -104,20 +172,24 @@ export class BandPlanStorage {
 			await storage.initialize()
 			storage.available = true
 			return storage
-		} catch {
+		} catch (error) {
 			await storage.cleanup().catch(() => undefined)
-			throw unavailable()
+			if (error instanceof StorageUnavailable) throw error
+			throw new StorageUnavailable(classifyFailure(error))
 		}
 	}
 	isAvailable(): boolean {
 		return this.available && !this.closing
 	}
 	snapshot(): BandPlanState {
-		if (!this.isAvailable() || !this.current) throw unavailable()
+		if (!this.isAvailable() || !this.current)
+			throw new StorageUnavailable("io")
 		return validateBandPlanState(this.current)
 	}
 	persist(state: BandPlanState): Promise<void> {
-		if (!this.isAvailable()) return Promise.reject(unavailable())
+		if (!this.isAvailable()) return Promise.reject(new StorageUnavailable("io"))
+		if (!this.writable)
+			return Promise.reject(new BandPlansError("BANDPLANS_READ_ONLY"))
 		if (this.active) return Promise.reject(new BandPlansError("BANDPLANS_BUSY"))
 		let next: BandPlanState
 		let encoded: string
@@ -145,11 +217,20 @@ export class BandPlanStorage {
 				try {
 					await this.cleanup()
 				} catch {
-					throw unavailable()
+					throw new StorageUnavailable("io")
 				}
 			})()
 		}
 		return this.closeResult
+	}
+	private noteUnavailable(reason: BandPlanStoreUnavailableReason): void {
+		const listener = this.options.onStoreUnavailable
+		if (!listener) return
+		try {
+			listener(reason)
+		} catch {
+			// A listener fault must not change durability or release behavior.
+		}
 	}
 	private async stage(
 		stage: StorageStage,
@@ -222,18 +303,72 @@ export class BandPlanStorage {
 			(directory ? !stat.isDirectory() : !stat.isFile()) ||
 			(privateMode !== undefined &&
 				(stat.uid !== process.getuid?.() ||
-					(stat.mode & 0o7777) !== privateMode))
+					(stat.mode & 0o777) !== privateMode))
 		)
-			throw unavailable()
+			throw new StorageUnavailable("permissions")
 	}
 	private async initialize(): Promise<void> {
-		if (!isAbsolute(this.options.stateDir) || process.getuid === undefined)
-			throw unavailable()
-		const flags =
-			constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+		if (!isAbsolute(this.options.stateDir))
+			throw new StorageUnavailable("io")
+		if (process.getuid === undefined)
+			throw new StorageUnavailable("permissions")
+		if (!this.writable) {
+			await this.initializeReadOnly()
+			return
+		}
+		await this.initializeWritable()
+	}
+	private async initializeReadOnly(): Promise<void> {
+		let directory: Awaited<ReturnType<typeof lstat>>
+		try {
+			directory = await lstat(this.directory)
+		} catch (error) {
+			if (missing(error)) {
+				this.current = createEmptyState(BANDPLAN_READ_ONLY_EMPTY_STORE_ID)
+				return
+			}
+			throw error
+		}
+		if (!directory.isDirectory()) throw new StorageUnavailable("permissions")
+		let listed: Awaited<ReturnType<typeof lstat>>
+		try {
+			listed = await lstat(this.file)
+		} catch (error) {
+			if (missing(error)) {
+				this.current = createEmptyState(BANDPLAN_READ_ONLY_EMPTY_STORE_ID)
+				return
+			}
+			throw error
+		}
+		if (!listed.isFile()) throw new StorageUnavailable("permissions")
+		const directoryHandle = await this.acquire(
+			this.directory,
+			READ_FLAGS | constants.O_DIRECTORY,
+			"directory-open",
+		)
+		try {
+			await this.check(directoryHandle, true, 0o700)
+			const actual = await directoryHandle.stat()
+			if (directory.ino !== actual.ino || directory.dev !== actual.dev)
+				throw new StorageUnavailable("permissions")
+		} finally {
+			await this.closeHandle(directoryHandle, "directory-close")
+		}
+		const handle = await this.acquire(this.file, READ_FLAGS, "read-open")
+		try {
+			await this.check(handle, false, 0o600)
+			const opened = await handle.stat()
+			if (opened.ino !== listed.ino || opened.dev !== listed.dev)
+				throw new StorageUnavailable("permissions")
+			await this.readCurrent(handle)
+		} finally {
+			await this.closeHandle(handle, "read-close")
+		}
+	}
+	private async initializeWritable(): Promise<void> {
 		const parent = await this.acquire(
 			this.options.stateDir,
-			flags | constants.O_DIRECTORY,
+			READ_FLAGS | constants.O_DIRECTORY,
 			"parent-open",
 		)
 		try {
@@ -241,35 +376,34 @@ export class BandPlanStorage {
 			try {
 				await mkdir(this.directory, { mode: 0o700 })
 			} catch (error) {
-				if (
-					!(
-						typeof error === "object" &&
-						error !== null &&
-						"code" in error &&
-						error.code === "EEXIST"
-					)
-				)
-					throw error
+				if (errno(error) !== "EEXIST") throw error
 			}
 			const identity = await lstat(this.directory)
 			this.directoryHandle = await this.acquire(
 				this.directory,
-				flags | constants.O_DIRECTORY,
+				READ_FLAGS | constants.O_DIRECTORY,
 				"directory-open",
 			)
 			await this.check(this.directoryHandle, true, 0o700)
 			const actual = await this.directoryHandle.stat()
 			if (identity.ino !== actual.ino || identity.dev !== actual.dev)
-				throw unavailable()
-			await mkdir(this.lock, { mode: 0o700 })
+				throw new StorageUnavailable("permissions")
+			try {
+				await mkdir(this.lock, { mode: 0o700 })
+			} catch (error) {
+				if (errno(error) === "EEXIST")
+					throw new StorageUnavailable("lock-held")
+				throw error
+			}
 			this.ownsLock = true
 			await this.perform("parent-sync", () => parent.sync())
 		} finally {
 			await this.closeHandle(parent, "parent-close")
 		}
+		await this.sweepTemps()
 		let handle: FileHandle
 		try {
-			handle = await this.acquire(this.file, flags, "read-open")
+			handle = await this.acquire(this.file, READ_FLAGS, "read-open")
 		} catch (error) {
 			if (!missing(error)) throw error
 			const empty = createEmptyState(randomUUID())
@@ -279,35 +413,74 @@ export class BandPlanStorage {
 		}
 		try {
 			await this.check(handle, false, 0o600)
-			const bytes = Buffer.alloc(BANDPLANS_LIMITS.stateBytes + 1)
-			let length = 0
-			await this.perform("read", async () => {
-				while (length < bytes.length) {
-					const result = await handle.read(
-						bytes,
-						length,
-						bytes.length - length,
-						length,
-					)
-					if (result.bytesRead === 0) break
-					length += result.bytesRead
-				}
-			})
-			if (length > BANDPLANS_LIMITS.stateBytes) throw unavailable()
-			this.current = validateBandPlanState(
-				JSON.parse(
-					new TextDecoder("utf-8", { fatal: true }).decode(
-						bytes.subarray(0, length),
-					),
-				),
-			)
+			await this.readCurrent(handle)
 		} finally {
 			await this.closeHandle(handle, "read-close")
 		}
 		// Visible state may be a previously uncertain rename. Complete that
 		// directory's durability before exposing it, including to no-op writes.
-		if (!this.directoryHandle) throw unavailable()
+		if (!this.directoryHandle) throw new StorageUnavailable("io")
 		await this.perform("directory-sync", () => this.directoryHandle!.sync())
+	}
+	private async readCurrent(handle: FileHandle): Promise<void> {
+		const bytes = Buffer.alloc(BANDPLANS_LIMITS.stateBytes + 1)
+		let length = 0
+		await this.perform("read", async () => {
+			while (length < bytes.length) {
+				const result = await handle.read(
+					bytes,
+					length,
+					bytes.length - length,
+					length,
+				)
+				if (result.bytesRead === 0) break
+				length += result.bytesRead
+			}
+		})
+		if (length > BANDPLANS_LIMITS.stateBytes)
+			throw new StorageUnavailable("oversized")
+		this.current = this.parseState(bytes.subarray(0, length))
+	}
+	private parseState(bytes: Uint8Array): BandPlanState {
+		let text: string
+		try {
+			text = new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+		} catch {
+			throw new StorageUnavailable("invalid")
+		}
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(text)
+		} catch {
+			throw new StorageUnavailable("invalid")
+		}
+		try {
+			return validateBandPlanState(parsed)
+		} catch (error) {
+			if (error instanceof BandPlansError && error.code === "BANDPLANS_QUOTA")
+				throw new StorageUnavailable("oversized")
+			throw new StorageUnavailable("invalid")
+		}
+	}
+	private async sweepTemps(): Promise<void> {
+		if (!this.ownsLock || !this.writable) return
+		let entries: Dirent[]
+		try {
+			entries = await readdir(this.directory, { withFileTypes: true })
+		} catch {
+			return
+		}
+		for (const entry of entries) {
+			if (!LEFTOVER_TEMP.test(entry.name) || !entry.isFile()) continue
+			const path = join(this.directory, entry.name)
+			try {
+				const stat = await lstat(path)
+				if (!stat.isFile()) continue
+				await unlink(path)
+			} catch {
+				// A leftover temp is bounded. Leave it rather than fail open.
+			}
+		}
 	}
 	private async write(encoded: string): Promise<void> {
 		const temp = join(this.directory, `.state-${randomUUID()}.tmp`)
@@ -336,10 +509,16 @@ export class BandPlanStorage {
 			await rename(temp, this.file)
 			renamed = true
 			await this.stage("rename", "after")
-			if (!this.directoryHandle) throw unavailable()
+			if (!this.directoryHandle) throw new StorageUnavailable("io")
 			await this.perform("directory-sync", () => this.directoryHandle!.sync())
-		} catch {
-			if (renamed) this.available = false
+		} catch (error) {
+			const reason = classifyFailure(error)
+			// Init writes are not yet live. Only a latched live store is reported.
+			if (renamed) {
+				const live = this.available
+				this.available = false
+				if (live) this.noteUnavailable(reason)
+			}
 			if (handle) {
 				try {
 					await this.closeHandle(handle, "temp-close")
@@ -355,7 +534,7 @@ export class BandPlanStorage {
 				}
 			}
 			if (this.unsafeIO) this.available = false
-			throw unavailable()
+			throw new StorageUnavailable(reason)
 		}
 	}
 	private async cleanup(): Promise<void> {
@@ -365,7 +544,7 @@ export class BandPlanStorage {
 			this.directoryHandle = undefined
 			await this.closeHandle(handle, "directory-close")
 		}
-		if (this.unsafeIO) throw unavailable()
+		if (this.unsafeIO) throw new StorageUnavailable("io")
 		if (this.ownsLock) {
 			await this.perform("lock-release", () => rmdir(this.lock))
 			this.ownsLock = false

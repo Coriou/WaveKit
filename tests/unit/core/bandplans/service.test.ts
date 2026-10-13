@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto"
-import { readFile, rm } from "node:fs/promises"
+import {
+	chmod,
+	lstat,
+	mkdir,
+	readFile,
+	readdir,
+	rm,
+	writeFile,
+} from "node:fs/promises"
 import { join } from "node:path"
 import {
 	BANDPLAN_SCANNER_PROTOCOLS,
@@ -29,10 +37,12 @@ import {
 } from "vitest"
 import { mountFastTemp } from "../../../helpers/bandplans/temp-volume.js"
 import type { FastTemp } from "../../../helpers/bandplans/temp-volume.js"
+import { transition as domainTransition } from "../../../../src/core/bandplans/domain.js"
 import { BandPlansError } from "../../../../src/core/bandplans/contract.js"
 import type {
 	BandPlanService,
 	BandPlanServiceOptions,
+	BandPlanStoreUnavailableReason,
 	ParsedImport,
 	SdrppParseResult,
 	TransitionResult,
@@ -40,6 +50,7 @@ import type {
 import { createBandPlanService } from "../../../../src/core/bandplans/service.js"
 import type { BandPlanServiceDeps } from "../../../../src/core/bandplans/service.js"
 import {
+	BANDPLAN_READ_ONLY_EMPTY_STORE_ID,
 	BandPlanStorage,
 	validateBandPlanState,
 } from "../../../../src/core/bandplans/storage.js"
@@ -338,6 +349,9 @@ async function open(
 				randomHex12: harness.randomHex12,
 			},
 			...(extras.onCommit ? { onCommit: extras.onCommit } : {}),
+			...(extras.onStoreUnavailable
+				? { onStoreUnavailable: extras.onStoreUnavailable }
+				: {}),
 			...(extras.storageStage ? { storageStage: extras.storageStage } : {}),
 		},
 		harness.deps,
@@ -1041,5 +1055,299 @@ describe("band plan service", { timeout: 60_000 }, () => {
 			"Aviation",
 			"Aviation",
 		])
+	})
+
+	it("legacy open creates nothing and rejects mutations as read-only", async () => {
+		const path = await root()
+		const before = await readdir(path)
+		const reasons: BandPlanStoreUnavailableReason[] = []
+		const { service } = await open(path, {
+			writable: false,
+			onStoreUnavailable: reason => {
+				reasons.push(reason)
+			},
+		})
+		expect(reasons).toEqual([])
+		expect(await readdir(path)).toEqual(before)
+		expect(service.view().store).toEqual({
+			state: "available",
+			storeId: BANDPLAN_READ_ONLY_EMPTY_STORE_ID,
+			revision: 0,
+		})
+		expect(service.view().stack.source).toBe("default")
+		expect(service.view().capabilities.writable).toBe(false)
+		await expect(
+			service.mutate(resetStack(token(service))),
+		).rejects.toMatchObject({ code: "BANDPLANS_READ_ONLY" })
+		let preview: unknown
+		try {
+			service.previewImport(fileFields(Uint8Array.of(1)))
+		} catch (error) {
+			preview = error
+		}
+		expect(preview).toMatchObject({ code: "BANDPLANS_READ_ONLY" })
+		const closing = service.close()
+		expect(service.close()).toBe(closing)
+		await closing
+		expect(await readdir(path)).toEqual(before)
+	})
+
+	it("read-only open serves state from a writable service despite a stale lock", async () => {
+		const path = await root()
+		const first = await open(path)
+		await first.service.mutate(setStack(token(first.service), "builtin-us"))
+		const stored = token(first.service)
+		await first.service.close()
+		await mkdir(join(path, "bandplans", ".writer-lock"), { mode: 0o700 })
+		const reasons: BandPlanStoreUnavailableReason[] = []
+		const { service } = await open(path, {
+			writable: false,
+			onStoreUnavailable: reason => {
+				reasons.push(reason)
+			},
+		})
+		expect(reasons).toEqual([])
+		expect(token(service)).toEqual(stored)
+		expect(service.view().stack).toMatchObject({
+			source: "operator",
+			entries: [expect.objectContaining({ packId: "builtin-us" })],
+		})
+		await expect(
+			service.mutate(resetStack(token(service))),
+		).rejects.toMatchObject({ code: "BANDPLANS_READ_ONLY" })
+		expect(
+			(await lstat(join(path, "bandplans", ".writer-lock"))).isDirectory(),
+		).toBe(true)
+	})
+
+	it.each([
+		["invalid", "invalid"],
+		["oversized", "oversized"],
+		["permissions", "permissions"],
+		["io", "io"],
+		["lock-held", "lock-held"],
+	] as const)(
+		"reports %s exactly once when open cannot use the store",
+		async (kind, reason) => {
+			const path = await root()
+			if (kind !== "io" && kind !== "lock-held") {
+				const seeded = await open(path)
+				await seeded.service.close()
+			}
+			if (kind === "invalid") await writeFile(stateFile(path), "{bad")
+			if (kind === "oversized")
+				await writeFile(
+					stateFile(path),
+					"x".repeat(BANDPLANS_LIMITS.stateBytes + 1),
+				)
+			if (kind === "permissions") await chmod(stateFile(path), 0o644)
+			if (kind === "lock-held") {
+				const holder = await open(path)
+				expect(holder.service.view().store.state).toBe("available")
+			}
+			const reasons: BandPlanStoreUnavailableReason[] = []
+			const { service } = await open(path, {
+				...(kind === "io"
+					? {
+							storageStage: (stage: string) => {
+								if (stage === "parent-sync") throw new Error("sync fault")
+							},
+						}
+					: {}),
+				onStoreUnavailable: reported => {
+					reasons.push(reported)
+				},
+			})
+			expect(reasons).toEqual([reason])
+			expect(service.view().store).toEqual({ state: "unavailable" })
+			await expect(
+				service.mutate({ type: "reset-stack" }),
+			).rejects.toMatchObject({ code: "BANDPLANS_UNAVAILABLE" })
+			expect(reasons).toEqual([reason])
+		},
+	)
+
+	it("ignores a throwing unavailable listener and still opens degraded", async () => {
+		let calls = 0
+		const { service } = await open("relative", {
+			writable: false,
+			onStoreUnavailable: () => {
+				calls += 1
+				throw new Error("listener")
+			},
+		})
+		expect(calls).toBe(1)
+		expect(service.view().store).toEqual({ state: "unavailable" })
+		expect(service.view().stack.source).toBe("default")
+	})
+
+	it("reports a post-rename latch once and stays quiet on a pre-rename miss", async () => {
+		const path = await root()
+		const reasons: BandPlanStoreUnavailableReason[] = []
+		let armed = false
+		let stageName = "temp-write"
+		const { service } = await open(path, {
+			onStoreUnavailable: reason => {
+				reasons.push(reason)
+			},
+			storageStage: stage => {
+				if (armed && stage === stageName) throw new Error("fault")
+			},
+		})
+		expect(reasons).toEqual([])
+		const before = token(service)
+		armed = true
+		await expect(
+			service.mutate(setStack(before, "builtin-eu")),
+		).rejects.toMatchObject({ code: "BANDPLANS_UNAVAILABLE" })
+		expect(reasons).toEqual([])
+		expect(token(service)).toEqual(before)
+		stageName = "directory-sync"
+		await expect(
+			service.mutate(setStack(before, "builtin-eu")),
+		).rejects.toMatchObject({ code: "BANDPLANS_UNAVAILABLE" })
+		expect(reasons).toEqual(["io"])
+		expect(service.view().store).toEqual({ state: "unavailable" })
+		await expect(
+			service.mutate(setStack(before, "builtin-us")),
+		).rejects.toMatchObject({ code: "BANDPLANS_UNAVAILABLE" })
+		expect(reasons).toEqual(["io"])
+		expect(JSON.parse(await readFile(stateFile(path), "utf8")).revision).toBe(1)
+	})
+
+	it("stops at the state-byte quota with the file and revision unchanged", async () => {
+		const path = await root()
+		const channel = (index: number) => ({
+			id: `c${String(index).padStart(63, "a")}`,
+			name: "n".repeat(40),
+			frequencyHz: 100_000_000_000,
+			aliases: Array.from({ length: 8 }, () => "b".repeat(32)),
+			registryRef: {
+				familyId: "f".repeat(64),
+				rowId: "r".repeat(64),
+			},
+		})
+		const inputOf = (count: number) => ({
+			name: "B".repeat(80),
+			startHz: 1,
+			endHz: 100_000_000_000,
+			group: "land-mobile" as const,
+			mode: "nfm" as const,
+			bandwidthHz: 10_000_000,
+			stepHz: 10_000_000,
+			skip: { reason: "s".repeat(80) },
+			channels: Array.from({ length: count }, (_, index) => channel(index)),
+			parentId: null,
+			colourHint: "#abcdef",
+			registryRef: {
+				familyId: "f".repeat(64),
+				rowId: "r".repeat(64),
+			},
+		})
+		const requestSized = (count: number) =>
+			Buffer.byteLength(
+				JSON.stringify({
+					type: "create-operator-band",
+					expected: {
+						storeId: "00000000-0000-4000-8000-000000000000",
+						revision: 9999,
+					},
+					band: inputOf(count),
+				}),
+			)
+		let channels = 1
+		while (
+			channels < BANDPLANS_LIMITS.channelsPerBand &&
+			requestSized(channels + 1) <= BANDPLANS_LIMITS.requestBytes
+		)
+			channels += 1
+		const input = inputOf(channels)
+		expect(requestSized(channels)).toBeLessThanOrEqual(
+			BANDPLANS_LIMITS.requestBytes,
+		)
+		const stored = (index: number) => ({
+			id: `op-a${index.toString(16).padStart(11, "0")}`,
+			...input,
+			scan: null,
+			provenance: { kind: "operator" as const },
+		})
+		const storage = await BandPlanStorage.open({ stateDir: path })
+		let seeded: ReturnType<typeof validateBandPlanState>
+		try {
+			const shell = storage.snapshot()
+			const emptySize = Buffer.byteLength(
+				JSON.stringify({ ...shell, operatorBands: [] }),
+			)
+			const bandSize = Buffer.byteLength(JSON.stringify(stored(0))) + 1
+			// Two bands of headroom: one legal commit, then the quota rejection.
+			const count = Math.max(
+				1,
+				Math.floor(
+					(BANDPLANS_LIMITS.stateBytes - emptySize - bandSize * 2) / bandSize,
+				),
+			)
+			seeded = validateBandPlanState({
+				...shell,
+				operatorBands: Array.from({ length: count }, (_, index) =>
+					stored(index),
+				),
+			})
+			expect(Buffer.byteLength(JSON.stringify(seeded))).toBeLessThanOrEqual(
+				BANDPLANS_LIMITS.stateBytes,
+			)
+			expect(seeded.operatorBands.length).toBeLessThan(
+				BANDPLANS_LIMITS.operatorBands,
+			)
+			await storage.persist(seeded)
+		} finally {
+			await storage.close()
+		}
+		const { service } = await open(path, { transition: domainTransition })
+		const started = Date.now()
+		let expected = {
+			storeId: seeded.storeId,
+			revision: seeded.revision,
+		}
+		let previous = await readFile(stateFile(path))
+		let commits = 0
+		for (;;) {
+			expect(commits).toBeLessThan(4)
+			const body = {
+				type: "create-operator-band" as const,
+				expected,
+				band: input,
+			}
+			expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThanOrEqual(
+				BANDPLANS_LIMITS.requestBytes,
+			)
+			try {
+				await service.mutate(body)
+			} catch (error) {
+				expect(error).toMatchObject({ code: "BANDPLANS_QUOTA" })
+				const after = await readFile(stateFile(path))
+				expect(after.equals(previous)).toBe(true)
+				expect(service.view().store).toMatchObject({
+					state: "available",
+					storeId: expected.storeId,
+					revision: expected.revision,
+				})
+				expect(expected.revision).toBeGreaterThan(seeded.revision)
+				expect(previous.byteLength).toBeGreaterThan(
+					BANDPLANS_LIMITS.stateBytes - BANDPLANS_LIMITS.requestBytes,
+				)
+				expect(commits).toBeGreaterThan(0)
+				expect(Date.now() - started).toBeLessThan(5_000)
+				return
+			}
+			commits += 1
+			expected = {
+				storeId: expected.storeId,
+				revision: expected.revision + 1,
+			}
+			previous = await readFile(stateFile(path))
+			expect(previous.byteLength).toBeLessThanOrEqual(
+				BANDPLANS_LIMITS.stateBytes,
+			)
+		}
 	})
 })

@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
+import { existsSync } from "node:fs"
 import {
 	chmod,
 	lstat,
@@ -11,6 +13,7 @@ import {
 } from "node:fs/promises"
 import { join } from "node:path"
 import { BANDPLANS_LIMITS } from "@wavekit/api-types"
+import { build } from "esbuild"
 import fc from "fast-check"
 import {
 	afterAll,
@@ -23,7 +26,12 @@ import {
 } from "vitest"
 import { mountFastTemp } from "../../../helpers/bandplans/temp-volume.js"
 import type { FastTemp } from "../../../helpers/bandplans/temp-volume.js"
-import { BandPlanStorage } from "../../../../src/core/bandplans/storage.js"
+import type { BandPlanStoreUnavailableReason } from "../../../../src/core/bandplans/contract.js"
+import {
+	BANDPLAN_READ_ONLY_EMPTY_STORE_ID,
+	BandPlanStorage,
+	bandPlanStorageFailureReason,
+} from "../../../../src/core/bandplans/storage.js"
 import type { StorageStage } from "../../../../src/core/bandplans/storage.js"
 
 const roots: string[] = []
@@ -50,13 +58,39 @@ async function open(
 		stage: StorageStage,
 		phase: "before" | "after",
 	) => void | Promise<void>,
+	options?: {
+		readonly writable?: boolean
+		readonly onStoreUnavailable?: (
+			reason: BandPlanStoreUnavailableReason,
+		) => void
+	},
 ) {
 	const store = await BandPlanStorage.open({
 		stateDir,
+		...(options?.writable === false ? { writable: false } : {}),
+		...(options?.onStoreUnavailable
+			? { onStoreUnavailable: options.onStoreUnavailable }
+			: {}),
 		...(stage ? { stage } : {}),
 	})
 	stores.push(store)
 	return store
+}
+async function rejectionOf(task: Promise<unknown>) {
+	try {
+		await task
+	} catch (error) {
+		return error
+	}
+	throw new Error("expected storage open to fail")
+}
+function waitExit(child: ChildProcess): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null)
+		return Promise.resolve()
+	return new Promise((resolve, reject) => {
+		child.once("exit", () => resolve())
+		child.once("error", reject)
+	})
 }
 const file = (path: string) => join(path, "bandplans", "state.json")
 const lock = (path: string) => join(path, "bandplans", ".writer-lock")
@@ -152,9 +186,14 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		)
 	})
 
-	it.each(["corrupt", "future", "oversize", "empty"])(
+	it.each([
+		["corrupt", "invalid"],
+		["future", "invalid"],
+		["oversize", "oversized"],
+		["empty", "invalid"],
+	] as const)(
 		"preserves %s state unchanged and releases its own lock",
-		async kind => {
+		async (kind, reason) => {
 			const path = await root()
 			const first = await open(path)
 			const initial = first.snapshot()
@@ -168,7 +207,9 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 							? ""
 							: "{bad"
 			await writeFile(file(path), bytes)
-			await expect(open(path)).rejects.toMatchObject(unavailable)
+			const error = await rejectionOf(open(path))
+			expect(error).toMatchObject(unavailable)
+			expect(bandPlanStorageFailureReason(error)).toBe(reason)
 			expect(await readFile(file(path), "utf8")).toBe(bytes)
 			await expect(lstat(lock(path))).rejects.toMatchObject({ code: "ENOENT" })
 		},
@@ -198,16 +239,20 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		const second = await open(path)
 		await second.close()
 		await mkdir(lock(path), { mode: 0o700 })
-		await expect(open(path)).rejects.toMatchObject(unavailable)
+		const error = await rejectionOf(open(path))
+		expect(error).toMatchObject(unavailable)
+		expect(bandPlanStorageFailureReason(error)).toBe("lock-held")
 		expect((await lstat(lock(path))).isDirectory()).toBe(true)
 	})
 
 	it("requires an existing absolute parent without creating ancestors", async () => {
 		const path = await root()
-		await expect(open("relative")).rejects.toMatchObject(unavailable)
-		await expect(open(join(path, "absent", "child"))).rejects.toMatchObject(
-			unavailable,
-		)
+		const relative = await rejectionOf(open("relative"))
+		expect(relative).toMatchObject(unavailable)
+		expect(bandPlanStorageFailureReason(relative)).toBe("io")
+		const absent = await rejectionOf(open(join(path, "absent", "child")))
+		expect(absent).toMatchObject(unavailable)
+		expect(bandPlanStorageFailureReason(absent)).toBe("io")
 		expect(await readdir(path)).toEqual([])
 	})
 
@@ -245,7 +290,9 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		}
 		const target = kind.startsWith("directory") ? directory : file(path)
 		const before = await lstat(target)
-		await expect(open(path)).rejects.toMatchObject(unavailable)
+		const error = await rejectionOf(open(path))
+		expect(error).toMatchObject(unavailable)
+		expect(bandPlanStorageFailureReason(error)).toBe("permissions")
 		const after = await lstat(target)
 		expect(after.mode).toBe(before.mode)
 		expect(after.ino).toBe(before.ino)
@@ -460,5 +507,242 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		).rejects.toMatchObject(unavailable)
 		await expect(open(fresh)).rejects.toMatchObject(unavailable)
 		expect((await lstat(lock(fresh))).isDirectory()).toBe(true)
+	})
+
+	it("read-only open creates nothing and serves an empty in-memory state", async () => {
+		const path = await root()
+		const before = await readdir(path)
+		const reasons: BandPlanStoreUnavailableReason[] = []
+		const store = await open(path, undefined, {
+			writable: false,
+			onStoreUnavailable: reason => {
+				reasons.push(reason)
+			},
+		})
+		expect(reasons).toEqual([])
+		expect(store.snapshot()).toMatchObject({
+			storeId: BANDPLAN_READ_ONLY_EMPTY_STORE_ID,
+			revision: 0,
+			stack: null,
+			importedPacks: [],
+			operatorBands: [],
+			edits: [],
+			presets: [],
+		})
+		await expect(store.persist(store.snapshot())).rejects.toMatchObject({
+			code: "BANDPLANS_READ_ONLY",
+		})
+		expect(store.close()).toBe(store.close())
+		await store.close()
+		expect(await readdir(path)).toEqual(before)
+		await expect(lstat(join(path, "bandplans"))).rejects.toMatchObject({
+			code: "ENOENT",
+		})
+	})
+
+	it("read-only open serves a writable store and ignores a stale lock and temps", async () => {
+		const path = await root()
+		const first = await open(path)
+		const stored = { ...first.snapshot(), revision: 4 }
+		await first.persist(stored)
+		await first.close()
+		const directory = join(path, "bandplans")
+		await mkdir(lock(path), { mode: 0o700 })
+		await writeFile(join(directory, ".state-stale.tmp"), "leftover")
+		const before = (await readdir(directory)).sort()
+		const store = await open(path, undefined, { writable: false })
+		expect(store.snapshot()).toEqual(stored)
+		await store.close()
+		await store.close()
+		expect((await readdir(directory)).sort()).toEqual(before)
+		expect((await lstat(lock(path))).isDirectory()).toBe(true)
+	})
+
+	it.each([
+		["corrupt", "invalid"],
+		["oversize", "oversized"],
+		["mode", "permissions"],
+	] as const)(
+		"read-only open leaves a %s file unavailable and creates no lock",
+		async (kind, reason) => {
+			const path = await root()
+			const first = await open(path)
+			await first.close()
+			const directory = join(path, "bandplans")
+			if (kind === "corrupt") await writeFile(file(path), "{bad")
+			if (kind === "oversize")
+				await writeFile(file(path), "x".repeat(BANDPLANS_LIMITS.stateBytes + 1))
+			if (kind === "mode") await chmod(file(path), 0o644)
+			const before = await readFile(file(path))
+			const listing = (await readdir(directory)).sort()
+			const error = await rejectionOf(
+				open(path, undefined, { writable: false }),
+			)
+			expect(error).toMatchObject(unavailable)
+			expect(bandPlanStorageFailureReason(error)).toBe(reason)
+			expect((await readFile(file(path))).equals(before)).toBe(true)
+			expect((await readdir(directory)).sort()).toEqual(listing)
+			await expect(lstat(lock(path))).rejects.toMatchObject({ code: "ENOENT" })
+		},
+	)
+
+	it("writable open sweeps leftover state temps and keeps other names", async () => {
+		const path = await root()
+		const first = await open(path)
+		await first.close()
+		const directory = join(path, "bandplans")
+		await writeFile(join(directory, ".state-abc.tmp"), "temp")
+		await writeFile(join(directory, ".state-.tmp"), "temp")
+		await writeFile(join(directory, ".state-keep.tmp.bak"), "keep")
+		await writeFile(join(directory, "state-no-dot.tmp"), "keep")
+		await writeFile(join(directory, "notes.txt"), "keep")
+		await mkdir(join(directory, ".state-dir.tmp"))
+		await symlink(file(path), join(directory, ".state-link.tmp"))
+		const store = await open(path)
+		expect(store.isAvailable()).toBe(true)
+		expect((await readdir(directory)).sort()).toEqual(
+			[
+				".state-dir.tmp",
+				".state-keep.tmp.bak",
+				".state-link.tmp",
+				".writer-lock",
+				"notes.txt",
+				"state-no-dot.tmp",
+				"state.json",
+			].sort(),
+		)
+		await store.close()
+	})
+
+	it("does not report a pre-rename failure and reports a post-rename latch once", async () => {
+		const path = await root()
+		const reasons: BandPlanStoreUnavailableReason[] = []
+		let armed = false
+		let stageName: StorageStage = "temp-write"
+		const store = await open(
+			path,
+			(stage, phase) => {
+				if (armed && stage === stageName && phase === "before")
+					throw new Error("fault")
+			},
+			{
+				onStoreUnavailable: reason => {
+					reasons.push(reason)
+				},
+			},
+		)
+		const prior = store.snapshot()
+		armed = true
+		await expect(
+			store.persist({ ...prior, revision: 1 }),
+		).rejects.toMatchObject(unavailable)
+		expect(store.isAvailable()).toBe(true)
+		expect(reasons).toEqual([])
+		stageName = "directory-sync"
+		await expect(
+			store.persist({ ...prior, revision: 2 }),
+		).rejects.toMatchObject(unavailable)
+		expect(store.isAvailable()).toBe(false)
+		expect(reasons).toEqual(["io"])
+		await expect(
+			store.persist({ ...prior, revision: 3 }),
+		).rejects.toMatchObject(unavailable)
+		expect(reasons).toEqual(["io"])
+		expect(JSON.parse(await readFile(file(path), "utf8")).revision).toBe(2)
+	})
+
+	it("leaves a crashed writable lock unavailable to a new process", async () => {
+		const path = await root()
+		const outfile = join(
+			process.cwd(),
+			"node_modules/.cache/r1store-crash-open.mjs",
+		)
+		await mkdir(join(process.cwd(), "node_modules/.cache"), { recursive: true })
+		const storageEntry = join(
+			process.cwd(),
+			"src/core/bandplans/storage.ts",
+		)
+		let child: ChildProcess | undefined
+		try {
+			await build({
+				stdin: {
+					contents: `
+						import { BandPlanStorage } from ${JSON.stringify(storageEntry)}
+						const stateDir = process.env.WAVEKIT_STATE_DIR
+						if (!stateDir) throw new Error("missing state dir")
+						await BandPlanStorage.open({ stateDir })
+						process.stdout.write("ready\\n")
+						setInterval(() => {}, 1000)
+					`,
+					resolveDir: process.cwd(),
+					sourcefile: "crash-open.ts",
+					loader: "ts",
+				},
+				bundle: true,
+				platform: "node",
+				format: "esm",
+				packages: "external",
+				outfile,
+				plugins: [
+					{
+						name: "remap-relative-js",
+						setup(plugin) {
+							plugin.onResolve({ filter: /^\.{1,2}\/.*\.js$/ }, args => {
+								const base = join(args.resolveDir, args.path.slice(0, -3))
+								for (const ext of [".ts", ".tsx", ".js", ".mjs"]) {
+									const candidate = `${base}${ext}`
+									if (existsSync(candidate)) return { path: candidate }
+								}
+								return undefined
+							})
+						},
+					},
+				],
+			})
+			let stderr = ""
+			child = spawn(process.execPath, [outfile], {
+				cwd: process.cwd(),
+				env: { ...process.env, WAVEKIT_STATE_DIR: path },
+				stdio: ["ignore", "pipe", "pipe"],
+			})
+			child.stderr?.on("data", chunk => {
+				stderr += String(chunk)
+			})
+			const opened = child
+			await new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					reject(new Error(`ready timeout\n${stderr}`))
+				}, 15_000)
+				let buf = ""
+				opened.stdout?.on("data", chunk => {
+					buf += String(chunk)
+					if (!buf.includes("ready\n")) return
+					clearTimeout(timer)
+					resolve()
+				})
+				opened.once("exit", code => {
+					clearTimeout(timer)
+					reject(new Error(`child exited ${code} before ready\n${stderr}`))
+				})
+				opened.once("error", error => {
+					clearTimeout(timer)
+					reject(error)
+				})
+			})
+			opened.kill("SIGKILL")
+			await waitExit(opened)
+			child = undefined
+			const error = await rejectionOf(open(path))
+			expect(error).toMatchObject(unavailable)
+			expect(bandPlanStorageFailureReason(error)).toBe("lock-held")
+			expect((await lstat(lock(path))).isDirectory()).toBe(true)
+			expect(JSON.parse(await readFile(file(path), "utf8")).revision).toBe(0)
+		} finally {
+			if (child && child.exitCode === null && child.signalCode === null) {
+				child.kill("SIGKILL")
+				await waitExit(child).catch(() => undefined)
+			}
+			await rm(outfile, { force: true })
+		}
 	})
 })

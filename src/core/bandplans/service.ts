@@ -35,6 +35,7 @@ import type {
 	BandPlanMutationResult,
 	BandPlanService,
 	BandPlanServiceOptions,
+	BandPlanStoreUnavailableReason,
 	BandPlanTransition,
 	BuiltinPackIdFor,
 	BuiltinPresetsFor,
@@ -48,7 +49,11 @@ import type {
 	ResolvedBandPlan,
 	ResolverInput,
 } from "./contract.js"
-import { BandPlanStorage, validateBandPlanState } from "./storage.js"
+import {
+	BandPlanStorage,
+	bandPlanStorageFailureReason,
+	validateBandPlanState,
+} from "./storage.js"
 import type { BandPlanStorageOptions } from "./storage.js"
 
 /**
@@ -71,6 +76,18 @@ interface PreparedMutation {
 	readonly parsedImport: ParsedImport | null
 }
 const unavailable = () => new BandPlansError("BANDPLANS_UNAVAILABLE")
+function notifyUnavailable(
+	options: BandPlanServiceOptions,
+	reason: BandPlanStoreUnavailableReason,
+): void {
+	const listener = options.onStoreUnavailable
+	if (!listener) return
+	try {
+		listener(reason)
+	} catch {
+		// A listener fault must not stop degraded reads.
+	}
+}
 function detach<T>(value: T): T {
 	return structuredClone(value)
 }
@@ -156,6 +173,7 @@ function emptyState(): BandPlanState {
 /**
  * Resolves even when `<stateDir>/bandplans/` cannot be opened. Reads then serve
  * built-ins, the default stack and built-in presets with `store: unavailable`.
+ * A read-only open with no state.json stays available and serves an empty state.
  */
 export async function createBandPlanService(
 	options: BandPlanServiceOptions,
@@ -172,12 +190,17 @@ export async function createBandPlanService(
 	try {
 		storage = await BandPlanStorage.open({
 			stateDir: options.stateDir,
+			writable: options.writable,
+			...(options.onStoreUnavailable
+				? { onStoreUnavailable: options.onStoreUnavailable }
+				: {}),
 			...(options.storageStage
 				? { stage: adaptStage(options.storageStage) }
 				: {}),
 		})
 	} catch (error) {
 		if (!(error instanceof BandPlansError)) throw error
+		notifyUnavailable(options, bandPlanStorageFailureReason(error))
 	}
 	try {
 		return new BandPlanRuntime(storage, options, deps, domain)
