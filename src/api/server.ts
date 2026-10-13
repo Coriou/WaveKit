@@ -120,6 +120,17 @@ const CORRELATION_ID_HEADER = "x-correlation-id"
 /** WG2 req 9: vessel, APRS and mesh `*:update` messages, at most one per entity per 2 s. */
 const ENTITY_UPDATE_WINDOW_MS = 2000
 
+/**
+ * WG2 req 9.2 identities: a change is sent at once. JSON tuples, so field text containing a
+ * separator cannot collide and null stays distinct from "".
+ */
+export const vesselIdentity = (v: VesselState): string =>
+	JSON.stringify([v.name, v.callsign, v.navStatus, v.shipType, v.destination])
+export const aprsIdentity = (a: AprsStation): string =>
+	JSON.stringify([a.kind, a.symbol, a.comment, a.status, a.killed])
+export const meshIdentity = (n: MeshNode): string =>
+	JSON.stringify([n.longName, n.shortName, n.role, n.hwModel])
+
 export interface ApiServerConfig {
 	publicOrigins?: ProtectedRuntimeAccessConfig["publicOrigins"]
 	accessBootstrap?: ProtectedAccessBootstrap
@@ -868,10 +879,7 @@ export class ApiServer {
 			const tracker = this.vesselTracker
 			const throttle = new EntityUpdateThrottle<VesselState>({
 				windowMs: ENTITY_UPDATE_WINDOW_MS,
-				identity: v =>
-					[v.name, v.callsign, v.navStatus, v.shipType, v.destination].join(
-						"|",
-					),
+				identity: vesselIdentity,
 				emit: (_key, vessel) => {
 					this.wsBroadcaster.broadcastVesselUpdate(vessel)
 				},
@@ -908,8 +916,7 @@ export class ApiServer {
 			const tracker = this.aprsTracker
 			const throttle = new EntityUpdateThrottle<AprsStation>({
 				windowMs: ENTITY_UPDATE_WINDOW_MS,
-				identity: a =>
-					[a.kind, a.symbol, a.comment, a.status, a.killed].join("|"),
+				identity: aprsIdentity,
 				emit: (_key, station) => {
 					this.wsBroadcaster.broadcastAprsUpdate(station)
 				},
@@ -945,7 +952,7 @@ export class ApiServer {
 			const tracker = this.meshTracker
 			const throttle = new EntityUpdateThrottle<MeshNode>({
 				windowMs: ENTITY_UPDATE_WINDOW_MS,
-				identity: n => [n.longName, n.shortName, n.role, n.hwModel].join("|"),
+				identity: meshIdentity,
 				emit: (_key, node) => {
 					this.wsBroadcaster.broadcastMeshUpdate(node)
 				},
