@@ -1,3 +1,4 @@
+import type * as FsPromises from "node:fs/promises"
 import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
@@ -13,7 +14,7 @@ import {
  * still go through tmp file and rename; only the flush to disk is skipped.
  */
 vi.mock("node:fs/promises", async importOriginal => {
-	const fs = await importOriginal<typeof import("node:fs/promises")>()
+	const fs = await importOriginal<typeof FsPromises>()
 	const open: typeof fs.open = async (...args) => {
 		const handle = await fs.open(...args)
 		handle.sync = () => Promise.resolve()
