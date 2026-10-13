@@ -10,6 +10,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { TunerState } from "@wavekit/api-types"
 import { WebSocketEventBroadcaster } from "../../../src/api/websocket/events.js"
+import { GracefulShutdown } from "../../../src/utils/graceful-shutdown.js"
 import { startActivityRuntime } from "../../../src/core/activity/runtime.js"
 import type { ActivityRuntime } from "../../../src/core/activity/runtime.js"
 import {
@@ -169,6 +170,70 @@ describe("analog transmission wiring", () => {
 			kind: "analog-transmission",
 			eventId: closed.transmissionId,
 		})
+	})
+
+	// Main registers "api-server", then "activity", then "analog-transmissions"
+	// (src/index.ts); LIFO runs the tracker first. Moving either teardown ahead
+	// of it loses the final close on WS or in the store.
+	it("stores and sends the final close of an open transmission at the real shutdown order", async () => {
+		const stateDir = await tempDir()
+		const runtime = await startActivityRuntime({
+			enabled: true,
+			stateDir,
+			logger,
+			execution: "inline",
+			queryExecution: "inline",
+			limits: { batchWindowMs: 0 },
+			setPublisher: () => {},
+		})
+		runtimes.push(runtime)
+		expect(runtime.status).toBe("ready")
+		const broadcaster = new WebSocketEventBroadcaster(logger)
+		const messages = liveAudioClient(broadcaster)
+		const demod = new FakeDemod()
+		const tracker = wireAnalogTransmissions({
+			source: demod,
+			frequencyAt: tuner({}),
+			broadcast: e => broadcaster.broadcastLiveAudioTransmission(e),
+			sink: () => runtime.transmissionSink(),
+		})
+		const shutdown = new GracefulShutdown({ logger })
+		shutdown.register({
+			name: "api-server",
+			handler: async () => {
+				broadcaster.closeAll()
+			},
+			timeout: 1000,
+		})
+		shutdown.register({
+			name: "activity",
+			handler: () => runtime.close(),
+			timeout: 5000,
+		})
+		shutdown.register({
+			name: "analog-transmissions",
+			handler: async () => {
+				tracker.stop()
+			},
+			timeout: 1000,
+		})
+		demod.gate(true)
+		await shutdown.shutdown()
+
+		const tx = messages.filter(m => m.type === "live-audio:transmission")
+		expect(tx.map(m => (m.data as { state: string }).state)).toEqual([
+			"open",
+			"closed",
+		])
+		const closed = tx[1]?.data as {
+			transmissionId: string
+			closeReason: string
+		}
+		expect(closed.closeReason).toBe("stopped")
+		const records = await readRecords(join(stateDir, "activity", "activity.db"))
+		expect(records.map(r => [r.kind, r.eventId])).toEqual([
+			["analog-transmission", closed.transmissionId],
+		])
 	})
 
 	it("still sends both events with Activity disabled and stores nothing", async () => {
