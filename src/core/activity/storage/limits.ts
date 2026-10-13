@@ -33,9 +33,19 @@ export interface ActivityLimits {
 	gapQuietMs: number
 	/** Sustained overload emits at most one ingestion-gap row per this interval. */
 	gapMaxIntervalMs: number
+	/**
+	 * Position-only receptions (aircraft, ship) of one entity are stored at most
+	 * once per this window; 0 stores every one (WG1 req 7.6).
+	 */
+	positionCoalesceMs: number
+	/** Entities tracked for coalescing; the least recently stored are evicted. */
+	positionCoalesceMaxEntities: number
 }
 
 const MiB = 1024 * 1024
+
+/** One stored position-only update per aircraft or vessel per minute (WG1 req 7.6). */
+export const ACTIVITY_POSITION_COALESCE_MS = 60_000
 
 /**
  * The single source of default limits. Activity is on by default (WG1 req 7),
@@ -74,6 +84,8 @@ export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
 	pauseRetryMs: 250,
 	gapQuietMs: 5_000,
 	gapMaxIntervalMs: 60_000,
+	positionCoalesceMs: ACTIVITY_POSITION_COALESCE_MS,
+	positionCoalesceMaxEntities: 20_000,
 })
 
 const LIMIT_KEYS = Object.keys(

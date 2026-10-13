@@ -10,6 +10,7 @@ import type { ActivityLimits } from "./limits.js"
 import { buildActivityRow } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { isTelemetryOutput } from "./telemetry.js"
+import { PositionCoalescer } from "./coalesce.js"
 import type { DecodeEnvelope } from "../types.js"
 import type { Logger } from "../../../utils/logger.js"
 
@@ -52,6 +53,7 @@ export class ActivityIngress {
 	admitted = 0
 	excludedTelemetry = 0
 	private readonly global: TokenBucket
+	private readonly coalescer: PositionCoalescer
 	private readonly decoders = new Map<string, TokenBucket>()
 	private readonly queue: BuiltActivityRow[] = []
 	private queueBytes = 0
@@ -72,6 +74,15 @@ export class ActivityIngress {
 			limits.globalBurst,
 			now(),
 		)
+		this.coalescer = new PositionCoalescer(
+			limits.positionCoalesceMs,
+			limits.positionCoalesceMaxEntities,
+		)
+	}
+
+	/** Position-only receptions not stored inside their entity's window. */
+	get coalescedPositions(): number {
+		return this.coalescer.coalesced
 	}
 
 	admit(envelope: DecodeEnvelope): AdmitResult {
@@ -82,6 +93,11 @@ export class ActivityIngress {
 		if (isTelemetryOutput(envelope.outputType)) {
 			this.excludedTelemetry++
 			return { admitted: false, reason: "telemetry" }
+		}
+		const coalesce = this.coalescer.decide(envelope)
+		if (!coalesce.store) {
+			this.coalescer.noteCoalesced()
+			return { admitted: false, reason: "coalesced" }
 		}
 		const now = this.now()
 		if (this.paused) return this.rejectEnvelope(envelope, "store-paused")
@@ -106,6 +122,7 @@ export class ActivityIngress {
 		this.queue.push(row)
 		this.queueBytes += row.recordBytes
 		this.admitted++
+		coalesce.commit()
 		return { admitted: true }
 	}
 
@@ -315,7 +332,7 @@ export class ActivityIngress {
 
 	private rejectEnvelope(
 		envelope: DecodeEnvelope,
-		reason: Exclude<AdmitRejection, "closed" | "telemetry">,
+		reason: Exclude<AdmitRejection, "closed" | "telemetry" | "coalesced">,
 	): AdmitResult {
 		this.noteDrop(reason, envelope.receivedAt, envelope.decoderId, this.now())
 		return { admitted: false, reason }
@@ -324,7 +341,7 @@ export class ActivityIngress {
 	private rejectTransmission(
 		input: AnalogTransmissionAdmission,
 		bucket: string,
-		reason: Exclude<AdmitRejection, "closed" | "telemetry">,
+		reason: Exclude<AdmitRejection, "closed" | "telemetry" | "coalesced">,
 	): AdmitResult {
 		this.noteDrop(reason, input.receivedAt, bucket, this.now())
 		return { admitted: false, reason }

@@ -60,6 +60,9 @@ and `pnpm run lint` before reporting.
   - _Requirements: 3.2, 3.4, 3.9, 4.5, 6.4, 6.5_
 - [x] M.2 Activity on by default with bounded defaults; tests.
   - _Requirements: 7.1–7.5_
+- [x] M.2b Position coalescing per entity in Activity ingress (user decision, R1 M1).
+  - _Requirements: 7.6–7.8_
+  - **Property 11: Position coalescing**
 - [x] M.3 Scanner extras: progress at 2 Hz, POI with per-hop dwell.
   - _Requirements: 8.1, 8.2_
   - **Property 10: Scanner progress rate**

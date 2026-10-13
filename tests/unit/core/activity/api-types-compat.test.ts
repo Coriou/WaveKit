@@ -54,6 +54,7 @@ type NextStats = {
 		number
 	>
 	excludedTelemetry: number
+	coalescedPositions: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number

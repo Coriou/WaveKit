@@ -431,7 +431,11 @@ class ActivityStore implements ActivityStoreHandle {
 		if (result.admitted) {
 			this.onQueued()
 			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
-		} else if (result.reason !== "telemetry" && result.reason !== "closed") {
+		} else if (
+			result.reason !== "telemetry" &&
+			result.reason !== "closed" &&
+			result.reason !== "coalesced"
+		) {
 			this.armGapTimer()
 		}
 		return result
@@ -442,7 +446,11 @@ class ActivityStore implements ActivityStoreHandle {
 		if (result.admitted) {
 			this.onQueued()
 			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
-		} else if (result.reason !== "telemetry" && result.reason !== "closed") {
+		} else if (
+			result.reason !== "telemetry" &&
+			result.reason !== "closed" &&
+			result.reason !== "coalesced"
+		) {
 			this.armGapTimer()
 		}
 		return result
@@ -461,6 +469,7 @@ class ActivityStore implements ActivityStoreHandle {
 				closed: this.ingress.dropped.closed,
 			},
 			excludedTelemetry: this.ingress.excludedTelemetry,
+			coalescedPositions: this.ingress.coalescedPositions,
 			queueDepth: this.ingress.queueDepth(),
 			queueBytes: this.ingress.queueBytesTotal(),
 			dbBytes: this.dbBytes,

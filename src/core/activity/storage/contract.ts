@@ -222,6 +222,8 @@ export type AdmitRejection =
 	| "closed"
 	/** Excluded telemetry output; counted, not a loss. */
 	| "telemetry"
+	/** A position-only update inside its entity's coalescing window; counted, not a loss. */
+	| "coalesced"
 
 export type AdmitResult =
 	| { admitted: true }
@@ -236,6 +238,8 @@ export interface ActivityStoreStats {
 		number
 	>
 	excludedTelemetry: number
+	/** Position-only receptions not stored inside their entity's window (WG1). */
+	coalescedPositions: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number

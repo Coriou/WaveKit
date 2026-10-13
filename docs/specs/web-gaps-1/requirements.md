@@ -158,6 +158,17 @@ app running, as today.
 7.4 `config/default.yaml`, `docs/API.md` and `docs/ROADMAP.md` shall describe the new
 default and bounds.
 7.5 Access stays `legacy` by default.
+7.6 (User decision, 2026-10-13.) Activity shall store a position-only reception of one
+entity (an `aircraft` output by ICAO address, a `ship` output by MMSI, per decoder) at most
+once per 60 s (`ACTIVITY_POSITION_COALESCE_MS`, the `positionCoalesceMs` store limit).
+7.7 A first sighting, and a reception whose identity or static fields change (aircraft
+`callsign`, `squawk`; ship `name`, `callsign`, `imo`, `shipType`, `destination`, `eta`,
+`draught`, `navStatus`), shall always be stored. Coalesced receptions are counted in
+`coalescedPositions`, are not losses and open no ingestion gap. The per-entity map is
+bounded (least recently stored evicted). Live trackers and WebSocket paths still get every
+update.
+7.8 Under a busy position feed at the row cap, rare events (pages, analog transmissions)
+shall survive far longer than without coalescing.
 
 ## 8. Scanner extras
 

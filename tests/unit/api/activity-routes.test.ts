@@ -26,6 +26,7 @@ function storeStats(): ActivityStoreStats {
 			closed: 0,
 		},
 		excludedTelemetry: 0,
+		coalescedPositions: 0,
 		queueDepth: 0,
 		queueBytes: 0,
 		dbBytes: 10,
