@@ -433,6 +433,9 @@ Activity `unavailable` and the rest running), and measured retention.
       not backfilled.
 - [ ] Backfill presentation onto rows stored before WG2 (deferred; old rows keep
       category `other` and no entity key).
+- [ ] Re-admit receptions coalesced behind a queued row whose write later fails
+      (today they stay dropped, so a failed write can leave up to one 60 s window
+      of that entity unstored).
 - [ ] Filter Meshtastic flood copies of non-position ports (telemetry, node
       info) in Activity by `(from, id)` (deferred; about 600 rows/h on a
       100-node mesh are still stored).
