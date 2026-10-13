@@ -45,7 +45,7 @@ const PREVIEW_KEYS = [
 const COMMIT_KEYS = [
 	...PREVIEW_KEYS,
 	"expected",
-	"previewSha256",
+	"previewDigest",
 	"name",
 	"author",
 	"licence",

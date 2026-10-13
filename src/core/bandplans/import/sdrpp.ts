@@ -5,12 +5,9 @@
  */
 import { createHash } from "node:crypto"
 import { BANDPLANS_LIMITS } from "@wavekit/api-types"
+import type { ImportSkipReason, StoredBand } from "@wavekit/api-types"
 import type {
-	ImportPreview,
-	ImportSkipReason,
-	StoredBand,
-} from "@wavekit/api-types"
-import type {
+	ParsedImportPreview,
 	ParseSdrppBandPlan,
 	SdrppFailureReason,
 	SdrppParseFailure,
@@ -34,7 +31,7 @@ const IMPORTED_PROVENANCE: StoredBand["provenance"] = Object.freeze({
 
 interface DocumentRead {
 	ok: true
-	meta: ImportPreview["meta"]
+	meta: ParsedImportPreview["meta"]
 	bands: readonly unknown[]
 }
 
@@ -111,7 +108,7 @@ function parseBody(
 	}
 
 	if (bands.length === 0) return invalid("empty")
-	const preview: ImportPreview = {
+	const preview: ParsedImportPreview = {
 		format: "sdrpp-json",
 		fileName: options.fileName,
 		bytes: bytes.length,
@@ -165,7 +162,7 @@ function readDocument(
 	return { ok: true, meta: readMeta(value), bands }
 }
 
-function readMeta(value: Record<string, unknown>): ImportPreview["meta"] {
+function readMeta(value: Record<string, unknown>): ParsedImportPreview["meta"] {
 	return {
 		name: boundedText(value["name"], META_CODE_POINTS),
 		countryName: boundedText(value["country_name"], META_CODE_POINTS),

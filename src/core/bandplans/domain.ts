@@ -446,8 +446,8 @@ export const transition: BandPlanTransition = (
 			if (!parsedImport) throw new BandPlansError("BANDPLANS_IMPORT_INVALID")
 			const digest = sha256Base64(mutation.contentBase64)
 			if (
-				digest !== mutation.previewSha256 ||
-				parsedImport.preview.sha256 !== mutation.previewSha256
+				digest !== mutation.previewDigest ||
+				parsedImport.preview.sha256 !== mutation.previewDigest
 			)
 				throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
 			const name = bandPlanTextSchema(80).safeParse(

@@ -50,7 +50,7 @@ const previewBody = {
 const commitBody = {
 	...previewBody,
 	expected: token,
-	previewSha256: "ab".repeat(32),
+	previewDigest: "ab".repeat(32),
 	name: null,
 	author: null,
 	licence: null,

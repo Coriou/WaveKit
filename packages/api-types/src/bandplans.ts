@@ -477,7 +477,10 @@ export type ScanPresetIssue = {
 }
 export interface ScanPresetView {
 	readonly preset: ScanPreset
-	/** False when a bandplan id does not resolve in the effective region. */
+	/**
+	 * False when a bandplan id is not in the effective scanner list (BP2: the built-in
+	 * plans of the enabled stack minus hidden bands; BP1: resolvable in the region).
+	 */
 	readonly applicable: boolean
 	readonly issues: readonly ScanPresetIssue[]
 }
@@ -568,6 +571,7 @@ export const BANDPLAN_IMPORT_FORMATS = ["sdrpp-json"] as const
 export const importGroupOverrideSchema = z
 	.object({ sourceType: z.string().min(0).max(64), group: displayGroupSchema })
 	.strict()
+export type ImportGroupOverride = z.infer<typeof importGroupOverrideSchema>
 const base64Schema = z
 	.string()
 	.max(BANDPLANS_LIMITS.importRequestBytes)
@@ -627,8 +631,14 @@ export interface ImportPreview {
 	readonly format: "sdrpp-json"
 	readonly fileName: string
 	readonly bytes: number
-	/** Of the decoded file bytes; commit must present the same value. */
+	/** SHA-256 (lowercase hex) of the decoded file bytes; display and provenance only. */
 	readonly sha256: string
+	/**
+	 * BP2 preview token: lowercase hex SHA-256 binding the file bytes and the request's
+	 * groupOverrides (design "Batch 2: preview digest"). Commit must present it as
+	 * `previewDigest`; any other bytes or overrides reject BANDPLANS_IMPORT_MISMATCH.
+	 */
+	readonly previewDigest: string
 	readonly meta: {
 		readonly name: string | null
 		readonly countryName: string | null
@@ -647,7 +657,8 @@ export const importCommitFieldsSchema = z
 	.object({
 		...importFileFields,
 		expected: expectedTokenSchema,
-		previewSha256: z.string().regex(/^[0-9a-f]{64}$/),
+		/** ImportPreview.previewDigest of the previewed bytes and groupOverrides. */
+		previewDigest: z.string().regex(/^[0-9a-f]{64}$/),
 		name: bandPlanTextSchema(80).nullable(),
 		author: bandPlanTextSchema(80).nullable(),
 		licence: bandPlanTextSchema(80).nullable(),
@@ -775,7 +786,11 @@ export type BandPlanMutationType = BandPlanMutation["type"]
 
 export interface AvailableBandPlanStore {
 	readonly state: "available"
-	readonly storeId: string
+	/**
+	 * Null iff the served state is the never-persisted in-memory empty state (legacy
+	 * read-only open without state.json). A null store accepts no mutation.
+	 */
+	readonly storeId: string | null
 	readonly revision: number
 }
 export type BandPlanStore =
@@ -878,10 +893,23 @@ export interface BandPlanWriteDto {
 
 // --- WebSocket (optional, Main-wired) ---
 
-/** `bandplans:changed` on channel `bandplans`: a change notice; clients refetch. */
+export const BANDPLANS_WS_CHANNEL = "bandplans" as const
+export const BANDPLANS_CHANGED_EVENT = "bandplans:changed" as const
+/**
+ * `bandplans:changed` on channel `bandplans`: a change token; clients refetch and ignore
+ * older revisions of the same store. Sent after each changed durable commit (storeId
+ * always a string then) and once on subscribe with the current token of an available
+ * store (storeId null for the in-memory legacy state).
+ */
 export interface BandPlansChangedEventData {
-	readonly storeId: string
+	readonly storeId: string | null
 	readonly revision: number
+}
+/** Wire envelope, same three-field shape as the operator-data channel. */
+export interface BandPlansServerMessage {
+	readonly type: typeof BANDPLANS_CHANGED_EVENT
+	readonly channel: typeof BANDPLANS_WS_CHANNEL
+	readonly data: BandPlansChangedEventData
 }
 
 // --- Errors ---

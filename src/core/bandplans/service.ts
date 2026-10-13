@@ -293,7 +293,10 @@ class BandPlanRuntime implements BandPlanService {
 			throw new BandPlansError("BANDPLANS_IMPORT_TOO_LARGE")
 		const parsed = importPreviewRequestSchema.safeParse(request)
 		if (!parsed.success) throw new BandPlansError("BANDPLANS_INVALID")
-		return detach(this.decodeAndParse(parsed.data).preview)
+		const preview = detach(this.decodeAndParse(parsed.data).preview)
+		// BP2 contract step: the digest equals the file hash (BP1 binding) until lane C
+		// binds groupOverrides through PreviewDigestFor (design "Batch 2").
+		return { ...preview, previewDigest: preview.sha256 }
 	}
 	mutate(input: unknown): Promise<BandPlanMutationResult> {
 		let prepared: PreparedMutation
@@ -487,7 +490,7 @@ class BandPlanRuntime implements BandPlanService {
 		if (parsed.data.type !== "commit-import")
 			return { mutation: parsed.data, parsedImport: null }
 		const imported = this.decodeAndParse(parsed.data)
-		if (imported.preview.sha256 !== parsed.data.previewSha256)
+		if (imported.preview.sha256 !== parsed.data.previewDigest)
 			throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
 		return { mutation: parsed.data, parsedImport: detach(imported) }
 	}

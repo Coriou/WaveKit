@@ -190,7 +190,7 @@ function commit(
 		fileName: "community.json",
 		contentBase64: file.contentBase64,
 		groupOverrides: [],
-		previewSha256: file.sha256,
+		previewDigest: file.sha256,
 		name: null,
 		author: null,
 		licence: null,
@@ -718,7 +718,7 @@ describe("band plan transitions", () => {
 				transition(
 					state,
 					commit(state, file, [storedBand("b-one")], {
-						previewSha256: "c".repeat(64),
+						previewDigest: "c".repeat(64),
 					}),
 					ctx(),
 					parsed([storedBand("b-one")], file.sha256),

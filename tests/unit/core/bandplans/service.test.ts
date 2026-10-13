@@ -21,7 +21,6 @@ import type {
 	BandRegion,
 	BuiltinScanPreset,
 	DisplayGroup,
-	ImportPreview,
 	ScanPresetJob,
 	StoredBand,
 } from "@wavekit/api-types"
@@ -44,6 +43,7 @@ import type {
 	BandPlanServiceOptions,
 	BandPlanStoreUnavailableReason,
 	ParsedImport,
+	ParsedImportPreview,
 	SdrppParseResult,
 	TransitionResult,
 } from "../../../../src/core/bandplans/contract.js"
@@ -230,7 +230,7 @@ function makeDeps(
 				}
 			const stored = importedBand(`Band ${sha256.slice(0, 8)}`)
 			const sourceType = options.overrides.keys().next().value
-			const preview: ImportPreview = {
+			const preview: ParsedImportPreview = {
 				format: "sdrpp-json",
 				fileName: options.fileName,
 				bytes: bytes.byteLength,
@@ -361,7 +361,8 @@ async function open(
 }
 function token(service: BandPlanService) {
 	const store = service.view().store
-	if (store.state !== "available") throw new Error("store unavailable")
+	if (store.state !== "available" || store.storeId === null)
+		throw new Error("store unavailable")
 	return { storeId: store.storeId, revision: store.revision }
 }
 function setStack(
@@ -398,14 +399,14 @@ function fileFields(
 function commitOf(
 	expected: { storeId: string; revision: number },
 	bytes: Uint8Array,
-	previewSha256: string,
+	previewDigest: string,
 	overrides: { sourceType: string; group: DisplayGroup }[] = [],
 ): BandPlanMutation {
 	return {
 		type: "commit-import",
 		expected,
 		...fileFields(bytes, overrides),
-		previewSha256,
+		previewDigest,
 		name: null,
 		author: null,
 		licence: null,
@@ -465,7 +466,7 @@ describe("band plan service", { timeout: 60_000 }, () => {
 					writes = 0
 					sink.mockClear()
 					const view = service.view()
-					if (view.store.state !== "available")
+					if (view.store.state !== "available" || view.store.storeId === null)
 						throw new Error("store unavailable")
 					const before = {
 						storeId: view.store.storeId,
