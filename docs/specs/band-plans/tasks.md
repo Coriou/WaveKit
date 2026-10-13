@@ -3,7 +3,8 @@
 Status: batch 1 implemented server-side (lanes A to D, Main M.1 to M.5); two
 independent review rounds, approved. Batch 2 (scanner feed, preview digest, store
 identity, WS change notice) is implemented server-side (lanes S, C, W, Main M2.1 to
-M2.5), pending acceptance (M2.6). Client consumers (CLI, web) remain open. See [requirements](requirements.md) and
+M2.6); two independent review rounds, approved. Client consumers (CLI, web) remain
+open. See [requirements](requirements.md) and
 [design](design.md). Lanes A to D work in parallel against the frozen contract files and
 touch only their own paths; Main (M) composes, mounts and publishes. Every lane runs its
 touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
@@ -172,6 +173,6 @@ contract files.
       effective `GET /api/scanner/bandplans`, preset applicability), `docs/SCANNER.md`,
       `docs/ROADMAP.md` item 3; spec status lines and ticks.
   - _Requirements: 1.1, 11.1–11.10_
-- [ ] M2.6 Acceptance: one review round, full root suite, typecheck, lint, build,
+- [x] M2.6 Acceptance: one review round, full root suite, typecheck, lint, build,
       pinned-blob tests unchanged.
   - _Requirements: 10, 11_

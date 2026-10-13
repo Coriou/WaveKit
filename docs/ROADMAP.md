@@ -66,7 +66,7 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    presets. Batch 1 landed server-side: the band-plan model, a layered resolver,
    a dedicated store with provenance, SDR++ JSON file import with preview,
    built-in and operator scan presets and the `/api/bandplans` REST routes.
-   Batch 2 landed server-side, pending acceptance: the scanner reads the effective
+   Batch 2 landed server-side: the scanner reads the effective
    built-in plans of the stack (hidden bands leave it), import commits bind a
    preview digest, a never-persisted legacy store reports `storeId: null`, and a
    `bandplans` WebSocket channel announces changes. Remaining: CLI and web

@@ -1,7 +1,7 @@
 # Band plans and scan presets design (BP1, BP2)
 
 Status: BP1 implemented server-side. BP2 ("Batch 2" sections at the end) implemented
-server-side, pending acceptance. See [requirements](requirements.md) and
+server-side and accepted. See [requirements](requirements.md) and
 [tasks](tasks.md).
 
 ## Authority audit
