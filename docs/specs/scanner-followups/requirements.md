@@ -1,7 +1,7 @@
 # Scanner follow-ups requirements (SF1)
 
-Status: reviewed design; the shared contract (DTO, JSON schema and core type additions) is
-frozen. Behaviour is not implemented yet. See [design](design.md) and [tasks](tasks.md).
+Status: implemented server-side (all tasks done); CLI and web consumption are follow-ups.
+See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 

@@ -1,6 +1,6 @@
 # Scanner follow-ups design (SF1)
 
-Status: reviewed design with a frozen contract; not implemented. Requirements in
+Status: implemented server-side as designed. Requirements in
 [requirements](requirements.md), tasks in [tasks](tasks.md). Background: `docs/SCANNER.md`,
 the S1 design (`docs/superpowers/specs/2026-10-09-signal-discovery-scanner-design.md`) and
 the band-plans spec ([BP2](../band-plans/design.md)).

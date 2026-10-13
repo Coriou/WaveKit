@@ -1751,6 +1751,26 @@ Creates a job (`ScanJobSpec`, every field optional; defaults in
 - an exclusion `{frequencyHz, widthHz}` becomes
   `{startHz: frequencyHz − widthHz / 2, endHz: frequencyHz + widthHz / 2}`.
 
+A range may also carry these optional fields. All of them can be changed while the
+job runs (see PATCH):
+
+- `enabled` (boolean, absent = enabled): `false` keeps the range in the job at the
+  same index but it is not planned, swept, masked or used for protocol matching.
+  If every range is disabled, the preview fails with `range-empty`.
+- `name` (1 to 100 characters): an operator label.
+- `dwellMs` (10 to 600000): the dwell of every hop that overlaps the range. A hop
+  overlapping several enabled ranges takes the longest of their dwells, counting a
+  range without one at the job's `dwellMs`. Such hops carry `hop.dwellMs` in the
+  plan; hops without it use the job's `dwellMs`.
+- `sensitivity` (`low`, `normal`, `high`): the CFAR false-alarm target inside this
+  range. Integration time stays job-level. Without it the job's sensitivity applies.
+
+`signalsOnly: true` (discover jobs) finds and classifies signals but requests no
+decoder trials of the job's own. Discoveries, captures and evidence from ambient
+decoders or other jobs are unchanged. A monitor job with `signalsOnly` gets the
+error issue `signals-only-unsupported`. The key appears in `spec` only when the
+operator set it.
+
 ```bash
 curl -X POST http://localhost:9000/api/scanner/jobs \
   -H 'Content-Type: application/json' \
@@ -1863,6 +1883,12 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`).
 
+A job in `paused(preempted-job)` carries `preemptedBy: { jobId, name }`: the job
+that holds its source lease now (`name` is null when that job has none). The field
+is absent in every other state or reason, and when no other job holds the lease.
+It is derived when the job is read and never stored. The paused job's
+`scanner:job` event is sent again when the holder changes or the lease is freed.
+
 Startup is bounded to 15 seconds; identify uses the smaller of that cap and
 `timeoutMs`. A source disconnect during startup fails the job with
 `tuner-unavailable` and releases its resources. Deadlines are evaluated on the
@@ -1881,7 +1907,7 @@ deleted in between.
 
 Live edit, applied at the next hop. Allowed keys: `thresholdDb`,
 `sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
-`capture`; other keys are ignored. The keys are merged into the spec the job
+`capture`, `signalsOnly` and `ranges`; other keys are ignored. The keys are merged into the spec the job
 was created with (only `sourceId` and `mode` are pinned), so derived fields
 follow the edit and keep their provenance: `{"sensitivity": "high"}` gives
 100 ms integration unless the job set `integrationMs` itself. While the job
@@ -1893,6 +1919,43 @@ previewed first; a preview with errors is rejected (400
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
   -H 'Content-Type: application/json' -d '{"sensitivity": "high"}'
+```
+
+`ranges` is the full state of the job's effective ranges: the job's
+`spec.ranges` (operator ranges, then bandplan ranges), in the same order and with
+the same count. Read them from the job, change what you need, and send the whole
+array back (the example assumes the job reported exactly these two ranges). Only the live fields `enabled`, `protocols`, `name`, `dwellMs` and
+`sensitivity` may differ. A live field missing from an element clears it, so an
+element without `protocols` drops that range's protocols. The edges, `rasters`,
+`obwHz` and `bandplanId` are locked for the job's lifetime. A changed locked
+field, or a different number of ranges, is 400 `SCANNER_PLAN_INVALID` with one
+`range-locked` issue per offending range (`details: { index, fields }`) or for the
+count (`details: { reason: "range-count", expected, received }`). Disabling every
+range is `range-empty`. The edit takes effect at the next hop. It persists with
+the job, and later patches of any key keep it.
+
+```bash
+curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
+  -H 'Content-Type: application/json' \
+  -d '{"ranges": [{"startHz": 446000000, "endHz": 446200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 446006250}], "name": "PMR", "dwellMs": 400}, {"startHz": 448000000, "endHz": 448200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 448006250}], "enabled": false}]}'
+```
+
+```json
+{
+	"error": "ScannerApiError",
+	"code": "SCANNER_PLAN_INVALID",
+	"message": "The job spec has errors",
+	"details": {
+		"issues": [
+			{
+				"code": "range-locked",
+				"severity": "error",
+				"message": "range 1: endHz cannot change while the job exists; stop it to change edges or channel spacing",
+				"details": { "index": 1, "fields": ["endHz"] }
+			}
+		]
+	}
+}
 ```
 
 #### POST /api/scanner/jobs/:id/pause, /resume, /cancel
@@ -1954,12 +2017,24 @@ stay. **204**; 409 `SCANNER_JOB_NOT_TERMINAL` while the job runs or is paused.
 
 Query parameters: `jobId`, `sourceId`, `protocol`, `minConfidence`
 (`activity` | `candidate` | `classified` | `decoded`), `freqMinHz`,
-`freqMaxHz`, `since` (ISO 8601), `encrypted` (boolean), `q` (label search,
-≤ 100 chars), `sort` (`lastSeen` | `frequency` | `confidence`), `cursor`,
-`limit` (1–500).
+`freqMaxHz`, `since` (ISO 8601), `encrypted` (boolean), `q` (≤ 100 chars),
+`identity` (`<kind>:<value>`, ≤ 100 chars), `sort` (`lastSeen` | `frequency` |
+`confidence`), `cursor`, `limit` (1–500).
+
+`q` is a case-insensitive substring search over the operator label and the
+decoded identity value. Everything it matched before (the label alone) still
+matches. Metadata lists such as talkgroups or capcodes are not searched.
+
+`identity` keeps discoveries whose identity has exactly that kind and value.
+The value is compared case-insensitively after trimming. The kind is one of
+`dmr-cc`, `p25-nac`, `nxdn-ran`, `ysf-dgid`, `dstar-call`, `dpmr-cc`,
+`pocsag-capcode`, `aprs-call` and `ism-model`. An unknown kind, a missing colon
+or an empty value is 400 `VALIDATION_ERROR`. All filters combine with AND; sort,
+cursor and limit work as for the other filters.
 
 ```bash
 curl 'http://localhost:9000/api/scanner/discoveries?protocol=dmr&minConfidence=decoded&limit=50'
+curl 'http://localhost:9000/api/scanner/discoveries?identity=dmr-cc:1'
 ```
 
 ```json

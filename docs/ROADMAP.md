@@ -73,8 +73,12 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    consumption, SDR#, Gqrx and URL import, verified packs (gated), a general
    settings store with YAML/env/UI provenance (spec pending), and country from
    the station location (gated).
-4. **Scanner and listening follow-ups**: running-range edits, identity search,
-   recording activity, then S2/S3 acceptance (§5, §5b).
+4. **Scanner and listening follow-ups**: scanner follow-ups batch 1 landed
+   server-side: running-range edits (enable, protocols, name, dwell and
+   sensitivity per range, applied at the next hop), signals-only jobs, the
+   preempting job on a preempted job, and discovery identity search. CLI and web
+   consumption is a follow-up. Remaining: recording activity, then S2/S3
+   acceptance (§5, §5b).
 
 Software, local-receiver acceptance and optional Pi acceptance have separate
 gates. The detailed workstreams:
