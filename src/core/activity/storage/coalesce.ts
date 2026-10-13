@@ -201,30 +201,58 @@ export function isCoalescibleShape(
 	return true
 }
 
-/** A value and the commit (reception) that set it, so one failed row undoes only its own part. */
+/**
+ * A value and the commit (reception) that set it, linked to the value it
+ * replaced. A failed commit is marked, never restored: undo walks back past
+ * every failed stamp, so a failed row's identity or clock cannot come back
+ * through a later row's undo, whatever order the rows fail in. A settled
+ * (written) stamp drops its link; nothing before it is ever needed again.
+ */
 interface Stamped<T> {
 	value: T
-	by: number
+	failed: boolean
+	prev: Stamped<T> | undefined
 }
 
 interface EntityState {
 	/** receivedAt (ms) of the last stored reception; -Infinity when none is left. */
-	storedAt: Stamped<number>
+	storedAt: Stamped<number> | undefined
 	/** Last known value per identity field, as JSON text. */
 	identity: Map<string, Stamped<string>>
+}
+
+/** Undoes one commit (its write failed). `settle` records that it was written. */
+export interface CoalesceUndo {
+	(): void
+	settle(): void
 }
 
 export interface CoalesceDecision {
 	store: boolean
 	/**
 	 * Records the reception as stored; call only once the row is queued. The
-	 * returned function undoes it if the write later fails.
+	 * returned function undoes it if the write later fails; call its
+	 * `settle` once the write succeeded.
 	 */
-	commit(): () => void
+	commit(): CoalesceUndo
 }
 
-const NOOP = (): void => {}
-const STORE_UNTRACKED: CoalesceDecision = { store: true, commit: () => NOOP }
+function undoOf(undo: () => void, settle: () => void): CoalesceUndo {
+	return Object.assign(undo, { settle })
+}
+
+const NOOP_UNDO = (): CoalesceUndo =>
+	undoOf(
+		() => {},
+		() => {},
+	)
+const STORE_UNTRACKED: CoalesceDecision = { store: true, commit: NOOP_UNDO }
+
+function live<T>(stamp: Stamped<T> | undefined): Stamped<T> | undefined {
+	let current = stamp
+	while (current?.failed) current = current.prev
+	return current
+}
 
 function asObject(value: JsonValue): JsonObject | null {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -234,7 +262,6 @@ function asObject(value: JsonValue): JsonObject | null {
 
 export class PositionCoalescer {
 	private readonly entities = new Map<string, EntityState>()
-	private seq = 0
 	coalesced = 0
 
 	/**
@@ -284,12 +311,11 @@ export class PositionCoalescer {
 				([field, value]) => state.identity.get(field)?.value !== value,
 			)
 		// A clock step backwards (at < storedAt) also stores, so it cannot mute an entity.
+		const storedAt = state?.storedAt?.value
 		const due =
-			state === undefined ||
-			at - state.storedAt.value >= this.windowMs ||
-			at < state.storedAt.value
+			storedAt === undefined || at - storedAt >= this.windowMs || at < storedAt
 		if (!informative && !changed && !due)
-			return { store: false, commit: () => NOOP }
+			return { store: false, commit: NOOP_UNDO }
 		return { store: true, commit: () => this.record(key, seen, at) }
 	}
 
@@ -302,40 +328,52 @@ export class PositionCoalescer {
 		key: string,
 		seen: ReadonlyMap<string, string>,
 		at: number,
-	): () => void {
-		const by = ++this.seq
+	): CoalesceUndo {
 		const state: EntityState = this.entities.get(key) ?? {
-			storedAt: { value: Number.NEGATIVE_INFINITY, by: 0 },
+			storedAt: undefined,
 			identity: new Map(),
 		}
-		const priorStoredAt = state.storedAt
-		const priorFields = new Map<string, Stamped<string> | undefined>()
+		const fields: Array<[string, Stamped<string>]> = []
 		for (const [field, value] of seen) {
-			priorFields.set(field, state.identity.get(field))
-			state.identity.set(field, { value, by })
+			const stamp: Stamped<string> = {
+				value,
+				failed: false,
+				prev: state.identity.get(field),
+			}
+			state.identity.set(field, stamp)
+			fields.push([field, stamp])
 		}
-		state.storedAt = { value: at, by }
+		const clock: Stamped<number> = {
+			value: at,
+			failed: false,
+			prev: state.storedAt,
+		}
+		state.storedAt = clock
 		this.entities.delete(key)
 		this.entities.set(key, state)
 		this.evict()
 		// Undo touches only what this reception set and nothing later rows
-		// replaced, so a later stored row never inherits a failed row's identity.
-		// The ingress undoes failed rows newest first.
-		return () => {
+		// replaced. A later row that replaced it skips it on its own undo.
+		const undo = () => {
+			clock.failed = true
+			for (const [, stamp] of fields) stamp.failed = true
 			const current = this.entities.get(key)
 			if (!current) return
-			for (const [field, prior] of priorFields) {
-				if (current.identity.get(field)?.by !== by) continue
-				if (prior) current.identity.set(field, prior)
+			for (const [field, stamp] of fields) {
+				if (current.identity.get(field) !== stamp) continue
+				const back = live(stamp.prev)
+				if (back) current.identity.set(field, back)
 				else current.identity.delete(field)
 			}
-			if (current.storedAt.by === by) current.storedAt = priorStoredAt
-			if (
-				current.identity.size === 0 &&
-				current.storedAt.value === Number.NEGATIVE_INFINITY
-			)
+			if (current.storedAt === clock) current.storedAt = live(clock.prev)
+			if (current.identity.size === 0 && current.storedAt === undefined)
 				this.entities.delete(key)
 		}
+		const settle = () => {
+			clock.prev = undefined
+			for (const [, stamp] of fields) stamp.prev = undefined
+		}
+		return undoOf(undo, settle)
 	}
 
 	/**

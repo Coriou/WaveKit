@@ -10,7 +10,7 @@ import type { ActivityLimits } from "./limits.js"
 import { buildActivityRow } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { isTelemetryOutput } from "./telemetry.js"
-import { PositionCoalescer } from "./coalesce.js"
+import { PositionCoalescer, type CoalesceUndo } from "./coalesce.js"
 import type { DecodeEnvelope } from "../types.js"
 import type { Logger } from "../../../utils/logger.js"
 
@@ -55,7 +55,7 @@ export class ActivityIngress {
 	private readonly global: TokenBucket
 	private readonly coalescer: PositionCoalescer
 	/** Undo of each queued or in-flight row's coalescing state, by eventId. */
-	private readonly coalesceUndo = new Map<string, () => void>()
+	private readonly coalesceUndo = new Map<string, CoalesceUndo>()
 	private readonly decoders = new Map<string, TokenBucket>()
 	private readonly queue: BuiltActivityRow[] = []
 	private queueBytes = 0
@@ -216,7 +216,7 @@ export class ActivityIngress {
 	ack(done: ReadonlySet<string>): void {
 		// Rows written (or duplicates) keep their coalescing state; noteSkipped
 		// has already rolled back the failed ones.
-		for (const row of this.inFlight) this.coalesceUndo.delete(row.eventId)
+		for (const row of this.inFlight) this.settleCoalescing(row.eventId)
 		const gap = this.inFlight.find(row => row.kind === "ingestion-gap")
 		if (gap) {
 			if (done.has(gap.eventId)) this.gapHeld = false
@@ -264,7 +264,7 @@ export class ActivityIngress {
 
 	/** Clears an in-flight batch without counting it. A timed-out write may still commit. */
 	forgetInFlight(): void {
-		for (const row of this.inFlight) this.coalesceUndo.delete(row.eventId)
+		for (const row of this.inFlight) this.settleCoalescing(row.eventId)
 		this.inFlight = []
 		this.inFlightBytes = 0
 	}
@@ -273,6 +273,12 @@ export class ActivityIngress {
 	 * A failed write must not suppress the entity's next reception (for example
 	 * the retransmission of a name-bearing report): restore its prior state.
 	 */
+	private settleCoalescing(eventId: string): void {
+		const undo = this.coalesceUndo.get(eventId)
+		this.coalesceUndo.delete(eventId)
+		undo?.settle()
+	}
+
 	private rollBackCoalescing(eventId: string): void {
 		const undo = this.coalesceUndo.get(eventId)
 		this.coalesceUndo.delete(eventId)
