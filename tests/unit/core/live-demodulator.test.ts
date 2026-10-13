@@ -851,6 +851,69 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.getStatus().config.httpPort).toBe(nextPort)
 	})
 
+	// WG2 req 7.7 (WG1 n2): the resolved source decides, not the configured string.
+	it("neither restarts nor closes when an absent and an explicit id resolve to the same source", async () => {
+		await liveDemod.stop()
+		liveDemod = create({ sourceId: undefined })
+		await liveDemod.start()
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		const spawned = processes.length
+		await liveDemod.reconfigure({ sourceId: "rtl-pi" })
+		expect(processes.length).toBe(spawned)
+		expect(fanoutManager.removeBranch).not.toHaveBeenCalled()
+		expect(reasons).toEqual([])
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		expect(liveDemod.getStatus().config.sourceId).toBe("rtl-pi")
+	})
+
+	it("restarts and closes as config on a real source change", async () => {
+		await liveDemod.stop()
+		const fanouts = new Map<
+			string,
+			ReturnType<typeof createMockFanoutManager>
+		>()
+		const fanoutFor = (id: string) => {
+			let f = fanouts.get(id)
+			if (!f) {
+				f = createMockFanoutManager()
+				fanouts.set(id, f)
+			}
+			return f
+		}
+		const router = {
+			getFanout: vi.fn((id: string) => fanoutFor(id)),
+			getDefaultSourceId: vi.fn(() => "rtl-pi"),
+		}
+		liveDemod = new LiveDemodulatorClass(
+			testLogger,
+			sourceManager as any,
+			router as any,
+			LiveDemodConfigSchema.parse({ enabled: true, httpPort: port }),
+			{},
+		)
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		const spawned = processes.length
+		// Absent resolving to rtl-pi, then explicit rtl-pi: no restart, no close.
+		await liveDemod.reconfigure({ sourceId: "rtl-pi" })
+		expect(processes.length).toBe(spawned)
+		expect(reasons).toEqual([])
+		await liveDemod.reconfigure({ sourceId: "rtl-b" })
+		expect(processes.length).toBeGreaterThan(spawned)
+		expect(fanoutFor("rtl-pi").removeBranch).toHaveBeenCalled()
+		expect(fanoutFor("rtl-b").addBranch).toHaveBeenCalledWith(
+			expect.objectContaining({ sourceId: "rtl-b" }),
+		)
+		expect(reasons).toEqual(["config"])
+	})
+
 	it("leaves a threshold-only squelch close unlabeled", async () => {
 		await liveDemod.start()
 		const reasons: Array<"stopped" | "config" | null> = []

@@ -352,17 +352,25 @@ export class LiveDemodulator extends EventEmitter {
 				"Protected audio port changes require deployment reconfiguration",
 				"ACCESS_CONFIG_INVALID",
 			)
-		const sourceChanged = validated.sourceId !== previous.sourceId
+		// WG2 req 7.7 (WG1 n2): compare the resolved source, so an absent id and an explicit id
+		// that resolve to the same source neither restart nor close the transmission. Both absent
+		// keeps today's behaviour (no change).
+		const resolvedAfter = this.resolveSourceId(validated)
+		const sourceChanged =
+			validated.sourceId !== previous.sourceId &&
+			(this.activeSourceId ?? this.resolveSourceId(previous)) !== resolvedAfter
 		const pipelineChanged = (
 			Object.keys(validated) as Array<keyof LiveDemodConfig>
-		).some(key => !NODE_ONLY_KEYS.has(key) && validated[key] !== previous[key])
+		).some(key => {
+			if (NODE_ONLY_KEYS.has(key)) return false
+			if (key === "sourceId") return sourceChanged
+			return validated[key] !== previous[key]
+		})
 		const active = this.http.listening || this.run !== null
 
 		// Validate the new source and RF plan before detaching the current stream.
 		if (sourceChanged || (active && pipelineChanged)) {
-			const sourceId = sourceChanged
-				? this.resolveSourceId(validated)
-				: this.activeSourceId
+			const sourceId = sourceChanged ? resolvedAfter : this.activeSourceId
 			if (!sourceId) throw this.noSourceError()
 			this.planFor(sourceId, validated)
 		}
@@ -371,7 +379,14 @@ export class LiveDemodulator extends EventEmitter {
 		// WG1 req 3.6: any change that restarts the pipeline, or changes one of
 		// the transmission identity fields, closes an open transmission as "config".
 		const restarting = active && (pipelineChanged || sourceChanged)
-		if (restarting || liveDemodTransmissionConfigChanged(previous, validated))
+		if (
+			restarting ||
+			liveDemodTransmissionConfigChanged(
+				previous,
+				validated,
+				resolvedAfter ?? undefined,
+			)
+		)
 			this.closeOverride = "config"
 		try {
 			if (this.run && validated.squelchMode !== previous.squelchMode)
