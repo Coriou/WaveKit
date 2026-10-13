@@ -27,6 +27,8 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [scanner-followups](scanner-followups/requirements.md): running-job range edits,
   per-range fields, signals only, preempting job, identity search (SF1)
 - [viewed-slice-spectrum](viewed-slice-spectrum/requirements.md)
+- [web-gaps-1](web-gaps-1/requirements.md): waterfall backfill and averaging, analog
+  transmission events, AIS vessel tracker, Activity on by default (WG1)
 
 ## The three files
 
