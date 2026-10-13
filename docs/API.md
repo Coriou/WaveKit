@@ -2674,8 +2674,10 @@ The store holds three kinds:
   source id, `frequencyHz` from the event-time frequency (null when unknown),
   `decoderId: null`, a title such as `NFM 446.00625 MHz` (or
   `NFM transmission` without a frequency) and fields `durationMs` (ms),
-  `modulation` and `peakChannelPowerDbfs` (dBFS, when known). Search with
-  `kinds=analog-transmission`, by source or frequency. Admission is
+  `modulation` and `peakChannelPowerDbfs` (dBFS, when known), plus `ctcssHz`
+  (label `CTCSS`, Hz) and `dtmf` (label `DTMF`) when the closed event's
+  `tone` has them; those values are also searchable text. Older rows have
+  no `tone`. Search with `kinds=analog-transmission`, by source or frequency. Admission is
   non-blocking and counted like decoder receptions, with one per-decoder
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
@@ -3481,6 +3483,14 @@ ready, each closed transmission is also stored as an `analog-transmission`
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
   level samples; null before the first one. Every open is followed by exactly
   one closed event, also on shutdown.
+- `tone` (WG2): `{ ctcssHz, dtmf }`, on closed events only (always both keys;
+  absent on open events). `ctcssHz` is one of the 50 standard CTCSS tones
+  (67.0–254.1 Hz) heard through the transmission, null when none qualified or
+  the transmission was shorter than 750 ms. `dtmf` is the DTMF symbols
+  (`0-9`, `*`, `#`, `A-D`) in order, at most 32, each held at least 40 ms
+  within the standard twist (−8 to +4 dB); null when none. Detection runs on
+  the demodulated audio (decimated to 8 kHz) only while a transmission is
+  open; it is always on and has no config key. DCS is not detected.
 
 #### digital-voice:call
 
