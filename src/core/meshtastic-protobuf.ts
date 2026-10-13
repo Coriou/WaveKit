@@ -15,6 +15,8 @@
 
 const MAX_VARINT_BYTES = 10
 const MAX_FIELDS = 64
+/** Proto3 field numbers are 1..2^29-1. A larger number is a malformed tag. */
+const MAX_FIELD_NUMBER = (1n << 29n) - 1n
 /** Meshtastic long-name limit, in UTF-8 bytes. Longer names reject the message. */
 const MAX_LONG_NAME_BYTES = 40
 /** Meshtastic short-name limit, in UTF-8 bytes. */
@@ -115,7 +117,7 @@ function walk(
 		fields += 1
 		const field = tag >> 3n
 		const wire = Number(tag & 7n)
-		if (field <= 0n) return false
+		if (field <= 0n || field > MAX_FIELD_NUMBER) return false
 		const action = known(field, wire, cursor)
 		if (action === "bad") return false
 		if (action === "unknown" && !skip(cursor, wire)) return false
@@ -185,7 +187,12 @@ function readText(
 	const slice = cursor.bytes.subarray(cursor.offset, cursor.offset + count)
 	cursor.offset += count
 	try {
-		const text = new TextDecoder("utf-8", { fatal: true }).decode(slice)
+		// ignoreBOM keeps U+FEFF. The default decoder strips a leading BOM and
+		// would make a name or a User.id fail to round-trip.
+		const text = new TextDecoder("utf-8", {
+			fatal: true,
+			ignoreBOM: true,
+		}).decode(slice)
 		if (hasControl(text)) return null
 		return text
 	} catch {

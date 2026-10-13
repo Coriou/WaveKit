@@ -97,6 +97,10 @@ describe("readPosition", () => {
 		expect(readPosition(eleven)).toBeNull()
 		expect(readPosition(Uint8Array.from([0x1a, 0x05, 0x01]))).toBeNull()
 		expect(readPosition(Uint8Array.from([0x08, 0x01]))).toBeNull()
+		// Field number 536870912 is above the proto3 maximum of 2^29-1.
+		const hugeField = Uint8Array.from([0x80, 0x80, 0x80, 0x80, 0x10, 0x00])
+		expect(readPosition(hugeField)).toBeNull()
+		expect(readUser(hugeField)).toBeNull()
 	})
 
 	it("returns null for a non-Uint8Array and never throws", () => {
@@ -138,6 +142,11 @@ describe("readUser", () => {
 		expect(readUser(Uint8Array.from([0x12, 0x01, 0x0a]))).toBeNull()
 		expect(readUser(Uint8Array.from([0x12, 0x01, 0x7f]))).toBeNull()
 		expect(readUser(Uint8Array.from([0x30, 0x02]))).toBeNull()
+		const bomName = "\uFEFFAda"
+		expect(readUser(encodeUser({ longName: bomName }))?.longName).toBe(bomName)
+		expect(readUser(encodeUser({ id: "\uFEFF!00000001" }))?.id).toBe(
+			"\uFEFF!00000001",
+		)
 	})
 
 	it("returns null for a length that runs past the buffer", () => {

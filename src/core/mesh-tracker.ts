@@ -3,7 +3,8 @@
  *
  * In-memory only. One node per `from` (`!` + 8 lowercase hex). The broadcast
  * address 0xffffffff is never a node, and `to` never creates one. A flood copy
- * of the same `(from, id)` within 60 s bumps `duplicateCopies` and nothing else.
+ * of the same `(from, id)` within 60 s either side of the latest copy bumps
+ * `duplicateCopies` and nothing else. The remembered time stays at the latest.
  */
 
 import { EventEmitter } from "node:events"
@@ -441,8 +442,12 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 		this.pruneDuplicates(atMs)
 		const key = duplicateKey(from, id)
 		const seen = this.duplicates.get(key)
-		if (seen !== undefined && atMs - seen <= this.limits.duplicateWindowMs) {
-			this.duplicates.set(key, atMs)
+		if (
+			seen !== undefined &&
+			Math.abs(atMs - seen) <= this.limits.duplicateWindowMs
+		) {
+			// Keep the later timestamp so an older copy cannot shrink the window.
+			this.duplicates.set(key, Math.max(seen, atMs))
 			return true
 		}
 		return false
@@ -450,14 +455,17 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 
 	private remember(from: number, id: number, atMs: number): void {
 		const key = duplicateKey(from, id)
-		if (!this.duplicates.has(key)) {
+		const existing = this.duplicates.get(key)
+		if (existing === undefined) {
 			while (this.duplicates.size >= this.limits.maxDuplicateKeys) {
 				const before = this.duplicates.size
 				this.evictOldestDuplicate()
 				if (this.duplicates.size >= before) return
 			}
+			this.duplicates.set(key, atMs)
+			return
 		}
-		this.duplicates.set(key, atMs)
+		this.duplicates.set(key, Math.max(existing, atMs))
 	}
 
 	private pruneDuplicates(atMs: number): void {

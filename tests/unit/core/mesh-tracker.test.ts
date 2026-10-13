@@ -156,6 +156,15 @@ describe("MeshTracker", () => {
 		})
 		send(nodes, {
 			from: 5,
+			id: 4,
+			portnum: 4,
+			payload: encodeUser({
+				id: "\uFEFF!00000005",
+				longName: "Bom",
+			}),
+		})
+		send(nodes, {
+			from: 5,
 			id: 3,
 			portnum: 4,
 			payload: encodeUser({
@@ -172,10 +181,10 @@ describe("MeshTracker", () => {
 			role: 2,
 			isLicensed: true,
 			lastNodeInfoAt: AT.toISOString(),
-			packetCount: 3,
+			packetCount: 4,
 		})
 		expect(stamped).toBe(AT.toISOString())
-		expect(nodes.getStats().invalidPackets).toBe(1)
+		expect(nodes.getStats().invalidPackets).toBe(2)
 		expect(nodes.getStats().decodeErrors).toBe(0)
 	})
 
@@ -217,6 +226,12 @@ describe("MeshTracker", () => {
 			payload: Uint8Array.from([0x12, 0x01, 0xff]),
 		})
 		send(nodes, { from: 1, id: 6, portnum: 67, payload: Uint8Array.from([1]) })
+		send(nodes, {
+			from: 1,
+			id: 7,
+			portnum: 3,
+			payload: Uint8Array.from([0x80, 0x80, 0x80, 0x80, 0x10, 0x00]),
+		})
 		const node = nodes.get("!00000001")
 		expect(node?.position).toEqual({
 			lat: 10,
@@ -225,10 +240,10 @@ describe("MeshTracker", () => {
 			at: AT.toISOString(),
 		})
 		expect(node?.snrDb).toBe(5)
-		expect(node?.portnums).toMatchObject({ "3": 4, "4": 1, "67": 1 })
-		expect(node?.packetCount).toBe(6)
+		expect(node?.portnums).toMatchObject({ "3": 5, "4": 1, "67": 1 })
+		expect(node?.packetCount).toBe(7)
 		expect(node?.longName).toBeNull()
-		expect(nodes.getStats().decodeErrors).toBe(2)
+		expect(nodes.getStats().decodeErrors).toBe(3)
 		expect(nodes.getStats().invalidPackets).toBe(0)
 	})
 
@@ -298,6 +313,50 @@ describe("MeshTracker", () => {
 			new Date(start + 60_001 + 60_001),
 		)
 		expect(nodes.get("!00000001")?.packetCount).toBe(3)
+	})
+
+	it("keeps a packet more than 60 s earlier and does not move the dedupe anchor backward", () => {
+		const nodes = tracker()
+		const start = 1_000_000
+		send(nodes, { from: 1, id: 7, rxSnr: 4, portnum: 1 }, new Date(start))
+		const events: string[] = []
+		nodes.on("mesh:update", () => events.push("update"))
+		send(
+			nodes,
+			{ from: 1, id: 7, rxSnr: 9, portnum: 5 },
+			new Date(start - 30_000),
+		)
+		expect(events).toEqual([])
+		expect(nodes.get("!00000001")).toMatchObject({
+			duplicateCopies: 1,
+			snrDb: 4,
+			packetCount: 1,
+		})
+		send(
+			nodes,
+			{ from: 1, id: 7, rxSnr: 1, portnum: 1 },
+			new Date(start + 60_000),
+		)
+		expect(nodes.get("!00000001")?.duplicateCopies).toBe(2)
+		expect(events).toEqual([])
+		send(
+			nodes,
+			{ from: 1, id: 7, rxSnr: 2, portnum: 1 },
+			new Date(start - 60_001),
+		)
+		expect(events).toEqual(["update"])
+		expect(nodes.get("!00000001")).toMatchObject({
+			snrDb: 2,
+			packetCount: 2,
+			duplicateCopies: 2,
+		})
+		send(nodes, { from: 1, id: 7, rxSnr: 8, portnum: 9 }, new Date(start))
+		expect(nodes.get("!00000001")).toMatchObject({
+			snrDb: 2,
+			packetCount: 2,
+			duplicateCopies: 3,
+		})
+		expect(events).toEqual(["update"])
 	})
 
 	it("folds portnums past 63 distinct values into other and stays at 64 keys", () => {
