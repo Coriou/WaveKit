@@ -73,6 +73,7 @@ import { toApiDecoderInfo } from "./serializers/decoder-status.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
 import type { VesselTracker } from "../core/vessel-tracker.js"
+import type { VesselState, VesselTrackerStats } from "@wavekit/api-types"
 import { installAccessHooks } from "../access/fastify-adapter.js"
 import type { FastifyAccessController } from "../access/fastify-adapter.js"
 import { registerAccessRoutes } from "../access/access-routes.js"
@@ -184,6 +185,8 @@ export class ApiServer {
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
 	private readonly vesselTracker?: VesselTracker | undefined
+	/** Detaches the vessel tracker listeners; the tracker outlives the server. */
+	private vesselWiring: (() => void) | null = null
 	private readonly scanner?: ScannerService | undefined
 	private readonly spectrum?: SpectrumService | undefined
 	private readonly audioConfig?: AudioConfig | undefined
@@ -564,6 +567,10 @@ export class ApiServer {
 			this.spectrumWiring?.dispose()
 			this.spectrumWiring = null
 		})
+		await attempt(() => {
+			this.vesselWiring?.()
+			this.vesselWiring = null
+		})
 		await attempt(async () => {
 			await this.app.close()
 		})
@@ -824,18 +831,29 @@ export class ApiServer {
 
 		// AIS vessel tracker events (WG1 req 6.4)
 		if (this.vesselTracker) {
-			this.vesselTracker.on("vessel:new", vessel => {
+			const tracker = this.vesselTracker
+			const onNew = (vessel: VesselState) => {
 				this.wsBroadcaster.broadcastVesselNew(vessel)
-			})
-			this.vesselTracker.on("vessel:update", vessel => {
+			}
+			const onUpdate = (vessel: VesselState) => {
 				this.wsBroadcaster.broadcastVesselUpdate(vessel)
-			})
-			this.vesselTracker.on("vessel:lost", (mmsi, vessel) => {
+			}
+			const onLost = (mmsi: string, vessel: VesselState) => {
 				this.wsBroadcaster.broadcastVesselLost(mmsi, vessel)
-			})
-			this.vesselTracker.on("stats:update", stats => {
+			}
+			const onStats = (stats: VesselTrackerStats) => {
 				this.wsBroadcaster.broadcastVesselStats(stats)
-			})
+			}
+			tracker.on("vessel:new", onNew)
+			tracker.on("vessel:update", onUpdate)
+			tracker.on("vessel:lost", onLost)
+			tracker.on("stats:update", onStats)
+			this.vesselWiring = () => {
+				tracker.off("vessel:new", onNew)
+				tracker.off("vessel:update", onUpdate)
+				tracker.off("vessel:lost", onLost)
+				tracker.off("stats:update", onStats)
+			}
 		}
 
 		this.log.debug("Event broadcasting handlers registered")

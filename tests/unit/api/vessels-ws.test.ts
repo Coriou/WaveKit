@@ -126,4 +126,80 @@ describe("vessels through the API server", () => {
 			.inject({ method: "GET", url: "/api/vessels/123456789" })
 		expect(one.statusCode).toBe(200)
 	})
+
+	it("sends vessel:lost on eviction and expiry, vessel:stats every 5 s, and detaches on stop", async () => {
+		await server.stop()
+		tracker.stop()
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		try {
+			let clock = Date.parse("2026-06-15T12:00:00.000Z")
+			tracker = new VesselTracker({ now: () => clock, maxVessels: 2 }, logger)
+			const events = [
+				"vessel:new",
+				"vessel:update",
+				"vessel:lost",
+				"stats:update",
+			] as const
+			const baseline = events.map(e => tracker.listenerCount(e))
+			server = new ApiServer(dependencies(tracker), {
+				host: "127.0.0.1",
+				port: 0,
+			})
+			await server.start()
+			expect(events.map(e => tracker.listenerCount(e))).toEqual(
+				baseline.map(n => n + 1),
+			)
+			const subscriber = connect(server)
+			subscriber.send({ type: "subscribe", channels: ["vessels"] })
+			tracker.start()
+			const report = (mmsi: string) =>
+				tracker.processShip(
+					"ais",
+					{ mmsi, messageType: 1, lat: 10, lon: 20 },
+					new Date(clock),
+				)
+			const types = () =>
+				subscriber.socket.sent
+					.filter(m => m.type.startsWith("vessel:"))
+					.map(m => m.type)
+
+			report("111111111")
+			vi.advanceTimersByTime(5_000)
+			expect(types()).toEqual(["vessel:new", "vessel:stats"])
+			const stats = subscriber.socket.sent.find(m => m.type === "vessel:stats")
+			expect(stats?.data).toMatchObject({ vesselCount: 1 })
+
+			clock += 1_000
+			report("222222222")
+			clock += 1_000
+			report("333333333") // at the cap of 2: evicts the least recently heard
+			const lost = subscriber.socket.sent.filter(m => m.type === "vessel:lost")
+			expect(lost.map(m => (m.data as { mmsi: string }).mmsi)).toEqual([
+				"111111111",
+			])
+			expect(lost[0]?.data).toMatchObject({ vessel: { mmsi: "111111111" } })
+
+			clock += 900_001
+			vi.advanceTimersByTime(10_000)
+			expect(
+				subscriber.socket.sent
+					.filter(m => m.type === "vessel:lost")
+					.map(m => (m.data as { mmsi: string }).mmsi)
+					.sort(),
+			).toEqual(["111111111", "222222222", "333333333"])
+
+			const broadcaster = server.getWebSocketBroadcaster()
+			const spy = vi.spyOn(broadcaster, "broadcast")
+			await server.stop()
+			expect(events.map(e => tracker.listenerCount(e))).toEqual(baseline)
+			report("444444444")
+			vi.advanceTimersByTime(5_000)
+			expect(
+				spy.mock.calls.filter(([channel]) => channel === "vessels"),
+			).toEqual([])
+			// afterEach stops it again; ApiServer.stop() is idempotent.
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 })
