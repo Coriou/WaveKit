@@ -51,7 +51,7 @@ export const accessDeviceDtoSchema = z
 		renewedAt: clockSchema,
 		expiresAt: clockSchema,
 		current: z.boolean(),
-		/** WG2: optional only until lane D lands; projections then always set them. */
+		/** WG2: optional so rows from older cores parse; current projections always set them. */
 		name: accessDeviceNameSchema.nullable().optional(),
 		kind: accessDeviceKindSchema.nullable().optional(),
 		lastSeenAt: lastSeenSchema.nullable().optional(),

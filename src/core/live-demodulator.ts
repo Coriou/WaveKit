@@ -356,9 +356,10 @@ export class LiveDemodulator extends EventEmitter {
 		// that resolve to the same source neither restart nor close the transmission. Both absent
 		// keeps today's behaviour (no change).
 		const resolvedAfter = this.resolveSourceId(validated)
+		const resolvedBefore = this.activeSourceId ?? this.resolveSourceId(previous)
 		const sourceChanged =
 			validated.sourceId !== previous.sourceId &&
-			(this.activeSourceId ?? this.resolveSourceId(previous)) !== resolvedAfter
+			resolvedBefore !== resolvedAfter
 		const pipelineChanged = (
 			Object.keys(validated) as Array<keyof LiveDemodConfig>
 		).some(key => {
@@ -379,12 +380,14 @@ export class LiveDemodulator extends EventEmitter {
 		// WG1 req 3.6: any change that restarts the pipeline, or changes one of
 		// the transmission identity fields, closes an open transmission as "config".
 		const restarting = active && (pipelineChanged || sourceChanged)
+		// The source side is `sourceChanged` (resolved before vs after); the helper compares
+		// the other identity fields only.
 		if (
 			restarting ||
+			sourceChanged ||
 			liveDemodTransmissionConfigChanged(
-				previous,
-				validated,
-				resolvedAfter ?? undefined,
+				{ ...previous, sourceId: undefined },
+				{ ...validated, sourceId: undefined },
 			)
 		)
 			this.closeOverride = "config"

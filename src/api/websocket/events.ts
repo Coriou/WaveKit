@@ -1233,7 +1233,7 @@ export class WebSocketEventBroadcaster {
 		})
 	}
 
-	/** WG2: a new APRS station, object or item. Unwired until Main M.3. */
+	/** WG2: a new APRS station, object or item. */
 	broadcastAprsNew(station: AprsStation): void {
 		this.broadcast("aprs", { type: "aprs:new", channel: "aprs", data: station })
 	}
@@ -1261,7 +1261,7 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("aprs", { type: "aprs:stats", channel: "aprs", data: stats })
 	}
 
-	/** WG2: a new Meshtastic node. Unwired until Main M.3. */
+	/** WG2: a new Meshtastic node. */
 	broadcastMeshNew(node: MeshNode): void {
 		this.broadcast("mesh", { type: "mesh:new", channel: "mesh", data: node })
 	}
