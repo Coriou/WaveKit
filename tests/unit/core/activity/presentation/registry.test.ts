@@ -214,6 +214,42 @@ describe("activity presentation registry", () => {
 		expect(item?.position).toBeUndefined()
 	})
 
+	it("never keys an APRS object or item with an invalid name by its sending station (1.3)", () => {
+		const controlled = present("aprs", {
+			source: "N0CALL",
+			dataType: "Object",
+			objectKind: "object",
+			objectName: "BAD\u0000NAME",
+			lat: 10,
+			lon: 20,
+		})
+		expect(controlled?.entityKey).toBeUndefined()
+		expect(controlled?.title).toBe("BADNAME object")
+		expect(controlled?.position).toEqual({ lat: 10, lon: 20 })
+		const unnamed = present("aprs", {
+			source: "N0CALL",
+			dataType: "Item",
+			objectKind: "item",
+		})
+		expect(unnamed?.entityKey).toBeUndefined()
+		expect(unnamed?.title).toBe("item")
+		const blank = present("aprs", {
+			source: "N0CALL",
+			dataType: "Object",
+			objectKind: "object",
+			objectName: "   ",
+		})
+		expect(blank?.entityKey).toBeUndefined()
+		const station = present("aprs", {
+			source: "N0CALL",
+			dataType: "Position",
+			objectName: "\u0007",
+			lat: 10,
+			lon: 20,
+		})
+		expect(station?.entityKey).toBeUndefined()
+	})
+
 	it("stores APRS messages and status text and does not map a weather packet as position-only", () => {
 		const message = present("aprs", {
 			source: "N0CALL",

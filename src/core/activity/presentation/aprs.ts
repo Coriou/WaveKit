@@ -61,7 +61,19 @@ export function presentAprs(data: unknown): DecodePresentation | undefined {
 	const call = source === undefined ? null : canonicalCallsign(source)
 	let key: string | null = null
 	let titleText = ""
-	if (objectName !== undefined) {
+	// An object or item is identified by its name, never by the sending
+	// station. A name with control characters (or a kind with no name) is an
+	// invalid identifier: no key, and no fallback to the station callsign.
+	const rawName = payload["objectName"]
+	const namedObject = typeof rawName === "string" && rawName.trim() !== ""
+	const objectPacket =
+		namedObject || objectKind === "object" || objectKind === "item"
+	if (objectPacket && objectName === undefined) {
+		const shown = stringField(payload, "objectName")
+		titleText = [shown, objectKind]
+			.filter(value => value !== undefined)
+			.join(" ")
+	} else if (objectName !== undefined) {
 		if (objectKind === "object" || objectKind === "item") {
 			key = entityKey(
 				objectKind === "object" ? "aprs-object" : "aprs-item",
@@ -77,7 +89,7 @@ export function presentAprs(data: unknown): DecodePresentation | undefined {
 	}
 	const titled = clampTitle(titleText)
 	const positioned =
-		objectName !== undefined ||
+		objectPacket ||
 		(dataType !== undefined && APRS_POSITION_DATA_TYPES.has(dataType))
 	const comment =
 		stringField(payload, "comment") ?? stringField(payload, "status")
