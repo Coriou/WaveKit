@@ -25,6 +25,7 @@ import { protocolsForHop } from "./protocols.js"
 import { describeHop, planHops } from "./hop-planner.js"
 import { normaliseCapture } from "../evidence/capture-spec.js"
 import type { HopPlanInput } from "./hop-planner.js"
+import { isRangeEnabled } from "./range-contract.js"
 import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
@@ -178,7 +179,52 @@ function copyRange(r: ScanRange): ScanRange {
 	if (r.obwHz !== undefined) out.obwHz = [...r.obwHz]
 	if (r.protocols !== undefined) out.protocols = [...r.protocols]
 	if (r.bandplanId !== undefined) out.bandplanId = r.bandplanId
+	if (r.enabled !== undefined) out.enabled = r.enabled
+	if (r.name !== undefined) out.name = r.name
+	if (r.dwellMs !== undefined) out.dwellMs = r.dwellMs
+	if (r.sensitivity !== undefined) out.sensitivity = r.sensitivity
 	return out
+}
+
+/** Full-state live overlay, then drop `enabled: true` (absent means enabled). */
+function overlayRangeLive(
+	ranges: ScanRange[],
+	live: StoredScanJobSpec["rangeLive"],
+	issues: PlanIssue[],
+): void {
+	if (live !== undefined) {
+		if (live.length !== ranges.length) {
+			issues.push(
+				issue(
+					"range-locked",
+					"error",
+					"a running job's ranges cannot be added or removed",
+					{
+						reason: "range-count",
+						expected: ranges.length,
+						received: live.length,
+					},
+				),
+			)
+		} else {
+			for (let i = 0; i < ranges.length; i++) {
+				const range = ranges[i]
+				const src = live[i]
+				if (range === undefined || src === undefined) continue
+				delete range.enabled
+				delete range.protocols
+				delete range.name
+				delete range.dwellMs
+				delete range.sensitivity
+				if (src.enabled !== undefined) range.enabled = src.enabled
+				if (src.protocols !== undefined) range.protocols = [...src.protocols]
+				if (src.name !== undefined) range.name = src.name
+				if (src.dwellMs !== undefined) range.dwellMs = src.dwellMs
+				if (src.sensitivity !== undefined) range.sensitivity = src.sensitivity
+			}
+		}
+	}
+	for (const range of ranges) if (range.enabled === true) delete range.enabled
 }
 
 function unique<T>(xs: Iterable<T>): T[] {
@@ -322,6 +368,8 @@ export function normaliseSpec(
 		}
 		for (const r of bp.ranges) ranges.push(copyRange(r))
 	}
+	overlayRangeLive(ranges, spec.rangeLive, issues)
+	const enabled = ranges.filter(isRangeEnabled)
 	const operatorRanges = (spec.ranges ?? []).length > 0
 	const planRanges = (spec.bandplans ?? []).length > 0
 	prov["ranges"] = operatorRanges
@@ -363,7 +411,7 @@ export function normaliseSpec(
 			)
 		}
 	}
-	if (ranges.length > 0 && ranges.every(r => fullyExcluded(r, exclusions))) {
+	if (enabled.length > 0 && enabled.every(r => fullyExcluded(r, exclusions))) {
 		issues.push(
 			issue("all-excluded", "error", "the exclusions cover every range"),
 		)
@@ -374,7 +422,7 @@ export function normaliseSpec(
 	const centre = source.centreHz
 	const fits =
 		centre !== null &&
-		ranges.every(
+		enabled.every(
 			r => r.startHz >= centre - windowHalf && r.endHz <= centre + windowHalf,
 		)
 	const requested = spec.mode ?? "auto"
@@ -391,8 +439,15 @@ export function normaliseSpec(
 			),
 		)
 	}
+	if (ranges.length > 0 && enabled.length === 0) {
+		issues.push(
+			issue("range-empty", "error", "every range is disabled", {
+				disabled: ranges.length,
+			}),
+		)
+	}
 	if (mode === "sweep") {
-		if (ranges.length === 0)
+		if (enabled.length === 0)
 			issues.push(
 				issue(
 					"range-empty",
@@ -529,9 +584,29 @@ export function normaliseSpec(
 			),
 		)
 	}
+	if (mode === "sweep") {
+		for (let i = 0; i < ranges.length; i++) {
+			const range = ranges[i]
+			if (
+				range === undefined ||
+				!isRangeEnabled(range) ||
+				range.dwellMs === undefined ||
+				range.dwellMs >= minimumDwell
+			)
+				continue
+			issues.push(
+				issue(
+					"dwell-too-short",
+					"error",
+					`range ${i} dwell ${range.dwellMs} ms is below settle + ${s.detection.minSurfaceBlocks + 1} blocks (${minimumDwell} ms)`,
+					{ minimumMs: minimumDwell, rangeIndex: i },
+				),
+			)
+		}
+	}
 
 	// Protocols, holds, probes.
-	const fromPlans = unique(ranges.flatMap(r => r.protocols ?? []))
+	const fromPlans = unique(enabled.flatMap(r => r.protocols ?? []))
 	const protocols =
 		spec.protocols !== undefined ? [...spec.protocols] : fromPlans
 	prov["protocols"] =
@@ -631,13 +706,28 @@ export function normaliseSpec(
 	pv("txDurationHintMs", spec.txDurationHintMs !== undefined)
 	pv("kind", spec.kind !== undefined)
 	pv("capture", spec.capture !== undefined)
+	for (let i = 0; i < ranges.length; i++) {
+		const range = ranges[i]
+		if (range === undefined) continue
+		if (range.name !== undefined) prov[`ranges[${i}].name`] = "operator"
+		if (range.dwellMs !== undefined) prov[`ranges[${i}].dwellMs`] = "operator"
+		if (range.sensitivity !== undefined)
+			prov[`ranges[${i}].sensitivity`] = "operator"
+	}
+	const kind = spec.kind ?? "discover"
+	if (spec.signalsOnly !== undefined) prov["signalsOnly"] = "operator"
+	if (kind === "monitor" && spec.signalsOnly === true) {
+		issues.push(
+			issue("signals-only-unsupported", "error", "monitor jobs need decoders"),
+		)
+	}
 
 	const n: NormalisedJobSpec = {
 		sourceId: source.id,
 		sensitivity,
 		priority: spec.priority ?? DEFAULT_PRIORITY,
 		mode,
-		kind: spec.kind ?? "discover",
+		kind,
 		ranges,
 		exclusions,
 		protocols,
@@ -683,6 +773,7 @@ export function normaliseSpec(
 		capture: normaliseCapture(spec.capture),
 		provenance: prov,
 	}
+	if (spec.signalsOnly !== undefined) n.signalsOnly = spec.signalsOnly
 	return { spec: n, source, issues }
 }
 
@@ -697,7 +788,7 @@ export function planForSpec(
 			? (spec.tuner.sampleRateHz ?? source.sampleRateHz)
 			: source.sampleRateHz
 	const input: HopPlanInput = {
-		ranges: spec.ranges,
+		ranges: spec.ranges.filter(isRangeEnabled),
 		exclusions: spec.exclusions,
 		sampleRateHz: fs,
 		usableFraction: ctx.usableFraction,
@@ -706,23 +797,68 @@ export function planForSpec(
 		ppmMargin: ctx.settings.detection.ppmMargin,
 		tunerRange: ctx.tunerRange(source.id),
 	}
-	if (spec.mode === "sweep") return planHops(input)
-	const half = (fs * ctx.usableFraction) / 2
+	const planned =
+		spec.mode === "sweep"
+			? planHops(input)
+			: inWindowPlan(source.centreHz, input, fs, ctx.usableFraction)
+	return spec.mode === "sweep" ? withHopDwell(planned, spec) : planned
+}
+
+/** In-window jobs ignore per-range dwell, the same way they ignore the job dwell. */
+function inWindowPlan(
+	centreHz: number | null,
+	input: HopPlanInput,
+	fs: number,
+	usableFraction: number,
+): HopPlan {
+	const half = (fs * usableFraction) / 2
 	const g = Math.max(input.dcGuardHz, 2 * input.rbwHz)
-	if (source.centreHz === null)
+	if (centreHz === null)
 		return { hops: [], usableHalfSpanHz: half, dcGuardHz: g, ppmMarginHz: 0 }
 	return {
-		hops: [describeHop(0, source.centreHz, input)],
+		hops: [describeHop(0, centreHz, input)],
 		usableHalfSpanHz: half,
 		dcGuardHz: g,
-		ppmMarginHz: input.ppmMargin * 1e-6 * source.centreHz,
+		ppmMarginHz: input.ppmMargin * 1e-6 * centreHz,
 	}
 }
 
-function sweepPeriod(hops: number, dwellMs: number, share: number): number {
+/**
+ * A hop dwells for the longest overlapping enabled range that sets `dwellMs`,
+ * using the job dwell for an overlapping range that does not. The key stays
+ * absent when no overlapping enabled range sets one, so plans without per-range
+ * dwell are unchanged.
+ */
+function withHopDwell(plan: HopPlan, spec: NormalisedJobSpec): HopPlan {
+	const ranges = spec.ranges.filter(isRangeEnabled)
+	if (!ranges.some(r => r.dwellMs !== undefined)) return plan
+	let changed = false
+	const hops = plan.hops.map(hop => {
+		const overlapping = ranges.filter(
+			r => r.endHz >= hop.covered.startHz && r.startHz <= hop.covered.endHz,
+		)
+		if (!overlapping.some(r => r.dwellMs !== undefined)) return hop
+		changed = true
+		return {
+			...hop,
+			dwellMs: Math.max(...overlapping.map(r => r.dwellMs ?? spec.dwellMs)),
+		}
+	})
+	return changed ? { ...plan, hops } : plan
+}
+
+function sweepPeriod(
+	hops: readonly Hop[],
+	dwellMs: number,
+	share: number,
+): number {
+	const count = hops.length
 	const every = share > 0 ? Math.max(1, Math.round(1 / share)) : Infinity
-	const revisits = Number.isFinite(every) ? Math.floor(hops / every) : 0
-	return (hops + revisits) * dwellMs
+	const revisits = Number.isFinite(every) ? Math.floor(count / every) : 0
+	if (count === 0) return revisits * dwellMs
+	let sum = 0
+	for (const hop of hops) sum += hop.dwellMs ?? dwellMs
+	return sum + revisits * (sum / count)
 }
 
 function poiFor(
@@ -840,7 +976,7 @@ export function previewPlan(
 	}
 	const sweepPeriodMs =
 		n.mode === "sweep" && plan.hops.length > 1
-			? sweepPeriod(plan.hops.length, n.dwellMs, n.revisit.share)
+			? sweepPeriod(plan.hops, n.dwellMs, n.revisit.share)
 			: null
 	const poi = plan.hops.map(h =>
 		poiFor(h, n, sweepPeriodMs, source, ctx.channelizerAvailable),
@@ -949,5 +1085,6 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 		if (n.stop.afterMs !== null) out.stop.afterMs = n.stop.afterMs
 	}
 	if (n.thresholdDb !== null) out.thresholdDb = n.thresholdDb
+	if (n.signalsOnly !== undefined) out.signalsOnly = n.signalsOnly
 	return out
 }
