@@ -6,6 +6,7 @@ import type {
 	ActivityStoreHandle,
 	ActivityStoreStats,
 	AdmitResult,
+	AnalogTransmissionAdmission,
 	StoreIdentity,
 } from "./contract.js"
 import {
@@ -15,6 +16,7 @@ import {
 	ActivityWriteTimeoutError,
 	errnoCode,
 } from "./errors.js"
+import { WaveKitError } from "../../../utils/errors.js"
 import { ActivityIngress } from "./ingress.js"
 import type { ActivityLimits } from "./limits.js"
 import { resolveActivityLimits } from "./limits.js"
@@ -434,6 +436,15 @@ class ActivityStore implements ActivityStoreHandle {
 			this.armGapTimer()
 		}
 		return result
+	}
+
+	// WG1 contract stub: lane a implements admission of analog-transmission records.
+	admitTransmission(input: AnalogTransmissionAdmission): AdmitResult {
+		void input
+		throw new WaveKitError(
+			"analog-transmission admission is not implemented yet",
+			"ACTIVITY_NOT_IMPLEMENTED",
+		)
 	}
 
 	stats(): ActivityStoreStats {

@@ -62,3 +62,45 @@ export interface LiveAudioLevel {
 	squelchOpen: boolean
 	thresholdDbfs: number
 }
+
+/** Why an analog transmission ended (WG1). */
+export type AnalogTransmissionCloseReason =
+	| "squelch"
+	| "retune"
+	| "config"
+	| "stopped"
+	| "max-duration"
+
+/** Event-time RF frequency of a transmission: the tuned centre plus `offsetHz` when it opened. */
+export interface AnalogTransmissionFrequency {
+	hz: number
+	tuningTrust: "commanded" | "relay" | "unverified"
+}
+
+/**
+ * `live-audio:transmission` on the `live-audio` channel (WG1): one squelch-delimited analog
+ * transmission of the live demodulator. Sent once with `state: "open"` when the gated squelch
+ * opens and once with `state: "closed"` when it ends; both carry the same `transmissionId`.
+ * Produced whether or not the Activity store is enabled.
+ */
+export interface AnalogTransmissionEventData {
+	transmissionId: string
+	sourceId: string
+	state: "open" | "closed"
+	startedAt: string
+	/** Null while open. */
+	endedAt: string | null
+	/** endedAt − startedAt in ms; null while open. */
+	durationMs: number | null
+	frequency: AnalogTransmissionFrequency | null
+	modulation: LiveAudioConfig["modulation"]
+	bandwidthHz: number
+	squelchMode: "manual" | "auto"
+	/** Effective threshold when the transmission opened. */
+	thresholdDbfs: number
+	/** Over the level samples of the transmission; null before the first one. */
+	peakChannelPowerDbfs: number | null
+	meanChannelPowerDbfs: number | null
+	/** Null while open. */
+	closeReason: AnalogTransmissionCloseReason | null
+}

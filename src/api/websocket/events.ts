@@ -44,6 +44,7 @@ import type {
 	TunerCommandOrigin,
 	OperatorDataReadDto,
 	BandPlansServerMessage,
+	VesselServerMessage,
 } from "@wavekit/api-types"
 
 /**
@@ -60,6 +61,7 @@ import type {
  * - scanner: Signal discovery scanner jobs, progress, discoveries, activity, identify, status (rate-limited)
  * - spectrum: core waterfall frames, opt-in; `options.spectrum` on subscribe selects a source and profile
  * - bandplans: change notice `{storeId, revision}` after a changed commit and on subscribe; clients refetch
+ * - vessels: AIS vessel current state (new, update, lost, stats), WG1
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -76,6 +78,7 @@ export type WebSocketChannel =
 	| "spectrum"
 	| "operator-data"
 	| "bandplans"
+	| "vessels"
 
 /**
  * Message sent from client to server. `options` carries per-channel subscribe
@@ -124,6 +127,7 @@ interface ExistingServerMessage {
 		| "live-audio:started"
 		| "live-audio:stopped"
 		| "live-audio:error"
+		| "live-audio:transmission"
 		| "digital-voice:call"
 		| "digital-voice:status"
 		| "resources:snapshot"
@@ -165,6 +169,7 @@ export type ServerMessage =
 	| ExistingServerMessage
 	| OperatorDataServerMessage
 	| BandPlansServerMessage
+	| VesselServerMessage
 
 /**
  * Internal client state tracking subscriptions.
@@ -205,7 +210,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "scanner" ||
 		channel === "spectrum" ||
 		channel === "operator-data" ||
-		channel === "bandplans"
+		channel === "bandplans" ||
+		channel === "vessels"
 	)
 }
 

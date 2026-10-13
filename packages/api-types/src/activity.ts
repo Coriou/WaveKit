@@ -101,7 +101,7 @@ export interface DecodeEnvelope {
 
 export const ACTIVITY_RECORD_VERSION = 1
 
-/** Closed kind union; batch 1 only produces the first and last. */
+/** Closed kind union; batch 1 produces the first and last, WG1 adds analog-transmission. */
 export type ActivityKind =
 	| "decoder-reception"
 	| "call-lifecycle"
@@ -122,8 +122,34 @@ export interface IngestionGapPayload {
 	toReceivedAt: string
 }
 
+/**
+ * Payload of an `analog-transmission` record (WG1): one closed squelch-delimited transmission of
+ * the live demodulator. The record's eventId equals `transmissionId`.
+ */
+export interface AnalogTransmissionPayload {
+	transmissionId: string
+	sourceId: string
+	startedAt: string
+	endedAt: string
+	durationMs: number
+	frequency: {
+		hz: number
+		tuningTrust: "commanded" | "relay" | "unverified"
+	} | null
+	modulation: "nfm" | "wfm" | "am" | "usb" | "lsb" | "dsb" | "cw" | "raw"
+	bandwidthHz: number
+	squelchMode: "manual" | "auto"
+	thresholdDbfs: number
+	peakChannelPowerDbfs: number | null
+	meanChannelPowerDbfs: number | null
+	closeReason: "squelch" | "retune" | "config" | "stopped" | "max-duration"
+}
+
 /** Stored and returned record. commitSeq is assigned by the writer. */
-export type ActivityRecord = DecoderReceptionRecord | IngestionGapRecord
+export type ActivityRecord =
+	| DecoderReceptionRecord
+	| IngestionGapRecord
+	| AnalogTransmissionRecord
 
 export interface DecoderReceptionRecord extends ActivityRecordBase {
 	kind: "decoder-reception"
@@ -133,6 +159,11 @@ export interface DecoderReceptionRecord extends ActivityRecordBase {
 export interface IngestionGapRecord extends ActivityRecordBase {
 	kind: "ingestion-gap"
 	payload: IngestionGapPayload
+}
+
+export interface AnalogTransmissionRecord extends ActivityRecordBase {
+	kind: "analog-transmission"
+	payload: AnalogTransmissionPayload
 }
 
 export interface ActivityRecordBase {

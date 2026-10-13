@@ -84,6 +84,12 @@ export function buildActivityRow(record: ActivityRecord): BuiltActivityRow {
 		payload: record.payload,
 	}
 	const recordJson = JSON.stringify(stored)
+	// WG1 contract stub: lane a replaces this with the analog-transmission row.
+	if (record.kind === "analog-transmission")
+		throw new WaveKitError(
+			"analog-transmission activity rows are not implemented yet",
+			"ACTIVITY_NOT_IMPLEMENTED",
+		)
 	if (record.kind === "ingestion-gap")
 		return gapRow(
 			record.payload,

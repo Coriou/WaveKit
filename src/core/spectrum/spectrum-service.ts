@@ -10,7 +10,6 @@
  * full CU8 stream.
  */
 import { EventEmitter } from "node:events"
-import { z } from "zod"
 import type {
 	SpectrumActiveProfile,
 	SpectrumBinEncoding,
@@ -42,6 +41,11 @@ import type {
 } from "./types.js"
 import type { PipelineHostMode } from "./pipeline-host.js"
 import {
+	BACKFILL_LIMITS,
+	PROFILE_LIMITS,
+	SpectrumSubscribeOptionsSchema,
+} from "./subscribe-options.js"
+import {
 	SpectrumEngine,
 	USABLE_FRACTION,
 	buildPipelineConfig,
@@ -57,17 +61,11 @@ export const BIN_ENCODING: SpectrumBinEncoding = "u8-halfdb-127.5"
 export const WS_CONSUMER_PREFIX = "ws:"
 export const wsConsumer = (clientId: string): string =>
 	`${WS_CONSUMER_PREFIX}${clientId}`
-export const PROFILE_LIMITS = {
-	hz: { min: 0.5, max: 25, step: 0.5 },
-	bins: { min: 128, max: 2048 },
-} as const
-export const SpectrumSubscribeOptionsSchema = z
-	.object({
-		sourceId: z.string().min(1).max(128),
-		hz: z.number().finite().optional(),
-		bins: z.number().finite().optional(),
-	})
-	.strict()
+export {
+	BACKFILL_LIMITS,
+	PROFILE_LIMITS,
+	SpectrumSubscribeOptionsSchema,
+} from "./subscribe-options.js"
 const MAX_SINCE_MS = 168 * 3_600_000
 const TOP_N = 10
 
@@ -550,6 +548,8 @@ export class SpectrumService extends EventEmitter {
 				maxProfiles: s.ws.spectrumMaxProfiles,
 				hz: { ...PROFILE_LIMITS.hz },
 				bins: { ...PROFILE_LIMITS.bins },
+				averaging: { ...PROFILE_LIMITS.averaging },
+				backfill: { ...BACKFILL_LIMITS },
 			},
 			subscribers,
 			sources,

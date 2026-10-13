@@ -17,6 +17,7 @@ export * from "./regional.js"
 export * from "./receiver-capabilities.js"
 export * from "./activity.js"
 export * from "./bandplans.js"
+export * from "./vessels.js"
 
 export type {
 	StationIdentity,

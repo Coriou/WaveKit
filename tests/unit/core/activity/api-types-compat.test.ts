@@ -142,6 +142,8 @@ const sameShapes: [
 	Same<Api.ActivityRecordBase, Contract.ActivityRecordBase>,
 	Same<Api.DecoderReceptionRecord, Contract.DecoderReceptionRecord>,
 	Same<Api.IngestionGapRecord, Contract.IngestionGapRecord>,
+	Same<Api.AnalogTransmissionPayload, Contract.AnalogTransmissionPayload>,
+	Same<Api.AnalogTransmissionRecord, Contract.AnalogTransmissionRecord>,
 	Same<Api.ActivityRecord, Contract.ActivityRecord>,
 	Same<Api.ActivitySummary, Contract.ActivitySummary>,
 	Same<Api.ActivityRefType, Contract.ActivityRefType>,
@@ -165,6 +167,8 @@ const sameShapes: [
 	Same<Api.ActivityUnsubscribeMessage, ExpectedUnsubscribe>,
 	Same<Api.ActivityServerMessage, ExpectedServer>,
 ] = [
+	true,
+	true,
 	true,
 	true,
 	true,
