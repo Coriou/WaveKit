@@ -129,11 +129,13 @@ user agent, address or other fingerprint. `lastSeenAt` is the start of the UTC h
 admission, null until the first one after the upgrade. It is the hour of the last use,
 not presence. It is written through the session mutation queue at most once per device
 per UTC hour (at most 32 × 24 = 768 writes a day), never by the inventory read itself
-and never by machine credentials. A failed last-seen write leaves the committed state
-unchanged, is counted and logged at most once a minute, and never fails or delays the
-request. The private session snapshot is version 2; a version 1 snapshot loads with
-null labels and is written as version 2 on the next commit. An older WaveKit refuses a
-version 2 snapshot and fails closed.
+and never by machine credentials. Admission does not wait for that write and a failed
+write never fails the request; it leaves the committed state unchanged and is counted
+and logged at most once a minute. A later session mutation of the same request
+(refresh, logout, label, revoke) shares the queue, so it runs after a last-seen write
+already queued. The private session snapshot is version 2; a version 1 snapshot loads
+with null labels and is written as version 2 on the next commit. An older WaveKit
+refuses a version 2 snapshot and fails closed.
 
 `POST /api/access/devices/label` with `{ "deviceId", "name"?, "kind"? }` labels a
 remembered device. At least one of `name` and `kind` is required; `null` clears a field
@@ -1755,6 +1757,14 @@ curl -X POST http://localhost:9000/api/scanner/plan \
 	"issues": [
 		{
 			"code": "poi-low",
+			"severity": "warning",
+			"message": "detection POI below 50 % for a 5000 ms transmission",
+			"details": { "hops": [3, 4, 17], "txDurationHintMs": 5000 }
+		}
+	]
+}
+```
+
 Sweep plans skip locked-out discoveries (WG2, "Ignore skips sweeps"). A
 discovery with `operator.lockout` heard on the spec's source adds a runtime
 exclusion `[centre − w/2, centre + w/2]`, w = max(the discovery's bandwidth,
@@ -1764,14 +1774,6 @@ applied }]`, lowest first. At most 256 apply; the rest have `applied: false`.
 When applying them would leave no hop, none applies and all have
 `applied: false`. The key is absent for in-window plans and when no lockout
 falls inside the ranges. Lockout exclusions are never written into the spec.
-
-			"severity": "warning",
-			"message": "detection POI below 50 % for a 5000 ms transmission",
-			"details": { "hops": [3, 4, 17], "txDurationHintMs": 5000 }
-		}
-	]
-}
-```
 
 #### POST /api/scanner/jobs
 
@@ -1936,6 +1938,15 @@ whose previous value was unknown, and fields whose restore could not be written
 and run on the source's first data after it reconnects, even if the job is
 deleted in between.
 
+Sweep jobs carry the `lockoutExclusions` of their current plan (see
+`POST /api/scanner/plan`; runtime only, not persisted, recomputed when the job
+is created, edited or restored). Setting, clearing or deleting a lockout
+replans every live sweep job on the discovery's sources whose list changes and
+sends `scanner:job`.
+
+`progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
+since the job started: see `GET /api/scanner/jobs/:id/hits`.
+
 #### PATCH /api/scanner/jobs/:id
 
 Live edit. The hop plan changes at the next hop; detection masks, protocol
@@ -1992,16 +2003,7 @@ current band plan) and resend.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
-
-Sweep jobs carry the `lockoutExclusions` of their current plan (see
-`POST /api/scanner/plan`; runtime only, not persisted, recomputed when the job
-is created, edited or restored). Setting, clearing or deleting a lockout
-replans every live sweep job on the discovery's sources whose list changes and
-sends `scanner:job`.
   -H 'Content-Type: application/json' \
-`progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
-since the job started: see `GET /api/scanner/jobs/:id/hits`.
-
   -d '{"ranges": [{"startHz": 446000000, "endHz": 446200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 446006250}], "name": "PMR", "dwellMs": 400}, {"startHz": 448000000, "endHz": 448200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 448006250}], "enabled": false}]}'
 ```
 
@@ -2073,6 +2075,43 @@ curl -X POST http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
   -H 'Content-Type: application/json' -d '{"takeover": true}'
 ```
 
+#### GET /api/scanner/jobs/:id/hits
+
+Per-job hit statistics (WG2): a hit is one observation of the job attributed
+to a discovery, counted once per observation and job (a job that joins an open
+track is credited once too). `?limit=n` (1–500, default 100). 404
+`SCANNER_JOB_NOT_FOUND` for an unknown job.
+
+```json
+{
+	"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+	"stats": {
+		"discoveries": 12,
+		"hits": 57,
+		"newDiscoveries": 3,
+		"truncated": false
+	},
+	"hits": [
+		{
+			"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+			"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
+			"hits": 9,
+			"firstHitAt": "2026-10-13T14:00:02.000Z",
+			"lastHitAt": "2026-10-13T14:02:11.000Z",
+			"firstSeenInJob": true
+		}
+	]
+}
+```
+
+`hits` is most recent hit first. `firstSeenInJob` means an observation of this
+job created the discovery. In memory only: the counts reset when the job
+starts (not on resume), are dropped when the job is deleted and are empty after
+a restart. At most 2,000 discoveries are tracked per job; further hits count
+in `stats.hits` only. The counts are best-effort: the job remembers the last
+4,096 observations it credited, and once that memory has dropped one a
+re-placed observation may count twice. Either case sets `truncated: true`.
+
 #### DELETE /api/scanner/jobs/:id
 
 Removes an ended job (`completed`, `cancelled`, `failed`); its discoveries
@@ -2143,43 +2182,6 @@ Pass `nextCursor` as `cursor` for the next page; `null` ends the list.
 
 The `Discovery` (metadata, co-channel links, operator fields). 404
 `SCANNER_NOT_FOUND`.
-
-#### GET /api/scanner/jobs/:id/hits
-
-Per-job hit statistics (WG2): a hit is one observation of the job attributed
-to a discovery, counted once per observation and job (a job that joins an open
-track is credited once too). `?limit=n` (1–500, default 100). 404
-`SCANNER_JOB_NOT_FOUND` for an unknown job.
-
-```json
-{
-	"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
-	"stats": {
-		"discoveries": 12,
-		"hits": 57,
-		"newDiscoveries": 3,
-		"truncated": false
-	},
-	"hits": [
-		{
-			"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
-			"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
-			"hits": 9,
-			"firstHitAt": "2026-10-13T14:00:02.000Z",
-			"lastHitAt": "2026-10-13T14:02:11.000Z",
-			"firstSeenInJob": true
-		}
-	]
-}
-```
-
-`hits` is most recent hit first. `firstSeenInJob` means an observation of this
-job created the discovery. In memory only: the counts reset when the job
-starts (not on resume), are dropped when the job is deleted and are empty after
-a restart. At most 2,000 discoveries are tracked per job; further hits count
-in `stats.hits` only. The counts are best-effort: the job remembers the last
-4,096 observations it credited, and once that memory has dropped one a
-re-placed observation may count twice. Either case sets `truncated: true`.
 
 #### GET /api/scanner/discoveries/:id/observations
 
@@ -2553,45 +2555,6 @@ One `VesselState`. 1–9 digits are zero-padded. 400 `VALIDATION_ERROR` for
 anything else; 404 `{ error, code: "VESSEL_NOT_FOUND", mmsi }` when the
 vessel is not tracked.
 
-## Activity
-
-Persistent decoder-event search. On by default with bounded retention and
-admission (see [Configuration](#configuration)). Turn it off with
-`activity: { enabled: false }` or `WAVEKIT_ACTIVITY__ENABLED=false`. The
-database is `<stateDir>/activity/activity.db` (`stateDir` defaults to `data`,
-`WAVEKIT_STATE_DIR`; the compose profiles mount it on a volume). Disabled mode
-creates no `activity` directory. The routes stay registered and answer 404
-`ACTIVITY_DISABLED`. The other WebSocket channels are unchanged.
-
-Opening the store needs Node 24 and `node:sqlite` with FTS5
-(`contentless_delete`). A failed probe creates no files. A lock or a
-schema mismatch means a database is already there. The lock is
-`<stateDir>/activity/activity.lock.db`, held by the writer worker with
-`PRAGMA locking_mode=EXCLUSIVE` until close or process death. A second
-opener gets `ACTIVITY_STORE_LOCKED`. WaveKit keeps running either way.
-The activity routes then answer 503:
-
-```json
-{
-	"error": "ServiceUnavailable",
-	"code": "ACTIVITY_UNAVAILABLE",
-	"reason": "ACTIVITY_STORE_LOCKED",
-	"message": "activity store is locked"
-}
-```
-
-`reason` is `ACTIVITY_UNAVAILABLE` (runtime, FTS5 or an invalid limit),
-`ACTIVITY_STORE_LOCKED`, or `ACTIVITY_SCHEMA_MISMATCH`. When error
-disclosure is off (protected mode), `message` is `Request failed` and
-`reason` is still set. The response does not include the open error text.
-
-The store holds three kinds:
-
-- `decoder-reception`: decoder output envelopes. Output types `sync`,
-  `rates`, `stats`, `status` and `error` are counted as excluded telemetry and
-  are not stored. Provenance on this path is unknown RF: `sourceId` and
-  `frequency` are null.
-- `analog-transmission`: one record per closed
 ### APRS
 
 APRS station, object and item current state (WG2) from the `direwolf`
@@ -2665,6 +2628,45 @@ One `MeshNode`; the id matches case-insensitively. 400 `VALIDATION_ERROR` for
 a malformed id; 404 `{ error, code: "MESH_NODE_NOT_FOUND", nodeId }` when the
 node is not tracked.
 
+## Activity
+
+Persistent decoder-event search. On by default with bounded retention and
+admission (see [Configuration](#configuration)). Turn it off with
+`activity: { enabled: false }` or `WAVEKIT_ACTIVITY__ENABLED=false`. The
+database is `<stateDir>/activity/activity.db` (`stateDir` defaults to `data`,
+`WAVEKIT_STATE_DIR`; the compose profiles mount it on a volume). Disabled mode
+creates no `activity` directory. The routes stay registered and answer 404
+`ACTIVITY_DISABLED`. The other WebSocket channels are unchanged.
+
+Opening the store needs Node 24 and `node:sqlite` with FTS5
+(`contentless_delete`). A failed probe creates no files. A lock or a
+schema mismatch means a database is already there. The lock is
+`<stateDir>/activity/activity.lock.db`, held by the writer worker with
+`PRAGMA locking_mode=EXCLUSIVE` until close or process death. A second
+opener gets `ACTIVITY_STORE_LOCKED`. WaveKit keeps running either way.
+The activity routes then answer 503:
+
+```json
+{
+	"error": "ServiceUnavailable",
+	"code": "ACTIVITY_UNAVAILABLE",
+	"reason": "ACTIVITY_STORE_LOCKED",
+	"message": "activity store is locked"
+}
+```
+
+`reason` is `ACTIVITY_UNAVAILABLE` (runtime, FTS5 or an invalid limit),
+`ACTIVITY_STORE_LOCKED`, or `ACTIVITY_SCHEMA_MISMATCH`. When error
+disclosure is off (protected mode), `message` is `Request failed` and
+`reason` is still set. The response does not include the open error text.
+
+The store holds three kinds:
+
+- `decoder-reception`: decoder output envelopes. Output types `sync`,
+  `rates`, `stats`, `status` and `error` are counted as excluded telemetry and
+  are not stored. Provenance on this path is unknown RF: `sourceId` and
+  `frequency` are null.
+- `analog-transmission`: one record per closed
   [`live-audio:transmission`](#live-audiotransmission) of the live
   demodulator. `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
   and `payload` is `AnalogTransmissionPayload` (the closed event without
@@ -3486,13 +3488,6 @@ On the `digital-voice` channel: a dsd-fme call started, turned out encrypted, or
 ended (`DigitalVoiceCall`). Published in the same tick as the decoder's
 `call_start` / `call_end` (same `callId`).
 
-Optional call metadata (WG2), present only when dsd-fme reported it:
-`colourCode` (DMR, 0–15), `nac` (P25, 1–4 upper-case hex digits),
-`algorithmId` (P25, only for an encrypted call or a non-clear algorithm) and
-`keyId` (1–8 upper-case hex digits), `ran` (NXDN, 0–63) and `errors`
-(`{ crc, fec }` counts). A malformed optional field is dropped and counted; the
-call is still published.
-
 ```json
 {
 	"type": "digital-voice:call",
@@ -3511,6 +3506,13 @@ call is still published.
 	}
 }
 ```
+
+Optional call metadata (WG2), present only when dsd-fme reported it:
+`colourCode` (DMR, 0–15), `nac` (P25, 1–4 upper-case hex digits),
+`algorithmId` (P25, only for an encrypted call or a non-clear algorithm) and
+`keyId` (1–8 upper-case hex digits), `ran` (NXDN, 0–63) and `errors`
+(`{ crc, fec }` counts). A malformed optional field is dropped and counted; the
+call is still published.
 
 #### digital-voice:status
 
@@ -3540,6 +3542,7 @@ state change and after every edit.
 
 `{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes, hits?, newDiscoveries?}`;
 `probes` is a count (the probe list is in the job detail, `progress.probes[]`).
+`hits` and `newDiscoveries` (WG2) are the job's hit totals since it started.
 Up to 2 Hz per job (at most one per 500 ms); progress changes on every hop
 tune and sweep end, and at least once a second while the job runs. It still
 counts toward the channel's global budget.
@@ -3630,7 +3633,6 @@ limiter and do not count toward `ws.maxMessagesPerSecond`.
 #### spectrum:profile
 
 Sent to one client only: the ack to a `spectrum` subscribe, or a notice after a
-`hits` and `newDiscoveries` (WG2) are the job's hit totals since it started.
 permanent source removal (`DELETE /api/sources/:id`) or a default-profile change
 that remapped the client.
 
@@ -3777,19 +3779,71 @@ reconnect.
   unheard) or is evicted at the 5,000-vessel cap
 - `vessel:stats` — `VesselTrackerStats`, every 5 s
 
-Entity updates are throttled (WG2): per entity at most one `vessel:update`
-per 2 s. The first update after a quiet window is sent at once; later ones in
-the window are coalesced and the latest is sent when the window ends. An
-identity change (`name`, `callsign`, `navStatus`, `shipType`
-or `destination`) is sent at once. A pending update is dropped when the
-entity is lost, so `vessel:lost` is never followed by an older update. `vessel:new`,
-`vessel:lost` and `vessel:stats` are never throttled.
-
 ```json
 {
 	"type": "vessel:update",
 	"channel": "vessels",
 	"data": { "mmsi": "244660000", "vesselClass": "A", "name": "EVER GIVEN", "position": { "lat": 51.9, "lon": 4.1, "at": "2026-10-13T14:02:15.000Z" }, "sog": 11.2, "cog": 254.1, "lastSeen": "2026-10-13T14:02:15.000Z" }
+}
+```
+
+Entity updates are throttled (WG2): per entity at most one `vessel:update`
+per 2 s. The first update after a quiet window is sent at once; later ones in
+the window are coalesced and the latest is sent when the window ends. An
+identity change (`name`, `callsign`, `navStatus`, `shipType` or
+`destination`) is sent at once. A pending update is dropped when the entity is
+lost, so `vessel:lost` is never followed by an older update. `vessel:new`,
+`vessel:lost` and `vessel:stats` are never throttled. The `aprs` and `mesh`
+channels follow the same rule.
+
+#### APRS channel
+
+APRS current state, mirroring the tracker behind [APRS](#aprs). Not replayed:
+refetch `GET /api/aprs/stations` after a reconnect. Digipeated copies send
+nothing.
+
+- `aprs:new` — `AprsStation`, the first packet of an entity
+- `aprs:update` — `AprsStation` after a unique packet, throttled as on the
+  [Vessels channel](#vessels-channel) (identity: `kind`, `symbol`, `comment`,
+  `status`, `killed`)
+- `aprs:lost` — `{ key, station }` when an entity expires (2 hours unheard),
+  is evicted at the 2,000 cap, or is killed (`station.killed: true`)
+- `aprs:stats` — `AprsTrackerStats`, every 5 s
+
+#### Mesh channel
+
+Meshtastic node current state, mirroring the tracker behind [Mesh](#mesh).
+Not replayed: refetch `GET /api/mesh/nodes` after a reconnect. Flood copies
+send nothing.
+
+- `mesh:new` — `MeshNode`, the first packet from a node
+- `mesh:update` — `MeshNode` after a unique packet, throttled as on the
+  [Vessels channel](#vessels-channel) (identity: `longName`, `shortName`,
+  `role`, `hwModel`)
+- `mesh:lost` — `{ nodeId, node }` when a node expires (4 hours unheard) or
+  is evicted at the 1,000-node cap
+- `mesh:stats` — `MeshTrackerStats`, every 5 s
+
+```json
+{
+	"type": "mesh:update",
+	"channel": "mesh",
+	"data": {
+		"nodeId": "!a1b2c3d4",
+		"key": "node:!a1b2c3d4",
+		"longName": "Hilltop relay",
+		"shortName": "HTR",
+		"position": {
+			"lat": 48.85,
+			"lon": 2.35,
+			"altitudeM": 120,
+			"at": "2026-10-13T14:02:15.000Z"
+		},
+		"snrDb": 6.5,
+		"hopsAway": 1,
+		"packetCount": 42,
+		"lastSeen": "2026-10-13T14:02:15.000Z"
+	}
 }
 ```
 
@@ -3922,57 +3976,6 @@ Scanner and spectrum routes answer with the flat body
 The API does not currently implement rate limiting. For production deployments, consider placing a reverse proxy (nginx, Caddy) in front of WaveKit.
 
 ## CORS
-		"lastSeen": "2026-10-13T14:02:15.000Z"
-	}
-}
-```
-
-#### APRS channel
-
-APRS current state, mirroring the tracker behind [APRS](#aprs). Not replayed:
-refetch `GET /api/aprs/stations` after a reconnect. Digipeated copies send
-nothing.
-
-- `aprs:new` — `AprsStation`, the first packet of an entity
-- `aprs:update` — `AprsStation` after a unique packet, throttled as on the
-  [Vessels channel](#vessels-channel) (identity: `kind`, `symbol`, `comment`,
-  `status`, `killed`)
-- `aprs:lost` — `{ key, station }` when an entity expires (2 hours unheard),
-  is evicted at the 2,000 cap, or is killed (`station.killed: true`)
-- `aprs:stats` — `AprsTrackerStats`, every 5 s
-
-#### Mesh channel
-
-Meshtastic node current state, mirroring the tracker behind [Mesh](#mesh).
-Not replayed: refetch `GET /api/mesh/nodes` after a reconnect. Flood copies
-send nothing.
-
-- `mesh:new` — `MeshNode`, the first packet from a node
-- `mesh:update` — `MeshNode` after a unique packet, throttled as on the
-  [Vessels channel](#vessels-channel) (identity: `longName`, `shortName`,
-  `role`, `hwModel`)
-- `mesh:lost` — `{ nodeId, node }` when a node expires (4 hours unheard) or
-  is evicted at the 1,000-node cap
-- `mesh:stats` — `MeshTrackerStats`, every 5 s
-
-```json
-{
-	"type": "mesh:update",
-	"channel": "mesh",
-	"data": {
-		"nodeId": "!a1b2c3d4",
-		"key": "node:!a1b2c3d4",
-		"longName": "Hilltop relay",
-		"shortName": "HTR",
-		"position": {
-			"lat": 48.85,
-			"lon": 2.35,
-			"altitudeM": 120,
-			"at": "2026-10-13T14:02:15.000Z"
-		},
-		"snrDb": 6.5,
-		"hopsAway": 1,
-		"packetCount": 42,
 
 CORS is enabled by default, allowing requests from any origin. Configure via:
 
