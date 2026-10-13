@@ -1948,7 +1948,14 @@ edit applies only to the range at its position that still has those edges;
 edits that no longer match are dropped, and the response reports one
 `range-locked` issue with severity `warning` and
 `details: { reason: "range-live-stale", dropped, expected, received }`. It never
-blocks the PATCH.
+blocks the PATCH, is reported in that PATCH's answer only (not stored in the
+job's `issues`), and the dropped edits are discarded so later PATCHes do not
+repeat it. A PATCH that sends `ranges` itself is different: if the band plan
+changed since the client read the job and an edit it sent would not land, the
+PATCH is refused with 400 `SCANNER_PLAN_INVALID` and a `range-locked` error with
+`details: { reason: "range-plan-changed", dropped, expected, received }`; the job
+is unchanged. Read the job again (a PATCH of another key re-plans it against the
+current band plan) and resend.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \

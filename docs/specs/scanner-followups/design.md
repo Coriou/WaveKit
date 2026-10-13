@@ -43,6 +43,13 @@ fields, then plan ranges), then, when `rangeLive` is present:
   **warning** `{ reason: "range-live-stale", dropped, expected, received }` reports them;
   it is never an error, so later PATCHes of any key succeed. A PATCH `ranges` against the
   current list replaces the whole stored snapshot;
+- Main's `patchJob`: when a PATCH sends `ranges` and the preview drops any entry, the
+  PATCH is refused with a `range-locked` **error**
+  `{ reason: "range-plan-changed", dropped, expected, received }` (the plan changed since
+  the client read `job.spec.ranges`) and the job is unchanged. When a PATCH of other keys
+  meets dropped entries, Main stores a fresh snapshot of the previewed ranges with their
+  current identities (the dropped entries pruned) and returns the warning in that answer
+  only, without storing it in the job's `issues` (R2 findings 1 and 2);
 - an entry without `startHz`/`endHz` (written before the identity existed, never released)
   matches by index while the counts agree;
 - a restored job is not re-normalised (restore uses the persisted normalised spec), so it

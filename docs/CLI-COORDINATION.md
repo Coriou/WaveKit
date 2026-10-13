@@ -1193,3 +1193,7 @@ Corrects the entry "Core: scanner resume contract and SF1 additions" above:
 - Timing: the hop plan changes at the next hop; detection masks, protocol matching, probes and `signalsOnly` change as soon as the PATCH returns.
 - Per-range `sensitivity`: ranges with identical edges share the most sensitive target set; a range without one counts at the detector's current target (not its own job's sensitivity).
 - Stored range edits remember the edges (and band plan) of their range. If a job's band plan changes later, edits that no longer match their range are dropped and the PATCH response carries one `range-locked` issue with severity `warning` (`details.reason: "range-live-stale"`); it never blocks the PATCH. Clients that treat every `range-locked` as an error should check `severity`.
+
+#### Core: SF1 range edits after a band-plan change — 2026-10-13
+
+Follow-up to the SF1 correction above. A `PATCH /api/scanner/jobs/:id` that sends `ranges` read before the job's band plan changed, where an edit it sent would no longer land, is refused with 400 `SCANNER_PLAN_INVALID` and a `range-locked` error with `details.reason: "range-plan-changed"`; the job is unchanged. Re-read the job (a PATCH of another key re-plans it) and resend. The `range-live-stale` warning for older edits appears only in the answer of the PATCH that dropped them; it is not kept in the job's `issues` and does not repeat. No CLI change is required.

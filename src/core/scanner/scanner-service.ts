@@ -2,6 +2,8 @@ import { protocolsForFrequency } from "./plan/protocols.js"
 import { applyRangePatch } from "./plan/range-edits.js"
 import {
 	isRangeEnabled,
+	type ScanRangeLive,
+	type StoredRangeLive,
 	type StoredScanJobSpec,
 } from "./plan/range-contract.js"
 import {
@@ -1328,22 +1330,41 @@ export class ScannerService extends EventEmitter {
 			const edited = applyRangePatch(record.spec.ranges, patch.ranges)
 			this.rejectErrors(edited.issues)
 			// The locked identity of each range goes with its entry (R1 finding 1).
-			merged.rangeLive = edited.rangeLive.map((live, i) => {
-				const range = record.spec.ranges[i]
-				return range
-					? {
-							...live,
-							startHz: range.startHz,
-							endHz: range.endHz,
-							...(range.bandplanId !== undefined
-								? { bandplanId: range.bandplanId }
-								: {}),
-						}
-					: live
-			})
+			merged.rangeLive = withIdentity(edited.rangeLive, record.spec.ranges)
 		}
-		const preview = this.preview(merged)
+		let preview = this.preview(merged)
 		this.rejectErrors(preview.issues)
+		// Reported with this PATCH's answer only, never stored on the job.
+		const notices: PlanIssue[] = []
+		const stale = staleRangeLive(preview.issues)
+		if (stale) {
+			// R2 finding 1: the band plan under the job changed since the client read its ranges, so
+			// an edit this PATCH sent would land nowhere. Refuse; the client re-reads and retries.
+			if (patch.ranges !== undefined)
+				this.rejectErrors([
+					{
+						code: "range-locked",
+						severity: "error",
+						message:
+							"the job's ranges changed since they were read; read the job again and resend",
+						details: {
+							reason: "range-plan-changed",
+							dropped: stale.dropped,
+							expected: stale.expected,
+							received: stale.received,
+						},
+					},
+				])
+			// R2 finding 2: keep what still applies, aligned with the current list, so the warning
+			// is reported once rather than on every later PATCH.
+			merged.rangeLive = withIdentity(
+				applyRangePatch(preview.spec.ranges, preview.spec.ranges).rangeLive,
+				preview.spec.ranges,
+			)
+			preview = this.preview(merged)
+			this.rejectErrors(preview.issues)
+			notices.push(stale.issue)
+		}
 		record.rawSpec = merged
 		record.issues = preview.issues
 		record.updatedAt = this.now()
@@ -1356,7 +1377,11 @@ export class ScannerService extends EventEmitter {
 		await this.persistJobs()
 		const job = this.toDto(record)
 		this.emit("job", job)
-		return { job, plan: preview.plan, issues: preview.issues }
+		return {
+			job,
+			plan: preview.plan,
+			issues: [...preview.issues, ...notices],
+		}
 	}
 
 	async pauseJob(id: string): Promise<ScanJob> {
@@ -4243,6 +4268,50 @@ function requireDiscoveryIdFormat(id: string): void {
 			"SCANNER_DISCOVERY_NOT_FOUND",
 			404,
 		)
+}
+
+/** Tags each stored range edit with the locked identity of its range (SF1 R1 finding 1). */
+function withIdentity(
+	live: readonly ScanRangeLive[],
+	ranges: readonly ScanRange[],
+): StoredRangeLive[] {
+	return live.map((entry, i) => {
+		const range = ranges[i]
+		return range
+			? {
+					...entry,
+					startHz: range.startHz,
+					endHz: range.endHz,
+					...(range.bandplanId !== undefined
+						? { bandplanId: range.bandplanId }
+						: {}),
+				}
+			: { ...entry }
+	})
+}
+
+interface StaleRangeLive {
+	issue: PlanIssue
+	dropped: unknown
+	expected: unknown
+	received: unknown
+}
+
+/** The preview's stale range-edit warning (`range-live-stale`), when there is one. */
+function staleRangeLive(
+	issues: readonly PlanIssue[],
+): StaleRangeLive | undefined {
+	const issue = issues.find(
+		i =>
+			i.code === "range-locked" && i.details?.["reason"] === "range-live-stale",
+	)
+	if (!issue?.details) return undefined
+	return {
+		issue,
+		dropped: issue.details["dropped"],
+		expected: issue.details["expected"],
+		received: issue.details["received"],
+	}
 }
 
 /**

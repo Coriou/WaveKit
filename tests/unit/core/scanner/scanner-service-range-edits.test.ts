@@ -310,6 +310,15 @@ describe("ScannerService range edits (SF1 req 1, 2, 6)", () => {
 				}),
 			)
 
+			// R2 finding 2: the dropped entry is pruned; the warning is not repeated or stored.
+			expect(
+				h.service.getJob(job.id)!.issues.some(i => i.code === "range-locked"),
+			).toBe(false)
+			const again = await h.service.patchJob(job.id, { thresholdDb: 8 })
+			expect(again.issues.some(i => i.code === "range-locked")).toBe(false)
+			expect(again.job.spec.ranges[0]?.name).toBe("low")
+			expect(again.job.spec.ranges[1]?.enabled).toBeUndefined()
+
 			// A range gained at the front shifts every index: nothing applies, the PATCH succeeds.
 			plan = { ...plan, ranges: [band(448_000_000), ...plan.ranges] }
 			const shifted = await h.service.patchJob(job.id, { thresholdDb: 7 })
@@ -329,6 +338,75 @@ describe("ScannerService range edits (SF1 req 1, 2, 6)", () => {
 			})
 			expect(fresh.job.spec.ranges[3]?.enabled).toBe(false)
 			expect(fresh.issues.some(i => i.code === "range-locked")).toBe(false)
+		} finally {
+			await h.service.stop()
+			await rm(h.dir, { recursive: true, force: true })
+		}
+	})
+
+	// R2 finding 1: a `ranges` PATCH read before the band plan changed never loses its edit silently.
+	it("refuses a ranges PATCH whose edit no longer lands after the plan's edges moved", async () => {
+		const band = (startHz: number) => ({
+			startHz,
+			endHz: startHz + 200_000,
+			rasters: [{ spacingHz: 12_500, firstChannelHz: startHz + 6_250 }],
+			bandplanId: "user-p",
+		})
+		let plan: Bandplan = {
+			id: "user-p",
+			region: "all",
+			name: "User P",
+			ranges: [band(450_000_000), band(452_000_000)],
+		}
+		const h = serviceHarness({ patch: noPassive, bandplans: () => [plan] })
+		try {
+			await h.service.start()
+			const job = await h.service.createJob({
+				sourceId: "rtl",
+				mode: "sweep",
+				bandplans: ["user-p"],
+				priority: 50,
+				takeover: true,
+				resume: { autoAfterIdleMs: null },
+			})
+			await untilRunning(h, job.id)
+			const before = h.service.getJob(job.id)!
+			const [c0, c1] = before.spec.ranges as [ScanRange, ScanRange]
+			// The plan moves range 1 after the client read the job.
+			plan = { ...plan, ranges: [band(450_000_000), band(452_100_000)] }
+			await expect(
+				h.service.patchJob(job.id, {
+					ranges: [c0, { ...c1, enabled: false }],
+				}),
+			).rejects.toMatchObject({
+				statusCode: 400,
+				code: "SCANNER_PLAN_INVALID",
+				details: {
+					issues: [
+						expect.objectContaining({
+							code: "range-locked",
+							severity: "error",
+							details: expect.objectContaining({
+								reason: "range-plan-changed",
+								dropped: [1],
+							}),
+						}),
+					],
+				},
+			})
+			const after = h.service.getJob(job.id)!
+			expect({ spec: after.spec, plan: after.plan }).toEqual({
+				spec: before.spec,
+				plan: before.plan,
+			})
+			// Re-read against the current list (a PATCH of another key re-plans) and retry: it lands.
+			const replanned = await h.service.patchJob(job.id, { thresholdDb: 9 })
+			const [n0, n1] = replanned.job.spec.ranges as [ScanRange, ScanRange]
+			expect(n1.startHz).toBe(452_100_000)
+			const retried = await h.service.patchJob(job.id, {
+				ranges: [n0, { ...n1, enabled: false }],
+			})
+			expect(retried.job.spec.ranges[1]?.enabled).toBe(false)
 		} finally {
 			await h.service.stop()
 			await rm(h.dir, { recursive: true, force: true })
