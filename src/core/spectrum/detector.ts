@@ -12,9 +12,12 @@
  *   that never join a track lasting ≥ 2 blocks (checked in the edge's block
  *   and the next), counted per MHz of unmasked span per minute of settled
  *   time. Burst ranges are not counted. Over each 5 minutes, a rate above the
- *   target raises k by 0.5 dB (cap table + 4 dB); over each 30 minutes, a rate
- *   below target/4 lowers it by 0.5 dB (never below the table). A pinned k
- *   disables both the table and the adaptation.
+ *   target (the range's `faTarget` when set, otherwise the pipeline target)
+ *   raises k by 0.5 dB (cap table + 4 dB); over each 30 minutes, a rate
+ *   below target/4 lowers it by 0.5 dB (never below the table). Ranges that
+ *   share a public key but set different targets keep separate counters and
+ *   k; stats and importK still use the public key. A pinned k disables both
+ *   the table and the adaptation.
  *
  * Bins are FFT-shifted (spectrum/fft.ts); ranges are half-open bin intervals.
  */
@@ -94,6 +97,8 @@ export interface CfarRange {
 	endBin: number
 	key: string
 	burst: boolean
+	/** Overrides the pipeline false-alarm target for this range. Absent keeps it. */
+	faTarget?: number
 }
 
 interface RangeState {
@@ -126,6 +131,8 @@ export class Detector {
 	private readonly kBin: Float32Array
 	private ranges: CfarRange[] = []
 	private readonly perKey = new Map<string, RangeState>()
+	/** k restored by importK, keyed by the public range key. */
+	private readonly restoredK = new Map<string, number>()
 	private pending: PendingEdge[] = []
 
 	constructor(opts: {
@@ -180,7 +187,7 @@ export class Detector {
 				i++
 			)
 				this.binRange[i] = idx
-			this.rangeState(r.key)
+			this.rangeState(this.adaptationKey(r))
 		})
 		this.pending = []
 		this.refreshK()
@@ -249,7 +256,11 @@ export class Detector {
 				!range.burst &&
 				!near(i, j - 1)
 			) {
-				this.pending.push({ from: i, to: j - 1, key: range.key })
+				this.pending.push({
+					from: i,
+					to: j - 1,
+					key: this.adaptationKey(range),
+				})
 			}
 			i = j
 		}
@@ -264,13 +275,13 @@ export class Detector {
 			for (let i = Math.max(0, r.startBin); i < Math.min(n, r.endBin); i++)
 				bins += this.mask[i]!
 			if (bins === 0) continue
-			const s = this.rangeState(r.key)
+			const s = this.rangeState(this.adaptationKey(r))
 			const exposure = ((mhz * bins) / totalUnmasked) * minutes
 			s.exposure5 += exposure
 			s.exposure30 += exposure
 			s.minutes5 += minutes
 			s.minutes30 += minutes
-			changed = this.adapt(s) || changed
+			changed = this.adapt(s, r.faTarget) || changed
 		}
 		if (changed) this.refreshK()
 	}
@@ -280,21 +291,36 @@ export class Detector {
 	}
 
 	stats(): { key: string; k: number; faPerMhzMin: number }[] {
-		return [...this.perKey].map(([key, s]) => ({
-			key,
-			k: this.pinnedK ?? s.k,
-			faPerMhzMin: s.rate,
-		}))
+		const live = new Set(this.ranges.map(r => this.adaptationKey(r)))
+		const livePublic = new Set(this.ranges.map(r => r.key))
+		const rows: { key: string; k: number; faPerMhzMin: number }[] = []
+		for (const [adaptationKey, s] of this.perKey) {
+			const key = this.publicKey(adaptationKey)
+			// Persistence stores one k per public key. While a key is live,
+			// publish only the states its current ranges use, so a previous
+			// target cannot overwrite the active k on the next importK.
+			if (livePublic.has(key) && !live.has(adaptationKey)) continue
+			rows.push({
+				key,
+				k: this.pinnedK ?? s.k,
+				faPerMhzMin: s.rate,
+			})
+		}
+		return rows
 	}
 
 	/** Restores persisted k values, clamped to [table, table + 4 dB]. */
 	importK(entries: { key: string; k: number }[]): void {
 		for (const e of entries) {
 			if (!Number.isFinite(e.k)) continue
-			this.rangeState(e.key).k = Math.min(
+			const k = Math.min(
 				this.tableK + CFAR_MAX_RAISE_DB,
 				Math.max(this.tableK, e.k),
 			)
+			this.restoredK.set(e.key, k)
+			for (const [adaptationKey, s] of this.perKey)
+				if (this.publicKey(adaptationKey) === e.key) s.k = k
+			this.rangeState(e.key).k = k
 		}
 		this.refreshK()
 	}
@@ -306,11 +332,23 @@ export class Detector {
 		this.pending = []
 	}
 
+	/** Public key, plus the target when the range sets one. Absent target keeps the public key. */
+	private adaptationKey(range: CfarRange): string {
+		return range.faTarget === undefined
+			? range.key
+			: `${range.key}\0${range.faTarget}`
+	}
+
+	private publicKey(adaptationKey: string): string {
+		const cut = adaptationKey.indexOf("\0")
+		return cut < 0 ? adaptationKey : adaptationKey.slice(0, cut)
+	}
+
 	private rangeState(key: string): RangeState {
 		let s = this.perKey.get(key)
 		if (s === undefined) {
 			s = {
-				k: this.tableK,
+				k: this.restoredK.get(this.publicKey(key)) ?? this.tableK,
 				edges5: 0,
 				exposure5: 0,
 				minutes5: 0,
@@ -324,11 +362,12 @@ export class Detector {
 		return s
 	}
 
-	private adapt(s: RangeState): boolean {
+	private adapt(s: RangeState, faTarget?: number): boolean {
+		const target = faTarget ?? this.faTarget
 		let changed = false
 		if (s.minutes5 >= CFAR_RAISE_WINDOW_MIN) {
 			s.rate = s.exposure5 > 0 ? s.edges5 / s.exposure5 : 0
-			const noisy = s.rate > this.faTarget * (1 + RATE_TOLERANCE)
+			const noisy = s.rate > target * (1 + RATE_TOLERANCE)
 			if (noisy && s.k < this.tableK + CFAR_MAX_RAISE_DB) {
 				s.k = Math.min(this.tableK + CFAR_MAX_RAISE_DB, s.k + CFAR_STEP_DB)
 				changed = true
@@ -344,7 +383,7 @@ export class Detector {
 		}
 		if (s.minutes30 >= CFAR_LOWER_WINDOW_MIN) {
 			const rate30 = s.exposure30 > 0 ? s.edges30 / s.exposure30 : 0
-			if (rate30 < this.faTarget / 4 && s.k > this.tableK) {
+			if (rate30 < target / 4 && s.k > this.tableK) {
 				s.k = Math.max(this.tableK, s.k - CFAR_STEP_DB)
 				changed = true
 			}
@@ -361,7 +400,9 @@ export class Detector {
 			const range = idx >= 0 ? this.ranges[idx] : undefined
 			this.kBin[i] =
 				this.pinnedK ??
-				(range === undefined ? this.tableK : this.rangeState(range.key).k)
+				(range === undefined
+					? this.tableK
+					: this.rangeState(this.adaptationKey(range)).k)
 		}
 	}
 }

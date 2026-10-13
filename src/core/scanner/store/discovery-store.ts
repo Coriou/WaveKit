@@ -77,6 +77,8 @@ export interface DiscoveryFilter {
 	since?: number
 	encrypted?: boolean
 	q?: string
+	/** Exact `kind` and case-insensitive trimmed `value`. Combined with the other filters by AND. */
+	identity?: Identity
 	sort?: "lastSeen" | "frequency" | "confidence"
 	cursor?: string | null
 	limit?: number
@@ -845,7 +847,11 @@ export class DiscoveryStore extends EventEmitter {
 			Math.max(1, Math.floor(filter.limit ?? DEFAULT_LIMIT)),
 		)
 		const offset = parseCursor(filter.cursor ?? null)
+		// q is lower-cased once. It matches the operator label or the identity value;
+		// metadata lists (talkgroups, callsigns, capcodes) are not searched.
 		const q = filter.q?.toLowerCase()
+		const identity = filter.identity
+		const identityValue = identity?.value.trim().toLowerCase()
 		const min = filter.minConfidence
 		const items = [...this.discoveries.values()].filter(
 			d =>
@@ -859,8 +865,12 @@ export class DiscoveryStore extends EventEmitter {
 				(filter.since === undefined ||
 					Date.parse(d.lastSeenAt) >= filter.since) &&
 				(filter.encrypted === undefined || d.encrypted === filter.encrypted) &&
+				(identity === undefined ||
+					(d.identity?.kind === identity.kind &&
+						d.identity.value.trim().toLowerCase() === identityValue)) &&
 				(q === undefined ||
-					(d.operator?.label ?? "").toLowerCase().includes(q)),
+					(d.operator?.label ?? "").toLowerCase().includes(q) ||
+					(d.identity?.value ?? "").toLowerCase().includes(q)),
 		)
 		const byLastSeen = (a: Discovery, b: Discovery): number =>
 			compareText(b.lastSeenAt, a.lastSeenAt) || compareText(a.id, b.id)
