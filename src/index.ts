@@ -122,6 +122,7 @@ import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
 import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
+import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import {
 	tunerFrequencyAt,
 	wireAnalogTransmissions,
@@ -1119,6 +1120,16 @@ async function main(): Promise<void> {
 			vesselTrackingManager.stop()
 		})
 
+		// Step 8e: Meshtastic node current state (WG2 req 5, 6)
+		const meshTrackingManager = new MeshTrackingManager(
+			decoderManager,
+			{},
+			logger,
+		)
+		own(20, () => {
+			meshTrackingManager.stop()
+		})
+
 		// Read-only metadata providers add no source consumers or receiver actions.
 		const regionalRegistry = createRegionalRegistry(
 			createRegionalRegistration(),
@@ -1197,6 +1208,7 @@ async function main(): Promise<void> {
 				resourceAggregator,
 				aircraftTracker: aircraftTrackingManager.getTracker(),
 				vesselTracker: vesselTrackingManager.getTracker(),
+				meshTracker: meshTrackingManager.getTracker(),
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
@@ -1425,6 +1437,15 @@ async function main(): Promise<void> {
 			timeout: 1000,
 		})
 
+		shutdown.register({
+			name: "mesh-tracking",
+			handler: async () => {
+				log.info("Shutting down mesh tracking")
+				meshTrackingManager.stop()
+			},
+			timeout: 1000,
+		})
+
 		// Step 10: Start API server
 		await apiServer.start()
 		checkpoint()
@@ -1559,6 +1580,7 @@ async function main(): Promise<void> {
 		aircraftTrackingManager.start()
 		aircraftEnrichmentService.start()
 		vesselTrackingManager.start()
+		meshTrackingManager.start()
 
 		// Step 13: Connect to configured sources and wire to fanout
 		for (const sourceConfig of config.sources) {

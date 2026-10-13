@@ -57,6 +57,7 @@ import { digitalVoiceRoutes } from "./routes/digital-voice.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
 import { vesselRoutes } from "./routes/vessels.js"
+import { meshRoutes } from "./routes/mesh.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
 import { spectrumRoutes } from "./routes/spectrum.js"
@@ -73,7 +74,13 @@ import { toApiDecoderInfo } from "./serializers/decoder-status.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
 import type { VesselTracker } from "../core/vessel-tracker.js"
-import type { VesselState, VesselTrackerStats } from "@wavekit/api-types"
+import type {
+	MeshNode,
+	MeshTrackerStats,
+	VesselState,
+	VesselTrackerStats,
+} from "@wavekit/api-types"
+import type { MeshTracker } from "../core/mesh-tracker.js"
 import { installAccessHooks } from "../access/fastify-adapter.js"
 import type { FastifyAccessController } from "../access/fastify-adapter.js"
 import { registerAccessRoutes } from "../access/access-routes.js"
@@ -140,6 +147,8 @@ export interface ApiServerDependencies {
 	aircraftTracker?: AircraftTracker | undefined
 	/** AIS vessel current state (WG1 req 6). */
 	vesselTracker?: VesselTracker | undefined
+	/** Meshtastic node current state (WG2 req 6). */
+	meshTracker?: MeshTracker | undefined
 	scanner?: ScannerService | undefined
 	spectrum?: SpectrumService | undefined
 	logger: Logger
@@ -187,6 +196,9 @@ export class ApiServer {
 	private readonly vesselTracker?: VesselTracker | undefined
 	/** Detaches the vessel tracker listeners; the tracker outlives the server. */
 	private vesselWiring: (() => void) | null = null
+	private readonly meshTracker?: MeshTracker | undefined
+	/** Detaches the mesh tracker listeners; the tracker outlives the server. */
+	private meshWiring: (() => void) | null = null
 	private readonly scanner?: ScannerService | undefined
 	private readonly spectrum?: SpectrumService | undefined
 	private readonly audioConfig?: AudioConfig | undefined
@@ -234,6 +246,7 @@ export class ApiServer {
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
 		this.vesselTracker = dependencies.vesselTracker
+		this.meshTracker = dependencies.meshTracker
 		this.scanner = dependencies.scanner
 		this.spectrum = dependencies.spectrum
 		this.audioConfig = dependencies.audioConfig
@@ -571,6 +584,10 @@ export class ApiServer {
 			this.vesselWiring?.()
 			this.vesselWiring = null
 		})
+		await attempt(() => {
+			this.meshWiring?.()
+			this.meshWiring = null
+		})
 		await attempt(async () => {
 			await this.app.close()
 		})
@@ -856,6 +873,36 @@ export class ApiServer {
 			}
 		}
 
+		// Meshtastic node tracker events (WG2 req 6.2, 6.3)
+		if (this.meshTracker) {
+			const tracker = this.meshTracker
+			const onNew = (node: MeshNode) => {
+				this.wsBroadcaster.broadcastMeshNew(node)
+			}
+			// TODO(WG2 M.3, req 9.4): route through EntityUpdateThrottle (2 s, identity
+			// `longName|shortName|role|hwModel`) once lane X's module is merged; until then direct.
+			const onUpdate = (node: MeshNode) => {
+				this.wsBroadcaster.broadcastMeshUpdate(node)
+			}
+			// TODO(WG2 M.3, req 9.4): clear the node's throttle key here, before broadcasting lost.
+			const onLost = (nodeId: string, node: MeshNode) => {
+				this.wsBroadcaster.broadcastMeshLost(nodeId, node)
+			}
+			const onStats = (stats: MeshTrackerStats) => {
+				this.wsBroadcaster.broadcastMeshStats(stats)
+			}
+			tracker.on("mesh:new", onNew)
+			tracker.on("mesh:update", onUpdate)
+			tracker.on("mesh:lost", onLost)
+			tracker.on("stats:update", onStats)
+			this.meshWiring = () => {
+				tracker.off("mesh:new", onNew)
+				tracker.off("mesh:update", onUpdate)
+				tracker.off("mesh:lost", onLost)
+				tracker.off("stats:update", onStats)
+			}
+		}
+
 		this.log.debug("Event broadcasting handlers registered")
 	}
 
@@ -911,6 +958,7 @@ export class ApiServer {
 					{ name: "decoders", description: "Decoder management" },
 					{ name: "aircraft", description: "Aircraft tracking endpoints" },
 					{ name: "vessels", description: "AIS vessel tracking endpoints" },
+					{ name: "mesh", description: "Meshtastic node tracking endpoints" },
 					{ name: "live-audio", description: "Live demodulation endpoints" },
 					{ name: "tuner", description: "RTL-TCP tuner control endpoints" },
 					{ name: "tuner-relay", description: "RTL-TCP tuner relay endpoints" },
@@ -1239,6 +1287,13 @@ export class ApiServer {
 		if (this.vesselTracker) {
 			await this.app.register(vesselRoutes, {
 				tracker: this.vesselTracker,
+			})
+		}
+
+		// Meshtastic node current-state routes (WG2 req 6.1)
+		if (this.meshTracker) {
+			await this.app.register(meshRoutes, {
+				tracker: this.meshTracker,
 			})
 		}
 
