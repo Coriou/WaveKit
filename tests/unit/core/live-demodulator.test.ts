@@ -771,6 +771,18 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.transmissionCloseOverride()).toBeNull()
 	})
 
+	// WG1 req 3.6: a pipeline restart outside the five identity fields is "config" too.
+	it("labels a pipeline-restarting reconfigure outside the identity fields as config", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.reconfigure({ audioFormat: "f32le" })
+		expect(reasons).toEqual(["config"])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
 	it("does not label a new pipeline failure during an http restart as config", async () => {
 		await liveDemod.start()
 		const reasons: Array<"stopped" | "config" | null> = []

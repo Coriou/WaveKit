@@ -358,7 +358,10 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.config = validated
-		if (liveDemodTransmissionConfigChanged(previous, validated))
+		// WG1 req 3.6: any change that restarts the pipeline, or changes one of
+		// the transmission identity fields, closes an open transmission as "config".
+		const restarting = active && (pipelineChanged || sourceChanged)
+		if (restarting || liveDemodTransmissionConfigChanged(previous, validated))
 			this.closeOverride = "config"
 		try {
 			if (this.run && validated.squelchMode !== previous.squelchMode)
@@ -378,7 +381,6 @@ export class LiveDemodulator extends EventEmitter {
 			// The hint covers only the synchronous teardown edge above (and the
 			// one stopRun emits before its first await). A transmission that
 			// opens on the replacement pipeline is a new squelch edge.
-			const restarting = active && (pipelineChanged || sourceChanged)
 			if (!restarting) this.closeOverride = null
 
 			if (restarting) {
