@@ -18,6 +18,8 @@ type ProfileListener = (
 	clientId: string,
 	ack: SpectrumProfileEventData,
 	snapshots: readonly SpectrumFrameEventData[],
+	/** Omitted only by callers that predate backfill; treated as none. */
+	backfill?: readonly SpectrumFrameEventData[],
 ) => void
 
 // `off` comes from EventEmitter (see ScannerBroadcastSource): typed overloads would have to mirror every `on`.
@@ -39,12 +41,17 @@ export function wireSpectrumBroadcasts(
 			data: frame,
 		})
 	}
-	// Ack first, then its snapshots, synchronously: live frames can only follow.
-	const onProfile: ProfileListener = (clientId, ack, snapshots) => {
+	// Ack, then backfill frames, then snapshots, synchronously: live frames can only follow.
+	const onProfile: ProfileListener = (clientId, ack, snapshots, backfill) => {
 		broadcaster.sendToClients("spectrum", [clientId], {
 			type: "spectrum:profile",
 			data: ack,
 		})
+		for (const frame of backfill ?? [])
+			broadcaster.sendToClients("spectrum", [clientId], {
+				type: "spectrum:frame",
+				data: frame,
+			})
 		for (const frame of snapshots)
 			broadcaster.sendToClients("spectrum", [clientId], {
 				type: "spectrum:frame",
