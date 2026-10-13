@@ -292,18 +292,14 @@ export class Detector {
 
 	stats(): { key: string; k: number; faPerMhzMin: number }[] {
 		const live = new Set(this.ranges.map(r => this.adaptationKey(r)))
+		const livePublic = new Set(this.ranges.map(r => r.key))
 		const rows: { key: string; k: number; faPerMhzMin: number }[] = []
 		for (const [adaptationKey, s] of this.perKey) {
 			const key = this.publicKey(adaptationKey)
-			// importK seeds the public key. A live range that sets its own
-			// target has a separate state; skip the unused seed so stats and
-			// persistence stay one row per public key.
-			if (
-				adaptationKey === key &&
-				!live.has(adaptationKey) &&
-				this.ranges.some(r => r.key === key && this.adaptationKey(r) !== key)
-			)
-				continue
+			// Persistence stores one k per public key. While a key is live,
+			// publish only the states its current ranges use, so a previous
+			// target cannot overwrite the active k on the next importK.
+			if (livePublic.has(key) && !live.has(adaptationKey)) continue
 			rows.push({
 				key,
 				k: this.pinnedK ?? s.k,

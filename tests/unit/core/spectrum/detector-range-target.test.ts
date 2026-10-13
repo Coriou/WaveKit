@@ -137,6 +137,40 @@ describe("per-range CFAR target", () => {
 		expect(alone.kFor(10)).toBe(shared.kFor(10))
 	})
 
+	it("exports only the live target's k when the target changes", () => {
+		const edges = [10, 12, 14]
+		const run = (d: Detector, minutes: number): void => {
+			const on = new Uint8Array(N)
+			for (const b of edges) on[b] = 1
+			d.recordNoiseEdges(on, new Uint8Array(N), minutes, 4)
+		}
+		const withTarget = (faTarget: number): CfarRange => ({
+			startBin: 0,
+			endBin: 128,
+			key: "same",
+			burst: false,
+			faTarget,
+		})
+		const d = make(1)
+		arm(d, [withTarget(0.25)])
+		run(d, 2.5)
+		run(d, 2.5)
+		expect(d.kFor(10)).toBe(TABLE_K + 0.5)
+		arm(d, [withTarget(2)])
+		expect(d.kFor(10)).toBe(TABLE_K)
+		expect(d.stats().map(s => s.k)).toEqual([TABLE_K])
+		arm(d, [withTarget(0.25)])
+		expect(d.kFor(10)).toBe(TABLE_K + 0.5)
+		expect(d.stats().map(s => ({ key: s.key, k: s.k }))).toEqual([
+			{ key: "same", k: TABLE_K + 0.5 },
+		])
+		const restored = make(1)
+		restored.importK(d.stats().map(s => ({ key: s.key, k: s.k })))
+		arm(restored, [withTarget(0.25)])
+		expect(restored.kFor(10)).toBe(TABLE_K + 0.5)
+		expect(restored.stats().map(s => s.k)).toEqual([TABLE_K + 0.5])
+	})
+
 	it("restores a persisted k onto a range that sets its own target", () => {
 		const d = make(1)
 		d.importK([{ key: "same", k: 5 }])
