@@ -1,6 +1,6 @@
 # Web gaps 1 requirements (WG1)
 
-Status: contract frozen; lanes and Main tasks not started. See [design](design.md) and
+Status: implemented (lanes and Main M.1–M.4, 2026-10-13); M.5 checkpoint open. See [design](design.md) and
 [tasks](tasks.md).
 
 ## Scope

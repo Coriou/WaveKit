@@ -734,12 +734,14 @@ csdr:
 #   inputHighWaterMark: 262144
 #   blockSamples: 16384
 
-# Activity recording. On by default: decoder events
-# go to an SQLite store under stateDir/activity, and the legacy decoder:output
-# stream is unchanged. Bounded defaults for a Pi-class SD card (an operator
-# judgement, not measured): 250_000 rows, 256 MiB, 3 days; admission 50/s burst
-# 500 global, 20/s burst 200 per decoder. Each field below is an optional
-# override; omitted fields keep the default. If node:sqlite is unusable the
+# Activity recording. On by default: decoder events and live-demodulator
+# analog transmissions go to an SQLite store under stateDir/activity, and the
+# legacy decoder:output stream is unchanged. Bounded defaults for a Pi-class
+# SD card (an operator judgement, not measured): 250_000 rows, 256 MiB of live
+# pages plus up to 64 MiB of WAL, 3 days; admission 50/s burst 500 global,
+# 20/s burst 200 per decoder. Each field below is an optional override;
+# omitted fields keep the default. A store that grew under the old defaults
+# (2 GiB) is pruned down gradually. If node:sqlite is unusable the
 # store reports "unavailable" and the rest of WaveKit keeps running.
 # Disable with `activity: { enabled: false }` or WAVEKIT_ACTIVITY__ENABLED=false.
 # activity:

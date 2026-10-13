@@ -217,7 +217,7 @@ describe("WsLimiter", () => {
 		])
 	})
 
-	// Feature: web-gaps-1, Property: scanner progress at 2 Hz
+	// Feature: web-gaps-1, Property 10: Scanner progress rate
 	// Validates: Requirements 8.1
 	it("keeps progress keys 500 ms apart, other keys 1 s apart, within the global budget", () => {
 		const offerArb = fc.record({

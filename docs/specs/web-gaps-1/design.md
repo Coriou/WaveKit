@@ -1,6 +1,6 @@
 # Web gaps 1 design (WG1)
 
-Status: contract frozen; implementation not started. Requirements in
+Status: implemented (2026-10-13); M.5 checkpoint open. Requirements in
 [requirements](requirements.md), tasks in [tasks](tasks.md). Background: `docs/SCANNER.md`
 (spectrum channel and profiles), the activity spec
 ([event foundation](../activity-recording-catalog/requirements.md)) and
@@ -104,8 +104,9 @@ export function toActivityPayload(
 **State machine.** Idle → Open on `squelch-changed(true)` while gated (rule as
 `liveDemodOperatorActivity`: `squelchMode === "auto" || squelch !== 0`) and running. Open →
 Idle on `squelch-changed(false)` (`squelch`), `stopped` (`stopped`), a `config-changed`
-that changes `sourceId`, `modulation`, `bandwidth`, `offsetHz` or `squelchMode` (`config`;
-threshold-only changes keep it open), a level sample whose `frequencyAt` differs from the open frequency by more than
+that changes `sourceId`, `modulation`, `bandwidth`, `offsetHz` or `squelchMode`, or any
+reconfigure that restarts the pipeline (`config`, per requirement 3.6; the live demodulator
+labels the teardown squelch edge; threshold-only changes keep it open), a level sample whose `frequencyAt` differs from the open frequency by more than
 1 Hz or changes null-ness (`retune`), or `now − startedAt >= maxDurationMs`, checked on
 level samples (`max-duration`). After `retune` or `max-duration` a new transmission opens
 at once if the squelch is still open and gated. Level samples while open update peak and a
@@ -207,3 +208,7 @@ emits one `vessel:lost` per removal. Validates: 5.6.
 
 Property 9: AIS six-bit round trip. For any field values in range, encoding a type 1, 5, 18
 or 24 payload with the test encoder and decoding it returns the values. Validates: 5.8.
+
+Property 10: Scanner progress rate. For any offer timeline, `scanner:progress` keys are
+emitted at least 500 ms apart, every other key at least 1 s apart, no 1 s window holds more
+than the global budget, and every key's latest state is delivered. Validates: 8.1.

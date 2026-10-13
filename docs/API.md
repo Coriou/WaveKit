@@ -2358,7 +2358,9 @@ curl http://localhost:9000/api/spectrum
 	"limits": {
 		"maxProfiles": 4,
 		"hz": { "min": 0.5, "max": 25, "step": 0.5 },
-		"bins": { "min": 128, "max": 2048 }
+		"bins": { "min": 128, "max": 2048 },
+		"averaging": { "min": 1, "max": 32 },
+		"backfill": { "maxMs": 10000, "maxFrames": 64, "maxBytes": 524288 }
 	},
 	"subscribers": 2,
 	"sources": [
@@ -2387,7 +2389,9 @@ curl http://localhost:9000/api/spectrum
 `SpectrumActiveProfile` (`profiles[]`): the profile `key`, `hz`, `bins`,
 `isDefault`, `clients`, and from the latest summary `binCount`, `binHz`,
 `summariesPerFrame` and `effectiveHz` (null before one). `SpectrumLimits`:
-`maxProfiles` (`scanner.ws.spectrumMaxProfiles`) and the `hz`/`bins` bounds.
+`maxProfiles` (`scanner.ws.spectrumMaxProfiles`), the `hz`/`bins` bounds, the
+`averaging` bounds and the `backfill` bounds (window, frames, summed bytes).
+`profiles[].key` carries the `:a<n>` suffix for an averaged profile.
 `SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
 (`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
 floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
@@ -2431,14 +2435,45 @@ curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=44600000
 schema violations (a missing or unknown parameter, a negative Hz, `sinceMs`
 below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
+### Vessels
+
+AIS vessel current state (WG1). In memory only: no position history, cleared
+on restart. DTOs in `packages/api-types/src/vessels.ts`. Vessels unheard for
+15 minutes expire; at 5,000 vessels the least recently heard is evicted. Live
+updates on the [`vessels` channel](#vessels-channel).
+
+#### GET /api/vessels
+
+`VesselListResponse`: `{ vessels, stats, timestamp }`, most recently heard
+first. A `VesselState` has the zero-padded 9-digit `mmsi`, `vesselClass`
+(`A`, `B`, `base-station`, `aton`, `sar`, `unknown`), static and voyage
+fields (`name`, `callsign`, `imo`, `shipType`, `destination`, `eta`,
+`draught`; null until received), `position` (`{lat, lon, at}` or null),
+`cog`, `sog`, `heading`, `navStatus` (null for the AIS "not available"
+values), `messageTypes`, `messageCount`, `decoderId`, `firstSeen`, `lastSeen`
+and `lastStaticAt`.
+
+#### GET /api/vessels/stats
+
+`VesselTrackerStats`: `vesselCount`, `withPosition`, `withName`, `byClass`,
+`messagesProcessed`, `messagesPerSecond` (60 s average), `lastMessageAt`,
+`latestMmsi`, `expiredTotal` and `timestamp`.
+
+#### GET /api/vessels/:mmsi
+
+One `VesselState`. 1–9 digits are zero-padded. 400 `VALIDATION_ERROR` for
+anything else; 404 `{ error, code: "VESSEL_NOT_FOUND", mmsi }` when the
+vessel is not tracked.
+
 ## Activity
 
-Persistent decoder-event search. Off unless `activity.enabled` is true
-(`WAVEKIT_ACTIVITY__ENABLED=true`). The database is
-`<stateDir>/activity/activity.db` (`stateDir` defaults to `data`,
-`WAVEKIT_STATE_DIR`). Disabled mode creates no `activity` directory. The
-routes stay registered and answer 404 `ACTIVITY_DISABLED`. The other
-WebSocket channels are unchanged.
+Persistent decoder-event search. On by default with bounded retention and
+admission (see [Configuration](#configuration)). Turn it off with
+`activity: { enabled: false }` or `WAVEKIT_ACTIVITY__ENABLED=false`. The
+database is `<stateDir>/activity/activity.db` (`stateDir` defaults to `data`,
+`WAVEKIT_STATE_DIR`; the compose profiles mount it on a volume). Disabled mode
+creates no `activity` directory. The routes stay registered and answer 404
+`ACTIVITY_DISABLED`. The other WebSocket channels are unchanged.
 
 Opening the store needs Node 24 and `node:sqlite` with FTS5
 (`contentless_delete`). A failed probe creates no files. A lock or a
@@ -2462,17 +2497,42 @@ The activity routes then answer 503:
 disclosure is off (protected mode), `message` is `Request failed` and
 `reason` is still set. The response does not include the open error text.
 
-Batch 1 stores `decoder-reception` envelopes and, when rows are dropped,
-`ingestion-gap` records. Output types `sync`, `rates`, `stats`, `status`
-and `error` are counted as excluded telemetry and are not stored. Provenance
-on this path is unknown RF: `sourceId` and `frequency` are null. Kinds other
-than those two, receipts, recordings and transcripts are not written.
+The store holds three kinds:
+
+- `decoder-reception`: decoder output envelopes. Output types `sync`,
+  `rates`, `stats`, `status` and `error` are counted as excluded telemetry and
+  are not stored. Provenance on this path is unknown RF: `sourceId` and
+  `frequency` are null.
+- `analog-transmission`: one record per closed
+  [`live-audio:transmission`](#live-audiotransmission) of the live
+  demodulator. `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
+  and `payload` is `AnalogTransmissionPayload` (the closed event without
+  `state`). The summary has `category: "voice"`, `protocol: "analog"`, the
+  source id, `frequencyHz` from the event-time frequency (null when unknown),
+  `decoderId: null`, a title such as `NFM 446.00625 MHz` (or
+  `NFM transmission` without a frequency) and fields `durationMs` (ms),
+  `modulation` and `peakChannelPowerDbfs` (dBFS, when known). Search with
+  `kinds=analog-transmission`, by source or frequency. Admission is
+  non-blocking and counted like decoder receptions, with one per-decoder
+  token bucket per source (`analog:<sourceId>`).
+- `ingestion-gap`: written when rows are dropped.
+
+Receipts, recordings and transcripts are not written.
 
 ### Configuration
 
-Commented in `config/default.yaml`. Omitted retention and admission fields
-keep the defaults: 1,000,000 rows, 2 GiB, 7 days, 100 events/s with a burst
-of 1000 globally, and 50/s with a burst of 200 per decoder. `maxRows` is an
+Commented in `config/default.yaml`. A config without an `activity` block, and
+every omitted retention or admission field, gets the bounded defaults: 250,000
+rows, 256 MiB, 3 days, 50 events/s with a burst of 500 globally, and 20/s with
+a burst of 200 per decoder. They are an operator judgement for a Pi-class SD
+card, not a measurement. The 256 MiB cap counts live database pages (freelist
+pages excluded) and triggers pruning; the WAL pauses writes past 64 MiB. So
+256 MiB + 64 MiB is a nominal live-page plus WAL threshold, not a hard disk
+ceiling: freed pages return through incremental vacuum, and pruning per write
+is bounded. Upgrade: a store that grew under the previous defaults (1,000,000
+rows, 2 GiB, 7 days) is pruned down to the new caps a bounded batch at a time
+and stays larger on disk until freed pages are vacuumed; set the old values
+explicitly to keep them. `maxRows` is an
 integer of at least 1,000. `maxDbBytes` is an integer of at least 16 MiB.
 `globalPerSecond` and `perDecoderPerSecond` are
 positive integers. Commits are batched (about 25 ms). Age pruning runs only
@@ -2482,19 +2542,20 @@ maxAge)`, then deletes down to the cap. Row and byte pruning delete down to
 
 ```yaml
 activity:
-  enabled: false
+  enabled: true
   retention:
-    maxRows: 1000000
-    maxDbBytes: 2147483648
-    maxAgeMs: 604800000
+    maxRows: 250000
+    maxDbBytes: 268435456
+    maxAgeMs: 259200000
   admission:
-    globalPerSecond: 100
-    globalBurst: 1000
-    perDecoderPerSecond: 50
+    globalPerSecond: 50
+    globalBurst: 500
+    perDecoderPerSecond: 20
     perDecoderBurst: 200
 ```
 
-Environment overrides, in addition to `WAVEKIT_ACTIVITY__ENABLED`:
+Environment overrides, in addition to `WAVEKIT_ACTIVITY__ENABLED`
+(`false` turns Activity off):
 
 - `WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS`
 - `WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES`
@@ -2707,8 +2768,9 @@ ws.onmessage = event => {
 
 Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
-[SCANNER.md](SCANNER.md)), `spectrum` (core waterfall frames, opt-in) and
-`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel)).
+[SCANNER.md](SCANNER.md)), `spectrum` (core waterfall frames, opt-in),
+`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel))
+and `vessels` (AIS vessel state, see [Vessels channel](#vessels-channel)).
 `activity` is not one of these channels. It uses `activity:subscribe` and
 `activity:unsubscribe`. See [Activity](#activity).
 
@@ -2734,6 +2796,21 @@ the client gets the default profile (`scanner.ws.spectrumHz` ×
   ones get no reply.
 - The answer is a `spectrum:profile` ack, then one `snapshot: true` frame per
   source (current state, not a replay of missed messages), then live frames.
+- `averaging` (optional, WG1): exponential average over n frames of the
+  profile, per bin in dBFS after each frame's max-hold:
+  `avg = avg + (frame − avg) / n`, seeded with the first frame and restarted
+  on a new epoch, stream or bin layout. Rounded and clamped to 1–32; absent or
+  1 is off. It is part of the profile: clients with equal `hz`, `bins` and
+  `averaging` share one frame build, and an averaged profile counts against
+  `scanner.ws.spectrumMaxProfiles`. A subscribe that omits `averaging` is
+  never served an averaged profile.
+- `backfillMs` (optional, WG1, opt-in): replay up to this many ms of recent
+  frames after the ack. Rounded and clamped to 0–10000; absent or 0 means no
+  backfill and the subscribe behaves exactly as before. It is per subscribe
+  and not part of the profile. See [spectrum:frame](#spectrumframe) for the
+  delivery order and bounds.
+- A client that sends neither option receives exactly the messages it did
+  before WG1.
 
 #### Unsubscribe
 
@@ -3163,6 +3240,57 @@ first complete IQ block; `thresholdDbfs` is the threshold in effect.
 }
 ```
 
+#### live-audio:transmission
+
+On the `live-audio` channel: one squelch-delimited analog transmission of the
+live demodulator, sent once with `state: "open"` and once with
+`state: "closed"` (same `transmissionId`, a UUID). Produced only while the
+squelch gates (auto mode, or manual with a non-zero threshold); with manual
+squelch 0 nothing is sent. Sent whether Activity is enabled or not; when it is
+ready, each closed transmission is also stored as an `analog-transmission`
+[Activity](#activity) record.
+
+```json
+{
+	"type": "live-audio:transmission",
+	"channel": "live-audio",
+	"data": {
+		"transmissionId": "5b0c7f0e-2d1a-4c7b-9f43-0d8e6a1b2c3d",
+		"sourceId": "rtl0",
+		"state": "closed",
+		"startedAt": "2026-10-13T14:02:11.250Z",
+		"endedAt": "2026-10-13T14:02:14.100Z",
+		"durationMs": 2850,
+		"frequency": { "hz": 446006250, "tuningTrust": "commanded" },
+		"modulation": "nfm",
+		"bandwidthHz": 12500,
+		"squelchMode": "manual",
+		"thresholdDbfs": -40,
+		"peakChannelPowerDbfs": -11.2,
+		"meanChannelPowerDbfs": -16.4,
+		"closeReason": "squelch"
+	}
+}
+```
+
+- `frequency`: the tuned centre of the demodulator's source plus `offsetHz`
+  when the transmission opened. `tuningTrust` is `commanded` under WaveKit
+  control and `relay` under external (SDR++) control. Null when the source
+  has no tuner state or its centre is an unconfirmed placeholder.
+- `endedAt` is the last above-threshold block: the close time minus the
+  squelch hang (250 ms), never before `startedAt`; for `stopped` and `config`
+  it is the close time. `endedAt`, `durationMs` and `closeReason` are null
+  while open.
+- `closeReason`: `squelch` (normal close), `retune` (the event-time frequency
+  moved by more than 1 Hz while open), `config` (a reconfigure that restarts
+  the pipeline or changes source, modulation, bandwidth, offset or squelch
+  mode; a threshold-only change keeps it open), `stopped`, or `max-duration`
+  (10 minutes). After `retune` or `max-duration` a new transmission opens at
+  once if the squelch is still open.
+- `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
+  level samples; null before the first one. Every open is followed by exactly
+  one closed event, also on shutdown.
+
 #### digital-voice:call
 
 On the `digital-voice` channel: a dsd-fme call started, turned out encrypted, or
@@ -3197,7 +3325,8 @@ sent on start/stop, on client connect/disconnect and after every
 #### Scanner channel
 
 All `scanner` messages pass one limiter: at most `scanner.ws.maxMessagesPerSecond`
-(10) in any second, at most one per key per second, latest state per key wins,
+(10) in any second, at most one per key per second (per 500 ms for
+`scanner:progress`), latest state per key wins,
 and the latest state of every key is always delivered eventually. After a
 reconnect, refetch over REST (`GET /api/scanner/jobs`, `/discoveries`); missed
 messages are not replayed.
@@ -3215,7 +3344,9 @@ state change and after every edit.
 
 `{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes}`;
 `probes` is a count (the probe list is in the job detail, `progress.probes[]`).
-At most 1/s per job.
+Up to 2 Hz per job (at most one per 500 ms); progress changes on every hop
+tune and sweep end, and at least once a second while the job runs. It still
+counts toward the channel's global budget.
 
 ```json
 {
@@ -3322,7 +3453,9 @@ that remapped the client.
 - `selection`: `none` (no frames), `default` (the default profile on every
   eligible source) or `source`.
 - `outcome`: `default` (no options), `exact`, `nearest` (see `adjusted`:
-  `hz`, `bins`, `profile-limit`), `rejected` (the previous selection is kept;
+  `hz`, `bins`, `profile-limit`, and with the WG1 options `averaging` and
+  `backfillMs` when the requested value was rounded, clamped or, for
+  `averaging`, mapped to another profile), `rejected` (the previous selection is kept;
   `code` and `message` say why) or `removed` (notice: `removedSourceId` was
   removed; a source selection becomes `selection: "none"`).
 - `code`: `SPECTRUM_OPTIONS_INVALID`, `SPECTRUM_SOURCE_NOT_FOUND`,
@@ -3331,7 +3464,13 @@ that remapped the client.
   request for its size. Above `scanner.ws.spectrumMaxProfiles` (4 distinct
   non-default profiles over all sources; config-only, 1–16) a request maps to an
   active profile on that source (preferring one not larger than the request) or
-  to the default.
+  to the default. An averaged request maps to the nearest profile with the same
+  averaging, otherwise to averaging off (the default always qualifies).
+- Profile key: `<hz>:<bins>` with averaging off (unchanged), `<hz>:<bins>:a<n>`
+  with averaging n > 1. `profile.averaging` is present only when n > 1.
+- `backfillFrames`: on a committed `source` ack whose `backfillMs` is above 0,
+  the number of backfill frames that follow (0 when nothing of the current
+  stream and epoch is buffered). Absent otherwise.
 - Reset the client's waterfalls on every `spectrum:profile`, except that an
   `outcome: "removed"` notice with `selection: "default"` drops only
   `removedSourceId`'s waterfall. A reconnect changes nothing; a source re-added
@@ -3367,7 +3506,8 @@ One frame per source and profile:
 }
 ```
 
-- `profile` is the key `<hz>:<bins>` (the default profile or the client's).
+- `profile` is the key `<hz>:<bins>` (the default profile or the client's),
+  `<hz>:<bins>:a<n>` for an averaged profile.
 - `bins`: base64 of a `Uint8Array`, `u8-halfdb-127.5` encoding: byte `v` is
   `dBFS = v / 2 − 127.5` (0.5 dB steps), max-hold over the frame interval;
   bin `i` is centred at `startHz + (i + 0.5) × binHz`.
@@ -3386,6 +3526,14 @@ One frame per source and profile:
 - `snapshot: true` marks the current-state frame sent right after an ack (the
   latest block of the current epoch at the client's profile; none while a
   retune settles). It is not a replay.
+- `backfill: true` marks a replayed frame (only after an ack that asked for
+  `backfillMs`). Order: `spectrum:profile`, the backfill frames oldest first,
+  then the snapshot, then live frames. A backfill frame has no `snapshot`; its
+  `at` is the arrival time of the newest block summary in it. Frames are
+  newest-aligned runs of `summariesPerFrame` from the current stream and epoch
+  only; a partial oldest run is dropped and the snapshot's summary is not
+  replayed. At most 64 frames and 512 KiB of summed message JSON; the oldest
+  are dropped first.
 - Client rules: never merge or accumulate rows across a change of `sourceId`,
   epoch, `profile`, `binHz` or `startHz`; each row carries its own axis. Compare
   epochs for equality only (they restart with the engine).
@@ -3410,6 +3558,26 @@ are disconnected so they reconnect and refetch; the write itself still succeeds.
 	"type": "bandplans:changed",
 	"channel": "bandplans",
 	"data": { "storeId": "6f1c2a7e-4b1d-4c3e-9a51-2d8f0b7c9e14", "revision": 4 }
+}
+```
+
+#### Vessels channel
+
+AIS vessel current state from the `ais` decoders, mirroring the tracker
+behind [Vessels](#vessels). Not replayed: refetch `GET /api/vessels` after a
+reconnect.
+
+- `vessel:new` — `VesselState`, the first report of an MMSI
+- `vessel:update` — `VesselState` after each merged report
+- `vessel:lost` — `{ mmsi, vessel }` when a vessel expires (15 minutes
+  unheard) or is evicted at the 5,000-vessel cap
+- `vessel:stats` — `VesselTrackerStats`, every 5 s
+
+```json
+{
+	"type": "vessel:update",
+	"channel": "vessels",
+	"data": { "mmsi": "244660000", "vesselClass": "A", "name": "EVER GIVEN", "position": { "lat": 51.9, "lon": 4.1, "at": "2026-10-13T14:02:15.000Z" }, "sog": 11.2, "cog": 254.1, "lastSeen": "2026-10-13T14:02:15.000Z" }
 }
 ```
 

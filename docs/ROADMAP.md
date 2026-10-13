@@ -392,16 +392,23 @@ unknown RF context and complete bounded decoded JSON. Batch 1 publishes that
 envelope into the activity store when Activity is enabled. Parser fallback
 frequencies still cannot establish event-time RF provenance.
 
-Event foundation batch 1 is mounted. With `activity.enabled` (off by default),
-decoder output is published as a decode envelope, stored in
-`<stateDir>/activity/activity.db`, and served as search, facets and cursor
-replay. Telemetry outputs (`sync`, `rates`, `stats`, `status`, `error`) are
-not stored. Still deferred: ingestion receipts, kinds other than
-decoder-reception and ingestion-gap, recordings and the catalog, CLI and web
-views, Docker image verification of the Node 24 base, and measured retention.
+Event foundation batch 1 is mounted, and since WG1 Activity is on by default
+with bounded retention and admission (250,000 rows, 256 MiB, 3 days; 50/s
+burst 500 globally, 20/s burst 200 per decoder; an operator judgement for a
+Pi-class SD card, not measured; `activity: { enabled: false }` turns it off).
+Decoder output is published as a decode envelope, stored in
+`<stateDir>/activity/activity.db` (on a volume in every compose profile), and
+served as search, facets and cursor replay. Telemetry outputs (`sync`,
+`rates`, `stats`, `status`, `error`) are not stored. WG1 adds the
+`analog-transmission` kind: each squelch-delimited live-demodulator
+transmission, with event-time frequency. Still deferred: ingestion receipts,
+other kinds, recordings and the catalog, CLI and web views, Docker image
+verification of `node:sqlite` FTS5 in the Node 24 base (a failed probe leaves
+Activity `unavailable` and the rest running), and measured retention.
 
 - [x] Event foundation batch 1: envelope publication, the SQLite/FTS5 store,
-      search, facets and cursor replay, off unless `activity.enabled`.
+      search, facets and cursor replay. On by default with bounded limits
+      since WG1; `analog-transmission` records from the live demodulator.
       Receipts, other kinds, recordings/catalog, CLI/web views, image
       verification and measured retention remain open.
 - [ ] Add a common decode envelope with stable identity, category, title, fields,
@@ -661,7 +668,11 @@ same view, and a program can do the watching more reliably than a person.
       averaged FFT of each source's IQ as a raw fanout consumer and publishes it
       on a general `spectrum` WebSocket channel. Rate and bins must suit a
       waterfall: 10 Hz or more and 1024 or more bins for the web; lower for the
-      CLI. Late-joining clients get a matching snapshot. Scanner Task 37a owns
+      CLI. Late-joining clients get a matching snapshot. WG1 adds opt-in
+      per-client waterfall backfill (`backfillMs`, up to 10 s / 64 frames of
+      the current epoch) and per-client exponential averaging (`averaging`
+      1–32); `fftSize` and `bins` stay capped at 2048 until a Pi-class CPU
+      measurement. Scanner Task 37a owns
       this service; support bounded simultaneous profiles and source selection
       without client preferences changing detector behavior. Preserve the planned scanner
       10 Hz / 512-bin default for subscriptions without options.
@@ -738,6 +749,16 @@ separate from scanner RF sweep coverage.
       `enableMlat` option gate. When unset, derive a visibly approximate location
       from received positions; do not use that estimate as authoritative station
       coordinates for coverage. gpsd is a later extension.
+- [x] AIS vessel current state (WG1): an in-memory tracker of AIS reports
+      (NMEA positions from types 1–3, 18, 19; static data from 5, 19, 24), `GET /api/vessels`, `/api/vessels/stats`,
+      `/api/vessels/:mmsi` and the `vessels` WebSocket channel. No position
+      history. APRS and Meshtastic current state remain open.
+- [ ] AIS NMEA checksums are not verified: the decoder accepts sentences with a
+      wrong XOR checksum, and every `!` sentence in
+      `tests/mocks/fixtures/ais/nmea-sample.txt` (and the `!AIVDO` sample in
+      `tests/unit/decoders/ais-catcher.test.ts`) carries a bad checksum. Verify
+      checksums in the decoder and regenerate those fixtures with the test
+      encoder.
 - [ ] Serve aircraft, vessel, APRS and mesh position trails with persistent
       last-hour replay and a time cursor; reuse existing ADS-B tracking.
 - [ ] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
