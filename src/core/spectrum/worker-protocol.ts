@@ -81,7 +81,11 @@ export const PipelineInputSchema = z.discriminatedUnion("kind", [
 	z.object({
 		kind: z.literal("masks"),
 		exclusions: z.array(FreqRangeSchema),
-		cfarRanges: z.array(FreqRangeSchema),
+		cfarRanges: z.array(
+			FreqRangeSchema.extend({
+				faTargetPerMhzMin: z.number().positive().optional(),
+			}),
+		),
 		burstRanges: z.array(FreqRangeSchema),
 		rasters: z.array(RasterSchema),
 		obwHz: z.array(z.number().positive()),

@@ -21,6 +21,21 @@ const protocolEnum = [
 	"carrier",
 	"unknown",
 ] as const
+const identityKindEnum = [
+	"dmr-cc",
+	"p25-nac",
+	"nxdn-ran",
+	"ysf-dgid",
+	"dstar-call",
+	"dpmr-cc",
+	"pocsag-capcode",
+	"aprs-call",
+	"ism-model",
+] as const
+/** SF1 `identity=<kind>:<value>`: a known IdentityKind, a colon, a non-empty value. */
+export const IDENTITY_QUERY = new RegExp(
+	`^(${identityKindEnum.join("|")}):(.+)$`,
+)
 const confidenceEnum = [
 	"activity",
 	"candidate",
@@ -71,6 +86,11 @@ const rangeSchema = {
 		obwHz: { type: "array", items: { type: "number", exclusiveMinimum: 0 } },
 		protocols: { type: "array", items: { type: "string", enum: protocolEnum } },
 		bandplanId: { type: "string" },
+		// SF1 per-range fields (docs/specs/scanner-followups): live-editable in a PATCH `ranges`
+		enabled: { type: "boolean" },
+		name: { type: "string", minLength: 1, maxLength: 100 },
+		dwellMs: { type: "number", minimum: 10, maximum: 600000 },
+		sensitivity: { type: "string", enum: ["low", "normal", "high"] },
 	},
 	required: ["startHz", "endHz"],
 	// § 5.1 shorthand: spacingHz (+ optional firstChannelHz) is one raster; the route converts it.
@@ -193,6 +213,8 @@ export const scanJobSpecSchema = {
 			required: ["enabled"],
 			additionalProperties: false,
 		},
+		// SF1: no decoder trials of the job's own (discover jobs only)
+		signalsOnly: { type: "boolean" },
 	},
 	additionalProperties: false,
 } as const
@@ -239,6 +261,11 @@ export const discoveryQuerySchema = {
 		since: { type: "string", format: "date-time" },
 		encrypted: { type: "boolean" },
 		q: { type: "string", maxLength: 100 },
+		identity: {
+			type: "string",
+			maxLength: 100,
+			pattern: IDENTITY_QUERY.source,
+		},
 		sort: { type: "string", enum: ["lastSeen", "frequency", "confidence"] },
 		cursor: { type: "string" },
 		limit: { type: "integer", minimum: 1, maximum: 500 },

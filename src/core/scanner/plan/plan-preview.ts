@@ -25,6 +25,7 @@ import { protocolsForHop } from "./protocols.js"
 import { describeHop, planHops } from "./hop-planner.js"
 import { normaliseCapture } from "../evidence/capture-spec.js"
 import type { HopPlanInput } from "./hop-planner.js"
+import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
  * POST /api/scanner/plan (spec § 5.4): pure. Normalises a job spec (every derived default plus its
@@ -253,7 +254,7 @@ function decodableClasses(
 }
 
 export function normaliseSpec(
-	spec: ScanJobSpec,
+	spec: StoredScanJobSpec,
 	ctx: PreviewContext,
 ): { spec: NormalisedJobSpec; source: PreviewSourceView; issues: PlanIssue[] } {
 	const issues: PlanIssue[] = []
@@ -805,7 +806,7 @@ function estimate(
 }
 
 export function previewPlan(
-	spec: ScanJobSpec,
+	spec: StoredScanJobSpec,
 	ctx: PreviewContext,
 ): PlanPreview {
 	const { spec: n, source, issues } = normaliseSpec(spec, ctx)

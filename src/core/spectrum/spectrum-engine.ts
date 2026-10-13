@@ -17,6 +17,7 @@ import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { defaultFftSize } from "./fft.js"
 import type {
+	CfarMaskRange,
 	EngineState,
 	FreqRange,
 	IqFormat,
@@ -97,7 +98,8 @@ export interface EngineEpoch {
 
 export interface EngineMasks {
 	exclusions: FreqRange[]
-	cfarRanges: FreqRange[]
+	/** SF1: per-range false-alarm target optional (CfarMaskRange). */
+	cfarRanges: CfarMaskRange[]
 	burstRanges: FreqRange[]
 	rasters: Raster[]
 	obwHz: number[]

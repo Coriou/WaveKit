@@ -36,12 +36,12 @@ import type {
 	NormalisedJobSpec,
 	PauseReason,
 	PlanIssue,
-	ScanJobSpec,
 	ScannerConfidence,
 	ScannerSettings,
 	UndecodedReason,
 } from "./types.js"
 import type { TrackSnapshot } from "../spectrum/types.js"
+import type { StoredScanJobSpec } from "./plan/range-contract.js"
 
 /** Bounds first-IQ admission only; running jobs retain their existing stop contract. */
 export const JOB_STARTUP_CAP_MS = 15_000
@@ -50,7 +50,7 @@ export interface JobRecord {
 	id: string
 	name: string | null
 	passive: boolean
-	rawSpec: ScanJobSpec
+	rawSpec: StoredScanJobSpec
 	spec: NormalisedJobSpec
 	plan: HopPlan
 	issues: PlanIssue[]

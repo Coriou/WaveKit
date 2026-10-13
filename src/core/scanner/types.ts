@@ -100,6 +100,25 @@ export interface ScanRange extends FreqRange {
 	obwHz?: number[]
 	protocols?: ScannerProtocol[]
 	bandplanId?: string
+	/**
+	 * Scanner follow-ups (SF1, docs/specs/scanner-followups): `false` keeps the range in the
+	 * job (index and fields stay) but it is not planned, swept, masked or matched for
+	 * protocols. Absent = enabled. Live-editable.
+	 */
+	enabled?: boolean
+	/** SF1: operator label, 1 to 100 characters. Live-editable. */
+	name?: string
+	/**
+	 * SF1: dwell (ms) of every hop overlapping this range; same bounds as the job's
+	 * `dwellMs`; the job's value applies when absent. Live-editable.
+	 */
+	dwellMs?: number
+	/**
+	 * SF1: CFAR false-alarm target of this range (low, normal, high as the job-level
+	 * mapping); integration stays job-level. The job's sensitivity applies when absent.
+	 * Live-editable.
+	 */
+	sensitivity?: "low" | "normal" | "high"
 }
 
 export interface ScanExclusion extends FreqRange {
@@ -364,6 +383,12 @@ export interface ScanJobSpec {
 	monitor?: MonitorSpec
 	/** Burst IQ capture (Task 34a); default off. */
 	capture?: Partial<CaptureSpec> & { enabled: boolean }
+	/**
+	 * SF1: find signals, never decode them. The job requests no decoder trials (confirm or
+	 * follow probes) of its own; detection, classification, discoveries, captures and
+	 * ambient or other jobs' evidence are unchanged. Discover jobs only. Live-editable.
+	 */
+	signalsOnly?: boolean
 }
 
 /**
@@ -419,6 +444,8 @@ export interface NormalisedJobSpec extends Required<
 	resume: { autoAfterIdleMs: number | null; onBoot: boolean }
 	txDurationHintMs: number
 	capture: CaptureSpec
+	/** SF1: present only when the operator set it (absent = false, today's behaviour). */
+	signalsOnly?: boolean
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.
@@ -442,6 +469,8 @@ export interface Hop {
 	dcAdjacentChannelsHz: number[]
 	excluded: FreqRange[]
 	dcMinEdgeHz: number
+	/** SF1: present only when an enabled range overlapping the hop sets `dwellMs` (max of the overlapping ranges' dwell, the job's for ranges without one). */
+	dwellMs?: number
 }
 
 export interface HopPlan {
@@ -477,6 +506,8 @@ export type PlanIssueCode =
 	| "dedicated-available"
 	| "unrestorable"
 	| "probe-unavailable"
+	| "range-locked"
+	| "signals-only-unsupported"
 
 export interface PlanIssue {
 	code: PlanIssueCode
