@@ -527,6 +527,18 @@ describe("MeshTracker", () => {
 		expect(rate).toBeLessThanOrEqual((61 * 50) / 60)
 	})
 
+	it("keeps at most 61 rate buckets when the clock runs backwards (R2 5)", () => {
+		let clock = 2_000_000
+		const nodes = tracker({ now: () => clock, maxNodes: 10 })
+		for (let i = 0; i < 1_000; i++) {
+			clock = 2_000_000 - i * 1000
+			send(nodes, { from: 1, id: i + 1, portnum: 1 }, new Date(clock))
+		}
+		const buckets = (nodes as unknown as { rateBuckets: Map<number, number> })
+			.rateBuckets
+		expect(buckets.size).toBeLessThanOrEqual(61)
+	})
+
 	it("unrefs the sweep and stats timers", () => {
 		const nodes = tracker({
 			statsIntervalMs: 60_000,

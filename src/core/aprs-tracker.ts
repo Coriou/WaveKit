@@ -461,8 +461,11 @@ export class AprsTracker extends EventEmitter<AprsTrackerEvents> {
 	/** Drops seconds that ended before the rolling 60 s window. */
 	private pruneMarks(now: number): void {
 		const cutoff = now - RATE_WINDOW_MS
+		// A bucket after `now` means the clock went back: drop it, so the window stays
+		// within [now - 60 s, now] (at most 61 buckets) whatever the clock does (WG2 R2).
 		for (const second of this.rateBuckets.keys()) {
-			if (second * 1000 + 999 < cutoff) this.rateBuckets.delete(second)
+			if (second * 1000 + 999 < cutoff || second * 1000 > now)
+				this.rateBuckets.delete(second)
 		}
 	}
 

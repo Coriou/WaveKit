@@ -533,6 +533,18 @@ describe("AprsTracker", () => {
 		expect(aprs.getStats().packetsPerSecond).toBe(0)
 	})
 
+	it("keeps at most 61 rate buckets when the clock runs backwards (R2 5)", () => {
+		let clock = 2_000_000
+		const aprs = tracker({ now: () => clock })
+		for (let i = 0; i < 1_000; i++) {
+			clock = 2_000_000 - i * 1000
+			aprs.processAprs("d", packet({ raw: `!p${i}` }), new Date(clock))
+		}
+		const buckets = (aprs as unknown as { rateBuckets: Map<number, number> })
+			.rateBuckets
+		expect(buckets.size).toBeLessThanOrEqual(61)
+	})
+
 	it("counts malformed payloads as invalid and does not throw or clear state", () => {
 		const aprs = tracker()
 		aprs.processAprs(
