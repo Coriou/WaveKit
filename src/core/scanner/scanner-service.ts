@@ -107,6 +107,7 @@ import {
 import {
 	DEFAULT_TUNING,
 	USABLE_FRACTION,
+	faTargetForSensitivity,
 	isScannerIqFormat,
 	type EngineEpoch,
 	type EngineStreamReason,
@@ -164,6 +165,7 @@ import type {
 	PlanIssue,
 	PlanPreview,
 	ScanJobSpec,
+	ScanRange,
 	ScannerConfidence,
 	ScannerProtocol,
 	ScannerSettings,
@@ -1719,9 +1721,17 @@ export class ScannerService extends EventEmitter {
 			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
 			.map(j => j.spec)
 		const ranges = specs.flatMap(s => s.ranges.filter(isRangeEnabled))
+		const targets = this.cfarTargets(sourceId, ranges)
 		engine.setMasks({
 			exclusions: intersectRanges(specs.map(s => s.exclusions)),
-			cfarRanges: ranges.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
+			cfarRanges: ranges.map(r => {
+				const fa = targets.get(`${r.startHz}:${r.endHz}`)
+				return {
+					startHz: r.startHz,
+					endHz: r.endHz,
+					...(fa !== undefined ? { faTargetPerMhzMin: fa } : {}),
+				}
+			}),
 			burstRanges: ranges
 				.filter(r => (r.protocols ?? []).some(p => BURST_PROTOCOLS.has(p)))
 				.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
@@ -1731,6 +1741,41 @@ export class ScannerService extends EventEmitter {
 			inWindow: this.arbiter.holder(sourceId) === undefined,
 		})
 		this.updateRing(sourceId)
+	}
+
+	/**
+	 * SF1 req 2.5: the CFAR false-alarm target per `start:end` of the enabled ranges that set a
+	 * sensitivity. Ranges sharing a span take the largest target (the most sensitive); a range
+	 * without one counts as the pipeline target. A span whose target equals the pipeline's gets
+	 * no entry, so jobs without per-range sensitivity send exactly today's masks.
+	 */
+	private cfarTargets(
+		sourceId: string,
+		ranges: readonly ScanRange[],
+	): Map<string, number> {
+		const settingsFa = this.settings().detection.faTargetPerMhzMin
+		const pipelineFa = faTargetForSensitivity(
+			this.engineTuning(sourceId).sensitivity ??
+				this.settings().detection.sensitivity,
+			settingsFa,
+		)
+		const spans = new Map<string, { fa: number; set: boolean }>()
+		for (const r of ranges) {
+			const key = `${r.startHz}:${r.endHz}`
+			const set = r.sensitivity !== undefined
+			const fa = r.sensitivity
+				? faTargetForSensitivity(r.sensitivity, settingsFa)
+				: pipelineFa
+			const prev = spans.get(key)
+			spans.set(key, {
+				fa: prev ? Math.max(prev.fa, fa) : fa,
+				set: set || (prev?.set ?? false),
+			})
+		}
+		const out = new Map<string, number>()
+		for (const [key, span] of spans)
+			if (span.set && span.fa !== pipelineFa) out.set(key, span.fa)
+		return out
 	}
 
 	private rastersAt(sourceId: string, hz: number) {
