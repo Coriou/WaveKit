@@ -140,6 +140,10 @@ export function resolveActivityLimits(
 		throw new ActivityUnavailableError(
 			"Activity gap interval must be at least 1 ms",
 		)
+	if (limits.positionCoalesceMs > 0 && limits.positionCoalesceMaxEntities < 1)
+		throw new ActivityUnavailableError(
+			"Activity position coalescing needs at least 1 tracked entity",
+		)
 	if (limits.pauseRetryMs < 1)
 		throw new ActivityUnavailableError(
 			"Activity pause retry must be at least 1 ms",

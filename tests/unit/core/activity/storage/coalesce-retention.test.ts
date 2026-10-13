@@ -90,3 +90,28 @@ describe("position coalescing and retention", () => {
 		expect(off.coalesced).toBe(0)
 	}, 20_000)
 })
+
+// WG1 req 7.9: a failed write rolls back the entity's coalescing state.
+describe("position coalescing and failed writes", () => {
+	it("stores the retransmission of a name-bearing report whose first write failed", async () => {
+		const store = await openStore({ failNextWrites: 1 })
+		const report = (eventId: string, ms: number) =>
+			envelope({
+				eventId,
+				decoderId: "readsb",
+				outputType: "aircraft",
+				receivedAt: new Date(T0 + ms).toISOString(),
+				decodedData: { icao: "abc123", callsign: "UAL1", lat: 51, lon: 4 },
+			})
+		expect(store.admit(report("lost", 0)).admitted).toBe(true)
+		await new Promise(resolve => setTimeout(resolve, 20))
+		expect(store.admit(report("retry", 1_000)).admitted).toBe(true)
+		await new Promise(resolve => setTimeout(resolve, 20))
+		const records = await readRecords(store.dbPath)
+		expect(records.map(r => r.eventId)).toEqual(["retry"])
+		expect(store.admit(report("again", 2_000))).toEqual({
+			admitted: false,
+			reason: "coalesced",
+		})
+	})
+})

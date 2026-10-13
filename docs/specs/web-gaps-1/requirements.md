@@ -164,17 +164,28 @@ app running, as today.
 7.4 `config/default.yaml`, `docs/API.md` and `docs/ROADMAP.md` shall describe the new
 default and bounds.
 7.5 Access stays `legacy` by default.
-7.6 (User decision, 2026-10-13.) Activity shall store a position-only reception of one
-entity (an `aircraft` output by ICAO address, a `ship` output by MMSI, per decoder) at most
-once per 60 s (`ACTIVITY_POSITION_COALESCE_MS`, the `positionCoalesceMs` store limit).
-7.7 A first sighting, and a reception whose identity or static fields change (aircraft
-`callsign`, `squawk`; ship `name`, `callsign`, `imo`, `shipType`, `destination`, `eta`,
-`draught`, `navStatus`), shall always be stored. Coalesced receptions are counted in
+7.6 (User decision, 2026-10-13.) Activity shall store a redundant position or presence
+update of one entity (an `aircraft` output by ICAO address, a `ship` output by MMSI, per
+decoder) at most once per 60 s (`ACTIVITY_POSITION_COALESCE_MS`, the `positionCoalesceMs`
+store limit). A reception is redundant only when every field it carries is on the type's
+allowlist (aircraft: `icao`/`hex`, position, altitudes, ground speed, track and headings,
+vertical rates, signal/RSSI, message counts and timestamps; ship: `mmsi`, `messageType`,
+position, `cog`, `sog`, `heading`, timestamps, and only for AIS message types 1, 2, 3, 18,
+19 and 27) or is an identity field with an unchanged value. Bare presence (an ICAO address
+with reception metadata only, as Beast output gives) is redundant.
+7.7 A first sighting, a reception whose identity or static fields change (aircraft
+`callsign`/`flight`, `squawk`, `onGround`/`ground`, `category`, `emergency`; ship
+`navStatus`, `name`, `callsign`, `imo`, `shipType`, `destination`, `eta`, `draught`), a
+reception with any field outside the allowlist, and every other AIS message type (4, 5,
+6, 8, 9, 12, 14, 21, 24, ...) shall always be stored. Coalesced receptions are counted in
 `coalescedPositions`, are not losses and open no ingestion gap. The per-entity map is
 bounded (least recently stored evicted). Live trackers and WebSocket paths still get every
 update.
 7.8 Under a busy position feed at the row cap, rare events (pages, analog transmissions)
 shall survive far longer than without coalescing.
+7.9 A reception whose write fails (write failure or failed batch) shall not count as stored:
+the entity's coalescing state is rolled back, so its retransmission is stored. The tracked
+entity bound shall be at least 1 while coalescing is on.
 
 ## 8. Scanner extras
 

@@ -170,11 +170,14 @@ the service's backfill to that headroom before the ack is sent and rewrites the 
 anywhere fall back to the bounded values. Those defaults are an operator judgement for a
 Pi-class SD card, not measured.
 
-**Position coalescing (7.6–7.8).** `src/core/activity/storage/coalesce.ts`
+**Position coalescing (7.6–7.9).** `src/core/activity/storage/coalesce.ts`
 `PositionCoalescer` runs in `ActivityIngress.admit` after the telemetry check and before
-the token buckets. Key `decoderId + outputType + entity id`; window by the envelope's
-`receivedAt`; the entity state is committed only when the row is queued, so a rate-limited
-or dropped reception does not mute the next one. Bounded by `positionCoalesceMaxEntities`
+the token buckets. Per output type a positive allowlist of redundant fields, a list of
+identity fields compared with the last stored values, and (ship) an AIS message-type gate;
+any other field makes the reception informative and stored. Key `decoderId + outputType +
+entity id`; window by the envelope's `receivedAt` (the ingest clock); the entity state is
+committed only when the row is queued, so a rate-limited or dropped reception does not
+mute the next one, and the commit's undo runs when the write fails (`nack`, skipped rows). Bounded by `positionCoalesceMaxEntities`
 (20 000) with LRU eviction; an evicted entity's next reception counts as a first sighting.
 A backwards clock step stores. Rejection reason `coalesced`; `coalescedPositions` in stats.
 
@@ -228,8 +231,9 @@ than the global budget, and every key's latest state is delivered. Validates: 8.
 
 Property 11: Position coalescing. For any timeline of aircraft receptions over a few
 entities, a reception is stored exactly when the entity is new (or was evicted), its last
-stored reception is at least 60 s older, or an identity field it carries differs from the
-last known value; the tracked entities never exceed the bound. Validates: 7.6, 7.7.
+stored reception is at least 60 s older, an identity field it carries differs from the
+last known value, or it carries a field outside the allowlist; the tracked entities never
+exceed the bound. Validates: 7.6, 7.7, 7.9.
 
 Property 12: Backfill within the outbound headroom. For any socket buffer level, earlier
 queued traffic, backfill frame count and size, delivering ack, backfill and snapshot never

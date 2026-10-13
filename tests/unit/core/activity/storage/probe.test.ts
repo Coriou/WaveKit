@@ -81,6 +81,15 @@ describe("activity runtime probe", () => {
 		expect(
 			resolveActivityLimits({ maxDbBytes: 16 * 1024 * 1024 }).maxDbBytes,
 		).toBe(16 * 1024 * 1024)
+		expect(() =>
+			resolveActivityLimits({ positionCoalesceMaxEntities: 0 }),
+		).toThrow(/at least 1 tracked entity/)
+		expect(
+			resolveActivityLimits({
+				positionCoalesceMs: 0,
+				positionCoalesceMaxEntities: 0,
+			}).positionCoalesceMs,
+		).toBe(0)
 		expect(() => resolveActivityLimits({ gapMaxIntervalMs: 0 })).toThrow(
 			/gap interval/,
 		)

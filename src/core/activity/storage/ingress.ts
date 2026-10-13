@@ -54,6 +54,8 @@ export class ActivityIngress {
 	excludedTelemetry = 0
 	private readonly global: TokenBucket
 	private readonly coalescer: PositionCoalescer
+	/** Undo of each queued or in-flight row's coalescing state, by eventId. */
+	private readonly coalesceUndo = new Map<string, () => void>()
 	private readonly decoders = new Map<string, TokenBucket>()
 	private readonly queue: BuiltActivityRow[] = []
 	private queueBytes = 0
@@ -122,7 +124,7 @@ export class ActivityIngress {
 		this.queue.push(row)
 		this.queueBytes += row.recordBytes
 		this.admitted++
-		coalesce.commit()
+		this.coalesceUndo.set(row.eventId, coalesce.commit())
 		return { admitted: true }
 	}
 
@@ -198,6 +200,9 @@ export class ActivityIngress {
 	}
 
 	ack(done: ReadonlySet<string>): void {
+		// Rows written (or duplicates) keep their coalescing state; noteSkipped
+		// has already rolled back the failed ones.
+		for (const row of this.inFlight) this.coalesceUndo.delete(row.eventId)
 		const gap = this.inFlight.find(row => row.kind === "ingestion-gap")
 		if (gap) {
 			if (done.has(gap.eventId)) this.gapHeld = false
@@ -213,6 +218,7 @@ export class ActivityIngress {
 		this.inFlight = []
 		this.inFlightBytes = 0
 		if (gap) this.pendingGap = gap
+		for (const row of failed) this.rollBackCoalescing(row.eventId)
 		for (const row of failed)
 			this.noteDrop(
 				"write-failed",
@@ -229,6 +235,7 @@ export class ActivityIngress {
 		const skipped = new Set(eventIds)
 		for (const row of batch) {
 			if (!skipped.has(row.eventId) || row.kind === "ingestion-gap") continue
+			this.rollBackCoalescing(row.eventId)
 			this.noteDrop(
 				"write-failed",
 				new Date(row.receivedAtMs).toISOString(),
@@ -240,8 +247,19 @@ export class ActivityIngress {
 
 	/** Clears an in-flight batch without counting it. A timed-out write may still commit. */
 	forgetInFlight(): void {
+		for (const row of this.inFlight) this.coalesceUndo.delete(row.eventId)
 		this.inFlight = []
 		this.inFlightBytes = 0
+	}
+
+	/**
+	 * A failed write must not suppress the entity's next reception (for example
+	 * the retransmission of a name-bearing report): restore its prior state.
+	 */
+	private rollBackCoalescing(eventId: string): void {
+		const undo = this.coalesceUndo.get(eventId)
+		this.coalesceUndo.delete(eventId)
+		undo?.()
 	}
 
 	/** An episode is open and has not been staged yet. */
@@ -293,6 +311,7 @@ export class ActivityIngress {
 	 */
 	abandonQueued(): void {
 		const rows = [...this.inFlight, ...this.queue]
+		this.coalesceUndo.clear()
 		this.inFlight = []
 		this.inFlightBytes = 0
 		this.queue.length = 0

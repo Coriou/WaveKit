@@ -13,7 +13,7 @@ const iso = (ms: number) => new Date(ms).toISOString()
 function aircraft(
 	icao: string,
 	at: number,
-	extra: Record<string, string> = {},
+	extra: Record<string, string | number> = {},
 ) {
 	return envelope({
 		outputType: "aircraft",
@@ -73,11 +73,87 @@ describe("position coalescing", () => {
 			envelope({
 				outputType: "ship",
 				receivedAt: iso(at),
-				decodedData: { mmsi: "244660000", lat: 51, ...(name ? { name } : {}) },
+				decodedData: {
+					mmsi: "244660000",
+					messageType: name ? 19 : 1,
+					lat: 51,
+					...(name ? { name } : {}),
+				},
 			})
 		expect(offer(c, ship(T0))).toBe(true)
 		expect(offer(c, ship(T0 + 1_000))).toBe(false)
 		expect(offer(c, ship(T0 + 2_000, "EVER GIVEN"))).toBe(true)
+	})
+
+	it("coalesces bare presence but stores any field outside the allowlist", () => {
+		const c = new PositionCoalescer(60_000, 100)
+		const bare = (at: number) =>
+			envelope({
+				outputType: "aircraft",
+				receivedAt: iso(at),
+				decodedData: { icao: "abc123", lastSeen: iso(at), messageCount: 1 },
+			})
+		expect(offer(c, bare(T0))).toBe(true)
+		expect(offer(c, bare(T0 + 1_000))).toBe(false) // Beast presence is redundant
+		// An SBS identification report: a first callsign is new information.
+		expect(offer(c, aircraft("abc123", T0 + 2_000, { callsign: "UAL1" }))).toBe(
+			true,
+		)
+		// Extra fields the allowlist does not know are stored.
+		expect(offer(c, aircraft("abc123", T0 + 3_000, { nic: 8 }))).toBe(true)
+		expect(
+			offer(
+				c,
+				aircraft("abc123", T0 + 4_000, { callsign: "UAL1", type: "adsb_icao" }),
+			),
+		).toBe(true)
+		expect(offer(c, aircraft("abc123", T0 + 5_000, { callsign: "UAL1" }))).toBe(
+			false,
+		)
+	})
+
+	it("stores every AIS message type other than position reports", () => {
+		const c = new PositionCoalescer(60_000, 100)
+		const ais = (messageType: number, at: number) =>
+			envelope({
+				outputType: "ship",
+				receivedAt: iso(at),
+				decodedData: { mmsi: "244660000", messageType, lat: 51, lon: 4 },
+			})
+		expect(offer(c, ais(1, T0))).toBe(true)
+		expect(offer(c, ais(1, T0 + 1_000))).toBe(false)
+		expect(offer(c, ais(18, T0 + 2_000))).toBe(false)
+		expect(offer(c, ais(27, T0 + 2_500))).toBe(false)
+		for (const [i, type] of [14, 6, 8, 12, 9, 21, 5, 24, 4].entries())
+			expect(offer(c, ais(type, T0 + 3_000 + i))).toBe(true)
+		// A report without a message type cannot be shown redundant.
+		expect(
+			offer(
+				c,
+				envelope({
+					outputType: "ship",
+					receivedAt: iso(T0 + 4_000),
+					decodedData: { mmsi: "244660000", lat: 51 },
+				}),
+			),
+		).toBe(true)
+	})
+
+	it("undoes a commit whose write failed, unless a later reception replaced it", () => {
+		const c = new PositionCoalescer(60_000, 100)
+		const undo = c.decide(aircraft("abc123", T0, { callsign: "UAL1" })).commit()
+		undo()
+		expect(offer(c, aircraft("abc123", T0 + 1_000, { callsign: "UAL1" }))).toBe(
+			true,
+		)
+		const stale = c.decide(aircraft("abc123", T0 + 70_000)).commit()
+		expect(offer(c, aircraft("abc123", T0 + 71_000, { squawk: "1200" }))).toBe(
+			true,
+		)
+		stale() // superseded: keeps the later state
+		expect(offer(c, aircraft("abc123", T0 + 72_000, { squawk: "1200" }))).toBe(
+			false,
+		)
 	})
 
 	it("does not record a reception whose row was not admitted", () => {
@@ -93,12 +169,13 @@ describe("position coalescing", () => {
 	})
 
 	// Feature: web-gaps-1, Property 11: Position coalescing
-	// Validates: Requirements 7.6, 7.7
-	it("stores first sightings, identity changes and one update per window, within the entity bound", () => {
+	// Validates: Requirements 7.6, 7.7, 7.9
+	it("stores first sightings, identity changes, informative fields and one update per window, within the entity bound", () => {
 		const step = fc.record({
 			dt: fc.integer({ min: 0, max: 30_000 }),
 			icao: fc.constantFrom("a1", "a2", "a3", "a4", "a5"),
 			callsign: fc.option(fc.constantFrom("UAL1", "DLH2"), { nil: undefined }),
+			extra: fc.boolean(),
 		})
 		fc.assert(
 			fc.property(
@@ -112,12 +189,15 @@ describe("position coalescing", () => {
 					let t = T0
 					for (const s of steps) {
 						t += s.dt
-						const extra: Record<string, string> =
-							s.callsign === undefined ? {} : { callsign: s.callsign }
+						const extra: Record<string, string | number> = {
+							...(s.callsign === undefined ? {} : { callsign: s.callsign }),
+							...(s.extra ? { nic: 7 } : {}),
+						}
 						const got = offer(c, aircraft(s.icao, t, extra))
 						const prev = model.get(s.icao)
 						const expected =
 							prev === undefined ||
+							s.extra ||
 							t - prev.at >= window ||
 							(s.callsign !== undefined && s.callsign !== prev.callsign)
 						expect(got).toBe(expected)

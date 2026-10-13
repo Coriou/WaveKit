@@ -2517,11 +2517,20 @@ The store holds three kinds:
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
 
-Position coalescing: a position-only `aircraft` (per ICAO address) or `ship`
-(per MMSI) reception is stored at most once per entity per 60 s and per
-decoder. A first sighting and any change of an identity or static field
-(aircraft `callsign`, `squawk`; ship `name`, `callsign`, `imo`, `shipType`,
-`destination`, `eta`, `draught`, `navStatus`) are always stored. Coalesced
+Position coalescing: a redundant position or presence update of an `aircraft`
+(per ICAO address) or `ship` (per MMSI) is stored at most once per entity per
+60 s and per decoder. Redundant means every field is position, kinematics,
+presence or reception metadata (aircraft: position, altitudes, speed, track,
+headings, vertical rate, signal, message counts, timestamps; ship: position,
+`cog`, `sog`, `heading`, timestamps, AIS types 1, 2, 3, 18, 19 and 27 only) or
+an unchanged identity field. A bare-presence aircraft report (ICAO address and
+reception metadata, as from Beast) is redundant. Always stored: a first
+sighting, a changed identity or static field (aircraft `callsign`, `squawk`,
+`onGround`, `category`, `emergency`; ship `navStatus`, `name`, `callsign`,
+`imo`, `shipType`, `destination`, `eta`, `draught`), any other field, and
+every other AIS message type (for example 4, 5, 6, 8, 9, 12, 14, 21, 24). A
+reception whose write fails is not counted as stored, so its retransmission
+is. Coalesced
 receptions are counted in `stats.coalescedPositions`; they are not losses and
 open no ingestion gap. The live trackers, `aircraft:*`/`vessel:*` and
 `decoder:output` WebSocket messages still carry every update.
