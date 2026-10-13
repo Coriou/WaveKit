@@ -521,7 +521,10 @@ describe("MeshTracker", () => {
 		const buckets = (nodes as unknown as { rateBuckets: Map<number, number> })
 			.rateBuckets
 		expect(buckets.size).toBeLessThanOrEqual(61)
-		expect(nodes.getStats().packetsPerSecond).toBeCloseTo(50, 0)
+		// Whole-second buckets: the window spans 60 to 61 seconds.
+		const rate = nodes.getStats().packetsPerSecond
+		expect(rate).toBeGreaterThanOrEqual(50)
+		expect(rate).toBeLessThanOrEqual((61 * 50) / 60)
 	})
 
 	it("unrefs the sweep and stats timers", () => {
