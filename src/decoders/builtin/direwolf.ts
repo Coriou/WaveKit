@@ -969,38 +969,40 @@ function parseWeatherData(data: string): APRSWeather {
 function parseMicE(info: string, destination: string, result: APRSData): void {
 	if (info.length < 9 || destination.length < 6) return
 
-	// Decode latitude from destination field
+	// Decode latitude from destination field. `high` marks the P-Z group: in characters 4, 5
+	// and 6 it means North, longitude offset +100 and West (APRS 1.0.1 ch. 10); 0-9 and L mean
+	// South, +0 and East.
 	const latDigits: number[] = []
-	const latNS: boolean[] = []
-	const lonOffset: boolean[] = []
+	const high: boolean[] = []
 
 	for (let i = 0; i < 6; i++) {
 		const c = destination.charCodeAt(i)
 		if (c >= 0x30 && c <= 0x39) {
 			// 0-9
 			latDigits.push(c - 0x30)
-			latNS.push(false)
-			lonOffset.push(false)
+			high.push(false)
 		} else if (c >= 0x41 && c <= 0x4a) {
-			// A-J (custom)
+			// A-J (custom message bit, positions 1-3 only)
+			if (i >= 3) return
 			latDigits.push(c - 0x41)
-			latNS.push(false)
-			lonOffset.push(false)
+			high.push(false)
 		} else if (c >= 0x50 && c <= 0x59) {
 			// P-Y
 			latDigits.push(c - 0x50)
-			latNS.push(true)
-			lonOffset.push(true)
-		} else if (c === 0x4b || c === 0x4c) {
-			// K, L (space)
+			high.push(true)
+		} else if (c === 0x4b) {
+			// K (space, custom message bit, positions 1-3 only)
+			if (i >= 3) return
 			latDigits.push(0)
-			latNS.push(false)
-			lonOffset.push(true)
+			high.push(false)
+		} else if (c === 0x4c) {
+			// L (space)
+			latDigits.push(0)
+			high.push(false)
 		} else if (c === 0x5a) {
 			// Z (space)
 			latDigits.push(0)
-			latNS.push(true)
-			lonOffset.push(true)
+			high.push(true)
 		} else {
 			return // Invalid character
 		}
@@ -1013,7 +1015,7 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 		latDigits[3]! +
 		(latDigits[4]! * 10 + latDigits[5]!) / 100
 	result.lat = latDeg + latMin / 60
-	if (!latNS[0] && !latNS[1] && !latNS[2]) {
+	if (!high[3]) {
 		result.lat = -result.lat // South
 	}
 
@@ -1023,7 +1025,7 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 	const h = info.charCodeAt(3) - 28
 
 	let lonDeg = d
-	if (lonOffset[4]) lonDeg += 100
+	if (high[4]) lonDeg += 100
 	if (lonDeg >= 180 && lonDeg <= 189) lonDeg -= 80
 	if (lonDeg >= 190 && lonDeg <= 199) lonDeg -= 190
 
@@ -1033,7 +1035,7 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 	const lonHun = h
 
 	result.lon = lonDeg + (lonMin + lonHun / 100) / 60
-	if (!lonOffset[5]) {
+	if (high[5]) {
 		result.lon = -result.lon // West
 	}
 
@@ -1042,8 +1044,13 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 	const dc = info.charCodeAt(5) - 28
 	const se = info.charCodeAt(6) - 28
 
-	result.speed = sp * 10 + Math.floor(dc / 10)
-	result.course = (dc % 10) * 100 + se
+	// APRS 1.0.1 ch. 10: the alternate SP and DC ranges add 800 knots and 400 degrees.
+	let speed = sp * 10 + Math.floor(dc / 10)
+	if (speed >= 800) speed -= 800
+	let course = (dc % 10) * 100 + se
+	if (course >= 400) course -= 400
+	result.speed = speed
+	result.course = course
 
 	// Symbol
 	if (info.length >= 9) {

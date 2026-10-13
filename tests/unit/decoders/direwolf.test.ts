@@ -507,6 +507,30 @@ describe("APRS speed is knots (WG2 req 3.9)", () => {
 		expect(result.course).toBe(0)
 	})
 
+	// Vectors built by the APRS 1.0.1 ch. 10 rules (pre-existing defect: no 800/400 adjustment and
+	// the N/S and E/W flags read from the wrong destination characters).
+	it("decodes a Mic-E vector with the alternate speed/course ranges, North and West", () => {
+		// S32UPT: 33 25.04, message bits from S,3,2; U = North, P = +100, T = West.
+		// Longitude 112 07.74: d = 12 + 28 "(", m = 7 + 28 "#", h = 74 + 28 "f".
+		// Speed 20 kn as SP = 82 ("n"), DC = 6 (\"), course 251 = 651 - 400, SE = 51 ("O").
+		const info = '`(#fn"O>/'
+		const result = parseAprsInfo("N0CALL", "S32UPT", [], info)
+
+		expect(result.dataType).toBe("Mic-E")
+		expect(result.lat).toBeCloseTo(33 + 25.04 / 60, 6)
+		expect(result.lon).toBeCloseTo(-(112 + 7.74 / 60), 6)
+		expect(result.speed).toBe(20)
+		expect(result.course).toBe(251)
+		expect(result.symbol).toBe("/>")
+	})
+
+	it("decodes a Mic-E vector South and East with no longitude offset", () => {
+		const result = parseAprsInfo("N0CALL", "332554", [], '`(#fn"O>/')
+
+		expect(result.lat).toBeCloseTo(-(33 + 25.54 / 60), 6)
+		expect(result.lon).toBeCloseTo(12 + 7.74 / 60, 6)
+	})
+
 	it("keeps compressed course/speed in knots from the 1.08^n-1 formula", () => {
 		const result = parseAprsInfo("N0CALL", "APRS", [], '!/!!!!!!!!>!"!')
 
