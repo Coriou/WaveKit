@@ -65,6 +65,13 @@ type NextStats = {
 	paused: boolean
 	writer: "running" | "stopped"
 }
+type ApiStats = {
+	[K in keyof (Omit<NextStats, "coalescedPositions"> & {
+		coalescedPositions?: number
+	})]: (Omit<NextStats, "coalescedPositions"> & {
+		coalescedPositions?: number
+	})[K]
+}
 
 interface ExpectedRecords {
 	type: "activity:records"
@@ -158,7 +165,8 @@ const sameShapes: [
 	Same<Contract.ActivityReplayResetFrame, NextReset>,
 	Same<Api.ActivityReplayFrame, NextReplay>,
 	Same<Contract.ActivityReplayFrame, NextReplay>,
-	Same<Api.ActivityStoreStats, NextStats>,
+	// WG1: optional in the public DTO (older cores omit it), required inside the core.
+	Same<Api.ActivityStoreStats, ApiStats>,
 	Same<Contract.ActivityStoreStats, NextStats>,
 	Same<
 		typeof Api.ACTIVITY_RECORD_VERSION,

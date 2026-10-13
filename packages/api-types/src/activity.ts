@@ -286,8 +286,8 @@ export interface ActivityStoreStats {
 		number
 	>
 	excludedTelemetry: number
-	/** Position-only receptions not stored inside their entity's window (WG1). */
-	coalescedPositions: number
+	/** Redundant position/presence receptions not stored inside their entity's window (WG1). Optional for older cores. */
+	coalescedPositions?: number
 	queueDepth: number
 	queueBytes: number
 	dbBytes: number
