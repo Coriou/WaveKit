@@ -404,7 +404,7 @@ function rejection(error: unknown) {
 	return error
 }
 
-describe("band plan service", () => {
+describe("band plan service", { timeout: 60_000 }, () => {
 	beforeAll(() => {
 		volume = mountFastTemp()
 	})

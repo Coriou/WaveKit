@@ -44,7 +44,20 @@ const allowedImports = new Set([
 	"./builtin-packs.js",
 	"./resolve.js",
 	"./domain.js",
+	"./presets.js",
+	"./group-map.js",
+	"../contract.js",
 ])
+// Composition and durable storage may add these; pure modules may not.
+const ioOnlyImports = new Set([
+	"node:fs",
+	"node:fs/promises",
+	"node:path",
+	"./storage.js",
+	"./service.js",
+	"./import/sdrpp.js",
+])
+const ioModules = new Set(["index.ts", "service.ts", "storage.ts"])
 
 // Feature: band-plans, Property 15: Authority isolation
 // Validates: Requirements 1.1, 10.2
@@ -62,7 +75,9 @@ describe("band plan authority isolation", () => {
 
 	it("confines src/core/bandplans imports to the scanner bandplan modules and types", () => {
 		const dir = resolve(root, "src/core/bandplans")
-		const files = readdirSync(dir).filter(name => name.endsWith(".ts"))
+		const files = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter(
+			name => name.endsWith(".ts"),
+		)
 		expect(files.length).toBeGreaterThan(0)
 		for (const file of files) {
 			const source = readFileSync(resolve(dir, file), "utf8")
@@ -70,10 +85,13 @@ describe("band plan authority isolation", () => {
 				match => match[1]!,
 			)
 			expect(imports.length).toBeGreaterThan(0)
+			const io = ioModules.has(file)
 			for (const specifier of imports)
-				expect(allowedImports.has(specifier), `${file} imports ${specifier}`).toBe(
-					true,
-				)
+				expect(
+					allowedImports.has(specifier) || (io && ioOnlyImports.has(specifier)),
+					`${file} imports ${specifier}`,
+				).toBe(true)
+			if (io) continue
 			expect(source).not.toMatch(
 				/\bimport\s*\(|\brequire\s*\(|\bprocess\s*\.|\bfetch\s*\(|\bset(?:Timeout|Interval)\s*\(/,
 			)

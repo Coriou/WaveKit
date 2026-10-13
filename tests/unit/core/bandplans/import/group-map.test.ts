@@ -299,7 +299,10 @@ describe("group mapping properties", () => {
 						"fallback-other",
 					]).toContain(mapping.rule)
 					expect(mapping.rule).not.toBe("override")
-					const fromTable = SDRPP_TYPE_TABLE[sourceType.toLowerCase()]
+					const typeKey = sourceType.toLowerCase()
+					const fromTable = Object.hasOwn(SDRPP_TYPE_TABLE, typeKey)
+						? SDRPP_TYPE_TABLE[typeKey]
+						: undefined
 					if (fromTable !== undefined) {
 						expect(mapping).toEqual({ group: fromTable, rule: "table" })
 					}

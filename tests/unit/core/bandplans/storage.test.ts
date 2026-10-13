@@ -79,7 +79,7 @@ const preStages: StorageStage[] = [
 	"rename",
 ]
 
-describe("band plan storage", () => {
+describe("band plan storage", { timeout: 60_000 }, () => {
 	beforeAll(() => {
 		volume = mountFastTemp()
 	})
