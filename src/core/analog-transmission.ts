@@ -13,9 +13,12 @@ import type {
 	AnalogTransmissionEventData,
 	AnalogTransmissionFrequency,
 	AnalogTransmissionPayload,
+	AnalogTransmissionTone,
 	TunerState,
 } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
+import { ToneDetector } from "./audio-tones/tone-detector.js"
+import type { TonePcmFormat } from "./audio-tones/tone-detector.js"
 import {
 	liveDemodSquelchGates,
 	liveDemodTransmissionConfigChanged,
@@ -55,6 +58,14 @@ export interface AnalogTransmissionSource {
 	): unknown
 	off(event: "started", listener: () => void): unknown
 	off(event: "stopped", listener: () => void): unknown
+	on(
+		event: "pcm",
+		listener: (chunk: Buffer, format: TonePcmFormat) => void,
+	): unknown
+	off(
+		event: "pcm",
+		listener: (chunk: Buffer, format: TonePcmFormat) => void,
+	): unknown
 }
 
 export interface AnalogTransmissionTrackerOptions {
@@ -68,6 +79,18 @@ export interface AnalogTransmissionTrackerOptions {
 	randomUUID?: () => string
 	/** Default 10 minutes. Checked on level samples. */
 	maxDurationMs?: number
+	/**
+	 * One detector per open transmission. Tests inject a double; production
+	 * uses {@link ToneDetector}.
+	 */
+	createToneDetector?: () => ToneDetectorPort
+}
+
+/** The slice of {@link ToneDetector} the tracker drives. */
+export interface ToneDetectorPort {
+	push(pcm: Buffer, format: TonePcmFormat): void
+	result(): AnalogTransmissionTone
+	reset(): void
 }
 
 export interface AnalogTransmissionTrackerEvents {
@@ -89,6 +112,11 @@ interface OpenTransmission {
 	peak: number | null
 	powerSum: number
 	powerCount: number
+	detector: ToneDetectorPort
+	/** Whole PCM samples fed while open, in seconds. */
+	audioSeconds: number
+	/** Trailing bytes that do not yet form a sample. */
+	audioRemainder: number
 }
 
 type AssertExtends<T extends U, U> = T
@@ -152,6 +180,14 @@ export function toActivityPayload(
 		peakChannelPowerDbfs: event.peakChannelPowerDbfs,
 		meanChannelPowerDbfs: event.meanChannelPowerDbfs,
 		closeReason: event.closeReason,
+		...(event.tone === undefined
+			? {}
+			: {
+					tone: {
+						ctcssHz: event.tone.ctcssHz,
+						dtmf: event.tone.dtmf,
+					},
+				}),
 	}
 }
 
@@ -161,8 +197,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private readonly now: () => number
 	private readonly newId: () => string
 	private readonly maxDurationMs: number
+	private readonly createToneDetector: () => ToneDetectorPort
 	private transmission: OpenTransmission | null = null
 	private attached = false
+	private pcmAttached = false
+	private toneErrorCount = 0
+	private toneBroken = false
 
 	constructor(options: AnalogTransmissionTrackerOptions) {
 		super()
@@ -170,9 +210,16 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.frequencyAt = options.frequencyAt
 		this.now = options.now ?? (() => Date.now())
 		this.newId = options.randomUUID ?? randomUUID
+		this.createToneDetector =
+			options.createToneDetector ?? (() => new ToneDetector())
 		const max = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
 		this.maxDurationMs =
 			Number.isFinite(max) && max >= 0 ? max : DEFAULT_MAX_DURATION_MS
+	}
+
+	/** Detector failures since this tracker was constructed. Each forces a null tone. */
+	toneErrors(): number {
+		return this.toneErrorCount
 	}
 
 	start(): void {
@@ -237,9 +284,21 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.guard(() => {
 			const open = this.transmission
 			if (!open) return
-			if (!liveDemodTransmissionConfigChanged(open.config, config)) return
+			if (!this.configClosesTransmission(open, config)) return
 			this.close("config", this.clock())
 		})
+	}
+
+	private readonly handlePcm = (chunk: Buffer, format: TonePcmFormat): void => {
+		const open = this.transmission
+		if (!open || this.toneBroken) return
+		this.noteAudio(open, chunk, format)
+		try {
+			open.detector.push(chunk, format)
+		} catch {
+			this.toneErrorCount += 1
+			this.toneBroken = true
+		}
 	}
 
 	private readonly handleStopped = (): void => {
@@ -250,12 +309,25 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 
 	private detach(): void {
+		this.detachPcm()
 		if (!this.attached) return
 		this.attached = false
 		this.source.off("squelch-changed", this.handleSquelch)
 		this.source.off("level", this.handleLevel)
 		this.source.off("config-changed", this.handleConfig)
 		this.source.off("stopped", this.handleStopped)
+	}
+
+	private attachPcm(): void {
+		if (this.pcmAttached) return
+		this.pcmAttached = true
+		this.source.on("pcm", this.handlePcm)
+	}
+
+	private detachPcm(): void {
+		if (!this.pcmAttached) return
+		this.pcmAttached = false
+		this.source.off("pcm", this.handlePcm)
 	}
 
 	private canOpen(): boolean {
@@ -295,6 +367,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const offsetHz = status.config.offsetHz ?? 0
 		const frequency = this.sampleFrequency(status.sourceId, offsetHz)
 		const threshold = status.thresholdDbfs
+		this.toneBroken = false
+		const detector = this.makeDetector()
 		this.transmission = {
 			transmissionId: this.newId(),
 			sourceId: status.sourceId,
@@ -312,7 +386,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			peak: null,
 			powerSum: 0,
 			powerCount: 0,
+			detector,
+			audioSeconds: 0,
+			audioRemainder: 0,
 		}
+		this.attachPcm()
 		this.publish(this.openEvent(this.transmission))
 	}
 
@@ -320,13 +398,15 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const open = this.transmission
 		if (!open) return
 		this.transmission = null
+		this.detachPcm()
+		const tone = this.finishTone(open)
 		// Only a squelch close happens a hang after the last above-threshold
 		// block; retune, max-duration, stop and config end at the close itself.
 		const endedMs =
 			reason === "squelch"
 				? Math.max(open.startedAtMs, closeAt - this.hangMs())
 				: closeAt
-		const event = this.closedEvent(open, reason, endedMs)
+		const event = this.closedEvent(open, reason, endedMs, tone)
 		this.publish(event)
 	}
 
@@ -377,6 +457,27 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		}
 	}
 
+	/**
+	 * Absent `sourceId` means the source this transmission opened on (WG2 req
+	 * 7.7). A status source that has since moved is a real source change: the
+	 * omitted id now resolves somewhere else.
+	 */
+	private configClosesTransmission(
+		open: OpenTransmission,
+		config: LiveDemodConfig,
+	): boolean {
+		try {
+			if (this.source.getStatus().sourceId !== open.sourceId) return true
+		} catch {
+			// A status failure still honours the config identity below.
+		}
+		return liveDemodTransmissionConfigChanged(
+			open.config,
+			config,
+			open.sourceId,
+		)
+	}
+
 	private hangMs(): number {
 		try {
 			const hang = this.source.squelchHangMs()
@@ -420,6 +521,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		open: OpenTransmission,
 		reason: AnalogTransmissionCloseReason,
 		endedMs: number,
+		tone: AnalogTransmissionTone,
 	): AnalogTransmissionEventData {
 		return {
 			transmissionId: open.transmissionId,
@@ -436,6 +538,46 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			peakChannelPowerDbfs: open.peak,
 			meanChannelPowerDbfs: meanOf(open),
 			closeReason: reason,
+			tone,
+		}
+	}
+
+	private makeDetector(): ToneDetectorPort {
+		try {
+			return this.createToneDetector()
+		} catch {
+			this.toneErrorCount += 1
+			this.toneBroken = true
+			return {
+				push() {},
+				result: () => ({ ctcssHz: null, dtmf: null }),
+				reset() {},
+			}
+		}
+	}
+
+	private noteAudio(
+		open: OpenTransmission,
+		chunk: Buffer,
+		format: TonePcmFormat,
+	): void {
+		if (!(format.rate > 0)) return
+		const width = format.format === "s16le" ? 2 : 4
+		open.audioRemainder += chunk.length
+		const samples = Math.floor(open.audioRemainder / width)
+		open.audioRemainder -= samples * width
+		open.audioSeconds += samples / format.rate
+	}
+
+	private finishTone(open: OpenTransmission): AnalogTransmissionTone {
+		if (this.toneBroken) return { ctcssHz: null, dtmf: null }
+		try {
+			const tone = open.detector.result()
+			if (open.audioSeconds < 0.75) return { ctcssHz: null, dtmf: tone.dtmf }
+			return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf }
+		} catch {
+			this.toneErrorCount += 1
+			return { ctcssHz: null, dtmf: null }
 		}
 	}
 

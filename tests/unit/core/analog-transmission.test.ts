@@ -8,13 +8,17 @@ import {
 	AnalogTransmissionTracker,
 	toActivityPayload,
 } from "../../../src/core/analog-transmission.js"
-import type { AnalogTransmissionSource } from "../../../src/core/analog-transmission.js"
+import type {
+	AnalogTransmissionSource,
+	ToneDetectorPort,
+} from "../../../src/core/analog-transmission.js"
 import type {
 	LiveAudioLevel,
 	LiveDemodConfig,
 	LiveDemodStatus,
 } from "../../../src/core/live-demodulator.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
+import { dtmfString, sine } from "./audio-tones/synth.js"
 
 class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 	running = true
@@ -22,6 +26,8 @@ class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 	squelch = -40
 	squelchMode: "manual" | "auto" = "manual"
 	sourceId = "rtl0"
+	/** When set, config events omit sourceId while status keeps `sourceId`. */
+	omitConfiguredSourceId = false
 	modulation: LiveDemodConfig["modulation"] = "nfm"
 	bandwidth = 12_500
 	offsetHz = 0
@@ -56,7 +62,7 @@ class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 	demodConfig(): LiveDemodConfig {
 		return {
 			enabled: true,
-			sourceId: this.sourceId,
+			...(this.omitConfiguredSourceId ? {} : { sourceId: this.sourceId }),
 			httpPort: 8081,
 			modulation: this.modulation,
 			bandwidth: this.bandwidth,
@@ -113,7 +119,10 @@ class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 	}
 }
 
-function harness(options?: { maxDurationMs?: number }) {
+function harness(options?: {
+	maxDurationMs?: number
+	createToneDetector?: () => ToneDetectorPort
+}) {
 	const source = new FakeSource()
 	let now = 1_700_000_000_000
 	let seq = 0
@@ -134,6 +143,9 @@ function harness(options?: { maxDurationMs?: number }) {
 		...(options?.maxDurationMs === undefined
 			? {}
 			: { maxDurationMs: options.maxDurationMs }),
+		...(options?.createToneDetector === undefined
+			? {}
+			: { createToneDetector: options.createToneDetector }),
 	})
 	tracker.on("transmission", event => {
 		events.push(event)
@@ -428,5 +440,247 @@ describe("analog transmission tracker", () => {
 		source.level(-5)
 		expect(first?.peakChannelPowerDbfs).toBeNull()
 		expect(tracker.current()?.peakChannelPowerDbfs).toBe(-5)
+	})
+
+	it("holds one pcm listener only while a transmission is open", () => {
+		const { source, tracker } = harness()
+		expect(source.listenerCount("pcm")).toBe(0)
+		source.gate(true)
+		expect(source.listenerCount("pcm")).toBe(1)
+		source.gate(false)
+		expect(source.listenerCount("pcm")).toBe(0)
+		source.gate(true)
+		expect(source.listenerCount("pcm")).toBe(1)
+		tracker.stop()
+		expect(source.listenerCount("pcm")).toBe(0)
+		expect(tracker.toneErrors()).toBe(0)
+	})
+
+	it("puts tone on the closed event only, and nulls CTCSS under 750 ms", () => {
+		const { source, events } = harness({
+			createToneDetector: () => ({
+				push() {},
+				result: () => ({ ctcssHz: 100, dtmf: "5" }),
+				reset() {},
+			}),
+		})
+		source.gate(true)
+		source.emit("pcm", Buffer.alloc(2), { rate: 8_000, format: "s16le" })
+		source.gate(false)
+		expect(events[0]).not.toHaveProperty("tone")
+		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: "5" })
+		expect(toActivityPayload(events[1]!).tone).toEqual({
+			ctcssHz: null,
+			dtmf: "5",
+		})
+
+		const held = harness({
+			createToneDetector: () => ({
+				push() {},
+				result: () => ({ ctcssHz: 100, dtmf: "5" }),
+				reset() {},
+			}),
+		})
+		held.source.gate(true)
+		// 6000 samples at 8 kHz is exactly 750 ms.
+		held.source.emit("pcm", Buffer.alloc(12_000), {
+			rate: 8_000,
+			format: "s16le",
+		})
+		held.source.gate(false)
+		expect(held.events[1]?.tone).toEqual({ ctcssHz: 100, dtmf: "5" })
+	})
+
+	it("keeps detecting across an odd s16le split and a close on the remainder", () => {
+		const { source, events } = harness()
+		const tone = sine({
+			hz: 100,
+			seconds: 1,
+			rate: 8_000,
+			amplitude: 0.4,
+			format: "s16le",
+		})
+		source.gate(true)
+		source.emit("pcm", tone.pcm.subarray(0, 3), {
+			rate: tone.rate,
+			format: tone.format,
+		})
+		source.emit("pcm", tone.pcm.subarray(3), {
+			rate: tone.rate,
+			format: tone.format,
+		})
+		source.gate(false)
+		expect(events[0]).not.toHaveProperty("tone")
+		expect(events[1]?.tone).toEqual({ ctcssHz: 100, dtmf: null })
+		expect(toActivityPayload(events[1]!).tone).toEqual({
+			ctcssHz: 100,
+			dtmf: null,
+		})
+		expect(source.listenerCount("pcm")).toBe(0)
+
+		const mid = harness()
+		mid.source.gate(true)
+		mid.source.emit("pcm", Buffer.from([1, 2, 3]), {
+			rate: 8_000,
+			format: "s16le",
+		})
+		mid.source.gate(false)
+		expect(mid.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(mid.source.listenerCount("pcm")).toBe(0)
+	})
+
+	it("reports DTMF from pcm and leaves CTCSS null on a short burst", () => {
+		const { source, events } = harness()
+		const tone = dtmfString({
+			symbols: "5",
+			rate: 8_000,
+			onSeconds: 0.08,
+			offSeconds: 0.05,
+			amplitude: 0.25,
+			format: "s16le",
+		})
+		source.gate(true)
+		source.emit("pcm", tone.pcm, { rate: tone.rate, format: tone.format })
+		source.gate(false)
+		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: "5" })
+	})
+
+	it("survives a throwing detector, a throwing factory, and NaN samples", () => {
+		let pushes = 0
+		const throwing = harness({
+			createToneDetector: () => ({
+				push() {
+					pushes += 1
+					throw new Error("bad sample")
+				},
+				result: () => ({ ctcssHz: 123, dtmf: "9" }),
+				reset() {},
+			}),
+		})
+		throwing.source.gate(true)
+		const format = { rate: 8_000, format: "s16le" as const }
+		expect(() =>
+			throwing.source.emit("pcm", Buffer.alloc(4), format),
+		).not.toThrow()
+		expect(() =>
+			throwing.source.emit("pcm", Buffer.alloc(4), format),
+		).not.toThrow()
+		throwing.source.gate(false)
+		expect(pushes).toBe(1)
+		expect(throwing.tracker.toneErrors()).toBe(1)
+		expect(throwing.events.map(event => event.state)).toEqual([
+			"open",
+			"closed",
+		])
+		expect(throwing.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(throwing.source.listenerCount("pcm")).toBe(0)
+
+		const factory = harness({
+			createToneDetector: () => {
+				throw new Error("alloc")
+			},
+		})
+		factory.source.gate(true)
+		factory.source.emit("pcm", Buffer.alloc(4), format)
+		factory.source.gate(false)
+		expect(factory.tracker.toneErrors()).toBe(1)
+		expect(factory.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+
+		const result = harness({
+			createToneDetector: () => ({
+				push() {},
+				result() {
+					throw new Error("result")
+				},
+				reset() {},
+			}),
+		})
+		result.source.gate(true)
+		result.source.emit("pcm", Buffer.alloc(4), format)
+		result.source.gate(false)
+		expect(result.tracker.toneErrors()).toBe(1)
+		expect(result.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+
+		const nan = harness()
+		const samples = Buffer.alloc(16)
+		samples.writeFloatLE(Number.NaN, 0)
+		nan.source.gate(true)
+		expect(() =>
+			nan.source.emit("pcm", samples, { rate: 8_000, format: "f32le" }),
+		).not.toThrow()
+		nan.source.gate(false)
+		expect(nan.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(nan.tracker.toneErrors()).toBe(0)
+	})
+
+	it("closes a stop during an open odd chunk and drops the pcm listener", () => {
+		const { source, tracker, events } = harness()
+		source.gate(true)
+		source.emit("pcm", Buffer.from([1, 2, 3]), {
+			rate: 8_000,
+			format: "s16le",
+		})
+		tracker.stop()
+		expect(events[1]).toMatchObject({ closeReason: "stopped" })
+		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(source.listenerCount("pcm")).toBe(0)
+		expect(() =>
+			source.emit("pcm", Buffer.alloc(4), { rate: 8_000, format: "s16le" }),
+		).not.toThrow()
+		expect(events).toHaveLength(2)
+	})
+
+	it("closes from inside a pcm push without leaking the listener", () => {
+		const { source, events } = harness({
+			createToneDetector: () => ({
+				push() {
+					source.gate(false)
+				},
+				result: () => ({ ctcssHz: null, dtmf: null }),
+				reset() {},
+			}),
+		})
+		source.gate(true)
+		expect(() =>
+			source.emit("pcm", Buffer.alloc(4), { rate: 8_000, format: "s16le" }),
+		).not.toThrow()
+		expect(events.map(event => event.state)).toEqual(["open", "closed"])
+		expect(events[1]?.closeReason).toBe("squelch")
+		expect(source.listenerCount("pcm")).toBe(0)
+	})
+
+	it("treats an omitted sourceId as the open status source", () => {
+		const same = harness()
+		same.source.omitConfiguredSourceId = true
+		same.source.gate(true)
+		same.source.omitConfiguredSourceId = false
+		same.source.reconfigure({})
+		expect(same.events).toHaveLength(1)
+		expect(same.tracker.current()?.transmissionId).toBe("tx-1")
+
+		const reverse = harness()
+		reverse.source.gate(true)
+		reverse.source.omitConfiguredSourceId = true
+		reverse.source.reconfigure({})
+		expect(reverse.events).toHaveLength(1)
+		expect(reverse.tracker.current()?.transmissionId).toBe("tx-1")
+
+		const changed = harness()
+		changed.source.omitConfiguredSourceId = true
+		changed.source.gate(true)
+		changed.source.omitConfiguredSourceId = false
+		changed.source.reconfigure({ sourceId: "rtl1" })
+		expect(changed.events[1]?.closeReason).toBe("config")
+		expect(changed.source.listenerCount("pcm")).toBe(0)
+		expect(changed.tracker.current()).toBeNull()
+
+		const moved = harness()
+		moved.source.sourceId = "rtl1"
+		moved.source.gate(true)
+		moved.source.omitConfiguredSourceId = true
+		moved.source.sourceId = "rtl0"
+		moved.source.reconfigure({})
+		expect(moved.events[1]?.closeReason).toBe("config")
+		expect(moved.tracker.current()).toBeNull()
 	})
 })

@@ -1,3 +1,5 @@
+import { isCtcssToneHz } from "../../audio-tones/ctcss.js"
+import { isDtmfDigitString } from "../../audio-tones/dtmf.js"
 import { WaveKitError } from "../../../utils/errors.js"
 import {
 	ACTIVITY_RECORD_VERSION,
@@ -314,6 +316,21 @@ function transmissionRow(
 			unit: "dBFS",
 		})
 	}
+	if (payload.tone?.ctcssHz != null) {
+		fields.push({
+			key: "ctcssHz",
+			label: "CTCSS",
+			value: payload.tone.ctcssHz,
+			unit: "Hz",
+		})
+	}
+	if (payload.tone?.dtmf != null) {
+		fields.push({
+			key: "dtmf",
+			label: "DTMF",
+			value: payload.tone.dtmf,
+		})
+	}
 	const summaryJson = fitTransmissionSummary({
 		eventId: record.eventId,
 		kind: "analog-transmission",
@@ -330,6 +347,9 @@ function transmissionRow(
 	})
 	const ftsParts = ["analog-transmission", payload.modulation, payload.sourceId]
 	if (frequencyHz !== null) ftsParts.push(String(frequencyHz))
+	if (payload.tone?.ctcssHz != null)
+		ftsParts.push(`CTCSS ${payload.tone.ctcssHz}`)
+	if (payload.tone?.dtmf != null) ftsParts.push(payload.tone.dtmf)
 	return {
 		eventId: record.eventId,
 		kind: "analog-transmission",
@@ -384,6 +404,14 @@ function storedTransmission(
 		peakChannelPowerDbfs: payload.peakChannelPowerDbfs,
 		meanChannelPowerDbfs: payload.meanChannelPowerDbfs,
 		closeReason: payload.closeReason,
+		...(payload.tone === undefined
+			? {}
+			: {
+					tone: {
+						ctcssHz: payload.tone.ctcssHz,
+						dtmf: payload.tone.dtmf,
+					},
+				}),
 	}
 }
 
@@ -783,9 +811,32 @@ function isTransmissionFrequency(
 	return trust === "commanded" || trust === "relay" || trust === "unverified"
 }
 
+function isTone(value: unknown): boolean {
+	const body = plain(value)
+	if (!body || !sameKeys(body, ["ctcssHz", "dtmf"])) return false
+	const hz = body["ctcssHz"]
+	if (hz !== null && (typeof hz !== "number" || !isCtcssToneHz(hz)))
+		return false
+	const dtmf = body["dtmf"]
+	if (dtmf !== null && (typeof dtmf !== "string" || !isDtmfDigitString(dtmf)))
+		return false
+	return true
+}
+
+/** Exactly the WG1 keys, or those keys plus a valid `tone`. */
+function transmissionKeysOk(body: Record<string, unknown>): boolean {
+	const present = Object.keys(body)
+	const withTone = present.includes("tone")
+	if (withTone) {
+		if (present.length !== TRANSMISSION_KEYS.length + 1) return false
+		if (!isTone(body["tone"])) return false
+	} else if (present.length !== TRANSMISSION_KEYS.length) return false
+	return TRANSMISSION_KEYS.every(key => present.includes(key))
+}
+
 function isTransmission(value: unknown): value is AnalogTransmissionPayload {
 	const body = plain(value)
-	if (!body || !sameKeys(body, TRANSMISSION_KEYS)) return false
+	if (!body || !transmissionKeysOk(body)) return false
 	if (
 		typeof body["transmissionId"] !== "string" ||
 		body["transmissionId"].length === 0 ||

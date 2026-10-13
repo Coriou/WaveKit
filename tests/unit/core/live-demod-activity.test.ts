@@ -140,5 +140,32 @@ describe("live demod transmission gating", () => {
 				},
 			),
 		).toBe(false)
+		expect(
+			liveDemodTransmissionConfigChanged(
+				{ modulation: "nfm", bandwidth: 12_500 },
+				{ modulation: "nfm", bandwidth: 12_500, sourceId: "rtl0" },
+				"rtl0",
+			),
+		).toBe(false)
+		expect(
+			liveDemodTransmissionConfigChanged(
+				{ modulation: "nfm", bandwidth: 12_500, sourceId: "rtl0" },
+				{ modulation: "nfm", bandwidth: 12_500 },
+				"rtl0",
+			),
+		).toBe(false)
+		expect(
+			liveDemodTransmissionConfigChanged(
+				{ modulation: "nfm", bandwidth: 12_500 },
+				{ modulation: "nfm", bandwidth: 12_500, sourceId: "rtl1" },
+				"rtl0",
+			),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(
+				{ modulation: "nfm", bandwidth: 12_500 },
+				{ modulation: "nfm", bandwidth: 12_500, sourceId: "rtl0" },
+			),
+		).toBe(true)
 	})
 })
