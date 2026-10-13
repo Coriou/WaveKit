@@ -74,7 +74,9 @@ import { ApiServer } from "./api/server.js"
 import { startActivityRuntime } from "./core/activity/runtime.js"
 import { OperatorDataService } from "./operator-data/service.js"
 import { openBandPlanService } from "./core/bandplans/index.js"
+import type { BandPlansCommitSink } from "./core/bandplans/contract.js"
 import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
+import { createBandPlansCommitSink } from "./api/websocket/bandplans-broadcast-adapter.js"
 import {
 	createDsdFmeDecoder,
 	DSD_FME_CAPS,
@@ -1118,6 +1120,7 @@ async function main(): Promise<void> {
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
 		const bandPlanLog = createComponentLogger(logger, "BandPlans")
+		let publishBandPlans: BandPlansCommitSink | undefined
 		const bandPlans = await openBandPlanService({
 			stateDir: config.stateDir,
 			context: {
@@ -1125,6 +1128,7 @@ async function main(): Promise<void> {
 				effectiveCountry: config.station.country ?? null,
 			},
 			writable: protectedMode,
+			onCommit: event => publishBandPlans?.(event),
 			onStoreUnavailable: reason => {
 				bandPlanLog.warn({ reason }, "Band-plan store unavailable")
 			},
@@ -1172,6 +1176,9 @@ async function main(): Promise<void> {
 			},
 		)
 
+		publishBandPlans = createBandPlansCommitSink(
+			apiServer.getBandPlansBroadcastPort(),
+		)
 		runtimeApi = apiServer
 		admissionGates.push(() => apiServer.stopAdmission())
 		own(10, () => apiServer.stop())

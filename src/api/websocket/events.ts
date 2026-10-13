@@ -43,6 +43,7 @@ import type {
 	DecoderRemovedEventData,
 	TunerCommandOrigin,
 	OperatorDataReadDto,
+	BandPlansServerMessage,
 } from "@wavekit/api-types"
 
 /**
@@ -58,6 +59,7 @@ import type {
  * - tuner: RTL-TCP tuner control events
  * - scanner: Signal discovery scanner jobs, progress, discoveries, activity, identify, status (rate-limited)
  * - spectrum: core waterfall frames, opt-in; `options.spectrum` on subscribe selects a source and profile
+ * - bandplans: change notice `{storeId, revision}` after a changed commit and on subscribe; clients refetch
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -73,6 +75,7 @@ export type WebSocketChannel =
 	| "scanner"
 	| "spectrum"
 	| "operator-data"
+	| "bandplans"
 
 /**
  * Message sent from client to server. `options` carries per-channel subscribe
@@ -158,7 +161,10 @@ interface OperatorDataServerMessage {
 	data: OperatorDataReadDto
 }
 
-export type ServerMessage = ExistingServerMessage | OperatorDataServerMessage
+export type ServerMessage =
+	| ExistingServerMessage
+	| OperatorDataServerMessage
+	| BandPlansServerMessage
 
 /**
  * Internal client state tracking subscriptions.
@@ -198,7 +204,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "aircraft" ||
 		channel === "scanner" ||
 		channel === "spectrum" ||
-		channel === "operator-data"
+		channel === "operator-data" ||
+		channel === "bandplans"
 	)
 }
 

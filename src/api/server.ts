@@ -83,9 +83,16 @@ import type { OperatorDataService } from "../operator-data/service.js"
 import { operatorDataRoutes } from "../operator-data/routes.js"
 import { sendOperatorDataSnapshot } from "../operator-data/broadcast-adapter.js"
 import type { OperatorDataBroadcastPort } from "../operator-data/broadcast-adapter.js"
+import {
+	createBandPlansBroadcastPort,
+	sendBandPlansSnapshot,
+} from "./websocket/bandplans-broadcast-adapter.js"
 import { regionalRoutes } from "./routes/regional.js"
 import { bandPlanRoutes } from "./routes/bandplans.js"
-import type { BandPlanService } from "../core/bandplans/contract.js"
+import type {
+	BandPlanService,
+	BandPlansBroadcastPort,
+} from "../core/bandplans/contract.js"
 import { receiverCapabilitiesRoutes } from "./routes/receiver-capabilities.js"
 import type { RegionalRegistry } from "../core/regional/registry.js"
 import type { ReceiverCapabilitiesProvider } from "../core/tuner-capabilities/types.js"
@@ -186,6 +193,7 @@ export class ApiServer {
 	private operatorRestRegistered = false
 	private operatorData: OperatorDataService | undefined
 	private operatorObserver: (() => void) | undefined
+	private bandPlansObserver: (() => void) | undefined
 	private operatorCloseResult: Promise<void> | undefined
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
 	private scannerLimiter: WsLimiter<ServerMessage> | null = null
@@ -230,6 +238,23 @@ export class ApiServer {
 
 		// Create WebSocket broadcaster
 		this.wsBroadcaster = new WebSocketEventBroadcaster(dependencies.logger)
+		this.bandPlansObserver = this.wsBroadcaster.observeChannel("bandplans", {
+			subscribed: clientId => {
+				try {
+					const outcome = sendBandPlansSnapshot(
+						this.bandPlans,
+						this.getBandPlansBroadcastPort(),
+						clientId,
+					)
+					if (outcome === "rejected")
+						this.wsBroadcaster.invalidateClient(clientId)
+				} catch {
+					this.log.warn("Band-plan snapshot unavailable")
+					this.wsBroadcaster.invalidateClient(clientId)
+				}
+			},
+			unsubscribed: () => {},
+		})
 		const activity = dependencies.activity
 		const activityUnavailable =
 			activity?.status === "unavailable" ? activity.unavailable : undefined
@@ -394,6 +419,14 @@ export class ApiServer {
 		}
 	}
 
+	/** Change notices on `bandplans` in both access modes. */
+	getBandPlansBroadcastPort(): BandPlansBroadcastPort {
+		return createBandPlansBroadcastPort(this.wsBroadcaster, () => {
+			this.log.warn("Band-plan publication unavailable")
+			this.wsBroadcaster.invalidateChannelClients("bandplans")
+		})
+	}
+
 	/** Mapping can fail before the port is called; the initial sink owns this fallback. */
 	invalidateOperatorDataPublication(): void {
 		this.log.warn("Operator data publication unavailable")
@@ -496,6 +529,10 @@ export class ApiServer {
 		await attempt(() => {
 			this.operatorObserver?.()
 			this.operatorObserver = undefined
+		})
+		await attempt(() => {
+			this.bandPlansObserver?.()
+			this.bandPlansObserver = undefined
 		})
 		await attempt(() => {
 			this.accessController?.dispose()
