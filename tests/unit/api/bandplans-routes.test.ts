@@ -1,7 +1,10 @@
 import Fastify from "fastify"
 import type { FastifyInstance, FastifyRequest } from "fastify"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { BANDPLANS_ERROR_DEFINITIONS, BANDPLANS_LIMITS } from "@wavekit/api-types"
+import {
+	BANDPLANS_ERROR_DEFINITIONS,
+	BANDPLANS_LIMITS,
+} from "@wavekit/api-types"
 import type {
 	BandPlanPackView,
 	BandPlansErrorCode,
@@ -277,19 +280,91 @@ describe("band-plan routes", () => {
 		const writes: ReadonlyArray<
 			readonly [HttpMethod, string, object, 200 | 201, string]
 		> = [
-			["PUT", "/api/bandplans/stack", { expected: token, entries: [{ packId: "builtin-eu", enabled: true }] }, 200, "set-stack"],
-			["DELETE", "/api/bandplans/stack", { expected: token }, 200, "reset-stack"],
-			["PATCH", "/api/bandplans/packs/builtin-eu/bands/airband/edit", { expected: token, set: { name: "Tower" } }, 200, "patch-band-edit"],
-			["DELETE", "/api/bandplans/packs/builtin-eu/bands/airband/edit", { expected: token }, 200, "reset-band-edits"],
-			["DELETE", "/api/bandplans/packs/builtin-eu/edits", { expected: token }, 200, "reset-pack-edits"],
-			["DELETE", `/api/bandplans/packs/${importedId}`, { expected: token }, 200, "delete-pack"],
-			["POST", "/api/bandplans/operator-bands", { expected: token, band }, 201, "create-operator-band"],
-			["PUT", `/api/bandplans/operator-bands/${operatorBandId}`, { expected: token, band }, 200, "replace-operator-band"],
-			["DELETE", `/api/bandplans/operator-bands/${operatorBandId}`, { expected: token }, 200, "delete-operator-band"],
+			[
+				"PUT",
+				"/api/bandplans/stack",
+				{ expected: token, entries: [{ packId: "builtin-eu", enabled: true }] },
+				200,
+				"set-stack",
+			],
+			[
+				"DELETE",
+				"/api/bandplans/stack",
+				{ expected: token },
+				200,
+				"reset-stack",
+			],
+			[
+				"PATCH",
+				"/api/bandplans/packs/builtin-eu/bands/airband/edit",
+				{ expected: token, set: { name: "Tower" } },
+				200,
+				"patch-band-edit",
+			],
+			[
+				"DELETE",
+				"/api/bandplans/packs/builtin-eu/bands/airband/edit",
+				{ expected: token },
+				200,
+				"reset-band-edits",
+			],
+			[
+				"DELETE",
+				"/api/bandplans/packs/builtin-eu/edits",
+				{ expected: token },
+				200,
+				"reset-pack-edits",
+			],
+			[
+				"DELETE",
+				`/api/bandplans/packs/${importedId}`,
+				{ expected: token },
+				200,
+				"delete-pack",
+			],
+			[
+				"POST",
+				"/api/bandplans/operator-bands",
+				{ expected: token, band },
+				201,
+				"create-operator-band",
+			],
+			[
+				"PUT",
+				`/api/bandplans/operator-bands/${operatorBandId}`,
+				{ expected: token, band },
+				200,
+				"replace-operator-band",
+			],
+			[
+				"DELETE",
+				`/api/bandplans/operator-bands/${operatorBandId}`,
+				{ expected: token },
+				200,
+				"delete-operator-band",
+			],
 			["POST", "/api/bandplans/imports", commitBody, 201, "commit-import"],
-			["POST", "/api/bandplans/presets", { expected: token, preset: presetBody }, 201, "create-preset"],
-			["PUT", `/api/bandplans/presets/${presetId}`, { expected: token, preset: presetBody }, 200, "replace-preset"],
-			["DELETE", `/api/bandplans/presets/${presetId}`, { expected: token }, 200, "delete-preset"],
+			[
+				"POST",
+				"/api/bandplans/presets",
+				{ expected: token, preset: presetBody },
+				201,
+				"create-preset",
+			],
+			[
+				"PUT",
+				`/api/bandplans/presets/${presetId}`,
+				{ expected: token, preset: presetBody },
+				200,
+				"replace-preset",
+			],
+			[
+				"DELETE",
+				`/api/bandplans/presets/${presetId}`,
+				{ expected: token },
+				200,
+				"delete-preset",
+			],
 		]
 		for (const [method, url, payload, status, type] of writes) {
 			service.mutate.mockClear()
@@ -299,10 +374,9 @@ describe("band-plan routes", () => {
 				view: stackView,
 				createdId: writeResult.createdId,
 			})
-			expect(Object.keys(response.json<Record<string, unknown>>()).sort()).toEqual([
-				"createdId",
-				"view",
-			])
+			expect(
+				Object.keys(response.json<Record<string, unknown>>()).sort(),
+			).toEqual(["createdId", "view"])
 			expect(service.mutate).toHaveBeenCalledOnce()
 			expect(service.mutate.mock.calls[0]?.[0]).toMatchObject({ type })
 		}
@@ -348,21 +422,75 @@ describe("band-plan routes", () => {
 		const cases: ReadonlyArray<
 			readonly [HttpMethod, string, object | undefined]
 		> = [
-			["PUT", "/api/bandplans/stack", { expected: token, entries: [], extra: true }],
+			[
+				"PUT",
+				"/api/bandplans/stack",
+				{ expected: token, entries: [], extra: true },
+			],
 			["PUT", "/api/bandplans/stack", []],
-			["PUT", "/api/bandplans/stack", { entries: [{ packId: "builtin-eu", enabled: true }], expected: null }],
-			["DELETE", `/api/bandplans/packs/${importedId}`, { expected: token, packId: importedId }],
-			["PATCH", "/api/bandplans/packs/builtin-eu/bands/airband/edit", { expected: token }],
-			["PATCH", "/api/bandplans/packs/builtin-eu/bands/airband/edit", { expected: token, set: { name: "Tower" }, reset: ["name"] }],
-			["PATCH", "/api/bandplans/packs/builtin-eu/bands/Airband/edit", { expected: token, set: { name: "Tower" } }],
-			["PATCH", "/api/bandplans/packs/nope/bands/airband/edit", { expected: token, set: { name: "Tower" } }],
-			["DELETE", "/api/bandplans/packs/imported-ZZZZZZZZZZZZ", { expected: token }],
+			[
+				"PUT",
+				"/api/bandplans/stack",
+				{ entries: [{ packId: "builtin-eu", enabled: true }], expected: null },
+			],
+			[
+				"DELETE",
+				`/api/bandplans/packs/${importedId}`,
+				{ expected: token, packId: importedId },
+			],
+			[
+				"PATCH",
+				"/api/bandplans/packs/builtin-eu/bands/airband/edit",
+				{ expected: token },
+			],
+			[
+				"PATCH",
+				"/api/bandplans/packs/builtin-eu/bands/airband/edit",
+				{ expected: token, set: { name: "Tower" }, reset: ["name"] },
+			],
+			[
+				"PATCH",
+				"/api/bandplans/packs/builtin-eu/bands/Airband/edit",
+				{ expected: token, set: { name: "Tower" } },
+			],
+			[
+				"PATCH",
+				"/api/bandplans/packs/nope/bands/airband/edit",
+				{ expected: token, set: { name: "Tower" } },
+			],
+			[
+				"DELETE",
+				"/api/bandplans/packs/imported-ZZZZZZZZZZZZ",
+				{ expected: token },
+			],
 			["DELETE", "/api/bandplans/packs/operator", { expected: token }],
 			["PUT", `/api/bandplans/operator-bands/Bad`, { expected: token, band }],
-			["POST", "/api/bandplans/imports/preview", { ...previewBody, expected: token }],
-			["POST", "/api/bandplans/imports/preview", { ...previewBody, groupOverrides: [{ sourceType: "a", group: "air" }, { sourceType: "a", group: "marine" }] }],
-			["PUT", `/api/bandplans/presets/${presetId.toUpperCase()}`, { expected: token, preset: presetBody }],
-			["PUT", "/api/bandplans/presets/not-a-uuid", { expected: token, preset: presetBody }],
+			[
+				"POST",
+				"/api/bandplans/imports/preview",
+				{ ...previewBody, expected: token },
+			],
+			[
+				"POST",
+				"/api/bandplans/imports/preview",
+				{
+					...previewBody,
+					groupOverrides: [
+						{ sourceType: "a", group: "air" },
+						{ sourceType: "a", group: "marine" },
+					],
+				},
+			],
+			[
+				"PUT",
+				`/api/bandplans/presets/${presetId.toUpperCase()}`,
+				{ expected: token, preset: presetBody },
+			],
+			[
+				"PUT",
+				"/api/bandplans/presets/not-a-uuid",
+				{ expected: token, preset: presetBody },
+			],
 			["GET", "/api/bandplans/packs/Nope", undefined],
 			["GET", "/api/bandplans/packs/builtin-nope", undefined],
 			["GET", "/api/bandplans/presets/not-a-preset/job", undefined],
@@ -379,6 +507,28 @@ describe("band-plan routes", () => {
 		expect(service.pack).not.toHaveBeenCalled()
 		expect(service.presetJob).not.toHaveBeenCalled()
 		expect(service.previewImport).not.toHaveBeenCalled()
+	})
+
+	it("rejects previewSha256 as an unknown key", async () => {
+		const service = createService()
+		const authorize = vi.fn(() => undefined)
+		const app = await server(service, authorize)
+		const digest = "ab".repeat(32)
+		const cases = [
+			[
+				"/api/bandplans/imports/preview",
+				{ ...previewBody, previewSha256: digest },
+			],
+			["/api/bandplans/imports", { ...commitBody, previewSha256: digest }],
+		] as const
+		for (const [url, payload] of cases) {
+			const response = await app.inject({ method: "POST", url, payload })
+			expect(response.statusCode, url).toBe(400)
+			expect(errorBody(response).code).toBe("BANDPLANS_INVALID")
+		}
+		expect(authorize).not.toHaveBeenCalled()
+		expect(service.previewImport).not.toHaveBeenCalled()
+		expect(service.mutate).not.toHaveBeenCalled()
 	})
 
 	it("returns read-only for builtin write ids before body validation", async () => {
@@ -426,7 +576,11 @@ describe("band-plan routes", () => {
 	})
 
 	it.each([
-		["PUT", "/api/bandplans/stack", { entries: [{ packId: "builtin-eu", enabled: true }] }],
+		[
+			"PUT",
+			"/api/bandplans/stack",
+			{ entries: [{ packId: "builtin-eu", enabled: true }] },
+		],
 		["POST", "/api/bandplans/presets", { preset: presetBody }],
 		["POST", "/api/bandplans/imports", { ...commitBody, expected: undefined }],
 		["DELETE", `/api/bandplans/packs/${importedId}`, {}],
@@ -455,10 +609,17 @@ describe("band-plan routes", () => {
 			throw thrown
 		})
 		const app = await server(service, () => undefined)
-		for (const code of Object.keys(BANDPLANS_ERROR_DEFINITIONS) as BandPlansErrorCode[]) {
+		for (const code of Object.keys(
+			BANDPLANS_ERROR_DEFINITIONS,
+		) as BandPlansErrorCode[]) {
 			thrown = new BandPlansError(code)
-			const response = await app.inject({ method: "GET", url: "/api/bandplans" })
-			expect(response.statusCode, code).toBe(BANDPLANS_ERROR_DEFINITIONS[code][0])
+			const response = await app.inject({
+				method: "GET",
+				url: "/api/bandplans",
+			})
+			expect(response.statusCode, code).toBe(
+				BANDPLANS_ERROR_DEFINITIONS[code][0],
+			)
 			expect(response.json()).toEqual({
 				error: "BandPlansError",
 				code,

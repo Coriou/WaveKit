@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import type { Dirent } from "node:fs"
-import { lstat, mkdir, open, readdir, rename, rmdir, unlink } from "node:fs/promises"
+import {
+	lstat,
+	mkdir,
+	open,
+	readdir,
+	rename,
+	rmdir,
+	unlink,
+} from "node:fs/promises"
 import type { FileHandle } from "node:fs/promises"
 import { isAbsolute, join } from "node:path"
 import { BANDPLANS_LIMITS, bandPlanStateSchema } from "@wavekit/api-types"
@@ -43,8 +51,8 @@ export interface BandPlanStorageOptions {
 }
 
 /**
- * storeId served when a read-only open finds no state.json.
- * AvailableBandPlanStore requires a storeId, and nothing is written.
+ * Internal storeId when a read-only open finds no state.json.
+ * Nothing is written. Views report `storeId: null`; this id is not served.
  * A later writable open mints a new id and persists it.
  */
 export const BANDPLAN_READ_ONLY_EMPTY_STORE_ID =
@@ -157,6 +165,8 @@ export class BandPlanStorage {
 	private unsafeIO = false
 	private available = false
 	private closing = false
+	/** True only after state.json has been read or written. The read-only empty state stays false. */
+	private durable = false
 	private current: BandPlanState | undefined
 	private active: Promise<void> | undefined
 	private closeResult: Promise<void> | undefined
@@ -181,9 +191,12 @@ export class BandPlanStorage {
 	isAvailable(): boolean {
 		return this.available && !this.closing
 	}
+	/** False iff this open is the never-persisted read-only empty state. */
+	persisted(): boolean {
+		return this.isAvailable() && this.durable
+	}
 	snapshot(): BandPlanState {
-		if (!this.isAvailable() || !this.current)
-			throw new StorageUnavailable("io")
+		if (!this.isAvailable() || !this.current) throw new StorageUnavailable("io")
 		return validateBandPlanState(this.current)
 	}
 	persist(state: BandPlanState): Promise<void> {
@@ -201,6 +214,7 @@ export class BandPlanStorage {
 		}
 		const operation = this.write(encoded).then(() => {
 			this.current = next
+			this.durable = true
 		})
 		this.active = operation
 		// Clear before the returned promise settles; close still awaits accepted I/O.
@@ -310,8 +324,7 @@ export class BandPlanStorage {
 			throw new StorageUnavailable("permissions")
 	}
 	private async initialize(): Promise<void> {
-		if (!isAbsolute(this.options.stateDir))
-			throw new StorageUnavailable("io")
+		if (!isAbsolute(this.options.stateDir)) throw new StorageUnavailable("io")
 		if (process.getuid === undefined)
 			throw new StorageUnavailable("permissions")
 		if (!this.writable) {
@@ -327,6 +340,7 @@ export class BandPlanStorage {
 		} catch (error) {
 			if (missing(error)) {
 				this.current = createEmptyState(BANDPLAN_READ_ONLY_EMPTY_STORE_ID)
+				this.durable = false
 				return
 			}
 			throw error
@@ -338,6 +352,7 @@ export class BandPlanStorage {
 		} catch (error) {
 			if (missing(error)) {
 				this.current = createEmptyState(BANDPLAN_READ_ONLY_EMPTY_STORE_ID)
+				this.durable = false
 				return
 			}
 			throw error
@@ -393,8 +408,7 @@ export class BandPlanStorage {
 			try {
 				await mkdir(this.lock, { mode: 0o700 })
 			} catch (error) {
-				if (errno(error) === "EEXIST")
-					throw new StorageUnavailable("lock-held")
+				if (errno(error) === "EEXIST") throw new StorageUnavailable("lock-held")
 				throw error
 			}
 			this.ownsLock = true
@@ -411,6 +425,7 @@ export class BandPlanStorage {
 			const empty = createEmptyState(randomUUID())
 			await this.write(JSON.stringify(empty))
 			this.current = empty
+			this.durable = true
 			return
 		}
 		try {
@@ -442,6 +457,7 @@ export class BandPlanStorage {
 		if (length > BANDPLANS_LIMITS.stateBytes)
 			throw new StorageUnavailable("oversized")
 		this.current = this.parseState(bytes.subarray(0, length))
+		this.durable = true
 	}
 	private parseState(bytes: Uint8Array): BandPlanState {
 		let text: string

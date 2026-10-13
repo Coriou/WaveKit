@@ -116,7 +116,8 @@ async function setup(protectedMode: boolean) {
 type Env = Awaited<ReturnType<typeof setup>>
 
 function setStackBody(view: BandPlanStackView) {
-	if (view.store.state !== "available") throw new Error("store unavailable")
+	if (view.store.state !== "available" || view.store.storeId === null)
+		throw new Error("store unavailable")
 	return {
 		expected: { storeId: view.store.storeId, revision: view.store.revision },
 		entries: view.stack.entries.map((entry, index) => ({
@@ -138,7 +139,11 @@ describe("band-plan routes mounted by ApiServer", () => {
 		const view = await readView(env, env.anonymous)
 		expect(view.capabilities.writable).toBe(false)
 		expect(view.context).toEqual({ region: "EU", effectiveCountry: null })
-		expect(view.store.state).toBe("available")
+		expect(view.store).toEqual({
+			state: "available",
+			storeId: null,
+			revision: 0,
+		})
 		for (const url of ["/api/bandplans/resolved", "/api/bandplans/presets"]) {
 			const response = await env.app.inject({ url, headers: env.anonymous })
 			expect(response.statusCode).toBe(200)
@@ -147,17 +152,25 @@ describe("band-plan routes mounted by ApiServer", () => {
 		await expect(stat(join(env.stateDir, "bandplans"))).rejects.toMatchObject({
 			code: "ENOENT",
 		})
+		const inertExpected = {
+			storeId: "00000000-0000-4000-8000-000000000001",
+			revision: 0,
+		}
 		const writes = [
-			{ method: "PUT", url: "/api/bandplans/stack", body: setStackBody(view) },
+			{
+				method: "PUT",
+				url: "/api/bandplans/stack",
+				body: { expected: inertExpected, entries: [] },
+			},
 			{
 				method: "DELETE",
 				url: "/api/bandplans/stack",
-				body: { expected: setStackBody(view).expected },
+				body: { expected: inertExpected },
 			},
 			{
 				method: "POST",
 				url: "/api/bandplans/presets",
-				body: { expected: setStackBody(view).expected, preset: {} },
+				body: { expected: inertExpected, preset: {} },
 			},
 		] as const
 		for (const write of writes) {
@@ -197,6 +210,9 @@ describe("band-plan routes mounted by ApiServer", () => {
 
 		const view = await readView(env, env.authorized)
 		expect(view.capabilities.writable).toBe(true)
+		expect(view.store.state).toBe("available")
+		if (view.store.state === "available")
+			expect(view.store.storeId).toEqual(expect.any(String))
 		const before = await readFile(env.storeFile, "utf8")
 		const anonymousWrite = await env.app.inject({
 			method: "PUT",
@@ -230,10 +246,18 @@ describe("band-plan routes mounted by ApiServer", () => {
 			const env = await setup(protectedMode)
 			const view = env.service.view()
 			await env.server.stop()
+			const expected =
+				view.store.state === "available" && view.store.storeId !== null
+					? { storeId: view.store.storeId, revision: view.store.revision }
+					: {
+							storeId: "00000000-0000-4000-8000-000000000001",
+							revision:
+								view.store.state === "available" ? view.store.revision : 0,
+						}
 			await expect(
 				env.service.mutate({
 					type: "reset-stack",
-					expected: setStackBody(view).expected,
+					expected,
 				}),
 			).rejects.toMatchObject({ code: "BANDPLANS_UNAVAILABLE" })
 			expect(env.service.view().store).toEqual({ state: "unavailable" })

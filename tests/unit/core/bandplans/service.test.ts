@@ -36,7 +36,10 @@ import {
 } from "vitest"
 import { mountFastTemp } from "../../../helpers/bandplans/temp-volume.js"
 import type { FastTemp } from "../../../helpers/bandplans/temp-volume.js"
-import { transition as domainTransition } from "../../../../src/core/bandplans/domain.js"
+import {
+	previewDigestFor,
+	transition as domainTransition,
+} from "../../../../src/core/bandplans/domain.js"
 import { BandPlansError } from "../../../../src/core/bandplans/contract.js"
 import type {
 	BandPlanService,
@@ -335,9 +338,28 @@ async function open(
 		context?: BandPlanServiceOptions["context"]
 		writable?: boolean
 		transition?: BandPlanServiceDeps["transition"]
+		parseSdrppBandPlan?: BandPlanServiceDeps["parseSdrppBandPlan"]
+		builtinPresetsFor?: BandPlanServiceDeps["builtinPresetsFor"]
+		presetIssuesFor?: BandPlanServiceDeps["presetIssuesFor"]
+		scannerBandplans?: BandPlanServiceDeps["scannerBandplans"]
 	} = {},
 ) {
 	const harness = makeDeps(extras.transition)
+	const deps: BandPlanServiceDeps = {
+		...harness.deps,
+		...(extras.parseSdrppBandPlan
+			? { parseSdrppBandPlan: extras.parseSdrppBandPlan }
+			: {}),
+		...(extras.builtinPresetsFor
+			? { builtinPresetsFor: extras.builtinPresetsFor }
+			: {}),
+		...(extras.presetIssuesFor
+			? { presetIssuesFor: extras.presetIssuesFor }
+			: {}),
+		...(extras.scannerBandplans
+			? { scannerBandplans: extras.scannerBandplans }
+			: {}),
+	}
 	const service = await createBandPlanService(
 		{
 			stateDir,
@@ -354,7 +376,7 @@ async function open(
 				: {}),
 			...(extras.storageStage ? { storageStage: extras.storageStage } : {}),
 		},
-		harness.deps,
+		deps,
 	)
 	services.push(service)
 	return { service, ...harness }
@@ -436,9 +458,11 @@ describe("band plan service", { timeout: 60_000 }, () => {
 			"utf8",
 		)
 		expect(service).not.toMatch(
-			/from "\.\/(?:resolve|domain|builtin-packs|presets|import\/)/,
+			/from "\.\/(?:resolve|builtin-packs|presets|import\/)/,
 		)
-		expect(service).not.toMatch(/operator-data|scanner/)
+		expect(service).toMatch(/from "\.\/domain\.js"/)
+		expect(service).not.toMatch(/operator-data/)
+		expect(service).not.toMatch(/from ["'][^"']*scanner/)
 		expect(service).not.toMatch(
 			/export (?:async )?function openBandPlanService/,
 		)
@@ -617,9 +641,12 @@ describe("band plan service", { timeout: 60_000 }, () => {
 					expect(preview.sha256).toBe(
 						createHash("sha256").update(bytes).digest("hex"),
 					)
+					expect(preview.previewDigest).toBe(
+						previewDigestFor(preview.sha256, []),
+					)
 					expect(await readFile(stateFile(path))).toEqual(before)
 					const committed = await service.mutate(
-						commitOf(token(service), bytes, preview.sha256),
+						commitOf(token(service), bytes, preview.previewDigest),
 					)
 					expect(committed.changed).toBe(true)
 					expect(committed.createdId).toMatch(/^imported-[0-9a-f]{12}$/)
@@ -628,7 +655,9 @@ describe("band plan service", { timeout: 60_000 }, () => {
 					)
 					const other = Uint8Array.from([...bytes, extra])
 					await expect(
-						service.mutate(commitOf(token(service), other, preview.sha256)),
+						service.mutate(
+							commitOf(token(service), other, preview.previewDigest),
+						),
 					).rejects.toMatchObject({ code: "BANDPLANS_IMPORT_MISMATCH" })
 					expect(service.pack(committed.createdId ?? "").pack.bands).toEqual(
 						preview.bands,
@@ -1050,7 +1079,7 @@ describe("band plan service", { timeout: 60_000 }, () => {
 		expect(invalid).toMatchObject({ code: "BANDPLANS_INVALID" })
 		expect(await readFile(stateFile(path))).toEqual(before)
 		await service.mutate(
-			commitOf(token(service), bytes, preview.sha256, overrides),
+			commitOf(token(service), bytes, preview.previewDigest, overrides),
 		)
 		expect(parses.map(item => item.sourceType)).toEqual([
 			"Aviation",
@@ -1072,13 +1101,24 @@ describe("band plan service", { timeout: 60_000 }, () => {
 		expect(await readdir(path)).toEqual(before)
 		expect(service.view().store).toEqual({
 			state: "available",
-			storeId: BANDPLAN_READ_ONLY_EMPTY_STORE_ID,
+			storeId: null,
 			revision: 0,
 		})
+		expect(JSON.stringify(service.view())).not.toContain(
+			BANDPLAN_READ_ONLY_EMPTY_STORE_ID,
+		)
+		expect(service.presets().store).toEqual(service.view().store)
+		expect(service.resolved().store).toEqual(service.view().store)
 		expect(service.view().stack.source).toBe("default")
 		expect(service.view().capabilities.writable).toBe(false)
 		await expect(
-			service.mutate(resetStack(token(service))),
+			service.mutate({
+				type: "reset-stack",
+				expected: {
+					storeId: "00000000-0000-4000-8000-000000000001",
+					revision: 0,
+				},
+			}),
 		).rejects.toMatchObject({ code: "BANDPLANS_READ_ONLY" })
 		let preview: unknown
 		try {
@@ -1350,5 +1390,234 @@ describe("band plan service", { timeout: 60_000 }, () => {
 				BANDPLANS_LIMITS.stateBytes,
 			)
 		}
+	})
+
+	it("round-trips a preview digest with overrides and rejects a mismatch unchanged", async () => {
+		const path = await root()
+		const { service } = await open(path)
+		const bytes = Uint8Array.of(9, 8, 7, 6)
+		const overrides = [
+			{ sourceType: "PMR", group: "personal-radio" as const },
+			{ sourceType: "Air", group: "air" as const },
+		]
+		const flipped = [overrides[1]!, overrides[0]!]
+		const before = await readFile(stateFile(path))
+		const preview = service.previewImport(fileFields(bytes, overrides))
+		const again = service.previewImport(fileFields(bytes, flipped))
+		expect(again.previewDigest).toBe(preview.previewDigest)
+		expect(preview.previewDigest).toBe(
+			previewDigestFor(preview.sha256, overrides),
+		)
+		expect(preview.previewDigest).not.toBe(preview.sha256)
+		expect(await readFile(stateFile(path))).toEqual(before)
+		const revision = token(service).revision
+		const wrong =
+			preview.previewDigest === "c".repeat(64) ? "d".repeat(64) : "c".repeat(64)
+		await expect(
+			service.mutate(commitOf(token(service), bytes, wrong, overrides)),
+		).rejects.toMatchObject({ code: "BANDPLANS_IMPORT_MISMATCH" })
+		const changed = [
+			{ sourceType: "PMR", group: "marine" as const },
+			overrides[1]!,
+		]
+		expect(previewDigestFor(preview.sha256, changed)).not.toBe(
+			preview.previewDigest,
+		)
+		await expect(
+			service.mutate(
+				commitOf(token(service), bytes, preview.previewDigest, changed),
+			),
+		).rejects.toMatchObject({ code: "BANDPLANS_IMPORT_MISMATCH" })
+		expect(await readFile(stateFile(path))).toEqual(before)
+		expect(token(service).revision).toBe(revision)
+		const committed = await service.mutate(
+			commitOf(token(service), bytes, preview.previewDigest, flipped),
+		)
+		expect(committed.changed).toBe(true)
+		expect(token(service).revision).toBe(revision + 1)
+	})
+
+	it("rejects a commit when the parser hash disagrees with the bytes", async () => {
+		const path = await root()
+		const bytes = Uint8Array.of(1, 2, 3, 4)
+		const fake = "ab".repeat(32)
+		const { service } = await open(path, {
+			parseSdrppBandPlan: (_bytes, options) => ({
+				ok: true,
+				value: {
+					preview: {
+						format: "sdrpp-json",
+						fileName: options.fileName,
+						bytes: bytes.byteLength,
+						sha256: fake,
+						meta: {
+							name: null,
+							countryName: null,
+							countryCode: null,
+							author: null,
+							version: null,
+						},
+						trust: "community-unverified",
+						bands: [],
+						report: {
+							rowsTotal: 1,
+							accepted: 1,
+							skipped: [],
+							groupMapping: [],
+							mapped: 1,
+							toOther: 0,
+							colourHints: 0,
+						},
+					},
+					bands: [importedBand("Lie")],
+				},
+			}),
+		})
+		const before = await readFile(stateFile(path))
+		const preview = service.previewImport(fileFields(bytes))
+		expect(preview.sha256).toBe(fake)
+		expect(preview.previewDigest).toBe(previewDigestFor(fake, []))
+		await expect(
+			service.mutate(commitOf(token(service), bytes, preview.previewDigest)),
+		).rejects.toMatchObject({ code: "BANDPLANS_IMPORT_MISMATCH" })
+		expect(await readFile(stateFile(path))).toEqual(before)
+		expect(token(service).revision).toBe(0)
+	})
+
+	it("passes effective plan ids once per preset call and omits them when unwired", async () => {
+		const path = await root()
+		const wiredCalls: unknown[] = []
+		const wiredIds: Array<ReadonlySet<string> | undefined> = []
+		const plans = [
+			{ id: "airband", region: "EU" as const, name: "Air", ranges: [] },
+			{ id: "marine", region: "EU" as const, name: "Marine", ranges: [] },
+		]
+		const presets = [
+			{
+				kind: "builtin" as const,
+				id: "builtin-airband",
+				name: "Air",
+				region: "EU" as const,
+				job: JOB,
+			},
+			{
+				kind: "builtin" as const,
+				id: "builtin-marine",
+				name: "Marine",
+				region: "EU" as const,
+				job: { ...JOB, bandplans: ["marine", "missing-plan"] },
+			},
+		]
+		const wired = await open(path, {
+			builtinPresetsFor: () => presets,
+			scannerBandplans: view => {
+				wiredCalls.push(view)
+				return plans
+			},
+			presetIssuesFor: (preset, _region, effectiveIds) => {
+				wiredIds.push(effectiveIds)
+				if (!effectiveIds)
+					return [{ code: "unknown-bandplan" as const, bandplanId: "bp1" }]
+				return preset.job.bandplans
+					.filter(id => !effectiveIds.has(id))
+					.map(bandplanId => ({
+						code: "unknown-bandplan" as const,
+						bandplanId,
+					}))
+			},
+		})
+		const list = wired.service.presets()
+		expect(wiredCalls).toHaveLength(1)
+		expect(wiredCalls[0]).not.toHaveProperty("presets")
+		expect(wiredIds).toHaveLength(2)
+		expect(wiredIds[0]).toEqual(new Set(["airband", "marine"]))
+		expect(wiredIds[1]).toBe(wiredIds[0])
+		expect(list.presets.map(item => item.applicable)).toEqual([true, false])
+		expect(list.presets[1]?.issues).toEqual([
+			{ code: "unknown-bandplan", bandplanId: "missing-plan" },
+		])
+		expect(wired.service.presetJob("builtin-airband").issues).toEqual([])
+		expect(wiredCalls).toHaveLength(2)
+		const plain = await open(path, {
+			presetIssuesFor: (_preset, _region, effectiveIds) => {
+				expect(effectiveIds).toBeUndefined()
+				return [{ code: "unknown-bandplan" as const, bandplanId: "bp1" }]
+			},
+		})
+		expect(plain.service.presetJob("builtin-airband").issues).toEqual([
+			{ code: "unknown-bandplan", bandplanId: "bp1" },
+		])
+	})
+
+	// Feature: band-plans, Property 21: Store identity
+	// Validates: Requirements 11.8
+	it("reports a null storeId only for the never-persisted read-only state", async () => {
+		const nil = BANDPLAN_READ_ONLY_EMPTY_STORE_ID
+		await fc.assert(
+			fc.asyncProperty(
+				fc.stringMatching(/^[0-9a-f]{12}$/),
+				fc.integer({ min: 0, max: 8 }),
+				fc.constantFrom(
+					"writable",
+					"readonly-file",
+					"readonly-empty",
+					"readonly-directory",
+				),
+				async (hex, revision, mode) => {
+					const storeId = `00000000-0000-4000-8000-${hex.toLowerCase()}`
+					const path = await root()
+					if (mode === "readonly-directory" || mode === "readonly-file")
+						await mkdir(join(path, "bandplans"), { mode: 0o700 })
+					if (mode === "readonly-file") {
+						const state = validateBandPlanState({
+							version: 1,
+							storeId,
+							revision,
+							stack: null,
+							importedPacks: [],
+							operatorBands: [],
+							edits: [],
+							presets: [],
+						})
+						const file = stateFile(path)
+						await writeFile(file, JSON.stringify(state), { mode: 0o600 })
+						await chmod(file, 0o600)
+						await chmod(join(path, "bandplans"), 0o700)
+					}
+					const { service } = await open(path, {
+						writable: mode === "writable",
+					})
+					const view = service.view()
+					expect(view.store.state).toBe("available")
+					if (view.store.state !== "available") return
+					const unpersisted =
+						mode === "readonly-empty" || mode === "readonly-directory"
+					expect(view.store.storeId === null).toBe(unpersisted)
+					expect(JSON.stringify(view)).not.toContain(nil)
+					expect(service.presets().store).toEqual(view.store)
+					expect(view.capabilities.writable).toBe(mode === "writable")
+					if (unpersisted) {
+						expect(view.store).toEqual({
+							state: "available",
+							storeId: null,
+							revision: 0,
+						})
+						return
+					}
+					const file = JSON.parse(await readFile(stateFile(path), "utf8")) as {
+						storeId: string
+						revision: number
+					}
+					expect(view.store.storeId).toBe(file.storeId)
+					expect(view.store.revision).toBe(file.revision)
+					expect(typeof view.store.storeId).toBe("string")
+					if (mode === "readonly-file") {
+						expect(view.store.storeId).toBe(storeId)
+						expect(view.store.revision).toBe(revision)
+					}
+				},
+			),
+			{ numRuns: 100 },
+		)
 	})
 })

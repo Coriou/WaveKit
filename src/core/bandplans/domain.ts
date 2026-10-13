@@ -37,6 +37,7 @@ import type {
 	BandPlanTransition,
 	DomainContext,
 	ParsedImport,
+	PreviewDigestFor,
 	TransitionResult,
 } from "./contract.js"
 
@@ -60,7 +61,10 @@ function isQuotaIssue(issue: ZodIssue): boolean {
 	)
 }
 
-function serverTime(context: DomainContext, floors: readonly string[] = []): string {
+function serverTime(
+	context: DomainContext,
+	floors: readonly string[] = [],
+): string {
 	const parsed = timestampSchema.safeParse(context.now())
 	if (!parsed.success) throw new BandPlansError("BANDPLANS_INVALID")
 	const time = Math.max(
@@ -230,7 +234,10 @@ function assertOperatorParent(
 	selfId: string | null,
 ): void {
 	if (parentId === null) return
-	if (parentId === selfId || !state.operatorBands.some(band => band.id === parentId))
+	if (
+		parentId === selfId ||
+		!state.operatorBands.some(band => band.id === parentId)
+	)
 		throw new BandPlansError("BANDPLANS_INVALID")
 }
 
@@ -248,6 +255,28 @@ function storedOperatorBand(id: string, band: BandInput): StoredBand {
 function sha256Base64(contentBase64: string): string {
 	return createHash("sha256")
 		.update(Buffer.from(contentBase64, "base64"))
+		.digest("hex")
+}
+
+function compareCodeUnit(left: string, right: string): number {
+	if (left < right) return -1
+	if (left > right) return 1
+	return 0
+}
+
+/** Order of `groupOverrides` does not change the digest. Source types are unique by schema. */
+export const previewDigestFor: PreviewDigestFor = (
+	fileSha256,
+	groupOverrides,
+) => {
+	const pairs = groupOverrides
+		.map(override => [override.sourceType, override.group] as const)
+		.sort((left, right) => compareCodeUnit(left[0], right[0]))
+	return createHash("sha256")
+		.update(
+			JSON.stringify({ v: 1, sha256: fileSha256, groupOverrides: pairs }),
+			"utf8",
+		)
 		.digest("hex")
 }
 
@@ -370,10 +399,7 @@ export const transition: BandPlanTransition = (
 				packId: mutation.packId,
 				bandId: mutation.bandId,
 				set: normalized,
-				updatedAt: serverTime(
-					context,
-					previous ? [previous.updatedAt] : [],
-				),
+				updatedAt: serverTime(context, previous ? [previous.updatedAt] : []),
 			})
 			if (!stored.success) throw new BandPlansError("BANDPLANS_INVALID")
 			if (previous) next.edits[index] = stored.data
@@ -444,10 +470,11 @@ export const transition: BandPlanTransition = (
 		}
 		case "commit-import": {
 			if (!parsedImport) throw new BandPlansError("BANDPLANS_IMPORT_INVALID")
-			const digest = sha256Base64(mutation.contentBase64)
+			const fileSha256 = sha256Base64(mutation.contentBase64)
+			const digest = previewDigestFor(fileSha256, mutation.groupOverrides)
 			if (
 				digest !== mutation.previewDigest ||
-				parsedImport.preview.sha256 !== mutation.previewDigest
+				parsedImport.preview.sha256 !== fileSha256
 			)
 				throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
 			const name = bandPlanTextSchema(80).safeParse(
@@ -464,7 +491,9 @@ export const transition: BandPlanTransition = (
 			let replaceIndex = -1
 			const floors: string[] = []
 			if (replacing !== null) {
-				replaceIndex = next.importedPacks.findIndex(pack => pack.id === replacing)
+				replaceIndex = next.importedPacks.findIndex(
+					pack => pack.id === replacing,
+				)
 				const previous = next.importedPacks[replaceIndex]
 				if (!previous) throw new BandPlansError("BANDPLANS_NOT_FOUND")
 				packId = replacing
@@ -510,7 +539,9 @@ export const transition: BandPlanTransition = (
 			next.importedPacks.splice(index, 1)
 			next.edits = next.edits.filter(edit => edit.packId !== mutation.packId)
 			if (next.stack)
-				next.stack = next.stack.filter(entry => entry.packId !== mutation.packId)
+				next.stack = next.stack.filter(
+					entry => entry.packId !== mutation.packId,
+				)
 			changed = true
 			break
 		}
