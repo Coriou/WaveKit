@@ -315,13 +315,31 @@ describe("range fields in the plan", () => {
 		expect(overlaid.spec.provenance["ranges[1].name"]).toBeUndefined()
 		expect(overlaid.spec.signalsOnly).toBe(true)
 
-		const mismatch = previewPlan({ ranges: [inside], rangeLive: [] }, ctx())
+		// Entries without an identity match by index only while the counts agree; stale ones
+		// are dropped with a warning, never an error (R1 finding 1).
+		const mismatch = previewPlan(
+			{ ranges: [inside], rangeLive: [{ enabled: false }, { name: "x" }] },
+			ctx(),
+		)
+		expect(mismatch.issues.filter(i => i.severity === "error")).toEqual([])
 		expect(mismatch.issues).toContainEqual({
 			code: "range-locked",
-			severity: "error",
-			message: "a running job's ranges cannot be added or removed",
-			details: { reason: "range-count", expected: 1, received: 0 },
+			severity: "warning",
+			message:
+				"the job's ranges changed since their last edit; those edits no longer apply",
+			details: {
+				reason: "range-live-stale",
+				dropped: [0, 1],
+				expected: 2,
+				received: 1,
+			},
 		})
+		expect(mismatch.spec.ranges[0]?.enabled).toBeUndefined()
+		expect(
+			previewPlan({ ranges: [inside], rangeLive: [] }, ctx()).issues.some(
+				i => i.code === "range-locked",
+			),
+		).toBe(false)
 
 		const round = toJobSpec(overlaid.spec)
 		expect(round.signalsOnly).toBe(true)
@@ -330,6 +348,129 @@ describe("range fields in the plan", () => {
 			protocols: ["pocsag"],
 			dwellMs: 800,
 		})
+	})
+
+	it("applies a rangeLive entry only to the range with its identity (R1 finding 1)", () => {
+		const id = (r: ScanRange) => ({ startHz: r.startHz, endHz: r.endHz })
+		// The identity matches: applied, no issue.
+		const same = previewPlan(
+			{
+				ranges: [inside, outside],
+				rangeLive: [
+					{ ...id(inside), enabled: false },
+					{ ...id(outside), name: "east" },
+				],
+			},
+			ctx(),
+		)
+		expect(same.spec.ranges[0]?.enabled).toBe(false)
+		expect(same.spec.ranges[1]?.name).toBe("east")
+		expect(same.issues.some(i => i.code === "range-locked")).toBe(false)
+
+		// A range gained at the end: the earlier entries still match their ranges.
+		const moreEnd = {
+			...outside,
+			startHz: outside.endHz + 1_000,
+			endHz: outside.endHz + 50_000,
+		}
+		const grown = previewPlan(
+			{
+				ranges: [inside, outside, moreEnd],
+				rangeLive: [
+					{ ...id(inside), enabled: false },
+					{ ...id(outside), name: "east" },
+				],
+			},
+			ctx(),
+		)
+		expect(grown.spec.ranges[0]?.enabled).toBe(false)
+		expect(grown.spec.ranges[1]?.name).toBe("east")
+		expect(grown.spec.ranges[2]?.name).toBeUndefined()
+		expect(grown.issues.some(i => i.code === "range-locked")).toBe(false)
+
+		// A range gained at the front shifts every index: nothing applies, one warning.
+		const shifted = previewPlan(
+			{
+				ranges: [moreEnd, inside, outside],
+				rangeLive: [
+					{ ...id(inside), enabled: false },
+					{ ...id(outside), name: "east" },
+				],
+			},
+			ctx(),
+		)
+		expect(shifted.spec.ranges.map(r => r.enabled ?? null)).toEqual([
+			null,
+			null,
+			null,
+		])
+		expect(shifted.spec.ranges.map(r => r.name ?? null)).toEqual([
+			null,
+			null,
+			null,
+		])
+		expect(shifted.issues.filter(i => i.severity === "error")).toEqual([])
+		expect(shifted.issues).toContainEqual(
+			expect.objectContaining({
+				code: "range-locked",
+				severity: "warning",
+				details: expect.objectContaining({ dropped: [0, 1] }),
+			}),
+		)
+
+		// Moved edges at the same index: that entry is dropped, the other still applies.
+		const moved = { ...outside, endHz: outside.endHz - 10_000 }
+		const edges = previewPlan(
+			{
+				ranges: [inside, moved],
+				rangeLive: [
+					{ ...id(inside), name: "air" },
+					{ ...id(outside), enabled: false },
+				],
+			},
+			ctx(),
+		)
+		expect(edges.spec.ranges[0]?.name).toBe("air")
+		expect(edges.spec.ranges[1]?.enabled).toBeUndefined()
+		expect(edges.issues).toContainEqual(
+			expect.objectContaining({
+				code: "range-locked",
+				severity: "warning",
+				details: expect.objectContaining({ dropped: [1] }),
+			}),
+		)
+
+		// A band-plan range matches on its plan id too.
+		const fromPlan = previewPlan(
+			{
+				ranges: [inside],
+				rangeLive: [{ ...id(inside), bandplanId: "pmr446", enabled: false }],
+			},
+			ctx(),
+		)
+		expect(fromPlan.spec.ranges[0]?.enabled).toBeUndefined()
+		expect(fromPlan.issues).toContainEqual(
+			expect.objectContaining({ code: "range-locked", severity: "warning" }),
+		)
+	})
+
+	it("keeps the pre-SF1 sweep period formula exactly when no hop has its own dwell (R1 finding 3)", () => {
+		for (const dwellMs of [185.3, 101.7, 333.33]) {
+			const p = previewPlan(
+				{
+					mode: "sweep",
+					ranges: [inside, outside],
+					dwellMs,
+					revisit: { share: 0.3 },
+				},
+				ctx(),
+			)
+			expect(p.plan.hops.every(h => h.dwellMs === undefined)).toBe(true)
+			const count = p.plan.hops.length
+			const every = Math.max(1, Math.round(1 / 0.3))
+			const revisits = Math.floor(count / every)
+			expect(p.sweepPeriodMs).toBe((count + revisits) * p.spec.dwellMs)
+		}
 	})
 
 	it("ignores per-range dwell on an in-window plan", () => {

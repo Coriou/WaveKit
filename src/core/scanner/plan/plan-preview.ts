@@ -186,43 +186,61 @@ function copyRange(r: ScanRange): ScanRange {
 	return out
 }
 
-/** Full-state live overlay, then drop `enabled: true` (absent means enabled). */
+/**
+ * Full-state live overlay, then drop `enabled: true` (absent means enabled). An entry applies
+ * only to the range at its index with the same locked identity (SF1 R1 finding 1); entries that
+ * no longer match (the band plan under the job changed) are dropped with one warning, never an
+ * error, so the job stays editable. Entries without an identity match by index while the counts
+ * agree.
+ */
 function overlayRangeLive(
 	ranges: ScanRange[],
 	live: StoredScanJobSpec["rangeLive"],
 	issues: PlanIssue[],
 ): void {
 	if (live !== undefined) {
-		if (live.length !== ranges.length) {
+		const dropped: number[] = []
+		for (let i = 0; i < live.length; i++) {
+			const range = ranges[i]
+			const src = live[i]
+			if (src === undefined) continue
+			const legacy = src.startHz === undefined || src.endHz === undefined
+			const matches =
+				range !== undefined &&
+				(legacy
+					? live.length === ranges.length
+					: src.startHz === range.startHz &&
+						src.endHz === range.endHz &&
+						src.bandplanId === range.bandplanId)
+			if (!matches || range === undefined) {
+				dropped.push(i)
+				continue
+			}
+			delete range.enabled
+			delete range.protocols
+			delete range.name
+			delete range.dwellMs
+			delete range.sensitivity
+			if (src.enabled !== undefined) range.enabled = src.enabled
+			if (src.protocols !== undefined) range.protocols = [...src.protocols]
+			if (src.name !== undefined) range.name = src.name
+			if (src.dwellMs !== undefined) range.dwellMs = src.dwellMs
+			if (src.sensitivity !== undefined) range.sensitivity = src.sensitivity
+		}
+		if (dropped.length > 0)
 			issues.push(
 				issue(
 					"range-locked",
-					"error",
-					"a running job's ranges cannot be added or removed",
+					"warning",
+					"the job's ranges changed since their last edit; those edits no longer apply",
 					{
-						reason: "range-count",
-						expected: ranges.length,
-						received: live.length,
+						reason: "range-live-stale",
+						dropped,
+						expected: live.length,
+						received: ranges.length,
 					},
 				),
 			)
-		} else {
-			for (let i = 0; i < ranges.length; i++) {
-				const range = ranges[i]
-				const src = live[i]
-				if (range === undefined || src === undefined) continue
-				delete range.enabled
-				delete range.protocols
-				delete range.name
-				delete range.dwellMs
-				delete range.sensitivity
-				if (src.enabled !== undefined) range.enabled = src.enabled
-				if (src.protocols !== undefined) range.protocols = [...src.protocols]
-				if (src.name !== undefined) range.name = src.name
-				if (src.dwellMs !== undefined) range.dwellMs = src.dwellMs
-				if (src.sensitivity !== undefined) range.sensitivity = src.sensitivity
-			}
-		}
 	}
 	for (const range of ranges) if (range.enabled === true) delete range.enabled
 }
@@ -857,7 +875,9 @@ function sweepPeriod(
 	const count = hops.length
 	const every = share > 0 ? Math.max(1, Math.round(1 / share)) : Infinity
 	const revisits = Number.isFinite(every) ? Math.floor(count / every) : 0
-	if (count === 0) return revisits * dwellMs
+	// No hop dwell: exactly the pre-SF1 formula, so previews stay byte-identical (R1 finding 3).
+	if (count === 0 || hops.every(hop => hop.dwellMs === undefined))
+		return (count + revisits) * dwellMs
 	let sum = 0
 	for (const hop of hops) sum += hop.dwellMs ?? dwellMs
 	return sum + revisits * (sum / count)

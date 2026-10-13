@@ -1327,7 +1327,20 @@ export class ScannerService extends EventEmitter {
 		if (patch.ranges !== undefined) {
 			const edited = applyRangePatch(record.spec.ranges, patch.ranges)
 			this.rejectErrors(edited.issues)
-			merged.rangeLive = edited.rangeLive
+			// The locked identity of each range goes with its entry (R1 finding 1).
+			merged.rangeLive = edited.rangeLive.map((live, i) => {
+				const range = record.spec.ranges[i]
+				return range
+					? {
+							...live,
+							startHz: range.startHz,
+							endHz: range.endHz,
+							...(range.bandplanId !== undefined
+								? { bandplanId: range.bandplanId }
+								: {}),
+						}
+					: live
+			})
 		}
 		const preview = this.preview(merged)
 		this.rejectErrors(preview.issues)

@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises"
 import { describe, expect, it } from "vitest"
 import type { ScanJob } from "@wavekit/api-types"
+import type { Bandplan } from "../../../../src/core/scanner/bandplan/index.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import type {
 	ScannerProtocol,
@@ -235,6 +236,99 @@ describe("ScannerService range edits (SF1 req 1, 2, 6)", () => {
 			expect(protocolsFor([a.id, b.id])).toEqual(["dmr"])
 			await h.service.patchJob(b.id, { signalsOnly: false })
 			expect(protocolsFor([a.id, b.id])).toEqual(["dmr", "pocsag"])
+		} finally {
+			await h.service.stop()
+			await rm(h.dir, { recursive: true, force: true })
+		}
+	})
+
+	// R1 finding 1: the plan under a running job changes; earlier range edits never move to
+	// another range and never block later patches.
+	it("drops stale range edits with a warning when the job's band plan changes, and stays editable", async () => {
+		const band = (startHz: number) => ({
+			startHz,
+			endHz: startHz + 200_000,
+			rasters: [{ spacingHz: 12_500, firstChannelHz: startHz + 6_250 }],
+			bandplanId: "user-p",
+		})
+		let plan: Bandplan = {
+			id: "user-p",
+			region: "all",
+			name: "User P",
+			ranges: [band(450_000_000), band(452_000_000)],
+		}
+		const h = serviceHarness({ patch: noPassive, bandplans: () => [plan] })
+		try {
+			await h.service.start()
+			const job = await h.service.createJob({
+				sourceId: "rtl",
+				mode: "sweep",
+				bandplans: ["user-p"],
+				priority: 50,
+				takeover: true,
+				resume: { autoAfterIdleMs: null },
+			})
+			await untilRunning(h, job.id)
+			const [c0, c1] = h.service.getJob(job.id)!.spec.ranges as [
+				ScanRange,
+				ScanRange,
+			]
+			await h.service.patchJob(job.id, {
+				ranges: [
+					{ ...c0, name: "low" },
+					{ ...c1, enabled: false },
+				],
+			})
+
+			// The plan gains a range at the end: both edits still apply to their ranges.
+			plan = { ...plan, ranges: [...plan.ranges, band(454_000_000)] }
+			const grown = await h.service.patchJob(job.id, { thresholdDb: 9 })
+			expect(grown.job.spec.ranges).toHaveLength(3)
+			expect(grown.job.spec.ranges[0]?.name).toBe("low")
+			expect(grown.job.spec.ranges[1]?.enabled).toBe(false)
+			expect(grown.job.spec.ranges[2]?.enabled).toBeUndefined()
+			expect(grown.issues.some(i => i.code === "range-locked")).toBe(false)
+
+			// The second range's edges move: its edit is dropped with a warning, the first stays.
+			plan = {
+				...plan,
+				ranges: [band(450_000_000), band(452_100_000), band(454_000_000)],
+			}
+			const moved = await h.service.patchJob(job.id, { thresholdDb: 8 })
+			expect(moved.job.spec.ranges[0]?.name).toBe("low")
+			expect(moved.job.spec.ranges[1]).toMatchObject({ startHz: 452_100_000 })
+			expect(moved.job.spec.ranges[1]?.enabled).toBeUndefined()
+			expect(moved.issues.filter(i => i.severity === "error")).toEqual([])
+			expect(moved.issues).toContainEqual(
+				expect.objectContaining({
+					code: "range-locked",
+					severity: "warning",
+					details: expect.objectContaining({
+						reason: "range-live-stale",
+						dropped: [1],
+					}),
+				}),
+			)
+
+			// A range gained at the front shifts every index: nothing applies, the PATCH succeeds.
+			plan = { ...plan, ranges: [band(448_000_000), ...plan.ranges] }
+			const shifted = await h.service.patchJob(job.id, { thresholdDb: 7 })
+			expect(shifted.job.spec.ranges).toHaveLength(4)
+			expect(shifted.job.spec.ranges.some(r => r.name !== undefined)).toBe(
+				false,
+			)
+			expect(shifted.job.spec.ranges.some(r => r.enabled === false)).toBe(false)
+			expect(shifted.issues).toContainEqual(
+				expect.objectContaining({ code: "range-locked", severity: "warning" }),
+			)
+
+			// A fresh range edit against the new list replaces the stale entries.
+			const now = h.service.getJob(job.id)!.spec.ranges
+			const fresh = await h.service.patchJob(job.id, {
+				ranges: now.map((r, i) => (i === 3 ? { ...r, enabled: false } : r)),
+			})
+			expect(fresh.job.spec.ranges[3]?.enabled).toBe(false)
+			expect(fresh.issues.some(i => i.code === "range-locked")).toBe(false)
 		} finally {
 			await h.service.stop()
 			await rm(h.dir, { recursive: true, force: true })

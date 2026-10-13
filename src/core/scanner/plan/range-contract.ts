@@ -30,13 +30,24 @@ export type RangeLockedField = (typeof RANGE_LOCKED_FIELDS)[number]
 export type ScanRangeLive = Pick<ScanRange, RangeLiveField>
 
 /**
+ * One stored live entry: the live fields plus the locked identity (`startHz`, `endHz`,
+ * `bandplanId`) of the range it was written for (SF1 R1 finding 1). The overlay applies an
+ * entry only to the range at the same index with the same identity, so a band plan that
+ * changes under a running job never moves an edit to another range. Entries without
+ * `startHz`/`endHz` (written before the identity existed) match by index when the counts agree.
+ */
+export type StoredRangeLive = ScanRangeLive &
+	Partial<Pick<ScanRange, "startHz" | "endHz" | "bandplanId">>
+
+/**
  * The stored operator spec (JobRecord.rawSpec, PersistedJob.rawSpec). `rangeLive` is never
  * accepted from a client: Main writes it from a validated PATCH `ranges`. It is aligned by
  * index with the job's effective range list (operator ranges, then bandplan ranges) and
- * replaces each range's live fields after normalisation.
+ * replaces the live fields of each range whose identity still matches after normalisation;
+ * stale entries are dropped with a warning (see `StoredRangeLive`).
  */
 export interface StoredScanJobSpec extends ScanJobSpec {
-	rangeLive?: ScanRangeLive[]
+	rangeLive?: StoredRangeLive[]
 }
 
 /**
