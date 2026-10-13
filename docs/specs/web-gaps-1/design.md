@@ -151,7 +151,7 @@ Invalid data is counted and dropped, never thrown.
 their ITU-R M.1371 offsets), 5 (static and voyage, 424 bits), 19 (name, ship type) and 24
 (part A name; part B ship type and callsign), six-bit text decoding with `@` trimming.
 `parseNmeaSentence` stays single-sentence; the adapter instance keeps a small fragment
-buffer keyed by sequence id and channel (at most 8 pending, 2 s timeout) so type 5 decodes.
+buffer keyed by talker (`AIVDM`/`AIVDO`), sequence id and channel (at most 8 pending, 2 s timeout) so type 5 decodes.
 Output stays `type: "ship"` with `ShipData`.
 
 **Routes.** `src/api/routes/vessels.ts` (new): `vesselRoutes(app, { tracker })` with the

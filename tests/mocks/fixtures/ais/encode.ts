@@ -176,13 +176,19 @@ export function toNmeaFragments(
 		channel?: "A" | "B"
 		seqId?: number
 		maxPayloadChars?: number
+		talker?: "AIVDM" | "AIVDO"
 	},
 ): string[] {
 	const maxChars = options?.maxPayloadChars ?? 48
 	const channel = options?.channel ?? "A"
 	const seqId = options?.seqId ?? 0
 	if (payload.length <= maxChars) {
-		return [toNmeaSentence(payload, fillBits, { channel })]
+		return [
+			toNmeaSentence(payload, fillBits, {
+				channel,
+				...(options?.talker ? { talker: options.talker } : {}),
+			}),
+		]
 	}
 	const parts: string[] = []
 	for (let i = 0; i < payload.length; i += maxChars) {
@@ -191,7 +197,7 @@ export function toNmeaFragments(
 	return parts.map((part, index) => {
 		const fragment = index + 1
 		const fill = fragment === parts.length ? fillBits : 0
-		const body = `AIVDM,${parts.length},${fragment},${seqId},${channel},${part},${fill}`
+		const body = `${options?.talker ?? "AIVDM"},${parts.length},${fragment},${seqId},${channel},${part},${fill}`
 		return `!${body}*${nmeaChecksum(body)}`
 	})
 }

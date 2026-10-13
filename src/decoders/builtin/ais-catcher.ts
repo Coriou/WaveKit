@@ -136,7 +136,7 @@ const MAX_PENDING_FRAGMENTS = 8
 
 export class AisCatcherDecoder extends IqDecimateDecoder {
 	private options: AisCatcherOptions
-	/** Pending multi-sentence groups, keyed by `${seqId}:${channel}`. */
+	/** Pending multi-sentence groups, keyed by `${talker}:${seqId}:${channel}`. */
 	private readonly fragmentGroups = new Map<string, FragmentGroup>()
 
 	constructor(config: DecoderConfig, logger: Logger) {
@@ -215,7 +215,7 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 		if (parts.total < 2 || parts.fragment < 1 || parts.fragment > parts.total) {
 			return null
 		}
-		const key = `${parts.seqId}:${parts.channel}`
+		const key = `${parts.talker}:${parts.seqId}:${parts.channel}`
 		if (parts.fragment === 1) {
 			// A second opening fragment means the group is incomplete or two
 			// groups collided. Drop it and discard this fragment so the next
@@ -431,6 +431,8 @@ function parseAisCatcherOptions(
 
 /** Fields of one NMEA AIS sentence, checksum already removed. */
 interface NmeaParts {
+	/** `AIVDM` (heard) or `AIVDO` (own vessel). */
+	talker: string
 	total: number
 	fragment: number
 	seqId: string
@@ -460,6 +462,7 @@ function inspectNmea(sentence: string): NmeaParts | null {
 	const fillField = parts[6] ?? ""
 	const fillBits = /^[0-5]$/.test(fillField) ? Number(fillField) : 0
 	return {
+		talker: sentence.slice(1, 6),
 		total,
 		fragment,
 		seqId: parts[3] ?? "",

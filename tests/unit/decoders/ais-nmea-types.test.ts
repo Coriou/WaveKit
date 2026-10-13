@@ -338,6 +338,27 @@ describe("fragment reassembly", () => {
 		expect((output?.data as { name?: string }).name).toBe("TEST VESSEL")
 	})
 
+	// R1 m2: the talker is part of the fragment key.
+	it("keeps interleaved AIVDM and AIVDO groups with the same sequence id and channel apart", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(at)
+		const decoder = new FeedableAis(config(), logger)
+		const other = encodeType5({ ...sampleType5(), mmsi: 99, name: "OWN SHIP" })
+		const own = toNmeaFragments(other.payload, other.fillBits, {
+			seqId: 4,
+			channel: "A",
+			talker: "AIVDO",
+		})
+		const heard = fragmentsOf(sampleType5(), 4)
+		expect(own[0]?.startsWith("!AIVDO,2,1,4,A,")).toBe(true)
+		expect(decoder.feed(heard[0]!)).toBeNull()
+		expect(decoder.feed(own[0]!)).toBeNull()
+		const a = decoder.feed(heard[1]!)
+		const b = decoder.feed(own[1]!)
+		expect((a?.data as { name?: string }).name).toBe("TEST VESSEL")
+		expect((b?.data as { name?: string }).name).toBe("OWN SHIP")
+	})
+
 	it("drops an out-of-order or timed-out group", () => {
 		vi.useFakeTimers()
 		vi.setSystemTime(at)
