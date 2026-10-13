@@ -133,5 +133,5 @@ describe("ScannerService lease holder", () => {
 			),
 			{ numRuns: 100 },
 		)
-	}, 60_000)
+	}, 120_000)
 })

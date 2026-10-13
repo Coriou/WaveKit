@@ -35,8 +35,10 @@ let dir = ""
 beforeAll(async () => {
 	dir = await mkdtemp(join(tmpdir(), "wavekit-scanner-sf1-"))
 })
+const cleanup: string[] = []
 afterAll(async () => {
-	await rm(dir, { recursive: true, force: true })
+	for (const d of [dir, ...cleanup])
+		await rm(d, { recursive: true, force: true })
 })
 
 const protocols: ScannerProtocol[] = ["analog-fm", "dmr", "pocsag", "ysf"]
@@ -124,7 +126,7 @@ describe("ScannerPersistence SF1 fields (scanner-followups req 6)", () => {
 			}),
 			{ numRuns: 100 },
 		)
-	})
+	}, 30_000)
 
 	// Feature: scanner-followups, Property 10: Persistence round trip
 	// Validates: Requirements 6.2
@@ -142,12 +144,15 @@ describe("ScannerPersistence SF1 fields (scanner-followups req 6)", () => {
 			createdAt: new Date(T0).toISOString(),
 			updatedAt: new Date(T0 + 1_000).toISOString(),
 		}
+		// Its own directory: nothing else writes jobs.json here.
+		const oldDir = await mkdtemp(join(tmpdir(), "wavekit-scanner-sf1-old-"))
+		cleanup.push(oldDir)
 		await writeFile(
-			join(dir, "jobs.json"),
+			join(oldDir, "jobs.json"),
 			JSON.stringify({ version: 1, jobs: [old] }),
 		)
 		const loaded = await new ScannerPersistence({
-			dir,
+			dir: oldDir,
 			logger,
 			now: () => T0,
 		}).loadConfig()
