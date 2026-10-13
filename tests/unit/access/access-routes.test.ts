@@ -125,6 +125,17 @@ describe("isolated access HTTP routes", () => {
 				})
 			})
 			const paired = await env.pair()
+			if (flow === "refresh") {
+				// Admission records this hour before the route handler. Commit it
+				// first so a paused refresh cannot be mistaken for a last-seen write.
+				expect(
+					env.sessions.lookupByPrincipal(paired.body.deviceId),
+				).toBeDefined()
+				await env.sessions.noteSeen(
+					paired.body.deviceId,
+					env.sessions.observedAt(),
+				)
+			}
 			const issued = await env.app.inject({
 				method: "POST",
 				url: "/api/access/pairing-codes",
@@ -171,6 +182,11 @@ describe("isolated access HTTP routes", () => {
 		})
 		const paired = await env.pair()
 		env.advance(86400000)
+		// The admission hook records last-seen before the route persists. Commit
+		// that hour first so the held write is the refresh, which starts after
+		// preHandler has captured the response.
+		expect(env.sessions.lookupByPrincipal(paired.body.deviceId)).toBeDefined()
+		await env.sessions.noteSeen(paired.body.deviceId, env.sessions.observedAt())
 		let started = () => {}
 		const persisting = new Promise<void>(resolve => {
 			started = resolve
@@ -382,7 +398,9 @@ describe("isolated access HTTP routes", () => {
 	it("durable failure returns503 with no successful cookie or credential exposure", async () => {
 		const env = await setup()
 		const paired = await env.pair()
-		env.persist.mockRejectedValueOnce(new Error("private storage detail"))
+		// Admission may spend one failed last-seen write without latching.
+		// The logout write is the one that must fail closed.
+		env.persist.mockRejectedValue(new Error("private storage detail"))
 		const result = await env.app.inject({
 			method: "POST",
 			url: "/api/access/session/logout",
@@ -545,5 +563,77 @@ describe("device inventory route admission", () => {
 			release()
 			await Promise.all(pending)
 		}
+	})
+})
+
+describe("device label route", () => {
+	it("labels a session device and leaves GET/HEAD inventory commit-free", async () => {
+		const env = await setup()
+		const paired = await env.pair()
+		env.persist.mockClear()
+		const labeled = await env.app.inject({
+			method: "POST",
+			url: "/api/access/devices/label",
+			headers: paired.headers,
+			payload: {
+				deviceId: paired.body.deviceId,
+				name: "Radio",
+				kind: "browser",
+			},
+		})
+		expect(labeled.statusCode).toBe(200)
+		expect(labeled.json()).toEqual({ updated: true })
+		const calls = env.persist.mock.calls.length
+		const listed = await env.app.inject({
+			method: "GET",
+			url: "/api/access/devices",
+			headers: paired.headers,
+		})
+		expect(listed.statusCode).toBe(200)
+		expect(listed.json()).toMatchObject({
+			devices: [
+				{
+					deviceId: paired.body.deviceId,
+					name: "Radio",
+					kind: "browser",
+					current: true,
+				},
+			],
+		})
+		const head = await env.app.inject({
+			method: "HEAD",
+			url: "/api/access/devices",
+			headers: paired.headers,
+		})
+		expect(head.statusCode).toBe(200)
+		// inject() returns the pre-transport payload; the wire HEAD body is empty.
+		expect(head.headers["content-length"]).toBe(
+			String(Buffer.byteLength(listed.body)),
+		)
+		expect(env.persist.mock.calls.length).toBe(calls)
+		const rejected = await env.app.inject({
+			method: "POST",
+			url: "/api/access/devices/label",
+			headers: paired.headers,
+			payload: { deviceId: paired.body.deviceId, name: "a".repeat(65) },
+		})
+		expect(rejected.statusCode).toBe(400)
+		expect(rejected.json()).toEqual({ code: "MALFORMED_REQUEST" })
+		const machine = await env.app.inject({
+			method: "POST",
+			url: "/api/access/devices/label",
+			headers: env.machine,
+			payload: { deviceId: paired.body.deviceId, name: "Nope" },
+		})
+		expect(machine.statusCode).toBe(403)
+		expect(machine.json()).toEqual({ code: "SESSION_REQUIRED" })
+		const absent = await env.app.inject({
+			method: "POST",
+			url: "/api/access/machine/devices/label",
+			headers: env.machine,
+			payload: { deviceId: paired.body.deviceId, name: "Nope" },
+		})
+		expect(absent.statusCode).toBe(404)
+		expect(env.sessions.exportSnapshot().sessions[0]?.name).toBe("Radio")
 	})
 })

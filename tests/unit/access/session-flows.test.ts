@@ -201,7 +201,7 @@ describe("original-request remembered-browser session flows", () => {
 		expect("cookie" in result).toBe(false)
 	})
 
-	it.each(["refresh", "logout", "revoke", "revokeAll"] as const)(
+	it.each(["refresh", "logout", "revoke", "revokeAll", "label"] as const)(
 		"requires a session, Origin and CSRF for %s; machine cannot bypass",
 		async action => {
 			const env = await setup()
@@ -210,11 +210,17 @@ describe("original-request remembered-browser session flows", () => {
 				logout: "/api/access/session/logout",
 				revoke: "/api/access/devices/revoke",
 				revokeAll: "/api/access/devices/revoke-all",
+				label: "/api/access/devices/label",
 			}[action]
 			const call = (request: AccessRequest) =>
 				action === "revoke"
 					? env.flows.revoke(request, { deviceId: env.created.principalId })
-					: env.flows[action](request)
+					: action === "label"
+						? env.flows.label(request, {
+								deviceId: env.created.principalId,
+								name: "Radio",
+							})
+						: env.flows[action](request)
 			const headers = [
 				"Host",
 				"receiver.lan:9000",
@@ -412,7 +418,15 @@ describe("session-only device read flows", () => {
 				kind: "success",
 				status: 200,
 				body: {
-					devices: [{ deviceId: env.created.principalId, current: true }],
+					devices: [
+						{
+							deviceId: env.created.principalId,
+							current: true,
+							name: null,
+							kind: null,
+							lastSeenAt: null,
+						},
+					],
 				},
 			})
 			expect(env.sessions.exportSnapshot()).toEqual(before)

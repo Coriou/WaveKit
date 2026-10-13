@@ -285,7 +285,7 @@ describe("durable remembered-browser authority", () => {
 		})
 		expect(rotated.lookup(session.cookieValue)).toBeUndefined()
 		expect(env.durable()).toEqual({
-			version: 1,
+			version: 2,
 			credentialBinding: "a".repeat(64),
 			sessions: [],
 		})
@@ -305,7 +305,19 @@ describe("durable remembered-browser authority", () => {
 		const snapshot = env.store.exportSnapshot()
 		const record = snapshot.sessions[0]!
 		for (const malformed of [
-			{ ...snapshot, version: 2 },
+			{ ...snapshot, version: 3 },
+			{
+				...snapshot,
+				sessions: [{ ...record, name: "bad\nname" }],
+			},
+			{
+				...snapshot,
+				sessions: [{ ...record, kind: "laptop" }],
+			},
+			{
+				...snapshot,
+				sessions: [{ ...record, lastSeenAt: record.createdAt + 1 }],
+			},
 			{ ...snapshot, sessions: [record, record] },
 			{
 				...snapshot,
@@ -411,6 +423,9 @@ describe("committed active device inventory", () => {
 					"current",
 					"deviceId",
 					"expiresAt",
+					"kind",
+					"lastSeenAt",
+					"name",
 					"renewedAt",
 				])
 				const first = snapshot.devices[0]
@@ -441,6 +456,9 @@ describe("committed active device inventory", () => {
 						renewedAt: 1_000_000,
 						expiresAt: first.expiresAt,
 						current: true,
+						name: null,
+						kind: null,
+						lastSeenAt: null,
 					},
 				]),
 			})

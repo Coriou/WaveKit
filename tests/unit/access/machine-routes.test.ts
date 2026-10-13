@@ -150,6 +150,9 @@ describe("machine device HTTP routes", () => {
 					renewedAt: 1_000_000,
 					expiresAt: paired.body.expiresAt,
 					current: false,
+					name: null,
+					kind: null,
+					lastSeenAt: null,
 				},
 			],
 		})

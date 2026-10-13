@@ -1079,3 +1079,91 @@ describe("root bootstrap opt-in dispatch", () => {
 		expect(handler).not.toHaveBeenCalled()
 	})
 })
+
+describe("coarse last-seen admission", () => {
+	it("notes a session admission without delaying it, and never from a device read or a machine principal", async () => {
+		const env = await setup()
+		env.persist.mockClear()
+		for (const url of [
+			"/api/access/devices",
+			"/api/access/devices?unused=1",
+			"/api/access/machine/devices",
+		]) {
+			for (const method of ["GET", "HEAD"] as const)
+				expect(
+					(await env.app.inject({ method, url, headers: env.headers }))
+						.statusCode,
+				).toBe(404)
+		}
+		await Promise.resolve()
+		expect(env.persist).not.toHaveBeenCalled()
+		expect(env.sessions.exportSnapshot().sessions[0]?.lastSeenAt).toBeNull()
+		await env.app.inject({
+			method: "GET",
+			url: "/api/status",
+			headers: env.machine,
+		})
+		await Promise.resolve()
+		expect(env.persist).not.toHaveBeenCalled()
+
+		let release = () => {}
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		env.persist.mockImplementationOnce(() => gate)
+		const pending = env.app.inject({
+			method: "GET",
+			url: "/api/access/session",
+			headers: env.headers,
+		})
+		const response = await Promise.race([
+			pending,
+			new Promise<never>((_resolve, reject) => {
+				setTimeout(
+					() => reject(new Error("last-seen delayed the request")),
+					500,
+				)
+			}),
+		])
+		expect(response.statusCode).toBe(404)
+		expect(env.sessions.exportSnapshot().sessions[0]?.lastSeenAt).toBeNull()
+		release()
+		await vi.waitFor(() =>
+			expect(env.sessions.exportSnapshot().sessions[0]?.lastSeenAt).toEqual(
+				expect.any(Number),
+			),
+		)
+		const seen = env.sessions.exportSnapshot().sessions[0]?.lastSeenAt
+		expect(typeof seen).toBe("number")
+		expect((seen ?? 1) % 3_600_000).toBe(0)
+		const expires = env.sessions.exportSnapshot().sessions[0]?.expiresAt
+		env.persist.mockClear()
+		await env.app.inject({
+			method: "GET",
+			url: "/api/access/session",
+			headers: env.headers,
+		})
+		await Promise.resolve()
+		expect(env.persist).not.toHaveBeenCalled()
+		expect(env.sessions.exportSnapshot().sessions[0]?.expiresAt).toBe(expires)
+	})
+
+	it("notes a successful websocket admission once per hour", async () => {
+		const env = await setup()
+		await addWs(env)
+		env.persist.mockClear()
+		const url = await listen(env.app)
+		const client = await connect(url, env.headers)
+		await vi.waitFor(() => expect(env.persist).toHaveBeenCalledOnce())
+		expect(env.sessions.exportSnapshot().sessions[0]?.lastSeenAt).toEqual(
+			expect.any(Number),
+		)
+		env.persist.mockClear()
+		const again = await connect(url, env.headers)
+		await Promise.resolve()
+		expect(env.persist).not.toHaveBeenCalled()
+		client.close()
+		again.close()
+		await Promise.all([once(client, "close"), once(again, "close")])
+	})
+})
