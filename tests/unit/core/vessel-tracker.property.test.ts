@@ -31,7 +31,7 @@ interface Report {
 
 function cleanText(value: string | undefined): string | null {
 	if (value === undefined) return null
-	const cleaned = value.replace(/@+$/g, "").trim()
+	const cleaned = value.trim().replace(/@+$/g, "").trim()
 	return cleaned.length > 0 ? cleaned : null
 }
 

@@ -142,6 +142,13 @@ describe("VesselTracker", () => {
 		expect(vessels.get("1")?.lastStaticAt).toBe(t1.toISOString())
 		vessels.processShip(
 			"ais",
+			{ mmsi: "1", messageType: 21, name: " @@@ " },
+			new Date("2026-06-15T12:03:00.000Z"),
+		)
+		expect(vessels.get("1")?.name).toBe("AMBROSE LIGHT")
+		expect(vessels.get("1")?.lastStaticAt).toBe(t1.toISOString())
+		vessels.processShip(
+			"ais",
 			{ mmsi: "2", messageType: 24, callsign: "KC1234" },
 			t2,
 		)

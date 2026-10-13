@@ -98,7 +98,7 @@ function normalizeMmsi(value: string | number): string | null {
 /** Trim and strip AIS "@" padding. Empty text is absent. */
 function carriedText(value: string | null | undefined): string | null {
 	if (value == null) return null
-	const cleaned = value.replace(/@+$/g, "").trim()
+	const cleaned = value.trim().replace(/@+$/g, "").trim()
 	return cleaned.length > 0 ? cleaned : null
 }
 

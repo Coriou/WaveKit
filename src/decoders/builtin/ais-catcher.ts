@@ -217,10 +217,14 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 		}
 		const key = `${parts.seqId}:${parts.channel}`
 		if (parts.fragment === 1) {
-			if (
-				!this.fragmentGroups.has(key) &&
-				this.fragmentGroups.size >= MAX_PENDING_FRAGMENTS
-			) {
+			// A second opening fragment means the group is incomplete or two
+			// groups collided. Drop it and discard this fragment so the next
+			// sentence cannot finish the previous payload.
+			if (this.fragmentGroups.has(key)) {
+				this.fragmentGroups.delete(key)
+				return null
+			}
+			if (this.fragmentGroups.size >= MAX_PENDING_FRAGMENTS) {
 				const oldest = this.oldestFragmentKey()
 				if (oldest !== undefined) this.fragmentGroups.delete(oldest)
 			}
@@ -676,13 +680,14 @@ function etaFromComponents(
 	if (month === 0 || day === 0 || hour === 24 || minute === 60) return undefined
 	if (month < 1 || month > 12 || day < 1 || day > 31) return undefined
 	if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return undefined
-	const year = at.getUTCFullYear()
-	const candidate = utcDate(year, month, day, hour, minute)
-	if (!candidate) return undefined
-	if (candidate.getTime() < at.getTime()) {
-		return utcDate(year + 1, month, day, hour, minute)
+	// Feb 29 is valid only in a leap year, so the next occurrence may be
+	// several years ahead (the longest gap spans a skipped century leap day).
+	const startYear = at.getUTCFullYear()
+	for (let year = startYear; year <= startYear + 8; year++) {
+		const candidate = utcDate(year, month, day, hour, minute)
+		if (candidate && candidate.getTime() >= at.getTime()) return candidate
 	}
-	return candidate
+	return undefined
 }
 
 function utcDate(
@@ -752,7 +757,7 @@ function readAisText(
 		text +=
 			value < 32 ? String.fromCharCode(value + 64) : String.fromCharCode(value)
 	}
-	const cleaned = text.replace(/@+$/g, "").trim()
+	const cleaned = text.trim().replace(/@+$/g, "").trim()
 	return cleaned.length > 0 ? cleaned : undefined
 }
 

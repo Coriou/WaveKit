@@ -196,6 +196,25 @@ describe("decodeAisPayload types", () => {
 		expect(decoded?.draught).toBe(12.8)
 	})
 
+	it("treats space-padded @ text as absent", () => {
+		const fields: Type5Fields = {
+			mmsi: 555678901,
+			imo: 9056789,
+			callsign: "GBTT",
+			name: " @@@ ".padEnd(20, " "),
+			shipType: 70,
+			month: 1,
+			day: 15,
+			hour: 14,
+			minute: 0,
+			draughtTenths: 128,
+			destination: "SOUTHAMPTON",
+		}
+		const decoded = decodeArmored(encodeType5(fields), at)
+		expect(decoded?.name).toBeUndefined()
+		expect(decoded?.destination).toBe("SOUTHAMPTON")
+	})
+
 	it("leaves ETA absent for the not-available sentinels", () => {
 		const base: Type5Fields = {
 			mmsi: 1,
@@ -219,6 +238,32 @@ describe("decodeAisPayload types", () => {
 			const decoded = decodeArmored(encodeType5({ ...base, ...patch }), at)
 			expect(decoded?.eta).toBeUndefined()
 		}
+	})
+
+	it("uses the next real February 29 for an ETA", () => {
+		const fields: Type5Fields = {
+			mmsi: 1,
+			imo: 1,
+			callsign: "ABC",
+			name: "N",
+			shipType: 70,
+			month: 2,
+			day: 29,
+			hour: 12,
+			minute: 0,
+			draughtTenths: 10,
+			destination: "PORT",
+		}
+		const fromNonLeap = decodeArmored(
+			encodeType5(fields),
+			new Date("2026-01-15T00:00:00.000Z"),
+		)
+		expect(fromNonLeap?.eta?.toISOString()).toBe("2028-02-29T12:00:00.000Z")
+		const afterLeapDay = decodeArmored(
+			encodeType5(fields),
+			new Date("2028-03-01T00:00:00.000Z"),
+		)
+		expect(afterLeapDay?.eta?.toISOString()).toBe("2032-02-29T12:00:00.000Z")
 	})
 
 	it("decodes the checked-in type 1 sample the way it did before", () => {
@@ -266,6 +311,31 @@ describe("fragment reassembly", () => {
 		expect(ship.mmsi).toBe("555678901")
 		expect(ship.name).toBe("ATLANTIC VOYAGER")
 		expect(ship.imo).toBe(9056789)
+	})
+
+	it("drops a group when another first fragment reuses its key", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(at)
+		const decoder = new FeedableAis(config(), logger)
+		const firstGroup = fragmentsOf(sampleType5(), 4)
+		const colliding = fragmentsOf(
+			{
+				...sampleType5(),
+				mmsi: 99,
+				name: "OTHER NAME",
+				destination: "ELSEWHERE",
+			},
+			4,
+		)
+		expect(decoder.feed(firstGroup[0]!)).toBeNull()
+		expect(decoder.feed(colliding[0]!)).toBeNull()
+		expect(decoder.feed(firstGroup[1]!)).toBeNull()
+		expect(decoder.feed(colliding[1]!)).toBeNull()
+		const fresh = fragmentsOf(sampleType5(), 4)
+		expect(decoder.feed(fresh[0]!)).toBeNull()
+		const output = decoder.feed(fresh[1]!)
+		expect(output?.type).toBe("ship")
+		expect((output?.data as { name?: string }).name).toBe("TEST VESSEL")
 	})
 
 	it("drops an out-of-order or timed-out group", () => {
