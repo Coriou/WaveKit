@@ -25,18 +25,33 @@ export interface TransmissionConfigIdentity {
  * True when a live-demod config change must end an open transmission.
  * Threshold-only edits (including `squelch` and `autoMarginDb`) do not.
  * `offsetHz` and `squelchMode` use the same defaults the demodulator applies.
+ *
+ * An absent `sourceId` means the resolved default (`resolvedSourceId`, the
+ * demodulator status source). It is the same source as an explicit id equal
+ * to that default (WG2 req 7.7). Callers that omit the resolved id keep the
+ * old string comparison.
  */
 export function liveDemodTransmissionConfigChanged(
 	previous: TransmissionConfigIdentity,
 	next: TransmissionConfigIdentity,
+	resolvedSourceId?: string,
 ): boolean {
 	return (
-		previous.sourceId !== next.sourceId ||
+		effectiveSourceId(previous.sourceId, resolvedSourceId) !==
+			effectiveSourceId(next.sourceId, resolvedSourceId) ||
 		previous.modulation !== next.modulation ||
 		previous.bandwidth !== next.bandwidth ||
 		(previous.offsetHz ?? 0) !== (next.offsetHz ?? 0) ||
 		(previous.squelchMode ?? "manual") !== (next.squelchMode ?? "manual")
 	)
+}
+
+function effectiveSourceId(
+	configured: string | undefined,
+	resolved: string | undefined,
+): string | undefined {
+	if (configured !== undefined) return configured
+	return resolved
 }
 
 const CHANGE_EVENTS = [
