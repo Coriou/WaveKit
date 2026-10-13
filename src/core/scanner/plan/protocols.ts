@@ -1,5 +1,6 @@
 import type { FreqRange } from "../../spectrum/types.js"
 import type { Hop, NormalisedJobSpec, ScannerProtocol } from "../types.js"
+import { isRangeEnabled } from "./range-contract.js"
 
 type ProtocolSpec = Pick<
 	NormalisedJobSpec,
@@ -15,7 +16,12 @@ function protocolsInRange(
 	return [
 		...new Set(
 			spec.ranges
-				.filter(r => r.endHz >= covered.startHz && r.startHz <= covered.endHz)
+				.filter(
+					r =>
+						isRangeEnabled(r) &&
+						r.endHz >= covered.startHz &&
+						r.startHz <= covered.endHz,
+				)
 				.flatMap(r => r.protocols ?? []),
 		),
 	]
