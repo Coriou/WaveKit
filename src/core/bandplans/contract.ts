@@ -179,6 +179,7 @@ export type SdrppFailureReason =
 	| "shape"
 	| "empty"
 	| "row-limit"
+	| "too-large"
 export interface SdrppParseFailure {
 	readonly ok: false
 	readonly code: "BANDPLANS_IMPORT_TOO_LARGE" | "BANDPLANS_IMPORT_INVALID"

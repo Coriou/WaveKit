@@ -124,13 +124,8 @@ function parseBody(
 	return { ok: true, value: { preview, bands } }
 }
 
-/**
- * Size failures use reason "too-large". That token is not on the frozen
- * `SdrppFailureReason` union; `code` is the discriminator callers switch on.
- */
 function tooLarge(): SdrppParseFailure {
-	const reason = "too-large" as SdrppFailureReason
-	return { ok: false, code: "BANDPLANS_IMPORT_TOO_LARGE", reason }
+	return { ok: false, code: "BANDPLANS_IMPORT_TOO_LARGE", reason: "too-large" }
 }
 
 function invalid(reason: SdrppFailureReason): SdrppParseFailure {
