@@ -118,10 +118,33 @@ credentials are rejected with 403, including when accompanied by a session cooki
 missing/expired/revoked sessions return 401 and unavailable storage/clock authority
 returns safe 503. The closed `AccessDevicesDto` is `{ devices: AccessDeviceDto[] }`:
 each row contains only `deviceId`, `createdAt`, `renewedAt`, `expiresAt` (integer
-milliseconds) and `current`. It lists unexpired remembered sessions, not online
-presence, with exactly one current requester and at most the configured cap (maximum
-32). Rows sort by creation time, then ASCII device ID. No names, credentials or private
-session records are exposed.
+milliseconds), `current`, and (WG2) `name`, `kind` and `lastSeenAt`, each null until
+set. It lists unexpired remembered sessions, not online presence, with exactly one
+current requester and at most the configured cap (maximum 32). Rows sort by creation
+time, then ASCII device ID. No credentials or private session records are exposed.
+
+`name` and `kind` are set only by an operator (below); they are never derived from a
+user agent, address or other fingerprint. `lastSeenAt` is the start of the UTC hour
+(integer milliseconds) of the device's latest authenticated HTTP or WebSocket
+admission, null until the first one after the upgrade. It is the hour of the last use,
+not presence. It is written through the session mutation queue at most once per device
+per UTC hour (at most 32 × 24 = 768 writes a day), never by the inventory read itself
+and never by machine credentials. A failed last-seen write leaves the committed state
+unchanged, is counted and logged at most once a minute, and never fails or delays the
+request. The private session snapshot is version 2; a version 1 snapshot loads with
+null labels and is written as version 2 on the next commit. An older WaveKit refuses a
+version 2 snapshot and fails closed.
+
+`POST /api/access/devices/label` with `{ "deviceId", "name"?, "kind"? }` labels a
+remembered device. At least one of `name` and `kind` is required; `null` clears a field
+and an absent key keeps it. `name` is 1–64 characters after trimming, at most 128
+UTF-8 bytes, with no C0/C1 control or bidirectional-override characters. `kind` is one
+of `browser`, `phone`, `tablet`, `desktop`, `cli`, `other`. The route has the same
+session, CSRF, Origin and exact-target admission as `POST /api/access/devices/revoke`;
+the body is parsed before the mutation is queued, and the label is persisted before
+the answer. The answer is `{ "updated": true | false }` (false for an unknown or expired
+device). A label queued behind the revocation of the requester's own session answers
+401 `AUTH_REQUIRED`. Machine routes do not label.
 
 The inventory reauthorizes the original request immediately before a synchronous,
 one-clock committed-map snapshot and rechecks availability after the clock callback.
@@ -145,7 +168,7 @@ Origin keeps the existing 403. Queries, encoded paths and non-HTTP transports
 return 400.
 
 The list reuses each `AccessDeviceDto` row (`deviceId`, `createdAt`, `renewedAt`,
-`expiresAt`, `current`) but is not the browser `AccessDevicesDto`: a machine
+`expiresAt`, `current`, `name`, `kind`, `lastSeenAt`) but is not the browser `AccessDevicesDto`: a machine
 principal is not a remembered browser, so every `current` value is false and the
 list may be empty. Rows are the unexpired committed sessions, sorted by creation
 time then ASCII device ID, at most 32. An empty inventory is 200 `{ "devices": [] }`,
@@ -1732,6 +1755,16 @@ curl -X POST http://localhost:9000/api/scanner/plan \
 	"issues": [
 		{
 			"code": "poi-low",
+Sweep plans skip locked-out discoveries (WG2, "Ignore skips sweeps"). A
+discovery with `operator.lockout` heard on the spec's source adds a runtime
+exclusion `[centre − w/2, centre + w/2]`, w = max(the discovery's bandwidth,
+the narrowest raster step there, 1 kHz), clipped to the enabled ranges. The
+preview lists them as `lockoutExclusions: [{ discoveryId, startHz, endHz,
+applied }]`, lowest first. At most 256 apply; the rest have `applied: false`.
+When applying them would leave no hop, none applies and all have
+`applied: false`. The key is absent for in-window plans and when no lockout
+falls inside the ranges. Lockout exclusions are never written into the spec.
+
 			"severity": "warning",
 			"message": "detection POI below 50 % for a 5000 ms transmission",
 			"details": { "hops": [3, 4, 17], "txDurationHintMs": 5000 }
@@ -1959,7 +1992,16 @@ current band plan) and resend.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
+
+Sweep jobs carry the `lockoutExclusions` of their current plan (see
+`POST /api/scanner/plan`; runtime only, not persisted, recomputed when the job
+is created, edited or restored). Setting, clearing or deleting a lockout
+replans every live sweep job on the discovery's sources whose list changes and
+sends `scanner:job`.
   -H 'Content-Type: application/json' \
+`progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
+since the job started: see `GET /api/scanner/jobs/:id/hits`.
+
   -d '{"ranges": [{"startHz": 446000000, "endHz": 446200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 446006250}], "name": "PMR", "dwellMs": 400}, {"startHz": 448000000, "endHz": 448200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 448006250}], "enabled": false}]}'
 ```
 
@@ -2102,6 +2144,43 @@ Pass `nextCursor` as `cursor` for the next page; `null` ends the list.
 The `Discovery` (metadata, co-channel links, operator fields). 404
 `SCANNER_NOT_FOUND`.
 
+#### GET /api/scanner/jobs/:id/hits
+
+Per-job hit statistics (WG2): a hit is one observation of the job attributed
+to a discovery, counted once per observation and job (a job that joins an open
+track is credited once too). `?limit=n` (1–500, default 100). 404
+`SCANNER_JOB_NOT_FOUND` for an unknown job.
+
+```json
+{
+	"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+	"stats": {
+		"discoveries": 12,
+		"hits": 57,
+		"newDiscoveries": 3,
+		"truncated": false
+	},
+	"hits": [
+		{
+			"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+			"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
+			"hits": 9,
+			"firstHitAt": "2026-10-13T14:00:02.000Z",
+			"lastHitAt": "2026-10-13T14:02:11.000Z",
+			"firstSeenInJob": true
+		}
+	]
+}
+```
+
+`hits` is most recent hit first. `firstSeenInJob` means an observation of this
+job created the discovery. In memory only: the counts reset when the job
+starts (not on resume), are dropped when the job is deleted and are empty after
+a restart. At most 2,000 discoveries are tracked per job; further hits count
+in `stats.hits` only. The counts are best-effort: the job remembers the last
+4,096 observations it credited, and once that memory has dropped one a
+re-placed observation may count twice. Either case sets `truncated: true`.
+
 #### GET /api/scanner/discoveries/:id/observations
 
 `{ items: Observation[], nextCursor }`; `cursor` and `limit` (1–500, default
@@ -2111,8 +2190,9 @@ hypotheses, the decode evidence and flags. 404 `SCANNER_DISCOVERY_NOT_FOUND`.
 #### PATCH /api/scanner/discoveries/:id
 
 Operator fields: `label` (≤ 100 chars), `notes` (≤ 2000), `lockout`
-(boolean; stops its probes and blocks listen), `keep` (boolean; never pruned
-by age). At least one key. Returns the `Discovery`.
+(boolean; stops its probes, blocks listen and, from WG2, skips the frequency
+in sweeps on the discovery's sources: see `POST /api/scanner/plan`), `keep`
+(boolean; never pruned by age). At least one key. Returns the `Discovery`.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/discoveries/d_01JA2T7B9S0KQ4M3XZ8R6V5W2N \
@@ -2504,6 +2584,42 @@ The store holds three kinds:
   are not stored. Provenance on this path is unknown RF: `sourceId` and
   `frequency` are null.
 - `analog-transmission`: one record per closed
+### Mesh
+
+Meshtastic node current state (WG2) from the `meshtastic` decoder output. In
+memory only: no position history, telemetry or links, cleared on restart. DTOs
+in `packages/api-types/src/mesh.ts`. Nodes are keyed by the packet's `from`
+(never `to` or the broadcast address). Copies of an already heard
+`(from, id)` packet within 60 s are flood copies: they only raise
+`duplicateCopies`. Nodes unheard for 4 hours expire; at 1,000 nodes the least
+recently heard is evicted. Live updates on the [`mesh` channel](#mesh-channel).
+
+#### GET /api/mesh/nodes
+
+`MeshNodeListResponse`: `{ nodes, stats, timestamp }`, most recently heard
+first. A `MeshNode` has `nodeId` (`!` plus 8 lowercase hex digits), `key`
+(`node:<nodeId>`, the Activity entity key), `nodeNum`, the NODEINFO fields
+`longName`, `shortName`, `hwModel`, `role`, `isLicensed` (null until
+received) and `lastNodeInfoAt`, `position` (`{ lat, lon, altitudeM, at }` from
+the latest valid POSITION, or null), `snrDb`, `rssiDbm` and `hopsAway` of the
+last unique packet (null when unknown), `viaMqtt`, `packetCount` (unique
+packets), `duplicateCopies`, `portnums` (unique packets per port, at most 64
+keys, later ports count under `other`), `lastPortnum`, `decoderId`,
+`firstSeen` and `lastSeen`.
+
+#### GET /api/mesh/stats
+
+`MeshTrackerStats`: `nodeCount`, `withPosition`, `withName`,
+`packetsProcessed`, `duplicatesDropped`, `invalidPackets`, `decodeErrors`,
+`packetsPerSecond` (60 s average of unique packets), `lastPacketAt`,
+`latestNodeId`, `expiredTotal` and `timestamp`.
+
+#### GET /api/mesh/nodes/:nodeId
+
+One `MeshNode`; the id matches case-insensitively. 400 `VALIDATION_ERROR` for
+a malformed id; 404 `{ error, code: "MESH_NODE_NOT_FOUND", nodeId }` when the
+node is not tracked.
+
   [`live-audio:transmission`](#live-audiotransmission) of the live
   demodulator. `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
   and `payload` is `AnalogTransmissionPayload` (the closed event without
@@ -3368,7 +3484,7 @@ state change and after every edit.
 
 #### scanner:progress
 
-`{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes}`;
+`{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes, hits?, newDiscoveries?}`;
 `probes` is a count (the probe list is in the job detail, `progress.probes[]`).
 Up to 2 Hz per job (at most one per 500 ms); progress changes on every hop
 tune and sweep end, and at least once a second while the job runs. It still
@@ -3393,8 +3509,10 @@ counts toward the channel's global budget.
 
 #### scanner:discovery
 
-`{change: "created" | "updated" | "upgraded" | "merged" | "deleted", discovery}`,
-coalesced to at most 1/s per discovery (the latest change wins).
+`{change: "created" | "updated" | "upgraded" | "merged" | "deleted", discovery, jobHits?}`,
+coalesced to at most 1/s per discovery (the latest change wins). `jobHits`
+(WG2) is present when a job's observation caused the change: one `ScanJobHit`
+per such job that tracks the discovery.
 
 #### scanner:activity
 
@@ -3458,6 +3576,7 @@ limiter and do not count toward `ws.maxMessagesPerSecond`.
 #### spectrum:profile
 
 Sent to one client only: the ack to a `spectrum` subscribe, or a notice after a
+`hits` and `newDiscoveries` (WG2) are the job's hit totals since it started.
 permanent source removal (`DELETE /api/sources/:id`) or a default-profile change
 that remapped the client.
 
@@ -3741,6 +3860,41 @@ Scanner and spectrum routes answer with the flat body
 The API does not currently implement rate limiting. For production deployments, consider placing a reverse proxy (nginx, Caddy) in front of WaveKit.
 
 ## CORS
+		"lastSeen": "2026-10-13T14:02:15.000Z"
+	}
+}
+```
+
+#### Mesh channel
+
+Meshtastic node current state, mirroring the tracker behind [Mesh](#mesh).
+Not replayed: refetch `GET /api/mesh/nodes` after a reconnect. Flood copies
+send nothing.
+
+- `mesh:new` — `MeshNode`, the first packet from a node
+- `mesh:update` — `MeshNode` after each unique packet
+- `mesh:lost` — `{ nodeId, node }` when a node expires (4 hours unheard) or
+  is evicted at the 1,000-node cap
+- `mesh:stats` — `MeshTrackerStats`, every 5 s
+
+```json
+{
+	"type": "mesh:update",
+	"channel": "mesh",
+	"data": {
+		"nodeId": "!a1b2c3d4",
+		"key": "node:!a1b2c3d4",
+		"longName": "Hilltop relay",
+		"shortName": "HTR",
+		"position": {
+			"lat": 48.85,
+			"lon": 2.35,
+			"altitudeM": 120,
+			"at": "2026-10-13T14:02:15.000Z"
+		},
+		"snrDb": 6.5,
+		"hopsAway": 1,
+		"packetCount": 42,
 
 CORS is enabled by default, allowing requests from any origin. Configure via:
 

@@ -212,6 +212,14 @@ Storage layout under `scanner.storage.dir`:
 
 Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and journal files), `discoveryMaxAgeDays` (discoveries not marked `keep`) and `maxDiscoveries`. When free disk drops below `minFreeDiskMb` the status reports `disk: "disk-low"`: recording and evidence stop; discoveries keep updating. Privacy: identifiers (talkgroups, radio ids, callsigns, capcodes) stay on the host; nothing is uploaded.
 
+### Ignore skips sweeps
+
+Marking a discovery Ignore (`PATCH /api/scanner/discoveries/:id` with `lockout: true`) stops its probes, blocks listen and, since WG2, takes its frequency out of sweeps on the sources it was heard on. Each lockout becomes a runtime exclusion of width max(the discovery's bandwidth, the narrowest raster step of the ranges holding it, 1 kHz) centred on it and clipped to the job's enabled ranges. The sweep's hops no longer list that channel; a hop whose channels are all locked out is dropped. In-window jobs are unchanged. Rules: at most 256 lockout exclusions apply per job (lowest frequency first, the rest are listed unapplied); lockouts never empty a plan (if they would, none applies and all are listed unapplied); they are never written into the job's spec, so a PATCH, a restart or clearing the lockout gives the plan back. Setting, clearing or deleting a lockout replans the affected sweep jobs at once. The plan preview and the job show them as `lockoutExclusions` with `applied`.
+
+### Hit statistics
+
+Each job counts its hits: one per observation attributed to a discovery, per discovery with first and last hit time and whether the job first saw it. `GET /api/scanner/jobs/:id/hits` lists them (most recent first); the job's `progress.hitStats`, `scanner:progress` (`hits`, `newDiscoveries`) and `scanner:discovery` (`jobHits`) carry them too. In memory only: reset when a job starts (not on resume), dropped with the job, empty after a restart. Bounds: 2,000 discoveries tracked per job (later ones count in the totals only) and a 4,096-observation dedupe memory; past either bound the stats say `truncated: true` and are best-effort.
+
 ## Listening
 
 `POST /api/scanner/discoveries/:id/listen` retunes live audio's `offsetHz` to the discovery when it is in the current window (409 `OUT_OF_WINDOW` otherwise). Probe audio is on the digital voice server at `/decoders/<probeId>/stream`.
