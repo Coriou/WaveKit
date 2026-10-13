@@ -227,6 +227,57 @@ export const SAMPLE_PACKETS: APRSPacket[] = [
 ]
 
 /**
+ * Object (`;`) and item (`)`) packets, including kill reports (WG2 req 3.2).
+ * Kept separate from SAMPLE_PACKETS so the committed KISS sample stays aligned.
+ */
+export const OBJECT_ITEM_PACKETS: APRSPacket[] = [
+	{
+		source: "N0CALL",
+		destination: "APRS",
+		path: [],
+		dataTypeChar: ";",
+		dataType: "Object",
+		info: ";MEETING  *092345z4903.50N/07201.75W-Weekly club meeting",
+		lat: 49.05833333333333,
+		lon: -72.02916666666667,
+		comment: "Weekly club meeting",
+	},
+	{
+		source: "N0CALL",
+		destination: "APRS",
+		path: [],
+		dataTypeChar: ";",
+		dataType: "Object",
+		info: ";MEETING  _092345z4903.50N/07201.75W-Weekly club meeting",
+		lat: 49.05833333333333,
+		lon: -72.02916666666667,
+		comment: "Weekly club meeting",
+	},
+	{
+		source: "W1AW",
+		destination: "APRS",
+		path: [],
+		dataTypeChar: ")",
+		dataType: "Item",
+		info: ")AID#4!4903.50N/07201.75W-First aid station",
+		lat: 49.05833333333333,
+		lon: -72.02916666666667,
+		comment: "First aid station",
+	},
+	{
+		source: "W1AW",
+		destination: "APRS",
+		path: [],
+		dataTypeChar: ")",
+		dataType: "Item",
+		info: ")AID#4_4903.50N/07201.75W-First aid station",
+		lat: 49.05833333333333,
+		lon: -72.02916666666667,
+		comment: "First aid station",
+	},
+]
+
+/**
  * Expected parsed data from the sample packets.
  * Can be used to verify parser output.
  */
