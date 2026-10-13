@@ -511,34 +511,36 @@ describe("snapshot version 2", () => {
 })
 
 describe("coarse last-seen", () => {
-	it("commits one hour floor, ignores bursts and earlier hours, and does not renew", async () => {
+	it("commits one hour floor, ignores bursts and earlier hours, keeps a later hour that arrives mid-commit, and does not renew", async () => {
 		const env = await setup()
 		const before = env.sessions.exportSnapshot().sessions[0]
 		if (!before) throw new Error("Missing session")
 		const gate = deferred()
 		env.persist.mockImplementationOnce(() => gate.promise)
 		const first = env.sessions.noteSeen(env.browser.principalId, START + 10)
-		const skipped = env.sessions.noteSeen(
+		await vi.waitFor(() => expect(env.persist).toHaveBeenCalledOnce())
+		// WG2 R2: a next-hour admission while that commit runs is queued, not dropped.
+		const later = env.sessions.noteSeen(
 			env.browser.principalId,
 			START + HOUR + 10,
 		)
-		await vi.waitFor(() => expect(env.persist).toHaveBeenCalledOnce())
 		expect(env.sessions.exportSnapshot().sessions[0]?.lastSeenAt).toBeNull()
 		gate.resolve()
 		await first
-		await skipped
+		await later
+		expect(env.persist).toHaveBeenCalledTimes(2)
 		expect(env.sessions.exportSnapshot().sessions[0]).toMatchObject({
-			lastSeenAt: START,
+			lastSeenAt: START + HOUR,
 			renewedAt: before.renewedAt,
 			expiresAt: before.expiresAt,
 			name: null,
 		})
 		env.persist.mockClear()
-		await env.sessions.noteSeen(env.browser.principalId, START + HOUR - 1)
-		expect(env.persist).not.toHaveBeenCalled()
+		// Bursts and earlier hours write nothing.
+		await env.sessions.noteSeen(env.browser.principalId, START + 2 * HOUR - 1)
+		await env.sessions.noteSeen(env.browser.principalId, START)
 		await env.sessions.noteSeen(env.browser.principalId, START - HOUR)
-		expect(env.sessions.exportSnapshot().sessions[0]?.lastSeenAt).toBe(START)
-		await env.sessions.noteSeen(env.browser.principalId, START + HOUR)
+		expect(env.persist).not.toHaveBeenCalled()
 		expect(env.sessions.exportSnapshot().sessions[0]?.lastSeenAt).toBe(
 			START + HOUR,
 		)
