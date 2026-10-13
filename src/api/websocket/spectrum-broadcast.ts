@@ -23,8 +23,10 @@ const CHANNEL_FIELD_BYTES = 24
 
 /**
  * WG1 req 1.8: trims backfill to the client's outbound headroom (newest kept),
- * after reserving the ack, the snapshots and a margin, so a re-subscribe on a
- * busy socket never crosses the disconnect cap.
+ * after reserving the ack, the snapshots and a margin; empty when the headroom
+ * is below that reserve. Backfill so never causes a disconnect that the ack and
+ * snapshots alone would not; those are still sent, so a client already at the
+ * outbound caps can be disconnected by them.
  */
 export function fitBackfill(
 	headroom: { bytes: number; messages: number } | null,
