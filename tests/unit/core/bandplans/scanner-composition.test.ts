@@ -1,22 +1,35 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { isDeepStrictEqual } from "node:util"
 import fc from "fast-check"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { BandPlanStackView } from "@wavekit/api-types"
 import {
+	createScannerBandplanProvider,
 	openBandPlanService,
-	resolveScannerBandplans,
 } from "../../../../src/core/bandplans/index.js"
 import type { BandPlanService } from "../../../../src/core/bandplans/contract.js"
-import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
+import {
+	bandplansFor,
+	priorsFor,
+} from "../../../../src/core/scanner/bandplan/index.js"
 import type { Bandplan } from "../../../../src/core/scanner/bandplan/index.js"
-import type { ScanJobSpec } from "../../../../src/core/scanner/types.js"
-import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
+import type { ScanJob } from "@wavekit/api-types"
+import type { JobDriver } from "../../../../src/core/scanner/job-runner.js"
+import type {
+	ScanJobSpec,
+	ScannerSettings,
+} from "../../../../src/core/scanner/types.js"
+import {
+	feedTone,
+	serviceHarness,
+	settled,
+} from "../../../mocks/scanner/service-fakes.js"
 
 // Scanner-level composition of the band-plan feed (M2.2, M2.3): a real band-plan
 // service over a mkdtemp stateDir, a real ScannerService (serviceHarness fakes the
-// SDR side, region EU) and the provider src/index.ts builds inline.
+// SDR side, region EU) and createScannerBandplanProvider, as src/index.ts wires it.
 
 const REGION = "EU" as const
 const cleanups: (() => Promise<void>)[] = []
@@ -25,28 +38,32 @@ afterEach(async () => {
 		await cleanup().catch(() => undefined)
 })
 
-/** Mirrors the inline `scannerBandplans` provider in src/index.ts. */
-function indexProvider(
+/** The provider src/index.ts builds, over a service that may be absent. */
+function feedFrom(
 	current: () => Pick<BandPlanService, "view"> | undefined,
+	onError?: (err: unknown) => void,
 ): () => readonly Bandplan[] {
-	return () => {
-		const service = current()
-		if (service === undefined) return bandplansFor(REGION)
-		try {
-			return resolveScannerBandplans(service.view())
-		} catch {
-			return bandplansFor(REGION)
-		}
-	}
+	return createScannerBandplanProvider(() => current()?.view(), REGION, onError)
 }
 
-function scanner(provider?: () => readonly Bandplan[]) {
-	const h = serviceHarness(provider ? { bandplans: provider } : {})
+const noPassive = (s: ScannerSettings): void => {
+	s.passive.enabled = false
+}
+
+function harness(provider?: () => readonly Bandplan[]) {
+	const h = serviceHarness({
+		patch: noPassive,
+		...(provider ? { bandplans: provider } : {}),
+	})
 	cleanups.push(async () => {
 		await h.service.stop()
 		await rm(h.dir, { recursive: true, force: true })
 	})
-	return h.service
+	return h
+}
+
+function scanner(provider?: () => readonly Bandplan[]) {
+	return harness(provider).service
 }
 
 async function openService(): Promise<BandPlanService> {
@@ -113,7 +130,7 @@ describe("scanner fed by the band-plan stack", () => {
 	// Validates: Requirements 11.2, 11.3, 11.4
 	it("default stack: bandplans() and previews equal the scanner without a provider", async () => {
 		const service = await openService()
-		const fed = scanner(indexProvider(() => service))
+		const fed = scanner(feedFrom(() => service))
 		const plain = scanner()
 		expect(fed.bandplans()).toEqual(bandplansFor(REGION))
 		expect(fed.bandplans()).toEqual(plain.bandplans())
@@ -125,7 +142,7 @@ describe("scanner fed by the band-plan stack", () => {
 	// Validates: Requirements 11.1, 11.3, 11.4
 	it("a hidden built-in band leaves the scanner at the next read; unhiding restores it", async () => {
 		const service = await openService()
-		const fed = scanner(indexProvider(() => service))
+		const fed = scanner(feedFrom(() => service))
 		const view = service.view()
 		const packId = builtinPackId(view)
 		const hiddenId = planIds[0]
@@ -194,7 +211,7 @@ describe("scanner fed by the band-plan stack", () => {
 		const base = service.view()
 		const packId = builtinPackId(base)
 		let current: BandPlanStackView = base
-		const fed = scanner(indexProvider(() => ({ view: () => current })))
+		const fed = scanner(feedFrom(() => ({ view: () => current })))
 		const displayOnly = fc.constantFrom<
 			BandPlanStackView["edits"][number]["set"]
 		>({ skip: { reason: "noisy" } }, { name: "Renamed" }, { hidden: false })
@@ -240,16 +257,172 @@ describe("scanner fed by the band-plan stack", () => {
 	// Validates: Requirements 11.5
 	it("falls back to bandplansFor(region) before the service opens and when view() throws", async () => {
 		let source: Pick<BandPlanService, "view"> | undefined
-		const fed = scanner(indexProvider(() => source))
+		const onError = vi.fn()
+		const fed = scanner(feedFrom(() => source, onError))
 		expect(fed.bandplans()).toEqual(bandplansFor(REGION))
+		expect(onError).not.toHaveBeenCalled()
 		source = {
 			view: () => {
 				throw new Error("store exploded")
 			},
 		}
 		expect(fed.bandplans()).toEqual(bandplansFor(REGION))
+		expect(onError).toHaveBeenCalled()
 		const plain = scanner()
 		for (const spec of specsFor())
 			expect(fed.preview(spec)).toEqual(plain.preview(spec))
 	})
+
+	// Feature: band-plans, Property 17: Hidden removal
+	// Validates: Requirements 11.3
+	it("an admitted sweep keeps its plans through a hide, a pause and a resume; create and patch re-resolve", async () => {
+		const service = await openService()
+		const h = harness(feedFrom(() => service))
+		await h.service.start()
+		const job = await h.service.createJob({
+			sourceId: "rtl",
+			mode: "sweep",
+			bandplans: [PLAN],
+			priority: 50,
+			takeover: true,
+			resume: { autoAfterIdleMs: null },
+		})
+		await untilRunning(h, job.id)
+		const admitted = h.service.getJob(job.id)
+		expect(admitted?.state).toBe("running")
+		const view = service.view()
+		await service.mutate({
+			type: "patch-band-edit",
+			expected: expectedOf(view),
+			packId: builtinPackId(view),
+			bandId: PLAN,
+			set: { hidden: true },
+			reset: [],
+		})
+		expect(h.service.bandplans().map(plan => plan.id)).not.toContain(PLAN)
+
+		// Running: unchanged.
+		feedTone(h.fanout, 0.1, 0, 0, 7)
+		await settled(h.service)
+		expect(pinned(h.service.getJob(job.id))).toEqual(pinned(admitted))
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+
+		// Paused and resumed: still the admitted plan, no error.
+		await h.service.pauseJob(job.id)
+		expect(h.service.getJob(job.id)?.state).toBe("paused")
+		await h.service.resumeJob(job.id, { takeover: true })
+		await untilRunning(h, job.id)
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		expect(pinned(h.service.getJob(job.id))).toEqual(pinned(admitted))
+
+		// A patch re-previews the operator's spec against the current list.
+		await expect(
+			h.service.patchJob(job.id, { thresholdDb: 9 }),
+		).rejects.toMatchObject({ code: "SCANNER_PLAN_INVALID" })
+		expect(pinned(h.service.getJob(job.id))).toEqual(pinned(admitted))
+		// A new create naming the hidden plan is range-empty.
+		await expect(
+			h.service.createJob({ mode: "sweep", bandplans: [PLAN] }),
+		).rejects.toMatchObject({
+			code: "SCANNER_PLAN_INVALID",
+			details: {
+				issues: expect.arrayContaining([
+					expect.objectContaining({
+						code: "range-empty",
+						details: { bandplan: PLAN },
+					}),
+				]),
+			},
+		})
+	})
+
+	// Feature: band-plans, Property 17: Hidden removal
+	// Validates: Requirements 11.1, 11.3
+	it("identify priors follow the effective list: default unchanged, a hidden band drops its priors", async () => {
+		const service = await openService()
+		const h = harness(feedFrom(() => service))
+		await h.service.start()
+		const probe = priorProbe()
+		// Identify targets must sit in the tuned window; the fake tuner reports caps.
+		h.sources.setCaps("rtl", { centerFreq: probe.hz })
+		const all = plans.flatMap(plan => plan.ranges)
+		const visible = plans
+			.filter(plan => plan.id !== probe.id)
+			.flatMap(plan => plan.ranges)
+		expect(priorsFor(visible, probe.hz)).not.toEqual(priorsFor(all, probe.hz))
+
+		const before = await h.service.identify({
+			sourceId: "rtl",
+			target: { frequencyHz: probe.hz },
+			timeoutMs: 1000,
+		})
+		expect(priorsOf(h, before.id)(probe.hz)).toEqual(priorsFor(all, probe.hz))
+		await h.service.cancelJob(before.id)
+		await settled(h.service)
+
+		const view = service.view()
+		await service.mutate({
+			type: "patch-band-edit",
+			expected: expectedOf(view),
+			packId: builtinPackId(view),
+			bandId: probe.id,
+			set: { hidden: true },
+			reset: [],
+		})
+		const after = await h.service.identify({
+			sourceId: "rtl",
+			target: { frequencyHz: probe.hz },
+			timeoutMs: 1000,
+		})
+		expect(priorsOf(h, after.id)(probe.hz)).toEqual(
+			priorsFor(visible, probe.hz),
+		)
+		await h.service.cancelJob(after.id)
+	})
 })
+
+/** pmr446 sits at the harness centre (446.1 MHz). */
+const PLAN = "pmr446"
+
+type Harness = ReturnType<typeof harness>
+
+/** Feeds noise until the sweep leaves `starting`. */
+async function untilRunning(h: Harness, id: string): Promise<void> {
+	for (let i = 0; i < 50 && h.service.getJob(id)?.state === "starting"; i++) {
+		await settled(h.service)
+		feedTone(h.fanout, 0.1, 0, 0, 20 + i)
+	}
+	await settled(h.service)
+}
+
+/** The admitted parts a band-plan change must not touch. */
+function pinned(job: ScanJob | undefined) {
+	if (!job) throw new Error("job missing")
+	return { spec: job.spec, plan: job.plan }
+}
+
+function priorsOf(h: Harness, id: string) {
+	const drivers = (h.service as unknown as { drivers: Map<string, JobDriver> })
+		.drivers
+	const driver = drivers.get(id) as unknown as
+		| { deps: { priorsAt: (hz: number) => unknown } }
+		| undefined
+	if (!driver) throw new Error("identify driver missing")
+	return driver.deps.priorsAt
+}
+
+/** A plan and a frequency inside it whose priors change when that plan is hidden. */
+function priorProbe(): { id: string; hz: number } {
+	const all = plans.flatMap(plan => plan.ranges)
+	for (const plan of plans) {
+		const visible = plans
+			.filter(other => other.id !== plan.id)
+			.flatMap(other => other.ranges)
+		for (const range of plan.ranges) {
+			const hz = Math.round((range.startHz + range.endHz) / 2)
+			if (!isDeepStrictEqual(priorsFor(all, hz), priorsFor(visible, hz)))
+				return { id: plan.id, hz }
+		}
+	}
+	throw new Error("no EU plan with distinct priors")
+}

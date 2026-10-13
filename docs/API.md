@@ -490,8 +490,9 @@ enabled built-in pack, in stack order, that region's built-in scanner plans,
 minus any band with a stored `hidden: true` edit and any plan id already taken.
 Under the default stack this equals the built-in list. `skip`, other edit
 fields, imported packs and operator bands are display-only. A stack change
-applies at the next scanner job create, patch, resume or preview, never to a
-running sweep. Preset `applicable` and `issues` are checked against the same
+applies at the next scanner job create, patch or preview. A running sweep and a
+resumed job (explicit, automatic or after a restart) keep the plans they were
+admitted with. Preset `applicable` and `issues` are checked against the same
 list; see [SCANNER.md](SCANNER.md#presets-and-bandplans).
 
 Reads are mounted in both access modes under the normal API admission. Writes and

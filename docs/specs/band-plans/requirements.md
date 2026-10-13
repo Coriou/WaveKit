@@ -214,9 +214,10 @@ scanner list shall deep-equal `bandplansFor(region)` for every `BandRegion`. The
 files pinned by 1.1 shall stay byte-identical, and scanner defaults, ranges, rasters,
 priors and snapping shall not change.
 11.3 The scanner shall read the effective scanner list when serving
-`GET /api/scanner/bandplans`, when previewing or admitting a job (create, patch, resume
-and passive jobs) and when creating an identify driver. A running sweep shall keep the
-plans it was admitted with; a change shall apply at the next admission, patch or resume.
+`GET /api/scanner/bandplans`, when previewing or admitting a job (create, patch and
+passive jobs) and when creating an identify driver. A running sweep and a resumed job
+(explicit, automatic or boot restore) shall keep the plans it was admitted with; a
+change shall apply at the next create, patch or preview.
 11.4 Job plan ids and the host ranges that operator ranges inherit rasters, OBW,
 protocols and plan id from shall resolve against the effective scanner list. An id that
 is not in it shall be reported as `range-empty`, as an id unknown in the region is today.

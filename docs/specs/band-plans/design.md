@@ -388,7 +388,9 @@ and both isolation hash tables stay unchanged. Main decisions: `GET
 /api/scanner/bandplans` serves the effective list (1.1 amended); built-in presets keep
 region-derived ids but are validated against the effective list; `storeId` is nullable
 on the available store; a new `previewDigest` field, `sha256` stays the file hash; a new
-stack applies at the next job create, patch or resume, never mid-sweep.
+stack applies at the next job create, patch (re-preview) or preview; a resume
+(explicit, automatic or boot restore) keeps the admitted plans and a running sweep is
+never changed.
 
 | Path                                                  | Lane | Role                                               |
 | ----------------------------------------------------- | ---- | -------------------------------------------------- |
@@ -435,11 +437,14 @@ the scanner. The scanner never imports `src/core/bandplans/`: it receives a prov
   `ScannerBandplanProvider`), default `() => bandplansFor(this.deps.region)`. The
   service reads it at `bandplans()` (`GET /api/scanner/bandplans`), in the preview
   context builder, and in `createIdentifyDriver`; it never caches the result across
-  calls, and running sweeps keep their admitted plans.
-- `src/index.ts`: the scanner is constructed before the band-plan service opens, so the
-  provider is late-bound: it returns `resolveScannerBandplans(service.view())` once
-  the service is open and `bandplansFor(region)` before that or when the read throws
-  (11.5).
+  calls. Running and resumed jobs keep their admitted plans: resume and boot restore
+  replan the persisted normalised spec and never resolve plan ids again. Identify
+  priors come from the effective ranges, so a hidden band also drops its priors.
+- `createScannerBandplanProvider(getView, region, onError?)` in `scanner-feed.ts` is
+  the provider: `resolveScannerBandplans(getView())`, or `bandplansFor(region)` when
+  `getView` returns undefined or throws (then `onError`). `src/index.ts` constructs the
+  scanner before the band-plan service opens, so it passes a late-bound
+  `() => bandPlanService?.view()` and logs `onError` (11.5).
 - Built-in presets: `presetIssuesFor(preset, region, effectiveIds?)`; with the set, an
   id is an issue iff absent from it. The service takes the set from an injected optional
   `scannerBandplans` dependency over its own current view (wired in the barrel), so

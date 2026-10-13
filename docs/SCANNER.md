@@ -136,8 +136,11 @@ stack order, contributes its region's plans above, minus bands hidden with a
 packs, operator bands, `skip` and other edits are display-only and change no
 scan range. Job plan ids and the host ranges that operator ranges inherit
 rasters from resolve against this list; a plan that is not in it is
-`range-empty`. A change applies at the next job create, patch, resume or
-preview; a running sweep keeps the plans it was admitted with. Until the
+`range-empty`. A change applies at the next job create, patch or preview; a
+running sweep and a resumed job (explicit, automatic or after a restart) keep
+the plans they were admitted with, while a patch re-checks the job's plan ids.
+Identify priors follow the same list, so hiding a built-in band also drops its
+identify priors. Until the
 band-plan service opens, or if it fails, the scanner uses the built-in list.
 Scan presets only produce job bodies: `GET /api/bandplans/presets/:presetId/job`
 returns a `spec` that a client posts to `POST /api/scanner/jobs`; preset

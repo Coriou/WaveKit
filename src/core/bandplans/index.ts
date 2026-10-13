@@ -12,7 +12,10 @@ import { resolveScannerBandplans } from "./scanner-feed.js"
 import { createBandPlanService } from "./service.js"
 
 export { BandPlansError } from "./contract.js"
-export { resolveScannerBandplans } from "./scanner-feed.js"
+export {
+	createScannerBandplanProvider,
+	resolveScannerBandplans,
+} from "./scanner-feed.js"
 export type {
 	BandPlanService,
 	BandPlanServiceOptions,

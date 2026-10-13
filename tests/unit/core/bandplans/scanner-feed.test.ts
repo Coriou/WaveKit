@@ -12,11 +12,14 @@ import type {
 	PlanStackEntryView,
 } from "@wavekit/api-types"
 import fc from "fast-check"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { projectBuiltinPacks } from "../../../../src/core/bandplans/builtin-packs.js"
 import { openBandPlanService } from "../../../../src/core/bandplans/index.js"
 import type { BandPlanService } from "../../../../src/core/bandplans/contract.js"
-import { resolveScannerBandplans } from "../../../../src/core/bandplans/scanner-feed.js"
+import {
+	createScannerBandplanProvider,
+	resolveScannerBandplans,
+} from "../../../../src/core/bandplans/scanner-feed.js"
 import { BAND_REGIONS } from "../../../../src/decoders/band-region.js"
 import { bandplansFor } from "../../../../src/core/scanner/bandplan/index.js"
 import type { Bandplan } from "../../../../src/core/scanner/bandplan/index.js"
@@ -572,5 +575,66 @@ describe("scanner bandplan feed", () => {
 			}),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+describe("createScannerBandplanProvider", () => {
+	it("falls back to bandplansFor(region) while the view is undefined", () => {
+		const onError = vi.fn()
+		const provider = createScannerBandplanProvider(
+			() => undefined,
+			"US",
+			onError,
+		)
+		expect(provider()).toEqual(bandplansFor("US"))
+		expect(onError).not.toHaveBeenCalled()
+	})
+
+	it("falls back and reports when reading the view throws, including a throwing onError", () => {
+		const failure = new Error("view failed")
+		const onError = vi.fn()
+		const provider = createScannerBandplanProvider(
+			() => {
+				throw failure
+			},
+			"EU",
+			onError,
+		)
+		expect(provider()).toEqual(bandplansFor("EU"))
+		expect(onError).toHaveBeenCalledExactlyOnceWith(failure)
+		const loud = createScannerBandplanProvider(
+			() => {
+				throw failure
+			},
+			"EU",
+			() => {
+				throw new Error("logger failed")
+			},
+		)
+		expect(loud()).toEqual(bandplansFor("EU"))
+		expect(
+			createScannerBandplanProvider(() => {
+				throw failure
+			}, "EU")(),
+		).toEqual(bandplansFor("EU"))
+	})
+
+	it("resolves the current view on every call", () => {
+		const pack = packFor("EU")
+		const hiddenId = bandplansFor("EU")[0]?.id
+		if (hiddenId === undefined) throw new Error("no EU plans")
+		let view = stackView({ region: "EU" })
+		const onError = vi.fn()
+		const provider = createScannerBandplanProvider(() => view, "EU", onError)
+		expect(provider()).toEqual(resolveScannerBandplans(view))
+		expect(provider()).toEqual(bandplansFor("EU"))
+		view = stackView({
+			region: "EU",
+			edits: [edit(pack.id, hiddenId, { hidden: true })],
+		})
+		expect(provider()).toEqual(
+			bandplansFor("EU").filter(plan => plan.id !== hiddenId),
+		)
+		expect(onError).not.toHaveBeenCalled()
 	})
 })

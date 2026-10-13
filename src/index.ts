@@ -75,13 +75,12 @@ import { startActivityRuntime } from "./core/activity/runtime.js"
 import { OperatorDataService } from "./operator-data/service.js"
 import {
 	openBandPlanService,
-	resolveScannerBandplans,
+	createScannerBandplanProvider,
 } from "./core/bandplans/index.js"
 import type {
 	BandPlanService,
 	BandPlansCommitSink,
 } from "./core/bandplans/contract.js"
-import { bandplansFor } from "./core/scanner/bandplan/index.js"
 import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
 import { createBandPlansCommitSink } from "./api/websocket/bandplans-broadcast-adapter.js"
 import {
@@ -883,16 +882,19 @@ async function main(): Promise<void> {
 		// start failure drops the scanner, and with it /api/spectrum.
 		// The band-plan service opens later in startup; until then, and if its view
 		// throws, the scanner falls back to the built-in plans for the region.
-		// Read per call so a committed stack applies to the next job or preview.
+		// Read per call: a committed stack applies to the next job create, patch or
+		// preview; a resumed or running job keeps the plans it was admitted with.
+		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		let bandPlanService: BandPlanService | undefined
-		const scannerBandplans = () => {
-			if (bandPlanService === undefined) return bandplansFor(bandRegion.code)
-			try {
-				return resolveScannerBandplans(bandPlanService.view())
-			} catch {
-				return bandplansFor(bandRegion.code)
-			}
-		}
+		const scannerBandplans = createScannerBandplanProvider(
+			() => bandPlanService?.view(),
+			bandRegion.code,
+			() => {
+				bandPlanLog.warn(
+					"Band-plan view unavailable; scanner uses built-in plans",
+				)
+			},
+		)
 		const { channelTier, ...scannerSettings } = config.scanner
 		try {
 			scannerConstructionStarted = true
@@ -1139,7 +1141,6 @@ async function main(): Promise<void> {
 
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
-		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		let publishBandPlans: BandPlansCommitSink | undefined
 		const bandPlans = await openBandPlanService({
 			stateDir: config.stateDir,
