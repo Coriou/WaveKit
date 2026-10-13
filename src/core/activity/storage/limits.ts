@@ -42,7 +42,9 @@ const MiB = 1024 * 1024
  * so retention and admission are bounded for a Pi-class SD card: 250 000 rows,
  * 256 MiB, 3 days; 50/s burst 500 globally, 20/s burst 200 per decoder. An
  * operator judgement, not a measurement. Config retention and admission blocks
- * override single fields; every omitted field keeps these values.
+ * override single fields; every omitted field keeps these values. maxDbBytes
+ * counts live database pages: the WAL (up to walPauseBytes before writes pause)
+ * comes on top, so worst-case disk use is about 320 MiB.
  */
 export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
 	globalRatePerSec: 50,
