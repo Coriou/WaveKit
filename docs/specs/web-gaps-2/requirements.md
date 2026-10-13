@@ -1,6 +1,6 @@
 # Web gaps 2 requirements (WG2)
 
-Status: reviewed design, contract frozen; not implemented (2026-10-13). See [design](design.md)
+Status: implemented on the WG2 batch (2026-10-13); final checkpoint pending. See [design](design.md)
 and [tasks](tasks.md).
 
 ## Scope

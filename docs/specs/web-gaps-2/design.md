@@ -1,6 +1,6 @@
 # Web gaps 2 design (WG2)
 
-Status: reviewed design, contract frozen; not implemented (2026-10-13). Requirements in
+Status: implemented on the WG2 batch (2026-10-13); final checkpoint pending. Requirements in
 [requirements](requirements.md), tasks in [tasks](tasks.md). Background: the envelope spec
 ([decode envelope](../decode-envelope/requirements.md) 4.1–4.6), WG1
 ([design](../web-gaps-1/design.md): coalescing, vessels, transmissions) and the access spec
