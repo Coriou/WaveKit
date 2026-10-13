@@ -81,9 +81,10 @@ close shall end it. With squelch 0 in manual mode no transmission is produced.
 3.2 On start the server shall send `live-audio:transmission` with `state: "open"` on the
 `live-audio` channel; on end, one with `state: "closed"`. Both carry the same
 `transmissionId` (a UUID).
-3.3 `startedAt` shall be the time of the open. `endedAt` shall be the time of the last
-above-threshold block, that is the close time minus the squelch hang time, and never before
-`startedAt`; `durationMs` = `endedAt − startedAt`.
+3.3 `startedAt` shall be the time of the open. For a `squelch` close, `endedAt` shall be the
+time of the last above-threshold block, that is the close time minus the squelch hang time,
+and never before `startedAt`; for every other close reason (`retune`, `max-duration`,
+`config`, `stopped`) it is the close time (R1 m1). `durationMs` = `endedAt − startedAt`.
 3.4 `frequency` shall be the event-time RF frequency when the transmission opened: the
 tuned centre of the live demodulator's source plus `offsetHz`, with the tuning trust; null
 when the centre is unknown.

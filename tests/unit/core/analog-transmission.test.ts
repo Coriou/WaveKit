@@ -267,6 +267,20 @@ describe("analog transmission tracker", () => {
 		}
 	})
 
+	it("ends a retune at the retune time, without subtracting the squelch hang", () => {
+		const { source, events, setNow } = harness()
+		setNow(5_000)
+		source.gate(true)
+		setNow(7_000)
+		source.frequencyHz = 446_000_500
+		source.level(-15)
+		expect(events[1]).toMatchObject({
+			closeReason: "retune",
+			endedAt: new Date(7_000).toISOString(),
+			durationMs: 2_000,
+		})
+	})
+
 	it("ends a retune and opens the next transmission at the new frequency", () => {
 		const { source, events } = harness()
 		source.gate(true)
@@ -327,7 +341,8 @@ describe("analog transmission tracker", () => {
 		expect(events[1]).toMatchObject({
 			transmissionId: "tx-1",
 			peakChannelPowerDbfs: -6,
-			durationMs: 1_000 - 250,
+			// The squelch is still open: no hang to subtract (R1 m1).
+			durationMs: 1_000,
 		})
 		expect(events[2]).toMatchObject({
 			transmissionId: "tx-2",

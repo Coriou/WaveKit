@@ -111,7 +111,7 @@ labels the teardown squelch edge; threshold-only changes keep it open), a level 
 level samples (`max-duration`). After `retune` or `max-duration` a new transmission opens
 at once if the squelch is still open and gated. Level samples while open update peak and a
 running mean of `channelPowerDbfs` (non-null only). `endedAt = max(startedAt, closeAt −
-squelchHangMs())` except for `stopped`/`config`, where it is `closeAt`. The tracker never
+squelchHangMs())` for a `squelch` close only; every other reason uses `closeAt`. The tracker never
 throws into the emitter; `frequencyAt` failures give `frequency: null`.
 
 **Live demodulator.** Lane A may add `squelchHangMs()` (the `ChannelSquelch` hang in use)

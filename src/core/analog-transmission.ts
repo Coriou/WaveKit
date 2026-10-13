@@ -320,10 +320,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const open = this.transmission
 		if (!open) return
 		this.transmission = null
+		// Only a squelch close happens a hang after the last above-threshold
+		// block; retune, max-duration, stop and config end at the close itself.
 		const endedMs =
-			reason === "stopped" || reason === "config"
-				? closeAt
-				: Math.max(open.startedAtMs, closeAt - this.hangMs())
+			reason === "squelch"
+				? Math.max(open.startedAtMs, closeAt - this.hangMs())
+				: closeAt
 		const event = this.closedEvent(open, reason, endedMs)
 		this.publish(event)
 	}

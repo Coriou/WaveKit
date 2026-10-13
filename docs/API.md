@@ -3294,9 +3294,9 @@ ready, each closed transmission is also stored as an `analog-transmission`
   when the transmission opened. `tuningTrust` is `commanded` under WaveKit
   control and `relay` under external (SDR++) control. Null when the source
   has no tuner state or its centre is an unconfirmed placeholder.
-- `endedAt` is the last above-threshold block: the close time minus the
-  squelch hang (250 ms), never before `startedAt`; for `stopped` and `config`
-  it is the close time. `endedAt`, `durationMs` and `closeReason` are null
+- `endedAt`: for a `squelch` close, the last above-threshold block (the close
+  time minus the squelch hang, 250 ms, never before `startedAt`); for every
+  other reason, the close time. `endedAt`, `durationMs` and `closeReason` are null
   while open.
 - `closeReason`: `squelch` (normal close), `retune` (the event-time frequency
   moved by more than 1 Hz while open), `config` (a reconfigure that restarts
