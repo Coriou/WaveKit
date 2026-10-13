@@ -1164,3 +1164,23 @@ Core publishes `live-audio:level` on the existing `live-audio` WS channel at 10 
 CLI validates these frames and drops them before store dispatch because it does not
 currently display the levels. Valid frames do not increment `invalidFrames` or
 trigger per-frame state updates; malformed level frames still count as invalid.
+
+#### Core: scanner resume contract and SF1 additions — 2026-10-13
+
+Announcement for CLI follow-up; all fields are additive and optional, so no CLI change is required. Spec: [scanner-followups](specs/scanner-followups/requirements.md).
+
+Resume contract (already shipped, not yet consumed by the CLI):
+
+- `ScanJob.resumeAt` (ISO deadline of the automatic resume after operator or relay preemption, or null) and `resumeHeldBy` (`audio`, `identify`, `recording` or null). An elapsed `resumeAt` stays fixed while resume is pending. Job-to-job lease hand-back ignores these holds. A job's `scanner:job` event is re-emitted when only these values change.
+- Stay here: `POST /api/scanner/jobs/:id/pause` on `paused(preempted-*)` makes the job `paused(operator)` without taking the lease; it no longer auto-resumes and stays paused across restart, even with `resume.onBoot`.
+
+SF1 additions (scanner follow-ups batch 1):
+
+- `ScanJob.preemptedBy?: { jobId, name }` (name null when that job has none), present only on `paused(preempted-job)` while another job holds the lease; derived, never persisted. The paused job's view is re-emitted when the holder changes or the lease is freed.
+- `ScanRange` gains optional `enabled` (absent = enabled; a disabled range stays in the job but is not planned, swept, masked or matched), `name` (1 to 100 characters), `dwellMs` (hop dwell of overlapping hops) and `sensitivity` (CFAR target of that range; integration stays job-level). `Hop.dwellMs?` appears only when a range sets it.
+- `ScanJobSpec.signalsOnly?` (discover jobs): the job finds signals but requests no decoder trials of its own. Present only when set.
+- `PATCH /api/scanner/jobs/:id` accepts `ranges` (index-aligned full state of the job's effective `spec.ranges`) and `signalsOnly`. Only `enabled`, `protocols`, `name`, `dwellMs` and `sensitivity` may change, applied at the next hop; a changed edge, raster, OBW or band-plan id, or a different count, is 400 `SCANNER_PLAN_INVALID` with a `range-locked` issue (`details: { index, fields }` or `{ expected, received }`). Later patches of any key keep earlier range edits.
+- Two new `PlanIssueCode` values: `range-locked` (PATCH only) and `signals-only-unsupported`. The CLI's identify issue allow-list (`cli/source/data/api-client.ts`) needs neither; any exhaustive switch over `PlanIssueCode` should add them.
+- `GET /api/scanner/discoveries` accepts `identity=<kind>:<value>` (known identity kind, non-empty value, case-insensitive exact value match; else 400 `VALIDATION_ERROR`), and `q` now matches the operator label or the identity value (a superset of before).
+
+Optional CLI follow-ups: show `preemptedBy` and the resume countdown/hold on paused jobs and offer Stay here; per-range enable toggles and names in job detail; a signals-only marker; identity search in the discoveries view.
