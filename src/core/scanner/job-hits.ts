@@ -64,8 +64,10 @@ export class JobHits {
 			this.truncated = true
 		}
 		this.hits += 1
-		if (created) this.newDiscoveries += 1
 		const known = this.byDiscovery.get(discoveryId)
+		// A promotion credits several observations of one new discovery: count it once.
+		if (created && !known && !this.untracked.has(discoveryId))
+			this.newDiscoveries += 1
 		if (known) {
 			known.hits += 1
 			known.lastHitAt = Math.max(known.lastHitAt, at)

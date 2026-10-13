@@ -46,6 +46,17 @@ describe("JobHits (WG2 req 13)", () => {
 		expect(h.entry("d_x")).toBeUndefined()
 	})
 
+	it("counts a discovery promoted from several observations as one new discovery (R1 #1)", () => {
+		const h = new JobHits("j_1")
+		for (const o of ["o_1", "o_2", "o_3"]) h.record(o, "d_p", T0, true)
+		expect(h.stats()).toEqual({
+			discoveries: 1,
+			hits: 3,
+			newDiscoveries: 1,
+			truncated: false,
+		})
+	})
+
 	it("credits an observation once, however often it is placed again", () => {
 		const h = new JobHits("j_1")
 		expect(h.record("o_1", "d_a", T0, true)).toBe(true)
@@ -131,8 +142,9 @@ describe("JobHits (WG2 req 13)", () => {
 						placed.push(o)
 						expect(h.record(o, id, at, isNew)).toBe(true)
 						counted += 1
+						// A discovery counts as new once, on its first credited observation.
+						if (isNew && !perDiscovery.has(id)) created += 1
 						perDiscovery.set(id, (perDiscovery.get(id) ?? 0) + 1)
-						if (isNew) created += 1
 						if (!tracked.has(id) && tracked.size < cap) tracked.set(id, isNew)
 					}
 					const stats = h.stats()
