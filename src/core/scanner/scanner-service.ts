@@ -2848,6 +2848,15 @@ export class ScannerService extends EventEmitter {
 				)
 			}
 		}
+		// SF1 req 4.3: the arbiter recorded the new holder before this event; jobs that stay preempted
+		// show their new preemptor now rather than on the next tick.
+		for (const d of this.driversOn(lease.sourceId))
+			if (
+				d.record.id !== lease.jobId &&
+				d.record.state === "paused" &&
+				d.record.reason === "preempted-job"
+			)
+				this.emitResumeChange(d.record)
 		const driver = this.drivers.get(lease.jobId)
 		if (!driver) return
 		// An operator or relay write is not handed to a waiting job at once (operator-idle tick).
@@ -3711,6 +3720,7 @@ export class ScannerService extends EventEmitter {
 			name: record.name,
 			state: record.state,
 			...(record.reason ? { reason: record.reason } : {}),
+			...this.preemptedByOf(record),
 			passive: record.passive,
 			spec: record.spec,
 			plan: record.plan,
@@ -3751,17 +3761,30 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	private preemptedByOf(record: JobRecord): Pick<ScanJob, "preemptedBy"> {
+		return preemptedByFor(
+			record,
+			this.arbiter.holder(record.spec.sourceId)?.jobId,
+			id => this.jobs.get(id)?.name,
+		)
+	}
+
+	/** The parts of a job view that change without a job event of their own (resume hold, preemptor). */
+	private derivedView(
+		dto: Pick<ScanJob, "resumeAt" | "resumeHeldBy" | "preemptedBy">,
+	): string {
+		return JSON.stringify({
+			resumeAt: dto.resumeAt,
+			resumeHeldBy: dto.resumeHeldBy,
+			preemptedBy: dto.preemptedBy ?? null,
+		})
+	}
+
 	/** A deleted (or replaced) job emits nothing more (S1-B final review, finding 4). */
 	private emitJob(record: JobRecord): void {
 		if (this.jobs.get(record.id) !== record) return
 		const dto = this.toDto(record)
-		this.resumeViews.set(
-			record.id,
-			JSON.stringify({
-				resumeAt: dto.resumeAt,
-				resumeHeldBy: dto.resumeHeldBy,
-			}),
-		)
+		this.resumeViews.set(record.id, this.derivedView(dto))
 		this.emit("job", dto)
 	}
 
@@ -3953,8 +3976,12 @@ export class ScannerService extends EventEmitter {
 			.catch((err: unknown) => this.log.warn({ err }, "jobs.json write failed"))
 	}
 
+	/** Re-emits a job whose resume hold or preemptor changed while its state did not (SF1 req 4.3). */
 	private emitResumeChange(record: JobRecord): void {
-		const view = JSON.stringify(this.resumeStatus(record))
+		const view = this.derivedView({
+			...this.resumeStatus(record),
+			...this.preemptedByOf(record),
+		})
 		if (this.resumeViews.get(record.id) === view) return
 		this.resumeViews.set(record.id, view)
 		this.emitJob(record)
@@ -4139,6 +4166,27 @@ function requireDiscoveryIdFormat(id: string): void {
 			"SCANNER_DISCOVERY_NOT_FOUND",
 			404,
 		)
+}
+
+/**
+ * SF1 req 4.1-4.2 (Property 11): the job holding a `paused(preempted-job)` job's source lease, as
+ * the DTO's `preemptedBy`. Absent in every other state or reason, when nobody else holds the lease,
+ * and when the holder is not a known job. Derived at read time, never persisted (4.3).
+ */
+export function preemptedByFor(
+	record: Pick<JobRecord, "id" | "state" | "reason">,
+	holderJobId: string | undefined,
+	nameOf: (jobId: string) => string | null | undefined,
+): Pick<ScanJob, "preemptedBy"> {
+	if (
+		record.state !== "paused" ||
+		record.reason !== "preempted-job" ||
+		holderJobId === undefined ||
+		holderJobId === record.id
+	)
+		return {}
+	const name = nameOf(holderJobId)
+	return name === undefined ? {} : { preemptedBy: { jobId: holderJobId, name } }
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
