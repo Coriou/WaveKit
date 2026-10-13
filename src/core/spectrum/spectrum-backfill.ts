@@ -191,22 +191,6 @@ function framesFromRuns(
 	})
 }
 
-/** Live hold: groups of `n` from the oldest summary. A partial tail is not a frame yet. */
-export function liveFrames(
-	stamps: readonly SummaryStamp[],
-	profile: SpectrumProfile,
-	sourceId: string,
-	integrationMs: number,
-	sampleRateHz: number,
-	fftSize: number,
-): SpectrumFrameEventData[] {
-	const n = summariesPerFrame(1000 / integrationMs, profile.hz)
-	const runs: SummaryStamp[][] = []
-	for (let i = 0; i + n <= stamps.length; i += n)
-		runs.push(stamps.slice(i, i + n))
-	return framesFromRuns(runs, profile, sourceId, sampleRateHz, fftSize, false)
-}
-
 /**
  * Backfill at commit: in-window summaries of this stream and epoch, excluding the snapshot,
  * grouped from the newest end (a partial oldest run is dropped). Averaged on a fresh

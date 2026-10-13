@@ -3,18 +3,67 @@ import * as fc from "fast-check"
 import type { SpectrumFrameEventData } from "@wavekit/api-types"
 import type { EngineEpoch } from "../../../../src/core/spectrum/spectrum-engine.js"
 import type { BlockSummary } from "../../../../src/core/spectrum/types.js"
-import { makeProfile } from "../../../../src/core/spectrum/spectrum-averaging.js"
+import {
+	applyAverage,
+	averagingOf,
+	makeProfile,
+	type SpectrumProfile,
+} from "../../../../src/core/spectrum/spectrum-averaging.js"
 import {
 	appendSummary,
 	buildBackfillFrames,
 	limitBackfillFrames,
-	liveFrames,
 	normaliseBackfillMs,
 	spectrumFrameJsonLength,
 	summaryRingCapacity,
 	type SummaryStamp,
 } from "../../../../src/core/spectrum/spectrum-backfill.js"
+import {
+	accumulateHold,
+	encodeBins,
+	reduceMaxHold,
+	summariesPerFrame,
+	type SpectrumHold,
+} from "../../../../src/core/spectrum/spectrum-service.js"
 import { BACKFILL_LIMITS } from "../../../../src/core/spectrum/subscribe-options.js"
+
+/**
+ * The service live path: one summary at a time, complete every n summaries, average
+ * the completed frame, then clear the max-hold but keep the average. Independent of
+ * the backfill run builder.
+ */
+function liveHoldFrames(
+	stamps: readonly SummaryStamp[],
+	profile: SpectrumProfile,
+	integrationMs: number,
+): { bins: string; at: string }[] {
+	const n = summariesPerFrame(1000 / integrationMs, profile.hz)
+	const averaging = averagingOf(profile)
+	let hold: SpectrumHold | undefined
+	const out: { bins: string; at: string }[] = []
+	for (const stamp of stamps) {
+		hold = accumulateHold(
+			hold,
+			reduceMaxHold(stamp.summary.bins, profile.bins),
+			stamp.summary.epoch,
+			stamp.summary.stream,
+		)
+		hold.count += 1
+		if (hold.count < n || hold.bins === null) continue
+		let bins: Float32Array = hold.bins
+		if (averaging > 1) {
+			hold.avg = applyAverage(hold.avg, bins, averaging)
+			bins = hold.avg
+		}
+		out.push({
+			bins: encodeBins(bins),
+			at: new Date(stamp.atMs).toISOString(),
+		})
+		hold.bins = null
+		hold.count = 0
+	}
+	return out
+}
 
 function epochOf(stream: number, epoch: number, centreHz: number): EngineEpoch {
 	return {
@@ -138,7 +187,7 @@ describe("spectrum backfill", () => {
 	})
 
 	it("drops oldest backfill frames to satisfy the 512 KiB cap", () => {
-		const tracks = Array.from({ length: 80 }, (_, i) => ({
+		const tracks = Array.from({ length: 160 }, (_, i) => ({
 			startHz: i,
 			endHz: i + 1,
 			flags: { burst: false, iqImage: false, edge: false },
@@ -153,8 +202,7 @@ describe("spectrum backfill", () => {
 					tracks,
 				}),
 			)
-		const frames = buildBackfillFrames({
-			ring,
+		const build = {
 			now: 2_000,
 			backfillMs: 10_000,
 			stream: 0,
@@ -165,12 +213,23 @@ describe("spectrum backfill", () => {
 			integrationMs: 50,
 			sampleRateHz: 1_024_000,
 			fftSize: 1024,
+		}
+		const one = buildBackfillFrames({
+			...build,
+			ring: ring.slice(0, 1),
 		})
+		// The frame cap keeps 64. Those 64 must already exceed 512 KiB, so the
+		// byte budget has to drop more than the frame cap does.
+		expect(one).toHaveLength(1)
+		expect(
+			spectrumFrameJsonLength(one[0]!) * BACKFILL_LIMITS.maxFrames,
+		).toBeGreaterThan(BACKFILL_LIMITS.maxBytes)
+		const frames = buildBackfillFrames({ ...build, ring })
 		expect(frames.length).toBeGreaterThan(0)
-		expect(frames.length).toBeLessThan(70)
+		expect(frames.length).toBeLessThan(BACKFILL_LIMITS.maxFrames)
 		expect(bytesOf(frames)).toBeLessThanOrEqual(BACKFILL_LIMITS.maxBytes)
 		expect(frames.at(-1)?.floorDbfs).toBe(69)
-		expect(frames[0]?.floorDbfs).toBeGreaterThan(0)
+		expect(frames[0]!.floorDbfs).toBeGreaterThan(70 - BACKFILL_LIMITS.maxFrames)
 	})
 
 	// Feature: web-gaps-1, Property 1: Backfill bounds and order
@@ -269,7 +328,7 @@ describe("spectrum backfill", () => {
 						stamp({ atMs: 1_000 + i * 50, bins: binPool[i]! }),
 					)
 					const profile = makeProfile(20 / n, 32, averaging)
-					const live = liveFrames(stamps, profile, "rtl", 50, 1_024_000, 1024)
+					const live = liveHoldFrames(stamps, profile, 50)
 					const backfill = buildBackfillFrames({
 						ring: stamps,
 						now: stamps.at(-1)!.atMs,
