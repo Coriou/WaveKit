@@ -134,6 +134,8 @@ services:
       NODE_ENV: production
       RTL_TCP_HOST: "${RTL_TCP_HOST:-127.0.0.1}"
       RTL_TCP_PORT: "${RTL_TCP_PORT:-1234}"
+      # Runtime state (Activity store, API band overrides) on a volume.
+      WAVEKIT_STATE_DIR: /app/data
     ports:
       - "9000:9000"
       - "8080:8080"
@@ -144,6 +146,7 @@ services:
       - wavekit-config:/app/config
       - wavekit-logs:/var/log/wavekit
       - recordings:/recordings
+      - wavekit-state:/app/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 30s
@@ -193,6 +196,8 @@ services:
       WAVEKIT_LOG_LEVEL: info
       NODE_ENV: production
       SDR_SOURCE: "tcp://wavekit-sdrpp-prod:5259"
+      # Runtime state (Activity store, API band overrides) on a volume.
+      WAVEKIT_STATE_DIR: /app/data
     ports:
       - "9000:9000"
       - "8080:8080"
@@ -202,6 +207,7 @@ services:
       - wavekit-config:/app/config
       - wavekit-logs:/var/log/wavekit
       - recordings:/recordings
+      - wavekit-state:/app/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
       interval: 30s
@@ -326,6 +332,7 @@ volumes:
   wavekit-config:
   wavekit-logs:
   recordings:
+  wavekit-state:
   wavekit-protected-access:
   wavekit-protected-state:
   wavekit-protected-caddy:
