@@ -420,6 +420,9 @@ describe("machine device command", () => {
 					renewedAt: 12,
 					expiresAt: 20,
 					current: false,
+					name: "Shack",
+					kind: "desktop" as const,
+					lastSeenAt: 3_600_000,
 				},
 			],
 		}
@@ -438,8 +441,14 @@ describe("machine device command", () => {
 		])
 		expect(table.exitCode).toBe(0)
 		expect(table.lines[0]).toContain("deviceId")
+		expect(table.lines[0]).toContain("name")
+		expect(table.lines[0]).toContain("kind")
+		expect(table.lines[0]).toContain("lastSeenAt")
 		expect(table.lines[1]).toContain(deviceId)
 		expect(table.lines[1]).toContain("false")
+		expect(table.lines[1]).toContain("Shack")
+		expect(table.lines[1]).toContain("desktop")
+		expect(table.lines[1]).toContain("3600000")
 		expect(table.lines.join("\n")).not.toContain(token)
 		expect(table.lines.join("\n")).not.toContain(directory)
 		const json = await runAccessCommand([

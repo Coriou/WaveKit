@@ -30,6 +30,12 @@ const ownerSchema = z
 		nonce: z.string().uuid(),
 	})
 	.strict()
+/**
+ * Envelope version stays 1. Device name, kind and last-seen migrate inside
+ * `sessions` (snapshot version 2). An older WaveKit rejects that inner version
+ * while parsing the envelope and fails closed; a second envelope version is
+ * not required for the embedding.
+ */
 const stateSchema = z
 	.object({
 		version: z.literal(1),
@@ -472,7 +478,7 @@ export class PrivateAccessStorage {
 				version: 1,
 				machineToken,
 				credentialBinding: binding,
-				sessions: { version: 1, credentialBinding: binding, sessions: [] },
+				sessions: { version: 2, credentialBinding: binding, sessions: [] },
 			}
 			// Persist setup intent first: a failed/incomplete setup is never regenerated.
 			await this.#atomic(MARKER, MARKER_CONTENT, true)
@@ -594,7 +600,7 @@ export class PrivateAccessStorage {
 			const binding = sessionCredentialBinding(digestMachineToken(machineToken))
 			const sessions = validateSnapshot(
 				{
-					version: 1,
+					version: 2,
 					credentialBinding: binding,
 					sessions: keepSessions
 						? current.sessions.sessions.map(record => ({ ...record }))

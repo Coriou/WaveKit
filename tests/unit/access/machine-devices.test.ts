@@ -472,6 +472,9 @@ describe("machine device projection", () => {
 			"current",
 			"deviceId",
 			"expiresAt",
+			"kind",
+			"lastSeenAt",
+			"name",
 			"renewedAt",
 		])
 		expect(() =>

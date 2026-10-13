@@ -1,6 +1,12 @@
-import type { AccessDeviceDto } from "@wavekit/api-types"
+import {
+	ACCESS_DEVICES_LIMITS,
+	accessDeviceKindSchema,
+	accessDeviceNameSchema,
+} from "@wavekit/api-types"
+import type { AccessDeviceDto, AccessDeviceKind } from "@wavekit/api-types"
 import { randomBytes } from "node:crypto"
 import { performance } from "node:perf_hooks"
+import { createLogger } from "../utils/logger.js"
 import { WaveKitError } from "../utils/errors.js"
 import {
 	digestMachineToken,
@@ -17,13 +23,44 @@ export interface SessionRecord {
 	createdAt: number
 	renewedAt: number
 	expiresAt: number
+	/** Operator-set. Never derived from a user agent or address. */
+	name: string | null
+	kind: AccessDeviceKind | null
+	/** Start of the UTC hour of the latest authenticated admission, or null. */
+	lastSeenAt: number | null
 }
 
 /** Sensitive private-storage payload. Never put this in config or logs. */
 export interface SessionSnapshot {
-	version: 1
+	version: 2
 	credentialBinding: string
 	sessions: SessionRecord[]
+}
+
+/** Absent keeps the stored value. Null clears it. */
+export interface SessionLabelPatch {
+	name?: string | null
+	kind?: AccessDeviceKind | null
+}
+
+interface SeenLogger {
+	warn(payload: { event: string; failures: number }): void
+}
+
+const seenLog = createLogger({ level: "warn" })
+const defaultSeenLogger: SeenLogger = {
+	warn(payload) {
+		seenLog.warn(payload)
+	},
+}
+const SEEN_LOG_INTERVAL_MS = 60_000
+
+function floorHour(now: number): number | undefined {
+	if (!Number.isSafeInteger(now) || now < 0) return undefined
+	const hour =
+		Math.floor(now / ACCESS_DEVICES_LIMITS.lastSeenResolutionMs) *
+		ACCESS_DEVICES_LIMITS.lastSeenResolutionMs
+	return Number.isSafeInteger(hour) ? hour : undefined
 }
 
 export type ActiveDevicesSnapshot =
@@ -48,6 +85,8 @@ export interface SessionStoreOptions {
 	epochNow?: () => number
 	monotonicNow?: () => number
 	random?: AccessRandomBytes
+	/** Defaults to the process logger. Tests inject a counter. */
+	logger?: SeenLogger
 }
 
 interface CreatedSession extends SessionMetadata {
@@ -97,6 +136,10 @@ export class SessionStore {
 	#lastNow: number
 	#unavailable = false
 	#queue: Promise<void> = Promise.resolve()
+	#seenInFlight = new Set<string>()
+	#seenFailures = 0
+	#seenLoggedAt = Number.NEGATIVE_INFINITY
+	#log: SeenLogger
 
 	private constructor(options: SessionStoreOptions) {
 		const parsed = sessionOptionsSchema.safeParse(options)
@@ -107,7 +150,9 @@ export class SessionStore {
 			(options.epochNow !== undefined &&
 				typeof options.epochNow !== "function") ||
 			(options.monotonicNow !== undefined &&
-				typeof options.monotonicNow !== "function")
+				typeof options.monotonicNow !== "function") ||
+			(options.logger !== undefined &&
+				typeof options.logger.warn !== "function")
 		)
 			throw new WaveKitError(
 				"Invalid session configuration",
@@ -120,6 +165,7 @@ export class SessionStore {
 		this.#persist = options.persist
 		this.#random = options.random ?? randomBytes
 		this.#monotonic = options.monotonicNow ?? (() => performance.now())
+		this.#log = options.logger ?? defaultSeenLogger
 		try {
 			this.#anchorEpoch = (options.epochNow ?? Date.now)()
 			this.#anchorMonotonic = this.#monotonic()
@@ -292,6 +338,9 @@ export class SessionStore {
 				renewedAt: record.renewedAt,
 				expiresAt: record.expiresAt,
 				current: requesterId !== undefined && record.deviceId === requesterId,
+				name: record.name,
+				kind: record.kind,
+				lastSeenAt: record.lastSeenAt,
 			})
 		}
 		devices.sort(
@@ -325,7 +374,7 @@ export class SessionStore {
 
 	#snapshot(records: Map<string, SessionRecord>): SessionSnapshot {
 		return {
-			version: 1,
+			version: 2,
 			credentialBinding: this.#binding,
 			sessions: [...records.values()].map(record => ({ ...record })),
 		}
@@ -371,6 +420,40 @@ export class SessionStore {
 		const previous = this.#records
 		this.#records = next
 		for (const id of previous.keys()) if (!next.has(id)) this.#notify(id)
+	}
+
+	/**
+	 * Last-seen persistence. Unlike #commit, a failure does not latch the
+	 * authority, notify leases, or change the committed map. The caller counts
+	 * and logs. PrivateAccessStorage still marks its own file unavailable after
+	 * an uncertain write; that is the storage latch, not this authority latch.
+	 */
+	async #commitSeen(
+		next: Map<string, SessionRecord>,
+		now: number,
+	): Promise<void> {
+		try {
+			await this.#persist(this.#snapshot(next))
+		} catch {
+			this.#countSeenFailure(now)
+			return
+		}
+		if (this.#unavailable) return
+		this.#records = next
+	}
+
+	#countSeenFailure(now: number): void {
+		this.#seenFailures += 1
+		if (now < this.#seenLoggedAt + SEEN_LOG_INTERVAL_MS) return
+		this.#seenLoggedAt = now
+		try {
+			this.#log.warn({
+				event: "session-last-seen-failed",
+				failures: this.#seenFailures,
+			})
+		} catch {
+			/* Logging must not latch the authority or fail the admission. */
+		}
 	}
 
 	#failClosed(): void {
@@ -423,6 +506,9 @@ export class SessionStore {
 					createdAt: now,
 					renewedAt: now,
 					expiresAt: now + this.#ttl,
+					name: null,
+					kind: null,
+					lastSeenAt: null,
 				}
 				next.set(deviceId, record)
 				await this.#commit(next)
@@ -456,6 +542,79 @@ export class SessionStore {
 				...this.#metadata(renewed),
 			}
 		})
+	}
+
+	/**
+	 * Operator label. Persists through the mutation queue before resolving true.
+	 * Unknown and expired devices resolve false without a write. A failed persist
+	 * latches the authority, the same as issuance, renewal and revocation.
+	 */
+	label(deviceId: string, patch: SessionLabelPatch): Promise<boolean> {
+		return this.#enqueue(async () => {
+			if (
+				(patch.name !== undefined &&
+					patch.name !== null &&
+					!accessDeviceNameSchema.safeParse(patch.name).success) ||
+				(patch.kind !== undefined &&
+					patch.kind !== null &&
+					!accessDeviceKindSchema.safeParse(patch.kind).success)
+			)
+				throw new WaveKitError("Invalid device label", "MALFORMED_REQUEST")
+			const now = this.#now()
+			const record = this.#records.get(deviceId)
+			if (!record || record.expiresAt <= now) return false
+			const next = new Map(this.#records)
+			next.set(deviceId, {
+				...record,
+				...(patch.name !== undefined ? { name: patch.name } : {}),
+				...(patch.kind !== undefined ? { kind: patch.kind } : {}),
+			})
+			await this.#commit(next)
+			return true
+		})
+	}
+
+	/**
+	 * Coarse last-seen. No-op unless the UTC hour of `now` is newer than the
+	 * committed value. At most one commit is in flight per device; later calls
+	 * are skipped. A failed commit leaves the committed snapshot unchanged,
+	 * does not renew or revoke, and does not latch this authority. The returned
+	 * promise never rejects.
+	 */
+	noteSeen(deviceId: string, now: number): Promise<void> {
+		const done = Promise.resolve()
+		if (this.#unavailable) return done
+		const hour = floorHour(now)
+		if (hour === undefined) return done
+		if (this.#seenInFlight.has(deviceId)) return done
+		const record = this.#records.get(deviceId)
+		if (!record || record.expiresAt <= now) return done
+		if (record.lastSeenAt !== null && hour <= record.lastSeenAt) return done
+		this.#seenInFlight.add(deviceId)
+		const task = this.#enqueue(async () => {
+			try {
+				const current = this.#records.get(deviceId)
+				if (!current || current.expiresAt <= now) return
+				if (current.lastSeenAt !== null && hour <= current.lastSeenAt) return
+				const next = new Map(this.#records)
+				next.set(deviceId, { ...current, lastSeenAt: hour })
+				await this.#commitSeen(next, now)
+			} finally {
+				this.#seenInFlight.delete(deviceId)
+			}
+		})
+		void task.catch(() => {
+			this.#seenInFlight.delete(deviceId)
+		})
+		return task.then(
+			() => undefined,
+			() => undefined,
+		)
+	}
+
+	/** Last accepted authority time. Does not read the clock or latch. */
+	observedAt(): number {
+		return this.#lastNow
 	}
 
 	revoke(principalId: string): Promise<boolean> {

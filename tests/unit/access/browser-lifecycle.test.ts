@@ -5,7 +5,6 @@ import type { IncomingHttpHeaders } from "node:http"
 import { createServer as createNetServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { setTimeout as delay } from "node:timers/promises"
 import fc from "fast-check"
 import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -727,11 +726,21 @@ describe("browser lifecycle against the assembled access server", () => {
 		expect(socket.opened).toBe(true)
 		socket.send(JSON.stringify({ type: "subscribe", channels: ["status"] }))
 		socket.send('{"type":"ping"}')
-		await delay(400)
-		const after = accessDevicesDtoSchema.parse(
-			(await client.fetch(`${env.apiOrigin}/api/access/devices`)).json(),
-		)
-		expect(after.devices[0]).toEqual(row)
+		const seen = await vi.waitFor(async () => {
+			const parsed = accessDevicesDtoSchema.parse(
+				(await client.fetch(`${env.apiOrigin}/api/access/devices`)).json(),
+			)
+			const device = parsed.devices[0]
+			if (!device || typeof device.lastSeenAt !== "number")
+				throw new Error("last-seen pending")
+			return device
+		})
+		expect(seen).toEqual({ ...row, lastSeenAt: seen.lastSeenAt })
+		expect(seen.renewedAt).toBe(row.renewedAt)
+		expect(seen.expiresAt).toBe(row.expiresAt)
+		const hour = seen.lastSeenAt
+		if (typeof hour !== "number") throw new Error("last-seen pending")
+		expect(hour % 3_600_000).toBe(0)
 		socket.close()
 	})
 

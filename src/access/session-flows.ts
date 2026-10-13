@@ -1,3 +1,4 @@
+import { accessDeviceLabelRequestSchema } from "@wavekit/api-types"
 import type { AccessDevicesDto } from "@wavekit/api-types"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
@@ -206,6 +207,29 @@ export class SessionFlows {
 					admission.headers,
 					this.#cookies.clear(),
 				)
+			},
+		)
+	}
+
+	label(
+		request: AccessRequest,
+		body: unknown,
+	): Promise<AccessFlowResult<{ updated: boolean }>> {
+		// Parse before asynchronous queueing so a later mutation of the body
+		// cannot change the name, kind or device.
+		const parsed = accessDeviceLabelRequestSchema.safeParse(body)
+		return this.#mutate(
+			request,
+			"/api/access/devices/label",
+			async admission => {
+				if (!parsed.success)
+					return flowDenial(400, "MALFORMED_REQUEST", admission.headers)
+				const updated = await this.#sessions.label(parsed.data.deviceId, {
+					...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+					...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
+				})
+				if (!this.#metadata(admission)) return this.#missing(admission)
+				return flowSuccess({ updated }, admission.headers)
 			},
 		)
 	}
