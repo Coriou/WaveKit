@@ -293,6 +293,35 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.getStatus().clientCount).toBe(1)
 	})
 
+	it("emits pcm only while a listener is attached, without copying audio", () => {
+		const client = new ClientTransport(false)
+		internals().registerClient(
+			client as unknown as http.ServerResponse,
+			"local",
+		)
+		const first = Buffer.from([1, 2, 3, 4])
+		internals().handleAudioData(first)
+		expect(client.received()).toEqual(first)
+		const heard: Buffer[] = []
+		const onPcm = (
+			chunk: Buffer,
+			format: { rate: number; format: string },
+		): void => {
+			heard.push(chunk)
+			expect(format).toEqual({ rate: 25_000, format: "s16le" })
+		}
+		liveDemod.on("pcm", onPcm)
+		const second = Buffer.from([5, 6, 7, 8])
+		internals().handleAudioData(second)
+		expect(heard).toEqual([second])
+		expect(heard[0]).toBe(second)
+		expect(client.received()).toEqual(Buffer.concat([first, second]))
+		liveDemod.off("pcm", onPcm)
+		internals().handleAudioData(Buffer.from([9, 10]))
+		expect(heard).toHaveLength(1)
+		expect(liveDemod.listenerCount("pcm")).toBe(0)
+	})
+
 	it("keeps about one second for a stalled client, dropping the oldest audio", () => {
 		const slow = new ClientTransport(true)
 		const healthy = new ClientTransport(false)

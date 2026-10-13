@@ -110,6 +110,14 @@ export interface LiveDemodEvents {
 	"config-changed": (config: LiveDemodConfig) => void
 	"client-connected": (clientId: string) => void
 	"client-disconnected": (clientId: string) => void
+	/**
+	 * Demodulated PCM, only while something is listening (WG2 req 7.6).
+	 * The chunk is the same buffer written to audio clients.
+	 */
+	pcm: (
+		chunk: Buffer,
+		format: { rate: number; format: "s16le" | "f32le" },
+	) => void
 }
 
 export interface LiveDemodulatorOptions {
@@ -217,6 +225,8 @@ export class LiveDemodulator extends EventEmitter {
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+	/** Reused pcm announcement so a listener does not allocate per chunk. */
+	private pcmFormat: { rate: number; format: "s16le" | "f32le" } | null = null
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
@@ -1068,5 +1078,17 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		this.audio.write(chunk)
+		if (this.listenerCount("pcm") === 0) return
+		const stream = this.run?.stream ?? this.plannedStream()
+		let announced = this.pcmFormat
+		if (
+			announced === null ||
+			announced.rate !== stream.rate ||
+			announced.format !== stream.format
+		) {
+			announced = { rate: stream.rate, format: stream.format }
+			this.pcmFormat = announced
+		}
+		this.emit("pcm", chunk, announced)
 	}
 }
