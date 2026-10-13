@@ -73,8 +73,15 @@ import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
 import { startActivityRuntime } from "./core/activity/runtime.js"
 import { OperatorDataService } from "./operator-data/service.js"
-import { openBandPlanService } from "./core/bandplans/index.js"
-import type { BandPlansCommitSink } from "./core/bandplans/contract.js"
+import {
+	openBandPlanService,
+	resolveScannerBandplans,
+} from "./core/bandplans/index.js"
+import type {
+	BandPlanService,
+	BandPlansCommitSink,
+} from "./core/bandplans/contract.js"
+import { bandplansFor } from "./core/scanner/bandplan/index.js"
 import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
 import { createBandPlansCommitSink } from "./api/websocket/bandplans-broadcast-adapter.js"
 import {
@@ -874,6 +881,18 @@ async function main(): Promise<void> {
 		// An unreadable state directory never reaches this catch: start() logs it and
 		// runs without the unread files (Task 35). Only an unexpected construction or
 		// start failure drops the scanner, and with it /api/spectrum.
+		// The band-plan service opens later in startup; until then, and if its view
+		// throws, the scanner falls back to the built-in plans for the region.
+		// Read per call so a committed stack applies to the next job or preview.
+		let bandPlanService: BandPlanService | undefined
+		const scannerBandplans = () => {
+			if (bandPlanService === undefined) return bandplansFor(bandRegion.code)
+			try {
+				return resolveScannerBandplans(bandPlanService.view())
+			} catch {
+				return bandplansFor(bandRegion.code)
+			}
+		}
 		const { channelTier, ...scannerSettings } = config.scanner
 		try {
 			scannerConstructionStarted = true
@@ -896,6 +915,7 @@ async function main(): Promise<void> {
 				sourceConfigs: config.sources,
 				decoderConfigs,
 				region: bandRegion.code,
+				bandplans: scannerBandplans,
 				stateDir: config.stateDir,
 				sources: sourceManager,
 				routing: sourceRouting,
@@ -1133,6 +1153,7 @@ async function main(): Promise<void> {
 				bandPlanLog.warn({ reason }, "Band-plan store unavailable")
 			},
 		})
+		bandPlanService = bandPlans
 		closeBandPlans = () => bandPlans.close()
 		own(11, closeBandPlans)
 		checkpoint()

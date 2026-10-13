@@ -45,6 +45,7 @@ const allowedImports = new Set([
 	"./resolve.js",
 	"./domain.js",
 	"./presets.js",
+	"./scanner-feed.js",
 	"./group-map.js",
 	"../contract.js",
 ])
@@ -75,15 +76,16 @@ describe("band plan authority isolation", () => {
 
 	it("confines src/core/bandplans imports to the scanner bandplan modules and types", () => {
 		const dir = resolve(root, "src/core/bandplans")
-		const files = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter(
-			name => name.endsWith(".ts"),
-		)
+		const files = readdirSync(dir, {
+			recursive: true,
+			encoding: "utf8",
+		}).filter(name => name.endsWith(".ts"))
 		expect(files.length).toBeGreaterThan(0)
 		for (const file of files) {
 			const source = readFileSync(resolve(dir, file), "utf8")
-			const imports = [...source.matchAll(/\b(?:from|import)\s+"([^"]+)"/g)].map(
-				match => match[1]!,
-			)
+			const imports = [
+				...source.matchAll(/\b(?:from|import)\s+"([^"]+)"/g),
+			].map(match => match[1]!)
 			expect(imports.length).toBeGreaterThan(0)
 			const io = ioModules.has(file)
 			for (const specifier of imports)
@@ -155,6 +157,8 @@ describe("band plan authority isolation", () => {
 			null,
 		)
 		for (let index = 0; index < preserved.length; index += 1)
-			expect(readFileSync(resolve(root, preserved[index]![0]))).toEqual(before[index])
+			expect(readFileSync(resolve(root, preserved[index]![0]))).toEqual(
+				before[index],
+			)
 	})
 })

@@ -8,9 +8,11 @@ import {
 	presetToJobSpec,
 } from "./presets.js"
 import { resolveBandPlans } from "./resolve.js"
+import { resolveScannerBandplans } from "./scanner-feed.js"
 import { createBandPlanService } from "./service.js"
 
 export { BandPlansError } from "./contract.js"
+export { resolveScannerBandplans } from "./scanner-feed.js"
 export type {
 	BandPlanService,
 	BandPlanServiceOptions,
@@ -30,5 +32,6 @@ export function openBandPlanService(
 		builtinPresetsFor,
 		presetIssuesFor,
 		presetToJobSpec,
+		scannerBandplans: resolveScannerBandplans,
 	})
 }
