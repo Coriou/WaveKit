@@ -771,6 +771,45 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.transmissionCloseOverride()).toBeNull()
 	})
 
+	it("does not label a new pipeline failure during an http restart as config", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		const nextPort = await findAvailablePort()
+		const internals = liveDemod as unknown as {
+			restartHttpServer(): Promise<void>
+		}
+		const restartHttp = internals.restartHttpServer.bind(liveDemod)
+		let release: () => void = () => undefined
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		let entered: () => void = () => undefined
+		const startedRestart = new Promise<void>(resolve => {
+			entered = resolve
+		})
+		internals.restartHttpServer = async () => {
+			processes[2]!.exit(1)
+			entered()
+			await gate
+			await restartHttp()
+		}
+		const pending = liveDemod.reconfigure({
+			modulation: "am",
+			httpPort: nextPort,
+		})
+		await startedRestart
+		expect(reasons).toEqual(["config", null])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+		release()
+		await pending
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+		expect(liveDemod.getStatus().config.modulation).toBe("am")
+		expect(liveDemod.getStatus().config.httpPort).toBe(nextPort)
+	})
+
 	it("leaves a threshold-only squelch close unlabeled", async () => {
 		await liveDemod.start()
 		const reasons: Array<"stopped" | "config" | null> = []

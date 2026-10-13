@@ -375,7 +375,13 @@ export class LiveDemodulator extends EventEmitter {
 				}
 			}
 
-			if (active && (pipelineChanged || sourceChanged)) {
+			// The hint covers only the synchronous teardown edge above (and the
+			// one stopRun emits before its first await). A transmission that
+			// opens on the replacement pipeline is a new squelch edge.
+			const restarting = active && (pipelineChanged || sourceChanged)
+			if (!restarting) this.closeOverride = null
+
+			if (restarting) {
 				this.consecutiveFailures = 0
 				await this.restartPipeline("configuration changed")
 			}
@@ -939,7 +945,10 @@ export class LiveDemodulator extends EventEmitter {
 	private async restartPipeline(reason: string): Promise<void> {
 		this.clearRestartTimer()
 		this.log.info({ reason }, "Restarting live demodulation pipeline")
-		if (this.run) await this.stopRun(this.run)
+		const stopping = this.run ? this.stopRun(this.run) : null
+		// stopRun emits squelch-changed(false) before it waits on the processes.
+		this.closeOverride = null
+		if (stopping) await stopping
 		await this.startPipeline()
 		const stream = this.plannedStream()
 		this.audio.closeWhere(
