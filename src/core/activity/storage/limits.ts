@@ -1,6 +1,9 @@
 import { ActivityUnavailableError } from "./errors.js"
 
-/** Spec defaults. Overrides replace individual fields; omitted fields keep these. */
+/**
+ * Store limits. Overrides replace individual fields; omitted fields keep the
+ * defaults below.
+ */
 export interface ActivityLimits {
 	globalRatePerSec: number
 	globalBurst: number
@@ -34,19 +37,26 @@ export interface ActivityLimits {
 
 const MiB = 1024 * 1024
 
+/**
+ * The single source of default limits. Activity is on by default (WG1 req 7),
+ * so retention and admission are bounded for a Pi-class SD card: 250 000 rows,
+ * 256 MiB, 3 days; 50/s burst 500 globally, 20/s burst 200 per decoder. An
+ * operator judgement, not a measurement. Config retention and admission blocks
+ * override single fields; every omitted field keeps these values.
+ */
 export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
-	globalRatePerSec: 100,
-	globalBurst: 1000,
-	decoderRatePerSec: 50,
+	globalRatePerSec: 50,
+	globalBurst: 500,
+	decoderRatePerSec: 20,
 	decoderBurst: 200,
 	queueMaxItems: 1024,
 	queueMaxBytes: 8 * MiB,
 	batchMaxItems: 64,
 	batchMaxBytes: 512 * 1024,
 	batchWindowMs: 25,
-	maxRows: 1_000_000,
-	maxDbBytes: 2 * 1024 * MiB,
-	maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+	maxRows: 250_000,
+	maxDbBytes: 256 * MiB,
+	maxAgeMs: 3 * 24 * 60 * 60 * 1000,
 	walPassiveBytes: 16 * MiB,
 	walTruncateBytes: 48 * MiB,
 	walPauseBytes: 64 * MiB,

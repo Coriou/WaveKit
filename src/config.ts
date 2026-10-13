@@ -564,7 +564,7 @@ export const StationConfigSchema = z
 	})
 	.strict()
 
-/** Operator ceilings. Batch-1 defaults (1e6 rows, 2 GiB, 7 days, 100/s) sit inside. */
+/** Operator ceilings. The bounded defaults (250 000 rows, 256 MiB, 3 days, 50/s) sit inside. */
 const ACTIVITY_MAX_ROWS = 1_000_000_000
 const ACTIVITY_MIN_DB_BYTES = 16 * 1024 * 1024
 const ACTIVITY_MAX_DB_BYTES = 16 * 1024 * 1024 * 1024 * 1024
@@ -617,13 +617,14 @@ export const ActivityAdmissionConfigSchema = z
 	.strict()
 
 /**
- * Persistent activity store. Absent or defaulted means disabled: no database
- * file and no worker. Retention and admission stay unset until an operator
- * overrides them.
+ * Persistent activity store. On by default with bounded limits; an explicit
+ * `enabled: false` means no database file and no worker. Retention and
+ * admission stay unset here: every omitted field resolves to
+ * ACTIVITY_LIMIT_DEFAULTS in the store.
  */
 export const ActivityConfigSchema = z
 	.object({
-		enabled: z.boolean().default(false),
+		enabled: z.boolean().default(true),
 		retention: ActivityRetentionConfigSchema.optional(),
 		admission: ActivityAdmissionConfigSchema.optional(),
 	})
@@ -655,8 +656,8 @@ export const ConfigSchema = z
 		region: RegionSchema.optional(),
 		station: StationConfigSchema.default({}),
 		/**
-		 * Persistent activity store. Off by default, so current decoder output
-		 * behaviour is unchanged until an operator enables it.
+		 * Persistent activity store under stateDir. On by default with bounded
+		 * retention and admission; `activity: { enabled: false }` turns it off.
 		 */
 		activity: ActivityConfigSchema.default({}),
 		/**

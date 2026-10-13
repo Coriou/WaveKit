@@ -1122,7 +1122,7 @@ async function main(): Promise<void> {
 		// Own immediately, including a constructor failure before runtimeApi exists.
 		own(15, disposeReceiverAfterApi)
 
-		// Activity is off unless config.activity.enabled. A failed probe or open
+		// Activity runs when config.activity.enabled (the default). A failed probe or open
 		// logs and leaves the rest of WaveKit running.
 		const activity = await startActivityRuntime({
 			enabled: config.activity.enabled,

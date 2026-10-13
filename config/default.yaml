@@ -734,21 +734,24 @@ csdr:
 #   inputHighWaterMark: 262144
 #   blockSamples: 16384
 
-# Activity recording (event foundation batch 1). Off by default: no database
-# file, no worker, and the legacy decoder:output stream is unchanged.
-# Retention and admission are optional overrides of the provisional defaults
-# (1_000_000 rows, 2 GiB, 7 days, 100/s burst 1000 global, 50/s burst 200
-# per decoder). Env: WAVEKIT_ACTIVITY__ENABLED=true
+# Activity recording. On by default: decoder events
+# go to an SQLite store under stateDir/activity, and the legacy decoder:output
+# stream is unchanged. Bounded defaults for a Pi-class SD card (an operator
+# judgement, not measured): 250_000 rows, 256 MiB, 3 days; admission 50/s burst
+# 500 global, 20/s burst 200 per decoder. Each field below is an optional
+# override; omitted fields keep the default. If node:sqlite is unusable the
+# store reports "unavailable" and the rest of WaveKit keeps running.
+# Disable with `activity: { enabled: false }` or WAVEKIT_ACTIVITY__ENABLED=false.
 # activity:
-#   enabled: false
+#   enabled: true
 #   retention:
-#     maxRows: 1000000
-#     maxDbBytes: 2147483648
-#     maxAgeMs: 604800000
+#     maxRows: 250000
+#     maxDbBytes: 268435456
+#     maxAgeMs: 259200000
 #   admission:
-#     globalPerSecond: 100
-#     globalBurst: 1000
-#     perDecoderPerSecond: 50
+#     globalPerSecond: 50
+#     globalBurst: 500
+#     perDecoderPerSecond: 20
 #     perDecoderBurst: 200
 
 # Protected runtime is opt-in; provision private state with the access command.

@@ -1227,16 +1227,31 @@ describe("activity config", () => {
 		return configPath
 	}
 
-	it("defaults to disabled and leaves retention and admission unset", () => {
+	it("defaults to enabled and leaves retention and admission to the store defaults", () => {
+		// WG1 req 7.1, 7.2: on by default; omitted limits resolve to the bounded
+		// ACTIVITY_LIMIT_DEFAULTS in the store, not here.
 		const config = ConfigSchema.parse({})
-		expect(config.activity).toEqual({ enabled: false })
+		expect(config.activity).toEqual({ enabled: true })
 		expect(config.activity).not.toHaveProperty("retention")
 		expect(config.activity).not.toHaveProperty("admission")
 		expect(config.stateDir).toBe("data")
 		expect(config.health).toBeUndefined()
+		expect(config.access.mode).toBe("legacy")
 		expect(loadConfig(write("sources: []\n")).activity).toEqual({
-			enabled: false,
+			enabled: true,
 		})
+		expect(ConfigSchema.parse({ activity: {} }).activity).toEqual({
+			enabled: true,
+		})
+	})
+
+	it("keeps an explicit enabled: false", () => {
+		expect(
+			ConfigSchema.parse({ activity: { enabled: false } }).activity,
+		).toEqual({ enabled: false })
+		expect(
+			loadConfig(write("activity:\n  enabled: false\n")).activity.enabled,
+		).toBe(false)
 	})
 
 	it("reads WAVEKIT_ACTIVITY__ENABLED and nested retention and admission", () => {
@@ -1314,7 +1329,7 @@ describe("activity config", () => {
 				},
 			}).activity,
 		).toEqual({
-			enabled: false,
+			enabled: true,
 			retention: { maxRows: 1000 },
 			admission: { globalPerSecond: 1, perDecoderPerSecond: 1 },
 		})

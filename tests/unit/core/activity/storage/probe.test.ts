@@ -34,17 +34,18 @@ describe("activity runtime probe", () => {
 		await expect(readdir(stateDir)).resolves.toEqual([])
 	})
 
-	it("keeps spec defaults and rejects inverted WAL thresholds", () => {
+	it("keeps the bounded defaults and rejects inverted WAL thresholds", () => {
+		// WG1 req 7.2: Activity is on by default, so the defaults are bounded.
 		const limits = resolveActivityLimits()
-		expect(limits.globalRatePerSec).toBe(100)
-		expect(limits.globalBurst).toBe(1000)
-		expect(limits.decoderRatePerSec).toBe(50)
+		expect(limits.globalRatePerSec).toBe(50)
+		expect(limits.globalBurst).toBe(500)
+		expect(limits.decoderRatePerSec).toBe(20)
 		expect(limits.decoderBurst).toBe(200)
 		expect(limits.queueMaxItems).toBe(1024)
 		expect(limits.queueMaxBytes).toBe(8 * 1024 * 1024)
-		expect(limits.maxRows).toBe(1_000_000)
-		expect(limits.maxDbBytes).toBe(2 * 1024 * 1024 * 1024)
-		expect(limits.maxAgeMs).toBe(7 * 24 * 60 * 60 * 1000)
+		expect(limits.maxRows).toBe(250_000)
+		expect(limits.maxDbBytes).toBe(256 * 1024 * 1024)
+		expect(limits.maxAgeMs).toBe(3 * 24 * 60 * 60 * 1000)
 		expect(limits.gapQuietMs).toBe(5_000)
 		expect(limits.gapMaxIntervalMs).toBe(60_000)
 		expect(limits.pruneBatchRows).toBe(500)
@@ -54,6 +55,16 @@ describe("activity runtime probe", () => {
 		expect(limits.walTruncateBytes).toBe(48 * 1024 * 1024)
 		expect(limits.walPauseBytes).toBe(64 * 1024 * 1024)
 		expect(resolveActivityLimits({ queueMaxItems: 2 }).queueMaxItems).toBe(2)
+		// Partial overrides keep the bounded value of every omitted field.
+		const partial = resolveActivityLimits({ maxRows: 1000, globalBurst: 10 })
+		expect(partial).toEqual({
+			...resolveActivityLimits(),
+			maxRows: 1000,
+			globalBurst: 10,
+		})
+		expect(partial.maxDbBytes).toBe(256 * 1024 * 1024)
+		expect(partial.maxAgeMs).toBe(3 * 24 * 60 * 60 * 1000)
+		expect(partial.decoderRatePerSec).toBe(20)
 		expect(() =>
 			resolveActivityLimits({
 				walPassiveBytes: 10,
