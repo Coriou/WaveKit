@@ -1197,3 +1197,13 @@ Corrects the entry "Core: scanner resume contract and SF1 additions" above:
 #### Core: SF1 range edits after a band-plan change — 2026-10-13
 
 Follow-up to the SF1 correction above. A `PATCH /api/scanner/jobs/:id` that sends `ranges` read before the job's band plan changed, where an edit it sent would no longer land, is refused with 400 `SCANNER_PLAN_INVALID` and a `range-locked` error with `details.reason: "range-plan-changed"`; the job is unchanged. Re-read the job (a PATCH of another key re-plans it) and resend. The `range-live-stale` warning for older edits appears only in the answer of the PATCH that dropped them; it is not kept in the job's `issues` and does not repeat. No CLI change is required.
+
+#### Core: WG1 web gaps — 2026-10-13
+
+Announcement for the CLI; no CLI change is required. Spec: [web-gaps-1](specs/web-gaps-1/requirements.md). Details in [API.md](API.md).
+
+- Spectrum subscribe options `averaging` (1–32, off by default) and `backfillMs` (0–10000, off by default) are opt-in. The CLI never sends them, so it receives exactly the messages it did before: profile keys stay `<hz>:<bins>`, no frame has `backfill`, no ack has `backfillFrames`, and `adjusted` stays within `hz`, `bins`, `profile-limit`. If the CLI ever sends the new options, `cli/source/data/scanner-guards.ts` must accept the `<hz>:<bins>:a<n>` key (the frame regex), the `averaging` and `backfillMs` adjustments (the `adjusted` enum at :103, max 3 today), `backfillFrames`, the view's `averaging` and the frame's `backfill: true` (Zod currently strips it, so a replayed frame would look live).
+- `live-audio:transmission` on the `live-audio` channel: one open and one closed event per squelch-delimited transmission of the live demodulator. The CLI subscribes to `live-audio` and has no guard case for it, so each event currently increments `invalidFrames` (nothing else). A follow-up should drop it like `live-audio:level` or show it.
+- New `vessels` channel (`vessel:new`, `vessel:update`, `vessel:lost`, `vessel:stats`) and `GET /api/vessels`, `/api/vessels/stats`, `/api/vessels/:mmsi`. The CLI does not subscribe; nothing changes for it.
+- Activity is now on by default with bounded retention and admission (250,000 rows, 256 MiB, 3 days; 50/s burst 500 global, 20/s burst 200 per decoder), and gains the `analog-transmission` kind. The CLI has no Activity view and ignores `activity` frames, so nothing changes; any future view will see data by default and must handle the new kind.
+- `scanner:progress` now arrives at up to 2 Hz per job (other scanner messages stay at 1/s per key, same global budget). Plan preview POI uses each hop's own dwell when a range sets `dwellMs`.
