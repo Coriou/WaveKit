@@ -6,16 +6,32 @@ import {
 	clampTitle,
 	entityKey,
 	numberField,
+	asNumber,
+	asNumberOrString,
+	asString,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	readPosition,
 	stringField,
 	takeFields,
 } from "./budget.js"
 
+const shipPayload = objectSchema({
+	mmsi: asNumberOrString,
+	name: asString,
+	callsign: asString,
+	navStatus: asNumber,
+	sog: asNumber,
+	cog: asNumber,
+	shipType: asNumber,
+	lat: asNumber,
+	lon: asNumber,
+})
+
 /** AIS vessel. Speed stays in the payload's knots; no unit conversion. */
 export function presentShip(data: unknown): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(shipPayload, data)
 	if (!payload) return undefined
 	const ship = payload as Partial<ShipData>
 	const mmsi = canonicalMmsi(ship.mmsi ?? payload["mmsi"])

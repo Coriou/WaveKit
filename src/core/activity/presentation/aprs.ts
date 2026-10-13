@@ -1,4 +1,5 @@
 import type { APRSData } from "../../../decoders/builtin/direwolf.js"
+import { z } from "zod"
 import {
 	APRS_POSITION_DATA_TYPES,
 	isCoalescibleShape,
@@ -8,16 +9,36 @@ import {
 	APRS_TEXT_BYTES,
 	canonicalCallsign,
 	type FieldDraft,
+	asNumber,
+	asString,
 	childRecord,
 	clampTitle,
 	entityKey,
 	numberField,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	readPosition,
 	stringField,
 	takeFields,
 } from "./budget.js"
+
+const aprsPayload = objectSchema({
+	source: asString,
+	dataType: asString,
+	objectName: asString,
+	objectKind: asString,
+	comment: asString,
+	status: asString,
+	symbol: asString,
+	course: asNumber,
+	speed: asNumber,
+	lat: asNumber,
+	lon: asNumber,
+	message: z
+		.union([z.string(), z.object({ text: asString }).passthrough(), z.null()])
+		.optional(),
+})
 
 function messageText(payload: Record<string, unknown>): string | undefined {
 	const message = payload["message"]
@@ -29,7 +50,7 @@ function messageText(payload: Record<string, unknown>): string | undefined {
 
 /** Station, object and item packets. Position only for the six position types, or an object/item. */
 export function presentAprs(data: unknown): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(aprsPayload, data)
 	if (!payload) return undefined
 	const aprs = payload as Partial<APRSData>
 	const dataType = stringField(payload, "dataType")

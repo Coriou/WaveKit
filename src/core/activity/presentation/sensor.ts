@@ -2,12 +2,26 @@ import type { DecodePresentation } from "../types.js"
 import {
 	clampTitle,
 	entityKey,
+	asNumber,
+	asNumberOrString,
+	asScalar,
+	asString,
 	numberField,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	stripControls,
 	takeFields,
 } from "./budget.js"
+
+const sensorPayload = objectSchema({
+	model: asString,
+	id: asNumberOrString,
+	channel: asNumberOrString,
+	temperature_C: asNumber,
+	humidity: asNumber,
+	battery_ok: asScalar,
+})
 
 /** Spaces become underscores. A colon or a control character rejects the token. */
 function sensorToken(raw: string): string | null {
@@ -29,7 +43,7 @@ function idToken(value: unknown): string | null {
  * A signal whose model is not a string is not a sensor.
  */
 export function presentSensor(data: unknown): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(sensorPayload, data)
 	if (!payload) return undefined
 	if (typeof payload["model"] !== "string") return undefined
 	const model = stripControls(payload["model"]).trim()

@@ -5,13 +5,28 @@ import {
 	canonicalCapcode,
 	clampTitle,
 	entityKey,
+	asNumber,
+	asNumberOrString,
+	asString,
 	integerField,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	safeProtocol,
 	stringField,
 	takeFields,
 } from "./budget.js"
+
+const textualPayload = objectSchema({
+	protocol: asString,
+	address: asNumberOrString,
+	capcode: asNumberOrString,
+	message: asString,
+	function: asNumber,
+	messageType: asString,
+	from: asString,
+	to: asString,
+})
 
 type TextualType = "message" | "decode"
 
@@ -31,7 +46,7 @@ export function presentTextual(
 	type: TextualType,
 	data: unknown,
 ): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(textualPayload, data)
 	if (!payload) return undefined
 	const rawProtocol = stringField(payload, "protocol")
 	const kind = family(rawProtocol)

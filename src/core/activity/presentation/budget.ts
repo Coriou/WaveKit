@@ -3,8 +3,15 @@
  * values are clipped here so a mapper cannot build an envelope the schema
  * rejects for ordinary text. Long texts (pager, APRS, ACARS) use a higher
  * cap than other strings; both caps count the trailing ellipsis.
+ * `fitRowBudget` then measures summary + record + FTS and shortens whatever
+ * still exceeds req 1.8 (wide titles, long coordinates, multibyte text).
  */
 import { z } from "zod"
+import type { DecoderOutput } from "../../../decoders/types.js"
+import { createDecodeEnvelope } from "../envelope.js"
+import { ACTIVITY_RECORD_VERSION } from "../storage/contract.js"
+import { isCoalescibleShape } from "../storage/coalesce.js"
+import { buildActivityRow } from "../storage/row.js"
 import type {
 	DecodeField,
 	DecodePosition,
@@ -21,10 +28,10 @@ export const MAX_TITLE_BYTES = 256
 /** Ordinary string fields (req 1.5). */
 export const FIELD_TEXT_BYTES = 64
 /**
- * Pager message and ACARS/VDL2 text. Req 1.5 allows 256 bytes. Measured
- * built-row growth for a pager with an 80-character title, function,
- * message type and this much message text is 1,100 bytes, so 126 is the
- * largest cap that satisfies req 1.8. The ellipsis counts toward the cap.
+ * Pager message and ACARS/VDL2 text. Req 1.5 allows 256 bytes. 126 is the
+ * largest cap whose worst ASCII pager (80-character title, function,
+ * message type, saturated FTS) grows the built row by 1,100 bytes. Wider
+ * text is shortened again by `fitRowBudget`. The ellipsis counts.
  */
 export const LONG_TEXT_BYTES = 126
 /**
@@ -32,6 +39,9 @@ export const LONG_TEXT_BYTES = 126
  * object title the other APRS fields, 16 bytes grows the built row by 1,097.
  */
 export const APRS_TEXT_BYTES = 16
+/** Req 1.8. A 1.6 reception, and any other reception. */
+export const ROW_GROWTH_COALESCED_BYTES = 160
+export const ROW_GROWTH_MAX_BYTES = 1_100
 export const ELLIPSIS = "…"
 
 const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/
@@ -42,25 +52,17 @@ export function stripControls(value: string): string {
 	return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
 }
 
-/** UTF-8 truncation that never splits a code point. */
+/**
+ * UTF-8 truncation that never splits a code point. A cut that lands on a
+ * character boundary keeps that character; a cut inside one steps back to
+ * the lead byte and drops it.
+ */
 export function truncateUtf8(value: string, maxBytes: number): string {
 	if (maxBytes <= 0) return ""
-	if (Buffer.byteLength(value, "utf8") <= maxBytes) return value
-	const bytes = Buffer.from(value, "utf8").subarray(0, maxBytes)
-	let end = bytes.length
-	while (end > 0 && (bytes[end - 1]! & 0b1100_0000) === 0b1000_0000) end--
-	if (end > 0 && bytes[end - 1]! >= 0b1100_0000) {
-		const lead = bytes[end - 1]!
-		const width =
-			lead >= 0b1111_0000
-				? 4
-				: lead >= 0b1110_0000
-					? 3
-					: lead >= 0b1100_0000
-						? 2
-						: 1
-		if (end - 1 + width > bytes.length) end--
-	}
+	const bytes = Buffer.from(value, "utf8")
+	if (bytes.length <= maxBytes) return value
+	let end = maxBytes
+	while (end > 0 && (bytes[end]! & 0b1100_0000) === 0b1000_0000) end--
 	return bytes.subarray(0, end).toString("utf8")
 }
 
@@ -173,6 +175,32 @@ export function readPayload(
 	const parsed = payloadSchema.safeParse(data)
 	if (!parsed.success) return undefined
 	return parsed.data
+}
+
+/** Consumed fields. Null and absence are allowed; a wrong type rejects the payload. */
+export const asString = z.string().nullish()
+export const asNumber = z.number().nullish()
+export const asNumberOrString = z.union([z.number(), z.string()]).nullish()
+export const asScalar = z.union([z.string(), z.number(), z.boolean()]).nullish()
+
+/** Per-type object schema. Unknown keys are kept. */
+export function objectSchema(shape: z.ZodRawShape) {
+	return z.object(shape).passthrough()
+}
+
+export function parsePayload(
+	schema: z.ZodType,
+	data: unknown,
+): Record<string, unknown> | undefined {
+	const parsed = schema.safeParse(data)
+	if (!parsed.success) return undefined
+	if (
+		typeof parsed.data !== "object" ||
+		parsed.data === null ||
+		Array.isArray(parsed.data)
+	)
+		return undefined
+	return parsed.data as Record<string, unknown>
 }
 
 export function stringField(
@@ -312,4 +340,226 @@ export function presentation(parts: {
 	if (parts.fields !== undefined && parts.fields.length > 0)
 		result.fields = parts.fields
 	return result
+}
+
+const BUDGET_AT = new Date("2026-10-13T00:00:00.000Z")
+
+function rowLimit(output: DecoderOutput): number {
+	const data = output.data
+	if (
+		typeof data === "object" &&
+		data !== null &&
+		!Array.isArray(data) &&
+		isCoalescibleShape(output.type, data as { readonly [key: string]: unknown })
+	)
+		return ROW_GROWTH_COALESCED_BYTES
+	return ROW_GROWTH_MAX_BYTES
+}
+
+function builtBytes(envelope: ReturnType<typeof createDecodeEnvelope>): number {
+	const row = buildActivityRow({
+		version: ACTIVITY_RECORD_VERSION,
+		eventId: envelope.eventId,
+		commitSeq: "0",
+		producedAt: envelope.producedAt,
+		receivedAt: envelope.receivedAt,
+		kind: "decoder-reception",
+		payload: envelope,
+	})
+	return (
+		Buffer.byteLength(row.summaryJson, "utf8") +
+		Buffer.byteLength(row.recordJson, "utf8") +
+		Buffer.byteLength(row.ftsText, "utf8")
+	)
+}
+
+/**
+ * Bytes added by this presentation. Undefined when either envelope is
+ * rejected: the ingress then rebuilds without the presentation (req 1.7).
+ */
+function measureGrowth(
+	output: DecoderOutput,
+	view: DecodePresentation,
+	plainBytes: { current: number | undefined },
+): number | undefined {
+	const context = {
+		eventId: "evt-budget",
+		receivedAt: BUDGET_AT,
+		decoderId: output.decoder,
+		decoderType: "budget",
+		provenance: { sourceId: null as null, frequency: null as null },
+	}
+	try {
+		if (plainBytes.current === undefined)
+			plainBytes.current = builtBytes(createDecodeEnvelope(output, context))
+		return (
+			builtBytes(createDecodeEnvelope(output, context, view)) -
+			plainBytes.current
+		)
+	} catch {
+		return undefined
+	}
+}
+
+function roundCoord(value: number, digits: number): number {
+	return Number(value.toFixed(digits))
+}
+
+function roundPosition(
+	position: DecodePosition,
+	digits: number,
+): DecodePosition | undefined {
+	const lat = roundCoord(position.lat, digits)
+	const lon = roundCoord(position.lon, digits)
+	if (!Number.isFinite(lat) || !Number.isFinite(lon)) return undefined
+	if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return undefined
+	if (lat === 0 && lon === 0) return undefined
+	return { lat, lon }
+}
+
+function reshape(
+	view: DecodePresentation,
+	patch: {
+		title?: string | null
+		position?: DecodePosition | null
+		fields?: readonly DecodeField[] | null
+	},
+): DecodePresentation {
+	const title = patch.title === undefined ? view.title : patch.title
+	const position =
+		patch.position === undefined
+			? view.position
+			: patch.position === null
+				? undefined
+				: patch.position
+	const fields =
+		patch.fields === undefined
+			? view.fields
+			: patch.fields === null || patch.fields.length === 0
+				? undefined
+				: patch.fields
+	return presentation({
+		category: view.category ?? "other",
+		protocol: view.protocol ?? undefined,
+		entityKey: view.entityKey,
+		title,
+		position,
+		fields,
+	})
+}
+
+function clipTitle(title: string, maxChars: number): string | null {
+	if (maxChars <= 0) return null
+	if (title.length <= maxChars) return title
+	const clipped = clampChars(title, maxChars)
+	if (
+		clipped === "" ||
+		clipped.length > MAX_TITLE_CHARS ||
+		Buffer.byteLength(clipped, "utf8") > MAX_TITLE_BYTES ||
+		CONTROLS.test(clipped)
+	)
+		return null
+	return clipped
+}
+
+function shrinkStrings(
+	fields: readonly DecodeField[],
+	maxBytes: number,
+): DecodeField[] {
+	const next: DecodeField[] = []
+	for (const field of fields) {
+		if (typeof field.value !== "string") {
+			next.push(field)
+			continue
+		}
+		if (Buffer.byteLength(field.value, "utf8") <= maxBytes) {
+			next.push(field)
+			continue
+		}
+		const value = truncateText(field.value, maxBytes)
+		if (value === "") continue
+		next.push({ ...field, value })
+	}
+	return next
+}
+
+/**
+ * Shorten a presentation until its built-row growth is within req 1.8.
+ * An envelope the schema rejects is returned unchanged so ingress can
+ * count the failure and store the reception without it.
+ */
+export function fitRowBudget(
+	output: DecoderOutput,
+	view: DecodePresentation,
+): DecodePresentation {
+	const limit = rowLimit(output)
+	const plainBytes: { current: number | undefined } = { current: undefined }
+	const growth = (candidate: DecodePresentation) =>
+		measureGrowth(output, candidate, plainBytes)
+	const initial = growth(view)
+	if (initial === undefined || initial <= limit) return view
+
+	let current = view
+	let bestGrowth = initial
+	const adopt = (candidate: DecodePresentation, measured: number): boolean => {
+		if (measured <= limit) return true
+		if (measured < bestGrowth) {
+			current = candidate
+			bestGrowth = measured
+		}
+		return false
+	}
+
+	if (current.position) {
+		for (const digits of [6, 5, 4, 3, 2, 1, 0]) {
+			const position = roundPosition(current.position, digits)
+			if (!position) continue
+			const candidate = reshape(current, { position })
+			const measured = growth(candidate)
+			if (measured === undefined) continue
+			if (adopt(candidate, measured)) return candidate
+		}
+	}
+
+	if (current.fields && current.fields.length > 0) {
+		for (const cap of [96, 64, 48, 32, 24, 16, 8, 4]) {
+			const fields = shrinkStrings(current.fields, cap)
+			const candidate = reshape(current, { fields })
+			const measured = growth(candidate)
+			if (measured === undefined) continue
+			if (adopt(candidate, measured)) return candidate
+		}
+	}
+
+	if (current.title) {
+		const title = current.title
+		for (let chars = title.length - 1; chars >= 0; chars -= 1) {
+			const candidate = reshape(current, { title: clipTitle(title, chars) })
+			const measured = growth(candidate)
+			if (measured === undefined) continue
+			if (adopt(candidate, measured)) return candidate
+		}
+	}
+
+	while (current.fields && current.fields.length > 0) {
+		const fields = current.fields.slice(0, -1)
+		const candidate = reshape(current, { fields })
+		const measured = growth(candidate)
+		if (measured === undefined) break
+		if (adopt(candidate, measured)) return candidate
+	}
+
+	if (current.position) {
+		const candidate = reshape(current, { position: null })
+		const measured = growth(candidate)
+		if (measured !== undefined && adopt(candidate, measured)) return candidate
+	}
+
+	if (current.title) {
+		const candidate = reshape(current, { title: null })
+		const measured = growth(candidate)
+		if (measured !== undefined && adopt(candidate, measured)) return candidate
+	}
+
+	return current
 }

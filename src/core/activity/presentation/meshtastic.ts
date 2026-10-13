@@ -4,11 +4,22 @@ import type { DecodePresentation } from "../types.js"
 import {
 	clampTitle,
 	entityKey,
+	asNumber,
 	numberField,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	takeFields,
 } from "./budget.js"
+
+const meshPayload = objectSchema({
+	from: asNumber,
+	portnum: asNumber,
+	to: asNumber,
+	hopLimit: asNumber,
+	rxSnr: asNumber,
+	rxRssi: asNumber,
+})
 
 /** Short names for the Meshtastic PortNum values Activity actually shows. */
 const PORT_NAMES: Readonly<Record<number, string>> = {
@@ -65,7 +76,7 @@ function portName(portnum: number | undefined): string {
 export function presentMeshtastic(
 	data: unknown,
 ): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(meshPayload, data)
 	if (!payload) return undefined
 	const packet = payload as Partial<MeshtasticPacket>
 	const node = meshNodeId(packet.from)

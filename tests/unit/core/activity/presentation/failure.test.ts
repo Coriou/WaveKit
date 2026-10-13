@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import pino from "pino"
+import * as aircraft from "../../../../../src/core/activity/presentation/aircraft.js"
 import { createDecodeEnvelope } from "../../../../../src/core/activity/envelope.js"
 import { createActivityIngress } from "../../../../../src/core/activity/ingress.js"
 import { MAX_ENVELOPE_BYTES } from "../../../../../src/core/activity/projection.js"
@@ -139,7 +140,70 @@ describe("activity presentation failure paths", () => {
 		).not.toThrow()
 		expect(published).toHaveLength(0)
 		expect(ingress.counters().buildFailures).toBe(1)
-		expect(ingress.counters().presentationFailures).toBe(0)
+		expect(ingress.counters().presentationFailures).toBe(1)
+	})
+
+	it("counts a mapper throw and still stores a buildable reception", () => {
+		const output = decoderOutput("aircraft", {
+			icao: "abc123",
+			lat: 51,
+			lon: 4,
+		})
+		const spy = vi.spyOn(aircraft, "presentAircraft").mockImplementation(() => {
+			throw new Error("mapper")
+		})
+		try {
+			expect(presentDecoderOutput(output, "readsb")).toBeUndefined()
+			const published: DecodeEnvelope[] = []
+			const ingress = createActivityIngress({
+				sink: envelope => {
+					published.push(envelope)
+				},
+				logger: pino({ level: "silent" }),
+				now: () => RECEIVED,
+				randomUUID: () => "evt-mapper",
+			})
+			expect(() =>
+				ingress.publish(output.decoder, "readsb", output),
+			).not.toThrow()
+			expect(published).toHaveLength(1)
+			expect(published[0]).toMatchObject({
+				category: "other",
+				protocol: null,
+				entityKey: null,
+				title: null,
+				fields: [],
+			})
+			expect(ingress.counters()).toEqual({
+				published: 1,
+				buildFailures: 0,
+				sinkFailures: 0,
+				presentationFailures: 1,
+			})
+		} finally {
+			spy.mockRestore()
+		}
+	})
+
+	it("rejects a malformed known field and still presents a valid one", () => {
+		expect(
+			presentDecoderOutput(
+				decoderOutput("aircraft", { icao: "abcdef", lat: { bad: true } }),
+				"readsb",
+			),
+		).toBeUndefined()
+		expect(
+			presentDecoderOutput(
+				decoderOutput("aircraft", { icao: "abcdef" }),
+				"readsb",
+			)?.entityKey,
+		).toBe("icao:ABCDEF")
+		expect(
+			presentDecoderOutput(
+				decoderOutput("aprs", { source: "N0CALL", message: 12 }),
+				"direwolf",
+			),
+		).toBeUndefined()
 	})
 
 	it("publishes an unknown output type with no presentation", () => {

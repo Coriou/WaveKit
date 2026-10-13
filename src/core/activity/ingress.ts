@@ -2,7 +2,7 @@ import { randomUUID as cryptoRandomUUID } from "node:crypto"
 import type { DecoderOutput } from "../../decoders/types.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { createDecodeEnvelope } from "./envelope.js"
-import { presentDecoderOutput } from "./presentation/registry.js"
+import { presentDecoderOutputResult } from "./presentation/registry.js"
 import type {
 	DecodeEnvelope,
 	DecodeEnvelopeContext,
@@ -105,7 +105,18 @@ export function createActivityIngress(
 			}
 			let presentation: DecodePresentation | undefined
 			try {
-				presentation = presentDecoderOutput(output, decoderType)
+				const attempt = presentDecoderOutputResult(output, decoderType)
+				if (attempt.error !== undefined) {
+					counts.presentationFailures++
+					logFailure(
+						decoderId,
+						"presentation",
+						attempt.error,
+						receivedAt.getTime(),
+					)
+				} else {
+					presentation = attempt.presentation
+				}
 			} catch (err) {
 				presentation = undefined
 				counts.presentationFailures++

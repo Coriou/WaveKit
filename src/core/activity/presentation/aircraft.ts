@@ -7,12 +7,33 @@ import {
 	entityKey,
 	firstNumber,
 	firstString,
+	asNumber,
+	asNumberOrString,
+	asString,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	readPosition,
 	stringField,
 	takeFields,
 } from "./budget.js"
+
+const aircraftPayload = objectSchema({
+	icao: asString,
+	hex: asString,
+	callsign: asString,
+	flight: asString,
+	squawk: asString,
+	altitude: asNumberOrString,
+	alt_baro: asNumberOrString,
+	groundSpeed: asNumber,
+	gs: asNumber,
+	track: asNumber,
+	verticalRate: asNumber,
+	baro_rate: asNumber,
+	lat: asNumber,
+	lon: asNumber,
+})
 
 function callsignOf(
 	payload: Record<string, unknown>,
@@ -22,7 +43,7 @@ function callsignOf(
 
 /** ADS-B aircraft. Altitude stays in feet; position has no altM. */
 export function presentAircraft(data: unknown): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(aircraftPayload, data)
 	if (!payload) return undefined
 	const icaoRaw = firstString(payload, ["icao", "hex"])
 	const icao = icaoRaw === undefined ? null : canonicalIcao(icaoRaw)

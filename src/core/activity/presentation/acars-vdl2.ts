@@ -1,18 +1,45 @@
 import type { ACARSMessage } from "../../../decoders/builtin/acarsdec.js"
 import type { VDL2Message } from "../../../decoders/builtin/dumpvdl2.js"
+import { z } from "zod"
 import type { DecodePresentation } from "../types.js"
 import {
 	LONG_TEXT_BYTES,
+	asString,
 	canonicalIcao,
 	canonicalRegistration,
 	childRecord,
 	clampTitle,
 	entityKey,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	stringField,
 	takeFields,
 } from "./budget.js"
+
+const acarsBody = z
+	.object({
+		tail: asString,
+		flight: asString,
+		label: asString,
+		text: asString,
+	})
+	.passthrough()
+const acarsPayload = objectSchema({
+	tail: asString,
+	flight: asString,
+	label: asString,
+	text: asString,
+})
+const vdl2Payload = objectSchema({
+	icao: asString,
+	tail: asString,
+	flight: asString,
+	label: asString,
+	text: asString,
+	msgType: asString,
+	acars: acarsBody.nullish(),
+})
 
 function textFields(
 	payload: Record<string, unknown>,
@@ -40,7 +67,7 @@ function textFields(
 
 /** ACARS. The entity is the tail with dots removed; there is no map position. */
 export function presentAcars(data: unknown): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(acarsPayload, data)
 	if (!payload) return undefined
 	const tail = stringField(payload, "tail") as ACARSMessage["tail"]
 	const flight = stringField(payload, "flight")
@@ -61,7 +88,7 @@ export function presentAcars(data: unknown): DecodePresentation | undefined {
 
 /** VDL2. ICAO wins over an embedded ACARS tail. No map position. */
 export function presentVdl2(data: unknown): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(vdl2Payload, data)
 	if (!payload) return undefined
 	const nested = childRecord(payload, "acars")
 	const icaoRaw = stringField(payload, "icao")

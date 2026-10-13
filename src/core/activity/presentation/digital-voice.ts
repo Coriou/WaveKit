@@ -1,18 +1,36 @@
 import type { DsdFmeVoiceCallState } from "../../../decoders/builtin/dsd-fme.js"
 import type { DigitalVoiceCall } from "../../digital-voice.js"
+import { z } from "zod"
 import type { DecodePresentation } from "../types.js"
 import {
+	asNumber,
+	asScalar,
+	asString,
 	childRecord,
 	clampTitle,
 	entityKey,
 	integerField,
 	numberField,
+	objectSchema,
+	parsePayload,
 	presentation,
-	readPayload,
 	safeProtocol,
 	stringField,
 	takeFields,
 } from "./budget.js"
+
+const voicePayload = objectSchema({
+	protocol: asString,
+	talkgroup: asNumber,
+	source: asNumber,
+	slot: asNumber,
+	encrypted: asScalar,
+	duration: asNumber,
+	colourCode: asNumber,
+	nac: asString,
+	dmr: z.object({ cc: asNumber }).passthrough().nullish(),
+	p25: z.object({ nac: asString }).passthrough().nullish(),
+})
 
 function nestedNumber(
 	payload: Record<string, unknown>,
@@ -39,7 +57,7 @@ function nestedString(
  * contract field and falls back to `dmr.cc` / `p25.nac` already on the output.
  */
 export function presentVoice(data: unknown): DecodePresentation | undefined {
-	const payload = readPayload(data)
+	const payload = parsePayload(voicePayload, data)
 	if (!payload) return undefined
 	const call = payload as Partial<DigitalVoiceCall> &
 		Partial<DsdFmeVoiceCallState>
