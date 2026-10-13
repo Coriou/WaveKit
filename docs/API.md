@@ -2517,6 +2517,23 @@ The store holds three kinds:
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
 
+Position coalescing: a position-only `aircraft` (per ICAO address) or `ship`
+(per MMSI) reception is stored at most once per entity per 60 s and per
+decoder. A first sighting and any change of an identity or static field
+(aircraft `callsign`, `squawk`; ship `name`, `callsign`, `imo`, `shipType`,
+`destination`, `eta`, `draught`, `navStatus`) are always stored. Coalesced
+receptions are counted in `stats.coalescedPositions`; they are not losses and
+open no ingestion gap. The live trackers, `aircraft:*`/`vessel:*` and
+`decoder:output` WebSocket messages still carry every update.
+
+Effective retention is whichever cap binds first. Pruning is oldest-first for
+every kind, so a busy position feed shortens retention for rare events too. With
+coalescing, N entities in continuous view add about N × 1,440 rows a day: 100
+aircraft and vessels fill 250,000 rows in about 1.7 days, 300 in about 14
+hours, while the 3-day age cap binds below about 58 entities. Without it (1 Hz
+per entity) the admission limits (50/s global) would fill the row cap in about
+83 minutes. The 256 MiB byte cap can bind earlier when rows are large.
+
 Receipts, recordings and transcripts are not written.
 
 ### Configuration
@@ -2610,7 +2627,7 @@ stops at 50,000 rows and 32 values per dimension.
 
 **Response** (200): `{ "enabled": true, "stats": { ... } }` with admitted,
 committed, dropped (`rate-limited`, `queue-full`, `store-paused`,
-`write-failed`, `closed`), `excludedTelemetry`, queue depth, `rows`,
+`write-failed`, `closed`), `excludedTelemetry`, `coalescedPositions`, queue depth, `rows`,
 `dbBytes`, `paused` and `writer` (`running` or `stopped`). `closed` counts
 admits rejected after the writer has stopped. A write timeout stops the
 writer for the session and does not count those rows as lost. 500
