@@ -33,6 +33,7 @@ import type {
 	Impact,
 	Identity,
 	JobState,
+	LockoutExclusion,
 	NormalisedJobSpec,
 	PauseReason,
 	PlanIssue,
@@ -65,6 +66,8 @@ export interface JobRecord {
 	endedAt?: number
 	unrestorable: string[]
 	counts: { observations: number; transients: number }
+	/** WG2 req 12.2: runtime lockout exclusions of the current plan (sweep jobs; never persisted). */
+	lockoutExclusions?: LockoutExclusion[]
 }
 
 export interface LiveObservation {

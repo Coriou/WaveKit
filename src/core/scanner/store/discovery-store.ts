@@ -9,6 +9,7 @@
  */
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
+import type { LockoutTarget } from "../plan/lockouts.js"
 import {
 	frequencyKey,
 	gridToleranceHz,
@@ -831,6 +832,19 @@ export class DiscoveryStore extends EventEmitter {
 
 	correction(sourceId: string): number {
 		return this.corrections.get(sourceId) ?? 0
+	}
+
+	/** WG2 req 12.1: the locked-out discoveries heard on `sourceId` (no clone: three scalars each). */
+	lockouts(sourceId: string): LockoutTarget[] {
+		const out: LockoutTarget[] = []
+		for (const d of this.discoveries.values())
+			if (d.operator?.lockout === true && d.sourceIds.includes(sourceId))
+				out.push({
+					discoveryId: d.id,
+					centreHz: d.frequencyHz,
+					bandwidthHz: d.bandwidthHz,
+				})
+		return out
 	}
 
 	get(id: string): Discovery | undefined {

@@ -88,7 +88,7 @@ import {
 } from "./job-runner.js"
 import { CPU_COST } from "./plan/cost.js"
 import {
-	planForSpec,
+	planJob,
 	previewPlan,
 	type PreviewContext,
 	type PreviewMeasured,
@@ -162,6 +162,7 @@ import type {
 	HopPlan,
 	Identity,
 	Impact,
+	LockoutExclusion,
 	NormalisedJobSpec,
 	Observation,
 	PlanIssue,
@@ -1251,6 +1252,9 @@ export class ScannerService extends EventEmitter {
 			updatedAt: now,
 			unrestorable: [],
 			counts: { observations: 0, transients: 0 },
+			...(preview.lockoutExclusions
+				? { lockoutExclusions: preview.lockoutExclusions }
+				: {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -1368,6 +1372,7 @@ export class ScannerService extends EventEmitter {
 		record.rawSpec = merged
 		record.issues = preview.issues
 		record.updatedAt = this.now()
+		setLockouts(record, preview.lockoutExclusions)
 		this.requireDriver(id).replan(preview.spec, preview.plan)
 		const { sourceId } = record.spec
 		// The lease holder's tuning drives the engine (finding 2); its scheduler follows on the next own epoch.
@@ -1563,7 +1568,58 @@ export class ScannerService extends EventEmitter {
 					.map(p => this.probes.release(p.probeId)),
 			)
 		}
+		// WG2 req 12.1, 12.5: Ignore skips sweeps; setting or clearing it replans the sweeps it touches.
+		if (patch.lockout !== undefined) await this.replanLockouts(d.sourceIds)
 		return d
+	}
+
+	/**
+	 * WG2 req 12: replans every live sweep job on one of `sourceIds` whose lockout exclusions
+	 * changed, through the same driver replan a live exclusion PATCH uses. The stored spec is not
+	 * touched (12.2), so nothing is persisted.
+	 */
+	private async replanLockouts(sourceIds: readonly string[]): Promise<void> {
+		const ctx = this.previewContext()
+		const touched = new Set<string>()
+		const retune = new Set<string>()
+		for (const record of [...this.jobs.values()]) {
+			if (
+				record.passive ||
+				record.spec.mode !== "sweep" ||
+				record.spec.kind === "identify" ||
+				isTerminal(record.state) ||
+				!sourceIds.includes(record.spec.sourceId)
+			)
+				continue
+			const driver = this.drivers.get(record.id)
+			if (!driver) continue
+			let next: ReturnType<typeof planJob>
+			try {
+				next = planJob(record.spec, ctx)
+			} catch (err) {
+				this.log.warn(
+					{ err, jobId: record.id },
+					"Lockout replan failed; the job keeps its plan",
+				)
+				continue
+			}
+			if (
+				JSON.stringify(next.lockoutExclusions ?? []) ===
+				JSON.stringify(record.lockoutExclusions ?? [])
+			)
+				continue
+			setLockouts(record, next.lockoutExclusions)
+			record.updatedAt = this.now()
+			driver.replan(record.spec, next.plan)
+			const { sourceId } = record.spec
+			touched.add(sourceId)
+			if (this.arbiter.holder(sourceId)?.jobId === record.id)
+				retune.add(sourceId)
+			this.emitJob(record)
+		}
+		// As patchJob: the lease holder's tuning drives the engine.
+		for (const sourceId of retune) await this.spectrum.refreshTuning(sourceId)
+		for (const sourceId of touched) this.updateMasks(sourceId)
 	}
 
 	async deleteDiscovery(id: string): Promise<boolean> {
@@ -1596,6 +1652,9 @@ export class ScannerService extends EventEmitter {
 				o.discoveryId = null
 				o.evidenceDeleted = true
 			}
+		// WG2 req 12.5: a deleted lockout no longer skips sweeps.
+		if (discovery.operator?.lockout === true)
+			await this.replanLockouts(discovery.sourceIds)
 		try {
 			await this.evidence.removeDiscovery(id)
 		} catch (err: unknown) {
@@ -3476,9 +3535,10 @@ export class ScannerService extends EventEmitter {
 	private async restoreJob(pj: PersistedJob): Promise<void> {
 		if (pj.id.startsWith("passive-")) return
 		let plan: HopPlan
+		let lockoutExclusions: LockoutExclusion[] | undefined
 		let failed = false
 		try {
-			plan = planForSpec(pj.spec, this.previewContext())
+			;({ plan, lockoutExclusions } = planJob(pj.spec, this.previewContext()))
 		} catch (err) {
 			this.log.warn(
 				{ err, jobId: pj.id },
@@ -3505,6 +3565,7 @@ export class ScannerService extends EventEmitter {
 			...(failed ? { endedAt: this.now() } : {}),
 			unrestorable: [],
 			counts: { observations: 0, transients: 0 },
+			...(lockoutExclusions && !failed ? { lockoutExclusions } : {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -3664,6 +3725,7 @@ export class ScannerService extends EventEmitter {
 			region: this.deps.region,
 			bandplans: this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
 			tunerRange: () => ({ startHz: 24_000_000, endHz: 1_766_000_000 }),
+			lockouts: sourceId => this.store.lockouts(sourceId),
 		}
 	}
 
@@ -3829,6 +3891,9 @@ export class ScannerService extends EventEmitter {
 			issues: record.issues,
 			impact: record.impact,
 			unrestorable: record.unrestorable,
+			...(record.lockoutExclusions
+				? { lockoutExclusions: record.lockoutExclusions }
+				: {}),
 			progress: driver
 				? driver.progress()
 				: {
@@ -4336,6 +4401,15 @@ export function preemptedByFor(
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
+/** WG2 req 12.2: the record's runtime lockout exclusions follow its current plan. */
+function setLockouts(
+	record: JobRecord,
+	lockoutExclusions: LockoutExclusion[] | undefined,
+): void {
+	if (lockoutExclusions) record.lockoutExclusions = lockoutExclusions
+	else delete record.lockoutExclusions
+}
+
 function isPreempted(r: JobRecord): boolean {
 	return (
 		r.state === "paused" &&

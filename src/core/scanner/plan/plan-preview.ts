@@ -8,6 +8,7 @@ import type {
 	Hop,
 	HopPlan,
 	Impact,
+	LockoutExclusion,
 	NormalisedJobSpec,
 	PlanIssue,
 	PlanIssueCode,
@@ -26,6 +27,8 @@ import { describeHop, planHops } from "./hop-planner.js"
 import { normaliseCapture } from "../evidence/capture-spec.js"
 import type { HopPlanInput } from "./hop-planner.js"
 import { isRangeEnabled } from "./range-contract.js"
+import { lockoutExclusionsFor, planWithLockouts } from "./lockouts.js"
+import type { LockoutTarget } from "./lockouts.js"
 import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
@@ -63,6 +66,8 @@ export interface PreviewContext {
 	tunerRange(sourceId: string): FreqRange
 	/** Omitted: bandplansFor(region). Present: host ranges and plan-id lookup. */
 	bandplans?: readonly Bandplan[]
+	/** WG2 req 12: locked-out discoveries heard on the source. Omitted: none (sweeps plan as before). */
+	lockouts?: (sourceId: string) => readonly LockoutTarget[]
 }
 
 type Provenance = NormalisedJobSpec["provenance"][string]
@@ -797,10 +802,14 @@ export function normaliseSpec(
 	return { spec: n, source, issues }
 }
 
-/** The only hop-plan function: preview, create, PATCH and re-plan all call it (P15). */
+/**
+ * The only hop-plan function: preview, create, PATCH and re-plan all call it (P15). `extra` adds
+ * runtime exclusions (WG2 lockouts) to the spec's own for this plan only; the spec is not changed.
+ */
 export function planForSpec(
 	spec: NormalisedJobSpec,
 	ctx: PreviewContext,
+	extra: readonly ScanExclusion[] = [],
 ): HopPlan {
 	const source = findSource(spec.sourceId, ctx)
 	const fs =
@@ -809,7 +818,8 @@ export function planForSpec(
 			: source.sampleRateHz
 	const input: HopPlanInput = {
 		ranges: spec.ranges.filter(isRangeEnabled),
-		exclusions: spec.exclusions,
+		exclusions:
+			extra.length === 0 ? spec.exclusions : [...spec.exclusions, ...extra],
 		sampleRateHz: fs,
 		usableFraction: ctx.usableFraction,
 		rbwHz: fs / spec.fftSize,
@@ -822,6 +832,25 @@ export function planForSpec(
 			? planHops(input)
 			: inWindowPlan(source.centreHz, input, fs, ctx.usableFraction)
 	return spec.mode === "sweep" ? withHopDwell(planned, spec) : planned
+}
+
+/**
+ * WG2 req 12: the job's plan with the lockout exclusions of its source. Sweep jobs only;
+ * `lockoutExclusions` is absent for in-window jobs and when the source has no lockout inside the
+ * job's enabled ranges, so plans and previews without lockouts are unchanged.
+ */
+export function planJob(
+	spec: NormalisedJobSpec,
+	ctx: PreviewContext,
+): { plan: HopPlan; lockoutExclusions?: LockoutExclusion[] } {
+	const targets =
+		spec.mode === "sweep" ? ctx.lockouts?.(spec.sourceId) : undefined
+	const candidates =
+		targets === undefined || targets.length === 0
+			? []
+			: lockoutExclusionsFor(targets, spec.ranges.filter(isRangeEnabled))
+	if (candidates.length === 0) return { plan: planForSpec(spec, ctx) }
+	return planWithLockouts(extra => planForSpec(spec, ctx, extra), candidates)
 }
 
 /** In-window jobs ignore per-range dwell, the same way they ignore the job dwell. */
@@ -969,7 +998,7 @@ export function previewPlan(
 	ctx: PreviewContext,
 ): PlanPreview {
 	const { spec: n, source, issues } = normaliseSpec(spec, ctx)
-	const plan = planForSpec(n, ctx)
+	const { plan, lockoutExclusions } = planJob(n, ctx)
 	const s = ctx.settings
 	const explained = issues.some(i => PLAN_EMPTY_CAUSES.has(i.code))
 	if (n.mode === "sweep" && plan.hops.length === 0 && !explained) {
@@ -1051,7 +1080,16 @@ export function previewPlan(
 			),
 		)
 	}
-	return { spec: n, plan, sweepPeriodMs, poi, estimates, impact, issues }
+	return {
+		spec: n,
+		plan,
+		sweepPeriodMs,
+		poi,
+		estimates,
+		impact,
+		issues,
+		...(lockoutExclusions ? { lockoutExclusions } : {}),
+	}
 }
 
 /** Inverse of normaliseSpec for create/PATCH round trips, preserving protocol override intent. */
