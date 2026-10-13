@@ -41,6 +41,7 @@ import type {
 	UndecodedReason,
 } from "./types.js"
 import type { TrackSnapshot } from "../spectrum/types.js"
+import { isRangeEnabled } from "./plan/range-contract.js"
 import type { StoredScanJobSpec } from "./plan/range-contract.js"
 
 /** Bounds first-IQ admission only; running jobs retain their existing stop contract. */
@@ -397,7 +398,10 @@ export class JobRunner implements JobDriver {
 	covers(sourceId: string, hz: number): boolean {
 		const { spec, state } = this.record
 		if (sourceId !== spec.sourceId || !ACTIVE.has(state)) return false
-		if (spec.ranges.length > 0 && !spec.ranges.some(r => inRange(hz, r)))
+		if (
+			spec.ranges.length > 0 &&
+			!spec.ranges.some(r => isRangeEnabled(r) && inRange(hz, r))
+		)
 			return false
 		if (spec.exclusions.some(x => inRange(hz, x))) return false
 		if (this.sweep) return this.epochOwn
@@ -555,22 +559,16 @@ export class JobRunner implements JobDriver {
 			live.hopIndex = this.hopIndex
 		this.tracks.set(track.trackId, { live, track })
 		const policy = this.record.spec.hold.policy
+		// A signals-only job takes the same path as a track that needs no confirmation.
+		const confirm = needsConfirm && this.record.spec.signalsOnly !== true
 		if (this.sweep && this.scheduler) {
-			const holdMs = needsConfirm ? this.confirmHoldMs(live) : 0
+			const holdMs = confirm ? this.confirmHoldMs(live) : 0
 			this.exec(
-				this.scheduler.onTrack(
-					track,
-					needsConfirm && policy !== "never",
-					holdMs,
-				),
+				this.scheduler.onTrack(track, confirm && policy !== "never", holdMs),
 			)
 			return
 		}
-		if (
-			!needsConfirm ||
-			policy === "never" ||
-			this.windowHolds.has(track.trackId)
-		)
+		if (!confirm || policy === "never" || this.windowHolds.has(track.trackId))
 			return
 		const holdMs = this.confirmHoldMs(live)
 		const res = this.requestProbe(live, track, holdMs)
@@ -1194,6 +1192,7 @@ export class JobRunner implements JobDriver {
 		track: TrackSnapshot,
 		holdMs: number,
 	) {
+		if (this.record.spec.signalsOnly === true) return null
 		const s = this.deps.settings()
 		if (this.record.passive && !s.passive.offsetProbes) return null
 		const engine = this.deps.engine(this.sourceId)

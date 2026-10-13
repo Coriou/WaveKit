@@ -349,8 +349,10 @@ export class SweepScheduler {
 
 	private dwellSamples(): number {
 		const blocks = (this.minSurfaceBlocks + 1) * this.blockSamples
+		const current = this.visit?.hopIndex ?? 0
+		const dwellMs = this.plan.hops[current]?.dwellMs ?? this.spec.dwellMs
 		const operator = Math.round(
-			((this.spec.dwellMs - this.spec.settleMs) * this.sampleRateHz) / 1000,
+			((dwellMs - this.spec.settleMs) * this.sampleRateHz) / 1000,
 		)
 		return Math.max(blocks, operator)
 	}
