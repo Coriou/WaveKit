@@ -670,14 +670,23 @@ describe("assembled ApiServer session-only devices (A3 devices)", () => {
 		expect(dto.devices.some(row => row.deviceId === second.body.deviceId)).toBe(
 			true,
 		)
-		for (const row of dto.devices)
+		for (const row of dto.devices) {
+			// WG2 access amendment 4.9, 4.12: labels start null; lastSeenAt is an hour or null.
 			expect(Object.keys(row).sort()).toEqual([
 				"createdAt",
 				"current",
 				"deviceId",
 				"expiresAt",
+				"kind",
+				"lastSeenAt",
+				"name",
 				"renewedAt",
 			])
+			expect(row.name).toBeNull()
+			expect(row.kind).toBeNull()
+			if (row.lastSeenAt !== null && row.lastSeenAt !== undefined)
+				expect(row.lastSeenAt % 3_600_000).toBe(0)
+		}
 		expect(get.headers["cache-control"]).toBe("no-store")
 		expect(get.headers["set-cookie"]).toBeUndefined()
 		expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(
@@ -999,6 +1008,8 @@ async function setupDeviceAuthority() {
 }
 
 const devicePath = "/api/access/devices"
+/** WG2 access amendment 4.11: `lastSeenAt` is the start of the admission's UTC hour. */
+const HOUR_OF = (ms: number): number => ms - (ms % 3_600_000)
 function deviceHeaders(cookie: string): string[] {
 	return ["Host", browser.host, "Origin", origin, "Cookie", cookie]
 }
@@ -1093,6 +1104,8 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 				...before.devices[0],
 				renewedAt: 1_001_000,
 				expiresAt: paired.body.expiresAt + 1000,
+				// WG2 access amendment 4.11: the refresh admission records its UTC hour (hour 0 here).
+				lastSeenAt: HOUR_OF(1_001_000),
 			})
 		} finally {
 			env.releaseBarriers()
@@ -1137,8 +1150,15 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 				await fs.readFile(join(env.directory, "access-state.json")),
 			).not.toEqual(durable)
 			const committed = await deviceRead(env, requester.headers.cookie)
+			// WG2 access amendment 4.11: the requester's revoke admission records its UTC hour.
 			expect(committed.devices).toEqual(
-				before.devices.filter(row => row.deviceId !== peer.body.deviceId),
+				before.devices
+					.filter(row => row.deviceId !== peer.body.deviceId)
+					.map(row =>
+						row.deviceId === requester.body.deviceId
+							? { ...row, lastSeenAt: HOUR_OF(1_000_000) }
+							: row,
+					),
 			)
 		} finally {
 			env.releaseBarriers()
