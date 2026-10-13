@@ -20,6 +20,7 @@ import {
 	SAMPLE_SSIDS,
 	SAMPLE_PATHS,
 	SAMPLE_PACKETS,
+	OBJECT_ITEM_PACKETS,
 	EXPECTED_PARSED_PACKETS,
 	APRS_DATA_TYPES,
 	RECORDING_SOURCE_CONFIGS,
@@ -30,6 +31,7 @@ import {
 	parseKissFrame,
 	parseAx25Frame,
 	parseAx25Address,
+	parseAprsInfo,
 } from "../../../src/decoders/builtin/direwolf.js"
 
 /** KISS frame special bytes */
@@ -349,6 +351,30 @@ describe("APRS Fixtures", () => {
 			expect(RECORDING_SOURCE_CONFIGS.packets.filePath).toContain(
 				"packets-sample.txt",
 			)
+		})
+	})
+
+	describe("object and item packets (WG2 req 3.2)", () => {
+		it("keeps SAMPLE_PACKETS stable and parses object and item fixtures", () => {
+			expect(SAMPLE_PACKETS.length).toBeGreaterThan(0)
+			expect(OBJECT_ITEM_PACKETS.length).toBe(4)
+			for (const packet of OBJECT_ITEM_PACKETS) {
+				const parsed = parseAprsInfo(
+					packet.source,
+					packet.destination,
+					[...packet.path],
+					packet.info,
+				)
+				expect(parsed.dataType).toBe(packet.dataType)
+				expect(
+					parsed.objectName === "MEETING" || parsed.objectName === "AID#4",
+				).toBe(true)
+				expect(
+					parsed.objectKind === "object" || parsed.objectKind === "item",
+				).toBe(true)
+				expect(typeof parsed.lat).toBe("number")
+				expect(typeof parsed.objectKilled).toBe("boolean")
+			}
 		})
 	})
 

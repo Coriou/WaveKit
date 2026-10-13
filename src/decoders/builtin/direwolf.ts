@@ -110,7 +110,7 @@ export interface APRSData {
 	altitude?: number | undefined
 	/** Course in degrees */
 	course?: number | undefined
-	/** Speed in mph */
+	/** Speed in knots (APRS course/speed extension and Mic-E). */
 	speed?: number | undefined
 	/** APRS symbol table and code */
 	symbol?: string | undefined
@@ -705,9 +705,97 @@ export function parseAprsInfo(
 		case "'":
 			parseMicE(info, destination, result)
 			break
+		case ";":
+			parseObjectReport(info, result)
+			break
+		case ")":
+			parseItemReport(info, result)
+			break
 	}
 
 	return result
+}
+
+/**
+ * Object report: `;` + 9-character name + `*` live / `_` killed + 7-character
+ * timestamp (`DDHHMMz` or `HHMMSSh`) + a position report. A bad timestamp, a
+ * missing position, or any other malformed header leaves dataType set and
+ * adds no object fields.
+ */
+function parseObjectReport(info: string, result: APRSData): void {
+	try {
+		if (info.length < 18) return
+		const flag = info.charAt(10)
+		if (flag !== "*" && flag !== "_") return
+		const name = info.substring(1, 10).replace(/ +$/, "")
+		if (name.length === 0) return
+		// DHMz or HMSz / HMSh. Anything else is not an object header.
+		if (!/^\d{6}[zh]$/.test(info.substring(11, 18))) return
+		const position = info.substring(18)
+		if (!applyObjectPosition(position, result)) return
+		result.objectName = name
+		result.objectKind = "object"
+		result.objectKilled = flag === "_"
+	} catch {
+		clearParsedPosition(result)
+		clearObjectFields(result)
+	}
+}
+
+/**
+ * Item report: `)` + 3–9 character name + `!` live / `_` killed + a position
+ * report. The first `!` or `_` ends the name. A missing position or any other
+ * malformed header leaves dataType set and adds no object fields.
+ */
+function parseItemReport(info: string, result: APRSData): void {
+	try {
+		const body = info.substring(1)
+		const delim = body.search(/[!_]/)
+		if (delim < 3 || delim > 9) return
+		const name = body.substring(0, delim).replace(/ +$/, "")
+		if (name.length === 0) return
+		const position = body.substring(delim + 1)
+		if (!applyObjectPosition(position, result)) return
+		result.objectName = name
+		result.objectKind = "item"
+		result.objectKilled = body.charAt(delim) === "_"
+	} catch {
+		clearParsedPosition(result)
+		clearObjectFields(result)
+	}
+}
+
+/** Parses the position that follows an object or item header. Rolls back a failed parse. */
+function applyObjectPosition(position: string, result: APRSData): boolean {
+	if (position.length === 0) return false
+	parsePositionReport(position, result)
+	if (
+		typeof result.lat === "number" &&
+		typeof result.lon === "number" &&
+		Number.isFinite(result.lat) &&
+		Number.isFinite(result.lon)
+	) {
+		return true
+	}
+	clearParsedPosition(result)
+	return false
+}
+
+function clearParsedPosition(result: APRSData): void {
+	delete result.lat
+	delete result.lon
+	delete result.altitude
+	delete result.course
+	delete result.speed
+	delete result.symbol
+	delete result.comment
+	delete result.weather
+}
+
+function clearObjectFields(result: APRSData): void {
+	delete result.objectName
+	delete result.objectKind
+	delete result.objectKilled
 }
 
 /**

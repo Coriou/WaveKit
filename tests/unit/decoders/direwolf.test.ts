@@ -352,6 +352,169 @@ describe("parseAprsInfo", () => {
 	})
 })
 
+describe("APRS objects and items (WG2 req 3.2)", () => {
+	const position = "4903.50N/07201.75W-Weekly club meeting"
+
+	it("parses a live object name, position, symbol and comment", () => {
+		const result = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			`;MEETING  *092345z${position}`,
+		)
+
+		expect(result.dataType).toBe("Object")
+		expect(result.objectName).toBe("MEETING")
+		expect(result.objectKind).toBe("object")
+		expect(result.objectKilled).toBe(false)
+		expect(result.lat).toBeCloseTo(49.05833333333333)
+		expect(result.lon).toBeCloseTo(-72.02916666666667)
+		expect(result.symbol).toBe("/-")
+		expect(result.comment).toBe("Weekly club meeting")
+	})
+
+	it("accepts an hour-minute-second object timestamp", () => {
+		const result = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			`;MEETING  *234517h${position}`,
+		)
+
+		expect(result.objectName).toBe("MEETING")
+		expect(result.objectKilled).toBe(false)
+		expect(result.lat).toBeCloseTo(49.05833333333333)
+	})
+
+	it("parses a killed object", () => {
+		const result = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			`;MEETING  _092345z${position}`,
+		)
+
+		expect(result.objectName).toBe("MEETING")
+		expect(result.objectKind).toBe("object")
+		expect(result.objectKilled).toBe(true)
+		expect(result.lat).toBeCloseTo(49.05833333333333)
+	})
+
+	it("parses a live and a killed item", () => {
+		const live = parseAprsInfo(
+			"W1AW",
+			"APRS",
+			[],
+			")AID#4!4903.50N/07201.75W-First aid station",
+		)
+		expect(live.dataType).toBe("Item")
+		expect(live.objectName).toBe("AID#4")
+		expect(live.objectKind).toBe("item")
+		expect(live.objectKilled).toBe(false)
+		expect(live.symbol).toBe("/-")
+		expect(live.comment).toBe("First aid station")
+
+		const killed = parseAprsInfo(
+			"W1AW",
+			"APRS",
+			[],
+			")AID#4_4903.50N/07201.75W-First aid station",
+		)
+		expect(killed.objectName).toBe("AID#4")
+		expect(killed.objectKilled).toBe(true)
+		expect(killed.objectKind).toBe("item")
+	})
+
+	it("parses an object position with the compressed parser", () => {
+		const compressed = "/5L!!<*e7>7P["
+		const viaPosition = parseAprsInfo("N0CALL", "APRS", [], `!${compressed}`)
+		const viaObject = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			`;OBJECT   *092345z${compressed}`,
+		)
+
+		expect(viaObject.objectName).toBe("OBJECT")
+		expect(viaObject.objectKilled).toBe(false)
+		expect(viaObject.lat).toBe(viaPosition.lat)
+		expect(viaObject.lon).toBe(viaPosition.lon)
+		expect(viaObject.symbol).toBe(viaPosition.symbol)
+	})
+
+	it("parses course and speed on an object comment as knots", () => {
+		const result = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			";LEADER   *092345z4903.50N/07201.75W>088/036",
+		)
+
+		expect(result.objectName).toBe("LEADER")
+		expect(result.course).toBe(88)
+		expect(result.speed).toBe(36)
+	})
+
+	it("leaves malformed objects and items without object fields and does not throw", () => {
+		const samples = [
+			";NOPE",
+			";SHORT*092345z4903.50N/07201.75W>",
+			`;${" ".repeat(9)}*092345z4903.50N/07201.75W>`,
+			";MEETING  _garbage4903.50N/07201.75W-test",
+			";MEETING  _092345zNOTAPOSITION",
+			";MEETING  *092345z",
+			";MEETING  *092345/4903.50N/07201.75W>",
+			")AB!4903.50N/07201.75W>",
+			")NODELIM",
+			")ABCDEFGHIJ!4903.50N/07201.75W>",
+			")ABC!",
+			";",
+			")",
+		]
+		for (const info of samples) {
+			const result = parseAprsInfo("N0CALL", "APRS", [], info)
+			expect(result.dataType === "Object" || result.dataType === "Item").toBe(
+				true,
+			)
+			expect(result.objectName).toBeUndefined()
+			expect(result.objectKind).toBeUndefined()
+			expect(result.objectKilled).toBeUndefined()
+			expect(result.lat).toBeUndefined()
+			expect(result.raw).toBe(info)
+		}
+	})
+})
+
+describe("APRS speed is knots (WG2 req 3.9)", () => {
+	it("keeps the course/speed extension as the integer knot value", () => {
+		const result = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			"!4903.50N/07201.75W>088/036",
+		)
+
+		expect(result.course).toBe(88)
+		expect(result.speed).toBe(36)
+	})
+
+	it("keeps Mic-E speed in knots from the spec formula", () => {
+		const info = '`AAA"' + String.fromCharCode(28, 28) + ">/"
+		const result = parseAprsInfo("N0CALL", "490350", [], info)
+
+		expect(result.dataType).toBe("Mic-E")
+		expect(result.speed).toBe(60)
+		expect(result.course).toBe(0)
+	})
+
+	it("keeps compressed course/speed in knots from the 1.08^n-1 formula", () => {
+		const result = parseAprsInfo("N0CALL", "APRS", [], '!/!!!!!!!!>!"!')
+
+		expect(result.course).toBe(0)
+		expect(result.speed).toBeCloseTo(Math.pow(1.08, 1) - 1)
+	})
+})
+
 describe("parseKissFrame", () => {
 	it("should return null for frames too short", () => {
 		expect(parseKissFrame(Buffer.from([0x00]))).toBeNull()
@@ -432,7 +595,7 @@ const lonArb = fc.double({ min: -180, max: 180, noNaN: true })
 const courseArb = fc.integer({ min: 0, max: 359 })
 
 /**
- * Arbitrary for generating valid speed (0-999 mph).
+ * Arbitrary for generating valid speed (0-999 knots).
  */
 const speedArb = fc.integer({ min: 0, max: 999 })
 

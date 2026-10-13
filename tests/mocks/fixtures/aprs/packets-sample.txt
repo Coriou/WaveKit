@@ -44,6 +44,10 @@ N0CALL>APRS:;MEETING  *092345z4903.50N/07201.75W-Weekly club meeting
 # Items () data type)
 W1AW>APRS:)AID#4!4903.50N/07201.75W-First aid station
 
+# Killed object and item (WG2 req 3.2)
+N0CALL>APRS:;MEETING  _092345z4903.50N/07201.75W-Weekly club meeting
+W1AW>APRS:)AID#4_4903.50N/07201.75W-First aid station
+
 # Telemetry (T data type)
 N0CALL>APRS:T#123,001,002,003,004,005,00000000
 
