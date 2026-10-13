@@ -742,4 +742,46 @@ describe("LiveDemodulator", () => {
 		expect(Math.round(status.effectiveSampleRate)).toBe(25000)
 		expect(status.wavUrl).toBe(`http://localhost:${port}/stream.wav`)
 	})
+
+	it("reports the channel squelch hang the gate is constructed with", () => {
+		expect(liveDemod.squelchHangMs()).toBe(250)
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
+	it("labels a squelch drop during stop as stopped", async () => {
+		await liveDemod.start()
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.stop()
+		expect(reasons).toEqual(["stopped"])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
+	it("labels a transmission-closing reconfigure as config", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.reconfigure({ modulation: "am" })
+		expect(reasons).toEqual(["config"])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
+	it("leaves a threshold-only squelch close unlabeled", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.reconfigure({ squelch: -50 })
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		expect(reasons).toEqual([null])
+	})
 })

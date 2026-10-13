@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
 import { EventEmitter } from "node:events"
-import { liveDemodOperatorActivity } from "../../../src/core/live-demod-activity.js"
+import {
+	liveDemodOperatorActivity,
+	liveDemodSquelchGates,
+	liveDemodTransmissionConfigChanged,
+} from "../../../src/core/live-demod-activity.js"
 import type { LiveDemodStatus } from "../../../src/core/live-demodulator.js"
 
 interface FakeState {
@@ -80,5 +84,61 @@ describe("liveDemodOperatorActivity", () => {
 		emitter.emit("squelch-changed", true)
 		expect(callback).toHaveBeenCalledTimes(4)
 		expect(emitter.listenerCount("squelch-changed")).toBe(0)
+	})
+})
+
+describe("live demod transmission gating", () => {
+	it("gates on auto mode or a non-zero manual threshold", () => {
+		expect(liveDemodSquelchGates({ squelch: 0 })).toBe(false)
+		expect(liveDemodSquelchGates({ squelch: -40 })).toBe(true)
+		expect(liveDemodSquelchGates({ squelch: 0, squelchMode: "manual" })).toBe(
+			false,
+		)
+		expect(liveDemodSquelchGates({ squelch: 0, squelchMode: "auto" })).toBe(
+			true,
+		)
+	})
+
+	it("closes on source, modulation, bandwidth, offset or squelch mode only", () => {
+		const base = {
+			sourceId: "rtl0",
+			modulation: "nfm" as const,
+			bandwidth: 12_500,
+			offsetHz: 0,
+			squelchMode: "manual" as const,
+		}
+		expect(liveDemodTransmissionConfigChanged(base, { ...base })).toBe(false)
+		expect(
+			liveDemodTransmissionConfigChanged(base, {
+				...base,
+				squelchMode: "auto",
+			}),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(base, {
+				...base,
+				modulation: "am",
+			}),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(base, { ...base, bandwidth: 25_000 }),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(base, { ...base, offsetHz: 12_500 }),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(base, { ...base, sourceId: "rtl1" }),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(
+				{ modulation: "nfm", bandwidth: 12_500 },
+				{
+					modulation: "nfm",
+					bandwidth: 12_500,
+					offsetHz: 0,
+					squelchMode: "manual",
+				},
+			),
+		).toBe(false)
 	})
 })
