@@ -731,7 +731,7 @@ describe("browser lifecycle against the assembled access server", () => {
 				(await client.fetch(`${env.apiOrigin}/api/access/devices`)).json(),
 			)
 			const device = parsed.devices[0]
-			if (!device || device.lastSeenAt === null)
+			if (!device || typeof device.lastSeenAt !== "number")
 				throw new Error("last-seen pending")
 			return device
 		})
@@ -739,7 +739,7 @@ describe("browser lifecycle against the assembled access server", () => {
 		expect(seen.renewedAt).toBe(row.renewedAt)
 		expect(seen.expiresAt).toBe(row.expiresAt)
 		const hour = seen.lastSeenAt
-		if (hour === null) throw new Error("last-seen pending")
+		if (typeof hour !== "number") throw new Error("last-seen pending")
 		expect(hour % 3_600_000).toBe(0)
 		socket.close()
 	})
