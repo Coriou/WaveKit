@@ -299,6 +299,39 @@ describe("durable remembered-browser authority", () => {
 		).rejects.toMatchObject({ code: "ACCESS_UNAVAILABLE" })
 	})
 
+	it("keeps a next-hour admission that arrives while an earlier last-seen waits behind a held mutation (R2 4)", async () => {
+		const HOUR = 3_600_000
+		let release: () => void = () => undefined
+		let entered: () => void = () => undefined
+		const held = new Promise<void>(resolve => {
+			entered = resolve
+		})
+		let hold = false
+		const env = await setup({
+			persist: async () => {
+				if (!hold) return
+				hold = false
+				const gate = new Promise<void>(resolve => {
+					release = resolve
+				})
+				entered()
+				await gate
+			},
+		})
+		const session = created(await env.store.create())
+		hold = true
+		const label = env.store.label(session.principalId, { name: "Desk" })
+		await held
+		const first = env.store.noteSeen(session.principalId, 13 * HOUR - 1000)
+		const second = env.store.noteSeen(session.principalId, 13 * HOUR)
+		release()
+		await Promise.all([label, first, second])
+		expect(env.store.exportSnapshot().sessions[0]).toMatchObject({
+			name: "Desk",
+			lastSeenAt: 13 * HOUR,
+		})
+	})
+
 	it("clears a stored last-seen hour after the current hour or before creation instead of rejecting (R1 #13)", async () => {
 		const HOUR = 3_600_000
 		const env = await setup({ epochNow: () => 5 * HOUR })

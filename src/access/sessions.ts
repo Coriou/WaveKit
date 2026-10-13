@@ -142,7 +142,8 @@ export class SessionStore {
 	#lastNow: number
 	#unavailable = false
 	#queue: Promise<void> = Promise.resolve()
-	#seenInFlight = new Set<string>()
+	/** Latest admission per device waiting for its queued last-seen commit. */
+	#seenPending = new Map<string, { hour: number; now: number }>()
 	#seenFailures = 0
 	#seenLoggedAt = Number.NEGATIVE_INFINITY
 	#log: SeenLogger
@@ -600,8 +601,9 @@ export class SessionStore {
 
 	/**
 	 * Coarse last-seen. No-op unless the UTC hour of `now` is newer than the
-	 * committed value. At most one commit is in flight per device; later calls
-	 * are skipped. A failed commit leaves the committed snapshot unchanged,
+	 * committed value. At most one commit is queued per device; a later admission
+	 * while it waits updates the hour it will write (WG2 R2: a next-hour admission
+	 * behind a held mutation is not lost). A failed commit leaves the committed snapshot unchanged,
 	 * does not renew or revoke, and does not latch this authority. The returned
 	 * promise never rejects.
 	 */
@@ -610,25 +612,28 @@ export class SessionStore {
 		if (this.#unavailable) return done
 		const hour = floorHour(now)
 		if (hour === undefined) return done
-		if (this.#seenInFlight.has(deviceId)) return done
 		const record = this.#records.get(deviceId)
 		if (!record || record.expiresAt <= now) return done
 		if (record.lastSeenAt !== null && hour <= record.lastSeenAt) return done
-		this.#seenInFlight.add(deviceId)
+		const waiting = this.#seenPending.get(deviceId)
+		if (waiting) {
+			if (hour > waiting.hour) this.#seenPending.set(deviceId, { hour, now })
+			return done
+		}
+		this.#seenPending.set(deviceId, { hour, now })
 		const task = this.#enqueue(async () => {
-			try {
-				const current = this.#records.get(deviceId)
-				if (!current || current.expiresAt <= now) return
-				if (current.lastSeenAt !== null && hour <= current.lastSeenAt) return
-				const next = new Map(this.#records)
-				next.set(deviceId, { ...current, lastSeenAt: hour })
-				await this.#commitSeen(next, now)
-			} finally {
-				this.#seenInFlight.delete(deviceId)
-			}
+			const take = this.#seenPending.get(deviceId)
+			this.#seenPending.delete(deviceId)
+			if (!take) return
+			const current = this.#records.get(deviceId)
+			if (!current || current.expiresAt <= take.now) return
+			if (current.lastSeenAt !== null && take.hour <= current.lastSeenAt) return
+			const next = new Map(this.#records)
+			next.set(deviceId, { ...current, lastSeenAt: take.hour })
+			await this.#commitSeen(next, take.now)
 		})
 		void task.catch(() => {
-			this.#seenInFlight.delete(deviceId)
+			this.#seenPending.delete(deviceId)
 		})
 		return task.then(
 			() => undefined,
