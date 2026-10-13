@@ -191,10 +191,20 @@ describe("read-only private credentials", () => {
 		]
 		await fs.writeFile(path, JSON.stringify(value))
 		expect((await provider()).use(v => v)).toBe(token)
-		// Still closed: a v2 record without the new keys, an unknown kind, or v2 keys in v1.
+		// Tolerant of label values the CLI never uses (a newer core may add kinds).
+		value.sessions.sessions = [
+			{ ...record, name: "x", kind: "car", lastSeenAt: 1 },
+		]
+		await fs.writeFile(path, JSON.stringify(value))
+		expect((await provider()).use(v => v)).toBe(token)
+		// Still closed: a v2 record without the new keys, an unknown key, over-long or
+		// wrongly typed labels, or v2 keys in a v1 snapshot.
 		for (const [version, records] of [
 			[2, [record]],
-			[2, [{ ...record, name: null, kind: "car", lastSeenAt: null }]],
+			[2, [{ ...record, name: null, kind: null, lastSeenAt: null, extra: 1 }]],
+			[2, [{ ...record, name: "n".repeat(257), kind: null, lastSeenAt: null }]],
+			[2, [{ ...record, name: null, kind: "k".repeat(17), lastSeenAt: null }]],
+			[2, [{ ...record, name: null, kind: null, lastSeenAt: -1 }]],
 			[1, [{ ...record, name: null, kind: null, lastSeenAt: null }]],
 		] as const) {
 			value.sessions.version = version

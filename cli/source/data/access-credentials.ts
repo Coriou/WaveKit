@@ -37,15 +37,14 @@ const recordFields = {
 }
 const recordSchema = z.object(recordFields).strict()
 // Core snapshot version 2 (WG2 access amendment 4.9-4.12) adds operator labels
-// and a coarse last-seen hour; the CLI reads only the machine projection.
+// and a coarse last-seen hour. The CLI never uses them, so it only bounds their
+// shape (a newer core may add kinds); unknown keys are still rejected.
 const recordV2Schema = z
 	.object({
 		...recordFields,
 		name: z.string().max(256).nullable(),
-		kind: z
-			.enum(["browser", "phone", "tablet", "desktop", "cli", "other"])
-			.nullable(),
-		lastSeenAt: timeSchema.nullable(),
+		kind: z.string().max(16).nullable(),
+		lastSeenAt: z.number().int().nonnegative().nullable(),
 	})
 	.strict()
 const stateSchema = z
