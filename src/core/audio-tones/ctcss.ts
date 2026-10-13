@@ -100,14 +100,19 @@ function biquad(kind: "low" | "high", freqHz: number): Biquad {
 
 /**
  * Streaming CTCSS bank. `pushSample` does not allocate after construction.
- * Band power is a 50 Hz high-pass into a 300 Hz low-pass, both 2nd-order
- * Butterworth, summed over the same 500 ms block as the Goertzel tones.
+ * Band power is the block's raw power minus a 40 Hz low-pass and a 400 Hz
+ * high-pass (both 2nd-order Butterworth). Those cutoffs sit outside
+ * 50–300 Hz, so an in-band tone near 290 Hz is counted in the denominator
+ * with the same weight as the Goertzel numerator. A cascade cut off at
+ * 300 Hz was attenuating that edge and letting a mid-band tone look like
+ * more than 0.65 of the band.
  */
 export class CtcssBank {
 	private readonly coeffs = new Float64Array(CTCSS_HZ.length)
 	private readonly powers = new Float64Array(CTCSS_HZ.length)
 	private readonly raw = new Float64Array(BLOCK_SAMPLES)
-	private readonly filtered = new Float64Array(BLOCK_SAMPLES)
+	private readonly below = new Float64Array(BLOCK_SAMPLES)
+	private readonly above = new Float64Array(BLOCK_SAMPLES)
 	private readonly block = new Float64Array(BLOCK_SAMPLES)
 	private readonly votes = new Uint32Array(CTCSS_HZ.length)
 	private readonly qualified = new Uint8Array(CTCSS_HZ.length)
@@ -130,22 +135,23 @@ export class CtcssBank {
 			this.coeffs[i] =
 				2 * Math.cos((2 * Math.PI * (CTCSS_HZ[i] ?? 0)) / RATE_HZ)
 		}
-		this.high = biquad("high", 50)
-		this.low = biquad("low", 300)
+		this.high = biquad("high", 400)
+		this.low = biquad("low", 40)
 		this.firstBlock.fill(-1)
 	}
 
 	pushSample(sample: number): void {
 		const high = this.high
 		const low = this.low
-		const mid = high.b0 * sample + this.hp1
-		this.hp1 = high.b1 * sample - high.a1 * mid + this.hp2
-		this.hp2 = high.b2 * sample - high.a2 * mid
-		const band = low.b0 * mid + this.lp1
-		this.lp1 = low.b1 * mid - low.a1 * band + this.lp2
-		this.lp2 = low.b2 * mid - low.a2 * band
+		const above = high.b0 * sample + this.hp1
+		this.hp1 = high.b1 * sample - high.a1 * above + this.hp2
+		this.hp2 = high.b2 * sample - high.a2 * above
+		const below = low.b0 * sample + this.lp1
+		this.lp1 = low.b1 * sample - low.a1 * below + this.lp2
+		this.lp2 = low.b2 * sample - low.a2 * below
 		this.raw[this.write] = sample
-		this.filtered[this.write] = band
+		this.below[this.write] = below
+		this.above[this.write] = above
 		this.write += 1
 		if (this.write === BLOCK_SAMPLES) this.write = 0
 		this.seen += 1
@@ -161,7 +167,8 @@ export class CtcssBank {
 
 	reset(): void {
 		this.raw.fill(0)
-		this.filtered.fill(0)
+		this.below.fill(0)
+		this.above.fill(0)
 		this.block.fill(0)
 		this.powers.fill(0)
 		this.votes.fill(0)
@@ -181,15 +188,21 @@ export class CtcssBank {
 
 	private analyse(): void {
 		const start = this.write
-		let bandEnergy = 0
+		let rawEnergy = 0
+		let belowEnergy = 0
+		let aboveEnergy = 0
 		for (let i = 0; i < BLOCK_SAMPLES; i++) {
 			const index = start + i
 			const at = index < BLOCK_SAMPLES ? index : index - BLOCK_SAMPLES
 			const sample = this.raw[at] ?? 0
-			const band = this.filtered[at] ?? 0
+			const below = this.below[at] ?? 0
+			const above = this.above[at] ?? 0
 			this.block[i] = sample
-			bandEnergy += band * band
+			rawEnergy += sample * sample
+			belowEnergy += below * below
+			aboveEnergy += above * above
 		}
+		const bandEnergy = Math.max(0, rawEnergy - belowEnergy - aboveEnergy)
 		const powers = this.powers
 		const coeffs = this.coeffs
 		const block = this.block

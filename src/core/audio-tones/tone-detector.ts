@@ -13,7 +13,7 @@
  */
 import type { AnalogTransmissionTone } from "@wavekit/api-types"
 import { CtcssBank } from "./ctcss.js"
-import { DtmfBank } from "./dtmf.js"
+import { DTMF_COLUMN_HZ, DTMF_ROW_HZ, DtmfBank } from "./dtmf.js"
 
 export const AUDIO_TONE_RATE_HZ = 8_000
 const MIN_CTCSS_SECONDS = 0.75
@@ -127,6 +127,10 @@ export class ToneDetector {
 		this.decimCount = 0
 		this.fracFill = 0
 		this.fracSum = 0
+		this.dtmf.setPowerScale(
+			powerScale(DTMF_ROW_HZ, rate),
+			powerScale(DTMF_COLUMN_HZ, rate),
+		)
 		if (!Number.isFinite(rate) || rate < AUDIO_TONE_RATE_HZ) {
 			this.fractional = false
 			this.decimFactor = 0
@@ -180,6 +184,16 @@ export class ToneDetector {
 		this.ctcss.pushSample(value)
 		this.dtmf.pushSample(value)
 	}
+}
+
+/** `1/g(f)²` so a column attenuated by the boxcar is not reported as extra twist. */
+function powerScale(hzs: readonly number[], rate: number): Float64Array {
+	const scale = new Float64Array(hzs.length)
+	for (let i = 0; i < hzs.length; i++) {
+		const gain = boxcarDecimationGain(hzs[i] ?? 0, rate)
+		scale[i] = gain > 0 ? 1 / (gain * gain) : 1
+	}
+	return scale
 }
 
 function readSample(

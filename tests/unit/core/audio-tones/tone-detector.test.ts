@@ -179,6 +179,78 @@ describe("tone detector", () => {
 		expect(lone.result().dtmf).toBeNull()
 	})
 
+	it("accepts every digit at both twist limits, at 8 kHz and 48 kHz", () => {
+		const grid = "123A456B789C*0#D"
+		for (const rate of [8_000, 48_000]) {
+			for (const symbol of grid) {
+				for (const twistDb of [4, -8, 0]) {
+					const detector = new ToneDetector()
+					const pcm = dtmfString({
+						symbols: symbol,
+						rate,
+						onSeconds: 0.08,
+						offSeconds: 0.05,
+						amplitude: 0.15,
+						twistDb,
+					})
+					detector.push(pcm.pcm, formatOf(pcm))
+					expect(
+						detector.result().dtmf,
+						`${rate} ${symbol} twist ${twistDb}`,
+					).toBe(symbol)
+				}
+			}
+		}
+		for (const rate of [8_000, 48_000]) {
+			for (const symbol of ["5", "C"]) {
+				for (const twistDb of [5, -9]) {
+					const detector = new ToneDetector()
+					const pcm = dtmfString({
+						symbols: symbol,
+						rate,
+						onSeconds: 0.2,
+						offSeconds: 0.05,
+						amplitude: 0.15,
+						twistDb,
+					})
+					detector.push(pcm.pcm, formatOf(pcm))
+					expect(
+						detector.result().dtmf,
+						`${rate} ${symbol} twist ${twistDb}`,
+					).toBeNull()
+				}
+			}
+		}
+	})
+
+	it("does not join bursts shorter than 40 ms across a real gap", () => {
+		const detector = new ToneDetector()
+		const pcm = dtmfString({
+			symbols: "55555",
+			rate: 8_000,
+			onSeconds: 0.015,
+			offSeconds: 0.01,
+			amplitude: 0.25,
+		})
+		detector.push(pcm.pcm, formatOf(pcm))
+		expect(detector.result().dtmf).toBeNull()
+	})
+
+	it("rejects a CTCSS tone that is under 0.65 of the in-band power", () => {
+		const detector = new ToneDetector()
+		const pcm = sine({
+			hz: 100,
+			seconds: 1,
+			rate: 8_000,
+			amplitude: 0.3,
+			extraHz: 290,
+			extraAmplitude: 0.3,
+		})
+		detector.push(pcm.pcm, formatOf(pcm))
+		expect(detector.result().ctcssHz).toBeNull()
+		expect(detector.result().dtmf).toBeNull()
+	})
+
 	it("survives 48 kHz block averaging, including the 1633 Hz column", () => {
 		const gain = boxcarDecimationGain(1633, 48_000)
 		expect(gain).toBeGreaterThan(10 ** (-3 / 20))
