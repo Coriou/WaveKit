@@ -16,6 +16,7 @@ export * from "./access-devices.js"
 export * from "./regional.js"
 export * from "./receiver-capabilities.js"
 export * from "./activity.js"
+export * from "./bandplans.js"
 
 export type {
 	StationIdentity,
