@@ -2207,7 +2207,8 @@ hypotheses, the decode evidence and flags. 404 `SCANNER_DISCOVERY_NOT_FOUND`.
 
 Operator fields: `label` (≤ 100 chars), `notes` (≤ 2000), `lockout`
 (boolean; stops its probes, blocks listen and, from WG2, skips the frequency
-in sweeps on the discovery's sources: see `POST /api/scanner/plan`), `keep`
+in sweeps on the discovery's sources: see `POST /api/scanner/plan`; a locked
+discovery is never evicted or pruned by age), `keep`
 (boolean; never pruned by age). At least one key. Returns the `Discovery`.
 
 ```bash

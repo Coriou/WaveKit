@@ -843,7 +843,14 @@ export class DiscoveryStore extends EventEmitter {
 		const op = newOp()
 		const removed: string[] = []
 		for (const d of [...this.discoveries.values()]) {
-			if (d.operator?.keep === true || d.lastSeenAt >= cutoff) continue
+			// WG2 R2: a lockout is skipped by sweeps, so its lastSeenAt stops moving; age must not
+			// silently remove it and put the frequency back into sweeps.
+			if (
+				d.operator?.keep === true ||
+				d.operator?.lockout === true ||
+				d.lastSeenAt >= cutoff
+			)
+				continue
 			removed.push(d.id)
 			this.deleteInto(op, d)
 		}

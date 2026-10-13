@@ -104,16 +104,21 @@ describe("ScannerService: Ignore skips sweeps (WG2 req 12)", () => {
 				expect(restored.state).not.toBe("failed")
 				expect(restored.lockoutExclusions).toEqual(locked.lockoutExclusions)
 				expect(restored.spec.exclusions).toEqual([])
-				// A store-side removal (eviction, age prune, merge drop) replans too (R1 #8).
+				// Evicting an unlocked discovery schedules no lockout replan (R2).
 				const internals = again.service as unknown as {
-					store: { delete(id: string): boolean }
+					store: { emit(event: string, id: string, change: string): boolean }
+					replanLockouts(): Promise<void>
 				}
-				expect(internals.store.delete(d!.id)).toBe(true)
-				await vi.waitFor(() =>
-					expect("lockoutExclusions" in again.service.getJob(job.id)!).toBe(
-						false,
-					),
-				)
+				const replan = vi.spyOn(internals, "replanLockouts")
+				internals.store.emit("change", "d_other", "deleted")
+				await Promise.resolve()
+				await new Promise(resolve => setImmediate(resolve))
+				expect(replan).not.toHaveBeenCalled()
+				// A merge whose survivor is locked does.
+				internals.store.emit("change", d!.id, "merged")
+				await vi.waitFor(() => expect(replan).toHaveBeenCalledTimes(1))
+				await again.service.deleteDiscovery(d!.id)
+				expect("lockoutExclusions" in again.service.getJob(job.id)!).toBe(false)
 			} finally {
 				await again.service.stop()
 			}

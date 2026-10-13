@@ -4233,9 +4233,10 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onStoreChange = (id: string, change: StoreChange): void => {
-		// WG2 R1 #8: a merge or a removal (eviction, age prune, merge drop) can move or drop a
-		// lockout; replan once after this turn (no-op when no job's lockout list changes).
-		if (change === "merged" || change === "deleted")
+		// WG2 R1 #8 / R2: eviction and age pruning never remove a lockout, and operator deletion
+		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a
+		// locked survivor schedules a replan (no-op when no job's lockout list changes).
+		if (change === "merged" && this.store.get(id)?.operator?.lockout === true)
 			this.scheduleLockoutReplan()
 		if (this.ingestChanges) {
 			this.ingestChanges.push([id, change])
@@ -4350,7 +4351,7 @@ export class ScannerService extends EventEmitter {
 	private async maintenance(): Promise<void> {
 		const s = this.settings()
 		await this.spectrum.persist()
-		// § 8 storage.discoveryMaxAgeDays (never operator `keep`)
+		// § 8 storage.discoveryMaxAgeDays (never operator `keep` or `lockout`)
 		const all = new Map(this.allDiscoveries({}).map(d => [d.id, d] as const))
 		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays)
 		for (const id of pruned) {
