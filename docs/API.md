@@ -479,9 +479,12 @@ cap). A storage failure never stops the core: reads return
 `store: { state: "unavailable" }`, the default stack and no stored layers, and
 writes fail with 503 `BANDPLANS_UNAVAILABLE`. In legacy mode the store is opened
 read-only: no lock, no directory or file is created, and an existing state file is
-only read. No WebSocket change notice is published yet, so clients refetch after
-their own writes and poll for others'. The scanner does not consume these layers
-yet; see [SCANNER.md](SCANNER.md#presets-and-bandplans).
+only read. If no state file exists there, the store is the empty default with
+`storeId: null` and revision 0; writes are not mounted, so this token is never
+sent back. Any other available store reports its persisted UUID. Changes are
+announced on the [`bandplans` WebSocket channel](#bandplans-channel) in both
+access modes. The scanner does not consume these layers yet; see
+[SCANNER.md](SCANNER.md#presets-and-bandplans).
 
 Reads are mounted in both access modes under the normal API admission. Writes and
 imports are mounted only in protected mode (`capabilities.writable: true` in the
@@ -522,14 +525,15 @@ is changed through `/operator-bands` instead (`operator` there returns 400).
 
 Import preview takes `format: "sdrpp-json"`, `fileName`, `contentBase64` and
 `groupOverrides` (`{ sourceType, group }`, 64 max). It returns the file metadata,
-`sha256` of the decoded bytes, proposed bands and a skip/mapping report. Commit
-repeats those fields and adds `expected`, `previewSha256` (must equal the file's
-hash, else 409 `BANDPLANS_IMPORT_MISMATCH`), `name`, `author`, `licence`,
-`keepColourHints`, `replacesPackId` (re-import keeping the pack id and its edits,
-or `null`) and `addToStack`. The hash binds only the file bytes: the client must
-send the same `groupOverrides` it previewed, or the stored groups differ from the
-preview. Presets are `{ name, job }` where `job` is a closed
-subset of the scanner job spec with at least one bandplan or range. Built-in
+`sha256` of the decoded bytes, `previewDigest`, proposed bands and a skip/mapping
+report. `previewDigest` is a SHA-256 binding the file bytes and the set of
+`groupOverrides` (override order does not matter); `sha256` stays the hash of the
+file bytes alone. Commit repeats those fields and adds `expected`, `previewDigest`
+from the preview, `name`, `author`, `licence`, `keepColourHints`,
+`replacesPackId` (re-import keeping the pack id and its edits, or `null`) and
+`addToStack`. Other bytes or other overrides than the ones previewed return 409
+`BANDPLANS_IMPORT_MISMATCH` and change nothing. Presets are `{ name, job }` where
+`job` is a closed subset of the scanner job spec with at least one bandplan or range. Built-in
 presets (`builtin-<plan id>` per scanner plan, plus a few combinations) are
 derived from the region and read-only (409 `BANDPLANS_READ_ONLY`).
 
@@ -2555,6 +2559,7 @@ ws.onopen = () => {
 				"tuner",
 				"scanner",
 				"spectrum",
+				"bandplans",
 			],
 		}),
 	)
@@ -2584,14 +2589,16 @@ ws.onmessage = event => {
 		"resources",
 		"tuner",
 		"scanner",
-		"spectrum"
+		"spectrum",
+		"bandplans"
 	]
 }
 ```
 
 Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
-[SCANNER.md](SCANNER.md)) and `spectrum` (core waterfall frames, opt-in).
+[SCANNER.md](SCANNER.md)), `spectrum` (core waterfall frames, opt-in) and
+`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel)).
 `activity` is not one of these channels. It uses `activity:subscribe` and
 `activity:unsubscribe`. See [Activity](#activity).
 
@@ -3272,6 +3279,29 @@ One frame per source and profile:
 - Client rules: never merge or accumulate rows across a change of `sourceId`,
   epoch, `profile`, `binHz` or `startHz`; each row carries its own axis. Compare
   epochs for equality only (they restart with the engine).
+
+#### Bandplans channel
+
+The `bandplans` channel is mounted in legacy and protected modes under the normal
+socket admission. Notices carry only the store token, never band-plan state:
+clients refetch `GET /api/bandplans` (or the resolved view) and ignore an older
+revision of the same `storeId`.
+
+#### bandplans:changed
+
+Sent to a client right after it subscribes, with the current token (nothing while
+the store is unavailable), and to every subscriber after each write that changed
+the store. No-op and rejected writes send nothing. `storeId` is `null` only for the
+never-persisted legacy store. If the notice cannot be sent, the channel's clients
+are disconnected so they reconnect and refetch; the write itself still succeeds.
+
+```json
+{
+	"type": "bandplans:changed",
+	"channel": "bandplans",
+	"data": { "storeId": "6f1c2a7e-4b1d-4c3e-9a51-2d8f0b7c9e14", "revision": 4 }
+}
+```
 
 #### subscribed
 

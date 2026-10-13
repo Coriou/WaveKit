@@ -163,7 +163,7 @@ contract files.
 - [ ] M2.3 `src/index.ts`: late-bound scanner provider with the `bandplansFor` fallback;
       late-bound `onCommit` sink set after the API server exists.
   - _Requirements: 11.3, 11.5, 11.9_
-- [ ] M2.4 `events.ts` channel, `isValidChannel`, `ServerMessage`; `server.ts`
+- [x] M2.4 `events.ts` channel, `isValidChannel`, `ServerMessage`; `server.ts`
       `getBandPlansBroadcastPort()` and channel observer in both modes; composition
       tests (subscribe snapshot, notice after a protected write, legacy snapshot).
   - _Requirements: 11.9_
