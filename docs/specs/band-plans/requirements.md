@@ -1,8 +1,9 @@
-# Band plans and scan presets requirements (BP1)
+# Band plans and scan presets requirements (BP1, BP2)
 
-Status: reviewed design, not implemented. The shared contract is
-`packages/api-types/src/bandplans.ts` plus `src/core/bandplans/contract.ts`; no module,
-route or composition exists yet. See [design](design.md) and [tasks](tasks.md).
+Status: BP1 (sections 1 to 10) implemented server-side. BP2 (section 11: scanner feed,
+preview digest, store identity, change notice) specified against the amended contract,
+not implemented. The shared contract is `packages/api-types/src/bandplans.ts` plus
+`src/core/bandplans/contract.ts`. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -16,18 +17,21 @@ Out of scope, each its own later spec or batch: a general settings store with YA
 environment and UI provenance; station country from coordinates (needs bundled boundary
 data); the scanner consuming the resolved stack (BP2); country packs or any new frequency
 data; numeric US FRS rows; URL fetch, "Check for update", SDR# XML and Gqrx CSV import;
-bundled community packs; deriving "verified" from registry links.
+bundled community packs; deriving "verified" from registry links. BP2 (section 11) brings
+the scanner consumption of the stack into scope, limited to built-in plan data.
 
 ## 1. Authority isolation
 
 As an operator I want band plans to label and organise the spectrum without silently
 changing what the receiver, scanner or decoders do.
 
-1.1 The scanner shall keep consuming today's built-in plans through `bandplansFor`.
+1.1 The scanner shall keep consuming today's built-in plan data from `bandplansFor`.
 `src/decoders/band-region.ts`, `src/decoders/band-defaults.ts`,
 `src/core/scanner/bandplan/index.ts` and `src/core/scanner/bandplan/builtin.ts` shall stay
-byte-identical; `GET /api/scanner/bandplans`, scanner defaults, ranges, rasters, priors and
-snapping shall not change.
+byte-identical; scanner defaults, ranges, rasters, priors and snapping shall not change.
+_Amended by BP2:_ the scanner's plan list, including `GET /api/scanner/bandplans`, is the
+effective scanner list of 11.1; under the default stack with no edits it equals
+`bandplansFor(region)` (11.2).
 1.2 No band-plan read or mutation shall tune, start or stop audio, decoders or scan jobs,
 or change scanner settings, decoder band overrides, operator data or the regional
 registry. Applying a scan preset shall remain a separate client call to the existing
@@ -127,7 +131,8 @@ table, then name keywords, else other. The preview shall report per source type 
 group, rule and count, plus mapped and to-other totals.
 6.6 Preview shall persist nothing. Commit shall present the same bytes, the preview's
 SHA-256 and the same overrides; a different file shall be rejected with
-`BANDPLANS_IMPORT_MISMATCH`. Commit may set name, author and licence, keep colour hints,
+`BANDPLANS_IMPORT_MISMATCH`. _Amended by BP2:_ the commit token is the preview digest
+of 11.7, which also binds the overrides. Commit may set name, author and licence, keep colour hints,
 replace an existing imported pack (keeping its id and edits) and append to the stack.
 6.7 Imported band ids shall be derived deterministically from names in file order, so
 re-importing the same file yields the same ids.
@@ -146,7 +151,8 @@ ranges, exclusions, protocols, sensitivity, threshold, FFT size, integration, dw
 settle) within the job schema's bounds; at least one bandplan or range is required.
 7.3 Core shall map any preset to a scanner job create body without creating a job. A
 preset naming a bandplan id unknown in the effective region shall be listed as not
-applicable with its issues, not rewritten.
+applicable with its issues, not rewritten. _Amended by BP2:_ "unknown" means absent from
+the effective scanner list (11.6).
 7.4 Built-in preset mappings shall always be valid job bodies whose bandplan ids resolve
 through `resolveBandplan(id, region)`.
 
@@ -179,6 +185,7 @@ operator-data mutations are. Views shall report whether writes are mounted.
 9.3 Core may publish a change notice `{storeId, revision}` on WebSocket channel
 `bandplans` after each changed durable commit; clients refetch. Delivery failure shall
 not undo or misreport a durable mutation. Wiring is Main's and optional for BP1.
+_BP2:_ required, see 11.9.
 
 ## 10. Verification obligations
 
@@ -189,3 +196,51 @@ mapping totality; preset-to-job validity; built-in projection fidelity.
 10.2 A repository test shall prove the four pinned files unchanged, every built-in
 citation URL present in `builtin.ts`, and `src/core/bandplans/` importing from the
 scanner only `bandplan/index.js`, `bandplan/builtin.js` and type modules.
+
+## 11. Batch 2 (BP2): scanner feed, preview digest, store identity, change notice
+
+As an operator I want the band-plan stack I chose to decide which built-in plans the
+scanner offers, hidden bands to leave the scanner, imports to bind what I previewed, and
+clients to learn about changes without polling.
+
+11.1 The effective scanner list shall be derived from the current stack view: for each
+enabled stack entry, in stack order, whose pack is built-in, the plans of
+`bandplansFor(<pack region>)` in that order, omitting a plan whose band carries a stored
+`hidden: true` edit and any plan id already taken from a higher entry. Imported packs,
+operator bands, `skip`, all other edit fields, segments and shadowing shall not change
+the list.
+11.2 With the default stack and no edits, including an unavailable store, the effective
+scanner list shall deep-equal `bandplansFor(region)` for every `BandRegion`. The four
+files pinned by 1.1 shall stay byte-identical, and scanner defaults, ranges, rasters,
+priors and snapping shall not change.
+11.3 The scanner shall read the effective scanner list when serving
+`GET /api/scanner/bandplans`, when previewing or admitting a job (create, patch, resume
+and passive jobs) and when creating an identify driver. A running sweep shall keep the
+plans it was admitted with; a change shall apply at the next admission, patch or resume.
+11.4 Job plan ids and the host ranges that operator ranges inherit rasters, OBW,
+protocols and plan id from shall resolve against the effective scanner list. An id that
+is not in it shall be reported as `range-empty`, as an id unknown in the region is today.
+11.5 Until the band-plan service is open, and whenever reading the stack view throws, the
+scanner shall use `bandplansFor(region)`. A band-plan failure shall never stop the
+scanner or core.
+11.6 Built-in presets shall stay region-derived (7.1, 7.4). Preset issues and
+`applicable` shall be computed against the effective scanner list.
+11.7 Import preview shall return `previewDigest`, a SHA-256 that binds the file bytes and
+the set of group overrides, independent of override order; `sha256` shall remain the
+hash of the file bytes. Commit shall present `previewDigest` (replacing
+`previewSha256`); any other bytes or overrides shall be rejected with
+`BANDPLANS_IMPORT_MISMATCH` and change nothing.
+11.8 An available store shall report `storeId: null` if and only if the served state is
+the never-persisted in-memory empty state of a read-only (legacy) open without
+`state.json`; otherwise it shall report the persisted UUID. No view shall expose the nil
+UUID. An unavailable store stays `{state: "unavailable"}`.
+11.9 Core shall publish `bandplans:changed` `{storeId, revision}` on WebSocket channel
+`bandplans` after each changed durable commit, and to a subscribing client the current
+token when the store is available (nothing when unavailable). The channel shall be
+mounted in legacy and protected modes under the normal socket admission. No-op and
+rejected mutations publish nothing; a delivery failure shall not undo or misreport the
+mutation, and a transport failure shall invalidate the channel's clients so they refetch.
+11.10 BP2 shall change no CLI or web client, add no frequency data and edit none of the
+files pinned by 1.1.
+11.11 Property tests (fast-check, at least 100 runs, trace comments) shall cover design
+properties 16 to 22, including the scanner parity of 11.2 for every `BandRegion`.

@@ -1,7 +1,8 @@
-# Band plans and scan presets design (BP1)
+# Band plans and scan presets design (BP1, BP2)
 
-Status: reviewed design, not implemented. Frozen contract files exist; no module, route or
-composition exists. See [requirements](requirements.md) and [tasks](tasks.md).
+Status: BP1 implemented server-side. BP2 ("Batch 2" sections at the end) specified against
+the amended contract files, not implemented. See [requirements](requirements.md) and
+[tasks](tasks.md).
 
 ## Authority audit
 
@@ -201,7 +202,8 @@ SRD, LPD, pager, POCSAG, airband, marine, AIS, amateur, ham, broadcast, DAB. A b
 "PMR" is not a keyword (it means PMR446 in France and land mobile elsewhere).
 
 Commit (`commit-import`) re-decodes the base64, re-parses with the same overrides and
-requires `preview.sha256 === previewSha256` (`IMPORT_MISMATCH`). Unless
+requires `preview.sha256 === previewSha256` (`IMPORT_MISMATCH`; BP2 replaces the token
+with `previewDigest`, see "Batch 2: preview digest"). Unless
 `keepColourHints`, stored colour hints are null. Name defaults to meta name, else file
 name. With `addToStack`, the pack is appended to the stack (materializing the default
 stack first when `stack` is null); a replaced pack keeps its stack position.
@@ -270,7 +272,8 @@ bits only (`0o777`), so a setgid parent does not make the store unavailable.
 When `writable` is false (legacy mode) the store opens read-only: no mkdir, no lock, no
 init write and no temp sweep. An existing `state.json` gets the same checks and bounded
 read; a missing one serves an in-memory empty state reported `available` with the nil
-UUID as `storeId` (never persisted; no write route is mounted). A writable open sweeps
+UUID as `storeId` (never persisted; no write route is mounted). BP2 reports that state as
+`storeId: null` instead (see "Batch 2: store identity"). A writable open sweeps
 leftover `.state-*.tmp` files under the lock. The additive option
 `onStoreUnavailable(reason)` reports a fixed token (`lock-held`, `invalid`, `oversized`,
 `permissions`, `io`) once when open ends unavailable and once on an after-rename latch;
@@ -375,3 +378,141 @@ least 100 runs and the trace comment `// Feature: band-plans, Property N: <name>
 - The SDR++ group and keyword tables are lane C's frozen data; they are display mapping,
   not frequency data. Country packs, URL import and "Check for update" need new data
   research and are not in BP1.
+
+## Batch 2 (BP2) overview
+
+User decisions: the scanner takes built-in plan data only, the stack chooses which
+built-in packs apply, and hiding a built-in band removes its plan; `skip`, imported and
+operator bands stay display-only. No CLI or web change. The four pinned scanner files
+and both isolation hash tables stay unchanged. Main decisions: `GET
+/api/scanner/bandplans` serves the effective list (1.1 amended); built-in presets keep
+region-derived ids but are validated against the effective list; `storeId` is nullable
+on the available store; a new `previewDigest` field, `sha256` stays the file hash; a new
+stack applies at the next job create, patch or resume, never mid-sweep.
+
+| Path                                                  | Lane | Role                                               |
+| ----------------------------------------------------- | ---- | -------------------------------------------------- |
+| `packages/api-types/src/bandplans.ts`, `contract.ts`  | done | Amended contract (BP2 step 0)                      |
+| `src/core/bandplans/scanner-feed.ts`                  | S    | Pure `resolveScannerBandplans`                     |
+| `src/core/bandplans/presets.ts`                       | S    | `presetIssuesFor` with optional `effectiveIds`     |
+| `src/core/scanner/plan/plan-preview.ts`               | S    | Lookups through `PreviewContext.bandplans`         |
+| `src/core/bandplans/{domain,service,storage}.ts`      | C    | `previewDigestFor`, digest checks, `storeId: null` |
+| `src/core/bandplans/import/sdrpp.ts`, routes plugin   | C    | Contract follow-ups only                           |
+| `src/api/websocket/bandplans-broadcast-adapter.ts`    | W    | Port factory, commit sink, subscribe snapshot      |
+| scanner-service, `src/index.ts`, server, events, docs | M    | Provider, composition order, channel mount, docs   |
+
+## Batch 2: scanner feed (lane S)
+
+`resolveScannerBandplans(view: BandPlanStackView): readonly Bandplan[]`
+(`ResolveScannerBandplans` in `contract.ts`) in `src/core/bandplans/scanner-feed.ts`:
+
+1. Built-in pack regions come from `view.packs` (`kind: "builtin"`, `region` non-null).
+2. Hidden keys are the `packId/bandId` of `view.edits` whose `set.hidden` is `true`.
+3. For each `view.stack.entries` entry with `enabled` whose pack is built-in, in order:
+   for each plan of `bandplansFor(region)` in order, skip it when its key is hidden or
+   its id was already emitted, else emit the plan object as returned by `bandplansFor`.
+4. Return the list. Nothing else of the view is read.
+
+The feed uses the stack view, not `ResolvedBandPlanView`: shadowed bands drop out of the
+resolved view's `bands` without their layer, and operator coverage must not remove a
+plan. Plans are the scanner's own objects (exact ranges with rasters, OBW and protocols,
+the variant `region` and the original name), so an edited name or edges never reach the
+scanner. Under the default stack the result is `bandplansFor(region)` element by element.
+If the operator disables every built-in pack, or stacks only imported packs, the list is
+empty: plan-id jobs and presets then report `range-empty` / not applicable, explicit
+ranges still scan (without host inheritance).
+
+`src/core/bandplans/` keeps importing only `../scanner/bandplan/index.js` and types from
+the scanner. The scanner never imports `src/core/bandplans/`: it receives a provider.
+
+## Batch 2: scanner integration (lane S module, Main splice)
+
+- `PreviewContext` gains optional `bandplans?: readonly Bandplan[]`. `plan-preview.ts`
+  uses `ctx.bandplans ?? bandplansFor(ctx.region)` for both the host-range list and the
+  plan-id lookup (`find` by id); the issue text and code are unchanged. Absent, the
+  output is identical to BP1.
+- `ScannerServiceDeps` gains optional `bandplans?: () => readonly Bandplan[]` (structural
+  `ScannerBandplanProvider`), default `() => bandplansFor(this.deps.region)`. The
+  service reads it at `bandplans()` (`GET /api/scanner/bandplans`), in the preview
+  context builder, and in `createIdentifyDriver`; it never caches the result across
+  calls, and running sweeps keep their admitted plans.
+- `src/index.ts`: the scanner is constructed before the band-plan service opens, so the
+  provider is late-bound: it returns `resolveScannerBandplans(service.view())` once
+  the service is open and `bandplansFor(region)` before that or when the read throws
+  (11.5).
+- Built-in presets: `presetIssuesFor(preset, region, effectiveIds?)`; with the set, an
+  id is an issue iff absent from it. The service takes the set from an injected optional
+  `scannerBandplans` dependency over its own current view (wired in the barrel), so
+  `applicable` and `/presets/:id/job` issues follow the effective list. Built-in preset
+  ids and job bodies stay region-derived (7.1, 7.4).
+
+## Batch 2: preview digest (lane C)
+
+`previewDigestFor(fileSha256, groupOverrides)` (`PreviewDigestFor`, pure, in
+`domain.ts`): lowercase hex SHA-256 of the UTF-8 bytes of
+`JSON.stringify({v: 1, sha256: fileSha256, groupOverrides: [[sourceType, group], ...]})`
+with pairs sorted by `sourceType` in code-unit order (override source types are unique
+by schema). `ImportPreview` gains `previewDigest`; the parser's preview
+(`ParsedImportPreview`) omits it and the service adds it in `previewImport` from the
+request's overrides. `importCommitFieldsSchema` replaces `previewSha256` with
+`previewDigest`. `service.prepare` and the `commit-import` transition both recompute the
+digest from the presented bytes and overrides and reject a mismatch with
+`BANDPLANS_IMPORT_MISMATCH` before any state change. The contract step left a stub
+(`previewDigest = sha256`) so the tree stays green until lane C lands.
+
+## Batch 2: store identity (lane C)
+
+`AvailableBandPlanStore.storeId` is `string | null`. Storage keeps its internal state
+schema (a UUID) but reports whether the served state is persisted; the service maps the
+never-persisted read-only empty state to `storeId: null`, and the resolution memo key
+uses a distinct token for it. Any other available store, legacy read-only over an
+existing file included, reports its persisted UUID. A null store only exists with `writable`
+false, so no write route is mounted and `mutate` keeps its BP1 rejection. `BANDPLAN_READ_ONLY_EMPTY_STORE_ID` stops appearing in views.
+
+## Batch 2: change notice (lane W adapter, Main splice)
+
+`src/api/websocket/bandplans-broadcast-adapter.ts`, modelled on
+`src/operator-data/broadcast-adapter.ts`:
+
+- `createBandPlansBroadcastPort(transport, onPublishFailure)`: `BandPlansBroadcastPort`
+  over a structural transport with `broadcast("bandplans", message)` and
+  `sendToClients("bandplans", ids, message)`, sending `BandPlansServerMessage`
+  `{type: "bandplans:changed", channel: "bandplans", data}`. A throwing broadcast calls
+  `onPublishFailure` (Main: invalidate the channel's clients); `sendSnapshot` is true
+  iff exactly one client accepted.
+- `createBandPlansCommitSink(port)`: the service's `onCommit`, copying the token.
+- `sendBandPlansSnapshot(service, port, clientId)`: `"unavailable"` when the service is
+  absent or its store unavailable, else the current `{storeId, revision}` (null storeId
+  allowed) and `"sent"` or `"rejected"`; Main invalidates the client on `"rejected"`.
+
+Main adds `"bandplans"` to `WebSocketChannel`, `isValidChannel` and the `ServerMessage`
+union, mounts the channel in both access modes (socket-level adoption applies in
+protected mode), exposes `ApiServer.getBandPlansBroadcastPort()` and observes the
+channel for subscribe snapshots. `src/index.ts` opens the service with a late-bound
+`onCommit` that forwards to the sink once the server exists.
+
+## Batch 2 correctness properties
+
+16. **Default scanner parity**: for every `BandRegion`, a default stack view (store
+    unavailable, or available with no stack and no edits) gives a feed deep-equal to
+    `bandplansFor(region)`, element order included; preview output with
+    `ctx.bandplans = bandplansFor(region)` equals output without it (11.2, 11.4, 1.1).
+17. **Hidden removal**: hiding a built-in band of an enabled entry removes that plan
+    unless another enabled built-in entry supplies the same id; unhiding restores the
+    list; imported packs, operator bands, `skip` and other edit fields never change it
+    (11.1).
+18. **Feed shape**: ids are unique; each plan deep-equals the `bandplansFor` plan of its
+    entry's region; order is stack order then plan order; disabled and imported entries
+    contribute nothing; the feed never throws (11.1, 11.5).
+19. **Preset applicability**: with `effectiveIds`, a preset's issues are exactly its
+    plan ids absent from the effective list; without it, BP1 behaviour (11.6, 7.3).
+20. **Preview digest binding**: equal bytes with permuted overrides give equal digests;
+    different bytes or a different override set give a different digest; a commit with
+    a mismatched digest rejects `BANDPLANS_IMPORT_MISMATCH` and changes nothing (11.7).
+21. **Store identity**: `storeId` is null iff the state is the never-persisted
+    read-only empty state; writable and file-backed opens report the file's UUID
+    (11.8).
+22. **Change notice**: exactly one notice per changed commit carrying the new token,
+    none for no-op or rejected mutations; the subscribe snapshot equals the current
+    view's token and is not sent for an unavailable store; a throwing transport never
+    fails the mutation (11.9).
