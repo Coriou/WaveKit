@@ -97,7 +97,7 @@ requester returns 401. Return detached allowlist rows bounded by the configured
 session cap, at most 32, with exactly one current requester.
 
 4.9 (WG2, user decision D3, 2026-10-13.) Each remembered device may carry an
-operator-set `name` (1–64 characters after trimming, at most 128 UTF-8 bytes, no
+operator-set `name` (1–64 characters, no leading or trailing whitespace, at most 128 UTF-8 bytes, no
 C0/C1 control or bidirectional-override characters) and `kind` (`browser`, `phone`,
 `tablet`, `desktop`, `cli`, `other`). Neither is ever derived from a user agent,
 address, header or any other fingerprint; both start null.

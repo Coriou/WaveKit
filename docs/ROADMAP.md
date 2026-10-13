@@ -58,7 +58,8 @@ per-entity throttle on vessel, APRS and mesh updates; CTCSS and DTMF on analog
 transmissions; strict AIS NMEA checksums; DMR/P25/NXDN call metadata; device
 names, kinds and coarse last-seen; Ignore (lockout) skips sweeps; per-job scanner
 hit statistics; a Mic-E position fix (West longitudes were decoded as East, and
-the speed/course offsets were missing). No CLI or web change.
+the speed/course offsets were missing). CLI changes: its credential reader accepts
+the version 2 session snapshot, and APRS speed is labelled in knots. No web change.
 
 Order of the remaining core gaps, by what they unblock in the dashboard:
 

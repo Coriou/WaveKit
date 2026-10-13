@@ -200,7 +200,7 @@ Talker alias is out of scope.
 ## 11. Device names, kinds and coarse last-seen (access amendment)
 
 11.1 Each remembered device shall have an optional operator-set `name` (1–64 characters
-after trimming, at most 128 bytes, no control or bidirectional-override characters) and
+with no leading or trailing whitespace, at most 128 bytes, no control or bidirectional-override characters) and
 `kind` (`browser`, `phone`, `tablet`, `desktop`, `cli`, `other`), never derived from a user
 agent, address or any fingerprint.
 11.2 `POST /api/access/devices/label` with `{ deviceId, name?, kind? }` (at least one;

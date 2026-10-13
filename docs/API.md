@@ -137,9 +137,23 @@ already queued. The private session snapshot is version 2; a version 1 snapshot 
 with null labels and is written as version 2 on the next commit. An older WaveKit
 refuses a version 2 snapshot and fails closed.
 
+Rolling back to a core older than WG2: the older core refuses the state file and
+protected access stays unavailable until it is fixed. The machine token is in the
+unchanged outer envelope (`machineToken`), so it survives if only the inner `sessions`
+object is rewritten as version 1. With the core stopped, in the private directory:
+`jq '.sessions |= (.version = 1 | .sessions |= map(del(.name, .kind, .lastSeenAt)))'
+access-state.json > access-state.json.v1`, then `chmod 600 access-state.json.v1` and
+`mv access-state.json.v1 access-state.json`. Device labels and last-seen hours are
+lost; remembered browsers and the machine token are kept. Without that rewrite the
+alternative is re-provisioning, which issues a new machine token. Update the CLI with
+the core: a CLI from before WG2 reading the credential with `--credential-format
+access-state` (the default) refuses a version 2 snapshot (`ACCESS_CREDENTIAL_UNAVAILABLE`);
+`--credential-format token` with an exported token file is not affected.
+
 `POST /api/access/devices/label` with `{ "deviceId", "name"?, "kind"? }` labels a
 remembered device. At least one of `name` and `kind` is required; `null` clears a field
-and an absent key keeps it. `name` is 1–64 characters after trimming, at most 128
+and an absent key keeps it. `name` is 1–64 characters with no leading or trailing
+whitespace (it is not trimmed for you; such a name is a 400), at most 128
 UTF-8 bytes, with no C0/C1 control or bidirectional-override characters. `kind` is one
 of `browser`, `phone`, `tablet`, `desktop`, `cli`, `other`. The route has the same
 session, CSRF, Origin and exact-target admission as `POST /api/access/devices/revoke`;
@@ -2530,7 +2544,8 @@ after `*` (either case) and nothing follows them. A failing sentence, fragment
 or not, is dropped before reassembly, counted in the decoder's `stats.errors`
 (see `GET /api/decoders/:id`) and logged at debug level at most once a minute;
 a good copy of a dropped fragment still completes its group within 2 s.
-AIS-catcher's JSON output is not affected.
+AIS-catcher's JSON output is not affected. The checksum count is not a separate
+field of the decoder status (only `stats.errors`); it appears in the debug log.
 
 #### GET /api/vessels
 
@@ -3545,7 +3560,9 @@ ready, each closed transmission is also stored as an `analog-transmission`
   (`0-9`, `*`, `#`, `A-D`) in order, at most 32, each held at least 40 ms
   within the standard twist (−8 to +4 dB); null when none. Detection runs on
   the demodulated audio (decimated to 8 kHz) only while a transmission is
-  open; it is always on and has no config key. DCS is not detected.
+  open; it is always on and has no config key. DCS is not detected. Tones need a
+  demodulated audio rate of at least 8 kHz; below that `tone` is
+  `{ ctcssHz: null, dtmf: null }`.
 
 #### digital-voice:call
 
