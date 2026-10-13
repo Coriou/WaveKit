@@ -1209,3 +1209,5 @@ Announcement for the CLI; no CLI change is required. Spec: [web-gaps-1](specs/we
 - `scanner:progress` now arrives at up to 2 Hz per job (other scanner messages stay at 1/s per key, same global budget). Plan preview POI uses each hop's own dwell when a range sets `dwellMs`.
 
 Update to the WG1 note above (2026-10-13): the CLI now validates `live-audio:transmission` and drops it like `live-audio:level` (no UI), so it no longer increments `invalidFrames`; a malformed one still counts as invalid.
+
+Update to the WG1 note (R1, 2026-10-13): Activity now stores a position-only aircraft or ship reception at most once per entity per 60 s (first sightings and callsign/squawk/static changes always), and `GET /api/activity/status` `stats` gains `coalescedPositions`. Spectrum backfill is trimmed to the client's free outbound queue room, so `backfillFrames` can be lower than requested. The CLI uses neither; no change required.
