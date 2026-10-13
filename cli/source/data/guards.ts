@@ -1558,6 +1558,14 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 				? { type }
 				: undefined
 		}
+		case "live-audio:transmission": {
+			const state = data["state"]
+			return s("transmissionId") !== undefined &&
+				s("sourceId") !== undefined &&
+				(state === "open" || state === "closed")
+				? { type }
+				: undefined
+		}
 		case "live-audio:status": {
 			const status = guardLiveAudioStatus(d)
 			return status ? { type, status } : undefined
