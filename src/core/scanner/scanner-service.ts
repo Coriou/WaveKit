@@ -2077,26 +2077,32 @@ export class ScannerService extends EventEmitter {
 		const outer = this.ingestChanges
 		const changes: [string, StoreChange][] = []
 		this.ingestChanges = changes
-		let attributed: string | null = null
+		let reported = new Map<string, Set<string>>()
 		try {
-			attributed = this.ingestTracked(live, track, endReason)
+			reported = this.ingestTracked(live, track, endReason)
 		} finally {
 			this.ingestChanges = outer
-			for (const [id, change] of changes)
+			for (const [id, change] of changes) {
+				const jobIds = reported.get(id)
 				this.emitDiscoveryChange(
 					id,
 					change,
-					id === attributed ? this.jobHitsOf(live.jobIds, id) : [],
+					jobIds ? this.jobHitsOf([...jobIds], id) : [],
 				)
+			}
 		}
 	}
 
-	/** Returns the discovery the observation is attributed to (null: transient). */
+	/**
+	 * Returns, per discovery, the jobs whose hits its events report: the observation's jobs on the
+	 * discovery it is attributed to, plus every job the store newly credited in this ingest.
+	 */
 	private ingestTracked(
 		live: LiveObservation,
 		track: TrackSnapshot,
 		endReason?: ObservationEndReason,
-	): string | null {
+	): Map<string, Set<string>> {
+		const reported = new Map<string, Set<string>>()
 		const now = this.now()
 		const sweep = live.jobIds.some(
 			id => this.jobs.get(id)?.spec.mode === "sweep",
@@ -2122,16 +2128,36 @@ export class ScannerService extends EventEmitter {
 					const r = this.jobs.get(id)
 					if (r) r.counts.transients += 1
 				}
-			return null
+			return reported
 		}
 		if (live.discoveryId === null) {
 			for (const id of live.jobIds) {
 				const r = this.jobs.get(id)
-				if (!r) continue
-				r.counts.observations += 1
-				// WG2 req 13.1: one hit per observation attributed to a discovery.
-				this.hitsOf(id).record(res.discoveryId, now, res.change === "created")
+				if (r) r.counts.observations += 1
 			}
+		}
+		const report = (discoveryId: string, jobIds: readonly string[]): void => {
+			let set = reported.get(discoveryId)
+			if (!set) {
+				set = new Set()
+				reported.set(discoveryId, set)
+			}
+			for (const j of jobIds) set.add(j)
+		}
+		report(res.discoveryId, live.jobIds)
+		// WG2 req 13.1: one hit per (observation, job) the store newly credits, including jobs joining
+		// a placed observation and every pending observation a single-block promotion attaches.
+		for (const a of res.attributed ?? []) {
+			for (const jobId of a.jobIds) {
+				if (!this.jobs.has(jobId)) continue
+				this.hitsOf(jobId).record(
+					a.observationId,
+					a.discoveryId,
+					now,
+					a.created,
+				)
+			}
+			report(a.discoveryId, a.jobIds)
 		}
 		live.discoveryId = res.discoveryId
 		live.decoded = this.store.get(res.discoveryId)?.confidence === "decoded"
@@ -2140,7 +2166,7 @@ export class ScannerService extends EventEmitter {
 			delete live.undecodedReason
 		}
 		this.dirty = true
-		return res.discoveryId
+		return reported
 	}
 
 	private hitsOf(jobId: string): JobHits {

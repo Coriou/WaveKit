@@ -14,6 +14,12 @@ export const JOB_HITS_TRACKED_MAX = 2000
  * `discoveries` stops growing while `hits` keeps counting.
  */
 export const JOB_HITS_UNTRACKED_DISTINCT_MAX = 10_000
+/**
+ * Observation ids already credited to the job, so a re-placed observation (unlinked, then placed
+ * again) is not counted twice. FIFO-pruned: observations are minutes long and their re-ingests
+ * close together, so the oldest of 4,096 ids (about 0.4 MB) is safe to forget.
+ */
+export const JOB_HITS_CREDITED_MAX = 4096
 /** 13.3: `GET /api/scanner/jobs/:id/hits?limit` bounds. */
 export const JOB_HITS_LIMIT_DEFAULT = 100
 export const JOB_HITS_LIMIT_MAX = 500
@@ -29,6 +35,7 @@ export class JobHits {
 	/** Insertion order is recency: a hit moves its entry to the end. */
 	private readonly byDiscovery = new Map<string, Entry>()
 	private readonly untracked = new Set<string>()
+	private readonly credited = new Set<string>()
 	private hits = 0
 	private newDiscoveries = 0
 	private truncated = false
@@ -38,8 +45,22 @@ export class JobHits {
 		private readonly trackedMax = JOB_HITS_TRACKED_MAX,
 	) {}
 
-	/** Counts one observation attributed to `discoveryId`; `created` = it created the discovery. */
-	record(discoveryId: string, at: number, created: boolean): void {
+	/**
+	 * Counts observation `observationId` attributed to `discoveryId` once; `created` = it created the
+	 * discovery. Returns false for an observation already credited.
+	 */
+	record(
+		observationId: string,
+		discoveryId: string,
+		at: number,
+		created: boolean,
+	): boolean {
+		if (this.credited.has(observationId)) return false
+		this.credited.add(observationId)
+		if (this.credited.size > JOB_HITS_CREDITED_MAX) {
+			const oldest = this.credited.values().next()
+			if (oldest.done !== true) this.credited.delete(oldest.value)
+		}
 		this.hits += 1
 		if (created) this.newDiscoveries += 1
 		const known = this.byDiscovery.get(discoveryId)
@@ -48,7 +69,7 @@ export class JobHits {
 			known.lastHitAt = Math.max(known.lastHitAt, at)
 			this.byDiscovery.delete(discoveryId)
 			this.byDiscovery.set(discoveryId, known)
-			return
+			return true
 		}
 		if (this.byDiscovery.size < this.trackedMax) {
 			this.byDiscovery.set(discoveryId, {
@@ -57,11 +78,12 @@ export class JobHits {
 				lastHitAt: at,
 				firstSeenInJob: created,
 			})
-			return
+			return true
 		}
 		this.truncated = true
 		if (this.untracked.size < JOB_HITS_UNTRACKED_DISTINCT_MAX)
 			this.untracked.add(discoveryId)
+		return true
 	}
 
 	entry(discoveryId: string): ScanJobHit | undefined {

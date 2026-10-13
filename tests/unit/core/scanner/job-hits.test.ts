@@ -1,19 +1,22 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	JOB_HITS_CREDITED_MAX,
 	JOB_HITS_TRACKED_MAX,
 	JOB_HITS_UNTRACKED_DISTINCT_MAX,
 	JobHits,
 } from "../../../../src/core/scanner/job-hits.js"
 
 const T0 = Date.parse("2026-10-13T12:00:00.000Z")
+let obsSeq = 0
+const nextObs = (): string => `o_${obsSeq++}`
 
 describe("JobHits (WG2 req 13)", () => {
 	it("counts hits per discovery with first and last time, most recent first", () => {
 		const h = new JobHits("j_1")
-		h.record("d_a", T0, true)
-		h.record("d_b", T0 + 1000, false)
-		h.record("d_a", T0 + 2000, false)
+		h.record(nextObs(), "d_a", T0, true)
+		h.record(nextObs(), "d_b", T0 + 1000, false)
+		h.record(nextObs(), "d_a", T0 + 2000, false)
 		expect(h.stats()).toEqual({
 			discoveries: 2,
 			hits: 3,
@@ -43,14 +46,31 @@ describe("JobHits (WG2 req 13)", () => {
 		expect(h.entry("d_x")).toBeUndefined()
 	})
 
+	it("credits an observation once, however often it is placed again", () => {
+		const h = new JobHits("j_1")
+		expect(h.record("o_1", "d_a", T0, true)).toBe(true)
+		expect(h.record("o_1", "d_a", T0 + 1, false)).toBe(false)
+		expect(h.record("o_1", "d_b", T0 + 2, false)).toBe(false)
+		expect(h.stats()).toEqual({
+			discoveries: 1,
+			hits: 1,
+			newDiscoveries: 1,
+			truncated: false,
+		})
+		// The credited-id memory is FIFO-bounded.
+		for (let i = 0; i < JOB_HITS_CREDITED_MAX; i++)
+			h.record(`o_x${i}`, "d_a", T0, false)
+		expect(h.record("o_1", "d_a", T0, false)).toBe(true)
+	})
+
 	it("tracks at most 2000 discoveries; the rest count in the totals only (13.4)", () => {
 		const h = new JobHits("j_1")
 		for (let i = 0; i < JOB_HITS_TRACKED_MAX; i++)
-			h.record(`d_${i}`, T0 + i, true)
+			h.record(nextObs(), `d_${i}`, T0 + i, true)
 		expect(h.stats().truncated).toBe(false)
-		h.record("d_over", T0, true)
-		h.record("d_over", T0, false)
-		h.record("d_0", T0 + 5000, false)
+		h.record(nextObs(), "d_over", T0, true)
+		h.record(nextObs(), "d_over", T0, false)
+		h.record(nextObs(), "d_0", T0 + 5000, false)
 		expect(h.entry("d_over")).toBeUndefined()
 		expect(h.entry("d_0")?.hits).toBe(2)
 		expect(h.stats()).toEqual({
@@ -63,7 +83,7 @@ describe("JobHits (WG2 req 13)", () => {
 		expect(h.list(500)[0]?.discoveryId).toBe("d_0")
 		// The distinct count of untracked discoveries is bounded too.
 		for (let i = 0; i < JOB_HITS_UNTRACKED_DISTINCT_MAX + 10; i++)
-			h.record(`u_${i}`, T0, false)
+			h.record(nextObs(), `u_${i}`, T0, false)
 		expect(h.stats().discoveries).toBe(
 			JOB_HITS_TRACKED_MAX + JOB_HITS_UNTRACKED_DISTINCT_MAX,
 		)
@@ -80,6 +100,7 @@ describe("JobHits (WG2 req 13)", () => {
 						d: fc.nat({ max: 60 }),
 						dt: fc.nat({ max: 5000 }),
 						created: fc.boolean(),
+						again: fc.option(fc.nat(), { nil: undefined }),
 					}),
 					{ maxLength: 300 },
 				),
@@ -90,10 +111,21 @@ describe("JobHits (WG2 req 13)", () => {
 					const tracked = new Map<string, boolean>()
 					let created = 0
 					let at = T0
-					for (const { d, dt, created: isNew } of seq) {
+					let counted = 0
+					const placed: string[] = []
+					for (const { d, dt, created: isNew, again } of seq) {
 						at += dt
 						const id = `d_${d}`
-						h.record(id, at, isNew)
+						// A re-placed observation (same id) is never counted twice.
+						if (again !== undefined && placed.length > 0) {
+							const o = placed[again % placed.length]!
+							expect(h.record(o, id, at, isNew)).toBe(false)
+							continue
+						}
+						const o = `o_${placed.length}`
+						placed.push(o)
+						expect(h.record(o, id, at, isNew)).toBe(true)
+						counted += 1
 						perDiscovery.set(id, (perDiscovery.get(id) ?? 0) + 1)
 						if (isNew) created += 1
 						if (!tracked.has(id) && tracked.size < cap) tracked.set(id, isNew)
@@ -101,7 +133,7 @@ describe("JobHits (WG2 req 13)", () => {
 					const stats = h.stats()
 					expect(stats).toEqual({
 						discoveries: perDiscovery.size,
-						hits: seq.length,
+						hits: counted,
 						newDiscoveries: created,
 						truncated: perDiscovery.size > cap,
 					})

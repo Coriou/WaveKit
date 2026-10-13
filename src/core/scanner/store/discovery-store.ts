@@ -113,7 +113,22 @@ export interface RecordingCommitPlan {
 	readonly recordingCount: number
 }
 
-type Ingested = { discoveryId: string | null; change: StoreChange }
+/**
+ * WG2 req 13.1: an observation newly credited to jobs by one ingest (its first placement, or jobs
+ * joining a placed observation). A promoted single-block hit credits every pending observation.
+ */
+export interface Attribution {
+	observationId: string
+	discoveryId: string
+	jobIds: string[]
+	/** The ingest created the discovery the observation landed in. */
+	created: boolean
+}
+type Ingested = {
+	discoveryId: string | null
+	change: StoreChange
+	attributed?: Attribution[]
+}
 
 const METADATA_MAX = 64
 const LINKS_MAX = 64
@@ -147,6 +162,8 @@ interface Op {
 	merged: [string, string][]
 	removedObservations: string[]
 	correction?: { sourceId: string; hz: number }
+	/** Observation id → job ids newly credited (WG2 req 13.1). */
+	credited: Map<string, string[]>
 }
 
 function newOp(): Op {
@@ -157,6 +174,7 @@ function newOp(): Op {
 		changes: new Map(),
 		merged: [],
 		removedObservations: [],
+		credited: new Map(),
 	}
 }
 
@@ -1169,6 +1187,7 @@ export class DiscoveryStore extends EventEmitter {
 		const record = this.toRecord(obs, d.id)
 		this.putObservation(record)
 		op.observations.add(record.id)
+		op.credited.set(record.id, [...record.jobIds])
 		d.observationCount += 1
 		d.airtimeMs += durationOf(obs)
 		this.absorbStats(d, obs, true)
@@ -1203,9 +1222,11 @@ export class DiscoveryStore extends EventEmitter {
 		this.refresh(d)
 		if (JSON.stringify(d) === beforeD && JSON.stringify(record) === beforeO)
 			return { discoveryId: d.id, change: "updated" }
+		const joined = record.jobIds.filter(j => !known.jobIds.includes(j))
 		return this.commit("observation", op => {
 			op.discoveries.add(d.id)
 			op.observations.add(record.id)
+			if (joined.length > 0) op.credited.set(record.id, joined)
 			mark(op, d.id, rank(d.confidence) > beforeRank ? "upgraded" : "updated")
 			return this.settle(op, d)
 		})
@@ -1814,7 +1835,24 @@ export class DiscoveryStore extends EventEmitter {
 		const op = newOp()
 		const id = run(op)
 		this.finish(kind, op)
-		return { discoveryId: id, change: op.changes.get(id) ?? "updated" }
+		const out: Ingested = {
+			discoveryId: id,
+			change: op.changes.get(id) ?? "updated",
+		}
+		const attributed: Attribution[] = []
+		for (const [observationId, jobIds] of op.credited) {
+			// Read after settle: a merge moves the observation to the survivor.
+			const discoveryId = this.observationIndex.get(observationId)?.discoveryId
+			if (discoveryId === undefined || jobIds.length === 0) continue
+			attributed.push({
+				observationId,
+				discoveryId,
+				jobIds: [...jobIds],
+				created: op.changes.get(discoveryId) === "created",
+			})
+		}
+		if (attributed.length > 0) out.attributed = attributed
+		return out
 	}
 
 	private finish(kind: JournalEntry["op"], op: Op): void {
