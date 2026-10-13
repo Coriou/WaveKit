@@ -490,7 +490,6 @@ export class ApiServer {
 				this.operatorData?.close() ?? Promise.resolve()
 			return this.operatorCloseResult
 		})
-		await attempt(() => this.bandPlans?.close())
 		await attempt(async () => {
 			await this.accessRoutes?.drain()
 		})
@@ -525,6 +524,8 @@ export class ApiServer {
 		await attempt(async () => {
 			await this.app.close()
 		})
+		// After HTTP drain: reads never see a closed store while requests finish.
+		await attempt(() => this.bandPlans?.close())
 		if (failed) {
 			this.log.error("Error stopping API server")
 			throw new WaveKitError("API shutdown incomplete", "ACCESS_UNAVAILABLE")

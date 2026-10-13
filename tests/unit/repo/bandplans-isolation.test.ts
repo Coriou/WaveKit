@@ -81,7 +81,7 @@ describe("band plan authority isolation", () => {
 		expect(files.length).toBeGreaterThan(0)
 		for (const file of files) {
 			const source = readFileSync(resolve(dir, file), "utf8")
-			const imports = [...source.matchAll(/\bfrom\s+"([^"]+)"/g)].map(
+			const imports = [...source.matchAll(/\b(?:from|import)\s+"([^"]+)"/g)].map(
 				match => match[1]!,
 			)
 			expect(imports.length).toBeGreaterThan(0)

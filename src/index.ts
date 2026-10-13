@@ -400,6 +400,8 @@ async function main(): Promise<void> {
 		if (protectedMode) cleanup.push({ priority, run })
 	}
 	let runtimeApi: ApiServer | undefined
+	// Idempotent; also closed by ApiServer.stop(). Covers a legacy stop during startup.
+	let closeBandPlans: (() => Promise<void>) | undefined
 	let disposeReceiver: (() => void) | undefined
 	let receiverDisposeResult: Promise<void> | undefined
 	const disposeReceiverAfterApi = (): Promise<void> => {
@@ -599,7 +601,7 @@ async function main(): Promise<void> {
 					const outcomes = await Promise.allSettled([
 						shutdown.shutdown(),
 						scannerPhases.completed(),
-						disposeReceiverAfterApi(),
+						disposeReceiverAfterApi().then(() => closeBandPlans?.()),
 					])
 					if (admissionFailed || outcomes.some(x => x.status === "rejected"))
 						throw new WaveKitError(
@@ -1123,7 +1125,8 @@ async function main(): Promise<void> {
 			},
 			writable: protectedMode,
 		})
-		own(11, () => bandPlans.close())
+		closeBandPlans = () => bandPlans.close()
+		own(11, closeBandPlans)
 		checkpoint()
 
 		// Step 9: Initialize API server

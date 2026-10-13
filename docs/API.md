@@ -477,8 +477,11 @@ Operator edits override single fields of a pack band without changing the pack.
 `community-unverified`. State lives in `<stateDir>/bandplans/state.json` (4 MiB
 cap). A storage failure never stops the core: reads return
 `store: { state: "unavailable" }`, the default stack and no stored layers, and
-writes fail with 503 `BANDPLANS_UNAVAILABLE`. The scanner does not consume these
-layers yet; see [SCANNER.md](SCANNER.md#presets-and-bandplans).
+writes fail with 503 `BANDPLANS_UNAVAILABLE`. In legacy mode the store is opened
+read-only: no lock, no directory or file is created, and an existing state file is
+only read. No WebSocket change notice is published yet, so clients refetch after
+their own writes and poll for others'. The scanner does not consume these layers
+yet; see [SCANNER.md](SCANNER.md#presets-and-bandplans).
 
 Reads are mounted in both access modes under the normal API admission. Writes and
 imports are mounted only in protected mode (`capabilities.writable: true` in the
@@ -523,7 +526,9 @@ Import preview takes `format: "sdrpp-json"`, `fileName`, `contentBase64` and
 repeats those fields and adds `expected`, `previewSha256` (must equal the file's
 hash, else 409 `BANDPLANS_IMPORT_MISMATCH`), `name`, `author`, `licence`,
 `keepColourHints`, `replacesPackId` (re-import keeping the pack id and its edits,
-or `null`) and `addToStack`. Presets are `{ name, job }` where `job` is a closed
+or `null`) and `addToStack`. The hash binds only the file bytes: the client must
+send the same `groupOverrides` it previewed, or the stored groups differ from the
+preview. Presets are `{ name, job }` where `job` is a closed
 subset of the scanner job spec with at least one bandplan or range. Built-in
 presets (`builtin-<plan id>` per scanner plan, plus a few combinations) are
 derived from the region and read-only (409 `BANDPLANS_READ_ONLY`).
