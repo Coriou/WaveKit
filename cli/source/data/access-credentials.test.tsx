@@ -158,6 +158,53 @@ describe("read-only private credentials", () => {
 			"live",
 		)
 	})
+	// WG2 access amendment 4.12: the core writes session snapshot version 2.
+	it("reads a version 2 session snapshot with device labels and last-seen", async () => {
+		const value = state() as {
+			sessions: { version: number; sessions: unknown[] }
+		}
+		const record = {
+			deviceId: `device_${token}`,
+			csrfToken: token,
+			tokenHash: "0".repeat(64),
+			createdAt: 1,
+			renewedAt: 2,
+			expiresAt: 3,
+		}
+		value.sessions.version = 2
+		value.sessions.sessions = [
+			{
+				...record,
+				name: "Kitchen tablet",
+				kind: "tablet",
+				lastSeenAt: 3_600_000,
+			},
+		]
+		await fs.writeFile(path, JSON.stringify(value))
+		const provider = createFileCredentialProvider({
+			path,
+			format: "access-state",
+		})
+		expect((await provider()).use(v => v)).toBe(token)
+		value.sessions.sessions = [
+			{ ...record, name: null, kind: null, lastSeenAt: null },
+		]
+		await fs.writeFile(path, JSON.stringify(value))
+		expect((await provider()).use(v => v)).toBe(token)
+		// Still closed: a v2 record without the new keys, an unknown kind, or v2 keys in v1.
+		for (const [version, records] of [
+			[2, [record]],
+			[2, [{ ...record, name: null, kind: "car", lastSeenAt: null }]],
+			[1, [{ ...record, name: null, kind: null, lastSeenAt: null }]],
+		] as const) {
+			value.sessions.version = version
+			value.sessions.sessions = [...records]
+			await fs.writeFile(path, JSON.stringify(value))
+			await expect(provider()).rejects.toMatchObject({
+				code: "ACCESS_CREDENTIAL_UNAVAILABLE",
+			})
+		}
+	})
 	it.each([
 		{ version: 1, machineToken: token },
 		{ ...(state() as object), credentialBinding: "0".repeat(64) },
