@@ -748,7 +748,8 @@ csdr:
 # 250_000-row cap in about 14 hours, and pruning is oldest-first for all
 # kinds. If node:sqlite is unusable the store reports "unavailable" and the
 # rest of WaveKit keeps running.
-# Disable with `activity: { enabled: false }` or WAVEKIT_ACTIVITY__ENABLED=false.
+# Disable with `activity: { enabled: false }` or
+# WAVEKIT_ACTIVITY__ENABLED=false.
 # activity:
 #   enabled: true
 #   retention:
