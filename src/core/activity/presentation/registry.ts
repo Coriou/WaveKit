@@ -1,5 +1,9 @@
 import type { DecoderOutput } from "../../../decoders/types.js"
-import type { DecodeEnvelopeContext, DecodePresentation } from "../types.js"
+import type {
+	DecodeEnvelope,
+	DecodeEnvelopeContext,
+	DecodePresentation,
+} from "../types.js"
 import { presentAcars, presentVdl2 } from "./acars-vdl2.js"
 import { presentAircraft } from "./aircraft.js"
 import { presentAprs } from "./aprs.js"
@@ -46,18 +50,21 @@ function dispatch(output: DecoderOutput): DecodePresentation | undefined {
 
 /**
  * Presentation plus a thrown-mapper signal for ingress. Zod failure is
- * `presentation: undefined` and no error. `decoderType` is ignored.
+ * `presentation: undefined` and no error. `decoderType` is ignored. Ingress
+ * passes the presentation-free envelope it already built, so the row budget
+ * never projects the payload again.
  */
 export function presentDecoderOutputResult(
 	output: DecoderOutput,
 	decoderType: string | undefined,
 	context?: DecodeEnvelopeContext,
+	plain?: DecodeEnvelope,
 ): PresentationAttempt {
 	void decoderType
 	try {
 		const view = dispatch(output)
 		if (view === undefined) return {}
-		return { presentation: fitRowBudget(output, view, context) }
+		return { presentation: fitRowBudget(output, view, context, plain) }
 	} catch (error) {
 		return { error }
 	}

@@ -91,8 +91,8 @@ describe("activity presentation failure paths", () => {
 		const output = oversizeAircraft()
 		const published: DecodeEnvelope[] = []
 		const ingress = createActivityIngress({
-			sink: envelope => {
-				published.push(envelope)
+			sink: (_envelope, present) => {
+				published.push(present())
 			},
 			logger: pino({ level: "silent" }),
 			now: () => RECEIVED,
@@ -128,8 +128,8 @@ describe("activity presentation failure paths", () => {
 		expect(reads).toBeGreaterThan(0)
 		const published: DecodeEnvelope[] = []
 		const ingress = createActivityIngress({
-			sink: envelope => {
-				published.push(envelope)
+			sink: (_envelope, present) => {
+				published.push(present())
 			},
 			logger: pino({ level: "silent" }),
 			now: () => RECEIVED,
@@ -140,7 +140,8 @@ describe("activity presentation failure paths", () => {
 		).not.toThrow()
 		expect(published).toHaveLength(0)
 		expect(ingress.counters().buildFailures).toBe(1)
-		expect(ingress.counters().presentationFailures).toBe(1)
+		// The plain build failed first, so presentation never ran.
+		expect(ingress.counters().presentationFailures).toBe(0)
 	})
 
 	it("counts a mapper throw and still stores a buildable reception", () => {
@@ -156,8 +157,8 @@ describe("activity presentation failure paths", () => {
 			expect(presentDecoderOutput(output, "readsb")).toBeUndefined()
 			const published: DecodeEnvelope[] = []
 			const ingress = createActivityIngress({
-				sink: envelope => {
-					published.push(envelope)
+				sink: (_envelope, present) => {
+					published.push(present())
 				},
 				logger: pino({ level: "silent" }),
 				now: () => RECEIVED,
@@ -211,8 +212,8 @@ describe("activity presentation failure paths", () => {
 		expect(presentDecoderOutput(output, "readsb")).toBeUndefined()
 		const published: DecodeEnvelope[] = []
 		const ingress = createActivityIngress({
-			sink: envelope => {
-				published.push(envelope)
+			sink: (_envelope, present) => {
+				published.push(present())
 			},
 			logger: pino({ level: "silent" }),
 			now: () => RECEIVED,

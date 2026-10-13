@@ -426,8 +426,9 @@ class ActivityStore implements ActivityStoreHandle {
 		}
 	}
 
-	admit(envelope: DecodeEnvelope): AdmitResult {
-		const result = this.ingress.admit(envelope)
+	/** `present` runs only for a reception that is kept; see ActivityIngress.admit. */
+	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult {
+		const result = this.ingress.admit(envelope, present)
 		if (result.admitted) {
 			this.onQueued()
 			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()

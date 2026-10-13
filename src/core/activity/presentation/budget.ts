@@ -3,16 +3,27 @@
  * values are clipped here so a mapper cannot build an envelope the schema
  * rejects for ordinary text. Long texts (pager, APRS, ACARS) use a higher
  * cap than other strings; both caps count the trailing ellipsis.
- * `fitRowBudget` then measures summary + record + FTS and shortens whatever
- * still exceeds req 1.8 (wide titles, long coordinates, multibyte text).
+ * `fitRowBudget` then bounds summary + record + FTS growth by arithmetic and
+ * shortens whatever still exceeds req 1.8 (wide titles, long coordinates,
+ * multibyte text); rows are built only when a 4 KiB summary or FTS cut could
+ * change the result.
  */
 import { z } from "zod"
 import type { DecoderOutput } from "../../../decoders/types.js"
-import { createDecodeEnvelope } from "../envelope.js"
-import { ACTIVITY_RECORD_VERSION } from "../storage/contract.js"
+import {
+	createDecodeEnvelope,
+	presentationJsonBytes,
+	withPresentation,
+} from "../envelope.js"
+import {
+	ACTIVITY_RECORD_VERSION,
+	MAX_INDEXED_TEXT_BYTES,
+	MAX_SUMMARY_BYTES,
+} from "../storage/contract.js"
 import { isCoalescibleShape } from "../storage/coalesce.js"
 import { buildActivityRow } from "../storage/row.js"
 import type {
+	DecodeEnvelope,
 	DecodeEnvelopeContext,
 	DecodeField,
 	DecodePosition,
@@ -381,7 +392,7 @@ function rowLimit(output: DecoderOutput): number {
 	return ROW_GROWTH_MAX_BYTES
 }
 
-function builtBytes(envelope: ReturnType<typeof createDecodeEnvelope>): number {
+function builtSize(envelope: DecodeEnvelope): { total: number } {
 	const row = buildActivityRow({
 		version: ACTIVITY_RECORD_VERSION,
 		eventId: envelope.eventId,
@@ -391,11 +402,12 @@ function builtBytes(envelope: ReturnType<typeof createDecodeEnvelope>): number {
 		kind: "decoder-reception",
 		payload: envelope,
 	})
-	return (
-		Buffer.byteLength(row.summaryJson, "utf8") +
-		Buffer.byteLength(row.recordJson, "utf8") +
-		Buffer.byteLength(row.ftsText, "utf8")
-	)
+	return {
+		total:
+			Buffer.byteLength(row.summaryJson, "utf8") +
+			Buffer.byteLength(row.recordJson, "utf8") +
+			Buffer.byteLength(row.ftsText, "utf8"),
+	}
 }
 
 /**
@@ -416,25 +428,111 @@ function budgetContext(
 	}
 }
 
+function jsonBytes(value: unknown): number {
+	return Buffer.byteLength(JSON.stringify(value), "utf8")
+}
+
+interface GrowthEstimate {
+	/** Bytes the presentation adds to one JSON copy (record or summary). */
+	json: number
+	/** Bytes at most added to the FTS text. */
+	fts: number
+	/** Upper bound of the built-row growth; exact when nothing is truncated. */
+	bound: number
+}
+
 /**
- * Bytes added by this presentation. Undefined when either envelope is
- * rejected: the ingress then rebuilds without the presentation (req 1.7).
+ * Built-row growth by arithmetic, without building a row. The record and
+ * summary JSON both store protocol, category, entity key, title, fields and
+ * position in place of the plain envelope's defaults; the FTS text adds the
+ * title, protocol and each field's label and value, one newline each. The
+ * summary's 4 KiB fit and the FTS cap only ever remove bytes, so this is an
+ * upper bound, and equal to the measured growth when neither cuts.
  */
-function measureGrowth(
-	output: DecoderOutput,
-	view: DecodePresentation,
-	context: DecodeEnvelopeContext,
-	plainBytes: { current: number | undefined },
-): number | undefined {
-	try {
-		if (plainBytes.current === undefined)
-			plainBytes.current = builtBytes(createDecodeEnvelope(output, context))
-		return (
-			builtBytes(createDecodeEnvelope(output, context, view)) -
-			plainBytes.current
+function estimateGrowth(view: DecodePresentation): GrowthEstimate {
+	const fields = view.fields ?? []
+	const json = presentationJsonBytes(view)
+	let fts = 0
+	if (view.title) fts += Buffer.byteLength(view.title, "utf8") + 1
+	if (view.protocol) fts += Buffer.byteLength(view.protocol, "utf8") + 1
+	for (const field of fields) {
+		fts += Buffer.byteLength(field.label, "utf8") + 1
+		if (typeof field.value === "string")
+			fts += Buffer.byteLength(field.value, "utf8") + 1
+		else if (
+			typeof field.value === "number" ||
+			typeof field.value === "boolean"
 		)
+			fts += Buffer.byteLength(String(field.value), "utf8") + 1
+	}
+	// A capped FTS text is cut on a code point boundary: up to 3 bytes move.
+	if (fts > 0 && fts < 3) fts = 3
+	return { json, fts, bound: 2 * json + fts }
+}
+
+/**
+ * Upper bounds of the plain row's summary and FTS bytes, from the envelope
+ * alone. The summary holds the envelope's ids, clocks and defaults plus
+ * `kind` and a rounded frequency; the FTS text joins the payload's strings,
+ * each no longer than its JSON form.
+ */
+function plainCeilings(plain: DecodeEnvelope): {
+	summary: number
+	fts: number
+} {
+	const summary =
+		jsonBytes({
+			eventId: plain.eventId,
+			kind: "decoder-reception",
+			producedAt: plain.producedAt,
+			receivedAt: plain.receivedAt,
+			decoderId: plain.decoderId,
+			sourceId: plain.provenance.sourceId,
+			protocol: null,
+			category: "other",
+			frequencyHz: plain.provenance.frequency?.hz ?? null,
+			entityKey: null,
+			title: null,
+			fields: [],
+		}) + 8
+	return { summary, fts: jsonBytes(plain.decodedData) }
+}
+
+/**
+ * Growth measure for the shrink loop. Arithmetic unless the summary fit or
+ * the FTS cap could cut this candidate; then the row is built. Undefined
+ * when the presented envelope is rejected.
+ */
+function growthMeter(
+	output: DecoderOutput,
+	limit: number,
+	context: DecodeEnvelopeContext | undefined,
+	plainEnvelope: DecodeEnvelope | undefined,
+): ((candidate: DecodePresentation) => number | undefined) | undefined {
+	let plain: DecodeEnvelope
+	let ceilings: { summary: number; fts: number }
+	try {
+		plain =
+			plainEnvelope ??
+			createDecodeEnvelope(output, budgetContext(output, context))
+		ceilings = plainCeilings(plain)
 	} catch {
 		return undefined
+	}
+	let plainTotal: number | undefined
+	return candidate => {
+		const estimate = estimateGrowth(candidate)
+		if (estimate.bound <= limit) return estimate.bound
+		const cut =
+			ceilings.summary + estimate.json > MAX_SUMMARY_BYTES ||
+			ceilings.fts + estimate.fts > MAX_INDEXED_TEXT_BYTES
+		if (!cut) return estimate.bound
+		try {
+			plainTotal ??= builtSize(plain).total
+			return builtSize(withPresentation(plain, candidate)).total - plainTotal
+		} catch {
+			return undefined
+		}
 	}
 }
 
@@ -529,12 +627,13 @@ export function fitRowBudget(
 	output: DecoderOutput,
 	view: DecodePresentation,
 	context?: DecodeEnvelopeContext,
+	plain?: DecodeEnvelope,
 ): DecodePresentation {
 	const limit = rowLimit(output)
-	const measuredContext = budgetContext(output, context)
-	const plainBytes: { current: number | undefined } = { current: undefined }
-	const growth = (candidate: DecodePresentation) =>
-		measureGrowth(output, candidate, measuredContext, plainBytes)
+	// Common path: the arithmetic bound fits, so no envelope or row is built.
+	if (estimateGrowth(view).bound <= limit) return view
+	const growth = growthMeter(output, limit, context, plain)
+	if (growth === undefined) return view
 	const initial = growth(view)
 	if (initial === undefined || initial <= limit) return view
 

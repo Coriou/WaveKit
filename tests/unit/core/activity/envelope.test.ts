@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 import {
 	createDecodeEnvelope,
 	validateDecodeEnvelope,
+	withPresentation,
 } from "../../../../src/core/activity/envelope.js"
 import { parseAcarsdecJson } from "../../../../src/decoders/builtin/acarsdec.js"
 import { parseDumpvdl2Json } from "../../../../src/decoders/builtin/dumpvdl2.js"
@@ -393,5 +394,45 @@ describe("unmounted decoder event envelope", () => {
 			"Invalid decoder event envelope",
 		)
 		expect(getter).not.toHaveBeenCalled()
+	})
+	it("adds a presentation to a plain envelope exactly as create does", () => {
+		const presentations: DecodePresentation[] = [
+			{},
+			{ category: "aircraft", protocol: "adsb" },
+			{
+				category: "aprs",
+				protocol: "aprs",
+				entityKey: "callsign:N0CALL-9",
+				title: "N0CALL-9 Position",
+				position: { lat: 51.5, lon: -0.1 },
+				fields: [
+					{ key: "speed", label: "Speed", value: 12, unit: "kn" },
+					{ key: "ok", label: "OK", value: true },
+				],
+			},
+		]
+		const supplied: DecodeEnvelopeContext = {
+			...context(),
+			decoderType: "readsb",
+			provenance: { sourceId: "rtl", frequency: null },
+			refs: { callId: "call-1" },
+		}
+		for (const presentation of presentations) {
+			const source = output({ icao: "abc123", tags: ["a"] }, "aircraft")
+			const plain = createDecodeEnvelope(source, supplied)
+			const added = withPresentation(plain, presentation)
+			const created = createDecodeEnvelope(source, supplied, presentation)
+			expect(added).toEqual(created)
+			expect(JSON.stringify(added)).toBe(JSON.stringify(created))
+		}
+	})
+
+	it("rejects a presentation through withPresentation as create does", () => {
+		const plain = createDecodeEnvelope(output({}), context())
+		expect(() => withPresentation(plain, { entityKey: "no key" })).toThrow()
+		expect(() => withPresentation(plain, { title: "bad\u0000title" })).toThrow()
+		expect(() =>
+			createDecodeEnvelope(output({}), context(), { entityKey: "no key" }),
+		).toThrow()
 	})
 })

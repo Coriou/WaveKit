@@ -171,14 +171,104 @@ function dateIso(value: unknown): string {
 		return invalidEnvelope()
 	return projected
 }
+/**
+ * Wire bytes of each envelope this module validated. `withPresentation` adds
+ * a presentation to one of them without validating its metadata again.
+ * Envelopes are treated as immutable once built.
+ */
+const validatedBytes = new WeakMap<DecodeEnvelope, number>()
+
 function complete(metadata: unknown, decodedData: JsonValue): DecodeEnvelope {
 	const result = metadataSchema.safeParse(metadata)
 	if (!result.success) return invalidEnvelope()
 	const envelope = { ...result.data, decodedData }
-	if (Buffer.byteLength(JSON.stringify(envelope), "utf8") > MAX_ENVELOPE_BYTES)
-		return invalidEnvelope()
+	const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8")
+	if (bytes > MAX_ENVELOPE_BYTES) return invalidEnvelope()
 	// Safe projection removed undefined members; Zod's optional types remain wider.
+	validatedBytes.set(envelope as DecodeEnvelope, bytes)
 	return envelope as DecodeEnvelope
+}
+
+function jsonBytes(value: unknown): number {
+	return Buffer.byteLength(JSON.stringify(value), "utf8")
+}
+
+/** `null`, `"other"`, `null`, `null`, `[]`: the defaults a plain envelope stores. */
+const PLAIN_PRESENTATION_BYTES = 4 + 7 + 4 + 4 + 2
+/** `,"position":` */
+const POSITION_MEMBER_BYTES = 12
+
+/**
+ * Bytes a presentation adds to the JSON of a presentation-free envelope (or
+ * of any JSON that stores protocol, category, entity key, title, fields and
+ * an optional position the same way, such as the Activity row summary).
+ */
+export function presentationJsonBytes(
+	presentation: DecodePresentation,
+): number {
+	let bytes =
+		jsonBytes(presentation.protocol ?? null) +
+		jsonBytes(presentation.category ?? "other") +
+		jsonBytes(presentation.entityKey ?? null) +
+		jsonBytes(presentation.title ?? null) +
+		jsonBytes(presentation.fields ?? []) -
+		PLAIN_PRESENTATION_BYTES
+	if (presentation.position !== undefined)
+		bytes += POSITION_MEMBER_BYTES + jsonBytes(presentation.position)
+	return bytes
+}
+
+function isPlain(envelope: DecodeEnvelope): boolean {
+	return (
+		envelope.protocol === null &&
+		envelope.category === "other" &&
+		envelope.entityKey === null &&
+		envelope.title === null &&
+		envelope.fields.length === 0 &&
+		envelope.position === undefined
+	)
+}
+
+type ParsedPresentation = z.infer<typeof presentationSchema>
+
+interface EnvelopeBase {
+	eventId: string
+	producedAt: string
+	receivedAt: string
+	decoderId: string
+	decoderType: string | undefined
+	outputType: string
+	provenance: unknown
+	refs: unknown
+}
+
+function assemble(
+	base: EnvelopeBase,
+	display: ParsedPresentation,
+	decodedData: JsonValue,
+): DecodeEnvelope {
+	return complete(
+		{
+			version: 1,
+			eventId: base.eventId,
+			producedAt: base.producedAt,
+			receivedAt: base.receivedAt,
+			decoderId: base.decoderId,
+			...(base.decoderType === undefined
+				? {}
+				: { decoderType: base.decoderType }),
+			outputType: base.outputType,
+			protocol: display.protocol ?? null,
+			category: display.category ?? "other",
+			entityKey: display.entityKey ?? null,
+			...(display.position === undefined ? {} : { position: display.position }),
+			title: display.title ?? null,
+			fields: display.fields ?? [],
+			provenance: base.provenance,
+			...(base.refs === undefined ? {} : { refs: base.refs }),
+		},
+		decodedData,
+	)
 }
 
 /** No IDs, clocks, RF inference or protocol confirmation are performed here. */
@@ -212,30 +302,19 @@ export function createDecodeEnvelope(
 			return invalidEnvelope()
 		const origin = parsedProducer.data
 		const supplied = parsedContext.data
-		const display = parsedPresentation.data
 		if (origin.decoder !== supplied.decoderId) return invalidEnvelope()
-		return complete(
+		return assemble(
 			{
-				version: 1,
 				eventId: supplied.eventId,
 				producedAt: origin.timestamp,
 				receivedAt: supplied.receivedAt,
 				decoderId: supplied.decoderId,
-				...(supplied.decoderType === undefined
-					? {}
-					: { decoderType: supplied.decoderType }),
+				decoderType: supplied.decoderType,
 				outputType: origin.type,
-				protocol: display.protocol ?? null,
-				category: display.category ?? "other",
-				entityKey: display.entityKey ?? null,
-				...(display.position === undefined
-					? {}
-					: { position: display.position }),
-				title: display.title ?? null,
-				fields: display.fields ?? [],
 				provenance: supplied.provenance ?? { sourceId: null, frequency: null },
-				...(supplied.refs === undefined ? {} : { refs: supplied.refs }),
+				refs: supplied.refs,
 			},
+			parsedPresentation.data,
 			decodedData,
 		)
 	} catch {
@@ -250,6 +329,74 @@ export function validateDecodeEnvelope(input: unknown): DecodeEnvelope {
 		const decodedData = projectJson(metadata["decodedData"], false, false)
 		delete metadata["decodedData"]
 		return complete(projectJson(metadata, false, false), decodedData)
+	} catch {
+		return invalidEnvelope()
+	}
+}
+
+/**
+ * Adds a presentation to an envelope built by `createDecodeEnvelope` without
+ * one. The result equals `createDecodeEnvelope(output, context, presentation)`
+ * but skips projecting the producer payload again. Throws like create when the
+ * presentation or the grown envelope is rejected.
+ */
+export function withPresentation(
+	envelope: DecodeEnvelope,
+	presentation: DecodePresentation,
+): DecodeEnvelope {
+	try {
+		const parsed = presentationSchema.safeParse(
+			projectJson(presentation, false, true),
+		)
+		if (!parsed.success) return invalidEnvelope()
+		const display = parsed.data
+		const plainBytes = validatedBytes.get(envelope)
+		if (plainBytes !== undefined && isPlain(envelope)) {
+			// The metadata was validated when the plain envelope was built and the
+			// presentation just now; only the size can change. Same member order
+			// as `assemble`.
+			const bytes =
+				plainBytes + presentationJsonBytes(display as DecodePresentation)
+			if (bytes > MAX_ENVELOPE_BYTES) return invalidEnvelope()
+			const grown = {
+				version: envelope.version,
+				eventId: envelope.eventId,
+				producedAt: envelope.producedAt,
+				receivedAt: envelope.receivedAt,
+				decoderId: envelope.decoderId,
+				...(envelope.decoderType === undefined
+					? {}
+					: { decoderType: envelope.decoderType }),
+				outputType: envelope.outputType,
+				protocol: display.protocol ?? null,
+				category: display.category ?? "other",
+				entityKey: display.entityKey ?? null,
+				...(display.position === undefined
+					? {}
+					: { position: display.position }),
+				title: display.title ?? null,
+				fields: display.fields ?? [],
+				provenance: envelope.provenance,
+				...(envelope.refs === undefined ? {} : { refs: envelope.refs }),
+				decodedData: envelope.decodedData,
+			} as DecodeEnvelope
+			validatedBytes.set(grown, bytes)
+			return grown
+		}
+		return assemble(
+			{
+				eventId: envelope.eventId,
+				producedAt: envelope.producedAt,
+				receivedAt: envelope.receivedAt,
+				decoderId: envelope.decoderId,
+				decoderType: envelope.decoderType,
+				outputType: envelope.outputType,
+				provenance: envelope.provenance,
+				refs: envelope.refs,
+			},
+			display,
+			envelope.decodedData,
+		)
 	} catch {
 		return invalidEnvelope()
 	}

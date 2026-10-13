@@ -43,8 +43,8 @@ describe("activity ingress", () => {
 		let ids = 0
 		let clocks = 0
 		const ingress = createActivityIngress({
-			sink: envelope => {
-				envelopes.push(envelope)
+			sink: (_envelope, present) => {
+				envelopes.push(present())
 			},
 			logger: captureLogger().logger,
 			now: () => {
@@ -94,8 +94,8 @@ describe("activity ingress", () => {
 	it("omits decoderType when the publisher has none", () => {
 		const envelopes: DecodeEnvelope[] = []
 		const ingress = createActivityIngress({
-			sink: envelope => {
-				envelopes.push(envelope)
+			sink: (_envelope, present) => {
+				envelopes.push(present())
 			},
 			logger: captureLogger().logger,
 			now: () => new Date("2026-10-12T00:00:01.000Z"),
@@ -110,8 +110,8 @@ describe("activity ingress", () => {
 		const before = Date.now()
 		const envelopes: DecodeEnvelope[] = []
 		const ingress = createActivityIngress({
-			sink: envelope => {
-				envelopes.push(envelope)
+			sink: (_envelope, present) => {
+				envelopes.push(present())
 			},
 			logger: captureLogger().logger,
 		})
@@ -145,7 +145,9 @@ describe("activity ingress", () => {
 			published: 0,
 			buildFailures: 1,
 			sinkFailures: 0,
-			presentationFailures: 1,
+			// A reception that cannot be built is never presented (1.7):
+			// only the presentation-free build failure counts.
+			presentationFailures: 0,
 		})
 		expect(lines).toHaveLength(1)
 		expect(lines[0]).toMatchObject({

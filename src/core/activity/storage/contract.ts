@@ -205,8 +205,11 @@ export interface ActivityStoreHandle {
 	cursorKey(): Buffer
 	/** Wakeup only; listeners must re-read committed rows. Returns unsubscribe. */
 	onCommit(listener: (identity: StoreIdentity) => void): () => void
-	/** Non-blocking; never throws on overload, counts loss instead. */
-	admit(envelope: DecodeEnvelope): AdmitResult
+	/**
+	 * Non-blocking; never throws on overload, counts loss instead. `present`
+	 * runs only for a kept reception; its envelope is stored instead.
+	 */
+	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult
 	/**
 	 * WG1: admits one closed analog transmission as an `analog-transmission` record (eventId =
 	 * payload.transmissionId), with the same non-blocking, loss-counting semantics as admit().

@@ -231,8 +231,8 @@ describe("built-row growth bounds", () => {
 		).toBeLessThanOrEqual(ROW_GROWTH_MAX_BYTES)
 		const published: DecodeEnvelope[] = []
 		const ingress = createActivityIngress({
-			sink: envelope => {
-				published.push(envelope)
+			sink: (_envelope, present) => {
+				published.push(present())
 			},
 			logger: pino({ level: "silent" }),
 			now: () => receivedAt,

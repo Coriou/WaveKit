@@ -1,13 +1,9 @@
 import { randomUUID as cryptoRandomUUID } from "node:crypto"
 import type { DecoderOutput } from "../../decoders/types.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
-import { createDecodeEnvelope } from "./envelope.js"
+import { createDecodeEnvelope, withPresentation } from "./envelope.js"
 import { presentDecoderOutputResult } from "./presentation/registry.js"
-import type {
-	DecodeEnvelope,
-	DecodeEnvelopeContext,
-	DecodePresentation,
-} from "./types.js"
+import type { DecodeEnvelope, DecodeEnvelopeContext } from "./types.js"
 
 const LOG_INTERVAL_MS = 60_000
 
@@ -15,7 +11,10 @@ export interface ActivityIngressCounters {
 	published: number
 	buildFailures: number
 	sinkFailures: number
-	/** Presentations dropped because they threw or made the envelope invalid. */
+	/**
+	 * Presentations dropped because they threw or made the envelope invalid.
+	 * Only receptions the store goes on to keep are presented.
+	 */
 	presentationFailures: number
 }
 
@@ -28,8 +27,19 @@ export interface ActivityIngress {
 	counters(): ActivityIngressCounters
 }
 
+/**
+ * Returns the envelope with its presentation, or the given presentation-free
+ * envelope when presenting fails (counted). Never throws.
+ */
+export type ActivityPresenter = () => DecodeEnvelope
+
 export interface ActivityIngressOptions {
-	sink: (envelope: DecodeEnvelope) => void
+	/**
+	 * Receives the presentation-free envelope and a presenter. The store calls
+	 * the presenter only once it has decided to keep the reception (after
+	 * coalescing and admission), so dropped receptions are never presented.
+	 */
+	sink: (envelope: DecodeEnvelope, present: ActivityPresenter) => void
 	logger: Logger
 	now?: () => Date
 	randomUUID?: () => string
@@ -37,8 +47,9 @@ export interface ActivityIngressOptions {
 
 /**
  * Allocates one event id and receivedAt per decoder output, builds a
- * provenance-free envelope, and hands it to the store. Build and sink
- * failures are counted and never thrown back to the decoder manager.
+ * provenance-free envelope, and hands it to the store with a lazy presenter.
+ * Build, sink and presentation failures are counted and never thrown back to
+ * the decoder manager. A failed presentation keeps the plain envelope (1.7).
  */
 export function createActivityIngress(
 	options: ActivityIngressOptions,
@@ -103,47 +114,40 @@ export function createActivityIngress(
 				...(decoderType === undefined ? {} : { decoderType }),
 				provenance: { sourceId: null, frequency: null },
 			}
-			let presentation: DecodePresentation | undefined
-			try {
-				const attempt = presentDecoderOutputResult(output, decoderType, context)
-				if (attempt.error !== undefined) {
-					counts.presentationFailures++
-					logFailure(
-						decoderId,
-						"presentation",
-						attempt.error,
-						receivedAt.getTime(),
-					)
-				} else {
-					presentation = attempt.presentation
-				}
-			} catch (err) {
-				presentation = undefined
-				counts.presentationFailures++
-				logFailure(decoderId, "presentation", err, receivedAt.getTime())
-			}
 			let envelope: DecodeEnvelope
 			try {
-				envelope =
-					presentation === undefined
-						? createDecodeEnvelope(output, context)
-						: createDecodeEnvelope(output, context, presentation)
+				envelope = createDecodeEnvelope(output, context)
 			} catch (err) {
-				if (presentation === undefined) {
-					note(decoderId, "build", err, receivedAt.getTime())
-					return
-				}
+				note(decoderId, "build", err, receivedAt.getTime())
+				return
+			}
+			const plain = envelope
+			const failed = (err: unknown): DecodeEnvelope => {
 				counts.presentationFailures++
-				try {
-					envelope = createDecodeEnvelope(output, context)
-				} catch (plainErr) {
-					note(decoderId, "build", plainErr, receivedAt.getTime())
-					return
-				}
 				logFailure(decoderId, "presentation", err, receivedAt.getTime())
+				return plain
+			}
+			let presented: DecodeEnvelope | undefined
+			const present: ActivityPresenter = () => {
+				if (presented !== undefined) return presented
+				presented = plain
+				try {
+					const attempt = presentDecoderOutputResult(
+						output,
+						decoderType,
+						context,
+						plain,
+					)
+					if (attempt.error !== undefined) return failed(attempt.error)
+					if (attempt.presentation === undefined) return plain
+					presented = withPresentation(plain, attempt.presentation)
+					return presented
+				} catch (err) {
+					return failed(err)
+				}
 			}
 			try {
-				sink(envelope)
+				sink(envelope, present)
 			} catch (err) {
 				note(decoderId, "sink", err, receivedAt.getTime())
 				return

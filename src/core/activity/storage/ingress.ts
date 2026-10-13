@@ -87,7 +87,13 @@ export class ActivityIngress {
 		return this.coalescer.coalesced
 	}
 
-	admit(envelope: DecodeEnvelope): AdmitResult {
+	/**
+	 * `present`, when given, is called only after coalescing and admission
+	 * have kept the reception, and its envelope is the one stored. Coalescing
+	 * reads decodedData, outputType, decoderId and receivedAt, which a
+	 * presentation never changes.
+	 */
+	admit(envelope: DecodeEnvelope, present?: () => DecodeEnvelope): AdmitResult {
 		if (this.closed) {
 			this.dropped.closed++
 			return { admitted: false, reason: "closed" }
@@ -106,14 +112,22 @@ export class ActivityIngress {
 		if (this.itemOverflow()) return this.rejectEnvelope(envelope, "queue-full")
 		if (!this.takeTokens(envelope.decoderId, now))
 			return this.rejectEnvelope(envelope, "rate-limited")
+		let stored = envelope
+		if (present) {
+			try {
+				stored = present()
+			} catch {
+				stored = envelope
+			}
+		}
 		const row = buildActivityRow({
 			version: ACTIVITY_RECORD_VERSION,
-			eventId: envelope.eventId,
+			eventId: stored.eventId,
 			commitSeq: "0",
-			producedAt: envelope.producedAt,
-			receivedAt: envelope.receivedAt,
+			producedAt: stored.producedAt,
+			receivedAt: stored.receivedAt,
 			kind: "decoder-reception",
-			payload: envelope,
+			payload: stored,
 		})
 		if (this.byteOverflow(row)) {
 			this.refundTokens(envelope.decoderId)

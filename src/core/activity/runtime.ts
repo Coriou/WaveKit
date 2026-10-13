@@ -310,8 +310,8 @@ export async function startActivityRuntime(
 			throw error
 		}
 		const ingress = ingressMod.createActivityIngress({
-			sink: envelope => {
-				store.admit(envelope)
+			sink: (envelope, present) => {
+				store.admit(envelope, present)
 			},
 			logger: options.logger,
 		})
