@@ -35,10 +35,14 @@ field-count rules). Each mapper parses its payload with a Zod schema (`safeParse
 keys allowed) and returns undefined on failure. Mappers `import type` adapter payload types
 only; they never import adapter modules or other lanes' new modules.
 
-**Ingress.** `activity/ingress.ts` computes the presentation inside `try`, builds the
-envelope with it, and on any build failure with a presentation rebuilds once without it
-(`presentationFailures++`, rate-limited warning as today). Only a failure of the
-presentation-free build counts as `buildFailures` (1.7).
+**Ingress.** `activity/ingress.ts` builds the presentation-free envelope first (a failure
+there counts as `buildFailures`, as today) and hands the store a lazy presenter. The store
+runs it only after coalescing and admission keep the reception, so coalesced and
+rate-limited receptions pay nothing for presentation. The presenter attaches the
+presentation to the plain envelope; if it throws, or the result is rejected (bad key,
+oversize, control characters), the plain envelope is stored and `presentationFailures`
+counts it (kept receptions only, rate-limited warning as today). This is the 1.7
+mechanism: the reception never depends on its presentation.
 
 **Entity keys (1.3).** Exact formats; `value` must match `[^:]+`, at most 128 bytes total.
 
@@ -74,22 +78,24 @@ channel; mesh: port, to, hops, rxSnr `dB`, rxRssi `dBm`). Only values present in
 appear, at most 6 (1.5); no field duplicates the title. Coalescible-shaped receptions
 (1.6) carry none.
 
-**Arithmetic (1.8), measured on main @27424340 with `buildActivityRow`.** A position-only
-ADS-B reception (ICAO, altitude, lat, lon, lastSeen, messageCount) builds 979 bytes of row
-JSON+FTS today; with its 1.6 presentation (category, protocol, key, title, position, no
-fields) 1,113 bytes (+134, +14 %). A full SBS reception with 6 fields grows from 1,095 to
-2,059 bytes (+964); an APRS position with 5 fields from 1,236 to 2,047 (+811). On a busy
-ADS-B station (300 aircraft, one stored row per aircraft per minute after WG1 coalescing,
-about 432,000 candidate rows/day) the 250,000-row cap is reached in about 14 h either way;
-most stored rows are position-only, so the mean row grows about 15–25 %, and when the
-256 MiB byte cap binds first (SQLite page, index and FTS overhead are not measured here)
-retention shortens by at most that fraction. Lane P measures on-disk bytes per row with and
-without presentation on 5,000 fixture rows through an inline store and reports both;
-Main documents the result in `docs/API.md`.
+**Arithmetic (1.8), measured with `buildActivityRow` after the R1 changes.** Built-row
+bytes (summary + record + FTS), plain to presented: position-only ADS-B 885 → 1,001 (+116,
++13.1 %); SBS `MSG,3` with `onGround: false` 910 → 1,183 (+273, +30.0 %); readsb JSON with
+callsign and squawk 1,110 → 1,961 (+851, +76.7 %); APRS position with symbol, comment,
+course and speed 949 → 1,723 (+774, +81.6 %); bare APRS position 882 → 1,017 (+135,
++15.3 %). The row budget bounds the growth by arithmetic (160 bytes for 1.6 shapes, 1,100
+otherwise) and builds rows only when a 4 KiB summary or FTS cut could change the result. On
+the 5,000-row docs mix (70 % position-only ADS-B, 10 % full ADS-B, 10 % AIS, 5 % APRS, 5 %
+pages) the built row grows from 890 to 1,179 bytes and the on-disk size from 1,228 to 1,777
+bytes a row (+44.7 %); at the 256 MiB cap that is about 151,100 rows instead of about
+218,600 (about 31 % fewer), so the byte cap binds before the 250,000-row cap, and
+retention under the byte cap shortens by that fraction. Feeds with identity fields or APRS
+comments grow far more than bare positions.
+`docs/API.md` carries the table.
 
 **Failure paths.** Mapper throws or Zod failure → no presentation; presentation rejected by
-the envelope schema (bad key, oversize, control characters) → rebuild without it; a
-presentation that pushes the envelope past `MAX_ENVELOPE_BYTES` → rebuild without it; the
+the envelope schema (bad key, oversize, control characters) → the plain envelope is kept; a
+presentation that pushes the envelope past `MAX_ENVELOPE_BYTES` → the plain envelope is kept; the
 summary builder already drops fields, then title, then position to fit 4 KiB. Stored rows:
 `parseStoredSummary` treats an invalid stored key or position as today (null / omitted); a
 pre-WG2 row has no presentation and parses.

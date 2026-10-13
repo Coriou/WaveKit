@@ -46,8 +46,9 @@ ACARS text at most 256 bytes), truncated on a UTF-8 boundary with a trailing `â€
 WG1 7.6: position, kinematics, presence) shall carry title, entity key, position, category
 and protocol but no fields.
 1.7 A presentation that fails, throws, or makes the envelope invalid shall never lose the
-reception: the ingress builds the envelope again without presentation and counts
-`presentationFailures`. Presentation never changes `decodedData`.
+reception: the ingress builds the presentation-free envelope first and the presentation is
+attached to it only for receptions the store keeps; on failure the plain envelope is stored
+and `presentationFailures` counts it. Presentation never changes `decodedData`.
 1.8 Built-row growth (summary JSON + record JSON + FTS text) from presentation shall be at
 most 160 bytes for a reception per 1.6 and at most 1,100 bytes for any reception.
 1.9 Rows stored before WG2 keep category `other` and no entity key; no migration or

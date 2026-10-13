@@ -2771,14 +2771,29 @@ reception: the row is stored without it. Rows stored before WG2 keep category
 The keys match the live trackers: `icao:` aircraft, `mmsi:` vessels, the APRS
 `key` and the Meshtastic node `key`.
 
+Presentation is computed only for receptions the store keeps: coalesced and
+rate-limited receptions cost what they did before WG2, and the internal
+`presentationFailures` counter counts kept receptions only.
+
 Row growth and retention: built-row growth from presentation is at most 160
-bytes for a position-only row and at most 1,100 bytes for any row. A
-position-only ADS-B row grows by about 116 bytes (+13%). On a measured
-5,000-row mix (70% position-only ADS-B, 10% full ADS-B, 10% AIS, 5% APRS, 5%
-pages) the on-disk size went from 1,228 to 1,777 bytes a row (+45%), so at the
-256 MiB cap that mix holds about 151,000 rows instead of about 215,000, and the
-byte cap binds before the 250,000-row cap. A coalesced ADS-B feed is closer to
-the +116 byte figure.
+bytes for a position-only row and at most 1,100 bytes for any row. Measured
+built-row bytes (summary + record + FTS), plain to presented:
+
+| Reception                                         | Plain | Presented | Growth        |
+| ------------------------------------------------- | ----- | --------- | ------------- |
+| Position-only ADS-B                               | 885   | 1,001     | +116 (+13.1%) |
+| SBS `MSG,3` with `onGround: false`                | 910   | 1,183     | +273 (+30.0%) |
+| readsb JSON with callsign and squawk              | 1,110 | 1,961     | +851 (+76.7%) |
+| APRS position with symbol, comment, course, speed | 949   | 1,723     | +774 (+81.6%) |
+| Bare APRS position                                | 882   | 1,017     | +135 (+15.3%) |
+
+On a measured 5,000-row mix (70% position-only ADS-B, 10% full ADS-B, 10% AIS,
+5% APRS, 5% pages) the built row went from 890 to 1,179 bytes and the on-disk
+size from 1,228 to 1,777 bytes a row (+44.7%). At the 256 MiB cap that mix holds
+about 151,100 rows instead of about 218,600 (about 31% fewer), so the byte cap
+binds before the 250,000-row cap. A feed that stores mostly bare positions is
+closer to +13–15%; SBS and readsb feeds with identity fields, and APRS with
+comments, grow more.
 
 ### Configuration
 

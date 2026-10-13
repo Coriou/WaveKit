@@ -19,7 +19,7 @@ the isolation tests or `docs/CLI-COORDINATION.md`. Every lane runs its touched t
 ## Lane P: Activity presentation
 
 - [x] P.1 `src/core/activity/presentation/**`: registry and per-family mappers, budget
-      helpers; ingress passes the presentation with the rebuild-without fallback.
+      helpers; ingress builds the plain envelope first and presents only kept receptions.
   - _Requirements: 1.1–1.9_
   - **Property 1: Presentation never loses a reception**, **Property 2: Entity key canonical
     form**, **Property 3: Presentation budget**
