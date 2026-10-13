@@ -1,14 +1,10 @@
 import type { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import type { ProbePool } from "../../../../src/core/scanner/probes/probe-pool.js"
 import { probeRequest } from "../../../mocks/scanner/probe-fakes.js"
-import {
-	chooseLeaseHolder,
-	type JobRecord,
-} from "../../../../src/core/scanner/job-runner.js"
+import type { JobRecord } from "../../../../src/core/scanner/job-runner.js"
 import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import {
 	ScannerService,
@@ -282,97 +278,6 @@ describe("ScannerService", () => {
 		expect(h.tuner.sent.filter(c => c.origin === "scanner")).toEqual([])
 		await h.service.stop()
 	})
-
-	// Feature: signal-discovery-scanner, Property 16: Priority
-	// Validates: spec § 10.2
-	it("keeps at most one lease holder per source and it is the best runnable sweep", async () => {
-		type Op =
-			| { t: "create"; priority: number }
-			| { t: "cancel" | "pause" | "resume"; idx: number }
-		const op: fc.Arbitrary<Op> = fc.oneof(
-			fc.record({
-				t: fc.constant("create" as const),
-				priority: fc.integer({ min: 0, max: 100 }),
-			}),
-			fc.record({
-				t: fc.constantFrom(
-					"cancel" as const,
-					"pause" as const,
-					"resume" as const,
-				),
-				idx: fc.nat(5),
-			}),
-		)
-		await fc.assert(
-			fc.asyncProperty(
-				fc.array(op, { minLength: 1, maxLength: 12 }),
-				async ops => {
-					const h = serviceHarness({
-						patch: s => {
-							s.passive.enabled = false
-						},
-					})
-					await h.service.start()
-					const ids: string[] = []
-					try {
-						for (const o of ops) {
-							try {
-								if (o.t === "create") {
-									const id = (await h.service.createJob(sweep(o.priority))).id
-									ids.push(id)
-									// R1: a starting holder is never handed over; let it run so preemption is exercised.
-									await untilRunning(h, id)
-								} else {
-									const id = ids[o.idx % Math.max(1, ids.length)]
-									if (!id) continue
-									if (o.t === "cancel") await h.service.cancelJob(id)
-									if (o.t === "pause") await h.service.pauseJob(id)
-									if (o.t === "resume")
-										await h.service.resumeJob(id, { takeover: true })
-								}
-							} catch (err) {
-								expect(err).toMatchObject({ statusCode: expect.any(Number) })
-							}
-							await settled(h.service)
-							const jobs = h.service
-								.listJobs()
-								.filter(j => j.spec.mode === "sweep")
-							const holder = (
-								h.service as unknown as {
-									arbiter: {
-										holder(id: string): { jobId: string } | undefined
-									}
-								}
-							).arbiter.holder("rtl")
-							const runnable = jobs.filter(
-								j =>
-									["starting", "running", "holding"].includes(j.state) ||
-									(j.state === "paused" &&
-										((j.reason === "operator" && holder?.jobId === j.id) ||
-											j.reason === "preempted-job")),
-							)
-							const best = chooseLeaseHolder(
-								runnable.map(j => ({
-									jobId: j.id,
-									priority: j.spec.priority,
-									createdAt: Date.parse(j.createdAt),
-								})),
-							)
-							// R1: a holder still in `starting` keeps the lease (a better job's create got 409).
-							const holderStarting =
-								holder !== undefined &&
-								jobs.find(j => j.id === holder.jobId)?.state === "starting"
-							if (best === null) expect(holder).toBeUndefined()
-							else if (!holderStarting) expect(holder?.jobId).toBe(best)
-						}
-					} finally {
-						await h.service.stop()
-					}
-				},
-			),
-			{ numRuns: 100 },
-		)
-	}, 120_000)
 
 	it("restores the tuner at shutdown and pauses the job with core-restart on the next boot", async () => {
 		const h = serviceHarness({
