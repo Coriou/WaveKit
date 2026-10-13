@@ -1,5 +1,5 @@
 import { rm } from "node:fs/promises"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { ScanJob } from "@wavekit/api-types"
 import type { ScanRange } from "../../../../src/core/scanner/types.js"
 import {
@@ -104,8 +104,16 @@ describe("ScannerService: Ignore skips sweeps (WG2 req 12)", () => {
 				expect(restored.state).not.toBe("failed")
 				expect(restored.lockoutExclusions).toEqual(locked.lockoutExclusions)
 				expect(restored.spec.exclusions).toEqual([])
-				await again.service.deleteDiscovery(d!.id)
-				expect("lockoutExclusions" in again.service.getJob(job.id)!).toBe(false)
+				// A store-side removal (eviction, age prune, merge drop) replans too (R1 #8).
+				const internals = again.service as unknown as {
+					store: { delete(id: string): boolean }
+				}
+				expect(internals.store.delete(d!.id)).toBe(true)
+				await vi.waitFor(() =>
+					expect("lockoutExclusions" in again.service.getJob(job.id)!).toBe(
+						false,
+					),
+				)
 			} finally {
 				await again.service.stop()
 			}

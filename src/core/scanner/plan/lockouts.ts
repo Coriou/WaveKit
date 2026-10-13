@@ -50,8 +50,9 @@ export function lockoutExclusionsFor(
 		if (holding.length === 0) continue
 		const bw = Number.isFinite(t.bandwidthHz) ? Math.max(0, t.bandwidthHz) : 0
 		const w = Math.max(bw, rasterStepAt(c, holding), LOCKOUT_MIN_WIDTH_HZ)
-		const lo = c - w / 2
-		const hi = c + w / 2
+		// Whole hertz, widened outwards so the centre is always inside.
+		const lo = Math.floor(c - w / 2)
+		const hi = Math.ceil(c + w / 2)
 		let minStart = Infinity
 		let maxEnd = -Infinity
 		for (const r of enabledRanges) {

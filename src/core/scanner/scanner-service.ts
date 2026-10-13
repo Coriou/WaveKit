@@ -1589,12 +1589,26 @@ export class ScannerService extends EventEmitter {
 		return d
 	}
 
+	private lockoutReplanQueued = false
+
+	private scheduleLockoutReplan(): void {
+		if (this.lockoutReplanQueued) return
+		this.lockoutReplanQueued = true
+		queueMicrotask(() => {
+			this.lockoutReplanQueued = false
+			this.replanLockouts().catch((err: unknown) =>
+				this.log.warn({ err }, "Lockout replan after a store change failed"),
+			)
+		})
+	}
+
 	/**
-	 * WG2 req 12: replans every live sweep job on one of `sourceIds` whose lockout exclusions
+	 * WG2 req 12: replans every live sweep job on one of `sourceIds` (all sources when omitted)
+	 * whose lockout exclusions
 	 * changed, through the same driver replan a live exclusion PATCH uses. The stored spec is not
 	 * touched (12.2), so nothing is persisted.
 	 */
-	private async replanLockouts(sourceIds: readonly string[]): Promise<void> {
+	private async replanLockouts(sourceIds?: readonly string[]): Promise<void> {
 		const ctx = this.previewContext()
 		const touched = new Set<string>()
 		const retune = new Set<string>()
@@ -1604,7 +1618,7 @@ export class ScannerService extends EventEmitter {
 				record.spec.mode !== "sweep" ||
 				record.spec.kind === "identify" ||
 				isTerminal(record.state) ||
-				!sourceIds.includes(record.spec.sourceId)
+				(sourceIds !== undefined && !sourceIds.includes(record.spec.sourceId))
 			)
 				continue
 			const driver = this.drivers.get(record.id)
@@ -4219,6 +4233,10 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onStoreChange = (id: string, change: StoreChange): void => {
+		// WG2 R1 #8: a merge or a removal (eviction, age prune, merge drop) can move or drop a
+		// lockout; replan once after this turn (no-op when no job's lockout list changes).
+		if (change === "merged" || change === "deleted")
+			this.scheduleLockoutReplan()
 		if (this.ingestChanges) {
 			this.ingestChanges.push([id, change])
 			return
@@ -4528,7 +4546,6 @@ export function preemptedByFor(
 	return name === undefined ? {} : { preemptedBy: { jobId: holderJobId, name } }
 }
 
-/** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
 /** WG2 req 12.2: the record's runtime lockout exclusions follow its current plan. */
 function setLockouts(
 	record: JobRecord,
@@ -4538,6 +4555,7 @@ function setLockouts(
 	else delete record.lockoutExclusions
 }
 
+/** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
 function isPreempted(r: JobRecord): boolean {
 	return (
 		r.state === "paused" &&

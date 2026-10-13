@@ -1660,11 +1660,19 @@ export class DiscoveryStore extends EventEmitter {
 		return fits
 	}
 
-	/** Lowest confidence, then oldest `lastSeenAt` (ties: smaller id); never `decoded` or `keep`. */
+	/**
+	 * Lowest confidence, then oldest `lastSeenAt` (ties: smaller id); never `decoded`, `keep` or
+	 * locked out (WG2 R1 #8: evicting a lockout would silently put it back into sweeps).
+	 */
 	private evictionVictim(): Discovery | undefined {
 		let victim: Discovery | undefined
 		for (const d of this.discoveries.values()) {
-			if (d.confidence === "decoded" || d.operator?.keep === true) continue
+			if (
+				d.confidence === "decoded" ||
+				d.operator?.keep === true ||
+				d.operator?.lockout === true
+			)
+				continue
 			if (
 				victim === undefined ||
 				rank(d.confidence) < rank(victim.confidence) ||

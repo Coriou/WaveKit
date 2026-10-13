@@ -740,6 +740,36 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 		expect(small.store.snapshot().discoveries).toHaveLength(2)
 	})
 
+	it("never evicts a locked-out discovery (WG2 R1 #8)", () => {
+		const { store } = newStore({ max: 2 })
+		const locked =
+			store.ingest(
+				makeObs({ id: "l1", centreHz: CH, startedAt: T0, blocks: 2 }),
+			).discoveryId ?? ""
+		store.setOperator(locked, { lockout: true })
+		const other =
+			store.ingest(
+				makeObs({
+					id: "l2",
+					centreHz: CH + 100_000,
+					startedAt: T0 + 1000,
+					blocks: 2,
+				}),
+			).discoveryId ?? ""
+		expect(
+			store.ingest(
+				makeObs({
+					id: "l3",
+					centreHz: CH + 200_000,
+					startedAt: T0 + 2000,
+					blocks: 2,
+				}),
+			).change,
+		).toBe("created")
+		expect(store.get(locked)).toBeDefined()
+		expect(store.get(other)).toBeUndefined()
+	})
+
 	it("patches operator fields and rejects an unknown id", () => {
 		const { store } = newStore()
 		const id = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
