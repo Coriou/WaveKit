@@ -386,6 +386,20 @@ describe("APRS objects and items (WG2 req 3.2)", () => {
 		expect(result.lat).toBeCloseTo(49.05833333333333)
 	})
 
+	it("accepts a local day-hour-minute object timestamp (R1 #10)", () => {
+		const result = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			`;LEADER   *092345/${position}`,
+		)
+
+		expect(result.objectName).toBe("LEADER")
+		expect(result.objectKilled).toBe(false)
+		expect(result.lat).toBeCloseTo(49.05833333333333)
+		expect(result.lon).toBeCloseTo(-72.02916666666667)
+	})
+
 	it("parses a killed object", () => {
 		const result = parseAprsInfo(
 			"N0CALL",
@@ -463,7 +477,6 @@ describe("APRS objects and items (WG2 req 3.2)", () => {
 			";MEETING  _garbage4903.50N/07201.75W-test",
 			";MEETING  _092345zNOTAPOSITION",
 			";MEETING  *092345z",
-			";MEETING  *092345/4903.50N/07201.75W>",
 			")AB!4903.50N/07201.75W>",
 			")NODELIM",
 			")ABCDEFGHIJ!4903.50N/07201.75W>",

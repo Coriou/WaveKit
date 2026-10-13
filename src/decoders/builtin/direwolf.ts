@@ -730,7 +730,8 @@ function parseObjectReport(info: string, result: APRSData): void {
 		const name = info.substring(1, 10).replace(/ +$/, "")
 		if (name.length === 0) return
 		// DHMz or HMSz / HMSh. Anything else is not an object header.
-		if (!/^\d{6}[zh]$/.test(info.substring(11, 18))) return
+		// DDHHMMz, HHMMSSh, or DDHHMM/ (local time, APRS 1.0.1 ch. 6).
+		if (!/^\d{6}[zh/]$/.test(info.substring(11, 18))) return
 		const position = info.substring(18)
 		if (!applyObjectPosition(position, result)) return
 		result.objectName = name
