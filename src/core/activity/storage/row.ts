@@ -228,21 +228,11 @@ export function parseStoredSummary(row: StoredActivityRow): ActivitySummary {
 export function truncateUtf8(value: string, maxBytes: number): string {
 	if (maxBytes <= 0) return ""
 	if (Buffer.byteLength(value, "utf8") <= maxBytes) return value
-	const bytes = Buffer.from(value, "utf8").subarray(0, maxBytes)
-	let end = bytes.length
-	while (end > 0 && (bytes[end - 1]! & 0b1100_0000) === 0b1000_0000) end--
-	if (end > 0 && bytes[end - 1]! >= 0b1100_0000) {
-		const lead = bytes[end - 1]!
-		const width =
-			lead >= 0b1111_0000
-				? 4
-				: lead >= 0b1110_0000
-					? 3
-					: lead >= 0b1100_0000
-						? 2
-						: 1
-		if (end - 1 + width > bytes.length) end--
-	}
+	const bytes = Buffer.from(value, "utf8")
+	// bytes[maxBytes] is the first byte cut. A continuation byte there means
+	// the cut splits a code point: step back to its lead byte and drop it.
+	let end = maxBytes
+	while (end > 0 && (bytes[end]! & 0b1100_0000) === 0b1000_0000) end--
 	return bytes.subarray(0, end).toString("utf8")
 }
 

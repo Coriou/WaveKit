@@ -579,12 +579,23 @@ describe("activity retention", () => {
 		// Validates: Requirements storage indexed text
 		fc.assert(
 			fc.property(
-				fc.string({ maxLength: 80 }),
+				fc.oneof(
+					fc.string({ maxLength: 80 }),
+					fc.string({ unit: "grapheme", maxLength: 40 }),
+				),
 				fc.integer({ min: 0, max: 64 }),
 				(value, maxBytes) => {
 					const cut = truncateUtf8(value, maxBytes)
 					expect(Buffer.byteLength(cut, "utf8")).toBeLessThanOrEqual(maxBytes)
 					expect(Buffer.from(cut, "utf8").toString("utf8")).toBe(cut)
+					// A prefix of whole code points: nothing becomes U+FFFD, and a
+					// cut that lands on a boundary keeps everything before it.
+					expect(value.startsWith(cut)).toBe(true)
+					const next = [...value.slice(cut.length)][0]
+					if (next !== undefined)
+						expect(Buffer.byteLength(cut + next, "utf8")).toBeGreaterThan(
+							maxBytes,
+						)
 				},
 			),
 			{ numRuns: 100 },
