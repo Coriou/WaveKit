@@ -129,6 +129,13 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 | `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
 
+The scanner still plans from these built-in plans. The layered band plans under
+`/api/bandplans` (built-in packs, SDR++ imports, operator bands and edits; see
+[API.md](API.md#band-plans)) are display and catalog data only in this release
+and change no scan ranges. Scan presets only produce job bodies:
+`GET /api/bandplans/presets/:presetId/job` returns a `spec` that a client posts to
+`POST /api/scanner/jobs`. Scanning the resolved band-plan stack is future work.
+
 Sensitivity presets: `low` (false-alarm target 0.25 /MHz/min, 50 ms blocks), `normal` (`detection.faTargetPerMhzMin`, 1.0, 50 ms), `high` (2.0, 100 ms).
 
 ## Settings

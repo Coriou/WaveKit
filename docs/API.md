@@ -464,6 +464,86 @@ and legacy composition under the normal API admission. Not passed to decoders ye
 }
 ```
 
+### Band plans
+
+Layered display band plans: a read-only built-in pack per region (`builtin-eu`,
+`builtin-us`, `builtin-ca`, `builtin-au`, `builtin-nz`, `builtin-jp`,
+`builtin-cn`), up to 8 imported SDR++ packs (`imported-` plus 12 hex digits), and
+an operator layer (`operator`) that always sits above the ordered stack. A `null`
+stored stack follows the default: the built-in pack of the scanner `region`.
+Operator edits override single fields of a pack band without changing the pack.
+`context` carries that `region` and `effectiveCountry` (`station.country` or
+`null`; never derived from coordinates). Imported data is always
+`community-unverified`. State lives in `<stateDir>/bandplans/state.json` (4 MiB
+cap). A storage failure never stops the core: reads return
+`store: { state: "unavailable" }`, the default stack and no stored layers, and
+writes fail with 503 `BANDPLANS_UNAVAILABLE`. The scanner does not consume these
+layers yet; see [SCANNER.md](SCANNER.md#presets-and-bandplans).
+
+Reads are mounted in both access modes under the normal API admission. Writes and
+imports are mounted only in protected mode (`capabilities.writable: true` in the
+stack view); they need an authenticated session or device, re-checked after body
+validation and immediately before the write is admitted. A denial keeps the
+access code-only body and headers.
+
+| Method   | Path                                              | Purpose                                                                                                     |
+| -------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/bandplans`                                  | Stack view: store token, context, stack, packs, operator bands, edits, orphaned edits, limits               |
+| `GET`    | `/api/bandplans/resolved`                         | Resolved bands with layer, uncovered `segments`, edited fields and provenance; `shadowed` and `hidden` keys |
+| `GET`    | `/api/bandplans/packs/:packId`                    | One built-in or imported pack as shipped or imported, without edits                                         |
+| `GET`    | `/api/bandplans/presets`                          | Built-in presets for the region, then operator presets, with `applicable` and `issues`                      |
+| `GET`    | `/api/bandplans/presets/:presetId/job`            | `{ presetId, region, spec, issues }`; `spec` is a scanner job body                                          |
+| `PUT`    | `/api/bandplans/stack`                            | Replace the stack: `entries` of `{ packId, enabled }` (16 max)                                              |
+| `DELETE` | `/api/bandplans/stack`                            | Return to the default stack                                                                                 |
+| `PATCH`  | `/api/bandplans/packs/:packId/bands/:bandId/edit` | Edit a band: `set` (fields or `null`), `reset` (field names)                                                |
+| `DELETE` | `/api/bandplans/packs/:packId/bands/:bandId/edit` | Drop every edit of one band                                                                                 |
+| `DELETE` | `/api/bandplans/packs/:packId/edits`              | Drop every edit of one pack                                                                                 |
+| `DELETE` | `/api/bandplans/packs/:packId`                    | Delete an imported pack (built-ins are read-only)                                                           |
+| `POST`   | `/api/bandplans/operator-bands`                   | Create an operator band (`band`); 201                                                                       |
+| `PUT`    | `/api/bandplans/operator-bands/:bandId`           | Replace an operator band (`band`)                                                                           |
+| `DELETE` | `/api/bandplans/operator-bands/:bandId`           | Delete an operator band                                                                                     |
+| `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++ file; persists nothing                                                                       |
+| `POST`   | `/api/bandplans/imports`                          | Commit a previewed import; 201                                                                              |
+| `POST`   | `/api/bandplans/presets`                          | Create an operator scan preset (`preset`); 201                                                              |
+| `PUT`    | `/api/bandplans/presets/:presetId`                | Replace an operator preset (`preset`)                                                                       |
+| `DELETE` | `/api/bandplans/presets/:presetId`                | Delete an operator preset                                                                                   |
+
+Every write except the preview carries `expected: { storeId, revision }` from the
+latest `store` in a read or write response; bodies reject unknown keys. A missing
+token returns 428 `BANDPLANS_PRECONDITION_REQUIRED`; a stale one returns 409
+`BANDPLANS_CONFLICT` with `details.current` holding the current token. Successful
+writes return `{ view, createdId }`: the new stack view and the id of a created
+pack, operator band or preset (otherwise `null`), with 201 for creates and 200
+otherwise. Pack-edit routes take built-in or imported pack ids; the operator layer
+is changed through `/operator-bands` instead (`operator` there returns 400).
+
+Import preview takes `format: "sdrpp-json"`, `fileName`, `contentBase64` and
+`groupOverrides` (`{ sourceType, group }`, 64 max). It returns the file metadata,
+`sha256` of the decoded bytes, proposed bands and a skip/mapping report. Commit
+repeats those fields and adds `expected`, `previewSha256` (must equal the file's
+hash, else 409 `BANDPLANS_IMPORT_MISMATCH`), `name`, `author`, `licence`,
+`keepColourHints`, `replacesPackId` (re-import keeping the pack id and its edits,
+or `null`) and `addToStack`. Presets are `{ name, job }` where `job` is a closed
+subset of the scanner job spec with at least one bandplan or range. Built-in
+presets (`builtin-<plan id>` per scanner plan, plus a few combinations) are
+derived from the region and read-only (409 `BANDPLANS_READ_ONLY`).
+
+Limits: JSON bodies 64 KiB, import bodies 1.5 MiB, decoded import files 1 MiB and
+4096 rows, 512 bands per pack, 256 operator bands, 1024 edits, 64 presets. All
+limits are returned in the stack view under `limits`.
+
+Errors use `{ error: "BandPlansError", code, message }`: 400 `BANDPLANS_INVALID`,
+404 `BANDPLANS_NOT_FOUND`, 409 `BANDPLANS_CONFLICT`, `BANDPLANS_READ_ONLY`,
+`BANDPLANS_QUOTA` (also an oversized non-import body) or
+`BANDPLANS_IMPORT_MISMATCH`, 413 `BANDPLANS_IMPORT_TOO_LARGE`, 422
+`BANDPLANS_IMPORT_INVALID`, 428 `BANDPLANS_PRECONDITION_REQUIRED`, 503
+`BANDPLANS_BUSY` or `BANDPLANS_UNAVAILABLE`. Full contract:
+[band plans specification](specs/band-plans/design.md).
+
+```bash
+curl http://localhost:9000/api/bandplans/presets/builtin-pmr446/job
+# then POST its "spec" to /api/scanner/jobs
+```
 ### Receiver capabilities
 
 `GET /api/receiver-capabilities` lists a page; `GET

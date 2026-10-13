@@ -63,7 +63,12 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    profile. Live TLS/browser deployment acceptance remains.
 3. **Band plans and settings**: the layered band-plan model fed to the scanner and
    spectrum labels, a persisted settings store with provenance, and core scan
-   presets.
+   presets. Batch 1 landed server-side: the band-plan model, a layered resolver,
+   a dedicated store with provenance, SDR++ JSON file import with preview,
+   built-in and operator scan presets and the `/api/bandplans` REST routes.
+   Remaining: the scanner consuming the resolved stack, a general settings store
+   with YAML/env/UI provenance, country from the station location, SDR#, Gqrx and
+   URL import, CLI and web consumption, and verified packs.
 4. **Scanner and listening follow-ups**: running-range edits, identity search,
    recording activity, then S2/S3 acceptance (§5, §5b).
 
