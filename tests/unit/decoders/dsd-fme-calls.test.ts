@@ -9,7 +9,10 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import pino from "pino"
-import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
+import {
+	DsdFmeDecoder,
+	type DsdFmeVoiceCallState,
+} from "../../../src/decoders/builtin/dsd-fme.js"
 import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
 import type {
 	DecoderConfig,
@@ -340,5 +343,206 @@ describe("audio-demod decoders accept offsetHz", () => {
 		expect(pipeline).toContain(
 			"csdr convert -i char -o float | csdr shift 0.0052083333 | csdr agc -f complex -p slow -r 0.7 | csdr firdecimate 50 0.012 | csdr fmdemod",
 		)
+	})
+})
+
+describe("dsd-fme voice-call metadata", () => {
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] })
+		vi.setSystemTime(T0)
+	})
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	function replayVoice(
+		lines: Array<{ atMs: number; text: string }>,
+		untilMs: number,
+		options: Record<string, unknown> = {},
+	) {
+		const decoder = createDecoder(options)
+		const voice: DsdFmeVoiceCallState[] = []
+		decoder.on("voice-call", (state: DsdFmeVoiceCallState) => {
+			voice.push({ ...state })
+		})
+		const outputs = replay(decoder, lines, untilMs)
+		return { outputs, voice }
+	}
+
+	it("publishes P25 nac, algorithm and key on the call_start voice state", () => {
+		const { outputs, voice } = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +P25p1" },
+				{ atMs: 0, text: "nac: [ 1b] src: [ 1234] tg: [ 56]" },
+				{ atMs: 50, text: "ALG ID: 0x84" },
+				{ atMs: 50, text: "KEY ID: 0xAB" },
+			],
+			500,
+		)
+		const start = outputs.find(output => output.type === "call_start")
+		expect(start).toBeDefined()
+		expect(start?.data).not.toHaveProperty("colourCode")
+		expect(start?.data).not.toHaveProperty("algorithmId")
+		expect(voice).toHaveLength(1)
+		expect(voice[0]).toMatchObject({
+			protocol: "p25p1",
+			talkgroup: 56,
+			source: 1234,
+			encrypted: true,
+			active: true,
+			nac: "1B",
+			algorithmId: "84",
+			keyId: "AB",
+			errors: { crc: 0, fec: 0 },
+		})
+		expect(voice[0]).not.toHaveProperty("colourCode")
+		expect(voice[0]).not.toHaveProperty("ran")
+	})
+
+	it("omits a clear P25 algorithm and still publishes the key id", () => {
+		const { voice } = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +P25p1" },
+				{ atMs: 0, text: "src: [ 9] tg: [ 8]" },
+				{ atMs: 50, text: "ALG ID: 0x80" },
+				{ atMs: 50, text: "KEY ID: 0x0AB" },
+			],
+			500,
+		)
+		expect(voice[0]).toMatchObject({
+			encrypted: false,
+			keyId: "0AB",
+			errors: { crc: 0, fec: 0 },
+		})
+		expect(voice[0]).not.toHaveProperty("algorithmId")
+		expect(voice[0]).not.toHaveProperty("nac")
+	})
+
+	it("publishes a DMR colour code and the error counters, including zero and out of range", () => {
+		const withErrors = replayVoice(
+			[
+				{
+					atMs: 0,
+					text: "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC ",
+				},
+				{ atMs: 0, text: " SLOT 1 TGT=9 SRC=100 Group Call Color Code=7" },
+				{ atMs: 200, text: "CRC ERR" },
+				{ atMs: 200, text: "FEC ERR" },
+			],
+			500,
+		)
+		expect(withErrors.voice[0]).toMatchObject({
+			protocol: "dmr",
+			colourCode: 7,
+			encrypted: false,
+			errors: { crc: 1, fec: 1 },
+		})
+		expect(withErrors.voice[0]).not.toHaveProperty("nac")
+		expect(withErrors.voice[0]).not.toHaveProperty("algorithmId")
+		expect(withErrors.voice[0]).not.toHaveProperty("ran")
+
+		const zero = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +DMR" },
+				{ atMs: 0, text: " SLOT 1 TGT=1 SRC=2 Group Call Color Code=0" },
+			],
+			500,
+		)
+		expect(zero.voice[0]?.colourCode).toBe(0)
+		expect(zero.voice[0]?.errors).toEqual({ crc: 0, fec: 0 })
+
+		const wide = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +DMR" },
+				{ atMs: 0, text: " SLOT 1 TGT=1 SRC=2 Group Call Color Code=99" },
+			],
+			500,
+		)
+		expect(wide.voice[0]?.colourCode).toBe(99)
+
+		const absent = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +DMR" },
+				{ atMs: 0, text: " SLOT 1 TGT=1 SRC=2 Group Call " },
+			],
+			500,
+		)
+		expect(absent.voice[0]).not.toHaveProperty("colourCode")
+		expect(absent.voice[0]?.errors).toEqual({ crc: 0, fec: 0 })
+	})
+
+	it("publishes an NXDN RAN, including 0 and 99", () => {
+		const ran = (value: number) =>
+			replayVoice(
+				[
+					{ atMs: 0, text: "Sync: +NXDN96" },
+					{ atMs: 0, text: `VOICE RAN=${value} TGT=7 SRC=8` },
+				],
+				500,
+			).voice[0]
+		expect(ran(12)).toMatchObject({
+			protocol: "nxdn96",
+			talkgroup: 7,
+			source: 8,
+			ran: 12,
+			errors: { crc: 0, fec: 0 },
+		})
+		expect(ran(0)?.ran).toBe(0)
+		expect(ran(99)?.ran).toBe(99)
+		expect(ran(12)).not.toHaveProperty("colourCode")
+	})
+
+	it("keeps colour code and errors on a call_end and on a later encryption update", () => {
+		const ended = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +DMR" },
+				{ atMs: 0, text: " SLOT 1 TGT=9 SRC=100 Group Call Color Code=3" },
+				{ atMs: 600, text: "FEC ERR" },
+				{
+					atMs: 1000,
+					text: "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC",
+				},
+			],
+			1000,
+		)
+		expect(ended.voice.map(state => state.active)).toEqual([true, false])
+		expect(ended.voice[0]?.errors).toEqual({ crc: 0, fec: 0 })
+		expect(ended.voice[1]).toMatchObject({
+			active: false,
+			colourCode: 3,
+			errors: { crc: 0, fec: 1 },
+		})
+
+		const encrypted = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +DMR" },
+				{ atMs: 0, text: " SLOT 1 TGT=4 SRC=5 Group Call Color Code=2" },
+				{ atMs: 600, text: "ALG ID: 21" },
+			],
+			600,
+		)
+		expect(encrypted.voice.map(state => state.encrypted)).toEqual([false, true])
+		expect(encrypted.voice[1]).toMatchObject({
+			colourCode: 2,
+			errors: { crc: 0, fec: 0 },
+		})
+		expect(encrypted.voice[1]).not.toHaveProperty("algorithmId")
+
+		const p25 = replayVoice(
+			[
+				{ atMs: 0, text: "Sync: +P25p1" },
+				{ atMs: 0, text: "nac: [ abcde] src: [ 10] tg: [ 20]" },
+				{ atMs: 700, text: "ALG ID: 0x84" },
+			],
+			700,
+		)
+		expect(p25.voice[0]).toMatchObject({ encrypted: false, nac: "ABCDE" })
+		expect(p25.voice[0]).not.toHaveProperty("algorithmId")
+		expect(p25.voice[1]).toMatchObject({
+			encrypted: true,
+			nac: "ABCDE",
+			algorithmId: "84",
+			errors: { crc: 0, fec: 0 },
+		})
 	})
 })
