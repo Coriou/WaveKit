@@ -30,26 +30,6 @@ function arm(d: Detector, ranges: CfarRange[]): void {
 	d.setCfarRanges(ranges)
 }
 
-interface Step {
-	bin: number
-	minutes: number
-}
-
-function trace(
-	d: Detector,
-	steps: readonly Step[],
-	probes: readonly number[],
-): number[] {
-	const out: number[] = []
-	for (const step of steps) {
-		const on = new Uint8Array(N)
-		if (step.bin >= 0 && step.bin < N) on[step.bin] = 1
-		d.recordNoiseEdges(on, new Uint8Array(N), step.minutes, N)
-		for (const probe of probes) out.push(d.kFor(probe))
-	}
-	return out
-}
-
 function withoutTarget(range: CfarRange): CfarRange {
 	const { faTarget: _fa, ...rest } = range
 	return rest
@@ -129,6 +109,44 @@ describe("per-range CFAR target", () => {
 		expect(pipeline.kFor(200)).toBe(TABLE_K)
 	})
 
+	it("adapts same-key ranges independently when their targets differ", () => {
+		// Half the window at mhz 4 is 2 MHz. Five minutes expose 10 MHz·min.
+		// Three edges → rate 0.3: above 0.25, below 2.
+		const edges = [10, 12, 14]
+		const run = (d: Detector, bins: number[], minutes: number): void => {
+			const on = new Uint8Array(N)
+			for (const b of bins) on[b] = 1
+			d.recordNoiseEdges(on, new Uint8Array(N), minutes, 4)
+		}
+		const ranges = (low: number, high: number): CfarRange[] => [
+			{ startBin: 0, endBin: 128, key: "same", burst: false, faTarget: low },
+			{ startBin: 128, endBin: 256, key: "same", burst: false, faTarget: high },
+		]
+		const shared = make(1)
+		arm(shared, ranges(0.25, 2))
+		run(shared, edges, 2.5)
+		run(shared, [], 2.5)
+		expect(shared.kFor(10)).toBe(TABLE_K + 0.5)
+		expect(shared.kFor(200)).toBe(TABLE_K)
+		expect(shared.stats().map(s => s.key)).toEqual(["same", "same"])
+
+		const alone = make(1)
+		arm(alone, [ranges(0.25, 2)[0]!])
+		run(alone, edges, 2.5)
+		run(alone, [], 2.5)
+		expect(alone.kFor(10)).toBe(shared.kFor(10))
+	})
+
+	it("restores a persisted k onto a range that sets its own target", () => {
+		const d = make(1)
+		d.importK([{ key: "same", k: 5 }])
+		arm(d, [
+			{ startBin: 0, endBin: 128, key: "same", burst: false, faTarget: 0.25 },
+		])
+		expect(d.kFor(10)).toBe(5)
+		expect(d.stats()).toEqual([{ key: "same", k: 5, faPerMhzMin: 0 }])
+	})
+
 	it("does not adapt a burst range even when it sets a target", () => {
 		const d = make(1)
 		arm(d, [
@@ -145,54 +163,92 @@ describe("per-range CFAR target", () => {
 	// Feature: scanner-followups, Property 7: Per-range target
 	// Validates: Requirements 2.5
 	it("matches a run whose pipeline target is the range target and whose ranges set none", () => {
-		const faArb = fc.double({ min: 0.05, max: 20, noNaN: true })
+		// Half a window at 4 MHz for 5 minutes exposes 10 MHz·min, so a handful of
+		// edges crosses the generated target. A random trace at mhz = 256 never does.
+		const faArb = fc.double({ min: 0.05, max: 2, noNaN: true })
 		const rangeArb = (key: string, startBin: number, endBin: number) =>
 			fc
 				.record({
 					faTarget: fc.option(faArb, { nil: undefined }),
 					burst: fc.boolean(),
+					noisy: fc.boolean(),
 				})
-				.map(
-					({ faTarget, burst }): CfarRange => ({
+				.map(({ faTarget, burst, noisy }) => ({
+					range: {
 						startBin,
 						endBin,
 						key,
 						burst,
 						...(faTarget !== undefined ? { faTarget } : {}),
-					}),
-				)
-		const stepArb: fc.Arbitrary<Step> = fc.record({
-			bin: fc.integer({ min: 0, max: N - 1 }),
-			minutes: fc.double({ min: 0.05, max: 8, noNaN: true }),
-		})
+					} satisfies CfarRange,
+					noisy,
+				}))
+		const edgesFor = (startBin: number, count: number): number[] =>
+			Array.from({ length: count }, (_, i) => startBin + 1 + i * 2)
+		const window = (
+			d: Detector,
+			bins: number[],
+			minutesEach: readonly number[],
+		): void => {
+			for (const minutes of minutesEach) {
+				const on = new Uint8Array(N)
+				for (const b of bins) on[b] = 1
+				d.recordNoiseEdges(on, new Uint8Array(N), minutes, 4)
+			}
+		}
 		fc.assert(
 			fc.property(
 				faArb,
 				rangeArb("a", 0, 128),
 				rangeArb("b", 128, 256),
-				fc.array(stepArb, { minLength: 1, maxLength: 8 }),
-				(pipelineFa, a, b, steps) => {
-					const subject = make(pipelineFa)
-					arm(subject, [a, b])
-					const probes = [10, 200]
-					const got = trace(subject, steps, probes)
-					for (const range of [a, b]) {
-						const probe = range.key === "a" ? 10 : 200
-						const targetsAbsent = make(range.faTarget ?? pipelineFa)
-						arm(targetsAbsent, [withoutTarget(range)])
-						const ref = trace(targetsAbsent, steps, [probe])
-						const fromSubject = got.filter((_, i) =>
-							range.key === "a" ? i % 2 === 0 : i % 2 === 1,
+				(pipelineFa, specA, specB) => {
+					const specs = [specA, specB]
+					const play = (d: Detector, which: 0 | 1 | "both"): number[] => {
+						const chosen = which === "both" ? specs : [specs[which]!]
+						const targetOf = (spec: (typeof specs)[number]): number =>
+							spec.range.faTarget ?? pipelineFa
+						const noisyBins = chosen.flatMap(spec =>
+							spec.noisy
+								? edgesFor(
+										spec.range.startBin,
+										Math.ceil(targetOf(spec) * 10) + 1,
+									)
+								: [],
 						)
-						expect(fromSubject).toEqual(ref)
-						expect(subject.stats().find(s => s.key === range.key)).toEqual(
+						window(d, noisyBins, [2.5, 2.5])
+						const afterRaise = [d.kFor(10), d.kFor(200)]
+						window(
+							d,
+							[],
+							[2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5, 2.5],
+						)
+						return [...afterRaise, d.kFor(10), d.kFor(200)]
+					}
+					const subject = make(pipelineFa)
+					arm(subject, [specA.range, specB.range])
+					const got = play(subject, "both")
+					for (const [index, spec] of specs.entries()) {
+						const targetsAbsent = make(spec.range.faTarget ?? pipelineFa)
+						arm(targetsAbsent, [withoutTarget(spec.range)])
+						const ref = play(targetsAbsent, index as 0 | 1)
+						const fromSubject = [got[index]!, got[2 + index]!]
+						const fromRef = [ref[index]!, ref[2 + index]!]
+						expect(fromSubject).toEqual(fromRef)
+						const raised = !spec.range.burst && spec.noisy
+						expect(fromSubject[0]).toBe(raised ? TABLE_K + 0.5 : TABLE_K)
+						// The quiet 30 minutes undo exactly one raise.
+						expect(fromSubject[1]).toBe(TABLE_K)
+						expect(subject.stats().find(s => s.key === spec.range.key)).toEqual(
 							targetsAbsent.stats()[0],
 						)
 					}
-					if (a.faTarget === undefined && b.faTarget === undefined) {
+					if (
+						specA.range.faTarget === undefined &&
+						specB.range.faTarget === undefined
+					) {
 						const twin = make(pipelineFa)
-						arm(twin, [withoutTarget(a), withoutTarget(b)])
-						expect(trace(twin, steps, probes)).toEqual(got)
+						arm(twin, [withoutTarget(specA.range), withoutTarget(specB.range)])
+						expect(play(twin, "both")).toEqual(got)
 						expect(twin.stats()).toEqual(subject.stats())
 					}
 				},
