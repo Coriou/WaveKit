@@ -373,6 +373,19 @@ describe("APRS objects and items (WG2 req 3.2)", () => {
 		expect(result.comment).toBe("Weekly club meeting")
 	})
 
+	it("accepts an hour-minute-second object timestamp", () => {
+		const result = parseAprsInfo(
+			"N0CALL",
+			"APRS",
+			[],
+			`;MEETING  *234517h${position}`,
+		)
+
+		expect(result.objectName).toBe("MEETING")
+		expect(result.objectKilled).toBe(false)
+		expect(result.lat).toBeCloseTo(49.05833333333333)
+	})
+
 	it("parses a killed object", () => {
 		const result = parseAprsInfo(
 			"N0CALL",
@@ -447,9 +460,14 @@ describe("APRS objects and items (WG2 req 3.2)", () => {
 			";NOPE",
 			";SHORT*092345z4903.50N/07201.75W>",
 			`;${" ".repeat(9)}*092345z4903.50N/07201.75W>`,
+			";MEETING  _garbage4903.50N/07201.75W-test",
+			";MEETING  _092345zNOTAPOSITION",
+			";MEETING  *092345z",
+			";MEETING  *092345/4903.50N/07201.75W>",
 			")AB!4903.50N/07201.75W>",
 			")NODELIM",
 			")ABCDEFGHIJ!4903.50N/07201.75W>",
+			")ABC!",
 			";",
 			")",
 		]
