@@ -84,6 +84,8 @@ import { operatorDataRoutes } from "../operator-data/routes.js"
 import { sendOperatorDataSnapshot } from "../operator-data/broadcast-adapter.js"
 import type { OperatorDataBroadcastPort } from "../operator-data/broadcast-adapter.js"
 import { regionalRoutes } from "./routes/regional.js"
+import { bandPlanRoutes } from "./routes/bandplans.js"
+import type { BandPlanService } from "../core/bandplans/contract.js"
 import { receiverCapabilitiesRoutes } from "./routes/receiver-capabilities.js"
 import type { RegionalRegistry } from "../core/regional/registry.js"
 import type { ReceiverCapabilitiesProvider } from "../core/tuner-capabilities/types.js"
@@ -110,6 +112,8 @@ export interface ApiServerDependencies {
 	station?: StationIdentity
 	access?: NamedAccessRuntimeContext
 	regionalRegistry?: RegionalRegistry | null
+	/** Owned: stop() closes it after HTTP drain. Writes mount only with access. */
+	bandPlans?: BandPlanService
 	receiverCapabilitiesProvider?: ReceiverCapabilitiesProvider | null | undefined
 
 	sourceManager: SourceManager
@@ -144,6 +148,7 @@ export interface ApiServerDependencies {
 export class ApiServer {
 	private readonly station: StationIdentity | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
+	private readonly bandPlans: BandPlanService | undefined
 	private readonly receiverCapabilitiesProvider:
 		| ReceiverCapabilitiesProvider
 		| null
@@ -195,6 +200,7 @@ export class ApiServer {
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.station = dependencies.station
 		this.regionalRegistry = dependencies.regionalRegistry
+		this.bandPlans = dependencies.bandPlans
 		this.receiverCapabilitiesProvider =
 			dependencies.receiverCapabilitiesProvider
 		this.access = dependencies.access
@@ -484,6 +490,7 @@ export class ApiServer {
 				this.operatorData?.close() ?? Promise.resolve()
 			return this.operatorCloseResult
 		})
+		await attempt(() => this.bandPlans?.close())
 		await attempt(async () => {
 			await this.accessRoutes?.drain()
 		})
@@ -1051,6 +1058,17 @@ export class ApiServer {
 		if (this.regionalRegistry !== undefined)
 			await this.app.register(regionalRoutes, {
 				registry: this.regionalRegistry,
+			})
+		// Reads in both access modes; mutation routes only with the access controller.
+		if (this.bandPlans)
+			await this.app.register(bandPlanRoutes, {
+				service: this.bandPlans,
+				...(this.accessController
+					? {
+							authorizeMutation: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
 			})
 		await this.app.register(receiverCapabilitiesRoutes, {
 			provider: this.receiverCapabilitiesProvider,

@@ -73,6 +73,7 @@ import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
 import { startActivityRuntime } from "./core/activity/runtime.js"
 import { OperatorDataService } from "./operator-data/service.js"
+import { openBandPlanService } from "./core/bandplans/index.js"
 import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
 import {
 	createDsdFmeDecoder,
@@ -1112,9 +1113,23 @@ async function main(): Promise<void> {
 		own(8, () => activity.close())
 		checkpoint()
 
+		// Band plans never stop core: a storage failure leaves built-ins readable.
+		// The API server closes it after HTTP drain; own() covers a failed construction.
+		const bandPlans = await openBandPlanService({
+			stateDir: config.stateDir,
+			context: {
+				region: bandRegion.code,
+				effectiveCountry: config.station.country ?? null,
+			},
+			writable: protectedMode,
+		})
+		own(11, () => bandPlans.close())
+		checkpoint()
+
 		// Step 9: Initialize API server
 		const apiServer = new ApiServer(
 			{
+				bandPlans,
 				...(access ? { access } : {}),
 				activity,
 				station: stationIdentity(config, bandRegion.code),
