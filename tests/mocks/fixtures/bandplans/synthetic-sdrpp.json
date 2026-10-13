@@ -1,0 +1,48 @@
+{
+	"name": "Synthetic demo",
+	"country_name": "Exampleland",
+	"country_code": "EX",
+	"author_name": "Lane Fixture",
+	"author_url": "https://example.invalid/not-a-source",
+	"version": 2,
+	"comment": "Hand-made synthetic fixture. Not a band plan from any source.",
+	"bands": [
+		{
+			"name": "Alpha beacon",
+			"type": "amateur",
+			"start": 1000000,
+			"end": 2000000,
+			"note": "ignored"
+		},
+		{
+			"name": "Beta broadcast",
+			"type": "broadcast",
+			"start": 3000000,
+			"end": 4000000
+		},
+		{
+			"name": "Gamma aviation",
+			"type": "aviation",
+			"start": 5000000,
+			"end": 6000000
+		},
+		{
+			"name": "Delta marine",
+			"type": "marine",
+			"start": 7000000,
+			"end": 8000000
+		},
+		{
+			"name": "Epsilon PMR446",
+			"type": "custom",
+			"start": 9000000,
+			"end": 10000000
+		},
+		{
+			"name": "Zeta",
+			"type": "#AaBbCc",
+			"start": 11000000,
+			"end": 12000000
+		}
+	]
+}
