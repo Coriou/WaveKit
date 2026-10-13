@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events"
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import pino from "pino"
@@ -143,7 +143,10 @@ describe("band-plan routes mounted by ApiServer", () => {
 			const response = await env.app.inject({ url, headers: env.anonymous })
 			expect(response.statusCode).toBe(200)
 		}
-		const before = await readFile(env.storeFile, "utf8")
+		// Legacy opens read-only: nothing under stateDir/bandplans is created.
+		await expect(stat(join(env.stateDir, "bandplans"))).rejects.toMatchObject({
+			code: "ENOENT",
+		})
 		const writes = [
 			{ method: "PUT", url: "/api/bandplans/stack", body: setStackBody(view) },
 			{
@@ -166,7 +169,9 @@ describe("band-plan routes mounted by ApiServer", () => {
 			})
 			expect(response.statusCode).toBe(404)
 		}
-		expect(await readFile(env.storeFile, "utf8")).toBe(before)
+		await expect(stat(join(env.stateDir, "bandplans"))).rejects.toMatchObject({
+			code: "ENOENT",
+		})
 		expect((await readView(env, env.anonymous)).store).toEqual(view.store)
 	})
 

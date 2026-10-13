@@ -1117,6 +1117,7 @@ async function main(): Promise<void> {
 
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
+		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		const bandPlans = await openBandPlanService({
 			stateDir: config.stateDir,
 			context: {
@@ -1124,6 +1125,9 @@ async function main(): Promise<void> {
 				effectiveCountry: config.station.country ?? null,
 			},
 			writable: protectedMode,
+			onStoreUnavailable: reason => {
+				bandPlanLog.warn({ reason }, "Band-plan store unavailable")
+			},
 		})
 		closeBandPlans = () => bandPlans.close()
 		own(11, closeBandPlans)
