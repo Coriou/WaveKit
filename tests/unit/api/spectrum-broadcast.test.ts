@@ -154,81 +154,110 @@ describe("spectrum backfill and the outbound queue", () => {
 		),
 		bins: "A".repeat(bytes),
 	})
+	const FILLER = bigFrame(1000, 300)
+	const fillerBytes = JSON.stringify({
+		type: "spectrum:frame",
+		data: FILLER,
+		channel: "spectrum",
+	}).length
 
-	// Feature: web-gaps-1, Property 12: Backfill within the outbound headroom
-	// Validates: Requirements 1.8
-	it("never disconnects a client whose queue is already partly full, and the ack counts what is sent", () => {
-		fc.assert(
-			fc.property(
-				fc.integer({ min: 0, max: 1024 * 1024 - 4096 }),
-				fc.integer({ min: 0, max: 64 }),
-				fc.integer({ min: 100, max: 16_000 }),
-				fc.integer({ min: 0, max: 200 }),
-				(buffered, count, bytes, queuedMessages) => {
-					const b = new WebSocketEventBroadcaster(
-						createLogger({ level: "fatal" }),
-					)
-					const source = new Source()
-					const wiring = wireSpectrumBroadcasts(source, b)
-					const c = connect(b)
-					c.send({ type: "subscribe", channels: ["spectrum"] })
-					// A slow socket with earlier messages still queued.
-					c.socket.bufferedAmount = buffered
-					// Earlier traffic that still fits, leaving room for the ack and snapshot.
-					const fillerBytes =
-						JSON.stringify({
-							type: "spectrum:frame",
-							data: bigFrame(1000, 300),
-							channel: "spectrum",
-						}).length + 8
-					const filler = Math.max(
-						0,
-						Math.min(
-							queuedMessages,
-							Math.floor((1024 * 1024 - buffered - 16_384) / fillerBytes),
-						),
-					)
-					for (let i = 0; i < filler; i++)
-						b.sendToClients("spectrum", [c.id], {
-							type: "spectrum:frame",
-							data: bigFrame(1000 + i, 300),
-						})
-					const backfill = Array.from({ length: count }, (_, i) =>
-						bigFrame(i, bytes),
-					)
-					source.emit(
-						"profile",
-						c.id,
-						{ ...ack, backfillFrames: count },
-						[frame("2026-10-13T00:10:00.000Z", "snapshot")],
-						backfill,
-					)
-					const clients = (b as unknown as { clients: Map<string, unknown> })
-						.clients
-					expect(clients.has(c.id)).toBe(true)
-					c.socket.bufferedAmount = 0
-					;(b as unknown as { maintainClients(): void }).maintainClients()
-					const profile = c.socket.sent.find(m => m.type === "spectrum:profile")
-					const sentBackfill = c.socket.sent.filter(
-						m =>
-							m.type === "spectrum:frame" &&
-							(m.data as { backfill?: boolean; at: string }).backfill ===
-								true &&
-							(m.data as { at: string }).at < "2026-10-13T00:16:40.000Z",
-					)
-					expect(
-						(profile?.data as { backfillFrames?: number }).backfillFrames,
-					).toBe(sentBackfill.length)
-					expect(
-						c.socket.sent.some(
-							m => (m.data as { snapshot?: boolean }).snapshot === true,
-						),
-					).toBe(true)
-					wiring.dispose()
-					b.closeAll()
-				},
-			),
-			{ numRuns: 100 },
+	/**
+	 * One re-subscribe on a socket with `buffered` bytes in its send buffer and
+	 * `queued` earlier messages still in the outbound queue.
+	 */
+	function deliver(
+		buffered: number,
+		queued: number,
+		backfill: readonly SpectrumFrameEventData[],
+	) {
+		const b = new WebSocketEventBroadcaster(createLogger({ level: "fatal" }))
+		const source = new Source()
+		const wiring = wireSpectrumBroadcasts(source, b)
+		const c = connect(b)
+		c.send({ type: "subscribe", channels: ["spectrum"] })
+		c.socket.bufferedAmount = buffered
+		for (let i = 0; i < queued; i++)
+			b.sendToClients("spectrum", [c.id], {
+				type: "spectrum:frame",
+				data: FILLER,
+			})
+		const clients = (b as unknown as { clients: Map<string, unknown> }).clients
+		const before = clients.has(c.id)
+		source.emit(
+			"profile",
+			c.id,
+			{ ...ack, backfillFrames: backfill.length },
+			[frame("2026-10-13T00:10:00.000Z", "snapshot")],
+			backfill,
 		)
+		const connected = clients.has(c.id)
+		if (connected) {
+			c.socket.bufferedAmount = 0
+			;(b as unknown as { maintainClients(): void }).maintainClients()
+		}
+		const profile = c.socket.sent.find(m => m.type === "spectrum:profile")
+		const sentBackfill = c.socket.sent.filter(
+			m =>
+				m.type === "spectrum:frame" &&
+				(m.data as { backfill?: boolean }).backfill === true &&
+				(m.data as { at: string }).at < "2026-10-13T00:16:40.000Z",
+		).length
+		wiring.dispose()
+		b.closeAll()
+		return {
+			before,
+			connected,
+			sentBackfill,
+			backfillFrames: (profile?.data as { backfillFrames?: number } | undefined)
+				?.backfillFrames,
+		}
+	}
+
+	// Feature: web-gaps-1, Property 12: Backfill causes no disconnect
+	// Validates: Requirements 1.8
+	it("never disconnects a client that the ack and snapshots alone would not, and the ack counts what is sent", () => {
+		const nearFull = fc.record({
+			// Down to 0..4 KiB of byte headroom and up to 255 queued messages.
+			buffered: fc.oneof(
+				fc.integer({ min: 0, max: 1024 * 1024 }),
+				fc.integer({ min: 1024 * 1024 - 4096, max: 1024 * 1024 }),
+			),
+			queued: fc.oneof(
+				fc.integer({ min: 0, max: 255 }),
+				fc.integer({ min: 230, max: 255 }),
+			),
+			count: fc.integer({ min: 0, max: 64 }),
+			bytes: fc.integer({ min: 100, max: 16_000 }),
+		})
+		fc.assert(
+			fc.property(nearFull, ({ buffered, queued, count, bytes }) => {
+				// Keep the earlier traffic itself within the caps.
+				const fits = Math.max(
+					0,
+					Math.min(queued, Math.floor((1024 * 1024 - buffered) / fillerBytes)),
+				)
+				const backfill = Array.from({ length: count }, (_, i) =>
+					bigFrame(i, bytes),
+				)
+				const alone = deliver(buffered, fits, [])
+				const withBackfill = deliver(buffered, fits, backfill)
+				expect(withBackfill.before).toBe(true)
+				expect(withBackfill.connected).toBe(alone.connected)
+				if (withBackfill.connected && count > 0)
+					expect(withBackfill.backfillFrames).toBe(withBackfill.sentBackfill)
+			}),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("sends no backfill when the headroom is below the reserve", () => {
+		const r = deliver(
+			1024 * 1024 - 100 * 1024,
+			0,
+			Array.from({ length: 8 }, (_, i) => bigFrame(i, 8_000)),
+		)
+		expect(r.connected).toBe(true)
+		expect(r.backfillFrames).toBe(0)
+		expect(r.sentBackfill).toBe(0)
 	})
 })

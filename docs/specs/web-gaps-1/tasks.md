@@ -30,7 +30,7 @@ and `pnpm run lint` before reporting.
   - _Requirements: 1.2, 9.1_
 - [x] W.4 (Main, R1 M2) Bound backfill by the client's outbound headroom.
   - _Requirements: 1.8_
-  - **Property 12: Backfill within the outbound headroom**
+  - **Property 12: Backfill causes no disconnect**
 
 ## Lane A: analog transmissions
 

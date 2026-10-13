@@ -44,11 +44,12 @@ backfill messages; when a bound is hit the newest frames are kept.
 1.6 The ack shall carry `backfillFrames`, the number of backfill frames that follow it
 (0 when none are buffered), whenever the request had `backfillMs` > 0.
 1.7 `GET /api/spectrum/status` `limits` shall report the averaging and backfill bounds.
-1.8 (R1 M2.) Backfill shall never make the server disconnect the client: its bytes are
-bounded by min(512 KiB, the client's remaining outbound headroom (1 MiB queued plus
-socket-buffered, 256 messages) less the ack, the snapshots and a 128 KiB / 16-message
-margin), newest kept, none when the headroom is smaller; `backfillFrames` counts the frames
-actually sent.
+1.8 (R1 M2, R2.) Backfill shall never cause a disconnect that the ack and snapshots alone
+would not: its bytes are bounded by min(512 KiB, the client's remaining outbound headroom
+(1 MiB queued plus socket-buffered, 256 messages) less the ack, the snapshots and a
+128 KiB / 16-message margin), newest kept, and it is empty when the headroom is below that
+reserve; `backfillFrames` counts the frames actually sent. The ack and snapshots are sent
+as before; a client already at the outbound caps can still be disconnected by them.
 
 ## 2. Per-client averaging
 

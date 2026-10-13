@@ -235,6 +235,8 @@ stored reception is at least 60 s older, an identity field it carries differs fr
 last known value, or it carries a field outside the allowlist; the tracked entities never
 exceed the bound. Validates: 7.6, 7.7, 7.9.
 
-Property 12: Backfill within the outbound headroom. For any socket buffer level, earlier
-queued traffic, backfill frame count and size, delivering ack, backfill and snapshot never
-disconnects the client, and `backfillFrames` equals the backfill frames sent. Validates: 1.8.
+Property 12: Backfill causes no disconnect. For any socket buffer level (including less
+than 4 KiB of headroom), up to 255 earlier queued messages, and any backfill frame count
+and size, the client stays connected with backfill exactly when it stays connected with
+the ack and snapshot alone, and `backfillFrames` equals the backfill frames sent.
+Validates: 1.8.

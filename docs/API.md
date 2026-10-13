@@ -3561,8 +3561,10 @@ One frame per source and profile:
   replayed. At most 64 frames and 512 KiB of summed message JSON, and never
   more than the client's free outbound queue room (1 MiB, 256 messages) less a
   margin, so a re-subscribe on a slow socket gets fewer or no backfill frames
-  instead of a disconnect; the oldest are dropped first and `backfillFrames`
-  counts the frames actually sent.
+  and backfill never causes a disconnect the ack and snapshot alone would not;
+  the oldest are dropped first and `backfillFrames` counts the frames actually
+  sent. A client already at the queue caps can still be disconnected by the
+  ack or snapshot, as before WG1.
 - Client rules: never merge or accumulate rows across a change of `sourceId`,
   epoch, `profile`, `binHz` or `startHz`; each row carries its own axis. Compare
   epochs for equality only (they restart with the engine).

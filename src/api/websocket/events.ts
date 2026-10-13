@@ -696,10 +696,6 @@ export class WebSocketEventBroadcaster {
 	}
 
 	/**
-	 * Sends one message to the listed clients that are subscribed to `channel`
-	 * (same filter as broadcast), serialising it once. Returns the clients reached.
-	 */
-	/**
 	 * Room left in one client's outbound queue before it would be disconnected
 	 * (queued plus socket-buffered bytes against the 1 MiB cap, and messages
 	 * against the 256-message cap). Null for an unknown or closed client.
@@ -721,6 +717,10 @@ export class WebSocketEventBroadcaster {
 		}
 	}
 
+	/**
+	 * Sends one message to the listed clients that are subscribed to `channel`
+	 * (same filter as broadcast), serialising it once. Returns the clients reached.
+	 */
 	sendToClients(
 		channel: WebSocketChannel,
 		clientIds: Iterable<string>,
