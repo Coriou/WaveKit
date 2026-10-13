@@ -113,7 +113,7 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 
 ## Presets and bandplans
 
-`GET /api/scanner/bandplans` lists the plans for the effective region (`region` config; EU, or US/CA → US):
+`GET /api/scanner/bandplans` lists the effective plans. Under the default band-plan stack these are the built-in plans for the effective region (`region` config; EU, or US/CA → US):
 
 | Id                | Region | Range (MHz)       | Rasters               | OBW classes (kHz) | Protocols                             |
 | ----------------- | ------ | ----------------- | --------------------- | ----------------- | ------------------------------------- |
@@ -129,12 +129,19 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 | `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
 
-The scanner still plans from these built-in plans. The layered band plans under
-`/api/bandplans` (built-in packs, SDR++ imports, operator bands and edits; see
-[API.md](API.md#band-plans)) are display and catalog data only in this release
-and change no scan ranges. Scan presets only produce job bodies:
-`GET /api/bandplans/presets/:presetId/job` returns a `spec` that a client posts to
-`POST /api/scanner/jobs`. Scanning the resolved band-plan stack is future work.
+The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
+selects which built-in plans the scanner uses: each enabled built-in pack, in
+stack order, contributes its region's plans above, minus bands hidden with a
+`hidden: true` edit; a plan id already contributed is not repeated. Imported
+packs, operator bands, `skip` and other edits are display-only and change no
+scan range. Job plan ids and the host ranges that operator ranges inherit
+rasters from resolve against this list; a plan that is not in it is
+`range-empty`. A change applies at the next job create, patch, resume or
+preview; a running sweep keeps the plans it was admitted with. Until the
+band-plan service opens, or if it fails, the scanner uses the built-in list.
+Scan presets only produce job bodies: `GET /api/bandplans/presets/:presetId/job`
+returns a `spec` that a client posts to `POST /api/scanner/jobs`; preset
+`applicable` and `issues` are checked against the effective list.
 
 Sensitivity presets: `low` (false-alarm target 0.25 /MHz/min, 50 ms blocks), `normal` (`detection.faTargetPerMhzMin`, 1.0, 50 ms), `high` (2.0, 100 ms).
 

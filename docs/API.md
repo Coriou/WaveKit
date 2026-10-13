@@ -483,8 +483,16 @@ only read. If no state file exists there, the store is the empty default with
 `storeId: null` and revision 0; writes are not mounted, so this token is never
 sent back. Any other available store reports its persisted UUID. Changes are
 announced on the [`bandplans` WebSocket channel](#bandplans-channel) in both
-access modes. The scanner does not consume these layers yet; see
-[SCANNER.md](SCANNER.md#presets-and-bandplans).
+access modes.
+
+The scanner plans from the effective list derived from the stack: for each
+enabled built-in pack, in stack order, that region's built-in scanner plans,
+minus any band with a stored `hidden: true` edit and any plan id already taken.
+Under the default stack this equals the built-in list. `skip`, other edit
+fields, imported packs and operator bands are display-only. A stack change
+applies at the next scanner job create, patch, resume or preview, never to a
+running sweep. Preset `applicable` and `issues` are checked against the same
+list; see [SCANNER.md](SCANNER.md#presets-and-bandplans).
 
 Reads are mounted in both access modes under the normal API admission. Writes and
 imports are mounted only in protected mode (`capabilities.writable: true` in the
@@ -1669,7 +1677,10 @@ sweeps) for this run rather than overwrite them.
 
 #### GET /api/scanner/bandplans
 
-Built-in bandplans for the effective region (see [SCANNER.md](SCANNER.md#presets-and-bandplans)).
+The effective scanner bandplans: the built-in plans of the enabled built-in packs
+in the band-plan stack, without hidden bands (see [Band plans](#band-plans) and
+[SCANNER.md](SCANNER.md#presets-and-bandplans)). Under the default stack this is
+the built-in list for the effective region.
 
 ```bash
 curl http://localhost:9000/api/scanner/bandplans

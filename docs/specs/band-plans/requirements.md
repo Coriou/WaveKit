@@ -1,8 +1,8 @@
 # Band plans and scan presets requirements (BP1, BP2)
 
 Status: BP1 (sections 1 to 10) implemented server-side. BP2 (section 11: scanner feed,
-preview digest, store identity, change notice) specified against the amended contract,
-not implemented. The shared contract is `packages/api-types/src/bandplans.ts` plus
+preview digest, store identity, change notice) implemented server-side, pending
+acceptance. The shared contract is `packages/api-types/src/bandplans.ts` plus
 `src/core/bandplans/contract.ts`. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope

@@ -415,7 +415,7 @@ describe("bandplans WebSocket channel end to end", () => {
 			),
 			{ numRuns: 100 },
 		)
-	})
+	}, 20_000) // About 1 s alone; margin for a loaded parallel run.
 
 	// Feature: band-plans, Property 22: Change notice
 	// Validates: Requirements 11.9

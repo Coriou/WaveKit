@@ -66,9 +66,13 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    presets. Batch 1 landed server-side: the band-plan model, a layered resolver,
    a dedicated store with provenance, SDR++ JSON file import with preview,
    built-in and operator scan presets and the `/api/bandplans` REST routes.
-   Remaining: the scanner consuming the resolved stack, a general settings store
-   with YAML/env/UI provenance, country from the station location, SDR#, Gqrx and
-   URL import, CLI and web consumption, and verified packs.
+   Batch 2 landed server-side, pending acceptance: the scanner reads the effective
+   built-in plans of the stack (hidden bands leave it), import commits bind a
+   preview digest, a never-persisted legacy store reports `storeId: null`, and a
+   `bandplans` WebSocket channel announces changes. Remaining: CLI and web
+   consumption, SDR#, Gqrx and URL import, verified packs (gated), a general
+   settings store with YAML/env/UI provenance (spec pending), and country from
+   the station location (gated).
 4. **Scanner and listening follow-ups**: running-range edits, identity search,
    recording activity, then S2/S3 acceptance (§5, §5b).
 

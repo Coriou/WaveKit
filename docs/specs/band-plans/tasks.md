@@ -2,8 +2,8 @@
 
 Status: batch 1 implemented server-side (lanes A to D, Main M.1 to M.5); two
 independent review rounds, approved. Batch 2 (scanner feed, preview digest, store
-identity, WS change notice) is specified below, contract step done, lanes open. Client
-consumers (CLI, web) remain open. See [requirements](requirements.md) and
+identity, WS change notice) is implemented server-side (lanes S, C, W, Main M2.1 to
+M2.5), pending acceptance (M2.6). Client consumers (CLI, web) remain open. See [requirements](requirements.md) and
 [design](design.md). Lanes A to D work in parallel against the frozen contract files and
 touch only their own paths; Main (M) composes, mounts and publishes. Every lane runs its
 touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
@@ -115,17 +115,17 @@ contract files.
 
 ### Lane S: scanner feed, presets, plan preview
 
-- [ ] S.1 `src/core/bandplans/scanner-feed.ts`: `resolveScannerBandplans` exactly as
+- [x] S.1 `src/core/bandplans/scanner-feed.ts`: `resolveScannerBandplans` exactly as
       designed; tests in `tests/unit/core/bandplans/scanner-feed.test.ts`, including the
       parity test over every `BandRegion` (pure views and a legacy-open service view).
   - _Requirements: 11.1, 11.2, 11.5_
   - **Property 16: Default scanner parity**, **Property 17: Hidden removal**,
     **Property 18: Feed shape**
-- [ ] S.2 `src/core/bandplans/presets.ts`: optional `effectiveIds` in `presetIssuesFor`;
+- [x] S.2 `src/core/bandplans/presets.ts`: optional `effectiveIds` in `presetIssuesFor`;
       `builtinPresetsFor` and `presetToJobSpec` unchanged.
   - _Requirements: 7.3, 11.6_
   - **Property 19: Preset applicability**
-- [ ] S.3 `src/core/scanner/plan/plan-preview.ts`: optional `PreviewContext.bandplans`
+- [x] S.3 `src/core/scanner/plan/plan-preview.ts`: optional `PreviewContext.bandplans`
       for host ranges and plan-id lookup; identity without it; tests under
       `tests/unit/core/scanner/plan/`.
   - _Requirements: 11.2, 11.4_
@@ -133,12 +133,12 @@ contract files.
 
 ### Lane C: preview digest and store identity
 
-- [ ] C.1 `previewDigestFor` in `domain.ts`; digest in `service.previewImport`;
+- [x] C.1 `previewDigestFor` in `domain.ts`; digest in `service.previewImport`;
       verification in `service.prepare` and the `commit-import` transition; remove the
       contract-step stub; route plugin and its tests follow the field name.
   - _Requirements: 6.6, 11.7_
   - **Property 20: Preview digest binding**
-- [ ] C.2 `storeId: null` for the never-persisted read-only state across storage,
+- [x] C.2 `storeId: null` for the never-persisted read-only state across storage,
       service views and the resolution memo; optional `scannerBandplans` service
       dependency feeding `effectiveIds` to `presetIssuesFor`.
   - _Requirements: 11.6, 11.8_
@@ -146,21 +146,21 @@ contract files.
 
 ### Lane W: change-notice adapter
 
-- [ ] W.1 `src/api/websocket/bandplans-broadcast-adapter.ts`: port factory, commit sink,
+- [x] W.1 `src/api/websocket/bandplans-broadcast-adapter.ts`: port factory, commit sink,
       subscribe snapshot; tests on a fake transport and a fake service.
   - _Requirements: 9.3, 11.9_
   - **Property 22: Change notice** (adapter part)
 
 ### Main (M2), serial after the lanes
 
-- [ ] M2.1 `src/core/bandplans/index.ts`: export `resolveScannerBandplans`, wire
+- [x] M2.1 `src/core/bandplans/index.ts`: export `resolveScannerBandplans`, wire
       `scannerBandplans` into the service deps; add `./scanner-feed.js` to the
       isolation test's allowed imports (no hash change).
   - _Requirements: 10.2, 11.6_
-- [ ] M2.2 `scanner-service.ts`: `bandplans` provider in `ScannerServiceDeps`, used by
+- [x] M2.2 `scanner-service.ts`: `bandplans` provider in `ScannerServiceDeps`, used by
       `bandplans()`, the preview context and `createIdentifyDriver`.
   - _Requirements: 11.3, 11.4, 11.5_
-- [ ] M2.3 `src/index.ts`: late-bound scanner provider with the `bandplansFor` fallback;
+- [x] M2.3 `src/index.ts`: late-bound scanner provider with the `bandplansFor` fallback;
       late-bound `onCommit` sink set after the API server exists.
   - _Requirements: 11.3, 11.5, 11.9_
 - [x] M2.4 `events.ts` channel, `isValidChannel`, `ServerMessage`; `server.ts`
@@ -168,7 +168,7 @@ contract files.
       tests (subscribe snapshot, notice after a protected write, legacy snapshot).
   - _Requirements: 11.9_
   - **Property 22: Change notice** (end to end)
-- [ ] M2.5 Docs: `docs/API.md` (previewDigest, nullable storeId, `bandplans` channel,
+- [x] M2.5 Docs: `docs/API.md` (previewDigest, nullable storeId, `bandplans` channel,
       effective `GET /api/scanner/bandplans`, preset applicability), `docs/SCANNER.md`,
       `docs/ROADMAP.md` item 3; spec status lines and ticks.
   - _Requirements: 1.1, 11.1–11.10_
