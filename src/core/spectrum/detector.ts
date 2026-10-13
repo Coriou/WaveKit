@@ -12,7 +12,8 @@
  *   that never join a track lasting ≥ 2 blocks (checked in the edge's block
  *   and the next), counted per MHz of unmasked span per minute of settled
  *   time. Burst ranges are not counted. Over each 5 minutes, a rate above the
- *   target raises k by 0.5 dB (cap table + 4 dB); over each 30 minutes, a rate
+ *   target (the range's `faTarget` when set, otherwise the pipeline target)
+ *   raises k by 0.5 dB (cap table + 4 dB); over each 30 minutes, a rate
  *   below target/4 lowers it by 0.5 dB (never below the table). A pinned k
  *   disables both the table and the adaptation.
  *
@@ -94,6 +95,8 @@ export interface CfarRange {
 	endBin: number
 	key: string
 	burst: boolean
+	/** Overrides the pipeline false-alarm target for this range. Absent keeps it. */
+	faTarget?: number
 }
 
 interface RangeState {
@@ -270,7 +273,7 @@ export class Detector {
 			s.exposure30 += exposure
 			s.minutes5 += minutes
 			s.minutes30 += minutes
-			changed = this.adapt(s) || changed
+			changed = this.adapt(s, r.faTarget) || changed
 		}
 		if (changed) this.refreshK()
 	}
@@ -324,11 +327,12 @@ export class Detector {
 		return s
 	}
 
-	private adapt(s: RangeState): boolean {
+	private adapt(s: RangeState, faTarget?: number): boolean {
+		const target = faTarget ?? this.faTarget
 		let changed = false
 		if (s.minutes5 >= CFAR_RAISE_WINDOW_MIN) {
 			s.rate = s.exposure5 > 0 ? s.edges5 / s.exposure5 : 0
-			const noisy = s.rate > this.faTarget * (1 + RATE_TOLERANCE)
+			const noisy = s.rate > target * (1 + RATE_TOLERANCE)
 			if (noisy && s.k < this.tableK + CFAR_MAX_RAISE_DB) {
 				s.k = Math.min(this.tableK + CFAR_MAX_RAISE_DB, s.k + CFAR_STEP_DB)
 				changed = true
@@ -344,7 +348,7 @@ export class Detector {
 		}
 		if (s.minutes30 >= CFAR_LOWER_WINDOW_MIN) {
 			const rate30 = s.exposure30 > 0 ? s.edges30 / s.exposure30 : 0
-			if (rate30 < this.faTarget / 4 && s.k > this.tableK) {
+			if (rate30 < target / 4 && s.k > this.tableK) {
 				s.k = Math.max(this.tableK, s.k - CFAR_STEP_DB)
 				changed = true
 			}
