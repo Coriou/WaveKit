@@ -130,7 +130,7 @@ Latitude/longitude out of range or both 0 are ignored.
 `duplicateCopies`, update nothing else and emit nothing.
 5.6 `hopsAway` = `hopStart − hopLimit` when `hopStart` > 0 and ≥ `hopLimit`, else null;
 `snrDb`/`rssiDbm` from the packet, null when the wrapper reports 0.
-5.7 A node not heard for 2 h is removed and reported lost; at most 1,000 nodes, evicting the
+5.7 A node not heard for 4 h (NODEINFO is broadcast every 3 h) is removed and reported lost; at most 1,000 nodes, evicting the
 least recently heard (reported lost). Per-node `portnums` counts are bounded to 64 keys.
 5.8 Stats: node counts, with position, with name, packets, duplicates, invalid packets,
 decode errors, packets per second (rolling 60 s), last packet time, latest node, expired.

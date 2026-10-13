@@ -132,7 +132,7 @@ item `)NAME!<pos>` or `)NAME_<pos>` (3–9 chars); position via the existing par
 `readUser(bytes): MeshUserFields | null`, over a bounded reader (varint ≤ 10 bytes,
 length-delimited ≤ remaining, no recursion, max 64 fields per message). `src/core/mesh-tracker.ts`:
 `MeshTracker` like `AprsTracker` with `processPacket(decoderId, data: unknown, at?)`, config
-`{ maxAgeMs = 7_200_000, maxNodes = 1000, duplicateWindowMs = 60_000, maxDuplicateKeys =
+`{ maxAgeMs = 14_400_000, maxNodes = 1000, duplicateWindowMs = 60_000, maxDuplicateKeys =
 4096, cleanupIntervalMs = 30_000, statsIntervalMs = 5000 }`. Manager
 `mesh-tracking-manager.ts` (`type === "meshtastic"`), routes `src/api/routes/mesh.ts`
 (`meshRoutes`). Test encoder `tests/mocks/fixtures/meshtastic/encode.ts` builds Position,

@@ -65,7 +65,7 @@ export interface MeshTrackerStats {
 	packetsPerSecond: number
 	lastPacketAt: string | null
 	latestNodeId: string | null
-	/** Nodes removed after maxAge (2 h) since start. */
+	/** Nodes removed after maxAge (4 h) since start. */
 	expiredTotal: number
 	timestamp: string
 }
