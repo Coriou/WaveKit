@@ -28,6 +28,9 @@ and `pnpm run lint` before reporting.
   - **Property 3: Averaging recurrence**, **Property 4: Averaging isolation**
 - [x] W.3 `spectrum-broadcast.ts`: send ack, backfill, snapshots in order.
   - _Requirements: 1.2, 9.1_
+- [x] W.4 (Main, R1 M2) Bound backfill by the client's outbound headroom.
+  - _Requirements: 1.8_
+  - **Property 12: Backfill within the outbound headroom**
 
 ## Lane A: analog transmissions
 

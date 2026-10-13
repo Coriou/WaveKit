@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events"
+import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type {
 	SpectrumFrameEventData,
@@ -142,5 +143,92 @@ describe("spectrum broadcast backfill order", () => {
 		expect(c.socket.sent.at(-1)?.data).toMatchObject({ snapshot: true })
 		wiring.dispose()
 		b.closeAll()
+	})
+})
+
+describe("spectrum backfill and the outbound queue", () => {
+	const bigFrame = (i: number, bytes: number): SpectrumFrameEventData => ({
+		...frame(
+			new Date(Date.UTC(2026, 9, 13, 0, 0, i)).toISOString(),
+			"backfill",
+		),
+		bins: "A".repeat(bytes),
+	})
+
+	// Feature: web-gaps-1, Property 12: Backfill within the outbound headroom
+	// Validates: Requirements 1.8
+	it("never disconnects a client whose queue is already partly full, and the ack counts what is sent", () => {
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 0, max: 1024 * 1024 - 4096 }),
+				fc.integer({ min: 0, max: 64 }),
+				fc.integer({ min: 100, max: 16_000 }),
+				fc.integer({ min: 0, max: 200 }),
+				(buffered, count, bytes, queuedMessages) => {
+					const b = new WebSocketEventBroadcaster(
+						createLogger({ level: "fatal" }),
+					)
+					const source = new Source()
+					const wiring = wireSpectrumBroadcasts(source, b)
+					const c = connect(b)
+					c.send({ type: "subscribe", channels: ["spectrum"] })
+					// A slow socket with earlier messages still queued.
+					c.socket.bufferedAmount = buffered
+					// Earlier traffic that still fits, leaving room for the ack and snapshot.
+					const fillerBytes =
+						JSON.stringify({
+							type: "spectrum:frame",
+							data: bigFrame(1000, 300),
+							channel: "spectrum",
+						}).length + 8
+					const filler = Math.max(
+						0,
+						Math.min(
+							queuedMessages,
+							Math.floor((1024 * 1024 - buffered - 16_384) / fillerBytes),
+						),
+					)
+					for (let i = 0; i < filler; i++)
+						b.sendToClients("spectrum", [c.id], {
+							type: "spectrum:frame",
+							data: bigFrame(1000 + i, 300),
+						})
+					const backfill = Array.from({ length: count }, (_, i) =>
+						bigFrame(i, bytes),
+					)
+					source.emit(
+						"profile",
+						c.id,
+						{ ...ack, backfillFrames: count },
+						[frame("2026-10-13T00:10:00.000Z", "snapshot")],
+						backfill,
+					)
+					const clients = (b as unknown as { clients: Map<string, unknown> })
+						.clients
+					expect(clients.has(c.id)).toBe(true)
+					c.socket.bufferedAmount = 0
+					;(b as unknown as { maintainClients(): void }).maintainClients()
+					const profile = c.socket.sent.find(m => m.type === "spectrum:profile")
+					const sentBackfill = c.socket.sent.filter(
+						m =>
+							m.type === "spectrum:frame" &&
+							(m.data as { backfill?: boolean; at: string }).backfill ===
+								true &&
+							(m.data as { at: string }).at < "2026-10-13T00:16:40.000Z",
+					)
+					expect(
+						(profile?.data as { backfillFrames?: number }).backfillFrames,
+					).toBe(sentBackfill.length)
+					expect(
+						c.socket.sent.some(
+							m => (m.data as { snapshot?: boolean }).snapshot === true,
+						),
+					).toBe(true)
+					wiring.dispose()
+					b.closeAll()
+				},
+			),
+			{ numRuns: 100 },
+		)
 	})
 })

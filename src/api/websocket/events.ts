@@ -699,6 +699,28 @@ export class WebSocketEventBroadcaster {
 	 * Sends one message to the listed clients that are subscribed to `channel`
 	 * (same filter as broadcast), serialising it once. Returns the clients reached.
 	 */
+	/**
+	 * Room left in one client's outbound queue before it would be disconnected
+	 * (queued plus socket-buffered bytes against the 1 MiB cap, and messages
+	 * against the 256-message cap). Null for an unknown or closed client.
+	 */
+	outboundHeadroom(
+		clientId: string,
+	): { bytes: number; messages: number } | null {
+		const client = this.clients.get(clientId)
+		if (!client || client.socket.readyState !== 1) return null
+		const state = this.getDelivery(client)
+		return {
+			bytes: Math.max(
+				0,
+				MAX_OUTBOUND_BYTES -
+					state.queuedBytes -
+					(client.socket.bufferedAmount ?? 0),
+			),
+			messages: Math.max(0, MAX_QUEUED_MESSAGES - state.queue.length),
+		}
+	}
+
 	sendToClients(
 		channel: WebSocketChannel,
 		clientIds: Iterable<string>,

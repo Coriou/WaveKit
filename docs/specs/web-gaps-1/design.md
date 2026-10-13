@@ -157,6 +157,11 @@ Output stays `type: "ship"` with `ShipData`.
 **Routes.** `src/api/routes/vessels.ts` (new): `vesselRoutes(app, { tracker })` with the
 three GET routes of requirement 6 and JSON schemas for the responses.
 
+**Backfill and the outbound queue (1.8).** `WebSocketEventBroadcaster.outboundHeadroom`
+reports a client's free bytes and messages; `fitBackfill` in `spectrum-broadcast.ts` trims
+the service's backfill to that headroom before the ack is sent and rewrites the ack's
+`backfillFrames` to the trimmed count.
+
 ## Activity default
 
 `src/config.ts`: `enabled` default true. Retention and admission defaults come from one place:
@@ -225,3 +230,7 @@ Property 11: Position coalescing. For any timeline of aircraft receptions over a
 entities, a reception is stored exactly when the entity is new (or was evicted), its last
 stored reception is at least 60 s older, or an identity field it carries differs from the
 last known value; the tracked entities never exceed the bound. Validates: 7.6, 7.7.
+
+Property 12: Backfill within the outbound headroom. For any socket buffer level, earlier
+queued traffic, backfill frame count and size, delivering ack, backfill and snapshot never
+disconnects the client, and `backfillFrames` equals the backfill frames sent. Validates: 1.8.

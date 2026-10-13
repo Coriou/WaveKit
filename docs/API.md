@@ -3549,8 +3549,11 @@ One frame per source and profile:
   `at` is the arrival time of the newest block summary in it. Frames are
   newest-aligned runs of `summariesPerFrame` from the current stream and epoch
   only; a partial oldest run is dropped and the snapshot's summary is not
-  replayed. At most 64 frames and 512 KiB of summed message JSON; the oldest
-  are dropped first.
+  replayed. At most 64 frames and 512 KiB of summed message JSON, and never
+  more than the client's free outbound queue room (1 MiB, 256 messages) less a
+  margin, so a re-subscribe on a slow socket gets fewer or no backfill frames
+  instead of a disconnect; the oldest are dropped first and `backfillFrames`
+  counts the frames actually sent.
 - Client rules: never merge or accumulate rows across a change of `sourceId`,
   epoch, `profile`, `binHz` or `startHz`; each row carries its own axis. Compare
   epochs for equality only (they restart with the engine).
