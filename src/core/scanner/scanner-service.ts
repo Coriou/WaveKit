@@ -1,4 +1,9 @@
 import { protocolsForFrequency } from "./plan/protocols.js"
+import { applyRangePatch } from "./plan/range-edits.js"
+import {
+	isRangeEnabled,
+	type StoredScanJobSpec,
+} from "./plan/range-contract.js"
 import {
 	ResumeActivity,
 	type OperatorActivityPort,
@@ -1184,7 +1189,7 @@ export class ScannerService extends EventEmitter {
 
 	// === jobs ===
 
-	preview(spec: ScanJobSpec): PlanPreview {
+	preview(spec: StoredScanJobSpec): PlanPreview {
 		return previewPlan(spec, this.previewContext())
 	}
 
@@ -1302,17 +1307,26 @@ export class ScannerService extends EventEmitter {
 			"record",
 			"protocols",
 			"capture",
+			"signalsOnly",
 		]
 		// S1-B final review, finding 7: the operator's own input, not the normalised spec, so derived
 		// fields (integration, dwell, …) follow the patch and keep honest provenance. Only the source
 		// and the mode are pinned (`auto` never flips a running job's mode).
-		const merged: ScanJobSpec = {
+		const merged: StoredScanJobSpec = {
 			...record.rawSpec,
 			sourceId: record.spec.sourceId,
 			mode: record.spec.mode,
 		}
 		for (const key of allowed)
 			if (patch[key] !== undefined) Object.assign(merged, { [key]: patch[key] })
+		// SF1 req 1: `ranges` is the full state of the effective ranges; only their live fields change,
+		// stored as `rangeLive` (never merged into the operator's `ranges`, so band-plan ranges and the
+		// plan-id re-check stay as admitted). Without `ranges`, an earlier `rangeLive` is kept (6.3).
+		if (patch.ranges !== undefined) {
+			const edited = applyRangePatch(record.spec.ranges, patch.ranges)
+			this.rejectErrors(edited.issues)
+			merged.rangeLive = edited.rangeLive
+		}
 		const preview = this.preview(merged)
 		this.rejectErrors(preview.issues)
 		record.rawSpec = merged
@@ -1704,7 +1718,7 @@ export class ScannerService extends EventEmitter {
 		const specs = [...this.jobs.values()]
 			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
 			.map(j => j.spec)
-		const ranges = specs.flatMap(s => s.ranges)
+		const ranges = specs.flatMap(s => s.ranges.filter(isRangeEnabled))
 		engine.setMasks({
 			exclusions: intersectRanges(specs.map(s => s.exclusions)),
 			cfarRanges: ranges.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
@@ -1723,7 +1737,7 @@ export class ScannerService extends EventEmitter {
 		return [...this.jobs.values()]
 			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
 			.flatMap(j => j.spec.ranges)
-			.filter(r => hz >= r.startHz && hz <= r.endHz)
+			.filter(r => isRangeEnabled(r) && hz >= r.startHz && hz <= r.endHz)
 			.flatMap(r => r.rasters ?? [])
 	}
 
@@ -1958,6 +1972,7 @@ export class ScannerService extends EventEmitter {
 			.flatMap(s => s.ranges)
 			.filter(
 				r =>
+					isRangeEnabled(r) &&
 					centreHz >= r.startHz &&
 					centreHz <= r.endHz &&
 					(r.protocols ?? []).length > 0,
@@ -2337,7 +2352,11 @@ export class ScannerService extends EventEmitter {
 	): ScannerProtocol[] {
 		const specs = live.jobIds
 			.map(id => this.jobs.get(id)?.spec)
-			.filter((s): s is NormalisedJobSpec => s !== undefined)
+			// SF1 req 3.3: a signals-only job never widens the probe protocols of the others.
+			.filter(
+				(s): s is NormalisedJobSpec =>
+					s !== undefined && s.signalsOnly !== true,
+			)
 		const selections = specs.map(s => protocolsForFrequency(s, centreHz))
 		if (selections.length === 0 || selections.some(p => p.length === 0))
 			return []
