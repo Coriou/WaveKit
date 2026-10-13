@@ -886,11 +886,15 @@ async function main(): Promise<void> {
 		// preview; a resumed or running job keeps the plans it was admitted with.
 		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		let bandPlanService: BandPlanService | undefined
+		let bandPlanViewWarned = false
 		const scannerBandplans = createScannerBandplanProvider(
 			() => bandPlanService?.view(),
 			bandRegion.code,
-			() => {
+			err => {
+				if (bandPlanViewWarned) return
+				bandPlanViewWarned = true
 				bandPlanLog.warn(
+					{ err },
 					"Band-plan view unavailable; scanner uses built-in plans",
 				)
 			},
