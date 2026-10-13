@@ -511,6 +511,19 @@ describe("MeshTracker", () => {
 		expect(statsEvents).toEqual([2])
 	})
 
+	it("keeps the rate window to at most 61 one-second buckets under a packet flood (R1 #9)", () => {
+		let clock = 0
+		const nodes = tracker({ now: () => clock, maxNodes: 10 })
+		for (let i = 0; i < 6_000; i++) {
+			clock = i * 20 // 50 unique packets/s for 120 s
+			send(nodes, { from: 1 + (i % 5), id: i + 1, portnum: 1 }, new Date(clock))
+		}
+		const buckets = (nodes as unknown as { rateBuckets: Map<number, number> })
+			.rateBuckets
+		expect(buckets.size).toBeLessThanOrEqual(61)
+		expect(nodes.getStats().packetsPerSecond).toBeCloseTo(50, 0)
+	})
+
 	it("unrefs the sweep and stats timers", () => {
 		const nodes = tracker({
 			statsIntervalMs: 60_000,

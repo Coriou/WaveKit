@@ -512,9 +512,12 @@ export class AprsTracker extends EventEmitter<AprsTrackerEvents> {
 	}
 
 	private pruneDedupe(atMs: number): void {
+		// Keys are inserted oldest first (re-inserted on remember): stop at the first live one.
+		// An out-of-order stale key may linger until reached; matching re-checks the window.
 		const dead: string[] = []
 		for (const [key, seen] of this.dedupe) {
-			if (atMs - seen >= this.limits.duplicateWindowMs) dead.push(key)
+			if (atMs - seen < this.limits.duplicateWindowMs) break
+			dead.push(key)
 		}
 		for (const key of dead) this.dedupe.delete(key)
 	}

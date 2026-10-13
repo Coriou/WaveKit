@@ -184,7 +184,8 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 	private duplicatesDropped = 0
 	private invalidPackets = 0
 	private decodeErrors = 0
-	private readonly uniqueMarks: number[] = []
+	/** Unique packets per wall-clock second over the rolling 60 s window (at most 61 keys). */
+	private readonly rateBuckets = new Map<number, number>()
 	private lastPacketAtMs: number | null = null
 	private expiredTotal = 0
 
@@ -446,7 +447,9 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 			seen !== undefined &&
 			Math.abs(atMs - seen) <= this.limits.duplicateWindowMs
 		) {
-			// Keep the later timestamp so an older copy cannot shrink the window.
+			// Keep the later timestamp so an older copy cannot shrink the window; re-insert so
+			// the map stays roughly oldest-first for the early-stop prune.
+			this.duplicates.delete(key)
 			this.duplicates.set(key, Math.max(seen, atMs))
 			return true
 		}
@@ -465,13 +468,17 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 			this.duplicates.set(key, atMs)
 			return
 		}
+		this.duplicates.delete(key)
 		this.duplicates.set(key, Math.max(existing, atMs))
 	}
 
 	private pruneDuplicates(atMs: number): void {
+		// Keys are kept in insertion (≈ time) order: stop at the first live one. An out-of-order
+		// stale key may linger until reached; matching re-checks the window, so it is harmless.
 		const cutoff = atMs - this.limits.duplicateWindowMs
 		for (const [key, seen] of this.duplicates) {
-			if (seen < cutoff) this.duplicates.delete(key)
+			if (seen >= cutoff) break
+			this.duplicates.delete(key)
 		}
 	}
 
@@ -493,25 +500,24 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 
 	private noteUnique(): void {
 		const now = this.now()
-		this.uniqueMarks.push(now)
+		const second = Math.floor(now / 1000)
+		this.rateBuckets.set(second, (this.rateBuckets.get(second) ?? 0) + 1)
 		this.pruneMarks(now)
 	}
 
+	/** Drops seconds that ended before the rolling 60 s window (same as the APRS tracker). */
 	private pruneMarks(now: number): void {
 		const cutoff = now - RATE_WINDOW_MS
-		let drop = 0
-		while (
-			drop < this.uniqueMarks.length &&
-			(this.uniqueMarks[drop] ?? 0) < cutoff
-		) {
-			drop += 1
+		for (const second of this.rateBuckets.keys()) {
+			if (second * 1000 + 999 < cutoff) this.rateBuckets.delete(second)
 		}
-		if (drop > 0) this.uniqueMarks.splice(0, drop)
 	}
 
 	private packetsPerSecond(now: number): number {
 		this.pruneMarks(now)
-		return this.uniqueMarks.length / 60
+		let count = 0
+		for (const value of this.rateBuckets.values()) count += value
+		return count / 60
 	}
 
 	private makeRoom(): void {
