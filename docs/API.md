@@ -2710,6 +2710,61 @@ per entity) the admission limits (50/s global) would fill the row cap in about
 
 Receipts, recordings and transcripts are not written.
 
+APRS and Meshtastic positions are coalesced the same way (WG2): an `aprs`
+output per source callsign and decoder when its `dataType` is `Position`,
+`Position with messaging`, `Position with timestamp`, `Position with timestamp
+and messaging`, `Mic-E` or `Mic-E (old)`, it has a finite `lat` and `lon`,
+and every other field is on the position allowlist (`source`, `destination`,
+`path`, `dataType`, `lat`, `lon`, `altitude`, `course`, `speed`, `raw`,
+`timestamp`) or an unchanged `symbol` or `comment`; a `meshtastic` output per
+`from` node and decoder only for port 3 (POSITION) with radio and packet
+metadata alone. Every other APRS data type (objects, items, messages, status,
+weather, telemetry), any packet with weather or a message, and every other
+Meshtastic port are always stored. Meshtastic flood copies of other ports
+(telemetry, node info) are still stored.
+
+### Presentation
+
+Decoder receptions stored from WG2 on carry a presentation beside the
+unchanged `decodedData`: `protocol`, `category`, `entityKey`, `title`,
+`fields` and `position`. It is derived only from the output's own validated
+payload, never from RF context, and never converts units. `position` is
+`lat`/`lon` only and is omitted for `(0, 0)`. `entityKey` is null when the
+identifier is missing, malformed, or contains a control character
+(U+0000–U+001F or U+007F–U+009F). Keys are at most 128 bytes and match
+`^[a-z][a-z0-9-]*:[^:]+$`. A row has at most 6 fields and a title of at most
+80 characters; long text is cut on a UTF-8 boundary with a trailing `…`. A
+position-only row (one that coalescing could drop) has a title, key, position,
+category and protocol but no fields. A presentation that fails never loses the
+reception: the row is stored without it. Rows stored before WG2 keep category
+`other` and no entity key; nothing is backfilled, and old and new rows parse.
+
+| Output                                    | entityKey                                                      |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| aircraft (`icao` or `hex`, 6 hex, no `~`) | `icao:<UPPER 6 hex>`                                           |
+| ship (`mmsi`, 1–9 digits)                 | `mmsi:<9 digits, zero-padded>`                                 |
+| APRS station                              | `callsign:<UPPER CALL[-SSID]>` (`-0` omitted)                  |
+| APRS object / item                        | `aprs-object:<name>` / `aprs-item:<name>`                      |
+| Meshtastic (`from` in `0..0xffffffff`)    | `node:!<8 lowercase hex>`                                      |
+| POCSAG / FLEX                             | `capcode:<decimal, no leading zeros>`                          |
+| AFSK1200 with a callsign `from`           | `callsign:<UPPER>`                                             |
+| DMR / P25 / YSF call (`talkgroup >= 0`)   | `talkgroup:<tg>`                                               |
+| ACARS                                     | `reg:<UPPER tail, dots removed>`                               |
+| VDL2                                      | `icao:<UPPER 6 hex>` when `icao` is valid, else the ACARS tail |
+| rtl_433 (`model` string)                  | `sensor:<model>-<id>[-<channel>]` (spaces become `_`)          |
+
+The keys match the live trackers: `icao:` aircraft, `mmsi:` vessels, the APRS
+`key` and the Meshtastic node `key`.
+
+Row growth and retention: built-row growth from presentation is at most 160
+bytes for a position-only row and at most 1,100 bytes for any row. A
+position-only ADS-B row grows by about 116 bytes (+13%). On a measured
+5,000-row mix (70% position-only ADS-B, 10% full ADS-B, 10% AIS, 5% APRS, 5%
+pages) the on-disk size went from 1,228 to 1,777 bytes a row (+45%), so at the
+256 MiB cap that mix holds about 151,000 rows instead of about 215,000, and the
+byte cap binds before the 250,000-row cap. A coalesced ADS-B feed is closer to
+the +116 byte figure.
+
 ### Configuration
 
 Commented in `config/default.yaml`. A config without an `activity` block, and
