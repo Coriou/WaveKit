@@ -7,6 +7,7 @@ import {
 	entityKey,
 	firstNumber,
 	firstString,
+	identifierText,
 	asNumber,
 	asNumberOrString,
 	asString,
@@ -45,7 +46,8 @@ function callsignOf(
 export function presentAircraft(data: unknown): DecodePresentation | undefined {
 	const payload = parsePayload(aircraftPayload, data)
 	if (!payload) return undefined
-	const icaoRaw = firstString(payload, ["icao", "hex"])
+	const icaoRaw =
+		identifierText(payload, "icao") ?? identifierText(payload, "hex")
 	const icao = icaoRaw === undefined ? null : canonicalIcao(icaoRaw)
 	const callsign = callsignOf(payload)
 	const title = clampTitle(callsign ?? icao ?? "")

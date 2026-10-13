@@ -1,5 +1,5 @@
 import type { DecoderOutput } from "../../../decoders/types.js"
-import type { DecodePresentation } from "../types.js"
+import type { DecodeEnvelopeContext, DecodePresentation } from "../types.js"
 import { presentAcars, presentVdl2 } from "./acars-vdl2.js"
 import { presentAircraft } from "./aircraft.js"
 import { presentAprs } from "./aprs.js"
@@ -51,12 +51,13 @@ function dispatch(output: DecoderOutput): DecodePresentation | undefined {
 export function presentDecoderOutputResult(
 	output: DecoderOutput,
 	decoderType: string | undefined,
+	context?: DecodeEnvelopeContext,
 ): PresentationAttempt {
 	void decoderType
 	try {
 		const view = dispatch(output)
 		if (view === undefined) return {}
-		return { presentation: fitRowBudget(output, view) }
+		return { presentation: fitRowBudget(output, view, context) }
 	} catch (error) {
 		return { error }
 	}

@@ -13,6 +13,7 @@ import { ACTIVITY_RECORD_VERSION } from "../storage/contract.js"
 import { isCoalescibleShape } from "../storage/coalesce.js"
 import { buildActivityRow } from "../storage/row.js"
 import type {
+	DecodeEnvelopeContext,
 	DecodeField,
 	DecodePosition,
 	DecodePresentation,
@@ -117,6 +118,7 @@ export function entityKey(kind: string, value: string): string | null {
 }
 
 export function canonicalIcao(raw: string): string | null {
+	if (CONTROLS.test(raw)) return null
 	const hex = raw.trim().toUpperCase()
 	if (hex.includes("~") || !/^[0-9A-F]{6}$/.test(hex)) return null
 	return hex
@@ -124,6 +126,7 @@ export function canonicalIcao(raw: string): string | null {
 
 /** Upper case, SSID `-0` removed. Null when the callsign grammar rejects it. */
 export function canonicalCallsign(raw: string): string | null {
+	if (CONTROLS.test(raw)) return null
 	const value = raw.trim().toUpperCase().replace(/-0$/, "")
 	if (!/^[A-Z0-9]{1,6}(-[0-9]{1,2})?$/.test(value)) return null
 	return value
@@ -134,8 +137,10 @@ export function canonicalMmsi(raw: unknown): string | null {
 	if (typeof raw === "number") {
 		if (!Number.isSafeInteger(raw) || raw < 0) return null
 		text = String(raw)
-	} else if (typeof raw === "string") text = raw.trim()
-	else return null
+	} else if (typeof raw === "string") {
+		if (CONTROLS.test(raw)) return null
+		text = raw.trim()
+	} else return null
 	if (!/^[0-9]{1,9}$/.test(text)) return null
 	return text.padStart(9, "0")
 }
@@ -146,17 +151,37 @@ export function canonicalCapcode(raw: unknown): string | null {
 	if (typeof raw === "number") {
 		if (!Number.isSafeInteger(raw) || raw < 0) return null
 		text = String(raw)
-	} else if (typeof raw === "string") text = raw.trim()
-	else return null
+	} else if (typeof raw === "string") {
+		if (CONTROLS.test(raw)) return null
+		text = raw.trim()
+	} else return null
 	if (!/^[0-9]+$/.test(text)) return null
 	const stripped = text.replace(/^0+/, "")
 	return stripped === "" ? "0" : stripped
 }
 
-/** Registration: upper case, dots removed. */
+/**
+ * Registration: upper case, dots removed. A control character is invalid;
+ * it is not stripped into a different registration.
+ */
 export function canonicalRegistration(raw: string): string | null {
-	const value = stripControls(raw).trim().toUpperCase().replace(/\./g, "")
+	if (CONTROLS.test(raw)) return null
+	const value = raw.trim().toUpperCase().replace(/\./g, "")
 	return value === "" ? null : value
+}
+
+/**
+ * Identifier text. Control characters reject the value. Display strings use
+ * `stringField`, which strips those characters instead.
+ */
+export function identifierText(
+	data: Record<string, unknown>,
+	key: string,
+): string | undefined {
+	const value = data[key]
+	if (typeof value !== "string" || CONTROLS.test(value)) return undefined
+	const clean = value.trim()
+	return clean === "" ? undefined : clean
 }
 
 const PROTOCOL_RE = /^[a-z0-9][a-z0-9.+_-]{0,62}$/
@@ -374,21 +399,33 @@ function builtBytes(envelope: ReturnType<typeof createDecodeEnvelope>): number {
 }
 
 /**
+ * Smallest envelope that can still be stored. A fatter synthetic context
+ * rejects near-cap payloads that a real short id would accept, which skipped
+ * the row budget. Ingress passes its own context when it has one.
+ */
+function budgetContext(
+	output: DecoderOutput,
+	context: DecodeEnvelopeContext | undefined,
+): DecodeEnvelopeContext {
+	if (context) return context
+	return {
+		eventId: "e",
+		receivedAt: BUDGET_AT,
+		decoderId: output.decoder,
+		provenance: { sourceId: null, frequency: null },
+	}
+}
+
+/**
  * Bytes added by this presentation. Undefined when either envelope is
  * rejected: the ingress then rebuilds without the presentation (req 1.7).
  */
 function measureGrowth(
 	output: DecoderOutput,
 	view: DecodePresentation,
+	context: DecodeEnvelopeContext,
 	plainBytes: { current: number | undefined },
 ): number | undefined {
-	const context = {
-		eventId: "evt-budget",
-		receivedAt: BUDGET_AT,
-		decoderId: output.decoder,
-		decoderType: "budget",
-		provenance: { sourceId: null as null, frequency: null as null },
-	}
 	try {
 		if (plainBytes.current === undefined)
 			plainBytes.current = builtBytes(createDecodeEnvelope(output, context))
@@ -491,11 +528,13 @@ function shrinkStrings(
 export function fitRowBudget(
 	output: DecoderOutput,
 	view: DecodePresentation,
+	context?: DecodeEnvelopeContext,
 ): DecodePresentation {
 	const limit = rowLimit(output)
+	const measuredContext = budgetContext(output, context)
 	const plainBytes: { current: number | undefined } = { current: undefined }
 	const growth = (candidate: DecodePresentation) =>
-		measureGrowth(output, candidate, plainBytes)
+		measureGrowth(output, candidate, measuredContext, plainBytes)
 	const initial = growth(view)
 	if (initial === undefined || initial <= limit) return view
 
@@ -509,17 +548,7 @@ export function fitRowBudget(
 		}
 		return false
 	}
-
-	if (current.position) {
-		for (const digits of [6, 5, 4, 3, 2, 1, 0]) {
-			const position = roundPosition(current.position, digits)
-			if (!position) continue
-			const candidate = reshape(current, { position })
-			const measured = growth(candidate)
-			if (measured === undefined) continue
-			if (adopt(candidate, measured)) return candidate
-		}
-	}
+	const originalPosition = view.position
 
 	if (current.fields && current.fields.length > 0) {
 		for (const cap of [96, 64, 48, 32, 24, 16, 8, 4]) {
@@ -531,13 +560,60 @@ export function fitRowBudget(
 		}
 	}
 
-	if (current.title) {
-		const title = current.title
-		for (let chars = title.length - 1; chars >= 0; chars -= 1) {
-			const candidate = reshape(current, { title: clipTitle(title, chars) })
-			const measured = growth(candidate)
-			if (measured === undefined) continue
-			if (adopt(candidate, measured)) return candidate
+	// The longest title that fits at full precision or six decimal places
+	// (~0.1 m) wins. Coarser fixes are used only when no title fits at that
+	// precision. Each candidate is rounded from the original, so 51.5 cannot
+	// become 52.
+	const title = current.title
+	const attempt = (
+		nextTitle: string | null | undefined,
+		digits: number | undefined,
+	): DecodePresentation | undefined => {
+		const patch: {
+			title?: string | null
+			position?: DecodePosition | null
+		} = {}
+		if (nextTitle !== undefined) patch.title = nextTitle
+		if (digits !== undefined) {
+			if (!originalPosition) return undefined
+			const position = roundPosition(originalPosition, digits)
+			if (!position) return undefined
+			patch.position = position
+		}
+		const candidate = reshape(current, patch)
+		const measured = growth(candidate)
+		if (measured === undefined) return undefined
+		if (adopt(candidate, measured)) return candidate
+		return undefined
+	}
+	const clippedTitles = (value: string): Array<string | null> => {
+		const clipped: Array<string | null> = [value]
+		for (let chars = value.length - 1; chars >= 0; chars -= 1)
+			clipped.push(clipTitle(value, chars))
+		return clipped
+	}
+	if (title) {
+		const clipped = clippedTitles(title)
+		for (const nextTitle of clipped) {
+			const fitted = attempt(nextTitle, undefined)
+			if (fitted) return fitted
+			if (originalPosition) {
+				const rounded = attempt(nextTitle, 6)
+				if (rounded) return rounded
+			}
+		}
+		if (originalPosition) {
+			for (const digits of [5, 4, 3, 2, 1, 0]) {
+				for (const nextTitle of clipped) {
+					const fitted = attempt(nextTitle, digits)
+					if (fitted) return fitted
+				}
+			}
+		}
+	} else if (originalPosition) {
+		for (const digits of [6, 5, 4, 3, 2, 1, 0]) {
+			const fitted = attempt(undefined, digits)
+			if (fitted) return fitted
 		}
 	}
 

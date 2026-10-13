@@ -10,6 +10,7 @@ import {
 	childRecord,
 	clampTitle,
 	entityKey,
+	identifierText,
 	objectSchema,
 	parsePayload,
 	presentation,
@@ -72,7 +73,8 @@ export function presentAcars(data: unknown): DecodePresentation | undefined {
 	const tail = stringField(payload, "tail") as ACARSMessage["tail"]
 	const flight = stringField(payload, "flight")
 	const label = stringField(payload, "label")
-	const reg = tail === undefined ? null : canonicalRegistration(tail)
+	const tailId = identifierText(payload, "tail")
+	const reg = tailId === undefined ? null : canonicalRegistration(tailId)
 	const who = tail ?? flight
 	const title = clampTitle(
 		[who, label].filter(part => part !== undefined).join(" "),
@@ -91,12 +93,15 @@ export function presentVdl2(data: unknown): DecodePresentation | undefined {
 	const payload = parsePayload(vdl2Payload, data)
 	if (!payload) return undefined
 	const nested = childRecord(payload, "acars")
-	const icaoRaw = stringField(payload, "icao")
+	const icaoRaw = identifierText(payload, "icao")
 	const icao = icaoRaw === undefined ? null : canonicalIcao(icaoRaw)
 	const tailRaw =
 		stringField(payload, "tail") ??
 		(nested ? stringField(nested, "tail") : undefined)
-	const tail = tailRaw === undefined ? null : canonicalRegistration(tailRaw)
+	const tailId =
+		identifierText(payload, "tail") ??
+		(nested ? identifierText(nested, "tail") : undefined)
+	const tail = tailId === undefined ? null : canonicalRegistration(tailId)
 	const flight =
 		stringField(payload, "flight") ??
 		(nested ? stringField(nested, "flight") : undefined)

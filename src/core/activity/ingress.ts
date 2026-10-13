@@ -105,7 +105,7 @@ export function createActivityIngress(
 			}
 			let presentation: DecodePresentation | undefined
 			try {
-				const attempt = presentDecoderOutputResult(output, decoderType)
+				const attempt = presentDecoderOutputResult(output, decoderType, context)
 				if (attempt.error !== undefined) {
 					counts.presentationFailures++
 					logFailure(

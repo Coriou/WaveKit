@@ -25,9 +25,9 @@ const sensorPayload = objectSchema({
 
 /** Spaces become underscores. A colon or a control character rejects the token. */
 function sensorToken(raw: string): string | null {
-	const value = stripControls(raw).trim().replace(/ /g, "_")
-	if (value === "" || value.includes(":") || value.includes("\u0000"))
-		return null
+	if (/[\u0000-\u001f\u007f-\u009f]/.test(raw)) return null
+	const value = raw.trim().replace(/ /g, "_")
+	if (value === "" || value.includes(":")) return null
 	return value
 }
 
@@ -45,16 +45,21 @@ function idToken(value: unknown): string | null {
 export function presentSensor(data: unknown): DecodePresentation | undefined {
 	const payload = parsePayload(sensorPayload, data)
 	if (!payload) return undefined
-	if (typeof payload["model"] !== "string") return undefined
-	const model = stripControls(payload["model"]).trim()
+	const modelRaw = payload["model"]
+	if (typeof modelRaw !== "string") return undefined
+	const model = stripControls(modelRaw).trim()
 	if (model === "") return undefined
-	const modelToken = sensorToken(model)
+	const modelToken = sensorToken(modelRaw)
 	const id = idToken(payload["id"])
 	const channel = payload["channel"]
-	const channelToken =
-		channel === undefined || channel === null ? null : idToken(channel)
+	const channelPresent = channel !== undefined && channel !== null
+	const channelToken = channelPresent ? idToken(channel) : null
 	let key: string | null = null
-	if (modelToken !== null && id !== null) {
+	if (
+		modelToken !== null &&
+		id !== null &&
+		(!channelPresent || channelToken !== null)
+	) {
 		let body = `${modelToken}-${id}`
 		if (channelToken !== null) body = `${body}-${channelToken}`
 		key = entityKey("sensor", body)

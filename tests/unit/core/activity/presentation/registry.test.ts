@@ -74,6 +74,9 @@ describe("activity presentation registry", () => {
 		).toBeUndefined()
 		expect(present("aircraft", { icao: "ZZZZZZ" })?.entityKey).toBeUndefined()
 		expect(present("aircraft", { icao: "ABC12" })?.entityKey).toBeUndefined()
+		expect(
+			present("aircraft", { icao: "AB\u0000C123" })?.entityKey,
+		).toBeUndefined()
 	})
 
 	it("never places an aircraft at exactly (0, 0) or converts altitude", () => {
@@ -168,6 +171,9 @@ describe("activity presentation registry", () => {
 		})
 		expect(view?.fields).toBeUndefined()
 		expect(present("aprs", { source: "not a call" })?.entityKey).toBeUndefined()
+		expect(
+			present("aprs", { source: "N0\u0000CALL", lat: 1, lon: 2 })?.entityKey,
+		).toBeUndefined()
 	})
 
 	it("keeps an APRS comment and keys objects and items by name", () => {
@@ -466,6 +472,16 @@ describe("activity presentation registry", () => {
 		).toBeUndefined()
 		expect(present("signal", { id: 1 })).toBeUndefined()
 		expect(present("signal", { model: "   " })).toBeUndefined()
+		expect(present("signal", { model: "Fine", id: 1 })?.entityKey).toBe(
+			"sensor:Fine-1",
+		)
+		expect(
+			present("signal", { model: "Fine", id: 1, channel: "bad:channel" })
+				?.entityKey,
+		).toBeUndefined()
+		expect(
+			present("acars", { tail: "N\u0000123", label: "Q0" })?.entityKey,
+		).toBeUndefined()
 	})
 
 	it("returns no presentation for unknown types and non-objects", () => {

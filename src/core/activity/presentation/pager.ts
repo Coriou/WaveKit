@@ -2,6 +2,7 @@ import type { DecodePresentation } from "../types.js"
 import {
 	LONG_TEXT_BYTES,
 	canonicalCallsign,
+	identifierText,
 	canonicalCapcode,
 	clampTitle,
 	entityKey,
@@ -113,7 +114,7 @@ function presentPage(
 }
 
 function presentAfsk(payload: Record<string, unknown>): DecodePresentation {
-	const from = stringField(payload, "from")
+	const from = identifierText(payload, "from")
 	const to = stringField(payload, "to")
 	const call = from === undefined ? null : canonicalCallsign(from)
 	const title = clampTitle(

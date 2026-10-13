@@ -14,6 +14,7 @@ import {
 	childRecord,
 	clampTitle,
 	entityKey,
+	identifierText,
 	numberField,
 	objectSchema,
 	parsePayload,
@@ -54,9 +55,9 @@ export function presentAprs(data: unknown): DecodePresentation | undefined {
 	if (!payload) return undefined
 	const aprs = payload as Partial<APRSData>
 	const dataType = stringField(payload, "dataType")
-	const objectName = stringField(payload, "objectName")
+	const objectName = identifierText(payload, "objectName")
 	const objectKind = aprs.objectKind
-	const source = stringField(payload, "source")
+	const source = identifierText(payload, "source")
 	const call = source === undefined ? null : canonicalCallsign(source)
 	let key: string | null = null
 	let titleText = ""
