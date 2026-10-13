@@ -10,6 +10,7 @@ import type {
 	ActivityRecord,
 	ActivityRefType,
 	ActivitySummary,
+	AnalogTransmissionPayload,
 	IngestionGapPayload,
 } from "./contract.js"
 import type { DecodeEnvelope, DecodeField, JsonValue } from "../types.js"
@@ -75,6 +76,24 @@ const CATEGORIES = new Set<ActivityCategory>([
 export function buildActivityRow(record: ActivityRecord): BuiltActivityRow {
 	const producedAtMs = timestampMs(record.producedAt)
 	const receivedAtMs = timestampMs(record.receivedAt)
+	if (record.kind === "analog-transmission") {
+		const payload = storedTransmission(record.payload)
+		const recordJson = JSON.stringify({
+			version: ACTIVITY_RECORD_VERSION,
+			eventId: record.eventId,
+			producedAt: record.producedAt,
+			receivedAt: record.receivedAt,
+			kind: record.kind,
+			payload,
+		})
+		return transmissionRow(
+			payload,
+			record,
+			producedAtMs,
+			receivedAtMs,
+			recordJson,
+		)
+	}
 	const stored = {
 		version: ACTIVITY_RECORD_VERSION,
 		eventId: record.eventId,
@@ -84,12 +103,6 @@ export function buildActivityRow(record: ActivityRecord): BuiltActivityRow {
 		payload: record.payload,
 	}
 	const recordJson = JSON.stringify(stored)
-	// WG1 contract stub: lane a replaces this with the analog-transmission row.
-	if (record.kind === "analog-transmission")
-		throw new WaveKitError(
-			"analog-transmission activity rows are not implemented yet",
-			"ACTIVITY_NOT_IMPLEMENTED",
-		)
 	if (record.kind === "ingestion-gap")
 		return gapRow(
 			record.payload,
@@ -142,6 +155,18 @@ export function parseStoredRecord(row: StoredActivityRow): ActivityRecord {
 	}
 	if (kind === "ingestion-gap") {
 		if (!isGap(payload)) return corrupt("payload")
+		return {
+			version: ACTIVITY_RECORD_VERSION,
+			eventId: row.event_id,
+			commitSeq: seq,
+			producedAt: body["producedAt"],
+			receivedAt: body["receivedAt"],
+			kind,
+			payload,
+		}
+	}
+	if (kind === "analog-transmission") {
+		if (!isTransmission(payload)) return corrupt("payload")
 		return {
 			version: ACTIVITY_RECORD_VERSION,
 			eventId: row.event_id,
@@ -217,6 +242,149 @@ export function truncateUtf8(value: string, maxBytes: number): string {
 		if (end - 1 + width > bytes.length) end--
 	}
 	return bytes.subarray(0, end).toString("utf8")
+}
+
+const MODULATIONS = new Set<AnalogTransmissionPayload["modulation"]>([
+	"nfm",
+	"wfm",
+	"am",
+	"usb",
+	"lsb",
+	"dsb",
+	"cw",
+	"raw",
+])
+
+const CLOSE_REASONS = new Set<AnalogTransmissionPayload["closeReason"]>([
+	"squelch",
+	"retune",
+	"config",
+	"stopped",
+	"max-duration",
+])
+
+const TRANSMISSION_KEYS = [
+	"transmissionId",
+	"sourceId",
+	"startedAt",
+	"endedAt",
+	"durationMs",
+	"frequency",
+	"modulation",
+	"bandwidthHz",
+	"squelchMode",
+	"thresholdDbfs",
+	"peakChannelPowerDbfs",
+	"meanChannelPowerDbfs",
+	"closeReason",
+] as const
+
+function transmissionRow(
+	payload: AnalogTransmissionPayload,
+	record: ActivityRecord,
+	producedAtMs: number,
+	receivedAtMs: number,
+	recordJson: string,
+): BuiltActivityRow {
+	const frequencyHz =
+		payload.frequency === null ? null : roundHz(payload.frequency.hz)
+	const modulation = payload.modulation.toUpperCase()
+	const title =
+		frequencyHz === null
+			? `${modulation} transmission`
+			: `${modulation} ${formatMHz(frequencyHz)} MHz`
+	const fields: DecodeField[] = [
+		{
+			key: "durationMs",
+			label: "Duration",
+			value: payload.durationMs,
+			unit: "ms",
+		},
+		{
+			key: "modulation",
+			label: "Modulation",
+			value: payload.modulation,
+		},
+	]
+	if (payload.peakChannelPowerDbfs !== null) {
+		fields.push({
+			key: "peakChannelPowerDbfs",
+			label: "Peak channel power",
+			value: payload.peakChannelPowerDbfs,
+			unit: "dBFS",
+		})
+	}
+	const summaryJson = fitSummary({
+		eventId: record.eventId,
+		kind: "analog-transmission",
+		producedAt: record.producedAt,
+		receivedAt: record.receivedAt,
+		decoderId: null,
+		sourceId: payload.sourceId,
+		protocol: "analog",
+		category: "voice",
+		frequencyHz,
+		entityKey: null,
+		title,
+		fields,
+	})
+	const ftsParts = ["analog-transmission", payload.modulation, payload.sourceId]
+	if (frequencyHz !== null) ftsParts.push(String(frequencyHz))
+	return {
+		eventId: record.eventId,
+		kind: "analog-transmission",
+		producedAtMs,
+		receivedAtMs,
+		sourceId: payload.sourceId,
+		decoderId: null,
+		protocol: "analog",
+		category: "voice",
+		frequencyHz,
+		entityKey: null,
+		summaryJson,
+		recordJson,
+		recordBytes: Buffer.byteLength(recordJson, "utf8"),
+		ftsText: truncateUtf8(ftsParts.join("\n"), MAX_INDEXED_TEXT_BYTES),
+		refs: [],
+	}
+}
+
+/** Megahertz with trailing zeros trimmed: 446006250 → "446.00625". */
+function formatMHz(hz: number): string {
+	const sign = hz < 0 ? "-" : ""
+	const abs = Math.abs(hz)
+	const whole = Math.trunc(abs / 1_000_000)
+	const frac = abs % 1_000_000
+	if (frac === 0) return `${sign}${whole}`
+	const digits = String(frac).padStart(6, "0").replace(/0+$/, "")
+	return `${sign}${whole}.${digits}`
+}
+
+function storedTransmission(
+	payload: AnalogTransmissionPayload,
+): AnalogTransmissionPayload {
+	if (!isTransmission(payload)) return corrupt("payload")
+	return {
+		transmissionId: payload.transmissionId,
+		sourceId: payload.sourceId,
+		startedAt: payload.startedAt,
+		endedAt: payload.endedAt,
+		durationMs: payload.durationMs,
+		frequency:
+			payload.frequency === null
+				? null
+				: {
+						hz: payload.frequency.hz,
+						tuningTrust: payload.frequency.tuningTrust,
+					},
+		modulation: payload.modulation,
+		bandwidthHz: payload.bandwidthHz,
+		squelchMode: payload.squelchMode,
+		thresholdDbfs: payload.thresholdDbfs,
+		peakChannelPowerDbfs: payload.peakChannelPowerDbfs,
+		meanChannelPowerDbfs: payload.meanChannelPowerDbfs,
+		closeReason: payload.closeReason,
+	}
 }
 
 function receptionRow(
@@ -549,6 +717,82 @@ function isEnvelope(value: unknown): value is DecodeEnvelope {
 		typeof body["decoderId"] === "string" &&
 		typeof body["outputType"] === "string" &&
 		isCategory(body["category"])
+	)
+}
+
+function isIso(value: unknown): value is string {
+	return typeof value === "string" && Number.isFinite(Date.parse(value))
+}
+
+function isNullableFinite(value: unknown): value is number | null {
+	if (value === null) return true
+	return typeof value === "number" && Number.isFinite(value)
+}
+
+function sameKeys(
+	body: Record<string, unknown>,
+	keys: readonly string[],
+): boolean {
+	const present = Object.keys(body)
+	return (
+		present.length === keys.length && keys.every(key => present.includes(key))
+	)
+}
+
+function isTransmissionFrequency(
+	value: unknown,
+): value is AnalogTransmissionPayload["frequency"] {
+	if (value === null) return true
+	const body = plain(value)
+	if (!body || !sameKeys(body, ["hz", "tuningTrust"])) return false
+	if (typeof body["hz"] !== "number" || !Number.isFinite(body["hz"]))
+		return false
+	const trust = body["tuningTrust"]
+	return trust === "commanded" || trust === "relay" || trust === "unverified"
+}
+
+function isTransmission(value: unknown): value is AnalogTransmissionPayload {
+	const body = plain(value)
+	if (!body || !sameKeys(body, TRANSMISSION_KEYS)) return false
+	if (
+		typeof body["transmissionId"] !== "string" ||
+		body["transmissionId"].length === 0 ||
+		typeof body["sourceId"] !== "string"
+	)
+		return false
+	if (!isIso(body["startedAt"]) || !isIso(body["endedAt"])) return false
+	if (
+		typeof body["durationMs"] !== "number" ||
+		!Number.isFinite(body["durationMs"]) ||
+		body["durationMs"] < 0
+	)
+		return false
+	if (!isTransmissionFrequency(body["frequency"])) return false
+	if (
+		!MODULATIONS.has(
+			body["modulation"] as AnalogTransmissionPayload["modulation"],
+		)
+	)
+		return false
+	if (
+		typeof body["bandwidthHz"] !== "number" ||
+		!Number.isFinite(body["bandwidthHz"])
+	)
+		return false
+	if (body["squelchMode"] !== "manual" && body["squelchMode"] !== "auto")
+		return false
+	if (
+		typeof body["thresholdDbfs"] !== "number" ||
+		!Number.isFinite(body["thresholdDbfs"])
+	)
+		return false
+	if (
+		!isNullableFinite(body["peakChannelPowerDbfs"]) ||
+		!isNullableFinite(body["meanChannelPowerDbfs"])
+	)
+		return false
+	return CLOSE_REASONS.has(
+		body["closeReason"] as AnalogTransmissionPayload["closeReason"],
 	)
 }
 

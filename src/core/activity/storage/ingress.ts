@@ -3,6 +3,7 @@ import { ACTIVITY_RECORD_VERSION } from "./contract.js"
 import type {
 	AdmitRejection,
 	AdmitResult,
+	AnalogTransmissionAdmission,
 	IngestionGapPayload,
 } from "./contract.js"
 import type { ActivityLimits } from "./limits.js"
@@ -99,6 +100,51 @@ export class ActivityIngress {
 		if (this.byteOverflow(row)) {
 			this.refundTokens(envelope.decoderId)
 			this.noteDrop("queue-full", envelope.receivedAt, envelope.decoderId, now)
+			return { admitted: false, reason: "queue-full" }
+		}
+		this.stageDueEpisode(now)
+		this.queue.push(row)
+		this.queueBytes += row.recordBytes
+		this.admitted++
+		return { admitted: true }
+	}
+
+	/**
+	 * Admits one closed analog transmission. The per-decoder bucket key is
+	 * `analog:<sourceId>` so a source has its own token budget. Gap episodes
+	 * record that key in decoderIds. Never telemetry.
+	 */
+	admitTransmission(input: AnalogTransmissionAdmission): AdmitResult {
+		if (this.closed) {
+			this.dropped.closed++
+			return { admitted: false, reason: "closed" }
+		}
+		const now = this.now()
+		const bucket = `analog:${input.payload.sourceId}`
+		if (this.paused)
+			return this.rejectTransmission(input, bucket, "store-paused")
+		if (this.itemOverflow())
+			return this.rejectTransmission(input, bucket, "queue-full")
+		if (!this.takeTokens(bucket, now))
+			return this.rejectTransmission(input, bucket, "rate-limited")
+		let row: BuiltActivityRow
+		try {
+			row = buildActivityRow({
+				version: ACTIVITY_RECORD_VERSION,
+				eventId: input.payload.transmissionId,
+				commitSeq: "0",
+				producedAt: input.producedAt,
+				receivedAt: input.receivedAt,
+				kind: "analog-transmission",
+				payload: input.payload,
+			})
+		} catch (error) {
+			this.refundTokens(bucket)
+			throw error
+		}
+		if (this.byteOverflow(row)) {
+			this.refundTokens(bucket)
+			this.noteDrop("queue-full", input.receivedAt, bucket, now)
 			return { admitted: false, reason: "queue-full" }
 		}
 		this.stageDueEpisode(now)
@@ -272,6 +318,15 @@ export class ActivityIngress {
 		reason: Exclude<AdmitRejection, "closed" | "telemetry">,
 	): AdmitResult {
 		this.noteDrop(reason, envelope.receivedAt, envelope.decoderId, this.now())
+		return { admitted: false, reason }
+	}
+
+	private rejectTransmission(
+		input: AnalogTransmissionAdmission,
+		bucket: string,
+		reason: Exclude<AdmitRejection, "closed" | "telemetry">,
+	): AdmitResult {
+		this.noteDrop(reason, input.receivedAt, bucket, this.now())
 		return { admitted: false, reason }
 	}
 
