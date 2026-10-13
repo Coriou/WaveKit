@@ -1207,3 +1207,5 @@ Announcement for the CLI; no CLI change is required. Spec: [web-gaps-1](specs/we
 - New `vessels` channel (`vessel:new`, `vessel:update`, `vessel:lost`, `vessel:stats`) and `GET /api/vessels`, `/api/vessels/stats`, `/api/vessels/:mmsi`. The CLI does not subscribe; nothing changes for it.
 - Activity is now on by default with bounded retention and admission (250,000 rows, 256 MiB, 3 days; 50/s burst 500 global, 20/s burst 200 per decoder), and gains the `analog-transmission` kind. The CLI has no Activity view and ignores `activity` frames, so nothing changes; any future view will see data by default and must handle the new kind.
 - `scanner:progress` now arrives at up to 2 Hz per job (other scanner messages stay at 1/s per key, same global budget). Plan preview POI uses each hop's own dwell when a range sets `dwellMs`.
+
+Update to the WG1 note above (2026-10-13): the CLI now validates `live-audio:transmission` and drops it like `live-audio:level` (no UI), so it no longer increments `invalidFrames`; a malformed one still counts as invalid.
