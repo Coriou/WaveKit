@@ -100,6 +100,14 @@ export interface ScanRange extends FreqRange {
 export interface ScanExclusion extends FreqRange {
 	reason?: string
 }
+/**
+ * WG2 (requirement 12): a runtime exclusion derived from a locked-out discovery. Never part of
+ * the stored job spec. `applied` is false past the 256 cap or when applying would empty the plan.
+ */
+export interface LockoutExclusion extends FreqRange {
+	discoveryId: string
+	applied: boolean
+}
 export type ObservationEndReason =
 	| "quiet"
 	| "retune"
@@ -439,6 +447,8 @@ export interface PlanPreview {
 	estimates: { cpuCores: number; diskMbPerHour: number; probes: number }
 	impact: Impact
 	issues: PlanIssue[]
+	/** WG2: lockout exclusions for the spec's source (sweep plans only). */
+	lockoutExclusions?: LockoutExclusion[]
 }
 
 export interface ScanJobProbe {
@@ -465,6 +475,38 @@ export interface ScanJobProgress {
 		transients: number
 		discoveries: Record<ScannerConfidence, number>
 	}
+	/** WG2: per-job hit statistics since the job started. */
+	hitStats?: ScanJobHitStats
+}
+
+/** WG2 (requirement 13): one discovery's hits in one job (in memory; reset on job start). */
+export interface ScanJobHit {
+	jobId: string
+	discoveryId: string
+	/** Observations attributed to the job. */
+	hits: number
+	firstHitAt: string
+	lastHitAt: string
+	/** The discovery was created by an observation of this job. */
+	firstSeenInJob: boolean
+}
+
+export interface ScanJobHitStats {
+	/** Distinct discoveries hit (tracked or not). */
+	discoveries: number
+	/** Total hits. */
+	hits: number
+	/** Discoveries first seen in this job. */
+	newDiscoveries: number
+	/** More than 2000 discoveries: the rest count in `hits` only. */
+	truncated: boolean
+}
+
+/** WG2: GET /api/scanner/jobs/:id/hits?limit=n (1–500, default 100), most recent first. */
+export interface ScanJobHitsResponse {
+	jobId: string
+	stats: ScanJobHitStats
+	hits: ScanJobHit[]
 }
 /** GET /api/scanner/jobs/:id and the `scanner:job` WS message. */
 export interface ScanJob {
@@ -492,6 +534,8 @@ export interface ScanJob {
 	 * absent otherwise (and when no other job holds it).
 	 */
 	preemptedBy?: { jobId: string; name: string | null }
+	/** WG2: lockout exclusions in force for this sweep job (runtime only). */
+	lockoutExclusions?: LockoutExclusion[]
 }
 
 // --- Status, settings, bandplans (spec § 12.1) ---
@@ -630,10 +674,15 @@ export interface ScannerProgressEventData {
 	holdingOn?: string
 	coverage: number
 	probes: number
+	/** WG2: total hits and discoveries first seen in this job. */
+	hits?: number
+	newDiscoveries?: number
 }
 export interface ScannerDiscoveryEventData {
 	change: "created" | "updated" | "upgraded" | "merged" | "deleted"
 	discovery: Discovery
+	/** WG2: present when a job's observation caused the event; one entry per such job. */
+	jobHits?: ScanJobHit[]
 }
 export interface ScannerActivityEventData {
 	sourceId: string

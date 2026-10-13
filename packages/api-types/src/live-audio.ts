@@ -71,6 +71,14 @@ export type AnalogTransmissionCloseReason =
 	| "stopped"
 	| "max-duration"
 
+/** WG2: CTCSS tone and DTMF digits of a closed transmission (docs/specs/web-gaps-2, requirement 7). */
+export interface AnalogTransmissionTone {
+	/** One of the 50 standard CTCSS tones (67.0–254.1 Hz), or null when none qualified. */
+	ctcssHz: number | null
+	/** DTMF symbols `0-9*#A-D` in order, at most 32; null when none. */
+	dtmf: string | null
+}
+
 /** Event-time RF frequency of a transmission: the tuned centre plus `offsetHz` when it opened. */
 export interface AnalogTransmissionFrequency {
 	hz: number
@@ -103,4 +111,6 @@ export interface AnalogTransmissionEventData {
 	meanChannelPowerDbfs: number | null
 	/** Null while open. */
 	closeReason: AnalogTransmissionCloseReason | null
+	/** WG2: on closed events only. */
+	tone?: AnalogTransmissionTone
 }

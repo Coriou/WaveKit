@@ -64,6 +64,12 @@ export interface DigitalVoiceCall {
 	active: boolean
 	startedAt: string
 	endedAt?: string
+	colourCode?: number
+	nac?: string
+	algorithmId?: string
+	keyId?: string
+	ran?: number
+	errors?: { crc: number; fec: number }
 }
 
 export interface DigitalVoiceDecoderStatus {

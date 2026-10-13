@@ -122,6 +122,12 @@ export interface APRSData {
 	message?: APRSMessage | undefined
 	/** Raw packet data */
 	raw?: string | undefined
+	/** WG2: object (`;`) or item (`)`) name, trailing spaces trimmed. */
+	objectName?: string | undefined
+	/** WG2: which report named the object. */
+	objectKind?: "object" | "item" | undefined
+	/** WG2: true for a kill report (`_`), false for a live one. */
+	objectKilled?: boolean | undefined
 }
 
 /**

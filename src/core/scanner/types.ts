@@ -533,6 +533,17 @@ export interface PlanPreview {
 	estimates: { cpuCores: number; diskMbPerHour: number; probes: number }
 	impact: Impact
 	issues: PlanIssue[]
+	/** WG2: lockout exclusions for the spec's source (sweep plans only). */
+	lockoutExclusions?: LockoutExclusion[]
+}
+
+/**
+ * WG2 (requirement 12): a runtime exclusion derived from a locked-out discovery. Never part of
+ * the stored job spec. `applied` is false past the 256 cap or when applying would empty the plan.
+ */
+export interface LockoutExclusion extends FreqRange {
+	discoveryId: string
+	applied: boolean
 }
 
 // ---------------------------------------------------------------- settings (§ 12.3, decision D4)

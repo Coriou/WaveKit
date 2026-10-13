@@ -38,6 +38,18 @@ export interface DigitalVoiceCall {
 	startedAt: string
 	/** ISO 8601, set once the call ended. */
 	endedAt?: string
+	/** WG2: DMR colour code, when known. */
+	colourCode?: number
+	/** WG2: P25 network access code, upper-case hex, when known. */
+	nac?: string
+	/** WG2: encryption algorithm id (hex), encrypted calls only. */
+	algorithmId?: string
+	/** WG2: encryption key id (hex), when known. */
+	keyId?: string
+	/** WG2: NXDN radio access number, when known. */
+	ran?: number
+	/** WG2: CRC and FEC error counts of the call so far. */
+	errors?: { crc: number; fec: number }
 }
 
 export type DigitalVoiceCallEventData = DigitalVoiceCall

@@ -48,6 +48,12 @@ import type {
 	VesselState,
 	VesselTrackerStats,
 	AnalogTransmissionEventData,
+	AprsServerMessage,
+	AprsStation,
+	AprsTrackerStats,
+	MeshServerMessage,
+	MeshNode,
+	MeshTrackerStats,
 } from "@wavekit/api-types"
 
 /**
@@ -65,6 +71,8 @@ import type {
  * - spectrum: core waterfall frames, opt-in; `options.spectrum` on subscribe selects a source and profile
  * - bandplans: change notice `{storeId, revision}` after a changed commit and on subscribe; clients refetch
  * - vessels: AIS vessel current state (new, update, lost, stats), WG1
+ * - aprs: APRS station, object and item current state (new, update, lost, stats), WG2
+ * - mesh: Meshtastic node current state (new, update, lost, stats), WG2
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -82,6 +90,8 @@ export type WebSocketChannel =
 	| "operator-data"
 	| "bandplans"
 	| "vessels"
+	| "aprs"
+	| "mesh"
 
 /**
  * Message sent from client to server. `options` carries per-channel subscribe
@@ -173,6 +183,8 @@ export type ServerMessage =
 	| OperatorDataServerMessage
 	| BandPlansServerMessage
 	| VesselServerMessage
+	| AprsServerMessage
+	| MeshServerMessage
 
 /**
  * Internal client state tracking subscriptions.
@@ -214,7 +226,9 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "spectrum" ||
 		channel === "operator-data" ||
 		channel === "bandplans" ||
-		channel === "vessels"
+		channel === "vessels" ||
+		channel === "aprs" ||
+		channel === "mesh"
 	)
 }
 
@@ -1217,6 +1231,58 @@ export class WebSocketEventBroadcaster {
 			channel: "vessels",
 			data: stats,
 		})
+	}
+
+	/** WG2: a new APRS station, object or item. Unwired until Main M.3. */
+	broadcastAprsNew(station: AprsStation): void {
+		this.broadcast("aprs", { type: "aprs:new", channel: "aprs", data: station })
+	}
+
+	/** WG2: a known APRS entity changed (Main puts it through the update throttle). */
+	broadcastAprsUpdate(station: AprsStation): void {
+		this.broadcast("aprs", {
+			type: "aprs:update",
+			channel: "aprs",
+			data: station,
+		})
+	}
+
+	/** WG2: an APRS entity expired, was evicted or killed, with its final state. */
+	broadcastAprsLost(key: string, station: AprsStation): void {
+		this.broadcast("aprs", {
+			type: "aprs:lost",
+			channel: "aprs",
+			data: { key, station },
+		})
+	}
+
+	/** WG2: periodic APRS tracker statistics. */
+	broadcastAprsStats(stats: AprsTrackerStats): void {
+		this.broadcast("aprs", { type: "aprs:stats", channel: "aprs", data: stats })
+	}
+
+	/** WG2: a new Meshtastic node. Unwired until Main M.3. */
+	broadcastMeshNew(node: MeshNode): void {
+		this.broadcast("mesh", { type: "mesh:new", channel: "mesh", data: node })
+	}
+
+	/** WG2: a known node changed (Main puts it through the update throttle). */
+	broadcastMeshUpdate(node: MeshNode): void {
+		this.broadcast("mesh", { type: "mesh:update", channel: "mesh", data: node })
+	}
+
+	/** WG2: a node expired or was evicted, with its final state. */
+	broadcastMeshLost(nodeId: string, node: MeshNode): void {
+		this.broadcast("mesh", {
+			type: "mesh:lost",
+			channel: "mesh",
+			data: { nodeId, node },
+		})
+	}
+
+	/** WG2: periodic mesh tracker statistics. */
+	broadcastMeshStats(stats: MeshTrackerStats): void {
+		this.broadcast("mesh", { type: "mesh:stats", channel: "mesh", data: stats })
 	}
 
 	/** Full job DTO on the scanner channel (the server normally goes through the WS limiter). */

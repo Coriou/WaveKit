@@ -143,6 +143,16 @@ export interface AnalogTransmissionPayload {
 	peakChannelPowerDbfs: number | null
 	meanChannelPowerDbfs: number | null
 	closeReason: "squelch" | "retune" | "config" | "stopped" | "max-duration"
+	/**
+	 * WG2: sub-audible tone and DTMF digits heard during the transmission. Present on closed
+	 * transmissions produced since WG2; absent on open events and on records stored before it.
+	 */
+	tone?: {
+		/** One of the 50 standard CTCSS tones (67.0–254.1 Hz), or null when none qualified. */
+		ctcssHz: number | null
+		/** DTMF symbols `0-9*#A-D` in order, at most 32; null when none. */
+		dtmf: string | null
+	}
 }
 
 /** Stored and returned record. commitSeq is assigned by the writer. */

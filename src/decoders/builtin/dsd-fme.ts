@@ -221,6 +221,16 @@ export interface DsdFmeVoiceCallState {
 	active: boolean
 	startedAt: string
 	endedAt?: string
+	/** WG2 (lane X fills these): DMR colour code. */
+	colourCode?: number
+	/** P25 NAC, upper-case hex. */
+	nac?: string
+	/** Encryption algorithm id (hex). */
+	algorithmId?: string
+	keyId?: string
+	/** NXDN RAN. */
+	ran?: number
+	errors?: { crc: number; fec: number }
 }
 
 /** Default per-call recording retention. */
