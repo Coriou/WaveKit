@@ -42,9 +42,13 @@ const MiB = 1024 * 1024
  * so retention and admission are bounded for a Pi-class SD card: 250 000 rows,
  * 256 MiB, 3 days; 50/s burst 500 globally, 20/s burst 200 per decoder. An
  * operator judgement, not a measurement. Config retention and admission blocks
- * override single fields; every omitted field keeps these values. maxDbBytes
- * counts live database pages: the WAL (up to walPauseBytes before writes pause)
- * comes on top, so worst-case disk use is about 320 MiB.
+ * override single fields; every omitted field keeps these values.
+ *
+ * maxDbBytes is a prune trigger on live pages (freelist pages excluded); the
+ * WAL pauses writes past walPauseBytes. 256 MiB + 64 MiB is therefore a
+ * nominal live-page plus WAL threshold, not a disk ceiling: freed pages return
+ * through incremental vacuum and pruning is bounded per write. A store opened
+ * near the previous 2 GiB default stays larger on disk until it shrinks.
  */
 export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
 	globalRatePerSec: 50,
