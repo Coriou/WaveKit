@@ -1184,3 +1184,12 @@ SF1 additions (scanner follow-ups batch 1):
 - `GET /api/scanner/discoveries` accepts `identity=<kind>:<value>` (known identity kind, non-empty value, case-insensitive exact value match; else 400 `VALIDATION_ERROR`), and `q` now matches the operator label or the identity value (a superset of before).
 
 Optional CLI follow-ups: show `preemptedBy` and the resume countdown/hold on paused jobs and offer Stay here; per-range enable toggles and names in job detail; a signals-only marker; identity search in the discoveries view.
+
+#### Core: correction to the SF1 scanner announcement — 2026-10-13
+
+Corrects the entry "Core: scanner resume contract and SF1 additions" above:
+
+- Not purely additive for PATCH: before SF1 a `ranges` key in `PATCH /api/scanner/jobs/:id` was ignored; now it is validated as the full state of the job's effective `spec.ranges`. A client that echoes its create body (operator ranges only, no inherited rasters or band-plan ranges) now gets 400 `SCANNER_PLAN_INVALID` with `range-locked`, and a body that passes clears protocols inherited from a band plan. Send `ranges` only to edit them. The CLI does not PATCH jobs today.
+- Timing: the hop plan changes at the next hop; detection masks, protocol matching, probes and `signalsOnly` change as soon as the PATCH returns.
+- Per-range `sensitivity`: ranges with identical edges share the most sensitive target set; a range without one counts at the detector's current target (not its own job's sensitivity).
+- Stored range edits remember the edges (and band plan) of their range. If a job's band plan changes later, edits that no longer match their range are dropped and the PATCH response carries one `range-locked` issue with severity `warning` (`details.reason: "range-live-stale"`); it never blocks the PATCH. Clients that treat every `range-locked` as an error should check `severity`.

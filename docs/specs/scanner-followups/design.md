@@ -33,12 +33,25 @@ and PATCH schemas reject it (`additionalProperties: false`).
 `normaliseSpec` builds the effective list as today (operator ranges with inherited host
 fields, then plan ranges), then, when `rangeLive` is present:
 
-- equal length: for each index, delete the five live keys from the range and copy the
-  defined keys of `rangeLive[i]`;
-- different length (only possible if the plan list changed under a stored job): one
-  `range-locked` error `{ reason: "range-count", expected, received }`. The PATCH that met
-  it fails; a restored job is not re-normalised (restore uses the persisted normalised
-  spec), so it keeps running on its admitted ranges (BP2 rule).
+- each entry (`StoredRangeLive`) carries the live keys plus the locked identity of the
+  range it was written for (`startHz`, `endHz`, `bandplanId` when set); Main adds the
+  identity from `job.spec.ranges[i]` when it stores a validated PATCH;
+- an entry applies to the range at its index only when that range has the same identity:
+  delete the five live keys from the range and copy the defined keys of the entry;
+- entries that do not match (the plan list changed under a stored job: a range added,
+  removed or moved), and entries beyond the list, are dropped. One `range-locked`
+  **warning** `{ reason: "range-live-stale", dropped, expected, received }` reports them;
+  it is never an error, so later PATCHes of any key succeed. A PATCH `ranges` against the
+  current list replaces the whole stored snapshot;
+- an entry without `startHz`/`endHz` (written before the identity existed, never released)
+  matches by index while the counts agree;
+- a restored job is not re-normalised (restore uses the persisted normalised spec), so it
+  keeps running on its admitted ranges (BP2 rule).
+
+Amended after the integration review (R1 finding 1); the frozen contract gained the
+additive `StoredRangeLive` type (`rangeLive?: StoredRangeLive[]`, assignable from the
+original `ScanRangeLive[]`). The `range-locked` error remains for the ranges sent in a
+PATCH (`applyRangePatch`).
 
 Because `rawSpec.bandplans` stays, every later PATCH re-checks plan ids as in BP2 (1.7).
 

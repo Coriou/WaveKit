@@ -1905,7 +1905,8 @@ deleted in between.
 
 #### PATCH /api/scanner/jobs/:id
 
-Live edit, applied at the next hop. Allowed keys: `thresholdDb`,
+Live edit. The hop plan changes at the next hop; detection masks, protocol
+matching, probes and `signalsOnly` change as soon as the PATCH returns. Allowed keys: `thresholdDb`,
 `sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
 `capture`, `signalsOnly` and `ranges`; other keys are ignored. The keys are merged into the spec the job
 was created with (only `sourceId` and `mode` are pinned), so derived fields
@@ -1931,8 +1932,23 @@ element without `protocols` drops that range's protocols. The edges, `rasters`,
 field, or a different number of ranges, is 400 `SCANNER_PLAN_INVALID` with one
 `range-locked` issue per offending range (`details: { index, fields }`) or for the
 count (`details: { reason: "range-count", expected, received }`). Disabling every
-range is `range-empty`. The edit takes effect at the next hop. It persists with
-the job, and later patches of any key keep it.
+range is `range-empty`. The hop plan changes at the next hop; masks, protocol
+matching and probes follow at once. The edit persists with the job, and later
+patches of any key keep it.
+
+Breaking change for clients that echo their create body: before SF1 a `ranges`
+key in a PATCH was ignored; now it is validated as the full effective state. A
+create body (operator ranges only, without inherited rasters or band-plan
+ranges) usually fails with `range-locked`, and one that passes clears the
+protocols its ranges inherited. Leave `ranges` out unless you mean to edit them.
+
+Each stored edit remembers the edges (and band plan) of the range it was made
+for. If the job's band plan changes later (a range added, removed or moved), an
+edit applies only to the range at its position that still has those edges;
+edits that no longer match are dropped, and the response reports one
+`range-locked` issue with severity `warning` and
+`details: { reason: "range-live-stale", dropped, expected, received }`. It never
+blocks the PATCH.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
