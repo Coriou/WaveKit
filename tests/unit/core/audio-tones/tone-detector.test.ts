@@ -223,6 +223,26 @@ describe("tone detector", () => {
 		}
 	})
 
+	it("does not credit a new digit with the previous digit's average", () => {
+		const first = dtmfString({
+			symbols: "1",
+			rate: 8_000,
+			onSeconds: 0.03,
+			offSeconds: 0,
+			amplitude: 0.2,
+		})
+		const second = dtmfString({
+			symbols: "2",
+			rate: 8_000,
+			onSeconds: 0.015,
+			offSeconds: 0,
+			amplitude: 0.2,
+		})
+		const detector = new ToneDetector()
+		detector.push(Buffer.concat([first.pcm, second.pcm]), formatOf(first))
+		expect(detector.result().dtmf).toBeNull()
+	})
+
 	it("does not join bursts shorter than 40 ms across a real gap", () => {
 		const detector = new ToneDetector()
 		const pcm = dtmfString({

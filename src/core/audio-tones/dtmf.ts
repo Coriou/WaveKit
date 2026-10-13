@@ -99,6 +99,8 @@ export class DtmfBank {
 	private dropout = 0
 	private twistAt = 0
 	private twistFill = 0
+	/** Pair currently filling the twist average. −1 when the average is empty. */
+	private twistSymbol = -1
 	private lastEnergy = 0
 
 	constructor() {
@@ -231,12 +233,18 @@ export class DtmfBank {
 			return -1
 		if (rowSecond > 0 && rowBest < GROUP_RATIO * rowSecond) return -1
 		if (colSecond > 0 && colBest < GROUP_RATIO * colSecond) return -1
+		const index = rowIndex * 4 + colIndex
+		// A new pair must not inherit the previous pair's averaged on-time.
+		if (index !== this.twistSymbol) {
+			this.clearTwist()
+			this.twistSymbol = index
+		}
 		this.twistRow[this.twistAt] = rowNorm
 		this.twistCol[this.twistAt] = colNorm
 		this.twistAt += 1
 		if (this.twistAt === TWIST_SMOOTH) this.twistAt = 0
 		if (this.twistFill < TWIST_SMOOTH) this.twistFill += 1
-		return rowIndex * 4 + colIndex
+		return index
 	}
 
 	private smoothedTwist(): number | null {
@@ -254,6 +262,7 @@ export class DtmfBank {
 	private clearTwist(): void {
 		this.twistAt = 0
 		this.twistFill = 0
+		this.twistSymbol = -1
 	}
 
 	private measure(
