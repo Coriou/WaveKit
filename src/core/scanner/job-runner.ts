@@ -1117,6 +1117,13 @@ export class JobRunner implements JobDriver {
 				case "start-probe": {
 					const t = this.tracks.get(a.trackId)
 					if (!t || !this.driving) break
+					// The scheduler committed this hold before a signals-only patch.
+					// Do not request a probe or enter holding; leave the hop.
+					if (this.record.spec.signalsOnly === true) {
+						if (this.scheduler)
+							this.exec(this.scheduler.abandonUnstartedConfirm())
+						break
+					}
 					this.requestProbe(t.live, t.track, a.holdMs)
 					if (this.record.state === "running") this.queueEvent({ type: "hold" })
 					break

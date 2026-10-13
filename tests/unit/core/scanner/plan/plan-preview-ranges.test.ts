@@ -176,6 +176,49 @@ describe("range fields in the plan", () => {
 			message: "every range is disabled",
 			details: { disabled: 2 },
 		})
+		expect(disabled.issues.filter(i => i.code === "range-empty")).toHaveLength(
+			1,
+		)
+		const emptySweep = previewPlan({ mode: "sweep", ranges: [] }, ctx())
+		expect(emptySweep.issues).toContainEqual(
+			expect.objectContaining({
+				code: "range-empty",
+				message: "a sweep needs at least one range or bandplan",
+			}),
+		)
+		const wideHz = 2_000_000
+		const disabledWide = previewPlan(
+			{
+				mode: "sweep",
+				ranges: [
+					{
+						...inside,
+						enabled: false,
+						rasters: [{ spacingHz: wideHz, firstChannelHz: inside.startHz }],
+						obwHz: [wideHz],
+					},
+					outside,
+				],
+			},
+			ctx(),
+		)
+		expect(disabledWide.issues.map(i => i.code)).not.toContain(
+			"channel-too-wide",
+		)
+		const enabledWide = previewPlan(
+			{
+				mode: "sweep",
+				ranges: [
+					{
+						...inside,
+						rasters: [{ spacingHz: wideHz, firstChannelHz: inside.startHz }],
+						obwHz: [wideHz],
+					},
+				],
+			},
+			ctx(),
+		)
+		expect(enabledWide.issues.map(i => i.code)).toContain("channel-too-wide")
 
 		const short = previewPlan(
 			{

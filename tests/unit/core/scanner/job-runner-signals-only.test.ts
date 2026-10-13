@@ -298,6 +298,109 @@ describe("signals-only jobs", () => {
 		expect(today.retunes).toBe(1)
 	})
 
+	it("does not hold a track queued before signalsOnly became true", async () => {
+		const settings = testSettings()
+		const block = 25 * 2048
+		const spec = makeNormalisedSpec({ sourceId: "rtl" })
+		const operator = Math.round(
+			((spec.dwellMs - spec.settleMs) * 1_024_000) / 1000,
+		)
+		const dwell = Math.max(
+			(settings.detection.minSurfaceBlocks + 1) * block,
+			operator,
+		)
+		const requested: string[] = []
+		const { runner, arbiter, record } = runnerFor(
+			undefined,
+			"hold",
+			requested,
+			"sweep",
+		)
+		record.state = "pending"
+		await runner.start()
+		await flush()
+		runner.onEpochStarted({
+			stream: 0,
+			epoch: 11,
+			startSample: 10_000,
+			centreHz: HOP0,
+			sampleRateHz: 1_024_000,
+			gainKey: "m:496",
+			tuningTrust: "commanded",
+			settleMode: "timer",
+		})
+		await flush()
+		arbiter.retunes[0]?.resolve({
+			epoch: 11,
+			commandSample: 0,
+			bufferedSamples: 0,
+			settleSamples: 0,
+			expectMarker: false,
+			markerTimeoutSamples: 0,
+			pllSettleSamples: 0,
+			centreHz: HOP0,
+			sampleRateHz: 1_024_000,
+			gainKey: "m:496",
+			tuningTrust: "commanded",
+			centreChanged: true,
+		})
+		await flush()
+		await flush()
+		const track = makeTrack({ id: "queued", centreHz: HOP0, startedAt: 0 })
+		runner.onTrack(liveFor(track), track, true)
+		runner.onBlock(10_000 + dwell, false)
+		runner.replan({ ...record.spec, signalsOnly: true }, record.plan)
+		await flush()
+		await flush()
+		expect(requested).toEqual([])
+		expect(record.state).not.toBe("holding")
+		expect(arbiter.retunes).toHaveLength(2)
+
+		const during: string[] = []
+		const second = runnerFor(undefined, "hold", during, "sweep")
+		second.record.state = "pending"
+		await second.runner.start()
+		await flush()
+		second.runner.onEpochStarted({
+			stream: 0,
+			epoch: 11,
+			startSample: 10_000,
+			centreHz: HOP0,
+			sampleRateHz: 1_024_000,
+			gainKey: "m:496",
+			tuningTrust: "commanded",
+			settleMode: "timer",
+		})
+		await flush()
+		second.arbiter.retunes[0]?.resolve({
+			epoch: 11,
+			commandSample: 0,
+			bufferedSamples: 0,
+			settleSamples: 0,
+			expectMarker: false,
+			markerTimeoutSamples: 0,
+			pllSettleSamples: 0,
+			centreHz: HOP0,
+			sampleRateHz: 1_024_000,
+			gainKey: "m:496",
+			tuningTrust: "commanded",
+			centreChanged: true,
+		})
+		await flush()
+		await flush()
+		second.runner.onTrack(liveFor(track), track, true)
+		second.runner.replan(
+			{ ...second.record.spec, signalsOnly: true },
+			second.record.plan,
+		)
+		second.runner.onBlock(10_000 + dwell, false)
+		await flush()
+		await flush()
+		expect(during).toEqual([])
+		expect(second.record.state).not.toBe("holding")
+		expect(second.arbiter.retunes).toHaveLength(2)
+	})
+
 	// Feature: scanner-followups, Property 6: Signals only
 	// Validates: Requirements 3.2, 3.3
 	it("requests no probe for a signals-only track sequence and the same probes without the flag", () => {

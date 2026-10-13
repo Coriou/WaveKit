@@ -274,6 +274,15 @@ export class SweepScheduler {
 		if (hop !== undefined) hop.boost = on
 	}
 
+	/**
+	 * decide() may already have opened a confirm hold for a track queued before
+	 * signalsOnly became true. The probe has not started; leave the hop instead.
+	 */
+	abandonUnstartedConfirm(): SchedulerAction[] {
+		if (this.phase !== "hold" || this.hold?.mode !== "confirm") return []
+		return this.leaveHop([{ type: "stop-probes" }])
+	}
+
 	tick(now: number): SchedulerAction[] {
 		if (this.phase !== "hold" || this.hold === null) return []
 		if (now >= this.maxHoldDeadline())
@@ -305,6 +314,10 @@ export class SweepScheduler {
 				"SCANNER_EMPTY_PLAN",
 			)
 		this.pendingReplan = { plan, spec }
+		// The plan still swaps at the hop boundary. signalsOnly is a track decision,
+		// so the next confirm sees it before that boundary.
+		if (spec.signalsOnly !== undefined) this.spec.signalsOnly = spec.signalsOnly
+		else delete this.spec.signalsOnly
 		if (this.phase === "idle") this.applyReplan()
 	}
 
@@ -402,6 +415,7 @@ export class SweepScheduler {
 	}
 
 	private nextCandidate(): [string, TrackInfo] | null {
+		if (this.spec.signalsOnly === true) return null
 		const v = this.visit
 		if (v === null) return null
 		let best: [string, TrackInfo] | null = null

@@ -447,7 +447,9 @@ export function normaliseSpec(
 		)
 	}
 	if (mode === "sweep") {
-		if (enabled.length === 0)
+		// All-disabled already reported the one range-empty above. This is the
+		// no-range sweep, unchanged from before per-range enabled existed.
+		if (ranges.length === 0)
 			issues.push(
 				issue(
 					"range-empty",
@@ -496,7 +498,7 @@ export function normaliseSpec(
 	const thresholdDb = spec.thresholdDb ?? null
 	pv("thresholdDb", spec.thresholdDb !== undefined)
 	const rbw = fs / fftSize
-	const obwClasses = ranges.flatMap(r => r.obwHz ?? []).filter(o => o > 0)
+	const obwClasses = enabled.flatMap(r => r.obwHz ?? []).filter(o => o > 0)
 	const typicalObw =
 		obwClasses.length > 0 ? Math.min(...obwClasses) : TYPICAL_OBW_HZ
 	if (rbw > typicalObw / 4)
@@ -518,7 +520,7 @@ export function normaliseSpec(
 			),
 		)
 	const half = (fs * ctx.usableFraction) / 2
-	const spacings = ranges.flatMap(r => (r.rasters ?? []).map(x => x.spacingHz))
+	const spacings = enabled.flatMap(r => (r.rasters ?? []).map(x => x.spacingHz))
 	const slack = spacings.length > 0 ? Math.min(...spacings) : 0
 	const widest = Math.max(0, ...spacings, ...obwClasses)
 	if (widest >= 2 * (half - slack) || widest > 2 * half) {
