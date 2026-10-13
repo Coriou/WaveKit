@@ -764,6 +764,26 @@ describe("last-seen persistence (WG2 req 11.6, R1 #6)", () => {
 		expect(state.sessions.sessions).toHaveLength(2)
 	})
 
+	it("latches a last-seen write whose directory check fails after the temp write (R2 3)", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const snapshot = storage.startupSnapshot()
+		const openFile = fs.open.bind(fs)
+		const lstat = fs.lstat.bind(fs)
+		let wrote = false
+		vi.spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
+			if (String(path).endsWith(".tmp")) wrote = true
+			return openFile(path, flags, mode)
+		})
+		vi.spyOn(fs, "lstat").mockImplementation(async path => {
+			if (wrote && String(path) === directory)
+				throw Object.assign(new Error("ENOENT"), { code: "ENOENT" })
+			return lstat(path)
+		})
+		await expect(storage.persistSeen(snapshot)).rejects.toThrow()
+		expect(storage.unavailable).toBe(true)
+	})
+
 	it("still latches a failed full commit", async () => {
 		const { directory } = await location()
 		const storage = await open(directory)

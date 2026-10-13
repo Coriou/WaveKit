@@ -506,9 +506,10 @@ export class PrivateAccessStorage {
 	}
 
 	/**
-	 * `latch: "io"` (last-seen writes) still latches on an integrity failure found before any
-	 * write (directory, marker, missing state), but not on a failed write, sync or rename:
-	 * the previous state file stays authoritative and the next full commit rewrites it.
+	 * `latch: "integrity"` (last-seen writes) still latches on every integrity check
+	 * (directory identity before and after the write, marker, missing state) but not on a
+	 * failed open, write, sync, rename or directory sync: the previous state file stays
+	 * authoritative and the next full commit rewrites it.
 	 */
 	async #atomic(
 		name: string,
@@ -547,7 +548,9 @@ export class PrivateAccessStorage {
 			await handle.sync()
 			await handle.close()
 			handle = undefined
+			writing = false
 			await this.#assertDirectory()
+			writing = true
 			await fs.rename(temp, join(this.#directory, name))
 			ownedTemp = false
 			await this.#handle.sync()
