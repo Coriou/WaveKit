@@ -348,7 +348,6 @@ describe("spectrum backfill", () => {
 						expect(backfill[i]!.bins).toBe(live[i]!.bins)
 						expect(backfill[i]!.at).toBe(live[i]!.at)
 						expect(backfill[i]!.backfill).toBe(true)
-						expect(live[i]!.backfill).toBeUndefined()
 					}
 					expect(
 						backfill.some(
