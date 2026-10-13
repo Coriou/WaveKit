@@ -242,6 +242,10 @@ most recent first.
 13.4 Per job at most 2,000 discoveries are tracked (further hits counted in `hits` only,
 `truncated: true`); the counts reset when a job starts (not on resume) and are dropped when
 the job is deleted; in memory only, empty after a restart.
+13.5 Hit statistics are best-effort. An observation counts once per job: the job remembers
+the last 4,096 observations it credited, and dedupe is exact until that memory first evicts
+one. From then on a re-placed evicted observation may count again, and the job's stats carry
+`truncated: true`.
 
 ## 14. Compatibility and gates
 

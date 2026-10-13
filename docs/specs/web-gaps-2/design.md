@@ -278,5 +278,6 @@ exclusions are ≤ 256, cover each applied locked centre, never empty a non-empt
 stored job spec is unchanged. Validates: 12.1–12.4.
 
 Property 16: Hit counts. For any attribution sequence, each tracked discovery's `hits`
-equals its observations in the job, `hitStats.hits` equals the total, and tracked
-discoveries ≤ 2,000. Validates: 13.1, 13.4.
+equals its observations in the job, `hitStats.hits` equals the total, tracked
+discoveries ≤ 2,000, and no observation is credited twice while the 4,096-entry dedupe
+memory has not evicted (after an eviction `truncated` is true). Validates: 13.1, 13.4, 13.5.

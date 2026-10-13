@@ -57,9 +57,14 @@ describe("JobHits (WG2 req 13)", () => {
 			newDiscoveries: 1,
 			truncated: false,
 		})
-		// The credited-id memory is FIFO-bounded.
-		for (let i = 0; i < JOB_HITS_CREDITED_MAX; i++)
+		// Exact while the credited-id memory has not evicted anything.
+		for (let i = 0; i < JOB_HITS_CREDITED_MAX - 1; i++)
 			h.record(`o_x${i}`, "d_a", T0, false)
+		expect(h.record("o_1", "d_a", T0, false)).toBe(false)
+		expect(h.stats().truncated).toBe(false)
+		// The first eviction (o_1, the oldest) marks the stats best-effort; o_1 may count again.
+		h.record("o_last", "d_a", T0, false)
+		expect(h.stats().truncated).toBe(true)
 		expect(h.record("o_1", "d_a", T0, false)).toBe(true)
 	})
 
@@ -90,7 +95,7 @@ describe("JobHits (WG2 req 13)", () => {
 	})
 
 	// Feature: web-gaps-2, Property 16: Hit counts
-	// Validates: Requirements 13.1, 13.4
+	// Validates: Requirements 13.1, 13.4, 13.5
 	it("per-discovery hits equal the attributed observations, totals add up, tracked stays bounded", () => {
 		fc.assert(
 			fc.property(

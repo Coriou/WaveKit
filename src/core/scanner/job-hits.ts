@@ -15,9 +15,10 @@ export const JOB_HITS_TRACKED_MAX = 2000
  */
 export const JOB_HITS_UNTRACKED_DISTINCT_MAX = 10_000
 /**
- * Observation ids already credited to the job, so a re-placed observation (unlinked, then placed
- * again) is not counted twice. FIFO-pruned: observations are minutes long and their re-ingests
- * close together, so the oldest of 4,096 ids (about 0.4 MB) is safe to forget.
+ * Observation ids already credited to the job, so a re-placed observation (unlinked or trimmed,
+ * then placed again) is not counted twice. FIFO-pruned at 4,096 ids (about 0.4 MB): dedupe is
+ * exact until the first eviction; from then on a re-placed evicted observation may count again,
+ * so the job's stats say `truncated: true` (best-effort, WG2 req 13.4).
  */
 export const JOB_HITS_CREDITED_MAX = 4096
 /** 13.3: `GET /api/scanner/jobs/:id/hits?limit` bounds. */
@@ -60,6 +61,7 @@ export class JobHits {
 		if (this.credited.size > JOB_HITS_CREDITED_MAX) {
 			const oldest = this.credited.values().next()
 			if (oldest.done !== true) this.credited.delete(oldest.value)
+			this.truncated = true
 		}
 		this.hits += 1
 		if (created) this.newDiscoveries += 1

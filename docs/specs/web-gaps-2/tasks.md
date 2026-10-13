@@ -83,7 +83,7 @@ the isolation tests or `docs/CLI-COORDINATION.md`. Every lane runs its touched t
   - _Requirements: 12.1–12.5_
   - **Property 15: Lockout exclusions**
 - [ ] M.2 Per-job hit statistics: counts, events, route.
-  - _Requirements: 13.1–13.4_
+  - _Requirements: 13.1–13.5_
   - **Property 16: Hit counts**
 - [ ] M.3 Merge the lanes; wire APRS and mesh trackers, routes and channels; the throttle on
       vessel, APRS and mesh updates.
