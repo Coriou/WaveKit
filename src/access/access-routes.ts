@@ -161,6 +161,14 @@ export function registerAccessRoutes(
 			services.flows.logout(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
+	app.post("/api/access/devices/label", options, async (request, reply) =>
+		run(reply, () =>
+			services.flows.label(
+				accessRequestFromHttp(request.raw, "api"),
+				request.body,
+			),
+		),
+	)
 	app.post("/api/access/devices/revoke", options, async (request, reply) =>
 		run(reply, () =>
 			services.flows.revoke(

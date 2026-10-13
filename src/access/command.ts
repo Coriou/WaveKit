@@ -411,10 +411,14 @@ function machineUnavailable(code: string): AccessCommandResult {
 	}
 }
 
+function deviceCell(value: string | number | null | undefined): string {
+	return value === null || value === undefined ? "" : String(value)
+}
+
 function deviceTable(devices: MachineAccessDevicesDto["devices"]): string[] {
 	if (devices.length === 0)
 		return [
-			"deviceId  createdAt  renewedAt  expiresAt  current",
+			"deviceId  createdAt  renewedAt  expiresAt  current  name  kind  lastSeenAt",
 			"No remembered devices.",
 		]
 	const rows = devices.map(device => [
@@ -423,8 +427,20 @@ function deviceTable(devices: MachineAccessDevicesDto["devices"]): string[] {
 		String(device.renewedAt),
 		String(device.expiresAt),
 		device.current ? "true" : "false",
+		deviceCell(device.name),
+		deviceCell(device.kind),
+		deviceCell(device.lastSeenAt),
 	])
-	const header = ["deviceId", "createdAt", "renewedAt", "expiresAt", "current"]
+	const header = [
+		"deviceId",
+		"createdAt",
+		"renewedAt",
+		"expiresAt",
+		"current",
+		"name",
+		"kind",
+		"lastSeenAt",
+	]
 	const widths = header.map((name, index) =>
 		Math.max(name.length, ...rows.map(row => row[index]?.length ?? 0)),
 	)

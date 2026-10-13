@@ -95,6 +95,9 @@ export function projectMachineAccessDevices(
 				renewedAt: row["renewedAt"],
 				expiresAt: row["expiresAt"],
 				current: row["current"],
+				name: "name" in row ? row["name"] : null,
+				kind: "kind" in row ? row["kind"] : null,
+				lastSeenAt: "lastSeenAt" in row ? row["lastSeenAt"] : null,
 			}
 		})
 		const parsed = machineAccessDevicesDtoSchema.safeParse({ devices })
