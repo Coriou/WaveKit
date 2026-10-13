@@ -47,6 +47,8 @@ export function wireScannerBroadcasts(
 	const limiter = new WsLimiter<ServerMessage>({
 		maxPerSecond: scanner.settings().ws.maxMessagesPerSecond,
 		perKeyMinIntervalMs: 1000,
+		// WG1 req 8.1: progress per job at up to 2 Hz; every other key keeps 1 s.
+		perPriorityMinIntervalMs: { progress: 500 },
 		// Monotonic: a wall-clock step must not stall or burst the limiter.
 		now: opts.now ?? (() => performance.now()),
 		emit: message => broadcaster.broadcast("scanner", message),

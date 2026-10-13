@@ -1,7 +1,8 @@
 /**
  * Rate limiter and coalescer for scanner WebSocket messages (spec § 9, § 12.2): at most
- * `maxPerSecond` emissions in any 1 s window, at most one per key per `perKeyMinIntervalMs`, latest
- * state per key wins, and the latest state of every key is always delivered eventually.
+ * `maxPerSecond` emissions in any 1 s window, at most one per key per `perKeyMinIntervalMs` (or the
+ * pending entry's `perPriorityMinIntervalMs`), latest state per key wins, and the latest state of
+ * every key is always delivered eventually.
  */
 type Priority = "state" | "progress" | "activity"
 
@@ -18,7 +19,9 @@ interface Pending<T> {
 
 export class WsLimiter<T> {
 	private maxPerSecond: number
-	private readonly perKeyMinIntervalMs: number
+	private readonly intervalMs: Record<Priority, number>
+	/** Longest per-key interval: a key older than this is free whatever its priority. */
+	private readonly maxIntervalMs: number
 	private readonly now: () => number
 	private readonly emitFn: (msg: T) => void
 	private readonly scheduleFn: (
@@ -38,12 +41,24 @@ export class WsLimiter<T> {
 	constructor(opts: {
 		maxPerSecond: number
 		perKeyMinIntervalMs: number
+		/** Per-key interval for one priority, overriding `perKeyMinIntervalMs` (WG1 req 8.1). */
+		perPriorityMinIntervalMs?: Partial<Record<Priority, number>>
 		now: () => number
 		emit: (msg: T) => void
 		schedule: (fn: () => void, ms: number) => { cancel(): void }
 	}) {
 		this.maxPerSecond = Math.max(1, Math.floor(opts.maxPerSecond))
-		this.perKeyMinIntervalMs = Math.max(0, opts.perKeyMinIntervalMs)
+		const base = Math.max(0, opts.perKeyMinIntervalMs)
+		const override = (p: Priority) => {
+			const v = opts.perPriorityMinIntervalMs?.[p]
+			return v === undefined ? base : Math.max(0, v)
+		}
+		this.intervalMs = {
+			state: override("state"),
+			progress: override("progress"),
+			activity: override("activity"),
+		}
+		this.maxIntervalMs = Math.max(...Object.values(this.intervalMs))
 		this.now = opts.now
 		this.emitFn = opts.emit
 		this.scheduleFn = opts.schedule
@@ -110,7 +125,8 @@ export class WsLimiter<T> {
 		let best: [string, Pending<T>] | null = null
 		for (const [key, entry] of this.pending) {
 			const last = this.lastEmit.get(key)
-			if (last !== undefined && now - last < this.perKeyMinIntervalMs) continue
+			if (last !== undefined && now - last < this.intervalMs[entry.priority])
+				continue
 			if (
 				best === null ||
 				RANK[entry.priority] < RANK[best[1].priority] ||
@@ -135,9 +151,10 @@ export class WsLimiter<T> {
 					WINDOW_MS
 				: now
 		let at = Number.POSITIVE_INFINITY
-		for (const key of this.pending.keys()) {
+		for (const [key, entry] of this.pending) {
 			const last = this.lastEmit.get(key)
-			const keyFree = last === undefined ? now : last + this.perKeyMinIntervalMs
+			const keyFree =
+				last === undefined ? now : last + this.intervalMs[entry.priority]
 			at = Math.min(at, Math.max(keyFree, windowFree))
 		}
 		if (this.timer !== null && this.timerAt === at) return
@@ -166,7 +183,7 @@ export class WsLimiter<T> {
 			this.window.shift()
 		if (this.lastEmit.size > LAST_EMIT_PRUNE_SIZE)
 			for (const [key, at] of this.lastEmit)
-				if (now - at >= this.perKeyMinIntervalMs && !this.pending.has(key))
+				if (now - at >= this.maxIntervalMs && !this.pending.has(key))
 					this.lastEmit.delete(key)
 	}
 
