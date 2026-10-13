@@ -27,6 +27,13 @@ const call: DigitalVoiceCall = {
 	encrypted: false,
 	active: true,
 	startedAt: "2026-10-09T13:38:38.413Z",
+	// WG2 req 10: the status route must not strip the call metadata.
+	colourCode: 1,
+	nac: "293",
+	algorithmId: "AA",
+	keyId: "1234",
+	ran: 0,
+	errors: { crc: 2, fec: 5 },
 }
 
 const status: DigitalVoiceStatus = {

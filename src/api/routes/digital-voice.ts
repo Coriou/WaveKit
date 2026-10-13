@@ -23,6 +23,17 @@ const digitalVoiceCallSchema = {
 		active: { type: "boolean" },
 		startedAt: { type: "string" },
 		endedAt: { type: "string" },
+		// WG2 req 10: optional call metadata (absent when dsd-fme did not report it).
+		colourCode: { type: "integer" },
+		nac: { type: "string" },
+		algorithmId: { type: "string" },
+		keyId: { type: "string" },
+		ran: { type: "integer" },
+		errors: {
+			type: "object",
+			properties: { crc: { type: "integer" }, fec: { type: "integer" } },
+			required: ["crc", "fec"],
+		},
 	},
 	required: [
 		"decoderId",
