@@ -912,7 +912,8 @@ function poiFor(
 			decode: confirm !== null && D >= confirm ? 1 : 0,
 		}
 	}
-	const d = n.dwellMs - n.settleMs
+	// WG1 req 8.2: a hop with its own (per-range) dwell listens for that long.
+	const d = (hop.dwellMs ?? n.dwellMs) - n.settleMs
 	return {
 		hopIndex: hop.index,
 		detection: Math.min(1, Math.max(0, D + d - 2 * T) / periodMs),

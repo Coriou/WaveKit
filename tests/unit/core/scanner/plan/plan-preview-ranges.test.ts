@@ -473,6 +473,39 @@ describe("range fields in the plan", () => {
 		}
 	})
 
+	// WG1 req 8.2: POI uses the hop's own dwell when set, else the job dwell.
+	it("computes POI with the hop's own dwell", () => {
+		const p = previewPlan(
+			{
+				mode: "sweep",
+				ranges: [{ ...inside, dwellMs: 2_000 }, outside],
+				dwellMs: 200,
+				settleMs: 0,
+				txDurationHintMs: 100,
+			},
+			ctx(),
+		)
+		const own = p.plan.hops.filter(h => h.dwellMs === 2_000)
+		const rest = p.plan.hops.filter(h => h.dwellMs === undefined)
+		expect(own.length).toBeGreaterThan(0)
+		expect(rest.length).toBeGreaterThan(0)
+		const period = p.sweepPeriodMs
+		expect(period).not.toBeNull()
+		const n = p.spec
+		const detection = (dwell: number) =>
+			Math.min(
+				1,
+				Math.max(
+					0,
+					n.txDurationHintMs + dwell - n.settleMs - 2 * n.integrationMs,
+				) / (period ?? 1),
+			)
+		const poiOf = (h: Hop) => p.poi.find(x => x.hopIndex === h.index)
+		for (const h of own) expect(poiOf(h)?.detection).toBe(detection(2_000))
+		for (const h of rest) expect(poiOf(h)?.detection).toBe(detection(200))
+		expect(detection(2_000)).toBeGreaterThan(detection(200))
+	})
+
 	it("ignores per-range dwell on an in-window plan", () => {
 		const planned = planForSpec(
 			previewPlan(
