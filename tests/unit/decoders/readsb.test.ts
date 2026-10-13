@@ -210,6 +210,16 @@ describe("parseSbsLine", () => {
 		expect(onGround?.onGround).toBe(true)
 		expect(inAir?.onGround).toBe(false)
 	})
+
+	// R3: an empty IsOnGround field (most MSG types) is unknown, not "in the air".
+	it("leaves onGround unknown when the field is empty", () => {
+		const msg1 =
+			"MSG,1,1,1,A12345,1,2024/01/15,12:30:45.123,2024/01/15,12:30:45.123,UAL123,,,,,,,,,,,"
+		const parsed = parseSbsLine(msg1)
+		expect(parsed?.callsign).toBe("UAL123")
+		expect(parsed?.onGround).toBeUndefined()
+		expect(parsed).not.toHaveProperty("onGround", false)
+	})
 })
 
 describe("parseBeastMessage", () => {

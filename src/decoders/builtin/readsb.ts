@@ -559,7 +559,9 @@ export function parseSbsLine(line: string): AircraftData | null {
 	const lon = match[12] ? parseFloat(match[12]) : undefined
 	const verticalRate = match[13] ? parseInt(match[13], 10) : undefined
 	const squawk = match[14]?.trim() || undefined
-	const onGround = match[18] === "-1"
+	// IsOnGround is -1 (ground), 0 (airborne) or empty (not in this message).
+	const onGround =
+		match[18] === "-1" ? true : match[18] === "0" ? false : undefined
 
 	return {
 		icao,
