@@ -44,6 +44,7 @@ import {
 import { csdrChildEnv } from "../decoders/csdr-buffers.js"
 import { signalDecoder } from "../decoders/process-tools.js"
 import { ChannelSquelch } from "./channel-squelch.js"
+import { liveDemodTransmissionConfigChanged } from "./live-demod-activity.js"
 import {
 	DEFAULT_IQ_SAMPLE_RATE,
 	liveDemodRates,
@@ -148,6 +149,11 @@ interface PipelineRun {
 
 // Each measurement advances one 10 ms block of stream time.
 const LEVEL_BLOCK_SECONDS = 0.01
+/**
+ * Hang passed to ChannelSquelch. 250 ms is that class's default; it is set
+ * explicitly so `squelchHangMs()` reports the hang the gate actually uses.
+ */
+const SQUELCH_HANG_MS = 250
 const AUTO_FLOOR_CLOSED_RISE_DB_PER_SECOND = 1
 const AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND = 0.4
 
@@ -188,6 +194,12 @@ export class LiveDemodulator extends EventEmitter {
 		Pick<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
 	private levelTimer: ReturnType<typeof setInterval> | null = null
 	private reportedSquelchOpen = false
+	/**
+	 * Set only while `stop()` or a transmission-closing `reconfigure()` is in
+	 * progress. `stopRun` emits `squelch-changed(false)` before `stopped` or
+	 * `config-changed`; the tracker reads this during that synchronous emit.
+	 */
+	private closeOverride: "stopped" | "config" | null = null
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
 	private readonly audio: AudioClientRegistry
@@ -298,19 +310,24 @@ export class LiveDemodulator extends EventEmitter {
 			return
 		}
 
-		this.clearRestartTimer()
-		this.unsubscribeFromSourceCapsChanges()
-		if (this.run) await this.stopRun(this.run)
-		this.pipelineHealth = "stopped"
-		this.detachBranch()
-		this.activeSourceId = null
-		this.audio.closeAll("stop", true)
-		await this.closeHttpServer()
-		// A failure that was still being cleaned up may have scheduled a restart.
-		this.clearRestartTimer()
+		this.closeOverride = "stopped"
+		try {
+			this.clearRestartTimer()
+			this.unsubscribeFromSourceCapsChanges()
+			if (this.run) await this.stopRun(this.run)
+			this.pipelineHealth = "stopped"
+			this.detachBranch()
+			this.activeSourceId = null
+			this.audio.closeAll("stop", true)
+			await this.closeHttpServer()
+			// A failure that was still being cleaned up may have scheduled a restart.
+			this.clearRestartTimer()
 
-		this.emit("stopped")
-		this.log.info("Live demodulator stopped")
+			this.emit("stopped")
+			this.log.info("Live demodulator stopped")
+		} finally {
+			this.closeOverride = null
+		}
 	}
 
 	async reconfigure(newConfig: Partial<LiveDemodConfig>): Promise<void> {
@@ -341,30 +358,42 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.config = validated
-		if (this.run && validated.squelchMode !== previous.squelchMode)
-			this.run.noiseFloorDbfs = null
-		if (this.run) this.applySquelchThreshold(this.run)
-		this.publishSquelchChange()
+		if (liveDemodTransmissionConfigChanged(previous, validated))
+			this.closeOverride = "config"
+		try {
+			if (this.run && validated.squelchMode !== previous.squelchMode)
+				this.run.noiseFloorDbfs = null
+			if (this.run) this.applySquelchThreshold(this.run)
+			this.publishSquelchChange()
 
-		if (sourceChanged && this.activeSourceId) {
-			this.detachBranch()
-			const sourceId = this.resolveSourceId()
-			if (sourceId) {
-				this.activeSourceId = sourceId
-				this.attachBranch(sourceId)
+			if (sourceChanged && this.activeSourceId) {
+				this.detachBranch()
+				const sourceId = this.resolveSourceId()
+				if (sourceId) {
+					this.activeSourceId = sourceId
+					this.attachBranch(sourceId)
+				}
 			}
-		}
 
-		if (active && (pipelineChanged || sourceChanged)) {
-			this.consecutiveFailures = 0
-			await this.restartPipeline("configuration changed")
-		}
+			// The hint covers only the synchronous teardown edge above (and the
+			// one stopRun emits before its first await). A transmission that
+			// opens on the replacement pipeline is a new squelch edge.
+			const restarting = active && (pipelineChanged || sourceChanged)
+			if (!restarting) this.closeOverride = null
 
-		if (portChanged && this.http.listening) {
-			await this.restartHttpServer()
-		}
+			if (restarting) {
+				this.consecutiveFailures = 0
+				await this.restartPipeline("configuration changed")
+			}
 
-		this.emit("config-changed", this.config)
+			if (portChanged && this.http.listening) {
+				await this.restartHttpServer()
+			}
+
+			this.emit("config-changed", this.config)
+		} finally {
+			this.closeOverride = null
+		}
 	}
 
 	getStatus(): LiveDemodStatus {
@@ -414,6 +443,20 @@ export class LiveDemodulator extends EventEmitter {
 	/** Scanner activity adapter: running gate only; stopped/failed is closed. */
 	isSquelchOpen(): boolean {
 		return this.run !== null && !this.run.stopping && this.run.squelch.open
+	}
+
+	/** Channel-squelch hang in use, in milliseconds. */
+	squelchHangMs(): number {
+		return SQUELCH_HANG_MS
+	}
+
+	/**
+	 * When a `squelch-changed(false)` is the pipeline being torn down by
+	 * `stop()` or by a config change that ends a transmission, the close
+	 * reason that teardown stands for. Null on a real gate close.
+	 */
+	transmissionCloseOverride(): "stopped" | "config" | null {
+		return this.closeOverride
 	}
 
 	private publishSquelchChange(): void {
@@ -755,6 +798,7 @@ export class LiveDemodulator extends EventEmitter {
 			sampleRate: plan.channelSampleRate,
 			thresholdDbfs:
 				this.config.squelchMode === "auto" ? -0.001 : this.config.squelch,
+			hangMs: SQUELCH_HANG_MS,
 		})
 		const run: PipelineRun = {
 			front: this.spawnStage(plan.front),
@@ -901,7 +945,10 @@ export class LiveDemodulator extends EventEmitter {
 	private async restartPipeline(reason: string): Promise<void> {
 		this.clearRestartTimer()
 		this.log.info({ reason }, "Restarting live demodulation pipeline")
-		if (this.run) await this.stopRun(this.run)
+		const stopping = this.run ? this.stopRun(this.run) : null
+		// stopRun emits squelch-changed(false) before it waits on the processes.
+		this.closeOverride = null
+		if (stopping) await stopping
 		await this.startPipeline()
 		const stream = this.plannedStream()
 		this.audio.closeWhere(

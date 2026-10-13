@@ -7,7 +7,10 @@ import type { ActivityPublisher } from "../../decoders/manager.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ActivityQueryService } from "./storage/contract.js"
-import type { ActivityStoreStats } from "./storage/contract.js"
+import type {
+	ActivityStoreStats,
+	AnalogTransmissionPayload,
+} from "./storage/contract.js"
 import type { ActivityLimits } from "./storage/limits.js"
 
 export type ActivityFailureCode =
@@ -43,6 +46,12 @@ export interface ActivityRuntime {
 	readonly discloseErrors: boolean
 	stats(): ActivityStoreStats
 	bindSubscriptions(hub: { close(): void }): void
+	/**
+	 * Admits a closed transmission when Activity is ready. Null when disabled,
+	 * unavailable, or closed. The returned function never throws; it allocates
+	 * receivedAt with Date.now() and sets producedAt to payload.endedAt.
+	 */
+	transmissionSink(): ((payload: AnalogTransmissionPayload) => void) | null
 	close(): Promise<void>
 }
 
@@ -129,6 +138,7 @@ interface RuntimeParts {
 	unavailable?: ActivityUnavailableState
 	stats: () => ActivityStoreStats
 	closeSteps: Array<() => Promise<void> | void>
+	admitTransmission?: (payload: AnalogTransmissionPayload) => void
 }
 
 function assemble(
@@ -164,6 +174,18 @@ function assemble(
 				hub.close()
 			} catch (err) {
 				note("subscriptions", err)
+			}
+		},
+		transmissionSink() {
+			const admit = parts.admitTransmission
+			if (closed || !admit) return null
+			return payload => {
+				if (closed) return
+				try {
+					admit(payload)
+				} catch {
+					// The live-demod listener must not see a store failure.
+				}
 			}
 		},
 		async close() {
@@ -300,6 +322,13 @@ export async function startActivityRuntime(
 			service,
 			stats: () => store.stats(),
 			closeSteps: [() => service.close(), () => store.close()],
+			admitTransmission: payload => {
+				store.admitTransmission({
+					payload,
+					producedAt: payload.endedAt,
+					receivedAt: new Date(Date.now()).toISOString(),
+				})
+			},
 		})
 	} catch (error) {
 		let reason: ActivityFailureCode = "ACTIVITY_UNAVAILABLE"

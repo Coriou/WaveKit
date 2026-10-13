@@ -1,5 +1,43 @@
 import type { OperatorActivityPort } from "./scanner/auto-resume.js"
-import type { LiveDemodStatus } from "./live-demodulator.js"
+import type { LiveDemodConfig, LiveDemodStatus } from "./live-demodulator.js"
+
+/**
+ * Manual mode gates only when the threshold is non-zero. Squelch 0 stays open
+ * for the whole run, so it is not operator activity and not a transmission.
+ */
+export function liveDemodSquelchGates(config: {
+	squelchMode?: "manual" | "auto" | undefined
+	squelch: number
+}): boolean {
+	return config.squelchMode === "auto" || config.squelch !== 0
+}
+
+/** Fields whose change ends an open analog transmission with reason `config`. */
+export interface TransmissionConfigIdentity {
+	sourceId?: string | undefined
+	modulation: LiveDemodConfig["modulation"]
+	bandwidth: number
+	offsetHz?: number | undefined
+	squelchMode?: "manual" | "auto" | undefined
+}
+
+/**
+ * True when a live-demod config change must end an open transmission.
+ * Threshold-only edits (including `squelch` and `autoMarginDb`) do not.
+ * `offsetHz` and `squelchMode` use the same defaults the demodulator applies.
+ */
+export function liveDemodTransmissionConfigChanged(
+	previous: TransmissionConfigIdentity,
+	next: TransmissionConfigIdentity,
+): boolean {
+	return (
+		previous.sourceId !== next.sourceId ||
+		previous.modulation !== next.modulation ||
+		previous.bandwidth !== next.bandwidth ||
+		(previous.offsetHz ?? 0) !== (next.offsetHz ?? 0) ||
+		(previous.squelchMode ?? "manual") !== (next.squelchMode ?? "manual")
+	)
+}
 
 const CHANGE_EVENTS = [
 	"squelch-changed",
@@ -35,8 +73,7 @@ export function liveDemodOperatorActivity(
 	return {
 		current: () => {
 			const status = liveDemod.getStatus()
-			const gated =
-				status.config.squelchMode === "auto" || status.config.squelch !== 0
+			const gated = liveDemodSquelchGates(status.config)
 			return {
 				audio:
 					status.running &&
