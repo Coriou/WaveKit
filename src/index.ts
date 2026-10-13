@@ -123,6 +123,7 @@ import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
 import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
 import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
+import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import {
 	tunerFrequencyAt,
 	wireAnalogTransmissions,
@@ -1120,7 +1121,17 @@ async function main(): Promise<void> {
 			vesselTrackingManager.stop()
 		})
 
-		// Step 8e: Meshtastic node current state (WG2 req 5, 6)
+		// Step 8e: APRS station, object and item current state (WG2 req 3, 4)
+		const aprsTrackingManager = new AprsTrackingManager(
+			decoderManager,
+			{},
+			logger,
+		)
+		own(20, () => {
+			aprsTrackingManager.stop()
+		})
+
+		// Step 8f: Meshtastic node current state (WG2 req 5, 6)
 		const meshTrackingManager = new MeshTrackingManager(
 			decoderManager,
 			{},
@@ -1209,6 +1220,7 @@ async function main(): Promise<void> {
 				aircraftTracker: aircraftTrackingManager.getTracker(),
 				vesselTracker: vesselTrackingManager.getTracker(),
 				meshTracker: meshTrackingManager.getTracker(),
+				aprsTracker: aprsTrackingManager.getTracker(),
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
@@ -1438,6 +1450,15 @@ async function main(): Promise<void> {
 		})
 
 		shutdown.register({
+			name: "aprs-tracking",
+			handler: async () => {
+				log.info("Shutting down APRS tracking")
+				aprsTrackingManager.stop()
+			},
+			timeout: 1000,
+		})
+
+		shutdown.register({
 			name: "mesh-tracking",
 			handler: async () => {
 				log.info("Shutting down mesh tracking")
@@ -1581,6 +1602,7 @@ async function main(): Promise<void> {
 		aircraftEnrichmentService.start()
 		vesselTrackingManager.start()
 		meshTrackingManager.start()
+		aprsTrackingManager.start()
 
 		// Step 13: Connect to configured sources and wire to fanout
 		for (const sourceConfig of config.sources) {

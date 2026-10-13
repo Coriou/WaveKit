@@ -1,8 +1,7 @@
 /**
  * Mesh nodes through the real ApiServer (WG2 req 6.1-6.3): the tracker passed in the
  * dependencies serves /api/mesh and its events reach `mesh` WebSocket subscribers only.
- * The 2 s update throttle (req 9.4) is wired with lane X's module; until then updates go out
- * directly.
+ * `mesh:update` goes through the 2 s per-node throttle (req 9.4).
  */
 
 import { EventEmitter } from "node:events"
@@ -14,7 +13,10 @@ import {
 } from "../../../src/api/server.js"
 import { MeshTracker } from "../../../src/core/mesh-tracker.js"
 import { createLogger } from "../../../src/utils/logger.js"
-import { meshPacket } from "../../mocks/fixtures/meshtastic/encode.js"
+import {
+	encodeUser,
+	meshPacket,
+} from "../../mocks/fixtures/meshtastic/encode.js"
 
 const logger = createLogger({ level: "fatal" })
 const AT = Date.parse("2026-10-13T12:00:00.000Z")
@@ -156,5 +158,65 @@ describe("mesh nodes through the API server", () => {
 	it("detaches its listeners on stop", async () => {
 		await server.stop()
 		expect(EVENTS.map(e => tracker.listenerCount(e))).toEqual(baseline)
+	})
+
+	it("throttles mesh:update per node: leading, trailing latest, identity change at once, nothing after lost", async () => {
+		const subscriber = connect(server)
+		subscriber.send({ type: "subscribe", channels: ["mesh"] })
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "Date"],
+			now: AT,
+		})
+		try {
+			const packet = (from: number, id: number, extra = {}) =>
+				tracker.processPacket(
+					"lora",
+					meshPacket({ from, id, portnum: 1, ...extra }),
+					new Date(Date.now()),
+				)
+			const sent = () =>
+				subscriber.socket.sent
+					.filter(m => m.type.startsWith("mesh:"))
+					.map(m => {
+						const d = m.data as {
+							nodeId: string
+							packetCount?: number
+							longName?: string | null
+						}
+						return [m.type, d.nodeId, d.packetCount ?? null, d.longName ?? null]
+					})
+			packet(5, 1) // new
+			packet(5, 2) // leading update
+			vi.advanceTimersByTime(500)
+			packet(5, 3)
+			packet(5, 4) // latest pending
+			expect(sent()).toEqual([
+				["mesh:new", "!00000005", 1, null],
+				["mesh:update", "!00000005", 2, null],
+			])
+			vi.advanceTimersByTime(1500)
+			expect(sent().at(-1)).toEqual(["mesh:update", "!00000005", 4, null])
+			// A name is an identity change: sent at once inside the window.
+			packet(5, 5, {
+				portnum: 4,
+				payload: encodeUser({ id: "!00000005", longName: "Ada" }),
+			})
+			expect(sent().at(-1)).toEqual(["mesh:update", "!00000005", 5, "Ada"])
+			packet(5, 6) // pending
+			const before = sent().length
+			// maxNodes 1: node 6 evicts node 5; the pending update is dropped.
+			packet(6, 7)
+			vi.advanceTimersByTime(5000)
+			expect(
+				sent()
+					.slice(before)
+					.map(([type, id]) => [type, id]),
+			).toEqual([
+				["mesh:lost", "!00000005"],
+				["mesh:new", "!00000006"],
+			])
+		} finally {
+			vi.useRealTimers()
+		}
 	})
 })

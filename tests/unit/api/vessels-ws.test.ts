@@ -202,4 +202,73 @@ describe("vessels through the API server", () => {
 			vi.useRealTimers()
 		}
 	})
+
+	it("throttles vessel:update per MMSI: leading, trailing latest, identity change at once, nothing after lost (WG2 req 9.4)", async () => {
+		await server.stop()
+		tracker.stop()
+		tracker = new VesselTracker({ maxVessels: 1 }, logger)
+		server = new ApiServer(dependencies(tracker), {
+			host: "127.0.0.1",
+			port: 0,
+		})
+		await server.start()
+		const subscriber = connect(server)
+		subscriber.send({ type: "subscribe", channels: ["vessels"] })
+		vi.useFakeTimers({
+			toFake: ["setTimeout", "clearTimeout", "Date"],
+			now: Date.parse("2026-06-15T12:00:00.000Z"),
+		})
+		try {
+			const report = (mmsi: string, fields: Record<string, unknown> = {}) =>
+				tracker.processShip(
+					"ais",
+					{ mmsi, messageType: 1, lat: 10, lon: 20, ...fields },
+					new Date(Date.now()),
+				)
+			const sent = () =>
+				subscriber.socket.sent
+					.filter(m => m.type.startsWith("vessel:"))
+					.map(m => {
+						const d = m.data as {
+							mmsi: string
+							messageCount?: number
+							name?: string | null
+						}
+						return [m.type, d.mmsi, d.messageCount ?? null, d.name ?? null]
+					})
+			report("123456789") // new
+			report("123456789", { lat: 10.1 }) // leading update
+			vi.advanceTimersByTime(500)
+			report("123456789", { lat: 10.2 })
+			report("123456789", { lat: 10.3 }) // latest pending
+			expect(sent().map(([type]) => type)).toEqual([
+				"vessel:new",
+				"vessel:update",
+			])
+			vi.advanceTimersByTime(1500)
+			expect(sent()).toHaveLength(3)
+			expect(sent().at(-1)?.slice(0, 3)).toEqual([
+				"vessel:update",
+				"123456789",
+				4,
+			])
+			// A name is an identity change: sent at once inside the window.
+			report("123456789", { messageType: 5, name: "EVER GIVEN" })
+			expect(sent().at(-1)?.[3]).toBe("EVER GIVEN")
+			report("123456789", { lat: 10.4 }) // pending
+			const before = sent().length
+			report("987654321") // the cap of 1 evicts the first; its pending update is dropped
+			vi.advanceTimersByTime(5000)
+			expect(
+				sent()
+					.slice(before)
+					.map(([type, mmsi]) => [type, mmsi]),
+			).toEqual([
+				["vessel:lost", "123456789"],
+				["vessel:new", "987654321"],
+			])
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 })

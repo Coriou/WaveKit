@@ -58,6 +58,7 @@ import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
 import { vesselRoutes } from "./routes/vessels.js"
 import { meshRoutes } from "./routes/mesh.js"
+import { aprsRoutes } from "./routes/aprs.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
 import { spectrumRoutes } from "./routes/spectrum.js"
@@ -75,12 +76,16 @@ import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
 import type { VesselTracker } from "../core/vessel-tracker.js"
 import type {
+	AprsStation,
+	AprsTrackerStats,
 	MeshNode,
 	MeshTrackerStats,
 	VesselState,
 	VesselTrackerStats,
 } from "@wavekit/api-types"
 import type { MeshTracker } from "../core/mesh-tracker.js"
+import type { AprsTracker } from "../core/aprs-tracker.js"
+import { EntityUpdateThrottle } from "../core/entity-update-throttle.js"
 import { installAccessHooks } from "../access/fastify-adapter.js"
 import type { FastifyAccessController } from "../access/fastify-adapter.js"
 import { registerAccessRoutes } from "../access/access-routes.js"
@@ -112,6 +117,8 @@ import type { ReceiverCapabilitiesProvider } from "../core/tuner-capabilities/ty
  * Clients can provide their own correlation ID via this header.
  */
 const CORRELATION_ID_HEADER = "x-correlation-id"
+/** WG2 req 9: vessel, APRS and mesh `*:update` messages, at most one per entity per 2 s. */
+const ENTITY_UPDATE_WINDOW_MS = 2000
 
 export interface ApiServerConfig {
 	publicOrigins?: ProtectedRuntimeAccessConfig["publicOrigins"]
@@ -149,6 +156,8 @@ export interface ApiServerDependencies {
 	vesselTracker?: VesselTracker | undefined
 	/** Meshtastic node current state (WG2 req 6). */
 	meshTracker?: MeshTracker | undefined
+	/** APRS station, object and item current state (WG2 req 4). */
+	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
 	spectrum?: SpectrumService | undefined
 	logger: Logger
@@ -199,6 +208,9 @@ export class ApiServer {
 	private readonly meshTracker?: MeshTracker | undefined
 	/** Detaches the mesh tracker listeners; the tracker outlives the server. */
 	private meshWiring: (() => void) | null = null
+	private readonly aprsTracker?: AprsTracker | undefined
+	/** Detaches the APRS tracker listeners and stops its update throttle. */
+	private aprsWiring: (() => void) | null = null
 	private readonly scanner?: ScannerService | undefined
 	private readonly spectrum?: SpectrumService | undefined
 	private readonly audioConfig?: AudioConfig | undefined
@@ -247,6 +259,7 @@ export class ApiServer {
 		this.aircraftTracker = dependencies.aircraftTracker
 		this.vesselTracker = dependencies.vesselTracker
 		this.meshTracker = dependencies.meshTracker
+		this.aprsTracker = dependencies.aprsTracker
 		this.scanner = dependencies.scanner
 		this.spectrum = dependencies.spectrum
 		this.audioConfig = dependencies.audioConfig
@@ -588,6 +601,10 @@ export class ApiServer {
 			this.meshWiring?.()
 			this.meshWiring = null
 		})
+		await attempt(() => {
+			this.aprsWiring?.()
+			this.aprsWiring = null
+		})
 		await attempt(async () => {
 			await this.app.close()
 		})
@@ -846,16 +863,28 @@ export class ApiServer {
 			})
 		}
 
-		// AIS vessel tracker events (WG1 req 6.4)
+		// AIS vessel tracker events (WG1 req 6.4); updates through the 2 s throttle (WG2 req 9.4)
 		if (this.vesselTracker) {
 			const tracker = this.vesselTracker
+			const throttle = new EntityUpdateThrottle<VesselState>({
+				windowMs: ENTITY_UPDATE_WINDOW_MS,
+				identity: v =>
+					[v.name, v.callsign, v.navStatus, v.shipType, v.destination].join(
+						"|",
+					),
+				emit: (_key, vessel) => {
+					this.wsBroadcaster.broadcastVesselUpdate(vessel)
+				},
+			})
 			const onNew = (vessel: VesselState) => {
 				this.wsBroadcaster.broadcastVesselNew(vessel)
 			}
 			const onUpdate = (vessel: VesselState) => {
-				this.wsBroadcaster.broadcastVesselUpdate(vessel)
+				throttle.offer(vessel.mmsi, vessel)
 			}
+			// A pending update must not follow the lost message.
 			const onLost = (mmsi: string, vessel: VesselState) => {
+				throttle.clear(mmsi)
 				this.wsBroadcaster.broadcastVesselLost(mmsi, vessel)
 			}
 			const onStats = (stats: VesselTrackerStats) => {
@@ -866,6 +895,7 @@ export class ApiServer {
 			tracker.on("vessel:lost", onLost)
 			tracker.on("stats:update", onStats)
 			this.vesselWiring = () => {
+				throttle.stop()
 				tracker.off("vessel:new", onNew)
 				tracker.off("vessel:update", onUpdate)
 				tracker.off("vessel:lost", onLost)
@@ -873,19 +903,61 @@ export class ApiServer {
 			}
 		}
 
-		// Meshtastic node tracker events (WG2 req 6.2, 6.3)
+		// APRS tracker events (WG2 req 4.2, 4.3); updates through the 2 s throttle (req 9.4)
+		if (this.aprsTracker) {
+			const tracker = this.aprsTracker
+			const throttle = new EntityUpdateThrottle<AprsStation>({
+				windowMs: ENTITY_UPDATE_WINDOW_MS,
+				identity: a =>
+					[a.kind, a.symbol, a.comment, a.status, a.killed].join("|"),
+				emit: (_key, station) => {
+					this.wsBroadcaster.broadcastAprsUpdate(station)
+				},
+			})
+			const onNew = (station: AprsStation) => {
+				this.wsBroadcaster.broadcastAprsNew(station)
+			}
+			const onUpdate = (station: AprsStation) => {
+				throttle.offer(station.key, station)
+			}
+			const onLost = (key: string, station: AprsStation) => {
+				throttle.clear(key)
+				this.wsBroadcaster.broadcastAprsLost(key, station)
+			}
+			const onStats = (stats: AprsTrackerStats) => {
+				this.wsBroadcaster.broadcastAprsStats(stats)
+			}
+			tracker.on("aprs:new", onNew)
+			tracker.on("aprs:update", onUpdate)
+			tracker.on("aprs:lost", onLost)
+			tracker.on("stats:update", onStats)
+			this.aprsWiring = () => {
+				throttle.stop()
+				tracker.off("aprs:new", onNew)
+				tracker.off("aprs:update", onUpdate)
+				tracker.off("aprs:lost", onLost)
+				tracker.off("stats:update", onStats)
+			}
+		}
+
+		// Meshtastic node tracker events (WG2 req 6.2, 6.3); updates through the 2 s throttle (req 9.4)
 		if (this.meshTracker) {
 			const tracker = this.meshTracker
+			const throttle = new EntityUpdateThrottle<MeshNode>({
+				windowMs: ENTITY_UPDATE_WINDOW_MS,
+				identity: n => [n.longName, n.shortName, n.role, n.hwModel].join("|"),
+				emit: (_key, node) => {
+					this.wsBroadcaster.broadcastMeshUpdate(node)
+				},
+			})
 			const onNew = (node: MeshNode) => {
 				this.wsBroadcaster.broadcastMeshNew(node)
 			}
-			// TODO(WG2 M.3, req 9.4): route through EntityUpdateThrottle (2 s, identity
-			// `longName|shortName|role|hwModel`) once lane X's module is merged; until then direct.
 			const onUpdate = (node: MeshNode) => {
-				this.wsBroadcaster.broadcastMeshUpdate(node)
+				throttle.offer(node.key, node)
 			}
-			// TODO(WG2 M.3, req 9.4): clear the node's throttle key here, before broadcasting lost.
 			const onLost = (nodeId: string, node: MeshNode) => {
+				throttle.clear(node.key)
 				this.wsBroadcaster.broadcastMeshLost(nodeId, node)
 			}
 			const onStats = (stats: MeshTrackerStats) => {
@@ -896,6 +968,7 @@ export class ApiServer {
 			tracker.on("mesh:lost", onLost)
 			tracker.on("stats:update", onStats)
 			this.meshWiring = () => {
+				throttle.stop()
 				tracker.off("mesh:new", onNew)
 				tracker.off("mesh:update", onUpdate)
 				tracker.off("mesh:lost", onLost)
@@ -959,6 +1032,10 @@ export class ApiServer {
 					{ name: "aircraft", description: "Aircraft tracking endpoints" },
 					{ name: "vessels", description: "AIS vessel tracking endpoints" },
 					{ name: "mesh", description: "Meshtastic node tracking endpoints" },
+					{
+						name: "aprs",
+						description: "APRS station, object and item tracking",
+					},
 					{ name: "live-audio", description: "Live demodulation endpoints" },
 					{ name: "tuner", description: "RTL-TCP tuner control endpoints" },
 					{ name: "tuner-relay", description: "RTL-TCP tuner relay endpoints" },
@@ -1287,6 +1364,13 @@ export class ApiServer {
 		if (this.vesselTracker) {
 			await this.app.register(vesselRoutes, {
 				tracker: this.vesselTracker,
+			})
+		}
+
+		// APRS current-state routes (WG2 req 4.1)
+		if (this.aprsTracker) {
+			await this.app.register(aprsRoutes, {
+				tracker: this.aprsTracker,
 			})
 		}
 
