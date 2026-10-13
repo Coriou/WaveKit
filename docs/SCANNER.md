@@ -223,6 +223,7 @@ Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and jou
 - Detection is measured on one strong DMR capture; false-alarm control adapts per range (CFAR), but a fresh dongle needs minutes to learn its spurs.
 - A sweep can miss short transmissions: the preview reports probability of intercept per hop for `txDurationHintMs`, with each hop's own dwell.
 - `scanner:progress` reaches WS clients at up to 2 Hz per job (one per 500 ms); every other scanner message keeps one per key per second, and all share the `ws.maxMessagesPerSecond` budget.
+- That budget is shared with `scanner:activity`: when slots are scarce the limiter sends state messages first, then progress, then activity, so faster progress can delay activity updates (each still gets its latest state eventually).
 - P25, NXDN, D-STAR, dPMR and DMR repeater rules are unvalidated until captures exist; those results stay `candidate` unless dsd-fme decodes them.
 - Marker settle needs the RTL2832 test mode to reach the core; over some rtlmux/Wi-Fi paths it does not, and timer settle makes sweeps about 6× slower.
 - Before the channelizer, one confirm probe runs at a time; on a Pi 4 even that may exceed the CPU budget.

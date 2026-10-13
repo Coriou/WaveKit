@@ -134,7 +134,8 @@ services:
       NODE_ENV: production
       RTL_TCP_HOST: "${RTL_TCP_HOST:-127.0.0.1}"
       RTL_TCP_PORT: "${RTL_TCP_PORT:-1234}"
-      # Runtime state (Activity store, API band overrides) on a volume.
+      # Runtime state on a volume: Activity, scanner jobs and discoveries,
+      # band plans, operator data and API band overrides.
       WAVEKIT_STATE_DIR: /app/data
     ports:
       - "9000:9000"
@@ -196,7 +197,8 @@ services:
       WAVEKIT_LOG_LEVEL: info
       NODE_ENV: production
       SDR_SOURCE: "tcp://wavekit-sdrpp-prod:5259"
-      # Runtime state (Activity store, API band overrides) on a volume.
+      # Runtime state on a volume: Activity, scanner jobs and discoveries,
+      # band plans, operator data and API band overrides.
       WAVEKIT_STATE_DIR: /app/data
     ports:
       - "9000:9000"

@@ -397,7 +397,9 @@ with bounded retention and admission (250,000 rows, 256 MiB, 3 days; 50/s
 burst 500 globally, 20/s burst 200 per decoder; an operator judgement for a
 Pi-class SD card, not measured; `activity: { enabled: false }` turns it off).
 Decoder output is published as a decode envelope, stored in
-`<stateDir>/activity/activity.db` (on a volume in every compose profile), and
+`<stateDir>/activity/activity.db` (on a volume in every compose profile; since
+WG1 the prod profiles' `wavekit-state` volume also persists scanner jobs and
+discoveries, band plans, operator data and API band overrides), and
 served as search, facets and cursor replay. Telemetry outputs (`sync`,
 `rates`, `stats`, `status`, `error`) are not stored. WG1 adds the
 `analog-transmission` kind: each squelch-delimited live-demodulator
@@ -753,6 +755,11 @@ separate from scanner RF sweep coverage.
       (NMEA positions from types 1–3, 18, 19; static data from 5, 19, 24), `GET /api/vessels`, `/api/vessels/stats`,
       `/api/vessels/:mmsi` and the `vessels` WebSocket channel. No position
       history. APRS and Meshtastic current state remain open.
+- [ ] Coalesce `vessel:update` per MMSI on the `vessels` channel (today every
+      merged report is sent; aircraft have the same shape).
+- [ ] `liveDemodTransmissionConfigChanged` treats an absent `sourceId` and an
+      explicit default source as different, so switching between them closes
+      an open transmission as `config` though the radio did not change.
 - [ ] AIS NMEA checksums are not verified: the decoder accepts sentences with a
       wrong XOR checksum, and every `!` sentence in
       `tests/mocks/fixtures/ais/nmea-sample.txt` (and the `!AIVDO` sample in
