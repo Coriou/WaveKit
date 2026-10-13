@@ -162,8 +162,11 @@ interface Op {
 	merged: [string, string][]
 	removedObservations: string[]
 	correction?: { sourceId: string; hz: number }
-	/** Observation id → job ids newly credited (WG2 req 13.1). */
-	credited: Map<string, string[]>
+	/**
+	 * Observation id → the discovery it was placed in and the job ids newly credited (WG2 req 13.1).
+	 * Recorded at placement, so neither observation retention nor a later listener can lose it.
+	 */
+	credited: Map<string, { discoveryId: string; jobIds: string[] }>
 }
 
 function newOp(): Op {
@@ -1187,7 +1190,10 @@ export class DiscoveryStore extends EventEmitter {
 		const record = this.toRecord(obs, d.id)
 		this.putObservation(record)
 		op.observations.add(record.id)
-		op.credited.set(record.id, [...record.jobIds])
+		op.credited.set(record.id, {
+			discoveryId: d.id,
+			jobIds: [...record.jobIds],
+		})
 		d.observationCount += 1
 		d.airtimeMs += durationOf(obs)
 		this.absorbStats(d, obs, true)
@@ -1226,7 +1232,8 @@ export class DiscoveryStore extends EventEmitter {
 		return this.commit("observation", op => {
 			op.discoveries.add(d.id)
 			op.observations.add(record.id)
-			if (joined.length > 0) op.credited.set(record.id, joined)
+			if (joined.length > 0)
+				op.credited.set(record.id, { discoveryId: d.id, jobIds: joined })
 			mark(op, d.id, rank(d.confidence) > beforeRank ? "upgraded" : "updated")
 			return this.settle(op, d)
 		})
@@ -1834,24 +1841,36 @@ export class DiscoveryStore extends EventEmitter {
 	private commit(kind: JournalEntry["op"], run: (op: Op) => string): Ingested {
 		const op = newOp()
 		const id = run(op)
-		this.finish(kind, op)
 		const out: Ingested = {
 			discoveryId: id,
 			change: op.changes.get(id) ?? "updated",
 		}
+		// WG2 req 13.1: snapshot the credits before any listener runs; a merge in this operation
+		// moves the observation to the survivor.
+		const survivor = new Map<string, string>()
+		for (const [keep, drop] of op.merged) survivor.set(drop, keep)
+		const resolve = (discoveryId: string): string => {
+			let at = discoveryId
+			for (let i = 0; i <= op.merged.length; i++) {
+				const next = survivor.get(at)
+				if (next === undefined) break
+				at = next
+			}
+			return at
+		}
 		const attributed: Attribution[] = []
-		for (const [observationId, jobIds] of op.credited) {
-			// Read after settle: a merge moves the observation to the survivor.
-			const discoveryId = this.observationIndex.get(observationId)?.discoveryId
-			if (discoveryId === undefined || jobIds.length === 0) continue
+		for (const [observationId, credit] of op.credited) {
+			if (credit.jobIds.length === 0) continue
+			const discoveryId = resolve(credit.discoveryId)
 			attributed.push({
 				observationId,
 				discoveryId,
-				jobIds: [...jobIds],
+				jobIds: [...credit.jobIds],
 				created: op.changes.get(discoveryId) === "created",
 			})
 		}
 		if (attributed.length > 0) out.attributed = attributed
+		this.finish(kind, op)
 		return out
 	}
 

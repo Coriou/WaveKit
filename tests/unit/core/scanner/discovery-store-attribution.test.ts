@@ -98,4 +98,52 @@ describe("DiscoveryStore attribution for job hits (WG2 req 13.1)", () => {
 			},
 		])
 	})
+
+	it("keeps a joining job's credit when retention trims the re-ingested observation at once (Sol R2 1a)", () => {
+		const store = newStore()
+		const obs = (id: string, t: number, jobIds: string[]) =>
+			makeObs({ id, centreHz: CH, startedAt: t, blocks: 2, jobIds })
+		const first = store.ingest(obs("o_old", T0, ["A"]))
+		// 256 newer observations push the open track's record out of retention.
+		for (let i = 1; i <= 256; i++)
+			store.ingest(obs(`o_${i}`, T0 + i * 1000, ["A"]))
+		expect(store.discoveryIdOf("o_old")).toBeUndefined()
+		// Its next ingest (job B joined) is placed again and trimmed again in the same operation.
+		const joined = store.ingest(obs("o_old", T0, ["A", "B"]))
+		expect(store.discoveryIdOf("o_old")).toBeUndefined()
+		// The store cannot tell A was credited before; the service's per-job dedupe drops A.
+		expect(joined.attributed).toEqual([
+			{
+				observationId: "o_old",
+				discoveryId: first.discoveryId,
+				jobIds: ["A", "B"],
+				created: false,
+			},
+		])
+	})
+
+	it("snapshots the credit before a synchronous listener deletes the discovery (Sol R2 1b)", () => {
+		const store = newStore()
+		store.on("mutation", () => {
+			for (const d of store.snapshot().discoveries) store.delete(d.id)
+		})
+		const r = store.ingest(
+			makeObs({
+				id: "o1",
+				centreHz: CH,
+				startedAt: T0,
+				blocks: 2,
+				jobIds: ["A"],
+			}),
+		)
+		expect(store.get(r.discoveryId ?? "")).toBeUndefined()
+		expect(r.attributed).toEqual([
+			{
+				observationId: "o1",
+				discoveryId: r.discoveryId,
+				jobIds: ["A"],
+				created: true,
+			},
+		])
+	})
 })
