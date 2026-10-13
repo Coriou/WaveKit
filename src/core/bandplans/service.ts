@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto"
+import { createHash, randomBytes, randomUUID } from "node:crypto"
 import {
 	BANDPLAN_IMPORT_FORMATS,
 	BANDPLANS_LIMITS,
@@ -24,6 +24,7 @@ import type {
 	PlanStackEntryView,
 	ResolvedBandPlanView,
 	ScanPreset,
+	ScanPresetIssue,
 	ScanPresetJobView,
 	ScanPresetListView,
 	ScanPresetView,
@@ -46,9 +47,11 @@ import type {
 	PresetToJobSpec,
 	ProjectBuiltinPacks,
 	ResolveBandPlans,
+	ResolveScannerBandplans,
 	ResolvedBandPlan,
 	ResolverInput,
 } from "./contract.js"
+import { previewDigestFor } from "./domain.js"
 import {
 	BandPlanStorage,
 	bandPlanStorageFailureReason,
@@ -57,9 +60,8 @@ import {
 import type { BandPlanStorageOptions } from "./storage.js"
 
 /**
- * Dependencies are the frozen contract functions from lanes A, C and D.
- * This module does not import those modules. Main's openBandPlanService in
- * src/core/bandplans/index.ts is the composition that supplies the real ones.
+ * Lane functions other than `previewDigestFor` are injected. Main's
+ * openBandPlanService in src/core/bandplans/index.ts supplies the real ones.
  */
 export interface BandPlanServiceDeps {
 	readonly projectBuiltinPacks: ProjectBuiltinPacks
@@ -70,6 +72,11 @@ export interface BandPlanServiceDeps {
 	readonly builtinPresetsFor: BuiltinPresetsFor
 	readonly presetIssuesFor: PresetIssuesFor
 	readonly presetToJobSpec: PresetToJobSpec
+	/**
+	 * Effective scanner list for preset issues. Absent keeps BP1 checks.
+	 * Main wires `resolveScannerBandplans` in the barrel.
+	 */
+	readonly scannerBandplans?: ResolveScannerBandplans
 }
 interface PreparedMutation {
 	readonly mutation: BandPlanMutation
@@ -270,20 +277,24 @@ class BandPlanRuntime implements BandPlanService {
 		return detach({ store: this.storeView(), pack })
 	}
 	presets(): ScanPresetListView {
+		const effectiveIds = this.effectiveScannerIds()
 		return detach({
 			store: this.storeView(),
 			context: this.context(),
-			presets: this.visiblePresets().map(preset => this.presetView(preset)),
+			presets: this.visiblePresets().map(preset =>
+				this.presetView(preset, effectiveIds),
+			),
 		})
 	}
 	presetJob(presetId: string): ScanPresetJobView {
 		const preset = this.visiblePresets().find(item => item.id === presetId)
 		if (!preset) throw new BandPlansError("BANDPLANS_NOT_FOUND")
+		const effectiveIds = this.effectiveScannerIds()
 		return detach({
 			presetId,
 			region: this.options.context.region,
 			spec: this.deps.presetToJobSpec(preset),
-			issues: this.deps.presetIssuesFor(preset, this.options.context.region),
+			issues: this.issuesFor(preset, effectiveIds),
 		})
 	}
 	previewImport(request: unknown): ImportPreview {
@@ -294,9 +305,13 @@ class BandPlanRuntime implements BandPlanService {
 		const parsed = importPreviewRequestSchema.safeParse(request)
 		if (!parsed.success) throw new BandPlansError("BANDPLANS_INVALID")
 		const preview = detach(this.decodeAndParse(parsed.data).preview)
-		// BP2 contract step: the digest equals the file hash (BP1 binding) until lane C
-		// binds groupOverrides through PreviewDigestFor (design "Batch 2").
-		return { ...preview, previewDigest: preview.sha256 }
+		return {
+			...preview,
+			previewDigest: previewDigestFor(
+				preview.sha256,
+				parsed.data.groupOverrides,
+			),
+		}
 	}
 	mutate(input: unknown): Promise<BandPlanMutationResult> {
 		let prepared: PreparedMutation
@@ -348,6 +363,8 @@ class BandPlanRuntime implements BandPlanService {
 	private storeView(): BandPlanStore {
 		const state = this.persisted()
 		if (!state) return { state: "unavailable" }
+		if (this.storage?.persisted() !== true)
+			return { state: "available", storeId: null, revision: state.revision }
 		return {
 			state: "available",
 			storeId: state.storeId,
@@ -437,7 +454,11 @@ class BandPlanRuntime implements BandPlanService {
 	}
 	private resolution(): ResolvedBandPlan {
 		const state = this.persisted()
-		const key = state ? `${state.storeId}:${state.revision}` : "unavailable"
+		const key = !state
+			? "unavailable"
+			: this.storage?.persisted() === true
+				? `${state.storeId}:${state.revision}`
+				: `readonly-empty:${state.revision}`
 		if (this.resolvedMemo?.key === key) return this.resolvedMemo.value
 		const value = this.deps.resolveBandPlans(this.resolverInput())
 		this.resolvedMemo = { key, value }
@@ -448,12 +469,26 @@ class BandPlanRuntime implements BandPlanService {
 		const stored = this.persisted()?.presets ?? []
 		return [...builtins, ...stored]
 	}
-	private presetView(preset: ScanPreset): ScanPresetView {
-		const issues = this.deps.presetIssuesFor(
-			preset,
-			this.options.context.region,
-		)
+	private effectiveScannerIds(): ReadonlySet<string> | undefined {
+		const resolve = this.deps.scannerBandplans
+		if (!resolve) return undefined
+		return new Set(resolve(this.view()).map(plan => plan.id))
+	}
+	private presetView(
+		preset: ScanPreset,
+		effectiveIds: ReadonlySet<string> | undefined,
+	): ScanPresetView {
+		const issues = this.issuesFor(preset, effectiveIds)
 		return { preset, applicable: issues.length === 0, issues }
+	}
+	private issuesFor(
+		preset: ScanPreset,
+		effectiveIds: ReadonlySet<string> | undefined,
+	): readonly ScanPresetIssue[] {
+		const region = this.options.context.region
+		return effectiveIds
+			? this.deps.presetIssuesFor(preset, region, effectiveIds)
+			: this.deps.presetIssuesFor(preset, region)
 	}
 	private decodeAndParse(file: {
 		readonly fileName: string
@@ -490,7 +525,12 @@ class BandPlanRuntime implements BandPlanService {
 		if (parsed.data.type !== "commit-import")
 			return { mutation: parsed.data, parsedImport: null }
 		const imported = this.decodeAndParse(parsed.data)
-		if (imported.preview.sha256 !== parsed.data.previewDigest)
+		const bytesSha256 = fileSha256(parsed.data.contentBase64)
+		const digest = previewDigestFor(bytesSha256, parsed.data.groupOverrides)
+		if (
+			imported.preview.sha256 !== bytesSha256 ||
+			digest !== parsed.data.previewDigest
+		)
 			throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
 		return { mutation: parsed.data, parsedImport: detach(imported) }
 	}
@@ -547,4 +587,8 @@ class BandPlanRuntime implements BandPlanService {
 
 function decodeBase64(value: string): Uint8Array {
 	return Uint8Array.from(Buffer.from(value, "base64"))
+}
+
+function fileSha256(contentBase64: string): string {
+	return createHash("sha256").update(decodeBase64(contentBase64)).digest("hex")
 }

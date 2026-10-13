@@ -129,6 +129,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		}
 		const first = await open(path, observe)
 		const initial = first.snapshot()
+		expect(first.persisted()).toBe(true)
 		expect(initial).toMatchObject({
 			version: 1,
 			revision: 0,
@@ -521,6 +522,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 			},
 		})
 		expect(reasons).toEqual([])
+		expect(store.persisted()).toBe(false)
 		expect(store.snapshot()).toMatchObject({
 			storeId: BANDPLAN_READ_ONLY_EMPTY_STORE_ID,
 			revision: 0,
@@ -552,6 +554,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		await writeFile(join(directory, ".state-stale.tmp"), "leftover")
 		const before = (await readdir(directory)).sort()
 		const store = await open(path, undefined, { writable: false })
+		expect(store.persisted()).toBe(true)
 		expect(store.snapshot()).toEqual(stored)
 		await store.close()
 		await store.close()
@@ -659,10 +662,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 			`node_modules/.cache/bandplans-crash-open-${randomUUID()}.mjs`,
 		)
 		await mkdir(join(process.cwd(), "node_modules/.cache"), { recursive: true })
-		const storageEntry = join(
-			process.cwd(),
-			"src/core/bandplans/storage.ts",
-		)
+		const storageEntry = join(process.cwd(), "src/core/bandplans/storage.ts")
 		let child: ChildProcess | undefined
 		try {
 			await build({

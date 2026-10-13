@@ -24,7 +24,10 @@ import type {
 	ParsedImport,
 	ResolverInput,
 } from "../../../../src/core/bandplans/contract.js"
-import { transition } from "../../../../src/core/bandplans/domain.js"
+import {
+	previewDigestFor,
+	transition,
+} from "../../../../src/core/bandplans/domain.js"
 import { resolveBandPlans } from "../../../../src/core/bandplans/resolve.js"
 
 const STORE = "00000000-0000-4000-8000-0000000000aa"
@@ -183,26 +186,37 @@ function commit(
 	_bands: readonly StoredBand[],
 	extra: Partial<Extract<BandPlanMutation, { type: "commit-import" }>> = {},
 ): BandPlanMutation {
+	const groupOverrides = extra.groupOverrides ?? []
+	const {
+		previewDigest,
+		groupOverrides: _groupOverrides,
+		type: _type,
+		expected: _expected,
+		...rest
+	} = extra
 	return {
 		type: "commit-import",
 		expected: token(state),
 		format: "sdrpp-json",
 		fileName: "community.json",
 		contentBase64: file.contentBase64,
-		groupOverrides: [],
-		previewDigest: file.sha256,
+		groupOverrides,
 		name: null,
 		author: null,
 		licence: null,
 		keepColourHints: false,
 		replacesPackId: null,
 		addToStack: true,
-		...extra,
-		// expected and type stay fixed when extra is spread first via the literal above
+		...rest,
+		previewDigest:
+			previewDigest ?? previewDigestFor(file.sha256, groupOverrides),
 	}
 }
 
-function asInput(state: BandPlanState, region: BandRegion = "EU"): ResolverInput {
+function asInput(
+	state: BandPlanState,
+	region: BandRegion = "EU",
+): ResolverInput {
 	const packs = new Map<string, BandPlanPack>(
 		projectBuiltinPacks().map(pack => [pack.id, pack]),
 	)
@@ -229,7 +243,11 @@ describe("band plan transitions", () => {
 		const context = ctx()
 		const created = transition(
 			state,
-			{ type: "create-operator-band", expected: token(state), band: bandInput() },
+			{
+				type: "create-operator-band",
+				expected: token(state),
+				band: bandInput(),
+			},
 			context,
 			null,
 		)
@@ -456,7 +474,10 @@ describe("band plan transitions", () => {
 			ctx(),
 			null,
 		)
-		expect(second.state.edits.map(item => item.bandId)).toEqual(["airband", "cb"])
+		expect(second.state.edits.map(item => item.bandId)).toEqual([
+			"airband",
+			"cb",
+		])
 	})
 
 	it("keeps orphan edits until the band or the pack is reset", () => {
@@ -502,7 +523,9 @@ describe("band plan transitions", () => {
 			ctx(),
 			null,
 		)
-		expect(bandReset.state.edits.map(item => item.packId)).toEqual(["builtin-us"])
+		expect(bandReset.state.edits.map(item => item.packId)).toEqual([
+			"builtin-us",
+		])
 		const packReset = transition(
 			state,
 			{
@@ -513,7 +536,9 @@ describe("band plan transitions", () => {
 			ctx(),
 			null,
 		)
-		expect(packReset.state.edits.map(item => item.packId)).toEqual(["builtin-us"])
+		expect(packReset.state.edits.map(item => item.packId)).toEqual([
+			"builtin-us",
+		])
 		const noop = transition(
 			packReset.state,
 			{
@@ -532,7 +557,11 @@ describe("band plan transitions", () => {
 		const context = ctx()
 		const created = transition(
 			state,
-			{ type: "create-operator-band", expected: token(state), band: bandInput("Parent") },
+			{
+				type: "create-operator-band",
+				expected: token(state),
+				band: bandInput("Parent"),
+			},
 			context,
 			null,
 		)
@@ -701,7 +730,9 @@ describe("band plan transitions", () => {
 		)
 		expect(coloured.state.stack).toBeNull()
 		expect(coloured.state.importedPacks[0]?.name).toBe("Named")
-		expect(coloured.state.importedPacks[0]?.bands[0]?.colourHint).toBe("#aabbcc")
+		expect(coloured.state.importedPacks[0]?.bands[0]?.colourHint).toBe(
+			"#aabbcc",
+		)
 		expect(coloured.state.importedPacks[0]?.provenance.author).toBe("Ada")
 	})
 
@@ -710,7 +741,12 @@ describe("band plan transitions", () => {
 		const state = empty()
 		expect(
 			codeOf(() =>
-				transition(state, commit(state, file, [storedBand("b-one")]), ctx(), null),
+				transition(
+					state,
+					commit(state, file, [storedBand("b-one")]),
+					ctx(),
+					null,
+				),
 			),
 		).toBe("BANDPLANS_IMPORT_INVALID")
 		expect(
@@ -767,12 +803,10 @@ describe("band plan transitions", () => {
 		const nextFile = hashed("community-d")
 		const replaced = transition(
 			orphaned.state,
-			commit(
-				orphaned.state,
-				nextFile,
-				[storedBand("b-one", "One")],
-				{ replacesPackId: packId, addToStack: true },
-			),
+			commit(orphaned.state, nextFile, [storedBand("b-one", "One")], {
+				replacesPackId: packId,
+				addToStack: true,
+			}),
 			ctx(),
 			parsed([storedBand("b-one", "One")], nextFile.sha256),
 		)
@@ -788,10 +822,12 @@ describe("band plan transitions", () => {
 		])
 		const resolved = resolveBandPlans(asInput(replaced.state))
 		expect(resolved.orphanedEdits).toEqual([{ packId, bandId: "b-two" }])
-		expect(resolved.bands.find(item => item.bandId === "b-one")?.band.name).toBe(
-			"Kept",
+		expect(
+			resolved.bands.find(item => item.bandId === "b-one")?.band.name,
+		).toBe("Kept")
+		expect(resolved.bands.some(item => item.band.name === "Dropped")).toBe(
+			false,
 		)
-		expect(resolved.bands.some(item => item.band.name === "Dropped")).toBe(false)
 		const removed = transition(
 			replaced.state,
 			{ type: "delete-pack", expected: token(replaced.state), packId },
@@ -822,12 +858,15 @@ describe("band plan transitions", () => {
 	it("rejects quotas, a bad clock, a bad id, and revision overflow, but allows a no-op at the ceiling", () => {
 		const fullOperators = bandPlanStateSchema.parse({
 			...empty(),
-			operatorBands: Array.from({ length: BANDPLANS_LIMITS.operatorBands }, (_, index) => ({
-				...bandInput(`B${index}`),
-				id: `op-${index.toString(16).padStart(12, "0")}`,
-				scan: null,
-				provenance: { kind: "operator" },
-			})),
+			operatorBands: Array.from(
+				{ length: BANDPLANS_LIMITS.operatorBands },
+				(_, index) => ({
+					...bandInput(`B${index}`),
+					id: `op-${index.toString(16).padStart(12, "0")}`,
+					scan: null,
+					provenance: { kind: "operator" },
+				}),
+			),
 		})
 		expect(
 			codeOf(() =>
@@ -945,11 +984,17 @@ describe("band plan transitions", () => {
 		const state = empty()
 		expect(
 			codeOf(() =>
-				transition(state, commit(state, file, []), ctx(), parsed([], file.sha256)),
+				transition(
+					state,
+					commit(state, file, []),
+					ctx(),
+					parsed([], file.sha256),
+				),
 			),
 		).toBe("BANDPLANS_IMPORT_INVALID")
-		const tooMany = Array.from({ length: BANDPLANS_LIMITS.bandsPerPack + 1 }, (_, index) =>
-			storedBand(`b-${index}`),
+		const tooMany = Array.from(
+			{ length: BANDPLANS_LIMITS.bandsPerPack + 1 },
+			(_, index) => storedBand(`b-${index}`),
 		)
 		expect(
 			codeOf(() =>
@@ -971,7 +1016,9 @@ describe("band plan transitions", () => {
 			importedAt: NOW,
 			sha256: "ab".repeat(32),
 		}
-		const bands = Array.from({ length: 512 }, (_, index) => storedBand(`b-${index}`))
+		const bands = Array.from({ length: 512 }, (_, index) =>
+			storedBand(`b-${index}`),
+		)
 		const editsFor = (packId: string) =>
 			bands.map(item => ({
 				packId,
@@ -1024,7 +1071,11 @@ describe("band plan transitions", () => {
 	it("deletes a preset and leaves an unchanged replacement unrevised", () => {
 		const created = transition(
 			empty(),
-			{ type: "create-preset", expected: token(empty()), preset: preset("Scan") },
+			{
+				type: "create-preset",
+				expected: token(empty()),
+				preset: preset("Scan"),
+			},
 			ctx(),
 			null,
 		)
@@ -1341,6 +1392,149 @@ describe("band plan transitions", () => {
 					),
 				).toBe("BANDPLANS_CONFLICT")
 			}),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("canonicalizes the preview digest over sorted override pairs", () => {
+		const sha256 = "ab".repeat(32)
+		const digest = previewDigestFor(sha256, [
+			{ sourceType: "b", group: "air" },
+			{ sourceType: "a", group: "marine" },
+		])
+		expect(digest).toBe(
+			createHash("sha256")
+				.update(
+					JSON.stringify({
+						v: 1,
+						sha256,
+						groupOverrides: [
+							["a", "marine"],
+							["b", "air"],
+						],
+					}),
+					"utf8",
+				)
+				.digest("hex"),
+		)
+		expect(digest).not.toBe(sha256)
+	})
+
+	it("rejects a parsed import whose file hash disagrees with the bytes", () => {
+		const state = empty()
+		const file = hashed("community-hash")
+		const before = structuredClone(state)
+		expect(
+			codeOf(() =>
+				transition(
+					state,
+					commit(state, file, [storedBand("b-one")]),
+					ctx(),
+					parsed([storedBand("b-one")], "cd".repeat(32)),
+				),
+			),
+		).toBe("BANDPLANS_IMPORT_MISMATCH")
+		expect(state).toEqual(before)
+	})
+
+	// Feature: band-plans, Property 20: Preview digest binding
+	// Validates: Requirements 11.7
+	it("binds the preview digest to the bytes and the override set", () => {
+		const override = fc.record({
+			sourceType: fc.string({ minLength: 0, maxLength: 12 }),
+			group: fc.constantFrom(...DISPLAY_GROUPS),
+		})
+		fc.assert(
+			fc.property(
+				fc.uint8Array({ minLength: 0, maxLength: 32 }),
+				fc.uniqueArray(override, {
+					minLength: 0,
+					maxLength: 6,
+					selector: item => item.sourceType,
+				}),
+				fc.integer({ min: 0, max: 255 }),
+				(bytes, overrides, salt) => {
+					const sha256 = createHash("sha256").update(bytes).digest("hex")
+					const rotated =
+						overrides.length === 0
+							? overrides
+							: [...overrides.slice(1), overrides[0]!]
+					const forward = previewDigestFor(sha256, overrides)
+					expect(previewDigestFor(sha256, [...overrides].reverse())).toBe(
+						forward,
+					)
+					expect(previewDigestFor(sha256, rotated)).toBe(forward)
+					const other = createHash("sha256")
+						.update(Uint8Array.from([...bytes, salt]))
+						.digest("hex")
+					expect(previewDigestFor(other, overrides)).not.toBe(forward)
+					if (overrides.length > 0) {
+						const changed = overrides.map((item, index) =>
+							index === 0
+								? {
+										...item,
+										group:
+											item.group === "other"
+												? ("air" as const)
+												: ("other" as const),
+									}
+								: item,
+						)
+						expect(previewDigestFor(sha256, changed)).not.toBe(forward)
+					}
+					const state = empty()
+					const before = structuredClone(state)
+					const file = {
+						sha256,
+						contentBase64: Buffer.from(bytes).toString("base64"),
+					}
+					const mismatched =
+						forward === "c".repeat(64) ? "d".repeat(64) : "c".repeat(64)
+					expect(
+						codeOf(() =>
+							transition(
+								state,
+								commit(state, file, [storedBand("b-one")], {
+									groupOverrides: overrides,
+									previewDigest: mismatched,
+									addToStack: false,
+								}),
+								ctx(),
+								parsed([storedBand("b-one")], sha256),
+							),
+						),
+					).toBe("BANDPLANS_IMPORT_MISMATCH")
+					expect(state).toEqual(before)
+					const committed = transition(
+						state,
+						commit(state, file, [storedBand("b-one")], {
+							groupOverrides: rotated,
+							addToStack: false,
+						}),
+						ctx(),
+						parsed([storedBand("b-one")], sha256),
+					)
+					expect(committed.changed).toBe(true)
+					expect(committed.state.revision).toBe(1)
+					expect(committed.state.importedPacks).toHaveLength(1)
+					expect(
+						codeOf(() =>
+							transition(
+								committed.state,
+								commit(committed.state, file, [storedBand("b-one")], {
+									groupOverrides: overrides,
+									previewDigest: previewDigestFor(other, overrides),
+									addToStack: false,
+								}),
+								ctx(),
+								parsed([storedBand("b-one")], sha256),
+							),
+						),
+					).toBe("BANDPLANS_IMPORT_MISMATCH")
+					expect(committed.state.revision).toBe(1)
+					expect(committed.state.importedPacks).toHaveLength(1)
+				},
+			),
 			{ numRuns: 100 },
 		)
 	})
