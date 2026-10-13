@@ -71,7 +71,10 @@ import { createDecoderManagerOptions } from "./decoders/manager-options.js"
 import { resolveProcessBandRegion } from "./decoders/band-region.js"
 import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
-import { startActivityRuntime } from "./core/activity/runtime.js"
+import {
+	activityConfigOptions,
+	startActivityRuntime,
+} from "./core/activity/runtime.js"
 import { OperatorDataService } from "./operator-data/service.js"
 import {
 	openBandPlanService,
@@ -118,6 +121,11 @@ import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
+import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
+import {
+	tunerFrequencyAt,
+	wireAnalogTransmissions,
+} from "./core/analog-transmission.js"
 import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder, DecoderConfig } from "./decoders/types.js"
@@ -1101,6 +1109,16 @@ async function main(): Promise<void> {
 			aircraftTrackingManager.stop()
 		})
 
+		// Step 8d: AIS vessel current state (WG1 req 5, 6)
+		const vesselTrackingManager = new VesselTrackingManager(
+			decoderManager,
+			{},
+			logger,
+		)
+		own(20, () => {
+			vesselTrackingManager.stop()
+		})
+
 		// Read-only metadata providers add no source consumers or receiver actions.
 		const regionalRegistry = createRegionalRegistry(
 			createRegionalRegistration(),
@@ -1125,19 +1143,13 @@ async function main(): Promise<void> {
 		// Activity runs when config.activity.enabled (the default). A failed probe or open
 		// logs and leaves the rest of WaveKit running.
 		const activity = await startActivityRuntime({
-			enabled: config.activity.enabled,
+			...activityConfigOptions(config.activity),
 			stateDir: config.stateDir,
 			logger,
 			setPublisher: publish => {
 				decoderManager.setActivityPublisher(publish)
 			},
 			discloseErrors: !protectedMode,
-			...(config.activity.retention
-				? { retention: config.activity.retention }
-				: {}),
-			...(config.activity.admission
-				? { admission: config.activity.admission }
-				: {}),
 		})
 		// Own before checkpoint: a stop during open must still close the workers.
 		own(8, () => activity.close())
@@ -1184,6 +1196,7 @@ async function main(): Promise<void> {
 				digitalVoice,
 				resourceAggregator,
 				aircraftTracker: aircraftTrackingManager.getTracker(),
+				vesselTracker: vesselTrackingManager.getTracker(),
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
@@ -1403,11 +1416,43 @@ async function main(): Promise<void> {
 			timeout: 1000,
 		})
 
+		shutdown.register({
+			name: "vessel-tracking",
+			handler: async () => {
+				log.info("Shutting down vessel tracking")
+				vesselTrackingManager.stop()
+			},
+			timeout: 1000,
+		})
+
 		// Step 10: Start API server
 		await apiServer.start()
 		checkpoint()
 
 		const wsBroadcaster = apiServer.getWebSocketBroadcaster()
+
+		// Analog transmissions from the live demodulator's squelch (WG1 req 3, 4).
+		// Started before liveDemod.start(), so a later POST start is covered too.
+		// Shutdown is LIFO: registered after "activity", this runs first, so the
+		// final closed event is broadcast and stored before Activity and the API
+		// close. own(7) does the same on a failed startup (Activity is own(8)).
+		const transmissions = wireAnalogTransmissions({
+			source: liveDemod,
+			frequencyAt: tunerFrequencyAt(id => tunerController.getState(id)),
+			broadcast: event => {
+				wsBroadcaster.broadcastLiveAudioTransmission(event)
+			},
+			sink: () => activity.transmissionSink(),
+		})
+		own(7, () => transmissions.stop())
+		shutdown.register({
+			name: "analog-transmissions",
+			handler: async () => {
+				log.info("Shutting down analog transmissions")
+				transmissions.stop()
+			},
+			timeout: 1000,
+		})
 
 		// Wire live demodulator events to WebSocket broadcaster
 		liveDemod.on("level", level => {
@@ -1513,6 +1558,7 @@ async function main(): Promise<void> {
 		// Start aircraft tracking manager and enrichment service
 		aircraftTrackingManager.start()
 		aircraftEnrichmentService.start()
+		vesselTrackingManager.start()
 
 		// Step 13: Connect to configured sources and wire to fanout
 		for (const sourceConfig of config.sources) {

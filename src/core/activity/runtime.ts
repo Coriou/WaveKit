@@ -55,6 +55,23 @@ export interface ActivityRuntime {
 	close(): Promise<void>
 }
 
+/**
+ * The config-derived part of the runtime options (the `activity` block). An
+ * omitted retention or admission block stays unset, so the store applies the
+ * bounded ACTIVITY_LIMIT_DEFAULTS (WG1 req 7.1, 7.2).
+ */
+export function activityConfigOptions(activity: {
+	enabled: boolean
+	retention?: ActivityRetentionOverrides | undefined
+	admission?: ActivityAdmissionOverrides | undefined
+}): Pick<StartActivityRuntimeOptions, "enabled" | "retention" | "admission"> {
+	return {
+		enabled: activity.enabled,
+		...(activity.retention ? { retention: activity.retention } : {}),
+		...(activity.admission ? { admission: activity.admission } : {}),
+	}
+}
+
 export interface StartActivityRuntimeOptions {
 	enabled: boolean
 	stateDir: string

@@ -45,6 +45,9 @@ import type {
 	OperatorDataReadDto,
 	BandPlansServerMessage,
 	VesselServerMessage,
+	VesselState,
+	VesselTrackerStats,
+	AnalogTransmissionEventData,
 } from "@wavekit/api-types"
 
 /**
@@ -988,6 +991,17 @@ export class WebSocketEventBroadcaster {
 	}
 
 	/**
+	 * Broadcasts one squelch-delimited analog transmission edge (open, then
+	 * close) on the live-audio channel (WG1 req 3.2).
+	 */
+	broadcastLiveAudioTransmission(event: AnalogTransmissionEventData): void {
+		this.broadcast("live-audio", {
+			type: "live-audio:transmission",
+			data: event,
+		})
+	}
+
+	/**
 	 * Broadcasts digital voice call state (start, encryption change, end).
 	 */
 	broadcastDigitalVoiceCall(call: DigitalVoiceCallEventData): void {
@@ -1143,6 +1157,42 @@ export class WebSocketEventBroadcaster {
 	broadcastAircraftStats(stats: AircraftTrackerStats): void {
 		this.broadcast("aircraft", {
 			type: "aircraft:stats",
+			data: stats,
+		})
+	}
+
+	/** A vessel heard for the first time (WG1 req 6.4). */
+	broadcastVesselNew(vessel: VesselState): void {
+		this.broadcast("vessels", {
+			type: "vessel:new",
+			channel: "vessels",
+			data: vessel,
+		})
+	}
+
+	/** A known vessel's merged state changed. */
+	broadcastVesselUpdate(vessel: VesselState): void {
+		this.broadcast("vessels", {
+			type: "vessel:update",
+			channel: "vessels",
+			data: vessel,
+		})
+	}
+
+	/** A vessel expired or was evicted at the cap, with its final state. */
+	broadcastVesselLost(mmsi: string, vessel: VesselState): void {
+		this.broadcast("vessels", {
+			type: "vessel:lost",
+			channel: "vessels",
+			data: { mmsi, vessel },
+		})
+	}
+
+	/** Periodic vessel tracker statistics. */
+	broadcastVesselStats(stats: VesselTrackerStats): void {
+		this.broadcast("vessels", {
+			type: "vessel:stats",
+			channel: "vessels",
 			data: stats,
 		})
 	}

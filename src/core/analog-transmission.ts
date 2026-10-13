@@ -13,6 +13,7 @@ import type {
 	AnalogTransmissionEventData,
 	AnalogTransmissionFrequency,
 	AnalogTransmissionPayload,
+	TunerState,
 } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 import {
@@ -95,6 +96,30 @@ type _LiveDemodulatorIsAnalogSource = AssertExtends<
 	LiveDemodulator,
 	AnalogTransmissionSource
 >
+
+/**
+ * Event-time frequency port from the tuner (WG1 req 3.4): the tuned centre
+ * plus the demodulator offset. Trust follows the spectrum engine's rule
+ * (external control is "relay", otherwise "commanded"). Null when the source
+ * has no tuner state or its centre is a placeholder the core never commanded
+ * or observed.
+ */
+export function tunerFrequencyAt(
+	getState: (
+		sourceId: string,
+	) =>
+		| Pick<TunerState, "frequency" | "controlMode" | "unknownFields">
+		| undefined,
+): AnalogTransmissionTrackerOptions["frequencyAt"] {
+	return (sourceId, offsetHz) => {
+		const state = getState(sourceId)
+		if (!state || state.unknownFields?.includes("frequency")) return null
+		return {
+			hz: state.frequency + offsetHz,
+			tuningTrust: state.controlMode === "external" ? "relay" : "commanded",
+		}
+	}
+}
 
 export function toActivityPayload(
 	event: AnalogTransmissionEventData,
@@ -458,4 +483,42 @@ function configIdentity(config: LiveDemodConfig): TransmissionConfigIdentity {
 			? {}
 			: { squelchMode: config.squelchMode }),
 	}
+}
+
+export interface AnalogTransmissionWiring {
+	source: AnalogTransmissionSource
+	frequencyAt: AnalogTransmissionTrackerOptions["frequencyAt"]
+	/** WebSocket delivery of open and closed events (live-audio channel). */
+	broadcast: (event: AnalogTransmissionEventData) => void
+	/**
+	 * Read at each close, so a runtime that becomes ready or closes later is
+	 * honoured. Null while Activity is disabled, unavailable or closed.
+	 */
+	sink: () => ((payload: AnalogTransmissionPayload) => void) | null
+	now?: () => number
+	randomUUID?: () => string
+}
+
+/**
+ * Builds and starts the tracker with its WS and Activity outputs (WG1 req
+ * 3.2, 3.9, 4.1, 4.5). `stop()` on the result closes an open transmission and
+ * still delivers both outputs, so call it before Activity and the API close.
+ */
+export function wireAnalogTransmissions(
+	wiring: AnalogTransmissionWiring,
+): AnalogTransmissionTracker {
+	const tracker = new AnalogTransmissionTracker({
+		source: wiring.source,
+		frequencyAt: wiring.frequencyAt,
+		...(wiring.now ? { now: wiring.now } : {}),
+		...(wiring.randomUUID ? { randomUUID: wiring.randomUUID } : {}),
+	})
+	tracker.on("transmission", event => {
+		wiring.broadcast(event)
+	})
+	tracker.on("closed", payload => {
+		wiring.sink()?.(payload)
+	})
+	tracker.start()
+	return tracker
 }

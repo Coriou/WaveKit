@@ -56,6 +56,7 @@ import { liveAudioRoutes } from "./routes/live-audio.js"
 import { digitalVoiceRoutes } from "./routes/digital-voice.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
+import { vesselRoutes } from "./routes/vessels.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
 import { spectrumRoutes } from "./routes/spectrum.js"
@@ -71,6 +72,7 @@ import { SourceStatusPublisher } from "./websocket/source-status-publisher.js"
 import { toApiDecoderInfo } from "./serializers/decoder-status.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
+import type { VesselTracker } from "../core/vessel-tracker.js"
 import { installAccessHooks } from "../access/fastify-adapter.js"
 import type { FastifyAccessController } from "../access/fastify-adapter.js"
 import { registerAccessRoutes } from "../access/access-routes.js"
@@ -135,6 +137,8 @@ export interface ApiServerDependencies {
 	digitalVoice?: DigitalVoiceService | undefined
 	resourceAggregator?: ResourceAggregator | undefined
 	aircraftTracker?: AircraftTracker | undefined
+	/** AIS vessel current state (WG1 req 6). */
+	vesselTracker?: VesselTracker | undefined
 	scanner?: ScannerService | undefined
 	spectrum?: SpectrumService | undefined
 	logger: Logger
@@ -179,6 +183,7 @@ export class ApiServer {
 	private readonly digitalVoice?: DigitalVoiceService | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
+	private readonly vesselTracker?: VesselTracker | undefined
 	private readonly scanner?: ScannerService | undefined
 	private readonly spectrum?: SpectrumService | undefined
 	private readonly audioConfig?: AudioConfig | undefined
@@ -225,6 +230,7 @@ export class ApiServer {
 		this.digitalVoice = dependencies.digitalVoice
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
+		this.vesselTracker = dependencies.vesselTracker
 		this.scanner = dependencies.scanner
 		this.spectrum = dependencies.spectrum
 		this.audioConfig = dependencies.audioConfig
@@ -816,6 +822,22 @@ export class ApiServer {
 			})
 		}
 
+		// AIS vessel tracker events (WG1 req 6.4)
+		if (this.vesselTracker) {
+			this.vesselTracker.on("vessel:new", vessel => {
+				this.wsBroadcaster.broadcastVesselNew(vessel)
+			})
+			this.vesselTracker.on("vessel:update", vessel => {
+				this.wsBroadcaster.broadcastVesselUpdate(vessel)
+			})
+			this.vesselTracker.on("vessel:lost", (mmsi, vessel) => {
+				this.wsBroadcaster.broadcastVesselLost(mmsi, vessel)
+			})
+			this.vesselTracker.on("stats:update", stats => {
+				this.wsBroadcaster.broadcastVesselStats(stats)
+			})
+		}
+
 		this.log.debug("Event broadcasting handlers registered")
 	}
 
@@ -870,6 +892,7 @@ export class ApiServer {
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
 					{ name: "aircraft", description: "Aircraft tracking endpoints" },
+					{ name: "vessels", description: "AIS vessel tracking endpoints" },
 					{ name: "live-audio", description: "Live demodulation endpoints" },
 					{ name: "tuner", description: "RTL-TCP tuner control endpoints" },
 					{ name: "tuner-relay", description: "RTL-TCP tuner relay endpoints" },
@@ -1191,6 +1214,13 @@ export class ApiServer {
 		if (this.aircraftTracker) {
 			await this.app.register(aircraftRoutes, {
 				tracker: this.aircraftTracker,
+			})
+		}
+
+		// AIS vessel current-state routes (WG1 req 6.1-6.3)
+		if (this.vesselTracker) {
+			await this.app.register(vesselRoutes, {
+				tracker: this.vesselTracker,
 			})
 		}
 
