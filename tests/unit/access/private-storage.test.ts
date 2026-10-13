@@ -726,3 +726,50 @@ describe("private single-operator persistence", () => {
 		).toMatchObject({ sessions: { sessions: [] } })
 	})
 })
+
+describe("last-seen persistence (WG2 req 11.6, R1 #6)", () => {
+	const failNextTempOpen = () => {
+		const open = fs.open.bind(fs)
+		let armed = true
+		vi.spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
+			if (armed && String(path).endsWith(".tmp")) {
+				armed = false
+				throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" })
+			}
+			return open(path, flags, mode)
+		})
+	}
+
+	it("does not latch the storage on a failed last-seen write; the next login commits", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const sessions = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			snapshot: storage.startupSnapshot(),
+			persist: storage.persist,
+			persistSeen: storage.persistSeen,
+			logger: { warn: () => undefined },
+		})
+		const browser = await sessions.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		failNextTempOpen()
+		await sessions.noteSeen(browser.principalId, Date.now())
+		expect(storage.unavailable).toBe(false)
+		expect(sessions.unavailable).toBe(false)
+		const next = await sessions.create()
+		expect(next.kind).toBe("created")
+		const state = JSON.parse(
+			await fs.readFile(join(directory, "access-state.json"), "utf8"),
+		) as { sessions: { sessions: unknown[] } }
+		expect(state.sessions.sessions).toHaveLength(2)
+	})
+
+	it("still latches a failed full commit", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const snapshot = storage.startupSnapshot()
+		failNextTempOpen()
+		await expect(storage.persist(snapshot)).rejects.toThrow()
+		expect(storage.unavailable).toBe(true)
+	})
+})

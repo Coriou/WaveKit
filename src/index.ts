@@ -572,6 +572,7 @@ async function main(): Promise<void> {
 				},
 				directory: process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? "",
 				ownership: "single-host-pid-namespace",
+				logger,
 			})
 			checkpoint()
 		}

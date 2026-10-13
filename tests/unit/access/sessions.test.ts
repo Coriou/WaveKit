@@ -299,6 +299,28 @@ describe("durable remembered-browser authority", () => {
 		).rejects.toMatchObject({ code: "ACCESS_UNAVAILABLE" })
 	})
 
+	it("clears a stored last-seen hour after the current hour or before creation instead of rejecting (R1 #13)", async () => {
+		const HOUR = 3_600_000
+		const env = await setup({ epochNow: () => 5 * HOUR })
+		created(await env.store.create())
+		const snapshot = env.store.exportSnapshot()
+		const record = snapshot.sessions[0]!
+		for (const [stored, expected] of [
+			[6 * HOUR, null],
+			[4 * HOUR, null],
+			[5 * HOUR, 5 * HOUR],
+		] as const) {
+			const restored = await SessionStore.open({
+				...env.options,
+				snapshot: {
+					...snapshot,
+					sessions: [{ ...record, lastSeenAt: stored }],
+				},
+			})
+			expect(restored.exportSnapshot().sessions[0]?.lastSeenAt).toBe(expected)
+		}
+	})
+
 	it("rejects malformed, duplicate, future or overlong snapshot records without exposing private input", async () => {
 		const env = await setup()
 		const session = created(await env.store.create())

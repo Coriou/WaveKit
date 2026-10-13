@@ -47,11 +47,14 @@ interface SeenLogger {
 	warn(payload: { event: string; failures: number }): void
 }
 
-const seenLog = createLogger({ level: "warn" })
-const defaultSeenLogger: SeenLogger = {
-	warn(payload) {
-		seenLog.warn(payload)
-	},
+/** Fallback when no component logger is injected (unit tests, the setup utility). */
+function defaultSeenLogger(): SeenLogger {
+	const log = createLogger({ level: "warn" })
+	return {
+		warn(payload) {
+			log.warn(payload, "Session last-seen write failed")
+		},
+	}
 }
 const SEEN_LOG_INTERVAL_MS = 60_000
 
@@ -77,6 +80,8 @@ export interface SessionStoreOptions {
 	credentialBinding: string
 	/** Must durably and atomically replace the private snapshot before resolving. */
 	persist: (snapshot: SessionSnapshot) => Promise<void>
+	/** Last-seen writes; a failure must not latch the storage. Defaults to `persist`. */
+	persistSeen?: (snapshot: SessionSnapshot) => Promise<void>
 	/** Startup input only; never reload stale snapshots into a running store. */
 	snapshot?: unknown
 	ttlMs?: number
@@ -129,6 +134,7 @@ export class SessionStore {
 	#maxSessions: number
 	#maxListeners: number
 	#persist: (snapshot: SessionSnapshot) => Promise<void>
+	#persistSeen: (snapshot: SessionSnapshot) => Promise<void>
 	#random: AccessRandomBytes
 	#monotonic: () => number
 	#anchorMonotonic: number
@@ -146,6 +152,8 @@ export class SessionStore {
 		if (
 			!parsed.success ||
 			typeof options.persist !== "function" ||
+			(options.persistSeen !== undefined &&
+				typeof options.persistSeen !== "function") ||
 			(options.random !== undefined && typeof options.random !== "function") ||
 			(options.epochNow !== undefined &&
 				typeof options.epochNow !== "function") ||
@@ -163,9 +171,10 @@ export class SessionStore {
 		this.#maxSessions = parsed.data.maxSessions
 		this.#maxListeners = parsed.data.maxListenersPerSession
 		this.#persist = options.persist
+		this.#persistSeen = options.persistSeen ?? options.persist
 		this.#random = options.random ?? randomBytes
 		this.#monotonic = options.monotonicNow ?? (() => performance.now())
-		this.#log = options.logger ?? defaultSeenLogger
+		this.#log = options.logger ?? defaultSeenLogger()
 		try {
 			this.#anchorEpoch = (options.epochNow ?? Date.now)()
 			this.#anchorMonotonic = this.#monotonic()
@@ -236,7 +245,22 @@ export class SessionStore {
 			ids.add(record.deviceId)
 			hashes.add(record.tokenHash)
 		}
-		return parsed.data
+		// WG2 R1 #13: a last-seen hour after the current hour (clock moved back) or before the
+		// device's creation hour is not evidence of use; clear it rather than reject the file.
+		const nowHour = floorHour(this.#lastNow)
+		return {
+			...parsed.data,
+			sessions: parsed.data.sessions.map(record => {
+				const created = floorHour(record.createdAt)
+				return record.lastSeenAt !== null &&
+					(nowHour === undefined ||
+						record.lastSeenAt > nowHour ||
+						created === undefined ||
+						record.lastSeenAt < created)
+					? { ...record, lastSeenAt: null }
+					: record
+			}),
+		}
 	}
 
 	#now(): number {
@@ -425,15 +449,15 @@ export class SessionStore {
 	/**
 	 * Last-seen persistence. Unlike #commit, a failure does not latch the
 	 * authority, notify leases, or change the committed map. The caller counts
-	 * and logs. PrivateAccessStorage still marks its own file unavailable after
-	 * an uncertain write; that is the storage latch, not this authority latch.
+	 * and logs. PrivateAccessStorage.persistSeen does not latch its storage on a
+	 * failed write either (only on an integrity failure found before writing).
 	 */
 	async #commitSeen(
 		next: Map<string, SessionRecord>,
 		now: number,
 	): Promise<void> {
 		try {
-			await this.#persist(this.#snapshot(next))
+			await this.#persistSeen(this.#snapshot(next))
 		} catch {
 			this.#countSeenFailure(now)
 			return

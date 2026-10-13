@@ -505,10 +505,21 @@ export class PrivateAccessStorage {
 		this.#state = result.data
 	}
 
-	async #atomic(name: string, content: string, initial = false): Promise<void> {
+	/**
+	 * `latch: "io"` (last-seen writes) still latches on an integrity failure found before any
+	 * write (directory, marker, missing state), but not on a failed write, sync or rename:
+	 * the previous state file stays authoritative and the next full commit rewrites it.
+	 */
+	async #atomic(
+		name: string,
+		content: string,
+		initial = false,
+		latch: "always" | "integrity" = "always",
+	): Promise<void> {
 		const temp = join(this.#directory, `.${name}-${randomUUID()}.tmp`)
 		let handle: FileHandle | undefined
 		let ownedTemp = false
+		let writing = false
 		try {
 			if (Buffer.byteLength(content) > MAX_BYTES)
 				throw failure("ACCESS_STORAGE_INVALID")
@@ -521,6 +532,7 @@ export class PrivateAccessStorage {
 				throw failure("ACCESS_STORAGE_INCOMPLETE")
 			if (name === STATE && (await this.#read(MARKER, 64)) !== MARKER_CONTENT)
 				throw failure("ACCESS_STORAGE_INCOMPLETE")
+			writing = true
 			handle = await fs.open(
 				temp,
 				constants.O_WRONLY |
@@ -540,7 +552,7 @@ export class PrivateAccessStorage {
 			ownedTemp = false
 			await this.#handle.sync()
 		} catch {
-			this.#unavailable = true
+			if (latch === "always" || !writing) this.#unavailable = true
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
 		} finally {
 			if (handle) await handle.close().catch(() => undefined)
@@ -570,6 +582,27 @@ export class PrivateAccessStorage {
 			const sessions = validateSnapshot(copy, current.credentialBinding)
 			const next = { ...current, sessions }
 			await this.#atomic(STATE, JSON.stringify(next))
+			this.#state = next
+		})
+	}
+
+	/**
+	 * WG2 req 11.6: last-seen persistence. Same validation and atomic replace as `persist`, but a
+	 * failed write does not mark the storage unavailable (see #atomic), so one bad hourly write
+	 * never locks out logins.
+	 */
+	persistSeen = (snapshot: SessionSnapshot): Promise<void> => {
+		let copy: unknown
+		try {
+			copy = structuredClone(snapshot)
+		} catch {
+			return Promise.reject(failure("ACCESS_STORAGE_INVALID"))
+		}
+		return this.#serialize(async () => {
+			const current = this.#current()
+			const sessions = validateSnapshot(copy, current.credentialBinding)
+			const next = { ...current, sessions }
+			await this.#atomic(STATE, JSON.stringify(next), false, "integrity")
 			this.#state = next
 		})
 	}
