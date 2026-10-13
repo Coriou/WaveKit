@@ -301,6 +301,8 @@ export class BandPlanStorage {
 		const stat = await handle.stat()
 		if (
 			(directory ? !stat.isDirectory() : !stat.isFile()) ||
+			// Permission bits only: a setgid parent makes a new child directory inherit
+			// S_ISGID on Linux, which does not widen owner-only access.
 			(privateMode !== undefined &&
 				(stat.uid !== process.getuid?.() ||
 					(stat.mode & 0o777) !== privateMode))

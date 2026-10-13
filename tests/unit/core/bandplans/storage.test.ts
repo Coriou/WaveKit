@@ -11,6 +11,7 @@ import {
 	symlink,
 	writeFile,
 } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
 import { join } from "node:path"
 import { BANDPLANS_LIMITS } from "@wavekit/api-types"
 import { build } from "esbuild"
@@ -655,7 +656,7 @@ describe("band plan storage", { timeout: 60_000 }, () => {
 		const path = await root()
 		const outfile = join(
 			process.cwd(),
-			"node_modules/.cache/r1store-crash-open.mjs",
+			`node_modules/.cache/bandplans-crash-open-${randomUUID()}.mjs`,
 		)
 		await mkdir(join(process.cwd(), "node_modules/.cache"), { recursive: true })
 		const storageEntry = join(

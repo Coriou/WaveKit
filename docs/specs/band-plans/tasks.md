@@ -1,6 +1,8 @@
 # Band plans and scan presets tasks (BP1)
 
-Status: reviewed design, not implemented. See [requirements](requirements.md) and
+Status: batch 1 implemented server-side (lanes A to D, Main M.1 to M.5); two
+independent review rounds, approved. Scanner consumption of the resolved stack, the WS
+change notice and client consumers remain open. See [requirements](requirements.md) and
 [design](design.md). Lanes A to D work in parallel against the frozen contract files and
 touch only their own paths; Main (M) composes, mounts and publishes. Every lane runs its
 touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
@@ -12,32 +14,32 @@ touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
 
 ## Lane A: domain, resolver, built-in projection
 
-- [ ] A.1 `builtin-packs.ts`: `projectBuiltinPacks`, `builtinPackIdFor`, `builtinGroupFor`,
+- [x] A.1 `builtin-packs.ts`: `projectBuiltinPacks`, `builtinPackIdFor`, `builtinGroupFor`,
       citation table transcribed from `builtin.ts` comments; frozen output.
   - _Requirements: 1.3, 2.1–2.4, 3.1_
   - **Property 14: Projection fidelity**
-- [ ] A.2 `resolve.ts`: `applyBandEdit` and `resolveBandPlans` exactly as designed.
+- [x] A.2 `resolve.ts`: `applyBandEdit` and `resolveBandPlans` exactly as designed.
   - _Requirements: 4.1–4.6, 5.1, 5.6, 5.8_
   - **Property 1: Resolver determinism**, **Property 2: Precedence**,
     **Property 3: Fall-through**, **Property 4: Segment shape**
-- [ ] A.3 `domain.ts`: pure `transition` for every mutation type, CAS, quotas,
+- [x] A.3 `domain.ts`: pure `transition` for every mutation type, CAS, quotas,
       no-op detection, edit validation against the target band, orphan retention.
   - _Requirements: 4.2, 5.2–5.7, 6.6, 6.8, 7.2, 8.2, 8.5_
   - **Property 5: Edit round-trip**, **Property 6: Edit survival**,
     **Property 7: CAS and revision** (pure part)
-- [ ] A.4 `tests/unit/repo/bandplans-isolation.test.ts`: pinned blobs, import
+- [x] A.4 `tests/unit/repo/bandplans-isolation.test.ts`: pinned blobs, import
       confinement of `src/core/bandplans/`, citation URLs present in `builtin.ts`.
   - _Requirements: 1.1, 10.2_
   - **Property 15: Authority isolation**
 
 ## Lane B: storage and service
 
-- [ ] B.1 `storage.ts`: dedicated `<stateDir>/bandplans/` storage per the operator-data
+- [x] B.1 `storage.ts`: dedicated `<stateDir>/bandplans/` storage per the operator-data
       durability design; injected stage failures; restart and invalid-state tests on real
       temporary directories.
   - _Requirements: 8.1, 8.3, 8.5_
   - **Property 8: Durability and latch**
-- [ ] B.2 `service.ts`: `openBandPlanService`, views, bounded queue, synchronous
+- [x] B.2 `service.ts`: `openBandPlanService`, views, bounded queue, synchronous
       `onCommit`, unavailable degradation, close/drain. Composes A, C and D modules; until
       they land, tests use the contract signatures with local stubs. Depends on A.3, B.1.
   - _Requirements: 4.2, 6.6, 8.2, 8.4, 9.2, 9.3_
@@ -46,22 +48,22 @@ touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
 
 ## Lane C: SDR++ importer and group map
 
-- [ ] C.1 `import/sdrpp.ts`: total `parseSdrppBandPlan` with size check, strict UTF-8,
+- [x] C.1 `import/sdrpp.ts`: total `parseSdrppBandPlan` with size check, strict UTF-8,
       row validation and skip counting, deterministic ids, colour hints, SHA-256.
   - _Requirements: 3.2, 3.4, 6.1–6.4, 6.7, 6.8_
   - **Property 10: Importer totality and bounds**
-- [ ] C.2 `import/group-map.ts`: frozen type and keyword tables, `mapImportGroup`, report
+- [x] C.2 `import/group-map.ts`: frozen type and keyword tables, `mapImportGroup`, report
       aggregation; fixed-vector test of both tables.
   - _Requirements: 3.1, 6.5_
   - **Property 11: Group mapping totality**
 
 ## Lane D: presets and route plugin
 
-- [ ] D.1 `presets.ts`: `builtinPresetsFor`, `presetIssuesFor`, `presetToJobSpec`;
+- [x] D.1 `presets.ts`: `builtinPresetsFor`, `presetIssuesFor`, `presetToJobSpec`;
       validate outputs with the real `scanJobSpecSchema` through Fastify's Ajv.
   - _Requirements: 7.1–7.4_
   - **Property 13: Preset to job validity**
-- [ ] D.2 `src/api/routes/bandplans.ts`: unmounted `bandPlanRoutes` plugin with
+- [x] D.2 `src/api/routes/bandplans.ts`: unmounted `bandPlanRoutes` plugin with
       `fastify.inject` tests on a fake `BandPlanService`: every route, key filtering,
       path-id validation, read-only ids, 428/409/413/422/503 mapping, body limits, GET-only
       registration without `authorizeMutation`, denial before admission.
@@ -69,26 +71,26 @@ touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
 
 ## Checkpoint
 
-- [ ] 1. Foundation checkpoint: all lane tests, root typecheck and lint pass; independent
+- [x] 1. Foundation checkpoint: all lane tests, root typecheck and lint pass; independent
      review of the merged lanes; no mounted or end-to-end claim.
   - _Requirements: 1–8, 10_
 
 ## Main (M)
 
-- [ ] M.1 `src/core/bandplans/index.ts` barrel exporting `openBandPlanService`, the plugin
+- [x] M.1 `src/core/bandplans/index.ts` barrel exporting `openBandPlanService`, the plugin
       types and the contract.
-- [ ] M.2 `src/index.ts`: open the service in both access modes with the scanner's
+- [x] M.2 `src/index.ts`: open the service in both access modes with the scanner's
       region, `station.country`, `writable = protectedMode`; register drain-before-close
       ownership like operator-data; storage failure never stops core.
   - _Requirements: 8.4, 9.2_
-- [ ] M.3 `src/api/server.ts`: register `bandPlanRoutes`; pass `authorizeMutation` only
+- [x] M.3 `src/api/server.ts`: register `bandPlanRoutes`; pass `authorizeMutation` only
       with the access controller; optional `bandplans` WS channel and `bandplans:changed`
       notices. Mounted protected and legacy composition tests.
   - _Requirements: 9.1–9.3_
-- [ ] M.4 Docs: `docs/API.md` band-plan section; `docs/SCANNER.md` note that the scanner
+- [x] M.4 Docs: `docs/API.md` band-plan section; `docs/SCANNER.md` note that the scanner
       still uses built-in plans and presets only produce job bodies; `docs/ROADMAP.md` item 3
       progress (settings store and country-from-location remain open).
   - _Requirements: 1.1, 9.1_
-- [ ] M.5 Acceptance checkpoint: full root suite, typecheck, lint, build, pinned-blob
+- [x] M.5 Acceptance checkpoint: full root suite, typecheck, lint, build, pinned-blob
       test; reconcile spec status. CLI and web consumers are a later allocation.
   - _Requirements: 1–10_

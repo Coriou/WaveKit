@@ -264,7 +264,17 @@ parent synced, files 0600 with ownership and type checks, bounded read of at mos
 fsync; before-rename failure keeps prior state, after-rename failure latches
 unavailable until reopen; atomic mkdir lock for the process lifetime, no stealing; close
 drains admitted work then releases the lock. No shared helper module with operator-data
-(no generic store abstraction); no automatic migration.
+(no generic store abstraction); no automatic migration. Mode checks compare permission
+bits only (`0o777`), so a setgid parent does not make the store unavailable.
+
+When `writable` is false (legacy mode) the store opens read-only: no mkdir, no lock, no
+init write and no temp sweep. An existing `state.json` gets the same checks and bounded
+read; a missing one serves an in-memory empty state reported `available` with the nil
+UUID as `storeId` (never persisted; no write route is mounted). A writable open sweeps
+leftover `.state-*.tmp` files under the lock. The additive option
+`onStoreUnavailable(reason)` reports a fixed token (`lock-held`, `invalid`, `oversized`,
+`permissions`, `io`) once when open ends unavailable and once on an after-rename latch;
+core logs it at warn level.
 
 ## REST (lane D plugin, Main mounts)
 

@@ -601,7 +601,7 @@ async function main(): Promise<void> {
 					const outcomes = await Promise.allSettled([
 						shutdown.shutdown(),
 						scannerPhases.completed(),
-						disposeReceiverAfterApi().then(() => closeBandPlans?.()),
+						disposeReceiverAfterApi().finally(() => closeBandPlans?.()),
 					])
 					if (admissionFailed || outcomes.some(x => x.status === "rejected"))
 						throw new WaveKitError(
