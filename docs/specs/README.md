@@ -29,6 +29,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [viewed-slice-spectrum](viewed-slice-spectrum/requirements.md)
 - [web-gaps-1](web-gaps-1/requirements.md): waterfall backfill and averaging, analog
   transmission events, AIS vessel tracker, Activity on by default (WG1)
+- [web-gaps-2](web-gaps-2/requirements.md): Activity presentation, APRS and Meshtastic
+  trackers, CTCSS/DTMF, AIS checksum, update throttle, call metadata, device labels,
+  lockouts skip sweeps, per-job hits (WG2)
 
 ## The three files
 

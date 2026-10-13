@@ -108,6 +108,12 @@ cannot create renewal or expose uncommitted state; requester expiry/revocation,
 storage failure and reentrant clock failure fail closed.
 Validates: Requirements 4.6, 4.7, 4.8.
 
+Property 7: **Device labels and coarse last-seen** (WG2) — for any admission and label
+timeline, `lastSeenAt` is hour-aligned and non-decreasing, at most one last-seen commit
+per device per UTC hour happens, a label or last-seen commit that fails leaves the
+committed snapshot unchanged, and no inventory read commits anything.
+Validates: Requirements 4.9–4.12.
+
 Use deterministic scenario tests for races, persistence faults and adapter effects;
 property-based tests map to these properties with at least 100 runs.
 
@@ -485,3 +491,58 @@ browser sessions. `--keep-sessions` rebinds them to the new credential
 generation; the operator then reviews `devices list` after restart. A previous
 in-memory persistence hook still cannot write the old binding. The command
 prints no secret.
+
+## Device names, kinds and coarse last-seen (WG2)
+
+Amends "Session-only device methods and DTO" for requirements 4.9–4.12 (user decision
+D3, 2026-10-13). The rest of that section, including "no device WS bus, online
+tracking, background clock", stands: last-seen is an hour, not presence.
+
+```ts
+type AccessDeviceKind =
+	| "browser"
+	| "phone"
+	| "tablet"
+	| "desktop"
+	| "cli"
+	| "other"
+interface AccessDeviceDto {
+	deviceId: string
+	createdAt: number
+	renewedAt: number
+	expiresAt: number
+	current: boolean
+	name?: string | null // always present once WG2 is implemented
+	kind?: AccessDeviceKind | null
+	lastSeenAt?: number | null // epoch ms, a multiple of 3 600 000
+}
+interface AccessDeviceLabelRequest {
+	deviceId: string
+	name?: string | null
+	kind?: AccessDeviceKind | null
+}
+interface AccessDeviceLabelResponse {
+	updated: boolean
+}
+```
+
+The fields are optional in the shared schema only so that the frozen contract precedes
+the implementation; projections always set them. The session snapshot record gains
+`name`, `kind` and `lastSeenAt` (nullable) at version 2; version 1 records load with
+nulls. `SessionStore` gains `label(deviceId, patch)` and `noteSeen(deviceId, now)`;
+both go through `#commit` on the existing queue. `noteSeen` is a no-op unless
+`floor(now / 1 h) * 1 h` is greater than the committed `lastSeenAt`, so a burst of
+requests within one hour produces one commit; while one is in flight further calls
+for that device are skipped. It is called after a successful authenticated admission
+in the Fastify adapter (HTTP and WebSocket), never from the inventory read, and its
+promise is caught. A persistence failure follows the existing latch rules for real
+mutations but a failed `noteSeen` alone only counts and logs.
+
+| Request/state                                | Result                                    |
+| -------------------------------------------- | ----------------------------------------- |
+| Valid session, CSRF, allowed Origin, body ok | 200 `{ updated: true }` after the commit  |
+| Unknown or expired device ID                 | 200 `{ updated: false }`                  |
+| Malformed body, invalid name, no keys        | 400 `MALFORMED_REQUEST`                   |
+| Missing session or CSRF, wrong Origin        | Existing 401/403                          |
+| Machine principal                            | 403 `SESSION_REQUIRED`                    |
+| Persistence failure                          | 503 `ACCESS_UNAVAILABLE`, state unchanged |

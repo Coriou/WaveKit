@@ -70,6 +70,9 @@ original CLI category vocabulary by owner decision on 2026-10-12.
 an evidence-owning adapter (e.g. icao:ABC123, mmsi:123456789, callsign:F1ABC,
 node:123, capcode:456, talkgroup-radio:7+42). It is not event identity or proof of
 scanner acceptance. Default null; never infer it from arbitrary decodedData.
+(WG2, 2026-10-13: the built-in key formats are fixed in
+[web gaps 2](../web-gaps-2/design.md); digital calls use `talkgroup:<tg>` and
+Meshtastic nodes `node:!xxxxxxxx`.)
 4.6 Accept optional position {lat, lon, altM?} from validated caller presentation.
 Latitude and longitude are finite degrees in [-90, 90] and [-180, 180]; altitude
 is finite metres. Omit unknown position; never fabricate it from RF context.

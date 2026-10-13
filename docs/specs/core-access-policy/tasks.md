@@ -283,6 +283,11 @@ retain their original scope. Backend verification is recorded below.
       deployment, RF/native, capacity or physical evidence acceptance. Task 9 remains
       a separate connected-client release gate.
       _Requirements: 1.1–1.3, 3.6, 4.8, 6.2–6.5_
+- [ ] 15. (WG2 lane D) Device names, kinds and coarse last-seen: snapshot version 2
+      migration, `POST /api/access/devices/label`, hour-aligned last-seen on
+      authenticated admission through the mutation queue, projections; Property 7.
+      See docs/specs/web-gaps-2.
+      _Requirements: 4.9–4.12_
 
 ### Backend implementation checkpoint — 2026-10-11
 
