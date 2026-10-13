@@ -1071,6 +1071,9 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		const env = await setupDeviceAuthority()
 		await env.server.start()
 		const paired = await env.pair()
+		// WG2 req 11: commit this hour's last-seen first (its own non-latching write), so the
+		// held write below is the refresh alone.
+		await env.context.api.sessions.noteSeen(paired.body.deviceId, 1_000_000)
 		const before = await deviceRead(env, paired.headers.cookie)
 		const durable = await fs.readFile(join(env.directory, "access-state.json"))
 		env.advance(1000)
@@ -1104,9 +1107,8 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 				...before.devices[0],
 				renewedAt: 1_001_000,
 				expiresAt: paired.body.expiresAt + 1000,
-				// WG2 access amendment 4.11: the refresh admission records its UTC hour (hour 0 here).
-				lastSeenAt: HOUR_OF(1_001_000),
 			})
+			expect(committed.devices[0]?.lastSeenAt).toBe(HOUR_OF(1_001_000))
 		} finally {
 			env.releaseBarriers()
 			await pending
@@ -1119,6 +1121,7 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		await env.server.start()
 		const requester = await env.pair()
 		const peer = await env.pair()
+		await env.context.api.sessions.noteSeen(requester.body.deviceId, 1_000_000)
 		const before = await deviceRead(env, requester.headers.cookie)
 		const durable = await fs.readFile(join(env.directory, "access-state.json"))
 		const barrier = env.holdNextPersist()
@@ -1150,15 +1153,8 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 				await fs.readFile(join(env.directory, "access-state.json")),
 			).not.toEqual(durable)
 			const committed = await deviceRead(env, requester.headers.cookie)
-			// WG2 access amendment 4.11: the requester's revoke admission records its UTC hour.
 			expect(committed.devices).toEqual(
-				before.devices
-					.filter(row => row.deviceId !== peer.body.deviceId)
-					.map(row =>
-						row.deviceId === requester.body.deviceId
-							? { ...row, lastSeenAt: HOUR_OF(1_000_000) }
-							: row,
-					),
+				before.devices.filter(row => row.deviceId !== peer.body.deviceId),
 			)
 		} finally {
 			env.releaseBarriers()
