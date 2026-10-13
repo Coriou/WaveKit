@@ -74,8 +74,8 @@ describe("activity ingress", () => {
 			decoderId: "adsb-1",
 			decoderType: "readsb",
 			outputType: "aircraft",
-			protocol: null,
-			category: "other",
+			protocol: "adsb",
+			category: "aircraft",
 			entityKey: null,
 			title: null,
 			fields: [],
@@ -87,6 +87,7 @@ describe("activity ingress", () => {
 			published: 1,
 			buildFailures: 0,
 			sinkFailures: 0,
+			presentationFailures: 0,
 		})
 	})
 
@@ -144,6 +145,7 @@ describe("activity ingress", () => {
 			published: 0,
 			buildFailures: 1,
 			sinkFailures: 0,
+			presentationFailures: 1,
 		})
 		expect(lines).toHaveLength(1)
 		expect(lines[0]).toMatchObject({
@@ -177,6 +179,7 @@ describe("activity ingress", () => {
 			published: 0,
 			buildFailures: 0,
 			sinkFailures: 1,
+			presentationFailures: 0,
 		})
 		ingress.publish("adsb-1", "readsb", output())
 		expect(ids).toBe(2)

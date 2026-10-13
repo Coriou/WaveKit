@@ -15,14 +15,14 @@ import type { DecodeEnvelope, JsonValue } from "../types.js"
 
 type JsonObject = { readonly [key: string]: JsonValue }
 
-interface CoalesceSpec {
+export interface CoalesceSpec {
 	/** Entity id field. */
 	entity: string
 	/** Position, kinematics, presence and reception metadata: never a reason to store. */
 	redundant: ReadonlySet<string>
 	/** Compared with the last stored value; a change (or a first value) is stored. */
 	identity: readonly string[]
-	/** Extra gate on the whole reception (AIS message types). */
+	/** Extra gate on the whole reception (AIS message types, APRS position types, mesh port). */
 	eligible?: (data: JsonObject) => boolean
 }
 
@@ -97,9 +97,108 @@ const SHIP: CoalesceSpec = {
 		SHIP_POSITION_TYPES.has(data["messageType"]),
 }
 
-const SPECS: Readonly<Record<string, CoalesceSpec>> = {
+/**
+ * APRS position packets (WG2 req 2.1). Objects, items, messages, status,
+ * weather and anything carrying `weather` or `message` stay ineligible.
+ */
+export const APRS_POSITION_DATA_TYPES: ReadonlySet<string> = new Set([
+	"Position",
+	"Position with messaging",
+	"Position with timestamp",
+	"Position with timestamp and messaging",
+	"Mic-E",
+	"Mic-E (old)",
+])
+
+const APRS: CoalesceSpec = {
+	entity: "source",
+	redundant: new Set([
+		"source",
+		"destination",
+		"path",
+		"dataType",
+		"lat",
+		"lon",
+		"altitude",
+		"course",
+		"speed",
+		"raw",
+		"timestamp",
+	]),
+	identity: ["symbol", "comment"],
+	eligible: data =>
+		typeof data["dataType"] === "string" &&
+		APRS_POSITION_DATA_TYPES.has(data["dataType"]) &&
+		typeof data["lat"] === "number" &&
+		Number.isFinite(data["lat"]) &&
+		typeof data["lon"] === "number" &&
+		Number.isFinite(data["lon"]),
+}
+
+/** Meshtastic POSITION_APP (portnum 3). No identity fields (WG2 req 2.2). */
+const MESHTASTIC: CoalesceSpec = {
+	entity: "from",
+	redundant: new Set([
+		"from",
+		"to",
+		"id",
+		"channel",
+		"hopLimit",
+		"hopStart",
+		"wantAck",
+		"viaMqtt",
+		"priority",
+		"portnum",
+		"payloadB64",
+		"payloadLen",
+		"rxRssi",
+		"rxSnr",
+		"rxTime",
+		"frequency",
+		"bw",
+		"sf",
+		"cr",
+	]),
+	identity: [],
+	eligible: data => data["portnum"] === 3,
+}
+
+/** Output-type allowlists. Aircraft and ship are the WG1 sets, unchanged. */
+export const COALESCE_SPECS: Readonly<Record<string, CoalesceSpec>> = {
 	aircraft: AIRCRAFT,
 	ship: SHIP,
+	aprs: APRS,
+	meshtastic: MESHTASTIC,
+}
+
+/**
+ * Stateless form of the coalescing allowlist (WG2 req 1.6). True when the
+ * eligibility gate passes and every non-null value is redundant. A present
+ * identity field (callsign, symbol, name, ...) is a full reception. Undefined
+ * values on a key outside both sets match `decide`: `undefined !== null`, so
+ * they are not redundant either.
+ */
+export function isCoalescibleShape(
+	outputType: string,
+	data: { readonly [key: string]: unknown },
+): boolean {
+	const spec = COALESCE_SPECS[outputType]
+	if (!spec) return false
+	if (spec.eligible !== undefined && !spec.eligible(data as JsonObject))
+		return false
+	for (const field of Object.keys(data)) {
+		const value = data[field]
+		if (
+			value === undefined &&
+			!spec.redundant.has(field) &&
+			!spec.identity.includes(field)
+		)
+			return false
+		if (value === undefined || value === null) continue
+		if (spec.identity.includes(field)) return false
+		if (!spec.redundant.has(field)) return false
+	}
+	return true
 }
 
 /** A value and the commit (reception) that set it, so one failed row undoes only its own part. */
@@ -153,7 +252,7 @@ export class PositionCoalescer {
 
 	decide(envelope: DecodeEnvelope): CoalesceDecision {
 		if (this.windowMs <= 0) return STORE_UNTRACKED
-		const spec = SPECS[envelope.outputType]
+		const spec = COALESCE_SPECS[envelope.outputType]
 		if (!spec) return STORE_UNTRACKED
 		const data = asObject(envelope.decodedData)
 		const id = data?.[spec.entity]
