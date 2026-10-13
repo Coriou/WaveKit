@@ -112,6 +112,14 @@ export interface BandPlanMutationResult {
 	readonly delivery: BandPlanDelivery
 }
 
+/** Fixed tokens for a store that cannot be served. Never file content or paths. */
+export type BandPlanStoreUnavailableReason =
+	| "lock-held"
+	| "invalid"
+	| "oversized"
+	| "permissions"
+	| "io"
+
 export interface BandPlanServiceOptions {
 	/** Existing durable local stateDir; the service owns `<stateDir>/bandplans/`. */
 	readonly stateDir: string
@@ -120,6 +128,13 @@ export interface BandPlanServiceOptions {
 	readonly writable: boolean
 	/** Synchronous change notice after a durable changed commit; never awaited. */
 	readonly onCommit?: (event: BandPlansChangedEventData) => undefined
+	/**
+	 * Called once when open cannot use the store, and once when a post-rename
+	 * failure latches a store that had opened. Listener failures are ignored.
+	 */
+	readonly onStoreUnavailable?: (
+		reason: BandPlanStoreUnavailableReason,
+	) => void
 	/** Test seams. */
 	readonly domain?: Partial<Omit<DomainContext, "region">>
 	readonly storageStage?: (stage: string) => void | Promise<void>
