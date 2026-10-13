@@ -314,7 +314,7 @@ function transmissionRow(
 			unit: "dBFS",
 		})
 	}
-	const summaryJson = fitSummary({
+	const summaryJson = fitTransmissionSummary({
 		eventId: record.eventId,
 		kind: "analog-transmission",
 		producedAt: record.producedAt,
@@ -508,6 +508,38 @@ interface SummaryDraft {
 	title: string | null
 	fields: DecodeField[]
 	position?: DecodeEnvelope["position"]
+}
+
+/**
+ * Transmission summaries drop identifier bytes until they fit. fitSummary
+ * leaves eventId and sourceId intact, which is required for decoder rows;
+ * a long source id must not make this summary fail the 4 KiB writer check.
+ */
+function fitTransmissionSummary(draft: SummaryDraft): string {
+	let sourceId = draft.sourceId
+	let eventId = draft.eventId
+	const build = (): string => fitSummary({ ...draft, sourceId, eventId })
+	let json = build()
+	while (Buffer.byteLength(json, "utf8") > MAX_SUMMARY_BYTES && sourceId) {
+		const next = truncateUtf8(
+			sourceId,
+			Math.max(0, Buffer.byteLength(sourceId, "utf8") - 64),
+		)
+		sourceId = next.length === sourceId.length ? "" : next
+		json = build()
+	}
+	while (
+		Buffer.byteLength(json, "utf8") > MAX_SUMMARY_BYTES &&
+		eventId.length > 0
+	) {
+		const next = truncateUtf8(
+			eventId,
+			Math.max(0, Buffer.byteLength(eventId, "utf8") - 64),
+		)
+		eventId = next.length === eventId.length ? "" : next
+		json = build()
+	}
+	return json
 }
 
 function fitSummary(draft: SummaryDraft): string {

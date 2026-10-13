@@ -122,6 +122,29 @@ describe("analog transmission rows", () => {
 		])
 	})
 
+	it("keeps the summary inside 4 KiB when the source id is huge", () => {
+		const sourceId = `rtl-${"x".repeat(5_000)}`
+		const built = rowFor(payload({ sourceId }))
+		expect(built.sourceId).toBe(sourceId)
+		expect(Buffer.byteLength(built.summaryJson, "utf8")).toBeLessThanOrEqual(
+			MAX_SUMMARY_BYTES,
+		)
+		const stored = {
+			seq: "1",
+			event_id: built.eventId,
+			kind: built.kind,
+			summary_json: built.summaryJson,
+			record_json: built.recordJson,
+		}
+		const record = parseStoredRecord(stored)
+		expect(
+			record.kind === "analog-transmission" && record.payload.sourceId,
+		).toBe(sourceId)
+		const summary = parseStoredSummary(stored)
+		expect(summary.sourceId?.startsWith("rtl-")).toBe(true)
+		expect(summary.sourceId).not.toBe(sourceId)
+	})
+
 	it("rejects an unknown or invalid stored payload as corrupt", () => {
 		const built = rowFor(payload())
 		const cases = [
