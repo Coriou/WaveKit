@@ -1,6 +1,10 @@
 /** JSON schemas for /api/scanner (spec § 12.1). Response bodies are DTOs from @wavekit/api-types. */
 import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
+import {
+	JOB_HITS_LIMIT_DEFAULT,
+	JOB_HITS_LIMIT_MAX,
+} from "../../core/scanner/job-hits.js"
 
 const protocolEnum = [
 	"analog-fm",
@@ -279,6 +283,66 @@ export const observationsQuerySchema = {
 		cursor: { type: "string" },
 		limit: { type: "integer", minimum: 1, maximum: 500 },
 	},
+	additionalProperties: false,
+} as const
+
+/** WG2 req 13.3: GET /api/scanner/jobs/:id/hits?limit (1–500, default 100). */
+export const jobHitsQuerySchema = {
+	type: "object",
+	properties: {
+		limit: {
+			type: "integer",
+			minimum: 1,
+			maximum: JOB_HITS_LIMIT_MAX,
+			default: JOB_HITS_LIMIT_DEFAULT,
+		},
+	},
+	additionalProperties: false,
+} as const
+
+const jobHitStatsSchema = {
+	type: "object",
+	properties: {
+		discoveries: { type: "integer" },
+		hits: { type: "integer" },
+		newDiscoveries: { type: "integer" },
+		truncated: { type: "boolean" },
+	},
+	required: ["discoveries", "hits", "newDiscoveries", "truncated"],
+	additionalProperties: false,
+} as const
+
+/** `ScanJobHitsResponse`, every field. */
+export const jobHitsResponseSchema = {
+	type: "object",
+	properties: {
+		jobId: { type: "string" },
+		stats: jobHitStatsSchema,
+		hits: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					jobId: { type: "string" },
+					discoveryId: { type: "string" },
+					hits: { type: "integer" },
+					firstHitAt: { type: "string" },
+					lastHitAt: { type: "string" },
+					firstSeenInJob: { type: "boolean" },
+				},
+				required: [
+					"jobId",
+					"discoveryId",
+					"hits",
+					"firstHitAt",
+					"lastHitAt",
+					"firstSeenInJob",
+				],
+				additionalProperties: false,
+			},
+		},
+	},
+	required: ["jobId", "stats", "hits"],
 	additionalProperties: false,
 } as const
 

@@ -41,6 +41,7 @@ import type {
 } from "../../core/scanner/types.js"
 import { RECORDING_ID } from "../../core/scanner/store/evidence-store.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
+import { JOB_HITS_LIMIT_DEFAULT } from "../../core/scanner/job-hits.js"
 import { ConfigValidationError } from "../../utils/errors.js"
 import {
 	captureIdParamsSchema,
@@ -53,6 +54,8 @@ import {
 	jobIdParamsSchema,
 	looseObjectSchema,
 	observationsQuerySchema,
+	jobHitsQuerySchema,
+	jobHitsResponseSchema,
 	resumeBodySchema,
 	scanJobSpecSchema,
 } from "./scanner-schemas.js"
@@ -67,6 +70,7 @@ export type ScannerRouteService = Pick<
 	| "createJob"
 	| "listJobs"
 	| "getJob"
+	| "jobHits"
 	| "patchJob"
 	| "pauseJob"
 	| "resumeJob"
@@ -456,6 +460,30 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		async (request, reply) =>
 			scanner.getJob(request.params.id) ??
 			notFound(reply, "Job", request.params.id),
+	)
+
+	fastify.get<{ Params: { id: string }; Querystring: { limit?: number } }>(
+		"/api/scanner/jobs/:id/hits",
+		{
+			schema: {
+				tags,
+				summary:
+					"Per-discovery hit statistics of a job, most recent first (in memory)",
+				params: jobIdParamsSchema,
+				querystring: jobHitsQuerySchema,
+				response: { 200: jobHitsResponseSchema, ...errors },
+			},
+		},
+		async (request, reply) => {
+			try {
+				return scanner.jobHits(
+					request.params.id,
+					request.query.limit ?? JOB_HITS_LIMIT_DEFAULT,
+				)
+			} catch (err) {
+				return sendError(reply, err)
+			}
+		},
 	)
 
 	fastify.patch<{ Params: { id: string }; Body: ScanJobSpecBody }>(

@@ -27,6 +27,9 @@ import { ZodError } from "zod"
 import type {
 	Bandplan as BandplanDto,
 	ScanJob,
+	ScanJobHit,
+	ScanJobHitStats,
+	ScanJobHitsResponse,
 	ScannerActivityEventData,
 	ScannerCapture,
 	ScannerDiscoveryEventData,
@@ -62,6 +65,7 @@ import {
 } from "./evidence/capture-recorder.js"
 import { CaptureStore } from "./evidence/capture-store.js"
 import { ulid } from "./ids.js"
+import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
 	IdentifyRunner,
@@ -122,6 +126,7 @@ import {
 	DiscoveryStore,
 	estimateFrequencyError,
 	type DiscoveryFilter,
+	type StoreChange,
 } from "./store/discovery-store.js"
 import {
 	DISCOVERY_ID,
@@ -360,6 +365,10 @@ export class ScannerService extends EventEmitter {
 	private readonly recorder: CaptureRecorder
 	private readonly jobs = new Map<string, JobRecord>()
 	private readonly drivers = new Map<string, JobDriver>()
+	/** WG2 req 13: per-job hit statistics (in memory; reset on start, dropped with the job). */
+	private readonly hits = new Map<string, JobHits>()
+	/** Store changes raised inside one ingest, emitted after its hits are counted (WG2 req 13.2). */
+	private ingestChanges: [string, StoreChange][] | null = null
 	/** § 10.7: engine instances the passive cost rule already judged (once, at openedAt + 60 s). */
 	private readonly costChecked = new WeakSet<SpectrumEngine>()
 	private readonly live = new Map<string, LiveObservation>()
@@ -1259,10 +1268,13 @@ export class ScannerService extends EventEmitter {
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
+		// WG2 req 13.4: hit counts start with the job (a resume keeps them).
+		this.hits.delete(record.id)
 		try {
 			await driver.start()
 		} catch (err) {
 			this.jobs.delete(record.id)
+			this.hits.delete(record.id)
 			this.drivers.delete(record.id)
 			// The start's own error is what the caller gets.
 			await driver
@@ -1415,6 +1427,7 @@ export class ScannerService extends EventEmitter {
 				409,
 			)
 		this.jobs.delete(id)
+		this.hits.delete(id)
 		this.resumeViews.delete(id)
 		this.drivers.delete(id)
 		void this.persistJobs()
@@ -1508,10 +1521,13 @@ export class ScannerService extends EventEmitter {
 		const driver = this.createIdentifyDriver(record, identify)
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
+		// WG2 req 13.4: hit counts start with the job (a resume keeps them).
+		this.hits.delete(record.id)
 		try {
 			await driver.start()
 		} catch (err) {
 			this.jobs.delete(record.id)
+			this.hits.delete(record.id)
 			this.drivers.delete(record.id)
 			await driver.dispose()
 			throw err
@@ -2049,11 +2065,38 @@ export class ScannerService extends EventEmitter {
 			: "retune"
 	}
 
+	/**
+	 * WG2 req 13.2: the store's discovery changes raised by this ingest are emitted once its hits are
+	 * counted, so the event of the attributed discovery carries `jobHits`.
+	 */
 	private ingest(
 		live: LiveObservation,
 		track: TrackSnapshot,
 		endReason?: ObservationEndReason,
 	): void {
+		const outer = this.ingestChanges
+		const changes: [string, StoreChange][] = []
+		this.ingestChanges = changes
+		let attributed: string | null = null
+		try {
+			attributed = this.ingestTracked(live, track, endReason)
+		} finally {
+			this.ingestChanges = outer
+			for (const [id, change] of changes)
+				this.emitDiscoveryChange(
+					id,
+					change,
+					id === attributed ? this.jobHitsOf(live.jobIds, id) : [],
+				)
+		}
+	}
+
+	/** Returns the discovery the observation is attributed to (null: transient). */
+	private ingestTracked(
+		live: LiveObservation,
+		track: TrackSnapshot,
+		endReason?: ObservationEndReason,
+	): string | null {
 		const now = this.now()
 		const sweep = live.jobIds.some(
 			id => this.jobs.get(id)?.spec.mode === "sweep",
@@ -2079,12 +2122,15 @@ export class ScannerService extends EventEmitter {
 					const r = this.jobs.get(id)
 					if (r) r.counts.transients += 1
 				}
-			return
+			return null
 		}
 		if (live.discoveryId === null) {
 			for (const id of live.jobIds) {
 				const r = this.jobs.get(id)
-				if (r) r.counts.observations += 1
+				if (!r) continue
+				r.counts.observations += 1
+				// WG2 req 13.1: one hit per observation attributed to a discovery.
+				this.hitsOf(id).record(res.discoveryId, now, res.change === "created")
 			}
 		}
 		live.discoveryId = res.discoveryId
@@ -2094,6 +2140,40 @@ export class ScannerService extends EventEmitter {
 			delete live.undecodedReason
 		}
 		this.dirty = true
+		return res.discoveryId
+	}
+
+	private hitsOf(jobId: string): JobHits {
+		let h = this.hits.get(jobId)
+		if (!h) {
+			h = new JobHits(jobId)
+			this.hits.set(jobId, h)
+		}
+		return h
+	}
+
+	/** One entry per job of the observation that tracks the discovery (WG2 req 13.2). */
+	private jobHitsOf(
+		jobIds: readonly string[],
+		discoveryId: string,
+	): ScanJobHit[] {
+		const out: ScanJobHit[] = []
+		for (const id of jobIds) {
+			const hit = this.hits.get(id)?.entry(discoveryId)
+			if (hit) out.push(hit)
+		}
+		return out
+	}
+
+	/** WG2 req 13.3: GET /api/scanner/jobs/:id/hits, most recent first. */
+	jobHits(id: string, limit: number): ScanJobHitsResponse {
+		this.requireJob(id)
+		const h = this.hits.get(id)
+		return {
+			jobId: id,
+			stats: h ? h.stats() : emptyHitStats(),
+			hits: h ? h.list(limit) : [],
+		}
 	}
 
 	private classifierContext(
@@ -3340,6 +3420,7 @@ export class ScannerService extends EventEmitter {
 			Math.max(0, ended.length - IDENTIFY_KEEP_JOBS),
 		)) {
 			this.jobs.delete(j.id)
+			this.hits.delete(j.id)
 			this.drivers.delete(j.id)
 		}
 	}
@@ -3605,6 +3686,7 @@ export class ScannerService extends EventEmitter {
 			if (existing && isTerminal(existing.state)) {
 				// An ended passive job (e.g. its source was removed) is rebuilt once the source is eligible again.
 				this.jobs.delete(id)
+				this.hits.delete(id)
 				this.drivers.delete(id)
 				existing = undefined
 			}
@@ -3619,6 +3701,7 @@ export class ScannerService extends EventEmitter {
 							),
 						)
 				this.jobs.delete(id)
+				this.hits.delete(id)
 				this.drivers.delete(id)
 				continue
 			}
@@ -3659,6 +3742,7 @@ export class ScannerService extends EventEmitter {
 			const driver = this.createDriver(record)
 			this.jobs.set(id, record)
 			this.drivers.set(id, driver)
+			this.hits.delete(id)
 			try {
 				await driver.start()
 			} catch (err) {
@@ -3669,6 +3753,7 @@ export class ScannerService extends EventEmitter {
 					"Passive job failed to start; retrying when the source changes",
 				)
 				this.jobs.delete(id)
+				this.hits.delete(id)
 				this.drivers.delete(id)
 				await driver.dispose()
 			}
@@ -3895,7 +3980,7 @@ export class ScannerService extends EventEmitter {
 				? { lockoutExclusions: record.lockoutExclusions }
 				: {}),
 			progress: driver
-				? driver.progress()
+				? { ...driver.progress(), hitStats: this.hitStatsOf(record.id) }
 				: {
 						sweepIndex: 0,
 						hopIndex: 0,
@@ -3926,6 +4011,10 @@ export class ScannerService extends EventEmitter {
 				: {}),
 			...(driver instanceof IdentifyRunner ? { identify: driver.view() } : {}),
 		}
+	}
+
+	private hitStatsOf(jobId: string): ScanJobHitStats {
+		return this.hits.get(jobId)?.stats() ?? emptyHitStats()
 	}
 
 	private preemptedByOf(record: JobRecord): Pick<ScanJob, "preemptedBy"> {
@@ -3962,6 +4051,7 @@ export class ScannerService extends EventEmitter {
 		for (const r of records) {
 			const p = this.drivers.get(r.id)?.progress()
 			if (!p) continue
+			const stats = this.hitStatsOf(r.id)
 			const hop = r.plan.hops[p.hopIndex]
 			const data: ScannerProgressEventData = {
 				jobId: r.id,
@@ -3976,6 +4066,8 @@ export class ScannerService extends EventEmitter {
 				...(p.holdingOn ? { holdingOn: p.holdingOn } : {}),
 				coverage: p.coverage,
 				probes: p.probes.length,
+				hits: stats.hits,
+				newDiscoveries: stats.newDiscoveries,
 			}
 			this.emit("progress", data)
 		}
@@ -4100,16 +4192,26 @@ export class ScannerService extends EventEmitter {
 		)
 	}
 
-	private readonly onStoreChange = (
+	private readonly onStoreChange = (id: string, change: StoreChange): void => {
+		if (this.ingestChanges) {
+			this.ingestChanges.push([id, change])
+			return
+		}
+		this.emitDiscoveryChange(id, change, [])
+	}
+
+	private emitDiscoveryChange(
 		id: string,
-		change: ScannerDiscoveryEventData["change"] | "transient",
-	): void => {
+		change: StoreChange,
+		jobHits: ScanJobHit[],
+	): void {
 		if (change === "transient") return
 		const discovery = this.store.get(id)
 		if (!discovery) return
 		this.emit("discovery", {
 			change,
 			discovery,
+			...(jobHits.length > 0 ? { jobHits } : {}),
 		} satisfies ScannerDiscoveryEventData)
 	}
 
