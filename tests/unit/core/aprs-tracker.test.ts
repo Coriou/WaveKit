@@ -520,6 +520,19 @@ describe("AprsTracker", () => {
 		expect(statsEvents).toEqual([2])
 	})
 
+	it("keeps the 60 s rate bounded for a burst of packets that are never deduped", () => {
+		let clock = 10_000
+		const aprs = tracker({ now: () => clock })
+		for (let i = 0; i < 20_000; i++) {
+			aprs.processAprs("d", packet({ raw: undefined }))
+		}
+		expect(aprs.getStats().packetsPerSecond).toBeCloseTo(20_000 / 60)
+		expect(aprs.getStats().stationCount).toBe(1)
+		expect(aprs.getStats().duplicatesDropped).toBe(0)
+		clock = 80_000
+		expect(aprs.getStats().packetsPerSecond).toBe(0)
+	})
+
 	it("counts malformed payloads as invalid and does not throw or clear state", () => {
 		const aprs = tracker()
 		aprs.processAprs(

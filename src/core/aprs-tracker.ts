@@ -280,7 +280,8 @@ export class AprsTracker extends EventEmitter<AprsTrackerEvents> {
 	private packetsProcessed = 0
 	private duplicatesDropped = 0
 	private invalidPackets = 0
-	private readonly uniqueMarks: number[] = []
+	/** Unique packets per processing second. At most one bucket per second of the window. */
+	private readonly rateBuckets = new Map<number, number>()
 	private lastPacketAtMs: number | null = null
 	private expiredTotal = 0
 
@@ -452,25 +453,24 @@ export class AprsTracker extends EventEmitter<AprsTrackerEvents> {
 	private noteUnique(atMs: number): void {
 		this.noteHeard(atMs)
 		const now = this.now()
-		this.uniqueMarks.push(now)
+		const second = Math.floor(now / 1000)
+		this.rateBuckets.set(second, (this.rateBuckets.get(second) ?? 0) + 1)
 		this.pruneMarks(now)
 	}
 
+	/** Drops seconds that ended before the rolling 60 s window. */
 	private pruneMarks(now: number): void {
 		const cutoff = now - RATE_WINDOW_MS
-		let drop = 0
-		while (
-			drop < this.uniqueMarks.length &&
-			(this.uniqueMarks[drop] ?? 0) < cutoff
-		) {
-			drop += 1
+		for (const second of this.rateBuckets.keys()) {
+			if (second * 1000 + 999 < cutoff) this.rateBuckets.delete(second)
 		}
-		if (drop > 0) this.uniqueMarks.splice(0, drop)
 	}
 
 	private packetsPerSecond(now: number): number {
 		this.pruneMarks(now)
-		return this.uniqueMarks.length / 60
+		let count = 0
+		for (const value of this.rateBuckets.values()) count += value
+		return count / 60
 	}
 
 	/**
