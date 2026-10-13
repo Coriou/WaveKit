@@ -524,6 +524,15 @@ describe("APRS speed is knots (WG2 req 3.9)", () => {
 		expect(result.symbol).toBe("/>")
 	})
 
+	it("decodes an independent Mic-E vector (490SUP) to 49 03.50 N, 123 45.67 W, 86 kn, 194 degrees", () => {
+		const result = parseAprsInfo("N0CALL", "490SUP", [], "`3I_t]z>/")
+
+		expect(result.lat).toBeCloseTo(49 + 3.5 / 60, 6)
+		expect(result.lon).toBeCloseTo(-(123 + 45.67 / 60), 6)
+		expect(result.speed).toBe(86)
+		expect(result.course).toBe(194)
+	})
+
 	it("decodes a Mic-E vector South and East with no longitude offset", () => {
 		const result = parseAprsInfo("N0CALL", "332554", [], '`(#fn"O>/')
 
