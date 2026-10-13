@@ -1,8 +1,8 @@
 import type { TunerControlMode } from "@wavekit/api-types"
 import { WaveKitError } from "../../../utils/errors.js"
 import { defaultFftSize } from "../../spectrum/fft.js"
-import { bandplansFor, resolveBandplan } from "../bandplan/index.js"
-import type { BandRegionCode } from "../bandplan/index.js"
+import { bandplansFor } from "../bandplan/index.js"
+import type { Bandplan, BandRegionCode } from "../bandplan/index.js"
 import type { FreqRange, IqFormat } from "../../spectrum/types.js"
 import type {
 	Hop,
@@ -59,6 +59,8 @@ export interface PreviewContext {
 	impactFor(sourceId: string, spec: NormalisedJobSpec): Impact
 	region: BandRegionCode
 	tunerRange(sourceId: string): FreqRange
+	/** Omitted: bandplansFor(region). Present: host ranges and plan-id lookup. */
+	bandplans?: readonly Bandplan[]
 }
 
 type Provenance = NormalisedJobSpec["provenance"][string]
@@ -280,7 +282,8 @@ export function normaliseSpec(
 	// Ranges: operator ranges (inheriting rasters from the enclosing regional bandplan), then bandplans.
 	const ranges: ScanRange[] = []
 	let inherited = false
-	const hosts = bandplansFor(ctx.region)
+	const scannerPlans = ctx.bandplans ?? bandplansFor(ctx.region)
+	const hosts = scannerPlans
 		.flatMap(p => p.ranges)
 		.sort((a, b) => a.endHz - a.startHz - (b.endHz - b.startHz))
 	for (const r of spec.ranges ?? []) {
@@ -304,7 +307,7 @@ export function normaliseSpec(
 		ranges.push(own)
 	}
 	for (const id of spec.bandplans ?? []) {
-		const bp = resolveBandplan(id, ctx.region)
+		const bp = scannerPlans.find(p => p.id === id)
 		if (!bp) {
 			issues.push(
 				issue(

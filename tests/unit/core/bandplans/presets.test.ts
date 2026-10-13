@@ -104,19 +104,21 @@ const arbName = fc.string({
 		),
 	),
 })
-const arbRange = fc.record({
-	startHz: fc.integer({ min: 1, max: 1_000_000_000 }),
-	endHz: fc.integer({ min: 1, max: 1_000_000_000 }),
-	rasters: fc.array(
-		fc.record({
-			spacingHz: fc.integer({ min: 1, max: 1_000_000 }),
-			firstChannelHz: fc.integer({ min: 0, max: 1_000_000_000 }),
-		}),
-		{ maxLength: 2 },
-	),
-	obwHz: fc.array(fc.integer({ min: 1, max: 1_000_000 }), { maxLength: 2 }),
-	protocols: fc.array(arbProtocol, { maxLength: 3 }),
-}).filter(range => range.startHz < range.endHz)
+const arbRange = fc
+	.record({
+		startHz: fc.integer({ min: 1, max: 1_000_000_000 }),
+		endHz: fc.integer({ min: 1, max: 1_000_000_000 }),
+		rasters: fc.array(
+			fc.record({
+				spacingHz: fc.integer({ min: 1, max: 1_000_000 }),
+				firstChannelHz: fc.integer({ min: 0, max: 1_000_000_000 }),
+			}),
+			{ maxLength: 2 },
+		),
+		obwHz: fc.array(fc.integer({ min: 1, max: 1_000_000 }), { maxLength: 2 }),
+		protocols: fc.array(arbProtocol, { maxLength: 3 }),
+	})
+	.filter(range => range.startHz < range.endHz)
 const arbExclusion = fc
 	.record({
 		startHz: fc.integer({ min: 1, max: 1_000_000_000 }),
@@ -214,7 +216,9 @@ describe("band-plan presets", () => {
 			expect(presets.map(preset => preset.region)).toEqual(
 				presets.map(() => region),
 			)
-			expect(new Set(presets.map(preset => preset.id)).size).toBe(presets.length)
+			expect(new Set(presets.map(preset => preset.id)).size).toBe(
+				presets.length,
+			)
 			for (const preset of presets.slice(0, plans.length)) {
 				expect(preset.job).toEqual({
 					mode: null,
@@ -253,20 +257,14 @@ describe("band-plan presets", () => {
 		expect(eu.map(preset => [preset.id, preset.job.bandplans])).toEqual([
 			["builtin-combo-ism-srd", ["ism-433", "ism-868", "ism-169"]],
 			["builtin-combo-personal-radio", ["pmr446", "dpmr446", "cb"]],
-			[
-				"builtin-combo-land-mobile-marine",
-				["vhf-land-mobile", "marine-vhf"],
-			],
+			["builtin-combo-land-mobile-marine", ["vhf-land-mobile", "marine-vhf"]],
 		])
 		for (const region of ["US", "CA", "AU", "NZ", "JP", "CN"] as const) {
 			const combos = builtinPresetsFor(region).filter(preset =>
 				preset.id.startsWith("builtin-combo-"),
 			)
 			expect(combos.map(preset => [preset.id, preset.job.bandplans])).toEqual([
-				[
-					"builtin-combo-land-mobile-marine",
-					["vhf-land-mobile", "marine-vhf"],
-				],
+				["builtin-combo-land-mobile-marine", ["vhf-land-mobile", "marine-vhf"]],
 			])
 		}
 	})
@@ -378,25 +376,118 @@ describe("band-plan presets", () => {
 			}
 		}
 		fc.assert(
-			fc.property(arbOperatorPreset, fc.constantFrom(...REGIONS), (preset, region) => {
-				const spec = presetToJobSpec(preset)
-				assertAccepted(spec)
-				expect(spec.name).toBe(preset.name)
-				expect(spec.kind).toBeUndefined()
-				expect(spec.sourceId).toBeUndefined()
-				expect(spec.tuner).toBeUndefined()
-				if (preset.job.bandplans.length === 0)
-					expect(spec.bandplans).toBeUndefined()
-				else expect(spec.bandplans).toEqual([...preset.job.bandplans])
-				if (preset.job.ranges.length === 0) expect(spec.ranges).toBeUndefined()
-				else expect(spec.ranges).toHaveLength(preset.job.ranges.length)
-				expect(presetIssuesFor(preset, region)).toEqual(
-					unresolved(preset, region).map(bandplanId => ({
-						code: "unknown-bandplan",
-						bandplanId,
-					})),
+			fc.property(
+				arbOperatorPreset,
+				fc.constantFrom(...REGIONS),
+				(preset, region) => {
+					const spec = presetToJobSpec(preset)
+					assertAccepted(spec)
+					expect(spec.name).toBe(preset.name)
+					expect(spec.kind).toBeUndefined()
+					expect(spec.sourceId).toBeUndefined()
+					expect(spec.tuner).toBeUndefined()
+					if (preset.job.bandplans.length === 0)
+						expect(spec.bandplans).toBeUndefined()
+					else expect(spec.bandplans).toEqual([...preset.job.bandplans])
+					if (preset.job.ranges.length === 0)
+						expect(spec.ranges).toBeUndefined()
+					else expect(spec.ranges).toHaveLength(preset.job.ranges.length)
+					expect(presetIssuesFor(preset, region)).toEqual(
+						unresolved(preset, region).map(bandplanId => ({
+							code: "unknown-bandplan",
+							bandplanId,
+						})),
+					)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("judges preset ids against the effective scanner list when it is supplied", () => {
+		// Feature: band-plans, Property 19: Preset applicability
+		// Validates: Requirements 11.6, 7.3
+		const watch: ScanPreset = {
+			kind: "operator",
+			id: "00000000-0000-4000-8000-0000000000aa",
+			name: "Watch",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			updatedAt: "2026-01-01T00:00:00.000Z",
+			job: {
+				mode: null,
+				bandplans: ["airband", "not-a-plan", "pmr446"],
+				ranges: [],
+				exclusions: [],
+				protocols: [],
+				sensitivity: null,
+				thresholdDb: null,
+				fftSize: null,
+				integrationMs: null,
+				dwellMs: null,
+				settleMs: null,
+			},
+		}
+		const present = new Set(["not-a-plan", "pmr446"])
+		expect(presetIssuesFor(watch, "EU", present)).toEqual([
+			{ code: "unknown-bandplan", bandplanId: "airband" },
+		])
+		expect(presetIssuesFor(watch, "EU", new Set(["not-a-plan"]))).toEqual([
+			{ code: "unknown-bandplan", bandplanId: "airband" },
+			{ code: "unknown-bandplan", bandplanId: "pmr446" },
+		])
+		expect(presetIssuesFor(watch, "EU", new Set())).toEqual([
+			{ code: "unknown-bandplan", bandplanId: "airband" },
+			{ code: "unknown-bandplan", bandplanId: "not-a-plan" },
+			{ code: "unknown-bandplan", bandplanId: "pmr446" },
+		])
+		expect(presetIssuesFor(watch, "EU")).toEqual([
+			{ code: "unknown-bandplan", bandplanId: "not-a-plan" },
+		])
+		expect(presetIssuesFor(watch, "US")).toEqual([
+			{ code: "unknown-bandplan", bandplanId: "airband" },
+			{ code: "unknown-bandplan", bandplanId: "not-a-plan" },
+			{ code: "unknown-bandplan", bandplanId: "pmr446" },
+		])
+		for (const region of REGIONS) {
+			const known = new Set(bandplansFor(region).map(plan => plan.id))
+			for (const preset of builtinPresetsFor(region)) {
+				expect(presetIssuesFor(preset, region)).toEqual([])
+				expect(presetIssuesFor(preset, region, known)).toEqual([])
+				const dropped = new Set(
+					[...known].filter(id => id !== preset.job.bandplans[0]),
 				)
-			}),
+				expect(presetIssuesFor(preset, region, dropped)).toEqual(
+					preset.job.bandplans
+						.filter(id => !dropped.has(id))
+						.map(bandplanId => ({ code: "unknown-bandplan", bandplanId })),
+				)
+			}
+		}
+		fc.assert(
+			fc.property(
+				arbOperatorPreset,
+				fc.constantFrom(...REGIONS),
+				fc.uniqueArray(arbBandplanId, { maxLength: 6 }),
+				(preset, region, ids) => {
+					const effective = new Set(ids)
+					expect(presetIssuesFor(preset, region, effective)).toEqual(
+						preset.job.bandplans
+							.filter(id => !effective.has(id))
+							.map(bandplanId => ({ code: "unknown-bandplan", bandplanId })),
+					)
+					expect(presetIssuesFor(preset, region)).toEqual(
+						unresolved(preset, region).map(bandplanId => ({
+							code: "unknown-bandplan",
+							bandplanId,
+						})),
+					)
+					expect(
+						presetIssuesFor(preset, region, new Set()).map(
+							issue => issue.bandplanId,
+						),
+					).toEqual([...preset.job.bandplans])
+				},
+			),
 			{ numRuns: 100 },
 		)
 	})
