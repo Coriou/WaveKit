@@ -2522,6 +2522,14 @@ on restart. DTOs in `packages/api-types/src/vessels.ts`. Vessels unheard for
 15 minutes expire; at 5,000 vessels the least recently heard is evicted. Live
 updates on the [`vessels` channel](#vessels-channel).
 
+AIS NMEA input is checksum-checked (WG2): a sentence is accepted only when the
+XOR of the characters between `!` (or `$`) and `*` equals the two hex digits
+after `*` (either case) and nothing follows them. A failing sentence, fragment
+or not, is dropped before reassembly, counted in the decoder's `stats.errors`
+(see `GET /api/decoders/:id`) and logged at debug level at most once a minute;
+a good copy of a dropped fragment still completes its group within 2 s.
+AIS-catcher's JSON output is not affected.
+
 #### GET /api/vessels
 
 `VesselListResponse`: `{ vessels, stats, timestamp }`, most recently heard
@@ -2584,6 +2592,43 @@ The store holds three kinds:
   are not stored. Provenance on this path is unknown RF: `sourceId` and
   `frequency` are null.
 - `analog-transmission`: one record per closed
+### APRS
+
+APRS station, object and item current state (WG2) from the `direwolf`
+decoders. In memory only: no position history, cleared on restart. DTOs in
+`packages/api-types/src/aprs.ts`. A digipeated copy (same source, destination
+and info within 30 s) only raises `digipeatedCopies`. Entities unheard for
+2 hours expire; at 2,000 the least recently heard is evicted. A killed object
+or item is removed at once. Live updates on the [`aprs` channel](#aprs-channel).
+
+#### GET /api/aprs/stations
+
+`AprsStationListResponse`: `{ stations, stats, timestamp }`, most recently
+heard first. An `AprsStation` has `key` (the Activity entity key:
+`callsign:<CALL[-SSID]>` upper case with `-0` omitted, `aprs-object:<name>` or
+`aprs-item:<name>`), `kind` (`station`, `object`, `item`), `callsign` (for
+objects and items: the station that last reported it), `name` (objects and
+items), `position` (`{ lat, lon, at }` or null), `altitudeFt`, `courseDeg`,
+`speedKn` (knots), `symbol` (table and code), `comment`, `status` (stations
+only), `weather` (`temperatureF`, `humidityPct`, `pressureMbar`,
+`windSpeedMph`, `windDirectionDeg`, `rainLastHourIn`, `at`, or null), `path`,
+`lastDataType`, `killed`, `packetCount` (unique packets), `digipeatedCopies`,
+`decoderId`, `firstSeen` and `lastSeen`. Fields a report does not carry are
+never cleared.
+
+#### GET /api/aprs/stats
+
+`AprsTrackerStats`: `stationCount`, `withPosition`, `byKind`,
+`packetsProcessed`, `duplicatesDropped`, `invalidPackets`, `packetsPerSecond`
+(60 s average of unique packets), `lastPacketAt`, `latestKey`, `expiredTotal`
+and `timestamp`.
+
+#### GET /api/aprs/stations/:key
+
+One `AprsStation` by its exact key (`callsign:N0CALL-9`). 400
+`VALIDATION_ERROR` for a malformed key; 404
+`{ error, code: "APRS_STATION_NOT_FOUND", key }` when it is not tracked.
+
 ### Mesh
 
 Meshtastic node current state (WG2) from the `meshtastic` decoder output. In
@@ -2912,7 +2957,9 @@ Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
 [SCANNER.md](SCANNER.md)), `spectrum` (core waterfall frames, opt-in),
 `bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel))
-and `vessels` (AIS vessel state, see [Vessels channel](#vessels-channel)).
+`vessels` (AIS vessel state, see [Vessels channel](#vessels-channel)), `aprs`
+(APRS stations, objects and items, see [APRS channel](#aprs-channel)) and `mesh`
+(Meshtastic nodes, see [Mesh channel](#mesh-channel)).
 `activity` is not one of these channels. It uses `activity:subscribe` and
 `activity:unsubscribe`. See [Activity](#activity).
 
@@ -3439,6 +3486,13 @@ On the `digital-voice` channel: a dsd-fme call started, turned out encrypted, or
 ended (`DigitalVoiceCall`). Published in the same tick as the decoder's
 `call_start` / `call_end` (same `callId`).
 
+Optional call metadata (WG2), present only when dsd-fme reported it:
+`colourCode` (DMR, 0–15), `nac` (P25, 1–4 upper-case hex digits),
+`algorithmId` (P25, only for an encrypted call or a non-clear algorithm) and
+`keyId` (1–8 upper-case hex digits), `ran` (NXDN, 0–63) and `errors`
+(`{ crc, fec }` counts). A malformed optional field is dropped and counted; the
+call is still published.
+
 ```json
 {
 	"type": "digital-voice:call",
@@ -3718,10 +3772,18 @@ behind [Vessels](#vessels). Not replayed: refetch `GET /api/vessels` after a
 reconnect.
 
 - `vessel:new` — `VesselState`, the first report of an MMSI
-- `vessel:update` — `VesselState` after each merged report
+- `vessel:update` — `VesselState` after a merged report, throttled (below)
 - `vessel:lost` — `{ mmsi, vessel }` when a vessel expires (15 minutes
   unheard) or is evicted at the 5,000-vessel cap
 - `vessel:stats` — `VesselTrackerStats`, every 5 s
+
+Entity updates are throttled (WG2): per entity at most one `vessel:update`
+per 2 s. The first update after a quiet window is sent at once; later ones in
+the window are coalesced and the latest is sent when the window ends. An
+identity change (`name`, `callsign`, `navStatus`, `shipType`
+or `destination`) is sent at once. A pending update is dropped when the
+entity is lost, so `vessel:lost` is never followed by an older update. `vessel:new`,
+`vessel:lost` and `vessel:stats` are never throttled.
 
 ```json
 {
@@ -3865,6 +3927,20 @@ The API does not currently implement rate limiting. For production deployments, 
 }
 ```
 
+#### APRS channel
+
+APRS current state, mirroring the tracker behind [APRS](#aprs). Not replayed:
+refetch `GET /api/aprs/stations` after a reconnect. Digipeated copies send
+nothing.
+
+- `aprs:new` — `AprsStation`, the first packet of an entity
+- `aprs:update` — `AprsStation` after a unique packet, throttled as on the
+  [Vessels channel](#vessels-channel) (identity: `kind`, `symbol`, `comment`,
+  `status`, `killed`)
+- `aprs:lost` — `{ key, station }` when an entity expires (2 hours unheard),
+  is evicted at the 2,000 cap, or is killed (`station.killed: true`)
+- `aprs:stats` — `AprsTrackerStats`, every 5 s
+
 #### Mesh channel
 
 Meshtastic node current state, mirroring the tracker behind [Mesh](#mesh).
@@ -3872,7 +3948,9 @@ Not replayed: refetch `GET /api/mesh/nodes` after a reconnect. Flood copies
 send nothing.
 
 - `mesh:new` — `MeshNode`, the first packet from a node
-- `mesh:update` — `MeshNode` after each unique packet
+- `mesh:update` — `MeshNode` after a unique packet, throttled as on the
+  [Vessels channel](#vessels-channel) (identity: `longName`, `shortName`,
+  `role`, `hwModel`)
 - `mesh:lost` — `{ nodeId, node }` when a node expires (4 hours unheard) or
   is evicted at the 1,000-node cap
 - `mesh:stats` — `MeshTrackerStats`, every 5 s
