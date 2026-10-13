@@ -462,7 +462,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 			"N0CALL-9",
 			"position+msg",
 			"51.50,-0.12",
-			"35 mph",
+			"35 kn",
 		])
 		expect(pos.text).toBe("on the road")
 		const msg = formatMessage(
