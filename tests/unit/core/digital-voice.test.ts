@@ -8,6 +8,7 @@ import { EventEmitter } from "node:events"
 import * as http from "node:http"
 import { Writable } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import pino from "pino"
 import { createLogger } from "../../../src/utils/logger.js"
 import { DigitalVoiceConfigSchema } from "../../../src/config.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
@@ -443,6 +444,110 @@ describe("DigitalVoiceService", () => {
 		it("ignores malformed voice-call events", () => {
 			decoder.emit("voice-call", { callId: 3 })
 			expect(calls).toHaveLength(0)
+			expect(service.metadataFieldDrops).toBe(0)
+		})
+
+		it("copies valid call metadata and uppercases hex", () => {
+			decoder.emit(
+				"voice-call",
+				state({
+					colourCode: 0,
+					nac: " 1b ",
+					ran: 63,
+					algorithmId: "84",
+					keyId: "0ab",
+					errors: { crc: 1, fec: 0 },
+				}),
+			)
+			expect(calls[0]).toMatchObject({
+				decoderId: "dsd-fme",
+				colourCode: 0,
+				nac: "1B",
+				ran: 63,
+				algorithmId: "84",
+				keyId: "0AB",
+				errors: { crc: 1, fec: 0 },
+			})
+			expect(service.metadataFieldDrops).toBe(0)
+		})
+
+		it("drops only the invalid optional fields and still publishes the call", () => {
+			decoder.emit(
+				"voice-call",
+				state({
+					colourCode: 16,
+					nac: "1B",
+					ran: 3,
+					algorithmId: "zz",
+					keyId: "AA",
+					errors: { crc: 0, fec: 0 },
+				}),
+			)
+			expect(calls).toHaveLength(1)
+			expect(calls[0]).toMatchObject({
+				nac: "1B",
+				ran: 3,
+				keyId: "AA",
+				errors: { crc: 0, fec: 0 },
+			})
+			expect(calls[0]).not.toHaveProperty("colourCode")
+			expect(calls[0]).not.toHaveProperty("algorithmId")
+			expect(service.metadataFieldDrops).toBe(2)
+
+			decoder.emit("voice-call", state({ ran: 64, colourCode: 15 }))
+			expect(calls).toHaveLength(2)
+			expect(calls[1]).toMatchObject({ colourCode: 15 })
+			expect(calls[1]).not.toHaveProperty("ran")
+			expect(service.metadataFieldDrops).toBe(3)
+
+			decoder.emit("voice-call", state({ errors: { crc: 1 } }))
+			expect(calls[2]).not.toHaveProperty("errors")
+			expect(service.metadataFieldDrops).toBe(4)
+
+			decoder.emit("voice-call", state({ nac: "ABCDE", keyId: "" }))
+			expect(calls[3]).not.toHaveProperty("nac")
+			expect(calls[3]).not.toHaveProperty("keyId")
+			expect(service.metadataFieldDrops).toBe(6)
+			expect(service.getStatus().call?.callId).toBe("dsd-fme-abc-1")
+		})
+
+		it("logs the first invalid metadata drop once", async () => {
+			const lines: string[] = []
+			const sink = new Writable({
+				write(chunk, _enc, cb) {
+					lines.push(String(chunk))
+					cb()
+				},
+			})
+			const extraPort = await freePort()
+			const extra = new DigitalVoiceService(
+				pino({ level: "warn" }, sink),
+				DigitalVoiceConfigSchema.parse({
+					httpPort: extraPort,
+					jitterBufferMs: 100,
+					maxBufferMs: 500,
+				}),
+			)
+			try {
+				await extra.prepareDecoderConfigs([dsd("dsd-log")])
+				const source = new EventEmitter()
+				const heard: DigitalVoiceCall[] = []
+				extra.on("call", (call: DigitalVoiceCall) => heard.push(call))
+				extra.attachDecoder("dsd-log", source)
+				source.emit("voice-call", state({ colourCode: 99 }))
+				source.emit("voice-call", state({ ran: 99, algorithmId: "0x84" }))
+				expect(heard).toHaveLength(2)
+				expect(heard[0]).not.toHaveProperty("colourCode")
+				expect(heard[1]).not.toHaveProperty("ran")
+				expect(heard[1]).not.toHaveProperty("algorithmId")
+				expect(extra.metadataFieldDrops).toBe(3)
+				const warns = lines.filter(line =>
+					line.includes("Dropped invalid digital voice call metadata"),
+				)
+				expect(warns).toHaveLength(1)
+			} finally {
+				await extra.destroy()
+			}
 		})
 	})
 

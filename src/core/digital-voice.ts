@@ -140,6 +140,30 @@ const STREAM: StreamFormat = {
 	format: "s16le",
 }
 
+const META_FIELDS = [
+	"colourCode",
+	"ran",
+	"nac",
+	"algorithmId",
+	"keyId",
+	"errors",
+] as const
+
+type MetaField = (typeof META_FIELDS)[number]
+
+/** Invalid optional metadata becomes undefined instead of failing the call. */
+function lenient<T>(schema: z.ZodType<T>) {
+	return schema.optional().catch(undefined)
+}
+
+function lenientHex(maxLength: number) {
+	const pattern = new RegExp(`^[0-9A-F]{1,${maxLength}}$`)
+	return z.preprocess(
+		value => (typeof value === "string" ? value.trim().toUpperCase() : value),
+		z.string().regex(pattern).optional().catch(undefined),
+	)
+}
+
 const VoiceCallStateSchema = z.object({
 	callId: z.string().min(1),
 	protocol: z.string().nullable(),
@@ -150,7 +174,38 @@ const VoiceCallStateSchema = z.object({
 	active: z.boolean(),
 	startedAt: z.string(),
 	endedAt: z.string().optional(),
+	/** DMR colour code 0–15. */
+	colourCode: lenient(z.number().int().min(0).max(15)),
+	/** NXDN RAN 0–63. */
+	ran: lenient(z.number().int().min(0).max(63)),
+	/** P25 NAC, upper-case hex, 1–4 digits. */
+	nac: lenientHex(4),
+	/** Encryption algorithm id, upper-case hex, 1–8 digits. */
+	algorithmId: lenientHex(8),
+	/** Encryption key id, upper-case hex, 1–8 digits. */
+	keyId: lenientHex(8),
+	errors: lenient(
+		z.object({
+			crc: z.number().int().nonnegative(),
+			fec: z.number().int().nonnegative(),
+		}),
+	),
 })
+
+function droppedMetadataFields(
+	raw: unknown,
+	parsed: Partial<Record<MetaField, unknown>>,
+): MetaField[] {
+	if (typeof raw !== "object" || raw === null) return []
+	const record = raw as Record<string, unknown>
+	const dropped: MetaField[] = []
+	for (const field of META_FIELDS) {
+		if (record[field] !== undefined && parsed[field] === undefined) {
+			dropped.push(field)
+		}
+	}
+	return dropped
+}
 
 const DEFAULT_UDP_RECEIVE_BUFFER_BYTES = 32 * 1024
 
@@ -191,6 +246,9 @@ export class DigitalVoiceService extends EventEmitter {
 	private running = false
 	private lastError: string | null = null
 	private starting: Promise<void> | null = null
+	/** Optional voice-call fields dropped because they failed validation. */
+	private metadataDrops = 0
+	private metadataDropLogged = false
 
 	constructor(
 		logger: Logger,
@@ -214,6 +272,11 @@ export class DigitalVoiceService extends EventEmitter {
 			err => this.emitError(err),
 			options.httpAccess,
 		)
+	}
+
+	/** Invalid optional call-metadata fields dropped so far. */
+	get metadataFieldDrops(): number {
+		return this.metadataDrops
 	}
 
 	get enabled(): boolean {
@@ -575,6 +638,8 @@ export class DigitalVoiceService extends EventEmitter {
 			return
 		}
 		const state = parsed.data
+		const dropped = droppedMetadataFields(raw, state)
+		if (dropped.length > 0) this.noteMetadataDrop(channel.decoderId, dropped)
 		const call: DigitalVoiceCall = {
 			decoderId: channel.decoderId,
 			callId: state.callId,
@@ -586,6 +651,16 @@ export class DigitalVoiceService extends EventEmitter {
 			active: state.active,
 			startedAt: state.startedAt,
 			...(state.endedAt !== undefined ? { endedAt: state.endedAt } : {}),
+			...(state.colourCode !== undefined
+				? { colourCode: state.colourCode }
+				: {}),
+			...(state.nac !== undefined ? { nac: state.nac } : {}),
+			...(state.algorithmId !== undefined
+				? { algorithmId: state.algorithmId }
+				: {}),
+			...(state.keyId !== undefined ? { keyId: state.keyId } : {}),
+			...(state.ran !== undefined ? { ran: state.ran } : {}),
+			...(state.errors !== undefined ? { errors: state.errors } : {}),
 		}
 		channel.paced.setCallActive(call.active)
 		if (call.active) {
@@ -646,6 +721,17 @@ export class DigitalVoiceService extends EventEmitter {
 
 	private url(path: string): string {
 		return `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}${path}`
+	}
+
+	/** Count every dropped field. Log only the first drop for this process. */
+	private noteMetadataDrop(decoderId: string, fields: readonly string[]): void {
+		this.metadataDrops += fields.length
+		if (this.metadataDropLogged) return
+		this.metadataDropLogged = true
+		this.log.warn(
+			{ decoderId, fields, metadataFieldDrops: this.metadataDrops },
+			"Dropped invalid digital voice call metadata",
+		)
 	}
 
 	private emitError(err: Error): void {

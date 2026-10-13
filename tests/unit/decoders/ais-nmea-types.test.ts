@@ -23,6 +23,7 @@ import {
 	encodeType24A,
 	encodeType24B,
 	renderGeneratedNmeaFixture,
+	renderNmeaSampleFixture,
 	toNmeaFragments,
 	unarmorBits,
 	type Type5Fields,
@@ -279,7 +280,7 @@ describe("fragment reassembly", () => {
 		vi.useRealTimers()
 	})
 
-	it("reassembles a type 5 group and ignores a bad checksum", () => {
+	it("drops a bad checksum fragment without finishing or forgetting the group", () => {
 		vi.useFakeTimers()
 		vi.setSystemTime(at)
 		const decoder = new FeedableAis(config(), logger)
@@ -305,12 +306,34 @@ describe("fragment reassembly", () => {
 		expect(second).toBeDefined()
 		expect(decoder.feed(first!)).toBeNull()
 		const broken = second!.slice(0, -2) + "00"
-		const output = decoder.feed(broken)
+		expect(decoder.feed(broken)).toBeNull()
+		expect(decoder.checksumErrors).toBe(1)
+		// The bad fragment never entered, so the good one still completes.
+		const output = decoder.feed(second!)
 		expect(output?.type).toBe("ship")
 		const ship = output?.data as { name?: string; mmsi?: string; imo?: number }
 		expect(ship.mmsi).toBe("555678901")
 		expect(ship.name).toBe("ATLANTIC VOYAGER")
 		expect(ship.imo).toBe(9056789)
+	})
+
+	it("drops a fragment group that never receives a good replacement before timeout", () => {
+		vi.useFakeTimers()
+		vi.setSystemTime(at)
+		const decoder = new FeedableAis(config(), logger)
+		const [first, second] = toNmeaFragments(
+			encodeType5(sampleType5()).payload,
+			encodeType5(sampleType5()).fillBits,
+			{ seqId: 3, channel: "B" },
+		)
+		expect(decoder.feed(first!)).toBeNull()
+		const broken = second!.endsWith("00")
+			? `${second!.slice(0, -2)}01`
+			: `${second!.slice(0, -2)}00`
+		expect(decoder.feed(broken)).toBeNull()
+		vi.advanceTimersByTime(2_000)
+		expect(decoder.feed(second!)).toBeNull()
+		expect(decoder.checksumErrors).toBe(1)
 	})
 
 	it("drops a group when another first fragment reuses its key", () => {
@@ -411,6 +434,14 @@ describe("fragment reassembly", () => {
 		expect(decoded?.name).toBe("WIND DANCER")
 		expect(decoded?.shipType).toBe(36)
 		expect(decoded?.cog).toBe(90)
+	})
+})
+
+describe("nmea-sample fixture", () => {
+	it("matches the encoder", () => {
+		const dir = dirname(fileURLToPath(import.meta.url))
+		const file = join(dir, "../../mocks/fixtures/ais/nmea-sample.txt")
+		expect(readFileSync(file, "utf8")).toBe(renderNmeaSampleFixture())
 	})
 })
 
