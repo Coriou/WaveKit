@@ -1220,10 +1220,13 @@ async function main(): Promise<void> {
 		own(15, disposeReceiverAfterApi)
 
 		// WG3 req 5: RF provenance on receptions from each decoder's binding (config and
-		// scanner probes alike), kept current on decoder create/remove. tuningTrust is
-		// "unverified" for every decoder (Main decision on req 5.3).
-		const decoderProvenance = createDecoderProvenanceIndex(decoderManager, () =>
-			sourceRouting.getDefaultSourceId(),
+		// scanner probes alike), kept current on decoder create/remove. WG5 req 6:
+		// tuningTrust is "commanded" (internal control) or "relay" (external) when the
+		// observed tuner state proves the decoder hears its targets, else "unverified".
+		const decoderProvenance = createDecoderProvenanceIndex(
+			decoderManager,
+			() => sourceRouting.getDefaultSourceId(),
+			tunerController,
 		)
 		own(8, () => decoderProvenance.dispose())
 

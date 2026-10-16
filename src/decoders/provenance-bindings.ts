@@ -32,8 +32,8 @@ export type ProvenanceTunerState = Pick<
 
 /**
  * WG5: the tuner surface the provenance index reads. The index seeds a per-source
- * snapshot with `getState` (which clones, so never on the reception path) and refreshes
- * it on `state-changed` and `control-mode-changed`.
+ * snapshot with `getState` (which clones, so never on the reception path), refreshes
+ * it on `state-changed` and `control-mode-changed`, and drops it on `source-removed`.
  */
 export interface ProvenanceTunerSource {
 	getState(sourceId: string): ProvenanceTunerState | undefined
@@ -45,6 +45,7 @@ export interface ProvenanceTunerSource {
 		event: "control-mode-changed",
 		fn: (sourceId: string, mode: TunerControlMode) => void,
 	): unknown
+	on(event: "source-removed", fn: (sourceId: string) => void): unknown
 	off(
 		event: "state-changed",
 		fn: (sourceId: string, state: ProvenanceTunerState) => void,
@@ -53,6 +54,7 @@ export interface ProvenanceTunerSource {
 		event: "control-mode-changed",
 		fn: (sourceId: string, mode: TunerControlMode) => void,
 	): unknown
+	off(event: "source-removed", fn: (sourceId: string) => void): unknown
 }
 
 type TuningTrust = ActivityDecoderBinding["tuningTrust"]
@@ -123,7 +125,8 @@ function snapshotOf(state: unknown): Snapshot | undefined {
  * still equals the centre captured when the decoder was last created or started, the
  * rate is known and positive, and every target lies within 0.45 × rate of the centre.
  * Anything else, including no tuner source, is `unverified`. Snapshots are refreshed on
- * tuner events only (`getState` clones, so it never runs inside a lookup). A retune that
+ * tuner events only (`getState` clones, so it never runs inside a lookup); a removed
+ * source drops its snapshot (`source-removed`). A retune that
  * bypasses WaveKit and the relay is not observed.
  */
 export function createDecoderProvenanceIndex(
@@ -182,6 +185,11 @@ export function createDecoderProvenanceIndex(
 	const onMode = (sourceId: string): void => {
 		read(sourceId)
 	}
+	// A removed source has no observed state: its receptions are unverified until a
+	// re-added source reports state again (initializeSource emits state-changed).
+	const onRemoved = (sourceId: string): void => {
+		snapshots.delete(sourceId)
+	}
 	const trustOf = (entry: Entry, sourceId: string | null): TuningTrust => {
 		if (sourceId === null) return "unverified"
 		const snapshot = snapshots.get(sourceId)
@@ -203,6 +211,7 @@ export function createDecoderProvenanceIndex(
 		decoders.on("decoder:started", bind)
 		tuner.on("state-changed", onState)
 		tuner.on("control-mode-changed", onMode)
+		tuner.on("source-removed", onRemoved)
 	}
 	for (const decoder of decoders.getAllDecoders()) bind(decoder.id)
 	return {
@@ -236,6 +245,7 @@ export function createDecoderProvenanceIndex(
 				decoders.off("decoder:started", bind)
 				tuner.off("state-changed", onState)
 				tuner.off("control-mode-changed", onMode)
+				tuner.off("source-removed", onRemoved)
 			}
 			entries.clear()
 			snapshots.clear()

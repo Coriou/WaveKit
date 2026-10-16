@@ -65,6 +65,10 @@ class FakeTuner extends EventEmitter implements ProvenanceTunerSource {
 		this.states.set(sourceId, state)
 		this.emit("state-changed", sourceId, { ...state })
 	}
+	removeSource(sourceId: string): void {
+		this.states.delete(sourceId)
+		this.emit("source-removed", sourceId)
+	}
 	mode(sourceId: string, controlMode: "internal" | "external"): void {
 		const state = this.states.get(sourceId)
 		if (state) this.states.set(sourceId, { ...state, controlMode })
@@ -126,6 +130,32 @@ describe("verified tuning trust (WG5 req 6)", () => {
 		expect(index.lookup("a")?.tuningTrust).toBe("relay")
 		tuner.set(MAIN, tuned(131_000_000, "external"))
 		expect(index.lookup("a")?.tuningTrust).toBe("unverified")
+	})
+
+	it("drops a removed source's snapshot; a re-added source restores it", () => {
+		const { decoders, tuner, index } = setup()
+		decoders.add("a", { targets: [131_550_000] })
+		decoders.add("b", { sourceId: "other", targets: [131_550_000] })
+		tuner.set("other", tuned(131_000_000))
+		decoders.start("b")
+		expect(index.lookup("a")?.tuningTrust).toBe("commanded")
+		expect(index.lookup("b")?.tuningTrust).toBe("commanded")
+		tuner.removeSource(MAIN)
+		expect(index.lookup("a")?.tuningTrust).toBe("unverified")
+		// Only the removed source's snapshot goes.
+		expect(index.lookup("b")?.tuningTrust).toBe("commanded")
+		const reads = tuner.reads
+		// A start while the source is gone reads getState and stays unverified.
+		decoders.start("a")
+		expect(tuner.reads).toBe(reads + 1)
+		expect(index.lookup("a")?.tuningTrust).toBe("unverified")
+		// Re-added: the state event restores the snapshot, the next start re-reads it.
+		tuner.set(MAIN, tuned(131_000_000))
+		decoders.start("a")
+		expect(tuner.reads).toBe(reads + 2)
+		expect(index.lookup("a")?.tuningTrust).toBe("commanded")
+		index.dispose()
+		expect(tuner.listenerCount("source-removed")).toBe(0)
 	})
 
 	it("applies the 0.45 × rate margin at the bound and just past it", () => {

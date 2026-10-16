@@ -323,6 +323,8 @@ export interface TunerControllerEvents {
 		origin?: TunerCommandOrigin,
 	) => void
 	"control-mode-changed": (sourceId: string, mode: TunerControlMode) => void
+	/** WG5: the source's tuner state is gone (removeSource); getState now returns undefined. */
+	"source-removed": (sourceId: string) => void
 	error: (sourceId: string, error: Error) => void
 }
 
@@ -464,6 +466,7 @@ export class TunerController extends EventEmitter {
 		this.inferredFields.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
+		this.emit("source-removed", sourceId)
 	}
 
 	// === Control Mode ===
