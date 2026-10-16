@@ -3159,13 +3159,18 @@ Redaction fails closed. `access` is reduced to `{ mode }`. A value whose key
 (any path segment) matches `/(key|psk|secret|passw|token|cred|auth|cookie|cert|salt)/i`
 becomes `"<redacted>"` whatever its type or depth (numbers too: dsd-fme numeric
 keys). `station.lat`, `station.lon` and `station.altM` are redacted. Inside
-`decoders[].options` every string at any depth is redacted unless its key is in
-`CONFIG_EXPORT_OPTION_ALLOWLIST`, and an option the type describes as
-`secret: true` (see `GET /api/decoders/types`) is redacted whatever its value.
-Outside options a string is kept only at `CONFIG_EXPORT_KEPT_STRING_PATHS` (ids,
-types and similar) or when the config schema limits it to a closed set (enum or
-literal), so host names, URLs, file paths, names and callsigns are redacted.
-Other numbers, booleans and null are kept. The lists live in
+`decoders[].options` a key is exported only when the type's option schema
+declares it and a descriptor documents it (see `GET /api/decoders/types`);
+other keys are dropped and only their number is reported, as
+`"<unknown-options>": n`. A kept option string must be allowlisted
+(`CONFIG_EXPORT_OPTION_ALLOWLIST`) and a member of the option's enum or literal
+set; a kept number must be a closed-set member or on a reviewed per-type numeric
+allowlist; an option the type describes as `secret: true` is redacted whatever
+its value. Outside options a string is kept only at
+`CONFIG_EXPORT_KEPT_STRING_PATHS` (ids, types and similar) or when the config
+schema limits it to a closed set (enum or literal), and numbers and booleans
+only where the schema declares that type, so host names, URLs, file paths,
+names and callsigns are redacted. The lists live in
 `packages/api-types/src/config-export.ts`. The body is at most 256 KiB; larger
 is 500 `CONFIG_EXPORT_FAILED`. Without a config provider the route answers 503
 `CONFIG_EXPORT_UNAVAILABLE`. Error bodies are `{ error: "ConfigExportError",
