@@ -31,7 +31,7 @@ import {
 } from "../../utils/health-check.js"
 
 // Application version (could be loaded from package.json in production)
-const APP_VERSION = "1.0.0"
+export const APP_VERSION = "1.0.0"
 
 // ============================================================================
 // Schema Definitions

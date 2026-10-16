@@ -59,6 +59,8 @@ const ioOnlyImports = new Set([
 	"./import/sdrpp.js",
 	"./import/sdrsharp.js",
 	"./import/gqrx.js",
+	// WG6: the barrel wires the URL-import update diff (a pure module) into the service.
+	"./import/update-diff.js",
 ])
 const ioModules = new Set(["index.ts", "service.ts", "storage.ts"])
 

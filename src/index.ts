@@ -65,6 +65,9 @@ import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle
 import { ScannerService } from "./core/scanner/scanner-service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
+import { createBandPlanUrlFetcher } from "./core/bandplan-url/fetch.js"
+import { BANDPLAN_URL_IMPORT_HOSTS } from "@wavekit/api-types"
+import { APP_VERSION } from "./api/routes/health.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { createDecoderManagerOptions } from "./decoders/manager-options.js"
@@ -1301,6 +1304,13 @@ async function main(): Promise<void> {
 				effectiveCountry: stationService.identity().effectiveCountry,
 			},
 			writable: protectedMode,
+			// WG6 req 5: URL import and update checks; the service turns them off unless writable
+			// (protected mode), so the legacy service advertises `urlImportHosts: []`.
+			urlFetcher: createBandPlanUrlFetcher({
+				userAgent: `WaveKit/${APP_VERSION}`,
+				logger,
+			}),
+			urlImportHosts: BANDPLAN_URL_IMPORT_HOSTS,
 			onCommit: event => publishBandPlans?.(event),
 			onStoreUnavailable: reason => {
 				bandPlanLog.warn({ reason }, "Band-plan store unavailable")

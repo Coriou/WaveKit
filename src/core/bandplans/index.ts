@@ -4,6 +4,7 @@ import { transition } from "./domain.js"
 import { parseGqrxBandPlan } from "./import/gqrx.js"
 import { parseSdrppBandPlan } from "./import/sdrpp.js"
 import { parseSdrSharpBandPlan } from "./import/sdrsharp.js"
+import { diffImportedBands } from "./import/update-diff.js"
 import {
 	builtinPresetsFor,
 	presetIssuesFor,
@@ -42,5 +43,6 @@ export function openBandPlanService(
 			"sdrsharp-xml": parseSdrSharpBandPlan,
 			"gqrx-csv": parseGqrxBandPlan,
 		},
+		diffImportedBands,
 	})
 }
