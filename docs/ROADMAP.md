@@ -47,8 +47,8 @@ manual/auto squelch without pipeline restarts, per-decoder `rateHistory` and a
 bounded `GET /api/decoders/:id/log`, per-hop scanner protocols, automatic resume
 held by identify and live listening (`resumeAt`, `resumeHeldBy`, Stay here), and
 cited built-in band plan corrections (EU airband, PMR446/dPMR446, CB, 169 MHz
-metering). Still open from that list: noise squelch, recording activity as a resume
-hold and an EU 466 MHz pager plan without a citable primary source.
+metering). Still open from that list: recording activity as a resume hold and an
+EU 466 MHz pager plan without a citable primary source (noise squelch landed in WG7).
 
 Landed in the 2026-10-13 web-gap batch 2 (WG2, core only, [spec](specs/web-gaps-2/requirements.md)):
 Activity presentation (category, protocol, entity key, title, fields, position)
@@ -175,7 +175,8 @@ gates. The detailed workstreams:
 
 Live-audio evidence from 2026-10-09 remains valid: silent idle squelch, clear
 NFM at an offset, intelligible DMR and two PTT presses producing two calls.
-Open follow-ups include the ~0.75 s squelch noise tail, a DMR call ending by
+Open follow-ups include real-RF acceptance of the WG7 squelch noise tail fix
+(the ~0.75 s tail is fixed in a synthetic pipeline test), a DMR call ending by
 fallback timeout when its terminator was missed, and lazy live-demod start.
 Most measured playback lag was ffplay buffering; measure actual client stages
 before changing buffer defaults. See [DIGITAL-VOICE.md](DIGITAL-VOICE.md).
@@ -605,9 +606,15 @@ and status. Shared browser audio and richer controls remain open.
       and decoded voice while retaining manual selection. Reuse scanner S3's
       routing and arbitration; its planned 8 kHz HTTP monitor is a foundation,
       not completion of this item. Avoid disconnecting clients on rate changes.
-- [ ] Add automatic floor-based and noise squelch, and update controls without
+- [x] Add automatic floor-based and noise squelch, and update controls without
       unnecessary pipeline restarts. Preserve current threshold/hang behavior
-      and fix the observed noise tail.
+      and fix the observed noise tail. Auto squelch landed in the 2026-10-12
+      batch; WG7 added the opt-in `squelchMode: "noise"` (FM quieting, NFM/WFM,
+      `noiseQuietingDb` default 6 dB) and fixed the noise tail (noise blocks just
+      below the threshold no longer hold the gate; about 260 ms of unmuted audio
+      after carrier loss in the synthetic test). Synthetic evidence only:
+      real-RF acceptance open (csdr back-chain delay, the 6 dB default at
+      12 dB CNR, WFM pilot harmonics), Pi CPU unmeasured.
 - [x] Live-audio AGC off/slow/fast including FM (WG4): `liveDemod.agc` and
       PATCH `agc` (null resets); absent keeps the per-modulation chain unchanged.
       Open: csdr `-p slow` at the pinned csdr is unverified until an image smoke
@@ -621,7 +628,13 @@ and status. Shared browser audio and richer controls remain open.
       on `live-audio:transmission` and Activity rows, searchable under both twin
       spellings. Synthetic corpora only; real-RF acceptance and Pi CPU are open.
 - [ ] Expose tones on live status, saved frequencies and tone squelch (deferred
-      from WG2).
+      from WG2). Partly done: WG7 live tone squelch (`liveDemod.toneSquelch`,
+      NFM only, standard CTCSS tones and DCS codes in the saved-frequency tone
+      shape) mutes the live audio until the tone is heard, with
+      `toneSquelch.state` on live status; events, rows and tone results are
+      unchanged. Saved frequencies store a tone but do not apply it (operator
+      data `capabilities.toneSquelch` is `false`), and the tone currently heard
+      is not on live status. Real-RF acceptance and Pi CPU are open.
 - [ ] Emit analog transmission start/end/duration events from squelch with stable
       identity and recording links. Detector tracks and squelch transmissions
       have different boundaries; reconcile them explicitly.

@@ -1146,6 +1146,9 @@ curl http://localhost:9000/api/live-audio/status
 		"modulation": "nfm",
 		"bandwidth": 12500,
 		"squelch": -40,
+		"squelchMode": "manual",
+		"autoMarginDb": 6,
+		"noiseQuietingDb": 6,
 		"noiseReduction": "off",
 		"lowPass": 0,
 		"highPass": 0,
@@ -1165,7 +1168,8 @@ curl http://localhost:9000/api/live-audio/status
 	"pipelineHealth": "running",
 	"pipelineRestarts": 0,
 	"channelPowerDbfs": -61.3,
-	"squelchOpen": false
+	"squelchOpen": false,
+	"toneSquelch": { "state": "off" }
 }
 ```
 
@@ -1189,6 +1193,13 @@ Fields:
 - `agc` (WG4) — the effective AGC mode of the chain after the modulation
   default: `off`, `slow` or `fast` (always `off` for `raw`), on every status.
   `config.agc` is present only when it is set. Optional in `@wavekit/api-types`; older cores omit both.
+- `toneSquelch` (WG7) — the tone squelch gate while the pipeline runs: `{ state }`
+  with `off` (no tone set), `waiting` (squelch closed or the tone not heard yet: the
+  stream carries silence) or `open` (tone heard: audio passes). Absent while stopped
+  and from older cores.
+- `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
+  are always present in config and status responses, with their defaults (`manual`,
+  6 and 6) when not set. `config.toneSquelch` is present only when it is set.
 
 Configuration notes:
 
@@ -1201,10 +1212,69 @@ Configuration notes:
   Long continuous signals can eventually enter the floor estimate. Pipeline
   rebuilds, source capability changes (including retained-pipeline retunes), and
   mode changes reset the estimate. This is not calibrated noise measurement.
-  There is no `noise` mode.
+- `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
+  10 ms block it measures the high-frequency noise of the FM discriminator output
+  (above voice: a high-pass at 0.6 of the channel's audio Nyquist) and compares it
+  with the noise-only reference of the same chain. The gate opens on a block at
+  least `noiseQuietingDb` below the reference, stays open within 2 dB of that and
+  closes 250 ms after the last such block, like the power squelch. The reference
+  needs no calibration and is not stored: the metric does not depend on the signal
+  scale, so it depends only on the channel filter cutoff relative to the channel
+  rate. It is a table entry computed once per cutoff by a deterministic
+  fixed-seed simulation (65 536 Gaussian noise samples through the channel filter,
+  about 10 ms of CPU, cached for the process), not a closed-form value. A block
+  with a non-finite sample, or with fewer than half usable samples, counts as
+  noise, so NaN or silent IQ never opens the gate. `squelch` and `autoMarginDb` are
+  kept but do not gate in noise mode; `thresholdDbfs` reports the configured
+  `squelch`. Config validation and PATCH answer 400 for `noise` with any other
+  modulation, and for a PATCH that changes the modulation of a `noise` config to a
+  non-FM one. Measured on synthetic channels only: noise alone never opened the
+  gate in 10 minutes, and a carrier at 12 dB carrier-to-noise ratio opens it within
+  50 ms. At 12 dB the median quieting is about 6.9 dB, close to the default, so a
+  lower default may follow the real-RF acceptance. CPU about 8 ns per channel IQ
+  sample on the Mac (budget 50 ns).
+- `noiseQuietingDb` (WG7) — the noise squelch threshold, 1–30 dB (default 6); used
+  in `noise` mode only.
+- `toneSquelch` (WG7, NFM only) — a CTCSS or DCS tone squelch gate, in the
+  saved-frequency tone shape: `{ "kind": "none" }`,
+  `{ "kind": "ctcss", "frequencyTenthsHz": 885 }` or
+  `{ "kind": "dcs", "code": "023", "polarity": "normal" }`. Absent or `none` means
+  no tone gate. A CTCSS value must be one of the 50 standard tones (in tenths of a
+  Hz) and a DCS code one of the standard codes; other values, and a tone with any
+  modulation other than `nfm`, answer 400. With a tone set, the audio sent to
+  stream clients is muted (zero samples, stream timing kept) until the squelch is
+  open and the tone is heard: for CTCSS the 50-tone detector picks the configured
+  tone in 2 consecutive 500 ms analysis blocks (250 ms hop; first open after about
+  750 ms of open squelch); for DCS the configured code, or its inverted twin (the
+  same bit stream), is decoded in 2 consecutive words. The gate closes after 2
+  analysis blocks without the tone (CTCSS) or 2 word periods without a matching
+  word (DCS), and at once when the squelch closes. In synthetic tests it opens
+  within 1.0 s for CTCSS and DCS and never opens on a tone one standard step away
+  or on the DCS-free corpora. The gate mutes audio only: `live-audio:transmission`
+  events, Activity rows, tone results (`tone.ctcssHz`, `tone.dcs`) and level events
+  are unchanged, so other users' transmissions on the channel are still recorded.
+  CPU about 4 ms per second of audio for CTCSS and 1 ms for DCS on the Mac
+  (budget 5 ms). The saved-frequency store does not apply its tones itself
+  (operator data `capabilities.toneSquelch` stays `false`): a client sets
+  `toneSquelch` here.
 - `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
+  Noise tail (WG7): with a threshold just above the channel noise, the 2 dB band
+  below it used to reach into the noise, so noise blocks kept the gate open for a
+  random time after the carrier stopped (measured about 0.26 s to over 1.6 s in a
+  synthetic pipeline, the "~0.75 s noise tail"). Now a block inside that band that
+  is also less than 2 dB above the channel's noise floor estimate (the same lower
+  envelope as auto mode, kept in manual mode too) no longer keeps the gate open.
+  In the same test the unmuted audio after carrier loss is now about 260 ms for
+  every seed, within the bound of the 250 ms hang, one 10 ms block and the
+  modelled csdr release batch (41 ms at 25 kHz); auto mode at its defaults was
+  already there and is unchanged. Threshold, hysteresis,
+  hang and the auto floor are unchanged; without a floor estimate the gate behaves
+  as before. A carrier that fades to within 2 dB of the floor for longer than the
+  hang can now close and reopen the transmission, because such blocks cannot be
+  told from noise. Real-RF acceptance of the tail (and of the csdr back-chain
+  delay) is open.
 - `gain` — audio gain after demodulation (default 2, formerly 10; for FM, ±5 kHz
   deviation at 0.8 full scale at a 25 kHz demod rate). Modes without AGC follow the
   gain directly: `raw` is about 5× (14 dB) quieter than before unless `gain` is set
@@ -1308,7 +1378,7 @@ curl -X POST http://localhost:9000/api/live-audio/stop
 #### PATCH /api/live-audio/config
 
 Update live demodulator configuration. DSP changes restart the pipeline; `squelch`,
-`squelchMode` and `autoMarginDb` changes apply immediately without a restart; an `httpPort` change moves the stream
+`squelchMode`, `autoMarginDb`, `noiseQuietingDb` and `toneSquelch` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
 
@@ -3390,7 +3460,8 @@ The store holds three kinds:
   `023N`; WG6) when the closed event's `tone` has them; those values are also
   searchable text, and a DCS code is indexed under both spellings
   (`DCS 023N` and its twin `DCS 047I`), so a search for either finds the row.
-  Older rows have no `tone` (or no `tone.dcs`). Search with `kinds=analog-transmission`, by source or frequency. Admission is
+  Older rows have no `tone` (or no `tone.dcs`). A WG7 `noise`-mode row carries
+  `squelchMode: "noise"` and `noiseQuietingDb`. Search with `kinds=analog-transmission`, by source or frequency. Admission is
   non-blocking and counted like decoder receptions, with one per-decoder
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
@@ -4676,8 +4747,9 @@ first complete IQ block; `thresholdDbfs` is the threshold in effect.
 On the `live-audio` channel: one squelch-delimited analog transmission of the
 live demodulator, sent once with `state: "open"` and once with
 `state: "closed"` (same `transmissionId`, a UUID). Produced only while the
-squelch gates (auto mode, or manual with a non-zero threshold); with manual
-squelch 0 nothing is sent. Sent whether Activity is enabled or not; when it is
+squelch gates (auto mode, noise mode, or manual with a non-zero threshold); with
+manual squelch 0 nothing is sent. A tone squelch gate (`toneSquelch`) does not
+change these events. Sent whether Activity is enabled or not; when it is
 ready, each closed transmission is also stored as an `analog-transmission`
 [Activity](#activity) record.
 
@@ -4708,14 +4780,21 @@ ready, each closed transmission is also stored as an `analog-transmission`
   when the transmission opened. `tuningTrust` is `commanded` under WaveKit
   control and `relay` under external (SDR++) control. Null when the source
   has no tuner state or its centre is an unconfirmed placeholder.
-- `endedAt`: for a `squelch` close, the last above-threshold block (the close
-  time minus the squelch hang, 250 ms, never before `startedAt`); for every
-  other reason, the close time. `endedAt`, `durationMs` and `closeReason` are null
+- `endedAt`: for a `squelch` close, the last above-threshold block (in noise mode
+  the last quieted block; the close time minus the squelch hang, 250 ms, never
+  before `startedAt`); for every other reason, the close time. Since the WG7 noise
+  tail fix a transmission that the tail used to prolong ends earlier, because noise
+  blocks just below the threshold no longer hold the squelch open (see `squelch`
+  under [GET /api/live-audio/status](#get-apilive-audiostatus)); start times are
+  unchanged.
+- `squelchMode` is `manual`, `auto` or (WG7) `noise`; `noiseQuietingDb` (WG7) is
+  the quieting threshold in effect when the transmission opened, present in
+  `noise` mode only. `thresholdDbfs` is the configured `squelch` in noise mode. `endedAt`, `durationMs` and `closeReason` are null
   while open.
 - `closeReason`: `squelch` (normal close), `retune` (the event-time frequency
   moved by more than 1 Hz while open), `config` (a reconfigure that restarts
   the pipeline or changes source, modulation, bandwidth, offset or squelch
-  mode; a threshold-only change keeps it open), `stopped`, or `max-duration`
+  mode; a threshold-only, `noiseQuietingDb` or `toneSquelch` change keeps it open), `stopped`, or `max-duration`
   (10 minutes). After `retune` or `max-duration` a new transmission opens at
   once if the squelch is still open.
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's

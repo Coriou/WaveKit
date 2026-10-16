@@ -1,8 +1,8 @@
 # Web gaps 7 requirements (WG7)
 
-Status: implementation in progress. Lanes AMB, GT, BX, HW and MIN are merged and wired on the
-batch branch; SQ (requirements 2-4) is pending. Implementation amendments are marked "Amended
-(WG7 Main)" below. See [design](design.md) and [tasks](tasks.md).
+Status: implemented on the batch branch. All six lanes (AMB, GT, BX, HW, MIN and SQ) are
+merged and wired; the checkpoint (MA.3) and the real-RF acceptance of requirements 2-4 are
+open. Implementation amendments are marked "Amended (WG7 Main)" below. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -157,6 +157,14 @@ hang + one 10 ms block + the back-chain delay the lane measures (stated in the r
 4.2 The fix keeps the threshold, hysteresis, hang and auto floor semantics (ROADMAP: "Preserve
 current threshold/hang behavior"); transmission start and end times are unchanged except
 where they were caused by the tail (then the change is stated).
+Amended (WG7 Main): a causal gate cannot confine the change to blocks after the last
+above-threshold block. The fix stops a block within the hysteresis band below the threshold
+from refreshing the hang when it is also less than the hysteresis above the channel's noise
+floor estimate; such blocks cannot be told from noise. So a carrier that fades into that
+overlap for longer than the hang mid-transmission now closes the gate and reopens on its next
+above-threshold block. With no floor estimate, or with band blocks at least the hysteresis
+above the floor, the gate is identical to the pre-WG7 one. Apart from that case, only end times in the tail case
+change (earlier); start times are unchanged.
 4.3 If the cause lies outside the Node process (csdr buffering), the lane documents it with
 the measurement and the fix stays within the Node pipeline; the RF window (MA.4) re-measures.
 

@@ -1,7 +1,7 @@
 # Web gaps 7 design (WG7)
 
-Status: implemented for lanes AMB, GT, BX, HW and MIN (merged and wired; amendments in the
-requirements); SQ pending. Requirements in [requirements](requirements.md), tasks in
+Status: implemented for all six lanes (merged and wired; amendments in the requirements);
+checkpoint and real-RF acceptance open. Requirements in [requirements](requirements.md), tasks in
 [tasks](tasks.md). Background: scanner ambient evidence and identify ([SCANNER.md](../../SCANNER.md)
 § 6.4, § 10.8), WG2 CTCSS/DTMF and WG6 DCS (the tone path), WG4 live-audio AGC, the WG6
 [decoded-elsewhere ranges](../web-gaps-6/design.md), [band plans](../band-plans/requirements.md),
@@ -300,7 +300,10 @@ BandPlanSkipSource[]`); `ScanJob.bandPlanSkips` from `planJob` beside `decodedEl
    _Validates 1.5, 1.6._
 5. **Manual and auto squelch unchanged.** For random IQ block sequences, the gate sequence in
    `manual` and `auto` equals the pre-WG7 `ChannelSquelch` except where the tail fix applies (the
-   difference is confined to blocks after the last above-threshold block). _Validates 2.1, 4.2._
+   difference is confined to blocks after the last above-threshold block). Amended (WG7 Main):
+   the new gate equals the pre-WG7 gate on the same sequence with the noise-band blocks (within
+   the hysteresis below the threshold and less than the hysteresis above the floor) replaced by
+   zero blocks; see requirement 4.2. _Validates 2.1, 4.2._
 6. **Noise squelch on noise and carrier.** Random noise seeds never open the gate at the default;
    carriers at ≥ 12 dB CNR open it within 50 ms. _Validates 2.2, 2.5._
 7. **Tone gate.** For random tone sequences, audio passes only while the configured tone (or DCS

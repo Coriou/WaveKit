@@ -1,6 +1,6 @@
 # Web gaps 7 tasks (WG7)
 
-Status: lanes AMB, GT, BX, HW and MIN merged and wired; SQ pending. See [requirements](requirements.md) and
+Status: all six lanes merged and wired; docs and coordination note done; checkpoint (MA.3) open. See [requirements](requirements.md) and
 [design](design.md). Lanes work against the frozen contract and touch only their own paths;
 Main (MA.\*) owns the composition files (`src/index.ts`, `src/api/server.ts`, barrels including
 `src/core/bandplans/index.ts`, `src/config.ts`, `config/*`), the frozen contract files
@@ -31,15 +31,15 @@ the isolation and contract tests and the docs. No lane edits the pinned band-pla
 
 ## Lane SQ: noise squelch, tone squelch, noise tail
 
-- [ ] SQ.1 Noise metric and `noise` mode in `ChannelSquelch` / the live demodulator; runtime
+- [x] SQ.1 Noise metric and `noise` mode in `ChannelSquelch` / the live demodulator; runtime
       schema, PATCH route, Activity row; benchmark.
   - _Requirements: 2.1–2.6_
   - **Property 5: Manual and auto squelch unchanged**, **Property 6: Noise squelch on noise and
     carrier**
-- [ ] SQ.2 `ToneSquelchGate` and the audio mute; status; benchmark.
+- [x] SQ.2 `ToneSquelchGate` and the audio mute; status; benchmark.
   - _Requirements: 3.1–3.6_
   - **Property 7: Tone gate**
-- [ ] SQ.3 Noise tail: reproduction, cause, fix.
+- [x] SQ.3 Noise tail: reproduction, cause, fix.
   - _Requirements: 4.1–4.3_
 
 ## Lane GT: gain tables
@@ -82,11 +82,11 @@ the isolation and contract tests and the docs. No lane edits the pinned band-pla
 
 ## Main
 
-- [ ] MA.1 Merge the lanes; scanner-service and `src/index.ts` wiring (ambient targets, trust
+- [x] MA.1 Merge the lanes; scanner-service and `src/index.ts` wiring (ambient targets, trust
       and identify hook; band-plan skip view, `ScanJob.bandPlanSkips`, PATCH key; coverage
       refresh; storage report decoder list); contract test updates.
   - _Requirements: 12.1_
-- [ ] MA.2 Docs (API.md, ROADMAP, coordination note for the CLI and the web session) and the CLI
+- [x] MA.2 Docs (API.md, ROADMAP, coordination note for the CLI and the web session) and the CLI
       grep. (The band-plans 11.1, receiver-capabilities 1.3 and web-gaps-6 E2 amendments are in
       the spec commit.)
   - _Requirements: 5.5, 6.7, 11.1, 12.2_
