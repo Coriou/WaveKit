@@ -927,4 +927,33 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.isSquelchOpen()).toBe(false)
 		expect(reasons).toEqual([null])
 	})
+
+	// WG4 req 4.1-4.7: AGC mode in status and restart semantics.
+	it("reports the effective AGC per modulation default and explicit mode", async () => {
+		liveDemod = create({ modulation: "am" })
+		expect(liveDemod.getStatus().agc).toBe("fast")
+		liveDemod = create({ modulation: "nfm" })
+		expect(liveDemod.getStatus().agc).toBe("off")
+		liveDemod = create({ modulation: "nfm", agc: "slow" })
+		expect(liveDemod.getStatus().agc).toBe("slow")
+	})
+
+	it("restarts and closes the transmission as config on an agc change, and null restores the default", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		const spawned = processes.length
+		await liveDemod.reconfigure({ agc: "slow" })
+		expect(processes.length).toBeGreaterThan(spawned)
+		expect(reasons).toEqual(["config"])
+		expect(liveDemod.getStatus().agc).toBe("slow")
+		const beforeReset = processes.length
+		await liveDemod.reconfigure({ agc: null })
+		expect(processes.length).toBeGreaterThan(beforeReset)
+		expect(liveDemod.getStatus().config.agc).toBeUndefined()
+		expect("agc" in liveDemod.getStatus().config).toBe(false)
+		expect(liveDemod.getStatus().agc).toBe("off")
+	})
 })

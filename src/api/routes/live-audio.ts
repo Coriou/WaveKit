@@ -5,7 +5,10 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import { ZodError } from "zod"
 import { ConfigValidationError, WaveKitError } from "../../utils/errors.js"
-import type { LiveDemodulator } from "../../core/live-demodulator.js"
+import type {
+	LiveDemodulator,
+	LiveDemodReconfigureUpdates as ReconfigureUpdates,
+} from "../../core/live-demodulator.js"
 import type { LiveDemodConfig, LiveDemodStatus } from "@wavekit/api-types"
 import type {
 	LiveDemodConfig as CoreLiveDemodConfig,
@@ -38,6 +41,7 @@ const liveDemodConfigSchema = {
 		audioFormat: { type: "string", enum: ["s16le", "f32le"] },
 		iqDcBlock: { type: "boolean" },
 		offsetHz: { type: "number" },
+		agc: { type: "string", enum: ["off", "slow", "fast"] },
 	},
 	required: [
 		"enabled",
@@ -81,6 +85,7 @@ const liveDemodStatusSchema = {
 		squelchOpen: { type: "boolean" },
 		noiseFloorDbfs: { type: "number" },
 		thresholdDbfs: { type: "number" },
+		agc: { type: "string", enum: ["off", "slow", "fast"] },
 	},
 	required: [
 		"enabled",
@@ -100,7 +105,15 @@ const liveDemodStatusSchema = {
 
 const liveDemodConfigUpdateSchema = {
 	type: "object",
-	properties: liveDemodConfigSchema.properties,
+	properties: {
+		...liveDemodConfigSchema.properties,
+		// null deletes the key (back to the modulation default).
+		agc: {
+			type: "string",
+			enum: ["off", "slow", "fast", null],
+			nullable: true,
+		},
+	},
 	additionalProperties: false,
 } as const
 
@@ -167,6 +180,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			iqDcBlock: config.iqDcBlock,
 			offsetHz: config.offsetHz,
 			...(config.sourceId !== undefined ? { sourceId: config.sourceId } : {}),
+			...(config.agc !== undefined ? { agc: config.agc } : {}),
 		}
 	}
 
@@ -203,6 +217,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			...(status.squelchOpen !== undefined
 				? { squelchOpen: status.squelchOpen }
 				: {}),
+			...(status.agc !== undefined ? { agc: status.agc } : {}),
 		}
 	}
 
@@ -259,7 +274,9 @@ export const liveAudioRoutes: FastifyPluginAsync<
 	)
 
 	fastify.patch<{
-		Body: Partial<LiveDemodConfig>
+		Body: Omit<Partial<LiveDemodConfig>, "agc"> & {
+			agc?: LiveDemodConfig["agc"] | null
+		}
 		Reply: LiveDemodStatus | { error: string; message: string }
 	}>(
 		"/api/live-audio/config",
@@ -275,9 +292,9 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			},
 		},
 		async (request, reply) => {
-			const body = request.body as Partial<LiveDemodConfig>
+			const body = request.body
 
-			const updates: Partial<CoreLiveDemodConfig> = {
+			const updates: ReconfigureUpdates = {
 				...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
 				...(body.httpPort !== undefined ? { httpPort: body.httpPort } : {}),
 				...(body.modulation !== undefined
@@ -309,6 +326,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				...(body.iqDcBlock !== undefined ? { iqDcBlock: body.iqDcBlock } : {}),
 				...(body.offsetHz !== undefined ? { offsetHz: body.offsetHz } : {}),
 				...(body.sourceId !== undefined ? { sourceId: body.sourceId } : {}),
+				...(body.agc !== undefined ? { agc: body.agc } : {}),
 			}
 
 			try {
