@@ -573,15 +573,22 @@ export function parseAx25Frame(frame: Buffer): APRSData | null {
 	// Parse digipeater path
 	const path: string[] = []
 	let offset = 14
+	// Index in `path` of the last digipeater whose has-been-repeated (H) bit is set
+	let lastRepeated = -1
 
 	// Check if there are digipeaters (bit 0 of last byte of address is 0)
 	while (offset < frame.length - 2 && (frame[offset - 1]! & 0x01) === 0) {
-		const digi = parseAx25Address(frame.subarray(offset, offset + 7))
+		const address = frame.subarray(offset, offset + 7)
+		const digi = parseAx25Address(address)
 		if (digi) {
+			if ((address[6]! & AX25_H_BIT) !== 0) lastRepeated = path.length
 			path.push(digi)
 		}
 		offset += 7
 	}
+	// TNC2 text marks the last repeated digipeater with `*`, as direwolf prints
+	// it (`K1ABC>APRS,W1AW*,WIDE2-1:`); source and destination never carry it.
+	if (lastRepeated >= 0) path[lastRepeated] = `${path[lastRepeated]!}*`
 
 	// Skip control and PID fields
 	offset += 2
@@ -596,6 +603,9 @@ export function parseAx25Frame(frame: Buffer): APRSData | null {
 	// Parse APRS data from information field
 	return parseAprsInfo(source, destination, path, info)
 }
+
+/** AX.25 SSID byte bit 7 on a digipeater address: the has-been-repeated (H) bit. */
+const AX25_H_BIT = 0x80
 
 /**
  * Parses an AX.25 address field.

@@ -575,6 +575,86 @@ describe("parseKissFrame", () => {
 	})
 })
 
+// Feature: web-gaps-4: digipeater has-been-repeated (H) bit in the TNC2 path
+describe("AX.25 digipeater H bit", () => {
+	const H = 0x80
+	function digi(call: string, ssid = 0, repeated = false): Buffer {
+		const address = createAx25Address(call, ssid)
+		if (repeated) address[6] = address[6]! | H
+		return address
+	}
+	/** dest, src, digis (last one ends the address field), UI control + PID, info. */
+	function frame(
+		digis: Buffer[],
+		options: { destCommandBit?: boolean; srcCommandBit?: boolean } = {},
+	): Buffer {
+		const dest = createAx25Address("APRS")
+		if (options.destCommandBit) dest[6] = dest[6]! | H
+		const src = createAx25Address("K1ABC", 7)
+		if (options.srcCommandBit) src[6] = src[6]! | H
+		const addresses = [dest, src, ...digis.map(d => Buffer.from(d))]
+		const last = addresses[addresses.length - 1]!
+		last[6] = last[6]! | 0x01
+		return Buffer.concat([
+			...addresses,
+			Buffer.from([0x03, 0xf0]),
+			Buffer.from("!4903.50N/07201.75W-Test", "ascii"),
+		])
+	}
+	function viaKiss(ax25: Buffer) {
+		const { frames } = extractKissFrames(createKissFrame(ax25))
+		expect(frames).toHaveLength(1)
+		return parseKissFrame(frames[0]!)
+	}
+
+	it("marks a repeated digipeater with * through a KISS frame", () => {
+		const result = viaKiss(frame([digi("W1AW", 0, true)]))
+		expect(result).not.toBeNull()
+		expect(result!.path).toEqual(["W1AW*"])
+		expect(result!.source).toBe("K1ABC-7")
+		expect(result!.destination).toBe("APRS")
+	})
+
+	it("leaves unrepeated digipeaters unmarked", () => {
+		const result = viaKiss(frame([digi("WIDE1", 1), digi("WIDE2", 2)]))
+		expect(result!.path).toEqual(["WIDE1-1", "WIDE2-2"])
+	})
+
+	it("marks only the last repeated digipeater, as direwolf prints TNC2", () => {
+		const result = viaKiss(
+			frame([
+				digi("N0CALL", 0, true),
+				digi("WIDE1", 0, true),
+				digi("WIDE2", 1),
+			]),
+		)
+		expect(result!.path).toEqual(["N0CALL", "WIDE1*", "WIDE2-1"])
+		const all = viaKiss(frame([digi("W1AW", 0, true), digi("W2AW", 3, true)]))
+		expect(all!.path).toEqual(["W1AW", "W2AW-3*"])
+	})
+
+	it("never marks the source or destination (their bit 7 is the C bit)", () => {
+		const result = viaKiss(
+			frame([digi("WIDE2", 2)], { destCommandBit: true, srcCommandBit: true }),
+		)
+		expect(result!.destination).toBe("APRS")
+		expect(result!.source).toBe("K1ABC-7")
+		expect(result!.path).toEqual(["WIDE2-2"])
+		expect(viaKiss(frame([], { destCommandBit: true }))!.path).toEqual([])
+	})
+
+	it("still skips a malformed digipeater address as before", () => {
+		const blank = Buffer.alloc(7, 0x40)
+		blank[6] = 0x60 | H
+		const result = viaKiss(frame([digi("W1AW", 0, true), blank]))
+		expect(result).not.toBeNull()
+		expect(result!.path).toEqual(["W1AW*"])
+		const onlyBlank = viaKiss(frame([blank]))
+		expect(onlyBlank!.path).toEqual([])
+		expect(parseAx25Address(Buffer.from([0x82, 0x84]))).toBeNull()
+	})
+})
+
 describe("createDirewolfDecoder", () => {
 	it("should create a DirewolfDecoder instance", () => {
 		const config = createConfig()

@@ -98,8 +98,7 @@ function validLatLon(lat: number, lon: number): boolean {
 /**
  * APRS "direct" rule: a station is direct when no element of its `path` ends with `*` (the
  * TNC2 "has been used" marker, e.g. `W1AW*` in `K1ABC>APRS,W1AW*,WIDE2-2:`). An empty path is
- * direct. Note: the direwolf adapter reads KISS frames and `parseAx25Address` drops the
- * AX.25 H bit, so live paths never carry `*` today; such stations count as direct.
+ * direct. The direwolf KISS adapter marks the last digipeater whose AX.25 H bit is set.
  */
 export function isAprsDirect(path: readonly string[]): boolean {
 	for (const element of path) if (element.endsWith("*")) return false
