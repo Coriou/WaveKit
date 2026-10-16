@@ -25,8 +25,8 @@ export const readsbOptionsSchema = z
 		deviceSerial: z.string().nullable().optional(),
 		enableMlat: z.boolean().nullable().optional(),
 		extraArgs: z.array(z.string()).nullable().optional(),
-		frequencies: z.array(Hz).nullable().optional(),
-		frequency: Hz.nullable().optional(),
+		frequencies: z.array(Hz).optional(),
+		frequency: Hz.optional(),
 		// Passed through toString(): a number or readsb's own text (e.g. "auto").
 		gain: z.union([z.number().finite(), z.string()]).optional(),
 		inputSampleRate: z.number().finite().positive().nullable().optional(),

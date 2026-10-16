@@ -22,8 +22,8 @@ export const dumpvdl2OptionsSchema = z
 		extraArgs: z.array(z.string()).nullable().optional(),
 		followCenter: z.boolean().nullable().optional(),
 		// Empty falls back to the built-in channel list.
-		frequencies: z.array(Hz).nullable().optional(),
-		frequency: Hz.nullable().optional(),
+		frequencies: z.array(Hz).optional(),
+		frequency: Hz.optional(),
 		gain: z.union([z.number().finite(), z.string()]).nullable().optional(),
 		// Only String()ed / toString()ed into arguments; null would print "null".
 		inputCenterFreq: numberOrText(Hz, INTEGER_TEXT).optional(),

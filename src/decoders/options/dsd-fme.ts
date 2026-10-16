@@ -45,8 +45,8 @@ export const dsdFmeOptionsSchema = z
 			.nullable()
 			.optional(),
 		fmGain: z.number().finite().nullable().optional(),
-		frequencies: z.array(Hz).nullable().optional(),
-		frequency: Hz.nullable().optional(),
+		frequencies: z.array(Hz).optional(),
+		frequency: Hz.optional(),
 		inputIqFormat: z.enum(IQ_FORMAT_VALUES).nullable().optional(),
 		inputSampleRate: z.number().finite().positive().nullable().optional(),
 		minCallDurationMs: z.number().finite().min(0).nullable().optional(),

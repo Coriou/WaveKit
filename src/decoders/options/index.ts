@@ -161,12 +161,16 @@ export function validateDecoderOptions(
 		})
 	}
 	issues.sort(compareIssues)
-	if (issues.length <= DECODER_OPTION_ISSUES_MAX) return issues
-	const kept = issues.slice(0, DECODER_OPTION_ISSUES_MAX - 1)
+	// Unions and nested schemas can raise the same issue twice; keep one.
+	const unique = issues.filter(
+		(issue, i) => i === 0 || compareIssues(issues[i - 1]!, issue) !== 0,
+	)
+	if (unique.length <= DECODER_OPTION_ISSUES_MAX) return unique
+	const kept = unique.slice(0, DECODER_OPTION_ISSUES_MAX - 1)
 	kept.push({
 		path: "",
 		code: "truncated",
-		message: `${issues.length - kept.length} more`,
+		message: `${unique.length - kept.length} more`,
 	})
 	return kept
 }

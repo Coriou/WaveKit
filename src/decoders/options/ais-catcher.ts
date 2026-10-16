@@ -24,8 +24,8 @@ export const aisCatcherOptionsSchema = z
 		outputPort: port.nullable().optional(),
 		inputSampleRate: z.number().finite().positive().nullable().optional(),
 		extraArgs: z.array(z.string()).nullable().optional(),
-		frequencies: z.array(frequencyHz).nullable().optional(),
-		frequency: frequencyHz.nullable().optional(),
+		frequencies: z.array(frequencyHz).optional(),
+		frequency: frequencyHz.optional(),
 		channelHz: frequencyHz.nullable().optional(),
 	})
 	.strict()

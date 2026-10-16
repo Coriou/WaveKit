@@ -51,10 +51,10 @@ describe("null the adapter treats as absent", () => {
 		["readsb", { outputFormat: null, outputPort: null, lat: null }],
 		["rtl433", { outputFormat: null, protocols: null, analyze: null }],
 		["dsd-fme", { mode: null, wavDir: null, callTimeoutMs: null }],
-		["acarsdec", { frequencies: null, extraArgs: null, debugRecordPath: null }],
+		["acarsdec", { extraArgs: null, debugRecordPath: null }],
 		["ais-catcher", { outputFormat: null, inputSampleRate: null }],
 		["direwolf", { kissPort: null, agwPort: null, channelHz: null }],
-		["dumpvdl2", { followCenter: null, outputFormat: null, frequency: null }],
+		["dumpvdl2", { followCenter: null, outputFormat: null }],
 		["multimon-ng", { modes: null, filters: null, fmGain: null }],
 	])("%s accepts %j", (type, options) => {
 		expect(validateDecoderOptions(type, options)).toEqual([])
@@ -72,5 +72,51 @@ describe("null the adapter treats as absent", () => {
 		["acarsdec", { offsetHz: null }],
 	])("%s still rejects null where it is not absent %j", (type, options) => {
 		expect(validateDecoderOptions(type, options)?.length).toBeGreaterThan(0)
+	})
+})
+
+describe("numeric text still meets the number range", () => {
+	it.each([
+		["readsb", { rtlTcpHost: "pi", rtlTcpPort: "65536" }, "rtlTcpPort"],
+		["readsb", { rtlTcpHost: "pi", rtlTcpPort: "0" }, "rtlTcpPort"],
+		["direwolf", { agwPort: "65536" }, "agwPort"],
+		[
+			"dsd-fme",
+			{ output: "udp", udpHost: "127.0.0.1", udpPort: "65536" },
+			"udpPort",
+		],
+		["dumpvdl2", { inputCenterFreq: "0" }, "inputCenterFreq"],
+		["rtl433", { protocols: ["1", "1.5"] }, "protocols.1"],
+	])("%s rejects out-of-range text %j", (type, options, path) => {
+		const issues = validateDecoderOptions(type, options) ?? []
+		expect(issues.map(i => i.path)).toEqual([path])
+		expect(issues[0]?.code).toBe("invalid-value")
+	})
+
+	it.each([
+		["readsb", { rtlTcpHost: "pi", rtlTcpPort: "65535" }],
+		["direwolf", { agwPort: "1" }],
+		["dsd-fme", { output: "udp", udpHost: "127.0.0.1", udpPort: "65535" }],
+	])("%s accepts text at the bound %j", (type, options) => {
+		expect(validateDecoderOptions(type, options)).toEqual([])
+	})
+})
+
+describe("null frequencies are not absent", () => {
+	// resolveDecoderTargetFrequencies skips only undefined: a null `frequencies`
+	// stops resolution before `frequency`, so null is a real problem here.
+	it.each([
+		"rtl433",
+		"acarsdec",
+		"dumpvdl2",
+		"readsb",
+		"dsd-fme",
+		"multimon-ng",
+		"ais-catcher",
+		"direwolf",
+	])("%s reports null frequencies and frequency", type => {
+		const issues =
+			validateDecoderOptions(type, { frequencies: null, frequency: null }) ?? []
+		expect(issues.map(i => i.path)).toEqual(["frequencies", "frequency"])
 	})
 })

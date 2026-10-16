@@ -6,8 +6,8 @@ const frequencyHz = z.number().finite().positive()
 /** Options read by the acarsdec adapter and the audio-demod base class. */
 export const acarsdecOptionsSchema = z
 	.object({
-		frequencies: z.array(frequencyHz).nullable().optional(),
-		frequency: frequencyHz.nullable().optional(),
+		frequencies: z.array(frequencyHz).optional(),
+		frequency: frequencyHz.optional(),
 		// Read but never used by the adapter.
 		gain: z.number().finite().nullable().optional(),
 		inputSampleRate: z.number().finite().positive().nullable().optional(),

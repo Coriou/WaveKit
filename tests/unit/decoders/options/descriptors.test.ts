@@ -72,7 +72,9 @@ describe("decoder option descriptors", () => {
 			// Number-or-numeric-text keys: the range lives on the number form.
 			if (
 				core instanceof z.ZodUnion &&
-				(d.type === "number" || d.type === "number-list")
+				(d.type === "number" ||
+					d.type === "integer" ||
+					d.type === "number-list")
 			) {
 				const numeric = (core.options as z.ZodTypeAny[])
 					.map(unwrap)
