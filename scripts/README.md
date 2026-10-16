@@ -44,6 +44,26 @@ docker run --rm --network none --entrypoint node -v "$PWD:/w:ro" \
   wavekit:local-core /w/scripts/dsd-fme-voice-ab.mjs [--chain "..."] [--decoded-wav /out/x.wav]
 ```
 
+### `rf-window/`
+
+Measurements for a supervised session on a live receiver (WG7): squelch noise tail per
+squelch mode, tone squelch gate, CTCSS/DCS detection and REST retune latency. Each script
+needs `--host` (API host, port 9000 by default) and prints its plan without sending
+anything unless given `--run` (read-only: GET requests, `/ws`, the audio stream) or
+`--apply` (also writes, and puts back the previous live audio config or tuner frequency at
+the end or on Ctrl-C). Output is one JSON object per line. Pure helpers are in `lib.mjs`
+(tested in `tests/unit/scripts/rf-window.test.ts`).
+
+```bash
+node scripts/rf-window/squelch-tail.mjs --host HOST --apply --modes manual,auto,noise --seconds 120
+node scripts/rf-window/tone-squelch.mjs --host HOST --apply --tone ctcss:100.0
+node scripts/rf-window/dcs-ctcss-capture.mjs --host HOST --run --expect dcs:023N
+node scripts/rf-window/tune-latency.mjs --host HOST --apply --count 20 --step-hz 100000
+```
+
+In protected mode set `WAVEKIT_RF_BEARER_ENV` to the name of an environment variable
+that holds a machine bearer.
+
 ## Python Analysis Tools
 
 - **`auto-capture.py`**: Core capture logic. Connects to `rtlmux` TCP stream, detects signals based on standard deviation threshold block-by-block, and saves IQ data.
