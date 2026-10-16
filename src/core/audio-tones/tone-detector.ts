@@ -1,5 +1,6 @@
 /**
- * CTCSS + DTMF over one live-demod transmission (WG2 req 7.1–7.4).
+ * CTCSS + DTMF + DCS over one live-demod transmission (WG2 req 7.1–7.4,
+ * WG6 req 4).
  *
  * PCM is s16le or f32le mono at the demodulator rate. It is decimated to
  * 8 kHz by block averaging before the banks in `ctcss.ts` and `dtmf.ts`.
@@ -10,9 +11,16 @@
  * tone (1633 Hz) is also below 4 kHz; at 48 kHz (N = 6) the boxcar gain
  * there is about 0.935 (−0.6 dB), so the tone still clears the detector.
  * See `boxcarDecimationGain`.
+ *
+ * DCS (`dcs.ts`) rides the same 8 kHz stream. It is withheld until the
+ * transmission has `DCS_MIN_AUDIO_SECONDS` of audio and is reset whenever the
+ * PCM format or rate changes mid-transmission. It never touches the CTCSS or
+ * DTMF banks.
  */
+import { DCS_MIN_AUDIO_SECONDS } from "@wavekit/api-types"
 import type { AnalogTransmissionTone } from "@wavekit/api-types"
 import { CtcssBank } from "./ctcss.js"
+import { DcsDecoder } from "./dcs.js"
 import { DTMF_COLUMN_HZ, DTMF_ROW_HZ, DtmfBank } from "./dtmf.js"
 
 export const AUDIO_TONE_RATE_HZ = 8_000
@@ -40,11 +48,12 @@ export function boxcarDecimationGain(hz: number, inputRate: number): number {
 /**
  * One detector per open transmission. `push` is allocation-free after the
  * first call: banks, the decimator and the odd-byte hold are constructed
- * once and reused. `result` always returns both keys.
+ * once and reused. `result` always returns all three keys.
  */
 export class ToneDetector {
 	private readonly ctcss = new CtcssBank()
 	private readonly dtmf = new DtmfBank()
+	private readonly dcs = new DcsDecoder()
 	/** Assembles a sample split across pushes. f32le needs 4 bytes; at most 3 sit here. */
 	private readonly pending = Buffer.alloc(4)
 	private pendingLen = 0
@@ -64,6 +73,7 @@ export class ToneDetector {
 		const width = format.format === "s16le" ? 2 : 4
 		if (this.format !== format.format || this.rate !== format.rate) {
 			this.pendingLen = 0
+			this.dcs.reset()
 			this.format = format.format
 			this.armRate(format.rate)
 		}
@@ -96,7 +106,9 @@ export class ToneDetector {
 		const digits = this.dtmf.result()
 		const ctcssHz =
 			this.durationSeconds() < MIN_CTCSS_SECONDS ? null : this.ctcss.result()
-		return { ctcssHz, dtmf: digits }
+		const dcs =
+			this.durationSeconds() < DCS_MIN_AUDIO_SECONDS ? null : this.dcs.result()
+		return { ctcssHz, dtmf: digits, dcs }
 	}
 
 	durationSeconds(): number {
@@ -107,6 +119,7 @@ export class ToneDetector {
 	reset(): void {
 		this.ctcss.reset()
 		this.dtmf.reset()
+		this.dcs.reset()
 		this.pending.fill(0)
 		this.pendingLen = 0
 		this.format = null
@@ -183,6 +196,7 @@ export class ToneDetector {
 		const value = Number.isFinite(sample) ? sample : 0
 		this.ctcss.pushSample(value)
 		this.dtmf.pushSample(value)
+		this.dcs.pushSample(value)
 	}
 }
 
