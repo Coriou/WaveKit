@@ -89,6 +89,13 @@ describe("WG4 contract", () => {
 				true,
 			),
 		).toBe(true)
+		// "time-limit" was added after the freeze (additive): the reader's wall budget
+		expect(
+			same<
+				Api.ActivityTrailsTruncation,
+				"scan-rows" | "points" | "entities" | "per-entity" | "time-limit"
+			>(true),
+		).toBe(true)
 		expect(ACTIVITY_TRAILS_DEFAULT_WINDOW_MS).toBe(3_600_000)
 		expect(ACTIVITY_TRAILS_MAX_WINDOW_MS).toBe(86_400_000)
 		expect(ACTIVITY_TRAILS_MAX_POINTS).toBe(20_000)

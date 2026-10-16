@@ -32,7 +32,11 @@ import {
 	type ReadRequest,
 	type ReadResult,
 } from "./read.js"
-import { DEFAULT_TRAILS_READ_LIMITS, type TrailsReadLimits } from "./trails.js"
+import {
+	DEFAULT_TRAILS_READ_LIMITS,
+	TRAILS_WALL_BUDGET_MS,
+	type TrailsReadLimits,
+} from "./trails.js"
 import { ReaderHost, type ReaderHostEvent } from "./reader-host.js"
 import { startReplay } from "./replay.js"
 import {
@@ -83,8 +87,10 @@ export interface ActivityQueryLimits {
 	facetValues: number
 	facetScan: number
 	deadlineMs: number
-	/** WG4: deadline of one bulk trails read. */
+	/** WG4: deadline of one bulk trails read (backstop: a timeout restarts the reader). */
 	trailsDeadlineMs: number
+	/** WG4: cooperative scan budget inside the reader; past it trails return `time-limit`. */
+	trailsWallBudgetMs: number
 	maxQueued: number
 	maxExecuting: number
 	maxInFlightPerClient: number
@@ -104,6 +110,7 @@ export const DEFAULT_ACTIVITY_QUERY_LIMITS: ActivityQueryLimits = {
 	facetScan: 50_000,
 	deadlineMs: 250,
 	trailsDeadlineMs: 1_000,
+	trailsWallBudgetMs: TRAILS_WALL_BUDGET_MS,
 	maxQueued: 4,
 	maxExecuting: 1,
 	maxInFlightPerClient: 1,
@@ -432,6 +439,7 @@ export function createActivityQueryService(
 						...(query.protocols ? { protocols: query.protocols } : {}),
 						...(query.entityKeys ? { entityKeys: query.entityKeys } : {}),
 						limits: trailsLimits,
+						wallBudgetMs: limits.trailsWallBudgetMs,
 					},
 				},
 				limits.trailsDeadlineMs,

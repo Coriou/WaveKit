@@ -110,6 +110,13 @@ describe("query service trails", () => {
 		expect(DEFAULT_ACTIVITY_QUERY_LIMITS.trailsDeadlineMs).toBe(1_000)
 	})
 
+	it("stops the scan cooperatively at 600 ms, inside the 1 000 ms reader deadline", () => {
+		expect(DEFAULT_ACTIVITY_QUERY_LIMITS.trailsWallBudgetMs).toBe(600)
+		expect(DEFAULT_ACTIVITY_QUERY_LIMITS.trailsWallBudgetMs).toBeLessThan(
+			DEFAULT_ACTIVITY_QUERY_LIMITS.trailsDeadlineMs,
+		)
+	})
+
 	it("applies trailsLimits overrides at the bound", async () => {
 		fixture = await createFixture()
 		const store = fixture

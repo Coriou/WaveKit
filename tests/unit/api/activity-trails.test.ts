@@ -3,7 +3,10 @@ import Fastify from "fastify"
 import { afterEach, describe, expect, it } from "vitest"
 import { activityRoutes } from "../../../src/api/routes/activity.js"
 import { ActivityReaderFailedError } from "../../../src/core/activity/query/errors.js"
-import type { ActivityQueryService } from "../../../src/core/activity/storage/contract.js"
+import type {
+	ActivityQueryService,
+	ActivityTrails,
+} from "../../../src/core/activity/storage/contract.js"
 import {
 	createActivityQueryService,
 	type ActivityQueryServiceOptions,
@@ -318,6 +321,32 @@ describe("GET /api/activity/trails", () => {
 		expect(codes).toEqual([200, 429])
 		const busy = first.statusCode === 429 ? first : second
 		expect(busy.json()).toMatchObject({ code: "ACTIVITY_QUERY_BUSY" })
+		await app.close()
+	})
+
+	it("answers 200 truncated by time-limit when the scan budget runs out", async () => {
+		const { app, store } = await open({
+			limits: { trailsWallBudgetMs: 0, deadlineMs: 2_000 },
+		})
+		insertPoint(store, "e1", "icao:A", -90_000, { lat: 48.1, lon: 2.1 })
+		insertPoint(store, "e2", "icao:B", -60_000, { lat: 48.2, lon: 2.2 })
+		insertPoint(store, "e3", "icao:A", -30_000, { lat: 48.3, lon: 2.3 })
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/activity/trails",
+		})
+		expect(response.statusCode).toBe(200)
+		const body = response.json() as ActivityTrails
+		// A zero budget still takes the newest row, then stops before the next one.
+		expect(body.truncated).toBe(true)
+		expect(body.truncation).toEqual(["time-limit"])
+		expect(body.scannedRows).toBe(1)
+		expect(body.trails).toHaveLength(1)
+		expect(body.trails[0]).toMatchObject({
+			entityKey: "icao:A",
+			truncated: true,
+			points: [[NOW - 30_000, 48.3, 2.3, null]],
+		})
 		await app.close()
 	})
 

@@ -539,6 +539,47 @@ describe("readTrails against a store", () => {
 		return result.trails
 	}
 
+	it("stops at the wall budget with the newest rows and an exact per-trail flag", () => {
+		reset()
+		const at = (offset: number, entityKey: string) =>
+			insert({
+				producedAtMs: NOW - offset,
+				entityKey,
+				category: "aircraft",
+				protocol: "adsb",
+				position: { lat: 10, lon: 20 },
+			})
+		at(100, "A")
+		at(200, "B")
+		at(300, "A")
+		at(400, "C")
+		at(500, "A")
+		// One tick per clock call: start 0, then checks before rows 2, 3, 4 read 1, 2, 3.
+		let ticks = 0
+		const result = read({
+			chunkRows: 2,
+			wallBudgetMs: 3,
+			clock: () => ticks++,
+		})
+		expect(result.truncated).toBe(true)
+		expect(result.truncation).toEqual(["time-limit"])
+		expect(result.scannedRows).toBe(3)
+		expect(
+			result.trails.map(t => [
+				t.entityKey,
+				t.points.map(p => p[0]),
+				t.truncated,
+			]),
+		).toEqual([
+			["A", [NOW - 300, NOW - 100], true],
+			["B", [NOW - 200], false],
+		])
+		// A budget that is never reached reads the whole window untruncated.
+		const full = read({ chunkRows: 2, wallBudgetMs: 1e9 })
+		expect(full.truncation).toEqual([])
+		expect(full.scannedRows).toBe(5)
+	})
+
 	it("empty store returns no trails and a null floor; from == to allowed", () => {
 		reset()
 		const result = read({ producedFromMs: NOW, producedToMs: NOW })

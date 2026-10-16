@@ -491,6 +491,8 @@ export type ActivityTrailsTruncation =
 	| "points"
 	| "entities"
 	| "per-entity"
+	/** WG4: the read's wall-time budget stopped the scan (additive, after the four bounds). */
+	| "time-limit"
 
 export interface ActivityTrails {
 	/** The effective window (ISO). */

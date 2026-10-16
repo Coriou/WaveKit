@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks"
 import {
 	ACTIVITY_TRAILS_MAX_ENTITIES,
 	ACTIVITY_TRAILS_MAX_POINTS,
@@ -34,7 +35,18 @@ export interface TrailsReadInput {
 	nowMs?: number
 	/** Keyset chunk size of the walk; defaults to TRAILS_CHUNK_ROWS (tests lower it). */
 	chunkRows?: number
+	/**
+	 * Cooperative wall-time budget of the scan in ms; defaults to TRAILS_WALL_BUDGET_MS. Past
+	 * it the walk stops before the next row and the result is marked `time-limit`, so the
+	 * outer reader deadline (and its worker restart) stays a backstop.
+	 */
+	wallBudgetMs?: number
+	/** Monotonic ms clock for the budget; defaults to performance.now (tests inject one). */
+	clock?: () => number
 }
+
+/** Default scan wall budget, well inside the 1 000 ms trails reader deadline. */
+export const TRAILS_WALL_BUDGET_MS = 600
 
 export const DEFAULT_TRAILS_READ_LIMITS: TrailsReadLimits = Object.freeze({
 	maxPoints: ACTIVITY_TRAILS_MAX_POINTS,
@@ -73,6 +85,7 @@ const TRUNCATION_ORDER: readonly ActivityTrailsTruncation[] = [
 	"points",
 	"entities",
 	"per-entity",
+	"time-limit",
 ]
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -163,9 +176,14 @@ export interface TrailAcceptor {
 	/**
 	 * `moreRows`: a row exists past the scanned ones (signals scan-rows when no other stop).
 	 * `hasOlder`: consulted per untruncated trail when the scan stopped early
-	 * (scan-rows or points), to mark trails that lost older in-window points.
+	 * (scan-rows, points or time-limit), to mark trails that lost older in-window points.
+	 * `timeLimited`: the wall budget stopped the scan before a remaining row.
 	 */
-	finish(moreRows: boolean, hasOlder?: TrailHasOlder): AcceptedTrails
+	finish(
+		moreRows: boolean,
+		hasOlder?: TrailHasOlder,
+		timeLimited?: boolean,
+	): AcceptedTrails
 }
 
 /** Incremental form of acceptTrailRows, so the reader can stop the SQL walk early. */
@@ -229,11 +247,19 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 		return true
 	}
 
-	function finish(moreRows: boolean, hasOlder?: TrailHasOlder): AcceptedTrails {
+	function finish(
+		moreRows: boolean,
+		hasOlder?: TrailHasOlder,
+		timeLimited = false,
+	): AcceptedTrails {
 		if (moreRows && !stopped && scannedRows >= limits.scanRows)
 			hit.add("scan-rows")
+		if (timeLimited && !stopped) hit.add("time-limit")
 		const built = [...byEntity.values()]
-		if (hasOlder && (hit.has("scan-rows") || hit.has("points"))) {
+		if (
+			hasOlder &&
+			(hit.has("scan-rows") || hit.has("points") || hit.has("time-limit"))
+		) {
 			for (const entry of built) {
 				if (entry.truncated) continue
 				if (hasOlder(entry.entityKey, entry.oldestMs, entry.oldestSeq))
@@ -358,8 +384,12 @@ export function readTrails(
 		`${select} AND produced_at_ms <= ? AND (produced_at_ms < ? OR seq < ?) ORDER BY produced_at_ms DESC, seq DESC LIMIT ?`,
 	)
 	const chunk = Math.max(1, Math.floor(input.chunkRows ?? TRAILS_CHUNK_ROWS))
+	const clock = input.clock ?? (() => performance.now())
+	const wallBudgetMs = input.wallBudgetMs ?? TRAILS_WALL_BUDGET_MS
+	const startedMs = clock()
 	let read = 0
 	let moreRows = false
+	let timeLimited = false
 	let last: TrailRow | null = null
 	walk: for (;;) {
 		const size = Math.min(chunk, budget - read)
@@ -374,6 +404,12 @@ export function readTrails(
 						size,
 					)
 		for (const raw of found) {
+			// Checked before every row after the first, so a stop always leaves a real
+			// unscanned row behind and at least the newest row is taken.
+			if (read > 0 && clock() - startedMs >= wallBudgetMs) {
+				timeLimited = true
+				break walk
+			}
 			const row = toTrailRow(raw)
 			read += 1
 			last = row
@@ -407,6 +443,7 @@ export function readTrails(
 		(entityKey, oldestMs, oldestSeq) =>
 			probe.get(entityKey, ...params, oldestMs, oldestMs, oldestSeq) !==
 			undefined,
+		timeLimited,
 	)
 	const floorRow = db
 		.prepare("SELECT MIN(produced_at_ms) AS floor FROM activity")

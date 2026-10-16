@@ -3357,12 +3357,17 @@ its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending tim
 ```
 
 Trails use the same reader and admission as search (one read in flight per
-caller, one executing at a time, so a trails read can delay other Activity reads)
-but have their own 1,000 ms deadline instead of 250 ms. A read that passes it
-answers 429 `ACTIVITY_QUERY_TIMEOUT` with no partial result; the reader worker is
-stopped and a new one starts for the next query (within the reader's 5 s startup
-budget). Retry with a shorter window or narrower filters. Errors are those of
-[Query and cursor errors](#query-and-cursor-errors).
+caller, one executing at a time, so a trails read can delay other Activity reads,
+by at most about 600 ms). The scan has a 600 ms wall-time budget inside the
+reader: when it runs out, the scan stops before the next row and the response is
+a normal 200 with the newest rows read so far, `truncated: true` and `time-limit`
+in `truncation` (after the four bounds above; each returned trail is still checked
+for older in-window points, so its `truncated` flag stays exact). Narrow the window
+or the filters to see older points. The 1,000 ms reader deadline (instead of
+search's 250 ms) is only a backstop: a read that passes it answers 429
+`ACTIVITY_QUERY_TIMEOUT` with no partial result, and the reader worker is stopped
+and a new one starts for the next query (within the reader's 5 s startup budget).
+Errors are those of [Query and cursor errors](#query-and-cursor-errors).
 
 ### GET /api/activity/:eventId
 
