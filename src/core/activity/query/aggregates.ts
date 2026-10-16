@@ -24,7 +24,6 @@ import {
 	createStepWalk,
 	numberOf,
 	pieceParams,
-	startOf,
 	WALK_CHUNK_ROWS,
 	WALK_RANGE_WHERE,
 	WALK_TIE_WHERE,
@@ -121,6 +120,9 @@ export const AGGREGATE_CATEGORIES = [
 	"mesh",
 	"other",
 ] as const satisfies readonly ActivityCategory[]
+
+/** SQL list of the known kinds (fixed literals, no user input). */
+const KIND_LIST = [...KINDS].map(kind => `'${kind}'`).join(", ")
 
 const CATEGORY_SET: ReadonlySet<string> = new Set(AGGREGATE_CATEGORIES)
 
@@ -439,9 +441,14 @@ export interface AggregateWalkOutcome {
 
 /**
  * Walks the window newest first in steps of at most `chunkRows` index rows (walk.ts) and
- * hands every piece to `visit`, which runs one statement bounded by the piece. Stops at the
- * scan cap (`scan-rows`, only when an unexamined window row remains) or when the wall budget
- * is spent before a step or a piece after the first (`time-limit`).
+ * hands every piece to `visit`, which runs one statement bounded by the piece and returns
+ * the piece's index rows (matched or not). The wall budget is checked before every
+ * statement after the first (`guard`, shared with the caller's other statements); a spent
+ * budget stops with `time-limit`. Reaching `scanRows` examined rows stops with `scan-rows`
+ * (requirement 1.6): steps are sized so the cap is never passed and no row past it is read.
+ * `coveredFromMs` is the oldest boundary known exact: `lo` after a range piece, `ms + 1`
+ * after a run piece (rows below it in the same ms may remain), the window start when the
+ * walk ended.
  */
 export function walkAggregate(
 	db: SqlDatabase,
@@ -449,61 +456,72 @@ export function walkAggregate(
 		producedFromMs: number
 		producedToMs: number
 		limits: AggregatesReadLimits
-		clock?: () => number
 	},
-	visit: (piece: StepPiece) => void,
+	guard: AggregateGuard,
+	visit: (piece: StepPiece) => number,
 ): AggregateWalkOutcome {
 	const { limits } = input
 	const fromMs = input.producedFromMs
 	const walk = createStepWalk(db, { fromMs, chunk: limits.chunkRows })
-	const clock = input.clock ?? (() => performance.now())
-	const startedMs = clock()
-	const spent = (): boolean => clock() - startedMs >= limits.wallBudgetMs
 	let scannedRows = 0
 	let scanCut = false
-	let timeCut = false
-	let coveredFromMs = fromMs
+	let coveredFromMs = input.producedToMs + 1
 	let cursor: StepCursor | null = walkStart(input.producedToMs)
-	walk: for (let steps = 0; cursor !== null; steps += 1) {
-		if (steps > 0 && spent()) {
-			timeCut = true
-			coveredFromMs = cursor.ms + 1
-			break
-		}
+	walk: while (cursor !== null) {
 		const remaining = limits.scanRows - scannedRows
 		if (remaining <= 0) {
-			// One index row tells whether the cap cut anything, and where (exact).
-			const probe = walk.planStep(cursor, 1)
-			if (probe.examined !== null && probe.examined > 0 && probe.next) {
-				scanCut = true
-				coveredFromMs = probe.next.ms + 1
-			}
+			scanCut = true
 			break
 		}
-		const plan = walk.planStep(cursor, Math.min(limits.chunkRows, remaining))
-		for (let at = 0; at < plan.pieces.length; at += 1) {
-			const piece = plan.pieces[at] as StepPiece
-			if ((steps > 0 || at > 0) && spent()) {
-				timeCut = true
-				coveredFromMs = startOf(piece).ms + 1
-				// Only the pieces of this step already visited were examined.
-				for (let done = 0; done < at; done += 1)
-					scannedRows += walk.countPiece(plan.pieces[done] as StepPiece)
-				break walk
-			}
-			visit(piece)
+		const plan = walk.planStep(
+			cursor,
+			Math.min(limits.chunkRows, remaining),
+			guard.stop,
+		)
+		if (plan.stopped) break
+		for (const piece of plan.pieces) {
+			if (guard.stop()) break walk
+			scannedRows += visit(piece)
+			coveredFromMs = Math.min(
+				coveredFromMs,
+				piece.kind === "tie" ? piece.ms + 1 : piece.lo,
+			)
 		}
-		if (plan.examined !== null) scannedRows += plan.examined
-		else for (const piece of plan.pieces) scannedRows += walk.countPiece(piece)
 		cursor = plan.next
 	}
+	if (cursor === null) coveredFromMs = fromMs
 	const truncation: ActivityAggregateTruncation[] = []
 	if (scanCut) truncation.push("scan-rows")
-	if (timeCut) truncation.push("time-limit")
+	if (guard.timedOut()) truncation.push("time-limit")
 	return {
 		scannedRows,
 		truncation,
 		coveredFromMs: Math.max(fromMs, coveredFromMs),
+	}
+}
+
+/** The cooperative wall budget, checked before every statement after the first. */
+export interface AggregateGuard {
+	/** Call before a statement: true when the budget is spent (the statement must not run). */
+	stop(): boolean
+	timedOut(): boolean
+}
+
+export function createAggregateGuard(
+	wallBudgetMs: number,
+	clock: () => number = () => performance.now(),
+): AggregateGuard {
+	const startedMs = clock()
+	let statements = 0
+	let timedOut = false
+	return {
+		stop() {
+			if (timedOut) return true
+			if (statements > 0 && clock() - startedMs >= wallBudgetMs) timedOut = true
+			else statements += 1
+			return timedOut
+		},
+		timedOut: () => timedOut,
 	}
 }
 
@@ -518,7 +536,12 @@ function appendIn(
 	for (const value of values) params.push(value)
 }
 
-function readRetentionFloor(db: SqlDatabase): string | null {
+function readRetentionFloor(
+	db: SqlDatabase,
+	guard: AggregateGuard,
+): string | null {
+	// The first statement of a read, so it always runs (MIN on activity_produced is one seek).
+	guard.stop()
 	const floorRow = db
 		.prepare("SELECT MIN(produced_at_ms) AS floor FROM activity")
 		.get()
@@ -593,13 +616,14 @@ export function readBandMap(
 	const filters = where.join(" AND ")
 	// One packed row per piece (at most the piece's chunk of rows inside): materialising
 	// a JSON text and parsing it costs about a third of returning each row as an object.
-	const select = `SELECT json_group_array(json_array(seq, produced_at_ms, kind, protocol,
-		category, entity_key, frequency_hz)) AS j
+	// COUNT(*) is the piece's index rows (scannedRows); the filters select what is packed.
+	const select = `SELECT COUNT(*) AS n, json_group_array(json_array(seq, produced_at_ms, kind,
+		protocol, category, entity_key, frequency_hz)) FILTER (WHERE ${filters}) AS j
 		FROM activity INDEXED BY activity_produced`
-	const scanTie = db.prepare(`${select} WHERE ${WALK_TIE_WHERE} AND ${filters}`)
-	const scanRange = db.prepare(
-		`${select} WHERE ${WALK_RANGE_WHERE} AND ${filters}`,
-	)
+	const scanTie = db.prepare(`${select} WHERE ${WALK_TIE_WHERE}`)
+	const scanRange = db.prepare(`${select} WHERE ${WALK_RANGE_WHERE}`)
+	const guard = createAggregateGuard(limits.wallBudgetMs, input.clock)
+	const retentionFloor = readRetentionFloor(db, guard)
 	const aggregator = createBandMapAggregator({
 		minHz: input.minHz,
 		maxHz: input.maxHz,
@@ -614,15 +638,16 @@ export function readBandMap(
 			producedFromMs: input.producedFromMs,
 			producedToMs: input.producedToMs,
 			limits,
-			...(input.clock ? { clock: input.clock } : {}),
 		},
+		guard,
 		piece => {
 			const packed = (piece.kind === "tie" ? scanTie : scanRange).get(
-				...pieceParams(piece),
 				...params,
+				...pieceParams(piece),
 			)
-			for (const row of parsePackedRows(packed?.["j"]))
+			for (const row of parsePackedRows(packed?.["j"] ?? "[]"))
 				aggregator.add(toBandMapRow(row))
+			return numberOf(packed?.["n"] ?? 0, "count")
 		},
 	)
 	const aggregate = aggregator.finish()
@@ -642,7 +667,7 @@ export function readBandMap(
 		truncated: truncation.length > 0,
 		truncation,
 		coveredFrom: iso(outcome.coveredFromMs),
-		retentionFloor: readRetentionFloor(db),
+		retentionFloor,
 		generatedAt: iso(input.nowMs ?? Date.now()),
 	}
 }
@@ -669,17 +694,22 @@ export function readTimeline(
 	appendIn(where, params, "category", input.categories)
 	appendIn(where, params, "protocol", input.protocols)
 	appendIn(where, params, "entity_key", input.entityKeys)
-	const filters = where.map(clause => ` AND ${clause}`).join("")
+	const filters = where.length === 0 ? "1" : where.join(" AND ")
 	// Integer division: produced_at_ms and the bound bigint are both INTEGER, and the
-	// window is non-negative, so this is floor(ms / bucketMs).
-	const select = `SELECT produced_at_ms / ? AS b, category, COUNT(*) AS n
+	// window is non-negative, so this is floor(ms / bucketMs). `seen` counts every index
+	// row of the piece (scannedRows), `n` the matched ones, `bad` rows of an unknown kind.
+	const select = `SELECT produced_at_ms / ? AS b, category, COUNT(*) AS seen,
+		COUNT(*) FILTER (WHERE ${filters}) AS n,
+		COUNT(*) FILTER (WHERE kind NOT IN (${KIND_LIST})) AS bad
 		FROM activity INDEXED BY activity_produced`
 	const scanTie = db.prepare(
-		`${select} WHERE ${WALK_TIE_WHERE}${filters} GROUP BY b, category`,
+		`${select} WHERE ${WALK_TIE_WHERE} GROUP BY b, category`,
 	)
 	const scanRange = db.prepare(
-		`${select} WHERE ${WALK_RANGE_WHERE}${filters} GROUP BY b, category`,
+		`${select} WHERE ${WALK_RANGE_WHERE} GROUP BY b, category`,
 	)
+	const guard = createAggregateGuard(limits.wallBudgetMs, input.clock)
+	const retentionFloor = readRetentionFloor(db, guard)
 	const counter = createTimelineCounter(
 		input.producedFromMs,
 		input.producedToMs,
@@ -692,20 +722,24 @@ export function readTimeline(
 			producedFromMs: input.producedFromMs,
 			producedToMs: input.producedToMs,
 			limits,
-			...(input.clock ? { clock: input.clock } : {}),
 		},
+		guard,
 		piece => {
 			const rows = (piece.kind === "tie" ? scanTie : scanRange).all(
 				bucketParam,
-				...pieceParams(piece),
 				...params,
+				...pieceParams(piece),
 			)
-			for (const row of rows)
-				counter.add(
-					numberOf(row["b"], "bucket"),
-					categoryOf(row["category"]),
-					numberOf(row["n"], "count"),
-				)
+			let seen = 0
+			for (const row of rows) {
+				if (numberOf(row["bad"], "count") > 0)
+					throw activityRecordCorrupt("Activity kind is corrupt")
+				const category = categoryOf(row["category"])
+				const n = numberOf(row["n"], "count")
+				if (n > 0) counter.add(numberOf(row["b"], "bucket"), category, n)
+				seen += numberOf(row["seen"], "count")
+			}
+			return seen
 		},
 	)
 	const { buckets, totalRows } = counter.finish()
@@ -719,7 +753,7 @@ export function readTimeline(
 		truncated: outcome.truncation.length > 0,
 		truncation: outcome.truncation,
 		coveredFrom: iso(outcome.coveredFromMs),
-		retentionFloor: readRetentionFloor(db),
+		retentionFloor,
 		generatedAt: iso(input.nowMs ?? Date.now()),
 	}
 }

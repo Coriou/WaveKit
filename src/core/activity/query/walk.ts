@@ -42,6 +42,8 @@ export interface StepPlan {
 	 * with `countPiece`).
 	 */
 	examined: number | null
+	/** `stop` answered true before a statement: nothing was planned. */
+	stopped?: true
 }
 
 /** Piece predicates; bind `pieceParams(piece)` in this order. */
@@ -75,9 +77,10 @@ export function pieceParams(piece: StepPiece): SqlValue[] {
 export interface StepWalk {
 	/**
 	 * The step below `cursor` (exclusive): at most `chunk` index rows (defaults to the walk's
-	 * chunk). One or two statements, each examining at most `chunk` index rows.
+	 * chunk). One or two statements, each examining at most `chunk` index rows. `stop` is
+	 * consulted before each statement; true returns a `stopped` plan (cursor unchanged).
 	 */
-	planStep(cursor: StepCursor, chunk?: number): StepPlan
+	planStep(cursor: StepCursor, chunk?: number, stop?: () => boolean): StepPlan
 	/** Index rows of a piece on the covering index (bounded by the piece). */
 	countPiece(piece: StepPiece): number
 }
@@ -107,11 +110,22 @@ export function createStepWalk(
 	let countTie: ReturnType<SqlDatabase["prepare"]> | null = null
 	let countRange: ReturnType<SqlDatabase["prepare"]> | null = null
 
-	const planStep = (cursor: StepCursor, chunkRows?: number): StepPlan => {
+	const planStep = (
+		cursor: StepCursor,
+		chunkRows?: number,
+		stop?: () => boolean,
+	): StepPlan => {
 		const chunk =
 			chunkRows === undefined
 				? defaultChunk
 				: Math.max(1, Math.floor(chunkRows))
+		const stopped = (): StepPlan => ({
+			pieces: [],
+			next: cursor,
+			examined: 0,
+			stopped: true,
+		})
+		if (stop?.()) return stopped()
 		const tie = tieEndStatement.get(cursor.ms, cursor.seq, chunk)
 		const count = numberOf(tie?.["n"] ?? 0, "count")
 		if (count > 0) {
@@ -124,6 +138,7 @@ export function createStepWalk(
 		}
 		const hi = cursor.ms - 1
 		if (hi < fromMs) return { pieces: [], next: null, examined: 0 }
+		if (stop?.()) return stopped()
 		const end = rangeEndStatement.get(fromMs, hi, chunk - 1)
 		if (end === undefined)
 			return {

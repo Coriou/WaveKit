@@ -328,6 +328,55 @@ const rowArb = (fromMs: number, spanMs: number): fc.Arbitrary<AggRow> =>
 
 // ---------- pure helpers ----------
 
+function maxShapedBandMapBytes(protocolPad: string, entityPad: string): number {
+	const rows: BandMapRow[] = []
+	let seq = 0
+	const protocol = (p: number) => `${String(p)}`.padStart(64, protocolPad)
+	const entity = (b: number, e: number) => `${b}:${e}:`.padEnd(128, entityPad)
+	for (let b = 0; b < 1_000; b += 1)
+		for (let p = 0; p < 9; p += 1)
+			for (let e = 0; e < 3; e += 1)
+				rows.push(
+					row({
+						seq: ++seq,
+						frequencyHz: 1_000_000_000_000 / 100 + b * 1_000_000,
+						protocol: protocol(p),
+						category: "aviation-data",
+						entityKey: entity(b, e + p),
+						producedAtMs: NOW - seq,
+					}),
+				)
+	const out = aggregateBandMap(rows, {
+		...SHAPE,
+		maxHz: 100_000_000_000,
+		bucketHz: 1_000_000,
+	})
+	const map: ActivityBandMap = {
+		producedFrom: new Date(NOW).toISOString(),
+		producedTo: new Date(NOW).toISOString(),
+		minHz: 100_000_000_000,
+		maxHz: 100_000_000_000,
+		bucketHz: 1_000_000,
+		buckets: out.buckets,
+		scannedRows: 250_000,
+		countedRows: 250_000,
+		noFrequencyRows: 250_000,
+		droppedRows: 250_000,
+		truncated: true,
+		truncation: ["scan-rows", "time-limit", "buckets"],
+		coveredFrom: new Date(NOW).toISOString(),
+		retentionFloor: new Date(NOW).toISOString(),
+		generatedAt: new Date(NOW).toISOString(),
+	}
+	expect(out.buckets).toHaveLength(1_000)
+	expect(
+		out.buckets.every(
+			b => b.protocols.length === 8 && b.topEntities.length === 3,
+		),
+	).toBe(true)
+	return Buffer.byteLength(JSON.stringify(map))
+}
+
 describe("band map aggregation", () => {
 	it("defaults come from the frozen constants", () => {
 		expect(DEFAULT_AGGREGATES_READ_LIMITS).toEqual({
@@ -514,55 +563,19 @@ describe("band map aggregation", () => {
 		expect(tie.droppedRows).toBe(2)
 	})
 
-	it("serialised max-shaped band map stays <= 2.1 MB", () => {
-		const rows: BandMapRow[] = []
-		let seq = 0
-		const protocol = (p: number) => `${String(p)}`.padStart(64, "p")
-		const entity = (b: number, e: number) => `${b}:${e}:`.padEnd(128, "k")
-		for (let b = 0; b < 1_000; b += 1)
-			for (let p = 0; p < 9; p += 1)
-				for (let e = 0; e < 3; e += 1)
-					rows.push(
-						row({
-							seq: ++seq,
-							frequencyHz: 1_000_000_000_000 / 100 + b * 1_000_000,
-							protocol: protocol(p),
-							category: "aviation-data",
-							entityKey: entity(b, e + p),
-							producedAtMs: NOW - seq,
-						}),
-					)
-		const out = aggregateBandMap(rows, {
-			...SHAPE,
-			maxHz: 100_000_000_000,
-			bucketHz: 1_000_000,
-		})
-		const map: ActivityBandMap = {
-			producedFrom: new Date(NOW).toISOString(),
-			producedTo: new Date(NOW).toISOString(),
-			minHz: 100_000_000_000,
-			maxHz: 100_000_000_000,
-			bucketHz: 1_000_000,
-			buckets: out.buckets,
-			scannedRows: 250_000,
-			countedRows: 250_000,
-			noFrequencyRows: 250_000,
-			droppedRows: 250_000,
-			truncated: true,
-			truncation: ["scan-rows", "time-limit", "buckets"],
-			coveredFrom: new Date(NOW).toISOString(),
-			retentionFloor: new Date(NOW).toISOString(),
-			generatedAt: new Date(NOW).toISOString(),
-		}
-		expect(out.buckets).toHaveLength(1_000)
-		expect(
-			out.buckets.every(
-				b => b.protocols.length === 8 && b.topEntities.length === 3,
-			),
-		).toBe(true)
-		const bytes = Buffer.byteLength(JSON.stringify(map))
+	it("serialised max-shaped band map stays <= 2.1 MB (plain ASCII keys)", () => {
+		const bytes = maxShapedBandMapBytes("p", "k")
 		expect(bytes).toBeLessThanOrEqual(2_100_000)
 		expect(bytes).toBeGreaterThan(1_500_000)
+	})
+
+	it("max-shaped band map with JSON-escaped ASCII keys (quotes, backslashes): measured bound", () => {
+		// Every pad character escapes to two bytes. Measured 2 766 767 bytes: above the frozen
+		// 2.0 MB estimate (which assumed unescaped ASCII); bound asserted at the measurement.
+		const bytes = maxShapedBandMapBytes('"', "\\")
+		expect(bytes).toBeLessThanOrEqual(2_800_000)
+		if (process.env["WAVEKIT_AGGREGATES_SIZE"] === "1")
+			process.stderr.write(`BANDMAP_ESCAPED_BYTES ${bytes}\n`)
 	})
 
 	// Feature: web-gaps-5, Property 1: Band map model
@@ -854,6 +867,9 @@ describe("aggregate reads against a store", () => {
 			expect(() => bandMap(store)).toThrow(
 				expect.objectContaining({ code: "ACTIVITY_RECORD_CORRUPT" }),
 			)
+			expect(() => timeline(store)).toThrow(
+				expect.objectContaining({ code: "ACTIVITY_RECORD_CORRUPT" }),
+			)
 		})
 	})
 
@@ -914,7 +930,7 @@ describe("aggregate reads against a store", () => {
 				sql.includes("activity_produced"),
 			)
 			// tie end, range end, count range, band map tie/range, timeline tie/range.
-			expect(walked.length).toBeGreaterThanOrEqual(7)
+			expect(walked.length).toBeGreaterThanOrEqual(6)
 			for (const sql of walked) {
 				const count = (sql.match(/\?/g) ?? []).length
 				const details = store.sql
@@ -1017,24 +1033,102 @@ describe("aggregate reads against a store", () => {
 		})
 	})
 
-	it("lowered scan cap: at the cap is complete, one row past is scan-rows with an exact coveredFrom", () => {
+	it("lowered scan cap: below the cap is complete; reaching it is scan-rows, no row past it read", () => {
 		withStore(store => {
 			const rows: AggRow[] = []
 			for (let i = 0; i < 10; i += 1) rows.push({ producedAtMs: NOW - 10 + i })
 			store.insertMany(rows)
-			const at = bandMap(store, { limits: { scanRows: 10, chunkRows: 3 } })
-			expect(at.truncated).toBe(false)
+			const below = bandMap(store, { limits: { scanRows: 11, chunkRows: 3 } })
+			expect(below.truncated).toBe(false)
+			expect(below.scannedRows).toBe(10)
+			expect(below.coveredFrom).toBe(new Date(NOW - 10_000).toISOString())
+			const stats = newStats()
+			const at = bandMap(
+				store,
+				{ limits: { scanRows: 10, chunkRows: 3 } },
+				counting(store.sql, stats),
+			)
+			expect(at.truncation).toEqual(["scan-rows"])
 			expect(at.scannedRows).toBe(10)
-			expect(at.coveredFrom).toBe(new Date(NOW - 10_000).toISOString())
+			// Every row read was counted: the walk statements returned 10 rows in all.
+			const walked = stats.returned.filter(r =>
+				r.sql.includes("json_group_array"),
+			)
+			expect(walked.reduce((sum, r) => sum + r.rows, 0)).toBe(10)
+			// The oldest examined row is at NOW-10; rows below it in that ms may remain.
+			expect(at.coveredFrom).toBe(new Date(NOW - 9).toISOString())
 			const past = bandMap(store, { limits: { scanRows: 9, chunkRows: 3 } })
 			expect(past.truncation).toEqual(["scan-rows"])
 			expect(past.scannedRows).toBe(9)
 			expect(past.countedRows).toBe(9)
-			// Rows NOW-9 .. NOW-1 examined; the oldest (NOW-10) not.
-			expect(past.coveredFrom).toBe(new Date(NOW - 9).toISOString())
+			expect(past.coveredFrom).toBe(new Date(NOW - 8).toISOString())
 			const line = timeline(store, { limits: { scanRows: 9, chunkRows: 4 } })
 			expect(line.truncation).toEqual(["scan-rows"])
 			expect(line.totalRows).toBe(9)
+		})
+		withStore(store => {
+			store.insert({ producedAtMs: NOW - 1 })
+			const one = bandMap(store, { limits: { scanRows: 1 } })
+			expect(one.truncation).toEqual(["scan-rows"])
+			expect(one.scannedRows).toBe(1)
+		})
+	})
+
+	it("the budget is checked before every statement after the first (one row, 1 ms budget)", () => {
+		withStore(store => {
+			store.insert({ producedAtMs: 20_000 })
+			for (const read of ["bandmap", "timeline"] as const) {
+				let ticks = 0
+				const stats = newStats()
+				const db = counting(store.sql, stats, () => (ticks += 1))
+				const input = {
+					producedFromMs: 10_000,
+					producedToMs: 30_000,
+					limits: { wallBudgetMs: 1 },
+					clock: () => ticks,
+				}
+				const out =
+					read === "bandmap"
+						? bandMap(store, input, db)
+						: timeline(store, { ...input, bucketMs: 10_000 }, db)
+				expect(out.truncation).toEqual(["time-limit"])
+				// The snapshot meta, the retention floor (first statement of the read), then
+				// the first walk statement is refused: the budget is already spent.
+				expect(stats.returned).toHaveLength(2)
+				expect(out.scannedRows).toBe(0)
+				expect(out.coveredFrom).toBe(new Date(30_001).toISOString())
+			}
+		})
+	})
+
+	it("a time-limit stop reports the last fully examined position as coveredFrom", () => {
+		withStore(store => {
+			store.insertMany([{ producedAtMs: 20_000 }, { producedAtMs: 12_000 }])
+			const seen = new Set<string>()
+			for (let budget = 1; budget <= 12; budget += 1) {
+				let ticks = 0
+				const db = counting(store.sql, newStats(), () => (ticks += 1))
+				const out = bandMap(
+					store,
+					{
+						producedFromMs: 10_000,
+						producedToMs: 30_000,
+						limits: { chunkRows: 1, wallBudgetMs: budget },
+						clock: () => ticks,
+					},
+					db,
+				)
+				const covered = Date.parse(out.coveredFrom)
+				seen.add(`${out.scannedRows}:${out.truncated}:${covered}`)
+				// Never above one ms over the oldest examined row (minimal), and exact.
+				if (out.scannedRows === 2)
+					expect(covered).toBe(out.truncated ? 12_001 : 10_000)
+				else if (out.scannedRows === 1)
+					expect([12_001, 20_001]).toContain(covered)
+				else expect([20_001, 30_001]).toContain(covered)
+			}
+			// The cut right after the 12 000 row reports 12 001, not the previous cursor.
+			expect(seen.has("2:true:12001")).toBe(true)
 		})
 	})
 
@@ -1190,6 +1284,19 @@ describe("aggregate reads against a store", () => {
 						}
 						if (line.truncation.includes("scan-rows"))
 							expect(line.scannedRows).toBe(scanRows)
+						// Minimal: the examined rows are the newest scannedRows of the window,
+						// and coveredFrom is at most one ms above the oldest of them.
+						if (line.truncated) {
+							const ordered = [...window].sort((a, b) =>
+								a.producedAtMs !== b.producedAtMs
+									? b.producedAtMs - a.producedAtMs
+									: b.seq - a.seq,
+							)
+							const oldest = ordered[line.scannedRows - 1]
+							expect(covered).toBeLessThanOrEqual(
+								oldest ? oldest.producedAtMs + 1 : Math.max(fromMs, NOW + 1),
+							)
+						}
 					}),
 			),
 			{ numRuns: 100 },
