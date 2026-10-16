@@ -1,6 +1,11 @@
 import Fastify from "fastify"
 import { describe, expect, it, vi } from "vitest"
 import { stationRoutes } from "../../../src/api/routes/station.js"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { ConfigSchema } from "../../../src/config.js"
+import { openStationService } from "../../../src/core/station/station-service.js"
 import { StationUpdateError } from "../../../src/core/station/errors.js"
 import type { DeniedAdmission } from "../../../src/access/types.js"
 import type { StationService } from "../../../src/core/station/contract.js"
@@ -161,7 +166,25 @@ describe.each([true, false])(
 				expect(res.statusCode).toBe(400)
 			}
 			const big = await patch(app, { name: "x".repeat(5000) })
-			expect(big.statusCode).toBe(413)
+			expect(big.statusCode).toBe(400)
+			expect(big.json().code).toBe("STATION_UPDATE_INVALID")
+			expect(big.json().error).toBe("Bad Request")
+			const bad = await app.inject({
+				method: "PATCH",
+				url: "/api/station",
+				payload: "{",
+				headers: { "content-type": "application/json" },
+			})
+			expect(bad.statusCode).toBe(400)
+			expect(bad.json().code).toBe("STATION_UPDATE_INVALID")
+			const wrongType = await app.inject({
+				method: "PATCH",
+				url: "/api/station",
+				payload: "name=a",
+				headers: { "content-type": "text/plain" },
+			})
+			expect(wrongType.statusCode).toBe(400)
+			expect(wrongType.json().code).toBe("STATION_UPDATE_INVALID")
 			expect(update).not.toHaveBeenCalled()
 			await app.close()
 		})
@@ -227,3 +250,39 @@ describe.each([true, false])(
 		})
 	},
 )
+
+describe("real station service composition", () => {
+	it("registers service.identity() as the static option and serves it", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-station-route-"))
+		const logger = {
+			info: vi.fn(),
+			warn: vi.fn(),
+			error: vi.fn(),
+			debug: vi.fn(),
+			trace: vi.fn(),
+			child: () => logger,
+		}
+		const service = await openStationService({
+			config: ConfigSchema.parse({}),
+			region: "EU",
+			stateDir: dir,
+			logger: logger as never,
+			writable: true,
+		})
+		const app = Fastify()
+		await app.register(stationRoutes, {
+			station: service.identity(),
+			service,
+			authorizeMutation: () => undefined,
+		})
+		await app.ready()
+		const res = await patch(app, { name: "Roof" })
+		expect(res.statusCode).toBe(200)
+		const get = await app.inject({ method: "GET", url: "/api/station" })
+		expect(get.json().name).toEqual({ value: "Roof", provenance: "ui" })
+		expect(get.json().revision).toBe(1)
+		await app.close()
+		await service.close()
+		await rm(dir, { recursive: true, force: true })
+	})
+})

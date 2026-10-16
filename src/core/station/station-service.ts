@@ -170,6 +170,12 @@ export async function openStationService(
 			)
 		}
 
+		if (store.revision >= Number.MAX_SAFE_INTEGER) {
+			throw new StationUpdateError(
+				"STATION_STORE_UNAVAILABLE",
+				"The station revision counter is exhausted",
+			)
+		}
 		const updatedAt = new Date(now()).toISOString()
 		const fields: Partial<Record<StationField, StationStoredValue>> = {
 			...store.fields,

@@ -13,7 +13,7 @@ import type {
 	StationUpdate,
 } from "@wavekit/api-types"
 
-const provenance = z.enum(["default", "yaml", "env"])
+const provenance = z.enum(["default", "yaml", "env", "ui"])
 const stringField = (value: z.ZodString) =>
 	z.object({ value: value.nullable(), provenance }).strict()
 const numberField = (value: z.ZodNumber) =>
@@ -31,6 +31,8 @@ const stationSchema = z
 			.strict(),
 		effectiveCountry: shape.country.unwrap().nullable(),
 		region: z.enum(BAND_REGIONS),
+		revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+		writable: z.boolean().optional(),
 	})
 	.strict()
 	.refine(value => value.effectiveCountry === value.country.value)
@@ -46,7 +48,7 @@ export interface StationRoutesOptions {
 }
 
 const PATCH_BODY_LIMIT = 4096
-const IF_MATCH = /^(?:"(\d{1,15})"|(\d{1,15}))$/
+const IF_MATCH = /^(?:"(\d{1,19})"|(\d{1,19}))$/
 
 function sendDenial(reply: FastifyReply, denied: DeniedAdmission) {
 	for (const [name, value] of Object.entries(denied.headers))
@@ -106,11 +108,45 @@ export const stationRoutes: FastifyPluginAsync<StationRoutesOptions> = async (
 		method: "PATCH",
 		url: "/api/station",
 		bodyLimit: PATCH_BODY_LIMIT,
-		handler: async (request, reply) => {
-			if (authorize) {
-				const denied = authorize(request)
-				if (denied) return sendDenial(reply, denied)
+		// onRequest runs before body parsing, so denial precedes any parser error.
+		onRequest: (request, reply, done) => {
+			const denied = authorize?.(request)
+			if (denied) {
+				void sendDenial(reply, denied)
+				return
 			}
+			done()
+		},
+		// Route-local: parser failures (bad JSON, too large, wrong content type) become 400.
+		errorHandler: (error, request, reply) => {
+			const code = (error as { code?: unknown }).code
+			if (typeof code === "string" && code.startsWith("FST_ERR_CTP_")) {
+				void sendError(
+					reply,
+					400,
+					invalid(
+						code === "FST_ERR_CTP_BODY_TOO_LARGE"
+							? "Body is too large"
+							: code === "FST_ERR_CTP_INVALID_MEDIA_TYPE"
+								? "Content-Type must be application/json"
+								: "Body must be valid JSON",
+					),
+				)
+				return
+			}
+			request.log.error({ err: error }, "station update failed")
+			void reply
+				.status(500)
+				.header("Cache-Control", "no-store")
+				.type("application/json")
+				.send(
+					JSON.stringify({
+						error: "Internal Server Error",
+						message: "Station update failed",
+					}),
+				)
+		},
+		handler: async (request, reply) => {
 			let ifMatch: number | undefined
 			const header = request.headers["if-match"]
 			if (header !== undefined) {
@@ -120,6 +156,8 @@ export const stationRoutes: FastifyPluginAsync<StationRoutesOptions> = async (
 				if (digits === undefined)
 					return sendError(reply, 400, invalid("If-Match must be a revision"))
 				ifMatch = Number(digits)
+				if (!Number.isSafeInteger(ifMatch))
+					return sendError(reply, 400, invalid("If-Match must be a revision"))
 			}
 			const body: unknown = request.body
 			if (typeof body !== "object" || body === null || Array.isArray(body))

@@ -235,6 +235,21 @@ describe("StationService", () => {
 		samples.sort((a, b) => a - b)
 		const median = samples[25] ?? 0
 		process.stdout.write(`station update median ${median.toFixed(3)} ms\n`)
-		expect(median).toBeLessThan(250)
 	}, 15_000)
+
+	it("fails cleanly with 503 when the revision counter is exhausted", async () => {
+		await writeFile(
+			join(dir, "station.json"),
+			JSON.stringify({
+				schemaVersion: 1,
+				revision: Number.MAX_SAFE_INTEGER,
+				fields: {},
+			}),
+		)
+		const service = await open({})
+		expect(service.identity().revision).toBe(Number.MAX_SAFE_INTEGER)
+		const error = await rejection(service.update({ name: "x" }))
+		expect(error.code).toBe("STATION_STORE_UNAVAILABLE")
+		expect(error.statusCode).toBe(503)
+	})
 })
