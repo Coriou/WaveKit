@@ -27,7 +27,12 @@ export interface ProvenanceDecoderSource {
  */
 export type ProvenanceTunerState = Pick<
 	TunerState,
-	"frequency" | "sampleRate" | "controlMode" | "unknownFields"
+	| "frequency"
+	| "sampleRate"
+	| "controlMode"
+	| "directSampling"
+	| "unknownFields"
+	| "declaredOnlyFields"
 >
 
 /**
@@ -61,8 +66,17 @@ type TuningTrust = ActivityDecoderBinding["tuningTrust"]
 
 /** The tuner fields the rule reads, validated once per tuner event. */
 interface Snapshot {
-	/** False when a field is missing, non-finite, unknown, or the rate is not positive. */
+	/**
+	 * False when a field is missing, non-finite, unknown or only declared by the config
+	 * baseline, the rate is not positive, or direct sampling is on (the centre then is
+	 * not the R820T tuner's).
+	 */
 	usable: boolean
+	/**
+	 * The centre is the one decoders were configured with: finite and not unknown
+	 * (a declared-only centre counts, since source caps carry it). A bind captures it.
+	 */
+	bindable: boolean
 	frequency: number
 	/** 0.45 × sample rate: the usable 90 % of the IQ bandwidth around the centre. */
 	reach: number
@@ -90,21 +104,32 @@ const MARGIN = 0.45
 
 function snapshotOf(state: unknown): Snapshot | undefined {
 	if (typeof state !== "object" || state === null) return undefined
-	const { frequency, sampleRate, controlMode, unknownFields } =
-		state as Partial<Record<keyof ProvenanceTunerState, unknown>>
+	const {
+		frequency,
+		sampleRate,
+		controlMode,
+		directSampling,
+		unknownFields,
+		declaredOnlyFields,
+	} = state as Partial<Record<keyof ProvenanceTunerState, unknown>>
 	if (typeof frequency !== "number" || typeof sampleRate !== "number")
 		return undefined
-	const unknown =
-		unknownFields !== undefined &&
-		(!Array.isArray(unknownFields) ||
-			unknownFields.includes("frequency") ||
-			unknownFields.includes("sampleRate"))
+	const lists = (value: unknown, field: string): boolean =>
+		value !== undefined && (!Array.isArray(value) || value.includes(field))
+	const frequencyKnown =
+		!lists(unknownFields, "frequency") && Number.isFinite(frequency)
+	const unproven =
+		lists(unknownFields, "sampleRate") ||
+		lists(declaredOnlyFields, "frequency") ||
+		lists(declaredOnlyFields, "sampleRate")
 	return {
 		usable:
-			!unknown &&
-			Number.isFinite(frequency) &&
+			frequencyKnown &&
+			!unproven &&
+			directSampling === "off" &&
 			Number.isFinite(sampleRate) &&
 			sampleRate > 0,
+		bindable: frequencyKnown,
 		frequency,
 		reach: MARGIN * sampleRate,
 		relay: controlMode === "external",
@@ -123,8 +148,10 @@ function snapshotOf(state: unknown): Snapshot | undefined {
  * source, `tuningTrust` is `commanded` (internal control) or `relay` (external control)
  * when the observed tuner state proves the decoder hears its targets: the source centre
  * still equals the centre captured when the decoder was last created or started, the
- * rate is known and positive, and every target lies within 0.45 × rate of the centre.
- * Anything else, including no tuner source, is `unverified`. Snapshots are refreshed on
+ * centre and rate were written by WaveKit or seen from a relay client (a value only
+ * declared by the config baseline, or a relay value the controller ignored, proves
+ * nothing), the rate is positive, direct sampling is off, and every target lies within
+ * 0.45 × rate of the centre. Anything else, including no tuner source, is `unverified`. Snapshots are refreshed on
  * tuner events only (`getState` clones, so it never runs inside a lookup); a removed
  * source drops its snapshot (`source-removed`). A retune that
  * bypasses WaveKit and the relay is not observed.
@@ -165,7 +192,7 @@ export function createDecoderProvenanceIndex(
 			// Operator rate: re-read so a start also refreshes a stale snapshot.
 			read(sourceId)
 			const snapshot = snapshots.get(sourceId)
-			if (snapshot?.usable) bindCentre = snapshot.frequency
+			if (snapshot?.bindable) bindCentre = snapshot.frequency
 		}
 		entries.set(id, {
 			configured,

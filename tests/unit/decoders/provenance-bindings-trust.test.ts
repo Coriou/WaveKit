@@ -11,6 +11,12 @@ import {
 	type ProvenanceTunerSource,
 	type ProvenanceTunerState,
 } from "../../../src/decoders/provenance-bindings.js"
+import { TunerController } from "../../../src/core/tuner-controller.js"
+import type {
+	SourceCaps,
+	SourceManager,
+} from "../../../src/core/source-manager.js"
+import { createLogger } from "../../../src/utils/logger.js"
 
 interface FakeDecoder {
 	sourceId?: string
@@ -81,7 +87,12 @@ const tuned = (
 	frequency: number,
 	controlMode: "internal" | "external" = "internal",
 	sampleRate = 2_400_000,
-): ProvenanceTunerState => ({ frequency, sampleRate, controlMode })
+): ProvenanceTunerState => ({
+	frequency,
+	sampleRate,
+	controlMode,
+	directSampling: "off",
+})
 
 function setup(state: ProvenanceTunerState | null = tuned(131_000_000)) {
 	const decoders = new FakeDecoders()
@@ -325,6 +336,8 @@ function reference(
 	const unknown = state.unknownFields ?? []
 	if (unknown.includes("frequency") || unknown.includes("sampleRate"))
 		return "unverified"
+	if ((state.declaredOnlyFields ?? []).length > 0) return "unverified"
+	if (state.directSampling !== "off") return "unverified"
 	if (!Number.isFinite(state.frequency)) return "unverified"
 	if (!(state.sampleRate > 0) || !Number.isFinite(state.sampleRate))
 		return "unverified"
@@ -356,13 +369,29 @@ describe("trust rule property", () => {
 				frequency: fc.oneof(centre, fc.constant(Number.NaN)),
 				sampleRate: rate,
 				controlMode: fc.constantFrom("internal" as const, "external" as const),
+				directSampling: fc.constantFrom(
+					"off" as const,
+					"off" as const,
+					"q" as const,
+				),
 				unknownFields: fc.subarray([
 					"frequency" as const,
 					"sampleRate" as const,
 					"gain" as const,
 				]),
+				declaredOnlyFields: fc.subarray([
+					"frequency" as const,
+					"sampleRate" as const,
+				]),
 			},
-			{ requiredKeys: ["frequency", "sampleRate", "controlMode"] },
+			{
+				requiredKeys: [
+					"frequency",
+					"sampleRate",
+					"controlMode",
+					"directSampling",
+				],
+			},
 		)
 		const offset = fc.oneof(
 			fc.integer({ min: -2_000_000, max: 2_000_000 }),
@@ -400,13 +429,12 @@ describe("trust rule property", () => {
 					if (now) tuner.set(MAIN, now)
 					else tuner.emit("state-changed", MAIN, undefined)
 					const binding = index.lookup("d")
-					const usable = (s: ProvenanceTunerState | undefined) =>
+					// A bind captures any known centre, declared-only and direct sampling included.
+					const bindable = (s: ProvenanceTunerState | undefined) =>
 						s !== undefined &&
-						!(s.unknownFields ?? []).some(f => f !== "gain") &&
-						Number.isFinite(s.frequency) &&
-						Number.isFinite(s.sampleRate) &&
-						s.sampleRate > 0
-					const bindCentre = usable(atBind) ? atBind?.frequency : undefined
+						!(s.unknownFields ?? []).includes("frequency") &&
+						Number.isFinite(s.frequency)
+					const bindCentre = bindable(atBind) ? atBind?.frequency : undefined
 					const expected = withTuner
 						? sameSource
 							? reference(now, bindCentre, true, targets)
@@ -418,5 +446,118 @@ describe("trust rule property", () => {
 			),
 			{ numRuns: 300 },
 		)
+	})
+})
+
+/** rtl_tcp opcodes (librtlsdr rtl_tcp.c). */
+const RTL_TCP_COMMANDS = {
+	SET_FREQUENCY: 0x01,
+	SET_SAMPLE_RATE: 0x02,
+	SET_DIRECT_SAMPLING: 0x09,
+} as const
+
+describe("trust from a real TunerController (WG5 R1)", () => {
+	const AIS = "rtl-ais"
+	const CENTRE = 162_000_000
+	const RATE = 2_400_000
+	const setupReal = (reconnectPolicy: "restore" | "reset" = "restore") => {
+		let caps: SourceCaps = {
+			kind: "iq",
+			sampleRate: RATE,
+			centerFreq: CENTRE,
+			format: "U8_IQ",
+			exclusive: false,
+		}
+		const sources = {
+			writeToSource: () => true,
+			isRtlTcpSource: () => true,
+			getCaps: () => ({ ...caps }),
+			updateSourceCaps: (_id: string, update: Partial<SourceCaps>) => {
+				caps = { ...caps, ...update }
+				return caps
+			},
+			setTuningCaps: (
+				_id: string,
+				tuning: { sampleRate: number; centerFreq?: number },
+			) => {
+				caps = { ...caps, ...tuning }
+				return caps
+			},
+		}
+		const tuner = new TunerController(
+			createLogger({ level: "fatal" }),
+			sources as unknown as SourceManager,
+			{ reconnectPolicy },
+		)
+		tuner.initializeSource(AIS, { ...caps }, "rtl_tcp")
+		const decoders = new FakeDecoders()
+		const index = createDecoderProvenanceIndex(decoders, () => AIS, tuner)
+		decoders.add("ais", { targets: [161_975_000, 162_025_000] })
+		const trust = () => index.lookup("ais")?.tuningTrust
+		const command = async () => {
+			await tuner.setSampleRate(AIS, RATE)
+			await tuner.setFrequency(AIS, CENTRE)
+		}
+		return { tuner, decoders, trust, command }
+	}
+
+	it("a centre and rate only declared by config are unverified until WaveKit commands both", async () => {
+		const { tuner, trust } = setupReal()
+		expect(tuner.getState(AIS)?.declaredOnlyFields).toEqual([
+			"frequency",
+			"sampleRate",
+		])
+		expect(trust()).toBe("unverified")
+		await tuner.setFrequency(AIS, CENTRE)
+		expect(trust()).toBe("unverified")
+		await tuner.setSampleRate(AIS, RATE)
+		expect(tuner.getState(AIS)?.declaredOnlyFields).toBeUndefined()
+		expect(trust()).toBe("commanded")
+	})
+
+	it("a reset reconnect is unverified until re-commanded", async () => {
+		const { tuner, trust, command } = setupReal("reset")
+		await command()
+		expect(trust()).toBe("commanded")
+		expect(tuner.synchronizeOnConnect(AIS).reset).toBe(true)
+		expect(trust()).toBe("unverified")
+		await command()
+		expect(trust()).toBe("commanded")
+	})
+
+	it("accepted relay commands are relay", () => {
+		const { tuner, trust } = setupReal()
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, RATE)
+		expect(trust()).toBe("unverified")
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_FREQUENCY, CENTRE)
+		expect(trust()).toBe("relay")
+	})
+
+	it("direct sampling, then an ignored out-of-range frequency, is never relay", async () => {
+		const { tuner, trust, command } = setupReal()
+		await command()
+		expect(trust()).toBe("commanded")
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING, 2)
+		expect(trust()).toBe("unverified")
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_FREQUENCY, 14_200_000)
+		expect(tuner.getState(AIS)?.unknownFields).toContain("frequency")
+		expect(trust()).toBe("unverified")
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING, 0)
+		// The receiver may still sit at 14.2 MHz: unknown until an accepted value.
+		expect(trust()).toBe("unverified")
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_FREQUENCY, CENTRE)
+		expect(tuner.getState(AIS)?.unknownFields ?? []).not.toContain("frequency")
+		expect(trust()).toBe("relay")
+	})
+
+	it("an ignored RTL-gap sample rate is unverified until an accepted rate", async () => {
+		const { tuner, trust, command } = setupReal()
+		await command()
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, 500_000)
+		expect(tuner.getState(AIS)?.sampleRate).toBe(RATE)
+		expect(tuner.getState(AIS)?.unknownFields).toContain("sampleRate")
+		expect(trust()).toBe("unverified")
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, RATE)
+		expect(trust()).toBe("relay")
 	})
 })

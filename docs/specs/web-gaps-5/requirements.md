@@ -168,8 +168,10 @@ reception claims, and no confident frequency after SDR++ retunes the receiver.
 6.1 `createDecoderProvenanceIndex` shall take an optional tuner source. Without it, every
 binding is `unverified`, as today.
 6.2 With it, a binding is `unverified` when the decoder owns its device (source null), the
-source has no tuner state, the state marks `frequency` or `sampleRate` unknown, the sample
-rate is not positive, the decoder has no target frequency, the source centre differs from the
+source has no tuner state, the state marks `frequency` or `sampleRate` unknown or only
+declared by the configuration baseline (`declaredOnlyFields`: config or source caps, never
+written by WaveKit nor seen in an accepted relay command since the start or the last reset
+reconnect), direct sampling is not `off`, the sample rate is not positive, the decoder has no target frequency, the source centre differs from the
 centre captured when the decoder was last created or started (or none was captured), or any
 target lies more than 0.45 × sample rate from the centre. Otherwise it is `relay` when the
 control mode is `external` and `commanded` when it is `internal`.

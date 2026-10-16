@@ -880,7 +880,12 @@ commands are dropped, so those two tuner fields may over-claim.
 **`unknownFields`** lists the fields whose value is only a placeholder: nothing
 was commanded through this API, no relay client was seen commanding it, and
 (for `frequency`/`sampleRate`) neither the tuner config nor the source caps
-declare it. On a source whose gain was set on the SDR host this reads e.g.
+declare it. A `frequency` or `sampleRate` a relay client set to a value the
+controller ignored is also listed until the next accepted value (the relay
+forwards the raw command upstream, so the receiver may be there).
+**`declaredOnlyFields`** (WG5) lists `frequency`/`sampleRate` whose value comes
+only from that declared baseline: nothing wrote or observed it since the start or
+the last reset reconnect. Absent when empty. On a source whose gain was set on the SDR host this reads e.g.
 `["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
 "AGC 0.0 dB". A gain mode the relay path infers from a client's gain command
 counts as observed (it is not replayed on reconnect). The field values keep
@@ -3175,7 +3180,18 @@ must hold:
 - the decoder reads a WaveKit tuner source (not its own device) and has at least
   one target frequency;
 - the source's tuner state has a known, finite frequency and a positive sample
-  rate;
+  rate, and both were proven: written by WaveKit (an API or scanner command or a
+  reconnect replay) or seen in a relay client's accepted command. A value only
+  declared by the configuration baseline (`tuner.defaultFrequency`, the source
+  caps `centerFreq`/`sampleRate`) does not count (it is listed in the tuner
+  state's `declaredOnlyFields`): after a fresh start, a core-only restart while
+  rtlmux replays relay-set values, or a `reconnectPolicy: reset` reconnect, the
+  receiver may be elsewhere, so trust is `unverified` until WaveKit or a relay
+  client sets both again. A relay frequency or rate the controller ignored (out of
+  range, or an RTL rate gap) is forwarded upstream anyway, so it makes the field
+  unknown until the next accepted value;
+- direct sampling is `off` (in direct sampling the receiver does not use the
+  tuner centre);
 - the source centre still equals the centre captured when the decoder was last
   created or started (a retune makes it `unverified` until the decoder starts
   again, even when the decoder already follows the new centre);

@@ -78,8 +78,12 @@ function setup() {
 }
 
 describe("tuning trust through the tuner, index and ingress (WG5 req 6)", () => {
-	it("stores commanded, then relay, then unverified after the source is removed", () => {
+	it("stores commanded, then relay, then unverified after the source is removed", async () => {
 		const { tuner, decoders, index, receive } = setup()
+		// The config/caps baseline alone proves nothing (WG5 R1).
+		expect(receive()?.frequency?.tuningTrust).toBe("unverified")
+		await tuner.setSampleRate(SOURCE, 2_048_000)
+		await tuner.setFrequency(SOURCE, 131_000_000)
 		expect(receive()).toEqual({
 			sourceId: SOURCE,
 			frequency: { hz: TARGET, basis: "channel", tuningTrust: "commanded" },
@@ -103,6 +107,9 @@ describe("tuning trust through the tuner, index and ingress (WG5 req 6)", () => 
 			},
 			"rtl_tcp",
 		)
+		expect(receive()?.frequency?.tuningTrust).toBe("unverified")
+		await tuner.setSampleRate(SOURCE, 2_048_000)
+		await tuner.setFrequency(SOURCE, 131_000_000)
 		expect(receive()?.frequency?.tuningTrust).toBe("commanded")
 		decoders.emit("decoder:started", "acars-1")
 		expect(receive()?.frequency?.tuningTrust).toBe("commanded")

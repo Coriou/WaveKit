@@ -198,14 +198,19 @@ out of 0..31 impossible (5 bits); JSON with wrong types → the field is ignored
 if !tuner || entry.sourceId === null → unverified
 s = snapshot(entry.sourceId); if !s → unverified
 if s.unknownFields has "frequency" or "sampleRate" → unverified
+if s.declaredOnlyFields has "frequency" or "sampleRate" → unverified   (R1: baseline ≠ proof)
+if s.directSampling !== "off" → unverified
 if !(s.sampleRate > 0) or entry.targets is empty → unverified
 if entry.bindSourceId !== entry.sourceId or entry.bindCentre !== s.frequency → unverified
 if any |t − s.frequency| > 0.45 × s.sampleRate → unverified
 return s.controlMode === "external" ? "relay" : "commanded"
 ```
 
+The controller lists a relay frequency/rate it ignored (out of range, RTL gap; the relay
+already forwarded it) in `unknownFields` until the next accepted value. A bind captures any
+known centre, declared-only included, since the decoder configured itself from the caps.
 The index keeps one snapshot per source (`frequency`, `sampleRate`, `controlMode`,
-`unknownFields`), seeded with `getState` the first time a source is needed and refreshed on
+`directSampling`, `unknownFields`, `declaredOnlyFields`), seeded with `getState` the first time a source is needed and refreshed on
 `state-changed` and `control-mode-changed`; the lookup never calls `getState` (it clones).
 The bind centre and source are captured on `decoder:created` and `decoder:started`. Per entry
 up to three frozen bindings (one per trust value) are cached for the current source, so the

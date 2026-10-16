@@ -111,6 +111,13 @@ export interface TunerState {
 	 * Absent when every field is known.
 	 */
 	unknownFields?: TunerStateField[]
+	/**
+	 * WG5: `frequency`/`sampleRate` whose value above comes only from the configured
+	 * baseline (tuner config or source caps): never written by WaveKit nor seen from a
+	 * relay client since the start or the last reset reconnect. The receiver may be
+	 * elsewhere (rtlmux replays relay-set values), so it proves nothing. Absent when empty.
+	 */
+	declaredOnlyFields?: TunerStateField[]
 }
 
 // API request/response types
@@ -159,6 +166,7 @@ export interface TunerConfigUpdate extends Partial<
 		| "lastError"
 		| "commandCount"
 		| "unknownFields"
+		| "declaredOnlyFields"
 	>
 > {}
 
