@@ -2787,8 +2787,9 @@ receptions are counted in `stats.coalescedPositions`; they are not losses and
 open no ingestion gap. The live trackers, `aircraft:*`/`vessel:*` and
 `decoder:output` WebSocket messages still carry every update.
 
-Effective retention is whichever cap binds first. Pruning is oldest-first for
-every kind, so a busy position feed shortens retention for rare events too. With
+Effective retention is whichever cap binds first. Which rows a cap removes
+depends on the retention policy (see [Retention](#retention)); under
+`oldest-first` a busy position feed shortens retention for rare events too. With
 coalescing, N entities in continuous view add about N × 1,440 rows a day: 100
 aircraft and vessels fill 250,000 rows in about 1.7 days, 300 in about 14
 hours, while the 3-day age cap binds below about 58 entities. Without it (1 Hz
@@ -2911,6 +2912,58 @@ binds before the 250,000-row cap. A feed that stores mostly bare positions is
 closer to +13–15%; SBS and readsb feeds with identity fields, and APRS with
 comments, grow more.
 
+### Retention
+
+From WG3, `activity.retention.policy` decides which rows the row and byte caps
+remove. It is `fair-share` (the default) or `oldest-first` (the pre-WG3
+behaviour). Age pruning (`maxAgeMs`) is the same under both: it removes the
+oldest rows of every feed. The caps, the start-above-cap trigger, the run down to
+95% of the cap, the batch size per transaction and the time bound per write are
+unchanged and shared by both policies.
+
+Under `fair-share` the rows are grouped into shares. A row with a decoder belongs
+to `decoder:<decoderId>`; a row without one (analog transmissions, ingestion
+gaps) belongs to `kind:<kind>`. Cap pressure is spread by water-filling: with
+share usage `u_i` (rows for the row cap, summed record bytes for the byte cap) and
+the 95% target `T`, the level `L` is the largest value with
+`sum(min(u_i, L)) <= T`. Only shares above `L` lose rows, never below `L`, and
+inside a share the oldest rows (lowest `seq`) go first. A share at or under `L`
+keeps its rows until age pruning removes them.
+
+Two exceptions keep the caps binding:
+
+- Indivisible row: pruning frees record bytes faster than live database pages, so
+  the last byte excess can be smaller than any row a share above `L` could give up
+  without crossing `L`. Then one step deletes the single oldest row of the share
+  above `L` with the largest excess (ties by key, ascending). It never touches a
+  share at or under `L`.
+- Prefix fallback: if a cap is still active after the counters are rebuilt and no
+  share is above `L`, one step deletes the oldest rows of all shares alike.
+
+Both count in `retention.prefixFallbackSteps`. The per-share counters are built
+by one scan when the store opens (measured 330 ms for 250,000 rows on the
+development Mac) and updated after each commit and prune. If that scan fails, the
+session runs `oldest-first` until the store is reopened and status reports
+`effective: "oldest-first"`. With a single share, `fair-share` deletes exactly
+the rows `oldest-first` deletes.
+
+Because `fair-share` can delete rows that are not the oldest, it opens holes in
+the `seq` order. Paging and replay detect them; see
+[Retention holes](#retention-holes). `oldest-first` opens no holes.
+
+A busy station (estimates, not measurements), with the byte cap binding at about
+151,000 rows on the measured row mix (see Presentation): pages about 2,000 rows a day, a
+100-node mesh about 14,400, busy APRS about 72,000 and 300 aircraft about 432,000.
+Over the 3-day demands (pages 6,000, mesh 43,200, APRS 216,000, ADS-B 1,296,000),
+`6,000 + 43,200 + 2L = 151,000` gives `L` of about 50,900 rows. So under
+`fair-share` pages and mesh keep 3 days (the age cap), APRS about 17 hours and
+ADS-B about 2.8 hours. Under `oldest-first`, 151,000 rows at about 520,000 a day
+keep about 7 hours of every feed. A station with one feed keeps exactly the same
+rows under both policies. Measured against `oldest-first` on a 250,000-row
+fixture, `fair-share` deleted 1.20 times as many rows a second, the file was 3%
+larger after 10 cap cycles, and 0.966 times as many rows fit under a 64 MiB byte
+cap.
+
 ### Configuration
 
 Commented in `config/default.yaml`. A config without an `activity` block, and
@@ -2939,6 +2992,7 @@ activity:
     maxRows: 250000
     maxDbBytes: 268435456
     maxAgeMs: 259200000
+    policy: fair-share
   admission:
     globalPerSecond: 50
     globalBurst: 500
@@ -2952,6 +3006,7 @@ Environment overrides, in addition to `WAVEKIT_ACTIVITY__ENABLED`
 - `WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS`
 - `WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES`
 - `WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS`
+- `WAVEKIT_ACTIVITY__RETENTION__POLICY` (`fair-share` or `oldest-first`)
 - `WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND`
 - `WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST`
 - `WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND`
@@ -3008,6 +3063,80 @@ admits rejected after the writer has stopped. A write timeout stops the
 writer for the session and does not count those rows as lost. 500
 `ACTIVITY_STATUS_UNAVAILABLE` only if a ready store has no stats provider.
 
+From WG3 `stats` also has two optional fields (older cores omit them):
+
+- `floodCopies`: Meshtastic flood copies not stored (see Meshtastic flood copies
+  above). They are not losses and are not in `dropped`.
+- `retention`: `policy` (configured), `effective` (in force: `oldest-first` after
+  a failed counter scan), `shares` (largest first by `rows`, then `key`
+  ascending; at most 64), `sharesTruncated` (more than 64 shares exist) and
+  `prefixFallbackSteps` (indivisible-row and prefix steps this session; 0 under
+  `oldest-first`). Each share has `key`, `rows`, `bytes` (summed record bytes,
+  not on-disk bytes) and `oldestReceivedAt` (null when unknown). See
+  [Retention](#retention).
+
+```json
+{
+	"enabled": true,
+	"stats": {
+		"admitted": 182340,
+		"committed": 151020,
+		"duplicates": 0,
+		"dropped": {
+			"rate-limited": 0,
+			"queue-full": 0,
+			"store-paused": 0,
+			"write-failed": 0,
+			"closed": 0
+		},
+		"excludedTelemetry": 912,
+		"coalescedPositions": 29480,
+		"floodCopies": 1840,
+		"queueDepth": 0,
+		"queueBytes": 0,
+		"dbBytes": 254803968,
+		"walBytes": 4120032,
+		"rows": 151020,
+		"oldestReceivedAt": "2026-10-13T09:12:04.000Z",
+		"pruneWatermark": "212877",
+		"paused": false,
+		"writer": "running",
+		"retention": {
+			"policy": "fair-share",
+			"effective": "fair-share",
+			"shares": [
+				{
+					"key": "decoder:readsb",
+					"rows": 50910,
+					"bytes": 49120330,
+					"oldestReceivedAt": "2026-10-16T06:22:40.000Z"
+				},
+				{
+					"key": "decoder:direwolf",
+					"rows": 50890,
+					"bytes": 51002114,
+					"oldestReceivedAt": "2026-10-15T16:10:02.000Z"
+				},
+				{
+					"key": "decoder:lora-meshtastic",
+					"rows": 43150,
+					"bytes": 40788210,
+					"oldestReceivedAt": "2026-10-13T09:12:04.000Z"
+				},
+				{
+					"key": "decoder:multimon-ng",
+					"rows": 6070,
+					"bytes": 4911502,
+					"oldestReceivedAt": "2026-10-13T09:14:51.000Z"
+				}
+			],
+			"sharesTruncated": false,
+			"prefixFallbackSteps": 0
+		}
+	}
+}
+```
+
 ### Query and cursor errors
 
 The reader worker has its own 5 s startup budget. The 250 ms deadline starts
@@ -3034,6 +3163,8 @@ Cursor failures include `reason`. A query hash ignores `order` and paging, so
 a reconnect must send the same `query` as the cursor. A changed query is
 `query-changed`, not a silent filter change. Delivering a row twice is
 harmless; losing one is not.
+
+#### Retention holes
 
 Holes (WG3): a retention step can delete rows that are not the oldest (fair-share
 retention removes rows from the largest share). Paging and replay never skip such
