@@ -393,3 +393,54 @@ describe("activity store", () => {
 		}
 	})
 })
+
+// WG3 req 2.1, 6.5: status exposes the retention block and the flood-copy count.
+describe("activity store stats: retention and flood copies", () => {
+	it("counts a Meshtastic flood copy and reports per-share retention", async () => {
+		const store = await openStore({
+			limits: { globalBurst: 100, decoderBurst: 100 },
+		})
+		const mesh = (eventId: string, offsetMs: number) =>
+			envelope({
+				eventId,
+				decoderId: "mesh-1",
+				outputType: "meshtastic",
+				category: "mesh",
+				protocol: "meshtastic",
+				entityKey: null,
+				receivedAt: new Date(
+					Date.parse("2026-10-12T00:00:00.000Z") + offsetMs,
+				).toISOString(),
+				decodedData: {
+					from: 0x1234abcd,
+					id: 42,
+					portnum: 1,
+					payloadB64: "aGk=",
+				},
+			})
+		expect(store.admit(mesh("original", 0))).toEqual({ admitted: true })
+		expect(store.admit(mesh("copy", 2_000))).toEqual({
+			admitted: false,
+			reason: "flood-copy",
+		})
+		expect(
+			store.admit(envelope({ eventId: "plane", decoderId: "readsb" })),
+		).toEqual({ admitted: true })
+		expect(await readRecords(store.dbPath)).toHaveLength(2)
+		const stats = store.stats()
+		expect(stats.floodCopies).toBe(1)
+		expect(Object.values(stats.dropped).reduce((a, b) => a + b, 0)).toBe(0)
+		expect(stats.retention).toMatchObject({
+			policy: "fair-share",
+			effective: "fair-share",
+			sharesTruncated: false,
+			prefixFallbackSteps: 0,
+		})
+		expect(
+			stats.retention?.shares.map(share => [share.key, share.rows]),
+		).toEqual([
+			["decoder:mesh-1", 1],
+			["decoder:readsb", 1],
+		])
+	})
+})

@@ -474,6 +474,7 @@ class ActivityStore implements ActivityStoreHandle {
 			},
 			excludedTelemetry: this.ingress.excludedTelemetry,
 			coalescedPositions: this.ingress.coalescedPositions,
+			floodCopies: this.ingress.floodCopies,
 			queueDepth: this.ingress.queueDepth(),
 			queueBytes: this.ingress.queueBytesTotal(),
 			dbBytes: this.dbBytes,

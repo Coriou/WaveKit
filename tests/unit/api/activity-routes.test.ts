@@ -36,6 +36,21 @@ function storeStats(): ActivityStoreStats {
 		pruneWatermark: "0",
 		paused: false,
 		writer: "running" as const,
+		retention: {
+			policy: "fair-share" as const,
+			effective: "fair-share" as const,
+			shares: [
+				{
+					key: "decoder:readsb",
+					rows: 1,
+					bytes: 512,
+					oldestReceivedAt: "2026-10-12T00:00:00.000Z",
+				},
+			],
+			sharesTruncated: false,
+			prefixFallbackSteps: 0,
+		},
+		floodCopies: 2,
 	}
 	return stats
 }
@@ -207,7 +222,8 @@ describe("activity routes", () => {
 			url: "/api/activity/status",
 		})
 		expect(status.statusCode).toBe(200)
-		expect(status.json()).toMatchObject({ enabled: true, stats })
+		// WG3 req 2.1, 6.5: retention and floodCopies pass through the loose schema.
+		expect(status.json()).toEqual({ enabled: true, stats })
 
 		const search = await app.inject({
 			method: "GET",
