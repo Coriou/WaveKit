@@ -12,6 +12,7 @@ import type {
 	CoverageResponse,
 	CoverageSector,
 } from "@wavekit/api-types"
+import { STATION_COVERAGE_RESET_M } from "../station/contract.js"
 import { haversineM, initialBearingDeg } from "./geo.js"
 
 const HOUR_MS = 3_600_000
@@ -54,7 +55,7 @@ function createStore(): ProtocolStore {
  * position per 1-degree bearing in 24 hourly slots. observe() allocates nothing.
  */
 export class CoverageTracker {
-	private readonly station: { lat: number; lon: number } | null
+	private station: { lat: number; lon: number } | null
 	private readonly stores: Record<CoverageProtocol, ProtocolStore>
 	private readonly rejected: CoverageRejections = {
 		"invalid-position": 0,
@@ -67,6 +68,26 @@ export class CoverageTracker {
 		this.station =
 			station === null ? null : { lat: station.lat, lon: station.lon }
 		this.stores = { adsb: createStore(), ais: createStore() }
+	}
+
+	/**
+	 * Moves the station. Clears every cell when the location is set or cleared, or moves more than
+	 * STATION_COVERAGE_RESET_M; a smaller move keeps the cells.
+	 */
+	setStation(next: { lat: number; lon: number } | null): { cleared: boolean } {
+		const old = this.station
+		const cleared =
+			(old === null) !== (next === null) ||
+			(old !== null &&
+				next !== null &&
+				haversineM(old.lat, old.lon, next.lat, next.lon) >
+					STATION_COVERAGE_RESET_M)
+		this.station = next === null ? null : { lat: next.lat, lon: next.lon }
+		if (cleared) {
+			this.stores.adsb = createStore()
+			this.stores.ais = createStore()
+		}
+		return { cleared }
 	}
 
 	/** Returns true when accepted; otherwise increments the rejection counter. */
