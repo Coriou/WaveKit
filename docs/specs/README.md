@@ -41,6 +41,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-5](web-gaps-5/requirements.md): automatic band map and activity timeline,
   trail altitude and Meshtastic trail positions, AIS types 4/9/21 and the vessel channel,
   verified tuning trust, SDR# and Gqrx band-plan import (WG5)
+- [web-gaps-6](web-gaps-6/requirements.md): decoded-elsewhere ranges on scanner plans and
+  per-hit duration, decoder option schemas (report only), DCS on analog transmissions,
+  band-plan import by URL with update check, redacted config export, sample-rate presets (WG6)
 
 ## The three files
 

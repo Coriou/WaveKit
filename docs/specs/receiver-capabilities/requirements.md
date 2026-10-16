@@ -11,6 +11,7 @@ See [requirements](requirements.md), [design](design.md) and [tasks](tasks.md).
 1.2 Command availability, transport applicability and physical support are separate closed dimensions for every fixed control.
 
 1.3 Peer tunerType/gainCount are current-session advertised integers only; no model/table/range/bias-T inference.
+_Amended by [web-gaps-6 8.1–8.2](../web-gaps-6/requirements.md): a fixed list of suggested RTL-SDR sample rates may accompany rtl_tcp items; it is a suggestion inside the validated command ranges and claims nothing about the device._
 
 1.4 Gain value uses tenthsDb; gainIndex is dimensionless and never converted through gainCount.
 

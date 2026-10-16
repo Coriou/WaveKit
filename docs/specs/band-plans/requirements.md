@@ -119,6 +119,9 @@ commit it.
 
 6.1 Import shall accept SDR++ band-plan JSON only, as uploaded file bytes (base64 in a
 JSON body). Core shall fetch no URL.
+_Amended by [web-gaps-5 7.1](../web-gaps-5/requirements.md) (SDR# and Gqrx formats) and
+[web-gaps-6 5.1–5.7](../web-gaps-6/requirements.md): core may fetch an https URL on an
+allowlisted host, once per protected request, under the WG6 SSRF rules._
 6.2 Files larger than 1 MiB shall be rejected with `BANDPLANS_IMPORT_TOO_LARGE` before
 decoding. Bytes shall be decoded as strict UTF-8 (a leading BOM ignored) and parsed once.
 6.3 Parsing shall be a total function on bytes: every input yields a preview or a typed
