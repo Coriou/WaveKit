@@ -1,5 +1,7 @@
 // Feature: web-gaps-7, Property 12: Refresh bounds
 // Validates: Requirements 7.1, 7.2
+// Main decision (WG7 MA.1): a max-wait (default 30 s) from the first un-served notify, so
+// notifies closer than the debounce cannot postpone a refresh forever.
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
@@ -57,13 +59,27 @@ describe("coverage refresh bounds (property 12)", () => {
 					let fp = 0
 					let refreshes = 0
 					let lastNotify = -Infinity
+					let firstPending: number | null = null
+					let lastFire = -Infinity
 					let lastRefreshed = "none"
 					const fires: number[] = []
 					const refresh = createCoverageRefresh({
 						...clock,
 						fingerprint: () => {
-							fires.push(clock.now())
-							expect(clock.now() - lastNotify).toBeGreaterThanOrEqual(2000)
+							const at = clock.now()
+							fires.push(at)
+							// Debounced, or the max-wait of the first pending notify ran out.
+							expect(
+								at - lastNotify >= 2000 ||
+									(firstPending !== null && at - firstPending >= 30000),
+							).toBe(true)
+							// Liveness: served by max-wait or the min interval, whichever is later.
+							if (firstPending !== null)
+								expect(at).toBeLessThanOrEqual(
+									Math.max(firstPending + 30000, lastFire + 30000),
+								)
+							firstPending = null
+							lastFire = at
 							return String(fp)
 						},
 						onRefresh: () => {
@@ -76,6 +92,7 @@ describe("coverage refresh bounds (property 12)", () => {
 						clock.advance(e.gap)
 						if (e.change) fp++
 						lastNotify = clock.now()
+						if (firstPending === null) firstPending = lastNotify
 						refresh.notify()
 					}
 					const total = clock.now()

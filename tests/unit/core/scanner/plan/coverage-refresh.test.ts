@@ -91,6 +91,46 @@ describe("createCoverageRefresh", () => {
 		expect(s.count()).toBeGreaterThanOrEqual(1)
 	})
 
+	it("max-wait: continuous notifies under the debounce still refresh every 30 s (>= 19 in 10 min)", () => {
+		const s = setup()
+		const at: number[] = []
+		const refresh = createCoverageRefresh({
+			...s.clock,
+			fingerprint: () => String(s.clock.now()),
+			onRefresh: () => {
+				at.push(s.clock.now())
+			},
+		})
+		for (let i = 0; i < 600; i++) {
+			refresh.notify()
+			s.clock.advance(1000)
+		}
+		expect(at.length).toBeGreaterThanOrEqual(19)
+		expect(at.length).toBeLessThanOrEqual(Math.ceil(600_000 / 30_000) + 1)
+		expect(at[0]).toBe(30_000)
+		for (let i = 1; i < at.length; i++)
+			expect((at[i] ?? 0) - (at[i - 1] ?? 0)).toBeGreaterThanOrEqual(30_000)
+	})
+
+	it("max-wait is configurable and never beats the min interval", () => {
+		const s = setup()
+		const at: number[] = []
+		const refresh = createCoverageRefresh({
+			...s.clock,
+			maxWaitMs: 5_000,
+			fingerprint: () => String(s.clock.now()),
+			onRefresh: () => {
+				at.push(s.clock.now())
+			},
+		})
+		for (let i = 0; i < 100; i++) {
+			refresh.notify()
+			s.clock.advance(500)
+		}
+		expect(at[0]).toBe(5_000)
+		expect(at[1]).toBe(35_000)
+	})
+
 	it("refreshes about every 30 s when changes arrive every 5 s", () => {
 		const s = setup()
 		for (let i = 0; i < 120; i++) {

@@ -8,6 +8,7 @@ import type {
 } from "../../../src/decoders/types.js"
 import { ScannerService } from "../../../src/core/scanner/scanner-service.js"
 import type {
+	BandPlanSkipSource,
 	DecoderCoverageView,
 	ScannerSettings,
 } from "../../../src/core/scanner/types.js"
@@ -58,6 +59,7 @@ export function serviceHarness(
 		decoderConfigs?: DecoderConfig[]
 		bandplans?: () => readonly Bandplan[]
 		decoderCoverage?: () => readonly DecoderCoverageView[]
+		bandPlanSkips?: () => readonly BandPlanSkipSource[]
 	} = {},
 ) {
 	const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "wk-scan-"))
@@ -117,6 +119,7 @@ export function serviceHarness(
 		region: "EU",
 		...(opts.bandplans ? { bandplans: opts.bandplans } : {}),
 		...(opts.decoderCoverage ? { decoderCoverage: opts.decoderCoverage } : {}),
+		...(opts.bandPlanSkips ? { bandPlanSkips: opts.bandPlanSkips } : {}),
 		stateDir: dir,
 		sources: sources as never,
 		routing: {

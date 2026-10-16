@@ -65,6 +65,7 @@ import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle
 import { ScannerService } from "./core/scanner/scanner-service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
+import { bandPlanSkipSources } from "./core/scanner/plan/bandplan-skips.js"
 import { createBandPlanUrlFetcher } from "./core/bandplan-url/fetch.js"
 import { BANDPLAN_URL_IMPORT_HOSTS } from "@wavekit/api-types"
 import { APP_VERSION } from "./api/routes/health.js"
@@ -935,6 +936,7 @@ async function main(): Promise<void> {
 		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		let bandPlanService: BandPlanService | undefined
 		let bandPlanViewWarned = false
+		let bandPlanSkipsWarned = false
 		const scannerBandplans = createScannerBandplanProvider(
 			() => bandPlanService?.view(),
 			bandRegion.code,
@@ -988,6 +990,25 @@ async function main(): Promise<void> {
 							protectedMode ? { code: "RUNTIME_ERROR" } : { err },
 							"Decoder statuses unavailable; plans claim no decoded-elsewhere ranges",
 						)
+						return []
+					}
+				},
+				// WG7 req 6.2, 6.6: skip-marked band-plan segments, read once per plan (legacy and
+				// protected mode alike). Fails closed: no band-plan service yet, or a throwing
+				// view, means no skips (logged once).
+				bandPlanSkips: () => {
+					try {
+						return bandPlanService
+							? bandPlanSkipSources(bandPlanService.resolved())
+							: []
+					} catch (err) {
+						if (!bandPlanSkipsWarned) {
+							bandPlanSkipsWarned = true
+							bandPlanLog.warn(
+								protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+								"Band-plan view unavailable; plans apply no band-plan skips",
+							)
+						}
 						return []
 					}
 				},

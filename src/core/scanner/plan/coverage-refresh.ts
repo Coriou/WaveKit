@@ -14,6 +14,11 @@ import type { DecoderCoverageView } from "../types.js"
 export interface CoverageRefreshOptions {
 	debounceMs?: number
 	minIntervalMs?: number
+	/**
+	 * Longest wait from the first un-served notify to its fire (still at least minIntervalMs
+	 * after the previous fire). Default DECODED_ELSEWHERE_REFRESH_MIN_INTERVAL_MS.
+	 */
+	maxWaitMs?: number
 	now?: () => number
 	setTimer?: (fn: () => void, ms: number) => unknown
 	clearTimer?: (handle: unknown) => void
@@ -40,7 +45,11 @@ function defaultClearTimer(handle: unknown): void {
 /**
  * Semantics:
  * - `notify()` is O(1) and never throws. It (re)arms one trailing timer at
- *   max(now + debounceMs, lastFireAt + minIntervalMs).
+ *   max(min(now + debounceMs, firstPendingAt + maxWaitMs), lastFireAt + minIntervalMs),
+ *   where firstPendingAt is the time of the first notify not yet served by a fire. The
+ *   max-wait keeps continuous notifies closer than debounceMs (a flapping decoder) from
+ *   postponing the refresh forever: a notify is served within
+ *   max(maxWaitMs from the first pending one, minIntervalMs from the previous fire).
  * - The rate limit applies to every fire (every fingerprint computation), changed or not, so
  *   the cost bound holds: fires are at least minIntervalMs apart. A failed fingerprint still
  *   counts as a fire.
@@ -55,6 +64,8 @@ export function createCoverageRefresh(
 	const debounceMs = options.debounceMs ?? DECODED_ELSEWHERE_REFRESH_DEBOUNCE_MS
 	const minIntervalMs =
 		options.minIntervalMs ?? DECODED_ELSEWHERE_REFRESH_MIN_INTERVAL_MS
+	const maxWaitMs =
+		options.maxWaitMs ?? DECODED_ELSEWHERE_REFRESH_MIN_INTERVAL_MS
 	const now = options.now ?? Date.now
 	const setTimer = options.setTimer ?? defaultSetTimer
 	const clearTimer = options.clearTimer ?? defaultClearTimer
@@ -62,6 +73,7 @@ export function createCoverageRefresh(
 	let armed = false
 	let disposed = false
 	let lastFireAt = Number.NEGATIVE_INFINITY
+	let firstPendingAt: number | null = null
 	let last: string | null = null
 
 	const reportError = (err: unknown): void => {
@@ -75,6 +87,7 @@ export function createCoverageRefresh(
 	const fire = (): void => {
 		armed = false
 		handle = undefined
+		firstPendingAt = null
 		if (disposed) return
 		lastFireAt = now()
 		let fp: string
@@ -98,7 +111,11 @@ export function createCoverageRefresh(
 			if (disposed) return
 			try {
 				const t = now()
-				const at = Math.max(t + debounceMs, lastFireAt + minIntervalMs)
+				if (firstPendingAt === null) firstPendingAt = t
+				const at = Math.max(
+					Math.min(t + debounceMs, firstPendingAt + maxWaitMs),
+					lastFireAt + minIntervalMs,
+				)
 				if (armed) clearTimer(handle)
 				armed = false
 				handle = setTimer(fire, Math.max(0, at - t))

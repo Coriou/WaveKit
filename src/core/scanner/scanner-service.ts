@@ -167,6 +167,8 @@ import type {
 	HopPlan,
 	Identity,
 	Impact,
+	BandPlanSkipRange,
+	BandPlanSkipSource,
 	DecodedElsewhereRange,
 	DecoderCoverageView,
 	LockoutExclusion,
@@ -182,6 +184,11 @@ import type {
 	UndecodedReason,
 } from "./types.js"
 import { AMBIENT_PAIR_MS } from "./types.js"
+import {
+	coverageFingerprint,
+	createCoverageRefresh,
+	type CoverageRefresh,
+} from "./plan/coverage-refresh.js"
 
 import type { ChannelProvider } from "../channelizer/types.js"
 import type { CleanupOutcome } from "../channelizer/settlement-observer.js"
@@ -249,7 +256,25 @@ export interface ScannerServiceDeps {
 	 * plan. Absent: no `decodedElsewhere` and plans exactly as before. A throw counts as none.
 	 */
 	decoderCoverage?: () => readonly DecoderCoverageView[]
+	/**
+	 * WG7 req 6.2: the skip-marked band-plan segments, read once per plan. Absent: no
+	 * `bandPlanSkips` and plans exactly as before. A throw counts as none.
+	 */
+	bandPlanSkips?: () => readonly BandPlanSkipSource[]
 }
+
+/** WG7 req 7.1: decoder manager events after which decoded-elsewhere ranges are refreshed. */
+const COVERAGE_EVENTS = [
+	"decoder:created",
+	"decoder:started",
+	"decoder:stopped",
+	"decoder:error",
+	"decoder:restarting",
+	"decoder:max-restarts",
+	"decoder:removed",
+	"decoder:health",
+	"decoder:status-changed",
+] as const
 
 const SNAPSHOT_EVERY_MS = 10_000
 const MAINTENANCE_EVERY_MS = 5 * 60_000
@@ -908,6 +933,7 @@ export class ScannerService extends EventEmitter {
 		this.probes.on("recordings", this.onProbeRecordings)
 		this.probes.on("probe-state", this.onProbeState)
 		this.ambient.on("evidence", this.onAmbientEvidence)
+		this.startCoverageRefresh()
 		// A lease whose job was deleted is persisted unattached: its recovery still runs (H4).
 		const leases = [
 			...loaded.jobs.flatMap(j => (j.lease ? [j.lease] : [])),
@@ -1026,6 +1052,7 @@ export class ScannerService extends EventEmitter {
 				registration.settled = true
 			})
 		}
+		await attempt(() => this.stopCoverageRefresh())
 		await attempt(() =>
 			this.deps.sources.off("connected", this.onSourceConnected),
 		)
@@ -1274,6 +1301,9 @@ export class ScannerService extends EventEmitter {
 			...(preview.decodedElsewhere
 				? { decodedElsewhere: preview.decodedElsewhere }
 				: {}),
+			...(preview.bandPlanSkips
+				? { bandPlanSkips: preview.bandPlanSkips }
+				: {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -1339,6 +1369,7 @@ export class ScannerService extends EventEmitter {
 			"capture",
 			"signalsOnly",
 			"skipDecodedElsewhere",
+			"skipBandPlanSkips",
 		]
 		// S1-B final review, finding 7: the operator's own input, not the normalised spec, so derived
 		// fields (integration, dwell, …) follow the patch and keep honest provenance. Only the source
@@ -1397,6 +1428,7 @@ export class ScannerService extends EventEmitter {
 		record.updatedAt = this.now()
 		setLockouts(record, preview.lockoutExclusions)
 		setDecodedElsewhere(record, preview.decodedElsewhere)
+		setBandPlanSkips(record, preview.bandPlanSkips)
 		this.requireDriver(id).replan(preview.spec, preview.plan)
 		const { sourceId } = record.spec
 		// The lease holder's tuning drives the engine (finding 2); its scheduler follows on the next own epoch.
@@ -1603,6 +1635,36 @@ export class ScannerService extends EventEmitter {
 
 	private lockoutReplanQueued = false
 
+	/** WG7 req 7: decoded-elsewhere refresh on decoder changes (only with a coverage view). */
+	private coverageRefresh: CoverageRefresh | null = null
+
+	private readonly onCoverageEvent = (): void => {
+		this.coverageRefresh?.notify()
+	}
+
+	private startCoverageRefresh(): void {
+		const coverage = this.deps.decoderCoverage
+		if (!coverage || this.coverageRefresh) return
+		this.coverageRefresh = createCoverageRefresh({
+			fingerprint: () => coverageFingerprint(coverage()),
+			onRefresh: () => this.scheduleLockoutReplan(),
+			onError: err =>
+				this.log.warn(
+					{ errName: err instanceof Error ? err.name : typeof err },
+					"Decoded-elsewhere refresh failed",
+				),
+		})
+		for (const event of COVERAGE_EVENTS)
+			this.deps.decoders.on(event, this.onCoverageEvent)
+	}
+
+	private stopCoverageRefresh(): void {
+		for (const event of COVERAGE_EVENTS)
+			this.deps.decoders.off(event, this.onCoverageEvent)
+		this.coverageRefresh?.dispose()
+		this.coverageRefresh = null
+	}
+
 	private scheduleLockoutReplan(): void {
 		if (this.lockoutReplanQueued) return
 		this.lockoutReplanQueued = true
@@ -1651,14 +1713,17 @@ export class ScannerService extends EventEmitter {
 			if (
 				lockoutsSame &&
 				JSON.stringify(next.decodedElsewhere ?? []) ===
-					JSON.stringify(record.decodedElsewhere ?? [])
+					JSON.stringify(record.decodedElsewhere ?? []) &&
+				JSON.stringify(next.bandPlanSkips ?? []) ===
+					JSON.stringify(record.bandPlanSkips ?? [])
 			)
 				continue
 			setLockouts(record, next.lockoutExclusions)
 			setDecodedElsewhere(record, next.decodedElsewhere)
+			setBandPlanSkips(record, next.bandPlanSkips)
 			record.updatedAt = this.now()
-			// WG6: only the decoded-elsewhere list changed and the plan did not (skip off, or not
-			// applied): reported only, the job keeps its hop position.
+			// WG6/WG7: only the decoded-elsewhere or band-plan skip list changed and the plan did not
+			// (skip off, or not applied): reported only, the job keeps its hop position.
 			if (
 				lockoutsSame &&
 				JSON.stringify(next.plan) === JSON.stringify(record.plan)
@@ -2204,8 +2269,7 @@ export class ScannerService extends EventEmitter {
 		// latest credit of (JobHits ignores jobs whose entry moved on or never credited it).
 		if (endReason) {
 			const durationMs =
-				this.store.endedDurationOf(live.observationId) ??
-				now - live.startedAt
+				this.store.endedDurationOf(live.observationId) ?? now - live.startedAt
 			for (const jobId of live.jobIds)
 				this.hits
 					.get(jobId)
@@ -3696,9 +3760,10 @@ export class ScannerService extends EventEmitter {
 		let plan: HopPlan
 		let lockoutExclusions: LockoutExclusion[] | undefined
 		let decodedElsewhere: DecodedElsewhereRange[] | undefined
+		let bandPlanSkips: BandPlanSkipRange[] | undefined
 		let failed = false
 		try {
-			;({ plan, lockoutExclusions, decodedElsewhere } = planJob(
+			;({ plan, lockoutExclusions, decodedElsewhere, bandPlanSkips } = planJob(
 				pj.spec,
 				this.previewContext(),
 			))
@@ -3730,6 +3795,7 @@ export class ScannerService extends EventEmitter {
 			counts: { observations: 0, transients: 0 },
 			...(lockoutExclusions && !failed ? { lockoutExclusions } : {}),
 			...(decodedElsewhere && !failed ? { decodedElsewhere } : {}),
+			...(bandPlanSkips && !failed ? { bandPlanSkips } : {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -3897,6 +3963,22 @@ export class ScannerService extends EventEmitter {
 			...(this.deps.decoderCoverage
 				? { decoderCoverage: this.deps.decoderCoverage }
 				: {}),
+			...(this.deps.bandPlanSkips
+				? { bandPlanSkips: this.bandPlanSkipsRead }
+				: {}),
+		}
+	}
+
+	/** WG7 req 6.6: a throwing band-plan view counts as none (fail closed: nothing skipped). */
+	private readonly bandPlanSkipsRead = (): readonly BandPlanSkipSource[] => {
+		try {
+			return this.deps.bandPlanSkips?.() ?? []
+		} catch (err) {
+			this.log.warn(
+				{ errName: err instanceof Error ? err.name : typeof err },
+				"Band-plan skip view failed; planning without band-plan skips",
+			)
+			return []
 		}
 	}
 
@@ -4068,6 +4150,7 @@ export class ScannerService extends EventEmitter {
 			...(record.decodedElsewhere
 				? { decodedElsewhere: record.decodedElsewhere }
 				: {}),
+			...(record.bandPlanSkips ? { bandPlanSkips: record.bandPlanSkips } : {}),
 			progress: driver
 				? { ...driver.progress(), hitStats: this.hitStatsOf(record.id) }
 				: {
@@ -4612,6 +4695,15 @@ function setDecodedElsewhere(
 ): void {
 	if (decodedElsewhere) record.decodedElsewhere = decodedElsewhere
 	else delete record.decodedElsewhere
+}
+
+/** WG7 req 6.3: the record's runtime band-plan skip ranges follow its current plan. */
+function setBandPlanSkips(
+	record: JobRecord,
+	bandPlanSkips: BandPlanSkipRange[] | undefined,
+): void {
+	if (bandPlanSkips) record.bandPlanSkips = bandPlanSkips
+	else delete record.bandPlanSkips
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
