@@ -12,7 +12,11 @@
  */
 
 import type { StationIdentity } from "@wavekit/api-types"
-import { CONFIG_EXPORT_REQUIRES_ACCESS } from "@wavekit/api-types"
+import {
+	CONFIG_EXPORT_REQUIRES_ACCESS,
+	DECODER_SETTINGS_REQUIRES_ACCESS,
+} from "@wavekit/api-types"
+import type { DecoderSettingsService } from "../decoders/settings/contract.js"
 import { stationRoutes } from "./routes/station.js"
 import { stationEstimateRoutes } from "./routes/station-estimate.js"
 import { storageRoutes } from "./routes/storage.js"
@@ -198,6 +202,12 @@ export interface ApiServerDependencies {
 	 * provider it answers 503 CONFIG_EXPORT_UNAVAILABLE.
 	 */
 	getConfig?: (() => Config) | undefined
+	/**
+	 * WG8 req 2: live decoder settings. GET /api/decoders/:id/settings and the working PATCH
+	 * mount only with the access controller while DECODER_SETTINGS_REQUIRES_ACCESS is true;
+	 * otherwise the legacy decoder routes (PATCH 501) are unchanged.
+	 */
+	decoderSettings?: DecoderSettingsService | undefined
 	/** APRS station, object and item current state (WG2 req 4). */
 	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
@@ -221,6 +231,7 @@ export class ApiServer {
 	private readonly station: StationIdentity | undefined
 	private readonly stationEstimate: StationEstimateProvider | undefined
 	private readonly stationService: StationService | undefined
+	private readonly decoderSettings: DecoderSettingsService | undefined
 	private readonly getConfig: (() => Config) | undefined
 	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
@@ -288,6 +299,7 @@ export class ApiServer {
 		this.station = dependencies.station
 		this.stationEstimate = dependencies.stationEstimate
 		this.stationService = dependencies.stationService
+		this.decoderSettings = dependencies.decoderSettings
 		this.getConfig = dependencies.getConfig
 		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
@@ -1395,6 +1407,15 @@ export class ApiServer {
 		await this.app.register(decoderRoutes, {
 			decoderManager: this.decoderManager,
 			decoderRegistry: this.decoderRegistry,
+			...(this.decoderSettings &&
+			this.accessController &&
+			DECODER_SETTINGS_REQUIRES_ACCESS
+				? {
+						settings: this.decoderSettings,
+						authorizeSettings: request =>
+							this.accessController!.authorizeMetadataMutation(request),
+					}
+				: {}),
 		})
 		// Band overrides (band defaults spec §5.2)
 		await this.app.register(decoderBandRoutes, {

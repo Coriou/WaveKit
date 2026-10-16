@@ -135,8 +135,12 @@ import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
 import { openStationService } from "./core/station/station-service.js"
 import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
-import type { DecoderSettingsService } from "./decoders/settings/contract.js"
+import type {
+	DecoderSettingsManagerPort,
+	DecoderSettingsService,
+} from "./decoders/settings/contract.js"
 import { openDecoderSettingsService } from "./decoders/settings/service.js"
+import { toApiDecoderStatus } from "./api/serializers/decoder-status.js"
 import { STATION_WRITE_REQUIRES_ACCESS } from "./core/station/contract.js"
 import { createStorageReporter } from "./core/storage-report/reporter.js"
 import {
@@ -169,10 +173,10 @@ const startTime = Date.now()
  * @param log - Logger instance
  * @returns Cleanup function to detach audio sources
  */
-function wireDecoderAudioToOutput(
-	decoderManager: DecoderManager,
-	fanoutManager: FanoutManager,
-	audioOutput: AudioOutput,
+export function wireDecoderAudioToOutput(
+	decoderManager: Pick<DecoderManager, "on" | "getDecoder" | "getAllDecoders">,
+	fanoutManager: Pick<FanoutManager, "addBranch">,
+	audioOutput: Pick<AudioOutput, "attachSource" | "detachSource">,
 	config: Config, // Added config parameter
 	log: Logger,
 ): () => void {
@@ -199,6 +203,10 @@ function wireDecoderAudioToOutput(
 		const decoder = decoderManager.getDecoder(decoderId)
 		if (!decoder) return
 
+		// WG8: a rebuilt instance (staged settings, next start) replaces the one piped before
+		const piped = pipedDecoders.get(decoderId)
+		if (piped !== undefined && piped !== decoder) unwireDecoderAudio(decoderId)
+
 		const audioStream = decoder.getAudioOutput()
 		if (audioStream && !pipedDecoders.has(decoderId)) {
 			audioStream.pipe(combinedAudioStream, { end: false })
@@ -221,6 +229,14 @@ function wireDecoderAudioToOutput(
 			log.debug({ decoderId }, "Decoder audio output unwired from AudioOutput")
 		}
 	}
+
+	// WG8: drop a replaced instance's audio pipe as soon as the rebuild is announced
+	// (decoder:created with a known id); decoder:started then wires the new instance.
+	decoderManager.on("decoder:created", (decoderId: string) => {
+		const piped = pipedDecoders.get(decoderId)
+		if (piped !== undefined && piped !== decoderManager.getDecoder(decoderId))
+			unwireDecoderAudio(decoderId)
+	})
 
 	// Wire audio when decoders start
 	decoderManager.on("decoder:started", (decoderId: string) => {
@@ -279,6 +295,48 @@ export function effectiveDecoderConfigs(
 	configs: readonly DecoderConfig[],
 ): DecoderConfig[] {
 	return configs.map(c => settings.effectiveConfig(c))
+}
+
+/**
+ * WG8 req 3.1: a rebuild at next start announces the new instance with decoder:created (same
+ * id) before decoder:started. Digital voice follows the new instance once; attachDecoder
+ * detaches the replaced instance's listener first. Only ids in `attached` (configured decoders
+ * attached at boot) are followed: scanner probes attach in the probe pool.
+ */
+export function followRebuiltVoiceDecoders(
+	decoderManager: Pick<DecoderManager, "on" | "getDecoder">,
+	digitalVoice: Pick<DigitalVoiceService, "attachDecoder">,
+	attached: Map<string, Decoder>,
+): void {
+	decoderManager.on("decoder:created", (decoderId: string) => {
+		const previous = attached.get(decoderId)
+		if (previous === undefined) return
+		const decoder = decoderManager.getDecoder(decoderId)
+		if (decoder === undefined || decoder === previous) return
+		digitalVoice.attachDecoder(decoderId, decoder)
+		attached.set(decoderId, decoder)
+	})
+}
+
+/**
+ * WG8 req 2.4: the settings service's view of the DecoderManager. The port speaks the API
+ * status DTO (the service reads only `owner`); staging goes straight to the manager.
+ */
+export function decoderSettingsPort(
+	decoderManager: Pick<
+		DecoderManager,
+		"getStatus" | "stageDecoderOptions" | "isRestartPending"
+	>,
+): DecoderSettingsManagerPort {
+	return {
+		getStatus: id => {
+			const status = decoderManager.getStatus(id)
+			return status === undefined ? undefined : toApiDecoderStatus(status)
+		},
+		stageDecoderOptions: (id, options) =>
+			decoderManager.stageDecoderOptions(id, options),
+		isRestartPending: id => decoderManager.isRestartPending(id),
+	}
 }
 
 /** Actual phase promises remain authoritative even when a caller races a timeout. */
@@ -825,9 +883,8 @@ async function main(): Promise<void> {
 		)
 
 		runtimeDecoders = decoderManager
-		// TODO(WG8 Main, after DP merge): decoderSettings.setManager(decoderManager) once the
-		// DecoderManager implements DecoderSettingsManagerPort; until then update() answers
-		// DECODER_SETTINGS_STORE_UNAVAILABLE (no route calls it yet).
+		// WG8 req 2.4: PATCH stages effective option values on the manager (next start)
+		decoderSettings.setManager(decoderSettingsPort(decoderManager))
 
 		// Wire DecoderManager to SourceManager for dynamic sample rate handling
 		decoderManager.setSourceManager(sourceManager, sourceRouting)
@@ -933,10 +990,13 @@ async function main(): Promise<void> {
 				"Digital voice setup failed; decoders keep their output",
 			)
 		}
+		// Configured instances digital voice follows; scanner probes attach in the probe pool.
+		const voiceAttached = new Map<string, Decoder>()
 		for (const decoderConfig of decoderConfigs) {
 			try {
 				const decoder = decoderManager.createDecoder(decoderConfig)
 				digitalVoice.attachDecoder(decoderConfig.id, decoder)
+				voiceAttached.set(decoderConfig.id, decoder)
 				log.info(
 					{ decoderId: decoderConfig.id, type: decoderConfig.type },
 					"Decoder created",
@@ -953,6 +1013,9 @@ async function main(): Promise<void> {
 				)
 			}
 		}
+
+		// WG8 req 3.1: re-attach digital voice to a rebuilt instance. Registered before startAll.
+		followRebuiltVoiceDecoders(decoderManager, digitalVoice, voiceAttached)
 
 		// Step 7b: Signal discovery scanner + core spectrum service (docs/SCANNER.md).
 		// Built after the decoders and digital voice so probes and ambient evidence
@@ -1412,6 +1475,8 @@ async function main(): Promise<void> {
 				activity,
 				station: stationService.identity(),
 				stationService,
+				// WG8 req 2: mounted by the server only in protected mode (the access controller)
+				decoderSettings,
 				// WG6 req 7: the validated config with env overrides, as the runtime uses it.
 				getConfig: () => config,
 				regionalRegistry,
