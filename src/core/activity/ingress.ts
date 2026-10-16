@@ -3,10 +3,12 @@ import type { DecoderOutput } from "../../decoders/types.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { createDecodeEnvelope, withPresentation } from "./envelope.js"
 import { presentDecoderOutputResult } from "./presentation/registry.js"
+import { resolveProvenance } from "./provenance/resolve.js"
 import type {
 	ActivityProvenanceLookup,
 	DecodeEnvelope,
 	DecodeEnvelopeContext,
+	DecodeProvenance,
 } from "./types.js"
 
 const LOG_INTERVAL_MS = 60_000
@@ -20,6 +22,13 @@ export interface ActivityIngressCounters {
 	 * Only receptions the store goes on to keep are presented.
 	 */
 	presentationFailures: number
+	/**
+	 * Receptions whose provenance lookup or resolution threw, or whose envelope
+	 * was rejected because of provenance; each was kept with null provenance.
+	 * Present only once non-zero, so callers comparing the WG2 counter shape
+	 * keep working.
+	 */
+	provenanceFailures?: number
 }
 
 export interface ActivityIngress {
@@ -49,14 +58,15 @@ export interface ActivityIngressOptions {
 	randomUUID?: () => string
 	/**
 	 * WG3 (web-gaps-3 req 5): decoder binding lookup for RF provenance. Null or omitted keeps
-	 * today's `{ sourceId: null, frequency: null }`. Frozen stub: lane P implements its use.
+	 * today's `{ sourceId: null, frequency: null }` unless the payload reports a frequency.
 	 */
 	resolveProvenance?: ActivityProvenanceLookup | null
 }
 
 /**
- * Allocates one event id and receivedAt per decoder output, builds a
- * provenance-free envelope, and hands it to the store with a lazy presenter.
+ * Allocates one event id and receivedAt per decoder output, resolves its RF
+ * provenance (before store admission, req 5.6), builds the envelope, and
+ * hands it to the store with a lazy presenter.
  * Build, sink and presentation failures are counted and never thrown back to
  * the decoder manager. A failed presentation keeps the plain envelope (1.7).
  */
@@ -66,6 +76,7 @@ export function createActivityIngress(
 	const now = options.now ?? (() => new Date())
 	const randomUUID = options.randomUUID ?? cryptoRandomUUID
 	const sink = options.sink
+	const lookup = options.resolveProvenance ?? null
 	const log = createComponentLogger(options.logger, "ActivityIngress")
 	const counts = {
 		published: 0,
@@ -73,11 +84,12 @@ export function createActivityIngress(
 		sinkFailures: 0,
 		presentationFailures: 0,
 	}
+	let provenanceFailures = 0
 	const lastLoggedAt = new Map<string, number>()
 
 	function logFailure(
 		decoderId: string,
-		kind: "build" | "sink" | "presentation",
+		kind: "build" | "sink" | "presentation" | "provenance",
 		err: unknown,
 		at: number,
 	): void {
@@ -105,6 +117,11 @@ export function createActivityIngress(
 		logFailure(decoderId, kind, err, at)
 	}
 
+	function noteProvenance(decoderId: string, err: unknown, at: number): void {
+		provenanceFailures++
+		logFailure(decoderId, "provenance", err, at)
+	}
+
 	return {
 		publish(decoderId, decoderType, output) {
 			let eventId: string
@@ -116,19 +133,46 @@ export function createActivityIngress(
 				note(decoderId, "build", err, Date.now())
 				return
 			}
-			const context: DecodeEnvelopeContext = {
+			let provenance: DecodeProvenance | null = null
+			try {
+				provenance = resolveProvenance(
+					output,
+					lookup === null ? null : lookup(decoderId),
+				)
+				if (provenance.sourceId === null && provenance.frequency === null)
+					provenance = null
+			} catch (err) {
+				noteProvenance(decoderId, err, receivedAt.getTime())
+			}
+			let context: DecodeEnvelopeContext = {
 				eventId,
 				receivedAt,
 				decoderId,
 				...(decoderType === undefined ? {} : { decoderType }),
-				provenance: { sourceId: null, frequency: null },
+				provenance: provenance ?? { sourceId: null, frequency: null },
 			}
 			let envelope: DecodeEnvelope
 			try {
 				envelope = createDecodeEnvelope(output, context)
 			} catch (err) {
-				note(decoderId, "build", err, receivedAt.getTime())
-				return
+				if (provenance === null) {
+					note(decoderId, "build", err, receivedAt.getTime())
+					return
+				}
+				// Rejected possibly because of provenance (req 5.7): keep the
+				// reception with null provenance; only a failed rebuild counts as
+				// a build failure.
+				noteProvenance(decoderId, err, receivedAt.getTime())
+				context = {
+					...context,
+					provenance: { sourceId: null, frequency: null },
+				}
+				try {
+					envelope = createDecodeEnvelope(output, context)
+				} catch (rebuildErr) {
+					note(decoderId, "build", rebuildErr, receivedAt.getTime())
+					return
+				}
 			}
 			const plain = envelope
 			const failed = (err: unknown): DecodeEnvelope => {
@@ -164,7 +208,9 @@ export function createActivityIngress(
 			counts.published++
 		},
 		counters() {
-			return { ...counts }
+			return provenanceFailures === 0
+				? { ...counts }
+				: { ...counts, provenanceFailures }
 		},
 	}
 }
