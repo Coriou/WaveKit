@@ -140,6 +140,7 @@ export const dsdFmeOptionsSchema = z
 export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "callStartDelayMs",
+		patchable: true,
 		type: "number",
 		min: 0,
 		max: DSD_FME_DURATION_MS_MAX,
@@ -151,6 +152,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "callTimeoutMs",
+		patchable: true,
 		type: "number",
 		max: DSD_FME_DURATION_MS_MAX,
 		unit: "ms",
@@ -196,6 +198,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "enableIqAgc",
+		patchable: true,
 		type: "boolean",
 		default: true,
 		secret: false,
@@ -222,6 +225,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "fmGain",
+		patchable: true,
 		type: "number",
 		min: 0,
 		max: DSD_FME_FM_GAIN_MAX,
@@ -232,6 +236,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		min: 1,
 		unit: "Hz",
@@ -242,6 +247,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		min: 1,
 		unit: "Hz",
@@ -273,6 +279,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "minCallDurationMs",
+		patchable: true,
 		type: "number",
 		min: 0,
 		max: DSD_FME_DURATION_MS_MAX,

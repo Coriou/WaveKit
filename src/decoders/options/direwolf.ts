@@ -122,6 +122,7 @@ export const direwolfOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		unit: "Hz",
 		default: null,
@@ -130,6 +131,7 @@ export const direwolfOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		unit: "Hz",
 		default: null,

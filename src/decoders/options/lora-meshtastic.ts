@@ -26,6 +26,7 @@ export const loraMeshtasticOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "bandwidth",
+		patchable: true,
 		type: "integer",
 		unit: "Hz",
 		default: null,
@@ -42,6 +43,7 @@ export const loraMeshtasticOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "codingRate",
+		patchable: true,
 		type: "integer",
 		min: 5,
 		max: 8,
@@ -58,6 +60,7 @@ export const loraMeshtasticOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "frequency",
+		patchable: true,
 		type: "integer",
 		unit: "Hz",
 		default: null,
@@ -92,6 +95,7 @@ export const loraMeshtasticOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "preset",
+		patchable: true,
 		type: "enum",
 		enumValues: [...LORA_PRESETS],
 		default: null,
@@ -100,6 +104,7 @@ export const loraMeshtasticOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "region",
+		patchable: true,
 		type: "enum",
 		enumValues: [...LORA_REGIONS],
 		default: null,
@@ -108,6 +113,7 @@ export const loraMeshtasticOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "spreadingFactor",
+		patchable: true,
 		type: "integer",
 		min: 6,
 		max: 12,

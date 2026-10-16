@@ -68,6 +68,7 @@ export const rtl433OptionsSchema = z
 export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "analyze",
+		patchable: true,
 		type: "boolean",
 		default: false,
 		secret: false,
@@ -95,6 +96,7 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		unit: "Hz",
 		default: null,
@@ -104,6 +106,7 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		unit: "Hz",
 		default: null,
@@ -133,6 +136,7 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "protocols",
+		patchable: true,
 		type: "number-list",
 		min: 0,
 		max: RTL433_PROTOCOL_ID_MAX,

@@ -142,6 +142,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "fmGain",
+		patchable: true,
 		type: "number",
 		min: 0,
 		max: MULTIMON_FM_GAIN_MAX,
@@ -152,6 +153,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		unit: "Hz",
 		default: null,
@@ -161,6 +163,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		unit: "Hz",
 		default: null,
@@ -191,6 +194,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "modes",
+		patchable: true,
 		type: "string-list",
 		enumValues: [...MODES],
 		default: null,
@@ -210,6 +214,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "verbosity",
+		patchable: true,
 		type: "integer",
 		min: 0,
 		max: MULTIMON_VERBOSITY_MAX,
