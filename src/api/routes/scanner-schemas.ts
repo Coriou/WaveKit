@@ -219,6 +219,8 @@ export const scanJobSpecSchema = {
 		},
 		// SF1: no decoder trials of the job's own (discover jobs only)
 		signalsOnly: { type: "boolean" },
+		// WG6 1.6: drop sweep hops already decoded elsewhere
+		skipDecodedElsewhere: { type: "boolean" },
 	},
 	additionalProperties: false,
 } as const
@@ -329,6 +331,9 @@ export const jobHitsResponseSchema = {
 					firstHitAt: { type: "string" },
 					lastHitAt: { type: "string" },
 					firstSeenInJob: { type: "boolean" },
+					lastDurationMs: {
+						anyOf: [{ type: "integer", minimum: 0 }, { type: "null" }],
+					},
 				},
 				required: [
 					"jobId",

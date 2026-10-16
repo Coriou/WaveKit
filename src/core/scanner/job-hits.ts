@@ -30,6 +30,8 @@ interface Entry {
 	firstHitAt: number
 	lastHitAt: number
 	firstSeenInJob: boolean
+	lastObservationId: string
+	lastDurationMs: number | null
 }
 
 export class JobHits {
@@ -71,6 +73,7 @@ export class JobHits {
 		if (known) {
 			known.hits += 1
 			known.lastHitAt = Math.max(known.lastHitAt, at)
+			known.lastObservationId = observationId
 			this.byDiscovery.delete(discoveryId)
 			this.byDiscovery.set(discoveryId, known)
 			return true
@@ -81,6 +84,8 @@ export class JobHits {
 				firstHitAt: at,
 				lastHitAt: at,
 				firstSeenInJob: created,
+				lastObservationId: observationId,
+				lastDurationMs: null,
 			})
 			return true
 		}
@@ -88,6 +93,17 @@ export class JobHits {
 		if (this.untracked.size < JOB_HITS_UNTRACKED_DISTINCT_MAX)
 			this.untracked.add(discoveryId)
 		return true
+	}
+
+	/**
+	 * WG6 2.1: observation `observationId` ended after `durationMs`. Applies only when it is the
+	 * entry's latest credit and the duration is finite and non-negative.
+	 */
+	ended(observationId: string, discoveryId: string, durationMs: number): void {
+		const e = this.byDiscovery.get(discoveryId)
+		if (!e || e.lastObservationId !== observationId) return
+		if (!Number.isFinite(durationMs) || durationMs < 0) return
+		e.lastDurationMs = Math.round(durationMs)
 	}
 
 	entry(discoveryId: string): ScanJobHit | undefined {
@@ -123,6 +139,7 @@ export class JobHits {
 			firstHitAt: new Date(e.firstHitAt).toISOString(),
 			lastHitAt: new Date(e.lastHitAt).toISOString(),
 			firstSeenInJob: e.firstSeenInJob,
+			lastDurationMs: e.lastDurationMs,
 		}
 	}
 }
