@@ -209,7 +209,7 @@ invalid text, duplicate, pack band limit; same skip reasons); frequencies are in
 `color` to `colourHint` (`#rrggbb`, alpha dropped, else null); `sourceType` is the mode text
 (trimmed, at most 64 characters) and the group comes from the existing group mapping (name
 keywords, overrides).
-7.5 A file of the wrong format, a forbidden construct or a malformed document is 400
+7.5 A file of the wrong format, a forbidden construct or a malformed document is 422
 `BANDPLANS_IMPORT_INVALID`; an oversized one 413 `BANDPLANS_IMPORT_TOO_LARGE`. The parsers
 never throw.
 7.6 Preview, commit, digest and the protected-only write rule are unchanged.

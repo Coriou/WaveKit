@@ -938,7 +938,7 @@ export const BANDPLANS_ERROR_DEFINITIONS = {
 	BANDPLANS_IMPORT_TOO_LARGE: [413, "Import file is too large."],
 	BANDPLANS_IMPORT_INVALID: [
 		422,
-		"Import file is not a usable SDR++ band plan.",
+		"Import file is not a usable band plan of the selected format.",
 	],
 	BANDPLANS_IMPORT_MISMATCH: [
 		409,
