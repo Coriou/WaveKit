@@ -123,6 +123,10 @@ export class SpectrumScene {
 			heightPx,
 			this.layout.splitRatio,
 		)
+		const gapPx = Math.min(
+			waterfallPx,
+			Math.max(0, Math.round(this.layout.gapCss * this.size.dpr)),
+		)
 		const axis = this.axis ?? { startHz: 0, binHz: 1, binCount: 0 }
 		return {
 			map: texMapping(this.view, axis, this.texWidth),
@@ -130,11 +134,12 @@ export class SpectrumScene {
 			newest: (this.next - 1 + this.depth) % this.depth,
 			filled: this.filled,
 			rows: visibleRows(
-				waterfallPx,
+				waterfallPx - gapPx,
 				this.layout.rowHeightCss * this.size.dpr,
 				this.depth,
 			),
 			tracePx,
+			gapPx,
 			lineHalfWidth: 0.75 * this.size.dpr,
 			peakHold: this.layout.peakHold,
 		}

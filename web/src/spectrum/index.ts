@@ -22,4 +22,14 @@ export {
 	parseCssColor,
 } from "./ramp.ts"
 export { byteToDb, dbToByte } from "./codec.ts"
-export { captureSpan, hzToX, xToHz, zoomView, panView } from "./view.ts"
+export {
+	captureSpan,
+	coveredBins,
+	hzToX,
+	maxOverBins,
+	MAX_TAPS,
+	panView,
+	splitHeight,
+	xToHz,
+	zoomView,
+} from "./view.ts"

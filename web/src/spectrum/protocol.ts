@@ -28,6 +28,8 @@ export interface SpectrumLevels {
 export interface SpectrumLayout {
 	/** Share of the height given to the spectrum trace (0–1); the waterfall takes the rest. */
 	splitRatio: number
+	/** Empty band between the trace and the waterfall, CSS px (room for DOM axes). */
+	gapCss: number
 	/** CSS px per waterfall row. */
 	rowHeightCss: number
 	/** Draw the peak-hold trace. */
@@ -117,6 +119,7 @@ export type ResetReason =
 
 export const DEFAULT_LAYOUT: SpectrumLayout = {
 	splitRatio: 0.3,
+	gapCss: 0,
 	rowHeightCss: 1,
 	peakHold: false,
 	peakDecayDbPerSec: 6,

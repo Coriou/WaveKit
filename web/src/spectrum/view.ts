@@ -118,3 +118,43 @@ export function splitHeight(
 	const tracePx = Math.round(heightPx * ratio)
 	return { tracePx, waterfallPx: heightPx - tracePx }
 }
+
+/** Most bins the shader reads for one pixel; wider spans are strided. */
+export const MAX_TAPS = 32
+
+/**
+ * Bins the renderer reads for the screen px interval [a, b] of a canvas `widthPx` wide (the fragment
+ * shader's sampleSpan, mirrored for tests): null when the interval covers at most one bin (the shader
+ * then takes the linear sample at its middle), else the first and last bin and the stride of the MAX.
+ */
+export function coveredBins(
+	a: number,
+	b: number,
+	map: TexMapping,
+	texWidth: number,
+	widthPx: number,
+): { first: number; last: number; stride: number } | null {
+	const t0 = (map.offset + (a / widthPx) * map.scale) * texWidth
+	const t1 = (map.offset + (b / widthPx) * map.scale) * texWidth
+	if (t1 - t0 <= 1) return null
+	const lastBin = map.limit * texWidth - 1
+	const clampBin = (x: number) => Math.min(lastBin, Math.max(0, x))
+	const first = Math.trunc(clampBin(Math.floor(t0)))
+	const last = Math.trunc(clampBin(Math.ceil(t1) - 1))
+	const stride = Math.trunc((last - first + MAX_TAPS) / MAX_TAPS)
+	return { first, last, stride }
+}
+
+/** The value the shader takes for a pixel: the max of the bins coveredBins names. */
+export function maxOverBins(
+	row: ArrayLike<number>,
+	span: { first: number; last: number; stride: number },
+): number {
+	let m = 0
+	for (let k = 0; k < MAX_TAPS; k++) {
+		const i = span.first + k * span.stride
+		if (i > span.last) break
+		m = Math.max(m, row[i] ?? 0)
+	}
+	return m
+}

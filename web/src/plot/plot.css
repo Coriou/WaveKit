@@ -1,0 +1,300 @@
+/* The plot: spectrum trace + waterfall (WebGL, worker) under DOM overlays. Board: docs/web/canvas/Spectrum.dc.html.
+   Glass budget: nothing here blurs; chips and the zoom control are solid (--wk-glass-strong, canvas v101). */
+@layer wk-app {
+	.wk-plot {
+		position: absolute;
+		inset: 0;
+		overflow: hidden;
+		background: var(--wk-plot-bg);
+		color: var(--wk-text);
+		font-family: var(--wk-font-ui);
+		user-select: none;
+		-webkit-user-select: none;
+	}
+	.wk-plot-body {
+		position: absolute;
+		/* Room for the shell's island heads above the trace (Immersive board: 84 px). */
+		top: var(--wk-plot-inset-top, 84px);
+		left: 0;
+		right: 0;
+		bottom: 0;
+		touch-action: none;
+		cursor: crosshair;
+		outline: none;
+	}
+	.wk-plot-body[data-dragging] {
+		cursor: grabbing;
+	}
+	.wk-plot-body:focus-visible {
+		box-shadow: inset 0 0 0 2px rgba(var(--wk-accent-rgb), 0.55);
+	}
+	.wk-plot-band {
+		position: absolute;
+		left: 0;
+		right: 0;
+		pointer-events: none;
+	}
+	.wk-plot-band > * {
+		pointer-events: auto;
+	}
+
+	/* dB scale */
+	.wk-plot-db {
+		position: absolute;
+		left: 10px;
+		transform: translateY(-50%);
+		font-size: 11px;
+		color: rgba(var(--wk-ink-2-rgb), 0.5);
+		font-variant-numeric: tabular-nums;
+		pointer-events: none;
+	}
+
+	/* Signal chips: solid, never blurred */
+	.wk-plot-sig {
+		position: absolute;
+		transform: translateX(-50%);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	.wk-plot-sig > button {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: 28px;
+		padding: 0 10px 0 8px;
+		border-radius: 6px;
+		background: var(--wk-glass-strong);
+		border: 1px solid rgba(var(--wk-line-rgb), 0.14);
+		box-shadow: inset 0 1px 0 var(--wk-glass-hi);
+		color: var(--wk-text);
+		font: inherit;
+		font-size: 12px;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.wk-plot-sig[data-tuned] > button {
+		border-color: rgba(var(--wk-accent-rgb), 0.55);
+	}
+	.wk-plot-sig b {
+		font-weight: 700;
+	}
+	.wk-plot-sig-sub {
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-sig-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--wk-accent);
+		flex: none;
+	}
+	.wk-plot-sig[data-burst] .wk-plot-sig-dot {
+		background: transparent;
+		box-shadow: inset 0 0 0 1.5px var(--wk-accent);
+	}
+	.wk-plot-sig-lead {
+		width: 1px;
+		background: rgba(var(--wk-accent-rgb), 0.45);
+		pointer-events: none;
+	}
+	[data-wk-theme="light"] .wk-plot-sig > button {
+		box-shadow: none;
+		border-color: rgba(var(--wk-line-rgb), 0.3);
+	}
+
+	/* Zoom control: solid */
+	.wk-plot-zoom {
+		position: absolute;
+		right: 12px;
+		bottom: 10px;
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		height: 32px;
+		padding: 0 4px;
+		border-radius: 8px;
+		background: var(--wk-glass-strong);
+		border: 1px solid var(--wk-line-14);
+		box-shadow: inset 0 1px 0 var(--wk-glass-hi);
+	}
+	[data-wk-theme="light"] .wk-plot-zoom {
+		background: var(--wk-surface);
+		border-color: rgba(var(--wk-line-rgb), 0.22);
+		box-shadow: var(--wk-e2);
+	}
+	.wk-plot-zoom-ov {
+		position: relative;
+		width: 84px;
+		height: 6px;
+		border-radius: 3px;
+		background: var(--wk-line-solid);
+	}
+	.wk-plot-zoom-ov > span {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		min-width: 3px;
+		border-radius: 3px;
+		background: var(--wk-accent);
+	}
+	.wk-plot-zoom-fit {
+		padding: 0 7px;
+		min-width: 44px;
+		color: var(--wk-text-3);
+		font-size: 12px;
+		font-weight: 400;
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* Frequency axis */
+	.wk-plot-axis {
+		height: 30px;
+		border-top: 1px solid rgba(var(--wk-line-rgb), 0.08);
+		background: var(--wk-plot-bg);
+		overflow: hidden;
+	}
+	.wk-plot-axis[data-unverified] .wk-plot-tick {
+		opacity: 0.45;
+	}
+	.wk-plot-tick {
+		position: absolute;
+		top: 8px;
+		transform: translateX(-50%);
+		font-size: 11px;
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		pointer-events: none;
+	}
+	.wk-plot-chip {
+		position: absolute;
+		top: 5px;
+		height: 20px;
+		padding: 0 7px;
+		border-radius: 4px;
+		font-size: 11px;
+		font-weight: 700;
+		line-height: 20px;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		pointer-events: none;
+	}
+	.wk-plot-vfo-chip {
+		transform: translateX(-50%);
+		background: var(--wk-accent);
+		color: var(--wk-on-accent);
+	}
+	.wk-plot-unverified {
+		right: 8px;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 7px 0 6px;
+		background: var(--wk-amber-fill);
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-amber-rgb), 0.32);
+		color: var(--wk-amber);
+		pointer-events: auto;
+	}
+	.wk-plot-hover-tag {
+		transform: translateX(-50%);
+		background: var(--wk-fill);
+		border: 1px solid var(--wk-line-14);
+		font-weight: 400;
+		line-height: 18px;
+		z-index: 1;
+	}
+	[data-wk-theme="light"] .wk-plot-hover-tag {
+		background: var(--wk-surface);
+		box-shadow: var(--wk-e2);
+	}
+
+	/* Band lanes */
+	.wk-plot-lanes {
+		height: 24px;
+		border-bottom: 1px solid rgba(var(--wk-line-rgb), 0.08);
+		background: var(--wk-plot-bg);
+		overflow: hidden;
+		isolation: isolate;
+	}
+	.wk-plot-lane {
+		position: absolute;
+		top: 4px;
+		height: 16px;
+		box-sizing: border-box;
+		border-top: 2px solid rgba(var(--wk-line-rgb), 0.28);
+		pointer-events: auto;
+	}
+	.wk-plot-lane[data-skip] {
+		border-top-color: rgba(var(--wk-line-rgb), 0.14);
+		opacity: 0.7;
+	}
+	.wk-plot-lane-name {
+		position: absolute;
+		left: 6px;
+		top: 1px;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-family: var(--wk-font-head);
+		font-size: 11px;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--wk-text-3);
+		white-space: nowrap;
+	}
+	.wk-plot-lane[data-skip] .wk-plot-lane-name {
+		color: var(--wk-text-4);
+	}
+	.wk-plot-lane-name > i {
+		width: 6px;
+		height: 6px;
+		flex: none;
+		border-radius: 2px;
+	}
+	.wk-plot-lane-name > span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* VFO passband and hover line */
+	.wk-plot-vfo {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		min-width: 7px;
+		transform: translateX(-50%);
+		background: rgba(var(--wk-accent-rgb), 0.1);
+		pointer-events: none;
+	}
+	.wk-plot-vfo::after {
+		content: "";
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 50%;
+		width: 1px;
+		background: rgba(var(--wk-accent-rgb), 0.75);
+	}
+	.wk-plot-vfo[data-pending]::after {
+		background: rgba(var(--wk-accent-rgb), 0.4);
+	}
+	.wk-plot-hover {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: rgba(var(--wk-ink-rgb), 0.28);
+		pointer-events: none;
+	}
+	.wk-plot-note {
+		position: absolute;
+		left: 50%;
+		top: 40%;
+		transform: translate(-50%, -50%);
+		font-size: 13px;
+		color: var(--wk-text-3);
+		pointer-events: none;
+	}
+}

@@ -6,6 +6,7 @@
  */
 
 import { RAMP_SIZE } from "./ramp.ts"
+import { MAX_TAPS } from "./view.ts"
 
 export interface DrawParams {
 	/** u(x) = offset + x · scale; bins outside 0–limit are empty. */
@@ -20,6 +21,8 @@ export interface DrawParams {
 	rows: number
 	/** Trace band height, device px (0 hides it). */
 	tracePx: number
+	/** Empty band between the trace and the waterfall, device px. */
+	gapPx: number
 	/** Line half-width, device px. */
 	lineHalfWidth: number
 	peakHold: boolean
@@ -62,6 +65,9 @@ uniform float u_filled;
 uniform float u_rows;     // rows over the waterfall band
 uniform float u_lineHalf;
 uniform float u_peakOn;
+uniform float u_gapPx;   // empty band between the trace and the waterfall, device px
+
+const int MAX_TAPS = ${MAX_TAPS};
 
 out vec4 outColor;
 
@@ -82,27 +88,47 @@ float clampU(float u) {
 	return clamp(u, 0.5 / u_texWidth, u_map.z - 0.5 / u_texWidth);
 }
 
-float rowV(float age) {
-	float index = mod(u_newest - age + u_depth, u_depth);
-	return (index + 0.5) / u_depth;
+float rowIndex(float age) {
+	return mod(u_newest - age + u_depth, u_depth);
 }
 
 float level(float s) {
 	return s * u_level.x + u_level.y;
 }
 
-// y of the trace at screen px x, device px from the top of the trace band.
-float traceY(sampler2D tex, float v, float px) {
-	float t = clamp(level(texture(tex, vec2(clampU(texU(px)), v)).r), 0.0, 1.0);
+// Sample of the bins under screen px [a, b] in texture row \`row\` (v its normalized centre). Zoomed in
+// (at most one bin per px) it is the LINEAR sample at the middle; zoomed out it is the MAX over the
+// covered bins, so a narrow signal never falls between pixels. At most MAX_TAPS fetches: wider spans
+// are strided (view.ts coveredBins mirrors this).
+float sampleSpan(sampler2D tex, int row, float v, float a, float b) {
+	float t0 = texU(a) * u_texWidth;
+	float t1 = texU(b) * u_texWidth;
+	if (t1 - t0 <= 1.0) return texture(tex, vec2(clampU(texU(0.5 * (a + b))), v)).r;
+	float last = u_map.z * u_texWidth - 1.0;
+	int i0 = int(clamp(floor(t0), 0.0, last));
+	int i1 = int(clamp(ceil(t1) - 1.0, 0.0, last));
+	int stride = (i1 - i0 + MAX_TAPS) / MAX_TAPS;
+	float m = 0.0;
+	for (int k = 0; k < MAX_TAPS; k++) {
+		int i = i0 + k * stride;
+		if (i > i1) break;
+		m = max(m, texelFetch(tex, ivec2(i, row), 0).r);
+	}
+	return m;
+}
+
+// y of a sample on the trace, device px from the top of the trace band.
+float traceY(float s) {
+	float t = clamp(level(s), 0.0, 1.0);
 	float top = 2.0 * u_lineHalf;
 	return top + (1.0 - t) * (u_tracePx - top - 1.0);
 }
 
-// Coverage of a vertical stroke through the trace at px (bridges steep slopes between neighbours).
-float stroke(sampler2D tex, float v, float px, float y, float halfWidth) {
-	float y0 = traceY(tex, v, px - 0.5);
-	float y1 = traceY(tex, v, px + 0.5);
-	float yc = traceY(tex, v, px);
+// Coverage of a vertical stroke through the trace at px: spans the pixel's own level and the levels
+// half a pixel either side, so steep slopes stay connected.
+float stroke(sampler2D tex, int row, float v, float px, float y, float yc, float halfWidth) {
+	float y0 = traceY(sampleSpan(tex, row, v, px - 1.0, px));
+	float y1 = traceY(sampleSpan(tex, row, v, px, px + 1.0));
 	float lo = min(min(y0, y1), yc) - halfWidth;
 	float hi = max(max(y0, y1), yc) + halfWidth;
 	return clamp(min(y - lo, hi - y) + 0.5, 0.0, 1.0);
@@ -114,34 +140,44 @@ void main() {
 	vec4 bg = ramp(0.0);
 	float u = texU(px);
 	bool hasData = u_filled > 0.5 && inCapture(u);
+	float wfTop = u_tracePx + u_gapPx;
 
 	if (y >= u_tracePx) {
+		if (y < wfTop) {
+			// Gap between the bands (the DOM axis sits there).
+			outColor = vec4(bg.rgb, 1.0);
+			return;
+		}
 		// Waterfall: newest row at the top of the band.
-		float wy = (y - u_tracePx) / max(u_size.y - u_tracePx, 1.0);
+		float wy = (y - wfTop) / max(u_size.y - wfTop, 1.0);
 		float age = floor(wy * u_rows);
 		if (!hasData || age >= u_filled) {
 			outColor = bg;
 			return;
 		}
-		float s = texture(u_wf, vec2(clampU(u), rowV(age))).r;
+		float index = rowIndex(age);
+		float s = sampleSpan(u_wf, int(index), (index + 0.5) / u_depth, px - 0.5, px + 0.5);
 		outColor = vec4(ramp(level(s)).rgb, 1.0);
 		return;
 	}
 
 	vec3 color = bg.rgb;
 	if (hasData) {
-		float v = rowV(0.0);
-		float yc = traceY(u_wf, v, px);
+		float index = rowIndex(0.0);
+		int row = int(index);
+		float v = (index + 0.5) / u_depth;
+		float yc = traceY(sampleSpan(u_wf, row, v, px - 0.5, px + 0.5));
 		vec4 lineColor = ramp(0.82);
 		if (y > yc) {
 			float depth = (y - yc) / max(u_tracePx - yc, 1.0);
 			color = mix(color, lineColor.rgb, mix(0.32, 0.04, depth));
 		}
 		if (u_peakOn > 0.5) {
-			float p = stroke(u_peak, 0.5, px, y, u_lineHalf * 0.6);
+			float pc = traceY(sampleSpan(u_peak, 0, 0.5, px - 0.5, px + 0.5));
+			float p = stroke(u_peak, 0, 0.5, px, y, pc, u_lineHalf * 0.6);
 			color = mix(color, ramp(1.0).rgb, 0.55 * p);
 		}
-		float c = stroke(u_wf, v, px, y, u_lineHalf);
+		float c = stroke(u_wf, row, v, px, y, yc, u_lineHalf);
 		color = mix(color, lineColor.rgb, c);
 	}
 	outColor = vec4(color, 1.0);
@@ -162,7 +198,8 @@ type Uniforms = Record<
 	| "u_filled"
 	| "u_rows"
 	| "u_lineHalf"
-	| "u_peakOn",
+	| "u_peakOn"
+	| "u_gapPx",
 	WebGLUniformLocation | null
 >
 
@@ -201,6 +238,7 @@ export class SpectrumRenderer implements SceneRenderer {
 			"u_rows",
 			"u_lineHalf",
 			"u_peakOn",
+			"u_gapPx",
 		] as const
 		this.u = Object.fromEntries(
 			names.map(n => [n, gl.getUniformLocation(this.program, n)]),
@@ -290,6 +328,7 @@ export class SpectrumRenderer implements SceneRenderer {
 		gl.uniform1f(this.u.u_rows, p.rows)
 		gl.uniform1f(this.u.u_lineHalf, p.lineHalfWidth)
 		gl.uniform1f(this.u.u_peakOn, p.peakHold ? 1 : 0)
+		gl.uniform1f(this.u.u_gapPx, p.gapPx)
 		gl.drawArrays(gl.TRIANGLES, 0, 3)
 	}
 
