@@ -1961,7 +1961,11 @@ answers `DecoderSettingsView` with `Cache-Control: no-store`:
   its `source` (`override`, `config` or `default`), `patchable`, `secret` and
   `present` (an override or the configuration sets it). `value` appears only
   on a patchable, non-secret key (null = the adapter default applies); secret
-  and non-patchable keys show only `{ present }`.
+  and non-patchable keys show only `{ present }`. A frequency key that a
+  higher-priority source shadows (top-level `frequencies` over
+  `options.frequencies` over `options.frequency`) is `patchable: false` for
+  that decoder, and PATCH refuses it with `DECODER_OPTION_NOT_PATCHABLE`
+  (a revert with null stays allowed).
 - `undocumentedKeys` counts configured keys the type does not document; they
   are never named.
 - `enabled` is autostart at boot: it is applied when the decoder is created at
@@ -2032,7 +2036,9 @@ unreadable file is moved aside (`decoder-settings.json.corrupt-<ms>`, one kept)
 and the store starts empty with a seeded revision, so a stale `If-Match` never
 matches; a missing file starts empty at revision 0. The store reads only a
 regular file and never follows a symbolic link: a link or FIFO planted at the
-path is moved aside the same way. A stored key that is no longer patchable or
+path is moved aside the same way. A settings file that is a symlink (or any
+non-regular file) is moved aside as unreadable and the store starts empty; the
+link target is untouched; `stateDir` itself may be a symlink. A stored key that is no longer patchable or
 valid is dropped in memory (counted). The file is counted in the
 `decoder-overrides` storage area.
 

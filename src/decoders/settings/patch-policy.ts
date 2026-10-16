@@ -143,6 +143,30 @@ export function isPatchableOption(type: string, key: string): boolean {
 	}
 }
 
+function frequencySet(value: unknown): boolean {
+	return value !== undefined && value !== null
+}
+
+/**
+ * True when a higher-priority frequency source is set, so a patched `key` would be silently
+ * shadowed. The order is resolveDecoderTargetFrequencies' (and the ACARS/VDL2 adapters'):
+ * top-level `frequencies`, then `options.frequencies`, then `options.frequency`. Fails closed:
+ * any value present (valid or not) counts as set.
+ */
+export function isFrequencyKeyShadowed(
+	key: string,
+	topLevelFrequencies: unknown,
+	options: Readonly<Record<string, unknown>>,
+): boolean {
+	if (key !== "frequencies" && key !== "frequency") return false
+	if (frequencySet(topLevelFrequencies)) return true
+	if (key === "frequencies") return false
+	return (
+		Object.hasOwn(options, "frequencies") &&
+		frequencySet(options["frequencies"])
+	)
+}
+
 function range(d: DecoderOptionDescriptor): string {
 	if (d.min !== undefined && d.max !== undefined)
 		return ` from ${String(d.min)} to ${String(d.max)}`
@@ -295,6 +319,7 @@ export function validateDecoderPatch(
 	type: string,
 	configured: Readonly<Record<string, unknown>>,
 	body: unknown,
+	topLevelFrequencies?: unknown,
 ): DecoderPatch {
 	if (!isPlainObject(body))
 		throw invalid(shapeIssue("", "body must be a JSON object"))
@@ -336,6 +361,25 @@ export function validateDecoderPatch(
 		if (keySchema(type, key) !== undefined && documented.has(key))
 			refused.push(key)
 		else unknownKeys += 1
+	}
+	// A frequency key a higher-priority source shadows would be accepted and never used:
+	// refuse it (a revert, null, stays allowed). Setting `frequencies` in the same patch
+	// shadows `frequency`; reverting `frequencies` in it does not unshadow (fail closed).
+	if (refused.length === 0 && unknownKeys === 0) {
+		const shadowOptions: Record<string, unknown> = Object.fromEntries(
+			Object.keys(configured).map(key => [key, configured[key]]),
+		)
+		if (
+			Object.hasOwn(options, "frequencies") &&
+			options["frequencies"] !== null
+		)
+			shadowOptions["frequencies"] = options["frequencies"]
+		for (const key of keys)
+			if (
+				options[key] !== null &&
+				isFrequencyKeyShadowed(key, topLevelFrequencies, shadowOptions)
+			)
+				refused.push(key)
 	}
 	if (refused.length > 0 || unknownKeys > 0)
 		throw new DecoderSettingsError(

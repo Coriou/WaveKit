@@ -12,7 +12,7 @@ import type {
 import { decoderOptionDescriptors } from "../options/index.js"
 import type { DecoderConfig } from "../types.js"
 import type { DecoderOverride } from "./contract.js"
-import { isPatchableOption } from "./patch-policy.js"
+import { isFrequencyKeyShadowed, isPatchableOption } from "./patch-policy.js"
 
 function copyValue<T>(value: T): T {
 	return (Array.isArray(value) ? [...(value as unknown[])] : value) as T
@@ -84,7 +84,10 @@ export function buildDecoderSettingsView(
 				? "config"
 				: "default"
 		const present = Object.hasOwn(effective.options, d.key)
-		const patchable = isPatchableOption(config.type, d.key)
+		// A frequency key a higher-priority source shadows is not patchable for this decoder.
+		const patchable =
+			isPatchableOption(config.type, d.key) &&
+			!isFrequencyKeyShadowed(d.key, config.frequencies, effective.options)
 		const setting: DecoderOptionSetting = {
 			key: d.key,
 			source,

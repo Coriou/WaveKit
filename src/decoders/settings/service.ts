@@ -167,6 +167,7 @@ export async function openDecoderSettingsService(
 			config.type,
 			effectiveDecoderConfig(config, applied.get(id)).options,
 			body,
+			config.frequencies,
 		)
 
 		// A retyped stored entry is replaced: the patch starts from empty.

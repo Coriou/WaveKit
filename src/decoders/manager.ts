@@ -999,7 +999,7 @@ export class DecoderManager extends EventEmitter {
 		if (intent?.refuseIfHeld === true) this.assertNotHeld(state)
 
 		// WG8: staged options apply here, as if WaveKit booted with them.
-		if (state.stagedOptions) this.rebuildIfPending(state)
+		if (state.stagedOptions) this.rebuildIfPending(state, keepFailureAccounting)
 
 		if (intent) state.startMode = intent.startMode
 		this.log.info(
@@ -1255,8 +1255,15 @@ export class DecoderManager extends EventEmitter {
 	 * instance, config and staging, stops the decoder and throws
 	 * DecoderRebuildError.
 	 */
-	/** Returns true when a new adapter instance replaced the previous one. */
-	private rebuildIfPending(state: DecoderState): boolean {
+	/**
+	 * Returns true when a new adapter instance replaced the previous one.
+	 * `keepFailureAccounting` (a channel-invalidation restart) keeps
+	 * restartCount, consecutiveFailures, the backoff and lastError.
+	 */
+	private rebuildIfPending(
+		state: DecoderState,
+		keepFailureAccounting = false,
+	): boolean {
 		if (state.owner !== "config" || !state.stagedOptions) return false
 		if (!this.stagedDiffers(state)) {
 			state.stagedOptions = null
@@ -1332,10 +1339,12 @@ export class DecoderManager extends EventEmitter {
 			: undefined
 		state.optionIssues = this.checkDecoderOptions(config)
 		delete state.inputCaps
-		state.restartCount = 0
-		state.consecutiveFailures = 0
-		state.currentDelay = this.config.restartDelay
-		state.lastError = null
+		if (!keepFailureAccounting) {
+			state.restartCount = 0
+			state.consecutiveFailures = 0
+			state.currentDelay = this.config.restartDelay
+			state.lastError = null
+		}
 		state.lastOutputAt = null
 		state.lastStartedAt = null
 		this.updateDecoderHealth(state, "running")

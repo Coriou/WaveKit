@@ -6,6 +6,7 @@ import { DECODER_SETTINGS_FILE_NAME } from "@wavekit/api-types"
 import type { DecoderSettingsManagerPort } from "../../../../src/decoders/settings/contract.js"
 import { DecoderSettingsError } from "../../../../src/decoders/settings/contract.js"
 import { openDecoderSettingsService } from "../../../../src/decoders/settings/service.js"
+import { resolveDecoderTargetFrequencies } from "../../../../src/decoders/status-fields.js"
 import type { DecoderConfig } from "../../../../src/decoders/types.js"
 import { makeTmp, removeTmp, stubLogger } from "../../core/station/helpers.js"
 
@@ -431,6 +432,91 @@ describe("decoder settings service review regressions", () => {
 		const view = service.view("dsd")
 		const setting = view?.options.find(o => o.key === "fmGain")
 		expect(Object.is(setting?.value, 0)).toBe(true)
+		await service.close()
+	})
+})
+
+describe("frequency keys shadowed by a higher-priority source (WG8 R1)", () => {
+	const acars = (top?: number[]): DecoderConfig => ({
+		id: "acars",
+		type: "acarsdec",
+		enabled: true,
+		...(top ? { frequencies: top } : {}),
+		options: { frequencies: [131_550_000] },
+	})
+
+	async function refusal(p: Promise<unknown>): Promise<DecoderSettingsError> {
+		try {
+			await p
+		} catch (err) {
+			if (err instanceof DecoderSettingsError) return err
+			throw err
+		}
+		throw new Error("expected a rejection")
+	}
+
+	beforeEach(() => port.owners.set("acars", "config"))
+
+	it("top-level frequencies: PATCH options.frequencies is refused and the view says not patchable", async () => {
+		const config = acars([131_550_000])
+		const service = await open(true, [config])
+		const err = await refusal(
+			service.update("acars", { options: { frequencies: [131_725_000] } }),
+		)
+		expect(err.code).toBe("DECODER_OPTION_NOT_PATCHABLE")
+		expect(err.message).toBe("Option not patchable")
+		expect(JSON.stringify(err)).not.toContain("131725000")
+		expect(port.staged).toEqual([])
+		expect(service.revision()).toBe(0)
+		const view = service.view("acars")
+		const setting = view?.options.find(o => o.key === "frequencies")
+		expect(setting?.patchable).toBe(false)
+		expect(setting).not.toHaveProperty("value")
+		expect(view?.options.find(o => o.key === "frequency")?.patchable).toBe(
+			false,
+		)
+		await service.close()
+	})
+
+	it("options.frequencies shadows options.frequency; a same-patch frequencies does too", async () => {
+		const service = await open(true, [acars()])
+		expect(
+			(await refusal(service.update("acars", { options: { frequency: 1e8 } })))
+				.code,
+		).toBe("DECODER_OPTION_NOT_PATCHABLE")
+		expect(
+			service.view("acars")?.options.find(o => o.key === "frequency")
+				?.patchable,
+		).toBe(false)
+		// A revert of a shadowed key stays allowed.
+		await service.update("acars", { options: { frequency: null } })
+		await service.close()
+	})
+
+	it("without top-level frequencies the PATCH is accepted and changes the resolved targets", async () => {
+		const config = acars()
+		const service = await open(true, [config])
+		const view = service.view("acars")
+		expect(view?.options.find(o => o.key === "frequencies")?.patchable).toBe(
+			true,
+		)
+		const result = await service.update("acars", {
+			options: { frequencies: [131_725_000] },
+		})
+		expect(result.changed).toEqual(["frequencies"])
+		expect(port.staged).toEqual([
+			{ id: "acars", options: { frequencies: [131_725_000] } },
+		])
+		expect(resolveDecoderTargetFrequencies(config)).toEqual([131_550_000])
+		expect(
+			resolveDecoderTargetFrequencies(service.effectiveConfig(config)),
+		).toEqual([131_725_000])
+		// The manager's rebuild applies the staged options over the configured ones.
+		const rebuilt: DecoderConfig = {
+			...config,
+			options: { ...config.options, ...port.staged[0]!.options },
+		}
+		expect(resolveDecoderTargetFrequencies(rebuilt)).toEqual([131_725_000])
 		await service.close()
 	})
 })

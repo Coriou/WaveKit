@@ -73,7 +73,8 @@ describe("patch policy properties", () => {
 						"mode",
 						"udpPort",
 						"zz_secret_key_zz",
-						"frequencies",
+						// Not "frequencies": a configured one shadows the patched frequency (WG8 R1).
+						"offsetHz",
 						"extraArgs",
 					),
 					fc.anything(),

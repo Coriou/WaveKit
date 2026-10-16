@@ -6,6 +6,7 @@ import {
 } from "../../../../src/decoders/options/index.js"
 import { DecoderSettingsError } from "../../../../src/decoders/settings/contract.js"
 import {
+	isFrequencyKeyShadowed,
 	isPatchableOption,
 	sanitizeStoredOptions,
 	validateDecoderPatch,
@@ -282,5 +283,57 @@ describe("sanitizeStoredOptions", () => {
 			options: {},
 			dropped: 1,
 		})
+	})
+})
+
+describe("validateDecoderPatch frequency shadowing (WG8 R1)", () => {
+	it("refuses a frequency key a higher-priority source shadows, with fixed text", () => {
+		const shadowed = (
+			configured: Record<string, unknown>,
+			body: unknown,
+			top?: unknown,
+		) => {
+			try {
+				validateDecoderPatch("acarsdec", configured, body, top)
+			} catch (err) {
+				return err instanceof DecoderSettingsError ? err : undefined
+			}
+			return undefined
+		}
+		const top = shadowed({}, { options: { frequencies: [131_725_000] } }, [1])
+		expect(top?.code).toBe("DECODER_OPTION_NOT_PATCHABLE")
+		expect(top?.message).toBe("Option not patchable")
+		expect(JSON.stringify(top?.toBody())).not.toContain("131725000")
+		expect(
+			shadowed({ frequencies: [1] }, { options: { frequency: 2 } })?.code,
+		).toBe("DECODER_OPTION_NOT_PATCHABLE")
+		expect(
+			shadowed({}, { options: { frequencies: [1], frequency: 2 } })?.code,
+		).toBe("DECODER_OPTION_NOT_PATCHABLE")
+		// Garbage in a higher-priority source still shadows (fail closed).
+		expect(
+			shadowed({ frequencies: "x" }, { options: { frequency: 2 } })?.code,
+		).toBe("DECODER_OPTION_NOT_PATCHABLE")
+		// Reverts stay allowed; unshadowed keys pass.
+		expect(
+			shadowed({}, { options: { frequencies: null } }, [1]),
+		).toBeUndefined()
+		expect(shadowed({}, { options: { frequencies: [1] } })).toBeUndefined()
+		expect(shadowed({}, { options: { frequency: 2 } })).toBeUndefined()
+	})
+
+	it("isFrequencyKeyShadowed follows the resolver order", () => {
+		expect(isFrequencyKeyShadowed("frequencies", [1], {})).toBe(true)
+		expect(
+			isFrequencyKeyShadowed("frequencies", undefined, { frequencies: [1] }),
+		).toBe(false)
+		expect(
+			isFrequencyKeyShadowed("frequency", undefined, { frequencies: [1] }),
+		).toBe(true)
+		expect(isFrequencyKeyShadowed("frequency", [1], {})).toBe(true)
+		expect(isFrequencyKeyShadowed("frequency", undefined, {})).toBe(false)
+		expect(isFrequencyKeyShadowed("gain", [1], { frequencies: [1] })).toBe(
+			false,
+		)
 	})
 })
