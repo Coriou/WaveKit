@@ -436,15 +436,20 @@ Activity `unavailable` and the rest running), and measured retention.
 - [ ] Re-admit receptions coalesced behind a queued row whose write later fails
       (today they stay dropped, so a failed write can leave up to one 60 s window
       of that entity unstored).
-- [ ] Filter Meshtastic flood copies of non-position ports (telemetry, node
-      info) in Activity by `(from, id)` (deferred; about 600 rows/h on a
-      100-node mesh are still stored).
+- [x] Meshtastic flood copies are dropped in Activity (WG3): same `from`, `id`,
+      `portnum` and payload within 30 s, on every port; copies take no tokens
+      and are not losses.
 - [ ] Add a common decode envelope with stable identity, category, title, fields,
       actual channel frequency, source/decoder/job provenance and raw JSON.
       Preserve existing decoder payloads; source centre alone cannot locate an
       offset probe's decode. Batch 1 publishes the envelope on the enabled
       path with unknown RF provenance (`sourceId` and `frequency` null).
-      Event-time channel frequency is still open.
+- [x] Reception provenance (WG3): decoder receptions carry `sourceId` and the
+      channel frequency from the decoder binding or the decoder's own payload
+      frequency (`tuningTrust: "unverified"`).
+- [ ] Event-time channel frequency for offset probes and source retunes, a
+      verified tuning trust, and the AIS channel on ship output (a dual-channel
+      AIS decoder gets `frequency: null` today).
 - [ ] Provide persistent, searchable events with paging and full-text indexing,
       including transcripts when available. Link discoveries, observations and
       recordings without making scanner recovery journals a public event API.
@@ -783,9 +788,10 @@ Extend existing ADS-B state and bounded in-memory trails. Durable cross-protocol
 position history belongs with §4a's event foundation; map reception coverage is
 separate from scanner RF sweep coverage.
 
-- [ ] Store station latitude/longitude/altitude with provenance, configurable by
-      clients, and pass location to readsb independently of the current
-      `enableMlat` option gate. When unset, derive a visibly approximate location
+- [x] readsb receives `--lat`/`--lon` from `station` independently of
+      `enableMlat`; explicit decoder options still win (WG3).
+- [ ] Make the station latitude/longitude/altitude configurable by clients
+      (today YAML/env with provenance, `GET /api/station`). When unset, derive a visibly approximate location
       from received positions; do not use that estimate as authoritative station
       coordinates for coverage. gpsd is a later extension.
 - [x] AIS vessel current state (WG1): an in-memory tracker of AIS reports
@@ -794,8 +800,8 @@ separate from scanner RF sweep coverage.
       history.
 - [x] APRS and Meshtastic current state (WG2): in-memory trackers,
       `/api/aprs/*`, `/api/mesh/*` and the `aprs` and `mesh` channels.
-- [ ] Meshtastic telemetry, neighbour links and GPS time on nodes (deferred from
-      WG2).
+- [x] Meshtastic device telemetry and neighbour links on nodes (WG3).
+- [ ] Meshtastic GPS time on nodes (deferred from WG2).
 - [x] Throttle `vessel:update`, `aprs:update` and `mesh:update` per entity, 2 s
       (WG2); identity changes and new/lost are immediate. Aircraft keep today's
       shape.
@@ -805,13 +811,13 @@ separate from scanner RF sweep coverage.
       the test encoder.
 - [x] Mic-E positions (WG2): West longitudes were decoded as East and the
       800 kn / 400° offsets were missing; fixed with spec vectors.
-- [ ] The CLI WebSocket client treats a frame on an unknown channel as
-      `ws:invalid` (pre-existing). Not triggered today because the CLI never
-      subscribes to `aprs` or `mesh`; tolerate unknown channels before it does.
+- [x] The CLI WebSocket client ignores a frame on an unknown channel instead of
+      counting it as `ws:invalid` (WG3).
 - [ ] Serve aircraft, vessel, APRS and mesh position trails with persistent
       last-hour replay and a time cursor; reuse existing ADS-B tracking.
-- [ ] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
-      based on explicit station location and valid timestamped positions.
+- [x] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
+      based on explicit station location and valid timestamped positions
+      (WG3, `GET /api/coverage`, in memory).
 - [ ] Serve regional PMTiles, glyphs and style with bounded download/update and
       storage accounting; support the design's online fallback. Offline asset
       hosting follows the basic map and shared settings.
