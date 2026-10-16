@@ -15,6 +15,10 @@ import { stringify } from "yaml"
 import { z } from "zod"
 import type { Config } from "../../config.js"
 import { ConfigSchema } from "../../config.js"
+import {
+	DECODER_OPTION_SCHEMAS,
+	decoderOptionDescriptors,
+} from "../../decoders/options/index.js"
 import { WaveKitError } from "../../utils/errors.js"
 
 export interface ExportConfigOptions {
@@ -47,119 +51,135 @@ export const CONFIG_EXPORT_MAX_NODES = 200_000
 
 /**
  * Object-key rule. Keys are data too (a record keyed by host name would leak it):
- * - Outside decoder options, only keys declared by a ZodObject shape are kept. Keys of
- *   a ZodRecord, unknown keys and keys of unclassifiable objects become
- *   `<redacted-N>` (N = 1-based position in that object), values walked fail closed.
- * - Inside decoder options (a free record), at any depth, a key is kept only when it is
- *   in a finite trusted set: CONFIG_EXPORT_OPTION_ALLOWLIST, the decoder type's secret
- *   option keys (their values are redacted anyway) and BUILTIN_OPTION_KEYS. Any other
- *   key becomes `<redacted-N>`, so a record keyed by host or call sign never leaks.
+ * outside decoder options, only keys declared by a ZodObject shape are kept; keys of a
+ * ZodRecord, unknown keys and keys of unclassifiable objects become `<redacted-N>`
+ * (N = 1-based position in that object) and their values are redacted unless the schema
+ * classifies them. Decoder options are classified by meaning (see redactDecoderOptions).
  */
 
-/**
- * Option key names the built-in adapters under src/decoders/ actually read (from
- * `config.options[...]`, typed option parsers and option schemas), one global set.
- * Update when an adapter starts reading a new option; an unlisted key is only
- * renamed to `<redacted-N>` in the export, never dropped.
- */
-export const BUILTIN_OPTION_KEYS: readonly string[] = Object.freeze([
-	"agwPort",
-	"analyze",
-	"audioDevice",
-	"bandwidth",
-	"bw",
-	"callsign",
-	"callStartDelayMs",
-	"callTimeoutMs",
-	"channelHz",
-	"channelKey",
-	"charset",
-	"codingRate",
-	"cr",
-	"debugRecordPath",
-	"debugRecordStages",
-	"device",
-	"deviceSerial",
-	"dmr",
-	"dstar",
-	"emitDebugEvents",
-	"enableIqAgc",
-	"enableMlat",
-	"enablePerCallRecording",
-	"extraArgs",
-	"fillBits",
-	"filters",
-	"highpass",
-	"lowpass",
-	"gain",
-	"flags",
-	"fmGain",
-	"followCenter",
-	"format",
-	"frequencies",
-	"frequency",
-	"inputCenterFreq",
-	"inputIqFormat",
-	"inputSampleRate",
-	"kissPort",
-	"lat",
-	"lon",
-	"minCallDurationMs",
-	"mode",
-	"modes",
-	"nxdn",
-	"offsetHz",
-	"output",
-	"outputFormat",
-	"outputPort",
-	"oversampling",
-	"p25",
-	"perCallRecordingDir",
-	"perCallRecordingMaxAgeHours",
-	"perCallRecordingMaxTotalMb",
-	"perCallRecordingPrune",
-	"ppm",
-	"preset",
-	"protocol",
-	"protocols",
-	"quality",
-	"region",
-	"rtlTcpHost",
-	"rtlTcpPort",
-	"sampleRate",
-	"sf",
-	"slot",
-	"spreadingFactor",
-	"spyServerHost",
-	"spyServerPort",
-	"stateDir",
-	"talkgroup",
-	"targetSampleRate",
-	"udpHost",
-	"udpPort",
-	"verbosity",
-	"voiceSlot",
-	"wavDir",
-	"ysf",
-])
-const builtinOptionKeys = new Set(BUILTIN_OPTION_KEYS)
+/** Every option key the built-in decoder types describe (derived, so it cannot drift). */
+export const BUILTIN_OPTION_KEYS: readonly string[] = Object.freeze(
+	[
+		...new Set(
+			Object.keys(DECODER_OPTION_SCHEMAS).flatMap(type =>
+				(decoderOptionDescriptors(type) ?? []).map(d => d.key),
+			),
+		),
+	].sort(),
+)
 
 /**
- * Decoder option keys that carry a receiver position (readsb `lat`/`lon` and the usual
- * spellings). Redacted whatever the value type, like CONFIG_EXPORT_REDACTED_PATHS: a precise
- * position is personal data even as a number.
+ * Reviewed per-type option keys (dotted inside nested option objects) whose numbers are
+ * exported: frequencies, sample rates, gains, ppm, ports, durations and DSP parameters.
+ * Never a device index or serial, a position or anything ambiguous. Any other number in
+ * decoder options is redacted. A kept number must also pass the option's own schema.
  */
+export const CONFIG_EXPORT_NUMERIC_OPTION_KEYS: Readonly<
+	Record<string, readonly string[]>
+> = Object.freeze({
+	acarsdec: [
+		"channelHz",
+		"frequencies",
+		"frequency",
+		"gain",
+		"inputSampleRate",
+		"offsetHz",
+	],
+	"ais-catcher": [
+		"channelHz",
+		"frequencies",
+		"frequency",
+		"gain",
+		"inputSampleRate",
+		"outputPort",
+		"ppm",
+		"rtlTcpPort",
+		"spyServerPort",
+	],
+	direwolf: [
+		"agwPort",
+		"channelHz",
+		"frequencies",
+		"frequency",
+		"inputSampleRate",
+		"kissPort",
+		"offsetHz",
+		"sampleRate",
+	],
+	"dsd-fme": [
+		"callStartDelayMs",
+		"callTimeoutMs",
+		"channelHz",
+		"fmGain",
+		"frequencies",
+		"frequency",
+		"inputSampleRate",
+		"minCallDurationMs",
+		"offsetHz",
+		"perCallRecordingMaxAgeHours",
+		"perCallRecordingMaxTotalMb",
+		"udpPort",
+	],
+	dumpvdl2: [
+		"channelHz",
+		"frequencies",
+		"frequency",
+		"gain",
+		"inputCenterFreq",
+		"inputSampleRate",
+		"ppm",
+		"rtlTcpPort",
+		"targetSampleRate",
+	],
+	"lora-meshtastic": [
+		"bandwidth",
+		"codingRate",
+		"frequency",
+		"inputCenterFreq",
+		"inputSampleRate",
+		"oversampling",
+		"spreadingFactor",
+	],
+	"multimon-ng": [
+		"channelHz",
+		"filters.gain",
+		"filters.highpass",
+		"filters.lowpass",
+		"fmGain",
+		"frequencies",
+		"frequency",
+		"inputSampleRate",
+		"offsetHz",
+		"verbosity",
+	],
+	readsb: [
+		"frequencies",
+		"frequency",
+		"gain",
+		"inputSampleRate",
+		"outputPort",
+		"ppm",
+		"rtlTcpPort",
+	],
+	rtl433: [
+		"channelHz",
+		"frequencies",
+		"frequency",
+		"inputSampleRate",
+		"protocols",
+		"targetSampleRate",
+	],
+})
+
+/** Key of the count of dropped (unknown) option keys inside an exported options object. */
+export const CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY = "<unknown-options>"
+
+/** Decoder option names that carry a receiver position (no numeric allowlist entry may match). */
 export const POSITION_OPTION_KEY_PATTERN =
 	/^(lat|lon|lng|alt|latitude|longitude|altitude|altm|altitudem|height|elevation|position|location|coords?|qth|grid|locator|maidenhead)$/i
 
-function isTrustedOptionKey(key: string, secret: ReadonlySet<string>): boolean {
-	return (
-		optionAllowlist.has(key) || builtinOptionKeys.has(key) || secret.has(key)
-	)
-}
-
-const keptPaths = CONFIG_EXPORT_KEPT_STRING_PATHS.map(p => p.split("."))
 const redactedPaths = new Set(CONFIG_EXPORT_REDACTED_PATHS)
+const keptPaths = CONFIG_EXPORT_KEPT_STRING_PATHS.map(p => p.split("."))
 const optionAllowlist = new Set(CONFIG_EXPORT_OPTION_ALLOWLIST)
 
 type Path = readonly (string | number)[]
@@ -177,20 +197,11 @@ function isSecretKey(key: string): boolean {
 }
 
 /**
- * Keys whose value names a host, address, URL, path, file, device serial, account or a
- * free-form argument list. Redacted whatever the value type (a numeric `udpHost`, a numeric
- * element of `extraArgs` the adapter stringifies, a numeric `deviceSerial`), in decoder options
- * and outside them, with or without injected descriptors.
+ * Keys outside decoder options whose value names a host, address, URL, path, file, device
+ * serial, account or a free-form argument list: redacted whatever the value type.
  */
 export const SENSITIVE_KEY_PATTERN =
 	/(host|url|uri|addr|path|dir|file|serial|arg|cmd|command|exec|user|login|account|email|phone|callsign|owner|operator|endpoint|server|ip$|^ip|mac$)/i
-
-/**
- * An allowlisted option string is kept only when it looks like a short enum-like token: no
- * slash, colon, at sign, whitespace or query characters, at most 32 characters. Anything else
- * (a URL, path or credential put under `mode`) is redacted.
- */
-const SAFE_OPTION_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,31}$/
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object") return false
@@ -215,66 +226,108 @@ function dottedPath(path: Path): string {
 	return path.join(".")
 }
 
-/** Scalars kept as-is whatever the schema (strings are never in this set). */
-function isKeptScalar(value: unknown): boolean {
-	return (
-		value === null ||
-		value === undefined ||
-		typeof value === "boolean" ||
-		typeof value === "number"
-	)
-}
-
 function budgetExceeded(ctx: WalkContext, depth: number): boolean {
 	ctx.nodes += 1
 	return depth > CONFIG_EXPORT_MAX_DEPTH || ctx.nodes > CONFIG_EXPORT_MAX_NODES
 }
 
+/** Members of the closed sets (enum, native enum, literal, unions of them) in `schema`. */
+function closedMembers(schema: z.ZodTypeAny | undefined, depth = 0): unknown[] {
+	const s = unwrap(schema)
+	if (s === undefined || depth > 8) return []
+	if (s instanceof z.ZodEnum) return [...(s.options as readonly unknown[])]
+	if (s instanceof z.ZodNativeEnum)
+		return Object.values(s.enum as Record<string, unknown>)
+	if (s instanceof z.ZodLiteral) return [s.value]
+	return (unionOptions(s) ?? []).flatMap(b => closedMembers(b, depth + 1))
+}
+
 // ---------------------------------------------------------------------------
-// Decoder options (step 4)
+// Decoder options (step 4): fail closed by meaning, never by shape
 // ---------------------------------------------------------------------------
 
+interface OptionScope {
+	secret: ReadonlySet<string>
+	numeric: ReadonlySet<string>
+	dropped: number
+}
+
+/**
+ * One known option value: a boolean or null is kept; a string only when its key is in
+ * CONFIG_EXPORT_OPTION_ALLOWLIST and the value is a member of the option's closed set; a
+ * number only when it is a member of the option's closed set, or its key path is in the
+ * type's numeric allowlist and the option schema accepts it; arrays and objects only where
+ * the option schema declares them. Everything else is redacted.
+ */
 function redactOptionValue(
 	value: unknown,
-	key: string,
-	secret: ReadonlySet<string>,
+	schema: z.ZodTypeAny | undefined,
+	keyPath: string,
+	scope: OptionScope,
 	ctx: WalkContext,
 	depth: number,
 ): unknown {
 	if (budgetExceeded(ctx, depth)) return CONFIG_EXPORT_REDACTED
-	if (
-		secret.has(key) ||
-		isSecretKey(key) ||
-		SENSITIVE_KEY_PATTERN.test(key) ||
-		POSITION_OPTION_KEY_PATTERN.test(key)
-	)
-		return CONFIG_EXPORT_REDACTED
-	if (isKeptScalar(value)) return value
+	if (value === null || value === undefined || typeof value === "boolean")
+		return value
+	const s = unwrap(schema)
+	const key = keyPath.slice(keyPath.lastIndexOf(".") + 1)
 	if (typeof value === "string")
-		return optionAllowlist.has(key) && SAFE_OPTION_TOKEN.test(value)
+		return optionAllowlist.has(key) && closedMembers(s).includes(value)
 			? value
 			: CONFIG_EXPORT_REDACTED
-	// Array elements inherit the parent key.
-	if (Array.isArray(value))
+	if (typeof value === "number") {
+		if (closedMembers(s).includes(value)) return value
+		return scope.numeric.has(keyPath) && s?.safeParse(value).success === true
+			? value
+			: CONFIG_EXPORT_REDACTED
+	}
+	const objectSchema = (s ? (unionOptions(s) ?? [s]) : []).map(unwrap)
+	if (Array.isArray(value)) {
+		const array = objectSchema.find(b => b instanceof z.ZodArray)
+		if (!(array instanceof z.ZodArray)) return CONFIG_EXPORT_REDACTED
+		const element = (array as z.ZodArray<z.ZodTypeAny>).element
+		// Elements are classified like their option; nested arrays only where declared.
 		return value.map(item =>
-			redactOptionValue(item, key, secret, ctx, depth + 1),
+			redactOptionValue(item, element, keyPath, scope, ctx, depth + 1),
 		)
-	if (isPlainObject(value))
-		return redactOptionObject(value, secret, ctx, depth + 1)
+	}
+	if (isPlainObject(value)) {
+		const object = objectSchema.find(b => b instanceof z.ZodObject)
+		if (!(object instanceof z.ZodObject)) return CONFIG_EXPORT_REDACTED
+		return redactOptionObject(
+			value,
+			(object as z.AnyZodObject).shape as Record<string, z.ZodTypeAny>,
+			`${keyPath}.`,
+			scope,
+			ctx,
+			depth + 1,
+		)
+	}
 	return CONFIG_EXPORT_REDACTED
 }
 
+/** Known keys are classified; unknown keys are dropped (counted, never a value or a name). */
 function redactOptionObject(
 	value: Record<string, unknown>,
-	secret: ReadonlySet<string>,
+	shape: Record<string, z.ZodTypeAny>,
+	prefix: string,
+	scope: OptionScope,
 	ctx: WalkContext,
 	depth: number,
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {}
-	Object.keys(value).forEach((key, index) => {
-		const outKey = isTrustedOptionKey(key, secret) ? key : redactedKey(index)
-		out[outKey] = redactOptionValue(value[key], key, secret, ctx, depth)
-	})
+	for (const key of Object.keys(value)) {
+		if (!Object.hasOwn(shape, key)) {
+			scope.dropped += 1
+			continue
+		}
+		const keyPath = prefix + key
+		out[key] =
+			scope.secret.has(keyPath) || isSecretKey(key)
+				? CONFIG_EXPORT_REDACTED
+				: redactOptionValue(value[key], shape[key], keyPath, scope, ctx, depth)
+	}
 	return out
 }
 
@@ -285,22 +338,39 @@ function redactDecoderOptions(
 	ctx: WalkContext,
 	depth: number,
 ): unknown {
-	if (!isPlainObject(options)) return CONFIG_EXPORT_REDACTED
-	let secret: ReadonlySet<string> = new Set()
+	if (!isPlainObject(options) || typeof type !== "string")
+		return CONFIG_EXPORT_REDACTED
+	const secret = new Set<string>()
 	if (secretOptionKeys) {
 		// Fail closed: a throwing or malformed descriptor lookup redacts every option.
-		if (typeof type !== "string") return CONFIG_EXPORT_REDACTED
 		try {
 			const keys: unknown = secretOptionKeys(type)
 			if (!Array.isArray(keys)) return CONFIG_EXPORT_REDACTED
 			const list: unknown[] = keys
 			if (!list.every(k => typeof k === "string")) return CONFIG_EXPORT_REDACTED
-			secret = new Set(list as string[])
+			for (const k of list as string[]) secret.add(k)
 		} catch {
 			return CONFIG_EXPORT_REDACTED
 		}
 	}
-	return redactOptionObject(options, secret, ctx, depth)
+	const known = Object.hasOwn(DECODER_OPTION_SCHEMAS, type)
+	const descriptors = known ? (decoderOptionDescriptors(type) ?? []) : []
+	for (const d of descriptors) if (d.secret) secret.add(d.key)
+	const described = new Set(descriptors.map(d => d.key))
+	const schema = known ? unwrap(DECODER_OPTION_SCHEMAS[type]) : undefined
+	const fullShape =
+		schema instanceof z.ZodObject
+			? ((schema as z.AnyZodObject).shape as Record<string, z.ZodTypeAny>)
+			: {}
+	// A key is known only when the type's schema declares it and a descriptor documents it.
+	const shape = Object.fromEntries(
+		Object.entries(fullShape).filter(([k]) => described.has(k)),
+	)
+	const numeric = known ? (CONFIG_EXPORT_NUMERIC_OPTION_KEYS[type] ?? []) : []
+	const scope: OptionScope = { secret, numeric: new Set(numeric), dropped: 0 }
+	const out = redactOptionObject(options, shape, "", scope, ctx, depth)
+	if (scope.dropped > 0) out[CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY] = scope.dropped
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -333,16 +403,6 @@ function unwrap(schema: z.ZodTypeAny | undefined): z.ZodTypeAny | undefined {
 		}
 	}
 	return undefined
-}
-
-/** True when the schema is a closed set of strings containing `value`. */
-function closedSetContains(schema: z.ZodTypeAny, value: string): boolean {
-	if (schema instanceof z.ZodEnum)
-		return (schema.options as readonly unknown[]).includes(value)
-	if (schema instanceof z.ZodNativeEnum)
-		return Object.values(schema.enum as Record<string, unknown>).includes(value)
-	if (schema instanceof z.ZodLiteral) return schema.value === value
-	return false
 }
 
 function unionOptions(
@@ -396,12 +456,21 @@ function walk(
 		return walk(value, schema, path, ctx, depth, secretOptionKeys)
 	}
 
-	if (isKeptScalar(value)) return value
-	if (typeof value === "string") {
-		if (isKeptStringPath(path)) return value
-		return schema !== undefined && closedSetContains(schema, value)
-			? value
-			: CONFIG_EXPORT_REDACTED
+	if (value === null || value === undefined) return value
+	if (typeof value === "string" && isKeptStringPath(path)) return value
+	// A scalar is kept only where the schema classifies it: a member of a closed set, or a
+	// number or boolean where the schema declares exactly that type. Unknown sections,
+	// records of unknown and numbers where a string is expected are redacted.
+	if (
+		typeof value === "string" ||
+		typeof value === "number" ||
+		typeof value === "boolean"
+	) {
+		if (closedMembers(schema).includes(value)) return value
+		if (typeof value === "number" && schema instanceof z.ZodNumber) return value
+		if (typeof value === "boolean" && schema instanceof z.ZodBoolean)
+			return value
+		return CONFIG_EXPORT_REDACTED
 	}
 	if (Array.isArray(value)) {
 		const element =
