@@ -229,6 +229,8 @@ export const scanJobSpecSchema = {
 		signalsOnly: { type: "boolean" },
 		// WG6 1.6: drop sweep hops already decoded elsewhere
 		skipDecodedElsewhere: { type: "boolean" },
+		// WG7 6.1: drop sweep hops inside skip-marked band-plan ranges
+		skipBandPlanSkips: { type: "boolean" },
 	},
 	additionalProperties: false,
 } as const
