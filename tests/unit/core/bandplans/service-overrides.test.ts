@@ -83,7 +83,7 @@ const OVERRIDES_UNSORTED = [
 const OVERRIDES_SORTED = [
 	{ sourceType: "amateur", group: "marine" },
 	{ sourceType: "marine", group: "other" },
-]
+] as const
 
 // Golden digests captured from the code before WG7 lane MIN changed it (V1 bytes).
 const GOLDEN_UPLOAD_DIGEST =

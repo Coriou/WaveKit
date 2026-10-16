@@ -123,6 +123,15 @@ describe("URL schema parity (property 15)", () => {
 	it("host in the list: schema accepts exactly when checkBandPlanUrl does not throw", () => {
 		fc.assert(
 			fc.property(url(fc.oneof(fc.constant(HOST), caseMixed(HOST))), raw => {
+				// Generated tails can extend the host (`plans.example.org&`): compare only
+				// strings whose parsed host is still the listed one.
+				let parsedHost = ""
+				try {
+					parsedHost = new URL(raw).hostname.toLowerCase()
+				} catch {
+					parsedHost = HOST
+				}
+				if (parsedHost !== HOST) return
 				expect(bandPlanImportUrlSchema.safeParse(raw).success).toBe(
 					!fetcherThrows(raw),
 				)
