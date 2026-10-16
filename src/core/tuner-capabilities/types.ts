@@ -1,5 +1,6 @@
 import { RECEIVER_SAMPLE_RATE_PRESETS_HZ } from "@wavekit/api-types"
 import { z } from "zod"
+import { receiverGainTableSchema } from "./gain-table.js"
 import type {
 	ReceiverCapabilities,
 	ReceiverCapabilitiesPage,
@@ -505,6 +506,7 @@ const receiverCapabilitiesObjectSchema = z
 			})
 			.strict(),
 		sampleRatePresets: sampleRatePresetsSchema,
+		gainTable: receiverGainTableSchema,
 	})
 	.strict()
 
