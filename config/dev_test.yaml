@@ -61,7 +61,6 @@ decoders:
       audioDevice: stdin
       sampleRate: 48000
       inputSampleRate: 2048000 # Must match source
-      fmGain: 2.5 # Start here, tune if needed
       kissPort: 8001
       callsign: N0CALL
 
@@ -71,7 +70,6 @@ decoders:
     enabled: true
     sourceId: pi-iq
     options:
-      sampleRate: 2048000
       outputFormat: json
 
   # Maritime AIS decoder - ship positions and data (BaseDecoder IQ stdin)
@@ -93,7 +91,6 @@ decoders:
       # rtlTcpHost/Port removed - uses shared IQ
       inputSampleRate: 2048000 # Must match source
       frequencies: [131550000, 131725000]
-      outputFormat: json
 
   # VDL2 decoder - aviation VDL Mode 2 data link (BaseDecoder IQ stdin)
   - id: vdl2

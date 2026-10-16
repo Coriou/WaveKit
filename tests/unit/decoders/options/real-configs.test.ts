@@ -46,16 +46,6 @@ function loadDecoders(): RealDecoder[] {
 	return out
 }
 
-/**
- * Keys shipped in config/dev_test.yaml that no adapter reads (found while
- * writing the schemas; reported, not added to them).
- */
-const KNOWN_UNREAD: Record<string, string[]> = {
-	"dev_test.yaml:direwolf": ["fmGain"],
-	"dev_test.yaml:rtl433": ["sampleRate"],
-	"dev_test.yaml:acarsdec": ["outputFormat"],
-}
-
 const DECODERS = loadDecoders()
 
 describe("shipped configs against the option schemas", () => {
@@ -72,11 +62,7 @@ describe("shipped configs against the option schemas", () => {
 				expect(Object.hasOwn(DECODER_OPTION_SCHEMAS, d.type)).toBe(false)
 				return
 			}
-			const unread = KNOWN_UNREAD[`${d.file}:${d.type}`] ?? []
-			const unexpected = issues.filter(
-				i => !(i.code === "unknown-key" && unread.includes(i.path)),
-			)
-			expect(unexpected).toEqual([])
+			expect(issues).toEqual([])
 		},
 	)
 
@@ -94,10 +80,7 @@ describe("shipped configs against the option schemas", () => {
 				fc.jsonValue(),
 				(d, rawKey, value) => {
 					const key = `x-${rawKey}`
-					const unread = KNOWN_UNREAD[`${d.file}:${d.type}`] ?? []
-					const options = Object.fromEntries(
-						Object.entries(d.options).filter(([k]) => !unread.includes(k)),
-					)
+					const options = { ...d.options }
 					// Defined, not assigned: "__proto__" style keys stay own keys.
 					Object.defineProperty(options, key, {
 						value,
