@@ -780,7 +780,10 @@ csdr:
 access:
   mode: legacy
 
-# Optional operator station identity (no geolocation or decoder effects).
+# Optional operator station identity. lat/lon (both set) go to readsb as
+# --lat/--lon and are the coverage origin. A field set here or by env is pinned:
+# PATCH /api/station (protected mode) may set only unset fields, stored in
+# <stateDir>/station.json. Coordinates never determine the country.
 # station:
 #   name: Home
 #   lat: 48.8566

@@ -61,6 +61,16 @@ hit statistics; a Mic-E position fix (West longitudes were decoded as East, and
 the speed/course offsets were missing). CLI changes: its credential reader accepts
 the version 2 session snapshot, and APRS speed is labelled in knots. No web change.
 
+Landed in the 2026-10-16 web-gap batch 4 (WG4, core only, [spec](specs/web-gaps-4/requirements.md)):
+bulk position trails from Activity (`GET /api/activity/trails`); a visibly
+approximate station location (`GET /api/station/estimate`, never authoritative);
+a bounded storage report (`GET /api/storage`); a client-writable station identity
+(`PATCH /api/station`, protected mode, persisted UI layer); live-audio AGC
+off/slow/fast including FM; the AIS radio channel on ship output; Meshtastic GPS
+fix time; the SDR host version; and the APRS repeated-digipeater `*` marker on
+live direwolf paths. Open: csdr `-p slow` support awaits an image smoke test, and
+the Pi CPU cost of trails and AGC is unmeasured. No CLI or web change.
+
 Order of the remaining core gaps, by what they unblock in the dashboard:
 
 1. **Event foundation**: envelope publication, a persistent event store with
@@ -452,9 +462,11 @@ Activity `unavailable` and the rest running), and measured retention.
 - [x] Reception provenance (WG3): decoder receptions carry `sourceId` and the
       channel frequency from the decoder binding or the decoder's own payload
       frequency (`tuningTrust: "unverified"`).
-- [ ] Event-time channel frequency for offset probes and source retunes, a
-      verified tuning trust, and the AIS channel on ship output (a dual-channel
-      AIS decoder gets `frequency: null` today).
+- [x] AIS radio channel on ship output (WG4): `channel` A/B from NMEA field 4
+      or AIS-catcher JSON, so a dual-channel AIS decoder's receptions store
+      161.975 or 162.025 MHz. `VesselState` does not carry it yet.
+- [ ] Event-time channel frequency for offset probes and source retunes, and a
+      verified tuning trust.
 - [ ] Provide persistent, searchable events with paging and full-text indexing,
       including transcripts when available. Link discoveries, observations and
       recordings without making scanner recovery journals a public event API.
@@ -549,9 +561,13 @@ and status. Shared browser audio and richer controls remain open.
 - [ ] Add automatic floor-based and noise squelch, and update controls without
       unnecessary pipeline restarts. Preserve current threshold/hang behavior
       and fix the observed noise tail.
-- [ ] Expose AGC off/slow/fast where supported, including FM; implement real noise
-      reduction, audio noise blanker, notch, CW BFO and DSB demodulation.
-      Current filter presets and AM-based CW/DSB do not fulfill these controls.
+- [x] Live-audio AGC off/slow/fast including FM (WG4): `liveDemod.agc` and
+      PATCH `agc` (null resets); absent keeps the per-modulation chain unchanged.
+      Open: csdr `-p slow` at the pinned csdr is unverified until an image smoke
+      test, and the Pi CPU cost of the extra NFM/WFM stage is unmeasured.
+- [ ] Implement real noise reduction, audio noise blanker, notch, CW BFO and DSB
+      demodulation. Current filter presets and AM-based CW/DSB do not fulfill
+      these controls.
 - [x] Detect CTCSS and DTMF on analog transmissions (WG2): `tone` on closed
       `live-audio:transmission` events and `analog-transmission` Activity rows.
 - [ ] Decode DCS code/polarity; expose tones on live status, saved frequencies and
@@ -588,10 +604,12 @@ recording Keep protects one recording independently.
       Reuse paced IQ file sources and scanner Task 34a capture/decimation rather
       than implementing another playback engine. Reconcile recording-source
       capability metadata and spectrum/live-audio eligibility.
-- [ ] Expose storage totals: kept bytes, automatic-recording bytes, free space,
-      configured/effective retention and reasons for any shortened retention.
-      Existing evidence low-disk guards stop writes; do not claim automatic
-      retention shortening until it is implemented.
+- [x] Storage report (WG4): `GET /api/storage` with bounded per-area sizes
+      (automatic, state, other), caps, free space, Activity retention and the
+      one low-space behaviour (scanner evidence stops writing), without paths.
+- [ ] Report kept (Keep-protected) bytes (`kept` is null today) and reasons for
+      any shortened retention. Existing evidence low-disk guards stop writes; do
+      not claim automatic retention shortening until it is implemented.
 - [ ] Provide stable recording links and trimmed WAV/Opus downloads. Deep-link
       navigation belongs to clients; IDs, access policy and export belong to core.
 - [ ] Future: bounded transcription jobs with per-recording transcript/status,
@@ -796,10 +814,15 @@ separate from scanner RF sweep coverage.
 - [x] readsb receives `--lat`/`--lon` from `station` independently of
       `enableMlat`; a complete valid decoder-option coordinate pair wins (a
       single option coordinate falls back to the full station pair) (WG3).
-- [ ] Make the station latitude/longitude/altitude configurable by clients
-      (today YAML/env with provenance, `GET /api/station`). When unset, derive a visibly approximate location
-      from received positions; do not use that estimate as authoritative station
-      coordinates for coverage. gpsd is a later extension.
+- [x] Station identity writable by clients (WG4): `PATCH /api/station` in
+      protected mode, persisted in `station.json`, precedence env > yaml > ui >
+      default, provenance `ui`; coverage resets on a move over 1 km, readsb
+      picks the location up at its next start.
+- [x] Visibly approximate station location (WG4): `GET /api/station/estimate`,
+      a weighted median of heard positions, never authoritative and never used
+      by coverage or decoders.
+- [ ] Station writes in legacy access mode (mounted only in protected mode
+      today) and gpsd as a location source.
 - [x] AIS vessel current state (WG1): an in-memory tracker of AIS reports
       (NMEA positions from types 1–3, 18, 19; static data from 5, 19, 24), `GET /api/vessels`, `/api/vessels/stats`,
       `/api/vessels/:mmsi` and the `vessels` WebSocket channel. No position
@@ -807,7 +830,10 @@ separate from scanner RF sweep coverage.
 - [x] APRS and Meshtastic current state (WG2): in-memory trackers,
       `/api/aprs/*`, `/api/mesh/*` and the `aprs` and `mesh` channels.
 - [x] Meshtastic device telemetry and neighbour links on nodes (WG3).
-- [ ] Meshtastic GPS time on nodes (deferred from WG2).
+- [x] Meshtastic GPS time on nodes (WG4): `position.fixAt` from the sender's
+      fix time, bounded to 7 days back and 60 s ahead.
+- [x] APRS repeated-digipeater marker (WG4): live direwolf paths mark the last
+      repeated digipeater with `*`, so direct and relayed stations differ.
 - [x] Throttle `vessel:update`, `aprs:update` and `mesh:update` per entity, 2 s
       (WG2); identity changes and new/lost are immediate. Aircraft keep today's
       shape.
@@ -819,8 +845,11 @@ separate from scanner RF sweep coverage.
       800 kn / 400° offsets were missing; fixed with spec vectors.
 - [x] The CLI WebSocket client ignores a frame on an unknown channel instead of
       counting it as `ws:invalid` (WG3).
-- [ ] Serve aircraft, vessel, APRS and mesh position trails with persistent
-      last-hour replay and a time cursor; reuse existing ADS-B tracking.
+- [x] Bulk position trails (WG4, partial): `GET /api/activity/trails` serves
+      aircraft, vessel, APRS and mesh trails from the Activity store over a
+      window (default 1 h, at most 24 h) under fixed caps. The Pi CPU cost of
+      the trails read is unmeasured.
+- [ ] A time cursor over trails and a Pi-measured trails budget.
 - [x] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
       based on explicit station location and valid timestamped positions
       (WG3, `GET /api/coverage`, in memory).
