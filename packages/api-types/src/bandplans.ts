@@ -175,6 +175,15 @@ export const importedProvenanceSchema = z
 		sha256: z.string().regex(/^[0-9a-f]{64}$/),
 		/** WG6: the https URL the file was fetched from; absent for uploads and pre-WG6 state. */
 		sourceUrl: z.lazy(() => bandPlanImportUrlSchema).optional(),
+		/**
+		 * WG7 (web-gaps-7 req 10.2): the group overrides the import was committed with, applied
+		 * again by the update check; absent for imports without overrides and pre-WG7 state.
+		 */
+		groupOverrides: z
+			.lazy(() =>
+				z.array(importGroupOverrideSchema).max(BANDPLANS_LIMITS.groupOverrides),
+			)
+			.optional(),
 	})
 	.strict()
 export type ImportedProvenance = z.infer<typeof importedProvenanceSchema>
@@ -372,7 +381,7 @@ export const presetRangeSchema = z
 			)
 			.max(8),
 		obwHz: z.array(z.number().positive().max(10_000_000)).max(8),
-		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(17),
+		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(21),
 	})
 	.strict()
 	.refine(value => value.startHz < value.endHz, "Empty range")
@@ -396,6 +405,10 @@ export const BANDPLAN_SCANNER_PROTOCOLS = [
 	"digital-unknown",
 	"carrier",
 	"unknown",
+	"ais",
+	"acars",
+	"vdl2",
+	"lora",
 ] as const satisfies readonly ScannerProtocol[]
 // Compile-time completeness: every ScannerProtocol is listed.
 const protocolCompleteness: Exclude<
@@ -433,7 +446,7 @@ export const scanPresetJobSchema = z
 					.refine(value => value.startHz <= value.endHz, "Inverted exclusion"),
 			)
 			.max(BANDPLANS_LIMITS.presetExclusions),
-		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(17),
+		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(21),
 		sensitivity: z.enum(["low", "normal", "high"]).nullable(),
 		thresholdDb: z.number().min(0).max(40).nullable(),
 		fftSize: z
@@ -610,6 +623,17 @@ export const BANDPLAN_URL_CONTENT_TYPES: readonly string[] = Object.freeze([
 	"application/octet-stream",
 ])
 function isPlainHttpsUrl(value: string): boolean {
+	// WG7 req 10.1: judge the raw string as the fetcher does, since WHATWG parsing drops an
+	// explicit default port (`:443`) and an empty fragment (`#`) before the checks below.
+	if (/[\u0000- \u007f\\#]/.test(value)) return false
+	const schemeEnd = value.indexOf("//")
+	if (schemeEnd < 0 || value.slice(0, schemeEnd).toLowerCase() !== "https:")
+		return false
+	const rest = value.slice(schemeEnd + 2)
+	const authorityEnd = rest.search(/[/?]/)
+	const authority = authorityEnd < 0 ? rest : rest.slice(0, authorityEnd)
+	if (authority.includes(":") || authority.includes("@") || authority === "")
+		return false
 	let url: URL
 	try {
 		url = new URL(value)

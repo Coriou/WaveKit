@@ -112,7 +112,7 @@ interface OpenTransmission {
 	frequency: AnalogTransmissionFrequency | null
 	modulation: AnalogTransmissionEventData["modulation"]
 	bandwidthHz: number
-	squelchMode: "manual" | "auto"
+	squelchMode: "manual" | "auto" | "noise"
 	thresholdDbfs: number
 	config: TransmissionConfigIdentity
 	peak: number | null

@@ -24,6 +24,10 @@ const protocolEnum = [
 	"digital-unknown",
 	"carrier",
 	"unknown",
+	"ais",
+	"acars",
+	"vdl2",
+	"lora",
 ] as const
 const identityKindEnum = [
 	"dmr-cc",
@@ -35,6 +39,10 @@ const identityKindEnum = [
 	"pocsag-capcode",
 	"aprs-call",
 	"ism-model",
+	"ais-mmsi",
+	"acars-reg",
+	"vdl2-addr",
+	"lora-node",
 ] as const
 /** SF1 `identity=<kind>:<value>`: a known IdentityKind, a colon, a non-empty value. */
 export const IDENTITY_QUERY = new RegExp(

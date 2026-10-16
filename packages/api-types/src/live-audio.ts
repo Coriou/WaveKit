@@ -9,6 +9,38 @@ export const LIVE_AUDIO_AGC_MODES: readonly LiveAudioAgcMode[] = [
 	"fast",
 ]
 
+/**
+ * WG7 (docs/specs/web-gaps-7, requirement 2): squelch modes. `manual` (default when absent):
+ * `squelch` is the channel-power threshold; `auto`: noise-floor estimate + `autoMarginDb`;
+ * `noise` (NFM and WFM only): opens when the FM discriminator's high-frequency noise is at least
+ * `noiseQuietingDb` below its noise-only reference.
+ */
+export type LiveAudioSquelchMode = "manual" | "auto" | "noise"
+export const LIVE_AUDIO_SQUELCH_MODES: readonly LiveAudioSquelchMode[] =
+	Object.freeze(["manual", "auto", "noise"])
+/** WG7 req 2.2: noise squelch quieting threshold in dB (default, inclusive range). */
+export const LIVE_AUDIO_NOISE_QUIETING_DB = Object.freeze({
+	default: 6,
+	min: 1,
+	max: 30,
+})
+/** WG7 req 2.3, 3.1: modulations a noise squelch / tone squelch applies to. */
+export const LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS: readonly LiveAudioConfig["modulation"][] =
+	Object.freeze(["nfm", "wfm"])
+export const LIVE_AUDIO_TONE_SQUELCH_MODULATIONS: readonly LiveAudioConfig["modulation"][] =
+	Object.freeze(["nfm"])
+/**
+ * WG7 req 3.1: the tone a tone squelch gate waits for; the saved-frequency tone shape
+ * (`frequencyTenthsHz` one of the 50 standard CTCSS tones, `code` one of DCS_STANDARD_CODES).
+ */
+export type LiveAudioToneSquelch =
+	| { kind: "none" }
+	| { kind: "ctcss"; frequencyTenthsHz: number }
+	| { kind: "dcs"; code: string; polarity: "normal" | "inverted" }
+/** WG7 req 3.2: consecutive CTCSS analysis blocks / DCS words that open and close the gate. */
+export const LIVE_AUDIO_TONE_SQUELCH_OPEN_COUNT = 2
+export const LIVE_AUDIO_TONE_SQUELCH_CLOSE_COUNT = 2
+
 export interface LiveAudioConfig {
 	enabled: boolean
 	sourceId?: string
@@ -16,10 +48,14 @@ export interface LiveAudioConfig {
 	modulation: "nfm" | "wfm" | "am" | "usb" | "lsb" | "dsb" | "cw" | "raw"
 	bandwidth: number
 	squelch: number
-	/** Manual preserves the configured threshold; auto uses a channel-power floor estimate. */
-	squelchMode?: "manual" | "auto"
+	/** Manual preserves the configured threshold; auto uses a channel-power floor estimate; WG7 noise: FM quieting. */
+	squelchMode?: LiveAudioSquelchMode
 	/** Auto threshold margin above the estimate, 0–40 dB; default 6. */
 	autoMarginDb?: number
+	/** WG7: noise squelch quieting threshold, 1–30 dB; default 6 (used in `noise` mode only). */
+	noiseQuietingDb?: number
+	/** WG7: tone squelch gate (NFM only); absent or `none` = no tone gate. */
+	toneSquelch?: LiveAudioToneSquelch
 	noiseReduction: "off" | "voice" | "noaa-apt" | "narrow-band"
 	lowPass: number
 	highPass: number
@@ -64,6 +100,11 @@ export interface LiveAudioStatus {
 	thresholdDbfs?: number
 	/** WG4: AGC in the running chain after the modulation default (raw is always off). */
 	agc?: LiveAudioAgcMode
+	/**
+	 * WG7 req 3.4: tone squelch gate while running: `off` (no tone set), `waiting` (squelch closed
+	 * or the tone not heard: audio muted), `open` (tone heard: audio passes).
+	 */
+	toneSquelch?: { state: "off" | "waiting" | "open" }
 }
 
 export type LiveDemodConfig = LiveAudioConfig
@@ -164,9 +205,11 @@ export interface AnalogTransmissionEventData {
 	frequency: AnalogTransmissionFrequency | null
 	modulation: LiveAudioConfig["modulation"]
 	bandwidthHz: number
-	squelchMode: "manual" | "auto"
-	/** Effective threshold when the transmission opened. */
+	squelchMode: LiveAudioSquelchMode
+	/** Effective threshold when the transmission opened (WG7 noise mode: the configured `squelch`). */
 	thresholdDbfs: number
+	/** WG7 req 2.4: the quieting threshold in effect; present in `noise` mode only. */
+	noiseQuietingDb?: number
 	/** Over the level samples of the transmission; null before the first one. */
 	peakChannelPowerDbfs: number | null
 	meanChannelPowerDbfs: number | null

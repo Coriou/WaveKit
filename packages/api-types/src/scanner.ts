@@ -23,6 +23,11 @@ export type ScannerProtocol =
 	| "digital-unknown"
 	| "carrier"
 	| "unknown"
+	/** WG7 (web-gaps-7 req 1): named only from evidence of decoders already running (no probe). */
+	| "ais"
+	| "acars"
+	| "vdl2"
+	| "lora"
 export type ScannerClass =
 	| "fsk4-12k5"
 	| "fsk4-6k25"
@@ -60,6 +65,11 @@ export type IdentityKind =
 	| "pocsag-capcode"
 	| "aprs-call"
 	| "ism-model"
+	/** WG7 req 1.1: AIS MMSI, ACARS registration, VDL2 source address, Meshtastic node id. */
+	| "ais-mmsi"
+	| "acars-reg"
+	| "vdl2-addr"
+	| "lora-node"
 export interface Identity {
 	kind: IdentityKind
 	value: string
@@ -130,6 +140,25 @@ export const DECODED_ELSEWHERE_MAX_DECODERS = 64
 export const DECODED_ELSEWHERE_MAX_TARGETS = 32
 /** WG6 req 1.5: merged ranges reported per plan; past it the rest are dropped (sorted by start). */
 export const DECODED_ELSEWHERE_MAX_RANGES = 256
+/** WG7 req 7.1: trailing debounce after the last decoder change before decoded-elsewhere is recomputed. */
+export const DECODED_ELSEWHERE_REFRESH_DEBOUNCE_MS = 2_000
+/** WG7 req 7.1: at most one decoder-change refresh per interval (a later change refreshes at its end). */
+export const DECODED_ELSEWHERE_REFRESH_MIN_INTERVAL_MS = 30_000
+/**
+ * WG7 (web-gaps-7 requirement 6): a frequency range the resolved band plans mark `skip`. Reported
+ * on plan previews and jobs; it becomes an exclusion only when the job sets
+ * `skipBandPlanSkips: true` (`applied`). Merged and clipped to the job's enabled ranges.
+ */
+export interface BandPlanSkipRange extends FreqRange {
+	/** Resolved band keys (`<packId>/<bandId>`) of the skip-marked bands, sorted, deduplicated. */
+	bandKeys: string[]
+	/** True when the range is an exclusion of this plan (flag set, sweep, plan not emptied). */
+	applied: boolean
+}
+/** WG7 req 6.2: resolved skip segments examined per plan (view order); more are ignored. */
+export const BANDPLAN_SKIP_MAX_SOURCES = 1_024
+/** WG7 req 6.3: merged skip ranges reported per plan (lowest start first). */
+export const BANDPLAN_SKIP_MAX_RANGES = 256
 export type ObservationEndReason =
 	| "quiet"
 	| "retune"
@@ -342,6 +371,11 @@ export interface ScanJobSpec {
 	 * cover (`decodedElsewhere`). Sweep jobs only. Absent = false (today's plans). Live-editable.
 	 */
 	skipDecodedElsewhere?: boolean
+	/**
+	 * WG7 (web-gaps-7 req 6.1): exclude the band-plan ranges marked `skip` (`bandPlanSkips`).
+	 * Sweep jobs only. Absent = false (today's plans). Live-editable.
+	 */
+	skipBandPlanSkips?: boolean
 }
 
 export interface CaptureSpec {
@@ -395,6 +429,8 @@ export interface NormalisedJobSpec {
 	signalsOnly?: boolean
 	/** WG6: present only when the operator set it (absent = false, today's behaviour). */
 	skipDecodedElsewhere?: boolean
+	/** WG7: present only when the operator set it (absent = false, today's behaviour). */
+	skipBandPlanSkips?: boolean
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.
@@ -456,6 +492,8 @@ export type PlanIssueCode =
 	| "signals-only-unsupported"
 	| "decoded-elsewhere-truncated"
 	| "decoded-elsewhere-not-applied"
+	| "bandplan-skips-truncated"
+	| "bandplan-skips-not-applied"
 export interface PlanIssue {
 	code: PlanIssueCode
 	severity: IssueSeverity
@@ -482,6 +520,8 @@ export interface PlanPreview {
 	lockoutExclusions?: LockoutExclusion[]
 	/** WG6 req 1.2: ranges decoded elsewhere; absent when there are none (or no decoder view). */
 	decodedElsewhere?: DecodedElsewhereRange[]
+	/** WG7 req 6.3: band-plan skip ranges; absent when there are none (or no band-plan view). */
+	bandPlanSkips?: BandPlanSkipRange[]
 }
 
 export interface ScanJobProbe {
@@ -576,6 +616,8 @@ export interface ScanJob {
 	lockoutExclusions?: LockoutExclusion[]
 	/** WG6: ranges decoded elsewhere at the job's last plan (runtime only). */
 	decodedElsewhere?: DecodedElsewhereRange[]
+	/** WG7: band-plan skip ranges at the job's last plan (runtime only). */
+	bandPlanSkips?: BandPlanSkipRange[]
 }
 
 // --- Status, settings, bandplans (spec § 12.1) ---
@@ -772,14 +814,50 @@ export type ScannerTrialOutcome =
 export interface ScannerIdentifyTrial {
 	protocol: ScannerProtocol
 	/** The decoder that runs the trial or, for an `unsupported` one, would run it; null when none exists (`no-decoder`). */
-	decoder: "dsd-fme" | "multimon-ng" | "direwolf" | "rtl433" | null
+	decoder:
+		| "dsd-fme"
+		| "multimon-ng"
+		| "direwolf"
+		| "rtl433"
+		| ScannerAmbientDecoderType
+		| null
 	/** dsd-fme mode (`auto`, `nxdn`, `nxdn48`, `dpmr`) or the decoder name; null for an `unsupported` trial. */
 	mode: string | null
-	transport: "offset" | "channel" | null
+	/** WG7: `ambient` = evidence of a decoder already running there (no probe). */
+	transport: "offset" | "channel" | "ambient" | null
 	outcome: ScannerTrialOutcome
-	/** Why an `unsupported` trial cannot run. */
-	reason?: "no-decoder" | "needs-channelizer" | "unsupported-format"
+	/** Why an `unsupported` trial cannot run. WG7: `no-ambient-decoder` for an ambient-only protocol nobody decodes there. */
+	reason?:
+		| "no-decoder"
+		| "needs-channelizer"
+		| "unsupported-format"
+		| "no-ambient-decoder"
 }
+/** WG7 req 1.2: decoder types whose running instances name ambient-only protocols. */
+export type ScannerAmbientDecoderType =
+	| "ais-catcher"
+	| "acarsdec"
+	| "dumpvdl2"
+	| "lora-meshtastic"
+/** WG7 req 1.1: protocols identify names only from ambient evidence (no probe decoder). */
+export const SCANNER_AMBIENT_PROTOCOLS: readonly ScannerProtocol[] =
+	Object.freeze(["ais", "acars", "vdl2", "lora"])
+/** WG7 req 1.2: the ambient-only protocol each decoder type names. */
+export const SCANNER_AMBIENT_DECODER_PROTOCOL: Readonly<
+	Record<ScannerAmbientDecoderType, ScannerProtocol>
+> = Object.freeze({
+	"ais-catcher": "ais",
+	acarsdec: "acars",
+	dumpvdl2: "vdl2",
+	"lora-meshtastic": "lora",
+})
+/** WG7 req 1.3: AIS channel A and B (ITU-R M.1371 channels 87B and 88B). */
+export const SCANNER_AIS_CHANNEL_HZ: Readonly<Record<"A" | "B", number>> =
+	Object.freeze({ A: 161_975_000, B: 162_025_000 })
+/** WG7 req 1.3: an ambient decode's frequency must lie this close to one of the decoder's targets. */
+export const SCANNER_AMBIENT_TARGET_TOLERANCE_HZ = 1_000
+/** WG7 req 1.8: ambient trials planned per identify target at most. */
+export const IDENTIFY_AMBIENT_MAX_TRIALS = 8
 export interface ScannerIdentifyMeasurements {
 	/** `track`: the resolved emission; `spectrum`: the last block summary at the target (no track resolved). */
 	source: "track" | "spectrum"

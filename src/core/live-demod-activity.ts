@@ -6,7 +6,7 @@ import type { LiveDemodConfig, LiveDemodStatus } from "./live-demodulator.js"
  * for the whole run, so it is not operator activity and not a transmission.
  */
 export function liveDemodSquelchGates(config: {
-	squelchMode?: "manual" | "auto" | undefined
+	squelchMode?: "manual" | "auto" | "noise" | undefined
 	squelch: number
 }): boolean {
 	return config.squelchMode === "auto" || config.squelch !== 0
@@ -18,7 +18,7 @@ export interface TransmissionConfigIdentity {
 	modulation: LiveDemodConfig["modulation"]
 	bandwidth: number
 	offsetHz?: number | undefined
-	squelchMode?: "manual" | "auto" | undefined
+	squelchMode?: "manual" | "auto" | "noise" | undefined
 }
 
 /**

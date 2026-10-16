@@ -126,6 +126,8 @@ export interface ReceiverCapabilities {
 	}
 	/** WG6 (web-gaps-6 req 8): suggested sample rates; sent by WG6 cores. */
 	readonly sampleRatePresets?: ReceiverSampleRatePresets
+	/** WG7 (web-gaps-7 req 5): suggested tuner gain table; sent by WG7 cores. */
+	readonly gainTable?: ReceiverGainTable
 }
 
 /**
@@ -146,6 +148,63 @@ export type ReceiverSampleRatePresets =
 			readonly state: "suggested"
 			readonly provenance: "wavekit-rtl-rate-presets"
 			readonly valuesHz: readonly number[]
+	}
+	| {
+			readonly state: "not-applicable"
+			readonly reason: "non-rtl-transport"
+	}
+
+/** WG7 req 5.2: librtlsdr tuner names by the rtl_tcp header's tuner type (enum rtlsdr_tuner). */
+export type RtlTunerName =
+	| "unknown"
+	| "E4000"
+	| "FC0012"
+	| "FC0013"
+	| "FC2580"
+	| "R820T"
+	| "R828D"
+export const RTL_TUNER_NAMES: readonly RtlTunerName[] = Object.freeze([
+	"unknown",
+	"E4000",
+	"FC0012",
+	"FC0013",
+	"FC2580",
+	"R820T",
+	"R828D",
+])
+/**
+ * WG7 req 5.2: the gain lists librtlsdr reports per tuner (`rtlsdr_get_tuner_gains` in
+ * osmocom rtl-sdr src/librtlsdr.c: e4k_gains, fc0012_gains, fc0013_gains, r82xx_gains), in tenths
+ * of dB, ascending; keyed by the rtl_tcp header's tuner type. The rtl_tcp header's gain count
+ * is the length of that list. FC2580 (4) and unknown (0) report the single placeholder 0 and
+ * have no table here. A suggestion matched on two advertised integers, not receiver evidence.
+ */
+// prettier-ignore
+export const RTL_TUNER_GAIN_TABLES: Readonly<
+	Partial<Record<number, { readonly tuner: RtlTunerName; readonly valuesTenthsDb: readonly number[] }>>
+> = Object.freeze({
+	1: Object.freeze({ tuner: "E4000", valuesTenthsDb: Object.freeze([-10, 15, 40, 65, 90, 115, 140, 165, 190, 215, 240, 290, 340, 420]) }),
+	2: Object.freeze({ tuner: "FC0012", valuesTenthsDb: Object.freeze([-99, -40, 71, 179, 192]) }),
+	3: Object.freeze({ tuner: "FC0013", valuesTenthsDb: Object.freeze([-99, -73, -65, -63, -60, -58, -54, 58, 61, 63, 65, 67, 68, 70, 71, 179, 181, 182, 184, 186, 188, 191, 197]) }),
+	5: Object.freeze({ tuner: "R820T", valuesTenthsDb: Object.freeze([0, 9, 14, 27, 37, 77, 87, 125, 144, 157, 166, 197, 207, 229, 254, 280, 297, 328, 338, 364, 372, 386, 402, 421, 434, 439, 445, 480, 496]) }),
+	6: Object.freeze({ tuner: "R828D", valuesTenthsDb: Object.freeze([0, 9, 14, 27, 37, 77, 87, 125, 144, 157, 166, 197, 207, 229, 254, 280, 297, 328, 338, 364, 372, 386, 402, 421, 434, 439, 445, 480, 496]) }),
+})
+
+/** WG7 req 5.1: a gain table suggestion on rtl_tcp items. */
+export type ReceiverGainTable =
+	| {
+			readonly state: "suggested"
+			readonly provenance: "librtlsdr-tuner-gains"
+			readonly tuner: RtlTunerName
+			readonly valuesTenthsDb: readonly number[]
+	}
+	| {
+			readonly state: "unknown"
+			readonly reason:
+				| "header-not-advertised"
+				| "unlisted-tuner-type"
+				| "gain-count-mismatch"
+				| "no-gain-table"
 	}
 	| {
 			readonly state: "not-applicable"

@@ -1,7 +1,7 @@
 /**
  * WG6 (docs/specs/web-gaps-6, requirement 7): redacted export of the effective configuration.
- * E2 is pending a user decision; the frozen behaviour is the recommended default below, each
- * part a one-constant switch.
+ * E2 decided 2026-10-16 (web-gaps-7 req 11.1): keep as shipped, protected only and fail closed
+ * by meaning; each part stays a one-constant switch.
  */
 
 /** GET route of the export (YAML body). */
@@ -11,16 +11,19 @@ export const CONFIG_EXPORT_CONTENT_TYPE = "application/yaml; charset=utf-8"
 /** Suggested download name (Content-Disposition). */
 export const CONFIG_EXPORT_FILE_NAME = "wavekit-config.redacted.yaml"
 /**
- * E2 (recommended): the export route is mounted only in protected access mode and authorizes
+ * E2 (as shipped): the export route is mounted only in protected access mode and authorizes
  * every request like the other protected operator routes. false would mount it in legacy mode.
  */
 export const CONFIG_EXPORT_REQUIRES_ACCESS = true
 /** Replaces every redacted value, whatever its type. */
 export const CONFIG_EXPORT_REDACTED = "<redacted>"
 /**
- * E2 (recommended): decoder option keys whose string values are exported. Every other string
- * in `decoders[].options` (at any depth) is redacted. Numbers and booleans are kept unless the
- * key matches CONFIG_EXPORT_SECRET_KEY_PATTERN.
+ * E2: decoder option keys whose string values are exported (when the value is a member of the
+ * option's closed set). Every other string in `decoders[].options` (at any depth) is redacted.
+ * A number in decoder options is kept only when it is a member of the option's closed set or
+ * its key is in the reviewed per-type numeric allowlist (CONFIG_EXPORT_NUMERIC_OPTION_KEYS in
+ * src/core/config-export/export.ts) and the option schema accepts it; booleans are kept; keys
+ * matching CONFIG_EXPORT_SECRET_KEY_PATTERN are redacted whatever the value.
  */
 export const CONFIG_EXPORT_OPTION_ALLOWLIST: readonly string[] = Object.freeze([
 	"region",
@@ -41,7 +44,7 @@ export const CONFIG_EXPORT_OPTION_ALLOWLIST: readonly string[] = Object.freeze([
 export const CONFIG_EXPORT_SECRET_KEY_PATTERN =
 	/(key|psk|secret|passw|token|cred|auth|cookie|cert|salt)/i
 /**
- * E2 (recommended): free-text strings outside decoder options are exported only at these paths
+ * E2 (as shipped): free-text strings outside decoder options are exported only at these paths
  * (`*` = any array index); every other string is redacted unless the config schema restricts it
  * to a closed set (enum or literal). Host names, URLs, paths, names and callsigns are redacted.
  */

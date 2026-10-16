@@ -37,6 +37,11 @@ export type ScannerProtocol =
 	| "digital-unknown"
 	| "carrier"
 	| "unknown"
+	/** WG7 (web-gaps-7 req 1): named only from evidence of decoders already running (no probe). */
+	| "ais"
+	| "acars"
+	| "vdl2"
+	| "lora"
 
 export type ScannerClass =
 	| "fsk4-12k5"
@@ -85,6 +90,11 @@ export type IdentityKind =
 	| "pocsag-capcode"
 	| "aprs-call"
 	| "ism-model"
+	/** WG7 req 1.1: AIS MMSI, ACARS registration, VDL2 source address, Meshtastic node id. */
+	| "ais-mmsi"
+	| "acars-reg"
+	| "vdl2-addr"
+	| "lora-node"
 
 export interface Identity {
 	kind: IdentityKind
@@ -394,6 +404,11 @@ export interface ScanJobSpec {
 	 * cover (`decodedElsewhere`). Sweep jobs only. Absent = false (today's plans). Live-editable.
 	 */
 	skipDecodedElsewhere?: boolean
+	/**
+	 * WG7 (web-gaps-7 req 6.1): exclude the band-plan ranges marked `skip` (`bandPlanSkips`).
+	 * Sweep jobs only. Absent = false (today's plans). Live-editable.
+	 */
+	skipBandPlanSkips?: boolean
 }
 
 /**
@@ -453,6 +468,8 @@ export interface NormalisedJobSpec extends Required<
 	signalsOnly?: boolean
 	/** WG6: present only when the operator set it (absent = false, today's behaviour). */
 	skipDecodedElsewhere?: boolean
+	/** WG7: present only when the operator set it (absent = false, today's behaviour). */
+	skipBandPlanSkips?: boolean
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.
@@ -517,6 +534,8 @@ export type PlanIssueCode =
 	| "signals-only-unsupported"
 	| "decoded-elsewhere-truncated"
 	| "decoded-elsewhere-not-applied"
+	| "bandplan-skips-truncated"
+	| "bandplan-skips-not-applied"
 
 export interface PlanIssue {
 	code: PlanIssueCode
@@ -546,6 +565,8 @@ export interface PlanPreview {
 	lockoutExclusions?: LockoutExclusion[]
 	/** WG6 req 1.2: ranges decoded elsewhere; absent when there are none (or no decoder view). */
 	decodedElsewhere?: DecodedElsewhereRange[]
+	/** WG7 req 6.3: band-plan skip ranges; absent when there are none (or no band-plan view). */
+	bandPlanSkips?: BandPlanSkipRange[]
 }
 
 /**
@@ -602,6 +623,29 @@ export interface DecoderCoverageView {
 		captureCenterHz: number | null
 		windowHalfWidthHz: number | null
 	} | null
+}
+
+/**
+ * WG7 (web-gaps-7 requirement 6): a frequency range the resolved band plans mark `skip`. Reported
+ * on plan previews and jobs; it becomes an exclusion only when the job sets
+ * `skipBandPlanSkips: true` (`applied`). Merged and clipped to the job's enabled ranges.
+ */
+export interface BandPlanSkipRange extends FreqRange {
+	/** Resolved band keys (`<packId>/<bandId>`) of the skip-marked bands, sorted, deduplicated. */
+	bandKeys: string[]
+	/** True when the range is an exclusion of this plan (flag set, sweep, plan not emptied). */
+	applied: boolean
+}
+
+/**
+ * WG7 req 6.2: what the plan reads about one skip-marked band segment (Main maps the resolved
+ * band-plan view to it in the scanner service's preview context). Inclusive edges in Hz.
+ */
+export interface BandPlanSkipSource {
+	/** Resolved band key `<packId>/<bandId>`. */
+	key: string
+	startHz: number
+	endHz: number
 }
 
 // ---------------------------------------------------------------- settings (§ 12.3, decision D4)

@@ -6,6 +6,7 @@ import type { Bandplan, BandRegionCode } from "../bandplan/index.js"
 import type { FreqRange, IqFormat } from "../../spectrum/types.js"
 import type {
 	DecodedElsewhereRange,
+	BandPlanSkipSource,
 	DecoderCoverageView,
 	Hop,
 	HopPlan,
@@ -76,6 +77,11 @@ export interface PreviewContext {
 	 * no `decodedElsewhere` and plans exactly as before.
 	 */
 	decoderCoverage?: () => readonly DecoderCoverageView[]
+	/**
+	 * WG7 req 6.2: the skip-marked segments of the resolved band plans. Omitted: no
+	 * `bandPlanSkips` and plans exactly as before.
+	 */
+	bandPlanSkips?: () => readonly BandPlanSkipSource[]
 }
 
 type Provenance = NormalisedJobSpec["provenance"][string]
@@ -117,6 +123,11 @@ export const PROTOCOL_DECODER: Readonly<
 	"digital-unknown": null,
 	carrier: null,
 	unknown: null,
+	// WG7 req 1.1: ambient-only protocols (named from running decoders; no probe decoder).
+	ais: null,
+	acars: null,
+	vdl2: null,
+	lora: null,
 }
 
 const PROTOCOL_CLASS: Readonly<Record<ScannerProtocol, ScannerClass | null>> = {
@@ -137,6 +148,10 @@ const PROTOCOL_CLASS: Readonly<Record<ScannerProtocol, ScannerClass | null>> = {
 	"digital-unknown": null,
 	carrier: null,
 	unknown: null,
+	ais: null,
+	acars: null,
+	vdl2: null,
+	lora: null,
 }
 
 const ALL_PROTOCOLS = Object.keys(PROTOCOL_DECODER) as ScannerProtocol[]

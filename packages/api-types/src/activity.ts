@@ -138,7 +138,10 @@ export interface AnalogTransmissionPayload {
 	} | null
 	modulation: "nfm" | "wfm" | "am" | "usb" | "lsb" | "dsb" | "cw" | "raw"
 	bandwidthHz: number
-	squelchMode: "manual" | "auto"
+	/** WG7: `noise` added (web-gaps-7 req 2.4). */
+	squelchMode: "manual" | "auto" | "noise"
+	/** WG7 req 2.4: present in `noise` mode only. */
+	noiseQuietingDb?: number
 	thresholdDbfs: number
 	peakChannelPowerDbfs: number | null
 	meanChannelPowerDbfs: number | null
