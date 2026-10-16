@@ -4,12 +4,16 @@ import type {
 	FastifyReply,
 	FastifyRequest,
 } from "fastify"
-import { RECEIVER_SAMPLE_RATE_PRESETS_HZ } from "@wavekit/api-types"
+import {
+	RECEIVER_SAMPLE_RATE_PRESETS_HZ,
+	RTL_TUNER_GAIN_TABLES,
+} from "@wavekit/api-types"
 import type {
 	ReceiverCapabilities,
 	ReceiverCapabilitiesErrorCode,
 } from "@wavekit/api-types"
 import { TUNER_REST_COMMAND_POLICY } from "../../core/tuner-controller.js"
+import { gainTableCoherent } from "../../core/tuner-capabilities/gain-table.js"
 import { projectReceiverControls } from "../../core/tuner-capabilities/rtl-tcp.js"
 import {
 	isReceiverSourceId,
@@ -84,6 +88,15 @@ type Input =
 
 // Public pages contain up to16 *15 controls; the raw-reader guard's smaller
 // node allowance is not a public-page bound. Refuse holes/accessors before Zod.
+// Largest array in a response: 16 page items, 15 controls, or the longest frozen gain
+// table (29 R82xx values, WG7 req 5.4).
+const maxOutputArrayLength = Math.max(
+	16,
+	...Object.values(RTL_TUNER_GAIN_TABLES).map(
+		entry => entry?.valuesTenthsDb.length ?? 0,
+	),
+)
+
 function plainOutput(value: unknown): boolean {
 	let nodes = 0
 	const active = new Set<object>()
@@ -108,7 +121,7 @@ function plainOutput(value: unknown): boolean {
 				typeof length !== "number" ||
 				!Number.isInteger(length) ||
 				length < 0 ||
-				length > 16 ||
+				length > maxOutputArrayLength ||
 				Reflect.ownKeys(item).length !== length + 1
 			)
 				return false
@@ -163,7 +176,7 @@ function sameData(left: unknown, right: unknown): boolean {
  */
 function coherentItem(dto: ReceiverCapabilities): boolean {
 	const { source, connection, delivery, peerHeader } = dto
-	if (!sampleRatePresetsCoherent(dto)) return false
+	if (!sampleRatePresetsCoherent(dto) || !gainTableCoherent(dto)) return false
 	if (
 		dto.sourceIncarnation === dto.snapshotId ||
 		dto.sessionId === dto.snapshotId ||
@@ -514,6 +527,35 @@ const capabilities = closed({
 					maxItems: RECEIVER_SAMPLE_RATE_PRESETS_HZ.length,
 					uniqueItems: true,
 					items: { ...integer, enum: [...RECEIVER_SAMPLE_RATE_PRESETS_HZ] },
+				},
+			}),
+			closed({
+				state: literal("not-applicable"),
+				reason: literal("non-rtl-transport"),
+			}),
+		],
+	},
+	gainTable: {
+		anyOf: [
+			...Object.values(RTL_TUNER_GAIN_TABLES)
+				.filter(entry => entry !== undefined)
+				.map(entry =>
+					closed({
+						state: literal("suggested"),
+						provenance: literal("librtlsdr-tuner-gains"),
+						tuner: literal(entry.tuner),
+						valuesTenthsDb: { const: [...entry.valuesTenthsDb] },
+					}),
+				),
+			closed({
+				state: literal("unknown"),
+				reason: {
+					enum: [
+						"header-not-advertised",
+						"unlisted-tuner-type",
+						"gain-count-mismatch",
+						"no-gain-table",
+					],
 				},
 			}),
 			closed({

@@ -7,6 +7,7 @@ import {
 	projectReceiverControls,
 	projectReceiverHeader,
 } from "./rtl-tcp.js"
+import { gainTableCoherent, gainTableFor } from "./gain-table.js"
 import {
 	freezeReceiverData,
 	isDetachedPlainData,
@@ -159,6 +160,7 @@ function project(
 		return failure("CONFLICT")
 	const e = parsed.data
 	const controls = projectReceiverControls(policy, e.source.type === "rtl_tcp")
+	const peerHeader = projectReceiverHeader(e)
 	const dto = {
 		schemaVersion: 1 as const,
 		sourceId: e.sourceId,
@@ -175,7 +177,7 @@ function project(
 					? null
 					: new Date(e.delivery.lastSampleAt).toISOString(),
 		},
-		peerHeader: projectReceiverHeader(e),
+		peerHeader,
 		controls,
 		declaredStream: {
 			provenance: "source-config-or-core-metadata" as const,
@@ -197,9 +199,15 @@ function project(
 						state: "not-applicable" as const,
 						reason: "non-rtl-transport" as const,
 					},
+		// From this item's own current header only; never cached across sessions.
+		gainTable: gainTableFor(peerHeader, e.source.type),
 	}
 	const validated = receiverCapabilitiesSchema.safeParse(dto)
-	if (!validated.success || !sampleRatePresetsCoherent(validated.data))
+	if (
+		!validated.success ||
+		!sampleRatePresetsCoherent(validated.data) ||
+		!gainTableCoherent(validated.data)
+	)
 		return failure("CONFLICT")
 	if (
 		Buffer.byteLength(JSON.stringify(validated.data), "utf8") >
