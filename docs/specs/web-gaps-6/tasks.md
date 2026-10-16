@@ -1,7 +1,7 @@
 # Web gaps 6 tasks (WG6)
 
-Status: lanes K, DO, DCS, U and CE merged; Main wiring (MA.1) and docs (MA.2) done; the
-checkpoint (MA.3) and E2 are open. See [requirements](requirements.md)
+Status: implemented; all tasks done and gates passed. E2 (config export policy) is still a
+pending user decision; the shipped behaviour is the recommended one. See [requirements](requirements.md)
 and [design](design.md). Lanes work against the frozen contract and touch only their own
 paths; Main (MA.\*) owns the composition files (`src/index.ts`, `src/api/server.ts`, barrels
 including `src/core/bandplans/index.ts`, `src/config.ts`, `config/*`), the frozen contract files
@@ -84,5 +84,5 @@ the `config-export.ts` constants.
 - [x] MA.2 Docs (API.md, ROADMAP, coordination note) and the CLI grep. (The band-plans 6.1
       and receiver-capabilities 1.3 amendments are in the spec commit.)
   - _Requirements: 5.7, 8.2, 9.3_
-- [ ] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
+- [x] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
   - _Requirements: 10.1, 10.2_
