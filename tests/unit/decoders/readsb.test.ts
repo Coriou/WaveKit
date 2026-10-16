@@ -25,6 +25,16 @@ import {
 	type ReadsbOutputFormat,
 } from "../../../src/decoders/builtin/readsb.js"
 import pino from "pino"
+import type * as ChildProcess from "node:child_process"
+import { DecoderSpawnError } from "../../../src/utils/errors.js"
+
+// start() is exercised up to spawn: the mock records the argv and throws, so
+// no process or socket is ever created.
+const spawnMock = vi.hoisted(() => vi.fn())
+vi.mock("node:child_process", async importOriginal => ({
+	...(await importOriginal<typeof ChildProcess>()),
+	spawn: spawnMock,
+}))
 
 // Create a silent logger for tests
 const testLogger = pino({ level: "silent" })
@@ -504,6 +514,129 @@ describe("readsb receiver location (WG3 req 9.1)", () => {
 		view.config.options = { outputFormat: "sbs", rtlTcpHost: "10.0.0.3" }
 		view.onOptionsUpdated()
 		expect(location(view.getArgs())).toEqual(["10", "20"])
+	})
+})
+
+// Feature: web-gaps-4: readsb resolves the station location at each start
+describe("readsb station location getter", () => {
+	function location(argv: string[]): [string, string] | null {
+		const joined = argv.join(" ")
+		const lat = /--lat (\S+)/.exec(joined)
+		const lon = /--lon (\S+)/.exec(joined)
+		if (!lat?.[1] || !lon?.[1]) {
+			expect(lat).toBeNull()
+			expect(lon).toBeNull()
+			return null
+		}
+		return [lat[1], lon[1]]
+	}
+	/** Runs start() up to spawn and returns the argv it would launch. */
+	async function startArgs(decoder: ReadsbDecoder): Promise<string[]> {
+		spawnMock.mockReset()
+		spawnMock.mockImplementation(() => {
+			throw new Error("spawn disabled in tests")
+		})
+		await expect(decoder.start()).rejects.toBeInstanceOf(DecoderSpawnError)
+		expect(spawnMock).toHaveBeenCalledTimes(1)
+		const argv: unknown = spawnMock.mock.calls[0]?.[1]
+		expect(Array.isArray(argv)).toBe(true)
+		return argv as string[]
+	}
+	function decoderWith(
+		station: () => { lat?: number; lon?: number } | null,
+		options: Record<string, unknown> = {},
+	): ReadsbDecoder {
+		return readsbDecoderFactory(station)(
+			createConfig({ options: { outputFormat: "sbs", ...options } }),
+			testLogger,
+		)
+	}
+
+	afterEach(() => {
+		spawnMock.mockReset()
+	})
+
+	it("consults the getter at start, not at construction", async () => {
+		const station = vi.fn(() => ({ lat: 48.85, lon: 2.35 }))
+		const decoder = decoderWith(station)
+		expect(station).not.toHaveBeenCalled()
+		expect(location(await startArgs(decoder))).toEqual(["48.85", "2.35"])
+		expect(station).toHaveBeenCalled()
+	})
+
+	it("applies a changed getter value at the next start", async () => {
+		let current: { lat?: number; lon?: number } | null = null
+		const decoder = decoderWith(() => current)
+		expect(location(await startArgs(decoder))).toBeNull()
+		current = { lat: 10, lon: 20 }
+		expect(location(await startArgs(decoder))).toEqual(["10", "20"])
+		current = { lat: -33.9, lon: 151.2 }
+		expect(location(await startArgs(decoder))).toEqual(["-33.9", "151.2"])
+		current = { lat: 10 }
+		expect(location(await startArgs(decoder))).toBeNull()
+	})
+
+	it("treats a throwing getter as unset without crashing", async () => {
+		let fail = true
+		const decoder = decoderWith(() => {
+			if (fail) throw new Error("station service unavailable")
+			return { lat: 1, lon: 2 }
+		})
+		expect(location(await startArgs(decoder))).toBeNull()
+		fail = false
+		expect(location(await startArgs(decoder))).toEqual(["1", "2"])
+		fail = true
+		const withOptions = decoderWith(
+			() => {
+				throw new Error("station service unavailable")
+			},
+			{ lat: 5, lon: 6 },
+		)
+		expect(location(await startArgs(withOptions))).toEqual(["5", "6"])
+	})
+
+	it("treats invalid getter values as unset", async () => {
+		const invalid: unknown[] = [
+			null,
+			undefined,
+			"48.85,2.35",
+			{},
+			{ lat: Number.NaN, lon: 2 },
+			{ lat: 1, lon: Number.NaN },
+			{ lat: 91, lon: 2 },
+			{ lat: 1, lon: -181 },
+			{ lat: Number.POSITIVE_INFINITY, lon: 0 },
+			{ lat: "1", lon: "2" },
+			{ lat: null, lon: null },
+		]
+		for (const value of invalid) {
+			const decoder = decoderWith(
+				() => value as { lat?: number; lon?: number } | null,
+			)
+			expect(location(await startArgs(decoder))).toBeNull()
+		}
+		const edge = decoderWith(() => ({ lat: -90, lon: 180 }))
+		expect(location(await startArgs(edge))).toEqual(["-90", "180"])
+	})
+
+	it("keeps explicit decoder options ahead of the getter", async () => {
+		const station = vi.fn(() => ({ lat: 48.85, lon: 2.35 }))
+		expect(
+			location(
+				await startArgs(decoderWith(station, { lat: 51.5, lon: -0.12 })),
+			),
+		).toEqual(["51.5", "-0.12"])
+		expect(
+			location(await startArgs(decoderWith(station, { lat: 51.5 }))),
+		).toEqual(["48.85", "2.35"])
+	})
+
+	it("keeps a constant station working through start", async () => {
+		const decoder = readsbDecoderFactory({ lat: 10, lon: 20 })(
+			createConfig({ options: { outputFormat: "sbs" } }),
+			testLogger,
+		)
+		expect(location(await startArgs(decoder))).toEqual(["10", "20"])
 	})
 })
 

@@ -830,13 +830,11 @@ async function main(): Promise<void> {
 			MULTIMON_CAPS,
 		)
 		decoderRegistry.register("rtl433", createRtl433Decoder, RTL433_CAPS)
-		// readsb is the only decoder that receives the station location (WG3 req 9.1)
+		// readsb is the only decoder that receives the station location (WG3 req 9.1),
+		// read at each readsb start
 		decoderRegistry.register(
 			"readsb",
-			readsbDecoderFactory({
-				lat: config.station.lat,
-				lon: config.station.lon,
-			}),
+			readsbDecoderFactory(() => config.station),
 			READSB_CAPS,
 		)
 		decoderRegistry.register("acarsdec", createAcarsdecDecoder, ACARSDEC_CAPS)

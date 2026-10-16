@@ -151,15 +151,24 @@ export interface ReadsbStationLocation {
 	lon?: number | undefined
 }
 
+/**
+ * Station location source: a fixed location, or a getter read at each process
+ * start so a changed station applies at the next start. A getter returning
+ * null or throwing counts as no station.
+ */
+export type ReadsbStationSource =
+	| ReadsbStationLocation
+	| (() => ReadsbStationLocation | null)
+
 export class ReadsbDecoder extends NetworkProducerDecoder {
 	private options: ReadsbOptions
 	private lineBuffer: string = ""
-	private readonly station: ReadsbStationLocation
+	private readonly station: ReadsbStationSource
 
 	constructor(
 		config: DecoderConfig,
 		logger: Logger,
-		station: ReadsbStationLocation = {},
+		station: ReadsbStationSource = {},
 	) {
 		// Build the network producer config from decoder config
 		const options = parseReadsbOptions(config.options)
@@ -174,7 +183,30 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 		super(networkConfig, logger)
 		this.options = options
-		this.station = {
+		this.station = typeof station === "function" ? station : { ...station }
+	}
+
+	/**
+	 * Station location resolved now: a getter is consulted on every call, and
+	 * invalid, out-of-range or non-finite coordinates count as unset.
+	 */
+	private stationLocation(): ReadsbStationLocation {
+		let station: ReadsbStationLocation | null
+		if (typeof this.station === "function") {
+			try {
+				station = this.station()
+			} catch (error: unknown) {
+				this.logger.warn(
+					{ err: error },
+					"Station location lookup failed; starting readsb without it",
+				)
+				return {}
+			}
+		} else {
+			station = this.station
+		}
+		if (station === null || typeof station !== "object") return {}
+		return {
 			lat: coordinate(station.lat, 90),
 			lon: coordinate(station.lon, 180),
 		}
@@ -182,13 +214,16 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 	/**
 	 * Receiver location for readsb (WG3 req 9.1): the decoder options when both
-	 * coordinates are set, else the station when both are set, else none.
+	 * coordinates are set, else the station when both are set, else none. Read
+	 * at each process start (from getArgs), so a station change applies at the
+	 * next start.
 	 */
 	private receiverLocation(): { lat: number; lon: number } | null {
 		const { lat, lon } = this.options
 		if (lat !== undefined && lon !== undefined) return { lat, lon }
-		if (this.station.lat !== undefined && this.station.lon !== undefined)
-			return { lat: this.station.lat, lon: this.station.lon }
+		const station = this.stationLocation()
+		if (station.lat !== undefined && station.lon !== undefined)
+			return { lat: station.lat, lon: station.lon }
 		return null
 	}
 
@@ -779,11 +814,12 @@ export function createReadsbDecoder(
 }
 
 /**
- * Registry factory that injects the station location (WG3 req 9.1). Explicit
- * `lat`/`lon` decoder options still win.
+ * Registry factory that injects the station location (WG3 req 9.1), either
+ * fixed or as a getter read at each start. Explicit `lat`/`lon` decoder
+ * options still win.
  */
 export function readsbDecoderFactory(
-	station: ReadsbStationLocation,
+	station: ReadsbStationSource,
 ): (config: DecoderConfig, logger: Logger) => ReadsbDecoder {
 	return (config, logger) => new ReadsbDecoder(config, logger, station)
 }
