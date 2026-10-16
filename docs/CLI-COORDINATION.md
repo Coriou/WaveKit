@@ -1248,3 +1248,15 @@ WG3 update (acarsdec): `decoder:output` ACARS messages no longer carry an invent
 `frequency` of 131.55 MHz when acarsdec does not report one; the field is now absent
 in that case. Clients that display it should treat it as optional (the CLI formatter
 already does). dumpvdl2's embedded ACARS messages always carry it.
+
+#### Core: WG4 web gaps — 2026-10-16
+
+Announcement for the CLI; no CLI change is required. Spec: [web-gaps-4](specs/web-gaps-4/requirements.md). Details in [API.md](API.md). Everything below is additive: new routes, and new optional fields that `@wavekit/api-types` marks optional (older cores omit them). A grep of `cli/source` finds none of them in use, except the APRS path text (last bullet).
+
+- New routes: `GET /api/activity/trails` (bulk position trails from Activity, default 1 h, at most 24 h), `GET /api/station/estimate` (approximate station location, `authoritative: false`), `GET /api/storage` (bounded storage report without paths) and `PATCH /api/station` (protected mode only; `If-Match` revisions; errors 400/409/412/503). The CLI calls none of them.
+- Station: `StationProvenance` gains `"ui"` (a value written by `PATCH /api/station`; precedence env > yaml > ui > default), and `StationIdentity` gains optional `revision` and `writable`. A client that switches over provenance values must accept `ui`.
+- AIS: `ship` decoder output gains optional `channel` (`A` or `B`); stored receptions then carry 161.975 or 162.025 MHz as provenance frequency. `VesselState` is unchanged.
+- Mesh: `MeshPosition` gains optional `fixAt` (sender GPS fix time, ISO, or null), on the routes and on `mesh:*` frames.
+- SDR host: `SdrHostStatus` gains optional `version` (string or null) in `/api/resources` and `/api/resources/sdr-hosts`.
+- Live audio: `LiveAudioConfig` and `LiveAudioStatus` gain optional `agc` (`off`, `slow`, `fast`); `PATCH /api/live-audio/config` accepts `agc: null` to reset. Absent `agc` keeps today's per-modulation chain.
+- APRS: live direwolf paths now mark the last repeated digipeater with `*` (`W1AW*`), in `decoder:output` APRS `path` and `AprsStation.path`. Path elements are still strings; a client comparing them to callsigns should strip the trailing `*`. The CLI's APRS message row joins the path, so it now shows `W1AW*` exactly as direwolf prints it; no change required.
