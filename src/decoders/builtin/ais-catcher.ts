@@ -99,6 +99,21 @@ export interface ShipData {
 	lastSeen: Date
 	/** AIS message type (1-27) */
 	messageType: number
+	/** Radio channel the message was heard on (NMEA field 4 or JSON `channel`); absent when unknown. */
+	channel?: "A" | "B"
+}
+
+/**
+ * AIS radio channel from NMEA field 4 or AIS-catcher JSON `channel`.
+ * Strings only: trimmed and upper-cased; `A`/`1` is A, `B`/`2` is B.
+ * Anything else, including non-strings, is undefined.
+ */
+export function normaliseAisChannel(raw: unknown): "A" | "B" | undefined {
+	if (typeof raw !== "string") return undefined
+	const value = raw.trim().toUpperCase()
+	if (value === "A" || value === "1") return "A"
+	if (value === "B" || value === "2") return "B"
+	return undefined
 }
 
 /** AIS channel 1 (87B) and 2 (88B) carriers. */
@@ -129,6 +144,7 @@ interface FragmentGroup {
 	next: number
 	payloads: string[]
 	startedAt: number
+	channel: "A" | "B" | undefined
 }
 
 const FRAGMENT_TIMEOUT_MS = 2_000
@@ -267,6 +283,7 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 				next: 2,
 				payloads: [parts.payload],
 				startedAt: now,
+				channel: normaliseAisChannel(parts.channel),
 			})
 			return null
 		}
@@ -289,7 +306,7 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 			at,
 		})
 		if (!decoded) return null
-		return shipFromDecoded(decoded, at)
+		return shipFromDecoded(decoded, at, group.channel)
 	}
 
 	private expireFragments(now: number): void {
@@ -544,10 +561,14 @@ export function parseNmeaSentence(sentence: string): ShipData | null {
 		at,
 	})
 	if (!decoded) return null
-	return shipFromDecoded(decoded, at)
+	return shipFromDecoded(decoded, at, normaliseAisChannel(parts.channel))
 }
 
-function shipFromDecoded(decoded: DecodedAisPayload, at: Date): ShipData {
+function shipFromDecoded(
+	decoded: DecodedAisPayload,
+	at: Date,
+	channel: "A" | "B" | undefined,
+): ShipData {
 	const ship: ShipData = {
 		mmsi: decoded.mmsi,
 		lat: decoded.lat,
@@ -566,6 +587,7 @@ function shipFromDecoded(decoded: DecodedAisPayload, at: Date): ShipData {
 	if (decoded.destination !== undefined) ship.destination = decoded.destination
 	if (decoded.eta !== undefined) ship.eta = decoded.eta
 	if (decoded.draught !== undefined) ship.draught = decoded.draught
+	if (channel !== undefined) ship.channel = channel
 	return ship
 }
 
@@ -849,7 +871,7 @@ export function parseJsonShip(json: Record<string, unknown>): ShipData | null {
 	const messageType =
 		(json["type"] as number) ?? (json["msgtype"] as number) ?? 0
 
-	return {
+	const ship: ShipData = {
 		mmsi: mmsiStr,
 		name:
 			(json["shipname"] as string)?.trim() ||
@@ -874,6 +896,9 @@ export function parseJsonShip(json: Record<string, unknown>): ShipData | null {
 		lastSeen: new Date(),
 		messageType,
 	}
+	const channel = normaliseAisChannel(json["channel"])
+	if (channel !== undefined) ship.channel = channel
+	return ship
 }
 
 /**
