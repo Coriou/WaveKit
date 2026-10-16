@@ -41,9 +41,9 @@ own paths (`git commit -- <paths>`), push the branch.
 ### Task 2. `ui.json` and validator checks
 
 - [ ] `source/build_ui.py`: parse `ui.css` and write `tokens/ui.json`. It holds every token
-  resolved per theme × ground × accent (dark: ink, graphite, black × five accents; light: paper ×
-  five accents), the scales, and the recipe class list. Output is deterministic (sorted keys,
-  trailing newline). `--check` exits non-zero when the file on disk differs.
+      resolved per theme × ground × accent (dark: ink, graphite, black × five accents; light: paper ×
+      five accents), the scales, and the recipe class list. Output is deterministic (sorted keys,
+      trailing newline). `--check` exits non-zero when the file on disk differs.
 - [ ] `source/validate.py` gains `check_ui` (§3.2):
   1. `ui.json` equals a fresh build.
   2. Contrast per scope, measured on the solid fill and on the island glass composited over the
@@ -55,34 +55,34 @@ own paths (`git commit -- <paths>`), push the branch.
      `transparent` and `currentColor`.
   4. Every colour in `wk-tokens` is one of the THEME-TOKENS §7 colours.
 - [ ] `docs/ui-kit.md`: the recipe reference (class, sizes, states, the boards that use it) and the
-  explore → promote loop (§3.4).
+      explore → promote loop (§3.4).
 
 ### Task 3. Canvas plumbing
 
 - [ ] `scripts/web-canvas-kit.mjs <board>`: writes the text between `/* wk-ui begin */` and
-  `/* wk-ui end */` in a Kit board from `ui.css`. `--check` exits non-zero on drift.
+      `/* wk-ui end */` in a Kit board from `ui.css`. `--check` exits non-zero on drift.
 - [ ] `docs/web/canvas/Kit.dc.html`: a styles-only board. Its helmet holds the canvas
-  `@font-face` rules (blob URLs) and the kit section. It renders one hidden element.
+      `@font-face` rules (blob URLs) and the kit section. It renders one hidden element.
 - [ ] `tests/unit/repo/web-canvas-kit.test.ts`: fails when the Kit snapshot does not contain the
-  current `ui.css` verbatim.
+      current `ui.css` verbatim.
 
 ### Task 4. Components board
 
 - [ ] `Components.dc.html` (§7): one section per recipe, every size, variant and state (rest,
-  hover, focus-visible, pressed or selected, disabled), in three scopes side by side (True black +
-  Mono, Ink + phosphor, Paper + Mono). Under each recipe, a "Today" strip with the board variants
-  it replaces, labelled by board. Foundations sections: type scale, space, heights, radius,
-  motion (honouring reduced motion), elevation and materials over a mock waterfall strip. An
-  inventory table: recipe → boards → app component (empty until sub-project C).
+      hover, focus-visible, pressed or selected, disabled), in three scopes side by side (True black +
+      Mono, Ink + phosphor, Paper + Mono). Under each recipe, a "Today" strip with the board variants
+      it replaces, labelled by board. Foundations sections: type scale, space, heights, radius,
+      motion (honouring reduced motion), elevation and materials over a mock waterfall strip. An
+      inventory table: recipe → boards → app component (empty until sub-project C).
 - [ ] Publish `Kit.dc.html` and `Components.dc.html` to the canvas in one call, in a new
-  "Design system" row, and add both to `canvas.json`. No other board changes.
+      "Design system" row, and add both to `canvas.json`. No other board changes.
 - [ ] Snapshot both into `docs/web/canvas/`.
 
 ### Task 5. Owner checkpoint
 
 - [ ] The owner reviews the Components board and overrules picks. Each overruled pick changes in
-  `ui.css`, then Kit is re-synced (`node scripts/web-canvas-kit.mjs`), republished and
-  snapshotted.
+      `ui.css`, then Kit is re-synced (`node scripts/web-canvas-kit.mjs`), republished and
+      snapshotted.
 
 ### Task 6. Board migration (after Task 5)
 
@@ -97,7 +97,7 @@ every board, dark and Paper; any change outside the approved snaps is a defect.
 ### Task 7. Publish and record
 
 - [ ] All boards in one publish; snapshot; `perf-budget.js` on Immersive (default view, a drawer
-  open, a drawer and a pane) per §8.
+      open, a drawer and a pane) per §8.
 - [ ] Remove the `--wk-shadow*` aliases once no board uses them.
 - [ ] THEME-TOKENS becomes rationale plus a pointer to `ui.css`; DESIGN.md decision log, the loop
-  under "How we work", next session = sub-project B (Pi pages); CORE-GAPS sticky unchanged.
+      under "How we work", next session = sub-project B (Pi pages); CORE-GAPS sticky unchanged.

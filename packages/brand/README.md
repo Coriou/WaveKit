@@ -35,7 +35,7 @@ All paths are relative to `packages/brand/`.
 | Icon sprite (inline once, then `<use href="#wk-<slug>">`)   | `icons/categories.symbols.svg`                                                            |
 | Category ↔ signal mapping                                   | `icons/categories.json`                                                                   |
 | Colours, themes, spacing                                    | `tokens/brand.css` (CSS), `tokens/tokens.json` (data)                                     |
-| UI kit: themes, scales, component recipes                  | `tokens/ui.css` (CSS), `tokens/ui.json` (generated data)                                  |
+| UI kit: themes, scales, component recipes                   | `tokens/ui.css` (CSS), `tokens/ui.json` (generated data)                                  |
 | Live typography + `@font-face`                              | `tokens/typography.css` → `fonts/`                                                        |
 | GitHub social preview / repo banner                         | `exports/social-card-1200x630.png`, `templates/repository-banner-1280x640.svg`            |
 | Decorative spectrum art (never data)                        | `artwork/spectrum-on-dark.svg` / `-on-light.svg`                                          |

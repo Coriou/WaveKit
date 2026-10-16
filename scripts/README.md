@@ -21,6 +21,17 @@ node scripts/auto-capture.mjs
 - writes captures to `./debug_audio` (mapped to `/data/debug_audio` in container)
 - Supports thresholds, pre/post buffers, and multiple captures
 
+### `web-canvas-kit.mjs`
+
+Syncs the design canvas Kit board with the UI kit source
+(`packages/brand/tokens/ui.css`): it rewrites the board's `/* wk-ui begin */` …
+`/* wk-ui end */` section. `--check` only reports drift (exit 1). See
+`packages/brand/docs/ui-kit.md`.
+
+```bash
+node scripts/web-canvas-kit.mjs docs/web/canvas/Kit.dc.html [--check]
+```
+
 ### `demod-test.sh`
 
 A shell script to test the manual demodulation pipeline on recorded IQ files. Useful for replicating the production `csdr` pipeline and verifying decodability with `multimon-ng`.
