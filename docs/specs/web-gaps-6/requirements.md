@@ -1,7 +1,7 @@
 # Web gaps 6 requirements (WG6)
 
-Status: implemented (lanes K, DO, DCS, U and CE merged, Main wiring done); E2 pending user
-decision, frozen behaviour = recommended. See [design](design.md) and [tasks](tasks.md).
+Status: implemented (lanes K, DO, DCS, U and CE merged, Main wiring done); E2 decided
+2026-10-16: keep as shipped. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -201,13 +201,14 @@ commit with `replacesPackId` (operator edits kept, as re-import does today). A f
 does not parse answers its parser error.
 6.3 There is no automatic or periodic check.
 
-## 7. Redacted config export (E2 pending)
+## 7. Redacted config export (E2 decided)
 
 As an operator I want to download my effective configuration to back it up or share it, without
 leaking secrets.
 
-**E2 pending user decision; frozen behaviour = recommended default.** Every part below is a
-one-constant switch in `packages/api-types/src/config-export.ts`.
+**E2 DECIDED 2026-10-16: keep as shipped** (protected only, fail closed by meaning; see
+[web-gaps-7 11.1](../web-gaps-7/requirements.md)). Every part below is a one-constant switch in
+`packages/api-types/src/config-export.ts`.
 
 7.1 `GET /api/config/export` answers the effective configuration (file, environment overrides
 and defaults, as validated at startup) as YAML (`application/yaml`), with a first comment line
@@ -221,9 +222,13 @@ mounted (404).
 station position (`CONFIG_EXPORT_REDACTED_PATHS`) is redacted; in `decoders[].options` every
 string at any depth is redacted unless its key is in `CONFIG_EXPORT_OPTION_ALLOWLIST`, and a
 key described `secret: true` by the decoder's option schema (3.4) is redacted whatever its
-value; outside options, a string is kept only at `CONFIG_EXPORT_KEPT_STRING_PATHS` or when the
-config schema restricts it to a closed set (enum or literal). Numbers, booleans and null are
-kept otherwise. Host names, URLs, file paths, names and callsigns are therefore redacted.
+value; a number in decoder options is kept only when it is a member of the option's closed set
+or its key is in the reviewed per-type numeric allowlist (`CONFIG_EXPORT_NUMERIC_OPTION_KEYS`)
+and the option schema accepts it; outside options, a string is kept only at
+`CONFIG_EXPORT_KEPT_STRING_PATHS` or when the config schema restricts it to a closed set (enum or
+literal), and a value whose key names a host, URL, path, file, serial, argument, account or
+operator is redacted whatever its type. Booleans and null are kept otherwise, and numbers outside
+options where the schema types them. Host names, URLs, file paths, names and callsigns are therefore redacted.
 7.4 **No secret ever in output.** A fixture config containing every secret-bearing key the
 schema and the built-in adapters know (the protected `access` block, Meshtastic `channelKey`,
 dsd-fme key options, source URLs with credentials, hosts, paths, station name, callsign and

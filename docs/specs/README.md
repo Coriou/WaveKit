@@ -44,6 +44,10 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-6](web-gaps-6/requirements.md): decoded-elsewhere ranges on scanner plans and
   per-hit duration, decoder option schemas (report only), DCS on analog transmissions,
   band-plan import by URL with update check, redacted config export, sample-rate presets (WG6)
+- [web-gaps-7](web-gaps-7/requirements.md): ambient identify for AIS, ACARS, VDL2 and LoRa,
+  noise and tone squelch with the noise-tail fix, suggested gain tables, opt-in band-plan skip
+  exclusions and decoded-elsewhere refresh, audio stream CORS, bounded decoder options, minors
+  (WG7)
 
 ## The three files
 

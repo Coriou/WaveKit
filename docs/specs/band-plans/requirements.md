@@ -212,6 +212,10 @@ enabled stack entry, in stack order, whose pack is built-in, the plans of
 `hidden: true` edit and any plan id already taken from a higher entry. Imported packs,
 operator bands, `skip`, all other edit fields, segments and shadowing shall not change
 the list.
+_Amended by [web-gaps-7 6.1–6.7](../web-gaps-7/requirements.md): `skip` still does not change
+this list; the resolved skip-marked segments reach a scan plan only as exclusions of a job
+that opts in with `skipBandPlanSkips`, evaluated when that job's plan is computed (a band-plan
+edit never replans a running job, so 1.2 holds)._
 11.2 With the default stack and no edits, including an unavailable store, the effective
 scanner list shall deep-equal `bandplansFor(region)` for every `BandRegion`. The four
 files pinned by 1.1 shall stay byte-identical, and scanner defaults, ranges, rasters,

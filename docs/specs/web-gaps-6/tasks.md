@@ -1,7 +1,7 @@
 # Web gaps 6 tasks (WG6)
 
-Status: implemented; all tasks done and gates passed. E2 (config export policy) is still a
-pending user decision; the shipped behaviour is the recommended one. See [requirements](requirements.md)
+Status: implemented; all tasks done and gates passed. E2 (config export policy) decided
+2026-10-16: keep the shipped behaviour. See [requirements](requirements.md)
 and [design](design.md). Lanes work against the frozen contract and touch only their own
 paths; Main (MA.\*) owns the composition files (`src/index.ts`, `src/api/server.ts`, barrels
 including `src/core/bandplans/index.ts`, `src/config.ts`, `config/*`), the frozen contract files
@@ -11,8 +11,8 @@ including `src/core/bandplans/index.ts`, `src/config.ts`, `config/*`), the froze
 docs. No lane edits the pinned band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its
 touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
 
-E2 (config export redaction) is pending a user decision; CE codes the recommended default behind
-the `config-export.ts` constants.
+E2 (config export redaction) was pending during the batch; CE coded the recommended default
+behind the `config-export.ts` constants, and the user kept it (2026-10-16, web-gaps-7 11.1).
 
 - [x] 0.1 Freeze the contract: decoded-elsewhere DTOs, bounds and the preview-context slot, the
       skip flag and its persistence, hit duration, decoder option DTOs, the DCS field and table,
