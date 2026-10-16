@@ -908,6 +908,17 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
+**Resumed 2026-10-16** after four days of core-only work on main. The canvas (v85) is unchanged and
+matches `docs/web/canvas/`. The design system v1 spec
+([2026-10-12-design-system-v1-design.md](../superpowers/specs/2026-10-12-design-system-v1-design.md),
+approved in chat, written spec awaiting the owner's review) is now pushed. `origin/main@b3d75c9`
+is merged in, and CORE-GAPS.md is re-audited against it: web-gaps batches 1–3, band plans and
+scanner follow-ups ticked many items, and a new section lists core features the canvas does not
+draw yet (Activity holes and resets, reception provenance, retention, mesh telemetry and
+neighbours, coverage). Next, in order: the owner reviews the spec, then its implementation plan
+and step 1 (kit source in `packages/brand`). Drawing the new core features is a separate,
+smaller topic that can run alongside.
+
 Handoff written 2026-10-12 after the band plans pass (canvas v83, sticky v84) and the scanner
 one-hop / follow-hits polish (v85). Next: the design
 system v1 and web app foundation. Two standing rules from the owner apply (see "How we work"): the
