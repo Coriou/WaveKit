@@ -131,8 +131,8 @@ import { STATION_WRITE_REQUIRES_ACCESS } from "./core/station/contract.js"
 import { createStorageReporter } from "./core/storage-report/reporter.js"
 import {
 	activityRetentionFromStats,
+	liveStorageReportSources,
 	storageActivityLimits,
-	storageAreasFromConfig,
 } from "./core/storage-report/areas-from-config.js"
 import {
 	tunerFrequencyAt,
@@ -1243,32 +1243,32 @@ async function main(): Promise<void> {
 		own(8, () => activity.close())
 		checkpoint()
 
-		// WG4 req 3: storage report over the areas WaveKit writes. Areas follow the
-		// startup config; Activity retention is read per report (null when disabled,
-		// a throwing stats() reports retention: null).
+		// WG4 req 3: storage report over the areas WaveKit writes. Areas and the low-space
+		// threshold are read at each scan (cache misses), so runtime scanner settings and
+		// the scanner's presence show; Activity retention is read per report (null when
+		// disabled, a throwing stats() reports retention: null). Scanner probes record
+		// inside scanner storage, already its area.
 		const activityLimits = storageActivityLimits(config.activity.retention)
 		const accessDirectory = access
 			? (process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? null)
 			: null
+		const storageSources = liveStorageReportSources({
+			stateDir: config.stateDir,
+			activityMaxDbBytes: activityLimits?.maxDbBytes ?? null,
+			scannerStorage: config.scanner.storage,
+			scanner: () => scanner,
+			decoders: () => config.decoders,
+			accessDirectory,
+			logsDir: config.logging.dir,
+		})
 		const storageReport = createStorageReporter({
 			stateDir: config.stateDir,
-			areas: storageAreasFromConfig({
-				stateDir: config.stateDir,
-				activityMaxDbBytes: activityLimits?.maxDbBytes ?? null,
-				scannerStorage: config.scanner.storage,
-				scannerEnabled: scanner !== null,
-				decoders: config.decoders,
-				accessDirectory,
-				logsDir: config.logging.dir,
-			}),
+			areas: storageSources.areas,
 			activityRetention: () =>
 				activity.status === "disabled" || activityLimits === null
 					? null
 					: activityRetentionFromStats(activity.stats(), activityLimits),
-			minFreeBytes:
-				scanner !== null
-					? config.scanner.storage.minFreeDiskMb * 1024 * 1024
-					: null,
+			minFreeBytes: storageSources.minFreeBytes,
 		})
 
 		// Band plans never stop core: a storage failure leaves built-ins readable.
