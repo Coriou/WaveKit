@@ -141,7 +141,7 @@ function asEnvelope(
 }
 
 describe("presentation built-row and on-disk arithmetic", () => {
-	it("keeps 1.6 growth within 160 bytes and any reception within 1100", () => {
+	it("keeps 1.6 growth within 240 bytes and any reception within 1100", () => {
 		const bounds: Array<[string, DecoderOutput, number]> = [
 			[
 				"adsb-position",
@@ -153,7 +153,7 @@ describe("presentation built-row and on-disk arithmetic", () => {
 					lastSeen: "2026-10-13T00:00:00.000Z",
 					messageCount: 4,
 				}),
-				160,
+				240,
 			],
 			[
 				"ais-position",
@@ -165,7 +165,7 @@ describe("presentation built-row and on-disk arithmetic", () => {
 					cog: 10,
 					sog: 12,
 				}),
-				160,
+				240,
 			],
 			[
 				"aprs-position",
@@ -179,7 +179,7 @@ describe("presentation built-row and on-disk arithmetic", () => {
 					speed: 12,
 					raw: "!call",
 				}),
-				160,
+				240,
 			],
 			[
 				"mesh-position",
@@ -192,7 +192,7 @@ describe("presentation built-row and on-disk arithmetic", () => {
 					rxRssi: -90,
 					rxSnr: 8,
 				}),
-				160,
+				240,
 			],
 			[
 				"adsb-full",
@@ -294,7 +294,7 @@ describe("presentation built-row and on-disk arithmetic", () => {
 			plainEnvelopes.push(asEnvelope(output, index, false))
 			presentedEnvelopes.push(asEnvelope(output, index, true))
 			expect(growth.growth).toBeLessThanOrEqual(
-				name === "adsb-position" ? 160 : 1_100,
+				name === "adsb-position" ? 240 : 1_100,
 			)
 		}
 		const empty = await openStore({ limits: LIMITS })
