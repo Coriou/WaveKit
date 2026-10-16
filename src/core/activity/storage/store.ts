@@ -438,7 +438,8 @@ class ActivityStore implements ActivityStoreHandle {
 		} else if (
 			result.reason !== "telemetry" &&
 			result.reason !== "closed" &&
-			result.reason !== "coalesced"
+			result.reason !== "coalesced" &&
+			result.reason !== "flood-copy"
 		) {
 			this.armGapTimer()
 		}

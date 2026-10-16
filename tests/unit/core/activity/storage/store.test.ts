@@ -423,12 +423,23 @@ describe("activity store stats: retention and flood copies", () => {
 			admitted: false,
 			reason: "flood-copy",
 		})
+		// A flood copy is not a loss: it never arms the ingestion-gap timer.
+		const arm = vi.spyOn(
+			store as unknown as { armGapTimer(): void },
+			"armGapTimer",
+		)
+		expect(store.admit(mesh("copy-2", 3_000))).toEqual({
+			admitted: false,
+			reason: "flood-copy",
+		})
+		expect(arm).not.toHaveBeenCalled()
+		arm.mockRestore()
 		expect(
 			store.admit(envelope({ eventId: "plane", decoderId: "readsb" })),
 		).toEqual({ admitted: true })
 		expect(await readRecords(store.dbPath)).toHaveLength(2)
 		const stats = store.stats()
-		expect(stats.floodCopies).toBe(1)
+		expect(stats.floodCopies).toBe(2)
 		expect(Object.values(stats.dropped).reduce((a, b) => a + b, 0)).toBe(0)
 		expect(stats.retention).toMatchObject({
 			policy: "fair-share",
