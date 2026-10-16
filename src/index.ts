@@ -96,6 +96,7 @@ import {
 } from "./decoders/builtin/multimon-ng.js"
 import { createRtl433Decoder, RTL433_CAPS } from "./decoders/builtin/rtl433.js"
 import { readsbDecoderFactory, READSB_CAPS } from "./decoders/builtin/readsb.js"
+import { createDecoderProvenanceIndex } from "./decoders/provenance-bindings.js"
 import {
 	createAcarsdecDecoder,
 	ACARSDEC_CAPS,
@@ -1171,6 +1172,14 @@ async function main(): Promise<void> {
 		// Own immediately, including a constructor failure before runtimeApi exists.
 		own(15, disposeReceiverAfterApi)
 
+		// WG3 req 5: RF provenance on receptions from each decoder's binding (config and
+		// scanner probes alike), kept current on decoder create/remove. tuningTrust is
+		// "unverified" for every decoder (Main decision on req 5.3).
+		const decoderProvenance = createDecoderProvenanceIndex(decoderManager, () =>
+			sourceRouting.getDefaultSourceId(),
+		)
+		own(8, () => decoderProvenance.dispose())
+
 		// Activity runs when config.activity.enabled (the default). A failed probe or open
 		// logs and leaves the rest of WaveKit running.
 		const activity = await startActivityRuntime({
@@ -1181,6 +1190,7 @@ async function main(): Promise<void> {
 				decoderManager.setActivityPublisher(publish)
 			},
 			discloseErrors: !protectedMode,
+			resolveProvenance: decoderProvenance.lookup,
 		})
 		// Own before checkpoint: a stop during open must still close the workers.
 		own(8, () => activity.close())
