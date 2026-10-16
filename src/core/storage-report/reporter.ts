@@ -14,6 +14,7 @@ import type {
 import { WaveKitError } from "../../utils/errors.js"
 import type { StorageReportOptions, StorageReportProvider } from "./contract.js"
 import { scanStorageAreas } from "./scan.js"
+import { DEFAULT_STORAGE_SCAN_LIMITS } from "./scan.js"
 import type { StorageScanFs, StorageScanLimits } from "./scan.js"
 
 type Num = number | bigint
@@ -88,11 +89,36 @@ export function createStorageReporter(
 
 	async function build(): Promise<StorageReport> {
 		const started = now()
-		const scanOptions: Parameters<typeof scanStorageAreas>[1] = {}
+		const limits: StorageScanLimits = {
+			...DEFAULT_STORAGE_SCAN_LIMITS,
+			...internal.limits,
+		}
+		// One wall budget for statfs + scan, measured in real time from report start.
+		const wallStart = Date.now()
+		// statfs runs before the scan so peak fs concurrency stays within the limit; it gets
+		// a bounded wait so a stalled statfs cannot hang the report.
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const timedOut = Symbol("timeout")
+		const fsResult = await Promise.race([
+			readFilesystem(),
+			new Promise<typeof timedOut>(resolve => {
+				timer = setTimeout(() => resolve(timedOut), limits.maxWallMs)
+			}),
+		])
+		clearTimeout(timer)
+		const filesystem = fsResult === timedOut ? null : fsResult
+		const scanOptions: Parameters<typeof scanStorageAreas>[1] = {
+			limits: {
+				...limits,
+				maxWallMs: Math.max(0, limits.maxWallMs - (Date.now() - wallStart)),
+				// A stalled statfs still holds one fs slot.
+				concurrency:
+					fsResult === timedOut
+						? Math.max(1, limits.concurrency - 1)
+						: limits.concurrency,
+			},
+		}
 		if (internal.fs) scanOptions.fs = internal.fs
-		if (internal.limits) scanOptions.limits = internal.limits
-		// Sequential so peak fs concurrency stays within the scan's limit.
-		const filesystem = await readFilesystem()
 		const scans = await scan(areas, scanOptions)
 		const byId = new Map(scans.map(s => [s.id, s]))
 		const out: StorageArea[] = areas.map(source => {

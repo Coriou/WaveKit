@@ -370,4 +370,27 @@ describe("scanStorageAreas (fake fs)", () => {
 		expect(scans[0]).toMatchObject({ exists: false, partialReason: "io-error" })
 		expect(scans[1]).toMatchObject({ exists: true, partialReason: "io-error" })
 	})
+
+	it("keeps an earlier depth-limit when the deadline fires on stalled I/O", async () => {
+		const fs = {
+			lstat: (p: string) =>
+				p === "/stall"
+					? new Promise<never>(() => undefined)
+					: Promise.resolve({
+							size: 0,
+							isFile: () => false,
+							isDirectory: () => true,
+							isSymbolicLink: () => false,
+						}),
+			readdir: () => Promise.resolve(["a"]),
+		}
+		const [scan] = await scanStorageAreas(
+			[area("logs", ["/stall", "/depth"])],
+			{
+				fs,
+				limits: { maxDepth: 0, maxWallMs: 20, concurrency: 2 },
+			},
+		)
+		expect(scan?.partialReason).toBe("depth-limit")
+	})
 })

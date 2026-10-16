@@ -168,8 +168,10 @@ export async function scanStorageAreas(
 	const deadline = new Promise<StorageAreaScan[]>(resolve => {
 		const remaining = Math.max(0, limits.maxWallMs - (now() - start))
 		timer = setTimeout(() => {
-			bound ??= "time-limit"
-			frozen = snapshot("time-limit")
+			// Preserve the first bound reached (e.g. depth-limit) over the timeout.
+			const reason: BoundReason = bound ?? "time-limit"
+			bound = reason
+			frozen = snapshot(reason)
 			resolve(frozen)
 		}, remaining)
 	})

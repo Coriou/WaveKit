@@ -235,4 +235,55 @@ describe("storage reporter", () => {
 		expect(report.filesystem).not.toBeNull()
 		expect(peak).toBe(8)
 	})
+
+	it("bounds a stalled statfs within the report deadline", async () => {
+		let lstats = 0
+		const fs = {
+			lstat: () => {
+				lstats++
+				return Promise.resolve({
+					size: 1,
+					isFile: () => true,
+					isDirectory: () => false,
+					isSymbolicLink: () => false,
+				})
+			},
+			readdir: () => Promise.resolve([]),
+		}
+		const r = createStorageReporter(
+			{
+				areas: [{ id: "logs", paths: ["/d"], capBytes: null }],
+				stateDir: "/d",
+				minFreeBytes: 1,
+			},
+			{
+				fs,
+				limits: { maxWallMs: 20 },
+				statfs: () => new Promise<never>(() => undefined),
+			},
+		)
+		const started = Date.now()
+		const report = await r.report()
+		expect(Date.now() - started).toBeLessThan(1_000)
+		expect(report.filesystem).toBeNull()
+		expect(report.lowSpace.state).toBe("unknown")
+		expect(report.areas[0]?.partialReason).toBe("time-limit")
+		expect(lstats).toBe(0)
+	})
+
+	it("passes the remaining budget and concurrency - 1 after a statfs timeout", async () => {
+		const scanSpy = vi.fn(okScan)
+		const r = createStorageReporter(
+			{ areas: [src("logs")], stateDir: "/d", minFreeBytes: null },
+			{
+				scan: scanSpy as unknown as NonNullable<ScanFn>,
+				limits: { maxWallMs: 20 },
+				statfs: () => new Promise<never>(() => undefined),
+			},
+		)
+		await r.report()
+		const limits = scanSpy.mock.calls[0]?.[1]?.limits
+		expect(limits?.concurrency).toBe(7)
+		expect(limits?.maxWallMs).toBeLessThanOrEqual(1)
+	})
 })
