@@ -136,17 +136,22 @@ export function Shell({
 			el && el.offsetWidth && el.offsetHeight
 				? { w: el.offsetWidth, h: el.offsetHeight }
 				: d
-		const next: ShellGeometry = {
-			W: r.clientWidth,
-			H: r.clientHeight,
-			tuner: sz(e["tunerHead"], DEFAULT_GEOMETRY.tuner),
-			rx: sz(e["rxHead"], DEFAULT_GEOMETRY.rx),
-			listen: sz(e["listenHead"], DEFAULT_GEOMETRY.listen),
-			listenLiveH: e["listenBox"]?.offsetHeight || DEFAULT_GEOMETRY.listenLiveH,
-			dockW: e["dock"]?.offsetWidth ?? 0,
-			cardH: e["card"]?.offsetHeight || DEFAULT_GEOMETRY.cardH,
-		}
-		setGeo(prev => (sameGeometry(prev, next) ? prev : next))
+		setGeo(prev => {
+			const next: ShellGeometry = {
+				W: r.clientWidth,
+				H: r.clientHeight,
+				tuner: sz(e["tunerHead"], DEFAULT_GEOMETRY.tuner),
+				rx: sz(e["rxHead"], DEFAULT_GEOMETRY.rx),
+				listen: sz(e["listenHead"], DEFAULT_GEOMETRY.listen),
+				listenLiveH:
+					e["listenBox"]?.offsetHeight || DEFAULT_GEOMETRY.listenLiveH,
+				dockW: e["dock"]?.offsetWidth ?? 0,
+				// a hidden card keeps its last height: falling back to the default would show it again when it is
+				// taller than the default, and the card would flip between shown and hidden
+				cardH: e["card"]?.offsetHeight || prev.cardH,
+			}
+			return sameGeometry(prev, next) ? prev : next
+		})
 	}, [])
 	const L = shellLayout(geo, state.drawer)
 	useLayoutEffect(() => {
