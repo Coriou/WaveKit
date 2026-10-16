@@ -230,3 +230,33 @@ describe("mesh routes", () => {
 		})
 	})
 })
+
+describe("mesh routes fixAt (WG4 5.3)", () => {
+	it("serializes fixAt on the node position", async () => {
+		const { app, tracker } = await appWith()
+		try {
+			const when = new Date("2026-06-15T12:00:00.000Z")
+			const timeS = when.getTime() / 1000 - 20
+			tracker.processPacket(
+				"lora",
+				meshPacket({
+					from: 9,
+					id: 1,
+					portnum: 3,
+					payload: encodePosition({
+						latitudeI: 377_749_000,
+						longitudeI: -1_224_194_000,
+						timeS,
+					}),
+				}),
+				when,
+			)
+			const res = await app.inject({ method: "GET", url: "/api/mesh/nodes" })
+			expect(res.json().nodes[0].position.fixAt).toBe(
+				new Date(timeS * 1000).toISOString(),
+			)
+		} finally {
+			await app.close()
+		}
+	})
+})

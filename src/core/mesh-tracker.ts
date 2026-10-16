@@ -137,17 +137,35 @@ function userIdMatches(userId: string, nodeId: string): boolean {
 	return userId.toLowerCase() === nodeId
 }
 
+const FIX_MAX_AGE_MS = 7 * 86_400_000
+const FIX_MAX_FUTURE_MS = 60_000
+
+/** ISO time of the sender's GPS fix when it is plausible relative to receive time, else null. */
+export function fixTimeIso(
+	timeS: number | null | undefined,
+	atMs: number,
+): string | null {
+	if (typeof timeS !== "number" || !Number.isInteger(timeS) || timeS <= 0) {
+		return null
+	}
+	const ms = timeS * 1000
+	return atMs - FIX_MAX_AGE_MS <= ms && ms <= atMs + FIX_MAX_FUTURE_MS
+		? new Date(ms).toISOString()
+		: null
+}
+
 /** Ignore out-of-range coordinates and the exact (0, 0) default. */
 function carriedPosition(
 	lat: number,
 	lon: number,
 	altitudeM: number | null,
 	at: string,
+	fixAt: string | null,
 ): MeshPosition | null {
 	if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
 	if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null
 	if (lat === 0 && lon === 0) return null
-	return { lat, lon, altitudeM, at }
+	return { lat, lon, altitudeM, at, fixAt }
 }
 
 function bumpPortnum(portnums: Record<string, number>, portnum: number): void {
@@ -436,6 +454,7 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 				decoded.lon,
 				decoded.altitudeM,
 				atIso,
+				fixTimeIso(decoded.timeS, Date.parse(atIso)),
 			)
 			if (position) node.position = position
 			return
