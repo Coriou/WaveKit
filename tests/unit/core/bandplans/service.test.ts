@@ -50,6 +50,7 @@ import type {
 	SdrppParseResult,
 	TransitionResult,
 } from "../../../../src/core/bandplans/contract.js"
+import { parseGqrxBandPlan } from "../../../../src/core/bandplans/import/gqrx.js"
 import { createBandPlanService } from "../../../../src/core/bandplans/service.js"
 import type { BandPlanServiceDeps } from "../../../../src/core/bandplans/service.js"
 import {
@@ -314,7 +315,7 @@ function defaultTransition(
 				provenance: {
 					kind: "imported",
 					trust: "community-unverified",
-					format: "sdrpp-json",
+					format: parsedImport.preview.format,
 					sourceName: mutation.fileName,
 					author: mutation.author,
 					licence: mutation.licence,
@@ -339,6 +340,7 @@ async function open(
 		writable?: boolean
 		transition?: BandPlanServiceDeps["transition"]
 		parseSdrppBandPlan?: BandPlanServiceDeps["parseSdrppBandPlan"]
+		importParsers?: BandPlanServiceDeps["importParsers"]
 		builtinPresetsFor?: BandPlanServiceDeps["builtinPresetsFor"]
 		presetIssuesFor?: BandPlanServiceDeps["presetIssuesFor"]
 		scannerBandplans?: BandPlanServiceDeps["scannerBandplans"]
@@ -350,6 +352,7 @@ async function open(
 		...(extras.parseSdrppBandPlan
 			? { parseSdrppBandPlan: extras.parseSdrppBandPlan }
 			: {}),
+		...(extras.importParsers ? { importParsers: extras.importParsers } : {}),
 		...(extras.builtinPresetsFor
 			? { builtinPresetsFor: extras.builtinPresetsFor }
 			: {}),
@@ -1615,6 +1618,84 @@ describe("band plan service", { timeout: 60_000 }, () => {
 						expect(view.store.storeId).toBe(storeId)
 						expect(view.store.revision).toBe(revision)
 					}
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	// Feature: web-gaps-5, Property 12: Import round trip
+	// Validates: Requirements 7.2, 7.4, 7.6
+	it("imports generated Gqrx files through injected parsers with a stable digest and the file's format", async () => {
+		const path = await root()
+		let committed: StoredBand[] = []
+		let format: string | undefined
+		let packId: string | null = null
+		const { service } = await open(path, {
+			importParsers: { "gqrx-csv": parseGqrxBandPlan },
+			transition: (state, mutation, context, parsedImport) => {
+				const result = domainTransition(state, mutation, context, parsedImport)
+				const pack = result.state.importedPacks[0]
+				if (pack) {
+					committed = pack.bands
+					format = pack.provenance.format
+				}
+				return result
+			},
+		})
+		expect(service.view().capabilities.importFormats).toEqual([
+			"sdrpp-json",
+			"gqrx-csv",
+		])
+		const rowArb = fc.record({
+			start: fc.integer({ min: 1, max: 1_000_000_000 }),
+			width: fc.integer({ min: 1, max: 1_000_000 }),
+			mode: fc.constantFrom("AM", "NFM", "WFM", "USB", "LSB", "CW", "Weird"),
+			step: fc.integer({ min: 1, max: 100_000 }),
+			colour: fc.integer({ min: 0, max: 0xffffff }),
+		})
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(rowArb, { minLength: 1, maxLength: 12 }),
+				async rows => {
+					const lines = rows.map(
+						(row, i) =>
+							`${row.start},${row.start + row.width},${row.mode},${row.step},#${row.colour.toString(16).padStart(6, "0")},Band ${i}`,
+					)
+					const bytes = Buffer.from(lines.join("\n"))
+					const fields = { ...fileFields(bytes), format: "gqrx-csv" as const }
+					const first = service.previewImport(fields)
+					const second = service.previewImport(fields)
+					expect(second.previewDigest).toBe(first.previewDigest)
+					expect(first.format).toBe("gqrx-csv")
+					expect(first.bands.map(b => [b.name, b.startHz, b.endHz])).toEqual(
+						rows.map((row, i) => [
+							`Band ${i}`,
+							row.start,
+							row.start + row.width,
+						]),
+					)
+					expect(first.bands.map(b => b.stepHz)).toEqual(
+						rows.map(row => row.step),
+					)
+					expect(first.bands.map(b => b.colourHint)).toEqual(
+						rows.map(row => `#${row.colour.toString(16).padStart(6, "0")}`),
+					)
+					const view = service.view()
+					if (view.store.state !== "available" || view.store.storeId === null)
+						throw new Error("store unavailable")
+					const result = await service.mutate({
+						...commitOf(
+							{ storeId: view.store.storeId, revision: view.store.revision },
+							bytes,
+							first.previewDigest,
+						),
+						format: "gqrx-csv",
+						replacesPackId: packId,
+					})
+					packId = result.createdId ?? packId
+					expect(format).toBe("gqrx-csv")
+					expect(committed).toHaveLength(rows.length)
 				},
 			),
 			{ numRuns: 100 },
