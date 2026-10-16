@@ -211,6 +211,19 @@ describe("verified tuning trust (WG5 req 6)", () => {
 		expect(index.lookup("a")?.tuningTrust).toBe("commanded")
 	})
 
+	it("invalidates the snapshot when reading a state event throws", () => {
+		const { decoders, tuner, index } = setup()
+		decoders.add("a", { targets: [131_000_000] })
+		expect(index.lookup("a")?.tuningTrust).toBe("commanded")
+		const hostile = {
+			get frequency(): number {
+				throw new Error("bad accessor")
+			},
+		}
+		expect(() => tuner.emit("state-changed", MAIN, hostile)).not.toThrow()
+		expect(index.lookup("a")?.tuningTrust).toBe("unverified")
+	})
+
 	it("binds the source read at start; a default-source change is unverified until restart", () => {
 		const { decoders, tuner, index, setDefault } = setup()
 		tuner.states.set("sdr-b", tuned(131_000_000))

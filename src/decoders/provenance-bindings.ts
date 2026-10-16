@@ -133,15 +133,18 @@ export function createDecoderProvenanceIndex(
 ): DecoderProvenanceIndex {
 	const entries = new Map<string, Entry>()
 	const snapshots = new Map<string, Snapshot>()
-	const read = (sourceId: string): void => {
+	const store = (sourceId: string, state: () => unknown): void => {
 		let snapshot: Snapshot | undefined
 		try {
-			snapshot = snapshotOf(tuner?.getState(sourceId))
+			snapshot = snapshotOf(state())
 		} catch {
 			snapshot = undefined
 		}
 		if (snapshot) snapshots.set(sourceId, snapshot)
 		else snapshots.delete(sourceId)
+	}
+	const read = (sourceId: string): void => {
+		store(sourceId, () => tuner?.getState(sourceId))
 	}
 	const bind = (id: string): void => {
 		const status = decoders.getStatus(id)
@@ -156,7 +159,8 @@ export function createDecoderProvenanceIndex(
 			configured === undefined ? (defaultSourceId() ?? null) : configured
 		let bindCentre: number | undefined
 		if (tuner && sourceId !== null) {
-			if (!snapshots.has(sourceId)) read(sourceId)
+			// Operator rate: re-read so a start also refreshes a stale snapshot.
+			read(sourceId)
 			const snapshot = snapshots.get(sourceId)
 			if (snapshot?.usable) bindCentre = snapshot.frequency
 		}
@@ -173,9 +177,7 @@ export function createDecoderProvenanceIndex(
 		entries.delete(id)
 	}
 	const onState = (sourceId: string, state: ProvenanceTunerState): void => {
-		const snapshot = snapshotOf(state)
-		if (snapshot) snapshots.set(sourceId, snapshot)
-		else snapshots.delete(sourceId)
+		store(sourceId, () => state)
 	}
 	const onMode = (sourceId: string): void => {
 		read(sourceId)
