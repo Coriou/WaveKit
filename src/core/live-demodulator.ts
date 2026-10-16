@@ -1202,12 +1202,32 @@ export class LiveDemodulator extends EventEmitter {
 			this.emitPcm(chunk)
 			return
 		}
-		// WG7 req 3.2, 3.3: the gate and the pcm listeners (transmission tone
-		// detection) see the unmuted audio; only what clients hear is muted.
-		tone.gate?.push(chunk, run.stream.format)
+		// WG7 req 3.2, 3.3: the pcm listeners (transmission tone detection)
+		// see the unmuted audio; only what clients hear is muted.
 		this.emitPcm(chunk)
-		if (!run.squelch.open || tone.gate === null || !tone.gate.open())
+		const gate = tone.gate
+		if (gate === null) {
 			muteInPlace(chunk)
+		} else if (!run.squelch.open) {
+			// Evidence accumulates only while the squelch is open: PCM still
+			// draining from the back chain after a close must not re-arm the
+			// gate (req 3.5).
+			gate.reset()
+			muteInPlace(chunk)
+		} else {
+			// The gate's state applies per slice of at most TONE_SLICE_MS, so a
+			// large chunk is not passed or muted whole by its final state.
+			const format = run.stream.format
+			const width = format === "s16le" ? 2 : 4
+			const slice =
+				Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) *
+				width
+			for (let start = 0; start < chunk.length; start += slice) {
+				const end = Math.min(chunk.length, start + slice)
+				gate.push(chunk, format, start, end)
+				if (!gate.open()) chunk.fill(0, start, end)
+			}
+		}
 		this.audio.write(chunk)
 	}
 
@@ -1226,6 +1246,9 @@ export class LiveDemodulator extends EventEmitter {
 		this.emit("pcm", chunk, announced)
 	}
 }
+
+/** Tone gate decisions apply to PCM slices of at most this length (WG7 req 3.2). */
+const TONE_SLICE_MS = 10
 
 /** The configured tone of a tone squelch gate, or null (absent, `none` or not NFM). */
 function configuredTone(config: LiveDemodConfig): ToneSquelchTone | null {

@@ -196,6 +196,87 @@ describe("ToneSquelchGate input handling", () => {
 	})
 })
 
+describe("ToneSquelchGate fails closed (review fixes)", () => {
+	it("an unknown pcm format after opening closes and resets the gate", () => {
+		const gate = new ToneSquelchGate(ctcss(100), 25_000)
+		const pcm = renderPcm(
+			ctcssTone({ hz: 100, seconds: 1, seed: 1, rate: 25_000 }),
+			25_000,
+			"s16le",
+		).pcm
+		gate.push(pcm, "s16le")
+		expect(gate.open()).toBe(true)
+		gate.push(pcm.subarray(0, 100), "u8" as "s16le")
+		expect(gate.open()).toBe(false)
+		expect(gate.state).toBe("waiting")
+	})
+
+	it("refuses an unknown kind and an unknown DCS polarity without echoing the values", () => {
+		const secret = "<script>x</script>"
+		const attempts = [
+			() =>
+				new ToneSquelchGate(
+					{
+						kind: secret,
+						frequencyTenthsHz: 1000,
+					} as unknown as ToneSquelchTone,
+					25_000,
+				),
+			() =>
+				new ToneSquelchGate(
+					{
+						kind: "dcs",
+						code: "023",
+						polarity: secret,
+					} as unknown as ToneSquelchTone,
+					25_000,
+				),
+			() =>
+				new ToneSquelchGate(
+					{ kind: "dcs", code: secret, polarity: "normal" },
+					25_000,
+				),
+			() =>
+				new ToneSquelchGate(
+					{ kind: "ctcss", frequencyTenthsHz: 987_654 },
+					25_000,
+				),
+			() => new ToneSquelchGate(ctcss(100), 7_123),
+		]
+		for (const attempt of attempts) {
+			let message = ""
+			try {
+				attempt()
+			} catch (err) {
+				message = err instanceof Error ? err.message : "?"
+			}
+			expect(message).not.toBe("")
+			expect(message).not.toContain(secret)
+			expect(message).not.toContain("987654")
+			expect(message).not.toContain("7123")
+		}
+	})
+
+	it("push over index ranges equals push over the same bytes as separate buffers", () => {
+		const rate = 25_000
+		const pcm = renderPcm(
+			ctcssTone({ hz: 100, seconds: 1.2, seed: 4, rate }),
+			rate,
+			"s16le",
+		).pcm
+		const ranged = new ToneSquelchGate(ctcss(100), rate)
+		const split = new ToneSquelchGate(ctcss(100), rate)
+		const slice = 501
+		for (let at = 0; at < pcm.length; at += slice) {
+			const end = Math.min(pcm.length, at + slice)
+			ranged.push(pcm, "s16le", at, end)
+			split.push(Buffer.from(pcm.subarray(at, end)), "s16le")
+			expect(ranged.open()).toBe(split.open())
+		}
+		expect(ranged.open()).toBe(true)
+	})
+})
+
 describe("ToneSquelchGate is a separate consumer", () => {
 	it("tone results are equal with and without the gate on the same blocks", () => {
 		const rate = 25_000

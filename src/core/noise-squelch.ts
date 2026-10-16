@@ -246,13 +246,13 @@ export class NoiseSquelch {
 	private x2 = 0
 	private y1 = 0
 	private y2 = 0
-	/** Float32 view of the last block's backing store (re-made per new store). */
-	private view: Float32Array = new Float32Array(0)
-	private viewStore: ArrayBufferLike | null = null
-	private viewStart = 0
-	/** Scratch copy for unaligned blocks (grows once to the block size). */
-	private scratch: Float32Array = new Float32Array(0)
-	private scratchBytes: Buffer = Buffer.alloc(0)
+	/**
+	 * Every block is copied into this preallocated scratch (sized for a 10 ms
+	 * block at construction; grows only if a longer block arrives), so a fresh
+	 * process buffer never costs a typed-array view.
+	 */
+	private scratch: Float32Array
+	private scratchBytes: Buffer
 
 	constructor(options: NoiseSquelchOptions) {
 		if (!(options.sampleRate > 0) || !Number.isFinite(options.sampleRate)) {
@@ -262,6 +262,10 @@ export class NoiseSquelch {
 			)
 		}
 		this.sampleRate = options.sampleRate
+		this.scratch = new Float32Array(
+			Math.max(1, Math.round(options.sampleRate * 0.01)) * 2,
+		)
+		this.scratchBytes = Buffer.from(this.scratch.buffer)
 		this.threshold = validateNoiseQuietingDb(
 			options.quietingDb ?? NOISE_QUIETING_DB_DEFAULT,
 		)
@@ -343,9 +347,8 @@ export class NoiseSquelch {
 		let usable = 0
 		let finite = true
 		const view = this.floatView(block, byteOffset, samples)
-		const start = this.viewStart
-		const end = start + samples * 2
-		for (let k = start; k < end; k += 2) {
+		const end = samples * 2
+		for (let k = 0; k < end; k += 2) {
 			let i = view[k] ?? 0
 			let q = view[k + 1] ?? 0
 			if (!(Math.abs(i) < Infinity && Math.abs(q) < Infinity)) {
@@ -407,29 +410,15 @@ export class NoiseSquelch {
 	}
 
 	/**
-	 * Float32 elements of the block without per-block allocation: a view of
-	 * the block's backing store, re-created only when the store changes (once
-	 * per incoming chunk), or a preallocated scratch copy when unaligned.
-	 * `viewStart` is the element index of the first I value.
+	 * Float32 elements of the block without per-block allocation: a copy into
+	 * the preallocated scratch (`Buffer.prototype.copy` allocates nothing),
+	 * starting at element 0.
 	 */
 	private floatView(
 		block: Buffer,
 		byteOffset: number,
 		samples: number,
 	): Float32Array {
-		const absolute = block.byteOffset + byteOffset
-		if (LITTLE_ENDIAN && absolute % 4 === 0) {
-			if (block.buffer !== this.viewStore) {
-				this.viewStore = block.buffer
-				this.view = new Float32Array(
-					block.buffer,
-					0,
-					Math.floor(block.buffer.byteLength / 4),
-				)
-			}
-			this.viewStart = absolute / 4
-			return this.view
-		}
 		const bytes = samples * BYTES_PER_COMPLEX_SAMPLE
 		if (this.scratch.length < samples * 2) {
 			this.scratch = new Float32Array(samples * 2)
@@ -441,7 +430,6 @@ export class NoiseSquelch {
 			for (let k = 0; k < samples * 2; k++)
 				this.scratch[k] = block.readFloatLE(byteOffset + k * 4)
 		}
-		this.viewStart = 0
 		return this.scratch
 	}
 }

@@ -604,6 +604,75 @@ describe("LiveDemodulator WG7", () => {
 			expect(spawnMock).toHaveBeenCalledTimes(2)
 		})
 
+		it("PCM draining while the squelch is closed does not re-arm the gate", async () => {
+			const CTCSS_100 = { kind: "ctcss", frequencyTenthsHz: 1000 } as const
+			liveDemod = create({ squelch: -50, toneSquelch: CTCSS_100 })
+			await liveDemod.start()
+			feed(carrierBlock(-30), 2)
+			for (const block of pcmBlocks(tonePcm(100, 1.2, 11)))
+				internals().handleAudioData(block)
+			expect(liveDemod.getStatus().toneSquelch).toEqual({ state: "open" })
+			feed(carrierBlock(-80), 30)
+			expect(liveDemod.isSquelchOpen()).toBe(false)
+			// 1 s of the right tone still leaving the back chain after the close.
+			for (const block of pcmBlocks(tonePcm(100, 1, 12)))
+				internals().handleAudioData(block)
+			feed(carrierBlock(-30), 2)
+			expect(liveDemod.isSquelchOpen()).toBe(true)
+			const client = new ClientTransport()
+			internals().registerClient(
+				client as unknown as http.ServerResponse,
+				"local",
+			)
+			internals().handleAudioData(pcmBlocks(tonePcm(103.5, 0.1, 13))[0]!)
+			expect(client.received().length).toBe((RATE / 100) * 2)
+			expect(client.received().every(b => b === 0)).toBe(true)
+			expect(liveDemod.getStatus().toneSquelch).toEqual({ state: "waiting" })
+		})
+
+		it("applies the gate per 10 ms slice of a large chunk, not by its final state", async () => {
+			liveDemod = create({
+				toneSquelch: { kind: "ctcss", frequencyTenthsHz: 1000 },
+			})
+			await liveDemod.start()
+			const client = new ClientTransport()
+			internals().registerClient(
+				client as unknown as http.ServerResponse,
+				"local",
+			)
+			// One 62,500-byte chunk: 250 ms of the wrong tone, then 1 s of the right one.
+			const chunk = Buffer.concat([
+				tonePcm(103.5, 0.25, 14),
+				tonePcm(100, 1, 15),
+			])
+			expect(chunk.length).toBe(62_500)
+			const original = Buffer.from(chunk)
+			const seen: Buffer[] = []
+			liveDemod.on("pcm", (pcm: Buffer) => seen.push(Buffer.from(pcm)))
+			internals().handleAudioData(chunk)
+			expect(liveDemod.getStatus().toneSquelch).toEqual({ state: "open" })
+			// pcm listeners saw the whole chunk unmuted.
+			expect(seen).toHaveLength(1)
+			expect(seen[0]!.equals(original)).toBe(true)
+			const heard = client.received()
+			expect(heard.length).toBe(62_500)
+			// The wrong tone and the right tone's first 500 ms (before 2 blocks) stay muted.
+			const mutedBytes = (RATE / 1000) * 750 * 2
+			expect(heard.subarray(0, mutedBytes).every(b => b === 0)).toBe(true)
+			// Once open, the rest passes unchanged.
+			const step = (RATE / 100) * 2
+			let firstPassed = -1
+			for (let at = 0; at < heard.length; at += step)
+				if (heard.subarray(at, at + step).some(b => b !== 0)) {
+					firstPassed = at
+					break
+				}
+			expect(firstPassed).toBeGreaterThanOrEqual(mutedBytes)
+			expect(
+				heard.subarray(firstPassed).equals(original.subarray(firstPassed)),
+			).toBe(true)
+		})
+
 		it("mutes everything when the gate cannot run at the channel rate", async () => {
 			// 3 kHz bandwidth: 6 kHz demod rate, below the gate's 8 kHz minimum.
 			liveDemod = create({ bandwidth: 3000, toneSquelch: CTCSS_885 })

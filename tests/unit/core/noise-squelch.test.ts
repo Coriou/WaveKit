@@ -167,6 +167,32 @@ describe("NoiseSquelch gate (default 6 dB)", () => {
 	})
 })
 
+describe("NoiseSquelch allocation (review fix)", () => {
+	it("reads freshly allocated blocks through one preallocated scratch, never a new view", () => {
+		const squelch = new NoiseSquelch(NFM)
+		const synth = new FmChannelSynth({ ...NFM, seed: 9, cnrDb: 12 })
+		const internals = squelch as unknown as { scratch: Float32Array }
+		const scratch = internals.scratch
+		expect(scratch.length).toBe(250 * 2)
+		const reference = new NoiseSquelch(NFM)
+		for (let b = 0; b < 50; b++) {
+			const block = synth.next()
+			// A fresh backing store per block (as from a new process chunk), at
+			// aligned and unaligned offsets.
+			const fresh = Buffer.alloc(block.length + 1)
+			const offset = b % 2
+			Buffer.from(block).copy(fresh, offset)
+			const view = fresh.subarray(offset, offset + block.length)
+			expect(squelch.processBlock(view)).toBe(
+				reference.processBlock(Buffer.from(block)),
+			)
+			expect(squelch.lastQuietingDb).toBe(reference.lastQuietingDb)
+			expect(internals.scratch).toBe(scratch)
+		}
+		expect(Object.keys(internals)).not.toContain("view")
+	})
+})
+
 describe("NoiseSquelch thresholds", () => {
 	it("accepts the bounds 1 and 30 dB and refuses values past them", () => {
 		expect(validateNoiseQuietingDb(NOISE_QUIETING_DB_MIN)).toBe(1)

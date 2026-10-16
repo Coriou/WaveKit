@@ -28,12 +28,14 @@
  * (an operator raising the squelch until idle is silent lands about 2-3 dB
  * above the noise mean), the 2 dB band reached into the noise itself: noise
  * blocks kept refreshing the hang and the gate stayed open for a random
- * 0.3 s to several seconds after the carrier. Two rules keep the band out
- * of the noise: (1) given a noise floor estimate (`setNoiseFloorDbfs`), the
- * band starts no lower than `hysteresisDb` above the lowest floor seen since
- * the gate opened; (2) "remain" is continuous: after a block below the band,
- * band blocks no longer refresh the hang until a block reaches the threshold
- * again. Both only act after the last block at or above the threshold.
+ * 0.3 s to several seconds after the carrier. One rule keeps the band out of
+ * the noise: given a noise floor estimate (`setNoiseFloorDbfs`), a band block
+ * (below the threshold, within `hysteresisDb` of it) that is also less than
+ * `hysteresisDb` above that floor is indistinguishable from noise and does
+ * not refresh the hang; it is treated like a block below the band. Every
+ * other block is gated exactly as before. A causal gate cannot tell whether
+ * the carrier has ended, so such a block also stops refreshing the hang in
+ * the middle of a transmission (a fade to within 2 dB of the floor).
  *
  * Timing uses sample counts (stream time), so it does not depend on how
  * bursty the network delivers data.
@@ -89,16 +91,8 @@ export class ChannelSquelch {
 	private remainder: Buffer = Buffer.alloc(0)
 	private streamMs = 0
 	private lastAboveMs = Number.NEGATIVE_INFINITY
-	/**
-	 * Hysteresis hold: blocks within `hysteresisDb` below the threshold
-	 * refresh the hang only while no block has fallen below that band since
-	 * the last block at or above the threshold.
-	 */
-	private holdArmed = true
 	/** Channel noise floor estimate fed by the owner (null = unknown). */
 	private floorDbfs: number | null = null
-	/** Lowest floor estimate since the gate last opened (null = unknown). */
-	private holdFloorDbfs: number | null = null
 	private gateOpen: boolean
 	private smoothedPower: number | null = null
 	/** Gate state of the previous output block (to detect transitions). */
@@ -183,8 +177,6 @@ export class ChannelSquelch {
 		}
 		this.squelchMode = "power"
 		this.lastAboveMs = Number.NEGATIVE_INFINITY
-		this.holdArmed = true
-		this.holdFloorDbfs = null
 		this.gateOpen = this.thresholdDbfs === null
 	}
 
@@ -208,26 +200,19 @@ export class ChannelSquelch {
 	/** Applies a new threshold (null/0 disables) without resetting timing. */
 	setThreshold(thresholdDbfs: number | null): void {
 		this.thresholdDbfs = normalizeThreshold(thresholdDbfs)
-		if (this.thresholdDbfs === null && this.squelchMode === "power") {
+		if (this.thresholdDbfs === null && this.squelchMode === "power")
 			this.gateOpen = true
-			this.holdArmed = true
-			this.holdFloorDbfs = null
-		}
 	}
 
 	/**
 	 * Noise floor estimate of the channel in dBFS (null when unknown), used
 	 * only to keep the hysteresis hold band out of the noise (WG7 req 4.1):
-	 * while open, a block refreshes the hang from the band only when it is at
-	 * least `hysteresisDb` above the lowest floor seen since the gate opened.
-	 * Without an estimate the band is exactly `hysteresisDb` below the
-	 * threshold, as before.
+	 * a band block less than `hysteresisDb` above this floor does not refresh
+	 * the hang. Without an estimate the gate is exactly the pre-WG7 gate.
 	 */
 	setNoiseFloorDbfs(floorDbfs: number | null): void {
 		this.floorDbfs =
 			floorDbfs !== null && Number.isFinite(floorDbfs) ? floorDbfs : null
-		if (this.gateOpen && this.floorDbfs !== null && this.holdFloorDbfs !== null)
-			this.holdFloorDbfs = Math.min(this.holdFloorDbfs, this.floorDbfs)
 	}
 
 	/** Gates complete blocks; a partial block waits for the next chunk. */
@@ -273,28 +258,20 @@ export class ChannelSquelch {
 
 		const levelDbfs = toDbfs(power)
 		if (levelDbfs >= threshold) {
-			if (!this.gateOpen) this.holdFloorDbfs = this.floorDbfs
 			this.gateOpen = true
 			this.lastAboveMs = this.streamMs
-			this.holdArmed = true
 		} else if (this.gateOpen) {
-			// WG7 req 4.1 (noise tail): the hold band stays `hysteresisDb`
-			// clear of the noise floor, and once a block falls below the band
-			// only a block at the threshold re-arms it. Channel noise inside or
-			// straddling the band no longer keeps refreshing the hang.
-			const holdDbfs =
-				this.holdFloorDbfs === null
-					? threshold - this.hysteresisDb
-					: Math.max(
-							threshold - this.hysteresisDb,
-							this.holdFloorDbfs + this.hysteresisDb,
-						)
-			if (this.holdArmed && levelDbfs >= holdDbfs) {
+			// WG7 req 4.1 (noise tail): a band block within `hysteresisDb` of
+			// the noise floor is noise, not a held carrier; it counts as below
+			// the band. This is the only difference from the pre-WG7 gate.
+			const holds =
+				levelDbfs >= threshold - this.hysteresisDb &&
+				(this.floorDbfs === null ||
+					levelDbfs >= this.floorDbfs + this.hysteresisDb)
+			if (holds) {
 				this.lastAboveMs = this.streamMs
-			} else {
-				if (levelDbfs < holdDbfs) this.holdArmed = false
-				if (this.streamMs - this.lastAboveMs >= this.hangMs)
-					this.gateOpen = false
+			} else if (this.streamMs - this.lastAboveMs >= this.hangMs) {
+				this.gateOpen = false
 			}
 		}
 		return this.emitBlock(block)

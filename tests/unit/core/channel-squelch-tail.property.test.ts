@@ -1,7 +1,12 @@
 /**
  * Property 5 (docs/specs/web-gaps-7): the power gate (`manual` and `auto`)
- * equals the pre-WG7 ChannelSquelch except where the noise-tail fix applies,
- * which is confined to blocks after the last block at or above the threshold.
+ * equals the pre-WG7 ChannelSquelch except where the noise-tail fix applies.
+ * The invariant implemented and checked here is exact: the WG7 gate on a
+ * block sequence equals the pre-WG7 gate on the same sequence with every
+ * "noise band block" replaced by a block below the band, where a noise band
+ * block is one below the threshold, within `hysteresisDb` of it, and less
+ * than `hysteresisDb` above the noise floor estimate in force for that block.
+ * Without a floor estimate the two gates are identical.
  *
  * The reference is a frozen copy of the gate decision of `ChannelSquelch` at
  * the WG7 contract freeze (cccf665f), embedded below.
@@ -106,25 +111,30 @@ interface Step {
 	floorOffsetDb: number | null
 }
 
-const stepArb = (bandOnly: boolean) =>
-	fc.record({
-		offsetDb: bandOnly
-			? fc.oneof(
-					fc.double({ min: 0, max: 20, noNaN: true }),
-					fc.double({ min: -40, max: -6, noNaN: true }),
-				)
-			: fc.oneof(
-					fc.double({ min: 0, max: 20, noNaN: true }),
-					fc.double({ min: -6, max: 0, noNaN: true }),
-					fc.double({ min: -40, max: -6, noNaN: true }),
-				),
-		thresholdDelta: fc.option(fc.double({ min: -1, max: 1, noNaN: true }), {
-			freq: 8,
-		}),
-		floorOffsetDb: fc.option(fc.double({ min: -30, max: 5, noNaN: true }), {
-			freq: 3,
-		}),
+/** Lowest drifted threshold; keeps a zero block (-160 dBFS) below every band. */
+const MIN_THRESHOLD = -120
+
+const stepArb = fc.record({
+	offsetDb: fc.oneof(
+		fc.double({ min: 0, max: 20, noNaN: true }),
+		fc.double({ min: -6, max: 0, noNaN: true }),
+		fc.double({ min: -40, max: -6, noNaN: true }),
+	),
+	thresholdDelta: fc.option(fc.double({ min: -1, max: 1, noNaN: true }), {
+		freq: 8,
+	}),
+	floorOffsetDb: fc.option(fc.double({ min: -8, max: 2, noNaN: true }), {
+		freq: 3,
+	}),
+})
+
+/** Steps in runs of 1-30 equal blocks, so band holds outlast the hang. */
+const stepsArb = fc
+	.array(fc.tuple(stepArb, fc.integer({ min: 1, max: 30 })), {
+		minLength: 1,
+		maxLength: 30,
 	})
+	.map(runs => runs.flatMap(([step, n]) => Array<Step>(n).fill(step)))
 
 const configArb = fc.record({
 	baseThreshold: fc.double({ min: -90, max: -20, noNaN: true }),
@@ -137,10 +147,16 @@ const configArb = fc.record({
 interface Run {
 	frozen: boolean[]
 	fixed: boolean[]
-	levels: number[]
-	thresholds: (number | null)[]
+	/** Blocks the reference saw in place of a noise band block. */
+	replaced: number
 }
 
+/**
+ * Runs the WG7 gate on `steps` and the frozen gate on the same steps with
+ * every noise band block (judged on the measured float32 level, the
+ * threshold in force and the floor fed before the block) replaced by a zero
+ * block, which is below every band.
+ */
 function runBoth(
 	config: {
 		baseThreshold: number
@@ -159,29 +175,40 @@ function runBoth(
 	}
 	const frozen = new FrozenPowerGate(options)
 	const fixed = new ChannelSquelch(options)
+	const zero = Buffer.alloc(BLOCK_SAMPLES * 8)
 	let threshold: number | null = config.baseThreshold
-	const run: Run = { frozen: [], fixed: [], levels: [], thresholds: [] }
+	let floor: number | null = null
+	const run: Run = { frozen: [], fixed: [], replaced: 0 }
 	steps.forEach((step, index) => {
 		if (config.disableAt === index) threshold = null
 		else if (config.disableAt !== null && index === config.disableAt + 20)
 			threshold = config.baseThreshold
 		else if (threshold !== null && step.thresholdDelta !== null)
-			threshold = Math.min(-0.001, threshold + step.thresholdDelta)
+			threshold = Math.min(
+				-0.001,
+				Math.max(MIN_THRESHOLD, threshold + step.thresholdDelta),
+			)
 		frozen.setThreshold(threshold)
 		fixed.setThreshold(threshold)
 		const { buf, level } = block(config.baseThreshold + step.offsetDb)
-		frozen.gateBlock(buf)
+		const noiseBand =
+			threshold !== null &&
+			floor !== null &&
+			level < threshold &&
+			level >= threshold - config.hysteresisDb &&
+			level < floor + config.hysteresisDb
+		if (noiseBand) run.replaced++
+		frozen.gateBlock(noiseBand ? zero : buf)
 		fixed.process(buf)
-		if (feedFloor)
-			fixed.setNoiseFloorDbfs(
+		if (feedFloor) {
+			floor =
 				step.floorOffsetDb === null
 					? null
-					: config.baseThreshold + step.floorOffsetDb,
-			)
+					: config.baseThreshold + step.floorOffsetDb
+			fixed.setNoiseFloorDbfs(floor)
+		}
 		run.frozen.push(frozen.open)
 		run.fixed.push(fixed.open)
-		run.levels.push(level)
-		run.thresholds.push(threshold)
 	})
 	return run
 }
@@ -189,92 +216,79 @@ function runBoth(
 describe("ChannelSquelch noise-tail fix", () => {
 	// Feature: web-gaps-7, Property 5: Manual and auto squelch unchanged
 	// Validates: Requirements 2.1, 4.2
-	it("differs from the pre-WG7 gate only by closing earlier after the last block at or above the threshold", () => {
+	it("equals the pre-WG7 gate with noise band blocks moved below the band", () => {
+		let replaced = 0
 		fc.assert(
-			fc.property(
-				configArb,
-				fc.array(stepArb(false), { minLength: 1, maxLength: 300 }),
-				(config, steps) => {
-					const run = runBoth(config, steps, true)
-					for (let k = 0; k < steps.length; k++) {
-						const threshold = run.thresholds[k] ?? null
-						const level = run.levels[k] ?? -160
-						// At or above the threshold (or disabled) both are open.
-						if (threshold === null || level >= threshold) {
-							expect(run.fixed[k]).toBe(true)
-							expect(run.frozen[k]).toBe(true)
-						}
-						// The fix only closes earlier: open now implies open before.
-						if (run.fixed[k]) expect(run.frozen[k]).toBe(true)
-						if (run.fixed[k] !== run.frozen[k]) {
-							// Confined to blocks after a block at/above the threshold
-							// with none since: the gate was opened by an earlier block.
-							let j = k - 1
-							while (j >= 0) {
-								const t = run.thresholds[j] ?? null
-								if (t === null || (run.levels[j] ?? -160) >= t) break
-								j--
-							}
-							expect(j).toBeGreaterThanOrEqual(0)
-						}
-					}
-				},
-			),
+			fc.property(configArb, stepsArb, (config, steps) => {
+				const run = runBoth(config, steps, true)
+				replaced += run.replaced
+				expect(run.fixed).toEqual(run.frozen)
+			}),
 			{ numRuns: 200 },
 		)
+		// The generator does exercise the rule.
+		expect(replaced).toBeGreaterThan(0)
 	})
 
 	// Feature: web-gaps-7, Property 5: Manual and auto squelch unchanged
 	// Validates: Requirements 2.1, 4.2
-	it("is identical, gate and output bytes, when no block falls in the hysteresis band", () => {
+	it("is identical to the pre-WG7 gate without a floor estimate", () => {
 		fc.assert(
-			fc.property(
-				configArb,
-				fc.array(stepArb(true), { minLength: 1, maxLength: 300 }),
-				(config, steps) => {
-					// Threshold drift is at most ±1 dB per block; band blocks are > 6 dB below.
-					const run = runBoth(
-						config,
-						steps.map(s => ({ ...s, thresholdDelta: null })),
-						true,
-					)
-					expect(run.fixed).toEqual(run.frozen)
-				},
-			),
+			fc.property(configArb, stepsArb, (config, steps) => {
+				const run = runBoth(config, steps, false)
+				expect(run.replaced).toBe(0)
+				expect(run.fixed).toEqual(run.frozen)
+			}),
 			{ numRuns: 100 },
 		)
 	})
 
 	// Feature: web-gaps-7, Property 5: Manual and auto squelch unchanged
 	// Validates: Requirements 2.1, 4.2
-	it("is identical without a floor estimate while band blocks directly follow blocks at the threshold", () => {
+	it("is identical to the pre-WG7 gate when every band block is at least hysteresis above the floor", () => {
 		fc.assert(
-			fc.property(
-				configArb,
-				fc.array(stepArb(false), { minLength: 1, maxLength: 300 }),
-				(config, raw) => {
-					// A band block is kept only while every block since the last one at
-					// the threshold was in the band too (a carrier fading in the band);
-					// otherwise it is moved below the band. Offsets stay 0.05 dB clear
-					// of the band edges so float32 levels classify the same way.
-					const h = config.hysteresisDb
-					const steps: Step[] = []
-					let held = false
-					for (const step of raw) {
-						let offsetDb = step.offsetDb
-						if (Math.abs(offsetDb) < 0.05) offsetDb = 0.05
-						if (Math.abs(offsetDb + h) < 0.05) offsetDb = -h - 0.05
-						const inBand = offsetDb < 0 && offsetDb >= -h
-						if (inBand && !held) offsetDb = -40
-						held = offsetDb >= 0 || (inBand && held)
-						steps.push({ offsetDb, thresholdDelta: null, floorOffsetDb: null })
-					}
-					const run = runBoth({ ...config, disableAt: null }, steps, false)
-					expect(run.fixed).toEqual(run.frozen)
-				},
-			),
+			fc.property(configArb, stepsArb, (config, raw) => {
+				// Floors at most -2h - 0.01 dB below the base threshold and no drift:
+				// every band block (>= threshold - h) is >= floor + h + 0.01 dB, a
+				// margin float32 rounding (~1e-6 dB) cannot cross.
+				const h = config.hysteresisDb
+				const steps = raw.map(s => ({
+					...s,
+					thresholdDelta: null,
+					floorOffsetDb:
+						s.floorOffsetDb === null
+							? null
+							: Math.min(s.floorOffsetDb, -2 * h - 0.01),
+				}))
+				const run = runBoth(config, steps, true)
+				expect(run.replaced).toBe(0)
+				expect(run.fixed).toEqual(run.frozen)
+			}),
 			{ numRuns: 100 },
 		)
+	})
+
+	it("keeps an ongoing transmission open through a fade into the band without a floor", () => {
+		// Review repro: threshold -50, -49, -60, [-51 x 30], -49 stays open.
+		const fixed = new ChannelSquelch({ sampleRate: RATE, thresholdDbfs: -50 })
+		const frozen = new FrozenPowerGate({ sampleRate: RATE, thresholdDbfs: -50 })
+		const levels = [-49, -60, ...Array<number>(30).fill(-51), -49]
+		for (const level of levels) {
+			fixed.process(block(level).buf)
+			frozen.gateBlock(block(level).buf)
+			expect(fixed.open).toBe(true)
+			expect(frozen.open).toBe(true)
+		}
+	})
+
+	it("keeps a band fade open when it is at least hysteresis above the floor", () => {
+		const fixed = new ChannelSquelch({ sampleRate: RATE, thresholdDbfs: -50 })
+		const levels = [-49, -60, ...Array<number>(30).fill(-51), -49]
+		for (const level of levels) {
+			fixed.process(block(level).buf)
+			fixed.setNoiseFloorDbfs(-53.5)
+			expect(fixed.open).toBe(true)
+		}
 	})
 
 	it("closes exactly one hang after the last block at the threshold when the band lies in the noise", () => {

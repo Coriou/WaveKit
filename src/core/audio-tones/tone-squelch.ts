@@ -100,9 +100,24 @@ export class ToneSquelchGate {
 	constructor(tone: ToneSquelchTone, rate: number) {
 		if (!Number.isFinite(rate) || rate < 8_000)
 			throw new WaveKitError(
-				`Tone squelch needs a PCM rate of at least 8000 Hz, got ${String(rate)}`,
+				"Tone squelch needs a PCM rate of at least 8000 Hz",
 				"TONE_SQUELCH_RATE",
 			)
+		// Fail closed by meaning: only the known kinds and polarities build a gate.
+		const kind: unknown = (tone as { kind?: unknown }).kind
+		if (kind !== "ctcss" && kind !== "dcs")
+			throw new WaveKitError(
+				"Tone squelch kind is not ctcss or dcs",
+				"TONE_SQUELCH_TONE",
+			)
+		if (tone.kind === "dcs") {
+			const polarity: unknown = tone.polarity
+			if (polarity !== "normal" && polarity !== "inverted")
+				throw new WaveKitError(
+					"Tone squelch DCS polarity is not normal or inverted",
+					"TONE_SQUELCH_TONE",
+				)
+		}
 		this.tone = tone
 		this.rate = rate
 		this.decimator.arm(rate)
@@ -112,7 +127,7 @@ export class ToneSquelchGate {
 			)
 			if (index < 0)
 				throw new WaveKitError(
-					`Tone squelch CTCSS ${String(tone.frequencyTenthsHz)} tenths Hz is not a standard tone`,
+					"Tone squelch CTCSS frequency is not a standard tone",
 					"TONE_SQUELCH_TONE",
 				)
 			this.toneIndex = index
@@ -125,7 +140,7 @@ export class ToneSquelchGate {
 		const packed = packDcs({ code: tone.code, polarity: tone.polarity })
 		if (packed < 0)
 			throw new WaveKitError(
-				`Tone squelch DCS code ${tone.code} is malformed`,
+				"Tone squelch DCS code is malformed",
 				"TONE_SQUELCH_TONE",
 			)
 		this.toneIndex = -1
@@ -145,42 +160,57 @@ export class ToneSquelchGate {
 		return this.ctcss !== null ? this.counter.open() : this.dcsOpen
 	}
 
-	/** Feed one PCM block at the constructed rate. A format change drops the held bytes. */
-	push(pcm: Buffer, format: ToneSquelchPcmFormat): void {
-		if (format !== "s16le" && format !== "f32le") return
+	/**
+	 * Feed PCM bytes `[start, end)` of `pcm` at the constructed rate (default: the whole
+	 * buffer). A format change drops the held bytes; an unknown format fails closed (the gate
+	 * resets and stays waiting). Index ranges let the caller apply the gate's state per slice
+	 * of a large chunk without allocating views.
+	 */
+	push(
+		pcm: Buffer,
+		format: ToneSquelchPcmFormat,
+		start = 0,
+		end = pcm.length,
+	): void {
+		if (format !== "s16le" && format !== "f32le") {
+			this.reset()
+			return
+		}
+		const from = Math.max(0, Math.min(start, pcm.length))
+		const to = Math.max(from, Math.min(end, pcm.length))
 		if (format !== this.format) {
 			this.format = format
 			this.pendingLen = 0
 		}
 		const width = format === "s16le" ? 2 : 4
-		let offset = 0
+		let offset = from
 		if (this.pendingLen > 0) {
 			const need = width - this.pendingLen
-			if (pcm.length < need) {
-				pcm.copy(this.pending, this.pendingLen, 0, pcm.length)
-				this.pendingLen += pcm.length
+			if (to - from < need) {
+				pcm.copy(this.pending, this.pendingLen, from, to)
+				this.pendingLen += to - from
 				return
 			}
-			pcm.copy(this.pending, this.pendingLen, 0, need)
+			pcm.copy(this.pending, this.pendingLen, from, from + need)
 			this.takeSample(
 				format === "s16le"
 					? this.pending.readInt16LE(0) / 32_768
 					: this.pending.readFloatLE(0),
 			)
 			this.pendingLen = 0
-			offset = need
+			offset = from + need
 		}
-		const usable = pcm.length - offset
-		const end = offset + usable - (usable % width)
+		const usable = to - offset
+		const last = offset + usable - (usable % width)
 		if (format === "s16le") {
-			for (let i = offset; i < end; i += 2)
+			for (let i = offset; i < last; i += 2)
 				this.takeSample(pcm.readInt16LE(i) / 32_768)
 		} else {
-			for (let i = offset; i < end; i += 4) this.takeSample(pcm.readFloatLE(i))
+			for (let i = offset; i < last; i += 4) this.takeSample(pcm.readFloatLE(i))
 		}
-		if (end < pcm.length) {
-			pcm.copy(this.pending, 0, end, pcm.length)
-			this.pendingLen = pcm.length - end
+		if (last < to) {
+			pcm.copy(this.pending, 0, last, to)
+			this.pendingLen = to - last
 		}
 	}
 
