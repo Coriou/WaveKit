@@ -44,8 +44,10 @@ export const AMBIENT_MAX_TARGETS = 16
 const isHz = (v: unknown): v is number =>
 	typeof v === "number" && Number.isFinite(v) && v > 0
 
-function numberList(v: unknown): number[] | undefined {
+/** undefined: no list; null: oversized (refused before any element is read, no default). */
+function numberList(v: unknown): number[] | null | undefined {
 	if (!Array.isArray(v) || v.length === 0) return undefined
+	if (v.length > AMBIENT_MAX_TARGETS) return null
 	const out = v.filter(isHz)
 	return out.length === v.length ? out : undefined
 }
@@ -55,9 +57,10 @@ function newTypeTargets(
 	cfg: DecoderConfig,
 	centre: () => number | undefined,
 ): number[] | null {
-	const listed =
-		numberList(cfg.frequencies) ?? numberList(cfg.options["frequencies"])
-	if (listed) return listed
+	const own = numberList(cfg.frequencies)
+	if (own === null) return null
+	const listed = own ?? numberList(cfg.options["frequencies"])
+	if (listed !== undefined) return listed
 	const single = cfg.options["frequency"]
 	if (cfg.type === "lora-meshtastic") {
 		// followCenter decodes the capture centre (lora-meshtastic.ts:155-158, 334-361).

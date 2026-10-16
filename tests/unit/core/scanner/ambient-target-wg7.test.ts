@@ -205,4 +205,21 @@ describe("resolveAmbientTargets", () => {
 			),
 		).toBeNull()
 	})
+
+	it("refuses an oversized list before reading any element", () => {
+		let reads = 0
+		const big = new Proxy(new Array<number>(10_000).fill(131_550_000), {
+			get(target, key, receiver) {
+				if (typeof key === "string" && /^\d+$/.test(key)) reads++
+				return Reflect.get(target, key, receiver) as unknown
+			},
+		})
+		expect(
+			resolveAmbientTargets(
+				cfgOf("acarsdec", { frequencies: big }),
+				deps("rtl", undefined),
+			),
+		).toBeNull()
+		expect(reads).toBe(0)
+	})
 })
