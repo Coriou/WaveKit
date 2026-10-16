@@ -113,13 +113,18 @@ describe("createStationEstimator", () => {
 		expect(snapshots.aprs).toEqual([])
 	})
 
-	it("treats a throwing stationConfigured as false", async () => {
+	it("fails uncached when stationConfigured throws, then recovers", async () => {
+		let calls = 0
 		const est = createStationEstimator({
 			stationConfigured: () => {
-				throw new Error("nope")
+				calls++
+				if (calls === 1) throw new Error("nope")
+				return true
 			},
 		})
-		expect((await est.estimate()).stationConfigured).toBe(false)
+		const failure = await est.estimate().catch((error: unknown) => error)
+		expect((failure as WaveKitError).code).toBe("STATION_ESTIMATE_FAILED")
+		expect((await est.estimate()).stationConfigured).toBe(true)
 	})
 
 	it("rejects with STATION_ESTIMATE_FAILED, does not cache, then recovers", async () => {

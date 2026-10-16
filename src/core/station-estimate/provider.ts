@@ -34,12 +34,9 @@ export function createStationEstimator(
 		const vessels = snapshot(sources.vessels)
 		const aprs = snapshot(sources.aprs)
 		const mesh = snapshot(sources.mesh)
-		let stationConfigured = false
-		try {
-			stationConfigured = sources.stationConfigured() === true
-		} catch {
-			stationConfigured = false
-		}
+		// Only fleet getters are skipped on failure; a throwing stationConfigured is an
+		// unexpected failure (500, not cached).
+		const stationConfigured = sources.stationConfigured() === true
 		const { points, basis } = collectContributors(
 			{
 				...(aircraft !== undefined && { aircraft }),

@@ -334,6 +334,10 @@ describe("computeEstimate geometry", () => {
 		expect(r2.lat).toBe(0)
 		expect(r2.lon).toBe(0)
 		expect(r2.uncertaintyKm).toBe(115)
+		// Unequal weights: 6 centre points (weight 1) vs the ring (weight 4) -> 115 km, not 10.
+		const r3 = computeEstimate([...centre, ...ring])
+		if (!r3.available) throw new Error("expected available")
+		expect(r3.uncertaintyKm).toBe(115)
 	})
 })
 
