@@ -370,8 +370,11 @@ export class LiveDemodulator extends EventEmitter {
 		const sourceChanged =
 			validated.sourceId !== previous.sourceId &&
 			resolvedBefore !== resolvedAfter
+		// Union of both key sets: `agc: null` deletes a key, which must still count as a change.
 		const pipelineChanged = (
-			Object.keys(validated) as Array<keyof LiveDemodConfig>
+			[
+				...new Set([...Object.keys(previous), ...Object.keys(validated)]),
+			] as Array<keyof LiveDemodConfig>
 		).some(key => {
 			if (NODE_ONLY_KEYS.has(key)) return false
 			if (key === "sourceId") return sourceChanged

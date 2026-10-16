@@ -949,7 +949,9 @@ describe("LiveDemodulator", () => {
 		expect(processes.length).toBeGreaterThan(spawned)
 		expect(reasons).toEqual(["config"])
 		expect(liveDemod.getStatus().agc).toBe("slow")
+		const beforeReset = processes.length
 		await liveDemod.reconfigure({ agc: null })
+		expect(processes.length).toBeGreaterThan(beforeReset)
 		expect(liveDemod.getStatus().config.agc).toBeUndefined()
 		expect("agc" in liveDemod.getStatus().config).toBe(false)
 		expect(liveDemod.getStatus().agc).toBe("off")
