@@ -184,7 +184,11 @@ export abstract class NetworkProducerDecoder
 		const command = this.getCommand()
 		const args = this.getArgs()
 
-		this.logger.info({ command, args }, "Starting network producer decoder")
+		// argv carries option text: count only (WG7 HW fix).
+		this.logger.info(
+			{ command, argCount: args.length },
+			"Starting network producer decoder",
+		)
 
 		try {
 			this.process = spawn(command, args, {
@@ -478,7 +482,11 @@ export abstract class NetworkProducerDecoder
 	 */
 	updateOptions(updates: Record<string, unknown>): void {
 		this.config.options = { ...this.config.options, ...updates }
-		this.logger.debug({ updates }, "Decoder options updated")
+		// Count only: keys and values are option text (WG7 HW fix).
+		this.logger.debug(
+			{ updateCount: Object.keys(updates).length },
+			"Decoder options updated",
+		)
 		this.onOptionsUpdated()
 	}
 
@@ -495,10 +503,10 @@ export abstract class NetworkProducerDecoder
 	 * Supports both TCP and UDP protocols.
 	 */
 	protected async connectToOutput(): Promise<void> {
-		const { outputHost, outputPort, outputProtocol } = this.config
+		const { outputPort, outputProtocol } = this.config
 
 		this.logger.info(
-			{ host: outputHost, port: outputPort, protocol: outputProtocol },
+			{ port: outputPort, protocol: outputProtocol },
 			"Connecting to decoder output",
 		)
 
@@ -519,10 +527,7 @@ export abstract class NetworkProducerDecoder
 			const client = createConnection(
 				{ host: outputHost, port: outputPort },
 				() => {
-					this.logger.info(
-						{ host: outputHost, port: outputPort },
-						"Connected to TCP output",
-					)
+					this.logger.info({ port: outputPort }, "Connected to TCP output")
 					this.reconnectAttempts = 0
 					this.isReconnecting = false
 					resolve()

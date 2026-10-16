@@ -117,3 +117,64 @@ export function createOptionWarner(
 		)
 	}
 }
+
+/** extraArgs bounds (WG7 HW fix): entry count, per-entry and aggregate UTF-8 bytes. */
+export const EXTRA_ARGS_BOUNDS = {
+	maxEntries: 64,
+	maxEntryBytes: 4096,
+	maxTotalBytes: 65536,
+} as const
+
+/**
+ * Read an `extraArgs` option: the operator's config-only argv tail (never
+ * API-settable), so there is no flag allowlist and operands pass raw. A non-array
+ * is absent with `warn("invalid")`. Only the first `maxEntries` entries are read
+ * (`warn("clamped")` past that). Each entry must be a primitive string: anything
+ * else is dropped, never coerced (`warn("invalid")`). An entry over
+ * `maxEntryBytes` UTF-8 bytes is dropped, and once the running total would pass
+ * `maxTotalBytes` no further entries are added (both `warn("clamped")`).
+ * Warnings carry the key only, never an entry.
+ */
+export function readExtraArgsOption(
+	value: unknown,
+	warn: NumericOptionWarn,
+	key = "extraArgs",
+): string[] | undefined {
+	if (value === undefined || value === null) return undefined
+	if (!Array.isArray(value)) {
+		warn(key, "invalid")
+		return undefined
+	}
+	const { maxEntries, maxEntryBytes, maxTotalBytes } = EXTRA_ARGS_BOUNDS
+	let invalid = false
+	let clamped = value.length > maxEntries
+	const limit = Math.min(value.length, maxEntries)
+	const out: string[] = []
+	let total = 0
+	for (let i = 0; i < limit; i++) {
+		const entry: unknown = value[i]
+		if (typeof entry !== "string") {
+			invalid = true
+			continue
+		}
+		// UTF-8 is at least one byte per UTF-16 unit: skip the byte count when
+		// the length alone is already over the limit.
+		const bytes =
+			entry.length > maxEntryBytes
+				? maxEntryBytes + 1
+				: Buffer.byteLength(entry, "utf8")
+		if (bytes > maxEntryBytes) {
+			clamped = true
+			continue
+		}
+		if (total + bytes > maxTotalBytes) {
+			clamped = true
+			break
+		}
+		total += bytes
+		out.push(entry)
+	}
+	if (invalid) warn(key, "invalid")
+	else if (clamped) warn(key, "clamped")
+	return out
+}

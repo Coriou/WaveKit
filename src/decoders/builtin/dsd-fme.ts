@@ -33,10 +33,13 @@ import {
 	type AudioDecoderStdin,
 } from "../audio-demod-decoder.js"
 import { csdrNumber, deemphasisStage } from "../csdr-stages.js"
-import { readNumericOption, type NumericOptionRule } from "../option-values.js"
+import {
+	readExtraArgsOption,
+	readNumericOption,
+	type NumericOptionRule,
+} from "../option-values.js"
 import {
 	DSD_FME_DURATION_MS_MAX,
-	DSD_FME_EXTRA_ARGS_MAX,
 	DSD_FME_FM_GAIN_MAX,
 	DSD_FME_RECORDING_MAX_AGE_HOURS_MAX,
 	DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
@@ -676,28 +679,28 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * value, -y): WaveKit owns both, and the voice stream depends on them.
 	 */
 	private parseExtraArgs(value: unknown): string[] | undefined {
-		if (!Array.isArray(value)) return undefined
-		// WG7 HW.2: a hand-written argv tail, sliced before iterating.
-		if (value.length > DSD_FME_EXTRA_ARGS_MAX)
-			this.optionWarn("extraArgs", "clamped")
-		const capped = value.slice(0, DSD_FME_EXTRA_ARGS_MAX)
+		// Strings only, entry count and UTF-8 bytes bounded (WG7 HW fix).
+		const capped = readExtraArgsOption(value, this.optionWarn)
+		if (capped === undefined) return undefined
 		const kept: string[] = []
-		const dropped: string[] = []
+		let dropped = 0
 		for (let i = 0; i < capped.length; i++) {
-			const arg = String(capped[i])
+			const arg = capped[i] as string
 			if (RESERVED_EXTRA_ARG.test(arg)) {
-				dropped.push(arg)
+				dropped++
 				// "-o <device>": the device is the next argument.
-				if (arg === "-o" && i + 1 < capped.length)
-					dropped.push(String(capped[++i]))
+				if (arg === "-o" && i + 1 < capped.length) {
+					i++
+					dropped++
+				}
 				continue
 			}
 			kept.push(arg)
 		}
-		if (dropped.length > 0) {
+		if (dropped > 0) {
 			// Count only: the dropped arguments are option text (WG7 HW.2).
 			this.logger.warn(
-				{ key: "extraArgs", dropped: dropped.length },
+				{ key: "extraArgs", dropped },
 				"Ignoring extraArgs that set the dsd-fme mode or audio output",
 			)
 		}
@@ -2461,7 +2464,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				timeout,
 				quality: callInfo.quality,
 				badSignal: callInfo.flags.badSignal,
-				wavFile,
+				// Presence only: the path is the configured recording dir.
+				hasWavFile: wavFile !== undefined,
 			},
 			"Call ended",
 		)
