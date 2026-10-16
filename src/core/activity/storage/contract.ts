@@ -60,6 +60,11 @@ export interface AnalogTransmissionPayload {
 		ctcssHz: number | null
 		/** DTMF symbols `0-9*#A-D` in order, at most 32; null when none. */
 		dtmf: string | null
+		/**
+		 * WG6: DCS code and polarity, or null when none qualified. Present on transmissions
+		 * produced since WG6; absent on records stored before it.
+		 */
+		dcs?: { code: string; polarity: "normal" | "inverted" } | null
 	}
 }
 

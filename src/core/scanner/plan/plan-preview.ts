@@ -5,6 +5,7 @@ import { bandplansFor } from "../bandplan/index.js"
 import type { Bandplan, BandRegionCode } from "../bandplan/index.js"
 import type { FreqRange, IqFormat } from "../../spectrum/types.js"
 import type {
+	DecoderCoverageView,
 	Hop,
 	HopPlan,
 	Impact,
@@ -68,6 +69,11 @@ export interface PreviewContext {
 	bandplans?: readonly Bandplan[]
 	/** WG2 req 12: locked-out discoveries heard on the source. Omitted: none (sweeps plan as before). */
 	lockouts?: (sourceId: string) => readonly LockoutTarget[]
+	/**
+	 * WG6 req 1.1: the decoders the plan may treat as covering frequencies elsewhere. Omitted:
+	 * no `decodedElsewhere` and plans exactly as before.
+	 */
+	decoderCoverage?: () => readonly DecoderCoverageView[]
 }
 
 type Provenance = NormalisedJobSpec["provenance"][string]

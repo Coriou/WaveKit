@@ -124,7 +124,33 @@ export interface ReceiverCapabilities {
 		readonly sampleRateHz: number
 		readonly centerFrequencyHz: number | null
 	}
+	/** WG6 (web-gaps-6 req 8): suggested sample rates; sent by WG6 cores. */
+	readonly sampleRatePresets?: ReceiverSampleRatePresets
 }
+
+/**
+ * WG6 req 8.1: RTL-SDR sample rates a client may offer. A suggestion inside the command's
+ * validated ranges, not receiver evidence: no rate is claimed to work on the device.
+ * The same list the CLI offers (cli/source/ui/tuner-edit.ts).
+ */
+export const RECEIVER_SAMPLE_RATE_PRESETS_HZ: readonly number[] = Object.freeze(
+	[
+		250_000, 1_024_000, 1_536_000, 1_792_000, 1_920_000, 2_048_000, 2_160_000,
+		2_400_000, 2_560_000, 2_880_000, 3_200_000,
+	],
+)
+
+/** WG6 req 8.1: presets on rtl_tcp sources; not-applicable on other transports. */
+export type ReceiverSampleRatePresets =
+	| {
+			readonly state: "suggested"
+			readonly provenance: "wavekit-rtl-rate-presets"
+			readonly valuesHz: readonly number[]
+	}
+	| {
+			readonly state: "not-applicable"
+			readonly reason: "non-rtl-transport"
+	}
 
 export interface ReceiverCapabilitiesPage {
 	readonly schemaVersion: 1

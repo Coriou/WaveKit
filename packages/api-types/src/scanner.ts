@@ -108,6 +108,28 @@ export interface LockoutExclusion extends FreqRange {
 	discoveryId: string
 	applied: boolean
 }
+/**
+ * WG6 (web-gaps-6 requirement 1): a frequency range a running decoder on another source (or an
+ * external-input decoder on its own device) is proven to cover. Reported on plan previews and
+ * jobs; it becomes an exclusion only when the job sets `skipDecodedElsewhere: true` (`applied`).
+ * Ranges are merged per `sourceId` and clipped to the job's enabled ranges.
+ */
+export interface DecodedElsewhereRange extends FreqRange {
+	/** The WaveKit source of the covering decoders; null = external-input decoders (own device). */
+	sourceId: string | null
+	/** Covering decoder ids, sorted, deduplicated. */
+	decoderIds: string[]
+	/** True when the range is an exclusion of this plan (flag set, within the cap, plan not emptied). */
+	applied: boolean
+}
+/** WG6 req 1.3: half-width around a decoder target frequency when it declares no band range. */
+export const DECODED_ELSEWHERE_TARGET_HALF_WIDTH_HZ = 6_250
+/** WG6 req 1.5: decoders examined per plan; more are ignored (counted in the issue). */
+export const DECODED_ELSEWHERE_MAX_DECODERS = 64
+/** WG6 req 1.5: targets plus ranges examined per decoder; more are ignored. */
+export const DECODED_ELSEWHERE_MAX_TARGETS = 32
+/** WG6 req 1.5: merged ranges reported per plan; past it the rest are dropped (sorted by start). */
+export const DECODED_ELSEWHERE_MAX_RANGES = 256
 export type ObservationEndReason =
 	| "quiet"
 	| "retune"
@@ -315,6 +337,11 @@ export interface ScanJobSpec {
 	 * ambient or other jobs' evidence are unchanged. Discover jobs only. Live-editable.
 	 */
 	signalsOnly?: boolean
+	/**
+	 * WG6 (web-gaps-6 req 1.6): exclude the frequency ranges decoders elsewhere are proven to
+	 * cover (`decodedElsewhere`). Sweep jobs only. Absent = false (today's plans). Live-editable.
+	 */
+	skipDecodedElsewhere?: boolean
 }
 
 export interface CaptureSpec {
@@ -366,6 +393,8 @@ export interface NormalisedJobSpec {
 	capture: CaptureSpec
 	/** SF1: present only when the operator set it (absent = false, today's behaviour). */
 	signalsOnly?: boolean
+	/** WG6: present only when the operator set it (absent = false, today's behaviour). */
+	skipDecodedElsewhere?: boolean
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.
@@ -425,6 +454,8 @@ export type PlanIssueCode =
 	| "probe-unavailable"
 	| "range-locked"
 	| "signals-only-unsupported"
+	| "decoded-elsewhere-truncated"
+	| "decoded-elsewhere-not-applied"
 export interface PlanIssue {
 	code: PlanIssueCode
 	severity: IssueSeverity
@@ -449,6 +480,8 @@ export interface PlanPreview {
 	issues: PlanIssue[]
 	/** WG2: lockout exclusions for the spec's source (sweep plans only). */
 	lockoutExclusions?: LockoutExclusion[]
+	/** WG6 req 1.2: ranges decoded elsewhere; absent when there are none (or no decoder view). */
+	decodedElsewhere?: DecodedElsewhereRange[]
 }
 
 export interface ScanJobProbe {
@@ -489,6 +522,11 @@ export interface ScanJobHit {
 	lastHitAt: string
 	/** The discovery was created by an observation of this job. */
 	firstSeenInJob: boolean
+	/**
+	 * WG6 req 2.1: duration in ms of the most recent ended observation credited to this
+	 * discovery in the job; null until one has ended. Always sent by WG6 cores.
+	 */
+	lastDurationMs?: number | null
 }
 
 export interface ScanJobHitStats {
@@ -536,6 +574,8 @@ export interface ScanJob {
 	preemptedBy?: { jobId: string; name: string | null }
 	/** WG2: lockout exclusions in force for this sweep job (runtime only). */
 	lockoutExclusions?: LockoutExclusion[]
+	/** WG6: ranges decoded elsewhere at the job's last plan (runtime only). */
+	decodedElsewhere?: DecodedElsewhereRange[]
 }
 
 // --- Status, settings, bandplans (spec § 12.1) ---

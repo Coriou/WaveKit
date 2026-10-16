@@ -22,6 +22,7 @@ export * from "./aprs.js"
 export * from "./mesh.js"
 export * from "./coverage.js"
 export * from "./storage.js"
+export * from "./config-export.js"
 
 export type {
 	StationEstimate,

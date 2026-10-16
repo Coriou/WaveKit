@@ -279,6 +279,65 @@ export interface DecoderStatus {
 	scannerJobId?: string
 	/** Runtime-only instance (not in config, never persisted); present only for probes. */
 	ephemeral?: true
+	/**
+	 * WG6 (web-gaps-6 req 3.3): problems of the configured `options` against the type's option
+	 * schema (report only while DECODER_OPTIONS_ENFORCE is false). Absent when the type has no
+	 * schema; [] when the options are valid. Sent by WG6 cores.
+	 */
+	optionIssues?: DecoderOptionIssue[]
+}
+
+/** WG6 req 3.6: false = option problems are reported, the decoder is created as before. */
+export const DECODER_OPTIONS_ENFORCE = false
+/** WG6 req 3.3: issues kept per decoder; more are counted in one final `truncated` issue. */
+export const DECODER_OPTION_ISSUES_MAX = 32
+/** WG6 req 3.3: UTF-16 code units of an issue message (and of its path). */
+export const DECODER_OPTION_ISSUE_TEXT_MAX = 256
+
+/** WG6 req 3.3: one problem of a decoder's configured options. */
+export interface DecoderOptionIssue {
+	/** Dotted path below `options`, e.g. `frequencies.2`; "" for the whole object. */
+	path: string
+	code: "unknown-key" | "invalid-value" | "truncated"
+	message: string
+}
+
+/** WG6 req 3.4: value type of one documented option key. */
+export type DecoderOptionType =
+	| "string"
+	| "integer"
+	| "number"
+	| "boolean"
+	| "enum"
+	| "string-list"
+	| "number-list"
+	| "object"
+
+/** WG6 req 3.4: one documented option key of a decoder type. */
+export interface DecoderOptionDescriptor {
+	key: string
+	type: DecoderOptionType
+	/** For `enum` (and string lists with a closed set). */
+	enumValues?: string[]
+	min?: number
+	max?: number
+	/** e.g. "Hz", "dB", "ms", "ppm". */
+	unit?: string
+	/** The adapter's own default when the key is absent; null = none or computed. */
+	default: string | number | boolean | null
+	/** The value is a credential or key; exports redact it and UIs mask it. */
+	secret: boolean
+	/** How a change takes effect (only "restart" until decoder PATCH exists). */
+	effect: "restart"
+	description: string
+}
+
+/** WG6 req 3.4: GET /api/decoders/types item. */
+export interface DecoderTypeInfo {
+	type: string
+	caps: DecoderCaps
+	/** Documented option keys; absent when the type has no option schema. */
+	options?: DecoderOptionDescriptor[]
 }
 
 /** Why and since when a decoder is suspended for its source rate or band. */

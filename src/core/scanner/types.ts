@@ -389,6 +389,11 @@ export interface ScanJobSpec {
 	 * ambient or other jobs' evidence are unchanged. Discover jobs only. Live-editable.
 	 */
 	signalsOnly?: boolean
+	/**
+	 * WG6 (web-gaps-6 req 1.6): exclude the frequency ranges decoders elsewhere are proven to
+	 * cover (`decodedElsewhere`). Sweep jobs only. Absent = false (today's plans). Live-editable.
+	 */
+	skipDecodedElsewhere?: boolean
 }
 
 /**
@@ -446,6 +451,8 @@ export interface NormalisedJobSpec extends Required<
 	capture: CaptureSpec
 	/** SF1: present only when the operator set it (absent = false, today's behaviour). */
 	signalsOnly?: boolean
+	/** WG6: present only when the operator set it (absent = false, today's behaviour). */
+	skipDecodedElsewhere?: boolean
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.
@@ -508,6 +515,8 @@ export type PlanIssueCode =
 	| "probe-unavailable"
 	| "range-locked"
 	| "signals-only-unsupported"
+	| "decoded-elsewhere-truncated"
+	| "decoded-elsewhere-not-applied"
 
 export interface PlanIssue {
 	code: PlanIssueCode
@@ -535,6 +544,8 @@ export interface PlanPreview {
 	issues: PlanIssue[]
 	/** WG2: lockout exclusions for the spec's source (sweep plans only). */
 	lockoutExclusions?: LockoutExclusion[]
+	/** WG6 req 1.2: ranges decoded elsewhere; absent when there are none (or no decoder view). */
+	decodedElsewhere?: DecodedElsewhereRange[]
 }
 
 /**
@@ -544,6 +555,53 @@ export interface PlanPreview {
 export interface LockoutExclusion extends FreqRange {
 	discoveryId: string
 	applied: boolean
+}
+
+/**
+ * WG6 (web-gaps-6 requirement 1): a frequency range a running decoder on another source (or an
+ * external-input decoder on its own device) is proven to cover. Reported on plan previews and
+ * jobs; it becomes an exclusion only when the job sets `skipDecodedElsewhere: true` (`applied`).
+ * Ranges are merged per `sourceId` and clipped to the job's enabled ranges.
+ */
+export interface DecodedElsewhereRange extends FreqRange {
+	/** The WaveKit source of the covering decoders; null = external-input decoders (own device). */
+	sourceId: string | null
+	/** Covering decoder ids, sorted, deduplicated. */
+	decoderIds: string[]
+	/** True when the range is an exclusion of this plan (flag set, within the cap, plan not emptied). */
+	applied: boolean
+}
+
+/**
+ * WG6 req 1.1: what the plan reads about one decoder (Main maps DecoderManager statuses to it in
+ * the scanner service's preview context). Coverage is only ever derived from these fields.
+ */
+export interface DecoderCoverageView {
+	id: string
+	/** The process (or in-process decoder) is running. */
+	running: boolean
+	health: "running" | "idle" | "restarting" | "faulted"
+	suspended: boolean
+	/** Scanner probes ("scanner") never count. */
+	owner: "config" | "scanner"
+	/** WaveKit source the decoder reads (default source resolved); null = external input. */
+	sourceId: string | null
+	inputKind: "iq" | "audio_pcm" | "external"
+	/** The decoder's band assessment; null when it has none. */
+	band: {
+		verdict: "in-band" | "out-of-band" | "unknown"
+		basis:
+			| "configured"
+			| "protocol"
+			| "decoder-default"
+			| "region-default"
+			| "override"
+			| null
+		targetsHz: readonly number[]
+		rangesHz: readonly { minHz: number; maxHz: number }[]
+		captureCenterHz: number | null
+		windowHalfWidthHz: number | null
+	} | null
 }
 
 // ---------------------------------------------------------------- settings (§ 12.3, decision D4)
