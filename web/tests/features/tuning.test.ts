@@ -201,8 +201,8 @@ describe("TuningController against the mock core", () => {
 
 	it("keeps the core's error and clears the target", async () => {
 		const tuning = new TuningController(data)
-		await tuning.tune(1_800_000_000) // the mock tuner stops at 1766 MHz
+		await tuning.tune(2_000_000_000) // the core's rtl_tcp range stops at 1900 MHz
 		expect(tuning.get().targetHz).toBeNull()
-		expect(tuning.get().error).toMatch(/outside the tuner range/)
+		expect(tuning.get().error).toMatch(/frequency out of range/)
 	})
 })

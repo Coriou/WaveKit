@@ -18,8 +18,7 @@ import {
 	panBy,
 	resolveView,
 	snapToStep,
-	snapToTrack,
-	spanCentre,
+	snapToTrackChannel,
 	spanWidth,
 	tuneAction,
 	zoomAt,
@@ -50,7 +49,10 @@ export class PlotStore extends Store<PlotState> {
 /** What the controller needs to know about the receiver, refreshed by the component. */
 export interface PlotContext {
 	sourceId: string | null
-	/** The capture on screen (from the latest frame, else the tuner). */
+	/**
+	 * The capture on screen (from the latest frame, else the tuner). A real core's frames cover only the
+	 * usable share of the band (USABLE_FRACTION), so this is narrower than the hardware capture.
+	 */
 	capture: SpectrumViewSpan | null
 	/** Hardware centre the live-audio offset is relative to. */
 	centreHz: number | null
@@ -108,15 +110,32 @@ export class PlotController {
 		return this.store.get().pendingHz ?? this.ctx.tunedHz
 	}
 
+	/**
+	 * The hardware capture (centre ± sample rate / 2) the tuning rule works on, as tuning.ts does; the
+	 * on-screen capture when the tuner is unknown. The frame span must not be used: a real core sends only
+	 * the usable 80 %, and edgeMargin() would then cut the unusable edge a second time.
+	 */
+	hardwareCapture(): SpectrumViewSpan | null {
+		const { capture, centreHz, sampleRateHz } = this.ctx
+		if (centreHz !== null && sampleRateHz !== null && sampleRateHz > 0)
+			return {
+				startHz: centreHz - sampleRateHz / 2,
+				endHz: centreHz + sampleRateHz / 2,
+			}
+		return capture
+	}
+
 	/** Tunes to `hz`: inside the capture the live-audio channel moves, outside the hardware recentres. */
 	tuneTo(hz: number): Promise<void> {
 		const { capture, centreHz, sourceId } = this.ctx
-		if (!capture || centreHz === null || !(hz > 0)) return Promise.resolve()
+		const hardware = this.hardwareCapture()
+		if (!capture || !hardware || centreHz === null || !(hz > 0))
+			return Promise.resolve()
 		const action = tuneAction(
 			hz,
 			centreHz,
-			capture,
-			edgeMargin(capture, this.ctx.bandwidthHz),
+			hardware,
+			edgeMargin(hardware, this.ctx.bandwidthHz),
 		)
 		const seq = ++this.seq
 		this.store.update(s => ({ ...s, pendingHz: Math.round(hz) }))
@@ -145,7 +164,7 @@ export class PlotController {
 		if (!view) return Promise.resolve()
 		const hz = view.startHz + x * spanWidth(view)
 		const snapped =
-			snapToTrack(hz, this.ctx.tracks, view, widthPx) ??
+			snapToTrackChannel(hz, this.ctx.tracks, view, widthPx, this.ctx.stepHz) ??
 			snapToStep(hz, this.ctx.stepHz)
 		return this.tuneTo(snapped)
 	}
@@ -229,14 +248,15 @@ export class PlotController {
 			return Promise.resolve()
 		if (Math.abs(pan.overflowHz) < spanWidth(capture) * 0.01)
 			return Promise.resolve()
-		const centre = Math.round(spanCentre(capture) + pan.overflowHz)
+		const hardware = this.hardwareCapture() ?? capture
+		const centre = Math.round(centreHz + pan.overflowHz)
 		const keep =
 			tunedHz !== null && sampleRateHz !== null
 				? offsetKeeping(
 						tunedHz,
 						centre,
 						sampleRateHz,
-						edgeMargin(capture, this.ctx.bandwidthHz),
+						edgeMargin(hardware, this.ctx.bandwidthHz),
 					)
 				: null
 		// The view stays relative to the capture: once the hardware has moved it shows what was dragged to.

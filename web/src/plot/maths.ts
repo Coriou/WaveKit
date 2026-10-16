@@ -188,6 +188,39 @@ export interface DbTick {
 	text: string
 }
 
+/** dB shown below the noise floor, and the span of the scale (DEFAULT_LEVELS: −120 … −20). */
+export const LEVELS_BELOW_FLOOR_DB = 15
+export const LEVELS_RANGE_DB = 100
+/** The floor must move this far before the scale follows (frame-to-frame jitter is a few dB). */
+export const LEVELS_HYSTERESIS_DB = 10
+
+/**
+ * The trace and waterfall scale from the frame's noise floor (`floorDbfs`): the floor sits
+ * LEVELS_BELOW_FLOOR_DB above the bottom (rounded to 5 dB) and the scale spans LEVELS_RANGE_DB, capped
+ * at 0 dBFS. A real dongle's floor is far from the mock's −110 dBFS (about −62 dBFS at 1 kHz bins on an
+ * RTL-SDR), which the fixed −120 … −20 scale drew as a washed-out grey waterfall. Returns `prev` itself
+ * while the floor stays within LEVELS_HYSTERESIS_DB of the current scale's floor, or when it is unknown.
+ */
+export function autoLevels(
+	floorDbfs: number | null | undefined,
+	prev: SpectrumLevels,
+): SpectrumLevels {
+	if (
+		floorDbfs === null ||
+		floorDbfs === undefined ||
+		!Number.isFinite(floorDbfs)
+	)
+		return prev
+	const minDb = Math.floor((floorDbfs - LEVELS_BELOW_FLOOR_DB) / 5) * 5
+	if (
+		Math.abs(prev.minDb + LEVELS_BELOW_FLOOR_DB - floorDbfs) <
+		LEVELS_HYSTERESIS_DB
+	)
+		return prev
+	const maxDb = Math.min(0, minDb + LEVELS_RANGE_DB)
+	return { minDb: Math.min(minDb, maxDb - 20), maxDb }
+}
+
 /** dB labels on the trace: a 10/20/30 dB step leaving at least 36 px between labels. */
 export function dbTicks(levels: SpectrumLevels, traceCss: number): DbTick[] {
 	const range = levels.maxDb - levels.minDb
@@ -215,6 +248,30 @@ export const DEFAULT_STEP_HZ = 12_500
 /** Click snap radius around a signal's centre, CSS px. */
 export const SNAP_PX = 8
 
+/** The track a click at `hz` lands on (see snapToTrack); null when none. */
+function trackAt(
+	hz: number,
+	tracks: readonly Track[],
+	view: SpectrumViewSpan,
+	widthPx: number,
+	snapPx: number,
+): Track | null {
+	const hzPerPx = spanWidth(view) / Math.max(1, widthPx)
+	const pad = snapPx * hzPerPx
+	let best: Track | null = null
+	let bestD = Infinity
+	for (const t of tracks) {
+		const centre = (t.startHz + t.endHz) / 2
+		const reach = Math.max(pad, (t.endHz - t.startHz) / 2 + pad)
+		const d = Math.abs(hz - centre)
+		if (d <= reach && d < bestD) {
+			best = t
+			bestD = d
+		}
+	}
+	return best
+}
+
 /**
  * The centre of the track a click at `hz` lands on: the click is inside the track (padded by
  * `snapPx` screen px) or within `snapPx` of its centre. The nearest centre wins; null when none.
@@ -226,16 +283,28 @@ export function snapToTrack(
 	widthPx: number,
 	snapPx = SNAP_PX,
 ): number | null {
-	const hzPerPx = spanWidth(view) / Math.max(1, widthPx)
-	const pad = snapPx * hzPerPx
-	let best: number | null = null
-	for (const t of tracks) {
-		const centre = (t.startHz + t.endHz) / 2
-		const reach = Math.max(pad, (t.endHz - t.startHz) / 2 + pad)
-		const d = Math.abs(hz - centre)
-		if (d <= reach && (best === null || d < Math.abs(hz - best))) best = centre
-	}
-	return best
+	const t = trackAt(hz, tracks, view, widthPx, snapPx)
+	return t ? (t.startHz + t.endHz) / 2 : null
+}
+
+/**
+ * Like snapToTrack, but lands on the step raster's channel when the track covers one. A real core's
+ * track edges sit on its FFT bin grid (offset from the centre frequency), so the measured centre of a
+ * carrier on 446.600 MHz reads 446.59992 MHz; the channel it covers is what the click means.
+ */
+export function snapToTrackChannel(
+	hz: number,
+	tracks: readonly Track[],
+	view: SpectrumViewSpan,
+	widthPx: number,
+	stepHz: number,
+	snapPx = SNAP_PX,
+): number | null {
+	const t = trackAt(hz, tracks, view, widthPx, snapPx)
+	if (!t) return null
+	const centre = (t.startHz + t.endHz) / 2
+	const channel = snapToStep(centre, stepHz)
+	return channel >= t.startHz && channel <= t.endHz ? channel : centre
 }
 
 /** Rounds to the step raster. */

@@ -22,7 +22,7 @@ import { groupName } from "../tuner/band.ts"
 import { modeSpec, modulationOf } from "../tuner/modes.ts"
 import { decodersAt } from "./decoders.ts"
 import { identifyView, type IdentifyView } from "./identify-view.ts"
-import { decoderLabel, signalBars } from "./signal.ts"
+import { decoderLabel, signalBars, signalPresent } from "./signal.ts"
 
 function IdentifyBlock({
 	view,
@@ -186,7 +186,8 @@ export function TunedCard() {
 				: "Unknown"
 	const protoSub = [band?.band.name, channel?.name].filter(Boolean).join(" · ")
 	const live = status?.running === true && level !== null
-	const squelchOpen = live && level.squelchOpen
+	const present = live ? signalPresent(level) : false
+	const squelchOpen = present === true
 	const snr =
 		live && level.channelPowerDbfs !== null && level.noiseFloorDbfs !== null
 			? level.channelPowerDbfs - level.noiseFloorDbfs
@@ -205,7 +206,9 @@ export function TunedCard() {
 					: squelchOpen
 						? "Signal present"
 						: live
-							? "Quiet"
+							? present === null
+								? "Squelch off"
+								: "Quiet"
 							: "Not decoded here"
 	const stateTone =
 		idHere && idView.running

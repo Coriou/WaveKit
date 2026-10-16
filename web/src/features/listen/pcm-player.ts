@@ -3,7 +3,13 @@
 // and resumed inside the Listen gesture (autoplay rules). The <audio> WAV path in controller.ts is the
 // fallback where AudioWorklet is missing.
 import workletUrl from "./pcm-worklet.ts?worker&url"
-import { parsePcmFormat, parsePositiveInt, PcmDecoder, WORKLET_NAME } from "./pcm.ts"
+import {
+	parsePcmFormat,
+	parsePositiveInt,
+	parsePositiveRate,
+	PcmDecoder,
+	WORKLET_NAME,
+} from "./pcm.ts"
 import type { FromWorklet, PcmFormat, RingStats, ToWorklet } from "./pcm.ts"
 
 export interface PcmSource {
@@ -112,7 +118,8 @@ export class PcmPlayer {
 	setVolume(volume: number): void {
 		this.volume = volume
 		const gain = this.gain
-		if (gain && this.ctx) gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.02)
+		if (gain && this.ctx)
+			gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.02)
 	}
 
 	dispose(): void {
@@ -137,8 +144,9 @@ export class PcmPlayer {
 		if (!response.ok || !response.body)
 			throw new Error(`The audio stream answered ${response.status}`)
 		const headers = response.headers
-		const format = parsePcmFormat(headers.get("X-Audio-Format")) ?? source.format
-		const rate = parsePositiveInt(headers.get("X-Sample-Rate")) ?? source.rate
+		const format =
+			parsePcmFormat(headers.get("X-Audio-Format")) ?? source.format
+		const rate = parsePositiveRate(headers.get("X-Sample-Rate")) ?? source.rate
 		const channels = parsePositiveInt(headers.get("X-Channels")) ?? 1
 		const node = await ready
 		if (signal.aborted) return

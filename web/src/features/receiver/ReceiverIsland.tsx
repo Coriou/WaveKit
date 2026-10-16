@@ -7,7 +7,13 @@ import { Icon } from "../../ui/Icon.tsx"
 import { Label } from "../../ui/Label.tsx"
 import { formatMHz, formatRate } from "../format.ts"
 import { useTunerState } from "../hooks.ts"
-import { gainText, receiverSummary, sourceTitle } from "./summary.ts"
+import {
+	gainText,
+	isUnknown,
+	receiverSummary,
+	sourceTitle,
+	switchText,
+} from "./summary.ts"
 
 function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
 	const { data } = useServices()
@@ -52,9 +58,12 @@ function ReceiverPanel() {
 				{ k: "Centre", v: `${formatMHz(tuner.frequency)} MHz` },
 				{ k: "Sample rate", v: formatRate(tuner.sampleRate) },
 				{ k: "Gain", v: gainText(tuner) },
-				{ k: "RTL AGC", v: tuner.agcMode ? "On" : "Off" },
-				{ k: "Bias-T", v: tuner.biasTee ? "On" : "Off" },
-				{ k: "PPM", v: String(tuner.ppm) },
+				{ k: "RTL AGC", v: switchText(tuner, "agcMode") },
+				{ k: "Bias-T", v: switchText(tuner, "biasTee") },
+				{
+					k: "PPM",
+					v: isUnknown(tuner, "ppm") ? "Unknown" : String(tuner.ppm),
+				},
 			]
 		: []
 	return (

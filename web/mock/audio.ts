@@ -43,18 +43,19 @@ function stream(
 ): void {
 	const rate = source.sampleRate()
 	if (rate === null) {
-		res.writeHead(503, { "Content-Type": "application/json" })
-		res.end(JSON.stringify({ error: "Live audio is not running" }))
+		// The core's audio server only listens while live audio runs: the client sees a refused or
+		// dropped connection (fetch rejects), never an HTTP error.
+		req.socket.destroy()
 		return
 	}
+	// As the core (src/core/audio-stream-server.ts streamHeaders): no Access-Control-Allow-Origin, so a
+	// page on another origin cannot fetch() it; the Vite dev server proxies it (web/vite.config.ts).
 	res.writeHead(200, {
 		"Content-Type": wav ? "audio/wav" : "application/octet-stream",
-		"Cache-Control": "no-store",
-		"Access-Control-Allow-Origin": "*",
+		"Cache-Control": "no-cache, no-store",
 		"X-Audio-Format": "s16le",
 		"X-Sample-Rate": String(rate),
 		"X-Channels": "1",
-		// as the core (src/core/audio-stream-server.ts streamHeaders): fetch() from the app's origin reads them
 		"Access-Control-Expose-Headers":
 			"X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
 	})

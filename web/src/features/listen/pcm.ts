@@ -5,16 +5,32 @@
 export type PcmFormat = "s16le" | "f32le"
 
 /** The X-Audio-Format header, else null. */
-export function parsePcmFormat(raw: string | null | undefined): PcmFormat | null {
+export function parsePcmFormat(
+	raw: string | null | undefined,
+): PcmFormat | null {
 	const v = raw?.trim().toLowerCase()
 	return v === "s16le" || v === "f32le" ? v : null
 }
 
 /** A positive integer header value (X-Sample-Rate, X-Channels), else null. */
-export function parsePositiveInt(raw: string | null | undefined): number | null {
+export function parsePositiveInt(
+	raw: string | null | undefined,
+): number | null {
 	if (raw === null || raw === undefined || raw.trim() === "") return null
 	const v = Number(raw)
 	return Number.isInteger(v) && v > 0 ? v : null
+}
+
+/**
+ * A positive sample rate header. The core sends the effective rate unrounded
+ * (`X-Sample-Rate: 24975.60975609756` for 2.048 MS/s ÷ 82), so fractions are kept.
+ */
+export function parsePositiveRate(
+	raw: string | null | undefined,
+): number | null {
+	if (raw === null || raw === undefined || raw.trim() === "") return null
+	const v = Number(raw)
+	return Number.isFinite(v) && v > 0 ? v : null
 }
 
 /**
@@ -52,7 +68,8 @@ export class PcmDecoder {
 		if (this.format === "s16le") {
 			for (let i = 0; i < frames; i++) {
 				let sum = 0
-				for (let c = 0; c < ch; c++) sum += view.getInt16((i * ch + c) * 2, true)
+				for (let c = 0; c < ch; c++)
+					sum += view.getInt16((i * ch + c) * 2, true)
 				out[i] = sum / ch / 32768
 			}
 		} else {
@@ -131,7 +148,10 @@ export class PcmRing {
 	}
 
 	private get max(): number {
-		return Math.max(this.target + 1, Math.round((this.maxMs / 1000) * this.rate))
+		return Math.max(
+			this.target + 1,
+			Math.round((this.maxMs / 1000) * this.rate),
+		)
 	}
 
 	private capacityFor(rate: number): number {

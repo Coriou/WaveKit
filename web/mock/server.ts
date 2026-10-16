@@ -5,12 +5,13 @@
  * Listens on 127.0.0.1:3101 (WAVEKIT_MOCK_PORT) and serves synthetic audio on 3102
  * (WAVEKIT_MOCK_AUDIO_PORT). Type stripping only: no enums, parameter properties or namespaces.
  */
+import { randomUUID } from "node:crypto"
 import type { Server } from "node:http"
 import type { AddressInfo } from "node:net"
 import { pathToFileURL } from "node:url"
 import fastifyWebsocket from "@fastify/websocket"
 import Fastify from "fastify"
-import type { FastifyInstance, FastifyReply } from "fastify"
+import type { FastifyError, FastifyInstance, FastifyReply } from "fastify"
 import type { WebSocket } from "ws"
 import type {
 	ActivityQuery,
@@ -76,6 +77,10 @@ export interface MockServer {
 	}>
 	close(): Promise<void>
 }
+
+/** The core's rtl_tcp frequency range (TunerValidationError beyond it). */
+const TUNER_MIN_HZ = 24_000_000
+const TUNER_MAX_HZ = 1_900_000_000
 
 const CHANNELS = new Set([
 	"decoders",
@@ -424,7 +429,8 @@ export async function buildMockServer(
 			},
 			consumers: list.filter(d => d.running).length + (live.running ? 1 : 0),
 			bytesReceived: bytes,
-			dataRate: SAMPLE_RATE_HZ * 2,
+			// KiB/s, as the core's SourceManager (bytes / 1024 / s)
+			dataRate: (SAMPLE_RATE_HZ * 2) / 1024,
 			reconnectAttempts: 0,
 			caps: {
 				kind: "iq",
@@ -666,7 +672,9 @@ export async function buildMockServer(
 			explicit && parsed.backfillMs > 0
 				? Math.min(
 						SPECTRUM_BACKFILL_MAX_FRAMES,
-						Math.floor(Math.min(parsed.backfillMs, now - epochStartedAt) / periodMs),
+						Math.floor(
+							Math.min(parsed.backfillMs, now - epochStartedAt) / periodMs,
+						),
 					)
 				: null
 		sendProfile(client, {
@@ -764,7 +772,8 @@ export async function buildMockServer(
 			resumeHeldBy: null,
 			id,
 			name: `Identify ${(hz / 1e6).toFixed(5)} MHz`,
-			state: "running",
+			// the core answers the POST before the job starts
+			state: "starting",
 			passive: false,
 			spec: {
 				sourceId: MOCK_SOURCE_ID,
@@ -842,7 +851,6 @@ export async function buildMockServer(
 			},
 			createdAt: now,
 			updatedAt: now,
-			startedAt: now,
 			identify: {
 				target:
 					bandwidthHz !== undefined
@@ -859,7 +867,11 @@ export async function buildMockServer(
 
 		const update = (e: ScannerIdentifyEventData, done = false) => {
 			const current = jobs.get(id)
-			if (!current || current.state !== "running") return
+			if (
+				!current ||
+				(current.state !== "running" && current.state !== "starting")
+			)
+				return
 			current.updatedAt = new Date().toISOString()
 			if (current.identify) current.identify.targets = [e]
 			broadcast("scanner", "scanner:identify", e)
@@ -913,9 +925,16 @@ export async function buildMockServer(
 		const steps = plan.trials.length
 		const finish = () =>
 			update(event(plan.state, trialsAt(steps), resultFor()), true)
-		later(80, () => {
-			broadcast("scanner", "scanner:job", jobs.get(id))
-			update(event("waiting-for-signal", trialsAt(-1)))
+		// The core's order: waiting-for-signal first, then the job turns "running" (about 1 s later on a
+		// real core; compressed here).
+		later(80, () => update(event("waiting-for-signal", trialsAt(-1))))
+		later(300, () => {
+			const current = jobs.get(id)
+			if (!current || current.state !== "starting") return
+			current.state = "running"
+			current.startedAt = new Date().toISOString()
+			current.updatedAt = current.startedAt
+			broadcast("scanner", "scanner:job", current)
 		})
 		if (signal && steps > 0) {
 			later(600, () => update(event("trying", trialsAt(0))))
@@ -931,6 +950,39 @@ export async function buildMockServer(
 
 	const app = Fastify({ logger: false })
 	await app.register(fastifyWebsocket)
+	// Error bodies as the core's (src/api/server.ts setNotFoundHandler / setErrorHandler, legacy mode).
+	app.setNotFoundHandler((request, reply) =>
+		reply.code(404).send({
+			error: "NotFound",
+			code: "NOT_FOUND",
+			message: `Route ${request.method} ${request.url} not found`,
+			correlationId: randomUUID(),
+		}),
+	)
+	app.setErrorHandler((error: FastifyError, _request, reply) => {
+		if (error.validation)
+			return reply.code(400).send({
+				error: "ValidationError",
+				code: "VALIDATION_ERROR",
+				message: error.message,
+				details: error.validation,
+				correlationId: randomUUID(),
+			})
+		const status = error.statusCode ?? 500
+		if (status >= 400 && status < 500)
+			return reply.code(status).send({
+				error: error.name || "ClientError",
+				code: error.code || "CLIENT_ERROR",
+				message: error.message,
+				correlationId: randomUUID(),
+			})
+		return reply.code(500).send({
+			error: "InternalServerError",
+			code: "INTERNAL_ERROR",
+			message: error.message,
+			correlationId: randomUUID(),
+		})
+	})
 
 	const ok = () => ({
 		status: "ok" as const,
@@ -942,19 +994,7 @@ export async function buildMockServer(
 	// GET /api/access/bootstrap is deliberately not mounted: a legacy core answers it with 404.
 
 	app.get("/api/sources", async () => [sourceStatus()])
-	app.get<{ Params: { id: string } }>(
-		"/api/sources/:id",
-		async (request, reply) => {
-			if (request.params.id !== MOCK_SOURCE_ID)
-				return reply
-					.code(404)
-					.send({
-						error: "NotFound",
-						message: `Source not found: ${request.params.id}`,
-					})
-			return sourceStatus()
-		},
-	)
+	// The core has no GET /api/sources/:id (it answers the route-not-found 404 below).
 
 	app.get("/api/decoders", async () => decoders())
 	app.get<{ Params: { id: string } }>(
@@ -962,24 +1002,21 @@ export async function buildMockServer(
 		async (request, reply) => {
 			const found = decoders().find(d => d.id === request.params.id)
 			if (!found)
-				return reply
-					.code(404)
-					.send({
-						error: "NotFound",
-						message: `Decoder not found: ${request.params.id}`,
-					})
+				return reply.code(404).send({
+					error: "NotFound",
+					code: "DECODER_NOT_FOUND",
+					message: `Decoder with id '${request.params.id}' not found`,
+				})
 			return found
 		},
 	)
 
 	const tunerNotFound = (reply: FastifyReply, sourceId: string) =>
-		reply
-			.code(404)
-			.send({
-				error: "NotFound",
-				code: "TUNER_SOURCE_NOT_FOUND",
-				message: `Tuner source not found: ${sourceId}`,
-			})
+		reply.code(404).send({
+			error: "TunerSourceNotFoundError",
+			code: "TUNER_SOURCE_NOT_FOUND",
+			message: `Tuner source not found: ${sourceId}`,
+		})
 
 	app.get("/api/tuner", async () => [tuner])
 	app.get<{ Params: { sourceId: string } }>(
@@ -1005,11 +1042,11 @@ export async function buildMockServer(
 			const { sourceId } = request.params
 			if (sourceId !== MOCK_SOURCE_ID) return tunerNotFound(reply, sourceId)
 			const { hz } = request.body
-			if (hz < 24_000_000 || hz > 1_766_000_000)
+			if (hz < TUNER_MIN_HZ || hz > TUNER_MAX_HZ)
 				return reply.code(400).send({
-					error: "WaveKitError",
-					code: "TUNER_FREQUENCY_OUT_OF_RANGE",
-					message: `Frequency ${hz} Hz is outside the tuner range (24–1766 MHz)`,
+					error: "TunerValidationError",
+					code: "TUNER_VALIDATION_ERROR",
+					message: `frequency out of range: ${hz} (expected ${TUNER_MIN_HZ}-${TUNER_MAX_HZ})`,
 				})
 			const before = new Map(decoders().map(d => [d.id, d.suspended]))
 			if (hz !== tuner.frequency) {
@@ -1065,8 +1102,14 @@ export async function buildMockServer(
 	app.patch<{ Body: unknown }>(
 		"/api/live-audio/config",
 		async (request, reply) => {
+			// Type and range errors come from the core's route schema (VALIDATION_ERROR).
 			const bad = (message: string) =>
-				reply.code(400).send({ error: "Bad Request", message })
+				reply.code(400).send({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message,
+					correlationId: randomUUID(),
+				})
 			const body = request.body
 			if (!isRecord(body)) return bad("body must be an object")
 			const next: LiveAudioConfig = { ...live.config }
@@ -1075,10 +1118,13 @@ export async function buildMockServer(
 				min: number,
 				max: number,
 			): number | undefined | string => {
+				// worded as the core's schema validation (ajv) words it
 				const v = body[key]
 				if (v === undefined) return undefined
-				if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max)
-					return `${key}: must be a number between ${min} and ${max}`
+				if (typeof v !== "number" || !Number.isFinite(v))
+					return `body/${key} must be number`
+				if (v < min) return `body/${key} must be >= ${min}`
+				if (v > max) return `body/${key} must be <= ${max}`
 				return v
 			}
 			for (const [key, min, max] of [
@@ -1088,7 +1134,7 @@ export async function buildMockServer(
 				["lowPass", 0, 24_000],
 				["highPass", 0, 24_000],
 				["gain", 0, 100],
-				["offsetHz", -SAMPLE_RATE_HZ / 2, SAMPLE_RATE_HZ / 2],
+				["offsetHz", -Infinity, Infinity],
 			] as const) {
 				const v = num(key, min, max)
 				if (typeof v === "string") return bad(v)
@@ -1144,11 +1190,15 @@ export async function buildMockServer(
 			}
 			if (body["sourceId"] !== undefined && body["sourceId"] !== MOCK_SOURCE_ID)
 				return bad("sourceId: unknown source")
+			// The core's channel check (src/decoders/csdr-stages.ts validateChannelOffset), answered as the
+			// core's live-audio route does: 400 "Bad Request" without a code.
 			const offset = next.offsetHz ?? 0
-			if (Math.abs(offset) + next.bandwidth / 2 > SAMPLE_RATE_HZ / 2)
-				return bad(
-					`Channel offset ${offset} Hz is outside the capture window of ±${SAMPLE_RATE_HZ / 2} Hz`,
-				)
+			const limit = SAMPLE_RATE_HZ / 2 - next.bandwidth / 2
+			if (Math.abs(offset) > limit)
+				return reply.code(400).send({
+					error: "Bad Request",
+					message: `offsetHz ${offset} puts the channel outside the ${SAMPLE_RATE_HZ} Hz capture (limit ±${Math.floor(limit)} Hz)`,
+				})
 			live.config = next
 			broadcast("live-audio", "live-audio:config", liveStatus().config)
 			broadcast("live-audio", "live-audio:status", liveStatus())
@@ -1214,13 +1264,12 @@ export async function buildMockServer(
 		async (request, reply) => {
 			const { sourceId, target, timeoutMs } = request.body
 			if (sourceId !== undefined && sourceId !== MOCK_SOURCE_ID)
-				return reply
-					.code(404)
-					.send({
-						error: "ScannerApiError",
-						code: "SOURCE_NOT_FOUND",
-						message: `Unknown source ${sourceId}`,
-					})
+				return reply.code(400).send({
+					error: "WaveKitError",
+					code: "SCANNER_SOURCE_NOT_FOUND",
+					message: `unknown scanner source ${sourceId}`,
+					correlationId: randomUUID(),
+				})
 			// Identify of the whole window: the mock answers for the strongest signal in it.
 			const centre = tuner.frequency
 			const half = (SAMPLE_RATE_HZ * USABLE_FRACTION) / 2
@@ -1245,13 +1294,11 @@ export async function buildMockServer(
 		async (request, reply) => {
 			const job = jobs.get(request.params.id)
 			if (!job)
-				return reply
-					.code(404)
-					.send({
-						error: "ScannerApiError",
-						code: "JOB_NOT_FOUND",
-						message: "Job not found",
-					})
+				return reply.code(404).send({
+					error: "NotFound",
+					code: "SCANNER_NOT_FOUND",
+					message: `Job ${request.params.id} not found`,
+				})
 			return job
 		},
 	)
@@ -1264,32 +1311,26 @@ export async function buildMockServer(
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : "Invalid activity query"
-			return reply
-				.code(400)
-				.send({
-					error: "ActivityQueryError",
-					code: "ACTIVITY_QUERY_INVALID",
-					message,
-				})
+			return reply.code(400).send({
+				error: "ActivityQueryError",
+				code: "ACTIVITY_QUERY_INVALID",
+				message,
+			})
 		}
 		const order = params["order"] ?? "desc"
 		if (order !== "asc" && order !== "desc")
-			return reply
-				.code(400)
-				.send({
-					error: "ActivityQueryError",
-					code: "ACTIVITY_QUERY_INVALID",
-					message: "order must be asc or desc",
-				})
+			return reply.code(400).send({
+				error: "ActivityQueryError",
+				code: "ACTIVITY_QUERY_INVALID",
+				message: "order must be asc or desc",
+			})
 		const limit = params["limit"] === undefined ? 100 : Number(params["limit"])
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
-			return reply
-				.code(400)
-				.send({
-					error: "ActivityQueryError",
-					code: "ACTIVITY_QUERY_INVALID",
-					message: "limit must be an integer from 1 to 500",
-				})
+			return reply.code(400).send({
+				error: "ActivityQueryError",
+				code: "ACTIVITY_QUERY_INVALID",
+				message: "limit must be an integer from 1 to 500",
+			})
 		const highWater = activity[activity.length - 1]?.commitSeq ?? "0"
 		let snapshotTop = Number(highWater)
 		let offset = 0
@@ -1298,13 +1339,11 @@ export async function buildMockServer(
 			const match =
 				typeof token === "string" ? /^p:(\d+):(\d+)$/.exec(token) : null
 			if (!match)
-				return reply
-					.code(400)
-					.send({
-						error: "ActivityQueryError",
-						code: "ACTIVITY_QUERY_INVALID",
-						message: "Invalid pageToken",
-					})
+				return reply.code(400).send({
+					error: "ActivityQueryError",
+					code: "ACTIVITY_QUERY_INVALID",
+					message: "Invalid pageToken",
+				})
 			offset = Number(match[1])
 			snapshotTop = Number(match[2])
 		}

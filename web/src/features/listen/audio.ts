@@ -1,6 +1,7 @@
 // Listen island logic (docs/web/canvas/Listen.dc.html; DESIGN.md "Audio follows tuning", "Squelch UX"). Pure.
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
+import { proxiedAudioUrl } from "./audio-proxy.ts"
 import type { PcmFormat } from "./pcm.ts"
 
 /** The squelch bar's scale, as the Listen board. */
@@ -32,14 +33,20 @@ export interface AudioStreamSource {
 	rate: number
 }
 
-/** The stream to play; null while live audio is stopped or has no URL. */
+/**
+ * The stream to play; null while live audio is stopped or has no URL. `proxyPrefix` (development):
+ * cross-origin URLs go through the dev server's audio proxy (./audio-proxy.ts).
+ */
 export function audioSource(
 	status: LiveAudioStatus | null,
 	base: string,
+	proxyPrefix: string | null = null,
 ): AudioStreamSource | null {
 	if (!status?.running) return null
-	const httpUrl = absolute(status.httpUrl, base)
-	const wavUrl = absolute(status.wavUrl, base)
+	const via = (url: string | null) =>
+		url === null ? null : proxiedAudioUrl(url, base, proxyPrefix)
+	const httpUrl = via(absolute(status.httpUrl, base))
+	const wavUrl = via(absolute(status.wavUrl, base))
 	if (!httpUrl && !wavUrl) return null
 	return {
 		httpUrl,
@@ -55,7 +62,9 @@ export function audioSource(
  * stream already follows tuning (audio follows tuning), and a reattach costs the start-up latency.
  * Null means nothing to play.
  */
-export function audioAttachKey(source: AudioStreamSource | null): string | null {
+export function audioAttachKey(
+	source: AudioStreamSource | null,
+): string | null {
 	if (!source) return null
 	return `${source.httpUrl ?? ""}|${source.wavUrl ?? ""}|${source.format}|${source.rate}`
 }

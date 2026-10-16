@@ -89,18 +89,41 @@ describe("mock server REST", () => {
 			DecoderInfo[]
 		>()
 		expect(decoders.find(d => d.id === "rtl433-433")?.suspended).toBe(false)
-		expect(
-			(await inject("POST", "/api/tuner/rtl-0/frequency", { hz: "x" }))
-				.statusCode,
-		).toBe(400)
+		// error bodies as a real core sends them (lot C7)
+		const invalid = await inject("POST", "/api/tuner/rtl-0/frequency", {
+			hz: "x",
+		})
+		expect(invalid.statusCode).toBe(400)
+		expect(invalid.json()).toMatchObject({
+			error: "ValidationError",
+			code: "VALIDATION_ERROR",
+			message: "body/hz must be integer",
+		})
+		expect(invalid.json()).toHaveProperty("details")
+		expect(invalid.json()).toHaveProperty("correlationId")
 		const range = await inject("POST", "/api/tuner/rtl-0/frequency", {
 			hz: 5_000_000_000,
 		})
 		expect(range.statusCode).toBe(400)
-		expect(range.json()).toMatchObject({ code: "TUNER_FREQUENCY_OUT_OF_RANGE" })
+		expect(range.json()).toEqual({
+			error: "TunerValidationError",
+			code: "TUNER_VALIDATION_ERROR",
+			message:
+				"frequency out of range: 5000000000 (expected 24000000-1900000000)",
+		})
 		const missing = await inject("GET", "/api/tuner/nope")
 		expect(missing.statusCode).toBe(404)
-		expect(missing.json()).toMatchObject({ code: "TUNER_SOURCE_NOT_FOUND" })
+		expect(missing.json()).toMatchObject({
+			error: "TunerSourceNotFoundError",
+			code: "TUNER_SOURCE_NOT_FOUND",
+		})
+		const route = await inject("GET", "/api/sources/rtl-0")
+		expect(route.statusCode).toBe(404)
+		expect(route.json()).toMatchObject({
+			error: "NotFound",
+			code: "NOT_FOUND",
+			message: "Route GET /api/sources/rtl-0 not found",
+		})
 		await inject("POST", "/api/tuner/rtl-0/frequency", { hz: 161_500_000 })
 	})
 
@@ -165,11 +188,13 @@ describe("mock server REST", () => {
 		})
 		expect(created.statusCode).toBe(201)
 		const job = created.json<ScanJob>()
+		// a real core answers before the job starts
 		expect(job).toMatchObject({
-			state: "running",
+			state: "starting",
 			spec: { kind: "identify" },
 			identify: { targets: [{ state: "waiting-for-signal" }] },
 		})
+		expect(job.startedAt).toBeUndefined()
 		expect(
 			(await inject("GET", `/api/scanner/jobs/${job.id}`)).statusCode,
 		).toBe(200)
@@ -178,10 +203,25 @@ describe("mock server REST", () => {
 		})
 		expect(out.statusCode).toBe(409)
 		expect(out.json()).toMatchObject({ code: "OUT_OF_WINDOW" })
-		expect(
-			(await inject("POST", "/api/scanner/identify", { target: {} }))
-				.statusCode,
-		).toBe(400)
+		const empty = await inject("POST", "/api/scanner/identify", { target: {} })
+		expect(empty.statusCode).toBe(400)
+		expect(empty.json()).toMatchObject({ code: "VALIDATION_ERROR" })
+		const source = await inject("POST", "/api/scanner/identify", {
+			sourceId: "nope",
+			target: { frequencyHz: 161_150_000 },
+		})
+		expect(source.statusCode).toBe(400)
+		expect(source.json()).toMatchObject({
+			error: "WaveKitError",
+			code: "SCANNER_SOURCE_NOT_FOUND",
+		})
+		const gone = await inject("GET", "/api/scanner/jobs/nope")
+		expect(gone.statusCode).toBe(404)
+		expect(gone.json()).toEqual({
+			error: "NotFound",
+			code: "SCANNER_NOT_FOUND",
+			message: "Job nope not found",
+		})
 	})
 
 	it("pages activity newest first with filters", async () => {
@@ -297,18 +337,22 @@ describe("mock server WebSocket and audio", () => {
 			profile: { key: "20:512", hz: 20, bins: 512 },
 		})
 		const first = (await snapshot).data as SpectrumFrameEventData
+		// as a real core: only the usable 80 % of the 2.4 MHz capture, max-reduced to at most 512 bins
 		expect(first).toMatchObject({
 			snapshot: true,
-			binCount: 512,
+			binCount: 410,
 			centerHz: 161_500_000,
-			startHz: 160_300_000,
+			startHz: 160_539_648,
 			binHz: 4687.5,
 			binEncoding: "u8-halfdb-127.5",
 		})
+		const span = first.binCount * first.binHz
+		expect(span).toBeGreaterThan(2_400_000 * 0.8 - first.binHz)
+		expect(span).toBeLessThan(2_400_000 * 0.8 + first.binHz)
 		const bytes = Buffer.from(first.bins, "base64")
-		expect(bytes).toHaveLength(512)
+		expect(bytes).toHaveLength(410)
 		const db = [...bytes].map(v => v / 2 - 127.5)
-		const median = [...db].sort((a, b) => a - b)[256] ?? 0
+		const median = [...db].sort((a, b) => a - b)[205] ?? 0
 		expect(median).toBeGreaterThan(-115)
 		expect(median).toBeLessThan(-104)
 		// AIS A at 161.975 MHz is bursty; the steady carrier at 160.900 MHz is always there.
@@ -370,7 +414,12 @@ describe("mock server WebSocket and audio", () => {
 				type: "subscribe",
 				channels: ["spectrum"],
 				options: {
-					spectrum: { sourceId: "rtl-0", hz: 20, bins: 256, backfillMs: 10_000 },
+					spectrum: {
+						sourceId: "rtl-0",
+						hz: 20,
+						bins: 256,
+						backfillMs: 10_000,
+					},
 				},
 			}),
 		)
@@ -439,6 +488,17 @@ describe("mock server WebSocket and audio", () => {
 			.map(m => (m.data as ScannerIdentifyEventData).state)
 		expect(states[0]).toBe("waiting-for-signal")
 		expect(states).toContain("trying")
+		// a real core's order: waiting-for-signal, then the job turns running
+		const ofJob = inbox.messages.filter(
+			m =>
+				(m.type === "scanner:identify" &&
+					(m.data as ScannerIdentifyEventData).jobId === job.id) ||
+				(m.type === "scanner:job" && (m.data as ScanJob).id === job.id),
+		)
+		expect(ofJob[0]?.type).toBe("scanner:identify")
+		const running = ofJob.find(m => m.type === "scanner:job")
+		expect((running?.data as ScanJob | undefined)?.state).toBe("running")
+		expect((running?.data as ScanJob | undefined)?.startedAt).toBeDefined()
 		const output = await inbox.next(m => m.type === "decoder:output")
 		expect(output.channel).toBe("decoders")
 		const fed = await inbox.next(m => m.type === "activity:records")
@@ -447,7 +507,8 @@ describe("mock server WebSocket and audio", () => {
 	})
 
 	it("serves a streaming WAV while live audio runs", async () => {
-		expect((await fetch(`${audio}/stream.wav`)).status).toBe(503)
+		// stopped: the core's audio server is not listening, so the request fails outright
+		await expect(fetch(`${audio}/stream.wav`)).rejects.toThrow()
 		await fetch(`${api}/api/live-audio/start`, { method: "POST" })
 		const controller = new AbortController()
 		const res = await fetch(`${audio}/stream.wav`, {
@@ -455,6 +516,11 @@ describe("mock server WebSocket and audio", () => {
 		})
 		expect(res.status).toBe(200)
 		expect(res.headers.get("x-sample-rate")).toBe("16000")
+		// like the core: headers exposed, but no Access-Control-Allow-Origin (the dev server proxies it)
+		expect(res.headers.get("access-control-allow-origin")).toBeNull()
+		expect(res.headers.get("access-control-expose-headers")).toContain(
+			"X-Sample-Rate",
+		)
 		const reader = res.body?.getReader()
 		const chunk = await reader?.read()
 		const head = Buffer.from(chunk?.value ?? new Uint8Array())

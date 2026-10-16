@@ -21,12 +21,14 @@ import {
 	SpectrumCanvas,
 	type SpectrumEngineStatus,
 	type SpectrumFrameMeta,
+	type SpectrumLevels,
 	type SpectrumViewSpan,
 } from "../spectrum/index.ts"
 import { IconButton } from "../ui/index.ts"
 import {
 	type PlacedLabel,
 	type Track,
+	autoLevels,
 	dbTicks,
 	describeTracks,
 	formatMHz,
@@ -82,6 +84,8 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const plotState = useStore(controller.store)
 
 	const [meta, setMeta] = useState<SpectrumFrameMeta | null>(null)
+	// the scale follows the core's noise floor (frames carry floorDbfs)
+	const [levels, setLevels] = useState<SpectrumLevels>(DEFAULT_LEVELS)
 	const [engineError, setEngineError] = useState<string | null>(null)
 	const heldRef = useRef<{ track: Track; seenAt: number }[]>([])
 	const [tracks, setTracks] = useState<readonly Track[]>([])
@@ -149,11 +153,11 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	controller.setContext(context)
 
 	const layout = plotLayout(size.h)
-	const levels = DEFAULT_LEVELS
 	const unverified = shownMeta?.tuningTrust === "unverified"
 
 	const onFrameMeta = (m: SpectrumFrameMeta) => {
 		setMeta(m)
+		setLevels(prev => autoLevels(m.floorDbfs, prev))
 		heldRef.current = holdTracks(
 			heldRef.current,
 			m.tracks,

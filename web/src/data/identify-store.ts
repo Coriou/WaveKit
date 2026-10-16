@@ -136,6 +136,21 @@ export class IdentifyStore extends Store<IdentifyState> {
 				null
 			this.update(s => ({ ...s, job, event: event ?? s.event }))
 		} catch (error) {
+			if (this.get().job?.id !== id) return
+			// A restarted core has lost the job (404 SCANNER_NOT_FOUND). A final answer already shown
+			// stays; one still in progress ends as an error instead of "Trying decoders" forever.
+			if (isApiError(error) && error.status === 404) {
+				if (isIdentifyFinal(this.get().event?.state)) return
+				this.update(s => ({
+					...s,
+					job: null,
+					event: null,
+					error:
+						"The receiver restarted and this identify was lost. Try again.",
+					errorCode: error.code,
+				}))
+				return
+			}
 			this.update(s => ({ ...s, error: errorMessage(error) }))
 		}
 	}

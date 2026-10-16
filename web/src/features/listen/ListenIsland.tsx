@@ -23,6 +23,7 @@ import {
 	squelchSetting,
 	squelchThreshold,
 } from "./audio.ts"
+import { AUDIO_PROXY_PREFIX } from "./audio-proxy.ts"
 import type { ListenPhase } from "./controller.ts"
 
 /** The page's audio output, bound to the listen controller; reattaches when the stream itself changes. */
@@ -31,7 +32,12 @@ export function AudioOutput() {
 	const status = useLiveStatus()
 	const base =
 		typeof location === "undefined" ? "http://localhost/" : location.href
-	const source = audioSource(status, base)
+	// The dev server proxies the core's audio port (a legacy core sends no CORS header for it).
+	const source = audioSource(
+		status,
+		base,
+		import.meta.env.DEV ? AUDIO_PROXY_PREFIX : null,
+	)
 	const key = audioAttachKey(source)
 	// the source object is rebuilt every render; the key says when it really changed
 	useEffect(() => listen.setSource(key, source), [listen, key])

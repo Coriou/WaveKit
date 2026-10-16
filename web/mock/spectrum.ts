@@ -12,6 +12,7 @@ import {
 	NOISE_FLOOR_DBFS,
 	SAMPLE_RATE_HZ,
 	signalActive,
+	USABLE_FRACTION,
 } from "./data.ts"
 import type { MockSignal } from "./data.ts"
 
@@ -21,6 +22,38 @@ export const SPECTRUM_BACKFILL_MAX_MS = 10_000
 export const SPECTRUM_BACKFILL_MAX_FRAMES = 64
 export const SPECTRUM_DEFAULT_BINS = 1024
 export const SPECTRUM_FFT_SIZE = 8192
+/** Core `scanner.ws.spectrumSummaryBins` default: the engine's per-source summary budget. */
+export const SPECTRUM_SUMMARY_BINS = 2048
+
+/** Where a frame's bins sit, as the real core lays them out. */
+export interface FrameGeometry {
+	startHz: number
+	binHz: number
+	binCount: number
+	/** The engine summary's bin width: track edges sit on this grid. */
+	summaryBinHz: number
+}
+
+/**
+ * Frame geometry like the core's (src/core/spectrum/spectrum-service.ts frame()): a frame covers only
+ * the usable share of the capture (USABLE_FRACTION, 80 %: the edges are filter roll-off), from the
+ * engine's summary (FFT bins grouped down to SPECTRUM_SUMMARY_BINS), max-reduced by a whole factor to at
+ * most `bins` bins. So binCount is usually below the bins asked for (820 for 1024 on a real core).
+ */
+export function frameGeometry(centerHz: number, bins: number): FrameGeometry {
+	const nativeBinHz = SAMPLE_RATE_HZ / SPECTRUM_FFT_SIZE
+	const native = Math.floor((SAMPLE_RATE_HZ * USABLE_FRACTION) / nativeBinHz)
+	const group = Math.max(1, Math.ceil(native / SPECTRUM_SUMMARY_BINS))
+	const summaryCount = Math.ceil(native / group)
+	const summaryBinHz = nativeBinHz * group
+	const factor = Math.max(1, Math.ceil(summaryCount / Math.max(1, bins)))
+	return {
+		startHz: Math.round(centerHz - (summaryCount * summaryBinHz) / 2),
+		binHz: summaryBinHz * factor,
+		binCount: Math.ceil(summaryCount / factor),
+		summaryBinHz,
+	}
+}
 
 interface Hump {
 	signal: MockSignal
@@ -28,9 +61,7 @@ interface Hump {
 	levels: Float32Array
 }
 
-interface Layout {
-	startHz: number
-	binHz: number
+interface Layout extends FrameGeometry {
 	humps: Hump[]
 	dcBin: number
 }
@@ -56,9 +87,9 @@ function layout(centerHz: number, bins: number): Layout {
 	const key = `${centerHz}:${bins}`
 	const cached = layouts.get(key)
 	if (cached) return cached
-	const binHz = SAMPLE_RATE_HZ / bins
-	const startHz = centerHz - SAMPLE_RATE_HZ / 2
-	const endHz = startHz + SAMPLE_RATE_HZ
+	const geometry = frameGeometry(centerHz, bins)
+	const { startHz, binHz, binCount } = geometry
+	const endHz = startHz + binCount * binHz
 	const humps: Hump[] = []
 	for (const signal of MOCK_SIGNALS) {
 		const half = signal.bwHz / 2
@@ -66,7 +97,7 @@ function layout(centerHz: number, bins: number): Layout {
 		if (signal.hz + reach < startHz || signal.hz - reach > endHz) continue
 		const first = Math.max(0, Math.floor((signal.hz - reach - startHz) / binHz))
 		const last = Math.min(
-			bins - 1,
+			binCount - 1,
 			Math.ceil((signal.hz + reach - startHz) / binHz),
 		)
 		if (last < first) continue
@@ -82,10 +113,12 @@ function layout(centerHz: number, bins: number): Layout {
 		humps.push({ signal, first, levels })
 	}
 	const result: Layout = {
-		startHz,
-		binHz,
+		...geometry,
 		humps,
-		dcBin: Math.min(bins - 1, Math.floor(bins / 2)),
+		dcBin: Math.min(
+			binCount - 1,
+			Math.max(0, Math.floor((centerHz - startHz) / binHz)),
+		),
 	}
 	if (layouts.size > 32) layouts.clear()
 	layouts.set(key, result)
@@ -112,8 +145,9 @@ export interface FrameInput {
 
 /** One `spectrum:frame` payload. */
 export function synthFrame(input: FrameInput): SpectrumFrameEventData {
-	const { bins, centerHz } = input
-	const lay = layout(centerHz, bins)
+	const { centerHz } = input
+	const lay = layout(centerHz, input.bins)
+	const bins = lay.binCount
 	const random = input.random ?? Math.random
 	const tSec = input.nowMs / 1000
 	const levels = new Float32Array(bins)
@@ -133,9 +167,20 @@ export function synthFrame(input: FrameInput): SpectrumFrameEventData {
 			const v = (hump.levels[j] ?? -200) + wobble
 			if (v > (levels[i] ?? 0)) levels[i] = v
 		}
-		const endHz = lay.startHz + SAMPLE_RATE_HZ
-		const lo = Math.max(signal.hz - signal.bwHz / 2, lay.startHz)
-		const hi = Math.min(signal.hz + signal.bwHz / 2, endHz)
+		// Track edges on the summary bin grid, as the core measures them (so a carrier on a round
+		// frequency reads a few hundred Hz off: the grid starts at the frame's startHz).
+		const endHz = lay.startHz + bins * lay.binHz
+		const grid = lay.summaryBinHz
+		const lo = Math.max(
+			lay.startHz +
+				Math.floor((signal.hz - signal.bwHz / 2 - lay.startHz) / grid) * grid,
+			lay.startHz,
+		)
+		const hi = Math.min(
+			lay.startHz +
+				Math.ceil((signal.hz + signal.bwHz / 2 - lay.startHz) / grid) * grid,
+			endHz,
+		)
 		if (lo < hi)
 			tracks.push({
 				startHz: Math.round(lo),
@@ -152,7 +197,7 @@ export function synthFrame(input: FrameInput): SpectrumFrameEventData {
 		bytes[i] = encode(levels[i] ?? NOISE_FLOOR_DBFS)
 	const frame: SpectrumFrameEventData = {
 		sourceId: input.sourceId,
-		profile: `${input.hz}:${bins}`,
+		profile: `${input.hz}:${input.bins}`,
 		epoch: input.epoch,
 		tuningTrust: "commanded",
 		centerHz,
@@ -225,8 +270,14 @@ export function normaliseSpectrumOptions(
 	}
 	let backfillMs = 0
 	if (o["backfillMs"] !== undefined) {
-		if (typeof o["backfillMs"] !== "number" || !Number.isFinite(o["backfillMs"]))
-			return { ok: false, message: "options.spectrum.backfillMs must be a number" }
+		if (
+			typeof o["backfillMs"] !== "number" ||
+			!Number.isFinite(o["backfillMs"])
+		)
+			return {
+				ok: false,
+				message: "options.spectrum.backfillMs must be a number",
+			}
 		backfillMs = Math.min(
 			SPECTRUM_BACKFILL_MAX_MS,
 			Math.max(0, Math.round(o["backfillMs"])),
