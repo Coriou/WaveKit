@@ -2,7 +2,6 @@ import type {
 	ReceiverCapabilities,
 	ReceiverCapabilitiesPage,
 } from "@wavekit/api-types"
-import { RECEIVER_SAMPLE_RATE_PRESETS_HZ } from "@wavekit/api-types"
 import {
 	prepareReceiverPolicy,
 	projectReceiverControls,
@@ -16,6 +15,8 @@ import {
 	isReceiverToken,
 	receiverCapabilitiesPageSchema,
 	receiverCapabilitiesSchema,
+	sampleRatePresetsCoherent,
+	sampleRatePresetsWithin,
 	receiverEvidenceSchema,
 	RECEIVER_CAPABILITIES_LIMITS,
 } from "./types.js"
@@ -157,6 +158,7 @@ function project(
 	if (!parsed.success || !coherentEvidence(parsed.data))
 		return failure("CONFLICT")
 	const e = parsed.data
+	const controls = projectReceiverControls(policy, e.source.type === "rtl_tcp")
 	const dto = {
 		schemaVersion: 1 as const,
 		sourceId: e.sourceId,
@@ -174,7 +176,7 @@ function project(
 					: new Date(e.delivery.lastSampleAt).toISOString(),
 		},
 		peerHeader: projectReceiverHeader(e),
-		controls: projectReceiverControls(policy, e.source.type === "rtl_tcp"),
+		controls,
 		declaredStream: {
 			provenance: "source-config-or-core-metadata" as const,
 			sampleRateHz: e.caps.sampleRate,
@@ -185,7 +187,11 @@ function project(
 				? {
 						state: "suggested" as const,
 						provenance: "wavekit-rtl-rate-presets" as const,
-						valuesHz: RECEIVER_SAMPLE_RATE_PRESETS_HZ,
+						// Only the frozen presets inside this item's validated sampleRate rule.
+						valuesHz: sampleRatePresetsWithin(
+							controls.find(c => c.id === "sampleRate")?.command.validation
+								.rule,
+						),
 					}
 				: {
 						state: "not-applicable" as const,
@@ -193,7 +199,8 @@ function project(
 					},
 	}
 	const validated = receiverCapabilitiesSchema.safeParse(dto)
-	if (!validated.success) return failure("CONFLICT")
+	if (!validated.success || !sampleRatePresetsCoherent(validated.data))
+		return failure("CONFLICT")
 	if (
 		Buffer.byteLength(JSON.stringify(validated.data), "utf8") >
 		RECEIVER_CAPABILITIES_LIMITS.itemBytes

@@ -4,6 +4,7 @@ import type {
 	FastifyReply,
 	FastifyRequest,
 } from "fastify"
+import { RECEIVER_SAMPLE_RATE_PRESETS_HZ } from "@wavekit/api-types"
 import type {
 	ReceiverCapabilities,
 	ReceiverCapabilitiesErrorCode,
@@ -14,6 +15,7 @@ import {
 	isReceiverSourceId,
 	receiverCapabilitiesPageSchema,
 	receiverCapabilitiesSchema,
+	sampleRatePresetsCoherent,
 	RECEIVER_CAPABILITIES_LIMITS,
 } from "../../core/tuner-capabilities/types.js"
 import type { ReceiverCapabilitiesProvider } from "../../core/tuner-capabilities/types.js"
@@ -161,6 +163,7 @@ function sameData(left: unknown, right: unknown): boolean {
  */
 function coherentItem(dto: ReceiverCapabilities): boolean {
 	const { source, connection, delivery, peerHeader } = dto
+	if (!sampleRatePresetsCoherent(dto)) return false
 	if (
 		dto.sourceIncarnation === dto.snapshotId ||
 		dto.sessionId === dto.snapshotId ||
@@ -508,8 +511,9 @@ const capabilities = closed({
 				provenance: literal("wavekit-rtl-rate-presets"),
 				valuesHz: {
 					type: "array",
-					maxItems: 11,
-					items: { ...integer, minimum: 1 },
+					maxItems: RECEIVER_SAMPLE_RATE_PRESETS_HZ.length,
+					uniqueItems: true,
+					items: { ...integer, enum: [...RECEIVER_SAMPLE_RATE_PRESETS_HZ] },
 				},
 			}),
 			closed({

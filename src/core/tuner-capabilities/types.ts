@@ -1,3 +1,4 @@
+import { RECEIVER_SAMPLE_RATE_PRESETS_HZ } from "@wavekit/api-types"
 import { z } from "zod"
 import type {
 	ReceiverCapabilities,
@@ -388,7 +389,13 @@ const sampleRatePresetsSchema = z.discriminatedUnion("state", [
 		.object({
 			state: z.literal("suggested"),
 			provenance: z.literal("wavekit-rtl-rate-presets"),
-			valuesHz: z.array(positiveInteger.max(Number.MAX_SAFE_INTEGER)).max(11),
+			valuesHz: z
+				.array(
+					positiveInteger.refine(hz =>
+						RECEIVER_SAMPLE_RATE_PRESETS_HZ.includes(hz),
+					),
+				)
+				.max(RECEIVER_SAMPLE_RATE_PRESETS_HZ.length),
 		})
 		.strict(),
 	z
@@ -398,7 +405,23 @@ const sampleRatePresetsSchema = z.discriminatedUnion("state", [
 		})
 		.strict(),
 ])
-export const receiverCapabilitiesSchema = z
+/**
+ * WG6 req 8.1: the frozen RTL presets that lie inside the sampleRate command's validated
+ * rule, in frozen order. A rule of another kind admits none (fail closed).
+ */
+export function sampleRatePresetsWithin(
+	rule: ReceiverCommandValidation | undefined,
+): readonly number[] {
+	const inside = (hz: number): boolean => {
+		if (rule?.kind === "integer-range") return hz >= rule.min && hz <= rule.max
+		if (rule?.kind === "integer-ranges")
+			return rule.ranges.some(r => hz >= r.min && hz <= r.max)
+		return false
+	}
+	return Object.freeze(RECEIVER_SAMPLE_RATE_PRESETS_HZ.filter(inside))
+}
+
+const receiverCapabilitiesObjectSchema = z
 	.object({
 		schemaVersion: z.literal(1),
 		sourceId,
@@ -484,6 +507,30 @@ export const receiverCapabilitiesSchema = z
 		sampleRatePresets: sampleRatePresetsSchema,
 	})
 	.strict()
+
+export const receiverCapabilitiesSchema = receiverCapabilitiesObjectSchema
+
+/**
+ * Presets correlation (checked with the other item correlations, failure is CONFLICT):
+ * `suggested` exactly on rtl_tcp sources, and its valuesHz equal, in order, to the
+ * frozen presets inside the item's own sampleRate validation rule.
+ */
+export function sampleRatePresetsCoherent(
+	item: Pick<ReceiverCapabilities, "source" | "controls" | "sampleRatePresets">,
+): boolean {
+	const presets = item.sampleRatePresets
+	if (presets === undefined) return false
+	if ((item.source.type === "rtl_tcp") !== (presets.state === "suggested"))
+		return false
+	if (presets.state !== "suggested") return true
+	const rule = item.controls.find(c => c.id === "sampleRate")?.command
+		.validation.rule
+	const expected = sampleRatePresetsWithin(rule)
+	return (
+		presets.valuesHz.length === expected.length &&
+		presets.valuesHz.every((hz, i) => hz === expected[i])
+	)
+}
 
 export const receiverCapabilitiesPageSchema = z
 	.object({

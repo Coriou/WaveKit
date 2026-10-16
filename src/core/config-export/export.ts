@@ -50,11 +50,105 @@ export const CONFIG_EXPORT_MAX_NODES = 200_000
  * - Outside decoder options, only keys declared by a ZodObject shape are kept. Keys of
  *   a ZodRecord, unknown keys and keys of unclassifiable objects become
  *   `<redacted-N>` (N = 1-based position in that object), values walked fail closed.
- * - Inside decoder options (a free record of option names), a key is kept only when it
- *   looks like an option identifier (OPTION_KEY_PATTERN); any other key becomes
- *   `<redacted-N>`.
+ * - Inside decoder options (a free record), at any depth, a key is kept only when it is
+ *   in a finite trusted set: CONFIG_EXPORT_OPTION_ALLOWLIST, the decoder type's secret
+ *   option keys (their values are redacted anyway) and BUILTIN_OPTION_KEYS. Any other
+ *   key becomes `<redacted-N>`, so a record keyed by host or call sign never leaks.
  */
-const OPTION_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/
+
+/**
+ * Option key names the built-in adapters under src/decoders/ actually read (from
+ * `config.options[...]`, typed option parsers and option schemas), one global set.
+ * Update when an adapter starts reading a new option; an unlisted key is only
+ * renamed to `<redacted-N>` in the export, never dropped.
+ */
+export const BUILTIN_OPTION_KEYS: readonly string[] = Object.freeze([
+	"agwPort",
+	"analyze",
+	"audioDevice",
+	"bandwidth",
+	"bw",
+	"callsign",
+	"callStartDelayMs",
+	"callTimeoutMs",
+	"channelHz",
+	"channelKey",
+	"charset",
+	"codingRate",
+	"cr",
+	"debugRecordPath",
+	"debugRecordStages",
+	"device",
+	"deviceSerial",
+	"dmr",
+	"dstar",
+	"emitDebugEvents",
+	"enableIqAgc",
+	"enableMlat",
+	"enablePerCallRecording",
+	"extraArgs",
+	"fillBits",
+	"filters",
+	"highpass",
+	"lowpass",
+	"gain",
+	"flags",
+	"fmGain",
+	"followCenter",
+	"format",
+	"frequencies",
+	"frequency",
+	"inputCenterFreq",
+	"inputIqFormat",
+	"inputSampleRate",
+	"kissPort",
+	"lat",
+	"lon",
+	"minCallDurationMs",
+	"mode",
+	"modes",
+	"nxdn",
+	"offsetHz",
+	"output",
+	"outputFormat",
+	"outputPort",
+	"oversampling",
+	"p25",
+	"perCallRecordingDir",
+	"perCallRecordingMaxAgeHours",
+	"perCallRecordingMaxTotalMb",
+	"perCallRecordingPrune",
+	"ppm",
+	"preset",
+	"protocol",
+	"protocols",
+	"quality",
+	"region",
+	"rtlTcpHost",
+	"rtlTcpPort",
+	"sampleRate",
+	"sf",
+	"slot",
+	"spreadingFactor",
+	"spyServerHost",
+	"spyServerPort",
+	"stateDir",
+	"talkgroup",
+	"targetSampleRate",
+	"udpHost",
+	"udpPort",
+	"verbosity",
+	"voiceSlot",
+	"wavDir",
+	"ysf",
+])
+const builtinOptionKeys = new Set(BUILTIN_OPTION_KEYS)
+
+function isTrustedOptionKey(key: string, secret: ReadonlySet<string>): boolean {
+	return (
+		optionAllowlist.has(key) || builtinOptionKeys.has(key) || secret.has(key)
+	)
+}
 
 const keptPaths = CONFIG_EXPORT_KEPT_STRING_PATHS.map(p => p.split("."))
 const redactedPaths = new Set(CONFIG_EXPORT_REDACTED_PATHS)
@@ -146,7 +240,7 @@ function redactOptionObject(
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {}
 	Object.keys(value).forEach((key, index) => {
-		const outKey = OPTION_KEY_PATTERN.test(key) ? key : redactedKey(index)
+		const outKey = isTrustedOptionKey(key, secret) ? key : redactedKey(index)
 		out[outKey] = redactOptionValue(value[key], key, secret, ctx, depth)
 	})
 	return out

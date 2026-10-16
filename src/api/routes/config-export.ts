@@ -77,7 +77,14 @@ export const configExportRoutes: FastifyPluginAsync<
 		CONFIG_EXPORT_ROUTE,
 		{
 			onRequest: (request, reply, done) => {
-				const denied = authorize?.(request)
+				let denied: DeniedAdmission | undefined
+				try {
+					denied = authorize?.(request)
+				} catch {
+					// Fixed body and code only: the thrown message is never echoed or logged.
+					void sendFailure(request, reply, 500, "CONFIG_EXPORT_FAILED")
+					return
+				}
 				if (denied) {
 					void sendDenial(reply, denied)
 					return

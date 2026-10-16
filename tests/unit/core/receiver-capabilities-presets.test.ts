@@ -1,13 +1,17 @@
 import { RECEIVER_SAMPLE_RATE_PRESETS_HZ } from "@wavekit/api-types"
+import Fastify from "fastify"
 import { describe, expect, it } from "vitest"
+import { receiverCapabilitiesRoutes } from "../../../src/api/routes/receiver-capabilities.js"
 import { createReceiverCapabilitiesProvider } from "../../../src/core/tuner-capabilities/provider.js"
 import { RECEIVER_CONTROL_METADATA } from "../../../src/core/tuner-capabilities/rtl-tcp.js"
 import {
 	RECEIVER_CAPABILITIES_LIMITS,
 	receiverCapabilitiesPageSchema,
 	receiverCapabilitiesSchema,
+	sampleRatePresetsCoherent,
 } from "../../../src/core/tuner-capabilities/types.js"
 import type {
+	ReceiverCapabilitiesProvider,
 	ReceiverRestCommandPolicy,
 	SourceReceiverEvidence,
 } from "../../../src/core/tuner-capabilities/types.js"
@@ -20,7 +24,12 @@ const RANGES = [
 	{ min: 900_001, max: 3_200_000 },
 ] as const
 
-function policy(): ReceiverRestCommandPolicy {
+function policy(
+	ranges: readonly [
+		{ min: number; max: number },
+		{ min: number; max: number },
+	] = RANGES,
+): ReceiverRestCommandPolicy {
 	return RECEIVER_CONTROL_METADATA.map(row => {
 		const base = { id: row.id, unit: row.unit, opcode: row.opcode }
 		if (row.kind === "boolean")
@@ -38,7 +47,7 @@ function policy(): ReceiverRestCommandPolicy {
 		if (row.kind === "integer-ranges")
 			return {
 				...base,
-				rule: { kind: "integer-ranges" as const, ranges: RANGES },
+				rule: { kind: "integer-ranges" as const, ranges },
 			}
 		return {
 			...base,
@@ -84,7 +93,10 @@ function evidence(
 	} as SourceReceiverEvidence
 }
 
-function item(type: "rtl_tcp" | "sdrpp-network" | "recording") {
+function item(
+	type: "rtl_tcp" | "sdrpp-network" | "recording",
+	p: ReceiverRestCommandPolicy = policy(),
+) {
 	const ev = evidence(type)
 	const provider = createReceiverCapabilitiesProvider(
 		{
@@ -96,11 +108,17 @@ function item(type: "rtl_tcp" | "sdrpp-network" | "recording") {
 				snapshotId: token(3),
 			}),
 		},
-		policy(),
+		p,
 	)
 	const r = provider.get("s")
 	if (!r.ok) throw new Error(`provider failed: ${r.code}`)
 	return r.value
+}
+
+/** Shape and presets correlation, as the provider and route both apply them. */
+function accepted(value: unknown): boolean {
+	const parsed = receiverCapabilitiesSchema.safeParse(value)
+	return parsed.success && sampleRatePresetsCoherent(parsed.data)
 }
 
 describe("receiver sample-rate presets", () => {
@@ -148,9 +166,10 @@ describe("receiver sample-rate presets", () => {
 		const ok = {
 			state: "suggested",
 			provenance: "wavekit-rtl-rate-presets",
-			valuesHz: [250_000],
+			valuesHz: [...RECEIVER_SAMPLE_RATE_PRESETS_HZ],
 		}
 		expect(bad(ok)).toBe(true)
+		expect(bad({ ...ok, valuesHz: [1_000_000] })).toBe(false)
 		expect(bad({ ...ok, provenance: "other" })).toBe(false)
 		expect(bad({ ...ok, extra: 1 })).toBe(false)
 		expect(bad({ ...ok, valuesHz: Array.from({ length: 12 }, () => 1) })).toBe(
@@ -187,10 +206,99 @@ describe("receiver sample-rate presets", () => {
 			),
 			nextAfter: null,
 		}
-		expect(receiverCapabilitiesPageSchema.safeParse(page).success).toBe(true)
+		expect(
+			receiverCapabilitiesPageSchema.safeParse({
+				...page,
+				items: page.items.map(() => item("rtl_tcp")),
+			}).success,
+		).toBe(true)
 		expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(
 			RECEIVER_CAPABILITIES_LIMITS.pageBytes,
 		)
-		console.info
+	})
+
+	it("rejects an invented list of in-range rates", () => {
+		const good = item("rtl_tcp")
+		for (const valuesHz of [
+			[1_000_000],
+			[...RECEIVER_SAMPLE_RATE_PRESETS_HZ].reverse(),
+			[...RECEIVER_SAMPLE_RATE_PRESETS_HZ, 3_200_000].slice(1),
+			[],
+		])
+			expect(
+				accepted({
+					...good,
+					sampleRatePresets: { ...good.sampleRatePresets, valuesHz },
+				}),
+			).toBe(false)
+	})
+
+	it("rejects a state that disagrees with the transport", () => {
+		const rtl = item("rtl_tcp")
+		const other = item("sdrpp-network")
+		expect(
+			accepted({
+				...rtl,
+				sampleRatePresets: other.sampleRatePresets,
+			}),
+		).toBe(false)
+		expect(
+			accepted({
+				...other,
+				sampleRatePresets: rtl.sampleRatePresets,
+			}),
+		).toBe(false)
+	})
+
+	it("a narrow injected policy suggests only the frozen rates inside it", () => {
+		const narrow = item(
+			"rtl_tcp",
+			policy([
+				{ min: 225_001, max: 300_000 },
+				{ min: 2_000_000, max: 2_400_000 },
+			]),
+		)
+		expect(narrow.sampleRatePresets).toEqual({
+			state: "suggested",
+			provenance: "wavekit-rtl-rate-presets",
+			valuesHz: [250_000, 2_048_000, 2_160_000, 2_400_000],
+		})
+		expect(accepted(narrow)).toBe(true)
+		// The full frozen list is inconsistent with the narrow rule.
+		expect(
+			accepted({
+				...narrow,
+				sampleRatePresets: item("rtl_tcp").sampleRatePresets,
+			}),
+		).toBe(false)
+	})
+
+	it("the route answers CONFLICT for a provider item with an invented list", async () => {
+		const good = item("rtl_tcp")
+		const value = {
+			...good,
+			sampleRatePresets: { ...good.sampleRatePresets, valuesHz: [1_000_000] },
+		}
+		const provider = {
+			get: () => ({ ok: true as const, value }),
+			list: () => ({
+				ok: true as const,
+				value: { schemaVersion: 1 as const, items: [value], nextAfter: null },
+			}),
+		} as unknown as ReceiverCapabilitiesProvider
+		const app = Fastify()
+		await app.register(receiverCapabilitiesRoutes, { provider })
+		try {
+			for (const url of [
+				"/api/receiver-capabilities/s",
+				"/api/receiver-capabilities",
+			]) {
+				const res = await app.inject({ url })
+				expect(res.statusCode, url).toBe(503)
+				expect(JSON.parse(res.body).code).toBe("RECEIVER_CAPABILITIES_CONFLICT")
+			}
+		} finally {
+			await app.close()
+		}
 	})
 })

@@ -231,8 +231,13 @@ describe("config export redaction", () => {
 				region: "EU_868",
 				preset: "LongFast",
 				channelKey: R,
-				numericKey: R,
-				nested: { psk: R, deeper: [{ label: R }, R], ok: 3 },
+				// Untrusted option keys are renamed at any depth (values still classified).
+				"<redacted-4>": R,
+				"<redacted-5>": {
+					"<redacted-1>": R,
+					"<redacted-2>": [{ "<redacted-1>": R }, R],
+					"<redacted-3>": 3,
+				},
 			},
 		})
 		expect(r.decoders[1]).toMatchObject({
@@ -241,8 +246,11 @@ describe("config export redaction", () => {
 			outputHost: R,
 			deviceSerial: R,
 			minVersion: R,
-			options: { mode: "dmr", output: R, udpPort: 7355, keys: R },
+			options: { mode: "dmr", output: R, udpPort: 7355 },
 		})
+		const dsdOptions = (r.decoders[1] as { options: Record<string, unknown> })
+			.options
+		expect(Object.keys(dsdOptions)).not.toContain("keys")
 		expect(r.logging).toEqual({ level: "debug", dir: R })
 		expect(r.channelizer).toMatchObject({
 			enabled: false,
@@ -301,6 +309,36 @@ describe("config export redaction", () => {
 		config.decoders[0]!.options = { "10.0.0.1:80": 5, gain: 3 }
 		const r = redactConfig(config) as { decoders: { options: unknown }[] }
 		expect(r.decoders[0]!.options).toEqual({ "<redacted-1>": 5, gain: 3 })
+	})
+
+	it("renames identifier-shaped option keys outside the trusted set, at any depth", () => {
+		const { config } = everySecretFixture(1)
+		config.decoders[0]!.options = {
+			destinations: { "ben-private-rpi": 1, F4SECRET: 2, sk_live_123: true },
+			filters: { highpass: 3, myHomeQth: 4 },
+			gain: 3,
+		}
+		const r = redactConfig(config, { secretOptionKeys: () => ["apiPass"] })
+		const json = JSON.stringify(r)
+		for (const leak of [
+			"destinations",
+			"ben-private-rpi",
+			"F4SECRET",
+			"sk_live_123",
+			"myHomeQth",
+		])
+			expect(json).not.toContain(leak)
+		const options = (r as { decoders: { options: unknown }[] }).decoders[0]!
+			.options
+		expect(options).toEqual({
+			"<redacted-1>": {
+				"<redacted-1>": 1,
+				"<redacted-2>": R,
+				"<redacted-3>": true,
+			},
+			filters: { highpass: 3, "<redacted-2>": 4 },
+			gain: 3,
+		})
 	})
 
 	it("keeps closed-set strings only when the value is a member", () => {
@@ -365,6 +403,8 @@ describe("config export redaction", () => {
 					optionString: hex,
 					optionKey: fc.constantFrom("channelKey", "psk", "token", "x"),
 					nestedSecret: hex,
+					secretKey: hex,
+					nestedSecretKey: hex,
 					urlUser: hex,
 					serial: hex,
 					lat: fc.double({ min: -89, max: 89, noNaN: true }),
@@ -392,6 +432,8 @@ describe("config export redaction", () => {
 								[s.optionKey]: s.optionString,
 								list: [s.optionString, { inner: [s.nestedSecret] }],
 								obj: { token: 1234567, free: s.nestedSecret },
+								[s.secretKey]: 1,
+								filters: { [s.nestedSecretKey]: { [s.secretKey]: 2 } },
 							},
 						})),
 						...(s.withAccess
@@ -415,6 +457,8 @@ describe("config export redaction", () => {
 						s.nestedSecret,
 						s.urlUser,
 						s.serial,
+						s.secretKey,
+						s.nestedSecretKey,
 					])
 					expect(body).not.toContain("1234567")
 					if (!Number.isInteger(s.lat))

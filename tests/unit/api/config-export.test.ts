@@ -136,4 +136,32 @@ describe("configExportRoutes", () => {
 		expect(lines.join("")).toContain("CONFIG_EXPORT_")
 		expect(lines.join("")).not.toContain(SECRET)
 	})
+
+	it("returns a fixed 500 when authorize throws, without echoing or logging it", async () => {
+		const lines: string[] = []
+		const stream = { write: (s: string) => void lines.push(s) }
+		const getConfig = vi.fn(() => config)
+		const app = await build(
+			{
+				authorize: () => {
+					throw new Error(`authorizer exploded ${SECRET}`)
+				},
+				getConfig,
+			},
+			stream,
+		)
+		const res = await app.inject({ method: "GET", url: CONFIG_EXPORT_ROUTE })
+		expect(res.statusCode).toBe(500)
+		expect(res.headers["cache-control"]).toBe("no-store")
+		expect(JSON.parse(res.body)).toEqual({
+			error: "ConfigExportError",
+			code: "CONFIG_EXPORT_FAILED",
+			message: "Configuration export failed",
+		})
+		expect(res.body).not.toContain(SECRET)
+		expect(getConfig).not.toHaveBeenCalled()
+		expect(lines.join("")).toContain("CONFIG_EXPORT_FAILED")
+		expect(lines.join("")).not.toContain(SECRET)
+		expect(lines.join("")).not.toContain("exploded")
+	})
 })
