@@ -14,6 +14,7 @@
 import type { StationIdentity } from "@wavekit/api-types"
 import { stationRoutes } from "./routes/station.js"
 import { stationEstimateRoutes } from "./routes/station-estimate.js"
+import { storageRoutes } from "./routes/storage.js"
 import type { FanoutTelemetryProvider } from "../core/source-fanout-router.js"
 import Fastify, { type FastifyInstance, type FastifyError } from "fastify"
 import fastifyCors from "@fastify/cors"
@@ -209,6 +210,7 @@ export interface ApiServerDependencies {
 export class ApiServer {
 	private readonly station: StationIdentity | undefined
 	private readonly stationEstimate: StationEstimateProvider | undefined
+	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
 	private readonly bandPlans: BandPlanService | undefined
 	private readonly receiverCapabilitiesProvider:
@@ -273,6 +275,7 @@ export class ApiServer {
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.station = dependencies.station
 		this.stationEstimate = dependencies.stationEstimate
+		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
 		this.bandPlans = dependencies.bandPlans
 		this.receiverCapabilitiesProvider =
@@ -1293,6 +1296,9 @@ export class ApiServer {
 			await this.app.register(stationEstimateRoutes, {
 				estimate: this.stationEstimate,
 			})
+		// GET /api/storage under root admission, like the other read routes
+		if (this.storageReport !== undefined)
+			await this.app.register(storageRoutes, { report: this.storageReport })
 		// These child plugins inherit normal root admission in both access modes.
 		// Providers are borrowed; the composing runtime owns receiver disposal.
 		if (this.regionalRegistry !== undefined)

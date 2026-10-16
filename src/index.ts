@@ -127,6 +127,12 @@ import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
 import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
+import { createStorageReporter } from "./core/storage-report/reporter.js"
+import {
+	activityRetentionFromStats,
+	storageActivityLimits,
+	storageAreasFromConfig,
+} from "./core/storage-report/areas-from-config.js"
 import {
 	tunerFrequencyAt,
 	wireAnalogTransmissions,
@@ -1221,6 +1227,33 @@ async function main(): Promise<void> {
 		own(8, () => activity.close())
 		checkpoint()
 
+		// WG4 req 3: storage report over the areas WaveKit writes. Areas follow the
+		// startup config; Activity retention is read per report (null when disabled,
+		// a throwing stats() reports retention: null).
+		const activityLimits = storageActivityLimits(config.activity.retention)
+		const accessDirectory = access
+			? (process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? null)
+			: null
+		const storageReport = createStorageReporter({
+			stateDir: config.stateDir,
+			areas: storageAreasFromConfig({
+				stateDir: config.stateDir,
+				activityMaxDbBytes: activityLimits?.maxDbBytes ?? null,
+				scannerStorage: config.scanner.storage,
+				decoders: config.decoders,
+				accessDirectory,
+				logsDir: config.logging.dir,
+			}),
+			activityRetention: () =>
+				activity.status === "disabled" || activityLimits === null
+					? null
+					: activityRetentionFromStats(activity.stats(), activityLimits),
+			minFreeBytes:
+				scanner !== null
+					? config.scanner.storage.minFreeDiskMb * 1024 * 1024
+					: null,
+		})
+
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
 		let publishBandPlans: BandPlansCommitSink | undefined
@@ -1267,6 +1300,7 @@ async function main(): Promise<void> {
 				meshTracker: meshTrackingManager.getTracker(),
 				aprsTracker: aprsTrackingManager.getTracker(),
 				stationEstimate,
+				storageReport,
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
