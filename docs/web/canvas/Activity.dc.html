@@ -9,142 +9,130 @@
 <x-dc>
 <helmet>
 <style>
-/* wk-tokens v2 · copy verbatim, never edit per board */
-[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92;--wk-brand:#7becc7;--wk-focus:rgba(var(--wk-ink-rgb),.55);--wk-sel:rgba(var(--wk-accent-rgb),.12);--wk-chip:rgba(var(--wk-ink-rgb),.06)}
-[data-wk-theme="light"]{color-scheme:light;--wk-plot-bg:#f4f0e6;--wk-bg:#f4f0e6;--wk-surface:#fbf8f1;--wk-fill:#ebe5d8;--wk-fill-glass:rgba(251,248,241,.96);--wk-well:rgba(74,58,34,.07);--wk-well-glass:rgba(74,58,34,.05);--wk-glass:rgba(251,248,241,.96);--wk-glass-panel:rgba(251,248,241,.97);--wk-glass-strong:rgba(252,250,245,.985);--wk-glass-fx:saturate(105%);--wk-glass-hi:rgba(255,255,255,0);--wk-shadow:0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10);--wk-shadow-pop:0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12);--wk-shadow-tip:0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12);--wk-shadow-lg:0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13);--wk-shadow-drawer:0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16);--wk-shadow-xl:0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16);--wk-shadow-lift:0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20);--wk-text:#2a241c;--wk-text-soft:#3a3328;--wk-text-2:#4a4235;--wk-text-3:#5a5143;--wk-text-4:#72675a;--wk-text-5:#a39a89;--wk-ink-rgb:42,36,28;--wk-ink-2-rgb:74,66,53;--wk-ink-3-rgb:90,81,67;--wk-knob:#ffffff;--wk-line-solid:#e0d9ca;--wk-track:#8f8573;--wk-accent:#1d6b52;--wk-accent-rgb:29,107,82;--wk-line-rgb:74,58,34;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(252,241,214,.97);--wk-amber-fill:#f6e7c4;--wk-on-amber:#ffffff;--wk-danger:#a8321e;--wk-danger-rgb:214,64,48;--wk-danger-soft:#93291a;--wk-brand:#16735c}
-[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
-[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
-[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
-[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
-[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#225f92;--wk-accent-rgb:34,95,146}
-[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#5f45a8;--wk-accent-rgb:95,69,168}
-[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#9e3370;--wk-accent-rgb:158,51,112}
-[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#2a241c;--wk-accent-rgb:42,36,28}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="ice"]{--wk-plot-bg:#0d1319;--wk-bg:#0d1319;--wk-surface:#131a21;--wk-fill:#1b2833;--wk-fill-glass:rgba(27,40,51,.92);--wk-well:#0d1319;--wk-well-glass:rgba(13,19,25,.6);--wk-glass:rgba(19,26,33,.5);--wk-glass-panel:rgba(19,26,33,.66);--wk-glass-strong:rgba(19,26,33,.92);--wk-text:#f4f6f9;--wk-text-soft:#d9e2ea;--wk-text-2:#bac7d3;--wk-text-3:#8da1b2;--wk-text-4:#778796;--wk-text-5:#54616d;--wk-ink-rgb:244,246,249;--wk-ink-2-rgb:186,199,211;--wk-ink-3-rgb:141,161,178;--wk-knob:#f4f6f9;--wk-line-solid:#25333f;--wk-track:#2f404f;--wk-on-accent:#131a21}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="violet"]{--wk-plot-bg:#141119;--wk-bg:#141119;--wk-surface:#1a1820;--wk-fill:#292432;--wk-fill-glass:rgba(41,36,50,.92);--wk-well:#141119;--wk-well-glass:rgba(20,17,25,.6);--wk-glass:rgba(26,24,32,.5);--wk-glass-panel:rgba(26,24,32,.66);--wk-glass-strong:rgba(26,24,32,.92);--wk-text:#f6f6f9;--wk-text-soft:#e2dfe9;--wk-text-2:#c7c2d2;--wk-text-3:#a199b1;--wk-text-4:#878195;--wk-text-5:#615c6b;--wk-ink-rgb:246,246,249;--wk-ink-2-rgb:199,194,210;--wk-ink-3-rgb:161,153,177;--wk-knob:#f6f6f9;--wk-line-solid:#332e3e;--wk-track:#413a4e;--wk-on-accent:#1a1820}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="coral"]{--wk-plot-bg:#181013;--wk-bg:#181013;--wk-surface:#20161a;--wk-fill:#312128;--wk-fill-glass:rgba(49,33,40,.92);--wk-well:#181013;--wk-well-glass:rgba(24,16,19,.6);--wk-glass:rgba(32,22,26,.5);--wk-glass-panel:rgba(32,22,26,.66);--wk-glass-strong:rgba(32,22,26,.92);--wk-text:#f9f5f6;--wk-text-soft:#e9dde2;--wk-text-2:#d2c0c7;--wk-text-3:#b095a0;--wk-text-4:#947e87;--wk-text-5:#6b5a61;--wk-ink-rgb:249,245,246;--wk-ink-2-rgb:210,192,199;--wk-ink-3-rgb:176,149,160;--wk-knob:#f9f5f6;--wk-line-solid:#3d2b33;--wk-track:#4c3740;--wk-on-accent:#20161a}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
-[data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
-[data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
-[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-</style>
-<style>
-[data-wk-theme]{--wka-hint:var(--wk-text-5);--wka-grip:var(--wk-well-glass);--wka-scrim:color-mix(in srgb,var(--wk-plot-bg) 28%,transparent);--wka-sticky:var(--wk-well);--wka-sticky-hi:var(--wk-surface);--wka-sticky-fx:blur(12px)}[data-wk-theme="light"]{--wka-hint:var(--wk-text-4);--wka-grip:var(--wk-glass-strong);--wka-scrim:color-mix(in srgb,var(--wk-plot-bg) 18%,transparent);--wka-sticky:color-mix(in srgb,var(--wk-fill) 96%,var(--wk-plot-bg));--wka-sticky-hi:var(--wk-fill);--wka-sticky-fx:none}
-@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
-@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
-@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
-@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
-/* paper: the sticky time header is the column well over the sheet, not a darker fill band */
-[data-wk-theme="light"] .wk-act-stick{background:linear-gradient(var(--wk-well-glass) 70%,transparent),linear-gradient(var(--wk-surface) 70%,transparent) !important}
 body{margin:0;background:#000000}
 body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
-.wk-play:focus-visible{outline:none}
-.wk-play:focus-visible>span:first-child{box-shadow:0 0 0 2px var(--wk-surface),0 0 0 3.5px var(--wk-focus)}
-section[tabindex]:focus-visible{outline:none;box-shadow:inset 0 2px 0 var(--wk-focus)}
-button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus);outline-offset:2px}
+[data-wk-theme]{--wka-sticky:var(--wk-well)}[data-wk-theme="light"]{--wka-sticky:color-mix(in srgb,var(--wk-fill) 96%,var(--wk-plot-bg))}
+/* paper: the sticky time header is the column well over the sheet, not a darker fill band */
+[data-wk-theme="light"] .wk-act-stick{background:linear-gradient(var(--wk-well-glass) 70%,transparent),linear-gradient(var(--wk-surface) 70%,transparent) !important}
+/* row play: an outlined 32 px circle in a 54 px hit column (not the filled .wk-play); the ring goes on the circle */
+.wk-act .wk-txplay:focus-visible{outline:none}
+.wk-act .wk-txplay:focus-visible>span:first-child{box-shadow:0 0 0 2px var(--wk-surface),0 0 0 3.5px var(--wk-focus)}
+/* wk-explore: .wk-tile tones (batch a) */
+.wk-act .wk-tile[data-tone="accent"]{color:var(--wk-accent)}
+/* rows: a fresh arrival and the row now playing keep their tints (the kit has selected and a one-shot flash only) */
+.wk-act .wk-row[data-state="fresh"]:not([aria-current="true"]){background:rgba(var(--wk-accent-rgb),.07)}
+.wk-act .wk-row[data-state="current"]:not([aria-current="true"]){background:rgba(var(--wk-accent-rgb),.05)}
+/* a column's open ⋯ keeps a fill while its menu is open */
+.wk-act .wk-icon-btn[aria-expanded="true"]{background:var(--wk-fill)}
+/* Live / Paused status toggle: accent while live, amber while paused (no kit variant) */
+.wk-act .wk-act-live{background:rgba(var(--wk-accent-rgb),.12);color:var(--wk-accent)}
+.wk-act .wk-act-live[aria-pressed="true"]{background:rgba(var(--wk-amber-rgb),.14);color:var(--wk-amber)}
+/* wk-explore: .wk-btn as a toggle (aria-pressed): Columns gets the selected fill; Keep only turns accent */
+.wk-act .wk-cols[aria-pressed="true"]{background:var(--wk-sel);color:var(--wk-accent)}
+.wk-act .wk-keep[aria-pressed="true"]{color:var(--wk-accent)}
 </style>
 </helmet>
-<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; gap: 0; border-radius: {{rootR}}; overflow: hidden; background: {{rootBg}}; border: {{rootBorder}}; box-shadow: {{rootShadow}}; backdrop-filter: {{rootFx}}; color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" class="wk-act" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; gap: 0; border-radius: {{rootR}}; overflow: hidden; background: {{rootBg}}; border: {{rootBorder}}; box-shadow: {{rootShadow}}; backdrop-filter: {{rootFx}}; color: var(--wk-text); font-family: var(--wk-font-ui); font-size: var(--wk-fs-lg)">
+	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
 
 	<!-- the columns pane: pinned searches side by side, left of the drawer (the shell's attached pane, or the board's own frame) -->
 	<sc-if value="{{showPane}}" hint-placeholder-val="{{true}}">
 		<section aria-label="Activity columns" style="position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: {{paneR}}; background: {{paneBg}}; border: {{paneBorder}}; border-right: 0">
 			<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 54px; box-sizing: border-box; padding: 8px 10px 2px 18px">
-				<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Columns</h2>
-				<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{paneCount}}</span>
+				<h2 class="wk-h2">Columns</h2>
+				<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{paneCount}}</span>
 				<div style="flex: 1"></div>
-				<button onClick="{{hidePane}}" title="Hide the columns. Columns in the Activity header brings them back." style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-2); font-size: 13px">Hide</button>
+				<button class="wk-btn" data-variant="ghost" onClick="{{hidePane}}" title="Hide the columns. Columns in the Activity header brings them back." style="flex: none; font-size: var(--wk-fs-md); font-weight: 400">Hide</button>
 			</header>
 			<sc-if value="{{paneEmpty}}" hint-placeholder-val="{{false}}">
 				<div style="flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center">
-					<span style="font-weight: 700; font-size: 15px; color: var(--wk-text-2)">Pin a search to watch it side by side</span>
-					<span style="max-width: 380px; font-size: 13px; line-height: 1.5; color: var(--wk-text-3)">Search a talkgroup, channel, capcode or name in Activity, then Pin as column. Or start from what you hear most:</span>
+					<span style="font-weight: 700; font-size: var(--wk-fs-xl); color: var(--wk-text-2)">Pin a search to watch it side by side</span>
+					<span style="max-width: 380px; font-size: var(--wk-fs-md); line-height: 1.5; color: var(--wk-text-3)">Search a talkgroup, channel, capcode or name in Activity, then Pin as column. Or start from what you hear most:</span>
 					<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 520px">
 						<sc-for list="{{heard}}" as="h" hint-placeholder-count="3">
-							<button onClick="{{h.add}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 12px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.10); color: var(--wk-accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; white-space: nowrap">+ {{h.title}}<span style="font-weight: 400; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{h.count}}</span></button>
+							<button class="wk-btn" data-variant="tonal" onClick="{{h.add}}" style="gap: 8px; background: rgba(var(--wk-accent-rgb),.10); font-size: var(--wk-fs-md)">+ {{h.title}}<span style="font-weight: 400; font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{h.count}}</span></button>
 						</sc-for>
 					</div>
 					<div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; max-width: 520px">
 						<sc-for list="{{presets}}" as="p" hint-placeholder-count="3">
-							<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: var(--wk-chip); color: var(--wk-text-2); font-size: 12.5px">+ {{p.title}}</button>
+							<button class="wk-chip" onClick="{{p.add}}" style="font-weight: 400"><span>+ {{p.title}}</span></button>
 						</sc-for>
 					</div>
 				</div>
 			</sc-if>
 			<sc-if value="{{paneHasCols}}" hint-placeholder-val="{{true}}">
-				<div data-act-cols="" onScroll="{{onPaneScroll}}" style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scroll-padding: 0 10px 0 {{snapL}}px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+				<div data-act-cols="" class="wk-scroll" onScroll="{{onPaneScroll}}" style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity; scroll-padding: 0 10px 0 {{snapL}}px">
 					<sc-for list="{{paneCols}}" as="col" hint-placeholder-count="3">
-						<section data-act-col="{{col.id}}" aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" onDragOver="{{col.over}}" onDrop="{{col.drop}}" title="↑ ↓ move · ← → other columns · Space play · S keep · Enter open · Esc close" style="position: relative; flex: {{colGrow}} 0 {{colW}}px; min-width: 0; max-width: 420px; scroll-snap-align: start; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--wk-well-glass); box-shadow: {{col.ring}}; opacity: {{col.op}}">
+						<section data-act-col="{{col.id}}" data-wk-region="" aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" onDragOver="{{col.over}}" onDrop="{{col.drop}}" title="↑ ↓ move · ← → other columns · Space play · S keep · Enter open · Esc close" style="position: relative; flex: {{colGrow}} 0 {{colW}}px; min-width: 0; max-width: 420px; scroll-snap-align: start; display: flex; flex-direction: column; min-height: 0; border-radius: var(--wk-r-4); background: var(--wk-well-glass); box-shadow: {{col.ring}}; opacity: {{col.op}}">
 							<header draggable="true" onDragStart="{{col.dragStart}}" onDragEnd="{{col.dragEnd}}" title="Drag to reorder" style="flex: none; display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 4px 0 6px; cursor: grab">
 								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wka-hint)" stroke-width="2" stroke-linecap="round" aria-hidden="true" style="flex: none"><path d="M9 6m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M9 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M9 18m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M15 6m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M15 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M15 18m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg>
 								<sc-if value="{{col.renaming}}" hint-placeholder-val="{{false}}">
-									<input value="{{renameText}}" onChange="{{onRename}}" onKeyDown="{{renameKey}}" onBlur="{{renameCommit}}" aria-label="Column name" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 30px; box-sizing: border-box; padding: 0 8px; border: 1px solid rgba(var(--wk-line-rgb),.3); border-radius: 6px; outline: none; background: var(--wk-well); color: var(--wk-text); font: inherit; font-size: 13px; font-weight: 700">
+									<input class="wk-input" value="{{renameText}}" onChange="{{onRename}}" onKeyDown="{{renameKey}}" onBlur="{{renameCommit}}" aria-label="Column name" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; font-size: var(--wk-fs-md); font-weight: 700">
 								</sc-if>
 								<sc-if value="{{col.titled}}" hint-placeholder-val="{{true}}">
-									<h3 style="margin: 0; min-width: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: var(--wk-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
-									<span style="flex: none; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{col.count}}</span>
+									<h3 style="margin: 0; min-width: 0; font-family: var(--wk-font-head); font-weight: 700; font-size: var(--wk-fs-xl); letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
+									<span style="flex: none; font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{col.count}}</span>
 								</sc-if>
 								<div style="flex: 1"></div>
-								<button onClick="{{col.menu}}" aria-label="Options for column {{col.title}}" aria-haspopup="menu" aria-expanded="{{col.menuExp}}" style="font: inherit; cursor: pointer; flex: none; width: 30px; height: 30px; border: 0; border-radius: 6px; background: {{col.menuBg}}; color: var(--wk-text-3); display: grid; place-items: center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M12 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M19 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg></button>
+								<button class="wk-icon-btn" data-size="sm" onClick="{{col.menu}}" aria-label="Options for column {{col.title}}" aria-haspopup="menu" aria-expanded="{{col.menuExp}}" style="color: var(--wk-text-3)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M5 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M12 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M19 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg></button>
 							</header>
 							<sc-if value="{{col.menuOpen}}" hint-placeholder-val="{{false}}">
-								<div role="menu" aria-label="Column {{col.title}}" style="position: absolute; z-index: 3; top: 40px; right: 6px; min-width: 190px; padding: 6px; border-radius: 10px; background: var(--wk-surface); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: var(--wk-shadow-pop)">
+								<div role="menu" aria-label="Column {{col.title}}" class="wk-menu" style="position: absolute; z-index: 3; top: 40px; right: 6px; min-width: 190px">
 									<sc-for list="{{col.items}}" as="m" hint-placeholder-count="4">
-										<button role="menuitem" aria-disabled="{{m.off}}" onClick="{{m.act}}" style="font: inherit; cursor: pointer; width: 100%; height: 36px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: {{m.fg}}; font-size: 13px; text-align: left; display: flex; align-items: center; gap: 10px">{{m.label}}<span style="flex: 1"></span><span style="font-size: 12px; color: var(--wka-hint)">{{m.hint}}</span></button>
+										<button role="menuitem" class="wk-option" aria-disabled="{{m.off}}" onClick="{{m.act}}" style="color: {{m.fg}}">{{m.label}}<span style="flex: 1"></span><span style="font-size: var(--wk-fs-xs); color: var(--wka-hint)">{{m.hint}}</span></button>
 									</sc-for>
 								</div>
 							</sc-if>
 							<sc-if value="{{col.hasNew}}" hint-placeholder-val="{{false}}">
-								<button onClick="{{col.toTop}}" style="font: inherit; cursor: pointer; position: absolute; z-index: 2; top: 50px; left: 50%; transform: translateX(-50%); height: 28px; padding: 0 12px; border: 0; border-radius: 14px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 12px; font-weight: 700; white-space: nowrap; box-shadow: var(--wk-shadow-tip)">↑ {{col.newText}}</button>
+								<button onClick="{{col.toTop}}" style="font: inherit; cursor: pointer; position: absolute; z-index: 2; top: 50px; left: 50%; transform: translateX(-50%); height: var(--wk-h-sm); padding: 0 12px; border: 0; border-radius: var(--wk-r-pill); background: var(--wk-accent); color: var(--wk-on-accent); font-size: var(--wk-fs-xs); font-weight: 700; white-space: nowrap; box-shadow: var(--wk-e2)">↑ {{col.newText}}</button>
 							</sc-if>
-							<div data-act-list="" onScroll="{{col.scroll}}" style="flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: auto contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+							<div data-act-list="" class="wk-scroll" onScroll="{{col.scroll}}" style="flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: auto contain; padding: 0 6px 8px">
 								<sc-if value="{{col.empty}}" hint-placeholder-val="{{false}}">
 									<div style="display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 16px; text-align: center">
 										<span style="font-weight: 700; color: var(--wk-text-2)">{{col.emptyTitle}}</span>
-										<span style="font-size: 13px; color: var(--wk-text-3); line-height: 1.5">{{col.emptyText}}</span>
+										<span style="font-size: var(--wk-fs-md); color: var(--wk-text-3); line-height: 1.5">{{col.emptyText}}</span>
 										<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
-											<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 14px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 6px; background: transparent; color: var(--wk-accent); font-size: 13px; font-weight: 700">Clear filters</button>
+											<button class="wk-btn" data-variant="outline" onClick="{{clearAll}}" style="padding: 0 14px; color: var(--wk-accent); font-size: var(--wk-fs-md)">Clear filters</button>
 										</sc-if>
 									</div>
 								</sc-if>
 								<sc-for list="{{col.groups}}" as="g" hint-placeholder-count="2">
-									<div class="wk-act-stick" style="position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; font-size: 11.5px; font-weight: 700; letter-spacing: .04em; color: var(--wk-text-3); font-variant-numeric: tabular-nums; background: linear-gradient(var(--wka-sticky) 70%, transparent)">{{g.label}}</div>
+									<div class="wk-act-stick" style="position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; font-size: var(--wk-fs-2xs); font-weight: 700; color: var(--wk-text-3); font-variant-numeric: tabular-nums; background: linear-gradient(var(--wka-sticky) 70%, transparent)">{{g.label}}</div>
 									<sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
-										<div style="display: flex; align-items: stretch; margin-bottom: 2px; border-radius: 6px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .8s ease">
-											<button onClick="{{r.pick}}" aria-current="{{r.selected}}" style="font: inherit; color: inherit; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; border: 0; background: transparent; text-align: left; border-radius: 6px">
-												<span style="position: relative; width: 32px; height: 32px; flex: none; border-radius: 6px; background: var(--wk-fill); display: grid; place-items: center">
-													<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+										<div class="wk-row" aria-current="{{r.selected}}" data-state="{{r.state}}" style="align-items: stretch; gap: 0; padding: 0; margin-bottom: 2px; transition: background-color var(--wk-dur-flash) var(--wk-ease-out)">
+<button onClick="{{r.pick}}" style="flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; text-align: left; border-radius: var(--wk-r-4)">
+<span class="wk-tile" data-tone="accent" style="position: relative">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 													<sc-if value="{{r.rec}}" hint-placeholder-val="{{false}}"><span title="Recording now" style="position: absolute; top: -2px; right: -2px; width: 10px; height: 10px; border-radius: 50%; background: var(--wk-danger); box-shadow: 0 0 0 2px var(--wk-surface)"></span></sc-if>
 												</span>
 												<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
 													<span style="display: flex; align-items: baseline; gap: 10px; min-width: 0">
-														<span style="flex: 0 1 auto; min-width: 0; font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
+														<span style="flex: 0 1 auto; min-width: 0; font-weight: 700; font-size: var(--wk-fs-lg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
 														<span style="flex: 1"></span>
 														<sc-if value="{{r.kept}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="var(--wk-accent)" stroke="var(--wk-accent)" stroke-width="1.5" stroke-linejoin="round" role="img" aria-label="Kept in Recordings" style="flex: none; align-self: center"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg></sc-if>
-														<span style="flex: none; font-size: 12px; color: {{r.timeC}}; font-variant-numeric: tabular-nums">{{r.time}}</span>
+														<span style="flex: none; font-size: var(--wk-fs-xs); color: {{r.timeC}}; font-variant-numeric: tabular-nums">{{r.time}}</span>
 													</span>
-													<span style="display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 1px; font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden">
+													<span style="display: flex; align-items: center; gap: 4px; min-width: 0; margin-top: 1px; font-size: var(--wk-fs-xs); color: var(--wk-text-3); white-space: nowrap; overflow: hidden">
 														<sc-if value="{{r.locked}}" hint-placeholder-val="{{false}}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--wk-amber)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-label="Encrypted"><path d="M5 11h14v10h-14zM8 11v-4a4 4 0 1 1 8 0v4"></path></svg></sc-if>
 														<span style="overflow: hidden; text-overflow: ellipsis">{{r.meta}}</span>
 													</span>
-													<span style="margin-top: 5px; font-size: 13.5px; line-height: 1.45; color: {{r.prevC}}; font-style: {{r.prevI}}; font-family: {{r.prevF}}; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{r.preview}}</span>
+													<span style="margin-top: 5px; font-size: var(--wk-fs-md); line-height: 1.45; color: {{r.prevC}}; font-style: {{r.prevI}}; font-family: {{r.prevF}}; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{r.preview}}</span>
 													<sc-if value="{{r.isCurrent}}" hint-placeholder-val="{{false}}">
 														<span style="display: block; height: 3px; border-radius: 2px; background: var(--wk-line-solid); margin-top: 8px; overflow: hidden"><span style="display: block; height: 100%; width: {{r.pos}}%; background: var(--wk-accent)"></span></span>
 													</sc-if>
 												</span>
 											</button>
 											<sc-if value="{{r.hasAudio}}" hint-placeholder-val="{{false}}">
-												<button class="wk-play" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 54px; border: 0; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 6px">
+												<button class="wk-txplay" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="flex: none; width: 54px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: var(--wk-r-4)">
 													<span style="width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; border: 1px solid {{r.pBorder}}; background: {{r.pBg}}; color: {{r.pFg}}">
 														<sc-if value="{{r.playing}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
 														<sc-if value="{{r.notPlaying}}" hint-placeholder-val="{{true}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
 													</span>
-													<span style="font-size: 11px; color: {{r.durC}}; font-variant-numeric: tabular-nums">{{r.dur}}</span>
+													<span style="font-size: var(--wk-fs-2xs); color: {{r.durC}}; font-variant-numeric: tabular-nums">{{r.dur}}</span>
 												</button>
 											</sc-if>
 											<sc-if value="{{r.notRecorded}}" hint-placeholder-val="{{false}}">
-												<span title="Recording was off" style="flex: none; width: 54px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--wka-hint); text-align: center; line-height: 1.2">Not<br>recorded</span>
+												<span title="Recording was off" style="flex: none; width: 54px; display: flex; align-items: center; justify-content: center; font-size: var(--wk-fs-2xs); color: var(--wka-hint); text-align: center; line-height: 1.2">Not<br>recorded</span>
 											</sc-if>
 										</div>
 									</sc-for>
@@ -153,29 +141,29 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 						</section>
 					</sc-for>
 					<sc-if value="{{canAdd}}" hint-placeholder-val="{{false}}">
-						<div style="flex: none; width: 184px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; border: 1px dashed rgba(var(--wk-line-rgb),.18); overflow-y: auto">
-							<span style="font-size: 12px; font-weight: 700; color: var(--wk-text-2); padding: 4px 4px 2px">Add a column</span>
+						<div style="flex: none; width: 184px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: var(--wk-r-4); border: 1px dashed var(--wk-line-18); overflow-y: auto">
+							<span style="font-size: var(--wk-fs-xs); font-weight: 700; color: var(--wk-text-2); padding: 4px 4px 2px">Add a column</span>
 							<sc-if value="{{canPin}}" hint-placeholder-val="{{false}}">
-								<button onClick="{{pinSearch}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-size: 13px; font-weight: 700; text-align: left">Pin current search</button>
+								<button onClick="{{pinSearch}}" style="font: inherit; cursor: pointer; min-height: var(--wk-h-lg); padding: 6px 10px; border: 0; border-radius: var(--wk-r-3); background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-size: var(--wk-fs-md); font-weight: 700; text-align: left">Pin current search</button>
 							</sc-if>
 							<sc-for list="{{heard}}" as="h" hint-placeholder-count="2">
-								<button onClick="{{h.add}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: 13px; text-align: left">+ {{h.title}}</button>
+								<button onClick="{{h.add}}" style="font: inherit; cursor: pointer; min-height: var(--wk-h-lg); padding: 6px 10px; border: 0; border-radius: var(--wk-r-3); background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: var(--wk-fs-md); text-align: left">+ {{h.title}}</button>
 							</sc-for>
 							<sc-for list="{{presets}}" as="p" hint-placeholder-count="2">
-								<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: 13px; text-align: left">+ {{p.title}}</button>
+								<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: var(--wk-h-lg); padding: 0 10px; border: 0; border-radius: var(--wk-r-3); background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: var(--wk-fs-md); text-align: left">+ {{p.title}}</button>
 							</sc-for>
-							<span style="font-size: 12px; color: var(--wka-hint); padding: 4px; line-height: 1.45">Up to five columns. They sync to every device signed in to this WaveKit.</span>
+							<span style="font-size: var(--wk-fs-xs); color: var(--wka-hint); padding: 4px; line-height: 1.45">Up to five columns. They sync to every device signed in to this WaveKit.</span>
 						</div>
 					</sc-if>
 				</div>
 				<sc-if value="{{moreLeft}}" hint-placeholder-val="{{false}}">
-					<div style="position: absolute; left: 10px; top: 54px; bottom: 10px; width: 64px; pointer-events: none; display: flex; align-items: center; justify-content: flex-start; padding-left: 6px; box-sizing: border-box; border-radius: 8px 0 0 8px; background: linear-gradient(270deg, transparent, {{fadeC}} 75%)">
-						<button onClick="{{scrollLeftCol}}" aria-label="Show {{moreLeftN}} more columns to the left" style="font: inherit; cursor: pointer; pointer-events: auto; height: 30px; padding: 0 10px 0 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 15px; background: var(--wk-surface); color: var(--wk-text-2); font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 2px; box-shadow: var(--wk-shadow-tip)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg>+{{moreLeftN}}</button>
+					<div style="position: absolute; left: 10px; top: 54px; bottom: 10px; width: 64px; pointer-events: none; display: flex; align-items: center; justify-content: flex-start; padding-left: 6px; box-sizing: border-box; border-radius: var(--wk-r-4) 0 0 var(--wk-r-4); background: linear-gradient(270deg, transparent, {{fadeC}} 75%)">
+						<button class="wk-btn" data-variant="outline" data-size="sm" onClick="{{scrollLeftCol}}" aria-label="Show {{moreLeftN}} more columns to the left" style="pointer-events: auto; padding: 0 10px 0 6px; border-radius: var(--wk-r-pill); background: var(--wk-surface); color: var(--wk-text-2); font-size: var(--wk-fs-xs); gap: 2px; box-shadow: var(--wk-e2)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg>+{{moreLeftN}}</button>
 					</div>
 				</sc-if>
 				<sc-if value="{{moreRight}}" hint-placeholder-val="{{false}}">
-					<div style="position: absolute; right: 10px; top: 54px; bottom: 10px; width: 64px; pointer-events: none; display: flex; align-items: center; justify-content: flex-end; padding-right: 6px; box-sizing: border-box; border-radius: 0 8px 8px 0; background: linear-gradient(90deg, transparent, {{fadeC}} 75%)">
-						<button onClick="{{scrollRightCol}}" aria-label="Show {{moreRightN}} more columns to the right" style="font: inherit; cursor: pointer; pointer-events: auto; height: 30px; padding: 0 6px 0 10px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 15px; background: var(--wk-surface); color: var(--wk-text-2); font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 2px; box-shadow: var(--wk-shadow-tip)">+{{moreRightN}}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
+					<div style="position: absolute; right: 10px; top: 54px; bottom: 10px; width: 64px; pointer-events: none; display: flex; align-items: center; justify-content: flex-end; padding-right: 6px; box-sizing: border-box; border-radius: 0 var(--wk-r-4) var(--wk-r-4) 0; background: linear-gradient(90deg, transparent, {{fadeC}} 75%)">
+						<button class="wk-btn" data-variant="outline" data-size="sm" onClick="{{scrollRightCol}}" aria-label="Show {{moreRightN}} more columns to the right" style="pointer-events: auto; padding: 0 6px 0 10px; border-radius: var(--wk-r-pill); background: var(--wk-surface); color: var(--wk-text-2); font-size: var(--wk-fs-xs); gap: 2px; box-shadow: var(--wk-e2)">+{{moreRightN}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
 					</div>
 				</sc-if>
 			</sc-if>
@@ -186,70 +174,70 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	<sc-if value="{{showDrawer}}" hint-placeholder-val="{{true}}">
 	<div style="position: relative; flex: {{drawerFlex}}; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: {{drawerR}}; overflow: hidden; background: {{drawerBg}}; border: {{drawerBorder}}; box-shadow: {{drawerShadow}}">
 	<header style="flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 10px 10px 18px">
-		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Activity</h2>
-		<button onClick="{{togglePause}}" aria-pressed="{{paused}}" title="{{pauseTitle}}" style="font: inherit; cursor: pointer; flex: none; height: 26px; padding: 0 10px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; background: {{liveBg}}; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</button>
-		<button onClick="{{toggleRec}}" aria-pressed="{{recording}}" title="{{recTitle}}" aria-label="{{recText}}" style="font: inherit; cursor: pointer; flex: 0 1 auto; min-width: 29px; height: 26px; padding: 0 10px; border: 1px solid {{recBorder}}; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; overflow: hidden; background: transparent; color: var(--wk-text-2)"><span style="flex: none; width: 7px; height: 7px; border-radius: 50%; background: {{recDot}}"></span><sc-if value="{{recLabel}}" hint-placeholder-val="{{true}}"><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{recText}}</span></sc-if></button>
+		<h2 class="wk-h2">Activity</h2>
+		<button class="wk-act-live" onClick="{{togglePause}}" aria-pressed="{{paused}}" title="{{pauseTitle}}" style="flex: none; height: var(--wk-h-sm); padding: 0 10px; border-radius: var(--wk-r-3); display: flex; align-items: center; gap: 6px; font-size: var(--wk-fs-xs); font-weight: 700; white-space: nowrap"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</button>
+		<button onClick="{{toggleRec}}" aria-pressed="{{recording}}" title="{{recTitle}}" aria-label="{{recText}}" style="flex: 0 1 auto; min-width: 29px; height: var(--wk-h-sm); padding: 0 10px; border: 1px solid transparent; border-radius: var(--wk-r-3); display: flex; align-items: center; gap: 6px; font-size: var(--wk-fs-xs); white-space: nowrap; overflow: hidden; color: var(--wk-text-2)"><span style="flex: none; width: 7px; height: 7px; border-radius: 50%; background: {{recDot}}"></span><sc-if value="{{recLabel}}" hint-placeholder-val="{{true}}"><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{recText}}</span></sc-if></button>
 		<div style="flex: 1"></div>
 		<sc-if value="{{showColsBtn}}" hint-placeholder-val="{{true}}">
-			<button onClick="{{toggleCols}}" aria-pressed="{{paneOpen}}" title="{{colsTitle}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 10px 0 8px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{colsBg}}; color: {{colsFg}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16h-16zM9.33 4v16M14.67 4v16"></path></svg>Columns</button>
+			<button class="wk-btn wk-cols" data-variant="ghost" data-size="sm" onClick="{{toggleCols}}" aria-pressed="{{paneOpen}}" title="{{colsTitle}}" style="flex: none; padding: 0 10px 0 8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16h-16zM9.33 4v16M14.67 4v16"></path></svg>Columns</button>
 		</sc-if>
-		<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; flex: none; width: 36px; height: 36px; border: 0; border-radius: 6px; display: grid; place-items: center; background: transparent; color: var(--wk-text-3)">
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
+		<button class="wk-icon-btn" data-close="" onClick="{{close}}" aria-label="Close activity" style="color: var(--wk-text-3)">
+			<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
 		</button>
 	</header>
 
 	<div style="flex: none; padding: 0 14px; position: relative; z-index: 2">
-		<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 46px; box-sizing: border-box; padding: 6px 8px 6px 14px; border-radius: 8px; background: var(--wk-well-glass); border: 1px solid {{searchBorder}}; transition: border-color .15s">
+		<div class="wk-field" style="flex-wrap: wrap; gap: 6px">
 			<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M21 21l-6 -6"></path></svg>
 			<sc-for list="{{tokens}}" as="t" hint-placeholder-count="0">
-				<span style="display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 2px 0 10px; border-radius: 4px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-size: 12.5px; font-weight: 700; white-space: nowrap"><span style="font-weight: 400; color: var(--wk-text-3); margin-right: 4px">{{t.kind}}</span>{{t.value}}
-					<button onClick="{{t.remove}}" aria-label="Remove filter {{t.kind}} {{t.value}}" style="font: inherit; cursor: pointer; width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: var(--wk-accent); display: grid; place-items: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+				<span class="wk-token"><span style="font-weight: 400; color: var(--wk-text-3); margin-right: 4px">{{t.kind}}</span>{{t.value}}
+					<button onClick="{{t.remove}}" aria-label="Remove filter {{t.kind}} {{t.value}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 				</span>
 			</sc-for>
-			<input value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onKey}}" onFocus="{{onFocus}}" onBlur="{{onBlur}}" aria-label="Search activity" placeholder="{{placeholder}}" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 160px; height: 32px; border: 0; outline: none; background: transparent; color: var(--wk-text); font: inherit; font-size: 14.5px">
+			<input value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onKey}}" onFocus="{{onFocus}}" onBlur="{{onBlur}}" aria-label="Search activity" placeholder="{{placeholder}}" spellcheck="false" autocomplete="off" style="min-width: 160px">
 			<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
-				<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap">{{resultCount}}</span>
-				<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.06); color: var(--wk-text-2); font-size: 12.5px">Clear all</button>
+				<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap">{{resultCount}}</span>
+				<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{clearAll}}" style="padding: 0 10px; background: rgba(var(--wk-accent-rgb),.06); font-weight: 400">Clear all</button>
 			</sc-if>
 			<sc-if value="{{canPin}}" hint-placeholder-val="{{false}}">
-				<button onClick="{{pinSearch}}" title="{{pinTitle}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 10px 0 8px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4M9 15l-4.5 4.5M14.5 4l5.5 5.5"></path></svg>{{pinText}}</button>
+				<button class="wk-btn" data-variant="tonal" data-size="sm" onClick="{{pinSearch}}" title="{{pinTitle}}" style="flex: none; padding: 0 10px 0 8px; gap: 4px; background: rgba(var(--wk-accent-rgb),.14)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4M9 15l-4.5 4.5M14.5 4l5.5 5.5"></path></svg>{{pinText}}</button>
 			</sc-if>
 		</div>
 		<sc-if value="{{showSugg}}" hint-placeholder-val="{{false}}">
-			<div role="listbox" aria-label="Search suggestions" style="position: absolute; left: 14px; right: 14px; top: 52px; max-width: 560px; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer); backdrop-filter: blur(24px)">
+			<div role="listbox" aria-label="Search suggestions" class="wk-menu" style="position: absolute; left: 14px; right: 14px; top: 52px; max-width: 560px">
 				<sc-for list="{{sugg}}" as="s" hint-placeholder-count="3">
-					<button role="option" aria-selected="{{s.on}}" onMouseDown="{{s.pick}}" onMouseEnter="{{s.enter}}" style="font: inherit; color: inherit; cursor: pointer; width: 100%; text-align: left; display: flex; align-items: center; gap: 12px; height: 42px; padding: 0 12px; border: 0; border-radius: 6px; background: {{s.bg}}">
-						<span style="font-size: 12px; color: var(--wk-text-3); width: 104px; flex: none">{{s.kind}}</span>
+					<button role="option" class="wk-option" data-size="touch" aria-selected="{{s.on}}" onMouseDown="{{s.pick}}" onMouseEnter="{{s.enter}}">
+							<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3); width: 104px; flex: none">{{s.kind}}</span>
 						<span style="flex: 1; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.value}}</span>
-						<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{s.count}}</span>
+						<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{s.count}}</span>
 					</button>
 				</sc-for>
-				<div style="display: flex; gap: 14px; padding: 8px 12px 4px; font-size: 12px; color: var(--wka-hint)"><span>↑↓ choose</span><span>Enter add filter</span><span>⌫ remove last</span></div>
+				<div class="wk-menu-foot" style="display: flex; gap: 14px; padding: 8px 12px 4px"><span>↑↓ choose</span><span>Enter add filter</span><span>⌫ remove last</span></div>
 			</div>
 		</sc-if>
 	</div>
 
 	<div role="group" aria-label="Quick filters" style="flex: none; display: flex; flex-wrap: {{chipWrap}}; align-items: center; gap: 6px; padding: 10px 14px 12px; overflow-x: auto; scrollbar-width: none">
 		<sc-for list="{{cats}}" as="c" hint-placeholder-count="8">
-			<button aria-pressed="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.aria}}" title="{{c.label}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}; opacity: {{c.op}}">
-				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+			<button class="wk-chip" aria-pressed="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.aria}}" title="{{c.label}}" style="flex: none; opacity: {{c.op}}">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 				<sc-if value="{{catLabels}}" hint-placeholder-val="{{true}}"><span>{{c.label}}</span></sc-if>
-				<span style="font-weight: 400; font-size: 11.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{c.count}}</span>
+				<span style="font-weight: 400; font-size: var(--wk-fs-2xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{c.count}}</span>
 			</button>
 		</sc-for>
-		<sc-if value="{{catLabels}}" hint-placeholder-val="{{true}}"><div style="width: 1px; height: 20px; background: rgba(var(--wk-line-rgb),.08); flex: none; margin: 0 2px"></div></sc-if>
-		<button aria-pressed="{{audioOnly}}" onClick="{{toggleAudio}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{audioBorder}}; background: {{audioBg}}; color: {{audioFg}}">
-			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM4 15v-3a8 8 0 0 1 16 0v3"></path></svg>With audio
+		<sc-if value="{{catLabels}}" hint-placeholder-val="{{true}}"><div style="width: 1px; height: 20px; background: var(--wk-line-08); flex: none; margin: 0 2px"></div></sc-if>
+		<button class="wk-chip" aria-pressed="{{audioOnly}}" onClick="{{toggleAudio}}" style="flex: none">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM4 15v-3a8 8 0 0 1 16 0v3"></path></svg>With audio
 		</button>
-		<button style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; border: 1px solid rgba(var(--wk-line-rgb),.18); background: transparent; color: var(--wk-text-2)">Today
-			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6l6 -6"></path></svg>
+		<button class="wk-chip" style="flex: none">Today
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6l6 -6"></path></svg>
 		</button>
 	</div>
 
 	<sc-if value="{{showSwitch}}" hint-placeholder-val="{{false}}">
 		<div role="tablist" aria-label="Pinned columns" style="flex: none; display: flex; align-items: center; gap: 6px; padding: 0 14px 10px; overflow-x: auto; scrollbar-width: none">
 			<sc-for list="{{switcher}}" as="w" hint-placeholder-count="4">
-				<button role="tab" aria-selected="{{w.on}}" onClick="{{w.pick}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 10px; border-radius: 15px; border: 1px solid {{w.border}}; background: {{w.bg}}; color: {{w.fg}}; font-size: 12.5px; font-weight: 700; display: flex; align-items: center; gap: 6px; white-space: nowrap">{{w.title}}<sc-if value="{{w.hasNew}}" hint-placeholder-val="{{false}}"><span aria-label="{{w.newN}} new" style="min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 11px; display: grid; place-items: center; font-variant-numeric: tabular-nums">{{w.newN}}</span></sc-if></button>
+				<button class="wk-chip" role="tab" aria-selected="{{w.on}}" onClick="{{w.pick}}" style="flex: none">{{w.title}}<sc-if value="{{w.hasNew}}" hint-placeholder-val="{{false}}"><span class="wk-count" aria-label="{{w.newN}} new">{{w.newN}}</span></sc-if></button>
 			</sc-for>
 		</div>
 	</sc-if>
@@ -257,58 +245,58 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	<div style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px">
 		<sc-if value="{{showLists}}" hint-placeholder-val="{{true}}">
 			<sc-for list="{{drawerCols}}" as="col" hint-placeholder-count="1">
-				<section data-act-col="drawer" aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · S keep · Enter open · Esc close" style="position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--wk-well-glass)">
+				<section data-act-col="drawer" data-wk-region="" aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · S keep · Enter open · Esc close" style="position: relative; flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: var(--wk-r-4); background: var(--wk-well-glass)">
 					<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px 0 14px">
-						<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: var(--wk-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
-						<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{col.count}}</span>
+						<h3 style="margin: 0; font-family: var(--wk-font-head); font-weight: 700; font-size: var(--wk-fs-xl); letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
+						<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{col.count}}</span>
 					</header>
-					<div data-act-list="" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+					<div data-act-list="" class="wk-scroll" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px">
 							<sc-if value="{{col.empty}}" hint-placeholder-val="{{false}}">
 								<div style="display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 16px; text-align: center">
 									<span style="font-weight: 700; color: var(--wk-text-2)">{{col.emptyTitle}}</span>
-									<span style="font-size: 13px; color: var(--wk-text-3); line-height: 1.5">{{col.emptyText}}</span>
+									<span style="font-size: var(--wk-fs-md); color: var(--wk-text-3); line-height: 1.5">{{col.emptyText}}</span>
 									<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
-										<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 14px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 6px; background: transparent; color: var(--wk-accent); font-size: 13px; font-weight: 700">Clear filters</button>
+										<button class="wk-btn" data-variant="outline" onClick="{{clearAll}}" style="padding: 0 14px; color: var(--wk-accent); font-size: var(--wk-fs-md)">Clear filters</button>
 									</sc-if>
 								</div>
 							</sc-if>
 							<sc-for list="{{col.groups}}" as="g" hint-placeholder-count="2">
-								<div class="wk-act-stick" style="position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; font-size: 11.5px; font-weight: 700; letter-spacing: .04em; color: var(--wk-text-3); font-variant-numeric: tabular-nums; background: linear-gradient(var(--wka-sticky) 70%, transparent)">{{g.label}}</div>
+								<div class="wk-act-stick" style="position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; font-size: var(--wk-fs-2xs); font-weight: 700; color: var(--wk-text-3); font-variant-numeric: tabular-nums; background: linear-gradient(var(--wka-sticky) 70%, transparent)">{{g.label}}</div>
 								<sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
-									<div style="display: flex; align-items: stretch; margin-bottom: 2px; border-radius: 6px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .8s ease">
-										<button onClick="{{r.pick}}" aria-current="{{r.selected}}" style="font: inherit; color: inherit; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; border: 0; background: transparent; text-align: left; border-radius: 6px">
-											<span style="position: relative; width: 32px; height: 32px; flex: none; border-radius: 6px; background: var(--wk-fill); display: grid; place-items: center">
-												<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+									<div class="wk-row" aria-current="{{r.selected}}" data-state="{{r.state}}" style="align-items: stretch; gap: 0; padding: 0; margin-bottom: 2px; transition: background-color var(--wk-dur-flash) var(--wk-ease-out)">
+<button onClick="{{r.pick}}" style="flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; text-align: left; border-radius: var(--wk-r-4)">
+<span class="wk-tile" data-tone="accent" style="position: relative">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 												<sc-if value="{{r.rec}}" hint-placeholder-val="{{false}}"><span title="Recording now" style="position: absolute; top: -2px; right: -2px; width: 10px; height: 10px; border-radius: 50%; background: var(--wk-danger); box-shadow: 0 0 0 2px var(--wk-surface)"></span></sc-if>
 											</span>
 											<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
 												<span style="display: flex; align-items: baseline; gap: 10px; min-width: 0">
-													<span style="flex: 0 1 auto; min-width: 0; font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
+													<span style="flex: 0 1 auto; min-width: 0; font-weight: 700; font-size: var(--wk-fs-lg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
 													<span style="flex: 1"></span>
 													<sc-if value="{{r.kept}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="var(--wk-accent)" stroke="var(--wk-accent)" stroke-width="1.5" stroke-linejoin="round" role="img" aria-label="Kept in Recordings" style="flex: none; align-self: center"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg></sc-if>
-													<span style="flex: none; font-size: 12px; color: {{r.timeC}}; font-variant-numeric: tabular-nums">{{r.time}}</span>
+													<span style="flex: none; font-size: var(--wk-fs-xs); color: {{r.timeC}}; font-variant-numeric: tabular-nums">{{r.time}}</span>
 												</span>
-												<span style="display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 1px; font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden">
+												<span style="display: flex; align-items: center; gap: 4px; min-width: 0; margin-top: 1px; font-size: var(--wk-fs-xs); color: var(--wk-text-3); white-space: nowrap; overflow: hidden">
 													<sc-if value="{{r.locked}}" hint-placeholder-val="{{false}}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--wk-amber)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-label="Encrypted"><path d="M5 11h14v10h-14zM8 11v-4a4 4 0 1 1 8 0v4"></path></svg></sc-if>
 													<span style="overflow: hidden; text-overflow: ellipsis">{{r.meta}}</span>
 												</span>
-												<span style="margin-top: 5px; font-size: 13.5px; line-height: 1.45; color: {{r.prevC}}; font-style: {{r.prevI}}; font-family: {{r.prevF}}; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{r.preview}}</span>
+												<span style="margin-top: 5px; font-size: var(--wk-fs-md); line-height: 1.45; color: {{r.prevC}}; font-style: {{r.prevI}}; font-family: {{r.prevF}}; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{r.preview}}</span>
 												<sc-if value="{{r.isCurrent}}" hint-placeholder-val="{{false}}">
 													<span style="display: block; height: 3px; border-radius: 2px; background: var(--wk-line-solid); margin-top: 8px; overflow: hidden"><span style="display: block; height: 100%; width: {{r.pos}}%; background: var(--wk-accent)"></span></span>
 												</sc-if>
 											</span>
 										</button>
 										<sc-if value="{{r.hasAudio}}" hint-placeholder-val="{{false}}">
-											<button class="wk-play" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 54px; border: 0; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 6px">
+											<button class="wk-txplay" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="flex: none; width: 54px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: var(--wk-r-4)">
 												<span style="width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; border: 1px solid {{r.pBorder}}; background: {{r.pBg}}; color: {{r.pFg}}">
 													<sc-if value="{{r.playing}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
 													<sc-if value="{{r.notPlaying}}" hint-placeholder-val="{{true}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
 												</span>
-												<span style="font-size: 11px; color: {{r.durC}}; font-variant-numeric: tabular-nums">{{r.dur}}</span>
+												<span style="font-size: var(--wk-fs-2xs); color: {{r.durC}}; font-variant-numeric: tabular-nums">{{r.dur}}</span>
 											</button>
 										</sc-if>
 										<sc-if value="{{r.notRecorded}}" hint-placeholder-val="{{false}}">
-											<span title="Recording was off" style="flex: none; width: 54px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--wka-hint); text-align: center; line-height: 1.2">Not<br>recorded</span>
+											<span title="Recording was off" style="flex: none; width: 54px; display: flex; align-items: center; justify-content: center; font-size: var(--wk-fs-2xs); color: var(--wka-hint); text-align: center; line-height: 1.2">Not<br>recorded</span>
 										</sc-if>
 									</div>
 								</sc-for>
@@ -319,33 +307,33 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 		</sc-if>
 
 		<sc-if value="{{showDetail}}" hint-placeholder-val="{{false}}">
-			<aside aria-label="Details" style="flex: {{detailFlex}}; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: var(--wk-well-glass)">
+			<aside aria-label="Details" style="flex: {{detailFlex}}; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: var(--wk-r-4); background: var(--wk-well-glass)">
 				<header style="flex: none; display: flex; align-items: center; gap: 4px; height: 44px; padding: 0 6px">
-					<button onClick="{{closeDetail}}" aria-label="{{backLabel}}" style="font: inherit; cursor: pointer; flex: 0 1 auto; min-width: 32px; height: 32px; padding: 0 10px 0 6px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-2); display: flex; align-items: center; gap: 4px; font-size: 13px; white-space: nowrap; overflow: hidden">
-						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="{{backIcon}}"></path></svg><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{backText}}</span>
+					<button class="wk-btn" data-variant="ghost" onClick="{{closeDetail}}" aria-label="{{backLabel}}" style="flex: 0 1 auto; min-width: 32px; padding: 0 10px 0 6px; justify-content: flex-start; gap: 4px; font-size: var(--wk-fs-md); font-weight: 400; overflow: hidden">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{backIcon}}"></path></svg><span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{backText}}</span>
 					</button>
 					<div style="flex: 1"></div>
 					<sc-if value="{{selCanKeep}}" hint-placeholder-val="{{false}}">
-						<button onClick="{{toggleKeep}}" aria-pressed="{{selKept}}" title="{{keepTitle}}" style="font: inherit; cursor: pointer; flex: none; white-space: nowrap; height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: {{keepFg}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="{{keepFill}}" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg>{{keepText}}</button>
+						<button class="wk-btn wk-keep" data-variant="ghost" onClick="{{toggleKeep}}" aria-pressed="{{selKept}}" title="{{keepTitle}}" style="flex: none; padding: 0 10px; font-size: var(--wk-fs-md)"><svg viewBox="0 0 24 24" fill="{{keepFill}}" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg>{{keepText}}</button>
 					</sc-if>
-					<button onClick="{{copySel}}" style="font: inherit; cursor: pointer; flex: none; white-space: nowrap; height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-2); font-size: 13px">{{copyText}}</button>
-					<button onClick="{{tuneSel}}" style="font: inherit; cursor: pointer; flex: none; white-space: nowrap; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.12); color: var(--wk-accent); font-size: 13px; font-weight: 700">Tune {{selFreq}}</button>
+					<button class="wk-btn" data-variant="ghost" onClick="{{copySel}}" style="flex: none; padding: 0 10px; font-size: var(--wk-fs-md); font-weight: 400">{{copyText}}</button>
+					<button class="wk-btn" data-variant="tonal" onClick="{{tuneSel}}" style="flex: none; font-size: var(--wk-fs-md)"><span>Tune {{selFreq}}</span></button>
 				</header>
-				<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 14px; display: flex; flex-direction: column; gap: 18px; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
+				<div class="wk-scroll" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 14px; display: flex; flex-direction: column; gap: 18px">
 					<dc-import name="Decode" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" msg="{{sel}}" flat="{{true}}" on-tune="{{tune}}" on-play="{{playId}}" playing="{{selPlaying}}" play-pos="{{selPos}}" json-height="{{jsonH}}" hint-size="100%,360px"></dc-import>
 					<sc-if value="{{hasRelated}}" hint-placeholder-val="{{false}}">
-						<section style="display: flex; flex-direction: column; gap: 2px; border-top: 1px solid rgba(var(--wk-line-rgb),.08); padding-top: 14px">
+						<section style="display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--wk-line-08); padding-top: 14px">
 							<div style="display: flex; align-items: center; margin: 0 4px 6px">
-								<h4 style="margin: 0; flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 400; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-3)">{{relatedTitle}}</h4>
+								<h4 class="wk-label" style="margin: 0; flex: 1">{{relatedTitle}}</h4>
 								<sc-if value="{{canPlayAll}}" hint-placeholder-val="{{false}}">
-									<button onClick="{{playAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-accent); font-size: 12.5px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg>Play conversation</button>
+									<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{playAll}}" style="padding: 0 10px; color: var(--wk-accent)"><svg viewBox="0 0 24 24" aria-hidden="true" style="width: 11px; height: 11px"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg>Play conversation</button>
 								</sc-if>
 							</div>
 							<sc-for list="{{related}}" as="r" hint-placeholder-count="3">
-								<button onClick="{{r.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 4px 8px; border: 0; border-radius: 6px; background: {{r.bg}}">
-									<span style="width: 40px; flex: none; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{r.time}}</span>
-									<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: var(--wk-text-soft)">{{r.preview}}</span>
-									<span style="font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{r.dur}}</span>
+								<button onClick="{{r.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: var(--wk-h-touch); padding: 4px 8px; border: 0; border-radius: var(--wk-r-3); background: {{r.bg}}">
+									<span style="width: 40px; flex: none; font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{r.time}}</span>
+									<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: var(--wk-fs-md); color: var(--wk-text-soft)">{{r.preview}}</span>
+									<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{r.dur}}</span>
 								</button>
 							</sc-for>
 						</section>
@@ -356,21 +344,21 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	</div>
 
 	<sc-if value="{{hasPlayer}}" hint-placeholder-val="{{false}}">
-		<div style="flex: none; margin: 0 10px 10px; padding: 8px 10px 8px 8px; border-radius: 8px; background: var(--wk-well-glass); border: 1px solid rgba(var(--wk-line-rgb),.08); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px">
+		<div style="flex: none; margin: 0 10px 10px; padding: 8px 10px 8px 8px; border-radius: var(--wk-r-4); background: var(--wk-well-glass); border: 1px solid var(--wk-line-08); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px">
 			<div style="display: flex; align-items: center; gap: 2px; flex: none">
-				<button onClick="{{prev}}" aria-label="Previous recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 6px; background: transparent; color: {{prevC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2v14h-2zM20 5v14l-10 -7z"></path></svg></button>
-				<button onClick="{{togglePlay}}" aria-label="{{playerLabel}}" style="font: inherit; cursor: pointer; width: 40px; height: 40px; border: 0; border-radius: 50%; background: var(--wk-accent); color: var(--wk-on-accent); display: grid; place-items: center">
+				<button class="wk-icon-btn" onClick="{{prev}}" aria-label="Previous recording" style="color: {{prevC}}"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="width: 15px; height: 15px"><path d="M6 5h2v14h-2zM20 5v14l-10 -7z"></path></svg></button>
+				<button class="wk-play" data-size="lg" onClick="{{togglePlay}}" aria-label="{{playerLabel}}">
 					<sc-if value="{{pPlaying}}" hint-placeholder-val="{{true}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
 					<sc-if value="{{pPaused}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
 				</button>
-				<button onClick="{{next}}" aria-label="Next recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 6px; background: transparent; color: {{nextC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5v14l10 -7z"></path></svg></button>
+				<button class="wk-icon-btn" onClick="{{next}}" aria-label="Next recording" style="color: {{nextC}}"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" style="width: 15px; height: 15px"><path d="M16 5h2v14h-2zM4 5v14l10 -7z"></path></svg></button>
 			</div>
 			<div style="flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
 				<div style="display: flex; align-items: baseline; gap: 8px; min-width: 0">
-					<button onClick="{{revealPlaying}}" style="font: inherit; color: var(--wk-text); cursor: pointer; padding: 0; border: 0; background: transparent; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pTitle}}</button>
-					<span style="font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pSub}}</span>
+					<button onClick="{{revealPlaying}}" style="color: var(--wk-text); padding: 0; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pTitle}}</button>
+					<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pSub}}</span>
 					<span style="flex: 1"></span>
-					<span style="font-size: 12px; color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap">{{pTime}}</span>
+					<span style="font-size: var(--wk-fs-xs); color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap">{{pTime}}</span>
 				</div>
 				<div style="position: relative; height: 14px">
 					<div style="position: absolute; left: 0; right: 0; top: 5px; height: 4px; border-radius: 2px; background: var(--wk-line-solid)"></div>
@@ -380,9 +368,9 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 				</div>
 			</div>
 			<div style="flex: none; margin-left: auto; display: flex; align-items: center; gap: 8px">
-			<button onClick="{{cycleSpeed}}" aria-label="Playback speed {{speedText}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; min-width: 44px; padding: 0 8px; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 6px; background: transparent; color: var(--wk-text-2); font-size: 12.5px; font-variant-numeric: tabular-nums">{{speedText}}</button>
-			<button aria-pressed="{{autoNext}}" onClick="{{toggleAutoNext}}" title="Play the next recording in this list when one ends" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 9px; border-radius: 6px; border: 1px solid {{anBorder}}; background: {{anBg}}; color: {{anFg}}; font-size: 12.5px">Auto-next</button>
-			<button onClick="{{stopPlay}}" aria-label="Close player and resume live audio" title="Close and resume live audio" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-3); display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			<button class="wk-btn" data-variant="outline" data-size="sm" onClick="{{cycleSpeed}}" aria-label="Playback speed {{speedText}}" style="flex: none; min-width: 44px; padding: 0 8px; color: var(--wk-text-2); font-weight: 400; font-variant-numeric: tabular-nums">{{speedText}}</button>
+			<button class="wk-chip" data-size="sm" aria-pressed="{{autoNext}}" onClick="{{toggleAutoNext}}" title="Play the next recording in this list when one ends" style="flex: none; padding: 0 9px; font-weight: 400">Auto-next</button>
+			<button class="wk-icon-btn" onClick="{{stopPlay}}" aria-label="Close player and resume live audio" title="Close and resume live audio" style="color: var(--wk-text-3)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 			</div>
 		</div>
 	</sc-if>
@@ -648,11 +636,10 @@ class Component extends DCLogic {
 				preview: preview(x),
 				prevC: x.transcript ? 'var(--wk-text-soft)' : x.text ? 'var(--wk-text-soft)' : 'var(--wk-text-2)',
 				prevI: x.transcriptState === 'pending' || x.toneOnly ? 'italic' : 'normal',
-				prevF: x.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : 'inherit',
+				prevF: x.mono ? 'var(--wk-font-mono)' : 'inherit',
 				icon: I[x.cat], rec: !!x.live, kept: s.kept.includes(x.id),
 				selected: s.sel === x.id ? 'true' : 'false',
-				bg: s.sel === x.id ? 'rgba(var(--wk-accent-rgb),.11)' : x.fresh ? 'rgba(var(--wk-accent-rgb),.07)' : isCur ? 'rgba(var(--wk-accent-rgb),.05)' : 'transparent',
-				ring: 'none',
+				state: x.fresh ? 'fresh' : isCur ? 'current' : 'rest',
 				hasAudio, notRecorded: audioItem && !hasAudio && !x.encrypted,
 				dur: x.live ? fmtS(x.audio) : fmtS(x.audio || 0), durC: x.live ? 'var(--wk-danger)' : 'var(--wk-text-3)',
 				isCurrent: isCur, playing: isPlay, notPlaying: !isPlay, pos: isCur ? s.pos * 100 : 0,
@@ -702,7 +689,7 @@ class Component extends DCLogic {
 			const item = (label, act, hint, off) => ({ label, hint: hint || '', off: off ? 'true' : 'false', fg: off ? 'var(--wk-text-5)' : 'var(--wk-text)', act: off ? () => {} : act });
 			return Object.assign(L, {
 				renaming: s.renaming === id, titled: s.renaming !== id,
-				menuOpen, menuExp: menuOpen ? 'true' : 'false', menuBg: menuOpen ? 'var(--wk-fill)' : 'transparent',
+				menuOpen, menuExp: menuOpen ? 'true' : 'false',
 				menu: e => { e.stopPropagation(); this.setState({ menu: menuOpen ? null : id }); },
 				items: [
 					item('Rename', () => this.setState({ renaming: id, renameText: p.title, menu: null })),
@@ -734,8 +721,7 @@ class Component extends DCLogic {
 		const switcher = ['all'].concat(cols).map(id => {
 			const on = id === nview, p = id === 'all' ? { title: 'All' } : this.col(id);
 			const newN = on || id === 'all' ? 0 : items.filter(x => x.at > (s.seen[id] || 0) && this.matches(x, p)).length;
-			return { title: p.title, on: on ? 'true' : 'false', hasNew: newN > 0, newN: String(newN), pick: () => pickView(id),
-				border: on ? 'transparent' : 'rgba(var(--wk-line-rgb),.18)', bg: on ? 'var(--wk-sel)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-2)' };
+			return { title: p.title, on: on ? 'true' : 'false', hasNew: newN > 0, newN: String(newN), pick: () => pickView(id) };
 		});
 		const editing = s.editing && cols.indexOf(s.editing) >= 0 ? s.editing : null;
 		const canPin = (s.tokens.length > 0 || s.cats.length > 0) && (!!editing || cols.length < MAX_COLS);
@@ -744,12 +730,13 @@ class Component extends DCLogic {
 		const total = items.filter(x => this.matches(x)).length;
 		// surfaces: in the shell the drawer is the board's root and the slot draws the pane's surface; framed on the board,
 		// pane and drawer are one opaque surface (as in the shell while the pane is open)
-		const glass = { bg: 'var(--wk-glass)', border: '1px solid rgba(var(--wk-line-rgb),.14)', shadow: 'inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl)', fx: 'blur(26px) var(--wk-glass-fx)' };
-		const root = part === 'pane' || framed ? { bg: framed ? 'var(--wk-surface)' : 'transparent', border: framed ? glass.border : '0', shadow: framed ? 'var(--wk-shadow-xl)' : 'none', fx: 'none' } : glass;
+		// the drawer is the solid drawer material (spec 4.7, 5 .wk-drawer); framed, the surface material
+		const solid = { bg: 'var(--wk-glass-strong)', border: '1px solid var(--wk-line-14)', shadow: 'var(--wk-e3)', fx: 'none' };
+		const root = part === 'pane' || framed ? { bg: framed ? 'var(--wk-surface)' : 'transparent', border: framed ? solid.border : '0', shadow: framed ? 'var(--wk-e3)' : 'none', fx: 'none' } : solid;
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
-			rootR: part === 'pane' ? '12px 0 0 12px' : '12px', rootBg: root.bg, rootBorder: root.border, rootShadow: root.shadow, rootFx: root.fx,
+			rootR: part === 'pane' ? 'var(--wk-r-5) 0 0 var(--wk-r-5)' : 'var(--wk-r-5)', rootBg: root.bg, rootBorder: root.border, rootShadow: root.shadow, rootFx: root.fx,
 			showPane, showDrawer,
 			paneR: '0', paneBg: 'transparent', paneBorder: '0', fadeC: framed || part === 'pane' ? 'var(--wk-surface)' : 'var(--wk-glass-strong)',
 			drawerFlex: framed ? '0 0 420px' : '1 1 0', drawerR: '0', drawerBg: 'transparent', drawerBorder: '0', drawerShadow: framed ? '-1px 0 0 rgba(var(--wk-line-rgb),.10)' : 'none',
@@ -775,26 +762,23 @@ class Component extends DCLogic {
 			// the drawer
 			showColsBtn: room && part !== 'pane', paneOpen: paneOpen ? 'true' : 'false',
 			colsTitle: paneOpen ? 'Hide the columns' : 'Show your pinned searches as columns beside Activity',
-			colsBg: paneOpen ? 'var(--wk-sel)' : 'transparent', colsFg: paneOpen ? 'var(--wk-accent)' : 'var(--wk-text-2)',
 			toggleCols: () => this.setMode(paneOpen ? 'drawer' : 'wide'),
 			showSwitch: !room && cols.length > 0, switcher,
 			catLabels: false, hasQuery,
 			paused: s.paused,
 			liveText: s.paused ? (s.pending.length ? 'Paused · ' + s.pending.length + ' new' : 'Paused') : 'Live',
 			pauseTitle: s.paused ? 'Resume and show new activity' : 'Pause the feed while you read',
-			liveBg: s.paused ? 'rgba(var(--wk-amber-rgb),.14)' : 'rgba(var(--wk-accent-rgb),.12)', liveFg: s.paused ? 'var(--wk-amber)' : 'var(--wk-accent)',
 			togglePause: () => s.paused ? this.resume() : this.setState({ paused: true }),
 			recording: s.recording, recText: s.recording ? 'Recording' : 'Recording off',
 			recTitle: s.recording ? 'Recording all audio. Every analog transmission and digital call is saved' : 'Recording off. Audio is not being saved',
 			// beside the Columns button the recording state is its dot (the title says it)
 			recLabel: !(room && part !== 'pane'),
-			recDot: s.recording ? 'var(--wk-danger)' : 'var(--wk-text-5)', recBorder: 'transparent',
+			recDot: s.recording ? 'var(--wk-danger)' : 'var(--wk-text-5)',
 			toggleRec: () => this.setState({ recording: !s.recording }),
 			close: () => this.props.onClose && this.props.onClose(),
 			q: s.q,
 			resultCount: total + (total === 1 ? ' result' : ' results'),
 			placeholder: s.tokens.length ? 'Narrow further…' : 'Search talkgroups, callsigns, messages, transcripts…',
-			searchBorder: editing ? 'rgba(var(--wk-accent-rgb),.45)' : s.focus ? 'rgba(var(--wk-line-rgb),.3)' : 'rgba(var(--wk-line-rgb),.18)',
 			onQ: e => this.setState({ q: e.target.value, sugg: 0 }),
 			onFocus: () => this.setState({ focus: true }),
 			onBlur: () => this.setState({ focus: false }),
@@ -807,7 +791,7 @@ class Component extends DCLogic {
 			},
 			tokens: s.tokens.map(t => ({ kind: t.kind, value: t.value, remove: () => this.setState({ tokens: s.tokens.filter(x => x !== t) }) })),
 			showSugg: s.focus && sugg.length > 0,
-			sugg: sugg.map((x, i) => ({ kind: x.kind, value: x.value, count: x.n + (x.n === 1 ? ' result' : ' results'), on: i === s.sugg, bg: i === s.sugg ? 'rgba(var(--wk-accent-rgb),.10)' : 'transparent', enter: () => this.setState({ sugg: i }), pick: e => { e.preventDefault(); this.addToken(x.t); } })),
+			sugg: sugg.map((x, i) => ({ kind: x.kind, value: x.value, count: x.n + (x.n === 1 ? ' result' : ' results'), on: i === s.sugg, enter: () => this.setState({ sugg: i }), pick: e => { e.preventDefault(); this.addToken(x.t); } })),
 			clearAll: () => this.setState({ q: '', tokens: [], cats: [], audioOnly: false, editing: null }),
 			// Pin as column: the search becomes a column (and opens the pane); editing a column's search updates it instead
 			canPin, pinText: editing ? 'Update column' : 'Pin as column',
@@ -823,10 +807,9 @@ class Component extends DCLogic {
 			},
 			cats: CATS.map(([id, label]) => {
 				const on = s.cats.includes(id), n = items.filter(x => x.cat === id).length;
-				return { label, aria: label + ', ' + n, icon: I[id], count: String(n), on, op: n ? 1 : 0.45, border: 'transparent', bg: on ? 'var(--wk-sel)' : 'var(--wk-chip)', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-2)', pick: () => this.setState({ cats: on ? s.cats.filter(c => c !== id) : s.cats.concat([id]) }) };
+				return { label, aria: label + ', ' + n, icon: I[id], count: String(n), on, op: n ? 1 : 0.45, pick: () => this.setState({ cats: on ? s.cats.filter(c => c !== id) : s.cats.concat([id]) }) };
 			}),
 			audioOnly: s.audioOnly, toggleAudio: () => this.setState({ audioOnly: !s.audioOnly }),
-			audioBorder: 'transparent', audioBg: s.audioOnly ? 'var(--wk-sel)' : 'var(--wk-chip)', audioFg: s.audioOnly ? 'var(--wk-accent)' : 'var(--wk-text-2)',
 			chipWrap: 'wrap',
 			// an item picked in any list, pane columns included, opens here in place of the list
 			showLists: !selItem,
@@ -842,7 +825,6 @@ class Component extends DCLogic {
 			selCanKeep: !!selItem && this.playable(selItem) && !selItem.live,
 			selKept: !!selItem && s.kept.includes(selItem.id),
 			keepText: selItem && s.kept.includes(selItem.id) ? 'Kept' : 'Keep',
-			keepFg: selItem && s.kept.includes(selItem.id) ? 'var(--wk-accent)' : 'var(--wk-text-2)',
 			keepFill: selItem && s.kept.includes(selItem.id) ? 'currentColor' : 'none',
 			keepTitle: selItem && s.kept.includes(selItem.id) ? 'Kept in Recordings. Click to let it expire with other calls (S)' : 'Keep in Recordings so it never expires (S)',
 			toggleKeep: () => selItem && this.toggleKeep(selItem.id),
@@ -875,7 +857,6 @@ class Component extends DCLogic {
 			pTime: playItem ? fmtS(s.pos * playItem.audio) + ' / ' + fmtS(playItem.audio) : '',
 			speedText: s.speed + '×', cycleSpeed: () => this.setState({ speed: s.speed === 1 ? 1.5 : s.speed === 1.5 ? 2 : 1 }),
 			autoNext: s.autoNext, toggleAutoNext: () => this.setState({ autoNext: !s.autoNext }),
-			anBorder: 'transparent', anBg: s.autoNext ? 'var(--wk-sel)' : 'var(--wk-chip)', anFg: s.autoNext ? 'var(--wk-accent)' : 'var(--wk-text-2)',
 			stopPlay: () => this.setState({ play: null, playing: false, pos: 0 })
 		};
 	}

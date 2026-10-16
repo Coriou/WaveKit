@@ -9,59 +9,36 @@
 <x-dc>
 <helmet>
 <style>
-/* wk-tokens v2 · copy verbatim, never edit per board */
-[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92;--wk-brand:#7becc7;--wk-focus:rgba(var(--wk-ink-rgb),.55);--wk-sel:rgba(var(--wk-accent-rgb),.12);--wk-chip:rgba(var(--wk-ink-rgb),.06)}
-[data-wk-theme="light"]{color-scheme:light;--wk-plot-bg:#f4f0e6;--wk-bg:#f4f0e6;--wk-surface:#fbf8f1;--wk-fill:#ebe5d8;--wk-fill-glass:rgba(251,248,241,.96);--wk-well:rgba(74,58,34,.07);--wk-well-glass:rgba(74,58,34,.05);--wk-glass:rgba(251,248,241,.96);--wk-glass-panel:rgba(251,248,241,.97);--wk-glass-strong:rgba(252,250,245,.985);--wk-glass-fx:saturate(105%);--wk-glass-hi:rgba(255,255,255,0);--wk-shadow:0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10);--wk-shadow-pop:0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12);--wk-shadow-tip:0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12);--wk-shadow-lg:0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13);--wk-shadow-drawer:0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16);--wk-shadow-xl:0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16);--wk-shadow-lift:0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20);--wk-text:#2a241c;--wk-text-soft:#3a3328;--wk-text-2:#4a4235;--wk-text-3:#5a5143;--wk-text-4:#72675a;--wk-text-5:#a39a89;--wk-ink-rgb:42,36,28;--wk-ink-2-rgb:74,66,53;--wk-ink-3-rgb:90,81,67;--wk-knob:#ffffff;--wk-line-solid:#e0d9ca;--wk-track:#8f8573;--wk-accent:#1d6b52;--wk-accent-rgb:29,107,82;--wk-line-rgb:74,58,34;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(252,241,214,.97);--wk-amber-fill:#f6e7c4;--wk-on-amber:#ffffff;--wk-danger:#a8321e;--wk-danger-rgb:214,64,48;--wk-danger-soft:#93291a;--wk-brand:#16735c}
-[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
-[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
-[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
-[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
-[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#225f92;--wk-accent-rgb:34,95,146}
-[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#5f45a8;--wk-accent-rgb:95,69,168}
-[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#9e3370;--wk-accent-rgb:158,51,112}
-[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#2a241c;--wk-accent-rgb:42,36,28}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="ice"]{--wk-plot-bg:#0d1319;--wk-bg:#0d1319;--wk-surface:#131a21;--wk-fill:#1b2833;--wk-fill-glass:rgba(27,40,51,.92);--wk-well:#0d1319;--wk-well-glass:rgba(13,19,25,.6);--wk-glass:rgba(19,26,33,.5);--wk-glass-panel:rgba(19,26,33,.66);--wk-glass-strong:rgba(19,26,33,.92);--wk-text:#f4f6f9;--wk-text-soft:#d9e2ea;--wk-text-2:#bac7d3;--wk-text-3:#8da1b2;--wk-text-4:#778796;--wk-text-5:#54616d;--wk-ink-rgb:244,246,249;--wk-ink-2-rgb:186,199,211;--wk-ink-3-rgb:141,161,178;--wk-knob:#f4f6f9;--wk-line-solid:#25333f;--wk-track:#2f404f;--wk-on-accent:#131a21}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="violet"]{--wk-plot-bg:#141119;--wk-bg:#141119;--wk-surface:#1a1820;--wk-fill:#292432;--wk-fill-glass:rgba(41,36,50,.92);--wk-well:#141119;--wk-well-glass:rgba(20,17,25,.6);--wk-glass:rgba(26,24,32,.5);--wk-glass-panel:rgba(26,24,32,.66);--wk-glass-strong:rgba(26,24,32,.92);--wk-text:#f6f6f9;--wk-text-soft:#e2dfe9;--wk-text-2:#c7c2d2;--wk-text-3:#a199b1;--wk-text-4:#878195;--wk-text-5:#615c6b;--wk-ink-rgb:246,246,249;--wk-ink-2-rgb:199,194,210;--wk-ink-3-rgb:161,153,177;--wk-knob:#f6f6f9;--wk-line-solid:#332e3e;--wk-track:#413a4e;--wk-on-accent:#1a1820}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="coral"]{--wk-plot-bg:#181013;--wk-bg:#181013;--wk-surface:#20161a;--wk-fill:#312128;--wk-fill-glass:rgba(49,33,40,.92);--wk-well:#181013;--wk-well-glass:rgba(24,16,19,.6);--wk-glass:rgba(32,22,26,.5);--wk-glass-panel:rgba(32,22,26,.66);--wk-glass-strong:rgba(32,22,26,.92);--wk-text:#f9f5f6;--wk-text-soft:#e9dde2;--wk-text-2:#d2c0c7;--wk-text-3:#b095a0;--wk-text-4:#947e87;--wk-text-5:#6b5a61;--wk-ink-rgb:249,245,246;--wk-ink-2-rgb:210,192,199;--wk-ink-3-rgb:176,149,160;--wk-knob:#f9f5f6;--wk-line-solid:#3d2b33;--wk-track:#4c3740;--wk-on-accent:#20161a}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
-[data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
-[data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
-[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-</style>
-<style>
-@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
-@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
-@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
-@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#000000}
 body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
-button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer}
-button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus);outline-offset:2px}
-.wk-ghost:hover{background:var(--wk-fill);color:var(--wk-text)}
+/* dock: an island rail of touch icon buttons; the active view shows its label. Board emphasis kept: off text-3, on --wk-fill + accent */
+.wk-dock .wk-icon-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:auto;min-width:var(--wk-h-touch);padding:0 12px;box-sizing:border-box;font-size:var(--wk-fs-md);font-weight:700;color:var(--wk-text-3)}
+.wk-dock .wk-icon-btn:hover{color:var(--wk-text)}
+.wk-dock .wk-icon-btn[aria-pressed="true"]{background:var(--wk-fill);color:var(--wk-accent)}
+/* .wk-tip placed above its dock button (offset 12 clears the dock's edge) */
 .wk-tipw{position:relative}
-.wk-tip{position:absolute;left:50%;bottom:calc(100% + 12px);transform:translate(-50%,4px);white-space:nowrap;padding:6px 10px;border-radius:6px;background:var(--wk-glass-strong);border:1px solid rgba(var(--wk-line-rgb),.14);box-shadow:var(--wk-shadow-tip);color:var(--wk-text);font-size:12.5px;font-weight:400;pointer-events:none;opacity:0;transition:opacity .12s,transform .12s}
-.wk-tip kbd{font:inherit;color:var(--wk-text-3);margin-left:2px}
-.wk-tipw:hover .wk-tip,.wk-tipw:focus-visible .wk-tip{opacity:1;transform:translate(-50%,0);transition-delay:.35s}
+.wk-tipw .wk-tip{position:absolute;left:50%;bottom:calc(100% + 12px);transform:translate(-50%,4px);font-weight:400;opacity:0;transition:opacity var(--wk-dur-1) var(--wk-ease-out),transform var(--wk-dur-1) var(--wk-ease-out)}
+.wk-tipw .wk-tip kbd{font:inherit;color:var(--wk-text-3);margin-left:2px}
+.wk-tipw:hover .wk-tip,.wk-tipw:focus-visible .wk-tip{opacity:1;transform:translate(-50%,0);transition-delay:.4s}
 .wk-tipw:focus-visible .wk-tip{transition-delay:0s}
-.wk-rs .wk-rs-bar{opacity:.4;transition:opacity .15s,background .15s,height .15s}
+/* drawer resize handle */
+.wk-rs .wk-rs-bar{opacity:.4;transition:opacity var(--wk-dur-2),background var(--wk-dur-2),height var(--wk-dur-2)}
 .wk-rs:hover .wk-rs-bar,.wk-rs:focus-visible .wk-rs-bar,.wk-rs[data-on="true"] .wk-rs-bar{opacity:1;background:var(--wk-accent);height:56px}
 .wk-rs:focus-visible{outline-offset:-2px}
-.wk-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-@keyframes wk-pane{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
-.wk-pane{animation:wk-pane .2s cubic-bezier(.2,.8,.2,1) both}
-/* drawer + attached pane: the slot draws one opaque surface for both (no blur, no see-through over the live waterfall); the drawer's board drops
-   its own blur and takes the same fill, the pane's board drops its own surface so the slot's outline is the only one */
-.wk-drawer[data-pane="true"] > .sc-host > [data-wk-theme]{backdrop-filter:none !important;-webkit-backdrop-filter:none !important;background:var(--wk-surface) !important}
-.wk-pane-body > .sc-host > [data-wk-theme]{backdrop-filter:none !important;-webkit-backdrop-filter:none !important;background:transparent !important;border:0 !important;border-radius:0 !important;box-shadow:none !important}
+/* slots: .wk-slot holds the right drawer, .wk-paneslot its attached pane (the pane material is the kit's .wk-pane) */
+.wk-paneslot{animation:wk-rise var(--wk-dur-4) var(--wk-ease-out)}
+/* drawer + attached pane read as one opaque surface: the drawer's solid material takes the pane's surface,
+   and the pane's board draws no material of its own (the slot's .wk-pane is the only outline) */
+.wk-slot[data-pane="true"] > .sc-host > [data-wk-theme]{--wk-glass-strong:var(--wk-surface)}
+.wk-paneslot-body > .sc-host > [data-wk-theme]{background:none;border:0;box-shadow:none}
 @keyframes wk-tgt{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
-.wk-tgt{animation:wk-tgt .16s ease-out both}
+.wk-tgt{animation:wk-tgt var(--wk-dur-2) var(--wk-ease-out) both}
 @media (max-width:1100px){.wk-float{display:none}}
 @media (max-width:760px){.wk-dock{display:none}.wk-src{top:84px !important}}
-@media (prefers-reduced-motion:reduce){.wk-glide,.wk-shift,.wk-dock,.wk-drawer,.wk-tgt,.wk-tip,.wk-pane{transition:none !important;animation:none !important}}
 </style>
 </helmet>
-<div ref="{{refs.root}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: relative; height: 100vh; min-height: 760px; background: var(--wk-plot-bg); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
+<div ref="{{refs.root}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: relative; height: 100vh; min-height: 760px; background: var(--wk-plot-bg); color: var(--wk-text); font-family: var(--wk-font-ui); overflow: hidden">
+	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
 	<div style="position: absolute; inset: 0">
 		<dc-import name="Spectrum" on-settings="{{openSetting}}" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" scan="{{specScan}}" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
 
@@ -84,7 +61,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 				<sc-for list="{{targets}}" as="t" hint-placeholder-count="6">
 					<div class="wk-tgt" style="position: absolute; left: {{t.dotX}}px; top: {{t.dotY}}px; width: 12px; height: 12px; margin: -6px 0 0 -6px; box-sizing: border-box; border-radius: 50%; border: 1.5px solid rgba(var(--wk-accent-rgb),.5); background: rgba(var(--wk-accent-rgb),.12)"></div>
 				</sc-for>
-				<div style="position: absolute; left: 0; top: 0; width: 320px; height: {{cardH}}px; box-sizing: border-box; border-radius: 12px; border: 1.5px dashed rgba(var(--wk-accent-rgb),.55); background: rgba(var(--wk-accent-rgb),.05); transform: translate({{snapX}}px, {{snapY}}px); transition: transform .14s ease-out"></div>
+				<div style="position: absolute; left: 0; top: 0; width: 320px; height: {{cardH}}px; box-sizing: border-box; border-radius: var(--wk-r-5); border: 1.5px dashed rgba(var(--wk-accent-rgb),.55); background: rgba(var(--wk-accent-rgb),.05); transform: translate({{snapX}}px, {{snapY}}px); transition: transform var(--wk-dur-2) var(--wk-ease-out)"></div>
 			</div>
 		</sc-if>
 
@@ -95,10 +72,10 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 		</sc-if>
 
 		<sc-if value="{{hasSource}}" hint-placeholder-val="{{false}}">
-			<div class="wk-src" role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: var(--wk-amber-glass); border: 1px solid rgba(var(--wk-amber-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); white-space: nowrap; font-size: 13px; color: var(--wk-amber-soft)">
+			<div class="wk-src wk-island" data-tone="amber" role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; white-space: nowrap; font-size: var(--wk-fs-md); color: var(--wk-amber-soft)">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-amber)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>
 				<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis"><b style="color: var(--wk-amber)">Playing capture</b> · {{sourceText}}</span>
-				<button onClick="{{backToLive}}" style="flex: none; height: 32px; padding: 0 12px; border-radius: 6px; background: rgba(var(--wk-amber-rgb),.18); color: var(--wk-amber); font-weight: 700; font-size: 12.5px">Back to live</button>
+				<button class="wk-btn" onClick="{{backToLive}}" style="flex: none; background: rgba(var(--wk-amber-rgb),.18); color: var(--wk-amber)">Back to live</button>
 			</div>
 		</sc-if>
 
@@ -106,51 +83,51 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			<dc-import name="Listen" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" following-text="{{followingText}}" hint-size="340px,64px"></dc-import>
 		</div>
 
-		<nav ref="{{refs.dock}}" class="wk-dock" aria-label="Primary" style="position: absolute; left: {{dockX}}px; bottom: 16px; height: 64px; box-sizing: border-box; display: flex; align-items: center; gap: 4px; padding: 0 9px; border-radius: 12px; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); z-index: 2; transition: {{dockTr}}">
+		<nav ref="{{refs.dock}}" class="wk-dock wk-island" aria-label="Primary" style="position: absolute; left: {{dockX}}px; bottom: 16px; height: 64px; box-sizing: border-box; display: flex; align-items: center; gap: 4px; padding: 0 8px; z-index: 2; transition: {{dockTr}}">
 			<sc-for list="{{navViews}}" as="item" hint-placeholder-count="2">
-				<button class="wk-ghost wk-tipw" aria-label="{{item.label}}" aria-pressed="{{item.on}}" onClick="{{item.pick}}" style="height: 44px; min-width: 44px; padding: 0 12px; box-sizing: border-box; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; background: {{item.bg}}; color: {{item.fg}}; font-size: 13px; font-weight: 700">
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+				<button class="wk-icon-btn wk-tipw" data-size="touch" aria-label="{{item.label}}" aria-pressed="{{item.on}}" onClick="{{item.pick}}">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 					<sc-if value="{{item.showLabel}}" hint-placeholder-val="{{false}}"><span>{{item.label}}</span></sc-if>
 					<sc-if value="{{item.showTip}}" hint-placeholder-val="{{true}}"><span class="wk-tip" aria-hidden="true">{{item.label}}</span></sc-if>
 				</button>
 			</sc-for>
-			<div aria-hidden="true" style="width: 1px; height: 28px; background: rgba(var(--wk-line-rgb),.14); margin: 0 4px; flex: none"></div>
+			<div aria-hidden="true" style="width: 1px; height: 28px; background: var(--wk-line-14); margin: 0 4px; flex: none"></div>
 			<sc-for list="{{navDrawers}}" as="item" hint-placeholder-count="3">
-				<button class="wk-ghost wk-tipw" aria-label="{{item.label}}" aria-pressed="{{item.on}}" onClick="{{item.pick}}" style="height: 44px; min-width: 44px; padding: 0 12px; box-sizing: border-box; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; background: {{item.bg}}; color: {{item.fg}}; font-size: 13px; font-weight: 700">
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+				<button class="wk-icon-btn wk-tipw" data-size="touch" aria-label="{{item.label}}" aria-pressed="{{item.on}}" onClick="{{item.pick}}">
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 					<sc-if value="{{item.showLabel}}" hint-placeholder-val="{{false}}"><span>{{item.label}}</span></sc-if>
 					<sc-if value="{{item.showTip}}" hint-placeholder-val="{{true}}"><span class="wk-tip" aria-hidden="true">{{item.label}}</span></sc-if>
 				</button>
 			</sc-for>
-			<div aria-hidden="true" style="width: 1px; height: 28px; background: rgba(var(--wk-line-rgb),.14); margin: 0 4px; flex: none"></div>
-			<button class="wk-ghost wk-tipw" onClick="{{openPal}}" aria-haspopup="dialog" aria-expanded="{{palOpen}}" aria-label="Search" aria-keyshortcuts="Meta+K" style="width: 44px; height: 44px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"></path><path d="M21 21l-6 -6"></path></svg>
+			<div aria-hidden="true" style="width: 1px; height: 28px; background: var(--wk-line-14); margin: 0 4px; flex: none"></div>
+			<button class="wk-icon-btn wk-tipw" data-size="touch" onClick="{{openPal}}" aria-haspopup="dialog" aria-expanded="{{palOpen}}" aria-label="Search" aria-keyshortcuts="Meta+K">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"></path><path d="M21 21l-6 -6"></path></svg>
 				<span class="wk-tip" aria-hidden="true">Search <kbd>· ⌘K</kbd></span>
 			</button>
-			<button class="wk-ghost wk-tipw" onClick="{{toggleSettings}}" aria-pressed="{{settingsOn}}" aria-label="Settings" aria-keyshortcuts="Meta+Comma" style="width: 44px; height: 44px; border-radius: 6px; display: grid; place-items: center; background: {{gearBg}}; color: {{gearFg}}">
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
+			<button class="wk-icon-btn wk-tipw" data-size="touch" onClick="{{toggleSettings}}" aria-pressed="{{settingsOn}}" aria-label="Settings" aria-keyshortcuts="Meta+Comma">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
 				<span class="wk-tip" aria-hidden="true">Settings <kbd>· ⌘,</kbd></span>
 			</button>
 		</nav>
 
 		<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
-			<div role="status" style="position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 6px 0 16px; border-radius: 12px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); backdrop-filter: blur(22px) var(--wk-glass-fx); white-space: nowrap; font-size: 13.5px">
+			<div style="position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; display: flex; white-space: nowrap"><div class="wk-toast" role="status">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
 				<span>{{toastText}}</span>
 				<sc-if value="{{canUndo}}" hint-placeholder-val="{{true}}">
-					<button onClick="{{undo}}" style="height: 32px; padding: 0 12px; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-weight: 700; font-size: 13px">Undo</button>
+					<button class="wk-btn" data-variant="tonal" data-size="sm" onClick="{{undo}}">Undo</button>
 				</sc-if>
 				<sc-if value="{{noUndo}}" hint-placeholder-val="{{false}}"><span style="width: 10px"></span></sc-if>
-			</div>
+			</div></div>
 		</sc-if>
 	</div>
 
 	<sc-if value="{{hasSource}}" hint-placeholder-val="{{false}}">
-		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(var(--wk-amber-rgb),.55), inset 0 0 90px rgba(var(--wk-amber-rgb),.10); transition: opacity .3s"></div>
+		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(var(--wk-amber-rgb),.55), inset 0 0 90px rgba(var(--wk-amber-rgb),.10); transition: opacity var(--wk-dur-4)"></div>
 	</sc-if>
 
 	<sc-if value="{{hasDrawer}}" hint-placeholder-val="{{false}}">
-		<div class="wk-drawer" data-pane="{{paneSolid}}" style="position: absolute; z-index: 4; top: {{drTop}}px; bottom: {{drBottom}}px; right: 16px; left: {{drLeft}}; width: {{drWidth}}; transition: {{drTr}}">
+		<div class="wk-slot" data-pane="{{paneSolid}}" style="position: absolute; z-index: 4; top: {{drTop}}px; bottom: {{drBottom}}px; right: 16px; left: {{drLeft}}; width: {{drWidth}}; transition: {{drTr}}">
 			<sc-if value="{{showActivity}}" hint-placeholder-val="{{false}}">
 				<dc-import name="Activity" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" part="drawer" pane-room="{{actPaneRoom}}" command="{{actCmd}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
 			</sc-if>
@@ -176,11 +153,11 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 
 	<!-- the drawer's attached pane: grows left from the drawer's edge, between the island rows; its content is chosen by the drawer -->
 	<sc-if value="{{paneOn}}" hint-placeholder-val="{{false}}">
-		<div class="wk-pane" role="region" aria-label="{{paneLabel}}" style="position: absolute; z-index: 4; top: {{paneTop}}px; bottom: {{paneBottom}}px; left: 16px; right: {{paneRight}}px; transition: {{paneTr}}">
-			<div aria-hidden="true" style="position: absolute; inset: 0; box-sizing: border-box; border-radius: 12px 0 0 12px; background: var(--wk-surface); border: 1px solid rgba(var(--wk-line-rgb),.14); border-right: 0; box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); clip-path: inset(-96px 0 -96px -96px)"></div>
-			<div aria-hidden="true" style="position: absolute; right: 0; top: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 0, transparent 11.6px, rgba(var(--wk-line-rgb),.14) 12.2px, rgba(var(--wk-line-rgb),.14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 0, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
-			<div aria-hidden="true" style="position: absolute; right: 0; bottom: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 100%, transparent 11.6px, rgba(var(--wk-line-rgb),.14) 12.2px, rgba(var(--wk-line-rgb),.14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 100%, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
-			<div class="wk-pane-body" style="position: absolute; inset: 0; display: grid; border-radius: 12px 0 0 12px; overflow: hidden">
+		<div class="wk-paneslot" role="region" aria-label="{{paneLabel}}" style="position: absolute; z-index: 4; top: {{paneTop}}px; bottom: {{paneBottom}}px; left: 16px; right: {{paneRight}}px; transition: {{paneTr}}">
+			<div class="wk-pane" aria-hidden="true" style="position: absolute; inset: 0; box-sizing: border-box; clip-path: inset(-96px 0 -96px -96px)"></div>
+			<div aria-hidden="true" style="position: absolute; right: 0; top: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 0, transparent 11.6px, var(--wk-line-14) 12.2px, var(--wk-line-14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 0, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
+			<div aria-hidden="true" style="position: absolute; right: 0; bottom: -12px; width: 13px; height: 13px; pointer-events: none; background: radial-gradient(circle at 0 100%, transparent 11.6px, var(--wk-line-14) 12.2px, var(--wk-line-14) 12.8px, transparent 13.4px), radial-gradient(circle at 0 100%, transparent 11.6px, var(--wk-surface) 12.2px)"></div>
+			<div class="wk-paneslot-body" style="position: absolute; inset: 0; display: grid; border-radius: var(--wk-r-5) 0 0 var(--wk-r-5); overflow: hidden">
 				<sc-if value="{{paneActivity}}" hint-placeholder-val="{{false}}">
 					<dc-import name="Activity" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" part="pane" width="{{paneW}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
 				</sc-if>
@@ -804,7 +781,7 @@ class Component extends DCLogic {
 			const label = isView && on && !L.compact;
 			// a view button shows its view; a drawer button opens its drawer, or closes it when it is the one open
 			const pick = isView ? () => this.setState({ view: n.id }) : () => on ? this.closeActivity() : this.setState({ drawer: n.id });
-			return { ...n, on, showLabel: label, showTip: !label, bg: on ? 'var(--wk-fill)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)', pick };
+			return { ...n, on, showLabel: label, showTip: !label, pick };
 		};
 		return {
 			wkTheme, wkAccent, wkGround, waterfall,
@@ -816,7 +793,7 @@ class Component extends DCLogic {
 			paneOn, paneSolid: paneOn || pushIn, paneScanPlan: paneOn && pane.id === 'scanner', paneActivity: paneOn && pane.id === 'activity', paneLabel: pane ? pane.label : '', paneW,
 			// Activity asks whether a pane fits; without room its columns become a switcher row in the drawer
 			actPaneRoom: L.full,
-			paneTop: L.topRow, paneBottom: L.paneBottom, paneRight: G + L.dW - 1, paneTr: moving ? 'none' : 'right .26s cubic-bezier(.2,.8,.2,1)',
+			paneTop: L.topRow, paneBottom: L.paneBottom, paneRight: G + L.dW - 1, paneTr: moving ? 'none' : 'right var(--wk-dur-4) var(--wk-ease-inout)',
 			showPushPlan: pushIn, pushW: Math.max(0, L.W - 2 * G),
 			drawerGrip: !!(L.dr && L.dr.resize) && !paneOn,
 			// an open island panel stays above the pane
@@ -856,7 +833,7 @@ class Component extends DCLogic {
 			showRecordings: drawerOn && drawer === 'recordings',
 			showSettings: drawerOn && drawer === 'settings',
 			settingsVals: Object.assign({}, s, colours), settingsAt: base.settingsAt || null, settingsAction: this.settingsAction,
-			toggleSettings: this.toggleSettings, settingsOn: drawer === 'settings', gearBg: drawer === 'settings' ? 'var(--wk-fill)' : 'transparent', gearFg: drawer === 'settings' ? 'var(--wk-accent)' : 'var(--wk-text-3)',
+			toggleSettings: this.toggleSettings, settingsOn: drawer === 'settings',
 			openStorage: this.openStorage, openRxSettings: this.openRxSettings, openAudioSettings: this.openAudioSettings,
 			recOn: !!s.rec, recLabel: (s.freq / 1e6).toFixed(3) + ' ' + s.mode,
 			srcStop: base.srcStop || 0, setSource: this.setSource, stopRec: this.stopRec, recActivity: this.recActivity,
@@ -877,18 +854,18 @@ class Component extends DCLogic {
 			navViews: NAV.map(n => navItem(n, true)), navDrawers: DRAWER_NAV.map(n => navItem(n, false)),
 			refs: this.refsObj,
 			// drawer slot; the Receiver slides to clear a full-height drawer
-			rxRight: G + L.clearR, rxTr: moving ? 'none' : 'right .26s cubic-bezier(.2,.8,.2,1)',
+			rxRight: G + L.clearR, rxTr: moving ? 'none' : 'right var(--wk-dur-4) var(--wk-ease-inout)',
 			hasDrawer: drawerOn, drawerName: drawer ? DRAWER_NAME[drawer] : '',
 			drTop: L.dr ? L.dr.top : 0, drBottom: L.dr ? L.dr.bottom : 0, drLeft: L.dr ? L.dr.left : 'auto', drWidth: L.dr ? L.dr.width : 'auto',
-			drTr: moving ? 'none' : 'width .26s cubic-bezier(.2,.8,.2,1)',
+			drTr: moving ? 'none' : 'width var(--wk-dur-4) var(--wk-ease-inout)',
 			canResize: !!(L.dr && L.dr.resize), drW: drawer ? (L.full ? L.dW : this.drawerW(drawer)) : 0,
 			resizing: !!base.resizing, rsDown: this.rsDown, rsKey: this.rsKey, rsReset: this.rsReset,
 			// dock centred on the window
-			dockX: L.dockX, dockTr: moving ? 'none' : 'left .26s cubic-bezier(.2,.8,.2,1)',
+			dockX: L.dockX, dockTr: moving ? 'none' : 'left var(--wk-dur-4) var(--wk-ease-inout)',
 			// tuned card: anchored in the free plot area, dragged by its type tile
 			showCard: cardOn && !paneOn && !pushIn && !sweepMoving,
 			cardX: drag ? drag.x : home ? home.x : 0, cardY: drag ? drag.y : home ? home.y : 0, cardScale: drag ? 1.02 : 1,
-			cardTr: drag || moving || base.minAnim ? 'none' : 'transform .24s cubic-bezier(.34,1.32,.64,1)',
+			cardTr: drag || moving || base.minAnim ? 'none' : 'transform var(--wk-dur-4) var(--wk-ease-spring)',
 			cardZ: drag ? 8 : 1, cardH: L.cardH, cardMin: !!base.cardMin, setCardMin: this.setCardMin,
 			dragging: !!drag, grabCard: this.grabCard, cardKey: this.cardKey,
 			snapX: snap.x, snapY: snap.y,
