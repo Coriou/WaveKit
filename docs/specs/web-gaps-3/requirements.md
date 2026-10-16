@@ -34,8 +34,8 @@ feed keeping the same few hours.
 
 1.1 `activity.retention.policy` shall accept `fair-share` and `oldest-first`; any other value
 is a config validation error. Omitted, the store uses `ACTIVITY_RETENTION_POLICY_DEFAULT`,
-which is `fair-share`. (Decision, PROVISIONAL pending the user: flipping the default to
-`oldest-first` is that one constant.) The env override is
+which is `fair-share`. (User decision, 2026-10-16: fair-share is the default;
+`oldest-first` is the opt-out.) The env override is
 `WAVEKIT_ACTIVITY__RETENTION__POLICY`.
 1.2 A retention share shall be keyed `decoder:<decoderId>` for rows with a decoder id and
 `kind:<kind>` for rows without one (analog transmissions, ingestion gaps). There are no

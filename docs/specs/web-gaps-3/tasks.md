@@ -10,7 +10,7 @@ edits the pinned band-plan files, the isolation tests or `docs/CLI-COORDINATION.
 runs its touched tests, `pnpm run typecheck`and`pnpm run lint` before reporting.
 
 - [x] 0.1 Freeze the contract: hole meta keys and identity fields, the retention policy key,
-      limit and default (provisional), retention stats, `flood-copy`, the provenance lookup
+      limit and default (fair-share), retention stats, `flood-copy`, the provenance lookup
       types and pass-through, coverage DTOs, mesh telemetry and neighbour DTOs; anchor the
       Activity test store clock.
   - _Requirements: 1.1, 1.16, 2.1, 3.1, 3.5, 5.2, 6.6, 7.5, 8.4, 8.5_

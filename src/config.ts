@@ -586,7 +586,7 @@ export const ActivityRetentionConfigSchema = z
 		maxAgeMs: z.number().int().positive().max(ACTIVITY_MAX_AGE_MS).optional(),
 		/**
 		 * Which rows the row and byte caps remove (web-gaps-3 req 1.1). Omitted keeps the
-		 * store default (`fair-share`, provisional). Age pruning is the same under both.
+		 * store default (`fair-share`). Age pruning is the same under both.
 		 */
 		policy: z.enum(["fair-share", "oldest-first"]).optional(),
 	})

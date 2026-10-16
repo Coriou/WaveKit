@@ -15,7 +15,7 @@ import {
 } from "../../../src/core/activity/storage/limits.js"
 
 describe("WG3 contract", () => {
-	it("defaults the retention policy to fair-share (provisional) and keeps the caps", () => {
+	it("defaults the retention policy to fair-share and keeps the caps", () => {
 		// Feature: web-gaps-3, requirement 1.1 and 1.16
 		expect(ACTIVITY_RETENTION_POLICY_DEFAULT).toBe("fair-share")
 		const limits = resolveActivityLimits()

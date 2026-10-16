@@ -51,8 +51,8 @@ export interface ActivityLimits {
 const MiB = 1024 * 1024
 
 /**
- * PROVISIONAL (web-gaps-3 req 1.1): fair-share is the default pending the user's decision;
- * flipping it to "oldest-first" is this one line. Caps, admission and `activity.enabled`
+ * Default retention policy (web-gaps-3 req 1.1): fair-share, decided by the user on 2026-10-16;
+ * "oldest-first" stays available as an opt-out. Caps, admission and `activity.enabled`
  * are unchanged by either value.
  */
 export const ACTIVITY_RETENTION_POLICY_DEFAULT: ActivityRetentionPolicy =
