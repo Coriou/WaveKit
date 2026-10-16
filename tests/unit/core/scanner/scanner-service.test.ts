@@ -667,13 +667,23 @@ describe("ScannerService", () => {
 			sourceId: "rtl",
 			hz: CENTRE + 12_500,
 			nxdn: "nxdn48",
+			targetsHz: [CENTRE + 12_500],
+			external: true,
 		})
 		expect(target("n96")).toEqual({
 			sourceId: "rtl",
 			hz: CENTRE + 12_500,
 			nxdn: "nxdn96",
+			targetsHz: [CENTRE + 12_500],
+			external: true,
 		})
-		expect(target("pager")).toEqual({ sourceId: "rtl", hz: CENTRE })
+		// WG7: every target and the input kind (unknown here: the fake has no running instance).
+		expect(target("pager")).toEqual({
+			sourceId: "rtl",
+			hz: CENTRE,
+			targetsHz: [CENTRE],
+			external: true,
+		})
 	})
 
 	it("starts with empty state when the persisted state cannot be read", async () => {

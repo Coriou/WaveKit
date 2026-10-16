@@ -209,13 +209,18 @@ describe("ScannerService decoded-elsewhere refresh (WG7 req 7)", () => {
 		const before = EVENTS.map(e => h.decoders.listenerCount(e))
 		await bare.service.start()
 		await h.service.start()
-		for (const [i, e] of EVENTS.entries()) {
-			expect(bare.decoders.listenerCount(e)).toBe(before[i])
-			expect(h.decoders.listenerCount(e)).toBe((before[i] ?? 0) + 1)
-		}
+		// The coverage refresh adds one listener per event over the bare service (ambient
+		// evidence also watches decoder:created/removed in both).
+		for (const e of EVENTS)
+			expect(h.decoders.listenerCount(e)).toBe(
+				bare.decoders.listenerCount(e) + 1,
+			)
 		await h.service.stop()
-		for (const [i, e] of EVENTS.entries())
+		await bare.service.stop()
+		for (const [i, e] of EVENTS.entries()) {
 			expect(h.decoders.listenerCount(e)).toBe(before[i])
+			expect(bare.decoders.listenerCount(e)).toBe(before[i])
+		}
 	}, 30_000)
 
 	it("a decoder change replans after the 2 s debounce; unchanged coverage does nothing", async () => {

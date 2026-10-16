@@ -66,6 +66,7 @@ import { ScannerService } from "./core/scanner/scanner-service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
 import { bandPlanSkipSources } from "./core/scanner/plan/bandplan-skips.js"
+import { ambientTrustFromBinding } from "./core/scanner/probes/ambient.js"
 import { createBandPlanUrlFetcher } from "./core/bandplan-url/fetch.js"
 import { BANDPLAN_URL_IMPORT_HOSTS } from "@wavekit/api-types"
 import { APP_VERSION } from "./api/routes/health.js"
@@ -101,6 +102,7 @@ import {
 import { createRtl433Decoder, RTL433_CAPS } from "./decoders/builtin/rtl433.js"
 import { readsbDecoderFactory, READSB_CAPS } from "./decoders/builtin/readsb.js"
 import { createDecoderProvenanceIndex } from "./decoders/provenance-bindings.js"
+import type { ActivityProvenanceLookup } from "./core/activity/types.js"
 import { CoverageManager } from "./core/coverage/coverage-manager.js"
 import {
 	createAcarsdecDecoder,
@@ -937,6 +939,9 @@ async function main(): Promise<void> {
 		let bandPlanService: BandPlanService | undefined
 		let bandPlanViewWarned = false
 		let bandPlanSkipsWarned = false
+		// WG7 req 1.3: the decoder provenance index is built after the scanner starts; until then
+		// ambient AIS/ACARS/VDL2/LoRa decodes have no trust and are no evidence (fail closed).
+		let ambientProvenance: ActivityProvenanceLookup | null = null
 		const scannerBandplans = createScannerBandplanProvider(
 			() => bandPlanService?.view(),
 			bandRegion.code,
@@ -1012,6 +1017,18 @@ async function main(): Promise<void> {
 						return []
 					}
 				},
+				// WG7 req 1.3: the decoder's own provenance binding; only commanded/relay, on the very
+				// source the ambient target names, at a frequency within 1 kHz of a binding target
+				// (the frequencies trust was proven for). Anything else: undefined (fail closed).
+				ambientTrust: (decoderId, hz, sourceId) =>
+					ambientTrustFromBinding(
+						ambientProvenance?.(decoderId),
+						hz,
+						sourceId,
+						() =>
+							decoderManager.getStatus(decoderId)?.sourceId ??
+							sourceRouting.getDefaultSourceId(),
+					),
 				digitalVoice,
 				liveDemod,
 				operatorActivity: liveDemodOperatorActivity(liveDemod),
@@ -1270,6 +1287,7 @@ async function main(): Promise<void> {
 			tunerController,
 		)
 		own(8, () => decoderProvenance.dispose())
+		ambientProvenance = decoderProvenance.lookup
 
 		// Activity runs when config.activity.enabled (the default). A failed probe or open
 		// logs and leaves the rest of WaveKit running.

@@ -338,7 +338,14 @@ describe("AmbientEvidence WG7 new types", () => {
 	it("treats a target without external as external (no evidence, no coverage)", () => {
 		const r = rig({
 			add: d => d.add("ais", "ais-catcher"),
-			targets: { ais: { sourceId: "rtl", hz: AIS_A, targetsHz: [AIS_A] } },
+			// A malformed target at run time (the type requires `external`).
+			targets: {
+				ais: {
+					sourceId: "rtl",
+					hz: AIS_A,
+					targetsHz: [AIS_A],
+				} as unknown as AmbientTarget,
+			},
 		})
 		twice(r, "ais", ship("244123456"))
 		expect(r.got).toEqual([])
@@ -352,7 +359,7 @@ describe("AmbientEvidence WG7 new types", () => {
 		]) {
 			const r = rig({
 				add: d => d.add("ais", "ais-catcher"),
-				targets: { ais: t },
+				targets: { ais: t as AmbientTarget },
 			})
 			twice(r, "ais", ship("244123456"))
 			expect(r.got).toEqual([])

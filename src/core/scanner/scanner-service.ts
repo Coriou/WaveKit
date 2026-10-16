@@ -40,6 +40,10 @@ import type {
 	ScannerStatus,
 	SpectrumSourceStatus,
 } from "@wavekit/api-types"
+import {
+	SCANNER_AMBIENT_PROTOCOLS,
+	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
+} from "@wavekit/api-types"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -102,6 +106,7 @@ import {
 	type AmbientEvidenceEvent,
 	type AmbientTarget,
 } from "./probes/ambient.js"
+import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import {
 	ProbePool,
 	offsetTransport,
@@ -158,6 +163,7 @@ import type {
 	ObservationEndReason,
 	PipelineEvent,
 	TrackSnapshot,
+	TuningTrust,
 } from "../spectrum/types.js"
 import type {
 	Classification,
@@ -261,6 +267,16 @@ export interface ScannerServiceDeps {
 	 * `bandPlanSkips` and plans exactly as before. A throw counts as none.
 	 */
 	bandPlanSkips?: () => readonly BandPlanSkipSource[]
+	/**
+	 * WG7 req 1.3: reception trust of a config-owned ambient decoder whose decode at `hz` lies
+	 * on `sourceId` (the source its ambient target names). Absent: ambient AIS, ACARS, VDL2 and
+	 * LoRa decodes are never evidence. Only `commanded`/`relay` count; a throw counts as none.
+	 */
+	ambientTrust?: (
+		decoderId: string,
+		hz: number,
+		sourceId: string,
+	) => TuningTrust | undefined
 }
 
 /** WG7 req 7.1: decoder manager events after which decoded-elsewhere ranges are refreshed. */
@@ -709,6 +725,7 @@ export class ScannerService extends EventEmitter {
 					this.spectrum.engine(sourceId)?.currentEpoch().epoch ?? null,
 				logger: deps.logger,
 				now: this.now,
+				...(deps.ambientTrust ? { tuningTrustOf: deps.ambientTrust } : {}),
 			})
 			this.channelTaps = deps.channelOwnership
 				? new ChannelTaps({
@@ -2930,17 +2947,27 @@ export class ScannerService extends EventEmitter {
 
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
 		const now = this.now()
+		const ambientOnly = SCANNER_AMBIENT_PROTOCOLS.includes(e.ev.protocol)
 		const candidates = [...this.live.values(), ...this.recent].filter(o => {
 			const t = o.lastTrack
 			if (o.sourceId !== e.sourceId || !t) return false
-			if (Math.abs(t.centreHz - e.hz) > Math.max(1500, t.obwHz / 2))
-				return false
+			// WG7: an ambient-only decode (AIS, ACARS, VDL2, LoRa) names only a track within the
+			// 1 kHz decode tolerance, so a wide track near its channel is never named by it.
+			const tolHz = ambientOnly
+				? SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
+				: Math.max(1500, t.obwHz / 2)
+			if (Math.abs(t.centreHz - e.hz) > tolHz) return false
 			return (
 				e.ev.at >= o.startedAt - AMBIENT_PAIR_MS &&
 				e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
 			)
 		})
-		for (const live of candidates) this.applyEvidence(live, e.ev)
+		for (const live of candidates) {
+			this.applyEvidence(live, e.ev)
+			// WG7 req 1.5: identify jobs pairing this observation may decode an ambient trial.
+			for (const jobId of live.jobIds)
+				this.drivers.get(jobId)?.onAmbientEvidence?.(live.observationId, e.ev)
+		}
 	}
 
 	private applyEvidence(live: LiveObservation, ev: DecodeEvidence): void {
@@ -3180,31 +3207,30 @@ export class ScannerService extends EventEmitter {
 		return this.recent.find(o => o.observationId === observationId)
 	}
 
+	/**
+	 * The ambient target of a config-owned decoder (WG7 resolveAmbientTargets; the existing types
+	 * unchanged). The manager's current config wins, so decoders created after start resolve; the
+	 * startup configs remain the fallback for managers without that view.
+	 */
 	private ambientTarget(decoderId: string): AmbientTarget | null {
-		const cfg = this.deps.decoderConfigs.find(c => c.id === decoderId)
+		const cfg =
+			this.liveDecoderConfig(decoderId) ??
+			this.deps.decoderConfigs.find(c => c.id === decoderId)
 		if (!cfg) return null
-		const sourceId = cfg.sourceId ?? this.deps.routing.getDefaultSourceId()
-		if (!sourceId) return null
-		// The NXDN flavour of a dsd-fme decoder comes from its mode (Task 34 carry).
-		const nxdn =
-			cfg.type === "dsd-fme"
-				? cfg.options["mode"] === "nxdn48"
-					? ("nxdn48" as const)
-					: ("nxdn96" as const)
-				: undefined
-		const withNxdn = (hz: number): AmbientTarget =>
-			nxdn ? { sourceId, hz, nxdn } : { sourceId, hz }
-		const listed =
-			cfg.frequencies?.[0] ??
-			(typeof cfg.options["frequency"] === "number"
-				? cfg.options["frequency"]
-				: undefined)
-		if (listed !== undefined) return withNxdn(listed)
-		const centre = this.deps.sources.getCaps(sourceId)?.centerFreq
-		if (centre === undefined) return null
-		const offset =
-			typeof cfg.options["offsetHz"] === "number" ? cfg.options["offsetHz"] : 0
-		return withNxdn(centre + offset)
+		return resolveAmbientTargets(cfg, {
+			defaultSourceId: () => this.deps.routing.getDefaultSourceId(),
+			caps: sourceId => this.deps.sources.getCaps(sourceId),
+			inputKind: id => this.deps.decoders.getDecoder(id)?.caps.input,
+		})
+	}
+
+	private liveDecoderConfig(decoderId: string): DecoderConfig | undefined {
+		const decoders = this.deps.decoders as Partial<
+			Pick<DecoderManager, "getConfiguredDecoderConfigs">
+		>
+		if (typeof decoders.getConfiguredDecoderConfigs !== "function")
+			return undefined
+		return decoders.getConfiguredDecoderConfigs().find(c => c.id === decoderId)
 	}
 
 	// === arbiter and source events ===
@@ -3509,6 +3535,14 @@ export class ScannerService extends EventEmitter {
 				"",
 			// [S2] Task 40 replaces this with Boolean(this.deps.channels): parallel channel trials.
 			channelizer: () => false,
+			// WG7 req 1.5: running config-owned ambient decoders covering the target. Without a trust
+			// source no ambient decode can ever count, so no ambient trial is planned (as before WG7).
+			...(this.deps.ambientTrust
+				? {
+						ambient: (sourceId: string, hz: number, toleranceHz: number) =>
+							this.ambient.coverageAt(sourceId, hz, toleranceHz),
+					}
+				: {}),
 			settings: () => this.settings(),
 			emit: data => this.emit("identify", data),
 			logger: this.deps.logger,

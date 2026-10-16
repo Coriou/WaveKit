@@ -10,6 +10,7 @@
 import { EventEmitter } from "node:events"
 import {
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
+	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 	type ScannerAmbientDecoderType,
 } from "@wavekit/api-types"
 import type { DsdFmeLinkLine } from "../../../decoders/builtin/dsd-fme-link.js"
@@ -42,9 +43,9 @@ export interface AmbientTarget {
 	/** NXDN flavour of a dsd-fme decoder (its `options.mode`); unset means NXDN96. */
 	nxdn?: "nxdn48" | "nxdn96"
 	/** Every target frequency (WG7); `hz` is `targetsHz[0]`. */
-	targetsHz?: readonly number[]
+	targetsHz: readonly number[]
 	/** The decoder reads its own device (input kind `external`), not a WaveKit source. */
-	external?: boolean
+	external: boolean
 }
 
 /** A running config-owned ambient-only decoder whose target lies at a frequency (WG7). */
@@ -70,8 +71,15 @@ export interface AmbientDeps {
 	epochOf: (sourceId: string) => number | null
 	logger: Logger
 	now?: () => number
-	/** Reception trust of a decoder at a frequency (WG7 req 1.3); absent → no new-type evidence. */
-	tuningTrustOf?: (decoderId: string, hz: number) => TuningTrust | undefined
+	/**
+	 * Reception trust of a decoder at a frequency on the source its target names (WG7 req 1.3);
+	 * absent → no new-type evidence.
+	 */
+	tuningTrustOf?: (
+		decoderId: string,
+		hz: number,
+		sourceId: string,
+	) => TuningTrust | undefined
 }
 
 /** Acceptance memory of one decoder for one epoch; multimon keeps it per capcode (interp null). */
@@ -108,12 +116,49 @@ const AMBIENT_TYPES = new Set([
 const isTrusted = (t: TuningTrust | undefined): boolean =>
 	t === "commanded" || t === "relay"
 
+/** The provenance binding fields the ambient trust rule reads (structural ActivityDecoderBinding). */
+export interface AmbientTrustBinding {
+	sourceId: string | null
+	targetFrequenciesHz: readonly number[]
+	tuningTrust: TuningTrust
+}
+
+/**
+ * WG7 req 1.3: trust of an ambient decode at `hz` on `sourceId` from the decoder's provenance
+ * binding. Fail closed: only `commanded`/`relay`, only when the binding's source (or, when it
+ * names none, the decoder's resolved source) is `sourceId`, and only when `hz` lies within
+ * SCANNER_AMBIENT_TARGET_TOLERANCE_HZ of one of the binding's own target frequencies (the
+ * frequencies the trust was proven for). Anything else, a throw included, is undefined.
+ */
+export function ambientTrustFromBinding(
+	binding: AmbientTrustBinding | null | undefined,
+	hz: number,
+	sourceId: string,
+	resolvedSourceId: () => string | null | undefined,
+): TuningTrust | undefined {
+	try {
+		if (!binding || !isTrusted(binding.tuningTrust)) return undefined
+		if (!Number.isFinite(hz)) return undefined
+		const bound = binding.sourceId ?? resolvedSourceId()
+		if (typeof bound !== "string" || bound !== sourceId) return undefined
+		const near = binding.targetFrequenciesHz.some(
+			t =>
+				Number.isFinite(t) &&
+				Math.abs(t - hz) <= SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
+		)
+		return near ? binding.tuningTrust : undefined
+	} catch {
+		return undefined
+	}
+}
+
 export class AmbientEvidence extends EventEmitter {
 	private readonly log: Logger
 	private readonly now: () => number
 	private readonly states = new Map<string, AmbientState>()
 	private readonly types = new Map<string, string>()
-	private readonly detach: (() => void)[] = []
+	/** Per watched dsd-fme decoder: removes its `link` listener. */
+	private readonly detach = new Map<string, () => void>()
 	private running = false
 	/** New-type decodes dropped because trust was not commanded/relay or its lookup threw. */
 	private trustDrops = 0
@@ -128,21 +173,11 @@ export class AmbientEvidence extends EventEmitter {
 	start(): void {
 		if (this.running) return
 		this.running = true
-		for (const status of this.deps.decoders.getAllStatus()) {
-			if (status.owner === "scanner" || !AMBIENT_TYPES.has(status.type))
-				continue
-			this.types.set(status.id, status.type)
-			if (status.type !== "dsd-fme") continue
-			const decoder = this.deps.decoders.getDecoder(status.id) as unknown as
-				| EventEmitter
-				| undefined
-			if (!decoder) continue
-			const onLink = (line: DsdFmeLinkLine): void =>
-				this.handle(status.id, { kind: "link", line })
-			decoder.on("link", onLink)
-			this.detach.push(() => decoder.off("link", onLink))
-		}
+		for (const status of this.deps.decoders.getAllStatus()) this.watch(status)
 		this.deps.decoders.on("decoder:output", this.onOutput)
+		// Decoders created or removed after start (API, config reload) join or leave the watched set.
+		this.deps.decoders.on("decoder:created", this.onCreated)
+		this.deps.decoders.on("decoder:removed", this.onRemoved)
 		this.log.info(
 			{ decoders: [...this.types.keys()] },
 			"Ambient evidence attached",
@@ -153,9 +188,72 @@ export class AmbientEvidence extends EventEmitter {
 		if (!this.running) return
 		this.running = false
 		this.deps.decoders.off("decoder:output", this.onOutput)
-		for (const off of this.detach.splice(0)) off()
+		this.deps.decoders.off("decoder:created", this.onCreated)
+		this.deps.decoders.off("decoder:removed", this.onRemoved)
+		for (const off of this.detach.values()) off()
+		this.detach.clear()
 		this.states.clear()
 		this.types.clear()
+		this.trustErrorLogged.clear()
+	}
+
+	/** Ids of the decoders watched now (for tests and stats). */
+	get watchedDecoderIds(): readonly string[] {
+		return [...this.types.keys()]
+	}
+
+	/**
+	 * Watches one config-owned ambient decoder: its type, and for dsd-fme its `link` lines. A
+	 * decoder already watched under this id is unwatched first, so a re-created id never keeps
+	 * the former instance's listener. The set is bounded by the manager's own decoders.
+	 */
+	private watch(status: {
+		id: string
+		type: string
+		owner?: string | undefined
+	}): void {
+		this.unwatch(status.id)
+		if (status.owner === "scanner" || !AMBIENT_TYPES.has(status.type)) return
+		this.types.set(status.id, status.type)
+		if (status.type !== "dsd-fme") return
+		const decoder = this.deps.decoders.getDecoder(status.id) as unknown as
+			| EventEmitter
+			| undefined
+		if (!decoder) return
+		const id = status.id
+		const onLink = (line: DsdFmeLinkLine): void =>
+			this.handle(id, { kind: "link", line })
+		decoder.on("link", onLink)
+		this.detach.set(id, () => decoder.off("link", onLink))
+	}
+
+	private unwatch(decoderId: string): void {
+		const off = this.detach.get(decoderId)
+		this.detach.delete(decoderId)
+		off?.()
+		this.types.delete(decoderId)
+		this.states.delete(decoderId)
+		this.trustErrorLogged.delete(decoderId)
+	}
+
+	private readonly onCreated = (decoderId: unknown): void => {
+		if (!this.running || typeof decoderId !== "string") return
+		try {
+			const getStatus = this.deps.decoders.getStatus
+			const status = getStatus
+				? getStatus.call(this.deps.decoders, decoderId)
+				: this.deps.decoders.getAllStatus().find(s => s.id === decoderId)
+			if (status) this.watch(status)
+			else this.unwatch(decoderId)
+		} catch {
+			// A failing status read watches nothing (fail closed).
+			this.unwatch(decoderId)
+		}
+	}
+
+	private readonly onRemoved = (decoderId: unknown): void => {
+		if (!this.running || typeof decoderId !== "string") return
+		this.unwatch(decoderId)
 	}
 
 	/** Dropped new-type decodes (untrusted, unknown trust or throwing lookup); for tests and stats. */
@@ -222,11 +320,15 @@ export class AmbientEvidence extends EventEmitter {
 	}
 
 	/** Trust at `hz`; any failure is undefined (fail closed), logged once per decoder without values. */
-	private trustAt(decoderId: string, hz: number): TuningTrust | undefined {
+	private trustAt(
+		decoderId: string,
+		hz: number,
+		sourceId: string,
+	): TuningTrust | undefined {
 		const of = this.deps.tuningTrustOf
 		if (!of) return undefined
 		try {
-			return of(decoderId, hz)
+			return of(decoderId, hz, sourceId)
 		} catch {
 			if (!this.trustErrorLogged.has(decoderId)) {
 				this.trustErrorLogged.add(decoderId)
@@ -245,7 +347,8 @@ export class AmbientEvidence extends EventEmitter {
 		const target = this.deps.targetOf(decoderId)
 		if (!target || target.external !== false) return
 		const targetsHz = target.targetsHz
-		if (!targetsHz || targetsHz.length === 0) return
+		// Still checked at run time: a target is external data from the config (fail closed).
+		if (!Array.isArray(targetsHz) || targetsHz.length === 0) return
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
 		if (!this.eligible(decoderId)) return
@@ -253,7 +356,7 @@ export class AmbientEvidence extends EventEmitter {
 		// acceptance memory is touched: an untrusted decode never primes the H2 match.
 		const parsed = parse(out, { targetsHz })
 		if (parsed === null) return
-		if (!isTrusted(this.trustAt(decoderId, parsed.hz))) {
+		if (!isTrusted(this.trustAt(decoderId, parsed.hz, target.sourceId))) {
 			this.trustDrops++
 			return
 		}
