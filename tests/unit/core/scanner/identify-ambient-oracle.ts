@@ -1,0 +1,1407 @@
+/**
+ * Frozen oracle for web-gaps-7 Property 4: src/core/scanner/identify.ts as of commit cccf665f
+ * (before ambient identify), imports repointed at src/. Test-only; never edit its logic.
+ */
+/**
+ * Identify mode (spec § 10.8, the primary use case): "what is this signal?" for one waterfall
+ * target or every surfaced emission in the window. Never retunes. A target on an artefact mask
+ * (DC, spur or comb tooth, IQ image; § 4.9) is answered without a trial; otherwise every plausible
+ * decoder tries the resolved track: sequential `offset` probes with pre-roll at identify priority
+ * before the channelizer, parallel probes within `maxProbes.channel` after it (Task 40), stopping
+ * at the first H2-accepted identity unless `exhaustive`. The pure planning functions carry P25.
+ * IdentifyRunner decorates the job's in-window JobRunner, which keeps the lifecycle (transition
+ * table), the engine reference and the teardown.
+ */
+import type {
+	DiscoveryMetadata,
+	ScanJobProgress,
+	ScannerIdentifyEventData,
+	ScannerIdentifyMeasurements,
+	ScannerIdentifyRequest,
+	ScannerIdentifyResult,
+	ScannerIdentifyState,
+	ScannerIdentifyTrial,
+	ScannerIdentifyView,
+	ScannerTrialOutcome,
+} from "@wavekit/api-types"
+import {
+	createComponentLogger,
+	type Logger,
+} from "../../../../src/utils/logger.js"
+import type { ArtefactKind } from "../../../../src/core/spectrum/artefacts.js"
+import {
+	USABLE_FRACTION,
+	type EngineEpoch,
+} from "../../../../src/core/spectrum/spectrum-engine.js"
+import type {
+	BlockSummary,
+	TrackSnapshot,
+} from "../../../../src/core/spectrum/types.js"
+import {
+	CLASS_HYPOTHESES,
+	classOf,
+	classifySpectral,
+} from "../../../../src/core/scanner/classify/classifier.js"
+import { ScannerApiError } from "../../../../src/core/scanner/errors.js"
+import {
+	JOB_STARTUP_CAP_MS,
+	type JobDriver,
+	type JobRecord,
+} from "../../../../src/core/scanner/job-runner.js"
+import type { JobEvent } from "../../../../src/core/scanner/job-state.js"
+import {
+	PROTOCOL_DECODER,
+	probeTransportFor,
+} from "../../../../src/core/scanner/plan/plan-preview.js"
+import {
+	probeModesFor,
+	type ProbeMode,
+	type ProbePool,
+	type ProbeRequest,
+} from "../../../../src/core/scanner/probes/probe-pool.js"
+import {
+	CONFIDENCE_RANK,
+	type DecodeEvidence,
+	type Discovery,
+	type Hypothesis,
+	type Identity,
+	type ScannerClass,
+	type ScannerConfidence,
+	type ScannerProtocol,
+	type ScannerSettings,
+} from "../../../../src/core/scanner/types.js"
+
+export const IDENTIFY_DEFAULT_TIMEOUT_MS = 15_000
+/** Above every job priority (0–100): identify trials preempt passive and job probes at once. */
+export const IDENTIFY_PROBE_PRIORITY = 101
+/** Every run lasts at least the DMR late-entry hold (§ 6.4 row 1): the click may come mid-call. */
+export const IDENTIFY_MIN_HOLD_MS = 1800
+/** A run that gets no probe slot within this time is reported `skipped-budget`. */
+export const IDENTIFY_QUEUE_WAIT_MS = 3000
+/** Trials are planned once the track has 300 ms of envelope at 50 ms blocks (the § 6.2 ACF test), or closed. */
+export const IDENTIFY_SETTLE_BLOCKS = 6
+export const IDENTIFY_MIN_TOLERANCE_HZ = 1000
+export const IDENTIFY_ALL_MAX_TARGETS = 16
+export const IDENTIFY_CANDIDATE_SCORE = 0.5
+/** Weight of a class the bandwidth allows but the spectral features did not pick. */
+export const IDENTIFY_ALT_CLASS_WEIGHT = 0.5
+/** Relative slack on each class's OBW window (below 20 dB SNR the OBW is the on-bin width). */
+export const IDENTIFY_OBW_SLACK = 0.25
+/** Ended identify jobs kept listed (they are never persisted). */
+export const IDENTIFY_KEEP_JOBS = 50
+/** The classifier's burst limit (Task 11): a track this short may be an OOK burst. */
+const BURST_MAX_BLOCKS = 4
+
+/** Protocols a trial can name; `digital-unknown`, `carrier` and `unknown` are not decoders. */
+export const IDENTIFY_PROTOCOLS: readonly ScannerProtocol[] = [
+	"analog-fm",
+	"analog-am",
+	"dmr",
+	"p25p1",
+	"p25p2",
+	"nxdn48",
+	"nxdn96",
+	"ysf",
+	"dstar",
+	"dpmr",
+	"pocsag",
+	"flex",
+	"aprs",
+	"ism",
+]
+
+/** OBW window (Hz) of each bandwidth-defined class (§ 6.1; Task 11's class limits). */
+export const CLASS_OBW_HZ: Readonly<
+	Partial<Record<ScannerClass, readonly [number, number]>>
+> = {
+	"fsk4-12k5": [6000, 10_500],
+	"fsk4-6k25": [2500, 5500],
+	"gmsk-narrow": [4000, 7500],
+	"fsk2-wide": [8000, 14_000],
+	"afsk-fm": [7500, 18_000],
+	"analog-fm": [7500, 18_000],
+	"ook-burst": [0, 25_000],
+}
+
+/** The class whose § 6.4 mode list holds a protocol's probe mode. */
+const MODE_CLASS: Readonly<Partial<Record<ScannerProtocol, ScannerClass>>> = {
+	dmr: "fsk4-12k5",
+	p25p1: "fsk4-12k5",
+	p25p2: "fsk4-12k5",
+	ysf: "fsk4-12k5",
+	nxdn96: "fsk4-12k5",
+	dstar: "gmsk-narrow",
+	nxdn48: "fsk4-6k25",
+	dpmr: "fsk4-6k25",
+	pocsag: "fsk2-wide",
+	flex: "fsk2-wide",
+	aprs: "afsk-fm",
+	ism: "ook-burst",
+}
+
+export type NormalisedIdentify = Omit<ScannerIdentifyView, "targets">
+
+export interface IdentifyTrackView {
+	observationId: string
+	trackId: string
+	epoch: number
+	/** Null until the store surfaced the observation (§ 7.2). */
+	discoveryId: string | null
+	track: TrackSnapshot
+}
+
+export interface IdentifyRun {
+	key: string
+	/** The first protocol's mode, covering every protocol of the run. */
+	mode: ProbeMode
+	cls: ScannerClass
+	protocols: ScannerProtocol[]
+	/** Without the probe start latency (added when the run starts). */
+	holdMs: number
+}
+
+export interface IdentifyPlannedTrial {
+	protocol: ScannerProtocol
+	score: number
+	decoder: ScannerIdentifyTrial["decoder"]
+	mode: string | null
+	transport: "offset" | "channel" | null
+	reason?: NonNullable<ScannerIdentifyTrial["reason"]>
+	run: number | null
+}
+
+export interface IdentifyPlan {
+	trials: IdentifyPlannedTrial[]
+	runs: IdentifyRun[]
+}
+
+export interface TrialSeen {
+	output: boolean
+	crcFailures: number
+	identity: Identity | null
+}
+
+export function normaliseIdentify(
+	r: ScannerIdentifyRequest,
+): NormalisedIdentify {
+	return {
+		target:
+			"all" in r.target
+				? { all: true }
+				: {
+						frequencyHz: r.target.frequencyHz,
+						...(r.target.bandwidthHz !== undefined
+							? { bandwidthHz: r.target.bandwidthHz }
+							: {}),
+					},
+		timeoutMs: r.timeoutMs ?? IDENTIFY_DEFAULT_TIMEOUT_MS,
+		protocols: [...new Set(r.protocols ?? [])],
+		exhaustive: r.exhaustive ?? false,
+		record: r.record ?? true,
+	}
+}
+
+/** § 10.8: a track resolves the target within max(1 kHz, bw/2). */
+export function toleranceHz(bandwidthHz: number | undefined): number {
+	return Math.max(IDENTIFY_MIN_TOLERANCE_HZ, (bandwidthHz ?? 0) / 2)
+}
+
+export function inWindow(
+	hz: number,
+	bandwidthHz: number,
+	window: { centreHz: number; sampleRateHz: number },
+	usableFraction: number,
+): boolean {
+	return (
+		Math.abs(hz - window.centreHz) + bandwidthHz / 2 <=
+		(window.sampleRateHz * usableFraction) / 2
+	)
+}
+
+/** The classes the track's bandwidth and features allow, the spectral class first. */
+export function compatibleClasses(track: TrackSnapshot): ScannerClass[] {
+	const own = classOf(track)
+	if (own === "carrier" || own === "wideband") return [own]
+	const out: ScannerClass[] = [own]
+	const short = track.flags.burst || track.blocks <= BURST_MAX_BLOCKS
+	for (const [cls, window] of Object.entries(CLASS_OBW_HZ) as [
+		ScannerClass,
+		readonly [number, number],
+	][]) {
+		if (cls === own || (cls === "ook-burst" && !short)) continue
+		if (
+			track.obwHz >= window[0] * (1 - IDENTIFY_OBW_SLACK) &&
+			track.obwHz <= window[1] * (1 + IDENTIFY_OBW_SLACK)
+		)
+			out.push(cls)
+	}
+	return out
+}
+
+/**
+ * § 10.8 plausible decoders: every identify protocol some compatible class lists, scored
+ * hypothesis × class weight × bandplan prior (missing = 1), cut to the request's protocols,
+ * best first (ties by name). A prior of 0 removes a protocol.
+ */
+export function identifyScores(
+	track: TrackSnapshot,
+	ctx: {
+		priors: Partial<Record<ScannerProtocol, number>>
+		protocols: readonly ScannerProtocol[]
+	},
+): Hypothesis[] {
+	const classes = compatibleClasses(track)
+	const own = classes[0]
+	const only = ctx.protocols.length > 0 ? new Set(ctx.protocols) : null
+	const best = new Map<ScannerProtocol, number>()
+	for (const cls of classes) {
+		const weight = cls === own ? 1 : IDENTIFY_ALT_CLASS_WEIGHT
+		for (const h of CLASS_HYPOTHESES[cls]) {
+			if (
+				!IDENTIFY_PROTOCOLS.includes(h.protocol) ||
+				(only && !only.has(h.protocol))
+			)
+				continue
+			const score = Math.min(
+				1,
+				Math.max(0, h.score * weight * (ctx.priors[h.protocol] ?? 1)),
+			)
+			if (score > (best.get(h.protocol) ?? 0)) best.set(h.protocol, score)
+		}
+	}
+	return [...best]
+		.map(([protocol, score]) => ({ protocol, score }))
+		.sort((a, b) => b.score - a.score || a.protocol.localeCompare(b.protocol))
+}
+
+/** The § 6.4 probe mode that decodes one protocol, or null (no decoder, or ISM before Task 40). */
+export function identifyModeFor(protocol: ScannerProtocol): ProbeMode | null {
+	const cls = MODE_CLASS[protocol]
+	return cls ? (probeModesFor(cls, [protocol])[0] ?? null) : null
+}
+
+function modeKey(mode: ProbeMode): string {
+	return `${mode.decoderType}:${JSON.stringify(mode.options)}`
+}
+
+function modeLabel(mode: ProbeMode): string {
+	const m = mode.options["mode"]
+	return typeof m === "string" ? m : mode.decoderType
+}
+
+/** One trial per scored protocol; protocols that share a probe mode share one run (P25). */
+export function planIdentifyTrials(
+	scores: readonly Hypothesis[],
+	opts: { format: string; channelizer: boolean },
+): IdentifyPlan {
+	const trials: IdentifyPlannedTrial[] = []
+	const runs: IdentifyRun[] = []
+	for (const h of scores) {
+		const pt = probeTransportFor(h.protocol, opts.format, opts.channelizer)
+		const mode = pt.transport ? identifyModeFor(h.protocol) : null
+		const cls = MODE_CLASS[h.protocol]
+		if (!pt.transport || !mode || !cls) {
+			trials.push({
+				protocol: h.protocol,
+				score: h.score,
+				decoder: PROTOCOL_DECODER[h.protocol],
+				mode: null,
+				transport: null,
+				reason: pt.reason ?? "no-decoder",
+				run: null,
+			})
+			continue
+		}
+		const key = modeKey(mode)
+		let index = runs.findIndex(r => r.key === key)
+		if (index < 0) {
+			runs.push({
+				key,
+				mode: { ...mode, covers: [] },
+				cls,
+				protocols: [],
+				holdMs: IDENTIFY_MIN_HOLD_MS,
+			})
+			index = runs.length - 1
+		}
+		const run = runs[index]!
+		run.protocols.push(h.protocol)
+		run.mode = {
+			...run.mode,
+			covers: [...new Set([...run.mode.covers, ...mode.covers])],
+		}
+		run.holdMs = Math.max(run.holdMs, mode.holdMs)
+		trials.push({
+			protocol: h.protocol,
+			score: h.score,
+			decoder: mode.decoderType,
+			mode: modeLabel(mode),
+			transport: pt.transport,
+			run: index,
+		})
+	}
+	return { trials, runs }
+}
+
+/** The nearest candidate within the tolerance; the stronger one on equal distance. */
+export function resolveTarget<T extends { track: TrackSnapshot }>(
+	hz: number,
+	tolHz: number,
+	candidates: readonly T[],
+): T | null {
+	let best: T | null = null
+	let bestDistance = Number.POSITIVE_INFINITY
+	for (const c of candidates) {
+		const d = Math.abs(c.track.centreHz - hz)
+		if (d > tolHz) continue
+		if (
+			d < bestDistance ||
+			(d === bestDistance && best !== null && c.track.snrDb > best.track.snrDb)
+		) {
+			best = c
+			bestDistance = d
+		}
+	}
+	return best
+}
+
+/** What one protocol's trial saw during its run (H2: an identity is an accepted one). */
+export function trialOutcome(
+	seen: TrialSeen | undefined,
+): "decoded" | "no-sync" | "crc-errors" | "timeout" {
+	if (!seen || !seen.output) return "no-sync"
+	if (seen.identity) return "decoded"
+	return seen.crcFailures > 0 ? "crc-errors" : "timeout"
+}
+
+export function identifyVerdict(v: {
+	artefact: ArtefactKind | null
+	decoded: boolean
+	heardIdentity: boolean
+	discoveryConfidence: ScannerConfidence | null
+	topScore: number
+}): "identified" | "candidate" | "unidentified" {
+	if (v.artefact) return "unidentified"
+	if (v.decoded) return "identified"
+	if (v.heardIdentity) return "candidate" // an identity capped by a leak/intermod flag (§ 6.2)
+	if (
+		v.discoveryConfidence !== null &&
+		CONFIDENCE_RANK[v.discoveryConfidence] >= CONFIDENCE_RANK.classified
+	)
+		return "candidate"
+	return v.topScore >= IDENTIFY_CANDIDATE_SCORE ? "candidate" : "unidentified"
+}
+
+/** § 10.8 measurements: from the track, else the strongest summary bin within the tolerance. */
+export function measureTarget(
+	track: TrackSnapshot | null,
+	summary: BlockSummary | null,
+	targetHz: number,
+	halfWidthHz: number,
+): ScannerIdentifyMeasurements {
+	if (track) {
+		return {
+			source: "track",
+			centreHz: track.centreHz,
+			obwHz: track.obwHz,
+			peakDbfs: track.peakDbfs,
+			snrDb: track.snrDb,
+			floorDbfs: track.floorDbfs,
+			dutyCycle: track.dutyCycle,
+			...(track.acf30 !== undefined ? { acf30: track.acf30 } : {}),
+			...(track.acf60 !== undefined ? { acf60: track.acf60 } : {}),
+			class: classOf(track),
+		}
+	}
+	let peak: number | null = null
+	if (summary) {
+		const half = Math.max(halfWidthHz, summary.binHz / 2)
+		const lo = Math.max(
+			0,
+			Math.floor((targetHz - half - summary.startHz) / summary.binHz),
+		)
+		const hi = Math.min(
+			summary.bins.length - 1,
+			Math.floor((targetHz + half - summary.startHz) / summary.binHz),
+		)
+		for (let i = lo; i <= hi; i++) {
+			const b = summary.bins[i]
+			if (b !== undefined && (peak === null || b > peak)) peak = b
+		}
+	}
+	const floor = summary?.floorDbfs ?? null
+	return {
+		source: "spectrum",
+		centreHz: targetHz,
+		obwHz: null,
+		peakDbfs: peak,
+		snrDb: peak !== null && floor !== null ? peak - floor : null,
+		floorDbfs: floor,
+		dutyCycle: null,
+		class: "unknown",
+	}
+}
+
+export interface IdentifyDeps {
+	record: JobRecord
+	identify: NormalisedIdentify
+	/** The job's in-window JobRunner: transition table, engine reference, probe release on end, teardown. */
+	inner: JobDriver
+	probes: Pick<
+		ProbePool,
+		| "request"
+		| "release"
+		| "dequeue"
+		| "startLatencyMs"
+		| "status"
+		| "on"
+		| "off"
+	>
+	engine: (sourceId: string) => { currentEpoch(): EngineEpoch } | undefined
+	/**
+	 * `artefactOf(hz, epoch, masks)` on the engine's current masks (Task 32 carries them from the worker).
+	 * `stale`: the worker's masks are still for an older epoch (just after a retune); the runner asks again next tick.
+	 */
+	artefactAt: (
+		sourceId: string,
+		hz: number,
+	) => Promise<ArtefactKind | null | "stale">
+	/** Live observations with a track on the source (ScannerService.live). */
+	liveTracks: (sourceId: string) => IdentifyTrackView[]
+	lastSummary: (sourceId: string) => BlockSummary | null
+	discoveryOf: (observationId: string) => Discovery | undefined
+	/** Bandplan priors at a frequency (Task 12 `priorsFor` over the region's bandplans). */
+	priorsAt: (hz: number) => Partial<Record<ScannerProtocol, number>>
+	format: (sourceId: string) => string
+	/** True once the core channelizer serves probe channels (S2, Task 40): parallel trials. */
+	channelizer: () => boolean
+	settings: () => ScannerSettings
+	emit: (data: ScannerIdentifyEventData) => void
+	logger: Logger
+	now: () => number
+}
+
+interface RunState {
+	runIndex: number
+	run: IdentifyRun
+	req: ProbeRequest
+	probeId: string | null
+	queuedUntil: number | null
+	endsAt: number | null
+	seen: Map<ScannerProtocol, TrialSeen>
+}
+
+interface TargetState {
+	targetHz: number
+	toleranceHz: number
+	/** The target band for the window check: the request's bandwidth, or the collected track's OBW (`all`). */
+	bandwidthHz: number
+	state: ScannerIdentifyState
+	deadline: number
+	view: IdentifyTrackView | null
+	/** The track resolved before an in-window epoch change: the verdict's evidence if nothing re-resolves. */
+	fallback: IdentifyTrackView | null
+	/** Decoder outcomes of runs completed before an in-window epoch change; a re-plan keeps them and skips their runs. */
+	done: Map<ScannerProtocol, ScannerTrialOutcome>
+	/** The resolved track closed: trials run on its last snapshot (pre-roll from the ring). */
+	gone: boolean
+	/** The start-of-target artefact check met stale masks: repeat it while waiting (§ 10.8 (1) "ends at once"). */
+	recheckArtefact: boolean
+	plan: IdentifyPlan | null
+	trials: ScannerIdentifyTrial[]
+	nextRun: number
+	active: RunState[]
+	decoded: { protocol: ScannerProtocol; identity: Identity } | null
+	result: ScannerIdentifyResult | null
+}
+
+const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
+	"identified",
+	"candidate",
+	"unidentified",
+])
+
+/** Trial outcomes a decoder actually produced (kept across an in-window epoch change). */
+const COMPLETED: ReadonlySet<ScannerTrialOutcome> = new Set([
+	"decoded",
+	"no-sync",
+	"crc-errors",
+	"timeout",
+])
+
+function emptyMetadata(): DiscoveryMetadata {
+	return {
+		talkgroups: [],
+		sources: [],
+		slots: [],
+		callsigns: [],
+		capcodes: [],
+		ismModels: [],
+	}
+}
+
+export class IdentifyRunner implements JobDriver {
+	readonly record: JobRecord
+	private readonly log: Logger
+	private readonly targets: TargetState[] = []
+	private phase: "idle" | "collecting" | "running" | "finished" = "idle"
+	/** Artefact checks and probe releases in flight; tick waits for them. */
+	private inflight = 0
+	/** Set while this runner calls `probes.request` (the call's own "starting" is not a queued start). */
+	private requesting = false
+	private detached = false
+
+	constructor(private readonly deps: IdentifyDeps) {
+		this.record = deps.record
+		this.log = createComponentLogger(deps.logger, `Identify:${deps.record.id}`)
+		deps.probes.on("probe-state", this.onProbeState)
+		deps.probes.on("evidence", this.onPoolEvidence)
+	}
+
+	private get sourceId(): string {
+		return this.record.spec.sourceId
+	}
+
+	/** `ScanJob.identify` (Task 25). */
+	view(): ScannerIdentifyView {
+		return {
+			...this.deps.identify,
+			targets: this.targets.map(t => this.eventOf(t)),
+		}
+	}
+
+	// === JobDriver ===
+
+	start(): Promise<void> {
+		return this.deps.inner.start()
+	}
+
+	async dispatch(e: JobEvent): Promise<void> {
+		switch (e.type) {
+			case "pause":
+			case "resume":
+				throw new ScannerApiError(
+					"Identify jobs cannot be paused; cancel it and identify again",
+					"SCANNER_IDENTIFY_NOT_PAUSABLE",
+					409,
+				)
+			case "source-down":
+				// A 15 s identify does not wait for a reconnect: it ends with what it has (the stop-condition row).
+				if (this.record.state === "starting")
+					return this.failStartup({ type: "engine-failed" })
+				return this.endWithResults()
+			case "tuner-error":
+				return this.failStartup(e)
+			case "cancel":
+			case "source-removed":
+			case "engine-failed":
+				if (e.type === "engine-failed" && this.record.state === "starting")
+					return this.failStartup(e)
+				await this.abort()
+				try {
+					await this.deps.inner.dispatch(e)
+				} finally {
+					this.detach()
+				}
+				return
+			default:
+				return this.deps.inner.dispatch(e)
+		}
+	}
+
+	idle(): Promise<void> {
+		return this.deps.inner.idle()
+	}
+
+	covers(sourceId: string, hz: number): boolean {
+		if (!this.deps.inner.covers(sourceId, hz)) return false
+		const target = this.deps.identify.target
+		return (
+			"all" in target ||
+			Math.abs(hz - target.frequencyHz) <= toleranceHz(target.bandwidthHz)
+		)
+	}
+
+	progress(): ScanJobProgress {
+		return this.deps.inner.progress()
+	}
+
+	tick(now: number): void {
+		if (
+			this.record.state === "starting" &&
+			this.phase !== "finished" &&
+			now - this.record.createdAt >=
+				Math.min(this.deps.identify.timeoutMs, JOB_STARTUP_CAP_MS)
+		) {
+			void this.failStartup({ type: "engine-failed" }).catch((err: unknown) =>
+				this.log.warn({ err }, "Identify startup failed"),
+			)
+			return
+		}
+		this.deps.inner.tick(now)
+		this.step(now)
+	}
+
+	onEpochStarted(epoch: EngineEpoch): void {
+		this.deps.inner.onEpochStarted(epoch)
+	}
+
+	onBlock(endSample: number, overload: boolean): void {
+		this.deps.inner.onBlock(endSample, overload)
+	}
+
+	onStale(blocks: number): void {
+		this.deps.inner.onStale(blocks)
+	}
+
+	onTrack(): void {
+		// Identify plans its own trials from tick(); the inner runner must not open window-hold probes.
+	}
+
+	onTrackClosed(trackId: string): void {
+		this.deps.inner.onTrackClosed(trackId)
+	}
+
+	onUntrackedRetune(): void {
+		this.deps.inner.onUntrackedRetune()
+	}
+
+	onEvidence(): void {
+		// Trial outcomes come from the probe pool's own events (onPoolEvidence); the store has the evidence already.
+	}
+
+	/**
+	 * An identify job never holds a lease (the in-window rows strip the lease actions, P5), so the arbiter never
+	 * revokes one. Should it, the job ends like on source-down: probes released, results so far reported.
+	 */
+	leaseLost(): Promise<void> {
+		return this.endWithResults()
+	}
+
+	/**
+	 * § 10.8: whether identify owns the confirmation of a track at `hz` (other jobs then request no probe
+	 * for it). Before and during the `all` collection that is everything it covers; afterwards only the
+	 * tolerances of the targets still being identified.
+	 */
+	owns(sourceId: string, hz: number): boolean {
+		if (this.phase === "finished" || !this.covers(sourceId, hz)) return false
+		if (this.phase === "idle" || this.phase === "collecting") return true
+		return this.targets.some(
+			t => !FINAL.has(t.state) && Math.abs(hz - t.targetHz) <= t.toleranceHz,
+		)
+	}
+
+	replan(): void {
+		throw new ScannerApiError(
+			"Identify jobs cannot be edited",
+			"SCANNER_IDENTIFY_NOT_EDITABLE",
+			409,
+		)
+	}
+
+	async dispose(): Promise<void> {
+		this.detach()
+		await this.deps.inner.dispose()
+	}
+
+	// === the identify flow (tick-driven) ===
+
+	private step(now: number): void {
+		if (
+			this.inflight > 0 ||
+			this.phase === "finished" ||
+			this.record.state !== "running"
+		)
+			return
+		// The window moved off a target (operator retune, sweep takeover): end it now with what it has.
+		let moved = false
+		for (const x of this.targets) {
+			if (FINAL.has(x.state) || !this.windowMoved(x)) continue
+			this.endMoved(x)
+			moved = true
+		}
+		if (moved) return
+		// First-IQ startup is separately capped; this budget bounds signal wait after readiness.
+		const started = this.record.startedAt ?? now
+		const { target, timeoutMs } = this.deps.identify
+		if (this.phase === "idle") {
+			if ("all" in target) {
+				this.phase = "collecting"
+			} else {
+				this.phase = "running"
+				const t = this.newTarget(
+					target.frequencyHz,
+					toleranceHz(target.bandwidthHz),
+					target.bandwidthHz ?? 0,
+					started + timeoutMs,
+					null,
+				)
+				// § 10.8 (1): a target on an artefact mask ends at once, before any trial.
+				this.checkArtefact(t, false)
+				return
+			}
+		}
+		if (this.phase === "collecting") {
+			const found = this.currentTracks()
+				.filter(
+					v =>
+						v.discoveryId !== null &&
+						!v.track.flags.iqImage &&
+						!v.track.flags.spur &&
+						!v.track.flags.truncated,
+				)
+				.sort((a, b) => b.track.snrDb - a.track.snrDb)
+				.slice(0, IDENTIFY_ALL_MAX_TARGETS)
+			if (found.length === 0) {
+				if (now >= started + timeoutMs) this.finishJob()
+				return
+			}
+			this.phase = "running"
+			// Each target's track is already resolved, so no wait deadline applies (a shared started + timeoutMs would
+			// have passed by the time later targets get their turn); restartTarget gives one after an epoch change.
+			// The window-move check looks at the centre only: detection keeps track centres in the usable span, but an
+			// edge track's OBW may reach past it without the window having moved.
+			for (const v of found)
+				this.newTarget(
+					v.track.centreHz,
+					toleranceHz(v.track.obwHz),
+					0,
+					Number.POSITIVE_INFINITY,
+					v,
+				)
+		}
+		const t = this.targets.find(x => !FINAL.has(x.state))
+		if (!t) {
+			this.finishJob()
+			return
+		}
+		if (t.state === "waiting-for-signal") this.waitStep(t, now)
+		else this.tryStep(t, now)
+	}
+
+	private newTarget(
+		targetHz: number,
+		tolHz: number,
+		bandwidthHz: number,
+		deadline: number,
+		view: IdentifyTrackView | null,
+	): TargetState {
+		const t: TargetState = {
+			targetHz,
+			toleranceHz: tolHz,
+			bandwidthHz,
+			state: "waiting-for-signal",
+			deadline,
+			view,
+			fallback: null,
+			done: new Map(),
+			gone: false,
+			recheckArtefact: false,
+			plan: null,
+			trials: [],
+			nextRun: 0,
+			active: [],
+			decoded: null,
+			result: null,
+		}
+		this.targets.push(t)
+		this.emitTarget(t)
+		return t
+	}
+
+	/**
+	 * Artefact masks at the target. `dc`, `spur` and `image` end the target at once; `rfi` is
+	 * evidence of absence (Task 7a) and counts only on the final check, after the wait found nothing.
+	 */
+	private checkArtefact(t: TargetState, final: boolean): void {
+		this.hold(
+			this.deps
+				.artefactAt(this.sourceId, t.targetHz)
+				.catch((err: unknown) => {
+					this.log.warn(
+						{ err },
+						"Artefact masks unavailable; identifying without them",
+					)
+					return null
+				})
+				.then(kind => {
+					if (kind === "stale") {
+						if (final) this.finishTarget(t, null)
+						else t.recheckArtefact = true
+						return
+					}
+					t.recheckArtefact = false
+					if (kind && (kind !== "rfi" || final)) this.finishTarget(t, kind)
+					else if (final) this.finishTarget(t, null)
+				}),
+		)
+	}
+
+	private waitStep(t: TargetState, now: number): void {
+		if (t.recheckArtefact) {
+			t.recheckArtefact = false
+			this.checkArtefact(t, false)
+			return
+		}
+		// Restarted by an in-window epoch change past the deadline: end with the evidence so far (like a window move).
+		if (t.fallback && now >= t.deadline) {
+			this.finishTarget(t, null)
+			return
+		}
+		const hit = resolveTarget(t.targetHz, t.toleranceHz, this.currentTracks())
+		if (hit) {
+			t.view = hit
+			t.gone = false
+			if (hit.track.flags.iqImage || hit.track.flags.spur) {
+				this.finishTarget(t, hit.track.flags.iqImage ? "image" : "spur")
+				return
+			}
+		} else if (t.view) {
+			t.gone = true
+		}
+		// The timeout bounds the wait for a signal only: a track that keyed inside it still gets its trials, once it
+		// has IDENTIFY_SETTLE_BLOCKS of envelope, closes, or (a slow-settling track) at most settleGraceMs past the deadline.
+		if (
+			t.view &&
+			(t.gone ||
+				t.view.track.blocks >= IDENTIFY_SETTLE_BLOCKS ||
+				now >= t.deadline + this.settleGraceMs())
+		) {
+			this.plan(t)
+			this.tryStep(t, now)
+			return
+		}
+		if (t.view === null && now >= t.deadline) {
+			t.deadline = Number.POSITIVE_INFINITY
+			// Nothing transmitted in time: check once more (a comb may have been promoted, or RFI is the answer).
+			this.checkArtefact(t, true)
+		}
+	}
+
+	/** How long past the deadline a resolved but young track may settle: IDENTIFY_SETTLE_BLOCKS blocks plus 1 s. */
+	private settleGraceMs(): number {
+		return IDENTIFY_SETTLE_BLOCKS * this.record.spec.integrationMs + 1000
+	}
+
+	private plan(t: TargetState): void {
+		const view = t.view
+		if (!view) return
+		const scores = identifyScores(view.track, {
+			priors: this.deps.priorsAt(view.track.centreHz),
+			protocols: this.deps.identify.protocols,
+		})
+		const plan = planIdentifyTrials(scores, {
+			format: this.deps.format(this.sourceId),
+			channelizer: this.deps.channelizer(),
+		})
+		t.plan = plan
+		t.trials = plan.trials.map(
+			(p): ScannerIdentifyTrial => ({
+				protocol: p.protocol,
+				decoder: p.decoder,
+				mode: p.mode,
+				transport: p.transport,
+				outcome:
+					p.run === null
+						? "unsupported"
+						: (t.done.get(p.protocol) ?? "pending"),
+				...(p.reason ? { reason: p.reason } : {}),
+			}),
+		)
+		t.nextRun = 0
+		t.active = []
+		t.state = "trying"
+		this.emitTarget(t)
+	}
+
+	private tryStep(t: TargetState, now: number): void {
+		const plan = t.plan
+		if (!plan) return
+		for (const r of [...t.active]) {
+			if (r.endsAt !== null && now >= r.endsAt) {
+				this.endRun(t, r, "hold")
+				return
+			}
+			if (r.queuedUntil !== null && now >= r.queuedUntil) {
+				this.deps.probes.dequeue(r.req)
+				t.active.splice(t.active.indexOf(r), 1)
+				this.setTrials(t, r.runIndex, () => "skipped-budget")
+				this.emitTarget(t)
+			}
+		}
+		if (!this.fillRuns(t, now)) return
+		if (t.active.length === 0 && t.nextRun >= plan.runs.length)
+			this.finishTarget(t, null)
+	}
+
+	/** Starts runs up to the parallel limit; false when the target went back to waiting (the epoch moved). */
+	private fillRuns(t: TargetState, now: number): boolean {
+		const plan = t.plan
+		if (!plan) return false
+		// Never a new run while the job ends (cancel, source-down, stop) or once it left `running`.
+		if (this.phase !== "running" || this.record.state !== "running") return true
+		// [S2] After the channelizer: parallel runs within maxProbes.channel (Task 40 sets `channelizer`).
+		const parallel = this.deps.channelizer()
+			? Math.max(1, this.deps.settings().maxProbes.channel)
+			: 1
+		while (t.active.length < parallel && t.nextRun < plan.runs.length) {
+			if (!this.startRun(t, now)) return false
+		}
+		return true
+	}
+
+	/** Starts the plan's next run; false when the target went back to waiting (the epoch moved). */
+	private startRun(t: TargetState, now: number): boolean {
+		const view = t.view
+		const runIndex = t.nextRun
+		const run = t.plan?.runs[runIndex]
+		if (!view || !run) return false
+		t.nextRun += 1
+		// Completed before an in-window epoch change: not run again.
+		if (run.protocols.every(p => t.done.has(p))) return true
+		const fs = this.deps.engine(this.sourceId)?.currentEpoch().sampleRateHz ?? 0
+		const preRollSamples = Math.round(
+			(this.deps.settings().hold.preRollMs * fs) / 1000,
+		)
+		const req: ProbeRequest = {
+			jobId: this.record.id,
+			priority: IDENTIFY_PROBE_PRIORITY,
+			sourceId: this.sourceId,
+			trackId: view.trackId,
+			observationId: view.observationId,
+			discoveryId: this.deps.discoveryOf(view.observationId)?.id ?? null,
+			targetHz: view.track.centreHz,
+			epoch: view.epoch,
+			cls: run.cls,
+			protocols: run.protocols,
+			modes: [run.mode],
+			// § 6.5: pre-roll from the observation start, so a click after key-up still sees the header.
+			preRollFromSample: Math.max(0, view.track.startSample - preRollSamples),
+			holdMs: run.holdMs,
+			record: this.deps.identify.record,
+			admission: { kind: "protocol-target", snrDb: view.track.snrDb },
+		}
+		const res = this.request(req)
+		const state: RunState = {
+			runIndex,
+			run,
+			req,
+			probeId: null,
+			queuedUntil: null,
+			endsAt: null,
+			seen: new Map(),
+		}
+		if ("started" in res) {
+			t.active.push(state)
+			this.begin(t, state, res.started, now)
+		} else {
+			switch (res.deferred) {
+				case "max-probes":
+				case "budget":
+				case "cpu":
+					// Queued in the pool (a lower-priority probe was preempted); begin() runs on its "starting".
+					state.queuedUntil = now + IDENTIFY_QUEUE_WAIT_MS
+					t.active.push(state)
+					break
+				case "no-transport":
+				case "format": {
+					// Same shape as a planned unsupported trial (CLI-COORDINATION 2026-10-10): no mode, no transport, a reason.
+					const reason =
+						res.deferred === "format"
+							? "unsupported-format"
+							: this.deps.channelizer()
+								? "no-decoder"
+								: "needs-channelizer"
+					this.setTrials(t, runIndex, (_protocol, trial) => {
+						trial.mode = null
+						trial.transport = null
+						trial.reason = reason
+						return "unsupported"
+					})
+					break
+				}
+				case "stale-epoch":
+					this.restartTarget(t, now)
+					return false
+			}
+		}
+		this.emitTarget(t)
+		return true
+	}
+
+	/**
+	 * The epoch changed under the track with the target still in the window (gain change, reconnect at the
+	 * same centre): resolve the target again. The original deadline stays, so repeated epoch changes never
+	 * extend the job; an `all` target (no wait deadline) gets one now. A window move ends the target instead.
+	 */
+	private restartTarget(t: TargetState, now: number): void {
+		if (this.windowMoved(t)) {
+			this.endMoved(t)
+			return
+		}
+		const runs = t.active.splice(0)
+		for (const r of runs) this.setTrials(t, r.runIndex, () => "cancelled")
+		this.releaseRuns(runs)
+		// Keep the evidence: decoder outcomes of completed runs, and the resolved track for the verdict.
+		for (const trial of t.trials)
+			if (COMPLETED.has(trial.outcome))
+				t.done.set(trial.protocol, trial.outcome)
+		t.fallback = t.view ?? t.fallback
+		t.state = "waiting-for-signal"
+		if (!Number.isFinite(t.deadline))
+			t.deadline = now + this.deps.identify.timeoutMs
+		t.view = null
+		t.gone = false
+		t.nextRun = 0
+		this.emitTarget(t)
+	}
+
+	private begin(
+		t: TargetState,
+		r: RunState,
+		probeId: string,
+		now: number,
+	): void {
+		const transport =
+			this.deps.probes.status().find(p => p.probeId === probeId)?.transport ??
+			(this.deps.channelizer() ? "channel" : "offset")
+		r.probeId = probeId
+		r.queuedUntil = null
+		r.endsAt =
+			now +
+			r.run.holdMs +
+			this.deps.probes.startLatencyMs(r.run.mode.decoderType, transport)
+		this.setTrials(t, r.runIndex, (_protocol, trial) => {
+			trial.transport = transport
+			return "running"
+		})
+	}
+
+	private endRun(
+		t: TargetState,
+		r: RunState,
+		why: "hold" | "stopped" | "decoded",
+	): void {
+		const index = t.active.indexOf(r)
+		if (index < 0) return
+		t.active.splice(index, 1)
+		// § 10.8 (3): stop at the first accepted decode unless exhaustive.
+		const stop = why === "decoded" && !this.deps.identify.exhaustive
+		// The pool stopped the probe before its hold (epoch change, spawn failure, shutdown) and nothing was
+		// accepted: that is no decoder verdict.
+		const cutShort =
+			why === "stopped" &&
+			r.endsAt !== null &&
+			this.deps.now() < r.endsAt &&
+			![...r.seen.values()].some(seen => seen.identity !== null)
+		this.setTrials(t, r.runIndex, protocol => {
+			if (cutShort) return "cancelled"
+			const outcome = trialOutcome(r.seen.get(protocol))
+			return stop && outcome !== "decoded" ? "not-needed" : outcome
+		})
+		const ended = [r]
+		if (stop) {
+			for (const other of t.active.splice(0)) {
+				this.setTrials(t, other.runIndex, () => "not-needed")
+				ended.push(other)
+			}
+			for (const trial of t.trials)
+				if (trial.outcome === "pending") trial.outcome = "not-needed"
+			t.nextRun = t.plan?.runs.length ?? 0
+		} else if (t.state === "trying" && why !== "stopped") {
+			// Request the next run before this one's slot is released: the pool's priority queue then hands the slot to
+			// it, not to a queued passive probe that the next run would only preempt again (a spawn and a kill per run).
+			// A run the pool stopped is followed from the next tick (after an epoch change, or never at shutdown).
+			this.fillRuns(t, this.deps.now())
+		}
+		this.releaseRuns(ended)
+		this.emitTarget(t)
+	}
+
+	private finishTarget(
+		t: TargetState,
+		artefact: ArtefactKind | null,
+		ended?: "window-moved",
+		unavailable = false,
+	): void {
+		if (FINAL.has(t.state)) return
+		const resolved = t.view ?? t.fallback
+		const latest = resolved
+			? (this.deps
+					.liveTracks(this.sourceId)
+					.find(v => v.trackId === resolved.trackId) ?? resolved)
+			: null
+		const track = latest?.track ?? null
+		const discovery = latest
+			? this.deps.discoveryOf(latest.observationId)
+			: undefined
+		const top = track
+			? classifySpectral(track, {
+					priors: this.deps.priorsAt(track.centreHz),
+					protocols: [],
+				}).hypotheses[0]
+			: undefined
+		const state = identifyVerdict({
+			artefact,
+			// identified = an identity this job's trials accepted (H2) on a discovery not capped below decoded; a discovery
+			// decoded earlier (another PTT, passive discovery) without a decode now is a candidate carrying its identity
+			decoded:
+				t.decoded !== null &&
+				(discovery?.confidence ?? "decoded") === "decoded",
+			heardIdentity: t.decoded !== null,
+			discoveryConfidence: discovery?.confidence ?? null,
+			topScore: top?.score ?? 0,
+		})
+		const classified =
+			discovery !== undefined &&
+			CONFIDENCE_RANK[discovery.confidence] >= CONFIDENCE_RANK.classified
+		const protocol =
+			state === "unidentified"
+				? undefined
+				: (t.decoded?.protocol ??
+					(classified ? discovery?.protocol : top?.protocol))
+		const identity =
+			state === "unidentified"
+				? undefined
+				: (t.decoded?.identity ?? discovery?.identity)
+		for (const trial of t.trials)
+			if (trial.outcome === "pending" || trial.outcome === "running")
+				trial.outcome = "cancelled"
+		t.result = {
+			...(protocol ? { protocol } : {}),
+			confidence: discovery?.confidence ?? (t.decoded ? "decoded" : "activity"),
+			...(identity ? { identity } : {}),
+			metadata: discovery?.metadata ?? emptyMetadata(),
+			...(discovery ? { discoveryId: discovery.id } : {}),
+			...(latest ? { observationId: latest.observationId } : {}),
+			// After a window move the latest summary shows another window: measure from the track or not at all.
+			measurements: measureTarget(
+				track,
+				ended || unavailable ? null : this.deps.lastSummary(this.sourceId),
+				t.targetHz,
+				t.toleranceHz,
+			),
+			...(artefact ? { artefact } : {}),
+			...(ended ? { ended } : {}),
+		}
+		t.state = state
+		this.emitTarget(t)
+	}
+
+	/** No accepted IQ: never use a retained summary as an RF measurement. */
+	private async failStartup(event: JobEvent): Promise<void> {
+		if (this.phase === "finished") return
+		const target = this.deps.identify.target
+		if (this.targets.length === 0 && "frequencyHz" in target) {
+			const t = this.newTarget(
+				target.frequencyHz,
+				toleranceHz(target.bandwidthHz),
+				target.bandwidthHz ?? 0,
+				0,
+				null,
+			)
+			this.finishTarget(t, null, undefined, true)
+		}
+		await this.abort()
+		try {
+			await this.deps.inner.dispatch(event)
+		} finally {
+			this.detach()
+		}
+	}
+
+	private finishJob(): void {
+		if (this.phase === "finished") return
+		this.phase = "finished"
+		void this.deps.inner
+			.dispatch({ type: "stop-condition" })
+			.catch((err: unknown) =>
+				this.log.debug({ err }, "Identify stop ignored in this state"),
+			)
+			.finally(() => this.detach())
+	}
+
+	/** source-down (and a lease loss, never expected): end through the stop-condition row with the results so far. */
+	private async endWithResults(): Promise<void> {
+		await this.abort()
+		try {
+			await this.deps.inner.dispatch({ type: "stop-condition" })
+		} finally {
+			this.detach()
+		}
+	}
+
+	/** A sweep now holds the source, or the target band left the tuned window. */
+	private windowMoved(t: TargetState): boolean {
+		if (!this.deps.inner.covers(this.sourceId, t.targetHz)) return true
+		const epoch = this.deps.engine(this.sourceId)?.currentEpoch()
+		return (
+			epoch !== undefined &&
+			!inWindow(t.targetHz, t.bandwidthHz, epoch, USABLE_FRACTION)
+		)
+	}
+
+	/** Ends a target whose window moved: runs released, open trials `cancelled`, `ended: "window-moved"`. */
+	private endMoved(t: TargetState): void {
+		this.log.info(
+			{ targetHz: t.targetHz, state: t.state },
+			"Identify target ended: window moved",
+		)
+		const runs = t.active.splice(0)
+		for (const r of runs) this.setTrials(t, r.runIndex, () => "cancelled")
+		this.releaseRuns(runs)
+		this.finishTarget(t, null, "window-moved")
+	}
+
+	/** Live tracks of the current epoch only (old-epoch observations linger briefly behind a thread host). */
+	private currentTracks(): IdentifyTrackView[] {
+		const epoch = this.deps.engine(this.sourceId)?.currentEpoch().epoch
+		return this.deps
+			.liveTracks(this.sourceId)
+			.filter(v => epoch === undefined || v.epoch === epoch)
+	}
+
+	/** Cancel, source-down, source-removed: release every probe and report what each target has so far. */
+	private async abort(): Promise<void> {
+		if (this.phase === "finished") return
+		this.phase = "finished"
+		const releases: Promise<void>[] = []
+		for (const t of this.targets) {
+			for (const r of t.active.splice(0)) {
+				if (r.probeId) releases.push(this.deps.probes.release(r.probeId))
+				else this.deps.probes.dequeue(r.req)
+				this.setTrials(t, r.runIndex, () => "cancelled")
+			}
+			this.finishTarget(t, null)
+		}
+		await Promise.all(releases).catch((err: unknown) =>
+			this.log.warn({ err }, "Releasing identify probes failed"),
+		)
+	}
+
+	// === probe pool events ===
+
+	private readonly onProbeState = (
+		probeId: string,
+		state: string,
+		req: ProbeRequest,
+	): void => {
+		if (req.jobId !== this.record.id || this.requesting) return
+		const hit = this.findRun(
+			r =>
+				r.probeId === probeId ||
+				(r.probeId === null && r.queuedUntil !== null && r.req === req),
+		)
+		if (state === "starting") {
+			if (hit && hit.r.probeId === null) {
+				this.begin(hit.t, hit.r, probeId, this.deps.now())
+				this.emitTarget(hit.t)
+			} else if (!hit) {
+				// Not a run of ours any more (e.g. the pool's re-request after an epoch change): give the slot back.
+				void this.deps.probes.release(probeId).catch(() => undefined)
+			}
+			return
+		}
+		if (state === "stopped" && hit && hit.r.probeId === probeId) {
+			hit.r.probeId = null
+			this.endRun(hit.t, hit.r, "stopped")
+		}
+	}
+
+	private readonly onPoolEvidence = (
+		probeId: string,
+		req: ProbeRequest,
+		ev: DecodeEvidence,
+	): void => {
+		if (req.jobId !== this.record.id) return
+		const hit = this.findRun(r => r.probeId === probeId)
+		if (!hit) return
+		const seen = hit.r.seen.get(ev.protocol) ?? {
+			output: false,
+			crcFailures: 0,
+			identity: null,
+		}
+		seen.output = true
+		if (!ev.crcClean) seen.crcFailures += 1
+		// H2: the interpreters attach an identity only after the second CRC-clean line with the same value.
+		if (ev.identity) seen.identity = ev.identity
+		hit.r.seen.set(ev.protocol, seen)
+		if (!ev.identity) return
+		hit.t.decoded ??= { protocol: ev.protocol, identity: ev.identity }
+		if (!this.deps.identify.exhaustive) this.endRun(hit.t, hit.r, "decoded")
+	}
+
+	// === helpers ===
+
+	private request(req: ProbeRequest): ReturnType<ProbePool["request"]> {
+		this.requesting = true
+		try {
+			return this.deps.probes.request(req)
+		} finally {
+			this.requesting = false
+		}
+	}
+
+	private releaseRuns(runs: readonly RunState[]): void {
+		const pending: Promise<void>[] = []
+		for (const r of runs) {
+			if (r.probeId) pending.push(this.deps.probes.release(r.probeId))
+			else this.deps.probes.dequeue(r.req)
+			r.probeId = null
+		}
+		if (pending.length > 0) this.hold(Promise.all(pending))
+	}
+
+	private hold(p: Promise<unknown>): void {
+		this.inflight += 1
+		void p
+			.catch((err: unknown) => this.log.warn({ err }, "Identify step failed"))
+			.finally(() => {
+				this.inflight -= 1
+			})
+	}
+
+	private setTrials(
+		t: TargetState,
+		runIndex: number,
+		outcome: (
+			protocol: ScannerProtocol,
+			trial: ScannerIdentifyTrial,
+		) => ScannerTrialOutcome,
+	): void {
+		t.plan?.trials.forEach((planned, i) => {
+			const trial = t.trials[i]
+			if (planned.run === runIndex && trial)
+				trial.outcome = outcome(planned.protocol, trial)
+		})
+	}
+
+	private findRun(
+		match: (r: RunState) => boolean,
+	): { t: TargetState; r: RunState } | null {
+		for (const t of this.targets)
+			for (const r of t.active) if (match(r)) return { t, r }
+		return null
+	}
+
+	private eventOf(t: TargetState): ScannerIdentifyEventData {
+		return {
+			jobId: this.record.id,
+			targetHz: t.targetHz,
+			state: t.state,
+			trials: t.trials.map(x => ({ ...x })),
+			...(t.result ? { result: t.result } : {}),
+		}
+	}
+
+	private emitTarget(t: TargetState): void {
+		this.deps.emit(this.eventOf(t))
+	}
+
+	private detach(): void {
+		if (this.detached) return
+		this.detached = true
+		this.deps.probes.off("probe-state", this.onProbeState)
+		this.deps.probes.off("evidence", this.onPoolEvidence)
+	}
+}
