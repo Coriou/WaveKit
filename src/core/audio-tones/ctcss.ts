@@ -129,6 +129,8 @@ export class CtcssBank {
 	private blockIndex = 0
 	private lastWinner = -1
 	private streak = 0
+	/** Table index that won the most recent analysis block, or -1 (WG7 streaming view). */
+	private lastBlockWinner = -1
 
 	constructor() {
 		for (let i = 0; i < CTCSS_HZ.length; i++) {
@@ -160,6 +162,24 @@ export class CtcssBank {
 		this.nextAt += HOP_SAMPLES
 	}
 
+	/**
+	 * WG7 streaming per-block result: the number of 500 ms analysis blocks run so far
+	 * (one every 250 ms hop after the first). A caller compares it between pushes to see
+	 * a new block. Does not affect `result()`.
+	 */
+	blockCount(): number {
+		return this.blockIndex
+	}
+
+	/**
+	 * WG7 streaming per-block result: the table index (into `CTCSS_HZ`) that won the most
+	 * recent analysis block (≥ 0.65 of the band and ≥ 3× the next tone), or -1 when no tone
+	 * won it or no block has run. Does not affect `result()`.
+	 */
+	lastBlockToneIndex(): number {
+		return this.lastBlockWinner
+	}
+
 	result(): number | null {
 		if (this.seen < MIN_SAMPLES) return null
 		return selectCtcssTone(this.votes, this.qualified, this.firstBlock)
@@ -184,6 +204,7 @@ export class CtcssBank {
 		this.blockIndex = 0
 		this.lastWinner = -1
 		this.streak = 0
+		this.lastBlockWinner = -1
 	}
 
 	private analyse(): void {
@@ -245,6 +266,7 @@ export class CtcssBank {
 			bestPower > MIN_POWER &&
 			bestPower >= BAND_FRACTION * bandMean
 		const winner = inBand && dominates ? best : -1
+		this.lastBlockWinner = winner
 		if (winner >= 0 && winner === this.lastWinner) this.streak += 1
 		else if (winner >= 0) {
 			this.streak = 1

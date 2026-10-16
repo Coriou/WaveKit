@@ -46,6 +46,97 @@ export function boxcarDecimationGain(hz: number, inputRate: number): number {
 }
 
 /**
+ * Streaming decimator to `AUDIO_TONE_RATE_HZ` by block averaging (the tone detector's own
+ * decimator, exported for the WG7 tone squelch gate). An integer ratio averages N samples; a
+ * fractional ratio uses a varying group length with the same average; a rate below 8 kHz (or
+ * not finite) yields nothing. `take` allocates nothing: it returns true when a decimated sample
+ * is ready in `output`.
+ */
+export class PcmDecimator {
+	/** The decimated sample produced by the last `take` that returned true. */
+	output = 0
+	private decimFactor = 1
+	private decimSum = 0
+	private decimCount = 0
+	private fractional = false
+	private fracRatio = 1
+	private fracFill = 0
+	private fracSum = 0
+
+	/** Back to the constructed state (factor 1). */
+	clear(): void {
+		this.output = 0
+		this.decimFactor = 1
+		this.decimSum = 0
+		this.decimCount = 0
+		this.fractional = false
+		this.fracRatio = 1
+		this.fracFill = 0
+		this.fracSum = 0
+	}
+
+	/** Set the input rate and drop any partial group. */
+	arm(rate: number): void {
+		this.decimSum = 0
+		this.decimCount = 0
+		this.fracFill = 0
+		this.fracSum = 0
+		if (!Number.isFinite(rate) || rate < AUDIO_TONE_RATE_HZ) {
+			this.fractional = false
+			this.decimFactor = 0
+			return
+		}
+		const ratio = rate / AUDIO_TONE_RATE_HZ
+		const nearest = Math.round(ratio)
+		if (Math.abs(ratio - nearest) < 1e-6) {
+			this.fractional = false
+			this.decimFactor = nearest
+			return
+		}
+		this.fractional = true
+		this.fracRatio = ratio
+		this.decimFactor = 0
+	}
+
+	/**
+	 * One input sample (non-finite counts as 0). The ratio is at least 1, so one input
+	 * completes at most one output.
+	 */
+	take(sample: number): boolean {
+		if (this.decimFactor === 0 && !this.fractional) return false
+		const value = Number.isFinite(sample) ? sample : 0
+		if (!this.fractional) {
+			if (this.decimFactor <= 1) {
+				this.output = value
+				return true
+			}
+			this.decimSum += value
+			this.decimCount += 1
+			if (this.decimCount < this.decimFactor) return false
+			this.output = this.decimSum / this.decimFactor
+			this.decimSum = 0
+			this.decimCount = 0
+			return true
+		}
+		let ready = false
+		let left = 1
+		while (left > 0) {
+			const need = this.fracRatio - this.fracFill
+			const take = left < need ? left : need
+			this.fracSum += value * take
+			this.fracFill += take
+			left -= take
+			if (this.fracFill < this.fracRatio - 1e-9) continue
+			this.output = this.fracSum / this.fracRatio
+			ready = true
+			this.fracSum = 0
+			this.fracFill = 0
+		}
+		return ready
+	}
+}
+
+/**
  * One detector per open transmission. `push` is allocation-free after the
  * first call: banks, the decimator and the odd-byte hold are constructed
  * once and reused. `result` always returns all three keys.
@@ -69,13 +160,7 @@ export class ToneDetector {
 	 * misframe every later sample, so DCS stays blind until the format is re-armed.
 	 */
 	private dcsBlind = false
-	private decimFactor = 1
-	private decimSum = 0
-	private decimCount = 0
-	private fractional = false
-	private fracRatio = 1
-	private fracFill = 0
-	private fracSum = 0
+	private readonly decimator = new PcmDecimator()
 
 	push(pcm: Buffer, format: TonePcmFormat): void {
 		if (format.format !== "s16le" && format.format !== "f32le") {
@@ -151,74 +236,24 @@ export class ToneDetector {
 		this.dcsSecondsDone = 0
 		this.segmentSamples = 0
 		this.dcsBlind = false
-		this.decimFactor = 1
-		this.decimSum = 0
-		this.decimCount = 0
-		this.fractional = false
-		this.fracRatio = 1
-		this.fracFill = 0
-		this.fracSum = 0
+		this.decimator.clear()
 	}
 
 	private armRate(rate: number): void {
 		this.dcsSecondsDone = this.dcsSeconds()
 		this.segmentSamples = 0
 		this.rate = rate
-		this.decimSum = 0
-		this.decimCount = 0
-		this.fracFill = 0
-		this.fracSum = 0
 		this.dtmf.setPowerScale(
 			powerScale(DTMF_ROW_HZ, rate),
 			powerScale(DTMF_COLUMN_HZ, rate),
 		)
-		if (!Number.isFinite(rate) || rate < AUDIO_TONE_RATE_HZ) {
-			this.fractional = false
-			this.decimFactor = 0
-			return
-		}
-		const ratio = rate / AUDIO_TONE_RATE_HZ
-		const nearest = Math.round(ratio)
-		if (Math.abs(ratio - nearest) < 1e-6) {
-			this.fractional = false
-			this.decimFactor = nearest
-			return
-		}
-		this.fractional = true
-		this.fracRatio = ratio
-		this.decimFactor = 0
+		this.decimator.arm(rate)
 	}
 
 	private takeSample(sample: number): void {
 		this.inputSamples += 1
 		this.segmentSamples += 1
-		if (this.decimFactor === 0 && !this.fractional) return
-		const value = Number.isFinite(sample) ? sample : 0
-		if (!this.fractional) {
-			if (this.decimFactor <= 1) {
-				this.onDecimated(value)
-				return
-			}
-			this.decimSum += value
-			this.decimCount += 1
-			if (this.decimCount < this.decimFactor) return
-			this.onDecimated(this.decimSum / this.decimFactor)
-			this.decimSum = 0
-			this.decimCount = 0
-			return
-		}
-		let left = 1
-		while (left > 0) {
-			const need = this.fracRatio - this.fracFill
-			const take = left < need ? left : need
-			this.fracSum += value * take
-			this.fracFill += take
-			left -= take
-			if (this.fracFill < this.fracRatio - 1e-9) continue
-			this.onDecimated(this.fracSum / this.fracRatio)
-			this.fracSum = 0
-			this.fracFill = 0
-		}
+		if (this.decimator.take(sample)) this.onDecimated(this.decimator.output)
 	}
 
 	private onDecimated(sample: number): void {

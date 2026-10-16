@@ -124,6 +124,20 @@ function toDcs(packed: number): AnalogTransmissionDcs {
 }
 
 /**
+ * WG7: the packed reading the streaming view (`DcsDecoder.wordReading`) uses for `dcs`:
+ * the code's value with 512 added for "inverted"; -1 for a malformed code.
+ */
+export function packDcs(dcs: AnalogTransmissionDcs): number {
+	if (!/^[0-7]{3}$/.test(dcs.code)) return NONE
+	return (
+		Number.parseInt(dcs.code, 8) | (dcs.polarity === "inverted" ? INVERTED : 0)
+	)
+}
+
+/** WG7: one DCS word period in bits (a 23-bit Golay word, about 171 ms). */
+export const DCS_WORD_BITS = WORD_BITS
+
+/**
  * The same bit stream read with the other polarity: the code whose word's complement is a
  * rotation of this code's word, with the polarity flipped (023N ↔ 047I). A table twin is
  * preferred, then the lowest valid code. A code with no valid twin (only possible outside the
@@ -243,6 +257,26 @@ export class DcsDecoder {
 		this.pushBit(this.acc > 0 ? 1 : 0, quiet)
 		this.acc = 0
 		this.mag = 0
+	}
+
+	/** WG7 streaming view: bits sliced so far (one per 1/134.4 s once locked). */
+	bitCount(): number {
+		return this.bitIndex
+	}
+
+	/**
+	 * WG7 streaming per-word result: the packed reading (`packDcs`) of the current word chain,
+	 * or -1 when none. `wordHits()` counts the consecutive words of that chain, each exactly
+	 * 23 bits after the previous one with the same reading and register. Does not affect
+	 * `result()`.
+	 */
+	wordReading(): number {
+		return this.candidate
+	}
+
+	/** WG7 streaming per-word result: consecutive matching words of `wordReading()` (0 if none). */
+	wordHits(): number {
+		return this.candidate === NONE ? 0 : this.hits
 	}
 
 	result(): AnalogTransmissionDcs | null {
