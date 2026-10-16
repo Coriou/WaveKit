@@ -11,13 +11,17 @@ import { EventEmitter } from "node:events"
 import type { Logger } from "@wavekit/shared"
 import { z } from "zod"
 import type {
+	MeshDeviceTelemetry,
+	MeshNeighbour,
 	MeshNode,
 	MeshPosition,
 	MeshTrackerStats,
 } from "@wavekit/api-types"
 import { createComponentLogger } from "../utils/logger.js"
 import {
+	readNeighborInfo,
 	readPosition,
+	readTelemetry,
 	readUser,
 	type MeshUserFields,
 } from "./meshtastic-protobuf.js"
@@ -63,6 +67,9 @@ const RATE_WINDOW_MS = 60_000
 const BROADCAST = 0xffffffff
 const PORT_POSITION = 3
 const PORT_NODEINFO = 4
+const PORT_TELEMETRY_APP = 67
+const PORT_NEIGHBORINFO_APP = 71
+const MAX_NEIGHBOURS = 32
 const MAX_PAYLOAD_BYTES = 512
 /** Base64 of 512 bytes is 684 characters. Longer strings are rejected unread. */
 const MAX_PAYLOAD_B64 = 684
@@ -161,6 +168,25 @@ function bumpPortnum(portnums: Record<string, number>, portnum: number): void {
 	portnums["other"] = (portnums["other"] ?? 0) + 1
 }
 
+function copyNode(node: MeshNode): MeshNode {
+	const copy: MeshNode = {
+		...node,
+		portnums: { ...node.portnums },
+		position: node.position ? { ...node.position } : null,
+	}
+	if (node.telemetry !== undefined) {
+		copy.telemetry = node.telemetry
+			? ({ ...node.telemetry } satisfies MeshDeviceTelemetry)
+			: null
+	}
+	if (node.neighbours !== undefined) {
+		copy.neighbours = node.neighbours.map(
+			n => ({ ...n }) satisfies MeshNeighbour,
+		)
+	}
+	return copy
+}
+
 export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 	private readonly log: Logger
 	private readonly nodes = new Map<string, MeshNode>()
@@ -188,6 +214,8 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 	private readonly rateBuckets = new Map<number, number>()
 	private lastPacketAtMs: number | null = null
 	private expiredTotal = 0
+	private telemetryPackets = 0
+	private neighbourReports = 0
 
 	constructor(config: MeshTrackerConfig = {}, logger: Logger) {
 		super()
@@ -297,7 +325,7 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 
 	/** Most recently heard first. Equal times break toward the smaller node id. */
 	getAll(): MeshNode[] {
-		return [...this.nodes.values()].sort((a, b) => {
+		return [...this.nodes.values()].map(copyNode).sort((a, b) => {
 			if (a.lastSeen !== b.lastSeen) return a.lastSeen < b.lastSeen ? 1 : -1
 			if (a.nodeId < b.nodeId) return -1
 			if (a.nodeId > b.nodeId) return 1
@@ -309,7 +337,8 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 	get(nodeId: string): MeshNode | undefined {
 		const key = canonicalNodeId(nodeId)
 		if (!key) return undefined
-		return this.nodes.get(key)
+		const node = this.nodes.get(key)
+		return node ? copyNode(node) : undefined
 	}
 
 	getStats(): MeshTrackerStats {
@@ -341,6 +370,8 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 					: new Date(this.lastPacketAtMs).toISOString(),
 			latestNodeId: latest?.id ?? null,
 			expiredTotal: this.expiredTotal,
+			telemetryPackets: this.telemetryPackets,
+			neighbourReports: this.neighbourReports,
 			timestamp: new Date(now).toISOString(),
 		}
 	}
@@ -373,6 +404,8 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 			firstSeen: atIso,
 			lastSeen: atIso,
 			lastNodeInfoAt: null,
+			telemetry: null,
+			neighbours: [],
 		}
 	}
 
@@ -414,6 +447,50 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 				return
 			}
 			this.applyUser(node, decoded, atIso)
+			return
+		}
+		if (packet.portnum === PORT_TELEMETRY_APP) {
+			const decoded = readTelemetry(payload)
+			if (!decoded) {
+				this.decodeErrors += 1
+				return
+			}
+			if (!decoded.deviceMetrics) return
+			const m = decoded.deviceMetrics
+			const level = m.batteryLevel
+			node.telemetry = {
+				batteryPct: level === null || level > 100 ? null : level,
+				powered: level === null ? null : level > 100,
+				voltageV: m.voltage,
+				channelUtilizationPct: m.channelUtilization,
+				airUtilTxPct: m.airUtilTx,
+				uptimeS: m.uptimeSeconds,
+				at: atIso,
+			}
+			this.telemetryPackets += 1
+			return
+		}
+		if (packet.portnum === PORT_NEIGHBORINFO_APP) {
+			const decoded = readNeighborInfo(payload)
+			if (!decoded) {
+				this.decodeErrors += 1
+				return
+			}
+			if (decoded.nodeNum !== packet.from) {
+				this.invalidPackets += 1
+				return
+			}
+			node.neighbours = decoded.neighbors
+				.map(n => ({
+					nodeId: formatNodeId(n.nodeNum),
+					snrDb: n.snr,
+					at: atIso,
+				}))
+				.sort((a, b) =>
+					a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0,
+				)
+				.slice(0, MAX_NEIGHBOURS)
+			this.neighbourReports += 1
 		}
 	}
 
@@ -558,6 +635,15 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 				doomed.push(id)
 		}
 		for (const id of doomed) this.remove(id, "age")
+		for (const node of this.nodes.values()) {
+			if (!node.neighbours || node.neighbours.length === 0) continue
+			const kept = node.neighbours.filter(
+				n => now - Date.parse(n.at) <= this.limits.maxAgeMs,
+			)
+			if (kept.length === node.neighbours.length) continue
+			node.neighbours = kept
+			this.emit("mesh:update", node)
+		}
 		if (doomed.length > 0) {
 			this.log.debug(
 				{ removed: doomed.length, remaining: this.nodes.size },

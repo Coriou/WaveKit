@@ -40,6 +40,46 @@ const positionSchema = {
 	],
 } as const
 
+const telemetrySchema = {
+	anyOf: [
+		{
+			type: "object",
+			properties: {
+				batteryPct: nullableNumber,
+				powered: nullableBoolean,
+				voltageV: nullableNumber,
+				channelUtilizationPct: nullableNumber,
+				airUtilTxPct: nullableNumber,
+				uptimeS: nullableNumber,
+				at: { type: "string" },
+			},
+			required: [
+				"batteryPct",
+				"powered",
+				"voltageV",
+				"channelUtilizationPct",
+				"airUtilTxPct",
+				"uptimeS",
+				"at",
+			],
+		},
+		{ type: "null" },
+	],
+} as const
+
+const neighboursSchema = {
+	type: "array",
+	items: {
+		type: "object",
+		properties: {
+			nodeId: { type: "string" },
+			snrDb: nullableNumber,
+			at: { type: "string" },
+		},
+		required: ["nodeId", "snrDb", "at"],
+	},
+} as const
+
 const nodeSchema = {
 	type: "object",
 	additionalProperties: false,
@@ -68,6 +108,8 @@ const nodeSchema = {
 		firstSeen: { type: "string" },
 		lastSeen: { type: "string" },
 		lastNodeInfoAt: nullableString,
+		telemetry: telemetrySchema,
+		neighbours: neighboursSchema,
 	},
 	required: [
 		"nodeId",
@@ -109,6 +151,8 @@ const statsSchema = {
 		lastPacketAt: nullableString,
 		latestNodeId: nullableString,
 		expiredTotal: { type: "integer" },
+		telemetryPackets: { type: "integer" },
+		neighbourReports: { type: "integer" },
 		timestamp: { type: "string" },
 	},
 	required: [

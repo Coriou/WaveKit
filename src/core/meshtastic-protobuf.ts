@@ -9,14 +9,17 @@
  * (metres), 4 time fixed32 (unix seconds). Other fields are skipped.
  * User: 1 id, 2 long_name, 3 short_name, 5 hw_model, 6 is_licensed, 7 role.
  *
- * Both readers return null on any malformation and never throw. There is no
+ * Telemetry and NeighborInfo readers (WG3 req 8.1-8.3) are at the end.
+ *
+ * All readers return null on any malformation and never throw. There is no
  * recursion: length-delimited unknowns are skipped as opaque bytes.
  */
 
 const MAX_VARINT_BYTES = 10
 const MAX_FIELDS = 64
 /** Proto3 field numbers are 1..2^29-1. A larger number is a malformed tag. */
-const MAX_FIELD_NUMBER = (1n << 29n) - 1n
+const MAX_FIELD_NUMBER = 2 ** 29 - 1
+const MAX_TAG = 0xffffffffn
 /** Meshtastic long-name limit, in UTF-8 bytes. Longer names reject the message. */
 const MAX_LONG_NAME_BYTES = 40
 /** Meshtastic short-name limit, in UTF-8 bytes. */
@@ -52,6 +55,8 @@ export interface MeshUserFields {
 interface Cursor {
 	bytes: Uint8Array
 	offset: number
+	/** Exclusive end of the message being walked (a nested message ends early). */
+	end: number
 }
 
 type FieldAction = "handled" | "unknown" | "bad"
@@ -61,11 +66,35 @@ function asBytes(value: Uint8Array): Uint8Array | null {
 	return value
 }
 
+/**
+ * Fast path: a varint of up to 4 bytes (28 bits) as a small integer, with no
+ * BigInt work. Returns -1 and leaves the cursor unchanged otherwise.
+ */
+function readSmallVarint(cursor: Cursor): number {
+	const { bytes, offset, end } = cursor
+	let small = 0
+	for (let i = 0; i < 4 && offset + i < end; i++) {
+		const byte = bytes[offset + i] ?? 0
+		small |= (byte & 0x7f) << (7 * i)
+		if ((byte & 0x80) === 0) {
+			cursor.offset = offset + i + 1
+			return small
+		}
+	}
+	return -1
+}
+
 function readVarint(cursor: Cursor): bigint | null {
+	const small = readSmallVarint(cursor)
+	if (small >= 0) return BigInt(small)
+	return readVarintSlow(cursor)
+}
+
+function readVarintSlow(cursor: Cursor): bigint | null {
 	let value = 0n
 	let shift = 0n
 	for (let i = 0; i < MAX_VARINT_BYTES; i++) {
-		if (cursor.offset >= cursor.bytes.length) return null
+		if (cursor.offset >= cursor.end) return null
 		const byte = cursor.bytes[cursor.offset]
 		if (byte === undefined) return null
 		cursor.offset += 1
@@ -80,7 +109,7 @@ function readVarint(cursor: Cursor): bigint | null {
 }
 
 function advance(cursor: Cursor, count: number): boolean {
-	if (count < 0 || cursor.offset + count > cursor.bytes.length) return false
+	if (count < 0 || cursor.offset + count > cursor.end) return false
 	cursor.offset += count
 	return true
 }
@@ -93,7 +122,7 @@ function skip(cursor: Cursor, wire: number): boolean {
 	if (wire === WIRE_LENGTH) {
 		const length = readVarint(cursor)
 		if (length === null) return false
-		const remaining = cursor.bytes.length - cursor.offset
+		const remaining = cursor.end - cursor.offset
 		if (length > BigInt(remaining)) return false
 		return advance(cursor, Number(length))
 	}
@@ -106,18 +135,25 @@ function skip(cursor: Cursor, wire: number): boolean {
  */
 function walk(
 	bytes: Uint8Array,
-	known: (field: bigint, wire: number, cursor: Cursor) => FieldAction,
+	known: (field: number, wire: number, cursor: Cursor) => FieldAction,
+	maxFields: number = MAX_FIELDS,
+	start = 0,
+	end: number = bytes.length,
 ): boolean {
-	const cursor: Cursor = { bytes, offset: 0 }
+	const cursor: Cursor = { bytes, offset: start, end }
 	let fields = 0
-	while (cursor.offset < bytes.length) {
-		if (fields >= MAX_FIELDS) return false
-		const tag = readVarint(cursor)
-		if (tag === null) return false
+	while (cursor.offset < end) {
+		if (fields >= maxFields) return false
+		let tagNumber = readSmallVarint(cursor)
+		if (tagNumber < 0) {
+			const tag = readVarintSlow(cursor)
+			if (tag === null || tag > MAX_TAG) return false
+			tagNumber = Number(tag)
+		}
 		fields += 1
-		const field = tag >> 3n
-		const wire = Number(tag & 7n)
-		if (field <= 0n || field > MAX_FIELD_NUMBER) return false
+		const field = Math.floor(tagNumber / 8)
+		const wire = tagNumber % 8
+		if (field <= 0 || field > MAX_FIELD_NUMBER) return false
 		const action = known(field, wire, cursor)
 		if (action === "bad") return false
 		if (action === "unknown" && !skip(cursor, wire)) return false
@@ -131,7 +167,7 @@ function readFixed(
 	signed: boolean,
 ): number | null {
 	if (wire !== WIRE_FIXED32) return null
-	if (cursor.offset + 4 > cursor.bytes.length) return null
+	if (cursor.offset + 4 > cursor.end) return null
 	const view = new DataView(
 		cursor.bytes.buffer,
 		cursor.bytes.byteOffset + cursor.offset,
@@ -180,7 +216,7 @@ function readText(
 	if (wire !== WIRE_LENGTH) return null
 	const length = readVarint(cursor)
 	if (length === null) return null
-	const remaining = cursor.bytes.length - cursor.offset
+	const remaining = cursor.end - cursor.offset
 	if (length > BigInt(remaining)) return null
 	if (length > BigInt(maxBytes)) return null
 	const count = Number(length)
@@ -210,25 +246,25 @@ export function readPosition(bytes: Uint8Array): MeshPositionFields | null {
 		let altitudeM: number | null = null
 		let timeS: number | null = null
 		const ok = walk(view, (field, wire, cursor) => {
-			if (field === 1n) {
+			if (field === 1) {
 				const value = readFixed(cursor, wire, true)
 				if (value === null) return "bad"
 				latitudeI = value
 				return "handled"
 			}
-			if (field === 2n) {
+			if (field === 2) {
 				const value = readFixed(cursor, wire, true)
 				if (value === null) return "bad"
 				longitudeI = value
 				return "handled"
 			}
-			if (field === 3n) {
+			if (field === 3) {
 				const value = readInt32(cursor, wire)
 				if (value === null) return "bad"
 				altitudeM = value
 				return "handled"
 			}
-			if (field === 4n) {
+			if (field === 4) {
 				const value = readFixed(cursor, wire, false)
 				if (value === null) return "bad"
 				timeS = value
@@ -260,37 +296,37 @@ export function readUser(bytes: Uint8Array): MeshUserFields | null {
 		let isLicensed: boolean | null = null
 		let role: number | null = null
 		const ok = walk(view, (field, wire, cursor) => {
-			if (field === 1n) {
+			if (field === 1) {
 				const value = readText(cursor, wire, view.length)
 				if (value === null) return "bad"
 				id = value
 				return "handled"
 			}
-			if (field === 2n) {
+			if (field === 2) {
 				const value = readText(cursor, wire, MAX_LONG_NAME_BYTES)
 				if (value === null) return "bad"
 				longName = value
 				return "handled"
 			}
-			if (field === 3n) {
+			if (field === 3) {
 				const value = readText(cursor, wire, MAX_SHORT_NAME_BYTES)
 				if (value === null) return "bad"
 				shortName = value
 				return "handled"
 			}
-			if (field === 5n) {
+			if (field === 5) {
 				const value = readInt32(cursor, wire)
 				if (value === null) return "bad"
 				hwModel = value
 				return "handled"
 			}
-			if (field === 6n) {
+			if (field === 6) {
 				const value = readBool(cursor, wire)
 				if (value === null) return "bad"
 				isLicensed = value
 				return "handled"
 			}
-			if (field === 7n) {
+			if (field === 7) {
 				const value = readInt32(cursor, wire)
 				if (value === null) return "bad"
 				role = value
@@ -300,6 +336,268 @@ export function readUser(bytes: Uint8Array): MeshUserFields | null {
 		})
 		if (!ok) return null
 		return { id, longName, shortName, hwModel, isLicensed, role }
+	} catch {
+		return null
+	}
+}
+
+// --- Telemetry and NeighborInfo (WG3 req 8.1-8.3) ---------------------------
+// Field numbers from the public Meshtastic telemetry.proto and mesh.proto.
+
+/** Telemetry.time (fixed32): skipped as an unknown field. */
+const TELEMETRY_TIME = 1
+/** Telemetry.device_metrics (DeviceMetrics, length-delimited). */
+const TELEMETRY_DEVICE_METRICS = 2
+/** DeviceMetrics.battery_level (uint32 varint). */
+const DEVICE_BATTERY_LEVEL = 1
+/** DeviceMetrics.voltage (float, fixed32). */
+const DEVICE_VOLTAGE = 2
+/** DeviceMetrics.channel_utilization (float, fixed32). */
+const DEVICE_CHANNEL_UTILIZATION = 3
+/** DeviceMetrics.air_util_tx (float, fixed32). */
+const DEVICE_AIR_UTIL_TX = 4
+/** DeviceMetrics.uptime_seconds (uint32 varint). */
+const DEVICE_UPTIME_SECONDS = 5
+/** NeighborInfo.node_id (uint32 varint). Fields 2 and 3 are skipped. */
+const NEIGHBOR_INFO_NODE_ID = 1
+/** NeighborInfo.neighbors (repeated Neighbor, length-delimited). */
+const NEIGHBOR_INFO_NEIGHBORS = 4
+/** Neighbor.node_id (uint32 varint). */
+const NEIGHBOR_NODE_ID = 1
+/** Neighbor.snr (float, fixed32). */
+const NEIGHBOR_SNR = 2
+
+/** More neighbours than this in one report is a decode error (null). */
+export const MAX_NEIGHBORS_PER_REPORT = 64
+/** NeighborInfo field budget: the neighbour cap plus room for the scalar fields. */
+const MAX_NEIGHBOR_INFO_FIELDS = MAX_NEIGHBORS_PER_REPORT + 16
+
+export interface MeshDeviceMetricsFields {
+	/** Raw uint32. Values above 100 mean externally powered (interpreted by the tracker). */
+	batteryLevel: number | null
+	voltage: number | null
+	channelUtilization: number | null
+	airUtilTx: number | null
+	uptimeSeconds: number | null
+}
+
+export interface MeshTelemetryFields {
+	/** Null when the packet carries another variant (environment, power, ...). */
+	deviceMetrics: MeshDeviceMetricsFields | null
+}
+
+export interface MeshNeighborFields {
+	nodeNum: number
+	snr: number | null
+}
+
+export interface MeshNeighborInfoFields {
+	/** Null when NeighborInfo.node_id is absent. */
+	nodeNum: number | null
+	neighbors: MeshNeighborFields[]
+}
+
+/** uint32: low 32 bits of the varint, unsigned. Wrong wire type is null. */
+function readUint32(cursor: Cursor, wire: number): number | null {
+	if (wire !== WIRE_VARINT) return null
+	const small = readSmallVarint(cursor)
+	if (small >= 0) return small
+	const value = readVarintSlow(cursor)
+	if (value === null) return null
+	return Number(value & 0xffffffffn) >>> 0
+}
+
+/** Scratch view for float decoding: avoids a DataView allocation per field. */
+const FLOAT_VIEW = new DataView(new ArrayBuffer(4))
+
+/** float (fixed32, LE). undefined = malformed; non-finite = null (not an error). */
+function readFloat(cursor: Cursor, wire: number): number | null | undefined {
+	if (wire !== WIRE_FIXED32) return undefined
+	if (cursor.offset + 4 > cursor.end) return undefined
+	const { bytes, offset } = cursor
+	FLOAT_VIEW.setUint32(
+		0,
+		((bytes[offset] ?? 0) |
+			((bytes[offset + 1] ?? 0) << 8) |
+			((bytes[offset + 2] ?? 0) << 16) |
+			((bytes[offset + 3] ?? 0) << 24)) >>>
+			0,
+		true,
+	)
+	const value = FLOAT_VIEW.getFloat32(0, true)
+	cursor.offset += 4
+	return Number.isFinite(value) ? value : null
+}
+
+/**
+ * Length prefix of a sub-message, bounded by the enclosing message. Leaves the
+ * cursor at the sub-message start; the caller walks [offset, offset + length)
+ * in place (no copy) and then advances past it. Null on a malformed prefix.
+ */
+function readSubMessageLength(cursor: Cursor, wire: number): number | null {
+	if (wire !== WIRE_LENGTH) return null
+	const small = readSmallVarint(cursor)
+	if (small >= 0) return small > cursor.end - cursor.offset ? null : small
+	const length = readVarintSlow(cursor)
+	if (length === null) return null
+	if (length > BigInt(cursor.end - cursor.offset)) return null
+	return Number(length)
+}
+
+function readDeviceMetrics(
+	bytes: Uint8Array,
+	start: number,
+	end: number,
+): MeshDeviceMetricsFields | null {
+	const out: MeshDeviceMetricsFields = {
+		batteryLevel: null,
+		voltage: null,
+		channelUtilization: null,
+		airUtilTx: null,
+		uptimeSeconds: null,
+	}
+	const ok = walk(
+		bytes,
+		(field, wire, cursor) => {
+			if (field === DEVICE_BATTERY_LEVEL || field === DEVICE_UPTIME_SECONDS) {
+				const value = readUint32(cursor, wire)
+				if (value === null) return "bad"
+				if (field === DEVICE_BATTERY_LEVEL) out.batteryLevel = value
+				else out.uptimeSeconds = value
+				return "handled"
+			}
+			if (
+				field === DEVICE_VOLTAGE ||
+				field === DEVICE_CHANNEL_UTILIZATION ||
+				field === DEVICE_AIR_UTIL_TX
+			) {
+				const read = readFloat(cursor, wire)
+				if (read === undefined) return "bad"
+				if (field === DEVICE_VOLTAGE) out.voltage = read
+				else if (field === DEVICE_CHANNEL_UTILIZATION)
+					out.channelUtilization = read
+				else out.airUtilTx = read
+				return "handled"
+			}
+			return "unknown"
+		},
+		MAX_FIELDS,
+		start,
+		end,
+	)
+	return ok ? out : null
+}
+
+/**
+ * Telemetry (port 67). Only device_metrics is decoded (one nested level);
+ * Telemetry.time and the other oneof variants are skipped, giving
+ * `deviceMetrics: null`. Malformed input is null; never throws.
+ */
+export function readTelemetry(bytes: Uint8Array): MeshTelemetryFields | null {
+	try {
+		const view = asBytes(bytes)
+		if (!view) return null
+		let deviceMetrics: MeshDeviceMetricsFields | null = null
+		const ok = walk(view, (field, wire, cursor) => {
+			if (field === TELEMETRY_TIME) return "unknown"
+			if (field === TELEMETRY_DEVICE_METRICS) {
+				const length = readSubMessageLength(cursor, wire)
+				if (length === null) return "bad"
+				const start = cursor.offset
+				cursor.offset += length
+				const metrics = readDeviceMetrics(view, start, cursor.offset)
+				if (metrics === null) return "bad"
+				deviceMetrics = metrics
+				return "handled"
+			}
+			// A later oneof member replaces device_metrics (last one wins).
+			if (field > TELEMETRY_DEVICE_METRICS) deviceMetrics = null
+			return "unknown"
+		})
+		if (!ok) return null
+		return { deviceMetrics }
+	} catch {
+		return null
+	}
+}
+
+/** Neighbor sub-message. `undefined` = valid but no node_id (skipped by the caller). */
+function readNeighbor(
+	bytes: Uint8Array,
+	start: number,
+	end: number,
+): MeshNeighborFields | null | undefined {
+	let nodeNum: number | null = null
+	let snr: number | null = null
+	const ok = walk(
+		bytes,
+		(field, wire, cursor) => {
+			if (field === NEIGHBOR_NODE_ID) {
+				const value = readUint32(cursor, wire)
+				if (value === null) return "bad"
+				nodeNum = value
+				return "handled"
+			}
+			if (field === NEIGHBOR_SNR) {
+				const read = readFloat(cursor, wire)
+				if (read === undefined) return "bad"
+				snr = read
+				return "handled"
+			}
+			return "unknown"
+		},
+		MAX_FIELDS,
+		start,
+		end,
+	)
+	if (!ok) return null
+	if (nodeNum === null) return undefined
+	return { nodeNum, snr }
+}
+
+/**
+ * NeighborInfo (port 71). Reads node_id and up to 64 neighbours (one nested
+ * level); more than 64 Neighbor entries rejects the report. A well-formed
+ * Neighbor without node_id is skipped (it names no link) but still counts
+ * toward the cap. last_sent_by_id and node_broadcast_interval_secs are
+ * skipped. Malformed input is null; never throws.
+ */
+export function readNeighborInfo(
+	bytes: Uint8Array,
+): MeshNeighborInfoFields | null {
+	try {
+		const view = asBytes(bytes)
+		if (!view) return null
+		let nodeNum: number | null = null
+		const neighbors: MeshNeighborFields[] = []
+		let entries = 0
+		const ok = walk(
+			view,
+			(field, wire, cursor) => {
+				if (field === NEIGHBOR_INFO_NODE_ID) {
+					const value = readUint32(cursor, wire)
+					if (value === null) return "bad"
+					nodeNum = value
+					return "handled"
+				}
+				if (field === NEIGHBOR_INFO_NEIGHBORS) {
+					entries += 1
+					if (entries > MAX_NEIGHBORS_PER_REPORT) return "bad"
+					const length = readSubMessageLength(cursor, wire)
+					if (length === null) return "bad"
+					const start = cursor.offset
+					cursor.offset += length
+					const neighbor = readNeighbor(view, start, cursor.offset)
+					if (neighbor === null) return "bad"
+					if (neighbor !== undefined) neighbors.push(neighbor)
+					return "handled"
+				}
+				return "unknown"
+			},
+			MAX_NEIGHBOR_INFO_FIELDS,
+		)
+		if (!ok) return null
+		return { nodeNum, neighbors }
 	} catch {
 		return null
 	}

@@ -127,6 +127,88 @@ export function encodeUser(fields: UserFixture = {}): Uint8Array {
 	return Uint8Array.from(out)
 }
 
+export interface DeviceMetricsFixture {
+	batteryLevel?: number | undefined
+	voltage?: number | undefined
+	channelUtilization?: number | undefined
+	airUtilTx?: number | undefined
+	uptimeSeconds?: number | undefined
+}
+
+export interface NeighborFixture {
+	nodeNum: number
+	snr?: number | undefined
+}
+
+export interface NeighborInfoFixture {
+	nodeNum?: number | undefined
+	neighbors?: NeighborFixture[] | undefined
+}
+
+function pushFloat(out: number[], field: number, value: number): void {
+	const bytes = new Uint8Array(4)
+	new DataView(bytes.buffer).setFloat32(0, value, true)
+	pushTag(out, field, 5)
+	for (const byte of bytes) out.push(byte)
+}
+
+function pushUint(out: number[], field: number, value: number): void {
+	pushTag(out, field, 0)
+	pushVarint(out, BigInt(value))
+}
+
+function pushBytes(out: number[], field: number, value: Uint8Array): void {
+	pushTag(out, field, 2)
+	pushVarint(out, BigInt(value.length))
+	for (const byte of value) out.push(byte)
+}
+
+/** DeviceMetrics: battery_level 1, voltage 2, channel_utilization 3, air_util_tx 4, uptime_seconds 5. */
+export function encodeDeviceMetrics(
+	fields: DeviceMetricsFixture = {},
+): Uint8Array {
+	const out: number[] = []
+	if (fields.batteryLevel !== undefined) pushUint(out, 1, fields.batteryLevel)
+	if (fields.voltage !== undefined) pushFloat(out, 2, fields.voltage)
+	if (fields.channelUtilization !== undefined)
+		pushFloat(out, 3, fields.channelUtilization)
+	if (fields.airUtilTx !== undefined) pushFloat(out, 4, fields.airUtilTx)
+	if (fields.uptimeSeconds !== undefined) pushUint(out, 5, fields.uptimeSeconds)
+	return Uint8Array.from(out)
+}
+
+/** Telemetry with device_metrics (field 2), or another variant (field 3) when `other`. */
+export function encodeTelemetry(
+	fields: DeviceMetricsFixture | { other: true } = {},
+): Uint8Array {
+	const out: number[] = []
+	if ("other" in fields) {
+		pushBytes(out, 3, Uint8Array.from([0x0d, 0x00, 0x00, 0xc8, 0x41]))
+	} else {
+		pushBytes(out, 2, encodeDeviceMetrics(fields))
+	}
+	return Uint8Array.from(out)
+}
+
+/** Neighbor: node_id 1, snr 2 (float). */
+export function encodeNeighbor(fields: NeighborFixture): Uint8Array {
+	const out: number[] = []
+	pushUint(out, 1, fields.nodeNum)
+	if (fields.snr !== undefined) pushFloat(out, 2, fields.snr)
+	return Uint8Array.from(out)
+}
+
+/** NeighborInfo: node_id 1, neighbors 4 (repeated). */
+export function encodeNeighborInfo(
+	fields: NeighborInfoFixture = {},
+): Uint8Array {
+	const out: number[] = []
+	if (fields.nodeNum !== undefined) pushUint(out, 1, fields.nodeNum)
+	for (const neighbor of fields.neighbors ?? [])
+		pushBytes(out, 4, encodeNeighbor(neighbor))
+	return Uint8Array.from(out)
+}
+
 /** Adapter-shaped packet. `payload` is base64-encoded into `payloadB64`. */
 export function meshPacket(fields: MeshPacketFixture = {}): MeshtasticPacket {
 	const payload = fields.payload ?? new Uint8Array()
