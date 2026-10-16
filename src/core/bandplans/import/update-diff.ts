@@ -23,7 +23,7 @@ export interface ImportedBandsDiff {
 	readonly truncated: boolean
 }
 
-/** Field order of `changed.fields` (req 6.2); keys absent from both bands are skipped. */
+/** Fields always compared (req 6.2); keys absent from both bands are skipped. */
 export const UPDATE_DIFF_FIELD_ORDER: readonly string[] = Object.freeze([
 	"name",
 	"startHz",
@@ -72,8 +72,9 @@ function field(band: DiffableBand, key: string): unknown {
 }
 
 /**
- * Listed fields first in UPDATE_DIFF_FIELD_ORDER, then any other differing key (other than
- * id, scan and provenance) in code-unit order, so a diff never hides a change.
+ * Differing UPDATE_DIFF_FIELD_ORDER fields plus any other differing key (other than id, scan
+ * and provenance), so a diff never hides a change; the whole list sorted by code unit (the
+ * frozen DTO says "sorted", e.g. ["endHz", "mode"]).
  */
 function changedFields(
 	current: DiffableBand,
@@ -92,8 +93,8 @@ function changedFields(
 				!sameValue(field(current, key), field(fresh, key))
 			)
 				(extra ??= []).push(key)
-	if (extra) fields.push(...extra.sort())
-	return fields
+	if (extra) fields.push(...extra)
+	return fields.sort()
 }
 
 function capped<T>(list: T[]): { list: T[]; cut: boolean } {

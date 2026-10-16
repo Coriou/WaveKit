@@ -269,6 +269,8 @@ class BandPlanRuntime implements BandPlanService {
 	private resolvedMemo: { key: string; value: ResolvedBandPlan } | undefined
 	/** previewDigest → issued URL preview; insertion order is FIFO eviction order. */
 	private readonly issuedUrlPreviews = new Map<string, IssuedUrlPreview>()
+	/** Admitted URL previews and update checks; close() awaits them. */
+	private readonly urlOperations = new Set<Promise<unknown>>()
 	constructor(
 		private readonly storage: BandPlanStorage | undefined,
 		private readonly options: BandPlanServiceOptions,
@@ -358,7 +360,31 @@ class BandPlanRuntime implements BandPlanService {
 			),
 		}
 	}
-	async previewImportUrl(request: unknown): Promise<ImportUrlPreview> {
+	previewImportUrl(request: unknown): Promise<ImportUrlPreview> {
+		return this.trackUrlOperation(() => this.runPreviewImportUrl(request))
+	}
+	checkImportUpdate(packId: string): Promise<BandPlanUpdateCheck> {
+		return this.trackUrlOperation(() => this.runCheckImportUpdate(packId))
+	}
+	private trackUrlOperation<T>(run: () => Promise<T>): Promise<T> {
+		if (this.closing) return Promise.reject(unavailable())
+		let operation: Promise<T>
+		try {
+			operation = run()
+		} catch (error) {
+			return Promise.reject(error)
+		}
+		const settled = operation.then(
+			() => undefined,
+			() => undefined,
+		)
+		this.urlOperations.add(settled)
+		void settled.finally(() => this.urlOperations.delete(settled))
+		return operation
+	}
+	private async runPreviewImportUrl(
+		request: unknown,
+	): Promise<ImportUrlPreview> {
 		const fetcher = this.urlFetcherOrThrow()
 		if (this.closing) throw unavailable()
 		const parsed = importUrlPreviewRequestSchema.safeParse(request)
@@ -371,7 +397,9 @@ class BandPlanRuntime implements BandPlanService {
 			await this.fetchAllowed(fetcher, url),
 		)
 	}
-	async checkImportUpdate(packId: string): Promise<BandPlanUpdateCheck> {
+	private async runCheckImportUpdate(
+		packId: string,
+	): Promise<BandPlanUpdateCheck> {
 		const fetcher = this.urlFetcherOrThrow()
 		const diffImportedBands = this.deps.diffImportedBands
 		if (!diffImportedBands)
@@ -455,11 +483,14 @@ class BandPlanRuntime implements BandPlanService {
 	close(): Promise<void> {
 		if (!this.closeResult) {
 			this.closing = true
-			this.closeResult = this.tail.then(async () => {
-				this.closed = true
-				this.resolvedMemo = undefined
-				if (this.storage) await this.storage.close()
-			})
+			const urlOperations = Promise.all([...this.urlOperations])
+			this.closeResult = Promise.all([this.tail, urlOperations]).then(
+				async () => {
+					this.closed = true
+					this.resolvedMemo = undefined
+					if (this.storage) await this.storage.close()
+				},
+			)
 		}
 		return this.closeResult
 	}
@@ -505,6 +536,7 @@ class BandPlanRuntime implements BandPlanService {
 			if (error instanceof BandPlansError) throw error
 			throw new BandPlansError("BANDPLANS_URL_FETCH_FAILED")
 		}
+		if (this.closing) throw unavailable()
 		if (!(result.bytes instanceof Uint8Array))
 			throw new BandPlansError("BANDPLANS_URL_FETCH_FAILED")
 		if (result.bytes.byteLength > BANDPLANS_LIMITS.importFileBytes)
@@ -526,6 +558,8 @@ class BandPlanRuntime implements BandPlanService {
 		groupOverrides: ImportPreviewRequest["groupOverrides"],
 		fetched: BandPlanUrlFetchResult,
 	): { preview: ImportUrlPreview; bands: readonly StoredBand[] } {
+		// A fetch that resolves after close began never yields or registers a preview.
+		if (this.closing) throw unavailable()
 		const contentBase64 = Buffer.from(
 			fetched.bytes.buffer,
 			fetched.bytes.byteOffset,

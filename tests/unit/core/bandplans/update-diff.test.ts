@@ -1,10 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type { StoredBand } from "@wavekit/api-types"
-import {
-	UPDATE_DIFF_FIELD_ORDER,
-	diffImportedBands,
-} from "../../../../src/core/bandplans/import/update-diff.js"
+import { diffImportedBands } from "../../../../src/core/bandplans/import/update-diff.js"
 
 function band(id: string, extra: Partial<StoredBand> = {}): StoredBand {
 	return {
@@ -90,11 +87,7 @@ describe("diffImportedBands", () => {
 						).toBe(true)
 					}
 				for (const entry of diff.changed) {
-					const listed = entry.fields.filter(f =>
-						UPDATE_DIFF_FIELD_ORDER.includes(f),
-					)
-					const order = listed.map(f => UPDATE_DIFF_FIELD_ORDER.indexOf(f))
-					expect(order).toEqual([...order].sort((x, y) => x - y))
+					expect(entry.fields).toEqual([...entry.fields].sort())
 					expect(entry.fields.length).toBeGreaterThan(0)
 				}
 				expect(diff.truncated).toBe(false)
@@ -103,7 +96,7 @@ describe("diffImportedBands", () => {
 		)
 	})
 
-	it("orders changed fields name, startHz, endHz, mode, stepHz, colourHint, group, then others", () => {
+	it("sorts changed fields by code unit, extra keys included", () => {
 		const diff = diffImportedBands(
 			[band("x")],
 			[
@@ -135,18 +128,25 @@ describe("diffImportedBands", () => {
 				startHz: 50,
 				endHz: 300,
 				fields: [
+					"bandwidthHz",
+					"channels",
+					"colourHint",
+					"endHz",
+					"group",
+					"mode",
 					"name",
 					"startHz",
-					"endHz",
-					"mode",
 					"stepHz",
-					"colourHint",
-					"group",
-					"channels",
-					"bandwidthHz",
 				],
 			},
 		])
+	})
+
+	it("a name and endHz change reports [endHz, name]", () => {
+		expect(
+			diffImportedBands([band("x")], [band("x", { name: "Y", endHz: 300 })])
+				.changed[0]?.fields,
+		).toEqual(["endHz", "name"])
 	})
 
 	it("ignores provenance and scan, reports sourceType when present", () => {

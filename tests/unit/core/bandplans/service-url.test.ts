@@ -488,6 +488,55 @@ describe("band plan service: URL import (WG6 lane U)", () => {
 		})
 	})
 
+	describe("close", () => {
+		function deferredFetcher() {
+			let release!: () => void
+			const gate = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const fetcher: BandPlanUrlFetcher = async () => {
+				await gate
+				return { bytes: V1, contentType: null }
+			}
+			return { fetcher, release }
+		}
+		it("awaits an in-flight preview and fails it UNAVAILABLE without registering", async () => {
+			const { fetcher, release } = deferredFetcher()
+			const service = await open({ urlFetcher: fetcher })
+			const pending = previewUrl(service, request())
+			let closed = false
+			const closing = service.close().then(() => {
+				closed = true
+			})
+			await new Promise(resolve => setTimeout(resolve, 20))
+			expect(closed).toBe(false)
+			release()
+			expect(await codeOf(pending)).toBe("BANDPLANS_UNAVAILABLE")
+			await closing
+			expect(closed).toBe(true)
+			expect(await codeOf(previewUrl(service, request()))).toBe(
+				"BANDPLANS_UNAVAILABLE",
+			)
+		})
+		it("awaits an in-flight update check and fails it UNAVAILABLE", async () => {
+			let hold = false
+			const { fetcher, release } = deferredFetcher()
+			const service = await open({
+				urlFetcher: (url, hosts) =>
+					hold
+						? fetcher(url, hosts)
+						: Promise.resolve({ bytes: V1, contentType: null }),
+			})
+			const packId = await commitFromUrl(service)
+			hold = true
+			const pending = checkUpdate(service, packId)
+			const closing = service.close()
+			release()
+			expect(await codeOf(pending)).toBe("BANDPLANS_UNAVAILABLE")
+			await closing
+		})
+	})
+
 	describe("checkImportUpdate", () => {
 		it("404 for an unknown or operator pack", async () => {
 			const service = await open({ urlFetcher: fakeFetcher(() => V1) })
