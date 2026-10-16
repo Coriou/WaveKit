@@ -277,9 +277,14 @@ export function pruneActivityPrefix(
 	>,
 	nowMs: number,
 	pressure?: ActivityPrunePressure,
+	/**
+	 * `COUNT(*)` the caller read on this connection with no write since (the fair-share
+	 * single-share path); omitted reads it here, as before WG3.
+	 */
+	knownRowCount?: number,
 ): PruneResult {
 	const meta = readRequiredMeta(db)
-	const rowCount = countRows(db)
+	const rowCount = knownRowCount ?? countRows(db)
 	const dbBytes = databaseBytes(db)
 	const unchanged: PruneResult = {
 		deleted: 0,

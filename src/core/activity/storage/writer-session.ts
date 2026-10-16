@@ -151,12 +151,19 @@ export function createActivitySession(
 		nowMs: number,
 		pressure: { rowCap: boolean; byteCap: boolean } | undefined,
 		preRead = true,
+		knownRowCount?: number,
 	): PruneResult => {
 		const read = counters.live && preRead
 		const before = read ? readPrefixCandidates(db, limits.pruneBatchRows) : []
 		let step: PruneResult
 		try {
-			step = pruneActivityPrefix(db, prefixLimits, nowMs, pressure)
+			step = pruneActivityPrefix(
+				db,
+				prefixLimits,
+				nowMs,
+				pressure,
+				knownRowCount,
+			)
 		} catch (error) {
 			// The prefix may have committed before incremental_vacuum threw: rebuild counters.
 			if (counters.live && !seed()) counters.drop()
@@ -185,9 +192,14 @@ export function createActivitySession(
 
 	/**
 	 * `pruneActivityPrefix` exactly as before WG3. The counters' candidate read only runs when
-	 * a delete is plausible; an unexpected delete reseeds instead.
+	 * a delete is plausible; an unexpected delete reseeds instead. `knownRowCount` is a
+	 * `COUNT(*)` read since the last write (fair-share's pressure reading), so the prefix
+	 * does not count again.
 	 */
-	const oldestFirstStep = (nowMs: number): PruneResult => {
+	const oldestFirstStep = (
+		nowMs: number,
+		knownRowCount?: number,
+	): PruneResult => {
 		let plausible = false
 		if (counters.live) {
 			const live = readActivityLiveBytes(db)
@@ -205,19 +217,22 @@ export function createActivitySession(
 			nowMs,
 			{ rowCap: rowCapPruning, byteCap: byteCapPruning },
 			plausible,
+			knownRowCount,
 		)
 	}
 
 	/** Fair-share step order: age prefix, else fair step, else stop (design "Step order"). */
 	const fairShareStep = (nowMs: number, burst: BurstState): PruneResult => {
 		const reading = readActivityPressure(db)
+		// Nothing writes between this reading and the steps that reuse its row count below
+		// (seeding only reads), so the prefix prune need not count again.
 		// Drift first (1.10): the one-share shortcut below must not trust stale counters.
 		if (counters.totalRows() !== reading.rowCount && !burst.reseeded) {
 			burst.reseeded = true
-			if (!seed()) return oldestFirstStep(nowMs)
+			if (!seed()) return oldestFirstStep(nowMs, reading.rowCount)
 		}
 		// One share: its fair level is the low-water mark, so the step is today's (1.13).
-		if (counters.size() <= 1) return oldestFirstStep(nowMs)
+		if (counters.size() <= 1) return oldestFirstStep(nowMs, reading.rowCount)
 		if (activityAgeActive(reading.oldestReceivedMs, limits.maxAgeMs, nowMs)) {
 			const aged = prefixStep(
 				{
@@ -264,7 +279,7 @@ export function createActivitySession(
 		if (planned.allocations.length === 0 && !burst.reseeded) {
 			burst.reseeded = true
 			if (!seed()) return prefixStep(capOnly, nowMs, capPressure)
-			if (counters.size() <= 1) return oldestFirstStep(nowMs)
+			if (counters.size() <= 1) return oldestFirstStep(nowMs, reading.rowCount)
 			planned = plan()
 		}
 		if (planned.allocations.length === 0) {

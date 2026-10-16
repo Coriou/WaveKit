@@ -754,3 +754,62 @@ describe("fair-share retention regressions, round 3", () => {
 		expect(indivisibleShare(plan, shares)).toBe("b")
 	})
 })
+
+const COUNT_SQL = "SELECT COUNT(*) AS n FROM activity"
+
+/** Wraps a database and counts how often the full row count is prepared. */
+function countingDb(db: SqliteDatabase): {
+	db: SqliteDatabase
+	counts: { n: number }
+} {
+	const counts = { n: 0 }
+	return {
+		counts,
+		db: {
+			exec: sql => {
+				db.exec(sql)
+			},
+			prepare(sql: string) {
+				if (sql === COUNT_SQL) counts.n += 1
+				return db.prepare(sql)
+			},
+			close: () => {
+				db.close()
+			},
+		},
+	}
+}
+
+// WG3 req 1.13, 1.15 (R1 6): one share costs the same row counts per write as oldest-first.
+describe("single-share fair-share cost", () => {
+	it("runs COUNT(*) as often per write as oldest-first", async () => {
+		const perWrite = async (policy: ActivityRetentionPolicy) => {
+			const raw = await openSqliteFile(":memory:")
+			const { db, counts } = countingDb(raw)
+			const session = createActivitySession(
+				db,
+				":memory:",
+				smallLimits({
+					maxRows: 100,
+					pruneBatchRows: 20,
+					retentionPolicy: policy,
+				}),
+			)
+			try {
+				const seen: number[] = []
+				for (let batch = 0; batch < 8; batch++) {
+					counts.n = 0
+					writeOk(session, busy(`${policy}-${batch}`, 30))
+					seen.push(counts.n)
+				}
+				return { seen, rows: eventIds(raw).length }
+			} finally {
+				session.close()
+			}
+		}
+		const fair = await perWrite("fair-share")
+		const oldest = await perWrite("oldest-first")
+		expect(fair.rows).toBe(oldest.rows)
+		expect(fair.seen).toEqual(oldest.seen)
+	})
+})
