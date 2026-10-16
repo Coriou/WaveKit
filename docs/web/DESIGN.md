@@ -968,6 +968,14 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
+**Status 2026-10-16 (C started):** the web app lives in `web/` (spec
+[2026-10-16-web-app-foundation-design.md](../superpowers/specs/2026-10-16-web-app-foundation-design.md)): Vite +
+React on `ui.css` (no Tailwind/shadcn), a mock core in `web/mock/`, a WebGL2 spectrum and waterfall
+rendered in a worker on an OffscreenCanvas, the Immersive shell, and the first slice (tune, identify,
+tuned card, listen with a Web Audio PCM player) running in Chromium against the mock. Next in C:
+run it against a real core, the rest of the spectrum interactions (VFO and band-edge drag, squelch
+line, tags), Receiver controls, then the drawers (Activity first).
+
 **Next session: sub-project C, the web app foundation** (owner order 2026-10-16: A → C → B).
 Design system v1 (A) is done: canvas v100, every board on the kit, Kit and Components in the
 "Design system" row, `packages/brand/tokens/ui.css` the one source (decision log, 2026-10-16).
