@@ -316,3 +316,148 @@ describe("activity admission", () => {
 		expect(gate.admit(envelope()).admitted).toBe(true)
 	})
 })
+
+describe("meshtastic flood copies", () => {
+	const BIG = 64 * 1024 * 1024
+
+	function mesh(
+		offsetMs: number,
+		patch: Record<string, unknown> = {},
+	): ReturnType<typeof envelope> {
+		return envelope({
+			outputType: "meshtastic",
+			category: "mesh",
+			protocol: "meshtastic",
+			entityKey: null,
+			receivedAt: new Date(
+				Date.parse("2026-10-12T00:00:00.000Z") + offsetMs,
+			).toISOString(),
+			decodedData: {
+				from: 0x1234abcd,
+				id: 42,
+				portnum: 1,
+				payloadB64: "aGk=",
+				...patch,
+			} as Record<string, number | string>,
+		})
+	}
+
+	const roomy = { globalBurst: 100, decoderBurst: 100 }
+
+	it("rejects a copy, takes no token and opens no gap", () => {
+		const gate = ingress({ globalBurst: 1, decoderBurst: 1 })
+		expect(gate.admit(mesh(0))).toEqual({ admitted: true })
+		expect(gate.admit(mesh(2000))).toEqual({
+			admitted: false,
+			reason: "flood-copy",
+		})
+		expect(gate.floodCopies).toBe(1)
+		expect(gate.dropped["rate-limited"]).toBe(0)
+		expect(gate.hasOpenEpisode()).toBe(false)
+		expect(gate.pendingCount()).toBe(1)
+	})
+
+	it("stores a copy at 30 001 ms; 30 000 ms is still a copy", () => {
+		const gate = ingress(roomy)
+		gate.admit(mesh(0))
+		expect(gate.admit(mesh(30_000)).admitted).toBe(false)
+		expect(gate.admit(mesh(30_001))).toEqual({ admitted: true })
+	})
+
+	it("stores a copy with a different payload or portnum", () => {
+		const gate = ingress(roomy)
+		gate.admit(mesh(0))
+		expect(gate.admit(mesh(1, { payloadB64: "eW8=" })).admitted).toBe(true)
+		expect(gate.admit(mesh(2, { portnum: 67 })).admitted).toBe(true)
+		expect(gate.floodCopies).toBe(0)
+	})
+
+	it("stores the copy when the original was rate-limited", () => {
+		let now = 0
+		const gate = ingress(
+			{
+				globalBurst: 1,
+				decoderBurst: 1,
+				decoderRatePerSec: 1,
+				globalRatePerSec: 1,
+			},
+			() => now,
+		)
+		gate.admit(envelope())
+		expect(gate.admit(mesh(0))).toEqual({
+			admitted: false,
+			reason: "rate-limited",
+		})
+		now = 1000
+		expect(gate.admit(mesh(1000))).toEqual({ admitted: true })
+	})
+
+	it("stores the next copy after a failed or skipped write, keeps it on ack and timeout", () => {
+		const gate = ingress(roomy)
+		gate.admit(mesh(0))
+		gate.takeBatch(10, BIG)
+		gate.nack()
+		expect(gate.admit(mesh(1)).admitted).toBe(true)
+		const batch = gate.takeBatch(10, BIG)
+		gate.noteSkipped(
+			batch,
+			batch.map(row => row.eventId),
+		)
+		gate.ack(new Set())
+		expect(gate.admit(mesh(2)).admitted).toBe(true)
+		gate.takeBatch(10, BIG)
+		gate.ack(new Set(["x"]))
+		expect(gate.admit(mesh(3))).toEqual({
+			admitted: false,
+			reason: "flood-copy",
+		})
+		gate.admit(mesh(4, { id: 43 }))
+		gate.takeBatch(10, BIG)
+		gate.forgetInFlight()
+		expect(gate.admit(mesh(5, { id: 43 }))).toEqual({
+			admitted: false,
+			reason: "flood-copy",
+		})
+		expect(gate.floodCopies).toBe(2)
+	})
+
+	it("a copy dropped while the original is queued is not re-admitted if that write fails", () => {
+		const gate = ingress(roomy)
+		gate.admit(mesh(0))
+		expect(gate.admit(mesh(1))).toEqual({
+			admitted: false,
+			reason: "flood-copy",
+		})
+		gate.takeBatch(10, BIG)
+		gate.nack()
+		expect(gate.floodCopies).toBe(1)
+		expect(gate.dropped["write-failed"]).toBe(1)
+	})
+
+	it("never dedupes id 0, malformed fields or a backward clock step", () => {
+		const gate = ingress(roomy)
+		gate.admit(mesh(0, { id: 0 }))
+		expect(gate.admit(mesh(1, { id: 0 })).admitted).toBe(true)
+		gate.admit(mesh(0, { from: -1 }))
+		expect(gate.admit(mesh(1, { from: -1 })).admitted).toBe(true)
+		gate.admit(mesh(0, { id: "42" }))
+		expect(gate.admit(mesh(1, { id: "42" })).admitted).toBe(true)
+		gate.admit(mesh(10_000, { id: 9 }))
+		expect(gate.admit(mesh(9_999, { id: 9 })).admitted).toBe(true)
+		expect(gate.floodCopies).toBe(0)
+	})
+
+	it("leaves non-mesh outputs with mesh-shaped data unaffected", () => {
+		const gate = ingress(roomy)
+		const data = { from: 1, id: 2, portnum: 1, payloadB64: "QQ==" }
+		expect(
+			gate.admit(envelope({ outputType: "pocsag", decodedData: data }))
+				.admitted,
+		).toBe(true)
+		expect(
+			gate.admit(envelope({ outputType: "pocsag", decodedData: data }))
+				.admitted,
+		).toBe(true)
+		expect(gate.floodCopies).toBe(0)
+	})
+})
