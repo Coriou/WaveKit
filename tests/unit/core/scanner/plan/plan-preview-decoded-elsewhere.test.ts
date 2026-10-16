@@ -449,6 +449,28 @@ describe("skip excludes", () => {
 		)
 	})
 
+	it("65 out-of-band WaveKit views: deep-equal to no views, no warning", () => {
+		const spec = sweep([{ startHz: 446_000_000, endHz: 446_200_000 }])
+		const base = previewPlan(spec, context())
+		const baseJob = planJob(base.spec, context())
+		const views = Array.from({ length: 65 }, (_, i) => ({
+			...external(`o${i}`, [446_100_000]),
+			sourceId: "other",
+			inputKind: "iq" as const,
+			band: {
+				verdict: "out-of-band" as const,
+				basis: "configured" as const,
+				targetsHz: [446_100_000],
+				rangesHz: [],
+				captureCenterHz: 446_100_000,
+				windowHalfWidthHz: 1e6,
+			},
+		}))
+		const ctx = withCoverage(() => views)
+		expect(previewPlan(spec, ctx)).toEqual(base)
+		expect(planJob(base.spec, ctx)).toEqual(baseJob)
+	})
+
 	it("surfaces the truncated warning in the preview", () => {
 		const views = Array.from({ length: 65 }, (_, i) =>
 			external(`d${String(i).padStart(2, "0")}`, [446_100_000]),

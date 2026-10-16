@@ -277,17 +277,48 @@ describe("computeDecodedElsewhere bounds", () => {
 		expect(res.truncated).toBe(true)
 	})
 
-	it("65 decoders failing the state gate: none counted, not truncated", () => {
+	it("stopped views use slots: 64 stopped then a covering view yields nothing, no warning", () => {
 		const res = run(
-			Array.from({ length: 65 }, (_, i) =>
+			Array.from({ length: 64 }, (_, i) =>
 				view({ id: `u${i}`, running: false }),
-			).concat(distinct(64)),
+			).concat(distinct(1)),
 		)
-		expect(res.ranges).toHaveLength(64)
-		expect(res.truncated).toBe(false)
+		expect(res).toEqual({ ranges: [], truncated: false })
 		expect(
 			run(Array.from({ length: 65 }, () => view({ running: false }))),
 		).toEqual({ ranges: [], truncated: false })
+	})
+
+	it("64 covering views then a throwing view 65: never read, truncated", () => {
+		let reads = 0
+		const views = distinct(64)
+		Object.defineProperty(views, 64, {
+			get() {
+				reads++
+				throw new Error("overflow read")
+			},
+		})
+		const res = run(views)
+		expect(reads).toBe(0)
+		expect(res.ranges).toHaveLength(64)
+		expect(res.truncated).toBe(true)
+	})
+
+	it("65 out-of-band views: no coverage, no warning", () => {
+		const res = run(
+			Array.from({ length: 65 }, () =>
+				view({ band: band({ verdict: "out-of-band" }) }),
+			),
+		)
+		expect(res).toEqual({ ranges: [], truncated: false })
+	})
+
+	it("past the item budget with no coverage: no warning", () => {
+		const targetsHz = [...Array<number>(32).fill(NaN), 100_000_000]
+		expect(run([view({ band: band({ targetsHz }) })])).toEqual({
+			ranges: [],
+			truncated: false,
+		})
 	})
 
 	it("32 targets then a throwing element: the overflow is never read", () => {
@@ -791,5 +822,134 @@ describe("toDecoderCoverageView", () => {
 			"default",
 		)
 		expect(v.band).toBeNull()
+	})
+
+	it("deviceSerial never moves a decoder off its source", () => {
+		const covering = {
+			id: "dec",
+			owner: "config" as const,
+			suspended: false,
+			sourceId: "job",
+			bandAssessment: {
+				verdict: "in-band" as const,
+				basis: "configured" as const,
+				targetsHz: [100_000_000],
+				captureCenterHz: 100_000_000,
+				windowHalfWidthHz: 1e6,
+			},
+		}
+		const s = { sourceId: "job", ranges: [{ startHz: 99e6, endHz: 101e6 }] }
+		for (const deviceSerial of [null, "0001", 42]) {
+			const v = toDecoderCoverageView(
+				status({
+					...covering,
+					deviceSerial: deviceSerial as unknown as string,
+				}),
+				"job",
+			)
+			expect(v.sourceId).toBe("job")
+			expect(v.inputKind).toBe("iq")
+			expect(computeDecodedElsewhere([v], s).ranges).toEqual([])
+		}
+	})
+
+	it("reads each status field once: a switching sourceId cannot leave its source", () => {
+		let reads = 0
+		const st = status({
+			owner: "config",
+			suspended: false,
+			bandAssessment: {
+				verdict: "in-band",
+				basis: "configured",
+				targetsHz: [100_000_000],
+				captureCenterHz: 100_000_000,
+				windowHalfWidthHz: 1e6,
+			},
+		})
+		Object.defineProperty(st, "sourceId", {
+			get() {
+				reads++
+				return reads === 1 ? "job" : "other"
+			},
+		})
+		const v = toDecoderCoverageView(st, "job")
+		expect(reads).toBe(1)
+		expect(v.sourceId).toBe("job")
+		expect(
+			computeDecodedElsewhere([v], { ...spec(), sourceId: "job" }).ranges,
+		).toEqual([])
+	})
+
+	it("a throwing getter maps to the safe non-covering view", () => {
+		for (const field of ["owner", "bandAssessment", "health"]) {
+			const st = status({ owner: "config", suspended: false, sourceId: "s1" })
+			Object.defineProperty(st, field, {
+				get() {
+					throw new Error("boom")
+				},
+			})
+			expect(toDecoderCoverageView(st, "d")).toMatchObject({
+				running: false,
+				owner: "scanner",
+				suspended: true,
+				band: null,
+			})
+		}
+	})
+
+	it("copies targets by index without dropping invalid ones", () => {
+		const v = toDecoderCoverageView(
+			status({
+				owner: "config",
+				suspended: false,
+				sourceId: "other",
+				bandAssessment: {
+					verdict: "in-band",
+					basis: "configured",
+					targetsHz: [...Array<number>(32).fill(NaN), 100_000_000],
+					captureCenterHz: 100_000_000,
+					windowHalfWidthHz: 1e6,
+				},
+			}),
+			"job",
+		)
+		expect(v.band?.targetsHz).toHaveLength(32)
+		expect(computeDecodedElsewhere([v], spec())).toEqual({
+			ranges: [],
+			truncated: false,
+		})
+	})
+
+	it("never reads target or range 33", () => {
+		let reads = 0
+		const targetsHz = Array.from({ length: 33 }, () => 100_000_000)
+		const rangesHz = Array.from({ length: 33 }, () => ({ minHz: 1, maxHz: 2 }))
+		for (const arr of [targetsHz, rangesHz])
+			Object.defineProperty(arr, 32, {
+				get() {
+					reads++
+					throw new Error("overflow read")
+				},
+			})
+		const v = toDecoderCoverageView(
+			status({
+				owner: "config",
+				suspended: false,
+				sourceId: "other",
+				bandAssessment: {
+					verdict: "in-band",
+					basis: "configured",
+					targetsHz,
+					rangesHz,
+					captureCenterHz: 100_000_000,
+					windowHalfWidthHz: 1e6,
+				},
+			}),
+			"job",
+		)
+		computeDecodedElsewhere([v], spec())
+		expect(reads).toBe(0)
+		expect(v.band?.targetsHz).toHaveLength(32)
+		expect(v.band?.rangesHz).toHaveLength(32)
 	})
 })

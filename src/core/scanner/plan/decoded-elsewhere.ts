@@ -195,8 +195,6 @@ export function computeDecodedElsewhere(
 	const maxDecoders = limit(limits?.maxDecoders, DECODED_ELSEWHERE_MAX_DECODERS)
 	const maxTargets = limit(limits?.maxTargets, DECODED_ELSEWHERE_MAX_TARGETS)
 	const maxRanges = limit(limits?.maxRanges, DECODED_ELSEWHERE_MAX_RANGES)
-	let truncated = false
-
 	const clips: [number, number][] = []
 	for (const r of spec.ranges) {
 		if (!isRangeEnabled(r)) continue
@@ -211,14 +209,17 @@ export function computeDecodedElsewhere(
 	if (clips.length === 0) return { ranges: [], truncated: false }
 
 	const pieces: Piece[] = []
-	let nViews = 0
+	let nViews: number
 	try {
 		nViews = lengthOf(views)
 	} catch {
 		return { ranges: [], truncated: false }
 	}
-	let counted = 0
-	for (let i = 0; i < nViews; i++) {
+	// Only the first `maxDecoders` views by index are ever read; the state gate is per-view
+	// work inside that prefix, so a stopped view still uses a slot.
+	const examined = Math.min(nViews, maxDecoders)
+	let exceeded = nViews > maxDecoders
+	for (let i = 0; i < examined; i++) {
 		const raw: [number, number][] = []
 		let snap: ViewSnapshot
 		let viewTruncated: boolean
@@ -228,16 +229,11 @@ export function computeDecodedElsewhere(
 				continue
 			snap = snapshotView(view as DecoderCoverageView)
 			if (!passesGate(snap, spec.sourceId)) continue
-			if (counted >= maxDecoders) {
-				truncated = true
-				break
-			}
-			counted++
 			viewTruncated = coverageOf(snap, maxTargets, raw)
 		} catch {
 			continue
 		}
-		if (viewTruncated) truncated = true
+		if (viewTruncated) exceeded = true
 		const id = snap.id as string
 		const sourceId = snap.sourceId as string | null
 		for (const [s, e] of raw) {
@@ -249,7 +245,7 @@ export function computeDecodedElsewhere(
 			}
 		}
 	}
-	if (pieces.length === 0) return { ranges: [], truncated }
+	if (pieces.length === 0) return { ranges: [], truncated: false }
 
 	pieces.sort(
 		(a, b) =>
@@ -285,7 +281,7 @@ export function computeDecodedElsewhere(
 	merged.sort(
 		(a, b) => a.startHz - b.startHz || compareSource(a.sourceId, b.sourceId),
 	)
-	if (merged.length > maxRanges) truncated = true
+	if (merged.length > maxRanges) exceeded = true
 	const ranges = merged.slice(0, maxRanges).map(m => ({
 		startHz: m.startHz,
 		endHz: m.endHz,
@@ -293,7 +289,10 @@ export function computeDecodedElsewhere(
 		decoderIds: [...m.ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
 		applied: false,
 	}))
-	return { ranges, truncated }
+	// Truncation rule (req 1.1 vs 1.5): report it only when a bound was exceeded AND some
+	// coverage is returned. Without coverage there is nothing partial to warn about, so a
+	// plan with no covering views stays deep-equal to one without views.
+	return { ranges, truncated: exceeded && ranges.length > 0 }
 }
 
 const HEALTHS = new Set<unknown>(["running", "idle", "restarting", "faulted"])
@@ -306,75 +305,123 @@ const BASES = new Set<unknown>([
 	"override",
 ])
 
-function finiteNumbers(v: unknown): number[] {
-	return Array.isArray(v)
-		? v.filter((x): x is number => typeof x === "number" && Number.isFinite(x))
-		: []
+type Band = NonNullable<DecoderCoverageView["band"]>
+
+/**
+ * The first `max` items of an array by index, in order, invalid values passed through so the
+ * plan rejects them while they still use budget. Nothing past `max` is read.
+ */
+function prefix(v: unknown, max: number): unknown[] {
+	const n = Math.min(lengthOf(v), max)
+	const arr = v as readonly unknown[]
+	const out: unknown[] = []
+	for (let i = 0; i < n; i++) out.push(arr[i])
+	return out
+}
+
+function rangePrefix(v: unknown, max: number): Band["rangesHz"] {
+	return prefix(v, max).map(r => {
+		if (r === null || typeof r !== "object") return { minHz: NaN, maxHz: NaN }
+		const { minHz, maxHz } = r as { minHz: unknown; maxHz: unknown }
+		return { minHz: minHz as number, maxHz: maxHz as number }
+	})
+}
+
+function safeView(): DecoderCoverageView {
+	return {
+		id: "",
+		running: false,
+		health: "faulted",
+		suspended: true,
+		owner: "scanner",
+		sourceId: null,
+		inputKind: "iq",
+		band: null,
+	}
 }
 
 /**
  * Pure mapping of a manager status to the view the plan reads (Main calls it in the scanner
- * service's preview context). External input is recognised by the manager's
- * `external-input` band reason or a configured device serial; it gets `sourceId` null. Anything
- * missing or malformed maps to the safe side (band null, basis null, running false, suspended
- * true, owner scanner).
+ * service's preview context). Every status and assessment field is read exactly once into
+ * a snapshot; validation and emission use only that. External input is recognised solely by
+ * the assessment's `external-input` reason code (it gets `sourceId` null); `deviceSerial`
+ * never affects source identity. Anything missing, malformed or throwing maps to the safe
+ * side (band null, basis null, running false, suspended true, owner scanner). Targets and
+ * ranges are copied by index, at most the per-view budget of each.
  */
 export function toDecoderCoverageView(
 	status: DecoderStatus,
 	defaultSourceId: string | null,
 ): DecoderCoverageView {
-	const a = status.bandAssessment
-	const external =
-		a?.reasonCode === "external-input" || status.deviceSerial !== undefined
-	const sourceId = external
-		? null
-		: typeof status.sourceId === "string"
-			? status.sourceId
-			: defaultSourceId
-	const health = HEALTHS.has(status.health)
-		? (status.health as DecoderCoverageView["health"])
-		: "faulted"
-	let band: DecoderCoverageView["band"] = null
-	if (a !== undefined && a !== null && VERDICTS.has(a.verdict)) {
-		const configuredTargets = finiteNumbers(status.targetFrequenciesHz)
-		const ownTargets = finiteNumbers(a.targetsHz)
-		// Basis only ever comes from the assessment itself; nothing is manufactured.
-		const basis: NonNullable<DecoderCoverageView["band"]>["basis"] = BASES.has(
-			a.basis,
-		)
-			? (a.basis as NonNullable<DecoderCoverageView["band"]>["basis"])
-			: null
-		// Configured target frequencies stand in for external targets only when the
-		// assessment itself carries a proving basis.
-		let targetsHz = ownTargets
-		if (
-			external &&
-			ownTargets.length === 0 &&
-			TRUSTED_EXTERNAL_BASIS.has(basis)
-		)
-			targetsHz = configuredTargets
-		band = {
-			verdict: a.verdict,
-			basis,
-			targetsHz,
-			rangesHz: Array.isArray(a.rangesHz)
-				? a.rangesHz.map(r => ({ minHz: r.minHz, maxHz: r.maxHz }))
-				: [],
-			captureCenterHz:
-				typeof a.captureCenterHz === "number" ? a.captureCenterHz : null,
-			windowHalfWidthHz:
-				typeof a.windowHalfWidthHz === "number" ? a.windowHalfWidthHz : null,
+	try {
+		const id: unknown = status.id
+		const running: unknown = status.running
+		const health: unknown = status.health
+		const suspended: unknown = status.suspended
+		const owner: unknown = status.owner
+		const rawSourceId: unknown = status.sourceId
+		const configuredTargets: unknown = status.targetFrequenciesHz
+		const a: unknown = status.bandAssessment
+		let assessment: Record<string, unknown> | null = null
+		if (a !== null && typeof a === "object") {
+			const r = a as Record<string, unknown>
+			assessment = {
+				verdict: r["verdict"],
+				basis: r["basis"],
+				reasonCode: r["reasonCode"],
+				targetsHz: r["targetsHz"],
+				rangesHz: r["rangesHz"],
+				captureCenterHz: r["captureCenterHz"],
+				windowHalfWidthHz: r["windowHalfWidthHz"],
+			}
 		}
-	}
-	return {
-		id: status.id,
-		running: status.running === true,
-		health,
-		// Missing or malformed state maps to the side that never counts.
-		suspended: typeof status.suspended === "boolean" ? status.suspended : true,
-		owner: status.owner === "config" ? "config" : "scanner",
-		sourceId,
-		inputKind: external ? "external" : "iq",
-		band,
+		const external = assessment?.["reasonCode"] === "external-input"
+		const sourceId = external
+			? null
+			: typeof rawSourceId === "string"
+				? rawSourceId
+				: defaultSourceId
+		let band: DecoderCoverageView["band"] = null
+		if (assessment !== null && VERDICTS.has(assessment["verdict"])) {
+			// Basis only ever comes from the assessment itself; nothing is manufactured.
+			const basis = BASES.has(assessment["basis"])
+				? (assessment["basis"] as Band["basis"])
+				: null
+			const max = DECODED_ELSEWHERE_MAX_TARGETS
+			let targetsHz = prefix(assessment["targetsHz"], max)
+			// Configured target frequencies stand in for external targets only when the
+			// assessment itself carries a proving basis.
+			if (
+				external &&
+				targetsHz.length === 0 &&
+				TRUSTED_EXTERNAL_BASIS.has(basis)
+			)
+				targetsHz = prefix(configuredTargets, max)
+			const c = assessment["captureCenterHz"]
+			const w = assessment["windowHalfWidthHz"]
+			band = {
+				verdict: assessment["verdict"] as Band["verdict"],
+				basis,
+				targetsHz: targetsHz as number[],
+				rangesHz: rangePrefix(assessment["rangesHz"], max),
+				captureCenterHz: typeof c === "number" ? c : null,
+				windowHalfWidthHz: typeof w === "number" ? w : null,
+			}
+		}
+		return {
+			id: id as string,
+			running: running === true,
+			health: HEALTHS.has(health)
+				? (health as DecoderCoverageView["health"])
+				: "faulted",
+			// Missing or malformed state maps to the side that never counts.
+			suspended: typeof suspended === "boolean" ? suspended : true,
+			owner: owner === "config" ? "config" : "scanner",
+			sourceId,
+			inputKind: external ? "external" : "iq",
+			band,
+		}
+	} catch {
+		return safeView()
 	}
 }
