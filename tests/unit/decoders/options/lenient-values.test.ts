@@ -37,7 +37,6 @@ describe("numeric text the adapter stringifies", () => {
 		["readsb", { outputPort: "30003" }],
 		["direwolf", { kissPort: "8001" }],
 		["dumpvdl2", { targetSampleRate: "1050000" }],
-		["multimon-ng", { verbosity: "2" }],
 	])(
 		"%s rejects numeric text where the adapter computes with it %j",
 		(type, options) => {
@@ -118,5 +117,32 @@ describe("null frequencies are not absent", () => {
 		const issues =
 			validateDecoderOptions(type, { frequencies: null, frequency: null }) ?? []
 		expect(issues.map(i => i.path)).toEqual(["frequencies", "frequency"])
+	})
+})
+
+describe("round 3 review fixes", () => {
+	it("accepts integer text for multimon-ng verbosity, which the adapter compares", () => {
+		expect(validateDecoderOptions("multimon-ng", { verbosity: "2" })).toEqual(
+			[],
+		)
+		expect(
+			validateDecoderOptions("multimon-ng", { verbosity: "1.5" })?.map(
+				i => i.path,
+			),
+		).toEqual(["verbosity"])
+	})
+
+	it("keeps distinct issues whose paths share the first 256 units", () => {
+		const options = Object.fromEntries(
+			Array.from({ length: 40 }, (_, i) => ["k".repeat(256) + String(i), 0]),
+		)
+		const issues = validateDecoderOptions("rtl433", options) ?? []
+		expect(issues).toHaveLength(32)
+		expect(issues[31]).toEqual({
+			path: "",
+			code: "truncated",
+			message: "9 more",
+		})
+		expect(issues.slice(0, 31).every(i => i.path.length === 256)).toBe(true)
 	})
 })

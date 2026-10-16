@@ -1,6 +1,6 @@
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
-import { numberOrText } from "./common.js"
+import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 /** Modes `multimon-ng.ts` accepts (MULTIMON_MODES); others are dropped with a warning. */
 const MODES = [
@@ -20,8 +20,10 @@ const frequencyHz = z.number().finite().positive()
 export const multimonNgOptionsSchema = z
 	.object({
 		modes: z.array(z.enum(MODES)).nullable().optional(),
-		// `i < null` adds no -v, like an absent verbosity.
-		verbosity: z.number().int().min(0).nullable().optional(),
+		// `i < null` adds no -v, like an absent verbosity; `i < "2"` coerces.
+		verbosity: numberOrText(z.number().int().min(0), INTEGER_TEXT)
+			.nullable()
+			.optional(),
 		charset: z.string().nullable().optional(),
 		filters: z
 			.object({

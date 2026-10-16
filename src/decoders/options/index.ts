@@ -147,7 +147,7 @@ export function validateDecoderOptions(
 		if (issue.code === "unrecognized_keys") {
 			for (const key of issue.keys) {
 				issues.push({
-					path: trimIssueText(dotted([...issue.path, key])),
+					path: dotted([...issue.path, key]),
 					code: "unknown-key",
 					message: "unknown option",
 				})
@@ -155,16 +155,17 @@ export function validateDecoderOptions(
 			continue
 		}
 		issues.push({
-			path: trimIssueText(dotted(issue.path)),
+			path: dotted(issue.path),
 			code: "invalid-value",
 			message: trimIssueText(describeIssue(issue)),
 		})
 	}
 	issues.sort(compareIssues)
-	// Unions and nested schemas can raise the same issue twice; keep one.
-	const unique = issues.filter(
-		(issue, i) => i === 0 || compareIssues(issues[i - 1]!, issue) !== 0,
-	)
+	// Unions and nested schemas can raise the same issue twice; keep one. Compared
+	// on the full path, then the path is cut to the text bound.
+	const unique = issues
+		.filter((issue, i) => i === 0 || compareIssues(issues[i - 1]!, issue) !== 0)
+		.map(issue => ({ ...issue, path: trimIssueText(issue.path) }))
 	if (unique.length <= DECODER_OPTION_ISSUES_MAX) return unique
 	const kept = unique.slice(0, DECODER_OPTION_ISSUES_MAX - 1)
 	kept.push({
