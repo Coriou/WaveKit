@@ -64,7 +64,7 @@ export interface ActivityFixture {
 	 * holeGeneration in one transaction. `diverge` leaves the cached identity
 	 * untouched (a commit the main thread has not seen yet).
 	 */
-	openHole(seqs: readonly string[], options?: { diverge?: boolean }): void
+	openHole(seqs: readonly string[], options?: { diverge?: boolean }): string
 	/** Raw store_meta write; null deletes the key. */
 	writeRawMeta(key: string, value: string | null): void
 	notify(): void
@@ -335,27 +335,57 @@ export async function createFixture(
 				const row = readMeta.get(key) as { value: string } | undefined
 				return row?.value
 			}
+			// Emulates the writer (requirements 3.2-3.4): W advances to
+			// MIN(remaining) - 1 (the greatest deleted seq on an empty table);
+			// only deleted seqs left above the new W open a hole.
+			const oldWatermark = BigInt(onDisk("pruneWatermark") ?? "0")
+			let pruneWatermark = oldWatermark
+			let pruneGeneration = Number(onDisk("pruneGeneration") ?? "0")
 			let watermark = BigInt(onDisk("holeWatermark") ?? "0")
-			const generation = Number(onDisk("holeGeneration") ?? "0") + 1
+			let generation = Number(onDisk("holeGeneration") ?? "0")
 			db.exec("BEGIN")
 			try {
+				let maxDeleted = 0n
 				for (const seq of seqs) {
 					deleteRefs.run(Number(seq))
 					deleteFts.run(Number(seq))
 					deleteRow.run(Number(seq))
-					if (BigInt(seq) > watermark) watermark = BigInt(seq)
+					if (BigInt(seq) > maxDeleted) maxDeleted = BigInt(seq)
 				}
-				upsertMeta.run("holeWatermark", watermark.toString(10))
-				upsertMeta.run("holeGeneration", String(generation))
+				const min = db
+					.prepare("SELECT MIN(seq) AS seq FROM activity")
+					.get() as {
+					seq: number | bigint | null
+				}
+				const floor =
+					min.seq === null ? maxDeleted : BigInt(seqText(min.seq)) - 1n
+				if (floor > pruneWatermark) {
+					pruneWatermark = floor
+					pruneGeneration += 1
+					upsertMeta.run("pruneWatermark", pruneWatermark.toString(10))
+					upsertMeta.run("pruneGeneration", String(pruneGeneration))
+				}
+				const above = seqs.filter(seq => BigInt(seq) > pruneWatermark)
+				if (above.length > 0) {
+					generation += 1
+					for (const seq of above) {
+						if (BigInt(seq) > watermark) watermark = BigInt(seq)
+					}
+					upsertMeta.run("holeWatermark", watermark.toString(10))
+					upsertMeta.run("holeGeneration", String(generation))
+				}
 				db.exec("COMMIT")
 			} catch (error) {
 				db.exec("ROLLBACK")
 				throw error
 			}
 			if (options.diverge !== true) {
+				identity.pruneWatermark = pruneWatermark.toString(10)
+				identity.pruneGeneration = pruneGeneration
 				identity.holeWatermark = watermark.toString(10)
 				identity.holeGeneration = generation
 			}
+			return pruneWatermark.toString(10)
 		},
 		writeRawMeta(key, value) {
 			if (value === null) deleteMeta.run(key)

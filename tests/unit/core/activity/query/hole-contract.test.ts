@@ -249,7 +249,7 @@ describe("activity hole contract (readers)", () => {
 	it("replay adopts a hole at or below its position and continues", async () => {
 		const { store, query, seqs } = await setup(3)
 		const page = await query.search({ query: {} })
-		store.openHole([seqs[0] ?? ""])
+		store.openHole([seqs[1] ?? ""])
 		const later = store.insert({ eventId: "later" })
 		const followed = await collectReplay(
 			query,

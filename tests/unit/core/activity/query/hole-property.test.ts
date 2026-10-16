@@ -119,7 +119,7 @@ class Harness {
 		const live = this.live()
 		const chosen = live.filter((_seq, index) => (mask >> (index % 8)) & 1)
 		if (chosen.length === 0) return
-		this.store.openHole(chosen)
+		this.watermark = BigInt(this.store.openHole(chosen))
 		this.store.notify()
 		this.holeSincePage = true
 		for (const seq of chosen) this.existing.delete(seq)
@@ -133,7 +133,7 @@ class Harness {
 		)
 		const chosen = live.filter((_seq, index) => (mask >> (index % 8)) & 1)
 		if (chosen.length === 0) return
-		this.store.openHole(chosen)
+		this.watermark = BigInt(this.store.openHole(chosen))
 		this.store.notify()
 		this.holeSincePage = true
 		for (const seq of chosen) this.existing.delete(seq)
