@@ -142,6 +142,8 @@ frequency the decoder itself reports in its payload. It is never inferred from d
 or from a protocol constant.
 5.3 `tuningTrust` shall be the binding's value, `unverified` when there is no binding. (Main
 decision: `unverified` unless WaveKit itself commands the tuning the decoder hears.)
+Superseded by [web-gaps-5 requirement 6](../web-gaps-5/requirements.md): the trust comes
+from the observed tuner state, guarded by the centre captured when the decoder started.
 5.4 `hz` shall be an integer (rounded) in (0, 10^12]; any other value means no frequency.
 5.5 A binding with more than one target frequency and no payload frequency gives
 `frequency: null`.

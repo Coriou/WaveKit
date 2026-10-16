@@ -38,6 +38,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-4](web-gaps-4/requirements.md): bulk position trails, approximate station
   location, storage report, live-audio AGC, AIS channel, Meshtastic fix time, SDR host
   version, station write layer (WG4)
+- [web-gaps-5](web-gaps-5/requirements.md): automatic band map and activity timeline,
+  trail altitude and Meshtastic trail positions, AIS types 4/9/21 and the vessel channel,
+  verified tuning trust, SDR# and Gqrx band-plan import (WG5)
 
 ## The three files
 
