@@ -501,6 +501,23 @@ const capabilities = closed({
 		sampleRateHz: { ...integer, minimum: 1 },
 		centerFrequencyHz: nullable({ ...integer, minimum: 1 }),
 	}),
+	sampleRatePresets: {
+		anyOf: [
+			closed({
+				state: literal("suggested"),
+				provenance: literal("wavekit-rtl-rate-presets"),
+				valuesHz: {
+					type: "array",
+					maxItems: 11,
+					items: { ...integer, minimum: 1 },
+				},
+			}),
+			closed({
+				state: literal("not-applicable"),
+				reason: literal("non-rtl-transport"),
+			}),
+		],
+	},
 })
 const page = closed({
 	schemaVersion: literal(1),

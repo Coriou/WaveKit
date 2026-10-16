@@ -383,6 +383,21 @@ const headerSchema = z.discriminatedUnion("state", [
 		})
 		.strict(),
 ])
+const sampleRatePresetsSchema = z.discriminatedUnion("state", [
+	z
+		.object({
+			state: z.literal("suggested"),
+			provenance: z.literal("wavekit-rtl-rate-presets"),
+			valuesHz: z.array(positiveInteger.max(Number.MAX_SAFE_INTEGER)).max(11),
+		})
+		.strict(),
+	z
+		.object({
+			state: z.literal("not-applicable"),
+			reason: z.literal("non-rtl-transport"),
+		})
+		.strict(),
+])
 export const receiverCapabilitiesSchema = z
 	.object({
 		schemaVersion: z.literal(1),
@@ -466,6 +481,7 @@ export const receiverCapabilitiesSchema = z
 				centerFrequencyHz: positiveInteger.nullable(),
 			})
 			.strict(),
+		sampleRatePresets: sampleRatePresetsSchema,
 	})
 	.strict()
 

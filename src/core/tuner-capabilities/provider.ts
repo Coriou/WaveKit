@@ -2,6 +2,7 @@ import type {
 	ReceiverCapabilities,
 	ReceiverCapabilitiesPage,
 } from "@wavekit/api-types"
+import { RECEIVER_SAMPLE_RATE_PRESETS_HZ } from "@wavekit/api-types"
 import {
 	prepareReceiverPolicy,
 	projectReceiverControls,
@@ -179,6 +180,17 @@ function project(
 			sampleRateHz: e.caps.sampleRate,
 			centerFrequencyHz: e.caps.centerFreq,
 		},
+		sampleRatePresets:
+			e.source.type === "rtl_tcp"
+				? {
+						state: "suggested" as const,
+						provenance: "wavekit-rtl-rate-presets" as const,
+						valuesHz: RECEIVER_SAMPLE_RATE_PRESETS_HZ,
+					}
+				: {
+						state: "not-applicable" as const,
+						reason: "non-rtl-transport" as const,
+					},
 	}
 	const validated = receiverCapabilitiesSchema.safeParse(dto)
 	if (!validated.success) return failure("CONFLICT")
