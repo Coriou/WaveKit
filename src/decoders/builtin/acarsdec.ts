@@ -32,6 +32,7 @@ import {
 	type NumericOptionWarn,
 } from "../option-values.js"
 import { ACARSDEC_BOUNDS } from "../options/acarsdec.js"
+import { safeErrorFields } from "../safe-error-fields.js"
 
 /**
  * Configuration options for the ACARS decoder.
@@ -277,7 +278,11 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 				}
 			}
 		} catch (err) {
-			this.logger.debug({ line: trimmed, err }, "Failed to parse JSON line")
+			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
+			this.logger.debug(
+				{ line: trimmed, err: safeErrorFields(err) },
+				"Failed to parse JSON line",
+			)
 		}
 
 		return null

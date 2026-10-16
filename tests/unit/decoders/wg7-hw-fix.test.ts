@@ -86,7 +86,7 @@ describe("readExtraArgsOption", () => {
 		expect(issues).toEqual([["extraArgs", "invalid"]])
 	})
 
-	it("keeps an entry of exactly 4096 UTF-8 bytes and drops 4097", () => {
+	it("keeps an entry of exactly 4096 serialized bytes and drops 4097", () => {
 		const { issues, warn } = collect()
 		const ok = "x".repeat(EXTRA_ARGS_BOUNDS.maxEntryBytes)
 		expect(readExtraArgsOption([ok], warn)).toEqual([ok])
@@ -98,18 +98,19 @@ describe("readExtraArgsOption", () => {
 		expect(issues).toEqual([["extraArgs", "clamped"]])
 	})
 
-	it("counts bytes, not UTF-16 units", () => {
+	it("counts serialized UTF-8 bytes, not UTF-16 units", () => {
 		const { warn } = collect()
-		// 2049 two-byte characters: 2049 units but 4098 bytes.
-		const wide = "é".repeat(2049)
+		// "é" needs quoting: 2 quote bytes + 2 bytes per character.
+		const wide = "é".repeat(2048)
 		expect(readExtraArgsOption([wide, "-b"], warn)).toEqual(["-b"])
-		const fits = "é".repeat(2048)
+		const fits = "é".repeat(2047)
 		expect(readExtraArgsOption([fits], warn)).toEqual([fits])
 	})
 
 	it("stops adding entries once the aggregate would pass 65536 bytes", () => {
 		const { issues, warn } = collect()
-		const big = "y".repeat(EXTRA_ARGS_BOUNDS.maxEntryBytes)
+		// 16 × (4095 + 1 separator) = 65536 exactly.
+		const big = "y".repeat(EXTRA_ARGS_BOUNDS.maxEntryBytes - 1)
 		const sixteen = Array.from({ length: 16 }, () => big)
 		expect(readExtraArgsOption(sixteen, warn)).toEqual(sixteen)
 		expect(issues).toEqual([])
@@ -143,9 +144,9 @@ describe("readExtraArgsOption", () => {
 					let total = 0
 					for (const entry of out) {
 						expect(typeof entry).toBe("string")
-						const bytes = Buffer.byteLength(entry, "utf8")
+						const bytes = Buffer.byteLength(shellArg(entry), "utf8")
 						expect(bytes).toBeLessThanOrEqual(4096)
-						total += bytes
+						total += bytes + 1
 					}
 					expect(total).toBeLessThanOrEqual(65536)
 					const strings = value.filter(v => typeof v === "string")

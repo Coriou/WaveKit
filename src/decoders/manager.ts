@@ -69,7 +69,10 @@ import { channelisedRatePlan } from "../core/channelizer/rate-plan.js"
 import { isValidRtlSampleRate } from "../core/tuner-controller.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import type { SourceManager, SourceCaps } from "../core/source-manager.js"
-import { validateDecoderOptions } from "./options/index.js"
+import {
+	decoderOptionDescriptors,
+	validateDecoderOptions,
+} from "./options/index.js"
 import { WaveKitError } from "../utils/errors.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import {
@@ -77,6 +80,7 @@ import {
 	getUpgradeInstructions,
 	type VersionValidationResult,
 } from "../utils/version.js"
+import { safeErrorFields } from "./safe-error-fields.js"
 
 /**
  * Optional activity publication. Runs after the legacy `decoder:output`
@@ -540,11 +544,28 @@ export class DecoderManager extends EventEmitter {
 		try {
 			const issues = validateDecoderOptions(config.type, config.options)
 			if (issues && issues.length > 0) {
+				// Log known-schema keys only: an unknown key is operator text of any
+				// meaning, so it is counted (unknownKeyCount), never named.
+				const known = new Set(
+					(decoderOptionDescriptors(config.type) ?? []).map(d => d.key),
+				)
+				const paths = new Set<string>()
+				let unknownKeyCount = 0
+				for (const issue of issues) {
+					if (issue.code === "truncated") continue
+					const top = issue.path.split(".", 1)[0] ?? ""
+					// "" is the options object itself (a schema path, no operator text).
+					if (issue.code === "unknown-key" || (top !== "" && !known.has(top)))
+						unknownKeyCount++
+					else paths.add(top)
+				}
 				this.log.warn(
 					{
 						decoderId: config.id,
 						type: config.type,
-						paths: issues.map(issue => issue.path),
+						issueCount: issues.length,
+						paths: [...paths].sort(),
+						unknownKeyCount,
 					},
 					"Decoder options have issues (reported only)",
 				)
@@ -555,7 +576,7 @@ export class DecoderManager extends EventEmitter {
 				{
 					decoderId: config.id,
 					type: config.type,
-					errName: err instanceof Error ? err.name : typeof err,
+					err: safeErrorFields(err),
 				},
 				"Decoder option validation failed; issues not reported",
 			)
@@ -706,7 +727,7 @@ export class DecoderManager extends EventEmitter {
 					await decoder.stop()
 				} catch (stopErr: unknown) {
 					this.log.warn(
-						{ err: stopErr, decoderId: config.id },
+						{ err: safeErrorFields(stopErr), decoderId: config.id },
 						"Failed to stop a scanner probe removed during its start",
 					)
 				}
@@ -739,7 +760,7 @@ export class DecoderManager extends EventEmitter {
 					await this.removeDecoder(config.id)
 				} catch (removeErr: unknown) {
 					this.log.error(
-						{ err: removeErr, decoderId: config.id },
+						{ err: safeErrorFields(removeErr), decoderId: config.id },
 						"Failed to remove a scanner probe whose start failed",
 					)
 				}
@@ -785,7 +806,10 @@ export class DecoderManager extends EventEmitter {
 		try {
 			return provider.currentGeneration(sourceId)
 		} catch (err: unknown) {
-			this.log.warn({ err, sourceId }, "Channel generation unavailable")
+			this.log.warn(
+				{ err: safeErrorFields(err), sourceId },
+				"Channel generation unavailable",
+			)
 			return null
 		}
 	}
@@ -1111,7 +1135,10 @@ export class DecoderManager extends EventEmitter {
 			if (state.config.enabled) {
 				startPromises.push(
 					this.startDecoder(id, { startMode: "auto" }).catch(err => {
-						this.log.error({ err, decoderId: id }, "Failed to start decoder")
+						this.log.error(
+							{ err: safeErrorFields(err), decoderId: id },
+							"Failed to start decoder",
+						)
 					}),
 				)
 			}
@@ -1132,7 +1159,10 @@ export class DecoderManager extends EventEmitter {
 		for (const id of this.decoders.keys()) {
 			stopPromises.push(
 				this.stopDecoder(id).catch(err => {
-					this.log.error({ err, decoderId: id }, "Failed to stop decoder")
+					this.log.error(
+						{ err: safeErrorFields(err), decoderId: id },
+						"Failed to stop decoder",
+					)
 				}),
 			)
 		}
@@ -1347,7 +1377,7 @@ export class DecoderManager extends EventEmitter {
 				this.emit("decoder:output", decoder.id, output)
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: decoder.id },
+					{ err: safeErrorFields(err), decoderId: decoder.id },
 					"Error handling decoder output event, continuing operation",
 				)
 			}
@@ -1357,7 +1387,7 @@ export class DecoderManager extends EventEmitter {
 				publish(decoder.id, decoder.type, output)
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: decoder.id },
+					{ err: safeErrorFields(err), decoderId: decoder.id },
 					"Activity publisher failed, continuing operation",
 				)
 			}
@@ -1368,11 +1398,14 @@ export class DecoderManager extends EventEmitter {
 		decoder.on("error", (error: Error) => {
 			try {
 				state.lastError = createDecoderLastError(error, "error")
-				this.log.error({ err: error, decoderId: decoder.id }, "Decoder error")
+				this.log.error(
+					{ err: safeErrorFields(error), decoderId: decoder.id },
+					"Decoder error",
+				)
 				this.emit("decoder:error", decoder.id, error)
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: decoder.id },
+					{ err: safeErrorFields(err), decoderId: decoder.id },
 					"Error handling decoder error event, continuing operation",
 				)
 			}
@@ -1390,7 +1423,7 @@ export class DecoderManager extends EventEmitter {
 				this.emit("decoder:started", decoder.id)
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: decoder.id },
+					{ err: safeErrorFields(err), decoderId: decoder.id },
 					"Error handling decoder started event, continuing operation",
 				)
 			}
@@ -1403,7 +1436,7 @@ export class DecoderManager extends EventEmitter {
 				this.emit("decoder:stopped", decoder.id)
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: decoder.id },
+					{ err: safeErrorFields(err), decoderId: decoder.id },
 					"Error handling decoder stopped event, continuing operation",
 				)
 			}
@@ -1416,7 +1449,7 @@ export class DecoderManager extends EventEmitter {
 				this.updateDecoderHealth(state, health)
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: decoder.id },
+					{ err: safeErrorFields(err), decoderId: decoder.id },
 					"Error handling decoder health event, continuing operation",
 				)
 			}
@@ -1429,7 +1462,7 @@ export class DecoderManager extends EventEmitter {
 				this.handleDecoderExit(state, code, signal)
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: decoder.id, code, signal },
+					{ err: safeErrorFields(err), decoderId: decoder.id, code, signal },
 					"Error handling decoder exit event, continuing operation",
 				)
 			}
@@ -1464,7 +1497,7 @@ export class DecoderManager extends EventEmitter {
 			this.unwireDecoderFromFanout(state)
 		} catch (err) {
 			this.log.error(
-				{ err, decoderId: decoder.id },
+				{ err: safeErrorFields(err), decoderId: decoder.id },
 				"Error unwiring decoder from fanout, continuing with exit handling",
 			)
 		}
@@ -1580,7 +1613,7 @@ export class DecoderManager extends EventEmitter {
 					state.lastError = createDecoderLastError(err, "error")
 					// Log failure but don't crash - failure isolation (Requirement 10.1)
 					this.log.error(
-						{ err, decoderId: decoder.id },
+						{ err: safeErrorFields(err), decoderId: decoder.id },
 						"Failed to restart decoder - other decoders continue operating",
 					)
 					// Spawn failures do not emit exit, so retry them explicitly.
@@ -1867,10 +1900,16 @@ export class DecoderManager extends EventEmitter {
 				state.inputCaps,
 			)
 		} catch (err: unknown) {
+			// The thrown message can carry paths or argv: only a safe code reaches
+			// the status detail and its logs.
+			const { code } = safeErrorFields(err)
 			return {
 				ok: false,
 				reasonCode: "channelizer-unavailable",
-				detail: err instanceof Error ? err.message : String(err),
+				detail:
+					code !== undefined
+						? `channel request failed (${code})`
+						: "channel request failed",
 			}
 		}
 	}
@@ -1884,7 +1923,10 @@ export class DecoderManager extends EventEmitter {
 		try {
 			await provider.releaseChannel(channelId)
 		} catch (err: unknown) {
-			this.log.warn({ err, channelId }, "Channel release failed")
+			this.log.warn(
+				{ err: safeErrorFields(err), channelId },
+				"Channel release failed",
+			)
 		}
 	}
 
@@ -1940,7 +1982,7 @@ export class DecoderManager extends EventEmitter {
 			} catch (err: unknown) {
 				delivered = false
 				this.log.error(
-					{ err, event, decoderId: binding.decoderId },
+					{ err: safeErrorFields(err), event, decoderId: binding.decoderId },
 					"Scanner channel listener threw",
 				)
 			}
@@ -1953,12 +1995,15 @@ export class DecoderManager extends EventEmitter {
 		try {
 			void ref.provider.releaseChannel(ref.channelId).catch((err: unknown) => {
 				this.log.warn(
-					{ err, channelId: ref.channelId },
+					{ err: safeErrorFields(err), channelId: ref.channelId },
 					"Channel release failed",
 				)
 			})
 		} catch (err: unknown) {
-			this.log.warn({ err, channelId: ref.channelId }, "Channel release failed")
+			this.log.warn(
+				{ err: safeErrorFields(err), channelId: ref.channelId },
+				"Channel release failed",
+			)
 		} finally {
 			ref.stream.destroy()
 		}
@@ -2012,7 +2057,7 @@ export class DecoderManager extends EventEmitter {
 			if (!state.channel && !state.branchId) state.decoder.detachInput()
 		} catch (err: unknown) {
 			this.log.warn(
-				{ err, decoderId: state.config.id },
+				{ err: safeErrorFields(err), decoderId: state.config.id },
 				"detachInput failed while dropping a channel",
 			)
 		}
@@ -2209,13 +2254,13 @@ export class DecoderManager extends EventEmitter {
 					state.assignedSourceId = sourceId
 				} catch (err) {
 					this.log.error(
-						{ err, decoderId: state.config.id, sourceId },
+						{ err: safeErrorFields(err), decoderId: state.config.id, sourceId },
 						"Source reassignment failed",
 					)
 					this.unwireDecoderFromFanout(state)
 					void this.stopDecoder(state.config.id).catch(error => {
 						this.log.error(
-							{ err: error, decoderId: state.config.id },
+							{ err: safeErrorFields(error), decoderId: state.config.id },
 							"Failed to stop decoder after source reassignment failure",
 						)
 					})
@@ -2302,7 +2347,10 @@ export class DecoderManager extends EventEmitter {
 				}
 			}
 		} catch (err) {
-			this.log.error({ err }, "Failed to apply source tuning changes")
+			this.log.error(
+				{ err: safeErrorFields(err) },
+				"Failed to apply source tuning changes",
+			)
 		}
 	}
 
@@ -2390,7 +2438,7 @@ export class DecoderManager extends EventEmitter {
 				)
 			} catch (err) {
 				this.log.warn(
-					{ decoderId, err },
+					{ decoderId, err: safeErrorFields(err) },
 					"Failed to update decoder options before restart",
 				)
 			}
@@ -2406,7 +2454,7 @@ export class DecoderManager extends EventEmitter {
 				await this.restartDecoder(decoderId)
 			} catch (err) {
 				this.log.error(
-					{ decoderId, err },
+					{ decoderId, err: safeErrorFields(err) },
 					"Failed to restart decoder after sample rate change",
 				)
 			} finally {
@@ -2594,7 +2642,7 @@ export class DecoderManager extends EventEmitter {
 			if (state.decoder.getStatus().running) await state.decoder.stop()
 		} catch (err) {
 			this.log.error(
-				{ err, decoderId: id },
+				{ err: safeErrorFields(err), decoderId: id },
 				"Failed to stop decoder for rate suspension; will retry",
 			)
 			this.emitStatusChanged(state)
@@ -2614,7 +2662,7 @@ export class DecoderManager extends EventEmitter {
 			this.reserveSource(state)
 		} catch (err) {
 			this.log.warn(
-				{ err, decoderId: id },
+				{ err: safeErrorFields(err), decoderId: id },
 				"Could not keep the source reservation for a suspended decoder",
 			)
 		}
@@ -2638,7 +2686,7 @@ export class DecoderManager extends EventEmitter {
 				await state.decoder.stop()
 			} catch (err) {
 				this.log.error(
-					{ err, decoderId: id },
+					{ err: safeErrorFields(err), decoderId: id },
 					"Failed to stop the surviving process before resuming; will retry",
 				)
 				this.emitStatusChanged(state)
@@ -2675,7 +2723,7 @@ export class DecoderManager extends EventEmitter {
 					await state.decoder.stop()
 				} catch (err) {
 					this.log.error(
-						{ err, decoderId: id },
+						{ err: safeErrorFields(err), decoderId: id },
 						"Failed to stop a decoder whose resume was superseded",
 					)
 				}
@@ -2698,7 +2746,10 @@ export class DecoderManager extends EventEmitter {
 			state.transition = null
 			// A real spawn failure: record it and use the normal backoff/budget.
 			state.lastError = createDecoderLastError(err, "error")
-			this.log.error({ err, decoderId: id }, "Failed to resume decoder")
+			this.log.error(
+				{ err: safeErrorFields(err), decoderId: id },
+				"Failed to resume decoder",
+			)
 			this.handleDecoderExit(state, null, null)
 			return
 		}
@@ -2720,7 +2771,7 @@ export class DecoderManager extends EventEmitter {
 			this.reserveSource(state)
 		} catch (err) {
 			this.log.warn(
-				{ err, decoderId: state.config.id, sourceId },
+				{ err: safeErrorFields(err), decoderId: state.config.id, sourceId },
 				"Could not restore the source reservation for a suspended decoder",
 			)
 		}
@@ -2806,7 +2857,7 @@ export class DecoderManager extends EventEmitter {
 				: plan
 		} catch (err) {
 			this.log.error(
-				{ err, decoderId: state.config.id },
+				{ err: safeErrorFields(err), decoderId: state.config.id },
 				"Rate assessment failed; reporting unknown",
 			)
 			return { verdict: "unknown", reasonCode: "adaptation-unknown" }
@@ -2857,7 +2908,7 @@ export class DecoderManager extends EventEmitter {
 			})
 		} catch (err) {
 			this.log.error(
-				{ err, decoderId: state.config.id },
+				{ err: safeErrorFields(err), decoderId: state.config.id },
 				"Band assessment failed; reporting unknown",
 			)
 			return { verdict: "unknown" }
@@ -2926,7 +2977,7 @@ export class DecoderManager extends EventEmitter {
 			return this.resolveBand(state).bandSuspension
 		} catch (err) {
 			this.log.error(
-				{ err, decoderId: state.config.id },
+				{ err: safeErrorFields(err), decoderId: state.config.id },
 				"Band resolution failed; band suspension stays enabled",
 			)
 			return true
@@ -3088,7 +3139,7 @@ export class DecoderManager extends EventEmitter {
 							detectedVersion: result.detectedVersion,
 							minVersion,
 							maxVersion,
-							error: result.error,
+							hasError: result.error !== undefined,
 						},
 						instructions,
 					)
@@ -3106,7 +3157,7 @@ export class DecoderManager extends EventEmitter {
 							detectedVersion: result.detectedVersion,
 							minVersion,
 							maxVersion,
-							error: result.error,
+							hasError: result.error !== undefined,
 						},
 						instructions,
 					)
@@ -3116,7 +3167,7 @@ export class DecoderManager extends EventEmitter {
 					{
 						decoderId: config.id,
 						type,
-						error: result.error,
+						hasError: result.error !== undefined,
 					},
 					`Failed to detect version for decoder ${type}. Version validation skipped.`,
 				)
@@ -3293,7 +3344,7 @@ export class DecoderManager extends EventEmitter {
 			} catch (err) {
 				// Log error but continue checking other decoders (Requirement 10.1)
 				this.log.error(
-					{ err, decoderId: id },
+					{ err: safeErrorFields(err), decoderId: id },
 					"Error during health check for decoder, continuing with other decoders",
 				)
 			}
@@ -3322,7 +3373,7 @@ export class DecoderManager extends EventEmitter {
 			this.emit("decoder:status-changed", state.decoder.id)
 		} catch (err) {
 			this.log.error(
-				{ err, decoderId: state.decoder.id },
+				{ err: safeErrorFields(err), decoderId: state.decoder.id },
 				"Error handling decoder status-changed event, continuing operation",
 			)
 		}

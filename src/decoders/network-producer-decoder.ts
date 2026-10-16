@@ -33,6 +33,7 @@ import type {
 import type { Logger } from "../utils/logger.js"
 import { DecoderSpawnError, NetworkConnectionError } from "../utils/errors.js"
 import { createComponentLogger } from "../utils/logger.js"
+import { safeErrorFields } from "./safe-error-fields.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
 const GRACEFUL_STOP_TIMEOUT = 5000
@@ -95,7 +96,10 @@ export abstract class NetworkProducerDecoder
 		this.stats.bytesIn += chunk.length
 	}
 	private readonly handleInputError = (err: Error): void => {
-		this.logger.warn({ err }, "Decoder input stream error")
+		this.logger.warn(
+			{ err: safeErrorFields(err) },
+			"Decoder input stream error",
+		)
 	}
 	protected outputStream: PassThrough
 	protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 }
@@ -215,7 +219,7 @@ export abstract class NetworkProducerDecoder
 
 		// Handle spawn errors (e.g., command not found)
 		this.process.on("error", (err: Error) => {
-			this.logger.error({ err }, "Decoder process error")
+			this.logger.error({ err: safeErrorFields(err) }, "Decoder process error")
 			this.stats.errors++
 			if (this.listenerCount("error") > 0) {
 				this.emit("error", new DecoderSpawnError(this.id, command, err))
@@ -228,7 +232,7 @@ export abstract class NetworkProducerDecoder
 				signalDecoder(proc, "SIGKILL")
 			} catch (err) {
 				this.logger.error(
-					{ err, pid: proc.pid },
+					{ err: safeErrorFields(err), pid: proc.pid },
 					"Failed to clean up decoder process group",
 				)
 			}
@@ -247,12 +251,14 @@ export abstract class NetworkProducerDecoder
 		// Log stdout/stderr for debugging (some decoders output status info)
 		if (this.process.stdout) {
 			this.process.stdout.on("data", (data: Buffer) => {
+				// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
 				this.logger.debug({ output: data.toString().trim() }, "Process stdout")
 			})
 		}
 
 		if (this.process.stderr) {
 			this.process.stderr.on("data", (data: Buffer) => {
+				// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
 				this.logger.debug({ output: data.toString().trim() }, "Process stderr")
 			})
 		}
@@ -267,7 +273,7 @@ export abstract class NetworkProducerDecoder
 			this.process.stdin.on("error", (err: Error) => {
 				// EPIPE is expected when process exits while we're writing
 				if ((err as NodeJS.ErrnoException).code !== "EPIPE") {
-					this.logger.warn({ err }, "Process stdin error")
+					this.logger.warn({ err: safeErrorFields(err) }, "Process stdin error")
 				}
 			})
 		}
@@ -540,7 +546,7 @@ export abstract class NetworkProducerDecoder
 			})
 
 			client.on("error", (err: Error) => {
-				this.logger.error({ err }, "TCP connection error")
+				this.logger.error({ err: safeErrorFields(err) }, "TCP connection error")
 				this.stats.errors++
 
 				// Every failed attempt must settle, including retries.
@@ -575,7 +581,7 @@ export abstract class NetworkProducerDecoder
 				})
 
 				this.udpClient.on("error", (err: Error) => {
-					this.logger.error({ err }, "UDP socket error")
+					this.logger.error({ err: safeErrorFields(err) }, "UDP socket error")
 					this.stats.errors++
 					const error = new NetworkConnectionError(
 						outputHost,
@@ -695,7 +701,7 @@ export abstract class NetworkProducerDecoder
 		try {
 			await this.connectToOutput()
 		} catch (err) {
-			this.logger.error({ err }, "Reconnection failed")
+			this.logger.error({ err: safeErrorFields(err) }, "Reconnection failed")
 			this.disconnectFromOutput()
 			// Schedule another attempt
 			this.isReconnecting = false
@@ -728,7 +734,7 @@ export abstract class NetworkProducerDecoder
 			}
 		} catch (err) {
 			this.logger.warn(
-				{ err, dataLength: data.length },
+				{ err: safeErrorFields(err), dataLength: data.length },
 				"Failed to parse network data",
 			)
 			this.stats.errors++

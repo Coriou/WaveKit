@@ -31,6 +31,7 @@ import type {
 import type { Logger } from "../utils/logger.js"
 import { DecoderSpawnError } from "../utils/errors.js"
 import { createComponentLogger } from "../utils/logger.js"
+import { safeErrorFields } from "./safe-error-fields.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
 const GRACEFUL_STOP_TIMEOUT = 5000
@@ -213,7 +214,7 @@ export abstract class ExternalSdrDecoder
 
 		// Handle spawn errors (e.g., command not found)
 		this.process.on("error", (err: Error) => {
-			this.logger.error({ err }, "Decoder process error")
+			this.logger.error({ err: safeErrorFields(err) }, "Decoder process error")
 			this.stats.errors++
 			if (this.listenerCount("error") > 0) {
 				this.emit("error", new DecoderSpawnError(this.id, command, err))
@@ -469,7 +470,11 @@ export abstract class ExternalSdrDecoder
 				}
 			}
 		} catch (err) {
-			this.logger.warn({ line, err }, "Failed to parse decoder output")
+			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
+			this.logger.warn(
+				{ line, err: safeErrorFields(err) },
+				"Failed to parse decoder output",
+			)
 			this.stats.errors++
 		}
 	}
