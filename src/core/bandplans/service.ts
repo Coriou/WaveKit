@@ -440,7 +440,7 @@ class BandPlanRuntime implements BandPlanService {
 		const { preview, bands } = this.previewFetchedWithBands(
 			sourceUrl,
 			stored.provenance.format,
-			[],
+			stored.provenance.groupOverrides ?? [],
 			fetched,
 		)
 		// Both sides are bounded by bandsPerPack, so the diff is never truncated.

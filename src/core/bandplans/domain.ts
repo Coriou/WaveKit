@@ -533,6 +533,14 @@ export const transition: BandPlanTransition = (
 					...(typeof mutation.sourceUrl === "string"
 						? { sourceUrl: mutation.sourceUrl }
 						: {}),
+					// Sorted as the digest sorts them; absent when none (pre-WG7 shape).
+					...(mutation.groupOverrides.length > 0
+						? {
+								groupOverrides: [...mutation.groupOverrides].sort((a, b) =>
+									compareCodeUnit(a.sourceType, b.sourceType),
+								),
+							}
+						: {}),
 				},
 				bands,
 			})
