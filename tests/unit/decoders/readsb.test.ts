@@ -409,6 +409,74 @@ describe("readsb receiver location (WG3 req 9.1)", () => {
 		expect(location(args({ lon: 2 }, { lat: 48.85 }))).toBeNull()
 	})
 
+	it("treats an invalid option coordinate as unset and falls back to the station", () => {
+		const station = { lat: 48.85, lon: 2.35 }
+		const invalid: Array<[unknown, unknown]> = [
+			[null, null],
+			[Number.NaN, 2],
+			[1, Number.NaN],
+			["51.5", "-0.12"],
+			[91, 0],
+			[0, 181],
+			[-90.5, 0],
+			[0, -180.5],
+			[Number.POSITIVE_INFINITY, 0],
+		]
+		for (const enableMlat of [true, false]) {
+			for (const [lat, lon] of invalid) {
+				expect(location(args({ enableMlat, lat, lon }, station))).toEqual([
+					"48.85",
+					"2.35",
+				])
+				expect(location(args({ enableMlat, lat, lon }))).toBeNull()
+			}
+		}
+		expect(location(args({ lat: 90, lon: -180 }, station))).toEqual([
+			"90",
+			"-180",
+		])
+	})
+
+	it("ignores an invalid station coordinate", () => {
+		for (const station of [
+			{ lat: Number.NaN, lon: 2 },
+			{ lat: 91, lon: 2 },
+			{ lat: 1, lon: 181 },
+			{ lat: null, lon: null } as unknown as { lat: number; lon: number },
+			{ lat: "1", lon: "2" } as unknown as { lat: number; lon: number },
+		])
+			expect(location(args({}, station))).toBeNull()
+	})
+
+	it("validates option coordinates again after an options update", () => {
+		const config = createConfig({
+			options: { outputFormat: "sbs", lat: 1, lon: 2 },
+		})
+		const decoder = readsbDecoderFactory({ lat: 10, lon: 20 })(
+			config,
+			testLogger,
+		)
+		const view = decoder as unknown as {
+			getArgs(): string[]
+			onOptionsUpdated(): void
+			config: DecoderConfig
+		}
+		expect(location(view.getArgs())).toEqual(["1", "2"])
+		for (const [lat, lon] of [
+			[null, null],
+			[Number.NaN, 2],
+			["1", "2"],
+			[95, 2],
+		] as const) {
+			view.config.options = { outputFormat: "sbs", lat, lon }
+			view.onOptionsUpdated()
+			expect(location(view.getArgs())).toEqual(["10", "20"])
+		}
+		view.config.options = { outputFormat: "sbs", lat: 3, lon: 4 }
+		view.onOptionsUpdated()
+		expect(location(view.getArgs())).toEqual(["3", "4"])
+	})
+
 	it("is independent of enableMlat", () => {
 		for (const enableMlat of [true, false]) {
 			expect(location(args({ enableMlat }, { lat: 48.85, lon: 2.35 }))).toEqual(

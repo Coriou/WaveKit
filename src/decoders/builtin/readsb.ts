@@ -174,7 +174,10 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 		super(networkConfig, logger)
 		this.options = options
-		this.station = { lat: station.lat, lon: station.lon }
+		this.station = {
+			lat: coordinate(station.lat, 90),
+			lon: coordinate(station.lon, 180),
+		}
 	}
 
 	/**
@@ -533,6 +536,18 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 }
 
 /**
+ * A usable receiver coordinate: a finite number within [-limit, limit].
+ * Anything else (null, NaN, string, out of range) counts as unset.
+ */
+function coordinate(value: unknown, limit: number): number | undefined {
+	return typeof value === "number" &&
+		Number.isFinite(value) &&
+		Math.abs(value) <= limit
+		? value
+		: undefined
+}
+
+/**
  * Parses and validates decoder options from config.
  */
 function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
@@ -554,8 +569,8 @@ function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
 				: "sbs",
 		outputPort: options["outputPort"] as number | undefined,
 		enableMlat: options["enableMlat"] as boolean | undefined,
-		lat: options["lat"] as number | undefined,
-		lon: options["lon"] as number | undefined,
+		lat: coordinate(options["lat"], 90),
+		lon: coordinate(options["lon"], 180),
 		extraArgs: options["extraArgs"] as string[] | undefined,
 	}
 }
