@@ -1,6 +1,6 @@
 # Web gaps 8 design (WG8)
 
-Status: contract frozen; lanes in progress. Requirements in [requirements](requirements.md),
+Status: implemented; lanes merged and wired (MA.1), docs done (MA.2); checkpoint (MA.3) open. Requirements in [requirements](requirements.md),
 tasks in [tasks](tasks.md). Background: the WG4 station write layer (the store pattern), WG6
 decoder option schemas and descriptors, WG7 bounded options and the safe error fields, the
 access spec (protected mode, download leases), the dsd-fme call recordings and their pruner, the
@@ -82,12 +82,17 @@ spectrum worker: pipeline summary (bins rounded to 0.5 dB) → SB int16 half-dB 
 | ST store write | per PATCH (operator rate)                                                             | one file ≤ 256 KiB written and fsynced; validation O(keys)                                                                        | by construction + byte test at the bound                                     |
 | ST load        | once at boot                                                                          | one read ≤ 256 KiB, one parse                                                                                                     | by construction                                                              |
 | DP rebuild     | per start with staged options                                                         | one adapter construction (as at boot); no work on other starts                                                                    | by construction                                                              |
-| RC scan        | per list request, at most once per 2 s (cached listing shared by concurrent requests) | ≤ 2 000 files, concurrency 8, ≤ 4 KiB read per uncached file, ≤ 500 ms on the Mac at the bound (cold), ≤ 50 ms warm               | benchmark over 2 000 synthetic files in a tmp dir, median of 3, load average |
+| RC scan        | per list request, at most once per 2 s (cached listing shared by concurrent requests) | ≤ 2 000 files, concurrency 8, ≤ 4 KiB read per uncached file, ≤ 500 ms on the Mac at the bound (cold), ≤ 300 ms warm (amended)    | benchmark over 2 000 synthetic files in a tmp dir, median of 3, load average |
 | RC download    | per request                                                                           | one lstat + one stream (lease bounded)                                                                                            | by construction                                                              |
 | SB wire        | every block summary in the worker (20/s per source at the default)                    | encode + decode O(bins), no per-summary allocation beyond the transfer buffer; ≤ 50 µs per 8 192-bin summary each side on the Mac | micro-benchmark over 10 000 summaries                                        |
 | SB traffic     | worker → main                                                                         | ≤ 512 KiB/s per source at the cap (8 192 bins × 2 B × 20/s ≈ 320 KiB/s)                                                           | arithmetic + bench                                                           |
 | SB bench       | once at startup                                                                       | ≤ 200 ms wall (`SPECTRUM_BINS_BUDGET.benchWallMs`), logged once                                                                   | the bench reports its own wall time                                          |
 | SB clamp       | per subscribe                                                                         | constant                                                                                                                          | by construction                                                              |
+
+Amended (WG8 Main): the RC warm rescan budget is ≤ 300 ms at the 2 000-file bound on the Mac
+(was ≤ 50 ms). Each rescan re-verifies every candidate file it lists (open, fstat, realpath and
+directory checks, about 5 to 6 filesystem calls per file), so it is filesystem-call bound;
+measured 203 to 217 ms at load about 10. The header cache saves only the 4 KiB read.
 
 Measured before WG8 (one Pi bench run, Pi 3B 1.2 GHz, live 2.048 Msps): `number[]` summaries cost
 about 9 B per bin across the worker boundary, so 4 096 and 8 192 bins fail the 512 KiB/s budget

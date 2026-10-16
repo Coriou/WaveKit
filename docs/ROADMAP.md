@@ -98,8 +98,9 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    exclusions (`skipBandPlanSkips`). Remaining: CLI and
    web consumption, verified packs
    (gated), a general
-   settings store with YAML/env/UI provenance (spec pending), and country from
-   the station location (gated).
+   settings store with YAML/env/UI provenance (WG8 landed the decoder-scope
+   store: decoder options and `enabled`; station, scanner and live audio keep
+   their own layers), and country from the station location (gated).
 4. **Scanner and listening follow-ups**: scanner follow-ups batch 1 landed
    server-side: running-range edits (enable, protocols, name, dwell and
    sensitivity per range, applied at the next hop), signals-only jobs, the
@@ -391,8 +392,8 @@ without renewal or online-presence claims. See the
       hour, at most 768 writes a day.
 - [x] Decoder option schemas, report only (WG6): `optionIssues` on decoder
       status and option descriptors on `GET /api/decoders/types`; the
-      prerequisite of a decoder `PATCH` (still 501; enforcement is a later
-      decision).
+      prerequisite of a decoder `PATCH` (WG8 made it work in protected mode;
+      legacy mode still answers 501).
 - [x] Redacted config export (WG6, export half): `GET /api/config/export`,
       protected mode only, fail-closed redaction. Config import remains open.
       The redaction defaults (E2) were confirmed on 2026-10-16. WG7 exports six
@@ -407,6 +408,15 @@ without renewal or online-presence claims. See the
       capped, and `extraArgs` is limited to 64 strings of at most 4 096 bytes
       (65 536 in total). Shell pipelines carry only formatted finite numbers.
       multimon-ng `verbosity` is 0–10. Configured argv is unchanged.
+- [x] Decoder settings store and `PATCH /api/decoders/:id` (WG8, protected
+      mode only): a persisted override layer (`decoder-settings.json`,
+      override > YAML/env config > default) for `enabled` (autostart at boot)
+      and the options whose descriptor says `patchable` (never paths, hosts,
+      ports, devices, `extraArgs` or secrets); merge patch with `If-Match`,
+      applied by rebuilding the adapter at its next start;
+      `GET /api/decoders/:id/settings` shows each value's source. The config
+      export stays YAML/env only. Open: applying a patch without a restart,
+      rate-plan keys, config import.
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
       bounded replay and explicit gaps when history is unavailable.
@@ -656,6 +666,11 @@ recording Keep protects one recording independently.
 - [ ] Record analog transmissions and digital calls automatically across supported
       live and scanner paths; expose bounded retention and playback by ID with
       seek. Scanner WAV download alone does not provide seek or all-call coverage.
+- [x] Read-only recordings inventory (WG8, protected mode only):
+      `GET /api/recordings` lists the dsd-fme per-call and scanner WAVs with
+      opaque ids, time, talkgroup, duration and size (frequency only when
+      known), and `GET /api/recordings/:id/file` downloads the whole file (no
+      `Range`). WaveKit changes no file; the catalog below stays open.
 - [ ] Keep/star individual recordings across clients; un-keeping restores normal
       retention. Define disk reserve/low-space behavior and coordinate the
       digital WAV pruner with scanner/catalog retention before enabling this.
@@ -800,8 +815,12 @@ same view, and a program can do the watching more reliably than a person.
       CLI. Late-joining clients get a matching snapshot. WG1 adds opt-in
       per-client waterfall backfill (`backfillMs`, up to 10 s / 64 frames of
       the current epoch) and per-client exponential averaging (`averaging`
-      1–32); `fftSize` and `bins` stay capped at 2048 until a Pi-class CPU
-      measurement. Scanner Task 37a owns
+      1–32). WG8 lifts the 2048 bins cap where the host can afford it:
+      `scanner.ws.spectrumBinsCap` (`auto` measures once at startup; up to
+      8192, the Mac picks 8192, a Pi 3 stays at 2048), with a lossless int16
+      worker wire; clients get at most min(cap, `spectrumSummaryBins`), so the
+      shipped config and the default profile are unchanged. Viewed-slice zoom
+      stays gated. Scanner Task 37a owns
       this service; support bounded simultaneous profiles and source selection
       without client preferences changing detector behavior. Preserve the planned scanner
       10 Hz / 512-bin default for subscriptions without options.

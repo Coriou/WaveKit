@@ -1,7 +1,7 @@
 # Web gaps 8 requirements (WG8)
 
-Status: contract frozen; lanes ST, DP, RC and SB in progress. See [design](design.md) and
-[tasks](tasks.md).
+Status: implemented; lanes ST, DP, RC and SB merged and wired (MA.1), docs done (MA.2); the
+checkpoint (MA.3) is open. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -159,6 +159,11 @@ deletes a file and never follows a symbolic link.
 read per file header (`RECORDINGS_HEADER_READ_BYTES`), at most 8 concurrent filesystem
 operations, header results cached by path, size and mtime; a scan takes at most 500 ms on the
 Mac at the bound.
+
+Amended (WG8 Main): a rescan with warm header results takes at most 300 ms on the Mac at the
+2 000-file bound (the design's 50 ms is replaced). Every rescan opens and verifies each
+candidate (regular file, age, identity and ancestry), which is filesystem-call bound; measured
+about 210 ms on a loaded Mac. The listing is protected, cached for 2 s and off the hot path.
 4.7 Log lines and error bodies of the inventory name no path, file name, directory or decoder
 option; errors use the allowlisted error fields.
 

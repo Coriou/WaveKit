@@ -1740,8 +1740,36 @@ type, enumValues?, min?, max?, unit?, default, secret, effect: "restart",
 description }`. It is absent for a type without an option schema. Keys whose
 value is key material or may carry it (Meshtastic `channelKey`, dsd-fme
 `extraArgs`) have `secret: true`; the config export redacts them. Every option
-takes effect on the next start (`effect: "restart"`); editing options at
-runtime is not implemented (`PATCH /api/decoders/:id` answers 501).
+takes effect on the next start (`effect: "restart"`).
+
+WG8 adds `patchable` to a descriptor: `true` when the protected
+`PATCH /api/decoders/:id` may set the key (see
+[decoder settings](#get-apidecodersidsettings)). Absent means false, so an
+older core reads as not patchable. Patchable keys are receive tuning and
+decode parameters whose value is a bounded number, a boolean or a closed set:
+
+| Type              | Patchable keys                                                                                         |
+| ----------------- | ------------------------------------------------------------------------------------------------------ |
+| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                         |
+| `ais-catcher`     | `gain`, `ppm`                                                                                          |
+| `readsb`          | `ppm`                                                                                                  |
+| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`                      |
+| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                                         |
+| `rtl433`          | `analyze`, `protocols`                                                                                 |
+| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                       |
+
+Never patchable, by meaning: `extraArgs`; secrets; free-text `string` and
+`object` options; a `string-list` without a closed set; anything naming a path,
+file, directory, host, address, port, device, serial, URL or station identity
+(`lat`, `lon`, `callsign`); output routing (`output*`, `udp*`, `agwPort`,
+`kissPort`); recording, retention and debug capture; the input format; the
+rate-plan inputs (`inputSampleRate`, `targetSampleRate`, `inputCenterFreq`,
+`followCenter`, `sampleRate`, `channelHz`, `offsetHz`, lora `oversampling`);
+and any key the digital-voice preparation reads or rewrites (dsd-fme `mode`,
+`output`, `udpHost`, `udpPort`, `voiceSlot`). A string `gain` (readsb,
+dumpvdl2) and options an adapter does not use (acarsdec `gain`, dumpvdl2 `ppm`)
+stay false. The core re-checks these rules at runtime, not only through the
+descriptors.
 
 Bounded options (WG7). Every built-in adapter reads its numeric options through
 one helper. The helper coerces numeric text as the option schema does. A
@@ -1900,12 +1928,118 @@ line }] }`, oldest first. Each decoder keeps at most 500 lines of 4096 character
 These are raw decoder output and can contain decoded data; network frames from
 producers such as readsb are not turned into log lines. 404 for an unknown id.
 
+#### GET /api/decoders/:id/settings
+
+Decoder settings (WG8, [spec](specs/web-gaps-8/requirements.md)). A persisted
+override layer, `<stateDir>/decoder-settings.json`, holds per decoder id and
+type an optional `enabled` and a map of option values. Precedence: override >
+configuration (YAML with `WAVEKIT_` environment overrides) > adapter default.
+The loaded configuration is never mutated, and `GET /api/config/export` stays
+the YAML/env configuration (overrides are not exported). The store loads in
+both access modes, so overrides written in protected mode keep applying; the
+routes exist only in protected mode (`DECODER_SETTINGS_REQUIRES_ACCESS`).
+
+GET runs under root admission (an authenticated browser session or device) and
+answers `DecoderSettingsView` with `Cache-Control: no-store`:
+
+```json
+{
+	"decoderId": "dsd-main",
+	"type": "dsd-fme",
+	"revision": 3,
+	"enabled": { "value": true, "source": "config" },
+	"options": [
+		{ "key": "callTimeoutMs", "source": "override", "patchable": true, "secret": false, "present": true, "value": 2500 },
+		{ "key": "udpPort", "source": "config", "patchable": false, "secret": false, "present": true }
+	],
+	"undocumentedKeys": 0,
+	"pendingRestart": true
+}
+```
+
+- `options` lists every documented key of the type in descriptor order with
+  its `source` (`override`, `config` or `default`), `patchable`, `secret` and
+  `present` (an override or the configuration sets it). `value` appears only
+  on a patchable, non-secret key (null = the adapter default applies); secret
+  and non-patchable keys show only `{ present }`.
+- `undocumentedKeys` counts configured keys the type does not document; they
+  are never named.
+- `enabled` is autostart at boot: it is applied when the decoder is created at
+  WaveKit startup and never starts or stops a running decoder.
+- `pendingRestart` is true while the running instance does not yet have the
+  effective options.
+- `overrideIgnored: "type-changed"`: the stored entry has another type than
+  the configured decoder; it is ignored until a PATCH replaces it. Entries for
+  ids that are not configured are kept in the file, ignored and logged as a
+  count (no ids).
+
+404 `DECODER_NOT_FOUND` for an unknown id, 409 `DECODER_OWNED_BY_SCANNER` for
+a scanner probe.
+
 #### PATCH /api/decoders/:id
 
-Not implemented: a valid body (`enabled` and/or `options`) answers 501
-`DECODER_CONFIG_UPDATE_UNSUPPORTED`; edit the YAML configuration and restart
-WaveKit. 404 for an unknown decoder, 400 `NO_UPDATE_FIELDS` for an empty body.
-`GET /api/decoders/types` describes the options a later PATCH would accept.
+Protected mode: a JSON merge patch of the settings, re-authorized like the
+other protected mutations. Body `{ enabled?: boolean | null, options?: { <key>:
+value | null } }`: a value sets the override, `null` removes it (the configured
+value or the default applies again), an absent key is unchanged; at least one
+key, at most 64 option keys, only `enabled` and `options` (checked strictly,
+no coercion: `"true"` is not a boolean). Optional `If-Match: <revision>`
+(`W/"n"`, `"n"` or `n`; the `revision` of the view) guards against a lost
+update.
+
+```bash
+curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
+	-H 'Content-Type: application/json' -H 'If-Match: 3' \
+	-d '{"options":{"callTimeoutMs":3000,"fmGain":null}}'
+```
+
+200 `DecoderSettingsUpdateResult`: `{ settings, revision, changed,
+pendingRestart }`, where `changed` lists the keys whose effective value changed
+(`enabled` first, then options in descriptor order).
+
+Each patched key is validated with its own option schema, and the merged
+effective options with the type's cross-key rules; a problem already present in
+configured keys the patch does not touch never fails the patch. A refused
+patch changes nothing. Error bodies `{ error, code, message, issues?, keys?,
+unknownKeys? }` never carry a submitted value:
+
+| Status | Code                                 | When                                                                                                       |
+| ------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id        |
+| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`) or undocumented keys (counted in `unknownKeys`, never named)       |
+| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                            |
+| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                            |
+| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                                 |
+| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                       |
+| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                              |
+
+A denial answers before the body is parsed, with the access code-only body.
+
+Applying: the PATCH restarts nothing. It stages the effective options on the
+decoder; the next start (operator start or restart, an automatic restart, or
+the next boot) rebuilds the adapter from its current configuration with the
+staged keys set or removed, announces it with `decoder:created` for the same
+id, then starts it. Status, caps, band and rate assessment, provenance, ambient
+targets, audio and digital-voice wiring follow the rebuilt instance. A rebuild
+that fails keeps the previous instance and configuration, leaves the decoder
+stopped with `lastError` "Decoder rebuild failed", and `pendingRestart` stays
+true.
+
+Store: writes are serialised and atomic (an exclusively created temporary
+file, fsync, rename). Bounds: file 256 KiB, 256 decoder entries, 64 option keys
+per entry, values of the patchable types only. A corrupt, over-bound or
+unreadable file is moved aside (`decoder-settings.json.corrupt-<ms>`, one kept)
+and the store starts empty with a seeded revision, so a stale `If-Match` never
+matches; a missing file starts empty at revision 0. The store reads only a
+regular file and never follows a symbolic link: a link or FIFO planted at the
+path is moved aside the same way. A stored key that is no longer patchable or
+valid is dropped in memory (counted). The file is counted in the
+`decoder-overrides` storage area.
+
+Legacy mode (and protected mode without the settings service): unchanged. A
+valid body answers 501 `DECODER_CONFIG_UPDATE_UNSUPPORTED`; 404 for an unknown
+decoder, 400 `NO_UPDATE_FIELDS` for an empty body; there is no GET settings
+route. Edit the YAML configuration and restart WaveKit.
 
 ### Digital Voice
 
@@ -3033,6 +3167,34 @@ floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile) and `lastError?`.
 
+Spectrum detail above 2 048 bins (WG8). `scanner.ws.spectrumBinsCap` (config
+only: `"auto"`, 2048, 4096 or 8192; absent means `"auto"`, so the parsed config
+and its export are unchanged) caps the summary and client bins of every source.
+`"auto"` runs one startup micro-benchmark (at most 200 ms wall, logged once as
+`{ setting, cap, source, wallMs }`) and picks the largest of 8 192 and 4 096
+whose measured cost, times 1.5, fits the budgets (summary traffic 512 KiB/s,
+clone 10 ms/s, per-profile work 5 ms/s at the summary rate); 2 048 is the floor
+and is never measured, and a failing bench gives 2 048. The Mac picks 8 192;
+the measured cap on a Raspberry Pi 3 is 2 048. Block summaries cross the
+worker boundary as lossless 16-bit half-dB integers (about 2 B per bin).
+
+- `limits.binsCap` (`SpectrumBinsCapView`, optional; older cores omit it):
+  `{ setting, cap, source }`, `source` `config` (a fixed setting), `measured`
+  (the bench) or `fallback` (the bench failed).
+- `limits.bins.max` is `min(cap, scanner.ws.spectrumSummaryBins)`. The summary
+  budget `spectrumSummaryBins` accepts 512–8 192 (default 2 048 unchanged), so
+  with the shipped config `limits.bins.max` stays 2 048 on every host and
+  every subscribe, frame and limit is as before. An operator raises
+  `spectrumSummaryBins` for more detail.
+- A client may ask `options.spectrum.bins` up to 8 192; a value above the bound
+  is clamped with `adjusted: ["bins"]`.
+- Real detail above 2 048 bins also needs `scanner.detection.fftSize` ≥ 4 096
+  at 2.048 Msps, where the `auto` FFT size is 2 048 (`binCount` is never
+  upsampled; the actual count is in
+  `summaryBinCount` and the frame's `binCount`).
+- The default profile (`scanner.ws.spectrumBins`) keeps 128–2 048 and the
+  default 512. Viewed-slice zoom is still gated.
+
 An unexpected worker exit, fatal worker error or failed pipeline replacement
 invalidates the engine and its cached live spectrum. Status reports
 `engine: "error"` with `lastError`; stale summaries are not served as live.
@@ -3330,7 +3492,7 @@ area with no path, such as `digital-voice-wav` without a recording dsd-fme, repo
 | `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
 | `operator-data`     | `state`     | Operator data                                                                                                     | null                                     |
 | `access`            | `state`     | Private access state (protected mode only)                                                                        | null                                     |
-| `decoder-overrides` | `state`     | Decoder band overrides                                                                                            | null                                     |
+| `decoder-overrides` | `state`     | Decoder band overrides and decoder settings (`decoder-settings.json`)                                             | null                                     |
 | `station`           | `state`     | The station UI layer (`station.json`)                                                                             | null                                     |
 | `logs`              | `other`     | `logging.dir` (only when set)                                                                                     | null                                     |
 
@@ -3413,6 +3575,91 @@ is 500 `CONFIG_EXPORT_FAILED`. Without a config provider the route answers 503
 `CONFIG_EXPORT_UNAVAILABLE`. Error bodies are `{ error: "ConfigExportError",
 code, message }`. The redaction defaults (decision E2) were confirmed on
 2026-10-16: protected mode only, fail closed by meaning.
+
+### Recordings
+
+A read-only inventory of the WAV recordings WaveKit already writes (WG8,
+[spec](specs/web-gaps-8/requirements.md)): the per-call recordings of the
+dsd-fme decoders that record, and the scanner recordings
+(`recordings/{dv,analog}/<discoveryId>/` under the scanner storage directory;
+none when no scanner runs). DTOs in `packages/api-types/src/recordings.ts`.
+While `RECORDINGS_REQUIRES_ACCESS` is true both routes exist only in protected
+mode; nothing is mounted in legacy mode (404). The inventory never writes,
+renames, deletes or trims a file. Keep, delete and trim belong to the
+recording catalog, which stays gated.
+
+#### GET /api/recordings
+
+Re-authorized like the other protected operator routes; `Cache-Control:
+no-store`. Query: `limit` (1–200, default 50), `cursor` (opaque, at most 512
+characters), `kind` (`dsd-fme-call`, `scanner-dv`, `scanner-analog`) and
+`decoderId` (exact match). The query is checked strictly (unknown or repeated
+keys, `limit=10abc` or a malformed cursor answer 400
+`RECORDINGS_QUERY_INVALID`).
+
+```json
+{
+	"items": [
+		{
+			"id": "dsd:0~20261016_141503_12345_DMR_GROUP_TGT_9_SRC_2301234.wav",
+			"kind": "dsd-fme-call",
+			"decoderId": "dsd-main",
+			"discoveryId": null,
+			"startedAtLocal": "2026-10-16T14:15:03",
+			"modifiedAt": "2026-10-16T12:15:21.402Z",
+			"bytes": 288044,
+			"durationMs": 18000,
+			"callType": "group",
+			"talkgroup": "9",
+			"source": "2301234",
+			"frequencyHz": null
+		}
+	],
+	"nextCursor": null,
+	"scannedFiles": 1,
+	"truncated": false,
+	"scannedAt": "2026-10-16T12:16:00.000Z"
+}
+```
+
+- Order: newest `modifiedAt` first, ties by id; follow `nextCursor` (null on
+  the last page). Each item appears exactly once across pages.
+- `id` is opaque and never a path: `dsd:<n>~<basename>` (n = the position of
+  the recording directory in the inventory's source list, dsd-fme decoders
+  sorted by id) or `scan:<recordingId>`. A configuration change can renumber
+  `n`, so an old id may stop resolving; list again.
+- `startedAtLocal` (local time, no zone) comes from the file name only when it
+  is a real date and time; `durationMs` from the RIFF header of a plain PCM
+  WAV, else null; `callType`, `talkgroup` and `source` from a dsd-fme name
+  (digits only, else null); `frequencyHz` only for a scanner recording whose
+  discovery centre is known. dsd-fme names carry no frequency, so it is null:
+  the frequency is never guessed.
+- Never listed: files modified in the last 10 s (still being written),
+  `TEMP_` files, live probe folders (`probe-*`), names that match neither the
+  dsd-fme call pattern nor the scanner recording id, symbolic links and
+  non-regular files. Files that vanish during a scan are skipped.
+- Bounds: at most 2 000 files examined per scan (`truncated` then true), at
+  most 4 KiB read per header, 8 filesystem operations in flight; the listing is
+  cached for 2 s and header results by path, size and mtime. Measured on the
+  Mac at the 2 000-file bound: about 290 ms cold and about 210 ms warm (every
+  rescan re-verifies each file; budgets 500 ms and 300 ms).
+
+#### GET /api/recordings/:id/file
+
+Whole-file download under the protected download lease (429 `ACCESS_CAPACITY`,
+401 `AUTH_REQUIRED`, 503 `ACCESS_UNAVAILABLE` as the scanner download).
+`Content-Type: audio/wav`, `Content-Disposition: attachment;
+filename="<basename>"`, `Accept-Ranges: none`, `Cache-Control: no-store`. No
+`Range` support: a request with `Range` gets the whole file with 200, so a
+browser player must buffer the file to seek. The id is checked against
+`RECORDING_INVENTORY_ID` before any filesystem lookup and resolved again at
+request time with the listing's rules; the opened file is verified (regular,
+not fresh, the same file the directory names, no symbolic link on the way). An
+unknown, malformed or no longer eligible id is 404 `RECORDING_NOT_FOUND`.
+
+Errors: `{ error, code, message }` with `RECORDINGS_QUERY_INVALID` (400),
+`RECORDING_NOT_FOUND` (404) or `RECORDINGS_UNAVAILABLE` (503). Error bodies and
+log lines name no path, file name, directory or decoder option.
 
 ## Activity
 
@@ -4295,7 +4542,9 @@ the client gets the default profile (`scanner.ws.spectrumHz` ×
 ```
 
 - `hz` is snapped to 0.5 and clamped to 0.5–25; `bins` is rounded and
-  clamped to 128–2048; omitted fields take the default's values.
+  clamped to 128..`limits.bins.max` (2048 with the default summary budget;
+  up to 8192 where the host bins cap and `scanner.ws.spectrumSummaryBins`
+  allow, WG8); omitted fields take the default's values.
 - One source and one profile per client. Subscribing again switches without a
   gap; subscribing without options returns to the default selection.
   `unsubscribe` or a disconnect releases the demand.
@@ -5062,8 +5311,8 @@ One frame per source and profile:
   bin `i` is centred at `startHz + (i + 0.5) × binHz`.
 - `binCount ≤ bins`, never upsampled; `binHz` is the true width and
   `nativeBinHz` is `fs / fftSize` (`binHz / nativeBinHz` is the max-hold
-  factor). The engine summary budget (`scanner.ws.spectrumSummaryBins`, 2048)
-  caps the detail.
+  factor). The engine summary budget (`min(scanner.ws.spectrumSummaryBins,
+  host bins cap)`, 2048 by default) caps the detail.
 - Cadence: one frame per `ceil(blockHz / hz)` block summaries, with
   `blockHz = 1000 / integrationMs` (20 at the default): 25 Hz gives 20 Hz, 10 or
   15 Hz gives 10 Hz. `effectiveHz` is that cadence while blocks flow and an
