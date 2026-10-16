@@ -3596,7 +3596,10 @@ trails. Two bounds can cut a read, and either gives a normal 200 with
 
 `coveredFrom` says how far back the counts are exact: they are exact for rows
 produced at or after it. It equals `producedFrom` when the read is complete, and is
-later when a bound stopped it (the oldest step boundary fully examined). Show the
+later when a bound stopped it (the oldest step boundary fully examined; under
+`scan-rows`, 1 ms above the newest row left unexamined). When the budget is spent
+before any row was examined it is `producedTo` + 1 ms, which is outside the window
+on purpose: nothing in it is exact. Show the
 part before `coveredFrom` as incomplete rather than as no activity. `retentionFloor`
 is the `producedAt` of the oldest stored row (null when the store is empty); nothing
 older exists.
@@ -3609,8 +3612,14 @@ protected mode both are ordinary reads (an authenticated session or device, like
 every other read). A client should poll them at most every 30 s or so: they are
 snapshots, not live feeds, and each read occupies the single reader.
 
-Measured on the development Mac at the 250,000-row scan cap (load average about 9):
-band map 355 ms, timeline 212 ms. Response size: a busy station has a few hundred
+Measured on the development Mac with 250,000 rows scanned (load average 8 to 14,
+WG5 R1): band map about 370 to 490 ms (earlier runs 355 to 470 ms), timeline about
+220 to 245 ms for 72 h in 180 s buckets and 225 to 230 ms for 24 h in 60 s buckets
+(1,440 buckets; about 384 ms in an earlier loaded run). Budgets are restated as
+measured, not optimised: on the worst row packing a band map stops at the 600 ms
+budget with `time-limit` and still answers 200. A window holding exactly 250,000
+rows is complete (a one-row probe finds nothing left), not `scan-rows`. Raspberry Pi
+figures are not measured yet. Response size: a busy station has a few hundred
 active 12.5 kHz buckets (about 0.1 to 0.2 MB). The worst case, 1,000 buckets each
 with 8 groups of 64-character protocols and 3 entity keys of 128 characters, is
 about 1.9 MB of plain ASCII (measured 1,894,277 bytes) and about 2.8 MB when every

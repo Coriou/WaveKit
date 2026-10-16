@@ -871,6 +871,18 @@ describe("aggregate reads against a store", () => {
 				expect.objectContaining({ code: "ACTIVITY_RECORD_CORRUPT" }),
 			)
 		})
+		// Both check matching rows only: a corrupt row the filters exclude is skipped (R1).
+		withStore(store => {
+			store.insert({ producedAtMs: NOW - 2, protocol: "ais" })
+			store.insert({ producedAtMs: NOW - 1, category: "bogus", protocol: "x" })
+			store.insert({ producedAtMs: NOW - 1, kind: "bogus", protocol: "x" })
+			const map = bandMap(store, { protocols: ["ais"] })
+			expect(map.countedRows).toBe(1)
+			expect(map.scannedRows).toBe(3)
+			const line = timeline(store, { protocols: ["ais"] })
+			expect(line.totalRows).toBe(1)
+			expect(line.scannedRows).toBe(3)
+		})
 	})
 
 	it("timeline at 1 440 buckets is valid, 1 441 is invalid", () => {
@@ -1043,34 +1055,44 @@ describe("aggregate reads against a store", () => {
 			expect(below.scannedRows).toBe(10)
 			expect(below.coveredFrom).toBe(new Date(NOW - 10_000).toISOString())
 			const stats = newStats()
+			// Exactly scanRows rows in the window: a one-row probe finds none left (R1).
 			const at = bandMap(
 				store,
 				{ limits: { scanRows: 10, chunkRows: 3 } },
 				counting(store.sql, stats),
 			)
-			expect(at.truncation).toEqual(["scan-rows"])
+			expect(at.truncation).toEqual([])
 			expect(at.scannedRows).toBe(10)
+			expect(at.coveredFrom).toBe(new Date(NOW - 10_000).toISOString())
 			// Every row read was counted: the walk statements returned 10 rows in all.
 			const walked = stats.returned.filter(r =>
 				r.sql.includes("json_group_array"),
 			)
 			expect(walked.reduce((sum, r) => sum + r.rows, 0)).toBe(10)
-			// The oldest examined row is at NOW-10; rows below it in that ms may remain.
-			expect(at.coveredFrom).toBe(new Date(NOW - 9).toISOString())
+			const atLine = timeline(store, { limits: { scanRows: 10, chunkRows: 4 } })
+			expect(atLine.truncated).toBe(false)
+			expect(atLine.coveredFrom).toBe(new Date(NOW - 10_000).toISOString())
+			// One row past the cap: the probed row is at NOW-10, so exact from NOW-9.
 			const past = bandMap(store, { limits: { scanRows: 9, chunkRows: 3 } })
 			expect(past.truncation).toEqual(["scan-rows"])
 			expect(past.scannedRows).toBe(9)
 			expect(past.countedRows).toBe(9)
-			expect(past.coveredFrom).toBe(new Date(NOW - 8).toISOString())
+			expect(past.coveredFrom).toBe(new Date(NOW - 9).toISOString())
 			const line = timeline(store, { limits: { scanRows: 9, chunkRows: 4 } })
 			expect(line.truncation).toEqual(["scan-rows"])
 			expect(line.totalRows).toBe(9)
+			expect(line.coveredFrom).toBe(new Date(NOW - 9).toISOString())
 		})
 		withStore(store => {
 			store.insert({ producedAtMs: NOW - 1 })
 			const one = bandMap(store, { limits: { scanRows: 1 } })
-			expect(one.truncation).toEqual(["scan-rows"])
+			expect(one.truncation).toEqual([])
 			expect(one.scannedRows).toBe(1)
+			store.insertMany([{ producedAtMs: NOW - 5 }, { producedAtMs: NOW - 5 }])
+			// The cut falls inside the NOW-5 run: rows below it in that ms remain.
+			const tie = bandMap(store, { limits: { scanRows: 2 } })
+			expect(tie.truncation).toEqual(["scan-rows"])
+			expect(tie.coveredFrom).toBe(new Date(NOW - 4).toISOString())
 		})
 	})
 
@@ -1096,6 +1118,8 @@ describe("aggregate reads against a store", () => {
 				// the first walk statement is refused: the budget is already spent.
 				expect(stats.returned).toHaveLength(2)
 				expect(out.scannedRows).toBe(0)
+				// Nothing examined: producedTo + 1 ms (documented; a clamp to producedTo
+				// would claim the rows at producedTo exact).
 				expect(out.coveredFrom).toBe(new Date(30_001).toISOString())
 			}
 		})
@@ -1282,16 +1306,38 @@ describe("aggregate reads against a store", () => {
 							expect(line.scannedRows).toBe(window.length)
 							expect(covered).toBe(fromMs)
 						}
-						if (line.truncation.includes("scan-rows"))
+						const ordered = [...window].sort((a, b) =>
+							a.producedAtMs !== b.producedAtMs
+								? b.producedAtMs - a.producedAtMs
+								: b.seq - a.seq,
+						)
+						if (line.truncation.includes("scan-rows")) {
 							expect(line.scannedRows).toBe(scanRows)
+							// Exact (R1): a row is left, and coverage reaches just above it.
+							const next = ordered[scanRows]
+							expect(next).toBeDefined()
+							expect(covered).toBe((next?.producedAtMs ?? 0) + 1)
+						}
+						if (
+							scanRows >= window.length &&
+							!line.truncation.includes("time-limit")
+						)
+							expect(line.truncated).toBe(false)
+						// rows == cap with an ample budget is complete, from the window start.
+						if (window.length > 0) {
+							const atCap = timeline(store, {
+								producedFromMs: fromMs,
+								bucketMs: 1,
+								...(protocols ? { protocols } : {}),
+								limits: { chunkRows, scanRows: window.length },
+							})
+							expect(atCap.truncation).toEqual([])
+							expect(atCap.coveredFrom).toBe(new Date(fromMs).toISOString())
+							expect(atCap.totalRows).toBe(all.total)
+						}
 						// Minimal: the examined rows are the newest scannedRows of the window,
 						// and coveredFrom is at most one ms above the oldest of them.
 						if (line.truncated) {
-							const ordered = [...window].sort((a, b) =>
-								a.producedAtMs !== b.producedAtMs
-									? b.producedAtMs - a.producedAtMs
-									: b.seq - a.seq,
-							)
 							const oldest = ordered[line.scannedRows - 1]
 							expect(covered).toBeLessThanOrEqual(
 								oldest ? oldest.producedAtMs + 1 : Math.max(fromMs, NOW + 1),

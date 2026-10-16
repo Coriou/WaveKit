@@ -445,10 +445,12 @@ export interface AggregateWalkOutcome {
  * the piece's index rows (matched or not). The wall budget is checked before every
  * statement after the first (`guard`, shared with the caller's other statements); a spent
  * budget stops with `time-limit`. Reaching `scanRows` examined rows stops with `scan-rows`
- * (requirement 1.6): steps are sized so the cap is never passed and no row past it is read.
+ * (requirement 1.6) only when a one-row probe finds a row left below the cursor (exactly
+ * `scanRows` rows in the window is complete): steps are sized so the cap is never passed.
  * `coveredFromMs` is the oldest boundary known exact: `lo` after a range piece, `ms + 1`
- * after a run piece (rows below it in the same ms may remain), the window start when the
- * walk ended.
+ * after a run piece (rows below it in the same ms may remain), the probed row's `ms + 1` at
+ * the cap, the window start when the walk ended, and the window end + 1 ms when a budget
+ * spent before any piece examined nothing.
  */
 export function walkAggregate(
 	db: SqlDatabase,
@@ -470,7 +472,15 @@ export function walkAggregate(
 	walk: while (cursor !== null) {
 		const remaining = limits.scanRows - scannedRows
 		if (remaining <= 0) {
-			scanCut = true
+			// At the cap: a one-row probe tells an exhausted window (complete) from rows
+			// left below the cursor (cut; exact down to just above the next row's ms).
+			const probe = walk.planStep(cursor, 1, guard.stop)
+			if (probe.stopped) break
+			if (probe.next !== null) {
+				scanCut = true
+				coveredFromMs = Math.min(coveredFromMs, probe.next.ms + 1)
+			}
+			cursor = probe.next
 			break
 		}
 		const plan = walk.planStep(
@@ -496,6 +506,8 @@ export function walkAggregate(
 	return {
 		scannedRows,
 		truncation,
+		// A budget spent before any piece examined nothing: producedTo + 1 ms, deliberately
+		// not clamped (a clamp would claim rows at producedTo were examined).
 		coveredFromMs: Math.max(fromMs, coveredFromMs),
 	}
 }
@@ -697,10 +709,11 @@ export function readTimeline(
 	const filters = where.length === 0 ? "1" : where.join(" AND ")
 	// Integer division: produced_at_ms and the bound bigint are both INTEGER, and the
 	// window is non-negative, so this is floor(ms / bucketMs). `seen` counts every index
-	// row of the piece (scannedRows), `n` the matched ones, `bad` rows of an unknown kind.
+	// row of the piece (scannedRows), `n` the matched ones, `bad` matched rows of an unknown
+	// kind. Like the band map, only matched rows are checked (kind and category).
 	const select = `SELECT produced_at_ms / ? AS b, category, COUNT(*) AS seen,
 		COUNT(*) FILTER (WHERE ${filters}) AS n,
-		COUNT(*) FILTER (WHERE kind NOT IN (${KIND_LIST})) AS bad
+		COUNT(*) FILTER (WHERE (${filters}) AND kind NOT IN (${KIND_LIST})) AS bad
 		FROM activity INDEXED BY activity_produced`
 	const scanTie = db.prepare(
 		`${select} WHERE ${WALK_TIE_WHERE} GROUP BY b, category`,
@@ -727,16 +740,21 @@ export function readTimeline(
 		piece => {
 			const rows = (piece.kind === "tie" ? scanTie : scanRange).all(
 				bucketParam,
-				...params,
+				...params, // n
+				...params, // bad
 				...pieceParams(piece),
 			)
 			let seen = 0
 			for (const row of rows) {
 				if (numberOf(row["bad"], "count") > 0)
 					throw activityRecordCorrupt("Activity kind is corrupt")
-				const category = categoryOf(row["category"])
 				const n = numberOf(row["n"], "count")
-				if (n > 0) counter.add(numberOf(row["b"], "bucket"), category, n)
+				if (n > 0)
+					counter.add(
+						numberOf(row["b"], "bucket"),
+						categoryOf(row["category"]),
+						n,
+					)
 				seen += numberOf(row["seen"], "count")
 			}
 			return seen

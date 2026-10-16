@@ -125,8 +125,25 @@ describe.skipIf(!enabled)(
 					lineTimes.push(performance.now() - started)
 					if (result.op === "timeline") line = result.timeline
 				}
+				// The finest default-limit timeline: 24 h x 60 s = 1 440 buckets.
+				const fineTimes: number[] = []
+				let fine: ActivityTimeline | undefined
+				for (let run = 0; run < 3; run += 1) {
+					const started = performance.now()
+					const result = runRead(reader, {
+						op: "timeline",
+						input: {
+							producedFromMs: NOW - 24 * HOUR,
+							producedToMs: NOW - 1,
+							bucketMs: 60_000,
+							limits,
+						},
+					})
+					fineTimes.push(performance.now() - started)
+					if (result.op === "timeline") fine = result.timeline
+				}
 				reader.close()
-				if (!band || !line) throw new TypeError("no result")
+				if (!band || !line || !fine) throw new TypeError("no result")
 				// Max-shaped band map: 1 000 buckets x 8 protocols x 3 entities, long keys.
 				const rows: BandMapRow[] = []
 				let seq = 0
@@ -182,6 +199,12 @@ describe.skipIf(!enabled)(
 						buckets: line.buckets.length,
 						truncation: line.truncation,
 					},
+					timeline1440Ms: median(fineTimes),
+					timeline1440: {
+						scanned: fine.scannedRows,
+						buckets: fine.buckets.length,
+						truncation: fine.truncation,
+					},
 					maxBandMapStringifyMs: median(serial),
 					maxBandMapBytes: bytes,
 					timelineStringifyMs: median(lineSerial),
@@ -189,6 +212,9 @@ describe.skipIf(!enabled)(
 				}
 				process.stderr.write(`AGGREGATES_BENCH ${JSON.stringify(report)}\n`)
 				expect(band.scannedRows).toBe(ROWS)
+				// Exactly the cap in the window is complete (R1).
+				expect(band.truncation).toEqual([])
+				expect(fine.buckets).toHaveLength(1_440)
 			} finally {
 				await rm(dir, { recursive: true, force: true })
 			}
