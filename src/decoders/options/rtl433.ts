@@ -10,6 +10,8 @@ export const RTL433_PROTOCOL_ID_MAX = 999
 export const RTL433_PROTOCOLS_MAX = 256
 /** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
 export const RTL433_INPUT_SAMPLE_RATE_MAX_HZ = 64_000_000
+/** Equals the base classes' 1 kHz floor: below any IQ capture (0 means the default). */
+export const RTL433_INPUT_SAMPLE_RATE_MIN_HZ = 1000
 /** rtl_433's processing range: its 250 kHz default up to the 3.2 Msps RTL-SDR maximum. */
 export const RTL433_TARGET_SAMPLE_RATE_MIN_HZ = 250_000
 export const RTL433_TARGET_SAMPLE_RATE_MAX_HZ = 3_200_000
@@ -37,7 +39,7 @@ export const rtl433OptionsSchema = z
 		inputSampleRate: z
 			.number()
 			.finite()
-			.positive()
+			.min(RTL433_INPUT_SAMPLE_RATE_MIN_HZ)
 			.max(RTL433_INPUT_SAMPLE_RATE_MAX_HZ)
 			.nullable()
 			.optional(),
@@ -105,6 +107,7 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "inputSampleRate",
 		type: "number",
 		unit: "Hz",
+		min: RTL433_INPUT_SAMPLE_RATE_MIN_HZ,
 		max: RTL433_INPUT_SAMPLE_RATE_MAX_HZ,
 		default: 2048000,
 		secret: false,

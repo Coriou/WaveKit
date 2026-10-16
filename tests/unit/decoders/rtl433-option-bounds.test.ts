@@ -207,3 +207,18 @@ describe("Property 14: rtl433 bounded numeric options", () => {
 		)
 	})
 })
+
+describe("rtl433 inputSampleRate bound agrees in schema and argv", () => {
+	const ok = (v: number) =>
+		rtl433OptionsSchema.safeParse({ inputSampleRate: v }).success
+	const args = (v: unknown) => build({ inputSampleRate: v }).view.getArgs()
+	it("999 / 1000 / max / max+1", () => {
+		expect(ok(999)).toBe(false)
+		expect(ok(1000)).toBe(true)
+		expect(ok(64_000_000)).toBe(true)
+		expect(ok(64_000_001)).toBe(false)
+		expect(args(999)).toEqual(args(1000))
+		expect(args(64_000_001)).toEqual(args(64_000_000))
+		expect(args(0)).toEqual(build({}).view.getArgs())
+	})
+})

@@ -18,6 +18,7 @@ import {
 	MULTIMON_FILTER_HZ_MAX,
 	MULTIMON_FM_GAIN_MAX,
 	MULTIMON_SAMPLE_RATE_MAX_HZ,
+	MULTIMON_SAMPLE_RATE_MIN_HZ,
 	MULTIMON_VERBOSITY_MAX,
 } from "../options/multimon-ng.js"
 import type {
@@ -151,12 +152,15 @@ export class MultimonDecoder extends AudioDemodDecoder {
 			),
 			charset: options["charset"] as string | undefined,
 			filters: this.parseFilters(options["filters"]),
+			// An exact 0 stays "absent" (the default rate), as before.
 			inputSampleRate: readNumericOption(
-				options["inputSampleRate"],
+				options["inputSampleRate"] === 0
+					? undefined
+					: options["inputSampleRate"],
 				{
 					key: "inputSampleRate",
 					integer: false,
-					min: 0,
+					min: MULTIMON_SAMPLE_RATE_MIN_HZ,
 					max: MULTIMON_SAMPLE_RATE_MAX_HZ,
 				},
 				warn,
@@ -216,11 +220,13 @@ export class MultimonDecoder extends AudioDemodDecoder {
 		const validModes = rawModes.filter(mode => MULTIMON_MODES.includes(mode))
 
 		if (validModes.length !== rawModes.length) {
-			const invalidModes = rawModes.filter(
-				mode => !MULTIMON_MODES.includes(mode),
-			)
+			// Count only: the invalid entries are option text (WG7 HW.2).
 			this.logger.warn(
-				{ invalidModes, validModes: MULTIMON_MODES },
+				{
+					key: "modes",
+					invalidCount: rawModes.length - validModes.length,
+					validModes: MULTIMON_MODES,
+				},
 				"Some modes are invalid and will be ignored",
 			)
 		}

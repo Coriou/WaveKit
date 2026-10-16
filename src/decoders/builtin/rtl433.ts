@@ -25,6 +25,7 @@ import type { Logger } from "../../utils/logger.js"
 import { readNumericArrayOption, readNumericOption } from "../option-values.js"
 import {
 	RTL433_INPUT_SAMPLE_RATE_MAX_HZ,
+	RTL433_INPUT_SAMPLE_RATE_MIN_HZ,
 	RTL433_PROTOCOLS_MAX,
 	RTL433_PROTOCOL_ID_MAX,
 	RTL433_TARGET_SAMPLE_RATE_MAX_HZ,
@@ -144,12 +145,15 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 			),
 			outputFormat:
 				(options["outputFormat"] as Rtl433OutputFormat | undefined) ?? "json",
+			// An exact 0 stays "absent" (the default rate), as before.
 			inputSampleRate: readNumericOption(
-				options["inputSampleRate"],
+				options["inputSampleRate"] === 0
+					? undefined
+					: options["inputSampleRate"],
 				{
 					key: "inputSampleRate",
 					integer: false,
-					min: 0,
+					min: RTL433_INPUT_SAMPLE_RATE_MIN_HZ,
 					max: RTL433_INPUT_SAMPLE_RATE_MAX_HZ,
 				},
 				warn,

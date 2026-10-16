@@ -267,3 +267,42 @@ describe("Property 14: dsd-fme bounded numeric options", () => {
 		)
 	})
 })
+
+describe("dsd-fme warnings never echo option values", () => {
+	const SECRET = "SECRET-424242; rm -rf /"
+	it("voiceSlot, mode, offsetHz, extraArgs and udp warn without the value", () => {
+		const { view, warn } = build({
+			voiceSlot: SECRET,
+			mode: SECRET,
+			offsetHz: SECRET,
+			extraArgs: ["-o", SECRET, "-f1"],
+			output: "udp",
+			udpHost: SECRET,
+		})
+		view.getArgs()
+		view.onOptionsUpdated()
+		view.onOptionsUpdated()
+		view.getArgs()
+		expect(JSON.stringify(warn)).not.toContain("SECRET-424242")
+		for (const key of ["voiceSlot", "mode", "offsetHz"])
+			expect(
+				warn.filter(w => w["key"] === key),
+				key,
+			).toHaveLength(1)
+	})
+})
+
+describe("dsd-fme inputSampleRate bound agrees in schema and argv", () => {
+	const ok = (v: number) =>
+		dsdFmeOptionsSchema.safeParse({ inputSampleRate: v }).success
+	const args = (v: unknown) => build({ inputSampleRate: v }).view.getArgs()
+	it("999 / 1000 / max / max+1", () => {
+		expect(ok(999)).toBe(false)
+		expect(ok(1000)).toBe(true)
+		expect(ok(64_000_000)).toBe(true)
+		expect(ok(64_000_001)).toBe(false)
+		expect(args(999)).toEqual(args(1000))
+		expect(args(64_000_001)).toEqual(args(64_000_000))
+		expect(args(0)).toEqual(build({}).view.getArgs())
+	})
+})

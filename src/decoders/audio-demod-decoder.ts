@@ -312,7 +312,6 @@ function getDebugFilename(
 export abstract class AudioDemodDecoder extends BaseDecoder {
 	/** Debug recording options if enabled */
 	protected debugRecording?: DebugRecordingOptions
-	private invalidOffsetLogged = false
 	private channelOverridesOffsetLogged = false
 	private unknownCentreLogged = false
 	/** One warning per key for this decoder (WG7 HW.2); never logs the value. */
@@ -407,13 +406,8 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	protected getOffsetHz(): number {
 		const parsed = OffsetHzSchema.safeParse(this.config.options["offsetHz"])
 		if (parsed.success) return parsed.data ?? 0
-		if (!this.invalidOffsetLogged) {
-			this.invalidOffsetLogged = true
-			this.logger.warn(
-				{ offsetHz: this.config.options["offsetHz"] },
-				"Ignoring invalid offsetHz option (expected a number of Hz)",
-			)
-		}
+		// Key-only, deduped warning: never the value (WG7 HW.2).
+		this.optionWarn("offsetHz", "invalid")
 		return 0
 	}
 

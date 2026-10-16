@@ -239,3 +239,42 @@ describe("Property 14: multimon-ng bounded numeric options", () => {
 		)
 	})
 })
+
+describe("multimon-ng warnings never echo option values", () => {
+	const SECRET = "SECRET-424242; rm -rf /"
+	it("offsetHz and modes warn key-only, once per key", () => {
+		const { view, warn } = build({
+			offsetHz: SECRET,
+			modes: ["POCSAG1200", SECRET],
+		})
+		view.getArgs()
+		view.getArgs()
+		view.onOptionsUpdated()
+		view.getArgs()
+		expect(JSON.stringify(warn)).not.toContain("SECRET-424242")
+		expect(warn.filter(w => w["key"] === "offsetHz")).toEqual([
+			expect.objectContaining({ key: "offsetHz", issue: "invalid" }),
+		])
+		expect(warn.some(w => w["key"] === "modes")).toBe(true)
+	})
+})
+
+describe("multimon-ng inputSampleRate bound agrees in schema and argv", () => {
+	const ok = (v: number) =>
+		multimonNgOptionsSchema.safeParse({ inputSampleRate: v }).success
+	const cmd = (v: unknown) => pipeline(build({ inputSampleRate: v }).view)
+	it("999 / 1000 / max / max+1", () => {
+		expect(ok(999)).toBe(false)
+		expect(ok(1000)).toBe(true)
+		expect(ok(64_000_000)).toBe(true)
+		expect(ok(64_000_001)).toBe(false)
+		expect(cmd(999)).toBe(cmd(1000))
+		expect(cmd(64_000_001)).toBe(cmd(64_000_000))
+		const below = build({ inputSampleRate: 999 })
+		below.view.getArgs()
+		expect(below.optionWarnings()).toEqual([
+			expect.objectContaining({ key: "inputSampleRate", issue: "clamped" }),
+		])
+		expect(cmd(0)).toBe(pipeline(build({}).view))
+	})
+})

@@ -35,6 +35,8 @@ export const DSD_FME_DURATION_MS_MAX = 86_400_000
 export const DSD_FME_FM_GAIN_MAX = 1000
 /** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
 export const DSD_FME_SAMPLE_RATE_MAX_HZ = 64_000_000
+/** Equals the base classes' 1 kHz floor: below any IQ capture (0 means the default). */
+export const DSD_FME_SAMPLE_RATE_MIN_HZ = 1000
 /** Retention by age: at most one year (8 760 h); the default is a week. */
 export const DSD_FME_RECORDING_MAX_AGE_HOURS_MAX = 8760
 /** Retention by size: at most 1 TiB (1 048 576 MB); the default is 512 MB. */
@@ -86,7 +88,7 @@ export const dsdFmeOptionsSchema = z
 		inputSampleRate: z
 			.number()
 			.finite()
-			.positive()
+			.min(DSD_FME_SAMPLE_RATE_MIN_HZ)
 			.max(DSD_FME_SAMPLE_RATE_MAX_HZ)
 			.nullable()
 			.optional(),
@@ -256,6 +258,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "inputSampleRate",
 		type: "number",
+		min: DSD_FME_SAMPLE_RATE_MIN_HZ,
 		max: DSD_FME_SAMPLE_RATE_MAX_HZ,
 		unit: "Hz",
 		default: 2_400_000,

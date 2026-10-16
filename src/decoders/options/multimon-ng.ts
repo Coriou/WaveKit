@@ -26,6 +26,8 @@ export const MULTIMON_FILTER_GAIN_DB_MAX = 60
 export const MULTIMON_FM_GAIN_MAX = 1000
 /** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
 export const MULTIMON_SAMPLE_RATE_MAX_HZ = 64_000_000
+/** Equals the base classes' 1 kHz floor: below any IQ capture (0 means the default). */
+export const MULTIMON_SAMPLE_RATE_MIN_HZ = 1000
 /** Target frequency lists: the decoder's channel limit for single-channel adapters. */
 export const MULTIMON_FREQUENCIES_MAX = 64
 
@@ -67,7 +69,7 @@ export const multimonNgOptionsSchema = z
 		inputSampleRate: z
 			.number()
 			.finite()
-			.positive()
+			.min(MULTIMON_SAMPLE_RATE_MIN_HZ)
 			.max(MULTIMON_SAMPLE_RATE_MAX_HZ)
 			.nullable()
 			.optional(),
@@ -176,6 +178,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "inputSampleRate",
 		type: "number",
 		unit: "Hz",
+		min: MULTIMON_SAMPLE_RATE_MIN_HZ,
 		max: MULTIMON_SAMPLE_RATE_MAX_HZ,
 		default: 2400000,
 		secret: false,

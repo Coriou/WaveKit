@@ -7,6 +7,7 @@
 // producing byte-identical argv and pipeline strings. Expected values were recorded
 // from the frozen code (cccf665f) and are inlined here as literals.
 import { describe, expect, it } from "vitest"
+import path from "node:path"
 import pino from "pino"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
 import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
@@ -19,6 +20,9 @@ import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { LoraMeshtasticDecoder } from "../../../src/decoders/builtin/lora-meshtastic.js"
 
 const logger = pino({ level: "silent" })
+
+/** dsd-fme resolves a relative wavDir against the working directory. */
+const CWD_CALLS = path.resolve("./decoded_calls")
 
 const BUILD: Record<
 	string,
@@ -609,13 +613,13 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | (mkdir -p /Users/ben/Projects/wavekit-wg7-hw/decoded_calls && cd /Users/ben/Projects/wavekit-wg7-hw/decoded_calls && dsd-fme -i /dev/stdin -7 /Users/ben/Projects/wavekit-wg7-hw/decoded_calls -P -fa -o null)",
+			`csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | (mkdir -p ${CWD_CALLS} && cd ${CWD_CALLS} && dsd-fme -i /dev/stdin -7 ${CWD_CALLS} -P -fa -o null)`,
 		],
 		getDecoderArgs: [
 			"-i",
 			"/dev/stdin",
 			"-7",
-			"/Users/ben/Projects/wavekit-wg7-hw/decoded_calls",
+			CWD_CALLS,
 			"-P",
 			"-fa",
 			"-o",

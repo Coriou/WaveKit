@@ -40,6 +40,7 @@ import {
 	DSD_FME_RECORDING_MAX_AGE_HOURS_MAX,
 	DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
 	DSD_FME_SAMPLE_RATE_MAX_HZ,
+	DSD_FME_SAMPLE_RATE_MIN_HZ,
 } from "../options/dsd-fme.js"
 import { pruneCallRecordings } from "./call-recordings.js"
 import type {
@@ -568,10 +569,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Validate mode
 		if (!DSD_FME_MODES.includes(mode)) {
-			this.logger.warn(
-				{ mode, validModes: DSD_FME_MODES },
-				"Invalid mode, defaulting to auto",
-			)
+			// Key-only, deduped: never the value (WG7 HW.2). Defaults to auto.
+			this.optionWarn("mode", "invalid")
 		}
 
 		// WG7 HW.2: every number is read by meaning (bounded, finite) before it
@@ -592,11 +591,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			udpHost: options["udpHost"] as string | undefined,
 			udpPort: this.parseUdpPort(options["udpPort"]),
 			extraArgs: this.parseExtraArgs(options["extraArgs"]),
-			inputSampleRate: num("inputSampleRate", {
-				integer: false,
-				min: 0,
-				max: DSD_FME_SAMPLE_RATE_MAX_HZ,
-			}),
+			// An exact 0 stays "absent" (the default rate), as before.
+			inputSampleRate:
+				options["inputSampleRate"] === 0
+					? undefined
+					: num("inputSampleRate", {
+							integer: false,
+							min: DSD_FME_SAMPLE_RATE_MIN_HZ,
+							max: DSD_FME_SAMPLE_RATE_MAX_HZ,
+						}),
 			fmGain: num("fmGain", {
 				integer: false,
 				min: 0,
@@ -662,10 +665,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (value === undefined) return undefined
 		const parsed = VoiceSlotSchema.safeParse(value)
 		if (parsed.success) return parsed.data
-		this.logger.warn(
-			{ voiceSlot: value },
-			'Invalid voiceSlot (expected 1, 2 or "both"); using the dsd-fme default',
-		)
+		// Key-only, deduped: never the value (WG7 HW.2); the dsd-fme default applies.
+		this.optionWarn("voiceSlot", "invalid")
 		return undefined
 	}
 
@@ -689,8 +690,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			kept.push(arg)
 		}
 		if (dropped.length > 0) {
+			// Count only: the dropped arguments are option text (WG7 HW.2).
 			this.logger.warn(
-				{ dropped },
+				{ key: "extraArgs", dropped: dropped.length },
 				"Ignoring extraArgs that set the dsd-fme mode or audio output",
 			)
 		}
@@ -1208,7 +1210,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		} else {
 			if (this.options.output === "udp") {
 				this.logger.warn(
-					{ udpHost: this.options.udpHost, udpPort: this.options.udpPort },
+					{
+						hasUdpHost: Boolean(this.options.udpHost),
+						hasUdpPort: this.options.udpPort !== undefined,
+					},
 					"output udp needs udpHost and udpPort; voice output disabled",
 				)
 			}
