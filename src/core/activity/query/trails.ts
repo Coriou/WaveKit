@@ -121,6 +121,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export function parseTrailPosition(json: unknown): TrailPosition | null {
 	let value: unknown = json
 	if (typeof json === "string") {
+		// SQLite keeps the first of duplicate keys, JSON.parse the last: refuse a
+		// repeated lat, lon or altM so both sides read the row the same way.
+		if (
+			json.indexOf('"lat"') !== json.lastIndexOf('"lat"') ||
+			json.indexOf('"lon"') !== json.lastIndexOf('"lon"') ||
+			json.indexOf('"altM"') !== json.lastIndexOf('"altM"')
+		)
+			return null
 		try {
 			value = JSON.parse(json) as unknown
 		} catch {
