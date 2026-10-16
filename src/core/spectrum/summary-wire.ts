@@ -73,15 +73,19 @@ export function encodeEventsForWire(
 }
 
 /**
- * Host side, after WorkerToMainSchema validated the wire fields: replaces each
- * wire block-summary event with a plain one whose bins are decoded.
+ * Host side, after WorkerToMainSchema validated the wire fields: decodes each wire
+ * block-summary's bins and strips the wire fields in place (no new event object).
  */
 export function decodeEventsFromWire(events: PipelineEvent[]): void {
 	for (let i = 0; i < events.length; i++) {
-		const ev = events[i] as Partial<WireBlockSummaryEvent> | undefined
-		if (!ev?.binsI16 || ev.kind !== "block-summary" || !ev.summary) continue
-		ev.summary.bins = decodeSummaryBins(ev.binsI16)
-		events[i] = { kind: "block-summary", summary: ev.summary }
+		const ev = events[i]
+		if (ev?.kind !== "block-summary") continue
+		const wire = ev as Partial<WireBlockSummaryEvent>
+		if (!wire.binsI16 || !ev.summary) continue
+		ev.summary.bins = decodeSummaryBins(wire.binsI16)
+		delete wire.binsEncoding
+		delete wire.binsI16
+		delete wire.binCount
 	}
 }
 
@@ -102,7 +106,7 @@ export function wireEventProblem(ev: object, maxBins: number): string | null {
 	if (!has) return null
 	if (w.kind !== "block-summary") return "wire bins on a non-summary event"
 	if (w.binsEncoding !== SUMMARY_BINS_ENCODING)
-		return `unknown bins encoding ${String(w.binsEncoding)}`
+		return "unknown wire bins encoding"
 	if (!(w.binsI16 instanceof Int16Array)) return "wire bins not an Int16Array"
 	const count = w.binCount
 	if (
@@ -111,9 +115,9 @@ export function wireEventProblem(ev: object, maxBins: number): string | null {
 		count < 1 ||
 		count > maxBins
 	)
-		return `invalid wire bin count ${String(count)}`
+		return "invalid wire bin count"
 	if (w.binsI16.length !== count)
-		return `wire bins length ${w.binsI16.length} !== binCount ${count}`
+		return "wire bins length does not match binCount"
 	const summary = w.summary as { bins?: unknown } | undefined
 	if (
 		typeof summary !== "object" ||

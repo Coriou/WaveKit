@@ -139,4 +139,146 @@ describe("spectrum bins cap (service and engine)", () => {
 		expect(decodeBins(snapshots[0]!.bins)).toHaveLength(8192)
 		await h.service.stop()
 	})
+
+	describe("cap dep snapshot and validation", () => {
+		const FLOOR_VIEW = { setting: "auto", cap: 2048, source: "fallback" }
+		async function statusOf(dep: () => unknown) {
+			const h = makeService({
+				summaryBins: 8192,
+				binsCap: dep as () => SpectrumBinsCapView,
+			})
+			await h.service.start()
+			await h.service.acquire("rtl", "job:a")
+			const engineBins = h.host().cfg.spectrumBins
+			const limits = h.service.status().limits
+			await h.service.stop()
+			return { engineBins, limits }
+		}
+
+		it.each<[string, () => unknown]>([
+			["cap only", () => ({ cap: 8192 })],
+			[
+				"fallback with cap 8192",
+				() => ({ setting: "auto", cap: 8192, source: "fallback" }),
+			],
+			[
+				"config with setting !== cap",
+				() => ({ setting: 2048, cap: 8192, source: "config" }),
+			],
+			[
+				"measured with a fixed setting",
+				() => ({ setting: 8192, cap: 8192, source: "measured" }),
+			],
+			[
+				"unknown source",
+				() => ({ setting: "auto", cap: 8192, source: "guess" }),
+			],
+			[
+				"unknown setting",
+				() => ({ setting: 3000, cap: 8192, source: "measured" }),
+			],
+			["null", () => null],
+			["a string", () => "8192"],
+		])(
+			"a malformed or contradictory view (%s) answers the floor",
+			async (_n, dep) => {
+				const r = await statusOf(dep)
+				expect(r.limits.binsCap).toEqual(FLOOR_VIEW)
+				expect(r.limits.bins.max).toBe(PROFILE_BINS_FLOOR)
+				expect(r.engineBins).toBe(PROFILE_BINS_FLOOR)
+			},
+		)
+
+		it("each field is read once: a changing getter cannot desync status and clamp", async () => {
+			let reads = 0
+			const view = {
+				setting: "auto",
+				source: "measured",
+				get cap() {
+					reads++
+					return reads === 1 ? 8192 : 4096
+				},
+			}
+			const r = await statusOf(() => view)
+			expect(reads).toBe(1)
+			expect(r.limits.binsCap).toEqual({
+				setting: "auto",
+				cap: 8192,
+				source: "measured",
+			})
+			expect(r.limits.bins.max).toBe(8192)
+			expect(r.engineBins).toBe(8192)
+		})
+
+		it("a getter that throws answers the floor", async () => {
+			const r = await statusOf(() => ({
+				setting: "auto",
+				source: "measured",
+				get cap(): number {
+					throw new Error("x")
+				},
+			}))
+			expect(r.limits.binsCap).toEqual(FLOOR_VIEW)
+		})
+
+		it("extra fields on the view are not echoed into status", async () => {
+			const r = await statusOf(() => ({
+				setting: 4096,
+				cap: 4096,
+				source: "config",
+				secret: "do-not-echo",
+				measurements: [1, 2, 3],
+			}))
+			expect(r.limits.binsCap).toEqual({
+				setting: 4096,
+				cap: 4096,
+				source: "config",
+			})
+			expect(JSON.stringify(r.limits)).not.toContain("do-not-echo")
+		})
+	})
+
+	describe("every served profile stays within limits.bins.max", () => {
+		async function setup(maxProfiles: number) {
+			const h = makeService({ summaryBins: 512, binsCap: () => view(8192) })
+			h.settings.ws.spectrumBins = 2048
+			h.settings.ws.spectrumMaxProfiles = maxProfiles
+			await h.service.start()
+			await h.service.acquire("rtl", "job:a")
+			h.host().epoch(1, true)
+			for (let i = 0; i < 3; i++) h.host().summary(1, i, 512)
+			return h
+		}
+
+		it("omitted bins take the default bounded to the client max (512, not 2048)", async () => {
+			const h = await setup(4)
+			const max = h.service.status().limits.bins.max
+			expect(max).toBe(512)
+			expect(h.service.status().defaultProfile.bins).toBe(512)
+			await h.service.subscribe("c1", { sourceId: "rtl" })
+			const ack = h.profiles.at(-1)!.ack
+			expect(ack.profile!.bins).toBe(512)
+			expect(ack.outcome).toBe("exact")
+			expect(ack.adjusted).toEqual([])
+			await h.service.subscribe("c2", undefined)
+			expect(h.profiles.at(-1)!.ack.profile!.bins).toBe(512)
+			await h.service.stop()
+		})
+
+		it("an admission fallback to the default never exceeds the bound", async () => {
+			const h = await setup(1)
+			await h.service.subscribe("a", { sourceId: "rtl", hz: 0.5, bins: 512 })
+			expect(h.profiles.at(-1)!.ack.profile).toMatchObject({
+				hz: 0.5,
+				bins: 512,
+			})
+			await h.service.subscribe("b", { sourceId: "rtl", hz: 10, bins: 128 })
+			const ack = h.profiles.at(-1)!.ack
+			expect(ack.profile).toMatchObject({ key: "10:512", hz: 10, bins: 512 })
+			expect(ack.adjusted).toContain("profile-limit")
+			for (const p of h.service.status().profiles)
+				expect(p.bins).toBeLessThanOrEqual(512)
+			await h.service.stop()
+		})
+	})
 })

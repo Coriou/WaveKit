@@ -178,6 +178,87 @@ describe("resolveSpectrumBinsCap", () => {
 		expect(res).toMatchObject({ cap: 2048, source: "fallback", wallMs: 201 })
 	})
 
+	it("a getter sample is read once: NaN on a second read cannot pass as 8192", () => {
+		const reads = new Map<number, number>()
+		const res = resolveSpectrumBinsCap("auto", {
+			now: () => 0,
+			measure: bins => {
+				const sample = { ...ok(bins) } as BinsCostSample
+				Object.defineProperty(sample, "summaryBytesPerSecond", {
+					enumerable: true,
+					get: () => {
+						const n = (reads.get(bins) ?? 0) + 1
+						reads.set(bins, n)
+						return n === 1 ? 1 : NaN
+					},
+				})
+				return sample
+			},
+		})
+		expect(res.cap).toBe(8192)
+		expect(res.source).toBe("measured")
+		expect(reads.get(8192)).toBe(1)
+		for (const m of res.measurements) {
+			expect(Number.isFinite(m.summaryBytesPerSecond)).toBe(true)
+			expect(
+				Object.getOwnPropertyDescriptor(m, "summaryBytesPerSecond")?.get,
+			).toBeUndefined()
+		}
+	})
+
+	it("a getter that fails the budget on the second read still uses the first value", () => {
+		let n = 0
+		const res = resolveSpectrumBinsCap("auto", {
+			now: () => 0,
+			measure: bins => {
+				const sample = { ...ok(bins) }
+				Object.defineProperty(sample, "profileMsPerSecond", {
+					enumerable: true,
+					get: () => (++n === 1 ? 1e9 : 0),
+				})
+				return sample
+			},
+		})
+		expect(res.measurements[0]).toMatchObject({
+			bins: 8192,
+			profileMsPerSecond: 1e9,
+		})
+	})
+
+	it("overtime fallback from the default measurer reports a finite non-zero wallMs", () => {
+		let t = 0
+		const res = resolveSpectrumBinsCap("auto", { now: () => (t += 50) })
+		expect(res).toMatchObject({ cap: 2048, source: "fallback" })
+		expect(res.wallMs).toBeGreaterThan(0)
+		expect(Number.isFinite(res.wallMs)).toBe(true)
+	})
+
+	it("a clock that throws or turns NaN keeps the last known finite wallMs", () => {
+		let calls = 0
+		const throwing = resolveSpectrumBinsCap("auto", {
+			now: () => {
+				calls++
+				if (calls === 1) return 0
+				if (calls === 2) return 30
+				throw new Error("clock")
+			},
+			measure: bins => ({
+				...ok(bins),
+				profileMsPerSecond: B.profileMsPerSecond * 10,
+			}),
+		})
+		expect(throwing).toMatchObject({ source: "fallback", wallMs: 30 })
+		let k = 0
+		const nan = resolveSpectrumBinsCap("auto", {
+			now: () => [0, 40][k++] ?? NaN,
+			measure: bins => ({
+				...ok(bins),
+				profileMsPerSecond: B.profileMsPerSecond * 10,
+			}),
+		})
+		expect(nan).toMatchObject({ source: "fallback", wallMs: 40 })
+	})
+
 	it("default measurer stops on overtime and falls back", () => {
 		let t = 0
 		const res = resolveSpectrumBinsCap("auto", { now: () => (t += 50) })

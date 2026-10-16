@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest"
 import type { SpectrumBinsCapView } from "@wavekit/api-types"
 import {
 	GOLDEN_OPTIONS,
+	SAMPLED_RUNS,
+	optionArb,
 	runScenario,
 	type MakeOptions,
 } from "./spectrum-service-bins-cap-harness.js"
@@ -92,12 +94,26 @@ interface GoldenEntry {
 	live: unknown
 	status: { limits: Record<string, unknown> }
 }
-const entries = golden as unknown as GoldenEntry[]
+interface SampledEntry {
+	options: unknown
+	logged: unknown
+	live: unknown
+}
+const fixture = golden as unknown as {
+	fixed: GoldenEntry[]
+	sampled: SampledEntry[]
+}
+const entries = fixture.fixed
 
 describe("bins cap: default profile unchanged (golden from 30f17b43)", () => {
-	it("the golden covers the fixed option list", () => {
+	it("the golden covers the fixed option list with live frames", () => {
 		expect(entries).toHaveLength(GOLDEN_OPTIONS.length)
 		expect(entries.length).toBeGreaterThanOrEqual(40)
+		for (const e of entries)
+			if (
+				(e.logged as { ack?: { profile?: unknown } } | undefined)?.ack?.profile
+			)
+				expect((e.live as unknown[]).length).toBeGreaterThan(0)
 	})
 
 	it("absent dep: every golden subscribe, frame and the status are identical", async () => {
@@ -107,7 +123,7 @@ describe("bins cap: default profile unchanged (golden from 30f17b43)", () => {
 			expect(got, JSON.stringify(options)).toEqual(want)
 			expect(Object.keys(got.status.limits)).not.toContain("binsCap")
 		}
-	})
+	}, 60_000)
 
 	it("cap dep with the default 2048 budget: golden equal except limits.binsCap", async () => {
 		for (const cap of [2048, 4096, 8192]) {
@@ -129,26 +145,39 @@ describe("bins cap: default profile unchanged (golden from 30f17b43)", () => {
 				expect(limits).toEqual(want.status.limits)
 			}
 		}
-	})
+	}, 60_000)
 
-	const optionArb = fc.record(
-		{
-			hz: fc.double({ min: -5, max: 80, noNaN: true }),
-			bins: fc.oneof(
-				fc.integer({ min: -10, max: 20_000 }),
-				fc.double({ min: -10, max: 20_000, noNaN: true }),
-				fc.constant(1e9),
-			),
-			averaging: fc.double({ min: -3, max: 50, noNaN: true }),
-			backfillMs: fc.oneof(
-				fc.integer({ min: -5, max: 12_000 }),
-				fc.constant(80_000),
-			),
-		},
-		{ requiredKeys: [] },
-	)
 	const capArb = fc.constantFrom<number | null>(null, 2048, 4096, 8192)
 
+	it("frozen oracle: sampled options give the 30f17b43 ack, snapshots, backfill and live frames under every cap", async () => {
+		expect(fixture.sampled).toHaveLength(SAMPLED_RUNS)
+		const caps = [null, 2048, 4096, 8192] as const
+		for (const [i, entry] of fixture.sampled.entries()) {
+			const cap = caps[i % caps.length]!
+			const base: MakeOptions = { summaryBins: 2048 }
+			const got = roundTrip(
+				await runScenario(
+					cap === null ? base : { ...base, binsCap: () => view(cap) },
+					entry.options,
+				),
+			)
+			expect(got.logged, `${cap} ${JSON.stringify(entry.options)}`).toEqual(
+				entry.logged,
+			)
+			expect(got.live).toEqual(entry.live)
+			expect((got.live as unknown[]).length).toBeGreaterThan(0)
+		}
+	}, 60_000)
+
+	/*
+	 * Property 13 frames: the frozen code cannot run here, so frames are pinned in two steps.
+	 * (1) The frozen oracle above (and the fixed golden) captured ack, snapshot, backfill and live
+	 * frames at 30f17b43 for 140 option sets spanning every clamp branch; the current dep-absent
+	 * and dep-present paths must reproduce them exactly. (2) For each random option here, frames
+	 * with the dep equal frames with the dep absent, and the served profile, adjusted list and
+	 * backfill normalisation equal the frozen normaliser's; frames are a function of exactly
+	 * that (profile, backfillMs) and the identical summary feed, which (1) pins against 30f17b43.
+	 */
 	it("Property 13: random options and caps with budget 2048 equal the frozen behaviour", async () => {
 		await fc.assert(
 			fc.asyncProperty(optionArb, capArb, async (opt, cap) => {
@@ -163,6 +192,7 @@ describe("bins cap: default profile unchanged (golden from 30f17b43)", () => {
 				)
 				expect(withCap.logged).toEqual(plain.logged)
 				expect(withCap.live).toEqual(plain.live)
+				expect((withCap.live as unknown[]).length).toBeGreaterThan(0)
 				const { binsCap, ...limits } = withCap.status
 					.limits as unknown as unknown as Record<string, unknown>
 				expect(limits).toEqual(plain.status.limits)
@@ -183,5 +213,5 @@ describe("bins cap: default profile unchanged (golden from 30f17b43)", () => {
 			}),
 			{ numRuns: 150 },
 		)
-	})
+	}, 60_000)
 })

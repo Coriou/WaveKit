@@ -2,6 +2,8 @@
  * WG8 lane SB: shared harness for the bins-cap tests and for the golden capture (run once against
  * the frozen code, commit 30f17b43). Builds a SpectrumService like spectrum-service-backfill.test.ts.
  */
+import { createHash } from "node:crypto"
+import fc from "fast-check"
 import pino from "pino"
 import type {
 	SpectrumBinsCapView,
@@ -173,7 +175,21 @@ export function makeService(opts: MakeOptions) {
 	}
 }
 
-/** Subscribes one option set on a fresh service and records ack, snapshot, backfill, a live frame and status. */
+/**
+ * Post-subscribe summaries: 20 summaries/s (50 ms integration), so 40 yield 20 frames at 10 Hz and
+ * one at 0.5 Hz (the slowest profile), making live frames non-empty for every served profile.
+ */
+export const LIVE_SUMMARIES = 40
+
+/** A frame with its base64 bins replaced by their sha256 (keeps the golden small, still byte-exact). */
+function digestFrame(frame: SpectrumFrameEventData): SpectrumFrameEventData {
+	return {
+		...frame,
+		bins: createHash("sha256").update(frame.bins).digest("hex"),
+	}
+}
+
+/** Subscribes one option set on a fresh service and records ack, snapshot, backfill, live frames and status. */
 export async function runScenario(
 	opts: MakeOptions,
 	options: unknown,
@@ -190,16 +206,17 @@ export async function runScenario(
 	for (let i = 0; i < 3; i++) h.host().summary(1, i * 3, feedBins)
 	await h.service.subscribe("c1", options)
 	const before = h.frames.length
-	h.host().summary(1, 5, feedBins)
+	for (let i = 0; i < LIVE_SUMMARIES; i++)
+		h.host().summary(1, 5 + (i % 11), feedBins)
 	const logged = h.profiles.at(-1)
-	const live = h.frames.slice(before).map(f => f.frame)
+	const live = h.frames.slice(before).map(f => digestFrame(f.frame))
 	const status = h.service.status()
 	await h.service.stop()
 	return {
 		logged: logged && {
 			ack: logged.ack,
-			snapshots: logged.snapshots,
-			backfill: logged.backfill,
+			snapshots: logged.snapshots.map(digestFrame),
+			backfill: logged.backfill.map(digestFrame),
 		},
 		live,
 		status,
@@ -249,3 +266,31 @@ export const GOLDEN_OPTIONS: unknown[] = [
 	{ sourceId: "nope", bins: 512 },
 	{ sourceId: "rtl", bins: "x" },
 ]
+
+/** Property 13's subscribe options (all keys optional; hostile ranges on every axis). */
+export const optionArb = fc.record(
+	{
+		hz: fc.double({ min: -5, max: 80, noNaN: true }),
+		bins: fc.oneof(
+			fc.integer({ min: -10, max: 20_000 }),
+			fc.double({ min: -10, max: 20_000, noNaN: true }),
+			fc.constant(1e9),
+		),
+		averaging: fc.double({ min: -3, max: 50, noNaN: true }),
+		backfillMs: fc.oneof(
+			fc.integer({ min: -5, max: 12_000 }),
+			fc.constant(80_000),
+		),
+	},
+	{ requiredKeys: [] },
+)
+
+/** Seed and size of the sampled frozen oracle (`golden.sampled`, captured at 30f17b43). */
+export const SAMPLED_SEED = 13
+export const SAMPLED_RUNS = 100
+
+export function sampledOptions(): unknown[] {
+	return fc
+		.sample(optionArb, { seed: SAMPLED_SEED, numRuns: SAMPLED_RUNS })
+		.map(o => ({ sourceId: "rtl", ...o }))
+}

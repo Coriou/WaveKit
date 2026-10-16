@@ -3,6 +3,7 @@ import fc from "fast-check"
 import { SPECTRUM_SUMMARY_BINS_MAX } from "@wavekit/api-types"
 import {
 	decodeEventsFromWire,
+	wireEventProblem,
 	decodeSummaryBins,
 	encodeEventsForWire,
 	encodeSummaryBins,
@@ -204,6 +205,45 @@ describe("host boundary refuses malformed wire summaries", () => {
 			events: [{ kind: "block-summary", summary: summary([]), binCount: 1 }],
 		}
 		expect(WorkerToMainSchema.safeParse(msg).success).toBe(false)
+	})
+})
+
+describe("wire decode and problems (review fixes)", () => {
+	it("decode strips the wire fields in place on the same event object", () => {
+		const ev: PipelineEvent = {
+			kind: "block-summary",
+			summary: summary([-1, 0.5, 2]),
+		}
+		const events = [ev]
+		encodeEventsForWire(events, [])
+		decodeEventsFromWire(events)
+		expect(events[0]).toBe(ev)
+		expect(Object.keys(ev).sort()).toEqual(["kind", "summary"])
+		expect(ev.kind === "block-summary" && ev.summary.bins).toEqual([-1, 0.5, 2])
+	})
+
+	it("problem messages never echo a hostile encoding or count", () => {
+		const hostile = "<script>evil-ENCODING-1234</script>"
+		const base = {
+			kind: "block-summary",
+			summary: summary([]),
+			binsEncoding: "i16-half-db",
+			binsI16: new Int16Array(4),
+			binCount: 4,
+		}
+		const enc = wireEventProblem({ ...base, binsEncoding: hostile }, 8192)
+		expect(enc).toBe("unknown wire bins encoding")
+		expect(enc).not.toContain("evil")
+		const count = wireEventProblem(
+			{ ...base, binCount: { toString: () => hostile } },
+			8192,
+		)
+		expect(count).toBe("invalid wire bin count")
+		expect(count).not.toContain("evil")
+		const huge = wireEventProblem({ ...base, binCount: 1234567 }, 8192)
+		expect(huge).not.toContain("1234567")
+		const mismatch = wireEventProblem({ ...base, binCount: 5 }, 8192)
+		expect(mismatch).toBe("wire bins length does not match binCount")
 	})
 })
 

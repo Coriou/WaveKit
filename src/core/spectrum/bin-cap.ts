@@ -53,19 +53,29 @@ function passes(s: BinsCostSample): boolean {
 	)
 }
 
-function valid(s: unknown, bins: number): s is BinsCostSample {
-	if (typeof s !== "object" || s === null) return false
+/**
+ * Reads each field of a measurer answer exactly once into a fresh plain sample, or null when
+ * it is not an object, has the wrong `bins` or any cost that is not a finite number >= 0.
+ * Validation and selection only ever see the snapshot (a getter cannot answer twice).
+ */
+function snapshot(s: unknown, bins: number): BinsCostSample | null {
+	if (typeof s !== "object" || s === null) return null
 	const r = s as Record<string, unknown>
-	if (r["bins"] !== bins) return false
-	for (const k of [
-		"summaryBytesPerSecond",
-		"cloneMsPerSecond",
-		"profileMsPerSecond",
-	]) {
-		const v = r[k]
-		if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return false
+	const sample = {
+		bins: r["bins"],
+		summaryBytesPerSecond: r["summaryBytesPerSecond"],
+		cloneMsPerSecond: r["cloneMsPerSecond"],
+		profileMsPerSecond: r["profileMsPerSecond"],
 	}
-	return true
+	if (sample.bins !== bins) return null
+	const costs = [
+		sample.summaryBytesPerSecond,
+		sample.cloneMsPerSecond,
+		sample.profileMsPerSecond,
+	]
+	for (const v of costs)
+		if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return null
+	return sample as BinsCostSample
 }
 
 /** Worker side: int16 half-dB encode of one summary into `wire`. */
@@ -199,8 +209,20 @@ export function resolveSpectrumBinsCap(
 			wallMs: 0,
 		}
 	const measurements: BinsCostSample[] = []
+	let now: () => number = () => performance.now()
 	let start = 0
+	let started = false
 	let wallMs = 0
+	/** Elapsed since `start`, or the last known finite value when the clock throws or is not finite. */
+	const elapsed = (): number => {
+		try {
+			const t = now() - start
+			if (Number.isFinite(t) && t >= 0) wallMs = t
+		} catch {
+			// keep the last known wallMs
+		}
+		return wallMs
+	}
 	const fallback = (): SpectrumBinsCapResult => ({
 		setting,
 		cap: SPECTRUM_BINS_CAP_FLOOR,
@@ -209,23 +231,21 @@ export function resolveSpectrumBinsCap(
 		wallMs,
 	})
 	try {
-		const now = options?.now ?? (() => performance.now())
+		if (options?.now) now = options.now
 		start = now()
+		started = Number.isFinite(start)
 		const measure =
 			options?.measure ??
 			defaultMeasurer(now, start + SPECTRUM_BINS_BUDGET.benchWallMs)
 		for (const bins of AUTO_CANDIDATES) {
-			const sample: unknown = measure(bins, DEFAULT_SUMMARY_HZ)
-			wallMs = now() - start
-			if (!Number.isFinite(wallMs) || wallMs > SPECTRUM_BINS_BUDGET.benchWallMs)
+			const raw: unknown = measure(bins, DEFAULT_SUMMARY_HZ)
+			const t = now() - start
+			if (Number.isFinite(t) && t >= 0) wallMs = t
+			if (!Number.isFinite(t) || t > SPECTRUM_BINS_BUDGET.benchWallMs)
 				return fallback()
-			if (!valid(sample, bins)) return fallback()
-			measurements.push({
-				bins: sample.bins,
-				summaryBytesPerSecond: sample.summaryBytesPerSecond,
-				cloneMsPerSecond: sample.cloneMsPerSecond,
-				profileMsPerSecond: sample.profileMsPerSecond,
-			})
+			const sample = snapshot(raw, bins)
+			if (!sample) return fallback()
+			measurements.push(sample)
 			if (passes(sample))
 				return { setting, cap: bins, source: "measured", measurements, wallMs }
 		}
@@ -237,6 +257,7 @@ export function resolveSpectrumBinsCap(
 			wallMs,
 		}
 	} catch {
+		if (started) elapsed()
 		return fallback()
 	}
 }
