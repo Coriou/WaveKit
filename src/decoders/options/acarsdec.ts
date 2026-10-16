@@ -3,14 +3,33 @@ import type { DecoderOptionDescriptor } from "@wavekit/api-types"
 
 const frequencyHz = z.number().finite().positive()
 
+/** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
+export const ACARSDEC_BOUNDS = {
+	/** Below 1 kHz is no IQ stream; above 10 Msps is beyond any supported SDR front end. */
+	sampleRateHz: { min: 1_000, max: 10_000_000 },
+	/** Tunable range of the supported SDRs (up to 6 GHz). */
+	frequencyHz: { min: 1, max: 6_000_000_000 },
+	/** A few channels fit one ~2.4 Msps capture; by meaning, not an acarsdec limit. */
+	maxFrequencies: 8,
+} as const
+
 /** Options read by the acarsdec adapter and the audio-demod base class. */
 export const acarsdecOptionsSchema = z
 	.object({
-		frequencies: z.array(frequencyHz).optional(),
+		frequencies: z
+			.array(frequencyHz.max(ACARSDEC_BOUNDS.frequencyHz.max))
+			.max(ACARSDEC_BOUNDS.maxFrequencies)
+			.optional(),
 		frequency: frequencyHz.optional(),
 		// Read but never used by the adapter.
 		gain: z.number().finite().nullable().optional(),
-		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		inputSampleRate: z
+			.number()
+			.finite()
+			.min(ACARSDEC_BOUNDS.sampleRateHz.min)
+			.max(ACARSDEC_BOUNDS.sampleRateHz.max)
+			.nullable()
+			.optional(),
 		extraArgs: z.array(z.string()).nullable().optional(),
 		channelHz: frequencyHz.nullable().optional(),
 		offsetHz: z.number().finite().optional(),
@@ -59,6 +78,7 @@ export const acarsdecOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "frequencies",
 		type: "number-list",
+		max: ACARSDEC_BOUNDS.frequencyHz.max,
 		unit: "Hz",
 		default: null,
 		secret: false,
@@ -96,6 +116,8 @@ export const acarsdecOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "inputSampleRate",
 		type: "number",
+		min: ACARSDEC_BOUNDS.sampleRateHz.min,
+		max: ACARSDEC_BOUNDS.sampleRateHz.max,
 		unit: "Hz",
 		default: 2400000,
 		secret: false,

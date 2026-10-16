@@ -3,21 +3,48 @@ import type { DecoderOptionDescriptor } from "@wavekit/api-types"
 import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 const frequencyHz = z.number().finite().positive()
-const port = z.number().int().min(1).max(65535)
+
+/** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
+export const DIREWOLF_BOUNDS = {
+	/** Every TCP port. */
+	port: { min: 1, max: 65535 },
+	/** Below 1 kHz is no IQ stream; above 10 Msps is beyond any supported SDR front end. */
+	inputSampleRateHz: { min: 1_000, max: 10_000_000 },
+	/** Direwolf audio runs at 8-192 kHz (sound card rates). */
+	audioSampleRateHz: { min: 8_000, max: 192_000 },
+} as const
+
+const port = z
+	.number()
+	.int()
+	.min(DIREWOLF_BOUNDS.port.min)
+	.max(DIREWOLF_BOUNDS.port.max)
 
 /** Options read by the Direwolf adapter and the audio-demod base class. */
 export const direwolfOptionsSchema = z
 	.object({
 		// audioDevice, sampleRate and callsign are read but never used by the adapter.
 		audioDevice: z.string().nullable().optional(),
-		sampleRate: z.number().finite().positive().nullable().optional(),
+		sampleRate: z
+			.number()
+			.finite()
+			.min(DIREWOLF_BOUNDS.audioSampleRateHz.min)
+			.max(DIREWOLF_BOUNDS.audioSampleRateHz.max)
+			.nullable()
+			.optional(),
 		// Also the TCP port the adapter connects to, so it stays a number.
 		kissPort: port.nullable().optional(),
 		// Only `(agwPort ?? default).toString()`: numeric text gives the same argument.
 		agwPort: numberOrText(port, INTEGER_TEXT).nullable().optional(),
 		callsign: z.string().nullable().optional(),
 		extraArgs: z.array(z.string()).nullable().optional(),
-		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		inputSampleRate: z
+			.number()
+			.finite()
+			.min(DIREWOLF_BOUNDS.inputSampleRateHz.min)
+			.max(DIREWOLF_BOUNDS.inputSampleRateHz.max)
+			.nullable()
+			.optional(),
 		frequencies: z.array(frequencyHz).optional(),
 		frequency: frequencyHz.optional(),
 		channelHz: frequencyHz.nullable().optional(),
@@ -114,6 +141,8 @@ export const direwolfOptionDescriptors: DecoderOptionDescriptor[] = [
 		...base,
 		key: "inputSampleRate",
 		type: "number",
+		min: DIREWOLF_BOUNDS.inputSampleRateHz.min,
+		max: DIREWOLF_BOUNDS.inputSampleRateHz.max,
 		unit: "Hz",
 		default: 2400000,
 		description: "IQ sample rate of the source.",
@@ -139,6 +168,8 @@ export const direwolfOptionDescriptors: DecoderOptionDescriptor[] = [
 		...base,
 		key: "sampleRate",
 		type: "number",
+		min: DIREWOLF_BOUNDS.audioSampleRateHz.min,
+		max: DIREWOLF_BOUNDS.audioSampleRateHz.max,
 		unit: "Hz",
 		default: 48000,
 		description: "Audio sample rate (the adapter fixes 48000).",

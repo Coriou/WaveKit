@@ -27,6 +27,12 @@ import type {
 import { z } from "zod"
 import { configuredBandRequirements } from "../status-fields.js"
 import type { Logger } from "../../utils/logger.js"
+import {
+	createOptionWarner,
+	readNumericOption,
+	type NumericOptionWarn,
+} from "../option-values.js"
+import { AIS_CATCHER_BOUNDS } from "../options/ais-catcher.js"
 
 /** Supported output formats for AIS-catcher (Requirement 25.3) */
 export type AisCatcherOutputFormat = "nmea" | "json"
@@ -166,6 +172,7 @@ const CHECKSUM_LOG_INTERVAL_MS = 60_000
 
 export class AisCatcherDecoder extends IqDecimateDecoder {
 	private options: AisCatcherOptions
+	private readonly warnOption: NumericOptionWarn
 	/** Pending multi-sentence groups, keyed by `${talker}:${seqId}:${channel}`. */
 	private readonly fragmentGroups = new Map<string, FragmentGroup>()
 	/** Sentences dropped for a missing or wrong NMEA checksum (WG2 req 8.1). */
@@ -174,7 +181,10 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
-		this.options = parseAisCatcherOptions(config.options)
+		this.warnOption = createOptionWarner((fields, message) =>
+			this.logger.warn(fields, message),
+		)
+		this.options = parseAisCatcherOptions(config.options, this.warnOption)
 	}
 
 	/**
@@ -182,7 +192,7 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 	 * Called by BaseDecoder.updateOptions().
 	 */
 	protected override onOptionsUpdated(): void {
-		this.options = parseAisCatcherOptions(this.config.options)
+		this.options = parseAisCatcherOptions(this.config.options, this.warnOption)
 		this.logger.debug(
 			{ inputSampleRate: this.options.inputSampleRate },
 			"AIS-catcher options re-parsed after update",
@@ -469,7 +479,14 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
  */
 function parseAisCatcherOptions(
 	options: Record<string, unknown>,
+	warn: NumericOptionWarn,
 ): AisCatcherOptions {
+	const port = (key: string) =>
+		readNumericOption(
+			options[key],
+			{ key, integer: true, ...AIS_CATCHER_BOUNDS.port },
+			warn,
+		)
 	const outputFormat =
 		(options["outputFormat"] as AisCatcherOutputFormat) ?? "nmea"
 
@@ -477,17 +494,33 @@ function parseAisCatcherOptions(
 		device: options["device"] as string | undefined,
 		deviceSerial: options["deviceSerial"] as string | undefined,
 		rtlTcpHost: options["rtlTcpHost"] as string | undefined,
-		rtlTcpPort: options["rtlTcpPort"] as number | undefined,
+		rtlTcpPort: port("rtlTcpPort"),
 		spyServerHost: options["spyServerHost"] as string | undefined,
-		spyServerPort: options["spyServerPort"] as number | undefined,
-		gain: options["gain"] as number | undefined,
-		ppm: options["ppm"] as number | undefined,
+		spyServerPort: port("spyServerPort"),
+		gain: readNumericOption(
+			options["gain"],
+			{ key: "gain", integer: false, ...AIS_CATCHER_BOUNDS.gainDb },
+			warn,
+		),
+		ppm: readNumericOption(
+			options["ppm"],
+			{ key: "ppm", integer: false, ...AIS_CATCHER_BOUNDS.ppm },
+			warn,
+		),
 		outputFormat:
 			outputFormat === "nmea" || outputFormat === "json"
 				? outputFormat
 				: "nmea",
-		outputPort: options["outputPort"] as number | undefined,
-		inputSampleRate: options["inputSampleRate"] as number | undefined,
+		outputPort: port("outputPort"),
+		inputSampleRate: readNumericOption(
+			options["inputSampleRate"],
+			{
+				key: "inputSampleRate",
+				integer: false,
+				...AIS_CATCHER_BOUNDS.sampleRateHz,
+			},
+			warn,
+		),
 		extraArgs: options["extraArgs"] as string[] | undefined,
 	}
 }
