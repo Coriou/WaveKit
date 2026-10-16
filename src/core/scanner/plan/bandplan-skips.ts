@@ -27,11 +27,24 @@ function isValidEdge(start: unknown, end: unknown): start is number {
 	)
 }
 
+/** A `BandSkip` by meaning: a plain object whose `reason` is a string. Anything else is no skip. */
+function isBandSkip(skip: unknown): boolean {
+	if (skip === null || typeof skip !== "object" || Array.isArray(skip))
+		return false
+	return typeof (skip as { reason?: unknown }).reason === "string"
+}
+
 /**
- * Sources of every band whose effective `skip` is not null, one per resolved segment, in view
- * order. Collects at most `BANDPLAN_SKIP_MAX_SOURCES + 1` entries: the extra entry lets
- * `computeBandPlanSkips` detect (and report) that the bound was passed. Never throws; a
- * malformed band or segment is skipped and a malformed view yields [].
+ * Sources of every band whose effective `skip` is a valid `BandSkip`, one per resolved segment,
+ * in view order. Never throws; a malformed band or segment is skipped and a malformed view
+ * yields [].
+ *
+ * Bound: at most `BANDPLAN_SKIP_MAX_SOURCES + 1` segments of skip bands are EXAMINED in total,
+ * valid or not, so iteration is bounded however large or malformed the segment arrays are.
+ * The (MAX + 1)-th examined segment, if valid, is returned as the overflow entry that lets
+ * `computeBandPlanSkips` detect and report truncation (the MAX + 1 contract). When that
+ * segment, or earlier ones, are malformed, the overflow is cut silently: the result is still
+ * bounded but carries no truncation signal.
  */
 export function bandPlanSkipSources(
 	view: ResolvedBandPlanView | null | undefined,
@@ -42,8 +55,9 @@ export function bandPlanSkipSources(
 		if (!Array.isArray(bands)) return []
 		const cap = BANDPLAN_SKIP_MAX_SOURCES + 1
 		const out: BandPlanSkipSource[] = []
+		let examined = 0
 		for (const entry of bands as readonly unknown[]) {
-			if (out.length >= cap) break
+			if (examined >= cap) break
 			try {
 				if (entry === null || typeof entry !== "object") continue
 				const rb = entry as {
@@ -56,17 +70,23 @@ export function bandPlanSkipSources(
 				const segments = rb.segments
 				if (typeof key !== "string") continue
 				if (band === null || typeof band !== "object") continue
-				const skip = (band as { skip?: unknown }).skip
-				if (skip === null || skip === undefined) continue
+				if (!isBandSkip((band as { skip?: unknown }).skip)) continue
 				if (!Array.isArray(segments)) continue
-				for (const seg of segments as readonly unknown[]) {
-					if (out.length >= cap) break
-					if (seg === null || typeof seg !== "object") continue
-					const s = seg as { startHz?: unknown; endHz?: unknown }
-					const startHz = s.startHz
-					const endHz = s.endHz
-					if (!isValidEdge(startHz, endHz)) continue
-					out.push({ key, startHz, endHz: endHz as number })
+				const arr = segments as readonly unknown[]
+				const len = arr.length
+				for (let i = 0; i < len && examined < cap; i++) {
+					examined++
+					try {
+						const seg: unknown = arr[i]
+						if (seg === null || typeof seg !== "object") continue
+						const s = seg as { startHz?: unknown; endHz?: unknown }
+						const startHz = s.startHz
+						const endHz = s.endHz
+						if (!isValidEdge(startHz, endHz)) continue
+						out.push({ key, startHz, endHz: endHz as number })
+					} catch {
+						// a throwing segment is skipped (it still counts as examined)
+					}
 				}
 			} catch {
 				// a throwing band is skipped

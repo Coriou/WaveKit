@@ -123,89 +123,151 @@ export function createCoverageRefresh(
 	}
 }
 
-const BAD = "?"
+/** Token for a read that threw or a container that is not one; never equal to a value tag. */
+const THREW = ["x"]
 
-function norm(v: unknown): unknown {
-	if (typeof v === "number") return Number.isFinite(v) ? v : String(v)
-	if (typeof v === "string" || typeof v === "boolean" || v === null) return v
-	return BAD
+/**
+ * Type-tagged scalar: distinct values of distinct types never collide, and no valid value
+ * collides with a malformed token. Non-primitive scalars are all equivalent to WG6 (every check
+ * on these fields is a primitive comparison), so they share one tag.
+ */
+function tag(v: unknown): unknown[] {
+	switch (typeof v) {
+		case "string":
+			return ["s", v]
+		case "number":
+			return ["n", Object.is(v, -0) ? "-0" : String(v)]
+		case "boolean":
+			return ["b", v]
+		case "undefined":
+			return ["u"]
+		default:
+			return v === null ? ["z"] : ["o"]
+	}
 }
 
-function prefixOf(v: unknown, max: number): unknown[] {
-	if (!Array.isArray(v)) return [BAD]
-	const len: unknown = v.length
-	const n = typeof len === "number" && Number.isFinite(len) ? len : 0
-	const out: unknown[] = [n]
-	const k = Math.min(n, max)
-	const arr = v as readonly unknown[]
-	for (let i = 0; i < k; i++) out.push(arr[i])
+function isFreq(v: unknown): v is number {
+	return typeof v === "number" && Number.isFinite(v) && v >= 0
+}
+
+/** Same as WG6 `lengthOf`: array length read once, non-arrays have none. */
+function lengthOf(v: unknown): number {
+	if (!Array.isArray(v)) return 0
+	const n: unknown = v.length
+	return typeof n === "number" && Number.isFinite(n) && n > 0
+		? Math.floor(n)
+		: 0
+}
+
+/**
+ * The band reads WG6 `coverageOf` performs for a view with this `sourceId` and `inputKind`, in
+ * the same order and with the same shared targets-then-ranges budget. Nothing it skips is read.
+ */
+function bandReads(
+	sourceId: unknown,
+	inputKind: unknown,
+	band: object,
+): unknown[] {
+	const b = band as Record<string, unknown>
+	const verdict = b["verdict"]
+	const basis = b["basis"]
+	const targets = b["targetsHz"]
+	const ranges = b["rangesHz"]
+	const c = b["captureCenterHz"]
+	const w = b["windowHalfWidthHz"]
+	const out: unknown[] = [tag(verdict), tag(basis), tag(c), tag(w)]
+	const nTargets = lengthOf(targets)
+	out.push(nTargets)
+	let budget = DECODED_ELSEWHERE_MAX_TARGETS
+	const tarr = targets as readonly unknown[]
+	if (sourceId !== null) {
+		if (verdict !== "in-band" || !isFreq(c) || !isFreq(w)) return out
+		const tCount = Math.min(nTargets, budget)
+		for (let i = 0; i < tCount; i++) out.push(tag(tarr[i]))
+		budget -= tCount
+		const nRanges = lengthOf(ranges)
+		out.push(nRanges)
+		const rCount = Math.min(nRanges, budget)
+		const rarr = ranges as readonly unknown[]
+		for (let i = 0; i < rCount; i++) {
+			const r: unknown = rarr[i]
+			if (r === null || typeof r !== "object") {
+				out.push(tag(r))
+				continue
+			}
+			const o = r as Record<string, unknown>
+			const minHz = o["minHz"]
+			const maxHz = o["maxHz"]
+			out.push(["r", tag(minHz), tag(maxHz)])
+		}
+		return out
+	}
+	if (inputKind !== "external") return out
+	const count = Math.min(nTargets, budget)
+	for (let i = 0; i < count; i++) out.push(tag(tarr[i]))
 	return out
 }
 
-function bandTuple(band: unknown): unknown {
-	if (band === null) return null
-	if (typeof band !== "object") return BAD
-	const b = band as Record<string, unknown>
-	const targets = prefixOf(b["targetsHz"], DECODED_ELSEWHERE_MAX_TARGETS).map(
-		norm,
-	)
-	const ranges = prefixOf(b["rangesHz"], DECODED_ELSEWHERE_MAX_TARGETS).map(
-		(r, i) => {
-			if (i === 0) return norm(r)
-			if (r === null || typeof r !== "object") return BAD
-			const o = r as Record<string, unknown>
-			return [norm(o["minHz"]), norm(o["maxHz"])]
-		},
-	)
-	return [
-		norm(b["verdict"]),
-		norm(b["basis"]),
-		targets,
-		ranges,
-		norm(b["captureCenterHz"]),
-		norm(b["windowHalfWidthHz"]),
-	]
-}
-
 function viewTuple(view: unknown): unknown {
+	if (view === null || typeof view !== "object") return tag(view)
+	let fields: unknown[]
+	let sourceId: unknown
+	let inputKind: unknown
+	let band: unknown
 	try {
-		if (view === null || typeof view !== "object") return BAD
+		// Same fields, same order, each read once, as WG6 `snapshotView`.
 		const v = view as Record<string, unknown>
-		return [
-			norm(v["id"]),
-			norm(v["running"]),
-			norm(v["health"]),
-			norm(v["suspended"]),
-			norm(v["owner"]),
-			norm(v["sourceId"]),
-			norm(v["inputKind"]),
-			bandTuple(v["band"]),
-		]
+		const id = v["id"]
+		const running = v["running"]
+		const health = v["health"]
+		const suspended = v["suspended"]
+		const owner = v["owner"]
+		sourceId = v["sourceId"]
+		inputKind = v["inputKind"]
+		band = v["band"]
+		fields = [id, running, health, suspended, owner, sourceId, inputKind].map(
+			tag,
+		)
 	} catch {
-		return BAD
+		return THREW
+	}
+	if (band === null || typeof band !== "object") return [...fields, tag(band)]
+	try {
+		return [...fields, ["band", ...bandReads(sourceId, inputKind, band)]]
+	} catch {
+		return [...fields, THREW]
 	}
 }
 
 /**
- * Stable fingerprint of the coverage views over exactly the fields the WG6 trust rule
- * (`computeDecodedElsewhere`) reads: id, running, health, suspended, owner, sourceId,
- * inputKind and band {verdict, basis, targetsHz, rangesHz{minHz,maxHz}, captureCenterHz,
- * windowHalfWidthHz}. View order matters. Only the first DECODED_ELSEWHERE_MAX_DECODERS views
- * and DECODED_ELSEWHERE_MAX_TARGETS targets/ranges are read (the rest cannot affect coverage,
- * their count is included). Total: malformed entries become a fixed token, never throws.
+ * Stable fingerprint of the coverage views over exactly what the WG6 trust rule
+ * (`computeDecodedElsewhere`) reads, mirroring its read order and bounds: the first
+ * DECODED_ELSEWHERE_MAX_DECODERS views by index (each indexed read caught on its own), their
+ * id, running, health, suspended, owner, sourceId, inputKind and band, and of the band the
+ * same targets-then-ranges prefix under one shared DECODED_ELSEWHERE_MAX_TARGETS budget.
+ * Values are type-tagged so no valid value collides with a malformed or throwing token.
+ * Equal fingerprints imply equal `computeDecodedElsewhere` output for any spec. View order
+ * matters. Total: never throws.
  */
 export function coverageFingerprint(
 	views: readonly DecoderCoverageView[],
 ): string {
 	try {
-		if (!Array.isArray(views)) return JSON.stringify([BAD])
-		const len: unknown = views.length
-		const n = typeof len === "number" && Number.isFinite(len) ? len : 0
+		const n = lengthOf(views)
 		const k = Math.min(n, DECODED_ELSEWHERE_MAX_DECODERS)
 		const out: unknown[] = [n]
-		for (let i = 0; i < k; i++) out.push(viewTuple(views[i]))
+		for (let i = 0; i < k; i++) {
+			let view: unknown
+			try {
+				view = views[i]
+			} catch {
+				out.push(THREW)
+				continue
+			}
+			out.push(viewTuple(view))
+		}
 		return JSON.stringify(out)
 	} catch {
-		return JSON.stringify([BAD])
+		return JSON.stringify(THREW)
 	}
 }

@@ -3,7 +3,12 @@ import {
 	coverageFingerprint,
 	createCoverageRefresh,
 } from "../../../../../src/core/scanner/plan/coverage-refresh.js"
-import type { DecoderCoverageView } from "../../../../../src/core/scanner/types.js"
+import { computeDecodedElsewhere } from "../../../../../src/core/scanner/plan/decoded-elsewhere.js"
+import type {
+	DecoderCoverageView,
+	NormalisedJobSpec,
+} from "../../../../../src/core/scanner/types.js"
+import { DECODED_ELSEWHERE_MAX_TARGETS } from "@wavekit/api-types"
 
 function fakeClock() {
 	let t = 0
@@ -265,5 +270,71 @@ describe("coverageFingerprint", () => {
 		expect(() =>
 			coverageFingerprint(null as unknown as DecoderCoverageView[]),
 		).not.toThrow()
+	})
+})
+
+describe("coverageFingerprint regressions", () => {
+	const spec = {
+		sourceId: "job",
+		ranges: [{ startHz: 0, endHz: 1e9 }],
+	} as unknown as Pick<NormalisedJobSpec, "sourceId" | "ranges">
+	const covers = (views: unknown[]): number =>
+		computeDecodedElsewhere(views as DecoderCoverageView[], spec).ranges.length
+
+	it("never collides a valid '?' with a malformed value", () => {
+		const a = view({ id: "?" })
+		const b = view({ id: undefined })
+		expect(covers([a])).toBeGreaterThan(0)
+		expect(covers([b])).toBe(0)
+		expect(coverageFingerprint([a])).not.toBe(coverageFingerprint([b]))
+	})
+
+	it("catches each indexed view read on its own", () => {
+		const make = (running: boolean): DecoderCoverageView[] => {
+			const arr: unknown[] = [view({ running }), null]
+			Object.defineProperty(arr, 1, {
+				get() {
+					throw new Error("slot")
+				},
+			})
+			return arr as DecoderCoverageView[]
+		}
+		expect(covers(make(true))).toBeGreaterThan(0)
+		expect(covers(make(false))).toBe(0)
+		expect(coverageFingerprint(make(true))).not.toBe(
+			coverageFingerprint(make(false)),
+		)
+	})
+
+	it("shares one targets-then-ranges budget like WG6", () => {
+		const make = (running: boolean): DecoderCoverageView[] => {
+			const ranges: unknown[] = [null]
+			Object.defineProperty(ranges, 0, {
+				get() {
+					throw new Error("range")
+				},
+			})
+			const targets = Array.from(
+				{ length: DECODED_ELSEWHERE_MAX_TARGETS },
+				(_, i) => 100 + i,
+			)
+			return [
+				view({
+					running,
+					band: {
+						verdict: "in-band",
+						basis: "configured",
+						targetsHz: targets,
+						rangesHz: ranges,
+						captureCenterHz: 150,
+						windowHalfWidthHz: 100,
+					},
+				}),
+			]
+		}
+		expect(covers(make(true))).toBeGreaterThan(0)
+		expect(coverageFingerprint(make(true))).not.toBe(
+			coverageFingerprint(make(false)),
+		)
 	})
 })

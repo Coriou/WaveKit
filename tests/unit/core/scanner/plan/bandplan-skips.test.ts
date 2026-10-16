@@ -30,13 +30,13 @@ function view(bands: unknown[]): ResolvedBandPlanView {
 describe("bandPlanSkipSources", () => {
 	it("takes segments of skip bands only, in view order", () => {
 		const v = view([
-			band("a/x", "noise", [
+			band("a/x", { reason: "noise" }, [
 				{ startHz: 1, endHz: 5 },
 				{ startHz: 10, endHz: 20 },
 			]),
 			band("a/y", null, [{ startHz: 30, endHz: 40 }]),
 			band("a/z", undefined, [{ startHz: 30, endHz: 40 }]),
-			band("b/w", "x", [{ startHz: 50, endHz: 60 }]),
+			band("b/w", { reason: "x" }, [{ startHz: 50, endHz: 60 }]),
 		])
 		expect(bandPlanSkipSources(v)).toEqual([
 			{ key: "a/x", startHz: 1, endHz: 5 },
@@ -72,9 +72,13 @@ describe("bandPlanSkipSources", () => {
 			null,
 			7,
 			bad,
-			{ key: 3, band: { skip: "x" }, segments: [{ startHz: 1, endHz: 2 }] },
-			band("a/x", "x", "nope"),
-			band("a/y", "x", [
+			{
+				key: 3,
+				band: { skip: { reason: "x" } },
+				segments: [{ startHz: 1, endHz: 2 }],
+			},
+			band("a/x", { reason: "x" }, "nope"),
+			band("a/y", { reason: "x" }, [
 				null,
 				{ startHz: Number.NaN, endHz: 3 },
 				{ startHz: 9, endHz: 3 },
@@ -94,9 +98,73 @@ describe("bandPlanSkipSources", () => {
 			endHz: i * 10 + 5,
 		}))
 		const out = bandPlanSkipSources(
-			view([band("a/x", "x", segs), band("a/y", "x", segs)]),
+			view([
+				band("a/x", { reason: "x" }, segs),
+				band("a/y", { reason: "x" }, segs),
+			]),
 		)
 		expect(out).toHaveLength(BANDPLAN_SKIP_MAX_SOURCES + 1)
+	})
+})
+
+describe("bandPlanSkipSources regressions", () => {
+	const seg = [{ startHz: 1, endHz: 2 }]
+	it("accepts only a BandSkip by meaning", () => {
+		for (const skip of [false, true, 0, "x", {}, { reason: 5 }, [], ["x"]]) {
+			expect(bandPlanSkipSources(view([band("a/x", skip, seg)]))).toEqual([])
+		}
+		expect(
+			bandPlanSkipSources(view([band("a/x", { reason: "" }, seg)])),
+		).toEqual([{ key: "a/x", startHz: 1, endHz: 2 }])
+	})
+
+	it("counts examined segments, not accepted ones, against the bound", () => {
+		const nulls: unknown[] = Array.from(
+			{ length: BANDPLAN_SKIP_MAX_SOURCES + 1 },
+			() => null,
+		)
+		const out = bandPlanSkipSources(
+			view([
+				band("a/x", { reason: "x" }, nulls),
+				band("a/y", { reason: "x" }, [{ startHz: 5, endHz: 6 }]),
+			]),
+		)
+		expect(out).toEqual([])
+	})
+
+	it("examines at most MAX + 1 segments of a huge malformed array", () => {
+		let reads = 0
+		const huge = new Proxy([] as unknown[], {
+			get(target, prop, receiver) {
+				if (prop === "length") return 1e9
+				if (typeof prop === "string" && /^\d+$/.test(prop)) {
+					reads++
+					return null
+				}
+				return Reflect.get(target, prop, receiver) as unknown
+			},
+		})
+		expect(
+			bandPlanSkipSources(view([band("a/x", { reason: "x" }, huge)])),
+		).toEqual([])
+		expect(reads).toBe(BANDPLAN_SKIP_MAX_SOURCES + 1)
+	})
+
+	it("keeps the MAX + 1 overflow signal when the extra segment is valid", () => {
+		const segs: unknown[] = Array.from(
+			{ length: BANDPLAN_SKIP_MAX_SOURCES + 5 },
+			(_, i) => (i === 0 ? null : { startHz: i * 10, endHz: i * 10 + 1 }),
+		)
+		const out = bandPlanSkipSources(view([band("a/x", { reason: "x" }, segs)]))
+		// 1 malformed + MAX valid examined: MAX entries, overflow cut silently (documented).
+		expect(out).toHaveLength(BANDPLAN_SKIP_MAX_SOURCES)
+		const valid = segs.slice(1)
+		const full = bandPlanSkipSources(
+			view([band("a/x", { reason: "x" }, valid)]),
+		)
+		expect(full).toHaveLength(BANDPLAN_SKIP_MAX_SOURCES + 1)
+		const r = computeBandPlanSkips(full, spec([{ startHz: 0, endHz: 1e9 }]))
+		expect(r.issues.map(i => i.code)).toEqual(["bandplan-skips-truncated"])
 	})
 })
 
