@@ -1,7 +1,7 @@
 # Web gaps 7 requirements (WG7)
 
-Status: implemented on the batch branch. All six lanes (AMB, GT, BX, HW, MIN and SQ) are
-merged and wired; the checkpoint (MA.3) and the real-RF acceptance of requirements 2-4 are
+Status: implemented. All six lanes (AMB, GT, BX, HW, MIN and SQ) are merged and wired and the
+checkpoint (MA.3) passed; the real-RF acceptance of requirements 1-4 is
 open. Implementation amendments are marked "Amended (WG7 Main)" below. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope

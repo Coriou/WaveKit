@@ -1,7 +1,7 @@
 # Web gaps 7 design (WG7)
 
 Status: implemented for all six lanes (merged and wired; amendments in the requirements);
-checkpoint and real-RF acceptance open. Requirements in [requirements](requirements.md), tasks in
+checkpoint passed; real-RF acceptance open. Requirements in [requirements](requirements.md), tasks in
 [tasks](tasks.md). Background: scanner ambient evidence and identify ([SCANNER.md](../../SCANNER.md)
 § 6.4, § 10.8), WG2 CTCSS/DTMF and WG6 DCS (the tone path), WG4 live-audio AGC, the WG6
 [decoded-elsewhere ranges](../web-gaps-6/design.md), [band plans](../band-plans/requirements.md),

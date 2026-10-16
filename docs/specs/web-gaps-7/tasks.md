@@ -1,6 +1,6 @@
 # Web gaps 7 tasks (WG7)
 
-Status: all six lanes merged and wired; docs and coordination note done; checkpoint (MA.3) open. See [requirements](requirements.md) and
+Status: implemented; checkpoint (MA.3) passed (build, typecheck, lint, contract, CLI, sdr-host and the full root suite); real-RF acceptance open. See [requirements](requirements.md) and
 [design](design.md). Lanes work against the frozen contract and touch only their own paths;
 Main (MA.\*) owns the composition files (`src/index.ts`, `src/api/server.ts`, barrels including
 `src/core/bandplans/index.ts`, `src/config.ts`, `config/*`), the frozen contract files
@@ -90,7 +90,7 @@ the isolation and contract tests and the docs. No lane edits the pinned band-pla
       grep. (The band-plans 11.1, receiver-capabilities 1.3 and web-gaps-6 E2 amendments are in
       the spec commit.)
   - _Requirements: 5.5, 6.7, 11.1, 12.2_
-- [ ] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
+- [x] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
   - _Requirements: 13.1, 13.2_
 - [ ] MA.4 RF-window preparation: checklist and scripts for one supervised session after WG7
       (noise and tone squelch, DCS/CTCSS on real RF, the noise tail, REST drag-to-tune latency);
