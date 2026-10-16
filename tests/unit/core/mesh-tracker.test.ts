@@ -225,7 +225,7 @@ describe("MeshTracker", () => {
 			portnum: 4,
 			payload: Uint8Array.from([0x12, 0x01, 0xff]),
 		})
-		send(nodes, { from: 1, id: 6, portnum: 67, payload: Uint8Array.from([1]) })
+		send(nodes, { from: 1, id: 6, portnum: 99, payload: Uint8Array.from([1]) })
 		send(nodes, {
 			from: 1,
 			id: 7,
@@ -240,7 +240,7 @@ describe("MeshTracker", () => {
 			at: AT.toISOString(),
 		})
 		expect(node?.snrDb).toBe(5)
-		expect(node?.portnums).toMatchObject({ "3": 5, "4": 1, "67": 1 })
+		expect(node?.portnums).toMatchObject({ "3": 5, "4": 1, "99": 1 })
 		expect(node?.packetCount).toBe(7)
 		expect(node?.longName).toBeNull()
 		expect(nodes.getStats().decodeErrors).toBe(3)

@@ -8,7 +8,9 @@ import { meshRoutes } from "../../../src/api/routes/mesh.js"
 import { MeshTracker } from "../../../src/core/mesh-tracker.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import {
+	encodeNeighborInfo,
 	encodePosition,
+	encodeTelemetry,
 	encodeUser,
 	meshPacket,
 } from "../../mocks/fixtures/meshtastic/encode.js"
@@ -176,5 +178,55 @@ describe("mesh routes", () => {
 				code: "VALIDATION_ERROR",
 			})
 		}
+	})
+
+	it("returns telemetry, neighbours and their counters", async () => {
+		const { app, tracker } = await appWith()
+		open.push(app)
+		const when = new Date("2026-06-15T12:00:00.000Z")
+		tracker.processPacket(
+			"lora",
+			meshPacket({
+				from: 0x1000,
+				id: 1,
+				portnum: 67,
+				payload: encodeTelemetry({ batteryLevel: 101, voltage: 4.5 }),
+			}),
+			when,
+		)
+		tracker.processPacket(
+			"lora",
+			meshPacket({
+				from: 0x1000,
+				id: 2,
+				portnum: 71,
+				payload: encodeNeighborInfo({
+					nodeNum: 0x1000,
+					neighbors: [{ nodeNum: 0x20, snr: 3.5 }],
+				}),
+			}),
+			when,
+		)
+		const one = await app.inject({
+			method: "GET",
+			url: "/api/mesh/nodes/!00001000",
+		})
+		expect(one.json()).toMatchObject({
+			telemetry: {
+				batteryPct: null,
+				powered: true,
+				voltageV: 4.5,
+				uptimeS: null,
+				at: "2026-06-15T12:00:00.000Z",
+			},
+			neighbours: [
+				{ nodeId: "!00000020", snrDb: 3.5, at: "2026-06-15T12:00:00.000Z" },
+			],
+		})
+		const stats = await app.inject({ method: "GET", url: "/api/mesh/stats" })
+		expect(stats.json()).toMatchObject({
+			telemetryPackets: 1,
+			neighbourReports: 1,
+		})
 	})
 })
