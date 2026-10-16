@@ -8,8 +8,14 @@
  */
 import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
+import {
+	DCS_CODE_SET,
+	DCS_MIN_AUDIO_SECONDS,
+	DCS_STANDARD_CODES,
+} from "@wavekit/api-types"
 import type {
 	AnalogTransmissionCloseReason,
+	AnalogTransmissionDcs,
 	AnalogTransmissionEventData,
 	AnalogTransmissionFrequency,
 	AnalogTransmissionPayload,
@@ -186,9 +192,21 @@ export function toActivityPayload(
 					tone: {
 						ctcssHz: event.tone.ctcssHz,
 						dtmf: event.tone.dtmf,
+						dcs: copyDcs(event.tone.dcs),
 					},
 				}),
 	}
+}
+
+/** Defensive fresh copy of a detector-supplied DCS; anything malformed becomes null. */
+function copyDcs(value: unknown): AnalogTransmissionDcs | null {
+	if (typeof value !== "object" || value === null) return null
+	const { code, polarity } = value as { code?: unknown; polarity?: unknown }
+	if (typeof code !== "string" || !/^[0-7]{3}$/.test(code)) return null
+	if (DCS_CODE_SET === "standard" && !DCS_STANDARD_CODES.includes(code))
+		return null
+	if (polarity !== "normal" && polarity !== "inverted") return null
+	return { code, polarity }
 }
 
 export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTrackerEvents> {
@@ -550,7 +568,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.toneBroken = true
 			return {
 				push() {},
-				result: () => ({ ctcssHz: null, dtmf: null }),
+				result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
 				reset() {},
 			}
 		}
@@ -570,14 +588,18 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 
 	private finishTone(open: OpenTransmission): AnalogTransmissionTone {
-		if (this.toneBroken) return { ctcssHz: null, dtmf: null }
+		if (this.toneBroken) return { ctcssHz: null, dtmf: null, dcs: null }
 		try {
 			const tone = open.detector.result()
-			if (open.audioSeconds < 0.75) return { ctcssHz: null, dtmf: tone.dtmf }
-			return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf }
+			const dcs =
+				open.audioSeconds < DCS_MIN_AUDIO_SECONDS ? null : copyDcs(tone.dcs)
+			if (open.audioSeconds < 0.75) {
+				return { ctcssHz: null, dtmf: tone.dtmf, dcs }
+			}
+			return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf, dcs }
 		} catch {
 			this.toneErrorCount += 1
-			return { ctcssHz: null, dtmf: null }
+			return { ctcssHz: null, dtmf: null, dcs: null }
 		}
 	}
 

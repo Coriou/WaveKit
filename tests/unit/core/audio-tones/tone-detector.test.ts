@@ -71,7 +71,7 @@ describe("tone detector", () => {
 			seed: 7,
 		})
 		detector.push(pcm.pcm, formatOf(pcm))
-		expect(detector.result()).toEqual({ ctcssHz: 100, dtmf: null })
+		expect(detector.result()).toEqual({ ctcssHz: 100, dtmf: null, dcs: null })
 
 		const short = new ToneDetector()
 		const brief = sine({
@@ -325,7 +325,7 @@ describe("tone detector", () => {
 		expect(() =>
 			hostile.push(nan, { rate: 8_000, format: "f32le" }),
 		).not.toThrow()
-		expect(hostile.result()).toEqual({ ctcssHz: null, dtmf: null })
+		expect(hostile.result()).toEqual({ ctcssHz: null, dtmf: null, dcs: null })
 
 		const mixed = sine({
 			hz: 100,
@@ -365,7 +365,7 @@ describe("tone detector", () => {
 		detector.push(pcm.pcm, formatOf(pcm))
 		expect(detector.result().ctcssHz).toBe(100)
 		detector.reset()
-		expect(detector.result()).toEqual({ ctcssHz: null, dtmf: null })
+		expect(detector.result()).toEqual({ ctcssHz: null, dtmf: null, dcs: null })
 		expect(() =>
 			detector.push(pcm.pcm, { rate: 0, format: "f32le" }),
 		).not.toThrow()

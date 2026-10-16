@@ -1,5 +1,6 @@
 /**
- * CTCSS + DTMF over one live-demod transmission (WG2 req 7.1–7.4).
+ * CTCSS + DTMF + DCS over one live-demod transmission (WG2 req 7.1–7.4,
+ * WG6 req 4).
  *
  * PCM is s16le or f32le mono at the demodulator rate. It is decimated to
  * 8 kHz by block averaging before the banks in `ctcss.ts` and `dtmf.ts`.
@@ -10,9 +11,16 @@
  * tone (1633 Hz) is also below 4 kHz; at 48 kHz (N = 6) the boxcar gain
  * there is about 0.935 (−0.6 dB), so the tone still clears the detector.
  * See `boxcarDecimationGain`.
+ *
+ * DCS (`dcs.ts`) rides the same 8 kHz stream. It is withheld until the
+ * transmission has `DCS_MIN_AUDIO_SECONDS` of audio and is reset whenever the
+ * PCM format or rate changes mid-transmission. It never touches the CTCSS or
+ * DTMF banks.
  */
+import { DCS_MIN_AUDIO_SECONDS } from "@wavekit/api-types"
 import type { AnalogTransmissionTone } from "@wavekit/api-types"
 import { CtcssBank } from "./ctcss.js"
+import { DcsDecoder } from "./dcs.js"
 import { DTMF_COLUMN_HZ, DTMF_ROW_HZ, DtmfBank } from "./dtmf.js"
 
 export const AUDIO_TONE_RATE_HZ = 8_000
@@ -40,17 +48,27 @@ export function boxcarDecimationGain(hz: number, inputRate: number): number {
 /**
  * One detector per open transmission. `push` is allocation-free after the
  * first call: banks, the decimator and the odd-byte hold are constructed
- * once and reused. `result` always returns both keys.
+ * once and reused. `result` always returns all three keys.
  */
 export class ToneDetector {
 	private readonly ctcss = new CtcssBank()
 	private readonly dtmf = new DtmfBank()
+	private readonly dcs = new DcsDecoder()
 	/** Assembles a sample split across pushes. f32le needs 4 bytes; at most 3 sit here. */
 	private readonly pending = Buffer.alloc(4)
 	private pendingLen = 0
 	private format: TonePcmFormat["format"] | null = null
 	private rate = 0
 	private inputSamples = 0
+	/** Audio seconds summed per sample at its own rate (DCS gate; CTCSS keeps its rule). */
+	/** DCS audio time: closed rate segments plus samples of the current one (exact at boundaries). */
+	private dcsSecondsDone = 0
+	private segmentSamples = 0
+	/**
+	 * Set when unreadable audio arrives while a split sample is held: the held bytes would
+	 * misframe every later sample, so DCS stays blind until the format is re-armed.
+	 */
+	private dcsBlind = false
 	private decimFactor = 1
 	private decimSum = 0
 	private decimCount = 0
@@ -60,10 +78,17 @@ export class ToneDetector {
 	private fracSum = 0
 
 	push(pcm: Buffer, format: TonePcmFormat): void {
-		if (format.format !== "s16le" && format.format !== "f32le") return
+		if (format.format !== "s16le" && format.format !== "f32le") {
+			// DCS evidence must not bridge audio it cannot read.
+			this.dcs.reset()
+			if (this.pendingLen > 0) this.dcsBlind = true
+			return
+		}
 		const width = format.format === "s16le" ? 2 : 4
 		if (this.format !== format.format || this.rate !== format.rate) {
 			this.pendingLen = 0
+			this.dcs.reset()
+			this.dcsBlind = false
 			this.format = format.format
 			this.armRate(format.rate)
 		}
@@ -96,7 +121,17 @@ export class ToneDetector {
 		const digits = this.dtmf.result()
 		const ctcssHz =
 			this.durationSeconds() < MIN_CTCSS_SECONDS ? null : this.ctcss.result()
-		return { ctcssHz, dtmf: digits }
+		const dcs =
+			this.dcsSeconds() < DCS_MIN_AUDIO_SECONDS ? null : this.dcs.result()
+		return { ctcssHz, dtmf: digits, dcs }
+	}
+
+	private dcsSeconds(): number {
+		const current =
+			this.rate > 0 && Number.isFinite(this.rate)
+				? this.segmentSamples / this.rate
+				: 0
+		return this.dcsSecondsDone + current
 	}
 
 	durationSeconds(): number {
@@ -107,11 +142,15 @@ export class ToneDetector {
 	reset(): void {
 		this.ctcss.reset()
 		this.dtmf.reset()
+		this.dcs.reset()
 		this.pending.fill(0)
 		this.pendingLen = 0
 		this.format = null
 		this.rate = 0
 		this.inputSamples = 0
+		this.dcsSecondsDone = 0
+		this.segmentSamples = 0
+		this.dcsBlind = false
 		this.decimFactor = 1
 		this.decimSum = 0
 		this.decimCount = 0
@@ -122,6 +161,8 @@ export class ToneDetector {
 	}
 
 	private armRate(rate: number): void {
+		this.dcsSecondsDone = this.dcsSeconds()
+		this.segmentSamples = 0
 		this.rate = rate
 		this.decimSum = 0
 		this.decimCount = 0
@@ -150,6 +191,7 @@ export class ToneDetector {
 
 	private takeSample(sample: number): void {
 		this.inputSamples += 1
+		this.segmentSamples += 1
 		if (this.decimFactor === 0 && !this.fractional) return
 		const value = Number.isFinite(sample) ? sample : 0
 		if (!this.fractional) {
@@ -183,6 +225,7 @@ export class ToneDetector {
 		const value = Number.isFinite(sample) ? sample : 0
 		this.ctcss.pushSample(value)
 		this.dtmf.pushSample(value)
+		if (!this.dcsBlind) this.dcs.pushSample(value)
 	}
 }
 
