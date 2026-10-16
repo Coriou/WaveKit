@@ -64,6 +64,7 @@ import type {
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
 import { ScannerService } from "./core/scanner/scanner-service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
+import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { createDecoderManagerOptions } from "./decoders/manager-options.js"
@@ -971,6 +972,22 @@ async function main(): Promise<void> {
 				routing: sourceRouting,
 				tuner: tunerController,
 				decoders: decoderManager,
+				// WG6 req 1.1: read once per plan; the mapper and the plan fail closed (a
+				// decoder counts only when its own running state and band assessment prove it).
+				decoderCoverage: () => {
+					try {
+						const defaultSourceId = sourceRouting.getDefaultSourceId() ?? null
+						return decoderManager
+							.getAllStatus()
+							.map(s => toDecoderCoverageView(s, defaultSourceId))
+					} catch (err) {
+						log.warn(
+							{ err },
+							"Decoder statuses unavailable; plans claim no decoded-elsewhere ranges",
+						)
+						return []
+					}
+				},
 				digitalVoice,
 				liveDemod,
 				operatorActivity: liveDemodOperatorActivity(liveDemod),

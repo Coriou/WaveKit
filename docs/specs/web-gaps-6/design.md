@@ -111,7 +111,8 @@ else:                                               (external input, own device)
 ```
 
 Per decoder at most 32 targets plus ranges (targets first, then ranges, in view order), at most
-64 decoders in view order; past a bound one `decoded-elsewhere-truncated` warning issue. Intervals
+64 decoders in view order; past a bound one `decoded-elsewhere-truncated` warning issue, only
+when at least one entry is reported (a plan with no coverage stays equal to today's). Intervals
 are clipped to the job's enabled ranges (`isRangeEnabled`), grouped by `sourceId`, sorted and
 merged (touching intervals merge; decoder ids united, sorted), then all entries sorted by
 `startHz`, `sourceId` (null last), and cut to 256.
@@ -133,7 +134,7 @@ when an observation closes (`endReason` present) for each of its jobs, with
 
 **Failure paths.** A throwing `decoderCoverage()` → no entries and plans as without it (logged
 by Main); NaN, negative or non-finite numbers in a view → that target or range ignored; a view
-list longer than 64 → truncated issue; flag on an in-window job → ignored (entries reported,
+list longer than 64 → truncated issue (when entries are reported); flag on an in-window job → ignored (entries reported,
 never applied).
 
 ## Decoder option schemas (lane DO)
@@ -309,8 +310,13 @@ d.secret).map(d => d.key)` passed to the export route.
    external with a proving basis), and no view failing 1.3 contributes. _Validates 1.3._
 3. **Merge shape.** Reported entries are sorted, non-overlapping and non-touching per source,
    clipped to enabled ranges, decoder ids sorted and unique, at most 256. _Validates 1.2, 1.5._
-4. **Skip excludes.** With the flag on a sweep job, no hop's covered span centre lies inside an
-   applied interval unless none were applied (and then the warning is present). _Validates 1.6._
+4. **Skip excludes.** With the flag on a sweep job and the ranges applied, the plan deep-equals
+   the plan of the same spec with the applied ranges added as operator exclusions (the WG2
+   lockout path), and no hop's covered span lies wholly inside one applied range; when none
+   were applied the `decoded-elsewhere-not-applied` warning is present and the plan equals the
+   plan without the flag. (The hop planner may
+   still centre a hop inside an exclusion while it covers wanted spectrum on both sides, so the
+   earlier "no hop centre inside an applied range" wording does not hold.) _Validates 1.6._
 5. **Hit duration.** For random record/ended sequences, `lastDurationMs` equals the duration of
    the latest ended observation that was the entry's last credit, else null. _Validates 2.1, 2.2._
 6. **Option schemas accept real configs.** Every decoder in `config/*.yaml` and the fixtures

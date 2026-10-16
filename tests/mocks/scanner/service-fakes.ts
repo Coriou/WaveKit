@@ -7,7 +7,10 @@ import type {
 	DecoderStatus,
 } from "../../../src/decoders/types.js"
 import { ScannerService } from "../../../src/core/scanner/scanner-service.js"
-import type { ScannerSettings } from "../../../src/core/scanner/types.js"
+import type {
+	DecoderCoverageView,
+	ScannerSettings,
+} from "../../../src/core/scanner/types.js"
 import type { Bandplan } from "../../../src/core/scanner/bandplan/index.js"
 import { ArbiterFakeTuner } from "./arbiter-fakes.js"
 import { FakeFanout, FakeSources, testSettings } from "./engine-fakes.js"
@@ -54,6 +57,7 @@ export function serviceHarness(
 		liveCaps?: boolean
 		decoderConfigs?: DecoderConfig[]
 		bandplans?: () => readonly Bandplan[]
+		decoderCoverage?: () => readonly DecoderCoverageView[]
 	} = {},
 ) {
 	const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "wk-scan-"))
@@ -112,6 +116,7 @@ export function serviceHarness(
 		decoderConfigs: opts.decoderConfigs ?? [],
 		region: "EU",
 		...(opts.bandplans ? { bandplans: opts.bandplans } : {}),
+		...(opts.decoderCoverage ? { decoderCoverage: opts.decoderCoverage } : {}),
 		stateDir: dir,
 		sources: sources as never,
 		routing: {

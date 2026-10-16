@@ -62,7 +62,9 @@ replan the service already performs); WG6 adds no replan on decoder state change
 documentation says a skipped range stays skipped until the job's next plan.
 1.5 Bounds: at most 64 decoders (in view order) and 32 targets plus ranges per decoder are
 examined; at most 256 merged entries are reported (lowest `startHz` first). Exceeding a bound
-adds one `warning` plan issue `decoded-elsewhere-truncated` and never fails the plan.
+adds one `warning` plan issue `decoded-elsewhere-truncated` and never fails the plan; the
+warning is added only when at least one entry is reported (with no entry nothing is partial, so
+1.1's equality holds).
 1.6 `ScanJobSpec.skipDecodedElsewhere` (boolean, optional, absent = false, live-editable) makes
 the reported ranges exclusions of a sweep plan, merged like the WG2 lockout exclusions:
 `applied` is true for the ranges that became exclusions; if applying them would leave no hop,

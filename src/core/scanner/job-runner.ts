@@ -33,6 +33,7 @@ import type {
 	Impact,
 	Identity,
 	JobState,
+	DecodedElsewhereRange,
 	LockoutExclusion,
 	NormalisedJobSpec,
 	PauseReason,
@@ -68,6 +69,8 @@ export interface JobRecord {
 	counts: { observations: number; transients: number }
 	/** WG2 req 12.2: runtime lockout exclusions of the current plan (sweep jobs; never persisted). */
 	lockoutExclusions?: LockoutExclusion[]
+	/** WG6 req 1.2: runtime decoded-elsewhere ranges of the current plan (never persisted). */
+	decodedElsewhere?: DecodedElsewhereRange[]
 }
 
 export interface LiveObservation {

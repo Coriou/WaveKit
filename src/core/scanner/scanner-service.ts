@@ -167,6 +167,8 @@ import type {
 	HopPlan,
 	Identity,
 	Impact,
+	DecodedElsewhereRange,
+	DecoderCoverageView,
 	LockoutExclusion,
 	NormalisedJobSpec,
 	Observation,
@@ -242,6 +244,11 @@ export interface ScannerServiceDeps {
 	tickMs?: number
 	operatorActivity?: OperatorActivityPort
 	hostCentre?: HostCentreReader
+	/**
+	 * WG6 req 1.1: the decoders plans may treat as covering frequencies elsewhere, read once per
+	 * plan. Absent: no `decodedElsewhere` and plans exactly as before. A throw counts as none.
+	 */
+	decoderCoverage?: () => readonly DecoderCoverageView[]
 }
 
 const SNAPSHOT_EVERY_MS = 10_000
@@ -1264,6 +1271,9 @@ export class ScannerService extends EventEmitter {
 			...(preview.lockoutExclusions
 				? { lockoutExclusions: preview.lockoutExclusions }
 				: {}),
+			...(preview.decodedElsewhere
+				? { decodedElsewhere: preview.decodedElsewhere }
+				: {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -1328,6 +1338,7 @@ export class ScannerService extends EventEmitter {
 			"protocols",
 			"capture",
 			"signalsOnly",
+			"skipDecodedElsewhere",
 		]
 		// S1-B final review, finding 7: the operator's own input, not the normalised spec, so derived
 		// fields (integration, dwell, …) follow the patch and keep honest provenance. Only the source
@@ -1385,6 +1396,7 @@ export class ScannerService extends EventEmitter {
 		record.issues = preview.issues
 		record.updatedAt = this.now()
 		setLockouts(record, preview.lockoutExclusions)
+		setDecodedElsewhere(record, preview.decodedElsewhere)
 		this.requireDriver(id).replan(preview.spec, preview.plan)
 		const { sourceId } = record.spec
 		// The lease holder's tuning drives the engine (finding 2); its scheduler follows on the next own epoch.
@@ -1633,13 +1645,27 @@ export class ScannerService extends EventEmitter {
 				)
 				continue
 			}
-			if (
+			const lockoutsSame =
 				JSON.stringify(next.lockoutExclusions ?? []) ===
 				JSON.stringify(record.lockoutExclusions ?? [])
+			if (
+				lockoutsSame &&
+				JSON.stringify(next.decodedElsewhere ?? []) ===
+					JSON.stringify(record.decodedElsewhere ?? [])
 			)
 				continue
 			setLockouts(record, next.lockoutExclusions)
+			setDecodedElsewhere(record, next.decodedElsewhere)
 			record.updatedAt = this.now()
+			// WG6: only the decoded-elsewhere list changed and the plan did not (skip off, or not
+			// applied): reported only, the job keeps its hop position.
+			if (
+				lockoutsSame &&
+				JSON.stringify(next.plan) === JSON.stringify(record.plan)
+			) {
+				this.emitJob(record)
+				continue
+			}
 			driver.replan(record.spec, next.plan)
 			const { sourceId } = record.spec
 			touched.add(sourceId)
@@ -2172,6 +2198,19 @@ export class ScannerService extends EventEmitter {
 				)
 			}
 			report(a.discoveryId, a.jobIds)
+		}
+		// WG6 req 2.1: a closing observation sets its duration on every job entry it is the
+		// latest credit of (JobHits ignores jobs whose entry moved on or never credited it).
+		if (endReason) {
+			const durationMs = now - live.startedAt
+			const jobIds = new Set(live.jobIds)
+			for (const a of res.attributed ?? [])
+				if (a.observationId === live.observationId)
+					for (const j of a.jobIds) jobIds.add(j)
+			for (const jobId of jobIds)
+				this.hits
+					.get(jobId)
+					?.ended(live.observationId, res.discoveryId, durationMs)
 		}
 		live.discoveryId = res.discoveryId
 		live.decoded = this.store.get(res.discoveryId)?.confidence === "decoded"
@@ -3657,9 +3696,13 @@ export class ScannerService extends EventEmitter {
 		if (pj.id.startsWith("passive-")) return
 		let plan: HopPlan
 		let lockoutExclusions: LockoutExclusion[] | undefined
+		let decodedElsewhere: DecodedElsewhereRange[] | undefined
 		let failed = false
 		try {
-			;({ plan, lockoutExclusions } = planJob(pj.spec, this.previewContext()))
+			;({ plan, lockoutExclusions, decodedElsewhere } = planJob(
+				pj.spec,
+				this.previewContext(),
+			))
 		} catch (err) {
 			this.log.warn(
 				{ err, jobId: pj.id },
@@ -3687,6 +3730,7 @@ export class ScannerService extends EventEmitter {
 			unrestorable: [],
 			counts: { observations: 0, transients: 0 },
 			...(lockoutExclusions && !failed ? { lockoutExclusions } : {}),
+			...(decodedElsewhere && !failed ? { decodedElsewhere } : {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -3851,6 +3895,9 @@ export class ScannerService extends EventEmitter {
 			bandplans: this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
 			tunerRange: () => ({ startHz: 24_000_000, endHz: 1_766_000_000 }),
 			lockouts: sourceId => this.store.lockouts(sourceId),
+			...(this.deps.decoderCoverage
+				? { decoderCoverage: this.deps.decoderCoverage }
+				: {}),
 		}
 	}
 
@@ -4018,6 +4065,9 @@ export class ScannerService extends EventEmitter {
 			unrestorable: record.unrestorable,
 			...(record.lockoutExclusions
 				? { lockoutExclusions: record.lockoutExclusions }
+				: {}),
+			...(record.decodedElsewhere
+				? { decodedElsewhere: record.decodedElsewhere }
 				: {}),
 			progress: driver
 				? { ...driver.progress(), hitStats: this.hitStatsOf(record.id) }
@@ -4554,6 +4604,15 @@ function setLockouts(
 ): void {
 	if (lockoutExclusions) record.lockoutExclusions = lockoutExclusions
 	else delete record.lockoutExclusions
+}
+
+/** WG6 req 1.2: the record's runtime decoded-elsewhere ranges follow its current plan. */
+function setDecodedElsewhere(
+	record: JobRecord,
+	decodedElsewhere: DecodedElsewhereRange[] | undefined,
+): void {
+	if (decodedElsewhere) record.decodedElsewhere = decodedElsewhere
+	else delete record.decodedElsewhere
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
