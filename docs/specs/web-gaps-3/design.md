@@ -45,18 +45,18 @@ mesh tracker processPacket → (from, id) dedupe → M: telemetry / neighbour de
 
 ## CPU and IO budgets
 
-| Item              | Position                                                  | Budget                                                                                                                                                                    | How measured                                                                                                   |
-| ----------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| P provenance      | ingress, before admission and coalescing; every reception | ≤ 2 µs mean per reception; 1 map lookup, ≤ 2 payload reads, no Zod/JSON                                                                                                   | micro-benchmark over 100 000 mixed outputs, reported (not asserted in CI)                                      |
-| H flood check     | storage ingress, after telemetry, before coalescer        | 1 string compare for non-mesh outputs; ≤ 5 µs per mesh reception (FNV-1a over ≤ 684 chars); ≤ 20 000 live entries (measured ≈ 4.4 MB, ≤ ≈ 5.6 MB with retained event ids) | benchmark, reported                                                                                            |
-| F seed            | writer worker, once at session open                       | ≤ 500 ms for 250 000 rows                                                                                                                                                 | one timed run on a 250 000-row fixture, reported                                                               |
-| F commit counters | writer worker, after COMMIT                               | O(1) map update per committed row, no SQL                                                                                                                                 | by construction                                                                                                |
-| F planner         | writer worker, per prune step                             | O(k log k), k shares (≤ 256 in tests)                                                                                                                                     | by construction                                                                                                |
-| F prune step      | writer worker, per step                                   | ≤ `pruneBatchRows` rows per transaction; burst bounded by `pruneBurstBatches`/`pruneBurstMs` (unchanged)                                                                  | delete rows/s fair vs oldest-first on 250 000 rows, reported; DB file size drift after 10 cap cycles, reported |
-| F share oldest    | writer worker, after a step that changed a share          | ≤ 1 indexed point lookup per changed share                                                                                                                                | by construction                                                                                                |
-| G checks          | query worker / service, per page and replay iteration     | no extra SQL statement: the hole keys join the existing `store_meta` read (`readObserved`)                                                                                | by construction                                                                                                |
-| C observe         | tracker update listener                                   | ≤ 2 µs per update (haversine + atan2 + array write); 17 280 cells of Float64                                                                                              | benchmark, reported                                                                                            |
-| M decode          | mesh tracker, unique packets only                         | ≤ 20 µs per telemetry or neighbour payload (≤ 512 bytes)                                                                                                                  | benchmark, reported                                                                                            |
+| Item              | Position                                                  | Budget                                                                                                                                                                    | How measured                                                                                                                                                            |
+| ----------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P provenance      | ingress, before admission and coalescing; every reception | ≤ 2 µs mean per reception; 1 map lookup, ≤ 2 payload reads, no Zod/JSON                                                                                                   | micro-benchmark over 100 000 mixed outputs, reported (not asserted in CI)                                                                                               |
+| H flood check     | storage ingress, after telemetry, before coalescer        | 1 string compare for non-mesh outputs; ≤ 5 µs per mesh reception (FNV-1a over ≤ 684 chars); ≤ 20 000 live entries (measured ≈ 4.4 MB, ≤ ≈ 5.6 MB with retained event ids) | benchmark, reported                                                                                                                                                     |
+| F seed            | writer worker, once at session open                       | ≤ 500 ms for 250 000 rows; measured 330 ms (`oldest-first` open 317 ms), median of 3 warm opens                                                                           | opt-in benchmark `retention-measure.test.ts` (`WAVEKIT_RETENTION_BENCH=1`) on a 250 000-row fixture                                                                     |
+| F commit counters | writer worker, after COMMIT                               | O(1) map update per committed row, no SQL                                                                                                                                 | by construction                                                                                                                                                         |
+| F planner         | writer worker, per prune step                             | O(k log k), k shares (≤ 256 in tests)                                                                                                                                     | by construction                                                                                                                                                         |
+| F prune step      | writer worker, per step                                   | ≤ `pruneBatchRows` rows per transaction; burst bounded by `pruneBurstBatches`/`pruneBurstMs` (unchanged)                                                                  | same benchmark: delete rate 8 657 vs 7 238 rows/s (1.20x); file after 10 cap cycles 83.1 vs 80.7 MiB (+3 %); rows kept at the 64 MiB byte cap 38 684 vs 40 048 (0.966x) |
+| F share oldest    | writer worker, after a step that changed a share          | ≤ 1 indexed point lookup per changed share                                                                                                                                | by construction                                                                                                                                                         |
+| G checks          | query worker / service, per page and replay iteration     | no extra SQL statement: the hole keys join the existing `store_meta` read (`readObserved`)                                                                                | by construction                                                                                                                                                         |
+| C observe         | tracker update listener                                   | ≤ 2 µs per update (haversine + atan2 + array write); 17 280 cells of Float64                                                                                              | benchmark, reported                                                                                                                                                     |
+| M decode          | mesh tracker, unique packets only                         | ≤ 20 µs per telemetry or neighbour payload (≤ 512 bytes)                                                                                                                  | benchmark, reported                                                                                                                                                     |
 
 ## Fair-share retention (lane F)
 
@@ -121,7 +121,13 @@ the greatest deleted seq when the table is empty; `holes = deleted seqs > W'`; i
 counters are rebuilt at open; a planner/`COUNT(*)` mismatch reseeds, 1.10). Seed failure:
 `effective: "oldest-first"` for the session plus one note (1.11). Residual excess with no share
 above `L` after a reseed: one oldest-first prefix step for that cap, counted (1.12), so caps
-bind even when record bytes and live pages disagree (fragmentation). A removed decoder's share
+bind even when record bytes and live pages disagree (fragmentation). Indivisible row (1.5): pruning
+frees record bytes faster than live pages, so the last excess can be live-page excess smaller
+than any candidate row while shares are still above `L`. Then no fair delete can avoid
+crossing a byte floor, and the prefix fallback would take quiet shares' oldest rows instead.
+One counted step deletes the single oldest row of the over-level share with the largest excess
+(ties: key ascending), first trying over-level shares the batch budget left out; it never
+touches a share at or under `L` and counts in `prefixFallbackSteps`. A removed decoder's share
 keeps its rows until age or until it is above `L`. Generation exhaustion fails the step (3.6).
 Restore or a new `storeUuid` is a new session with new counters (3.7).
 
@@ -131,7 +137,9 @@ ingress getter at merge.
 
 **Existing tests to amend.** `prune.property.test.ts` (the prefix invariant becomes
 `oldest-first`-scoped; add the single-share equivalence), `coalesce-retention.test.ts` (WG1 7.8
-must still pass under the default `fair-share`).
+must still pass under the default `fair-share`). Its WG1 case where the rare page is lost
+without coalescing now holds only under `oldest-first` and runs with that policy; a new case
+shows the page is kept under the default `fair-share`, because the page's share is below `L`.
 
 ## Hole contract (lane G)
 
@@ -244,7 +252,10 @@ after lanes F and H merge. Docs per 9.3. CLI ws-client unknown channels (9.2).
 ## Correctness properties
 
 1. **Fair floor.** For any share usages and active caps, a fair step removes no row from a share
-   with `u_i <= L`, and no share ends a burst below `min(u_i, L)`. _Validates 1.5, 1.6._
+   with `u_i <= L`, and no share ends a burst below `min(u_i, L)`, except the single counted
+   indivisible-row step of 1.5, which removes the oldest row of the over-level share with the
+   largest excess (ties key ascending), never a share at or under `L`, and counts in
+   `prefixFallbackSteps`. _Validates 1.5, 1.6._
 2. **Caps bind.** For any sequence of commits with prune bursts unconstrained by time, rows end
    at or below the row low-water mark once the row cap triggered, and the byte cap likewise
    (including the prefix fallback). _Validates 1.4, 1.12._

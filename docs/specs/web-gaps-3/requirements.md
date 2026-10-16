@@ -48,7 +48,12 @@ transaction and the same `pruneBurstBatches` / `pruneBurstMs` bound per write.
 1.5 Under `fair-share`, cap pressure shall remove rows by max-min water-filling: with per-share
 usage `u_i` (rows for the row cap, summed `record_bytes` for the byte cap) and target `T`
 (the low-water mark), the level `L` is the largest integer with `sum(min(u_i, L)) <= T`. Only
-shares with `u_i > L` lose rows, never below `L`.
+shares with `u_i > L` lose rows, never below `L`, with one exception (the indivisible row):
+when the only excess left is live-page excess smaller than any candidate row, so no fair delete
+can avoid crossing a share's byte floor, one counted step deletes the single oldest row of the
+over-level share with the largest excess (ties: key ascending). It never touches a share at or
+under `L`, and it counts in `prefixFallbackSteps`. The true prefix fallback (1.12) still runs
+only when no share is above `L`.
 1.6 Inside one share the rows removed shall be its lowest `seq` first.
 1.7 Per-share row and byte counters shall live in writer memory: seeded once when the session
 opens by one grouped scan, increased after a commit by the rows that committed (not duplicates
@@ -68,10 +73,11 @@ an oldest-first prefix for that cap, so the caps always bind; `prefixFallbackSte
 1.14 Under `oldest-first` the writer shall behave exactly as before WG3 (same rows deleted,
 same watermark and generation updates, no holes).
 1.15 Budgets (design "CPU and IO budgets"): the seed scan at most 500 ms for 250 000 rows on
-the development Mac, in the writer worker; counter updates O(1) per committed row with no SQL;
-the planner O(k log k) for k shares; per-write prune wall time bounded by `pruneBurstMs` as
-today; fair-share delete throughput and on-disk size drift measured against `oldest-first` on a
-250 000-row fixture and reported.
+the development Mac, in the writer worker (measured 330 ms, `oldest-first` open 317 ms);
+counter updates O(1) per committed row with no SQL; the planner O(k log k) for k shares;
+per-write prune wall time bounded by `pruneBurstMs` as today; fair-share delete throughput and
+on-disk size drift measured against `oldest-first` on a 250 000-row fixture and reported
+(measured: delete rate 1.20x, file after 10 cap cycles +3 %, rows kept at the byte cap 0.966x).
 1.16 Caps, admission limits, `activity.enabled` and the access default shall not change.
 
 ## 2. Retention exposure
