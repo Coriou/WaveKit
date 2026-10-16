@@ -1228,3 +1228,14 @@ Announcement for the CLI. Spec: [web-gaps-2](specs/web-gaps-2/requirements.md). 
 - AIS NMEA sentences with a wrong checksum are dropped and counted in the decoder's `stats.errors`; APRS Mic-E positions are now correct (West longitudes were East before), which changes positions in `decoder:output` for Mic-E packets.
 
 Update to the WG2 note (R1, 2026-10-13): the CLI's access-state reader is tolerant of v2 label values it never uses (`name` string up to 256, `kind` any string up to 16, `lastSeenAt` a non-negative integer, each nullable); unknown keys are still rejected and v1 is still accepted. The CLI's APRS message row now labels speed in knots (`kn`), as the APRS spec and the core use; weather wind stays mph. Update the CLI with the core: a pre-WG2 CLI reading the credential from `access-state` refuses a v2 snapshot. Also: `newDiscoveries` on scanner hits now counts discoveries, not observations; the digital-voice status route keeps the call metadata fields.
+
+#### Core: WG3 web gaps — 2026-10-16
+
+Announcement for the CLI. Spec: [web-gaps-3](specs/web-gaps-3/requirements.md). Details in [API.md](API.md). One CLI change landed with the batch (first bullet); the rest needs none.
+
+- CLI change: `cli/source/data/ws-client.ts` now ignores a frame whose `channel` is a string the CLI does not know (anything other than its subscribed channels, `scanner`, `spectrum` and `activity`) instead of counting it as `ws:invalid`. Frames without a channel, and unknown types on a known channel, are checked as before. A test helper in `tests/unit/cli/runtime.test.ts` that used a made-up channel now uses the real ones.
+- New route `GET /api/coverage` (ADS-B and AIS range per 1° bearing over 24 h from `station.lat`/`station.lon`; 200 `available: false` without a station location). The CLI does not call it.
+- Mesh: `MeshNode` gains optional `telemetry` and `neighbours`, `MeshTrackerStats` gains optional `telemetryPackets` and `neighbourReports`, on the routes and on `mesh:update`/`mesh:stats`. The CLI does not read mesh data.
+- Activity: decoder receptions now carry `provenance.sourceId` and `provenance.frequency` when known (null before); Meshtastic flood copies (same `from`, `id`, `portnum`, payload within 30 s) are no longer stored; paging and replay can now reset with the existing `snapshot-reset` / `cursor-gap` reasons when retention deletes a row that is not the oldest. No DTO, frame or reason changed. The CLI has no Activity view and ignores `activity` frames.
+- readsb now receives `--lat`/`--lon` from `station` whether or not `enableMlat` is set; explicit decoder options win. Decoder status is unchanged.
+- The retention policy (fair-share) and the `retention` and `floodCopies` fields of `GET /api/activity/status` follow in an update to this note.
