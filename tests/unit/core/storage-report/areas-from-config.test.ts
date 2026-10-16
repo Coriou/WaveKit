@@ -87,7 +87,10 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			{ id: "access", paths: ["/run/wavekit/access"], capBytes: null },
 			{
 				id: "decoder-overrides",
-				paths: [join(stateDir, "decoder-band-overrides.json")],
+				paths: [
+					join(stateDir, "decoder-band-overrides.json"),
+					join(stateDir, "decoder-settings.json"),
+				],
 				capBytes: null,
 			},
 			{
@@ -217,6 +220,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			join(stateDir, "bandplans"),
 			join(stateDir, "operator-data"),
 			join(stateDir, "decoder-band-overrides.json"),
+			join(stateDir, "decoder-settings.json"),
 			join(stateDir, "station.json"),
 		])
 		// A shared root belongs to the later area only.

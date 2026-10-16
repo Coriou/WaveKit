@@ -687,7 +687,7 @@ export interface ScannerSettings {
 	}
 	/**
 	 * spectrumHz default 10 (0.5–25), spectrumBins default 512 (128–2048).
-	 * spectrumSummaryBins 2048 (512–2048, provisional) and spectrumMaxProfiles 4 (1–16) are config-only.
+	 * spectrumSummaryBins 2048 (512–8192, `SPECTRUM_SUMMARY_BINS_MAX`; served bins ≤ min(cap, budget)) and spectrumMaxProfiles 4 (1–16) are config-only.
 	 */
 	ws: {
 		maxMessagesPerSecond: number

@@ -38,6 +38,7 @@ import type {
 	ScannerProgressEventData,
 	ScannerSettingsView,
 	ScannerStatus,
+	SpectrumBinsCapView,
 	SpectrumSourceStatus,
 } from "@wavekit/api-types"
 import {
@@ -262,6 +263,11 @@ export interface ScannerServiceDeps {
 	 * plan. Absent: no `decodedElsewhere` and plans exactly as before. A throw counts as none.
 	 */
 	decoderCoverage?: () => readonly DecoderCoverageView[]
+	/**
+	 * WG8 req 5.4: the host bins cap resolved once at startup, handed to the spectrum service
+	 * (client bound, `limits.binsCap`, engine summary budget). Absent: the frozen 2048 floor.
+	 */
+	spectrumBinsCap?: () => SpectrumBinsCapView
 	/**
 	 * WG7 req 6.2: the skip-marked band-plan segments, read once per plan. Absent: no
 	 * `bandPlanSkips` and plans exactly as before. A throw counts as none.
@@ -605,6 +611,7 @@ export class ScannerService extends EventEmitter {
 				now: this.now,
 				engineHost: deps.engineHost ?? "thread",
 				...(deps.hostCentre ? { hostCentre: deps.hostCentre } : {}),
+				...(deps.spectrumBinsCap ? { binsCap: deps.spectrumBinsCap } : {}),
 				// From the open, so the pool's lag guard sees every stream boundary (Task 34).
 				engineCreated: (sourceId, engine) => {
 					// This hook runs BEFORE engine.start; revoke queued capabilities before extra work.

@@ -9,6 +9,7 @@ import {
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_TONE_SQUELCH_MODULATIONS,
+	SPECTRUM_SUMMARY_BINS_MAX,
 	toneSchema,
 } from "@wavekit/api-types"
 import { CTCSS_HZ } from "./core/audio-tones/ctcss.js"
@@ -580,14 +581,19 @@ export const ScannerConfigSchema = z
 				spectrumHz: z.number().finite().min(0.5).max(25).default(10),
 				spectrumBins: z.number().int().min(128).max(2048).default(512),
 				/** Engine summary-detail budget: block-summary bins per source (config only; never per client, never PATCHed). */
-				spectrumSummaryBins: z.number().int().min(512).max(2048).default(2048),
+				spectrumSummaryBins: z
+					.number()
+					.int()
+					.min(512)
+					.max(SPECTRUM_SUMMARY_BINS_MAX)
+					.default(2048),
 				/** Distinct active non-default spectrum profiles over all sources (config only). */
 				spectrumMaxProfiles: z.number().int().min(1).max(16).default(4),
 				/**
 				 * WG8 req 5.2: host cap on summary and client bins (config only). Absent or "auto"
 				 * measures the host once at startup (floor 2048, ceiling 8192); no default is
-				 * filled in, so the parsed config and its export stay as before. Read by the
-				 * spectrum service once lane SB lands; spectrumSummaryBins keeps max 2048 until then.
+				 * filled in, so the parsed config and its export stay as before. Clients get at most
+				 * min(cap, spectrumSummaryBins) bins; the default profile stays within spectrumBins.
 				 */
 				spectrumBinsCap: z
 					.union([

@@ -134,6 +134,9 @@ import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
 import { openStationService } from "./core/station/station-service.js"
+import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
+import type { DecoderSettingsService } from "./decoders/settings/contract.js"
+import { openDecoderSettingsService } from "./decoders/settings/service.js"
 import { STATION_WRITE_REQUIRES_ACCESS } from "./core/station/contract.js"
 import { createStorageReporter } from "./core/storage-report/reporter.js"
 import {
@@ -265,6 +268,17 @@ interface ScannerRuntimePhaseDependencies {
 	stopChannelizer(): Promise<void>
 	attemptLocalCleanup(): Promise<readonly CleanupOutcome[]>
 	finalizeStopNative(producerOutcome: CleanupOutcome): Promise<void>
+}
+
+/**
+ * WG8 req 1.5: the decoder configurations created at boot, override applied (`enabled` and
+ * patchable options). Without a settings file each entry deep-equals the configured one.
+ */
+export function effectiveDecoderConfigs(
+	settings: Pick<DecoderSettingsService, "effectiveConfig">,
+	configs: readonly DecoderConfig[],
+): DecoderConfig[] {
+	return configs.map(c => settings.effectiveConfig(c))
 }
 
 /** Actual phase promises remain authoritative even when a caller races a timeout. */
@@ -792,6 +806,15 @@ async function main(): Promise<void> {
 		})
 		own(12, () => stationService.close())
 		checkpoint()
+		// WG8 req 1-3: decoder settings overrides (<stateDir>/decoder-settings.json), loaded in
+		// both modes; read-only until the manager port is set. Export stays YAML-only.
+		const decoderSettings = await openDecoderSettingsService({
+			configs: config.decoders,
+			stateDir: config.stateDir,
+			logger,
+		})
+		own(12, () => decoderSettings.close())
+		checkpoint()
 		const decoderRegistry = new DecoderRegistry()
 		const decoderManager = new DecoderManager(
 			decoderRegistry,
@@ -802,6 +825,9 @@ async function main(): Promise<void> {
 		)
 
 		runtimeDecoders = decoderManager
+		// TODO(WG8 Main, after DP merge): decoderSettings.setManager(decoderManager) once the
+		// DecoderManager implements DecoderSettingsManagerPort; until then update() answers
+		// DECODER_SETTINGS_STORE_UNAVAILABLE (no route calls it yet).
 
 		// Wire DecoderManager to SourceManager for dynamic sample rate handling
 		decoderManager.setSourceManager(sourceManager, sourceRouting)
@@ -890,9 +916,15 @@ async function main(): Promise<void> {
 
 		// Step 7: Create decoders from configuration. dsd-fme decoders are first
 		// pointed at the digital voice stream (-o udp to a local socket).
-		let decoderConfigs: DecoderConfig[] = config.decoders
+		// Overrides apply BEFORE the digital-voice preparation, which rewrites dsd-fme output.
+		const effectiveDecoders = effectiveDecoderConfigs(
+			decoderSettings,
+			config.decoders,
+		)
+		let decoderConfigs: DecoderConfig[] = effectiveDecoders
 		try {
-			decoderConfigs = await digitalVoice.prepareDecoderConfigs(config.decoders)
+			decoderConfigs =
+				await digitalVoice.prepareDecoderConfigs(effectiveDecoders)
 			checkpoint()
 		} catch (err) {
 			if (stopping) throw err
@@ -955,6 +987,24 @@ async function main(): Promise<void> {
 			},
 		)
 		const { channelTier, ...scannerSettings } = config.scanner
+		// WG8 req 5.2: the host bins cap, resolved once (bounded bench, or the configured value)
+		const spectrumBinsCap = resolveSpectrumBinsCap(
+			config.scanner.ws.spectrumBinsCap ?? "auto",
+		)
+		log.info(
+			{
+				setting: spectrumBinsCap.setting,
+				cap: spectrumBinsCap.cap,
+				source: spectrumBinsCap.source,
+				wallMs: spectrumBinsCap.wallMs,
+			},
+			"Spectrum bins cap resolved",
+		)
+		const spectrumBinsCapView = Object.freeze({
+			setting: spectrumBinsCap.setting,
+			cap: spectrumBinsCap.cap,
+			source: spectrumBinsCap.source,
+		})
 		try {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
@@ -975,6 +1025,7 @@ async function main(): Promise<void> {
 					: {}),
 				sourceConfigs: config.sources,
 				decoderConfigs,
+				spectrumBinsCap: () => spectrumBinsCapView,
 				region: bandRegion.code,
 				bandplans: scannerBandplans,
 				stateDir: config.stateDir,
@@ -1561,6 +1612,15 @@ async function main(): Promise<void> {
 			name: "station",
 			handler: async () => {
 				await stationService.close()
+			},
+			timeout: 2000,
+		})
+
+		// Same position: no settings PATCH is in flight once the API server has stopped
+		shutdown.register({
+			name: "decoder-settings",
+			handler: async () => {
+				await decoderSettings.close()
 			},
 			timeout: 2000,
 		})

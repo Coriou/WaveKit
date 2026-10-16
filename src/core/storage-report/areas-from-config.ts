@@ -5,6 +5,7 @@
  */
 import { join, resolve } from "node:path"
 import type { StorageActivityRetention } from "@wavekit/api-types"
+import { DECODER_SETTINGS_FILE_NAME } from "@wavekit/api-types"
 import type {
 	ActivityRetentionPolicy,
 	ActivityStoreStats,
@@ -113,7 +114,11 @@ export function storageAreasFromConfig(
 	areas.push(
 		{
 			id: "decoder-overrides",
-			paths: [join(stateDir, BAND_OVERRIDE_FILE_NAME)],
+			// Band overrides and the WG8 decoder settings store share the area (no new id)
+			paths: [
+				join(stateDir, BAND_OVERRIDE_FILE_NAME),
+				join(stateDir, DECODER_SETTINGS_FILE_NAME),
+			],
 			capBytes: null,
 		},
 		{
