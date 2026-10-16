@@ -491,6 +491,8 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 		if (report.messageType === 21) {
 			// One aton object per vessel, updated in place. The emitted state is
 			// already the live object, so consumers see the same values as before.
+			// state.aton is live per vessel, like the state itself: consumers that
+			// keep history must copy it.
 			const aidType = carriedNumber(report.aidType, acceptAidType)
 			const virtual = report.virtualAid ?? null
 			const offPosition = report.offPosition ?? null

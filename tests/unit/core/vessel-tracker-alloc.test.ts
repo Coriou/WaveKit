@@ -90,6 +90,32 @@ describe("VesselTracker class-field reuse", () => {
 		expect(second).toEqual({ aidType: 30, virtual: true, offPosition: null })
 	})
 
+	it("pins the live-reference contract: a shallow copy sees later aton updates, a structuredClone does not", () => {
+		const tracker = new VesselTracker({ now: () => T0 }, logger)
+		tracker.processShip("ais", {
+			mmsi: "992350002",
+			messageType: 21,
+			aidType: 1,
+			virtualAid: false,
+			offPosition: false,
+		})
+		const state = tracker.get("992350002") as VesselState
+		const atonBefore = state.aton
+		const shallow = { ...state }
+		const deep = structuredClone(state)
+		tracker.processShip("ais", {
+			mmsi: "992350002",
+			messageType: 21,
+			aidType: 30,
+			virtualAid: false,
+			offPosition: false,
+		})
+		expect(state.aton).toBe(atonBefore)
+		expect(shallow.aton).toBe(state.aton)
+		expect(shallow.aton?.aidType).toBe(30)
+		expect(deep.aton?.aidType).toBe(1)
+	})
+
 	it("keeps one class-field object per vessel", () => {
 		const tracker = new VesselTracker({ now: () => T0 }, logger)
 		const peek = (state: VesselState): unknown =>

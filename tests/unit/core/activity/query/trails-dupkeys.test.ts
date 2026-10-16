@@ -21,6 +21,11 @@ const NOW = FIXTURE_CLOCK_ANCHOR_MS
 /** SQLite keeps the first of duplicate keys, JSON.parse the last. */
 const INNER_DUP = '{"lat":10,"lon":20,"lat":50}'
 
+/** The second key is spelled with an escape; SQLite decodes it, a text scan misses it. */
+const ESCAPED_DUP = '{"lat":10,"lon":20,"l\\u0061t":50}'
+/** A nested object named lat repeats the quoted key. */
+const NESTED = '{"lat":10,"lon":20,"meta":{"lat":30}}'
+
 describe("parseTrailPosition with duplicate keys", () => {
 	it("refuses a position whose lat, lon or altM key repeats", () => {
 		expect(parseTrailPosition(INNER_DUP)).toBeNull()
@@ -33,6 +38,15 @@ describe("parseTrailPosition with duplicate keys", () => {
 			lon: 20,
 			altM: 5,
 		})
+	})
+
+	it("refuses escaped keys that hide a duplicate from the text check", () => {
+		expect(parseTrailPosition(ESCAPED_DUP)).toBeNull()
+		expect(parseTrailPosition('{"lat":10,"lon":20,"l\\u006fn":30}')).toBeNull()
+	})
+
+	it("refuses a nested object named lat (intended: fail-safe, both sides agree)", () => {
+		expect(parseTrailPosition(NESTED)).toBeNull()
 	})
 })
 
@@ -127,5 +141,20 @@ describe("readTrails with duplicate JSON keys in a stored row", () => {
 		)
 		const full = read()
 		expect(full.trails[0]?.points).toEqual([[NOW - 100, 12, 22, null]])
+	})
+
+	it("the walk and the probe both refuse escaped-key and nested rows", () => {
+		writer.exec("DELETE FROM activity")
+		insert(100, "C", '{"position":{"lat":11,"lon":21}}')
+		insert(200, "C", `{"position":${ESCAPED_DUP}}`)
+		insert(300, "C", `{"position":${NESTED}}`)
+		const full = read()
+		expect(full.skippedRows).toBe(2)
+		expect(full.trails[0]?.points).toEqual([[NOW - 100, 11, 21, null]])
+		const capped = read({
+			limits: { ...DEFAULT_TRAILS_READ_LIMITS, maxPoints: 1, scanRows: 1 },
+		})
+		expect(capped.trails[0]?.points).toEqual([[NOW - 100, 11, 21, null]])
+		expect(capped.trails[0]?.truncated).toBe(false)
 	})
 })

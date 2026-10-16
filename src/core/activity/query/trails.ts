@@ -122,8 +122,13 @@ export function parseTrailPosition(json: unknown): TrailPosition | null {
 	let value: unknown = json
 	if (typeof json === "string") {
 		// SQLite keeps the first of duplicate keys, JSON.parse the last: refuse a
-		// repeated lat, lon or altM so both sides read the row the same way.
+		// repeated lat, lon or altM so both sides read the row the same way. Escaped
+		// keys (`"l\u0061t"`) could hide a duplicate from the text check and position
+		// rows never need escapes, so any backslash is refused. Nested objects named
+		// lat, lon or altM repeat the quoted key and are refused too (fail-safe: walk
+		// and probe both use this parser, so they agree).
 		if (
+			json.includes("\\") ||
 			json.indexOf('"lat"') !== json.lastIndexOf('"lat"') ||
 			json.indexOf('"lon"') !== json.lastIndexOf('"lon"') ||
 			json.indexOf('"altM"') !== json.lastIndexOf('"altM"')

@@ -38,6 +38,30 @@ function oracleRefuses(raw: string): boolean {
 	return authority.includes(":") || authority.includes("@") || authority === "" // fetch.ts:97-98
 }
 
+/** The authority text exactly as fetch.ts:94-96 slices it (undefined without `//`). */
+function authorityOf(raw: string): string | undefined {
+	const schemeEnd = raw.indexOf("//")
+	if (schemeEnd < 0) return undefined
+	const rest = raw.slice(schemeEnd + 2)
+	const authorityEnd = rest.search(/[/?]/)
+	return authorityEnd < 0 ? rest : rest.slice(0, authorityEnd)
+}
+
+/**
+ * The fetcher also requires `authority.toLowerCase() === new URL(raw).hostname`
+ * (fetch.ts:116); the schema does not. true = the authority text differs from the
+ * normalised host (percent-encoded or ideographic-dot spellings).
+ */
+function authorityDiffers(raw: string): boolean {
+	const authority = authorityOf(raw)
+	if (authority === undefined) return false
+	try {
+		return authority.toLowerCase() !== new URL(raw).hostname
+	} catch {
+		return false
+	}
+}
+
 const caseMixed = (text: string) =>
 	fc
 		.array(fc.boolean(), { minLength: text.length, maxLength: text.length })
@@ -76,6 +100,15 @@ const listedHost = fc.oneof(
 	fc.constant("1.2.3.4"),
 	fc.constant("evil.example.org"),
 	fc.constant(""),
+)
+const disguisedHost = fc.constantFrom(
+	"%70lans.example.org",
+	"%50lans.example.org",
+	"plans%2Eexample.org",
+	"plans。example.org",
+	"plans．example.org",
+	"plans｡example.org",
+	"PLANS。EXAMPLE.org",
 )
 const port = fc.constantFrom(
 	"",
@@ -122,20 +155,26 @@ const url = (hosts: fc.Arbitrary<string>) =>
 describe("URL schema parity (property 15)", () => {
 	it("host in the list: schema accepts exactly when checkBandPlanUrl does not throw", () => {
 		fc.assert(
-			fc.property(url(fc.oneof(fc.constant(HOST), caseMixed(HOST))), raw => {
-				// Generated tails can extend the host (`plans.example.org&`): compare only
-				// strings whose parsed host is still the listed one.
-				let parsedHost = ""
-				try {
-					parsedHost = new URL(raw).hostname.toLowerCase()
-				} catch {
-					parsedHost = HOST
-				}
-				if (parsedHost !== HOST) return
-				expect(bandPlanImportUrlSchema.safeParse(raw).success).toBe(
-					!fetcherThrows(raw),
-				)
-			}),
+			fc.property(
+				url(fc.oneof(fc.constant(HOST), caseMixed(HOST), disguisedHost)),
+				raw => {
+					// Generated tails can extend the host (`plans.example.org&`): compare only
+					// strings whose parsed host is still the listed one.
+					let parsedHost = ""
+					try {
+						parsedHost = new URL(raw).hostname.toLowerCase()
+					} catch {
+						parsedHost = HOST
+					}
+					if (parsedHost !== HOST) return
+					// Known divergence (see below): the fetcher also demands the authority
+					// text equal the normalised host, the schema does not.
+					if (authorityDiffers(raw)) return
+					expect(bandPlanImportUrlSchema.safeParse(raw).success).toBe(
+						!fetcherThrows(raw),
+					)
+				},
+			),
 			{ numRuns: RUNS },
 		)
 	})
@@ -163,6 +202,21 @@ describe("URL schema parity (property 15)", () => {
 			}),
 			{ numRuns: RUNS },
 		)
+	})
+
+	describe("known divergence (fetcher stricter; for Main)", () => {
+		// The schema accepts these; checkBandPlanUrl refuses them at fetch.ts:116
+		// (authority.toLowerCase() !== url.hostname). Fail-safe: the fetcher is the
+		// stricter side, so nothing unlisted is ever fetched.
+		it.each([
+			["percent-encoded host char", "https://%70lans.example.org/a"],
+			["percent-encoded uppercase host char", "https://%50lans.example.org/a"],
+			["ideographic full stop U+3002", "https://plans。example.org/a"],
+		])("%s: schema accepts, fetcher refuses", (_, raw) => {
+			expect(authorityDiffers(raw)).toBe(true)
+			expect(bandPlanImportUrlSchema.safeParse(raw).success).toBe(true)
+			expect(fetcherThrows(raw)).toBe(true)
+		})
 	})
 
 	it.each([
