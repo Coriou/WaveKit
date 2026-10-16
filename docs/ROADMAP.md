@@ -92,7 +92,10 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    preview digest, a never-persisted legacy store reports `storeId: null`, and a
    `bandplans` WebSocket channel announces changes. WG5 added SDR# XML and Gqrx
    CSV import. WG6 added import by URL from an allowlisted host (protected
-   mode, SSRF-hardened fetch) and a manual check for update. Remaining: CLI and
+   mode, SSRF-hardened fetch) and a manual check for update. WG7 stores the
+   committed group overrides so the update check applies them, aligns the URL
+   schema with the fetcher, and lets a scan opt in to band-plan `skip` bands as
+   exclusions (`skipBandPlanSkips`). Remaining: CLI and
    web consumption, verified packs
    (gated), a general
    settings store with YAML/env/UI provenance (spec pending), and country from
@@ -297,9 +300,11 @@ pending. Coordinate any live receiver/network changes with the hardware session.
 - [x] Sample-rate presets through core capability discovery (WG6):
       `sampleRatePresets` on receiver capabilities suggests the CLI's 11 RTL
       rates on `rtl_tcp` sources (suggestions, not receiver evidence).
-- [ ] Expose per-tuner gain values through core capability discovery. Core
-      already supports gain in tenths dB and gain index; report table
-      provenance/unknown values honestly and share them with both clients.
+- [x] Expose per-tuner gain values through core capability discovery (WG7):
+      `gainTable` on receiver capabilities is the cited librtlsdr list when the
+      advertised tuner type and gain count match it, else `unknown` with a
+      reason (a suggestion, not receiver evidence). Tuning ranges are open:
+      librtlsdr has no per-tuner range table to cite.
 - [ ] Decided 2026-10-08: no lossy bit reduction, no lossless-only compression
       (measured 0.68–0.86 at real gains), no decoders on the Pi for now. Details
       and measurements: `docs/RESEARCH-2026-10-08-WIFI-IQ-TRANSPORT.md`.
@@ -388,8 +393,19 @@ without renewal or online-presence claims. See the
       prerequisite of a decoder `PATCH` (still 501; enforcement is a later
       decision).
 - [x] Redacted config export (WG6, export half): `GET /api/config/export`,
-      protected mode only, fail-closed redaction. Config import remains open;
-      the redaction defaults (E2) await confirmation.
+      protected mode only, fail-closed redaction. Config import remains open.
+      The redaction defaults (E2) were confirmed on 2026-10-16. WG7 exports six
+      reviewed numeric paths that the sensitive-name pattern matched by
+      accident.
+- [x] Audio streams across origins (WG7): in legacy mode the live and
+      digital-voice audio servers send `Access-Control-Allow-Origin: *`
+      (no credentials) and answer `OPTIONS` preflights. Protected mode is
+      unchanged (allowed origins only).
+- [x] Bounded numeric decoder options (WG7): every adapter clamps or falls back
+      by meaning and warns once per key without the value. Argv arrays are
+      capped, and `extraArgs` is limited to 64 strings of at most 4 096 bytes
+      (65 536 in total). Shell pipelines carry only formatted finite numbers.
+      multimon-ng `verbosity` is 0–10. Configured argv is unchanged.
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
       bounded replay and explicit gaps when history is unavailable.
@@ -539,10 +555,19 @@ open. Missing proof retains ownership rather than admitting a successor.
 - [x] Decoded elsewhere and last hit duration (WG6): plans and jobs report the
       ranges running decoders on other sources provably cover
       (`decodedElsewhere`, fail-closed trust rule), skipped only with
-      `skipDecodedElsewhere`; `lastDurationMs` per job hit. Open: coverage is
-      read at plan time only (no replan on decoder start/stop), and
-      external-input decoders never contribute until their band check proves
-      targets.
+      `skipDecodedElsewhere`; `lastDurationMs` per job hit. WG7 refreshes the
+      ranges after decoder changes (2 s debounce, at most every 30 s, at most
+      30 s late). Open: external-input decoders never contribute until their
+      band check proves targets.
+- [x] Band plans to scanner exclusions (WG7): `skipBandPlanSkips` turns
+      `skip`-marked bands of the resolved band-plan view into sweep exclusions
+      (`bandPlanSkips`, after lockouts and before decoded-elsewhere ranges,
+      never emptying a plan). A band-plan edit applies at the job's next plan.
+- [x] Ambient identify for AIS, ACARS, VDL2 and LoRa (WG7): identify names
+      these from an already-running config-owned decoder on the same source
+      (`transport: "ambient"`, no probe). Only `commanded`/`relay` tuning trust
+      at the decoder's own target frequency counts, and the identity needs two
+      clean decodes. Open: acceptance on real AIS, ACARS, VDL2 and LoRa traffic.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
@@ -783,8 +808,11 @@ same view, and a program can do the watching more reliably than a person.
 - [ ] Keep the engine behind an interface so a native backend can take over.
       `wavekit-chan` already reads the full CU8 stream per source.
 - [ ] A stale `caps.centerFreq` (a retune from SDR++ that bypasses the relay)
-      puts the frequency axis and every emission centre on the wrong RF. Fix it
-      or show it as untrusted.
+      puts the frequency axis and every emission centre on the wrong RF. Partly
+      solved: decoder receptions carry the WG5 tuning trust (`unverified` unless
+      the observed tuner state proves the tuning). The spectrum axis and
+      `declaredStream.centerFrequencyHz` still come from config or core
+      metadata. Fix those, or show them as untrusted.
 
 ### Spectrum contract amendment for scanner S1-B
 

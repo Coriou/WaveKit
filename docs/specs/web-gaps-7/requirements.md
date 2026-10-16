@@ -1,7 +1,8 @@
 # Web gaps 7 requirements (WG7)
 
-Status: frozen for implementation (spec and contract committed; lanes AMB, SQ, GT, BX, HW and
-MIN pending). See [design](design.md) and [tasks](tasks.md).
+Status: implementation in progress. Lanes AMB, GT, BX, HW and MIN are merged and wired on the
+batch branch; SQ (requirements 2-4) is pending. Implementation amendments are marked "Amended
+(WG7 Main)" below. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -64,9 +65,17 @@ CRC-clean occurrence within one engine epoch (H2 double match). AIS maps channel
 without a frequency is evidence only when the decoder has exactly one target. A VDL2 frequency
 of 0 or non-finite is no evidence. Anything unknown, missing, malformed or throwing is no
 evidence.
+Amended (WG7 Main): the decoder's provenance binding gives the trust. It counts only on the
+target's source (or, without a binding source, the decoder's resolved source) and only when the
+decode's frequency lies within 1 kHz of one of the binding's own target frequencies. Without a
+trust lookup no ambient trial is planned (identify behaves as before WG7).
 1.4 Evidence pairs with observations exactly as today (same source, `|centre − hz| ≤ max(1 500,
 OBW/2)`, within ±2 s, `AMBIENT_PAIR_MS`); the four existing ambient types behave exactly as
 before for every input (their interpreters and targets are unchanged).
+Amended (WG7 Main): evidence of the ambient-only protocols (`ais`, `acars`, `vdl2`, `lora`) pairs
+only within 1 kHz (`SCANNER_AMBIENT_TARGET_TOLERANCE_HZ`) of the track centre, so a wide track
+near a channel is never named by it. The existing types keep `max(1 500, OBW/2)`. Ambient
+evidence also follows decoders created or removed after the scanner started.
 1.5 Identify: for a target whose tolerance contains a target frequency of a running ambient
 decoder that passes the decoder part of 1.3, the job plans one trial per such protocol with
 `decoder` = the decoder type, `mode` = the decoder type, `transport: "ambient"` and no probe.
@@ -220,6 +229,9 @@ or status changes, the scanner recomputes the decoded-elsewhere ranges of every 
 debounce `DECODED_ELSEWHERE_REFRESH_DEBOUNCE_MS` (2 000 ms after the last change) and at most
 one refresh per `DECODED_ELSEWHERE_REFRESH_MIN_INTERVAL_MS` (30 000 ms; a change inside the
 interval refreshes at its end).
+Amended (WG7 Main): a pending change is served at most 30 s after the first unserved change
+(max-wait), still at least 30 s after the previous refresh, so a flapping decoder cannot postpone
+it forever.
 7.2 A refresh does nothing when the fingerprint of the coverage views (the fields the WG6 trust
 rule reads) is unchanged; otherwise it uses the existing replan path, which emits only when a
 job's list changed with an identical plan and replans only when the plan itself changed (a
@@ -256,6 +268,9 @@ without the value.
 9.2 multimon-ng `verbosity` is an integer 0–10 (one `-v` per step).
 9.3 Arrays that become argv entries are bounded (frequencies, rtl_433 `protocols`); the bound
 per adapter is stated with its reason (the decoder's own channel limit where it has one).
+Amended (WG7 Main): `extraArgs` is the operator's config-only escape hatch with no flag
+allowlist. Each entry is a string of at most 4 096 bytes, at most 64 entries and 65 536 bytes in
+total; anything else is dropped with a key-only warning. Decoder logs carry no option text.
 9.4 No option value reaches a shell command line unless it is a finite number formatted by the
 helper (the csdr `gain` stage of the audio-demod base); every `sh -c` interpolation of option
 values is audited.
@@ -267,6 +282,9 @@ their descriptors agree.
 
 10.1 `bandPlanImportUrlSchema` refuses an explicit port (also `:443`) and any `#` (also an empty
 fragment) in the raw URL string, as the fetcher does.
+Amended (WG7 Main): one divergence is accepted because it fails safe. The schema accepts a
+percent-encoded or Unicode-dot authority that the fetcher refuses (lower-cased raw authority
+must equal the parsed host). It is pinned by a test.
 10.2 A URL import committed with group overrides stores them in the provenance
 (`importedProvenanceSchema.groupOverrides`, optional, at most 64); the update check applies them
 to the fresh file; packs stored before WG7 load unchanged and check without overrides.

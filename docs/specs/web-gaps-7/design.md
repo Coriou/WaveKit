@@ -1,6 +1,7 @@
 # Web gaps 7 design (WG7)
 
-Status: frozen for implementation. Requirements in [requirements](requirements.md), tasks in
+Status: implemented for lanes AMB, GT, BX, HW and MIN (merged and wired; amendments in the
+requirements); SQ pending. Requirements in [requirements](requirements.md), tasks in
 [tasks](tasks.md). Background: scanner ambient evidence and identify ([SCANNER.md](../../SCANNER.md)
 § 6.4, § 10.8), WG2 CTCSS/DTMF and WG6 DCS (the tone path), WG4 live-audio AGC, the WG6
 [decoded-elsewhere ranges](../web-gaps-6/design.md), [band plans](../band-plans/requirements.md),

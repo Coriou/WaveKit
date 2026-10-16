@@ -262,6 +262,10 @@ curl http://localhost:9000/health/ready
 #### GET /api/status
 
 Full system status including sources, decoders, audio output, and tuner relay (if enabled).
+`version` is the root `package.json` version. It is put into the bundle at build time
+(`build-file.mjs`; vitest defines the same value), so a built image, `pnpm run dev` and
+tests all report the same version. The same value names the version in the config export
+header and in the band-plan URL fetcher's `User-Agent`.
 
 ```bash
 curl http://localhost:9000/api/status
@@ -799,9 +803,24 @@ digest, URL and bytes, and uses it up; otherwise it is 409
 `BANDPLANS_IMPORT_MISMATCH` (a client cannot claim a URL it did not fetch
 through core). A commit without `sourceUrl` computes exactly the earlier digest.
 
+Group overrides (WG7). A commit stores its `groupOverrides` in the pack's
+provenance (`provenance.groupOverrides`, sorted by `sourceType` as the digest
+sorts them, at most 64; absent when there are none). This applies to uploads
+and URL imports. A re-import with `replacesPackId` takes the overrides of the
+new commit. `check-update` applies the stored overrides to the fresh file, so
+the diff compares like with like. Packs stored before WG7 load unchanged and
+are checked without overrides.
+
 URL and fetch rules: `https:` only, no user info, no explicit port (also not
 `:443`), no fragment (also not an empty `#`), at most 2,048 characters, and an
-exact lower-case host from the allowlist (no IP literal). Core resolves the host
+exact lower-case host from the allowlist (no IP literal). Since WG7 the request
+schema judges the raw string as the fetcher does. A control character, space,
+DEL, backslash or `#` is refused, and the authority must have no `:` or `@`.
+One known difference fails safe. The schema still accepts a percent-encoded or
+Unicode-dot host such as `https://%70lans.example.org/a` or
+`https://plans。example.org/a`. The fetcher then refuses it, because it
+requires the lower-cased raw authority to equal the parsed host name (422
+`BANDPLANS_URL_REFUSED`). Core resolves the host
 itself and refuses the URL if any resolved address is loopback, private (RFC
 1918), link-local, CGNAT, unspecified, broadcast, multicast, reserved or
 documentation space, IPv6 unique-local or link-local; IPv4-mapped
@@ -906,6 +925,24 @@ with the fixed list 250000, 1024000, 1536000, 1792000, 1920000, 2048000,
 the accepted sample-rate ranges); elsewhere `{ state: "not-applicable", reason:
 "non-rtl-transport" }`. These are WaveKit suggestions, not receiver evidence:
 they say nothing about the device or its model.
+
+`gainTable` (WG7, always sent) suggests the gain steps of an RTL-SDR tuner.
+It is `{ state: "suggested", provenance: "librtlsdr-tuner-gains", tuner,
+valuesTenthsDb }` when three conditions hold: the session's current peer header
+is `advertised`, its `tunerType` has a table, and its `gainCount` equals that
+table's length. The values are the librtlsdr `rtlsdr_get_tuner_gains` list
+(`RTL_TUNER_GAIN_TABLES`, tenths of dB, ascending), and a value's index is the
+`gainIndex` the same librtlsdr would use. The tables are E4000 (type 1, 14
+values), FC0012 (2, 5), FC0013 (3, 23), R820T (5, 29) and R828D (6, the same 29).
+Otherwise the field is `{ state: "unknown", reason }`. The reason is checked in
+this order: `header-not-advertised`, `no-gain-table` (FC2580 and unknown tuners,
+whose librtlsdr list is only the placeholder 0), `unlisted-tuner-type`, then
+`gain-count-mismatch`. On other transports it is `{ state: "not-applicable",
+reason: "non-rtl-transport" }`. Like `sampleRatePresets`, it is a suggestion
+matched on two advertised integers, not receiver evidence. The gain command's
+validation (0–500) is unchanged. Ten listed values fall outside it (E4000 1,
+FC0012 2, FC0013 7) and the command still rejects them. Tuning ranges are not
+reported: librtlsdr has no per-tuner range table to match against.
 
 ### Tuner
 
@@ -1211,6 +1248,19 @@ When the rate or format changes (sample-rate change, `audioFormat` change) the
 server ends existing streams; reconnect to get the new parameters. A client that
 falls behind keeps at most about one second of queued audio (the oldest audio is
 dropped); a client that accepts nothing for 30 s is disconnected.
+
+Cross-origin use (WG7). In legacy access mode, every response of the audio HTTP
+servers carries `Access-Control-Allow-Origin: *` beside
+`Access-Control-Expose-Headers`, and never `Access-Control-Allow-Credentials`.
+The servers are the live demodulator (`/stream`, `/stream.wav`) and digital
+voice (`/decoders/<id>/stream[.wav]`). Their 404 and 503 answers carry the
+header too, so a web app on another origin can `fetch()` the stream. `OPTIONS`
+on a stream path answers 204 with `Access-Control-Allow-Origin: *`,
+`Access-Control-Allow-Methods: GET, OPTIONS`, `Access-Control-Allow-Headers:
+Range` and `Access-Control-Max-Age: 600`. Other paths stay 404, and a non-GET
+method answers 404 with `*`. Protected mode is unchanged. The access layer
+answers preflights and echoes only an allowed origin, with credentials, as for
+REST. `*` is never sent. `Access-Control-Allow-Private-Network` is not sent.
 
 ```bash
 # Self-describing: no format flags
@@ -1617,6 +1667,44 @@ value is key material or may carry it (Meshtastic `channelKey`, dsd-fme
 `extraArgs`) have `secret: true`; the config export redacts them. Every option
 takes effect on the next start (`effect: "restart"`); editing options at
 runtime is not implemented (`PATCH /api/decoders/:id` answers 501).
+
+Bounded options (WG7). Every built-in adapter reads its numeric options through
+one helper. The helper coerces numeric text as the option schema does. A
+non-finite or non-numeric value counts as absent, so the adapter default
+applies. A value out of range is clamped to the option's bounds. One warning
+is logged per decoder and key, naming the key and the issue, never the value.
+Decoder logs carry no option text. The schemas and descriptors carry the same
+bounds. Argv and pipeline commands for every decoder in `config/*.yaml` and the
+test fixtures are byte-identical to before. A shell pipeline (`sh -c`) carries
+an option only as a finite number formatted by the helper (for example the
+csdr `gain` stage): `fmGain: "1; rm -rf /"` counts as absent, so only a number reaches the shell.
+
+| Option                                                        | Bound                                                                              |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `ppm`                                                         | −1000 to 1000                                                                      |
+| ports (`udpPort` and others)                                  | 1–65535 (dsd-fme `udpPort` out of range is dropped, not clamped)                   |
+| `inputSampleRate`                                             | 1 kHz–64 Msps (demod bases, multimon-ng, dsd-fme, rtl_433); 1 kHz–10 Msps (others) |
+| ais-catcher `gain`                                            | 0–60 dB                                                                            |
+| readsb `gain`                                                 | −10 to 60 dB or `auto`; other text is dropped                                      |
+| dumpvdl2 `targetSampleRate`                                   | 105 000–2 100 000 (oversample 1–20); `frequencies` 1 Hz–6 GHz                      |
+| rtl_433 `targetSampleRate`                                    | 250 kHz–3.2 Msps                                                                   |
+| multimon-ng `verbosity`                                       | integer 0–10 (one `-v` per step)                                                   |
+| multimon-ng high-pass / low-pass, filter gain, `fmGain`       | 0–11 025 Hz; ±60 dB; linear 0–1000                                                 |
+| dsd-fme durations, `callTimeoutMs`, retention, total size     | 0–24 h; (0, 24 h]; at most 8760 h; at most 1 048 576 MB                            |
+| demod base `filterTransition`, `filterCutoff`, `audioLowPass` | 0–0.5; 0–0.5; 0–96 kHz                                                             |
+| direwolf `sampleRate`                                         | 8–192 kHz                                                                          |
+
+Arrays that become argv entries are bounded. Entries past a bound are dropped
+with a key-only warning:
+
+- `frequencies`: at most 8 for acarsdec and dumpvdl2, at most 64 for multimon-ng.
+- rtl_433 `protocols`: at most 256, ids 0–999. A list whose every entry is
+  invalid gives no `-R`, which means rtl_433's defaults, the same as absent.
+- multimon-ng `modes`: deduplicated, at most 8.
+- `extraArgs` (every adapter): at most 64 entries. Each entry must be a string
+  of at most 4 096 bytes, and all entries together at most 65 536 bytes.
+
+`extraArgs` is the operator's escape hatch: config only, with no flag allowlist.
 
 #### GET /api/decoders/:id
 
@@ -2084,9 +2172,38 @@ never dropped for them). If that would leave no hop, none applies (all
 `applied: false`) and the plan gets one `decoded-elsewhere-not-applied`
 warning. In-window jobs report the entries but never apply them. Without the
 flag the hops are exactly today's. Coverage is read when a plan is computed
-(preview, create, PATCH, restore and the lockout replans); a decoder starting or
-stopping does not replan a job, so a skipped range stays skipped until the
-job's next plan.
+(preview, create, PATCH, restore and the lockout replans). It is also read
+after decoder changes (WG7; this replaces the WG6 "plan-time only" rule). Each
+decoder change triggers a refresh: created, started, stopped, error,
+restarting, max-restarts, removed, health or status change. The refresh runs
+2 s after the last change, at most once per 30 s, and no later than 30 s after
+the first pending change. A decoder that keeps flapping cannot postpone it
+forever. A refresh compares a fingerprint of the fields the trust rule reads,
+so an unchanged view does nothing. Otherwise every live sweep job is replanned
+through the lockout path: `scanner:job` is sent only when a job's list
+changed, and hops change only for a job with `skipDecodedElsewhere`. A
+throwing view counts as no coverage.
+
+Band-plan skips (WG7): `skipBandPlanSkips: true` (optional, absent = false,
+live-editable) turns the band-plan bands marked `skip` into exclusions of a
+sweep plan. The sources are the resolved band-plan view: the operator layer
+and every enabled pack, built-in or imported. Each band whose effective
+`skip` is set contributes its resolved segments (the parts no higher layer
+names); hidden or shadowed parts contribute nothing. At most 1 024 segments
+are examined, in view order. Plans list them as `bandPlanSkips: [{ startHz,
+endHz, bandKeys, applied }]`: clipped to the enabled ranges, merged
+(overlapping or touching become one, `bandKeys` sorted and unique), sorted by
+`startHz`, at most 256. Jobs carry the same key, runtime only, like
+`lockoutExclusions`. Sweep and in-window plans both report the entries; only
+sweep jobs with the flag apply them. They apply after the lockouts and before
+decoded-elsewhere ranges. If applying them would leave no hop, none applies
+(all `applied: false`) and the plan gets one `bandplan-skips-not-applied`
+warning. Past a bound, the plan gets one `bandplan-skips-truncated` warning,
+only when some entry is reported. The key is absent when there is no entry.
+Without the flag the hops are exactly today's. A missing or throwing band-plan
+view yields no entries. Skips are read only when a plan is computed (preview,
+create, PATCH, restore, replans). A band-plan edit never replans a running
+job, so a new skip applies at the job's next plan.
 
 #### POST /api/scanner/jobs
 
@@ -2258,8 +2375,9 @@ replans every live sweep job on the discovery's sources whose list changes and
 sends `scanner:job`.
 
 Jobs also carry the `decodedElsewhere` entries of their current plan (WG6; see
-`POST /api/scanner/plan`), runtime only like `lockoutExclusions` and recomputed
-at the same points.
+`POST /api/scanner/plan`), runtime only like `lockoutExclusions`. They are
+recomputed at the same points and after decoder changes (WG7 refresh). WG7
+`bandPlanSkips` entries are carried the same way.
 
 `progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
 since the job started: see `GET /api/scanner/jobs/:id/hits`.
@@ -2269,7 +2387,7 @@ since the job started: see `GET /api/scanner/jobs/:id/hits`.
 Live edit. The hop plan changes at the next hop; detection masks, protocol
 matching, probes and `signalsOnly` change as soon as the PATCH returns. Allowed keys: `thresholdDb`,
 `sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
-`capture`, `signalsOnly`, `skipDecodedElsewhere` and `ranges`; other keys are ignored. The keys are merged into the spec the job
+`capture`, `signalsOnly`, `skipDecodedElsewhere`, `skipBandPlanSkips` and `ranges`; other keys are ignored. The keys are merged into the spec the job
 was created with (only `sourceId` and `mode` are pinned), so derived fields
 follow the edit and keep their provenance: `{"sensitivity": "high"}` gives
 100 ms integration unless the job set `integrationMs` itself. While the job
@@ -2679,6 +2797,41 @@ earlier) or `unidentified`, with `result`: `protocol?`, `confidence`,
 `spur`, `image` at once with no trial; `rfi` only after the wait found no
 signal) and `ended?: "window-moved"` (the window moved off the target; open
 trials are `cancelled`).
+
+**Ambient identify (WG7).** `ais`, `acars`, `vdl2` and `lora` have no probe
+decoder: identify names them from a decoder that already runs there
+(`ais-catcher`, `acarsdec`, `dumpvdl2`, `lora-meshtastic`). Identify never
+starts, stops or retunes such a decoder. When a running, healthy, config-owned,
+not suspended decoder of those types on the job's source (external-input
+decoders never count) has a target frequency within the target's tolerance
+(at least 1 kHz), the target gets one trial per protocol (at most 8):
+`{ "protocol": "ais", "decoder": "ais-catcher", "mode": "ais-catcher",
+"transport": "ambient", "outcome": "running" }`. Ambient trials hold no probe
+and never delay probe trials. One ends `decoded` when that decoder's evidence
+with an accepted identity pairs with the target's observation in the same
+engine epoch before the deadline. Otherwise it ends `timeout`, `not-needed` or
+`cancelled` like other trials. A protocol named in `protocols` with no covering
+decoder is `unsupported` with reason `no-ambient-decoder`. An accepted ambient
+identity makes the target `identified`, with the same rule as a probe decode.
+
+A decode counts only when all of these hold (fail closed):
+
+- the decoder's reception `tuningTrust` is `commanded` or `relay`, never
+  `unverified`. Its provenance binding must be on the same source, and the
+  decode's frequency must lie within 1 kHz of one of the binding's targets.
+- the decode carries its own frequency within 1 kHz of a decoder target. AIS
+  channel `A` is 161 975 000 Hz and `B` is 162 025 000 Hz; a message without a
+  channel does not count. ACARS without a frequency counts only for a decoder
+  with exactly one target. A VDL2 frequency of 0 does not count.
+- it is CRC-clean: ACARS `error` 0, AIS sentences that passed the checksum,
+  dumpvdl2 frames as emitted, and Meshtastic packets from RF (never `viaMqtt`).
+- the observation's track centre is within 1 kHz of the decode's frequency, so
+  a wide track near a channel is never named by it.
+
+The identity is attached on its second clean decode within one engine epoch.
+Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
+(`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
+of these types, or without tuning trust, identify behaves as before WG7.
 
 #### GET /api/scanner/captures
 
@@ -3159,7 +3312,14 @@ legacy mode it is not mounted (404).
 Redaction fails closed. `access` is reduced to `{ mode }`. A value whose key
 (any path segment) matches `/(key|psk|secret|passw|token|cred|auth|cookie|cert|salt)/i`
 becomes `"<redacted>"` whatever its type or depth (numbers too: dsd-fme numeric
-keys). `station.lat`, `station.lon` and `station.altM` are redacted. Inside
+keys). WG7 exempts six exact paths outside decoder options that the pattern
+matches only by accident. Each is a number (or number array) in the schema
+whose meaning is a frequency, margin or limit:
+`decoders.*.band.targetsHz`, `tunerRelay.commandHistoryLimit`,
+`liveDemod.autoMarginDb`, `scanner.detection.faTargetPerMhzMin`,
+`scanner.detection.ppmMargin` and `scanner.ws.spectrumMaxProfiles`. They are
+kept only while the value is a finite number or an array of finite numbers.
+Anything else at those paths stays redacted. `station.lat`, `station.lon` and `station.altM` are redacted. Inside
 `decoders[].options` a key is exported only when the type's option schema
 declares it and a descriptor documents it (see `GET /api/decoders/types`);
 other keys are dropped and only their number is reported, as
@@ -3175,8 +3335,8 @@ names and callsigns are redacted. The lists live in
 `packages/api-types/src/config-export.ts`. The body is at most 256 KiB; larger
 is 500 `CONFIG_EXPORT_FAILED`. Without a config provider the route answers 503
 `CONFIG_EXPORT_UNAVAILABLE`. Error bodies are `{ error: "ConfigExportError",
-code, message }`. The redaction defaults (decision E2) await the user's
-confirmation; the shipped behaviour is the recommended default.
+code, message }`. The redaction defaults (decision E2) were confirmed on
+2026-10-16: protected mode only, fail closed by meaning.
 
 ## Activity
 
@@ -4687,9 +4847,11 @@ most 1/s per (job, target); the latest state is always delivered.
 - `trials[]`: `{protocol, decoder, mode, transport, outcome, reason?}`. Outcomes:
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
-  `needs-channelizer`, `unsupported-format`; `mode` and `transport` null),
+  `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`; `mode` and
+  `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false) and
-  `cancelled`.
+  `cancelled`. `transport` is `offset`, `channel` or `ambient` (WG7: an
+  already-running AIS, ACARS, VDL2 or LoRa decoder; see `POST /api/scanner/identify`).
 - `result`: see `POST /api/scanner/identify`, including `artefact?` and
   `ended?: "window-moved"`.
 
@@ -5077,6 +5239,11 @@ Scanner and spectrum routes answer with the flat body
 The API does not currently implement rate limiting. For production deployments, consider placing a reverse proxy (nginx, Caddy) in front of WaveKit.
 
 ## CORS
+
+The audio stream ports have their own rule (WG7): legacy mode sends
+`Access-Control-Allow-Origin: *` without credentials, and protected mode allows
+only the access layer's allowed origins. See
+[GET /stream](#get-httplocalhost8081stream-and-streamwav).
 
 CORS is enabled by default, allowing requests from any origin. Configure via:
 

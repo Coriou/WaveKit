@@ -1,6 +1,6 @@
 # Web gaps 7 tasks (WG7)
 
-Status: frozen for implementation; lanes pending. See [requirements](requirements.md) and
+Status: lanes AMB, GT, BX, HW and MIN merged and wired; SQ pending. See [requirements](requirements.md) and
 [design](design.md). Lanes work against the frozen contract and touch only their own paths;
 Main (MA.\*) owns the composition files (`src/index.ts`, `src/api/server.ts`, barrels including
 `src/core/bandplans/index.ts`, `src/config.ts`, `config/*`), the frozen contract files
@@ -19,12 +19,12 @@ the isolation and contract tests and the docs. No lane edits the pinned band-pla
 
 ## Lane AMB: ambient identify
 
-- [ ] AMB.1 Interpreters `confirm/{ais,acars,vdl2,meshtastic}.ts`, the new types in
+- [x] AMB.1 Interpreters `confirm/{ais,acars,vdl2,meshtastic}.ts`, the new types in
       `ambient.ts` (trust rule, `tuningTrustOf`, `coverageAt`), `ambient-target.ts`.
   - _Requirements: 1.2–1.4, 1.8_
   - **Property 1: Ambient trust rule**, **Property 2: Existing ambient unchanged**,
     **Property 3: Identity needs two clean decodes**
-- [ ] AMB.2 Identify ambient trials (`IDENTIFY_PROTOCOLS`, planning, `onAmbientEvidence`,
+- [x] AMB.2 Identify ambient trials (`IDENTIFY_PROTOCOLS`, planning, `onAmbientEvidence`,
       verdict).
   - _Requirements: 1.5–1.7_
   - **Property 4: Ambient identify inert without coverage**
@@ -44,39 +44,39 @@ the isolation and contract tests and the docs. No lane edits the pinned band-pla
 
 ## Lane GT: gain tables
 
-- [ ] GT.1 `gainTableFor`, provider, Zod and JSON schemas, byte bounds.
+- [x] GT.1 `gainTableFor`, provider, Zod and JSON schemas, byte bounds.
   - _Requirements: 5.1–5.4_
   - **Property 8: Gain table match**
 
 ## Lane BX: band-plan skips and decoded-elsewhere refresh
 
-- [ ] BX.1 `bandplan-skips.ts` and its use in `planJob` / `previewPlan` / normalisation; route
+- [x] BX.1 `bandplan-skips.ts` and its use in `planJob` / `previewPlan` / normalisation; route
       schemas; benchmark.
   - _Requirements: 6.1–6.6_
   - **Property 9: Band-plan skips inert without view or flag**, **Property 10: Skip merge
     shape**, **Property 11: Skip excludes**
-- [ ] BX.2 `coverage-refresh.ts` (debounce, interval, fingerprint).
+- [x] BX.2 `coverage-refresh.ts` (debounce, interval, fingerprint).
   - _Requirements: 7.1–7.3_
   - **Property 12: Refresh bounds**
 
 ## Lane HW: audio CORS and bounded options
 
-- [ ] HW.1 Legacy audio CORS and preflight; protected-mode tests.
+- [x] HW.1 Legacy audio CORS and preflight; protected-mode tests.
   - _Requirements: 8.1–8.3_
   - **Property 13: Audio CORS**
-- [ ] HW.2 `option-values.ts`; every adapter's numeric reads, array bounds and shell strings;
+- [x] HW.2 `option-values.ts`; every adapter's numeric reads, array bounds and shell strings;
       schema bounds and descriptors.
   - _Requirements: 9.1–9.5_
   - **Property 14: Bounded numeric options**
 
 ## Lane MIN: minors
 
-- [ ] MIN.1 URL schema parity property; stored group overrides in commit and update check.
+- [x] MIN.1 URL schema parity property; stored group overrides in commit and update check.
   - _Requirements: 10.1, 10.2_
   - **Property 15: URL schema parity**
-- [ ] MIN.2 Config export exempt paths; `APP_VERSION` from the build.
+- [x] MIN.2 Config export exempt paths; `APP_VERSION` from the build.
   - _Requirements: 10.3, 10.4_
-- [ ] MIN.3 SDR# reference bound, AIS tracker reuse, trails duplicate keys, relay-disconnect
+- [x] MIN.3 SDR# reference bound, AIS tracker reuse, trails duplicate keys, relay-disconnect
       label.
   - _Requirements: 10.5–10.8_
 
