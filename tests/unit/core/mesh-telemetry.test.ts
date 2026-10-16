@@ -138,6 +138,50 @@ describe("mesh neighbours", () => {
 		expect(tracker.getStats().neighbourReports).toBe(2)
 	})
 
+	// A node listed twice keeps one entry, the one with the best SNR (a known
+	// SNR beats null; ties keep the first), and takes one of the 32 slots.
+	it("merges a node listed twice into one entry with the best SNR", () => {
+		const { tracker, send } = setup()
+		const duplicates = [
+			{ nodeNum: 0x20, snr: 1.5 },
+			{ nodeNum: 0x30 },
+			{ nodeNum: 0x20, snr: 6 },
+			{ nodeNum: 0x30, snr: -3 },
+			{ nodeNum: 0x20, snr: 2 },
+			{ nodeNum: 0x40, snr: 3 },
+			{ nodeNum: 0x40 },
+		]
+		send({
+			...NEIGHBOR,
+			payload: encodeNeighborInfo({ nodeNum: FROM, neighbors: duplicates }),
+		})
+		expect(
+			tracker.get("!00001000")?.neighbours?.map(n => [n.nodeId, n.snrDb]),
+		).toEqual([
+			["!00000020", 6],
+			["!00000030", -3],
+			["!00000040", 3],
+		])
+	})
+
+	it("counts a duplicated node once against the 32 slots", () => {
+		const { tracker, send } = setup()
+		const neighbors = Array.from({ length: 32 }, (_, i) => ({
+			nodeNum: 0x100 + i,
+		}))
+		send({
+			...NEIGHBOR,
+			payload: encodeNeighborInfo({
+				nodeNum: FROM,
+				neighbors: [{ nodeNum: 0x100, snr: 9 }, ...neighbors],
+			}),
+		})
+		const list = tracker.get("!00001000")?.neighbours ?? []
+		expect(list).toHaveLength(32)
+		expect(list[0]).toMatchObject({ nodeId: "!00000100", snrDb: 9 })
+		expect(list[31]?.nodeId).toBe("!0000011f")
+	})
+
 	it("rejects a report for another node as invalid", () => {
 		const { tracker, send } = setup()
 		send({

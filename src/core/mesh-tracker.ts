@@ -480,12 +480,22 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 				this.invalidPackets += 1
 				return
 			}
-			node.neighbours = decoded.neighbors
-				.map(n => ({
-					nodeId: formatNodeId(n.nodeNum),
-					snrDb: n.snr,
-					at: atIso,
-				}))
+			// One entry per node: a node listed twice keeps its best SNR (a known
+			// SNR beats null; ties keep the first) and takes one slot.
+			const best = new Map<number, number | null>()
+			for (const n of decoded.neighbors) {
+				const seen = best.get(n.nodeNum)
+				if (
+					seen === undefined ||
+					(n.snr !== null && (seen === null || n.snr > seen))
+				)
+					best.set(n.nodeNum, n.snr)
+			}
+			node.neighbours = Array.from(best, ([nodeNum, snr]) => ({
+				nodeId: formatNodeId(nodeNum),
+				snrDb: snr,
+				at: atIso,
+			}))
 				.sort((a, b) =>
 					a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0,
 				)
