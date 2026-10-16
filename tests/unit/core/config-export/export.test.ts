@@ -7,6 +7,7 @@ import { CONFIG_EXPORT_REDACTED } from "@wavekit/api-types"
 import { ConfigSchema } from "../../../../src/config.js"
 import type { Config } from "../../../../src/config.js"
 import {
+	CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY,
 	ConfigExportTooLargeError,
 	exportConfig,
 	redactConfig,
@@ -231,13 +232,8 @@ describe("config export redaction", () => {
 				region: "EU_868",
 				preset: "LongFast",
 				channelKey: R,
-				// Untrusted option keys are renamed at any depth (values still classified).
-				"<redacted-4>": R,
-				"<redacted-5>": {
-					"<redacted-1>": R,
-					"<redacted-2>": [{ "<redacted-1>": R }, R],
-					"<redacted-3>": 3,
-				},
+				// Unknown option keys are dropped and only counted.
+				[CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY]: 2,
 			},
 		})
 		expect(r.decoders[1]).toMatchObject({
@@ -293,7 +289,7 @@ describe("config export redaction", () => {
 			schema,
 		)
 		expect(out).toEqual({
-			m: { "<redacted-1>": R, "<redacted-2>": 2 },
+			m: { "<redacted-1>": R, "<redacted-2>": R },
 			id: R,
 			"<redacted-3>": R,
 		})
@@ -304,14 +300,17 @@ describe("config export redaction", () => {
 		expect(JSON.stringify(r)).not.toContain("surprise")
 	})
 
-	it("renames non-identifier option keys", () => {
+	it("drops non-identifier option keys", () => {
 		const { config } = everySecretFixture(1)
-		config.decoders[0]!.options = { "10.0.0.1:80": 5, gain: 3 }
+		config.decoders[0]!.options = { "10.0.0.1:80": 5, bandwidth: 250000 }
 		const r = redactConfig(config) as { decoders: { options: unknown }[] }
-		expect(r.decoders[0]!.options).toEqual({ "<redacted-1>": 5, gain: 3 })
+		expect(r.decoders[0]!.options).toEqual({
+			bandwidth: 250000,
+			[CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY]: 1,
+		})
 	})
 
-	it("renames identifier-shaped option keys outside the trusted set, at any depth", () => {
+	it("drops option keys the decoder type does not know, at any depth", () => {
 		const { config } = everySecretFixture(1)
 		config.decoders[0]!.options = {
 			destinations: { "ben-private-rpi": 1, F4SECRET: 2, sk_live_123: true },
@@ -330,14 +329,13 @@ describe("config export redaction", () => {
 			expect(json).not.toContain(leak)
 		const options = (r as { decoders: { options: unknown }[] }).decoders[0]!
 			.options
-		expect(options).toEqual({
-			"<redacted-1>": {
-				"<redacted-1>": 1,
-				"<redacted-2>": R,
-				"<redacted-3>": true,
-			},
-			filters: { highpass: 3, "<redacted-2>": 4 },
-			gain: 3,
+		// lora-meshtastic knows none of these keys.
+		expect(options).toEqual({ [CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY]: 3 })
+		config.decoders[0]!.type = "multimon-ng"
+		const m = redactConfig(config) as { decoders: { options: unknown }[] }
+		expect(m.decoders[0]!.options).toEqual({
+			filters: { highpass: 3 },
+			[CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY]: 3,
 		})
 	})
 
@@ -383,7 +381,13 @@ describe("config export redaction", () => {
 		])
 			expect(body).not.toContain(leak)
 		const r = redactConfig(config) as { decoders: { options: unknown }[] }
-		expect(r.decoders[0]!.options).toMatchObject({ format: "s16le", gain: 3 })
+		// format, gain, deviceSerial, outputFormat, rtlTcpHost are not dsd-fme options.
+		expect(r.decoders[0]!.options).toEqual({
+			extraArgs: R,
+			udpHost: R,
+			mode: R,
+			[CONFIG_EXPORT_UNKNOWN_OPTIONS_KEY]: 5,
+		})
 	})
 
 	it("keeps closed-set strings only when the value is a member", () => {
