@@ -3191,7 +3191,11 @@ must hold:
   range, or an RTL rate gap) is forwarded upstream anyway, so it makes the field
   unknown until the next accepted value;
 - direct sampling is `off` (in direct sampling the receiver does not use the
-  tuner centre);
+  tuner centre; a relay value above 2 is the Q branch, as in librtlsdr). After a
+  fresh start or a reset reconnect `off` is an unproven placeholder (listed in
+  `unknownFields`) that the rule still accepts: a local rtl_tcp left in direct
+  sampling by an earlier client can read `commanded`. rtlmux drops direct sampling
+  commands, so the Raspberry Pi path is unaffected;
 - the source centre still equals the centre captured when the decoder was last
   created or started (a retune makes it `unverified` until the decoder starts
   again, even when the decoder already follows the new centre);
@@ -3199,7 +3203,9 @@ must hold:
   the IQ bandwidth; ±1.08 MHz at 2.4 Msps).
 
 Tuner state comes from WaveKit's own tuning commands, relay commands and
-reconnect replay. A client that tunes the dongle host directly, bypassing
+reconnect replay. A reconnect under either policy forgets a centre or rate that
+WaveKit wrote without accepting it (it is not replayed), returning it to the
+baseline. A client that tunes the dongle host directly, bypassing
 WaveKit and the relay, is not observed, so trust can claim a centre the dongle
 no longer has. A removed tuner source drops its state: receptions on it are
 `unverified` until it is added again and reports state. Rows stored before WG5
