@@ -7,6 +7,8 @@ const ws = api.replace(/^http/, "ws")
 
 export default defineConfig({
 	plugins: [react()],
+	// packages/brand pulls its own React 18 peer; one copy only.
+	resolve: { dedupe: ["react", "react-dom"] },
 	server: {
 		port: 5173,
 		proxy: {
