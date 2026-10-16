@@ -36,6 +36,8 @@ import {
 	cursorBehindWatermark,
 	formatSeq,
 	higherWatermark,
+	holeStateOf,
+	newerHoles,
 	parseSeq,
 	snapshotLowerBoundPassed,
 } from "./seq.js"
@@ -218,6 +220,7 @@ export function createActivityQueryService(
 		captured: StoreIdentity,
 		low: bigint,
 		continuation: bigint | undefined,
+		tokenHoleGeneration: number | undefined,
 		observed: ObservedStore,
 	): void {
 		const fresh = store.identity()
@@ -248,6 +251,16 @@ export function createActivityQueryService(
 				"Activity snapshot lower bound moved",
 			)
 		}
+		if (
+			tokenHoleGeneration !== undefined &&
+			newerHoles(holeStateOf(fresh), holeStateOf(observed)).generation >
+				tokenHoleGeneration
+		) {
+			throw new ActivitySnapshotResetError(
+				"snapshot-reset",
+				"Activity snapshot lost rows to a hole",
+			)
+		}
 	}
 
 	const service: ActivityQueryService = {
@@ -264,6 +277,7 @@ export function createActivityQueryService(
 			let after: string | null = null
 			let expiresAtMs = now() + limits.snapshotTtlMs
 			let continuation: bigint | undefined
+			let tokenHoleGeneration: number | undefined
 			if (input.pageToken !== undefined) {
 				const payload = verifyCursor({
 					token: input.pageToken,
@@ -282,6 +296,7 @@ export function createActivityQueryService(
 				low = parseSeq(payload.L)
 				high = parseSeq(payload.H)
 				continuation = parseSeq(payload.lastSeq)
+				tokenHoleGeneration = payload.hg
 				if (order === "desc") before = payload.lastSeq
 				else after = payload.lastSeq
 				expiresAtMs = Date.parse(payload.expiresAt)
@@ -296,8 +311,17 @@ export function createActivityQueryService(
 				before,
 				after,
 			})
-			guardSnapshot(identity, low, continuation, result.observed)
+			guardSnapshot(
+				identity,
+				low,
+				continuation,
+				tokenHoleGeneration,
+				result.observed,
+			)
 			if (result.op !== "search") throw new ActivityReaderFailedError()
+			// First page: the generation read with its rows. Continuation: carried.
+			const holeGeneration =
+				tokenHoleGeneration ?? result.observed.holeGeneration
 			const page = assembleSummaries(result.rows, limit, limits.pageBytes)
 			const expiresAt = new Date(expiresAtMs).toISOString()
 			const replay = issueCursor({
@@ -307,6 +331,7 @@ export function createActivityQueryService(
 				order: "asc",
 				lastSeq: high,
 				high,
+				holeGeneration,
 				expiresAtMs,
 			})
 			let nextPageToken: string | null = null
@@ -320,6 +345,7 @@ export function createActivityQueryService(
 					lastSeq: parseSeq(page.lastSeq),
 					low,
 					high,
+					holeGeneration,
 					expiresAtMs,
 				}).token
 			}
@@ -365,7 +391,7 @@ export function createActivityQueryService(
 				scanCap: limits.facetScan,
 				valueCap: limits.facetValues,
 			})
-			guardSnapshot(identity, low, undefined, result.observed)
+			guardSnapshot(identity, low, undefined, undefined, result.observed)
 			if (result.op !== "facets") throw new ActivityReaderFailedError()
 			return {
 				facets: result.facets,

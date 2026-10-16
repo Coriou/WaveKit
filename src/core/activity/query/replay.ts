@@ -21,7 +21,10 @@ import { assembleSummaries, type ReadRequest, type ReadResult } from "./read.js"
 import {
 	cursorBehindWatermark,
 	formatSeq,
+	checkReplayHoles,
 	higherWatermark,
+	holeStateOf,
+	newerHoles,
 	parseSeq,
 } from "./seq.js"
 import { hashQuery, normaliseQuery, type QueryLimits } from "./validate.js"
@@ -34,7 +37,11 @@ interface ReplayStore {
 export interface ReplayDeps {
 	store: ReplayStore
 	now: () => number
-	limits: QueryLimits & { pageBytes: number; snapshotTtlMs: number; replayPage: number }
+	limits: QueryLimits & {
+		pageBytes: number
+		snapshotTtlMs: number
+		replayPage: number
+	}
 	log: Logger
 	clientKey: string
 	read: (clientKey: string, request: ReadRequest) => Promise<ReadResult>
@@ -85,6 +92,8 @@ export function startReplay(
 	let rerun = false
 	let pauseGeneration = 0
 	let position: bigint | null = null
+	/** Hole generation the replay has checked its position against (4.4). */
+	let holeBase = 0
 	let announcedHigh: bigint | null = null
 	let storeUuid: string | undefined
 	let restoreGeneration: number | undefined
@@ -134,6 +143,8 @@ export function startReplay(
 	}
 
 	function issue(identity: StoreIdentity, seq: bigint): string {
+		// holeBase is only advanced once every hole is at or below the
+		// position, so it is the generation that holds for these rows.
 		return issueCursor({
 			key: deps.store.cursorKey(),
 			identity,
@@ -141,6 +152,7 @@ export function startReplay(
 			order: "asc",
 			lastSeq: seq,
 			high: seq,
+			holeGeneration: holeBase,
 			expiresAtMs: deps.now() + deps.limits.snapshotTtlMs,
 		}).token
 	}
@@ -181,6 +193,7 @@ export function startReplay(
 								mode: "replay",
 							})
 							position = parseSeq(payload.lastSeq)
+							holeBase = payload.hg
 						} catch (error) {
 							const reason = resetReason(error)
 							if (reason) {
@@ -191,6 +204,7 @@ export function startReplay(
 						}
 					} else {
 						position = parseSeq(identity.committedMax)
+						holeBase = holeStateOf(identity).generation
 					}
 				}
 				const watermark = parseSeq(identity.pruneWatermark)
@@ -198,6 +212,7 @@ export function startReplay(
 					emitReset("cursor-gap")
 					return
 				}
+				holeBase = checkReplayHoles(holeBase, holeStateOf(identity), position)
 				const high = parseSeq(identity.committedMax)
 				if (position >= high) {
 					if (announcedHigh !== position) {
@@ -279,6 +294,11 @@ export function startReplay(
 					emitReset("cursor-gap")
 					return
 				}
+				holeBase = checkReplayHoles(
+					holeBase,
+					newerHoles(holeStateOf(fresh), holeStateOf(result.observed)),
+					position,
+				)
 				const page = assembleSummaries(
 					result.rows,
 					deps.limits.replayPage,
@@ -286,7 +306,9 @@ export function startReplay(
 				)
 				const scanned = page.hasMore ? page.lastSeq : formatSeq(high)
 				if (scanned === null || parseSeq(scanned) <= position) {
-					throw new ActivityReaderFailedError("Activity replay made no progress")
+					throw new ActivityReaderFailedError(
+						"Activity replay made no progress",
+					)
 				}
 				const frame: ActivityReplayFrame =
 					page.items.length > 0

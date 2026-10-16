@@ -58,6 +58,15 @@ export interface ActivityFixture {
 		patch: Partial<Pick<StoreIdentity, "storeUuid" | "restoreGeneration">>,
 	): void
 	corruptSummary(eventId: string): void
+	/**
+	 * Emulates the writer opening a hole (web-gaps-3 3.x): deletes the given
+	 * rows, raises holeWatermark to the greatest deleted seq and increments
+	 * holeGeneration in one transaction. `diverge` leaves the cached identity
+	 * untouched (a commit the main thread has not seen yet).
+	 */
+	openHole(seqs: readonly string[], options?: { diverge?: boolean }): string
+	/** Raw store_meta write; null deletes the key. */
+	writeRawMeta(key: string, value: string | null): void
 	notify(): void
 	listenerCount(): number
 	reset(): void
@@ -117,6 +126,9 @@ export async function createFixture(
 	)
 	const deleteRefs = db.prepare("DELETE FROM activity_refs WHERE seq = ?")
 	const deleteFts = db.prepare("DELETE FROM activity_fts WHERE rowid = ?")
+	const deleteRow = db.prepare("DELETE FROM activity WHERE seq = ?")
+	const deleteMeta = db.prepare("DELETE FROM store_meta WHERE key = ?")
+	const readMeta = db.prepare("SELECT value FROM store_meta WHERE key = ?")
 
 	function writeMeta(next: StoreIdentity): void {
 		const rows: readonly (readonly [string, string])[] = [
@@ -128,6 +140,13 @@ export async function createFixture(
 			["cursorKey", cursorKey.toString("hex")],
 		]
 		for (const [key, value] of rows) upsertMeta.run(key, value)
+		// Hole keys are written only by openHole/writeRawMeta and cleared by reset.
+		if (next.holeWatermark !== undefined) {
+			upsertMeta.run("holeWatermark", next.holeWatermark)
+		}
+		if (next.holeGeneration !== undefined) {
+			upsertMeta.run("holeGeneration", String(next.holeGeneration))
+		}
 	}
 
 	function snapshot(): StoreIdentity {
@@ -306,9 +325,71 @@ export async function createFixture(
 			}
 		},
 		corruptSummary(eventId) {
-			db.prepare(
-				"UPDATE activity SET summary_json = ? WHERE event_id = ?",
-			).run("{", eventId)
+			db.prepare("UPDATE activity SET summary_json = ? WHERE event_id = ?").run(
+				"{",
+				eventId,
+			)
+		},
+		openHole(seqs, options = {}) {
+			const onDisk = (key: string): string | undefined => {
+				const row = readMeta.get(key) as { value: string } | undefined
+				return row?.value
+			}
+			// Emulates the writer (requirements 3.2-3.4): W advances to
+			// MIN(remaining) - 1 (the greatest deleted seq on an empty table);
+			// only deleted seqs left above the new W open a hole.
+			const oldWatermark = BigInt(onDisk("pruneWatermark") ?? "0")
+			let pruneWatermark = oldWatermark
+			let pruneGeneration = Number(onDisk("pruneGeneration") ?? "0")
+			let watermark = BigInt(onDisk("holeWatermark") ?? "0")
+			let generation = Number(onDisk("holeGeneration") ?? "0")
+			db.exec("BEGIN")
+			try {
+				let maxDeleted = 0n
+				for (const seq of seqs) {
+					deleteRefs.run(Number(seq))
+					deleteFts.run(Number(seq))
+					deleteRow.run(Number(seq))
+					if (BigInt(seq) > maxDeleted) maxDeleted = BigInt(seq)
+				}
+				const min = db
+					.prepare("SELECT MIN(seq) AS seq FROM activity")
+					.get() as {
+					seq: number | bigint | null
+				}
+				const floor =
+					min.seq === null ? maxDeleted : BigInt(seqText(min.seq)) - 1n
+				if (floor > pruneWatermark) {
+					pruneWatermark = floor
+					pruneGeneration += 1
+					upsertMeta.run("pruneWatermark", pruneWatermark.toString(10))
+					upsertMeta.run("pruneGeneration", String(pruneGeneration))
+				}
+				const above = seqs.filter(seq => BigInt(seq) > pruneWatermark)
+				if (above.length > 0) {
+					generation += 1
+					for (const seq of above) {
+						if (BigInt(seq) > watermark) watermark = BigInt(seq)
+					}
+					upsertMeta.run("holeWatermark", watermark.toString(10))
+					upsertMeta.run("holeGeneration", String(generation))
+				}
+				db.exec("COMMIT")
+			} catch (error) {
+				db.exec("ROLLBACK")
+				throw error
+			}
+			if (options.diverge !== true) {
+				identity.pruneWatermark = pruneWatermark.toString(10)
+				identity.pruneGeneration = pruneGeneration
+				identity.holeWatermark = watermark.toString(10)
+				identity.holeGeneration = generation
+			}
+			return pruneWatermark.toString(10)
+		},
+		writeRawMeta(key, value) {
+			if (value === null) deleteMeta.run(key)
+			else upsertMeta.run(key, value)
 		},
 		notify() {
 			const current = snapshot()
@@ -323,7 +404,11 @@ export async function createFixture(
 			db.exec("DELETE FROM activity")
 			seqs.length = 0
 			listeners.clear()
+			delete identity.holeWatermark
+			delete identity.holeGeneration
 			Object.assign(identity, initial)
+			deleteMeta.run("holeWatermark")
+			deleteMeta.run("holeGeneration")
 			writeMeta(identity)
 		},
 		async close() {
@@ -387,7 +472,9 @@ export function delay(ms: number): Promise<void> {
 	})
 }
 
-export function recordEventIds(frames: readonly ActivityReplayFrame[]): string[] {
+export function recordEventIds(
+	frames: readonly ActivityReplayFrame[],
+): string[] {
 	const ids: string[] = []
 	for (const frame of frames) {
 		if (frame.type !== "records") continue
@@ -419,7 +506,7 @@ export async function collectReplay(
 		timer = setTimeout(() => {
 			reject(
 				new Error(
-					`replay timed out after ${frames.length} frames ${JSON.stringify(frames.map(frame => frame.type === "records" ? { type: frame.type, n: frame.items.length, scannedThrough: frame.scannedThrough } : frame))}`,
+					`replay timed out after ${frames.length} frames ${JSON.stringify(frames.map(frame => (frame.type === "records" ? { type: frame.type, n: frame.items.length, scannedThrough: frame.scannedThrough } : frame)))}`,
 				),
 			)
 		}, timeoutMs)
