@@ -290,6 +290,7 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 				}
 			} catch {
 				// JSON parse failed - log and skip
+				// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
 				this.logger.debug({ line: trimmedLine }, "Failed to parse JSON output")
 				return null
 			}

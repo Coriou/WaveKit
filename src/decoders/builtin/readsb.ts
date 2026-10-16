@@ -30,6 +30,7 @@ import {
 } from "../option-values.js"
 import { READSB_BOUNDS } from "../options/readsb.js"
 import type { RawAircraftMessage } from "@wavekit/api-types"
+import { safeErrorFields } from "../safe-error-fields.js"
 
 /** Mode S / ADS-B carrier (1090ES). */
 export const ADSB_FREQUENCY_HZ = 1_090_000_000
@@ -209,7 +210,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 				station = this.station()
 			} catch (error: unknown) {
 				this.logger.warn(
-					{ err: error },
+					{ err: safeErrorFields(error) },
 					"Station location lookup failed; starting readsb without it",
 				)
 				return {}
@@ -574,6 +575,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 				}
 			} catch {
 				// Skip invalid JSON lines
+				// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
 				this.logger.debug({ line: trimmed }, "Failed to parse JSON line")
 			}
 		}

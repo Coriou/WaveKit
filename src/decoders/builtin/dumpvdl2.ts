@@ -32,6 +32,7 @@ import {
 } from "../option-values.js"
 import { DUMPVDL2_BOUNDS } from "../options/dumpvdl2.js"
 import type { ACARSMessage } from "./acarsdec.js"
+import { safeErrorFields } from "../safe-error-fields.js"
 
 /**
  * Configuration options for the VDL2 decoder.
@@ -390,6 +391,7 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 
 		// Skip non-JSON lines (startup messages, etc.)
 		if (!trimmed.startsWith("{")) {
+			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
 			this.logger.debug({ line: trimmed }, "Skipping non-JSON line")
 			return null
 		}
@@ -407,7 +409,11 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 				}
 			}
 		} catch (err) {
-			this.logger.debug({ line: trimmed, err }, "Failed to parse JSON line")
+			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
+			this.logger.debug(
+				{ line: trimmed, err: safeErrorFields(err) },
+				"Failed to parse JSON line",
+			)
 		}
 
 		return null

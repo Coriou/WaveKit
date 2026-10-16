@@ -1,4 +1,5 @@
 import { DECIMAL_TEXT, INTEGER_TEXT } from "./options/common.js"
+import { shellArg } from "./process-tools.js"
 
 /** Bounds of one numeric decoder option, by meaning. */
 export interface NumericOptionRule {
@@ -118,20 +119,34 @@ export function createOptionWarner(
 	}
 }
 
-/** extraArgs bounds (WG7 HW fix): entry count, per-entry and aggregate UTF-8 bytes. */
+/**
+ * extraArgs bounds (WG7 HW fix, R2): entry count, per-entry and aggregate bytes of
+ * the SERIALIZED form. An entry costs the UTF-8 bytes of `shellArg(entry)` (what
+ * it becomes inside an `sh -c` pipeline; never less than its raw bytes, so the
+ * same bound covers argv-spawned adapters) plus one separator byte (the space in
+ * the shell string, the NUL in argv). Per entry the serialized form is at most
+ * `maxEntryBytes`; all kept entries together, separators included, at most
+ * `maxTotalBytes`, so the extraArgs share of the final command never passes it.
+ */
 export const EXTRA_ARGS_BOUNDS = {
 	maxEntries: 64,
 	maxEntryBytes: 4096,
 	maxTotalBytes: 65536,
 } as const
 
+/** Serialized bytes of one extraArgs entry (see EXTRA_ARGS_BOUNDS), separator excluded. */
+export function extraArgSerializedBytes(entry: string): number {
+	return Buffer.byteLength(shellArg(entry), "utf8")
+}
+
 /**
  * Read an `extraArgs` option: the operator's config-only argv tail (never
  * API-settable), so there is no flag allowlist and operands pass raw. A non-array
  * is absent with `warn("invalid")`. Only the first `maxEntries` entries are read
  * (`warn("clamped")` past that). Each entry must be a primitive string: anything
- * else is dropped, never coerced (`warn("invalid")`). An entry over
- * `maxEntryBytes` UTF-8 bytes is dropped, and once the running total would pass
+ * else is dropped, never coerced (`warn("invalid")`). An entry whose serialized
+ * form (shell-quoted UTF-8) is over `maxEntryBytes` is dropped, and once the
+ * running serialized total (plus one separator per entry) would pass
  * `maxTotalBytes` no further entries are added (both `warn("clamped")`).
  * Warnings carry the key only, never an entry.
  */
@@ -157,21 +172,21 @@ export function readExtraArgsOption(
 			invalid = true
 			continue
 		}
-		// UTF-8 is at least one byte per UTF-16 unit: skip the byte count when
-		// the length alone is already over the limit.
+		// The serialized form is at least one byte per UTF-16 unit: skip quoting
+		// when the length alone is already over the limit.
 		const bytes =
 			entry.length > maxEntryBytes
 				? maxEntryBytes + 1
-				: Buffer.byteLength(entry, "utf8")
+				: extraArgSerializedBytes(entry)
 		if (bytes > maxEntryBytes) {
 			clamped = true
 			continue
 		}
-		if (total + bytes > maxTotalBytes) {
+		if (total + bytes + 1 > maxTotalBytes) {
 			clamped = true
 			break
 		}
-		total += bytes
+		total += bytes + 1
 		out.push(entry)
 	}
 	if (invalid) warn(key, "invalid")

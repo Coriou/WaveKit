@@ -26,6 +26,7 @@ import {
 } from "../option-values.js"
 import { DIREWOLF_BOUNDS } from "../options/direwolf.js"
 import { NetworkConnectionError } from "../../utils/errors.js"
+import { safeErrorFields } from "../safe-error-fields.js"
 
 /** Default KISS TCP port for direwolf */
 const DEFAULT_KISS_PORT = 8001
@@ -350,7 +351,10 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 			})
 
 			this.tcpClient.on("error", (err: Error) => {
-				this.logger.error({ err }, "KISS connection error")
+				this.logger.error(
+					{ err: safeErrorFields(err) },
+					"KISS connection error",
+				)
 				if (!this.isReconnecting && this.reconnectAttempts === 0) {
 					this.scheduleReconnect()
 					resolve()

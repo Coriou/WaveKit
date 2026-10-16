@@ -109,7 +109,13 @@ describe("decoder option validation in the manager", () => {
 		manager.getStatus("a")
 		expect(warn).toHaveBeenCalledTimes(1)
 		const logged = JSON.stringify(warn.mock.calls)
-		expect(logged).toContain("a.b")
+		// "rate-test" documents no keys: both paths are counted, never named.
+		expect(warn.mock.calls[0]?.[0]).toMatchObject({
+			issueCount: 2,
+			paths: [],
+			unknownKeyCount: 2,
+		})
+		expect(logged).not.toContain("a.b")
 		expect(logged).not.toContain(SECRET)
 	})
 
