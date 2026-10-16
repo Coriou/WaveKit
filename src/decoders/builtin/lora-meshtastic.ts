@@ -110,7 +110,7 @@ export interface LoraMeshtasticOptions {
 	effectiveTargetRate: number
 }
 
-const RawOptionsSchema = z
+export const RawOptionsSchema = z
 	.object({
 		region: z.enum(LORA_REGIONS),
 		preset: z.enum(LORA_PRESETS),
