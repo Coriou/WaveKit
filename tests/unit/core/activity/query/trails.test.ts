@@ -555,14 +555,15 @@ describe("readTrails against a store", () => {
 		at(300, "A")
 		at(400, "C")
 		at(500, "A")
-		// One tick per clock call: start 0, row 2 reads 1, step 2 reads 2, rows 3 and 4
-		// read 3 and 4. The walk budget is 100 - 96 = 4, so it stops before row 4; the
-		// probe then runs well inside the 100 total and keeps the per-trail flags exact.
+		// One tick per clock call. Start 0; step 1 is two pieces (rows 1, 2): the second
+		// piece reads 1, row 2 reads 2. Step 2 reads 3, its pieces (rows 3, 4) read 4 and 6,
+		// rows 3 and 4 read 5 and 7. The walk budget is 100 - 93 = 7, so it stops before
+		// row 4; the probe then runs well inside the 100 total and keeps the flags exact.
 		let ticks = 0
 		const result = read({
 			chunkRows: 2,
 			wallBudgetMs: 100,
-			probeReserveMs: 96,
+			probeReserveMs: 93,
 			clock: () => ticks++,
 		})
 		expect(result.truncated).toBe(true)
@@ -599,13 +600,13 @@ describe("readTrails against a store", () => {
 		at(300, "A")
 		at(400, "C")
 		at(500, "A")
-		// Walk budget 5 - 1 = 4 stops before row 4 (tick 4); the probe checks the held
-		// row 4 (C, not returned) then reads tick 5 >= 5 before its first step, so A and B
-		// are never probed and both trails are conservative.
+		// Walk budget 8 - 1 = 7 stops before row 4 (tick 7, as above); the probe checks the
+		// held row 4 (C, not returned) then reads tick 8 >= 8 before its first step, so A
+		// and B are never probed and both trails are conservative.
 		let ticks = 0
 		const result = read({
 			chunkRows: 2,
-			wallBudgetMs: 5,
+			wallBudgetMs: 8,
 			probeReserveMs: 1,
 			clock: () => ticks++,
 		})
@@ -642,12 +643,13 @@ describe("readTrails against a store", () => {
 			["A", false],
 			["B", true],
 		])
-		// Clock calls: walk start, checks before rows 2 and 3, then one per probe chunk.
-		// The 4th call (first probe chunk) is in budget, the 5th is past it.
+		// Clock calls: walk start (1), the second piece and row B of step 1 (2, 3), step 2
+		// and its first piece (4, 5), row C (6, refused: points). The probe's step (7)
+		// and its first piece (8, the X run) are in budget, its next step (9) is past it.
 		let calls = 0
-		const clock = () => (++calls >= 5 ? 1e6 : 0)
+		const clock = () => (++calls >= 9 ? 1e6 : 0)
 		const cut = read({ limits, chunkRows: 2, clock })
-		expect(calls).toBe(5)
+		expect(calls).toBe(9)
 		expect(cut.truncation).toEqual(["points", "time-limit"])
 		expect(flags(cut)).toEqual([
 			["A", true],
@@ -829,9 +831,10 @@ describe("readTrails against a store", () => {
 		expect(full.truncation).toEqual([])
 		expect(full.scannedRows).toBe(5)
 		expect(full.trails[0]?.points).toHaveLength(5)
-		// 2 005 index rows in steps of 100: 21 steps of two statements, plus the
-		// snapshot meta read and the floor.
-		expect(statements).toBe(44)
+		// 2 005 index rows in steps of 100: 20 steps of four statements (tie end, range
+		// end, a range piece, the end's run), the last step three, the snapshot meta
+		// read and the floor.
+		expect(statements).toBe(85)
 		// One clock tick per statement: the walk (budget 10) stops between statements
 		// although none of the examined rows matched, instead of one unbounded statement.
 		statements = 0
@@ -846,6 +849,183 @@ describe("readTrails against a store", () => {
 		// Meta, five steps (10 statements, 500 index rows) and the floor.
 		expect(statements).toBe(12)
 	})
+
+	it("every trails statement seeks activity_produced on both bounds (EXPLAIN QUERY PLAN)", () => {
+		reset()
+		insert({
+			producedAtMs: NOW - 1,
+			entityKey: "A",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 1, lon: 1 },
+		})
+		insert({
+			producedAtMs: NOW - 2,
+			entityKey: "B",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 1, lon: 1 },
+		})
+		insert({
+			producedAtMs: NOW - 3,
+			entityKey: "A",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 1, lon: 1 },
+		})
+		const seen = new Set<string>()
+		const recording: SqlDatabase = {
+			prepare(sql) {
+				seen.add(sql)
+				return reader.prepare(sql)
+			},
+			exec: sql => reader.exec(sql),
+			close: () => undefined,
+		}
+		// A points stop so the probe statements are prepared too.
+		runRead(recording, {
+			op: "trails",
+			input: {
+				producedFromMs: NOW - 1_000,
+				producedToMs: NOW,
+				protocols: ["adsb"],
+				limits: { ...DEFAULT_TRAILS_READ_LIMITS, maxPoints: 1 },
+				chunkRows: 1,
+			},
+		})
+		const plans = [...seen]
+			.filter(sql => sql.includes("activity_produced"))
+			.map(sql => {
+				const count = (sql.match(/\?/g) ?? []).length
+				const rows = reader
+					.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+					.all(...Array<number>(count).fill(1))
+				return rows
+					.map(row => String(row["detail"]))
+					.filter(detail => detail.includes("activity_produced"))
+			})
+		expect(plans).toHaveLength(6)
+		for (const details of plans) {
+			expect(details).toHaveLength(1)
+			expect(details[0]).toMatch(
+				/^SEARCH activity USING (COVERING )?INDEX activity_produced \((produced_at_ms=\? AND rowid>\? AND rowid<\?|produced_at_ms>\? AND produced_at_ms<\?|produced_at_ms=\? AND rowid<\?)\)$/,
+			)
+		}
+		if (process.env["WAVEKIT_TRAILS_EQP"] === "1")
+			process.stderr.write(`TRAILS_EQP ${JSON.stringify(plans)}\n`)
+	})
+
+	it("a deadline crossed while finding a step end stops before its rows, cursor unchanged", () => {
+		reset()
+		const at = (offset: number, entityKey: string) =>
+			insert({
+				producedAtMs: NOW - offset,
+				entityKey,
+				category: "aircraft",
+				protocol: "adsb",
+				position: { lat: 10, lon: 20 },
+			})
+		at(100, "A")
+		at(200, "B")
+		at(300, "A")
+		at(400, "C")
+		let ends = 0
+		let late = false
+		const boundary: SqlDatabase = {
+			prepare(sql) {
+				const statement = reader.prepare(sql)
+				const mark = () => {
+					if (sql.includes("OFFSET") && ++ends === 2) late = true
+				}
+				return {
+					all: (...values) => (mark(), statement.all(...values)),
+					get: (...values) => (mark(), statement.get(...values)),
+				}
+			},
+			exec: sql => reader.exec(sql),
+			close: () => undefined,
+		}
+		const out = runRead(boundary, {
+			op: "trails",
+			input: {
+				producedFromMs: NOW - 1_000,
+				producedToMs: NOW,
+				limits: DEFAULT_TRAILS_READ_LIMITS,
+				nowMs: NOW,
+				chunkRows: 2,
+				wallBudgetMs: 100,
+				probeReserveMs: 95,
+				// Past the walk budget (5) from step 2's end on, inside the probe's (100).
+				clock: () => (late ? 5 : 0),
+			},
+		})
+		if (out.op !== "trails") throw new TypeError("wrong op")
+		expect(out.trails.truncation).toEqual(["time-limit"])
+		expect(out.trails.scannedRows).toBe(2)
+		// The probe resumes at the unread step and finds A's older point: exact flags.
+		expect(out.trails.trails.map(t => [t.entityKey, t.truncated])).toEqual([
+			["A", true],
+			["B", false],
+		])
+	})
+
+	it("a run of 100 000 equal timestamps is walked in bounded statements", () => {
+		reset()
+		writer.exec("BEGIN")
+		for (let index = 0; index < 100_000; index += 1) {
+			insert({
+				producedAtMs: NOW - 5,
+				entityKey: `icao:${index % 10}`,
+				category: "aircraft",
+				protocol: "adsb",
+				position: { lat: 1, lon: 1 },
+			})
+		}
+		writer.exec("COMMIT")
+		let statements = 0
+		let slowest = 0
+		const timing: SqlDatabase = {
+			prepare(sql) {
+				const statement = reader.prepare(sql)
+				const timed = <T>(run: () => T): T => {
+					statements += 1
+					const started = performance.now()
+					try {
+						return run()
+					} finally {
+						slowest = Math.max(slowest, performance.now() - started)
+					}
+				}
+				return {
+					all: (...values) => timed(() => statement.all(...values)),
+					get: (...values) => timed(() => statement.get(...values)),
+				}
+			},
+			exec: sql => reader.exec(sql),
+			close: () => undefined,
+		}
+		const { result } = (() => {
+			const out = runRead(timing, {
+				op: "trails",
+				input: {
+					producedFromMs: NOW - 1_000,
+					producedToMs: NOW,
+					limits: DEFAULT_TRAILS_READ_LIMITS,
+					chunkRows: 4,
+					wallBudgetMs: 200,
+					probeReserveMs: 50,
+				},
+			})
+			if (out.op !== "trails") throw new TypeError("wrong op")
+			return { result: out.trails }
+		})()
+		expect(result.truncation).toContain("time-limit")
+		// A statement re-examining the whole run would take milliseconds each (100 000
+		// index rows) and reach only a few dozen statements in the budget.
+		expect(statements).toBeGreaterThan(2_000)
+		if (process.env["WAVEKIT_TRAILS_EQP"] === "1")
+			process.stderr.write(`TRAILS_TIES ${statements} ${slowest}\n`)
+	}, 60_000)
 
 	it("empty store returns no trails and a null floor; from == to allowed", () => {
 		reset()

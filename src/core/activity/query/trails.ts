@@ -342,10 +342,16 @@ function numberOf(value: unknown, what: string): number {
 	throw activityRecordCorrupt(`Activity ${what} is not a number`)
 }
 
+/** An exclusive walk position: rows strictly below (ms, seq) remain. */
 interface StepCursor {
 	ms: number
 	seq: number
 }
+
+/** A seekable index range: a run of one millisecond, or whole milliseconds lo..hi. */
+type StepPiece =
+	| { kind: "tie"; ms: number; below: number; low: number }
+	| { kind: "range"; lo: number; hi: number }
 
 /** Index rows of the window examined per step of the newest-first walk. */
 export const TRAILS_CHUNK_ROWS = 4_096
@@ -394,114 +400,145 @@ export function readTrails(
 	const elapsed = (): number => clock() - startedMs
 
 	// The walk goes newest first, (produced_at_ms, seq) descending, in steps of at most
-	// `chunk` index rows of the window, whatever the filters match: a step first finds
-	// its end on activity_produced alone (a covering index read), then reads the filtered
-	// rows of that range only. So every statement examines a bounded number of rows and
-	// the clock is checked between them. A cursor is exclusive; the start is above any row.
-	const START: StepCursor = {
-		ms: input.producedToMs,
-		seq: Number.MAX_SAFE_INTEGER,
-	}
-	const stepEndStatement = db.prepare(
+	// `chunk` index rows of the window, whatever the filters match. activity_produced is
+	// (produced_at_ms) with the rowid (seq) implicit, so every statement uses bounds the
+	// index can seek on: a run of equal produced_at_ms (`produced_at_ms = ? AND seq < ?
+	// AND seq >= ?`) or a range of whole milliseconds (`produced_at_ms BETWEEN ? AND ?`).
+	// A step first finds its end on the index alone (covering), then reads the filtered
+	// rows of its pieces; the clock is checked before every statement after the first.
+	const MAX_SEQ = Number.MAX_SAFE_INTEGER
+	const START: StepCursor = { ms: input.producedToMs, seq: MAX_SEQ }
+	const tieEndStatement = db.prepare(
+		`SELECT COUNT(*) AS n, MIN(seq) AS s FROM (SELECT seq FROM activity INDEXED BY activity_produced
+		WHERE produced_at_ms = ? AND seq < ? ORDER BY seq DESC LIMIT ?)`,
+	)
+	const rangeEndStatement = db.prepare(
 		`SELECT produced_at_ms, seq FROM activity INDEXED BY activity_produced
-		WHERE produced_at_ms BETWEEN ? AND ? AND (produced_at_ms < ? OR seq < ?)
+		WHERE produced_at_ms BETWEEN ? AND ?
 		ORDER BY produced_at_ms DESC, seq DESC LIMIT 1 OFFSET ?`,
 	)
-	/** The last index row of the step after `cursor`; null when the window ends inside it. */
-	const stepEnd = (cursor: StepCursor): StepCursor | null => {
-		const row = stepEndStatement.get(
-			fromMs,
-			cursor.ms,
-			cursor.ms,
-			cursor.seq,
-			chunk - 1,
-		)
-		if (row === undefined) return null
-		return {
-			ms: numberOf(row["produced_at_ms"], "producedAt"),
-			seq: numberOf(row["seq"], "seq"),
-		}
-	}
-	/** (end, cursor): below the cursor, down to and including the step end. */
-	const range = `produced_at_ms BETWEEN ? AND ? AND (produced_at_ms < ? OR seq < ?)
-		AND (produced_at_ms > ? OR seq >= ?)`
-	const rangeParams = (
+	/** The step below `cursor` (exclusive): its pieces in walk order and the next cursor. */
+	const planStep = (
 		cursor: StepCursor,
-		end: StepCursor | null,
-	): SqlValue[] => [
-		end?.ms ?? fromMs,
-		cursor.ms,
-		cursor.ms,
-		cursor.seq,
-		end?.ms ?? fromMs,
-		end?.seq ?? -1,
-	]
-	const scanStatement = db.prepare(
-		`SELECT seq, produced_at_ms, entity_key, category, protocol,
+	): { pieces: StepPiece[]; next: StepCursor | null } => {
+		const tie = tieEndStatement.get(cursor.ms, cursor.seq, chunk)
+		const count = numberOf(tie?.["n"] ?? 0, "count")
+		if (count > 0) {
+			const low = numberOf(tie?.["s"], "seq")
+			return {
+				pieces: [{ kind: "tie", ms: cursor.ms, below: cursor.seq, low }],
+				next: { ms: cursor.ms, seq: low },
+			}
+		}
+		const hi = cursor.ms - 1
+		if (hi < fromMs) return { pieces: [], next: null }
+		const end = rangeEndStatement.get(fromMs, hi, chunk - 1)
+		if (end === undefined)
+			return { pieces: [{ kind: "range", lo: fromMs, hi }], next: null }
+		const endMs = numberOf(end["produced_at_ms"], "producedAt")
+		const endSeq = numberOf(end["seq"], "seq")
+		const pieces: StepPiece[] = []
+		if (endMs + 1 <= hi) pieces.push({ kind: "range", lo: endMs + 1, hi })
+		pieces.push({ kind: "tie", ms: endMs, below: MAX_SEQ, low: endSeq })
+		return { pieces, next: { ms: endMs, seq: endSeq } }
+	}
+	/** The cursor just above a piece: everything newer is consumed. */
+	const startOf = (piece: StepPiece): StepCursor =>
+		piece.kind === "tie"
+			? { ms: piece.ms, seq: piece.below }
+			: { ms: piece.hi, seq: MAX_SEQ }
+	const pieceParams = (piece: StepPiece): SqlValue[] =>
+		piece.kind === "tie"
+			? [piece.ms, piece.below, piece.low]
+			: [piece.lo, piece.hi]
+	const TIE_WHERE = "produced_at_ms = ? AND seq < ? AND seq >= ?"
+	const RANGE_WHERE = "produced_at_ms BETWEEN ? AND ?"
+	const scanSelect = `SELECT seq, produced_at_ms, entity_key, category, protocol,
 		CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
 			THEN json_extract(summary_json, '$.position') END AS position
-		FROM activity INDEXED BY activity_produced
-		WHERE ${range} AND ${filters}
+		FROM activity INDEXED BY activity_produced`
+	const scanTie = db.prepare(
+		`${scanSelect} WHERE ${TIE_WHERE} AND ${filters} ORDER BY seq DESC`,
+	)
+	const scanRange = db.prepare(
+		`${scanSelect} WHERE ${RANGE_WHERE} AND ${filters}
 		ORDER BY produced_at_ms DESC, seq DESC`,
 	)
+	const scanPiece = (piece: StepPiece): TrailRow[] =>
+		(piece.kind === "tie" ? scanTie : scanRange)
+			.all(...pieceParams(piece), ...params)
+			.map(toTrailRow)
 
 	let read = 0
 	let moreRows = false
 	let timeLimited = false
 	/** Rows read by the walk but not consumed; the probe checks them first. */
 	let pending: TrailRow[] = []
-	/** Where the probe continues: past the last step read; null when the window is done. */
+	/** Where the probe continues: above the first unread piece; null when the window is done. */
 	let resume: StepCursor | null = null
-	let cursor = START
-	walk: for (let steps = 0; ; steps += 1) {
+	let cursor: StepCursor | null = START
+	walk: for (let steps = 0; cursor !== null; steps += 1) {
 		if (steps > 0 && elapsed() >= walkBudgetMs) {
 			timeLimited = true
 			resume = cursor
 			break
 		}
-		const end = stepEnd(cursor)
-		const rows = scanStatement
-			.all(...rangeParams(cursor, end), ...params)
-			.map(toTrailRow)
-		for (let index = 0; index < rows.length; index += 1) {
-			const row = rows[index] as TrailRow
-			// Checked before every row after the first, so a stop leaves a real unscanned
-			// row behind.
-			if (read > 0 && elapsed() >= walkBudgetMs) {
+		const { pieces, next } = planStep(cursor)
+		for (let at = 0; at < pieces.length; at += 1) {
+			const piece = pieces[at] as StepPiece
+			const after = (): StepCursor | null => {
+				const following = pieces[at + 1]
+				return following === undefined ? next : startOf(following)
+			}
+			// After the step end and between pieces: a stop leaves the cursor unchanged.
+			if ((steps > 0 || at > 0) && elapsed() >= walkBudgetMs) {
 				timeLimited = true
-				pending = rows.slice(index)
-				resume = end
+				resume = startOf(piece)
 				break walk
 			}
-			read += 1
-			if (read > input.limits.scanRows) {
-				// One row past scanRows only signals the bound.
-				moreRows = true
-				pending = rows.slice(index)
-				resume = end
-				break walk
-			}
-			if (!acceptor.push(row)) {
-				pending = rows.slice(index + 1)
-				resume = end
-				break walk
+			const rows = scanPiece(piece)
+			for (let index = 0; index < rows.length; index += 1) {
+				const row = rows[index] as TrailRow
+				// Checked before every row after the first, so a stop leaves a real
+				// unscanned row behind.
+				if (read > 0 && elapsed() >= walkBudgetMs) {
+					timeLimited = true
+					pending = rows.slice(index)
+					resume = after()
+					break walk
+				}
+				read += 1
+				if (read > input.limits.scanRows) {
+					// One row past scanRows only signals the bound.
+					moreRows = true
+					pending = rows.slice(index)
+					resume = after()
+					break walk
+				}
+				if (!acceptor.push(row)) {
+					pending = rows.slice(index + 1)
+					resume = after()
+					break walk
+				}
 			}
 		}
-		if (end === null) break
-		cursor = end
+		cursor = next
 	}
 	// Early stop: the walk continues past the stop with the same steps, reading the
 	// position only for the returned trails not yet known to be cut, to find those that
 	// lost an older in-window valid row. Rows the walk already read are not read again.
 	// It ends when no open trail remains or the window is exhausted (exact), or when the
 	// shared wall budget runs out (the rest are marked truncated, time-limit reported).
-	const probeStatement = db.prepare(
-		`SELECT entity_key,
+	const probeSelect = `SELECT entity_key,
 			CASE WHEN entity_key IN (SELECT value FROM json_each(?))
 				THEN CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
 					THEN json_extract(summary_json, '$.position') END END AS position
-			FROM activity INDEXED BY activity_produced
-			WHERE ${range} AND ${filters}`,
+			FROM activity INDEXED BY activity_produced`
+	const probeTie = db.prepare(
+		`${probeSelect} WHERE ${TIE_WHERE} AND ${filters}`,
+	)
+	const probeRange = db.prepare(
+		`${probeSelect} WHERE ${RANGE_WHERE} AND ${filters}`,
 	)
 	const resolveOlder: TrailOlderResolver = candidates => {
 		const open = new Set(candidates)
@@ -516,22 +553,25 @@ export function readTrails(
 		let at = resume
 		while (open.size > 0 && at !== null) {
 			if (elapsed() >= wallBudgetMs) return { older, complete: false }
-			const end = stepEnd(at)
-			if (elapsed() >= wallBudgetMs) return { older, complete: false }
-			const found = probeStatement.all(
-				JSON.stringify([...open]),
-				...rangeParams(at, end),
-				...params,
-			)
-			for (const raw of found) {
-				const entityKey = raw["entity_key"]
-				if (typeof entityKey !== "string")
-					throw activityRecordCorrupt("Activity trail row is corrupt")
-				const position = raw["position"]
-				if (position !== null && position !== undefined)
-					check(entityKey, position)
+			const { pieces, next } = planStep(at)
+			for (const piece of pieces) {
+				if (open.size === 0) break
+				if (elapsed() >= wallBudgetMs) return { older, complete: false }
+				const found = (piece.kind === "tie" ? probeTie : probeRange).all(
+					JSON.stringify([...open]),
+					...pieceParams(piece),
+					...params,
+				)
+				for (const raw of found) {
+					const entityKey = raw["entity_key"]
+					if (typeof entityKey !== "string")
+						throw activityRecordCorrupt("Activity trail row is corrupt")
+					const position = raw["position"]
+					if (position !== null && position !== undefined)
+						check(entityKey, position)
+				}
 			}
-			at = end
+			at = next
 		}
 		return { older, complete: true }
 	}
