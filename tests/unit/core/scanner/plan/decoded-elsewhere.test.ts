@@ -913,7 +913,8 @@ describe("toDecoderCoverageView", () => {
 			}),
 			"job",
 		)
-		expect(v.band?.targetsHz).toHaveLength(32)
+		// 32 copied plus one unread overflow sentinel
+		expect(v.band?.targetsHz).toHaveLength(33)
 		expect(computeDecodedElsewhere([v], spec())).toEqual({
 			ranges: [],
 			truncated: false,
@@ -949,7 +950,77 @@ describe("toDecoderCoverageView", () => {
 		)
 		computeDecodedElsewhere([v], spec())
 		expect(reads).toBe(0)
-		expect(v.band?.targetsHz).toHaveLength(32)
-		expect(v.band?.rangesHz).toHaveLength(32)
+		// Targets use the whole shared budget; each list keeps one unread overflow sentinel.
+		expect(v.band?.targetsHz).toHaveLength(33)
+		expect(v.band?.rangesHz).toHaveLength(1)
+	})
+
+	const inBand = (
+		targetsHz: number[],
+		rangesHz: { minHz: number; maxHz: number }[] = [],
+	) => ({
+		owner: "config" as const,
+		suspended: false,
+		bandAssessment: {
+			verdict: "in-band" as const,
+			basis: "configured" as const,
+			targetsHz,
+			rangesHz,
+			captureCenterHz: 100_000_000,
+			windowHalfWidthHz: 1e6,
+		},
+	})
+
+	it("a malformed sourceId never resolves to the default source", () => {
+		for (const bad of [null, 42, {}]) {
+			const v = toDecoderCoverageView(
+				status({
+					...inBand([100_000_000]),
+					sourceId: bad as unknown as string,
+				}),
+				"other",
+			)
+			expect(computeDecodedElsewhere([v], spec()).ranges).toEqual([])
+		}
+		const ok = toDecoderCoverageView(status(inBand([100_000_000])), "other")
+		expect(computeDecodedElsewhere([ok], spec()).ranges).toHaveLength(1)
+	})
+
+	it("targets and ranges share one 32-item budget", () => {
+		let reads = 0
+		const rangesHz = [{ minHz: 1, maxHz: 2 }]
+		Object.defineProperty(rangesHz, 0, {
+			get() {
+				reads++
+				throw new Error("item 33")
+			},
+		})
+		const v = toDecoderCoverageView(
+			status({
+				...inBand(
+					Array.from({ length: 32 }, () => 100_000_000),
+					rangesHz,
+				),
+				sourceId: "other",
+			}),
+			"d",
+		)
+		expect(reads).toBe(0)
+		const r = computeDecodedElsewhere([v], spec())
+		expect(r.ranges).toHaveLength(1)
+		expect(r.truncated).toBe(true)
+	})
+
+	it("keeps the overflow visible after mapping", () => {
+		const v = toDecoderCoverageView(
+			status({
+				...inBand(Array.from({ length: 33 }, () => 100_000_000)),
+				sourceId: "other",
+			}),
+			"d",
+		)
+		const r = computeDecodedElsewhere([v], spec())
+		expect(r.ranges).toHaveLength(1)
+		expect(r.truncated).toBe(true)
 	})
 })

@@ -312,10 +312,13 @@ type Band = NonNullable<DecoderCoverageView["band"]>
  * plan rejects them while they still use budget. Nothing past `max` is read.
  */
 function prefix(v: unknown, max: number): unknown[] {
-	const n = Math.min(lengthOf(v), max)
+	const len = lengthOf(v)
+	const n = Math.min(len, Math.max(0, max))
 	const arr = v as readonly unknown[]
 	const out: unknown[] = []
 	for (let i = 0; i < n; i++) out.push(arr[i])
+	// One unread NaN stands in for the overflow so the plan still sees the bound exceeded.
+	if (len > n) out.push(NaN)
 	return out
 }
 
@@ -326,6 +329,8 @@ function rangePrefix(v: unknown, max: number): Band["rangesHz"] {
 		return { minHz: minHz as number, maxHz: maxHz as number }
 	})
 }
+
+const SOURCE_INVALID = Symbol("invalid source id")
 
 function safeView(): DecoderCoverageView {
 	return {
@@ -380,7 +385,9 @@ export function toDecoderCoverageView(
 			? null
 			: typeof rawSourceId === "string"
 				? rawSourceId
-				: defaultSourceId
+				: rawSourceId === undefined
+					? defaultSourceId
+					: SOURCE_INVALID
 		let band: DecoderCoverageView["band"] = null
 		if (assessment !== null && VERDICTS.has(assessment["verdict"])) {
 			// Basis only ever comes from the assessment itself; nothing is manufactured.
@@ -397,17 +404,20 @@ export function toDecoderCoverageView(
 				TRUSTED_EXTERNAL_BASIS.has(basis)
 			)
 				targetsHz = prefix(configuredTargets, max)
+			// Targets first, then ranges, share one per-view budget (overflow sentinel excluded).
+			const used = Math.min(targetsHz.length, max)
 			const c = assessment["captureCenterHz"]
 			const w = assessment["windowHalfWidthHz"]
 			band = {
 				verdict: assessment["verdict"] as Band["verdict"],
 				basis,
 				targetsHz: targetsHz as number[],
-				rangesHz: rangePrefix(assessment["rangesHz"], max),
+				rangesHz: rangePrefix(assessment["rangesHz"], max - used),
 				captureCenterHz: typeof c === "number" ? c : null,
 				windowHalfWidthHz: typeof w === "number" ? w : null,
 			}
 		}
+		if (sourceId === SOURCE_INVALID) return safeView()
 		return {
 			id: id as string,
 			running: running === true,
