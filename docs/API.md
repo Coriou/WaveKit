@@ -2684,7 +2684,8 @@ great-circle bearing in degrees true, bucket = floor (bucket `b` covers
 the farthest per bearing over the current and previous 23 hours. A position is
 rejected, and counted in `rejected`, as `no-station` (no station location),
 `invalid-position` (non-finite, out of range, or exactly (0, 0)), `stale` (older
-than 60 s when observed) or `too-far` (more than 500 km).
+than 60 s, or more than 60 s ahead of the clock, when observed) or `too-far`
+(more than 500 km).
 
 #### GET /api/coverage
 

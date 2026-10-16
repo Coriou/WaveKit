@@ -69,6 +69,36 @@ describe("CoverageTracker", () => {
 		expect(t.query(T0).rejected.stale).toBe(2)
 	})
 
+	// R1 4: a position more than 60 s ahead of the clock is rejected as stale.
+	it("rejects positions more than 60 s in the future", () => {
+		const t = new CoverageTracker(STATION)
+		expect(t.observe("adsb", 52, 0, T0 + 60_000, T0)).toBe(true)
+		expect(t.observe("adsb", 52, 0, T0 + 60_001, T0)).toBe(false)
+		expect(t.observe("ais", 52, 0, T0 + HOUR, T0)).toBe(false)
+		expect(t.query(T0).rejected.stale).toBe(2)
+	})
+
+	it("after the clock steps back, rejects positions stamped by the old clock", () => {
+		const t = new CoverageTracker(STATION)
+		// Accepted at 12:00 by a clock that then steps back 10 minutes.
+		expect(t.observe("adsb", 52, -0.12, T0, T0)).toBe(true)
+		const back = T0 - 10 * 60_000
+		// A receiver still stamping by the old clock is now 10 min ahead.
+		expect(t.observe("adsb", 53, -0.12, T0 + 1_000, back)).toBe(false)
+		expect(t.observe("adsb", 52.2, -0.12, back, back)).toBe(true)
+		const q = t.query(back)
+		expect(q.rejected.stale).toBe(1)
+		const adsb = q.protocols.find(p => p.protocol === "adsb")
+		// The 12:00 slot is ahead of the stepped-back clock and not served yet.
+		expect(adsb?.accepted).toBe(1)
+		expect(adsb?.sectors).toHaveLength(1)
+		expect(adsb?.sectors[0]?.at).toBe(new Date(back).toISOString())
+		// Once the clock reaches 12:00 again both hours are served.
+		expect(
+			t.query(T0).protocols.find(p => p.protocol === "adsb")?.accepted,
+		).toBe(2)
+	})
+
 	it("keeps the farthest position per bearing and sorts sectors", () => {
 		const t = new CoverageTracker(STATION)
 		t.observe("adsb", 52.0, -0.12, T0, T0)

@@ -183,7 +183,7 @@ returns the farthest per bearing over the current and the previous 23 hours.
 7.2 Range shall be the haversine distance (R = 6 371 000 m) and bearing the initial
 great-circle bearing, degrees true, bucket = floor.
 7.3 A position shall be rejected as `invalid-position` (non-finite, out of range, or exactly
-(0, 0)), `too-far` (more than 500 km), `stale` (older than 60 s when observed) or `no-station`
+(0, 0)), `too-far` (more than 500 km), `stale` (older than 60 s, or more than 60 s ahead of the clock, when observed) or `no-station`
 (no station latitude and longitude).
 7.4 Inputs are aircraft and vessel tracker updates; one tracked entity counts only when its
 position time advances.

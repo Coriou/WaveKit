@@ -20,6 +20,12 @@ const SLOTS = COVERAGE_WINDOW_HOURS
 const CELLS = SLOTS * BUCKETS
 /** Empty range cell; -1 so a range of 0 m (at the station) is storable. */
 const EMPTY = -1
+/**
+ * Largest lead of a position over the clock, ms. A position stamped further
+ * ahead (a receiver on a clock that later stepped back) is rejected as stale,
+ * so it cannot claim a future hourly slot.
+ */
+const MAX_FUTURE_MS = 60_000
 /** Slot hour sentinel: never written. */
 const NO_HOUR = -2_147_483_648
 
@@ -88,7 +94,8 @@ export class CoverageTracker {
 		}
 		if (
 			!Number.isFinite(positionAtMs) ||
-			!(nowMs - positionAtMs <= COVERAGE_MAX_POSITION_AGE_MS)
+			!(nowMs - positionAtMs <= COVERAGE_MAX_POSITION_AGE_MS) ||
+			!(positionAtMs - nowMs <= MAX_FUTURE_MS)
 		) {
 			this.rejected.stale++
 			return false
