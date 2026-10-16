@@ -24,6 +24,8 @@ admission limits, retention policy, coalescing windows or `activity.enabled`; th
 default (`legacy`); the files pinned by the band-plans spec (`src/decoders/band-region.ts`,
 `src/decoders/band-defaults.ts`, `src/core/scanner/bandplan/index.ts`,
 `src/core/scanner/bandplan/builtin.ts`); new npm dependencies.
+Amended (WG8): decoder PATCH (protected only, applied on restart), a recordings inventory and
+spectrum bins above 2 048 are specified in [web-gaps-8](../web-gaps-8/requirements.md).
 
 Hard gates (no lane may do these): RF, tuning, receiver or Raspberry Pi work, deploys, Docker
 builds or runs, network access or data research (tests use injected fetchers, fake DNS and

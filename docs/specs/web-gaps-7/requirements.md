@@ -27,6 +27,9 @@ limits, retention, coalescing windows or `activity.enabled`; the access default 
 the files pinned by the band-plans spec (`src/decoders/band-region.ts`,
 `src/decoders/band-defaults.ts`, `src/core/scanner/bandplan/index.ts`,
 `src/core/scanner/bandplan/builtin.ts`); new npm dependencies.
+Amended (WG8): the decoder PATCH, settings store, recordings inventory and the bins above 2 048
+(measured on the Raspberry Pi before WG8: the worker transfer, not the WebSocket, was the cost)
+are specified in [web-gaps-8](../web-gaps-8/requirements.md).
 
 Hard gates (no lane may do these): RF, tuning, receiver or Raspberry Pi work, deploys, Docker
 builds or runs, network access or data research (tests use synthetic audio, injected clocks,

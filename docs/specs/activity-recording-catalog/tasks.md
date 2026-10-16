@@ -70,6 +70,9 @@ Main assigns owners at each remaining gate.
       staging/publication, reconciliation and bounded imports. Test property6 including
       producer death and EXDEV; verify native closure rather than waiting a fixed delay.
       Read-only legacy inventory can precede adapters, but cannot enable managed Keep.
+      Amended (WG8): the read-only legacy inventory is delivered by
+      [web-gaps-8](../web-gaps-8/requirements.md) requirement 4 before checkpoint B (protected
+      list and whole-file download; no Keep, delete or trim). This task stays open.
       _Requirements: 4.1–4.5, 2.5, 7.2._
 - [ ] **6. Unified deletion decisions and capacity.** Depends on5. Integrate every
       existing deletion owner; implement generation-fenced durable scanner Keep handshake, recording CAS,

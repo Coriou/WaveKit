@@ -19,6 +19,9 @@ data); the scanner consuming the resolved stack (BP2); country packs or any new 
 data; numeric US FRS rows; URL fetch, "Check for update", SDR# XML and Gqrx CSV import;
 bundled community packs; deriving "verified" from registry links. BP2 (section 11) brings
 the scanner consumption of the stack into scope, limited to built-in plan data.
+Amended (WG8): a settings store for decoder options and `enabled` only (override over YAML/env,
+protected writes) is specified in [web-gaps-8](../web-gaps-8/requirements.md) requirement 1;
+a general settings store stays out of scope.
 
 ## 1. Authority isolation
 

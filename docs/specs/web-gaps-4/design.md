@@ -213,6 +213,9 @@ in protected mode (`STATION_WRITE_REQUIRES_ACCESS = true`). Legacy mode has no c
 and the station location is persistent state that moves coverage and readsb, so an anonymous
 LAN client must not change it; band-plan import (WG5) follows the same rule. The `false` path
 (PATCH in legacy mode too) stays implemented and tested; revisit it once browser access lands.
+Amended (WG8): the WG8 decoder settings store ([web-gaps-8](../web-gaps-8/design.md)) is a
+separate layer for decoder options and `enabled`; the station layer keeps its own store and
+precedence (env > yaml > ui).
 
 **Store** (`src/core/station/store.ts`): load at open (`readFile`, size check ≤ 4 096 B, JSON
 parse, Zod schema of `StationStoreFile`, each value re-validated with the field's

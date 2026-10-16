@@ -48,6 +48,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
   noise and tone squelch with the noise-tail fix, suggested gain tables, opt-in band-plan skip
   exclusions and decoded-elsewhere refresh, audio stream CORS, bounded decoder options, minors
   (WG7)
+- [web-gaps-8](web-gaps-8/requirements.md): decoder settings store and protected decoder PATCH
+  applied on restart, read-only recordings inventory with download, spectrum bins above 2 048
+  by a measured host cap (WG8)
 
 ## The three files
 
