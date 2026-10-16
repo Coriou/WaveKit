@@ -11,6 +11,8 @@ import { buildActivityRow } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { isTelemetryOutput } from "./telemetry.js"
 import { PositionCoalescer, type CoalesceUndo } from "./coalesce.js"
+import { FloodDedupe, floodKeyOf } from "./flood-dedupe.js"
+import type { FloodKey } from "./flood-dedupe.js"
 import type { DecodeEnvelope } from "../types.js"
 import type { Logger } from "../../../utils/logger.js"
 
@@ -57,6 +59,10 @@ export class ActivityIngress {
 	/** Undo of each queued or in-flight row's coalescing state, by eventId. */
 	private readonly coalesceUndo = new Map<string, CoalesceUndo>()
 	private readonly decoders = new Map<string, TokenBucket>()
+	private readonly flood = new FloodDedupe()
+	/** Flood key of each queued or in-flight mesh row, by eventId. */
+	private readonly floodPending = new Map<string, string>()
+	private floodCopyCount = 0
 	private readonly queue: BuiltActivityRow[] = []
 	private queueBytes = 0
 	private inFlight: BuiltActivityRow[] = []
@@ -87,6 +93,11 @@ export class ActivityIngress {
 		return this.coalescer.coalesced
 	}
 
+	/** Meshtastic flood copies not stored (req 6.6); not a loss. */
+	get floodCopies(): number {
+		return this.floodCopyCount
+	}
+
 	/**
 	 * `present`, when given, is called only after coalescing and admission
 	 * have kept the reception, and its envelope is the one stored. Coalescing
@@ -101,6 +112,14 @@ export class ActivityIngress {
 		if (isTelemetryOutput(envelope.outputType)) {
 			this.excludedTelemetry++
 			return { admitted: false, reason: "telemetry" }
+		}
+		let floodKey: FloodKey | undefined
+		if (envelope.outputType === "meshtastic") {
+			floodKey = floodKeyOf(envelope.decodedData, envelope.receivedAt)
+			if (floodKey && this.flood.isCopy(floodKey)) {
+				this.floodCopyCount++
+				return { admitted: false, reason: "flood-copy" }
+			}
 		}
 		const coalesce = this.coalescer.decide(envelope)
 		if (!coalesce.store) {
@@ -139,6 +158,10 @@ export class ActivityIngress {
 		this.queueBytes += row.recordBytes
 		this.admitted++
 		this.coalesceUndo.set(row.eventId, coalesce.commit())
+		if (floodKey) {
+			this.flood.remember(floodKey, row.eventId)
+			this.floodPending.set(row.eventId, floodKey.key)
+		}
 		return { admitted: true }
 	}
 
@@ -216,7 +239,10 @@ export class ActivityIngress {
 	ack(done: ReadonlySet<string>): void {
 		// Rows written (or duplicates) keep their coalescing state; noteSkipped
 		// has already rolled back the failed ones.
-		for (const row of this.inFlight) this.settleCoalescing(row.eventId)
+		for (const row of this.inFlight) {
+			this.settleCoalescing(row.eventId)
+			this.floodPending.delete(row.eventId)
+		}
 		const gap = this.inFlight.find(row => row.kind === "ingestion-gap")
 		if (gap) {
 			if (done.has(gap.eventId)) this.gapHeld = false
@@ -235,6 +261,7 @@ export class ActivityIngress {
 		// Newest first, so each undo sees the state its own commit left.
 		for (const row of [...failed].reverse())
 			this.rollBackCoalescing(row.eventId)
+		for (const row of failed) this.forgetFlood(row.eventId)
 		for (const row of failed)
 			this.noteDrop(
 				"write-failed",
@@ -250,7 +277,10 @@ export class ActivityIngress {
 	): void {
 		const skipped = new Set(eventIds)
 		for (const row of [...batch].reverse())
-			if (skipped.has(row.eventId)) this.rollBackCoalescing(row.eventId)
+			if (skipped.has(row.eventId)) {
+				this.rollBackCoalescing(row.eventId)
+				this.forgetFlood(row.eventId)
+			}
 		for (const row of batch) {
 			if (!skipped.has(row.eventId) || row.kind === "ingestion-gap") continue
 			this.noteDrop(
@@ -264,7 +294,10 @@ export class ActivityIngress {
 
 	/** Clears an in-flight batch without counting it. A timed-out write may still commit. */
 	forgetInFlight(): void {
-		for (const row of this.inFlight) this.settleCoalescing(row.eventId)
+		for (const row of this.inFlight) {
+			this.settleCoalescing(row.eventId)
+			this.floodPending.delete(row.eventId)
+		}
 		this.inFlight = []
 		this.inFlightBytes = 0
 	}
@@ -277,6 +310,14 @@ export class ActivityIngress {
 		const undo = this.coalesceUndo.get(eventId)
 		this.coalesceUndo.delete(eventId)
 		undo?.settle()
+	}
+
+	/** A failed or skipped write forgets its flood entry if still its own. */
+	private forgetFlood(eventId: string): void {
+		const key = this.floodPending.get(eventId)
+		if (key === undefined) return
+		this.floodPending.delete(eventId)
+		this.flood.forget(key, eventId)
 	}
 
 	private rollBackCoalescing(eventId: string): void {
@@ -335,6 +376,7 @@ export class ActivityIngress {
 	abandonQueued(): void {
 		const rows = [...this.inFlight, ...this.queue]
 		this.coalesceUndo.clear()
+		this.floodPending.clear()
 		this.inFlight = []
 		this.inFlightBytes = 0
 		this.queue.length = 0
