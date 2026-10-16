@@ -985,7 +985,7 @@ async function main(): Promise<void> {
 							.map(s => toDecoderCoverageView(s, defaultSourceId))
 					} catch (err) {
 						log.warn(
-							{ err },
+							protectedMode ? { code: "RUNTIME_ERROR" } : { err },
 							"Decoder statuses unavailable; plans claim no decoded-elsewhere ranges",
 						)
 						return []

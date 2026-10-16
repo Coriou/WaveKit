@@ -2424,8 +2424,9 @@ track is credited once too). `?limit=n` (1–500, default 100). 404
 
 `hits` is most recent hit first. `firstSeenInJob` means an observation of this
 job created the discovery. `lastDurationMs` (WG6) is the length in ms of the
-most recent observation credited to the discovery in this job once that
-observation has ended, null while it is open or until one ended; the same
+most recent ended observation credited to the discovery in this job: null
+until one has ended, and while a newer observation is open it keeps the
+previous value; the same
 entries ride on `jobHits` in `scanner:discovery` events. In memory only: the counts reset when the job
 starts (not on resume), are dropped when the job is deleted and are empty after
 a restart. At most 2,000 discoveries are tracked per job; further hits count
