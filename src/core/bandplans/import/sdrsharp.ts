@@ -33,7 +33,7 @@ export const SDRSHARP_LIMITS = Object.freeze({
  * quote style; the encoding name is matched case-insensitively.
  */
 const XML_DECLARATION =
-	/^<\?xml\s+version\s*=\s*(?:"1\.[0-9]+"|'1\.[0-9]+')(?:\s+encoding\s*=\s*(?:"[Uu][Tt][Ff]-8"|'[Uu][Tt][Ff]-8'))?(?:\s+standalone\s*=\s*(?:"(?:yes|no)"|'(?:yes|no)'))?\s*\?>$/
+	/^<\?xml[ \t\r\n]+version[ \t\r\n]*=[ \t\r\n]*(?:"1\.[0-9]+"|'1\.[0-9]+')(?:[ \t\r\n]+encoding[ \t\r\n]*=[ \t\r\n]*(?:"[Uu][Tt][Ff]-8"|'[Uu][Tt][Ff]-8'))?(?:[ \t\r\n]+standalone[ \t\r\n]*=[ \t\r\n]*(?:"(?:yes|no)"|'(?:yes|no)'))?[ \t\r\n]*\?>$/
 
 const ROOT = "ArrayOfRangeEntry"
 const ROW = "RangeEntry"
@@ -136,6 +136,11 @@ function isReferableScalar(code: number): boolean {
 class Tokenizer {
 	private pos = 0
 	private readonly stack: string[] = []
+	/**
+	 * Length of each open element's current character-data run: comments do
+	 * not split a run, a child element does.
+	 */
+	private readonly textLengths: number[] = []
 	private readonly entries: Entry[] = []
 	private rootSeen = false
 	private rootClosed = false
@@ -217,7 +222,7 @@ class Tokenizer {
 		const outside = top === 0
 		const keep = this.row !== null && top === 2
 		let out = ""
-		let length = 0
+		let length = outside ? 0 : (this.textLengths[top - 1] ?? 0)
 		let segment = this.pos
 		while (this.pos < s.length) {
 			const code = s.charCodeAt(this.pos)
@@ -238,6 +243,7 @@ class Tokenizer {
 			}
 			if (length > SDRSHARP_LIMITS.textChars) reject()
 		}
+		if (!outside) this.textLengths[top - 1] = length
 		if (keep && segment < this.pos && this.pos >= s.length)
 			out += s.slice(segment, this.pos)
 		if (this.row !== null && top === 2) {
@@ -342,7 +348,12 @@ class Tokenizer {
 			else if (selfClosing) this.entries.push(toRow(attrs, ""))
 			else this.row = { attrs, name: "" }
 		}
-		if (!selfClosing) this.stack.push(qualified)
+		if (this.textLengths.length > 0)
+			this.textLengths[this.textLengths.length - 1] = 0
+		if (!selfClosing) {
+			this.stack.push(qualified)
+			this.textLengths.push(0)
+		}
 	}
 
 	private attribute(seen: readonly Attribute[]): Attribute {
@@ -387,6 +398,9 @@ class Tokenizer {
 		this.skipSpace()
 		if (s.charCodeAt(this.pos) !== 0x3e) reject()
 		this.pos++
+		this.textLengths.pop()
+		if (this.textLengths.length > 0)
+			this.textLengths[this.textLengths.length - 1] = 0
 		const open = this.stack.pop()
 		if (open === undefined || open !== name) reject()
 		const depth = this.stack.length + 1

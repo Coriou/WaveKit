@@ -322,6 +322,8 @@ describe("parseSdrSharpBandPlan: failure paths", () => {
 			`<ArrayOfRangeEntry xmlns:b="y">${row("A")}</b:ArrayOfRangeEntry>`,
 		],
 		["garbage declaration", `<?xml garbage?>${valid}`],
+		["vertical tab in declaration", `<?xml\u000bversion="1.0"?>${valid}`],
+		["form feed in declaration", `<?xml version\u000c="1.0"?>${valid}`],
 		["declaration without version", `<?xml encoding="UTF-8"?>${valid}`],
 		["declaration version 2.0", `<?xml version="2.0"?>${valid}`],
 		["declaration mixed quotes", `<?xml version="1.0'?>${valid}`],
@@ -391,5 +393,11 @@ describe("parseSdrSharpBandPlan: failure paths", () => {
 	it("never echoes content in failures", () => {
 		const result = parseText(doc([row("SECRET&xxe;")]))
 		expect(JSON.stringify(result)).not.toContain("SECRET")
+	})
+	it("counts text across comments in every element: 1 024 accepted, 1 025 -> xml", () => {
+		const other = (n: number) =>
+			`<Other>${"x".repeat(n - 1)}<!--split-->x</Other>`
+		expect(parseText(doc([row("A"), other(1024)])).ok).toBe(true)
+		expectInvalid(doc([row("A"), other(1025)]), "xml")
 	})
 })
