@@ -708,6 +708,8 @@ access code-only body and headers.
 | `DELETE` | `/api/bandplans/operator-bands/:bandId`           | Delete an operator band                                                                                     |
 | `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++, SDR# or Gqrx file; persists nothing                                                         |
 | `POST`   | `/api/bandplans/imports`                          | Commit a previewed import; 201                                                                              |
+| `POST`   | `/api/bandplans/imports/preview-url`              | WG6: fetch an allowlisted https URL once and preview it; persists nothing                                   |
+| `POST`   | `/api/bandplans/packs/:packId/check-update`       | WG6: re-fetch a URL-imported pack and diff it against the committed pack; persists nothing                  |
 | `POST`   | `/api/bandplans/presets`                          | Create an operator scan preset (`preset`); 201                                                              |
 | `PUT`    | `/api/bandplans/presets/:presetId`                | Replace an operator preset (`preset`)                                                                       |
 | `DELETE` | `/api/bandplans/presets/:presetId`                | Delete an operator preset                                                                                   |
@@ -742,8 +744,9 @@ limits are returned in the stack view under `limits`.
 Import formats (WG5): `capabilities.importFormats` lists the formats this core
 parses: `sdrpp-json` (SDR++ band plan JSON), `sdrsharp-xml` (SDR# `BandPlan.xml`) and
 `gqrx-csv` (Gqrx `bandplan.csv`). A format the core does not parse is 422
-`BANDPLANS_IMPORT_INVALID`. Files are uploaded in the request body only: there is no
-import from a URL. Imports, like every band-plan write, need protected mode. The
+`BANDPLANS_IMPORT_INVALID`. Files are uploaded in the request body, or fetched by
+core from an allowlisted URL (WG6, below). Imports, like every band-plan write,
+need protected mode. The
 imported pack's provenance records the file's `format`; state written before WG5
 reads as `sdrpp-json`.
 
@@ -781,6 +784,56 @@ trimmed; anything else is no mode):
 
 Parsing a 1 MiB, 4,096-row file takes about 27 ms (SDR#) and 11 ms (Gqrx) on the
 development Mac.
+
+Import by URL (WG6). Protected mode only, mounted with the other writes and
+re-authorized before any fetch. `capabilities.urlImportHosts` lists the host
+allowlist (`raw.githubusercontent.com`) when URL import is on and `[]`
+otherwise (legacy mode, or no fetcher). `POST /api/bandplans/imports/preview-url`
+takes `{ url, format, groupOverrides }`, fetches the URL once and answers the
+usual import preview plus `sourceUrl` and the fetched file as `contentBase64`.
+Commit it through `POST /api/bandplans/imports` with `sourceUrl` added; the
+`previewDigest` then also binds the URL, and the pack's provenance records
+`sourceUrl`. A commit with `sourceUrl` must match a URL preview this core issued
+in the last 15 minutes (at most 32 remembered, oldest dropped) for the same
+digest, URL and bytes, and uses it up; otherwise it is 409
+`BANDPLANS_IMPORT_MISMATCH` (a client cannot claim a URL it did not fetch
+through core). A commit without `sourceUrl` computes exactly the earlier digest.
+
+URL and fetch rules: `https:` only, no user info, no explicit port (also not
+`:443`), no fragment (also not an empty `#`), at most 2,048 characters, and an
+exact lower-case host from the allowlist (no IP literal). Core resolves the host
+itself and refuses the URL if any resolved address is loopback, private (RFC
+1918), link-local, CGNAT, unspecified, broadcast, multicast, reserved or
+documentation space, IPv6 unique-local or link-local; IPv4-mapped
+(`::ffff:0:0/96`) and NAT64 (`64:ff9b::/96`) addresses are refused as whole
+blocks, so NAT64-only hosts cannot import. It connects only to the checked
+address (no second lookup) with TLS verification and SNI for the host, follows
+no redirect, accepts only status 200, sends no cookies, credentials or proxy
+settings, asks for `identity` encoding and refuses a compressed body, accepts
+only `text/plain`, `application/json`, `application/xml`, `text/xml`, `text/csv`
+and `application/octet-stream`, stops past 1 MiB (also when `Content-Length`
+announces more) and gives up after 10 s in total. One fetch runs at a time per
+process. Logs carry the host and path, never the query string or response
+bytes.
+
+`POST /api/bandplans/packs/:packId/check-update` re-fetches the `sourceUrl` of a
+URL-imported pack under the same rules (the host must still be allowlisted)
+and answers `{ packId, sourceUrl, checkedAt, currentSha256, fetchedSha256,
+upToDate, added, removed, changed, preview }`. Same bytes give `upToDate: true`,
+empty lists and `preview: null`. Otherwise the file is parsed with the pack's
+format and compared with the pack's imported bands by id: `added`, `removed` and
+`changed` (each with its differing field names, sorted), each list sorted by
+`startHz`, then id. `preview` is a URL preview to commit with `replacesPackId`
+(operator edits are kept, as for a re-import). A file that no longer parses
+answers its parser error. There is no automatic or periodic check. 404
+`BANDPLANS_NOT_FOUND` for an unknown pack; 400 `BANDPLANS_INVALID` for a pack
+without `sourceUrl`.
+
+URL errors: 403 `BANDPLANS_URL_IMPORT_DISABLED` (URL import off), 422
+`BANDPLANS_URL_REFUSED` (URL, address or media type refused), 502
+`BANDPLANS_URL_FETCH_FAILED` (network, TLS, redirect or status), 504
+`BANDPLANS_URL_TIMEOUT`, 413 `BANDPLANS_IMPORT_TOO_LARGE`, 503 `BANDPLANS_BUSY`
+(another fetch is running).
 
 Errors use `{ error: "BandPlansError", code, message }`: 400 `BANDPLANS_INVALID`,
 404 `BANDPLANS_NOT_FOUND`, 409 `BANDPLANS_CONFLICT`, `BANDPLANS_READ_ONLY`,
@@ -845,6 +898,14 @@ Fixed errors use `{error: "ReceiverCapabilitiesError", code, message}` and
 Unexpected response encoding/serialization failure uses 500 `FAILED`.
 Root denial envelopes and headers remain unchanged. Full contract:
 [receiver capabilities specification](specs/receiver-capabilities/design.md).
+
+`sampleRatePresets` (WG6) suggests sample rates worth offering: on `rtl_tcp`
+sources `{ state: "suggested", provenance: "wavekit-rtl-rate-presets", valuesHz }`
+with the fixed list 250000, 1024000, 1536000, 1792000, 1920000, 2048000,
+2160000, 2400000, 2560000, 2880000 and 3200000 Hz (the CLI's list, each inside
+the accepted sample-rate ranges); elsewhere `{ state: "not-applicable", reason:
+"non-rtl-transport" }`. These are WaveKit suggestions, not receiver evidence:
+they say nothing about the device or its model.
 
 ### Tuner
 
@@ -1363,6 +1424,7 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 | `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                       |
 | `owner`               | `"config"` or `"scanner"`: who created the instance. Scanner probes are `"scanner"`; their start/stop/restart and band routes answer 409 `DECODER_OWNED_BY_SCANNER`. Sent by current cores.                                                                                                                                                       |
 | `scannerJobId`        | The scanner job that owns a probe; present only with `owner: "scanner"`.                                                                                                                                                                                                                                                                          |
+| `optionIssues`        | WG6, report only: problems with the instance's `options` found when it was created (config, API create and scanner probes), `[{ path, code, message }]` with `code` `unknown-key`, `invalid-value` or `truncated`. `[]` when valid; absent for a type without an option schema. At most 32 entries (the 32nd is a `truncated` entry counting the rest); `path` and `message` ≤ 256 UTF-16 code units; messages never echo option values. The decoder is created and started exactly as before (`DECODER_OPTIONS_ENFORCE` is false); one warn log per decoder lists the issue paths. |
 | `ephemeral`           | `true` for runtime-only instances (scanner probes: not in config, never persisted, announced by `decoder:created` / `decoder:removed`). Hide or group them in decoder lists.                                                                                                                                                                       |
 
 `health` after an unexpected exit:
@@ -1545,6 +1607,17 @@ for every decoder selecting that source. 404 for an unknown source; 400 for a
 non-positive or non-integer rate and, for `rtl_tcp` sources, for rates
 librtlsdr rejects (valid: 225001–300000 and 900001–3200000 Hz).
 
+#### GET /api/decoders/types
+
+Registered decoder types: `[{ type, caps, options? }]`. `options` (WG6) lists
+one descriptor per documented option key of the type, sorted by key: `{ key,
+type, enumValues?, min?, max?, unit?, default, secret, effect: "restart",
+description }`. It is absent for a type without an option schema. Keys whose
+value is key material or may carry it (Meshtastic `channelKey`, dsd-fme
+`extraArgs`) have `secret: true`; the config export redacts them. Every option
+takes effect on the next start (`effect: "restart"`); editing options at
+runtime is not implemented (`PATCH /api/decoders/:id` answers 501).
+
 #### GET /api/decoders/:id
 
 Get status of a specific decoder.
@@ -1666,26 +1739,10 @@ producers such as readsb are not turned into log lines. 404 for an unknown id.
 
 #### PATCH /api/decoders/:id
 
-Update decoder configuration.
-
-```bash
-curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
-  -H "Content-Type: application/json" \
-  -d '{
-    "options": {
-      "mode": "dmr"
-    }
-  }'
-```
-
-**Response** (200 OK):
-
-```json
-{
-	"id": "dsd-main",
-	"message": "Configuration updated, restart required"
-}
-```
+Not implemented: a valid body (`enabled` and/or `options`) answers 501
+`DECODER_CONFIG_UPDATE_UNSUPPORTED`; edit the YAML configuration and restart
+WaveKit. 404 for an unknown decoder, 400 `NO_UPDATE_FIELDS` for an empty body.
+`GET /api/decoders/types` describes the options a later PATCH would accept.
 
 ### Digital Voice
 
@@ -2002,6 +2059,35 @@ When applying them would leave no hop, none applies and all have
 `applied: false`. The key is absent for in-window plans and when no lockout
 falls inside the ranges. Lockout exclusions are never written into the spec.
 
+Plans also say which parts of the ranges decoders elsewhere already decode
+(WG6): `decodedElsewhere: [{ startHz, endHz, sourceId, decoderIds, applied }]`.
+A decoder counts only when its own state proves the coverage (fail closed):
+it is running, healthy (`running` or `idle`), not suspended, configured (scanner
+probes never count) and on a different source than the job (a job retunes its
+own source, so those decoders lose their coverage while it scans). A decoder on
+a WaveKit source needs an `in-band` band verdict with a known capture centre
+`c` and window half-width `w`: each target `t` within the window covers
+`[t − 6 250, t + 6 250]` clipped to `[c − w, c + w]`, and each band range is
+clipped to the window. External-input decoders (`sourceId: null`) would cover
+their targets only with a `configured`, `protocol` or `override` band basis;
+today's band check reports external inputs as `unknown`, so they never
+contribute. Entries are clipped to the enabled ranges, merged per `sourceId`
+(touching intervals merge, decoder ids are sorted and unique) and sorted by
+`startHz`, then `sourceId` (null last). At most 64 decoders, 32 targets plus
+ranges per decoder and 256 entries are examined or reported; past a bound the
+plan gets one `decoded-elsewhere-truncated` warning, only when some entry is
+reported. The key is absent when nothing is covered.
+
+`skipDecodedElsewhere: true` (sweep jobs, optional, live-editable) applies the
+entries as exclusions after the lockouts (lockouts keep their own rule and are
+never dropped for them). If that would leave no hop, none applies (all
+`applied: false`) and the plan gets one `decoded-elsewhere-not-applied`
+warning. In-window jobs report the entries but never apply them. Without the
+flag the hops are exactly today's. Coverage is read when a plan is computed
+(preview, create, PATCH, restore and the lockout replans); a decoder starting or
+stopping does not replan a job, so a skipped range stays skipped until the
+job's next plan.
+
 #### POST /api/scanner/jobs
 
 Creates a job (`ScanJobSpec`, every field optional; defaults in
@@ -2171,6 +2257,10 @@ is created, edited or restored). Setting, clearing or deleting a lockout
 replans every live sweep job on the discovery's sources whose list changes and
 sends `scanner:job`.
 
+Jobs also carry the `decodedElsewhere` entries of their current plan (WG6; see
+`POST /api/scanner/plan`), runtime only like `lockoutExclusions` and recomputed
+at the same points.
+
 `progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
 since the job started: see `GET /api/scanner/jobs/:id/hits`.
 
@@ -2179,7 +2269,7 @@ since the job started: see `GET /api/scanner/jobs/:id/hits`.
 Live edit. The hop plan changes at the next hop; detection masks, protocol
 matching, probes and `signalsOnly` change as soon as the PATCH returns. Allowed keys: `thresholdDb`,
 `sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
-`capture`, `signalsOnly` and `ranges`; other keys are ignored. The keys are merged into the spec the job
+`capture`, `signalsOnly`, `skipDecodedElsewhere` and `ranges`; other keys are ignored. The keys are merged into the spec the job
 was created with (only `sourceId` and `mode` are pinned), so derived fields
 follow the edit and keep their provenance: `{"sensitivity": "high"}` gives
 100 ms integration unless the job set `integrationMs` itself. While the job
@@ -2325,14 +2415,18 @@ track is credited once too). `?limit=n` (1–500, default 100). 404
 			"hits": 9,
 			"firstHitAt": "2026-10-13T14:00:02.000Z",
 			"lastHitAt": "2026-10-13T14:02:11.000Z",
-			"firstSeenInJob": true
+			"firstSeenInJob": true,
+			"lastDurationMs": 2350
 		}
 	]
 }
 ```
 
 `hits` is most recent hit first. `firstSeenInJob` means an observation of this
-job created the discovery. In memory only: the counts reset when the job
+job created the discovery. `lastDurationMs` (WG6) is the length in ms of the
+most recent observation credited to the discovery in this job once that
+observation has ended, null while it is open or until one ended; the same
+entries ride on `jobHits` in `scanner:discovery` events. In memory only: the counts reset when the job
 starts (not on resume), are dropped when the job is deleted and are empty after
 a restart. At most 2,000 discoveries are tracked per job; further hits count
 in `stats.hits` only. The counts are best-effort: the job remembers the last
@@ -3047,6 +3141,37 @@ that threshold in bytes (null without a scanner) and `state` is `low` when
 WaveKit does not shorten any retention because space is low; the report only
 states the configured caps and retention.
 
+### Config export
+
+`GET /api/config/export` (WG6) downloads the effective configuration (the YAML
+file, `WAVEKIT_` environment overrides and defaults, as validated at startup)
+as redacted YAML: `Content-Type: application/yaml; charset=utf-8`,
+`Content-Disposition: attachment`, `Cache-Control: no-store`, with a first
+comment line naming the WaveKit version and saying the export is redacted.
+Export only: there is no import.
+
+While `CONFIG_EXPORT_REQUIRES_ACCESS` is true the route exists only in protected
+mode and re-authorizes every request like the other operator routes (an
+authenticated session or device; a denial keeps the access code-only body). In
+legacy mode it is not mounted (404).
+
+Redaction fails closed. `access` is reduced to `{ mode }`. A value whose key
+(any path segment) matches `/(key|psk|secret|passw|token|cred|auth|cookie|cert|salt)/i`
+becomes `"<redacted>"` whatever its type or depth (numbers too: dsd-fme numeric
+keys). `station.lat`, `station.lon` and `station.altM` are redacted. Inside
+`decoders[].options` every string at any depth is redacted unless its key is in
+`CONFIG_EXPORT_OPTION_ALLOWLIST`, and an option the type describes as
+`secret: true` (see `GET /api/decoders/types`) is redacted whatever its value.
+Outside options a string is kept only at `CONFIG_EXPORT_KEPT_STRING_PATHS` (ids,
+types and similar) or when the config schema limits it to a closed set (enum or
+literal), so host names, URLs, file paths, names and callsigns are redacted.
+Other numbers, booleans and null are kept. The lists live in
+`packages/api-types/src/config-export.ts`. The body is at most 256 KiB; larger
+is 500 `CONFIG_EXPORT_FAILED`. Without a config provider the route answers 503
+`CONFIG_EXPORT_UNAVAILABLE`. Error bodies are `{ error: "ConfigExportError",
+code, message }`. The redaction defaults (decision E2) await the user's
+confirmation; the shipped behaviour is the recommended default.
+
 ## Activity
 
 Persistent decoder-event search. On by default with bounded retention and
@@ -3094,9 +3219,11 @@ The store holds three kinds:
   `decoderId: null`, a title such as `NFM 446.00625 MHz` (or
   `NFM transmission` without a frequency) and fields `durationMs` (ms),
   `modulation` and `peakChannelPowerDbfs` (dBFS, when known), plus `ctcssHz`
-  (label `CTCSS`, Hz) and `dtmf` (label `DTMF`) when the closed event's
-  `tone` has them; those values are also searchable text. Older rows have
-  no `tone`. Search with `kinds=analog-transmission`, by source or frequency. Admission is
+  (label `CTCSS`, Hz), `dtmf` (label `DTMF`) and `dcs` (label `DCS`, such as
+  `023N`; WG6) when the closed event's `tone` has them; those values are also
+  searchable text, and a DCS code is indexed under both spellings
+  (`DCS 023N` and its twin `DCS 047I`), so a search for either finds the row.
+  Older rows have no `tone` (or no `tone.dcs`). Search with `kinds=analog-transmission`, by source or frequency. Admission is
   non-blocking and counted like decoder receptions, with one per-decoder
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
@@ -4427,16 +4554,28 @@ ready, each closed transmission is also stored as an `analog-transmission`
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
   level samples; null before the first one. Every open is followed by exactly
   one closed event, also on shutdown.
-- `tone` (WG2): `{ ctcssHz, dtmf }`, on closed events only (always both keys;
-  absent on open events). `ctcssHz` is one of the 50 standard CTCSS tones
+- `tone` (WG2): `{ ctcssHz, dtmf, dcs }`, on closed events only (always all
+  three keys from WG6 cores; `dcs` is absent from older cores; absent on open
+  events). `ctcssHz` is one of the 50 standard CTCSS tones
   (67.0–254.1 Hz) heard through the transmission, null when none qualified or
   the transmission was shorter than 750 ms. `dtmf` is the DTMF symbols
   (`0-9`, `*`, `#`, `A-D`) in order, at most 32, each held at least 40 ms
   within the standard twist (−8 to +4 dB); null when none. Detection runs on
   the demodulated audio (decimated to 8 kHz) only while a transmission is
-  open; it is always on and has no config key. DCS is not detected. Tones need a
+  open; it is always on and has no config key. Tones need a
   demodulated audio rate of at least 8 kHz; below that `tone` is
-  `{ ctcssHz: null, dtmf: null }`.
+  `{ ctcssHz: null, dtmf: null, dcs: null }`.
+  `dcs` (WG6) is `{ code, polarity }` or null: `code` is three octal digits of
+  the 104-code standard table, `polarity` `normal` or `inverted`. DCS is
+  134.4 bit/s sub-audible data in 23-bit Golay(23,12) words; a code is
+  reported only after at least 3 consecutive identical valid words and only for
+  transmissions with at least 0.75 s of audio, and an ambiguous stream is null
+  (the detector never guesses). Polarity is as received through WaveKit's FM
+  demodulator. Every code's inverted word is a rotation of exactly one other
+  code's word (023N is the same bit stream as 047I, 025N as 244I, 026N as 464I,
+  754N as 116I), so the bit stream alone cannot tell a code from its twin:
+  receivers whose discriminator polarity differs from WaveKit's see the twin.
+  The twin is never sent; derive it, or search either spelling.
 
 #### digital-voice:call
 

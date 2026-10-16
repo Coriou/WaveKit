@@ -1,6 +1,7 @@
 # Web gaps 6 tasks (WG6)
 
-Status: frozen; lanes K, DO, DCS, U and CE work in parallel. See [requirements](requirements.md)
+Status: lanes K, DO, DCS, U and CE merged; Main wiring (MA.1) and docs (MA.2) done; the
+checkpoint (MA.3) and E2 are open. See [requirements](requirements.md)
 and [design](design.md). Lanes work against the frozen contract and touch only their own
 paths; Main (MA.\*) owns the composition files (`src/index.ts`, `src/api/server.ts`, barrels
 including `src/core/bandplans/index.ts`, `src/config.ts`, `config/*`), the frozen contract files
@@ -21,66 +22,66 @@ the `config-export.ts` constants.
 
 ## Lane K: decoded elsewhere and hit duration
 
-- [ ] K.1 `plan/decoded-elsewhere.ts` (trust rule, clipping, merge, bounds) and its use in
+- [x] K.1 `plan/decoded-elsewhere.ts` (trust rule, clipping, merge, bounds) and its use in
       `planJob` / `previewPlan` / normalisation; issues; micro-benchmark.
   - _Requirements: 1.1–1.8_
   - **Property 1: Decoded elsewhere is inert without views or flag**, **Property 2: Trust
     rule**, **Property 3: Merge shape**, **Property 4: Skip excludes**
-- [ ] K.2 `JobHits` `lastObservationId` / `lastDurationMs` and `ended()`; hits route schema; job
+- [x] K.2 `JobHits` `lastObservationId` / `lastDurationMs` and `ended()`; hits route schema; job
       spec request schema accepts `skipDecodedElsewhere`.
   - _Requirements: 1.6, 2.1–2.3_
   - **Property 5: Hit duration**
 
 ## Lane DO: decoder option schemas
 
-- [ ] DO.1 One schema and descriptor list per built-in in `src/decoders/options/`; the
+- [x] DO.1 One schema and descriptor list per built-in in `src/decoders/options/`; the
       adapter-read coverage test; real-config validation test.
   - _Requirements: 3.1, 3.4, 3.6_
   - **Property 6: Option schemas accept real configs**
-- [ ] DO.2 Validation at create in the manager (issues cached, one warn), `optionIssues` on the
+- [x] DO.2 Validation at create in the manager (issues cached, one warn), `optionIssues` on the
       status, serializer and response schemas; `options` on `GET /api/decoders/types`.
   - _Requirements: 3.2, 3.3, 3.5_
   - **Property 7: Issue bounds and secrecy**
 
 ## Lane DCS: Digital-Coded Squelch
 
-- [ ] DCS.1 `audio-tones/dcs.ts` detector, synthetic encoder and corpora; benchmark;
+- [x] DCS.1 `audio-tones/dcs.ts` detector, synthetic encoder and corpora; benchmark;
       false-alarm measurement.
   - _Requirements: 4.1–4.3, 4.5, 4.8, 4.9_
   - **Property 8: DCS round trip**, **Property 9: DCS never guesses**
-- [ ] DCS.2 Tone detector and `finishTone` integration; Activity row (validation, summary field,
+- [x] DCS.2 Tone detector and `finishTone` integration; Activity row (validation, summary field,
       FTS, twin); golden rows for the growth bound.
   - _Requirements: 4.4, 4.6, 4.7, 4.10_
   - **Property 10: Tone path unchanged**
 
 ## Lane U: band-plan URL import and update check
 
-- [ ] U.1 `src/core/bandplan-url/fetch.ts`: allowlist, DNS check and pinned connect, no
+- [x] U.1 `src/core/bandplan-url/fetch.ts`: allowlist, DNS check and pinned connect, no
       redirects, status, encoding, media type, size and time caps, one in flight.
   - _Requirements: 5.2–5.4_
   - **Property 11: URL refusal**, **Property 12: Fetch bounds**
-- [ ] U.2 Service `previewImportUrl`, URL-bound digest, `sourceUrl` provenance, capabilities;
+- [x] U.2 Service `previewImportUrl`, URL-bound digest, `sourceUrl` provenance, capabilities;
       routes (protected only) and the commit key.
   - _Requirements: 5.1, 5.4–5.6_
-- [ ] U.3 `import/update-diff.ts` and `checkImportUpdate`; route.
+- [x] U.3 `import/update-diff.ts` and `checkImportUpdate`; route.
   - _Requirements: 6.1–6.3_
   - **Property 13: Update diff**
 
 ## Lane CE: config export and sample-rate presets
 
-- [ ] CE.1 `src/core/config-export/` redaction walk and YAML; every-secret fixture; route plugin.
+- [x] CE.1 `src/core/config-export/` redaction walk and YAML; every-secret fixture; route plugin.
   - _Requirements: 7.1–7.5_
   - **Property 14: No secret in export**
-- [ ] CE.2 `sampleRatePresets` on receiver capabilities (schemas, bounds, tests).
+- [x] CE.2 `sampleRatePresets` on receiver capabilities (schemas, bounds, tests).
   - _Requirements: 8.1, 8.2_
 
 ## Main
 
-- [ ] MA.1 Merge the lanes; scanner-service wiring (coverage view, `ScanJob.decodedElsewhere`,
+- [x] MA.1 Merge the lanes; scanner-service wiring (coverage view, `ScanJob.decodedElsewhere`,
       PATCH key, `ended` calls); `src/index.ts` (URL fetcher and hosts, scanner dep, effective
       config); `src/api/server.ts` (config export mount and guard); contract test updates.
   - _Requirements: 9.1, 9.2_
-- [ ] MA.2 Docs (API.md, ROADMAP, coordination note) and the CLI grep. (The band-plans 6.1
+- [x] MA.2 Docs (API.md, ROADMAP, coordination note) and the CLI grep. (The band-plans 6.1
       and receiver-capabilities 1.3 amendments are in the spec commit.)
   - _Requirements: 5.7, 8.2, 9.3_
 - [ ] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.

@@ -1,6 +1,7 @@
 # Web gaps 6 requirements (WG6)
 
-Status: frozen for lanes K, DO, DCS, U and CE. See [design](design.md) and [tasks](tasks.md).
+Status: implemented (lanes K, DO, DCS, U and CE merged, Main wiring done); E2 pending user
+decision, frozen behaviour = recommended. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 

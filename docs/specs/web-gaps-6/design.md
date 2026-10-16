@@ -1,6 +1,7 @@
 # Web gaps 6 design (WG6)
 
-Status: frozen for lanes K, DO, DCS, U and CE. Requirements in [requirements](requirements.md),
+Status: implemented (lanes merged, Main wiring done); E2 pending user decision, frozen
+behaviour = recommended. Requirements in [requirements](requirements.md),
 tasks in [tasks](tasks.md). Background: the scanner ([SCANNER.md](../../SCANNER.md) plan
 preview, WG2 [lockouts](../web-gaps-2/design.md)), WG2 CTCSS/DTMF (the tone path), band
 plans ([band-plans](../band-plans/requirements.md), WG5 [import formats](../web-gaps-5/design.md)),

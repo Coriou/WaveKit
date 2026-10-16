@@ -91,7 +91,9 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    built-in plans of the stack (hidden bands leave it), import commits bind a
    preview digest, a never-persisted legacy store reports `storeId: null`, and a
    `bandplans` WebSocket channel announces changes. WG5 added SDR# XML and Gqrx
-   CSV import. Remaining: CLI and web consumption, URL import, verified packs
+   CSV import. WG6 added import by URL from an allowlisted host (protected
+   mode, SSRF-hardened fetch) and a manual check for update. Remaining: CLI and
+   web consumption, verified packs
    (gated), a general
    settings store with YAML/env/UI provenance (spec pending), and country from
    the station location (gated).
@@ -292,11 +294,12 @@ pending. Coordinate any live receiver/network changes with the hardware session.
       unknown third-party requirements remain explicit. A channelizer cannot
       recover RF bandwidth absent from the capture. Hardware/live acceptance
       and source capability presets remain separate work.
-- [ ] Expose per-tuner gain values and sample-rate presets through core capability
-      discovery. Core already supports gain in tenths dB and gain index, and
-      validates RTL sample-rate ranges; CLI presets are currently client-local.
-      Reuse that foundation, report table provenance/unknown values honestly,
-      and share presets with both clients.
+- [x] Sample-rate presets through core capability discovery (WG6):
+      `sampleRatePresets` on receiver capabilities suggests the CLI's 11 RTL
+      rates on `rtl_tcp` sources (suggestions, not receiver evidence).
+- [ ] Expose per-tuner gain values through core capability discovery. Core
+      already supports gain in tenths dB and gain index; report table
+      provenance/unknown values honestly and share them with both clients.
 - [ ] Decided 2026-10-08: no lossy bit reduction, no lossless-only compression
       (measured 0.68–0.86 at real gains), no decoders on the Pi for now. Details
       and measurements: `docs/RESEARCH-2026-10-08-WIFI-IQ-TRANSPORT.md`.
@@ -380,6 +383,13 @@ without renewal or online-presence claims. See the
 - [x] Device names, kinds and coarse last-seen (WG2, access amendment 4.9–4.12):
       operator labels via `POST /api/access/devices/label`, `lastSeenAt` as a UTC
       hour, at most 768 writes a day.
+- [x] Decoder option schemas, report only (WG6): `optionIssues` on decoder
+      status and option descriptors on `GET /api/decoders/types`; the
+      prerequisite of a decoder `PATCH` (still 501; enforcement is a later
+      decision).
+- [x] Redacted config export (WG6, export half): `GET /api/config/export`,
+      protected mode only, fail-closed redaction. Config import remains open;
+      the redaction defaults (E2) await confirmation.
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
       bounded replay and explicit gaps when history is unavailable.
@@ -526,6 +536,13 @@ open. Missing proof retains ownership rather than admitting a successor.
 - [x] Per-job hit statistics (WG2): hits per discovery, `GET /api/scanner/jobs/:id/hits`,
       `hitStats` on progress and `jobHits` on discovery events; in memory,
       best-effort past 2,000 discoveries or 4,096 credited observations.
+- [x] Decoded elsewhere and last hit duration (WG6): plans and jobs report the
+      ranges running decoders on other sources provably cover
+      (`decodedElsewhere`, fail-closed trust rule), skipped only with
+      `skipDecodedElsewhere`; `lastDurationMs` per job hit. Open: coverage is
+      read at plan time only (no replan on decoder start/stop), and
+      external-input decoders never contribute until their band check proves
+      targets.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
@@ -575,9 +592,11 @@ and status. Shared browser audio and richer controls remain open.
       these controls.
 - [x] Detect CTCSS and DTMF on analog transmissions (WG2): `tone` on closed
       `live-audio:transmission` events and `analog-transmission` Activity rows.
-- [ ] Decode DCS code/polarity; expose tones on live status, saved frequencies and
-      tone squelch (deferred from WG2). Reuse scanner Task 41 channel features; its
-      DCS presence boolean is not a decoded code.
+- [x] Decode DCS code/polarity on closed analog transmissions (WG6): `tone.dcs`
+      on `live-audio:transmission` and Activity rows, searchable under both twin
+      spellings. Synthetic corpora only; real-RF acceptance and Pi CPU are open.
+- [ ] Expose tones on live status, saved frequencies and tone squelch (deferred
+      from WG2).
 - [ ] Emit analog transmission start/end/duration events from squelch with stable
       identity and recording links. Detector tracks and squelch transmissions
       have different boundaries; reconcile them explicitly.
