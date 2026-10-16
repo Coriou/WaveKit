@@ -949,8 +949,12 @@ Condensed + Noto Sans, Tabler-based icons).
   recipe (the empty column of the inventory) come with C. Recipes no board uses yet: `.wk-grip`
   (Immersive keeps its accent resize bar), `.wk-spinner`, `.wk-jump` (Settings keeps its own
   jump-to fade). Glass budget: the Immersive dark views measured 10–11 blurred elements during
-  the migration against the 6 of spec §8; six are Spectrum's marker chips and zoom, the rest are
-  the islands. Make the marker chips solid when Immersive embeds Spectrum, or relax the count?
+  the migration against the 6 of spec §8; six were Spectrum's marker chips and zoom. Canvas v101
+  makes those solid (`--wk-glass-strong`, no blur), which brings every Immersive view to 5
+  (default, drawer, drawer + pane) with nothing nested and nothing on Paper. Pending the owner's
+  confirmation (2026-10-16); the alternative was relaxing the count. Open owner calls from the
+  migration (kit promotions, disabled primary, Decode title, Messages feed material) are listed
+  in the design notes shared in the project.
 - Theme follow-ups: the owner liked the themes (2026-10-11); confirm the Paper waterfall ramp (a / b / c on the Spectrum board) and
   delete the other two; more light grounds later (a cool "Mist"?) only if asked; whether the
   Ink tint should also follow the accent on the Pi image UI; the Map legend's "Aircraft"

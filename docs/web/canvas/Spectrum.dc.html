@@ -44,7 +44,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			</sc-if>
 			<sc-for list="{{markers}}" as="m" hint-placeholder-count="4">
 				<div style="position: absolute; left: {{m.left}}%; top: {{m.top}}px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center">
-					<button class="wk-sig" onPointerDown="{{stop}}" onClick="{{m.pick}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 8px; border-radius: 6px; background: var(--wk-glass); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi); color: var(--wk-text); font-size: 12px; white-space: nowrap; -webkit-backdrop-filter: var(--wk-blur); backdrop-filter: var(--wk-blur)">
+					<button class="wk-sig" onPointerDown="{{stop}}" onClick="{{m.pick}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 8px; border-radius: 6px; background: var(--wk-glass-strong); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi); color: var(--wk-text); font-size: 12px; white-space: nowrap">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 						<span style="font-weight: 700">{{m.label}}</span>
 						<sc-if value="{{m.hasSub}}" hint-placeholder-val="{{true}}"><span style="color: var(--wk-text-3)">{{m.sub}}</span></sc-if>
@@ -57,7 +57,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					<span style="position: absolute; right: 0; top: -17px; font-family: var(--wk-font-head); font-size: 11px; letter-spacing: .1em; color: var(--wk-amber)">SQUELCH</span>
 				</div>
 			</sc-if>
-			<div class="wk-zoom" style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 4px; border-radius: 8px; background: var(--wk-glass); border: 1px solid var(--wk-line-14); box-shadow: inset 0 1px 0 var(--wk-glass-hi); -webkit-backdrop-filter: var(--wk-blur); backdrop-filter: var(--wk-blur)" onPointerDown="{{stop}}">
+			<div class="wk-zoom" style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 4px; border-radius: 8px; background: var(--wk-glass-strong); border: 1px solid var(--wk-line-14); box-shadow: inset 0 1px 0 var(--wk-glass-hi)" onPointerDown="{{stop}}">
 				<button class="wk-icon-btn" data-size="sm" onClick="{{zoomOut}}" aria-label="Zoom out" style="font-size: 16px">−</button>
 				<div style="position: relative; width: 84px; height: 6px; border-radius: 3px; background: var(--wk-line-solid)" aria-hidden="true">
 					<div style="position: absolute; top: 0; bottom: 0; left: {{ovLeft}}%; width: max(3px, {{ovWidth}}%); border-radius: 3px; background: var(--wk-accent)"></div>
