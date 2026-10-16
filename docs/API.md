@@ -488,7 +488,9 @@ in the environment; `WAVEKIT_COUNTRY` sets `station.country`). Every field carri
 `null`. `country` is ISO 3166-1 alpha-2 (uppercase). `effectiveCountry` is the
 configured country or `null`: it is never derived from the coordinates. `region` is
 the existing coarse band region. `HEAD` returns the headers only. Mounted in protected
-and legacy composition under the normal API admission. Not passed to decoders yet.
+and legacy composition under the normal API admission. `lat` and `lon` (when both are
+set) are passed to readsb as `--lat`/`--lon` and are the origin of
+[`GET /api/coverage`](#coverage); no other decoder receives station data.
 
 ```json
 {
@@ -2611,12 +2613,20 @@ One `AprsStation` by its exact key (`callsign:N0CALL-9`). 400
 ### Mesh
 
 Meshtastic node current state (WG2) from the `meshtastic` decoder output. In
-memory only: no position history, telemetry or links, cleared on restart. DTOs
+memory only: no position history, cleared on restart. DTOs
 in `packages/api-types/src/mesh.ts`. Nodes are keyed by the packet's `from`
 (never `to` or the broadcast address). Copies of an already heard
 `(from, id)` packet within 60 s are flood copies: they only raise
 `duplicateCopies`. Nodes unheard for 4 hours expire; at 1,000 nodes the least
 recently heard is evicted. Live updates on the [`mesh` channel](#mesh-channel).
+
+Device telemetry and neighbour links (WG3) are decoded from unique packets only
+(after the `(from, id)` dedupe). TELEMETRY_APP (port 67) `device_metrics` set the
+sending node's `telemetry`; other telemetry variants are recognised and ignored.
+NEIGHBORINFO_APP (port 71) reports replace the sending node's `neighbours` when the
+report's `node_id` equals the packet's `from` (otherwise the packet counts in
+`invalidPackets`). A malformed payload counts in `decodeErrors` and changes nothing.
+Both fields are optional: older cores omit them.
 
 #### GET /api/mesh/nodes
 
@@ -2629,20 +2639,78 @@ the latest valid POSITION, or null), `snrDb`, `rssiDbm` and `hopsAway` of the
 last unique packet (null when unknown), `viaMqtt`, `packetCount` (unique
 packets), `duplicateCopies`, `portnums` (unique packets per port, at most 64
 keys, later ports count under `other`), `lastPortnum`, `decoderId`,
-`firstSeen` and `lastSeen`.
+`firstSeen` and `lastSeen`, and from WG3:
+
+- `telemetry`: `{ batteryPct, powered, voltageV, channelUtilizationPct,
+  airUtilTxPct, uptimeS, at }` from the node's latest device metrics, or null.
+  A `battery_level` above 100 means `powered: true` and `batteryPct: null`; an
+  absent metric is null; `at` is the packet's receive time. Values are reported
+  as sent (no rounding).
+- `neighbours`: `[{ nodeId, snrDb, at }]` from the node's latest NeighborInfo
+  report, sorted by `nodeId`, at most 32. `nodeId` may be a node this receiver
+  has not heard. Entries older than 4 hours are dropped on cleanup (and the node
+  is sent as `mesh:update`).
 
 #### GET /api/mesh/stats
 
 `MeshTrackerStats`: `nodeCount`, `withPosition`, `withName`,
 `packetsProcessed`, `duplicatesDropped`, `invalidPackets`, `decodeErrors`,
 `packetsPerSecond` (60 s average of unique packets), `lastPacketAt`,
-`latestNodeId`, `expiredTotal` and `timestamp`.
+`latestNodeId`, `expiredTotal`, `telemetryPackets` and `neighbourReports`
+(WG3: applied telemetry and NeighborInfo packets) and `timestamp`.
 
 #### GET /api/mesh/nodes/:nodeId
 
 One `MeshNode`; the id matches case-insensitively. 400 `VALIDATION_ERROR` for
 a malformed id; 404 `{ error, code: "MESH_NODE_NOT_FOUND", nodeId }` when the
 node is not tracked.
+
+### Coverage
+
+Receiver coverage per bearing (WG3): the farthest ADS-B and AIS position heard
+in each 1° bearing bucket from the station location (`station.lat`/`station.lon`,
+see [Station](#station)) over the last 24 hours. In memory only: it starts empty
+after a restart. DTOs in `packages/api-types/src/coverage.ts`. Inputs are the
+aircraft and vessel trackers; one aircraft or vessel counts only when its
+position time advances (a new position report), so repeated messages without a
+new position count once.
+
+Range is the haversine distance (R = 6,371,000 m), bearing the initial
+great-circle bearing in degrees true, bucket = floor (bucket `b` covers
+`[b, b + 1)`). Each protocol keeps 24 hourly slots × 360 buckets; a query takes
+the farthest per bearing over the current and previous 23 hours. A position is
+rejected, and counted in `rejected`, as `no-station` (no station location),
+`invalid-position` (non-finite, out of range, or exactly (0, 0)), `stale` (older
+than 60 s when observed) or `too-far` (more than 500 km).
+
+#### GET /api/coverage
+
+Optional `protocol=adsb|ais` filters `protocols`; any other value is 400
+`VALIDATION_ERROR`. `Cache-Control: no-store`.
+
+**Response** (200) `CoverageResponse`: `available`, `reason`, `station`
+(`{ lat, lon }` or null), `windowHours` (24), `bearingStepDeg` (1), `protocols`
+(per protocol: `sectors` — only buckets with data, by bearing, each
+`{ bearingDeg, maxRangeM, lat, lon, at }` — `maxRangeM` over the sectors or
+null, and `accepted`, positions accepted in the window), `rejected` (counts
+since start by reason) and `timestamp`. Without a station location the answer is
+still 200:
+
+```json
+{
+	"available": false,
+	"reason": "no-station-location",
+	"station": null,
+	"windowHours": 24,
+	"bearingStepDeg": 1,
+	"protocols": [],
+	"rejected": { "invalid-position": 0, "too-far": 0, "stale": 0, "no-station": 12 },
+	"timestamp": "2026-10-16T12:00:00.000Z"
+}
+```
+
+Access is the same as the other read routes (`GET /api/vessels`,
+`GET /api/mesh/nodes`).
 
 ## Activity
 
@@ -2680,8 +2748,8 @@ The store holds three kinds:
 
 - `decoder-reception`: decoder output envelopes. Output types `sync`,
   `rates`, `stats`, `status` and `error` are counted as excluded telemetry and
-  are not stored. Provenance on this path is unknown RF: `sourceId` and
-  `frequency` are null.
+  are not stored. Provenance (WG3) names the source and channel frequency
+  when WaveKit knows them; see [Provenance](#provenance).
 - `analog-transmission`: one record per closed
   [`live-audio:transmission`](#live-audiotransmission) of the live
   demodulator. `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
@@ -2736,8 +2804,52 @@ and every other field is on the position allowlist (`source`, `destination`,
 `from` node and decoder only for port 3 (POSITION) with radio and packet
 metadata alone. Every other APRS data type (objects, items, messages, status,
 weather, telemetry), any packet with weather or a message, and every other
-Meshtastic port are always stored. Meshtastic flood copies of other ports
-(telemetry, node info) are still stored.
+Meshtastic port are always stored.
+
+Meshtastic flood copies (WG3): a `meshtastic` reception with the same `from`,
+`id`, `portnum` and payload (`payloadB64`) as a reception queued at most 30 s
+earlier (by `receivedAt`, inclusive) is dropped as `flood-copy`, on every port.
+The check runs after the closed and telemetry checks and before coalescing and
+rate limiting, so a copy takes no admission token and touches no coalescing
+state; copies are not losses and open no ingestion gap. Only queued receptions
+are remembered: a failed or skipped write forgets its entry (a timed-out write
+keeps it), so a later copy can still be stored. `id` 0 or missing, `from`
+missing, a non-integer value, a different payload, a backward clock step or more
+than 30 s apart means "not a copy". A copy dropped while its original was still
+queued is not re-admitted if that write later fails. The memory holds at most
+20,000 live entries (oldest evicted), about 4.4 MB and at most about 5.6 MB.
+The live mesh tracker and `decoder:output` still see every copy.
+
+### Provenance
+
+From WG3 a decoder reception's `provenance` carries `sourceId` and
+`frequency: { hz, basis: "channel", tuningTrust }` when WaveKit can resolve them;
+otherwise both stay null, as before. Provenance comes only from the decoder's
+binding (its configured `sourceId`, or the default source; and its configured
+target frequencies: `frequencies`, `options.frequencies` or `options.frequency`)
+and from a frequency the decoder itself reports in its payload. It is never
+inferred from decoded content or from a protocol constant. A decoder that reads
+its own device (external input, for example readsb with `rtlTcpHost`) has
+`sourceId: null`. `hz` is rounded to an integer in (0, 10^12]; anything else
+means no frequency. `tuningTrust` is `unverified` for every decoder: WaveKit
+does not verify the tuning the decoder hears.
+
+| Output                                                   | `frequency.hz`                                                                        |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `acars` (acarsdec)                                       | payload `frequency` (Hz)                                                              |
+| `vdl2` (dumpvdl2)                                        | payload `frequency` (Hz) when above 0, else the single target                         |
+| `meshtastic` (lora-meshtastic)                           | payload `frequency` (Hz)                                                              |
+| `ship` (AIS)                                             | payload `channel` A → 161,975,000, B → 162,025,000 if present, else the single target |
+| others (readsb, direwolf, multimon-ng, dsd-fme, rtl_433) | the binding's target when it has exactly one, else null                               |
+
+A payload frequency that is missing or invalid falls back to the binding's single
+target. AIS-catcher's output does not carry the channel today, so a dual-channel AIS
+decoder (two targets) gets `frequency: null`. multimon-ng's string `frequency` is
+not used (its unit is not verified). A lookup or provenance that fails never
+loses the reception: it is stored with null provenance. Provenance does not
+change `decodedData`, the presentation, coalescing or admission. Search by
+`sourceIds`, `frequencyMin` and `frequencyMax` now matches decoder receptions
+that carry provenance; rows stored before WG3 keep null provenance.
 
 ### Presentation
 
@@ -2919,6 +3031,25 @@ Cursor failures include `reason`. A query hash ignores `order` and paging, so
 a reconnect must send the same `query` as the cursor. A changed query is
 `query-changed`, not a silent filter change. Delivering a row twice is
 harmless; losing one is not.
+
+Holes (WG3): a retention step can delete rows that are not the oldest (fair-share
+retention removes rows from the largest share). Paging and replay never skip such
+a row silently:
+
+- A page continuation fails with 409 `ACTIVITY_SNAPSHOT_RESET`, `reason:
+  "snapshot-reset"`, when retention opened a hole after the first page was read.
+  Start a new search.
+- A replay (REST `replayCursor` or WebSocket cursor) resets with `cursor-gap`
+  when a hole opened above its position, that is, a row it had not delivered was
+  deleted. A hole only at or below its position is adopted and the replay
+  continues. A live follower at the committed head is never reset by holes.
+- A page or replay started after a reset is not reset again unless a new hole
+  opens. Tokens and cursors issued before WG3 read as "no holes seen". Facets and
+  detail lookups are unaffected; no frame, reason or DTO changed.
+
+Under the `oldest-first` policy no holes open, so these resets do not happen.
+Under cap pressure with several shares, expect more `snapshot-reset` and
+`cursor-gap` than before.
 
 ### WebSocket
 
