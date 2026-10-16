@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -243,6 +243,45 @@ describe("stored group overrides (10.2)", () => {
 		const check = await service.checkImportUpdate?.(id)
 		expect(check?.preview?.previewDigest).toBe(
 			previewDigestFor(check?.fetchedSha256 ?? "", [], URL_A),
+		)
+	})
+
+	it("pre-WG7 state rewritten on disk (no key) reopens and checks with []", async () => {
+		bytes = V1
+		const first = await open()
+		const id = await commitUrl(first.service, [])
+		await first.service.close()
+		const file = join(first.dir, "bandplans", "state.json")
+		const state = JSON.parse(await readFile(file, "utf8")) as {
+			importedPacks: { id: string; provenance: Record<string, unknown> }[]
+		}
+		const stored = state.importedPacks.find(p => p.id === id)
+		if (!stored) throw new Error("pack not persisted")
+		delete stored.provenance["groupOverrides"]
+		await writeFile(file, JSON.stringify(state))
+		expect(await readFile(file, "utf8")).not.toContain("groupOverrides")
+		const second = await open(first.dir)
+		expect("groupOverrides" in provenanceOf(second.service, id)).toBe(false)
+		bytes = V2
+		const check = await second.service.checkImportUpdate?.(id)
+		expect(check?.preview?.previewDigest).toBe(
+			previewDigestFor(check?.fetchedSha256 ?? "", [], URL_A),
+		)
+	})
+
+	it("stored overrides survive a reopen and the update check applies them", async () => {
+		bytes = V1
+		const first = await open()
+		const id = await commitUrl(first.service, [...OVERRIDES_UNSORTED])
+		await first.service.close()
+		const second = await open(first.dir)
+		expect(provenanceOf(second.service, id).groupOverrides).toEqual(
+			OVERRIDES_SORTED,
+		)
+		bytes = V2
+		const check = await second.service.checkImportUpdate?.(id)
+		expect(check?.preview?.previewDigest).toBe(
+			previewDigestFor(check?.fetchedSha256 ?? "", OVERRIDES_SORTED, URL_A),
 		)
 	})
 
