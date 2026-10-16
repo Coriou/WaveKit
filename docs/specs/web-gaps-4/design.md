@@ -298,8 +298,9 @@ required on the query service after lane T merges.
    without throwing and `version` is null or a 1–64 printable string. _Validates 5.5._
 10. **Station precedence.** For any env/yaml/ui/default layer combination and any patch, the
     effective identity equals the precedence model, a pinned field never changes, a rejected
-    patch changes nothing, and the effective lat/lon are both set or both null. _Validates
-    6.1–6.3, 6.6._
+    patch changes nothing, and, for every pair a patch can change (config sets both lat and
+    lon or neither), the effective lat/lon are both set or both null. A config-pinned half
+    pair is reported as-is, unchanged from today. _Validates 6.1–6.3, 6.6._
 11. **Station store.** Any valid layer round-trips through the file; any byte string as the
     file loads as an empty layer or a valid one, never throws, and leaves at most one corrupt
     copy. _Validates 6.4, 6.7._

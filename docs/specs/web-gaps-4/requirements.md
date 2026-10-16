@@ -170,8 +170,10 @@ deployment pins them in YAML or the environment.
 6.1 `PATCH /api/station` shall accept a strict JSON object, at most 4 KiB, with at least one of
 `name`, `lat`, `lon`, `altM`, `callsign`, `country`; a value sets the UI layer (validated like
 the YAML `station` block), null clears it. Otherwise 400 `STATION_UPDATE_INVALID`.
-6.2 `lat` and `lon` shall be set or cleared together (400 otherwise); after a patch the
-effective pair is either both set or both unset.
+6.2 `lat` and `lon` shall be set or cleared together (400 otherwise); after a patch every
+pair a patch can change is either both set or both unset. A config-pinned half pair (YAML or
+env sets only `lat` or only `lon`) is reported as-is, unchanged from today (6.3, 6.11): no
+patch can change it and the UI layer never fills the missing half.
 6.3 Precedence per field: env > yaml > ui > default. A field set by YAML or env is pinned: a
 patch naming it is 409 `STATION_FIELD_PINNED` with `fields`; when either of `lat`/`lon` is
 pinned, both are.

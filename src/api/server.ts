@@ -210,6 +210,7 @@ export interface ApiServerDependencies {
 export class ApiServer {
 	private readonly station: StationIdentity | undefined
 	private readonly stationEstimate: StationEstimateProvider | undefined
+	private readonly stationService: StationService | undefined
 	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
 	private readonly bandPlans: BandPlanService | undefined
@@ -275,6 +276,7 @@ export class ApiServer {
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.station = dependencies.station
 		this.stationEstimate = dependencies.stationEstimate
+		this.stationService = dependencies.stationService
 		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
 		this.bandPlans = dependencies.bandPlans
@@ -1289,8 +1291,19 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		// PATCH mounts with the service and, while STATION_WRITE_REQUIRES_ACCESS, only with
+		// the access controller (protected mode), like the band-plan mutations.
 		if (this.station)
-			await this.app.register(stationRoutes, { station: this.station })
+			await this.app.register(stationRoutes, {
+				station: this.station,
+				...(this.stationService ? { service: this.stationService } : {}),
+				...(this.accessController
+					? {
+							authorizeMutation: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
+			})
 		// Absolute path plugin, mounted without a prefix like the station route
 		if (this.stationEstimate !== undefined)
 			await this.app.register(stationEstimateRoutes, {

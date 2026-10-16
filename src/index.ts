@@ -1,4 +1,3 @@
-import { stationIdentity } from "./config.js"
 /**
  * WaveKit - SDR Stream Processing Framework
  *
@@ -127,6 +126,8 @@ import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
 import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
+import { openStationService } from "./core/station/station-service.js"
+import { STATION_WRITE_REQUIRES_ACCESS } from "./core/station/contract.js"
 import { createStorageReporter } from "./core/storage-report/reporter.js"
 import {
 	activityRetentionFromStats,
@@ -767,6 +768,23 @@ async function main(): Promise<void> {
 		})
 		await bandOverrides.load()
 		checkpoint()
+
+		// WG4 req 6: live station identity (env > yaml > ui > default). Opened before
+		// the decoders so readsb reads its location; coverage follows a location change
+		// once it exists (the API, the only writer, starts later).
+		let applyStationLocation = (
+			_location: { lat: number; lon: number } | null,
+		): { cleared: boolean } => ({ cleared: false })
+		const stationService = await openStationService({
+			config,
+			region: bandRegion.code,
+			stateDir: config.stateDir,
+			logger,
+			writable: protectedMode || !STATION_WRITE_REQUIRES_ACCESS,
+			onLocationChange: location => applyStationLocation(location),
+		})
+		own(12, () => stationService.close())
+		checkpoint()
 		const decoderRegistry = new DecoderRegistry()
 		const decoderManager = new DecoderManager(
 			decoderRegistry,
@@ -838,10 +856,10 @@ async function main(): Promise<void> {
 		)
 		decoderRegistry.register("rtl433", createRtl433Decoder, RTL433_CAPS)
 		// readsb is the only decoder that receives the station location (WG3 req 9.1),
-		// read at each readsb start
+		// read from the station service at each readsb start
 		decoderRegistry.register(
 			"readsb",
-			readsbDecoderFactory(() => config.station),
+			readsbDecoderFactory(() => stationService.location()),
 			READSB_CAPS,
 		)
 		decoderRegistry.register("acarsdec", createAcarsdecDecoder, ACARSDEC_CAPS)
@@ -1140,13 +1158,12 @@ async function main(): Promise<void> {
 		// Step 8d': ADS-B and AIS coverage per bearing from the station (WG3 req 7);
 		// without a station location the route answers available: false.
 		const coverageManager = new CoverageManager({
-			station:
-				config.station.lat !== undefined && config.station.lon !== undefined
-					? { lat: config.station.lat, lon: config.station.lon }
-					: null,
+			station: stationService.location(),
 			aircraft: aircraftTrackingManager.getTracker(),
 			vessels: vesselTrackingManager.getTracker(),
 		})
+		// A PATCH moving the station > STATION_COVERAGE_RESET_M (or clearing it) resets coverage
+		applyStationLocation = location => coverageManager.setStation(location)
 		own(20, () => {
 			coverageManager.stop()
 		})
@@ -1178,8 +1195,7 @@ async function main(): Promise<void> {
 			vessels: () => vesselTrackingManager.getTracker().getAll(),
 			aprs: () => aprsTrackingManager.getTracker().getAll(),
 			mesh: () => meshTrackingManager.getTracker().getAll(),
-			stationConfigured: () =>
-				config.station.lat !== undefined && config.station.lon !== undefined,
+			stationConfigured: () => stationService.location() !== null,
 		})
 
 		// Read-only metadata providers add no source consumers or receiver actions.
@@ -1261,7 +1277,7 @@ async function main(): Promise<void> {
 			stateDir: config.stateDir,
 			context: {
 				region: bandRegion.code,
-				effectiveCountry: config.station.country ?? null,
+				effectiveCountry: stationService.identity().effectiveCountry,
 			},
 			writable: protectedMode,
 			onCommit: event => publishBandPlans?.(event),
@@ -1280,7 +1296,8 @@ async function main(): Promise<void> {
 				bandPlans,
 				...(access ? { access } : {}),
 				activity,
-				station: stationIdentity(config, bandRegion.code),
+				station: stationService.identity(),
+				stationService,
 				regionalRegistry,
 				receiverCapabilitiesProvider,
 				sourceManager,
@@ -1472,6 +1489,15 @@ async function main(): Promise<void> {
 			name: "scanner",
 			handler: scannerPhases.producerSettled,
 			timeout: 5000,
+		})
+
+		// Runs right after the API server stops (LIFO), so no PATCH is in flight
+		shutdown.register({
+			name: "station",
+			handler: async () => {
+				await stationService.close()
+			},
+			timeout: 2000,
 		})
 
 		// First to shutdown: API server (stop accepting new connections)
