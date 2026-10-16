@@ -776,9 +776,13 @@ export function createRecordingInventory(
 		const out: Location[] = []
 		for (const kindDir of SCANNER_RECORDING_KINDS) {
 			const kindPath = childPath(root, kindDir)
-			if (kindPath === null || !(await isRealDir(kindPath))) continue
-			const folder = childPath(kindPath, d)
-			if (folder === null || !(await isRealDir(folder))) continue
+			const folder = kindPath === null ? null : childPath(kindPath, d)
+			if (kindPath === null || folder === null) continue
+			// an unreadable sibling kind must not hide a valid location in the other
+			const ok = await isRealDir(kindPath)
+				.then(async r => r && (await isRealDir(folder)))
+				.catch(() => false)
+			if (!ok) continue
 			const file = childPath(folder, name)
 			const real = childPath(path.join(realRoot, kindDir, d), name)
 			if (file === null || real === null) continue

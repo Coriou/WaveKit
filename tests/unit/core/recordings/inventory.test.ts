@@ -1225,3 +1225,24 @@ describe("recordings inventory open on the real filesystem", () => {
 		expect(await inv.open(id)).toBeNull()
 	})
 })
+
+describe("recordings inventory scanner kinds", () => {
+	it("resolves a dv recording when the analog folder cannot be read", async () => {
+		const fs = new FakeFs()
+			.file("/r/scan/dv/d_x/call.wav", OLD)
+			.dir("/r/scan/analog")
+		const lstat = fs.lstat.bind(fs)
+		fs.lstat = async (p: string) => {
+			if (p === "/r/scan/analog")
+				throw Object.assign(new Error("denied"), { code: "EACCES" })
+			return await lstat(p)
+		}
+		const inventory = fakeInventory(fs)
+		expect(await inventory.resolve("scan:d_x~call.wav")).toBe(
+			"/r/scan/dv/d_x/call.wav",
+		)
+		const opened = await inventory.open("scan:d_x~call.wav")
+		expect(opened?.name).toBe("call.wav")
+		await opened?.handle.close()
+	})
+})
