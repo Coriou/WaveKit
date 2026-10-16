@@ -511,3 +511,151 @@ export interface ActivityTrails {
 	retentionFloor: string | null
 	generatedAt: string
 }
+
+/**
+ * WG5 Activity aggregates (docs/specs/web-gaps-5, requirements 1-3): an automatic band map
+ * (GET /api/activity/bandmap) and a timeline of counts (GET /api/activity/timeline) over
+ * stored rows. Snapshots: no cursor, no paging. Counts are stored rows, not receptions.
+ */
+/** Index rows of the window examined per request, newest first. */
+export const ACTIVITY_AGGREGATES_SCAN_ROWS = 250_000
+
+export const ACTIVITY_BANDMAP_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000
+export const ACTIVITY_BANDMAP_MAX_WINDOW_MS = 72 * 60 * 60 * 1000
+export const ACTIVITY_BANDMAP_DEFAULT_MIN_HZ = 0
+export const ACTIVITY_BANDMAP_DEFAULT_MAX_HZ = 2_000_000_000
+/** `maxHz - minHz` at most. */
+export const ACTIVITY_BANDMAP_MAX_SPAN_HZ = 2_000_000_000
+/** `maxHz` at most. */
+export const ACTIVITY_BANDMAP_MAX_HZ = 100_000_000_000
+export const ACTIVITY_BANDMAP_DEFAULT_BUCKET_HZ = 12_500
+export const ACTIVITY_BANDMAP_MIN_BUCKET_HZ = 1_000
+export const ACTIVITY_BANDMAP_MAX_BUCKET_HZ = 1_000_000
+/** Buckets per response; past it the newest-active buckets are kept. */
+export const ACTIVITY_BANDMAP_MAX_BUCKETS = 1_000
+/** Protocol entries per bucket; the rest are counted in `otherRows`. */
+export const ACTIVITY_BANDMAP_MAX_PROTOCOLS = 8
+export const ACTIVITY_BANDMAP_MAX_TOP_ENTITIES = 3
+
+export const ACTIVITY_TIMELINE_DEFAULT_WINDOW_MS = 60 * 60 * 1000
+export const ACTIVITY_TIMELINE_MAX_WINDOW_MS = 72 * 60 * 60 * 1000
+export const ACTIVITY_TIMELINE_DEFAULT_BUCKET_MS = 60_000
+export const ACTIVITY_TIMELINE_MIN_BUCKET_MS = 10_000
+export const ACTIVITY_TIMELINE_MAX_BUCKET_MS = 3_600_000
+export const ACTIVITY_TIMELINE_MAX_BUCKETS = 1_440
+/** `entityKey` filter values per timeline request. */
+export const ACTIVITY_TIMELINE_MAX_ENTITY_KEYS = 64
+
+/** Bounds that cut an aggregate scan. */
+export type ActivityAggregateTruncation = "scan-rows" | "time-limit"
+export type ActivityBandMapTruncation = ActivityAggregateTruncation | "buckets"
+
+export interface ActivityBandMapQuery {
+	/** ISO; default `to` minus ACTIVITY_BANDMAP_DEFAULT_WINDOW_MS. */
+	producedFrom?: string
+	/** ISO; default now. */
+	producedTo?: string
+	/** Inclusive Hz; default ACTIVITY_BANDMAP_DEFAULT_MIN_HZ. */
+	minHz?: number
+	/** Inclusive Hz; default ACTIVITY_BANDMAP_DEFAULT_MAX_HZ. */
+	maxHz?: number
+	/** Default ACTIVITY_BANDMAP_DEFAULT_BUCKET_HZ. */
+	bucketHz?: number
+	categories?: readonly ActivityCategory[]
+	protocols?: readonly string[]
+}
+
+export interface ActivityBandMapProtocol {
+	/** Group key: the row's protocol, or its kind when the protocol is null. */
+	protocol: string
+	/** Of the group's newest row in the bucket. */
+	category: ActivityCategory
+	rows: number
+	/** Distinct non-null entity keys. */
+	entities: number
+	/** ISO producedAt of the group's newest row in the bucket. */
+	lastAt: string
+}
+
+export interface ActivityBandMapEntity {
+	entityKey: string
+	rows: number
+}
+
+export interface ActivityBandMapBucket {
+	/** `floor(hz / bucketHz) * bucketHz`; the bucket is [startHz, startHz + bucketHz). */
+	startHz: number
+	/** Equals the sum of `protocols[].rows` and `otherRows`. */
+	rows: number
+	/** ISO producedAt of the bucket's newest row. */
+	lastAt: string
+	/** At most ACTIVITY_BANDMAP_MAX_PROTOCOLS, rows descending then protocol ascending. */
+	protocols: readonly ActivityBandMapProtocol[]
+	/** Rows of the groups past the last listed protocol. */
+	otherRows: number
+	/** At most ACTIVITY_BANDMAP_MAX_TOP_ENTITIES, rows descending then entityKey ascending. */
+	topEntities: readonly ActivityBandMapEntity[]
+}
+
+export interface ActivityBandMap {
+	/** The effective window (ISO) and frequency range. */
+	producedFrom: string
+	producedTo: string
+	minHz: number
+	maxHz: number
+	bucketHz: number
+	/** startHz ascending. */
+	buckets: readonly ActivityBandMapBucket[]
+	/** Index rows of the window examined (matched or not). */
+	scannedRows: number
+	/** Rows placed in buckets, before the bucket cap. */
+	countedRows: number
+	/** Matched rows without a frequency (never bucketed). */
+	noFrequencyRows: number
+	/** Rows of the buckets dropped by the bucket cap. */
+	droppedRows: number
+	truncated: boolean
+	/** Which bounds cut the result; empty when truncated is false. */
+	truncation: readonly ActivityBandMapTruncation[]
+	/** ISO: counts are exact for rows produced at or after it (the window start when complete). */
+	coveredFrom: string
+	/** ISO producedAt of the oldest stored row; null when empty. */
+	retentionFloor: string | null
+	generatedAt: string
+}
+
+export interface ActivityTimelineQuery {
+	/** ISO; default `to` minus ACTIVITY_TIMELINE_DEFAULT_WINDOW_MS. */
+	producedFrom?: string
+	/** ISO; default now. */
+	producedTo?: string
+	/** Default ACTIVITY_TIMELINE_DEFAULT_BUCKET_MS. */
+	bucketMs?: number
+	categories?: readonly ActivityCategory[]
+	protocols?: readonly string[]
+	entityKeys?: readonly string[]
+}
+
+export interface ActivityTimelineBucket {
+	/** `floor(ms / bucketMs) * bucketMs` (epoch-aligned). */
+	startMs: number
+	total: number
+	/** Non-zero categories only. */
+	counts: Partial<Record<ActivityCategory, number>>
+}
+
+export interface ActivityTimeline {
+	producedFrom: string
+	producedTo: string
+	bucketMs: number
+	/** Dense and ascending, from the step holding producedFrom to the step holding producedTo. */
+	buckets: readonly ActivityTimelineBucket[]
+	/** Sum of the bucket totals. */
+	totalRows: number
+	scannedRows: number
+	truncated: boolean
+	truncation: readonly ActivityAggregateTruncation[]
+	coveredFrom: string
+	retentionFloor: string | null
+	generatedAt: string
+}

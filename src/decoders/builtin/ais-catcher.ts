@@ -101,6 +101,17 @@ export interface ShipData {
 	messageType: number
 	/** Radio channel the message was heard on (NMEA field 4 or JSON `channel`); absent when unknown. */
 	channel?: "A" | "B"
+	/**
+	 * WG5 (web-gaps-5 req 5.3), type 9 SAR aircraft: altitude in metres 0–4094
+	 * (4094 means 4094 or higher); absent when not available (4095).
+	 */
+	altitudeM?: number | undefined
+	/** WG5, type 21 aid to navigation: ITU-R M.1371 aid type 0–31. */
+	aidType?: number | undefined
+	/** WG5, type 21: virtual aid (no physical aid at the position). */
+	virtualAid?: boolean | undefined
+	/** WG5, type 21: off position; absent when the UTC second is not available (> 59). */
+	offPosition?: boolean | undefined
 }
 
 /**

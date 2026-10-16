@@ -24,6 +24,13 @@ export { defaultActivityWorkerUrl, openActivityStore } from "./store.js"
 export type { OpenActivityStoreOptions } from "./store.js"
 export { isTelemetryOutput, TELEMETRY_OUTPUT_TYPES } from "./telemetry.js"
 export type {
+	ActivityAggregateTruncation,
+	ActivityBandMap,
+	ActivityBandMapBucket,
+	ActivityBandMapEntity,
+	ActivityBandMapProtocol,
+	ActivityBandMapQuery,
+	ActivityBandMapTruncation,
 	ActivityRetentionPolicy,
 	ActivityRetentionShare,
 	ActivityRetentionStats,
@@ -35,6 +42,9 @@ export type {
 	ActivityTrails,
 	ActivityTrailsQuery,
 	ActivityTrailsTruncation,
+	ActivityTimeline,
+	ActivityTimelineBucket,
+	ActivityTimelineQuery,
 	AdmitResult,
 	StoreIdentity,
 } from "./contract.js"

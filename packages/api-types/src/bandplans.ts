@@ -146,6 +146,17 @@ export type BandChannel = z.infer<typeof bandChannelSchema>
 
 // --- Provenance ---
 
+/**
+ * Import file formats. WG5 (web-gaps-5 req 7.1) adds SDR# `BandPlan.xml` and Gqrx
+ * `bandplan.csv`; a server advertises the formats it parses in `capabilities.importFormats`.
+ */
+export const BANDPLAN_IMPORT_FORMATS = [
+	"sdrpp-json",
+	"sdrsharp-xml",
+	"gqrx-csv",
+] as const
+export type BandPlanImportFormat = (typeof BANDPLAN_IMPORT_FORMATS)[number]
+
 export interface BandPlanCitation {
 	readonly title: string
 	readonly url: string
@@ -155,7 +166,8 @@ export const importedProvenanceSchema = z
 		kind: z.literal("imported"),
 		/** Imported data is always "community, unverified"; "verified" needs a registry link. */
 		trust: z.literal("community-unverified"),
-		format: z.literal("sdrpp-json"),
+		/** WG5: the imported file's format; state written before WG5 holds "sdrpp-json". */
+		format: z.enum(BANDPLAN_IMPORT_FORMATS),
 		sourceName: bandPlanTextSchema(128),
 		author: bandPlanTextSchema(80).nullable(),
 		licence: bandPlanTextSchema(80).nullable(),
@@ -567,7 +579,6 @@ export type BandPlanState = z.infer<typeof bandPlanStateSchema>
 
 // --- SDR++ import ---
 
-export const BANDPLAN_IMPORT_FORMATS = ["sdrpp-json"] as const
 export const importGroupOverrideSchema = z
 	.object({ sourceType: z.string().min(0).max(64), group: displayGroupSchema })
 	.strict()
@@ -628,7 +639,7 @@ export interface ImportReport {
 	readonly colourHints: number
 }
 export interface ImportPreview {
-	readonly format: "sdrpp-json"
+	readonly format: BandPlanImportFormat
 	readonly fileName: string
 	readonly bytes: number
 	/** SHA-256 (lowercase hex) of the decoded file bytes; display and provenance only. */

@@ -19,6 +19,16 @@ export interface VesselPosition {
 	at: string
 }
 
+/** WG5 (web-gaps-5 req 5.5): aid-to-navigation fields from the newest type 21 report. */
+export interface VesselAton {
+	/** ITU-R M.1371 aid type 0–31; null when the report lacked it. */
+	aidType: number | null
+	/** Virtual aid (no physical aid at the position). */
+	virtual: boolean | null
+	/** Off position; null when the report's UTC second was not available. */
+	offPosition: boolean | null
+}
+
 export interface VesselState {
 	/** 9 digits, zero-padded. */
 	mmsi: string
@@ -53,6 +63,15 @@ export interface VesselState {
 	lastSeen: string
 	/** Last static or voyage message (5, 19, 24, 21 with a name); null if none. */
 	lastStaticAt: string | null
+	/**
+	 * WG5: radio channel of the newest message that carried one; null before any.
+	 * Optional for older producers; WG5 trackers always set it.
+	 */
+	channel?: "A" | "B" | null
+	/** WG5: set only for class `aton`, from the newest type 21; null otherwise. */
+	aton?: VesselAton | null
+	/** WG5: SAR aircraft altitude in metres (type 9; 4094 means 4094 or higher); null otherwise. */
+	altitudeM?: number | null
 }
 
 export interface VesselTrackerStats {

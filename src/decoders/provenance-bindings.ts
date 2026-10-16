@@ -2,6 +2,7 @@ import type {
 	ActivityDecoderBinding,
 	ActivityProvenanceLookup,
 } from "../core/activity/types.js"
+import type { TunerControlMode, TunerState } from "@wavekit/api-types"
 import type { DecoderStatus } from "./types.js"
 
 /** The DecoderManager surface the provenance index reads (structural, for tests). */
@@ -19,6 +20,40 @@ export interface ProvenanceDecoderSource {
 		id: string,
 	): Pick<DecoderStatus, "sourceId" | "targetFrequenciesHz"> | undefined
 	getDecoder(id: string): { caps: { input: string } } | undefined
+}
+
+/**
+ * WG5 (web-gaps-5 req 6): the tuner fields the trust rule reads. Structural so tests can
+ * fake it; `TunerController` satisfies `ProvenanceTunerSource`.
+ */
+export type ProvenanceTunerState = Pick<
+	TunerState,
+	"frequency" | "sampleRate" | "controlMode" | "unknownFields"
+>
+
+/**
+ * WG5: the tuner surface the provenance index reads. The index seeds a per-source
+ * snapshot with `getState` (which clones, so never on the reception path) and refreshes
+ * it on `state-changed` and `control-mode-changed`.
+ */
+export interface ProvenanceTunerSource {
+	getState(sourceId: string): ProvenanceTunerState | undefined
+	on(
+		event: "state-changed",
+		fn: (sourceId: string, state: ProvenanceTunerState) => void,
+	): unknown
+	on(
+		event: "control-mode-changed",
+		fn: (sourceId: string, mode: TunerControlMode) => void,
+	): unknown
+	off(
+		event: "state-changed",
+		fn: (sourceId: string, state: ProvenanceTunerState) => void,
+	): unknown
+	off(
+		event: "control-mode-changed",
+		fn: (sourceId: string, mode: TunerControlMode) => void,
+	): unknown
 }
 
 interface Entry {

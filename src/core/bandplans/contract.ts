@@ -10,6 +10,7 @@ import type {
 	BandEdit,
 	BandEditField,
 	BandPlanContext,
+	BandPlanImportFormat,
 	BandPlanMutation,
 	BandPlanPack,
 	BandPlanPackView,
@@ -198,6 +199,10 @@ export type SdrppFailureReason =
 	| "empty"
 	| "row-limit"
 	| "too-large"
+	/** WG5: SDR# XML that is not well formed or uses a forbidden construct (DTD, entity, CDATA). */
+	| "xml"
+	/** WG5: a Gqrx CSV document that cannot be read as lines of fields. */
+	| "csv"
 export interface SdrppParseFailure {
 	readonly ok: false
 	readonly code: "BANDPLANS_IMPORT_TOO_LARGE" | "BANDPLANS_IMPORT_INVALID"
@@ -212,6 +217,19 @@ export type ParseSdrppBandPlan = (
 	bytes: Uint8Array,
 	options: SdrppParseOptions,
 ) => SdrppParseResult
+
+/**
+ * WG5 (web-gaps-5 req 7): every import parser has the SDR++ signature and rules: total on
+ * bytes, never throws, size-checked before decoding. `parseSdrSharpBandPlan`
+ * (import/sdrsharp.ts) and `parseGqrxBandPlan` (import/gqrx.ts).
+ */
+export type BandPlanImportParser = ParseSdrppBandPlan
+/** Parsers of the non-SDR++ formats; a format without one is rejected as invalid. */
+export type BandPlanImportParsers = Readonly<
+	Partial<
+		Record<Exclude<BandPlanImportFormat, "sdrpp-json">, BandPlanImportParser>
+	>
+>
 
 // --- Lane D: presets.ts (pure) ---
 

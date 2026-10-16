@@ -19,6 +19,7 @@ import type {
 	BandPlansChangedEventData,
 	DisplayGroup,
 	ImportPreview,
+	BandPlanImportFormat,
 	ImportPreviewRequest,
 	PlanStackEntry,
 	PlanStackEntryView,
@@ -33,6 +34,8 @@ import type {
 import { BandPlansError } from "./contract.js"
 import type {
 	BandPlanDelivery,
+	BandPlanImportParser,
+	BandPlanImportParsers,
 	BandPlanMutationResult,
 	BandPlanService,
 	BandPlanServiceOptions,
@@ -69,6 +72,11 @@ export interface BandPlanServiceDeps {
 	readonly resolveBandPlans: ResolveBandPlans
 	readonly transition: BandPlanTransition
 	readonly parseSdrppBandPlan: ParseSdrppBandPlan
+	/**
+	 * WG5: parsers of the SDR# and Gqrx formats. A format without a parser is
+	 * BANDPLANS_IMPORT_INVALID and is not advertised in `capabilities.importFormats`.
+	 */
+	readonly importParsers?: BandPlanImportParsers
 	readonly builtinPresetsFor: BuiltinPresetsFor
 	readonly presetIssuesFor: PresetIssuesFor
 	readonly presetToJobSpec: PresetToJobSpec
@@ -246,7 +254,9 @@ class BandPlanRuntime implements BandPlanService {
 			context: this.context(),
 			capabilities: {
 				writable: this.options.writable,
-				importFormats: [...BANDPLAN_IMPORT_FORMATS],
+				importFormats: BANDPLAN_IMPORT_FORMATS.filter(
+					format => this.parserFor(format) !== undefined,
+				),
 			},
 			stack: {
 				source: stack.source,
@@ -490,7 +500,14 @@ class BandPlanRuntime implements BandPlanService {
 			? this.deps.presetIssuesFor(preset, region, effectiveIds)
 			: this.deps.presetIssuesFor(preset, region)
 	}
+	private parserFor(
+		format: BandPlanImportFormat,
+	): BandPlanImportParser | undefined {
+		if (format === "sdrpp-json") return this.deps.parseSdrppBandPlan
+		return this.deps.importParsers?.[format]
+	}
 	private decodeAndParse(file: {
+		readonly format: BandPlanImportFormat
 		readonly fileName: string
 		readonly contentBase64: string
 		readonly groupOverrides: ImportPreviewRequest["groupOverrides"]
@@ -504,7 +521,10 @@ class BandPlanRuntime implements BandPlanService {
 				override.group,
 			]),
 		)
-		const result = this.deps.parseSdrppBandPlan(bytes, {
+		const parse = this.parserFor(file.format)
+		if (parse === undefined)
+			throw new BandPlansError("BANDPLANS_IMPORT_INVALID")
+		const result = parse(bytes, {
 			fileName: file.fileName,
 			overrides,
 		})
