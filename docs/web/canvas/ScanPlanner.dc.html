@@ -9,72 +9,34 @@
 <x-dc>
 <helmet>
 <style>
-/* wk-tokens v2 · copy verbatim, never edit per board */
-[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92;--wk-brand:#7becc7;--wk-focus:rgba(var(--wk-ink-rgb),.55);--wk-sel:rgba(var(--wk-accent-rgb),.12);--wk-chip:rgba(var(--wk-ink-rgb),.06)}
-[data-wk-theme="light"]{color-scheme:light;--wk-plot-bg:#f4f0e6;--wk-bg:#f4f0e6;--wk-surface:#fbf8f1;--wk-fill:#ebe5d8;--wk-fill-glass:rgba(251,248,241,.96);--wk-well:rgba(74,58,34,.07);--wk-well-glass:rgba(74,58,34,.05);--wk-glass:rgba(251,248,241,.96);--wk-glass-panel:rgba(251,248,241,.97);--wk-glass-strong:rgba(252,250,245,.985);--wk-glass-fx:saturate(105%);--wk-glass-hi:rgba(255,255,255,0);--wk-shadow:0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10);--wk-shadow-pop:0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12);--wk-shadow-tip:0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12);--wk-shadow-lg:0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13);--wk-shadow-drawer:0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16);--wk-shadow-xl:0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16);--wk-shadow-lift:0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20);--wk-text:#2a241c;--wk-text-soft:#3a3328;--wk-text-2:#4a4235;--wk-text-3:#5a5143;--wk-text-4:#72675a;--wk-text-5:#a39a89;--wk-ink-rgb:42,36,28;--wk-ink-2-rgb:74,66,53;--wk-ink-3-rgb:90,81,67;--wk-knob:#ffffff;--wk-line-solid:#e0d9ca;--wk-track:#8f8573;--wk-accent:#1d6b52;--wk-accent-rgb:29,107,82;--wk-line-rgb:74,58,34;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(252,241,214,.97);--wk-amber-fill:#f6e7c4;--wk-on-amber:#ffffff;--wk-danger:#a8321e;--wk-danger-rgb:214,64,48;--wk-danger-soft:#93291a;--wk-brand:#16735c}
-[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
-[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
-[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
-[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
-[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#225f92;--wk-accent-rgb:34,95,146}
-[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#5f45a8;--wk-accent-rgb:95,69,168}
-[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#9e3370;--wk-accent-rgb:158,51,112}
-[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#2a241c;--wk-accent-rgb:42,36,28}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="ice"]{--wk-plot-bg:#0d1319;--wk-bg:#0d1319;--wk-surface:#131a21;--wk-fill:#1b2833;--wk-fill-glass:rgba(27,40,51,.92);--wk-well:#0d1319;--wk-well-glass:rgba(13,19,25,.6);--wk-glass:rgba(19,26,33,.5);--wk-glass-panel:rgba(19,26,33,.66);--wk-glass-strong:rgba(19,26,33,.92);--wk-text:#f4f6f9;--wk-text-soft:#d9e2ea;--wk-text-2:#bac7d3;--wk-text-3:#8da1b2;--wk-text-4:#778796;--wk-text-5:#54616d;--wk-ink-rgb:244,246,249;--wk-ink-2-rgb:186,199,211;--wk-ink-3-rgb:141,161,178;--wk-knob:#f4f6f9;--wk-line-solid:#25333f;--wk-track:#2f404f;--wk-on-accent:#131a21}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="violet"]{--wk-plot-bg:#141119;--wk-bg:#141119;--wk-surface:#1a1820;--wk-fill:#292432;--wk-fill-glass:rgba(41,36,50,.92);--wk-well:#141119;--wk-well-glass:rgba(20,17,25,.6);--wk-glass:rgba(26,24,32,.5);--wk-glass-panel:rgba(26,24,32,.66);--wk-glass-strong:rgba(26,24,32,.92);--wk-text:#f6f6f9;--wk-text-soft:#e2dfe9;--wk-text-2:#c7c2d2;--wk-text-3:#a199b1;--wk-text-4:#878195;--wk-text-5:#615c6b;--wk-ink-rgb:246,246,249;--wk-ink-2-rgb:199,194,210;--wk-ink-3-rgb:161,153,177;--wk-knob:#f6f6f9;--wk-line-solid:#332e3e;--wk-track:#413a4e;--wk-on-accent:#1a1820}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="coral"]{--wk-plot-bg:#181013;--wk-bg:#181013;--wk-surface:#20161a;--wk-fill:#312128;--wk-fill-glass:rgba(49,33,40,.92);--wk-well:#181013;--wk-well-glass:rgba(24,16,19,.6);--wk-glass:rgba(32,22,26,.5);--wk-glass-panel:rgba(32,22,26,.66);--wk-glass-strong:rgba(32,22,26,.92);--wk-text:#f9f5f6;--wk-text-soft:#e9dde2;--wk-text-2:#d2c0c7;--wk-text-3:#b095a0;--wk-text-4:#947e87;--wk-text-5:#6b5a61;--wk-ink-rgb:249,245,246;--wk-ink-2-rgb:210,192,199;--wk-ink-3-rgb:176,149,160;--wk-knob:#f9f5f6;--wk-line-solid:#3d2b33;--wk-track:#4c3740;--wk-on-accent:#20161a}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
-[data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
-[data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
-[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-</style>
-<style>
-@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
-@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
-@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
-@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#000000}
 body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 .wk-pl{outline:none}
-.wk-pl button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;margin:0;padding:0}
-.wk-pl button:disabled{cursor:default}
-.wk-pl button:focus-visible,.wk-pl [tabindex]:focus-visible{outline:1.5px solid var(--wk-focus);outline-offset:2px}
-.wk-pl [role="group"][tabindex]:focus-visible{outline:none;box-shadow:inset 0 2px 0 var(--wk-focus)}
-.wk-pl .wk-ghost:hover:not(:disabled){background:rgba(var(--wk-accent-rgb),.08);color:var(--wk-text)}
-.wk-pl .wk-chipb{border:1px solid transparent;transition:background .15s,color .15s}
-.wk-pl .wk-chipb[aria-pressed="false"]:hover,.wk-pl .wk-chipb[aria-checked="false"]:hover{background:rgba(var(--wk-ink-rgb),.1) !important}
+/* table cells that open a popover: no kit recipe */
 .wk-pl .wk-cell:hover{background:var(--wk-chip)}
-.wk-pl .wk-row{transition:background .6s ease}
-.wk-pl .wk-row:hover{background:rgba(var(--wk-accent-rgb),.04)}
-.wk-pl .wk-box{border:1px solid rgba(var(--wk-line-rgb),.14);transition:border-color .15s}
-.wk-pl .wk-box:hover{border-color:rgba(var(--wk-line-rgb),.26)}
-.wk-pl .wk-box:focus{border-color:rgba(var(--wk-line-rgb),.3);outline:none}
-.wk-pl .wk-box::placeholder{color:var(--wk-text-4)}
-.wk-pl input{caret-color:var(--wk-accent)}
-.wk-pl ::selection{background:rgba(var(--wk-accent-rgb),.28);color:var(--wk-text)}
-.wk-pl .wk-scroll{scrollbar-width:thin;scrollbar-color:rgba(var(--wk-accent-rgb),.18) transparent}
-.wk-pl .wk-hscroll{scrollbar-width:none}
-.wk-pl .wk-hscroll::-webkit-scrollbar{display:none}
-.wk-pl .wk-th{font-family:'D-DIN Condensed','Noto Sans',sans-serif;font-weight:700;font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--wk-text-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.wk-pl .wk-seg{display:inline-flex;gap:2px;padding:3px;border-radius:6px;background:var(--wk-well);border:1px solid rgba(var(--wk-line-rgb),.08)}
-.wk-pl .wk-seg>button{height:28px;padding:0 10px;border-radius:4px;font-size:12.5px;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;transition:background .15s,color .15s}
-.wk-pl .wk-seg>button[aria-checked="false"]:hover{color:var(--wk-text)}
+/* wk-explore: bordered inline field (.wk-box), line .18 at rest per spec §5 .wk-field row */
+.wk-pl .wk-box{border:1px solid var(--wk-line-18);transition:border-color var(--wk-dur-2)}
+.wk-pl .wk-box:hover{border-color:var(--wk-line-26)}
+.wk-pl .wk-box:focus,.wk-pl .wk-box:focus-visible{border-color:var(--wk-line-30);outline:none}
+.wk-pl .wk-box::placeholder{color:var(--wka-hint)}
+/* column headers: .wk-label data-strong, kept on text-4 and one line */
+.wk-pl .wk-th{color:var(--wk-text-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* amber text action (Discard): no kit variant */
+.wk-pl .wk-amb{color:var(--wk-amber-soft);font-weight:400}
 .wk-pl .wk-amb:hover{background:rgba(var(--wk-amber-rgb),.12)}
-.wk-pl .wk-primary{transition:filter .15s}
-.wk-pl .wk-primary:hover:not(:disabled){filter:brightness(1.08)}
-@keyframes wk-pl-pulse{0%{transform:scale(1);opacity:.7}100%{transform:scale(2.6);opacity:0}}
-.wk-pl .wk-pulse{animation:wk-pl-pulse 1.4s ease-out infinite}
-.wk-pl .wk-new{opacity:0;animation:wk-pl-pulse 1.4s ease-out 2}
-@media (prefers-reduced-motion:reduce){.wk-pl *{transition:none !important}.wk-pl .wk-pulse{animation:none;opacity:.35;transform:scale(1.8)}.wk-pl .wk-new{animation:none}}
+/* live and fresh hit ticks on the ruler ring out with the kit's wk-ping; the live one shows its static ring under reduced motion */
+.wk-pl .wk-pulse{animation:wk-ping 1.4s var(--wk-ease-out) infinite}
+.wk-pl .wk-new{opacity:0;animation:wk-ping 1.4s var(--wk-ease-out) 2}
+@media (prefers-reduced-motion:reduce){.wk-pl .wk-pulse{animation:none;opacity:.35;transform:scale(1.8)}}
 </style>
 </helmet>
-<div class="wk-pl" ref="{{rootRef}}" tabindex="-1" onKeyDown="{{rootKey}}" role="dialog" aria-label="{{dialogLabel}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{rootR}}; overflow: hidden; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); border-right-color: {{rootEdgeR}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); clip-path: {{rootClip}}; color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div class="wk-pl wk-pane" ref="{{rootRef}}" tabindex="-1" onKeyDown="{{rootKey}}" role="dialog" aria-label="{{dialogLabel}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{rootR}}; overflow: hidden; border-right: 1px solid {{rootEdgeR}}; clip-path: {{rootClip}}; font-size: var(--wk-fs-lg)">
+	<dc-import name="Kit" hint-size="0px,0px"></dc-import>
 
 	<header style="flex: none; display: grid; grid-template-columns: {{hdCols}}; grid-template-areas: {{hdAreas}}; align-items: center; column-gap: 12px; row-gap: 8px; padding: {{hdPad}}">
-		<div style="grid-area: title; display: flex; align-items: center; gap: 9px; min-width: 0">
+		<div style="grid-area: title; display: flex; align-items: center; gap: 8px; min-width: 0">
 			<sc-if value="{{isScreen}}" hint-placeholder-val="{{false}}">
-				<button class="wk-ghost" onClick="{{close}}" aria-label="Back to Scanner" title="Back to Scanner · Esc" style="flex: none; height: 36px; margin-left: -8px; padding: 0 10px 0 4px; border-radius: 6px; display: flex; align-items: center; gap: 2px; font-size: 13.5px; font-weight: 700; color: var(--wk-text-2)">
+				<button class="wk-btn" data-variant="ghost" data-size="lg" onClick="{{close}}" aria-label="Back to Scanner" title="Back to Scanner · Esc" style="flex: none; margin-left: -8px; padding: 0 10px 0 4px; gap: 2px">
 					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg>Scanner
 				</button>
 				<span aria-hidden="true" style="flex: none; width: 1px; height: 18px; background: rgba(var(--wk-line-rgb),.16)"></span>
@@ -82,39 +44,39 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			<sc-if value="{{running}}" hint-placeholder-val="{{false}}">
 				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{runC}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>
 			</sc-if>
-			<h2 title="{{title}}" style="margin: 0; font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{title}}</h2>
+			<h2 class="wk-h2" title="{{title}}" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{title}}</h2>
 		</div>
 
 		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
 			<div role="group" aria-label="Presets" class="wk-hscroll" style="grid-area: presets; min-width: 0; display: flex; align-items: center; gap: 6px; overflow-x: auto; -webkit-mask-image: {{chipMask}}; mask-image: {{chipMask}}">
 				<sc-for list="{{presets}}" as="p" hint-placeholder-count="8">
 					<sc-if value="{{p.divider}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="flex: none; width: 1px; height: 18px; margin: 0 4px; background: rgba(var(--wk-line-rgb),.16)"></span></sc-if>
-					<button class="wk-chipb" aria-pressed="{{p.on}}" onClick="{{p.pick}}" title="{{p.title}}" aria-label="{{p.aria}}" style="flex: none; height: 32px; padding: 0 11px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; white-space: nowrap; background: {{p.bg}}; color: {{p.fg}}">
-						<sc-if value="{{p.on}}" hint-placeholder-val="{{false}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left: -2px"><path d="M5 12l5 5l10 -10"></path></svg></sc-if>
-						<sc-if value="{{p.user}}" hint-placeholder-val="{{false}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left: -2px; opacity: .8"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg></sc-if>
+					<button class="wk-chip" aria-pressed="{{p.on}}" onClick="{{p.pick}}" title="{{p.title}}" aria-label="{{p.aria}}" style="flex: none">
+						<sc-if value="{{p.on}}" hint-placeholder-val="{{false}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg></sc-if>
+						<sc-if value="{{p.user}}" hint-placeholder-val="{{false}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: .8"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg></sc-if>
 						{{p.label}}
 					</button>
 				</sc-for>
 			</div>
-			<button class="wk-ghost" onClick="{{openSave}}" disabled="{{saveDisabled}}" aria-expanded="{{saveOpen}}" title="{{saveTitle}}" style="grid-area: save; height: 36px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--wk-text-2); white-space: nowrap; opacity: {{saveOp}}">
+			<button class="wk-btn" data-variant="ghost" data-size="lg" onClick="{{openSave}}" disabled="{{saveDisabled}}" aria-expanded="{{saveOpen}}" title="{{saveTitle}}" style="grid-area: save; padding: 0 10px 0 8px; font-weight: 400">
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4h10l4 4v10a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2"></path><path d="M10 14a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"></path><path d="M14 4v4h-6v-4"></path></svg>{{saveLabel}}
 			</button>
 		</sc-if>
 
 		<sc-if value="{{showHide}}" hint-placeholder-val="{{true}}">
-			<button class="wk-ghost" onClick="{{close}}" aria-label="Hide the plan" title="{{hideTitle}}" style="grid-area: close; height: 36px; padding: 0 8px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: var(--wk-text-2); white-space: nowrap">
+			<button class="wk-btn" data-variant="ghost" data-size="lg" onClick="{{close}}" aria-label="Hide the plan" title="{{hideTitle}}" style="grid-area: close; padding: 0 8px 0 10px; gap: 4px">
 				Hide<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 7l5 5l-5 5M13 7l5 5l-5 5"></path></svg>
 			</button>
 		</sc-if>
 	</header>
 
 	<section aria-label="Ruler" style="flex: none; padding: {{secPad}}">
-		<div ref="{{rulerRef}}" tabindex="0" role="group" aria-label="{{rulerAria}}" onKeyDown="{{rulerKey}}" style="position: relative; display: flex; height: {{rulerH}}px; border-radius: 8px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.12); user-select: none">
+		<div ref="{{rulerRef}}" tabindex="0" role="group" data-wk-region="" aria-label="{{rulerAria}}" onKeyDown="{{rulerKey}}" style="position: relative; display: flex; height: {{rulerH}}px; border-radius: 8px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.12); user-select: none">
 
 			<sc-if value="{{showGutter}}" hint-placeholder-val="{{true}}">
 				<div aria-hidden="true" style="position: relative; flex: none; width: {{gutW}}px; border-right: 1px solid rgba(var(--wk-line-rgb),.08)">
 					<sc-for list="{{gutLabels}}" as="g" hint-placeholder-count="7">
-						<span style="position: absolute; left: 12px; right: 6px; top: {{g.top}}px; height: {{g.h}}px; display: flex; align-items: center; gap: 5px; font-size: {{g.size}}px; font-weight: {{g.weight}}; color: {{g.fg}}; white-space: nowrap">
+						<span style="position: absolute; left: 12px; right: 6px; top: {{g.top}}px; height: {{g.h}}px; display: flex; align-items: center; gap: 4px; font-size: {{g.size}}px; font-weight: {{g.weight}}; color: {{g.fg}}; white-space: nowrap">
 							<sc-if value="{{g.sw}}" hint-placeholder-val="{{true}}"><span style="flex: none; width: 7px; height: 7px; border-radius: 2px; background: {{g.swc}}"></span></sc-if>
 							<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{g.text}}</span>
 						</span>
@@ -126,7 +88,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 
 				<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
 					<sc-for list="{{laneBars}}" as="b" hint-placeholder-count="8">
-						<div title="{{b.title}}" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; box-sizing: border-box; border-radius: 3px; background: {{b.bg}}; box-shadow: inset 3px 0 0 {{b.edge}}; overflow: hidden; display: flex; align-items: center; padding: 0 5px 0 7px; font-size: 10.5px; font-weight: 700; line-height: 1; color: {{b.fg}}; white-space: nowrap">{{b.text}}</div>
+						<div title="{{b.title}}" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; box-sizing: border-box; border-radius: 3px; background: {{b.bg}}; box-shadow: inset 3px 0 0 {{b.edge}}; overflow: hidden; display: flex; align-items: center; padding: 0 5px 0 7px; font-size: 11px; font-weight: 700; line-height: 1; color: {{b.fg}}; white-space: nowrap">{{b.text}}</div>
 					</sc-for>
 					<div aria-hidden="true" style="position: absolute; left: 0; right: 0; top: {{laneLine}}px; height: 1px; background: rgba(var(--wk-line-rgb),.08)"></div>
 					<sc-for list="{{runBars}}" as="b" hint-placeholder-count="2">
@@ -143,7 +105,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</sc-if>
 					<sc-if value="{{hasDrag}}" hint-placeholder-val="{{false}}">
 						<div aria-hidden="true" style="position: absolute; top: 2px; height: {{dragH}}px; left: {{dragL}}px; width: {{dragW}}px; box-sizing: border-box; border: 1px dashed {{dragEdge}}; border-radius: 3px; background: {{dragBg}}; z-index: 3">
-							<span style="position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); padding: 2px 7px; border-radius: 4px; background: var(--wk-glass-strong); font-size: 11.5px; font-weight: 700; color: {{dragEdge}}; white-space: nowrap; font-variant-numeric: tabular-nums">{{dragText}}</span>
+							<span style="position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); padding: 2px 7px; border-radius: 4px; background: var(--wk-glass-strong); font-size: 11px; font-weight: 700; color: {{dragEdge}}; white-space: nowrap; font-variant-numeric: tabular-nums">{{dragText}}</span>
 						</div>
 					</sc-if>
 				</sc-if>
@@ -180,8 +142,8 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 						</button>
 					</sc-for>
 					<sc-if value="{{hasTip}}" hint-placeholder-val="{{false}}">
-						<div role="tooltip" style="position: absolute; top: {{tipTop}}px; left: {{tipLeft}}px; transform: translateX({{tipShift}}); z-index: 6; box-sizing: border-box; min-width: 180px; max-width: 300px; padding: 8px 12px 9px; border-radius: 10px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); backdrop-filter: blur(22px) var(--wk-glass-fx); display: flex; flex-direction: column; gap: 2px; pointer-events: none">
-							<span style="font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{tipFreq}} <span style="font-size: 12px; font-weight: 400; color: var(--wk-text-3)">MHz</span></span>
+						<div role="tooltip" class="wk-tip" style="position: absolute; top: {{tipTop}}px; left: {{tipLeft}}px; transform: translateX({{tipShift}}); z-index: 6; box-sizing: border-box; min-width: 180px; max-width: 300px; white-space: normal; display: flex; flex-direction: column; gap: 2px">
+							<span style="font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{tipFreq}} <span style="font-size: 12px; font-weight: 400; color: var(--wk-text-3)">MHz</span></span>
 							<span style="display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: {{tipColor}}">
 								<sc-if value="{{tipDecoded}}" hint-placeholder-val="{{true}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg></sc-if>{{tipLabel}}
 							</span>
@@ -192,7 +154,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</sc-if>
 
 				<sc-for list="{{tags}}" as="t" hint-placeholder-count="2">
-					<span aria-hidden="true" title="{{t.title}}" style="position: absolute; top: {{t.top}}px; left: {{t.left}}px; height: 18px; min-width: 18px; box-sizing: border-box; padding: 0 5px; border-radius: 4px; display: grid; place-items: center; background: {{t.bg}}; color: {{t.fg}}; font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; opacity: {{t.op}}; z-index: 1">{{t.num}}</span>
+					<span aria-hidden="true" title="{{t.title}}" style="position: absolute; top: {{t.top}}px; left: {{t.left}}px; height: 18px; min-width: 18px; box-sizing: border-box; padding: 0 5px; border-radius: 4px; display: grid; place-items: center; background: {{t.bg}}; color: {{t.fg}}; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; opacity: {{t.op}}; z-index: 1">{{t.num}}</span>
 					<sc-if value="{{t.showName}}" hint-placeholder-val="{{true}}">
 						<span aria-hidden="true" style="position: absolute; top: {{t.top}}px; left: {{t.nameLeft}}px; max-width: {{t.nameW}}px; height: 18px; font-size: 12px; font-weight: 700; color: var(--wk-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; line-height: 18px; opacity: {{t.op}}; pointer-events: none; z-index: 1">{{t.name}}</span>
 					</sc-if>
@@ -201,7 +163,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<div style="position: absolute; left: 0; right: 0; top: {{axisTop}}px; height: {{axisH}}px; border-top: 1px solid rgba(var(--wk-line-rgb),.08); cursor: {{axisCursor}}" title="{{axisTitle}}">
 					<sc-for list="{{rTicks}}" as="t" hint-placeholder-count="6">
 						<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: 0; width: 1px; height: 4px; background: rgba(var(--wk-ink-3-rgb),.5)"></span>
-						<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: 4px; transform: translateX({{t.shift}}); font-size: 11.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none">{{t.text}}</span>
+						<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: 4px; transform: translateX({{t.shift}}); font-size: 11px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none">{{t.text}}</span>
 					</sc-for>
 				</div>
 			</div>
@@ -210,7 +172,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
 			<div style="display: flex; align-items: center; gap: 10px; margin-top: 6px">
 				<div role="radiogroup" aria-label="Dragging on the ruler" class="wk-seg" style="flex: none">
-					<sc-for list="{{tools}}" as="t" hint-placeholder-count="2"><button role="radio" aria-checked="{{t.on}}" onClick="{{t.pick}}" title="{{t.title}}" style="background: {{t.bg}}; color: {{t.fg}}">{{t.label}}</button></sc-for>
+					<sc-for list="{{tools}}" as="t" hint-placeholder-count="2"><button role="radio" aria-checked="{{t.on}}" onClick="{{t.pick}}" title="{{t.title}}">{{t.label}}</button></sc-for>
 				</div>
 				<div ref="{{ovRef}}" onPointerDown="{{ovDown}}" onPointerMove="{{ovMove}}" onPointerUp="{{ovUp}}" onPointerCancel="{{ovUp}}" role="slider" tabindex="0" aria-label="Overview, 100 to 900 MHz" title="Overview, 100 to 900 MHz · drag to move the ruler" aria-valuemin="100" aria-valuemax="900" aria-valuenow="{{ovNow}}" aria-valuetext="{{ovText}}" onKeyDown="{{rulerKey}}" style="position: relative; flex: 1; min-width: 60px; height: 18px; border-radius: 4px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.1); cursor: grab; touch-action: none">
 					<sc-for list="{{ovMarks}}" as="m" hint-placeholder-count="2">
@@ -219,9 +181,9 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					<span aria-hidden="true" style="position: absolute; top: 1px; bottom: 1px; left: {{ovL}}%; width: max(6px, {{ovW}}%); border-radius: 3px; background: rgba(var(--wk-ink-rgb),.12); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-rgb),.28)"></span>
 				</div>
 				<div style="flex: none; display: flex; gap: 2px">
-					<button class="wk-ghost" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out · Ctrl + scroll" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
-					<button class="wk-ghost" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in · Ctrl + scroll" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
-					<button class="wk-ghost" onClick="{{zoomFit}}" disabled="{{noFit}}" title="{{fitTitle}}" style="height: 32px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; opacity: {{fitOp}}">Fit</button>
+					<button class="wk-icon-btn" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out · Ctrl + scroll"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
+					<button class="wk-icon-btn" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in · Ctrl + scroll"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+					<button class="wk-btn" data-variant="ghost" onClick="{{zoomFit}}" disabled="{{noFit}}" title="{{fitTitle}}">Fit</button>
 				</div>
 			</div>
 		</sc-if>
@@ -230,75 +192,73 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	<div class="wk-scroll" role="table" aria-label="Ranges" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: {{tablePad}}">
 		<sc-if value="{{showHead}}" hint-placeholder-val="{{true}}">
 			<div role="row" style="display: grid; grid-template-columns: {{gridCols}}; grid-template-areas: {{gridAreas}}; column-gap: 12px; align-items: center; height: 28px; padding: 0 8px; border-bottom: 1px solid rgba(var(--wk-line-rgb),.1)">
-				<span role="columnheader" class="wk-th" style="grid-area: n">#</span>
-				<span role="columnheader" class="wk-th" style="grid-area: name">Name</span>
-				<span role="columnheader" class="wk-th" style="grid-area: edges">Edges <span style="text-transform: none; letter-spacing: .02em">MHz</span></span>
-				<span role="columnheader" class="wk-th" style="grid-area: sp">Channel spacing</span>
-				<span role="columnheader" class="wk-th" style="grid-area: protos">Protocols</span>
-				<span role="columnheader" class="wk-th" style="grid-area: skips">Skips</span>
-				<span role="columnheader" class="wk-th" style="grid-area: act; text-align: right">{{actHead}}</span>
+				<span role="columnheader" class="wk-label wk-th" data-strong="" style="grid-area: n">#</span>
+				<span role="columnheader" class="wk-label wk-th" data-strong="" style="grid-area: name">Name</span>
+				<span role="columnheader" class="wk-label wk-th" data-strong="" style="grid-area: edges">Edges <span style="text-transform: none; letter-spacing: .02em">MHz</span></span>
+				<span role="columnheader" class="wk-label wk-th" data-strong="" style="grid-area: sp">Channel spacing</span>
+				<span role="columnheader" class="wk-label wk-th" data-strong="" style="grid-area: protos">Protocols</span>
+				<span role="columnheader" class="wk-label wk-th" data-strong="" style="grid-area: skips">Skips</span>
+				<span role="columnheader" class="wk-label wk-th" data-strong="" style="grid-area: act; text-align: right">{{actHead}}</span>
 			</div>
 		</sc-if>
 		<sc-if value="{{noRows}}" hint-placeholder-val="{{false}}">
 			<p style="margin: 0; padding: 16px 8px; font-size: 13px; color: var(--wk-text-3)">No ranges yet</p>
 		</sc-if>
 		<sc-for list="{{rows}}" as="r" hint-placeholder-count="2">
-			<div role="row" id="{{r.domId}}" class="wk-row" aria-label="{{r.aria}}" style="display: grid; grid-template-columns: {{gridCols}}; grid-template-areas: {{gridAreas}}; column-gap: 12px; row-gap: 6px; align-items: center; min-height: 44px; padding: {{rowPad}}; border-bottom: 1px solid rgba(var(--wk-line-rgb),.07); background: {{r.bg}}; opacity: {{r.op}}; scroll-margin: 8px">
+			<div role="row" id="{{r.domId}}" class="wk-row" aria-label="{{r.aria}}" style="display: grid; grid-template-columns: {{gridCols}}; grid-template-areas: {{gridAreas}}; column-gap: 12px; row-gap: 6px; min-height: 44px; padding: {{rowPad}}; border-radius: 0; border-bottom: 1px solid rgba(var(--wk-line-rgb),.07); background: {{r.bg}}; opacity: {{r.op}}; transition: background var(--wk-dur-jump) var(--wk-ease-out); scroll-margin: 8px">
 				<span role="cell" style="grid-area: n; display: flex">
-					<span style="height: 20px; min-width: 20px; box-sizing: border-box; padding: 0 5px; border-radius: 4px; display: grid; place-items: center; background: {{r.tagBg}}; color: {{r.tagFg}}; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.num}}</span>
+					<span style="height: 22px; min-width: 22px; box-sizing: border-box; padding: 0 5px; border-radius: 4px; display: grid; place-items: center; background: {{r.tagBg}}; color: {{r.tagFg}}; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.num}}</span>
 				</span>
 				<span role="cell" style="grid-area: name; min-width: 0; display: flex; align-items: center">
 					<sc-if value="{{r.renaming}}" hint-placeholder-val="{{false}}">
-						<input class="wk-box" ref="{{renameRef}}" value="{{renameText}}" onChange="{{onRename}}" onKeyDown="{{renameKey}}" onBlur="{{commitRename}}" aria-label="Range name" spellcheck="false" autocomplete="off" style="width: 100%; min-width: 0; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-weight: 700">
+						<input class="wk-box" ref="{{renameRef}}" value="{{renameText}}" onChange="{{onRename}}" onKeyDown="{{renameKey}}" onBlur="{{commitRename}}" aria-label="Range name" spellcheck="false" autocomplete="off" style="width: 100%; min-width: 0; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px; font-weight: 700">
 					</sc-if>
 					<sc-if value="{{r.notRenaming}}" hint-placeholder-val="{{true}}">
-						<span title="{{r.name}}" onDoubleClick="{{r.rename}}" style="min-width: 0; font-size: 13.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
+						<span title="{{r.name}}" onDoubleClick="{{r.rename}}" style="min-width: 0; font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
 							<sc-if value="{{r.pending}}" hint-placeholder-val="{{false}}"><span role="img" aria-label="Change waiting" title="Change waiting for Apply" style="flex: none; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--wk-amber)"></span></sc-if>
 					</sc-if>
 				</span>
 				<span role="cell" style="grid-area: edges; display: flex; align-items: center; gap: 6px; min-width: 0">
 					<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}">
-						<input class="wk-box" value="{{r.fa}}" onChange="{{r.onA}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, low edge, MHz" title="{{r.err}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-variant-numeric: tabular-nums; border-color: {{r.aEdge}}">
+						<input class="wk-box" value="{{r.fa}}" onChange="{{r.onA}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, low edge, MHz" title="{{r.err}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums; border-color: {{r.aEdge}}">
 						<span aria-hidden="true" style="color: var(--wk-text-3)">–</span>
-						<input class="wk-box" value="{{r.fb}}" onChange="{{r.onB}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, high edge, MHz" title="{{r.err}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-variant-numeric: tabular-nums; border-color: {{r.bEdge}}">
+						<input class="wk-box" value="{{r.fb}}" onChange="{{r.onB}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, high edge, MHz" title="{{r.err}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums; border-color: {{r.bEdge}}">
 					</sc-if>
 					<sc-if value="{{r.readOnly}}" hint-placeholder-val="{{false}}">
-						<span title="Stop to change edges" style="display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-4)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M5 11h14v10h-14z"></path><path d="M8 11v-4a4 4 0 1 1 8 0v4"></path></svg>{{r.edgesText}}</span>
+						<span title="Stop to change edges" style="display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-4)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M5 11h14v10h-14z"></path><path d="M8 11v-4a4 4 0 1 1 8 0v4"></path></svg>{{r.edgesText}}</span>
 					</sc-if>
 				</span>
 				<span role="cell" style="grid-area: sp; display: flex; min-width: 0">
-					<button class="wk-cell" onClick="{{r.openSp}}" disabled="{{r.readOnly}}" aria-haspopup="dialog" aria-label="Channel spacing for {{r.name}}: {{r.spText}}" title="{{r.spTitle}}" style="height: 30px; max-width: 100%; padding: 0 8px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; background: var(--wk-chip); color: var(--wk-text); font-size: 13px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums">
+					<button class="wk-cell" onClick="{{r.openSp}}" disabled="{{r.readOnly}}" aria-haspopup="dialog" aria-label="Channel spacing for {{r.name}}: {{r.spText}}" title="{{r.spTitle}}" style="height: 28px; max-width: 100%; padding: 0 8px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; background: var(--wk-chip); color: var(--wk-text); font-size: 13px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums">
 						<span style="overflow: hidden; text-overflow: ellipsis">{{r.spText}}</span>
 						<sc-if value="{{r.spMine}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" title="Changed from the band plan" style="width: 5px; height: 5px; border-radius: 50%; background: var(--wk-accent)"></span></sc-if>
 						<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6l6 -6"></path></svg></sc-if>
 					</button>
 				</span>
 				<span role="cell" style="grid-area: protos; min-width: 0; display: flex">
-					<button class="wk-cell" onClick="{{r.openProtos}}" disabled="{{r.noEdit}}" aria-haspopup="dialog" aria-label="Protocols for {{r.name}}: {{r.protoAll}}" title="{{r.protoAll}}" style="min-width: 0; max-width: 100%; min-height: 30px; padding: 3px; border-radius: 7px; display: flex; flex-wrap: {{protoWrap}}; align-items: center; gap: 4px; overflow: hidden">
+					<button class="wk-cell" onClick="{{r.openProtos}}" disabled="{{r.noEdit}}" aria-haspopup="dialog" aria-label="Protocols for {{r.name}}: {{r.protoAll}}" title="{{r.protoAll}}" style="min-width: 0; max-width: 100%; min-height: 28px; padding: 3px; border-radius: 6px; display: flex; flex-wrap: {{protoWrap}}; align-items: center; gap: 4px; overflow: hidden">
 						<sc-for list="{{r.protos}}" as="c" hint-placeholder-count="3">
-							<span style="flex: none; height: 24px; padding: 0 8px; border-radius: 5px; display: flex; align-items: center; background: var(--wk-sel); color: var(--wk-accent); font-size: 12.5px; font-weight: 700; white-space: nowrap">{{c.label}}</span>
+							<span style="flex: none; height: 24px; padding: 0 8px; border-radius: 4px; display: flex; align-items: center; background: var(--wk-sel); color: var(--wk-accent); font-size: 12.5px; font-weight: 700; white-space: nowrap">{{c.label}}</span>
 						</sc-for>
-						<sc-if value="{{r.protoMore}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 24px; padding: 0 7px; border-radius: 5px; display: flex; align-items: center; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.protoMoreText}}</span></sc-if>
+						<sc-if value="{{r.protoMore}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 24px; padding: 0 7px; border-radius: 4px; display: flex; align-items: center; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.protoMoreText}}</span></sc-if>
 						<sc-if value="{{r.protoNone}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 24px; padding: 0 6px; display: flex; align-items: center; color: var(--wk-text-3); font-size: 12.5px; white-space: nowrap">{{r.protoNoneText}}</span></sc-if>
 						<sc-if value="{{r.canEdit}}" hint-placeholder-val="{{true}}"><span aria-hidden="true" style="flex: none; width: 24px; height: 24px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></span></sc-if>
 					</button>
 				</span>
 				<span role="cell" style="grid-area: skips; min-width: 0; display: flex">
-					<button class="wk-cell" onClick="{{r.openSkips}}" disabled="{{r.noEdit}}" aria-haspopup="dialog" aria-label="Skips in {{r.name}}: {{r.skipText}}" title="{{r.skipTitle}}" style="min-width: 0; max-width: 100%; height: 30px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: {{r.skipFg}}; white-space: nowrap">
+					<button class="wk-cell" onClick="{{r.openSkips}}" disabled="{{r.noEdit}}" aria-haspopup="dialog" aria-label="Skips in {{r.name}}: {{r.skipText}}" title="{{r.skipTitle}}" style="min-width: 0; max-width: 100%; height: 28px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: {{r.skipFg}}; white-space: nowrap">
 						<sc-if value="{{r.hasSkips}}" hint-placeholder-val="{{true}}"><span aria-hidden="true" style="flex: none; width: 12px; height: 12px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, transparent 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.4)"></span></sc-if>
 						<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.skipText}}</span>
 					</button>
 				</span>
 				<span role="cell" style="grid-area: act; display: flex; justify-content: flex-end">
 					<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}">
-						<button class="wk-ghost" onClick="{{r.openMore}}" aria-haspopup="menu" aria-label="More for {{r.name}}" title="Rename, edit band or remove" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
+						<button class="wk-icon-btn" onClick="{{r.openMore}}" aria-haspopup="menu" aria-label="More for {{r.name}}" title="Rename, edit band or remove" style="color: var(--wk-text-3)">
 							<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>
 						</button>
 					</sc-if>
 					<sc-if value="{{r.readOnly}}" hint-placeholder-val="{{false}}">
-						<button role="switch" aria-checked="{{r.on}}" onClick="{{r.toggle}}" aria-label="Scan {{r.name}}" title="{{r.swTitle}}" style="width: 48px; height: 36px; margin-right: -6px; display: grid; place-items: center; border-radius: 6px">
-							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
-						</button>
+						<button class="wk-switch" role="switch" aria-checked="{{r.on}}" onClick="{{r.toggle}}" aria-label="Scan {{r.name}}" title="{{r.swTitle}}" style="margin-right: -6px; border-radius: 6px"></button>
 					</sc-if>
 				</span>
 			</div>
@@ -306,36 +266,36 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
 			<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 2px 10px; padding: 10px 8px 4px; font-size: 12.5px; color: var(--wk-text-3)">
 				<span title="{{bpTitle}}" style="min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{bpText}}</span>
-				<button class="wk-ghost" onClick="{{editPlan}}" title="Settings › Band plans" style="flex: none; height: 28px; margin-left: -4px; padding: 0 6px; border-radius: 6px; font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)">Edit band plan</button>
+				<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{editPlan}}" title="Settings › Band plans" style="flex: none; margin-left: -4px; padding: 0 6px">Edit band plan</button>
 			</div>
 		</sc-if>
 	</div>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
-		<div role="status" style="position: absolute; left: 50%; bottom: {{toastBottom}}px; transform: translateX(-50%); z-index: 15; max-width: calc(100% - 32px); box-sizing: border-box; min-height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 10px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); font-size: 13px">
+		<div role="status" class="wk-toast" style="position: absolute; left: 50%; bottom: {{toastBottom}}px; transform: translateX(-50%); z-index: 15; max-width: calc(100% - 32px); height: auto; min-height: 44px; display: flex">
 			<span style="flex: 1; min-width: 0; padding: 8px 0; line-height: 1.4">{{toastText}}</span>
-			<sc-if value="{{canUndo}}" hint-placeholder-val="{{false}}"><button onClick="{{undo}}" style="flex: none; height: 30px; padding: 0 12px; border-radius: 6px; background: var(--wk-sel); color: var(--wk-accent); font-weight: 700; font-size: 13px">Undo</button></sc-if>
+			<sc-if value="{{canUndo}}" hint-placeholder-val="{{false}}"><button class="wk-btn" data-variant="tonal" data-size="sm" onClick="{{undo}}" style="flex: none">Undo</button></sc-if>
 		</div>
 	</sc-if>
 
 	<footer style="flex: none; display: {{footDisp}}; flex-wrap: wrap; align-items: center; column-gap: 14px; row-gap: 8px; padding: {{footPad}}; border-top: 1px solid rgba(var(--wk-line-rgb),.1)">
 		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
-			<button class="wk-ghost" onClick="{{openOptions}}" aria-haspopup="dialog" aria-expanded="{{optOpen}}" style="flex: none; height: 40px; padding: 0 10px 0 8px; margin-left: -8px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; color: var(--wk-text-2)">
+			<button class="wk-btn" data-variant="ghost" data-size="lg" onClick="{{openOptions}}" aria-haspopup="dialog" aria-expanded="{{optOpen}}" style="flex: none; padding: 0 10px 0 8px; margin-left: -8px">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h4m4 0h8M4 16h10m4 0h2"></path><path d="M8 6v4M14 14v4"></path></svg>Options
 				<sc-if value="{{optChanged}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" title="Changed from the defaults" style="width: 5px; height: 5px; border-radius: 50%; background: var(--wk-accent)"></span></sc-if>
 			</button>
-			<span role="status" title="{{sumTitle}}" style="order: {{sumOrder}}; flex: {{sumFlex}}; min-width: 0; font-size: 13.5px; font-weight: {{sumWeight}}; color: {{sumC}}; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sumText}}</span>
+			<span role="status" title="{{sumTitle}}" style="order: {{sumOrder}}; flex: {{sumFlex}}; min-width: 0; font-size: 13px; font-weight: {{sumWeight}}; color: {{sumC}}; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sumText}}</span>
 			<sc-if value="{{showConsent}}" hint-placeholder-val="{{true}}">
 				<span title="Takes the Pi receiver until the scan ends · live audio follows the scan" style="flex: none; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--wk-amber); white-space: nowrap">
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 5h4v14h-4zM14 5h4v14h-4z"></path></svg>{{consentText}}
 				</span>
 			</sc-if>
 			<span style="flex: 1 1 0; min-width: 0"></span>
-			<button class="wk-primary" onClick="{{start}}" disabled="{{startDisabled}}" title="{{startTitle}}" style="flex: {{startFlex}}; margin-left: auto; height: 40px; padding: 0 18px; border-radius: 6px; background: {{startBg}}; color: {{startFg}}; font-size: 13.5px; font-weight: 700; white-space: nowrap">{{startText}}</button>
+			<button class="wk-btn" data-variant="primary" data-size="lg" onClick="{{start}}" disabled="{{startDisabled}}" title="{{startTitle}}" style="flex: {{startFlex}}; margin-left: auto">{{startText}}</button>
 		</sc-if>
 
 		<sc-if value="{{runQuiet}}" hint-placeholder-val="{{false}}">
-			<span role="status" title="{{passTitle}}" style="flex: 1; min-width: 0; min-height: 40px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden">
+			<span role="status" title="{{passTitle}}" style="flex: 1; min-width: 0; min-height: 36px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden">
 				<sc-if value="{{runHasWord}}" hint-placeholder-val="{{false}}"><span style="flex: none; font-weight: 700; color: var(--wk-amber)">{{runWord}}</span><span aria-hidden="true" style="flex: none">·</span></sc-if>
 				<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{passText}}</span>
 			</span>
@@ -344,92 +304,90 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	<sc-if value="{{runPending}}" hint-placeholder-val="{{false}}">
 		<div role="region" aria-label="Changes waiting to be applied" style="flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 10px 12px 10px 20px; border-top: 1px solid rgba(var(--wk-amber-rgb),.32); background: var(--wk-amber-glass)">
 			<span aria-hidden="true" style="flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--wk-amber); box-shadow: 0 0 0 3px rgba(var(--wk-amber-rgb),.18)"></span>
-			<span title="Apply re-plans the scan at its next hop" style="flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700; color: var(--wk-amber-soft); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pendTitle}}</span>
-			<button class="wk-amb" onClick="{{discard}}" style="flex: none; height: 36px; padding: 0 12px; border-radius: 6px; color: var(--wk-amber-soft); font-size: 13px">Discard</button>
-			<button onClick="{{applyEdits}}" title="Re-plans at the next hop" style="flex: none; height: 36px; padding: 0 18px; border-radius: 6px; background: var(--wk-amber); color: var(--wk-on-amber); font-size: 13px; font-weight: 700">Apply</button>
+			<span title="Apply re-plans the scan at its next hop" style="flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: var(--wk-amber-soft); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pendTitle}}</span>
+			<button class="wk-btn wk-amb" data-size="lg" onClick="{{discard}}" style="flex: none; padding: 0 12px">Discard</button>
+			<button class="wk-btn" data-variant="amber" data-size="lg" onClick="{{applyEdits}}" title="Re-plans at the next hop" style="flex: none">Apply</button>
 		</div>
 	</sc-if>
 
 	<sc-if value="{{hasPop}}" hint-placeholder-val="{{false}}">
 		<div aria-hidden="true" onPointerDown="{{closePop}}" style="position: absolute; inset: 0; z-index: 20"></div>
-		<div role="dialog" aria-label="{{popLabel}}" class="wk-scroll" style="position: absolute; z-index: 21; left: {{popLeft}}px; top: {{popTop}}; bottom: {{popBottom}}; width: {{popW}}px; max-height: {{popMaxH}}px; overflow-y: auto; box-sizing: border-box; padding: 12px; border-radius: 10px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); backdrop-filter: blur(22px) var(--wk-glass-fx); display: flex; flex-direction: column; gap: 10px">
+		<div role="dialog" aria-label="{{popLabel}}" class="wk-scroll" style="position: absolute; z-index: 21; left: {{popLeft}}px; top: {{popTop}}; bottom: {{popBottom}}; width: {{popW}}px; max-height: {{popMaxH}}px; overflow-y: auto; box-sizing: border-box; padding: 12px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid var(--wk-line-14); box-shadow: var(--wk-e2); display: flex; flex-direction: column; gap: 10px">
 
 			<sc-if value="{{popSp}}" hint-placeholder-val="{{false}}">
-				<span class="wk-th" style="color: var(--wk-text-3)">Channel spacing, kHz</span>
+				<span class="wk-label wk-th" data-strong="" style="color: var(--wk-text-3)">Channel spacing, kHz</span>
 				<div role="group" aria-label="Channel spacing" style="display: flex; flex-wrap: wrap; gap: 6px">
 					<sc-for list="{{spOpts}}" as="o" hint-placeholder-count="5">
-						<button class="wk-chipb" aria-pressed="{{o.on}}" onClick="{{o.pick}}" title="{{o.title}}" style="height: 32px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; background: {{o.bg}}; color: {{o.fg}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{o.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{o.label}}</button>
+						<button class="wk-chip" data-tick="" aria-pressed="{{o.on}}" onClick="{{o.pick}}" title="{{o.title}}">{{o.label}}</button>
 					</sc-for>
 				</div>
 				<div style="display: flex; align-items: center; gap: 6px">
 					<input class="wk-box" value="{{spCustom}}" onChange="{{onSpCustom}}" onKeyDown="{{spCustomKey}}" placeholder="Other, e.g. 5" aria-label="Other channel spacing, kHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 32px; box-sizing: border-box; padding: 0 9px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13px; font-variant-numeric: tabular-nums">
-					<button class="wk-ghost" onClick="{{addSpCustom}}" disabled="{{spCustomBad}}" style="height: 32px; padding: 0 12px; border-radius: 6px; font-size: 13px; font-weight: 700; color: var(--wk-text-2); opacity: {{spCustomOp}}">Add</button>
+					<button class="wk-btn" data-variant="ghost" onClick="{{addSpCustom}}" disabled="{{spCustomBad}}">Add</button>
 				</div>
 				<sc-if value="{{spCanReset}}" hint-placeholder-val="{{false}}">
-					<button class="wk-ghost" onClick="{{spReset}}" style="align-self: flex-start; height: 30px; margin: -2px 0 -4px -6px; padding: 0 8px; border-radius: 6px; font-size: 12.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums">{{spResetText}}</button>
+					<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{spReset}}" style="align-self: flex-start; margin: -2px 0 -4px -6px; padding: 0 8px; font-weight: 400; font-variant-numeric: tabular-nums">{{spResetText}}</button>
 				</sc-if>
 			</sc-if>
 
 			<sc-if value="{{popProtos}}" hint-placeholder-val="{{false}}">
-				<span class="wk-th" style="color: var(--wk-text-3)">Protocols to try</span>
+				<span class="wk-label wk-th" data-strong="" style="color: var(--wk-text-3)">Protocols to try</span>
 				<div role="group" aria-label="Protocols" style="display: flex; flex-wrap: wrap; gap: 6px">
 					<sc-for list="{{protoOpts}}" as="o" hint-placeholder-count="8">
-						<button class="wk-chipb" aria-pressed="{{o.on}}" onClick="{{o.pick}}" title="{{o.title}}" style="height: 30px; padding: 0 10px 0 7px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{o.bg}}; color: {{o.fg}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{o.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{o.label}}</button>
+						<button class="wk-chip" data-size="sm" data-tick="" aria-pressed="{{o.on}}" onClick="{{o.pick}}" title="{{o.title}}">{{o.label}}</button>
 					</sc-for>
 				</div>
 				<sc-if value="{{protoFindOnly}}" hint-placeholder-val="{{false}}"><span style="font-size: 12.5px; color: var(--wk-text-3)">Off while Find signals only is on</span></sc-if>
 			</sc-if>
 
 			<sc-if value="{{popSkips}}" hint-placeholder-val="{{false}}">
-				<span class="wk-th" style="color: var(--wk-text-3)">Skips in {{popName}}</span>
+				<span class="wk-label wk-th" data-strong="" style="color: var(--wk-text-3)">Skips in {{popName}}</span>
 				<sc-if value="{{skipsNone}}" hint-placeholder-val="{{false}}"><span style="font-size: 13px; color: var(--wk-text-3)">None</span></sc-if>
 				<sc-for list="{{skipRows}}" as="x" hint-placeholder-count="1">
 					<div style="display: flex; align-items: center; gap: 6px">
 						<span aria-hidden="true" style="flex: none; width: 12px; height: 12px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, transparent 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.4)"></span>
-						<input class="wk-box" value="{{x.fa}}" onChange="{{x.onA}}" onKeyDown="{{fieldKey}}" disabled="{{x.auto}}" aria-label="Skip, low edge, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 84px; height: 30px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
+						<input class="wk-box" value="{{x.fa}}" onChange="{{x.onA}}" onKeyDown="{{fieldKey}}" disabled="{{x.auto}}" aria-label="Skip, low edge, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 84px; height: 28px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
 						<span aria-hidden="true" style="color: var(--wk-text-3)">–</span>
-						<input class="wk-box" value="{{x.fb}}" onChange="{{x.onB}}" onKeyDown="{{fieldKey}}" disabled="{{x.auto}}" aria-label="Skip, high edge, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 84px; height: 30px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
+						<input class="wk-box" value="{{x.fb}}" onChange="{{x.onB}}" onKeyDown="{{fieldKey}}" disabled="{{x.auto}}" aria-label="Skip, high edge, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 84px; height: 28px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
 						<span title="{{x.title}}" style="flex: 1; min-width: 0; font-size: 12.5px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{x.why}}</span>
-						<button class="wk-ghost" onClick="{{x.remove}}" aria-label="{{x.removeLabel}}" title="{{x.removeLabel}}" style="flex: none; width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+						<button class="wk-icon-btn" data-size="sm" onClick="{{x.remove}}" aria-label="{{x.removeLabel}}" title="{{x.removeLabel}}" style="color: var(--wk-text-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 					</div>
 				</sc-for>
-				<button class="wk-ghost" onClick="{{addSkip}}" title="Or Alt-drag across the ruler" style="align-self: flex-start; height: 30px; margin: 0 0 -4px -6px; padding: 0 9px 0 6px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Skip a part</button>
+				<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{addSkip}}" title="Or Alt-drag across the ruler" style="align-self: flex-start; margin: 0 0 -4px -6px; padding: 0 9px 0 6px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Skip a part</button>
 			</sc-if>
 
 			<sc-if value="{{popMore}}" hint-placeholder-val="{{false}}">
 				<div role="menu" aria-label="{{popName}}" style="display: flex; flex-direction: column; margin: -6px">
-					<button role="menuitem" class="wk-ghost" onClick="{{menuRename}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Rename</button>
-					<sc-if value="{{menuHasBand}}" hint-placeholder-val="{{false}}"><button role="menuitem" class="wk-ghost" onClick="{{menuBand}}" title="{{menuBandTitle}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Edit band</button></sc-if>
-						<button role="menuitem" class="wk-ghost" onClick="{{menuRemove}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; color: var(--wk-danger-soft)">Remove</button>
+					<button role="menuitem" class="wk-option" onClick="{{menuRename}}">Rename</button>
+					<sc-if value="{{menuHasBand}}" hint-placeholder-val="{{false}}"><button role="menuitem" class="wk-option" onClick="{{menuBand}}" title="{{menuBandTitle}}">Edit band</button></sc-if>
+						<button role="menuitem" class="wk-option" onClick="{{menuRemove}}" style="color: var(--wk-danger-soft)">Remove</button>
 				</div>
 			</sc-if>
 
 			<sc-if value="{{popOpts}}" hint-placeholder-val="{{false}}">
 				<sc-for list="{{optSwitches}}" as="o" hint-placeholder-count="3">
 					<div title="{{o.hint}}" style="display: flex; align-items: center; gap: 12px; min-height: 36px">
-						<span id="{{o.id}}" style="flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700">{{o.label}}</span>
-						<button role="switch" aria-checked="{{o.on}}" aria-labelledby="{{o.id}}" onClick="{{o.toggle}}" style="flex: none; width: 48px; height: 36px; margin-right: -6px; display: grid; place-items: center; border-radius: 6px">
-							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{o.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{o.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
-						</button>
+						<span id="{{o.id}}" style="flex: 1; min-width: 0; font-size: 13px; font-weight: 700">{{o.label}}</span>
+						<button class="wk-switch" role="switch" aria-checked="{{o.on}}" aria-labelledby="{{o.id}}" onClick="{{o.toggle}}" style="margin-right: -6px; border-radius: 6px"></button>
 					</div>
 				</sc-for>
 				<div aria-hidden="true" style="height: 1px; background: rgba(var(--wk-line-rgb),.1)"></div>
 				<sc-for list="{{optSegs}}" as="o" hint-placeholder-count="3">
 					<div title="{{o.hint}}" style="display: flex; align-items: center; gap: 12px; min-height: 36px">
-						<span id="{{o.id}}" style="flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700">{{o.label}}</span>
+						<span id="{{o.id}}" style="flex: 1; min-width: 0; font-size: 13px; font-weight: 700">{{o.label}}</span>
 						<div role="radiogroup" aria-labelledby="{{o.id}}" class="wk-seg" style="flex: none">
-							<sc-for list="{{o.opts}}" as="v" hint-placeholder-count="3"><button role="radio" aria-checked="{{v.on}}" onClick="{{v.pick}}" style="background: {{v.bg}}; color: {{v.fg}}">{{v.label}}</button></sc-for>
+							<sc-for list="{{o.opts}}" as="v" hint-placeholder-count="3"><button role="radio" aria-checked="{{v.on}}" onClick="{{v.pick}}">{{v.label}}</button></sc-for>
 						</div>
 					</div>
 				</sc-for>
 			</sc-if>
 
 			<sc-if value="{{popSave}}" hint-placeholder-val="{{false}}">
-				<label for="pl-save-name" class="wk-th" style="color: var(--wk-text-3)">Preset name</label>
+				<label for="pl-save-name" class="wk-label wk-th" data-strong="" style="color: var(--wk-text-3)">Preset name</label>
 				<input id="pl-save-name" ref="{{saveRef}}" class="wk-box" value="{{saveName}}" onChange="{{onSaveName}}" onKeyDown="{{saveKey}}" spellcheck="false" autocomplete="off" style="height: 36px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px">
 				<div style="display: flex; justify-content: flex-end; gap: 6px">
-					<button class="wk-ghost" onClick="{{closePop}}" style="height: 34px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px">Cancel</button>
-					<button class="wk-primary" onClick="{{savePreset}}" disabled="{{saveNameBad}}" style="height: 34px; padding: 0 14px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13px; font-weight: 700; opacity: {{saveNameOp}}">Save</button>
+					<button class="wk-btn" data-variant="ghost" onClick="{{closePop}}" style="padding: 0 10px; font-weight: 400">Cancel</button>
+					<button class="wk-btn" data-variant="primary" onClick="{{savePreset}}" disabled="{{saveNameBad}}">Save</button>
 				</div>
 			</sc-if>
 		</div>
@@ -608,9 +566,8 @@ const spSame = (x, y) => x.length === y.length && x.every(v => y.includes(v));
 const fq = hz => { const s = (hz / 1e6).toFixed(4); return s.endsWith('0') ? s.slice(0, -1) : s; };
 const short = hz => { const m = hz / 1e6; return Number.isInteger(m) ? String(m) : m.toFixed(3).replace(/0+$/, ''); };
 const andText = xs => xs.length < 2 ? xs.join('') : xs.slice(0, -1).join(', ') + ' and ' + xs[xs.length - 1];
-const sw = on => ({ on, track: on ? 'var(--wk-accent)' : 'var(--wk-track)', knob: on ? 18 : 2 });
-const segc = on => ({ on, bg: on ? 'var(--wk-sel)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)' });
-const chipc = on => ({ on, bg: on ? 'var(--wk-sel)' : 'var(--wk-chip)', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-2)', tick: on ? 1 : 0.3 });
+// kit recipes carry the on/off look (.wk-chip aria-pressed, .wk-seg aria-checked, .wk-switch aria-checked)
+const onv = on => ({ on });
 const withTones = ps => ps.includes('fm') && !ps.includes('tones') ? ps.concat(['tones']) : ps;
 const coveredElsewhere = (p, r) => { const o = PROTO[p].only; if (!o) return false; const a = pf(r.fa), b = pf(r.fb), inR = o.filter(f => f >= a - 0.0125 && f <= b + 0.0125); return inR.length > 0 && inR.every(f => r.excl.some(x => x.auto && pf(x.fa) <= f + 0.0125 && pf(x.fb) >= f - 0.0125)); };
 const textW = (t, px) => t.length * px * 0.56 + 2;
@@ -1036,9 +993,9 @@ class Component extends DCLogic {
 	presetVals(plan) {
 		const s = this.state, picked = id => s.ranges.some(r => r.src === id), users = s.userPresets;
 		return users.concat(PRESETS).map((p, i) => {
-			const on = picked(p.id), c = chipc(on);
+			const on = picked(p.id);
 			const range = p.ranges.map(r => mt(r[0]) + '–' + mt(r[1])).join(', ') + ' MHz';
-			return { label: p.user ? p.name : p.chip || p.name, user: !!p.user, on, bg: c.bg, fg: c.fg, divider: i === users.length && i > 0,
+			return { label: p.user ? p.name : p.chip || p.name, user: !!p.user, on, divider: i === users.length && i > 0,
 				title: (p.user ? 'Your preset · ' : '') + p.name + ' · ' + range, aria: p.name + (p.user ? ', your preset' : '') + ', ' + range, pick: () => this.togglePreset(p) };
 		});
 	}
@@ -1053,15 +1010,15 @@ class Component extends DCLogic {
 			let edge = -Infinity;
 			bands.filter(h => h.b > L && h.a < R).forEach(h => {
 				const x0 = Math.max(0, X(h.a)), x1 = Math.min(tw, X(h.b)), w = Math.max(2, x1 - x0), on = picked(h.p.id);
-				const lbl = w >= textW(h.label, 10.5) + 10 ? h.label : h.alt && w >= textW(h.alt, 10.5) + 10 ? h.alt : '';
+				const lbl = w >= textW(h.label, 11) + 10 ? h.label : h.alt && w >= textW(h.alt, 11) + 10 ? h.alt : '';
 				const fits = !!lbl && x0 >= edge;
-				if (fits) edge = x0 + textW(lbl, 10.5) + 12;
+				if (fits) edge = x0 + textW(lbl, 11) + 12;
 				laneBars.push({ top: G.laneTop + li * (G.LH + G.LG), h: G.LH, left: x0, width: w, bg: on ? 'rgba(var(--wk-accent-rgb),.26)' : 'rgba(var(--wk-ink-rgb),.09)', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)', text: fits ? lbl : '',
 					edge: ln.color, title: h.label + ' · ' + bpGroup(ln.id).name + ' · ' + mt(h.a) + '–' + mt(h.b) + ' MHz · click to ' + (on ? 'take it out' : 'add it') });
 			});
 			LANE_SKIPS.filter(b => b.group === ln.id && b.b > L && b.a < R).forEach(b => {
 				const x0 = Math.max(0, X(b.a)), w = Math.max(3, Math.min(tw, X(b.b)) - x0);
-				laneBars.push({ top: G.laneTop + li * (G.LH + G.LG), h: G.LH, left: x0, width: w, bg: 'repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.45) 0 1.5px, transparent 1.5px 4px)', fg: 'var(--wk-text-3)', text: w >= textW(b.name, 10.5) + 10 ? b.name : '',
+				laneBars.push({ top: G.laneTop + li * (G.LH + G.LG), h: G.LH, left: x0, width: w, bg: 'repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.45) 0 1.5px, transparent 1.5px 4px)', fg: 'var(--wk-text-3)', text: w >= textW(b.name, 11) + 10 ? b.name : '',
 					edge: ln.color, title: b.name + ' · ' + mt(b.a) + '–' + mt(b.b) + ' MHz · scans skip it: ' + lc1(b.skip) });
 			});
 		});
@@ -1109,7 +1066,7 @@ class Component extends DCLogic {
 			laneLine: G.lanesEnd + 2,
 			rulerEmpty: !vis, emptyTop: RT, emptyH: G.rangeH,
 			rulerEmptyText: skipTool ? 'Skips go inside a range' : ok.length ? 'Your ranges are outside this view · Fit' : 'Drag here to draw a range, or click a band above',
-			tools: [['add', 'Add', 'Drag on the ruler adds a range · Alt-drag skips'], ['skip', 'Skip', 'Drag across a range skips that part · Alt-drag adds']].map(t => Object.assign(segc(s.tool === t[0]), { label: t[1], title: t[2], pick: () => this.setState({ tool: t[0] }) })),
+			tools: [['add', 'Add', 'Drag on the ruler adds a range · Alt-drag skips'], ['skip', 'Skip', 'Drag across a range skips that part · Alt-drag adds']].map(t => Object.assign(onv(s.tool === t[0]), { label: t[1], title: t[2], pick: () => this.setState({ tool: t[0] }) })),
 			rulerAria: 'Band ruler, ' + fmt(L) + ' to ' + fmt(R) + ' MHz. Drag to add a range, Alt-drag to skip, arrow keys move, plus and minus zoom.',
 			rCursor: g ? (g.alt ? 'cell' : 'col-resize') : skipTool ? 'cell' : 'crosshair',
 			axisCursor: this.rd && this.rd.mode === 'pan' && this.rd.moved ? 'grabbing' : 'grab', axisTitle: 'Drag to move along the band',
@@ -1119,7 +1076,7 @@ class Component extends DCLogic {
 			dragBg: g && g.alt ? 'repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.35) 0 1.5px, transparent 1.5px 4px)' : 'rgba(var(--wk-accent-rgb),.1)',
 			zoomIn: () => this.zoomAt(0.5), zoomOut: () => this.zoomAt(2),
 			zoomFit: () => { const v = ok.length ? this.fitRanges(s.ranges.filter(r => isFinite(pf(r.fa)) && isFinite(pf(r.fb)))) : this.fitBands(); if (v.vL != null) this.setState(v); },
-			noFit: false, fitOp: 1, fitTitle: ok.length ? 'Show every range' : 'Show the band plans',
+			noFit: false, fitTitle: ok.length ? 'Show every range' : 'Show the band plans',
 			ovMarks: ok.filter(i => i.b > OV[0] && i.a < OV[1]).map(i => ({ left: ovP(i.a), width: Math.max(0.3, ovP(i.b) - ovP(i.a)) })),
 			ovL: ovP(L), ovW: Math.max(0.8, ovP(R) - ovP(L)), ovNow: Math.round((L + R) / 2), ovText: fmt(L) + ' to ' + fmt(R) + ' MHz',
 			rangeBars: [], coverBars: [], runSkips: [], segGaps: [], ticks: [], hasTip: false, winOn: false, runChans: [], hasHit: false
@@ -1181,7 +1138,7 @@ class Component extends DCLogic {
 			const span = g.b - g.a, pxPer = g.w / span;
 			rTicks.push({ left: g.x, text: short(g.a), shift: '0' });
 			const endText = short(g.b) + (gi === lay.segs.length - 1 ? ' MHz' : '');
-			const endW = textW(endText, 11.5);
+			const endW = textW(endText, 11);
 			if (g.w > endW + 46) rTicks.push({ left: g.x + g.w, text: endText, shift: '-100%' });
 			const step = [1e5, 2e5, 5e5, 1e6, 2e6, 5e6, 10e6, 20e6, 50e6].find(v => v * pxPer >= 90);
 			if (!step) return;
@@ -1229,7 +1186,7 @@ class Component extends DCLogic {
 	runRows(rr) {
 		const s = this.state, w = rr.w, d = this.runDraft(w), ch = this.runChanges(w), mx = this.protoMax();
 		return rr.lay.rows.map((r, k) => {
-			const on = !d.off[r.name], v = sw(on);
+			const on = !d.off[r.name];
 			const labels = Array.from(new Set((d.protos[r.name] || []).map(plabel))), pc = this.protoChips(labels, mx);
 			const sk = d.excl.filter(x => pf(x.fb) * 1e6 > r.startHz && pf(x.fa) * 1e6 < r.endHz);
 			const names = Array.from(new Set(sk.map(x => x.auto ? x.why : mt(x.fa) + '–' + mt(x.fb))));
@@ -1245,7 +1202,7 @@ class Component extends DCLogic {
 				hasSkips: names.length > 0, skipText: names.length ? names.join(', ') : 'None', skipFg: names.length ? 'var(--wk-text-2)' : 'var(--wk-text-4)',
 				skipTitle: sk.length ? sk.map(x => x.fa + '–' + x.fb + ' MHz · ' + xWhy(x)).join('\n') : 'Skip a part',
 				openSkips: e => this.openPop('skips', r.name, e, 400),
-				on, track: v.track, knob: v.knob, swTitle: on ? 'Take it out of the scan' : 'Scan it again',
+				on, swTitle: on ? 'Take it out of the scan' : 'Scan it again',
 				toggle: () => this.editRun(w, nd => { nd.off[r.name] = on; })
 			};
 		});
@@ -1262,7 +1219,7 @@ class Component extends DCLogic {
 			const elsewhere = q => !!PROTO[q].only && inR(q).every(f => d.excl.some(x => x.auto && pf(x.fa) <= f + 0.0125 && pf(x.fb) >= f - 0.0125));
 			const list = PORDER.filter(q => this.vis(q, st) && (!PROTO[q].only || inR(q).length > 0) && !elsewhere(q));
 			return Object.assign(base, { popProtos: true, popLabel: 'Protocols for ' + r.name, protoFindOnly: false,
-				protoOpts: list.map(q => { const on = cur.includes(q); return Object.assign(chipc(on), { label: PROTO[q].label, title: PROTO[q].title || '', pick: () => this.editRun(w, nd => { nd.protos[r.name] = on ? cur.filter(x => x !== q) : cur.concat([q]); }) }); }) });
+				protoOpts: list.map(q => { const on = cur.includes(q); return Object.assign(onv(on), { label: PROTO[q].label, title: PROTO[q].title || '', pick: () => this.editRun(w, nd => { nd.protos[r.name] = on ? cur.filter(x => x !== q) : cur.concat([q]); }) }); }) });
 		}
 		if (p.kind === 'skips') {
 			const inR = x => pf(x.fb) > a && pf(x.fa) < b, mine = d.excl.filter(inR);
@@ -1295,14 +1252,14 @@ class Component extends DCLogic {
 					['pl-o-find', 'Find signals only', 'Lists what transmits without trying a decoder · fastest', 'findOnly'],
 					['pl-o-rec', 'Record calls', 'Decoded calls go to Activity like any other', 'rec']
 				].filter(o => !(o[3] === 'hold' && plan.oneHop)).map(o => {
-					const cur = o[3] === 'follow' ? fOn : !!s[o[3]], v = sw(cur);
-					return { id: o[0], label: o[1], hint: o[2], on: v.on, track: v.track, knob: v.knob, toggle: () => this.setState({ [o[3]]: !cur }) };
+					const cur = o[3] === 'follow' ? fOn : !!s[o[3]];
+					return { id: o[0], label: o[1], hint: o[2], on: cur, toggle: () => this.setState({ [o[3]]: !cur }) };
 				}),
 				optSegs: [
 					['pl-o-stop', 'Stop after', 'Ends the scan on its own', 'stopAfter', STOPS],
 					['pl-o-dwell', 'Time per hop', 'How long each hop listens · for every range', 'dwell', DWELL_OPTS],
 					['pl-o-sens', 'Sensitivity', 'Higher finds weaker signals, and more false ones · for every range', 'sens', SENS]
-				].map(o => ({ id: o[0], label: o[1], hint: o[2], opts: o[4].map(v => Object.assign(segc(s[o[3]] === v[0]), { label: v[1], pick: () => this.setState({ [o[3]]: v[0] }) })) }))
+				].map(o => ({ id: o[0], label: o[1], hint: o[2], opts: o[4].map(v => Object.assign(onv(s[o[3]] === v[0]), { label: v[1], pick: () => this.setState({ [o[3]]: v[0] }) })) }))
 			});
 		}
 		if (p.kind === 'save') {
@@ -1315,7 +1272,7 @@ class Component extends DCLogic {
 				this.toast('Saved “' + name + '” · first in the presets');
 			};
 			return Object.assign(base, { popSave: true, popLabel: 'Save as preset', saveName: s.saveName, saveRef: this.saveRef, onSaveName: e => this.setState({ saveName: e.target.value }),
-				saveKey: e => { e.stopPropagation(); if (e.key === 'Enter') save(); if (e.key === 'Escape') this.setState({ pop: null }); }, savePreset: save, saveNameBad: !name, saveNameOp: name ? 1 : 0.45 });
+				saveKey: e => { e.stopPropagation(); if (e.key === 'Enter') save(); if (e.key === 'Escape') this.setState({ pop: null }); }, savePreset: save, saveNameBad: !name });
 		}
 		if (!r || !i) return none;
 		if (p.kind === 'sp') {
@@ -1325,10 +1282,10 @@ class Component extends DCLogic {
 			const cv = pf(s.spCustom), bad = !(cv >= 0.5 && cv <= 500);
 			const add = () => { if (bad) return; const hz = Math.round(cv * 1000); tog(cur.includes(hz) ? -1 : hz); this.setState({ spCustom: '' }); };
 			return Object.assign(base, { popSp: true, popLabel: 'Channel spacing for ' + r.name,
-				spOpts: SP_OPTS.concat(customs).map(v => Object.assign(chipc(cur.includes(v)), { label: kHz(v), title: kHz(v) + ' kHz channels', pick: () => tog(v) }))
-					.concat([Object.assign(chipc(cur.includes(0)), { label: 'Any', title: 'No channel grid · for wideband devices', pick: () => tog(0) })]),
+				spOpts: SP_OPTS.concat(customs).map(v => Object.assign(onv(cur.includes(v)), { label: kHz(v), title: kHz(v) + ' kHz channels', pick: () => tog(v) }))
+					.concat([Object.assign(onv(cur.includes(0)), { label: 'Any', title: 'No channel grid · for wideband devices', pick: () => tog(0) })]),
 				spCustom: s.spCustom, onSpCustom: e => this.setState({ spCustom: e.target.value }), spCustomKey: e => { e.stopPropagation(); if (e.key === 'Enter') add(); if (e.key === 'Escape') this.setState({ pop: null }); },
-				addSpCustom: add, spCustomBad: bad, spCustomOp: bad ? 0.45 : 1,
+				addSpCustom: add, spCustomBad: bad,
 				spCanReset: !!r.sp && !spSame(r.sp, r.spDef), spResetText: 'Use the band plan · ' + spText(r.spDef), spReset: () => this.patchRange(r.id, { sp: null })
 			});
 		}
@@ -1337,7 +1294,7 @@ class Component extends DCLogic {
 			const a = i.a, b = i.b;
 			const list = PORDER.filter(q => this.vis(q, st) && !coveredElsewhere(q, r) && (!PROTO[q].only || PROTO[q].only.some(f => f >= a && f <= b)));
 			return Object.assign(base, { popProtos: true, popLabel: 'Protocols for ' + r.name, protoFindOnly: s.findOnly,
-				protoOpts: list.map(q => { const on = r.protos.includes(q); return Object.assign(chipc(on), { label: lab(q), title: PROTO[q].title || '', pick: () => this.patchRange(r.id, { protos: on ? r.protos.filter(x => x !== q) : r.protos.concat([q]) }) }); })
+				protoOpts: list.map(q => { const on = r.protos.includes(q); return Object.assign(onv(on), { label: lab(q), title: PROTO[q].title || '', pick: () => this.patchRange(r.id, { protos: on ? r.protos.filter(x => x !== q) : r.protos.concat([q]) }) }); })
 			});
 		}
 		if (p.kind === 'skips') {
@@ -1444,7 +1401,7 @@ class Component extends DCLogic {
 			isScreen: scr, showHide: !scr, hideTitle: runningM ? 'Hide the plan · the scan carries on · Esc' : 'Hide the plan · Esc',
 			hdAreas, hdCols, hdPad: narrow ? '10px 10px 8px 14px' : '12px 12px 10px 20px',
 			presets: this.presetVals(plan), chipMask: 'linear-gradient(90deg, #000 calc(100% - 28px), transparent)',
-			saveDisabled: !valid, saveOp: valid ? 1 : 0.45, saveOpen: !!(s.pop && s.pop.kind === 'save'), saveLabel: narrow ? 'Save' : 'Save as preset', saveTitle: 'Save these ranges, spacing, protocols and options as a preset',
+			saveDisabled: !valid, saveOpen: !!(s.pop && s.pop.kind === 'save'), saveLabel: narrow ? 'Save' : 'Save as preset', saveTitle: 'Save these ranges, spacing, protocols and options as a preset',
 			openSave: e => { if (valid) this.openPop('save', null, e, 300); },
 			close,
 			secPad: '0 ' + pad + 'px', rulerH: G.rulerH, showGutter: gutW > 0, gutW, gutLabels, trackPad: narrow ? 6 : 10, trackOverflow: runningM ? 'visible' : 'hidden',
@@ -1470,7 +1427,7 @@ class Component extends DCLogic {
 			sumC: plan.empty ? 'var(--wk-text-3)' : valid ? 'var(--wk-text)' : 'var(--wk-amber)', sumWeight: valid ? 700 : 400, sumFlex: narrow ? '1 0 100%' : '0 1 auto', sumOrder: narrow ? -1 : 0,
 			showConsent: valid, consentText: 'Pauses ' + PAUSES.join(', '),
 			startDisabled: !valid, startTitle: valid ? '' : plan.empty ? 'Pick a preset or drag on the ruler' : 'Fix range ' + plan.bad.num,
-			startBg: valid ? 'var(--wk-accent)' : 'var(--wk-chip)', startFg: valid ? 'var(--wk-on-accent)' : 'var(--wk-text-3)', startFlex: narrow ? '1 0 100%' : 'none',
+			startFlex: narrow ? '1 0 100%' : 'none',
 			start: () => { if (valid) sendScan('start', this.payload(plan, s)); },
 			runQuiet: runningM, runWord, runHasWord: !!runWord, passText, passTitle,
 			runPending: pendN > 0, pendTitle: pendN === 1 ? '1 change waiting' : pendN + ' changes waiting',
