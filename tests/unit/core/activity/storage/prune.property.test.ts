@@ -34,6 +34,8 @@ describe("activity retention", () => {
 	it("moves the prune watermark only forward", async () => {
 		// Feature: event-foundation-batch1, Property 1: prune watermark moves only forward
 		// Validates: Requirements retention
+		// The prefix prune (oldest-first, and age under both policies) never opens a hole;
+		// fair-share hole invariants are in retention-holes.property.test.ts.
 		const maxAgeMs = 200_000
 		const db = await openSqliteFile(":memory:")
 		try {
@@ -293,6 +295,7 @@ describe("activity retention", () => {
 		const store = await openStore({
 			now: () => clock,
 			limits: {
+				retentionPolicy: "oldest-first",
 				batchWindowMs: 0,
 				maxAgeMs: 1_000,
 				globalBurst: 10_000,
@@ -363,6 +366,7 @@ describe("activity retention", () => {
 			db,
 			":memory:",
 			resolveActivityLimits({
+				retentionPolicy: "oldest-first",
 				maxRows,
 				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
 				pruneBatchRows,
@@ -434,6 +438,7 @@ describe("activity retention", () => {
 			db,
 			":memory:",
 			resolveActivityLimits({
+				retentionPolicy: "oldest-first",
 				maxRows,
 				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
 				pruneBatchRows,
@@ -482,6 +487,7 @@ describe("activity retention", () => {
 			db,
 			":memory:",
 			resolveActivityLimits({
+				retentionPolicy: "oldest-first",
 				maxRows,
 				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
 				pruneBatchRows,
@@ -532,6 +538,7 @@ describe("activity retention", () => {
 			db,
 			":memory:",
 			resolveActivityLimits({
+				retentionPolicy: "oldest-first",
 				maxRows: 100_000,
 				maxDbBytes,
 				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
