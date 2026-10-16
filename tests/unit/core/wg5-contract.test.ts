@@ -285,7 +285,12 @@ describe("WG5 contract", () => {
 				ProvenanceTunerState,
 				Pick<
 					Api.TunerState,
-					"frequency" | "sampleRate" | "controlMode" | "unknownFields"
+					| "frequency"
+					| "sampleRate"
+					| "controlMode"
+					| "directSampling"
+					| "unknownFields"
+					| "declaredOnlyFields"
 				>
 			>(true),
 		).toBe(true)
