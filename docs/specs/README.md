@@ -32,6 +32,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-2](web-gaps-2/requirements.md): Activity presentation, APRS and Meshtastic
   trackers, CTCSS/DTMF, AIS checksum, update throttle, call metadata, device labels,
   lockouts skip sweeps, per-job hits (WG2)
+- [web-gaps-3](web-gaps-3/requirements.md): fair-share Activity retention and the hole
+  contract, RF provenance on receptions, Meshtastic flood copies, coverage per bearing,
+  Meshtastic telemetry and neighbours (WG3)
 
 ## The three files
 
