@@ -1,6 +1,8 @@
 // Listen island logic (docs/web/canvas/Listen.dc.html; DESIGN.md "Audio follows tuning", "Squelch UX"). Pure.
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
+import type { PcmFormat } from "./pcm.ts"
+
 /** The squelch bar's scale, as the Listen board. */
 export const LEVEL_MIN_DBFS = -120
 export const LEVEL_MAX_DBFS = -20
@@ -12,12 +14,8 @@ export function levelFraction(dbfs: number | null | undefined): number {
 	return Math.min(1, Math.max(0, f))
 }
 
-/** Absolute stream URL (the core may send a path); null when live audio has none. */
-export function streamUrl(
-	status: LiveAudioStatus | null,
-	base: string,
-): string | null {
-	const raw = status?.wavUrl
+/** A URL from the core (it may send a path) made absolute; null when missing or invalid. */
+function absolute(raw: string | undefined, base: string): string | null {
 	if (!raw) return null
 	try {
 		return new URL(raw, base).toString()
@@ -26,20 +24,40 @@ export function streamUrl(
 	}
 }
 
+/** The live stream as this page plays it: raw PCM (`httpUrl`) and the WAV fallback (`wavUrl`). */
+export interface AudioStreamSource {
+	httpUrl: string | null
+	wavUrl: string | null
+	format: PcmFormat
+	rate: number
+}
+
+/** The stream to play; null while live audio is stopped or has no URL. */
+export function audioSource(
+	status: LiveAudioStatus | null,
+	base: string,
+): AudioStreamSource | null {
+	if (!status?.running) return null
+	const httpUrl = absolute(status.httpUrl, base)
+	const wavUrl = absolute(status.wavUrl, base)
+	if (!httpUrl && !wavUrl) return null
+	return {
+		httpUrl,
+		wavUrl,
+		format: status.config.audioFormat === "f32le" ? "f32le" : "s16le",
+		rate: status.effectiveSampleRate,
+	}
+}
+
 /**
- * When this key changes, the <audio> element reattaches to the stream: a new stream URL, a new
- * sample rate (the core ends the stream on a rate change), the pipeline coming up, or a new tuned
- * frequency (drops the audio the browser buffered for the old one: audio follows tuning).
+ * When this key changes the player reattaches: a new stream URL, format or sample rate (the core ends
+ * the stream on a rate change), or the pipeline coming up. Tuning is not part of it: the core's
+ * stream already follows tuning (audio follows tuning), and a reattach costs the start-up latency.
  * Null means nothing to play.
  */
-export function audioAttachKey(
-	status: LiveAudioStatus | null,
-	tunedHz: number | null,
-	base: string,
-): string | null {
-	const url = streamUrl(status, base)
-	if (!url || !status?.running) return null
-	return `${url}|${status.effectiveSampleRate}|${tunedHz ?? ""}`
+export function audioAttachKey(source: AudioStreamSource | null): string | null {
+	if (!source) return null
+	return `${source.httpUrl ?? ""}|${source.wavUrl ?? ""}|${source.format}|${source.rate}`
 }
 
 /** Squelch the board's way: "Off" (0 opens it), "Auto", or a manual threshold. */

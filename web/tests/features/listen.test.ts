@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest"
 import type { LiveAudioConfig, LiveAudioStatus } from "@wavekit/api-types"
 import {
 	audioAttachKey,
+	audioSource,
 	levelFraction,
 	squelchSetting,
 	squelchThreshold,
-	streamUrl,
 } from "../../src/features/listen/audio.ts"
 
 const BASE = "http://localhost:5173/"
@@ -18,6 +18,7 @@ const status = (
 		running: true,
 		sourceId: "pi",
 		effectiveSampleRate: 16_000,
+		httpUrl: "http://localhost:3102/stream",
 		wavUrl: "http://localhost:3102/stream.wav",
 		clientCount: 0,
 		config: {
@@ -25,6 +26,7 @@ const status = (
 			bandwidth: 12_500,
 			squelch: 0,
 			offsetHz: 0,
+			audioFormat: "s16le",
 			...config,
 		},
 		...over,
@@ -43,47 +45,43 @@ describe("levelFraction", () => {
 })
 
 describe("audio follows tuning", () => {
-	it("resolves the stream URL, relative or absolute", () => {
-		expect(streamUrl(status(), BASE)).toBe("http://localhost:3102/stream.wav")
-		expect(streamUrl(status({ wavUrl: "/stream.wav" }), BASE)).toBe(
-			"http://localhost:5173/stream.wav",
+	it("resolves the stream URLs, relative or absolute", () => {
+		expect(audioSource(status(), BASE)).toEqual({
+			httpUrl: "http://localhost:3102/stream",
+			wavUrl: "http://localhost:3102/stream.wav",
+			format: "s16le",
+			rate: 16_000,
+		})
+		const rel = audioSource(
+			status({ httpUrl: "/stream", wavUrl: "/stream.wav" }),
+			BASE,
 		)
-		expect(streamUrl({ ...status(), wavUrl: "" }, BASE)).toBeNull()
-		expect(streamUrl(null, BASE)).toBeNull()
+		expect(rel?.httpUrl).toBe("http://localhost:5173/stream")
+		expect(rel?.wavUrl).toBe("http://localhost:5173/stream.wav")
+		expect(
+			audioSource(status({ httpUrl: "", wavUrl: "" }), BASE),
+		).toBeNull()
+		expect(audioSource(status({}, { audioFormat: "f32le" }), BASE)?.format).toBe(
+			"f32le",
+		)
 	})
 
 	it("has nothing to attach while live audio is stopped", () => {
-		expect(
-			audioAttachKey(status({ running: false }), 161_150_000, BASE),
-		).toBeNull()
-		expect(audioAttachKey(null, 161_150_000, BASE)).toBeNull()
+		expect(audioSource(status({ running: false }), BASE)).toBeNull()
+		expect(audioAttachKey(audioSource(null, BASE))).toBeNull()
 	})
 
-	it("changes the attach key when the tuning, URL or sample rate changes, not otherwise", () => {
-		const a = audioAttachKey(status(), 161_150_000, BASE)
+	it("reattaches on a new URL, format or sample rate, never on tuning alone", () => {
+		const key = (s: LiveAudioStatus) => audioAttachKey(audioSource(s, BASE))
+		const a = key(status())
 		expect(a).not.toBeNull()
-		expect(
-			audioAttachKey(
-				status({ clientCount: 3 }, { squelch: -60 }),
-				161_150_000,
-				BASE,
-			),
-		).toBe(a)
-		expect(audioAttachKey(status(), 161_175_000, BASE)).not.toBe(a)
-		expect(
-			audioAttachKey(
-				status({ effectiveSampleRate: 48_000 }),
-				161_150_000,
-				BASE,
-			),
-		).not.toBe(a)
-		expect(
-			audioAttachKey(
-				status({ wavUrl: "http://pi:8081/stream.wav" }),
-				161_150_000,
-				BASE,
-			),
-		).not.toBe(a)
+		// retuning moves offsetHz (or the hardware centre): the stream follows, no reattach
+		expect(key(status({}, { offsetHz: 25_000 }))).toBe(a)
+		expect(key(status({ clientCount: 3 }, { squelch: -60 }))).toBe(a)
+		expect(key(status({ effectiveSampleRate: 48_000 }))).not.toBe(a)
+		expect(key(status({}, { audioFormat: "f32le" }))).not.toBe(a)
+		expect(key(status({ httpUrl: "http://pi:8081/stream" }))).not.toBe(a)
+		expect(key(status({ wavUrl: "http://pi:8081/stream.wav" }))).not.toBe(a)
 	})
 })
 

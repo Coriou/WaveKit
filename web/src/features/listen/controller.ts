@@ -1,7 +1,12 @@
-// Plays live audio in this browser: one <audio> element bound to status.wavUrl. Start and stop come
-// from a user gesture (autoplay rules); reattaching follows audioAttachKey() (audio follows tuning).
+// Plays live audio in this browser. The low-latency path is PcmPlayer (fetch + AudioWorklet); where
+// AudioWorklet is missing, one <audio> element plays status.wavUrl. Start and stop come from a user
+// gesture (autoplay rules); reattaching follows audioAttachKey(): stream URL, format or rate only, since
+// the core's stream already follows tuning.
 import { errorMessage, Store } from "../../data/index.ts"
 import type { LiveAudioStore } from "../../data/index.ts"
+import type { AudioStreamSource } from "./audio.ts"
+import { PcmPlayer, pcmPlayerSupported } from "./pcm-player.ts"
+import type { RingStats } from "./pcm.ts"
 
 export type ListenPhase = "off" | "connecting" | "playing" | "blocked" | "error"
 
@@ -12,6 +17,20 @@ export interface ListenState {
 	/** 0–1, this browser only. */
 	volume: number
 	error: string | null
+}
+
+/** The part of PcmPlayer the controller drives (a fake in tests). */
+export interface ListenPlayer {
+	unlock(rateHint: number | null): void
+	play(source: { url: string; format: AudioStreamSource["format"]; rate: number }): void
+	stop(): void
+	setVolume(volume: number): void
+	dispose(): void
+}
+
+export interface ListenControllerOptions {
+	/** Builds the Web Audio player; null forces the <audio> fallback. Default: PcmPlayer where supported. */
+	createPlayer?: ((events: ConstructorParameters<typeof PcmPlayer>[0]) => ListenPlayer) | null
 }
 
 const VOLUME_KEY = "wavekit.web.volume"
@@ -38,25 +57,46 @@ function writeVolume(v: number): void {
 
 export class ListenController extends Store<ListenState> {
 	private el: HTMLAudioElement | null = null
-	private url: string | null = null
+	private source: AudioStreamSource | null = null
 	private key: string | null = null
 	private attachedKey: string | null = null
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private retries = 0
 	private readonly liveAudio: LiveAudioStore
+	private readonly player: ListenPlayer | null
 	private unbind: (() => void) | null = null
 
-	constructor(liveAudio: LiveAudioStore) {
+	constructor(liveAudio: LiveAudioStore, options: ListenControllerOptions = {}) {
 		super({ wanted: false, phase: "off", volume: readVolume(), error: null })
 		this.liveAudio = liveAudio
+		const events = {
+			onStats: (stats: RingStats) => this.onStats(stats),
+			onEnded: (reason: string) => this.fail(reason),
+			onBlocked: () => {
+				if (this.get().wanted) this.setPhase("blocked")
+			},
+		}
+		const create =
+			options.createPlayer === undefined
+				? pcmPlayerSupported()
+					? (e: typeof events) => new PcmPlayer(e)
+					: null
+				: options.createPlayer
+		this.player = create ? create(events) : null
+		this.player?.setVolume(this.get().volume)
 	}
 
-	/** The page's <audio> element (ref callback). */
+	/** Which path plays: "worklet" (low latency) or "element" (<audio> WAV fallback). */
+	get backend(): "worklet" | "element" {
+		return this.player ? "worklet" : "element"
+	}
+
+	/** The page's <audio> element (ref callback); only used by the fallback path. */
 	bind = (el: HTMLAudioElement | null): void => {
 		this.unbind?.()
 		this.unbind = null
 		this.el = el
-		if (!el) return
+		if (!el || this.player) return
 		el.volume = this.get().volume
 		const on = (type: string, fn: () => void) => {
 			el.addEventListener(type, fn)
@@ -75,8 +115,8 @@ export class ListenController extends Store<ListenState> {
 	}
 
 	/** Called on every render with the current stream; reattaches when `key` changes. */
-	setSource(key: string | null, url: string | null): void {
-		this.url = url
+	setSource(key: string | null, source: AudioStreamSource | null): void {
+		this.source = source
 		if (key === this.key) return
 		const first = this.key === null
 		this.key = key
@@ -95,9 +135,11 @@ export class ListenController extends Store<ListenState> {
 	async start(): Promise<void> {
 		this.set({ ...this.get(), wanted: true, phase: "connecting", error: null })
 		this.retries = 0
-		// play inside the gesture so the browser allows sound later on (Safari needs this call here)
-		if (this.el && this.url) this.attach()
-		if (!this.liveAudio.get().status?.running) {
+		// unlock audio inside the gesture so the browser allows sound later on
+		const status = this.liveAudio.get().status
+		this.player?.unlock(status?.effectiveSampleRate ?? null)
+		if (this.source) this.attach()
+		if (!status?.running) {
 			try {
 				await this.liveAudio.start()
 			} catch (error) {
@@ -123,12 +165,17 @@ export class ListenController extends Store<ListenState> {
 
 	/** A blocked autoplay resumes on the next gesture. */
 	resume(): void {
-		if (this.get().wanted) this.attach()
+		if (!this.get().wanted) return
+		if (this.player) {
+			this.player.unlock(this.source?.rate ?? null)
+			this.setPhase("connecting")
+		} else this.attach()
 	}
 
 	setVolume(volume: number): void {
 		const v = Math.min(1, Math.max(0, volume))
 		if (this.el) this.el.volume = v
+		this.player?.setVolume(v)
 		writeVolume(v)
 		this.update(s => ({ ...s, volume: v }))
 	}
@@ -137,6 +184,16 @@ export class ListenController extends Store<ListenState> {
 		this.clearTimer()
 		this.detach()
 		this.unbind?.()
+		this.player?.dispose()
+	}
+
+	private onStats(stats: RingStats): void {
+		const s = this.get()
+		if (!s.wanted || this.attachedKey === null || s.phase === "blocked") return
+		if (stats.playing) {
+			this.retries = 0
+			this.setPhase("playing")
+		} else if (s.phase === "playing") this.setPhase("connecting")
 	}
 
 	private schedule(ms: number): void {
@@ -148,11 +205,20 @@ export class ListenController extends Store<ListenState> {
 	}
 
 	private attach(): void {
-		const el = this.el
-		if (!el || !this.url) return
+		const source = this.source
+		if (!source) return
 		this.clearTimer()
+		if (this.player) {
+			if (!source.httpUrl) return
+			this.attachedKey = this.key
+			if (this.get().phase !== "playing") this.setPhase("connecting")
+			this.player.play({ url: source.httpUrl, format: source.format, rate: source.rate })
+			return
+		}
+		const el = this.el
+		if (!el || !source.wavUrl) return
 		this.attachedKey = this.key
-		el.src = this.url
+		el.src = source.wavUrl
 		el.volume = this.get().volume
 		if (this.get().phase !== "playing") this.setPhase("connecting")
 		el.play().catch((error: unknown) => {
@@ -163,9 +229,10 @@ export class ListenController extends Store<ListenState> {
 	}
 
 	private detach(): void {
-		const el = this.el
 		this.attachedKey = null
-		if (!el) return
+		this.player?.stop()
+		const el = this.el
+		if (!el || this.player) return
 		el.pause()
 		el.removeAttribute("src")
 		el.load()

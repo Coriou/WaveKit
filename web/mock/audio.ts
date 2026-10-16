@@ -54,6 +54,9 @@ function stream(
 		"X-Audio-Format": "s16le",
 		"X-Sample-Rate": String(rate),
 		"X-Channels": "1",
+		// as the core (src/core/audio-stream-server.ts streamHeaders): fetch() from the app's origin reads them
+		"Access-Control-Expose-Headers":
+			"X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
 	})
 	if (wav) res.write(wavHeader(rate))
 	source.onClient(1, 0)

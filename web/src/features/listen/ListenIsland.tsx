@@ -16,25 +16,25 @@ import { useLiveStatus, useSettledHz } from "../hooks.ts"
 import { modeSpec } from "../tuner/modes.ts"
 import {
 	audioAttachKey,
+	audioSource,
 	LEVEL_MAX_DBFS,
 	LEVEL_MIN_DBFS,
 	levelFraction,
 	squelchSetting,
 	squelchThreshold,
-	streamUrl,
 } from "./audio.ts"
 import type { ListenPhase } from "./controller.ts"
 
-/** The page's audio element, bound to the listen controller; reattaches as the stream or tuning changes. */
+/** The page's audio output, bound to the listen controller; reattaches when the stream itself changes. */
 export function AudioOutput() {
 	const { listen } = useServices()
 	const status = useLiveStatus()
-	const hz = useSettledHz()
 	const base =
 		typeof location === "undefined" ? "http://localhost/" : location.href
-	const key = audioAttachKey(status, hz, base)
-	const url = streamUrl(status, base)
-	useEffect(() => listen.setSource(key, url), [listen, key, url])
+	const source = audioSource(status, base)
+	const key = audioAttachKey(source)
+	// the source object is rebuilt every render; the key says when it really changed
+	useEffect(() => listen.setSource(key, source), [listen, key])
 	return (
 		<audio
 			ref={listen.bind}
