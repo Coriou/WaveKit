@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises"
 import { afterEach, describe, expect, it } from "vitest"
+import type { ActivityRetentionPolicy } from "../../../../../src/core/activity/storage/contract.js"
 import { envelope, openStore, readRecords, roots, stores } from "./helpers.js"
 
 afterEach(async () => {
@@ -20,9 +21,13 @@ const SECONDS = 600
  * minutes (6,000 receptions) against the minimum row cap of 1,000. Returns
  * whether the page is still stored and the row count.
  */
-async function busyFeed(positionCoalesceMs: number) {
+async function busyFeed(
+	positionCoalesceMs: number,
+	retentionPolicy?: ActivityRetentionPolicy,
+) {
 	const store = await openStore({
 		limits: {
+			...(retentionPolicy ? { retentionPolicy } : {}),
 			maxRows: 1_000,
 			globalRatePerSec: 1_000_000,
 			globalBurst: 1_000_000,
@@ -82,9 +87,18 @@ describe("position coalescing and retention", () => {
 		expect(on.coalesced).toBe(AIRCRAFT * SECONDS - AIRCRAFT * (SECONDS / 60))
 	}, 20_000)
 
-	it("loses the same page within seconds of the feed without coalescing", async () => {
-		const off = await busyFeed(0)
+	it("loses the same page within seconds of the feed without coalescing under oldest-first", async () => {
+		const off = await busyFeed(0, "oldest-first")
 		expect(off.rareKept).toBe(false)
+		expect(off.dropped).toBe(0)
+		expect(off.rows).toBeLessThanOrEqual(1_000)
+		expect(off.coalesced).toBe(0)
+	}, 20_000)
+
+	// WG3 req 1.5: under the default fair-share the quiet page's share is below the level.
+	it("keeps the page without coalescing under the default fair-share", async () => {
+		const off = await busyFeed(0)
+		expect(off.rareKept).toBe(true)
 		expect(off.dropped).toBe(0)
 		expect(off.rows).toBeLessThanOrEqual(1_000)
 		expect(off.coalesced).toBe(0)

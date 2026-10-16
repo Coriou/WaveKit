@@ -16,7 +16,7 @@ import type { ActivityLimits } from "./limits.js"
 import { truncateUtf8 } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { bindInteger, cell, sqlNumber } from "./sqlite.js"
-import type { SqliteDatabase } from "./sqlite.js"
+import type { SqliteDatabase, SqliteValue } from "./sqlite.js"
 
 export interface OpenedActivityDatabase {
 	created: boolean
@@ -29,6 +29,11 @@ export interface CommitBatchSuccess {
 	duplicates: number
 	writeFailed: number
 	committedEventIds: string[]
+	/**
+	 * Batch index of each committed row, parallel to committedEventIds. A skipped or
+	 * duplicate row can share an event id with the row that committed.
+	 */
+	committedIndexes: number[]
 	duplicateEventIds: string[]
 	writeFailedEventIds: string[]
 }
@@ -103,6 +108,7 @@ export function openActivityDatabase(
 	}
 	assertSchema(db, names)
 	applyRuntimePragmas(db)
+	ensureHoleMeta(db)
 	return { created: false, cursorKey: readRequiredMeta(db).cursorKey }
 }
 
@@ -140,6 +146,7 @@ export function commitActivityBatch(
 			duplicates: 0,
 			writeFailed: 0,
 			committedEventIds: [],
+			committedIndexes: [],
 			duplicateEventIds: [],
 			writeFailedEventIds: [],
 		}
@@ -155,11 +162,12 @@ export function commitActivityBatch(
 		"INSERT INTO activity_refs(seq, ref_type, ref_value) VALUES (?, ?, ?)",
 	)
 	const committedEventIds: string[] = []
+	const committedIndexes: number[] = []
 	const duplicateEventIds: string[] = []
 	const writeFailedEventIds: string[] = []
 	db.exec("BEGIN IMMEDIATE")
 	try {
-		for (const row of rows) {
+		for (const [index, row] of rows.entries()) {
 			const recordBytes = Buffer.byteLength(row.recordJson, "utf8")
 			if (
 				recordBytes > MAX_RECORD_BYTES ||
@@ -192,6 +200,7 @@ export function commitActivityBatch(
 				fts.run(seq, text)
 				for (const item of row.refs) ref.run(seq, item.type, item.value)
 				committedEventIds.push(row.eventId)
+				committedIndexes.push(index)
 			} catch (error) {
 				if (isUniqueConstraint(error)) {
 					duplicateEventIds.push(row.eventId)
@@ -214,6 +223,7 @@ export function commitActivityBatch(
 		duplicates: duplicateEventIds.length,
 		writeFailed: writeFailedEventIds.length,
 		committedEventIds,
+		committedIndexes,
 		duplicateEventIds,
 		writeFailedEventIds,
 	}
@@ -364,6 +374,303 @@ export function pruneActivityPrefix(
 	}
 }
 
+/** One retention share's usage from the grouped scan (WG3 req 1.7). */
+export interface RetentionGroup {
+	decoderId: string | null
+	kind: string
+	rows: number
+	bytes: number
+}
+
+/** A row a prune transaction removed, with what the retention counters need. */
+export interface PrunedActivityRow {
+	seq: bigint
+	decoderId: string | null
+	kind: string
+	recordBytes: number
+}
+
+/** Rows and live bytes as the prefix prune reads them, plus the oldest received time. */
+export interface ActivityPressureReading {
+	rowCount: number
+	dbBytes: number
+	oldestReceivedMs: number | null
+}
+
+/** One share's slice of a fair prune step. */
+export interface FairDeleteTarget {
+	decoderId: string | null
+	kind: string
+	/** At most this many oldest rows. */
+	rows: number
+	/** Rows deleted regardless of the byte floor (the row cap's share). Defaults to `rows`. */
+	minRows?: number
+	/** Beyond minRows, delete only while retained bytes stay >= this. */
+	byteFloor?: number | null
+	/** The share's record bytes before the step (the counters' value). */
+	shareBytes?: number
+}
+
+export interface FairPruneResult extends PruneResult {
+	deletedRows: PrunedActivityRow[]
+	holeWatermark: string
+	holeGeneration: number
+	holeOpened: boolean
+	/** Set when incremental_vacuum failed after COMMIT; the deletes stand. */
+	vacuumError?: string
+}
+
+/**
+ * The seed scan of the per-share counters (design "Counters"). NOT INDEXED keeps it one
+ * sequential table pass: left to itself SQLite walks activity_decoder and fetches every row
+ * by rowid, which measured 1.5-14x slower on a 250 000-row store.
+ */
+export function scanRetentionGroups(db: SqliteDatabase): RetentionGroup[] {
+	const rows = db
+		.prepare(
+			`SELECT decoder_id, CASE WHEN decoder_id IS NULL THEN kind END AS k,
+			        COUNT(*) AS n, COALESCE(SUM(record_bytes), 0) AS b
+			 FROM activity NOT INDEXED GROUP BY decoder_id, k`,
+		)
+		.all()
+	return rows.map(row => {
+		const decoderId = cell(row, "decoder_id")
+		const kind = cell(row, "k")
+		if (decoderId !== null && typeof decoderId !== "string")
+			throw new ActivityUnavailableError("Activity decoder id is invalid")
+		if (decoderId === null && typeof kind !== "string")
+			throw new ActivityUnavailableError("Activity kind is invalid")
+		return {
+			decoderId,
+			kind: typeof kind === "string" ? kind : "",
+			rows: sqlNumber(cell(row, "n"), "count"),
+			bytes: sqlNumber(cell(row, "b"), "record_bytes"),
+		}
+	})
+}
+
+/** received_at of a share's lowest-seq row: one indexed point lookup. */
+export function shareOldestReceivedMs(
+	db: SqliteDatabase,
+	decoderId: string | null,
+	kind: string,
+): number | null {
+	const row =
+		decoderId === null
+			? db
+					.prepare(
+						`SELECT received_at_ms FROM activity
+						 WHERE kind = ? AND decoder_id IS NULL ORDER BY seq ASC LIMIT 1`,
+					)
+					.get(kind)
+			: db
+					.prepare(
+						`SELECT received_at_ms FROM activity
+						 WHERE decoder_id = ? ORDER BY seq ASC LIMIT 1`,
+					)
+					.get(decoderId)
+	const value = cell(row, "received_at_ms")
+	if (value === undefined || value === null) return null
+	return sqlNumber(value, "received_at_ms")
+}
+
+export function readActivityPressure(
+	db: SqliteDatabase,
+): ActivityPressureReading {
+	return {
+		rowCount: countRows(db),
+		dbBytes: databaseBytes(db),
+		oldestReceivedMs: oldestReceivedMs(db),
+	}
+}
+
+/** Live bytes and the oldest received time, without the row count. */
+export function readActivityLiveBytes(db: SqliteDatabase): {
+	dbBytes: number
+	oldestReceivedMs: number | null
+} {
+	return { dbBytes: databaseBytes(db), oldestReceivedMs: oldestReceivedMs(db) }
+}
+
+/** True when `pruneActivityPrefix` would start an age delete (rule unchanged). */
+export function activityAgeActive(
+	oldestMs: number | null,
+	maxAgeMs: number,
+	nowMs: number,
+): boolean {
+	return (
+		oldestMs !== null &&
+		oldestMs < nowMs - maxAgeMs - activityAgeSlackMs(maxAgeMs)
+	)
+}
+
+/**
+ * The rows `pruneActivityPrefix` reads as its candidates (the lowest `limit` seqs), with the
+ * share columns. The writer reads them before a prefix step so it can subtract what the step
+ * deleted (every deleted seq is one of these) without touching the prefix prune itself.
+ */
+export function readPrefixCandidates(
+	db: SqliteDatabase,
+	limit: number,
+): PrunedActivityRow[] {
+	const rows = db
+		.prepare(
+			`SELECT CAST(seq AS TEXT) AS seq_text, decoder_id, kind, record_bytes
+			 FROM activity ORDER BY seq ASC LIMIT ?`,
+		)
+		.all(limit)
+	return rows.map(prunedRow)
+}
+
+/**
+ * WG3 fair prune transaction (design "Transaction"). Deletes each target's lowest-seq rows
+ * through its share index, then moves the prune watermark to MIN(seq) - 1 of what remains
+ * (the greatest deleted seq when the table is empty) when that is greater, and records any
+ * deleted seq above it as a hole. Every meta update is in the same transaction; a
+ * generation at Number.MAX_SAFE_INTEGER fails the step and rolls back.
+ */
+export function pruneActivityFair(
+	db: SqliteDatabase,
+	limits: Pick<ActivityLimits, "incrementalVacuumPages">,
+	targets: readonly FairDeleteTarget[],
+	before: Pick<ActivityPressureReading, "rowCount" | "dbBytes">,
+): FairPruneResult {
+	const vacuumPages = limits.incrementalVacuumPages
+	if (!Number.isSafeInteger(vacuumPages) || vacuumPages < 0)
+		throw new ActivityUnavailableError("Activity vacuum page cap is invalid")
+	const deletedRows: PrunedActivityRow[] = []
+	let result: FairPruneResult
+	db.exec("BEGIN IMMEDIATE")
+	try {
+		const meta = readRequiredMeta(db)
+		const byDecoder = db.prepare(
+			`SELECT CAST(seq AS TEXT) AS seq_text, decoder_id, kind, record_bytes
+			 FROM activity WHERE decoder_id = ? ORDER BY seq ASC LIMIT ?`,
+		)
+		const byKind = db.prepare(
+			`SELECT CAST(seq AS TEXT) AS seq_text, decoder_id, kind, record_bytes
+			 FROM activity WHERE kind = ? AND decoder_id IS NULL ORDER BY seq ASC LIMIT ?`,
+		)
+		const dropFts = db.prepare("DELETE FROM activity_fts WHERE rowid = ?")
+		const dropRow = db.prepare("DELETE FROM activity WHERE seq = ?")
+		for (const target of targets) {
+			if (!Number.isSafeInteger(target.rows) || target.rows < 1) continue
+			const rows =
+				target.decoderId === null
+					? byKind.all(target.kind, target.rows)
+					: byDecoder.all(target.decoderId, target.rows)
+			const minRows = Math.min(target.rows, target.minRows ?? target.rows)
+			const floor = target.byteFloor ?? null
+			let retained = target.shareBytes ?? 0
+			let taken = 0
+			for (const raw of rows) {
+				const row = prunedRow(raw)
+				if (taken >= minRows) {
+					// Never below the share's byte floor (req 1.5), not even for one row.
+					if (floor === null || retained - row.recordBytes < floor) break
+				}
+				taken += 1
+				retained -= row.recordBytes
+				const bound = bindInteger(row.seq)
+				dropFts.run(bound)
+				dropRow.run(bound)
+				deletedRows.push(row)
+			}
+		}
+		const watermark = BigInt(meta.pruneWatermark)
+		const holeWatermark = BigInt(meta.holeWatermark)
+		let nextWatermark = watermark
+		let nextHole = holeWatermark
+		let pruneGeneration = meta.pruneGeneration
+		let holeGeneration = meta.holeGeneration
+		let holeOpened = false
+		if (deletedRows.length > 0) {
+			let greatest = 0n
+			for (const row of deletedRows) if (row.seq > greatest) greatest = row.seq
+			const min = cell(
+				db.prepare("SELECT CAST(MIN(seq) AS TEXT) AS seq FROM activity").get(),
+				"seq",
+			)
+			const floor =
+				typeof min === "string" && /^\d+$/.test(min)
+					? BigInt(min) - 1n
+					: greatest
+			if (floor > nextWatermark) nextWatermark = floor
+			for (const row of deletedRows) {
+				if (row.seq <= nextWatermark) continue
+				holeOpened = true
+				if (row.seq > nextHole) nextHole = row.seq
+			}
+			const update = db.prepare("UPDATE store_meta SET value = ? WHERE key = ?")
+			if (holeOpened) {
+				if (holeGeneration >= Number.MAX_SAFE_INTEGER)
+					throw new ActivityUnavailableError(
+						"Activity hole generation is exhausted",
+					)
+				holeGeneration += 1
+				update.run(nextHole.toString(10), "holeWatermark")
+				update.run(String(holeGeneration), "holeGeneration")
+			}
+			if (nextWatermark > watermark) {
+				if (pruneGeneration >= Number.MAX_SAFE_INTEGER)
+					throw new ActivityUnavailableError(
+						"Activity prune generation is exhausted",
+					)
+				pruneGeneration += 1
+				update.run(nextWatermark.toString(10), "pruneWatermark")
+				update.run(String(pruneGeneration), "pruneGeneration")
+			}
+		}
+		db.exec("COMMIT")
+		result = {
+			deleted: deletedRows.length,
+			watermark: nextWatermark.toString(10),
+			generation: pruneGeneration,
+			changed: deletedRows.length > 0,
+			rowCount: before.rowCount,
+			dbBytes: before.dbBytes,
+			deletedRows,
+			holeWatermark: nextHole.toString(10),
+			holeGeneration,
+			holeOpened,
+		}
+	} catch (error) {
+		rollback(db)
+		throw error
+	}
+	if (result.changed && vacuumPages > 0) {
+		try {
+			db.exec(`PRAGMA incremental_vacuum(${vacuumPages})`)
+		} catch (error) {
+			result.vacuumError =
+				error instanceof Error ? error.message : String(error)
+		}
+	}
+	return result
+}
+
+function prunedRow(row: Record<string, SqliteValue>): PrunedActivityRow {
+	const seqText = cell(row, "seq_text")
+	if (typeof seqText !== "string" || !/^\d+$/.test(seqText))
+		throw new ActivityUnavailableError("Activity seq is invalid")
+	const decoderId = cell(row, "decoder_id")
+	const kind = cell(row, "kind")
+	if (
+		(decoderId !== null && typeof decoderId !== "string") ||
+		typeof kind !== "string"
+	)
+		throw new ActivityUnavailableError("Activity share columns are invalid")
+	return {
+		seq: BigInt(seqText),
+		decoderId,
+		kind,
+		recordBytes: Math.max(
+			0,
+			sqlNumber(cell(row, "record_bytes") ?? 0, "record_bytes"),
+		),
+	}
+}
+
 export function syncActivityWal(
 	db: SqliteDatabase,
 	dbPath: string,
@@ -399,7 +706,13 @@ export function readActivityState(
 			restoreGeneration: meta.restoreGeneration,
 			pruneWatermark: meta.pruneWatermark,
 			pruneGeneration: meta.pruneGeneration,
-			committedMax: readCommittedMax(db, meta.pruneWatermark),
+			committedMax: readCommittedMax(
+				db,
+				meta.pruneWatermark,
+				meta.holeWatermark,
+			),
+			holeWatermark: meta.holeWatermark,
+			holeGeneration: meta.holeGeneration,
 		},
 		cursorKey: meta.cursorKey,
 		dbBytes: databaseBytes(db),
@@ -438,6 +751,8 @@ function writeSchema(
 			["pruneWatermark", "0"],
 			["pruneGeneration", "0"],
 			["cursorKey", cursorKey.toString("hex")],
+			["holeWatermark", "0"],
+			["holeGeneration", "0"],
 		]
 		for (const [key, value] of rows) insert.run(key, value)
 		db.exec("COMMIT")
@@ -463,6 +778,8 @@ interface StoreMeta {
 	pruneWatermark: string
 	pruneGeneration: number
 	cursorKey: Buffer
+	holeWatermark: string
+	holeGeneration: number
 }
 
 function readRequiredMeta(db: SqliteDatabase): StoreMeta {
@@ -488,7 +805,29 @@ function readRequiredMeta(db: SqliteDatabase): StoreMeta {
 		pruneWatermark: watermark,
 		pruneGeneration: parseCount(map.get("pruneGeneration"), "pruneGeneration"),
 		cursorKey: Buffer.from(cursor, "hex"),
+		holeWatermark: parseSeq(map.get("holeWatermark") ?? "0", "holeWatermark"),
+		holeGeneration: parseCount(
+			map.get("holeGeneration") ?? "0",
+			"holeGeneration",
+		),
 	}
+}
+
+/**
+ * WG3 (req 3.1): stores written before the hole keys gain them as "0". schemaVersion stays 1.
+ */
+function ensureHoleMeta(db: SqliteDatabase): void {
+	const insert = db.prepare(
+		"INSERT OR IGNORE INTO store_meta(key, value) VALUES (?, '0')",
+	)
+	insert.run("holeWatermark")
+	insert.run("holeGeneration")
+}
+
+function parseSeq(value: string, name: string): string {
+	if (!/^\d+$/.test(value))
+		throw new ActivityUnavailableError(`Activity store meta ${name} is invalid`)
+	return BigInt(value).toString(10)
 }
 
 function readMetaMap(db: SqliteDatabase): Map<string, string> {
@@ -503,13 +842,25 @@ function readMetaMap(db: SqliteDatabase): Map<string, string> {
 	return map
 }
 
-function readCommittedMax(db: SqliteDatabase, watermark: string): string {
+/**
+ * max(MAX(seq), pruneWatermark, holeWatermark): a fair prune that deletes the newest rows
+ * must not move committedMax backwards.
+ */
+function readCommittedMax(
+	db: SqliteDatabase,
+	watermark: string,
+	holeWatermark: string,
+): string {
 	const row = db
 		.prepare("SELECT CAST(MAX(seq) AS TEXT) AS seq FROM activity")
 		.get()
 	const max = cell(row, "seq")
-	const text = typeof max === "string" && /^\d+$/.test(max) ? max : "0"
-	return BigInt(text) >= BigInt(watermark) ? text : watermark
+	let best = BigInt(typeof max === "string" && /^\d+$/.test(max) ? max : "0")
+	for (const floor of [watermark, holeWatermark]) {
+		const value = BigInt(floor)
+		if (value > best) best = value
+	}
+	return best.toString(10)
 }
 
 function countRows(db: SqliteDatabase): number {

@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { Worker } from "node:worker_threads"
 import type {
+	ActivityRetentionStats,
 	ActivityStoreHandle,
 	ActivityStoreStats,
 	AdmitResult,
@@ -374,6 +375,7 @@ class ActivityStore implements ActivityStoreHandle {
 	private walBytes: number
 	private rowCount: number
 	private oldestReceivedAt: string | null
+	private retention: ActivityRetentionStats | undefined
 	private committed = 0
 	private duplicates = 0
 	private flushing = false
@@ -405,6 +407,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.walBytes = snapshot.walBytes
 		this.rowCount = snapshot.rows
 		this.oldestReceivedAt = snapshot.oldestReceivedAt
+		this.retention = retentionOf(snapshot)
 		this.ingress.paused = snapshot.paused
 		this.threaded?.onGone(() => {
 			this.onWriterGone()
@@ -480,6 +483,7 @@ class ActivityStore implements ActivityStoreHandle {
 			pruneWatermark: this.identityCache.pruneWatermark,
 			paused: this.ingress.paused,
 			writer: this.writerState,
+			...(this.retention ? { retention: this.retention } : {}),
 		}
 	}
 
@@ -689,6 +693,7 @@ class ActivityStore implements ActivityStoreHandle {
 		this.walBytes = snapshot.walBytes
 		this.rowCount = snapshot.rows
 		this.oldestReceivedAt = snapshot.oldestReceivedAt
+		this.retention = retentionOf(snapshot) ?? this.retention
 		this.ingress.paused = snapshot.paused
 		if (snapshot.paused && !wasPaused)
 			this.logger.warn({ walBytes: snapshot.walBytes }, "activity store paused")
@@ -866,4 +871,19 @@ function wrapOpenError(error: unknown): Error {
 		message,
 		error instanceof Error ? error : undefined,
 	)
+}
+
+/** The writer's retention block as a stats copy (WG3 req 2.1); absent if the writer sent none. */
+function retentionOf(
+	snapshot: ActivityWorkerSnapshot,
+): ActivityRetentionStats | undefined {
+	const retention = (snapshot as Partial<ActivityWorkerSnapshot>).retention
+	if (!retention) return undefined
+	return {
+		policy: retention.policy,
+		effective: retention.effective,
+		shares: retention.shares.map(share => ({ ...share })),
+		sharesTruncated: retention.sharesTruncated,
+		prefixFallbackSteps: retention.prefixFallbackSteps,
+	}
 }
