@@ -1031,7 +1031,9 @@ export function parseJsonShip(json: unknown): ShipData | null {
 		lastSeen: new Date(),
 		messageType: data.type ?? data.msgtype ?? 0,
 	}
-	if (data.alt !== undefined) ship.altitudeM = data.alt
+	// Only type 9 (SAR aircraft) carries an altitude; `alt` on any other type is ignored.
+	if (data.alt !== undefined && ship.messageType === 9)
+		ship.altitudeM = data.alt
 	if (data.aid_type !== undefined) ship.aidType = data.aid_type
 	if (data.virtual_aid !== undefined) ship.virtualAid = data.virtual_aid
 	if (data.off_position !== undefined) ship.offPosition = data.off_position

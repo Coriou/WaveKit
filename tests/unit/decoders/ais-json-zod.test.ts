@@ -48,6 +48,15 @@ describe("parseJsonShip Zod validation", () => {
 		expect(ship?.lon).toBe(2)
 	})
 
+	it.each([1, 3, 18, 21])("ignores alt on message type %s (WG5 R1)", type => {
+		const ship = parseJsonShip({ mmsi: 111232511, type, alt: 300, lon: 2 })
+		expect(ship?.altitudeM).toBeUndefined()
+		expect(ship?.lon).toBe(2)
+		expect(
+			parseJsonShip({ mmsi: 111232511, msgtype: 9, alt: 300 })?.altitudeM,
+		).toBe(300)
+	})
+
 	it("accepts alt 0", () => {
 		expect(parseJsonShip({ mmsi: 111232511, type: 9, alt: 0 })?.altitudeM).toBe(
 			0,
