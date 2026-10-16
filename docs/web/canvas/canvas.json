@@ -156,6 +156,22 @@
       "h": 680,
       "is_interactive": true,
       "title": "Scan a band — the plan pane beside the Scanner drawer, setup and running (layout tweak: pane / screen)"
+    },
+    "Kit.dc.html": {
+      "x": 1540,
+      "y": 10300,
+      "w": 320,
+      "h": 80,
+      "is_interactive": true,
+      "title": "Kit — the WaveKit UI kit (packages/brand/tokens/ui.css), imported by every board; styles only"
+    },
+    "Components.dc.html": {
+      "x": 0,
+      "y": 10300,
+      "w": 1440,
+      "h": 5200,
+      "is_interactive": true,
+      "title": "Components — design system v1: foundations and every recipe in three scopes, with what each replaces today"
     }
   },
   "createdOnFiles": {
@@ -222,6 +238,14 @@
       "w": 240,
       "x": 0,
       "y": 7820
+    },
+    "designsystem": {
+      "kind": "title1",
+      "maxW": 1860,
+      "text": "Design system",
+      "w": 240,
+      "x": 0,
+      "y": 10020
     }
   },
   "order": [
@@ -243,7 +267,9 @@
     "SettingsPhone.dc.html",
     "Scanner.dc.html",
     "Identify.dc.html",
-    "ScanPlanner.dc.html"
+    "ScanPlanner.dc.html",
+    "Components.dc.html",
+    "Kit.dc.html"
   ],
   "pages": [],
   "title": "WaveKit Web — App Shell"

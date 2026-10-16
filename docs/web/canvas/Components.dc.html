@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Components</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#000000}
+/* specimen helpers: show a forced state next to the live one; not part of the kit */
+.cmp-focus{outline:1.5px solid var(--wk-focus);outline-offset:2px}
+.cmp-panel{display:flex;flex-direction:column;gap:14px;min-width:0;padding:20px;border-radius:12px;background:var(--wk-bg);color:var(--wk-text);border:1px solid var(--wk-line-08)}
+.cmp-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.cmp-cap{font-size:11px;color:var(--wk-text-3)}
+.cmp-today{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 14px;border-radius:8px;border:1px dashed var(--wk-line-18)}
+.cmp-wf{position:relative;height:150px;border-radius:8px;overflow:hidden;background:repeating-linear-gradient(180deg,rgba(var(--wk-accent-rgb),.10) 0 2px,transparent 2px 5px),linear-gradient(90deg,var(--wk-plot-bg) 0 18%,rgba(var(--wk-accent-rgb),.55) 22%,var(--wk-plot-bg) 26% 48%,rgba(var(--wk-accent-rgb),.35) 50%,var(--wk-plot-bg) 53% 74%,rgba(var(--wk-ink-rgb),.6) 77%,var(--wk-plot-bg) 80%)}
+</style>
+</helmet>
+<div data-wk-theme="dark" data-wk-ground="black" data-wk-accent="mono" style="box-sizing: border-box; min-height: 100vh; padding: 48px; background: var(--wk-bg); color: var(--wk-text); font-family: var(--wk-font-ui); display: flex; flex-direction: column; gap: 56px">
+	<dc-import name="Kit" hint-size="0px,0px"></dc-import>
+
+	<header style="display: flex; flex-direction: column; gap: 10px; max-width: 980px">
+		<span class="wk-label">Design system v1 · packages/brand/tokens/ui.css</span>
+		<h1 style="margin: 0; font-family: var(--wk-font-head); font-size: 40px; font-weight: 700; letter-spacing: .02em; line-height: 1.05">Components</h1>
+		<p style="margin: 0; font-size: 14px; line-height: 1.55; color: var(--wk-text-2)">Every recipe of the UI kit in every size, variant and state, in three scopes side by side: True black + Mono (the default), Ink + phosphor and Paper + Mono. Under each recipe, the dashed "Today" strip shows what the boards draw now and what the recipe replaces. Hover and click are live; focus is shown forced. Overrule any pick here before the boards migrate.</p>
+	</header>
+
+	<!-- Foundations: type -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<h2 class="wk-h2">Type</h2>
+		<p style="margin: 0; font-size: 13px; color: var(--wk-text-3)">Ten sizes instead of 21; weights 400 and 700 only. D-DIN Condensed for headings and labels, Noto Sans for everything else, one monospace stack.</p>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}}</span>
+					<sc-for list="{{typeScale}}" as="t" hint-placeholder-count="10">
+						<div style="display: flex; align-items: baseline; gap: 12px; min-width: 0">
+							<span class="cmp-cap" style="width: 84px; flex: none; font-family: var(--wk-font-mono)">{{t.token}} {{t.px}}</span>
+							<span style="font-family: {{t.family}}; font-size: {{t.size}}; font-weight: {{t.weight}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{t.sample}}</span>
+						</div>
+					</sc-for>
+					<div class="cmp-row"><span class="wk-label">Section label</span><span class="wk-label" data-strong="">Strong label</span><span class="wk-kbd">⌘</span><span class="wk-kbd">K</span></div>
+					<div style="font-family: var(--wk-font-mono); font-size: 12.5px; color: var(--wk-text-2)">161.975 000 MHz · −42.5 dBFS</div>
+				</div>
+			</sc-for>
+		</div>
+	</section>
+
+	<!-- Foundations: scales -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<h2 class="wk-h2">Space, heights, radius, motion</h2>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · space 2 · 4 · 6 · 8 · 10 · 12 · 16 · 20 · 24</span>
+					<div style="display: flex; align-items: flex-end; gap: 8px">
+						<sc-for list="{{space}}" as="v" hint-placeholder-count="9">
+							<div style="display: flex; flex-direction: column; align-items: center; gap: 4px"><div style="width: {{v.px}}; height: {{v.px}}; background: rgba(var(--wk-accent-rgb),.35); border-radius: 2px"></div><span class="cmp-cap">{{v.n}}</span></div>
+						</sc-for>
+					</div>
+					<span class="cmp-cap">Control heights xs 24 · sm 28 · md 32 · lg 36 · touch 44</span>
+					<div style="display: flex; align-items: flex-end; gap: 8px">
+						<sc-for list="{{heights}}" as="v" hint-placeholder-count="5">
+							<div style="display: grid; place-items: center; width: 56px; height: {{v.px}}; border-radius: 6px; background: var(--wk-chip); font-size: 11px; color: var(--wk-text-2)">{{v.n}}</div>
+						</sc-for>
+					</div>
+					<span class="cmp-cap">Radius 2 · 4 · 6 · 8 · 12 · pill</span>
+					<div style="display: flex; align-items: center; gap: 10px">
+						<sc-for list="{{radii}}" as="v" hint-placeholder-count="6">
+							<div style="width: 44px; height: 32px; border-radius: {{v.px}}; border: 1px solid var(--wk-line-26); background: var(--wk-chip)"></div>
+						</sc-for>
+					</div>
+					<span class="cmp-cap">Motion: hover 120 · state 150 · knob 200 · drawers 260 ms (stops under reduced motion)</span>
+					<div class="cmp-row"><span class="wk-live"></span><span class="wk-live" data-tone="amber"></span><span class="wk-live" data-tone="danger"></span><span class="wk-spinner"></span><span class="cmp-cap">wk-pulse · wk-spin</span></div>
+				</div>
+			</sc-for>
+		</div>
+	</section>
+
+	<!-- Materials -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<h2 class="wk-h2">Materials and elevation</h2>
+		<p style="margin: 0; font-size: 13px; color: var(--wk-text-3)">Glass blurs only on small islands, never inside another blur and never on Paper. Drawers, menus, toasts and tooltips are solid. Panes are surface.</p>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}}</span>
+					<div class="cmp-wf" style="display: flex; align-items: center; justify-content: space-around; padding: 0 12px">
+						<div class="wk-island" style="padding: 12px 14px; font-size: 12.5px; font-weight: 700">glass · e1</div>
+						<div class="wk-drawer" style="padding: 12px 14px; font-size: 12.5px; font-weight: 700">solid · e3</div>
+						<div class="wk-pane" style="padding: 12px 14px; font-size: 12.5px; font-weight: 700; border-right: 1px solid var(--wk-line-14); border-radius: 12px">surface</div>
+					</div>
+					<div class="cmp-row">
+						<div class="wk-island" data-tone="amber" style="padding: 10px 12px; font-size: 12.5px; font-weight: 700; color: var(--wk-amber)">Paused</div>
+						<div class="wk-menu" style="min-width: 0; padding: 10px 12px">e2 menu</div>
+						<div class="wk-drawer" style="padding: 10px 12px; box-shadow: var(--wk-e4)">e4 lifted</div>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+	</section>
+
+	<!-- Chip -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Chip</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-chip · h32 · sm h28</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · off · on · icon · count · focus · disabled</span>
+					<div class="cmp-row">
+						<button type="button" class="wk-chip" aria-pressed="{{chipA}}" onClick="{{toggleA}}">Voice</button>
+						<button type="button" class="wk-chip" aria-pressed="{{chipB}}" onClick="{{toggleB}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l3 -8l4 16l3 -8h4"></path></svg>Aircraft<span class="wk-count">128</span></button>
+						<button type="button" class="wk-chip cmp-focus">Focus</button>
+						<button type="button" class="wk-chip" disabled="disabled">Disabled</button>
+					</div>
+					<div class="cmp-row">
+						<button type="button" class="wk-chip" data-size="sm" aria-pressed="false">Small</button>
+						<button type="button" class="wk-chip" data-size="sm" aria-pressed="true">Small on</button>
+						<button type="button" class="wk-chip" data-tick="" aria-checked="{{chipA}}" role="checkbox" onClick="{{toggleA}}">Tick</button>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span style="display: inline-flex; align-items: center; height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.22); font-size: 13px; color: var(--wk-text-2)">Activity · outlined 30</span>
+			<span style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 6px; background: var(--wk-chip); font-size: 13px; font-weight: 700; color: var(--wk-text-2)">Scanner · Plan 36</span>
+			<span style="display: inline-flex; align-items: center; height: 28px; padding: 0 9px; border-radius: 6px; background: var(--wk-chip); font-size: 12px; font-weight: 700; color: var(--wk-text-2)">Tuned · 28</span>
+			<span style="display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border-radius: 999px; background: var(--wk-sel); font-size: 12.5px; font-weight: 700; color: var(--wk-accent)">Activity · pinned-column pill</span>
+			<span class="cmp-cap">→ one filled chip, h32 (sm h28); pinned columns become chips with role=tab.</span>
+		</div>
+	</section>
+
+	<!-- Segmented control and switch -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Segmented control and switch</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-seg · .wk-switch</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · h28 · lg h36 · wide</span>
+					<div class="wk-seg" role="radiogroup" aria-label="Demodulation">
+						<sc-for list="{{modes}}" as="m" hint-placeholder-count="5">
+							<button type="button" role="radio" aria-checked="{{m.on}}" onClick="{{m.pick}}">{{m.label}}</button>
+						</sc-for>
+					</div>
+					<div class="wk-seg is-wide" data-size="lg" role="radiogroup" aria-label="Squelch">
+						<button type="button" role="radio" aria-checked="true">Auto</button>
+						<button type="button" role="radio" aria-checked="false">Manual</button>
+						<button type="button" role="radio" aria-checked="false" class="cmp-focus">Off</button>
+					</div>
+					<div class="cmp-row">
+						<button type="button" class="wk-switch" role="switch" aria-checked="{{sw}}" aria-label="Bias-T" onClick="{{toggleSw}}"></button>
+						<button type="button" class="wk-switch" role="switch" aria-checked="false" aria-label="Off"></button>
+						<button type="button" class="wk-switch" role="switch" aria-checked="true" aria-label="On" disabled="disabled"></button>
+						<span class="cmp-cap">off · on · disabled · hit box 48×36</span>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span style="display: inline-flex; gap: 2px; padding: 3px; border-radius: 6px; background: var(--wk-well); border: 1px solid rgba(var(--wk-line-rgb),.08)"><span style="height: 28px; padding: 0 10px; display: inline-flex; align-items: center; border-radius: 4px; background: var(--wk-fill); font-size: 12.5px; font-weight: 700">Settings · fill</span><span style="height: 28px; padding: 0 10px; display: inline-flex; align-items: center; font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)">Off</span></span>
+			<span style="display: inline-flex; gap: 2px; padding: 3px; border-radius: 6px; background: var(--wk-well); border: 1px solid rgba(var(--wk-line-rgb),.08)"><span style="height: 28px; padding: 0 10px; display: inline-flex; align-items: center; border-radius: 4px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 12.5px; font-weight: 700">Tuner · NFM accent</span><span style="height: 28px; padding: 0 10px; display: inline-flex; align-items: center; font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)">AM</span></span>
+			<span class="cmp-cap">→ one selected look (--wk-sel + accent text). Tuner's demod loses its accent fill (owner, 2026-10-12). Tuned's 34 px switch track becomes 36.</span>
+		</div>
+	</section>
+
+	<!-- Buttons -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Buttons</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-btn · .wk-icon-btn · .wk-play</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · variants at md 32</span>
+					<div class="cmp-row">
+						<sc-for list="{{btnVariants}}" as="b" hint-placeholder-count="6">
+							<button type="button" class="wk-btn" data-variant="{{b.v}}">{{b.label}}</button>
+						</sc-for>
+					</div>
+					<span class="cmp-cap">sizes sm 28 · md 32 · lg 36 · icon · focus · disabled</span>
+					<div class="cmp-row">
+						<button type="button" class="wk-btn" data-variant="outline" data-size="sm">Small</button>
+						<button type="button" class="wk-btn" data-variant="outline">Medium</button>
+						<button type="button" class="wk-btn" data-variant="primary" data-size="lg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>Apply</button>
+						<button type="button" class="wk-btn cmp-focus" data-variant="tonal">Focus</button>
+						<button type="button" class="wk-btn" data-variant="primary" disabled="disabled">Disabled</button>
+					</div>
+					<span class="cmp-cap">icon buttons xs 24 · sm 28 · md 32 · lg/close 36 · touch 44 · pressed · play 32 / 40</span>
+					<div class="cmp-row">
+						<sc-for list="{{iconSizes}}" as="i" hint-placeholder-count="5">
+							<button type="button" class="wk-icon-btn" data-size="{{i.size}}" aria-label="Close {{i.size}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6l-12 12M6 6l12 12"></path></svg></button>
+						</sc-for>
+						<button type="button" class="wk-icon-btn" aria-pressed="true" aria-label="Pinned"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4M9 15l-4.5 4.5M14.5 4l5.5 5.5"></path></svg></button>
+						<button type="button" class="wk-play" aria-label="Play"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg></button>
+						<button type="button" class="wk-play" data-size="lg" aria-label="Play"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg></button>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span class="cmp-cap">Outline buttons in 7 heights (26 to 42), ghost hover in three alphas, close buttons at 32 (Messages, Map) and 36, Decode's play at 34 and Map's at 36, Map save at 42.</span>
+			<span class="cmp-cap">→ three sizes; close is always 36; play is 32 in rows and 40 in players.</span>
+		</div>
+	</section>
+
+	<!-- Fields -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Fields, tokens, select, stepper</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-field · .wk-token · .wk-input · .wk-select · .wk-stepper</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · search shell h44 with tokens</span>
+					<label class="wk-field">
+						<span class="wk-sr">Search activity</span>
+						<span class="wk-token">kind: voice<button type="button" aria-label="Remove kind: voice"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M18 6l-12 12M6 6l12 12"></path></svg></button></span>
+						<input type="search" placeholder="Search calls, pages, aircraft"></input>
+					</label>
+					<span class="cmp-cap">inline field h32 (hover shows its line) · select h36 · stepper h36</span>
+					<div class="cmp-row">
+						<input class="wk-input" aria-label="Name" value="Harbour channels" style="width: 160px"></input>
+						<select class="wk-select" aria-label="Sample rate"><option>2.4 MS/s</option><option>2.048 MS/s</option></select>
+						<div class="wk-stepper"><button type="button" aria-label="Less">−</button><input aria-label="PPM" value="0"></input><button type="button" aria-label="More">+</button></div>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span style="display: inline-flex; align-items: center; height: 46px; padding: 0 14px; border-radius: 8px; background: var(--wk-well-glass); border: 1px solid var(--wk-accent); font-size: 14.5px; color: var(--wk-text-2)">Activity · editing: accent border, h46</span>
+			<span class="cmp-cap">Scanner and ScanPlanner boxes at line .14, Settings fields at .18. → one search shell (h44, 14 px, line .18 → .26 → .3), no accent border (§5.1).</span>
+		</div>
+	</section>
+
+	<!-- Rows, menus, toasts, tooltips -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Rows, menus, toasts, tooltips</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-row · .wk-menu · .wk-toast · .wk-tip</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · rest · selected · keyboard cursor · dense</span>
+					<div style="display: flex; flex-direction: column; gap: 2px">
+						<sc-for list="{{rows}}" as="r" hint-placeholder-count="3">
+							<button type="button" class="wk-row" aria-selected="{{r.sel}}" data-kb-cursor="{{r.kb}}" onClick="{{r.pick}}">
+								<span class="wk-tile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12a8 8 0 0 1 16 0M8 12a4 4 0 0 1 8 0M12 12v8"></path></svg></span>
+								<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px"><span style="font-size: 13px; font-weight: 700">{{r.title}}</span><span style="font-size: 12px; color: var(--wk-text-3)">{{r.meta}}</span></span>
+								<span class="wk-tag" data-variant="{{r.tagv}}">{{r.tag}}</span>
+							</button>
+						</sc-for>
+						<div class="wk-row" data-size="dense"><span style="flex: 1; font-size: 13px">Dense row · Map, Tuned</span><span class="wk-kbd">↵</span></div>
+					</div>
+					<div style="display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap">
+						<div class="wk-menu" role="menu" aria-label="Signal">
+							<button type="button" class="wk-option" role="menuitem" data-active=""><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 8a5 5 0 0 1 0 8M17.7 5a9 9 0 0 1 0 14M6 15h-2a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1h2l3.5 -4.5a.8 .8 0 0 1 1.5 .5v14a.8 .8 0 0 1 -1.5 .5l-3.5 -4.5"></path></svg>Listen</button>
+							<button type="button" class="wk-option" role="menuitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M21 21l-6 -6"></path></svg>Identify</button>
+							<div class="wk-menu-sep"></div>
+							<button type="button" class="wk-option" role="menuitemcheckbox" aria-checked="true">Follow hits</button>
+							<div class="wk-menu-foot">↑↓ to move · ↵ to pick</div>
+						</div>
+						<div style="display: flex; flex-direction: column; gap: 12px; align-items: flex-start">
+							<div class="wk-toast" role="status"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>Saved 446.025<button type="button" class="wk-btn" data-variant="tonal" data-size="sm">Undo</button></div>
+							<span class="wk-tip" role="tooltip">Stay here<span class="wk-kbd">H</span></span>
+						</div>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span class="cmp-cap">Seven menu variants (two blurred at 24 inside blurred drawers), six toast variants, tooltips in two sizes, tiles at 30, 32 and 34, selected rows at five alphas (.08 to .13), Activity rows without hover. → one solid menu (h36 options, touch h44 in suggestion lists), one toast, one tooltip, tiles at 32, selected .11.</span>
+		</div>
+	</section>
+
+	<!-- Sliders, meters, tags -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Sliders, meters, tags</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-slider · .wk-meter · .wk-tag · .wk-count</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · slider (drag it) · seek · meter scales with transform</span>
+					<label class="wk-slider" style="--wk-value: {{vol}}">
+						<span class="wk-sr">Volume</span>
+						<span class="wk-slider-track"><span class="wk-slider-fill"></span></span>
+						<span class="wk-slider-knob"></span>
+						<input type="range" min="0" max="100" value="{{volPct}}" onInput="{{setVol}}"></input>
+					</label>
+					<div class="wk-slider" data-size="seek" style="--wk-value: .35"><span class="wk-slider-track"><span class="wk-slider-fill"></span></span><span class="wk-slider-knob"></span></div>
+					<div class="wk-meter" style="--wk-level: {{vol}}"><span class="wk-meter-fill"></span></div>
+					<div class="wk-meter" data-tone="amber" style="--wk-level: .42"><span class="wk-meter-fill"></span></div>
+					<div class="cmp-row">
+						<span class="wk-tag">DMR</span>
+						<span class="wk-tag" data-variant="accent">Live</span>
+						<span class="wk-tag" data-variant="outline">CC 1</span>
+						<span class="wk-tag" data-variant="amber">Paused</span>
+						<span class="wk-tag" data-size="md" data-variant="accent">TG 2081</span>
+						<span class="wk-count">12</span>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span class="cmp-cap">Listen's level meter animates width (layout work every frame); Settings uses a native slider; tags at 16, 18 and 20 px with outline .18 and .22. → transform-only meters and one slider recipe; tags h18 (md h22), outline .18.</span>
+		</div>
+	</section>
+
+	<!-- Islands and drawers -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Islands, drawers, panes</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-island · .wk-drawer · .wk-pane · .wk-grip</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · island over the plot, drawer with an attached pane</span>
+					<div class="cmp-wf" style="height: 220px; padding: 12px; display: flex; gap: 12px; align-items: flex-start; justify-content: space-between">
+						<div class="wk-island" style="width: 46%">
+							<div class="wk-island-head"><span class="wk-label" data-strong="">Tuner</span><span style="flex: 1"></span><button type="button" class="wk-icon-btn" data-size="sm" aria-label="Expand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6l6 -6"></path></svg></button></div>
+							<div style="padding: 0 16px 14px; font-family: var(--wk-font-head); font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums">161.975</div>
+						</div>
+						<div style="display: flex; height: 100%; width: 50%">
+							<div class="wk-pane" style="flex: 1; padding: 10px; font-size: 12px; color: var(--wk-text-3)">pane</div>
+							<div class="wk-drawer" style="flex: 1.4; padding: 12px 12px 12px 14px; gap: 8px"><div style="display: flex; align-items: center"><h3 class="wk-h3" style="flex: 1; font-size: 20px">Activity</h3><button type="button" class="wk-icon-btn" data-close="" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M18 6l-12 12M6 6l12 12"></path></svg></button></div><span style="font-size: 12px; color: var(--wk-text-3)">Solid: no blur over the waterfall.</span></div>
+						</div>
+					</div>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span class="cmp-cap">Activity and Recordings drawers are glass with a 26 px blur over the live waterfall; Map mixes blur 16, 22 and 24 on about nine surfaces; dropdowns blur at 24 inside blurred drawers. → glass only on small islands (24 px, never nested, never on Paper); drawers solid; the pane moves from Immersive's helmet into the kit.</span>
+		</div>
+	</section>
+
+	<!-- Inventory -->
+	<section style="display: flex; flex-direction: column; gap: 16px; max-width: 1200px">
+		<h2 class="wk-h2">Inventory</h2>
+		<p style="margin: 0; font-size: 13px; color: var(--wk-text-3)">Recipe → the boards that draw it today (inventory of 2026-10-12) → its app component. The app column fills in with the web app (sub-project C).</p>
+		<div class="wk-scroll" style="border-radius: 8px; border: 1px solid var(--wk-line-14)">
+			<table style="width: 100%; border-collapse: collapse; font-size: 13px">
+				<thead>
+					<tr style="text-align: left; color: var(--wk-text-3)"><th class="wk-label" style="padding: 10px 14px">Recipe</th><th class="wk-label" style="padding: 10px 14px">Boards</th><th class="wk-label" style="padding: 10px 14px">App component</th></tr>
+				</thead>
+				<tbody>
+					<sc-for list="{{inventory}}" as="r" hint-placeholder-count="12">
+						<tr style="border-top: 1px solid var(--wk-line-08)"><td style="padding: 9px 14px; font-family: var(--wk-font-mono); font-size: 12.5px; white-space: nowrap">{{r.recipe}}</td><td style="padding: 9px 14px; color: var(--wk-text-2)">{{r.boards}}</td><td style="padding: 9px 14px; color: var(--wk-text-4)">—</td></tr>
+					</sc-for>
+				</tbody>
+			</table>
+		</div>
+	</section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":5200}}'>
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { chipA: true, chipB: false, mode: 'NFM', sw: true, row: 1, vol: 0.62 };
+	}
+	renderVals() {
+		const s = this.state;
+		const ui = 'var(--wk-font-ui)', head = 'var(--wk-font-head)';
+		return {
+			scopes: [
+				{ name: 'True black + Mono', theme: 'dark', ground: 'black', accent: 'mono' },
+				{ name: 'Ink + phosphor', theme: 'dark', ground: 'ink', accent: 'phosphor' },
+				{ name: 'Paper + Mono', theme: 'light', ground: 'paper', accent: 'mono' }
+			],
+			typeScale: [
+				{ token: 'display-2', px: 32, size: '32px', family: head, weight: 700, sample: 'Scanner' },
+				{ token: 'display-1', px: 26, size: '26px', family: head, weight: 700, sample: '446.025 00' },
+				{ token: '3xl', px: 22, size: '22px', family: head, weight: 700, sample: 'Activity drawer' },
+				{ token: '2xl', px: 20, size: '20px', family: head, weight: 700, sample: 'Band plans' },
+				{ token: 'xl', px: 16, size: '16px', family: ui, weight: 700, sample: 'Sub-heading' },
+				{ token: 'lg', px: 14, size: '14px', family: ui, weight: 400, sample: 'Fields and drawer body' },
+				{ token: 'md', px: 13, size: '13px', family: ui, weight: 400, sample: 'Rows, menus and toasts' },
+				{ token: 'sm', px: 12.5, size: '12.5px', family: ui, weight: 700, sample: 'Chips, buttons, segments' },
+				{ token: 'xs', px: 12, size: '12px', family: ui, weight: 400, sample: 'Meta and hints' },
+				{ token: '2xs', px: 11, size: '11px', family: ui, weight: 700, sample: 'TAGS AND COUNTS' }
+			],
+			space: [2, 4, 6, 8, 10, 12, 16, 20, 24].map(n => ({ n, px: n + 'px' })),
+			heights: [['xs', 24], ['sm', 28], ['md', 32], ['lg', 36], ['touch', 44]].map(([n, h]) => ({ n, px: h + 'px' })),
+			radii: ['2px', '4px', '6px', '8px', '12px', '999px'].map(px => ({ px })),
+			chipA: s.chipA, chipB: s.chipB,
+			toggleA: () => this.setState({ chipA: !s.chipA }),
+			toggleB: () => this.setState({ chipB: !s.chipB }),
+			modes: ['NFM', 'AM', 'WFM', 'USB', 'LSB'].map(label => ({ label, on: s.mode === label, pick: () => this.setState({ mode: label }) })),
+			sw: s.sw, toggleSw: () => this.setState({ sw: !s.sw }),
+			btnVariants: [['primary', 'Primary'], ['amber', 'Resume'], ['tonal', 'Tonal'], ['danger', 'Delete'], ['outline', 'Outline'], ['ghost', 'Ghost']].map(([v, label]) => ({ v, label })),
+			iconSizes: ['xs', 'sm', 'md', 'lg', 'touch'].map(size => ({ size })),
+			rows: [
+				{ title: 'TG 2081 · Fire dispatch', meta: 'DMR · 446.025 · 12 s', tag: 'Voice', tagv: 'outline' },
+				{ title: 'AFR1234 · A320', meta: 'ADS-B · FL340 · 82 km', tag: 'New', tagv: 'accent' },
+				{ title: 'Capcode 1234567', meta: 'POCSAG 1200 · 2 min ago', tag: 'Paging', tagv: 'outline' }
+			].map((r, i) => Object.assign(r, { sel: s.row === i, kb: i === 2 ? 'true' : null, pick: () => this.setState({ row: i }) })),
+			vol: s.vol, volPct: Math.round(s.vol * 100),
+			setVol: e => this.setState({ vol: Number(e.target.value) / 100 }),
+			inventory: [
+				{ recipe: '.wk-chip', boards: 'Activity, Scanner, ScanPlanner, Settings, Recordings, Map, Tuned, Palette' },
+				{ recipe: '.wk-token', boards: 'Activity, Recordings, Scanner, Palette' },
+				{ recipe: '.wk-switch', boards: 'Settings, Receiver, Listen, Tuned, Scanner' },
+				{ recipe: '.wk-seg', boards: 'Tuner, Receiver, Listen, Settings, Scanner, ScanPlanner' },
+				{ recipe: '.wk-btn', boards: 'every drawer and island; Map, Settings, ScanPlanner, Recordings' },
+				{ recipe: '.wk-icon-btn, .wk-play', boards: 'Messages, Map, Decode, Recordings, Activity, Immersive dock' },
+				{ recipe: '.wk-island', boards: 'Immersive (Tuner, Receiver, Listen, dock, status), Tuned (floating), Map, Spectrum overlays' },
+				{ recipe: '.wk-drawer, .wk-pane, .wk-grip', boards: 'Activity, Recordings, Scanner, ScanPlanner, Settings, Immersive' },
+				{ recipe: '.wk-row, .wk-tile', boards: 'Activity, Scanner, Settings, Palette, Recordings, Map, Tuned' },
+				{ recipe: '.wk-field, .wk-input', boards: 'Activity, Scanner, ScanPlanner, Settings, Palette, Tuner' },
+				{ recipe: '.wk-select, .wk-stepper', boards: 'Settings' },
+				{ recipe: '.wk-menu, .wk-option', boards: 'Activity, Scanner, Settings, Tuner, Tuned, Map, Recordings' },
+				{ recipe: '.wk-toast', boards: 'Activity, Scanner, Settings, Recordings, Tuned, Immersive' },
+				{ recipe: '.wk-tip, .wk-kbd', boards: 'Tuned, ScanPlanner, Palette, Immersive' },
+				{ recipe: '.wk-slider, .wk-meter', boards: 'Listen, Settings, Recordings, Receiver' },
+				{ recipe: '.wk-tag, .wk-count', boards: 'Messages, Activity, Scanner, Tuned, TunedGallery, Map' },
+				{ recipe: '.wk-label, .wk-h2, .wk-h3', boards: 'every board' },
+				{ recipe: '.wk-live, .wk-spinner', boards: 'Immersive, Scanner, Identify, Activity' },
+				{ recipe: '.wk-scroll, .wk-hscroll', boards: 'Recordings, Palette, Activity' }
+			]
+		};
+	}
+}
+</script>
+</body>
+</html>
