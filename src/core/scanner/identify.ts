@@ -18,7 +18,14 @@ import type {
 	ScannerIdentifyState,
 	ScannerIdentifyTrial,
 	ScannerIdentifyView,
+	ScannerAmbientDecoderType,
 	ScannerTrialOutcome,
+} from "@wavekit/api-types"
+import {
+	IDENTIFY_AMBIENT_MAX_TRIALS,
+	SCANNER_AMBIENT_DECODER_PROTOCOL,
+	SCANNER_AMBIENT_PROTOCOLS,
+	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 } from "@wavekit/api-types"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ArtefactKind } from "../spectrum/artefacts.js"
@@ -95,7 +102,28 @@ export const IDENTIFY_PROTOCOLS: readonly ScannerProtocol[] = [
 	"flex",
 	"aprs",
 	"ism",
+	// WG7 req 1.7: ambient-only protocols (no probe decoder; named by a decoder already running there).
+	"ais",
+	"acars",
+	"vdl2",
+	"lora",
 ]
+
+/**
+ * WG7 req 1.5: one running ambient decoder whose target frequency lies within the identify target's tolerance
+ * (structurally the `AmbientCoverage` of `probes/ambient.ts`).
+ */
+export type AmbientCoverageLike = {
+	decoderId: string
+	type: ScannerAmbientDecoderType
+	protocol: ScannerProtocol
+}
+
+export type IdentifyAmbientLookup = (
+	sourceId: string,
+	hz: number,
+	toleranceHz: number,
+) => readonly AmbientCoverageLike[]
 
 /** OBW window (Hz) of each bandwidth-defined class (§ 6.1; Task 11's class limits). */
 export const CLASS_OBW_HZ: Readonly<
@@ -152,7 +180,7 @@ export interface IdentifyPlannedTrial {
 	score: number
 	decoder: ScannerIdentifyTrial["decoder"]
 	mode: string | null
-	transport: "offset" | "channel" | null
+	transport: "offset" | "channel" | "ambient" | null
 	reason?: NonNullable<ScannerIdentifyTrial["reason"]>
 	run: number | null
 }
@@ -246,6 +274,7 @@ export function identifyScores(
 		for (const h of CLASS_HYPOTHESES[cls]) {
 			if (
 				!IDENTIFY_PROTOCOLS.includes(h.protocol) ||
+				SCANNER_AMBIENT_PROTOCOLS.includes(h.protocol) ||
 				(only && !only.has(h.protocol))
 			)
 				continue
@@ -328,6 +357,79 @@ export function planIdentifyTrials(
 		})
 	}
 	return { trials, runs }
+}
+
+/**
+ * WG7 req 1.5: one ambient trial per protocol a running ambient decoder covers at the target (deduplicated per
+ * protocol, at most IDENTIFY_AMBIENT_MAX_TRIALS, ordered by decoder id), restricted to `protocols` when given.
+ * A protocol `protocols` names explicitly without coverage is `unsupported`/`no-ambient-decoder`. The lookup
+ * gets the target's own tolerance, never below SCANNER_AMBIENT_TARGET_TOLERANCE_HZ. A missing or throwing
+ * lookup is no coverage (fail closed). Ambient trials hold no run and no probe (`run: null`, score 0).
+ */
+export function planAmbientTrials(
+	target: { sourceId: string; hz: number; toleranceHz: number },
+	ambient: IdentifyAmbientLookup | undefined,
+	protocols: readonly ScannerProtocol[],
+	onError?: (err: unknown) => void,
+): IdentifyPlannedTrial[] {
+	const only = protocols.length > 0 ? new Set(protocols) : null
+	let coverage: readonly AmbientCoverageLike[] = []
+	if (ambient) {
+		try {
+			coverage = ambient(
+				target.sourceId,
+				target.hz,
+				Math.max(target.toleranceHz, SCANNER_AMBIENT_TARGET_TOLERANCE_HZ),
+			)
+		} catch (err) {
+			onError?.(err)
+			coverage = []
+		}
+	}
+	const byProtocol = new Map<ScannerProtocol, AmbientCoverageLike>()
+	for (const c of [...coverage].sort((a, b) =>
+		a.decoderId < b.decoderId ? -1 : a.decoderId > b.decoderId ? 1 : 0,
+	)) {
+		// Only a decoder type that names this protocol counts (defensive against a mismatched lookup).
+		if (
+			SCANNER_AMBIENT_DECODER_PROTOCOL[c.type] !== c.protocol ||
+			!SCANNER_AMBIENT_PROTOCOLS.includes(c.protocol) ||
+			(only && !only.has(c.protocol)) ||
+			byProtocol.has(c.protocol)
+		)
+			continue
+		byProtocol.set(c.protocol, c)
+	}
+	const trials: IdentifyPlannedTrial[] = [...byProtocol.values()]
+		.slice(0, IDENTIFY_AMBIENT_MAX_TRIALS)
+		.map(c => ({
+			protocol: c.protocol,
+			score: 0,
+			decoder: c.type,
+			mode: c.type,
+			transport: "ambient",
+			run: null,
+		}))
+	if (only) {
+		for (const p of protocols) {
+			if (!SCANNER_AMBIENT_PROTOCOLS.includes(p) || byProtocol.has(p)) continue
+			const type = (
+				Object.keys(
+					SCANNER_AMBIENT_DECODER_PROTOCOL,
+				) as ScannerAmbientDecoderType[]
+			).find(k => SCANNER_AMBIENT_DECODER_PROTOCOL[k] === p)
+			trials.push({
+				protocol: p,
+				score: 0,
+				decoder: type ?? null,
+				mode: null,
+				transport: null,
+				reason: "no-ambient-decoder",
+				run: null,
+			})
+		}
+	}
+	return trials
 }
 
 /** The nearest candidate within the tolerance; the stronger one on equal distance. */
@@ -466,6 +568,8 @@ export interface IdentifyDeps {
 	emit: (data: ScannerIdentifyEventData) => void
 	logger: Logger
 	now: () => number
+	/** WG7 req 1.5: running ambient decoders covering a frequency (AmbientEvidence.coverageAt). Absent: no ambient trials. */
+	ambient?: IdentifyAmbientLookup
 }
 
 interface RunState {
@@ -500,6 +604,8 @@ interface TargetState {
 	active: RunState[]
 	decoded: { protocol: ScannerProtocol; identity: Identity } | null
 	result: ScannerIdentifyResult | null
+	/** WG7: running ambient trials end `timeout` at this time (the wait deadline, or plan time + timeoutMs for `all`). */
+	ambientUntil: number
 }
 
 const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
@@ -790,6 +896,7 @@ export class IdentifyRunner implements JobDriver {
 			active: [],
 			decoded: null,
 			result: null,
+			ambientUntil: Number.POSITIVE_INFINITY,
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -881,7 +988,27 @@ export class IdentifyRunner implements JobDriver {
 			format: this.deps.format(this.sourceId),
 			channelizer: this.deps.channelizer(),
 		})
+		// WG7 req 1.5: ambient trials after the probe trials; they never take a run, so probes are not delayed.
+		plan.trials.push(
+			...planAmbientTrials(
+				{
+					sourceId: this.sourceId,
+					hz: t.targetHz,
+					toleranceHz: t.toleranceHz,
+				},
+				this.deps.ambient,
+				this.deps.identify.protocols,
+				err =>
+					this.log.warn(
+						{ err },
+						"Ambient coverage unavailable; no ambient trials",
+					),
+			),
+		)
 		t.plan = plan
+		t.ambientUntil = Number.isFinite(t.deadline)
+			? t.deadline
+			: this.deps.now() + this.deps.identify.timeoutMs
 		t.trials = plan.trials.map(
 			(p): ScannerIdentifyTrial => ({
 				protocol: p.protocol,
@@ -889,9 +1016,11 @@ export class IdentifyRunner implements JobDriver {
 				mode: p.mode,
 				transport: p.transport,
 				outcome:
-					p.run === null
-						? "unsupported"
-						: (t.done.get(p.protocol) ?? "pending"),
+					p.transport === "ambient"
+						? (t.done.get(p.protocol) ?? "running")
+						: p.run === null
+							? "unsupported"
+							: (t.done.get(p.protocol) ?? "pending"),
 				...(p.reason ? { reason: p.reason } : {}),
 			}),
 		)
@@ -916,8 +1045,15 @@ export class IdentifyRunner implements JobDriver {
 				this.emitTarget(t)
 			}
 		}
+		if (now >= t.ambientUntil && this.endAmbient(t, "timeout"))
+			this.emitTarget(t)
 		if (!this.fillRuns(t, now)) return
-		if (t.active.length === 0 && t.nextRun >= plan.runs.length)
+		// A target with running ambient trials waits for their evidence or deadline.
+		if (
+			t.active.length === 0 &&
+			t.nextRun >= plan.runs.length &&
+			!this.ambientRunning(t)
+		)
 			this.finishTarget(t, null)
 	}
 
@@ -1094,6 +1230,7 @@ export class IdentifyRunner implements JobDriver {
 			}
 			for (const trial of t.trials)
 				if (trial.outcome === "pending") trial.outcome = "not-needed"
+			this.endAmbient(t, "not-needed")
 			t.nextRun = t.plan?.runs.length ?? 0
 		} else if (t.state === "trying" && why !== "stopped") {
 			// Request the next run before this one's slot is released: the pool's priority queue then hands the slot to
@@ -1318,7 +1455,65 @@ export class IdentifyRunner implements JobDriver {
 		if (!this.deps.identify.exhaustive) this.endRun(hit.t, hit.r, "decoded")
 	}
 
+	/**
+	 * WG7 req 1.5: ambient evidence paired with one of this job's observations. Decodes a running ambient trial
+	 * of the target whose resolved observation it is, when the evidence is CRC-clean, ambient and carries an
+	 * accepted (H2) identity for the trial's protocol.
+	 */
+	onAmbientEvidence(observationId: string, ev: DecodeEvidence): void {
+		if (
+			this.phase !== "running" ||
+			ev.origin !== "ambient" ||
+			!ev.crcClean ||
+			!ev.identity
+		)
+			return
+		const identity = ev.identity
+		for (const t of this.targets) {
+			if (t.state !== "trying" || t.view?.observationId !== observationId)
+				continue
+			const trial = t.trials.find(
+				x =>
+					x.transport === "ambient" &&
+					x.protocol === ev.protocol &&
+					x.outcome === "running",
+			)
+			if (!trial) continue
+			trial.outcome = "decoded"
+			t.decoded ??= { protocol: ev.protocol, identity }
+			if (!this.deps.identify.exhaustive) {
+				// § 10.8 (3) like a probe decode: every other trial is not needed.
+				const runs = t.active.splice(0)
+				for (const r of runs) this.setTrials(t, r.runIndex, () => "not-needed")
+				for (const x of t.trials)
+					if (x.outcome === "pending") x.outcome = "not-needed"
+				this.endAmbient(t, "not-needed")
+				t.nextRun = t.plan?.runs.length ?? 0
+				this.releaseRuns(runs)
+			}
+			this.emitTarget(t)
+			return
+		}
+	}
+
 	// === helpers ===
+
+	private ambientRunning(t: TargetState): boolean {
+		return t.trials.some(
+			x => x.transport === "ambient" && x.outcome === "running",
+		)
+	}
+
+	/** Ends every running ambient trial of `t` with `outcome`; true when one ended. */
+	private endAmbient(t: TargetState, outcome: ScannerTrialOutcome): boolean {
+		let ended = false
+		for (const x of t.trials)
+			if (x.transport === "ambient" && x.outcome === "running") {
+				x.outcome = outcome
+				ended = true
+			}
+		return ended
+	}
 
 	private request(req: ProbeRequest): ReturnType<ProbePool["request"]> {
 		this.requesting = true
