@@ -73,7 +73,7 @@ describe("built-row growth bounds", () => {
 		)
 	})
 
-	it("rounds a high-precision aircraft position instead of exceeding 160 bytes", () => {
+	it("keeps a high-precision aircraft position within the 240-byte coalesced bound", () => {
 		const lat = 51.12345678912345
 		const lon = -0.12345678912345
 		const output = decoderOutput("aircraft", { icao: "abc123", lat, lon })

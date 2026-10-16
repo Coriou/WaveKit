@@ -7,6 +7,7 @@ import {
 import type { DecodePresentation } from "../types.js"
 import {
 	APRS_TEXT_BYTES,
+	altitudeFromFeet,
 	canonicalCallsign,
 	type FieldDraft,
 	asNumber,
@@ -49,7 +50,11 @@ function messageText(payload: Record<string, unknown>): string | undefined {
 	return stringField(body, "text")
 }
 
-/** Station, object and item packets. Position only for the six position types, or an object/item. */
+/**
+ * Station, object and item packets. Position only for the six position
+ * types, or an object/item; `altM` from the payload `altitude` in feet
+ * (req 4.2).
+ */
 export function presentAprs(data: unknown): DecodePresentation | undefined {
 	const payload = parsePayload(aprsPayload, data)
 	if (!payload) return undefined
@@ -142,7 +147,9 @@ export function presentAprs(data: unknown): DecodePresentation | undefined {
 		protocol: "aprs",
 		entityKey: key,
 		title: titled,
-		position: positioned ? readPosition(payload) : undefined,
+		position: positioned
+			? readPosition(payload, altitudeFromFeet(payload["altitude"]))
+			: undefined,
 		fields,
 	})
 }
