@@ -190,7 +190,7 @@ describe("unmounted decoder event envelope", () => {
 	it("handles real ACARS defaults/undefined and VDL2 unknown frequency without promoting them", () => {
 		const acars = parseAcarsdecJson({ text: "Message" })
 		const vdl2 = parseDumpvdl2Json({ vdl2: { t: { sec: 1 } } })
-		expect(acars?.frequency).toBeCloseTo(131_550_000, 0)
+		expect(acars).not.toHaveProperty("frequency")
 		expect(vdl2?.frequency).toBe(0)
 		for (const data of [acars, vdl2]) {
 			const envelope = createDecodeEnvelope(output(data), context())

@@ -45,8 +45,12 @@ export interface AcarsdecOptions {
 export interface ACARSMessage {
 	/** Timestamp when the message was received */
 	timestamp: Date
-	/** Frequency the message was received on (Hz) */
-	frequency: number
+	/**
+	 * Frequency the message was received on (Hz), as the decoder reported it.
+	 * Absent when acarsdec reports none (never a protocol constant: provenance
+	 * reads it as the channel, WG3 req 5.2).
+	 */
+	frequency?: number
 	/** Channel number */
 	channel: number
 	/** Signal level in dB */
@@ -294,8 +298,8 @@ function parseAcarsdecOptions(config: DecoderConfig): AcarsdecOptions {
 export function parseAcarsdecJson(
 	json: AcarsdecJsonOutput,
 ): ACARSMessage | null {
-	// Frequency is required - use freq or frequency field
-	const frequency = json.freq ?? json.frequency ?? 131.55 // Default fallback if missing (stdin mode might output 0 or null?)
+	// MHz from `freq` or the older `frequency`; absent stays absent (WG3 req 5.2).
+	const frequencyMhz = json.freq ?? json.frequency
 
 	// Parse timestamp - can be Unix timestamp or ISO string
 	let timestamp: Date
@@ -319,7 +323,9 @@ export function parseAcarsdecJson(
 
 	return {
 		timestamp,
-		frequency: frequency * 1_000_000, // Convert MHz to Hz
+		...(frequencyMhz === undefined
+			? {}
+			: { frequency: frequencyMhz * 1_000_000 }), // MHz to Hz
 		channel: json.channel ?? 0,
 		level: json.level ?? 0,
 		error: json.error ?? 0,
