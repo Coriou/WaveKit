@@ -3,8 +3,12 @@ import {
 	BANDPLAN_IMPORT_FORMATS,
 	BANDPLANS_LIMITS,
 	OPERATOR_PACK_ID,
+	BANDPLAN_URL_IMPORT_HOSTS,
+	bandPlanImportUrlSchema,
 	bandPlanMutationSchema,
+	bandPlanTextSchema,
 	importPreviewRequestSchema,
+	importUrlPreviewRequestSchema,
 } from "@wavekit/api-types"
 import type {
 	Band,
@@ -17,6 +21,8 @@ import type {
 	BandPlanState,
 	BandPlanStore,
 	BandPlansChangedEventData,
+	BandPlanUpdateCheck,
+	ImportUrlPreview,
 	DisplayGroup,
 	ImportPreview,
 	BandPlanImportFormat,
@@ -41,6 +47,8 @@ import type {
 	BandPlanServiceOptions,
 	BandPlanStoreUnavailableReason,
 	BandPlanTransition,
+	BandPlanUrlFetcher,
+	BandPlanUrlFetchResult,
 	BuiltinPackIdFor,
 	BuiltinPresetsFor,
 	DomainContext,
@@ -85,6 +93,20 @@ export interface BandPlanServiceDeps {
 	 * Main wires `resolveScannerBandplans` in the barrel.
 	 */
 	readonly scannerBandplans?: ResolveScannerBandplans
+	/**
+	 * WG6: `diffImportedBands` from ./import/update-diff.js (Main wires it in the barrel).
+	 * Absent: checkImportUpdate answers BANDPLANS_URL_IMPORT_DISABLED.
+	 */
+	readonly diffImportedBands?: DiffImportedBands
+}
+/** Structural type of import/update-diff.ts `diffImportedBands`; the service never imports it. */
+export type DiffImportedBands = (
+	current: readonly StoredBand[],
+	fresh: readonly StoredBand[],
+) => {
+	readonly added: BandPlanUpdateCheck["added"]
+	readonly removed: BandPlanUpdateCheck["removed"]
+	readonly changed: BandPlanUpdateCheck["changed"]
 }
 interface PreparedMutation {
 	readonly mutation: BandPlanMutation
@@ -257,6 +279,7 @@ class BandPlanRuntime implements BandPlanService {
 				importFormats: BANDPLAN_IMPORT_FORMATS.filter(
 					format => this.parserFor(format) !== undefined,
 				),
+				urlImportHosts: this.urlImportOn() ? [...this.urlHosts()] : [],
 			},
 			stack: {
 				source: stack.source,
@@ -323,6 +346,74 @@ class BandPlanRuntime implements BandPlanService {
 			),
 		}
 	}
+	async previewImportUrl(request: unknown): Promise<ImportUrlPreview> {
+		const fetcher = this.urlFetcherOrThrow()
+		if (this.closing) throw unavailable()
+		const parsed = importUrlPreviewRequestSchema.safeParse(request)
+		if (!parsed.success) throw new BandPlansError("BANDPLANS_INVALID")
+		const { url, format, groupOverrides } = parsed.data
+		return this.previewFetched(
+			url,
+			format,
+			groupOverrides,
+			await this.fetchAllowed(fetcher, url),
+		)
+	}
+	async checkImportUpdate(packId: string): Promise<BandPlanUpdateCheck> {
+		const fetcher = this.urlFetcherOrThrow()
+		const diffImportedBands = this.deps.diffImportedBands
+		if (!diffImportedBands)
+			throw new BandPlansError("BANDPLANS_URL_IMPORT_DISABLED")
+		if (this.closing) throw unavailable()
+		if (typeof packId !== "string" || packId === OPERATOR_PACK_ID)
+			throw new BandPlansError("BANDPLANS_NOT_FOUND")
+		const stored = this.persisted()?.importedPacks.find(
+			pack => pack.id === packId,
+		)
+		if (!stored) {
+			if (this.builtinById.has(packId))
+				throw new BandPlansError("BANDPLANS_INVALID")
+			throw new BandPlansError("BANDPLANS_NOT_FOUND")
+		}
+		const sourceUrl = stored.provenance.sourceUrl
+		if (sourceUrl === undefined) throw new BandPlansError("BANDPLANS_INVALID")
+		const fetched = await this.fetchAllowed(fetcher, sourceUrl)
+		const fetchedSha256 = createHash("sha256")
+			.update(fetched.bytes)
+			.digest("hex")
+		const base = {
+			packId,
+			sourceUrl,
+			checkedAt: this.domain.now(),
+			currentSha256: stored.provenance.sha256,
+			fetchedSha256,
+		}
+		if (fetchedSha256 === stored.provenance.sha256)
+			return {
+				...base,
+				upToDate: true,
+				added: [],
+				removed: [],
+				changed: [],
+				preview: null,
+			}
+		const { preview, bands } = this.previewFetchedWithBands(
+			sourceUrl,
+			stored.provenance.format,
+			[],
+			fetched,
+		)
+		// Both sides are bounded by bandsPerPack, so the diff is never truncated.
+		const diff = diffImportedBands(stored.bands, bands)
+		return detach({
+			...base,
+			upToDate: false,
+			added: diff.added,
+			removed: diff.removed,
+			changed: diff.changed,
+			preview,
+		})
+	}
 	mutate(input: unknown): Promise<BandPlanMutationResult> {
 		let prepared: PreparedMutation
 		try {
@@ -359,6 +450,96 @@ class BandPlanRuntime implements BandPlanService {
 			})
 		}
 		return this.closeResult
+	}
+	private urlHosts(): readonly string[] {
+		return this.options.urlImportHosts ?? BANDPLAN_URL_IMPORT_HOSTS
+	}
+	/** Off: no fetcher, an empty allowlist, or a read-only (unprotected) service. */
+	private urlImportOn(): boolean {
+		return (
+			this.options.urlFetcher !== undefined &&
+			this.urlHosts().length > 0 &&
+			this.options.writable
+		)
+	}
+	private urlFetcherOrThrow(): BandPlanUrlFetcher {
+		const fetcher = this.options.urlFetcher
+		if (!fetcher || !this.urlImportOn())
+			throw new BandPlansError("BANDPLANS_URL_IMPORT_DISABLED")
+		return fetcher
+	}
+	/** Syntax and exact host membership in the CURRENT allowlist; never echoes the URL. */
+	private assertAllowedUrl(url: string): void {
+		if (!bandPlanImportUrlSchema.safeParse(url).success)
+			throw new BandPlansError("BANDPLANS_URL_REFUSED")
+		let host: string
+		try {
+			host = new URL(url).hostname.toLowerCase()
+		} catch {
+			throw new BandPlansError("BANDPLANS_URL_REFUSED")
+		}
+		if (!this.urlHosts().includes(host))
+			throw new BandPlansError("BANDPLANS_URL_REFUSED")
+	}
+	private async fetchAllowed(
+		fetcher: BandPlanUrlFetcher,
+		url: string,
+	): Promise<BandPlanUrlFetchResult> {
+		this.assertAllowedUrl(url)
+		let result: BandPlanUrlFetchResult
+		try {
+			result = await fetcher(url, [...this.urlHosts()])
+		} catch (error) {
+			if (error instanceof BandPlansError) throw error
+			throw new BandPlansError("BANDPLANS_URL_FETCH_FAILED")
+		}
+		if (!(result.bytes instanceof Uint8Array))
+			throw new BandPlansError("BANDPLANS_URL_FETCH_FAILED")
+		if (result.bytes.byteLength > BANDPLANS_LIMITS.importFileBytes)
+			throw new BandPlansError("BANDPLANS_IMPORT_TOO_LARGE")
+		return result
+	}
+	private previewFetched(
+		url: string,
+		format: BandPlanImportFormat,
+		groupOverrides: ImportPreviewRequest["groupOverrides"],
+		fetched: BandPlanUrlFetchResult,
+	): ImportUrlPreview {
+		return this.previewFetchedWithBands(url, format, groupOverrides, fetched)
+			.preview
+	}
+	private previewFetchedWithBands(
+		url: string,
+		format: BandPlanImportFormat,
+		groupOverrides: ImportPreviewRequest["groupOverrides"],
+		fetched: BandPlanUrlFetchResult,
+	): { preview: ImportUrlPreview; bands: readonly StoredBand[] } {
+		const contentBase64 = Buffer.from(
+			fetched.bytes.buffer,
+			fetched.bytes.byteOffset,
+			fetched.bytes.byteLength,
+		).toString("base64")
+		const parsed = detach(
+			this.decodeAndParse({
+				format,
+				fileName: urlFileName(url),
+				contentBase64,
+				groupOverrides,
+			}),
+		)
+		return {
+			preview: {
+				...parsed.preview,
+				previewDigest: previewDigestFor(
+					parsed.preview.sha256,
+					groupOverrides,
+					url,
+				),
+				sourceUrl: url,
+				contentBase64,
+			},
+			bands: parsed.bands,
+		}
 	}
 	private context(): BandPlanContext {
 		return {
@@ -544,9 +725,19 @@ class BandPlanRuntime implements BandPlanService {
 			throw new BandPlansError("BANDPLANS_QUOTA")
 		if (parsed.data.type !== "commit-import")
 			return { mutation: parsed.data, parsedImport: null }
+		const sourceUrl = parsed.data.sourceUrl
+		if (typeof sourceUrl === "string") {
+			if (!this.urlImportOn())
+				throw new BandPlansError("BANDPLANS_URL_IMPORT_DISABLED")
+			this.assertAllowedUrl(sourceUrl)
+		}
 		const imported = this.decodeAndParse(parsed.data)
 		const bytesSha256 = fileSha256(parsed.data.contentBase64)
-		const digest = previewDigestFor(bytesSha256, parsed.data.groupOverrides)
+		const digest = previewDigestFor(
+			bytesSha256,
+			parsed.data.groupOverrides,
+			sourceUrl,
+		)
 		if (
 			imported.preview.sha256 !== bytesSha256 ||
 			digest !== parsed.data.previewDigest
@@ -602,6 +793,21 @@ class BandPlanRuntime implements BandPlanService {
 		} catch {
 			return "failed"
 		}
+	}
+}
+
+const URL_FILE_NAME_FALLBACK = "band-plan"
+/** Last decoded path segment, at most 128 code points and valid band-plan text; else "band-plan". */
+function urlFileName(url: string): string {
+	try {
+		const segments = new URL(url).pathname.split("/")
+		const decoded = decodeURIComponent(segments[segments.length - 1] ?? "")
+		const bounded = [...decoded].slice(0, 128).join("")
+		return bandPlanTextSchema(128).safeParse(bounded).success
+			? bounded
+			: URL_FILE_NAME_FALLBACK
+	} catch {
+		return URL_FILE_NAME_FALLBACK
 	}
 }
 
