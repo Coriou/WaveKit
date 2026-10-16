@@ -33,7 +33,7 @@ export interface TrailsReadInput {
 	limits: TrailsReadLimits
 	/** generatedAt; defaults to Date.now(). */
 	nowMs?: number
-	/** Keyset chunk size of the walk; defaults to TRAILS_CHUNK_ROWS (tests lower it). */
+	/** Index rows examined per walk step; defaults to TRAILS_CHUNK_ROWS (tests lower it). */
 	chunkRows?: number
 	/**
 	 * Cooperative wall-time budget in ms of the whole read (walk and early-stop probe);
@@ -342,7 +342,12 @@ function numberOf(value: unknown, what: string): number {
 	throw activityRecordCorrupt(`Activity ${what} is not a number`)
 }
 
-/** Rows fetched per keyset chunk of the newest-first walk. */
+interface StepCursor {
+	ms: number
+	seq: number
+}
+
+/** Index rows of the window examined per step of the newest-first walk. */
 export const TRAILS_CHUNK_ROWS = 4_096
 
 function toTrailRow(row: Record<string, unknown>): TrailRow {
@@ -368,32 +373,15 @@ export function readTrails(
 	input: TrailsReadInput,
 ): ActivityTrails {
 	checkLimits(input)
-	const where = [
-		"produced_at_ms BETWEEN ? AND ?",
-		"kind = 'decoder-reception'",
-		"entity_key IS NOT NULL",
-	]
-	const params: SqlValue[] = [input.producedFromMs, input.producedToMs]
+	// Filters only; the window is applied per step as an index range.
+	const where = ["kind = 'decoder-reception'", "entity_key IS NOT NULL"]
+	const params: SqlValue[] = []
 	appendIn(where, params, "category", input.categories)
 	appendIn(where, params, "protocol", input.protocols)
 	appendIn(where, params, "entity_key", input.entityKeys)
-	// The walk is read in keyset chunks so a point cap stops it early instead
-	// of materialising scanRows rows. One extra row past scanRows signals the
-	// scan-rows bound.
+	const filters = where.join(" AND ")
+	const fromMs = input.producedFromMs
 	const acceptor = createTrailAcceptor(input.limits)
-	const budget = input.limits.scanRows + 1
-	const select = `SELECT seq, produced_at_ms, entity_key, category, protocol,
-		CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
-			THEN json_extract(summary_json, '$.position') END AS position
-		FROM activity INDEXED BY activity_produced
-		WHERE ${where.join(" AND ")}`
-	const first = db.prepare(
-		`${select} ORDER BY produced_at_ms DESC, seq DESC LIMIT ?`,
-	)
-	// (produced_at_ms, seq) < (lastMs, lastSeq), written so the index range still applies.
-	const next = db.prepare(
-		`${select} AND produced_at_ms <= ? AND (produced_at_ms < ? OR seq < ?) ORDER BY produced_at_ms DESC, seq DESC LIMIT ?`,
-	)
 	const chunk = Math.max(1, Math.floor(input.chunkRows ?? TRAILS_CHUNK_ROWS))
 	const clock = input.clock ?? (() => performance.now())
 	const wallBudgetMs = input.wallBudgetMs ?? TRAILS_WALL_BUDGET_MS
@@ -404,58 +392,116 @@ export function readTrails(
 	)
 	const startedMs = clock()
 	const elapsed = (): number => clock() - startedMs
+
+	// The walk goes newest first, (produced_at_ms, seq) descending, in steps of at most
+	// `chunk` index rows of the window, whatever the filters match: a step first finds
+	// its end on activity_produced alone (a covering index read), then reads the filtered
+	// rows of that range only. So every statement examines a bounded number of rows and
+	// the clock is checked between them. A cursor is exclusive; the start is above any row.
+	const START: StepCursor = {
+		ms: input.producedToMs,
+		seq: Number.MAX_SAFE_INTEGER,
+	}
+	const stepEndStatement = db.prepare(
+		`SELECT produced_at_ms, seq FROM activity INDEXED BY activity_produced
+		WHERE produced_at_ms BETWEEN ? AND ? AND (produced_at_ms < ? OR seq < ?)
+		ORDER BY produced_at_ms DESC, seq DESC LIMIT 1 OFFSET ?`,
+	)
+	/** The last index row of the step after `cursor`; null when the window ends inside it. */
+	const stepEnd = (cursor: StepCursor): StepCursor | null => {
+		const row = stepEndStatement.get(
+			fromMs,
+			cursor.ms,
+			cursor.ms,
+			cursor.seq,
+			chunk - 1,
+		)
+		if (row === undefined) return null
+		return {
+			ms: numberOf(row["produced_at_ms"], "producedAt"),
+			seq: numberOf(row["seq"], "seq"),
+		}
+	}
+	/** (end, cursor): below the cursor, down to and including the step end. */
+	const range = `produced_at_ms BETWEEN ? AND ? AND (produced_at_ms < ? OR seq < ?)
+		AND (produced_at_ms > ? OR seq >= ?)`
+	const rangeParams = (
+		cursor: StepCursor,
+		end: StepCursor | null,
+	): SqlValue[] => [
+		end?.ms ?? fromMs,
+		cursor.ms,
+		cursor.ms,
+		cursor.seq,
+		end?.ms ?? fromMs,
+		end?.seq ?? -1,
+	]
+	const scanStatement = db.prepare(
+		`SELECT seq, produced_at_ms, entity_key, category, protocol,
+		CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
+			THEN json_extract(summary_json, '$.position') END AS position
+		FROM activity INDEXED BY activity_produced
+		WHERE ${range} AND ${filters}
+		ORDER BY produced_at_ms DESC, seq DESC`,
+	)
+
 	let read = 0
 	let moreRows = false
 	let timeLimited = false
-	let last: TrailRow | null = null
-	/** The row past scanRows that only signalled the bound; never pushed. */
-	let extra: TrailRow | null = null
-	walk: for (;;) {
-		const size = Math.min(chunk, budget - read)
-		const found =
-			last === null
-				? first.all(...params, size)
-				: next.all(
-						...params,
-						last.producedAtMs,
-						last.producedAtMs,
-						last.seq,
-						size,
-					)
-		for (const raw of found) {
-			// Checked before every row after the first, so a stop always leaves a real
-			// unscanned row behind and at least the newest row is taken.
+	/** Rows read by the walk but not consumed; the probe checks them first. */
+	let pending: TrailRow[] = []
+	/** Where the probe continues: past the last step read; null when the window is done. */
+	let resume: StepCursor | null = null
+	let cursor = START
+	walk: for (let steps = 0; ; steps += 1) {
+		if (steps > 0 && elapsed() >= walkBudgetMs) {
+			timeLimited = true
+			resume = cursor
+			break
+		}
+		const end = stepEnd(cursor)
+		const rows = scanStatement
+			.all(...rangeParams(cursor, end), ...params)
+			.map(toTrailRow)
+		for (let index = 0; index < rows.length; index += 1) {
+			const row = rows[index] as TrailRow
+			// Checked before every row after the first, so a stop leaves a real unscanned
+			// row behind.
 			if (read > 0 && elapsed() >= walkBudgetMs) {
 				timeLimited = true
+				pending = rows.slice(index)
+				resume = end
 				break walk
 			}
-			const row = toTrailRow(raw)
 			read += 1
-			last = row
 			if (read > input.limits.scanRows) {
+				// One row past scanRows only signals the bound.
 				moreRows = true
-				extra = row
+				pending = rows.slice(index)
+				resume = end
 				break walk
 			}
-			if (!acceptor.push(row)) break walk
+			if (!acceptor.push(row)) {
+				pending = rows.slice(index + 1)
+				resume = end
+				break walk
+			}
 		}
-		if (found.length < size || read >= budget) break
+		if (end === null) break
+		cursor = end
 	}
-	// Early stop: one bounded continuation of the same newest-first walk, past the
-	// stop, reads the position only for the returned trails not yet known to be cut,
-	// to find those that lost an older in-window valid row. Every statement reads at
-	// most one chunk, so the clock is checked between chunks. It ends when every
-	// candidate is resolved or the window is exhausted (exact), or when the shared
-	// wall budget runs out (the rest are marked truncated and time-limit is reported).
-	const probe = db.prepare(
-		`SELECT seq, produced_at_ms, entity_key,
+	// Early stop: the walk continues past the stop with the same steps, reading the
+	// position only for the returned trails not yet known to be cut, to find those that
+	// lost an older in-window valid row. Rows the walk already read are not read again.
+	// It ends when no open trail remains or the window is exhausted (exact), or when the
+	// shared wall budget runs out (the rest are marked truncated, time-limit reported).
+	const probeStatement = db.prepare(
+		`SELECT entity_key,
 			CASE WHEN entity_key IN (SELECT value FROM json_each(?))
 				THEN CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
 					THEN json_extract(summary_json, '$.position') END END AS position
 			FROM activity INDEXED BY activity_produced
-			WHERE ${where.join(" AND ")}
-			AND produced_at_ms <= ? AND (produced_at_ms < ? OR seq < ?)
-			ORDER BY produced_at_ms DESC, seq DESC LIMIT ?`,
+			WHERE ${range} AND ${filters}`,
 	)
 	const resolveOlder: TrailOlderResolver = candidates => {
 		const open = new Set(candidates)
@@ -466,32 +512,26 @@ export function readTrails(
 				older.add(entityKey)
 			}
 		}
-		if (extra !== null) check(extra.entityKey, extra.position)
-		let cursor: { ms: number; seq: number } | null =
-			last === null ? null : { ms: last.producedAtMs, seq: last.seq }
-		while (open.size > 0 && cursor !== null) {
+		for (const row of pending) check(row.entityKey, row.position)
+		let at = resume
+		while (open.size > 0 && at !== null) {
 			if (elapsed() >= wallBudgetMs) return { older, complete: false }
-			const found = probe.all(
+			const end = stepEnd(at)
+			if (elapsed() >= wallBudgetMs) return { older, complete: false }
+			const found = probeStatement.all(
 				JSON.stringify([...open]),
+				...rangeParams(at, end),
 				...params,
-				cursor.ms,
-				cursor.ms,
-				cursor.seq,
-				chunk,
 			)
 			for (const raw of found) {
 				const entityKey = raw["entity_key"]
 				if (typeof entityKey !== "string")
 					throw activityRecordCorrupt("Activity trail row is corrupt")
-				cursor = {
-					ms: numberOf(raw["produced_at_ms"], "producedAt"),
-					seq: numberOf(raw["seq"], "seq"),
-				}
 				const position = raw["position"]
 				if (position !== null && position !== undefined)
 					check(entityKey, position)
 			}
-			if (found.length < chunk) break
+			at = end
 		}
 		return { older, complete: true }
 	}

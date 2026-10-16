@@ -555,14 +555,14 @@ describe("readTrails against a store", () => {
 		at(300, "A")
 		at(400, "C")
 		at(500, "A")
-		// One tick per clock call: start 0, then checks before rows 2, 3, 4 read 1, 2, 3.
-		// The walk budget is 100 - 97 = 3, so it stops before row 4; the probe then runs
-		// well inside the 100 total and keeps the per-trail flags exact.
+		// One tick per clock call: start 0, row 2 reads 1, step 2 reads 2, rows 3 and 4
+		// read 3 and 4. The walk budget is 100 - 96 = 4, so it stops before row 4; the
+		// probe then runs well inside the 100 total and keeps the per-trail flags exact.
 		let ticks = 0
 		const result = read({
 			chunkRows: 2,
 			wallBudgetMs: 100,
-			probeReserveMs: 97,
+			probeReserveMs: 96,
 			clock: () => ticks++,
 		})
 		expect(result.truncated).toBe(true)
@@ -599,12 +599,13 @@ describe("readTrails against a store", () => {
 		at(300, "A")
 		at(400, "C")
 		at(500, "A")
-		// Walk budget 4 - 1 = 3 stops before row 4 (tick 3); the probe's first check
-		// reads tick 4 >= 4, so nothing is probed and both trails are conservative.
+		// Walk budget 5 - 1 = 4 stops before row 4 (tick 4); the probe checks the held
+		// row 4 (C, not returned) then reads tick 5 >= 5 before its first step, so A and B
+		// are never probed and both trails are conservative.
 		let ticks = 0
 		const result = read({
 			chunkRows: 2,
-			wallBudgetMs: 4,
+			wallBudgetMs: 5,
 			probeReserveMs: 1,
 			clock: () => ticks++,
 		})
@@ -716,12 +717,15 @@ describe("readTrails against a store", () => {
 		// chunk would take 5 ms.
 		const db = delayed((sql, call) => {
 			if (sql.includes("json_each")) return 5
-			return sql.includes("seq < ?") && call === 1 ? 610 : 0
+			const scan = sql.includes("json_extract") && !sql.includes("OFFSET")
+			return scan && call === 2 ? 610 : 0
 		})
 		const { ms, result } = timedRead(db, { chunkRows: 100 })
 		expect(result.truncation).toEqual(["time-limit"])
 		expect(result.scannedRows).toBe(100)
-		expect(result.trails.every(trail => trail.truncated)).toBe(true)
+		// The held row 101 was the window's last: the probe has nothing left to read, so
+		// the flags stay exact without another statement.
+		expect(result.trails.some(trail => trail.truncated)).toBe(false)
 		expect(ms).toBeLessThan(650)
 	})
 
@@ -769,6 +773,78 @@ describe("readTrails against a store", () => {
 		// One probe chunk past the budget at most.
 		expect(ms).toBeGreaterThanOrEqual(200)
 		expect(ms).toBeLessThan(260)
+	})
+
+	it("a selective filter is walked in bounded steps over the non-matching rows", () => {
+		reset()
+		writer.exec("BEGIN")
+		for (let index = 0; index < 2_000; index += 1) {
+			insert({
+				producedAtMs: NOW - 1 - index,
+				entityKey: `icao:${index % 50}`,
+				category: "aircraft",
+				protocol: "adsb",
+				position: { lat: 1, lon: 1 },
+			})
+		}
+		for (let index = 0; index < 5; index += 1) {
+			insert({
+				producedAtMs: NOW - 3_000 - index,
+				entityKey: "mmsi:1",
+				category: "marine",
+				protocol: "ais",
+				position: { lat: 1, lon: 1 },
+			})
+		}
+		writer.exec("COMMIT")
+		let statements = 0
+		const counting: SqlDatabase = {
+			prepare(sql) {
+				const statement = reader.prepare(sql)
+				return {
+					all: (...values) => (statements++, statement.all(...values)),
+					get: (...values) => (statements++, statement.get(...values)),
+				}
+			},
+			exec: sql => reader.exec(sql),
+			close: () => undefined,
+		}
+		const run = (input: Partial<TrailsReadInput>): ActivityTrails => {
+			const result = runRead(counting, {
+				op: "trails",
+				input: {
+					producedFromMs: NOW - 10_000,
+					producedToMs: NOW,
+					protocols: ["ais"],
+					limits: DEFAULT_TRAILS_READ_LIMITS,
+					nowMs: NOW,
+					chunkRows: 100,
+					...input,
+				},
+			})
+			if (result.op !== "trails") throw new TypeError("wrong op")
+			return result.trails
+		}
+		const full = run({})
+		expect(full.truncation).toEqual([])
+		expect(full.scannedRows).toBe(5)
+		expect(full.trails[0]?.points).toHaveLength(5)
+		// 2 005 index rows in steps of 100: 21 steps of two statements, plus the
+		// snapshot meta read and the floor.
+		expect(statements).toBe(44)
+		// One clock tick per statement: the walk (budget 10) stops between statements
+		// although none of the examined rows matched, instead of one unbounded statement.
+		statements = 0
+		const cut = run({
+			clock: () => statements,
+			wallBudgetMs: 12,
+			probeReserveMs: 2,
+		})
+		expect(cut.truncation).toEqual(["time-limit"])
+		expect(cut.scannedRows).toBe(0)
+		expect(cut.trails).toEqual([])
+		// Meta, five steps (10 statements, 500 index rows) and the floor.
+		expect(statements).toBe(12)
 	})
 
 	it("empty store returns no trails and a null floor; from == to allowed", () => {

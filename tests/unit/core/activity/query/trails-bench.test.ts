@@ -273,4 +273,87 @@ describe.skipIf(!enabled)("trails benchmark (WAVEKIT_TRAILS_BENCH=1)", () => {
 			await rm(dir, { recursive: true, force: true })
 		}
 	}, 600_000)
+
+	it("selective filter: protocols=ais over 1M mostly ADS-B rows in 24 h", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-trails-bench-"))
+		try {
+			const path = join(dir, "activity.db")
+			const db = new DatabaseSync(path)
+			db.exec("PRAGMA journal_mode = WAL")
+			db.exec(ACTIVITY_SCHEMA_V1)
+			const meta = db.prepare(
+				"INSERT INTO store_meta(key, value) VALUES (?, ?)",
+			)
+			meta.run("storeUuid", randomUUID())
+			meta.run("restoreGeneration", "1")
+			meta.run("pruneWatermark", "0")
+			const insert =
+				db.prepare(`INSERT INTO activity (event_id, kind, produced_at_ms, received_at_ms,
+				source_id, decoder_id, protocol, category, frequency_hz, entity_key, summary_json, record_json, record_bytes)
+				VALUES (?, 'decoder-reception', ?, ?, 'rtl', 'dec', ?, ?, 1090000000, ?, ?, '{}', 2)`)
+			const TOTAL = 1_000_000
+			const step = (24 * HOUR) / TOTAL
+			db.exec("BEGIN")
+			for (let index = 0; index < TOTAL; index += 1) {
+				const ms = Math.round(NOW - (TOTAL - index) * step)
+				const ais = index % 100 === 0
+				const key = ais ? `mmsi:${index % 3_000}` : `icao:${index % 700}`
+				insert.run(
+					`e${index}`,
+					ms,
+					ms,
+					ais ? "ais" : "adsb",
+					ais ? "marine" : "aircraft",
+					key,
+					JSON.stringify({
+						eventId: `e${index}`,
+						kind: "decoder-reception",
+						producedAt: new Date(ms).toISOString(),
+						entityKey: key,
+						title: `Entity ${key}`,
+						position: { lat: 48 + (index % 1000) / 1000, lon: 2 },
+					}),
+				)
+			}
+			db.exec("COMMIT")
+			db.close()
+			const reader = await openReadOnly(path)
+			const run = (fromMs: number) => {
+				const times: number[] = []
+				let last: ActivityTrails | undefined
+				for (let attempt = 0; attempt < 3; attempt += 1) {
+					const started = performance.now()
+					const result = runRead(reader, {
+						op: "trails",
+						input: {
+							producedFromMs: fromMs,
+							producedToMs: NOW,
+							protocols: ["ais"],
+							limits: DEFAULT_TRAILS_READ_LIMITS,
+						},
+					})
+					times.push(performance.now() - started)
+					if (result.op === "trails") last = result.trails
+				}
+				if (!last) throw new TypeError("no result")
+				return {
+					ms: median(times),
+					worstMs: Math.max(...times),
+					scanned: last.scannedRows,
+					points: last.pointCount,
+					trails: last.trails.length,
+					truncation: last.truncation,
+				}
+			}
+			const day = run(NOW - 24 * HOUR)
+			const hour = run(NOW - HOUR)
+			reader.close()
+			process.stderr.write(
+				`TRAILS_BENCH_SELECTIVE ${JSON.stringify({ rows: TOTAL, day, hour })}\n`,
+			)
+			expect(day.worstMs).toBeLessThan(650)
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+	}, 600_000)
 })

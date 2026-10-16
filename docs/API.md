@@ -3376,16 +3376,21 @@ its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending tim
 
 Trails use the same reader and admission as search (one read in flight per
 caller, one executing at a time, so a trails read can delay other Activity reads,
-by at most about 650 ms). One 600 ms wall-time budget inside the reader covers
-the scan and the check for older points: the scan stops before the next row at
-450 ms, leaving 150 ms for the check, and the check stops between chunks of rows at
-600 ms (a chunk can overrun by a few ms). When either runs out the response is a
-normal 200 with the newest rows read so far, `truncated: true` and `time-limit` in
-`truncation` (after the four bounds above). Trails the check resolved keep an exact
-flag; trails it had no time to check are marked `truncated: true`, so with
-`time-limit` a `true` flag means "may have lost older points" while `false` stays
-exact. Narrow the window or the filters to see older points. The 1,000 ms reader deadline (instead of
-search's 250 ms) is only a backstop: a read that passes it answers 429
+by about 600 ms plus one step, a few ms). One 600 ms wall-time budget inside
+the reader covers the scan and the check for older points. Both walk the window
+newest first in steps of at most 4,096 index rows, whatever the filters match,
+and read the clock between statements and before every row: the scan stops at
+450 ms, leaving 150 ms for the check, and the check stops at 600 ms; the step in
+progress finishes first (measured worst on the development Mac: 452 ms for
+`protocols=ais` over 24 hours of 1,000,000 mostly ADS-B rows). When either runs
+out the response is a normal 200 with the newest rows read so far,
+`truncated: true` and `time-limit` in `truncation` (after the four bounds
+above). Trails the check resolved keep an exact flag; trails it had no time to
+check are marked `truncated: true`, so with `time-limit` a `true` flag means "may
+have lost older points" while `false` stays exact. A filtered read over a long,
+busy window can reach `time-limit` before it reaches older matching rows. Narrow
+the window or the filters to see older points. The 1,000 ms reader deadline
+(instead of search's 250 ms) is only a backstop: a read that passes it answers 429
 `ACTIVITY_QUERY_TIMEOUT` with no partial result, and the reader worker is stopped
 and a new one starts for the next query (within the reader's 5 s startup budget).
 Errors are those of [Query and cursor errors](#query-and-cursor-errors).
