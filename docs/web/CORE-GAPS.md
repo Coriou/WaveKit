@@ -24,15 +24,19 @@ Re-checked 2026-10-12 (band plans session) against `origin/main@6b4e5dc`: the re
 registry (`/api/regional/families`, `/channels`, `/resolve`) and receiver capabilities
 (`/api/receiver-capabilities`, `/:sourceId`) are now mounted, read-only, in protected and legacy
 composition; the two "Partly" texts below are updated. Nothing to tick.
+Re-audited 2026-10-16 item by item against `origin/main@b3d75c9` (web-gaps batches 1–3, band plans
+batches 1–2, scanner follow-ups batch 1, browser access batch 1): 19 ticked, 15 now partly, 4 "Partly"
+texts rewritten, 27 still open with no core work; both owner decisions are settled; a new section at
+the end lists what core now provides that the canvas does not draw. Default deployment still runs
+`access.mode: legacy`, so band-plan writes, operator presets and operator data stay *protected mode only*.
 
 **Owner to decide first** (core specs on main lock these; the web design differs)
-- Activity categories: the decode-envelope spec on main (`docs/specs/decode-envelope/`,
-  req 4.4) fixes five categories (`aircraft, voice, pager, data, other`); the web design and
-  the brand use eight (Voice, Aircraft, Marine, Aviation data, Paging, APRS, Sensors, Mesh)
-  and also need an entity key and an optional position on the envelope. Needs a spec
-  amendment or a mapping decision.
-- Device names: the access spec excludes labels, kind and last seen for remembered devices
-  (`docs/specs/core-access-policy/requirements.md`); Settings › Devices draws them.
+- Resolved 2026-10-12: activity categories. The decode-envelope spec was amended (req 4.4) to
+  the eight brand categories plus `other` (`aircraft, marine, aviation-data, voice, paging, aprs,
+  sensors, mesh, other`) with an entity key and an optional position; `src/core/activity/envelope.ts`.
+- Landed (WG2 §11): device names. The access spec was amended; remembered devices carry `name`,
+  `kind` (operator-chosen) and `lastSeenAt` (start of a UTC hour), set with
+  `POST /api/access/devices/label`.
 - Labels for talkgroups, radio IDs, capcodes and MMSIs (TG 2081 → "Fire dispatch"), stored
   in operator data and shown wherever the number is. No board draws this yet; scanner
   discoveries have a label per emitter, not per talkgroup.
@@ -42,15 +46,14 @@ composition; the two "Partly" texts below are updated. Nothing to tick.
   (0.5–25 Hz, 128–2048 bins), snapshot on join, DC and spur masks, tuning trust.
 - [ ] Zoom: a real higher-resolution FFT of the viewed slice (cropping published bins is not
   zoom). Designed on main (`docs/specs/viewed-slice-spectrum/`, feasibility gates), not built.
-- [ ] Per-client `fftSize` up to 16384 and `averaging` (frames or time constant) in the
-  `spectrum` subscribe options (Display › FFT size, Averaging). Not covered by the
-  viewed-slice spec; bins stop at 2048 today. (Profiles: default 4 per server,
-  `scanner.ws.spectrumMaxProfiles` configurable 1–16.)
-- [ ] Waterfall backfill: on a `spectrum` subscribe, send the last N seconds (bounded, e.g.
-  ≤10 s at the client's profile) of frames marked `backfill: true` before live frames, reset
-  on epoch change. Today a join gets one snapshot frame (SCANNER.md: "not a replay").
-- [ ] Low-latency tuner control over WebSocket (`ClientMessage` is subscribe/unsubscribe only)
-  for drag-to-pan. Depends on the ROADMAP §8 measurement of coalesced REST drag-to-tune.
+- [ ] Per-client `fftSize` up to 16384 in the `spectrum` subscribe options (Display › FFT size).
+  Partly: per-client `averaging` landed (1–32 frames of exponential averaging, WG1 §2,
+  `src/core/spectrum/subscribe-options.ts`). Still the gap: bins stop at 2048. (Profiles:
+  default 4 per server, `scanner.ws.spectrumMaxProfiles` configurable 1–16.)
+- [x] Waterfall backfill: `backfillMs` on a `spectrum` subscribe (≤10 s, ≤64 frames, ≤512 KiB)
+  sends recent frames marked as backfill before live frames (WG1 §1, `spectrum-backfill.ts`).
+- [ ] Low-latency tuner control over WebSocket (`ClientMessage` is still subscribe/unsubscribe
+  only) for drag-to-pan. Depends on the ROADMAP §8 measurement of coalesced REST drag-to-tune.
 
 **Band plans and presets** (one package: Spectrum labels, typed entry, ⌘K, Scanner).
 Owner, 2026-10-12: band plans adapt to the user, configurable in core and in the UI, and WaveKit
@@ -65,73 +68,63 @@ unknown → Other; imported colours only a hint); import by file or by URL fetch
 manual "Check for update" showing a diff (no auto-update); an ordered stack of active plans under the
 user's edits; a full band editor with channels; provenance shown only in Settings; the regional
 registry stays the verified layer that plan bands and channels link to.
+Landed 2026-10-13/15 (BP1, BP2, `docs/specs/band-plans/`): `/api/bandplans` (stack, resolved view,
+packs, presets; writes protected mode only), the `bandplans` WS channel and revision tokens.
 - [ ] Configurable band plans in core, layered and resolved user edits > imports > built-in:
   built-in country packs (a CEPT / EU baseline and France first; then UK, DE, IT, ES, NL / BE, US,
   CA, AU, JP), imported plans (SDR++ JSON first, then SDR# XML, which carries mode and step, and
-  Gqrx CSV) with provenance (source file or URL, author, licence, imported at, shown as
-  "community, unverified"), and operator overrides (rename, re-edge, hide, add) kept as a layer
-  over a plan so pack updates still apply. Several plans can be active, in order. A band has
-  name, edges, display group (an open set coloured by group; imported colours are hints), mode /
-  bandwidth / step for tuning, scan hints (channel spacing, protocols, OBW, skip by default with
-  a reason such as encrypted or already decoded), named channels with aliases and a nesting
-  parent. Scan presets, spectrum lanes, Tuner suggestions and ⌘K all derive from the active
-  plans; the scanner's `Bandplan` / `ScanRange` become a projection of them. CRUD, ordering and
-  import endpoints; the choice of plans persisted in core. Import notes: SDR++ files put a colour
-  in `type` (not a category) and lose mode / step; many rows are unnamed fillers; SDR++'s own
-  plans are GPL-3.0 (compatible with AGPL-3.0, needs a notice) and uneven (its `france.json` has
-  FM 80–108 and 70 cm 420–450). Prefer packs transcribed from regulator documents (ERC Report 25 /
-  ECC Rec 70-03, ANFR TNRBF) and credit community files. Relation to the regional display
-  registry (strict primary-source channel rows) is an open owner decision: keep it as the
-  "verified" layer that plan channels reference, or extend it.
-- [ ] Station country (ISO 3166) next to the coarse `region` enum (`EU|US|CA|AU|NZ|JP|CN`,
-  `src/config.ts`), from config, the station location or the UI, with provenance; it picks the
-  default pack. Owner, 2026-10-12: derived from the station location (reverse lookup on a bundled
-  country boundary set, offline), overridable, falling back to `region` when no location is set.
-  Today there is no country and no station lat / lon in core.
-- [ ] Band plan model shared with the scanner (the original gap, now part of the layered model
-  above): bands with
-  name, edges, display group (Air, Marine, Amateur, Land mobile, PMR446, Pagers, ISM / SRD, named
-  per country), default mode, bandwidth, step and protocols to try; named channels with aliases (marine ch 16 / 12,
-  PMR446 ch 1–16, AIS A/B, airband guard, ACARS, VDL2). Today `/api/scanner/bandplans`
-  returns `{id, region, name, ranges}` with scan ranges and rasters only. Partly (main@7743665):
-  the regional display registry spec, a core registry (`src/core/regional/`) and DTOs
-  (`packages/api-types/src/regional.ts`), mounted read-only at `/api/regional/families`, `/channels`,
-  `/resolve` (main@6b4e5dc). The schema has sourced channel rows with scoped aliases,
-  simplex / duplex and advisory mode / bandwidth / step hints, but no rows ship: the only family is
-  US FRS with `dataset: null` (evidence-pending). Owner, 2026-10-12: the registry stays the
-  verified layer; a plan band or channel that links to a registry row is what the UI marks
-  "verified". Scanner band plans are unchanged. Still the gap: EU families (marine VHF, PMR446, airband,
-  AIS / ACARS / VDL2 channels), band display groups, and one model shared with the scanner.
-- [ ] Missing or wrong plans in `src/core/scanner/bandplan/builtin.ts`: Airband (118–137 MHz,
-  8.33 kHz) and EU pagers 466.0–466.25 MHz (France: e*Message 466.025–466.230); 169.4–169.8 MHz
-  split by use (France: 169.4–169.475 is mostly Wize, wM-Bus mode N meters, not paging; it sits
-  inside `pager-vhf` 137–174 today, on the same raster); `vhf-land-mobile` 136–174 must not be
-  labelled "PMR" in EU packs; `dpmr446` covers 446.1–446.2 (pre-2018 rule): PMR446 is 446.0–446.2,
-  16 analogue channels at 12.5 kHz, digital at 6.25 kHz; CB 26.965–27.405 MHz (40 ch, AM / FM /
-  SSB); 380–400 MHz (TETRA / INPT, encrypted) as skip by default, not a preset; a combined ISM
-  433 / 868 preset if presets stay one per plan. Partly: `ism-433` (433.05–434.79) and `ism-868`
-  (863–870) exist as separate EU plans.
-- [ ] Band plan store details the canvas (v83) relies on: the plan stack's order and on/off as a
-  synced operator setting; a per-band edit layer with field-level diff against the pack (so "Reset
-  to France" and "3 edits" work, and pack updates still apply); import preview without committing,
-  with a group-mapping report ("48 mapped, 13 to Other") and the imported colour kept as an
-  off-by-default hint; "Check for update" on an imported URL or a pack returning bands changed /
-  added / removed, applied by hand; per band a channel list with aliases and a link to the decoder
-  that covers a channel. `WAVEKIT_COUNTRY` locks the country as `WAVEKIT_REGION` locks the region.
-- [ ] Band plans feed the scanner: bands skipped by default (with their reason, hidden ones too)
-  and channels covered by a running decoder become automatic exclusions; the fixed-channel list
-  (AIS, ACARS, VDL2, APRS, Meshtastic) comes from plan channels, not a hard-coded table; a preset
-  carries protocols and spacing per range (ISM 433 / 868, Pagers 169 + 466).
+  Gqrx CSV) with provenance, and operator overrides kept as a layer over a plan so pack updates
+  still apply. Partly: the layered resolver (operator layer, then the ordered stack of packs), a
+  built-in pack per region projected read-only from the scanner plans (`builtin-eu`, …, citations
+  as provenance), SDR++ JSON file import with preview and provenance "community-unverified",
+  operator edits and operator bands (BP1 §2–6). Still the gap: country packs (built-ins are
+  per region, with no tuning hints or channels by design, BP1 1.3), SDR# XML and Gqrx CSV import,
+  import by URL, and scan hints on imported bands (their `scan` is null). Display groups are a
+  closed enum of nine (`other` as fallback), not an open set.
+- [ ] Station country picks the default pack and is derived from the station location (reverse
+  lookup on a bundled country boundary set, offline), overridable, falling back to `region`.
+  Partly: `station.country` (ISO 3166-1 alpha-2) in config and `WAVEKIT_COUNTRY`, served with
+  provenance by `GET /api/station` and as `effectiveCountry` in the band-plan context. Still the
+  gap: BP1 1.4 forbids inferring country from coordinates (ROADMAP: "gated"), the default pack
+  follows `region`, not country, and there is no way to set it from the UI.
+- [ ] Band plan model shared with the scanner: bands with name, edges, display group, default
+  mode, bandwidth, step and protocols to try; named channels with aliases (marine ch 16 / 12,
+  PMR446 ch 1–16, AIS A/B, airband guard, ACARS, VDL2). Partly: the band-plan `Band` has name,
+  edges, display group (`marine, air, ism-srd, pagers, personal-radio, amateur, land-mobile,
+  broadcast, other`), mode / bandwidth / step hints, skip with reason, up to 128 channels with
+  aliases, a parent and a registry reference (`packages/api-types/src/bandplans.ts`); the
+  scanner list follows the stack (BP2 §11). The regional registry (`/api/regional/*`) still has
+  only US FRS with `dataset: null`. Still the gap: built-in bands ship no channels or tuning hints,
+  EU registry families (marine VHF, PMR446, airband, AIS / ACARS / VDL2 channels), and the scanner's
+  `Bandplan` is still the source the packs project from, not a projection of the plans.
+- [ ] Missing or wrong plans in `src/core/scanner/bandplan/builtin.ts`: EU pagers 466.0–466.25 MHz
+  (France: e*Message 466.025–466.230); 380–400 MHz (TETRA / INPT, encrypted) as skip by default.
+  Partly: cited corrections landed for airband (8.33 / 25 kHz), `pmr446` 446.0–446.2 (12.5 and
+  6.25 kHz rasters), `dpmr446` widened to 446.0–446.2, CB (40 CEPT channels), `ism-169` metering
+  split out of `pager-vhf`, `vhf-land-mobile` no longer named PMR, and a combined built-in preset
+  "ISM / SRD" (433 + 868 + 169). The 466 MHz plan waits for a citable primary source (ROADMAP).
+- [ ] Band plan store details the canvas (v83) relies on: "Check for update" on an imported URL
+  or a pack returning bands changed / added / removed, applied by hand; per band a link to the
+  decoder that covers a channel. Partly: stack order and on/off (`PUT/DELETE /api/bandplans/stack`),
+  field-level edits with `editedFields`, reset per band and per pack (`/edits`), orphaned edits
+  reported, import preview without commit with a group-mapping report and `colourHint` kept,
+  channels with aliases per band, `WAVEKIT_COUNTRY` (BP1 §4–6, BP2 11.7).
+- [ ] Band plans feed the scanner: bands skipped by default (with their reason) and channels
+  covered by a running decoder become automatic exclusions; the fixed-channel list (AIS, ACARS,
+  VDL2, APRS, Meshtastic) comes from plan channels, not a hard-coded table. Partly: the scanner
+  uses the effective built-in plans of the stack and drops hidden bands (BP2 11.1–11.4); scan
+  presets carry protocols and rasters per range. Still the gap: `skip`, imported and operator bands
+  do not reach the scanner (BP2 11.1), and decoder-covered channels are not excluded.
 - [ ] Scanner follow hits (canvas v85): the demodulator follows a hit inside the current window or
   hop without retuning the hardware and returns after a hang time (today Listen only moves
   `offsetHz` on request via `/discoveries/:id/listen`); a per-job Follow hits option with a per-band
   default from the plan (voice on, data off); hits named from the plan (nearest named channel, else
   the range's raster point); `POST /api/scanner/plan` states one-hop plans explicitly (centre,
   channel count) so clients say "watching", not "sweeping".
-- [ ] Scan presets in core, shared by every client: built-in presets per region from the
-  band plans (name, ranges, protocols, step, dwell, sensitivity; read-only, "Save as new"),
-  plus operator presets saved from the composer (name, ranges, skips, protocols, settings)
-  with create / rename / update / delete.
+- [x] Scan presets in core, shared by every client: built-in presets per region (one per plan plus
+  combinations), read-only; operator presets with create / replace / delete
+  (`/api/bandplans/presets`, `/:presetId`), and `GET …/presets/:id/job` turns one into a job spec
+  (BP1 §7). Writes are protected mode only.
 
 **Tuner**
 - [ ] `GET /api/tuner/:sourceId/capabilities`: `gainsTenthsDb[]` (or `null` with
@@ -152,137 +145,109 @@ registry stays the verified layer that plan bands and channels link to.
 - [ ] One WebSocket audio stream with analog and decoded voice auto-routed, a clean 48 kHz
   rate and its pipeline latency (Listen "Latency ≈ 180 ms"). Today: HTTP 8081 analog, HTTP
   8082 digital, clients dropped on rate change (ROADMAP §5b).
-- [ ] `live-audio:level` on WS at 10–20 Hz while running: `channelPowerDbfs`,
-  `noiseFloorDbfs`, `squelchOpen`, `thresholdDbfs` (effective, including Auto). Partly:
-  `live-audio:status` already carries `channelPowerDbfs` and `squelchOpen`, but only on
-  start, stop, config change, connect and error.
-- [ ] `squelchMode: manual | auto | noise` with `autoMarginDb`; threshold changes applied
-  without a pipeline restart (non-threshold changes restart it today).
+- [x] `live-audio:level` on WS at 10 Hz (configurable 10–20) while running: `channelPowerDbfs`,
+  `noiseFloorDbfs`, `squelchOpen`, `thresholdDbfs` (`LiveAudioLevel`).
+- [ ] `squelchMode: noise`. Partly: `squelchMode: manual | auto` with `autoMarginDb`, and
+  squelch changes apply without a pipeline restart (`NODE_ONLY_KEYS` in `live-demodulator.ts`).
 - [ ] Configurable AGC (off / slow / fast, and any AGC on FM; today `csdr agc -p fast` is
   hard-coded), real noise reduction, noise blanker, notch, CW BFO, real DSB.
 
 **Analog transmissions** (one package: a squelch-delimited event carries all of these)
-- [ ] Analog transmission events (start, end, duration, frequency) from squelch.
+- [x] Analog transmission events (start, end, duration, frequency) from squelch:
+  `live-audio:transmission` and the `analog-transmission` Activity kind (WG1 §3–4).
 - [ ] Analog vs digital detected per transmission on shared channels (ROADMAP §5b), so
   "What you hear: Auto" switches per transmission and the event carries the mode.
-- [ ] CTCSS and DCS detection on live analog audio (tone below 300 Hz; DCS code and polarity
-  at 134.4 bit/s) on transmission events and live status, plus tone squelch. Partly: saved
-  frequencies store a tone (ctcss, dcs code + polarity); scanner discoveries carry `ctcssHz`
-  (S2, disabled).
-- [ ] DTMF on the tuned analog channel: `audio:dtmf {digits, frequencyHz, startedAt,
-  endedAt}`, one event per transmission (multimon-ng DTMF runs on its own input only).
+- [ ] DCS detection (code and polarity at 134.4 bit/s), tone on live status while a
+  transmission is open, and tone squelch. Partly: CTCSS (50 standard tones) on each closed
+  transmission as `tone.ctcssHz`, stored and searchable as text (WG2 §7); saved frequencies
+  store a tone (ctcss, dcs code + polarity); scanner discoveries carry `ctcssHz` (S2, disabled).
+- [x] DTMF on the tuned analog channel: digits on each closed transmission as `tone.dtmf` (up to
+  32 symbols, WG2 §7), one per transmission, rather than a separate `audio:dtmf` event.
 - [ ] The recording id on the event (see Recordings).
 
 **Activity and events**
-- [ ] Common decode envelope, published live and stored. Partly: unmounted helper
-  `src/core/activity/envelope.ts` per `docs/specs/decode-envelope/`. The web also needs the
-  eight categories, an entity key (ICAO, MMSI, callsign, node id, capcode, talkgroup +
-  radio), an optional position, the tone and the recording id (see "Owner to decide first").
-- [ ] Persistent event store: typed filters (category, talkgroup, radio, capcode, MMSI,
-  callsign or name, frequency ± channel width, CTCSS/DCS, with audio, kept), full text
-  including transcripts, time range and jump to time, newest-first paging; the same store
-  searches kept recordings and IQ captures. Serves Activity search, the tuned card's recent
-  items, "Play the last call on TG …". Design (`docs/specs/activity-recording-catalog/`) and
-  SQLite qualification only today.
-- [ ] Facet counts for the current search and time range (per category, "With audio"); add
-  to the catalog spec.
-- [ ] Digital call metadata: DMR tier, colour code, talker alias and error rate; P25 phase and
-  NAC; encryption algorithm. `DigitalVoiceCall` has protocol, talkgroup, source, slot,
-  encrypted, active, start and end only; dsd-fme parses colour code and NAC internally.
-- [ ] Message rate history per decoder: `decoderStatus.rateHistory` (messages per minute, last
-  15) or `GET /api/decoders/:id/rate?window=15m`, for the tuned-card sparkline and decoder
-  pages; today only the `eventsOut` counter.
+- [x] Common decode envelope, published live and stored: `/api/activity`, `/:eventId`, the
+  `activity` WS channel, on by default (WG1 §7), with the eight categories, entity key, optional
+  position and tone (WG2 §1). The recording id is listed under Recordings.
+- [ ] Persistent event store: typed filters for CTCSS / DCS, with audio and kept; full text
+  including transcripts; jump to time; the same store searching kept recordings and IQ captures.
+  Partly: SQLite with FTS5 (`src/core/activity/storage/`), filters by kind, source, decoder,
+  protocol, category, entity key (talkgroup, capcode, MMSI, callsign), refs, frequency range, time
+  range and plain text, newest-first paging with a snapshot; fair-share retention (WG3 §1).
+- [ ] Facet counts for "With audio". Partly: `POST /api/activity/facets` counts category,
+  protocol, decoder, source and kind for the current query and time range (≤32 values each).
+- [ ] Digital call metadata: DMR tier, talker alias and error rate. Partly: `colourCode`, `nac`,
+  `ran` and `algorithmId` on digital voice calls (WG2 §10); P25 phase is the protocol value.
+- [x] Message rate history per decoder: `decoderStatus.rateHistory` (messages per minute, last 15,
+  every decoder base).
 - [ ] Auto band map for spectrum labels: per frequency bucket, the protocols decoded (by every
   decoder, not only `ScannerProtocol` ones), identity, last seen, active now. Partly:
   `/api/spectrum/occupancy` (7 days, hourly duty per 12.5 kHz) and ambient discoveries from
   the passive job (on by default, off on Pi 4-class hosts); ADS-B, AIS, ACARS, VDL2 and LoRa
-  decodes never become discoveries.
+  decodes never become discoveries. Activity rows now carry frequency and provenance, but no
+  per-bucket summary exists.
 
 **Event contract** (one replay contract, ROADMAP §4)
-- [ ] Live push with a sequence number and replay from a cursor for activity events and
-  scanner events, so paused or reconnecting clients catch up (only operator data has a
-  revision contract; scanner WS has none, clients refetch over REST).
-- [ ] `scanner:progress` at the 2 Hz the scanner spec promised (`scanner-broadcast.ts` limits
-  to 1/s per job).
+- [ ] Live push with replay from a cursor for scanner events (scanner WS has none; clients
+  refetch over REST). Partly: `activity:subscribe` takes a replay cursor and resets with a reason
+  (`cursor-gap`, `cursor-expired`, `store-changed`, `query-changed`, `invalid-cursor`,
+  `reader-failed`); holes in the store are reported (WG3 §3–4); band plans carry `revision`.
+- [x] `scanner:progress` at up to 2 Hz per job (500 ms per key; WG1 §8, `scanner-broadcast.ts`).
 
 **Access**
 - [x] Public capability bootstrap: `GET/HEAD /api/access/bootstrap` (origins, session and
   pairing availability, analog / digital audio and operator data availability).
 - [x] Remembered devices list: `GET/HEAD /api/access/devices` (id, created, renewed, expires,
   current); needs a browser session.
-- [ ] Browser access end to end: onboarding and renewal flow for the web client, TLS / proxy
-  acceptance (`access.exposure: tls-termination` exists, not accepted), and a default
-  deployment where operator data is available (default is `legacy`). Must land before browser
-  controls touch the receiver (ROADMAP §4).
-- [ ] Device `name` / `kind` and `lastSeenAt` (needs the access spec change, see "Owner to
-  decide first").
+- [ ] Browser access end to end: client consumption of the onboarding and renewal flow, live TLS /
+  proxy deployment acceptance (task 14), and a default deployment where operator data is available
+  (default stays `legacy`). Must land before browser controls touch the receiver (ROADMAP §4).
+  Partly (browser access batch 1, `docs/specs/core-access-policy/browser-access-batch1.md`):
+  server-side pairing to renewal and revocation, `access.exposure: tls-termination`, an opt-in Caddy
+  TLS compose profile, `make dev-protected`, machine-credential device list and revoke.
+- [x] Device `name` / `kind` and `lastSeenAt` (hour resolution), set with
+  `POST /api/access/devices/label` (WG2 §11).
 - [ ] A read-only access role (view spectrum, activity and scanner results; no receiver
   control).
 
 **Scanner** (S1 on main: discoveries, identify, sweeps with takeover, occupancy, listen)
-- [ ] **Auto-resume that never cuts off a call** (owner, 2026-10-11: "core also waits", wants
-  the best implementation; design: tuned card and Tuner island show "Scan resumes in 42 s ·
-  Stay here"). Today `paused(preempted-operator)` resumes `resume.autoAfterIdleMs` (60 s) after
-  the last REST tuner write, so a long call on the tuned frequency is cut off. Proposed:
-  1. The idle timer measures *operator activity*, not only tuner writes: it is held while the
-     operator's demodulator squelch is open (plus a short hang, e.g. 3 s after it closes),
-     while an identify trial runs on the leased source, and while a manual recording runs; it
-     restarts from full when the activity ends.
-  2. Job status and `scanner:job` WS events carry `resumeAt` (ISO time, or `null` while held)
-     and `resumeHeldBy` (`audio` | `identify` | `recording` | `null`), so every client shows
-     the same countdown and "Scan waits while you listen".
-  3. "Stay here": `POST …/pause` on a job in `paused(preempted-*)` turns it into
-     `paused(operator)` (no auto-resume) without needing the lease back. Needs a new transition:
-     today `pause` is accepted only from running or holding (`job-state.ts`).
-- [ ] Search discoveries by identity: an `identity` (kind:value) filter, and `q` matching
-  identity values as well as labels. Partly: `protocol`, frequency range, confidence and
-  `minConfidence`, `encrypted`, `since`, `sourceId` and `jobId` filters exist; `q` matches the
-  operator label only.
+- [ ] **Auto-resume that never cuts off a call**: a manual recording also holds the resume.
+  Partly (2026-10-12 batch): the idle timer is held while the operator's squelch is open (3 s
+  hang) and while an identify trial runs; jobs carry `resumeAt` and `resumeHeldBy`
+  (`audio | identify | recording | null`); "Stay here" (`POST …/pause` on `paused(preempted-*)`
+  → `paused(operator)`). Still the gap: no recorder reports activity, so `recording` never holds
+  (`src/core/live-demod-activity.ts`).
+- [x] Search discoveries by identity: `identity=<kind>:<value>`, and `q` matching identity values
+  as well as labels (SF1 §5).
 - [ ] `ScannerProtocol` values for what the composer offers: `ais`, `acars`, `vdl2`, `lora`
   (Meshtastic); CTCSS/DCS as a searchable feature, not a protocol. DSC has no decoder at all.
-- [ ] Per range: a `name`, `dwellMs` and `sensitivity` with provenance keys
-  (`ranges[i].…`), and exclusions per range (today rasters, `obwHz`, `protocols` and
-  `bandplanId` are per range; dwell, sensitivity and exclusions per job). Partly: job provenance
-  (`operator|bandplan|measured|config|default`) and the plan preview's derived numbers
-  (`hops`, `sweepPeriodMs`, estimates) from `POST /api/scanner/plan` have landed.
-- [ ] A job-level "signals only" flag (no decoder trials) for "Find signals, don't decode".
-- [ ] Edit ranges in a running job: allow `ranges[i].enabled` and `ranges[i].protocols` in
-  `PATCH /api/scanner/jobs/:id`, applied at the next hop like the other live keys. The running
-  plan pane batches range on/off, per-range protocols and skips behind one Apply; edges and
-  channel spacing stay locked while running ("Stop to change edges"). Partly: the PATCH
-  live-edits `thresholdDb`, `sensitivity`, `exclusions` (skips), `hold`, `revisit`, `record`,
-  `protocols` and `capture`, but `protocols` is job-wide and overrides every range; a `ranges` key
-  passes validation and is silently dropped; `ranges[i].enabled` does not exist. Depends on per-hop
-  protocols (next item). (requested 2026-10-11, widened 2026-10-12, needed for Scanner › running plan pane,
-  priority normal)
-- [ ] Ignore that also skips the frequency in sweeps (Ignore = this signal, always). Today a
-  lockout stops probes, recordings and monitor audio, but the planner only honours job
-  exclusions. Skip (this scan only) maps to a per-job exclusion.
+- [ ] Exclusions per range. Partly: per range `enabled`, `name`, `dwellMs` and `sensitivity` with
+  `ranges[i].…` provenance (SF1 §2), plus rasters, `obwHz`, `protocols` and `bandplanId`;
+  exclusions stay per job.
+- [x] A job-level `signalsOnly` flag (no decoder trials) for "Find signals, don't decode" (SF1 §3).
+- [x] Edit ranges in a running job: `PATCH /api/scanner/jobs/:id` accepts `ranges` with live
+  `enabled`, `protocols`, `name`, `dwellMs`, `sensitivity`, applied at the next hop; edges, rasters,
+  OBW and plan id are locked (`range-locked`) (SF1 §1).
+- [x] Ignore also skips the frequency in sweeps: lockouts become runtime `lockoutExclusions` on
+  sweep jobs (WG2 §12).
 - [ ] Plan preview marks ranges covered by running decoders (`decodedElsewhere[]`) with an
   optional `skipDecodedElsewhere` default. Partly: `GET /api/decoders` exposes
   `targetFrequenciesHz` and band ranges.
-- [ ] Per-job hit stats for the live hit log: `hitsInJob`, `firstHeardInJob`,
-  `lastDurationMs` (or a `jobId` filter on `/discoveries/:id/observations`), and
-  `firstSeenInJob: boolean` on discovery events for the one-shot "new" pulse. Global
-  `firstSeenAt`, `lastSeenAt`, `observationCount` and `airtimeMs` exist.
+- [ ] Per-job hit stats: `lastDurationMs` for the live hit log. Partly: `GET
+  /api/scanner/jobs/:id/hits` (hits, first and last hit, `firstSeenInJob`), `jobHits` on
+  `scanner:discovery` and `hitStats` on progress (WG2 §13); global `airtimeMs` exists.
 - [ ] Watch here protocols: a persisted per-source `passive.protocols` setting (the passive
-  job tries every protocol today).
-- [ ] `preemptedBy: {jobId, name}` on `paused(preempted-job)`.
+  job tries every protocol today; `passiveBySource` is on/off only).
+- [x] `preemptedBy: {jobId, name}` on `paused(preempted-job)` (SF1 §4).
 - [ ] Optional `discoveryId` on saved frequencies; the discovery DTO lists
   `savedFrequencyIds`.
 - [ ] S2 enabled (parallel identify trials, "Likely", CTCSS, analog recordings) and S3
   listen-scan ("Scan a list") for the later Scanner mode.
 - [x] Decoder IDs in a sweep's impact (`Impact.runningDecoders`, `pinnedDecoders`); the UI
   maps IDs to display names.
-- [ ] Per-range protocols honoured per hop: each hop tries the union of the protocols of the
-  ranges covering it (so Marine VHF tries FM voice only while the PMR stretch around it tries DMR,
-  P25, …), with job-level `protocols` as an explicit override; plus a test. The planner's range
-  table and running pane show protocols per range. Partly: overlapping ranges are swept once
-  (`rasterItems` dedupes channels by Hz, `hop-planner.ts`), but at runtime a job without
-  `protocols` gets the union of every range's protocols job-wide (`plan-preview.ts`), and probes use
-  that list (`job-runner.ts`); the per-hop branch of `hopProtocols` only feeds the preview
-  estimate. (Ticked 2026-10-11 in error; reopened 2026-10-12, needed for Scanner › planner range
-  table, priority normal)
+- [x] Per-range protocols honoured per hop: without job-level `protocols`, a signal or hop uses the
+  union of the enabled ranges covering it; job-level `protocols` overrides (SF1 2.6; reopened
+  2026-10-12, landed with the 2026-10-12 batch).
 
 **Recordings** (one package with the event store)
 - [ ] Auto-record all audio (analog transmissions and digital calls), global retention and
@@ -304,36 +269,39 @@ registry stays the verified layer that plan bands and channels link to.
 - [ ] Waveform peaks for every audio recording and a spectrogram thumbnail for every IQ
   capture, computed once by core.
 - [ ] `GET /api/storage`: kept, automatic and other bytes, free, effective retention, the
-  low-space policy. Partly: scanner status `disk-low` and scanner storage caps.
+  low-space policy. Partly: scanner status `disk-low` and scanner storage caps; Activity
+  retention per share in `GET /api/activity/status` (WG3 §2).
 - [ ] Stable `GET /api/recordings/:id` and `…/download?format=opus|wav&trim=1`.
 - [ ] Transcription pipeline (future): per-recording transcript and status.
 
 **Map**
-- [ ] Current state for fleets other than aircraft (only ADS-B has a tracker): AIS vessels
-  (position merged with static and voyage data), APRS stations (path, weather, altitude),
-  Meshtastic nodes (name, role, SNR/RSSI, hops), with counts, latest and last heard.
-- [ ] Meshtastic links with SNR (neighbour info, relays).
+- [x] Current state for fleets other than aircraft: AIS vessels (`/api/vessels`, class, static and
+  voyage data, `navStatus`), APRS stations, objects and items (`/api/aprs/stations`; path, weather),
+  Meshtastic nodes (`/api/mesh/nodes`; role, SNR/RSSI, hops), with stats routes and `vessels`,
+  `aprs`, `mesh` WS channels (WG1 §5–6, WG2 §3–6).
+- [x] Meshtastic links with SNR: `neighbours` from NEIGHBORINFO reports, up to 32 per node (WG3 §8).
 - [ ] Position history for aircraft, vessels, APRS and mesh nodes (trails, last-hour replay)
   with a time cursor, plus per-minute activity counts for the timeline (depends on the event
-  store; ADS-B trails are in memory only).
-- [ ] Coverage: maximum range per bearing over 24 h for ADS-B and AIS.
+  store; ADS-B trails are in memory only; vessel, APRS and mesh trackers keep no history).
+- [x] Coverage: maximum range per 1° bearing over 24 h for ADS-B and AIS (`GET /api/coverage`,
+  WG3 §7; needs a station location; in memory only).
 - [ ] Map tiles: a regional PMTiles extract (200 / 400 / 800 km with size, download and update
   from Settings with progress) plus glyphs and the style; online OpenFreeMap fallback.
-- [ ] Position extraction from ACARS / VDL2 (ADS-C, `POS` reports) and AIS aids to navigation
-  (type 21) into the common envelope.
+- [ ] Position extraction from ACARS / VDL2 (ADS-C, `POS` reports) into the common envelope.
+  Partly: AIS aids to navigation (type 21) are tracked as vessel class `aton` with position.
 - [ ] Optional: aircraft route and military flag (enrichment has registration, type, operator).
 
 **Settings and station**
-- [ ] Station identity in core config: `station.{name, lat, lon, altM, region, callsign}`
-  with provenance, set from the UI, passed to decoders (readsb `--lat/--lon` today only under
-  `enableMlat`; direwolf `callsign` parsed, never used; lora-meshtastic's second `region`);
-  approximate location estimated from received positions when unset; gpsd later for the
-  portable receiver. (ROADMAP: can ship early.)
+- [ ] Station identity: set from the UI, passed to the other decoders (direwolf `callsign` parsed,
+  never used; lora-meshtastic's second `region`), approximate location estimated from received
+  positions when unset; gpsd later for the portable receiver. Partly: `station.{name, lat, lon,
+  altM, callsign, country}` in config and env with provenance (default / yaml / env), read-only
+  `GET /api/station`; readsb takes `--lat/--lon` from it and coverage uses it.
 - [ ] Settings store in core: a persisted layer over the YAML (in `stateDir`), validated writes
   over the API, live push of every change to all clients, each value reporting its source
   (default, YAML, environment, UI) so the UI can lock what env or YAML pins. Partly: decoder
-  band overrides, scanner settings (the model: provenance, bounds, PATCH) and operator
-  preferences persist. Decide whether operator preferences (below) live in this store.
+  band overrides, scanner settings (the model: provenance, bounds, PATCH), band-plan stack and
+  operator preferences persist. Decide whether operator preferences (below) live in this store.
 - [ ] Operator settings synced to every client including mobile. Partly (protected mode only):
   preferences `units, timeFormat, waterfallPalette, showSavedFrequencyLabels` and command
   usage for tune, identify, listen and open-saved. Missing: Activity columns and pinned
@@ -349,7 +317,36 @@ registry stays the verified layer that plan bands and channels link to.
 - [ ] Settings with no other owner in this file: language, runtime log level, map labels, audio
   download format. (FFT size, squelch margin, recording, storage, offline area and trails are
   listed under their own sections.)
-- [ ] `GET /api/decoders/:id/log?lines=200` (bounded stdout/stderr ring) for "Show log".
+- [x] `GET /api/decoders/:id/log?lines=200` (bounded stdout/stderr ring) for "Show log".
   Decoder status itself has landed (health, uptime, version, events out, last output, error).
 - [ ] The sdr-host version on `/api/resources/sdr-hosts` (startup rate and gain are there).
 - [ ] Configuration export and import (YAML), update check.
+
+**New in core, not on the canvas yet** (2026-10-16)
+- [ ] Activity storage health: retention policy (fair-share) and per-share usage, coalesced
+  positions and `floodCopies` from `GET /api/activity/status` (WG3 §1–2), in a storage / health view.
+- [ ] Activity read states: a replay `reset` with its reason (`cursor-gap`, `cursor-expired`,
+  `store-changed`, `query-changed`, `invalid-cursor`, `reader-failed`), holes in the store (WG3 §4)
+  and the overflow close `activity:closed`, each as a visible state of the Activity list.
+- [ ] Reception provenance in row detail: `sourceId`, `frequency.hz` and `tuningTrust`
+  (`commanded | relay | unverified`) per reception (WG3 §5); ACARS frequency absent when the
+  decoder omits it.
+- [ ] Meshtastic flood copies: `duplicateCopies` per node and copies kept out of Activity (WG3 §6).
+- [ ] Mesh node telemetry: battery % (or powered), voltage, channel and air utilisation, uptime
+  (float32 values, round for display) on the node card (WG3 §8).
+- [ ] Coverage layer on the map, per protocol, with the "no station location" state (WG3 §7).
+- [ ] APRS weather, digipeater path, objects and items (with kill), `digipeatedCopies` (WG2 §3).
+- [ ] Vessel class (A, B, base station, aid to navigation, SAR aircraft), voyage data and
+  `navStatus` on the vessel card (WG1 §5).
+- [ ] Map and list updates for vessels, APRS and mesh arrive at most every 2 s per entity (WG2 §9);
+  the UI should not imply faster freshness.
+- [ ] Band-plan editing conflicts: `storeId` / `revision` on every write, 428 when the token is
+  missing and 409 `BANDPLANS_CONFLICT` when stale, refetch on `bandplans:changed`.
+- [ ] Band-plan views: per preset `applicable` and `issues`, orphaned edits after a re-import,
+  shadowed and hidden bands, and a band's remaining `segments` when a higher layer names part
+  of it.
+- [ ] "Unknown" states from the regional registry (`dataset: null`) and receiver capabilities
+  (`state: "unknown"`), drawn as unknown rather than empty.
+- [ ] Lost-browser recovery: the machine credential lists and revokes remembered browsers
+  (`/api/access/machine/devices`, `…/revoke`, `…/revoke-all`), so Settings › Devices should
+  point to it.
