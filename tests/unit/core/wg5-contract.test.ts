@@ -4,9 +4,10 @@
  * formats with a parser slot that keeps today's behaviour, the ShipData names lanes AIS and
  * TA share, and the tuner source type of the provenance index. No behaviour beyond defaults.
  */
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import type * as Api from "@wavekit/api-types"
 import {
@@ -135,15 +136,15 @@ describe("WG5 contract", () => {
 		).toBeLessThanOrEqual(ACTIVITY_TIMELINE_MAX_WINDOW_MS)
 	})
 
-	it("adds optional aggregate methods that the inert service rejects", async () => {
+	it("requires the aggregate methods; the inert service rejects them", async () => {
 		expect(
 			same<
 				Pick<Contract.ActivityQueryService, "bandMap" | "timeline">,
 				{
-					bandMap?(
+					bandMap(
 						input: Contract.ActivityBandMapQuery,
 					): Promise<Contract.ActivityBandMap>
-					timeline?(
+					timeline(
 						input: Contract.ActivityTimelineQuery,
 					): Promise<Contract.ActivityTimeline>
 				}
@@ -152,10 +153,10 @@ describe("WG5 contract", () => {
 		const service = inertActivityService()
 		expect(service.bandMap).toBeTypeOf("function")
 		expect(service.timeline).toBeTypeOf("function")
-		await expect(service.bandMap?.({})).rejects.toMatchObject({
+		await expect(service.bandMap({})).rejects.toMatchObject({
 			code: "ACTIVITY_UNAVAILABLE",
 		})
-		await expect(service.timeline?.({})).rejects.toMatchObject({
+		await expect(service.timeline({})).rejects.toMatchObject({
 			code: "ACTIVITY_UNAVAILABLE",
 		})
 	})
@@ -241,24 +242,36 @@ describe("WG5 contract", () => {
 		expect(reasons).toHaveLength(2)
 	})
 
-	it("advertises and parses only SDR++ until Main wires the new parsers", async () => {
-		// Feature: web-gaps-5, requirement 7.1 (frozen behaviour before lane B merges)
+	it("advertises and parses SDR++, SDR# and Gqrx once Main wires the parsers", async () => {
+		// Feature: web-gaps-5, requirement 7.1
 		const service = await openBandPlanService({
 			stateDir: directory,
 			context: { region: "EU", effectiveCountry: null },
 			writable: true,
 		})
 		services.push(service)
-		expect(service.view().capabilities.importFormats).toEqual(["sdrpp-json"])
-		for (const format of ["sdrsharp-xml", "gqrx-csv"] as const)
-			expect(() =>
-				service.previewImport({
-					format,
-					fileName: "plan",
-					contentBase64: Buffer.from("x").toString("base64"),
-					groupOverrides: [],
-				}),
-			).toThrow(expect.objectContaining({ code: "BANDPLANS_IMPORT_INVALID" }))
+		expect(service.view().capabilities.importFormats).toEqual([
+			"sdrpp-json",
+			"sdrsharp-xml",
+			"gqrx-csv",
+		])
+		const fixtures = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"../../mocks/fixtures/bandplans",
+		)
+		for (const [format, file] of [
+			["sdrsharp-xml", "sdrsharp/BandPlan.xml"],
+			["gqrx-csv", "synthetic-gqrx.csv"],
+		] as const) {
+			const preview = service.previewImport({
+				format,
+				fileName: file,
+				contentBase64: readFileSync(join(fixtures, file)).toString("base64"),
+				groupOverrides: [],
+			})
+			expect(preview.format).toBe(format)
+			expect(preview.bands.length).toBeGreaterThan(0)
+		}
 	})
 
 	it("types the provenance tuner source so TunerController satisfies it", () => {

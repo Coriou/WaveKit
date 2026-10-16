@@ -427,14 +427,6 @@ function timelineRequest(
 	return request
 }
 
-function aggregateUnavailable(): ActivityQueryError {
-	return new ActivityQueryError(
-		"Activity aggregates are unavailable",
-		"ACTIVITY_UNAVAILABLE",
-		503,
-	)
-}
-
 function correlationOf(request: FastifyRequest): string | undefined {
 	const value = (request as FastifyRequest & { correlationId?: string })
 		.correlationId
@@ -786,11 +778,9 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 			try {
 				const params = request.query as Record<string, unknown>
 				const query = bandMapRequest(params)
-				const read = options.service.bandMap
-				if (!read) throw aggregateUnavailable()
 				return await withActivityClient(
 					activityClientKey(request, options.access),
-					() => read.call(options.service, query),
+					() => options.service.bandMap(query),
 				)
 			} catch (error) {
 				return sendError(reply, request, error)
@@ -820,11 +810,9 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 			try {
 				const params = request.query as Record<string, unknown>
 				const query = timelineRequest(params)
-				const read = options.service.timeline
-				if (!read) throw aggregateUnavailable()
 				return await withActivityClient(
 					activityClientKey(request, options.access),
-					() => read.call(options.service, query),
+					() => options.service.timeline(query),
 				)
 			} catch (error) {
 				return sendError(reply, request, error)

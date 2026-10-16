@@ -354,9 +354,9 @@ export interface ActivityQueryService {
 	/** WG4 bulk position trails (docs/specs/web-gaps-4, requirement 1). */
 	trails(input: ActivityTrailsQuery): Promise<ActivityTrails>
 	/** WG5 automatic band map (docs/specs/web-gaps-5, requirements 1 and 3). */
-	bandMap?(input: ActivityBandMapQuery): Promise<ActivityBandMap>
+	bandMap(input: ActivityBandMapQuery): Promise<ActivityBandMap>
 	/** WG5 activity timeline (docs/specs/web-gaps-5, requirements 2 and 3). */
-	timeline?(input: ActivityTimelineQuery): Promise<ActivityTimeline>
+	timeline(input: ActivityTimelineQuery): Promise<ActivityTimeline>
 	close(): Promise<void>
 }
 

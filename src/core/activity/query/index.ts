@@ -24,3 +24,14 @@ export type {
 export type { ReaderHostEvent } from "./reader-host.js"
 export { DEFAULT_TRAILS_READ_LIMITS, readTrails } from "./trails.js"
 export type { TrailsReadInput, TrailsReadLimits } from "./trails.js"
+export {
+	DEFAULT_AGGREGATES_READ_LIMITS,
+	readBandMap,
+	readTimeline,
+} from "./aggregates.js"
+export type {
+	AggregatesReadLimits,
+	BandMapReadInput,
+	TimelineReadInput,
+} from "./aggregates.js"
+export { normaliseBandMapQuery, normaliseTimelineQuery } from "./validate.js"

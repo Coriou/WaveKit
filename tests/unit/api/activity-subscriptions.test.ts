@@ -12,9 +12,16 @@ import type {
 	ActivityReplayHandle,
 	ActivityReplaySink,
 } from "../../../src/core/activity/storage/contract.js"
-import { createFixture, delay, openQueryService } from "../core/activity/query/fixture.js"
+import {
+	createFixture,
+	delay,
+	openQueryService,
+} from "../core/activity/query/fixture.js"
 import { issueCursor } from "../../../src/core/activity/query/cursor.js"
-import { hashQuery, normaliseQuery } from "../../../src/core/activity/query/validate.js"
+import {
+	hashQuery,
+	normaliseQuery,
+} from "../../../src/core/activity/query/validate.js"
 import { DEFAULT_ACTIVITY_QUERY_LIMITS } from "../../../src/core/activity/query/service.js"
 
 class FakeTransport implements ActivityClientTransport {
@@ -53,6 +60,12 @@ function fakeService(): ActivityQueryService & { stops: number } {
 		async trails() {
 			throw new Error("not used")
 		},
+		async bandMap() {
+			throw new Error("not used")
+		},
+		async timeline() {
+			throw new Error("not used")
+		},
 		replay(_input, sink): ActivityReplayHandle {
 			sink.send({ type: "progress", scannedThrough: "0", cursor: "cursor-0" })
 			return {
@@ -78,22 +91,49 @@ function codes(transport: FakeTransport): string[] {
 
 describe("activity subscriptions", () => {
 	it("caps subscriptions per client and across clients", () => {
-		const hub = createActivitySubscriptions({ service: fakeService(), enabled: true })
+		const hub = createActivitySubscriptions({
+			service: fakeService(),
+			enabled: true,
+		})
 		const first = new FakeTransport("client-a")
-		hub.handleMessage(first, { type: "activity:subscribe", id: "one", query: {} })
-		hub.handleMessage(first, { type: "activity:subscribe", id: "two", query: {} })
-		hub.handleMessage(first, { type: "activity:subscribe", id: "three", query: {} })
+		hub.handleMessage(first, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
+		hub.handleMessage(first, {
+			type: "activity:subscribe",
+			id: "two",
+			query: {},
+		})
+		hub.handleMessage(first, {
+			type: "activity:subscribe",
+			id: "three",
+			query: {},
+		})
 		expect(codes(first)).toContain("ACTIVITY_QUERY_BUSY")
 
 		const clients: FakeTransport[] = []
 		for (let index = 0; index < 4; index += 1) {
 			const transport = new FakeTransport(`other-${index}`)
 			clients.push(transport)
-			hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
-			hub.handleMessage(transport, { type: "activity:subscribe", id: "two", query: {} })
+			hub.handleMessage(transport, {
+				type: "activity:subscribe",
+				id: "one",
+				query: {},
+			})
+			hub.handleMessage(transport, {
+				type: "activity:subscribe",
+				id: "two",
+				query: {},
+			})
 		}
 		const overflow = new FakeTransport("client-b")
-		hub.handleMessage(overflow, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(overflow, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
 		expect(codes(overflow)).toEqual(["ACTIVITY_QUERY_BUSY"])
 		expect(clients.every(transport => transport.closed === null)).toBe(true)
 		hub.close()
@@ -103,16 +143,39 @@ describe("activity subscriptions", () => {
 		const service = fakeService()
 		const hub = createActivitySubscriptions({ service, enabled: true })
 		const transport = new FakeTransport("client-a")
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
 		hub.handleMessage(transport, "{")
-		hub.handleMessage(transport, new TextEncoder().encode(JSON.stringify({ type: "activity:nope" })))
-		expect(codes(transport)).toEqual(["ACTIVITY_QUERY_INVALID", "ACTIVITY_QUERY_INVALID", "ACTIVITY_QUERY_INVALID"])
+		hub.handleMessage(
+			transport,
+			new TextEncoder().encode(JSON.stringify({ type: "activity:nope" })),
+		)
+		expect(codes(transport)).toEqual([
+			"ACTIVITY_QUERY_INVALID",
+			"ACTIVITY_QUERY_INVALID",
+			"ACTIVITY_QUERY_INVALID",
+		])
 
 		const disabled = createActivitySubscriptions({ service, enabled: false })
 		const quiet = new FakeTransport("client-b")
-		disabled.handleMessage(quiet, { type: "activity:subscribe", id: "one", query: {} })
-		disabled.handleMessage(quiet, { type: "activity:subscribe", id: "two", query: {} })
+		disabled.handleMessage(quiet, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
+		disabled.handleMessage(quiet, {
+			type: "activity:subscribe",
+			id: "two",
+			query: {},
+		})
 		expect(codes(quiet)).toEqual(["ACTIVITY_DISABLED", "ACTIVITY_DISABLED"])
 		expect(quiet.closed).toBeNull()
 		hub.close()
@@ -122,11 +185,23 @@ describe("activity subscriptions", () => {
 		const service = fakeService()
 		const hub = createActivitySubscriptions({ service, enabled: true })
 		const transport = new FakeTransport("client-a")
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
 		hub.handleMessage(transport, { type: "activity:unsubscribe", id: "one" })
-		expect(transport.delivered.some(message => message.type === "activity:unsubscribed")).toBe(true)
+		expect(
+			transport.delivered.some(
+				message => message.type === "activity:unsubscribed",
+			),
+		).toBe(true)
 		expect(service.stops).toBe(1)
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
 		hub.detach(transport.key)
 		expect(transport.closed).toBeNull()
 		expect(service.stops).toBe(2)
@@ -141,12 +216,18 @@ describe("activity subscriptions", () => {
 		})
 		const transport = new FakeTransport("client-a")
 		transport.accept = false
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
 		expect(transport.closed).toEqual({
 			code: ACTIVITY_RESUMABLE_CLOSE_CODE,
 			reason: ACTIVITY_RESUMABLE_CLOSE_REASON,
 		})
-		const notice = transport.attempts.find(message => message.type === "activity:closed")
+		const notice = transport.attempts.find(
+			message => message.type === "activity:closed",
+		)
 		expect(notice?.data).toEqual({ reason: "resumable", cursors: {} })
 		hub.close()
 	})
@@ -166,10 +247,20 @@ describe("activity subscriptions", () => {
 			async trails() {
 				throw new Error("not used")
 			},
+			async bandMap() {
+				throw new Error("not used")
+			},
+			async timeline() {
+				throw new Error("not used")
+			},
 			replay(_input, sink) {
 				sinks.push(sink)
 				const cursor = `cursor-${sinks.length}`
-				sink.send({ type: "progress", scannedThrough: String(sinks.length), cursor })
+				sink.send({
+					type: "progress",
+					scannedThrough: String(sinks.length),
+					cursor,
+				})
 				return { resume() {}, stop() {} }
 			},
 			async close() {},
@@ -180,8 +271,16 @@ describe("activity subscriptions", () => {
 			limits: { maxMessages: 1, perClient: 2 },
 		})
 		const transport = new FakeTransport("client-a")
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "two", query: {} })
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "two",
+			query: {},
+		})
 		expect(transport.closed).toBeNull()
 		transport.accept = false
 		const first = sinks[0]
@@ -193,8 +292,14 @@ describe("activity subscriptions", () => {
 			cursor: "cursor-undelivered",
 		}
 		first.send(undelivered)
-		first.send({ ...undelivered, scannedThrough: "10", cursor: "cursor-overflow" })
-		const notice = transport.attempts.find(message => message.type === "activity:closed")
+		first.send({
+			...undelivered,
+			scannedThrough: "10",
+			cursor: "cursor-overflow",
+		})
+		const notice = transport.attempts.find(
+			message => message.type === "activity:closed",
+		)
 		expect(notice?.data).toEqual({
 			reason: "resumable",
 			cursors: { one: "cursor-1", two: "cursor-2" },
@@ -209,8 +314,14 @@ describe("activity subscriptions", () => {
 			limits: { maxBytes: 1 },
 		})
 		const transport = new FakeTransport("client-a")
-		hub.handleMessage(transport, { type: "activity:subscribe", id: "one", query: {} })
-		const notice = transport.attempts.find(message => message.type === "activity:closed")
+		hub.handleMessage(transport, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
+		const notice = transport.attempts.find(
+			message => message.type === "activity:closed",
+		)
 		expect(notice?.data).toEqual({ reason: "resumable", cursors: {} })
 		expect(transport.closed?.code).toBe(4001)
 		hub.close()
@@ -230,6 +341,12 @@ describe("activity subscriptions", () => {
 			async trails() {
 				throw new Error("not used")
 			},
+			async bandMap() {
+				throw new Error("not used")
+			},
+			async timeline() {
+				throw new Error("not used")
+			},
 			replay(_input, sink) {
 				sink.send({ type: "reset", reason: "reader-failed" })
 				return { resume() {}, stop() {} }
@@ -242,10 +359,18 @@ describe("activity subscriptions", () => {
 			limits: { global: 1 },
 		})
 		const first = new FakeTransport("client-a")
-		hub.handleMessage(first, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(first, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
 		await delay(0)
 		const second = new FakeTransport("client-b")
-		hub.handleMessage(second, { type: "activity:subscribe", id: "one", query: {} })
+		hub.handleMessage(second, {
+			type: "activity:subscribe",
+			id: "one",
+			query: {},
+		})
 		expect(codes(second)).toEqual([])
 		expect(
 			first.delivered.some(message => {
@@ -259,7 +384,9 @@ describe("activity subscriptions", () => {
 
 	it("holds a blocked transport and resumes without losing records", async () => {
 		const fixture = await createFixture()
-		const service = openQueryService(fixture, { limits: { replayPage: 1, deadlineMs: 2_000 } })
+		const service = openQueryService(fixture, {
+			limits: { replayPage: 1, deadlineMs: 2_000 },
+		})
 		try {
 			for (const eventId of ["a", "b", "c"]) fixture.insert({ eventId })
 			const cursor = issueCursor({
@@ -317,7 +444,9 @@ describe("activity subscriptions", () => {
 				id: "bad",
 				query: { kinds: ["nope"] },
 			})
-			expect(transport.delivered.some(message => message.type === "activity:reset")).toBe(false)
+			expect(
+				transport.delivered.some(message => message.type === "activity:reset"),
+			).toBe(false)
 			expect(codes(transport)).toEqual(["ACTIVITY_QUERY_INVALID"])
 			hub.close()
 		} finally {
