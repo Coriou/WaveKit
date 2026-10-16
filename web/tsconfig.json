@@ -1,0 +1,17 @@
+{
+	"extends": "../tsconfig.base.json",
+	"compilerOptions": {
+		"composite": false,
+		"declaration": false,
+		"declarationMap": false,
+		"noEmit": true,
+		"lib": ["es2024", "dom", "dom.iterable", "webworker.importscripts"],
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"jsx": "react-jsx",
+		"types": ["node", "vite/client"],
+		"tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo"
+	},
+	"include": ["src", "mock", "tests", "vite.config.ts"]
+}

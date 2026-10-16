@@ -22,6 +22,7 @@ export default [
 				project: [
 					"./tsconfig.json",
 					"./cli/tsconfig.json",
+					"./web/tsconfig.json",
 					"./packages/*/tsconfig.json",
 				],
 				tsconfigRootDir: __dirname,

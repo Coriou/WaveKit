@@ -1,0 +1,36 @@
+{
+	"name": "@wavekit/web",
+	"version": "0.1.0",
+	"private": true,
+	"license": "AGPL-3.0-or-later",
+	"description": "WaveKit web app (Immersive shell on the ui.css design system)",
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview",
+		"mock": "node --experimental-strip-types ./mock/server.ts",
+		"lint": "eslint -c ../eslint.config.js .",
+		"test": "vitest run --passWithNoTests",
+		"typecheck": "pnpm -w exec tsc -p web/tsconfig.json --noEmit"
+	},
+	"dependencies": {
+		"@wavekit/api-types": "workspace:*",
+		"@wavekit/brand": "workspace:*",
+		"react": "^19.3.1",
+		"react-dom": "^19.3.1"
+	},
+	"devDependencies": {
+		"@fastify/websocket": "^11.0.2",
+		"@types/node": "^24.0.0",
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@types/ws": "^8.5.14",
+		"@vitejs/plugin-react": "^5.2.0",
+		"fastify": "^5.3.3",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.1",
+		"vitest": "^3.2.4",
+		"ws": "^8.18.0"
+	}
+}

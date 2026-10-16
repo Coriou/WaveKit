@@ -11,5 +11,5 @@
 		"tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo"
 	},
 	"include": ["**/*.ts", "**/*.d.ts"],
-	"exclude": ["node_modules", "dist", "cli", "packages"]
+	"exclude": ["node_modules", "dist", "cli", "web", "packages"]
 }

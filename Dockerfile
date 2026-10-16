@@ -522,6 +522,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json turbo.js
 COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/api-types/package.json packages/api-types/tsconfig.json ./packages/api-types/
 COPY cli/package.json cli/tsconfig.json ./cli/
+COPY web/package.json web/tsconfig.json ./web/
 COPY packages/sdr-host/package.json packages/sdr-host/tsconfig.json ./packages/sdr-host/
 COPY packages/brand/package.json packages/brand/tsconfig.json ./packages/brand/
 

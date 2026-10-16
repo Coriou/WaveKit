@@ -41,6 +41,8 @@ pnpm workspaces + Turborepo. The root `package.json` is both the workspace root 
   adapters and lifecycle; `src/api/` routes and WebSocket; `src/access/` access policy;
   `src/config.ts` Zod config schemas.
 - `cli/`: `@wavekit/cli` dashboard (tsc build, own vitest suite).
+- `web/`: `@wavekit/web` browser app (Vite + React on `packages/brand/tokens/ui.css`, mock API in
+  `web/mock/`). Spec: `docs/superpowers/specs/2026-10-16-web-app-foundation-design.md`.
 - `packages/shared` (logger, errors) and `packages/api-types` (shared DTOs): built with tsc.
 - `packages/sdr-host`: Raspberry Pi dongle host (rtlmux fanout + status API), own Dockerfile.
 - `packages/brand`: brand assets; read `packages/brand/AGENTS.md` before changing it.
