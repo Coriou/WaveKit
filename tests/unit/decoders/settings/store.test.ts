@@ -603,3 +603,21 @@ describe("decoder settings store unreadable file", () => {
 		await store.close()
 	})
 })
+
+describe("decoder settings store tmp file (WG8 R1)", () => {
+	it("never follows a symlink planted at the tmp path", async () => {
+		const victim = join(dir, "victim.txt")
+		await nodeFs.writeFile(victim, "KEEP_THIS_FILE")
+		const tmp = join(dir, `${FILE}.${process.pid}.tmp`)
+		await nodeFs.symlink(victim, tmp)
+		const { store } = await open()
+		await store.write(valid(1))
+		expect(await nodeFs.readFile(victim, "utf8")).toBe("KEEP_THIS_FILE")
+		const st = await nodeFs.lstat(join(dir, FILE))
+		expect(st.isFile()).toBe(true)
+		expect(st.isSymbolicLink()).toBe(false)
+		expect((await nodeFs.readdir(dir)).filter(n => n.endsWith(".tmp"))).toEqual(
+			[],
+		)
+	})
+})

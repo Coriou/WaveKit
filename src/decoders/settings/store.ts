@@ -518,8 +518,22 @@ export async function openDecoderSettingsStore(
 		)
 		try {
 			await fs.mkdir(stateDir, { recursive: true })
+			let created = false
 			try {
-				const handle = await fs.open(tmp, "w", 0o644)
+				// Exclusive create: never open (and so never truncate) an existing entry, a planted
+				// symlink included. A leftover entry of ours is unlinked (unlink removes the link,
+				// not its target) and the create retried once; a second clash fails closed.
+				const exclusive = () => fs.open(tmp, "wx", 0o644)
+				let handle
+				try {
+					handle = await exclusive()
+				} catch (error: unknown) {
+					if ((error as { code?: unknown } | null)?.code !== "EEXIST")
+						throw error
+					await fs.unlink(tmp)
+					handle = await exclusive()
+				}
+				created = true
 				try {
 					await handle.writeFile(body, "utf8")
 					await handle.sync()
@@ -528,7 +542,7 @@ export async function openDecoderSettingsStore(
 				}
 				await fs.rename(tmp, join(stateDir, DECODER_SETTINGS_FILE_NAME))
 			} catch (error: unknown) {
-				await fs.unlink(tmp).catch(() => undefined)
+				if (created) await fs.unlink(tmp).catch(() => undefined)
 				throw error
 			}
 		} catch (error: unknown) {
