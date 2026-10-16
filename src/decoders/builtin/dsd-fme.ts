@@ -32,7 +32,15 @@ import {
 	audioDemodRates,
 	type AudioDecoderStdin,
 } from "../audio-demod-decoder.js"
-import { deemphasisStage } from "../csdr-stages.js"
+import { csdrNumber, deemphasisStage } from "../csdr-stages.js"
+import { readNumericOption, type NumericOptionRule } from "../option-values.js"
+import {
+	DSD_FME_DURATION_MS_MAX,
+	DSD_FME_FM_GAIN_MAX,
+	DSD_FME_RECORDING_MAX_AGE_HOURS_MAX,
+	DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
+	DSD_FME_SAMPLE_RATE_MAX_HZ,
+} from "../options/dsd-fme.js"
 import { pruneCallRecordings } from "./call-recordings.js"
 import type {
 	DecoderCaps,
@@ -401,8 +409,6 @@ const CALL_TIMEOUT_MS = 4000
  */
 const TERMINATOR_TRAILER_MS = 700
 
-const PositiveMsSchema = z.number().finite().positive()
-
 /** Error rate threshold - if > 80% frames have errors, mark as bad signal */
 const BAD_SIGNAL_ERROR_RATE = 0.8
 
@@ -568,38 +574,88 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			)
 		}
 
+		// WG7 HW.2: every number is read by meaning (bounded, finite) before it
+		// reaches argv, a timer, the retention policy or the csdr shell pipeline.
+		const num = (
+			key: string,
+			rule: Omit<NumericOptionRule, "key">,
+		): number | undefined =>
+			readNumericOption(options[key], { key, ...rule }, this.optionWarn)
+		// Positive keys: 0 and below (clamped to 0) fall back to the default, as
+		// the former positive-only schema did.
+		const positive = (key: string, max: number, fallback: number): number =>
+			num(key, { integer: false, min: 0, max }) || fallback
 		return {
 			mode: DSD_FME_MODES.includes(mode) ? mode : "auto",
 			output,
 			wavDir: options["wavDir"] as string | undefined,
 			udpHost: options["udpHost"] as string | undefined,
-			udpPort: options["udpPort"] as number | undefined,
+			udpPort: this.parseUdpPort(options["udpPort"]),
 			extraArgs: this.parseExtraArgs(options["extraArgs"]),
-			inputSampleRate: options["inputSampleRate"] as number | undefined,
-			fmGain: options["fmGain"] as number | undefined,
+			inputSampleRate: num("inputSampleRate", {
+				integer: false,
+				min: 0,
+				max: DSD_FME_SAMPLE_RATE_MAX_HZ,
+			}),
+			fmGain: num("fmGain", {
+				integer: false,
+				min: 0,
+				max: DSD_FME_FM_GAIN_MAX,
+			}),
 			enableIqAgc: options["enableIqAgc"] as boolean | undefined,
 			enablePerCallRecording:
 				(options["enablePerCallRecording"] as boolean) ?? false,
 			perCallRecordingDir:
 				(options["perCallRecordingDir"] as string) ?? "/app/decoded_calls",
-			minCallDurationMs:
-				(options["minCallDurationMs"] as number) ?? MIN_CALL_DURATION_MS,
+			minCallDurationMs: num("minCallDurationMs", {
+				integer: false,
+				min: 0,
+				max: DSD_FME_DURATION_MS_MAX,
+				default: MIN_CALL_DURATION_MS,
+			}),
 			emitDebugEvents: (options["emitDebugEvents"] as boolean) ?? false,
-			callStartDelayMs:
-				(options["callStartDelayMs"] as number) ?? CALL_START_DELAY_MS,
-			callTimeoutMs:
-				PositiveMsSchema.safeParse(options["callTimeoutMs"]).data ??
+			callStartDelayMs: num("callStartDelayMs", {
+				integer: false,
+				min: 0,
+				max: DSD_FME_DURATION_MS_MAX,
+				default: CALL_START_DELAY_MS,
+			}),
+			callTimeoutMs: positive(
+				"callTimeoutMs",
+				DSD_FME_DURATION_MS_MAX,
 				CALL_TIMEOUT_MS,
+			),
 			voiceSlot: this.parseVoiceSlot(options["voiceSlot"]),
-			perCallRecordingMaxTotalMb:
-				PositiveMsSchema.safeParse(options["perCallRecordingMaxTotalMb"])
-					.data ?? PER_CALL_RECORDING_MAX_TOTAL_MB,
-			perCallRecordingMaxAgeHours:
-				PositiveMsSchema.safeParse(options["perCallRecordingMaxAgeHours"])
-					.data ?? PER_CALL_RECORDING_MAX_AGE_HOURS,
+			perCallRecordingMaxTotalMb: positive(
+				"perCallRecordingMaxTotalMb",
+				DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
+				PER_CALL_RECORDING_MAX_TOTAL_MB,
+			),
+			perCallRecordingMaxAgeHours: positive(
+				"perCallRecordingMaxAgeHours",
+				DSD_FME_RECORDING_MAX_AGE_HOURS_MAX,
+				PER_CALL_RECORDING_MAX_AGE_HOURS,
+			),
 			perCallRecordingPrune:
 				z.boolean().safeParse(options["perCallRecordingPrune"]).data ?? true,
 		}
+	}
+
+	/**
+	 * A UDP port is an integer 1..65535 or absent: clamping would aim the voice
+	 * at an unrelated port, so an out-of-range value is dropped (WG7 HW.2).
+	 */
+	private parseUdpPort(value: unknown): number | undefined {
+		let outOfRange = false
+		const port = readNumericOption(
+			value,
+			{ key: "udpPort", integer: true, min: 1, max: 65535 },
+			(key, issue) => {
+				if (issue === "clamped") outOfRange = true
+				this.optionWarn(key, "invalid")
+			},
+		)
+		return outOfRange ? undefined : port
 	}
 
 	private parseVoiceSlot(value: unknown): DsdFmeVoiceSlot | undefined {
@@ -963,7 +1019,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/** dsd-fme reads a sox WAV stream (S16LE mono) at the output rate. */
 	protected override getDecoderStdin(): AudioDecoderStdin {
-		return { format: "wav-s16le", rateHz: this.getDemodConfig().sampleRate }
+		return {
+			format: "wav-s16le",
+			rateHz: this.boundedDemodConfig().sampleRate,
+		}
 	}
 
 	/**
@@ -975,7 +1034,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Pipeline: IQ -> csdr (demod at demodRate) -> S16LE -> sox (WAV wrapper) -> dsd-fme
 	 */
 	protected override buildPipelineCommand(): string {
-		const config = this.getDemodConfig()
+		const config = this.boundedDemodConfig()
 
 		// Integer decimation to the ACTUAL demod rate (clamped to >= 1); sox must
 		// use that rate. Shared with getRateAdapter() via audioDemodRates().
@@ -1003,7 +1062,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		csdrStages.push(
-			`csdr gain ${config.fmGain ?? 5.0}`, // Tuned: high gain with limiter for best 4FSK detection
+			`csdr gain ${csdrNumber(config.fmGain ?? 5.0)}`, // Bounded number only; limiter follows
 			"csdr limit", // Essential: prevents clipping distortion at high gain
 		)
 
@@ -1032,11 +1091,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const soxCommand = [
 			"sox",
 			"-t raw",
-			`-r ${actualDemodRate}`, // Input rate from csdr
+			`-r ${csdrNumber(actualDemodRate)}`, // Input rate from csdr
 			"-e signed -b 16 -c 1",
 			"-",
 			"-t wav",
-			`-r ${outputRate}`, // Output rate for dsd-fme
+			`-r ${csdrNumber(outputRate)}`, // Output rate for dsd-fme
 			"-",
 		].join(" ")
 

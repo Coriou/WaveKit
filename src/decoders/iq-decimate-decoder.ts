@@ -23,6 +23,13 @@
 import { z } from "zod"
 import { iqResampleCommand, shellCommand } from "./process-tools.js"
 import { boundCsdrPipeline } from "./csdr-buffers.js"
+import { csdrNumber } from "./csdr-stages.js"
+import {
+	createOptionWarner,
+	readNumericOption,
+	type NumericOptionRule,
+	type NumericOptionWarn,
+} from "./option-values.js"
 import { BaseDecoder } from "./base-decoder.js"
 import { configuredBandRequirements } from "./status-fields.js"
 import type {
@@ -63,6 +70,69 @@ export interface IqDecimationConfig {
  * Default IQ sample rate from sources (2.048 Msps)
  */
 const DEFAULT_IQ_SAMPLE_RATE = 2_048_000
+
+/**
+ * WG7 HW.2: upper bound of any IQ sample rate a decoder pipeline is built for.
+ * 64 Msps is above every supported front end (RTL-SDR 3.2, Airspy 10, SDRplay 10,
+ * HackRF 20 Msps) and keeps decimation factors and sox rates small finite numbers.
+ */
+export const SAMPLE_RATE_MAX_HZ = 64_000_000
+
+type IqNumericKey =
+	| "inputSampleRate"
+	| "targetSampleRate"
+	| "filterTransition"
+	| "filterCutoff"
+
+const IQ_RULES: Record<IqNumericKey, NumericOptionRule> = {
+	// 1 kHz floor: below any IQ capture, and keeps derived rates and normalised
+	// cutoffs small finite numbers. An exact 0 is passed through to keep the
+	// historical `|| DEFAULT_IQ_SAMPLE_RATE` fallback in iqDecimationRates.
+	inputSampleRate: {
+		key: "inputSampleRate",
+		integer: false,
+		min: 1000,
+		max: SAMPLE_RATE_MAX_HZ,
+		default: DEFAULT_IQ_SAMPLE_RATE,
+	},
+	// min 1: a 0 target would divide by zero (an Infinity decimation in argv).
+	targetSampleRate: {
+		key: "targetSampleRate",
+		integer: false,
+		min: 1,
+		max: SAMPLE_RATE_MAX_HZ,
+		default: 1_000_000,
+	},
+	// Normalised to the input rate: 0.5 is Nyquist.
+	filterTransition: {
+		key: "filterTransition",
+		integer: false,
+		min: 0,
+		max: 0.5,
+	},
+	filterCutoff: { key: "filterCutoff", integer: false, min: 0, max: 0.5 },
+}
+
+/**
+ * WG7 HW.2 (requirement 9.1): every number of an IQ decimation config passed
+ * through `readNumericOption`; finite in-range numbers come back unchanged.
+ */
+export function boundIqDecimationConfig(
+	config: IqDecimationConfig,
+	warn: NumericOptionWarn,
+): IqDecimationConfig {
+	const out: Record<string, unknown> = { ...config }
+	for (const key of Object.keys(IQ_RULES) as IqNumericKey[]) {
+		const rule = IQ_RULES[key]
+		const raw: unknown = config[key]
+		if (raw === undefined && rule.default === undefined) continue
+		if (key === "inputSampleRate" && raw === 0) continue
+		const value = readNumericOption(raw, rule, warn)
+		if (value === undefined) delete out[key]
+		else out[key] = value
+	}
+	return out as unknown as IqDecimationConfig
+}
 
 /**
  * Rate conversion the IQ pipeline really performs for its configured input:
@@ -168,6 +238,10 @@ export function iqDecimateRateAdapter(
 export abstract class IqDecimateDecoder extends BaseDecoder {
 	private unknownCentreLogged = false
 	private filterCutoffLogged = false
+	/** One warning per key for this decoder (WG7 HW.2); never logs the value. */
+	protected readonly optionWarn: NumericOptionWarn = createOptionWarner(
+		(fields, message) => this.logger.warn(fields, message),
+	)
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -180,6 +254,14 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 	 * @returns IqDecimationConfig with target sample rate and input rate
 	 */
 	protected abstract getIqDecimationConfig(): IqDecimationConfig
+
+	/** `getIqDecimationConfig()` with every number bounded. */
+	protected boundedIqDecimationConfig(): IqDecimationConfig {
+		return boundIqDecimationConfig(
+			this.getIqDecimationConfig(),
+			this.optionWarn,
+		)
+	}
 
 	/**
 	 * Template method: Returns the decoder command to execute.
@@ -213,7 +295,7 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 
 	getRateAdapter(input: { sampleRateHz: number }): DecoderRateAdapter {
 		return iqDecimateRateAdapter(
-			this.getIqDecimationConfig(),
+			this.boundedIqDecimationConfig(),
 			input.sampleRateHz,
 			this.getDecoderInputFormat(),
 		)
@@ -229,7 +311,7 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 		centerHz?: number
 	}): DecoderChannelRequestResult | undefined {
 		if (!this.channelizerSupported()) return undefined
-		const config = { ...this.getIqDecimationConfig() }
+		const config = { ...this.boundedIqDecimationConfig() }
 		config.channelHz ??= readChannelHz(this.config.options)
 		if (
 			config.channelHz === undefined &&
@@ -285,7 +367,7 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 	 * @returns Complete shell command string
 	 */
 	protected buildPipelineCommand(): string {
-		const config = this.getIqDecimationConfig()
+		const config = this.boundedIqDecimationConfig()
 
 		const targetSampleRate = config.targetSampleRate
 		// Shared with getRateAdapter() so the reported plan matches the pipeline.
@@ -316,13 +398,13 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 
 		const transition = config.filterTransition ?? 0.05
 		const cutoffArg = config.filterCutoff
-			? ` --cutoff ${config.filterCutoff}`
+			? ` --cutoff ${csdrNumber(config.filterCutoff)}`
 			: ""
 
 		// Build csdr pipeline stages
 		const csdrStages: string[] = [
 			"csdr convert -i char -o float", // U8 IQ → complex float
-			`csdr firdecimate ${decimation} ${transition}${cutoffArg}`, // Decimate + filter
+			`csdr firdecimate ${csdrNumber(decimation)} ${csdrNumber(transition)}${cutoffArg}`, // Decimate + filter
 			"csdr convert -i float -o char", // complex float → U8 IQ
 		]
 

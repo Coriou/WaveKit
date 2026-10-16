@@ -29,10 +29,36 @@ const VOICE_SLOT_VALUES = ["1", "2", "both"] as const
 
 const Hz = z.number().finite().min(1)
 
+/** Timers (call start delay, timeout, minimum duration): at most 24 h. */
+export const DSD_FME_DURATION_MS_MAX = 86_400_000
+/** Linear `csdr gain` multiplier; equals audio-demod-decoder FM_GAIN_MAX (+60 dB). */
+export const DSD_FME_FM_GAIN_MAX = 1000
+/** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
+export const DSD_FME_SAMPLE_RATE_MAX_HZ = 64_000_000
+/** Retention by age: at most one year (8 760 h); the default is a week. */
+export const DSD_FME_RECORDING_MAX_AGE_HOURS_MAX = 8760
+/** Retention by size: at most 1 TiB (1 048 576 MB); the default is 512 MB. */
+export const DSD_FME_RECORDING_MAX_TOTAL_MB_MAX = 1_048_576
+/** Target frequency lists: the decoder's channel limit for single-channel adapters. */
+export const DSD_FME_FREQUENCIES_MAX = 64
+
 export const dsdFmeOptionsSchema = z
 	.object({
-		callStartDelayMs: z.number().finite().min(0).nullable().optional(),
-		callTimeoutMs: z.number().finite().positive().nullable().optional(),
+		// Timers are bounded to 24 h (DSD_FME_DURATION_MS_MAX), as the adapter clamps.
+		callStartDelayMs: z
+			.number()
+			.finite()
+			.min(0)
+			.max(DSD_FME_DURATION_MS_MAX)
+			.nullable()
+			.optional(),
+		callTimeoutMs: z
+			.number()
+			.finite()
+			.positive()
+			.max(DSD_FME_DURATION_MS_MAX)
+			.nullable()
+			.optional(),
 		channelHz: z.number().finite().positive().nullable().optional(),
 		debugRecordPath: z.string().nullable().optional(),
 		debugRecordStages: z.enum(DEBUG_STAGE_VALUES).nullable().optional(),
@@ -44,27 +70,51 @@ export const dsdFmeOptionsSchema = z
 			.array(z.union([z.string(), z.number(), z.boolean()]))
 			.nullable()
 			.optional(),
-		fmGain: z.number().finite().nullable().optional(),
-		frequencies: z.array(Hz).optional(),
+		// Linear csdr gain multiplier, 0 to +60 dB (the adapter clamps to it).
+		fmGain: z
+			.number()
+			.finite()
+			.min(0)
+			.max(DSD_FME_FM_GAIN_MAX)
+			.nullable()
+			.optional(),
+		// At most the decoder's channel limit of target frequencies.
+		frequencies: z.array(Hz).max(DSD_FME_FREQUENCIES_MAX).optional(),
 		frequency: Hz.optional(),
 		inputIqFormat: z.enum(IQ_FORMAT_VALUES).nullable().optional(),
-		inputSampleRate: z.number().finite().positive().nullable().optional(),
-		minCallDurationMs: z.number().finite().min(0).nullable().optional(),
+		// Rate bound: above every supported front end (the adapter clamps to it).
+		inputSampleRate: z
+			.number()
+			.finite()
+			.positive()
+			.max(DSD_FME_SAMPLE_RATE_MAX_HZ)
+			.nullable()
+			.optional(),
+		minCallDurationMs: z
+			.number()
+			.finite()
+			.min(0)
+			.max(DSD_FME_DURATION_MS_MAX)
+			.nullable()
+			.optional(),
 		mode: z.enum(DSD_FME_MODE_VALUES).nullable().optional(),
 		offsetHz: z.number().finite().optional(),
 		// YAML `output: null` (unquoted) reaches the adapter as null, read as "null".
 		output: z.enum(OUTPUT_VALUES).nullable().optional(),
 		perCallRecordingDir: z.string().nullable().optional(),
+		// Retention bounds (constants above), as the adapter clamps.
 		perCallRecordingMaxAgeHours: z
 			.number()
 			.finite()
 			.positive()
+			.max(DSD_FME_RECORDING_MAX_AGE_HOURS_MAX)
 			.nullable()
 			.optional(),
 		perCallRecordingMaxTotalMb: z
 			.number()
 			.finite()
 			.positive()
+			.max(DSD_FME_RECORDING_MAX_TOTAL_MB_MAX)
 			.nullable()
 			.optional(),
 		perCallRecordingPrune: z.boolean().nullable().optional(),
@@ -86,6 +136,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "callStartDelayMs",
 		type: "number",
 		min: 0,
+		max: DSD_FME_DURATION_MS_MAX,
 		unit: "ms",
 		default: 100,
 		secret: false,
@@ -95,6 +146,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "callTimeoutMs",
 		type: "number",
+		max: DSD_FME_DURATION_MS_MAX,
 		unit: "ms",
 		default: 4000,
 		secret: false,
@@ -165,6 +217,8 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "fmGain",
 		type: "number",
+		min: 0,
+		max: DSD_FME_FM_GAIN_MAX,
 		default: 2,
 		secret: false,
 		effect: "restart",
@@ -202,6 +256,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "inputSampleRate",
 		type: "number",
+		max: DSD_FME_SAMPLE_RATE_MAX_HZ,
 		unit: "Hz",
 		default: 2_400_000,
 		secret: false,
@@ -213,6 +268,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "minCallDurationMs",
 		type: "number",
 		min: 0,
+		max: DSD_FME_DURATION_MS_MAX,
 		unit: "ms",
 		default: 250,
 		secret: false,
@@ -258,6 +314,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "perCallRecordingMaxAgeHours",
 		type: "number",
+		max: DSD_FME_RECORDING_MAX_AGE_HOURS_MAX,
 		unit: "h",
 		default: 168,
 		secret: false,
@@ -267,6 +324,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "perCallRecordingMaxTotalMb",
 		type: "number",
+		max: DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
 		unit: "MB",
 		default: 512,
 		secret: false,

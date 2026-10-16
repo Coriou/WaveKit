@@ -30,6 +30,27 @@ const NFM_DEEMPHASIS_TAU_SECONDS = 0.00075
  */
 const MIN_TRANSITION = 0.0001
 
+/**
+ * WG7 HW.2 (requirement 9.4): the only way a number enters a csdr/sox stage string.
+ * A finite number is formatted exactly as a template literal would (byte-identical
+ * argv); anything else throws, so no NaN, Infinity or text ever reaches `sh -c`.
+ */
+export function csdrNumber(value: number): string {
+	if (typeof value !== "number" || !Number.isFinite(value)) {
+		throw new WaveKitError(
+			"A csdr pipeline stage needs a finite number",
+			"CSDR_STAGE_NON_FINITE",
+		)
+	}
+	return String(value)
+}
+
+/** `toFixed` of a finite number only (see `csdrNumber`). */
+function fixed(value: number, digits: number): string {
+	csdrNumber(value)
+	return value.toFixed(digits)
+}
+
 export interface ChannelFilterPlan {
 	/** Transition width normalised to the input rate (firdecimate argument). */
 	transition: number
@@ -101,7 +122,7 @@ export function channelDecimationStage(
 		channelBandwidthHz,
 		mode,
 	)
-	return `csdr firdecimate ${decimation} ${plan.transition.toFixed(6)} --cutoff ${plan.cutoff.toFixed(4)}`
+	return `csdr firdecimate ${csdrNumber(decimation)} ${fixed(plan.transition, 6)} --cutoff ${fixed(plan.cutoff, 4)}`
 }
 
 /**
@@ -128,7 +149,7 @@ export function validateChannelOffset(
  */
 export function shiftStage(offsetHz: number, inputRate: number): string | null {
 	if (offsetHz === 0) return null
-	return `csdr shift ${(-offsetHz / inputRate).toFixed(10)}`
+	return `csdr shift ${fixed(-offsetHz / inputRate, 10)}`
 }
 
 export interface DeemphasisStage {
@@ -143,6 +164,7 @@ export function deemphasisStage(
 	tauMicroseconds = 50,
 ): DeemphasisStage {
 	const rate = Math.max(1, Math.round(sampleRate))
+	csdrNumber(rate)
 	if (kind === "nfm") {
 		if (Math.abs(sampleRate - rate) < 1e-6 && NFM_DEEMPHASIS_RATES.has(rate)) {
 			return { stage: `csdr deemphasis --nfm ${rate}`, approximated: false }
@@ -152,6 +174,7 @@ export function deemphasisStage(
 			approximated: true,
 		}
 	}
+	csdrNumber(tauMicroseconds)
 	const tauSeconds = Number((tauMicroseconds / 1_000_000).toPrecision(6))
 	return {
 		stage: `csdr deemphasis --wfm ${rate} ${tauSeconds}`,

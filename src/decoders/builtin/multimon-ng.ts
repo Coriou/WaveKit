@@ -12,6 +12,14 @@
  */
 
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import { readNumericOption } from "../option-values.js"
+import {
+	MULTIMON_FILTER_GAIN_DB_MAX,
+	MULTIMON_FILTER_HZ_MAX,
+	MULTIMON_FM_GAIN_MAX,
+	MULTIMON_SAMPLE_RATE_MAX_HZ,
+	MULTIMON_VERBOSITY_MAX,
+} from "../options/multimon-ng.js"
 import type {
 	DecoderCaps,
 	DecoderConfig,
@@ -126,13 +134,73 @@ export class MultimonDecoder extends AudioDemodDecoder {
 		const rawModes = options["modes"] as MultimonMode[] | undefined
 		const modes = this.validateModes(rawModes)
 
+		// WG7 HW.2: every number is read by meaning (bounded, finite) before it
+		// becomes a -v count, an argument or part of the csdr shell pipeline.
+		const warn = this.optionWarn
 		return {
 			modes,
-			verbosity: options["verbosity"] as number | undefined,
+			verbosity: readNumericOption(
+				options["verbosity"],
+				{
+					key: "verbosity",
+					integer: true,
+					min: 0,
+					max: MULTIMON_VERBOSITY_MAX,
+				},
+				warn,
+			),
 			charset: options["charset"] as string | undefined,
-			filters: options["filters"] as MultimonFilterOptions | undefined,
-			inputSampleRate: options["inputSampleRate"] as number | undefined,
-			fmGain: options["fmGain"] as number | undefined,
+			filters: this.parseFilters(options["filters"]),
+			inputSampleRate: readNumericOption(
+				options["inputSampleRate"],
+				{
+					key: "inputSampleRate",
+					integer: false,
+					min: 0,
+					max: MULTIMON_SAMPLE_RATE_MAX_HZ,
+				},
+				warn,
+			),
+			fmGain: readNumericOption(
+				options["fmGain"],
+				{ key: "fmGain", integer: false, min: 0, max: MULTIMON_FM_GAIN_MAX },
+				warn,
+			),
+		}
+	}
+
+	/** Audio filter numbers, bounded by meaning (WG7 HW.2). */
+	private parseFilters(value: unknown): MultimonFilterOptions | undefined {
+		if (value === undefined || value === null) return undefined
+		if (typeof value !== "object" || Array.isArray(value)) {
+			this.optionWarn("filters", "invalid")
+			return undefined
+		}
+		const filters = value as Record<string, unknown>
+		const hz = (key: "highpass" | "lowpass"): number | undefined =>
+			readNumericOption(
+				filters[key],
+				{
+					key: `filters.${key}`,
+					integer: false,
+					min: 0,
+					max: MULTIMON_FILTER_HZ_MAX,
+				},
+				this.optionWarn,
+			)
+		return {
+			highpass: hz("highpass"),
+			lowpass: hz("lowpass"),
+			gain: readNumericOption(
+				filters["gain"],
+				{
+					key: "filters.gain",
+					integer: false,
+					min: -MULTIMON_FILTER_GAIN_DB_MAX,
+					max: MULTIMON_FILTER_GAIN_DB_MAX,
+				},
+				this.optionWarn,
+			),
 		}
 	}
 

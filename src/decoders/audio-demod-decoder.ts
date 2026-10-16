@@ -27,12 +27,19 @@ import { boundCsdrPipeline } from "./csdr-buffers.js"
 import {
 	channelDecimationStage,
 	channelFilterPlan,
+	csdrNumber,
 	deemphasisStage,
 	shiftStage,
 	validateChannelOffset,
 } from "./csdr-stages.js"
 import { BaseDecoder } from "./base-decoder.js"
-import { readChannelHz } from "./iq-decimate-decoder.js"
+import { SAMPLE_RATE_MAX_HZ, readChannelHz } from "./iq-decimate-decoder.js"
+import {
+	createOptionWarner,
+	readNumericOption,
+	type NumericOptionRule,
+	type NumericOptionWarn,
+} from "./option-values.js"
 import { configuredBandRequirements } from "./status-fields.js"
 import type {
 	DecoderBandDeclaration,
@@ -64,6 +71,93 @@ const OffsetHzSchema = z.number().finite().optional()
  * Default IQ sample rate from rtlmux (2.4 Msps)
  */
 const DEFAULT_IQ_SAMPLE_RATE = 2_400_000
+
+/**
+ * WG7 HW.2: linear gain multiplier of the `csdr gain` stage. 1000 is +60 dB of
+ * amplitude, past anything a limiter-followed FM discriminator output can use.
+ */
+export const FM_GAIN_MAX = 1000
+
+type DemodNumericKey =
+	| "inputSampleRate"
+	| "sampleRate"
+	| "demodSampleRate"
+	| "bandwidth"
+	| "fmGain"
+	| "filterTransition"
+	| "filterCutoff"
+	| "audioLowPass"
+
+/**
+ * Bounds by meaning of every DemodulationConfig number that reaches the csdr/sox
+ * pipeline string. Required fields get a safe default; optional ones are dropped
+ * (the pipeline's own default applies) when invalid.
+ */
+const DEMOD_RULES: Record<DemodNumericKey, NumericOptionRule> = {
+	// 1 kHz floor: below any IQ capture, and keeps derived rates and normalised
+	// cutoffs small finite numbers. An exact 0 is passed through to keep the
+	// historical `|| DEFAULT_IQ_SAMPLE_RATE` fallback in audioDemodRates.
+	inputSampleRate: {
+		key: "inputSampleRate",
+		integer: false,
+		min: 1000,
+		max: SAMPLE_RATE_MAX_HZ,
+		default: DEFAULT_IQ_SAMPLE_RATE,
+	},
+	sampleRate: {
+		key: "sampleRate",
+		integer: false,
+		min: 1,
+		max: SAMPLE_RATE_MAX_HZ,
+		default: 48_000,
+	},
+	demodSampleRate: {
+		key: "demodSampleRate",
+		integer: false,
+		min: 1,
+		max: SAMPLE_RATE_MAX_HZ,
+	},
+	bandwidth: {
+		key: "bandwidth",
+		integer: false,
+		min: 0,
+		max: SAMPLE_RATE_MAX_HZ,
+		default: 12_500,
+	},
+	fmGain: { key: "fmGain", integer: false, min: 0, max: FM_GAIN_MAX },
+	// Normalised to the input rate: 0.5 is Nyquist.
+	filterTransition: {
+		key: "filterTransition",
+		integer: false,
+		min: 0,
+		max: 0.5,
+	},
+	filterCutoff: { key: "filterCutoff", integer: false, min: 0, max: 0.5 },
+	// Hz; 96 kHz is the Nyquist of a 192 kHz audio stage, above any decoder's audio.
+	audioLowPass: { key: "audioLowPass", integer: false, min: 0, max: 96_000 },
+}
+
+/**
+ * WG7 HW.2 (requirement 9.1): every number of a demod config passed through
+ * `readNumericOption`. Finite in-range numbers come back unchanged, so real
+ * configs keep byte-identical pipelines.
+ */
+export function boundDemodConfig(
+	config: DemodulationConfig,
+	warn: NumericOptionWarn,
+): DemodulationConfig {
+	const out: Record<string, unknown> = { ...config }
+	for (const key of Object.keys(DEMOD_RULES) as DemodNumericKey[]) {
+		const rule = DEMOD_RULES[key]
+		const raw: unknown = config[key]
+		if (raw === undefined && rule.default === undefined) continue
+		if (key === "inputSampleRate" && raw === 0) continue
+		const value = readNumericOption(raw, rule, warn)
+		if (value === undefined) delete out[key]
+		else out[key] = value
+	}
+	return out as unknown as DemodulationConfig
+}
 
 /** What the decoder program reads on stdin after the demod pipeline. */
 export interface AudioDecoderStdin {
@@ -221,6 +315,10 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	private invalidOffsetLogged = false
 	private channelOverridesOffsetLogged = false
 	private unknownCentreLogged = false
+	/** One warning per key for this decoder (WG7 HW.2); never logs the value. */
+	protected readonly optionWarn: NumericOptionWarn = createOptionWarner(
+		(fields, message) => this.logger.warn(fields, message),
+	)
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -248,6 +346,11 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	 */
 	protected abstract getDemodConfig(): DemodulationConfig
 
+	/** `getDemodConfig()` with every number bounded (see `boundDemodConfig`). */
+	protected boundedDemodConfig(): DemodulationConfig {
+		return boundDemodConfig(this.getDemodConfig(), this.optionWarn)
+	}
+
 	/**
 	 * Template method: Returns the decoder command to execute.
 	 * Subclasses must implement this to return the decoder executable name.
@@ -269,12 +372,12 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	 * config's output rate. Subclasses that wrap the audio override this.
 	 */
 	protected getDecoderStdin(): AudioDecoderStdin {
-		return { format: "s16le", rateHz: this.getDemodConfig().sampleRate }
+		return { format: "s16le", rateHz: this.boundedDemodConfig().sampleRate }
 	}
 
 	getRateRequirements(): DecoderRateRequirements {
 		return audioDemodRateRequirements(
-			this.getDemodConfig(),
+			this.boundedDemodConfig(),
 			this.getDecoderStdin(),
 		)
 	}
@@ -290,7 +393,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 
 	getRateAdapter(input: { sampleRateHz: number }): DecoderRateAdapter {
 		return audioDemodRateAdapter(
-			this.getDemodConfig(),
+			this.boundedDemodConfig(),
 			this.getDecoderStdin(),
 			input.sampleRateHz,
 		)
@@ -329,7 +432,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		centerHz?: number
 	}): DecoderChannelRequestResult | undefined {
 		if (!this.channelizerSupported()) return undefined
-		const config = this.getDemodConfig()
+		const config = this.boundedDemodConfig()
 		const channelHz = this.resolveChannelHz(
 			config.channelHz ?? readChannelHz(this.config.options),
 			input,
@@ -400,14 +503,14 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			validateChannelOffset(offsetHz, inputSampleRate, config.bandwidth)
 		}
 		const cutoffArg = config.filterCutoff
-			? ` --cutoff ${config.filterCutoff}`
+			? ` --cutoff ${csdrNumber(config.filterCutoff)}`
 			: ""
 		return {
 			convert: "csdr convert -i char -o float",
 			shift: shiftStage(offsetHz, inputSampleRate),
 			decimate:
 				config.filterTransition !== undefined
-					? `csdr firdecimate ${decimation} ${config.filterTransition}${cutoffArg}`
+					? `csdr firdecimate ${csdrNumber(decimation)} ${csdrNumber(config.filterTransition)}${cutoffArg}`
 					: channelDecimationStage(
 							inputSampleRate,
 							decimation,
@@ -456,7 +559,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	 * @returns Complete shell command string
 	 */
 	protected buildPipelineCommand(): string {
-		const config = this.getDemodConfig()
+		const config = this.boundedDemodConfig()
 
 		// Determine the rate at which demodulation happens (and thus the filter cutoff)
 		// If demodSampleRate is provided, use it. Otherwise use output sampleRate.
@@ -526,6 +629,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			// Calculate normalized cutoff (0.0 - 0.5) relative to sample rate
 			// 0.5 = Nyquist (Fs/2).
 			const normalizedCutoff = config.audioLowPass / actualDemodRate
+			csdrNumber(normalizedCutoff) // throws unless finite
 			csdrStages.push(`csdr lowpass -f float ${normalizedCutoff.toFixed(4)}`)
 		}
 
@@ -541,7 +645,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		}
 
 		csdrStages.push(
-			`csdr gain ${config.fmGain ?? 10.0}`, // Apply gain (real)
+			`csdr gain ${csdrNumber(config.fmGain ?? 10.0)}`, // Apply gain (real), bounded number only
 			"csdr limit", // Prevent clipping (real audio)
 		)
 
@@ -575,11 +679,11 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			const soxResample = [
 				"sox",
 				"-t raw", // Input type
-				`-r ${actualDemodRate}`, // Input rate - MUST match csdr output
+				`-r ${csdrNumber(actualDemodRate)}`, // Input rate - MUST match csdr output
 				"-e signed -b 16 -c 1", // Input format (S16LE Mono)
 				"-", // Input from stdin
 				"-t raw", // Output type
-				`-r ${outputRate}`, // Output rate
+				`-r ${csdrNumber(outputRate)}`, // Output rate
 				"-", // Output to stdout
 			].join(" ")
 

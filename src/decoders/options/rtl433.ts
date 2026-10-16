@@ -4,20 +4,53 @@ import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 const frequencyHz = z.number().finite().positive()
 
+/** rtl_433 registers about 300 protocol decoders; 999 leaves room for new releases. */
+export const RTL433_PROTOCOL_ID_MAX = 999
+/** At most 256 `-R` ids: a fraction of the registry, keeps argv bounded. */
+export const RTL433_PROTOCOLS_MAX = 256
+/** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
+export const RTL433_INPUT_SAMPLE_RATE_MAX_HZ = 64_000_000
+/** rtl_433's processing range: its 250 kHz default up to the 3.2 Msps RTL-SDR maximum. */
+export const RTL433_TARGET_SAMPLE_RATE_MIN_HZ = 250_000
+export const RTL433_TARGET_SAMPLE_RATE_MAX_HZ = 3_200_000
+/** Target frequency lists: the decoder's channel limit for single-channel adapters. */
+export const RTL433_FREQUENCIES_MAX = 64
+
 /** Options read by the rtl_433 adapter and the IQ-decimate base class. */
 export const rtl433OptionsSchema = z
 	.object({
 		analyze: z.boolean().nullable().optional(),
 		// Each protocol is String()ed into `-R`: numeric text gives the same argument.
+		// Ids and list length bounded as the adapter clamps them (constants above).
 		protocols: z
-			.array(numberOrText(z.number().int().min(0), INTEGER_TEXT))
+			.array(
+				numberOrText(
+					z.number().int().min(0).max(RTL433_PROTOCOL_ID_MAX),
+					INTEGER_TEXT,
+				),
+			)
+			.max(RTL433_PROTOCOLS_MAX)
 			.nullable()
 			.optional(),
 		outputFormat: z.enum(["json", "csv"]).nullable().optional(),
-		inputSampleRate: z.number().finite().positive().nullable().optional(),
-		targetSampleRate: z.number().finite().positive().nullable().optional(),
+		// Rate bounds: the adapter clamps to them (constants above).
+		inputSampleRate: z
+			.number()
+			.finite()
+			.positive()
+			.max(RTL433_INPUT_SAMPLE_RATE_MAX_HZ)
+			.nullable()
+			.optional(),
+		targetSampleRate: z
+			.number()
+			.finite()
+			.min(RTL433_TARGET_SAMPLE_RATE_MIN_HZ)
+			.max(RTL433_TARGET_SAMPLE_RATE_MAX_HZ)
+			.nullable()
+			.optional(),
 		extraArgs: z.array(z.string()).nullable().optional(),
-		frequencies: z.array(frequencyHz).optional(),
+		// At most the decoder's channel limit of target frequencies.
+		frequencies: z.array(frequencyHz).max(RTL433_FREQUENCIES_MAX).optional(),
 		frequency: frequencyHz.optional(),
 		channelHz: frequencyHz.nullable().optional(),
 	})
@@ -72,6 +105,7 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "inputSampleRate",
 		type: "number",
 		unit: "Hz",
+		max: RTL433_INPUT_SAMPLE_RATE_MAX_HZ,
 		default: 2048000,
 		secret: false,
 		effect: "restart",
@@ -90,6 +124,7 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "protocols",
 		type: "number-list",
 		min: 0,
+		max: RTL433_PROTOCOL_ID_MAX,
 		default: null,
 		secret: false,
 		effect: "restart",
@@ -99,6 +134,8 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "targetSampleRate",
 		type: "number",
 		unit: "Hz",
+		min: RTL433_TARGET_SAMPLE_RATE_MIN_HZ,
+		max: RTL433_TARGET_SAMPLE_RATE_MAX_HZ,
 		default: 1000000,
 		secret: false,
 		effect: "restart",

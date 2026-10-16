@@ -16,15 +16,25 @@ const MODES = [
 
 const frequencyHz = z.number().finite().positive()
 
-/** Report-only bound on `verbosity` (multimon-ng gains nothing past a few -v flags). */
+/** Bound on `verbosity`: the adapter pushes one -v per step; multimon-ng gains nothing past a few. */
 export const MULTIMON_VERBOSITY_MAX = 10
+/** Filter corners in Hz: multimon-ng reads 22 050 Hz audio, Nyquist 11 025 Hz. */
+export const MULTIMON_FILTER_HZ_MAX = 11_025
+/** Filter gain in dB, symmetric: ±60 dB is ×1000 amplitude, past any usable level. */
+export const MULTIMON_FILTER_GAIN_DB_MAX = 60
+/** Linear `csdr gain` multiplier; equals audio-demod-decoder FM_GAIN_MAX (+60 dB). */
+export const MULTIMON_FM_GAIN_MAX = 1000
+/** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
+export const MULTIMON_SAMPLE_RATE_MAX_HZ = 64_000_000
+/** Target frequency lists: the decoder's channel limit for single-channel adapters. */
+export const MULTIMON_FREQUENCIES_MAX = 64
 
 /** Options read by the multimon-ng adapter and the audio-demod base class. */
 export const multimonNgOptionsSchema = z
 	.object({
 		modes: z.array(z.enum(MODES)).nullable().optional(),
-		// `i < null` adds no -v, like an absent verbosity; `i < "2"` coerces. Capped at
-		// MULTIMON_VERBOSITY_MAX so a huge value is reported (the adapter pushes one -v per step).
+		// null adds no -v, like an absent verbosity; "2" coerces. The adapter clamps to
+		// MULTIMON_VERBOSITY_MAX (it pushes one -v per step).
 		verbosity: numberOrText(
 			z.number().int().min(0).max(MULTIMON_VERBOSITY_MAX),
 			INTEGER_TEXT,
@@ -35,16 +45,42 @@ export const multimonNgOptionsSchema = z
 		filters: z
 			.object({
 				// Each is String()ed into an argument: numeric text gives the same one.
-				highpass: numberOrText(z.number().finite()).optional(),
-				lowpass: numberOrText(z.number().finite()).optional(),
-				gain: numberOrText(z.number().finite()).optional(),
+				// Bounded as the adapter clamps them (see the constants above).
+				highpass: numberOrText(
+					z.number().finite().min(0).max(MULTIMON_FILTER_HZ_MAX),
+				).optional(),
+				lowpass: numberOrText(
+					z.number().finite().min(0).max(MULTIMON_FILTER_HZ_MAX),
+				).optional(),
+				gain: numberOrText(
+					z
+						.number()
+						.finite()
+						.min(-MULTIMON_FILTER_GAIN_DB_MAX)
+						.max(MULTIMON_FILTER_GAIN_DB_MAX),
+				).optional(),
 			})
 			.strict()
 			.nullable()
 			.optional(),
-		inputSampleRate: z.number().finite().positive().nullable().optional(),
-		fmGain: z.number().finite().nullable().optional(),
-		frequencies: z.array(frequencyHz).optional(),
+		// Rate bound: above every supported front end (the adapter clamps to it).
+		inputSampleRate: z
+			.number()
+			.finite()
+			.positive()
+			.max(MULTIMON_SAMPLE_RATE_MAX_HZ)
+			.nullable()
+			.optional(),
+		// Linear csdr gain multiplier, 0 to +60 dB (the adapter clamps to it).
+		fmGain: z
+			.number()
+			.finite()
+			.min(0)
+			.max(MULTIMON_FM_GAIN_MAX)
+			.nullable()
+			.optional(),
+		// At most the decoder's channel limit of target frequencies.
+		frequencies: z.array(frequencyHz).max(MULTIMON_FREQUENCIES_MAX).optional(),
 		frequency: frequencyHz.optional(),
 		channelHz: frequencyHz.nullable().optional(),
 		offsetHz: z.number().finite().optional(),
@@ -101,6 +137,8 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		key: "fmGain",
 		type: "number",
+		min: 0,
+		max: MULTIMON_FM_GAIN_MAX,
 		default: 3,
 		secret: false,
 		effect: "restart",
@@ -138,6 +176,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "inputSampleRate",
 		type: "number",
 		unit: "Hz",
+		max: MULTIMON_SAMPLE_RATE_MAX_HZ,
 		default: 2400000,
 		secret: false,
 		effect: "restart",
