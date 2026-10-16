@@ -2,6 +2,7 @@
 // Validates: Requirements 1.2, 1.3
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import fc from "fast-check"
+import * as nodeFs from "node:fs/promises"
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -10,6 +11,7 @@ import type {
 	DecoderOverride,
 	DecoderSettingsFile,
 } from "../../../../src/decoders/settings/contract.js"
+import type { DecoderSettingsFs } from "../../../../src/decoders/settings/store.js"
 import {
 	openDecoderSettingsStore,
 	parseDecoderSettingsFile,
@@ -18,6 +20,21 @@ import {
 import type { Logger } from "../../../../src/utils/logger.js"
 
 const FILE = "decoder-settings.json"
+
+// Real fs with fsync skipped: durability is covered by store.test.ts; this keeps 100 runs
+// of real reads, writes, renames and quarantines under the test timeout.
+const noSyncFs: DecoderSettingsFs = {
+	open: (async (...args: Parameters<typeof nodeFs.open>) => {
+		const handle = await nodeFs.open(...args)
+		handle.sync = () => Promise.resolve()
+		return handle
+	}) as typeof nodeFs.open,
+	rename: nodeFs.rename,
+	unlink: nodeFs.unlink,
+	readdir: (path: string) => nodeFs.readdir(path),
+	lstat: nodeFs.lstat,
+	mkdir: nodeFs.mkdir,
+}
 const NOW = 1_700_000_000_000
 
 function silentLogger(): Logger {
@@ -137,6 +154,7 @@ describe("Property 2: store round trip and fail closed (real fs)", () => {
 					stateDir: runDir,
 					logger: silentLogger(),
 					now: () => NOW,
+					fs: noSyncFs,
 				}
 				const store = await openDecoderSettingsStore(opts)
 				await store.write(file)
@@ -159,7 +177,7 @@ describe("Property 2: store round trip and fail closed (real fs)", () => {
 				expect(names).not.toContain(FILE)
 				await rm(runDir, { recursive: true, force: true })
 			}),
-			{ numRuns: 25 },
+			{ numRuns: 100 },
 		)
 	})
 })

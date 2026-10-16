@@ -27,13 +27,18 @@ export function effectiveDecoderConfig(
 	config: DecoderConfig,
 	override: DecoderOverride | undefined,
 ): DecoderConfig {
-	const options: Record<string, unknown> = {}
-	for (const key of Object.keys(config.options))
-		options[key] = config.options[key]
+	// Spread and defineProperty create own data properties: a configured or override
+	// "__proto__" key stays data and never becomes the prototype.
+	const options: Record<string, unknown> = { ...config.options }
 	const out: DecoderConfig = { ...config, options }
 	if (override === undefined) return out
 	for (const key of Object.keys(override.options))
-		options[key] = copyValue(override.options[key])
+		Object.defineProperty(options, key, {
+			value: copyValue(override.options[key]),
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		})
 	if (override.enabled !== undefined) out.enabled = override.enabled
 	return out
 }

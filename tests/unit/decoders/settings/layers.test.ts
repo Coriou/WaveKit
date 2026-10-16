@@ -24,6 +24,25 @@ function override(
 }
 
 describe("effectiveDecoderConfig", () => {
+	it("keeps a configured or override __proto__ key as own data, never the prototype", () => {
+		const configured = JSON.parse(
+			'{"__proto__":{"outputFormat":"csv"}}',
+		) as Record<string, unknown>
+		for (const out of [
+			effectiveDecoderConfig(rtl433(configured), undefined).options,
+			effectiveDecoderConfig(
+				rtl433(),
+				override(
+					JSON.parse('{"__proto__":["csv"]}') as DecoderOverride["options"],
+				),
+			).options,
+		]) {
+			expect(Object.hasOwn(out, "__proto__")).toBe(true)
+			expect(Object.getPrototypeOf(out)).toBe(Object.prototype)
+			expect("outputFormat" in out).toBe(false)
+		}
+	})
+
 	it("returns a copy when there is no override", () => {
 		const config = rtl433({ frequency: 433_920_000 })
 		const out = effectiveDecoderConfig(config, undefined)

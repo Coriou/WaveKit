@@ -161,7 +161,13 @@ export async function openDecoderSettingsService(
 				"DECODER_SETTINGS_REVISION_MISMATCH",
 				"Decoder settings revision does not match",
 			)
-		const patch = validateDecoderPatch(config.type, config.options, body)
+		// Cross-key rules see the options the decoder runs with now (retained overrides
+		// included); a retyped stored entry is not applied, so it never counts.
+		const patch = validateDecoderPatch(
+			config.type,
+			effectiveDecoderConfig(config, applied.get(id)).options,
+			body,
+		)
 
 		// A retyped stored entry is replaced: the patch starts from empty.
 		const previous = applied.get(id)
