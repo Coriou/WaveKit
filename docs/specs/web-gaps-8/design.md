@@ -1,6 +1,6 @@
 # Web gaps 8 design (WG8)
 
-Status: implemented; lanes merged and wired (MA.1), docs done (MA.2); checkpoint (MA.3) open. Requirements in [requirements](requirements.md),
+Status: implemented; lanes merged and wired (MA.1), docs done (MA.2); checkpoint (MA.3) passed. Requirements in [requirements](requirements.md),
 tasks in [tasks](tasks.md). Background: the WG4 station write layer (the store pattern), WG6
 decoder option schemas and descriptors, WG7 bounded options and the safe error fields, the
 access spec (protected mode, download leases), the dsd-fme call recordings and their pruner, the

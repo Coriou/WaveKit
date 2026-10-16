@@ -1,7 +1,7 @@
 # Web gaps 8 tasks (WG8)
 
 Status: lanes ST, DP, RC and SB merged; Main wiring (MA.1) and docs (MA.2) done; checkpoint
-(MA.3) open. See [requirements](requirements.md) and [design](design.md). Lanes work against the frozen contract
+(MA.3) passed. See [requirements](requirements.md) and [design](design.md). Lanes work against the frozen contract
 and touch only their own paths; Main (MA.\*) owns the composition files (`src/index.ts`,
 `src/api/server.ts`, barrels, `src/config.ts`, `config/*`), the frozen contract files
 (`packages/**`, `src/decoders/settings/contract.ts`, `src/core/spectrum/subscribe-options.ts`,
@@ -67,5 +67,5 @@ touched tests, `pnpm run typecheck` and `pnpm run lint` before reporting.
       and the CLI grep. (The activity-recording-catalog, band-plans, web-gaps-4, web-gaps-6 and
       web-gaps-7 amendment notes are in the spec commit.)
   - _Requirements: 6.1, 6.2, 7.2_
-- [ ] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
+- [x] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
   - _Requirements: 8.1, 8.2_

@@ -1,7 +1,7 @@
 # Web gaps 8 requirements (WG8)
 
 Status: implemented; lanes ST, DP, RC and SB merged and wired (MA.1), docs done (MA.2); the
-checkpoint (MA.3) is open. See [design](design.md) and [tasks](tasks.md).
+checkpoint (MA.3) passed. See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
