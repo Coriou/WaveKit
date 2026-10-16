@@ -306,3 +306,50 @@ describe("dsd-fme inputSampleRate bound agrees in schema and argv", () => {
 		expect(args(0)).toEqual(build({}).view.getArgs())
 	})
 })
+
+describe("dsd-fme logs at every level carry no option text", () => {
+	it("udpHost, debugRecordPath, perCallRecordingDir, wavDir never appear in any log", () => {
+		const MARK = "MARK-777"
+		const lines: string[] = []
+		const logger = pino(
+			{ level: "trace" },
+			{ write: (line: string) => void lines.push(line) },
+		)
+		const decoder = new DsdFmeDecoder(
+			{
+				id: "t",
+				type: "dsd-fme",
+				enabled: true,
+				options: {
+					output: "udp",
+					udpHost: MARK,
+					udpPort: 7355,
+					debugRecordPath: `/tmp/${MARK}`,
+					enablePerCallRecording: true,
+					perCallRecordingDir: `/tmp/${MARK}`,
+					wavDir: `/tmp/${MARK}`,
+					mode: MARK,
+					voiceSlot: MARK,
+					extraArgs: ["-o", MARK],
+				},
+			} as unknown as DecoderConfig,
+			logger,
+		) as unknown as { getArgs(): string[]; onOptionsUpdated(): void }
+		expect(decoder.getArgs()[1]).toContain(MARK) // it is in argv, quoted
+		decoder.onOptionsUpdated()
+		decoder.getArgs()
+		decoder.getArgs()
+		const noUdp = new DsdFmeDecoder(
+			{
+				id: "u",
+				type: "dsd-fme",
+				enabled: true,
+				options: { output: "udp", udpHost: MARK },
+			} as unknown as DecoderConfig,
+			logger,
+		) as unknown as { getArgs(): string[] }
+		noUdp.getArgs()
+		expect(lines.length).toBeGreaterThan(0)
+		expect(lines.join("\n")).not.toContain(MARK)
+	})
+})

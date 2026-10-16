@@ -278,3 +278,84 @@ describe("multimon-ng inputSampleRate bound agrees in schema and argv", () => {
 		expect(cmd(0)).toBe(pipeline(build({}).view))
 	})
 })
+
+describe("multimon-ng modes cap and dedupe", () => {
+	const modesOf = (modes: unknown) => {
+		const args = build({ modes }).view.getDecoderArgs()
+		return args.flatMap((a, i) => (a === "-a" ? [args[i + 1]] : []))
+	}
+	const ALL = [
+		"POCSAG512",
+		"POCSAG1200",
+		"POCSAG2400",
+		"FLEX",
+		"EAS",
+		"AFSK1200",
+		"FSK9600",
+		"DTMF",
+	]
+	it("65 x FLEX gives one -a FLEX", () => {
+		expect(modesOf(Array(65).fill("FLEX"))).toEqual(["FLEX"])
+	})
+	it("keeps first-seen order and drops duplicates", () => {
+		expect(modesOf(["FLEX", "EAS", "FLEX", "POCSAG512"])).toEqual([
+			"FLEX",
+			"EAS",
+			"POCSAG512",
+		])
+	})
+	it("at the cap all 8 pass silently; past it extra entries are dropped with one warning", () => {
+		const at = build({ modes: ALL })
+		expect(modesOf(ALL)).toEqual(ALL)
+		expect(at.optionWarnings()).toEqual([])
+		const past = build({ modes: [...ALL, "FLEX"] })
+		expect(modesOf([...ALL, "FLEX"])).toEqual(ALL)
+		expect(past.optionWarnings()).toEqual([
+			expect.objectContaining({ key: "modes", issue: "clamped" }),
+		])
+	})
+	it("schema caps at 8 entries", () => {
+		expect(multimonNgOptionsSchema.safeParse({ modes: ALL }).success).toBe(true)
+		expect(
+			multimonNgOptionsSchema.safeParse({ modes: [...ALL, "FLEX"] }).success,
+		).toBe(false)
+	})
+	it("a non-array falls back to the POCSAG modes", () => {
+		expect(modesOf("FLEX; rm")).toEqual([
+			"POCSAG512",
+			"POCSAG1200",
+			"POCSAG2400",
+		])
+	})
+})
+
+describe("multimon-ng logs at every level carry no option text", () => {
+	it("debugRecordPath, charset, offsetHz, modes never appear in any log", () => {
+		const MARK = "MARK-777"
+		const lines: string[] = []
+		const logger = pino(
+			{ level: "trace" },
+			{ write: (line: string) => void lines.push(line) },
+		)
+		const decoder = new MultimonDecoder(
+			{
+				id: "t",
+				type: "multimon-ng",
+				enabled: true,
+				options: {
+					debugRecordPath: `/tmp/${MARK}`,
+					charset: MARK,
+					offsetHz: MARK,
+					modes: ["FLEX", MARK],
+					verbosity: MARK,
+				},
+			} as unknown as DecoderConfig,
+			logger,
+		) as unknown as { getArgs(): string[]; onOptionsUpdated(): void }
+		decoder.getArgs()
+		decoder.onOptionsUpdated()
+		decoder.getArgs()
+		expect(lines.length).toBeGreaterThan(0)
+		expect(lines.join("\n")).not.toContain(MARK)
+	})
+})

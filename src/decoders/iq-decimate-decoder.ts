@@ -430,7 +430,8 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 				targetSampleRate,
 				actualOutputRate,
 				decimation,
-				pipeline,
+				// Stage count, not the string: it carries option text (WG7 HW.2).
+				pipelineStages: pipeline.split(" | ").length,
 			},
 			"Built csdr IQ decimation pipeline",
 		)

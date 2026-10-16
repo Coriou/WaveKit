@@ -222,3 +222,32 @@ describe("rtl433 inputSampleRate bound agrees in schema and argv", () => {
 		expect(args(0)).toEqual(build({}).view.getArgs())
 	})
 })
+
+describe("rtl433 logs at every level carry no option text", () => {
+	it("extraArgs and garbage numbers never appear in any log", () => {
+		const MARK = "MARK-777"
+		const lines: string[] = []
+		const logger = pino(
+			{ level: "trace" },
+			{ write: (line: string) => void lines.push(line) },
+		)
+		const decoder = new Rtl433Decoder(
+			{
+				id: "t",
+				type: "rtl433",
+				enabled: true,
+				options: {
+					extraArgs: [MARK],
+					targetSampleRate: MARK,
+					protocols: [MARK],
+				},
+			} as unknown as DecoderConfig,
+			logger,
+		) as unknown as { getArgs(): string[]; onOptionsUpdated(): void }
+		decoder.getArgs()
+		decoder.onOptionsUpdated()
+		decoder.getArgs()
+		expect(lines.length).toBeGreaterThan(0)
+		expect(lines.join("\n")).not.toContain(MARK)
+	})
+})

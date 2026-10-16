@@ -331,7 +331,8 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 					"both",
 			}
 			this.logger.info(
-				{ debugPath, stages: this.debugRecording.stages },
+				// No path: option text never reaches the logs (WG7 HW.2).
+				{ stages: this.debugRecording.stages },
 				"Debug audio recording ENABLED - will save audio to files",
 			)
 		}
@@ -661,7 +662,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			// Simple tee to file - no process substitution needed
 			pipelineStr += ` | ${shellCommand("tee", [debugDemodFile])}`
 			this.logger.info(
-				{ file: debugDemodFile, rate: actualDemodRate },
+				{ rate: actualDemodRate },
 				"Debug recording DEMOD stage audio",
 			)
 		}
@@ -689,7 +690,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		if (shouldRecordFinal && debugFinalFile) {
 			pipelineStr += ` | ${shellCommand("tee", [debugFinalFile])}`
 			this.logger.info(
-				{ file: debugFinalFile, rate: outputRate },
+				{ rate: outputRate },
 				"Debug recording FINAL stage audio",
 			)
 		}
@@ -714,7 +715,8 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 				decimation,
 				bandwidth: config.bandwidth,
 				deEmphasis: config.deEmphasis,
-				pipeline,
+				// Stage count, not the string: it carries option text (WG7 HW.2).
+				pipelineStages: pipeline.split(" | ").length,
 			},
 			"Built csdr demodulation pipeline",
 		)

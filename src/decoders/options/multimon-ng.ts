@@ -16,6 +16,9 @@ const MODES = [
 
 const frequencyHz = z.number().finite().positive()
 
+/** At most one entry per known mode: the adapter reads this many and dedupes. */
+export const MULTIMON_MODES_MAX = MODES.length
+
 /** Bound on `verbosity`: the adapter pushes one -v per step; multimon-ng gains nothing past a few. */
 export const MULTIMON_VERBOSITY_MAX = 10
 /** Filter corners in Hz: multimon-ng reads 22 050 Hz audio, Nyquist 11 025 Hz. */
@@ -34,7 +37,8 @@ export const MULTIMON_FREQUENCIES_MAX = 64
 /** Options read by the multimon-ng adapter and the audio-demod base class. */
 export const multimonNgOptionsSchema = z
 	.object({
-		modes: z.array(z.enum(MODES)).nullable().optional(),
+		// Bounded by the known modes (the adapter caps and dedupes).
+		modes: z.array(z.enum(MODES)).max(MULTIMON_MODES_MAX).nullable().optional(),
 		// null adds no -v, like an absent verbosity; "2" coerces. The adapter clamps to
 		// MULTIMON_VERBOSITY_MAX (it pushes one -v per step).
 		verbosity: numberOrText(
@@ -192,7 +196,8 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 		default: null,
 		secret: false,
 		effect: "restart",
-		description: "Protocols to decode; empty or absent means the POCSAG modes.",
+		description:
+			"Protocols to decode, at most one per mode (8); empty or absent means the POCSAG modes.",
 	},
 	{
 		key: "offsetHz",

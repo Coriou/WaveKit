@@ -17,6 +17,7 @@ import {
 	MULTIMON_FILTER_GAIN_DB_MAX,
 	MULTIMON_FILTER_HZ_MAX,
 	MULTIMON_FM_GAIN_MAX,
+	MULTIMON_MODES_MAX,
 	MULTIMON_SAMPLE_RATE_MAX_HZ,
 	MULTIMON_SAMPLE_RATE_MIN_HZ,
 	MULTIMON_VERBOSITY_MAX,
@@ -211,20 +212,34 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	/**
 	 * Validates and filters modes to only include supported ones.
 	 */
-	private validateModes(rawModes: MultimonMode[] | undefined): MultimonMode[] {
-		if (!rawModes || rawModes.length === 0) {
+	private validateModes(value: MultimonMode[] | undefined): MultimonMode[] {
+		if (value !== undefined && value !== null && !Array.isArray(value)) {
+			this.optionWarn("modes", "invalid")
+			return ["POCSAG512", "POCSAG1200", "POCSAG2400"]
+		}
+		if (!value || value.length === 0) {
 			// Default to all POCSAG modes if none specified
 			return ["POCSAG512", "POCSAG1200", "POCSAG2400"]
 		}
 
-		const validModes = rawModes.filter(mode => MULTIMON_MODES.includes(mode))
+		// WG7 HW.2: at most one entry per known mode is read (MULTIMON_MODES_MAX);
+		// duplicates are dropped keeping first-seen order, so each -a appears once.
+		if (value.length > MULTIMON_MODES_MAX) this.optionWarn("modes", "clamped")
+		const rawModes = value.slice(0, MULTIMON_MODES_MAX)
+		const validModes = [
+			...new Set(rawModes.filter(mode => MULTIMON_MODES.includes(mode))),
+		]
+		const validCount = rawModes.filter(mode =>
+			MULTIMON_MODES.includes(mode),
+		).length
+		if (validModes.length !== validCount) this.optionWarn("modes", "clamped")
 
-		if (validModes.length !== rawModes.length) {
+		if (validCount !== rawModes.length) {
 			// Count only: the invalid entries are option text (WG7 HW.2).
 			this.logger.warn(
 				{
 					key: "modes",
-					invalidCount: rawModes.length - validModes.length,
+					invalidCount: rawModes.length - validCount,
 					validModes: MULTIMON_MODES,
 				},
 				"Some modes are invalid and will be ignored",

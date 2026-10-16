@@ -886,7 +886,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				)
 			}
 		} catch (err) {
-			this.logger.warn({ err, dir }, "Per-call recording retention failed")
+			// Error code only: messages and dir carry the configured path (WG7 HW.2).
+			this.logger.warn(
+				{ code: (err as NodeJS.ErrnoException).code },
+				"Per-call recording retention failed",
+			)
 		} finally {
 			this.pruning = false
 		}
@@ -1083,7 +1087,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (debugFile && this.debugRecording) {
 			pipelineStr += ` | ${shellCommand("tee", [debugFile])}`
 			this.logger.warn(
-				{ file: debugFile, rate: actualDemodRate },
+				{ rate: actualDemodRate },
 				"DEBUG: Recording raw audio BEFORE sox",
 			)
 		}
@@ -1125,7 +1129,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				outputSampleRate: outputRate,
 				decimation,
 				skipDcBlock: config.skipDcBlock,
-				pipeline,
+				// Stage count, not the string: it carries option text (WG7 HW.2).
+				pipelineStages: pipeline.split(" | ").length,
 			},
 			"Built dsd-fme pipeline with WAV wrapper",
 		)
@@ -2256,10 +2261,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 							wavFile,
 						},
 					})
-					this.logger.debug(
-						{ wavFile, attempt, dir },
-						"Found WAV file after async search",
-					)
+					this.logger.debug({ attempt }, "Found WAV file after async search")
 					return
 				}
 			}
@@ -2274,7 +2276,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 						tg: call.talkgroup,
 						src: call.source,
 						attempts: attempt,
-						dirsSearched: dirsToSearch,
+						dirsSearched: dirsToSearch.length,
 					},
 					"WAV file not found after max retries",
 				)
@@ -2295,7 +2297,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	): string | undefined {
 		// Check if directory exists
 		if (!fs.existsSync(dir)) {
-			this.logger.debug({ dir }, "Recording directory does not exist")
+			this.logger.debug("Recording directory does not exist")
 			return undefined
 		}
 
@@ -2368,7 +2370,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return undefined
 		} catch (err) {
 			this.logger.warn(
-				{ dir, error: err instanceof Error ? err.message : String(err) },
+				{ code: (err as NodeJS.ErrnoException).code },
 				"Error searching for WAV file",
 			)
 			return undefined

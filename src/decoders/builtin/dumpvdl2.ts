@@ -35,6 +35,12 @@ import type { ACARSMessage } from "./acarsdec.js"
 /**
  * Configuration options for the VDL2 decoder.
  */
+/**
+ * Parsed options whose frequency list kept at least one valid configured entry;
+ * the built-in defaults never gain configured provenance.
+ */
+const CONFIGURED_FREQUENCIES = new WeakSet<object>()
+
 export interface Dumpvdl2Options {
 	inputCenterFreq?: number | undefined
 	followCenter?: boolean | undefined
@@ -211,9 +217,7 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 * list says which band it follows; without one the band is unknown.
 	 */
 	override getBandDeclaration(): DecoderBandDeclaration {
-		const configured =
-			this.config.frequencies ?? this.config.options["frequencies"]
-		const isConfigured = Array.isArray(configured) && configured.length > 0
+		const isConfigured = CONFIGURED_FREQUENCIES.has(this.options)
 		if (this.options.followCenter)
 			return isConfigured
 				? {
@@ -437,12 +441,14 @@ function parseDumpvdl2Options(
 		DUMPVDL2_BOUNDS.maxFrequencies,
 		warn,
 	)
+	const frequenciesConfigured =
+		frequencies !== undefined && frequencies.length > 0
 	if (!frequencies || frequencies.length === 0) {
 		// Default VDL2 frequencies (in Hz) - common European frequencies
 		frequencies = [136_650_000, 136_700_000, 136_975_000]
 	}
 
-	return {
+	const parsed: Dumpvdl2Options = {
 		inputCenterFreq: readNumericOption(
 			options["inputCenterFreq"],
 			{ key: "inputCenterFreq", integer: true, ...DUMPVDL2_BOUNDS.frequencyHz },
@@ -481,6 +487,8 @@ function parseDumpvdl2Options(
 		),
 		extraArgs: options["extraArgs"] as string[] | undefined,
 	}
+	if (frequenciesConfigured) CONFIGURED_FREQUENCIES.add(parsed)
+	return parsed
 }
 
 /**
