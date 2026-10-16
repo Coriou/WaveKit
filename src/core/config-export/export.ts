@@ -144,6 +144,14 @@ export const BUILTIN_OPTION_KEYS: readonly string[] = Object.freeze([
 ])
 const builtinOptionKeys = new Set(BUILTIN_OPTION_KEYS)
 
+/**
+ * Decoder option keys that carry a receiver position (readsb `lat`/`lon` and the usual
+ * spellings). Redacted whatever the value type, like CONFIG_EXPORT_REDACTED_PATHS: a precise
+ * position is personal data even as a number.
+ */
+export const POSITION_OPTION_KEY_PATTERN =
+	/^(lat|lon|lng|alt|latitude|longitude|altitude|altm|altitudem|height|elevation|position|location|coords?|qth|grid|locator|maidenhead)$/i
+
 function isTrustedOptionKey(key: string, secret: ReadonlySet<string>): boolean {
 	return (
 		optionAllowlist.has(key) || builtinOptionKeys.has(key) || secret.has(key)
@@ -218,7 +226,12 @@ function redactOptionValue(
 	depth: number,
 ): unknown {
 	if (budgetExceeded(ctx, depth)) return CONFIG_EXPORT_REDACTED
-	if (secret.has(key) || isSecretKey(key)) return CONFIG_EXPORT_REDACTED
+	if (
+		secret.has(key) ||
+		isSecretKey(key) ||
+		POSITION_OPTION_KEY_PATTERN.test(key)
+	)
+		return CONFIG_EXPORT_REDACTED
 	if (isKeptScalar(value)) return value
 	if (typeof value === "string")
 		return optionAllowlist.has(key) ? value : CONFIG_EXPORT_REDACTED

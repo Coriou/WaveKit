@@ -341,6 +341,23 @@ describe("config export redaction", () => {
 		})
 	})
 
+	it("redacts decoder option positions (readsb lat/lon) whatever the type, without descriptors", () => {
+		const { config } = everySecretFixture(1)
+		config.decoders[0]!.type = "readsb"
+		config.decoders[0]!.options = {
+			lat: 47.123456789,
+			lon: 8.987654321,
+			altitude: 431.25,
+			nested: { latitude: 47.123456789 },
+			gain: 3,
+		}
+		const body = exportConfig(config, META)
+		for (const leak of ["47.123456789", "8.987654321", "431.25"])
+			expect(body).not.toContain(leak)
+		const r = redactConfig(config) as { decoders: { options: unknown }[] }
+		expect(r.decoders[0]!.options).toMatchObject({ lat: R, lon: R, gain: 3 })
+	})
+
 	it("keeps closed-set strings only when the value is a member", () => {
 		const schema = z.object({
 			e: z.enum(["a", "b"]),
@@ -434,6 +451,9 @@ describe("config export redaction", () => {
 								obj: { token: 1234567, free: s.nestedSecret },
 								[s.secretKey]: 1,
 								filters: { [s.nestedSecretKey]: { [s.secretKey]: 2 } },
+								lat: s.lat,
+								lon: s.lat,
+								alt: s.lat,
 							},
 						})),
 						...(s.withAccess
