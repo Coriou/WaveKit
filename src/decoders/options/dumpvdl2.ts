@@ -107,6 +107,7 @@ export const dumpvdl2OptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		min: 1,
 		max: DUMPVDL2_BOUNDS.frequencyHz.max,
@@ -118,6 +119,7 @@ export const dumpvdl2OptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		min: 1,
 		max: DUMPVDL2_BOUNDS.frequencyHz.max,

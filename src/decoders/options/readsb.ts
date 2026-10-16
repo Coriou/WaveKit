@@ -121,6 +121,7 @@ export const readsbOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		min: 1,
 		unit: "Hz",
@@ -131,6 +132,7 @@ export const readsbOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		min: 1,
 		unit: "Hz",
@@ -203,6 +205,7 @@ export const readsbOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "ppm",
+		patchable: true,
 		type: "number",
 		min: READSB_BOUNDS.ppm.min,
 		max: READSB_BOUNDS.ppm.max,

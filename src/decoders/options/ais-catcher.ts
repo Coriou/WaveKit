@@ -108,6 +108,7 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		unit: "Hz",
 		default: null,
@@ -116,6 +117,7 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		unit: "Hz",
 		default: null,
@@ -124,6 +126,7 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "gain",
+		patchable: true,
 		type: "number",
 		min: AIS_CATCHER_BOUNDS.gainDb.min,
 		max: AIS_CATCHER_BOUNDS.gainDb.max,
@@ -161,6 +164,7 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 	{
 		...base,
 		key: "ppm",
+		patchable: true,
 		type: "number",
 		min: AIS_CATCHER_BOUNDS.ppm.min,
 		max: AIS_CATCHER_BOUNDS.ppm.max,

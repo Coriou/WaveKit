@@ -84,6 +84,7 @@ export const acarsdecOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequencies",
+		patchable: true,
 		type: "number-list",
 		max: ACARSDEC_BOUNDS.frequencyHz.max,
 		unit: "Hz",
@@ -94,6 +95,7 @@ export const acarsdecOptionDescriptors: DecoderOptionDescriptor[] = [
 	},
 	{
 		key: "frequency",
+		patchable: true,
 		type: "number",
 		unit: "Hz",
 		default: null,
