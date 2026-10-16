@@ -31,6 +31,10 @@ export function parseRiffDurationMs(
 		if (len < 12) return null
 		if (tag(b, 0) !== "RIFF" || tag(b, 8) !== "WAVE") return null
 		const dv = new DataView(b.buffer, b.byteOffset, b.byteLength)
+		// The RIFF container: `fmt ` and the `data` chunk header must lie inside 8 + riffSize.
+		const riffSize = dv.getUint32(4, true)
+		if (riffSize < 4) return null
+		const riffEnd = 8 + riffSize
 		let byteRate = 0
 		let haveFmt = false
 		let pos = 12
@@ -39,13 +43,14 @@ export function parseRiffDurationMs(
 			const size = dv.getUint32(pos + 4, true)
 			const body = pos + 8
 			if (id === "data") {
-				if (!haveFmt) return null
+				if (!haveFmt || body > riffEnd) return null
 				if (!Number.isInteger(fileSize) || fileSize < body) return null
 				const avail = Math.min(size, fileSize - body)
 				return Math.round((avail / byteRate) * 1000)
 			}
 			if (id === "fmt ") {
 				if (haveFmt || size < 16 || body + 16 > len) return null
+				if (body + size > riffEnd) return null
 				const format = dv.getUint16(body, true)
 				const channels = dv.getUint16(body + 2, true)
 				const rate = dv.getUint32(body + 4, true)

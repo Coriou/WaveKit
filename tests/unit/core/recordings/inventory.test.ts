@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
 	chmod,
@@ -7,6 +8,7 @@ import {
 	readFile,
 	readdir,
 	readlink,
+	rename,
 	rm,
 	symlink,
 	unlink,
@@ -15,6 +17,7 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
+import { Readable } from "node:stream"
 import { setTimeout as delay } from "node:timers/promises"
 import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -25,8 +28,12 @@ import {
 	RECORDINGS_SCAN_MAX_FILES,
 } from "@wavekit/api-types"
 import {
+	RECORDINGS_ID_MAX_LENGTH,
+	RECORDINGS_SCAN_MAX_DIRS,
+	RECORDINGS_SCAN_MAX_ENTRIES,
 	RecordingInventoryError,
 	createRecordingInventory,
+	nodeRecordingFs,
 } from "../../../../src/core/recordings/inventory.js"
 import type {
 	RecordingFileHandle,
@@ -79,13 +86,17 @@ const DSD = (hhmmss: string, rest = "1_GROUP_TGT_100_SRC_2001"): string =>
 	`20261016_${hhmmss}_01234_${rest}.wav`
 
 type FNode =
-	| { t: "dir" }
-	| { t: "link" }
-	| { t: "file"; size: number; mtimeMs: number; data: Uint8Array }
+	| { t: "dir"; ino: number }
+	| { t: "link"; ino: number }
+	| { t: "fifo"; ino: number }
+	| { t: "file"; size: number; mtimeMs: number; data: Uint8Array; ino: number }
+
+let nextIno = 1
 
 /** In-memory read-only fs behind the inventory's port, instrumented. */
 class FakeFs implements RecordingFsPort {
 	readonly nodes = new Map<string, FNode>()
+	readonly children = new Map<string, Set<string>>()
 	readonly real = new Map<string, string>()
 	calls = 0
 	active = 0
@@ -93,26 +104,41 @@ class FakeFs implements RecordingFsPort {
 	delayMs = 0
 	opens = 0
 	readdirs = 0
+	lstats = 0
+	liveHandles = 0
+	maxLiveHandles = 0
 	readLengths: number[] = []
 	afterReaddir: ((dir: string) => void) | null = null
+	beforeOpen: ((p: string) => void) | null = null
+
+	put(p: string, node: FNode): this {
+		const parent = path.dirname(p)
+		if (parent !== p) {
+			if (!this.nodes.has(parent)) this.dir(parent)
+			let set = this.children.get(parent)
+			if (!set) this.children.set(parent, (set = new Set()))
+			set.add(path.basename(p))
+		}
+		this.nodes.set(p, node)
+		return this
+	}
 
 	dir(p: string): this {
-		const parent = path.dirname(p)
-		if (parent !== p && !this.nodes.has(parent)) this.dir(parent)
-		this.nodes.set(p, { t: "dir" })
-		return this
+		return this.put(p, { t: "dir", ino: nextIno++ })
 	}
 
 	file(p: string, mtimeMs: number, data: Uint8Array = WAV_1S): this {
-		this.dir(path.dirname(p))
-		this.nodes.set(p, { t: "file", size: data.length, mtimeMs, data })
-		return this
+		return this.put(p, {
+			t: "file",
+			size: data.length,
+			mtimeMs,
+			data,
+			ino: nextIno++,
+		})
 	}
 
 	link(p: string): this {
-		this.dir(path.dirname(p))
-		this.nodes.set(p, { t: "link" })
-		return this
+		return this.put(p, { t: "link", ino: nextIno++ })
 	}
 
 	private async step<T>(fn: () => T): Promise<T> {
@@ -128,31 +154,65 @@ class FakeFs implements RecordingFsPort {
 		}
 	}
 
-	readdir(dir: string): Promise<string[]> {
+	private statsOf(n: FNode): RecordingStats {
+		return {
+			isFile: () => n.t === "file",
+			isDirectory: () => n.t === "dir",
+			isSymbolicLink: () => n.t === "link",
+			size: n.t === "file" ? n.size : 0,
+			mtimeMs: n.t === "file" ? n.mtimeMs : 0,
+			dev: 1,
+			ino: n.ino,
+		}
+	}
+
+	opendir(dir: string): Promise<AsyncIterable<string>> {
 		return this.step(() => {
 			this.readdirs++
 			const n = this.nodes.get(dir)
 			if (!n) throw errno("ENOENT")
 			if (n.t !== "dir") throw errno("ENOTDIR")
-			const out: string[] = []
-			for (const p of this.nodes.keys())
-				if (p !== dir && path.dirname(p) === dir) out.push(path.basename(p))
+			const names = [...(this.children.get(dir) ?? [])]
 			this.afterReaddir?.(dir)
-			return out
+			const step = <T>(fn: () => T): Promise<T> => this.step(fn)
+			return {
+				[Symbol.asyncIterator]: () => {
+					let i = 0
+					return {
+						next: () =>
+							step(
+								(): IteratorResult<string> =>
+									i < names.length
+										? { done: false, value: names[i++] ?? "" }
+										: { done: true, value: undefined },
+							),
+						return: () =>
+							step(
+								(): IteratorResult<string> => ({
+									done: true,
+									value: undefined,
+								}),
+							),
+					}
+				},
+			}
 		})
 	}
 
 	lstat(p: string): Promise<RecordingStats> {
 		return this.step(() => {
+			this.lstats++
 			const n = this.nodes.get(p)
 			if (!n) throw errno("ENOENT")
-			return {
-				isFile: () => n.t === "file",
-				isDirectory: () => n.t === "dir",
-				isSymbolicLink: () => n.t === "link",
-				size: n.t === "file" ? n.size : 0,
-				mtimeMs: n.t === "file" ? n.mtimeMs : 0,
-			}
+			return this.statsOf(n)
+		})
+	}
+
+	stat(p: string): Promise<RecordingStats> {
+		return this.step(() => {
+			const n = this.nodes.get(this.real.get(p) ?? p)
+			if (!n) throw errno("ENOENT")
+			return this.statsOf(n)
 		})
 	}
 
@@ -164,13 +224,18 @@ class FakeFs implements RecordingFsPort {
 	}
 
 	open(p: string): Promise<RecordingFileHandle> {
+		this.beforeOpen?.(p)
 		return this.step(() => {
 			this.opens++
 			const n = this.nodes.get(p)
 			if (!n) throw errno("ENOENT")
 			if (n.t === "link") throw errno("ELOOP")
-			if (n.t !== "file") throw errno("EISDIR")
-			const data = n.data
+			if (n.t === "dir") throw errno("EISDIR")
+			const data = n.t === "file" ? n.data : new Uint8Array(0)
+			const stats = this.statsOf(n)
+			this.liveHandles++
+			this.maxLiveHandles = Math.max(this.maxLiveHandles, this.liveHandles)
+			let closed = false
 			return {
 				read: (buf: Uint8Array, off: number, len: number, pos: number) =>
 					this.step(() => {
@@ -179,7 +244,13 @@ class FakeFs implements RecordingFsPort {
 						buf.set(chunk, off)
 						return { bytesRead: chunk.length }
 					}),
-				close: () => this.step(() => undefined),
+				stat: () => this.step(() => stats),
+				close: () =>
+					this.step(() => {
+						if (!closed) this.liveHandles--
+						closed = true
+					}),
+				createReadStream: () => Readable.from([Buffer.from(data)]),
 			}
 		})
 	}
@@ -522,7 +593,7 @@ describe("recordings inventory ids", () => {
 		const orig = fs.lstat.bind(fs)
 		fs.lstat = async p => {
 			const st = await orig(p)
-			if (p.endsWith(".wav")) fs.nodes.set(p, { t: "link" })
+			if (p.endsWith(".wav")) fs.nodes.set(p, { t: "link", ino: nextIno++ })
 			return st
 		}
 		expect((await fakeInventory(fs).list({})).items).toEqual([])
@@ -674,9 +745,11 @@ describe("recordings inventory bounds", () => {
 		await inv.list({})
 		expect(fs.opens).toBe(6000)
 		now += 3000
-		setAll(OLD) // 1904 of these were evicted
+		// 1904 of these were evicted; the pool inserts each miss as it goes, so those misses
+		// (first in name order) evict the 96 survivors before the workers reach them.
+		setAll(OLD)
 		await inv.list({})
-		expect(fs.opens).toBe(6000 + 6000 - 4096)
+		expect(fs.opens).toBe(6000 + 2000)
 	})
 
 	it("shares one scan between concurrent lists and caches it for 2 s", async () => {
@@ -802,5 +875,265 @@ describe("recordings inventory property", () => {
 			}),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+// ---------------------------------------------------------------------------------------------
+// Adversarial review fixes: handle verification, FIFOs, budgets, id length
+
+/** A dsd-fme call name giving an id of exactly `idLength` characters at index 0. */
+function dsdNameForIdLength(idLength: number): string {
+	const head = "20261016_120000_01234_"
+	const tail = "_GROUP_TGT_1_SRC_2.wav"
+	return (
+		head +
+		"a".repeat(idLength - "dsd:0~".length - head.length - tail.length) +
+		tail
+	)
+}
+
+describe("recordings inventory handle bounds and budgets", () => {
+	it("keeps at most 8 live handles and 8 fs operations in flight at 2000 files", async () => {
+		const fs = manyFiles(RECORDINGS_SCAN_MAX_FILES)
+		const page = await fakeInventory(fs).list({ limit: 200 })
+		expect(page).toMatchObject({ scannedFiles: 2000, truncated: false })
+		expect(fs.opens).toBe(2000)
+		expect(fs.liveHandles).toBe(0)
+		expect(fs.maxLiveHandles).toBeLessThanOrEqual(RECORDINGS_SCAN_CONCURRENCY)
+		expect(fs.maxLiveHandles).toBeGreaterThan(1)
+		expect(fs.maxActive).toBeLessThanOrEqual(RECORDINGS_SCAN_CONCURRENCY)
+	})
+
+	it("enters at most 2000 discovery folders", async () => {
+		const tree = (n: number): FakeFs => {
+			const fs = new FakeFs().dir("/r/dsd").dir("/r/scan/dv")
+			for (let i = 0; i < n; i++)
+				fs.dir(`/r/scan/dv/d_${String(i).padStart(5, "0")}`)
+			return fs
+		}
+		const at = tree(RECORDINGS_SCAN_MAX_DIRS)
+		expect(await fakeInventory(at).list({})).toMatchObject({
+			scannedFiles: 0,
+			truncated: false,
+		})
+		const over = tree(RECORDINGS_SCAN_MAX_DIRS + 1)
+		expect(await fakeInventory(over).list({})).toMatchObject({
+			scannedFiles: 0,
+			truncated: true,
+		})
+		// dsd dir, root, dv and analog at most, plus one lstat per entered folder
+		expect(over.lstats).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 4)
+		expect(over.readdirs).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 2)
+	})
+
+	it("reads at most 16000 directory entries per scan", async () => {
+		expect(RECORDINGS_SCAN_MAX_ENTRIES).toBe(8 * RECORDINGS_SCAN_MAX_FILES)
+		const tree = (n: number): FakeFs => {
+			const fs = new FakeFs().dir("/r/dsd").file(`/r/dsd/${DSD("000000")}`, OLD)
+			for (let i = 1; i < n; i++)
+				fs.file(`/r/dsd/x${i}.txt`, OLD, new Uint8Array(0))
+			return fs
+		}
+		const at = await fakeInventory(tree(RECORDINGS_SCAN_MAX_ENTRIES)).list({})
+		expect(at).toMatchObject({ scannedFiles: 1, truncated: false })
+		const fs = tree(RECORDINGS_SCAN_MAX_ENTRIES + 1)
+		const over = await fakeInventory(fs).list({})
+		expect(over.truncated).toBe(true)
+		// the scan stopped: the scanner root was never visited
+		expect(fs.readdirs).toBe(1)
+	})
+
+	it("drops a FIFO or another file swapped in between lstat and open", async () => {
+		for (const swap of ["fifo", "file"] as const) {
+			const p = `/r/dsd/${DSD("120000")}`
+			const fs = new FakeFs().file(p, OLD).file(`/r/dsd/${DSD("120001")}`, OLD)
+			fs.beforeOpen = q => {
+				if (q !== p) return
+				if (swap === "fifo") fs.nodes.set(q, { t: "fifo", ino: nextIno++ })
+				else fs.file(q, OLD)
+			}
+			const page = await fakeInventory(fs).list({})
+			expect(page.items.map(i => i.id)).toEqual([`dsd:0~${DSD("120001")}`])
+			expect(fs.readLengths).toHaveLength(1)
+			expect(fs.liveHandles).toBe(0)
+		}
+	})
+
+	it("lists ids up to 100 characters, counts and refuses longer ones without fs calls", async () => {
+		expect(RECORDINGS_ID_MAX_LENGTH).toBe(100)
+		const n100 = dsdNameForIdLength(100)
+		const n101 = dsdNameForIdLength(101)
+		expect(`dsd:0~${n100}`).toHaveLength(100)
+		const fs = new FakeFs()
+			.file(`/r/dsd/${n100}`, OLD)
+			.file(`/r/dsd/${n101}`, OLD)
+		const { logger, warn } = fakeLogger()
+		const inv = fakeInventory(fs, { logger })
+		const page = await inv.list({ limit: 1 })
+		expect(page.items.map(i => i.id)).toEqual([`dsd:0~${n100}`])
+		expect(page.scannedFiles).toBe(1)
+		expect(warn).toHaveBeenCalledTimes(1)
+		expect((warn.mock.calls[0] as [Record<string, unknown>])[0]).toMatchObject({
+			longIds: 1,
+		})
+		expect(JSON.stringify(warn.mock.calls)).not.toContain("aaaa")
+		expect(await inv.resolve(`dsd:0~${n100}`)).toBe(`/r/dsd/${n100}`)
+		const calls = fs.calls
+		expect(await inv.resolve(`dsd:0~${n101}`)).toBeNull()
+		expect(await inv.open(`dsd:0~${n101}`)).toBeNull()
+		expect(fs.calls).toBe(calls)
+	})
+
+	it("opens a verified handle and refuses a fresh file swapped in before the open", async () => {
+		const p = `/r/dsd/${DSD("120000")}`
+		const fs = new FakeFs().file(p, OLD)
+		const inv = fakeInventory(fs)
+		const opened = await inv.open(`dsd:0~${DSD("120000")}`)
+		expect(opened?.name).toBe(DSD("120000"))
+		await opened?.handle.close()
+		fs.beforeOpen = () => fs.file(p, NOW)
+		expect(await inv.resolve(`dsd:0~${DSD("120000")}`)).toBe(p)
+		expect(await inv.open(`dsd:0~${DSD("120000")}`)).toBeNull()
+		expect(fs.liveHandles).toBe(0)
+	})
+})
+
+describe("recordings inventory open on the real filesystem", () => {
+	let root = ""
+
+	afterEach(async () => {
+		if (root) await rm(root, { recursive: true, force: true })
+		root = ""
+	})
+
+	async function setup(): Promise<{
+		now: number
+		scan: string
+		dsd: string
+		outside: string
+		put: (p: string, data?: Buffer, fresh?: boolean) => Promise<void>
+	}> {
+		root = await mkdtemp(path.join(tmpdir(), "wk-rec-open-"))
+		const now = Date.now() + 60_000
+		const put = async (
+			p: string,
+			data: Buffer = wav(16_000),
+			fresh = false,
+		): Promise<void> => {
+			await mkdir(path.dirname(p), { recursive: true })
+			await writeFile(p, data)
+			const t = (fresh ? now : now - 30_000) / 1000
+			await utimes(p, t, t)
+		}
+		const scan = path.join(root, "scan")
+		const dsd = path.join(root, "dsd")
+		const outside = path.join(root, "outside")
+		await put(path.join(scan, "dv", "d_x", "call.wav"))
+		await put(path.join(dsd, DSD("120000")))
+		await put(path.join(outside, "call.wav"), Buffer.from("SECRET-OUTSIDE"))
+		return { now, scan, dsd, outside, put }
+	}
+
+	function inventoryOver(
+		s: Awaited<ReturnType<typeof setup>>,
+		fs: RecordingFsPort = nodeRecordingFs,
+	): ReturnType<typeof createRecordingInventory> {
+		return createRecordingInventory({
+			dsdFmeDirs: () => [{ decoderId: "a", dir: s.dsd }],
+			scannerRecordingsDir: () => s.scan,
+			now: () => s.now,
+			logger: fakeLogger().logger,
+			fs,
+		})
+	}
+
+	async function readAll(h: RecordingFileHandle): Promise<Buffer> {
+		const chunks: Buffer[] = []
+		for await (const c of h.createReadStream({ autoClose: true }))
+			chunks.push(Buffer.from(c as Uint8Array))
+		return Buffer.concat(chunks)
+	}
+
+	it("streams an eligible file through the verified handle", async () => {
+		const s = await setup()
+		const opened = await inventoryOver(s).open("scan:d_x~call.wav")
+		expect(opened?.name).toBe("call.wav")
+		const bytes = await readAll(opened?.handle as RecordingFileHandle)
+		expect(bytes.equals(wav(16_000))).toBe(true)
+	})
+
+	it("refuses a discovery folder swapped for a symlink to an outside directory before the open", async () => {
+		const s = await setup()
+		const folder = path.join(s.scan, "dv", "d_x")
+		let swapped = false
+		const fs: RecordingFsPort = {
+			...nodeRecordingFs,
+			open: async (p, flags) => {
+				if (!swapped && p === path.join(folder, "call.wav")) {
+					swapped = true
+					await rename(folder, `${folder}-orig`)
+					await symlink(s.outside, folder)
+				}
+				return nodeRecordingFs.open(p, flags)
+			},
+		}
+		const before = await treeHash(s.outside)
+		expect(await inventoryOver(s, fs).open("scan:d_x~call.wav")).toBeNull()
+		expect(swapped).toBe(true)
+		// O_NOFOLLOW alone would have opened the outside file: the handle checks refuse it.
+		const raw = await nodeRecordingFs.open(path.join(folder, "call.wav"), 0)
+		await raw.close()
+		expect(await treeHash(s.outside)).toBe(before)
+	})
+
+	it("refuses a FIFO, directly and swapped in between lstat and open", async ctx => {
+		const s = await setup()
+		const fifo = path.join(s.dsd, DSD("120001"))
+		try {
+			execFileSync("mkfifo", [fifo])
+		} catch {
+			ctx.skip()
+			return
+		}
+		const inv = inventoryOver(s)
+		const page = await inv.list({})
+		expect(page.items.map(i => i.id)).not.toContain(`dsd:0~${DSD("120001")}`)
+		expect(await inv.resolve(`dsd:0~${DSD("120001")}`)).toBeNull()
+		expect(await inv.open(`dsd:0~${DSD("120001")}`)).toBeNull()
+
+		const target = path.join(s.dsd, DSD("120000"))
+		const swapIn = async (): Promise<void> => {
+			await unlink(target)
+			execFileSync("mkfifo", [target])
+		}
+		let armed = true
+		const fs: RecordingFsPort = {
+			...nodeRecordingFs,
+			open: async (p, flags) => {
+				if (armed && p === target) {
+					armed = false
+					await swapIn()
+				}
+				return nodeRecordingFs.open(p, flags)
+			},
+		}
+		const swapped = await inventoryOver(s, fs).list({})
+		expect(swapped.items.map(i => i.id)).toEqual(["scan:d_x~call.wav"])
+
+		await unlink(target)
+		await s.put(target)
+		armed = true
+		expect(await inventoryOver(s, fs).open(`dsd:0~${DSD("120000")}`)).toBeNull()
+	}, 5_000)
+
+	it("refuses a file made fresh after resolve", async () => {
+		const s = await setup()
+		const inv = inventoryOver(s)
+		const id = `dsd:0~${DSD("120000")}`
+		const target = path.join(s.dsd, DSD("120000"))
+		expect(await inv.resolve(id)).toBe(target)
+		await unlink(target)
+		await s.put(target, wav(16_000), true)
+		expect(await inv.open(id)).toBeNull()
 	})
 })

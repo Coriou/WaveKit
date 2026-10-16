@@ -1,11 +1,16 @@
-import { mkdtemp, rm, writeFile, unlink } from "node:fs/promises"
+import { mkdir, mkdtemp, open, rm, utimes, writeFile } from "node:fs/promises"
+import type { FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ServerResponse } from "node:http"
 import Fastify from "fastify"
+import type { Logger } from "../../../src/utils/logger.js"
 import type { FastifyInstance } from "fastify"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { RecordingInventoryError } from "../../../src/core/recordings/inventory.js"
+import {
+	RecordingInventoryError,
+	createRecordingInventory,
+} from "../../../src/core/recordings/inventory.js"
 import {
 	recordingRoutes,
 	type RecordingRoutesOptions,
@@ -22,6 +27,8 @@ describe("recordingRoutes", () => {
 	let app: FastifyInstance
 	let list: ReturnType<typeof vi.fn>
 	let resolve: ReturnType<typeof vi.fn>
+	let openRec: ReturnType<typeof vi.fn>
+	let handles: FileHandle[]
 	let authorize: ReturnType<typeof vi.fn>
 	let release: ReturnType<typeof vi.fn>
 	let lease: (response: ServerResponse) => LeaseResult
@@ -39,12 +46,18 @@ describe("recordingRoutes", () => {
 			scannedAt: "2026-01-01T00:00:00.000Z",
 		}))
 		resolve = vi.fn(async () => filePath)
+		handles = []
+		openRec = vi.fn(async (id: string) => {
+			const handle = await open(filePath, "r")
+			handles.push(handle)
+			return { handle, name: id.slice(id.indexOf("~") + 1) }
+		})
 		authorize = vi.fn(() => undefined)
 		release = vi.fn()
 		lease = () => ({ kind: "attached", active: () => true, release })
 		app = Fastify({ logger: false })
 		await app.register(recordingRoutes, {
-			inventory: { list, resolve },
+			inventory: { list, resolve, open: openRec },
 			authorize,
 			access: { leaseDownload: (_request, response) => lease(response) },
 		} as RecordingRoutesOptions)
@@ -52,6 +65,7 @@ describe("recordingRoutes", () => {
 	})
 	afterEach(async () => {
 		await app.close()
+		for (const h of handles) await h.close().catch(() => {})
 		await rm(dir, { recursive: true, force: true })
 	})
 
@@ -110,10 +124,10 @@ describe("recordingRoutes", () => {
 		const res = await get(`/api/recordings/${encodeURIComponent(DSD_ID)}/file`)
 		expect(res.statusCode).toBe(status)
 		expect(res.json()).toEqual({ code })
-		expect(resolve).not.toHaveBeenCalled()
+		expect(openRec).not.toHaveBeenCalled()
 	})
 
-	it("sends no body when the lease went inactive during resolve", async () => {
+	it("sends no body and closes the handle when the lease went inactive during open", async () => {
 		lease = response => ({
 			kind: "attached",
 			active: () => {
@@ -128,6 +142,8 @@ describe("recordingRoutes", () => {
 		})
 		expect(res.body).toBe("")
 		expect(res.body).not.toContain(BYTES.toString())
+		expect(handles).toHaveLength(1)
+		await expect(handles[0]?.stat()).rejects.toThrow()
 	})
 
 	it.each([
@@ -139,15 +155,15 @@ describe("recordingRoutes", () => {
 		"scan:d_1~a%2Fb.wav",
 		"scan:d_1~a%5Cb.wav",
 		"nonsense",
-	])("rejects invalid id %s with 404 and no resolve", async id => {
+	])("rejects invalid id %s with 404 and no open", async id => {
 		const res = await get(`/api/recordings/${id}/file`)
 		expect(res.statusCode).toBe(404)
-		expect(resolve).not.toHaveBeenCalled()
+		expect(openRec).not.toHaveBeenCalled()
 		expect(res.body).not.toContain("passwd")
 	})
 
-	it("404s when resolve returns null", async () => {
-		resolve.mockResolvedValue(null)
+	it("404s when open returns null", async () => {
+		openRec.mockResolvedValue(null)
 		const res = await get(`/api/recordings/${encodeURIComponent(SCAN_ID)}/file`)
 		expect(res.statusCode).toBe(404)
 		expect(res.json()).toEqual({
@@ -175,41 +191,102 @@ describe("recordingRoutes", () => {
 			expect(res.headers["cache-control"]).toBe("no-store")
 			expect(res.headers["content-range"]).toBeUndefined()
 		}
-		expect(resolve).toHaveBeenCalledWith(DSD_ID)
+		expect(openRec).toHaveBeenCalledWith(DSD_ID)
+		expect(resolve).not.toHaveBeenCalled()
 	})
 
-	it("404s cleanly when the file vanished after resolve, without leaking paths", async () => {
-		await unlink(filePath)
+	it("refuses an unsafe returned name and closes the handle", async () => {
+		openRec.mockImplementation(async () => {
+			const handle = await open(filePath, "r")
+			handles.push(handle)
+			return { handle, name: "../secret clip.wav" }
+		})
 		const res = await get(`/api/recordings/${encodeURIComponent(DSD_ID)}/file`)
 		expect(res.statusCode).toBe(404)
-		expect(res.json().code).toBe("RECORDING_NOT_FOUND")
-		expect(res.body).not.toContain(dir)
-		expect(res.body).not.toContain("secret-clip")
+		expect(res.body).not.toContain("secret")
+		await expect(handles[0]?.stat()).rejects.toThrow()
 	})
 
-	it("refuses a directory resolved path", async () => {
-		resolve.mockResolvedValue(dir)
-		const res = await get(`/api/recordings/${encodeURIComponent(DSD_ID)}/file`)
-		expect(res.statusCode).toBe(404)
-		expect(res.body).not.toContain(dir)
+	it("passes a 100-character id to open and 404s a 101-character one without it", async () => {
+		const head = "dsd:0~20261016_120000_01234_"
+		const tail = "_GROUP_TGT_1_SRC_2.wav"
+		const id100 = head + "a".repeat(100 - head.length - tail.length) + tail
+		const id101 = head + "a".repeat(101 - head.length - tail.length) + tail
+		expect(id100).toHaveLength(100)
+		openRec.mockResolvedValue(null)
+		const ok = await get(`/api/recordings/${id100}/file`)
+		expect(ok.statusCode).toBe(404)
+		expect(openRec).toHaveBeenCalledWith(id100)
+		openRec.mockClear()
+		const long = await get(`/api/recordings/${id101}/file`)
+		expect(long.statusCode).toBe(404)
+		expect(openRec).not.toHaveBeenCalled()
 	})
 
-	it("refuses a symlink at the resolved path", async () => {
-		const { symlink } = await import("node:fs/promises")
-		const link = join(dir, "link.wav")
-		await symlink(filePath, link)
-		resolve.mockResolvedValue(link)
-		const res = await get(`/api/recordings/${encodeURIComponent(DSD_ID)}/file`)
-		expect(res.statusCode).toBe(404)
-		expect(res.body).not.toContain("RIFF")
-	})
-
-	it("does not leak id or path on a resolve failure (503)", async () => {
-		resolve.mockRejectedValue(new Error(`boom ${filePath}`))
+	it("does not leak id or path on an open failure (503)", async () => {
+		openRec.mockRejectedValue(new Error(`boom ${filePath}`))
 		const res = await get(`/api/recordings/${encodeURIComponent(DSD_ID)}/file`)
 		expect(res.statusCode).toBe(503)
 		expect(res.json().code).toBe("RECORDINGS_UNAVAILABLE")
 		expect(res.body).not.toContain(dir)
 		expect(res.body).not.toContain("call.wav")
+	})
+})
+
+describe("recordingRoutes over a real inventory", () => {
+	let root: string
+	let app: FastifyInstance
+
+	afterEach(async () => {
+		await app.close()
+		await rm(root, { recursive: true, force: true })
+	})
+
+	it("404s a recording made fresh after it was listed", async () => {
+		root = await mkdtemp(join(tmpdir(), "rec-routes-real-"))
+		const dsd = join(root, "dsd")
+		await mkdir(dsd)
+		const name = "20261016_120000_01234_1_GROUP_TGT_1_SRC_2.wav"
+		const file = join(dsd, name)
+		const now = Date.now() + 60_000
+		await writeFile(file, BYTES)
+		await utimes(file, (now - 30_000) / 1000, (now - 30_000) / 1000)
+		const logger: Record<string, unknown> = {
+			warn: () => {},
+			info: () => {},
+			debug: () => {},
+			error: () => {},
+			trace: () => {},
+			fatal: () => {},
+		}
+		logger["child"] = () => logger
+		const inventory = createRecordingInventory({
+			dsdFmeDirs: () => [{ decoderId: "a", dir: dsd }],
+			scannerRecordingsDir: () => null,
+			now: () => now,
+			logger: logger as unknown as Logger,
+		})
+		app = Fastify({ logger: false })
+		await app.register(recordingRoutes, {
+			inventory,
+			authorize: () => undefined,
+			access: {
+				leaseDownload: () => ({
+					kind: "attached",
+					active: () => true,
+					release: () => {},
+				}),
+			},
+		} as RecordingRoutesOptions)
+		await app.ready()
+		const url = `/api/recordings/${encodeURIComponent(`dsd:0~${name}`)}/file`
+		const first = await app.inject({ method: "GET", url })
+		expect(first.statusCode).toBe(200)
+		expect(first.rawPayload.equals(BYTES)).toBe(true)
+		await writeFile(file, BYTES)
+		await utimes(file, now / 1000, now / 1000)
+		const fresh = await app.inject({ method: "GET", url })
+		expect(fresh.statusCode).toBe(404)
+		expect(fresh.body).not.toContain(root)
 	})
 })

@@ -1,3 +1,4 @@
+import { RECORDINGS_CURSOR_MAX_LENGTH } from "@wavekit/api-types"
 import type { RecordingInventoryItem } from "@wavekit/api-types"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
@@ -9,6 +10,7 @@ import {
 } from "../../../../src/core/recordings/cursor.js"
 import type { InventoryEntry } from "../../../../src/core/recordings/cursor.js"
 import { parseInventoryQuery } from "../../../../src/core/recordings/cursor.js"
+import { RECORDINGS_ID_MAX_LENGTH } from "../../../../src/core/recordings/inventory.js"
 
 const ID = "dsd:0~20250101_120000_00001_a.wav"
 
@@ -182,6 +184,29 @@ describe("paginate", () => {
 						expect(q.cursor).not.toBeNull()
 					}
 					expect(got).toEqual(want)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	// Feature: web-gaps-8, Property 9: Paging is a partition
+	// Validates: Requirements 4.4
+	it("property: a cursor for any id of the maximum listed length stays within bounds", () => {
+		const head = "20261016_120000_01234_"
+		const tail = "_GROUP_TGT_1_SRC_2.wav"
+		const fill = 100 - "dsd:0~".length - head.length - tail.length
+		fc.assert(
+			fc.property(
+				fc.double({ noNaN: true, noDefaultInfinity: true }),
+				fc.stringMatching(new RegExp(`^[A-Za-z0-9_.-]{${fill}}$`)),
+				(m, filler) => {
+					const i = `dsd:0~${head}${filler}${tail}`
+					expect(i).toHaveLength(RECORDINGS_ID_MAX_LENGTH)
+					const c = encodeCursor({ m, i })
+					expect(c.length).toBeLessThanOrEqual(184)
+					expect(c.length).toBeLessThanOrEqual(RECORDINGS_CURSOR_MAX_LENGTH)
+					expect(decodeCursor(c)).toEqual({ m: m === 0 ? 0 : m, i })
 				},
 			),
 			{ numRuns: 100 },

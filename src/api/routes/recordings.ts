@@ -3,10 +3,7 @@
  * authorized per request; the file download leases first, exactly as the scanner download.
  * Bodies and logs carry fixed text: never an id, a path or a file name.
  */
-import { constants } from "node:fs"
-import { open } from "node:fs/promises"
-import type { FileHandle } from "node:fs/promises"
-import type { ReadStream } from "node:fs"
+import type { Readable } from "node:stream"
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
 import {
 	RECORDING_INVENTORY_ID,
@@ -20,8 +17,12 @@ import type {
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 import type { DeniedAdmission } from "../../access/types.js"
 import {
+	RECORDINGS_ID_MAX_LENGTH,
 	RecordingInventoryError,
-	type RecordingInventory,
+} from "../../core/recordings/inventory.js"
+import type {
+	RecordingFileHandle,
+	RecordingInventory,
 } from "../../core/recordings/inventory.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 
@@ -32,7 +33,6 @@ export interface RecordingRoutesOptions {
 }
 
 const SAFE_BASENAME = /^[A-Za-z0-9_.-]+$/
-const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)
 
 const MESSAGES: Record<RecordingInventoryErrorCode, string> = {
 	RECORDINGS_QUERY_INVALID: "The recordings query is invalid",
@@ -67,12 +67,6 @@ function sendDenial(reply: FastifyReply, denied: DeniedAdmission) {
 		.send(JSON.stringify({ code: denied.code }))
 }
 
-/** The file part of a validated inventory id (after the first `~`), or null. */
-function fileNameOf(id: string): string | null {
-	const name = id.slice(id.indexOf("~") + 1)
-	return SAFE_BASENAME.test(name) ? name : null
-}
-
 export async function recordingRoutes(
 	fastify: FastifyInstance,
 	options: RecordingRoutesOptions,
@@ -96,8 +90,8 @@ export async function recordingRoutes(
 	fastify.get<{ Params: { id: string } }>(
 		RECORDINGS_FILE_ROUTE,
 		async (request, reply) => {
-			let stream: ReadStream | undefined
-			let handle: FileHandle | undefined
+			let stream: Readable | undefined
+			let handle: RecordingFileHandle | undefined
 			const lease = access.leaseDownload(request, reply.raw, () => {
 				if (stream) stream.destroy()
 				else void handle?.close().catch(() => {})
@@ -120,30 +114,26 @@ export async function recordingRoutes(
 			}
 			try {
 				const id = request.params.id
-				if (!RECORDING_INVENTORY_ID.test(id))
+				if (
+					id.length > RECORDINGS_ID_MAX_LENGTH ||
+					!RECORDING_INVENTORY_ID.test(id)
+				)
 					return sendError(reply, 404, "RECORDING_NOT_FOUND")
-				const name = fileNameOf(id)
-				if (!name) return sendError(reply, 404, "RECORDING_NOT_FOUND")
-				const path = await inventory.resolve(id)
-				if (!lease.active()) return reply
-				if (!path) return sendError(reply, 404, "RECORDING_NOT_FOUND")
-				// O_NOFOLLOW closes the lstat -> open symlink swap; fstat rejects non-files.
-				// Opening before send keeps open failures a clean 404.
-				try {
-					handle = await open(path, OPEN_FLAGS)
-					if (!(await handle.stat()).isFile()) throw new Error("not a file")
-				} catch {
-					await handle?.close().catch(() => {})
-					handle = undefined
-					// The adapter releases the lease when the 404 finishes.
-					if (!lease.active()) return reply
-					return sendError(reply, 404, "RECORDING_NOT_FOUND")
-				}
+				// The inventory opens and verifies the handle (fstat, realpath, inode, directories).
+				const opened = await inventory.open(id)
+				if (opened) handle = opened.handle
 				if (!lease.active()) {
-					await handle.close().catch(() => {})
+					await handle?.close().catch(() => {})
 					return reply
 				}
-				stream = handle.createReadStream()
+				if (!opened) return sendError(reply, 404, "RECORDING_NOT_FOUND")
+				const name = opened.name
+				if (!SAFE_BASENAME.test(name)) {
+					await opened.handle.close().catch(() => {})
+					handle = undefined
+					return sendError(reply, 404, "RECORDING_NOT_FOUND")
+				}
+				stream = opened.handle.createReadStream({ autoClose: true })
 				stream.on("error", () => {
 					request.log.warn("Recording download stream error")
 					lease.release()
@@ -160,7 +150,8 @@ export async function recordingRoutes(
 					.header("Cache-Control", "no-store")
 					.send(stream)
 			} catch (err) {
-				stream?.destroy()
+				if (stream) stream.destroy()
+				else await handle?.close().catch(() => {})
 				if (!lease.active()) return reply
 				request.log.warn(
 					{ err: safeErrorFields(err) },

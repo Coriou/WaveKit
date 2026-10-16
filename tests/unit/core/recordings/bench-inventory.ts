@@ -1,6 +1,7 @@
 /**
  * WG8 recordings inventory benchmark (not collected by vitest): 2 000 synthetic WAV files in a
- * temporary directory, cold and warm `list`, median of 3, with the load average.
+ * temporary directory: cold `list`, a listing-cache hit, and a header-cache-warm rescan, median
+ * of 3, with the load average.
  *
  * Run: pnpm exec esbuild tests/unit/core/recordings/bench-inventory.ts --bundle
  *   --platform=node --format=esm --packages=external --outfile=<tmp>/bench.mjs && node <tmp>/bench.mjs
@@ -52,6 +53,7 @@ async function main(): Promise<void> {
 		}
 		const logger = createLogger({ level: "error" })
 		const cold: number[] = []
+		const hit: number[] = []
 		const warm: number[] = []
 		for (let run = 0; run < 3; run++) {
 			let now = Date.now()
@@ -65,7 +67,11 @@ async function main(): Promise<void> {
 			const page = await inv.list({ limit: 200 })
 			cold.push(performance.now() - t)
 			if (page.scannedFiles !== FILES) throw new Error("unexpected scan size")
-			// Warm: a rescan (listing cache expired) with every header cached.
+			// Listing-cache hit: same clock, served from the 2 s snapshot.
+			t = performance.now()
+			await inv.list({ limit: 200 })
+			hit.push(performance.now() - t)
+			// Header-cache-warm rescan (listing cache expired) with every header cached.
 			now += 3000
 			t = performance.now()
 			await inv.list({ limit: 200 })
@@ -73,8 +79,10 @@ async function main(): Promise<void> {
 		}
 		const [l1, l5, l15] = loadavg()
 		process.stdout.write(
-			`files=${FILES} cold_median_ms=${median(cold).toFixed(1)} warm_median_ms=${median(warm).toFixed(1)} ` +
-				`cold=${cold.map(x => x.toFixed(1)).join(",")} warm=${warm.map(x => x.toFixed(1)).join(",")} ` +
+			`files=${FILES} cold_median_ms=${median(cold).toFixed(1)} ` +
+				`listing_hit_median_ms=${median(hit).toFixed(2)} header_warm_rescan_median_ms=${median(warm).toFixed(1)} ` +
+				`cold=${cold.map(x => x.toFixed(1)).join(",")} hit=${hit.map(x => x.toFixed(2)).join(",")} ` +
+				`warm=${warm.map(x => x.toFixed(1)).join(",")} ` +
 				`loadavg=${[l1, l5, l15].map(x => (x ?? 0).toFixed(2)).join(",")}\n`,
 		)
 	} finally {

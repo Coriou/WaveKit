@@ -13,6 +13,8 @@ interface Opts {
 	list?: number
 	extensible?: { cb?: number; sub?: number; tail?: number[] }
 	dataFirst?: boolean
+	/** RIFF container size override (default: header bytes after offset 8 plus the data size). */
+	riffSize?: number
 }
 
 const KS_TAIL = [0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]
@@ -61,7 +63,11 @@ function build(o: Opts = {}): Uint8Array {
 		for (const t of ext.tail ?? KS_TAIL) parts.push(t)
 	}
 	if (!o.dataFirst) data()
-	return Uint8Array.from(parts)
+	const out = Uint8Array.from(parts)
+	const riff =
+		o.riffSize ?? Math.min(0xffffffff, out.length - 8 + (o.dataSize ?? 16000))
+	new DataView(out.buffer).setUint32(4, riff, true)
+	return out
 }
 
 describe("parseRiffDurationMs", () => {
@@ -129,6 +135,29 @@ describe("parseRiffDurationMs", () => {
 		expect(parseRiffDurationMs(h, 1.5)).toBeNull()
 	})
 
+	it("honours the RIFF container size", () => {
+		const h = build()
+		expect(parseRiffDurationMs(h, h.length + 16000)).toBe(1000)
+		expect(
+			parseRiffDurationMs(build({ riffSize: 0 }), h.length + 16000),
+		).toBeNull()
+		expect(
+			parseRiffDurationMs(build({ riffSize: 3 }), h.length + 16000),
+		).toBeNull()
+		// fmt body ends at 36: a container ending at 35 cuts it
+		expect(
+			parseRiffDurationMs(build({ riffSize: 27 }), h.length + 16000),
+		).toBeNull()
+		// data header at 36..44: ending the container at 43 leaves it just past the end
+		expect(
+			parseRiffDurationMs(build({ riffSize: 35 }), h.length + 16000),
+		).toBeNull()
+		// the data chunk header exactly at the container end is still inside
+		expect(parseRiffDurationMs(build({ riffSize: 36 }), h.length + 16000)).toBe(
+			1000,
+		)
+	})
+
 	// Feature: web-gaps-8, Property 10: RIFF duration
 	// Validates: Requirements 4.3, 4.6
 	it("property: formula for valid PCM, null for corrupted, never throws", () => {
@@ -178,6 +207,30 @@ describe("parseRiffDurationMs", () => {
 					for (const [i, v] of muts) h[i] = v
 					const r1 = parseRiffDurationMs(h, size)
 					expect(r1 === null || Number.isFinite(r1)).toBe(true)
+					// Cheaply decidable invalid headers must be refused.
+					const dv = new DataView(h.buffer)
+					const ascii = (o: number) =>
+						String.fromCharCode(
+							h[o] ?? 0,
+							h[o + 1] ?? 0,
+							h[o + 2] ?? 0,
+							h[o + 3] ?? 0,
+						)
+					const fmtIntact =
+						ascii(12) === "fmt " && dv.getUint32(16, true) === 16
+					const channels = dv.getUint16(22, true)
+					const bits = dv.getUint16(34, true)
+					if (
+						ascii(0) !== "RIFF" ||
+						ascii(8) !== "WAVE" ||
+						dv.getUint32(4, true) < 4 ||
+						(fmtIntact &&
+							(dv.getUint16(20, true) !== 1 ||
+								channels < 1 ||
+								channels > 8 ||
+								![8, 16, 24, 32].includes(bits)))
+					)
+						expect(r1).toBeNull()
 					const r2 = parseRiffDurationMs(noise, size)
 					expect(r2 === null || Number.isFinite(r2)).toBe(true)
 				},

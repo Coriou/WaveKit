@@ -11,7 +11,9 @@
  */
 
 import { constants as fsConstants, promises as nodeFs } from "node:fs"
+import type { Dir } from "node:fs"
 import * as path from "node:path"
+import type { Readable } from "node:stream"
 import {
 	RECORDING_INVENTORY_ID,
 	RECORDINGS_HEADER_READ_BYTES,
@@ -48,6 +50,20 @@ import { parseRiffDurationMs } from "./riff.js"
 export const RECORDINGS_LIST_CACHE_MS = 2_000
 /** Header results kept (path + size + mtime); the oldest is dropped first. */
 export const RECORDINGS_HEADER_CACHE_MAX = 4_096
+/**
+ * Directory entries read per scan across every directory, matching or not
+ * (8 × RECORDINGS_SCAN_MAX_FILES = 16 000). Reaching it stops the scan (truncated).
+ */
+export const RECORDINGS_SCAN_MAX_ENTRIES = 8 * RECORDINGS_SCAN_MAX_FILES
+/** Scanner discovery folders entered per scan. Reaching it stops the scan (truncated). */
+export const RECORDINGS_SCAN_MAX_DIRS = 2_000
+/**
+ * Longest listed or resolvable id: Fastify's default `maxParamLength` (100) bounds the download
+ * route parameter, and a cursor `{"m":<≤ 24>,"i":"<≤ 100>"}` stays ≤ 137 bytes, ≤ 184 base64url
+ * characters, well inside the 512-character cursor bound. Real dsd-fme ids are about 56
+ * characters; a scanner id (26-character discovery ULID + file name) is usually below 100.
+ */
+export const RECORDINGS_ID_MAX_LENGTH = 100
 
 export interface RecordingStats {
 	isFile(): boolean
@@ -55,8 +71,11 @@ export interface RecordingStats {
 	isSymbolicLink(): boolean
 	size: number
 	mtimeMs: number
+	dev: number
+	ino: number
 }
 
+/** The open-file calls the inventory and the download route make (a `FileHandle` fits). */
 export interface RecordingFileHandle {
 	read(
 		buffer: Uint8Array,
@@ -64,20 +83,35 @@ export interface RecordingFileHandle {
 		length: number,
 		position: number,
 	): Promise<{ bytesRead: number }>
+	stat(): Promise<RecordingStats>
 	close(): Promise<void>
+	createReadStream(options?: { autoClose?: boolean }): Readable
 }
 
 /** The filesystem calls the inventory makes (all read-only). A test seam. */
 export interface RecordingFsPort {
-	readdir(dir: string): Promise<string[]>
+	/** Entry names of a directory, read lazily; the iterator is returned (closed) early on a bound. */
+	opendir(dir: string): Promise<AsyncIterable<string>>
 	lstat(p: string): Promise<RecordingStats>
+	stat(p: string): Promise<RecordingStats>
 	realpath(p: string): Promise<string>
 	open(p: string, flags: number): Promise<RecordingFileHandle>
 }
 
-const defaultFs: RecordingFsPort = {
-	readdir: dir => nodeFs.readdir(dir),
+async function* direntNames(dir: Dir): AsyncGenerator<string> {
+	try {
+		for await (const entry of dir) yield entry.name
+	} finally {
+		// Already closed after a full iteration; closing again only rejects.
+		await dir.close().catch(() => undefined)
+	}
+}
+
+/** The Node filesystem behind the port. */
+export const nodeRecordingFs: RecordingFsPort = {
+	opendir: async dir => direntNames(await nodeFs.opendir(dir)),
 	lstat: p => nodeFs.lstat(p),
+	stat: p => nodeFs.stat(p),
 	realpath: p => nodeFs.realpath(p),
 	open: (p, flags) => nodeFs.open(p, flags),
 }
@@ -100,6 +134,13 @@ export interface RecordingInventory {
 	): Promise<RecordingInventoryPage>
 	/** The absolute path of an eligible recording, or null. Never throws. */
 	resolve(id: string): Promise<string | null>
+	/**
+	 * An open, verified handle on an eligible recording and its file name, or null. The caller
+	 * owns (closes) the handle. Never throws.
+	 */
+	open(
+		id: string,
+	): Promise<{ handle: RecordingFileHandle; name: string } | null>
 }
 
 export class RecordingInventoryError extends WaveKitError {
@@ -114,6 +155,8 @@ export class RecordingInventoryError extends WaveKitError {
 interface DsdSource {
 	decoderId: string
 	dir: string
+	/** realpath of `dir` at derivation. */
+	real: string
 }
 
 interface Counts {
@@ -121,6 +164,7 @@ interface Counts {
 	dirErrors: number
 	fileErrors: number
 	lookupErrors: number
+	longIds: number
 	firstError: unknown
 }
 
@@ -134,6 +178,16 @@ interface Candidate {
 	frequencyHz: number | null
 }
 
+/** Where an id may live, and what its real path must be once opened. */
+interface Location {
+	file: string
+	name: string
+	/** realpath(source dir) joined with the name: the only acceptable realpath of `file`. */
+	real: string
+	/** Configured directories on the way to `file`, each re-checked as a real directory. */
+	dirs: string[]
+}
+
 interface Snapshot {
 	at: number
 	entries: InventoryEntry[]
@@ -143,9 +197,11 @@ interface Snapshot {
 }
 
 const SKIP_CODES = new Set(["ENOENT", "ELOOP", "ENOTDIR"])
+/** Read-only, never through a final symlink, never blocking on a FIFO. */
 const OPEN_FLAGS =
-	fsConstants.O_RDONLY |
-	(typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0)
+	(fsConstants.O_RDONLY ?? 0) |
+	(fsConstants.O_NOFOLLOW ?? 0) |
+	(fsConstants.O_NONBLOCK ?? 0)
 
 function errCode(err: unknown): string | undefined {
 	if (typeof err !== "object" || err === null) return undefined
@@ -164,13 +220,14 @@ function newCounts(): Counts {
 		dirErrors: 0,
 		fileErrors: 0,
 		lookupErrors: 0,
+		longIds: 0,
 		firstError: undefined,
 	}
 }
 
 function note(
 	counts: Counts,
-	key: Exclude<keyof Counts, "firstError">,
+	key: Exclude<keyof Counts, "firstError" | "longIds">,
 	err: unknown,
 ): void {
 	counts[key]++
@@ -202,6 +259,14 @@ function childPath(dir: string, name: string): string | null {
 	return path.dirname(p) === dir && path.basename(p) === name ? p : null
 }
 
+async function closeQuietly(handle: RecordingFileHandle): Promise<void> {
+	try {
+		await handle.close()
+	} catch {
+		// Nothing to do: the handle is gone either way.
+	}
+}
+
 /** A tiny counting semaphore bounding the fs operations in flight. */
 class Semaphore {
 	private active = 0
@@ -229,7 +294,7 @@ export function createRecordingInventory(
 	options: RecordingInventoryOptions,
 ): RecordingInventory {
 	const log = createComponentLogger(options.logger, "RecordingInventory")
-	const fs = options.fs ?? defaultFs
+	const fs = options.fs ?? nodeRecordingFs
 	const now = options.now ?? Date.now
 	const sem = new Semaphore(RECORDINGS_SCAN_CONCURRENCY)
 	const headerCache = new Map<string, number | null>()
@@ -238,10 +303,6 @@ export function createRecordingInventory(
 
 	const lstat = (p: string): Promise<RecordingStats> =>
 		sem.run(() => fs.lstat(p))
-	const readdir = async (dir: string): Promise<string[]> => {
-		const names = await sem.run(() => fs.readdir(dir))
-		return [...names].sort()
-	}
 
 	/** True when `p` is a real directory (not a symlink); missing → false; other errors throw. */
 	async function isRealDir(p: string): Promise<boolean> {
@@ -280,7 +341,7 @@ export function createRecordingInventory(
 				const real = await sem.run(() => fs.realpath(dir))
 				if (seen.has(real)) continue
 				seen.add(real)
-				out.push({ decoderId: entry.decoderId, dir })
+				out.push({ decoderId: entry.decoderId, dir, real })
 			} catch (err) {
 				note(counts, "sourceErrors", err)
 			}
@@ -328,10 +389,17 @@ export function createRecordingInventory(
 		return hz
 	}
 
+	/** True when stats describe a settled regular file (not fresh) at `at`. */
+	function settledFile(st: RecordingStats, at: number): boolean {
+		if (st.isSymbolicLink() || !st.isFile()) return false
+		if (!Number.isFinite(st.mtimeMs) || !Number.isFinite(st.size)) return false
+		return st.mtimeMs <= at - RECORDINGS_IN_PROGRESS_MS
+	}
+
 	/** An eligible regular file's stats, or null (symlink, not a file, fresh, vanished). */
 	async function eligibleStats(
 		file: string,
-		scanNow: number,
+		at: number,
 		counts: Counts | null,
 	): Promise<RecordingStats | null> {
 		let st: RecordingStats
@@ -341,13 +409,13 @@ export function createRecordingInventory(
 			if (!isSkip(err) && counts) note(counts, "fileErrors", err)
 			return null
 		}
-		if (st.isSymbolicLink() || !st.isFile()) return null
-		if (!Number.isFinite(st.mtimeMs) || !Number.isFinite(st.size)) return null
-		if (st.mtimeMs > scanNow - RECORDINGS_IN_PROGRESS_MS) return null
-		return st
+		return settledFile(st, at) ? st : null
 	}
 
-	/** RIFF duration (cached by path + size + mtime); undefined when the file vanished or became a link. */
+	/**
+	 * RIFF duration (cached by path + size + mtime). Undefined drops the item: the file vanished,
+	 * became a link, or the opened object is not the regular file `lstat` saw (FIFO, swap).
+	 */
 	async function durationOf(
 		file: string,
 		st: RecordingStats,
@@ -363,25 +431,28 @@ export function createRecordingInventory(
 		}
 		let result: number | null = null
 		try {
+			const h = handle
+			let hst: RecordingStats
+			try {
+				hst = await sem.run(() => h.stat())
+			} catch {
+				return undefined
+			}
+			if (!hst.isFile() || hst.dev !== st.dev || hst.ino !== st.ino)
+				return undefined
 			const length = Math.max(
 				0,
 				Math.min(RECORDINGS_HEADER_READ_BYTES, Math.floor(st.size)),
 			)
 			if (length > 0) {
 				const buf = new Uint8Array(length)
-				const { bytesRead } = await sem.run(() =>
-					handle.read(buf, 0, length, 0),
-				)
+				const { bytesRead } = await sem.run(() => h.read(buf, 0, length, 0))
 				result = parseRiffDurationMs(buf.subarray(0, bytesRead), st.size)
 			}
 		} catch {
 			return null
 		} finally {
-			try {
-				await sem.run(() => handle.close())
-			} catch {
-				// Nothing to do: the handle is gone either way.
-			}
+			await sem.run(() => closeQuietly(handle))
 		}
 		headerCache.set(key, result)
 		while (headerCache.size > RECORDINGS_HEADER_CACHE_MAX) {
@@ -397,6 +468,8 @@ export function createRecordingInventory(
 		const counts = newCounts()
 		const candidates: Candidate[] = []
 		let claimed = 0
+		let entriesRead = 0
+		let dirsEntered = 0
 		let truncated = false
 		/** Claims one examined name; false once the bound is reached (sets truncated). */
 		const claim = (): boolean => {
@@ -407,13 +480,53 @@ export function createRecordingInventory(
 			claimed++
 			return true
 		}
+		/**
+		 * The names of one directory, read lazily under the per-scan entry budget and then
+		 * sorted. Only the bounded names collected are sorted: when the budget stops a directory
+		 * midway, which names were collected is the filesystem's order (best effort).
+		 */
 		const listDir = async (dir: string): Promise<string[] | null> => {
+			const names: string[] = []
+			let it: AsyncIterator<string> | undefined
 			try {
-				return await readdir(dir)
+				const iterable = await sem.run(() => fs.opendir(dir))
+				const iter = iterable[Symbol.asyncIterator]()
+				it = iter
+				for (;;) {
+					const r = await sem.run(() => iter.next())
+					if (r.done === true) break
+					if (entriesRead >= RECORDINGS_SCAN_MAX_ENTRIES) {
+						truncated = true
+						break
+					}
+					entriesRead++
+					names.push(r.value)
+				}
 			} catch (err) {
 				if (!isSkip(err)) note(counts, "dirErrors", err)
 				return null
+			} finally {
+				const iter = it
+				if (iter?.return) {
+					try {
+						await sem.run(async () => {
+							await iter.return?.()
+						})
+					} catch {
+						// Closing a directory stream cannot leak anything further.
+					}
+				}
 			}
+			return names.sort()
+		}
+		/** A candidate id, or null when it is too long (counted). */
+		const bounded = (id: string | null): string | null => {
+			if (id === null) return null
+			if (id.length > RECORDINGS_ID_MAX_LENGTH) {
+				counts.longIds++
+				return null
+			}
+			return id
 		}
 
 		const sources = await dsdSources(counts)
@@ -422,7 +535,7 @@ export function createRecordingInventory(
 			const names = await listDir(source.dir)
 			if (!names) continue
 			for (const name of names) {
-				const id = dsdId(n, name)
+				const id = bounded(dsdId(n, name))
 				if (id === null) continue
 				const file = childPath(source.dir, name)
 				if (file === null) continue
@@ -460,27 +573,26 @@ export function createRecordingInventory(
 				}
 				const discoveries = await listDir(kindPath)
 				if (!discoveries) continue
-				const folders = discoveries.filter(d => SCANNER_DISCOVERY_ID.test(d))
-				const real = await Promise.all(
-					folders.map(async d => {
-						const p = childPath(kindPath, d)
-						if (p === null) return null
-						try {
-							return (await isRealDir(p)) ? p : null
-						} catch (err) {
-							note(counts, "dirErrors", err)
-							return null
-						}
-					}),
-				)
-				for (const [i, d] of folders.entries()) {
+				for (const d of discoveries) {
 					if (truncated) break
-					const folder = real[i]
-					if (!folder) continue
+					if (!SCANNER_DISCOVERY_ID.test(d)) continue
+					if (dirsEntered >= RECORDINGS_SCAN_MAX_DIRS) {
+						truncated = true
+						break
+					}
+					dirsEntered++
+					const folder = childPath(kindPath, d)
+					if (folder === null) continue
+					try {
+						if (!(await isRealDir(folder))) continue
+					} catch (err) {
+						note(counts, "dirErrors", err)
+						continue
+					}
 					const names = await listDir(folder)
 					if (!names) continue
 					for (const name of names) {
-						const id = scanId(d, name)
+						const id = bounded(scanId(d, name))
 						if (id === null) continue
 						const file = childPath(folder, name)
 						if (file === null) continue
@@ -499,14 +611,29 @@ export function createRecordingInventory(
 			}
 		}
 
-		const built = await Promise.all(
-			candidates.map(async (c): Promise<InventoryEntry | null> => {
+		// A pool of RECORDINGS_SCAN_CONCURRENCY workers, each taking one candidate through its
+		// whole lifecycle (lstat, open, fstat, read, close): at most that many handles live.
+		const built: (InventoryEntry | null)[] = candidates.map(() => null)
+		let nextIndex = 0
+		const worker = async (): Promise<void> => {
+			while (nextIndex < candidates.length) {
+				const i = nextIndex++
+				const c = candidates[i]
+				if (!c) continue
 				const st = await eligibleStats(c.file, scanNow, counts)
-				if (!st) return null
+				if (!st) continue
 				const durationMs = await durationOf(c.file, st)
-				if (durationMs === undefined) return null
-				return { mtimeMs: st.mtimeMs, item: toItem(c, st, durationMs) }
-			}),
+				if (durationMs === undefined) continue
+				built[i] = { mtimeMs: st.mtimeMs, item: toItem(c, st, durationMs) }
+			}
+		}
+		await Promise.all(
+			Array.from(
+				{
+					length: Math.min(RECORDINGS_SCAN_CONCURRENCY, candidates.length),
+				},
+				() => worker(),
+			),
 		)
 		// A scanner id present under both dv and analog: the dv one wins (as in resolve).
 		const byId = new Map<string, InventoryEntry>()
@@ -519,7 +646,8 @@ export function createRecordingInventory(
 			counts.sourceErrors +
 			counts.dirErrors +
 			counts.fileErrors +
-			counts.lookupErrors
+			counts.lookupErrors +
+			counts.longIds
 		if (skipped > 0) {
 			log.warn(
 				{
@@ -527,6 +655,7 @@ export function createRecordingInventory(
 					dirErrors: counts.dirErrors,
 					fileErrors: counts.fileErrors,
 					lookupErrors: counts.lookupErrors,
+					longIds: counts.longIds,
 					err: safeErrorFields(counts.firstError),
 				},
 				"Recordings inventory scan skipped entries",
@@ -566,6 +695,95 @@ export function createRecordingInventory(
 		return inFlight
 	}
 
+	/** Every place an id may live, in lookup order (dv before analog). No fs call on a bad id. */
+	async function locations(id: string): Promise<Location[]> {
+		if (typeof id !== "string" || id.length > RECORDINGS_ID_MAX_LENGTH)
+			return []
+		const m = RECORDING_INVENTORY_ID.exec(id)
+		if (!m) return []
+		const [, n, dsdName, recordingId] = m
+		if (n !== undefined && dsdName !== undefined) {
+			if (dsdId(Number(n), dsdName) !== id) return []
+			const sources = await dsdSources(newCounts())
+			const source = sources[Number(n)]
+			if (!source) return []
+			const file = childPath(source.dir, dsdName)
+			const real = childPath(source.real, dsdName)
+			if (file === null || real === null) return []
+			return [{ file, name: dsdName, real, dirs: [source.dir] }]
+		}
+		if (recordingId === undefined) return []
+		const sm = SCANNER_RECORDING_ID.exec(recordingId)
+		const d = sm?.[1]
+		const name = sm?.[2]
+		if (d === undefined || name === undefined) return []
+		if (scanId(d, name) !== id) return []
+		const root = scannerRoot(newCounts())
+		if (root === null || !(await isRealDir(root))) return []
+		const realRoot = await sem.run(() => fs.realpath(root))
+		const out: Location[] = []
+		for (const kindDir of SCANNER_RECORDING_KINDS) {
+			const kindPath = childPath(root, kindDir)
+			if (kindPath === null || !(await isRealDir(kindPath))) continue
+			const folder = childPath(kindPath, d)
+			if (folder === null || !(await isRealDir(folder))) continue
+			const file = childPath(folder, name)
+			const real = childPath(path.join(realRoot, kindDir, d), name)
+			if (file === null || real === null) continue
+			out.push({ file, name, real, dirs: [root, kindPath, folder] })
+		}
+		return out
+	}
+
+	/** The first location whose `lstat` is an eligible file, or null. */
+	async function firstEligible(
+		id: string,
+		at: number,
+	): Promise<Location | null> {
+		for (const loc of await locations(id)) {
+			if (await eligibleStats(loc.file, at, null)) return loc
+		}
+		return null
+	}
+
+	/**
+	 * Open `loc` and verify the opened object, not the path: a settled regular file (fstat), whose
+	 * path still resolves to the source's real directory and to the same inode, with every
+	 * configured directory on the way still a real directory. This closes a final-component
+	 * symlink (O_NOFOLLOW), a FIFO (O_NONBLOCK + fstat), a fresh replacement and an intermediate
+	 * directory swapped for a symlink before the open. Residual: a directory swapped to a link
+	 * and back again between the open and these checks is not detectable from user space without
+	 * openat-relative traversal; the window is a few syscalls wide.
+	 */
+	async function openVerified(
+		loc: Location,
+		at: number,
+	): Promise<RecordingFileHandle | null> {
+		let handle: RecordingFileHandle
+		try {
+			handle = await sem.run(() => fs.open(loc.file, OPEN_FLAGS))
+		} catch {
+			return null
+		}
+		const h = handle
+		let ok = false
+		try {
+			const hst = await sem.run(() => h.stat())
+			if (!settledFile(hst, at)) return null
+			const real = await sem.run(() => fs.realpath(loc.file))
+			if (real !== loc.real) return null
+			const rst = await sem.run(() => fs.stat(real))
+			if (rst.dev !== hst.dev || rst.ino !== hst.ino) return null
+			for (const dir of loc.dirs) if (!(await isRealDir(dir))) return null
+			ok = true
+			return h
+		} catch {
+			return null
+		} finally {
+			if (!ok) await closeQuietly(h)
+		}
+	}
+
 	return {
 		async list(query) {
 			const q = parseInventoryQuery(query)
@@ -584,50 +802,24 @@ export function createRecordingInventory(
 
 		async resolve(id) {
 			try {
-				if (typeof id !== "string") return null
-				const m = RECORDING_INVENTORY_ID.exec(id)
-				if (!m) return null
-				const scanNow = now()
-				const [, n, dsdName, recordingId] = m
-				if (n !== undefined && dsdName !== undefined) {
-					if (dsdId(Number(n), dsdName) !== id) return null
-					const sources = await dsdSources(newCounts())
-					const source = sources[Number(n)]
-					if (!source) return null
-					return await eligiblePath(source.dir, dsdName, scanNow)
-				}
-				if (recordingId === undefined) return null
-				const sm = SCANNER_RECORDING_ID.exec(recordingId)
-				const d = sm?.[1]
-				const name = sm?.[2]
-				if (d === undefined || name === undefined) return null
-				if (scanId(d, name) !== id) return null
-				const root = scannerRoot(newCounts())
-				if (root === null || !(await isRealDir(root))) return null
-				for (const kindDir of SCANNER_RECORDING_KINDS) {
-					const kindPath = childPath(root, kindDir)
-					if (kindPath === null || !(await isRealDir(kindPath))) continue
-					const folder = childPath(kindPath, d)
-					if (folder === null || !(await isRealDir(folder))) continue
-					const found = await eligiblePath(folder, name, scanNow)
-					if (found !== null) return found
-				}
-				return null
+				const loc = await firstEligible(id, now())
+				return loc ? loc.file : null
 			} catch {
 				return null
 			}
 		},
-	}
 
-	async function eligiblePath(
-		dir: string,
-		name: string,
-		scanNow: number,
-	): Promise<string | null> {
-		const file = childPath(dir, name)
-		if (file === null) return null
-		const st = await eligibleStats(file, scanNow, null)
-		return st ? file : null
+		async open(id) {
+			try {
+				const at = now()
+				const loc = await firstEligible(id, at)
+				if (!loc) return null
+				const handle = await openVerified(loc, at)
+				return handle ? { handle, name: loc.name } : null
+			} catch {
+				return null
+			}
+		},
 	}
 }
 
