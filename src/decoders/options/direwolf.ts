@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 const frequencyHz = z.number().finite().positive()
 const port = z.number().int().min(1).max(65535)
@@ -7,20 +8,23 @@ const port = z.number().int().min(1).max(65535)
 /** Options read by the Direwolf adapter and the audio-demod base class. */
 export const direwolfOptionsSchema = z
 	.object({
-		audioDevice: z.string().optional(),
-		sampleRate: z.number().finite().positive().optional(),
-		kissPort: port.optional(),
-		agwPort: port.optional(),
-		callsign: z.string().optional(),
-		extraArgs: z.array(z.string()).optional(),
-		inputSampleRate: z.number().finite().positive().optional(),
-		frequencies: z.array(frequencyHz).optional(),
-		frequency: frequencyHz.optional(),
-		channelHz: frequencyHz.optional(),
+		// audioDevice, sampleRate and callsign are read but never used by the adapter.
+		audioDevice: z.string().nullable().optional(),
+		sampleRate: z.number().finite().positive().nullable().optional(),
+		// Also the TCP port the adapter connects to, so it stays a number.
+		kissPort: port.nullable().optional(),
+		// Only `(agwPort ?? default).toString()`: numeric text gives the same argument.
+		agwPort: numberOrText(port, INTEGER_TEXT).nullable().optional(),
+		callsign: z.string().nullable().optional(),
+		extraArgs: z.array(z.string()).nullable().optional(),
+		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		frequencies: z.array(frequencyHz).nullable().optional(),
+		frequency: frequencyHz.nullable().optional(),
+		channelHz: frequencyHz.nullable().optional(),
 		offsetHz: z.number().finite().optional(),
-		debugRecordPath: z.string().optional(),
-		debugRecordStages: z.enum(["demod", "final", "both"]).optional(),
-		inputIqFormat: z.enum(["cu8", "cf32"]).optional(),
+		debugRecordPath: z.string().nullable().optional(),
+		debugRecordStages: z.enum(["demod", "final", "both"]).nullable().optional(),
+		inputIqFormat: z.enum(["cu8", "cf32"]).nullable().optional(),
 	})
 	.strict()
 

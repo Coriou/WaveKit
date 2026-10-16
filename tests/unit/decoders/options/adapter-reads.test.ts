@@ -3,22 +3,27 @@
  * built-in adapter reads must be a key of its type's option schema, so a valid
  * config never reports a false `unknown-key` issue.
  *
- * Keys are extracted from the adapter source text with:
- * - BRACKET_READ `options["key"]` (also `options?.["key"]`, `config.options["key"]`):
- *   reads of the raw `Record<string, unknown>` options (every adapter and base uses this form).
+ * Keys are extracted from the adapter source text by `extractKeys`, with:
+ * - BRACKET_READ `options["key"]`, `options?.["key"]`, `config.options["key"]`,
+ *   `opts["key"]`, `raw["key"]`: reads of the raw options record.
+ * - RAW_DOT_READ `options.key`, `options?.key`, `config.options.key`, `opts.key`,
+ *   `raw.key` (not `this.options.key`): dot reads of a raw options alias (a parse
+ *   function's `options` parameter, lora-meshtastic's raw schema input `raw`).
+ * - RAW_DESTRUCTURE `{ a, b: c, d = 1, ...rest } = options` (also `opts`, `raw`,
+ *   `config.options`, `this.config.options`): destructured raw reads; a renamed entry
+ *   counts its source key, a default is dropped, a rest element is skipped.
  * - THIS_OPTIONS_READ `this.options.key` and THIS_OPTIONS_DESTRUCTURE
  *   `{ a, b } = this.options`: reads of the adapter's parsed options, whose keys mirror
  *   the raw keys (not used for lora-meshtastic, whose parsed options carry derived keys
  *   such as `bw`, `effectiveTargetRate`).
- * - RAW_READ `raw.key`: lora-meshtastic only, where `raw` is the input of the raw
- *   options schema transform.
  * Base-class reads come from scanning the base file with BRACKET_READ
  * (AudioDemodDecoder also calls IqDecimateDecoder's readChannelHz, so audio bases scan
  * both files). Keys read outside the adapter, listed by hand:
  * - `frequencies`, `frequency`: resolveDecoderTargetFrequencies (status-fields.ts) for every type.
  * Exception: lora-meshtastic parses its options with its own strict RawOptionsSchema and
  * throws on any other key, so base and generic reads it does not accept can never be
- * configured (UNREACHABLE_KEYS).
+ * configured (UNREACHABLE_KEYS). Dot reads of an `options`/`raw` name that is not
+ * decoder options are listed in NOT_OPTION_READS with the reason.
  */
 
 import { readFileSync } from "node:fs"
@@ -37,10 +42,14 @@ import { rtl433OptionsSchema } from "../../../../src/decoders/options/rtl433.js"
 
 const DECODERS_DIR = join(__dirname, "../../../../src/decoders")
 
-const BRACKET_READ = /options\??\.?\["([A-Za-z_][A-Za-z0-9_]*)"\]/g
+const BRACKET_READ =
+	/\b(?:options|opts|raw)\??\.?\["([A-Za-z_][A-Za-z0-9_]*)"\]/g
+const RAW_DOT_READ =
+	/(?<!this\.)\b(?:options|opts|raw)\??\.([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\()/g
+const RAW_DESTRUCTURE =
+	/\{([^{}]*)\}\s*=\s*(?:(?:this\.)?config\.options|options|opts|raw)\b(?!\s*\.)/g
 const THIS_OPTIONS_READ = /this\.options\??\.([A-Za-z_][A-Za-z0-9_]*)/g
-const THIS_OPTIONS_DESTRUCTURE = /\{([^{}]*)\}\s*=\s*this\.options\b/g
-const RAW_READ = /\braw\.([A-Za-z_][A-Za-z0-9_]*)/g
+const THIS_OPTIONS_DESTRUCTURE = /\{([^{}]*)\}\s*=\s*this\.options\b(?!\s*\.)/g
 
 const AUDIO_BASES = ["audio-demod-decoder.ts", "iq-decimate-decoder.ts"]
 const IQ_BASES = ["iq-decimate-decoder.ts"]
@@ -48,6 +57,18 @@ const NETWORK_BASES = ["network-producer-decoder.ts"]
 const TARGET_FREQUENCY_KEYS = ["frequencies", "frequency"]
 const UNREACHABLE_KEYS: Record<string, string[]> = {
 	"lora-meshtastic": ["channelHz", "frequencies"],
+}
+/**
+ * Dot reads RAW_DOT_READ finds on names that are not decoder options:
+ * - ais-catcher `options?.fillBits`, `options?.at`: decodeAisPayload's own
+ *   DecodeAisOptions parameter.
+ * - lora-meshtastic `options.bw`, `.sf`, `.cr`, `.effectiveTargetRate`:
+ *   buildDecoderArgs' parameter is the parsed LoraMeshtasticOptions, whose derived
+ *   keys come from the preset (its raw keys are covered by the raw schema).
+ */
+const NOT_OPTION_READS: Record<string, string[]> = {
+	"ais-catcher": ["at", "fillBits"],
+	"lora-meshtastic": ["bw", "cr", "effectiveTargetRate", "sf"],
 }
 
 interface AdapterCase {
@@ -136,24 +157,33 @@ function matches(text: string, pattern: RegExp): string[] {
 	return [...text.matchAll(pattern)].map(m => m[1] ?? "")
 }
 
-function destructured(text: string): string[] {
-	return matches(text, THIS_OPTIONS_DESTRUCTURE).flatMap(list =>
+/** Source keys of a destructuring list: `a`, `b: c` -> b, `d = 1` -> d; skips `...rest`. */
+function destructured(text: string, pattern: RegExp): string[] {
+	return matches(text, pattern).flatMap(list =>
 		list
 			.split(",")
-			.map(part => part.split(":")[0]?.trim() ?? "")
-			.filter(name => name.length > 0),
+			.map(part => part.split(":")[0]?.split("=")[0]?.trim() ?? "")
+			.filter(name => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)),
 	)
+}
+
+/** Option keys an adapter source reads (see the file comment for the forms). */
+function extractKeys(text: string, parsedMirrorsRaw: boolean): string[] {
+	const keys = new Set(matches(text, BRACKET_READ))
+	for (const key of matches(text, RAW_DOT_READ)) keys.add(key)
+	for (const key of destructured(text, RAW_DESTRUCTURE)) keys.add(key)
+	if (parsedMirrorsRaw) {
+		for (const key of matches(text, THIS_OPTIONS_READ)) keys.add(key)
+		for (const key of destructured(text, THIS_OPTIONS_DESTRUCTURE))
+			keys.add(key)
+	}
+	return [...keys].sort()
 }
 
 function adapterKeys(c: AdapterCase): { own: string[]; all: string[] } {
 	const text = readFileSync(join(DECODERS_DIR, "builtin", c.file), "utf8")
-	const own = new Set(matches(text, BRACKET_READ))
-	if (c.parsedMirrorsRaw) {
-		for (const key of matches(text, THIS_OPTIONS_READ)) own.add(key)
-		for (const key of destructured(text)) own.add(key)
-	} else {
-		for (const key of matches(text, RAW_READ)) own.add(key)
-	}
+	const own = new Set(extractKeys(text, c.parsedMirrorsRaw))
+	for (const key of NOT_OPTION_READS[c.type] ?? []) own.delete(key)
 	const all = new Set(own)
 	for (const base of c.bases) {
 		const baseText = readFileSync(join(DECODERS_DIR, base), "utf8")
@@ -163,6 +193,50 @@ function adapterKeys(c: AdapterCase): { own: string[]; all: string[] } {
 	for (const key of UNREACHABLE_KEYS[c.type] ?? []) all.delete(key)
 	return { own: [...own].sort(), all: [...all].sort() }
 }
+
+describe("extractKeys", () => {
+	it("finds bracket reads, optional-chained included", () => {
+		expect(
+			extractKeys(
+				'const a = options["alpha"]; const b = options?.["beta"]; config.options["gamma"]; opts["delta"]',
+				true,
+			),
+		).toEqual(["alpha", "beta", "delta", "gamma"])
+	})
+
+	it("finds dot reads of raw aliases but not method calls", () => {
+		expect(
+			extractKeys(
+				"options.alpha; options?.beta; this.config.options.gamma; opts.delta; raw.epsilon; raw.trim()",
+				true,
+			),
+		).toEqual(["alpha", "beta", "delta", "epsilon", "gamma"])
+	})
+
+	it("finds this.options dot reads only when parsed options mirror raw keys", () => {
+		const text = "this.options.alpha; this.options?.beta"
+		expect(extractKeys(text, true)).toEqual(["alpha", "beta"])
+		expect(extractKeys(text, false)).toEqual([])
+	})
+
+	it("finds destructuring, renamed and defaulted entries included", () => {
+		expect(
+			extractKeys(
+				"const { alpha, beta: b, gamma = 1, delta: d = 2, ...rest } = options",
+				false,
+			),
+		).toEqual(["alpha", "beta", "delta", "gamma"])
+		expect(extractKeys("const { alpha } = raw", false)).toEqual(["alpha"])
+		expect(extractKeys("const { alpha } = this.config.options", false)).toEqual(
+			["alpha"],
+		)
+		expect(extractKeys("const { lat, lon: x } = this.options", true)).toEqual([
+			"lat",
+			"lon",
+		])
+		expect(extractKeys("const { lat } = this.options", false)).toEqual([])
+	})
+})
 
 describe("decoder option schemas cover every adapter read", () => {
 	it.each(CASES)("$type", c => {

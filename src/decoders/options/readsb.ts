@@ -7,6 +7,7 @@
 
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 const OUTPUT_FORMAT_VALUES = ["sbs", "beast", "json"] as const
 
@@ -16,22 +17,30 @@ const Port = z.number().int().min(1).max(65535)
 export const readsbOptionsSchema = z
 	.object({
 		// Passed to readsb as text: an index or a serial.
-		device: z.union([z.string(), z.number().int().min(0)]).optional(),
-		deviceSerial: z.string().optional(),
-		enableMlat: z.boolean().optional(),
-		extraArgs: z.array(z.string()).optional(),
-		frequencies: z.array(Hz).optional(),
-		frequency: Hz.optional(),
+		device: z
+			.union([z.string(), z.number().int().min(0)])
+			.nullable()
+			.optional(),
+		// device, deviceSerial and enableMlat are read but never used by the adapter.
+		deviceSerial: z.string().nullable().optional(),
+		enableMlat: z.boolean().nullable().optional(),
+		extraArgs: z.array(z.string()).nullable().optional(),
+		frequencies: z.array(Hz).nullable().optional(),
+		frequency: Hz.nullable().optional(),
 		// Passed through toString(): a number or readsb's own text (e.g. "auto").
 		gain: z.union([z.number().finite(), z.string()]).optional(),
-		inputSampleRate: z.number().finite().positive().optional(),
-		lat: z.number().finite().min(-90).max(90).optional(),
-		lon: z.number().finite().min(-180).max(180).optional(),
-		outputFormat: z.enum(OUTPUT_FORMAT_VALUES).optional(),
-		outputPort: Port.optional(),
-		ppm: z.number().finite().optional(),
-		rtlTcpHost: z.string().optional(),
-		rtlTcpPort: Port.optional(),
+		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		// coordinate() reads anything but a finite number in range as unset.
+		lat: z.number().finite().min(-90).max(90).nullable().optional(),
+		lon: z.number().finite().min(-180).max(180).nullable().optional(),
+		outputFormat: z.enum(OUTPUT_FORMAT_VALUES).nullable().optional(),
+		// Also the TCP port the producer connects to, so it stays a number.
+		outputPort: Port.nullable().optional(),
+		// Passed through toString(): numeric text gives the same argument.
+		ppm: numberOrText(z.number().finite()).optional(),
+		rtlTcpHost: z.string().nullable().optional(),
+		// Only in the `${host},${port ?? 1234},beast_in` argument.
+		rtlTcpPort: numberOrText(Port, INTEGER_TEXT).nullable().optional(),
 	})
 	.strict()
 

@@ -69,6 +69,16 @@ describe("decoder option descriptors", () => {
 				)
 			}
 			if (core instanceof z.ZodArray) core = unwrap(core.element)
+			// Number-or-numeric-text keys: the range lives on the number form.
+			if (
+				core instanceof z.ZodUnion &&
+				(d.type === "number" || d.type === "number-list")
+			) {
+				const numeric = (core.options as z.ZodTypeAny[])
+					.map(unwrap)
+					.find(o => o instanceof z.ZodNumber)
+				if (numeric) core = numeric
+			}
 			if (core instanceof z.ZodNumber) {
 				expect(d.min, `${d.key} min`).toBe(inclusiveBound(core, "min"))
 				expect(d.max, `${d.key} max`).toBe(inclusiveBound(core, "max"))

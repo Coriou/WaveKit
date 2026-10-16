@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import { numberOrText } from "./common.js"
 
 /** Modes `multimon-ng.ts` accepts (MULTIMON_MODES); others are dropped with a warning. */
 const MODES = [
@@ -18,26 +19,29 @@ const frequencyHz = z.number().finite().positive()
 /** Options read by the multimon-ng adapter and the audio-demod base class. */
 export const multimonNgOptionsSchema = z
 	.object({
-		modes: z.array(z.enum(MODES)).optional(),
-		verbosity: z.number().int().min(0).optional(),
-		charset: z.string().optional(),
+		modes: z.array(z.enum(MODES)).nullable().optional(),
+		// `i < null` adds no -v, like an absent verbosity.
+		verbosity: z.number().int().min(0).nullable().optional(),
+		charset: z.string().nullable().optional(),
 		filters: z
 			.object({
-				highpass: z.number().finite().optional(),
-				lowpass: z.number().finite().optional(),
-				gain: z.number().finite().optional(),
+				// Each is String()ed into an argument: numeric text gives the same one.
+				highpass: numberOrText(z.number().finite()).optional(),
+				lowpass: numberOrText(z.number().finite()).optional(),
+				gain: numberOrText(z.number().finite()).optional(),
 			})
 			.strict()
+			.nullable()
 			.optional(),
-		inputSampleRate: z.number().finite().positive().optional(),
-		fmGain: z.number().finite().optional(),
-		frequencies: z.array(frequencyHz).optional(),
-		frequency: frequencyHz.optional(),
-		channelHz: frequencyHz.optional(),
+		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		fmGain: z.number().finite().nullable().optional(),
+		frequencies: z.array(frequencyHz).nullable().optional(),
+		frequency: frequencyHz.nullable().optional(),
+		channelHz: frequencyHz.nullable().optional(),
 		offsetHz: z.number().finite().optional(),
-		debugRecordPath: z.string().optional(),
-		debugRecordStages: z.enum(["demod", "final", "both"]).optional(),
-		inputIqFormat: z.enum(["cu8", "cf32"]).optional(),
+		debugRecordPath: z.string().nullable().optional(),
+		debugRecordStages: z.enum(["demod", "final", "both"]).nullable().optional(),
+		inputIqFormat: z.enum(["cu8", "cf32"]).nullable().optional(),
 	})
 	.strict()
 

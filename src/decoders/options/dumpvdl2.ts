@@ -7,6 +7,7 @@
 
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 const OUTPUT_FORMAT_VALUES = ["json", "text"] as const
 
@@ -15,21 +16,23 @@ const Port = z.number().int().min(1).max(65535)
 
 export const dumpvdl2OptionsSchema = z
 	.object({
-		channelHz: z.number().finite().positive().optional(),
-		deviceSerial: z.string().optional(),
-		extraArgs: z.array(z.string()).optional(),
-		followCenter: z.boolean().optional(),
+		channelHz: z.number().finite().positive().nullable().optional(),
+		// deviceSerial, gain, ppm, rtlTcpHost and rtlTcpPort are read but never used.
+		deviceSerial: z.string().nullable().optional(),
+		extraArgs: z.array(z.string()).nullable().optional(),
+		followCenter: z.boolean().nullable().optional(),
 		// Empty falls back to the built-in channel list.
-		frequencies: z.array(Hz).optional(),
-		frequency: Hz.optional(),
-		gain: z.union([z.number().finite(), z.string()]).optional(),
-		inputCenterFreq: Hz.optional(),
-		inputSampleRate: z.number().finite().positive().optional(),
-		outputFormat: z.enum(OUTPUT_FORMAT_VALUES).optional(),
-		ppm: z.number().finite().optional(),
-		rtlTcpHost: z.string().optional(),
-		rtlTcpPort: Port.optional(),
-		targetSampleRate: z.number().finite().positive().optional(),
+		frequencies: z.array(Hz).nullable().optional(),
+		frequency: Hz.nullable().optional(),
+		gain: z.union([z.number().finite(), z.string()]).nullable().optional(),
+		// Only String()ed / toString()ed into arguments; null would print "null".
+		inputCenterFreq: numberOrText(Hz, INTEGER_TEXT).optional(),
+		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		outputFormat: z.enum(OUTPUT_FORMAT_VALUES).nullable().optional(),
+		ppm: z.number().finite().nullable().optional(),
+		rtlTcpHost: z.string().nullable().optional(),
+		rtlTcpPort: Port.nullable().optional(),
+		targetSampleRate: z.number().finite().positive().nullable().optional(),
 	})
 	.strict()
 

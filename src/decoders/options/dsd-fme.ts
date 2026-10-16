@@ -8,6 +8,7 @@
 
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 const DSD_FME_MODE_VALUES = [
 	"auto",
@@ -30,39 +31,53 @@ const Hz = z.number().finite().min(1)
 
 export const dsdFmeOptionsSchema = z
 	.object({
-		callStartDelayMs: z.number().finite().min(0).optional(),
-		callTimeoutMs: z.number().finite().positive().optional(),
-		channelHz: z.number().finite().positive().optional(),
-		debugRecordPath: z.string().optional(),
-		debugRecordStages: z.enum(DEBUG_STAGE_VALUES).optional(),
-		emitDebugEvents: z.boolean().optional(),
-		enableIqAgc: z.boolean().optional(),
-		enablePerCallRecording: z.boolean().optional(),
+		callStartDelayMs: z.number().finite().min(0).nullable().optional(),
+		callTimeoutMs: z.number().finite().positive().nullable().optional(),
+		channelHz: z.number().finite().positive().nullable().optional(),
+		debugRecordPath: z.string().nullable().optional(),
+		debugRecordStages: z.enum(DEBUG_STAGE_VALUES).nullable().optional(),
+		emitDebugEvents: z.boolean().nullable().optional(),
+		enableIqAgc: z.boolean().nullable().optional(),
+		enablePerCallRecording: z.boolean().nullable().optional(),
 		// The adapter String()s every element before filtering reserved flags.
 		extraArgs: z
 			.array(z.union([z.string(), z.number(), z.boolean()]))
+			.nullable()
 			.optional(),
-		fmGain: z.number().finite().optional(),
-		frequencies: z.array(Hz).optional(),
-		frequency: Hz.optional(),
-		inputIqFormat: z.enum(IQ_FORMAT_VALUES).optional(),
-		inputSampleRate: z.number().finite().positive().optional(),
-		minCallDurationMs: z.number().finite().min(0).optional(),
-		mode: z.enum(DSD_FME_MODE_VALUES).optional(),
+		fmGain: z.number().finite().nullable().optional(),
+		frequencies: z.array(Hz).nullable().optional(),
+		frequency: Hz.nullable().optional(),
+		inputIqFormat: z.enum(IQ_FORMAT_VALUES).nullable().optional(),
+		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		minCallDurationMs: z.number().finite().min(0).nullable().optional(),
+		mode: z.enum(DSD_FME_MODE_VALUES).nullable().optional(),
 		offsetHz: z.number().finite().optional(),
 		// YAML `output: null` (unquoted) reaches the adapter as null, read as "null".
 		output: z.enum(OUTPUT_VALUES).nullable().optional(),
-		perCallRecordingDir: z.string().optional(),
-		perCallRecordingMaxAgeHours: z.number().finite().positive().optional(),
-		perCallRecordingMaxTotalMb: z.number().finite().positive().optional(),
-		perCallRecordingPrune: z.boolean().optional(),
-		udpHost: z.string().optional(),
-		udpPort: z.number().int().min(1).max(65535).optional(),
+		perCallRecordingDir: z.string().nullable().optional(),
+		perCallRecordingMaxAgeHours: z
+			.number()
+			.finite()
+			.positive()
+			.nullable()
+			.optional(),
+		perCallRecordingMaxTotalMb: z
+			.number()
+			.finite()
+			.positive()
+			.nullable()
+			.optional(),
+		perCallRecordingPrune: z.boolean().nullable().optional(),
+		udpHost: z.string().nullable().optional(),
+		// Only in the `udp:${host}:${port}` argument, guarded by truthiness.
+		udpPort: numberOrText(z.number().int().min(1).max(65535), INTEGER_TEXT)
+			.nullable()
+			.optional(),
 		// The adapter maps "1"/"2" to 1/2 before checking.
 		voiceSlot: z
 			.union([z.literal(1), z.literal(2), z.enum(VOICE_SLOT_VALUES)])
 			.optional(),
-		wavDir: z.string().optional(),
+		wavDir: z.string().nullable().optional(),
 	})
 	.strict()
 

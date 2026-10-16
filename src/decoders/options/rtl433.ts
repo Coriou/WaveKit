@@ -1,20 +1,25 @@
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import { INTEGER_TEXT, numberOrText } from "./common.js"
 
 const frequencyHz = z.number().finite().positive()
 
 /** Options read by the rtl_433 adapter and the IQ-decimate base class. */
 export const rtl433OptionsSchema = z
 	.object({
-		analyze: z.boolean().optional(),
-		protocols: z.array(z.number().int().min(0)).optional(),
-		outputFormat: z.enum(["json", "csv"]).optional(),
-		inputSampleRate: z.number().finite().positive().optional(),
-		targetSampleRate: z.number().finite().positive().optional(),
-		extraArgs: z.array(z.string()).optional(),
-		frequencies: z.array(frequencyHz).optional(),
-		frequency: frequencyHz.optional(),
-		channelHz: frequencyHz.optional(),
+		analyze: z.boolean().nullable().optional(),
+		// Each protocol is String()ed into `-R`: numeric text gives the same argument.
+		protocols: z
+			.array(numberOrText(z.number().int().min(0), INTEGER_TEXT))
+			.nullable()
+			.optional(),
+		outputFormat: z.enum(["json", "csv"]).nullable().optional(),
+		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		targetSampleRate: z.number().finite().positive().nullable().optional(),
+		extraArgs: z.array(z.string()).nullable().optional(),
+		frequencies: z.array(frequencyHz).nullable().optional(),
+		frequency: frequencyHz.nullable().optional(),
+		channelHz: frequencyHz.nullable().optional(),
 	})
 	.strict()
 

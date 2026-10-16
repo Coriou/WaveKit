@@ -1,5 +1,6 @@
 import { z } from "zod"
 import type { DecoderOptionDescriptor } from "@wavekit/api-types"
+import { numberOrText } from "./common.js"
 
 const frequencyHz = z.number().finite().positive()
 const port = z.number().int().min(1).max(65535)
@@ -9,21 +10,23 @@ const stringOrNumber = z.union([z.string(), z.number()])
 /** Options read by the AIS-catcher adapter and the IQ-decimate base class. */
 export const aisCatcherOptionsSchema = z
 	.object({
-		device: stringOrNumber.optional(),
-		deviceSerial: stringOrNumber.optional(),
-		rtlTcpHost: z.string().optional(),
-		rtlTcpPort: port.optional(),
-		spyServerHost: z.string().optional(),
-		spyServerPort: port.optional(),
-		gain: z.number().finite().optional(),
-		ppm: z.number().finite().optional(),
-		outputFormat: z.enum(["nmea", "json"]).optional(),
-		outputPort: port.optional(),
-		inputSampleRate: z.number().finite().positive().optional(),
-		extraArgs: z.array(z.string()).optional(),
-		frequencies: z.array(frequencyHz).optional(),
-		frequency: frequencyHz.optional(),
-		channelHz: frequencyHz.optional(),
+		// device..spyServerPort and outputPort are read but never used by the adapter.
+		device: stringOrNumber.nullable().optional(),
+		deviceSerial: stringOrNumber.nullable().optional(),
+		rtlTcpHost: z.string().nullable().optional(),
+		rtlTcpPort: port.nullable().optional(),
+		spyServerHost: z.string().nullable().optional(),
+		spyServerPort: port.nullable().optional(),
+		// `tuner=${gain}` and ppm.toString(): numeric text gives the same argument.
+		gain: numberOrText(z.number().finite()).optional(),
+		ppm: numberOrText(z.number().finite()).optional(),
+		outputFormat: z.enum(["nmea", "json"]).nullable().optional(),
+		outputPort: port.nullable().optional(),
+		inputSampleRate: z.number().finite().positive().nullable().optional(),
+		extraArgs: z.array(z.string()).nullable().optional(),
+		frequencies: z.array(frequencyHz).nullable().optional(),
+		frequency: frequencyHz.nullable().optional(),
+		channelHz: frequencyHz.nullable().optional(),
 	})
 	.strict()
 
