@@ -1,0 +1,25 @@
+/* Layout glue for the ui/ components where a board composes recipes (no new materials or colours).
+   Drawer header: the Recordings and Settings boards (14 px top, 18 px left, close button text-3). */
+@layer wk-app {
+	.wk-drawer-head {
+		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 14px 10px 10px 18px;
+	}
+	.wk-drawer-gap {
+		flex: 1;
+	}
+	.wk-drawer-close {
+		color: var(--wk-text-3);
+	}
+	.wk-drawer-body {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		padding: 4px 18px 18px;
+	}
+}

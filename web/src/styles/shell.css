@@ -1,0 +1,348 @@
+/* Immersive shell layout (docs/web/canvas/Immersive.dc.html and the Tuner, Receiver, Listen, Recordings boards).
+   Layout and board-local rules only; materials, colours and states come from the ui.css recipes. */
+@layer wk-app {
+	.wk-shell {
+		position: fixed;
+		inset: 0;
+		overflow: hidden;
+		background: var(--wk-plot-bg);
+		color: var(--wk-text);
+		font-family: var(--wk-font-ui);
+		font-size: var(--wk-fs-lg);
+	}
+	.wk-shell-plot,
+	.wk-plot-placeholder,
+	.wk-shell-map {
+		position: absolute;
+		inset: 0;
+	}
+	.wk-plot-placeholder {
+		background: var(--wk-plot-bg);
+	}
+	.wk-shell-map {
+		z-index: 1;
+		display: grid;
+		place-items: center;
+		background: var(--wk-bg);
+	}
+
+	/* islands: head and panel are sibling islands (never nested glass), one gutter of 8 between them */
+	.wk-shell-island {
+		position: absolute;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		max-width: calc(100% - 32px);
+	}
+	.wk-shell-island[data-direction="up"] {
+		flex-direction: column-reverse;
+	}
+	.wk-shell-island[data-island="tuner"] {
+		width: 440px;
+	}
+	.wk-shell-island[data-island="receiver"] {
+		width: 300px;
+		transition: right var(--wk-dur-4) var(--wk-ease-inout);
+	}
+	.wk-shell-island[data-island="listen"] {
+		width: 340px;
+	}
+	.wk-shell-panel {
+		box-sizing: border-box;
+		padding: 20px;
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		overscroll-behavior: contain;
+		max-height: calc(100dvh - 110px);
+	}
+	.wk-shell-island[data-island="listen"] .wk-shell-panel {
+		max-height: calc(100dvh - 176px);
+	}
+
+	/* Tuner head (Tuner board) */
+	.wk-shell-tuner-head {
+		gap: 10px;
+		padding: 0 8px 0 16px;
+	}
+	.wk-shell-brand {
+		flex: none;
+		color: var(--wk-brand);
+	}
+	.wk-shell-vsep {
+		width: 1px;
+		height: 24px;
+		flex: none;
+		background: var(--wk-line-08);
+	}
+	.wk-shell-freq {
+		flex: 1;
+		min-width: 0;
+		font-size: var(--wk-fs-display-1);
+		font-weight: 700;
+		line-height: 38px;
+		font-variant-numeric: tabular-nums;
+		letter-spacing: 0.02em;
+		white-space: nowrap;
+	}
+	.wk-shell-tuner-head .wk-icon-btn {
+		color: var(--wk-text-3);
+	}
+	@media (max-width: 479px) {
+		.wk-shell-freq {
+			font-size: var(--wk-fs-2xl);
+			overflow: hidden;
+		}
+		.wk-shell-tuner-head .wk-icon-btn {
+			display: none;
+		}
+	}
+	.wk-shell-mode {
+		padding: 0 8px 0 10px;
+		font-weight: 400;
+	}
+	.wk-shell-mode b {
+		color: var(--wk-text);
+	}
+	.wk-shell-tuner-head .wk-btn[aria-expanded="true"] {
+		background: rgba(var(--wk-accent-rgb), 0.1);
+	}
+	.wk-shell-chev {
+		flex: none;
+		stroke-width: 2;
+		transition: transform var(--wk-dur-3) var(--wk-ease-out);
+	}
+	.wk-shell-chev[data-open] {
+		transform: rotate(180deg);
+	}
+
+	/* Receiver head (Receiver board): the whole head is the toggle */
+	.wk-shell-rx-head {
+		width: 100%;
+		gap: 10px;
+		text-align: left;
+	}
+	.wk-shell-rx-head b {
+		white-space: nowrap;
+	}
+	.wk-shell-rx-head .wk-shell-sub {
+		flex: 1;
+	}
+	.wk-shell-rx-head .wk-shell-chev {
+		color: var(--wk-text-3);
+	}
+	.wk-shell-dot {
+		width: 8px;
+		height: 8px;
+		flex: none;
+		border-radius: 50%;
+		background: var(--wk-accent);
+	}
+	.wk-shell-sub {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--wk-text-3);
+		font-size: var(--wk-fs-md);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* Listen head (Listen board) */
+	.wk-shell-listen-head {
+		height: 64px;
+		gap: 12px;
+		padding: 0 10px;
+	}
+	.wk-shell-listen-btn {
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		flex: none;
+		box-sizing: border-box;
+		border-radius: var(--wk-r-3);
+		border: 1px solid var(--wk-line-18);
+		color: var(--wk-text-2);
+		transition: background-color var(--wk-dur-2);
+	}
+	.wk-shell-listen-btn[aria-pressed="true"] {
+		border-color: transparent;
+		background: var(--wk-accent);
+		color: var(--wk-on-accent);
+	}
+	.wk-shell-listen-text {
+		flex: 1;
+		min-width: 120px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		white-space: nowrap;
+	}
+	.wk-shell-listen-text .wk-meter {
+		background: var(--wk-fill);
+	}
+	.wk-shell-listen-head .wk-icon-btn {
+		color: var(--wk-text-3);
+	}
+	.wk-shell-listen-head .wk-icon-btn[aria-expanded="true"] {
+		background: var(--wk-fill);
+	}
+
+	/* tuned card home (above Listen); hidden on narrow windows like the board's .wk-float */
+	.wk-shell-cardslot {
+		position: absolute;
+		left: 0;
+		top: 0;
+		width: 320px;
+		z-index: 1;
+		transition: transform var(--wk-dur-4) var(--wk-ease-spring);
+	}
+	.wk-shell-card {
+		box-sizing: border-box;
+		padding: 16px;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.wk-shell-card-freq {
+		font-family: var(--wk-font-head);
+		font-size: var(--wk-fs-display-2);
+		font-weight: 700;
+		letter-spacing: 0.02em;
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* dock: an island rail of touch icon buttons; the active view shows its label (board emphasis: off text-3,
+	   on --wk-fill + accent) */
+	.wk-dock {
+		position: absolute;
+		bottom: 16px;
+		z-index: 2;
+		height: 64px;
+		box-sizing: border-box;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 8px;
+		transition: left var(--wk-dur-4) var(--wk-ease-inout);
+	}
+	.wk-dock .wk-icon-btn {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		width: auto;
+		min-width: var(--wk-h-touch);
+		padding: 0 12px;
+		box-sizing: border-box;
+		font-size: var(--wk-fs-md);
+		font-weight: 700;
+		color: var(--wk-text-3);
+	}
+	.wk-dock .wk-icon-btn:hover {
+		color: var(--wk-text);
+	}
+	.wk-dock .wk-icon-btn[aria-pressed="true"] {
+		background: var(--wk-fill);
+		color: var(--wk-accent);
+	}
+	.wk-dock-sep {
+		width: 1px;
+		height: 28px;
+		margin: 0 4px;
+		flex: none;
+		background: var(--wk-line-14);
+	}
+	/* .wk-tip placed above its dock button (offset 12 clears the dock's edge), shown after 400 ms */
+	.wk-tipw {
+		position: relative;
+	}
+	.wk-tipw .wk-tip {
+		position: absolute;
+		left: 50%;
+		bottom: calc(100% + 12px);
+		transform: translate(-50%, 4px);
+		font-weight: 400;
+		opacity: 0;
+		transition:
+			opacity var(--wk-dur-1) var(--wk-ease-out),
+			transform var(--wk-dur-1) var(--wk-ease-out);
+	}
+	.wk-tipw .wk-tip kbd {
+		font: inherit;
+		color: var(--wk-text-3);
+		margin-left: 2px;
+	}
+	.wk-tipw:hover .wk-tip,
+	.wk-tipw:focus-visible .wk-tip {
+		opacity: 1;
+		transform: translate(-50%, 0);
+		transition-delay: 0.4s;
+	}
+	.wk-tipw:focus-visible .wk-tip {
+		transition-delay: 0s;
+	}
+
+	/* right drawer slot: full height from 1100 px, between the island rows below it */
+	.wk-shell-drawer {
+		position: absolute;
+		z-index: 4;
+		display: flex;
+		transition: width var(--wk-dur-4) var(--wk-ease-inout);
+	}
+	.wk-shell-drawer:focus {
+		outline: none;
+	}
+	.wk-shell-drawer > .wk-drawer {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		animation: wk-rise var(--wk-dur-4) var(--wk-ease-out);
+	}
+
+	/* palette: a solid sheet over the Palette board's scrim */
+	[data-wk-theme] {
+		--wka-scrim: color-mix(in srgb, var(--wk-plot-bg) 28%, transparent);
+	}
+	[data-wk-theme="light"] {
+		--wka-scrim: color-mix(in srgb, var(--wk-plot-bg) 18%, transparent);
+	}
+	.wk-shell-scrim {
+		position: absolute;
+		inset: 0;
+		z-index: 10;
+		display: flex;
+		justify-content: center;
+		align-items: flex-start;
+		padding: 12vh 16px 16px;
+		box-sizing: border-box;
+		background: var(--wka-scrim);
+	}
+	.wk-shell-palette {
+		width: min(640px, 100%);
+		box-sizing: border-box;
+		padding: 12px;
+		gap: 10px;
+		animation: wk-rise var(--wk-dur-4) var(--wk-ease-out);
+	}
+
+	/* placeholder content helpers */
+	.wk-shell-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.wk-shell-setting {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+	.wk-shell-empty {
+		margin: 0;
+		color: var(--wk-text-3);
+		font-size: var(--wk-fs-md);
+	}
+}
