@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { build, context } from "esbuild"
+import { readFileSync } from "node:fs"
 import { basename, extname } from "node:path"
 import process from "node:process"
 
@@ -26,7 +27,12 @@ if (entryPoints.length === 0) {
 	process.exit(1)
 }
 
+const pkg = JSON.parse(
+	readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+)
+
 const options = {
+	define: { __WAVEKIT_VERSION__: JSON.stringify(pkg.version) },
 	entryPoints,
 	bundle: true,
 	outdir: "dist",
