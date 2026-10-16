@@ -842,8 +842,8 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				},
 			},
 			// The default validator would coerce ("true" -> true) and drop unknown
-			// keys; the handler's strict shape check is the only body gate. Params
-			// keep the default answer for an empty id.
+			// keys; the handler's strict shape check is the only body gate. An
+			// empty id param fails validation and maps to a fixed 400.
 			validatorCompiler: ({ httpPart }) =>
 				httpPart === "params" ? validateIdParam : acceptUnvalidated,
 			// onRequest runs before body parsing: a denial precedes any lookup or parser error.
@@ -861,6 +861,15 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					const err = settingsError(
 						"DECODER_SETTINGS_LIMIT",
 						"Body is too large",
+					)
+					void sendJson(reply, err.statusCode, err.toBody())
+					return
+				}
+				// Params validation (empty id): a fixed 400, no echo.
+				if (code === "FST_ERR_VALIDATION") {
+					const err = settingsError(
+						"DECODER_OPTIONS_INVALID",
+						"Decoder id is required",
 					)
 					void sendJson(reply, err.statusCode, err.toBody())
 					return

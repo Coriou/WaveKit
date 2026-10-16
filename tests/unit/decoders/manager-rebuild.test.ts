@@ -488,3 +488,110 @@ describe("rebuild failure", () => {
 		expect(logLines.join("\n")).not.toContain("SENTINEL")
 	})
 })
+
+describe("retired instance disposal", () => {
+	it("crash restart: the retired instance is stopped once, silently", async () => {
+		const old = create()
+		await manager.startDecoder("dec")
+		manager.stageDecoderOptions("dec", { a: 1 })
+		old.crash()
+		const stopsBefore = old.stops
+		const emitted: string[] = []
+		manager.on("decoder:stopped", (id: string) => emitted.push(id))
+		await vi.advanceTimersByTimeAsync(10)
+		expect(manager.getDecoder("dec")).toBe(instances[1])
+		expect(old.stops).toBe(stopsBefore + 1)
+		expect(old.listenerCount("stopped")).toBe(0)
+		expect(emitted).toEqual([])
+		expect(instances[1]!.running).toBe(true)
+	})
+
+	it("operator start: the retired instance is stopped once", async () => {
+		const old = create()
+		manager.stageDecoderOptions("dec", { a: 1 })
+		await manager.startDecoder("dec", { startMode: "operator" })
+		expect(manager.getDecoder("dec")).toBe(instances[1])
+		expect(old.stops).toBe(1)
+		expect(instances[1]!.stops).toBe(0)
+	})
+
+	it("a failing cleanup is logged with safe fields and the new instance runs", async () => {
+		const old = create()
+		old.stop = () => Promise.reject(new Error(SENTINEL))
+		manager.stageDecoderOptions("dec", { a: 1 })
+		await manager.startDecoder("dec")
+		expect(instances[1]!.running).toBe(true)
+		const logs = logLines.join("\n")
+		expect(logs).toContain("Retired decoder cleanup failed")
+		expect(logs).not.toContain("secret-host")
+	})
+
+	it("constructor failure: the old instance is not stopped", async () => {
+		const old = create()
+		manager.stageDecoderOptions("dec", { boom: true })
+		await expect(manager.startDecoder("dec")).rejects.toBeInstanceOf(
+			DecoderRebuildError,
+		)
+		expect(manager.getDecoder("dec")).toBe(old)
+		expect(old.stops).toBe(0)
+	})
+
+	it("real DSD-FME adapter: no timer survives a crash rebuild", async () => {
+		const { BaseDecoder } =
+			await import("../../../src/decoders/base-decoder.js")
+		const { DsdFmeDecoder } =
+			await import("../../../src/decoders/builtin/dsd-fme.js")
+		const running = new WeakSet<object>()
+		vi.spyOn(BaseDecoder.prototype, "start").mockImplementation(async function (
+			this: InstanceType<typeof BaseDecoder>,
+		) {
+			running.add(this)
+			this.emit("started")
+		})
+		vi.spyOn(BaseDecoder.prototype, "getStatus").mockImplementation(function (
+			this: InstanceType<typeof BaseDecoder>,
+		) {
+			return {
+				id: this.id,
+				type: this.type,
+				running: running.has(this),
+				health: "running",
+				uptime: 0,
+				stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
+				restartCount: 0,
+			}
+		})
+		try {
+			await manager.destroy()
+			const log = pino({ level: "silent" })
+			const registry = new DecoderRegistry()
+			registry.register("dsd-fme", c => new DsdFmeDecoder(c, log), {
+				input: "iq",
+				output: "jsonl",
+				integrationPattern: "pure_consumer",
+			})
+			manager = new DecoderManager(registry, new FanoutManager(log), log, {
+				validateVersions: false,
+				restartDelay: 10,
+			})
+			const old = manager.createDecoder({
+				id: "d",
+				type: "dsd-fme",
+				enabled: true,
+				options: { mode: "auto", perCallRecordingPrune: false },
+			})
+			const stop = vi.spyOn(old, "stop")
+			await manager.startDecoder("d")
+			manager.stageDecoderOptions("d", { mode: "dmr" })
+			running.delete(old)
+			old.emit("exit", 1, null)
+			await vi.advanceTimersByTimeAsync(10)
+			expect(manager.getDecoder("d")).not.toBe(old)
+			expect(stop).toHaveBeenCalledTimes(1)
+			await manager.destroy()
+			expect(vi.getTimerCount()).toBe(0)
+		} finally {
+			vi.restoreAllMocks()
+		}
+	})
+})

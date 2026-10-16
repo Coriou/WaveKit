@@ -177,9 +177,14 @@ describe("protected PATCH", () => {
 			expect(res.json()).toMatchObject({ code: "DECODER_OPTIONS_INVALID" })
 		}
 		expect(update).not.toHaveBeenCalled()
-		// Params keep the default validation answer (empty id).
+		// An empty id is a fixed 400 in the settings shape, no echo.
 		const empty = await app.inject({ method: "PATCH", url: "/api/decoders/" })
-		expect(empty.statusCode).toBe(500)
+		expect(empty.statusCode).toBe(400)
+		expect(empty.json()).toEqual({
+			error: "Bad Request",
+			code: "DECODER_OPTIONS_INVALID",
+			message: "Decoder id is required",
+		})
 	})
 	it("deny precedes lookup, parsing and the service", async () => {
 		denial = {

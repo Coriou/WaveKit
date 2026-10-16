@@ -999,7 +999,7 @@ export class DecoderManager extends EventEmitter {
 		if (intent?.refuseIfHeld === true) this.assertNotHeld(state)
 
 		// WG8: staged options apply here, as if WaveKit booted with them.
-		this.rebuildIfPending(state)
+		if (state.stagedOptions) await this.rebuildIfPending(state)
 
 		if (intent) state.startMode = intent.startMode
 		this.log.info(
@@ -1256,7 +1256,7 @@ export class DecoderManager extends EventEmitter {
 	 * DecoderRebuildError.
 	 */
 	/** Returns true when a new adapter instance replaced the previous one. */
-	private rebuildIfPending(state: DecoderState): boolean {
+	private async rebuildIfPending(state: DecoderState): Promise<boolean> {
 		if (state.owner !== "config" || !state.stagedOptions) return false
 		if (!this.stagedDiffers(state)) {
 			state.stagedOptions = null
@@ -1311,8 +1311,19 @@ export class DecoderManager extends EventEmitter {
 		// The old instance is stopped: drop its input and listeners.
 		if (state.branchId !== null || state.channel !== null)
 			this.detachBranch(state)
-		state.decoder.removeAllListeners()
+		const retired = state.decoder
+		retired.removeAllListeners()
 		state.decoder = decoder
+		// Run the retired adapter's cleanup (timers, watchers) with its listeners
+		// already detached; stop() is a no-op on an exited process.
+		try {
+			await retired.stop()
+		} catch (err) {
+			this.log.warn(
+				{ decoderId: id, err: safeErrorFields(err) },
+				"Retired decoder cleanup failed",
+			)
+		}
 		state.config = config
 		state.stagedOptions = null
 		// Counters and derived views as on a fresh create.
@@ -1779,7 +1790,7 @@ export class DecoderManager extends EventEmitter {
 				try {
 					// Wire to fanout and start
 					if (state.intentionallyStopped) return
-					if (this.rebuildIfPending(state)) {
+					if (state.stagedOptions && (await this.rebuildIfPending(state))) {
 						const blocked = this.blockedAfterRebuild(state)
 						if (blocked) {
 							await this.suspend(state, blocked)
@@ -2923,7 +2934,7 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		try {
-			if (this.rebuildIfPending(state)) {
+			if (state.stagedOptions && (await this.rebuildIfPending(state))) {
 				const blocked = this.blockedAfterRebuild(state)
 				if (blocked) {
 					// Still ineligible with the rebuilt config: stay suspended.
