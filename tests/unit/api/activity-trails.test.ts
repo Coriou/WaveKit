@@ -239,6 +239,12 @@ describe("GET /api/activity/trails", () => {
 			`?producedFrom=${encodeURIComponent(iso(-86_400_001))}&producedTo=${encodeURIComponent(iso(0))}`,
 			"?categories=not-a-category",
 			`?${keys}`,
+			// Strict ISO 8601: bare numbers, impossible dates, unrepresentable windows.
+			"?producedTo=1",
+			`?producedTo=${encodeURIComponent("2026-02-30T12:00:00.000Z")}`,
+			`?producedTo=${encodeURIComponent("-271821-04-20T00:00:00.000Z")}`,
+			`?producedTo=${encodeURIComponent("2026-03-02T12:00:00")}`,
+			`?producedTo=${encodeURIComponent("2026-03-02T24:00:00Z")}`,
 		]
 		for (const url of urls) {
 			const response = await app.inject({
@@ -255,6 +261,11 @@ describe("GET /api/activity/trails", () => {
 			url: `/api/activity/trails?producedFrom=${encodeURIComponent(iso(-86_400_000))}&producedTo=${encodeURIComponent(iso(0))}`,
 		})
 		expect(bound.statusCode).toBe(200)
+		const offset = await app.inject({
+			method: "GET",
+			url: `/api/activity/trails?producedTo=${encodeURIComponent("2024-02-29T13:00:00.5+01:00")}`,
+		})
+		expect(offset.statusCode).toBe(200)
 		await app.close()
 	})
 

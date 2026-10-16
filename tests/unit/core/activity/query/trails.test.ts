@@ -67,7 +67,6 @@ function model(
 ): ModelResult {
 	const scanned = rows.slice(0, limits.scanRows)
 	const points = new Map<string, number[][]>()
-	const truncatedKeys = new Set<string>()
 	const truncation = new Set<ActivityTrailsTruncation>()
 	let total = 0
 	let scannedRows = 0
@@ -82,7 +81,6 @@ function model(
 		}
 		if (total === limits.maxPoints) {
 			truncation.add("points")
-			if (points.has(row.entityKey)) truncatedKeys.add(row.entityKey)
 			stopped = true
 			break
 		}
@@ -93,7 +91,6 @@ function model(
 		}
 		if (list && list.length === limits.maxPointsPerEntity) {
 			truncation.add("per-entity")
-			truncatedKeys.add(row.entityKey)
 			continue
 		}
 		const target = list ?? []
@@ -102,11 +99,18 @@ function model(
 		total += 1
 	}
 	if (!stopped && rows.length > limits.scanRows) truncation.add("scan-rows")
+	// Independent of the caps: a trail is truncated exactly when the full,
+	// uncapped input holds a valid in-window point of its entity it did not get.
+	const validCount = new Map<string, number>()
+	for (const row of rows) {
+		if (modelValid(row.position) === null) continue
+		validCount.set(row.entityKey, (validCount.get(row.entityKey) ?? 0) + 1)
+	}
 	const trails = [...points.entries()]
 		.map(([entityKey, list]) => ({
 			entityKey,
 			points: [...list].reverse(),
-			truncated: truncatedKeys.has(entityKey),
+			truncated: (validCount.get(entityKey) ?? 0) > list.length,
 		}))
 		.sort((a, b) => {
 			const an = a.points[a.points.length - 1]?.[0] ?? 0
@@ -350,9 +354,52 @@ describe("acceptTrailRows", () => {
 		)
 	})
 
+	it("scan-rows stop marks a trail that lost older points", () => {
+		const result = acceptTrailRows(
+			[row(3, 3, "A"), row(2, 2, "A"), row(1, 1, "A")],
+			{ ...DEFAULT_TRAILS_READ_LIMITS, scanRows: 2 },
+		)
+		expect(result.truncation).toEqual(["scan-rows"])
+		expect(result.trails[0]?.truncated).toBe(true)
+	})
+
+	it("points stop marks every trail that lost older points", () => {
+		const result = acceptTrailRows(
+			[row(4, 4, "A"), row(3, 3, "B"), row(2, 2, "B"), row(1, 1, "A")],
+			{ ...DEFAULT_TRAILS_READ_LIMITS, maxPoints: 2 },
+		)
+		expect(result.truncation).toEqual(["points"])
+		expect(
+			result.trails.map(trail => [trail.entityKey, trail.truncated]),
+		).toEqual([
+			["A", true],
+			["B", true],
+		])
+	})
+
+	it("an early stop does not mark a trail with nothing older", () => {
+		const result = acceptTrailRows(
+			[row(3, 3, "A"), row(2, 2, "B"), row(1, 1, "B", null), row(0, 0, "B")],
+			{ ...DEFAULT_TRAILS_READ_LIMITS, scanRows: 2 },
+		)
+		expect(result.truncation).toEqual(["scan-rows"])
+		expect(
+			result.trails.map(trail => [trail.entityKey, trail.truncated]),
+		).toEqual([
+			["A", false],
+			["B", true],
+		])
+	})
+
 	// Feature: web-gaps-4, Property 2: Trails truncation keeps the newest
 	// Validates: Requirements 1.4
-	it("every returned point is at least as new as every refused point of the same bound", () => {
+	// Greedy newest-first admission (design "Bulk trails"): rows are taken in
+	// (produced_at_ms, seq) DESC order and a bound refuses the row that hits it.
+	// Checked: for a returned entity, every refused point of it is older in scan
+	// order than all of its accepted points; for a refused (unreturned) entity,
+	// its newest refused point is not newer than any returned trail's newest
+	// point; and points / scan-rows stops keep only rows before the stop.
+	it("greedy admission: per entity newest first; a refused entity is not newer than any returned trail", () => {
 		fc.assert(
 			fc.property(
 				fc.array(rawRowArb, { maxLength: 60 }),
@@ -590,6 +637,62 @@ describe("readTrails against a store", () => {
 		expect(
 			read({ producedFromMs: NOW - 6, producedToMs: NOW - 5 }).pointCount,
 		).toBe(1)
+	})
+
+	it("early stops mark trails with an older in-window valid row (probe)", () => {
+		const at = (
+			ms: number,
+			key: string,
+			position: unknown = { lat: 1, lon: 1 },
+		) =>
+			insert({
+				producedAtMs: NOW - 10 + ms,
+				entityKey: key,
+				category: "aircraft",
+				protocol: "adsb",
+				position,
+			})
+		const flags = (result: ActivityTrails) =>
+			result.trails.map(trail => [trail.entityKey, trail.truncated])
+		reset()
+		at(3, "A")
+		at(2, "A")
+		at(1, "A")
+		const limits = DEFAULT_TRAILS_READ_LIMITS
+		const scan = read({ limits: { ...limits, scanRows: 2 } })
+		expect(scan.truncation).toEqual(["scan-rows"])
+		expect(flags(scan)).toEqual([["A", true]])
+		// The older row outside the window is not a lost point.
+		expect(
+			flags(
+				read({ producedFromMs: NOW - 8, limits: { ...limits, scanRows: 2 } }),
+			),
+		).toEqual([["A", false]])
+		reset()
+		at(4, "A")
+		at(3, "B")
+		at(2, "B")
+		at(1, "A")
+		at(0, "B", { lat: 0, lon: 0 })
+		const points = read({ limits: { ...limits, maxPoints: 2 }, chunkRows: 1 })
+		expect(points.truncation).toEqual(["points"])
+		expect(flags(points)).toEqual([
+			["A", true],
+			["B", true],
+		])
+		// Only an invalid position is older: not a lost point.
+		reset()
+		at(4, "A")
+		at(3, "B")
+		at(2, "B", '{"lat":1e999,"lon":2}')
+		at(1, "B", { lat: 91, lon: 2 })
+		at(0, "A", null)
+		const invalid = read({ limits: { ...limits, scanRows: 2 } })
+		expect(invalid.truncation).toEqual(["scan-rows"])
+		expect(flags(invalid)).toEqual([
+			["A", false],
+			["B", false],
+		])
 	})
 
 	// Feature: web-gaps-4, Property 1: Trails model

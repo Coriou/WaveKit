@@ -112,8 +112,22 @@ interface Building {
 	newestMs: number
 	/** Newest first while building. */
 	points: ActivityTrailPoint[]
+	/** Oldest accepted row, in scan order the last one. */
+	oldestMs: number
+	oldestSeq: number
 	truncated: boolean
 }
+
+/**
+ * Asks whether an in-window row with a valid position, older in scan order
+ * than (oldestMs, oldestSeq), exists for the entity. Used only when the scan
+ * stopped early, so trails that lost points past the stop are marked.
+ */
+export type TrailHasOlder = (
+	entityKey: string,
+	oldestMs: number,
+	oldestSeq: number,
+) => boolean
 
 /**
  * Greedy newest-first acceptance over rows already ordered by
@@ -126,17 +140,32 @@ export function acceptTrailRows(
 	limits: TrailsReadLimits,
 ): AcceptedTrails {
 	const acceptor = createTrailAcceptor(limits)
+	let index = 0
 	for (const row of rows) {
 		if (!acceptor.push(row)) break
+		index += 1
 	}
-	return acceptor.finish(rows.length > limits.scanRows)
+	// Rows from the stop on (the refused row included): any valid one of a
+	// returned entity is a lost point.
+	const rest = rows.slice(index)
+	return acceptor.finish(rows.length > limits.scanRows, entityKey =>
+		rest.some(
+			row =>
+				row.entityKey === entityKey &&
+				parseTrailPosition(row.position) !== null,
+		),
+	)
 }
 
 export interface TrailAcceptor {
 	/** Feeds the next row in scan order. False: stop scanning (a cap was reached). */
 	push(row: TrailRow): boolean
-	/** `moreRows`: a row exists past the scanned ones (signals scan-rows when no other stop). */
-	finish(moreRows: boolean): AcceptedTrails
+	/**
+	 * `moreRows`: a row exists past the scanned ones (signals scan-rows when no other stop).
+	 * `hasOlder`: consulted per untruncated trail when the scan stopped early
+	 * (scan-rows or points), to mark trails that lost older in-window points.
+	 */
+	finish(moreRows: boolean, hasOlder?: TrailHasOlder): AcceptedTrails
 }
 
 /** Incremental form of acceptTrailRows, so the reader can stop the SQL walk early. */
@@ -181,6 +210,8 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 				protocol: row.protocol,
 				newestMs: row.producedAtMs,
 				points: [point],
+				oldestMs: row.producedAtMs,
+				oldestSeq: row.seq,
 				truncated: false,
 			})
 			pointCount += 1
@@ -192,14 +223,23 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 			return true
 		}
 		trail.points.push(point)
+		trail.oldestMs = row.producedAtMs
+		trail.oldestSeq = row.seq
 		pointCount += 1
 		return true
 	}
 
-	function finish(moreRows: boolean): AcceptedTrails {
+	function finish(moreRows: boolean, hasOlder?: TrailHasOlder): AcceptedTrails {
 		if (moreRows && !stopped && scannedRows >= limits.scanRows)
 			hit.add("scan-rows")
 		const built = [...byEntity.values()]
+		if (hasOlder && (hit.has("scan-rows") || hit.has("points"))) {
+			for (const entry of built) {
+				if (entry.truncated) continue
+				if (hasOlder(entry.entityKey, entry.oldestMs, entry.oldestSeq))
+					entry.truncated = true
+			}
+		}
 		built.sort((left, right) => {
 			if (left.newestMs !== right.newestMs)
 				return right.newestMs - left.newestMs
@@ -345,7 +385,29 @@ export function readTrails(
 		}
 		if (found.length < size || read >= budget) break
 	}
-	const accepted = acceptor.finish(moreRows)
+	// Early stop: probe each returned trail for an older in-window valid row it
+	// did not get (at most maxEntities probes on activity_entity, same snapshot).
+	// The SQL predicate mirrors parseTrailPosition; JSON overflow (1e999) reads
+	// as an infinite real and fails the range check.
+	const probe = db.prepare(
+		`SELECT 1 AS hit FROM activity INDEXED BY activity_entity
+		WHERE entity_key = ? AND ${where.join(" AND ")}
+		AND (produced_at_ms < ? OR (produced_at_ms = ? AND seq < ?))
+		AND json_valid(summary_json)
+		AND json_type(summary_json, '$.position.lat') IN ('integer', 'real')
+		AND json_type(summary_json, '$.position.lon') IN ('integer', 'real')
+		AND json_extract(summary_json, '$.position.lat') BETWEEN -90 AND 90
+		AND json_extract(summary_json, '$.position.lon') BETWEEN -180 AND 180
+		AND NOT (json_extract(summary_json, '$.position.lat') = 0
+			AND json_extract(summary_json, '$.position.lon') = 0)
+		LIMIT 1`,
+	)
+	const accepted = acceptor.finish(
+		moreRows,
+		(entityKey, oldestMs, oldestSeq) =>
+			probe.get(entityKey, ...params, oldestMs, oldestMs, oldestSeq) !==
+			undefined,
+	)
 	const floorRow = db
 		.prepare("SELECT MIN(produced_at_ms) AS floor FROM activity")
 		.get()

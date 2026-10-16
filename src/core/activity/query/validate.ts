@@ -329,6 +329,53 @@ const trailsQuerySchema = z
 	})
 	.strict()
 
+const STRICT_ISO =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/
+
+/**
+ * Trails-local strict timestamp: ISO 8601 date-time with seconds and a `Z` or
+ * `±hh:mm` offset, calendar-valid (no Feb 30, hour <= 23, offset <= 23:59).
+ * Search keeps its own lenient Date.parse.
+ */
+function parseStrictTime(value: string, label: string): number {
+	const match = STRICT_ISO.exec(value)
+	const fail = (): never => {
+		throw new ActivityQueryInvalidError(
+			`${label} must be an ISO 8601 UTC or offset timestamp`,
+		)
+	}
+	if (!match) return fail()
+	const [year, month, day, hour, minute, second] = match
+		.slice(1, 7)
+		.map(Number) as [number, number, number, number, number, number]
+	const zone = match[8] ?? "Z"
+	if (zone !== "Z") {
+		const offsetHour = Number(zone.slice(1, 3))
+		const offsetMinute = Number(zone.slice(4, 6))
+		if (offsetHour > 23 || offsetMinute > 59) return fail()
+	}
+	// Round-trip the wall-clock fields to reject normalised dates (Feb 30 -> Mar 2).
+	const wall = new Date(Date.UTC(2000, month - 1, day, hour, minute, second))
+	wall.setUTCFullYear(year)
+	if (
+		wall.getUTCFullYear() !== year ||
+		wall.getUTCMonth() !== month - 1 ||
+		wall.getUTCDate() !== day ||
+		wall.getUTCHours() !== hour ||
+		wall.getUTCMinutes() !== minute ||
+		wall.getUTCSeconds() !== second
+	) {
+		return fail()
+	}
+	const parsed = Date.parse(value)
+	if (!Number.isFinite(parsed)) return fail()
+	return parsed
+}
+
+function representable(ms: number): boolean {
+	return Number.isFinite(new Date(ms).getTime())
+}
+
 /** Validated trails filter. Empty lists are absent; lists are sorted and deduplicated. */
 export interface NormalisedTrailsQuery {
 	producedFromMs: number
@@ -352,11 +399,16 @@ export function normaliseTrailsQuery(
 	const producedToMs =
 		raw.producedTo === undefined
 			? nowMs
-			: parseTime(raw.producedTo, "producedTo")
+			: parseStrictTime(raw.producedTo, "producedTo")
 	const producedFromMs =
 		raw.producedFrom === undefined
 			? producedToMs - ACTIVITY_TRAILS_DEFAULT_WINDOW_MS
-			: parseTime(raw.producedFrom, "producedFrom")
+			: parseStrictTime(raw.producedFrom, "producedFrom")
+	if (!representable(producedFromMs) || !representable(producedToMs)) {
+		throw new ActivityQueryInvalidError(
+			"The trails window is outside the representable time range",
+		)
+	}
 	if (producedFromMs > producedToMs) {
 		throw new ActivityQueryInvalidError(
 			"producedFrom must not exceed producedTo",
