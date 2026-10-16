@@ -599,6 +599,66 @@ describe("recordings inventory ids", () => {
 		expect((await fakeInventory(fs).list({})).items).toEqual([])
 	})
 
+	it("drops a file whose discovery folder became a symlink between enumeration and lstat", async () => {
+		const file = "/r/scan/dv/d_x/call.wav"
+		const fs = new FakeFs()
+			.file(file, OLD)
+			.file("/out/call.wav", OLD - 5, new Uint8Array(wav(8000)))
+		const outside = fs.nodes.get("/out/call.wav")
+		const swap = (): void => {
+			if (!outside) return
+			fs.nodes.set("/r/scan/dv/d_x", { t: "link", ino: nextIno++ })
+			fs.nodes.set(file, outside)
+			fs.real.set(file, "/out/call.wav")
+		}
+		const orig = fs.lstat.bind(fs)
+		let armed = true
+		fs.lstat = async p => {
+			if (armed && p === file) {
+				armed = false
+				swap()
+			}
+			return orig(p)
+		}
+		const { logger, warn } = fakeLogger()
+		const inv = fakeInventory(fs, { logger })
+		const page = await inv.list({})
+		expect(page.items).toEqual([])
+		expect(warn).not.toHaveBeenCalled()
+		expect(fs.liveHandles).toBe(0)
+		expect(fs.readLengths).toEqual([])
+		// resolve with the folder link back as a real directory but the file still escaping.
+		fs.nodes.set("/r/scan/dv/d_x", { t: "dir", ino: nextIno++ })
+		expect(await inv.resolve("scan:d_x~call.wav")).toBeNull()
+		expect(await inv.open("scan:d_x~call.wav")).toBeNull()
+		expect(fs.liveHandles).toBe(0)
+	})
+
+	it.each([
+		["made fresh", NOW],
+		["touched to another old mtime", OLD - 1],
+	])(
+		"drops a file whose mtime was %s between lstat and open",
+		async (_label, m) => {
+			const p = `/r/dsd/${DSD("120000")}`
+			const fs = new FakeFs().file(p, OLD).file(`/r/dsd/${DSD("120001")}`, OLD)
+			fs.beforeOpen = q => {
+				const n = fs.nodes.get(q)
+				if (q === p && n?.t === "file") n.mtimeMs = m
+			}
+			const page = await fakeInventory(fs).list({})
+			expect(page.items.map(i => i.id)).toEqual([`dsd:0~${DSD("120001")}`])
+			expect(fs.liveHandles).toBe(0)
+		},
+	)
+
+	it("takes bytes and modifiedAt from the opened file's fstat", async () => {
+		const fs = new FakeFs().file(`/r/dsd/${DSD("120000")}`, OLD)
+		const item = (await fakeInventory(fs).list({})).items[0]
+		expect(item?.bytes).toBe(WAV_1S.length)
+		expect(item?.modifiedAt).toBe(new Date(OLD).toISOString())
+	})
+
 	it("gives a shared directory to the first decoder only", async () => {
 		const fs = new FakeFs()
 			.file(`/r/dsd/${DSD("120000")}`, OLD)
@@ -706,23 +766,24 @@ describe("recordings inventory bounds", () => {
 		expect(fs.readLengths).toEqual([RECORDINGS_HEADER_READ_BYTES])
 	})
 
+	// Every scan opens and verifies each candidate; the cache saves the header read.
 	it("caches headers by path, size and mtime", async () => {
 		let now = NOW
 		const fs = new FakeFs().file(`/r/dsd/${DSD("120000")}`, OLD)
 		const inv = fakeInventory(fs, { now: () => now })
 		await inv.list({})
-		expect(fs.opens).toBe(1)
+		expect(fs.readLengths.length).toBe(1)
 		now += 3000
 		await inv.list({})
-		expect(fs.opens).toBe(1)
+		expect(fs.readLengths.length).toBe(1)
 		fs.file(`/r/dsd/${DSD("120000")}`, OLD + 1)
 		now += 3000
 		await inv.list({})
-		expect(fs.opens).toBe(2)
+		expect(fs.readLengths.length).toBe(2)
 		fs.file(`/r/dsd/${DSD("120000")}`, OLD + 1, new Uint8Array(wav(8000)))
 		now += 3000
 		expect((await inv.list({})).items[0]?.durationMs).toBe(500)
-		expect(fs.opens).toBe(3)
+		expect(fs.readLengths.length).toBe(3)
 	})
 
 	it("bounds the header cache at 4096 entries, oldest dropped", async () => {
@@ -737,19 +798,19 @@ describe("recordings inventory bounds", () => {
 			await inv.list({})
 			now += 3000
 		}
-		expect(fs.opens).toBe(6000)
+		expect(fs.readLengths.length).toBe(6000)
 		await inv.list({}) // OLD - 2: cached
-		expect(fs.opens).toBe(6000)
+		expect(fs.readLengths.length).toBe(6000)
 		now += 3000
 		setAll(OLD - 1) // entries 2000..3999: still cached
 		await inv.list({})
-		expect(fs.opens).toBe(6000)
+		expect(fs.readLengths.length).toBe(6000)
 		now += 3000
 		// 1904 of these were evicted; the pool inserts each miss as it goes, so those misses
 		// (first in name order) evict the 96 survivors before the workers reach them.
 		setAll(OLD)
 		await inv.list({})
-		expect(fs.opens).toBe(6000 + 2000)
+		expect(fs.readLengths.length).toBe(6000 + 2000)
 	})
 
 	it("shares one scan between concurrent lists and caches it for 2 s", async () => {
@@ -992,7 +1053,8 @@ describe("recordings inventory handle bounds and budgets", () => {
 		expect(opened?.name).toBe(DSD("120000"))
 		await opened?.handle.close()
 		fs.beforeOpen = () => fs.file(p, NOW)
-		expect(await inv.resolve(`dsd:0~${DSD("120000")}`)).toBe(p)
+		// resolve opens and verifies too: the fresh replacement is refused.
+		expect(await inv.resolve(`dsd:0~${DSD("120000")}`)).toBeNull()
 		expect(await inv.open(`dsd:0~${DSD("120000")}`)).toBeNull()
 		expect(fs.liveHandles).toBe(0)
 	})
@@ -1125,6 +1187,32 @@ describe("recordings inventory open on the real filesystem", () => {
 		armed = true
 		expect(await inventoryOver(s, fs).open(`dsd:0~${DSD("120000")}`)).toBeNull()
 	}, 5_000)
+
+	it("lists nothing and resolves null when the discovery folder becomes a symlink between enumeration and lstat", async () => {
+		const s = await setup()
+		const folder = path.join(s.scan, "dv", "d_x")
+		const file = path.join(folder, "call.wav")
+		let swapped = false
+		const fs: RecordingFsPort = {
+			...nodeRecordingFs,
+			lstat: async p => {
+				if (!swapped && p === file) {
+					swapped = true
+					await rename(folder, `${folder}-orig`)
+					await symlink(s.outside, folder)
+				}
+				return nodeRecordingFs.lstat(p)
+			},
+		}
+		const before = await treeHash(s.outside)
+		const inv = inventoryOver(s, fs)
+		const page = await inv.list({})
+		expect(swapped).toBe(true)
+		expect(page.items.map(i => i.id)).toEqual([`dsd:0~${DSD("120000")}`])
+		expect(await inv.resolve("scan:d_x~call.wav")).toBeNull()
+		expect(await inv.open("scan:d_x~call.wav")).toBeNull()
+		expect(await treeHash(s.outside)).toBe(before)
+	})
 
 	it("refuses a file made fresh after resolve", async () => {
 		const s = await setup()

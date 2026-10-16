@@ -134,14 +134,14 @@ export async function recordingRoutes(
 					return sendError(reply, 404, "RECORDING_NOT_FOUND")
 				}
 				stream = opened.handle.createReadStream({ autoClose: true })
-				stream.on("error", () => {
+				// As the scanner download: the reply already carries audio/wav, so a JSON error body
+				// cannot be sent here. Releasing the lease destroys the transport; the errored
+				// stream (autoClose) closes the handle.
+				const s = stream
+				s.on("error", () => {
 					request.log.warn("Recording download stream error")
 					lease.release()
-					if (!reply.raw.headersSent) {
-						void sendError(reply, 404, "RECORDING_NOT_FOUND")
-					} else {
-						reply.raw.destroy()
-					}
+					s.destroy()
 				})
 				return await reply
 					.type("audio/wav")

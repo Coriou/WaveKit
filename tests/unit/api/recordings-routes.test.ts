@@ -218,9 +218,52 @@ describe("recordingRoutes", () => {
 		expect(ok.statusCode).toBe(404)
 		expect(openRec).toHaveBeenCalledWith(id100)
 		openRec.mockClear()
+		// A >100-character id is cut by Fastify's maxParamLength before the handler and gets
+		// Fastify's generic 404 body, not RECORDING_NOT_FOUND (deferred to Main; finding 4).
 		const long = await get(`/api/recordings/${id101}/file`)
 		expect(long.statusCode).toBe(404)
 		expect(openRec).not.toHaveBeenCalled()
+	})
+
+	it("a stream error before the first byte releases the lease, closes the handle and throws nothing", async () => {
+		const uncaught: unknown[] = []
+		const onUncaught = (err: unknown) => uncaught.push(err)
+		process.on("uncaughtException", onUncaught)
+		process.on("unhandledRejection", onUncaught)
+		try {
+			let raw: ServerResponse | undefined
+			release.mockImplementation(() => raw?.destroy())
+			lease = response => {
+				raw = response
+				return { kind: "attached", active: () => true, release }
+			}
+			openRec.mockImplementation(async () => {
+				const handle = await open(filePath, "r")
+				handles.push(handle)
+				const createReadStream = handle.createReadStream.bind(handle)
+				const wrapped = Object.assign(Object.create(handle) as FileHandle, {
+					createReadStream: (opts?: { autoClose?: boolean }) => {
+						const s = createReadStream(opts)
+						process.nextTick(() =>
+							s.destroy(Object.assign(new Error("EIO"), { code: "EIO" })),
+						)
+						return s
+					},
+				})
+				return { handle: wrapped, name: "clip.wav" }
+			})
+			const res = await get(
+				`/api/recordings/${encodeURIComponent(SCAN_ID)}/file`,
+			).catch(() => null)
+			await new Promise(r => setTimeout(r, 50))
+			expect(uncaught).toEqual([])
+			expect(release).toHaveBeenCalled()
+			await expect(handles[0]?.stat()).rejects.toThrow()
+			expect(res?.body ?? "").not.toContain("RECORDING_NOT_FOUND")
+		} finally {
+			process.off("uncaughtException", onUncaught)
+			process.off("unhandledRejection", onUncaught)
+		}
 	})
 
 	it("does not leak id or path on an open failure (503)", async () => {

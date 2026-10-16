@@ -169,7 +169,7 @@ interface Counts {
 }
 
 interface Candidate {
-	file: string
+	loc: Location
 	name: string
 	id: string
 	kind: RecordingInventoryKind
@@ -413,33 +413,53 @@ export function createRecordingInventory(
 	}
 
 	/**
-	 * RIFF duration (cached by path + size + mtime). Undefined drops the item: the file vanished,
-	 * became a link, or the opened object is not the regular file `lstat` saw (FIFO, swap).
+	 * Verify an opened handle, not the path: a settled regular file (fstat, so a FIFO, a fresh
+	 * replacement or an mtime touched after `lstat` fails), whose path still resolves to the
+	 * source's real directory and to the opened inode, with every configured directory on the way
+	 * still a real directory. With `expected` (the `lstat` the scan saw), fstat dev/ino/size/mtime
+	 * must equal it. Returns the fstat, or null on any mismatch or vanished path; other errors throw.
+	 * Residual: a directory swapped to a link and back again between the open and these checks is
+	 * not detectable from user space without openat-relative traversal (a few syscalls wide).
 	 */
+	async function verifyOpened(
+		h: RecordingFileHandle,
+		loc: Location,
+		at: number,
+		expected: RecordingStats | null,
+	): Promise<RecordingStats | null> {
+		try {
+			const hst = await sem.run(() => h.stat())
+			if (!settledFile(hst, at)) return null
+			if (
+				expected &&
+				(hst.dev !== expected.dev ||
+					hst.ino !== expected.ino ||
+					hst.size !== expected.size ||
+					hst.mtimeMs !== expected.mtimeMs)
+			)
+				return null
+			const real = await sem.run(() => fs.realpath(loc.file))
+			if (real !== loc.real) return null
+			const rst = await sem.run(() => fs.stat(real))
+			if (rst.dev !== hst.dev || rst.ino !== hst.ino) return null
+			for (const dir of loc.dirs) if (!(await isRealDir(dir))) return null
+			return hst
+		} catch (err) {
+			if (isSkip(err)) return null
+			throw err
+		}
+	}
+
+	/** RIFF duration from an open handle (cached by path + size + mtime); null when unreadable. */
 	async function durationOf(
+		h: RecordingFileHandle,
 		file: string,
 		st: RecordingStats,
-	): Promise<number | null | undefined> {
+	): Promise<number | null> {
 		const key = `${file}\0${st.size}\0${st.mtimeMs}`
 		if (headerCache.has(key)) return headerCache.get(key) ?? null
-		let handle: RecordingFileHandle
-		try {
-			handle = await sem.run(() => fs.open(file, OPEN_FLAGS))
-		} catch (err) {
-			if (isSkip(err)) return undefined
-			return null
-		}
 		let result: number | null = null
 		try {
-			const h = handle
-			let hst: RecordingStats
-			try {
-				hst = await sem.run(() => h.stat())
-			} catch {
-				return undefined
-			}
-			if (!hst.isFile() || hst.dev !== st.dev || hst.ino !== st.ino)
-				return undefined
 			const length = Math.max(
 				0,
 				Math.min(RECORDINGS_HEADER_READ_BYTES, Math.floor(st.size)),
@@ -451,8 +471,6 @@ export function createRecordingInventory(
 			}
 		} catch {
 			return null
-		} finally {
-			await sem.run(() => closeQuietly(handle))
 		}
 		headerCache.set(key, result)
 		while (headerCache.size > RECORDINGS_HEADER_CACHE_MAX) {
@@ -461,6 +479,38 @@ export function createRecordingInventory(
 			headerCache.delete(oldest.value)
 		}
 		return result
+	}
+
+	/**
+	 * One candidate's whole lifecycle (lstat, open, verify, read, close): its entry, or null when
+	 * it is not eligible, vanished or failed verification (non-skip errors are counted).
+	 */
+	async function buildEntry(
+		c: Candidate,
+		at: number,
+		counts: Counts,
+	): Promise<InventoryEntry | null> {
+		const st = await eligibleStats(c.loc.file, at, counts)
+		if (!st) return null
+		let handle: RecordingFileHandle
+		try {
+			handle = await sem.run(() => fs.open(c.loc.file, OPEN_FLAGS))
+		} catch (err) {
+			if (!isSkip(err)) note(counts, "fileErrors", err)
+			return null
+		}
+		const h = handle
+		try {
+			const hst = await verifyOpened(h, c.loc, at, st)
+			if (!hst) return null
+			const durationMs = await durationOf(h, c.loc.file, hst)
+			return { mtimeMs: hst.mtimeMs, item: toItem(c, hst, durationMs) }
+		} catch (err) {
+			note(counts, "fileErrors", err)
+			return null
+		} finally {
+			await sem.run(() => closeQuietly(h))
+		}
 	}
 
 	async function scan(): Promise<Snapshot> {
@@ -538,10 +588,11 @@ export function createRecordingInventory(
 				const id = bounded(dsdId(n, name))
 				if (id === null) continue
 				const file = childPath(source.dir, name)
-				if (file === null) continue
+				const real = childPath(source.real, name)
+				if (file === null || real === null) continue
 				if (!claim()) break
 				candidates.push({
-					file,
+					loc: { file, name, real, dirs: [source.dir] },
 					name,
 					id,
 					kind: "dsd-fme-call",
@@ -555,13 +606,14 @@ export function createRecordingInventory(
 		const root = scannerRoot(counts)
 		const memo = new Map<string, number | null>()
 		if (root !== null && !truncated) {
-			let rootOk = false
+			let realRoot: string | null = null
 			try {
-				rootOk = await isRealDir(root)
+				if (await isRealDir(root))
+					realRoot = await sem.run(() => fs.realpath(root))
 			} catch (err) {
-				note(counts, "dirErrors", err)
+				if (!isSkip(err)) note(counts, "dirErrors", err)
 			}
-			for (const kindDir of rootOk ? SCANNER_RECORDING_KINDS : []) {
+			for (const kindDir of realRoot !== null ? SCANNER_RECORDING_KINDS : []) {
 				if (truncated) break
 				const kindPath = childPath(root, kindDir)
 				if (kindPath === null) continue
@@ -595,10 +647,14 @@ export function createRecordingInventory(
 						const id = bounded(scanId(d, name))
 						if (id === null) continue
 						const file = childPath(folder, name)
-						if (file === null) continue
+						const real =
+							realRoot === null
+								? null
+								: childPath(path.join(realRoot, kindDir, d), name)
+						if (file === null || real === null) continue
 						if (!claim()) break
 						candidates.push({
-							file,
+							loc: { file, name, real, dirs: [root, kindPath, folder] },
 							name,
 							id,
 							kind: kindDir === "dv" ? "scanner-dv" : "scanner-analog",
@@ -620,11 +676,7 @@ export function createRecordingInventory(
 				const i = nextIndex++
 				const c = candidates[i]
 				if (!c) continue
-				const st = await eligibleStats(c.file, scanNow, counts)
-				if (!st) continue
-				const durationMs = await durationOf(c.file, st)
-				if (durationMs === undefined) continue
-				built[i] = { mtimeMs: st.mtimeMs, item: toItem(c, st, durationMs) }
+				built[i] = await buildEntry(c, scanNow, counts)
 			}
 		}
 		await Promise.all(
@@ -746,15 +798,18 @@ export function createRecordingInventory(
 		return null
 	}
 
-	/**
-	 * Open `loc` and verify the opened object, not the path: a settled regular file (fstat), whose
-	 * path still resolves to the source's real directory and to the same inode, with every
-	 * configured directory on the way still a real directory. This closes a final-component
-	 * symlink (O_NOFOLLOW), a FIFO (O_NONBLOCK + fstat), a fresh replacement and an intermediate
-	 * directory swapped for a symlink before the open. Residual: a directory swapped to a link
-	 * and back again between the open and these checks is not detectable from user space without
-	 * openat-relative traversal; the window is a few syscalls wide.
-	 */
+	/** Open the first eligible location of `id` and verify the opened object, or null. */
+	async function openId(
+		id: string,
+	): Promise<{ handle: RecordingFileHandle; loc: Location } | null> {
+		const at = now()
+		const loc = await firstEligible(id, at)
+		if (!loc) return null
+		const handle = await openVerified(loc, at)
+		return handle ? { handle, loc } : null
+	}
+
+	/** Open `loc` (O_NOFOLLOW, O_NONBLOCK) and verify it; the caller owns the handle. */
 	async function openVerified(
 		loc: Location,
 		at: number,
@@ -768,15 +823,8 @@ export function createRecordingInventory(
 		const h = handle
 		let ok = false
 		try {
-			const hst = await sem.run(() => h.stat())
-			if (!settledFile(hst, at)) return null
-			const real = await sem.run(() => fs.realpath(loc.file))
-			if (real !== loc.real) return null
-			const rst = await sem.run(() => fs.stat(real))
-			if (rst.dev !== hst.dev || rst.ino !== hst.ino) return null
-			for (const dir of loc.dirs) if (!(await isRealDir(dir))) return null
-			ok = true
-			return h
+			ok = (await verifyOpened(h, loc, at, null)) !== null
+			return ok ? h : null
 		} catch {
 			return null
 		} finally {
@@ -802,8 +850,11 @@ export function createRecordingInventory(
 
 		async resolve(id) {
 			try {
-				const loc = await firstEligible(id, now())
-				return loc ? loc.file : null
+				// Opened and verified like a download, then closed: never an escaped path.
+				const opened = await openId(id)
+				if (!opened) return null
+				await sem.run(() => closeQuietly(opened.handle))
+				return opened.loc.file
 			} catch {
 				return null
 			}
@@ -811,11 +862,8 @@ export function createRecordingInventory(
 
 		async open(id) {
 			try {
-				const at = now()
-				const loc = await firstEligible(id, at)
-				if (!loc) return null
-				const handle = await openVerified(loc, at)
-				return handle ? { handle, name: loc.name } : null
+				const opened = await openId(id)
+				return opened ? { handle: opened.handle, name: opened.loc.name } : null
 			} catch {
 				return null
 			}
