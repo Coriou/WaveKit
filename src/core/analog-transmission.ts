@@ -12,6 +12,7 @@ import {
 	DCS_CODE_SET,
 	DCS_MIN_AUDIO_SECONDS,
 	DCS_STANDARD_CODES,
+	LIVE_AUDIO_NOISE_QUIETING_DB,
 } from "@wavekit/api-types"
 import type {
 	AnalogTransmissionCloseReason,
@@ -113,6 +114,8 @@ interface OpenTransmission {
 	modulation: AnalogTransmissionEventData["modulation"]
 	bandwidthHz: number
 	squelchMode: "manual" | "auto" | "noise"
+	/** WG7 req 2.4: the quieting threshold in effect (noise mode only). */
+	noiseQuietingDb: number | undefined
 	thresholdDbfs: number
 	config: TransmissionConfigIdentity
 	peak: number | null
@@ -182,6 +185,9 @@ export function toActivityPayload(
 		modulation: event.modulation,
 		bandwidthHz: event.bandwidthHz,
 		squelchMode: event.squelchMode,
+		...(event.noiseQuietingDb === undefined
+			? {}
+			: { noiseQuietingDb: event.noiseQuietingDb }),
 		thresholdDbfs: event.thresholdDbfs,
 		peakChannelPowerDbfs: event.peakChannelPowerDbfs,
 		meanChannelPowerDbfs: event.meanChannelPowerDbfs,
@@ -385,6 +391,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const offsetHz = status.config.offsetHz ?? 0
 		const frequency = this.sampleFrequency(status.sourceId, offsetHz)
 		const threshold = status.thresholdDbfs
+		const squelchMode = status.config.squelchMode ?? "manual"
 		this.toneBroken = false
 		const detector = this.makeDetector()
 		this.transmission = {
@@ -395,7 +402,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			frequency,
 			modulation: status.config.modulation,
 			bandwidthHz: status.config.bandwidth,
-			squelchMode: status.config.squelchMode ?? "manual",
+			squelchMode,
+			noiseQuietingDb:
+				squelchMode === "noise"
+					? (status.config.noiseQuietingDb ??
+						LIVE_AUDIO_NOISE_QUIETING_DB.default)
+					: undefined,
 			thresholdDbfs:
 				typeof threshold === "number" && Number.isFinite(threshold)
 					? threshold
@@ -528,6 +540,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			modulation: open.modulation,
 			bandwidthHz: open.bandwidthHz,
 			squelchMode: open.squelchMode,
+			...(open.noiseQuietingDb === undefined
+				? {}
+				: { noiseQuietingDb: open.noiseQuietingDb }),
 			thresholdDbfs: open.thresholdDbfs,
 			peakChannelPowerDbfs: open.peak,
 			meanChannelPowerDbfs: meanOf(open),
@@ -552,6 +567,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			modulation: open.modulation,
 			bandwidthHz: open.bandwidthHz,
 			squelchMode: open.squelchMode,
+			...(open.noiseQuietingDb === undefined
+				? {}
+				: { noiseQuietingDb: open.noiseQuietingDb }),
 			thresholdDbfs: open.thresholdDbfs,
 			peakChannelPowerDbfs: open.peak,
 			meanChannelPowerDbfs: meanOf(open),

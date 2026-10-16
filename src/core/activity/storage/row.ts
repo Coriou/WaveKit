@@ -1,4 +1,8 @@
-import { DCS_CODE_SET, DCS_STANDARD_CODES } from "@wavekit/api-types"
+import {
+	DCS_CODE_SET,
+	DCS_STANDARD_CODES,
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+} from "@wavekit/api-types"
 import { isCtcssToneHz } from "../../audio-tones/ctcss.js"
 import { isDtmfDigitString } from "../../audio-tones/dtmf.js"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -404,6 +408,9 @@ function storedTransmission(
 		modulation: payload.modulation,
 		bandwidthHz: payload.bandwidthHz,
 		squelchMode: payload.squelchMode,
+		...(payload.noiseQuietingDb === undefined
+			? {}
+			: { noiseQuietingDb: payload.noiseQuietingDb }),
 		thresholdDbfs: payload.thresholdDbfs,
 		peakChannelPowerDbfs: payload.peakChannelPowerDbfs,
 		meanChannelPowerDbfs: payload.meanChannelPowerDbfs,
@@ -901,15 +908,34 @@ function isTone(value: unknown): boolean {
 	return true
 }
 
-/** Exactly the WG1 keys, or those keys plus a valid `tone`. */
+/**
+ * Exactly the WG1 keys, plus optionally a valid `tone` and (WG7 req 2.4) a `noiseQuietingDb`
+ * that only a `noise`-mode transmission carries.
+ */
 function transmissionKeysOk(body: Record<string, unknown>): boolean {
 	const present = Object.keys(body)
-	const withTone = present.includes("tone")
-	if (withTone) {
-		if (present.length !== TRANSMISSION_KEYS.length + 1) return false
+	let optional = 0
+	if (present.includes("tone")) {
 		if (!isTone(body["tone"])) return false
-	} else if (present.length !== TRANSMISSION_KEYS.length) return false
+		optional += 1
+	}
+	if (present.includes("noiseQuietingDb")) {
+		if (!isNoiseQuietingDb(body["noiseQuietingDb"])) return false
+		if (body["squelchMode"] !== "noise") return false
+		optional += 1
+	}
+	if (present.length !== TRANSMISSION_KEYS.length + optional) return false
 	return TRANSMISSION_KEYS.every(key => present.includes(key))
+}
+
+/** WG7 req 2.2: the quieting threshold range (`LIVE_AUDIO_NOISE_QUIETING_DB`). */
+function isNoiseQuietingDb(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isFinite(value) &&
+		value >= LIVE_AUDIO_NOISE_QUIETING_DB.min &&
+		value <= LIVE_AUDIO_NOISE_QUIETING_DB.max
+	)
 }
 
 function isTransmission(value: unknown): value is AnalogTransmissionPayload {
@@ -940,7 +966,11 @@ function isTransmission(value: unknown): value is AnalogTransmissionPayload {
 		!Number.isFinite(body["bandwidthHz"])
 	)
 		return false
-	if (body["squelchMode"] !== "manual" && body["squelchMode"] !== "auto")
+	if (
+		body["squelchMode"] !== "manual" &&
+		body["squelchMode"] !== "auto" &&
+		body["squelchMode"] !== "noise"
+	)
 		return false
 	if (
 		typeof body["thresholdDbfs"] !== "number" ||
