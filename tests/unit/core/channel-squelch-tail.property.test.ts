@@ -5,8 +5,9 @@
  * block sequence equals the pre-WG7 gate on the same sequence with every
  * "noise band block" replaced by a block below the band, where a noise band
  * block is one below the threshold, within `hysteresisDb` of it, and less
- * than `hysteresisDb` above the noise floor estimate in force for that block.
- * Without a floor estimate the two gates are identical.
+ * than `hysteresisDb` above the noise floor estimate in force for that block
+ * (the last estimate fed while the gate was closed: the floor freezes while
+ * the gate is open). Without a floor estimate the two gates are identical.
  *
  * The reference is a frozen copy of the gate decision of `ChannelSquelch` at
  * the WG7 contract freeze (cccf665f), embedded below.
@@ -201,11 +202,14 @@ function runBoth(
 		frozen.gateBlock(noiseBand ? zero : buf)
 		fixed.process(buf)
 		if (feedFloor) {
-			floor =
+			const fed =
 				step.floorOffsetDb === null
 					? null
 					: config.baseThreshold + step.floorOffsetDb
-			fixed.setNoiseFloorDbfs(floor)
+			// The gate samples a finite estimate only while closed (frozen while
+			// open); null clears it in every state.
+			if (fed === null || !fixed.open) floor = fed
+			fixed.setNoiseFloorDbfs(fed)
 		}
 		run.frozen.push(frozen.open)
 		run.fixed.push(fixed.open)
@@ -320,5 +324,178 @@ describe("ChannelSquelch noise-tail fix", () => {
 		expect(fixedClose).toBe(250)
 		// Before WG7 the noise sat in the band and the gate never closed.
 		expect(frozenClose).toBe(-1)
+	})
+
+	/**
+	 * R1 regression: the owner's floor estimate (the live demodulator's lower
+	 * envelope) rises while the gate is open. One transmission on a channel
+	 * with noise at N: idle noise in [N - 1, N - 0.5] dB, a carrier that
+	 * starts above the threshold T and otherwise fades only within the hold
+	 * band (so the pre-WG7 gate holds it) and at least h + 0.01 dB above the
+	 * loudest idle block (so it is never noise to the closed-gate floor),
+	 * then tail noise in [N - 1, N + 0.5] dB. T lies in (N + h - 0.49,
+	 * N + h + 0.5], so the band [T - h, T) reaches into the tail noise. The
+	 * fed floor follows the envelope rule with an open rise of 0.4-40 dB/s.
+	 */
+	const channelArb = fc
+		.record({
+			noiseDbfs: fc.double({ min: -90, max: -30, noNaN: true }),
+			hysteresisDb: fc.constantFrom(1, 2, 3),
+			hangMs: fc.constantFrom(50, 100, 250),
+			thresholdFrac: fc.double({ min: 0, max: 1, noNaN: true }),
+			openRiseDbPerS: fc.double({ min: 0.4, max: 40, noNaN: true }),
+			idle: fc.array(fc.double({ min: -1, max: -0.5, noNaN: true }), {
+				minLength: 1,
+				maxLength: 100,
+			}),
+			carrier: fc.array(
+				fc.tuple(
+					fc.record({
+						above: fc.boolean(),
+						frac: fc.double({ min: 0, max: 1, noNaN: true }),
+					}),
+					fc.integer({ min: 1, max: 30 }),
+				),
+				{ minLength: 1, maxLength: 40 },
+			),
+			tail: fc.array(fc.double({ min: -1, max: 0.5, noNaN: true }), {
+				minLength: 1,
+				maxLength: 100,
+			}),
+		})
+		.map(c => {
+			const h = c.hysteresisDb
+			const n = c.noiseDbfs
+			const threshold = n + h - 0.47 + c.thresholdFrac * 0.97
+			// 0.01 dB margins clear float32 level rounding (~1e-6 dB).
+			const fadedMin = Math.max(n - 0.5 + h + 0.01, threshold - h + 0.01)
+			const fadedMax = threshold - 0.01
+			const levels: number[] = c.idle.map(d => n + d)
+			levels.push(threshold + 1)
+			for (const [b, count] of c.carrier) {
+				const level = b.above
+					? threshold + 0.01 + b.frac * 20
+					: fadedMin + b.frac * Math.max(0, fadedMax - fadedMin)
+				for (let k = 0; k < count; k++) levels.push(level)
+			}
+			for (const d of c.tail) levels.push(n + d)
+			return { ...c, threshold, levels }
+		})
+
+	/** Pre-WG7 gate plus the hold rule judged on a floor fed every block (R0). */
+	class LiveFloorGate extends FrozenPowerGate {
+		floor: number | null = null
+		private readonly h: number
+		private readonly t: number
+		constructor(options: {
+			sampleRate: number
+			thresholdDbfs: number
+			hysteresisDb: number
+			hangMs: number
+		}) {
+			super(options)
+			this.h = options.hysteresisDb
+			this.t = options.thresholdDbfs
+		}
+		gate(level: number, buf: Buffer, zero: Buffer): void {
+			const noiseBand =
+				this.floor !== null &&
+				level < this.t &&
+				level >= this.t - this.h &&
+				level < this.floor + this.h
+			this.gateBlock(noiseBand ? zero : buf)
+		}
+	}
+
+	// Feature: web-gaps-7, Property 5: Manual and auto squelch unchanged
+	// Validates: Requirements 2.1, 4.2
+	it("with a floor rising while open, equals the pre-WG7 gate on every block up to the last above-threshold block", () => {
+		let r0Chops = 0
+		let earlierCloses = 0
+		fc.assert(
+			fc.property(channelArb, c => {
+				const options = {
+					sampleRate: RATE,
+					thresholdDbfs: c.threshold,
+					hysteresisDb: c.hysteresisDb,
+					hangMs: c.hangMs,
+				}
+				const reference = new FrozenPowerGate(options)
+				const fixed = new ChannelSquelch(options)
+				const r0 = new LiveFloorGate(options)
+				const zero = Buffer.alloc(BLOCK_SAMPLES * 8)
+				let fixedFloor: number | null = null
+				let r0Floor: number | null = null
+				let lastAbove = -1
+				const ref: boolean[] = []
+				const got: boolean[] = []
+				const r0Open: boolean[] = []
+				c.levels.forEach((dbfs, index) => {
+					const { buf, level } = block(dbfs)
+					if (level >= c.threshold) lastAbove = index
+					reference.gateBlock(buf)
+					fixed.process(buf)
+					r0.gate(level, buf, zero)
+					// The live demodulator's lower envelope (measureRun).
+					const envelope = (floor: number | null, open: boolean): number =>
+						floor === null || level < floor
+							? level
+							: Math.min(level, floor + (open ? c.openRiseDbPerS : 1) * 0.01)
+					fixedFloor = envelope(fixedFloor, fixed.open)
+					fixed.setNoiseFloorDbfs(fixedFloor)
+					r0Floor = envelope(r0Floor, r0.open)
+					r0.floor = r0Floor
+					ref.push(reference.open)
+					got.push(fixed.open)
+					r0Open.push(r0.open)
+				})
+				expect(lastAbove).toBeGreaterThanOrEqual(0)
+				expect(got.slice(0, lastAbove + 1)).toEqual(ref.slice(0, lastAbove + 1))
+				// After it the fix only closes earlier (the tail), never later.
+				for (let i = lastAbove + 1; i < got.length; i++)
+					if (got[i]) expect(ref[i]).toBe(true)
+				if (
+					got
+						.slice(lastAbove + 1)
+						.some((open, i) => open !== ref[lastAbove + 1 + i])
+				)
+					earlierCloses++
+				if (r0Open.slice(0, lastAbove + 1).some((open, i) => open !== ref[i]))
+					r0Chops++
+			}),
+			{ numRuns: 300 },
+		)
+		// The generator exercises both the R0 chop (a floor fed while open
+		// closes the gate mid-transmission) and the tail fix itself.
+		expect(r0Chops).toBeGreaterThan(0)
+		expect(earlierCloses).toBeGreaterThan(0)
+	})
+
+	it("freezes the hold-rule floor while open and follows the estimate again once closed", () => {
+		const fixed = new ChannelSquelch({ sampleRate: RATE, thresholdDbfs: -30 })
+		for (let b = 0; b < 20; b++) {
+			fixed.process(block(-40).buf)
+			fixed.setNoiseFloorDbfs(-40)
+		}
+		// Open; the fed floor climbs to just under the band block level.
+		fixed.process(block(-29).buf)
+		fixed.setNoiseFloorDbfs(-31)
+		for (let b = 0; b < 100; b++) {
+			fixed.process(block(-31.5).buf)
+			fixed.setNoiseFloorDbfs(-31.6)
+			expect(fixed.open).toBe(true)
+		}
+		// Carrier gone: closes one hang after the last held block.
+		for (let b = 0; b < 25; b++) {
+			fixed.process(block(-40).buf)
+			fixed.setNoiseFloorDbfs(-40)
+		}
+		expect(fixed.open).toBe(false)
+		// Closed, the floor follows the estimate: a raised floor now drops band blocks.
+		fixed.setNoiseFloorDbfs(-32)
+		fixed.process(block(-29).buf)
+		expect(fixed.open).toBe(true)
+		for (let b = 0; b < 25; b++) fixed.process(block(-31.5).buf)
+		expect(fixed.open).toBe(false)
 	})
 })

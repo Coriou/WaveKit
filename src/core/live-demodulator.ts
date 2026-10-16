@@ -51,7 +51,6 @@ import { signalDecoder } from "../decoders/process-tools.js"
 import { ChannelSquelch } from "./channel-squelch.js"
 import {
 	ToneSquelchGate,
-	muteInPlace,
 	type ToneSquelchTone,
 } from "./audio-tones/tone-squelch.js"
 import { liveDemodTransmissionConfigChanged } from "./live-demod-activity.js"
@@ -196,6 +195,12 @@ interface PipelineRun {
 	 * a gate built mid-stream starts at the stream's sample framing.
 	 */
 	pcmPhase: number
+	/**
+	 * Tone gate decision for the sample straddling the last chunk's end (true:
+	 * muted), so its remaining bytes in the next chunk get the same decision
+	 * and muting only ever zeroes whole samples.
+	 */
+	pcmTailMuted: boolean
 	noiseFloorDbfs: number | null
 	stopping: boolean
 	failed: boolean
@@ -628,6 +633,8 @@ export class LiveDemodulator extends EventEmitter {
 			}
 		}
 		// WG7 req 4.1: keeps the hysteresis hold band out of the channel noise.
+		// The squelch samples this estimate only while closed (it rises while
+		// open), so a held carrier is never judged against its own level.
 		run.squelch.setNoiseFloorDbfs(run.noiseFloorDbfs)
 		this.applySquelchThreshold(run)
 		this.publishSquelchChange()
@@ -952,6 +959,7 @@ export class LiveDemodulator extends EventEmitter {
 			stream,
 			tone: null,
 			pcmPhase: 0,
+			pcmTailMuted: false,
 			stopping: false,
 			failed: false,
 		}
@@ -1205,9 +1213,11 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		const run = this.run
-		if (run !== null) run.pcmPhase = (run.pcmPhase + chunk.length) % 4
+		const phase = run?.pcmPhase ?? 0
+		if (run !== null) run.pcmPhase = (phase + chunk.length) % 4
 		const tone = run?.tone ?? null
 		if (run === null || tone === null) {
+			if (run !== null) run.pcmTailMuted = false
 			this.audio.write(chunk)
 			this.emitPcm(chunk)
 			return
@@ -1215,27 +1225,41 @@ export class LiveDemodulator extends EventEmitter {
 		// WG7 req 3.2, 3.3: the pcm listeners (transmission tone detection)
 		// see the unmuted audio; only what clients hear is muted.
 		this.emitPcm(chunk)
+		const format = run.stream.format
+		const width = format === "s16le" ? 2 : 4
+		// Bytes completing the sample split by the previous chunk: they take
+		// that sample's decision, so muting zeroes whole samples only.
+		const lead = Math.min(chunk.length, (width - (phase % width)) % width)
+		const leadMuted = run.pcmTailMuted
 		const gate = tone.gate
-		if (gate === null) {
-			muteInPlace(chunk)
-		} else if (!run.squelch.open) {
-			// Evidence accumulates only while the squelch is open: PCM still
-			// draining from the back chain after a close must not re-arm the
-			// gate (req 3.5). The skipped bytes still advance the sample framing.
-			gate.skip(chunk.length, run.stream.format)
-			muteInPlace(chunk)
+		if (gate === null || !run.squelch.open) {
+			// Without a gate, or while the squelch is closed, clients hear
+			// silence. Evidence accumulates only while the squelch is open:
+			// PCM still draining from the back chain after a close must not
+			// re-arm the gate (req 3.5). Skipped bytes still advance the framing.
+			if (gate !== null) gate.skip(chunk.length, format)
+			if (leadMuted) chunk.fill(0, 0, lead)
+			if (chunk.length > lead) {
+				chunk.fill(0, lead)
+				run.pcmTailMuted = true
+			}
 		} else {
-			// The gate's state applies per slice of at most TONE_SLICE_MS, so a
-			// large chunk is not passed or muted whole by its final state.
-			const format = run.stream.format
-			const width = format === "s16le" ? 2 : 4
+			// The gate's state applies per slice of at most TONE_SLICE_MS that
+			// starts on a sample boundary, so a large chunk is not passed or
+			// muted whole by its final state.
+			if (lead > 0) {
+				gate.push(chunk, format, 0, lead)
+				if (leadMuted) chunk.fill(0, 0, lead)
+			}
 			const slice =
 				Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) *
 				width
-			for (let start = 0; start < chunk.length; start += slice) {
+			for (let start = lead; start < chunk.length; start += slice) {
 				const end = Math.min(chunk.length, start + slice)
 				gate.push(chunk, format, start, end)
-				if (!gate.open()) chunk.fill(0, start, end)
+				const muted = !gate.open()
+				if (muted) chunk.fill(0, start, end)
+				run.pcmTailMuted = muted
 			}
 		}
 		this.audio.write(chunk)

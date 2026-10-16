@@ -337,6 +337,51 @@ describe("LiveDemodulator WG7", () => {
 			}
 			for (const tail of tails) expect(tail).toBeLessThanOrEqual(BOUND_MS)
 		})
+
+		/**
+		 * R1 regression (req 2.1, 4.2): the run's floor estimate rises while the
+		 * gate is open (0.4 dB/s); fed live into the hold rule it climbed under
+		 * a held carrier until band blocks no longer held. Manual -30 dBFS, idle
+		 * -40 dBFS for 2 s, then 40 s of a marginal fading carrier alternating
+		 * 200 ms at -29 dBFS (above) and 300 ms at -31.5 dBFS (in the 2 dB band):
+		 * the pre-WG7 gate (no floor) never closes, nor may the fixed one (it
+		 * closed 67 times before the floor was frozen while open).
+		 */
+		async function fadingCarrierCloses(withFloor: boolean): Promise<number> {
+			const { ChannelSquelch } =
+				await import("../../../src/core/channel-squelch.js")
+			const spy = withFloor
+				? null
+				: vi
+						.spyOn(ChannelSquelch.prototype, "setNoiseFloorDbfs")
+						.mockImplementation(() => undefined)
+			try {
+				await liveDemod.stop().catch(() => undefined)
+				liveDemod = create({ squelch: -30 })
+				await liveDemod.start()
+				let opened = false
+				let closes = 0
+				liveDemod.on("squelch-changed", (open: boolean) => {
+					if (open) opened = true
+					else if (opened) closes++
+				})
+				await feedAsync(carrierBlock(-40), 200)
+				for (let c = 0; c < 80; c++) {
+					await feedAsync(carrierBlock(-29), 20)
+					await feedAsync(carrierBlock(-31.5), 30)
+				}
+				expect(opened).toBe(true)
+				expect(liveDemod.isSquelchOpen()).toBe(true)
+				return closes
+			} finally {
+				spy?.mockRestore()
+			}
+		}
+
+		it("manual holds a marginal fading carrier through the hysteresis band as before WG7", async () => {
+			expect(await fadingCarrierCloses(false)).toBe(0)
+			expect(await fadingCarrierCloses(true)).toBe(0)
+		})
 	})
 
 	describe("runtime schema (req 2.1, 2.3, 3.1)", () => {
@@ -800,6 +845,62 @@ describe("LiveDemodulator WG7", () => {
 			expect(
 				gated.heard.subarray(-5000).equals(plain.heard.subarray(-5000)),
 			).toBe(true)
+		})
+
+		it("mutes whole samples only when chunks start mid-sample (R1)", async () => {
+			liveDemod = create({
+				toneSquelch: { kind: "ctcss", frequencyTenthsHz: 1000 },
+			})
+			await liveDemod.start()
+			const client = new ClientTransport()
+			internals().registerClient(
+				client as unknown as http.ServerResponse,
+				"local",
+			)
+			const seen: Buffer[] = []
+			liveDemod.on("pcm", (pcm: Buffer) => seen.push(Buffer.from(pcm)))
+			// Configured tone, a neighbouring tone, the configured tone again:
+			// the gate opens, closes and reopens inside odd-aligned chunks.
+			const original = Buffer.concat([
+				tonePcm(100, 1.5, 4),
+				tonePcm(103.5, 1.5, 5),
+				tonePcm(100, 1.5, 6),
+			])
+			// 1 byte first, then 501-byte chunks: every other chunk starts mid-sample.
+			const cuts = [0, 1]
+			for (let at = 1; at < original.length; at += 501)
+				cuts.push(Math.min(original.length, at + 501))
+			for (let k = 0; k + 1 < cuts.length; k++)
+				internals().handleAudioData(
+					Buffer.from(original.subarray(cuts[k], cuts[k + 1])),
+				)
+			// pcm listeners get the unmuted bytes.
+			expect(Buffer.concat(seen).equals(original)).toBe(true)
+			const heard = client.received()
+			expect(heard.length).toBe(original.length)
+			// Each sample is passed whole or zeroed whole: every zeroed run
+			// starts and ends on a sample boundary.
+			let split = 0
+			let passed = 0
+			let zeroed = 0
+			let runs = 0
+			let previousZeroed = false
+			for (let i = 0; i < heard.length; i += 2) {
+				const changed =
+					heard[i] !== original[i] || heard[i + 1] !== original[i + 1]
+				if (changed && heard.readInt16LE(i) !== 0) split++
+				if (changed) zeroed++
+				else passed++
+				if (changed && !previousZeroed) runs++
+				// A sample that is 0 in the source does not end a zeroed run.
+				if (changed) previousZeroed = true
+				else if (original.readInt16LE(i) !== 0) previousZeroed = false
+			}
+			expect(split).toBe(0)
+			expect(passed).toBeGreaterThan(0)
+			expect(zeroed).toBeGreaterThan(0)
+			// Muted at the start, open, muted on the wrong tone, open again.
+			expect(runs).toBeGreaterThanOrEqual(2)
 		})
 	})
 })

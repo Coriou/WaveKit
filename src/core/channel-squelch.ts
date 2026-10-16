@@ -37,6 +37,14 @@
  * the carrier has ended, so such a block also stops refreshing the hang in
  * the middle of a transmission (a fade to within 2 dB of the floor).
  *
+ * The floor the rule uses is sampled only while the gate is closed: it
+ * freezes when the gate opens and follows the estimate again once it closes.
+ * An owner's floor estimate keeps rising while the gate is open (the auto
+ * squelch's slow open rise); fed straight into the rule it climbed under a
+ * held carrier until band blocks no longer held, chopping a transmission.
+ * The frozen floor is the noise the gate last saw idle, so the rule only
+ * drops band blocks that look like that noise.
+ *
  * Timing uses sample counts (stream time), so it does not depend on how
  * bursty the network delivers data.
  *
@@ -91,7 +99,10 @@ export class ChannelSquelch {
 	private remainder: Buffer = Buffer.alloc(0)
 	private streamMs = 0
 	private lastAboveMs = Number.NEGATIVE_INFINITY
-	/** Channel noise floor estimate fed by the owner (null = unknown). */
+	/**
+	 * Noise floor for the hold rule (null = unknown): the owner's estimate,
+	 * sampled only while the gate is closed (frozen while open).
+	 */
 	private floorDbfs: number | null = null
 	private gateOpen: boolean
 	private smoothedPower: number | null = null
@@ -209,10 +220,18 @@ export class ChannelSquelch {
 	 * only to keep the hysteresis hold band out of the noise (WG7 req 4.1):
 	 * a band block less than `hysteresisDb` above this floor does not refresh
 	 * the hang. Without an estimate the gate is exactly the pre-WG7 gate.
+	 *
+	 * A finite estimate is taken only while the gate is closed; while it is
+	 * open the floor in force stays the one sampled before it opened (the
+	 * owner's estimate may rise under a carrier). Null (estimate reset, e.g.
+	 * on retune) clears it in every state.
 	 */
 	setNoiseFloorDbfs(floorDbfs: number | null): void {
-		this.floorDbfs =
-			floorDbfs !== null && Number.isFinite(floorDbfs) ? floorDbfs : null
+		if (floorDbfs === null || !Number.isFinite(floorDbfs)) {
+			this.floorDbfs = null
+			return
+		}
+		if (!this.gateOpen) this.floorDbfs = floorDbfs
 	}
 
 	/** Gates complete blocks; a partial block waits for the next chunk. */
