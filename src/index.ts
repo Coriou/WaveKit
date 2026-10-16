@@ -97,6 +97,7 @@ import {
 import { createRtl433Decoder, RTL433_CAPS } from "./decoders/builtin/rtl433.js"
 import { readsbDecoderFactory, READSB_CAPS } from "./decoders/builtin/readsb.js"
 import { createDecoderProvenanceIndex } from "./decoders/provenance-bindings.js"
+import { CoverageManager } from "./core/coverage/coverage-manager.js"
 import {
 	createAcarsdecDecoder,
 	ACARSDEC_CAPS,
@@ -1131,6 +1132,20 @@ async function main(): Promise<void> {
 			vesselTrackingManager.stop()
 		})
 
+		// Step 8d': ADS-B and AIS coverage per bearing from the station (WG3 req 7);
+		// without a station location the route answers available: false.
+		const coverageManager = new CoverageManager({
+			station:
+				config.station.lat !== undefined && config.station.lon !== undefined
+					? { lat: config.station.lat, lon: config.station.lon }
+					: null,
+			aircraft: aircraftTrackingManager.getTracker(),
+			vessels: vesselTrackingManager.getTracker(),
+		})
+		own(20, () => {
+			coverageManager.stop()
+		})
+
 		// Step 8e: APRS station, object and item current state (WG2 req 3, 4)
 		const aprsTrackingManager = new AprsTrackingManager(
 			decoderManager,
@@ -1238,6 +1253,7 @@ async function main(): Promise<void> {
 				resourceAggregator,
 				aircraftTracker: aircraftTrackingManager.getTracker(),
 				vesselTracker: vesselTrackingManager.getTracker(),
+				coverage: coverageManager,
 				meshTracker: meshTrackingManager.getTracker(),
 				aprsTracker: aprsTrackingManager.getTracker(),
 				scanner: scanner ?? undefined,
@@ -1469,6 +1485,14 @@ async function main(): Promise<void> {
 		})
 
 		shutdown.register({
+			name: "coverage",
+			handler: async () => {
+				coverageManager.stop()
+			},
+			timeout: 1000,
+		})
+
+		shutdown.register({
 			name: "aprs-tracking",
 			handler: async () => {
 				log.info("Shutting down APRS tracking")
@@ -1620,6 +1644,7 @@ async function main(): Promise<void> {
 		aircraftTrackingManager.start()
 		aircraftEnrichmentService.start()
 		vesselTrackingManager.start()
+		coverageManager.start()
 		meshTrackingManager.start()
 		aprsTrackingManager.start()
 
