@@ -31,9 +31,7 @@ import type { BandPlanService } from "../../core/bandplans/contract.js"
 export interface BandPlanRoutesOptions {
 	service: BandPlanService
 	/** Present only in protected mode. Omission registers GET routes alone. */
-	authorizeMutation?: (
-		request: FastifyRequest,
-	) => DeniedAdmission | undefined
+	authorizeMutation?: (request: FastifyRequest) => DeniedAdmission | undefined
 }
 
 const PREVIEW_KEYS = [
@@ -52,16 +50,15 @@ const COMMIT_KEYS = [
 	"keepColourHints",
 	"replacesPackId",
 	"addToStack",
+	"sourceUrl",
 ] as const
-const builtinPresetIdSchema = z
-	.string()
-	.regex(/^builtin-[a-z][a-z0-9-]{0,63}$/)
+const URL_PREVIEW_KEYS = ["url", "format", "groupOverrides"] as const
+const builtinPresetIdSchema = z.string().regex(/^builtin-[a-z][a-z0-9-]{0,63}$/)
 const readablePresetIdSchema = z.union([uuidSchema, builtinPresetIdSchema])
 
 function knownCode(code: unknown): code is BandPlansErrorCode {
 	return (
-		typeof code === "string" &&
-		Object.hasOwn(BANDPLANS_ERROR_DEFINITIONS, code)
+		typeof code === "string" && Object.hasOwn(BANDPLANS_ERROR_DEFINITIONS, code)
 	)
 }
 
@@ -99,7 +96,8 @@ function isImportRequest(request: FastifyRequest): boolean {
 	const path = request.url.split("?", 1)[0] ?? ""
 	return (
 		path === "/api/bandplans/imports" ||
-		path === "/api/bandplans/imports/preview"
+		path === "/api/bandplans/imports/preview" ||
+		path === "/api/bandplans/imports/preview-url"
 	)
 }
 
@@ -253,13 +251,7 @@ const writeRoutes: readonly WriteRoute[] = [
 		["expected", "entries"],
 		200,
 	),
-	mutation(
-		"DELETE",
-		"/api/bandplans/stack",
-		"reset-stack",
-		["expected"],
-		200,
-	),
+	mutation("DELETE", "/api/bandplans/stack", "reset-stack", ["expected"], 200),
 	mutation(
 		"PATCH",
 		"/api/bandplans/packs/:packId/bands/:bandId/edit",
@@ -350,9 +342,10 @@ const writeRoutes: readonly WriteRoute[] = [
 ]
 
 /** Unmounted plugin. The caller owns the service and drains it before close. */
-export const bandPlanRoutes: FastifyPluginAsync<
-	BandPlanRoutesOptions
-> = async (app, options) => {
+export const bandPlanRoutes: FastifyPluginAsync<BandPlanRoutesOptions> = async (
+	app,
+	options,
+) => {
 	const service = options.service
 	const authorizeMutation = options.authorizeMutation
 
@@ -395,16 +388,13 @@ export const bandPlanRoutes: FastifyPluginAsync<
 	app.get("/api/bandplans/presets", async (_request, reply) => {
 		return reply.status(200).send(service.presets())
 	})
-	app.get(
-		"/api/bandplans/presets/:presetId/job",
-		async (request, reply) => {
-			const presetId = parseWith(
-				readablePresetIdSchema,
-				readParam(request, "presetId"),
-			)
-			return reply.status(200).send(service.presetJob(presetId))
-		},
-	)
+	app.get("/api/bandplans/presets/:presetId/job", async (request, reply) => {
+		const presetId = parseWith(
+			readablePresetIdSchema,
+			readParam(request, "presetId"),
+		)
+		return reply.status(200).send(service.presetJob(presetId))
+	})
 
 	if (!authorizeMutation) return
 
@@ -457,4 +447,33 @@ export const bandPlanRoutes: FastifyPluginAsync<
 			},
 		})
 	}
+
+	if (typeof service.previewImportUrl === "function")
+		app.route({
+			method: "POST",
+			url: "/api/bandplans/imports/preview-url",
+			bodyLimit: BANDPLANS_LIMITS.requestBytes,
+			handler: async (request, reply) => {
+				const input = pickBody(request.body, URL_PREVIEW_KEYS)
+				const denial = admit(request, reply)
+				if (denial) return denial
+				if (!service.previewImportUrl)
+					throw new BandPlansError("BANDPLANS_URL_IMPORT_DISABLED")
+				return reply.status(200).send(await service.previewImportUrl(input))
+			},
+		})
+	if (typeof service.checkImportUpdate === "function")
+		app.route({
+			method: "POST",
+			url: "/api/bandplans/packs/:packId/check-update",
+			bodyLimit: BANDPLANS_LIMITS.requestBytes,
+			handler: async (request, reply) => {
+				const packId = parseWith(packIdSchema, readParam(request, "packId"))
+				const denial = admit(request, reply)
+				if (denial) return denial
+				if (!service.checkImportUpdate)
+					throw new BandPlansError("BANDPLANS_URL_IMPORT_DISABLED")
+				return reply.status(200).send(await service.checkImportUpdate(packId))
+			},
+		})
 }
