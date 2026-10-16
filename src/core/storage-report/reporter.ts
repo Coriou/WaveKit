@@ -91,10 +91,9 @@ export function createStorageReporter(
 		const scanOptions: Parameters<typeof scanStorageAreas>[1] = {}
 		if (internal.fs) scanOptions.fs = internal.fs
 		if (internal.limits) scanOptions.limits = internal.limits
-		const [scans, filesystem] = await Promise.all([
-			scan(areas, scanOptions),
-			readFilesystem(),
-		])
+		// Sequential so peak fs concurrency stays within the scan's limit.
+		const filesystem = await readFilesystem()
+		const scans = await scan(areas, scanOptions)
 		const byId = new Map(scans.map(s => [s.id, s]))
 		const out: StorageArea[] = areas.map(source => {
 			const s = byId.get(source.id)

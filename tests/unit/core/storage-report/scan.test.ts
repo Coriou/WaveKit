@@ -266,4 +266,108 @@ describe("scanStorageAreas (fake fs)", () => {
 		expect(fs.maxInFlight).toBeLessThanOrEqual(3)
 		expect(fs.maxInFlight).toBeGreaterThan(1)
 	})
+
+	it("depth-limit bounds every later area too", async () => {
+		const fs = createFakeFs({ ...chain(2), "/s": { kind: "file", size: 1 } })
+		const scans = await scanStorageAreas(
+			[area("logs", ["/r"]), area("station", ["/s"])],
+			{ fs, limits: { maxDepth: 1 } },
+		)
+		expect(scans[0]).toMatchObject({ partialReason: "depth-limit" })
+		expect(scans[1]).toEqual({
+			id: "station",
+			bytes: 0,
+			files: 0,
+			exists: false,
+			partialReason: "depth-limit",
+		})
+		expect(fs.lstatCalls).not.toContain("/s")
+	})
+
+	it("drops an lstat result that lands past the deadline", async () => {
+		let t = 0
+		const fs = createFakeFs(
+			{ "/f": { kind: "file", size: 9 }, "/s": { kind: "file", size: 1 } },
+			{ onCall: () => (t += 100) },
+		)
+		const scans = await scanStorageAreas(
+			[area("logs", ["/f"]), area("station", ["/s"])],
+			{ fs, now: () => t, limits: { maxWallMs: 50 } },
+		)
+		expect(scans[0]).toMatchObject({
+			files: 0,
+			bytes: 0,
+			exists: false,
+			partialReason: "time-limit",
+		})
+		expect(scans[1]).toMatchObject({ partialReason: "time-limit" })
+		expect(fs.lstatCalls).not.toContain("/s")
+	})
+
+	it("drops a readdir result that lands past the deadline", async () => {
+		let t = 0
+		let calls = 0
+		const fs = createFakeFs(
+			{ "/r": { kind: "dir" }, "/r/a": { kind: "file", size: 1 } },
+			{ onCall: () => (t = ++calls === 2 ? 100 : t) },
+		)
+		const [scan] = await scanStorageAreas([area("logs", ["/r"])], {
+			fs,
+			now: () => t,
+			limits: { maxWallMs: 50 },
+		})
+		expect(scan).toMatchObject({ files: 0, partialReason: "time-limit" })
+		expect(fs.lstatCalls).toEqual(["/r"])
+	})
+
+	it("returns time-limit promptly on a stalled lstat and stays frozen", async () => {
+		let release: (() => void) | undefined
+		const fs = {
+			lstat: (p: string) =>
+				p === "/stall"
+					? new Promise<never>(() => {
+							release = () => undefined
+						})
+					: Promise.resolve({
+							size: 5,
+							isFile: () => true,
+							isDirectory: () => false,
+							isSymbolicLink: () => false,
+						}),
+			readdir: () => Promise.resolve([]),
+		}
+		const started = Date.now()
+		const scans = await scanStorageAreas(
+			[
+				area("logs", ["/ok"]),
+				area("station", ["/stall"]),
+				area("access", ["/x"]),
+			],
+			{ fs, limits: { maxWallMs: 30 } },
+		)
+		expect(Date.now() - started).toBeLessThan(1_000)
+		expect(release).toBeDefined()
+		expect(scans[0]).toMatchObject({ files: 1, partialReason: null })
+		expect(scans[1]).toMatchObject({ files: 0, partialReason: "time-limit" })
+		expect(scans[2]).toMatchObject({
+			exists: false,
+			partialReason: "time-limit",
+		})
+		const copy = JSON.stringify(scans)
+		await new Promise(resolve => setTimeout(resolve, 20))
+		expect(JSON.stringify(scans)).toBe(copy)
+	})
+
+	it("treats ENOTDIR as io-error, not missing", async () => {
+		const fs = createFakeFs(
+			{ "/r": { kind: "dir" }, "/r/a": { kind: "file", size: 1 } },
+			{ lstatErrors: { "/root": "ENOTDIR", "/r/a": "ENOTDIR" } },
+		)
+		const scans = await scanStorageAreas(
+			[area("logs", ["/root"]), area("station", ["/r"])],
+			{ fs },
+		)
+		expect(scans[0]).toMatchObject({ exists: false, partialReason: "io-error" })
+		expect(scans[1]).toMatchObject({ exists: true, partialReason: "io-error" })
+	})
 })

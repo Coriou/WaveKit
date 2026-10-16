@@ -54,7 +54,7 @@ export interface StorageAreaScan {
 	partialReason: StoragePartialReason | null
 }
 
-type BoundReason = "entry-limit" | "time-limit"
+type BoundReason = "entry-limit" | "time-limit" | "depth-limit"
 
 interface WalkItem {
 	path: string
@@ -77,10 +77,14 @@ function errorReason(err: unknown): StoragePartialReason {
 
 function isMissing(err: unknown): boolean {
 	const code = errnoCode(err)
-	return code === "ENOENT" || code === "ENOTDIR"
+	return code === "ENOENT"
 }
 
-/** Scans every area with one shared budget; results are in input order. */
+/**
+ * Scans every area with one shared budget; results are in input order. The wall deadline is
+ * also enforced on stalled I/O: when it fires, a frozen snapshot is returned and late fs
+ * completions cannot change it.
+ */
 export async function scanStorageAreas(
 	areas: readonly StorageAreaSource[],
 	options: {
@@ -115,23 +119,67 @@ export async function scanStorageAreas(
 		return true
 	}
 
-	const results: StorageAreaScan[] = []
-	for (const area of areas) {
-		if (bound !== null) {
-			results.push({
-				id: area.id,
-				bytes: 0,
-				files: 0,
-				exists: false,
-				partialReason: bound,
-			})
-			continue
-		}
-		results.push(await scanArea(area))
+	const expired = (): boolean => now() - start >= limits.maxWallMs
+	/** Post-op deadline check; results landing after the deadline are dropped. */
+	const lateCheck = (): boolean => {
+		if (!expired()) return false
+		bound ??= "time-limit"
+		return true
 	}
-	return results
 
-	async function scanArea(area: StorageAreaSource): Promise<StorageAreaScan> {
+	const results: StorageAreaScan[] = []
+	let frozen: StorageAreaScan[] | null = null
+	let done = 0
+	const snapshot = (reason: BoundReason): StorageAreaScan[] =>
+		areas.map((area, i) => {
+			const r = results[i]
+			if (r === undefined) {
+				return {
+					id: area.id,
+					bytes: 0,
+					files: 0,
+					exists: false,
+					partialReason: reason,
+				}
+			}
+			if (i < done) return { ...r }
+			return { ...r, partialReason: r.partialReason ?? reason }
+		})
+
+	const run = async (): Promise<StorageAreaScan[]> => {
+		for (const area of areas) {
+			if (bound !== null) {
+				results.push({
+					id: area.id,
+					bytes: 0,
+					files: 0,
+					exists: false,
+					partialReason: bound,
+				})
+				continue
+			}
+			await scanArea(area)
+			done++
+		}
+		return results.map(r => ({ ...r }))
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined
+	const deadline = new Promise<StorageAreaScan[]>(resolve => {
+		const remaining = Math.max(0, limits.maxWallMs - (now() - start))
+		timer = setTimeout(() => {
+			bound ??= "time-limit"
+			frozen = snapshot("time-limit")
+			resolve(frozen)
+		}, remaining)
+	})
+	try {
+		return await Promise.race([run(), deadline])
+	} finally {
+		clearTimeout(timer)
+	}
+
+	async function scanArea(area: StorageAreaSource): Promise<void> {
 		const excluded = new Set((area.exclude ?? []).map(p => path.resolve(p)))
 		const scan: StorageAreaScan = {
 			id: area.id,
@@ -140,7 +188,9 @@ export async function scanStorageAreas(
 			exists: false,
 			partialReason: null,
 		}
+		results.push(scan)
 		const mark = (reason: StoragePartialReason): void => {
+			if (frozen !== null) return
 			if (scan.partialReason === null) scan.partialReason = reason
 		}
 		const queue: WalkItem[] = area.paths.map(p => ({
@@ -157,9 +207,11 @@ export async function scanStorageAreas(
 			try {
 				stat = await fs.lstat(item.path)
 			} catch (err: unknown) {
+				if (lateCheck()) return
 				if (!isMissing(err)) mark(errorReason(err))
 				return
 			}
+			if (lateCheck() || frozen !== null) return
 			if (item.root) scan.exists = true
 			if (stat.isFile() || stat.isSymbolicLink()) {
 				scan.bytes += stat.size
@@ -171,12 +223,14 @@ export async function scanStorageAreas(
 			try {
 				names = await fs.readdir(item.path)
 			} catch (err: unknown) {
+				if (lateCheck()) return
 				if (!isMissing(err)) mark(errorReason(err))
 				return
 			}
+			if (lateCheck() || frozen !== null) return
 			if (names.length === 0) return
 			if (item.depth + 1 > limits.maxDepth) {
-				mark("depth-limit")
+				bound ??= "depth-limit"
 				return
 			}
 			for (const name of names) {
@@ -210,6 +264,5 @@ export async function scanStorageAreas(
 			else if (bound !== null) break
 		}
 		if (bound !== null) mark(bound)
-		return scan
 	}
 }

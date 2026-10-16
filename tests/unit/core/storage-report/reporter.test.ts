@@ -200,4 +200,39 @@ describe("storage reporter", () => {
 		await expect(rep.report()).resolves.toMatchObject({ kept: null })
 		expect(scan).toHaveBeenCalledTimes(2)
 	})
+
+	it("runs statfs before the scan so fs concurrency stays <= 8", async () => {
+		let inFlight = 0
+		let peak = 0
+		const track = async <T>(v: T): Promise<T> => {
+			inFlight++
+			peak = Math.max(peak, inFlight)
+			await new Promise(resolve => setImmediate(resolve))
+			inFlight--
+			return v
+		}
+		const nodes = Array.from({ length: 40 }, (_, i) => `f${i}`)
+		const fs = {
+			lstat: (p: string) =>
+				track({
+					size: 1,
+					isFile: () => p !== "/d",
+					isDirectory: () => p === "/d",
+					isSymbolicLink: () => false,
+				}),
+			readdir: () => track(nodes),
+		}
+		const r = createStorageReporter(
+			{
+				areas: [{ id: "logs", paths: ["/d"], capBytes: null }],
+				stateDir: "/d",
+				minFreeBytes: null,
+			},
+			{ fs, statfs: () => track({ blocks: 1, bfree: 1, bavail: 1, bsize: 1 }) },
+		)
+		const report = await r.report()
+		expect(report.areas[0]?.files).toBe(40)
+		expect(report.filesystem).not.toBeNull()
+		expect(peak).toBe(8)
+	})
 })
