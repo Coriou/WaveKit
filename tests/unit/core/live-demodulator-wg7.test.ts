@@ -654,6 +654,40 @@ describe("LiveDemodulator WG7", () => {
 			}
 		})
 
+		for (const format of ["s16le", "f32le"] as const) {
+			for (const how of ["enable", "change"] as const) {
+				it(`${format}: a gate built mid-sample (${how}) starts at the stream's framing`, async () => {
+					const width = format === "s16le" ? 2 : 4
+					const samples = RATE * 2
+					const pcm = Buffer.alloc(samples * width)
+					for (let n = 0; n < samples; n++) {
+						const v = 0.1 * Math.sin((2 * Math.PI * 100 * n) / RATE)
+						if (format === "s16le")
+							pcm.writeInt16LE(Math.round(v * 32_767), n * 2)
+						else pcm.writeFloatLE(v, n * 4)
+					}
+					liveDemod = create({
+						audioFormat: format,
+						...(how === "change"
+							? { toneSquelch: { kind: "ctcss", frequencyTenthsHz: 885 } }
+							: {}),
+					})
+					await liveDemod.start()
+					// One byte of a sample, then the gate is built or replaced.
+					internals().handleAudioData(Buffer.alloc(1))
+					await liveDemod.reconfigure({
+						toneSquelch: { kind: "ctcss", frequencyTenthsHz: 1000 },
+					})
+					internals().handleAudioData(
+						Buffer.concat([Buffer.alloc(width - 1), pcm]),
+					)
+					expect(liveDemod.getStatus().toneSquelch).toEqual({
+						state: "open",
+					})
+				})
+			}
+		}
+
 		it("applies the gate per 10 ms slice of a large chunk, not by its final state", async () => {
 			liveDemod = create({
 				toneSquelch: { kind: "ctcss", frequencyTenthsHz: 1000 },

@@ -191,6 +191,11 @@ interface PipelineRun {
 	 * not be built for this run (audio stays muted: an unproven tone is absent).
 	 */
 	tone: { gate: ToneSquelchGate | null; key: string } | null
+	/**
+	 * PCM bytes delivered this run, mod 4 (a multiple of every sample width):
+	 * a gate built mid-stream starts at the stream's sample framing.
+	 */
+	pcmPhase: number
 	noiseFloorDbfs: number | null
 	stopping: boolean
 	failed: boolean
@@ -583,7 +588,10 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		const key = JSON.stringify(tone)
 		if (run.tone?.key === key) return
-		run.tone = { gate: this.buildToneGate(tone, run.stream.rate), key }
+		const gate = this.buildToneGate(tone, run.stream.rate)
+		// Align the new gate with the byte stream it joins mid-way.
+		gate?.skip(run.pcmPhase, run.stream.format)
+		run.tone = { gate, key }
 	}
 
 	private buildToneGate(
@@ -943,6 +951,7 @@ export class LiveDemodulator extends EventEmitter {
 			sourceFormat: caps.format,
 			stream,
 			tone: null,
+			pcmPhase: 0,
 			stopping: false,
 			failed: false,
 		}
@@ -1196,6 +1205,7 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		const run = this.run
+		if (run !== null) run.pcmPhase = (run.pcmPhase + chunk.length) % 4
 		const tone = run?.tone ?? null
 		if (run === null || tone === null) {
 			this.audio.write(chunk)
