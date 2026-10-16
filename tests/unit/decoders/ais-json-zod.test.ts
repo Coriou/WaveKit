@@ -42,6 +42,34 @@ describe("parseJsonShip Zod validation", () => {
 		expect(ship?.lon).toBe(2)
 	})
 
+	it.each([4095, 12.5, 4096, -1])("ignores alt %s but keeps the ship", alt => {
+		const ship = parseJsonShip({ mmsi: 111232511, type: 9, alt, lon: 2 })
+		expect(ship?.altitudeM).toBeUndefined()
+		expect(ship?.lon).toBe(2)
+	})
+
+	it("accepts alt 0", () => {
+		expect(parseJsonShip({ mmsi: 111232511, type: 9, alt: 0 })?.altitudeM).toBe(
+			0,
+		)
+	})
+
+	it.each([32, 3.5, -1])("ignores aid_type %s but keeps the ship", aidType => {
+		const ship = parseJsonShip({
+			mmsi: 992351234,
+			type: 21,
+			aid_type: aidType,
+			lat: 40.5,
+		})
+		expect(ship?.aidType).toBeUndefined()
+		expect(ship?.lat).toBe(40.5)
+	})
+
+	it("accepts aid_type 0 and 31", () => {
+		expect(parseJsonShip({ mmsi: 1, type: 21, aid_type: 0 })?.aidType).toBe(0)
+		expect(parseJsonShip({ mmsi: 1, type: 21, aid_type: 31 })?.aidType).toBe(31)
+	})
+
 	it("drops a boolean given as a number", () => {
 		const ship = parseJsonShip({
 			mmsi: 992351234,

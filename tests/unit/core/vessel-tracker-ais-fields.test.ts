@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest"
 import * as fc from "fast-check"
 import { VesselTracker } from "../../../src/core/vessel-tracker.js"
+import { decodeAisPayload } from "../../../src/decoders/builtin/ais-catcher.js"
+import { encodeType9 } from "../../mocks/fixtures/ais/encode.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
 const logger = createLogger({ level: "error" })
@@ -15,6 +17,30 @@ function tracker() {
 }
 
 describe("VesselTracker WG5 fields", () => {
+	it("keeps a type 9 SAR sog above 102.3 knots from decoder to tracker", () => {
+		const armored = encodeType9({
+			mmsi: 111232511,
+			altitude: 300,
+			sogKnots: 120,
+			lonRaw: 1_200_000,
+			latRaw: 30_000_000,
+			cogTenths: 900,
+		})
+		const decoded = decodeAisPayload(armored.payload, {
+			fillBits: armored.fillBits,
+		})
+		expect(decoded?.sog).toBe(120)
+		const t = tracker()
+		t.processShip(
+			"d",
+			{ mmsi: "111232511", messageType: 9, sog: decoded?.sog },
+			T0,
+		)
+		expect(t.get("111232511")?.sog).toBe(120)
+		t.processShip("d", { mmsi: "111232512", messageType: 1, sog: 120 }, T0)
+		expect(t.get("111232512")?.sog).toBeNull()
+	})
+
 	it("is null for channel, aton and altitude before any carry", () => {
 		const t = tracker()
 		t.processShip("d", { mmsi: "1", messageType: 1 }, T0)

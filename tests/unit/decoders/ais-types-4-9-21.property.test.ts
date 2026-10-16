@@ -34,6 +34,35 @@ const nameArb = fc
 	})
 	.map(chars => chars.join("").trim())
 
+/** Names of 21-34 characters exercise the type 21 name extension. */
+const longNameArb = fc
+	.tuple(
+		fc.constantFrom(...AIS_TEXT_ALPHABET.replace(/[@ ]/g, "").split("")),
+		fc.array(fc.constantFrom(...AIS_TEXT_ALPHABET.split("")), {
+			minLength: 19,
+			maxLength: 32,
+		}),
+		fc.constantFrom(...AIS_TEXT_ALPHABET.replace(/[@ ]/g, "").split("")),
+	)
+	.map(([first, middle, last]) => first + middle.join("") + last)
+
+/** Expected type 21 name when the payload keeps `length` bits: base plus the whole extension characters present. */
+function expectedTruncatedName(
+	name: string,
+	length: number,
+): string | undefined {
+	const extensionChars = Math.min(
+		14,
+		Math.max(0, Math.floor((length - 272) / 6)),
+	)
+	const decoded = (
+		name.slice(0, 20).replace(/@+$/, "") + name.slice(20, 20 + extensionChars)
+	)
+		.replace(/[@ ]+$/, "")
+		.trim()
+	return decoded.length > 0 ? decoded : undefined
+}
+
 function expectPosition(
 	decoded: DecodedAisPayload | null,
 	lonRaw: number,
@@ -166,17 +195,18 @@ describe("AIS types 4, 9 and 21 properties", () => {
 				.record({
 					mmsi: mmsiArb,
 					aidType: fc.integer({ min: 0, max: 31 }),
-					name: nameArb,
+					name: fc.oneof(nameArb, longNameArb),
 					lonRaw: lonArb,
 					latRaw: latArb,
 					second: fc.integer({ min: 0, max: 63 }),
 					offPosition: fc.boolean(),
 					virtualAid: fc.boolean(),
 				})
-				.map(f => ({ type: 21, armored: encodeType21(f) })),
+				.map(f => ({ type: 21, armored: encodeType21(f), name: f.name })),
 		)
 		fc.assert(
-			fc.property(messageArb, fc.nat(), ({ type, armored }, cut) => {
+			fc.property(messageArb, fc.nat(), (message, cut) => {
+				const { type, armored } = message
 				const bits = unarmorBits(armored.payload, armored.fillBits)
 				const length = 1 + (cut % bits.length)
 				const truncated = armorBitString(bits.slice(0, length))
@@ -187,7 +217,12 @@ describe("AIS types 4, 9 and 21 properties", () => {
 					return
 				}
 				for (const [field, end] of ends[type] ?? []) {
-					if (length >= end) expect(decoded?.[field]).toEqual(full?.[field])
+					if (field === "name" && length >= end && "name" in message) {
+						expect(decoded?.name).toBe(
+							expectedTruncatedName(message.name, length),
+						)
+					} else if (length >= end)
+						expect(decoded?.[field]).toEqual(full?.[field])
 					else expect(decoded?.[field]).toBeUndefined()
 				}
 			}),

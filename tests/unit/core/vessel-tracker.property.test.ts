@@ -106,7 +106,11 @@ function reference(reports: Report[]): VesselState {
 		const eta = cleanEta(report.eta)
 		const draught = keepNumber(report.draught, value => value > 0)
 		const cog = keepNumber(report.cog, value => value >= 0 && value < 360)
-		const sog = keepNumber(report.sog, value => value >= 0 && value < 102.3)
+		const sog = keepNumber(report.sog, value =>
+			report.messageType === 9
+				? value >= 0 && value <= 1022
+				: value >= 0 && value < 102.3,
+		)
 		const heading = keepNumber(
 			report.heading,
 			value => value >= 0 && value <= 359,

@@ -139,6 +139,15 @@ function acceptSog(value: number): boolean {
 	return value >= 0 && value < 102.3
 }
 
+/** Type 9 (SAR aircraft) carries whole knots 0..1022; 1023 is n/a. */
+function acceptSarSog(value: number): boolean {
+	return value >= 0 && value <= 1022
+}
+
+function sogAcceptor(messageType: number): (value: number) => boolean {
+	return messageType === 9 ? acceptSarSog : acceptSog
+}
+
 function acceptHeading(value: number): boolean {
 	return value >= 0 && value <= 359
 }
@@ -400,7 +409,7 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 			draught: carriedNumber(report.draught, acceptDraught),
 			position: null,
 			cog: carriedNumber(report.cog, acceptCog),
-			sog: carriedNumber(report.sog, acceptSog),
+			sog: carriedNumber(report.sog, sogAcceptor(report.messageType)),
 			heading: carriedNumber(report.heading, acceptHeading),
 			navStatus: carriedNumber(report.navStatus, acceptNavStatus),
 			messageTypes: [report.messageType],
@@ -439,7 +448,7 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 		const eta = carriedEta(report.eta)
 		const draught = carriedNumber(report.draught, acceptDraught)
 		const cog = carriedNumber(report.cog, acceptCog)
-		const sog = carriedNumber(report.sog, acceptSog)
+		const sog = carriedNumber(report.sog, sogAcceptor(report.messageType))
 		const heading = carriedNumber(report.heading, acceptHeading)
 		const navStatus = carriedNumber(report.navStatus, acceptNavStatus)
 		const lat = carriedNumber(report.lat, acceptLat)

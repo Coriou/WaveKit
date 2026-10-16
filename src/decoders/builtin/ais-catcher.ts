@@ -992,7 +992,8 @@ const AisCatcherJsonSchema = z.object({
 	aid_type: z.number().int().min(0).max(31).optional().catch(undefined),
 	virtual_aid: jsonBoolean,
 	off_position: jsonBoolean,
-	alt: z.number().finite().min(0).optional().catch(undefined),
+	// 4095 is n/a; anything outside 0..4094 or fractional is ignored.
+	alt: z.number().int().min(0).max(4094).optional().catch(undefined),
 })
 
 function trimmedOrUndefined(value: string | undefined): string | undefined {
