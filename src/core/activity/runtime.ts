@@ -117,6 +117,7 @@ export function inertActivityService(): ActivityQueryService {
 		search: async () => fail(),
 		detail: async () => fail(),
 		facets: async () => fail(),
+		trails: async () => fail(),
 		replay: () => fail(),
 		close: async () => {},
 	}

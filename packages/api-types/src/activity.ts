@@ -439,3 +439,73 @@ export type ActivityServerMessage =
 	| ActivityUnsubscribedMessage
 	| ActivityClosedMessage
 	| ActivityErrorMessage
+
+/**
+ * WG4 bulk position trails (docs/specs/web-gaps-4, requirement 1): one trail per entity from
+ * stored decoder receptions whose summary carries a valid position, inside a producedAt window.
+ * GET /api/activity/trails. A snapshot: no cursor, no paging.
+ */
+export const ACTIVITY_TRAILS_DEFAULT_WINDOW_MS = 60 * 60 * 1000
+export const ACTIVITY_TRAILS_MAX_WINDOW_MS = 24 * 60 * 60 * 1000
+/** Points in one response, over all trails. */
+export const ACTIVITY_TRAILS_MAX_POINTS = 20_000
+export const ACTIVITY_TRAILS_MAX_ENTITIES = 2_000
+/** 24 h at the 60 s position coalescing interval. */
+export const ACTIVITY_TRAILS_MAX_POINTS_PER_ENTITY = 1_440
+/** Rows examined per request, newest first. */
+export const ACTIVITY_TRAILS_SCAN_ROWS = 200_000
+/** `entityKey` filter values per request. */
+export const ACTIVITY_TRAILS_MAX_ENTITY_KEYS = 64
+
+export interface ActivityTrailsQuery {
+	/** ISO; default `to` minus ACTIVITY_TRAILS_DEFAULT_WINDOW_MS. */
+	producedFrom?: string
+	/** ISO; default now. */
+	producedTo?: string
+	categories?: readonly ActivityCategory[]
+	protocols?: readonly string[]
+	entityKeys?: readonly string[]
+}
+
+/** `[producedAtMs, lat, lon, altM]`; altM null when the position had none. */
+export type ActivityTrailPoint = readonly [
+	producedAtMs: number,
+	lat: number,
+	lon: number,
+	altM: number | null,
+]
+
+export interface ActivityTrail {
+	entityKey: string
+	/** Of the trail's newest point. */
+	category: ActivityCategory
+	protocol: string | null
+	/** producedAt ascending (ties commitSeq ascending). */
+	points: readonly ActivityTrailPoint[]
+	/** Older points of this entity inside the window were not returned. */
+	truncated: boolean
+}
+
+export type ActivityTrailsTruncation =
+	| "scan-rows"
+	| "points"
+	| "entities"
+	| "per-entity"
+
+export interface ActivityTrails {
+	/** The effective window (ISO). */
+	producedFrom: string
+	producedTo: string
+	/** By each trail's newest point descending, then entityKey ascending. */
+	trails: readonly ActivityTrail[]
+	pointCount: number
+	scannedRows: number
+	/** Rows in the window whose stored position was missing or invalid. */
+	skippedRows: number
+	truncated: boolean
+	/** Which bounds cut the result; empty when truncated is false. */
+	truncation: readonly ActivityTrailsTruncation[]
+	/** ISO producedAt of the oldest stored row (trails cannot start earlier); null when empty. */
+	retentionFloor: string | null
+	generatedAt: string
+}

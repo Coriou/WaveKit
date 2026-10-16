@@ -1,3 +1,14 @@
+/**
+ * WG4 (docs/specs/web-gaps-4, requirement 4): post-demodulation AGC. Absent means the
+ * modulation default (AM, CW, DSB, USB, LSB `fast`; NFM, WFM and raw none).
+ */
+export type LiveAudioAgcMode = "off" | "slow" | "fast"
+export const LIVE_AUDIO_AGC_MODES: readonly LiveAudioAgcMode[] = [
+	"off",
+	"slow",
+	"fast",
+]
+
 export interface LiveAudioConfig {
 	enabled: boolean
 	sourceId?: string
@@ -23,6 +34,8 @@ export interface LiveAudioConfig {
 	 * is shifted to DC before demodulation). Default 0.
 	 */
 	offsetHz?: number
+	/** WG4: absent = modulation default. */
+	agc?: LiveAudioAgcMode
 }
 
 export interface LiveAudioStatus {
@@ -49,6 +62,8 @@ export interface LiveAudioStatus {
 	squelchOpen?: boolean
 	noiseFloorDbfs?: number
 	thresholdDbfs?: number
+	/** WG4: AGC in the running chain after the modulation default (raw is always off). */
+	agc?: LiveAudioAgcMode
 }
 
 export type LiveDemodConfig = LiveAudioConfig

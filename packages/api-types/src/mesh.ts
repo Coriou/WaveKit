@@ -12,6 +12,11 @@ export interface MeshPosition {
 	altitudeM: number | null
 	/** ISO time the packet was received. */
 	at: string
+	/**
+	 * WG4: ISO of the sender's GPS fix time (`Position.time`) when it lies between 7 days before
+	 * and 60 s after `at`; null otherwise. Absent on older cores.
+	 */
+	fixAt?: string | null
 }
 
 export interface MeshNode {

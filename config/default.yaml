@@ -309,6 +309,10 @@ tuner:
 #                             # DC (tune the dongle a few kHz off the carrier to
 #                             # keep the receiver's DC spike out of the channel)
 #   iqDcBlock: false          # deprecated, ignored (it corrupted I/Q)
+#   agc: "fast"               # off | slow | fast; omit for the modulation
+#                             # default: AM/CW/DSB/USB/LSB fast, NFM/WFM/raw
+#                             # none. On NFM/WFM, slow or fast adds AGC after
+#                             # de-emphasis; raw never gets AGC
 #
 liveDemod:
   enabled: false

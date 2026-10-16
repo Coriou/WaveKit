@@ -60,6 +60,9 @@ import { vesselRoutes } from "./routes/vessels.js"
 import { meshRoutes } from "./routes/mesh.js"
 import { coverageRoutes } from "./routes/coverage.js"
 import type { CoverageManager } from "../core/coverage/coverage-manager.js"
+import type { StationEstimateProvider } from "../core/station-estimate/contract.js"
+import type { StationService } from "../core/station/contract.js"
+import type { StorageReportProvider } from "../core/storage-report/contract.js"
 import { aprsRoutes } from "./routes/aprs.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
@@ -171,6 +174,18 @@ export interface ApiServerDependencies {
 	meshTracker?: MeshTracker | undefined
 	/** ADS-B and AIS coverage per bearing (WG3 req 7). */
 	coverage?: Pick<CoverageManager, "query"> | undefined
+	/**
+	 * WG4 slots (docs/specs/web-gaps-4): accepted but not mounted until each lane merges.
+	 * GET /api/storage (req 3).
+	 */
+	storageReport?: StorageReportProvider | undefined
+	/** WG4: GET /api/station/estimate (req 2). */
+	stationEstimate?: StationEstimateProvider | undefined
+	/**
+	 * WG4: live station identity and PATCH /api/station (req 6). PATCH mounts with the access
+	 * controller only while STATION_WRITE_REQUIRES_ACCESS is true.
+	 */
+	stationService?: StationService | undefined
 	/** APRS station, object and item current state (WG2 req 4). */
 	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
