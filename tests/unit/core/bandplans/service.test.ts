@@ -606,6 +606,8 @@ describe("band plan service", { timeout: 60_000 }, () => {
 					expect(view.capabilities).toEqual({
 						writable,
 						importFormats: ["sdrpp-json"],
+						// WG6: no urlFetcher, so URL import is off.
+						urlImportHosts: [],
 					})
 					const presets = service.presets()
 					expect(presets.store).toEqual({ state: "unavailable" })
