@@ -170,6 +170,8 @@ export class DcsDecoder {
 	private bitIndex = 0
 	private candidate = NONE
 	private candidateBit = 0
+	/** Raw register at the last hit: a check point must repeat the same word, same rotation. */
+	private candidateWord = 0
 	private hits = 0
 	private confirmed = NONE
 
@@ -264,6 +266,7 @@ export class DcsDecoder {
 		this.bitIndex = 0
 		this.candidate = NONE
 		this.candidateBit = 0
+		this.candidateWord = 0
 		this.hits = 0
 		this.confirmed = NONE
 	}
@@ -284,7 +287,7 @@ export class DcsDecoder {
 		if (this.candidate !== NONE) {
 			if (this.bitIndex - this.candidateBit < WORD_BITS) return
 			// Check point: exactly 23 bits after the previous hit.
-			if (reading === this.candidate) {
+			if (reading === this.candidate && this.register === this.candidateWord) {
 				this.hits += 1
 				this.candidateBit = this.bitIndex
 				if (this.hits >= DCS_MIN_WORDS) this.confirmed = reading
@@ -296,6 +299,7 @@ export class DcsDecoder {
 		if (reading === NONE) return
 		this.candidate = reading
 		this.candidateBit = this.bitIndex
+		this.candidateWord = this.register
 		this.hits = 1
 	}
 }

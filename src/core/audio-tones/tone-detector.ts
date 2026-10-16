@@ -60,6 +60,9 @@ export class ToneDetector {
 	private format: TonePcmFormat["format"] | null = null
 	private rate = 0
 	private inputSamples = 0
+	/** Audio seconds summed per sample at its own rate (DCS gate; CTCSS keeps its rule). */
+	private dcsSeconds = 0
+	private secondsPerSample = 0
 	private decimFactor = 1
 	private decimSum = 0
 	private decimCount = 0
@@ -69,7 +72,11 @@ export class ToneDetector {
 	private fracSum = 0
 
 	push(pcm: Buffer, format: TonePcmFormat): void {
-		if (format.format !== "s16le" && format.format !== "f32le") return
+		if (format.format !== "s16le" && format.format !== "f32le") {
+			// DCS evidence must not bridge audio it cannot read.
+			this.dcs.reset()
+			return
+		}
 		const width = format.format === "s16le" ? 2 : 4
 		if (this.format !== format.format || this.rate !== format.rate) {
 			this.pendingLen = 0
@@ -107,7 +114,7 @@ export class ToneDetector {
 		const ctcssHz =
 			this.durationSeconds() < MIN_CTCSS_SECONDS ? null : this.ctcss.result()
 		const dcs =
-			this.durationSeconds() < DCS_MIN_AUDIO_SECONDS ? null : this.dcs.result()
+			this.dcsSeconds < DCS_MIN_AUDIO_SECONDS ? null : this.dcs.result()
 		return { ctcssHz, dtmf: digits, dcs }
 	}
 
@@ -125,6 +132,8 @@ export class ToneDetector {
 		this.format = null
 		this.rate = 0
 		this.inputSamples = 0
+		this.dcsSeconds = 0
+		this.secondsPerSample = 0
 		this.decimFactor = 1
 		this.decimSum = 0
 		this.decimCount = 0
@@ -136,6 +145,7 @@ export class ToneDetector {
 
 	private armRate(rate: number): void {
 		this.rate = rate
+		this.secondsPerSample = rate > 0 && Number.isFinite(rate) ? 1 / rate : 0
 		this.decimSum = 0
 		this.decimCount = 0
 		this.fracFill = 0
@@ -163,6 +173,7 @@ export class ToneDetector {
 
 	private takeSample(sample: number): void {
 		this.inputSamples += 1
+		this.dcsSeconds += this.secondsPerSample
 		if (this.decimFactor === 0 && !this.fractional) return
 		const value = Number.isFinite(sample) ? sample : 0
 		if (!this.fractional) {
