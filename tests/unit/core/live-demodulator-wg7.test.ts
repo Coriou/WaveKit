@@ -630,6 +630,30 @@ describe("LiveDemodulator WG7", () => {
 			expect(liveDemod.getStatus().toneSquelch).toEqual({ state: "waiting" })
 		})
 
+		it("keeps f32le sample framing across chunks delivered while the squelch is closed", async () => {
+			const pcm = Buffer.alloc(RATE * 2 * 4)
+			for (let n = 0; n < RATE * 2; n++)
+				pcm.writeFloatLE(0.1 * Math.sin((2 * Math.PI * 100 * n) / RATE), n * 4)
+			for (const split of [0, 1, 2, 3]) {
+				await liveDemod.stop().catch(() => undefined)
+				liveDemod = create({
+					squelch: -50,
+					audioFormat: "f32le",
+					toneSquelch: { kind: "ctcss", frequencyTenthsHz: 1000 },
+				})
+				await liveDemod.start()
+				feed(carrierBlock(-80), 2)
+				expect(liveDemod.isSquelchOpen()).toBe(false)
+				internals().handleAudioData(Buffer.alloc(split))
+				feed(carrierBlock(-30), 2)
+				expect(liveDemod.isSquelchOpen()).toBe(true)
+				internals().handleAudioData(
+					Buffer.concat([Buffer.alloc(split ? 4 - split : 0), pcm]),
+				)
+				expect(liveDemod.getStatus().toneSquelch).toEqual({ state: "open" })
+			}
+		})
+
 		it("applies the gate per 10 ms slice of a large chunk, not by its final state", async () => {
 			liveDemod = create({
 				toneSquelch: { kind: "ctcss", frequencyTenthsHz: 1000 },

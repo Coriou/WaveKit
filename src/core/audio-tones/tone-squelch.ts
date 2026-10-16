@@ -15,7 +15,8 @@
  *   023N ↔ 047I) for `OPEN_COUNT` consecutive words, and closes once `CLOSE_COUNT` word periods
  *   (23 bits each) pass without a matching word.
  *
- * `reset()` (the squelch closed) closes the gate at once and clears every stage. Per block the
+ * `reset()` (the squelch closed) closes the gate at once and clears every stage; `skip()`
+ * also tracks the byte framing of PCM that goes by while closed. Per block the
  * gate allocates nothing: stages, the decimator and the split-sample hold are built once.
  */
 import {
@@ -174,6 +175,8 @@ export class ToneSquelchGate {
 	): void {
 		if (format !== "s16le" && format !== "f32le") {
 			this.reset()
+			this.format = null
+			this.pendingLen = 0
 			return
 		}
 		const from = Math.max(0, Math.min(start, pcm.length))
@@ -214,14 +217,38 @@ export class ToneSquelchGate {
 		}
 	}
 
-	/** The squelch closed: close the gate at once and start the next transmission clean. */
+	/**
+	 * The squelch is closed and `byteCount` PCM bytes go by unanalysed: reset the evidence
+	 * (`reset()`) but keep the stream's sample framing, so a sample split across the closed
+	 * and the next open chunk is still read from the right byte. The bytes are not inspected;
+	 * the one sample that straddles the boundary is read with zeros for its skipped bytes.
+	 */
+	skip(byteCount: number, format: ToneSquelchPcmFormat): void {
+		this.reset()
+		if (format !== "s16le" && format !== "f32le") {
+			this.format = null
+			this.pendingLen = 0
+			return
+		}
+		if (format !== this.format) {
+			this.format = format
+			this.pendingLen = 0
+		}
+		const width = format === "s16le" ? 2 : 4
+		const bytes = Number.isFinite(byteCount) && byteCount > 0 ? byteCount : 0
+		this.pending.fill(0)
+		this.pendingLen = (this.pendingLen + (bytes % width)) % width
+	}
+
+	/**
+	 * The squelch closed: close the gate at once and discard every stage's evidence. The
+	 * sample framing (format and split-sample hold) is kept: it belongs to the byte stream.
+	 */
 	reset(): void {
 		this.counter.reset()
 		this.ctcss?.reset()
 		this.dcs?.reset()
 		this.decimator.arm(this.rate)
-		this.pendingLen = 0
-		this.format = null
 		this.lastBlock = 0
 		this.lastBit = 0
 		this.dcsOpen = false

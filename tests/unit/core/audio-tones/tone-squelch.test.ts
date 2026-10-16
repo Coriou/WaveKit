@@ -277,6 +277,46 @@ describe("ToneSquelchGate fails closed (review fixes)", () => {
 	})
 })
 
+describe("ToneSquelchGate framing across a closed squelch (review round 2)", () => {
+	for (const format of ["f32le", "s16le"] as const) {
+		const width = format === "s16le" ? 2 : 4
+		for (let split = 0; split < width; split++) {
+			it(`${format}: ${split} skipped bytes keep the sample framing`, () => {
+				const rate = 25_000
+				const pcm = renderPcm(
+					ctcssTone({ hz: 100, seconds: 2, seed: 31, amplitude: 0.1, rate }),
+					rate,
+					format,
+				).pcm
+				const gate = new ToneSquelchGate(ctcss(100), rate)
+				gate.skip(split, format)
+				expect(gate.open()).toBe(false)
+				gate.push(
+					Buffer.concat([Buffer.alloc(split ? width - split : 0), pcm]),
+					format,
+				)
+				expect(gate.state).toBe("open")
+			})
+		}
+	}
+
+	it("skip discards the evidence: a re-opened gate needs fresh tone", () => {
+		const rate = 25_000
+		const gate = new ToneSquelchGate(ctcss(100), rate)
+		gate.push(
+			renderPcm(
+				ctcssTone({ hz: 100, seconds: 1, seed: 32, rate }),
+				rate,
+				"s16le",
+			).pcm,
+			"s16le",
+		)
+		expect(gate.open()).toBe(true)
+		gate.skip(3, "s16le")
+		expect(gate.open()).toBe(false)
+	})
+})
+
 describe("ToneSquelchGate is a separate consumer", () => {
 	it("tone results are equal with and without the gate on the same blocks", () => {
 		const rate = 25_000

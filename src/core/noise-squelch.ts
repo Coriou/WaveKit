@@ -247,12 +247,12 @@ export class NoiseSquelch {
 	private y1 = 0
 	private y2 = 0
 	/**
-	 * Every block is copied into this preallocated scratch (sized for a 10 ms
-	 * block at construction; grows only if a longer block arrives), so a fresh
-	 * process buffer never costs a typed-array view.
+	 * Every block is copied, in tiles, into this scratch (one 10 ms block,
+	 * allocated at construction and never replaced), so neither a fresh
+	 * process buffer nor a longer block costs an allocation.
 	 */
-	private scratch: Float32Array
-	private scratchBytes: Buffer
+	private readonly scratch: Float32Array
+	private readonly scratchBytes: Buffer
 
 	constructor(options: NoiseSquelchOptions) {
 		if (!(options.sampleRate > 0) || !Number.isFinite(options.sampleRate)) {
@@ -346,32 +346,43 @@ export class NoiseSquelch {
 		let sum = 0
 		let usable = 0
 		let finite = true
-		const view = this.floatView(block, byteOffset, samples)
-		const end = samples * 2
-		for (let k = 0; k < end; k += 2) {
-			let i = view[k] ?? 0
-			let q = view[k + 1] ?? 0
-			if (!(Math.abs(i) < Infinity && Math.abs(q) < Infinity)) {
-				finite = false
-				i = 0
-				q = 0
+		// Fixed scratch tiles: filter state carries across them, one mean
+		// square accumulates over the whole block, nothing is allocated.
+		const view = this.scratch
+		const tileSamples = view.length / 2
+		for (let done = 0; done < samples; done += tileSamples) {
+			const count = Math.min(tileSamples, samples - done)
+			this.fillScratch(
+				block,
+				byteOffset + done * BYTES_PER_COMPLEX_SAMPLE,
+				count,
+			)
+			const end = count * 2
+			for (let k = 0; k < end; k += 2) {
+				let i = view[k] ?? 0
+				let q = view[k + 1] ?? 0
+				if (!(Math.abs(i) < Infinity && Math.abs(q) < Infinity)) {
+					finite = false
+					i = 0
+					q = 0
+				}
+				const m = Math.sqrt(i * i + q * q)
+				const den = m * pm
+				let d = 0
+				if (den > MAGNITUDE_EPSILON) {
+					d = (q * pi - i * pq) / den
+					usable++
+				}
+				pi = i
+				pq = q
+				pm = m
+				const y = b0 * d + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+				x2 = x1
+				x1 = d
+				y2 = y1
+				y1 = y
+				sum += y * y
 			}
-			const m = Math.sqrt(i * i + q * q)
-			const den = m * pm
-			let d = 0
-			if (den > MAGNITUDE_EPSILON) {
-				d = (q * pi - i * pq) / den
-				usable++
-			}
-			pi = i
-			pq = q
-			pm = m
-			const y = b0 * d + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-			x2 = x1
-			x1 = d
-			y2 = y1
-			y1 = y
-			sum += y * y
 		}
 		this.pi = pi
 		this.pq = pq
@@ -409,27 +420,22 @@ export class NoiseSquelch {
 		return this.gateOpen
 	}
 
-	/**
-	 * Float32 elements of the block without per-block allocation: a copy into
-	 * the preallocated scratch (`Buffer.prototype.copy` allocates nothing),
-	 * starting at element 0.
-	 */
-	private floatView(
+	/** Copies `samples` complex samples at `byteOffset` into the scratch tile. */
+	private fillScratch(
 		block: Buffer,
 		byteOffset: number,
 		samples: number,
-	): Float32Array {
-		const bytes = samples * BYTES_PER_COMPLEX_SAMPLE
-		if (this.scratch.length < samples * 2) {
-			this.scratch = new Float32Array(samples * 2)
-			this.scratchBytes = Buffer.from(this.scratch.buffer)
-		}
+	): void {
 		if (LITTLE_ENDIAN) {
-			block.copy(this.scratchBytes, 0, byteOffset, byteOffset + bytes)
+			block.copy(
+				this.scratchBytes,
+				0,
+				byteOffset,
+				byteOffset + samples * BYTES_PER_COMPLEX_SAMPLE,
+			)
 		} else {
 			for (let k = 0; k < samples * 2; k++)
 				this.scratch[k] = block.readFloatLE(byteOffset + k * 4)
 		}
-		return this.scratch
 	}
 }

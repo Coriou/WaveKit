@@ -1211,8 +1211,8 @@ export class LiveDemodulator extends EventEmitter {
 		} else if (!run.squelch.open) {
 			// Evidence accumulates only while the squelch is open: PCM still
 			// draining from the back chain after a close must not re-arm the
-			// gate (req 3.5).
-			gate.reset()
+			// gate (req 3.5). The skipped bytes still advance the sample framing.
+			gate.skip(chunk.length, run.stream.format)
 			muteInPlace(chunk)
 		} else {
 			// The gate's state applies per slice of at most TONE_SLICE_MS, so a

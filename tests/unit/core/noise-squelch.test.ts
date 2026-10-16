@@ -193,6 +193,43 @@ describe("NoiseSquelch allocation (review fix)", () => {
 	})
 })
 
+describe("NoiseSquelch tiles (review round 2)", () => {
+	it("blocks longer than the scratch reuse it and equal a single-pass reference", () => {
+		const squelch = new NoiseSquelch(NFM)
+		const reference = new NoiseSquelch(NFM)
+		// The reference reads every block in one pass through a scratch larger than any block.
+		const big = new Float32Array(700 * 2)
+		Object.assign(reference, {
+			scratch: big,
+			scratchBytes: Buffer.from(big.buffer),
+		})
+		const internals = squelch as unknown as { scratch: Float32Array }
+		const scratch = internals.scratch
+		const synth = new FmChannelSynth({ ...NFM, seed: 21, cnrDb: 12 })
+		for (let samples = 251; samples <= 700; samples += 7) {
+			const block = Buffer.alloc(samples * 8)
+			for (let at = 0; at < block.length; ) {
+				const part = synth.next()
+				const n = Math.min(part.length, block.length - at)
+				part.copy(block, at, 0, n)
+				at += n
+			}
+			expect(squelch.processBlock(block)).toBe(reference.processBlock(block))
+			expect(squelch.lastBlockMeanSquare).toBe(reference.lastBlockMeanSquare)
+			expect(internals.scratch).toBe(scratch)
+		}
+	})
+
+	it("a non-finite sample past the first tile invalidates the whole block", () => {
+		const squelch = new NoiseSquelch(NFM)
+		const block = Buffer.alloc(500 * 8)
+		for (let n = 0; n < 500; n++) block.writeFloatLE(0.1, n * 8)
+		block.writeFloatLE(Number.NaN, 499 * 8)
+		expect(squelch.processBlock(block)).toBe(false)
+		expect(squelch.lastQuietingDb).toBeNull()
+	})
+})
+
 describe("NoiseSquelch thresholds", () => {
 	it("accepts the bounds 1 and 30 dB and refuses values past them", () => {
 		expect(validateNoiseQuietingDb(NOISE_QUIETING_DB_MIN)).toBe(1)
