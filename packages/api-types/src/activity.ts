@@ -340,8 +340,10 @@ export interface ActivityRetentionStats {
 	/** True when more than 64 shares exist. */
 	sharesTruncated: boolean
 	/**
-	 * Cap steps this session that removed an oldest-first prefix because no share was above
-	 * the fair level (req 1.12). 0 under `oldest-first`.
+	 * Cap steps this session outside the fair floor: an oldest-first prefix because no share
+	 * was above the fair level (req 1.12), or the single-row step that deletes the oldest row
+	 * of the over-level share with the largest excess when no fair delete fits (req 1.5).
+	 * 0 under `oldest-first`.
 	 */
 	prefixFallbackSteps: number
 }
