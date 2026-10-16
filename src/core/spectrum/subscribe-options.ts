@@ -3,13 +3,27 @@
  * spectrum-service.ts re-exports these names. Changing anything here is a Main-only contract change.
  */
 import { z } from "zod"
+import {
+	SPECTRUM_BINS_CAP_CEILING,
+	SPECTRUM_BINS_CAP_FLOOR,
+} from "@wavekit/api-types"
 
 export const PROFILE_LIMITS = {
 	hz: { min: 0.5, max: 25, step: 0.5 },
+	/**
+	 * `max` is the floor bins cap (SPECTRUM_BINS_CAP_FLOOR): served when no host cap is given.
+	 * WG8: clients are clamped to 128..min(bins cap, ws.spectrumSummaryBins), never above
+	 * PROFILE_BINS_CEILING.
+	 */
 	bins: { min: 128, max: 2048 },
 	/** Frames of exponential averaging; 1 = off (the default). */
 	averaging: { min: 1, max: 32 },
 } as const
+
+/** WG8 req 5.4: the largest client bins any host cap allows. */
+export const PROFILE_BINS_CEILING = SPECTRUM_BINS_CAP_CEILING
+/** WG8: the floor cap equals PROFILE_LIMITS.bins.max (pinned by wg8-contract). */
+export const PROFILE_BINS_FLOOR = SPECTRUM_BINS_CAP_FLOOR
 
 /**
  * Backfill bounds per subscribe: the window, the frame count and the summed JSON length of the

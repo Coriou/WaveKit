@@ -695,5 +695,7 @@ export interface ScannerSettings {
 		spectrumBins: number
 		spectrumSummaryBins: number
 		spectrumMaxProfiles: number
+		/** WG8 req 5.2: config only; absent means "auto" (the bins cap; see SpectrumBinsCapSetting). */
+		spectrumBinsCap?: "auto" | 2048 | 4096 | 8192 | undefined
 	}
 }

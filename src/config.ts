@@ -583,6 +583,20 @@ export const ScannerConfigSchema = z
 				spectrumSummaryBins: z.number().int().min(512).max(2048).default(2048),
 				/** Distinct active non-default spectrum profiles over all sources (config only). */
 				spectrumMaxProfiles: z.number().int().min(1).max(16).default(4),
+				/**
+				 * WG8 req 5.2: host cap on summary and client bins (config only). Absent or "auto"
+				 * measures the host once at startup (floor 2048, ceiling 8192); no default is
+				 * filled in, so the parsed config and its export stay as before. Read by the
+				 * spectrum service once lane SB lands; spectrumSummaryBins keeps max 2048 until then.
+				 */
+				spectrumBinsCap: z
+					.union([
+						z.literal("auto"),
+						z.literal(2048),
+						z.literal(4096),
+						z.literal(8192),
+					])
+					.optional(),
 			})
 			.default({}),
 	})

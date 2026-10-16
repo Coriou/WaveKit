@@ -171,7 +171,8 @@ afford it, without slowing the Raspberry Pi or changing what the CLI gets.
 already rounded to 0.5 dB, so the encoding is lossless); the host decodes them back to the same
 `number[]`, so every consumer sees identical values. A summary with a value the encoding cannot
 carry exactly (non-finite, or outside its range) crosses as today's `number[]`.
-5.2 `scanner.ws.spectrumBinsCap`: `"auto"` (default), 2 048, 4 096 or 8 192. `"auto"` runs one
+5.2 `scanner.ws.spectrumBinsCap`: `"auto"`, 2 048, 4 096 or 8 192; absent means `"auto"` (no
+default is filled in, so the parsed config and its export are unchanged). `"auto"` runs one
 startup micro-benchmark (at most 200 ms wall, logged once) with an injectable measurer and
 picks the largest of 4 096 and 8 192 whose measured cost, times 1.5, stays within the budgets
 (summary traffic ≤ 512 KiB/s, clone ≤ 10 ms/s, per-profile work ≤ 5 ms/s at the summary rate);

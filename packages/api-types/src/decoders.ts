@@ -327,8 +327,13 @@ export interface DecoderOptionDescriptor {
 	default: string | number | boolean | null
 	/** The value is a credential or key; exports redact it and UIs mask it. */
 	secret: boolean
-	/** How a change takes effect (only "restart" until decoder PATCH exists). */
+	/** How a change takes effect: WG8 decoder PATCH applies it when the decoder next starts. */
 	effect: "restart"
+	/**
+	 * WG8 req 2.3: PATCH /api/decoders/:id may set this key (protected mode). Absent means
+	 * false; set only by the reviewed allowlist by meaning.
+	 */
+	patchable?: boolean
 	description: string
 }
 
