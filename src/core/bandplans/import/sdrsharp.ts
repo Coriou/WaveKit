@@ -28,6 +28,13 @@ export const SDRSHARP_LIMITS = Object.freeze({
 	referenceChars: 12,
 })
 
+/**
+ * `<?xml version="1.x" [encoding="UTF-8"] [standalone="yes|no"] ?>`, either
+ * quote style; the encoding name is matched case-insensitively.
+ */
+const XML_DECLARATION =
+	/^<\?xml\s+version\s*=\s*(?:"1\.[0-9]+"|'1\.[0-9]+')(?:\s+encoding\s*=\s*(?:"[Uu][Tt][Ff]-8"|'[Uu][Tt][Ff]-8'))?(?:\s+standalone\s*=\s*(?:"(?:yes|no)"|'(?:yes|no)'))?\s*\?>$/
+
 const ROOT = "ArrayOfRangeEntry"
 const ROW = "RangeEntry"
 
@@ -154,18 +161,20 @@ class Tokenizer {
 		const s = this.s
 		const start = this.pos
 		this.pos += 5
-		if (!isSpace(s.charCodeAt(this.pos))) reject()
 		for (;;) {
 			if (this.pos - start > SDRSHARP_LIMITS.declarationChars) reject()
 			if (this.pos >= s.length) reject()
-			const code = s.charCodeAt(this.pos)
-			if (code === 0x3f && s.charCodeAt(this.pos + 1) === 0x3e) {
+			if (
+				s.charCodeAt(this.pos) === 0x3f &&
+				s.charCodeAt(this.pos + 1) === 0x3e
+			) {
 				this.pos += 2
-				return
+				break
 			}
-			if (code === 0x3c || code === 0x26 || !isAllowedChar(code)) reject()
 			this.pos++
 		}
+		// Bounded by declarationChars, so the pattern runs on a short string.
+		if (!XML_DECLARATION.test(s.slice(start, this.pos))) reject()
 	}
 
 	private markup(): void {
@@ -215,6 +224,7 @@ class Tokenizer {
 			if (code === 0x3c || code === 0x26) {
 				if (keep) out += s.slice(segment, this.pos)
 				if (code === 0x3c) break
+				if (outside) reject() // no character data, references included, outside the root
 				const piece = this.reference()
 				length += piece.length
 				if (keep) out += piece
@@ -260,8 +270,9 @@ class Tokenizer {
 				return "'"
 		}
 		let code: number
-		if (/^#[0-9]{1,7}$/.test(body)) code = Number.parseInt(body.slice(1), 10)
-		else if (/^#x[0-9a-fA-F]{1,6}$/.test(body))
+		// Leading zeros are legal; the scalar value, not the digit count, decides.
+		if (/^#[0-9]+$/.test(body)) code = Number.parseInt(body.slice(1), 10)
+		else if (/^#x[0-9a-fA-F]+$/.test(body))
 			code = Number.parseInt(body.slice(2), 16)
 		else reject() // unknown entity
 		if (!isReferableScalar(code)) reject()
@@ -298,7 +309,8 @@ class Tokenizer {
 		const s = this.s
 		if (this.rootClosed) reject()
 		this.pos++
-		const name = localName(this.qualifiedName())
+		const qualified = this.qualifiedName()
+		const name = localName(qualified)
 		const attrs: Attribute[] = []
 		let selfClosing = false
 		for (;;) {
@@ -330,7 +342,7 @@ class Tokenizer {
 			else if (selfClosing) this.entries.push(toRow(attrs, ""))
 			else this.row = { attrs, name: "" }
 		}
-		if (!selfClosing) this.stack.push(name)
+		if (!selfClosing) this.stack.push(qualified)
 	}
 
 	private attribute(seen: readonly Attribute[]): Attribute {
@@ -370,7 +382,8 @@ class Tokenizer {
 	private endTag(): void {
 		const s = this.s
 		this.pos += 2
-		const name = localName(this.qualifiedName())
+		// Tags match on the full qualified name, prefix included.
+		const name = this.qualifiedName()
 		this.skipSpace()
 		if (s.charCodeAt(this.pos) !== 0x3e) reject()
 		this.pos++
@@ -385,7 +398,7 @@ class Tokenizer {
 	}
 }
 
-/** Namespace prefixes are allowed and ignored. */
+/** Namespace prefixes are allowed and ignored when recognising element names. */
 function localName(qualified: string): string {
 	const colon = qualified.indexOf(":")
 	return colon < 0 ? qualified : qualified.slice(colon + 1)

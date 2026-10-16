@@ -311,8 +311,57 @@ describe("parseSdrSharpBandPlan: failure paths", () => {
 			JSON.stringify({ bands: [{ name: "A", type: "x", start: 1, end: 2 }] }),
 		],
 		["Gqrx CSV", "# Gqrx\n1000,2000,AM,10000,#ff0000,A\n"],
+		["reference before root", `&amp;${valid}`],
+		["reference after root", `${valid}&#65;`],
+		[
+			"end tag with a different prefix",
+			`<a:ArrayOfRangeEntry xmlns:a="x" xmlns:b="y">${row("A")}</b:ArrayOfRangeEntry>`,
+		],
+		[
+			"prefixed end tag for an unprefixed start",
+			`<ArrayOfRangeEntry xmlns:b="y">${row("A")}</b:ArrayOfRangeEntry>`,
+		],
+		["garbage declaration", `<?xml garbage?>${valid}`],
+		["declaration without version", `<?xml encoding="UTF-8"?>${valid}`],
+		["declaration version 2.0", `<?xml version="2.0"?>${valid}`],
+		["declaration mixed quotes", `<?xml version="1.0'?>${valid}`],
+		[
+			"declaration non UTF-8 encoding",
+			`<?xml version="1.0" encoding="ISO-8859-1"?>${valid}`,
+		],
+		[
+			"declaration bad standalone",
+			`<?xml version="1.0" standalone="maybe"?>${valid}`,
+		],
+		[
+			"declaration attributes out of order",
+			`<?xml version="1.0" standalone="yes" encoding="UTF-8"?>${valid}`,
+		],
+		["declaration trailing junk", `<?xml version="1.0" x?>${valid}`],
+		["leading-zero reference out of range", doc([row("&#x0110000;")])],
+		["leading-zero control reference", doc([row("&#0000001;")])],
 	])("%s -> xml", (_label, text) => {
 		expectInvalid(text, "xml")
+	})
+
+	it.each([
+		['<?xml version="1.0"?>'],
+		["<?xml version='1.1'?>"],
+		['<?xml version="1.0" encoding="utf-8"?>'],
+		["<?xml version = '1.0' encoding='UTF-8' standalone='yes' ?>"],
+		['<?xml\n\tversion="1.0"\n\tstandalone="no"?>'],
+	])("accepts the declaration %s", prolog => {
+		expect(accepted(doc([row("A")], prolog)).bands).toHaveLength(1)
+	})
+
+	it("accepts matching prefixed tags", () => {
+		const text = `<a:ArrayOfRangeEntry xmlns:a="x"><a:RangeEntry minFrequency="1000" maxFrequency="2000">A</a:RangeEntry></a:ArrayOfRangeEntry>`
+		expect(accepted(text).bands.map(b => b.name)).toEqual(["A"])
+	})
+
+	it("decodes numeric references with leading zeros by scalar value", () => {
+		const value = accepted(doc([row("&#00000065;&#x0000042;")]))
+		expect(value.bands.map(b => b.name)).toEqual(["AB"])
 	})
 
 	it("UTF-16 BE and LE with BOM -> encoding", () => {

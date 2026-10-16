@@ -58,15 +58,17 @@ function readLine(
 	while (first < to && isBlank(text.charCodeAt(first))) first += 1
 	if (first === to || text.charCodeAt(first) === 35) return null
 	if (to - from > LINE_MAX) return "malformed-row"
+	// Slice the line first so the comma search can never scan past its end.
+	const line = text.slice(from, to)
 	const fields: string[] = []
-	let at = from
+	let at = 0
 	for (let i = 0; i < FIELD_COUNT - 1; i++) {
-		const comma = text.indexOf(",", at)
-		if (comma < 0 || comma >= to) return "malformed-row"
-		fields.push(text.slice(at, comma).trim())
+		const comma = line.indexOf(",", at)
+		if (comma < 0) return "malformed-row"
+		fields.push(line.slice(at, comma).trim())
 		at = comma + 1
 	}
-	fields.push(text.slice(at, to).trim())
+	fields.push(line.slice(at).trim())
 	const [minHz, maxHz, mode, step, color, name] = fields
 	if (
 		minHz === undefined ||

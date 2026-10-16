@@ -4,7 +4,7 @@ import { BANDPLANS_LIMITS } from "@wavekit/api-types"
 import { storedBandSchema } from "@wavekit/api-types"
 import type { DisplayGroup } from "@wavekit/api-types"
 import fc from "fast-check"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { SdrppParseResult } from "../../../../../src/core/bandplans/contract.js"
 import { parseGqrxBandPlan } from "../../../../../src/core/bandplans/import/gqrx.js"
 
@@ -322,5 +322,33 @@ describe("Gqrx import properties", () => {
 			),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+describe("parseGqrxBandPlan: comma search stays on its line", () => {
+	it("never searches for a comma beyond the current line (no quadratic scan)", () => {
+		const head = "100,200,AM,5,,A\n" + "x\n".repeat(4095)
+		const input = head + "#".padEnd(1_048_576 - head.length, "x")
+		const original = String.prototype.indexOf
+		let longest = 0
+		const spy = vi
+			.spyOn(String.prototype, "indexOf")
+			.mockImplementation(function (
+				this: string,
+				search: string,
+				position?: number,
+			) {
+				if (search === ",") longest = Math.max(longest, this.length)
+				return original.call(this, search, position)
+			})
+		try {
+			const value = success(run(input))
+			expect(value.bands).toHaveLength(1)
+		} finally {
+			spy.mockRestore()
+		}
+		// Every comma search runs on a slice no longer than one line (LINE_MAX).
+		expect(longest).toBeGreaterThan(0)
+		expect(longest).toBeLessThanOrEqual(1024)
 	})
 })
