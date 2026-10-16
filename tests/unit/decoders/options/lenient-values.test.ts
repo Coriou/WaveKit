@@ -132,6 +132,17 @@ describe("round 3 review fixes", () => {
 		).toEqual(["verbosity"])
 	})
 
+	it("reports multimon-ng verbosity above 10, as a number or as text (report only)", () => {
+		expect(validateDecoderOptions("multimon-ng", { verbosity: 10 })).toEqual([])
+		expect(validateDecoderOptions("multimon-ng", { verbosity: "10" })).toEqual(
+			[],
+		)
+		for (const verbosity of [11, "11", 1e9, "999999999999"])
+			expect(
+				validateDecoderOptions("multimon-ng", { verbosity })?.map(i => i.path),
+			).toEqual(["verbosity"])
+	})
+
 	it("keeps distinct issues whose paths share the first 256 units", () => {
 		const options = Object.fromEntries(
 			Array.from({ length: 40 }, (_, i) => ["k".repeat(256) + String(i), 0]),

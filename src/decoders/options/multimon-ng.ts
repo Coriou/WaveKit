@@ -16,12 +16,19 @@ const MODES = [
 
 const frequencyHz = z.number().finite().positive()
 
+/** Report-only bound on `verbosity` (multimon-ng gains nothing past a few -v flags). */
+export const MULTIMON_VERBOSITY_MAX = 10
+
 /** Options read by the multimon-ng adapter and the audio-demod base class. */
 export const multimonNgOptionsSchema = z
 	.object({
 		modes: z.array(z.enum(MODES)).nullable().optional(),
-		// `i < null` adds no -v, like an absent verbosity; `i < "2"` coerces.
-		verbosity: numberOrText(z.number().int().min(0), INTEGER_TEXT)
+		// `i < null` adds no -v, like an absent verbosity; `i < "2"` coerces. Capped at
+		// MULTIMON_VERBOSITY_MAX so a huge value is reported (the adapter pushes one -v per step).
+		verbosity: numberOrText(
+			z.number().int().min(0).max(MULTIMON_VERBOSITY_MAX),
+			INTEGER_TEXT,
+		)
 			.nullable()
 			.optional(),
 		charset: z.string().nullable().optional(),
@@ -158,6 +165,7 @@ export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "verbosity",
 		type: "integer",
 		min: 0,
+		max: MULTIMON_VERBOSITY_MAX,
 		default: null,
 		secret: false,
 		effect: "restart",
