@@ -170,7 +170,7 @@ const trial = z.object({
 	protocol: text,
 	decoder: text.nullable(),
 	mode: text.nullable(),
-	transport: z.enum(["offset", "channel"]).nullable(),
+	transport: z.enum(["offset", "channel", "ambient"]).nullable(),
 	outcome: z.enum([
 		"pending",
 		"running",

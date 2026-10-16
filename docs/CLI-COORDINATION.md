@@ -1311,3 +1311,5 @@ For the web session (web app on `claude/project-thread-afdtom`):
 6. New fields to read: `gainTable` (receiver capabilities: a real gain slider), `toneSquelch` (live audio config and status; a saved frequency's tone is not applied by the core, operator data `capabilities.toneSquelch` stays `false`, so PATCH it into the live audio config), `squelchMode: "noise"` with `noiseQuietingDb`, `bandPlanSkips` / `skipBandPlanSkips` (scanner plans) and ambient identify trials (`transport: "ambient"`, the four new protocols and identity kinds).
 
 No frozen WG7 name changed during the lanes; the contract tests are unchanged.
+
+Update (WG7 Main): the CLI identify guard action above is done in the same batch; `cli/source/data/scanner-guards.ts` now accepts `transport: "ambient"` (test in `tests/unit/cli/scanner-guards.test.ts`). The web client needs the same when it parses identify trials.
