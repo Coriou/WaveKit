@@ -63,19 +63,19 @@ ais-catcher stdout line → AIS: bit decode 4/9/21 (per sentence) → ShipData �
 
 ## CPU and IO budgets
 
-| Item             | Position                                                            | Budget                                                                                                       | How measured                                          |
-| ---------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
-| AG band map read | reader worker, per request                                          | ≤ 400 ms Mac at the 250 000-row scan cap; 600 ms cooperative wall budget; 1 000 ms deadline                  | benchmark on a seeded 250 000-row store, reported     |
-| AG timeline read | reader worker, per request                                          | ≤ 250 ms Mac at the scan cap (SQL `GROUP BY` per step)                                                       | benchmark, reported                                   |
-| AG serialisation | main thread, per request                                            | ≤ 30 ms for the largest band map (≈ 2.0 MB), ≤ 5 ms for the largest timeline (≈ 330 kB)                      | benchmark, reported                                   |
-| TA altitude      | ingress presentation, every aircraft/APRS/AIS reception             | one multiply, one round, two compares (< 1 µs)                                                               | by construction                                       |
-| TA mesh position | ingress presentation, portnum 3 receptions (≈ 600/h on a busy mesh) | strict base64 of ≤ 344 characters + one protobuf walk of ≤ 256 B, ≤ 20 µs                                    | micro-benchmark, reported                             |
-| TA row budget    | ingress, every reception                                            | the arithmetic fast path stays the path of ≥ 99 % of typical coalesced receptions (no built row)             | count on generated corpora before and after, reported |
-| AIS decode       | adapter, per sentence of type 4/9/21                                | ≤ 12 more bit slices, ≤ 5 µs                                                                                 | by construction                                       |
-| AIS tracker      | per ShipData                                                        | constant work, no allocation beyond the state object it already builds                                       | by construction                                       |
-| V lookup         | ingress, every reception, before admission                          | ≤ 2 µs mean (WG3 req 5.6 budget), one Map read + ≤ one compare per target, no allocation in the steady state | micro-benchmark, reported                             |
-| V snapshot       | tuner events, operator rate                                         | one `getState` clone per event                                                                               | by construction                                       |
-| B parse          | protected import request, operator rate                             | single linear pass, ≤ 100 ms Mac for a 1 MiB file, no backtracking regex over unbounded input                | benchmark, reported                                   |
+| Item             | Position                                                            | Budget                                                                                                                | How measured                                          |
+| ---------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| AG band map read | reader worker, per request                                          | ≤ 400 ms Mac at the 250 000-row scan cap; 600 ms cooperative wall budget; 1 000 ms deadline                           | benchmark on a seeded 250 000-row store, reported     |
+| AG timeline read | reader worker, per request                                          | ≤ 250 ms Mac at the scan cap (SQL `GROUP BY` per step)                                                                | benchmark, reported                                   |
+| AG serialisation | main thread, per request                                            | ≤ 30 ms for the largest band map (≈ 1.9 MB plain, ≈ 2.8 MB fully escaped), ≤ 5 ms for the largest timeline (≈ 330 kB) | benchmark, reported                                   |
+| TA altitude      | ingress presentation, every aircraft/APRS/AIS reception             | one multiply, one round, two compares (< 1 µs)                                                                        | by construction                                       |
+| TA mesh position | ingress presentation, portnum 3 receptions (≈ 600/h on a busy mesh) | strict base64 of ≤ 344 characters + one protobuf walk of ≤ 256 B, ≤ 20 µs                                             | micro-benchmark, reported                             |
+| TA row budget    | ingress, every reception                                            | the arithmetic fast path stays the path of ≥ 99 % of typical coalesced receptions (no built row)                      | count on generated corpora before and after, reported |
+| AIS decode       | adapter, per sentence of type 4/9/21                                | ≤ 12 more bit slices, ≤ 5 µs                                                                                          | by construction                                       |
+| AIS tracker      | per ShipData                                                        | constant work, no allocation beyond the state object it already builds                                                | by construction                                       |
+| V lookup         | ingress, every reception, before admission                          | ≤ 2 µs mean (WG3 req 5.6 budget), one Map read + ≤ one compare per target, no allocation in the steady state          | micro-benchmark, reported                             |
+| V snapshot       | tuner events, operator rate                                         | one `getState` clone per event                                                                                        | by construction                                       |
+| B parse          | protected import request, operator rate                             | single linear pass, ≤ 100 ms Mac for a 1 MiB file, no backtracking regex over unbounded input                         | benchmark, reported                                   |
 
 Benchmarks are indicative under batch load; Main re-measures a miss on a quiet box. Raspberry
 Pi figures are open gaps.
@@ -125,7 +125,10 @@ and the 250 000 scan cap only bites when the store is above its cap between prun
 one entity entry per distinct (bucket, group, entity): at most 250 000 entries (≈ 20 MB
 transient in the worker). Band map response, worst case with 64-character protocols and
 128-character ASCII entity keys: bucket header ≈ 130 B + 8 × ≈ 176 B + 3 × ≈ 160 B ≈ 2.0 kB,
-× 1 000 buckets ≈ 2.0 MB; a typical bucket (two short protocols, three short keys) is ≈ 0.5 kB
+× 1 000 buckets ≈ 2.0 MB of unescaped ASCII (measured 1 894 277 B; the test bound is 2.1 MB).
+That figure assumes no character needs JSON escaping: with every protocol and key character
+escaped (quotes, backslashes) the same shape measures 2 766 767 B, ≈ 2.8 MB (Main correction
+after lane AG). A typical bucket (two short protocols, three short keys) is ≈ 0.5 kB
 and a busy station has a few hundred active 12.5 kHz buckets (≈ 0.1–0.2 MB). Timeline: ≈ 30 B +
 9 categories × ≈ 22 B ≈ 230 B per bucket × 1 440 ≈ 330 kB. Both routes are exempt from the
 512 KiB search page budget, as trails. Zero rows per day are added.

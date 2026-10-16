@@ -90,8 +90,9 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    Batch 2 landed server-side: the scanner reads the effective
    built-in plans of the stack (hidden bands leave it), import commits bind a
    preview digest, a never-persisted legacy store reports `storeId: null`, and a
-   `bandplans` WebSocket channel announces changes. Remaining: CLI and web
-   consumption, SDR#, Gqrx and URL import, verified packs (gated), a general
+   `bandplans` WebSocket channel announces changes. WG5 added SDR# XML and Gqrx
+   CSV import. Remaining: CLI and web consumption, URL import, verified packs
+   (gated), a general
    settings store with YAML/env/UI provenance (spec pending), and country from
    the station location (gated).
 4. **Scanner and listening follow-ups**: scanner follow-ups batch 1 landed
@@ -856,6 +857,13 @@ separate from scanner RF sweep coverage.
       gave Meshtastic POSITION receptions a position; new rows also carry
       `altM` (WG5; no backfill).
 - [ ] A time cursor over trails and a Pi-measured trails budget.
+- [x] Activity band map and timeline (WG5): `GET /api/activity/bandmap` counts
+      stored rows per 12.5 kHz bucket by protocol with top entities, and
+      `GET /api/activity/timeline` counts rows per epoch-aligned time bucket and
+      category, both over a window of at most 72 h under the 250,000-row scan cap
+      and a 600 ms budget, with `coveredFrom` marking how far back the counts are
+      exact. Pi CPU cost unmeasured; the timeline is a first step towards a time
+      cursor over trails.
 - [x] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
       based on explicit station location and valid timestamped positions
       (WG3, `GET /api/coverage`, in memory).

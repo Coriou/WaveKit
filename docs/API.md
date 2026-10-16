@@ -657,7 +657,7 @@ When unavailable, `lat`, `lon` and `uncertaintyKm` are null and `reason` is set.
 
 Layered display band plans: a read-only built-in pack per region (`builtin-eu`,
 `builtin-us`, `builtin-ca`, `builtin-au`, `builtin-nz`, `builtin-jp`,
-`builtin-cn`), up to 8 imported SDR++ packs (`imported-` plus 12 hex digits), and
+`builtin-cn`), up to 8 imported packs (`imported-` plus 12 hex digits; SDR++, SDR# or Gqrx), and
 an operator layer (`operator`) that always sits above the ordered stack. A `null`
 stored stack follows the default: the built-in pack of the scanner `region`.
 Operator edits override single fields of a pack band without changing the pack.
@@ -706,7 +706,7 @@ access code-only body and headers.
 | `POST`   | `/api/bandplans/operator-bands`                   | Create an operator band (`band`); 201                                                                       |
 | `PUT`    | `/api/bandplans/operator-bands/:bandId`           | Replace an operator band (`band`)                                                                           |
 | `DELETE` | `/api/bandplans/operator-bands/:bandId`           | Delete an operator band                                                                                     |
-| `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++ file; persists nothing                                                                       |
+| `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++, SDR# or Gqrx file; persists nothing                                                         |
 | `POST`   | `/api/bandplans/imports`                          | Commit a previewed import; 201                                                                              |
 | `POST`   | `/api/bandplans/presets`                          | Create an operator scan preset (`preset`); 201                                                              |
 | `PUT`    | `/api/bandplans/presets/:presetId`                | Replace an operator preset (`preset`)                                                                       |
@@ -721,7 +721,7 @@ pack, operator band or preset (otherwise `null`), with 201 for creates and 200
 otherwise. Pack-edit routes take built-in or imported pack ids; the operator layer
 is changed through `/operator-bands` instead (`operator` there returns 400).
 
-Import preview takes `format: "sdrpp-json"`, `fileName`, `contentBase64` and
+Import preview takes `format` (one of `capabilities.importFormats`), `fileName`, `contentBase64` and
 `groupOverrides` (`{ sourceType, group }`, 64 max). It returns the file metadata,
 `sha256` of the decoded bytes, `previewDigest`, proposed bands and a skip/mapping
 report. `previewDigest` is a SHA-256 binding the file bytes and the set of
@@ -738,6 +738,49 @@ derived from the region and read-only (409 `BANDPLANS_READ_ONLY`).
 Limits: JSON bodies 64 KiB, import bodies 1.5 MiB, decoded import files 1 MiB and
 4096 rows, 512 bands per pack, 256 operator bands, 1024 edits, 64 presets. All
 limits are returned in the stack view under `limits`.
+
+Import formats (WG5): `capabilities.importFormats` lists the formats this core
+parses: `sdrpp-json` (SDR++ band plan JSON), `sdrsharp-xml` (SDR# `BandPlan.xml`) and
+`gqrx-csv` (Gqrx `bandplan.csv`). A format the core does not parse is 422
+`BANDPLANS_IMPORT_INVALID`. Files are uploaded in the request body only: there is no
+import from a URL. Imports, like every band-plan write, need protected mode. The
+imported pack's provenance records the file's `format`; state written before WG5
+reads as `sdrpp-json`.
+
+- `sdrsharp-xml`: strict UTF-8 (a BOM is stripped; UTF-16 is rejected). The root
+  must be `ArrayOfRangeEntry`; each `RangeEntry` child is one row
+  (`minFrequency`, `maxFrequency`, `mode`, `step`, `color` attributes; the element
+  text is the name). Any other child is a `malformed-row` skip. A hand-written,
+  single-pass reader with fixed bounds: no DOCTYPE, entity declaration, CDATA or
+  processing instruction after the optional `<?xml ...?>` declaration (each is
+  422 with reason `xml`, and file content is never echoed); depth at most 4, at
+  most 16 attributes of at most 1,024 characters, element text at most 1,024
+  characters, comments at most 4,096 characters, names at most 128 characters,
+  only the five predefined entities and numeric references of at most 12
+  characters.
+- `gqrx-csv`: strict UTF-8, lines split on LF (a trailing CR removed), blank and
+  `#` lines skipped (not counted as rows), `start,end,mode,step,color,name` split
+  on the first five commas and trimmed. A line over 1,024 characters or with fewer
+  than six fields is a `malformed-row` skip; a header line counts as a row and is
+  skipped.
+
+Both use the SDR++ row rules (decimal integer frequencies, edges, ranges, text,
+duplicates), map `step` to `stepHz` and `color` (`AARRGGBB`, `RRGGBB`, `#RRGGBB` or
+`#AARRGGBB`) to a `#rrggbb` colour hint, use the mode text as the `sourceType` for
+group mapping, and return preview `meta` all null. Mode map (case-insensitive,
+trimmed; anything else is no mode):
+
+| File mode                                         | Band mode |
+| ------------------------------------------------- | --------- |
+| `AM`                                              | `am`      |
+| `FM`, `NFM`, `Narrow FM`                          | `nfm`     |
+| `WFM`, `WFM (mono)`, `WFM (stereo)`, `WFM (OIRT)` | `wfm`     |
+| `USB`, `LSB`, `DSB`                               | same      |
+| `CW`, `CW-L`, `CW-U`, `CWL`, `CWU`                | `cw`      |
+| `RAW`                                             | `raw`     |
+
+Parsing a 1 MiB, 4,096-row file takes about 27 ms (SDR#) and 11 ms (Gqrx) on the
+development Mac.
 
 Errors use `{ error: "BandPlansError", code, message }`: 400 `BANDPLANS_INVALID`,
 404 `BANDPLANS_NOT_FOUND`, 409 `BANDPLANS_CONFLICT`, `BANDPLANS_READ_ONLY`,
@@ -3468,6 +3511,97 @@ the window or the filters to see older points. The 1,000 ms reader deadline
 and a new one starts for the next query (within the reader's 5 s startup budget).
 Errors are those of [Query and cursor errors](#query-and-cursor-errors).
 
+### GET /api/activity/bandmap
+
+Automatic band map (WG5): stored Activity rows counted per frequency bucket over a
+`producedAt` window, from the rows' provenance frequency (see
+[Provenance](#provenance)). One snapshot read: no cursor, no paging. Counts are
+stored rows, not receptions: coalesced and dropped receptions are not counted, so
+a bucket's `rows` is not a message rate.
+
+Query parameters (an unknown one is 400 `ACTIVITY_QUERY_INVALID`):
+
+- `producedFrom`, `producedTo` — the window, both inclusive, strict ISO 8601 as
+  for trails. `producedTo` defaults to now, `producedFrom` to `producedTo` minus
+  24 hours; at most 72 hours. Windows before 1970 are rejected.
+- `minHz`, `maxHz` — inclusive range, decimal integers; default 0 to
+  2,000,000,000. `maxHz` at most 100,000,000,000 and `maxHz - minHz` at most
+  2,000,000,000; `minHz > maxHz` is 400.
+- `bucketHz` — 1,000 to 1,000,000, default 12,500.
+- `categories`, `protocols` — comma-separated or repeated. `protocols` matches the
+  row's protocol column, as search does.
+
+A bucket is `[startHz, startHz + bucketHz)` with `startHz = floor(hz / bucketHz) ×
+bucketHz`. Rows are grouped by `protocol`, or by `kind` when the protocol is null.
+Each bucket carries `startHz`, `rows`, `lastAt` (newest row), `protocols` (at most
+8 groups, rows descending then name; each `{ protocol, category, rows, entities,
+lastAt }`, `category` of the group's newest row), `otherRows` (rows of the groups
+past the eighth; `rows` = the listed groups' rows + `otherRows`) and `topEntities`
+(at most 3 `{ entityKey, rows }`). At most 1,000 buckets are returned: past that
+the most recently active ones are kept (`lastAt` descending), returned in `startHz`
+order, and `buckets` is added to `truncation`, with the rows of the dropped buckets
+in `droppedRows`. `countedRows` is the rows placed in buckets before that cap;
+`noFrequencyRows` is matched rows without a frequency (never bucketed); rows with a
+frequency outside `minHz`..`maxHz` are neither counted nor returned.
+
+**Response** (200) `ActivityBandMap`: `producedFrom`, `producedTo`, `minHz`,
+`maxHz`, `bucketHz` (effective), `buckets` (`startHz` ascending), `scannedRows`,
+`countedRows`, `noFrequencyRows`, `droppedRows`, `truncated`, `truncation` (in the
+order `scan-rows`, `time-limit`, `buckets`), `coveredFrom`, `retentionFloor` and
+`generatedAt`.
+
+### GET /api/activity/timeline
+
+Activity timeline (WG5): stored rows per time bucket and category over a window,
+every kind included. Query parameters: `producedFrom`, `producedTo` (default the
+last hour, at most 72 hours), `bucketMs` (10,000 to 3,600,000, default 60,000),
+`categories`, `protocols` (comma-separated or repeated) and `entityKey` (repeated,
+at most 64, never split on commas). Buckets are epoch-aligned (`startMs =
+floor(ms / bucketMs) × bucketMs`) and dense: every bucket from the one holding
+`producedFrom` to the one holding `producedTo` is present, empty ones with
+`total: 0`. A window of more than 1,440 buckets is 400. Each bucket is `{ startMs,
+total, counts }`, `counts` holding only the non-zero categories. **Response** (200)
+`ActivityTimeline`: `producedFrom`, `producedTo`, `bucketMs`, `buckets`,
+`totalRows` (the sum of the totals), `scannedRows`, `truncated`, `truncation`
+(`scan-rows`, `time-limit`), `coveredFrom`, `retentionFloor` and `generatedAt`.
+
+### Aggregate reads (band map and timeline)
+
+Both reads walk the window newest first in steps of at most 4,096 index rows,
+whatever the filters match, on the same reader and admission as search and
+trails. Two bounds can cut a read, and either gives a normal 200 with
+`truncated: true`:
+
+- `scan-rows`: at most 250,000 index rows of the window are examined. The store
+  holds at most 250,000 rows (about 11.5 hours of the WG3 docs mix of about
+  520,000 rows a day), so this binds only when the store is above its cap between
+  prune passes.
+- `time-limit`: a 600 ms wall-time budget, checked before every statement.
+
+`coveredFrom` says how far back the counts are exact: they are exact for rows
+produced at or after it. It equals `producedFrom` when the read is complete, and is
+later when a bound stopped it (the oldest step boundary fully examined). Show the
+part before `coveredFrom` as incomplete rather than as no activity. `retentionFloor`
+is the `producedAt` of the oldest stored row (null when the store is empty); nothing
+older exists.
+
+The 1,000 ms reader deadline is a backstop, as for trails: past it the answer is
+429 `ACTIVITY_QUERY_TIMEOUT` and the reader worker is restarted. Activity disabled
+is 404 `ACTIVITY_DISABLED`; an unavailable store is 503 `ACTIVITY_UNAVAILABLE`.
+Other errors are those of [Query and cursor errors](#query-and-cursor-errors). In
+protected mode both are ordinary reads (an authenticated session or device, like
+every other read). A client should poll them at most every 30 s or so: they are
+snapshots, not live feeds, and each read occupies the single reader.
+
+Measured on the development Mac at the 250,000-row scan cap (load average about 9):
+band map 355 ms, timeline 212 ms. Response size: a busy station has a few hundred
+active 12.5 kHz buckets (about 0.1 to 0.2 MB). The worst case, 1,000 buckets each
+with 8 groups of 64-character protocols and 3 entity keys of 128 characters, is
+about 1.9 MB of plain ASCII (measured 1,894,277 bytes) and about 2.8 MB when every
+character needs JSON escaping (measured 2,766,767 bytes). The largest timeline
+(1,440 buckets) is about 98 kB. Both routes are exempt from the 512 KiB search page
+budget, as trails.
+
 ### GET /api/activity/:eventId
 
 One stored record: `kind`, decimal `commitSeq`, and `payload` (the envelope,
@@ -3581,7 +3715,7 @@ for trails) starts only after the reader is ready. A reader that cannot start is
 | `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
 | `ACTIVITY_CURSOR_GAP`        | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
 | `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
-| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms; 1,000 ms for trails) after the reader was ready |
+| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms; 1,000 ms for trails, band map and timeline) after the reader was ready |
 | `ACTIVITY_QUERY_FAILED`      | 500  | The reader did not start, the reader failed, or the store read failed |
 | `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
 | `ACTIVITY_RECORD_CORRUPT`    | 500  | A stored record failed validation |
