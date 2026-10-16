@@ -1266,6 +1266,11 @@ Configuration notes:
   synthetic pipeline, the "~0.75 s noise tail"). Now a block inside that band that
   is also less than 2 dB above the channel's noise floor estimate (the same lower
   envelope as auto mode, kept in manual mode too) no longer keeps the gate open.
+  The floor used by this rule is the one measured while the gate was closed: it
+  is frozen while the gate is open and follows the estimate again after it closes,
+  so a long transmission is never judged against its own carrier level. Auto mode
+  at a margin of 4 dB or more behaves exactly as before; below 4 dB the band lies
+  in the noise, so a fade into it no longer holds the gate.
   In the same test the unmuted audio after carrier loss is now about 260 ms for
   every seed, within the bound of the 250 ms hang, one 10 ms block and the
   modelled csdr release batch (41 ms at 25 kHz); auto mode at its defaults was

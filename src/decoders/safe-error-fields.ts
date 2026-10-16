@@ -22,7 +22,7 @@ export interface SafeErrorFields {
 	type: string
 	/** Node / WaveKit error code: `^[A-Z0-9_]{1,32}$` only. */
 	code?: string
-	/** Finite numeric errno. */
+	/** Node errno: an integer in -4096..0 (libuv codes), nothing else. */
 	errno?: number
 	/** One of the known syscall names; Node's `"spawn <command>"` reduces to `spawn`. */
 	syscall?: string
@@ -107,7 +107,13 @@ export function safeErrorFields(err: unknown): SafeErrorFields {
 		const code = read("code")
 		if (typeof code === "string" && CODE_PATTERN.test(code)) out.code = code
 		const errno = read("errno")
-		if (typeof errno === "number" && Number.isFinite(errno)) out.errno = errno
+		if (
+			typeof errno === "number" &&
+			Number.isInteger(errno) &&
+			errno >= -4096 &&
+			errno <= 0
+		)
+			out.errno = errno
 		const syscall = read("syscall")
 		if (typeof syscall === "string") {
 			const head = syscall.split(" ", 1)[0] ?? ""
