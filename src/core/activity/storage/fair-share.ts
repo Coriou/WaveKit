@@ -68,7 +68,7 @@ export interface FairShareAllocation {
 	/**
 	 * The share's byte level when the byte cap is active, else null. The writer deletes beyond
 	 * `minRows` only while the share's actual retained record bytes stay at or above this
-	 * floor (the first row of a step may cross it, so a step always progresses).
+	 * floor. A step that can delete nothing is residual: the writer runs a prefix fallback.
 	 */
 	readonly byteFloor: number | null
 }
@@ -201,4 +201,36 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 	}
 	allocations.sort((a, b) => compareKey(a.key, b.key))
 	return { allocations, rowLevel, byteLevel, residual }
+}
+
+/**
+ * The share an indivisible step takes one row from: when a fair step deleted nothing because
+ * every candidate would cross its byte floor, the allocated share with the largest excess
+ * (record bytes above the byte level, else rows above the row level), ties key ascending.
+ * Null when no allocated share is above a level.
+ */
+export function indivisibleShare(
+	plan: FairStepPlan,
+	shares: readonly FairShareUsage[],
+): string | null {
+	const usage = new Map(normalizeShares(shares).map(s => [s.key, s]))
+	let best: { key: string; excess: number } | null = null
+	for (const allocation of plan.allocations) {
+		const share = usage.get(allocation.key)
+		if (!share || share.rows < 1) continue
+		const excess =
+			allocation.byteFloor !== null
+				? share.bytes - allocation.byteFloor
+				: plan.rowLevel === null
+					? 0
+					: share.rows - plan.rowLevel
+		if (excess <= 0) continue
+		if (
+			best === null ||
+			excess > best.excess ||
+			(excess === best.excess && compareKey(allocation.key, best.key) < 0)
+		)
+			best = { key: allocation.key, excess }
+	}
+	return best?.key ?? null
 }

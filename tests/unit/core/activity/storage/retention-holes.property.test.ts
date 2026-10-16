@@ -145,6 +145,7 @@ describe("fair-share hole bookkeeping", () => {
 					)
 					try {
 						const everDeleted: bigint[] = []
+						let lastCommittedMax = 0n
 						for (const [index, batch] of batches.entries()) {
 							const before = readMeta(db)
 							const present = seqs(db)
@@ -171,6 +172,11 @@ describe("fair-share hole bookkeeping", () => {
 									expect(seq <= after.holeWatermark).toBe(true)
 							expect(after.holeGeneration >= before.holeGeneration).toBe(true)
 							expect(after.pruneGeneration >= before.pruneGeneration).toBe(true)
+							const committedMax = BigInt(wrote.snapshot.identity.committedMax)
+							expect(committedMax >= lastCommittedMax).toBe(true)
+							expect(committedMax >= after.holeWatermark).toBe(true)
+							expect(committedMax >= after.pruneWatermark).toBe(true)
+							lastCommittedMax = committedMax
 							expect(wrote.snapshot.identity.holeWatermark).toBe(
 								after.holeWatermark.toString(),
 							)

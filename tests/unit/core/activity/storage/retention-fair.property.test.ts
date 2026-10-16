@@ -4,6 +4,7 @@ import {
 	activityLowWater,
 	commitActivityBatch,
 	openActivityDatabase,
+	readActivityPressure,
 } from "../../../../../src/core/activity/storage/database.js"
 import type { ActivityRetentionPolicy } from "../../../../../src/core/activity/storage/contract.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
@@ -123,6 +124,63 @@ describe("fair-share retention in the writer session", () => {
 			fallbacks: true,
 			holes: true,
 		})
+	}, 30_000)
+
+	it("binds both caps with large variable rows, through the fallback when rows are indivisible", async () => {
+		// Feature: web-gaps-3, Property 2: Caps bind
+		// Validates: Requirements 1.4, 1.5, 1.12
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.record({
+						share: fc.integer({ min: 0, max: 5 }),
+						blob: fc.integer({ min: 0, max: 60_000 }),
+					}),
+					{ minLength: 2, maxLength: 40 },
+				),
+				fc.integer({ min: 10, max: 40 }),
+				fc.integer({ min: 300_000, max: 600_000 }),
+				fc.integer({ min: 1, max: 30 }),
+				async (specs, maxRows, maxDbBytes, pruneBatchRows) => {
+					const db = await memoryDb()
+					openActivityDatabase(db)
+					expect(
+						commitActivityBatch(
+							db,
+							specs.map((spec, index) =>
+								shareRow(`x${index}`, `d${spec.share}`, NOW, spec.blob),
+							),
+						).ok,
+					).toBe(true)
+					const before = readActivityPressure(db)
+					const session = createActivitySession(
+						db,
+						":memory:",
+						smallLimits({ maxRows, maxDbBytes, pruneBatchRows }),
+					)
+					try {
+						const wrote = session.write([], NOW)
+						expect(wrote.ok).toBe(true)
+						if (!wrote.ok) return
+						expect(wrote.note).toBeUndefined()
+						expect(wrote.snapshot.rows).toBeLessThanOrEqual(
+							before.rowCount > maxRows ? activityLowWater(maxRows) : maxRows,
+						)
+						expect(wrote.snapshot.dbBytes).toBeLessThanOrEqual(
+							before.dbBytes > maxDbBytes
+								? activityLowWater(maxDbBytes)
+								: maxDbBytes,
+						)
+						expect(sharesOf(wrote.snapshot.retention.shares)).toEqual(
+							groupedScan(db),
+						)
+					} finally {
+						session.close()
+					}
+				},
+			),
+			{ numRuns: 100 },
+		)
 	}, 30_000)
 
 	it("deletes exactly what oldest-first deletes when there is one share", async () => {

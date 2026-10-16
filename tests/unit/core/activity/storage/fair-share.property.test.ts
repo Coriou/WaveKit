@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import {
+	indivisibleShare,
 	planFairStep,
 	waterLevel,
 } from "../../../../../src/core/activity/storage/fair-share.js"
@@ -138,6 +139,7 @@ describe("Property 1: Fair floor", () => {
 		const db = await openSqliteFile(":memory:")
 		try {
 			openActivityDatabase(db)
+			let indivisibleSteps = 0
 			await fc.assert(
 				fc.asyncProperty(
 					fc.array(
@@ -169,7 +171,7 @@ describe("Property 1: Fair floor", () => {
 							byteExcess,
 							budget,
 						})
-						const step = pruneActivityFair(
+						const fair = pruneActivityFair(
 							db,
 							{ incrementalVacuumPages: 0 },
 							plan.allocations.map(a => ({
@@ -182,42 +184,77 @@ describe("Property 1: Fair floor", () => {
 							})),
 							{ rowCount: totalRows, dbBytes: 0 },
 						)
+						// The writer's indivisible step: the fair step deleted nothing.
+						const pick =
+							fair.deleted === 0 ? indivisibleShare(plan, usages) : null
+						const step =
+							pick === null
+								? fair
+								: pruneActivityFair(
+										db,
+										{ incrementalVacuumPages: 0 },
+										[
+											{
+												decoderId: pick.slice("decoder:".length),
+												kind: "",
+												rows: 1,
+											},
+										],
+										{ rowCount: totalRows, dbBytes: 0 },
+									)
 						const after = groupedScan(db)
 						const deletedBy = new Map<string, number>()
 						for (const row of step.deletedRows) {
 							const key = `decoder:${row.decoderId ?? ""}`
 							deletedBy.set(key, (deletedBy.get(key) ?? 0) + 1)
 						}
+						const excessOf = (key: string): number => {
+							const was = before.get(key) ?? { rows: 0, bytes: 0 }
+							const allocation = plan.allocations.find(a => a.key === key)
+							if (allocation?.byteFloor !== null && allocation !== undefined)
+								return was.bytes - allocation.byteFloor
+							return plan.rowLevel === null ? 0 : was.rows - plan.rowLevel
+						}
+						if (pick !== null) {
+							indivisibleSteps += 1
+							// Exactly one row, from the largest-excess share, ties key ascending.
+							expect(step.deleted).toBe(1)
+							expect(deletedBy.get(pick)).toBe(1)
+							for (const a of plan.allocations) {
+								const other = excessOf(a.key)
+								expect(
+									other < excessOf(pick) ||
+										(other === excessOf(pick) && a.key >= pick),
+								).toBe(true)
+							}
+						}
 						for (const [key, was] of before) {
 							const now = after.get(key) ?? { rows: 0, bytes: 0 }
 							const allocation = plan.allocations.find(a => a.key === key)
 							const deleted = deletedBy.get(key) ?? 0
+							if (deleted === 0) continue
+							// Never a share at or under the level.
+							expect(
+								(plan.byteLevel !== null && was.bytes > plan.byteLevel) ||
+									(plan.rowLevel !== null && was.rows > plan.rowLevel),
+							).toBe(true)
 							expect(deleted).toBeLessThanOrEqual(allocation?.rows ?? 0)
 							// With both caps, a share's step excess is the larger of the two.
 							if (plan.rowLevel !== null && plan.byteLevel === null)
 								expect(now.rows).toBeGreaterThanOrEqual(
 									Math.min(was.rows, plan.rowLevel),
 								)
-							// A row beyond the row cap's need is deleted only if the share keeps
-							// at least the byte level; only a step's very first row may cross it.
+							// Beyond the row cap's need the byte floor holds, except for the one
+							// row of an indivisible step.
 							const minRows = allocation?.minRows ?? 0
-							if (
-								plan.byteLevel !== null &&
-								deleted > minRows &&
-								(minRows > 0 || deleted > 1)
-							)
+							if (plan.byteLevel !== null && deleted > minRows && pick === null)
 								expect(now.bytes).toBeGreaterThanOrEqual(plan.byteLevel)
-							if (
-								plan.byteLevel !== null &&
-								plan.rowLevel === null &&
-								deleted > 0
-							)
-								expect(was.bytes).toBeGreaterThan(plan.byteLevel)
 						}
 					},
 				),
 				{ numRuns: 100 },
 			)
+			expect(indivisibleSteps).toBeGreaterThan(0)
 		} finally {
 			db.close()
 		}

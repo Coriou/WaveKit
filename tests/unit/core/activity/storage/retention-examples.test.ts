@@ -6,6 +6,8 @@ import {
 	commitActivityBatch,
 	openActivityDatabase,
 	pruneActivityFair,
+	readActivityLiveBytes,
+	readActivityState,
 } from "../../../../../src/core/activity/storage/database.js"
 import { planFairStep } from "../../../../../src/core/activity/storage/fair-share.js"
 import type { ActivityRetentionPolicy } from "../../../../../src/core/activity/storage/contract.js"
@@ -581,6 +583,112 @@ describe("fair-share retention regressions", () => {
 			])
 		} finally {
 			session.close()
+		}
+	})
+})
+
+// Review round 2 (WG3 F).
+describe("fair-share retention regressions, round 2", () => {
+	it("never takes a share below its byte floor, not even for one row", async () => {
+		const db = await openSqliteFile(":memory:")
+		try {
+			openActivityDatabase(db)
+			const rows = [
+				shareRow("big", "busy", NOW, 20_000),
+				...Array.from({ length: 9 }, (_, index) =>
+					shareRow(`small${index}`, "busy", NOW, 10),
+				),
+				shareRow("quiet", "quiet", NOW, 10),
+			]
+			expect(commitActivityBatch(db, rows).ok).toBe(true)
+			const usage = groupedScan(db)
+			const plan = planFairStep({
+				shares: [...usage].map(([key, value]) => ({ key, ...value })),
+				rowTarget: null,
+				byteExcess: 1_000,
+				budget: 500,
+			})
+			const step = pruneActivityFair(
+				db,
+				{ incrementalVacuumPages: 0 },
+				plan.allocations.map(a => ({
+					decoderId: a.key.slice("decoder:".length),
+					kind: "",
+					rows: a.rows,
+					minRows: a.minRows,
+					byteFloor: a.byteFloor,
+					shareBytes: usage.get(a.key)?.bytes ?? 0,
+				})),
+				{ rowCount: rows.length, dbBytes: 0 },
+			)
+			// The oldest busy row alone would cross the floor: nothing is deleted.
+			expect(step.deleted).toBe(0)
+			expect(step.changed).toBe(false)
+			expect(groupedScan(db).get("decoder:busy")?.bytes).toBeGreaterThanOrEqual(
+				plan.byteLevel ?? 0,
+			)
+		} finally {
+			db.close()
+		}
+	})
+
+	it("binds the byte cap through a counted prefix fallback when every candidate is indivisible", async () => {
+		const db = await openSqliteFile(":memory:")
+		openActivityDatabase(db)
+		expect(
+			commitActivityBatch(db, [
+				shareRow("quiet", "quiet", NOW, 10),
+				shareRow("big", "busy", NOW, 60_000),
+				shareRow("small", "busy", NOW, 10),
+			]).ok,
+		).toBe(true)
+		const live = readActivityLiveBytes(db).dbBytes
+		const maxDbBytes = live - 1
+		const session = createActivitySession(
+			db,
+			":memory:",
+			smallLimits({ maxDbBytes, pruneBatchRows: 50 }),
+		)
+		try {
+			const wrote = writeOk(session, [])
+			expect(wrote.note).toBeUndefined()
+			expect(wrote.prune.deleted).toBeGreaterThan(0)
+			expect(wrote.snapshot.dbBytes).toBeLessThanOrEqual(
+				activityLowWater(maxDbBytes),
+			)
+			expect(wrote.snapshot.retention.prefixFallbackSteps).toBeGreaterThan(0)
+			expect(sharesOf(wrote.snapshot.retention.shares)).toEqual(groupedScan(db))
+		} finally {
+			session.close()
+		}
+	})
+
+	it("keeps committedMax when a fair prune deletes the newest row", async () => {
+		const db = await openSqliteFile(":memory:")
+		try {
+			openActivityDatabase(db)
+			expect(
+				commitActivityBatch(db, [
+					shareRow("quiet", "quiet", NOW, 10),
+					shareRow("big", "busy", NOW, 60_000),
+				]).ok,
+			).toBe(true)
+			expect(readActivityState(db, ":memory:").identity.committedMax).toBe("2")
+			const step = pruneActivityFair(
+				db,
+				{ incrementalVacuumPages: 0 },
+				[{ decoderId: "busy", kind: "", rows: 1 }],
+				{ rowCount: 2, dbBytes: 0 },
+			)
+			expect(step.deleted).toBe(1)
+			expect(eventIds(db)).toEqual(["quiet"])
+			const identity = readActivityState(db, ":memory:").identity
+			expect(identity.pruneWatermark).toBe("0")
+			expect(identity.holeWatermark).toBe("2")
+			// max(MAX(seq) = 1, pruneWatermark, holeWatermark = 2).
+			expect(identity.committedMax).toBe("2")
+		} finally {
+			db.close()
 		}
 	})
 })

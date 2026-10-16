@@ -27,7 +27,11 @@ import type {
 	PruneResult,
 	PrunedActivityRow,
 } from "./database.js"
-import { planFairStep, retentionShareKey } from "./fair-share.js"
+import {
+	indivisibleShare,
+	planFairStep,
+	retentionShareKey,
+} from "./fair-share.js"
 import type { FairStepPlan } from "./fair-share.js"
 import type { ActivityLimits } from "./limits.js"
 import type { BuiltActivityRow } from "./row.js"
@@ -282,28 +286,45 @@ export function createActivitySession(
 					shareBytes: share.bytes,
 				})
 		}
-		const step = pruneActivityFair(db, limits, targets, reading)
-		counters.subtract(step.deletedRows)
-		if (step.vacuumError !== undefined)
-			stepNote = `activity incremental vacuum failed: ${step.vacuumError}`
-		if (step.changed) {
-			adoptStep(step)
-			state = {
-				...state,
-				identity: {
-					...state.identity,
-					holeWatermark: step.holeWatermark,
-					holeGeneration: step.holeGeneration,
-				},
+		const runFair = (chosen: readonly FairDeleteTarget[]): PruneResult => {
+			const done = pruneActivityFair(db, limits, chosen, reading)
+			counters.subtract(done.deletedRows)
+			if (done.vacuumError !== undefined)
+				stepNote = `activity incremental vacuum failed: ${done.vacuumError}`
+			if (done.changed) {
+				adoptStep(done)
+				state = {
+					...state,
+					identity: {
+						...state.identity,
+						holeWatermark: done.holeWatermark,
+						holeGeneration: done.holeGeneration,
+					},
+				}
 			}
-		} else if (!burst.reseeded) {
+			return done
+		}
+		const step = runFair(targets)
+		if (step.changed) return step
+		if (!burst.reseeded) {
 			// Counters named rows the share index does not hold: drift. Reseed and re-plan in
 			// this same step; the burst flag keeps it to once per burst.
 			burst.reseeded = true
 			if (!seed()) return oldestFirstStep(nowMs)
 			return fairShareStep(nowMs, burst)
 		}
-		return step
+		// Indivisible step: every candidate would cross its share's byte floor. Delete the
+		// oldest row of the over-level share with the largest excess (ties key ascending),
+		// so the cap still binds and no share at or under the level loses a row. Counted in
+		// prefixFallbackSteps.
+		const key = indivisibleShare(planned, counters.usages())
+		const share = key === null ? undefined : counters.get(key)
+		if (!share) return step
+		const single = runFair([
+			{ decoderId: share.decoderId, kind: share.kind, rows: 1 },
+		])
+		if (single.changed) prefixFallbackSteps += 1
+		return single
 	}
 
 	const refresh = (reason: "threshold" | "close"): void => {

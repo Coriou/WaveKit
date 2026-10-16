@@ -405,7 +405,7 @@ export interface FairDeleteTarget {
 	rows: number
 	/** Rows deleted regardless of the byte floor (the row cap's share). Defaults to `rows`. */
 	minRows?: number
-	/** Beyond minRows, delete only while retained bytes stay >= this (first row may cross). */
+	/** Beyond minRows, delete only while retained bytes stay >= this. */
 	byteFloor?: number | null
 	/** The share's record bytes before the step (the counters' value). */
 	shareBytes?: number
@@ -566,8 +566,8 @@ export function pruneActivityFair(
 			for (const raw of rows) {
 				const row = prunedRow(raw)
 				if (taken >= minRows) {
-					if (floor === null || retained <= floor) break
-					if (taken > 0 && retained - row.recordBytes < floor) break
+					// Never below the share's byte floor (req 1.5), not even for one row.
+					if (floor === null || retained - row.recordBytes < floor) break
 				}
 				taken += 1
 				retained -= row.recordBytes
@@ -706,7 +706,11 @@ export function readActivityState(
 			restoreGeneration: meta.restoreGeneration,
 			pruneWatermark: meta.pruneWatermark,
 			pruneGeneration: meta.pruneGeneration,
-			committedMax: readCommittedMax(db, meta.pruneWatermark),
+			committedMax: readCommittedMax(
+				db,
+				meta.pruneWatermark,
+				meta.holeWatermark,
+			),
 			holeWatermark: meta.holeWatermark,
 			holeGeneration: meta.holeGeneration,
 		},
@@ -838,13 +842,25 @@ function readMetaMap(db: SqliteDatabase): Map<string, string> {
 	return map
 }
 
-function readCommittedMax(db: SqliteDatabase, watermark: string): string {
+/**
+ * max(MAX(seq), pruneWatermark, holeWatermark): a fair prune that deletes the newest rows
+ * must not move committedMax backwards.
+ */
+function readCommittedMax(
+	db: SqliteDatabase,
+	watermark: string,
+	holeWatermark: string,
+): string {
 	const row = db
 		.prepare("SELECT CAST(MAX(seq) AS TEXT) AS seq FROM activity")
 		.get()
 	const max = cell(row, "seq")
-	const text = typeof max === "string" && /^\d+$/.test(max) ? max : "0"
-	return BigInt(text) >= BigInt(watermark) ? text : watermark
+	let best = BigInt(typeof max === "string" && /^\d+$/.test(max) ? max : "0")
+	for (const floor of [watermark, holeWatermark]) {
+		const value = BigInt(floor)
+		if (value > best) best = value
+	}
+	return best.toString(10)
 }
 
 function countRows(db: SqliteDatabase): number {
