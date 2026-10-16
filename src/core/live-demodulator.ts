@@ -48,6 +48,7 @@ import { liveDemodTransmissionConfigChanged } from "./live-demod-activity.js"
 import {
 	DEFAULT_IQ_SAMPLE_RATE,
 	liveDemodRates,
+	effectiveAgc,
 	planLiveDemodPipeline,
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
@@ -99,7 +100,15 @@ export interface LiveDemodStatus {
 	noiseFloorDbfs?: number
 	thresholdDbfs?: number
 	lastError?: string
+	/** WG4: AGC in the running chain after the modulation default. */
+	agc?: "off" | "slow" | "fast"
 }
+
+/** reconfigure() input; `agc: null` deletes the key (modulation default). */
+export type LiveDemodReconfigureUpdates = Omit<
+	Partial<LiveDemodConfig>,
+	"agc"
+> & { agc?: "off" | "slow" | "fast" | null | undefined }
 
 export interface LiveDemodEvents {
 	level: (level: LiveAudioLevel) => void
@@ -340,11 +349,12 @@ export class LiveDemodulator extends EventEmitter {
 		}
 	}
 
-	async reconfigure(newConfig: Partial<LiveDemodConfig>): Promise<void> {
-		const validated = LiveDemodRuntimeConfigSchema.parse({
-			...this.config,
-			...newConfig,
-		})
+	async reconfigure(newConfig: LiveDemodReconfigureUpdates): Promise<void> {
+		const { agc: agcUpdate, ...rest } = newConfig
+		const merged: Record<string, unknown> = { ...this.config, ...rest }
+		if (agcUpdate === null) delete merged["agc"]
+		else if (agcUpdate !== undefined) merged["agc"] = agcUpdate
+		const validated = LiveDemodRuntimeConfigSchema.parse(merged)
 		const previous = this.config
 		const portChanged = validated.httpPort !== previous.httpPort
 		if (portChanged && this.options.httpAccess)
@@ -466,6 +476,7 @@ export class LiveDemodulator extends EventEmitter {
 			if (power !== null) status.channelPowerDbfs = Math.round(power * 10) / 10
 		}
 		if (this.lastError) status.lastError = this.lastError
+		status.agc = effectiveAgc(this.config.modulation, this.config.agc)
 
 		return status
 	}
