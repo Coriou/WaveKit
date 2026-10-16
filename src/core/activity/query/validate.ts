@@ -7,7 +7,13 @@ import type {
 	ActivityKind,
 	ActivityQuery,
 	ActivityRefType,
+	ActivityTrailsQuery,
 } from "../storage/contract.js"
+import {
+	ACTIVITY_TRAILS_DEFAULT_WINDOW_MS,
+	ACTIVITY_TRAILS_MAX_ENTITY_KEYS,
+	ACTIVITY_TRAILS_MAX_WINDOW_MS,
+} from "@wavekit/api-types"
 
 const KINDS = [
 	"decoder-reception",
@@ -151,9 +157,13 @@ export function normaliseQuery(
 	if (!parsed.success) throw invalid(parsed.error)
 	const raw = parsed.data
 	const frequencyMin =
-		raw.frequencyHz?.min === undefined ? null : integerHz(raw.frequencyHz.min, "frequencyHz.min")
+		raw.frequencyHz?.min === undefined
+			? null
+			: integerHz(raw.frequencyHz.min, "frequencyHz.min")
 	const frequencyMax =
-		raw.frequencyHz?.max === undefined ? null : integerHz(raw.frequencyHz.max, "frequencyHz.max")
+		raw.frequencyHz?.max === undefined
+			? null
+			: integerHz(raw.frequencyHz.max, "frequencyHz.max")
 	if (
 		frequencyMin !== null &&
 		frequencyMax !== null &&
@@ -290,7 +300,8 @@ export function parseLimit(
 	input: number | undefined,
 	defaults: { pageDefault: number; pageMax: number },
 ): number {
-	if (input === undefined) return Math.min(defaults.pageDefault, defaults.pageMax)
+	if (input === undefined)
+		return Math.min(defaults.pageDefault, defaults.pageMax)
 	if (!Number.isSafeInteger(input) || input < 1 || input > defaults.pageMax) {
 		throw new ActivityQueryInvalidError(
 			`limit must be an integer from 1 to ${defaults.pageMax}`,
@@ -303,4 +314,68 @@ export function parseOrder(input: unknown): "asc" | "desc" {
 	if (input === undefined) return "desc"
 	if (input === "asc" || input === "desc") return input
 	throw new ActivityQueryInvalidError("order must be asc or desc")
+}
+
+const trailsQuerySchema = z
+	.object({
+		producedFrom: z.string().min(1).max(40).optional(),
+		producedTo: z.string().min(1).max(40).optional(),
+		categories: z.array(z.enum(CATEGORIES)).max(64).optional(),
+		protocols: z.array(idSchema).max(64).optional(),
+		entityKeys: z
+			.array(idSchema)
+			.max(ACTIVITY_TRAILS_MAX_ENTITY_KEYS)
+			.optional(),
+	})
+	.strict()
+
+/** Validated trails filter. Empty lists are absent; lists are sorted and deduplicated. */
+export interface NormalisedTrailsQuery {
+	producedFromMs: number
+	producedToMs: number
+	categories?: string[]
+	protocols?: string[]
+	entityKeys?: string[]
+}
+
+/**
+ * Window defaults: `to` is now, `from` is `to` minus the default window.
+ * from === to is allowed; from > to and a window over the maximum are not.
+ */
+export function normaliseTrailsQuery(
+	input: ActivityTrailsQuery | unknown,
+	nowMs: number,
+): NormalisedTrailsQuery {
+	const parsed = trailsQuerySchema.safeParse(input ?? {})
+	if (!parsed.success) throw invalid(parsed.error)
+	const raw = parsed.data
+	const producedToMs =
+		raw.producedTo === undefined
+			? nowMs
+			: parseTime(raw.producedTo, "producedTo")
+	const producedFromMs =
+		raw.producedFrom === undefined
+			? producedToMs - ACTIVITY_TRAILS_DEFAULT_WINDOW_MS
+			: parseTime(raw.producedFrom, "producedFrom")
+	if (producedFromMs > producedToMs) {
+		throw new ActivityQueryInvalidError(
+			"producedFrom must not exceed producedTo",
+		)
+	}
+	if (producedToMs - producedFromMs > ACTIVITY_TRAILS_MAX_WINDOW_MS) {
+		throw new ActivityQueryInvalidError(
+			"The trails window must not exceed 24 hours",
+		)
+	}
+	const query: NormalisedTrailsQuery = { producedFromMs, producedToMs }
+	if (raw.categories && raw.categories.length > 0) {
+		query.categories = uniqueSorted(raw.categories)
+	}
+	if (raw.protocols && raw.protocols.length > 0) {
+		query.protocols = uniqueSorted(raw.protocols)
+	}
+	if (raw.entityKeys && raw.entityKeys.length > 0) {
+		query.entityKeys = uniqueSorted(raw.entityKeys)
+	}
+	return query
 }

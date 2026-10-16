@@ -13,6 +13,7 @@ import type {
 	ActivityQueryService,
 	ActivityRefType,
 	ActivitySearchRequest,
+	ActivityTrailsQuery,
 } from "../../core/activity/storage/contract.js"
 import { ActivityQueryError } from "../../core/activity/query/errors.js"
 import { withActivityClient } from "../../core/activity/query/service.js"
@@ -72,6 +73,120 @@ const SEARCH_PARAMS = new Set([
 	"limit",
 	"pageToken",
 ])
+
+const TRAILS_PARAMS = new Set([
+	"producedFrom",
+	"producedTo",
+	"categories",
+	"protocols",
+	"entityKey",
+])
+
+const trailsResponseSchema = {
+	type: "object",
+	properties: {
+		producedFrom: { type: "string" },
+		producedTo: { type: "string" },
+		trails: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					entityKey: { type: "string" },
+					category: { type: "string" },
+					protocol: { type: ["string", "null"] },
+					points: {
+						type: "array",
+						items: {
+							type: "array",
+							items: [
+								{ type: "number" },
+								{ type: "number" },
+								{ type: "number" },
+								{ type: ["number", "null"] },
+							],
+							minItems: 4,
+							maxItems: 4,
+						},
+					},
+					truncated: { type: "boolean" },
+				},
+				required: ["entityKey", "category", "protocol", "points", "truncated"],
+			},
+		},
+		pointCount: { type: "integer" },
+		scannedRows: { type: "integer" },
+		skippedRows: { type: "integer" },
+		truncated: { type: "boolean" },
+		truncation: { type: "array", items: { type: "string" } },
+		retentionFloor: { type: ["string", "null"] },
+		generatedAt: { type: "string" },
+	},
+	required: [
+		"producedFrom",
+		"producedTo",
+		"trails",
+		"pointCount",
+		"scannedRows",
+		"skippedRows",
+		"truncated",
+		"truncation",
+		"retentionFloor",
+		"generatedAt",
+	],
+} as const
+
+function trailsRequest(params: Record<string, unknown>): ActivityTrailsQuery {
+	for (const key of Object.keys(params)) {
+		if (!TRAILS_PARAMS.has(key)) {
+			throw new ActivityQueryError(
+				`Unknown activity trails parameter ${key}`,
+				"ACTIVITY_QUERY_INVALID",
+				400,
+			)
+		}
+	}
+	const request: ActivityTrailsQuery = {}
+	for (const name of ["producedFrom", "producedTo"] as const) {
+		const value = params[name]
+		if (value === undefined) continue
+		if (typeof value !== "string") {
+			throw new ActivityQueryError(
+				`${name} must be a string`,
+				"ACTIVITY_QUERY_INVALID",
+				400,
+			)
+		}
+		request[name] = value
+	}
+	if (params["categories"] !== undefined) {
+		const values = asStrings(params["categories"])
+		if (values.length > 0)
+			request.categories = values as unknown as ActivityCategory[]
+	}
+	if (params["protocols"] !== undefined) {
+		const values = asStrings(params["protocols"])
+		if (values.length > 0) request.protocols = values
+	}
+	const entityKey = params["entityKey"]
+	if (entityKey !== undefined) {
+		// Entity keys may contain commas: repeated parameters only, never split.
+		const raw = Array.isArray(entityKey) ? entityKey : [entityKey]
+		const keys: string[] = []
+		for (const value of raw) {
+			if (typeof value !== "string") {
+				throw new ActivityQueryError(
+					"entityKey must be a string",
+					"ACTIVITY_QUERY_INVALID",
+					400,
+				)
+			}
+			keys.push(value)
+		}
+		if (keys.length > 0) request.entityKeys = keys
+	}
+	return request
+}
 
 function correlationOf(request: FastifyRequest): string | undefined {
 	const value = (request as FastifyRequest & { correlationId?: string })
@@ -363,6 +478,48 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 				return await withActivityClient(
 					activityClientKey(request, options.access),
 					() => options.service.search(searchRequest(params)),
+				)
+			} catch (error) {
+				return sendError(reply, request, error)
+			}
+		},
+	)
+
+	fastify.get(
+		"/api/activity/trails",
+		{
+			schema: {
+				tags,
+				summary: "Bulk position trails, one per entity, newest bounded",
+				querystring: { type: "object", additionalProperties: true },
+				response: {
+					200: trailsResponseSchema,
+					...disabledReply,
+					400: errorResponseSchema,
+					429: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const blockedReply = blocked(options, reply)
+			if (blockedReply) return blockedReply
+			try {
+				const params = request.query as Record<string, unknown>
+				const query = trailsRequest(params)
+				return await withActivityClient(
+					activityClientKey(request, options.access),
+					() => {
+						const trails = options.service.trails
+						if (!trails) {
+							throw new ActivityQueryError(
+								"Activity trails are not available",
+								"ACTIVITY_QUERY_FAILED",
+								500,
+							)
+						}
+						return trails.call(options.service, query)
+					},
 				)
 			} catch (error) {
 				return sendError(reply, request, error)

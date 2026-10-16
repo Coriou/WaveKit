@@ -12,6 +12,8 @@ import type {
 	ActivityReplaySink,
 	ActivitySearchPage,
 	ActivitySearchRequest,
+	ActivityTrails,
+	ActivityTrailsQuery,
 	StoreIdentity,
 } from "../storage/contract.js"
 import { QueryAdmission } from "./admission.js"
@@ -30,6 +32,7 @@ import {
 	type ReadRequest,
 	type ReadResult,
 } from "./read.js"
+import { DEFAULT_TRAILS_READ_LIMITS, type TrailsReadLimits } from "./trails.js"
 import { ReaderHost, type ReaderHostEvent } from "./reader-host.js"
 import { startReplay } from "./replay.js"
 import {
@@ -44,6 +47,7 @@ import {
 import {
 	hashQuery,
 	normaliseQuery,
+	normaliseTrailsQuery,
 	parseDimensions,
 	parseLimit,
 	parseOrder,
@@ -79,6 +83,8 @@ export interface ActivityQueryLimits {
 	facetValues: number
 	facetScan: number
 	deadlineMs: number
+	/** WG4: deadline of one bulk trails read. */
+	trailsDeadlineMs: number
 	maxQueued: number
 	maxExecuting: number
 	maxInFlightPerClient: number
@@ -97,6 +103,7 @@ export const DEFAULT_ACTIVITY_QUERY_LIMITS: ActivityQueryLimits = {
 	facetValues: 32,
 	facetScan: 50_000,
 	deadlineMs: 250,
+	trailsDeadlineMs: 1_000,
 	maxQueued: 4,
 	maxExecuting: 1,
 	maxInFlightPerClient: 1,
@@ -113,6 +120,8 @@ export interface ActivityQueryServiceOptions {
 	/** Tests pass "inline" so they do not need the built worker. */
 	execution?: "worker" | "inline"
 	limits?: Partial<ActivityQueryLimits>
+	/** Test override of the trails read bounds, merged over DEFAULT_TRAILS_READ_LIMITS. */
+	trailsLimits?: Partial<TrailsReadLimits>
 	/** Test hook. A number, or a function sampled once per read. */
 	readerDelayMs?: number | (() => number)
 	onReaderEvent?: (event: ReaderHostEvent) => void
@@ -155,6 +164,10 @@ export function createActivityQueryService(
 	options: ActivityQueryServiceOptions,
 ): ActivityQueryService {
 	const limits = resolveLimits(options.limits)
+	const trailsLimits: TrailsReadLimits = {
+		...DEFAULT_TRAILS_READ_LIMITS,
+		...options.trailsLimits,
+	}
 	const log = createComponentLogger(options.logger, "ActivityQuery")
 	const now = options.now ?? (() => Date.now())
 	const execution = options.execution ?? "worker"
@@ -183,6 +196,7 @@ export function createActivityQueryService(
 	async function perform(
 		clientKey: string,
 		request: ReadRequest,
+		deadlineMs: number = limits.deadlineMs,
 	): Promise<ReadResult> {
 		if (closed) throw new ActivityQueryClosedError()
 		const release = await admission.acquire(clientKey)
@@ -195,7 +209,7 @@ export function createActivityQueryService(
 				timer = setTimeout(() => {
 					host.invalidate(ticket)
 					reject(new ActivityQueryTimeoutError())
-				}, limits.deadlineMs)
+				}, deadlineMs)
 				timer.unref()
 				void host.execute(request, delayMs(), ticket).then(
 					value => {
@@ -402,6 +416,28 @@ export function createActivityQueryService(
 					highWater: formatSeq(high),
 				},
 			}
+		},
+
+		async trails(input: ActivityTrailsQuery): Promise<ActivityTrails> {
+			if (closed) throw new ActivityQueryClosedError()
+			const query = normaliseTrailsQuery(input, now())
+			const result = await perform(
+				currentClient(),
+				{
+					op: "trails",
+					input: {
+						producedFromMs: query.producedFromMs,
+						producedToMs: query.producedToMs,
+						...(query.categories ? { categories: query.categories } : {}),
+						...(query.protocols ? { protocols: query.protocols } : {}),
+						...(query.entityKeys ? { entityKeys: query.entityKeys } : {}),
+						limits: trailsLimits,
+					},
+				},
+				limits.trailsDeadlineMs,
+			)
+			if (result.op !== "trails") throw new ActivityReaderFailedError()
+			return result.trails
 		},
 
 		replay(
