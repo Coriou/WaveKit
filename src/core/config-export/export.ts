@@ -176,6 +176,22 @@ function isSecretKey(key: string): boolean {
 	return CONFIG_EXPORT_SECRET_KEY_PATTERN.test(key)
 }
 
+/**
+ * Keys whose value names a host, address, URL, path, file, device serial, account or a
+ * free-form argument list. Redacted whatever the value type (a numeric `udpHost`, a numeric
+ * element of `extraArgs` the adapter stringifies, a numeric `deviceSerial`), in decoder options
+ * and outside them, with or without injected descriptors.
+ */
+export const SENSITIVE_KEY_PATTERN =
+	/(host|url|uri|addr|path|dir|file|serial|arg|cmd|command|exec|user|login|account|email|phone|callsign|owner|operator|endpoint|server|ip$|^ip|mac$)/i
+
+/**
+ * An allowlisted option string is kept only when it looks like a short enum-like token: no
+ * slash, colon, at sign, whitespace or query characters, at most 32 characters. Anything else
+ * (a URL, path or credential put under `mode`) is redacted.
+ */
+const SAFE_OPTION_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.+-]{0,31}$/
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object") return false
 	const proto: unknown = Object.getPrototypeOf(value)
@@ -229,12 +245,15 @@ function redactOptionValue(
 	if (
 		secret.has(key) ||
 		isSecretKey(key) ||
+		SENSITIVE_KEY_PATTERN.test(key) ||
 		POSITION_OPTION_KEY_PATTERN.test(key)
 	)
 		return CONFIG_EXPORT_REDACTED
 	if (isKeptScalar(value)) return value
 	if (typeof value === "string")
-		return optionAllowlist.has(key) ? value : CONFIG_EXPORT_REDACTED
+		return optionAllowlist.has(key) && SAFE_OPTION_TOKEN.test(value)
+			? value
+			: CONFIG_EXPORT_REDACTED
 	// Array elements inherit the parent key.
 	if (Array.isArray(value))
 		return value.map(item =>
@@ -412,7 +431,12 @@ function walk(
 		const child = value[key]
 		const declared = shape !== undefined && Object.hasOwn(shape, key)
 		const outKey = declared ? key : redactedKey(index)
-		if (isSecretKey(key)) {
+		// Outside options a sensitive-named object (sdrHost) is walked: its strings are
+		// redacted by the string rule and its own keys are checked again.
+		if (
+			isSecretKey(key) ||
+			(SENSITIVE_KEY_PATTERN.test(key) && !isPlainObject(child))
+		) {
 			out[outKey] = CONFIG_EXPORT_REDACTED
 			return
 		}

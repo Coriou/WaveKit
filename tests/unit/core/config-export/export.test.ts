@@ -358,6 +358,34 @@ describe("config export redaction", () => {
 		expect(r.decoders[0]!.options).toMatchObject({ lat: R, lon: R, gain: 3 })
 	})
 
+	it("redacts numeric host, argument and serial values and unsafe allowlisted strings", () => {
+		const { config } = everySecretFixture(1)
+		config.decoders[0]!.type = "dsd-fme"
+		config.decoders[0]!.options = {
+			extraArgs: ["-H", 918273645],
+			udpHost: 3232235777,
+			deviceSerial: 55667788,
+			mode: "https://alice:PRIVATE_PASSWORD@private.example/export",
+			outputFormat: "/home/alice/private",
+			rtlTcpHost: { mode: "PRIVATE_HOST_SENTINEL" },
+			format: "s16le",
+			gain: 3,
+		}
+		const body = exportConfig(config, META)
+		for (const leak of [
+			"918273645",
+			"3232235777",
+			"55667788",
+			"PRIVATE_PASSWORD",
+			"private.example",
+			"/home/alice",
+			"PRIVATE_HOST_SENTINEL",
+		])
+			expect(body).not.toContain(leak)
+		const r = redactConfig(config) as { decoders: { options: unknown }[] }
+		expect(r.decoders[0]!.options).toMatchObject({ format: "s16le", gain: 3 })
+	})
+
 	it("keeps closed-set strings only when the value is a member", () => {
 		const schema = z.object({
 			e: z.enum(["a", "b"]),
