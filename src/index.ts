@@ -126,6 +126,7 @@ import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
 import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
 import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
+import { createStationEstimator } from "./core/station-estimate/provider.js"
 import {
 	tunerFrequencyAt,
 	wireAnalogTransmissions,
@@ -1164,6 +1165,17 @@ async function main(): Promise<void> {
 			meshTrackingManager.stop()
 		})
 
+		// Step 8g: approximate station location from heard positions (WG4 req 2),
+		// computed on request over live tracker snapshots
+		const stationEstimate = createStationEstimator({
+			aircraft: () => aircraftTrackingManager.getTracker().getAll(),
+			vessels: () => vesselTrackingManager.getTracker().getAll(),
+			aprs: () => aprsTrackingManager.getTracker().getAll(),
+			mesh: () => meshTrackingManager.getTracker().getAll(),
+			stationConfigured: () =>
+				config.station.lat !== undefined && config.station.lon !== undefined,
+		})
+
 		// Read-only metadata providers add no source consumers or receiver actions.
 		const regionalRegistry = createRegionalRegistry(
 			createRegionalRegistration(),
@@ -1254,6 +1266,7 @@ async function main(): Promise<void> {
 				coverage: coverageManager,
 				meshTracker: meshTrackingManager.getTracker(),
 				aprsTracker: aprsTrackingManager.getTracker(),
+				stationEstimate,
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
