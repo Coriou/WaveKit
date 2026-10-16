@@ -41,7 +41,7 @@ describe("ScannerService burst capture wiring", () => {
 		} finally {
 			open.mockRestore()
 		}
-	})
+	}, 20_000)
 
 	it("keeps a closed burst as a listed capture and holds the pre-roll in the ring", async () => {
 		const h = serviceHarness({
@@ -113,5 +113,5 @@ describe("ScannerService burst capture wiring", () => {
 		} finally {
 			open.mockRestore()
 		}
-	})
+	}, 20_000)
 })

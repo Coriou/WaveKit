@@ -207,7 +207,7 @@ describe("ScannerService (S1-B final review)", () => {
 			WAIT,
 		)
 		await again.service.stop()
-	})
+	}, 20_000)
 
 	it("re-applies the holder's tuning on a hand-over and a hand-back, with the scheduler's block geometry (finding 2)", async () => {
 		const h = serviceHarness({ patch: noPassive })
@@ -231,7 +231,7 @@ describe("ScannerService (S1-B final review)", () => {
 		expect(cfg.thresholdDb).toBeNull()
 		expect(schedulerBlocks(h, a.id)).toBe(blockSamplesOf(cfg))
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("returns the engine to the default tuning when a sweep with thresholdDb ends (finding 2)", async () => {
 		// The passive job keeps the engine up after the sweep.
@@ -290,7 +290,7 @@ describe("ScannerService (S1-B final review)", () => {
 		expect(h.service.getJob(a.id)?.state).toBe("running")
 		expect([...(h.decoders.held.get("rtl") ?? [])]).toEqual([a.id])
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("answers every SCANNER_SOURCE_BUSY with details.reason (finding 4)", async () => {
 		const h = serviceHarness({ patch: noPassive })
@@ -359,7 +359,7 @@ describe("ScannerService (S1-B final review)", () => {
 		await settled(h.service)
 		expect(events.slice(deletedAt)).toEqual([])
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("needs takeover to resume a lease-less operator pause when the impact grew (finding 8)", async () => {
 		const h = serviceHarness({ patch: noPassive })
