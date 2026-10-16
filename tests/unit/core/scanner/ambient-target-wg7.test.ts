@@ -180,4 +180,29 @@ describe("resolveAmbientTargets", () => {
 			resolveAmbientTargets(cfgOf("ais-catcher"), deps(null, undefined)),
 		).toBeNull()
 	})
+
+	it("an unknown input kind is external (fail closed)", () => {
+		const d: AmbientTargetDeps = {
+			...deps("rtl", undefined),
+			inputKind: () => undefined,
+		}
+		expect(resolveAmbientTargets(cfgOf("ais-catcher"), d)?.external).toBe(true)
+	})
+
+	it("accepts 16 target frequencies and fails closed at 17", () => {
+		const list = (n: number) =>
+			Array.from({ length: n }, (_, i) => 131_000_000 + i * 25_000)
+		expect(
+			resolveAmbientTargets(
+				cfgOf("acarsdec", { frequencies: list(16) }),
+				deps("rtl", undefined),
+			)?.targetsHz,
+		).toHaveLength(16)
+		expect(
+			resolveAmbientTargets(
+				cfgOf("acarsdec", { frequencies: list(17) }),
+				deps("rtl", undefined),
+			),
+		).toBeNull()
+	})
 })

@@ -43,6 +43,17 @@ describe("interpretMeshtastic", () => {
 			interpretMeshtastic(ok({ from: 0x1f }), s, ctx)[0]?.identity?.value,
 		).toBe("!0000001f")
 	})
+	it('viaMqtt present and not exactly false is no evidence ("true", 1, null)', () => {
+		for (const viaMqtt of ["true", 1, null]) {
+			const s = st()
+			expect(interpretMeshtastic(ok({ viaMqtt }), s, ctx)).toEqual([])
+			expect(interpretMeshtastic(ok({ viaMqtt }), s, ctx)).toEqual([])
+		}
+		expect(interpretMeshtastic(ok({ viaMqtt: false }), st(), ctx)).toHaveLength(
+			1,
+		)
+	})
+
 	it("viaMqtt is no evidence at all", () => {
 		const s = st()
 		expect(interpretMeshtastic(ok({ viaMqtt: true }), s, ctx)).toEqual([])

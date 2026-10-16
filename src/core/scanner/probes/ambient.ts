@@ -17,11 +17,12 @@ import type { DecoderManager } from "../../../decoders/manager.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import type { TuningTrust } from "../../spectrum/types.js"
 import type { DecodeEvidence, ScannerProtocol } from "../types.js"
-import { interpretAcars } from "./confirm/acars.js"
-import { interpretAis } from "./confirm/ais.js"
-import type {
-	AmbientDecode,
-	AmbientInterpretCtx,
+import { parseAcars } from "./confirm/acars.js"
+import { parseAis } from "./confirm/ais.js"
+import {
+	acceptAmbient,
+	type AmbientInterpretCtx,
+	type AmbientParsed,
 } from "./confirm/ambient-decode.js"
 import {
 	createInterpreterState,
@@ -30,9 +31,9 @@ import {
 } from "./confirm/double-match.js"
 import { interpretDirewolf } from "./confirm/direwolf.js"
 import { interpretDsdFme, toDsdFmeScannerEvent } from "./confirm/dsd-fme.js"
-import { interpretMeshtastic } from "./confirm/meshtastic.js"
+import { parseMeshtastic } from "./confirm/meshtastic.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
-import { interpretVdl2 } from "./confirm/vdl2.js"
+import { parseVdl2 } from "./confirm/vdl2.js"
 import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
 
 export interface AmbientTarget {
@@ -80,21 +81,20 @@ interface AmbientState {
 	capcodes: CapcodeWindows | null
 }
 
-type AmbientInterpreter = (
+type AmbientParser = (
 	out: DecoderOutputLike,
-	state: InterpreterState,
 	ctx: AmbientInterpretCtx,
-) => AmbientDecode[]
+) => AmbientParsed | null
 
 /** WG7 ambient-only types: trust-gated, emitted at the decode's own frequency. */
-const NEW_INTERPRETERS: ReadonlyMap<string, AmbientInterpreter> = new Map<
+const NEW_INTERPRETERS: ReadonlyMap<string, AmbientParser> = new Map<
 	ScannerAmbientDecoderType,
-	AmbientInterpreter
+	AmbientParser
 >([
-	["ais-catcher", interpretAis],
-	["acarsdec", interpretAcars],
-	["dumpvdl2", interpretVdl2],
-	["lora-meshtastic", interpretMeshtastic],
+	["ais-catcher", parseAis],
+	["acarsdec", parseAcars],
+	["dumpvdl2", parseVdl2],
+	["lora-meshtastic", parseMeshtastic],
 ])
 
 const AMBIENT_TYPES = new Set([
@@ -199,7 +199,10 @@ export class AmbientEvidence extends EventEmitter {
 		)
 	}
 
-	/** Decoder part of the trust rule (req 1.3): running, healthy, not suspended, config-owned. */
+	/**
+	 * Decoder part of the trust rule (req 1.3): running, healthy, not suspended and positively
+	 * config-owned (a missing owner is not eligible; fail closed). New types only.
+	 */
 	private eligible(decoderId: string): boolean {
 		const getStatus = this.deps.decoders.getStatus
 		if (!getStatus) return false
@@ -214,7 +217,7 @@ export class AmbientEvidence extends EventEmitter {
 			status.running &&
 			(status.health === "running" || status.health === "idle") &&
 			status.suspended !== true &&
-			status.owner !== "scanner"
+			status.owner === "config"
 		)
 	}
 
@@ -235,7 +238,7 @@ export class AmbientEvidence extends EventEmitter {
 
 	private handleNew(
 		decoderId: string,
-		interpret: AmbientInterpreter,
+		parse: AmbientParser,
 		out: DecoderOutputLike,
 	): void {
 		if (!this.running) return
@@ -246,14 +249,11 @@ export class AmbientEvidence extends EventEmitter {
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
 		if (!this.eligible(decoderId)) return
-		// Only trusted targets reach the interpreter, so untrusted decodes never feed the H2 match.
-		let trusted: readonly number[] = targetsHz
-		for (const t of targetsHz)
-			if (!isTrusted(this.trustAt(decoderId, t))) {
-				trusted = targetsHz.filter(x => isTrusted(this.trustAt(decoderId, x)))
-				break
-			}
-		if (trusted.length === 0) {
+		// Parse against every target, then one trust lookup at the decode's own frequency BEFORE
+		// acceptance memory is touched: an untrusted decode never primes the H2 match.
+		const parsed = parse(out, { targetsHz })
+		if (parsed === null) return
+		if (!isTrusted(this.trustAt(decoderId, parsed.hz))) {
 			this.trustDrops++
 			return
 		}
@@ -271,12 +271,7 @@ export class AmbientEvidence extends EventEmitter {
 			this.states.set(decoderId, entry)
 		}
 		if (entry.interp === null) return
-		const decodes = interpret(out, entry.interp, { targetsHz: trusted })
-		for (const decode of decodes) {
-			if (!isTrusted(this.trustAt(decoderId, decode.hz))) {
-				this.trustDrops++
-				continue
-			}
+		for (const decode of acceptAmbient(entry.interp, parsed)) {
 			const { hz, ...ev } = decode
 			const event: AmbientEvidenceEvent = {
 				decoderId,

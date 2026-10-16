@@ -15,6 +15,47 @@ export interface AmbientInterpretCtx {
 /** Evidence plus the decode's RF frequency (Hz). */
 export type AmbientDecode = DecodeEvidence & { hz: number }
 
+/**
+ * A decode parsed without touching acceptance memory: AmbientEvidence checks trust at `hz`
+ * before `acceptAmbient` may record the identity (an untrusted decode never primes H2).
+ */
+export interface AmbientParsed {
+	hz: number
+	timestamp: Date
+	protocol: ScannerProtocol
+	crcClean: boolean
+	identity: { key: string; kind: Identity["kind"]; value: string | undefined }
+}
+
+/** The accept step: evidence for a parsed decode, recording its identity in `state`. */
+export function acceptAmbient(
+	state: InterpreterState,
+	p: AmbientParsed,
+): AmbientDecode[] {
+	return ambientEvidence(
+		state,
+		p.timestamp,
+		p.hz,
+		p.protocol,
+		p.crcClean,
+		p.identity,
+	)
+}
+
+/** Parse then accept (no trust gate); for callers that already trust every target. */
+export function interpretWith<C>(
+	parse: (out: C, ctx: AmbientInterpretCtx) => AmbientParsed | null,
+): (
+	out: C,
+	state: InterpreterState,
+	ctx: AmbientInterpretCtx,
+) => AmbientDecode[] {
+	return (out, state, ctx) => {
+		const p = parse(out, ctx)
+		return p ? acceptAmbient(state, p) : []
+	}
+}
+
 /** True when `hz` is finite and within the ambient tolerance of one of `targetsHz`. */
 export function nearTarget(hz: number, targetsHz: readonly number[]): boolean {
 	if (!Number.isFinite(hz)) return false

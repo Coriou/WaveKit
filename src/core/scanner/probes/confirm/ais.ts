@@ -1,8 +1,8 @@
 /** AIS-catcher ambient interpreter (WG7 req 1.3): channel A/B frequency, MMSI identity. */
 import { SCANNER_AIS_CHANNEL_HZ } from "@wavekit/api-types"
-import type { DecoderOutputLike, InterpreterState } from "./double-match.js"
-import { ambientEvidence, asRecord, nearTarget } from "./ambient-decode.js"
-import type { AmbientDecode, AmbientInterpretCtx } from "./ambient-decode.js"
+import type { DecoderOutputLike } from "./double-match.js"
+import { asRecord, interpretWith, nearTarget } from "./ambient-decode.js"
+import type { AmbientInterpretCtx, AmbientParsed } from "./ambient-decode.js"
 
 /**
  * MMSI as 9 digits. `ShipData.mmsi` is a string; a number is accepted only as an integer in
@@ -20,23 +20,31 @@ function mmsiOf(raw: unknown): string | undefined {
 	return undefined
 }
 
-export function interpretAis(
+/** Pure parse step: no acceptance memory is touched (null: no evidence). */
+export function parseAis(
 	out: DecoderOutputLike,
-	state: InterpreterState,
 	ctx: AmbientInterpretCtx,
-): AmbientDecode[] {
-	if (out.type !== "ship") return []
+): AmbientParsed | null {
+	if (out.type !== "ship") return null
 	const data = asRecord(out.data)
-	if (data === undefined) return []
+	if (data === undefined) return null
 	const channel = data["channel"]
 	// the adapter normalises the channel to "A" | "B"; no or unknown channel is no evidence
-	if (channel !== "A" && channel !== "B") return []
+	if (channel !== "A" && channel !== "B") return null
 	const hz = SCANNER_AIS_CHANNEL_HZ[channel]
-	if (!nearTarget(hz, ctx.targetsHz)) return []
+	if (!nearTarget(hz, ctx.targetsHz)) return null
 	// the adapter drops sentences that fail the checksum
-	return ambientEvidence(state, out.timestamp, hz, "ais", true, {
-		key: "ais:mmsi",
-		kind: "ais-mmsi",
-		value: mmsiOf(data["mmsi"]),
-	})
+	return {
+		hz,
+		timestamp: out.timestamp,
+		protocol: "ais",
+		crcClean: true,
+		identity: {
+			key: "ais:mmsi",
+			kind: "ais-mmsi",
+			value: mmsiOf(data["mmsi"]),
+		},
+	}
 }
+
+export const interpretAis = interpretWith(parseAis)

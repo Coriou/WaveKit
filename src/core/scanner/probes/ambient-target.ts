@@ -34,6 +34,13 @@ const NEW_TYPES = new Set([
 	"lora-meshtastic",
 ])
 
+/**
+ * Most target frequencies a new-type decoder may name. Each decode costs one tolerance scan of
+ * the list (16 compares) plus one trust lookup at the decode's own frequency, so per-message
+ * work stays O(16) regardless of config; a longer list is no target at all (fail closed).
+ */
+export const AMBIENT_MAX_TARGETS = 16
+
 const isHz = (v: unknown): v is number =>
 	typeof v === "number" && Number.isFinite(v) && v > 0
 
@@ -75,11 +82,14 @@ export function resolveAmbientTargets(
 ): AmbientTarget | null {
 	const sourceId = cfg.sourceId ?? deps.defaultSourceId()
 	if (!sourceId) return null
-	const external = deps.inputKind(cfg.id) === "external"
+	// Only a positively known non-external input kind is a WaveKit source (unknown: fail closed).
+	const kind = deps.inputKind(cfg.id)
+	const external = kind === undefined || kind === "external"
 	if (NEW_TYPES.has(cfg.type)) {
 		const targetsHz = newTypeTargets(cfg, () => deps.caps(sourceId)?.centerFreq)
 		const hz = targetsHz?.[0]
 		if (!targetsHz || hz === undefined) return null
+		if (targetsHz.length > AMBIENT_MAX_TARGETS) return null
 		return { sourceId, hz, targetsHz, external }
 	}
 	// Existing types: scanner-service.ts:3119-3143 (cccf665f), unchanged.

@@ -643,6 +643,7 @@ export class IdentifyRunner implements JobDriver {
 	/** Set while this runner calls `probes.request` (the call's own "starting" is not a queued start). */
 	private requesting = false
 	private detached = false
+	private ambientErrorLogged = false
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -998,11 +999,12 @@ export class IdentifyRunner implements JobDriver {
 				},
 				this.deps.ambient,
 				this.deps.identify.protocols,
-				err =>
-					this.log.warn(
-						{ err },
-						"Ambient coverage unavailable; no ambient trials",
-					),
+				// Fixed message, no exception payload (its text may carry decoder details); once per job.
+				() => {
+					if (this.ambientErrorLogged) return
+					this.ambientErrorLogged = true
+					this.log.warn("Ambient coverage unavailable; no ambient trials")
+				},
 			),
 		)
 		t.plan = plan
@@ -1469,9 +1471,13 @@ export class IdentifyRunner implements JobDriver {
 		)
 			return
 		const identity = ev.identity
+		const now = this.deps.now()
 		for (const t of this.targets) {
 			if (t.state !== "trying" || t.view?.observationId !== observationId)
 				continue
+			// Only evidence of the resolved observation's epoch counts, and only before the ambient
+			// deadline (late evidence is ignored; the next tick ends the trial `timeout`).
+			if (ev.epoch !== t.view.epoch || !(now < t.ambientUntil)) continue
 			const trial = t.trials.find(
 				x =>
 					x.transport === "ambient" &&

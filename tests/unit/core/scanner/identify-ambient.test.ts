@@ -19,6 +19,7 @@ import type {
 	DecodeEvidence,
 	ScannerProtocol,
 } from "../../../../src/core/scanner/types.js"
+import { IdentifyRunner as OracleRunner } from "./identify-ambient-oracle.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import {
 	TARGET_HZ,
@@ -42,6 +43,9 @@ function harness(
 		request?: Partial<ScannerIdentifyRequest>
 		ambient?: IdentifyAmbientLookup
 		channelizer?: boolean
+		/** Run the frozen cccf665f runner (Property 4 oracle). */
+		oracle?: boolean
+		logger?: pino.Logger
 	} = {},
 ) {
 	const settings = testSettings()
@@ -52,7 +56,11 @@ function harness(
 	const events: ScannerIdentifyEventData[] = []
 	const calls: [string, number, number][] = []
 	const ambient = opts.ambient
-	const runner = new IdentifyRunner({
+	// The oracle has no onAmbientEvidence; Property 4 only calls it on the current runner.
+	const Runner = (opts.oracle
+		? OracleRunner
+		: IdentifyRunner) as unknown as typeof IdentifyRunner
+	const runner = new Runner({
 		record,
 		identify: normaliseIdentify({
 			target: { frequencyHz: TARGET_HZ },
@@ -72,7 +80,7 @@ function harness(
 		channelizer: () => opts.channelizer ?? false,
 		settings: () => settings,
 		emit: d => events.push(structuredClone(d)),
-		logger: pino({ level: "silent" }),
+		logger: opts.logger ?? pino({ level: "silent" }),
 		now: () => pool.clock.now,
 		...(ambient
 			? {
@@ -166,6 +174,7 @@ describe("identify ambient trials (WG7 req 1.5-1.7)", () => {
 
 	it.each([
 		["another observation", "o_other", aisEvidence()],
+		["evidence of another epoch", "o_t1", aisEvidence({ epoch: 2 })],
 		[
 			"evidence without identity",
 			"o_t1",
@@ -194,6 +203,36 @@ describe("identify ambient trials (WG7 req 1.5-1.7)", () => {
 			expect(h.last()?.state).not.toBe("identified")
 		},
 	)
+
+	it("ignores evidence after the ambient deadline; the next tick ends the trial timeout", async () => {
+		const h = harness({ ambient: () => [AIS], request: { protocols: ["ais"] } })
+		await resolved(h)
+		h.clock.now += 10_000
+		h.runner.onAmbientEvidence("o_t1", aisEvidence())
+		await h.advance(1)
+		expect(h.outcomes()).toEqual({ ais: "timeout" })
+		expect(h.last()?.state).not.toBe("identified")
+	})
+
+	it("logs a throwing ambient lookup once with a fixed message and no exception payload", async () => {
+		const lines: string[] = []
+		const logger = pino(
+			{ level: "debug" },
+			{ write: (s: string) => void lines.push(s) },
+		)
+		const h = harness({
+			logger,
+			ambient: () => {
+				throw new Error("secret-lookup-detail")
+			},
+		})
+		await resolved(h)
+		for (let i = 0; i < 4; i++) await h.advance(500)
+		const warns = lines.filter(l => l.includes("Ambient coverage unavailable"))
+		expect(warns).toHaveLength(1)
+		expect(lines.join("")).not.toContain("secret-lookup-detail")
+		expect(warns[0]).not.toContain('"err"')
+	})
 
 	it("non-exhaustive: an ambient decode makes the probe trials not-needed and releases the probe", async () => {
 		const h = harness({
@@ -386,13 +425,16 @@ describe("planAmbientTrials", () => {
 	})
 })
 
+const finished = (h: ReturnType<typeof harness>): boolean =>
+	!["pending", "starting", "running", "holding"].includes(h.record.state)
+
 describe("identify ambient inertness", () => {
 	const NON_AMBIENT = IDENTIFY_PROTOCOLS.filter(
 		p => !["ais", "acars", "vdl2", "lora"].includes(p),
 	)
 	// Feature: web-gaps-7, Property 4: Ambient identify inert without coverage
 	// Validates: Requirements 1.5, 1.6
-	it("without coverage and without ambient protocols, events equal a runner without the ambient dep", async () => {
+	it("without coverage and without ambient protocols, events equal the frozen cccf665f runner (run to completion)", async () => {
 		await fc.assert(
 			fc.asyncProperty(
 				fc.constantFrom(6000, 9000, 12_000, 20_000),
@@ -410,18 +452,23 @@ describe("identify ambient inertness", () => {
 						return mode === "other-only" && protocols.length > 0 ? [AIS] : []
 					}
 					const request = { protocols, exhaustive }
-					const run = async (h: ReturnType<typeof harness>) => {
+					const run = async (
+						h: ReturnType<typeof harness>,
+						oracle: boolean,
+					) => {
 						await resolved(h, trackOf({ obwHz }))
-						h.runner.onAmbientEvidence("o_t1", aisEvidence())
-						for (let i = 0; i < 6; i++) await h.advance(500)
+						if (!oracle) h.runner.onAmbientEvidence("o_t1", aisEvidence())
+						// Through completion: until the job reports its result.
+						for (let i = 0; i < 80 && !finished(h); i++) await h.advance(500)
+						expect(finished(h)).toBe(true)
 						return h.events
 					}
-					const a = await run(harness({ request }))
-					const b = await run(harness({ request, ambient }))
+					const a = await run(harness({ request, oracle: true }), true)
+					const b = await run(harness({ request, ambient }), false)
 					expect(b).toEqual(a)
 				},
 			),
 			{ numRuns: 100 },
 		)
-	}, 120_000)
+	}, 5_000)
 })

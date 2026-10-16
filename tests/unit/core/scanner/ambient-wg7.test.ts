@@ -735,3 +735,65 @@ describe("WG7 properties", () => {
 		expect(emitted).toBeGreaterThan(0)
 	})
 })
+
+describe("AmbientEvidence WG7 review fixes", () => {
+	it("an untrusted decode never primes the double match (trust checked at decode hz before acceptance)", () => {
+		let trusted = false
+		const r = rig({
+			add: d => d.add("acars", "acarsdec"),
+			targets: { acars: target(131_550_000) },
+			trust: (_id, hz) =>
+				hz === 131_550_500 && !trusted ? "unverified" : "commanded",
+		})
+		r.decoders.out("acars", acars("PH-BXA", 131_550_500))
+		trusted = true
+		r.decoders.out("acars", acars("PH-BXA", 131_550_500))
+		expect(r.got).toHaveLength(1)
+		expect(r.got[0]?.ev.identity).toBeUndefined()
+		expect(r.ambient.trustDropCount).toBe(1)
+	})
+
+	it("ACARS without frequency and two targets with only the first trusted is no evidence", () => {
+		const r = rig({
+			add: d => d.add("acars", "acarsdec"),
+			targets: {
+				acars: target(131_550_000, { targetsHz: [131_550_000, 131_725_000] }),
+			},
+			trust: (_id, hz) => (hz === 131_550_000 ? "commanded" : "unverified"),
+		})
+		const noFreq = {
+			type: "acars",
+			data: { tail: "PH-BXA", error: 0 },
+			timestamp: new Date(1_000),
+		}
+		twice(r, "acars", noFreq)
+		expect(r.got).toEqual([])
+	})
+
+	it("a status without owner is not eligible: no evidence and no coverage", () => {
+		const r = aisRig()
+		const status = r.decoders.statuses.get("ais")
+		if (status) delete status.owner
+		twice(r, "ais", ship("244123456"))
+		expect(r.got).toEqual([])
+		expect(r.ambient.coverageAt("rtl", AIS_A, 1_000)).toEqual([])
+	})
+
+	it("makes exactly one trust lookup per decode, at the decode hz", () => {
+		const seen: number[] = []
+		const many = Array.from(
+			{ length: 16 },
+			(_, i) => AIS_A - 16_000 + i * 1_000,
+		)
+		const r = rig({
+			add: d => d.add("ais", "ais-catcher"),
+			targets: { ais: target(AIS_A, { targetsHz: [...many, AIS_A] }) },
+			trust: (_id, hz) => {
+				seen.push(hz)
+				return "commanded"
+			},
+		})
+		twice(r, "ais", ship("244123456"))
+		expect(seen).toEqual([AIS_A, AIS_A])
+	})
+})
