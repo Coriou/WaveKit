@@ -65,6 +65,23 @@ export const decoderStatusExtensionProperties = {
 	owner: { type: "string", enum: ["config", "scanner"] },
 	scannerJobId: { type: "string" },
 	ephemeral: { type: "boolean", enum: [true] },
+	// WG6: report-only option problems.
+	optionIssues: {
+		type: "array",
+		maxItems: 32,
+		items: {
+			type: "object",
+			properties: {
+				path: { type: "string", maxLength: 256 },
+				code: {
+					type: "string",
+					enum: ["unknown-key", "invalid-value", "truncated"],
+				},
+				message: { type: "string", maxLength: 256 },
+			},
+			required: ["path", "code", "message"],
+		},
+	},
 } as const
 
 /** Every DecoderHealth value; Fastify schemas share this one list. */

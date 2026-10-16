@@ -102,6 +102,15 @@ export function toApiDecoderStatus(
 		...(status.scannerJobId !== undefined
 			? { scannerJobId: status.scannerJobId }
 			: {}),
+		...(status.optionIssues !== undefined
+			? {
+					optionIssues: status.optionIssues.map(issue => ({
+						path: issue.path,
+						code: issue.code,
+						message: issue.message,
+					})),
+				}
+			: {}),
 		...(status.ephemeral === true ? { ephemeral: true as const } : {}),
 	}
 }

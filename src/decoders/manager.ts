@@ -18,6 +18,7 @@
  */
 
 import { EventEmitter } from "node:events"
+import type { DecoderOptionIssue } from "@wavekit/api-types"
 import type { Readable } from "node:stream"
 import type {
 	Decoder,
@@ -68,6 +69,7 @@ import { channelisedRatePlan } from "../core/channelizer/rate-plan.js"
 import { isValidRtlSampleRate } from "../core/tuner-controller.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import type { SourceManager, SourceCaps } from "../core/source-manager.js"
+import { validateDecoderOptions } from "./options/index.js"
 import { WaveKitError } from "../utils/errors.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import {
@@ -122,6 +124,8 @@ export interface DecoderManagerConfig {
  * Internal state for tracking decoder restart behavior.
  */
 interface DecoderState {
+	/** WG6: option problems found at creation; undefined = type has no schema */
+	optionIssues?: DecoderOptionIssue[] | undefined
 	decoder: Decoder
 	config: DecoderConfig
 	restartCount: number
@@ -529,6 +533,36 @@ export class DecoderManager extends EventEmitter {
 		return this.registerDecoder(config, null)
 	}
 
+	/** Report-only option validation; never throws, never logs values. */
+	private checkDecoderOptions(
+		config: DecoderConfig,
+	): DecoderOptionIssue[] | undefined {
+		try {
+			const issues = validateDecoderOptions(config.type, config.options)
+			if (issues && issues.length > 0) {
+				this.log.warn(
+					{
+						decoderId: config.id,
+						type: config.type,
+						paths: issues.map(issue => issue.path),
+					},
+					"Decoder options have issues (reported only)",
+				)
+			}
+			return issues?.slice(0, 32)
+		} catch (err) {
+			this.log.warn(
+				{
+					decoderId: config.id,
+					type: config.type,
+					errName: err instanceof Error ? err.name : typeof err,
+				},
+				"Decoder option validation failed; issues not reported",
+			)
+			return undefined
+		}
+	}
+
 	private registerDecoder(
 		config: DecoderConfig,
 		probe: { jobId: string; input: Readable | null } | null,
@@ -570,9 +604,12 @@ export class DecoderManager extends EventEmitter {
 			versionValidation = this.validateDecoderVersion(config)
 		}
 
+		const optionIssues = this.checkDecoderOptions(config)
+
 		const state: DecoderState = {
 			decoder,
 			config,
+			optionIssues,
 			restartCount: 0,
 			currentDelay: this.config.restartDelay,
 			restartTimer: null,
@@ -1135,6 +1172,9 @@ export class DecoderManager extends EventEmitter {
 			...state.decoder.getStatus(),
 			health: state.lastHealth,
 			restartCount: state.restartCount,
+			...(state.optionIssues !== undefined
+				? { optionIssues: state.optionIssues.map(issue => ({ ...issue })) }
+				: {}),
 			...(state.ratePlan ? { rateAssessment: state.ratePlan } : {}),
 			...(state.bandPlan ? { bandAssessment: state.bandPlan } : {}),
 			...(state.nextRestartAt ? { nextRestartAt: state.nextRestartAt } : {}),

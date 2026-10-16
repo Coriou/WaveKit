@@ -17,9 +17,9 @@ import { z } from "zod"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
-	DecoderCaps as ApiDecoderCaps,
 	DecoderInfo as ApiDecoderInfo,
 	DecoderRatePreviewItem,
+	DecoderTypeInfo,
 	DecoderStatus as ApiDecoderStatus,
 } from "@wavekit/api-types"
 import type { DecoderStatus as InternalDecoderStatus } from "../../decoders/types.js"
@@ -36,6 +36,7 @@ import {
 	toApiDecoderInfo,
 	toApiDecoderStatus,
 } from "../serializers/decoder-status.js"
+import { decoderOptionDescriptors } from "../../decoders/options/index.js"
 import { WaveKitError } from "../../utils/errors.js"
 
 /**
@@ -55,6 +56,39 @@ const decoderCapsSchema = {
 		},
 	},
 	required: ["input", "output", "integrationPattern"],
+} as const
+
+/** WG6: documented option keys of a decoder type (GET /api/decoders/types). */
+const decoderOptionDescriptorsSchema = {
+	type: "array",
+	items: {
+		type: "object",
+		properties: {
+			key: { type: "string" },
+			type: {
+				type: "string",
+				enum: [
+					"string",
+					"integer",
+					"number",
+					"boolean",
+					"enum",
+					"string-list",
+					"number-list",
+					"object",
+				],
+			},
+			enumValues: { type: "array", items: { type: "string" } },
+			min: { type: "number" },
+			max: { type: "number" },
+			unit: { type: "string" },
+			default: { type: ["string", "number", "boolean", "null"] },
+			secret: { type: "boolean" },
+			effect: { type: "string", enum: ["restart"] },
+			description: { type: "string" },
+		},
+		required: ["key", "type", "default", "secret", "effect", "description"],
+	},
 } as const
 
 /**
@@ -689,7 +723,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	 * Requirement 17.1: Returns all registered decoder types with their capabilities
 	 */
 	fastify.get<{
-		Reply: Array<{ type: string; caps: ApiDecoderCaps }> | ErrorResponse
+		Reply: Array<DecoderTypeInfo> | ErrorResponse
 	}>(
 		"/api/decoders/types",
 		{
@@ -706,6 +740,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 							properties: {
 								type: { type: "string" },
 								caps: decoderCapsSchema,
+								options: decoderOptionDescriptorsSchema,
 							},
 							required: ["type", "caps"],
 						},
@@ -724,10 +759,14 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			}
 
 			const types = decoderRegistry.getRegisteredTypes()
-			return types.map(type => ({
-				type,
-				caps: toApiDecoderCaps(decoderRegistry.getCaps(type)!),
-			}))
+			return types.map(type => {
+				const options = decoderOptionDescriptors(type)
+				return {
+					type,
+					caps: toApiDecoderCaps(decoderRegistry.getCaps(type)!),
+					...(options ? { options } : {}),
+				}
+			})
 		},
 	)
 
