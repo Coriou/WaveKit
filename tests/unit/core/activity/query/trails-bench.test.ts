@@ -173,4 +173,104 @@ describe.skipIf(!enabled)("trails benchmark (WAVEKIT_TRAILS_BENCH=1)", () => {
 			await rm(dir, { recursive: true, force: true })
 		}
 	}, 300_000)
+
+	it("long history: 500 vessels x 45 in-window points + 3 000 older rows each", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-trails-bench-"))
+		try {
+			const path = join(dir, "activity.db")
+			const db = new DatabaseSync(path)
+			db.exec("PRAGMA journal_mode = WAL")
+			db.exec(ACTIVITY_SCHEMA_V1)
+			const meta = db.prepare(
+				"INSERT INTO store_meta(key, value) VALUES (?, ?)",
+			)
+			meta.run("storeUuid", randomUUID())
+			meta.run("restoreGeneration", "1")
+			meta.run("pruneWatermark", "0")
+			const insert =
+				db.prepare(`INSERT INTO activity (event_id, kind, produced_at_ms, received_at_ms,
+				source_id, decoder_id, protocol, category, frequency_hz, entity_key, summary_json, record_json, record_bytes)
+				VALUES (?, 'decoder-reception', ?, ?, 'rtl', 'dec', 'ais', 'marine', 162025000, ?, ?, '{}', 2)`)
+			const ENTITIES = 500
+			const OLDER = 3_000
+			const IN_WINDOW = 45
+			let id = 0
+			const add = (entity: number, ms: number): void => {
+				id += 1
+				const key = `mmsi:${200_000_000 + entity}`
+				insert.run(
+					`e${id}`,
+					ms,
+					ms,
+					key,
+					JSON.stringify({
+						eventId: `e${id}`,
+						kind: "decoder-reception",
+						producedAt: new Date(ms).toISOString(),
+						protocol: "ais",
+						category: "marine",
+						entityKey: key,
+						title: `Vessel ${key}`,
+						fields: [{ label: "Speed", value: "12 kt" }],
+						position: { lat: 48 + entity / 1000, lon: -4 + (id % 997) / 1000 },
+					}),
+				)
+			}
+			db.exec("BEGIN")
+			// Older history first (lower seq), 1 h to 49 h before NOW.
+			for (let row = 0; row < OLDER; row += 1) {
+				for (let entity = 0; entity < ENTITIES; entity += 1) {
+					add(entity, NOW - HOUR - 1 - (OLDER - row) * 57_000 - entity)
+				}
+			}
+			for (let row = 0; row < IN_WINDOW; row += 1) {
+				for (let entity = 0; entity < ENTITIES; entity += 1) {
+					add(entity, NOW - (IN_WINDOW - row) * 79_000 - entity)
+				}
+			}
+			db.exec("COMMIT")
+			db.close()
+			const reader = await openReadOnly(path)
+			const run = (
+				limits = DEFAULT_TRAILS_READ_LIMITS,
+			): { ms: number; worstMs: number; result: ActivityTrails } => {
+				const times: number[] = []
+				let last: ActivityTrails | undefined
+				for (let attempt = 0; attempt < 3; attempt += 1) {
+					const started = performance.now()
+					const result = runRead(reader, {
+						op: "trails",
+						input: { producedFromMs: NOW - HOUR, producedToMs: NOW, limits },
+					})
+					times.push(performance.now() - started)
+					if (result.op === "trails") last = result.trails
+				}
+				if (!last) throw new TypeError("no result")
+				return { ms: median(times), worstMs: Math.max(...times), result: last }
+			}
+			const summary = (value: ReturnType<typeof run>) => ({
+				ms: value.ms,
+				worstMs: value.worstMs,
+				scanned: value.result.scannedRows,
+				points: value.result.pointCount,
+				trails: value.result.trails.length,
+				truncatedTrails: value.result.trails.filter(trail => trail.truncated)
+					.length,
+				truncation: value.result.truncation,
+			})
+			const points = run()
+			const scan = run({ ...DEFAULT_TRAILS_READ_LIMITS, scanRows: 5_000 })
+			reader.close()
+			const report = {
+				rows: id,
+				points: summary(points),
+				scanRows5000: summary(scan),
+			}
+			process.stderr.write(`TRAILS_BENCH_LONG ${JSON.stringify(report)}\n`)
+			expect(points.worstMs).toBeLessThan(650)
+			expect(scan.worstMs).toBeLessThan(650)
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+	}, 600_000)
 })

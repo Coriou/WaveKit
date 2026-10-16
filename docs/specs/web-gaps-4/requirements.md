@@ -60,10 +60,12 @@ skipped and counted in `skippedRows`; it never fails the request.
 empty), so a client can say "trail since".
 1.7 The read runs in the Activity reader worker in one read transaction, through the existing
 query admission (same busy and timeout responses as search, 429), with its own deadline of
-1 000 ms as a backstop. Inside the reader the scan has a 600 ms wall-time budget; past it the
-scan stops before the next row and answers 200 with `truncated: true` and `time-limit` in
-`truncation` (an additive fifth value, after the four bounds; added after the freeze so a slow
-read does not restart the reader). Activity disabled is 404 `ACTIVITY_DISABLED`, unavailable 503
+1 000 ms as a backstop. Inside the reader one 600 ms wall-time budget covers the scan (which
+stops before the next row at 450 ms) and the early-stop check for older points (which stops
+between chunks at 600 ms, marking the trails it did not reach `truncated: true`); past it the
+read answers 200 with `truncated: true` and `time-limit` in `truncation` (an additive fifth
+value, after the four bounds; added after the freeze so a slow read does not restart the
+reader). Activity disabled is 404 `ACTIVITY_DISABLED`, unavailable 503
 `ACTIVITY_UNAVAILABLE`, a reader failure 500 `ACTIVITY_QUERY_FAILED`, as on the other Activity
 routes. The response is a snapshot: no cursor, no page token, no hole checks.
 1.8 Budget: at most 150 ms on the development Mac for a one-hour window on a busy store

@@ -3309,8 +3309,10 @@ accepted greedily under four bounds:
 
 So every trail holds the newest points of its entity in the window. A trail whose
 older in-window points were not returned has `truncated: true`; when the scan
-stopped early (`scan-rows` or `points`) each returned trail is checked for an older
-valid in-window row, so the flag is exact. As arithmetic: at most 61 points per
+stopped early (`scan-rows`, `points` or `time-limit`) the walk continues past the
+stop, reading positions only for the returned trails not yet marked, to find those
+with an older valid in-window row, so the flag is exact unless `time-limit` is
+reported (see below). As arithmetic: at most 61 points per
 entity per hour, so 300 aircraft over 1 hour is about 18,000 points, under the
 20,000 cap. A busy store (about 520,000 rows a day) holds about 21,700 rows an
 hour, so a 24-hour request reaches the scan cap after about the newest 9 hours. A
@@ -3321,8 +3323,8 @@ trails).
 window, ISO), `trails`, `pointCount`, `scannedRows`, `skippedRows` (rows in the
 window whose stored position was missing or invalid: not finite, out of range or
 exactly (0, 0)), `truncated`, `truncation` (the bounds that cut the result, in the
-order `scan-rows`, `points`, `entities`, `per-entity`; empty when `truncated` is
-false), `retentionFloor` (ISO `producedAt` of the oldest stored row: no trail can
+order `scan-rows`, `points`, `entities`, `per-entity`, `time-limit`; empty when
+`truncated` is false), `retentionFloor` (ISO `producedAt` of the oldest stored row: no trail can
 start earlier; null when the store is empty) and `generatedAt`. Trails are sorted
 by their newest point descending, then `entityKey`. A trail is `{ entityKey,
 category, protocol, points, truncated }`; `category` and `protocol` are those of
@@ -3358,12 +3360,15 @@ its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending tim
 
 Trails use the same reader and admission as search (one read in flight per
 caller, one executing at a time, so a trails read can delay other Activity reads,
-by at most about 600 ms). The scan has a 600 ms wall-time budget inside the
-reader: when it runs out, the scan stops before the next row and the response is
-a normal 200 with the newest rows read so far, `truncated: true` and `time-limit`
-in `truncation` (after the four bounds above; each returned trail is still checked
-for older in-window points, so its `truncated` flag stays exact). Narrow the window
-or the filters to see older points. The 1,000 ms reader deadline (instead of
+by at most about 650 ms). One 600 ms wall-time budget inside the reader covers
+the scan and the check for older points: the scan stops before the next row at
+450 ms, leaving 150 ms for the check, and the check stops between chunks of rows at
+600 ms (a chunk can overrun by a few ms). When either runs out the response is a
+normal 200 with the newest rows read so far, `truncated: true` and `time-limit` in
+`truncation` (after the four bounds above). Trails the check resolved keep an exact
+flag; trails it had no time to check are marked `truncated: true`, so with
+`time-limit` a `true` flag means "may have lost older points" while `false` stays
+exact. Narrow the window or the filters to see older points. The 1,000 ms reader deadline (instead of
 search's 250 ms) is only a backstop: a read that passes it answers 429
 `ACTIVITY_QUERY_TIMEOUT` with no partial result, and the reader worker is stopped
 and a new one starts for the next query (within the reader's 5 s startup budget).

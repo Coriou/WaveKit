@@ -110,11 +110,42 @@ describe("query service trails", () => {
 		expect(DEFAULT_ACTIVITY_QUERY_LIMITS.trailsDeadlineMs).toBe(1_000)
 	})
 
-	it("stops the scan cooperatively at 600 ms, inside the 1 000 ms reader deadline", () => {
+	it("keeps the 600 ms cooperative budget inside the 1 000 ms reader deadline", () => {
 		expect(DEFAULT_ACTIVITY_QUERY_LIMITS.trailsWallBudgetMs).toBe(600)
 		expect(DEFAULT_ACTIVITY_QUERY_LIMITS.trailsWallBudgetMs).toBeLessThan(
 			DEFAULT_ACTIVITY_QUERY_LIMITS.trailsDeadlineMs,
 		)
+	})
+
+	it("passes trailsWallBudgetMs to the reader: a spent budget is a 200 time-limit answer", async () => {
+		fixture = await createFixture()
+		const store = fixture
+		for (let i = 0; i < 3; i++) {
+			store.insert({
+				eventId: `e${i}`,
+				entityKey: i === 1 ? "B" : "A",
+				producedAt: iso(-(3 - i) * 1000),
+			})
+			stamp(store, `e${i}`, 10 + i)
+		}
+		// A zero budget stops the walk after the newest row and leaves the probe no time,
+		// so the one returned trail is conservatively marked.
+		service = openQueryService(store, {
+			now: () => NOW,
+			limits: { trailsWallBudgetMs: 0 },
+		})
+		const result = await service.trails?.({})
+		expect(result?.scannedRows).toBe(1)
+		expect(result?.truncation).toEqual(["time-limit"])
+		expect(result?.trails.map(t => [t.entityKey, t.truncated])).toEqual([
+			["A", true],
+		])
+		await service.close()
+		// The default budget reads all three rows untruncated.
+		service = openQueryService(store, { now: () => NOW })
+		const full = await service.trails?.({})
+		expect(full?.scannedRows).toBe(3)
+		expect(full?.truncation).toEqual([])
 	})
 
 	it("applies trailsLimits overrides at the bound", async () => {

@@ -36,17 +36,26 @@ export interface TrailsReadInput {
 	/** Keyset chunk size of the walk; defaults to TRAILS_CHUNK_ROWS (tests lower it). */
 	chunkRows?: number
 	/**
-	 * Cooperative wall-time budget of the scan in ms; defaults to TRAILS_WALL_BUDGET_MS. Past
-	 * it the walk stops before the next row and the result is marked `time-limit`, so the
-	 * outer reader deadline (and its worker restart) stays a backstop.
+	 * Cooperative wall-time budget in ms of the whole read (walk and early-stop probe);
+	 * defaults to TRAILS_WALL_BUDGET_MS. Past it the work stops and the result is marked
+	 * `time-limit`, so the outer reader deadline (and its worker restart) stays a backstop.
 	 */
 	wallBudgetMs?: number
+	/**
+	 * Part of the wall budget kept for the early-stop probe: the walk stops at
+	 * `wallBudgetMs - probeReserveMs`, the probe at `wallBudgetMs`. Defaults to
+	 * TRAILS_PROBE_RESERVE_MS.
+	 */
+	probeReserveMs?: number
 	/** Monotonic ms clock for the budget; defaults to performance.now (tests inject one). */
 	clock?: () => number
 }
 
 /** Default scan wall budget, well inside the 1 000 ms trails reader deadline. */
 export const TRAILS_WALL_BUDGET_MS = 600
+
+/** Share of the wall budget reserved for the early-stop probe (the walk gets the rest). */
+export const TRAILS_PROBE_RESERVE_MS = 150
 
 export const DEFAULT_TRAILS_READ_LIMITS: TrailsReadLimits = Object.freeze({
 	maxPoints: ACTIVITY_TRAILS_MAX_POINTS,
@@ -125,22 +134,20 @@ interface Building {
 	newestMs: number
 	/** Newest first while building. */
 	points: ActivityTrailPoint[]
-	/** Oldest accepted row, in scan order the last one. */
-	oldestMs: number
-	oldestSeq: number
 	truncated: boolean
 }
 
 /**
- * Asks whether an in-window row with a valid position, older in scan order
- * than (oldestMs, oldestSeq), exists for the entity. Used only when the scan
- * stopped early, so trails that lost points past the stop are marked.
+ * Resolves which returned trails lost an older in-window point. Given the keys of
+ * the returned trails not yet marked truncated (only when the scan stopped early),
+ * returns those that have a valid in-window row past the stop. `complete: false`
+ * means the check ran out of time: every candidate not in `older` is then marked
+ * truncated (conservative) and `time-limit` is reported.
  */
-export type TrailHasOlder = (
-	entityKey: string,
-	oldestMs: number,
-	oldestSeq: number,
-) => boolean
+export type TrailOlderResolver = (candidates: readonly string[]) => {
+	older: ReadonlySet<string>
+	complete: boolean
+}
 
 /**
  * Greedy newest-first acceptance over rows already ordered by
@@ -161,13 +168,18 @@ export function acceptTrailRows(
 	// Rows from the stop on (the refused row included): any valid one of a
 	// returned entity is a lost point.
 	const rest = rows.slice(index)
-	return acceptor.finish(rows.length > limits.scanRows, entityKey =>
-		rest.some(
-			row =>
-				row.entityKey === entityKey &&
-				parseTrailPosition(row.position) !== null,
-		),
-	)
+	return acceptor.finish(rows.length > limits.scanRows, candidates => {
+		const wanted = new Set(candidates)
+		const older = new Set<string>()
+		for (const row of rest) {
+			if (
+				wanted.has(row.entityKey) &&
+				parseTrailPosition(row.position) !== null
+			)
+				older.add(row.entityKey)
+		}
+		return { older, complete: true }
+	})
 }
 
 export interface TrailAcceptor {
@@ -175,13 +187,13 @@ export interface TrailAcceptor {
 	push(row: TrailRow): boolean
 	/**
 	 * `moreRows`: a row exists past the scanned ones (signals scan-rows when no other stop).
-	 * `hasOlder`: consulted per untruncated trail when the scan stopped early
-	 * (scan-rows, points or time-limit), to mark trails that lost older in-window points.
-	 * `timeLimited`: the wall budget stopped the scan before a remaining row.
+	 * `resolveOlder`: consulted once with the untruncated trails when the scan stopped
+	 * early (scan-rows, points or time-limit), to mark trails that lost older in-window
+	 * points. `timeLimited`: the wall budget stopped the scan before a remaining row.
 	 */
 	finish(
 		moreRows: boolean,
-		hasOlder?: TrailHasOlder,
+		resolveOlder?: TrailOlderResolver,
 		timeLimited?: boolean,
 	): AcceptedTrails
 }
@@ -228,8 +240,6 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 				protocol: row.protocol,
 				newestMs: row.producedAtMs,
 				points: [point],
-				oldestMs: row.producedAtMs,
-				oldestSeq: row.seq,
 				truncated: false,
 			})
 			pointCount += 1
@@ -241,15 +251,13 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 			return true
 		}
 		trail.points.push(point)
-		trail.oldestMs = row.producedAtMs
-		trail.oldestSeq = row.seq
 		pointCount += 1
 		return true
 	}
 
 	function finish(
 		moreRows: boolean,
-		hasOlder?: TrailHasOlder,
+		resolveOlder?: TrailOlderResolver,
 		timeLimited = false,
 	): AcceptedTrails {
 		if (moreRows && !stopped && scannedRows >= limits.scanRows)
@@ -257,14 +265,17 @@ export function createTrailAcceptor(limits: TrailsReadLimits): TrailAcceptor {
 		if (timeLimited && !stopped) hit.add("time-limit")
 		const built = [...byEntity.values()]
 		if (
-			hasOlder &&
+			resolveOlder &&
 			(hit.has("scan-rows") || hit.has("points") || hit.has("time-limit"))
 		) {
-			for (const entry of built) {
-				if (entry.truncated) continue
-				if (hasOlder(entry.entityKey, entry.oldestMs, entry.oldestSeq))
-					entry.truncated = true
+			const open = built.filter(entry => !entry.truncated)
+			const { older, complete } = resolveOlder(
+				open.map(entry => entry.entityKey),
+			)
+			for (const entry of open) {
+				if (!complete || older.has(entry.entityKey)) entry.truncated = true
 			}
+			if (!complete) hit.add("time-limit")
 		}
 		built.sort((left, right) => {
 			if (left.newestMs !== right.newestMs)
@@ -386,11 +397,19 @@ export function readTrails(
 	const chunk = Math.max(1, Math.floor(input.chunkRows ?? TRAILS_CHUNK_ROWS))
 	const clock = input.clock ?? (() => performance.now())
 	const wallBudgetMs = input.wallBudgetMs ?? TRAILS_WALL_BUDGET_MS
+	// The walk stops early enough to leave the probe its reserve inside the one budget.
+	const walkBudgetMs = Math.max(
+		0,
+		wallBudgetMs - (input.probeReserveMs ?? TRAILS_PROBE_RESERVE_MS),
+	)
 	const startedMs = clock()
+	const elapsed = (): number => clock() - startedMs
 	let read = 0
 	let moreRows = false
 	let timeLimited = false
 	let last: TrailRow | null = null
+	/** The row past scanRows that only signalled the bound; never pushed. */
+	let extra: TrailRow | null = null
 	walk: for (;;) {
 		const size = Math.min(chunk, budget - read)
 		const found =
@@ -406,7 +425,7 @@ export function readTrails(
 		for (const raw of found) {
 			// Checked before every row after the first, so a stop always leaves a real
 			// unscanned row behind and at least the newest row is taken.
-			if (read > 0 && clock() - startedMs >= wallBudgetMs) {
+			if (read > 0 && elapsed() >= walkBudgetMs) {
 				timeLimited = true
 				break walk
 			}
@@ -415,36 +434,68 @@ export function readTrails(
 			last = row
 			if (read > input.limits.scanRows) {
 				moreRows = true
+				extra = row
 				break walk
 			}
 			if (!acceptor.push(row)) break walk
 		}
 		if (found.length < size || read >= budget) break
 	}
-	// Early stop: probe each returned trail for an older in-window valid row it
-	// did not get (at most maxEntities probes on activity_entity, same snapshot).
-	// The SQL predicate mirrors parseTrailPosition; JSON overflow (1e999) reads
-	// as an infinite real and fails the range check.
+	// Early stop: one bounded continuation of the same newest-first walk, past the
+	// stop, reads the position only for the returned trails not yet known to be cut,
+	// to find those that lost an older in-window valid row. Every statement reads at
+	// most one chunk, so the clock is checked between chunks. It ends when every
+	// candidate is resolved or the window is exhausted (exact), or when the shared
+	// wall budget runs out (the rest are marked truncated and time-limit is reported).
 	const probe = db.prepare(
-		`SELECT 1 AS hit FROM activity INDEXED BY activity_entity
-		WHERE entity_key = ? AND ${where.join(" AND ")}
-		AND (produced_at_ms < ? OR (produced_at_ms = ? AND seq < ?))
-		AND json_valid(summary_json)
-		AND json_type(summary_json, '$.position.lat') IN ('integer', 'real')
-		AND json_type(summary_json, '$.position.lon') IN ('integer', 'real')
-		AND json_extract(summary_json, '$.position.lat') BETWEEN -90 AND 90
-		AND json_extract(summary_json, '$.position.lon') BETWEEN -180 AND 180
-		AND NOT (json_extract(summary_json, '$.position.lat') = 0
-			AND json_extract(summary_json, '$.position.lon') = 0)
-		LIMIT 1`,
+		`SELECT seq, produced_at_ms, entity_key,
+			CASE WHEN entity_key IN (SELECT value FROM json_each(?))
+				THEN CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
+					THEN json_extract(summary_json, '$.position') END END AS position
+			FROM activity INDEXED BY activity_produced
+			WHERE ${where.join(" AND ")}
+			AND produced_at_ms <= ? AND (produced_at_ms < ? OR seq < ?)
+			ORDER BY produced_at_ms DESC, seq DESC LIMIT ?`,
 	)
-	const accepted = acceptor.finish(
-		moreRows,
-		(entityKey, oldestMs, oldestSeq) =>
-			probe.get(entityKey, ...params, oldestMs, oldestMs, oldestSeq) !==
-			undefined,
-		timeLimited,
-	)
+	const resolveOlder: TrailOlderResolver = candidates => {
+		const open = new Set(candidates)
+		const older = new Set<string>()
+		const check = (entityKey: string, position: unknown): void => {
+			if (open.has(entityKey) && parseTrailPosition(position) !== null) {
+				open.delete(entityKey)
+				older.add(entityKey)
+			}
+		}
+		if (extra !== null) check(extra.entityKey, extra.position)
+		let cursor: { ms: number; seq: number } | null =
+			last === null ? null : { ms: last.producedAtMs, seq: last.seq }
+		while (open.size > 0 && cursor !== null) {
+			if (elapsed() >= wallBudgetMs) return { older, complete: false }
+			const found = probe.all(
+				JSON.stringify([...open]),
+				...params,
+				cursor.ms,
+				cursor.ms,
+				cursor.seq,
+				chunk,
+			)
+			for (const raw of found) {
+				const entityKey = raw["entity_key"]
+				if (typeof entityKey !== "string")
+					throw activityRecordCorrupt("Activity trail row is corrupt")
+				cursor = {
+					ms: numberOf(raw["produced_at_ms"], "producedAt"),
+					seq: numberOf(raw["seq"], "seq"),
+				}
+				const position = raw["position"]
+				if (position !== null && position !== undefined)
+					check(entityKey, position)
+			}
+			if (found.length < chunk) break
+		}
+		return { older, complete: true }
+	}
+	const accepted = acceptor.finish(moreRows, resolveOlder, timeLimited)
 	const floorRow = db
 		.prepare("SELECT MIN(produced_at_ms) AS floor FROM activity")
 		.get()

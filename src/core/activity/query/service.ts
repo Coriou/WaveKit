@@ -89,7 +89,7 @@ export interface ActivityQueryLimits {
 	deadlineMs: number
 	/** WG4: deadline of one bulk trails read (backstop: a timeout restarts the reader). */
 	trailsDeadlineMs: number
-	/** WG4: cooperative scan budget inside the reader; past it trails return `time-limit`. */
+	/** WG4: cooperative budget of the trails scan plus its older-points check; past it `time-limit`. */
 	trailsWallBudgetMs: number
 	maxQueued: number
 	maxExecuting: number

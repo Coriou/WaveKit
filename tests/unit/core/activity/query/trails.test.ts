@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { performance } from "node:perf_hooks"
 import { DatabaseSync } from "node:sqlite"
 import fc from "fast-check"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -555,10 +556,13 @@ describe("readTrails against a store", () => {
 		at(400, "C")
 		at(500, "A")
 		// One tick per clock call: start 0, then checks before rows 2, 3, 4 read 1, 2, 3.
+		// The walk budget is 100 - 97 = 3, so it stops before row 4; the probe then runs
+		// well inside the 100 total and keeps the per-trail flags exact.
 		let ticks = 0
 		const result = read({
 			chunkRows: 2,
-			wallBudgetMs: 3,
+			wallBudgetMs: 100,
+			probeReserveMs: 97,
 			clock: () => ticks++,
 		})
 		expect(result.truncated).toBe(true)
@@ -578,6 +582,193 @@ describe("readTrails against a store", () => {
 		const full = read({ chunkRows: 2, wallBudgetMs: 1e9 })
 		expect(full.truncation).toEqual([])
 		expect(full.scannedRows).toBe(5)
+	})
+
+	it("a probe that runs out of the shared budget marks the open trails truncated", () => {
+		reset()
+		const at = (offset: number, entityKey: string) =>
+			insert({
+				producedAtMs: NOW - offset,
+				entityKey,
+				category: "aircraft",
+				protocol: "adsb",
+				position: { lat: 10, lon: 20 },
+			})
+		at(100, "A")
+		at(200, "B")
+		at(300, "A")
+		at(400, "C")
+		at(500, "A")
+		// Walk budget 4 - 1 = 3 stops before row 4 (tick 3); the probe's first check
+		// reads tick 4 >= 4, so nothing is probed and both trails are conservative.
+		let ticks = 0
+		const result = read({
+			chunkRows: 2,
+			wallBudgetMs: 4,
+			probeReserveMs: 1,
+			clock: () => ticks++,
+		})
+		expect(result.truncation).toEqual(["time-limit"])
+		expect(result.scannedRows).toBe(3)
+		expect(result.trails.map(t => [t.entityKey, t.truncated])).toEqual([
+			["A", true],
+			["B", true],
+		])
+	})
+
+	it("the probe after a points stop is bounded per chunk by the same budget", () => {
+		reset()
+		const at = (offset: number, entityKey: string) =>
+			insert({
+				producedAtMs: NOW - offset,
+				entityKey,
+				category: "aircraft",
+				protocol: "adsb",
+				position: { lat: 10, lon: 20 },
+			})
+		at(100, "A")
+		at(200, "B")
+		at(300, "C")
+		for (let i = 0; i < 6; i += 1) at(400 + i, "X")
+		at(900, "B")
+		const limits = { ...DEFAULT_TRAILS_READ_LIMITS, maxPoints: 2 }
+		const flags = (result: ActivityTrails) =>
+			result.trails.map(t => [t.entityKey, t.truncated])
+		// Ample budget: the probe walks past the six X rows and finds B's older point.
+		const exact = read({ limits, chunkRows: 2 })
+		expect(exact.truncation).toEqual(["points"])
+		expect(flags(exact)).toEqual([
+			["A", false],
+			["B", true],
+		])
+		// Clock calls: walk start, checks before rows 2 and 3, then one per probe chunk.
+		// The 4th call (first probe chunk) is in budget, the 5th is past it.
+		let calls = 0
+		const clock = () => (++calls >= 5 ? 1e6 : 0)
+		const cut = read({ limits, chunkRows: 2, clock })
+		expect(calls).toBe(5)
+		expect(cut.truncation).toEqual(["points", "time-limit"])
+		expect(flags(cut)).toEqual([
+			["A", true],
+			["B", true],
+		])
+	})
+
+	/** Wraps the reader so chosen statement calls block for `delay(sql, call)` ms. */
+	function delayed(delay: (sql: string, call: number) => number): SqlDatabase {
+		const cell = new Int32Array(new SharedArrayBuffer(4))
+		return {
+			prepare(sql) {
+				const statement = reader.prepare(sql)
+				let call = 0
+				const wait = () => {
+					call += 1
+					const ms = delay(sql, call)
+					if (ms > 0) Atomics.wait(cell, 0, 0, ms)
+				}
+				return {
+					all: (...params) => (wait(), statement.all(...params)),
+					get: (...params) => (wait(), statement.get(...params)),
+				}
+			},
+			exec: sql => reader.exec(sql),
+			close: () => undefined,
+		}
+	}
+
+	function timedRead(
+		db: SqlDatabase,
+		input: Partial<TrailsReadInput>,
+	): { ms: number; result: ActivityTrails } {
+		const started = performance.now()
+		const result = runRead(db, {
+			op: "trails",
+			input: {
+				producedFromMs: NOW - 10_000,
+				producedToMs: NOW,
+				limits: DEFAULT_TRAILS_READ_LIMITS,
+				nowMs: NOW,
+				...input,
+			},
+		})
+		if (result.op !== "trails") throw new TypeError("wrong op")
+		return { ms: performance.now() - started, result: result.trails }
+	}
+
+	function fill(rows: number, keyOf: (index: number) => string): void {
+		writer.exec("BEGIN")
+		for (let index = 0; index < rows; index += 1) {
+			insert({
+				producedAtMs: NOW - 1 - index,
+				entityKey: keyOf(index),
+				category: "marine",
+				protocol: "ais",
+				position: { lat: 10, lon: 20 },
+			})
+		}
+		writer.exec("COMMIT")
+	}
+
+	it("real clock: a slow walk fetch stops at the default budget with no probe overrun", () => {
+		reset()
+		fill(101, index => `mmsi:${index}`)
+		// The second walk chunk (first keyset continuation) takes 610 ms; every probe
+		// chunk would take 5 ms.
+		const db = delayed((sql, call) => {
+			if (sql.includes("json_each")) return 5
+			return sql.includes("seq < ?") && call === 1 ? 610 : 0
+		})
+		const { ms, result } = timedRead(db, { chunkRows: 100 })
+		expect(result.truncation).toEqual(["time-limit"])
+		expect(result.scannedRows).toBe(100)
+		expect(result.trails.every(trail => trail.truncated)).toBe(true)
+		expect(ms).toBeLessThan(650)
+	})
+
+	it("real clock: a slow probe stops at the shared budget", () => {
+		reset()
+		// A and B are returned (maxPoints 2), C is refused, then 400 rows of X follow:
+		// the probe never resolves A or B and needs many chunks of 4 rows, 20 ms each.
+		insert({
+			producedAtMs: NOW - 1,
+			entityKey: "A",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 1, lon: 1 },
+		})
+		insert({
+			producedAtMs: NOW - 2,
+			entityKey: "B",
+			category: "aircraft",
+			protocol: "adsb",
+			position: { lat: 1, lon: 1 },
+		})
+		writer.exec("BEGIN")
+		for (let index = 0; index < 400; index += 1) {
+			insert({
+				producedAtMs: NOW - 3 - index,
+				entityKey: index === 0 ? "C" : "X",
+				category: "aircraft",
+				protocol: "adsb",
+				position: { lat: 1, lon: 1 },
+			})
+		}
+		writer.exec("COMMIT")
+		const db = delayed(sql => (sql.includes("json_each") ? 20 : 0))
+		const { ms, result } = timedRead(db, {
+			chunkRows: 4,
+			limits: { ...DEFAULT_TRAILS_READ_LIMITS, maxPoints: 2 },
+			wallBudgetMs: 200,
+			probeReserveMs: 50,
+		})
+		expect(result.truncation).toEqual(["points", "time-limit"])
+		expect(result.trails.map(t => [t.entityKey, t.truncated])).toEqual([
+			["A", true],
+			["B", true],
+		])
+		// One probe chunk past the budget at most.
+		expect(ms).toBeGreaterThanOrEqual(200)
+		expect(ms).toBeLessThan(260)
 	})
 
 	it("empty store returns no trails and a null floor; from == to allowed", () => {
