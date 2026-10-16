@@ -439,6 +439,11 @@ Activity `unavailable` and the rest running), and measured retention.
 - [x] Meshtastic flood copies are dropped in Activity (WG3): same `from`, `id`,
       `portnum` and payload within 30 s, on every port; copies take no tokens
       and are not losses.
+- [x] Busy-station fair-share retention (WG3): `activity.retention.policy`
+      `fair-share` (default) water-fills the row and byte caps across decoder
+      feeds, so pages and a mesh keep their rows to the age cap beside a busy
+      ADS-B feed; `oldest-first` keeps the pre-WG3 behaviour. Status reports
+      per-share usage in `retention` and `floodCopies`.
 - [ ] Add a common decode envelope with stable identity, category, title, fields,
       actual channel frequency, source/decoder/job provenance and raw JSON.
       Preserve existing decoder payloads; source centre alone cannot locate an
