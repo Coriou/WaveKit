@@ -17,6 +17,7 @@ import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { defaultFftSize } from "./fft.js"
 import type {
+	CfarMaskRange,
 	EngineState,
 	FreqRange,
 	IqFormat,
@@ -97,7 +98,8 @@ export interface EngineEpoch {
 
 export interface EngineMasks {
 	exclusions: FreqRange[]
-	cfarRanges: FreqRange[]
+	/** SF1: per-range false-alarm target optional (CfarMaskRange). */
+	cfarRanges: CfarMaskRange[]
 	burstRanges: FreqRange[]
 	rasters: Raster[]
 	obwHz: number[]
@@ -192,6 +194,19 @@ export function gainKeyOf(state: TunerState | undefined): string {
 	return state.gainMode === "manual" ? `m:${state.gain}` : "agc"
 }
 
+/**
+ * False-alarm target (per MHz per minute) for a sensitivity preset.
+ * `normal` keeps `settingsFa`; `low` is 0.25 and `high` is 2.
+ */
+export function faTargetForSensitivity(
+	sensitivity: SpectrumSettings["detection"]["sensitivity"],
+	settingsFa: number,
+): number {
+	if (sensitivity === "low") return 0.25
+	if (sensitivity === "high") return 2
+	return settingsFa
+}
+
 export function buildPipelineConfig(
 	sourceId: string,
 	format: IqFormat,
@@ -209,12 +224,10 @@ export function buildPipelineConfig(
 	const integrationMs =
 		tuning.integrationMs ??
 		(sensitivity === "high" ? 100 : s.detection.integrationMs)
-	const faTargetPerMhzMin =
-		sensitivity === "low"
-			? 0.25
-			: sensitivity === "high"
-				? 2
-				: s.detection.faTargetPerMhzMin
+	const faTargetPerMhzMin = faTargetForSensitivity(
+		sensitivity,
+		s.detection.faTargetPerMhzMin,
+	)
 	return {
 		sourceId,
 		format,

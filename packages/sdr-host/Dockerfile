@@ -52,7 +52,7 @@ RUN git clone --depth 1 --branch ${RTLSDR_VERSION} https://github.com/osmocom/rt
 
 # TypeScript and production dependencies are JavaScript-only. Build them on the
 # build machine rather than emulating Node for ARM64 cross-builds.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS node-build
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS node-build
 
 # Install pnpm v10
 RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
@@ -77,7 +77,7 @@ RUN pnpm install --frozen-lockfile --prod=false --config.enable-global-virtual-s
     CI=true pnpm prune --prod --config.enable-global-virtual-store=false
 
 # Supply the target architecture's Node binary, not the build machine's binary.
-FROM node:22-bookworm-slim AS node-runtime
+FROM node:24-bookworm-slim AS node-runtime
 
 # Stage: runtime
 FROM debian:bookworm-slim AS runtime

@@ -13,6 +13,29 @@ tool is required to read or write any of it.
 
 Whichever skill or tool helps you write a design, save the result in the paths above.
 
+## Spec index
+
+- [activity-recording-catalog](activity-recording-catalog/requirements.md)
+- [band-plans](band-plans/requirements.md)
+- [build-devx-overhaul](build-devx-overhaul/requirements.md)
+- [core-access-policy](core-access-policy/requirements.md)
+- [decode-envelope](decode-envelope/requirements.md)
+- [lora-decoder](lora-decoder/requirements.md)
+- [operator-data](operator-data/requirements.md)
+- [receiver-capabilities](receiver-capabilities/requirements.md)
+- [regional-display-registry](regional-display-registry/requirements.md)
+- [scanner-followups](scanner-followups/requirements.md): running-job range edits,
+  per-range fields, signals only, preempting job, identity search (SF1)
+- [viewed-slice-spectrum](viewed-slice-spectrum/requirements.md)
+- [web-gaps-1](web-gaps-1/requirements.md): waterfall backfill and averaging, analog
+  transmission events, AIS vessel tracker, Activity on by default (WG1)
+- [web-gaps-2](web-gaps-2/requirements.md): Activity presentation, APRS and Meshtastic
+  trackers, CTCSS/DTMF, AIS checksum, update throttle, call metadata, device labels,
+  lockouts skip sweeps, per-job hits (WG2)
+- [web-gaps-3](web-gaps-3/requirements.md): fair-share Activity retention and the hole
+  contract, RF provenance on receptions, Meshtastic flood copies, coverage per bearing,
+  Meshtastic telemetry and neighbours (WG3)
+
 ## The three files
 
 - **`requirements.md`**: user stories and numbered acceptance criteria (`1.1`, `1.2`, ...).

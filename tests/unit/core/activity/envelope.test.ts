@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 import {
 	createDecodeEnvelope,
 	validateDecodeEnvelope,
+	withPresentation,
 } from "../../../../src/core/activity/envelope.js"
 import { parseAcarsdecJson } from "../../../../src/decoders/builtin/acarsdec.js"
 import { parseDumpvdl2Json } from "../../../../src/decoders/builtin/dumpvdl2.js"
@@ -43,6 +44,55 @@ function nodes(count: number): unknown[] {
 }
 
 describe("unmounted decoder event envelope", () => {
+	it.each([
+		"aircraft",
+		"marine",
+		"aviation-data",
+		"voice",
+		"paging",
+		"aprs",
+		"sensors",
+		"mesh",
+		"other",
+	] as const)("accepts brand category %s", category => {
+		const envelope = createDecodeEnvelope(output({}), context(), { category })
+		expect(validateDecodeEnvelope(wire(envelope)).category).toBe(category)
+	})
+	it("preserves explicit entity and position without inference or shared references", () => {
+		const position = { lat: 48, lon: 2, altM: 100 }
+		const envelope = createDecodeEnvelope(
+			output({ lat: 0, icao: "abc123" }),
+			context(),
+			{ entityKey: "icao:ABC123", position },
+		)
+		expect(envelope.entityKey).toBe("icao:ABC123")
+		position.lat = 0
+		expect(envelope.position).toEqual({ lat: 48, lon: 2, altM: 100 })
+		expect(validateDecodeEnvelope(wire(envelope))).toEqual(envelope)
+		const unknown = createDecodeEnvelope(
+			output({ lat: 48, lon: 2, mmsi: 123 }),
+			context(),
+		)
+		expect(unknown.entityKey).toBeNull()
+		expect(unknown).not.toHaveProperty("position")
+	})
+	it("rejects retired categories and malformed entity/position", () => {
+		const envelope = createDecodeEnvelope(output({}), context())
+		for (const patch of [
+			{ category: "pager" },
+			{ category: "data" },
+			{ entityKey: "icao" },
+			{ entityKey: "icao:" },
+			{ entityKey: ":value" },
+			{ position: { lat: 91, lon: 0 } },
+			{ position: { lat: 0, lon: NaN } },
+			{ position: { lat: 0 } },
+			{ position: { lat: 0, lon: 0, altM: Infinity } },
+		])
+			expect(() => validateDecodeEnvelope({ ...envelope, ...patch })).toThrow(
+				"Invalid decoder event envelope",
+			)
+	})
 	// Feature: decode-envelope, Property 1: Immutable caller identity
 	// Validates: Requirements 1.2, 1.3, 1.4
 	it("preserves caller identity across equal receptions and changed presentation", () => {
@@ -140,7 +190,7 @@ describe("unmounted decoder event envelope", () => {
 	it("handles real ACARS defaults/undefined and VDL2 unknown frequency without promoting them", () => {
 		const acars = parseAcarsdecJson({ text: "Message" })
 		const vdl2 = parseDumpvdl2Json({ vdl2: { t: { sec: 1 } } })
-		expect(acars?.frequency).toBeCloseTo(131_550_000, 0)
+		expect(acars).not.toHaveProperty("frequency")
 		expect(vdl2?.frequency).toBe(0)
 		for (const data of [acars, vdl2]) {
 			const envelope = createDecodeEnvelope(output(data), context())
@@ -344,5 +394,45 @@ describe("unmounted decoder event envelope", () => {
 			"Invalid decoder event envelope",
 		)
 		expect(getter).not.toHaveBeenCalled()
+	})
+	it("adds a presentation to a plain envelope exactly as create does", () => {
+		const presentations: DecodePresentation[] = [
+			{},
+			{ category: "aircraft", protocol: "adsb" },
+			{
+				category: "aprs",
+				protocol: "aprs",
+				entityKey: "callsign:N0CALL-9",
+				title: "N0CALL-9 Position",
+				position: { lat: 51.5, lon: -0.1 },
+				fields: [
+					{ key: "speed", label: "Speed", value: 12, unit: "kn" },
+					{ key: "ok", label: "OK", value: true },
+				],
+			},
+		]
+		const supplied: DecodeEnvelopeContext = {
+			...context(),
+			decoderType: "readsb",
+			provenance: { sourceId: "rtl", frequency: null },
+			refs: { callId: "call-1" },
+		}
+		for (const presentation of presentations) {
+			const source = output({ icao: "abc123", tags: ["a"] }, "aircraft")
+			const plain = createDecodeEnvelope(source, supplied)
+			const added = withPresentation(plain, presentation)
+			const created = createDecodeEnvelope(source, supplied, presentation)
+			expect(added).toEqual(created)
+			expect(JSON.stringify(added)).toBe(JSON.stringify(created))
+		}
+	})
+
+	it("rejects a presentation through withPresentation as create does", () => {
+		const plain = createDecodeEnvelope(output({}), context())
+		expect(() => withPresentation(plain, { entityKey: "no key" })).toThrow()
+		expect(() => withPresentation(plain, { title: "bad\u0000title" })).toThrow()
+		expect(() =>
+			createDecodeEnvelope(output({}), context(), { entityKey: "no key" }),
+		).toThrow()
 	})
 })

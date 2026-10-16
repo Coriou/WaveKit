@@ -285,7 +285,7 @@ describe("durable remembered-browser authority", () => {
 		})
 		expect(rotated.lookup(session.cookieValue)).toBeUndefined()
 		expect(env.durable()).toEqual({
-			version: 1,
+			version: 2,
 			credentialBinding: "a".repeat(64),
 			sessions: [],
 		})
@@ -299,13 +299,80 @@ describe("durable remembered-browser authority", () => {
 		).rejects.toMatchObject({ code: "ACCESS_UNAVAILABLE" })
 	})
 
+	it("keeps a next-hour admission that arrives while an earlier last-seen waits behind a held mutation (R2 4)", async () => {
+		const HOUR = 3_600_000
+		let release: () => void = () => undefined
+		let entered: () => void = () => undefined
+		const held = new Promise<void>(resolve => {
+			entered = resolve
+		})
+		let hold = false
+		const env = await setup({
+			persist: async () => {
+				if (!hold) return
+				hold = false
+				const gate = new Promise<void>(resolve => {
+					release = resolve
+				})
+				entered()
+				await gate
+			},
+		})
+		const session = created(await env.store.create())
+		hold = true
+		const label = env.store.label(session.principalId, { name: "Desk" })
+		await held
+		const first = env.store.noteSeen(session.principalId, 13 * HOUR - 1000)
+		const second = env.store.noteSeen(session.principalId, 13 * HOUR)
+		release()
+		await Promise.all([label, first, second])
+		expect(env.store.exportSnapshot().sessions[0]).toMatchObject({
+			name: "Desk",
+			lastSeenAt: 13 * HOUR,
+		})
+	})
+
+	it("clears a stored last-seen hour after the current hour or before creation instead of rejecting (R1 #13)", async () => {
+		const HOUR = 3_600_000
+		const env = await setup({ epochNow: () => 5 * HOUR })
+		created(await env.store.create())
+		const snapshot = env.store.exportSnapshot()
+		const record = snapshot.sessions[0]!
+		for (const [stored, expected] of [
+			[6 * HOUR, null],
+			[4 * HOUR, null],
+			[5 * HOUR, 5 * HOUR],
+		] as const) {
+			const restored = await SessionStore.open({
+				...env.options,
+				snapshot: {
+					...snapshot,
+					sessions: [{ ...record, lastSeenAt: stored }],
+				},
+			})
+			expect(restored.exportSnapshot().sessions[0]?.lastSeenAt).toBe(expected)
+		}
+	})
+
 	it("rejects malformed, duplicate, future or overlong snapshot records without exposing private input", async () => {
 		const env = await setup()
 		const session = created(await env.store.create())
 		const snapshot = env.store.exportSnapshot()
 		const record = snapshot.sessions[0]!
 		for (const malformed of [
-			{ ...snapshot, version: 2 },
+			{ ...snapshot, version: 3 },
+			{
+				...snapshot,
+				sessions: [{ ...record, name: "bad\nname" }],
+			},
+			{
+				...snapshot,
+				sessions: [{ ...record, kind: "laptop" }],
+			},
+			{
+				...snapshot,
+				sessions: [{ ...record, lastSeenAt: record.createdAt + 1 }],
+			},
 			{ ...snapshot, sessions: [record, record] },
 			{
 				...snapshot,
@@ -411,6 +478,9 @@ describe("committed active device inventory", () => {
 					"current",
 					"deviceId",
 					"expiresAt",
+					"kind",
+					"lastSeenAt",
+					"name",
 					"renewedAt",
 				])
 				const first = snapshot.devices[0]
@@ -441,6 +511,9 @@ describe("committed active device inventory", () => {
 						renewedAt: 1_000_000,
 						expiresAt: first.expiresAt,
 						current: true,
+						name: null,
+						kind: null,
+						lastSeenAt: null,
 					},
 				]),
 			})
@@ -582,6 +655,58 @@ describe("device snapshot ordering and clock failures", () => {
 			b.deviceId,
 			a.deviceId,
 		])
+	})
+
+	it("returns every unexpired remembered device with no current requester", async () => {
+		// Feature: browser-access-batch1, Property 1: Remembered-device inventory
+		// Validates: browser-access-batch1 Decision 6
+		await fc.assert(
+			fc.asyncProperty(fc.integer({ min: 0, max: 32 }), async count => {
+				const env = await setup({ maxSessions: Math.max(count, 1) })
+				const identities: string[] = []
+				for (let i = 0; i < count; i++) {
+					identities.push(created(await env.store.create()).principalId)
+					if (i % 2 === 0) env.advance(1)
+				}
+				env.persist.mockClear()
+				const devices = env.store.snapshotRememberedDevices()
+				expect(devices).toHaveLength(count)
+				expect(devices.every(device => device.current === false)).toBe(true)
+				expect(devices.map(device => device.deviceId)).toEqual(
+					identities.toSorted((a, b) => {
+						const groupA = Math.floor((identities.indexOf(a) + 1) / 2)
+						const groupB = Math.floor((identities.indexOf(b) + 1) / 2)
+						return groupA - groupB || (a < b ? -1 : a > b ? 1 : 0)
+					}),
+				)
+				const first = devices[0]
+				if (first) {
+					first.expiresAt = 0
+					expect(env.store.snapshotRememberedDevices()).not.toEqual(devices)
+				} else {
+					expect(env.store.snapshotRememberedDevices()).toEqual([])
+				}
+				expect(env.persist).not.toHaveBeenCalled()
+			}),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("omits expired rows from the machine inventory without pruning them", async () => {
+		let now = 0
+		const env = await setup({ ttlMs: 100, monotonicNow: () => now })
+		const expired = created(await env.store.create())
+		now = 50
+		const live = created(await env.store.create())
+		now = 100
+		env.persist.mockClear()
+		expect(env.store.snapshotRememberedDevices()).toEqual([
+			expect.objectContaining({ deviceId: live.principalId, current: false }),
+		])
+		expect(
+			env.store.exportSnapshot().sessions.map(record => record.deviceId),
+		).toEqual([expired.principalId, live.principalId])
+		expect(env.persist).not.toHaveBeenCalled()
 	})
 
 	it.each([NaN, Infinity, Number.MAX_SAFE_INTEGER])(

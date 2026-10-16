@@ -19,19 +19,19 @@ scanner Tasks 37, 37a and 38 checkpoint; no preparation grants live protection.
 - [x] 3. CHECKPOINT FOUNDATION: targeted meaningful tests, typecheck, lint and independent
   review; verify no existing runtime files/adapters changed and no live protection claimed.
   _Requirements: 1.3, 2.1–5.3_
-- [ ] 4. Prepare exact adapter/config/CLI contracts; agree the shared-file integration
+- [x] 4. Prepare exact adapter/config/CLI contracts; agree the shared-file integration
   window with scanner and inspect settled route/WS/audio/bootstrap changes before wiring.
   _Requirements: 6.1, 6.5_
 - [x] 5. Implement guided provisioning/pairing/refresh/revoke flows and private persistence,
   including fail-closed startup/storage behavior and bounded failed-attempt handling.
   _Requirements: 1.1, 1.2, 4.1–4.5_
-- [ ] 6. Integrate root Fastify/WS and shared HTTP audio admission/lease adapters, exact
+- [x] 6. Integrate root Fastify/WS and shared HTTP audio admission/lease adapters, exact
   origins/authorities, cookie renewal and protected recording/download routes.
   _Requirements: 2.1–3.4, 5.1–5.3, 6.1_
-- [ ] 7. Integrate CLI credentials, liveness/status probes, sanitized logging/validation,
+- [x] 7. Integrate CLI credentials, liveness/status probes, sanitized logging/validation,
   child-environment isolation and correct public audio URLs.
   _Requirements: 6.3, 6.4_
-- [ ] 8. Implement explicit raw-listener policy and verify container/network exposure.
+- [x] 8. Implement explicit raw-listener policy and verify container/network exposure.
   _Requirements: 6.2_
 - [ ] 9. CHECKPOINT PROTECTED MODE: actual WS/audio/download tests, CLI/browser coexistence,
   pairing/renewal/logout/restart and denied-origin/authority/no-secret checks; coordinated
@@ -283,6 +283,11 @@ retain their original scope. Backend verification is recorded below.
       deployment, RF/native, capacity or physical evidence acceptance. Task 9 remains
       a separate connected-client release gate.
       _Requirements: 1.1–1.3, 3.6, 4.8, 6.2–6.5_
+- [ ] 15. (WG2 lane D) Device names, kinds and coarse last-seen: snapshot version 2
+      migration, `POST /api/access/devices/label`, hour-aligned last-seen on
+      authenticated admission through the mutation queue, projections; Property 7.
+      See docs/specs/web-gaps-2.
+      _Requirements: 4.9–4.12_
 
 ### Backend implementation checkpoint — 2026-10-11
 
@@ -306,3 +311,32 @@ Historical task formatting and earlier checkpoints are preserved.
 Task 14, task 9 and real browser cookie/CORS/TLS/proxy/deployment acceptance remain
 open. No receiver, native/RF, endurance/load, connected-client or production-binding
 acceptance follows from this backend checkpoint.
+
+## Browser access batch 1 checkpoint — 2026-10-12
+
+Scope and decisions: [browser-access-batch1.md](browser-access-batch1.md).
+Headless browser-lifecycle acceptance tests drive the assembled server and the
+compiled process with a real cookie jar and exact Origin/Host: pairing, CSRF,
+renewal near day 30 and expiry, concurrent tabs, uncertain pairing, WS and
+cross-port audio admission, logout/revoke/revoke-all lease closure, persistence
+fail-close, restart and secret-free denials. Machine-credential device routes
+and the `access devices` CLI support lost-browser recovery; offline
+`rotate-credential` empties remembered sessions unless `--keep-sessions` is
+given. `make dev-protected` runs the real protected server on loopback without
+a receiver. The opt-in `protected` compose profile adds a Caddy local-CA TLS
+sidecar in the core's network namespace and gives the core only the root
+certificate.
+
+Three independent review rounds ended in approval after two rounds of fixes.
+At the reviewed candidate, on Node 24.20.0: build, forced typecheck and lint
+exited 0 (0 errors, 59 existing warnings); CLI 343 and sdr-host 99 tests passed;
+the root suite with four workers passed 369 files and 5783 tests (24 skipped),
+exit 0. One earlier root run hit a known port-reservation race in an untouched
+legacy-startup process test that passes in isolation.
+
+Tasks 4, 6 and 7 are accepted on this evidence and the earlier integration
+checkpoints. Task 8 closes on the no-exception raw-listener decision and the
+static exposure checks of the reference profile; the stack was not started.
+Live TLS, proxy, private-volume and browser acceptance stay with task 14, and
+task 9 remains the connected-client release gate. No receiver, deployment,
+image build or production-binding acceptance follows from this checkpoint.

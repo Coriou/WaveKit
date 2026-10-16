@@ -1195,3 +1195,151 @@ describe("implicit tuner relay source validation", () => {
 		).toBe(true)
 	})
 })
+
+describe("activity config", () => {
+	let tempDir: string
+	let originalEnv: NodeJS.ProcessEnv
+	const activityEnv = [
+		"WAVEKIT_ACTIVITY__ENABLED",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS",
+		"WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND",
+		"WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST",
+		"WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND",
+		"WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_BURST",
+	]
+
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wavekit-activity-config-"))
+		originalEnv = { ...process.env }
+		for (const key of activityEnv) delete process.env[key]
+	})
+
+	afterEach(() => {
+		fs.rmSync(tempDir, { recursive: true, force: true })
+		process.env = originalEnv
+	})
+
+	function write(yaml: string): string {
+		const configPath = path.join(tempDir, "config.yaml")
+		fs.writeFileSync(configPath, yaml)
+		return configPath
+	}
+
+	it("defaults to enabled and leaves retention and admission to the store defaults", () => {
+		// WG1 req 7.1, 7.2: on by default; omitted limits resolve to the bounded
+		// ACTIVITY_LIMIT_DEFAULTS in the store, not here.
+		const config = ConfigSchema.parse({})
+		expect(config.activity).toEqual({ enabled: true })
+		expect(config.activity).not.toHaveProperty("retention")
+		expect(config.activity).not.toHaveProperty("admission")
+		expect(config.stateDir).toBe("data")
+		expect(config.health).toBeUndefined()
+		expect(config.access.mode).toBe("legacy")
+		expect(loadConfig(write("sources: []\n")).activity).toEqual({
+			enabled: true,
+		})
+		expect(ConfigSchema.parse({ activity: {} }).activity).toEqual({
+			enabled: true,
+		})
+	})
+
+	it("keeps an explicit enabled: false", () => {
+		expect(
+			ConfigSchema.parse({ activity: { enabled: false } }).activity,
+		).toEqual({ enabled: false })
+		expect(
+			loadConfig(write("activity:\n  enabled: false\n")).activity.enabled,
+		).toBe(false)
+	})
+
+	it("reads WAVEKIT_ACTIVITY__ENABLED and nested retention and admission", () => {
+		process.env["WAVEKIT_ACTIVITY__ENABLED"] = "1"
+		process.env["WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS"] = "1000000"
+		process.env["WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES"] = "2147483648"
+		process.env["WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS"] = "604800000"
+		process.env["WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND"] = "100"
+		process.env["WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST"] = "1000"
+		process.env["WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND"] = "50"
+		process.env["WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_BURST"] = "200"
+		const config = loadConfig(
+			write("activity:\n  enabled: false\n  retention:\n    maxRows: 1\n"),
+		)
+		expect(config.activity).toEqual({
+			enabled: true,
+			retention: {
+				maxRows: 1_000_000,
+				maxDbBytes: 2_147_483_648,
+				maxAgeMs: 604_800_000,
+			},
+			admission: {
+				globalPerSecond: 100,
+				globalBurst: 1000,
+				perDecoderPerSecond: 50,
+				perDecoderBurst: 200,
+			},
+		})
+	})
+
+	it("lets WAVEKIT_ACTIVITY__ENABLED=false override a yaml enablement", () => {
+		process.env["WAVEKIT_ACTIVITY__ENABLED"] = "false"
+		expect(
+			loadConfig(write("activity:\n  enabled: true\n")).activity.enabled,
+		).toBe(false)
+	})
+
+	it("rejects non-positive, non-integer and unknown activity values", () => {
+		const maxRows = 1_000_000_000
+		const maxDbBytes = 16 * 1024 * 1024 * 1024 * 1024
+		const maxAgeMs = 10 * 366 * 24 * 60 * 60 * 1000
+		for (const activity of [
+			{ enabled: false, extra: true },
+			{ retention: { maxRows: 0 } },
+			{ retention: { maxRows: 1 } },
+			{ retention: { maxRows: 999 } },
+			{ retention: { maxRows: 1.5 } },
+			{ retention: { maxRows: maxRows + 1 } },
+			{ retention: { maxDbBytes: 0 } },
+			{ retention: { maxDbBytes: 16 * 1024 * 1024 - 1 } },
+			{ retention: { maxDbBytes: maxDbBytes + 1 } },
+			{ retention: { maxAgeMs: 0 } },
+			{ retention: { maxAgeMs: maxAgeMs + 1 } },
+			{ admission: { globalPerSecond: 0 } },
+			{ admission: { globalPerSecond: -1 } },
+			{ admission: { globalPerSecond: 0.5 } },
+			{ admission: { globalPerSecond: 1.5 } },
+			{ admission: { globalPerSecond: Number.POSITIVE_INFINITY } },
+			{ admission: { globalBurst: 1.5 } },
+			{ admission: { perDecoderPerSecond: 0.5 } },
+			{ admission: { perDecoderPerSecond: 100_001 } },
+			{ admission: { perDecoderBurst: 0 } },
+			{ admission: { other: 1 } },
+		]) {
+			expect(
+				ConfigSchema.safeParse({ activity }).success,
+				JSON.stringify(activity),
+			).toBe(false)
+		}
+		expect(
+			ConfigSchema.parse({
+				activity: {
+					retention: { maxRows: 1000 },
+					admission: { globalPerSecond: 1, perDecoderPerSecond: 1 },
+				},
+			}).activity,
+		).toEqual({
+			enabled: true,
+			retention: { maxRows: 1000 },
+			admission: { globalPerSecond: 1, perDecoderPerSecond: 1 },
+		})
+		expect(() =>
+			loadConfig(write("activity:\n  enabled: false\n  nope: 1\n")),
+		).toThrow(ConfigValidationError)
+		expect(
+			ConfigSchema.parse({
+				activity: { retention: { maxDbBytes: 16 * 1024 * 1024 } },
+			}).activity.retention,
+		).toEqual({ maxDbBytes: 16 * 1024 * 1024 })
+	})
+})

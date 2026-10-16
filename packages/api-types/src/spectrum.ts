@@ -33,6 +33,12 @@ export interface SpectrumFrameEventData {
 	}
 	/** Current-state frame sent right after a `spectrum:profile` ack (not a replay). */
 	snapshot?: true
+	/**
+	 * Waterfall backfill (WG1): a recent frame replayed after a `spectrum:profile` ack, before the
+	 * snapshot and live frames, when the client asked for `backfillMs`. Oldest first; `at` is the
+	 * time of the frame's newest block summary. Never set together with `snapshot`.
+	 */
+	backfill?: true
 	at: string
 }
 
@@ -78,15 +84,35 @@ export interface SpectrumSubscribeOptions {
 	hz?: number
 	/** 128–2048, rounded to an integer; default `scanner.ws.spectrumBins`. */
 	bins?: number
+	/**
+	 * Per-client averaging (WG1): exponential average over this many frames of the profile, in the dBFS
+	 * domain, after the max-hold of each frame. Integer 1–32, rounded and clamped; 1 (default) = off.
+	 * Part of the profile: clients with the same hz, bins and averaging share frames.
+	 */
+	averaging?: number
+	/**
+	 * Waterfall backfill (WG1): replay up to this many ms of recent frames (0–10000, default 0 = none)
+	 * after the ack. Bounded by the current epoch and by SpectrumLimits.backfill.
+	 */
+	backfillMs?: number
 }
 
 export interface SpectrumProfileView {
+	/** `${hz}:${bins}` with averaging off; `${hz}:${bins}:a${averaging}` with averaging > 1 (WG1). */
 	key: string
 	hz: number
 	bins: number
+	/** Frames averaged (WG1); present only when > 1. */
+	averaging?: number
 }
 
-export type SpectrumProfileAdjustment = "hz" | "bins" | "profile-limit"
+/** `averaging` and `backfillMs` (WG1): the requested value was rounded or clamped. */
+export type SpectrumProfileAdjustment =
+	| "hz"
+	| "bins"
+	| "profile-limit"
+	| "averaging"
+	| "backfillMs"
 
 export type SpectrumSubscribeErrorCode =
 	| "SPECTRUM_OPTIONS_INVALID"
@@ -117,6 +143,11 @@ export interface SpectrumProfileEventData {
 	removedSourceId?: string
 	code?: SpectrumSubscribeErrorCode
 	message?: string
+	/**
+	 * Backfill frames that follow this ack (WG1). Present on a committed `source` ack whose request had
+	 * `backfillMs` > 0 (0 when nothing of the current epoch is buffered); absent otherwise.
+	 */
+	backfillFrames?: number
 }
 
 export interface SpectrumActiveProfile extends SpectrumProfileView {
@@ -135,6 +166,10 @@ export interface SpectrumLimits {
 	maxProfiles: number
 	hz: { min: number; max: number; step: number }
 	bins: { min: number; max: number }
+	/** Frames of `averaging` (WG1); 1 = off. */
+	averaging: { min: number; max: number }
+	/** Backfill bounds per subscribe (WG1): window, frames and serialized frame bytes. */
+	backfill: { maxMs: number; maxFrames: number; maxBytes: number }
 }
 
 export interface SpectrumStatus {

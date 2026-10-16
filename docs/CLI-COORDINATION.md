@@ -1155,3 +1155,96 @@ Protected composition with canonical public mapping now provides explicit `GET|H
 Session-only `GET|HEAD /api/access/devices` returns closed `AccessDevicesDto` rows containing only device ID, creation/renewal/expiry clocks and current marker. This is committed unexpired remembered-session inventory, not online presence. Reads use one authority clock, revalidate the requester and expose no pending mutation, renewal, pruning or private metadata; machine authority remains forbidden. Shared schemas/types are exported by `@wavekit/api-types`; existing CLI contracts are additive and current CLI code does not consume these new endpoints. Both routes use no-store, safe serializers and body-free real-wire HEAD responses.
 
 Browser onboarding/renewal, trusted canonical destination delivery and actual cookie/CORS/TLS/proxy exposure remain separate acceptance gates. No web UI or live receiver change is included. See [API.md](API.md) and the [access checklist](specs/core-access-policy/tasks.md).
+
+
+### 2026-10-12 — live-audio level telemetry
+
+Core publishes `live-audio:level` on the existing `live-audio` WS channel at 10 Hz:
+`{ sourceId, channelPowerDbfs: number|null, noiseFloorDbfs: number|null, squelchOpen, thresholdDbfs }`.
+CLI validates these frames and drops them before store dispatch because it does not
+currently display the levels. Valid frames do not increment `invalidFrames` or
+trigger per-frame state updates; malformed level frames still count as invalid.
+
+#### Core: scanner resume contract and SF1 additions — 2026-10-13
+
+Announcement for CLI follow-up; all fields are additive and optional, so no CLI change is required. Spec: [scanner-followups](specs/scanner-followups/requirements.md).
+
+Resume contract (already shipped, not yet consumed by the CLI):
+
+- `ScanJob.resumeAt` (ISO deadline of the automatic resume after operator or relay preemption, or null) and `resumeHeldBy` (`audio`, `identify`, `recording` or null). An elapsed `resumeAt` stays fixed while resume is pending. Job-to-job lease hand-back ignores these holds. A job's `scanner:job` event is re-emitted when only these values change.
+- Stay here: `POST /api/scanner/jobs/:id/pause` on `paused(preempted-*)` makes the job `paused(operator)` without taking the lease; it no longer auto-resumes and stays paused across restart, even with `resume.onBoot`.
+
+SF1 additions (scanner follow-ups batch 1):
+
+- `ScanJob.preemptedBy?: { jobId, name }` (name null when that job has none), present only on `paused(preempted-job)` while another job holds the lease; derived, never persisted. The paused job's view is re-emitted when the holder changes or the lease is freed.
+- `ScanRange` gains optional `enabled` (absent = enabled; a disabled range stays in the job but is not planned, swept, masked or matched), `name` (1 to 100 characters), `dwellMs` (hop dwell of overlapping hops) and `sensitivity` (CFAR target of that range; integration stays job-level). `Hop.dwellMs?` appears only when a range sets it.
+- `ScanJobSpec.signalsOnly?` (discover jobs): the job finds signals but requests no decoder trials of its own. Present only when set.
+- `PATCH /api/scanner/jobs/:id` accepts `ranges` (index-aligned full state of the job's effective `spec.ranges`) and `signalsOnly`. Only `enabled`, `protocols`, `name`, `dwellMs` and `sensitivity` may change, applied at the next hop; a changed edge, raster, OBW or band-plan id, or a different count, is 400 `SCANNER_PLAN_INVALID` with a `range-locked` issue (`details: { index, fields }` or `{ expected, received }`). Later patches of any key keep earlier range edits.
+- Two new `PlanIssueCode` values: `range-locked` (PATCH only) and `signals-only-unsupported`. The CLI's identify issue allow-list (`cli/source/data/api-client.ts`) needs neither; any exhaustive switch over `PlanIssueCode` should add them.
+- `GET /api/scanner/discoveries` accepts `identity=<kind>:<value>` (known identity kind, non-empty value, case-insensitive exact value match; else 400 `VALIDATION_ERROR`), and `q` now matches the operator label or the identity value (a superset of before).
+
+Optional CLI follow-ups: show `preemptedBy` and the resume countdown/hold on paused jobs and offer Stay here; per-range enable toggles and names in job detail; a signals-only marker; identity search in the discoveries view.
+
+#### Core: correction to the SF1 scanner announcement — 2026-10-13
+
+Corrects the entry "Core: scanner resume contract and SF1 additions" above:
+
+- Not purely additive for PATCH: before SF1 a `ranges` key in `PATCH /api/scanner/jobs/:id` was ignored; now it is validated as the full state of the job's effective `spec.ranges`. A client that echoes its create body (operator ranges only, no inherited rasters or band-plan ranges) now gets 400 `SCANNER_PLAN_INVALID` with `range-locked`, and a body that passes clears protocols inherited from a band plan. Send `ranges` only to edit them. The CLI does not PATCH jobs today.
+- Timing: the hop plan changes at the next hop; detection masks, protocol matching, probes and `signalsOnly` change as soon as the PATCH returns.
+- Per-range `sensitivity`: ranges with identical edges share the most sensitive target set; a range without one counts at the detector's current target (not its own job's sensitivity).
+- Stored range edits remember the edges (and band plan) of their range. If a job's band plan changes later, edits that no longer match their range are dropped and the PATCH response carries one `range-locked` issue with severity `warning` (`details.reason: "range-live-stale"`); it never blocks the PATCH. Clients that treat every `range-locked` as an error should check `severity`.
+
+#### Core: SF1 range edits after a band-plan change — 2026-10-13
+
+Follow-up to the SF1 correction above. A `PATCH /api/scanner/jobs/:id` that sends `ranges` read before the job's band plan changed, where an edit it sent would no longer land, is refused with 400 `SCANNER_PLAN_INVALID` and a `range-locked` error with `details.reason: "range-plan-changed"`; the job is unchanged. Re-read the job (a PATCH of another key re-plans it) and resend. The `range-live-stale` warning for older edits appears only in the answer of the PATCH that dropped them; it is not kept in the job's `issues` and does not repeat. No CLI change is required.
+
+#### Core: WG1 web gaps — 2026-10-13
+
+Announcement for the CLI; no CLI change is required. Spec: [web-gaps-1](specs/web-gaps-1/requirements.md). Details in [API.md](API.md).
+
+- Spectrum subscribe options `averaging` (1–32, off by default) and `backfillMs` (0–10000, off by default) are opt-in. The CLI never sends them, so it receives exactly the messages it did before: profile keys stay `<hz>:<bins>`, no frame has `backfill`, no ack has `backfillFrames`, and `adjusted` stays within `hz`, `bins`, `profile-limit`. If the CLI ever sends the new options, `cli/source/data/scanner-guards.ts` must accept the `<hz>:<bins>:a<n>` key (the frame regex), the `averaging` and `backfillMs` adjustments (the `adjusted` enum at :103, max 3 today), `backfillFrames`, the view's `averaging` and the frame's `backfill: true` (Zod currently strips it, so a replayed frame would look live).
+- `live-audio:transmission` on the `live-audio` channel: one open and one closed event per squelch-delimited transmission of the live demodulator. The CLI subscribes to `live-audio` and has no guard case for it, so each event currently increments `invalidFrames` (nothing else). A follow-up should drop it like `live-audio:level` or show it.
+- New `vessels` channel (`vessel:new`, `vessel:update`, `vessel:lost`, `vessel:stats`) and `GET /api/vessels`, `/api/vessels/stats`, `/api/vessels/:mmsi`. The CLI does not subscribe; nothing changes for it.
+- Activity is now on by default with bounded retention and admission (250,000 rows, 256 MiB, 3 days; 50/s burst 500 global, 20/s burst 200 per decoder), and gains the `analog-transmission` kind. The CLI has no Activity view and ignores `activity` frames, so nothing changes; any future view will see data by default and must handle the new kind.
+- `scanner:progress` now arrives at up to 2 Hz per job (other scanner messages stay at 1/s per key, same global budget). Plan preview POI uses each hop's own dwell when a range sets `dwellMs`.
+
+Update to the WG1 note above (2026-10-13): the CLI now validates `live-audio:transmission` and drops it like `live-audio:level` (no UI), so it no longer increments `invalidFrames`; a malformed one still counts as invalid.
+
+Update to the WG1 note (R1, 2026-10-13): Activity now stores a position-only aircraft or ship reception at most once per entity per 60 s (first sightings and callsign/squawk/static changes always), and `GET /api/activity/status` `stats` gains `coalescedPositions`. Spectrum backfill is trimmed to the client's free outbound queue room, so `backfillFrames` can be lower than requested. The CLI uses neither; no change required.
+
+Update to the WG1 R1 note (R2, 2026-10-13): Activity coalesces only redundant position/presence updates (allowlisted position, kinematics and reception fields with unchanged identity; AIS types 1, 2, 3, 18, 19, 27 only); any other field or AIS type is stored. `stats.coalescedPositions` is optional in `@wavekit/api-types` (older cores omit it). Backfill never causes a disconnect the ack and snapshots alone would not. No CLI change required.
+
+#### Core: WG2 web gaps — 2026-10-13
+
+Announcement for the CLI. Spec: [web-gaps-2](specs/web-gaps-2/requirements.md). Details in [API.md](API.md) and [SCANNER.md](SCANNER.md). One CLI change landed with the batch (first bullet); the rest needs none.
+
+- CLI change: the core now writes its private session snapshot as version 2 (device `name`, `kind`, `lastSeenAt`). `cli/source/data/access-credentials.ts` read only version 1 with strict records, so `--credential-format access-state` (the default) would have refused the credential after the core's first session write. It now accepts version 1 and version 2 (strict, the three new keys required in v2); covered in `access-credentials.test.tsx`.
+- New channels `aprs` (`aprs:new`, `aprs:update`, `aprs:lost`, `aprs:stats`) and `mesh` (`mesh:new`, `mesh:update`, `mesh:lost`, `mesh:stats`) and routes `/api/aprs/*`, `/api/mesh/*`. The CLI does not subscribe, so it sees nothing. Note: `ws-client.ts` counts a frame it cannot parse as `ws:invalid`; tolerate unknown channels before subscribing to these.
+- `vessel:update`, `aprs:update` and `mesh:update` are throttled per entity (2 s; identity changes, new and lost immediate). The CLI does not subscribe to any of them.
+- Activity rows from decoder receptions carry presentation (`category`, `protocol`, `entityKey`, `title`, `fields`, `position`); APRS and Meshtastic positions are coalesced like aircraft and ships. Old rows are not backfilled. The CLI has no Activity view.
+- Optional DTO fields: `live-audio:transmission` closed events and `analog-transmission` payloads gain `tone: { ctcssHz, dtmf }` (the CLI guard checks keys individually: fine); `digital-voice:call` and dsd-fme `voice-call` outputs gain `colourCode`, `nac`, `algorithmId`, `keyId`, `ran`, `errors` (the CLI does not subscribe to `digital-voice` and its decoder-output guard does not reject extra keys); access device rows gain `name`, `kind`, `lastSeenAt` (the CLI has no device view); new route `POST /api/access/devices/label`.
+- Scanner: `PlanPreview.lockoutExclusions`, `ScanJob.lockoutExclusions`, `ScanJobProgress.hitStats`, `scanner:progress` `hits`/`newDiscoveries`, `scanner:discovery` `jobHits`, and `GET /api/scanner/jobs/:id/hits`. The CLI's scanner Zod objects are not strict, so the extra keys are stripped. No new `PlanIssueCode`.
+- Behaviour change visible in the CLI's scanner views: a discovery marked Ignore (`lockout: true`) is now also skipped by sweep jobs on its sources (at most 256 per job, never emptying a plan); clearing or deleting the lockout restores coverage. Probe, recording and monitor gating are unchanged.
+- AIS NMEA sentences with a wrong checksum are dropped and counted in the decoder's `stats.errors`; APRS Mic-E positions are now correct (West longitudes were East before), which changes positions in `decoder:output` for Mic-E packets.
+
+Update to the WG2 note (R1, 2026-10-13): the CLI's access-state reader is tolerant of v2 label values it never uses (`name` string up to 256, `kind` any string up to 16, `lastSeenAt` a non-negative integer, each nullable); unknown keys are still rejected and v1 is still accepted. The CLI's APRS message row now labels speed in knots (`kn`), as the APRS spec and the core use; weather wind stays mph. Update the CLI with the core: a pre-WG2 CLI reading the credential from `access-state` refuses a v2 snapshot. Also: `newDiscoveries` on scanner hits now counts discoveries, not observations; the digital-voice status route keeps the call metadata fields.
+
+#### Core: WG3 web gaps — 2026-10-16
+
+Announcement for the CLI. Spec: [web-gaps-3](specs/web-gaps-3/requirements.md). Details in [API.md](API.md). One CLI change landed with the batch (first bullet); the rest needs none.
+
+- CLI change: `cli/source/data/ws-client.ts` now ignores a frame whose `channel` is a string the CLI does not know (anything other than its subscribed channels, `scanner`, `spectrum` and `activity`) instead of counting it as `ws:invalid`. Frames without a channel, and unknown types on a known channel, are checked as before. A test helper in `tests/unit/cli/runtime.test.ts` that used a made-up channel now uses the real ones.
+- New route `GET /api/coverage` (ADS-B and AIS range per 1° bearing over 24 h from `station.lat`/`station.lon`; 200 `available: false` without a station location). The CLI does not call it.
+- Mesh: `MeshNode` gains optional `telemetry` and `neighbours`, `MeshTrackerStats` gains optional `telemetryPackets` and `neighbourReports`, on the routes and on `mesh:update`/`mesh:stats`. The CLI does not read mesh data.
+- Activity: decoder receptions now carry `provenance.sourceId` and `provenance.frequency` when known (null before); Meshtastic flood copies (same `from`, `id`, `portnum`, payload within 30 s) are no longer stored; paging and replay can now reset with the existing `snapshot-reset` / `cursor-gap` reasons when retention deletes a row that is not the oldest. No DTO, frame or reason changed. The CLI has no Activity view and ignores `activity` frames.
+- readsb now receives `--lat`/`--lon` from `station` whether or not `enableMlat` is set; explicit decoder options win. Decoder status is unchanged.
+- The retention policy (fair-share) and the `retention` and `floodCopies` fields of `GET /api/activity/status` follow in an update to this note.
+
+Update to the WG3 note (2026-10-16): for readsb, a complete valid decoder-option `lat`/`lon` pair wins over `station`; a single or invalid option coordinate falls back to the full station pair.
+
+Update to the WG3 note (retention, 2026-10-16): Activity retention now has `activity.retention.policy`, `fair-share` (default) or `oldest-first`. Under `fair-share` the row and byte caps are water-filled across shares (`decoder:<id>`, or `kind:<kind>` for rows without a decoder), oldest first inside a share; age pruning, caps and hysteresis are unchanged, and a station with one feed keeps the same rows as before. `GET /api/activity/status` `stats` gains two optional fields, both additive and optional in `@wavekit/api-types` (`ActivityStoreStats`; older cores omit them): `retention` (`policy`, `effective`, `shares` of `{ key, rows, bytes, oldestReceivedAt }` at most 64, `sharesTruncated`, `prefixFallbackSteps`) and `floodCopies` (Meshtastic flood copies not stored; not losses, not in `dropped`). Details in [API.md](API.md#retention). The CLI does not read Activity status. No CLI change required.
+
+WG3 update (acarsdec): `decoder:output` ACARS messages no longer carry an invented
+`frequency` of 131.55 MHz when acarsdec does not report one; the field is now absent
+in that case. Clients that display it should treat it as optional (the CLI formatter
+already does). dumpvdl2's embedded ACARS messages always carry it.

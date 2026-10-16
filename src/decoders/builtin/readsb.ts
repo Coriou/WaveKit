@@ -74,9 +74,9 @@ export interface ReadsbOptions {
 	outputPort?: number | undefined
 	/** Enable MLAT support */
 	enableMlat?: boolean | undefined
-	/** Receiver latitude for MLAT */
+	/** Receiver latitude (wins over `station.lat` when both coordinates are set) */
 	lat?: number | undefined
-	/** Receiver longitude for MLAT */
+	/** Receiver longitude (wins over `station.lon` when both coordinates are set) */
 	lon?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
@@ -145,11 +145,22 @@ const SBS_MSG_PATTERN =
  * - Beast: Binary format, efficient for feeders
  * - JSON: JSON Lines format, easy to parse
  */
+/** Receiver location from `config.station`; either coordinate may be unset. */
+export interface ReadsbStationLocation {
+	lat?: number | undefined
+	lon?: number | undefined
+}
+
 export class ReadsbDecoder extends NetworkProducerDecoder {
 	private options: ReadsbOptions
 	private lineBuffer: string = ""
+	private readonly station: ReadsbStationLocation
 
-	constructor(config: DecoderConfig, logger: Logger) {
+	constructor(
+		config: DecoderConfig,
+		logger: Logger,
+		station: ReadsbStationLocation = {},
+	) {
 		// Build the network producer config from decoder config
 		const options = parseReadsbOptions(config.options)
 		const outputPort = options.outputPort ?? DEFAULT_PORTS[options.outputFormat]
@@ -163,6 +174,22 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 		super(networkConfig, logger)
 		this.options = options
+		this.station = {
+			lat: coordinate(station.lat, 90),
+			lon: coordinate(station.lon, 180),
+		}
+	}
+
+	/**
+	 * Receiver location for readsb (WG3 req 9.1): the decoder options when both
+	 * coordinates are set, else the station when both are set, else none.
+	 */
+	private receiverLocation(): { lat: number; lon: number } | null {
+		const { lat, lon } = this.options
+		if (lat !== undefined && lon !== undefined) return { lat, lon }
+		if (this.station.lat !== undefined && this.station.lon !== undefined)
+			return { lat: this.station.lat, lon: this.station.lon }
+		return null
 	}
 
 	/**
@@ -303,12 +330,12 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 		// and disable the others to avoid port conflicts if multiple readsb instances run.
 		// Pinned readsb treats --net-only as a legacy alias for --net.
 
-		// MLAT configuration
-		if (this.options.enableMlat) {
-			if (this.options.lat !== undefined && this.options.lon !== undefined) {
-				args.push("--lat", this.options.lat.toString())
-				args.push("--lon", this.options.lon.toString())
-			}
+		// Receiver location (range, CPR local decode, MLAT), independent of
+		// enableMlat (WG3 req 9.1)
+		const location = this.receiverLocation()
+		if (location) {
+			args.push("--lat", location.lat.toString())
+			args.push("--lon", location.lon.toString())
 		}
 
 		// Additional arguments
@@ -509,6 +536,18 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 }
 
 /**
+ * A usable receiver coordinate: a finite number within [-limit, limit].
+ * Anything else (null, NaN, string, out of range) counts as unset.
+ */
+function coordinate(value: unknown, limit: number): number | undefined {
+	return typeof value === "number" &&
+		Number.isFinite(value) &&
+		Math.abs(value) <= limit
+		? value
+		: undefined
+}
+
+/**
  * Parses and validates decoder options from config.
  */
 function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
@@ -530,8 +569,8 @@ function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
 				: "sbs",
 		outputPort: options["outputPort"] as number | undefined,
 		enableMlat: options["enableMlat"] as boolean | undefined,
-		lat: options["lat"] as number | undefined,
-		lon: options["lon"] as number | undefined,
+		lat: coordinate(options["lat"], 90),
+		lon: coordinate(options["lon"], 180),
 		extraArgs: options["extraArgs"] as string[] | undefined,
 	}
 }
@@ -559,7 +598,9 @@ export function parseSbsLine(line: string): AircraftData | null {
 	const lon = match[12] ? parseFloat(match[12]) : undefined
 	const verticalRate = match[13] ? parseInt(match[13], 10) : undefined
 	const squawk = match[14]?.trim() || undefined
-	const onGround = match[18] === "-1"
+	// IsOnGround is -1 (ground), 0 (airborne) or empty (not in this message).
+	const onGround =
+		match[18] === "-1" ? true : match[18] === "0" ? false : undefined
 
 	return {
 		icao,
@@ -735,6 +776,16 @@ export function createReadsbDecoder(
 	logger: Logger,
 ): ReadsbDecoder {
 	return new ReadsbDecoder(config, logger)
+}
+
+/**
+ * Registry factory that injects the station location (WG3 req 9.1). Explicit
+ * `lat`/`lon` decoder options still win.
+ */
+export function readsbDecoderFactory(
+	station: ReadsbStationLocation,
+): (config: DecoderConfig, logger: Logger) => ReadsbDecoder {
+	return (config, logger) => new ReadsbDecoder(config, logger, station)
 }
 
 /**

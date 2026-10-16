@@ -507,7 +507,7 @@ describe("private single-operator persistence", () => {
 		})
 	})
 
-	it("atomically rotates machine credentials and rejects writes from an old session authority", async () => {
+	it("atomically rotates machine credentials, removes remembered sessions, and rejects writes from an old session authority", async () => {
 		const { directory } = await location()
 		const storage = await open(directory)
 		const oldDigest = storage.machineSecretDigest()
@@ -519,16 +519,94 @@ describe("private single-operator persistence", () => {
 		if (browser.kind !== "created") throw new Error("Expected browser")
 		await storage.rotateMachineCredential()
 		expect(storage.machineSecretDigest()).not.toEqual(oldDigest)
-		expect(storage.startupSnapshot().sessions).toHaveLength(0)
+		expect(storage.startupSnapshot().sessions).toEqual([])
+		expect(storage.startupSnapshot().credentialBinding).toBe(
+			storage.credentialBinding,
+		)
+		expect(storage.startupSnapshot().credentialBinding).not.toBe(
+			old.credentialBinding,
+		)
 		await expect(old.renew(browser.principalId)).rejects.toMatchObject({
 			code: "ACCESS_UNAVAILABLE",
 		})
-		expect(storage.startupSnapshot().sessions).toHaveLength(0)
+		expect(storage.startupSnapshot().sessions).toEqual([])
 		const digest = storage.machineSecretDigest()
+		const mode = (await fs.stat(join(directory, "access-state.json"))).mode
+		expect(mode & 0o777).toBe(0o600)
 		await storage.close()
-		expect((await open(directory, "load")).machineSecretDigest()).toEqual(
-			digest,
+		const reloaded = await open(directory, "load")
+		expect(reloaded.machineSecretDigest()).toEqual(digest)
+		expect(reloaded.startupSnapshot().sessions).toEqual([])
+	})
+
+	it("rebinds remembered sessions when rotation keeps them, and still rejects the old binding", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const old = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			persist: storage.persist,
+		})
+		const browser = await old.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		await storage.rotateMachineCredential({ keepSessions: true })
+		expect(storage.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
+		expect(storage.startupSnapshot().credentialBinding).toBe(
+			storage.credentialBinding,
 		)
+		expect(storage.startupSnapshot().credentialBinding).not.toBe(
+			old.credentialBinding,
+		)
+		await expect(old.renew(browser.principalId)).rejects.toMatchObject({
+			code: "ACCESS_UNAVAILABLE",
+		})
+		expect(storage.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
+		const mode = (await fs.stat(join(directory, "access-state.json"))).mode
+		expect(mode & 0o777).toBe(0o600)
+		const binding = storage.credentialBinding
+		await storage.close()
+		const reloaded = await open(directory, "load")
+		expect(reloaded.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
+		expect(reloaded.startupSnapshot().credentialBinding).toBe(binding)
+	})
+
+	it("keeps the previous credential and sessions when rotation fails before rename", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const sessions = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			persist: storage.persist,
+		})
+		const browser = await sessions.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		const before = await fs.readFile(
+			join(directory, "access-state.json"),
+			"utf8",
+		)
+		vi.spyOn(fs, "rename").mockRejectedValueOnce(new Error("secret-rename"))
+		try {
+			await storage.rotateMachineCredential()
+			expect.fail("Expected rotation to fail closed")
+		} catch (error) {
+			expect(error).toMatchObject({
+				code: "ACCESS_STORAGE_UNAVAILABLE",
+				cause: undefined,
+			})
+			expect(String(error)).not.toContain("secret-rename")
+		}
+		expect(
+			await fs.readFile(join(directory, "access-state.json"), "utf8"),
+		).toBe(before)
+		await storage.close()
+		const reloaded = await open(directory, "load")
+		expect(reloaded.startupSnapshot().sessions).toEqual([
+			expect.objectContaining({ deviceId: browser.principalId }),
+		])
 	})
 
 	it("persists monotonic renewals after a wall-clock backward jump", async () => {
@@ -646,5 +724,72 @@ describe("private single-operator persistence", () => {
 				await fs.readFile(join(directory, "access-state.json"), "utf8"),
 			),
 		).toMatchObject({ sessions: { sessions: [] } })
+	})
+})
+
+describe("last-seen persistence (WG2 req 11.6, R1 #6)", () => {
+	const failNextTempOpen = () => {
+		const open = fs.open.bind(fs)
+		let armed = true
+		vi.spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
+			if (armed && String(path).endsWith(".tmp")) {
+				armed = false
+				throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" })
+			}
+			return open(path, flags, mode)
+		})
+	}
+
+	it("does not latch the storage on a failed last-seen write; the next login commits", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const sessions = await SessionStore.open({
+			credentialBinding: storage.credentialBinding,
+			snapshot: storage.startupSnapshot(),
+			persist: storage.persist,
+			persistSeen: storage.persistSeen,
+			logger: { warn: () => undefined },
+		})
+		const browser = await sessions.create()
+		if (browser.kind !== "created") throw new Error("Expected browser")
+		failNextTempOpen()
+		await sessions.noteSeen(browser.principalId, Date.now())
+		expect(storage.unavailable).toBe(false)
+		expect(sessions.unavailable).toBe(false)
+		const next = await sessions.create()
+		expect(next.kind).toBe("created")
+		const state = JSON.parse(
+			await fs.readFile(join(directory, "access-state.json"), "utf8"),
+		) as { sessions: { sessions: unknown[] } }
+		expect(state.sessions.sessions).toHaveLength(2)
+	})
+
+	it("latches a last-seen write whose directory check fails after the temp write (R2 3)", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const snapshot = storage.startupSnapshot()
+		const openFile = fs.open.bind(fs)
+		const lstat = fs.lstat.bind(fs)
+		let wrote = false
+		vi.spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
+			if (String(path).endsWith(".tmp")) wrote = true
+			return openFile(path, flags, mode)
+		})
+		vi.spyOn(fs, "lstat").mockImplementation(async path => {
+			if (wrote && String(path) === directory)
+				throw Object.assign(new Error("ENOENT"), { code: "ENOENT" })
+			return lstat(path)
+		})
+		await expect(storage.persistSeen(snapshot)).rejects.toThrow()
+		expect(storage.unavailable).toBe(true)
+	})
+
+	it("still latches a failed full commit", async () => {
+		const { directory } = await location()
+		const storage = await open(directory)
+		const snapshot = storage.startupSnapshot()
+		failNextTempOpen()
+		await expect(storage.persist(snapshot)).rejects.toThrow()
+		expect(storage.unavailable).toBe(true)
 	})
 })

@@ -1332,10 +1332,24 @@ export class SpectrumPipeline {
 			const burst = this.masks.burstRanges.some(
 				x => rf >= x.startHz && rf < x.endHz,
 			)
+			const faTarget = r?.faTargetPerMhzMin
 			const last = out.at(-1)
-			if (last && last.key === key && last.burst === burst && last.endBin === i)
+			if (
+				last &&
+				last.key === key &&
+				last.burst === burst &&
+				last.endBin === i &&
+				last.faTarget === faTarget
+			)
 				last.endBin = i + 1
-			else out.push({ startBin: i, endBin: i + 1, key, burst })
+			else
+				out.push({
+					startBin: i,
+					endBin: i + 1,
+					key,
+					burst,
+					...(faTarget !== undefined ? { faTarget } : {}),
+				})
 		}
 		return out
 	}

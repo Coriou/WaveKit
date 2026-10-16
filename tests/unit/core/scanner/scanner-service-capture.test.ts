@@ -64,7 +64,11 @@ describe("ScannerService burst capture wiring", () => {
 			})
 			feedTone(h.fanout, 1, 93_750)
 			feedTone(h.fanout, 3.5, 93_750, 0)
-			await tick(500)
+			// Condition-based: the capture closes after the post-roll is processed, which takes longer on a loaded box.
+			await vi.waitFor(() => expect(h.service.listCaptures()).toHaveLength(1), {
+				timeout: 20_000,
+				interval: 50,
+			})
 			const captures = h.service.listCaptures()
 			expect(captures).toHaveLength(1)
 			const c = captures[0]!

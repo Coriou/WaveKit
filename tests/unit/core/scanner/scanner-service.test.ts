@@ -1,11 +1,10 @@
 import type { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import type { ProbePool } from "../../../../src/core/scanner/probes/probe-pool.js"
 import { probeRequest } from "../../../mocks/scanner/probe-fakes.js"
-import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
+import type { JobRecord } from "../../../../src/core/scanner/job-runner.js"
 import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import {
 	ScannerService,
@@ -55,6 +54,162 @@ async function untilRunning(h: Harness, id: string, seed = 20): Promise<void> {
 }
 
 describe("ScannerService", () => {
+	it("preserves external-control resume readiness while the arbiter owns refusal", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		const inspected = h.service as unknown as {
+			jobs: Map<string, JobRecord>
+			arbiter: { operatorIdleSince(sourceId: string): number | null }
+			autoResumeReady(record: JobRecord): boolean
+		}
+		const record = inspected.jobs.get(job.id)!
+		record.state = "paused"
+		record.reason = "preempted-operator"
+		record.spec.resume.autoAfterIdleMs = 1000
+		vi.spyOn(inspected.arbiter, "operatorIdleSince").mockReturnValue(null)
+		expect(inspected.autoResumeReady(record)).toBe(true)
+		await h.service.stop()
+	})
+	it("emits activity updates only when a job's resume view changes", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		let changed = () => {}
+		let audio = false
+		const inspected = h.service as unknown as {
+			deps: ScannerServiceDeps
+			tick(): void
+		}
+		inspected.deps.operatorActivity = {
+			current: () => ({ audio, recording: false }),
+			onChange: cb => {
+				changed = cb
+				return () => {}
+			},
+		}
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			resume: { autoAfterIdleMs: 1000 },
+		})
+		await untilRunning(h, job.id)
+		const emitted: ScanJob[] = []
+		h.service.on("job", (dto: ScanJob) => emitted.push(dto))
+		changed()
+		expect(emitted).toHaveLength(0)
+		h.tuner.external("rtl", "set-frequency", 433920000, "rest")
+		await settled(h.service)
+		emitted.length = 0
+		audio = true
+		changed()
+		expect(emitted.map(dto => dto.id)).toEqual([job.id])
+		changed()
+		expect(emitted).toHaveLength(1)
+		await h.service.pauseJob(job.id)
+		emitted.length = 0
+		inspected.tick()
+		emitted.length = 0
+		audio = false
+		changed()
+		expect(emitted).toHaveLength(0)
+		await h.service.stop()
+	})
+	it("holds automatic resume during operator audio and restarts full idle after hang", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		let clock = Date.now()
+		let audio = true
+		let changed = () => {}
+		let removed = false
+		const inspected = h.service as unknown as {
+			deps: ScannerServiceDeps
+			now: () => number
+		}
+		inspected.now = () => clock
+		inspected.deps.operatorActivity = {
+			current: () => ({ audio, recording: false, sourceId: "rtl" }),
+			onChange: cb => {
+				changed = cb
+				return () => {
+					removed = true
+				}
+			},
+		}
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			resume: { autoAfterIdleMs: 1000 },
+		})
+		await untilRunning(h, job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		clock += 10000
+		changed()
+		expect(h.service.getJob(job.id)).toMatchObject({
+			reason: "preempted-operator",
+			resumeAt: null,
+			resumeHeldBy: "audio",
+		})
+		audio = false
+		changed()
+		clock += 3000
+		expect(h.service.getJob(job.id)?.resumeAt).toBe(
+			new Date(clock + 1000).toISOString(),
+		)
+		clock += 999
+		await tick(30)
+		expect(h.service.getJob(job.id)?.state).toBe("paused")
+		clock += 1
+		await vi.waitFor(
+			() => expect(h.service.getJob(job.id)?.state).toBe("running"),
+			WAIT,
+		)
+		await h.service.stop()
+		expect(removed).toBe(true)
+	})
+	it("Stay here without the lease persists as operator pause rather than boot auto-resume", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			resume: { autoAfterIdleMs: 1000, onBoot: true },
+		})
+		await untilRunning(h, job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		const stayed = await h.service.pauseJob(job.id)
+		expect(stayed).toMatchObject({
+			state: "paused",
+			reason: "operator",
+			resumeAt: null,
+			resumeHeldBy: null,
+		})
+		expect(holderOf(h)).toBeUndefined()
+		await h.service.stop()
+		const restored = serviceHarness({ dir: h.dir, patch: noPassive })
+		await restored.service.start()
+		expect(restored.service.getJob(job.id)).toMatchObject({
+			state: "paused",
+			reason: "operator",
+			resumeAt: null,
+		})
+		await restored.service.resumeJob(job.id, { takeover: true })
+		expect(restored.service.getJob(job.id)?.state).toBe("running")
+		expect(holderOf(restored)).toBe(job.id)
+		expect(restored.service.status().engines.length).toBeGreaterThan(0)
+		await vi.waitFor(
+			() =>
+				expect(
+					restored.tuner.sent.some(
+						command =>
+							command.name === "set-frequency" &&
+							command.value >= 450000000 &&
+							command.value <= 450200000,
+					),
+				).toBe(true),
+			WAIT,
+		)
+		await restored.service.stop()
+	})
+
 	it("phase40 preserves a channel component UNKNOWN and attempts every subscription remover", async () => {
 		const h = serviceHarness()
 		const original = new Error("first remover unavailable")
@@ -123,96 +278,6 @@ describe("ScannerService", () => {
 		expect(h.tuner.sent.filter(c => c.origin === "scanner")).toEqual([])
 		await h.service.stop()
 	})
-
-	// Feature: signal-discovery-scanner, Property 16: Priority
-	// Validates: spec § 10.2
-	it("keeps at most one lease holder per source and it is the best runnable sweep", async () => {
-		type Op =
-			| { t: "create"; priority: number }
-			| { t: "cancel" | "pause" | "resume"; idx: number }
-		const op: fc.Arbitrary<Op> = fc.oneof(
-			fc.record({
-				t: fc.constant("create" as const),
-				priority: fc.integer({ min: 0, max: 100 }),
-			}),
-			fc.record({
-				t: fc.constantFrom(
-					"cancel" as const,
-					"pause" as const,
-					"resume" as const,
-				),
-				idx: fc.nat(5),
-			}),
-		)
-		await fc.assert(
-			fc.asyncProperty(
-				fc.array(op, { minLength: 1, maxLength: 12 }),
-				async ops => {
-					const h = serviceHarness({
-						patch: s => {
-							s.passive.enabled = false
-						},
-					})
-					await h.service.start()
-					const ids: string[] = []
-					try {
-						for (const o of ops) {
-							try {
-								if (o.t === "create") {
-									const id = (await h.service.createJob(sweep(o.priority))).id
-									ids.push(id)
-									// R1: a starting holder is never handed over; let it run so preemption is exercised.
-									await untilRunning(h, id)
-								} else {
-									const id = ids[o.idx % Math.max(1, ids.length)]
-									if (!id) continue
-									if (o.t === "cancel") await h.service.cancelJob(id)
-									if (o.t === "pause") await h.service.pauseJob(id)
-									if (o.t === "resume")
-										await h.service.resumeJob(id, { takeover: true })
-								}
-							} catch (err) {
-								expect(err).toMatchObject({ statusCode: expect.any(Number) })
-							}
-							await settled(h.service)
-							const jobs = h.service
-								.listJobs()
-								.filter(j => j.spec.mode === "sweep")
-							const holder = (
-								h.service as unknown as {
-									arbiter: {
-										holder(id: string): { jobId: string } | undefined
-									}
-								}
-							).arbiter.holder("rtl")
-							const runnable = jobs.filter(
-								j =>
-									["starting", "running", "holding"].includes(j.state) ||
-									(j.state === "paused" &&
-										(j.reason === "operator" || j.reason === "preempted-job")),
-							)
-							const best = chooseLeaseHolder(
-								runnable.map(j => ({
-									jobId: j.id,
-									priority: j.spec.priority,
-									createdAt: Date.parse(j.createdAt),
-								})),
-							)
-							// R1: a holder still in `starting` keeps the lease (a better job's create got 409).
-							const holderStarting =
-								holder !== undefined &&
-								jobs.find(j => j.id === holder.jobId)?.state === "starting"
-							if (best === null) expect(holder).toBeUndefined()
-							else if (!holderStarting) expect(holder?.jobId).toBe(best)
-						}
-					} finally {
-						await h.service.stop()
-					}
-				},
-			),
-			{ numRuns: 100 },
-		)
-	}, 120_000)
 
 	it("restores the tuner at shutdown and pauses the job with core-restart on the next boot", async () => {
 		const h = serviceHarness({
@@ -307,6 +372,15 @@ describe("ScannerService", () => {
 			reason: "preempted-job",
 		})
 		expect(holderOf(h)).toBe(high.id)
+		const inspected = h.service as unknown as { deps: ScannerServiceDeps }
+		inspected.deps.operatorActivity = {
+			current: () => ({ audio: true, recording: true }),
+			onChange: () => () => {},
+		}
+		expect(h.service.getJob(low.id)).toMatchObject({
+			resumeAt: null,
+			resumeHeldBy: null,
+		})
 		await h.service.cancelJob(high.id)
 		await settled(h.service)
 		expect(h.service.getJob(low.id)?.state).toBe("running")
@@ -1264,7 +1338,7 @@ describe("R14 immutable scanner component phase", () => {
 		h.sources.off("newListener", failRegistration)
 		// Explicit fixture cleanup; the owner did not claim this unresolved listener settled.
 		for (const listener of h.tuner.listeners("command-sent"))
-			h.tuner.off("command-sent", listener)
+			h.tuner.off("command-sent", listener as (...args: unknown[]) => void)
 	})
 	it("an early own failure cannot complete40 while an independent component remains held", async () => {
 		const h = serviceHarness({

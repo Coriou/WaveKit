@@ -24,17 +24,27 @@ export function isCanonicalMachineToken(value: string): boolean {
 const tokenSchema = z.string().refine(isCanonicalMachineToken)
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/)
 const timeSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
-const recordSchema = z
+const recordFields = {
+	deviceId: z
+		.string()
+		.startsWith("device_")
+		.refine(v => isCanonicalMachineToken(v.slice(7))),
+	tokenHash: digestSchema,
+	csrfToken: tokenSchema,
+	createdAt: timeSchema,
+	renewedAt: timeSchema,
+	expiresAt: timeSchema,
+}
+const recordSchema = z.object(recordFields).strict()
+// Core snapshot version 2 (WG2 access amendment 4.9-4.12) adds operator labels
+// and a coarse last-seen hour. The CLI never uses them, so it only bounds their
+// shape (a newer core may add kinds); unknown keys are still rejected.
+const recordV2Schema = z
 	.object({
-		deviceId: z
-			.string()
-			.startsWith("device_")
-			.refine(v => isCanonicalMachineToken(v.slice(7))),
-		tokenHash: digestSchema,
-		csrfToken: tokenSchema,
-		createdAt: timeSchema,
-		renewedAt: timeSchema,
-		expiresAt: timeSchema,
+		...recordFields,
+		name: z.string().max(256).nullable(),
+		kind: z.string().max(16).nullable(),
+		lastSeenAt: z.number().int().nonnegative().nullable(),
 	})
 	.strict()
 const stateSchema = z
@@ -42,13 +52,22 @@ const stateSchema = z
 		version: z.literal(1),
 		machineToken: tokenSchema,
 		credentialBinding: digestSchema,
-		sessions: z
-			.object({
-				version: z.literal(1),
-				credentialBinding: digestSchema,
-				sessions: z.array(recordSchema).max(32),
-			})
-			.strict(),
+		sessions: z.union([
+			z
+				.object({
+					version: z.literal(1),
+					credentialBinding: digestSchema,
+					sessions: z.array(recordSchema).max(32),
+				})
+				.strict(),
+			z
+				.object({
+					version: z.literal(2),
+					credentialBinding: digestSchema,
+					sessions: z.array(recordV2Schema).max(32),
+				})
+				.strict(),
+		]),
 	})
 	.strict()
 

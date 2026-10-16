@@ -293,6 +293,35 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.getStatus().clientCount).toBe(1)
 	})
 
+	it("emits pcm only while a listener is attached, without copying audio", () => {
+		const client = new ClientTransport(false)
+		internals().registerClient(
+			client as unknown as http.ServerResponse,
+			"local",
+		)
+		const first = Buffer.from([1, 2, 3, 4])
+		internals().handleAudioData(first)
+		expect(client.received()).toEqual(first)
+		const heard: Buffer[] = []
+		const onPcm = (
+			chunk: Buffer,
+			format: { rate: number; format: string },
+		): void => {
+			heard.push(chunk)
+			expect(format).toEqual({ rate: 25_000, format: "s16le" })
+		}
+		liveDemod.on("pcm", onPcm)
+		const second = Buffer.from([5, 6, 7, 8])
+		internals().handleAudioData(second)
+		expect(heard).toEqual([second])
+		expect(heard[0]).toBe(second)
+		expect(client.received()).toEqual(Buffer.concat([first, second]))
+		liveDemod.off("pcm", onPcm)
+		internals().handleAudioData(Buffer.from([9, 10]))
+		expect(heard).toHaveLength(1)
+		expect(liveDemod.listenerCount("pcm")).toBe(0)
+	})
+
 	it("keeps about one second for a stalled client, dropping the oldest audio", () => {
 		const slow = new ClientTransport(true)
 		const healthy = new ClientTransport(false)
@@ -353,6 +382,156 @@ describe("LiveDemodulator", () => {
 			expect(muted.readFloatLE(offset + 4)).toBe(0)
 		}
 		expect(liveDemod.getStatus().squelchOpen).toBe(false)
+	})
+
+	it("emits bounded 10 Hz measured levels and immediate gate changes, then stops", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		const levels = vi.fn()
+		const gates = vi.fn()
+		liveDemod.on("level", levels)
+		liveDemod.on("squelch-changed", gates)
+		await liveDemod.start()
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		await liveDemod.reconfigure({ squelch: -50 })
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		expect(gates).toHaveBeenLastCalledWith(false)
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(levels).toHaveBeenCalledTimes(10)
+		expect(levels.mock.lastCall?.[0]).toMatchObject({
+			sourceId: "rtl-pi",
+			squelchOpen: false,
+			thresholdDbfs: -50,
+		})
+		expect(levels.mock.lastCall?.[0].noiseFloorDbfs).toBeCloseTo(-80)
+		await liveDemod.stop()
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(levels).toHaveBeenCalledTimes(10)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+	})
+
+	it("changes auto squelch live, retaining processes and rejecting unsupported noise mode", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto", autoMarginDb: 6 })
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet)
+		expect(liveDemod.getStatus().thresholdDbfs).toBeCloseTo(-74)
+		const signal = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) signal.writeFloatLE(0.01, i * 8)
+		processes[0]!.stdout.write(signal)
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		await liveDemod.reconfigure({ autoMarginDb: 10 })
+		expect(liveDemod.getStatus().thresholdDbfs).toBeCloseTo(-70, 1)
+		await liveDemod.reconfigure({ squelchMode: "manual", squelch: 0 })
+		expect(liveDemod.getStatus().thresholdDbfs).toBe(0)
+		expect(spawnMock).toHaveBeenCalledTimes(2)
+		await expect(
+			liveDemod.reconfigure({
+				squelchMode: "noise",
+			} as unknown as Partial<LiveDemodConfig>),
+		).rejects.toThrow()
+		await expect(liveDemod.reconfigure({ autoMarginDb: 41 })).rejects.toThrow()
+	})
+
+	async function feedPower(dbfs: number, seconds: number): Promise<void> {
+		const block = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) block.writeFloatLE(10 ** (dbfs / 20), i * 8)
+		processes[1]!.stdin.resume()
+		for (let i = 0; i < seconds * 100; i++) {
+			await new Promise<void>(resolve =>
+				processes[0]!.stdout.write(block, () => resolve()),
+			)
+		}
+	}
+
+	it("auto squelch survives a 20 s signal then closes a sustained 20 dB noise step within 60 s of stream time", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto", autoMarginDb: 6 })
+		await feedPower(-80, 1)
+		await feedPower(-60, 20)
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		await feedPower(-60, 40)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		// Only a scalar floor is retained, regardless of stream duration.
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeGreaterThan(-64)
+	})
+
+	it("keeps level estimation and stream buffers bounded over extended stream time", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto" })
+		await feedPower(-80, 1)
+		for (let minute = 0; minute < 2; minute++) {
+			await feedPower(-60, 60)
+			expect(typeof liveDemod.getStatus().noiseFloorDbfs).toBe("number")
+			expect(processes[0]!.stdout.readableLength).toBe(0)
+			expect(processes[0]!.stdout.writableLength).toBe(0)
+			expect(processes[1]!.stdin.readableLength).toBe(0)
+			expect(processes[1]!.stdin.writableLength).toBe(0)
+		}
+	})
+
+	it("resets the auto floor on retained-pipeline tuning and mode changes", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto" })
+		await feedPower(-80, 1)
+		sourceManager.emitCaps({ centerFreq: 101_000_000 })
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
+		await feedPower(-80, 1)
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeCloseTo(-80)
+		await liveDemod.reconfigure({ squelchMode: "manual", squelch: -70 })
+		await feedPower(-60, 60)
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		expect(liveDemod.getStatus().thresholdDbfs).toBe(-70)
+		await liveDemod.reconfigure({ squelchMode: "auto" })
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
+		expect(spawnMock).toHaveBeenCalledTimes(2)
+	})
+
+	it("publishes null measurements at 20 Hz until input and clears activity on failure", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+		liveDemod = create({}, { levelHz: 20, restartBaseDelayMs: 10_000 })
+		const levels = vi.fn()
+		const gates = vi.fn()
+		liveDemod.on("level", levels)
+		liveDemod.on("squelch-changed", gates)
+		await liveDemod.start()
+		await vi.advanceTimersByTimeAsync(100)
+		expect(levels).toHaveBeenCalledTimes(2)
+		expect(levels.mock.lastCall?.[0]).toMatchObject({
+			channelPowerDbfs: null,
+			noiseFloorDbfs: null,
+			thresholdDbfs: 0,
+			squelchOpen: true,
+		})
+		processes[0]!.exit(1)
+		expect(gates).toHaveBeenLastCalledWith(false)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		await vi.advanceTimersByTimeAsync(100)
+		expect(levels).toHaveBeenCalledTimes(2)
+	})
+
+	it("measures split IQ blocks once and emits no duplicate unchanged gate notifications", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelch: -50 })
+		const gates = vi.fn()
+		liveDemod.on("squelch-changed", gates)
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet.subarray(0, 3))
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
+		processes[0]!.stdout.write(quiet.subarray(3))
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeCloseTo(-80)
+		processes[0]!.stdout.write(Buffer.concat([quiet, quiet, quiet]))
+		expect(gates).toHaveBeenCalledTimes(1)
+		expect(gates).toHaveBeenLastCalledWith(false)
+	})
+
+	it("bounds level publishing rate to 10–20 Hz", () => {
+		expect(() => create({}, { levelHz: 9 })).toThrow()
+		expect(() => create({}, { levelHz: 21 })).toThrow()
 	})
 
 	it("restarts the pipeline when a DSP setting changes", async () => {
@@ -591,5 +770,161 @@ describe("LiveDemodulator", () => {
 		expect(status.decimationFactor).toBe(96)
 		expect(Math.round(status.effectiveSampleRate)).toBe(25000)
 		expect(status.wavUrl).toBe(`http://localhost:${port}/stream.wav`)
+	})
+
+	it("reports the channel squelch hang the gate is constructed with", () => {
+		expect(liveDemod.squelchHangMs()).toBe(250)
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
+	it("labels a squelch drop during stop as stopped", async () => {
+		await liveDemod.start()
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.stop()
+		expect(reasons).toEqual(["stopped"])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
+	it("labels a transmission-closing reconfigure as config", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.reconfigure({ modulation: "am" })
+		expect(reasons).toEqual(["config"])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
+	// WG1 req 3.6: a pipeline restart outside the five identity fields is "config" too.
+	it("labels a pipeline-restarting reconfigure outside the identity fields as config", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.reconfigure({ audioFormat: "f32le" })
+		expect(reasons).toEqual(["config"])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+	})
+
+	it("does not label a new pipeline failure during an http restart as config", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		const nextPort = await findAvailablePort()
+		const internals = liveDemod as unknown as {
+			restartHttpServer(): Promise<void>
+		}
+		const restartHttp = internals.restartHttpServer.bind(liveDemod)
+		let release: () => void = () => undefined
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		let entered: () => void = () => undefined
+		const startedRestart = new Promise<void>(resolve => {
+			entered = resolve
+		})
+		internals.restartHttpServer = async () => {
+			processes[2]!.exit(1)
+			entered()
+			await gate
+			await restartHttp()
+		}
+		const pending = liveDemod.reconfigure({
+			modulation: "am",
+			httpPort: nextPort,
+		})
+		await startedRestart
+		expect(reasons).toEqual(["config", null])
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+		release()
+		await pending
+		expect(liveDemod.transmissionCloseOverride()).toBeNull()
+		expect(liveDemod.getStatus().config.modulation).toBe("am")
+		expect(liveDemod.getStatus().config.httpPort).toBe(nextPort)
+	})
+
+	// WG2 req 7.7 (WG1 n2): the resolved source decides, not the configured string.
+	it("neither restarts nor closes when an absent and an explicit id resolve to the same source", async () => {
+		await liveDemod.stop()
+		liveDemod = create({ sourceId: undefined })
+		await liveDemod.start()
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		const spawned = processes.length
+		await liveDemod.reconfigure({ sourceId: "rtl-pi" })
+		expect(processes.length).toBe(spawned)
+		expect(fanoutManager.removeBranch).not.toHaveBeenCalled()
+		expect(reasons).toEqual([])
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		expect(liveDemod.getStatus().config.sourceId).toBe("rtl-pi")
+	})
+
+	it("restarts and closes as config on a real source change", async () => {
+		await liveDemod.stop()
+		const fanouts = new Map<
+			string,
+			ReturnType<typeof createMockFanoutManager>
+		>()
+		const fanoutFor = (id: string) => {
+			let f = fanouts.get(id)
+			if (!f) {
+				f = createMockFanoutManager()
+				fanouts.set(id, f)
+			}
+			return f
+		}
+		const router = {
+			getFanout: vi.fn((id: string) => fanoutFor(id)),
+			getDefaultSourceId: vi.fn(() => "rtl-pi"),
+		}
+		liveDemod = new LiveDemodulatorClass(
+			testLogger,
+			sourceManager as any,
+			router as any,
+			LiveDemodConfigSchema.parse({ enabled: true, httpPort: port }),
+			{},
+		)
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		const spawned = processes.length
+		// Absent resolving to rtl-pi, then explicit rtl-pi: no restart, no close.
+		await liveDemod.reconfigure({ sourceId: "rtl-pi" })
+		expect(processes.length).toBe(spawned)
+		expect(reasons).toEqual([])
+		await liveDemod.reconfigure({ sourceId: "rtl-b" })
+		expect(processes.length).toBeGreaterThan(spawned)
+		expect(fanoutFor("rtl-pi").removeBranch).toHaveBeenCalled()
+		expect(fanoutFor("rtl-b").addBranch).toHaveBeenCalledWith(
+			expect.objectContaining({ sourceId: "rtl-b" }),
+		)
+		expect(reasons).toEqual(["config"])
+	})
+
+	it("leaves a threshold-only squelch close unlabeled", async () => {
+		await liveDemod.start()
+		const reasons: Array<"stopped" | "config" | null> = []
+		liveDemod.on("squelch-changed", open => {
+			if (!open) reasons.push(liveDemod.transmissionCloseOverride())
+		})
+		await liveDemod.reconfigure({ squelch: -50 })
+		const quiet = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		processes[0]!.stdout.write(quiet)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		expect(reasons).toEqual([null])
 	})
 })

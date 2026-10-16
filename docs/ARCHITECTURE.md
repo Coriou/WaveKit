@@ -466,6 +466,13 @@ WebSocketEventBroadcaster
 Subscribed WebSocket Clients
 ```
 
+When `activity.enabled` is true, that same decoder output is also published as
+a decode envelope into `<stateDir>/activity/activity.db` (Node 24 `node:sqlite`
+with FTS5). Output types `sync`, `rates`, `stats`, `status` and `error` are
+not stored. Search, facets and cursor replay are served on `/api/activity` and
+the WebSocket `activity` channel. The store is off by default. A failed open
+keeps the process running and those routes answer 503 `ACTIVITY_UNAVAILABLE`.
+
 ## Decoder Integration Patterns
 
 WaveKit supports three decoder integration patterns:
@@ -535,7 +542,14 @@ Configuration is loaded from YAML files with environment variable overrides.
 WAVEKIT_API_PORT=9000           → api.port = 9000
 WAVEKIT_LOG_LEVEL=debug         → logging.level = "debug"
 WAVEKIT_SOURCES_0_HOST=1.2.3.4  → sources[0].host = "1.2.3.4"
+WAVEKIT_STATE_DIR=data          → stateDir = "data"
+WAVEKIT_ACTIVITY__ENABLED=true  → activity.enabled = true
 ```
+
+Nested activity retention and admission keys use the same `__` form
+(`WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS`, and the matching admission names).
+The activity database is `<stateDir>/activity/activity.db` and is created only
+when Activity is enabled and the store opens.
 
 **Validation**: All configuration is validated with Zod schemas at startup.
 

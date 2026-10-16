@@ -426,7 +426,7 @@ WAVEKIT_TUNER_RELAY__PORT=1234
 
 ### Prerequisites
 
-- Node.js 22+ (`.nvmrc` pins v25.2.1; Dockerfile uses `node:22-bookworm-slim`)
+- Node.js 24 LTS or newer (`.nvmrc` pins v24.20.0; Dockerfiles use `node:24-bookworm-slim`)
 - pnpm 10 via Corepack (`corepack enable && corepack prepare pnpm@10.28.0 --activate`)
 - Docker with BuildKit + buildx (run `make docker-init` once)
 - RTL-SDR dongle (or rtl_tcp server)

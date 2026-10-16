@@ -77,9 +77,36 @@ export interface ScanRange extends FreqRange {
 	obwHz?: number[]
 	protocols?: ScannerProtocol[]
 	bandplanId?: string
+	/**
+	 * Scanner follow-ups (SF1, docs/specs/scanner-followups): `false` keeps the range in the
+	 * job (index and fields stay) but it is not planned, swept, masked or matched for
+	 * protocols. Absent = enabled. Live-editable.
+	 */
+	enabled?: boolean
+	/** SF1: operator label, 1 to 100 characters. Live-editable. */
+	name?: string
+	/**
+	 * SF1: dwell (ms) of every hop overlapping this range; same bounds as the job's
+	 * `dwellMs`; the job's value applies when absent. Live-editable.
+	 */
+	dwellMs?: number
+	/**
+	 * SF1: CFAR false-alarm target of this range (low, normal, high as the job-level
+	 * mapping); integration stays job-level. The job's sensitivity applies when absent.
+	 * Live-editable.
+	 */
+	sensitivity?: "low" | "normal" | "high"
 }
 export interface ScanExclusion extends FreqRange {
 	reason?: string
+}
+/**
+ * WG2 (requirement 12): a runtime exclusion derived from a locked-out discovery. Never part of
+ * the stored job spec. `applied` is false past the 256 cap or when applying would empty the plan.
+ */
+export interface LockoutExclusion extends FreqRange {
+	discoveryId: string
+	applied: boolean
 }
 export type ObservationEndReason =
 	| "quiet"
@@ -282,6 +309,12 @@ export interface ScanJobSpec {
 	txDurationHintMs?: number
 	monitor?: MonitorSpec
 	capture?: Partial<CaptureSpec> & { enabled: boolean }
+	/**
+	 * SF1: find signals, never decode them. The job requests no decoder trials (confirm or
+	 * follow probes) of its own; detection, classification, discoveries, captures and
+	 * ambient or other jobs' evidence are unchanged. Discover jobs only. Live-editable.
+	 */
+	signalsOnly?: boolean
 }
 
 export interface CaptureSpec {
@@ -331,6 +364,8 @@ export interface NormalisedJobSpec {
 	resume: { autoAfterIdleMs: number | null; onBoot: boolean }
 	txDurationHintMs: number
 	capture: CaptureSpec
+	/** SF1: present only when the operator set it (absent = false, today's behaviour). */
+	signalsOnly?: boolean
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.
@@ -354,6 +389,8 @@ export interface Hop {
 	dcAdjacentChannelsHz: number[]
 	excluded: FreqRange[]
 	dcMinEdgeHz: number
+	/** SF1: present only when an enabled range overlapping the hop sets `dwellMs` (max of the overlapping ranges' dwell, the job's for ranges without one). */
+	dwellMs?: number
 }
 export interface HopPlan {
 	hops: Hop[]
@@ -386,6 +423,8 @@ export type PlanIssueCode =
 	| "dedicated-available"
 	| "unrestorable"
 	| "probe-unavailable"
+	| "range-locked"
+	| "signals-only-unsupported"
 export interface PlanIssue {
 	code: PlanIssueCode
 	severity: IssueSeverity
@@ -408,6 +447,8 @@ export interface PlanPreview {
 	estimates: { cpuCores: number; diskMbPerHour: number; probes: number }
 	impact: Impact
 	issues: PlanIssue[]
+	/** WG2: lockout exclusions for the spec's source (sweep plans only). */
+	lockoutExclusions?: LockoutExclusion[]
 }
 
 export interface ScanJobProbe {
@@ -434,9 +475,43 @@ export interface ScanJobProgress {
 		transients: number
 		discoveries: Record<ScannerConfidence, number>
 	}
+	/** WG2: per-job hit statistics since the job started. */
+	hitStats?: ScanJobHitStats
+}
+
+/** WG2 (requirement 13): one discovery's hits in one job (in memory; reset on job start). */
+export interface ScanJobHit {
+	jobId: string
+	discoveryId: string
+	/** Observations attributed to the job. */
+	hits: number
+	firstHitAt: string
+	lastHitAt: string
+	/** The discovery was created by an observation of this job. */
+	firstSeenInJob: boolean
+}
+
+export interface ScanJobHitStats {
+	/** Distinct discoveries hit (tracked or not). */
+	discoveries: number
+	/** Total hits. */
+	hits: number
+	/** Discoveries first seen in this job. */
+	newDiscoveries: number
+	/** More than 2000 discoveries: the rest count in `hits` only. */
+	truncated: boolean
+}
+
+/** WG2: GET /api/scanner/jobs/:id/hits?limit=n (1–500, default 100), most recent first. */
+export interface ScanJobHitsResponse {
+	jobId: string
+	stats: ScanJobHitStats
+	hits: ScanJobHit[]
 }
 /** GET /api/scanner/jobs/:id and the `scanner:job` WS message. */
 export interface ScanJob {
+	resumeAt: string | null
+	resumeHeldBy: "audio" | "identify" | "recording" | null
 	id: string
 	name: string | null
 	state: JobState
@@ -454,6 +529,13 @@ export interface ScanJob {
 	endedAt?: string
 	/** Identify jobs only (spec § 10.8, Task 35a): the request and one entry per target. */
 	identify?: ScannerIdentifyView
+	/**
+	 * SF1: on `paused(preempted-job)` only, the job that holds this job's source lease now;
+	 * absent otherwise (and when no other job holds it).
+	 */
+	preemptedBy?: { jobId: string; name: string | null }
+	/** WG2: lockout exclusions in force for this sweep job (runtime only). */
+	lockoutExclusions?: LockoutExclusion[]
 }
 
 // --- Status, settings, bandplans (spec § 12.1) ---
@@ -592,10 +674,15 @@ export interface ScannerProgressEventData {
 	holdingOn?: string
 	coverage: number
 	probes: number
+	/** WG2: total hits and discoveries first seen in this job. */
+	hits?: number
+	newDiscoveries?: number
 }
 export interface ScannerDiscoveryEventData {
 	change: "created" | "updated" | "upgraded" | "merged" | "deleted"
 	discovery: Discovery
+	/** WG2: present when a job's observation caused the event; one entry per such job. */
+	jobHits?: ScanJobHit[]
 }
 export interface ScannerActivityEventData {
 	sourceId: string

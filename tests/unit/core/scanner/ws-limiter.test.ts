@@ -42,12 +42,19 @@ class FakeClock {
 	}
 }
 
-function setup(maxPerSecond: number, perKeyMinIntervalMs: number) {
+type Priority = "state" | "progress" | "activity"
+
+function setup(
+	maxPerSecond: number,
+	perKeyMinIntervalMs: number,
+	perPriorityMinIntervalMs?: Partial<Record<Priority, number>>,
+) {
 	const clock = new FakeClock()
 	const emitted: { at: number; msg: Msg }[] = []
 	const limiter = new WsLimiter<Msg>({
 		maxPerSecond,
 		perKeyMinIntervalMs,
+		...(perPriorityMinIntervalMs ? { perPriorityMinIntervalMs } : {}),
 		now: clock.now,
 		emit: msg => emitted.push({ at: clock.t, msg }),
 		schedule: clock.schedule,
@@ -171,6 +178,84 @@ describe("WsLimiter", () => {
 					for (const e of emitted) {
 						const prev = lastByKey.get(e.msg.key)
 						if (prev !== undefined) {
+							expect(e.at - prev.at).toBeGreaterThanOrEqual(interval)
+							expect(e.msg.version).toBeGreaterThan(prev.version)
+						}
+						lastByKey.set(e.msg.key, { at: e.at, version: e.msg.version })
+					}
+					for (const [key, version] of latest)
+						expect(lastByKey.get(key)?.version).toBe(version)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("lets one priority override the per-key interval", () => {
+		const { clock, emitted, limiter } = setup(10, 1_000, { progress: 500 })
+		for (let v = 1; v <= 20; v++) {
+			clock.advanceTo(v * 100)
+			limiter.offer("p", { key: "p", version: v }, "progress")
+			limiter.offer("s", { key: "s", version: v }, "state")
+		}
+		clock.advanceTo(5_000)
+		expect(
+			emitted.filter(e => e.msg.key === "p").map(e => [e.at, e.msg.version]),
+		).toEqual([
+			[100, 1],
+			[600, 5],
+			[1_100, 10],
+			[1_600, 15],
+			[2_100, 20],
+		])
+		expect(
+			emitted.filter(e => e.msg.key === "s").map(e => [e.at, e.msg.version]),
+		).toEqual([
+			[100, 1],
+			[1_100, 10],
+			[2_100, 20],
+		])
+	})
+
+	// Feature: web-gaps-1, Property 10: Scanner progress rate
+	// Validates: Requirements 8.1
+	it("keeps progress keys 500 ms apart, other keys 1 s apart, within the global budget", () => {
+		const offerArb = fc.record({
+			dt: fc.integer({ min: 0, max: 300 }),
+			key: fc.integer({ min: 0, max: 5 }),
+			priority: fc.constantFrom(
+				"state" as const,
+				"progress" as const,
+				"activity" as const,
+			),
+		})
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 1, max: 20 }),
+				fc.array(offerArb, { maxLength: 150 }),
+				(max, offers) => {
+					const { clock, emitted, limiter } = setup(max, 1_000, {
+						progress: 500,
+					})
+					const latest = new Map<string, number>()
+					let t = 0
+					offers.forEach((o, i) => {
+						t += o.dt
+						clock.advanceTo(t)
+						const key = `${o.priority}:${o.key}` // one priority per key
+						latest.set(key, i)
+						limiter.offer(key, { key, version: i }, o.priority)
+					})
+					clock.advanceTo(t + 120_000)
+					for (let i = 0; i + max < emitted.length; i++)
+						expect(
+							(emitted[i + max]?.at ?? 0) - (emitted[i]?.at ?? 0),
+						).toBeGreaterThanOrEqual(1_000)
+					const lastByKey = new Map<string, { at: number; version: number }>()
+					for (const e of emitted) {
+						const prev = lastByKey.get(e.msg.key)
+						if (prev !== undefined) {
+							const interval = e.msg.key.startsWith("progress:") ? 500 : 1_000
 							expect(e.at - prev.at).toBeGreaterThanOrEqual(interval)
 							expect(e.msg.version).toBeGreaterThan(prev.version)
 						}

@@ -24,6 +24,8 @@ const liveDemodConfigSchema = {
 		},
 		bandwidth: { type: "number" },
 		squelch: { type: "number" },
+		squelchMode: { type: "string", enum: ["manual", "auto"] },
+		autoMarginDb: { type: "number", minimum: 0, maximum: 40 },
 		noiseReduction: {
 			type: "string",
 			enum: ["off", "voice", "noaa-apt", "narrow-band"],
@@ -77,6 +79,8 @@ const liveDemodStatusSchema = {
 		pipelineRestarts: { type: "number" },
 		channelPowerDbfs: { type: "number" },
 		squelchOpen: { type: "boolean" },
+		noiseFloorDbfs: { type: "number" },
+		thresholdDbfs: { type: "number" },
 	},
 	required: [
 		"enabled",
@@ -151,6 +155,8 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			modulation: config.modulation,
 			bandwidth: config.bandwidth,
 			squelch: config.squelch,
+			squelchMode: config.squelchMode ?? "manual",
+			autoMarginDb: config.autoMarginDb ?? 6,
 			noiseReduction: config.noiseReduction,
 			lowPass: config.lowPass,
 			highPass: config.highPass,
@@ -182,6 +188,12 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			pipelineHealth: status.pipelineHealth,
 			wavUrl: status.wavUrl,
 			pipelineRestarts: status.pipelineRestarts,
+			...(status.noiseFloorDbfs !== undefined
+				? { noiseFloorDbfs: status.noiseFloorDbfs }
+				: {}),
+			...(status.thresholdDbfs !== undefined
+				? { thresholdDbfs: status.thresholdDbfs }
+				: {}),
 			...(status.lastError !== undefined
 				? { lastError: status.lastError }
 				: {}),
@@ -273,6 +285,12 @@ export const liveAudioRoutes: FastifyPluginAsync<
 					: {}),
 				...(body.bandwidth !== undefined ? { bandwidth: body.bandwidth } : {}),
 				...(body.squelch !== undefined ? { squelch: body.squelch } : {}),
+				...(body.squelchMode !== undefined
+					? { squelchMode: body.squelchMode }
+					: {}),
+				...(body.autoMarginDb !== undefined
+					? { autoMarginDb: body.autoMarginDb }
+					: {}),
 				...(body.noiseReduction !== undefined
 					? { noiseReduction: body.noiseReduction }
 					: {}),

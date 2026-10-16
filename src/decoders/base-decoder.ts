@@ -18,6 +18,7 @@ import { signalDecoder } from "./process-tools.js"
 import { csdrChildEnv } from "./csdr-buffers.js"
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
+import { DecoderObservability } from "./decoder-observability.js"
 import { createInterface } from "node:readline"
 import { PassThrough, type Readable } from "node:stream"
 import type {
@@ -57,6 +58,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	readonly id: string
 	readonly type: string
 
+	private readonly observability: DecoderObservability
+
 	protected process: ChildProcess | null = null
 	protected inputStream: Readable | null = null
 	private readonly trackInputBytes = (chunk: Buffer): void => {
@@ -86,8 +89,13 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		return this.getCaps()
 	}
 
-	constructor(config: DecoderConfig, logger: Logger) {
+	constructor(
+		config: DecoderConfig,
+		logger: Logger,
+		wallClock: () => number = Date.now,
+	) {
 		super()
+		this.observability = new DecoderObservability(wallClock)
 		this.id = config.id
 		this.type = config.type
 		this.config = config
@@ -189,6 +197,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			if (this.process === proc) this.process = null
 			this.emit("exit", code, signal)
 		})
+
+		if (this.process.stdout)
+			this.observability.captureLog(this.process.stdout, "stdout")
+		if (this.process.stderr)
+			this.observability.captureLog(this.process.stderr, "stderr")
 
 		// Parse stdout line by line (Requirement 4.4)
 		if (this.process.stdout) {
@@ -372,10 +385,15 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			pid: this.process?.pid,
 			uptime,
 			stats: { ...this.stats },
+			rateHistory: this.observability.getRateHistory(),
 			lastOutputAt: this.lastOutputAt ?? undefined,
 			restartCount: this.restartCount,
 			version: this.version,
 		}
+	}
+
+	getLog(lines = 200): Array<{ stream: "stdout" | "stderr"; line: string }> {
+		return this.observability.getLog(lines)
 	}
 
 	/**
@@ -451,7 +469,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 */
 	protected emitOutput(output: DecoderOutput): void {
 		this.stats.eventsOut++
-		this.lastOutputAt = new Date()
+		this.lastOutputAt = this.observability.countOutput()
 		this.outputStream.write(output)
 		this.emit("output", output)
 

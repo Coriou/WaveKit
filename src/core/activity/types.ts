@@ -21,14 +21,52 @@ export interface DecodeProvenance {
 	probeId?: string
 	channelId?: string
 }
+/**
+ * WG3 (web-gaps-3 req 5.2): what the process knows about one decoder instance's RF input,
+ * supplied by Main (src/index.ts) from decoder config and source tuning. Never inferred
+ * from decoded data.
+ */
+export interface ActivityDecoderBinding {
+	/** Source the decoder reads; null for decoders with their own device or unknown. */
+	sourceId: string | null
+	/** Configured target frequencies in Hz (resolveDecoderTargetFrequencies); may be empty. */
+	targetFrequenciesHz: readonly number[]
+	/** `commanded` only when WaveKit itself commands the tuning the decoder hears. */
+	tuningTrust: "commanded" | "relay" | "unverified"
+}
+
+/**
+ * WG3: O(1) lookup by decoder instance id; null when unknown. Must not throw; the ingress
+ * still guards it (req 5.7).
+ */
+export type ActivityProvenanceLookup = (
+	decoderId: string,
+) => ActivityDecoderBinding | null
+
 export interface DecodeReferences {
 	callId?: string
 	discoveryId?: string
 	observationId?: string
 }
+export interface DecodePosition {
+	lat: number
+	lon: number
+	altM?: number
+}
 export interface DecodePresentation {
+	entityKey?: string | null
+	position?: DecodePosition
 	protocol?: string | null
-	category?: "aircraft" | "voice" | "pager" | "data" | "other"
+	category?:
+		| "aircraft"
+		| "marine"
+		| "aviation-data"
+		| "voice"
+		| "paging"
+		| "aprs"
+		| "sensors"
+		| "mesh"
+		| "other"
 	title?: string | null
 	fields?: readonly DecodeField[]
 }
@@ -54,7 +92,18 @@ export interface DecodeEnvelope {
 	decoderType?: string
 	outputType: string
 	protocol: string | null
-	category: "aircraft" | "voice" | "pager" | "data" | "other"
+	category:
+		| "aircraft"
+		| "marine"
+		| "aviation-data"
+		| "voice"
+		| "paging"
+		| "aprs"
+		| "sensors"
+		| "mesh"
+		| "other"
+	entityKey: string | null
+	position?: DecodePosition
 	title: string | null
 	fields: readonly DecodeField[]
 	provenance: DecodeProvenance

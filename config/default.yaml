@@ -296,6 +296,8 @@ tuner:
 #   squelch: 0               # channel power before demod, dBFS (-160 to 0);
 #                            # 0 = open. Typical: noise -55..-65, a carrier
 #                            # -10..-30, so -40 opens on real signals only
+#   squelchMode: "manual"    # manual | auto (floor estimate + autoMarginDb)
+#   autoMarginDb: 6          # dB above the floor estimate, auto mode (0-40)
 #   noiseReduction: "off"    # off | voice | noaa-apt | narrow-band
 #   lowPass: 0               # Hz (0 disables)
 #   highPass: 0              # Hz (0 disables)
@@ -732,7 +734,53 @@ csdr:
 #   inputHighWaterMark: 262144
 #   blockSamples: 16384
 
+# Activity recording. On by default: decoder events and live-demodulator
+# analog transmissions go to an SQLite store under stateDir/activity, and the
+# legacy decoder:output stream is unchanged. Bounded defaults for a Pi-class
+# SD card (an operator judgement, not measured): 250_000 rows, 256 MiB of live
+# pages plus up to 64 MiB of WAL, 3 days; admission 50/s burst 500 global,
+# 20/s burst 200 per decoder. Each field below is an optional override;
+# omitted fields keep the default. A store that grew under the old defaults
+# (2 GiB) is pruned down gradually. Redundant aircraft/ship position and
+# presence updates are stored once per entity per minute; first sightings,
+# identity changes, other fields and non-position AIS types are always
+# stored. N visible entities then add about N x 1440 rows a day: 300 fill the
+# 250_000-row cap in about 14 hours. Age pruning (maxAgeMs) removes the oldest
+# rows of every feed. When the row or byte cap binds, retention.policy decides
+# which rows go: "fair-share" (default) water-fills the cap across feeds
+# (decoder:<id>, or kind:<kind> for rows without a decoder) and removes only
+# the oldest rows of feeds above the fair level, so a quiet feed (pages, a
+# mesh) keeps its rows until maxAgeMs while busy feeds share the rest;
+# "oldest-first" removes the oldest rows of all feeds alike (the pre-WG3
+# behaviour). A station with one feed behaves the same under both. See the
+# Retention section of docs/API.md. If node:sqlite is
+# unusable the store reports "unavailable" and the rest of WaveKit keeps
+# running.
+# Disable with `activity: { enabled: false }` or
+# WAVEKIT_ACTIVITY__ENABLED=false.
+# activity:
+#   enabled: true
+#   retention:
+#     maxRows: 250000
+#     maxDbBytes: 268435456
+#     maxAgeMs: 259200000
+#     policy: fair-share
+#   admission:
+#     globalPerSecond: 50
+#     globalBurst: 500
+#     perDecoderPerSecond: 20
+#     perDecoderBurst: 200
+
 # Protected runtime is opt-in; provision private state with the access command.
 # Public listener mappings are validated separately from private state.
 access:
   mode: legacy
+
+# Optional operator station identity (no geolocation or decoder effects).
+# station:
+#   name: Home
+#   lat: 48.8566
+#   lon: 2.3522
+#   altM: 35
+#   callsign: F1ABC
+#   country: FR # uppercase ISO 3166-1 alpha-2; WAVEKIT_COUNTRY locks this value

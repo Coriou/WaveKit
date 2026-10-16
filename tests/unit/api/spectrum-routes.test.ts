@@ -40,6 +40,8 @@ describe("spectrum routes", () => {
 			maxProfiles: 4,
 			hz: { min: 0.5, max: 25, step: 0.5 },
 			bins: { min: 128, max: 2048 },
+			averaging: { min: 1, max: 32 },
+			backfill: { maxMs: 10_000, maxFrames: 64, maxBytes: 524_288 },
 		},
 		subscribers: 0,
 		sources: [],

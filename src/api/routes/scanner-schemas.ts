@@ -1,6 +1,10 @@
 /** JSON schemas for /api/scanner (spec § 12.1). Response bodies are DTOs from @wavekit/api-types. */
 import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
+import {
+	JOB_HITS_LIMIT_DEFAULT,
+	JOB_HITS_LIMIT_MAX,
+} from "../../core/scanner/job-hits.js"
 
 const protocolEnum = [
 	"analog-fm",
@@ -21,6 +25,21 @@ const protocolEnum = [
 	"carrier",
 	"unknown",
 ] as const
+const identityKindEnum = [
+	"dmr-cc",
+	"p25-nac",
+	"nxdn-ran",
+	"ysf-dgid",
+	"dstar-call",
+	"dpmr-cc",
+	"pocsag-capcode",
+	"aprs-call",
+	"ism-model",
+] as const
+/** SF1 `identity=<kind>:<value>`: a known IdentityKind, a colon, a non-empty value. */
+export const IDENTITY_QUERY = new RegExp(
+	`^(${identityKindEnum.join("|")}):(.+)$`,
+)
 const confidenceEnum = [
 	"activity",
 	"candidate",
@@ -71,6 +90,11 @@ const rangeSchema = {
 		obwHz: { type: "array", items: { type: "number", exclusiveMinimum: 0 } },
 		protocols: { type: "array", items: { type: "string", enum: protocolEnum } },
 		bandplanId: { type: "string" },
+		// SF1 per-range fields (docs/specs/scanner-followups): live-editable in a PATCH `ranges`
+		enabled: { type: "boolean" },
+		name: { type: "string", minLength: 1, maxLength: 100 },
+		dwellMs: { type: "number", minimum: 10, maximum: 600000 },
+		sensitivity: { type: "string", enum: ["low", "normal", "high"] },
 	},
 	required: ["startHz", "endHz"],
 	// § 5.1 shorthand: spacingHz (+ optional firstChannelHz) is one raster; the route converts it.
@@ -193,6 +217,8 @@ export const scanJobSpecSchema = {
 			required: ["enabled"],
 			additionalProperties: false,
 		},
+		// SF1: no decoder trials of the job's own (discover jobs only)
+		signalsOnly: { type: "boolean" },
 	},
 	additionalProperties: false,
 } as const
@@ -239,6 +265,11 @@ export const discoveryQuerySchema = {
 		since: { type: "string", format: "date-time" },
 		encrypted: { type: "boolean" },
 		q: { type: "string", maxLength: 100 },
+		identity: {
+			type: "string",
+			maxLength: 100,
+			pattern: IDENTITY_QUERY.source,
+		},
 		sort: { type: "string", enum: ["lastSeen", "frequency", "confidence"] },
 		cursor: { type: "string" },
 		limit: { type: "integer", minimum: 1, maximum: 500 },
@@ -252,6 +283,66 @@ export const observationsQuerySchema = {
 		cursor: { type: "string" },
 		limit: { type: "integer", minimum: 1, maximum: 500 },
 	},
+	additionalProperties: false,
+} as const
+
+/** WG2 req 13.3: GET /api/scanner/jobs/:id/hits?limit (1–500, default 100). */
+export const jobHitsQuerySchema = {
+	type: "object",
+	properties: {
+		limit: {
+			type: "integer",
+			minimum: 1,
+			maximum: JOB_HITS_LIMIT_MAX,
+			default: JOB_HITS_LIMIT_DEFAULT,
+		},
+	},
+	additionalProperties: false,
+} as const
+
+const jobHitStatsSchema = {
+	type: "object",
+	properties: {
+		discoveries: { type: "integer" },
+		hits: { type: "integer" },
+		newDiscoveries: { type: "integer" },
+		truncated: { type: "boolean" },
+	},
+	required: ["discoveries", "hits", "newDiscoveries", "truncated"],
+	additionalProperties: false,
+} as const
+
+/** `ScanJobHitsResponse`, every field. */
+export const jobHitsResponseSchema = {
+	type: "object",
+	properties: {
+		jobId: { type: "string" },
+		stats: jobHitStatsSchema,
+		hits: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					jobId: { type: "string" },
+					discoveryId: { type: "string" },
+					hits: { type: "integer" },
+					firstHitAt: { type: "string" },
+					lastHitAt: { type: "string" },
+					firstSeenInJob: { type: "boolean" },
+				},
+				required: [
+					"jobId",
+					"discoveryId",
+					"hits",
+					"firstHitAt",
+					"lastHitAt",
+					"firstSeenInJob",
+				],
+				additionalProperties: false,
+			},
+		},
+	},
+	required: ["jobId", "stats", "hits"],
 	additionalProperties: false,
 } as const
 

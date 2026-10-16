@@ -38,8 +38,11 @@ function variantFor(region: BandRegionCode): BandRegionCode | null {
 
 export function bandplansFor(region: BandRegionCode): Bandplan[] {
 	const variant = variantFor(region)
+	const specificIds = new Set(
+		BUILTIN_BANDPLANS.filter(p => p.region === variant).map(p => p.id),
+	)
 	return BUILTIN_BANDPLANS.filter(
-		p => p.region === "all" || p.region === variant,
+		p => p.region === variant || (p.region === "all" && !specificIds.has(p.id)),
 	)
 }
 
@@ -86,9 +89,10 @@ export function snapToRaster(
 	let best: { hz: number; d: number; spacing: number } | null = null
 	for (const r of rasters) {
 		if (!(r.spacingHz > 0)) continue
-		const ch =
+		const ch = Math.round(
 			r.firstChannelHz +
-			Math.round((corrected - r.firstChannelHz) / r.spacingHz) * r.spacingHz
+				Math.round((corrected - r.firstChannelHz) / r.spacingHz) * r.spacingHz,
+		)
 		const d = Math.abs(corrected - ch)
 		if (d > rasterToleranceHz(r.spacingHz)) continue
 		const better =

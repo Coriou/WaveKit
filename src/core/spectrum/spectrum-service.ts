@@ -10,7 +10,6 @@
  * full CU8 stream.
  */
 import { EventEmitter } from "node:events"
-import { z } from "zod"
 import type {
 	SpectrumActiveProfile,
 	SpectrumBinEncoding,
@@ -42,6 +41,26 @@ import type {
 } from "./types.js"
 import type { PipelineHostMode } from "./pipeline-host.js"
 import {
+	BACKFILL_LIMITS,
+	PROFILE_LIMITS,
+	SpectrumSubscribeOptionsSchema,
+} from "./subscribe-options.js"
+import {
+	admitProfile,
+	applyAverage,
+	averagingOf,
+	normaliseProfile,
+	profileKey,
+	profileView,
+	type SpectrumProfile,
+} from "./spectrum-averaging.js"
+import {
+	appendSummary,
+	buildBackfillFrames,
+	normaliseBackfillMs,
+	type SummaryStamp,
+} from "./spectrum-backfill.js"
+import {
 	SpectrumEngine,
 	USABLE_FRACTION,
 	buildPipelineConfig,
@@ -57,78 +76,24 @@ export const BIN_ENCODING: SpectrumBinEncoding = "u8-halfdb-127.5"
 export const WS_CONSUMER_PREFIX = "ws:"
 export const wsConsumer = (clientId: string): string =>
 	`${WS_CONSUMER_PREFIX}${clientId}`
-export const PROFILE_LIMITS = {
-	hz: { min: 0.5, max: 25, step: 0.5 },
-	bins: { min: 128, max: 2048 },
-} as const
-export const SpectrumSubscribeOptionsSchema = z
-	.object({
-		sourceId: z.string().min(1).max(128),
-		hz: z.number().finite().optional(),
-		bins: z.number().finite().optional(),
-	})
-	.strict()
+export {
+	BACKFILL_LIMITS,
+	PROFILE_LIMITS,
+	SpectrumSubscribeOptionsSchema,
+} from "./subscribe-options.js"
+export {
+	nearestProfile,
+	normaliseProfile,
+	profileKey,
+	type SpectrumProfile,
+} from "./spectrum-averaging.js"
 const MAX_SINCE_MS = 168 * 3_600_000
 const TOP_N = 10
 
-export interface SpectrumProfile {
-	key: string
-	hz: number
-	bins: number
-}
-
-export function profileKey(hz: number, bins: number): string {
-	return `${hz}:${bins}`
-}
-
-/** The default profile from ws.spectrumHz/spectrumBins, unsnapped (settings are already bounded). */
+/** The default profile from ws.spectrumHz/spectrumBins, averaging off (settings are already bounded). */
 export function defaultProfile(s: SpectrumSettings): SpectrumProfile {
 	const { spectrumHz: hz, spectrumBins: bins } = s.ws
 	return { key: profileKey(hz, bins), hz, bins }
-}
-
-const clamp = (v: number, min: number, max: number): number =>
-	Math.min(max, Math.max(min, v))
-
-/** Omitted fields take the fallback's value unchanged; given ones are snapped and clamped (Decisions); `adjusted` names those that changed. */
-export function normaliseProfile(
-	req: { hz?: number | undefined; bins?: number | undefined },
-	fallback: SpectrumProfile,
-): { profile: SpectrumProfile; adjusted: ("hz" | "bins")[] } {
-	const adjusted: ("hz" | "bins")[] = []
-	let hz = fallback.hz
-	let bins = fallback.bins
-	if (req.hz !== undefined) {
-		const { min, max, step } = PROFILE_LIMITS.hz
-		hz = clamp(Math.round(req.hz / step) * step, min, max)
-		if (hz !== req.hz) adjusted.push("hz")
-	}
-	if (req.bins !== undefined) {
-		const { min, max } = PROFILE_LIMITS.bins
-		bins = clamp(Math.round(req.bins), min, max)
-		if (bins !== req.bins) adjusted.push("bins")
-	}
-	return { profile: { key: profileKey(hz, bins), hz, bins }, adjusted }
-}
-
-const distance = (want: SpectrumProfile, c: SpectrumProfile): number =>
-	Math.abs(Math.log2(want.bins / c.bins)) + Math.abs(Math.log2(want.hz / c.hz))
-
-/** Prefers candidates ≤ want on both axes; metric and ties as in Decisions. `candidates` is never empty (the default is always in it). */
-export function nearestProfile(
-	want: SpectrumProfile,
-	candidates: readonly SpectrumProfile[],
-): SpectrumProfile {
-	const smaller = candidates.filter(c => c.hz <= want.hz && c.bins <= want.bins)
-	const pool = smaller.length > 0 ? smaller : candidates
-	const ranked = [...pool].sort(
-		(a, b) =>
-			distance(want, a) - distance(want, b) ||
-			a.bins - b.bins ||
-			a.hz - b.hz ||
-			(a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
-	)
-	return ranked[0]!
 }
 
 /** n = max(1, ceil(blockHz / hz)): one frame per n block summaries. */
@@ -209,32 +174,48 @@ export interface SpectrumHold {
 	epoch: number
 	/** Summaries since the last frame (survives a hold reset). */
 	count: number
+	/** Exponential average of completed frames. Null until the first; cleared on reset. */
+	avg: Float32Array | null
+	/** Summary stream the bins came from. A change clears `avg`. */
+	stream?: number
 }
 
 /**
- * Max-holds `reduced` into `hold`. A different epoch (retune) or bin layout starts a fresh
- * hold, so the frame label (the latest summary's centre and epoch) always matches its bins.
- * The caller counts summaries; the count survives a reset.
+ * Max-holds `reduced` into `hold`. A different epoch (retune), stream or bin layout starts a
+ * fresh hold and drops `avg`, so the frame label always matches its bins. Clearing `bins`
+ * after a completed frame does not reset `avg`. The caller counts summaries; the count survives.
  */
 export function accumulateHold(
 	hold: SpectrumHold | undefined,
 	reduced: { bins: Float32Array; factor: number },
 	epoch: number,
+	stream?: number,
 ): SpectrumHold {
-	const h = hold ?? { bins: null, factor: reduced.factor, epoch, count: 0 }
-	if (
-		h.bins &&
-		h.epoch === epoch &&
-		h.factor === reduced.factor &&
-		h.bins.length === reduced.bins.length
-	) {
+	const h: SpectrumHold = hold ?? {
+		bins: null,
+		factor: reduced.factor,
+		epoch,
+		count: 0,
+		avg: null,
+	}
+	const streamChanged =
+		stream !== undefined && h.stream !== undefined && h.stream !== stream
+	const lengthMatches =
+		(h.bins !== null && h.bins.length === reduced.bins.length) ||
+		(h.bins === null &&
+			(h.avg === null || h.avg.length === reduced.bins.length))
+	const sameLayout =
+		h.epoch === epoch && h.factor === reduced.factor && lengthMatches
+	if (h.bins && sameLayout && !streamChanged) {
 		for (let i = 0; i < h.bins.length; i++)
 			h.bins[i] = Math.max(h.bins[i]!, reduced.bins[i]!)
 	} else {
+		if (!sameLayout || streamChanged) h.avg = null
 		h.bins = reduced.bins
 		h.factor = reduced.factor
 		h.epoch = epoch
 	}
+	if (stream !== undefined) h.stream = stream
 	return h
 }
 
@@ -259,6 +240,8 @@ interface Selection {
 	sourceId: string | null
 	profile: SpectrumProfile | null
 	sources: Set<string>
+	/** Per subscribe, not part of the shared profile. 0 = no backfill. */
+	backfillMs: number
 }
 
 type ClientOp =
@@ -288,6 +271,8 @@ interface Entry {
 	openedAt: number
 	lastSummary: BlockSummary | null
 	lastEpoch: EngineEpoch | null
+	/** Recent block summaries for waterfall backfill. Lives and dies with the entry. */
+	ring: SummaryStamp[]
 	holds: Map<string, SpectrumHold>
 }
 
@@ -525,9 +510,7 @@ export class SpectrumService extends EventEmitter {
 					: null
 				profiles.push({
 					sourceId,
-					key,
-					hz: g.profile.hz,
-					bins: g.profile.bins,
+					...profileView(g.profile),
 					isDefault: key === def.key,
 					clients: g.clients.length,
 					binCount:
@@ -544,12 +527,14 @@ export class SpectrumService extends EventEmitter {
 		let subscribers = 0
 		for (const state of this.clients.values()) if (state.current) subscribers++
 		return {
-			defaultProfile: { key: def.key, hz: def.hz, bins: def.bins },
+			defaultProfile: profileView(def),
 			profiles,
 			limits: {
 				maxProfiles: s.ws.spectrumMaxProfiles,
 				hz: { ...PROFILE_LIMITS.hz },
 				bins: { ...PROFILE_LIMITS.bins },
+				averaging: { ...PROFILE_LIMITS.averaging },
+				backfill: { ...BACKFILL_LIMITS },
 			},
 			subscribers,
 			sources,
@@ -627,6 +612,7 @@ export class SpectrumService extends EventEmitter {
 			openedAt: this.now(),
 			lastSummary: null,
 			lastEpoch: null,
+			ring: [],
 			holds: new Map(),
 		}
 		this.addConsumer(entry, consumer)
@@ -648,6 +634,7 @@ export class SpectrumService extends EventEmitter {
 			entry.failed = true
 			entry.lastSummary = null
 			entry.lastEpoch = null
+			entry.ring.length = 0
 			entry.holds.clear()
 			for (const state of this.clients.values()) {
 				state.held.delete(sourceId)
@@ -814,7 +801,12 @@ export class SpectrumService extends EventEmitter {
 		let selection: Selection
 		let adjusted: SpectrumProfileAdjustment[] = []
 		if (options === undefined) {
-			selection = { sourceId: null, profile: null, sources: new Set() }
+			selection = {
+				sourceId: null,
+				profile: null,
+				sources: new Set(),
+				backfillMs: 0,
+			}
 		} else {
 			const parsed = SpectrumSubscribeOptionsSchema.safeParse(options)
 			if (!parsed.success) {
@@ -856,6 +848,8 @@ export class SpectrumService extends EventEmitter {
 			}
 			const normalised = normaliseProfile(parsed.data, def)
 			adjusted = normalised.adjusted
+			const backfill = normaliseBackfillMs(parsed.data.backfillMs)
+			if (backfill.adjusted) adjusted.push("backfillMs")
 			const profile = this.admit(
 				clientId,
 				sourceId,
@@ -863,7 +857,12 @@ export class SpectrumService extends EventEmitter {
 				def,
 				adjusted,
 			)
-			selection = { sourceId, profile, sources: new Set([sourceId]) }
+			selection = {
+				sourceId,
+				profile,
+				sources: new Set([sourceId]),
+				backfillMs: backfill.ms,
+			}
 		}
 		state.next = selection
 		state.nextAdjusted = adjusted
@@ -901,7 +900,7 @@ export class SpectrumService extends EventEmitter {
 			}
 			if (this.superseded(state, seq)) return this.abort(clientId, state)
 		}
-		// Commit (synchronous): ack, snapshots, then (via the wiring) live frames.
+		// Commit (synchronous): ack, then backfill, then snapshots; live frames can only follow.
 		const current = state.next
 		if (!current) return this.abort(clientId, state)
 		const committedDef = this.syncDefault()
@@ -915,12 +914,18 @@ export class SpectrumService extends EventEmitter {
 				: state.nextAdjusted.length === 0
 					? "exact"
 					: "nearest"
-		const ack = this.describe(current, committedDef, {
+		const described = this.describe(current, committedDef, {
 			outcome,
 			adjusted: state.nextAdjusted,
 		})
 		state.nextAdjusted = []
-		this.emit("profile", clientId, ack, this.snapshots(current, committedDef))
+		const snapshots = this.snapshots(current, committedDef)
+		const requested = current.sourceId !== null && current.backfillMs > 0
+		const backfill = requested ? this.backfillFor(current, snapshots) : []
+		const ack = requested
+			? { ...described, backfillFrames: backfill.length }
+			: described
+		this.emit("profile", clientId, ack, snapshots, backfill)
 		await this.releaseUnneeded(clientId, state)
 	}
 
@@ -978,6 +983,7 @@ export class SpectrumService extends EventEmitter {
 				entry.holds.clear()
 				entry.lastSummary = null
 				entry.lastEpoch = null
+				entry.ring.length = 0
 			}
 			state.held.delete(sourceId)
 			await this.release(sourceId, wsConsumer(clientId))
@@ -1003,7 +1009,7 @@ export class SpectrumService extends EventEmitter {
 			outcome: "rejected",
 			adjusted: [],
 		})
-		this.emit("profile", clientId, { ...ack, code, message }, [])
+		this.emit("profile", clientId, { ...ack, code, message }, [], [])
 	}
 
 	/**
@@ -1018,34 +1024,22 @@ export class SpectrumService extends EventEmitter {
 		def: SpectrumProfile,
 		adjusted: SpectrumProfileAdjustment[],
 	): SpectrumProfile {
-		if (profile.key === def.key) return profile
-		const cap = this.deps.settings().ws.spectrumMaxProfiles
-		const others = new Map<
-			string,
-			{ sourceId: string; profile: SpectrumProfile }
-		>()
+		const others: { sourceId: string; profile: SpectrumProfile }[] = []
 		for (const [id, state] of this.clients) {
 			if (id === clientId) continue
 			for (const sel of [state.current, state.next]) {
-				if (!sel?.sourceId || !sel.profile || sel.profile.key === def.key)
-					continue
-				others.set(pairKey(sel.sourceId, sel.profile.key), {
-					sourceId: sel.sourceId,
-					profile: sel.profile,
-				})
+				if (!sel?.sourceId || !sel.profile) continue
+				others.push({ sourceId: sel.sourceId, profile: sel.profile })
 			}
 		}
-		const pair = pairKey(sourceId, profile.key)
-		if ((others.has(pair) ? others.size : others.size + 1) <= cap)
-			return profile
-		const candidates =
-			others.size <= cap
-				? [...others.values()]
-						.filter(o => o.sourceId === sourceId)
-						.map(o => o.profile)
-				: []
-		adjusted.push("profile-limit")
-		return nearestProfile(profile, [def, ...candidates])
+		return admitProfile(
+			profile,
+			sourceId,
+			def,
+			others,
+			this.deps.settings().ws.spectrumMaxProfiles,
+			adjusted,
+		)
 	}
 
 	/**
@@ -1094,6 +1088,7 @@ export class SpectrumService extends EventEmitter {
 						adjusted: ["profile-limit"],
 					}),
 					[],
+					[],
 				)
 			}
 		}
@@ -1112,9 +1107,7 @@ export class SpectrumService extends EventEmitter {
 		return {
 			selection: sel ? (sel.sourceId === null ? "default" : "source") : "none",
 			sourceId: sel?.sourceId ?? null,
-			profile: profile
-				? { key: profile.key, hz: profile.hz, bins: profile.bins }
-				: null,
+			profile: profile ? profileView(profile) : null,
 			effectiveHz:
 				sel?.sourceId && profile
 					? this.effectiveHz(sel.sourceId, profile)
@@ -1155,7 +1148,7 @@ export class SpectrumService extends EventEmitter {
 					entry.lastEpoch,
 					profile,
 					cfg,
-					reduceMaxHold(summary.bins, profile.bins),
+					this.snapshotReduced(entry, profile, summary, cur),
 				),
 				snapshot: true,
 			})
@@ -1179,6 +1172,7 @@ export class SpectrumService extends EventEmitter {
 						removedSourceId: sourceId,
 						code: "SPECTRUM_SOURCE_REMOVED",
 					} satisfies SpectrumProfileEventData,
+					[],
 					[],
 				)
 			}
@@ -1216,6 +1210,7 @@ export class SpectrumService extends EventEmitter {
 		entry.holds.clear()
 		entry.lastSummary = null
 		entry.lastEpoch = null
+		entry.ring.length = 0
 		if (entry.jobs.size > 0) return
 		await this.closeEntry(sourceId, entry, false).catch((err: unknown) =>
 			this.log.warn({ err, sourceId }, "Stopping a removed source failed"),
@@ -1233,8 +1228,16 @@ export class SpectrumService extends EventEmitter {
 		if (entry.failed) return
 		if (ev.kind === "block-summary") {
 			const summary = ev.summary
+			const atMs = this.now()
 			entry.lastSummary = summary
 			entry.lastEpoch = epoch
+			// bins are not mutated after emission (fresh array per summary; the worker clones).
+			appendSummary(
+				entry.ring,
+				{ summary, epoch, atMs },
+				entry.engine.config()?.integrationMs ?? 50,
+				atMs,
+			)
 			this.observe(sourceId, entry, summary, epoch)
 			this.frames(sourceId, entry, summary, epoch)
 		}
@@ -1282,6 +1285,54 @@ export class SpectrumService extends EventEmitter {
 		return groups
 	}
 
+	/** Backfill for a committed source selection. Empty when the current epoch has nothing buffered. */
+	private backfillFor(
+		sel: Selection,
+		snapshots: readonly SpectrumFrameEventData[],
+	): SpectrumFrameEventData[] {
+		if (!sel.sourceId || !sel.profile || sel.backfillMs <= 0) return []
+		const entry = this.entries.get(sel.sourceId)
+		const cfg = entry?.engine.config()
+		if (!entry || !cfg) return []
+		const cur = entry.engine.currentEpoch()
+		const snapshotted = snapshots.some(s => s.sourceId === sel.sourceId)
+		return buildBackfillFrames({
+			ring: entry.ring,
+			now: this.now(),
+			backfillMs: sel.backfillMs,
+			stream: cur.stream,
+			epoch: cur.epoch,
+			snapshot: snapshotted ? entry.lastSummary : null,
+			profile: sel.profile,
+			sourceId: sel.sourceId,
+			integrationMs: cfg.integrationMs,
+			sampleRateHz: cfg.sampleRateHz,
+			fftSize: cfg.fftSize,
+		})
+	}
+
+	/**
+	 * Snapshot bins: an averaged profile's running average when it belongs to this epoch,
+	 * otherwise the raw latest summary (the pre-averaging behaviour).
+	 */
+	private snapshotReduced(
+		entry: Entry,
+		profile: SpectrumProfile,
+		summary: BlockSummary,
+		cur: { stream: number; epoch: number },
+	): { bins: Float32Array; factor: number } {
+		if (averagingOf(profile) > 1) {
+			const hold = entry.holds.get(profile.key)
+			if (
+				hold?.avg &&
+				hold.epoch === cur.epoch &&
+				(hold.stream === undefined || hold.stream === cur.stream)
+			)
+				return { bins: hold.avg, factor: hold.factor }
+		}
+		return reduceMaxHold(summary.bins, profile.bins)
+	}
+
 	/** M5: one frame per `summariesPerFrame` summaries of each profile; each profile is built once. */
 	private frames(
 		sourceId: string,
@@ -1302,14 +1353,22 @@ export class SpectrumService extends EventEmitter {
 				entry.holds.get(key),
 				reduceMaxHold(summary.bins, g.profile.bins),
 				summary.epoch,
+				summary.stream,
 			)
 			entry.holds.set(key, hold)
 			hold.count += 1
-			if (hold.count < n || !hold.bins) continue
+			const peak = hold.bins
+			if (hold.count < n || peak === null) continue
+			const averaging = averagingOf(g.profile)
+			let bins: Float32Array = peak
+			if (averaging > 1) {
+				hold.avg = applyAverage(hold.avg, peak, averaging)
+				bins = hold.avg
+			}
 			this.emit(
 				"frame",
 				this.frame(sourceId, summary, epoch, g.profile, cfg, {
-					bins: hold.bins,
+					bins,
 					factor: hold.factor,
 				}),
 				g.clients,

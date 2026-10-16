@@ -1,9 +1,9 @@
 {
-	"extends": "@tsconfig/node20/tsconfig.json",
+	"extends": "@tsconfig/node24/tsconfig.json",
 	"compilerOptions": {
-		"lib": ["es2023"],
+		"lib": ["es2024"],
 		"module": "nodeNext",
-		"target": "es2022",
+		"target": "es2024",
 		"strict": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,

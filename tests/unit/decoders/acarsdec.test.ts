@@ -17,6 +17,7 @@ import {
 	ACARSDEC_CAPS,
 } from "../../../src/decoders/builtin/acarsdec.js"
 import { AudioDemodDecoder } from "../../../src/decoders/audio-demod-decoder.js"
+import { resolveProvenance } from "../../../src/core/activity/provenance/resolve.js"
 import pino from "pino"
 
 // Create a silent logger for tests
@@ -377,10 +378,27 @@ describe("ACARS Decoder Property-Based Tests", () => {
 			)
 		})
 
-		// Skipped "should return null for JSON without frequency" test as new implementation falls back to default freq
-		// This is a behavior change - fallback allows decoding even if acarsdec -j doesn't report freq in file mode?
-		// Actually, let's keep the test if we remove the fallback, OR update the test to expect default.
-		// My implementation added `?? 131.550`.
-		// Let's remove the test that expects null for missing frequency, as we now have a default.
+		// WG3 req 5.2: a frequency acarsdec does not report is absent, never a
+		// protocol constant that provenance would read as the channel.
+		it("omits frequency when acarsdec reports none", () => {
+			const result = parseAcarsdecJson({ text: "Message", tail: ".N123" })
+			expect(result).not.toBeNull()
+			expect(result).not.toHaveProperty("frequency")
+			expect(result?.text).toBe("Message")
+			const output = {
+				timestamp: new Date("2026-10-16T00:00:00.000Z"),
+				decoder: "acars-1",
+				type: "acars" as const,
+				data: result,
+			}
+			expect(resolveProvenance(output, null).frequency).toBeNull()
+			expect(
+				resolveProvenance(output, {
+					sourceId: "rtl-0",
+					targetFrequenciesHz: [131_550_000, 131_725_000],
+					tuningTrust: "unverified",
+				}).frequency,
+			).toBeNull()
+		})
 	})
 })

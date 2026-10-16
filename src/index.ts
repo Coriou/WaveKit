@@ -1,3 +1,4 @@
+import { stationIdentity } from "./config.js"
 /**
  * WaveKit - SDR Stream Processing Framework
  *
@@ -52,6 +53,7 @@ import { createRegionalRegistration } from "./core/regional/data.js"
 import { createReceiverCapabilitiesProvider } from "./core/tuner-capabilities/provider.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
+import { liveDemodOperatorActivity } from "./core/live-demod-activity.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
 import { ChannelizerManager } from "./core/channelizer/channelizer-manager.js"
 import { SettlementRegistry } from "./core/channelizer/settlement-observer.js"
@@ -69,8 +71,21 @@ import { createDecoderManagerOptions } from "./decoders/manager-options.js"
 import { resolveProcessBandRegion } from "./decoders/band-region.js"
 import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
+import {
+	activityConfigOptions,
+	startActivityRuntime,
+} from "./core/activity/runtime.js"
 import { OperatorDataService } from "./operator-data/service.js"
+import {
+	openBandPlanService,
+	createScannerBandplanProvider,
+} from "./core/bandplans/index.js"
+import type {
+	BandPlanService,
+	BandPlansCommitSink,
+} from "./core/bandplans/contract.js"
 import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
+import { createBandPlansCommitSink } from "./api/websocket/bandplans-broadcast-adapter.js"
 import {
 	createDsdFmeDecoder,
 	DSD_FME_CAPS,
@@ -80,7 +95,9 @@ import {
 	MULTIMON_CAPS,
 } from "./decoders/builtin/multimon-ng.js"
 import { createRtl433Decoder, RTL433_CAPS } from "./decoders/builtin/rtl433.js"
-import { createReadsbDecoder, READSB_CAPS } from "./decoders/builtin/readsb.js"
+import { readsbDecoderFactory, READSB_CAPS } from "./decoders/builtin/readsb.js"
+import { createDecoderProvenanceIndex } from "./decoders/provenance-bindings.js"
+import { CoverageManager } from "./core/coverage/coverage-manager.js"
 import {
 	createAcarsdecDecoder,
 	ACARSDEC_CAPS,
@@ -106,6 +123,13 @@ import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
+import { VesselTrackingManager } from "./core/vessel-tracking-manager.js"
+import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
+import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
+import {
+	tunerFrequencyAt,
+	wireAnalogTransmissions,
+} from "./core/analog-transmission.js"
 import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder, DecoderConfig } from "./decoders/types.js"
@@ -396,6 +420,8 @@ async function main(): Promise<void> {
 		if (protectedMode) cleanup.push({ priority, run })
 	}
 	let runtimeApi: ApiServer | undefined
+	// Idempotent; also closed by ApiServer.stop(). Covers a legacy stop during startup.
+	let closeBandPlans: (() => Promise<void>) | undefined
 	let disposeReceiver: (() => void) | undefined
 	let receiverDisposeResult: Promise<void> | undefined
 	const disposeReceiverAfterApi = (): Promise<void> => {
@@ -548,6 +574,7 @@ async function main(): Promise<void> {
 				},
 				directory: process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? "",
 				ownership: "single-host-pid-namespace",
+				logger,
 			})
 			checkpoint()
 		}
@@ -595,7 +622,7 @@ async function main(): Promise<void> {
 					const outcomes = await Promise.allSettled([
 						shutdown.shutdown(),
 						scannerPhases.completed(),
-						disposeReceiverAfterApi(),
+						disposeReceiverAfterApi().finally(() => closeBandPlans?.()),
 					])
 					if (admissionFailed || outcomes.some(x => x.status === "rejected"))
 						throw new WaveKitError(
@@ -803,7 +830,15 @@ async function main(): Promise<void> {
 			MULTIMON_CAPS,
 		)
 		decoderRegistry.register("rtl433", createRtl433Decoder, RTL433_CAPS)
-		decoderRegistry.register("readsb", createReadsbDecoder, READSB_CAPS)
+		// readsb is the only decoder that receives the station location (WG3 req 9.1)
+		decoderRegistry.register(
+			"readsb",
+			readsbDecoderFactory({
+				lat: config.station.lat,
+				lon: config.station.lon,
+			}),
+			READSB_CAPS,
+		)
 		decoderRegistry.register("acarsdec", createAcarsdecDecoder, ACARSDEC_CAPS)
 		decoderRegistry.register(
 			"ais-catcher",
@@ -866,6 +901,25 @@ async function main(): Promise<void> {
 		// An unreadable state directory never reaches this catch: start() logs it and
 		// runs without the unread files (Task 35). Only an unexpected construction or
 		// start failure drops the scanner, and with it /api/spectrum.
+		// The band-plan service opens later in startup; until then, and if its view
+		// throws, the scanner falls back to the built-in plans for the region.
+		// Read per call: a committed stack applies to the next job create, patch or
+		// preview; a resumed or running job keeps the plans it was admitted with.
+		const bandPlanLog = createComponentLogger(logger, "BandPlans")
+		let bandPlanService: BandPlanService | undefined
+		let bandPlanViewWarned = false
+		const scannerBandplans = createScannerBandplanProvider(
+			() => bandPlanService?.view(),
+			bandRegion.code,
+			err => {
+				if (bandPlanViewWarned) return
+				bandPlanViewWarned = true
+				bandPlanLog.warn(
+					{ err },
+					"Band-plan view unavailable; scanner uses built-in plans",
+				)
+			},
+		)
 		const { channelTier, ...scannerSettings } = config.scanner
 		try {
 			scannerConstructionStarted = true
@@ -888,6 +942,7 @@ async function main(): Promise<void> {
 				sourceConfigs: config.sources,
 				decoderConfigs,
 				region: bandRegion.code,
+				bandplans: scannerBandplans,
 				stateDir: config.stateDir,
 				sources: sourceManager,
 				routing: sourceRouting,
@@ -895,6 +950,7 @@ async function main(): Promise<void> {
 				decoders: decoderManager,
 				digitalVoice,
 				liveDemod,
+				operatorActivity: liveDemodOperatorActivity(liveDemod),
 				logger,
 				cpuMeter: new CpuMeter({ sampleMs: 5000 }),
 			})
@@ -1066,6 +1122,50 @@ async function main(): Promise<void> {
 			aircraftTrackingManager.stop()
 		})
 
+		// Step 8d: AIS vessel current state (WG1 req 5, 6)
+		const vesselTrackingManager = new VesselTrackingManager(
+			decoderManager,
+			{},
+			logger,
+		)
+		own(20, () => {
+			vesselTrackingManager.stop()
+		})
+
+		// Step 8d': ADS-B and AIS coverage per bearing from the station (WG3 req 7);
+		// without a station location the route answers available: false.
+		const coverageManager = new CoverageManager({
+			station:
+				config.station.lat !== undefined && config.station.lon !== undefined
+					? { lat: config.station.lat, lon: config.station.lon }
+					: null,
+			aircraft: aircraftTrackingManager.getTracker(),
+			vessels: vesselTrackingManager.getTracker(),
+		})
+		own(20, () => {
+			coverageManager.stop()
+		})
+
+		// Step 8e: APRS station, object and item current state (WG2 req 3, 4)
+		const aprsTrackingManager = new AprsTrackingManager(
+			decoderManager,
+			{},
+			logger,
+		)
+		own(20, () => {
+			aprsTrackingManager.stop()
+		})
+
+		// Step 8f: Meshtastic node current state (WG2 req 5, 6)
+		const meshTrackingManager = new MeshTrackingManager(
+			decoderManager,
+			{},
+			logger,
+		)
+		own(20, () => {
+			meshTrackingManager.stop()
+		})
+
 		// Read-only metadata providers add no source consumers or receiver actions.
 		const regionalRegistry = createRegionalRegistry(
 			createRegionalRegistration(),
@@ -1087,10 +1187,57 @@ async function main(): Promise<void> {
 		// Own immediately, including a constructor failure before runtimeApi exists.
 		own(15, disposeReceiverAfterApi)
 
+		// WG3 req 5: RF provenance on receptions from each decoder's binding (config and
+		// scanner probes alike), kept current on decoder create/remove. tuningTrust is
+		// "unverified" for every decoder (Main decision on req 5.3).
+		const decoderProvenance = createDecoderProvenanceIndex(decoderManager, () =>
+			sourceRouting.getDefaultSourceId(),
+		)
+		own(8, () => decoderProvenance.dispose())
+
+		// Activity runs when config.activity.enabled (the default). A failed probe or open
+		// logs and leaves the rest of WaveKit running.
+		const activity = await startActivityRuntime({
+			...activityConfigOptions(config.activity),
+			stateDir: config.stateDir,
+			logger,
+			setPublisher: publish => {
+				decoderManager.setActivityPublisher(publish)
+			},
+			discloseErrors: !protectedMode,
+			resolveProvenance: decoderProvenance.lookup,
+		})
+		// Own before checkpoint: a stop during open must still close the workers.
+		own(8, () => activity.close())
+		checkpoint()
+
+		// Band plans never stop core: a storage failure leaves built-ins readable.
+		// The API server closes it after HTTP drain; own() covers a failed construction.
+		let publishBandPlans: BandPlansCommitSink | undefined
+		const bandPlans = await openBandPlanService({
+			stateDir: config.stateDir,
+			context: {
+				region: bandRegion.code,
+				effectiveCountry: config.station.country ?? null,
+			},
+			writable: protectedMode,
+			onCommit: event => publishBandPlans?.(event),
+			onStoreUnavailable: reason => {
+				bandPlanLog.warn({ reason }, "Band-plan store unavailable")
+			},
+		})
+		bandPlanService = bandPlans
+		closeBandPlans = () => bandPlans.close()
+		own(11, closeBandPlans)
+		checkpoint()
+
 		// Step 9: Initialize API server
 		const apiServer = new ApiServer(
 			{
+				bandPlans,
 				...(access ? { access } : {}),
+				activity,
+				station: stationIdentity(config, bandRegion.code),
 				regionalRegistry,
 				receiverCapabilitiesProvider,
 				sourceManager,
@@ -1105,6 +1252,10 @@ async function main(): Promise<void> {
 				digitalVoice,
 				resourceAggregator,
 				aircraftTracker: aircraftTrackingManager.getTracker(),
+				vesselTracker: vesselTrackingManager.getTracker(),
+				coverage: coverageManager,
+				meshTracker: meshTrackingManager.getTracker(),
+				aprsTracker: aprsTrackingManager.getTracker(),
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
@@ -1123,6 +1274,9 @@ async function main(): Promise<void> {
 			},
 		)
 
+		publishBandPlans = createBandPlansCommitSink(
+			apiServer.getBandPlansBroadcastPort(),
+		)
 		runtimeApi = apiServer
 		admissionGates.push(() => apiServer.stopAdmission())
 		own(10, () => apiServer.stop())
@@ -1285,6 +1439,17 @@ async function main(): Promise<void> {
 			timeout: 5000,
 		})
 
+		// Runs before the API server stops (LIFO): publisher, subscriptions,
+		// query service, then the store. Step errors are logged, not thrown.
+		shutdown.register({
+			name: "activity",
+			handler: async () => {
+				log.info("Shutting down activity")
+				await activity.close()
+			},
+			timeout: 5000,
+		})
+
 		// Shutdown resource monitoring
 		if (resourceAggregator) {
 			shutdown.register({
@@ -1310,13 +1475,74 @@ async function main(): Promise<void> {
 			timeout: 1000,
 		})
 
+		shutdown.register({
+			name: "vessel-tracking",
+			handler: async () => {
+				log.info("Shutting down vessel tracking")
+				vesselTrackingManager.stop()
+			},
+			timeout: 1000,
+		})
+
+		shutdown.register({
+			name: "coverage",
+			handler: async () => {
+				coverageManager.stop()
+			},
+			timeout: 1000,
+		})
+
+		shutdown.register({
+			name: "aprs-tracking",
+			handler: async () => {
+				log.info("Shutting down APRS tracking")
+				aprsTrackingManager.stop()
+			},
+			timeout: 1000,
+		})
+
+		shutdown.register({
+			name: "mesh-tracking",
+			handler: async () => {
+				log.info("Shutting down mesh tracking")
+				meshTrackingManager.stop()
+			},
+			timeout: 1000,
+		})
+
 		// Step 10: Start API server
 		await apiServer.start()
 		checkpoint()
 
 		const wsBroadcaster = apiServer.getWebSocketBroadcaster()
 
+		// Analog transmissions from the live demodulator's squelch (WG1 req 3, 4).
+		// Started before liveDemod.start(), so a later POST start is covered too.
+		// Shutdown is LIFO: registered after "activity", this runs first, so the
+		// final closed event is broadcast and stored before Activity and the API
+		// close. own(7) does the same on a failed startup (Activity is own(8)).
+		const transmissions = wireAnalogTransmissions({
+			source: liveDemod,
+			frequencyAt: tunerFrequencyAt(id => tunerController.getState(id)),
+			broadcast: event => {
+				wsBroadcaster.broadcastLiveAudioTransmission(event)
+			},
+			sink: () => activity.transmissionSink(),
+		})
+		own(7, () => transmissions.stop())
+		shutdown.register({
+			name: "analog-transmissions",
+			handler: async () => {
+				log.info("Shutting down analog transmissions")
+				transmissions.stop()
+			},
+			timeout: 1000,
+		})
+
 		// Wire live demodulator events to WebSocket broadcaster
+		liveDemod.on("level", level => {
+			wsBroadcaster.broadcastLiveAudioLevel(level)
+		})
 		liveDemod.on("started", () => {
 			wsBroadcaster.broadcast("live-audio", {
 				type: "live-audio:started",
@@ -1417,6 +1643,10 @@ async function main(): Promise<void> {
 		// Start aircraft tracking manager and enrichment service
 		aircraftTrackingManager.start()
 		aircraftEnrichmentService.start()
+		vesselTrackingManager.start()
+		coverageManager.start()
+		meshTrackingManager.start()
+		aprsTrackingManager.start()
 
 		// Step 13: Connect to configured sources and wire to fanout
 		for (const sourceConfig of config.sources) {

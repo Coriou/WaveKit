@@ -1,13 +1,14 @@
 import type { TunerControlMode } from "@wavekit/api-types"
 import { WaveKitError } from "../../../utils/errors.js"
 import { defaultFftSize } from "../../spectrum/fft.js"
-import { bandplansFor, resolveBandplan } from "../bandplan/index.js"
-import type { BandRegionCode } from "../bandplan/index.js"
+import { bandplansFor } from "../bandplan/index.js"
+import type { Bandplan, BandRegionCode } from "../bandplan/index.js"
 import type { FreqRange, IqFormat } from "../../spectrum/types.js"
 import type {
 	Hop,
 	HopPlan,
 	Impact,
+	LockoutExclusion,
 	NormalisedJobSpec,
 	PlanIssue,
 	PlanIssueCode,
@@ -21,9 +22,14 @@ import type {
 	ScanRange,
 } from "../types.js"
 import { CPU_COST, probeCores } from "./cost.js"
+import { protocolsForHop } from "./protocols.js"
 import { describeHop, planHops } from "./hop-planner.js"
 import { normaliseCapture } from "../evidence/capture-spec.js"
 import type { HopPlanInput } from "./hop-planner.js"
+import { isRangeEnabled } from "./range-contract.js"
+import { lockoutExclusionsFor, planWithLockouts } from "./lockouts.js"
+import type { LockoutTarget } from "./lockouts.js"
+import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
  * POST /api/scanner/plan (spec § 5.4): pure. Normalises a job spec (every derived default plus its
@@ -58,6 +64,10 @@ export interface PreviewContext {
 	impactFor(sourceId: string, spec: NormalisedJobSpec): Impact
 	region: BandRegionCode
 	tunerRange(sourceId: string): FreqRange
+	/** Omitted: bandplansFor(region). Present: host ranges and plan-id lookup. */
+	bandplans?: readonly Bandplan[]
+	/** WG2 req 12: locked-out discoveries heard on the source. Omitted: none (sweeps plan as before). */
+	lockouts?: (sourceId: string) => readonly LockoutTarget[]
 }
 
 type Provenance = NormalisedJobSpec["provenance"][string]
@@ -174,7 +184,70 @@ function copyRange(r: ScanRange): ScanRange {
 	if (r.obwHz !== undefined) out.obwHz = [...r.obwHz]
 	if (r.protocols !== undefined) out.protocols = [...r.protocols]
 	if (r.bandplanId !== undefined) out.bandplanId = r.bandplanId
+	if (r.enabled !== undefined) out.enabled = r.enabled
+	if (r.name !== undefined) out.name = r.name
+	if (r.dwellMs !== undefined) out.dwellMs = r.dwellMs
+	if (r.sensitivity !== undefined) out.sensitivity = r.sensitivity
 	return out
+}
+
+/**
+ * Full-state live overlay, then drop `enabled: true` (absent means enabled). An entry applies
+ * only to the range at its index with the same locked identity (SF1 R1 finding 1); entries that
+ * no longer match (the band plan under the job changed) are dropped with one warning, never an
+ * error, so the job stays editable. Entries without an identity match by index while the counts
+ * agree.
+ */
+function overlayRangeLive(
+	ranges: ScanRange[],
+	live: StoredScanJobSpec["rangeLive"],
+	issues: PlanIssue[],
+): void {
+	if (live !== undefined) {
+		const dropped: number[] = []
+		for (let i = 0; i < live.length; i++) {
+			const range = ranges[i]
+			const src = live[i]
+			if (src === undefined) continue
+			const legacy = src.startHz === undefined || src.endHz === undefined
+			const matches =
+				range !== undefined &&
+				(legacy
+					? live.length === ranges.length
+					: src.startHz === range.startHz &&
+						src.endHz === range.endHz &&
+						src.bandplanId === range.bandplanId)
+			if (!matches || range === undefined) {
+				dropped.push(i)
+				continue
+			}
+			delete range.enabled
+			delete range.protocols
+			delete range.name
+			delete range.dwellMs
+			delete range.sensitivity
+			if (src.enabled !== undefined) range.enabled = src.enabled
+			if (src.protocols !== undefined) range.protocols = [...src.protocols]
+			if (src.name !== undefined) range.name = src.name
+			if (src.dwellMs !== undefined) range.dwellMs = src.dwellMs
+			if (src.sensitivity !== undefined) range.sensitivity = src.sensitivity
+		}
+		if (dropped.length > 0)
+			issues.push(
+				issue(
+					"range-locked",
+					"warning",
+					"the job's ranges changed since their last edit; those edits no longer apply",
+					{
+						reason: "range-live-stale",
+						dropped,
+						expected: live.length,
+						received: ranges.length,
+					},
+				),
+			)
+	}
+	for (const range of ranges) if (range.enabled === true) delete range.enabled
 }
 
 function unique<T>(xs: Iterable<T>): T[] {
@@ -250,7 +323,7 @@ function decodableClasses(
 }
 
 export function normaliseSpec(
-	spec: ScanJobSpec,
+	spec: StoredScanJobSpec,
 	ctx: PreviewContext,
 ): { spec: NormalisedJobSpec; source: PreviewSourceView; issues: PlanIssue[] } {
 	const issues: PlanIssue[] = []
@@ -279,7 +352,8 @@ export function normaliseSpec(
 	// Ranges: operator ranges (inheriting rasters from the enclosing regional bandplan), then bandplans.
 	const ranges: ScanRange[] = []
 	let inherited = false
-	const hosts = bandplansFor(ctx.region)
+	const scannerPlans = ctx.bandplans ?? bandplansFor(ctx.region)
+	const hosts = scannerPlans
 		.flatMap(p => p.ranges)
 		.sort((a, b) => a.endHz - a.startHz - (b.endHz - b.startHz))
 	for (const r of spec.ranges ?? []) {
@@ -303,7 +377,7 @@ export function normaliseSpec(
 		ranges.push(own)
 	}
 	for (const id of spec.bandplans ?? []) {
-		const bp = resolveBandplan(id, ctx.region)
+		const bp = scannerPlans.find(p => p.id === id)
 		if (!bp) {
 			issues.push(
 				issue(
@@ -317,6 +391,8 @@ export function normaliseSpec(
 		}
 		for (const r of bp.ranges) ranges.push(copyRange(r))
 	}
+	overlayRangeLive(ranges, spec.rangeLive, issues)
+	const enabled = ranges.filter(isRangeEnabled)
 	const operatorRanges = (spec.ranges ?? []).length > 0
 	const planRanges = (spec.bandplans ?? []).length > 0
 	prov["ranges"] = operatorRanges
@@ -358,7 +434,7 @@ export function normaliseSpec(
 			)
 		}
 	}
-	if (ranges.length > 0 && ranges.every(r => fullyExcluded(r, exclusions))) {
+	if (enabled.length > 0 && enabled.every(r => fullyExcluded(r, exclusions))) {
 		issues.push(
 			issue("all-excluded", "error", "the exclusions cover every range"),
 		)
@@ -369,7 +445,7 @@ export function normaliseSpec(
 	const centre = source.centreHz
 	const fits =
 		centre !== null &&
-		ranges.every(
+		enabled.every(
 			r => r.startHz >= centre - windowHalf && r.endHz <= centre + windowHalf,
 		)
 	const requested = spec.mode ?? "auto"
@@ -386,7 +462,16 @@ export function normaliseSpec(
 			),
 		)
 	}
+	if (ranges.length > 0 && enabled.length === 0) {
+		issues.push(
+			issue("range-empty", "error", "every range is disabled", {
+				disabled: ranges.length,
+			}),
+		)
+	}
 	if (mode === "sweep") {
+		// All-disabled already reported the one range-empty above. This is the
+		// no-range sweep, unchanged from before per-range enabled existed.
 		if (ranges.length === 0)
 			issues.push(
 				issue(
@@ -436,7 +521,7 @@ export function normaliseSpec(
 	const thresholdDb = spec.thresholdDb ?? null
 	pv("thresholdDb", spec.thresholdDb !== undefined)
 	const rbw = fs / fftSize
-	const obwClasses = ranges.flatMap(r => r.obwHz ?? []).filter(o => o > 0)
+	const obwClasses = enabled.flatMap(r => r.obwHz ?? []).filter(o => o > 0)
 	const typicalObw =
 		obwClasses.length > 0 ? Math.min(...obwClasses) : TYPICAL_OBW_HZ
 	if (rbw > typicalObw / 4)
@@ -458,7 +543,7 @@ export function normaliseSpec(
 			),
 		)
 	const half = (fs * ctx.usableFraction) / 2
-	const spacings = ranges.flatMap(r => (r.rasters ?? []).map(x => x.spacingHz))
+	const spacings = enabled.flatMap(r => (r.rasters ?? []).map(x => x.spacingHz))
 	const slack = spacings.length > 0 ? Math.min(...spacings) : 0
 	const widest = Math.max(0, ...spacings, ...obwClasses)
 	if (widest >= 2 * (half - slack) || widest > 2 * half) {
@@ -524,9 +609,29 @@ export function normaliseSpec(
 			),
 		)
 	}
+	if (mode === "sweep") {
+		for (let i = 0; i < ranges.length; i++) {
+			const range = ranges[i]
+			if (
+				range === undefined ||
+				!isRangeEnabled(range) ||
+				range.dwellMs === undefined ||
+				range.dwellMs >= minimumDwell
+			)
+				continue
+			issues.push(
+				issue(
+					"dwell-too-short",
+					"error",
+					`range ${i} dwell ${range.dwellMs} ms is below settle + ${s.detection.minSurfaceBlocks + 1} blocks (${minimumDwell} ms)`,
+					{ minimumMs: minimumDwell, rangeIndex: i },
+				),
+			)
+		}
+	}
 
 	// Protocols, holds, probes.
-	const fromPlans = unique(ranges.flatMap(r => r.protocols ?? []))
+	const fromPlans = unique(enabled.flatMap(r => r.protocols ?? []))
 	const protocols =
 		spec.protocols !== undefined ? [...spec.protocols] : fromPlans
 	prov["protocols"] =
@@ -626,13 +731,28 @@ export function normaliseSpec(
 	pv("txDurationHintMs", spec.txDurationHintMs !== undefined)
 	pv("kind", spec.kind !== undefined)
 	pv("capture", spec.capture !== undefined)
+	for (let i = 0; i < ranges.length; i++) {
+		const range = ranges[i]
+		if (range === undefined) continue
+		if (range.name !== undefined) prov[`ranges[${i}].name`] = "operator"
+		if (range.dwellMs !== undefined) prov[`ranges[${i}].dwellMs`] = "operator"
+		if (range.sensitivity !== undefined)
+			prov[`ranges[${i}].sensitivity`] = "operator"
+	}
+	const kind = spec.kind ?? "discover"
+	if (spec.signalsOnly !== undefined) prov["signalsOnly"] = "operator"
+	if (kind === "monitor" && spec.signalsOnly === true) {
+		issues.push(
+			issue("signals-only-unsupported", "error", "monitor jobs need decoders"),
+		)
+	}
 
 	const n: NormalisedJobSpec = {
 		sourceId: source.id,
 		sensitivity,
 		priority: spec.priority ?? DEFAULT_PRIORITY,
 		mode,
-		kind: spec.kind ?? "discover",
+		kind,
 		ranges,
 		exclusions,
 		protocols,
@@ -678,13 +798,18 @@ export function normaliseSpec(
 		capture: normaliseCapture(spec.capture),
 		provenance: prov,
 	}
+	if (spec.signalsOnly !== undefined) n.signalsOnly = spec.signalsOnly
 	return { spec: n, source, issues }
 }
 
-/** The only hop-plan function: preview, create, PATCH and re-plan all call it (P15). */
+/**
+ * The only hop-plan function: preview, create, PATCH and re-plan all call it (P15). `extra` adds
+ * runtime exclusions (WG2 lockouts) to the spec's own for this plan only; the spec is not changed.
+ */
 export function planForSpec(
 	spec: NormalisedJobSpec,
 	ctx: PreviewContext,
+	extra: readonly ScanExclusion[] = [],
 ): HopPlan {
 	const source = findSource(spec.sourceId, ctx)
 	const fs =
@@ -692,8 +817,9 @@ export function planForSpec(
 			? (spec.tuner.sampleRateHz ?? source.sampleRateHz)
 			: source.sampleRateHz
 	const input: HopPlanInput = {
-		ranges: spec.ranges,
-		exclusions: spec.exclusions,
+		ranges: spec.ranges.filter(isRangeEnabled),
+		exclusions:
+			extra.length === 0 ? spec.exclusions : [...spec.exclusions, ...extra],
 		sampleRateHz: fs,
 		usableFraction: ctx.usableFraction,
 		rbwHz: fs / spec.fftSize,
@@ -701,31 +827,89 @@ export function planForSpec(
 		ppmMargin: ctx.settings.detection.ppmMargin,
 		tunerRange: ctx.tunerRange(source.id),
 	}
-	if (spec.mode === "sweep") return planHops(input)
-	const half = (fs * ctx.usableFraction) / 2
+	const planned =
+		spec.mode === "sweep"
+			? planHops(input)
+			: inWindowPlan(source.centreHz, input, fs, ctx.usableFraction)
+	return spec.mode === "sweep" ? withHopDwell(planned, spec) : planned
+}
+
+/**
+ * WG2 req 12: the job's plan with the lockout exclusions of its source. Sweep jobs only;
+ * `lockoutExclusions` is absent for in-window jobs and when the source has no lockout inside the
+ * job's enabled ranges, so plans and previews without lockouts are unchanged.
+ */
+export function planJob(
+	spec: NormalisedJobSpec,
+	ctx: PreviewContext,
+): { plan: HopPlan; lockoutExclusions?: LockoutExclusion[] } {
+	const targets =
+		spec.mode === "sweep" ? ctx.lockouts?.(spec.sourceId) : undefined
+	const candidates =
+		targets === undefined || targets.length === 0
+			? []
+			: lockoutExclusionsFor(targets, spec.ranges.filter(isRangeEnabled))
+	if (candidates.length === 0) return { plan: planForSpec(spec, ctx) }
+	return planWithLockouts(extra => planForSpec(spec, ctx, extra), candidates)
+}
+
+/** In-window jobs ignore per-range dwell, the same way they ignore the job dwell. */
+function inWindowPlan(
+	centreHz: number | null,
+	input: HopPlanInput,
+	fs: number,
+	usableFraction: number,
+): HopPlan {
+	const half = (fs * usableFraction) / 2
 	const g = Math.max(input.dcGuardHz, 2 * input.rbwHz)
-	if (source.centreHz === null)
+	if (centreHz === null)
 		return { hops: [], usableHalfSpanHz: half, dcGuardHz: g, ppmMarginHz: 0 }
 	return {
-		hops: [describeHop(0, source.centreHz, input)],
+		hops: [describeHop(0, centreHz, input)],
 		usableHalfSpanHz: half,
 		dcGuardHz: g,
-		ppmMarginHz: input.ppmMargin * 1e-6 * source.centreHz,
+		ppmMarginHz: input.ppmMargin * 1e-6 * centreHz,
 	}
 }
 
-function sweepPeriod(hops: number, dwellMs: number, share: number): number {
-	const every = share > 0 ? Math.max(1, Math.round(1 / share)) : Infinity
-	const revisits = Number.isFinite(every) ? Math.floor(hops / every) : 0
-	return (hops + revisits) * dwellMs
+/**
+ * A hop dwells for the longest overlapping enabled range that sets `dwellMs`,
+ * using the job dwell for an overlapping range that does not. The key stays
+ * absent when no overlapping enabled range sets one, so plans without per-range
+ * dwell are unchanged.
+ */
+function withHopDwell(plan: HopPlan, spec: NormalisedJobSpec): HopPlan {
+	const ranges = spec.ranges.filter(isRangeEnabled)
+	if (!ranges.some(r => r.dwellMs !== undefined)) return plan
+	let changed = false
+	const hops = plan.hops.map(hop => {
+		const overlapping = ranges.filter(
+			r => r.endHz >= hop.covered.startHz && r.startHz <= hop.covered.endHz,
+		)
+		if (!overlapping.some(r => r.dwellMs !== undefined)) return hop
+		changed = true
+		return {
+			...hop,
+			dwellMs: Math.max(...overlapping.map(r => r.dwellMs ?? spec.dwellMs)),
+		}
+	})
+	return changed ? { ...plan, hops } : plan
 }
 
-function hopProtocols(hop: Hop, n: NormalisedJobSpec): ScannerProtocol[] {
-	if (n.protocols.length > 0) return n.protocols
-	const inHop = n.ranges.filter(
-		r => r.endHz >= hop.covered.startHz && r.startHz <= hop.covered.endHz,
-	)
-	return unique(inHop.flatMap(r => r.protocols ?? []))
+function sweepPeriod(
+	hops: readonly Hop[],
+	dwellMs: number,
+	share: number,
+): number {
+	const count = hops.length
+	const every = share > 0 ? Math.max(1, Math.round(1 / share)) : Infinity
+	const revisits = Number.isFinite(every) ? Math.floor(count / every) : 0
+	// No hop dwell: exactly the pre-SF1 formula, so previews stay byte-identical (R1 finding 3).
+	if (count === 0 || hops.every(hop => hop.dwellMs === undefined))
+		return (count + revisits) * dwellMs
+	let sum = 0
+	for (const hop of hops) sum += hop.dwellMs ?? dwellMs
+	return sum + revisits * (sum / count)
 }
 
 function poiFor(
@@ -738,7 +922,7 @@ function poiFor(
 	const T = n.integrationMs
 	const D = n.txDurationHintMs
 	const classes = decodableClasses(
-		hopProtocols(hop, n),
+		protocolsForHop(n, hop),
 		source.format,
 		channelizer,
 	)
@@ -757,7 +941,8 @@ function poiFor(
 			decode: confirm !== null && D >= confirm ? 1 : 0,
 		}
 	}
-	const d = n.dwellMs - n.settleMs
+	// WG1 req 8.2: a hop with its own (per-range) dwell listens for that long.
+	const d = (hop.dwellMs ?? n.dwellMs) - n.settleMs
 	return {
 		hopIndex: hop.index,
 		detection: Math.min(1, Math.max(0, D + d - 2 * T) / periodMs),
@@ -809,11 +994,11 @@ function estimate(
 }
 
 export function previewPlan(
-	spec: ScanJobSpec,
+	spec: StoredScanJobSpec,
 	ctx: PreviewContext,
 ): PlanPreview {
 	const { spec: n, source, issues } = normaliseSpec(spec, ctx)
-	const plan = planForSpec(n, ctx)
+	const { plan, lockoutExclusions } = planJob(n, ctx)
 	const s = ctx.settings
 	const explained = issues.some(i => PLAN_EMPTY_CAUSES.has(i.code))
 	if (n.mode === "sweep" && plan.hops.length === 0 && !explained) {
@@ -843,7 +1028,7 @@ export function previewPlan(
 	}
 	const sweepPeriodMs =
 		n.mode === "sweep" && plan.hops.length > 1
-			? sweepPeriod(plan.hops.length, n.dwellMs, n.revisit.share)
+			? sweepPeriod(plan.hops, n.dwellMs, n.revisit.share)
 			: null
 	const poi = plan.hops.map(h =>
 		poiFor(h, n, sweepPeriodMs, source, ctx.channelizerAvailable),
@@ -895,10 +1080,19 @@ export function previewPlan(
 			),
 		)
 	}
-	return { spec: n, plan, sweepPeriodMs, poi, estimates, impact, issues }
+	return {
+		spec: n,
+		plan,
+		sweepPeriodMs,
+		poi,
+		estimates,
+		impact,
+		issues,
+		...(lockoutExclusions ? { lockoutExclusions } : {}),
+	}
 }
 
-/** Inverse of normaliseSpec for create/PATCH round trips (everything explicit; provenance is lost). */
+/** Inverse of normaliseSpec for create/PATCH round trips, preserving protocol override intent. */
 export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 	const holds = Object.values(n.hold.confirmHoldMs)
 	const first = holds[0]
@@ -912,7 +1106,6 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 		kind: n.kind,
 		ranges: n.ranges.map(copyRange),
 		exclusions: n.exclusions.map(x => ({ ...x })),
-		protocols: [...n.protocols],
 		sensitivity: n.sensitivity,
 		fftSize: n.fftSize,
 		integrationMs: n.integrationMs,
@@ -937,6 +1130,7 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 		txDurationHintMs: n.txDurationHintMs,
 		capture: { ...n.capture },
 	}
+	if (n.provenance["protocols"] === "operator") out.protocols = [...n.protocols]
 	if (uniform && out.hold && first !== undefined) out.hold.confirmHoldMs = first
 	if (n.revisit.maxIntervalMs !== null && out.revisit)
 		out.revisit.maxIntervalMs = n.revisit.maxIntervalMs
@@ -952,5 +1146,6 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 		if (n.stop.afterMs !== null) out.stop.afterMs = n.stop.afterMs
 	}
 	if (n.thresholdDb !== null) out.thresholdDb = n.thresholdDb
+	if (n.signalsOnly !== undefined) out.signalsOnly = n.signalsOnly
 	return out
 }

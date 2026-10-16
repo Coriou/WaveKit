@@ -13,6 +13,7 @@
  * - 20.4: Emit health events when health changes
  */
 
+import { DecoderObservability } from "./decoder-observability.js"
 import { EventEmitter } from "node:events"
 import { childAccessEnvironment } from "../access/runtime-hygiene.js"
 import { spawn, type ChildProcess } from "node:child_process"
@@ -77,6 +78,8 @@ export abstract class ExternalSdrDecoder
 	readonly id: string
 	readonly type: string
 
+	private readonly observability: DecoderObservability
+
 	protected process: ChildProcess | null = null
 	protected outputStream: PassThrough
 	protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 }
@@ -96,8 +99,13 @@ export abstract class ExternalSdrDecoder
 		return this.getCaps()
 	}
 
-	constructor(config: ExternalSdrConfig, logger: Logger) {
+	constructor(
+		config: ExternalSdrConfig,
+		logger: Logger,
+		wallClock: () => number = Date.now,
+	) {
 		super()
+		this.observability = new DecoderObservability(wallClock)
 		this.id = config.id
 		this.type = config.type
 		this.config = config
@@ -217,6 +225,11 @@ export abstract class ExternalSdrDecoder
 			this.process = null
 			this.emit("exit", code, signal)
 		})
+
+		if (this.process.stdout)
+			this.observability.captureLog(this.process.stdout, "stdout")
+		if (this.process.stderr)
+			this.observability.captureLog(this.process.stderr, "stderr")
 
 		// Parse stdout line by line (Requirement 19.3)
 		if (this.process.stdout) {
@@ -344,6 +357,10 @@ export abstract class ExternalSdrDecoder
 	 * Gets the current status of the decoder (Requirements 4.5, 20.1, 20.2, 20.3).
 	 * @returns DecoderStatus with running state, PID, uptime, health, and statistics
 	 */
+	getLog(lines = 200): Array<{ stream: "stdout" | "stderr"; line: string }> {
+		return this.observability.getLog(lines)
+	}
+
 	getStatus(): DecoderStatus {
 		const running = this.process !== null
 		const uptime = running
@@ -358,6 +375,7 @@ export abstract class ExternalSdrDecoder
 			pid: this.process?.pid,
 			uptime,
 			stats: { ...this.stats },
+			rateHistory: this.observability.getRateHistory(),
 			lastOutputAt: this.lastOutputAt ?? undefined,
 			restartCount: this.restartCount,
 			version: this.version,
@@ -439,7 +457,7 @@ export abstract class ExternalSdrDecoder
 			const output = this.parseOutput(line)
 			if (output) {
 				this.stats.eventsOut++
-				this.lastOutputAt = new Date()
+				this.lastOutputAt = this.observability.countOutput()
 				this.outputStream.write(output)
 				this.emit("output", output)
 

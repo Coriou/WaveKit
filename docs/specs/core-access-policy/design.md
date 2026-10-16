@@ -108,6 +108,12 @@ cannot create renewal or expose uncommitted state; requester expiry/revocation,
 storage failure and reentrant clock failure fail closed.
 Validates: Requirements 4.6, 4.7, 4.8.
 
+Property 7: **Device labels and coarse last-seen** (WG2) — for any admission and label
+timeline, `lastSeenAt` is hour-aligned and non-decreasing, at most one last-seen commit
+per device per UTC hour happens, a label or last-seen commit that fails leaves the
+committed snapshot unchanged, and no inventory read commits anything.
+Validates: Requirements 4.9–4.12.
+
 Use deterministic scenario tests for races, persistence faults and adapter effects;
 property-based tests map to these properties with at least 100 runs.
 
@@ -119,7 +125,9 @@ Existing malformed, symlinked, unsafe or unexpectedly missing initialized state
 fails closed; it never silently provisions a replacement credential. Serialized
 writes use an exclusive same-directory temporary file, file sync, atomic rename
 and directory sync before success. Rotation atomically changes the credential
-binding and empties sessions; stale authority writes cannot restore the old binding.
+binding and, by default, removes remembered sessions in that same write. An
+explicit keep rebinds them to the new generation (see machine-credential device
+administration). Stale authority writes cannot restore the old binding.
 
 Ownership uses unique immutable process-owner files published before scanning other
 owners. Any other live owner, including another nonce for the same PID, makes the
@@ -344,9 +352,11 @@ Health remains minimal liveness metadata. Legacy is not expanded.
 Explicit GET and HEAD `/api/access/devices` reuse the existing session-only flow
 and bounded route admission/drain. HEAD executes the same checks with no body.
 Safe-read Origin/fetch-metadata rules remain unchanged; safe reads do not add CSRF.
-Machine authority cannot enumerate devices, even with a session cookie alongside
-a preferred machine Authorization credential. Existing pair, refresh, logout,
-individual revoke and revoke-all permissions and operations are reused.
+Machine authority cannot enumerate devices on this session route, even with a
+session cookie alongside a preferred machine Authorization credential.
+Enumeration uses the machine routes (see browser-access-batch1.md Decision 6).
+Existing pair, refresh, logout, individual revoke and revoke-all permissions
+and operations are reused.
 
 ```ts
 interface AccessDeviceDto {
@@ -442,3 +452,97 @@ native/RF settlement or measured capacity. Existing production binding remains o
 scanner tier disabled with 500 ms default and 300–2000 ms bounds, private profile
 absent/direct-only; analog filesystem uncertainty, deferred reuse and required
 incomplete guarded IQ remain separate acceptance gaps.
+
+## Machine-credential device administration
+
+Lost-browser recovery does not require a browser session. Exact machine-bearer
+routes list and revoke remembered sessions. Cookie and session routes keep their
+current semantics. These routes authenticate like `POST /api/access/pairing-codes`:
+canonical Host, an allowed Origin when one is present, and the machine bearer.
+They never accept a cookie as authority, never renew, and do not require CSRF.
+A cookie alongside the bearer is ignored. Missing and invalid bearers stay
+401 `AUTH_REQUIRED`. A cookie request that fails the existing cookie boundary
+(safe-read or CSRF) is denied there first. A session principal that passes it
+is 403 `MACHINE_REQUIRED`.
+
+| Route | Success |
+| --- | --- |
+| `GET`/`HEAD /api/access/machine/devices` | 200 inventory; HEAD has no wire body |
+| `POST /api/access/machine/devices/revoke` | 200 `{ "revoked": boolean }` |
+| `POST /api/access/machine/devices/revoke-all` | 200 `{ "revoked": true }` |
+
+The inventory reuses each `AccessDeviceDto` row and the same ordering, expiry and
+allowlist rules. It is not the browser `AccessDevicesDto`: there is no requester,
+so `current` is false on every row, and zero rows is a successful empty inventory.
+Unavailable storage or a failed authority clock is 503, never an empty success.
+Reads stay synchronous and do not wait for the mutation queue. Revocation uses
+that queue and `SessionStore.revoke` / `revokeAll`, so the same lease invalidation
+closes live WS and audio attachments. Persistence failure latches the authority
+and closes leases. Authenticated attempts use a separate budget with the same
+limits as pairing redemption (5/minute per connection address, 60/minute
+globally, 128 address buckets) and return 429 `MACHINE_RATE_LIMITED` with
+`Retry-After: 60`.
+
+`rotate-credential` is an offline utility, like setup. It refuses with
+`ACCESS_STORAGE_BUSY` while any live owner holds the private directory. On a
+stopped directory it atomically replaces the machine credential under the same
+0600 file and 0700 directory rules. By default that write removes remembered
+browser sessions. `--keep-sessions` rebinds them to the new credential
+generation; the operator then reviews `devices list` after restart. A previous
+in-memory persistence hook still cannot write the old binding. The command
+prints no secret.
+
+## Device names, kinds and coarse last-seen (WG2)
+
+Amends "Session-only device methods and DTO" for requirements 4.9–4.12 (user decision
+D3, 2026-10-13). The rest of that section, including "no device WS bus, online
+tracking, background clock", stands: last-seen is an hour, not presence.
+
+```ts
+type AccessDeviceKind =
+	| "browser"
+	| "phone"
+	| "tablet"
+	| "desktop"
+	| "cli"
+	| "other"
+interface AccessDeviceDto {
+	deviceId: string
+	createdAt: number
+	renewedAt: number
+	expiresAt: number
+	current: boolean
+	name?: string | null // always present once WG2 is implemented
+	kind?: AccessDeviceKind | null
+	lastSeenAt?: number | null // epoch ms, a multiple of 3 600 000
+}
+interface AccessDeviceLabelRequest {
+	deviceId: string
+	name?: string | null
+	kind?: AccessDeviceKind | null
+}
+interface AccessDeviceLabelResponse {
+	updated: boolean
+}
+```
+
+The fields are optional in the shared schema only so that the frozen contract precedes
+the implementation; projections always set them. The session snapshot record gains
+`name`, `kind` and `lastSeenAt` (nullable) at version 2; version 1 records load with
+nulls. `SessionStore` gains `label(deviceId, patch)` and `noteSeen(deviceId, now)`;
+both go through `#commit` on the existing queue. `noteSeen` is a no-op unless
+`floor(now / 1 h) * 1 h` is greater than the committed `lastSeenAt`, so a burst of
+requests within one hour produces one commit; while one is in flight further calls
+for that device are skipped. It is called after a successful authenticated admission
+in the Fastify adapter (HTTP and WebSocket), never from the inventory read, and its
+promise is caught. A persistence failure follows the existing latch rules for real
+mutations but a failed `noteSeen` alone only counts and logs.
+
+| Request/state                                | Result                                    |
+| -------------------------------------------- | ----------------------------------------- |
+| Valid session, CSRF, allowed Origin, body ok | 200 `{ updated: true }` after the commit  |
+| Unknown or expired device ID                 | 200 `{ updated: false }`                  |
+| Malformed body, invalid name, no keys        | 400 `MALFORMED_REQUEST`                   |
+| Missing session or CSRF, wrong Origin        | Existing 401/403                          |
+| Machine principal                            | 403 `SESSION_REQUIRED`                    |
+| Persistence failure                          | 503 `ACCESS_UNAVAILABLE`, state unchanged |

@@ -143,6 +143,38 @@ describe("scanner WebSocket channels", () => {
 		}
 	})
 
+	// WG1 req 8.1: progress per job at up to 2 Hz; other messages keep 1 s per key.
+	it("delivers scanner:progress at up to 2 Hz per job and discovery at 1 Hz", async () => {
+		vi.useFakeTimers()
+		try {
+			const b = new WebSocketEventBroadcaster(createLogger({ level: "fatal" }))
+			const scannerMsgs = client(b, "c1", ["scanner"])
+			const scanner = new FakeScanner()
+			const wiring = wireScannerBroadcasts(scanner, b, {
+				now: () => Date.now(),
+			})
+			for (let i = 0; i < 20; i++) {
+				scanner.emit("progress", { jobId: "j1", hopIndex: i })
+				scanner.emit("discovery", {
+					change: "updated",
+					discovery: { id: "d_1", observationCount: i },
+				})
+				await vi.advanceTimersByTimeAsync(100)
+			}
+			await vi.advanceTimersByTimeAsync(1_000)
+			const progress = scannerMsgs.filter(m => m.type === "scanner:progress")
+			const discovery = scannerMsgs.filter(m => m.type === "scanner:discovery")
+			// 2 s of offers every 100 ms: 0, 500, 1000, 1500 ms and the trailing latest.
+			expect(progress).toHaveLength(5)
+			expect(progress.at(-1)!.data).toMatchObject({ hopIndex: 19 })
+			expect(discovery).toHaveLength(3)
+			wiring.dispose()
+			b.closeAll()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
 	it("applies a patched ws.maxMessagesPerSecond on the next status event", async () => {
 		vi.useFakeTimers()
 		try {

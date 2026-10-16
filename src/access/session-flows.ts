@@ -1,3 +1,4 @@
+import { accessDeviceLabelRequestSchema } from "@wavekit/api-types"
 import type { AccessDevicesDto } from "@wavekit/api-types"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
@@ -9,6 +10,8 @@ import {
 	SessionCookies,
 } from "./cookies.js"
 import type { AccessFlowResult } from "./cookies.js"
+import { MachineDeviceAuthority } from "./machine-devices.js"
+import type { MachineAccessDevicesDto } from "./machine-devices.js"
 import type { PairedSession } from "./pairing.js"
 import type { AccessPolicy } from "./policy.js"
 import type { SessionStore } from "./sessions.js"
@@ -21,6 +24,8 @@ const revokeSchema = z
 export interface SessionFlowsOptions {
 	policy: AccessPolicy
 	sessions: SessionStore
+	/** Machine-administration budget only. Session clocks stay on the store. */
+	monotonicNow?: () => number
 }
 
 /** Original requests are authorized at execution, including queued mutations. */
@@ -28,6 +33,7 @@ export class SessionFlows {
 	#policy: AccessPolicy
 	#sessions: SessionStore
 	#cookies: SessionCookies
+	#machines: MachineDeviceAuthority
 	#queue: Promise<void> = Promise.resolve()
 
 	constructor(options: SessionFlowsOptions) {
@@ -39,6 +45,23 @@ export class SessionFlows {
 		this.#policy = options.policy
 		this.#sessions = options.sessions
 		this.#cookies = new SessionCookies(options.policy)
+		this.#machines = new MachineDeviceAuthority({
+			policy: options.policy,
+			sessions: options.sessions,
+			enqueue: operation => this.#enqueue(operation),
+			...(options.monotonicNow === undefined
+				? {}
+				: { monotonicNow: options.monotonicNow }),
+		})
+	}
+
+	#enqueue<T>(operation: () => Promise<T>): Promise<T> {
+		const task = this.#queue.then(operation)
+		this.#queue = task.then(
+			() => undefined,
+			() => undefined,
+		)
+		return task
 	}
 
 	#admit(
@@ -92,7 +115,7 @@ export class SessionFlows {
 	): Promise<AccessFlowResult<T>> {
 		// Capture request facts before queueing, never retain caller-mutable headers.
 		const original = { ...request, rawHeaders: [...request.rawHeaders] }
-		const task = this.#queue.then(async () => {
+		return this.#enqueue(async () => {
 			const admission = this.#admit(original, "POST", path)
 			if (admission.kind !== "authenticated") return admission
 			try {
@@ -101,11 +124,25 @@ export class SessionFlows {
 				return flowDenial(503, "ACCESS_UNAVAILABLE", admission.headers)
 			}
 		})
-		this.#queue = task.then(
-			() => undefined,
-			() => undefined,
-		)
-		return task
+	}
+
+	machineDevices(
+		request: AccessRequest,
+	): AccessFlowResult<MachineAccessDevicesDto> {
+		return this.#machines.devices(request)
+	}
+
+	machineRevoke(
+		request: AccessRequest,
+		body: unknown,
+	): Promise<AccessFlowResult<{ revoked: boolean }>> {
+		return this.#machines.revoke(request, body)
+	}
+
+	machineRevokeAll(
+		request: AccessRequest,
+	): Promise<AccessFlowResult<{ revoked: true }>> {
+		return this.#machines.revokeAll(request)
 	}
 
 	status(request: AccessRequest): AccessFlowResult<PairedSession> {
@@ -170,6 +207,29 @@ export class SessionFlows {
 					admission.headers,
 					this.#cookies.clear(),
 				)
+			},
+		)
+	}
+
+	label(
+		request: AccessRequest,
+		body: unknown,
+	): Promise<AccessFlowResult<{ updated: boolean }>> {
+		// Parse before asynchronous queueing so a later mutation of the body
+		// cannot change the name, kind or device.
+		const parsed = accessDeviceLabelRequestSchema.safeParse(body)
+		return this.#mutate(
+			request,
+			"/api/access/devices/label",
+			async admission => {
+				if (!parsed.success)
+					return flowDenial(400, "MALFORMED_REQUEST", admission.headers)
+				const updated = await this.#sessions.label(parsed.data.deviceId, {
+					...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+					...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
+				})
+				if (!this.#metadata(admission)) return this.#missing(admission)
+				return flowSuccess({ updated }, admission.headers)
 			},
 		)
 	}

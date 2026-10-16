@@ -10,7 +10,7 @@ commands below are optional native development and diagnostic paths.
 
 ## Start native development without hardware
 
-Install Node.js 20+ and pnpm 10.28.0, then from the repository root:
+Install Node.js 24 LTS (24.x or newer) and pnpm 10.28.0, then from the repository root:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -27,6 +27,47 @@ available at `/docs`.
 In a second terminal, run `pnpm dashboard`. Use `pnpm dev:local` for source
 watching, or `make dev-local`. The dashboard also supports
 `WAVEKIT_API_URL=http://127.0.0.1:3000 pnpm dashboard` for a different API port.
+
+## Protected mode locally
+
+Protected mode stays opt-in. `pnpm start:local` remains legacy mode. To run the
+real server on loopback with no Pi, dongle, Docker, or decoder binaries, build
+once and start the protected development server:
+
+```sh
+pnpm run build
+make dev-protected
+```
+
+`node scripts/dev-protected.mjs` is the same command. It reads
+`config/dev-protected.yaml`, creates a throwaway private access directory,
+provisions it with `node dist/access-command.js setup`, and starts protected
+mode with `exposure: local-http`. The API, analog audio, and digital audio
+origins are three distinct `http://127.0.0.1` ports. This is development HTTP
+on loopback; it does not terminate TLS. See
+[Protected runtime](API.md#protected-runtime-opt-in) for the configuration
+fields.
+
+When the server is healthy the command prints the three origins, the bootstrap
+URL (`/api/access/bootstrap` on the API origin), a one-time pairing code, and
+the private directory path. It does not print the machine credential. Ctrl-C,
+SIGHUP, SIGQUIT, or SIGTERM stops the server and deletes that directory.
+Closing the terminal sends SIGHUP; the command still stops the server and
+deletes the directory.
+
+`--keep` leaves the directory in place and prints its path. While that server
+is still running, another terminal can request a new code:
+
+```sh
+node scripts/dev-protected.mjs --pair --private-directory /path/printed/by/the/server --api-origin http://127.0.0.1:9473
+```
+
+`--api-port`, `--analog-port`, and `--digital-port` override the default ports
+(API `9473`, analog `9474`, digital `9475`). `config/dev-protected.yaml` stores
+those three as placeholders, which the script replaces. `0` chooses an
+ephemeral port. Empty sources and decoders are expected. Enter the printed
+code in a browser client that trusts the printed API origin; this command does
+not serve a web UI.
 
 ## Use a USB RTL-SDR dongle on macOS or Linux
 
@@ -95,6 +136,11 @@ Without an explicit selection, WaveKit loads `config/default.yaml` then
 `config/custom.yaml` (or `/app/config` in a container). `config/dev_test.yaml`
 contains the historical Pi address and container paths; it is an example for
 that setup and is not selected automatically.
+
+Activity recording stays off unless `activity.enabled` is true (or
+`WAVEKIT_ACTIVITY__ENABLED=true`). The database is
+`<stateDir>/activity/activity.db` (`stateDir` defaults to `data`, override
+`WAVEKIT_STATE_DIR`) and needs Node 24 with SQLite FTS5. See `docs/API.md`.
 
 ## Decoder capabilities
 

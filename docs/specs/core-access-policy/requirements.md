@@ -68,7 +68,8 @@ expiry together. Retain the opaque cookie across refresh to avoid tab/audio/WS
 races. Passive stream frames alone do not renew a session.
 4.3 Default to at most 32 remembered sessions, reject capacity exhaustion explicitly, and allow
 individual-device/all-device revocation. Machine credential rotation invalidates
-persisted browser sessions bound to the old credential generation.
+persisted browser sessions bound to the old credential generation, unless the operator
+explicitly keeps them (see browser-access-batch1.md).
 4.4 Persist only hashed cookie tokens and private session metadata through a
 validated bounded snapshot. Serialize mutations and persist before acknowledging
 issuance, renewal or revocation. Do not fall back silently to memory-only sessions.
@@ -76,7 +77,8 @@ issuance, renewal or revocation. Do not fall back silently to memory-only sessio
 close browser leases and avoid misleading login prompts or durable-success claims.
 
 4.6 Provide explicit session-only GET/HEAD `/api/access/devices` under existing
-safe-read rules. Machine authority cannot enumerate devices. Reuse existing
+safe-read rules. Machine authority enumerates devices through the machine routes
+(see browser-access-batch1.md Decision 6). Reuse existing
 pairing, refresh, logout and revocation operations without expanding permissions.
 4.7 Project a bounded deterministic snapshot of active committed sessions using
 one SessionStore authority-clock observation per snapshot. Include only existing
@@ -84,6 +86,8 @@ device ID, creation/renewal/expiry epoch-ms clocks and current-requester marker.
 Active means remembered and unexpired, not online. Reads must not renew, prune,
 queue or persist; pending mutations cannot leak before commit. No labels, kind,
 lastSeen, new clock, revision or persistence migration is introduced.
+(Superseded in part by 4.9–4.12, WG2 2026-10-13: name, kind and coarse lastSeen are
+added; the rest of 4.7 stands.)
 4.8 Reauthorize the original request immediately before the synchronous snapshot
 without an await gap and revalidate requester expiry/presence in the store.
 Recheck authority availability after the injected clock callback, capture committed
@@ -91,6 +95,29 @@ state afterward and invoke no external callback during assembly. Unavailable
 storage or clock failure returns 503, never successful empty inventory; an invalid
 requester returns 401. Return detached allowlist rows bounded by the configured
 session cap, at most 32, with exactly one current requester.
+
+4.9 (WG2, user decision D3, 2026-10-13.) Each remembered device may carry an
+operator-set `name` (1–64 characters, no leading or trailing whitespace, at most 128 UTF-8 bytes, no
+C0/C1 control or bidirectional-override characters) and `kind` (`browser`, `phone`,
+`tablet`, `desktop`, `cli`, `other`). Neither is ever derived from a user agent,
+address, header or any other fingerprint; both start null.
+4.10 `POST /api/access/devices/label` with `{ deviceId, name?, kind? }` (at least one
+key; null clears; absent keeps) updates a remembered device through the existing
+session mutation path (CSRF, Origin, serialized queue, persist before acknowledging)
+and returns `{ updated: boolean }` (false for an unknown device). Machine routes do
+not label. The body is parsed before queueing, like revoke.
+4.11 `lastSeenAt` is the start of the UTC hour of the device's latest authenticated
+HTTP or WebSocket admission, null until the first one after upgrade. It is committed
+through the mutation queue at most once per device per UTC hour and never by the
+device-inventory read itself. A failed last-seen commit leaves the committed state
+unchanged, is counted and logged once per interval, and never fails or delays the
+request that caused it. It is not presence: it states only the hour of the last use.
+Bound: at most 32 devices × 24 commits per day.
+4.12 Session and machine device DTOs carry `name`, `kind` and `lastSeenAt` (null when
+unset). The private session snapshot moves to version 2 with those fields; a
+version 1 snapshot loads with nulls and is written as version 2 on the next commit.
+An older WaveKit refuses a version 2 snapshot and fails closed like any invalid
+file. The state stays under its 64 KiB cap (32 × at most ~250 extra bytes).
 
 ## 5. Connection lifecycle
 

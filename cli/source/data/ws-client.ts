@@ -99,6 +99,16 @@ export function createNodeWsFactory(opts: NodeWsOptions = {}): WsFactory {
 
 export const nodeWsFactory: WsFactory = createNodeWsFactory()
 
+function isActivityFrame(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null) return false
+	if ("channel" in raw && raw.channel === "activity") return true
+	return (
+		"type" in raw &&
+		typeof raw.type === "string" &&
+		raw.type.startsWith("activity:")
+	)
+}
+
 export const CHANNELS = [
 	"decoders",
 	"health",
@@ -110,6 +120,25 @@ export const CHANNELS = [
 	"tuner",
 	"aircraft",
 ] as const
+
+/** Channels the CLI parses: its subscriptions plus Scan demand (and Activity, ignored). */
+const KNOWN_CHANNELS: ReadonlySet<string> = new Set<string>([
+	...CHANNELS,
+	"scanner",
+	"spectrum",
+	"activity",
+])
+
+/**
+ * A frame on a channel the CLI does not know (a newer core, or a channel such as
+ * `mesh` or `aprs` it never parses) is ignored, not counted as invalid (WG3 req 9.2).
+ * Frames without a string channel keep the normal checks.
+ */
+function isUnknownChannelFrame(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null || !("channel" in raw))
+		return false
+	return typeof raw.channel === "string" && !KNOWN_CHANNELS.has(raw.channel)
+}
 
 export const BACKOFF_STEPS_MS = [1000, 2000, 4000, 8000, 15000] as const
 
@@ -224,6 +253,11 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 						deps.emit({ kind: "ws:invalid", at: deps.now() })
 						return
 					}
+					// Activity is a separate subscription. The CLI never joins it.
+					// Its records and its error frames (type "error", channel
+					// "activity") must not count as invalid or as a server error.
+					if (isActivityFrame(raw)) return
+					if (isUnknownChannelFrame(raw)) return
 					const event = parseServerMessage(raw)
 					if (!event) {
 						const scan =
@@ -239,6 +273,12 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 						})
 						return
 					}
+					// Levels are valid telemetry; the dashboard does not display them yet.
+					if (
+						event.type === "live-audio:level" ||
+						event.type === "live-audio:transmission"
+					)
+						return
 					if (event.type === "subscribed") {
 						if (open) return // additive acknowledgements do not reopen/resync the socket
 						attempt = 0

@@ -9,6 +9,7 @@
  */
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
+import type { LockoutTarget } from "../plan/lockouts.js"
 import {
 	frequencyKey,
 	gridToleranceHz,
@@ -77,6 +78,8 @@ export interface DiscoveryFilter {
 	since?: number
 	encrypted?: boolean
 	q?: string
+	/** Exact `kind` and case-insensitive trimmed `value`. Combined with the other filters by AND. */
+	identity?: Identity
 	sort?: "lastSeen" | "frequency" | "confidence"
 	cursor?: string | null
 	limit?: number
@@ -110,7 +113,22 @@ export interface RecordingCommitPlan {
 	readonly recordingCount: number
 }
 
-type Ingested = { discoveryId: string | null; change: StoreChange }
+/**
+ * WG2 req 13.1: an observation newly credited to jobs by one ingest (its first placement, or jobs
+ * joining a placed observation). A promoted single-block hit credits every pending observation.
+ */
+export interface Attribution {
+	observationId: string
+	discoveryId: string
+	jobIds: string[]
+	/** The ingest created the discovery the observation landed in. */
+	created: boolean
+}
+type Ingested = {
+	discoveryId: string | null
+	change: StoreChange
+	attributed?: Attribution[]
+}
 
 const METADATA_MAX = 64
 const LINKS_MAX = 64
@@ -144,6 +162,11 @@ interface Op {
 	merged: [string, string][]
 	removedObservations: string[]
 	correction?: { sourceId: string; hz: number }
+	/**
+	 * Observation id → the discovery it was placed in and the job ids newly credited (WG2 req 13.1).
+	 * Recorded at placement, so neither observation retention nor a later listener can lose it.
+	 */
+	credited: Map<string, { discoveryId: string; jobIds: string[] }>
 }
 
 function newOp(): Op {
@@ -154,6 +177,7 @@ function newOp(): Op {
 		changes: new Map(),
 		merged: [],
 		removedObservations: [],
+		credited: new Map(),
 	}
 }
 
@@ -819,7 +843,14 @@ export class DiscoveryStore extends EventEmitter {
 		const op = newOp()
 		const removed: string[] = []
 		for (const d of [...this.discoveries.values()]) {
-			if (d.operator?.keep === true || d.lastSeenAt >= cutoff) continue
+			// WG2 R2: a lockout is skipped by sweeps, so its lastSeenAt stops moving; age must not
+			// silently remove it and put the frequency back into sweeps.
+			if (
+				d.operator?.keep === true ||
+				d.operator?.lockout === true ||
+				d.lastSeenAt >= cutoff
+			)
+				continue
 			removed.push(d.id)
 			this.deleteInto(op, d)
 		}
@@ -829,6 +860,19 @@ export class DiscoveryStore extends EventEmitter {
 
 	correction(sourceId: string): number {
 		return this.corrections.get(sourceId) ?? 0
+	}
+
+	/** WG2 req 12.1: the locked-out discoveries heard on `sourceId` (no clone: three scalars each). */
+	lockouts(sourceId: string): LockoutTarget[] {
+		const out: LockoutTarget[] = []
+		for (const d of this.discoveries.values())
+			if (d.operator?.lockout === true && d.sourceIds.includes(sourceId))
+				out.push({
+					discoveryId: d.id,
+					centreHz: d.frequencyHz,
+					bandwidthHz: d.bandwidthHz,
+				})
+		return out
 	}
 
 	get(id: string): Discovery | undefined {
@@ -845,7 +889,11 @@ export class DiscoveryStore extends EventEmitter {
 			Math.max(1, Math.floor(filter.limit ?? DEFAULT_LIMIT)),
 		)
 		const offset = parseCursor(filter.cursor ?? null)
+		// q is lower-cased once. It matches the operator label or the identity value;
+		// metadata lists (talkgroups, callsigns, capcodes) are not searched.
 		const q = filter.q?.toLowerCase()
+		const identity = filter.identity
+		const identityValue = identity?.value.trim().toLowerCase()
 		const min = filter.minConfidence
 		const items = [...this.discoveries.values()].filter(
 			d =>
@@ -859,8 +907,12 @@ export class DiscoveryStore extends EventEmitter {
 				(filter.since === undefined ||
 					Date.parse(d.lastSeenAt) >= filter.since) &&
 				(filter.encrypted === undefined || d.encrypted === filter.encrypted) &&
+				(identity === undefined ||
+					(d.identity?.kind === identity.kind &&
+						d.identity.value.trim().toLowerCase() === identityValue)) &&
 				(q === undefined ||
-					(d.operator?.label ?? "").toLowerCase().includes(q)),
+					(d.operator?.label ?? "").toLowerCase().includes(q) ||
+					(d.identity?.value ?? "").toLowerCase().includes(q)),
 		)
 		const byLastSeen = (a: Discovery, b: Discovery): number =>
 			compareText(b.lastSeenAt, a.lastSeenAt) || compareText(a.id, b.id)
@@ -1145,6 +1197,10 @@ export class DiscoveryStore extends EventEmitter {
 		const record = this.toRecord(obs, d.id)
 		this.putObservation(record)
 		op.observations.add(record.id)
+		op.credited.set(record.id, {
+			discoveryId: d.id,
+			jobIds: [...record.jobIds],
+		})
 		d.observationCount += 1
 		d.airtimeMs += durationOf(obs)
 		this.absorbStats(d, obs, true)
@@ -1179,9 +1235,12 @@ export class DiscoveryStore extends EventEmitter {
 		this.refresh(d)
 		if (JSON.stringify(d) === beforeD && JSON.stringify(record) === beforeO)
 			return { discoveryId: d.id, change: "updated" }
+		const joined = record.jobIds.filter(j => !known.jobIds.includes(j))
 		return this.commit("observation", op => {
 			op.discoveries.add(d.id)
 			op.observations.add(record.id)
+			if (joined.length > 0)
+				op.credited.set(record.id, { discoveryId: d.id, jobIds: joined })
 			mark(op, d.id, rank(d.confidence) > beforeRank ? "upgraded" : "updated")
 			return this.settle(op, d)
 		})
@@ -1608,11 +1667,19 @@ export class DiscoveryStore extends EventEmitter {
 		return fits
 	}
 
-	/** Lowest confidence, then oldest `lastSeenAt` (ties: smaller id); never `decoded` or `keep`. */
+	/**
+	 * Lowest confidence, then oldest `lastSeenAt` (ties: smaller id); never `decoded`, `keep` or
+	 * locked out (WG2 R1 #8: evicting a lockout would silently put it back into sweeps).
+	 */
 	private evictionVictim(): Discovery | undefined {
 		let victim: Discovery | undefined
 		for (const d of this.discoveries.values()) {
-			if (d.confidence === "decoded" || d.operator?.keep === true) continue
+			if (
+				d.confidence === "decoded" ||
+				d.operator?.keep === true ||
+				d.operator?.lockout === true
+			)
+				continue
 			if (
 				victim === undefined ||
 				rank(d.confidence) < rank(victim.confidence) ||
@@ -1789,8 +1856,37 @@ export class DiscoveryStore extends EventEmitter {
 	private commit(kind: JournalEntry["op"], run: (op: Op) => string): Ingested {
 		const op = newOp()
 		const id = run(op)
+		const out: Ingested = {
+			discoveryId: id,
+			change: op.changes.get(id) ?? "updated",
+		}
+		// WG2 req 13.1: snapshot the credits before any listener runs; a merge in this operation
+		// moves the observation to the survivor.
+		const survivor = new Map<string, string>()
+		for (const [keep, drop] of op.merged) survivor.set(drop, keep)
+		const resolve = (discoveryId: string): string => {
+			let at = discoveryId
+			for (let i = 0; i <= op.merged.length; i++) {
+				const next = survivor.get(at)
+				if (next === undefined) break
+				at = next
+			}
+			return at
+		}
+		const attributed: Attribution[] = []
+		for (const [observationId, credit] of op.credited) {
+			if (credit.jobIds.length === 0) continue
+			const discoveryId = resolve(credit.discoveryId)
+			attributed.push({
+				observationId,
+				discoveryId,
+				jobIds: [...credit.jobIds],
+				created: op.changes.get(discoveryId) === "created",
+			})
+		}
+		if (attributed.length > 0) out.attributed = attributed
 		this.finish(kind, op)
-		return { discoveryId: id, change: op.changes.get(id) ?? "updated" }
+		return out
 	}
 
 	private finish(kind: JournalEntry["op"], op: Op): void {

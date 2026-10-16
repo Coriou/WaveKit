@@ -110,7 +110,7 @@ export interface APRSData {
 	altitude?: number | undefined
 	/** Course in degrees */
 	course?: number | undefined
-	/** Speed in mph */
+	/** Speed in knots (APRS course/speed extension and Mic-E). */
 	speed?: number | undefined
 	/** APRS symbol table and code */
 	symbol?: string | undefined
@@ -122,6 +122,12 @@ export interface APRSData {
 	message?: APRSMessage | undefined
 	/** Raw packet data */
 	raw?: string | undefined
+	/** WG2: object (`;`) or item (`)`) name, trailing spaces trimmed. */
+	objectName?: string | undefined
+	/** WG2: which report named the object. */
+	objectKind?: "object" | "item" | undefined
+	/** WG2: true for a kill report (`_`), false for a live one. */
+	objectKilled?: boolean | undefined
 }
 
 /**
@@ -699,9 +705,98 @@ export function parseAprsInfo(
 		case "'":
 			parseMicE(info, destination, result)
 			break
+		case ";":
+			parseObjectReport(info, result)
+			break
+		case ")":
+			parseItemReport(info, result)
+			break
 	}
 
 	return result
+}
+
+/**
+ * Object report: `;` + 9-character name + `*` live / `_` killed + 7-character
+ * timestamp (`DDHHMMz` or `HHMMSSh`) + a position report. A bad timestamp, a
+ * missing position, or any other malformed header leaves dataType set and
+ * adds no object fields.
+ */
+function parseObjectReport(info: string, result: APRSData): void {
+	try {
+		if (info.length < 18) return
+		const flag = info.charAt(10)
+		if (flag !== "*" && flag !== "_") return
+		const name = info.substring(1, 10).replace(/ +$/, "")
+		if (name.length === 0) return
+		// DHMz or HMSz / HMSh. Anything else is not an object header.
+		// DDHHMMz, HHMMSSh, or DDHHMM/ (local time, APRS 1.0.1 ch. 6).
+		if (!/^\d{6}[zh/]$/.test(info.substring(11, 18))) return
+		const position = info.substring(18)
+		if (!applyObjectPosition(position, result)) return
+		result.objectName = name
+		result.objectKind = "object"
+		result.objectKilled = flag === "_"
+	} catch {
+		clearParsedPosition(result)
+		clearObjectFields(result)
+	}
+}
+
+/**
+ * Item report: `)` + 3–9 character name + `!` live / `_` killed + a position
+ * report. The first `!` or `_` ends the name. A missing position or any other
+ * malformed header leaves dataType set and adds no object fields.
+ */
+function parseItemReport(info: string, result: APRSData): void {
+	try {
+		const body = info.substring(1)
+		const delim = body.search(/[!_]/)
+		if (delim < 3 || delim > 9) return
+		const name = body.substring(0, delim).replace(/ +$/, "")
+		if (name.length === 0) return
+		const position = body.substring(delim + 1)
+		if (!applyObjectPosition(position, result)) return
+		result.objectName = name
+		result.objectKind = "item"
+		result.objectKilled = body.charAt(delim) === "_"
+	} catch {
+		clearParsedPosition(result)
+		clearObjectFields(result)
+	}
+}
+
+/** Parses the position that follows an object or item header. Rolls back a failed parse. */
+function applyObjectPosition(position: string, result: APRSData): boolean {
+	if (position.length === 0) return false
+	parsePositionReport(position, result)
+	if (
+		typeof result.lat === "number" &&
+		typeof result.lon === "number" &&
+		Number.isFinite(result.lat) &&
+		Number.isFinite(result.lon)
+	) {
+		return true
+	}
+	clearParsedPosition(result)
+	return false
+}
+
+function clearParsedPosition(result: APRSData): void {
+	delete result.lat
+	delete result.lon
+	delete result.altitude
+	delete result.course
+	delete result.speed
+	delete result.symbol
+	delete result.comment
+	delete result.weather
+}
+
+function clearObjectFields(result: APRSData): void {
+	delete result.objectName
+	delete result.objectKind
+	delete result.objectKilled
 }
 
 /**
@@ -875,38 +970,40 @@ function parseWeatherData(data: string): APRSWeather {
 function parseMicE(info: string, destination: string, result: APRSData): void {
 	if (info.length < 9 || destination.length < 6) return
 
-	// Decode latitude from destination field
+	// Decode latitude from destination field. `high` marks the P-Z group: in characters 4, 5
+	// and 6 it means North, longitude offset +100 and West (APRS 1.0.1 ch. 10); 0-9 and L mean
+	// South, +0 and East.
 	const latDigits: number[] = []
-	const latNS: boolean[] = []
-	const lonOffset: boolean[] = []
+	const high: boolean[] = []
 
 	for (let i = 0; i < 6; i++) {
 		const c = destination.charCodeAt(i)
 		if (c >= 0x30 && c <= 0x39) {
 			// 0-9
 			latDigits.push(c - 0x30)
-			latNS.push(false)
-			lonOffset.push(false)
+			high.push(false)
 		} else if (c >= 0x41 && c <= 0x4a) {
-			// A-J (custom)
+			// A-J (custom message bit, positions 1-3 only)
+			if (i >= 3) return
 			latDigits.push(c - 0x41)
-			latNS.push(false)
-			lonOffset.push(false)
+			high.push(false)
 		} else if (c >= 0x50 && c <= 0x59) {
 			// P-Y
 			latDigits.push(c - 0x50)
-			latNS.push(true)
-			lonOffset.push(true)
-		} else if (c === 0x4b || c === 0x4c) {
-			// K, L (space)
+			high.push(true)
+		} else if (c === 0x4b) {
+			// K (space, custom message bit, positions 1-3 only)
+			if (i >= 3) return
 			latDigits.push(0)
-			latNS.push(false)
-			lonOffset.push(true)
+			high.push(false)
+		} else if (c === 0x4c) {
+			// L (space)
+			latDigits.push(0)
+			high.push(false)
 		} else if (c === 0x5a) {
 			// Z (space)
 			latDigits.push(0)
-			latNS.push(true)
-			lonOffset.push(true)
+			high.push(true)
 		} else {
 			return // Invalid character
 		}
@@ -919,7 +1016,7 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 		latDigits[3]! +
 		(latDigits[4]! * 10 + latDigits[5]!) / 100
 	result.lat = latDeg + latMin / 60
-	if (!latNS[0] && !latNS[1] && !latNS[2]) {
+	if (!high[3]) {
 		result.lat = -result.lat // South
 	}
 
@@ -929,7 +1026,7 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 	const h = info.charCodeAt(3) - 28
 
 	let lonDeg = d
-	if (lonOffset[4]) lonDeg += 100
+	if (high[4]) lonDeg += 100
 	if (lonDeg >= 180 && lonDeg <= 189) lonDeg -= 80
 	if (lonDeg >= 190 && lonDeg <= 199) lonDeg -= 190
 
@@ -939,7 +1036,7 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 	const lonHun = h
 
 	result.lon = lonDeg + (lonMin + lonHun / 100) / 60
-	if (!lonOffset[5]) {
+	if (high[5]) {
 		result.lon = -result.lon // West
 	}
 
@@ -948,8 +1045,13 @@ function parseMicE(info: string, destination: string, result: APRSData): void {
 	const dc = info.charCodeAt(5) - 28
 	const se = info.charCodeAt(6) - 28
 
-	result.speed = sp * 10 + Math.floor(dc / 10)
-	result.course = (dc % 10) * 100 + se
+	// APRS 1.0.1 ch. 10: the alternate SP and DC ranges add 800 knots and 400 degrees.
+	let speed = sp * 10 + Math.floor(dc / 10)
+	if (speed >= 800) speed -= 800
+	let course = (dc % 10) * 100 + se
+	if (course >= 400) course -= 400
+	result.speed = speed
+	result.course = course
 
 	// Symbol
 	if (info.length >= 9) {

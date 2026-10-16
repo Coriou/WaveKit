@@ -23,10 +23,11 @@ import type { NodeHttpAccessOptions } from "../access/node-http-adapter.js"
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
 import type * as http from "node:http"
-import type { Readable, Transform } from "node:stream"
+import { Transform, type Readable } from "node:stream"
+import { z } from "zod"
 import {
 	LiveDemodConfigSchema,
-	type LiveDemodConfig,
+	type LiveDemodConfig as BaseLiveDemodConfig,
 	type SourceCaps,
 } from "../config.js"
 import type { Logger } from "../utils/logger.js"
@@ -42,10 +43,8 @@ import {
 } from "./audio-stream-server.js"
 import { csdrChildEnv } from "../decoders/csdr-buffers.js"
 import { signalDecoder } from "../decoders/process-tools.js"
-import {
-	ChannelSquelch,
-	createChannelSquelchTransform,
-} from "./channel-squelch.js"
+import { ChannelSquelch } from "./channel-squelch.js"
+import { liveDemodTransmissionConfigChanged } from "./live-demod-activity.js"
 import {
 	DEFAULT_IQ_SAMPLE_RATE,
 	liveDemodRates,
@@ -56,7 +55,25 @@ import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
 
-export type { LiveDemodConfig } from "../config.js"
+/** Local schema until Main adds these fields to startup configuration. */
+export const LiveDemodRuntimeConfigSchema = LiveDemodConfigSchema.and(
+	z.object({
+		squelchMode: z.enum(["manual", "auto"]).default("manual"),
+		autoMarginDb: z.number().finite().min(0).max(40).default(6),
+	}),
+)
+export type LiveDemodConfig = BaseLiveDemodConfig & {
+	squelchMode?: "manual" | "auto" | undefined
+	autoMarginDb?: number | undefined
+}
+export interface LiveAudioLevel {
+	sourceId: string
+	channelPowerDbfs: number | null
+	/** Lower-envelope estimate of channel power, not an RF calibration. */
+	noiseFloorDbfs: number | null
+	squelchOpen: boolean
+	thresholdDbfs: number
+}
 
 export interface LiveDemodStatus {
 	enabled: boolean
@@ -79,19 +96,33 @@ export interface LiveDemodStatus {
 	channelPowerDbfs?: number
 	/** Squelch gate state, while running (always true with squelch off). */
 	squelchOpen?: boolean
+	noiseFloorDbfs?: number
+	thresholdDbfs?: number
 	lastError?: string
 }
 
 export interface LiveDemodEvents {
+	level: (level: LiveAudioLevel) => void
+	"squelch-changed": (open: boolean) => void
 	started: () => void
 	stopped: () => void
 	error: (error: Error) => void
 	"config-changed": (config: LiveDemodConfig) => void
 	"client-connected": (clientId: string) => void
 	"client-disconnected": (clientId: string) => void
+	/**
+	 * Demodulated PCM, only while something is listening (WG2 req 7.6).
+	 * The chunk is the same buffer written to audio clients.
+	 */
+	pcm: (
+		chunk: Buffer,
+		format: { rate: number; format: "s16le" | "f32le" },
+	) => void
 }
 
 export interface LiveDemodulatorOptions {
+	/** Level publication frequency, integer 10–20 Hz (default 10). */
+	levelHz?: number
 	/** Borrowed shared protected policy/session/lease authority. */
 	httpAccess?: NodeHttpAccessOptions
 	/** Canonical configured public origin; never inferred from listener binding. */
@@ -119,15 +150,28 @@ interface PipelineRun {
 	sourceSampleRate: number
 	sourceFormat: SourceCaps["format"] | undefined
 	stream: StreamFormat
+	noiseFloorDbfs: number | null
 	stopping: boolean
 	failed: boolean
 }
+
+// Each measurement advances one 10 ms block of stream time.
+const LEVEL_BLOCK_SECONDS = 0.01
+/**
+ * Hang passed to ChannelSquelch. 250 ms is that class's default; it is set
+ * explicitly so `squelchHangMs()` reports the hang the gate actually uses.
+ */
+const SQUELCH_HANG_MS = 250
+const AUTO_FLOOR_CLOSED_RISE_DB_PER_SECOND = 1
+const AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND = 0.4
 
 /** Config keys that only affect Node-side behaviour (no CSDR restart). */
 const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"enabled",
 	"httpPort",
 	"squelch",
+	"squelchMode",
+	"autoMarginDb",
 	"iqDcBlock",
 ])
 
@@ -135,6 +179,7 @@ const DEFAULTS: Required<
 	Omit<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
 > &
 	Pick<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost"> = {
+	levelHz: 10,
 	restartBaseDelayMs: 1000,
 	restartMaxDelayMs: 30_000,
 	maxRestartAttempts: 10,
@@ -155,6 +200,14 @@ export class LiveDemodulator extends EventEmitter {
 		Omit<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
 	> &
 		Pick<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
+	private levelTimer: ReturnType<typeof setInterval> | null = null
+	private reportedSquelchOpen = false
+	/**
+	 * Set only while `stop()` or a transmission-closing `reconfigure()` is in
+	 * progress. `stopRun` emits `squelch-changed(false)` before `stopped` or
+	 * `config-changed`; the tracker reads this during that synchronous emit.
+	 */
+	private closeOverride: "stopped" | "config" | null = null
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
 	private readonly audio: AudioClientRegistry
@@ -172,6 +225,8 @@ export class LiveDemodulator extends EventEmitter {
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+	/** Reused pcm announcement so a listener does not allocate per chunk. */
+	private pcmFormat: { rate: number; format: "s16le" | "f32le" } | null = null
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
@@ -185,8 +240,9 @@ export class LiveDemodulator extends EventEmitter {
 		this.log = createComponentLogger(logger, "LiveDemodulator")
 		this.sourceManager = sourceManager
 		this.fanoutManager = fanoutManager
-		this.config = config
+		this.config = LiveDemodRuntimeConfigSchema.parse(config)
 		this.options = { ...DEFAULTS, ...options }
+		z.number().int().min(10).max(20).parse(this.options.levelHz)
 		this.audio = new AudioClientRegistry(this.log, {
 			stallTimeoutMs: this.options.clientStallTimeoutMs,
 			label: "Live audio",
@@ -264,23 +320,28 @@ export class LiveDemodulator extends EventEmitter {
 			return
 		}
 
-		this.clearRestartTimer()
-		this.unsubscribeFromSourceCapsChanges()
-		if (this.run) await this.stopRun(this.run)
-		this.pipelineHealth = "stopped"
-		this.detachBranch()
-		this.activeSourceId = null
-		this.audio.closeAll("stop", true)
-		await this.closeHttpServer()
-		// A failure that was still being cleaned up may have scheduled a restart.
-		this.clearRestartTimer()
+		this.closeOverride = "stopped"
+		try {
+			this.clearRestartTimer()
+			this.unsubscribeFromSourceCapsChanges()
+			if (this.run) await this.stopRun(this.run)
+			this.pipelineHealth = "stopped"
+			this.detachBranch()
+			this.activeSourceId = null
+			this.audio.closeAll("stop", true)
+			await this.closeHttpServer()
+			// A failure that was still being cleaned up may have scheduled a restart.
+			this.clearRestartTimer()
 
-		this.emit("stopped")
-		this.log.info("Live demodulator stopped")
+			this.emit("stopped")
+			this.log.info("Live demodulator stopped")
+		} finally {
+			this.closeOverride = null
+		}
 	}
 
 	async reconfigure(newConfig: Partial<LiveDemodConfig>): Promise<void> {
-		const validated = LiveDemodConfigSchema.parse({
+		const validated = LiveDemodRuntimeConfigSchema.parse({
 			...this.config,
 			...newConfig,
 		})
@@ -291,43 +352,78 @@ export class LiveDemodulator extends EventEmitter {
 				"Protected audio port changes require deployment reconfiguration",
 				"ACCESS_CONFIG_INVALID",
 			)
-		const sourceChanged = validated.sourceId !== previous.sourceId
+		// WG2 req 7.7 (WG1 n2): compare the resolved source, so an absent id and an explicit id
+		// that resolve to the same source neither restart nor close the transmission. Both absent
+		// keeps today's behaviour (no change).
+		const resolvedAfter = this.resolveSourceId(validated)
+		const resolvedBefore = this.activeSourceId ?? this.resolveSourceId(previous)
+		const sourceChanged =
+			validated.sourceId !== previous.sourceId &&
+			resolvedBefore !== resolvedAfter
 		const pipelineChanged = (
 			Object.keys(validated) as Array<keyof LiveDemodConfig>
-		).some(key => !NODE_ONLY_KEYS.has(key) && validated[key] !== previous[key])
+		).some(key => {
+			if (NODE_ONLY_KEYS.has(key)) return false
+			if (key === "sourceId") return sourceChanged
+			return validated[key] !== previous[key]
+		})
 		const active = this.http.listening || this.run !== null
 
 		// Validate the new source and RF plan before detaching the current stream.
 		if (sourceChanged || (active && pipelineChanged)) {
-			const sourceId = sourceChanged
-				? this.resolveSourceId(validated)
-				: this.activeSourceId
+			const sourceId = sourceChanged ? resolvedAfter : this.activeSourceId
 			if (!sourceId) throw this.noSourceError()
 			this.planFor(sourceId, validated)
 		}
 
 		this.config = validated
-		this.run?.squelch.setThreshold(validated.squelch)
+		// WG1 req 3.6: any change that restarts the pipeline, or changes one of
+		// the transmission identity fields, closes an open transmission as "config".
+		const restarting = active && (pipelineChanged || sourceChanged)
+		// The source side is `sourceChanged` (resolved before vs after); the helper compares
+		// the other identity fields only.
+		if (
+			restarting ||
+			sourceChanged ||
+			liveDemodTransmissionConfigChanged(
+				{ ...previous, sourceId: undefined },
+				{ ...validated, sourceId: undefined },
+			)
+		)
+			this.closeOverride = "config"
+		try {
+			if (this.run && validated.squelchMode !== previous.squelchMode)
+				this.run.noiseFloorDbfs = null
+			if (this.run) this.applySquelchThreshold(this.run)
+			this.publishSquelchChange()
 
-		if (sourceChanged && this.activeSourceId) {
-			this.detachBranch()
-			const sourceId = this.resolveSourceId()
-			if (sourceId) {
-				this.activeSourceId = sourceId
-				this.attachBranch(sourceId)
+			if (sourceChanged && this.activeSourceId) {
+				this.detachBranch()
+				const sourceId = this.resolveSourceId()
+				if (sourceId) {
+					this.activeSourceId = sourceId
+					this.attachBranch(sourceId)
+				}
 			}
-		}
 
-		if (active && (pipelineChanged || sourceChanged)) {
-			this.consecutiveFailures = 0
-			await this.restartPipeline("configuration changed")
-		}
+			// The hint covers only the synchronous teardown edge above (and the
+			// one stopRun emits before its first await). A transmission that
+			// opens on the replacement pipeline is a new squelch edge.
+			if (!restarting) this.closeOverride = null
 
-		if (portChanged && this.http.listening) {
-			await this.restartHttpServer()
-		}
+			if (restarting) {
+				this.consecutiveFailures = 0
+				await this.restartPipeline("configuration changed")
+			}
 
-		this.emit("config-changed", this.config)
+			if (portChanged && this.http.listening) {
+				await this.restartHttpServer()
+			}
+
+			this.emit("config-changed", this.config)
+		} finally {
+			this.closeOverride = null
+		}
 	}
 
 	getStatus(): LiveDemodStatus {
@@ -363,12 +459,133 @@ export class LiveDemodulator extends EventEmitter {
 		const run = this.run
 		if (run) {
 			status.squelchOpen = run.squelch.open
+			status.thresholdDbfs = this.effectiveThreshold(run)
+			if (run.noiseFloorDbfs !== null)
+				status.noiseFloorDbfs = run.noiseFloorDbfs
 			const power = run.squelch.powerDbfs
 			if (power !== null) status.channelPowerDbfs = Math.round(power * 10) / 10
 		}
 		if (this.lastError) status.lastError = this.lastError
 
 		return status
+	}
+
+	/** Scanner activity adapter: running gate only; stopped/failed is closed. */
+	isSquelchOpen(): boolean {
+		return this.run !== null && !this.run.stopping && this.run.squelch.open
+	}
+
+	/** Channel-squelch hang in use, in milliseconds. */
+	squelchHangMs(): number {
+		return SQUELCH_HANG_MS
+	}
+
+	/**
+	 * When a `squelch-changed(false)` is the pipeline being torn down by
+	 * `stop()` or by a config change that ends a transmission, the close
+	 * reason that teardown stands for. Null on a real gate close.
+	 */
+	transmissionCloseOverride(): "stopped" | "config" | null {
+		return this.closeOverride
+	}
+
+	private publishSquelchChange(): void {
+		const open = this.isSquelchOpen()
+		if (open === this.reportedSquelchOpen) return
+		this.reportedSquelchOpen = open
+		this.emit("squelch-changed", open)
+	}
+
+	private effectiveThreshold(run: PipelineRun): number {
+		if (this.config.squelchMode !== "auto") return this.config.squelch
+		return Math.min(
+			-0.001,
+			Math.max(
+				-160,
+				(run.noiseFloorDbfs ?? -0.001) + (this.config.autoMarginDb ?? 6),
+			),
+		)
+	}
+
+	private applySquelchThreshold(run: PipelineRun): void {
+		run.squelch.setThreshold(this.effectiveThreshold(run))
+	}
+
+	private measureRun(run: PipelineRun): void {
+		if (this.run !== run || run.stopping) return
+		const power = run.squelch.powerDbfs
+		if (power !== null) {
+			// Constant-memory lower envelope: falls are immediate; a slower open
+			// rise preserves calls but eventually recovers from sustained noise steps.
+			if (run.noiseFloorDbfs === null || power < run.noiseFloorDbfs)
+				run.noiseFloorDbfs = power
+			else {
+				const riseRate = run.squelch.open
+					? AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND
+					: AUTO_FLOOR_CLOSED_RISE_DB_PER_SECOND
+				run.noiseFloorDbfs = Math.min(
+					power,
+					run.noiseFloorDbfs + riseRate * LEVEL_BLOCK_SECONDS,
+				)
+			}
+		}
+		this.applySquelchThreshold(run)
+		this.publishSquelchChange()
+	}
+
+	private measuredSquelchStream(
+		squelch: ChannelSquelch,
+		sampleRate: number,
+		measured: () => void,
+	): Transform {
+		const blockBytes = Math.max(1, Math.round(sampleRate * 0.01)) * 8
+		let remainder = Buffer.alloc(0)
+		return new Transform({
+			transform(chunk: Buffer, _encoding, callback) {
+				const data = remainder.length
+					? Buffer.concat([remainder, chunk])
+					: chunk
+				let offset = 0
+				while (data.length - offset >= blockBytes) {
+					const output = squelch.process(
+						data.subarray(offset, offset + blockBytes),
+					)
+					offset += blockBytes
+					measured()
+					for (const block of output) this.push(block)
+				}
+				remainder = Buffer.from(data.subarray(offset))
+				callback()
+			},
+			flush(callback) {
+				for (const block of squelch.process(remainder)) this.push(block)
+				for (const block of squelch.flush()) this.push(block)
+				remainder = Buffer.alloc(0)
+				callback()
+			},
+		})
+	}
+
+	private startLevelPublishing(): void {
+		this.stopLevelPublishing()
+		this.levelTimer = setInterval(() => {
+			const run = this.run
+			if (!run || run.stopping) return
+			const level: LiveAudioLevel = {
+				sourceId: this.activeSourceId ?? "",
+				channelPowerDbfs: run.squelch.powerDbfs,
+				noiseFloorDbfs: run.noiseFloorDbfs,
+				squelchOpen: run.squelch.open,
+				thresholdDbfs: this.effectiveThreshold(run),
+			}
+			this.emit("level", level)
+		}, 1000 / this.options.levelHz)
+		this.levelTimer.unref()
+	}
+
+	private stopLevelPublishing(): void {
+		if (this.levelTimer) clearInterval(this.levelTimer)
+		this.levelTimer = null
 	}
 
 	private noSourceError(): WaveKitError {
@@ -440,6 +657,8 @@ export class LiveDemodulator extends EventEmitter {
 
 		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
 			if (sourceId !== this.activeSourceId) return
+			// Retunes can retain the DSP pipeline but invalidate its floor estimate.
+			if (this.run) this.run.noiseFloorDbfs = null
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
@@ -607,13 +826,20 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		const squelch = new ChannelSquelch({
 			sampleRate: plan.channelSampleRate,
-			thresholdDbfs: this.config.squelch,
+			thresholdDbfs:
+				this.config.squelchMode === "auto" ? -0.001 : this.config.squelch,
+			hangMs: SQUELCH_HANG_MS,
 		})
 		const run: PipelineRun = {
 			front: this.spawnStage(plan.front),
 			back: this.spawnStage(plan.back),
 			squelch,
-			squelchStream: createChannelSquelchTransform(squelch),
+			squelchStream: this.measuredSquelchStream(
+				squelch,
+				plan.channelSampleRate,
+				() => this.measureRun(run),
+			),
+			noiseFloorDbfs: null,
 			startedAt: Date.now(),
 			sourceSampleRate: caps.sampleRate,
 			sourceFormat: caps.format,
@@ -626,6 +852,8 @@ export class LiveDemodulator extends EventEmitter {
 
 		this.wireRun(run)
 		this.pipelineHealth = "running"
+		this.startLevelPublishing()
+		this.publishSquelchChange()
 	}
 
 	private spawnStage(command: string): ChildProcess {
@@ -681,6 +909,8 @@ export class LiveDemodulator extends EventEmitter {
 		if (this.run !== run || run.stopping || run.failed) return
 		run.failed = true
 		this.run = null
+		this.stopLevelPublishing()
+		this.publishSquelchChange()
 		this.pipelineHealth = "error"
 		this.lastError = reason
 		this.log.error({ reason }, "Live demodulation pipeline failed")
@@ -745,7 +975,10 @@ export class LiveDemodulator extends EventEmitter {
 	private async restartPipeline(reason: string): Promise<void> {
 		this.clearRestartTimer()
 		this.log.info({ reason }, "Restarting live demodulation pipeline")
-		if (this.run) await this.stopRun(this.run)
+		const stopping = this.run ? this.stopRun(this.run) : null
+		// stopRun emits squelch-changed(false) before it waits on the processes.
+		this.closeOverride = null
+		if (stopping) await stopping
 		await this.startPipeline()
 		const stream = this.plannedStream()
 		this.audio.closeWhere(
@@ -763,7 +996,11 @@ export class LiveDemodulator extends EventEmitter {
 	 */
 	private async stopRun(run: PipelineRun): Promise<void> {
 		run.stopping = true
-		if (this.run === run) this.run = null
+		if (this.run === run) {
+			this.run = null
+			this.stopLevelPublishing()
+			this.publishSquelchChange()
+		}
 		if (this.branchStream && run.front.stdin) {
 			this.branchStream.unpipe(run.front.stdin)
 		}
@@ -859,5 +1096,17 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		this.audio.write(chunk)
+		if (this.listenerCount("pcm") === 0) return
+		const stream = this.run?.stream ?? this.plannedStream()
+		let announced = this.pcmFormat
+		if (
+			announced === null ||
+			announced.rate !== stream.rate ||
+			announced.format !== stream.format
+		) {
+			announced = { rate: stream.rate, format: stream.format }
+			this.pcmFormat = announced
+		}
+		this.emit("pcm", chunk, announced)
 	}
 }

@@ -364,7 +364,18 @@ export class TunerArbiter extends EventEmitter {
 			gainTenthsDb: number | null
 			sampleRateHz: number | null
 		},
+		allowed?: () => boolean,
 	): Promise<PendingEpoch> {
+		// Once a command starts, finish the retune; activity cannot leave a partial tuning.
+		let writesStarted = false
+		const guard = () => {
+			if (!writesStarted && allowed && !allowed())
+				throw new WaveKitError(
+					"Automatic resume held by activity",
+					"SCANNER_RESUME_HELD",
+				)
+		}
+		guard()
 		this.assertHeld(lease)
 		const { sourceId } = lease
 		const clock = this.deps.epochs(sourceId)
@@ -384,8 +395,10 @@ export class TunerArbiter extends EventEmitter {
 		) {
 			await this.markChanged(lease, ["sampleRate"])
 			this.assertHeld(lease)
+			guard()
 			clock.suppressExternal(true)
 			try {
+				writesStarted = true
 				await this.deps.tuner.setSampleRate(sourceId, target.sampleRateHz, opts)
 			} catch (err) {
 				throw new WaveKitError(
@@ -419,6 +432,7 @@ export class TunerArbiter extends EventEmitter {
 			)
 		await this.markChanged(lease, changing)
 		this.assertHeld(lease)
+		guard()
 		// The engine restarts the stream on a rate change and drops this hop's epoch, so no
 		// marker would ever be expected for it: the hop runs unbracketed.
 		const markers =
@@ -449,19 +463,25 @@ export class TunerArbiter extends EventEmitter {
 		try {
 			if (markers) {
 				this.markerOpen.add(sourceId)
+				guard()
+				writesStarted = true
 				await this.deps.tuner.setTestMode(sourceId, true, {
 					origin: "scanner",
 					accept: false,
 				})
 				this.assertHeld(lease)
 			}
+			guard()
+			writesStarted = true
 			await this.deps.tuner.setFrequency(sourceId, target.centreHz, opts)
 			if (gainChange && target.gainTenthsDb !== null) {
 				this.assertHeld(lease)
 				if (needsGainMode) {
+					guard()
 					await this.deps.tuner.setGainMode(sourceId, "manual", opts)
 					this.assertHeld(lease)
 				}
+				guard()
 				await this.deps.tuner.setGain(sourceId, target.gainTenthsDb, opts)
 			}
 		} catch (err) {
@@ -473,7 +493,8 @@ export class TunerArbiter extends EventEmitter {
 		if (failure !== null) {
 			if (
 				failure instanceof WaveKitError &&
-				failure.code === "SCANNER_LEASE_LOST"
+				(failure.code === "SCANNER_LEASE_LOST" ||
+					failure.code === "SCANNER_RESUME_HELD")
 			)
 				throw failure
 			throw new WaveKitError(

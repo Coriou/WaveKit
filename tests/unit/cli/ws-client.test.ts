@@ -99,6 +99,38 @@ describe("ws client", () => {
 			"ws",
 		])
 	})
+	it("ignores frames on a channel it does not know (WG3 req 9.2)", () => {
+		const { client, sockets, emitted } = harness()
+		client.start()
+		const s = sockets[0]!
+		const before = emitted.length
+		for (const frame of [
+			{ type: "mesh:update", channel: "mesh", data: { nodeId: "!1" } },
+			{ type: "aprs:new", channel: "aprs", data: {} },
+			{ type: "coverage:whatever", channel: "coverage", data: {} },
+			{ type: "error", channel: "mesh", data: { message: "nope" } },
+		])
+			s.h.message(JSON.stringify(frame))
+		expect(emitted.slice(before)).toEqual([])
+		// Known channels and channel-less frames keep their checks.
+		s.h.message(JSON.stringify({ type: "who-knows", channel: "decoders" }))
+		s.h.message(JSON.stringify({ type: "who-knows", channel: 7 }))
+		s.h.message(JSON.stringify({ type: "who-knows" }))
+		s.h.message(
+			JSON.stringify({
+				type: "decoder:started",
+				channel: "decoders",
+				data: { decoderId: "readsb" },
+			}),
+		)
+		expect(emitted.slice(before).map(e => e.kind)).toEqual([
+			"ws:invalid",
+			"ws:invalid",
+			"ws:invalid",
+			"ws",
+		])
+	})
+
 	it("backs off after close and resets after a successful subscribe", () => {
 		const { client, sockets, emitted, fire } = harness()
 		client.start()

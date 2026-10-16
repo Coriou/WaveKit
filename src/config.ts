@@ -1,3 +1,8 @@
+import type {
+	StationIdentity,
+	StationProvenance,
+	BandRegion,
+} from "@wavekit/api-types"
 import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
@@ -223,6 +228,9 @@ export const LiveDemodConfigSchema = z
 		 * demodulation (|IQ| = 1 is 0 dBFS). 0 disables squelch (open).
 		 */
 		squelch: z.number().min(-160).max(0).default(0),
+		/** manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`. */
+		squelchMode: z.enum(["manual", "auto"]).optional(),
+		autoMarginDb: z.number().finite().min(0).max(40).optional(),
 		noiseReduction: z
 			.enum(["off", "voice", "noaa-apt", "narrow-band"])
 			.default("off"),
@@ -535,10 +543,99 @@ export function sourceScannerConfig(
 	return source.scanner ?? { role: "shared", passive: true }
 }
 
+/** ISO 3166-1 assigned alpha-2 codes; reserved/user-assigned codes are rejected. */
+const stationCountries = new Set(
+	"AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW".split(
+		" ",
+	),
+)
+export const StationConfigSchema = z
+	.object({
+		name: z.string().trim().min(1).max(256).optional(),
+		lat: z.number().finite().min(-90).max(90).optional(),
+		lon: z.number().finite().min(-180).max(180).optional(),
+		altM: z.number().finite().optional(),
+		callsign: z.string().trim().min(1).max(128).optional(),
+		country: z
+			.string()
+			.regex(/^[A-Z]{2}$/)
+			.refine(value => stationCountries.has(value))
+			.optional(),
+	})
+	.strict()
+
+/** Operator ceilings. The bounded defaults (250 000 rows, 256 MiB, 3 days, 50/s) sit inside. */
+const ACTIVITY_MAX_ROWS = 1_000_000_000
+const ACTIVITY_MIN_DB_BYTES = 16 * 1024 * 1024
+const ACTIVITY_MAX_DB_BYTES = 16 * 1024 * 1024 * 1024 * 1024
+const ACTIVITY_MAX_AGE_MS = 10 * 366 * 24 * 60 * 60 * 1000
+const ACTIVITY_MAX_GLOBAL_PER_SECOND = 1_000_000
+const ACTIVITY_MAX_GLOBAL_BURST = 10_000_000
+const ACTIVITY_MAX_DECODER_PER_SECOND = 100_000
+const ACTIVITY_MAX_DECODER_BURST = 1_000_000
+
+export const ActivityRetentionConfigSchema = z
+	.object({
+		maxRows: z.number().int().min(1000).max(ACTIVITY_MAX_ROWS).optional(),
+		maxDbBytes: z
+			.number()
+			.int()
+			.min(ACTIVITY_MIN_DB_BYTES)
+			.max(ACTIVITY_MAX_DB_BYTES)
+			.optional(),
+		maxAgeMs: z.number().int().positive().max(ACTIVITY_MAX_AGE_MS).optional(),
+		/**
+		 * Which rows the row and byte caps remove (web-gaps-3 req 1.1). Omitted keeps the
+		 * store default (`fair-share`). Age pruning is the same under both.
+		 */
+		policy: z.enum(["fair-share", "oldest-first"]).optional(),
+	})
+	.strict()
+
+export const ActivityAdmissionConfigSchema = z
+	.object({
+		globalPerSecond: z
+			.number()
+			.int()
+			.positive()
+			.max(ACTIVITY_MAX_GLOBAL_PER_SECOND)
+			.optional(),
+		globalBurst: z
+			.number()
+			.int()
+			.positive()
+			.max(ACTIVITY_MAX_GLOBAL_BURST)
+			.optional(),
+		perDecoderPerSecond: z
+			.number()
+			.int()
+			.positive()
+			.max(ACTIVITY_MAX_DECODER_PER_SECOND)
+			.optional(),
+		perDecoderBurst: z
+			.number()
+			.int()
+			.positive()
+			.max(ACTIVITY_MAX_DECODER_BURST)
+			.optional(),
+	})
+	.strict()
+
 /**
- * Main configuration schema for WaveKit.
- * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
+ * Persistent activity store. On by default with bounded limits; an explicit
+ * `enabled: false` means no database file and no worker. Retention and
+ * admission stay unset here: every omitted field resolves to
+ * ACTIVITY_LIMIT_DEFAULTS in the store.
  */
+export const ActivityConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		retention: ActivityRetentionConfigSchema.optional(),
+		admission: ActivityAdmissionConfigSchema.optional(),
+	})
+	.strict()
+
+/** Main configuration schema (Requirements: 12.5, 15.4, 17.1–17.4). */
 export const ConfigSchema = z
 	.object({
 		sources: z.array(SourceConfigSchema).default([]),
@@ -562,6 +659,12 @@ export const ConfigSchema = z
 		 * case-insensitive). Absent: guessed from TZ / locale, else EU.
 		 */
 		region: RegionSchema.optional(),
+		station: StationConfigSchema.default({}),
+		/**
+		 * Persistent activity store under stateDir. On by default with bounded
+		 * retention and admission; `activity: { enabled: false }` turns it off.
+		 */
+		activity: ActivityConfigSchema.default({}),
 		/**
 		 * Directory for runtime state (API band overrides). Relative paths
 		 * resolve against the process working directory.
@@ -654,6 +757,13 @@ export type CsdrConfig = z.infer<typeof CsdrConfigSchema>
 export type ChannelizerConfig = z.infer<typeof ChannelizerConfigSchema>
 export type SourceScannerConfig = z.infer<typeof SourceScannerConfigSchema>
 export type ScannerConfig = z.infer<typeof ScannerConfigSchema>
+export type ActivityRetentionConfig = z.infer<
+	typeof ActivityRetentionConfigSchema
+>
+export type ActivityAdmissionConfig = z.infer<
+	typeof ActivityAdmissionConfigSchema
+>
+export type ActivityConfig = z.infer<typeof ActivityConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================
@@ -690,7 +800,9 @@ const LEGACY_ENV_MAPPINGS: Record<
 	WAVEKIT_LOG_LEVEL: { path: ["logging", "level"], type: "string" },
 	WAVEKIT_LOG_DIR: { path: ["logging", "dir"], type: "string" },
 	WAVEKIT_REGION: { path: ["region"], type: "string" },
+	WAVEKIT_COUNTRY: { path: ["station", "country"], type: "string" },
 	WAVEKIT_STATE_DIR: { path: ["stateDir"], type: "string" },
+	WAVEKIT_ACTIVITY__ENABLED: { path: ["activity", "enabled"], type: "boolean" },
 }
 
 /**
@@ -829,7 +941,13 @@ export function parseEnvironmentVariables(): Record<string, unknown> {
 				// Use new double-underscore format for nested keys
 				try {
 					const path = envVarToConfigPath(key)
-					const parsedValue = parseEnvValue(value)
+					const parsedValue = parseEnvValue(
+						value,
+						key.startsWith("WAVEKIT_STATION__") &&
+							["name", "callsign", "country"].includes(path[1] ?? "")
+							? "string"
+							: undefined,
+					)
 					setNestedValue(result, path, parsedValue)
 				} catch {
 					// Skip invalid env values - validation will catch them later
@@ -838,6 +956,9 @@ export function parseEnvironmentVariables(): Record<string, unknown> {
 		}
 	}
 
+	const country = process.env["WAVEKIT_COUNTRY"]
+	if (country !== undefined)
+		setNestedValue(result, ["station", "country"], country)
 	return result
 }
 
@@ -1097,6 +1218,18 @@ export function loadConfig(configPath?: string): Config {
 		throw new ConfigValidationError(result.error)
 	}
 
+	const env = parseEnvironmentVariables()["station"]
+	const provenance: Partial<
+		Record<keyof Config["station"], StationProvenance>
+	> = {}
+	for (const key of stationKeys) {
+		if (result.data.station[key] !== undefined)
+			provenance[key] =
+				env !== null && typeof env === "object" && Object.hasOwn(env, key)
+					? "env"
+					: "yaml"
+	}
+	stationOrigins.set(result.data, provenance)
 	return result.data
 }
 
@@ -1156,6 +1289,12 @@ export function validateConfigSafe(config: unknown): {
 export function getSupportedEnvVars(): string[] {
 	const legacyVars = Object.keys(LEGACY_ENV_MAPPINGS)
 	const nestedExamples = [
+		"WAVEKIT_STATION__NAME",
+		"WAVEKIT_STATION__LAT",
+		"WAVEKIT_STATION__LON",
+		"WAVEKIT_STATION__ALT_M",
+		"WAVEKIT_STATION__CALLSIGN",
+		"WAVEKIT_STATION__COUNTRY",
 		"WAVEKIT_API__HOST",
 		"WAVEKIT_API__PORT",
 		"WAVEKIT_AUDIO__TCP_PORT",
@@ -1179,6 +1318,50 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_SCANNER__MAX_PROBES__OFFSET",
 		"WAVEKIT_SCANNER__STORAGE__DIR",
 		"WAVEKIT_SOURCES__<INDEX>__SCANNER__ROLE",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES",
+		"WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS",
+		"WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND",
+		"WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST",
+		"WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND",
+		"WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_BURST",
 	]
 	return ["WAVEKIT_CONFIG", ...legacyVars, ...nestedExamples]
+}
+
+const stationKeys = [
+	"name",
+	"lat",
+	"lon",
+	"altM",
+	"callsign",
+	"country",
+] as const
+const stationOrigins = new WeakMap<
+	Config,
+	Partial<Record<keyof Config["station"], StationProvenance>>
+>()
+
+/** Snapshot provenance at load time; subsequent process.env mutations cannot change it. */
+export function stationIdentity(
+	config: Config,
+	region: BandRegion,
+): StationIdentity {
+	const origins = stationOrigins.get(config)
+	function field<K extends keyof Config["station"]>(key: K) {
+		const provenance: StationProvenance =
+			origins?.[key] ?? (config.station[key] === undefined ? "default" : "yaml")
+		return { value: config.station[key] ?? null, provenance }
+	}
+
+	return {
+		name: field("name"),
+		lat: field("lat"),
+		lon: field("lon"),
+		altM: field("altM"),
+		callsign: field("callsign"),
+		country: field("country"),
+		effectiveCountry: config.station.country ?? null,
+		region,
+	}
 }

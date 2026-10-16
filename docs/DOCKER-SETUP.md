@@ -37,8 +37,8 @@ expects rtl_tcp or SDR++ to already be listening, locally or remotely.
 
 ## Container integration via compose profiles
 
-One file: `compose.yaml` at the repo root. Four profiles, mutually
-exclusive.
+One file: `compose.yaml` at the repo root. Five profiles, mutually
+exclusive. `protected` is the opt-in TLS reference deployment.
 
 | Profile             | Services                                  | Purpose                                           |
 | ------------------- | ----------------------------------------- | ------------------------------------------------- |
@@ -46,6 +46,7 @@ exclusive.
 | `prod-single-host`  | `wavekit-full`                            | Single-container production (e.g. Raspberry Pi)   |
 | `prod-distributed`  | `wavekit-sdrpp-prod` + `wavekit-core-prod`| Two-host production: dedicated SDR host + core    |
 | `demod-test`        | `demod-test`                              | Interactive shell with decoder + audio tooling    |
+| `protected`         | `wavekit-protected` + `wavekit-protected-caddy` | Opt-in protected mode behind Caddy TLS ([reference](#protected-reference-profile)) |
 
 ### dev profile
 
@@ -276,6 +277,7 @@ Common runtime env vars consumed by the wavekit-api container:
 | `NODE_ENV`                       | -       | `development` or `production`          |
 | `WAVEKIT_REGION`                 | guessed | Band plan region (EU, US, CA, AU, NZ, JP, CN) |
 | `WAVEKIT_STATE_DIR`              | data    | Runtime state directory (`/app/data` in compose) |
+| `WAVEKIT_ACTIVITY__ENABLED`      | false   | Persistent activity store (Node 24 and SQLite FTS5) |
 
 YAML config under `config/` is the canonical source of truth; env vars
 override per-key via the `WAVEKIT_` prefix with `__` as nested separator
@@ -290,9 +292,13 @@ band overrides from `PUT /api/decoders/:id/band`, file
 so overrides survive a container restart (`data/` is git-ignored). If the
 directory is missing or not writable (read-only mount, permissions), core keeps
 running: overrides apply in memory only, a warning is logged and
-`GET /api/decoders/:id/band` reports `persisted: false`. Inside a container
-without `TZ` or a locale, the region guess falls back to `EU`; set
-`WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
+`GET /api/decoders/:id/band` reports `persisted: false`. When
+`activity.enabled` is true, the same directory holds `activity/activity.db`.
+Activity stays off unless that flag is set. Opening the store needs Node 24
+with SQLite FTS5; a failed open leaves the API up and the activity routes
+answer 503. This batch does not re-verify the image's Node base for that
+builtin. Inside a container without `TZ` or a locale, the region guess falls
+back to `EU`; set `WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
 
 ## Health checks
 
@@ -352,8 +358,9 @@ backend binding and approved Host rather than assuming a localhost default.
 Protected mode disables raw audio TCP and RTL-TCP relay startup. This does not
 establish container/network exposure acceptance: inspect published ports, proxy
 Host preservation, direct backend reachability and private-volume writer scope
-in the real deployment. No protected compose profile or new port publication is
-provided by this runtime change.
+in the real deployment. The opt-in reference profile below publishes three TLS
+ports and leaves the raw audio and relay ports unpublished. Its checklist is a
+static audit; a running stack is still required before exposure is accepted.
 
 Shutdown seals admissions, closes owned streams, waits for actual startup and
 accepted persistence/transport cleanup, then releases private access ownership.
@@ -367,3 +374,212 @@ Trusted shell delivery of the internal bootstrap, credentialed analog/digital
 playback, revocation/recovery and the connected spectrum → tune → identify →
 inspect → listen milestone require external acceptance before protected mode is
 advertised as client-ready.
+
+### Protected reference profile
+
+Opt-in Compose profile `protected`. It is separate from the dev and prod
+profiles above: `docker compose --profile protected` starts only this pair.
+Static files are [compose.yaml](../compose.yaml) (`wavekit-protected` and
+`wavekit-protected-caddy`), [docker/caddy/Caddyfile](../docker/caddy/Caddyfile),
+[docker/caddy/export-trust.sh](../docker/caddy/export-trust.sh) and
+[docker/caddy/protected-runtime.yaml](../docker/caddy/protected-runtime.yaml).
+
+```bash
+docker compose -f compose.yaml --profile protected config
+```
+
+That command parses the profile. It does not build, pull or start containers.
+
+`WAVEKIT_PUBLIC_HOST` is one DNS hostname, with no scheme and no port. The
+default is `receiver.example`. Compose substitutes it into the access
+environment, the Caddyfile and the container hosts entry. The runtime file
+holds the same public mapping as the
+[API opt-in example](API.md#protected-runtime-opt-in), with
+`listenerScheme: https` and `exposure: tls-termination`. Its host arrays are
+the slots those environment overrides update; leave the arrays in place when
+you change the hostname.
+
+| Public origin | Published TLS | Loopback upstream |
+| --- | --- | --- |
+| API and WebSocket `https://<host>:9443` | `9443` | `127.0.0.1:9000` |
+| Analog audio `https://<host>:9444` | `9444` | `127.0.0.1:8081` |
+| Digital audio `https://<host>:9445` | `9445` | `127.0.0.1:8082` |
+
+Caddy uses `network_mode: service:wavekit-protected`, so the three TLS ports
+are published on `wavekit-protected`. Caddy binds `0.0.0.0` in that namespace,
+terminates TLS with its local CA (`tls internal`) and proxies each site to the
+loopback upstream. Each site sets `Host` from the incoming host and port
+(`{http.request.hostport}`). WebSocket upgrades pass through `reverse_proxy`.
+The core image is the existing `final-core` build (`WAVEKIT_APP_IMAGE`,
+default `wavekit:local-core`). The sidecar image is `caddy:2`.
+
+Behind this proxy, per-address limits collapse to one shared loopback bucket.
+Caddy dials `127.0.0.1` in the shared network namespace, and the core ignores
+forwarded headers, so every LAN client shares that bucket.
+A trusted-proxy address source is a task 14 question. This profile does not
+add one.
+
+The core healthcheck runs the image copy of `docker/scripts/healthcheck.sh`
+(`/etc/s6-overlay/scripts/healthcheck.sh`) with the probe environment from
+this section. For the default host that is:
+
+```text
+WAVEKIT_ACCESS__MODE=protected
+WAVEKIT_ACCESS__HEALTH_PROBE__TARGET=http://127.0.0.1:9000
+WAVEKIT_ACCESS__HEALTH_PROBE__HOST=receiver.example:9443
+```
+
+`WAVEKIT_ACCESS__HEALTH_PROBE__HOST` follows `WAVEKIT_PUBLIC_HOST` and port
+`9443`. The probe target stays the loopback API origin.
+
+The reference configures no receiver and no decoders. The API binds
+`127.0.0.1:9000` at startup. Analog HTTP binds `127.0.0.1:8081` when live
+demod is enabled and a source is configured. Digital HTTP binds
+`127.0.0.1:8082` when a dsd-fme decoder streams voice. The TLS sites are
+published either way. Protected mode does not start raw audio TCP (configured
+port `8080`) or the RTL-TCP relay, and neither port is published.
+
+Private access state is the named volume `wavekit-protected-access`, mounted
+only on `wavekit-protected` at `/var/lib/wavekit/access`
+(`WAVEKIT_ACCESS_PRIVATE_DIRECTORY`). Caddy does not mount it. The Caddy data
+volume `wavekit-protected-caddy` is mounted only on the sidecar, writable, at
+`/data`. Treat that volume as CA key material: Caddy's local CA keeps
+`root.key` and `intermediate.key` there beside `root.crt`. The core does not
+mount it, and no private key is placed on a core-visible path.
+
+The sidecar entrypoint `docker/caddy/export-trust.sh` runs Caddy and copies
+only `root.crt` into the named volume `wavekit-protected-trust` (sidecar path
+`/trust/root.crt`). The core mounts that volume read-only at `/caddy-trust`.
+Runtime state (`WAVEKIT_STATE_DIR`) uses `wavekit-protected-state`, mounted at
+`/app/data`.
+
+Provision the private volume while the core is stopped, before the first
+start. The one-off replaces the image entrypoint so s6 does not start, and
+`--no-deps` leaves Caddy stopped. `chmod 700` matches the provisioning
+permission check on a fresh volume mount:
+
+```bash
+docker compose -f compose.yaml --profile protected run --rm --no-deps \
+  --entrypoint sh wavekit-protected -c \
+  'chmod 700 /var/lib/wavekit/access && exec node /app/dist/access-command.js setup --private-directory /var/lib/wavekit/access --ownership single-host-pid-namespace --api-origin "https://${WAVEKIT_PUBLIC_HOST}:9443" --allow-origin "https://${WAVEKIT_PUBLIC_HOST}:9443" --external-audio-origin "https://${WAVEKIT_PUBLIC_HOST}:9444" --external-audio-origin "https://${WAVEKIT_PUBLIC_HOST}:9445"'
+```
+
+Setup prints a public access plan. It does not print the machine credential.
+Run setup again only while the core is stopped.
+
+Starting the profile, installing the CA and pairing in a browser are
+deployment acceptance (task 14). The operator commands are:
+
+```bash
+docker compose -f compose.yaml --profile protected up -d
+```
+
+Recreate the core and the sidecar together after replacing the core
+container, so Caddy stays attached to the core network namespace.
+
+After the sidecar has created the local CA, read the public root from the
+trust volume. That file is the certificate only:
+
+```bash
+docker compose -f compose.yaml --profile protected exec wavekit-protected \
+  cat /caddy-trust/root.crt > wavekit-caddy-root.crt
+```
+
+Install that file as a trusted root on each LAN client. macOS system
+keychain:
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain wavekit-caddy-root.crt
+```
+
+Debian and Ubuntu: copy it to
+`/usr/local/share/ca-certificates/wavekit-caddy-root.crt` and run
+`sudo update-ca-certificates`. Windows: import it into Trusted Root
+Certification Authorities. Firefox uses its own store and needs a separate
+import. Point client DNS, or the client hosts file, at the Docker host for
+`WAVEKIT_PUBLIC_HOST`. The container hosts entry maps that name to
+`127.0.0.1` so in-container pairing reaches Caddy. LAN clients use the Docker
+host's address, not the container loopback.
+
+The browser shell's canonical API origin is `https://<host>:9443`. It takes
+WebSocket and audio origins from `GET /api/access/bootstrap` on that origin.
+
+Issue a pairing code while the core is running and `/caddy-trust/root.crt`
+exists. If it is missing, check `docker compose logs wavekit-protected-caddy`;
+the sidecar logs when it publishes the file or cannot write it. The code is
+one-time, for the browser shell, and is not a reusable API credential. The
+machine credential stays in the private volume; these commands pass it to the
+API and do not print it:
+
+```bash
+docker compose -f compose.yaml --profile protected exec \
+  -e NODE_EXTRA_CA_CERTS=/caddy-trust/root.crt \
+  wavekit-protected \
+  sh -c 'exec node /app/dist/access-command.js pair --private-directory /var/lib/wavekit/access --api-origin "https://${WAVEKIT_PUBLIC_HOST}:9443"'
+```
+
+The same exec and CA file list, revoke, or revoke every remembered browser.
+`revoke-all` requires `--yes`:
+
+```bash
+docker compose -f compose.yaml --profile protected exec \
+  -e NODE_EXTRA_CA_CERTS=/caddy-trust/root.crt \
+  wavekit-protected \
+  sh -c 'exec node /app/dist/access-command.js devices list --private-directory /var/lib/wavekit/access --api-origin "https://${WAVEKIT_PUBLIC_HOST}:9443"'
+
+docker compose -f compose.yaml --profile protected exec \
+  -e NODE_EXTRA_CA_CERTS=/caddy-trust/root.crt \
+  wavekit-protected \
+  sh -c 'exec node /app/dist/access-command.js devices revoke DEVICE_ID --private-directory /var/lib/wavekit/access --api-origin "https://${WAVEKIT_PUBLIC_HOST}:9443"'
+
+docker compose -f compose.yaml --profile protected exec \
+  -e NODE_EXTRA_CA_CERTS=/caddy-trust/root.crt \
+  wavekit-protected \
+  sh -c 'exec node /app/dist/access-command.js devices revoke-all --yes --private-directory /var/lib/wavekit/access --api-origin "https://${WAVEKIT_PUBLIC_HOST}:9443"'
+```
+
+Rotate the machine credential while the core is stopped, with the same
+one-off shape as setup. By default, rotation removes remembered browser
+sessions and the command says they were removed. `--keep-sessions` keeps
+them; the command then says they were kept and to review `devices list`
+after the core is started again. Restart the core before using the new
+credential.
+
+```bash
+docker compose -f compose.yaml --profile protected run --rm --no-deps \
+  --entrypoint sh wavekit-protected -c \
+  'exec node /app/dist/access-command.js rotate-credential --private-directory /var/lib/wavekit/access'
+
+docker compose -f compose.yaml --profile protected run --rm --no-deps \
+  --entrypoint sh wavekit-protected -c \
+  'exec node /app/dist/access-command.js rotate-credential --private-directory /var/lib/wavekit/access --keep-sessions'
+```
+
+Exposure audit checklist for this profile. The static items are visible in
+`docker compose -f compose.yaml --profile protected config` and the files
+linked above. Live reachability stays with deployment acceptance.
+
+1. Published ports on `wavekit-protected` are `9443`, `9444` and `9445`.
+   Container ports `8080` (raw audio TCP), `9000`, `8081`, `8082`, relay
+   `1234` and `4713`, and SDR++ `5259` are not published. The sidecar
+   publishes no ports of its own.
+2. Direct backend. `WAVEKIT_API__HOST` and both audio `bindHost` values are
+   `127.0.0.1`. The backend ports are unpublished, so the Docker host cannot
+   open them. The loopback bind keeps other compose services from opening
+   them too. Caddy dials them on loopback inside the shared network namespace.
+3. Host preservation. Each Caddy site contains
+   `header_up Host {http.request.hostport}` and `tls internal`. The Caddyfile
+   has no `trusted_proxies` entry. Forwarded headers do not select the scheme
+   or the listener role. Per-address limits are one shared loopback bucket,
+   because every client is seen as `127.0.0.1`.
+   A trusted-proxy address source is a task 14 question. This profile does
+   not add one.
+4. Private-volume writers. `wavekit-protected-access` is mounted only by
+   `wavekit-protected`, at the absolute `WAVEKIT_ACCESS_PRIVATE_DIRECTORY`.
+   The sidecar does not mount it. Setup is a one-off of that same service
+   while the core is stopped. Keep the volume off host bind mounts and off
+   any other service.
+5. CA key material. `wavekit-protected-caddy` is mounted only by the sidecar
+   at `/data`. The core mounts `wavekit-protected-trust` read-only at
+   `/caddy-trust`, which receives `root.crt` and no private key.

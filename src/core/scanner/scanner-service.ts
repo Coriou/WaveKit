@@ -1,3 +1,16 @@
+import { protocolsForFrequency } from "./plan/protocols.js"
+import { applyRangePatch } from "./plan/range-edits.js"
+import {
+	isRangeEnabled,
+	type ScanRangeLive,
+	type StoredRangeLive,
+	type StoredScanJobSpec,
+} from "./plan/range-contract.js"
+import {
+	ResumeActivity,
+	type OperatorActivityPort,
+	type ResumeStatus,
+} from "./auto-resume.js"
 /**
  * Composition root of the scanner (spec § 3): engines per source, the
  * arbiter, the probe pool, ambient evidence, the discovery/evidence stores
@@ -14,6 +27,9 @@ import { ZodError } from "zod"
 import type {
 	Bandplan as BandplanDto,
 	ScanJob,
+	ScanJobHit,
+	ScanJobHitStats,
+	ScanJobHitsResponse,
 	ScannerActivityEventData,
 	ScannerCapture,
 	ScannerDiscoveryEventData,
@@ -38,6 +54,7 @@ import { sourceScannerConfig } from "../../config.js"
 import {
 	bandplansFor,
 	priorsFor,
+	type Bandplan,
 	type BandRegionCode,
 } from "./bandplan/index.js"
 import { classifySpectral, leakOrIntermod } from "./classify/classifier.js"
@@ -48,6 +65,7 @@ import {
 } from "./evidence/capture-recorder.js"
 import { CaptureStore } from "./evidence/capture-store.js"
 import { ulid } from "./ids.js"
+import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
 	IdentifyRunner,
@@ -74,7 +92,7 @@ import {
 } from "./job-runner.js"
 import { CPU_COST } from "./plan/cost.js"
 import {
-	planForSpec,
+	planJob,
 	previewPlan,
 	type PreviewContext,
 	type PreviewMeasured,
@@ -95,6 +113,7 @@ import {
 import {
 	DEFAULT_TUNING,
 	USABLE_FRACTION,
+	faTargetForSensitivity,
 	isScannerIqFormat,
 	type EngineEpoch,
 	type EngineStreamReason,
@@ -107,6 +126,7 @@ import {
 	DiscoveryStore,
 	estimateFrequencyError,
 	type DiscoveryFilter,
+	type StoreChange,
 } from "./store/discovery-store.js"
 import {
 	DISCOVERY_ID,
@@ -147,11 +167,13 @@ import type {
 	HopPlan,
 	Identity,
 	Impact,
+	LockoutExclusion,
 	NormalisedJobSpec,
 	Observation,
 	PlanIssue,
 	PlanPreview,
 	ScanJobSpec,
+	ScanRange,
 	ScannerConfidence,
 	ScannerProtocol,
 	ScannerSettings,
@@ -196,6 +218,8 @@ export interface ScannerServiceDeps {
 	sourceConfigs: readonly SourceConfig[]
 	decoderConfigs: readonly DecoderConfig[]
 	region: BandRegionCode
+	/** Effective plans from the band-plan stack, read per call. Absent: bandplansFor(region). */
+	bandplans?: () => readonly Bandplan[]
 	stateDir: string
 	sources: SourceManager
 	routing: SourceFanoutRouter
@@ -216,6 +240,7 @@ export interface ScannerServiceDeps {
 		readonly mode?: "os" | "cgroup"
 	}
 	tickMs?: number
+	operatorActivity?: OperatorActivityPort
 	hostCentre?: HostCentreReader
 }
 
@@ -340,6 +365,10 @@ export class ScannerService extends EventEmitter {
 	private readonly recorder: CaptureRecorder
 	private readonly jobs = new Map<string, JobRecord>()
 	private readonly drivers = new Map<string, JobDriver>()
+	/** WG2 req 13: per-job hit statistics (in memory; reset on start, dropped with the job). */
+	private readonly hits = new Map<string, JobHits>()
+	/** Store changes raised inside one ingest, emitted after its hits are counted (WG2 req 13.2). */
+	private ingestChanges: [string, StoreChange][] | null = null
 	/** § 10.7: engine instances the passive cost rule already judged (once, at openedAt + 60 s). */
 	private readonly costChecked = new WeakSet<SpectrumEngine>()
 	private readonly live = new Map<string, LiveObservation>()
@@ -888,6 +917,9 @@ export class ScannerService extends EventEmitter {
 		if (!this.consumerLifecycle.admissionSealed && this.settings().enabled) {
 			await this.ensurePassiveJobs()
 			if (this.consumerLifecycle.admissionSealed) return
+			this.operatorActivityOff = this.deps.operatorActivity?.onChange(() => {
+				for (const record of this.jobs.values()) this.emitResumeChange(record)
+			})
 			this.ambient.start()
 			this.deps.cpuMeter?.start()
 			this.timer = setInterval(() => this.tick(), this.deps.tickMs ?? 100)
@@ -1003,6 +1035,10 @@ export class ScannerService extends EventEmitter {
 		}
 		// Probe teardown may emit cleanup-only recording settlement. Wait that actual component
 		// before snapshotting its publication chains; this never depends on native phase66.
+		await attempt(() => {
+			this.operatorActivityOff?.()
+			this.operatorActivityOff = undefined
+		})
 		await attempt(() => this.drainProbeComponents())
 		for (const outcome of await Promise.allSettled([
 			...this.background,
@@ -1156,7 +1192,9 @@ export class ScannerService extends EventEmitter {
 	}
 
 	bandplans(): BandplanDto[] {
-		return bandplansFor(this.deps.region)
+		return this.deps.bandplans
+			? [...this.deps.bandplans()]
+			: bandplansFor(this.deps.region)
 	}
 
 	recordMeasurement(m: Partial<PreviewMeasured>): void {
@@ -1165,7 +1203,7 @@ export class ScannerService extends EventEmitter {
 
 	// === jobs ===
 
-	preview(spec: ScanJobSpec): PlanPreview {
+	preview(spec: StoredScanJobSpec): PlanPreview {
 		return previewPlan(spec, this.previewContext())
 	}
 
@@ -1223,14 +1261,20 @@ export class ScannerService extends EventEmitter {
 			updatedAt: now,
 			unrestorable: [],
 			counts: { observations: 0, transients: 0 },
+			...(preview.lockoutExclusions
+				? { lockoutExclusions: preview.lockoutExclusions }
+				: {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
+		// WG2 req 13.4: hit counts start with the job (a resume keeps them).
+		this.hits.delete(record.id)
 		try {
 			await driver.start()
 		} catch (err) {
 			this.jobs.delete(record.id)
+			this.hits.delete(record.id)
 			this.drivers.delete(record.id)
 			// The start's own error is what the caller gets.
 			await driver
@@ -1283,22 +1327,64 @@ export class ScannerService extends EventEmitter {
 			"record",
 			"protocols",
 			"capture",
+			"signalsOnly",
 		]
 		// S1-B final review, finding 7: the operator's own input, not the normalised spec, so derived
 		// fields (integration, dwell, …) follow the patch and keep honest provenance. Only the source
 		// and the mode are pinned (`auto` never flips a running job's mode).
-		const merged: ScanJobSpec = {
+		const merged: StoredScanJobSpec = {
 			...record.rawSpec,
 			sourceId: record.spec.sourceId,
 			mode: record.spec.mode,
 		}
 		for (const key of allowed)
 			if (patch[key] !== undefined) Object.assign(merged, { [key]: patch[key] })
-		const preview = this.preview(merged)
+		// SF1 req 1: `ranges` is the full state of the effective ranges; only their live fields change,
+		// stored as `rangeLive` (never merged into the operator's `ranges`, so band-plan ranges and the
+		// plan-id re-check stay as admitted). Without `ranges`, an earlier `rangeLive` is kept (6.3).
+		if (patch.ranges !== undefined) {
+			const edited = applyRangePatch(record.spec.ranges, patch.ranges)
+			this.rejectErrors(edited.issues)
+			// The locked identity of each range goes with its entry (R1 finding 1).
+			merged.rangeLive = withIdentity(edited.rangeLive, record.spec.ranges)
+		}
+		let preview = this.preview(merged)
 		this.rejectErrors(preview.issues)
+		// Reported with this PATCH's answer only, never stored on the job.
+		const notices: PlanIssue[] = []
+		const stale = staleRangeLive(preview.issues)
+		if (stale) {
+			// R2 finding 1: the band plan under the job changed since the client read its ranges, so
+			// an edit this PATCH sent would land nowhere. Refuse; the client re-reads and retries.
+			if (patch.ranges !== undefined)
+				this.rejectErrors([
+					{
+						code: "range-locked",
+						severity: "error",
+						message:
+							"the job's ranges changed since they were read; read the job again and resend",
+						details: {
+							reason: "range-plan-changed",
+							dropped: stale.dropped,
+							expected: stale.expected,
+							received: stale.received,
+						},
+					},
+				])
+			// R2 finding 2: keep what still applies, aligned with the current list, so the warning
+			// is reported once rather than on every later PATCH.
+			merged.rangeLive = withIdentity(
+				applyRangePatch(preview.spec.ranges, preview.spec.ranges).rangeLive,
+				preview.spec.ranges,
+			)
+			preview = this.preview(merged)
+			this.rejectErrors(preview.issues)
+			notices.push(stale.issue)
+		}
 		record.rawSpec = merged
 		record.issues = preview.issues
 		record.updatedAt = this.now()
+		setLockouts(record, preview.lockoutExclusions)
 		this.requireDriver(id).replan(preview.spec, preview.plan)
 		const { sourceId } = record.spec
 		// The lease holder's tuning drives the engine (finding 2); its scheduler follows on the next own epoch.
@@ -1308,7 +1394,11 @@ export class ScannerService extends EventEmitter {
 		await this.persistJobs()
 		const job = this.toDto(record)
 		this.emit("job", job)
-		return { job, plan: preview.plan, issues: preview.issues }
+		return {
+			job,
+			plan: preview.plan,
+			issues: [...preview.issues, ...notices],
+		}
 	}
 
 	async pauseJob(id: string): Promise<ScanJob> {
@@ -1337,6 +1427,8 @@ export class ScannerService extends EventEmitter {
 				409,
 			)
 		this.jobs.delete(id)
+		this.hits.delete(id)
+		this.resumeViews.delete(id)
 		this.drivers.delete(id)
 		void this.persistJobs()
 	}
@@ -1429,10 +1521,13 @@ export class ScannerService extends EventEmitter {
 		const driver = this.createIdentifyDriver(record, identify)
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
+		// WG2 req 13.4: hit counts start with the job (a resume keeps them).
+		this.hits.delete(record.id)
 		try {
 			await driver.start()
 		} catch (err) {
 			this.jobs.delete(record.id)
+			this.hits.delete(record.id)
 			this.drivers.delete(record.id)
 			await driver.dispose()
 			throw err
@@ -1489,7 +1584,72 @@ export class ScannerService extends EventEmitter {
 					.map(p => this.probes.release(p.probeId)),
 			)
 		}
+		// WG2 req 12.1, 12.5: Ignore skips sweeps; setting or clearing it replans the sweeps it touches.
+		if (patch.lockout !== undefined) await this.replanLockouts(d.sourceIds)
 		return d
+	}
+
+	private lockoutReplanQueued = false
+
+	private scheduleLockoutReplan(): void {
+		if (this.lockoutReplanQueued) return
+		this.lockoutReplanQueued = true
+		queueMicrotask(() => {
+			this.lockoutReplanQueued = false
+			this.replanLockouts().catch((err: unknown) =>
+				this.log.warn({ err }, "Lockout replan after a store change failed"),
+			)
+		})
+	}
+
+	/**
+	 * WG2 req 12: replans every live sweep job on one of `sourceIds` (all sources when omitted)
+	 * whose lockout exclusions
+	 * changed, through the same driver replan a live exclusion PATCH uses. The stored spec is not
+	 * touched (12.2), so nothing is persisted.
+	 */
+	private async replanLockouts(sourceIds?: readonly string[]): Promise<void> {
+		const ctx = this.previewContext()
+		const touched = new Set<string>()
+		const retune = new Set<string>()
+		for (const record of [...this.jobs.values()]) {
+			if (
+				record.passive ||
+				record.spec.mode !== "sweep" ||
+				record.spec.kind === "identify" ||
+				isTerminal(record.state) ||
+				(sourceIds !== undefined && !sourceIds.includes(record.spec.sourceId))
+			)
+				continue
+			const driver = this.drivers.get(record.id)
+			if (!driver) continue
+			let next: ReturnType<typeof planJob>
+			try {
+				next = planJob(record.spec, ctx)
+			} catch (err) {
+				this.log.warn(
+					{ err, jobId: record.id },
+					"Lockout replan failed; the job keeps its plan",
+				)
+				continue
+			}
+			if (
+				JSON.stringify(next.lockoutExclusions ?? []) ===
+				JSON.stringify(record.lockoutExclusions ?? [])
+			)
+				continue
+			setLockouts(record, next.lockoutExclusions)
+			record.updatedAt = this.now()
+			driver.replan(record.spec, next.plan)
+			const { sourceId } = record.spec
+			touched.add(sourceId)
+			if (this.arbiter.holder(sourceId)?.jobId === record.id)
+				retune.add(sourceId)
+			this.emitJob(record)
+		}
+		// As patchJob: the lease holder's tuning drives the engine.
+		for (const sourceId of retune) await this.spectrum.refreshTuning(sourceId)
+		for (const sourceId of touched) this.updateMasks(sourceId)
 	}
 
 	async deleteDiscovery(id: string): Promise<boolean> {
@@ -1522,6 +1682,9 @@ export class ScannerService extends EventEmitter {
 				o.discoveryId = null
 				o.evidenceDeleted = true
 			}
+		// WG2 req 12.5: a deleted lockout no longer skips sweeps.
+		if (discovery.operator?.lockout === true)
+			await this.replanLockouts(discovery.sourceIds)
 		try {
 			await this.evidence.removeDiscovery(id)
 		} catch (err: unknown) {
@@ -1684,10 +1847,18 @@ export class ScannerService extends EventEmitter {
 		const specs = [...this.jobs.values()]
 			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
 			.map(j => j.spec)
-		const ranges = specs.flatMap(s => s.ranges)
+		const ranges = specs.flatMap(s => s.ranges.filter(isRangeEnabled))
+		const targets = this.cfarTargets(sourceId, ranges)
 		engine.setMasks({
 			exclusions: intersectRanges(specs.map(s => s.exclusions)),
-			cfarRanges: ranges.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
+			cfarRanges: ranges.map(r => {
+				const fa = targets.get(`${r.startHz}:${r.endHz}`)
+				return {
+					startHz: r.startHz,
+					endHz: r.endHz,
+					...(fa !== undefined ? { faTargetPerMhzMin: fa } : {}),
+				}
+			}),
 			burstRanges: ranges
 				.filter(r => (r.protocols ?? []).some(p => BURST_PROTOCOLS.has(p)))
 				.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
@@ -1699,11 +1870,46 @@ export class ScannerService extends EventEmitter {
 		this.updateRing(sourceId)
 	}
 
+	/**
+	 * SF1 req 2.5: the CFAR false-alarm target per `start:end` of the enabled ranges that set a
+	 * sensitivity. Ranges sharing a span take the largest target (the most sensitive); a range
+	 * without one counts as the pipeline target. A span whose target equals the pipeline's gets
+	 * no entry, so jobs without per-range sensitivity send exactly today's masks.
+	 */
+	private cfarTargets(
+		sourceId: string,
+		ranges: readonly ScanRange[],
+	): Map<string, number> {
+		const settingsFa = this.settings().detection.faTargetPerMhzMin
+		const pipelineFa = faTargetForSensitivity(
+			this.engineTuning(sourceId).sensitivity ??
+				this.settings().detection.sensitivity,
+			settingsFa,
+		)
+		const spans = new Map<string, { fa: number; set: boolean }>()
+		for (const r of ranges) {
+			const key = `${r.startHz}:${r.endHz}`
+			const set = r.sensitivity !== undefined
+			const fa = r.sensitivity
+				? faTargetForSensitivity(r.sensitivity, settingsFa)
+				: pipelineFa
+			const prev = spans.get(key)
+			spans.set(key, {
+				fa: prev ? Math.max(prev.fa, fa) : fa,
+				set: set || (prev?.set ?? false),
+			})
+		}
+		const out = new Map<string, number>()
+		for (const [key, span] of spans)
+			if (span.set && span.fa !== pipelineFa) out.set(key, span.fa)
+		return out
+	}
+
 	private rastersAt(sourceId: string, hz: number) {
 		return [...this.jobs.values()]
 			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
 			.flatMap(j => j.spec.ranges)
-			.filter(r => hz >= r.startHz && hz <= r.endHz)
+			.filter(r => isRangeEnabled(r) && hz >= r.startHz && hz <= r.endHz)
 			.flatMap(r => r.rasters ?? [])
 	}
 
@@ -1873,11 +2079,44 @@ export class ScannerService extends EventEmitter {
 			: "retune"
 	}
 
+	/**
+	 * WG2 req 13.2: the store's discovery changes raised by this ingest are emitted once its hits are
+	 * counted, so the event of the attributed discovery carries `jobHits`.
+	 */
 	private ingest(
 		live: LiveObservation,
 		track: TrackSnapshot,
 		endReason?: ObservationEndReason,
 	): void {
+		const outer = this.ingestChanges
+		const changes: [string, StoreChange][] = []
+		this.ingestChanges = changes
+		let reported = new Map<string, Set<string>>()
+		try {
+			reported = this.ingestTracked(live, track, endReason)
+		} finally {
+			this.ingestChanges = outer
+			for (const [id, change] of changes) {
+				const jobIds = reported.get(id)
+				this.emitDiscoveryChange(
+					id,
+					change,
+					jobIds ? this.jobHitsOf([...jobIds], id) : [],
+				)
+			}
+		}
+	}
+
+	/**
+	 * Returns, per discovery, the jobs whose hits its events report: the observation's jobs on the
+	 * discovery it is attributed to, plus every job the store newly credited in this ingest.
+	 */
+	private ingestTracked(
+		live: LiveObservation,
+		track: TrackSnapshot,
+		endReason?: ObservationEndReason,
+	): Map<string, Set<string>> {
+		const reported = new Map<string, Set<string>>()
 		const now = this.now()
 		const sweep = live.jobIds.some(
 			id => this.jobs.get(id)?.spec.mode === "sweep",
@@ -1903,13 +2142,36 @@ export class ScannerService extends EventEmitter {
 					const r = this.jobs.get(id)
 					if (r) r.counts.transients += 1
 				}
-			return
+			return reported
 		}
 		if (live.discoveryId === null) {
 			for (const id of live.jobIds) {
 				const r = this.jobs.get(id)
 				if (r) r.counts.observations += 1
 			}
+		}
+		const report = (discoveryId: string, jobIds: readonly string[]): void => {
+			let set = reported.get(discoveryId)
+			if (!set) {
+				set = new Set()
+				reported.set(discoveryId, set)
+			}
+			for (const j of jobIds) set.add(j)
+		}
+		report(res.discoveryId, live.jobIds)
+		// WG2 req 13.1: one hit per (observation, job) the store newly credits, including jobs joining
+		// a placed observation and every pending observation a single-block promotion attaches.
+		for (const a of res.attributed ?? []) {
+			for (const jobId of a.jobIds) {
+				if (!this.jobs.has(jobId)) continue
+				this.hitsOf(jobId).record(
+					a.observationId,
+					a.discoveryId,
+					now,
+					a.created,
+				)
+			}
+			report(a.discoveryId, a.jobIds)
 		}
 		live.discoveryId = res.discoveryId
 		live.decoded = this.store.get(res.discoveryId)?.confidence === "decoded"
@@ -1918,6 +2180,40 @@ export class ScannerService extends EventEmitter {
 			delete live.undecodedReason
 		}
 		this.dirty = true
+		return reported
+	}
+
+	private hitsOf(jobId: string): JobHits {
+		let h = this.hits.get(jobId)
+		if (!h) {
+			h = new JobHits(jobId)
+			this.hits.set(jobId, h)
+		}
+		return h
+	}
+
+	/** One entry per job of the observation that tracks the discovery (WG2 req 13.2). */
+	private jobHitsOf(
+		jobIds: readonly string[],
+		discoveryId: string,
+	): ScanJobHit[] {
+		const out: ScanJobHit[] = []
+		for (const id of jobIds) {
+			const hit = this.hits.get(id)?.entry(discoveryId)
+			if (hit) out.push(hit)
+		}
+		return out
+	}
+
+	/** WG2 req 13.3: GET /api/scanner/jobs/:id/hits, most recent first. */
+	jobHits(id: string, limit: number): ScanJobHitsResponse {
+		this.requireJob(id)
+		const h = this.hits.get(id)
+		return {
+			jobId: id,
+			stats: h ? h.stats() : emptyHitStats(),
+			hits: h ? h.list(limit) : [],
+		}
 	}
 
 	private classifierContext(
@@ -1930,13 +2226,15 @@ export class ScannerService extends EventEmitter {
 		const specs = this.driversOn(sourceId)
 			.filter(d => d.covers(sourceId, centreHz))
 			.map(d => d.record.spec)
-		const all = specs.length === 0 || specs.some(s => s.protocols.length === 0)
-		const protocols = all ? [] : [...new Set(specs.flatMap(s => s.protocols))]
+		const selections = specs.map(s => protocolsForFrequency(s, centreHz))
+		const all = selections.length === 0 || selections.some(p => p.length === 0)
+		const protocols = all ? [] : [...new Set(selections.flat())]
 		const priors: Partial<Record<ScannerProtocol, number>> = {}
 		const bandProtocols = specs
 			.flatMap(s => s.ranges)
 			.filter(
 				r =>
+					isRangeEnabled(r) &&
 					centreHz >= r.startHz &&
 					centreHz <= r.endHz &&
 					(r.protocols ?? []).length > 0,
@@ -2310,13 +2608,21 @@ export class ScannerService extends EventEmitter {
 		})
 	}
 
-	private protocolsFor(live: LiveObservation): ScannerProtocol[] {
+	private protocolsFor(
+		live: LiveObservation,
+		centreHz: number,
+	): ScannerProtocol[] {
 		const specs = live.jobIds
 			.map(id => this.jobs.get(id)?.spec)
-			.filter((s): s is NormalisedJobSpec => s !== undefined)
-		if (specs.length === 0 || specs.some(s => s.protocols.length === 0))
+			// SF1 req 3.3: a signals-only job never widens the probe protocols of the others.
+			.filter(
+				(s): s is NormalisedJobSpec =>
+					s !== undefined && s.signalsOnly !== true,
+			)
+		const selections = specs.map(s => protocolsForFrequency(s, centreHz))
+		if (selections.length === 0 || selections.some(p => p.length === 0))
 			return []
-		return [...new Set(specs.flatMap(s => s.protocols))]
+		return [...new Set(selections.flat())]
 	}
 
 	private needsConfirm(live: LiveObservation, track: TrackSnapshot): boolean {
@@ -2338,8 +2644,10 @@ export class ScannerService extends EventEmitter {
 		const d = live.discoveryId ? this.store.get(live.discoveryId) : undefined
 		if (d?.operator?.lockout) return false
 		if (
-			probeModesFor(live.classification.class, this.protocolsFor(live))
-				.length === 0
+			probeModesFor(
+				live.classification.class,
+				this.protocolsFor(live, track.centreHz),
+			).length === 0
 		)
 			return false
 		if (!d || d.confidence !== "decoded") return true
@@ -2821,6 +3129,15 @@ export class ScannerService extends EventEmitter {
 				)
 			}
 		}
+		// SF1 req 4.3: the arbiter recorded the new holder before this event; jobs that stay preempted
+		// show their new preemptor now rather than on the next tick.
+		for (const d of this.driversOn(lease.sourceId))
+			if (
+				d.record.id !== lease.jobId &&
+				d.record.state === "paused" &&
+				d.record.reason === "preempted-job"
+			)
+				this.emitResumeChange(d.record)
 		const driver = this.drivers.get(lease.jobId)
 		if (!driver) return
 		// An operator or relay write is not handed to a waiting job at once (operator-idle tick).
@@ -3005,6 +3322,7 @@ export class ScannerService extends EventEmitter {
 	private createDriver(record: JobRecord): JobDriver {
 		return new JobRunner({
 			record,
+			autoResumeReady: () => this.autoResumeReady(record),
 			arbiter: this.arbiter,
 			probes: this.probes,
 			decoders: this.deps.decoders,
@@ -3048,7 +3366,9 @@ export class ScannerService extends EventEmitter {
 		record: JobRecord,
 		identify: NormalisedIdentify,
 	): IdentifyRunner {
-		const ranges = bandplansFor(this.deps.region).flatMap(b => b.ranges)
+		const ranges = (
+			this.deps.bandplans?.() ?? bandplansFor(this.deps.region)
+		).flatMap(b => b.ranges)
 		return new IdentifyRunner({
 			record,
 			identify,
@@ -3140,6 +3460,7 @@ export class ScannerService extends EventEmitter {
 			Math.max(0, ended.length - IDENTIFY_KEEP_JOBS),
 		)) {
 			this.jobs.delete(j.id)
+			this.hits.delete(j.id)
 			this.drivers.delete(j.id)
 		}
 	}
@@ -3335,9 +3656,10 @@ export class ScannerService extends EventEmitter {
 	private async restoreJob(pj: PersistedJob): Promise<void> {
 		if (pj.id.startsWith("passive-")) return
 		let plan: HopPlan
+		let lockoutExclusions: LockoutExclusion[] | undefined
 		let failed = false
 		try {
-			plan = planForSpec(pj.spec, this.previewContext())
+			;({ plan, lockoutExclusions } = planJob(pj.spec, this.previewContext()))
 		} catch (err) {
 			this.log.warn(
 				{ err, jobId: pj.id },
@@ -3364,11 +3686,14 @@ export class ScannerService extends EventEmitter {
 			...(failed ? { endedAt: this.now() } : {}),
 			unrestorable: [],
 			counts: { observations: 0, transients: 0 },
+			...(lockoutExclusions && !failed ? { lockoutExclusions } : {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
 		this.drivers.set(record.id, driver)
 		if (isTerminal(record.state)) return
+		// An explicit Stay-here choice survives restart, even with onBoot enabled.
+		if (record.state === "paused" && record.reason === "operator") return
 		await driver
 			.dispatch({ type: "boot" })
 			.catch((err: unknown) =>
@@ -3401,6 +3726,7 @@ export class ScannerService extends EventEmitter {
 			if (existing && isTerminal(existing.state)) {
 				// An ended passive job (e.g. its source was removed) is rebuilt once the source is eligible again.
 				this.jobs.delete(id)
+				this.hits.delete(id)
 				this.drivers.delete(id)
 				existing = undefined
 			}
@@ -3415,6 +3741,7 @@ export class ScannerService extends EventEmitter {
 							),
 						)
 				this.jobs.delete(id)
+				this.hits.delete(id)
 				this.drivers.delete(id)
 				continue
 			}
@@ -3455,6 +3782,7 @@ export class ScannerService extends EventEmitter {
 			const driver = this.createDriver(record)
 			this.jobs.set(id, record)
 			this.drivers.set(id, driver)
+			this.hits.delete(id)
 			try {
 				await driver.start()
 			} catch (err) {
@@ -3465,6 +3793,7 @@ export class ScannerService extends EventEmitter {
 					"Passive job failed to start; retrying when the source changes",
 				)
 				this.jobs.delete(id)
+				this.hits.delete(id)
 				this.drivers.delete(id)
 				await driver.dispose()
 			}
@@ -3519,7 +3848,9 @@ export class ScannerService extends EventEmitter {
 			},
 			impactFor: (sourceId, spec) => this.arbiter.impact(sourceId, spec),
 			region: this.deps.region,
+			bandplans: this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
 			tunerRange: () => ({ startHz: 24_000_000, endHz: 1_766_000_000 }),
+			lockouts: sourceId => this.store.lockouts(sourceId),
 		}
 	}
 
@@ -3604,21 +3935,92 @@ export class ScannerService extends EventEmitter {
 		return counts
 	}
 
+	private readonly resumeActivities = new Map<string, ResumeActivity>()
+	private readonly resumeViews = new Map<string, string>()
+	private operatorActivityOff: (() => void) | undefined
+
+	private resumeStatus(record: JobRecord, prospective = false): ResumeStatus {
+		const sourceId = record.spec.sourceId
+		let operator: ReturnType<OperatorActivityPort["current"]> = {
+			audio: false,
+			recording: false,
+		}
+		try {
+			operator = this.deps.operatorActivity?.current() ?? operator
+		} catch {
+			operator = { audio: false, recording: true }
+		}
+		if (
+			operator.sourceId !== undefined &&
+			operator.sourceId !== null &&
+			operator.sourceId !== sourceId
+		)
+			operator = { audio: false, recording: false }
+		const identify = [...this.drivers.values()].some(
+			driver =>
+				driver instanceof IdentifyRunner &&
+				driver.record.spec.sourceId === sourceId &&
+				driver
+					.view()
+					.targets.some(target =>
+						target.trials.some(
+							trial =>
+								trial.outcome === "running" || trial.outcome === "pending",
+						),
+					),
+		)
+		let activity = this.resumeActivities.get(sourceId)
+		if (!activity) {
+			activity = new ResumeActivity()
+			this.resumeActivities.set(sourceId, activity)
+		}
+		const status = activity.status(
+			{ ...operator, identify },
+			this.arbiter.operatorIdleSince(sourceId),
+			record.spec.resume.autoAfterIdleMs ?? 0,
+			this.now(),
+		)
+		return prospective ||
+			(record.state === "paused" &&
+				(record.reason === "preempted-operator" ||
+					record.reason === "preempted-relay") &&
+				record.spec.resume.autoAfterIdleMs !== null)
+			? status
+			: { resumeAt: null, resumeHeldBy: null }
+	}
+
+	private autoResumeReady(record: JobRecord): boolean {
+		// External control remains an arbiter refusal, rather than a new activity hold.
+		if (this.arbiter.operatorIdleSince(record.spec.sourceId) === null)
+			return true
+		const status = this.resumeStatus(record, true)
+		return (
+			status.resumeHeldBy === null &&
+			(record.spec.resume.autoAfterIdleMs === null ||
+				(status.resumeAt !== null && this.now() >= Date.parse(status.resumeAt)))
+		)
+	}
+
 	private toDto(record: JobRecord): ScanJob {
 		const driver = this.drivers.get(record.id)
 		return {
 			id: record.id,
+			...this.resumeStatus(record),
 			name: record.name,
 			state: record.state,
 			...(record.reason ? { reason: record.reason } : {}),
+			...this.preemptedByOf(record),
 			passive: record.passive,
 			spec: record.spec,
 			plan: record.plan,
 			issues: record.issues,
 			impact: record.impact,
 			unrestorable: record.unrestorable,
+			...(record.lockoutExclusions
+				? { lockoutExclusions: record.lockoutExclusions }
+				: {}),
 			progress: driver
-				? driver.progress()
+				? { ...driver.progress(), hitStats: this.hitStatsOf(record.id) }
 				: {
 						sweepIndex: 0,
 						hopIndex: 0,
@@ -3651,10 +4053,35 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	private hitStatsOf(jobId: string): ScanJobHitStats {
+		return this.hits.get(jobId)?.stats() ?? emptyHitStats()
+	}
+
+	private preemptedByOf(record: JobRecord): Pick<ScanJob, "preemptedBy"> {
+		return preemptedByFor(
+			record,
+			this.arbiter.holder(record.spec.sourceId)?.jobId,
+			id => this.jobs.get(id)?.name,
+		)
+	}
+
+	/** The parts of a job view that change without a job event of their own (resume hold, preemptor). */
+	private derivedView(
+		dto: Pick<ScanJob, "resumeAt" | "resumeHeldBy" | "preemptedBy">,
+	): string {
+		return JSON.stringify({
+			resumeAt: dto.resumeAt,
+			resumeHeldBy: dto.resumeHeldBy,
+			preemptedBy: dto.preemptedBy ?? null,
+		})
+	}
+
 	/** A deleted (or replaced) job emits nothing more (S1-B final review, finding 4). */
 	private emitJob(record: JobRecord): void {
 		if (this.jobs.get(record.id) !== record) return
-		this.emit("job", this.toDto(record))
+		const dto = this.toDto(record)
+		this.resumeViews.set(record.id, this.derivedView(dto))
+		this.emit("job", dto)
 	}
 
 	private emitProgressFor(record: JobRecord | null): void {
@@ -3664,6 +4091,7 @@ export class ScannerService extends EventEmitter {
 		for (const r of records) {
 			const p = this.drivers.get(r.id)?.progress()
 			if (!p) continue
+			const stats = this.hitStatsOf(r.id)
 			const hop = r.plan.hops[p.hopIndex]
 			const data: ScannerProgressEventData = {
 				jobId: r.id,
@@ -3678,6 +4106,8 @@ export class ScannerService extends EventEmitter {
 				...(p.holdingOn ? { holdingOn: p.holdingOn } : {}),
 				coverage: p.coverage,
 				probes: p.probes.length,
+				hits: stats.hits,
+				newDiscoveries: stats.newDiscoveries,
 			}
 			this.emit("progress", data)
 		}
@@ -3802,16 +4232,31 @@ export class ScannerService extends EventEmitter {
 		)
 	}
 
-	private readonly onStoreChange = (
+	private readonly onStoreChange = (id: string, change: StoreChange): void => {
+		// WG2 R1 #8 / R2: eviction and age pruning never remove a lockout, and operator deletion
+		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a
+		// locked survivor schedules a replan (no-op when no job's lockout list changes).
+		if (change === "merged" && this.store.get(id)?.operator?.lockout === true)
+			this.scheduleLockoutReplan()
+		if (this.ingestChanges) {
+			this.ingestChanges.push([id, change])
+			return
+		}
+		this.emitDiscoveryChange(id, change, [])
+	}
+
+	private emitDiscoveryChange(
 		id: string,
-		change: ScannerDiscoveryEventData["change"] | "transient",
-	): void => {
+		change: StoreChange,
+		jobHits: ScanJobHit[],
+	): void {
 		if (change === "transient") return
 		const discovery = this.store.get(id)
 		if (!discovery) return
 		this.emit("discovery", {
 			change,
 			discovery,
+			...(jobHits.length > 0 ? { jobHits } : {}),
 		} satisfies ScannerDiscoveryEventData)
 	}
 
@@ -3845,11 +4290,25 @@ export class ScannerService extends EventEmitter {
 			.catch((err: unknown) => this.log.warn({ err }, "jobs.json write failed"))
 	}
 
+	/** Re-emits a job whose resume hold or preemptor changed while its state did not (SF1 req 4.3). */
+	private emitResumeChange(record: JobRecord): void {
+		const view = this.derivedView({
+			...this.resumeStatus(record),
+			...this.preemptedByOf(record),
+		})
+		if (this.resumeViews.get(record.id) === view) return
+		this.resumeViews.set(record.id, view)
+		this.emitJob(record)
+	}
+
 	private tick(): void {
 		if (this.consumerLifecycle.admissionSealed) return
 		this.channelTaps?.tick()
 		const now = this.now()
-		for (const d of this.drivers.values()) d.tick(now)
+		for (const d of this.drivers.values()) {
+			this.emitResumeChange(d.record)
+			d.tick(now)
+		}
 		this.resumeIdleWaiters(now)
 		// cpu- and budget-deferred probe requests start once the meter drops, not only when another probe stops
 		this.probes.pump()
@@ -3892,7 +4351,7 @@ export class ScannerService extends EventEmitter {
 	private async maintenance(): Promise<void> {
 		const s = this.settings()
 		await this.spectrum.persist()
-		// § 8 storage.discoveryMaxAgeDays (never operator `keep`)
+		// § 8 storage.discoveryMaxAgeDays (never operator `keep` or `lockout`)
 		const all = new Map(this.allDiscoveries({}).map(d => [d.id, d] as const))
 		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays)
 		for (const id of pruned) {
@@ -4021,6 +4480,80 @@ function requireDiscoveryIdFormat(id: string): void {
 			"SCANNER_DISCOVERY_NOT_FOUND",
 			404,
 		)
+}
+
+/** Tags each stored range edit with the locked identity of its range (SF1 R1 finding 1). */
+function withIdentity(
+	live: readonly ScanRangeLive[],
+	ranges: readonly ScanRange[],
+): StoredRangeLive[] {
+	return live.map((entry, i) => {
+		const range = ranges[i]
+		return range
+			? {
+					...entry,
+					startHz: range.startHz,
+					endHz: range.endHz,
+					...(range.bandplanId !== undefined
+						? { bandplanId: range.bandplanId }
+						: {}),
+				}
+			: { ...entry }
+	})
+}
+
+interface StaleRangeLive {
+	issue: PlanIssue
+	dropped: unknown
+	expected: unknown
+	received: unknown
+}
+
+/** The preview's stale range-edit warning (`range-live-stale`), when there is one. */
+function staleRangeLive(
+	issues: readonly PlanIssue[],
+): StaleRangeLive | undefined {
+	const issue = issues.find(
+		i =>
+			i.code === "range-locked" && i.details?.["reason"] === "range-live-stale",
+	)
+	if (!issue?.details) return undefined
+	return {
+		issue,
+		dropped: issue.details["dropped"],
+		expected: issue.details["expected"],
+		received: issue.details["received"],
+	}
+}
+
+/**
+ * SF1 req 4.1-4.2 (Property 11): the job holding a `paused(preempted-job)` job's source lease, as
+ * the DTO's `preemptedBy`. Absent in every other state or reason, when nobody else holds the lease,
+ * and when the holder is not a known job. Derived at read time, never persisted (4.3).
+ */
+export function preemptedByFor(
+	record: Pick<JobRecord, "id" | "state" | "reason">,
+	holderJobId: string | undefined,
+	nameOf: (jobId: string) => string | null | undefined,
+): Pick<ScanJob, "preemptedBy"> {
+	if (
+		record.state !== "paused" ||
+		record.reason !== "preempted-job" ||
+		holderJobId === undefined ||
+		holderJobId === record.id
+	)
+		return {}
+	const name = nameOf(holderJobId)
+	return name === undefined ? {} : { preemptedBy: { jobId: holderJobId, name } }
+}
+
+/** WG2 req 12.2: the record's runtime lockout exclusions follow its current plan. */
+function setLockouts(
+	record: JobRecord,
+	lockoutExclusions: LockoutExclusion[] | undefined,
+): void {
+	if (lockoutExclusions) record.lockoutExclusions = lockoutExclusions
+	else delete record.lockoutExclusions
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */

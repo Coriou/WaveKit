@@ -670,14 +670,23 @@ describe("assembled ApiServer session-only devices (A3 devices)", () => {
 		expect(dto.devices.some(row => row.deviceId === second.body.deviceId)).toBe(
 			true,
 		)
-		for (const row of dto.devices)
+		for (const row of dto.devices) {
+			// WG2 access amendment 4.9, 4.12: labels start null; lastSeenAt is an hour or null.
 			expect(Object.keys(row).sort()).toEqual([
 				"createdAt",
 				"current",
 				"deviceId",
 				"expiresAt",
+				"kind",
+				"lastSeenAt",
+				"name",
 				"renewedAt",
 			])
+			expect(row.name).toBeNull()
+			expect(row.kind).toBeNull()
+			if (row.lastSeenAt !== null && row.lastSeenAt !== undefined)
+				expect(row.lastSeenAt % 3_600_000).toBe(0)
+		}
 		expect(get.headers["cache-control"]).toBe("no-store")
 		expect(get.headers["set-cookie"]).toBeUndefined()
 		expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(
@@ -999,6 +1008,8 @@ async function setupDeviceAuthority() {
 }
 
 const devicePath = "/api/access/devices"
+/** WG2 access amendment 4.11: `lastSeenAt` is the start of the admission's UTC hour. */
+const HOUR_OF = (ms: number): number => ms - (ms % 3_600_000)
 function deviceHeaders(cookie: string): string[] {
 	return ["Host", browser.host, "Origin", origin, "Cookie", cookie]
 }
@@ -1060,6 +1071,9 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		const env = await setupDeviceAuthority()
 		await env.server.start()
 		const paired = await env.pair()
+		// WG2 req 11: commit this hour's last-seen first (its own non-latching write), so the
+		// held write below is the refresh alone.
+		await env.context.api.sessions.noteSeen(paired.body.deviceId, 1_000_000)
 		const before = await deviceRead(env, paired.headers.cookie)
 		const durable = await fs.readFile(join(env.directory, "access-state.json"))
 		env.advance(1000)
@@ -1094,6 +1108,7 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 				renewedAt: 1_001_000,
 				expiresAt: paired.body.expiresAt + 1000,
 			})
+			expect(committed.devices[0]?.lastSeenAt).toBe(HOUR_OF(1_001_000))
 		} finally {
 			env.releaseBarriers()
 			await pending
@@ -1106,6 +1121,7 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		await env.server.start()
 		const requester = await env.pair()
 		const peer = await env.pair()
+		await env.context.api.sessions.noteSeen(requester.body.deviceId, 1_000_000)
 		const before = await deviceRead(env, requester.headers.cookie)
 		const durable = await fs.readFile(join(env.directory, "access-state.json"))
 		const barrier = env.holdNextPersist()

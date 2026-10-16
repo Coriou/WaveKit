@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
+import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { AccessRouteServices } from "./access-routes.js"
 import { normalizeAuthority } from "./authority.js"
 import { resolveAccessBootstrap } from "./bootstrap-policy.js"
@@ -24,6 +25,8 @@ export interface AccessRuntimeOptions {
 	readonly directory: string
 	readonly ownership: "single-host-pid-namespace"
 	readonly sessionCookieName?: string
+	/** Parent logger; the session store logs through a "SessionStore" component logger. */
+	readonly logger?: Logger
 }
 
 /** Named listener boundaries are independent of the API authority allowlist. */
@@ -93,8 +96,29 @@ const optionsSchema = z
 			.max(64)
 			.regex(/^[A-Za-z0-9_-]+$/)
 			.default("wavekit_session"),
+		/** Parent logger for the session store's component logger. */
+		logger: z.custom<Logger>(isLogger).optional(),
 	})
 	.strict()
+
+function isLogger(value: unknown): boolean {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { child?: unknown }).child === "function"
+	)
+}
+
+function seenLoggerFor(parent: Logger): {
+	warn(payload: { event: string; failures: number }): void
+} {
+	const log = createComponentLogger(parent, "SessionStore")
+	return {
+		warn(payload) {
+			log.warn(payload, "Session last-seen write failed")
+		},
+	}
+}
 
 function unavailable(): WaveKitError {
 	return new WaveKitError(
@@ -190,6 +214,8 @@ export async function openAccessRuntime(
 			credentialBinding: storage.credentialBinding,
 			snapshot: storage.startupSnapshot(),
 			persist: storage.persist,
+			persistSeen: storage.persistSeen,
+			...(config.logger ? { logger: seenLoggerFor(config.logger) } : {}),
 		})
 		const common = {
 			allowedOrigins: bootstrap.allowedOrigins,

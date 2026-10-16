@@ -8,6 +8,9 @@ const row = {
 	renewedAt: 2,
 	expiresAt: 3,
 	current: true,
+	name: null,
+	kind: null,
+	lastSeenAt: null,
 }
 
 describe("public device projection", () => {
@@ -57,6 +60,28 @@ describe("public device projection", () => {
 			accessDevicesDtoSchema.safeParse({ devices: [row], online: true })
 				.success,
 		).toBe(false)
+	})
+
+	it("always emits name, kind and lastSeenAt, including when the record omitted them", () => {
+		const legacy = {
+			deviceId: row.deviceId,
+			createdAt: row.createdAt,
+			renewedAt: row.renewedAt,
+			expiresAt: row.expiresAt,
+			current: row.current,
+		}
+		expect(projectAccessDevices([legacy])).toEqual({
+			devices: [{ ...legacy, name: null, kind: null, lastSeenAt: null }],
+		})
+		expect(() =>
+			projectAccessDevices([{ ...row, name: `bad\u202ename` }]),
+		).toThrow("Device inventory unavailable")
+		expect(() => projectAccessDevices([{ ...row, kind: "laptop" }])).toThrow(
+			"Device inventory unavailable",
+		)
+		expect(() => projectAccessDevices([{ ...row, lastSeenAt: 1 }])).toThrow(
+			"Device inventory unavailable",
+		)
 	})
 
 	it("sanitizes throwing getters rather than leaking their error", () => {

@@ -24,13 +24,15 @@ import type {
 	FastifyReply,
 	FastifyRequest,
 } from "fastify"
-import { ZodError } from "zod"
+import { ZodError, ZodIssueCode } from "zod"
 import { ScannerApiError } from "../../core/scanner/errors.js"
 import type { ScannerService } from "../../core/scanner/scanner-service.js"
 import { ScannerSettingsPatchSchema } from "../../core/scanner/settings.js"
 import type { DiscoveryFilter } from "../../core/scanner/store/discovery-store.js"
 import type {
 	Discovery,
+	Identity,
+	IdentityKind,
 	ScanExclusion,
 	ScanJobSpec,
 	ScanRange,
@@ -39,6 +41,7 @@ import type {
 } from "../../core/scanner/types.js"
 import { RECORDING_ID } from "../../core/scanner/store/evidence-store.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
+import { JOB_HITS_LIMIT_DEFAULT } from "../../core/scanner/job-hits.js"
 import { ConfigValidationError } from "../../utils/errors.js"
 import {
 	captureIdParamsSchema,
@@ -46,10 +49,13 @@ import {
 	discoveryPatchSchema,
 	discoveryQuerySchema,
 	errorResponseSchema,
+	IDENTITY_QUERY,
 	identifyBodySchema,
 	jobIdParamsSchema,
 	looseObjectSchema,
 	observationsQuerySchema,
+	jobHitsQuerySchema,
+	jobHitsResponseSchema,
 	resumeBodySchema,
 	scanJobSpecSchema,
 } from "./scanner-schemas.js"
@@ -64,6 +70,7 @@ export type ScannerRouteService = Pick<
 	| "createJob"
 	| "listJobs"
 	| "getJob"
+	| "jobHits"
 	| "patchJob"
 	| "pauseJob"
 	| "resumeJob"
@@ -98,6 +105,7 @@ interface DiscoveryQuery {
 	since?: string
 	encrypted?: boolean
 	q?: string
+	identity?: string
 	sort?: "lastSeen" | "frequency" | "confidence"
 	cursor?: string
 	limit?: number
@@ -223,6 +231,32 @@ function notFound(reply: FastifyReply, what: string, id: string): FastifyReply {
 	})
 }
 
+/** Kinds named by `IDENTITY_QUERY`. A kind cannot contain a colon. */
+function isIdentityKind(value: string): value is IdentityKind {
+	return !value.includes(":") && IDENTITY_QUERY.test(`${value}:x`)
+}
+
+function identityQueryError(message: string): ZodError {
+	return new ZodError([
+		{
+			code: ZodIssueCode.custom,
+			path: ["identity"],
+			message,
+		},
+	])
+}
+
+/** Splits `kind:value` on the first colon and trims the value. */
+function identityFromQuery(raw: string): Identity {
+	const colon = raw.indexOf(":")
+	const kind = colon < 0 ? "" : raw.slice(0, colon)
+	const value = colon < 0 ? "" : raw.slice(colon + 1).trim()
+	if (value.length === 0) throw identityQueryError("Identity value is empty")
+	if (!isIdentityKind(kind))
+		throw identityQueryError("Identity kind is unknown")
+	return { kind, value }
+}
+
 function toFilter(q: DiscoveryQuery): DiscoveryFilter {
 	return {
 		...(q.jobId !== undefined ? { jobId: q.jobId } : {}),
@@ -236,6 +270,9 @@ function toFilter(q: DiscoveryQuery): DiscoveryFilter {
 		...(q.since !== undefined ? { since: Date.parse(q.since) } : {}),
 		...(q.encrypted !== undefined ? { encrypted: q.encrypted } : {}),
 		...(q.q !== undefined ? { q: q.q } : {}),
+		...(q.identity !== undefined
+			? { identity: identityFromQuery(q.identity) }
+			: {}),
 		...(q.sort !== undefined ? { sort: q.sort } : {}),
 		...(q.cursor !== undefined ? { cursor: q.cursor } : {}),
 		...(q.limit !== undefined ? { limit: q.limit } : {}),
@@ -425,6 +462,30 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			notFound(reply, "Job", request.params.id),
 	)
 
+	fastify.get<{ Params: { id: string }; Querystring: { limit?: number } }>(
+		"/api/scanner/jobs/:id/hits",
+		{
+			schema: {
+				tags,
+				summary:
+					"Per-discovery hit statistics of a job, most recent first (in memory)",
+				params: jobIdParamsSchema,
+				querystring: jobHitsQuerySchema,
+				response: { 200: jobHitsResponseSchema, ...errors },
+			},
+		},
+		async (request, reply) => {
+			try {
+				return scanner.jobHits(
+					request.params.id,
+					request.query.limit ?? JOB_HITS_LIMIT_DEFAULT,
+				)
+			} catch (err) {
+				return sendError(reply, err)
+			}
+		},
+	)
+
 	fastify.patch<{ Params: { id: string }; Body: ScanJobSpecBody }>(
 		"/api/scanner/jobs/:id",
 		{
@@ -508,7 +569,13 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				response: { 400: errorResponseSchema },
 			},
 		},
-		async request => scanner.listDiscoveries(toFilter(request.query)),
+		async (request, reply) => {
+			try {
+				return scanner.listDiscoveries(toFilter(request.query))
+			} catch (err) {
+				return sendError(reply, err)
+			}
+		},
 	)
 
 	fastify.get<{ Params: { id: string } }>(

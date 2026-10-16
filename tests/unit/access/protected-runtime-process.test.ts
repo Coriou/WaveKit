@@ -195,6 +195,14 @@ beforeAll(async () => {
 		entryPoints: [
 			{ in: "src/index.ts", out: "index" },
 			{ in: "src/core/spectrum/spectrum-worker.ts", out: "spectrum-worker" },
+			{
+				in: "src/core/activity/storage/activity-writer-worker.ts",
+				out: "activity-writer-worker",
+			},
+			{
+				in: "src/core/activity/query/activity-query-worker.ts",
+				out: "activity-query-worker",
+			},
 		],
 		bundle: true,
 		outdir: buildDirectory,

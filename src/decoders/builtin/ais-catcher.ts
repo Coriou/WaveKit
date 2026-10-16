@@ -123,8 +123,26 @@ const NMEA_AIS_PATTERN =
  *
  * Modified to consume IQ data from stdin (Passive Mode).
  */
+/** One in-progress multi-sentence AIS group. */
+interface FragmentGroup {
+	total: number
+	next: number
+	payloads: string[]
+	startedAt: number
+}
+
+const FRAGMENT_TIMEOUT_MS = 2_000
+const MAX_PENDING_FRAGMENTS = 8
+/** At most one checksum debug line per minute (WG2 req 8.1). */
+const CHECKSUM_LOG_INTERVAL_MS = 60_000
+
 export class AisCatcherDecoder extends IqDecimateDecoder {
 	private options: AisCatcherOptions
+	/** Pending multi-sentence groups, keyed by `${talker}:${seqId}:${channel}`. */
+	private readonly fragmentGroups = new Map<string, FragmentGroup>()
+	/** Sentences dropped for a missing or wrong NMEA checksum (WG2 req 8.1). */
+	private checksumErrorCount = 0
+	private lastChecksumLogAt = Number.NEGATIVE_INFINITY
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -170,8 +188,9 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 				// this.logger.debug({ line: trimmed }, "Failed to parse JSON line")
 			}
 		} else {
-			// Parse NMEA output
-			const ship = parseNmeaSentence(trimmed)
+			// Parse NMEA output. Multi-sentence groups are reassembled here;
+			// a single sentence still goes through parseNmeaSentence.
+			const ship = this.consumeNmea(trimmed)
 			if (ship) {
 				return {
 					timestamp: new Date(),
@@ -182,6 +201,119 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 			}
 		}
 		return null
+	}
+
+	/**
+	 * Sentences dropped because the NMEA XOR checksum was missing or wrong.
+	 * Read-only. Also counted in `stats.errors`.
+	 */
+	get checksumErrors(): number {
+		return this.checksumErrorCount
+	}
+
+	/**
+	 * Reassemble `!AIVDM` / `!AIVDO` groups. At most 8 groups, each dropped
+	 * after 2 s. Fragments must arrive in order; a gap drops the group.
+	 * The checksum is verified before a sentence can enter the fragment buffer.
+	 * A bad fragment never enters, so a group that is missing it times out.
+	 */
+	private consumeNmea(sentence: string): ShipData | null {
+		const now = Date.now()
+		this.expireFragments(now)
+		if (
+			(sentence.startsWith("!") || sentence.startsWith("$")) &&
+			!nmeaChecksumValid(sentence)
+		) {
+			this.noteChecksumFailure()
+			return null
+		}
+		const parts = inspectNmea(sentence)
+		if (!parts || parts.total <= 1) return parseNmeaSentence(sentence)
+		return this.consumeFragment(parts, now)
+	}
+
+	/** Count a checksum drop and debug-log at most once per minute. */
+	private noteChecksumFailure(): void {
+		this.stats.errors++
+		this.checksumErrorCount++
+		const now = Date.now()
+		if (now - this.lastChecksumLogAt < CHECKSUM_LOG_INTERVAL_MS) return
+		this.lastChecksumLogAt = now
+		this.logger.debug(
+			{ checksumErrors: this.checksumErrorCount },
+			"Dropped an AIS NMEA sentence with a missing or wrong checksum",
+		)
+	}
+
+	private consumeFragment(parts: NmeaParts, now: number): ShipData | null {
+		if (parts.total < 2 || parts.fragment < 1 || parts.fragment > parts.total) {
+			return null
+		}
+		const key = `${parts.talker}:${parts.seqId}:${parts.channel}`
+		if (parts.fragment === 1) {
+			// A second opening fragment means the group is incomplete or two
+			// groups collided. Drop it and discard this fragment so the next
+			// sentence cannot finish the previous payload.
+			if (this.fragmentGroups.has(key)) {
+				this.fragmentGroups.delete(key)
+				return null
+			}
+			if (this.fragmentGroups.size >= MAX_PENDING_FRAGMENTS) {
+				const oldest = this.oldestFragmentKey()
+				if (oldest !== undefined) this.fragmentGroups.delete(oldest)
+			}
+			this.fragmentGroups.set(key, {
+				total: parts.total,
+				next: 2,
+				payloads: [parts.payload],
+				startedAt: now,
+			})
+			return null
+		}
+		const group = this.fragmentGroups.get(key)
+		if (
+			!group ||
+			group.total !== parts.total ||
+			group.next !== parts.fragment
+		) {
+			if (group) this.fragmentGroups.delete(key)
+			return null
+		}
+		group.payloads.push(parts.payload)
+		group.next += 1
+		if (parts.fragment < parts.total) return null
+		this.fragmentGroups.delete(key)
+		const at = new Date(now)
+		const decoded = decodeAisPayload(group.payloads.join(""), {
+			fillBits: parts.fillBits,
+			at,
+		})
+		if (!decoded) return null
+		return shipFromDecoded(decoded, at)
+	}
+
+	private expireFragments(now: number): void {
+		for (const [key, group] of this.fragmentGroups) {
+			if (now - group.startedAt >= FRAGMENT_TIMEOUT_MS) {
+				this.fragmentGroups.delete(key)
+			}
+		}
+	}
+
+	private oldestFragmentKey(): string | undefined {
+		let bestKey: string | undefined
+		let bestAt = Infinity
+		for (const [key, group] of this.fragmentGroups) {
+			if (
+				bestKey === undefined ||
+				group.startedAt < bestAt ||
+				(group.startedAt === bestAt && key < bestKey)
+			) {
+				bestKey = key
+				bestAt = group.startedAt
+			}
+		}
+		return bestKey
 	}
 
 	/**
@@ -331,41 +463,92 @@ function parseAisCatcherOptions(
 	}
 }
 
+/** Fields of one NMEA AIS sentence, checksum already removed. */
+interface NmeaParts {
+	/** `AIVDM` (heard) or `AIVDO` (own vessel). */
+	talker: string
+	total: number
+	fragment: number
+	seqId: string
+	channel: string
+	payload: string
+	fillBits: number
+}
+
 /**
- * Parses an NMEA AIS sentence into ShipData.
+ * NMEA 0183 checksum. XOR of the characters strictly between the leading
+ * `!` or `$` and `*`, compared with the two hex digits after `*`
+ * (case-insensitive). Nothing may follow those two digits.
+ */
+export function nmeaChecksumValid(sentence: string): boolean {
+	const lead = sentence.charCodeAt(0)
+	if (lead !== 0x21 && lead !== 0x24) return false
+	const star = sentence.indexOf("*")
+	if (star < 1) return false
+	const hex = sentence.slice(star + 1)
+	if (!/^[0-9A-Fa-f]{2}$/.test(hex)) return false
+	let checksum = 0
+	for (let i = 1; i < star; i++) checksum ^= sentence.charCodeAt(i)
+	return checksum === Number.parseInt(hex, 16)
+}
+
+/**
+ * Split an AIS sentence. Returns null unless it has the same shape
+ * parseNmeaSentence has always required (prefix and at least 7 fields).
+ * The NMEA ingest path verifies the checksum before calling this.
+ * This function does not check it again, so a direct caller can still
+ * decode a payload whose fixture checksum is wrong.
+ */
+function inspectNmea(sentence: string): NmeaParts | null {
+	if (!sentence.startsWith("!AIVDM") && !sentence.startsWith("!AIVDO")) {
+		return null
+	}
+	const star = sentence.indexOf("*")
+	const body = star >= 0 ? sentence.slice(0, star) : sentence
+	const parts = body.split(",")
+	if (parts.length < 7) return null
+	const payload = parts[5]
+	if (!payload || payload.length < 1) return null
+	const total = Number(parts[1])
+	const fragment = Number(parts[2])
+	if (!Number.isInteger(total) || !Number.isInteger(fragment)) return null
+	const fillField = parts[6] ?? ""
+	const fillBits = /^[0-5]$/.test(fillField) ? Number(fillField) : 0
+	return {
+		talker: sentence.slice(1, 6),
+		total,
+		fragment,
+		seqId: parts[3] ?? "",
+		channel: parts[4] ?? "",
+		payload,
+		fillBits,
+	}
+}
+
+/**
+ * Parses one NMEA AIS sentence into ShipData.
  *
- * NMEA AIS sentences contain encoded AIS data that needs to be decoded.
- * This function handles the basic sentence parsing and extracts the MMSI
- * from the decoded payload.
+ * Multi-sentence reassembly lives on the decoder instance. This function
+ * decodes only the payload in this sentence. Fill bits on the sentence are
+ * not treated as data.
  *
  * @param sentence - NMEA sentence string (e.g., "!AIVDM,1,1,,A,13u@Dp0P00PH=3pN4T0,0*7D")
  * @returns ShipData or null if parsing fails
  */
 export function parseNmeaSentence(sentence: string): ShipData | null {
-	// Check for AIS sentence prefix
-	if (!sentence.startsWith("!AIVDM") && !sentence.startsWith("!AIVDO")) {
-		return null
-	}
+	const parts = inspectNmea(sentence)
+	if (!parts) return null
+	const at = new Date()
+	const decoded = decodeAisPayload(parts.payload, {
+		fillBits: parts.fillBits,
+		at,
+	})
+	if (!decoded) return null
+	return shipFromDecoded(decoded, at)
+}
 
-	// Split the sentence into parts
-	const parts = sentence.split(",")
-	if (parts.length < 7) {
-		return null
-	}
-
-	// Extract the payload (6th field, 0-indexed as 5)
-	const payload = parts[5]
-	if (!payload || payload.length < 1) {
-		return null
-	}
-
-	// Decode the AIS payload to extract MMSI and message type
-	const decoded = decodeAisPayload(payload)
-	if (!decoded) {
-		return null
-	}
-
-	return {
+function shipFromDecoded(decoded: DecodedAisPayload, at: Date): ShipData {
+	const ship: ShipData = {
 		mmsi: decoded.mmsi,
 		lat: decoded.lat,
 		lon: decoded.lon,
@@ -373,9 +556,17 @@ export function parseNmeaSentence(sentence: string): ShipData | null {
 		sog: decoded.sog,
 		heading: decoded.heading,
 		navStatus: decoded.navStatus,
-		lastSeen: new Date(),
+		lastSeen: at,
 		messageType: decoded.messageType,
 	}
+	if (decoded.name !== undefined) ship.name = decoded.name
+	if (decoded.callsign !== undefined) ship.callsign = decoded.callsign
+	if (decoded.imo !== undefined) ship.imo = decoded.imo
+	if (decoded.shipType !== undefined) ship.shipType = decoded.shipType
+	if (decoded.destination !== undefined) ship.destination = decoded.destination
+	if (decoded.eta !== undefined) ship.eta = decoded.eta
+	if (decoded.draught !== undefined) ship.draught = decoded.draught
+	return ship
 }
 
 /**
@@ -390,76 +581,240 @@ export interface DecodedAisPayload {
 	sog?: number | undefined
 	heading?: number | undefined
 	navStatus?: number | undefined
+	name?: string | undefined
+	callsign?: string | undefined
+	imo?: number | undefined
+	shipType?: number | undefined
+	destination?: string | undefined
+	eta?: Date | undefined
+	draught?: number | undefined
+}
+
+export interface DecodeAisOptions {
+	/** Unused low bits of the last armored character. Default 0. */
+	fillBits?: number
+	/** Report time for a type 5 ETA. Default is the current time. */
+	at?: Date
 }
 
 /**
  * Decodes an AIS payload from 6-bit ASCII armored format.
  *
- * AIS messages use a 6-bit ASCII encoding where each character represents
- * 6 bits of data. The first 6 bits contain the message type, and bits 8-37
- * contain the 30-bit MMSI.
+ * Types 1–3 keep the previous position decode. Types 18 and 19 add class B
+ * position, types 5 and 19 add static data, and type 24 adds part A (name)
+ * or part B (ship type and callsign).
  *
  * @param payload - The encoded AIS payload string
  * @returns Decoded data or null if decoding fails
  */
-export function decodeAisPayload(payload: string): DecodedAisPayload | null {
-	if (payload.length < 7) {
-		return null
-	}
+export function decodeAisPayload(
+	payload: string,
+	options?: DecodeAisOptions,
+): DecodedAisPayload | null {
+	if (payload.length < 7) return null
+	const fillBits = options?.fillBits ?? 0
+	const bits = armorToBits(payload, fillBits)
+	if (!bits || bits.length < 38) return null
 
-	// Convert payload to bit string
+	const messageType = parseInt(bits.slice(0, 6), 2)
+	if (messageType < 1 || messageType > 27) return null
+	const mmsi = parseInt(bits.slice(8, 38), 2).toString().padStart(9, "0")
+	const result: DecodedAisPayload = { messageType, mmsi }
+
+	if (messageType >= 1 && messageType <= 3) {
+		applyClassAPosition(result, bits)
+	} else if (messageType === 18 || messageType === 19) {
+		applyClassBPosition(result, bits)
+		if (messageType === 19) applyType19Static(result, bits)
+	} else if (messageType === 5) {
+		applyType5(result, bits, options?.at ?? new Date())
+	} else if (messageType === 24) {
+		applyType24(result, bits)
+	}
+	return result
+}
+
+/** ITU-R M.1371 class A position (types 1–3). Unchanged from the previous decode. */
+function applyClassAPosition(result: DecodedAisPayload, bits: string): void {
+	if (bits.length < 168) return
+	const navStatusRaw = parseInt(bits.slice(38, 42), 2)
+	const sogRaw = parseInt(bits.slice(50, 60), 2) / 10
+	const lonRaw = parseSignedInt(bits.slice(61, 89), 28) / 600000
+	const latRaw = parseSignedInt(bits.slice(89, 116), 27) / 600000
+	const cogRaw = parseInt(bits.slice(116, 128), 2) / 10
+	const headingRaw = parseInt(bits.slice(128, 137), 2)
+
+	if (navStatusRaw !== 15) result.navStatus = navStatusRaw
+	if (sogRaw !== 102.3) result.sog = sogRaw
+	if (lonRaw !== 181) result.lon = lonRaw
+	if (latRaw !== 91) result.lat = latRaw
+	if (cogRaw !== 360) result.cog = cogRaw
+	if (headingRaw !== 511) result.heading = headingRaw
+}
+
+/** Class B position (types 18 and 19). Offsets are ITU-R M.1371. */
+function applyClassBPosition(result: DecodedAisPayload, bits: string): void {
+	const sogRaw = readUnsigned(bits, 46, 10)
+	const lonRaw = readSigned(bits, 57, 28)
+	const latRaw = readSigned(bits, 85, 27)
+	const cogRaw = readUnsigned(bits, 112, 12)
+	const headingRaw = readUnsigned(bits, 124, 9)
+	if (sogRaw !== undefined && sogRaw !== 1023) result.sog = sogRaw / 10
+	if (lonRaw !== undefined && lonRaw !== 108_600_000)
+		result.lon = lonRaw / 600000
+	if (latRaw !== undefined && latRaw !== 54_600_000)
+		result.lat = latRaw / 600000
+	if (cogRaw !== undefined && cogRaw !== 3600) result.cog = cogRaw / 10
+	if (headingRaw !== undefined && headingRaw !== 511)
+		result.heading = headingRaw
+}
+
+function applyType19Static(result: DecodedAisPayload, bits: string): void {
+	const name = readAisText(bits, 143, 20)
+	if (name !== undefined) result.name = name
+	const shipType = readUnsigned(bits, 263, 8)
+	if (shipType !== undefined && shipType !== 0) result.shipType = shipType
+}
+
+/** Type 5 static and voyage data. ETA is the next UTC occurrence of the fields. */
+function applyType5(result: DecodedAisPayload, bits: string, at: Date): void {
+	const imo = readUnsigned(bits, 40, 30)
+	if (imo !== undefined && imo !== 0) result.imo = imo
+	const callsign = readAisText(bits, 70, 7)
+	if (callsign !== undefined) result.callsign = callsign
+	const name = readAisText(bits, 112, 20)
+	if (name !== undefined) result.name = name
+	const shipType = readUnsigned(bits, 232, 8)
+	if (shipType !== undefined && shipType !== 0) result.shipType = shipType
+	const month = readUnsigned(bits, 274, 4)
+	const day = readUnsigned(bits, 278, 5)
+	const hour = readUnsigned(bits, 283, 5)
+	const minute = readUnsigned(bits, 288, 6)
+	if (
+		month !== undefined &&
+		day !== undefined &&
+		hour !== undefined &&
+		minute !== undefined
+	) {
+		const eta = etaFromComponents(month, day, hour, minute, at)
+		if (eta) result.eta = eta
+	}
+	const draughtRaw = readUnsigned(bits, 294, 8)
+	if (draughtRaw !== undefined && draughtRaw !== 0) {
+		result.draught = draughtRaw / 10
+	}
+	const destination = readAisText(bits, 302, 20)
+	if (destination !== undefined) result.destination = destination
+}
+
+/** Type 24 part A is a name. Part B is ship type and callsign. */
+function applyType24(result: DecodedAisPayload, bits: string): void {
+	const part = readUnsigned(bits, 38, 2)
+	if (part === 0) {
+		const name = readAisText(bits, 40, 20)
+		if (name !== undefined) result.name = name
+		return
+	}
+	if (part === 1) {
+		const shipType = readUnsigned(bits, 40, 8)
+		if (shipType !== undefined && shipType !== 0) result.shipType = shipType
+		const callsign = readAisText(bits, 90, 7)
+		if (callsign !== undefined) result.callsign = callsign
+	}
+}
+
+/**
+ * Next UTC occurrence of an AIS ETA. 0 / 24 / 60 and impossible dates are absent.
+ */
+function etaFromComponents(
+	month: number,
+	day: number,
+	hour: number,
+	minute: number,
+	at: Date,
+): Date | undefined {
+	if (month === 0 || day === 0 || hour === 24 || minute === 60) return undefined
+	if (month < 1 || month > 12 || day < 1 || day > 31) return undefined
+	if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return undefined
+	// Feb 29 is valid only in a leap year, so the next occurrence may be
+	// several years ahead (the longest gap spans a skipped century leap day).
+	const startYear = at.getUTCFullYear()
+	for (let year = startYear; year <= startYear + 8; year++) {
+		const candidate = utcDate(year, month, day, hour, minute)
+		if (candidate && candidate.getTime() >= at.getTime()) return candidate
+	}
+	return undefined
+}
+
+function utcDate(
+	year: number,
+	month: number,
+	day: number,
+	hour: number,
+	minute: number,
+): Date | undefined {
+	const date = new Date(Date.UTC(year, month - 1, day, hour, minute, 0, 0))
+	if (
+		date.getUTCFullYear() !== year ||
+		date.getUTCMonth() !== month - 1 ||
+		date.getUTCDate() !== day
+	) {
+		return undefined
+	}
+	return date
+}
+
+function armorToBits(payload: string, fillBits: number): string | null {
+	if (!Number.isInteger(fillBits) || fillBits < 0 || fillBits > 5) return null
 	let bits = ""
 	for (const char of payload) {
 		const code = char.charCodeAt(0)
-		// AIS 6-bit ASCII: subtract 48, if > 40 subtract 8 more
 		let value = code - 48
-		if (value > 40) {
-			value -= 8
-		}
-		if (value < 0 || value > 63) {
-			return null
-		}
+		if (value > 40) value -= 8
+		if (value < 0 || value > 63) return null
 		bits += value.toString(2).padStart(6, "0")
 	}
+	if (fillBits === 0) return bits
+	if (fillBits > bits.length) return null
+	return bits.slice(0, bits.length - fillBits)
+}
 
-	// Extract message type (bits 0-5)
-	const messageType = parseInt(bits.slice(0, 6), 2)
-	if (messageType < 1 || messageType > 27) {
-		return null
+function readUnsigned(
+	bits: string,
+	start: number,
+	width: number,
+): number | undefined {
+	const end = start + width
+	if (bits.length < end) return undefined
+	return parseInt(bits.slice(start, end), 2)
+}
+
+function readSigned(
+	bits: string,
+	start: number,
+	width: number,
+): number | undefined {
+	const end = start + width
+	if (bits.length < end) return undefined
+	return parseSignedInt(bits.slice(start, end), width)
+}
+
+/** Six-bit text. Trailing "@" padding is removed; empty text is absent. */
+function readAisText(
+	bits: string,
+	start: number,
+	chars: number,
+): string | undefined {
+	const width = chars * 6
+	if (bits.length < start + width) return undefined
+	let text = ""
+	for (let i = 0; i < width; i += 6) {
+		const value = parseInt(bits.slice(start + i, start + i + 6), 2)
+		text +=
+			value < 32 ? String.fromCharCode(value + 64) : String.fromCharCode(value)
 	}
-
-	// Extract MMSI (bits 8-37, 30 bits)
-	if (bits.length < 38) {
-		return null
-	}
-	const mmsi = parseInt(bits.slice(8, 38), 2).toString().padStart(9, "0")
-
-	// For position reports (types 1, 2, 3), extract additional fields
-	if (messageType >= 1 && messageType <= 3 && bits.length >= 168) {
-		const navStatusRaw = parseInt(bits.slice(38, 42), 2)
-		const sogRaw = parseInt(bits.slice(50, 60), 2) / 10 // Speed in 1/10 knot
-		const lonRaw = parseSignedInt(bits.slice(61, 89), 28) / 600000 // Longitude in 1/10000 min
-		const latRaw = parseSignedInt(bits.slice(89, 116), 27) / 600000 // Latitude in 1/10000 min
-		const cogRaw = parseInt(bits.slice(116, 128), 2) / 10 // Course in 1/10 degree
-		const headingRaw = parseInt(bits.slice(128, 137), 2) // True heading
-
-		const result: DecodedAisPayload = {
-			messageType,
-			mmsi,
-		}
-
-		// Only add fields if they have valid values
-		if (navStatusRaw !== 15) result.navStatus = navStatusRaw
-		if (sogRaw !== 102.3) result.sog = sogRaw // 1023 = not available
-		if (lonRaw !== 181) result.lon = lonRaw // 181 = not available
-		if (latRaw !== 91) result.lat = latRaw // 91 = not available
-		if (cogRaw !== 360) result.cog = cogRaw // 3600 = not available
-		if (headingRaw !== 511) result.heading = headingRaw // 511 = not available
-
-		return result
-	}
-
-	return { messageType, mmsi }
+	const cleaned = text.trim().replace(/@+$/g, "").trim()
+	return cleaned.length > 0 ? cleaned : undefined
 }
 
 /**
@@ -467,9 +822,7 @@ export function decodeAisPayload(payload: string): DecodedAisPayload | null {
  */
 function parseSignedInt(bits: string, bitLength: number): number {
 	const value = parseInt(bits, 2)
-	// Check if the sign bit is set
 	if (bits[0] === "1") {
-		// Two's complement: subtract 2^bitLength
 		return value - Math.pow(2, bitLength)
 	}
 	return value

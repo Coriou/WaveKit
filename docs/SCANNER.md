@@ -32,35 +32,53 @@ One per eligible source (`passive-<sourceId>`): in-window, all protocols, lowest
 
 `POST /api/scanner/jobs` takes a `ScanJobSpec`. Every field is optional; the normalised spec (`job.spec`) carries a `provenance` per field: `operator` (set in the spec), `bandplan`, `measured`, `config` (an explicit setting, today only `fftSize`) or `default`.
 
-| Field              | Default                                                  | Meaning                                                                            |
-| ------------------ | -------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `name`             | none                                                     | Label                                                                              |
-| `sourceId`         | the default source                                       | Source to scan                                                                     |
-| `mode`             | `auto`                                                   | `in-window`, `sweep`, or `auto` (in-window when the scope fits the current window) |
-| `kind`             | `discover`                                               | `monitor` (listen-scan) needs the channelizer; `identify` only via `/identify`     |
-| `ranges`           | the current window                                       | `[{startHz, endHz, rasters?, obwHz?, protocols?}]`                                 |
-| `bandplans`        | none                                                     | Built-in bandplan ids, expanded into ranges                                        |
-| `exclusions`       | none                                                     | `[{startHz, endHz, reason?}]`                                                      |
-| `protocols`        | the bandplans' protocols, else all                       | Priors for classification and the protocols to confirm                             |
-| `sensitivity`      | `scanner.detection.sensitivity` (`normal`)               | Preset, see [Presets and bandplans](#presets-and-bandplans)                        |
-| `thresholdDb`      | adaptive (CFAR)                                          | Fixed detection threshold over the floor, 0–40 dB                                  |
-| `fftSize`          | `auto` (by sample rate)                                  | 512–16384, power of two                                                            |
-| `integrationMs`    | 50 (100 with `high`)                                     | Detection block length                                                             |
-| `dwellMs`          | settle + (`minSurfaceBlocks` + 1) blocks                 | Sweep dwell per hop                                                                |
-| `settleMs`         | marker run + `pllSettleMs`, or measured/configured timer | Sweep settle per hop                                                               |
-| `hold`             | `{policy: "hold", maxHoldMs: 60000, hangMs: 2000}`       | `hold`, `confirm` or `never`; `confirmHoldMs` per class (1.5–10 s)                 |
-| `revisit`          | `{share: 0.3, maxIntervalMs: null}`                      | Share of revisits in a sweep                                                       |
-| `record`           | `{voice: true, analog: true, data: true}`                | What to record                                                                     |
-| `evidence`         | `{psd: true, iq: false}`                                 | Evidence to keep per discovery                                                     |
-| `tuner`            | unchanged                                                | Sweep only: `sampleRateHz`, `gainTenthsDb`, `agc`, `overload: flag \| reduce-gain` |
-| `stop`             | none                                                     | `afterSweeps`, `afterMs` (≥ 1000), `onFirstDecoded`                                |
-| `priority`         | 50                                                       | 0–100, among scanner jobs only                                                     |
-| `takeover`         | `false`                                                  | Consent to disturb other consumers (sweep)                                         |
-| `resume`           | `{autoAfterIdleMs: 60000, onBoot: false}`                | Auto-resume after preemption; resume after a core restart                          |
-| `txDurationHintMs` | 5000                                                     | Transmission length used for the probability-of-intercept warnings                 |
-| `capture`          | `{enabled: false}`                                       | Burst IQ capture, see [Burst IQ capture](#burst-iq-capture-fixtures)               |
+| Field              | Default                                                  | Meaning                                                                                                                                    |
+| ------------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`             | none                                                     | Label                                                                                                                                      |
+| `sourceId`         | the default source                                       | Source to scan                                                                                                                             |
+| `mode`             | `auto`                                                   | `in-window`, `sweep`, or `auto` (in-window when the scope fits the current window)                                                         |
+| `kind`             | `discover`                                               | `monitor` (listen-scan) needs the channelizer; `identify` only via `/identify`                                                             |
+| `ranges`           | the current window                                       | `[{startHz, endHz, rasters?, obwHz?, protocols?, enabled?, name?, dwellMs?, sensitivity?}]`, see [Per-range settings](#per-range-settings) |
+| `bandplans`        | none                                                     | Built-in bandplan ids, expanded into ranges                                                                                                |
+| `exclusions`       | none                                                     | `[{startHz, endHz, reason?}]`                                                                                                              |
+| `protocols`        | covering ranges per frequency, else all                  | Priors for classification and the protocols to confirm                                                                                     |
+| `sensitivity`      | `scanner.detection.sensitivity` (`normal`)               | Preset, see [Presets and bandplans](#presets-and-bandplans)                                                                                |
+| `thresholdDb`      | adaptive (CFAR)                                          | Fixed detection threshold over the floor, 0–40 dB                                                                                          |
+| `fftSize`          | `auto` (by sample rate)                                  | 512–16384, power of two                                                                                                                    |
+| `integrationMs`    | 50 (100 with `high`)                                     | Detection block length                                                                                                                     |
+| `dwellMs`          | settle + (`minSurfaceBlocks` + 1) blocks                 | Sweep dwell per hop                                                                                                                        |
+| `settleMs`         | marker run + `pllSettleMs`, or measured/configured timer | Sweep settle per hop                                                                                                                       |
+| `hold`             | `{policy: "hold", maxHoldMs: 60000, hangMs: 2000}`       | `hold`, `confirm` or `never`; `confirmHoldMs` per class (1.5–10 s)                                                                         |
+| `revisit`          | `{share: 0.3, maxIntervalMs: null}`                      | Share of revisits in a sweep                                                                                                               |
+| `record`           | `{voice: true, analog: true, data: true}`                | What to record                                                                                                                             |
+| `evidence`         | `{psd: true, iq: false}`                                 | Evidence to keep per discovery                                                                                                             |
+| `tuner`            | unchanged                                                | Sweep only: `sampleRateHz`, `gainTenthsDb`, `agc`, `overload: flag \| reduce-gain`                                                         |
+| `stop`             | none                                                     | `afterSweeps`, `afterMs` (≥ 1000), `onFirstDecoded`                                                                                        |
+| `priority`         | 50                                                       | 0–100, among scanner jobs only                                                                                                             |
+| `takeover`         | `false`                                                  | Consent to disturb other consumers (sweep)                                                                                                 |
+| `resume`           | `{autoAfterIdleMs: 60000, onBoot: false}`                | Auto-resume after preemption; resume after a core restart                                                                                  |
+| `txDurationHintMs` | 5000                                                     | Transmission length used for the probability-of-intercept warnings                                                                         |
+| `capture`          | `{enabled: false}`                                       | Burst IQ capture, see [Burst IQ capture](#burst-iq-capture-fixtures)                                                                       |
+| `signalsOnly`      | `false`                                                  | Discover jobs: find signals, never start decoders, see [Signals only](#signals-only)                                                       |
 
 The API converts two § 5.1 shorthands before planning: a range's `spacingHz` with optional `firstChannelHz` (default `startHz + spacingHz / 2`) becomes one raster, and an exclusion `{frequencyHz, widthHz}` becomes `{startHz, endHz}` centred on the frequency.
+
+### Per-range settings
+
+Each range can carry its own settings; a range without them behaves as before.
+
+- `enabled: false` keeps the range in the job (same position, same fields) but skips it: it is not swept, masked or used to pick protocols. A job needs at least one enabled range (`range-empty` otherwise).
+- `name` labels the range (1 to 100 characters).
+- `dwellMs` lengthens or shortens the dwell of the hops that overlap the range. A hop that overlaps several enabled ranges uses the longest of their dwells (a range without one counts at the job's `dwellMs`); the plan shows it as `hop.dwellMs`, and the sweep period adds up the hop dwells. The preview's probability of intercept (detection and decode) for such a hop uses its own dwell; hops without one use the job's `dwellMs`, so plans without per-range dwell are unchanged.
+- `sensitivity` (`low`, `normal`, `high`) sets the detector's false-alarm target inside the range. Integration time stays job-wide, set by the job's `sensitivity`.
+
+### Editing a running job's ranges
+
+`PATCH /api/scanner/jobs/:id` with `ranges` edits a job while it runs. Send back the job's whole `spec.ranges` list (operator ranges first, then bandplan ranges) with the changes; the count and order must match. You can switch ranges on and off and change their `protocols`, `name`, `dwellMs` and `sensitivity`; leaving one of these out of a range clears it. Edges, channel spacing (`rasters`), `obwHz` and the bandplan a range came from are fixed while the job exists: changing them answers 400 `SCANNER_PLAN_INVALID` with a `range-locked` issue naming the range and the fields. Stop the job and create a new one to change them. The hop plan changes at the next hop; masks, protocol matching and probes follow as soon as the PATCH returns. Edits are saved with the job, survive a restart, and are kept by later patches of other keys. If the job's band plan changes under it, an edit applies only to the range it was made for (same position and edges); edits that no longer match are dropped once, with a `range-locked` warning in that PATCH's answer, and never block a PATCH. A `ranges` PATCH whose own edit would no longer land because the band plan changed since the job was read is refused instead (`range-locked`, `reason: "range-plan-changed"`), leaving the job unchanged; read the job again and resend. Before SF1 a `ranges` key in a PATCH was ignored; a client that sends its create body back now gets `range-locked`, so leave `ranges` out unless you mean to edit them.
+
+### Signals only
+
+`signalsOnly: true` makes a discover job find and classify signals without starting decoder trials of its own: no confirm or follow probes. Detection, classification, discoveries, evidence and burst captures work as usual, and identities decoded by configured (ambient) decoders or by other jobs on the same frequency are still attached. A signals-only job never widens the protocols other jobs probe. Use it to map activity without spending CPU on decoders. Monitor jobs cannot use it (`signals-only-unsupported`). It can be switched on and off with a PATCH, effective as soon as the PATCH returns; a probe already holding a signal finishes its hold.
 
 Three ready-to-send examples:
 
@@ -91,6 +109,12 @@ pending ─► starting ─► running ⇄ holding
 
 Auto-resume: once the preemptor leaves (relay control back to `user`, and no REST tuner write for `resume.autoAfterIdleMs`, 60 s by default) the job re-checks its impact. If it is not larger than what was consented, it re-takes the lease and resumes at the same hop; otherwise it goes to `paused(resume-blocked)` and needs `resume` with `takeover: true`. An explicit `resume` from `paused(preempted-*)` arbitrates at once; `takeover` is not required (sending it records the current impact as consented for later auto-resumes). It answers 409 `SCANNER_SOURCE_BUSY` while another job holds the lease or a better waiter exists.
 
+Automatic resume after operator or relay preemption is held by active identify trials on that source and, when an `OperatorActivityPort` is injected, by operator audio or recording. The default composition injects live audio only: it counts while a client listens through a gating squelch (manual threshold below 0, or auto) on the job's source; recording activity is not reported yet. Audio adds a 3-second hang; the full idle interval starts after activity/hang ends. Job REST and `scanner:job` views expose `resumeAt` (ISO deadline or null) and `resumeHeldBy` (`audio`, `identify`, `recording`, or null). An elapsed `resumeAt` reads as the time it was first seen elapsed and stays fixed while resume is pending. Job-to-job lease hand-back is unaffected by these activity holds. Without an operator port, no external audio/recording activity is inferred. `POST …/pause` on `paused(preempted-*)` means **Stay here**: it becomes `paused(operator)` without acquiring the lease and remains explicitly paused across restart, even with `onBoot` set.
+
+A job in `paused(preempted-job)` shows `preemptedBy: { jobId, name }`, the job that holds its tuner now (`name` null when that job has none). It is absent in every other state and when no job holds the lease, and the paused job's `scanner:job` event is sent again when the holder changes.
+
+When job-level `protocols` is omitted, runtime probes and preview use the union of the enabled ranges covering that signal/hop. A neighbouring range's DMR preference does not apply to a Marine VHF signal. Explicit job-level protocols, including an explicit empty list (all), override range preferences.
+
 Explicit `resume` in the other cases:
 
 - `paused(operator)` with the lease: resumes at the same hop.
@@ -109,7 +133,7 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 
 ## Presets and bandplans
 
-`GET /api/scanner/bandplans` lists the plans for the effective region (`region` config; EU, or US/CA → US):
+`GET /api/scanner/bandplans` lists the effective plans. Under the default band-plan stack these are the built-in plans for the effective region (`region` config; EU, or US/CA → US):
 
 | Id                | Region | Range (MHz)       | Rasters               | OBW classes (kHz) | Protocols                             |
 | ----------------- | ------ | ----------------- | --------------------- | ----------------- | ------------------------------------- |
@@ -124,6 +148,23 @@ At the end of a sweep the scanner writes back only the fields it changed, and on
 | `ism-868`         | EU     | 863–870           | none                  | none              | ism                                   |
 | `pager-vhf`       | all    | 137–174           | 12.5 kHz              | 12                | pocsag, flex                          |
 | `marine-vhf`      | all    | 156.0–162.0125    | 25 kHz (AIS excluded) | 16                | analog-fm                             |
+
+The band-plan stack under `/api/bandplans` (see [API.md](API.md#band-plans))
+selects which built-in plans the scanner uses: each enabled built-in pack, in
+stack order, contributes its region's plans above, minus bands hidden with a
+`hidden: true` edit; a plan id already contributed is not repeated. Imported
+packs, operator bands, `skip` and other edits are display-only and change no
+scan range. Job plan ids and the host ranges that operator ranges inherit
+rasters from resolve against this list; a plan that is not in it is
+`range-empty`. A change applies at the next job create, patch or preview; a
+running sweep and a resumed job (explicit, automatic or after a restart) keep
+the plans they were admitted with, while a patch re-checks the job's plan ids.
+Identify priors follow the same list, so hiding a built-in band also drops its
+identify priors. Until the
+band-plan service opens, or if it fails, the scanner uses the built-in list.
+Scan presets only produce job bodies: `GET /api/bandplans/presets/:presetId/job`
+returns a `spec` that a client posts to `POST /api/scanner/jobs`; preset
+`applicable` and `issues` are checked against the effective list.
 
 Sensitivity presets: `low` (false-alarm target 0.25 /MHz/min, 50 ms blocks), `normal` (`detection.faTargetPerMhzMin`, 1.0, 50 ms), `high` (2.0, 100 ms).
 
@@ -160,6 +201,8 @@ Env overrides: `WAVEKIT_SCANNER__CPU_BUDGET_CORES=0.5`, `WAVEKIT_SCANNER__PASSIV
 
 One discovery per emitter: same frequency key, protocol family and identity. Two DMR networks on one channel are two discoveries, cross-linked as co-channel. An observation surfaces as a discovery only when (a) it lasted at least `minSurfaceBlocks` blocks, (b) in a sweep, one block was at least 6 dB over the threshold, (c) a channel-tier classification or a decode is attached (the spectral tier alone never surfaces), or (d) it repeated three times as single blocks. Observations are kept per transmission with signal statistics and the decode evidence.
 
+To find discoveries by what a decoder reported, `GET /api/scanner/discoveries?identity=<kind>:<value>` (for example `identity=dmr-cc:1` or `identity=pocsag-capcode:1234567`) keeps those whose identity has that kind and value, ignoring case and surrounding spaces. The free-text `q` matches the operator label or the identity value; talkgroups, callsigns and other metadata are not searched. See [API.md](API.md#get-apiscannerdiscoveries).
+
 Storage layout under `scanner.storage.dir`:
 
 - `discoveries.json` (snapshot), `journal/` (daily observation journals), `jobs.json`, `settings.json`;
@@ -168,6 +211,14 @@ Storage layout under `scanner.storage.dir`:
 - `captures/` (burst IQ captures).
 
 Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and journal files), `discoveryMaxAgeDays` (discoveries not marked `keep`) and `maxDiscoveries`. When free disk drops below `minFreeDiskMb` the status reports `disk: "disk-low"`: recording and evidence stop; discoveries keep updating. Privacy: identifiers (talkgroups, radio ids, callsigns, capcodes) stay on the host; nothing is uploaded.
+
+### Ignore skips sweeps
+
+Marking a discovery Ignore (`PATCH /api/scanner/discoveries/:id` with `lockout: true`) stops its probes, blocks listen and, since WG2, takes its frequency out of sweeps on the sources it was heard on. Each lockout becomes a runtime exclusion of width max(the discovery's bandwidth, the narrowest raster step of the ranges holding it, 1 kHz) centred on it and clipped to the job's enabled ranges. The sweep's hops no longer list that channel; a hop whose channels are all locked out is dropped. In-window jobs are unchanged. Rules: at most 256 lockout exclusions apply per job (lowest frequency first, the rest are listed unapplied); lockouts never empty a plan (if they would, none applies and all are listed unapplied); they are never written into the job's spec; while a lockout stays set, a PATCH or a restart plans with it again. Clearing or deleting the lockout restores the coverage. A locked-out discovery is never evicted at `maxDiscoveries` or pruned by `discoveryMaxAgeDays` (sweeps no longer hear it, so its last-seen time stops moving); delete it to drop it. Setting, clearing or deleting a lockout replans the affected sweep jobs at once. The plan preview and the job show them as `lockoutExclusions` with `applied`.
+
+### Hit statistics
+
+Each job counts its hits: one per observation attributed to a discovery, per discovery with first and last hit time and whether the job first saw it. `GET /api/scanner/jobs/:id/hits` lists them (most recent first); the job's `progress.hitStats`, `scanner:progress` (`hits`, `newDiscoveries`) and `scanner:discovery` (`jobHits`) carry them too. In memory only: reset when a job starts (not on resume), dropped with the job, empty after a restart. Bounds: 2,000 discoveries tracked per job (later ones count in the totals only) and a 4,096-observation dedupe memory; past either bound the stats say `truncated: true` and are best-effort.
 
 ## Listening
 
@@ -178,7 +229,9 @@ Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and jou
 ## Honesty and limits
 
 - Detection is measured on one strong DMR capture; false-alarm control adapts per range (CFAR), but a fresh dongle needs minutes to learn its spurs.
-- A sweep can miss short transmissions: the preview reports probability of intercept per hop for `txDurationHintMs`.
+- A sweep can miss short transmissions: the preview reports probability of intercept per hop for `txDurationHintMs`, with each hop's own dwell.
+- `scanner:progress` reaches WS clients at up to 2 Hz per job (one per 500 ms); every other scanner message keeps one per key per second, and all share the `ws.maxMessagesPerSecond` budget.
+- That budget is shared with `scanner:activity`: when slots are scarce the limiter sends state messages first, then progress, then activity, so faster progress can delay activity updates (each still gets its latest state eventually).
 - P25, NXDN, D-STAR, dPMR and DMR repeater rules are unvalidated until captures exist; those results stay `candidate` unless dsd-fme decodes them.
 - Marker settle needs the RTL2832 test mode to reach the core; over some rtlmux/Wi-Fi paths it does not, and timer settle makes sweeps about 6× slower.
 - Before the channelizer, one confirm probe runs at a time; on a Pi 4 even that may exceed the CPU budget.
@@ -192,6 +245,8 @@ Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and jou
 - Spectrum-only clients receive no automatic profile notification for that fatal failure. Consult `scanner:status` or `GET /api/spectrum` when frames stop; re-subscribe after cleanup to request a fresh engine. Automatic bounded passive recovery and direct display failure notification remain follow-up work.
 - The CLI contract (`docs/CLI-COORDINATION.md`) was implemented without a CLI acknowledgement (user decision, 2026-10-10); later CLI requests become follow-up tasks.
 - Accepted deviation (Task 34a): the capture store has no separate `CaptureExtras` type; it uses `ScannerCapture` directly, so each name has one definition.
+- Per-range `sensitivity` changes only the detector's false-alarm target in that range; integration time stays job-wide. Ranges with identical edges share one target (the most sensitive one set; a range without one counts at the detector's current target). Where ranges overlap only partly, the detector uses the first matching range; overlaps are not split.
+- Per-range `dwellMs` applies to whole hops: a hop that also covers a neighbouring range dwells as long as the longest of them.
 
 ### Rules as implemented (spec wording notes)
 
@@ -217,13 +272,15 @@ const hzOf = i => frame.startHz + (i + 0.5) * frame.binHz
 
 **Selection.** `{"type":"subscribe","channels":["spectrum"]}` without options gets the default profile (`scanner.ws.spectrumHz` 10 × `scanner.ws.spectrumBins` 512, both runtime-PATCHable) on every eligible source. `"options":{"spectrum":{"sourceId":"rtl","hz":25,"bins":2048}}` selects one source and one profile for that client: `hz` is snapped to 0.5 and clamped to 0.5–25, `bins` rounded and clamped to 128–2048, omitted fields take the default's values. Subscribing again switches without a gap; subscribing without options returns to the default selection; `unsubscribe` or a disconnect releases the demand. Rapid re-subscribes coalesce: only the latest is answered.
 
-**`spectrum:profile`** is sent to that client only, as the ack to a subscribe or as a notice after a permanent source removal or a default-profile change that remapped it: `{selection: "none" | "default" | "source", sourceId, profile: {key, hz, bins} | null, effectiveHz, outcome: "default" | "exact" | "nearest" | "rejected" | "removed", adjusted: ("hz" | "bins" | "profile-limit")[], removedSourceId?, code?, message?}`. `selection: "none"` means no frames. A `rejected` request (`SPECTRUM_OPTIONS_INVALID`, `SPECTRUM_SOURCE_NOT_FOUND`, `SPECTRUM_SOURCE_NOT_IQ`, `SPECTRUM_SOURCE_REMOVED`, `SPECTRUM_ENGINE_ERROR`) keeps the previous selection.
+**`spectrum:profile`** is sent to that client only, as the ack to a subscribe or as a notice after a permanent source removal or a default-profile change that remapped it: `{selection: "none" | "default" | "source", sourceId, profile: {key, hz, bins} | null, effectiveHz, outcome: "default" | "exact" | "nearest" | "rejected" | "removed", adjusted: ("hz" | "bins" | "profile-limit" | "averaging" | "backfillMs")[], backfillFrames?, removedSourceId?, code?, message?}`. `selection: "none"` means no frames. A `rejected` request (`SPECTRUM_OPTIONS_INVALID`, `SPECTRUM_SOURCE_NOT_FOUND`, `SPECTRUM_SOURCE_NOT_IQ`, `SPECTRUM_SOURCE_REMOVED`, `SPECTRUM_ENGINE_ERROR`) keeps the previous selection.
 
-**Limits.** The server serves the nearest admissible profile and never rejects a request for its size. Above `scanner.ws.spectrumMaxProfiles` (4 distinct non-default profiles over all sources; config-only, 1–16) a request maps to an active profile on that source (preferring one not larger than the request) or to the default, with `outcome: "nearest"` and `adjusted: ["profile-limit"]`. `GET /api/spectrum` reports `limits`.
+**Limits.** The server serves the nearest admissible profile and never rejects a request for its size. Above `scanner.ws.spectrumMaxProfiles` (4 distinct non-default profiles over all sources; config-only, 1–16) a request maps to an active profile on that source (preferring one not larger than the request) or to the default, with `outcome: "nearest"` and `adjusted: ["profile-limit"]`. Averaged profiles count against the same limit; an averaged request maps to the nearest profile with the same averaging, else to averaging off (the default always qualifies), adding `"averaging"` to `adjusted` when the averaging changed. `GET /api/spectrum` reports `limits` (also `averaging` 1–32 and `backfill` bounds).
+
+**Averaging and backfill (opt-in, per client).** `options.spectrum.averaging` (1–32, default 1 = off) gives an exponential average over n frames per bin in dBFS after each frame's max-hold (`avg += (frame − avg) / n`, seeded with the first frame, restarted on a new epoch, stream or bin layout). It is part of the profile: the key becomes `<hz>:<bins>:a<n>` and `profile.averaging` is set only when n > 1; clients that never send `averaging` never get an averaged profile. `options.spectrum.backfillMs` (0–10000, default 0 = none) replays recent frames of the current stream and epoch after the ack; the ack's `backfillFrames` says how many follow. Without either option a client gets exactly the pre-WG1 messages.
 
 **Cadence and resolution.** One frame per `ceil(blockHz / hz)` block summaries, with `blockHz = 1000 / integrationMs` (20 at the default): 25 Hz gives 20 Hz, 10 or 15 Hz gives 10 Hz. `effectiveHz` is that cadence while blocks flow and an upper bound across sweep settles and gaps. `binCount ≤ bins` (never upsampled) and `binHz` is the true width; `nativeBinHz` is `fs / fftSize`, so `binHz / nativeBinHz` is the total max-hold factor. The engine's summary budget `scanner.ws.spectrumSummaryBins` (2048, config-only, 512–2048) caps the detail any profile can get; it is not a client setting.
 
-**Ordering and client rules.** A `spectrum` subscriber gets the current state on subscribe (ack, then one snapshot per source of the current epoch, then live frames). This is not a replay of missed messages. A snapshot frame has `snapshot: true` and is the latest block of the current epoch at the client's profile (none while a retune settles). Reset the waterfall on every `spectrum:profile`, except that an `outcome: "removed"` notice with `selection: "default"` drops only `removedSourceId`'s waterfall. Compare epochs for equality only; they restart with the engine. Spectrum messages bypass the scanner limiter and do not count toward `ws.maxMessagesPerSecond`.
+**Ordering and client rules.** A `spectrum` subscriber gets the current state on subscribe (ack, then one snapshot per source of the current epoch, then live frames). The snapshot is not a replay of missed messages. With `backfillMs` the ack is followed by up to 64 `backfill: true` frames (oldest first, at most 512 KiB of message JSON) before the snapshot; a backfill frame has no `snapshot`, its `at` is the arrival of its newest block, and the snapshot's block is not replayed. Backfill covers only the current epoch, so it never spans a retune. A snapshot frame has `snapshot: true` and is the latest block of the current epoch at the client's profile (none while a retune settles). Reset the waterfall on every `spectrum:profile`, except that an `outcome: "removed"` notice with `selection: "default"` drops only `removedSourceId`'s waterfall. Compare epochs for equality only; they restart with the engine. Spectrum messages bypass the scanner limiter and do not count toward `ws.maxMessagesPerSecond`.
 
 Engines run while a job or a `spectrum` client needs them, also with `scanner.enabled: false`. `tuningTrust` on frames: `unverified` frames have an untrusted frequency axis (grey it out). Status warnings (`GET /api/spectrum` `sources[].warnings`): `untracked-retune` (the scene moved without a command the core saw; the shift is reported when it can be estimated) and `host-centre-mismatch` (the receiver reports another centre than the core's caps). `GET /api/spectrum/occupancy` returns hourly duty per 12.5 kHz bucket for the last 7 days.
 

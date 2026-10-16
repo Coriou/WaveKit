@@ -221,6 +221,16 @@ export interface DsdFmeVoiceCallState {
 	active: boolean
 	startedAt: string
 	endedAt?: string
+	/** WG2 (lane X fills these): DMR colour code. */
+	colourCode?: number
+	/** P25 NAC, upper-case hex. */
+	nac?: string
+	/** Encryption algorithm id (hex). */
+	algorithmId?: string
+	keyId?: string
+	/** NXDN RAN. */
+	ran?: number
+	errors?: { crc: number; fec: number }
 }
 
 /** Default per-call recording retention. */
@@ -414,6 +424,47 @@ function isClearAlgorithm(alg: string): boolean {
 	return value === 0x80 || value === 0
 }
 
+/** Upper-case hex, or undefined when the stored field is not hex. */
+function upperHex(value: string | undefined): string | undefined {
+	if (value === undefined) return undefined
+	const hex = value.trim().toUpperCase()
+	if (!/^[0-9A-F]+$/.test(hex)) return undefined
+	return hex
+}
+
+/**
+ * Copy known call-state metadata onto a voice-call event (WG2 req 10).
+ * Absent fields are left off the object (exactOptionalPropertyTypes).
+ * `algorithmId` is only set for an encrypted call or a non-clear algorithm.
+ */
+function applyVoiceMetadata(
+	state: DsdFmeVoiceCallState,
+	source: {
+		dmr?: DmrMetadata | undefined
+		p25?: P25Metadata | undefined
+		nxdn?: NxdnMetadata | undefined
+		quality?: CallQuality | undefined
+		encrypted: boolean
+	},
+): void {
+	if (source.dmr?.cc !== undefined) state.colourCode = source.dmr.cc
+	const nac = upperHex(source.p25?.nac)
+	if (nac !== undefined) state.nac = nac
+	const alg = upperHex(source.p25?.alg)
+	if (alg !== undefined && (source.encrypted || !isClearAlgorithm(alg))) {
+		state.algorithmId = alg
+	}
+	const keyId = upperHex(source.p25?.keyId)
+	if (keyId !== undefined) state.keyId = keyId
+	if (source.nxdn?.ran !== undefined) state.ran = source.nxdn.ran
+	if (source.quality !== undefined) {
+		state.errors = {
+			crc: source.quality.crcErrs,
+			fec: source.quality.fecErrs,
+		}
+	}
+}
+
 /** Fields of the call_start / call_end data this decoder publishes. */
 interface CallEventData {
 	callId?: string
@@ -425,6 +476,10 @@ interface CallEventData {
 	source?: number | null
 	slot?: number | undefined
 	flags?: { encrypted?: boolean; wavFileUpdate?: boolean }
+	dmr?: DmrMetadata
+	p25?: P25Metadata
+	nxdn?: NxdnMetadata
+	quality?: CallQuality
 }
 
 /** Error event for rolling window tracking */
@@ -680,19 +735,28 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const data = output.data as CallEventData
 		if (data.flags?.wavFileUpdate || data.callId === undefined) return
 		const active = output.type === "call_start"
+		const encrypted = active
+			? data.encrypted === true
+			: data.flags?.encrypted === true
+		const live = this.callState?.callId === data.callId ? this.callState : null
 		const state: DsdFmeVoiceCallState = {
 			callId: data.callId,
 			protocol: data.protocol ?? null,
 			talkgroup: data.talkgroup ?? null,
 			source: data.source ?? null,
 			slot: data.slot ?? null,
-			encrypted: active
-				? data.encrypted === true
-				: data.flags?.encrypted === true,
+			encrypted,
 			active,
 			startedAt: data.startedAt ?? output.timestamp.toISOString(),
 			...(data.endedAt !== undefined ? { endedAt: data.endedAt } : {}),
 		}
+		applyVoiceMetadata(state, {
+			dmr: data.dmr ?? live?.dmr,
+			p25: data.p25 ?? live?.p25,
+			nxdn: data.nxdn ?? live?.nxdn,
+			quality: data.quality ?? live?.quality,
+			encrypted,
+		})
 		this.emit("voice-call", state)
 		if (!active) this.schedulePrune(RECORDING_PRUNE_DELAY_MS)
 	}
@@ -723,6 +787,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			active: true,
 			startedAt: call.startTime.toISOString(),
 		}
+		applyVoiceMetadata(state, {
+			dmr: call.dmr,
+			p25: call.p25,
+			nxdn: call.nxdn,
+			quality: call.quality,
+			encrypted: true,
+		})
 		this.emit("voice-call", state)
 	}
 

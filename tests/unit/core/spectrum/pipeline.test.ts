@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
+import { usableEdgeBins } from "../../../../src/core/spectrum/detector.js"
+import type { CfarRange } from "../../../../src/core/spectrum/detector.js"
 import { SpectrumPipeline } from "../../../../src/core/spectrum/pipeline.js"
+import type { CfarMaskRange } from "../../../../src/core/spectrum/types.js"
 import type { WaveKitError } from "../../../../src/utils/errors.js"
 import {
 	addInto,
@@ -14,6 +17,7 @@ import {
 	CENTRE,
 	FS,
 	Harness,
+	N,
 	pipelineConfig,
 } from "./pipeline-harness.js"
 
@@ -324,5 +328,80 @@ describe("SpectrumPipeline", () => {
 		expect(near.every(t => t.flags.obwBiased)).toBe(true)
 		expect(far.length).toBeGreaterThan(0)
 		expect(far.every(t => !t.flags.obwBiased)).toBe(true)
+	})
+})
+
+describe("pipeline CFAR ranges", () => {
+	const binHz = FS / N
+
+	function rfOf(centreHz: number, bin: number): number {
+		return centreHz + (bin - N / 2) * binHz
+	}
+
+	function cfarRanges(
+		centreHz: number,
+		cfarRangesIn: CfarMaskRange[],
+	): CfarRange[] {
+		const pipeline = new SpectrumPipeline(pipelineConfig())
+		pipeline.handle({
+			kind: "masks",
+			exclusions: [],
+			cfarRanges: cfarRangesIn,
+			burstRanges: [],
+			rasters: [],
+			obwHz: [],
+			inWindow: true,
+		})
+		return (
+			pipeline as unknown as {
+				cfarRanges(centreHz: number): CfarRange[]
+			}
+		).cfarRanges(centreHz)
+	}
+
+	it("copies faTargetPerMhzMin onto the merged range and leaves it off otherwise", () => {
+		const startHz = rfOf(CENTRE, 40)
+		const endHz = rfOf(CENTRE, 80)
+		const key = `${Math.round(startHz)}:${Math.round(endHz)}`
+		const withTarget = cfarRanges(CENTRE, [
+			{ startHz, endHz, faTargetPerMhzMin: 1.5 },
+		]).find(r => r.key === key)
+		expect(withTarget).toEqual({
+			startBin: 40,
+			endBin: 80,
+			key,
+			burst: false,
+			faTarget: 1.5,
+		})
+		const without = cfarRanges(CENTRE, [{ startHz, endHz }]).find(
+			r => r.key === key,
+		)
+		expect(without).toEqual({ startBin: 40, endBin: 80, key, burst: false })
+		expect(without?.faTarget).toBeUndefined()
+	})
+
+	it("does not merge adjacent bins of one key when their targets differ", () => {
+		const centre = 33_000.2
+		const a = { startHz: 1000.1, endHz: 5000.1, faTargetPerMhzMin: 0.25 }
+		const b = { startHz: 1000.4, endHz: 5000.4, faTargetPerMhzMin: 2 }
+		const key = `${Math.round(a.startHz)}:${Math.round(a.endHz)}`
+		expect(`${Math.round(b.startHz)}:${Math.round(b.endHz)}`).toBe(key)
+		const split = cfarRanges(centre, [a, b]).filter(r => r.key === key)
+		expect(split.map(r => r.faTarget)).toEqual([0.25, 2])
+		expect(split[0]!.endBin).toBe(split[1]!.startBin)
+		const at = split[1]!.startBin
+		expect(rfOf(centre, at - 1)).toBeGreaterThanOrEqual(a.startHz)
+		expect(rfOf(centre, at - 1)).toBeLessThan(a.endHz)
+		expect(rfOf(centre, at)).toBeGreaterThanOrEqual(a.endHz)
+		expect(rfOf(centre, at)).toBeLessThan(b.endHz)
+		const merged = cfarRanges(centre, [
+			{ startHz: a.startHz, endHz: a.endHz },
+			{ startHz: b.startHz, endHz: b.endHz },
+		]).filter(r => r.key === key)
+		expect(merged).toHaveLength(1)
+		expect(merged[0]!.startBin).toBe(split[0]!.startBin)
+		expect(merged[0]!.endBin).toBe(split[1]!.endBin)
+		expect(merged[0]!.faTarget).toBeUndefined()
+		expect(usableEdgeBins(N, 0.8)).toBeLessThan(split[0]!.startBin)
 	})
 })

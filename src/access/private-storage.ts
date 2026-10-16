@@ -30,6 +30,12 @@ const ownerSchema = z
 		nonce: z.string().uuid(),
 	})
 	.strict()
+/**
+ * Envelope version stays 1. Device name, kind and last-seen migrate inside
+ * `sessions` (snapshot version 2). An older WaveKit rejects that inner version
+ * while parsing the envelope and fails closed; a second envelope version is
+ * not required for the embedding.
+ */
 const stateSchema = z
 	.object({
 		version: z.literal(1),
@@ -472,7 +478,7 @@ export class PrivateAccessStorage {
 				version: 1,
 				machineToken,
 				credentialBinding: binding,
-				sessions: { version: 1, credentialBinding: binding, sessions: [] },
+				sessions: { version: 2, credentialBinding: binding, sessions: [] },
 			}
 			// Persist setup intent first: a failed/incomplete setup is never regenerated.
 			await this.#atomic(MARKER, MARKER_CONTENT, true)
@@ -499,10 +505,22 @@ export class PrivateAccessStorage {
 		this.#state = result.data
 	}
 
-	async #atomic(name: string, content: string, initial = false): Promise<void> {
+	/**
+	 * `latch: "integrity"` (last-seen writes) still latches on every integrity check
+	 * (directory identity before and after the write, marker, missing state) but not on a
+	 * failed open, write, sync, rename or directory sync: the previous state file stays
+	 * authoritative and the next full commit rewrites it.
+	 */
+	async #atomic(
+		name: string,
+		content: string,
+		initial = false,
+		latch: "always" | "integrity" = "always",
+	): Promise<void> {
 		const temp = join(this.#directory, `.${name}-${randomUUID()}.tmp`)
 		let handle: FileHandle | undefined
 		let ownedTemp = false
+		let writing = false
 		try {
 			if (Buffer.byteLength(content) > MAX_BYTES)
 				throw failure("ACCESS_STORAGE_INVALID")
@@ -515,6 +533,7 @@ export class PrivateAccessStorage {
 				throw failure("ACCESS_STORAGE_INCOMPLETE")
 			if (name === STATE && (await this.#read(MARKER, 64)) !== MARKER_CONTENT)
 				throw failure("ACCESS_STORAGE_INCOMPLETE")
+			writing = true
 			handle = await fs.open(
 				temp,
 				constants.O_WRONLY |
@@ -529,12 +548,14 @@ export class PrivateAccessStorage {
 			await handle.sync()
 			await handle.close()
 			handle = undefined
+			writing = false
 			await this.#assertDirectory()
+			writing = true
 			await fs.rename(temp, join(this.#directory, name))
 			ownedTemp = false
 			await this.#handle.sync()
 		} catch {
-			this.#unavailable = true
+			if (latch === "always" || !writing) this.#unavailable = true
 			throw failure("ACCESS_STORAGE_UNAVAILABLE")
 		} finally {
 			if (handle) await handle.close().catch(() => undefined)
@@ -568,8 +589,39 @@ export class PrivateAccessStorage {
 		})
 	}
 
-	/** Explicit stopped-authority rotation. Old-binding persistence hooks reject. */
-	rotateMachineCredential(random?: AccessRandomBytes): Promise<void> {
+	/**
+	 * WG2 req 11.6: last-seen persistence. Same validation and atomic replace as `persist`, but a
+	 * failed write does not mark the storage unavailable (see #atomic), so one bad hourly write
+	 * never locks out logins.
+	 */
+	persistSeen = (snapshot: SessionSnapshot): Promise<void> => {
+		let copy: unknown
+		try {
+			copy = structuredClone(snapshot)
+		} catch {
+			return Promise.reject(failure("ACCESS_STORAGE_INVALID"))
+		}
+		return this.#serialize(async () => {
+			const current = this.#current()
+			const sessions = validateSnapshot(copy, current.credentialBinding)
+			const next = { ...current, sessions }
+			await this.#atomic(STATE, JSON.stringify(next), false, "integrity")
+			this.#state = next
+		})
+	}
+
+	/**
+	 * Stopped-authority rotation. The same durable write replaces the credential
+	 * and, by default, removes remembered sessions. `keepSessions` rebinds them
+	 * to the new generation instead. Old-binding persistence hooks still reject,
+	 * so a live store cannot write the previous generation.
+	 */
+	rotateMachineCredential(options?: {
+		random?: AccessRandomBytes
+		keepSessions?: boolean
+	}): Promise<void> {
+		const random = options?.random
+		const keepSessions = options?.keepSessions === true
 		return this.#serialize(async () => {
 			const current = this.#current()
 			let machineToken = generateMachineToken(random)
@@ -582,11 +634,21 @@ export class PrivateAccessStorage {
 			if (machineToken === current.machineToken)
 				throw failure("ACCESS_STORAGE_ROTATION_FAILED")
 			const binding = sessionCredentialBinding(digestMachineToken(machineToken))
+			const sessions = validateSnapshot(
+				{
+					version: 2,
+					credentialBinding: binding,
+					sessions: keepSessions
+						? current.sessions.sessions.map(record => ({ ...record }))
+						: [],
+				},
+				binding,
+			)
 			const next: PrivateState = {
 				version: 1,
 				machineToken,
 				credentialBinding: binding,
-				sessions: { version: 1, credentialBinding: binding, sessions: [] },
+				sessions,
 			}
 			await this.#atomic(STATE, JSON.stringify(next))
 			this.#state = next

@@ -6,7 +6,7 @@ Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
 
-## Immediate priorities (re-ordered 2026-10-11)
+## Immediate priorities (re-ordered 2026-10-12)
 
 Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
 and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
@@ -28,11 +28,71 @@ acceptance still need measurement.
 
 The next connected web milestone is **spectrum → tune → identify → inspect →
 listen**. The web dashboard is in design on `design/web-dashboard`; its
-`docs/web/CORE-GAPS.md` (audited at `df1346b`, 2026-10-11) supplies the feature
-inventory mapped below. That design remains separately owned and in progress;
-the current core scope is backend gap analysis and contracts. Web UI implementation
-requires a separate decision. Software,
-local-receiver acceptance and optional Pi acceptance have separate gates.
+`docs/web/CORE-GAPS.md` (re-checked at `49aa3fe`, 2026-10-12, against main at
+`6b4e5dc`) supplies the feature inventory mapped below. Since the previous audit it
+adds a layered band-plan package (country packs, imports with provenance, operator
+edits, station country), per-client FFT size and averaging, analog transmission
+events and more precise scanner items. That design remains separately owned and in
+progress; web UI implementation requires a separate decision.
+
+Owner decisions on 2026-10-12: the decode envelope uses the eight web/brand
+categories (aircraft, marine, aviation data, voice, paging, APRS, sensors, mesh,
+plus `other`) with an entity key and an optional position; the regional registry
+stays the verified layer that band plans link to; built-in scan band plans are
+corrected from cited regulator documents.
+
+Landed in the 2026-10-12 web-gap batch: station identity with provenance
+(`GET /api/station`), the amended envelope spec and helper, `live-audio:level` and
+manual/auto squelch without pipeline restarts, per-decoder `rateHistory` and a
+bounded `GET /api/decoders/:id/log`, per-hop scanner protocols, automatic resume
+held by identify and live listening (`resumeAt`, `resumeHeldBy`, Stay here), and
+cited built-in band plan corrections (EU airband, PMR446/dPMR446, CB, 169 MHz
+metering). Still open from that list: noise squelch, recording activity as a resume
+hold and an EU 466 MHz pager plan without a citable primary source.
+
+Landed in the 2026-10-13 web-gap batch 2 (WG2, core only, [spec](specs/web-gaps-2/requirements.md)):
+Activity presentation (category, protocol, entity key, title, fields, position)
+with APRS and Meshtastic position coalescing; APRS station/object/item and
+Meshtastic node trackers with REST routes and `aprs`/`mesh` channels; a 2 s
+per-entity throttle on vessel, APRS and mesh updates; CTCSS and DTMF on analog
+transmissions; strict AIS NMEA checksums; DMR/P25/NXDN call metadata; device
+names, kinds and coarse last-seen; Ignore (lockout) skips sweeps; per-job scanner
+hit statistics; a Mic-E position fix (West longitudes were decoded as East, and
+the speed/course offsets were missing). CLI changes: its credential reader accepts
+the version 2 session snapshot, and APRS speed is labelled in knots. No web change.
+
+Order of the remaining core gaps, by what they unblock in the dashboard:
+
+1. **Event foundation**: envelope publication, a persistent event store with
+   search and facets, and replay from a cursor for activity and scanner events
+   (Activity, Recordings, map history; §4, §4a, §5c).
+2. **Browser access end to end** before browser controls touch the receiver
+   (onboarding, renewal, TLS/proxy acceptance, operator data in the default
+   deployment; §4). Read-only views and a mock data server do not wait for it.
+   Batch 1 landed server-side: browser-lifecycle acceptance tests, machine
+   device administration, `make dev-protected` and an opt-in Caddy TLS compose
+   profile. Live TLS/browser deployment acceptance remains.
+3. **Band plans and settings**: the layered band-plan model fed to the scanner and
+   spectrum labels, a persisted settings store with provenance, and core scan
+   presets. Batch 1 landed server-side: the band-plan model, a layered resolver,
+   a dedicated store with provenance, SDR++ JSON file import with preview,
+   built-in and operator scan presets and the `/api/bandplans` REST routes.
+   Batch 2 landed server-side: the scanner reads the effective
+   built-in plans of the stack (hidden bands leave it), import commits bind a
+   preview digest, a never-persisted legacy store reports `storeId: null`, and a
+   `bandplans` WebSocket channel announces changes. Remaining: CLI and web
+   consumption, SDR#, Gqrx and URL import, verified packs (gated), a general
+   settings store with YAML/env/UI provenance (spec pending), and country from
+   the station location (gated).
+4. **Scanner and listening follow-ups**: scanner follow-ups batch 1 landed
+   server-side: running-range edits (enable, protocols, name, dwell and
+   sensitivity per range, applied at the next hop), signals-only jobs, the
+   preempting job on a preempted job, and discovery identity search. CLI and web
+   consumption is a follow-up. Remaining: recording activity, then S2/S3
+   acceptance (§5, §5b).
+
+Software, local-receiver acceptance and optional Pi acceptance have separate
+gates. The detailed workstreams:
 
 1. **Connect clients to the accepted S1 contracts** (§5, §8). S1-A and S1-B
    landed locally, including identification, bounded burst capture and shared
@@ -47,8 +107,10 @@ local-receiver acceptance and optional Pi acceptance have separate gates.
    explicit origins across REST, WS and audio. It must land before connecting
    browser controls to the live receiver. Protected pairing and session refresh
    and exact public bootstrap/capabilities plus session-only device inventory are
-   implemented. Browser onboarding/renewal consumption, trusted canonical delivery
-   and TLS/proxy acceptance remain open.
+   implemented. Server-side browser lifecycle acceptance, machine device
+   administration and a reference TLS profile landed in browser access batch 1;
+   the shell's trust anchor is its configured API origin. Browser client
+   consumption and live TLS/proxy acceptance remain open.
    Operator data is protected-only while the default deployment remains legacy;
    changing that default is a separate decision. Regional registry and
    receiver-capability read-only routes are implemented and software-validated in protected and legacy modes, including API drain,
@@ -285,7 +347,8 @@ snapshots are design references, not production consumers yet.
 REST routes have Fastify schemas and Swagger; `/ws` supports channel subscriptions
 and caps incoming messages at 1 MiB. Outgoing payloads are now bounded per client
 at 1 MiB/256 queued messages, with heartbeat and slow/dead-client cleanup. There
-is no general durable event replay contract or SSE endpoint. Operator data has
+is no general durable event replay contract or SSE endpoint. Activity search,
+when enabled, has its own cursor; see §4a. Operator data has
 its own store-ID/revision snapshot contract; spectrum snapshots do not provide
 durable Activity replay. Audio and IQ use separate bounded streaming servers.
 Protected mode enforces authentication and explicit origins; legacy mode remains
@@ -303,6 +366,9 @@ session-only GET/HEAD device inventory publishes committed ID/clocks/current met
 without renewal or online-presence claims. See the
 [access implementation checklist](specs/core-access-policy/tasks.md).
 
+- [x] Device names, kinds and coarse last-seen (WG2, access amendment 4.9–4.12):
+      operator labels via `POST /api/access/devices/label`, `lastSeenAt` as a UTC
+      hour, at most 768 writes a day.
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
       bounded replay and explicit gaps when history is unavailable.
@@ -334,22 +400,71 @@ qualification. Recording integration still follows S2/S3 and deletion-owner gate
 Existing `DecoderOutput` has decoder/type/time/raw data; scanner recovery
 journals, discovery search and settings are separate domain foundations.
 
-The [decode envelope spec](specs/decode-envelope/design.md) defines the
-next unmounted foundation: caller-owned reception IDs, separate producer/ingestion
-clocks, explicit unknown RF context and complete bounded decoded JSON. Public
-publication and Activity persistence remain separate checkpoints; parser fallback
-frequencies cannot establish event-time RF provenance.
+The [decode envelope spec](specs/decode-envelope/design.md) defines
+caller-owned reception IDs, separate producer/ingestion clocks, explicit
+unknown RF context and complete bounded decoded JSON. Batch 1 publishes that
+envelope into the activity store when Activity is enabled. Parser fallback
+frequencies still cannot establish event-time RF provenance.
 
+Event foundation batch 1 is mounted, and since WG1 Activity is on by default
+with bounded retention and admission (250,000 rows, 256 MiB, 3 days; 50/s
+burst 500 globally, 20/s burst 200 per decoder; an operator judgement for a
+Pi-class SD card, not measured; `activity: { enabled: false }` turns it off).
+Decoder output is published as a decode envelope, stored in
+`<stateDir>/activity/activity.db` (on a volume in every compose profile; since
+WG1 the prod profiles' `wavekit-state` volume also persists scanner jobs and
+discoveries, band plans, operator data and API band overrides), and
+served as search, facets and cursor replay. Telemetry outputs (`sync`,
+`rates`, `stats`, `status`, `error`) are not stored. WG1 adds the
+`analog-transmission` kind: each squelch-delimited live-demodulator
+transmission, with event-time frequency. Still deferred: ingestion receipts,
+other kinds, recordings and the catalog, CLI and web views, Docker image
+verification of `node:sqlite` FTS5 in the Node 24 base (a failed probe leaves
+Activity `unavailable` and the rest running), and measured retention.
+
+- [x] Event foundation batch 1: envelope publication, the SQLite/FTS5 store,
+      search, facets and cursor replay. On by default with bounded limits
+      since WG1; `analog-transmission` records from the live demodulator.
+      Receipts, other kinds, recordings/catalog, CLI/web views, image
+      verification and measured retention remain open.
+- [x] Activity presentation (WG2): decoder receptions carry category, protocol,
+      entity key, title, fields and position from their own payload; APRS and
+      Meshtastic positions join the 60 s coalescing. Rows stored before WG2 are
+      not backfilled.
+- [ ] Backfill presentation onto rows stored before WG2 (deferred; old rows keep
+      category `other` and no entity key).
+- [ ] Re-admit receptions coalesced behind a queued row whose write later fails
+      (today they stay dropped, so a failed write can leave up to one 60 s window
+      of that entity unstored).
+- [x] Meshtastic flood copies are dropped in Activity (WG3): same `from`, `id`,
+      `portnum` and payload within 30 s, on every port; copies take no tokens
+      and are not losses.
+- [x] Busy-station fair-share retention (WG3): `activity.retention.policy`
+      `fair-share` (default) water-fills the row and byte caps across decoder
+      feeds, so pages and a mesh keep their rows to the age cap beside a busy
+      ADS-B feed; `oldest-first` keeps the pre-WG3 behaviour. Status reports
+      per-share usage in `retention` and `floodCopies`.
 - [ ] Add a common decode envelope with stable identity, category, title, fields,
       actual channel frequency, source/decoder/job provenance and raw JSON.
       Preserve existing decoder payloads; source centre alone cannot locate an
-      offset probe's decode.
+      offset probe's decode. Batch 1 publishes the envelope on the enabled
+      path with unknown RF provenance (`sourceId` and `frequency` null).
+- [x] Reception provenance (WG3): decoder receptions carry `sourceId` and the
+      channel frequency from the decoder binding or the decoder's own payload
+      frequency (`tuningTrust: "unverified"`).
+- [ ] Event-time channel frequency for offset probes and source retunes, a
+      verified tuning trust, and the AIS channel on ship output (a dual-channel
+      AIS decoder gets `frequency: null` today).
 - [ ] Provide persistent, searchable events with paging and full-text indexing,
       including transcripts when available. Link discoveries, observations and
       recordings without making scanner recovery journals a public event API.
+      Batch 1 stores and searches decoder receptions. Transcripts, discoveries,
+      observations and recording links are not stored yet.
 - [ ] Define live event replay from a cursor with snapshot ordering, duplicate
       handling, restart/retention gaps and filtered subscriptions. Separate
       durable Activity events from replaceable spectrum/status telemetry.
+      Batch 1 replays Activity from a cursor and keeps telemetry off that log.
+      General SSE and replay of every event kind remain open.
 - [ ] Store saved frequencies in core: name, frequency, mode, bandwidth and tone
       settings, shared by all clients. Decoder band overrides and automatically
       observed discoveries remain distinct objects.
@@ -388,6 +503,12 @@ open. Missing proof retains ownership rather than admitting a successor.
       compatible in-window searches and additional-receiver options explicitly. (S1: docs/SCANNER.md)
 - [x] Expose scan jobs, progress, cancellation and discovery reports through the
       shared API/events so CLI and future web clients have equivalent capabilities. (S1: docs/SCANNER.md)
+- [x] Ignore (lockout) skips sweeps (WG2, D2): a locked discovery becomes a runtime
+      exclusion on sweeps of its sources, at most 256 per job, never emptying a
+      plan; probe, recording and monitor gating unchanged. (docs/SCANNER.md)
+- [x] Per-job hit statistics (WG2): hits per discovery, `GET /api/scanner/jobs/:id/hits`,
+      `hitStats` on progress and `jobHits` on discovery events; in memory,
+      best-effort past 2,000 discoveries or 4,096 credited observations.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
@@ -431,15 +552,20 @@ and status. Shared browser audio and richer controls remain open.
 - [ ] Expose AGC off/slow/fast where supported, including FM; implement real noise
       reduction, audio noise blanker, notch, CW BFO and DSB demodulation.
       Current filter presets and AM-based CW/DSB do not fulfill these controls.
-- [ ] Detect CTCSS and decode DCS code/polarity; expose tones on live status and
-      transmission events, saved frequencies and tone squelch. Reuse scanner
-      Task 41 channel features; its DCS presence boolean is not a decoded code.
+- [x] Detect CTCSS and DTMF on analog transmissions (WG2): `tone` on closed
+      `live-audio:transmission` events and `analog-transmission` Activity rows.
+- [ ] Decode DCS code/polarity; expose tones on live status, saved frequencies and
+      tone squelch (deferred from WG2). Reuse scanner Task 41 channel features; its
+      DCS presence boolean is not a decoded code.
 - [ ] Emit analog transmission start/end/duration events from squelch with stable
       identity and recording links. Detector tracks and squelch transmissions
       have different boundaries; reconcile them explicitly.
+- [x] Digital call metadata (WG2): `colourCode`, `nac`, `ran`, `algorithmId`,
+      `keyId` and CRC/FEC `errors` counts on `digital-voice:call` when dsd-fme
+      reports them.
 - [ ] Expose DMR talker alias and a defined error-rate measure after verifying
-      pinned dsd-fme output. Existing CRC/FEC counts and internal bad-signal
-      ratio do not establish voice BER or an alias parser.
+      pinned dsd-fme output (talker alias deferred from WG2). The CRC/FEC counts
+      and internal bad-signal ratio do not establish voice BER or an alias parser.
 
 ## 5c. Recording catalog, capture and playback
 
@@ -591,7 +717,11 @@ same view, and a program can do the watching more reliably than a person.
       averaged FFT of each source's IQ as a raw fanout consumer and publishes it
       on a general `spectrum` WebSocket channel. Rate and bins must suit a
       waterfall: 10 Hz or more and 1024 or more bins for the web; lower for the
-      CLI. Late-joining clients get a matching snapshot. Scanner Task 37a owns
+      CLI. Late-joining clients get a matching snapshot. WG1 adds opt-in
+      per-client waterfall backfill (`backfillMs`, up to 10 s / 64 frames of
+      the current epoch) and per-client exponential averaging (`averaging`
+      1–32); `fftSize` and `bins` stay capped at 2048 until a Pi-class CPU
+      measurement. Scanner Task 37a owns
       this service; support bounded simultaneous profiles and source selection
       without client preferences changing detector behavior. Preserve the planned scanner
       10 Hz / 512-bin default for subscriptions without options.
@@ -663,15 +793,37 @@ Extend existing ADS-B state and bounded in-memory trails. Durable cross-protocol
 position history belongs with §4a's event foundation; map reception coverage is
 separate from scanner RF sweep coverage.
 
-- [ ] Store station latitude/longitude/altitude with provenance, configurable by
-      clients, and pass location to readsb independently of the current
-      `enableMlat` option gate. When unset, derive a visibly approximate location
+- [x] readsb receives `--lat`/`--lon` from `station` independently of
+      `enableMlat`; a complete valid decoder-option coordinate pair wins (a
+      single option coordinate falls back to the full station pair) (WG3).
+- [ ] Make the station latitude/longitude/altitude configurable by clients
+      (today YAML/env with provenance, `GET /api/station`). When unset, derive a visibly approximate location
       from received positions; do not use that estimate as authoritative station
       coordinates for coverage. gpsd is a later extension.
+- [x] AIS vessel current state (WG1): an in-memory tracker of AIS reports
+      (NMEA positions from types 1–3, 18, 19; static data from 5, 19, 24), `GET /api/vessels`, `/api/vessels/stats`,
+      `/api/vessels/:mmsi` and the `vessels` WebSocket channel. No position
+      history.
+- [x] APRS and Meshtastic current state (WG2): in-memory trackers,
+      `/api/aprs/*`, `/api/mesh/*` and the `aprs` and `mesh` channels.
+- [x] Meshtastic device telemetry and neighbour links on nodes (WG3).
+- [ ] Meshtastic GPS time on nodes (deferred from WG2).
+- [x] Throttle `vessel:update`, `aprs:update` and `mesh:update` per entity, 2 s
+      (WG2); identity changes and new/lost are immediate. Aircraft keep today's
+      shape.
+- [x] An absent `sourceId` and an explicit id for the same source no longer
+      restart live demodulation or close a transmission as `config` (WG2 req 7.7).
+- [x] AIS NMEA checksums are verified (WG2); the fixtures were regenerated with
+      the test encoder.
+- [x] Mic-E positions (WG2): West longitudes were decoded as East and the
+      800 kn / 400° offsets were missing; fixed with spec vectors.
+- [x] The CLI WebSocket client ignores a frame on an unknown channel instead of
+      counting it as `ws:invalid` (WG3).
 - [ ] Serve aircraft, vessel, APRS and mesh position trails with persistent
       last-hour replay and a time cursor; reuse existing ADS-B tracking.
-- [ ] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
-      based on explicit station location and valid timestamped positions.
+- [x] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
+      based on explicit station location and valid timestamped positions
+      (WG3, `GET /api/coverage`, in memory).
 - [ ] Serve regional PMTiles, glyphs and style with bounded download/update and
       storage accounting; support the design's online fallback. Offline asset
       hosting follows the basic map and shared settings.

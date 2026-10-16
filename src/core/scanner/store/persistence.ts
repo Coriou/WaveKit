@@ -34,8 +34,8 @@ import type {
 	NormalisedJobSpec,
 	Observation,
 	PauseReason,
-	ScanJobSpec,
 } from "../types.js"
+import type { StoredScanJobSpec } from "../plan/range-contract.js"
 import type {
 	Assert,
 	EngineState,
@@ -89,7 +89,7 @@ export interface PersistedLease {
 export interface PersistedJob {
 	id: string
 	spec: NormalisedJobSpec
-	rawSpec: ScanJobSpec
+	rawSpec: StoredScanJobSpec
 	state: JobState
 	reason?: PauseReason | FailReason
 	createdAt: string
@@ -134,6 +134,11 @@ const ScanRangeSchema = z.object({
 	obwHz: z.array(z.number().positive()).optional(),
 	protocols: z.array(ScannerProtocolSchema).optional(),
 	bandplanId: z.string().optional(),
+	// SF1: jobs persisted before these fields load unchanged (all optional)
+	enabled: z.boolean().optional(),
+	name: z.string().optional(),
+	dwellMs: z.number().nonnegative().optional(),
+	sensitivity: z.enum(["low", "normal", "high"]).optional(),
 })
 const ScanExclusionSchema = z.object({
 	startHz: z.number(),
@@ -201,6 +206,8 @@ export const NormalisedJobSpecSchema = z.object({
 			maxPerHour: z.number().int().min(1).max(60),
 		})
 		.default(() => ({ ...DEFAULT_CAPTURE })),
+	// SF1: absent on jobs persisted before signals-only existed (= false)
+	signalsOnly: z.boolean().optional(),
 	provenance: z.record(
 		z.enum(["operator", "bandplan", "measured", "config", "default"]),
 	),
@@ -237,7 +244,7 @@ const PersistedJobSchema = z.object({
 	id: z.string().min(1),
 	spec: NormalisedJobSpecSchema,
 	/** Checked as a plain object only; the job runner re-validates it with the REST schema (Task 36). */
-	rawSpec: z.custom<ScanJobSpec>(
+	rawSpec: z.custom<StoredScanJobSpec>(
 		v => typeof v === "object" && v !== null && !Array.isArray(v),
 	),
 	state: z.enum([

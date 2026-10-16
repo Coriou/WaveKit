@@ -72,7 +72,8 @@ export function formatAprs(
 		...(lat !== undefined && lon !== undefined
 			? [seg(`${lat.toFixed(2)},${lon.toFixed(2)}`, 2)]
 			: []),
-		...(speed !== undefined ? [seg(`${Math.round(speed)} mph`, 4)] : []),
+		// APRS course/speed and Mic-E speeds are knots; weather wind stays mph.
+		...(speed !== undefined ? [seg(`${Math.round(speed)} kn`, 4)] : []),
 		...(tempC !== undefined ? [seg(tempC, 2)] : []),
 		...(humidity !== undefined ? [seg(`${humidity}%`, 3)] : []),
 		...(wind !== undefined ? [seg(`wind ${Math.round(wind)} mph`, 4)] : []),

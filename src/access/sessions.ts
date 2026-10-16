@@ -1,6 +1,12 @@
-import type { AccessDeviceDto } from "@wavekit/api-types"
+import {
+	ACCESS_DEVICES_LIMITS,
+	accessDeviceKindSchema,
+	accessDeviceNameSchema,
+} from "@wavekit/api-types"
+import type { AccessDeviceDto, AccessDeviceKind } from "@wavekit/api-types"
 import { randomBytes } from "node:crypto"
 import { performance } from "node:perf_hooks"
+import { createLogger } from "../utils/logger.js"
 import { WaveKitError } from "../utils/errors.js"
 import {
 	digestMachineToken,
@@ -17,13 +23,47 @@ export interface SessionRecord {
 	createdAt: number
 	renewedAt: number
 	expiresAt: number
+	/** Operator-set. Never derived from a user agent or address. */
+	name: string | null
+	kind: AccessDeviceKind | null
+	/** Start of the UTC hour of the latest authenticated admission, or null. */
+	lastSeenAt: number | null
 }
 
 /** Sensitive private-storage payload. Never put this in config or logs. */
 export interface SessionSnapshot {
-	version: 1
+	version: 2
 	credentialBinding: string
 	sessions: SessionRecord[]
+}
+
+/** Absent keeps the stored value. Null clears it. */
+export interface SessionLabelPatch {
+	name?: string | null
+	kind?: AccessDeviceKind | null
+}
+
+interface SeenLogger {
+	warn(payload: { event: string; failures: number }): void
+}
+
+/** Fallback when no component logger is injected (unit tests, the setup utility). */
+function defaultSeenLogger(): SeenLogger {
+	const log = createLogger({ level: "warn" })
+	return {
+		warn(payload) {
+			log.warn(payload, "Session last-seen write failed")
+		},
+	}
+}
+const SEEN_LOG_INTERVAL_MS = 60_000
+
+function floorHour(now: number): number | undefined {
+	if (!Number.isSafeInteger(now) || now < 0) return undefined
+	const hour =
+		Math.floor(now / ACCESS_DEVICES_LIMITS.lastSeenResolutionMs) *
+		ACCESS_DEVICES_LIMITS.lastSeenResolutionMs
+	return Number.isSafeInteger(hour) ? hour : undefined
 }
 
 export type ActiveDevicesSnapshot =
@@ -40,6 +80,8 @@ export interface SessionStoreOptions {
 	credentialBinding: string
 	/** Must durably and atomically replace the private snapshot before resolving. */
 	persist: (snapshot: SessionSnapshot) => Promise<void>
+	/** Last-seen writes; a failure must not latch the storage. Defaults to `persist`. */
+	persistSeen?: (snapshot: SessionSnapshot) => Promise<void>
 	/** Startup input only; never reload stale snapshots into a running store. */
 	snapshot?: unknown
 	ttlMs?: number
@@ -48,6 +90,8 @@ export interface SessionStoreOptions {
 	epochNow?: () => number
 	monotonicNow?: () => number
 	random?: AccessRandomBytes
+	/** Defaults to the process logger. Tests inject a counter. */
+	logger?: SeenLogger
 }
 
 interface CreatedSession extends SessionMetadata {
@@ -90,6 +134,7 @@ export class SessionStore {
 	#maxSessions: number
 	#maxListeners: number
 	#persist: (snapshot: SessionSnapshot) => Promise<void>
+	#persistSeen: (snapshot: SessionSnapshot) => Promise<void>
 	#random: AccessRandomBytes
 	#monotonic: () => number
 	#anchorMonotonic: number
@@ -97,17 +142,26 @@ export class SessionStore {
 	#lastNow: number
 	#unavailable = false
 	#queue: Promise<void> = Promise.resolve()
+	/** Latest admission per device waiting for its queued last-seen commit. */
+	#seenPending = new Map<string, { hour: number; now: number }>()
+	#seenFailures = 0
+	#seenLoggedAt = Number.NEGATIVE_INFINITY
+	#log: SeenLogger
 
 	private constructor(options: SessionStoreOptions) {
 		const parsed = sessionOptionsSchema.safeParse(options)
 		if (
 			!parsed.success ||
 			typeof options.persist !== "function" ||
+			(options.persistSeen !== undefined &&
+				typeof options.persistSeen !== "function") ||
 			(options.random !== undefined && typeof options.random !== "function") ||
 			(options.epochNow !== undefined &&
 				typeof options.epochNow !== "function") ||
 			(options.monotonicNow !== undefined &&
-				typeof options.monotonicNow !== "function")
+				typeof options.monotonicNow !== "function") ||
+			(options.logger !== undefined &&
+				typeof options.logger.warn !== "function")
 		)
 			throw new WaveKitError(
 				"Invalid session configuration",
@@ -118,8 +172,10 @@ export class SessionStore {
 		this.#maxSessions = parsed.data.maxSessions
 		this.#maxListeners = parsed.data.maxListenersPerSession
 		this.#persist = options.persist
+		this.#persistSeen = options.persistSeen ?? options.persist
 		this.#random = options.random ?? randomBytes
 		this.#monotonic = options.monotonicNow ?? (() => performance.now())
+		this.#log = options.logger ?? defaultSeenLogger()
 		try {
 			this.#anchorEpoch = (options.epochNow ?? Date.now)()
 			this.#anchorMonotonic = this.#monotonic()
@@ -190,7 +246,22 @@ export class SessionStore {
 			ids.add(record.deviceId)
 			hashes.add(record.tokenHash)
 		}
-		return parsed.data
+		// WG2 R1 #13: a last-seen hour after the current hour (clock moved back) or before the
+		// device's creation hour is not evidence of use; clear it rather than reject the file.
+		const nowHour = floorHour(this.#lastNow)
+		return {
+			...parsed.data,
+			sessions: parsed.data.sessions.map(record => {
+				const created = floorHour(record.createdAt)
+				return record.lastSeenAt !== null &&
+					(nowHour === undefined ||
+						record.lastSeenAt > nowHour ||
+						created === undefined ||
+						record.lastSeenAt < created)
+					? { ...record, lastSeenAt: null }
+					: record
+			}),
+		}
 	}
 
 	#now(): number {
@@ -265,8 +336,7 @@ export class SessionStore {
 		return record ? this.#metadata(record) : undefined
 	}
 
-	/** Detached active committed inventory. Reads never queue, prune, persist or renew. */
-	snapshotActiveDevices(requesterId: string): ActiveDevicesSnapshot {
+	#capturedNow(): number {
 		if (this.#unavailable)
 			throw new WaveKitError(
 				"Session authority unavailable",
@@ -279,18 +349,23 @@ export class SessionStore {
 				"Session authority unavailable",
 				"ACCESS_UNAVAILABLE",
 			)
-		const records = this.#records
-		const requester = records.get(requesterId)
-		if (!requester || requester.expiresAt <= now) return { kind: "missing" }
+		return now
+	}
+
+	/** Detached rows from the committed map. Reads never queue, prune, persist or renew. */
+	#inventory(now: number, requesterId: string | undefined): AccessDeviceDto[] {
 		const devices: AccessDeviceDto[] = []
-		for (const record of records.values()) {
+		for (const record of this.#records.values()) {
 			if (record.expiresAt <= now) continue
 			devices.push({
 				deviceId: record.deviceId,
 				createdAt: record.createdAt,
 				renewedAt: record.renewedAt,
 				expiresAt: record.expiresAt,
-				current: record.deviceId === requesterId,
+				current: requesterId !== undefined && record.deviceId === requesterId,
+				name: record.name,
+				kind: record.kind,
+				lastSeenAt: record.lastSeenAt,
 			})
 		}
 		devices.sort(
@@ -298,7 +373,23 @@ export class SessionStore {
 				a.createdAt - b.createdAt ||
 				(a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0),
 		)
-		return { kind: "active", devices }
+		return devices
+	}
+
+	/** Detached active committed inventory. Reads never queue, prune, persist or renew. */
+	snapshotActiveDevices(requesterId: string): ActiveDevicesSnapshot {
+		const now = this.#capturedNow()
+		const requester = this.#records.get(requesterId)
+		if (!requester || requester.expiresAt <= now) return { kind: "missing" }
+		return { kind: "active", devices: this.#inventory(now, requesterId) }
+	}
+
+	/**
+	 * Committed remembered browsers for a machine principal. No row is current.
+	 * Empty is a real inventory; unavailable and clock failure throw.
+	 */
+	snapshotRememberedDevices(): AccessDeviceDto[] {
+		return this.#inventory(this.#capturedNow(), undefined)
 	}
 
 	/** Explicit export is intentionally sensitive; instance JSON contains no state. */
@@ -308,7 +399,7 @@ export class SessionStore {
 
 	#snapshot(records: Map<string, SessionRecord>): SessionSnapshot {
 		return {
-			version: 1,
+			version: 2,
 			credentialBinding: this.#binding,
 			sessions: [...records.values()].map(record => ({ ...record })),
 		}
@@ -354,6 +445,40 @@ export class SessionStore {
 		const previous = this.#records
 		this.#records = next
 		for (const id of previous.keys()) if (!next.has(id)) this.#notify(id)
+	}
+
+	/**
+	 * Last-seen persistence. Unlike #commit, a failure does not latch the
+	 * authority, notify leases, or change the committed map. The caller counts
+	 * and logs. PrivateAccessStorage.persistSeen does not latch its storage on a
+	 * failed write either (only on an integrity failure found before writing).
+	 */
+	async #commitSeen(
+		next: Map<string, SessionRecord>,
+		now: number,
+	): Promise<void> {
+		try {
+			await this.#persistSeen(this.#snapshot(next))
+		} catch {
+			this.#countSeenFailure(now)
+			return
+		}
+		if (this.#unavailable) return
+		this.#records = next
+	}
+
+	#countSeenFailure(now: number): void {
+		this.#seenFailures += 1
+		if (now < this.#seenLoggedAt + SEEN_LOG_INTERVAL_MS) return
+		this.#seenLoggedAt = now
+		try {
+			this.#log.warn({
+				event: "session-last-seen-failed",
+				failures: this.#seenFailures,
+			})
+		} catch {
+			/* Logging must not latch the authority or fail the admission. */
+		}
 	}
 
 	#failClosed(): void {
@@ -406,6 +531,9 @@ export class SessionStore {
 					createdAt: now,
 					renewedAt: now,
 					expiresAt: now + this.#ttl,
+					name: null,
+					kind: null,
+					lastSeenAt: null,
 				}
 				next.set(deviceId, record)
 				await this.#commit(next)
@@ -439,6 +567,83 @@ export class SessionStore {
 				...this.#metadata(renewed),
 			}
 		})
+	}
+
+	/**
+	 * Operator label. Persists through the mutation queue before resolving true.
+	 * Unknown and expired devices resolve false without a write. A failed persist
+	 * latches the authority, the same as issuance, renewal and revocation.
+	 */
+	label(deviceId: string, patch: SessionLabelPatch): Promise<boolean> {
+		return this.#enqueue(async () => {
+			if (
+				(patch.name !== undefined &&
+					patch.name !== null &&
+					!accessDeviceNameSchema.safeParse(patch.name).success) ||
+				(patch.kind !== undefined &&
+					patch.kind !== null &&
+					!accessDeviceKindSchema.safeParse(patch.kind).success)
+			)
+				throw new WaveKitError("Invalid device label", "MALFORMED_REQUEST")
+			const now = this.#now()
+			const record = this.#records.get(deviceId)
+			if (!record || record.expiresAt <= now) return false
+			const next = new Map(this.#records)
+			next.set(deviceId, {
+				...record,
+				...(patch.name !== undefined ? { name: patch.name } : {}),
+				...(patch.kind !== undefined ? { kind: patch.kind } : {}),
+			})
+			await this.#commit(next)
+			return true
+		})
+	}
+
+	/**
+	 * Coarse last-seen. No-op unless the UTC hour of `now` is newer than the
+	 * committed value. At most one commit is queued per device; a later admission
+	 * while it waits updates the hour it will write (WG2 R2: a next-hour admission
+	 * behind a held mutation is not lost). A failed commit leaves the committed snapshot unchanged,
+	 * does not renew or revoke, and does not latch this authority. The returned
+	 * promise never rejects.
+	 */
+	noteSeen(deviceId: string, now: number): Promise<void> {
+		const done = Promise.resolve()
+		if (this.#unavailable) return done
+		const hour = floorHour(now)
+		if (hour === undefined) return done
+		const record = this.#records.get(deviceId)
+		if (!record || record.expiresAt <= now) return done
+		if (record.lastSeenAt !== null && hour <= record.lastSeenAt) return done
+		const waiting = this.#seenPending.get(deviceId)
+		if (waiting) {
+			if (hour > waiting.hour) this.#seenPending.set(deviceId, { hour, now })
+			return done
+		}
+		this.#seenPending.set(deviceId, { hour, now })
+		const task = this.#enqueue(async () => {
+			const take = this.#seenPending.get(deviceId)
+			this.#seenPending.delete(deviceId)
+			if (!take) return
+			const current = this.#records.get(deviceId)
+			if (!current || current.expiresAt <= take.now) return
+			if (current.lastSeenAt !== null && take.hour <= current.lastSeenAt) return
+			const next = new Map(this.#records)
+			next.set(deviceId, { ...current, lastSeenAt: take.hour })
+			await this.#commitSeen(next, take.now)
+		})
+		void task.catch(() => {
+			this.#seenPending.delete(deviceId)
+		})
+		return task.then(
+			() => undefined,
+			() => undefined,
+		)
+	}
+
+	/** Last accepted authority time. Does not read the clock or latch. */
+	observedAt(): number {
+		return this.#lastNow
 	}
 
 	revoke(principalId: string): Promise<boolean> {

@@ -87,7 +87,8 @@ afterEach(() => {
 	rmSync(sandbox, { recursive: true, force: true })
 })
 
-describe("agents-setup", () => {
+// Real git repositories per test: allow for a loaded host (5 s default flaked).
+describe("agents-setup", { timeout: 30_000 }, () => {
 	it("links the directory named by WAVEKIT_AGENT_MEMORY_DIR and is idempotent", () => {
 		const shared = memoryDir("shared")
 		const first = setup(main, [], { WAVEKIT_AGENT_MEMORY_DIR: shared })

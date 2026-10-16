@@ -13,6 +13,7 @@
  * - 20.4: Emit health events when health changes
  */
 
+import { DecoderObservability } from "./decoder-observability.js"
 import { signalDecoder } from "./process-tools.js"
 import { EventEmitter } from "node:events"
 import { childAccessEnvironment } from "../access/runtime-hygiene.js"
@@ -84,6 +85,8 @@ export abstract class NetworkProducerDecoder
 	readonly id: string
 	readonly type: string
 
+	private readonly observability: DecoderObservability
+
 	protected process: ChildProcess | null = null
 	protected tcpClient: Socket | null = null
 	protected udpClient: UdpSocket | null = null
@@ -119,8 +122,13 @@ export abstract class NetworkProducerDecoder
 		return this.getCaps()
 	}
 
-	constructor(config: NetworkProducerConfig, logger: Logger) {
+	constructor(
+		config: NetworkProducerConfig,
+		logger: Logger,
+		wallClock: () => number = Date.now,
+	) {
 		super()
+		this.observability = new DecoderObservability(wallClock)
 		this.id = config.id
 		this.type = config.type
 		this.config = config
@@ -226,6 +234,11 @@ export abstract class NetworkProducerDecoder
 			this.disconnectFromOutput()
 			this.emit("exit", code, signal)
 		})
+
+		if (this.process.stdout)
+			this.observability.captureLog(this.process.stdout, "stdout")
+		if (this.process.stderr)
+			this.observability.captureLog(this.process.stderr, "stderr")
 
 		// Log stdout/stderr for debugging (some decoders output status info)
 		if (this.process.stdout) {
@@ -392,6 +405,10 @@ export abstract class NetworkProducerDecoder
 	 * Gets the current status of the decoder (Requirements 4.5, 20.1, 20.2, 20.3).
 	 * @returns DecoderStatus with running state, PID, uptime, health, and statistics
 	 */
+	getLog(lines = 200): Array<{ stream: "stdout" | "stderr"; line: string }> {
+		return this.observability.getLog(lines)
+	}
+
 	getStatus(): DecoderStatus {
 		const running = this.process !== null
 		const uptime = running
@@ -406,6 +423,7 @@ export abstract class NetworkProducerDecoder
 			pid: this.process?.pid,
 			uptime,
 			stats: { ...this.stats },
+			rateHistory: this.observability.getRateHistory(),
 			lastOutputAt: this.lastOutputAt ?? undefined,
 			restartCount: this.restartCount,
 			version: this.version,
@@ -694,7 +712,7 @@ export abstract class NetworkProducerDecoder
 
 			for (const output of outputs) {
 				this.stats.eventsOut++
-				this.lastOutputAt = new Date()
+				this.lastOutputAt = this.observability.countOutput()
 				this.outputStream.write(output)
 				this.emit("output", output)
 

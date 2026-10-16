@@ -1,0 +1,55 @@
+# Protected loopback development. scripts/dev-protected.mjs selects this file,
+# provisions throwaway private state, and substitutes the three HTTP port
+# placeholders below. Defaults are the wavekit-dev-protected-defaults line.
+# No receiver, dongle, Docker, or decoders. local-http is development-only.
+# wavekit-dev-protected-defaults: api=9473 analog=9474 digital=9475
+# Only the three placeholders below are substituted. The default digits on the
+# wavekit-dev-protected-defaults line (9473, 9474 and 9475) stay as written.
+sources: []
+decoders: []
+api:
+  host: 127.0.0.1
+  port: __WAVEKIT_DEV_API_PORT__
+audio:
+  tcpPort: 9472
+  monitoring: false
+tunerRelay:
+  enabled: false
+liveDemod:
+  enabled: false
+  httpPort: __WAVEKIT_DEV_ANALOG_PORT__
+digitalVoice:
+  enabled: false
+  httpPort: __WAVEKIT_DEV_DIGITAL_PORT__
+resources:
+  enabled: false
+scanner:
+  enabled: false
+channelizer:
+  enabled: false
+logging:
+  level: info
+access:
+  mode: protected
+  listenerScheme: http
+  exposure: local-http
+  allowedAuthorities:
+    - 127.0.0.1:__WAVEKIT_DEV_API_PORT__
+  allowedOrigins:
+    - http://127.0.0.1:__WAVEKIT_DEV_API_PORT__
+  audio:
+    analog:
+      allowedAuthorities:
+        - 127.0.0.1:__WAVEKIT_DEV_ANALOG_PORT__
+      bindHost: 127.0.0.1
+    digital:
+      allowedAuthorities:
+        - 127.0.0.1:__WAVEKIT_DEV_DIGITAL_PORT__
+      bindHost: 127.0.0.1
+  publicOrigins:
+    api: http://127.0.0.1:__WAVEKIT_DEV_API_PORT__
+    analogAudio: http://127.0.0.1:__WAVEKIT_DEV_ANALOG_PORT__
+    digitalAudio: http://127.0.0.1:__WAVEKIT_DEV_DIGITAL_PORT__
+  healthProbe:
+    target: http://127.0.0.1:__WAVEKIT_DEV_API_PORT__
+    host: 127.0.0.1:__WAVEKIT_DEV_API_PORT__

@@ -274,6 +274,9 @@ export type WsEvent =
 	| { type: "fanout:snapshot"; snapshot: FanoutSnapshot }
 	| WsBackpressureEvent
 	| WsDrainEvent
+	| { type: "live-audio:level" }
+	/** WG1 squelch transmission events: known, not displayed, never invalid. */
+	| { type: "live-audio:transmission" }
 	| { type: "live-audio:status"; status: LiveAudioStatus }
 	| { type: "live-audio:config"; config: LiveAudioConfig }
 	| { type: "live-audio:started" }

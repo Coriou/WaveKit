@@ -19,13 +19,13 @@ const preserved = [
 	],
 	[
 		"src/core/scanner/bandplan/index.ts",
-		3651,
-		"9c64cdaadc08fada6f4c5ce8b3d711edf9b86a5c9ee53db0e1ff110a91e7c1a7",
+		3800,
+		"2fc7ea5c676784a444124e2415784edcad88aeb98fce2873f91ba599d4bb307d",
 	],
 	[
 		"src/core/scanner/bandplan/builtin.ts",
-		4270,
-		"a147b79cdbfbb7fa07c38473a2ee5b68fca495f6648dd7a26cf509de4524a619",
+		7171,
+		"28ef63402d2c4ae4abd9cb4f136d10dc816f936681f8711c5cab3ec6e2ba8809",
 	],
 ] as const
 

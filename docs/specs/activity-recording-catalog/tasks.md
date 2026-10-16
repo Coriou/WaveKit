@@ -1,9 +1,13 @@
 # Activity and recording catalog — tasks
 
-Status: independently reviewed design. A disposable qualification harness and bounded
-guard/micro tests are allocated; production implementation remains unallocated.
-Storage qualification is incomplete and its task remains unchecked. Completion of design does not authorize production edits or shared
-runtime mounts. Follow dependencies; Main assigns owners at each gate.
+Status: independently reviewed design. Event foundation batch 1 is mounted:
+envelope publication, the SQLite store, search, facets and cursor replay run
+when `activity.enabled` is true and stay absent when it is false. Storage
+qualification (task 2) is still open, so tasks 2–8 and the checkpoints stay
+unchecked. Still deferred: receipts, kinds other than decoder-reception and
+ingestion-gap, recordings and the catalog, CLI and web views, Docker image
+verification of the Node 24 base, and measured retention. Follow dependencies;
+Main assigns owners at each remaining gate.
 
 - [x] **1. Draft design review checkpoint.** Audit actual core/envelope, scanner candidate and
       planned S2/S3, native recordings/pruners, CLI and external web references. Resolve
@@ -41,12 +45,18 @@ runtime mounts. Follow dependencies; Main assigns owners at each gate.
       implement worker store/transactional FTS, loss accounting, quotas, migrations and
       recovery. Preserve legacy output and completed envelope behavior. Implement
       properties1–3,5,10 with≥100 runs and crash fixtures. No recording mounts yet.
+      Batch 1 mounted the enabled-path store and decoder ingress. This task stays
+      open: qualification, receipts, migrations and the wider property set are
+      not closed.
       _Requirements: 1.1–1.6, 2.1–2.5, 7.2._
 - [ ] **4. Activity query/replay.** Depends on3. Implement strict filters/indexed
       keyset pages, authenticated cursors, fixed barrier, scannedThrough, duplicate
       handling, restart/retention reset and bounded WS drain. Test property4 and query
       deadlines, filtered-empty pages, live-during-snapshot, restore and slow clients.
       Mount only after protected runtime acceptance; inspect CLI/web consumers.
+      Batch 1 mounted search, facets and cursor replay on the activity routes
+      and the activity WebSocket channel. CLI and web views are not wired, and
+      this task stays open until qualification and protected acceptance land.
       _Requirements: 3.1–3.5, 6.1, 6.6, 7.1–7.3._
 - [ ] **CHECKPOINT B — S2/S3 recording contract freeze.** Scanner S2 establishes
       analog lifecycle/close/sample/provenance/cessation; S3 establishes monitor routing,

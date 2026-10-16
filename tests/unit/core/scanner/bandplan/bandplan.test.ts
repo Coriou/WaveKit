@@ -12,6 +12,8 @@ import {
 } from "../../../../../src/core/scanner/bandplan/index.js"
 import type { Bandplan } from "../../../../../src/core/scanner/bandplan/index.js"
 
+import { rasterItems } from "../../../../../src/core/scanner/plan/hop-planner.js"
+
 const MHz = (x: number) => Math.round(x * 1e6)
 function plan(id: string, region: "EU" | "US" = "EU"): Bandplan {
 	const p = resolveBandplan(id, region)
@@ -20,24 +22,38 @@ function plan(id: string, region: "EU" | "US" = "EU"): Bandplan {
 }
 
 describe("built-in bandplans (spec § 5.1)", () => {
-	it("PMR446: 446.0–446.2 MHz, 12.5 kHz from 446.00625, 9 k digital + 11 k analog", () => {
+	it("PMR446: 446.0–446.2 MHz, 12.5/6.25 kHz rasters, 16 analogue channels", () => {
 		const r = plan("pmr446").ranges
 		expect(r).toEqual([
 			{
 				startHz: MHz(446.0),
 				endHz: MHz(446.2),
-				rasters: [{ spacingHz: 12_500, firstChannelHz: MHz(446.00625) }],
+				rasters: [
+					{ spacingHz: 12_500, firstChannelHz: MHz(446.00625) },
+					{ spacingHz: 6250, firstChannelHz: MHz(446.003125) },
+				],
 				obwHz: [9000, 11_000],
 				protocols: ["analog-fm", "dmr", "dpmr"],
 				bandplanId: "pmr446",
 			},
 		])
 	})
+	it("PMR446 rasters cover 16 analogue and 32 digital carrier frequencies", () => {
+		const r = plan("pmr446").ranges[0]!
+		const counts = r.rasters!.map(
+			raster =>
+				Math.floor((r.endHz - raster.firstChannelHz) / raster.spacingHz) + 1,
+		)
+		expect(counts).toEqual([16, 32])
+		expect(plan("vhf-land-mobile").name).toBe("VHF land mobile")
+		expect(bandplansFor("EU").some(p => /tetra/i.test(p.id))).toBe(false)
+	})
+
 	it("dPMR446 and the land-mobile plans carry their rasters, sub-rasters and OBW classes", () => {
 		expect(plan("dpmr446").ranges[0]).toMatchObject({
-			startHz: MHz(446.1),
+			startHz: MHz(446.0),
 			endHz: MHz(446.2),
-			rasters: [{ spacingHz: 6250, firstChannelHz: MHz(446.103125) }],
+			rasters: [{ spacingHz: 6250, firstChannelHz: MHz(446.003125) }],
 			obwHz: [4500],
 		})
 		const uhf = plan("uhf-land-mobile").ranges[0]!
@@ -102,13 +118,74 @@ describe("built-in bandplans (spec § 5.1)", () => {
 			startHz: MHz(863),
 			endHz: MHz(870),
 		})
-		expect(plan("pager-vhf").ranges[0]).toMatchObject({
+		expect(plan("pager-vhf", "US").ranges[0]).toMatchObject({
 			startHz: MHz(137),
 			endHz: MHz(174),
 			obwHz: [12_000],
 			protocols: ["pocsag", "flex"],
 		})
 	})
+	it("airband uses actual carrier frequencies with exact thirds of 25 kHz", () => {
+		const r = plan("airband").ranges[0]!
+		expect([r.startHz, r.endHz]).toEqual([MHz(118), MHz(137)])
+		expect(r.protocols).toEqual(["analog-am"])
+		expect(r.rasters).toEqual([
+			{ spacingHz: 25_000, firstChannelHz: MHz(118) },
+			{ spacingHz: 25_000 / 3, firstChannelHz: MHz(118) },
+		])
+		const channels = rasterItems([r], [])
+		expect(channels).toHaveLength(2281)
+		expect(channels.every(channel => Number.isInteger(channel.hz))).toBe(true)
+		for (let k = 0; k <= 2280; k++) {
+			const expected = Math.round(MHz(118) + k * (25_000 / 3))
+			const snapped = snapToRaster(expected, r.rasters!, 0)
+			expect(snapped).toEqual({ hz: expected, snapped: true })
+			expect(frequencyKey(snapped.hz, snapped.snapped, 6000)).toBe(
+				`r:${expected}`,
+			)
+		}
+	})
+	it("CB represents exactly 40 CEPT carriers, excluding the five gaps", () => {
+		const ranges = plan("cb").ranges
+		const carriers = ranges.flatMap(r => {
+			const raster = r.rasters![0]!
+			const out: number[] = []
+			for (
+				let hz = raster.firstChannelHz;
+				hz <= r.endHz;
+				hz += raster.spacingHz
+			)
+				out.push(hz)
+			return out
+		})
+		expect(carriers).toHaveLength(40)
+		expect(carriers[0]).toBe(MHz(26.965))
+		expect(carriers.at(-1)).toBe(MHz(27.405))
+		for (const gap of [26.995, 27.045, 27.095, 27.145, 27.195])
+			expect(carriers).not.toContain(MHz(gap))
+		for (const r of ranges)
+			expect(r.protocols).toEqual(["analog-am", "analog-fm"])
+	})
+	it("EU paging excludes only metering, preserving the non-EU fallback", () => {
+		const ranges = plan("pager-vhf").ranges
+		const inside = (hz: number) =>
+			ranges.some(r => hz >= r.startHz && hz <= r.endHz)
+		for (const mhz of [169.4, 169.475]) expect(inside(MHz(mhz))).toBe(false)
+		expect(inside(MHz(169.4) - 1)).toBe(true)
+		expect(inside(MHz(169.475) + 1)).toBe(true)
+		expect(inside(MHz(169.65))).toBe(true)
+		expect(bandplansFor("EU").filter(p => p.id === "pager-vhf")).toHaveLength(1)
+		expect(plan("pager-vhf", "US").ranges[0]).toMatchObject({
+			startHz: MHz(137),
+			endHz: MHz(174),
+		})
+		expect(plan("ism-169").ranges[0]).toMatchObject({
+			startHz: MHz(169.4),
+			endHz: MHz(169.475),
+			protocols: ["ism"],
+		})
+	})
+
 	it("marine VHF never covers the AIS channels but keeps 162.000 MHz", () => {
 		const ranges = plan("marine-vhf").ranges
 		const inside = (hz: number) =>
@@ -124,10 +201,13 @@ describe("built-in bandplans (spec § 5.1)", () => {
 				.map(p => p.id)
 				.sort()
 		expect(ids("EU")).toEqual([
+			"airband",
 			"amateur-2m",
 			"amateur-70cm",
 			"aprs",
+			"cb",
 			"dpmr446",
+			"ism-169",
 			"ism-433",
 			"ism-868",
 			"marine-vhf",

@@ -18,6 +18,14 @@ export interface FreqRange {
 	endHz: number
 }
 
+/**
+ * SF1: a CFAR range of the detector masks. `faTargetPerMhzMin` overrides the pipeline's
+ * false-alarm target for this range only (per-range sensitivity); absent = the pipeline's.
+ */
+export interface CfarMaskRange extends FreqRange {
+	faTargetPerMhzMin?: number
+}
+
 /** A channel raster (§ 5.1): channels at firstChannelHz + n·spacingHz. */
 export interface Raster {
 	spacingHz: number
@@ -142,7 +150,7 @@ export type PipelineInput =
 	| { kind: "pending-epoch"; pending: PendingEpoch }
 	| { kind: "new-stream"; stream: number; centreHz: number; sampleRateHz: number; gainKey: string; tuningTrust: TuningTrust }
 	/** inWindow: true while no sweep lease holds the source; truncated segments then report as `edge` (§ 6.2). */
-	| { kind: "masks"; exclusions: FreqRange[]; cfarRanges: FreqRange[]; burstRanges: FreqRange[]; rasters: Raster[]; obwHz: number[]; inWindow: boolean }
+	| { kind: "masks"; exclusions: FreqRange[]; cfarRanges: CfarMaskRange[]; burstRanges: FreqRange[]; rasters: Raster[]; obwHz: number[]; inWindow: boolean }
 	| { kind: "spectrum-feed"; enabled: boolean }
 
 export type ObservationEndReason =

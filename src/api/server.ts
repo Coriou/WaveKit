@@ -11,6 +11,8 @@
  * - Centralized error handling
  */
 
+import type { StationIdentity } from "@wavekit/api-types"
+import { stationRoutes } from "./routes/station.js"
 import type { FanoutTelemetryProvider } from "../core/source-fanout-router.js"
 import Fastify, { type FastifyInstance, type FastifyError } from "fastify"
 import fastifyCors from "@fastify/cors"
@@ -33,6 +35,15 @@ import type { TunerController } from "../core/tuner-controller.js"
 import type { LiveDemodulator } from "../core/live-demodulator.js"
 import type { DigitalVoiceService } from "../core/digital-voice.js"
 import { WaveKitError } from "../utils/errors.js"
+import { ActivityQueryError } from "../core/activity/query/errors.js"
+import {
+	inertActivityService,
+	type ActivityRuntime,
+	type ActivityUnavailableState,
+} from "../core/activity/runtime.js"
+import { activityRoutes } from "./routes/activity.js"
+import { createActivitySubscriptions } from "./activity-subscriptions.js"
+import type { ActivitySubscriptionHub } from "./activity-subscriptions.js"
 import { healthRoutes } from "./routes/health.js"
 import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
@@ -45,6 +56,11 @@ import { liveAudioRoutes } from "./routes/live-audio.js"
 import { digitalVoiceRoutes } from "./routes/digital-voice.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
+import { vesselRoutes } from "./routes/vessels.js"
+import { meshRoutes } from "./routes/mesh.js"
+import { coverageRoutes } from "./routes/coverage.js"
+import type { CoverageManager } from "../core/coverage/coverage-manager.js"
+import { aprsRoutes } from "./routes/aprs.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
 import { spectrumRoutes } from "./routes/spectrum.js"
@@ -60,6 +76,18 @@ import { SourceStatusPublisher } from "./websocket/source-status-publisher.js"
 import { toApiDecoderInfo } from "./serializers/decoder-status.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
+import type { VesselTracker } from "../core/vessel-tracker.js"
+import type {
+	AprsStation,
+	AprsTrackerStats,
+	MeshNode,
+	MeshTrackerStats,
+	VesselState,
+	VesselTrackerStats,
+} from "@wavekit/api-types"
+import type { MeshTracker } from "../core/mesh-tracker.js"
+import type { AprsTracker } from "../core/aprs-tracker.js"
+import { EntityUpdateThrottle } from "../core/entity-update-throttle.js"
 import { installAccessHooks } from "../access/fastify-adapter.js"
 import type { FastifyAccessController } from "../access/fastify-adapter.js"
 import { registerAccessRoutes } from "../access/access-routes.js"
@@ -72,7 +100,16 @@ import type { OperatorDataService } from "../operator-data/service.js"
 import { operatorDataRoutes } from "../operator-data/routes.js"
 import { sendOperatorDataSnapshot } from "../operator-data/broadcast-adapter.js"
 import type { OperatorDataBroadcastPort } from "../operator-data/broadcast-adapter.js"
+import {
+	createBandPlansBroadcastPort,
+	sendBandPlansSnapshot,
+} from "./websocket/bandplans-broadcast-adapter.js"
 import { regionalRoutes } from "./routes/regional.js"
+import { bandPlanRoutes } from "./routes/bandplans.js"
+import type {
+	BandPlanService,
+	BandPlansBroadcastPort,
+} from "../core/bandplans/contract.js"
 import { receiverCapabilitiesRoutes } from "./routes/receiver-capabilities.js"
 import type { RegionalRegistry } from "../core/regional/registry.js"
 import type { ReceiverCapabilitiesProvider } from "../core/tuner-capabilities/types.js"
@@ -82,6 +119,19 @@ import type { ReceiverCapabilitiesProvider } from "../core/tuner-capabilities/ty
  * Clients can provide their own correlation ID via this header.
  */
 const CORRELATION_ID_HEADER = "x-correlation-id"
+/** WG2 req 9: vessel, APRS and mesh `*:update` messages, at most one per entity per 2 s. */
+const ENTITY_UPDATE_WINDOW_MS = 2000
+
+/**
+ * WG2 req 9.2 identities: a change is sent at once. JSON tuples, so field text containing a
+ * separator cannot collide and null stays distinct from "".
+ */
+export const vesselIdentity = (v: VesselState): string =>
+	JSON.stringify([v.name, v.callsign, v.navStatus, v.shipType, v.destination])
+export const aprsIdentity = (a: AprsStation): string =>
+	JSON.stringify([a.kind, a.symbol, a.comment, a.status, a.killed])
+export const meshIdentity = (n: MeshNode): string =>
+	JSON.stringify([n.longName, n.shortName, n.role, n.hwModel])
 
 export interface ApiServerConfig {
 	publicOrigins?: ProtectedRuntimeAccessConfig["publicOrigins"]
@@ -96,8 +146,11 @@ export interface AudioConfig {
 }
 
 export interface ApiServerDependencies {
+	station?: StationIdentity
 	access?: NamedAccessRuntimeContext
 	regionalRegistry?: RegionalRegistry | null
+	/** Owned: stop() closes it after HTTP drain. Writes mount only with access. */
+	bandPlans?: BandPlanService
 	receiverCapabilitiesProvider?: ReceiverCapabilitiesProvider | null | undefined
 
 	sourceManager: SourceManager
@@ -112,10 +165,20 @@ export interface ApiServerDependencies {
 	digitalVoice?: DigitalVoiceService | undefined
 	resourceAggregator?: ResourceAggregator | undefined
 	aircraftTracker?: AircraftTracker | undefined
+	/** AIS vessel current state (WG1 req 6). */
+	vesselTracker?: VesselTracker | undefined
+	/** Meshtastic node current state (WG2 req 6). */
+	meshTracker?: MeshTracker | undefined
+	/** ADS-B and AIS coverage per bearing (WG3 req 7). */
+	coverage?: Pick<CoverageManager, "query"> | undefined
+	/** APRS station, object and item current state (WG2 req 4). */
+	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
 	spectrum?: SpectrumService | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
+	/** Omitted means Activity is disabled: routes 404 and the socket says so. */
+	activity?: ActivityRuntime
 }
 
 /**
@@ -128,7 +191,9 @@ export interface ApiServerDependencies {
  * - CORS support for browser clients
  */
 export class ApiServer {
+	private readonly station: StationIdentity | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
+	private readonly bandPlans: BandPlanService | undefined
 	private readonly receiverCapabilitiesProvider:
 		| ReceiverCapabilitiesProvider
 		| null
@@ -152,6 +217,16 @@ export class ApiServer {
 	private readonly digitalVoice?: DigitalVoiceService | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
+	private readonly vesselTracker?: VesselTracker | undefined
+	/** Detaches the vessel tracker listeners; the tracker outlives the server. */
+	private vesselWiring: (() => void) | null = null
+	private readonly meshTracker?: MeshTracker | undefined
+	private readonly coverage?: Pick<CoverageManager, "query"> | undefined
+	/** Detaches the mesh tracker listeners; the tracker outlives the server. */
+	private meshWiring: (() => void) | null = null
+	private readonly aprsTracker?: AprsTracker | undefined
+	/** Detaches the APRS tracker listeners and stops its update throttle. */
+	private aprsWiring: (() => void) | null = null
 	private readonly scanner?: ScannerService | undefined
 	private readonly spectrum?: SpectrumService | undefined
 	private readonly audioConfig?: AudioConfig | undefined
@@ -166,14 +241,22 @@ export class ApiServer {
 	private operatorRestRegistered = false
 	private operatorData: OperatorDataService | undefined
 	private operatorObserver: (() => void) | undefined
+	private bandPlansObserver: (() => void) | undefined
 	private operatorCloseResult: Promise<void> | undefined
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
 	private scannerLimiter: WsLimiter<ServerMessage> | null = null
 	private scannerWiring: { dispose(): void } | null = null
 	private spectrumWiring: { dispose(): void } | null = null
+	private readonly activityRuntime: ActivityRuntime | undefined
+	private readonly activityService: ActivityRuntime["service"]
+	private readonly activityReady: boolean
+	private readonly activityUnavailable: ActivityUnavailableState | undefined
+	private readonly activityHub: ActivitySubscriptionHub
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
+		this.station = dependencies.station
 		this.regionalRegistry = dependencies.regionalRegistry
+		this.bandPlans = dependencies.bandPlans
 		this.receiverCapabilitiesProvider =
 			dependencies.receiverCapabilitiesProvider
 		this.access = dependencies.access
@@ -190,6 +273,10 @@ export class ApiServer {
 		this.digitalVoice = dependencies.digitalVoice
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
+		this.vesselTracker = dependencies.vesselTracker
+		this.meshTracker = dependencies.meshTracker
+		this.coverage = dependencies.coverage
+		this.aprsTracker = dependencies.aprsTracker
 		this.scanner = dependencies.scanner
 		this.spectrum = dependencies.spectrum
 		this.audioConfig = dependencies.audioConfig
@@ -203,6 +290,37 @@ export class ApiServer {
 
 		// Create WebSocket broadcaster
 		this.wsBroadcaster = new WebSocketEventBroadcaster(dependencies.logger)
+		this.bandPlansObserver = this.wsBroadcaster.observeChannel("bandplans", {
+			subscribed: clientId => {
+				try {
+					const outcome = sendBandPlansSnapshot(
+						this.bandPlans,
+						this.getBandPlansBroadcastPort(),
+						clientId,
+					)
+					if (outcome === "rejected")
+						this.wsBroadcaster.invalidateClient(clientId)
+				} catch {
+					this.log.warn("Band-plan snapshot unavailable")
+					this.wsBroadcaster.invalidateClient(clientId)
+				}
+			},
+			unsubscribed: () => {},
+		})
+		const activity = dependencies.activity
+		const activityUnavailable =
+			activity?.status === "unavailable" ? activity.unavailable : undefined
+		this.activityRuntime = activity
+		this.activityService = activity?.service ?? inertActivityService()
+		this.activityReady = activity?.status === "ready"
+		this.activityUnavailable = activityUnavailable
+		this.activityHub = createActivitySubscriptions({
+			service: this.activityService,
+			enabled: this.activityReady,
+			...(activityUnavailable ? { unavailable: true } : {}),
+		})
+		this.wsBroadcaster.attachActivity(this.activityHub)
+		activity?.bindSubscriptions(this.activityHub)
 		this.sourceStatusPublisher = new SourceStatusPublisher({
 			sourceManager: this.sourceManager,
 			fanoutTelemetry: this.fanoutTelemetry,
@@ -353,6 +471,14 @@ export class ApiServer {
 		}
 	}
 
+	/** Change notices on `bandplans` in both access modes. */
+	getBandPlansBroadcastPort(): BandPlansBroadcastPort {
+		return createBandPlansBroadcastPort(this.wsBroadcaster, () => {
+			this.log.warn("Band-plan publication unavailable")
+			this.wsBroadcaster.invalidateChannelClients("bandplans")
+		})
+	}
+
 	/** Mapping can fail before the port is called; the initial sink owns this fallback. */
 	invalidateOperatorDataPublication(): void {
 		this.log.warn("Operator data publication unavailable")
@@ -457,6 +583,10 @@ export class ApiServer {
 			this.operatorObserver = undefined
 		})
 		await attempt(() => {
+			this.bandPlansObserver?.()
+			this.bandPlansObserver = undefined
+		})
+		await attempt(() => {
 			this.accessController?.dispose()
 		})
 		await attempt(() => {
@@ -480,9 +610,23 @@ export class ApiServer {
 			this.spectrumWiring?.dispose()
 			this.spectrumWiring = null
 		})
+		await attempt(() => {
+			this.vesselWiring?.()
+			this.vesselWiring = null
+		})
+		await attempt(() => {
+			this.meshWiring?.()
+			this.meshWiring = null
+		})
+		await attempt(() => {
+			this.aprsWiring?.()
+			this.aprsWiring = null
+		})
 		await attempt(async () => {
 			await this.app.close()
 		})
+		// After HTTP drain: reads never see a closed store while requests finish.
+		await attempt(() => this.bandPlans?.close())
 		if (failed) {
 			this.log.error("Error stopping API server")
 			throw new WaveKitError("API shutdown incomplete", "ACCESS_UNAVAILABLE")
@@ -736,6 +880,115 @@ export class ApiServer {
 			})
 		}
 
+		// AIS vessel tracker events (WG1 req 6.4); updates through the 2 s throttle (WG2 req 9.4)
+		if (this.vesselTracker) {
+			const tracker = this.vesselTracker
+			const throttle = new EntityUpdateThrottle<VesselState>({
+				windowMs: ENTITY_UPDATE_WINDOW_MS,
+				identity: vesselIdentity,
+				emit: (_key, vessel) => {
+					this.wsBroadcaster.broadcastVesselUpdate(vessel)
+				},
+			})
+			const onNew = (vessel: VesselState) => {
+				this.wsBroadcaster.broadcastVesselNew(vessel)
+			}
+			const onUpdate = (vessel: VesselState) => {
+				throttle.offer(vessel.mmsi, vessel)
+			}
+			// A pending update must not follow the lost message.
+			const onLost = (mmsi: string, vessel: VesselState) => {
+				throttle.clear(mmsi)
+				this.wsBroadcaster.broadcastVesselLost(mmsi, vessel)
+			}
+			const onStats = (stats: VesselTrackerStats) => {
+				this.wsBroadcaster.broadcastVesselStats(stats)
+			}
+			tracker.on("vessel:new", onNew)
+			tracker.on("vessel:update", onUpdate)
+			tracker.on("vessel:lost", onLost)
+			tracker.on("stats:update", onStats)
+			this.vesselWiring = () => {
+				throttle.stop()
+				tracker.off("vessel:new", onNew)
+				tracker.off("vessel:update", onUpdate)
+				tracker.off("vessel:lost", onLost)
+				tracker.off("stats:update", onStats)
+			}
+		}
+
+		// APRS tracker events (WG2 req 4.2, 4.3); updates through the 2 s throttle (req 9.4)
+		if (this.aprsTracker) {
+			const tracker = this.aprsTracker
+			const throttle = new EntityUpdateThrottle<AprsStation>({
+				windowMs: ENTITY_UPDATE_WINDOW_MS,
+				identity: aprsIdentity,
+				emit: (_key, station) => {
+					this.wsBroadcaster.broadcastAprsUpdate(station)
+				},
+			})
+			const onNew = (station: AprsStation) => {
+				this.wsBroadcaster.broadcastAprsNew(station)
+			}
+			const onUpdate = (station: AprsStation) => {
+				throttle.offer(station.key, station)
+			}
+			const onLost = (key: string, station: AprsStation) => {
+				throttle.clear(key)
+				this.wsBroadcaster.broadcastAprsLost(key, station)
+			}
+			const onStats = (stats: AprsTrackerStats) => {
+				this.wsBroadcaster.broadcastAprsStats(stats)
+			}
+			tracker.on("aprs:new", onNew)
+			tracker.on("aprs:update", onUpdate)
+			tracker.on("aprs:lost", onLost)
+			tracker.on("stats:update", onStats)
+			this.aprsWiring = () => {
+				throttle.stop()
+				tracker.off("aprs:new", onNew)
+				tracker.off("aprs:update", onUpdate)
+				tracker.off("aprs:lost", onLost)
+				tracker.off("stats:update", onStats)
+			}
+		}
+
+		// Meshtastic node tracker events (WG2 req 6.2, 6.3); updates through the 2 s throttle (req 9.4)
+		if (this.meshTracker) {
+			const tracker = this.meshTracker
+			const throttle = new EntityUpdateThrottle<MeshNode>({
+				windowMs: ENTITY_UPDATE_WINDOW_MS,
+				identity: meshIdentity,
+				emit: (_key, node) => {
+					this.wsBroadcaster.broadcastMeshUpdate(node)
+				},
+			})
+			const onNew = (node: MeshNode) => {
+				this.wsBroadcaster.broadcastMeshNew(node)
+			}
+			const onUpdate = (node: MeshNode) => {
+				throttle.offer(node.key, node)
+			}
+			const onLost = (nodeId: string, node: MeshNode) => {
+				throttle.clear(node.key)
+				this.wsBroadcaster.broadcastMeshLost(nodeId, node)
+			}
+			const onStats = (stats: MeshTrackerStats) => {
+				this.wsBroadcaster.broadcastMeshStats(stats)
+			}
+			tracker.on("mesh:new", onNew)
+			tracker.on("mesh:update", onUpdate)
+			tracker.on("mesh:lost", onLost)
+			tracker.on("stats:update", onStats)
+			this.meshWiring = () => {
+				throttle.stop()
+				tracker.off("mesh:new", onNew)
+				tracker.off("mesh:update", onUpdate)
+				tracker.off("mesh:lost", onLost)
+				tracker.off("stats:update", onStats)
+			}
+		}
+
 		this.log.debug("Event broadcasting handlers registered")
 	}
 
@@ -790,6 +1043,12 @@ export class ApiServer {
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
 					{ name: "aircraft", description: "Aircraft tracking endpoints" },
+					{ name: "vessels", description: "AIS vessel tracking endpoints" },
+					{ name: "mesh", description: "Meshtastic node tracking endpoints" },
+					{
+						name: "aprs",
+						description: "APRS station, object and item tracking",
+					},
 					{ name: "live-audio", description: "Live demodulation endpoints" },
 					{ name: "tuner", description: "RTL-TCP tuner control endpoints" },
 					{ name: "tuner-relay", description: "RTL-TCP tuner relay endpoints" },
@@ -864,12 +1123,18 @@ export class ApiServer {
 				"Request error",
 			)
 
-			// Handle WaveKit-specific errors
+			// Handle WaveKit-specific errors. Activity query errors carry their
+			// own status (409/410/429/500/503); other WaveKit errors stay 400.
 			if (error instanceof WaveKitError) {
-				return reply.status(400).send({
+				const status =
+					error instanceof ActivityQueryError ? error.statusCode : 400
+				const reason =
+					error instanceof ActivityQueryError ? error.reason : undefined
+				return reply.status(status).send({
 					error: error.name,
 					code: error.code,
 					message: this.access ? "Request failed" : error.message,
+					...(reason !== undefined ? { reason } : {}),
 					correlationId,
 				})
 			}
@@ -1003,11 +1268,24 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		if (this.station)
+			await this.app.register(stationRoutes, { station: this.station })
 		// These child plugins inherit normal root admission in both access modes.
 		// Providers are borrowed; the composing runtime owns receiver disposal.
 		if (this.regionalRegistry !== undefined)
 			await this.app.register(regionalRoutes, {
 				registry: this.regionalRegistry,
+			})
+		// Reads in both access modes; mutation routes only with the access controller.
+		if (this.bandPlans)
+			await this.app.register(bandPlanRoutes, {
+				service: this.bandPlans,
+				...(this.accessController
+					? {
+							authorizeMutation: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
 			})
 		await this.app.register(receiverCapabilitiesRoutes, {
 			provider: this.receiverCapabilitiesProvider,
@@ -1095,6 +1373,32 @@ export class ApiServer {
 			})
 		}
 
+		// AIS vessel current-state routes (WG1 req 6.1-6.3)
+		if (this.vesselTracker) {
+			await this.app.register(vesselRoutes, {
+				tracker: this.vesselTracker,
+			})
+		}
+
+		// APRS current-state routes (WG2 req 4.1)
+		if (this.aprsTracker) {
+			await this.app.register(aprsRoutes, {
+				tracker: this.aprsTracker,
+			})
+		}
+
+		// Meshtastic node current-state routes (WG2 req 6.1)
+		if (this.meshTracker) {
+			await this.app.register(meshRoutes, {
+				tracker: this.meshTracker,
+			})
+		}
+
+		// ADS-B and AIS coverage per bearing (WG3 req 7)
+		if (this.coverage) {
+			await this.app.register(coverageRoutes, { coverage: this.coverage })
+		}
+
 		// Signal discovery scanner (spec § 12.1)
 		if (this.scanner) {
 			await this.app.register(scannerRoutes, {
@@ -1112,6 +1416,29 @@ export class ApiServer {
 				authorizeMetadataMutation: request =>
 					this.accessController!.authorizeMetadataMutation(request),
 			})
+
+		const activityRuntime = this.activityRuntime
+		await this.app.register(activityRoutes, {
+			service: this.activityService,
+			enabled: this.activityReady,
+			...(activityRuntime
+				? { discloseErrors: activityRuntime.discloseErrors }
+				: {}),
+			...(this.accessController
+				? {
+						access: {
+							principalId: request =>
+								this.accessController?.principalOf(request)?.id,
+						},
+					}
+				: {}),
+			...(this.activityUnavailable
+				? { unavailable: this.activityUnavailable }
+				: {}),
+			...(this.activityReady && activityRuntime
+				? { stats: () => activityRuntime.stats() }
+				: {}),
+		})
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
 		this.wsBroadcaster.registerRoute(this.app, this.accessController)

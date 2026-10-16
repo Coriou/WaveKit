@@ -919,8 +919,13 @@ describe("R55 follow-ups fix", () => {
 })
 
 describe("background items wait for the whole second (D3)", () => {
+	// The core stamps every broadcast with its channel; unknown channels are ignored.
 	const frame = (type: string, data: unknown) =>
-		JSON.stringify({ type, channel: "x", data })
+		JSON.stringify({
+			type,
+			channel: type.startsWith("decoder:") ? "decoders" : "metrics",
+			data,
+		})
 	it("a snapshot alone commits at the next second boundary; a decode commits on the next tick", () => {
 		vi.setSystemTime(new Date(1_000_000_100))
 		const ws = wsFake()

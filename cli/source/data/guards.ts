@@ -1547,6 +1547,25 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 				? { type, branchId, durationMs, timestamp }
 				: undefined
 		}
+		case "live-audio:level": {
+			const nullableNumber = (value: unknown): boolean =>
+				value === null || (typeof value === "number" && Number.isFinite(value))
+			return s("sourceId") !== undefined &&
+				nullableNumber(data["channelPowerDbfs"]) &&
+				nullableNumber(data["noiseFloorDbfs"]) &&
+				typeof data["squelchOpen"] === "boolean" &&
+				n("thresholdDbfs") !== undefined
+				? { type }
+				: undefined
+		}
+		case "live-audio:transmission": {
+			const state = data["state"]
+			return s("transmissionId") !== undefined &&
+				s("sourceId") !== undefined &&
+				(state === "open" || state === "closed")
+				? { type }
+				: undefined
+		}
 		case "live-audio:status": {
 			const status = guardLiveAudioStatus(d)
 			return status ? { type, status } : undefined

@@ -10,7 +10,25 @@ import type {
 import { accessRequestFromHttp } from "./http-request.js"
 import type { AccessPolicy } from "./policy.js"
 import type { SessionStore } from "./sessions.js"
-import type { AccessPrincipal, DeniedAdmission } from "./types.js"
+import type {
+	AccessPrincipal,
+	AccessRequest,
+	DeniedAdmission,
+} from "./types.js"
+
+/** Inventory reads stay commit-free. Query strings cannot turn them into writes. */
+function isRememberedDeviceRead(request: AccessRequest): boolean {
+	if (
+		request.surface !== "api" ||
+		request.transport !== "http" ||
+		(request.method !== "GET" && request.method !== "HEAD")
+	)
+		return false
+	const path = request.rawTarget.split("?")[0]
+	return (
+		path === "/api/access/devices" || path === "/api/access/machine/devices"
+	)
+}
 
 export interface FastifyAccessOptions {
 	policy: AccessPolicy
@@ -77,6 +95,7 @@ export function installAccessHooks(
 						.code(rejected.status)
 						.send({ code: rejected.code })
 			}
+			controller.noteAdmission(admission.principal, original)
 		}
 	})
 	app.addHook("onResponse", async request => controller.finishRequest(request))
@@ -189,6 +208,18 @@ export class FastifyAccessController {
 
 	admit(request: FastifyRequest, principal: AccessPrincipal): void {
 		if (!this.admissionStopped) this.#principals.set(request, { ...principal })
+	}
+
+	/**
+	 * After a successful session admission. Not awaited: a last-seen commit must
+	 * not fail or delay this request. Device inventory reads are skipped so they
+	 * stay commit-free. Machine principals are not remembered browsers.
+	 */
+	noteAdmission(principal: AccessPrincipal, request: AccessRequest): void {
+		if (this.admissionStopped || principal.kind !== "session") return
+		if (isRememberedDeviceRead(request)) return
+		const now = this.#sessions.observedAt()
+		void this.#sessions.noteSeen(principal.id, now).catch(() => undefined)
 	}
 
 	principalOf(request: FastifyRequest): AccessPrincipal | undefined {

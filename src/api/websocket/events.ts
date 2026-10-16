@@ -12,11 +12,17 @@
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 import type { FastifyInstance } from "fastify"
 import type { WebSocket } from "ws"
+import type {
+	ActivityClientTransport,
+	ActivitySubscriptionHub,
+	ActivityWireMessage,
+} from "../activity-subscriptions.js"
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { DecoderOutput } from "../../decoders/types.js"
 import type { FanoutStatus } from "../../core/fanout-manager.js"
 import type {
+	LiveAudioLevel,
 	LiveDemodConfig,
 	LiveDemodStatus,
 } from "../../core/live-demodulator.js"
@@ -37,6 +43,17 @@ import type {
 	DecoderRemovedEventData,
 	TunerCommandOrigin,
 	OperatorDataReadDto,
+	BandPlansServerMessage,
+	VesselServerMessage,
+	VesselState,
+	VesselTrackerStats,
+	AnalogTransmissionEventData,
+	AprsServerMessage,
+	AprsStation,
+	AprsTrackerStats,
+	MeshServerMessage,
+	MeshNode,
+	MeshTrackerStats,
 } from "@wavekit/api-types"
 
 /**
@@ -52,6 +69,10 @@ import type {
  * - tuner: RTL-TCP tuner control events
  * - scanner: Signal discovery scanner jobs, progress, discoveries, activity, identify, status (rate-limited)
  * - spectrum: core waterfall frames, opt-in; `options.spectrum` on subscribe selects a source and profile
+ * - bandplans: change notice `{storeId, revision}` after a changed commit and on subscribe; clients refetch
+ * - vessels: AIS vessel current state (new, update, lost, stats), WG1
+ * - aprs: APRS station, object and item current state (new, update, lost, stats), WG2
+ * - mesh: Meshtastic node current state (new, update, lost, stats), WG2
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -67,6 +88,10 @@ export type WebSocketChannel =
 	| "scanner"
 	| "spectrum"
 	| "operator-data"
+	| "bandplans"
+	| "vessels"
+	| "aprs"
+	| "mesh"
 
 /**
  * Message sent from client to server. `options` carries per-channel subscribe
@@ -110,10 +135,12 @@ interface ExistingServerMessage {
 		| "fanout:backpressure"
 		| "fanout:drain"
 		| "live-audio:status"
+		| "live-audio:level"
 		| "live-audio:config"
 		| "live-audio:started"
 		| "live-audio:stopped"
 		| "live-audio:error"
+		| "live-audio:transmission"
 		| "digital-voice:call"
 		| "digital-voice:status"
 		| "resources:snapshot"
@@ -151,7 +178,13 @@ interface OperatorDataServerMessage {
 	data: OperatorDataReadDto
 }
 
-export type ServerMessage = ExistingServerMessage | OperatorDataServerMessage
+export type ServerMessage =
+	| ExistingServerMessage
+	| OperatorDataServerMessage
+	| BandPlansServerMessage
+	| VesselServerMessage
+	| AprsServerMessage
+	| MeshServerMessage
 
 /**
  * Internal client state tracking subscriptions.
@@ -191,7 +224,11 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "aircraft" ||
 		channel === "scanner" ||
 		channel === "spectrum" ||
-		channel === "operator-data"
+		channel === "operator-data" ||
+		channel === "bandplans" ||
+		channel === "vessels" ||
+		channel === "aprs" ||
+		channel === "mesh"
 	)
 }
 
@@ -230,6 +267,12 @@ function parseClientMessage(data: unknown): ClientMessage | null {
 	}
 }
 
+function isActivityClientMessage(data: unknown): boolean {
+	if (typeof data !== "object" || data === null) return false
+	const type = (data as { type?: unknown }).type
+	return type === "activity:subscribe" || type === "activity:unsubscribe"
+}
+
 /**
  * WebSocketEventBroadcaster - Manages WebSocket connections and broadcasts events.
  *
@@ -248,9 +291,18 @@ export class WebSocketEventBroadcaster {
 	private readonly observers = new Map<WebSocketChannel, ChannelObserver>()
 	private operatorDataEnabled = false
 	private subscriptionAdmissionStopped = false
+	private activityHub: ActivitySubscriptionHub | undefined
 
 	constructor(logger: Logger) {
 		this.log = createComponentLogger(logger, "WebSocketBroadcaster")
+	}
+
+	/**
+	 * Activity frames use their own queue. The transport key is the client id.
+	 * Outbound messages bypass the replaceable-telemetry queue.
+	 */
+	attachActivity(hub: ActivitySubscriptionHub): void {
+		this.activityHub = hub
 	}
 
 	/**
@@ -300,6 +352,13 @@ export class WebSocketEventBroadcaster {
 			this.handleMessage(clientState, data)
 		})
 
+		// ws does not always emit drain; maintainClients also resumes.
+		socket.on("drain", () => {
+			if (this.clients.get(clientId) !== clientState) return
+			if ((socket.bufferedAmount ?? 0) !== 0) return
+			this.activityHub?.resume(clientId)
+		})
+
 		// Handle client disconnect
 		socket.on("close", (code: number, reason: Buffer) => {
 			this.handleDisconnect(clientState, code, reason)
@@ -327,6 +386,10 @@ export class WebSocketEventBroadcaster {
 			const rawData = typeof data === "string" ? data : data.toString("utf-8")
 
 			const parsed = JSON.parse(rawData) as unknown
+			if (isActivityClientMessage(parsed)) {
+				this.handleActivityMessage(client, parsed)
+				return
+			}
 			const message = parseClientMessage(parsed)
 
 			if (!message) {
@@ -348,6 +411,55 @@ export class WebSocketEventBroadcaster {
 				type: "error",
 				data: { message: "Invalid JSON" },
 			})
+		}
+	}
+
+	/**
+	 * Activity subscribe/unsubscribe never fall through to "Invalid message format".
+	 * Frames go straight to the socket, not the telemetry queue.
+	 */
+	private handleActivityMessage(client: ClientState, parsed: unknown): void {
+		if (!this.activityHub) {
+			this.sendActivity(client, {
+				type: "error",
+				channel: "activity",
+				data: {
+					code: "ACTIVITY_DISABLED",
+					message: "Activity is disabled",
+				},
+			})
+			return
+		}
+		this.activityHub.handleMessage(this.activityTransport(client), parsed)
+	}
+
+	private activityTransport(client: ClientState): ActivityClientTransport {
+		return {
+			key: client.id,
+			send: message => this.sendActivity(client, message),
+			close: (code, reason) => {
+				try {
+					client.socket.close(code, reason)
+				} catch {
+					// The socket may already be closed.
+				}
+			},
+		}
+	}
+
+	/** Direct send. False means the message was not accepted and stays queued. */
+	private sendActivity(
+		client: ClientState,
+		message: ActivityWireMessage,
+	): boolean {
+		if (!this.currentClient(client) || client.socket.readyState !== 1)
+			return false
+		if ((client.socket.bufferedAmount ?? 0) !== 0) return false
+		try {
+			client.socket.send(JSON.stringify(message))
+			return true
+		} catch {
+			return false
 		}
 	}
 
@@ -427,6 +539,11 @@ export class WebSocketEventBroadcaster {
 		// A late close after terminateClient or closeAll is a no-op (finding 7).
 		if (!this.clients.has(client.id)) return
 		this.clients.delete(client.id)
+		try {
+			this.activityHub?.detach(client.id)
+		} catch (err) {
+			this.log.error({ err, clientId: client.id }, "Activity detach failed")
+		}
 		const state = this.delivery.get(client)
 		if (state) {
 			state.queue = []
@@ -528,6 +645,8 @@ export class WebSocketEventBroadcaster {
 			}
 			const state = this.getDelivery(client)
 			this.flushClient(client, state)
+			if ((client.socket.bufferedAmount ?? 0) === 0)
+				this.activityHub?.resume(client.id)
 			if (
 				!this.clients.has(client.id) ||
 				Date.now() - state.lastPing < HEARTBEAT_INTERVAL_MS
@@ -588,6 +707,28 @@ export class WebSocketEventBroadcaster {
 			{ channel, type: message.type, sentCount },
 			"Broadcast message",
 		)
+	}
+
+	/**
+	 * Room left in one client's outbound queue before it would be disconnected
+	 * (queued plus socket-buffered bytes against the 1 MiB cap, and messages
+	 * against the 256-message cap). Null for an unknown or closed client.
+	 */
+	outboundHeadroom(
+		clientId: string,
+	): { bytes: number; messages: number } | null {
+		const client = this.clients.get(clientId)
+		if (!client || client.socket.readyState !== 1) return null
+		const state = this.getDelivery(client)
+		return {
+			bytes: Math.max(
+				0,
+				MAX_OUTBOUND_BYTES -
+					state.queuedBytes -
+					(client.socket.bufferedAmount ?? 0),
+			),
+			messages: Math.max(0, MAX_QUEUED_MESSAGES - state.queue.length),
+		}
 	}
 
 	/**
@@ -876,6 +1017,27 @@ export class WebSocketEventBroadcaster {
 	}
 
 	/**
+	 * Broadcasts the live audio meter (10–20 Hz while running).
+	 */
+	broadcastLiveAudioLevel(level: LiveAudioLevel): void {
+		this.broadcast("live-audio", {
+			type: "live-audio:level",
+			data: level,
+		})
+	}
+
+	/**
+	 * Broadcasts one squelch-delimited analog transmission edge (open, then
+	 * close) on the live-audio channel (WG1 req 3.2).
+	 */
+	broadcastLiveAudioTransmission(event: AnalogTransmissionEventData): void {
+		this.broadcast("live-audio", {
+			type: "live-audio:transmission",
+			data: event,
+		})
+	}
+
+	/**
 	 * Broadcasts digital voice call state (start, encryption change, end).
 	 */
 	broadcastDigitalVoiceCall(call: DigitalVoiceCallEventData): void {
@@ -1035,6 +1197,94 @@ export class WebSocketEventBroadcaster {
 		})
 	}
 
+	/** A vessel heard for the first time (WG1 req 6.4). */
+	broadcastVesselNew(vessel: VesselState): void {
+		this.broadcast("vessels", {
+			type: "vessel:new",
+			channel: "vessels",
+			data: vessel,
+		})
+	}
+
+	/** A known vessel's merged state changed. */
+	broadcastVesselUpdate(vessel: VesselState): void {
+		this.broadcast("vessels", {
+			type: "vessel:update",
+			channel: "vessels",
+			data: vessel,
+		})
+	}
+
+	/** A vessel expired or was evicted at the cap, with its final state. */
+	broadcastVesselLost(mmsi: string, vessel: VesselState): void {
+		this.broadcast("vessels", {
+			type: "vessel:lost",
+			channel: "vessels",
+			data: { mmsi, vessel },
+		})
+	}
+
+	/** Periodic vessel tracker statistics. */
+	broadcastVesselStats(stats: VesselTrackerStats): void {
+		this.broadcast("vessels", {
+			type: "vessel:stats",
+			channel: "vessels",
+			data: stats,
+		})
+	}
+
+	/** WG2: a new APRS station, object or item. */
+	broadcastAprsNew(station: AprsStation): void {
+		this.broadcast("aprs", { type: "aprs:new", channel: "aprs", data: station })
+	}
+
+	/** WG2: a known APRS entity changed (Main puts it through the update throttle). */
+	broadcastAprsUpdate(station: AprsStation): void {
+		this.broadcast("aprs", {
+			type: "aprs:update",
+			channel: "aprs",
+			data: station,
+		})
+	}
+
+	/** WG2: an APRS entity expired, was evicted or killed, with its final state. */
+	broadcastAprsLost(key: string, station: AprsStation): void {
+		this.broadcast("aprs", {
+			type: "aprs:lost",
+			channel: "aprs",
+			data: { key, station },
+		})
+	}
+
+	/** WG2: periodic APRS tracker statistics. */
+	broadcastAprsStats(stats: AprsTrackerStats): void {
+		this.broadcast("aprs", { type: "aprs:stats", channel: "aprs", data: stats })
+	}
+
+	/** WG2: a new Meshtastic node. */
+	broadcastMeshNew(node: MeshNode): void {
+		this.broadcast("mesh", { type: "mesh:new", channel: "mesh", data: node })
+	}
+
+	/** WG2: a known node changed (Main puts it through the update throttle). */
+	broadcastMeshUpdate(node: MeshNode): void {
+		this.broadcast("mesh", { type: "mesh:update", channel: "mesh", data: node })
+	}
+
+	/** WG2: a node expired or was evicted, with its final state. */
+	broadcastMeshLost(nodeId: string, node: MeshNode): void {
+		this.broadcast("mesh", {
+			type: "mesh:lost",
+			channel: "mesh",
+			data: { nodeId, node },
+		})
+	}
+
+	/** WG2: periodic mesh tracker statistics. */
+	broadcastMeshStats(stats: MeshTrackerStats): void {
+		this.broadcast("mesh", { type: "mesh:stats", channel: "mesh", data: stats })
+	}
+
 	/** Full job DTO on the scanner channel (the server normally goes through the WS limiter). */
 	broadcastScannerJob(job: ScanJob): void {
 		this.broadcast("scanner", { type: "scanner:job", data: job })
@@ -1074,6 +1324,11 @@ export class WebSocketEventBroadcaster {
 	 * Closes all client connections.
 	 */
 	closeAll(): void {
+		try {
+			this.activityHub?.close()
+		} catch (err) {
+			this.log.error({ err }, "Activity subscriptions close failed")
+		}
 		const clients = [...this.clients.values()]
 		for (const client of clients) this.handleDisconnect(client)
 		for (const client of clients) {

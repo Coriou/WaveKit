@@ -77,6 +77,16 @@ import {
 } from "../utils/version.js"
 
 /**
+ * Optional activity publication. Runs after the legacy `decoder:output`
+ * listeners; a throw must not change health or that emit.
+ */
+export type ActivityPublisher = (
+	decoderId: string,
+	decoderType: string | undefined,
+	output: DecoderOutput,
+) => void
+
+/**
  * Configuration for the Decoder Manager.
  */
 export interface DecoderManagerConfig {
@@ -368,6 +378,8 @@ export class DecoderManager extends EventEmitter {
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 	/** Optional core channelizer (addendum §4); null keeps the raw fanout path. */
 	private channelizer: ChannelProvider | null = null
+	/** Optional activity publication; null leaves output handling unchanged. */
+	private activityPublisher: ActivityPublisher | null = null
 	/** Review Focus 4: one error line per outage, not one per decoder. */
 	private channelizerUnavailableLogged = false
 	/** Per source: one pending re-evaluation for decoders held for channelizer-unavailable. */
@@ -494,6 +506,14 @@ export class DecoderManager extends EventEmitter {
 		for (const { state, ref } of replaced) this.finishChannelDrop(state, ref)
 		for (const sourceId of sources) this.recheckStaleChannel(sourceId)
 		if (!this.channelizer) this.clearChannelRetries()
+	}
+
+	/**
+	 * Attaches activity publication. Null (the default) keeps today's output
+	 * path. The hook is invoked after `decoder:output` and cannot affect it.
+	 */
+	setActivityPublisher(publish: ActivityPublisher | null): void {
+		this.activityPublisher = publish
 	}
 
 	/**
@@ -1278,6 +1298,16 @@ export class DecoderManager extends EventEmitter {
 				this.log.error(
 					{ err, decoderId: decoder.id },
 					"Error handling decoder output event, continuing operation",
+				)
+			}
+			const publish = this.activityPublisher
+			if (!publish) return
+			try {
+				publish(decoder.id, decoder.type, output)
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: decoder.id },
+					"Activity publisher failed, continuing operation",
 				)
 			}
 		})

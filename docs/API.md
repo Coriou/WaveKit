@@ -118,10 +118,49 @@ credentials are rejected with 403, including when accompanied by a session cooki
 missing/expired/revoked sessions return 401 and unavailable storage/clock authority
 returns safe 503. The closed `AccessDevicesDto` is `{ devices: AccessDeviceDto[] }`:
 each row contains only `deviceId`, `createdAt`, `renewedAt`, `expiresAt` (integer
-milliseconds) and `current`. It lists unexpired remembered sessions, not online
-presence, with exactly one current requester and at most the configured cap (maximum
-32). Rows sort by creation time, then ASCII device ID. No names, credentials or private
-session records are exposed.
+milliseconds), `current`, and (WG2) `name`, `kind` and `lastSeenAt`, each null until
+set. It lists unexpired remembered sessions, not online presence, with exactly one
+current requester and at most the configured cap (maximum 32). Rows sort by creation
+time, then ASCII device ID. No credentials or private session records are exposed.
+
+`name` and `kind` are set only by an operator (below); they are never derived from a
+user agent, address or other fingerprint. `lastSeenAt` is the start of the UTC hour
+(integer milliseconds) of the device's latest authenticated HTTP or WebSocket
+admission, null until the first one after the upgrade. It is the hour of the last use,
+not presence. It is written through the session mutation queue at most once per device
+per UTC hour (at most 32 × 24 = 768 writes a day), never by the inventory read itself
+and never by machine credentials. Admission does not wait for that write and a failed
+write never fails the request; it leaves the committed state unchanged and is counted
+and logged at most once a minute. A later session mutation of the same request
+(refresh, logout, label, revoke) shares the queue, so it runs after a last-seen write
+already queued. The private session snapshot is version 2; a version 1 snapshot loads
+with null labels and is written as version 2 on the next commit. An older WaveKit
+refuses a version 2 snapshot and fails closed.
+
+Rolling back to a core older than WG2: the older core refuses the state file and
+protected access stays unavailable until it is fixed. The machine token is in the
+unchanged outer envelope (`machineToken`), so it survives if only the inner `sessions`
+object is rewritten as version 1. With the core stopped, in the private directory:
+`jq '.sessions |= (.version = 1 | .sessions |= map(del(.name, .kind, .lastSeenAt)))'
+access-state.json > access-state.json.v1`, then `chmod 600 access-state.json.v1` and
+`mv access-state.json.v1 access-state.json`. Device labels and last-seen hours are
+lost; remembered browsers and the machine token are kept. Without that rewrite the
+alternative is re-provisioning, which issues a new machine token. Update the CLI with
+the core: a CLI from before WG2 reading the credential with `--credential-format
+access-state` (the default) refuses a version 2 snapshot (`ACCESS_CREDENTIAL_UNAVAILABLE`);
+`--credential-format token` with an exported token file is not affected.
+
+`POST /api/access/devices/label` with `{ "deviceId", "name"?, "kind"? }` labels a
+remembered device. At least one of `name` and `kind` is required; `null` clears a field
+and an absent key keeps it. `name` is 1–64 characters with no leading or trailing
+whitespace (it is not trimmed for you; such a name is a 400), at most 128
+UTF-8 bytes, with no C0/C1 control or bidirectional-override characters. `kind` is one
+of `browser`, `phone`, `tablet`, `desktop`, `cli`, `other`. The route has the same
+session, CSRF, Origin and exact-target admission as `POST /api/access/devices/revoke`;
+the body is parsed before the mutation is queued, and the label is persisted before
+the answer. The answer is `{ "updated": true | false }` (false for an unknown or expired
+device). A label queued behind the revocation of the requester's own session answers
+401 `AUTH_REQUIRED`. Machine routes do not label.
 
 The inventory reauthorizes the original request immediately before a synchronous,
 one-clock committed-map snapshot and rechecks availability after the clock callback.
@@ -130,6 +169,44 @@ not wait for the mutation queue, renew, prune, persist or migrate. Existing pair
 refresh/logout/revoke permissions and bounded flow/drain ownership remain unchanged;
 capacity denial returns 429. GET/HEAD use safe serializers, no-store and the existing
 origin policy, with no HEAD wire body. Informational success grants no RF operation.
+
+`GET` and `HEAD /api/access/machine/devices`, `POST /api/access/machine/devices/revoke`,
+and `POST /api/access/machine/devices/revoke-all` are exact machine-bearer routes.
+They use the same Host, Origin and bearer checks as `POST /api/access/pairing-codes`.
+A browser cookie is never sufficient and is never issued or renewed. CSRF is not
+required for a machine bearer. A cookie request that fails the existing cookie
+boundary (safe-read or CSRF) is denied there first (`ORIGIN_FORBIDDEN` on a safe
+read that lacks Origin and a qualifying `Sec-Fetch-Site`, or `CSRF_REQUIRED` on
+an unsafe method). A session principal that passes that boundary returns 403
+`MACHINE_REQUIRED`. A cookie alongside a valid bearer is ignored. Missing or
+invalid bearers return 401 `AUTH_REQUIRED`. The wrong Host or a present disallowed
+Origin keeps the existing 403. Queries, encoded paths and non-HTTP transports
+return 400.
+
+The list reuses each `AccessDeviceDto` row (`deviceId`, `createdAt`, `renewedAt`,
+`expiresAt`, `current`, `name`, `kind`, `lastSeenAt`) but is not the browser `AccessDevicesDto`: a machine
+principal is not a remembered browser, so every `current` value is false and the
+list may be empty. Rows are the unexpired committed sessions, sorted by creation
+time then ASCII device ID, at most 32. An empty inventory is 200 `{ "devices": [] }`,
+not a 401. Reads do not queue, renew, prune or persist. Pending mutations stay
+invisible until commit. HEAD matches GET status and headers and has no wire body.
+
+Revoke accepts the same strict `{ "deviceId" }` body as the session revoke route and
+returns `{ "revoked": true | false }`. Revoke-all returns `{ "revoked": true }`.
+Both call the session revoke path, so that device's live WS and audio leases close,
+and a persistence failure fail-closes the authority with 503 `ACCESS_UNAVAILABLE`
+instead of reporting success. No response sets a cookie. Authenticated machine
+attempts use a separate budget with the same limits as pairing redemption: 5 per
+minute for each connection address, 60 per minute globally, and 128 address
+buckets. Excess attempts return 429 `MACHINE_RATE_LIMITED` with `Retry-After: 60`.
+
+The offline `rotate-credential` command refuses while a live owner holds the private
+directory. It atomically replaces the machine credential in the existing 0600 state
+file. By default that write removes remembered browser sessions. `--keep-sessions`
+rebinds them to the new generation. The success line says those sessions were
+kept and to run `devices list` after restart. It prints no credential. Restart the
+core before the new credential is used. A running server's old persistence hook
+cannot write the previous binding.
 
 ## REST Endpoints
 
@@ -401,6 +478,131 @@ Local errors have fixed `{error, code, message}` fields: 400
 keeps its existing code-only body and headers. Full contract and evidence gates:
 [regional registry specification](specs/regional-display-registry/design.md).
 
+### Station
+
+#### GET /api/station
+
+Read-only station identity from config (`station.*` in YAML, `WAVEKIT_STATION__*`
+in the environment; `WAVEKIT_COUNTRY` sets `station.country`). Every field carries
+`{ value, provenance }` with provenance `default`, `yaml` or `env`; unset values are
+`null`. `country` is ISO 3166-1 alpha-2 (uppercase). `effectiveCountry` is the
+configured country or `null`: it is never derived from the coordinates. `region` is
+the existing coarse band region. `HEAD` returns the headers only. Mounted in protected
+and legacy composition under the normal API admission. `lat` and `lon` (when both are
+set) are passed to readsb as `--lat`/`--lon` and are the origin of
+[`GET /api/coverage`](#coverage); no other decoder receives station data.
+
+```json
+{
+	"name": { "value": "Home", "provenance": "yaml" },
+	"lat": { "value": 48.85, "provenance": "yaml" },
+	"lon": { "value": 2.35, "provenance": "yaml" },
+	"altM": { "value": null, "provenance": "default" },
+	"callsign": { "value": null, "provenance": "default" },
+	"country": { "value": "FR", "provenance": "env" },
+	"effectiveCountry": "FR",
+	"region": "EU"
+}
+```
+
+### Band plans
+
+Layered display band plans: a read-only built-in pack per region (`builtin-eu`,
+`builtin-us`, `builtin-ca`, `builtin-au`, `builtin-nz`, `builtin-jp`,
+`builtin-cn`), up to 8 imported SDR++ packs (`imported-` plus 12 hex digits), and
+an operator layer (`operator`) that always sits above the ordered stack. A `null`
+stored stack follows the default: the built-in pack of the scanner `region`.
+Operator edits override single fields of a pack band without changing the pack.
+`context` carries that `region` and `effectiveCountry` (`station.country` or
+`null`; never derived from coordinates). Imported data is always
+`community-unverified`. State lives in `<stateDir>/bandplans/state.json` (4 MiB
+cap). A storage failure never stops the core: reads return
+`store: { state: "unavailable" }`, the default stack and no stored layers, and
+writes fail with 503 `BANDPLANS_UNAVAILABLE`. In legacy mode the store is opened
+read-only: no lock, no directory or file is created, and an existing state file is
+only read. If no state file exists there, the store is the empty default with
+`storeId: null` and revision 0; writes are not mounted, so this token is never
+sent back. Any other available store reports its persisted UUID. Changes are
+announced on the [`bandplans` WebSocket channel](#bandplans-channel) in both
+access modes.
+
+The scanner plans from the effective list derived from the stack: for each
+enabled built-in pack, in stack order, that region's built-in scanner plans,
+minus any band with a stored `hidden: true` edit and any plan id already taken.
+Under the default stack this equals the built-in list. `skip`, other edit
+fields, imported packs and operator bands are display-only. A stack change
+applies at the next scanner job create, patch or preview. A running sweep and a
+resumed job (explicit, automatic or after a restart) keep the plans they were
+admitted with. Preset `applicable` and `issues` are checked against the same
+list; see [SCANNER.md](SCANNER.md#presets-and-bandplans).
+
+Reads are mounted in both access modes under the normal API admission. Writes and
+imports are mounted only in protected mode (`capabilities.writable: true` in the
+stack view); they need an authenticated session or device, re-checked after body
+validation and immediately before the write is admitted. A denial keeps the
+access code-only body and headers.
+
+| Method   | Path                                              | Purpose                                                                                                     |
+| -------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `GET`    | `/api/bandplans`                                  | Stack view: store token, context, stack, packs, operator bands, edits, orphaned edits, limits               |
+| `GET`    | `/api/bandplans/resolved`                         | Resolved bands with layer, uncovered `segments`, edited fields and provenance; `shadowed` and `hidden` keys |
+| `GET`    | `/api/bandplans/packs/:packId`                    | One built-in or imported pack as shipped or imported, without edits                                         |
+| `GET`    | `/api/bandplans/presets`                          | Built-in presets for the region, then operator presets, with `applicable` and `issues`                      |
+| `GET`    | `/api/bandplans/presets/:presetId/job`            | `{ presetId, region, spec, issues }`; `spec` is a scanner job body                                          |
+| `PUT`    | `/api/bandplans/stack`                            | Replace the stack: `entries` of `{ packId, enabled }` (16 max)                                              |
+| `DELETE` | `/api/bandplans/stack`                            | Return to the default stack                                                                                 |
+| `PATCH`  | `/api/bandplans/packs/:packId/bands/:bandId/edit` | Edit a band: `set` (fields or `null`), `reset` (field names)                                                |
+| `DELETE` | `/api/bandplans/packs/:packId/bands/:bandId/edit` | Drop every edit of one band                                                                                 |
+| `DELETE` | `/api/bandplans/packs/:packId/edits`              | Drop every edit of one pack                                                                                 |
+| `DELETE` | `/api/bandplans/packs/:packId`                    | Delete an imported pack (built-ins are read-only)                                                           |
+| `POST`   | `/api/bandplans/operator-bands`                   | Create an operator band (`band`); 201                                                                       |
+| `PUT`    | `/api/bandplans/operator-bands/:bandId`           | Replace an operator band (`band`)                                                                           |
+| `DELETE` | `/api/bandplans/operator-bands/:bandId`           | Delete an operator band                                                                                     |
+| `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++ file; persists nothing                                                                       |
+| `POST`   | `/api/bandplans/imports`                          | Commit a previewed import; 201                                                                              |
+| `POST`   | `/api/bandplans/presets`                          | Create an operator scan preset (`preset`); 201                                                              |
+| `PUT`    | `/api/bandplans/presets/:presetId`                | Replace an operator preset (`preset`)                                                                       |
+| `DELETE` | `/api/bandplans/presets/:presetId`                | Delete an operator preset                                                                                   |
+
+Every write except the preview carries `expected: { storeId, revision }` from the
+latest `store` in a read or write response; bodies reject unknown keys. A missing
+token returns 428 `BANDPLANS_PRECONDITION_REQUIRED`; a stale one returns 409
+`BANDPLANS_CONFLICT` with `details.current` holding the current token. Successful
+writes return `{ view, createdId }`: the new stack view and the id of a created
+pack, operator band or preset (otherwise `null`), with 201 for creates and 200
+otherwise. Pack-edit routes take built-in or imported pack ids; the operator layer
+is changed through `/operator-bands` instead (`operator` there returns 400).
+
+Import preview takes `format: "sdrpp-json"`, `fileName`, `contentBase64` and
+`groupOverrides` (`{ sourceType, group }`, 64 max). It returns the file metadata,
+`sha256` of the decoded bytes, `previewDigest`, proposed bands and a skip/mapping
+report. `previewDigest` is a SHA-256 binding the file bytes and the set of
+`groupOverrides` (override order does not matter); `sha256` stays the hash of the
+file bytes alone. Commit repeats those fields and adds `expected`, `previewDigest`
+from the preview, `name`, `author`, `licence`, `keepColourHints`,
+`replacesPackId` (re-import keeping the pack id and its edits, or `null`) and
+`addToStack`. Other bytes or other overrides than the ones previewed return 409
+`BANDPLANS_IMPORT_MISMATCH` and change nothing. Presets are `{ name, job }` where
+`job` is a closed subset of the scanner job spec with at least one bandplan or range. Built-in
+presets (`builtin-<plan id>` per scanner plan, plus a few combinations) are
+derived from the region and read-only (409 `BANDPLANS_READ_ONLY`).
+
+Limits: JSON bodies 64 KiB, import bodies 1.5 MiB, decoded import files 1 MiB and
+4096 rows, 512 bands per pack, 256 operator bands, 1024 edits, 64 presets. All
+limits are returned in the stack view under `limits`.
+
+Errors use `{ error: "BandPlansError", code, message }`: 400 `BANDPLANS_INVALID`,
+404 `BANDPLANS_NOT_FOUND`, 409 `BANDPLANS_CONFLICT`, `BANDPLANS_READ_ONLY`,
+`BANDPLANS_QUOTA` (also an oversized non-import body) or
+`BANDPLANS_IMPORT_MISMATCH`, 413 `BANDPLANS_IMPORT_TOO_LARGE`, 422
+`BANDPLANS_IMPORT_INVALID`, 428 `BANDPLANS_PRECONDITION_REQUIRED`, 503
+`BANDPLANS_BUSY` or `BANDPLANS_UNAVAILABLE`. Full contract:
+[band plans specification](specs/band-plans/design.md).
+
+```bash
+curl http://localhost:9000/api/bandplans/presets/builtin-pmr446/job
+# then POST its "spec" to /api/scanner/jobs
+```
 ### Receiver capabilities
 
 `GET /api/receiver-capabilities` lists a page; `GET
@@ -688,9 +890,21 @@ Fields:
   `squelch` threshold compares against.
 - `squelchOpen` — squelch gate state while the pipeline runs (`true` with squelch
   off).
+- `noiseFloorDbfs`, `thresholdDbfs` — the auto-squelch floor estimate and the
+  threshold in effect (the manual `squelch`, or floor + `autoMarginDb` in auto mode).
 
 Configuration notes:
 
+- `squelchMode` — `manual` (default: `squelch` is the threshold) or `auto` (an
+  estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB, default 6). The
+  floor is a constant-memory running lower envelope: falls are immediate; rises
+  are limited to 1 dB/s while closed and 0.4 dB/s while open, measured in 10 ms
+  stream-time blocks. With margin 6 dB, a sustained 20 dB noise step closes within
+  60 s, while a signal 20 dB above a stable floor stays open for at least 20 s.
+  Long continuous signals can eventually enter the floor estimate. Pipeline
+  rebuilds, source capability changes (including retained-pipeline retunes), and
+  mode changes reset the estimate. This is not calibrated noise measurement.
+  There is no `noise` mode.
 - `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
@@ -776,8 +990,8 @@ curl -X POST http://localhost:9000/api/live-audio/stop
 
 #### PATCH /api/live-audio/config
 
-Update live demodulator configuration. DSP changes restart the pipeline; a `squelch`
-change applies immediately without a restart; an `httpPort` change moves the stream
+Update live demodulator configuration. DSP changes restart the pipeline; `squelch`,
+`squelchMode` and `autoMarginDb` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
 
@@ -929,6 +1143,7 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 
 | Field                 | Meaning                                                                                                                                                                                                                                                                                                        |
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rateHistory`         | Messages per minute for the last 15 minutes, oldest first, including the current partial minute; empty minutes are 0. Kept across the instance's own process restarts.                                                                                                                                    |
 | `sourceId`            | WaveKit source the decoder reads: the live assignment while wired, otherwise the configured `sourceId`. Absent for external-input decoders (they own their device) and for unwired decoders relying on the default source.                                                                                     |
 | `deviceSerial`        | Configured device serial of an external-input decoder (`caps.input: "external"`). Never inferred; absent when not configured and always absent for stdin decoders (their serial options are ignored in stdin mode).                                                                                            |
 | `targetFrequenciesHz` | Target frequencies declared in config: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Absent when the config declares none (the decoder then decodes whatever its source is tuned to, or a built-in default that is not reported).                                             |
@@ -1230,6 +1445,14 @@ curl -X POST http://localhost:9000/api/decoders/dsd-main/restart
 }
 ```
 
+#### GET /api/decoders/:id/log
+
+`?lines=N` (1–500, default 200) returns the newest captured lines of the decoder
+process's stdout and stderr: `{ decoderId, lines: [{ stream: "stdout" | "stderr",
+line }] }`, oldest first. Each decoder keeps at most 500 lines of 4096 characters.
+These are raw decoder output and can contain decoded data; network frames from
+producers such as readsb are not turned into log lines. 404 for an unknown id.
+
 #### PATCH /api/decoders/:id
 
 Update decoder configuration.
@@ -1496,7 +1719,10 @@ sweeps) for this run rather than overwrite them.
 
 #### GET /api/scanner/bandplans
 
-Built-in bandplans for the effective region (see [SCANNER.md](SCANNER.md#presets-and-bandplans)).
+The effective scanner bandplans: the built-in plans of the enabled built-in packs
+in the band-plan stack, without hidden bands (see [Band plans](#band-plans) and
+[SCANNER.md](SCANNER.md#presets-and-bandplans)). Under the default stack this is
+the built-in list for the effective region.
 
 ```bash
 curl http://localhost:9000/api/scanner/bandplans
@@ -1555,6 +1781,16 @@ curl -X POST http://localhost:9000/api/scanner/plan \
 }
 ```
 
+Sweep plans skip locked-out discoveries (WG2, "Ignore skips sweeps"). A
+discovery with `operator.lockout` heard on the spec's source adds a runtime
+exclusion `[centre − w/2, centre + w/2]`, w = max(the discovery's bandwidth,
+the narrowest raster step there, 1 kHz), clipped to the enabled ranges. The
+preview lists them as `lockoutExclusions: [{ discoveryId, startHz, endHz,
+applied }]`, lowest first. At most 256 apply; the rest have `applied: false`.
+When applying them would leave no hop, none applies and all have
+`applied: false`. The key is absent for in-window plans and when no lockout
+falls inside the ranges. Lockout exclusions are never written into the spec.
+
 #### POST /api/scanner/jobs
 
 Creates a job (`ScanJobSpec`, every field optional; defaults in
@@ -1565,6 +1801,26 @@ Creates a job (`ScanJobSpec`, every field optional; defaults in
   `startHz + spacingHz / 2`;
 - an exclusion `{frequencyHz, widthHz}` becomes
   `{startHz: frequencyHz − widthHz / 2, endHz: frequencyHz + widthHz / 2}`.
+
+A range may also carry these optional fields. All of them can be changed while the
+job runs (see PATCH):
+
+- `enabled` (boolean, absent = enabled): `false` keeps the range in the job at the
+  same index but it is not planned, swept, masked or used for protocol matching.
+  If every range is disabled, the preview fails with `range-empty`.
+- `name` (1 to 100 characters): an operator label.
+- `dwellMs` (10 to 600000): the dwell of every hop that overlaps the range. A hop
+  overlapping several enabled ranges takes the longest of their dwells, counting a
+  range without one at the job's `dwellMs`. Such hops carry `hop.dwellMs` in the
+  plan; hops without it use the job's `dwellMs`.
+- `sensitivity` (`low`, `normal`, `high`): the CFAR false-alarm target inside this
+  range. Integration time stays job-level. Without it the job's sensitivity applies.
+
+`signalsOnly: true` (discover jobs) finds and classifies signals but requests no
+decoder trials of the job's own. Discoveries, captures and evidence from ambient
+decoders or other jobs are unchanged. A monitor job with `signalsOnly` gets the
+error issue `signals-only-unsupported`. The key appears in `spec` only when the
+operator set it.
 
 ```bash
 curl -X POST http://localhost:9000/api/scanner/jobs \
@@ -1678,6 +1934,12 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`).
 
+A job in `paused(preempted-job)` carries `preemptedBy: { jobId, name }`: the job
+that holds its source lease now (`name` is null when that job has none). The field
+is absent in every other state or reason, and when no other job holds the lease.
+It is derived when the job is read and never stored. The paused job's
+`scanner:job` event is sent again when the holder changes or the lease is freed.
+
 Startup is bounded to 15 seconds; identify uses the smaller of that cap and
 `timeoutMs`. A source disconnect during startup fails the job with
 `tuner-unavailable` and releases its resources. Deadlines are evaluated on the
@@ -1692,11 +1954,21 @@ whose previous value was unknown, and fields whose restore could not be written
 and run on the source's first data after it reconnects, even if the job is
 deleted in between.
 
+Sweep jobs carry the `lockoutExclusions` of their current plan (see
+`POST /api/scanner/plan`; runtime only, not persisted, recomputed when the job
+is created, edited or restored). Setting, clearing or deleting a lockout
+replans every live sweep job on the discovery's sources whose list changes and
+sends `scanner:job`.
+
+`progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
+since the job started: see `GET /api/scanner/jobs/:id/hits`.
+
 #### PATCH /api/scanner/jobs/:id
 
-Live edit, applied at the next hop. Allowed keys: `thresholdDb`,
+Live edit. The hop plan changes at the next hop; detection masks, protocol
+matching, probes and `signalsOnly` change as soon as the PATCH returns. Allowed keys: `thresholdDb`,
 `sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
-`capture`; other keys are ignored. The keys are merged into the spec the job
+`capture`, `signalsOnly` and `ranges`; other keys are ignored. The keys are merged into the spec the job
 was created with (only `sourceId` and `mode` are pinned), so derived fields
 follow the edit and keep their provenance: `{"sensitivity": "high"}` gives
 100 ms integration unless the job set `integrationMs` itself. While the job
@@ -1708,6 +1980,65 @@ previewed first; a preview with errors is rejected (400
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
   -H 'Content-Type: application/json' -d '{"sensitivity": "high"}'
+```
+
+`ranges` is the full state of the job's effective ranges: the job's
+`spec.ranges` (operator ranges, then bandplan ranges), in the same order and with
+the same count. Read them from the job, change what you need, and send the whole
+array back (the example assumes the job reported exactly these two ranges). Only the live fields `enabled`, `protocols`, `name`, `dwellMs` and
+`sensitivity` may differ. A live field missing from an element clears it, so an
+element without `protocols` drops that range's protocols. The edges, `rasters`,
+`obwHz` and `bandplanId` are locked for the job's lifetime. A changed locked
+field, or a different number of ranges, is 400 `SCANNER_PLAN_INVALID` with one
+`range-locked` issue per offending range (`details: { index, fields }`) or for the
+count (`details: { reason: "range-count", expected, received }`). Disabling every
+range is `range-empty`. The hop plan changes at the next hop; masks, protocol
+matching and probes follow at once. The edit persists with the job, and later
+patches of any key keep it.
+
+Breaking change for clients that echo their create body: before SF1 a `ranges`
+key in a PATCH was ignored; now it is validated as the full effective state. A
+create body (operator ranges only, without inherited rasters or band-plan
+ranges) usually fails with `range-locked`, and one that passes clears the
+protocols its ranges inherited. Leave `ranges` out unless you mean to edit them.
+
+Each stored edit remembers the edges (and band plan) of the range it was made
+for. If the job's band plan changes later (a range added, removed or moved), an
+edit applies only to the range at its position that still has those edges;
+edits that no longer match are dropped, and the response reports one
+`range-locked` issue with severity `warning` and
+`details: { reason: "range-live-stale", dropped, expected, received }`. It never
+blocks the PATCH, is reported in that PATCH's answer only (not stored in the
+job's `issues`), and the dropped edits are discarded so later PATCHes do not
+repeat it. A PATCH that sends `ranges` itself is different: if the band plan
+changed since the client read the job and an edit it sent would not land, the
+PATCH is refused with 400 `SCANNER_PLAN_INVALID` and a `range-locked` error with
+`details: { reason: "range-plan-changed", dropped, expected, received }`; the job
+is unchanged. Read the job again (a PATCH of another key re-plans it against the
+current band plan) and resend.
+
+```bash
+curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
+  -H 'Content-Type: application/json' \
+  -d '{"ranges": [{"startHz": 446000000, "endHz": 446200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 446006250}], "name": "PMR", "dwellMs": 400}, {"startHz": 448000000, "endHz": 448200000, "rasters": [{"spacingHz": 12500, "firstChannelHz": 448006250}], "enabled": false}]}'
+```
+
+```json
+{
+	"error": "ScannerApiError",
+	"code": "SCANNER_PLAN_INVALID",
+	"message": "The job spec has errors",
+	"details": {
+		"issues": [
+			{
+				"code": "range-locked",
+				"severity": "error",
+				"message": "range 1: endHz cannot change while the job exists; stop it to change edges or channel spacing",
+				"details": { "index": 1, "fields": ["endHz"] }
+			}
+		]
+	}
+}
 ```
 
 #### POST /api/scanner/jobs/:id/pause, /resume, /cancel
@@ -1738,6 +2069,19 @@ Each returns the `ScanJob`. `resume` takes an optional body
   (`details.holderJobId`) or a better-placed job waits for it
   (`details.waiter`).
 
+`pause` on `paused(preempted-*)` is **Stay here**: the job becomes
+`paused(operator)` without taking the lease back and no longer auto-resumes.
+
+A `ScanJob` carries `resumeAt` (ISO time of the automatic resume, `null` when none is
+scheduled or while held) and `resumeHeldBy` (`audio`, `identify`, `recording` or
+`null`). An elapsed deadline reads as the time it was first seen elapsed and stays fixed while resume is pending.
+These activity holds apply to automatic resume after operator or relay preemption;
+job-to-job lease hand-back is unaffected. The idle clock is held while an identify
+trial runs on the job's source and
+while someone listens to live audio on that source through a gating squelch (manual
+threshold below 0, or auto), plus 3 s after the squelch closes; it then restarts
+from the full `resume.autoAfterIdleMs`. Recording activity does not hold it yet.
+
 409 `SCANNER_INVALID_TRANSITION` when the action does not apply to the
 current state, 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
 identify job.
@@ -1746,6 +2090,43 @@ identify job.
 curl -X POST http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH/resume \
   -H 'Content-Type: application/json' -d '{"takeover": true}'
 ```
+
+#### GET /api/scanner/jobs/:id/hits
+
+Per-job hit statistics (WG2): a hit is one observation of the job attributed
+to a discovery, counted once per observation and job (a job that joins an open
+track is credited once too). `?limit=n` (1–500, default 100). 404
+`SCANNER_JOB_NOT_FOUND` for an unknown job.
+
+```json
+{
+	"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+	"stats": {
+		"discoveries": 12,
+		"hits": 57,
+		"newDiscoveries": 3,
+		"truncated": false
+	},
+	"hits": [
+		{
+			"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+			"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
+			"hits": 9,
+			"firstHitAt": "2026-10-13T14:00:02.000Z",
+			"lastHitAt": "2026-10-13T14:02:11.000Z",
+			"firstSeenInJob": true
+		}
+	]
+}
+```
+
+`hits` is most recent hit first. `firstSeenInJob` means an observation of this
+job created the discovery. In memory only: the counts reset when the job
+starts (not on resume), are dropped when the job is deleted and are empty after
+a restart. At most 2,000 discoveries are tracked per job; further hits count
+in `stats.hits` only. The counts are best-effort: the job remembers the last
+4,096 observations it credited, and once that memory has dropped one a
+re-placed observation may count twice. Either case sets `truncated: true`.
 
 #### DELETE /api/scanner/jobs/:id
 
@@ -1756,12 +2137,24 @@ stay. **204**; 409 `SCANNER_JOB_NOT_TERMINAL` while the job runs or is paused.
 
 Query parameters: `jobId`, `sourceId`, `protocol`, `minConfidence`
 (`activity` | `candidate` | `classified` | `decoded`), `freqMinHz`,
-`freqMaxHz`, `since` (ISO 8601), `encrypted` (boolean), `q` (label search,
-≤ 100 chars), `sort` (`lastSeen` | `frequency` | `confidence`), `cursor`,
-`limit` (1–500).
+`freqMaxHz`, `since` (ISO 8601), `encrypted` (boolean), `q` (≤ 100 chars),
+`identity` (`<kind>:<value>`, ≤ 100 chars), `sort` (`lastSeen` | `frequency` |
+`confidence`), `cursor`, `limit` (1–500).
+
+`q` is a case-insensitive substring search over the operator label and the
+decoded identity value. Everything it matched before (the label alone) still
+matches. Metadata lists such as talkgroups or capcodes are not searched.
+
+`identity` keeps discoveries whose identity has exactly that kind and value.
+The value is compared case-insensitively after trimming. The kind is one of
+`dmr-cc`, `p25-nac`, `nxdn-ran`, `ysf-dgid`, `dstar-call`, `dpmr-cc`,
+`pocsag-capcode`, `aprs-call` and `ism-model`. An unknown kind, a missing colon
+or an empty value is 400 `VALIDATION_ERROR`. All filters combine with AND; sort,
+cursor and limit work as for the other filters.
 
 ```bash
 curl 'http://localhost:9000/api/scanner/discoveries?protocol=dmr&minConfidence=decoded&limit=50'
+curl 'http://localhost:9000/api/scanner/discoveries?identity=dmr-cc:1'
 ```
 
 ```json
@@ -1815,8 +2208,10 @@ hypotheses, the decode evidence and flags. 404 `SCANNER_DISCOVERY_NOT_FOUND`.
 #### PATCH /api/scanner/discoveries/:id
 
 Operator fields: `label` (≤ 100 chars), `notes` (≤ 2000), `lockout`
-(boolean; stops its probes and blocks listen), `keep` (boolean; never pruned
-by age). At least one key. Returns the `Discovery`.
+(boolean; stops its probes, blocks listen and, from WG2, skips the frequency
+in sweeps on the discovery's sources: see `POST /api/scanner/plan`; a locked
+discovery is never evicted or pruned by age), `keep`
+(boolean; never pruned by age). At least one key. Returns the `Discovery`.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/scanner/discoveries/d_01JA2T7B9S0KQ4M3XZ8R6V5W2N \
@@ -2062,7 +2457,9 @@ curl http://localhost:9000/api/spectrum
 	"limits": {
 		"maxProfiles": 4,
 		"hz": { "min": 0.5, "max": 25, "step": 0.5 },
-		"bins": { "min": 128, "max": 2048 }
+		"bins": { "min": 128, "max": 2048 },
+		"averaging": { "min": 1, "max": 32 },
+		"backfill": { "maxMs": 10000, "maxFrames": 64, "maxBytes": 524288 }
 	},
 	"subscribers": 2,
 	"sources": [
@@ -2091,7 +2488,9 @@ curl http://localhost:9000/api/spectrum
 `SpectrumActiveProfile` (`profiles[]`): the profile `key`, `hz`, `bins`,
 `isDefault`, `clients`, and from the latest summary `binCount`, `binHz`,
 `summariesPerFrame` and `effectiveHz` (null before one). `SpectrumLimits`:
-`maxProfiles` (`scanner.ws.spectrumMaxProfiles`) and the `hz`/`bins` bounds.
+`maxProfiles` (`scanner.ws.spectrumMaxProfiles`), the `hz`/`bins` bounds, the
+`averaging` bounds and the `backfill` bounds (window, frames, summed bytes).
+`profiles[].key` carries the `:a<n>` suffix for an averaged profile.
 `SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
 (`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
 floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
@@ -2135,6 +2534,711 @@ curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=44600000
 schema violations (a missing or unknown parameter, a negative Hz, `sinceMs`
 below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
+### Vessels
+
+AIS vessel current state (WG1). In memory only: no position history, cleared
+on restart. DTOs in `packages/api-types/src/vessels.ts`. Vessels unheard for
+15 minutes expire; at 5,000 vessels the least recently heard is evicted. Live
+updates on the [`vessels` channel](#vessels-channel).
+
+AIS NMEA input is checksum-checked (WG2): a sentence is accepted only when the
+XOR of the characters between `!` (or `$`) and `*` equals the two hex digits
+after `*` (either case) and nothing follows them. A failing sentence, fragment
+or not, is dropped before reassembly, counted in the decoder's `stats.errors`
+(see `GET /api/decoders/:id`) and logged at debug level at most once a minute;
+a good copy of a dropped fragment still completes its group within 2 s.
+AIS-catcher's JSON output is not affected. The checksum count is not a separate
+field of the decoder status (only `stats.errors`); it appears in the debug log.
+
+#### GET /api/vessels
+
+`VesselListResponse`: `{ vessels, stats, timestamp }`, most recently heard
+first. A `VesselState` has the zero-padded 9-digit `mmsi`, `vesselClass`
+(`A`, `B`, `base-station`, `aton`, `sar`, `unknown`), static and voyage
+fields (`name`, `callsign`, `imo`, `shipType`, `destination`, `eta`,
+`draught`; null until received), `position` (`{lat, lon, at}` or null),
+`cog`, `sog`, `heading`, `navStatus` (null for the AIS "not available"
+values), `messageTypes`, `messageCount`, `decoderId`, `firstSeen`, `lastSeen`
+and `lastStaticAt`.
+
+#### GET /api/vessels/stats
+
+`VesselTrackerStats`: `vesselCount`, `withPosition`, `withName`, `byClass`,
+`messagesProcessed`, `messagesPerSecond` (60 s average), `lastMessageAt`,
+`latestMmsi`, `expiredTotal` and `timestamp`.
+
+#### GET /api/vessels/:mmsi
+
+One `VesselState`. 1–9 digits are zero-padded. 400 `VALIDATION_ERROR` for
+anything else; 404 `{ error, code: "VESSEL_NOT_FOUND", mmsi }` when the
+vessel is not tracked.
+
+### APRS
+
+APRS station, object and item current state (WG2) from the `direwolf`
+decoders. In memory only: no position history, cleared on restart. DTOs in
+`packages/api-types/src/aprs.ts`. A digipeated copy (same source, destination
+and info within 30 s) only raises `digipeatedCopies`. Entities unheard for
+2 hours expire; at 2,000 the least recently heard is evicted. A killed object
+or item is removed at once. Live updates on the [`aprs` channel](#aprs-channel).
+
+#### GET /api/aprs/stations
+
+`AprsStationListResponse`: `{ stations, stats, timestamp }`, most recently
+heard first. An `AprsStation` has `key` (the Activity entity key:
+`callsign:<CALL[-SSID]>` upper case with `-0` omitted, `aprs-object:<name>` or
+`aprs-item:<name>`), `kind` (`station`, `object`, `item`), `callsign` (for
+objects and items: the station that last reported it), `name` (objects and
+items), `position` (`{ lat, lon, at }` or null), `altitudeFt`, `courseDeg`,
+`speedKn` (knots), `symbol` (table and code), `comment`, `status` (stations
+only), `weather` (`temperatureF`, `humidityPct`, `pressureMbar`,
+`windSpeedMph`, `windDirectionDeg`, `rainLastHourIn`, `at`, or null), `path`,
+`lastDataType`, `killed`, `packetCount` (unique packets), `digipeatedCopies`,
+`decoderId`, `firstSeen` and `lastSeen`. Fields a report does not carry are
+never cleared.
+
+#### GET /api/aprs/stats
+
+`AprsTrackerStats`: `stationCount`, `withPosition`, `byKind`,
+`packetsProcessed`, `duplicatesDropped`, `invalidPackets`, `packetsPerSecond`
+(60 s average of unique packets), `lastPacketAt`, `latestKey`, `expiredTotal`
+and `timestamp`.
+
+#### GET /api/aprs/stations/:key
+
+One `AprsStation` by its exact key (`callsign:N0CALL-9`). 400
+`VALIDATION_ERROR` for a malformed key; 404
+`{ error, code: "APRS_STATION_NOT_FOUND", key }` when it is not tracked.
+
+### Mesh
+
+Meshtastic node current state (WG2) from the `meshtastic` decoder output. In
+memory only: no position history, cleared on restart. DTOs
+in `packages/api-types/src/mesh.ts`. Nodes are keyed by the packet's `from`
+(never `to` or the broadcast address). Copies of an already heard
+`(from, id)` packet within 60 s are flood copies: they only raise
+`duplicateCopies`. Nodes unheard for 4 hours expire; at 1,000 nodes the least
+recently heard is evicted. Live updates on the [`mesh` channel](#mesh-channel).
+
+Device telemetry and neighbour links (WG3) are decoded from unique packets only
+(after the `(from, id)` dedupe). TELEMETRY_APP (port 67) `device_metrics` set the
+sending node's `telemetry`; other telemetry variants are recognised and ignored.
+NEIGHBORINFO_APP (port 71) reports replace the sending node's `neighbours` when the
+report's `node_id` equals the packet's `from` (otherwise the packet counts in
+`invalidPackets`). A malformed telemetry or NeighborInfo payload counts in
+`decodeErrors` and leaves `telemetry` and `neighbours` unchanged; as a unique packet
+it still creates or updates the node (counters, `lastSeen`, radio metadata) and sends
+`mesh:update`.
+Both fields are optional: older cores omit them.
+
+#### GET /api/mesh/nodes
+
+`MeshNodeListResponse`: `{ nodes, stats, timestamp }`, most recently heard
+first. A `MeshNode` has `nodeId` (`!` plus 8 lowercase hex digits), `key`
+(`node:<nodeId>`, the Activity entity key), `nodeNum`, the NODEINFO fields
+`longName`, `shortName`, `hwModel`, `role`, `isLicensed` (null until
+received) and `lastNodeInfoAt`, `position` (`{ lat, lon, altitudeM, at }` from
+the latest valid POSITION, or null), `snrDb`, `rssiDbm` and `hopsAway` of the
+last unique packet (null when unknown), `viaMqtt`, `packetCount` (unique
+packets), `duplicateCopies`, `portnums` (unique packets per port, at most 64
+keys, later ports count under `other`), `lastPortnum`, `decoderId`,
+`firstSeen` and `lastSeen`, and from WG3:
+
+- `telemetry`: `{ batteryPct, powered, voltageV, channelUtilizationPct,
+  airUtilTxPct, uptimeS, at }` from the node's latest device metrics, or null.
+  A `battery_level` above 100 means `powered: true` and `batteryPct: null`; an
+  absent metric is null; `at` is the packet's receive time. Values are reported
+  as sent, not rounded: `voltageV`, `channelUtilizationPct` and `airUtilTxPct`
+  are float32 values widened to a double (3.7 V arrives as
+  `3.700000047683716`), so clients should round them for display (6
+  significant digits stay within float32 precision). `snrDb` in `neighbours`
+  is float32 too.
+- `neighbours`: `[{ nodeId, snrDb, at }]` from the node's latest NeighborInfo
+  report, sorted by `nodeId`, at most 32; a node listed twice in one report is
+  one entry with its best SNR (a known SNR beats null). `nodeId` may be a node
+  this receiver has not heard. Entries older than 4 hours are dropped on cleanup
+  (and the node is sent as `mesh:update`).
+
+#### GET /api/mesh/stats
+
+`MeshTrackerStats`: `nodeCount`, `withPosition`, `withName`,
+`packetsProcessed`, `duplicatesDropped`, `invalidPackets`, `decodeErrors`,
+`packetsPerSecond` (60 s average of unique packets), `lastPacketAt`,
+`latestNodeId`, `expiredTotal`, `telemetryPackets` and `neighbourReports`
+(WG3: applied telemetry and NeighborInfo packets) and `timestamp`.
+
+#### GET /api/mesh/nodes/:nodeId
+
+One `MeshNode`; the id matches case-insensitively. 400 `VALIDATION_ERROR` for
+a malformed id; 404 `{ error, code: "MESH_NODE_NOT_FOUND", nodeId }` when the
+node is not tracked.
+
+### Coverage
+
+Receiver coverage per bearing (WG3): the farthest ADS-B and AIS position heard
+in each 1° bearing bucket from the station location (`station.lat`/`station.lon`,
+see [Station](#station)) over the last 24 hours. In memory only: it starts empty
+after a restart. DTOs in `packages/api-types/src/coverage.ts`. Inputs are the
+aircraft and vessel trackers; one aircraft or vessel counts only when its
+position time advances (a new position report), so repeated messages without a
+new position count once.
+
+Range is the haversine distance (R = 6,371,000 m), bearing the initial
+great-circle bearing in degrees true, bucket = floor (bucket `b` covers
+`[b, b + 1)`). Each protocol keeps 24 hourly slots × 360 buckets; a query takes
+the farthest per bearing over the current and previous 23 hours. A position is
+rejected, and counted in `rejected`, as `no-station` (no station location),
+`invalid-position` (non-finite, out of range, or exactly (0, 0)), `stale` (older
+than 60 s, or more than 60 s ahead of the clock, when observed) or `too-far`
+(more than 500 km).
+
+#### GET /api/coverage
+
+Optional `protocol=adsb|ais` filters `protocols`; any other value is 400
+`VALIDATION_ERROR`. `Cache-Control: no-store`.
+
+**Response** (200) `CoverageResponse`: `available`, `reason`, `station`
+(`{ lat, lon }` or null), `windowHours` (24), `bearingStepDeg` (1), `protocols`
+(per protocol: `sectors` — only buckets with data, by bearing, each
+`{ bearingDeg, maxRangeM, lat, lon, at }` — `maxRangeM` over the sectors or
+null, and `accepted`, positions accepted in the window), `rejected` (counts
+since start by reason) and `timestamp`. Without a station location the answer is
+still 200:
+
+```json
+{
+	"available": false,
+	"reason": "no-station-location",
+	"station": null,
+	"windowHours": 24,
+	"bearingStepDeg": 1,
+	"protocols": [],
+	"rejected": { "invalid-position": 0, "too-far": 0, "stale": 0, "no-station": 12 },
+	"timestamp": "2026-10-16T12:00:00.000Z"
+}
+```
+
+Access is the same as the other read routes (`GET /api/vessels`,
+`GET /api/mesh/nodes`).
+
+## Activity
+
+Persistent decoder-event search. On by default with bounded retention and
+admission (see [Configuration](#configuration)). Turn it off with
+`activity: { enabled: false }` or `WAVEKIT_ACTIVITY__ENABLED=false`. The
+database is `<stateDir>/activity/activity.db` (`stateDir` defaults to `data`,
+`WAVEKIT_STATE_DIR`; the compose profiles mount it on a volume). Disabled mode
+creates no `activity` directory. The routes stay registered and answer 404
+`ACTIVITY_DISABLED`. The other WebSocket channels are unchanged.
+
+Opening the store needs Node 24 and `node:sqlite` with FTS5
+(`contentless_delete`). A failed probe creates no files. A lock or a
+schema mismatch means a database is already there. The lock is
+`<stateDir>/activity/activity.lock.db`, held by the writer worker with
+`PRAGMA locking_mode=EXCLUSIVE` until close or process death. A second
+opener gets `ACTIVITY_STORE_LOCKED`. WaveKit keeps running either way.
+The activity routes then answer 503:
+
+```json
+{
+	"error": "ServiceUnavailable",
+	"code": "ACTIVITY_UNAVAILABLE",
+	"reason": "ACTIVITY_STORE_LOCKED",
+	"message": "activity store is locked"
+}
+```
+
+`reason` is `ACTIVITY_UNAVAILABLE` (runtime, FTS5 or an invalid limit),
+`ACTIVITY_STORE_LOCKED`, or `ACTIVITY_SCHEMA_MISMATCH`. When error
+disclosure is off (protected mode), `message` is `Request failed` and
+`reason` is still set. The response does not include the open error text.
+
+The store holds three kinds:
+
+- `decoder-reception`: decoder output envelopes. Output types `sync`,
+  `rates`, `stats`, `status` and `error` are counted as excluded telemetry and
+  are not stored. Provenance (WG3) names the source and channel frequency
+  when WaveKit knows them; see [Provenance](#provenance).
+- `analog-transmission`: one record per closed
+  [`live-audio:transmission`](#live-audiotransmission) of the live
+  demodulator. `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
+  and `payload` is `AnalogTransmissionPayload` (the closed event without
+  `state`). The summary has `category: "voice"`, `protocol: "analog"`, the
+  source id, `frequencyHz` from the event-time frequency (null when unknown),
+  `decoderId: null`, a title such as `NFM 446.00625 MHz` (or
+  `NFM transmission` without a frequency) and fields `durationMs` (ms),
+  `modulation` and `peakChannelPowerDbfs` (dBFS, when known), plus `ctcssHz`
+  (label `CTCSS`, Hz) and `dtmf` (label `DTMF`) when the closed event's
+  `tone` has them; those values are also searchable text. Older rows have
+  no `tone`. Search with `kinds=analog-transmission`, by source or frequency. Admission is
+  non-blocking and counted like decoder receptions, with one per-decoder
+  token bucket per source (`analog:<sourceId>`).
+- `ingestion-gap`: written when rows are dropped.
+
+Position coalescing: a redundant position or presence update of an `aircraft`
+(per ICAO address) or `ship` (per MMSI) is stored at most once per entity per
+60 s and per decoder. Redundant means every field is position, kinematics,
+presence or reception metadata (aircraft: position, altitudes, speed, track,
+headings, vertical rate, signal, message counts, timestamps; ship: position,
+`cog`, `sog`, `heading`, timestamps, AIS types 1, 2, 3, 18, 19 and 27 only) or
+an unchanged identity field. A bare-presence aircraft report (ICAO address and
+reception metadata, as from Beast) is redundant. Always stored: a first
+sighting, a changed identity or static field (aircraft `callsign`, `squawk`,
+`onGround`, `category`, `emergency`; ship `navStatus`, `name`, `callsign`,
+`imo`, `shipType`, `destination`, `eta`, `draught`), any other field, and
+every other AIS message type (for example 4, 5, 6, 8, 9, 12, 14, 21, 24). A
+reception whose write fails is not counted as stored, so its retransmission
+is. Coalesced
+receptions are counted in `stats.coalescedPositions`; they are not losses and
+open no ingestion gap. The live trackers, `aircraft:*`/`vessel:*` and
+`decoder:output` WebSocket messages still carry every update.
+
+Effective retention is whichever cap binds first. Which rows a cap removes
+depends on the retention policy (see [Retention](#retention)); under
+`oldest-first` a busy position feed shortens retention for rare events too. With
+coalescing, N entities in continuous view add about N × 1,440 rows a day: 100
+aircraft and vessels fill 250,000 rows in about 1.7 days, 300 in about 14
+hours, while the 3-day age cap binds below about 58 entities. Without it (1 Hz
+per entity) the admission limits (50/s global) would fill the row cap in about
+83 minutes. The 256 MiB byte cap can bind earlier when rows are large.
+
+Receipts, recordings and transcripts are not written.
+
+APRS and Meshtastic positions are coalesced the same way (WG2): an `aprs`
+output per source callsign and decoder when its `dataType` is `Position`,
+`Position with messaging`, `Position with timestamp`, `Position with timestamp
+and messaging`, `Mic-E` or `Mic-E (old)`, it has a finite `lat` and `lon`,
+and every other field is on the position allowlist (`source`, `destination`,
+`path`, `dataType`, `lat`, `lon`, `altitude`, `course`, `speed`, `raw`,
+`timestamp`) or an unchanged `symbol` or `comment`; a `meshtastic` output per
+`from` node and decoder only for port 3 (POSITION) with radio and packet
+metadata alone. Every other APRS data type (objects, items, messages, status,
+weather, telemetry), any packet with weather or a message, and every other
+Meshtastic port are always stored.
+
+Meshtastic flood copies (WG3): a `meshtastic` reception with the same `from`,
+`id` and `portnum` and the same payload hash (32-bit FNV-1a over `portnum` and
+`payloadB64`; two different payloads collide with probability about 2^-32, so a
+distinct packet is dropped that rarely) as a reception queued at most 30 s
+earlier (by `receivedAt`, inclusive) is dropped as `flood-copy`, on every port.
+The check runs after the closed and telemetry checks and before coalescing and
+rate limiting, so a copy takes no admission token and touches no coalescing
+state; copies are not losses and open no ingestion gap. Only queued receptions
+are remembered: a failed or skipped write forgets its entry (a timed-out write
+keeps it), so a later copy can still be stored. `id` 0 or missing, `from`
+missing, a non-integer value, a different payload, a backward clock step or more
+than 30 s apart means "not a copy". A copy dropped while its original was still
+queued is not re-admitted if that write later fails. The memory holds at most
+20,000 live entries (oldest evicted), about 4.4 MB and at most about 5.6 MB.
+The live mesh tracker and `decoder:output` still see every copy.
+
+### Provenance
+
+From WG3 a decoder reception's `provenance` carries `sourceId` and
+`frequency: { hz, basis: "channel", tuningTrust }` when WaveKit can resolve them;
+otherwise both stay null, as before. Provenance comes only from the decoder's
+binding (its configured `sourceId`, or the default source; and its configured
+target frequencies: `frequencies`, `options.frequencies` or `options.frequency`)
+and from a frequency the decoder itself reports in its payload. It is never
+inferred from decoded content or from a protocol constant. A decoder that reads
+its own device (external input, for example readsb with `rtlTcpHost`) has
+`sourceId: null`. `hz` is rounded to an integer in (0, 10^12]; anything else
+means no frequency. `tuningTrust` is `unverified` for every decoder: WaveKit
+does not verify the tuning the decoder hears.
+
+| Output                                                   | `frequency.hz`                                                                        |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `acars` (acarsdec)                                       | payload `frequency` (Hz)                                                              |
+| `vdl2` (dumpvdl2)                                        | payload `frequency` (Hz) when above 0, else the single target                         |
+| `meshtastic` (lora-meshtastic)                           | payload `frequency` (Hz)                                                              |
+| `ship` (AIS)                                             | payload `channel` A → 161,975,000, B → 162,025,000 if present, else the single target |
+| others (readsb, direwolf, multimon-ng, dsd-fme, rtl_433) | the binding's target when it has exactly one, else null                               |
+
+A payload frequency that is missing or invalid falls back to the binding's single
+target. AIS-catcher's output does not carry the channel today, so a dual-channel AIS
+decoder (two targets) gets `frequency: null`. multimon-ng's string `frequency` is
+not used (its unit is not verified). A lookup or provenance that fails never
+loses the reception: it is stored with null provenance. Provenance does not
+change `decodedData`, the presentation, coalescing or admission. Search by
+`sourceIds`, `frequencyMin` and `frequencyMax` now matches decoder receptions
+that carry provenance; rows stored before WG3 keep null provenance.
+
+### Presentation
+
+Decoder receptions stored from WG2 on carry a presentation beside the
+unchanged `decodedData`: `protocol`, `category`, `entityKey`, `title`,
+`fields` and `position`. It is derived only from the output's own validated
+payload, never from RF context, and never converts units. `position` is
+`lat`/`lon` only and is omitted for `(0, 0)`. `entityKey` is null when the
+identifier is missing, malformed, or contains a control character
+(U+0000–U+001F or U+007F–U+009F). Keys are at most 128 bytes and match
+`^[a-z][a-z0-9-]*:[^:]+$`. A row has at most 6 fields and a title of at most
+80 characters; long text is cut on a UTF-8 boundary with a trailing `…`. A
+position-only row (one that coalescing could drop) has a title, key, position,
+category and protocol but no fields. A presentation that fails never loses the
+reception: the row is stored without it. Rows stored before WG2 keep category
+`other` and no entity key; nothing is backfilled, and old and new rows parse.
+
+| Output                                    | entityKey                                                      |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| aircraft (`icao` or `hex`, 6 hex, no `~`) | `icao:<UPPER 6 hex>`                                           |
+| ship (`mmsi`, 1–9 digits)                 | `mmsi:<9 digits, zero-padded>`                                 |
+| APRS station                              | `callsign:<UPPER CALL[-SSID]>` (`-0` omitted)                  |
+| APRS object / item                        | `aprs-object:<name>` / `aprs-item:<name>`                      |
+| Meshtastic (`from` in `0..0xffffffff`)    | `node:!<8 lowercase hex>`                                      |
+| POCSAG / FLEX                             | `capcode:<decimal, no leading zeros>`                          |
+| AFSK1200 with a callsign `from`           | `callsign:<UPPER>`                                             |
+| DMR / P25 / YSF call (`talkgroup >= 0`)   | `talkgroup:<tg>`                                               |
+| ACARS                                     | `reg:<UPPER tail, dots removed>`                               |
+| VDL2                                      | `icao:<UPPER 6 hex>` when `icao` is valid, else the ACARS tail |
+| rtl_433 (`model` string)                  | `sensor:<model>-<id>[-<channel>]` (spaces become `_`)          |
+
+The keys match the live trackers: `icao:` aircraft, `mmsi:` vessels, the APRS
+`key` and the Meshtastic node `key`.
+
+Presentation is computed only for receptions the store keeps: coalesced and
+rate-limited receptions cost what they did before WG2, and the internal
+`presentationFailures` counter counts kept receptions only.
+
+Row growth and retention: built-row growth from presentation is at most 160
+bytes for a position-only row and at most 1,100 bytes for any row. Measured
+built-row bytes (summary + record + FTS), plain to presented:
+
+| Reception                                         | Plain | Presented | Growth        |
+| ------------------------------------------------- | ----- | --------- | ------------- |
+| Position-only ADS-B                               | 885   | 1,001     | +116 (+13.1%) |
+| SBS `MSG,3` with `onGround: false`                | 910   | 1,183     | +273 (+30.0%) |
+| readsb JSON with callsign and squawk              | 1,110 | 1,961     | +851 (+76.7%) |
+| APRS position with symbol, comment, course, speed | 949   | 1,723     | +774 (+81.6%) |
+| Bare APRS position                                | 882   | 1,017     | +135 (+15.3%) |
+
+On a measured 5,000-row mix (70% position-only ADS-B, 10% full ADS-B, 10% AIS,
+5% APRS, 5% pages) the built row went from 890 to 1,179 bytes and the on-disk
+size from 1,228 to 1,777 bytes a row (+44.7%). At the 256 MiB cap that mix holds
+about 151,100 rows instead of about 218,600 (about 31% fewer), so the byte cap
+binds before the 250,000-row cap. A feed that stores mostly bare positions is
+closer to +13–15%; SBS and readsb feeds with identity fields, and APRS with
+comments, grow more.
+
+### Retention
+
+From WG3, `activity.retention.policy` decides which rows the row and byte caps
+remove. It is `fair-share` (the default) or `oldest-first` (the pre-WG3
+behaviour). Age pruning (`maxAgeMs`) is the same under both: it removes the
+oldest rows of every feed. The caps, the start-above-cap trigger, the run down to
+95% of the cap, the batch size per transaction and the time bound per write are
+unchanged and shared by both policies.
+
+Under `fair-share` the rows are grouped into shares. A row with a decoder belongs
+to `decoder:<decoderId>`; a row without one (analog transmissions, ingestion
+gaps) belongs to `kind:<kind>`. Cap pressure is spread by water-filling: with
+share usage `u_i` (rows for the row cap, summed record bytes for the byte cap) and
+the 95% target `T`, the level `L` is the largest value with
+`sum(min(u_i, L)) <= T`. Only shares above `L` lose rows, never below `L`, and
+inside a share the oldest rows (lowest `seq`) go first. A share at or under `L`
+keeps its rows until age pruning removes them.
+
+Two exceptions keep the caps binding:
+
+- Indivisible row: pruning frees record bytes faster than live database pages, so
+  the last byte excess can be smaller than any row a share above `L` could give up
+  without crossing `L`. Then one step deletes the single oldest row of the share
+  above `L` with the largest excess (ties by key, ascending). It never touches a
+  share at or under `L`.
+- Prefix fallback: if a cap is still active after the counters are rebuilt and no
+  share is above `L`, one step deletes the oldest rows of all shares alike.
+
+Both count in `retention.prefixFallbackSteps`. The per-share counters are built
+by one scan when the store opens (measured 330 ms for 250,000 rows on the
+development Mac) and updated after each commit and prune. If that scan fails, the
+session runs `oldest-first` until the store is reopened and status reports
+`effective: "oldest-first"`. With a single share, `fair-share` deletes exactly
+the rows `oldest-first` deletes.
+
+Because `fair-share` can delete rows that are not the oldest, it opens holes in
+the `seq` order. Paging and replay detect them; see
+[Retention holes](#retention-holes). `oldest-first` opens no holes.
+
+A busy station (estimates, not measurements), with the byte cap binding at about
+151,000 rows on the measured row mix (see Presentation): pages about 2,000 rows a day, a
+100-node mesh about 14,400, busy APRS about 72,000 and 300 aircraft about 432,000.
+Over the 3-day demands (pages 6,000, mesh 43,200, APRS 216,000, ADS-B 1,296,000),
+`6,000 + 43,200 + 2L = 151,000` gives `L` of about 50,900 rows. So under
+`fair-share` pages and mesh keep 3 days (the age cap), APRS about 17 hours and
+ADS-B about 2.8 hours. Under `oldest-first`, 151,000 rows at about 520,000 a day
+keep about 7 hours of every feed. A station with one feed keeps exactly the same
+rows under both policies. Measured against `oldest-first` on a 250,000-row
+fixture, `fair-share` deleted 1.20 times as many rows a second, the file was 3%
+larger after 10 cap cycles, and 0.966 times as many rows fit under a 64 MiB byte
+cap.
+
+### Configuration
+
+Commented in `config/default.yaml`. A config without an `activity` block, and
+every omitted retention or admission field, gets the bounded defaults: 250,000
+rows, 256 MiB, 3 days, 50 events/s with a burst of 500 globally, and 20/s with
+a burst of 200 per decoder. They are an operator judgement for a Pi-class SD
+card, not a measurement. The 256 MiB cap counts live database pages (freelist
+pages excluded) and triggers pruning; the WAL pauses writes past 64 MiB. So
+256 MiB + 64 MiB is a nominal live-page plus WAL threshold, not a hard disk
+ceiling: freed pages return through incremental vacuum, and pruning per write
+is bounded. Upgrade: a store that grew under the previous defaults (1,000,000
+rows, 2 GiB, 7 days) is pruned down to the new caps a bounded batch at a time
+and stays larger on disk until freed pages are vacuumed; set the old values
+explicitly to keep them. `maxRows` is an
+integer of at least 1,000. `maxDbBytes` is an integer of at least 16 MiB.
+`globalPerSecond` and `perDecoderPerSecond` are
+positive integers. Commits are batched (about 25 ms). Age pruning runs only
+when the oldest row is past the age cap by a slack of `max(60 s, 1% of
+maxAge)`, then deletes down to the cap. Row and byte pruning delete down to
+95% of the cap and never remove more than the surplus above that mark.
+
+```yaml
+activity:
+  enabled: true
+  retention:
+    maxRows: 250000
+    maxDbBytes: 268435456
+    maxAgeMs: 259200000
+    policy: fair-share
+  admission:
+    globalPerSecond: 50
+    globalBurst: 500
+    perDecoderPerSecond: 20
+    perDecoderBurst: 200
+```
+
+Environment overrides, in addition to `WAVEKIT_ACTIVITY__ENABLED`
+(`false` turns Activity off):
+
+- `WAVEKIT_ACTIVITY__RETENTION__MAX_ROWS`
+- `WAVEKIT_ACTIVITY__RETENTION__MAX_DB_BYTES`
+- `WAVEKIT_ACTIVITY__RETENTION__MAX_AGE_MS`
+- `WAVEKIT_ACTIVITY__RETENTION__POLICY` (`fair-share` or `oldest-first`)
+- `WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_PER_SECOND`
+- `WAVEKIT_ACTIVITY__ADMISSION__GLOBAL_BURST`
+- `WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_PER_SECOND`
+- `WAVEKIT_ACTIVITY__ADMISSION__PER_DECODER_BURST`
+
+### GET /api/activity
+
+Search summaries inside one snapshot.
+
+Query parameters: `kinds`, `sourceIds`, `decoderIds`, `protocols`,
+`categories`, `frequencyMin`, `frequencyMax`, `producedFrom`, `producedTo`,
+`entityKey`, `text`, `refs` (`type:value`, repeated), `order` (`asc` or
+`desc`), `limit`, `pageToken`. An unknown parameter is 400
+`ACTIVITY_QUERY_INVALID`.
+
+`text` is plain text. The server tokenises it and quotes each token; it is
+not a raw FTS5 query. Indexed text is the title, the protocol, field labels,
+string, numeric and boolean field values, and string leaves of the decoded
+JSON. Whitespace- or punctuation-only text applies no text filter. The
+search is a bounded projection
+(`searchCoverage: "bounded-projection"`), not a search of every raw byte.
+One search, detail or facet request may be in flight per caller. The caller
+is the admitted access principal (a session's device id, or the machine
+principal), or else the request IP. Without an access controller, admission
+keys on `request.ip`. A reverse proxy without `trustProxy` shares that one
+key, so every client shares one in-flight slot. `x-activity-client` is
+ignored.
+
+**Response** (200): `items` (summaries), `nextPageToken`, `replayCursor`,
+`snapshot` (`lowBarrier`, `highWater`, `expiresAt`), `searchCoverage`.
+Default page size is 100 and the maximum is 200. A page token is bound to
+the same query and expires with the snapshot (5 minutes).
+
+### GET /api/activity/:eventId
+
+One stored record: `kind`, decimal `commitSeq`, and `payload` (the envelope,
+including `outputType` and `decodedData`). 404 `NOT_FOUND` when the id is
+absent. 400 `ACTIVITY_QUERY_INVALID` when the id is not a valid event id.
+
+### POST /api/activity/facets
+
+Body `{ "query": { }, "dimensions": ["kind"] }`. Dimensions are `category`,
+`protocol`, `decoderId`, `sourceId` and `kind` (at most five, unique).
+**Response** (200): `facets`, `scanned`, `truncated`, `snapshot`. The scan
+stops at 50,000 rows and 32 values per dimension.
+
+### GET /api/activity/status
+
+**Response** (200): `{ "enabled": true, "stats": { ... } }` with admitted,
+committed, dropped (`rate-limited`, `queue-full`, `store-paused`,
+`write-failed`, `closed`), `excludedTelemetry`, `coalescedPositions`, queue depth, `rows`,
+`dbBytes`, `paused` and `writer` (`running` or `stopped`). `closed` counts
+admits rejected after the writer has stopped. A write timeout stops the
+writer for the session and does not count those rows as lost. 500
+`ACTIVITY_STATUS_UNAVAILABLE` only if a ready store has no stats provider.
+
+From WG3 `stats` also has two optional fields (older cores omit them):
+
+- `floodCopies`: Meshtastic flood copies not stored (see Meshtastic flood copies
+  above). They are not losses and are not in `dropped`.
+- `retention`: `policy` (configured), `effective` (in force: `oldest-first` after
+  a failed counter scan), `shares` (largest first by `rows`, then `key`
+  ascending; at most 64), `sharesTruncated` (more than 64 shares exist) and
+  `prefixFallbackSteps` (indivisible-row and prefix steps this session; 0 under
+  `oldest-first`). Each share has `key`, `rows`, `bytes` (summed record bytes,
+  not on-disk bytes) and `oldestReceivedAt` (null when unknown). See
+  [Retention](#retention).
+
+```json
+{
+	"enabled": true,
+	"stats": {
+		"admitted": 182340,
+		"committed": 151020,
+		"duplicates": 0,
+		"dropped": {
+			"rate-limited": 0,
+			"queue-full": 0,
+			"store-paused": 0,
+			"write-failed": 0,
+			"closed": 0
+		},
+		"excludedTelemetry": 912,
+		"coalescedPositions": 29480,
+		"floodCopies": 1840,
+		"queueDepth": 0,
+		"queueBytes": 0,
+		"dbBytes": 254803968,
+		"walBytes": 4120032,
+		"rows": 151020,
+		"oldestReceivedAt": "2026-10-13T09:12:04.000Z",
+		"pruneWatermark": "212877",
+		"paused": false,
+		"writer": "running",
+		"retention": {
+			"policy": "fair-share",
+			"effective": "fair-share",
+			"shares": [
+				{
+					"key": "decoder:readsb",
+					"rows": 50910,
+					"bytes": 49120330,
+					"oldestReceivedAt": "2026-10-16T06:22:40.000Z"
+				},
+				{
+					"key": "decoder:direwolf",
+					"rows": 50890,
+					"bytes": 51002114,
+					"oldestReceivedAt": "2026-10-15T16:10:02.000Z"
+				},
+				{
+					"key": "decoder:lora-meshtastic",
+					"rows": 43150,
+					"bytes": 40788210,
+					"oldestReceivedAt": "2026-10-13T09:12:04.000Z"
+				},
+				{
+					"key": "decoder:multimon-ng",
+					"rows": 6070,
+					"bytes": 4911502,
+					"oldestReceivedAt": "2026-10-13T09:14:51.000Z"
+				}
+			],
+			"sharesTruncated": false,
+			"prefixFallbackSteps": 0
+		}
+	}
+}
+```
+
+### Query and cursor errors
+
+The reader worker has its own 5 s startup budget. The 250 ms deadline starts
+only after the reader is ready. A reader that cannot start is
+`ACTIVITY_QUERY_FAILED`.
+
+| Code                         | HTTP | When |
+| ---------------------------- | ---- | ---- |
+| `ACTIVITY_DISABLED`          | 404  | `activity.enabled` is false |
+| `NOT_FOUND`                  | 404  | Detail id is not in the store |
+| `ACTIVITY_UNAVAILABLE`       | 503  | Enabled, but the store did not open. `reason` says why |
+| `ACTIVITY_QUERY_INVALID`     | 400  | Bad query, facet list, event id or subscribe message |
+| `ACTIVITY_CURSOR_INVALID`    | 400  | Cursor does not verify. `reason`: `invalid-cursor` |
+| `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
+| `ACTIVITY_CURSOR_GAP`        | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
+| `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
+| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms) after the reader was ready |
+| `ACTIVITY_QUERY_FAILED`      | 500  | The reader did not start, the reader failed, or the store read failed |
+| `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
+| `ACTIVITY_RECORD_CORRUPT`    | 500  | A stored record failed validation |
+| `ACTIVITY_STATUS_UNAVAILABLE`| 500  | Status was requested without a stats provider |
+
+Cursor failures include `reason`. A query hash ignores `order` and paging, so
+a reconnect must send the same `query` as the cursor. A changed query is
+`query-changed`, not a silent filter change. Delivering a row twice is
+harmless; losing one is not.
+
+#### Retention holes
+
+Holes (WG3): a retention step can delete rows that are not the oldest (fair-share
+retention removes rows from the largest share). Paging and replay never skip such
+a row silently:
+
+- A page continuation fails with 409 `ACTIVITY_SNAPSHOT_RESET`, `reason:
+  "snapshot-reset"`, when retention opened a hole after the first page was read.
+  Start a new search.
+- A replay (REST `replayCursor` or WebSocket cursor) resets with `cursor-gap`
+  when a hole opened above its position, that is, a row it had not delivered was
+  deleted. A hole only at or below its position is adopted and the replay
+  continues. A live follower at the committed head is never reset by holes.
+- A page or replay started after a reset is not reset again unless a new hole
+  opens. Tokens and cursors issued before WG3 read as "no holes seen". Facets and
+  detail lookups are unaffected; no frame, reason or DTO changed.
+
+Under the `oldest-first` policy no holes open, so these resets do not happen.
+Under cap pressure with several shares, expect more `snapshot-reset` and
+`cursor-gap` than before.
+
+### WebSocket
+
+`activity` is not a channel of `subscribe`. Clients send:
+
+```json
+{ "type": "activity:subscribe", "id": "live", "query": {}, "cursor": "<optional>" }
+```
+
+```json
+{ "type": "activity:unsubscribe", "id": "live" }
+```
+
+`id` matches `^[A-Za-z0-9_-]{1,64}$`. `query` is the same object as the REST
+search query. `cursor` is a `replayCursor` or a cursor from an earlier
+`activity:records` / `activity:progress` frame. Omit it to follow new commits
+only.
+
+Server frames use `channel: "activity"` and are sent on the socket directly.
+They do not enter the replaceable telemetry queue. Each message is
+`{ type, channel: "activity", data }`. There is no `activity:frame` wrapper.
+Types:
+
+- `activity:subscribed` — `{ id }`
+- `activity:records` — `{ id, items, scannedThrough, cursor }`
+- `activity:progress` — `{ id, scannedThrough, cursor }` when a page was empty
+- `activity:reset` — `{ id, reason }` (`invalid-cursor`, `cursor-expired`,
+  `store-changed`, `query-changed`, `cursor-gap`, `reader-failed`).
+  `snapshot-reset` is not sent; replay reports that case as `cursor-gap`.
+  `reader-failed` ends the subscription when a read fails. The subscription
+  ends.
+- `activity:unsubscribed` — `{ id }`
+- `activity:closed` — `{ reason: "resumable", cursors: { "<id>": "<cursor>" } }`
+  when this client's activity queue passes 256 messages or 1 MiB. `cursors`
+  maps each subscription id to the last cursor that subscription delivered.
+  The socket then closes. Reconnect each subscription with its own cursor.
+- `error` — `{ code, message, id? }`. Disabled sockets get
+  `ACTIVITY_DISABLED`. An enabled store that did not open gets
+  `ACTIVITY_UNAVAILABLE`. A bad message gets `ACTIVITY_QUERY_INVALID`. A
+  second subscription with the same id, or more than 2 per connection or 8
+  on the process, gets `ACTIVITY_QUERY_BUSY`.
+
+These frames are not "Invalid message format". The CLI never sends
+`activity:subscribe`. A frame with `channel: "activity"` or a type starting
+with `activity:` is ignored there and does not increment its invalid-frame
+count.
+
 ## WebSocket API
 
 Each connection has a 1 MiB outbound payload budget across the application queue
@@ -2149,9 +3253,10 @@ WebSocket libraries normally answer protocol pings automatically. This does not
 require a new JSON message type.
 
 After disconnecting, reconnect and resubscribe, then refresh state through REST.
-Events missed during disconnection are not replayed, and snapshot/event ordering
-is not yet guaranteed. SSE and resumable event history are planned, not currently
-implemented. See [the API roadmap](ROADMAP.md#4-api-and-event-foundation-for-multiple-clients).
+Events missed on these telemetry channels are not replayed, and snapshot/event
+ordering is not yet guaranteed. SSE is not implemented. Activity, when enabled,
+replays from a cursor on its own channel; see [Activity](#activity). See
+[the API roadmap](ROADMAP.md#4-api-and-event-foundation-for-multiple-clients).
 
 ### Connection
 
@@ -2175,6 +3280,7 @@ ws.onopen = () => {
 				"tuner",
 				"scanner",
 				"spectrum",
+				"bandplans",
 			],
 		}),
 	)
@@ -2204,14 +3310,21 @@ ws.onmessage = event => {
 		"resources",
 		"tuner",
 		"scanner",
-		"spectrum"
+		"spectrum",
+		"bandplans"
 	]
 }
 ```
 
 Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
-[SCANNER.md](SCANNER.md)) and `spectrum` (core waterfall frames, opt-in).
+[SCANNER.md](SCANNER.md)), `spectrum` (core waterfall frames, opt-in),
+`bandplans` (band-plan change notices, see [Bandplans channel](#bandplans-channel))
+`vessels` (AIS vessel state, see [Vessels channel](#vessels-channel)), `aprs`
+(APRS stations, objects and items, see [APRS channel](#aprs-channel)) and `mesh`
+(Meshtastic nodes, see [Mesh channel](#mesh-channel)).
+`activity` is not one of these channels. It uses `activity:subscribe` and
+`activity:unsubscribe`. See [Activity](#activity).
 
 `spectrum` takes optional per-client options on `subscribe`. Without options
 the client gets the default profile (`scanner.ws.spectrumHz` ×
@@ -2235,6 +3348,21 @@ the client gets the default profile (`scanner.ws.spectrumHz` ×
   ones get no reply.
 - The answer is a `spectrum:profile` ack, then one `snapshot: true` frame per
   source (current state, not a replay of missed messages), then live frames.
+- `averaging` (optional, WG1): exponential average over n frames of the
+  profile, per bin in dBFS after each frame's max-hold:
+  `avg = avg + (frame − avg) / n`, seeded with the first frame and restarted
+  on a new epoch, stream or bin layout. Rounded and clamped to 1–32; absent or
+  1 is off. It is part of the profile: clients with equal `hz`, `bins` and
+  `averaging` share one frame build, and an averaged profile counts against
+  `scanner.ws.spectrumMaxProfiles`. A subscribe that omits `averaging` is
+  never served an averaged profile.
+- `backfillMs` (optional, WG1, opt-in): replay up to this many ms of recent
+  frames after the ack. Rounded and clamped to 0–10000; absent or 0 means no
+  backfill and the subscribe behaves exactly as before. It is per subscribe
+  and not part of the profile. See [spectrum:frame](#spectrumframe) for the
+  delivery order and bounds.
+- A client that sends neither option receives exactly the messages it did
+  before WG1.
 
 #### Unsubscribe
 
@@ -2644,6 +3772,87 @@ Backpressure status snapshot.
 }
 ```
 
+#### live-audio:level
+
+On the `live-audio` channel while the live demodulator runs, published at
+10 Hz. `channelPowerDbfs` and `noiseFloorDbfs` are `null` until the
+first complete IQ block; `thresholdDbfs` is the threshold in effect.
+
+```json
+{
+	"type": "live-audio:level",
+	"channel": "live-audio",
+	"data": {
+		"sourceId": "rtl0",
+		"channelPowerDbfs": -52.3,
+		"noiseFloorDbfs": -61.8,
+		"squelchOpen": true,
+		"thresholdDbfs": -55.8
+	}
+}
+```
+
+#### live-audio:transmission
+
+On the `live-audio` channel: one squelch-delimited analog transmission of the
+live demodulator, sent once with `state: "open"` and once with
+`state: "closed"` (same `transmissionId`, a UUID). Produced only while the
+squelch gates (auto mode, or manual with a non-zero threshold); with manual
+squelch 0 nothing is sent. Sent whether Activity is enabled or not; when it is
+ready, each closed transmission is also stored as an `analog-transmission`
+[Activity](#activity) record.
+
+```json
+{
+	"type": "live-audio:transmission",
+	"channel": "live-audio",
+	"data": {
+		"transmissionId": "5b0c7f0e-2d1a-4c7b-9f43-0d8e6a1b2c3d",
+		"sourceId": "rtl0",
+		"state": "closed",
+		"startedAt": "2026-10-13T14:02:11.250Z",
+		"endedAt": "2026-10-13T14:02:14.100Z",
+		"durationMs": 2850,
+		"frequency": { "hz": 446006250, "tuningTrust": "commanded" },
+		"modulation": "nfm",
+		"bandwidthHz": 12500,
+		"squelchMode": "manual",
+		"thresholdDbfs": -40,
+		"peakChannelPowerDbfs": -11.2,
+		"meanChannelPowerDbfs": -16.4,
+		"closeReason": "squelch"
+	}
+}
+```
+
+- `frequency`: the tuned centre of the demodulator's source plus `offsetHz`
+  when the transmission opened. `tuningTrust` is `commanded` under WaveKit
+  control and `relay` under external (SDR++) control. Null when the source
+  has no tuner state or its centre is an unconfirmed placeholder.
+- `endedAt`: for a `squelch` close, the last above-threshold block (the close
+  time minus the squelch hang, 250 ms, never before `startedAt`); for every
+  other reason, the close time. `endedAt`, `durationMs` and `closeReason` are null
+  while open.
+- `closeReason`: `squelch` (normal close), `retune` (the event-time frequency
+  moved by more than 1 Hz while open), `config` (a reconfigure that restarts
+  the pipeline or changes source, modulation, bandwidth, offset or squelch
+  mode; a threshold-only change keeps it open), `stopped`, or `max-duration`
+  (10 minutes). After `retune` or `max-duration` a new transmission opens at
+  once if the squelch is still open.
+- `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
+  level samples; null before the first one. Every open is followed by exactly
+  one closed event, also on shutdown.
+- `tone` (WG2): `{ ctcssHz, dtmf }`, on closed events only (always both keys;
+  absent on open events). `ctcssHz` is one of the 50 standard CTCSS tones
+  (67.0–254.1 Hz) heard through the transmission, null when none qualified or
+  the transmission was shorter than 750 ms. `dtmf` is the DTMF symbols
+  (`0-9`, `*`, `#`, `A-D`) in order, at most 32, each held at least 40 ms
+  within the standard twist (−8 to +4 dB); null when none. Detection runs on
+  the demodulated audio (decimated to 8 kHz) only while a transmission is
+  open; it is always on and has no config key. DCS is not detected. Tones need a
+  demodulated audio rate of at least 8 kHz; below that `tone` is
+  `{ ctcssHz: null, dtmf: null }`.
+
 #### digital-voice:call
 
 On the `digital-voice` channel: a dsd-fme call started, turned out encrypted, or
@@ -2669,6 +3878,13 @@ ended (`DigitalVoiceCall`). Published in the same tick as the decoder's
 }
 ```
 
+Optional call metadata (WG2), present only when dsd-fme reported it:
+`colourCode` (DMR, 0–15), `nac` (P25, 1–4 upper-case hex digits),
+`algorithmId` (P25, only for an encrypted call or a non-clear algorithm) and
+`keyId` (1–8 upper-case hex digits), `ran` (NXDN, 0–63) and `errors`
+(`{ crc, fec }` counts). A malformed optional field is dropped and counted; the
+call is still published.
+
 #### digital-voice:status
 
 On the `digital-voice` channel: the full `GET /api/digital-voice/status` body,
@@ -2678,7 +3894,8 @@ sent on start/stop, on client connect/disconnect and after every
 #### Scanner channel
 
 All `scanner` messages pass one limiter: at most `scanner.ws.maxMessagesPerSecond`
-(10) in any second, at most one per key per second, latest state per key wins,
+(10) in any second, at most one per key per second (per 500 ms for
+`scanner:progress`), latest state per key wins,
 and the latest state of every key is always delivered eventually. After a
 reconnect, refetch over REST (`GET /api/scanner/jobs`, `/discoveries`); missed
 messages are not replayed.
@@ -2694,9 +3911,12 @@ state change and after every edit.
 
 #### scanner:progress
 
-`{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes}`;
+`{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes, hits?, newDiscoveries?}`;
 `probes` is a count (the probe list is in the job detail, `progress.probes[]`).
-At most 1/s per job.
+`hits` and `newDiscoveries` (WG2) are the job's hit totals since it started.
+Up to 2 Hz per job (at most one per 500 ms); progress changes on every hop
+tune and sweep end, and at least once a second while the job runs. It still
+counts toward the channel's global budget.
 
 ```json
 {
@@ -2717,8 +3937,10 @@ At most 1/s per job.
 
 #### scanner:discovery
 
-`{change: "created" | "updated" | "upgraded" | "merged" | "deleted", discovery}`,
-coalesced to at most 1/s per discovery (the latest change wins).
+`{change: "created" | "updated" | "upgraded" | "merged" | "deleted", discovery, jobHits?}`,
+coalesced to at most 1/s per discovery (the latest change wins). `jobHits`
+(WG2) is present when a job's observation caused the change: one `ScanJobHit`
+per such job that tracks the discovery.
 
 #### scanner:activity
 
@@ -2803,7 +4025,9 @@ that remapped the client.
 - `selection`: `none` (no frames), `default` (the default profile on every
   eligible source) or `source`.
 - `outcome`: `default` (no options), `exact`, `nearest` (see `adjusted`:
-  `hz`, `bins`, `profile-limit`), `rejected` (the previous selection is kept;
+  `hz`, `bins`, `profile-limit`, and with the WG1 options `averaging` and
+  `backfillMs` when the requested value was rounded, clamped or, for
+  `averaging`, mapped to another profile), `rejected` (the previous selection is kept;
   `code` and `message` say why) or `removed` (notice: `removedSourceId` was
   removed; a source selection becomes `selection: "none"`).
 - `code`: `SPECTRUM_OPTIONS_INVALID`, `SPECTRUM_SOURCE_NOT_FOUND`,
@@ -2812,7 +4036,13 @@ that remapped the client.
   request for its size. Above `scanner.ws.spectrumMaxProfiles` (4 distinct
   non-default profiles over all sources; config-only, 1–16) a request maps to an
   active profile on that source (preferring one not larger than the request) or
-  to the default.
+  to the default. An averaged request maps to the nearest profile with the same
+  averaging, otherwise to averaging off (the default always qualifies).
+- Profile key: `<hz>:<bins>` with averaging off (unchanged), `<hz>:<bins>:a<n>`
+  with averaging n > 1. `profile.averaging` is present only when n > 1.
+- `backfillFrames`: on a committed `source` ack whose `backfillMs` is above 0,
+  the number of backfill frames that follow (0 when nothing of the current
+  stream and epoch is buffered). Absent otherwise.
 - Reset the client's waterfalls on every `spectrum:profile`, except that an
   `outcome: "removed"` notice with `selection: "default"` drops only
   `removedSourceId`'s waterfall. A reconnect changes nothing; a source re-added
@@ -2848,7 +4078,8 @@ One frame per source and profile:
 }
 ```
 
-- `profile` is the key `<hz>:<bins>` (the default profile or the client's).
+- `profile` is the key `<hz>:<bins>` (the default profile or the client's),
+  `<hz>:<bins>:a<n>` for an averaged profile.
 - `bins`: base64 of a `Uint8Array`, `u8-halfdb-127.5` encoding: byte `v` is
   `dBFS = v / 2 − 127.5` (0.5 dB steps), max-hold over the frame interval;
   bin `i` is centred at `startHz + (i + 0.5) × binHz`.
@@ -2867,9 +4098,125 @@ One frame per source and profile:
 - `snapshot: true` marks the current-state frame sent right after an ack (the
   latest block of the current epoch at the client's profile; none while a
   retune settles). It is not a replay.
+- `backfill: true` marks a replayed frame (only after an ack that asked for
+  `backfillMs`). Order: `spectrum:profile`, the backfill frames oldest first,
+  then the snapshot, then live frames. A backfill frame has no `snapshot`; its
+  `at` is the arrival time of the newest block summary in it. Frames are
+  newest-aligned runs of `summariesPerFrame` from the current stream and epoch
+  only; a partial oldest run is dropped and the snapshot's summary is not
+  replayed. At most 64 frames and 512 KiB of summed message JSON, and never
+  more than the client's free outbound queue room (1 MiB, 256 messages) less a
+  margin, so a re-subscribe on a slow socket gets fewer or no backfill frames
+  and backfill never causes a disconnect the ack and snapshot alone would not;
+  the oldest are dropped first and `backfillFrames` counts the frames actually
+  sent. A client already at the queue caps can still be disconnected by the
+  ack or snapshot, as before WG1.
 - Client rules: never merge or accumulate rows across a change of `sourceId`,
   epoch, `profile`, `binHz` or `startHz`; each row carries its own axis. Compare
   epochs for equality only (they restart with the engine).
+
+#### Bandplans channel
+
+The `bandplans` channel is mounted in legacy and protected modes under the normal
+socket admission. Notices carry only the store token, never band-plan state:
+clients refetch `GET /api/bandplans` (or the resolved view) and ignore an older
+revision of the same `storeId`.
+
+#### bandplans:changed
+
+Sent to a client right after it subscribes, with the current token (nothing while
+the store is unavailable), and to every subscriber after each write that changed
+the store. No-op and rejected writes send nothing. `storeId` is `null` only for the
+never-persisted legacy store. If the notice cannot be sent, the channel's clients
+are disconnected so they reconnect and refetch; the write itself still succeeds.
+
+```json
+{
+	"type": "bandplans:changed",
+	"channel": "bandplans",
+	"data": { "storeId": "6f1c2a7e-4b1d-4c3e-9a51-2d8f0b7c9e14", "revision": 4 }
+}
+```
+
+#### Vessels channel
+
+AIS vessel current state from the `ais` decoders, mirroring the tracker
+behind [Vessels](#vessels). Not replayed: refetch `GET /api/vessels` after a
+reconnect.
+
+- `vessel:new` — `VesselState`, the first report of an MMSI
+- `vessel:update` — `VesselState` after a merged report, throttled (below)
+- `vessel:lost` — `{ mmsi, vessel }` when a vessel expires (15 minutes
+  unheard) or is evicted at the 5,000-vessel cap
+- `vessel:stats` — `VesselTrackerStats`, every 5 s
+
+```json
+{
+	"type": "vessel:update",
+	"channel": "vessels",
+	"data": { "mmsi": "244660000", "vesselClass": "A", "name": "EVER GIVEN", "position": { "lat": 51.9, "lon": 4.1, "at": "2026-10-13T14:02:15.000Z" }, "sog": 11.2, "cog": 254.1, "lastSeen": "2026-10-13T14:02:15.000Z" }
+}
+```
+
+Entity updates are throttled (WG2): per entity at most one `vessel:update`
+per 2 s. The first update after a quiet window is sent at once; later ones in
+the window are coalesced and the latest is sent when the window ends. An
+identity change (`name`, `callsign`, `navStatus`, `shipType` or
+`destination`) is sent at once. A pending update is dropped when the entity is
+lost, so `vessel:lost` is never followed by an older update. `vessel:new`,
+`vessel:lost` and `vessel:stats` are never throttled. The `aprs` and `mesh`
+channels follow the same rule.
+
+#### APRS channel
+
+APRS current state, mirroring the tracker behind [APRS](#aprs). Not replayed:
+refetch `GET /api/aprs/stations` after a reconnect. Digipeated copies send
+nothing.
+
+- `aprs:new` — `AprsStation`, the first packet of an entity
+- `aprs:update` — `AprsStation` after a unique packet, throttled as on the
+  [Vessels channel](#vessels-channel) (identity: `kind`, `symbol`, `comment`,
+  `status`, `killed`)
+- `aprs:lost` — `{ key, station }` when an entity expires (2 hours unheard),
+  is evicted at the 2,000 cap, or is killed (`station.killed: true`)
+- `aprs:stats` — `AprsTrackerStats`, every 5 s
+
+#### Mesh channel
+
+Meshtastic node current state, mirroring the tracker behind [Mesh](#mesh).
+Not replayed: refetch `GET /api/mesh/nodes` after a reconnect. Flood copies
+send nothing.
+
+- `mesh:new` — `MeshNode`, the first packet from a node
+- `mesh:update` — `MeshNode` after a unique packet, throttled as on the
+  [Vessels channel](#vessels-channel) (identity: `longName`, `shortName`,
+  `role`, `hwModel`)
+- `mesh:lost` — `{ nodeId, node }` when a node expires (4 hours unheard) or
+  is evicted at the 1,000-node cap
+- `mesh:stats` — `MeshTrackerStats`, every 5 s
+
+```json
+{
+	"type": "mesh:update",
+	"channel": "mesh",
+	"data": {
+		"nodeId": "!a1b2c3d4",
+		"key": "node:!a1b2c3d4",
+		"longName": "Hilltop relay",
+		"shortName": "HTR",
+		"position": {
+			"lat": 48.85,
+			"lon": 2.35,
+			"altitudeM": 120,
+			"at": "2026-10-13T14:02:15.000Z"
+		},
+		"snrDb": 6.5,
+		"hopsAway": 1,
+		"packetCount": 42,
+		"lastSeen": "2026-10-13T14:02:15.000Z"
+	}
+}
+```
 
 #### subscribed
 
@@ -2955,6 +4302,7 @@ the status code.
 | `INVALID_CONFIG`          | 400         | Invalid configuration provided |
 | `SOURCE_CONNECTION_ERROR` | 503         | Cannot connect to source       |
 | `INTERNAL_ERROR`          | 500         | Internal server error          |
+| Activity codes            |             | See [Activity](#activity)      |
 | `DECODER_OWNED_BY_SCANNER` | 409        | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`) |
 | `SOURCE_HELD_BY_SCANNER`  | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`) |
 
