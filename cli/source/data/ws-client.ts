@@ -121,6 +121,25 @@ export const CHANNELS = [
 	"aircraft",
 ] as const
 
+/** Channels the CLI parses: its subscriptions plus Scan demand (and Activity, ignored). */
+const KNOWN_CHANNELS: ReadonlySet<string> = new Set<string>([
+	...CHANNELS,
+	"scanner",
+	"spectrum",
+	"activity",
+])
+
+/**
+ * A frame on a channel the CLI does not know (a newer core, or a channel such as
+ * `mesh` or `aprs` it never parses) is ignored, not counted as invalid (WG3 req 9.2).
+ * Frames without a string channel keep the normal checks.
+ */
+function isUnknownChannelFrame(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null || !("channel" in raw))
+		return false
+	return typeof raw.channel === "string" && !KNOWN_CHANNELS.has(raw.channel)
+}
+
 export const BACKOFF_STEPS_MS = [1000, 2000, 4000, 8000, 15000] as const
 
 export function backoffDelay(attempt: number, random: () => number): number {
@@ -238,6 +257,7 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 					// Its records and its error frames (type "error", channel
 					// "activity") must not count as invalid or as a server error.
 					if (isActivityFrame(raw)) return
+					if (isUnknownChannelFrame(raw)) return
 					const event = parseServerMessage(raw)
 					if (!event) {
 						const scan =
