@@ -26,16 +26,17 @@ import type { DecoderOverride, DecoderSettingsFile } from "./contract.js"
  * Per-value bounds. The file cap (256 KiB) is the global bound; these keep one value from
  * taking it all and keep parse cost linear in the file size:
  * - decoder id and option key: 1..128 chars; decoder type: 1..64 chars;
- * - string value and list item: <= 256 chars; list: <= 64 items.
- * Worst case for one value: 64 items x (256 chars + ~6 quote/comma/indent bytes) ~ 16.4 KiB,
- * well under the 256 KiB cap; 256 entries x 64 keys x 16 KiB would not fit, so the byte cap
+ * - string value and list item: <= 256 chars; list: <= 256 items (the largest list any option
+ *   schema accepts: rtl433 `protocols`, RTL433_PROTOCOLS_MAX).
+ * Worst case for one value: 256 items x (256 chars + ~6 quote/comma/indent bytes) ~ 67 KiB,
+ * under the 256 KiB cap; 256 entries x 64 keys x 67 KiB would not fit, so the byte cap
  * (checked first, before parse) is what bounds the whole file.
  */
 export const DECODER_SETTINGS_ID_MAX_LENGTH = 128
 export const DECODER_SETTINGS_KEY_MAX_LENGTH = 128
 export const DECODER_SETTINGS_TYPE_MAX_LENGTH = 64
 export const DECODER_SETTINGS_STRING_MAX_LENGTH = 256
-export const DECODER_SETTINGS_LIST_MAX_ITEMS = 64
+export const DECODER_SETTINGS_LIST_MAX_ITEMS = 256
 
 /** Leftover temporary files removed per open (station bound). */
 export const DECODER_SETTINGS_TMP_SWEEP_MAX = 16
@@ -44,7 +45,16 @@ export const DECODER_SETTINGS_TMP_STALE_MS = 60_000
 
 const CORRUPT_PREFIX = `${DECODER_SETTINGS_FILE_NAME}.corrupt-`
 const TMP_PATTERN = /^decoder-settings\.json\.(\d+)\.tmp$/
-const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
+const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
+	"__proto__",
+	"constructor",
+	"prototype",
+])
+
+/** A decoder id or option key the store never loads nor writes (prototype names). */
+export function isForbiddenDecoderSettingsKey(key: string): boolean {
+	return FORBIDDEN_KEYS.has(key)
+}
 const SEED_PER_MS = 1_000
 
 const UNAVAILABLE_TEXT = "Decoder settings store is unavailable"
@@ -168,9 +178,13 @@ function withoutNegativeZero(value: DecoderSettingValue): DecoderSettingValue {
 }
 
 function toFile(data: z.infer<typeof FileSchema>): DecoderSettingsFile {
-	const decoders: Record<string, DecoderOverride> = {}
+	// Null-prototype records: no key can reach Object.prototype.
+	const decoders = Object.create(null) as Record<string, DecoderOverride>
 	for (const [id, entry] of Object.entries(data.decoders)) {
-		const options: Record<string, DecoderOverride["options"][string]> = {}
+		const options = Object.create(null) as Record<
+			string,
+			DecoderOverride["options"][string]
+		>
 		for (const [key, value] of Object.entries(entry.options)) {
 			// JSON cannot carry -0; normalise so memory equals what a reload yields.
 			options[key] = withoutNegativeZero(value)
@@ -250,7 +264,7 @@ function emptyFile(revision: number): DecoderSettingsFile {
 	return deepFreeze({
 		schemaVersion: DECODER_SETTINGS_SCHEMA_VERSION,
 		revision,
-		decoders: {},
+		decoders: Object.create(null) as Record<string, DecoderOverride>,
 	})
 }
 
@@ -356,13 +370,13 @@ async function quarantinedRevision(
 	}
 }
 
-/** Moves the corrupt file aside, keeping only the new copy. */
+/** Moves the corrupt file aside, keeping only the new copy. True when the file was moved. */
 async function quarantine(
 	fs: DecoderSettingsFs,
 	stateDir: string,
 	at: number,
 	log: Logger,
-): Promise<void> {
+): Promise<boolean> {
 	try {
 		const old = corruptCopies(await fs.readdir(stateDir))
 		for (const name of old) {
@@ -372,12 +386,20 @@ async function quarantine(
 			join(stateDir, DECODER_SETTINGS_FILE_NAME),
 			join(stateDir, `${CORRUPT_PREFIX}${at}`),
 		)
+		return true
 	} catch (error: unknown) {
 		log.warn(
 			{ err: safeErrorFields(error) },
 			"Could not move the corrupt decoder settings file aside",
 		)
+		return false
 	}
+}
+
+interface Loaded {
+	file: DecoderSettingsFile
+	/** The store must refuse every write for this process lifetime. */
+	sealed: boolean
 }
 
 async function load(
@@ -385,24 +407,42 @@ async function load(
 	stateDir: string,
 	log: Logger,
 	now: () => number,
-): Promise<DecoderSettingsFile> {
+): Promise<Loaded> {
 	const entries = await listDir(fs, stateDir)
 	await sweepTmp(fs, stateDir, entries, log)
 	let text: ReadResult
 	try {
 		text = await readBounded(fs, join(stateDir, DECODER_SETTINGS_FILE_NAME))
 	} catch (error: unknown) {
+		// Unreadable (EACCES, EIO, ...): its revision is unknown, so it must never become current
+		// again. Move it aside like a corrupt file. If that also fails the file stays in place
+		// and a later write (or a later process, once it is readable) could resurrect or
+		// overwrite it out of order, so the store is sealed: it starts empty and refuses every
+		// write with STORE_UNAVAILABLE for this process lifetime (fail closed).
 		log.warn(
 			{ err: safeErrorFields(error) },
 			"Decoder settings file unreadable; starting empty",
 		)
-		return emptyFile(seedDecoderSettingsRevision(now(), undefined))
+		const at = now()
+		const moved = await quarantine(fs, stateDir, at, log)
+		if (!moved)
+			log.warn(
+				{},
+				"Decoder settings store refuses writes until the file is readable or removed",
+			)
+		return {
+			file: emptyFile(seedDecoderSettingsRevision(at, undefined)),
+			sealed: !moved,
+		}
 	}
 	if (text === null) {
 		const lost = await quarantinedRevision(fs, stateDir, entries)
-		return emptyFile(
-			lost.found ? seedDecoderSettingsRevision(now(), lost.revision) : 0,
-		)
+		return {
+			file: emptyFile(
+				lost.found ? seedDecoderSettingsRevision(now(), lost.revision) : 0,
+			),
+			sealed: false,
+		}
 	}
 	let lostRevision: number | undefined
 	let reason: "oversized" | "invalid"
@@ -410,7 +450,7 @@ async function load(
 		reason = "oversized"
 	} else {
 		const parsed = parseDecoderSettingsFile(text)
-		if (!parsed.corrupt) return deepFreeze(parsed.file)
+		if (!parsed.corrupt) return { file: deepFreeze(parsed.file), sealed: false }
 		reason = "invalid"
 		lostRevision = parsed.lostRevision
 	}
@@ -420,7 +460,10 @@ async function load(
 	)
 	const at = now()
 	await quarantine(fs, stateDir, at, log)
-	return emptyFile(seedDecoderSettingsRevision(at, lostRevision))
+	return {
+		file: emptyFile(seedDecoderSettingsRevision(at, lostRevision)),
+		sealed: false,
+	}
 }
 
 function checkBounds(next: DecoderSettingsFile): string {
@@ -448,12 +491,18 @@ export async function openDecoderSettingsStore(
 	const fs = opts.fs ?? defaultFs
 	const now = opts.now ?? Date.now
 	const log = createComponentLogger(opts.logger, "DecoderSettings")
-	let current = await load(fs, stateDir, log, now)
+	const loaded = await load(fs, stateDir, log, now)
+	let current = loaded.file
+	const sealed = loaded.sealed
 	let chain: Promise<void> = Promise.resolve()
 	let closed = false
 
 	const persist = async (next: DecoderSettingsFile): Promise<void> => {
-		if (closed)
+		if (
+			closed ||
+			sealed ||
+			Object.keys(next.decoders).some(id => FORBIDDEN_KEYS.has(id))
+		)
 			throw new DecoderSettingsError(
 				"DECODER_SETTINGS_STORE_UNAVAILABLE",
 				UNAVAILABLE_TEXT,

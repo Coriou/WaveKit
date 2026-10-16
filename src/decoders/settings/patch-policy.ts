@@ -25,6 +25,48 @@ import { DecoderSettingsError } from "./contract.js"
 const NEVER_PATCHABLE_KEY =
 	/(path|file|dir|host|addr|port|device|serial|url|callsign|^lat$|^lon$|^output|^udp|record|prune|debug|inputIqFormat|extraArgs|voiceSlot)/i
 
+/**
+ * Exact keys never patchable by meaning (requirement 2.3), whatever a descriptor says: a
+ * second backstop next to NEVER_PATCHABLE_KEY. `gain` is not listed: its string form is
+ * refused by type (string is not a patchable descriptor type).
+ */
+const NEVER_PATCHABLE_EXACT: ReadonlySet<string> = Object.freeze(
+	new Set([
+		"enableMlat",
+		"inputSampleRate",
+		"targetSampleRate",
+		"inputCenterFreq",
+		"followCenter",
+		"sampleRate",
+		"channelHz",
+		"offsetHz",
+		"oversampling",
+		"lat",
+		"lon",
+		"output",
+		"udpHost",
+		"udpPort",
+		"voiceSlot",
+		"outputFormat",
+		"charset",
+		"filters",
+		"channelKey",
+		"extraArgs",
+	]),
+)
+
+/** Exact keys never patchable for one decoder type (dsd-fme `mode` is digital-voice wiring). */
+const NEVER_PATCHABLE_BY_TYPE: Readonly<Record<string, ReadonlySet<string>>> =
+	Object.freeze({ "dsd-fme": Object.freeze(new Set(["mode"])) })
+
+function deniedByMeaning(type: string, key: string): boolean {
+	if (NEVER_PATCHABLE_EXACT.has(key)) return true
+	const byType = Object.hasOwn(NEVER_PATCHABLE_BY_TYPE, type)
+		? NEVER_PATCHABLE_BY_TYPE[type]
+		: undefined
+	return byType?.has(key) === true
+}
+
 const INVALID_MESSAGE = "Decoder options are invalid"
 const NOT_PATCHABLE_MESSAGE = "Option not patchable"
 const BODY_KEYS: ReadonlySet<string> = new Set(["enabled", "options"])
@@ -92,6 +134,7 @@ function consistentPatchable(d: DecoderOptionDescriptor): boolean {
 export function isPatchableOption(type: string, key: string): boolean {
 	try {
 		if (typeof type !== "string" || typeof key !== "string") return false
+		if (deniedByMeaning(type, key)) return false
 		if (keySchema(type, key) === undefined) return false
 		const d = descriptorOf(type, key)
 		return d !== undefined && consistentPatchable(d)

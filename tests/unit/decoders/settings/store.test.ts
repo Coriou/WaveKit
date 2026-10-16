@@ -253,7 +253,7 @@ describe("decoder settings store load", () => {
 			"option long list",
 			{
 				...base,
-				decoders: { a: { ...ais, options: { x: Array(65).fill(1) } } },
+				decoders: { a: { ...ais, options: { x: Array(257).fill(1) } } },
 			},
 		],
 		[
@@ -539,5 +539,67 @@ describe("decoder settings store write", () => {
 		for (const forbidden of [dir, secret, "my-id", "mykey", FILE]) {
 			expect(text).not.toContain(forbidden)
 		}
+	})
+})
+
+describe("decoder settings store unreadable file", () => {
+	const asRoot = typeof process.getuid === "function" && process.getuid() === 0
+
+	it.skipIf(asRoot)(
+		"an unreadable file (chmod 000) is quarantined and never comes back",
+		async () => {
+			await put(valid(9_000_000_000_000_000))
+			await nodeFs.chmod(join(dir, FILE), 0o000)
+			const { store } = await open()
+			expect(store.revision()).toBe(seeded)
+			expect(store.snapshot().decoders).toEqual({})
+			expect(await corruptCopies()).toEqual([`${FILE}.corrupt-${NOW}`])
+			await store.write({ ...valid(seeded + 1), decoders: {} })
+			await store.close()
+			const again = await open()
+			expect(again.store.revision()).toBe(seeded + 1)
+			await again.store.close()
+		},
+	)
+
+	it("seals the store when the unreadable file cannot be moved aside", async () => {
+		await put(valid(7))
+		const before = await readFile(join(dir, FILE), "utf8")
+		const failing: DecoderSettingsFs = {
+			open: (async (path: string, ...rest: unknown[]) => {
+				if (path === join(dir, FILE))
+					throw Object.assign(new Error("denied"), { code: "EACCES" })
+				return (nodeFs.open as (...a: unknown[]) => unknown)(path, ...rest)
+			}) as DecoderSettingsFs["open"],
+			rename: (async () => {
+				throw Object.assign(new Error("denied"), { code: "EACCES" })
+			}) as DecoderSettingsFs["rename"],
+			unlink: nodeFs.unlink,
+			readdir: (path: string) => nodeFs.readdir(path),
+			lstat: nodeFs.lstat,
+			mkdir: nodeFs.mkdir,
+		}
+		const { store, log } = await open(failing)
+		expect(store.revision()).toBe(seeded)
+		await expect(
+			store.write({ ...valid(seeded + 1), decoders: {} }),
+		).rejects.toMatchObject({ code: "DECODER_SETTINGS_STORE_UNAVAILABLE" })
+		expect(store.revision()).toBe(seeded)
+		expect(await readFile(join(dir, FILE), "utf8")).toBe(before)
+		expect(log.text()).not.toContain(dir)
+		await store.close()
+	})
+
+	it("refuses to write a prototype decoder id", async () => {
+		const { store } = await open()
+		const decoders = Object.create(null) as DecoderSettingsFile["decoders"]
+		const entry = valid().decoders["ais-1"]
+		if (entry === undefined) throw new Error("fixture")
+		decoders["__proto__"] = entry
+		await expect(
+			store.write({ schemaVersion: 1, revision: 1, decoders }),
+		).rejects.toBeInstanceOf(DecoderSettingsError)
+		expect(store.revision()).toBe(0)
+		await store.close()
 	})
 })

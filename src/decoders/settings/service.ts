@@ -27,7 +27,10 @@ import type {
 } from "./contract.js"
 import { buildDecoderSettingsView, effectiveDecoderConfig } from "./layers.js"
 import { sanitizeStoredOptions, validateDecoderPatch } from "./patch-policy.js"
-import { openDecoderSettingsStore } from "./store.js"
+import {
+	isForbiddenDecoderSettingsKey,
+	openDecoderSettingsStore,
+} from "./store.js"
 
 const UNAVAILABLE_TEXT = "Decoder settings store is unavailable"
 const LIMIT_TEXT = "Decoder settings exceed the store bounds"
@@ -120,7 +123,8 @@ export async function openDecoderSettingsService(
 		manager?.getStatus(id)?.owner === "scanner"
 
 	const storedRetyped = (id: string, config: DecoderConfig): boolean => {
-		const entry = store.snapshot().decoders[id]
+		const decoders = store.snapshot().decoders
+		const entry = Object.hasOwn(decoders, id) ? decoders[id] : undefined
 		return entry !== undefined && entry.type !== config.type
 	}
 
@@ -144,7 +148,13 @@ export async function openDecoderSettingsService(
 	): Promise<DecoderSettingsUpdateResult> => {
 		const port = manager
 		const config = configured.get(id)
-		if (port === undefined || config === undefined || probeOwned(id))
+		// Prototype names are never stored (the loader treats them as corrupt): refuse them.
+		if (
+			isForbiddenDecoderSettingsKey(id) ||
+			port === undefined ||
+			config === undefined ||
+			probeOwned(id)
+		)
 			throw unavailable()
 		if (ifMatch !== undefined && ifMatch !== store.revision())
 			throw new DecoderSettingsError(
@@ -155,9 +165,13 @@ export async function openDecoderSettingsService(
 
 		// A retyped stored entry is replaced: the patch starts from empty.
 		const previous = applied.get(id)
-		const nextOptions: Record<string, DecoderSettingValue> = {
-			...(previous?.options ?? {}),
-		}
+		const nextOptions = Object.create(null) as Record<
+			string,
+			DecoderSettingValue
+		>
+		if (previous !== undefined)
+			for (const key of Object.keys(previous.options))
+				nextOptions[key] = previous.options[key] as DecoderSettingValue
 		let nextEnabled = previous?.enabled
 		if (patch.enabled !== undefined)
 			nextEnabled = patch.enabled === null ? undefined : patch.enabled
@@ -169,20 +183,23 @@ export async function openDecoderSettingsService(
 		}
 
 		const current = store.snapshot()
-		const decoders: Record<string, DecoderOverride> = {
-			...current.decoders,
+		// Null prototype: no id can reach Object.prototype. Applied entries are persisted in
+		// their sanitized form (dropped keys go away); orphan and retyped entries stay as stored.
+		const decoders = Object.create(null) as Record<string, DecoderOverride>
+		for (const other of Object.keys(current.decoders)) {
+			const stored = current.decoders[other]
+			if (stored === undefined) continue
+			decoders[other] = applied.get(other) ?? stored
 		}
-		let nextEntry: DecoderOverride | undefined
 		if (Object.keys(nextOptions).length === 0 && nextEnabled === undefined) {
 			delete decoders[id]
 		} else {
-			nextEntry = {
+			decoders[id] = {
 				type: config.type,
 				...(nextEnabled !== undefined ? { enabled: nextEnabled } : {}),
 				options: nextOptions,
 				updatedAt: new Date(now()).toISOString(),
 			}
-			decoders[id] = nextEntry
 		}
 		if (
 			Object.keys(decoders).length > DECODER_SETTINGS_MAX_DECODERS ||
@@ -198,17 +215,23 @@ export async function openDecoderSettingsService(
 		// Throws without changing the store; nothing below has run yet.
 		await store.write(next)
 
+		// Memory and staging take the committed (normalised, e.g. -0 -> 0) entry from the store.
+		const committedDecoders = store.snapshot().decoders
+		const committed = Object.hasOwn(committedDecoders, id)
+			? committedDecoders[id]
+			: undefined
 		const before = effectiveDecoderConfig(config, previous)
-		if (nextEntry === undefined) applied.delete(id)
-		else applied.set(id, nextEntry)
-		const after = effectiveDecoderConfig(config, nextEntry)
+		if (committed === undefined) applied.delete(id)
+		else applied.set(id, committed)
+		const after = effectiveDecoderConfig(config, committed)
+		const committedOptions = committed?.options ?? {}
 
 		let staged = false
 		if (patchKeys.length > 0) {
 			const values: Record<string, DecoderSettingValue | null> = {}
 			for (const key of patchKeys) {
-				const value = Object.hasOwn(nextOptions, key)
-					? nextOptions[key]
+				const value = Object.hasOwn(committedOptions, key)
+					? committedOptions[key]
 					: optionValue(config.options, key)
 				values[key] =
 					value === undefined ? null : (value as DecoderSettingValue)
@@ -259,7 +282,9 @@ export async function openDecoderSettingsService(
 			return result
 		},
 		effectiveConfig(config: DecoderConfig): DecoderConfig {
-			const entry = applied.get(config.id)
+			const entry = isForbiddenDecoderSettingsKey(config.id)
+				? undefined
+				: applied.get(config.id)
 			return effectiveDecoderConfig(
 				config,
 				entry !== undefined && entry.type === config.type ? entry : undefined,

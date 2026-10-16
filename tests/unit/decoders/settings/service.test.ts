@@ -321,3 +321,116 @@ describe("decoder settings service", () => {
 		await service.close()
 	})
 })
+
+describe("decoder settings service review regressions", () => {
+	const readDisk = async () =>
+		JSON.parse(
+			await readFile(join(stateDir, DECODER_SETTINGS_FILE_NAME), "utf8"),
+		) as { revision: number; decoders: Record<string, unknown> }
+
+	it.each(["__proto__", "constructor", "prototype"])(
+		"refuses the prototype id %s and never writes it",
+		async id => {
+			const config: DecoderConfig = {
+				id,
+				type: "rtl433",
+				enabled: true,
+				options: { frequency: 433_920_000 },
+			}
+			port.owners.set(id, "config")
+			const service = await open(true, [ISM, config])
+			expect(
+				await codeOf(service.update(id, { options: { analyze: true } })),
+			).toBe("DECODER_SETTINGS_STORE_UNAVAILABLE")
+			expect(service.revision()).toBe(0)
+			expect(Object.getPrototypeOf({})).toBe(Object.prototype)
+			const effective = service.effectiveConfig(config)
+			expect(effective).not.toBe(config)
+			expect(effective).toEqual(config)
+			// Another decoder still persists normally and the bad id never reaches the disk.
+			await service.update("ism", { options: { analyze: true } })
+			const disk = await readDisk()
+			expect(Object.keys(disk.decoders)).toEqual(["ism"])
+			await service.close()
+		},
+	)
+
+	it("accepts 65 and 256 rtl433 protocols end to end; 257 stored items are corrupt", async () => {
+		const list = (n: number) => Array.from({ length: n }, (_, i) => i)
+		const service = await open()
+		for (const n of [65, 256]) {
+			await service.update("ism", { options: { protocols: list(n) } })
+			expect(service.effectiveConfig(ISM).options["protocols"]).toEqual(list(n))
+			const disk = (await readDisk()).decoders["ism"] as {
+				options: { protocols: number[] }
+			}
+			expect(disk.options.protocols).toHaveLength(n)
+		}
+		await service.close()
+		const reopened = await open()
+		expect(reopened.effectiveConfig(ISM).options["protocols"]).toEqual(
+			list(256),
+		)
+		await reopened.close()
+
+		await writeStored({
+			ism: {
+				type: "rtl433",
+				options: { protocols: list(257) },
+				updatedAt: "2026-10-01T00:00:00.000Z",
+			},
+		})
+		const corrupt = await open()
+		expect(corrupt.effectiveConfig(ISM).options).not.toHaveProperty("protocols")
+		expect(corrupt.revision()).toBeGreaterThan(5)
+		await corrupt.close()
+	})
+
+	it("persists other applied entries sanitized; orphan entries stay as stored", async () => {
+		const ISM2: DecoderConfig = { ...ISM, id: "ism2" }
+		port.owners.set("ism2", "config")
+		const orphan = {
+			type: "rtl433",
+			options: { outputFormat: "csv" },
+			updatedAt: "2026-10-01T00:00:00.000Z",
+		}
+		await writeStored({
+			ism: {
+				type: "rtl433",
+				options: { outputFormat: "csv", analyze: true },
+				updatedAt: "2026-10-01T00:00:00.000Z",
+			},
+			gone: orphan,
+		})
+		const service = await open(true, [ISM, ISM2])
+		await service.update("ism2", { options: { analyze: true } })
+		const disk = await readDisk()
+		expect(disk.decoders["ism"]).toEqual({
+			type: "rtl433",
+			options: { analyze: true },
+			updatedAt: "2026-10-01T00:00:00.000Z",
+		})
+		expect(disk.decoders["gone"]).toEqual(orphan)
+		await service.close()
+	})
+
+	it("normalises -0 in memory and staging to the committed 0", async () => {
+		const DSD: DecoderConfig = {
+			id: "dsd",
+			type: "dsd-fme",
+			enabled: true,
+			options: { frequency: 851_000_000 },
+		}
+		port.owners.set("dsd", "config")
+		const service = await open(true, [DSD])
+		await service.update("dsd", { options: { fmGain: -0 } })
+		const staged = port.staged.at(-1)?.options["fmGain"]
+		expect(Object.is(staged, 0)).toBe(true)
+		const effective = service.effectiveConfig(DSD).options["fmGain"]
+		expect(Object.is(effective, 0)).toBe(true)
+		const view = service.view("dsd")
+		const setting = view?.options.find(o => o.key === "fmGain")
+		expect(Object.is(setting?.value, 0)).toBe(true)
+		await service.close()
+	})
+})
