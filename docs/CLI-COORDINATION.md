@@ -1243,3 +1243,8 @@ Announcement for the CLI. Spec: [web-gaps-3](specs/web-gaps-3/requirements.md). 
 Update to the WG3 note (2026-10-16): for readsb, a complete valid decoder-option `lat`/`lon` pair wins over `station`; a single or invalid option coordinate falls back to the full station pair.
 
 Update to the WG3 note (retention, 2026-10-16): Activity retention now has `activity.retention.policy`, `fair-share` (default) or `oldest-first`. Under `fair-share` the row and byte caps are water-filled across shares (`decoder:<id>`, or `kind:<kind>` for rows without a decoder), oldest first inside a share; age pruning, caps and hysteresis are unchanged, and a station with one feed keeps the same rows as before. `GET /api/activity/status` `stats` gains two optional fields, both additive and optional in `@wavekit/api-types` (`ActivityStoreStats`; older cores omit them): `retention` (`policy`, `effective`, `shares` of `{ key, rows, bytes, oldestReceivedAt }` at most 64, `sharesTruncated`, `prefixFallbackSteps`) and `floodCopies` (Meshtastic flood copies not stored; not losses, not in `dropped`). Details in [API.md](API.md#retention). The CLI does not read Activity status. No CLI change required.
+
+WG3 update (acarsdec): `decoder:output` ACARS messages no longer carry an invented
+`frequency` of 131.55 MHz when acarsdec does not report one; the field is now absent
+in that case. Clients that display it should treat it as optional (the CLI formatter
+already does). dumpvdl2's embedded ACARS messages always carry it.
