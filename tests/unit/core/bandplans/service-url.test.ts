@@ -59,9 +59,12 @@ const HOST = "plans.example.org"
 const URL_A = `https://${HOST}/files/EU%20plan.json?rev=2`
 const SECRET = "s3cret-sentinel"
 const encoder = new TextEncoder()
+const T0 = "2026-10-16T00:00:00.000Z"
+let clock = T0
 const roots: string[] = []
 const services: BandPlanService[] = []
 afterEach(async () => {
+	clock = T0
 	await Promise.all(services.splice(0).map(s => s.close()))
 	await Promise.all(
 		roots.splice(0).map(p => rm(p, { recursive: true, force: true })),
@@ -110,7 +113,7 @@ async function open(
 		stateDir,
 		context: { region: "EU", effectiveCountry: null },
 		writable: loose.writable ?? true,
-		domain: { now: () => "2026-10-16T00:00:00.000Z" },
+		domain: { now: () => clock },
 	}
 	// An explicit undefined drops the option (exactOptionalPropertyTypes).
 	const hosts = "urlImportHosts" in loose ? loose.urlImportHosts : [HOST]
@@ -399,6 +402,88 @@ describe("band plan service: URL import (WG6 lane U)", () => {
 			const off = await open({ urlFetcher: undefined })
 			expect(await codeOf(off.mutate(commitOf(off, preview)))).toBe(
 				"BANDPLANS_URL_IMPORT_DISABLED",
+			)
+		})
+	})
+
+	describe("issued URL preview registry", () => {
+		const urlN = (n: number) => `https://${HOST}/p${n}.json`
+		async function previewN(service: BandPlanService, n: number) {
+			return previewUrl(service, request(urlN(n)))
+		}
+		it("refuses a forged sourceUrl on uploaded bytes", async () => {
+			const service = await open({ urlFetcher: fakeFetcher(() => V1) })
+			const contentBase64 = Buffer.from(V1).toString("base64")
+			const upload = service.previewImport({
+				format: "sdrpp-json",
+				fileName: "plan.json",
+				contentBase64,
+				groupOverrides: [],
+			})
+			const forged = previewDigestFor(upload.sha256, [], URL_A)
+			expect(
+				await codeOf(
+					service.mutate(
+						commitOf(
+							service,
+							{ ...upload, sourceUrl: URL_A, contentBase64 },
+							{ previewDigest: forged },
+						),
+					),
+				),
+			).toBe("BANDPLANS_IMPORT_MISMATCH")
+		})
+		it("keeps 32 previews and evicts the oldest past the bound", async () => {
+			let n = 0
+			const service = await open({
+				urlFetcher: () =>
+					Promise.resolve({
+						bytes: sdrpp([[`Band ${n++}`, "amateur", 1_000, 2_000]]),
+						contentType: null,
+					}),
+			})
+			const previews: ImportUrlPreview[] = []
+			for (let i = 0; i < 32; i++) previews.push(await previewN(service, i))
+			// At the bound: the oldest is still committable.
+			const first = previews[0]
+			if (!first) throw new Error("no preview")
+			expect((await service.mutate(commitOf(service, first))).changed).toBe(
+				true,
+			)
+			// 31 left; two more push the registry past 32 and evict #1.
+			previews.push(await previewN(service, 32))
+			previews.push(await previewN(service, 33))
+			const second = previews[1]
+			const third = previews[2]
+			if (!second || !third) throw new Error("no preview")
+			expect(await codeOf(service.mutate(commitOf(service, second)))).toBe(
+				"BANDPLANS_IMPORT_MISMATCH",
+			)
+			expect((await service.mutate(commitOf(service, third))).changed).toBe(
+				true,
+			)
+		})
+		it("refuses an expired preview (15 min TTL)", async () => {
+			const service = await open({ urlFetcher: fakeFetcher(() => V1) })
+			const preview = await previewUrl(service, request())
+			clock = "2026-10-16T00:15:00.000Z"
+			const atTtl = await previewUrl(service, request(urlN(1)))
+			clock = "2026-10-16T00:15:00.001Z"
+			expect(await codeOf(service.mutate(commitOf(service, preview)))).toBe(
+				"BANDPLANS_IMPORT_MISMATCH",
+			)
+			expect((await service.mutate(commitOf(service, atTtl))).changed).toBe(
+				true,
+			)
+		})
+		it("refuses reuse after a successful commit", async () => {
+			const service = await open({ urlFetcher: fakeFetcher(() => V1) })
+			const preview = await previewUrl(service, request())
+			expect((await service.mutate(commitOf(service, preview))).changed).toBe(
+				true,
+			)
+			expect(await codeOf(service.mutate(commitOf(service, preview)))).toBe(
+				"BANDPLANS_IMPORT_MISMATCH",
 			)
 		})
 	})

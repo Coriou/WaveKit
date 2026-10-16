@@ -108,6 +108,16 @@ export type DiffImportedBands = (
 	readonly removed: BandPlanUpdateCheck["removed"]
 	readonly changed: BandPlanUpdateCheck["changed"]
 }
+/** Bounds of the issued URL-preview registry (trust: sourceUrl is never a client claim). */
+export const URL_PREVIEW_REGISTRY = Object.freeze({
+	entries: 32,
+	ttlMs: 15 * 60 * 1000,
+})
+interface IssuedUrlPreview {
+	readonly sourceUrl: string
+	readonly sha256: string
+	readonly issuedAtMs: number
+}
 interface PreparedMutation {
 	readonly mutation: BandPlanMutation
 	readonly parsedImport: ParsedImport | null
@@ -257,6 +267,8 @@ class BandPlanRuntime implements BandPlanService {
 	private readonly builtins: readonly BandPlanPack[]
 	private readonly builtinById: ReadonlyMap<string, BandPlanPack>
 	private resolvedMemo: { key: string; value: ResolvedBandPlan } | undefined
+	/** previewDigest → issued URL preview; insertion order is FIFO eviction order. */
+	private readonly issuedUrlPreviews = new Map<string, IssuedUrlPreview>()
 	constructor(
 		private readonly storage: BandPlanStorage | undefined,
 		private readonly options: BandPlanServiceOptions,
@@ -527,19 +539,67 @@ class BandPlanRuntime implements BandPlanService {
 				groupOverrides,
 			}),
 		)
+		const previewDigest = previewDigestFor(
+			parsed.preview.sha256,
+			groupOverrides,
+			url,
+		)
+		this.registerUrlPreview(previewDigest, url, parsed.preview.sha256)
 		return {
 			preview: {
 				...parsed.preview,
-				previewDigest: previewDigestFor(
-					parsed.preview.sha256,
-					groupOverrides,
-					url,
-				),
+				previewDigest,
 				sourceUrl: url,
 				contentBase64,
 			},
 			bands: parsed.bands,
 		}
+	}
+	private nowMs(): number {
+		const ms = Date.parse(this.domain.now())
+		return Number.isFinite(ms) ? ms : 0
+	}
+	private registerUrlPreview(
+		digest: string,
+		sourceUrl: string,
+		sha256: string,
+	) {
+		const registry = this.issuedUrlPreviews
+		registry.delete(digest)
+		registry.set(digest, { sourceUrl, sha256, issuedAtMs: this.nowMs() })
+		while (registry.size > URL_PREVIEW_REGISTRY.entries) {
+			const oldest = registry.keys().next()
+			if (oldest.done === true) break
+			registry.delete(oldest.value)
+		}
+	}
+	/** An unexpired preview this service issued for exactly this digest, URL and bytes. */
+	private assertIssuedUrlPreview(
+		digest: string,
+		sourceUrl: string,
+		sha256: string,
+	): void {
+		const entry = this.issuedUrlPreviews.get(digest)
+		if (!entry) throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
+		const age = this.nowMs() - entry.issuedAtMs
+		if (age < 0 || age > URL_PREVIEW_REGISTRY.ttlMs) {
+			this.issuedUrlPreviews.delete(digest)
+			throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
+		}
+		if (entry.sourceUrl !== sourceUrl || entry.sha256 !== sha256)
+			throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
+	}
+	/** Re-checked inside the queue so two racing commits cannot both use one preview. */
+	private issuedUrlCommit(prepared: PreparedMutation): string | null {
+		const mutation = prepared.mutation
+		if (mutation.type !== "commit-import") return null
+		if (typeof mutation.sourceUrl !== "string") return null
+		this.assertIssuedUrlPreview(
+			mutation.previewDigest,
+			mutation.sourceUrl,
+			fileSha256(mutation.contentBase64),
+		)
+		return mutation.previewDigest
 	}
 	private context(): BandPlanContext {
 		return {
@@ -743,6 +803,8 @@ class BandPlanRuntime implements BandPlanService {
 			digest !== parsed.data.previewDigest
 		)
 			throw new BandPlansError("BANDPLANS_IMPORT_MISMATCH")
+		if (typeof sourceUrl === "string")
+			this.assertIssuedUrlPreview(digest, sourceUrl, bytesSha256)
 		return { mutation: parsed.data, parsedImport: detach(imported) }
 	}
 	private async commit(
@@ -752,6 +814,7 @@ class BandPlanRuntime implements BandPlanService {
 		// Admitted work finishes after close starts. A latched store does not.
 		if (this.closed || storage === undefined || !storage.isAvailable())
 			throw unavailable()
+		const issuedDigest = this.issuedUrlCommit(prepared)
 		const proposal = this.deps.transition(
 			validateBandPlanState(this.current),
 			prepared.mutation,
@@ -766,6 +829,7 @@ class BandPlanRuntime implements BandPlanService {
 				delivery: "not-needed",
 			}
 		await storage.persist(proposal.state)
+		if (issuedDigest !== null) this.issuedUrlPreviews.delete(issuedDigest)
 		this.current = storage.snapshot()
 		this.resolvedMemo = undefined
 		const delivery = this.publish()
