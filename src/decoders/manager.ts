@@ -1255,13 +1255,14 @@ export class DecoderManager extends EventEmitter {
 	 * instance, config and staging, stops the decoder and throws
 	 * DecoderRebuildError.
 	 */
-	private rebuildIfPending(state: DecoderState): void {
-		if (state.owner !== "config" || !state.stagedOptions) return
+	/** Returns true when a new adapter instance replaced the previous one. */
+	private rebuildIfPending(state: DecoderState): boolean {
+		if (state.owner !== "config" || !state.stagedOptions) return false
 		if (!this.stagedDiffers(state)) {
 			state.stagedOptions = null
-			return
+			return false
 		}
-		if (state.decoder.getStatus().running) return
+		if (state.decoder.getStatus().running) return false
 		const id = state.config.id
 		const options: Record<string, unknown> = { ...(state.config.options ?? {}) }
 		for (const [key, value] of Object.entries(state.stagedOptions)) {
@@ -1330,6 +1331,24 @@ export class DecoderManager extends EventEmitter {
 		this.setupDecoderEventHandlers(state)
 		this.refreshRatePlan(state)
 		this.emit("decoder:created", id)
+		return true
+	}
+
+	/**
+	 * After a rebuild on an internal start path (crash restart, resume): the
+	 * same eligibility decision startDecoder makes. Returns the blocking
+	 * eligibility, or null when the rebuilt decoder may be wired and started.
+	 */
+	private blockedAfterRebuild(state: DecoderState): Eligibility | null {
+		if (state.decoder.caps.input === "external") return null
+		const sourceId = this.selectedSourceId(state)
+		const eligibility = this.assessEligibility(
+			state,
+			(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined) ?? null,
+		)
+		state.ratePlan = eligibility.rate
+		state.bandPlan = eligibility.band
+		return eligibility.blockedBy === null ? null : eligibility
 	}
 
 	/**
@@ -1760,7 +1779,13 @@ export class DecoderManager extends EventEmitter {
 				try {
 					// Wire to fanout and start
 					if (state.intentionallyStopped) return
-					this.rebuildIfPending(state)
+					if (this.rebuildIfPending(state)) {
+						const blocked = this.blockedAfterRebuild(state)
+						if (blocked) {
+							await this.suspend(state, blocked)
+							return
+						}
+					}
 					const outcome = await this.wireDecoderToFanout(state)
 					if (state.intentionallyStopped) {
 						this.unwireDecoderFromFanout(state)
@@ -2898,7 +2923,19 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		try {
-			this.rebuildIfPending(state)
+			if (this.rebuildIfPending(state)) {
+				const blocked = this.blockedAfterRebuild(state)
+				if (blocked) {
+					// Still ineligible with the rebuilt config: stay suspended.
+					state.transition = null
+					state.suspension = {
+						reasonCode: blocked.blockedBy ?? "unsupported-sample-rate",
+						since: prior?.since ?? new Date(),
+					}
+					await this.suspend(state, blocked)
+					return
+				}
+			}
 			const outcome = await this.wireDecoderToFanout(state)
 			if (!this.stillWanted(state, generation)) return await abandon(false)
 			if (!outcome.wired) {

@@ -173,4 +173,57 @@ describe("Property 6", () => {
 			{ numRuns: 120 },
 		)
 	})
+
+	// Feature: web-gaps-8, Property 6: Rebuild equals fresh create
+	// Validates: Requirements 3.1, 3.2, 3.4
+	it("stage + crash restart equals a fresh create with C ⊕ S", async () => {
+		await fc.assert(
+			fc.asyncProperty(configOptions, staged, async (options, stage) => {
+				// A running in-band iq decoder that crashes, so the restart timer runs.
+				const base: DecoderConfig = {
+					id: "dec",
+					type: "rt",
+					enabled: true,
+					options: { ...options, input: "iq", targets: [POCSAG] },
+				}
+				const s = { ...stage }
+				if (s["input"] !== undefined) s["input"] = "iq"
+				const effective = applyStaged(base.options, s)
+				const a = harness()
+				const b = harness()
+				try {
+					a.manager.createDecoder(base)
+					await a.manager.startDecoder("dec")
+					const pending = a.manager.stageDecoderOptions("dec", s)
+					fc.pre(pending)
+					;(a.manager.getDecoder("dec") as ArgvDecoder).crash()
+					await vi.advanceTimersByTimeAsync(60_000)
+					expect(a.manager.isRestartPending("dec")).toBe(false)
+					expect(a.configs).toHaveLength(2)
+
+					b.manager.createDecoder({ ...base, options: effective })
+					await b.manager.startDecoder("dec")
+					const va = view(a)
+					const vb = view(b)
+					expect(va.config?.options).toEqual(vb.config?.options)
+					expect(stripSince({ ...va, config: undefined })).toEqual(
+						stripSince({ ...vb, config: undefined }),
+					)
+				} finally {
+					await a.manager.destroy()
+					await b.manager.destroy()
+				}
+			}),
+			{ numRuns: 120 },
+		)
+	})
 })
+
+/** The restart timer moves the clock; suspension stamps are not compared. */
+function stripSince<T extends { status: Record<string, unknown> }>(v: T): T {
+	const suspension = v.status["suspension"] as
+		| Record<string, unknown>
+		| undefined
+	if (suspension) delete suspension["since"]
+	return v
+}

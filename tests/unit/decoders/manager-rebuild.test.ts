@@ -353,6 +353,54 @@ describe("every start path reaches the rebuild", () => {
 	})
 })
 
+describe("internal start paths re-check eligibility after a rebuild", () => {
+	it("crash restart: rebuilt targets out of band suspend instead of spawning", async () => {
+		const old = create()
+		await manager.startDecoder("dec")
+		manager.stageDecoderOptions("dec", { targets: [ELSEWHERE] })
+		old.crash()
+		await vi.advanceTimersByTimeAsync(10)
+		expect(creates).toHaveLength(2)
+		const rebuilt = instances[1]!
+		expect(manager.getDecoder("dec")).toBe(rebuilt)
+		expect(rebuilt.running).toBe(false)
+		expect(rebuilt.starts).toBe(0)
+		const status = manager.getStatus("dec")
+		expect(status?.suspended).toBe(true)
+		expect(status?.desiredRunning).toBe(true)
+
+		// Same answer as a fresh manager booted with that config.
+		await manager.destroy()
+		setup()
+		create("dec", { targets: [ELSEWHERE] })
+		await manager.startDecoder("dec")
+		const fresh = manager.getStatus("dec")
+		expect(fresh?.suspended).toBe(true)
+		expect(status?.suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(fresh?.suspension?.reasonCode).toBe("frequency-out-of-band")
+	})
+
+	it("resume: rebuilt targets out of band at the new center stay suspended", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		create()
+		await manager.startDecoder("dec")
+		expect(manager.getStatus("dec")?.suspended).toBe(true)
+		manager.stageDecoderOptions("dec", { targets: [ELSEWHERE] })
+		sources.setCenter("rtl", POCSAG)
+		await vi.advanceTimersByTimeAsync(350)
+		expect(creates).toHaveLength(2)
+		expect(instances[1]!.running).toBe(false)
+		expect(instances[1]!.starts).toBe(0)
+		expect(manager.getStatus("dec")?.suspended).toBe(true)
+		// Back on the rebuilt target: it resumes normally.
+		sources.setCenter("rtl", ELSEWHERE)
+		await vi.advanceTimersByTimeAsync(350)
+		expect(creates).toHaveLength(2)
+		expect(instances[1]!.running).toBe(true)
+		expect(manager.getStatus("dec")?.suspended).toBe(false)
+	})
+})
+
 describe("without staging nothing is constructed (req 3.4)", () => {
 	it("start, restart, crash restart, rate restart, startAll: one create", async () => {
 		const decoder = create()

@@ -146,6 +146,41 @@ describe("protected GET settings", () => {
 })
 
 describe("protected PATCH", () => {
+	it("documents the body schema but never validates or coerces it", async () => {
+		const schemas: unknown[] = []
+		const docApp = Fastify()
+		docApp.addHook("onRoute", route => {
+			if (route.method === "PATCH" && route.url === "/api/decoders/:id")
+				schemas.push(route.schema?.body)
+		})
+		await docApp.register(decoderRoutes, {
+			decoderManager: {} as DecoderRoutesOptions["decoderManager"],
+			settings: service(),
+			authorizeSettings: authorize,
+		})
+		await docApp.ready()
+		await docApp.close()
+		expect(schemas).toEqual([
+			{
+				type: "object",
+				properties: {
+					enabled: { type: ["boolean", "null"] },
+					options: { type: "object", additionalProperties: true },
+				},
+				additionalProperties: false,
+			},
+		])
+
+		for (const body of [{ enabled: "true" }, { enabled: true, extra: 1 }]) {
+			const res = await patch(body)
+			expect(res.statusCode).toBe(400)
+			expect(res.json()).toMatchObject({ code: "DECODER_OPTIONS_INVALID" })
+		}
+		expect(update).not.toHaveBeenCalled()
+		// Params keep the default validation answer (empty id).
+		const empty = await app.inject({ method: "PATCH", url: "/api/decoders/" })
+		expect(empty.statusCode).toBe(500)
+	})
 	it("deny precedes lookup, parsing and the service", async () => {
 		denial = {
 			kind: "deny",

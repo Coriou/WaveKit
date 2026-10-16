@@ -17,6 +17,7 @@ import type {
 	FastifyPluginAsync,
 	FastifyReply,
 	FastifyRequest,
+	FastifySchemaValidationError,
 } from "fastify"
 import { z } from "zod"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -212,6 +213,41 @@ const SETTINGS_UPDATE_FAILED = {
 } as const
 
 /** Body shape of the protected PATCH: enabled boolean|null, options object, nothing else. */
+/** Protected PATCH body: the handler validates strictly, nothing here may coerce. */
+const acceptUnvalidated = (): boolean => true
+
+/**
+ * Protected PATCH params, matching the default Ajv answer for the documented
+ * schema (`id` a string of length >= 1) without a per-route Ajv instance.
+ */
+const validateIdParam: ((data: unknown) => boolean) & {
+	errors?: FastifySchemaValidationError[] | null
+} = (data: unknown) => {
+	const id = (data as { id?: unknown } | null)?.id
+	if (typeof id === "string" && id.length >= 1) {
+		validateIdParam.errors = null
+		return true
+	}
+	validateIdParam.errors = [
+		typeof id === "string"
+			? {
+					keyword: "minLength",
+					instancePath: "/id",
+					schemaPath: "#/properties/id/minLength",
+					params: { limit: 1 },
+					message: "must NOT have fewer than 1 characters",
+				}
+			: {
+					keyword: "required",
+					instancePath: "",
+					schemaPath: "#/required",
+					params: { missingProperty: "id" },
+					message: "must have required property 'id'",
+				},
+	]
+	return false
+}
+
 function isSettingsPatchShape(body: unknown): boolean {
 	if (typeof body !== "object" || body === null || Array.isArray(body))
 		return false
@@ -795,7 +831,21 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					properties: { id: { type: "string", minLength: 1 } },
 					required: ["id"],
 				},
+				// Documentation only: see validatorCompiler below.
+				body: {
+					type: "object",
+					properties: {
+						enabled: { type: ["boolean", "null"] },
+						options: { type: "object", additionalProperties: true },
+					},
+					additionalProperties: false,
+				},
 			},
+			// The default validator would coerce ("true" -> true) and drop unknown
+			// keys; the handler's strict shape check is the only body gate. Params
+			// keep the default answer for an empty id.
+			validatorCompiler: ({ httpPart }) =>
+				httpPart === "params" ? validateIdParam : acceptUnvalidated,
 			// onRequest runs before body parsing: a denial precedes any lookup or parser error.
 			onRequest: (request, reply, done) => {
 				const denied = authorizeSettings(request)
