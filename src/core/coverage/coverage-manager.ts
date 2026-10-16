@@ -56,6 +56,14 @@ export class CoverageManager {
 	private readonly now: () => number
 	private readonly lastAircraft = new Map<string, number>()
 	private readonly lastVessel = new Map<string, number>()
+	/**
+	 * The tracker builds a fresh position object per position report and keeps it (and seenPos)
+	 * across non-position messages while lastUpdated advances; identity tells the two apart.
+	 */
+	private readonly lastAircraftPos = new Map<
+		string,
+		AircraftState["position"]
+	>()
 	private started = false
 
 	private readonly onAircraft = (s: AircraftState): void => {
@@ -63,6 +71,7 @@ export class CoverageManager {
 	}
 	private readonly onAircraftLost = (icao: string): void => {
 		this.lastAircraft.delete(icao)
+		this.lastAircraftPos.delete(icao)
 	}
 	private readonly onVessel = (s: VesselState): void => {
 		this.observeVessel(s)
@@ -107,6 +116,8 @@ export class CoverageManager {
 	observeAircraft(state: AircraftState): void {
 		const pos = state.position
 		if (!pos) return
+		if (this.lastAircraftPos.get(state.icao) === pos) return
+		this.lastAircraftPos.set(state.icao, pos)
 		const at =
 			state.seenPos !== undefined
 				? state.lastUpdated - state.seenPos * 1000
