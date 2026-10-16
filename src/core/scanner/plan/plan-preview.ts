@@ -6,6 +6,7 @@ import type { Bandplan, BandRegionCode } from "../bandplan/index.js"
 import type { FreqRange, IqFormat } from "../../spectrum/types.js"
 import type {
 	DecodedElsewhereRange,
+	BandPlanSkipRange,
 	BandPlanSkipSource,
 	DecoderCoverageView,
 	Hop,
@@ -33,6 +34,7 @@ import { isRangeEnabled } from "./range-contract.js"
 import { lockoutExclusionsFor, planWithLockouts } from "./lockouts.js"
 import type { LockoutTarget } from "./lockouts.js"
 import { computeDecodedElsewhere } from "./decoded-elsewhere.js"
+import { computeBandPlanSkips } from "./bandplan-skips.js"
 import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
@@ -766,6 +768,8 @@ export function normaliseSpec(
 	if (spec.signalsOnly !== undefined) prov["signalsOnly"] = "operator"
 	if (spec.skipDecodedElsewhere !== undefined)
 		prov["skipDecodedElsewhere"] = "operator"
+	if (spec.skipBandPlanSkips !== undefined)
+		prov["skipBandPlanSkips"] = "operator"
 	if (kind === "monitor" && spec.signalsOnly === true) {
 		issues.push(
 			issue("signals-only-unsupported", "error", "monitor jobs need decoders"),
@@ -826,6 +830,8 @@ export function normaliseSpec(
 	if (spec.signalsOnly !== undefined) n.signalsOnly = spec.signalsOnly
 	if (spec.skipDecodedElsewhere !== undefined)
 		n.skipDecodedElsewhere = spec.skipDecodedElsewhere
+	if (spec.skipBandPlanSkips !== undefined)
+		n.skipBandPlanSkips = spec.skipBandPlanSkips
 	return { spec: n, source, issues }
 }
 
@@ -869,6 +875,11 @@ export function planForSpec(
  * WG6 req 1: `decodedElsewhere` lists the ranges other decoders cover (absent when none);
  * `decodedElsewhereIssues` carries its warnings (absent when none). With `skipDecodedElsewhere`
  * on a sweep job the ranges join the lockouts as exclusions unless that would empty the plan.
+ *
+ * WG7 req 6: `bandPlanSkips` lists the skip-marked band-plan ranges (absent when none);
+ * `bandPlanSkipIssues` carries its warnings (absent when none). With `skipBandPlanSkips` on a
+ * sweep job they join the lockouts before the decoded-elsewhere ranges, unless that would empty
+ * the plan; the decoded-elsewhere step then runs on top of the applied skips.
  */
 export function planJob(
 	spec: NormalisedJobSpec,
@@ -878,8 +889,11 @@ export function planJob(
 	lockoutExclusions?: LockoutExclusion[]
 	decodedElsewhere?: DecodedElsewhereRange[]
 	decodedElsewhereIssues?: PlanIssue[]
+	bandPlanSkips?: BandPlanSkipRange[]
+	bandPlanSkipIssues?: PlanIssue[]
 } {
 	const decoded = decodedElsewhereFor(spec, ctx)
+	const skips = bandPlanSkipsFor(spec, ctx)
 	const targets =
 		spec.mode === "sweep" ? ctx.lockouts?.(spec.sourceId) : undefined
 	const candidates =
@@ -890,27 +904,53 @@ export function planJob(
 		spec.mode === "sweep" &&
 		spec.skipDecodedElsewhere === true &&
 		decoded.ranges.length > 0
+	const skipBands =
+		spec.mode === "sweep" &&
+		spec.skipBandPlanSkips === true &&
+		skips.ranges.length > 0
 	const issues = decoded.issues
+	const skipIssues = skips.issues
 	// Today's plan (lockouts by their own rule) is computed first so the flag never changes
-	// which lockouts apply; decoded ranges are layered on top only when hops remain.
+	// which lockouts apply; skips, then decoded ranges are layered on top only when hops remain.
 	const base: { plan: HopPlan; lockoutExclusions?: LockoutExclusion[] } =
 		candidates.length === 0
 			? { plan: planForSpec(spec, ctx) }
 			: planWithLockouts(extra => planForSpec(spec, ctx, extra), candidates)
-	let result = base
+	const locked: ScanExclusion[] = (base.lockoutExclusions ?? [])
+		.filter(x => x.applied)
+		.map(x => ({ startHz: x.startHz, endHz: x.endHz }))
+	let withSkips = base
+	let skipsApplied = false
+	let skipEx: ScanExclusion[] = []
+	if (skipBands) {
+		const ex = skips.ranges.map(r => ({ startHz: r.startHz, endHz: r.endHz }))
+		const plan = planForSpec(spec, ctx, [...locked, ...ex])
+		if (plan.hops.length > 0 || base.plan.hops.length === 0) {
+			skipsApplied = true
+			skipEx = ex
+			withSkips = { ...base, plan }
+		} else {
+			skipIssues.push(
+				issue(
+					"bandplan-skips-not-applied",
+					"warning",
+					"skipping the band-plan skip ranges would leave no hop; none were skipped",
+					{ ranges: skips.ranges.length },
+				),
+			)
+		}
+	}
+	let result = withSkips
 	let applied = false
 	if (skip) {
-		const locked: ScanExclusion[] = (base.lockoutExclusions ?? [])
-			.filter(x => x.applied)
-			.map(x => ({ startHz: x.startHz, endHz: x.endHz }))
 		const decodedEx: ScanExclusion[] = decoded.ranges.map(r => ({
 			startHz: r.startHz,
 			endHz: r.endHz,
 		}))
-		const plan = planForSpec(spec, ctx, [...locked, ...decodedEx])
-		if (plan.hops.length > 0 || base.plan.hops.length === 0) {
+		const plan = planForSpec(spec, ctx, [...locked, ...skipEx, ...decodedEx])
+		if (plan.hops.length > 0 || withSkips.plan.hops.length === 0) {
 			applied = true
-			result = { ...base, plan }
+			result = { ...withSkips, plan }
 		} else {
 			issues.push(
 				issue(
@@ -928,6 +968,39 @@ export function planJob(
 			? { decodedElsewhere: decoded.ranges.map(r => ({ ...r, applied })) }
 			: {}),
 		...(issues.length > 0 ? { decodedElsewhereIssues: issues } : {}),
+		...(skips.ranges.length > 0
+			? {
+					bandPlanSkips: skips.ranges.map(r => ({
+						...r,
+						bandKeys: [...r.bandKeys],
+						applied: skipsApplied,
+					})),
+				}
+			: {}),
+		...(skipIssues.length > 0 ? { bandPlanSkipIssues: skipIssues } : {}),
+	}
+}
+
+/**
+ * WG7 req 6.6: the band-plan view is read at most once per plan; a missing, throwing or
+ * non-array view means none.
+ */
+function bandPlanSkipsFor(
+	spec: NormalisedJobSpec,
+	ctx: PreviewContext,
+): { ranges: BandPlanSkipRange[]; issues: PlanIssue[] } {
+	if (ctx.bandPlanSkips === undefined) return { ranges: [], issues: [] }
+	try {
+		const sources: unknown = ctx.bandPlanSkips()
+		if (!Array.isArray(sources) || sources.length === 0)
+			return { ranges: [], issues: [] }
+		const r = computeBandPlanSkips(
+			sources as readonly BandPlanSkipSource[],
+			spec,
+		)
+		return { ranges: r.ranges, issues: [...r.issues] }
+	} catch {
+		return { ranges: [], issues: [] }
 	}
 }
 
@@ -1106,9 +1179,16 @@ export function previewPlan(
 	ctx: PreviewContext,
 ): PlanPreview {
 	const { spec: n, source, issues } = normaliseSpec(spec, ctx)
-	const { plan, lockoutExclusions, decodedElsewhere, decodedElsewhereIssues } =
-		planJob(n, ctx)
+	const {
+		plan,
+		lockoutExclusions,
+		decodedElsewhere,
+		decodedElsewhereIssues,
+		bandPlanSkips,
+		bandPlanSkipIssues,
+	} = planJob(n, ctx)
 	if (decodedElsewhereIssues) issues.push(...decodedElsewhereIssues)
+	if (bandPlanSkipIssues) issues.push(...bandPlanSkipIssues)
 	const s = ctx.settings
 	const explained = issues.some(i => PLAN_EMPTY_CAUSES.has(i.code))
 	if (n.mode === "sweep" && plan.hops.length === 0 && !explained) {
@@ -1200,6 +1280,7 @@ export function previewPlan(
 		issues,
 		...(lockoutExclusions ? { lockoutExclusions } : {}),
 		...(decodedElsewhere ? { decodedElsewhere } : {}),
+		...(bandPlanSkips ? { bandPlanSkips } : {}),
 	}
 }
 
@@ -1260,5 +1341,7 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 	if (n.signalsOnly !== undefined) out.signalsOnly = n.signalsOnly
 	if (n.skipDecodedElsewhere !== undefined)
 		out.skipDecodedElsewhere = n.skipDecodedElsewhere
+	if (n.skipBandPlanSkips !== undefined)
+		out.skipBandPlanSkips = n.skipBandPlanSkips
 	return out
 }
