@@ -1,8 +1,16 @@
 import type {
+	ActivityBandMap,
 	ActivityRecord,
 	ActivitySummary,
+	ActivityTimeline,
 	ActivityTrails,
 } from "../storage/contract.js"
+import {
+	readBandMap,
+	readTimeline,
+	type BandMapReadInput,
+	type TimelineReadInput,
+} from "./aggregates.js"
 import {
 	activityRecordCorrupt,
 	ActivityQueryInvalidError,
@@ -44,6 +52,8 @@ export type ReadRequest =
 	| { op: "detail"; eventId: string }
 	| FacetsReadRequest
 	| { op: "trails"; input: TrailsReadInput }
+	| { op: "bandmap"; input: BandMapReadInput }
+	| { op: "timeline"; input: TimelineReadInput }
 
 /** Store identity read in the same transaction as the rows. */
 export interface ObservedStore {
@@ -78,13 +88,31 @@ interface TrailsBody {
 	trails: ActivityTrails
 }
 
-type ReadBody = SearchBody | DetailBody | FacetsBody | TrailsBody
+interface BandMapBody {
+	op: "bandmap"
+	bandMap: ActivityBandMap
+}
+
+interface TimelineBody {
+	op: "timeline"
+	timeline: ActivityTimeline
+}
+
+type ReadBody =
+	| SearchBody
+	| DetailBody
+	| FacetsBody
+	| TrailsBody
+	| BandMapBody
+	| TimelineBody
 
 export type ReadResult =
 	| (SearchBody & { observed: ObservedStore })
 	| (DetailBody & { observed: ObservedStore })
 	| (FacetsBody & { observed: ObservedStore })
 	| (TrailsBody & { observed: ObservedStore })
+	| (BandMapBody & { observed: ObservedStore })
+	| (TimelineBody & { observed: ObservedStore })
 
 const FACET_COLUMN: Record<FacetDimension, string> = {
 	category: "category",
@@ -388,6 +416,10 @@ function readBody(db: SqlDatabase, request: ReadRequest): ReadBody {
 			return facets(db, request)
 		case "trails":
 			return { op: "trails", trails: readTrails(db, request.input) }
+		case "bandmap":
+			return { op: "bandmap", bandMap: readBandMap(db, request.input) }
+		case "timeline":
+			return { op: "timeline", timeline: readTimeline(db, request.input) }
 		default:
 			throw new ActivityQueryInvalidError("Unknown activity read")
 	}
@@ -412,6 +444,10 @@ export function runRead(db: SqlDatabase, request: ReadRequest): ReadResult {
 			case "facets":
 				return { ...body, observed }
 			case "trails":
+				return { ...body, observed }
+			case "bandmap":
+				return { ...body, observed }
+			case "timeline":
 				return { ...body, observed }
 			default:
 				throw new ActivityQueryInvalidError("Unknown activity read")
