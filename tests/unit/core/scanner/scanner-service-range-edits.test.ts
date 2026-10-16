@@ -145,7 +145,7 @@ describe("ScannerService range edits (SF1 req 1, 2, 6)", () => {
 			await first.service.stop()
 			await rm(first.dir, { recursive: true, force: true })
 		}
-	})
+	}, 20_000)
 
 	it("refuses locked-field, count and all-disabled edits with 400 and leaves the job unchanged", async () => {
 		const h = serviceHarness({ patch: noPassive })

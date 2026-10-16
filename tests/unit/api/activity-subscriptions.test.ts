@@ -50,6 +50,9 @@ function fakeService(): ActivityQueryService & { stops: number } {
 		async facets() {
 			throw new Error("not used")
 		},
+		async trails() {
+			throw new Error("not used")
+		},
 		replay(_input, sink): ActivityReplayHandle {
 			sink.send({ type: "progress", scannedThrough: "0", cursor: "cursor-0" })
 			return {
@@ -160,6 +163,9 @@ describe("activity subscriptions", () => {
 			async facets() {
 				throw new Error("not used")
 			},
+			async trails() {
+				throw new Error("not used")
+			},
 			replay(_input, sink) {
 				sinks.push(sink)
 				const cursor = `cursor-${sinks.length}`
@@ -219,6 +225,9 @@ describe("activity subscriptions", () => {
 				return null
 			},
 			async facets() {
+				throw new Error("not used")
+			},
+			async trails() {
 				throw new Error("not used")
 			},
 			replay(_input, sink) {

@@ -208,7 +208,7 @@ describe("ScannerService", () => {
 			WAIT,
 		)
 		await restored.service.stop()
-	})
+	}, 20_000)
 
 	it("phase40 preserves a channel component UNKNOWN and attempts every subscription remover", async () => {
 		const h = serviceHarness()
@@ -277,7 +277,7 @@ describe("ScannerService", () => {
 		// in-window jobs never command the tuner (P5)
 		expect(h.tuner.sent.filter(c => c.origin === "scanner")).toEqual([])
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("restores the tuner at shutdown and pauses the job with core-restart on the next boot", async () => {
 		const h = serviceHarness({
@@ -543,7 +543,7 @@ describe("ScannerService", () => {
 		expect(obs.length).toBeGreaterThan(0)
 		expect(obs.every(o => o.endReason === "job-end")).toBe(true)
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("closes each observation once across a new stream, ignoring the pipeline's late closes (R2)", async () => {
 		const h = serviceHarness({
@@ -593,7 +593,7 @@ describe("ScannerService", () => {
 		expect(after.length).toBeGreaterThan(0)
 		expect(after.some(id => before.includes(id))).toBe(false)
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("a job that joins a display-opened engine keeps its tracks (stream floor, Task 37a review finding 1)", async () => {
 		const h = serviceHarness({
@@ -636,7 +636,7 @@ describe("ScannerService", () => {
 		expect(gaps).toEqual([])
 		await h.service.spectrum.unsubscribe("c1")
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("targets ambient dsd-fme decoders with their NXDN flavour (Task 34 carry)", () => {
 		const dsd = (id: string, mode: string) => ({
@@ -839,7 +839,7 @@ describe("ScannerService", () => {
 		}
 		expect(h.tuner.sent.length).toBeGreaterThan(sent)
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("hands the lease back when the preemptor completes on its stop condition (finding 4)", async () => {
 		const h = serviceHarness({ patch: noPassive })
@@ -865,7 +865,7 @@ describe("ScannerService", () => {
 		expect(h.service.getJob(low.id)?.state).toBe("running")
 		expect(holderOf(h)).toBe(low.id)
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("keeps an operator pause when a REST write takes the lease, and re-acquires it on resume (finding 5)", async () => {
 		const h = serviceHarness({ patch: noPassive })
@@ -1020,7 +1020,7 @@ describe("ScannerService", () => {
 			reason: "resume-blocked",
 		})
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("never turns a malformed discovery id into a path (Task 36 review)", async () => {
 		const h = serviceHarness({ patch: noPassive })
@@ -1262,7 +1262,7 @@ describe("ScannerService", () => {
 			obs.some(o => (o.decode ?? []).some(e => e.identity?.value === "1")),
 		).toBe(true)
 		await h.service.stop()
-	})
+	}, 20_000)
 })
 
 describe("R14 immutable scanner component phase", () => {

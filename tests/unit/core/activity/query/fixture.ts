@@ -454,6 +454,7 @@ export function openQueryService(
 		search: input => track(service.search(input)),
 		detail: eventId => track(service.detail(eventId)),
 		facets: input => track(service.facets(input)),
+		trails: input => track(service.trails(input)),
 		replay: (input, sink) => service.replay(input, sink),
 		async close() {
 			draining = true

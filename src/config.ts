@@ -1,4 +1,5 @@
 import type {
+	StationField,
 	StationIdentity,
 	StationProvenance,
 	BandRegion,
@@ -211,6 +212,8 @@ export const TunerConfigSchema = z.object({
 	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
 })
 
+const LIVE_AUDIO_AGC_MODES_TUPLE = ["off", "slow", "fast"] as const
+
 /**
  * Schema for live demodulation configuration.
  */
@@ -258,6 +261,11 @@ export const LiveDemodConfigSchema = z
 		 * at the tuned centre.
 		 */
 		offsetHz: z.number().finite().min(-10_000_000).max(10_000_000).default(0),
+		/**
+		 * WG4: post-demodulation AGC. Absent (no default) keeps the modulation
+		 * default: AM, CW, DSB, USB and LSB `fast`; NFM, WFM and raw none.
+		 */
+		agc: z.enum(LIVE_AUDIO_AGC_MODES_TUPLE).optional(),
 	})
 	.superRefine((value, ctx) => {
 		if (value.modulation !== "raw" && value.bandwidth <= 0) {
@@ -1220,7 +1228,7 @@ export function loadConfig(configPath?: string): Config {
 
 	const env = parseEnvironmentVariables()["station"]
 	const provenance: Partial<
-		Record<keyof Config["station"], StationProvenance>
+		Record<keyof Config["station"], StationConfigOrigin>
 	> = {}
 	for (const key of stationKeys) {
 		if (result.data.station[key] !== undefined)
@@ -1229,7 +1237,7 @@ export function loadConfig(configPath?: string): Config {
 					? "env"
 					: "yaml"
 	}
-	stationOrigins.set(result.data, provenance)
+	stationOriginMap.set(result.data, provenance)
 	return result.data
 }
 
@@ -1337,17 +1345,36 @@ const stationKeys = [
 	"callsign",
 	"country",
 ] as const
-const stationOrigins = new WeakMap<
+const stationOriginMap = new WeakMap<
 	Config,
-	Partial<Record<keyof Config["station"], StationProvenance>>
+	Partial<Record<keyof Config["station"], StationConfigOrigin>>
 >()
+
+/** Where a configured (non-default) station field came from; both pin it against UI writes. */
+export type StationConfigOrigin = Extract<StationProvenance, "yaml" | "env">
+
+/**
+ * WG4: the load-time origin of each station field set by YAML or env (absent keys are
+ * unset). A config not produced by loadConfig reports set fields as yaml.
+ */
+export function stationOrigins(
+	config: Config,
+): Readonly<Partial<Record<StationField, StationConfigOrigin>>> {
+	const recorded = stationOriginMap.get(config)
+	const out: Partial<Record<StationField, StationConfigOrigin>> = {}
+	for (const key of stationKeys) {
+		if (config.station[key] === undefined) continue
+		out[key] = recorded?.[key] ?? "yaml"
+	}
+	return out
+}
 
 /** Snapshot provenance at load time; subsequent process.env mutations cannot change it. */
 export function stationIdentity(
 	config: Config,
 	region: BandRegion,
 ): StationIdentity {
-	const origins = stationOrigins.get(config)
+	const origins = stationOriginMap.get(config)
 	function field<K extends keyof Config["station"]>(key: K) {
 		const provenance: StationProvenance =
 			origins?.[key] ?? (config.station[key] === undefined ? "default" : "yaml")

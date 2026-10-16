@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { MeshNode } from "@wavekit/api-types"
 import {
+	fixTimeIso,
 	formatNodeId,
 	MeshTracker,
 	type MeshTrackerConfig,
@@ -238,6 +239,7 @@ describe("MeshTracker", () => {
 			lon: 20,
 			altitudeM: null,
 			at: AT.toISOString(),
+			fixAt: null,
 		})
 		expect(node?.snrDb).toBe(5)
 		expect(node?.portnums).toMatchObject({ "3": 5, "4": 1, "99": 1 })
@@ -569,5 +571,55 @@ describe("MeshTracker", () => {
 		expect(nodes.get("!00000001")).toBeUndefined()
 		expect(nodes.get("!00000002")).toBeUndefined()
 		expect(nodes.getStats().expiredTotal).toBe(0)
+	})
+})
+
+describe("MeshTracker fix time (WG4 5.3)", () => {
+	const atMs = AT.getTime()
+	const nowS = atMs / 1000
+
+	it("accepts a plausible integer second and both window edges", () => {
+		expect(fixTimeIso(nowS - 30, atMs)).toBe(
+			new Date((nowS - 30) * 1000).toISOString(),
+		)
+		expect(fixTimeIso(nowS - 7 * 86400, atMs)).not.toBeNull()
+		expect(fixTimeIso(nowS + 60, atMs)).not.toBeNull()
+	})
+
+	it.each([
+		["zero", 0],
+		["negative", -5],
+		["fractional", nowS - 0.5],
+		["NaN", Number.NaN],
+		["absent", null],
+		["undefined", undefined],
+		["8 days old", nowS - 8 * 86400],
+		["one second past the old edge", nowS - 7 * 86400 - 1],
+		["61 s in the future", nowS + 61],
+	])("rejects %s", (_name, timeS) => {
+		expect(fixTimeIso(timeS, atMs)).toBeNull()
+	})
+
+	function positionFix(timeS: number | undefined) {
+		const nodes = tracker()
+		send(nodes, {
+			from: 5,
+			id: 1,
+			portnum: 3,
+			payload: encodePosition({
+				latitudeI: 377_749_000,
+				longitudeI: -1_224_194_000,
+				...(timeS === undefined ? {} : { timeS }),
+			}),
+		})
+		return nodes.get("!00000005")?.position?.fixAt
+	}
+
+	it("sets fixAt from Position.time and null without it", () => {
+		expect(positionFix(nowS - 10)).toBe(
+			new Date((nowS - 10) * 1000).toISOString(),
+		)
+		expect(positionFix(undefined)).toBeNull()
+		expect(positionFix(nowS + 3600)).toBeNull()
 	})
 })

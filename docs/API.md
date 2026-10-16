@@ -343,6 +343,16 @@ curl http://localhost:9000/api/status
 }
 ```
 
+#### GET /api/resources/sdr-hosts
+
+`SdrHostStatus[]`, one per configured SDR host (also `sdrHosts` in
+`GET /api/resources` and one host at `/api/resources/sdr-hosts/:sourceId`). WG4
+adds optional `version`: the version the SDR host reports in its own
+`GET /api/status` (the `@wavekit/sdr-host` package version), kept only when it is
+1–64 printable ASCII characters, otherwise null; null while the host is
+unavailable, and absent on older cores. A host body that is not a JSON object
+counts as a fetch failure (`available: false`, `fetchError` set).
+
 ### Sources
 
 #### GET /api/sources
@@ -482,28 +492,166 @@ keeps its existing code-only body and headers. Full contract and evidence gates:
 
 #### GET /api/station
 
-Read-only station identity from config (`station.*` in YAML, `WAVEKIT_STATION__*`
-in the environment; `WAVEKIT_COUNTRY` sets `station.country`). Every field carries
-`{ value, provenance }` with provenance `default`, `yaml` or `env`; unset values are
-`null`. `country` is ISO 3166-1 alpha-2 (uppercase). `effectiveCountry` is the
-configured country or `null`: it is never derived from the coordinates. `region` is
-the existing coarse band region. `HEAD` returns the headers only. Mounted in protected
-and legacy composition under the normal API admission. `lat` and `lon` (when both are
-set) are passed to readsb as `--lat`/`--lon` and are the origin of
-[`GET /api/coverage`](#coverage); no other decoder receives station data.
+The live station identity (WG4). Values come from four layers, highest first:
+environment (`WAVEKIT_STATION__*`; `WAVEKIT_COUNTRY` sets `station.country`) >
+YAML (`station.*`) > UI (written by [`PATCH /api/station`](#patch-apistation)) >
+default (unset). Every field carries `{ value, provenance }` with provenance
+`default`, `yaml`, `env` or `ui`; unset values are `null`. `country` is ISO 3166-1
+alpha-2 (uppercase). `effectiveCountry` is the effective country or `null`: it is
+never derived from the coordinates. `region` is the existing coarse band region.
+`revision` is the revision of the persisted UI layer (0 when nothing was written);
+send it as `If-Match`. `writable` says whether `PATCH /api/station` is mounted in
+this deployment. Both are optional in `@wavekit/api-types` (older cores omit them).
+`HEAD` returns the headers only; `Cache-Control: no-store`. Mounted in protected
+and legacy composition under the normal API admission.
+
+`lat` and `lon` form a pair. When the environment or YAML sets either of them,
+both are pinned and the configured values are used as they are (a configured
+half pair stays a half pair, as before WG4); otherwise a UI pair applies only
+when both halves are stored. The effective pair (when both are set) is passed to
+readsb as `--lat`/`--lon` (a complete valid readsb option pair still wins) and is
+the origin of [`GET /api/coverage`](#coverage); no other decoder receives station
+data.
 
 ```json
 {
-	"name": { "value": "Home", "provenance": "yaml" },
+	"name": { "value": "Home", "provenance": "ui" },
 	"lat": { "value": 48.85, "provenance": "yaml" },
 	"lon": { "value": 2.35, "provenance": "yaml" },
 	"altM": { "value": null, "provenance": "default" },
 	"callsign": { "value": null, "provenance": "default" },
 	"country": { "value": "FR", "provenance": "env" },
 	"effectiveCountry": "FR",
-	"region": "EU"
+	"region": "EU",
+	"revision": 3,
+	"writable": true
 }
 ```
+
+#### PATCH /api/station
+
+Sets or clears UI values of the station (WG4). Mounted only in protected access
+mode: in legacy mode the route is absent (404) and `GET /api/station` reports
+`writable: false`. A request needs an authenticated session or device, checked
+before the body is parsed; a denial keeps the access code-only body and headers.
+
+Body: a JSON object (at most 4,096 bytes) with at least one of `name`, `lat`,
+`lon`, `altM`, `callsign`, `country`. A present key sets the UI value, validated
+like the YAML `station` block (`name` 1–256 characters and `callsign` 1–128 after
+trimming, `lat` −90..90, `lon` −180..180, `altM` finite, `country` a known
+uppercase ISO 3166-1 alpha-2 code); `null` clears it; an absent key is unchanged.
+`lat` and `lon` must be set or cleared together. Optional `If-Match: "<revision>"`
+(quotes optional) makes the write conditional on the current `revision`.
+
+```bash
+curl -X PATCH http://localhost:9000/api/station \
+  -H 'Content-Type: application/json' -H 'If-Match: "3"' \
+  -d '{ "name": "Roof", "callsign": "F1ABC", "altM": null }'
+```
+
+**Response** (200) `StationUpdateResult`: `station` (the new identity, as in
+`GET`), `revision`, `changed` (fields whose effective value changed, in field
+order), `appliesOnRestart` (`["readsb"]` when the effective location changed; it
+concerns readsb instances without their own complete `lat`/`lon` options, which
+keep using those),
+`restartRequired` (`["country"]` when the country changed) and `coverageCleared`.
+A write always bumps `revision`, even when no effective value changed.
+
+| Code                        | HTTP | When                                                                                                                                     |
+| --------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `STATION_UPDATE_INVALID`    | 400  | Not a JSON object, malformed JSON, over 4,096 bytes, wrong content type, no or unknown field, invalid value, half a pair, bad `If-Match` |
+| `STATION_FIELD_PINNED`      | 409  | A field in the body is set by YAML or the environment (`fields` lists them); checked after the shape and values                          |
+| `STATION_REVISION_MISMATCH` | 412  | `If-Match` is not the current `revision`                                                                                                 |
+| `STATION_STORE_UNAVAILABLE` | 503  | The store could not be written, the service is closed, or the revision counter is exhausted                                              |
+
+Error bodies are `{ error, code, message, fields? }` (`fields` on 409, and on 400
+when the invalid fields are known); nothing changes when a request fails. Checks
+run in this order: the body's shape and every value (400), pinned fields (409),
+the `lat`/`lon` pair (400), then `If-Match` (412). `lat` and `lon` are pinned
+jointly: when YAML or the environment sets either, both are pinned, so with only
+`station.lat` in YAML a body `{ "lon": 2.35 }` is a 409 with `fields: ["lon"]`
+(not a half-pair 400).
+
+Persistence: the UI layer lives in `<stateDir>/station.json` (per field: value,
+provenance `ui` and write time; schema version 1, at most 4,096 bytes). It is
+written to a temporary file, synced and renamed before the change applies; writes
+are serialised. A missing file is an empty layer. A corrupt, oversized or
+other-version file is logged once, moved aside to `station.json.corrupt-<ms>`
+(one kept) and loads empty; startup never fails on it. The empty layer (also after
+an unreadable file, and at a later start while only the quarantined copy is left)
+starts at a `revision` of the clock in ms × 1,000, or one above the lost file's
+`revision` when that is still readable and higher (the clock seed alone when that
+would not be a safe integer), so an `If-Match` taken before cannot match a later
+write. This is not guaranteed if the clock went back across the store loss.
+Temporary files a crash left behind (`station.json.<pid>.tmp` of another process,
+untouched for 60 s; at most 16 per start) are removed at startup. The file is read
+in both access modes, so UI values written in protected mode still apply in legacy mode,
+where they cannot be changed.
+
+When a change applies:
+
+- `GET /api/station` changes at once; the [estimate](#get-apistationestimate)'s
+  `stationConfigured` at its next computation (it is cached for 60 s).
+- Coverage takes the new origin at once. A move of more than 1 km, or setting or
+  clearing the location, clears the coverage map (`coverageCleared: true`); a
+  smaller move keeps it.
+- readsb reads the location at its next start (a decoder restart or a WaveKit
+  restart); a running readsb keeps its arguments.
+- `country` applies to the band plans' `effectiveCountry` at the next WaveKit
+  restart (`restartRequired: ["country"]`).
+
+#### GET /api/station/estimate
+
+A visibly approximate receiver location derived from the positions the
+aircraft, vessel, APRS and mesh trackers currently hold (WG4). It is never
+authoritative (`authoritative: false`): coverage, decoders, band plans and the
+station layer never use it, and it is computed whether or not a station location
+is configured. `HEAD` is supported; `Cache-Control: no-store`.
+
+Each tracked entity with a valid position (finite, in range, not exactly (0, 0))
+no older than 4 hours by its own position time contributes once, with a weight:
+
+| Entity                                                                 | Weight                |
+| ---------------------------------------------------------------------- | --------------------- |
+| Mesh node heard directly (`hopsAway` 0, not via MQTT)                  | 4                     |
+| Mesh node heard over RF through relays (`hopsAway` > 0 or unknown)     | 1                     |
+| Mesh node last heard via MQTT                                          | 0 (never contributes) |
+| APRS station (`kind: "station"`) whose path has no `*` marker          | 2                     |
+| APRS station heard through a digipeater (a path element ends with `*`) | 1                     |
+| APRS object or item                                                    | never                 |
+| Vessel, aircraft                                                       | 1                     |
+
+An aircraft's position time is `lastUpdated` minus `seenPos`, as in coverage.
+Above 8,000 contributors the newest positions are kept. The estimate is the
+weighted geometric median on the sphere (Weiszfeld, at most 50 iterations). It is
+available with at least 10 contributors or at least 3 direct ones (weight 4 or
+2); otherwise `reason` is `too-few-positions`. `degenerate` means no unique
+median (for example antipodal positions). `lat` and `lon` are rounded to 0.05°
+(about 5.6 km of latitude; `lon` in [−180, 180)). `uncertaintyKm` is the weighted
+median distance of the contributors from the estimate, rounded up to a multiple of
+5 km and at least 10 km. `basis` counts contributors per fleet; a tracker that is
+absent or fails counts 0.
+
+The estimate is computed on request only and cached for 60 s (`cachedUntil` =
+`computedAt` + 60 s); concurrent requests share one computation. A failure is not
+cached and answers 500 `{ error, code: "STATION_ESTIMATE_FAILED", message }`.
+
+```json
+{
+	"available": true,
+	"reason": null,
+	"lat": 48.85,
+	"lon": 2.35,
+	"uncertaintyKm": 45,
+	"basis": { "aircraft": 212, "vessels": 0, "aprs": 14, "mesh": 3 },
+	"computedAt": "2026-10-16T12:00:00.000Z",
+	"cachedUntil": "2026-10-16T12:01:00.000Z",
+	"authoritative": false,
+	"stationConfigured": false
+}
+```
+
+When unavailable, `lat`, `lon` and `uncertaintyKm` are null and `reason` is set.
 
 ### Band plans
 
@@ -892,6 +1040,9 @@ Fields:
   off).
 - `noiseFloorDbfs`, `thresholdDbfs` — the auto-squelch floor estimate and the
   threshold in effect (the manual `squelch`, or floor + `autoMarginDb` in auto mode).
+- `agc` (WG4) — the effective AGC mode of the chain after the modulation
+  default: `off`, `slow` or `fast` (always `off` for `raw`), on every status.
+  `config.agc` is present only when it is set. Optional in `@wavekit/api-types`; older cores omit both.
 
 Configuration notes:
 
@@ -913,6 +1064,13 @@ Configuration notes:
   gain directly: `raw` is about 5× (14 dB) quieter than before unless `gain` is set
   explicitly. AM/SSB use an AGC whose reference dropped from 0.8 to 0.4, so with the
   default gain they peak around 0.8 instead of hard-clipping.
+- `agc` (WG4, `liveDemod.agc`) — post-demodulation AGC: `off`, `slow` or `fast`.
+  Absent keeps the per-modulation behaviour unchanged (AM, CW, DSB, USB and LSB
+  `fast`; NFM, WFM and `raw` none), with the same chain as before WG4. An explicit
+  mode applies to every modulation except `raw`, which never gets AGC: `off`
+  removes the AGC stage from AM/SSB, and `slow` or `fast` adds one to NFM/WFM after
+  de-emphasis. The stage is one `csdr agc` process at the audio rate. Support for
+  `-p slow` by the image's pinned csdr is not yet verified by an image smoke test.
 - `offsetHz` — channel offset from the tuned centre (default 0). A carrier at
   centre + `offsetHz` is shifted to DC before the channel filter, so the receiver's
   DC spike can be kept out of the channel by tuning a few kHz off the carrier.
@@ -994,6 +1152,11 @@ Update live demodulator configuration. DSP changes restart the pipeline; `squelc
 `squelchMode` and `autoMarginDb` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
+
+`agc` takes `off`, `slow`, `fast` or `null`; `null` deletes the key and returns to
+the per-modulation default. Setting, changing or deleting the key is a DSP change
+even when the effective mode stays the same: the pipeline restarts and an open
+`live-audio:transmission` closes with `closeReason: "config"`.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/live-audio/config \
@@ -2550,6 +2713,13 @@ a good copy of a dropped fragment still completes its group within 2 s.
 AIS-catcher's JSON output is not affected. The checksum count is not a separate
 field of the decoder status (only `stats.errors`); it appears in the debug log.
 
+AIS radio channel (WG4): a `ship` decoder output (`decoder:output` and the stored
+Activity reception) carries `channel`, `A` or `B`, from NMEA field 4 or
+AIS-catcher's JSON `channel`; a multi-sentence message takes it from its first
+fragment, and the key is absent when the channel is unknown. It sets the
+reception's provenance frequency: A is 161.975 MHz, B 162.025 MHz (see
+[Provenance](#provenance)). `VesselState` does not carry the channel.
+
 #### GET /api/vessels
 
 `VesselListResponse`: `{ vessels, stats, timestamp }`, most recently heard
@@ -2597,6 +2767,12 @@ only), `weather` (`temperatureF`, `humidityPct`, `pressureMbar`,
 `decoderId`, `firstSeen` and `lastSeen`. Fields a report does not carry are
 never cleared.
 
+`path` is in TNC2 text form. From WG4 the direwolf adapter keeps the AX.25
+has-been-repeated bit: the last digipeater that repeated the packet ends with
+`*` (`["W1AW*", "WIDE2-1"]`), as direwolf prints it; source and destination never
+carry it. A path without `*` was heard directly, which the
+[station estimate](#get-apistationestimate) weighs higher.
+
 #### GET /api/aprs/stats
 
 `AprsTrackerStats`: `stationCount`, `withPosition`, `byKind`,
@@ -2637,8 +2813,11 @@ Both fields are optional: older cores omit them.
 first. A `MeshNode` has `nodeId` (`!` plus 8 lowercase hex digits), `key`
 (`node:<nodeId>`, the Activity entity key), `nodeNum`, the NODEINFO fields
 `longName`, `shortName`, `hwModel`, `role`, `isLicensed` (null until
-received) and `lastNodeInfoAt`, `position` (`{ lat, lon, altitudeM, at }` from
-the latest valid POSITION, or null), `snrDb`, `rssiDbm` and `hopsAway` of the
+received) and `lastNodeInfoAt`, `position` (`{ lat, lon, altitudeM, at, fixAt }`
+from the latest valid POSITION, or null; `at` is the receive time, and `fixAt`
+(WG4, optional, absent on older cores) is the sender's GPS fix time
+(`Position.time`) as ISO when it lies between 7 days before and 60 s after `at`,
+else null), `snrDb`, `rssiDbm` and `hopsAway` of the
 last unique packet (null when unknown), `viaMqtt`, `packetCount` (unique
 packets), `duplicateCopies`, `portnums` (unique packets per port, at most 64
 keys, later ports count under `other`), `lastPortnum`, `decoderId`,
@@ -2720,6 +2899,76 @@ still 200:
 
 Access is the same as the other read routes (`GET /api/vessels`,
 `GET /api/mesh/nodes`).
+
+### Storage
+
+#### GET /api/storage
+
+Sizes of the directories and files WaveKit writes (WG4), without their paths:
+no response field carries a filesystem path. DTOs in
+`packages/api-types/src/storage.ts`. `HEAD` is supported; `Cache-Control:
+no-store`. Access is the same as the other read routes. A report is cached for
+30 s (`cachedUntil` = `generatedAt` + 30 s) and concurrent requests share one
+scan. A failure answers 500 `{ error, code: "STORAGE_REPORT_FAILED" }` and is not
+cached.
+
+**Response** (200) `StorageReport`: `generatedAt`, `cachedUntil`, `filesystem`
+(`totalBytes`, `freeBytes`, `availableBytes` of the filesystem holding
+`stateDir`; `availableBytes` is what WaveKit's user may use; null when `statfs`
+failed or did not answer in time), `areas`, `kept` and `lowSpace`.
+
+Areas, in this order (`access` and `logs` are omitted when not configured; an
+area with no path, such as `digital-voice-wav` without a recording dsd-fme, reports
+`exists: false`):
+
+| `id`                | `class`     | What                                                                                                              | `cap`                                    |
+| ------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `activity`          | `automatic` | The Activity store (`<stateDir>/activity`)                                                                        | Resolved `activity.retention.maxDbBytes` |
+| `scanner-evidence`  | `automatic` | Scanner evidence (`scanner.storage.dir`, default `<stateDir>/scanner`), minus any dsd-fme WAV directory inside it | `scanner.storage.maxRecordingsMb`        |
+| `digital-voice-wav` | `other`     | Per-call WAV directories of the dsd-fme decoders that record                                                      | null                                     |
+| `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
+| `operator-data`     | `state`     | Operator data                                                                                                     | null                                     |
+| `access`            | `state`     | Private access state (protected mode only)                                                                        | null                                     |
+| `decoder-overrides` | `state`     | Decoder band overrides                                                                                            | null                                     |
+| `station`           | `state`     | The station UI layer (`station.json`)                                                                             | null                                     |
+| `logs`              | `other`     | `logging.dir` (only when set)                                                                                     | null                                     |
+
+`automatic` areas are bounded by WaveKit (caps, age); `state` is small operator
+state that is never pruned; `other` grows without WaveKit pruning it (the
+operator manages it). Each area has `bytes` (apparent `lstat` size of regular
+files; symlinks are counted, not followed), `files`, `exists`, `partial`,
+`partialReason`, `cap` (`{ bytes }` or null when WaveKit does not cap it) and
+`retention`. `retention` is set on `activity` only (null elsewhere, and null when
+Activity is disabled or its stats fail): `policy`, `effective`, `maxRows`,
+`maxDbBytes`, `maxAgeMs`, `rows`, `oldestReceivedAt`, `shares` (at most 64) and
+`sharesTruncated`, from the store's own stats, not from the scan. A file is
+counted in one area only. Directories are compared by real path at each report
+(symlinked parents and case aliases resolve to the same directory): one that
+another area's walk reaches (for example `logging.dir` inside
+`<stateDir>/activity`, or one dsd-fme WAV directory inside another) is left out
+of the outer area, and two areas configured with the same directory count it in
+the later one; the earlier still reports `exists: true` with 0 bytes. A
+directory reached only through a symlink is not inside: the walk counts the
+link, not its target. The scanner-evidence `cap` is null when the scanner is not
+running.
+
+The scan is bounded per report: 50,000 entries, depth 16, 2,000 ms wall time
+(`statfs` included) and 8 filesystem calls in flight. When a bound is reached the
+current area is `partial` with `partialReason` `entry-limit`, `depth-limit` or
+`time-limit`, and every later area is not scanned: it reports `exists: false`, 0
+bytes, 0 files and the same reason. The first reason wins. A permission error is
+`permission`, any other error except a missing path is `io-error`; a missing
+path is `exists: false` and not partial. A partial area's `bytes` and `files` are
+lower bounds.
+
+`kept` is always null: recordings protected by Keep are scanner-internal and not
+reported yet. `lowSpace` describes the only automatic low-space behaviour:
+`policy` is `scanner-evidence-stops-writing` (scanner evidence stops writing when
+the available space is below `scanner.storage.minFreeDiskMb`), `minFreeBytes` is
+that threshold in bytes (null without a scanner) and `state` is `low` when
+`filesystem.availableBytes` is below it, `ok` when not, `unknown` without either.
+WaveKit does not shorten any retention because space is low; the report only
+states the configured caps and retention.
 
 ## Activity
 
@@ -2855,8 +3104,9 @@ does not verify the tuning the decoder hears.
 | others (readsb, direwolf, multimon-ng, dsd-fme, rtl_433) | the binding's target when it has exactly one, else null                               |
 
 A payload frequency that is missing or invalid falls back to the binding's single
-target. AIS-catcher's output does not carry the channel today, so a dual-channel AIS
-decoder (two targets) gets `frequency: null`. multimon-ng's string `frequency` is
+target. From WG4 the AIS adapter emits `channel` on `ship` output, so a
+dual-channel AIS decoder (two targets) stores 161,975,000 or 162,025,000 Hz; a
+ship message whose channel is unknown still gets `frequency: null` there. multimon-ng's string `frequency` is
 not used (its unit is not verified). A lookup or provenance that fails never
 loses the reception: it is stored with null provenance. Provenance does not
 change `decodedData`, the presentation, coalescing or admission. Search by
@@ -3048,6 +3298,110 @@ ignored.
 Default page size is 100 and the maximum is 200. A page token is bound to
 the same query and expires with the snapshot (5 minutes).
 
+### GET /api/activity/trails
+
+Bulk position trails (WG4): one trail per entity, built from the stored decoder
+receptions (`kind` `decoder-reception` with an `entityKey`) whose summary carries
+a valid position, inside a `producedAt` window. One snapshot read: no cursor, no
+paging. It covers what Activity stores, so aircraft and ship positions arrive at
+most once per entity per 60 s (position coalescing) and nothing older than the
+retained rows exists.
+
+Query parameters (an unknown one is 400 `ACTIVITY_QUERY_INVALID`):
+
+- `producedFrom`, `producedTo` — the window, both inclusive. `producedTo`
+  defaults to now and `producedFrom` to `producedTo` minus 1 hour. The window may
+  be empty (`from` equal to `to`) and at most 24 hours; `from` after `to` or a
+  longer window is 400. Timestamps are strict ISO 8601 date-times with seconds
+  and a `Z` or `±hh:mm` offset (fractions up to 9 digits), calendar-valid (no
+  February 30, hour at most 23); anything else is 400. Search keeps its lenient
+  parsing.
+- `categories`, `protocols` — lists, as in search.
+- `entityKey` — repeated, at most 64 values; never split on commas (entity keys
+  may contain them).
+
+Rows are read newest first (`producedAt`, then `commitSeq`, descending) and
+accepted greedily under four bounds:
+
+| Bound        | Value   | When reached                                                                               |
+| ------------ | ------- | ------------------------------------------------------------------------------------------ |
+| `scan-rows`  | 200,000 | Rows examined, invalid ones included; the scan stops                                       |
+| `points`     | 20,000  | Points over all trails; the scan stops                                                     |
+| `entities`   | 2,000   | Trails; a row of a new entity is refused, the scan goes on for the accepted ones           |
+| `per-entity` | 1,440   | Points in one trail (24 h at the 60 s coalescing interval); older points of it are refused |
+
+So every trail holds the newest points of its entity in the window. A trail whose
+older in-window points were not returned has `truncated: true`; when the scan
+stopped early (`scan-rows`, `points` or `time-limit`) the walk continues past the
+stop, reading positions only for the returned trails not yet marked, to find those
+with an older valid in-window row, so the flag is exact unless `time-limit` is
+reported (see below). As arithmetic: at most 61 points per
+entity per hour, so 300 aircraft over 1 hour is about 18,000 points, under the
+20,000 cap. A busy store (about 520,000 rows a day) holds about 21,700 rows an
+hour, so a 24-hour request reaches the scan cap after about the newest 9 hours. A
+full response is about 1 MB (measured 1,012,271 bytes for 20,000 points in 2,000
+trails).
+
+**Response** (200) `ActivityTrails`: `producedFrom`, `producedTo` (the effective
+window, ISO), `trails`, `pointCount`, `scannedRows`, `skippedRows` (rows in the
+window whose stored position was missing or invalid: not finite, out of range or
+exactly (0, 0)), `truncated`, `truncation` (the bounds that cut the result, in the
+order `scan-rows`, `points`, `entities`, `per-entity`, `time-limit`; empty when
+`truncated` is false), `retentionFloor` (ISO `producedAt` of the oldest stored row: no trail can
+start earlier; null when the store is empty) and `generatedAt`. Trails are sorted
+by their newest point descending, then `entityKey`. A trail is `{ entityKey,
+category, protocol, points, truncated }`; `category` and `protocol` are those of
+its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending time
+(`altM` null when the stored position has none; today's presentations store
+`lat`/`lon` only, so it is null).
+
+```json
+{
+	"producedFrom": "2026-10-16T11:00:00.000Z",
+	"producedTo": "2026-10-16T12:00:00.000Z",
+	"trails": [
+		{
+			"entityKey": "icao:3C6444",
+			"category": "aircraft",
+			"protocol": "adsb",
+			"points": [
+				[1792148400000, 48.71, 2.36, null],
+				[1792148460000, 48.79, 2.41, null]
+			],
+			"truncated": false
+		}
+	],
+	"pointCount": 2,
+	"scannedRows": 2,
+	"skippedRows": 0,
+	"truncated": false,
+	"truncation": [],
+	"retentionFloor": "2026-10-13T12:00:04.000Z",
+	"generatedAt": "2026-10-16T12:00:00.012Z"
+}
+```
+
+Trails use the same reader and admission as search (one read in flight per
+caller, one executing at a time, so a trails read can delay other Activity reads,
+by about 600 ms plus one step, a few ms). One 600 ms wall-time budget inside
+the reader covers the scan and the check for older points. Both walk the window
+newest first in steps of at most 4,096 index rows, whatever the filters match,
+and read the clock between statements and before every row: the scan stops at
+450 ms, leaving 150 ms for the check, and the check stops at 600 ms; the step in
+progress finishes first (measured worst on the development Mac: 452 ms for
+`protocols=ais` over 24 hours of 1,000,000 mostly ADS-B rows). When either runs
+out the response is a normal 200 with the newest rows read so far,
+`truncated: true` and `time-limit` in `truncation` (after the four bounds
+above). Trails the check resolved keep an exact flag; trails it had no time to
+check are marked `truncated: true`, so with `time-limit` a `true` flag means "may
+have lost older points" while `false` stays exact. A filtered read over a long,
+busy window can reach `time-limit` before it reaches older matching rows. Narrow
+the window or the filters to see older points. The 1,000 ms reader deadline
+(instead of search's 250 ms) is only a backstop: a read that passes it answers 429
+`ACTIVITY_QUERY_TIMEOUT` with no partial result, and the reader worker is stopped
+and a new one starts for the next query (within the reader's 5 s startup budget).
+Errors are those of [Query and cursor errors](#query-and-cursor-errors).
+
 ### GET /api/activity/:eventId
 
 One stored record: `kind`, decimal `commitSeq`, and `payload` (the envelope,
@@ -3147,8 +3501,8 @@ From WG3 `stats` also has two optional fields (older cores omit them):
 
 ### Query and cursor errors
 
-The reader worker has its own 5 s startup budget. The 250 ms deadline starts
-only after the reader is ready. A reader that cannot start is
+The reader worker has its own 5 s startup budget. The 250 ms deadline (1,000 ms
+for trails) starts only after the reader is ready. A reader that cannot start is
 `ACTIVITY_QUERY_FAILED`.
 
 | Code                         | HTTP | When |
@@ -3156,12 +3510,12 @@ only after the reader is ready. A reader that cannot start is
 | `ACTIVITY_DISABLED`          | 404  | `activity.enabled` is false |
 | `NOT_FOUND`                  | 404  | Detail id is not in the store |
 | `ACTIVITY_UNAVAILABLE`       | 503  | Enabled, but the store did not open. `reason` says why |
-| `ACTIVITY_QUERY_INVALID`     | 400  | Bad query, facet list, event id or subscribe message |
+| `ACTIVITY_QUERY_INVALID`     | 400  | Bad query, trails window or timestamp, facet list, event id or subscribe message |
 | `ACTIVITY_CURSOR_INVALID`    | 400  | Cursor does not verify. `reason`: `invalid-cursor` |
 | `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
 | `ACTIVITY_CURSOR_GAP`        | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
 | `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
-| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms) after the reader was ready |
+| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms; 1,000 ms for trails) after the reader was ready |
 | `ACTIVITY_QUERY_FAILED`      | 500  | The reader did not start, the reader failed, or the store read failed |
 | `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
 | `ACTIVITY_RECORD_CORRUPT`    | 500  | A stored record failed validation |

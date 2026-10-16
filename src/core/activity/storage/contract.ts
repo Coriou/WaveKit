@@ -351,7 +351,54 @@ export interface ActivityQueryService {
 		input: ActivityReplayRequest,
 		sink: ActivityReplaySink,
 	): ActivityReplayHandle
+	/** WG4 bulk position trails (docs/specs/web-gaps-4, requirement 1). */
+	trails(input: ActivityTrailsQuery): Promise<ActivityTrails>
 	close(): Promise<void>
+}
+
+/** WG4: identical copies of the api-types trails DTOs (wg4-contract test asserts identity). */
+export interface ActivityTrailsQuery {
+	producedFrom?: string
+	producedTo?: string
+	categories?: readonly ActivityCategory[]
+	protocols?: readonly string[]
+	entityKeys?: readonly string[]
+}
+
+export type ActivityTrailPoint = readonly [
+	producedAtMs: number,
+	lat: number,
+	lon: number,
+	altM: number | null,
+]
+
+export interface ActivityTrail {
+	entityKey: string
+	category: ActivityCategory
+	protocol: string | null
+	points: readonly ActivityTrailPoint[]
+	truncated: boolean
+}
+
+export type ActivityTrailsTruncation =
+	| "scan-rows"
+	| "points"
+	| "entities"
+	| "per-entity"
+	/** WG4: the read's wall-time budget stopped the scan (additive, after the four bounds). */
+	| "time-limit"
+
+export interface ActivityTrails {
+	producedFrom: string
+	producedTo: string
+	trails: readonly ActivityTrail[]
+	pointCount: number
+	scannedRows: number
+	skippedRows: number
+	truncated: boolean
+	truncation: readonly ActivityTrailsTruncation[]
+	retentionFloor: string | null
+	generatedAt: string
 }
 
 export interface ActivitySearchRequest {

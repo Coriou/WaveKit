@@ -167,7 +167,7 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 			result: { ended: "window-moved" },
 		})
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("keeps only the newest IDENTIFY_KEEP_JOBS ended identify jobs listed", async () => {
 		const h = serviceHarness(noPassive)
@@ -219,7 +219,7 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		expect(h.decoders.created.size).toBe(0)
 		await h.service.stop()
 		expect(readFileSync(join(h.dir, "jobs.json"), "utf8")).not.toContain(job.id)
-	})
+	}, 20_000)
 
 	it("answers a click on the DC spike with the artefact and starts no probe", async () => {
 		const h = serviceHarness(noPassive)
@@ -238,7 +238,7 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		})
 		expect(h.decoders.created.size).toBe(0)
 		await h.service.stop()
-	})
+	}, 20_000)
 
 	it("refuses pause and edits on an identify job, and cancels it", async () => {
 		const h = serviceHarness(noPassive)

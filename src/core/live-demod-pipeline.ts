@@ -6,7 +6,7 @@
  *   front: capture IQ → float → [shift offsetHz to DC] → channel firdecimate
  *          (complex float32 channel IQ at the demod rate)
  *   Node:  channel-power squelch (zeros the IQ while closed)
- *   back:  demodulate → [de-emphasis] → [low-pass] → dcblock → gain → limit
+ *   back:  demodulate → [de-emphasis] → [agc] → [low-pass] → dcblock → gain → limit
  *          → [s16] [| sox high/low-pass]
  *
  * Squelching on channel IQ is the only place a dBFS threshold means anything;
@@ -31,6 +31,27 @@ export const DEFAULT_IQ_SAMPLE_RATE = 2_400_000
 
 /** AGC target ahead of the audio gain: the default gain 2 lands at 0.8. */
 const AGC_REFERENCE = 0.4
+
+export type LiveDemodAgcMode = NonNullable<LiveDemodConfig["agc"]>
+
+/**
+ * Effective AGC mode of the live chain. Raw never gets AGC; absent `agc`
+ * keeps the modulation default (fast for AM family and SSB, off for FM).
+ */
+export function effectiveAgc(
+	modulation: LiveDemodConfig["modulation"],
+	agc?: LiveDemodAgcMode,
+): LiveDemodAgcMode {
+	if (modulation === "raw") return "off"
+	if (agc !== undefined) return agc
+	return modulation === "nfm" || modulation === "wfm" ? "off" : "fast"
+}
+
+function agcStage(mode: LiveDemodAgcMode): string | null {
+	return mode === "off"
+		? null
+		: `csdr agc -f float -p ${mode} -r ${AGC_REFERENCE}`
+}
 
 export interface FilterSettings {
 	lowPass: number
@@ -160,14 +181,13 @@ export function planLiveDemodPipeline(
 
 	const filters = resolveLiveDemodFilters(config, channelSampleRate)
 	const backStages: string[] = []
+	const agc = agcStage(effectiveAgc(config.modulation, config.agc))
 	switch (config.modulation) {
 		case "am":
 		case "cw":
 		case "dsb":
-			backStages.push(
-				"csdr amdemod",
-				`csdr agc -f float -p fast -r ${AGC_REFERENCE}`,
-			)
+			backStages.push("csdr amdemod")
+			if (agc) backStages.push(agc)
 			break
 		case "usb":
 		case "lsb": {
@@ -180,8 +200,8 @@ export function planLiveDemodPipeline(
 			backStages.push(
 				`csdr bandpass --fft --low ${low.toFixed(4)} --high ${high.toFixed(4)} 0.05`,
 				"csdr realpart",
-				`csdr agc -f float -p fast -r ${AGC_REFERENCE}`,
 			)
+			if (agc) backStages.push(agc)
 			break
 		}
 		case "raw":
@@ -200,6 +220,7 @@ export function planLiveDemodPipeline(
 				)
 				backStages.push(deemphasis.stage)
 			}
+			if (agc) backStages.push(agc)
 			break
 		}
 	}

@@ -35,6 +35,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-3](web-gaps-3/requirements.md): fair-share Activity retention and the hole
   contract, RF provenance on receptions, Meshtastic flood copies, coverage per bearing,
   Meshtastic telemetry and neighbours (WG3)
+- [web-gaps-4](web-gaps-4/requirements.md): bulk position trails, approximate station
+  location, storage report, live-audio AGC, AIS channel, Meshtastic fix time, SDR host
+  version, station write layer (WG4)
 
 ## The three files
 

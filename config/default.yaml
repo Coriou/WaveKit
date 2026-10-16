@@ -309,6 +309,10 @@ tuner:
 #                             # DC (tune the dongle a few kHz off the carrier to
 #                             # keep the receiver's DC spike out of the channel)
 #   iqDcBlock: false          # deprecated, ignored (it corrupted I/Q)
+#   agc: "fast"               # off | slow | fast; omit for the modulation
+#                             # default: AM/CW/DSB/USB/LSB fast, NFM/WFM/raw
+#                             # none. On NFM/WFM, slow or fast adds AGC after
+#                             # de-emphasis; raw never gets AGC
 #
 liveDemod:
   enabled: false
@@ -776,7 +780,10 @@ csdr:
 access:
   mode: legacy
 
-# Optional operator station identity (no geolocation or decoder effects).
+# Optional operator station identity. lat/lon (both set) go to readsb as
+# --lat/--lon and are the coverage origin. A field set here or by env is pinned:
+# PATCH /api/station (protected mode) may set only unset fields, stored in
+# <stateDir>/station.json. Coordinates never determine the country.
 # station:
 #   name: Home
 #   lat: 48.8566

@@ -5,7 +5,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import * as fc from "fast-check"
 import type { MeshNode } from "@wavekit/api-types"
-import { formatNodeId, MeshTracker } from "../../../src/core/mesh-tracker.js"
+import {
+	fixTimeIso,
+	formatNodeId,
+	MeshTracker,
+} from "../../../src/core/mesh-tracker.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import {
 	encodePosition,
@@ -300,6 +304,33 @@ describe("MeshTracker properties", () => {
 				},
 			),
 			{ numRuns: 100 },
+		)
+	})
+})
+
+// Feature: web-gaps-4, Property 8: Mesh fix time
+// Validates: Requirements 5.3
+describe("fixTimeIso property", () => {
+	it("is an ISO of timeS exactly when integer, positive and inside the window", () => {
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 1_600_000_000_000, max: 2_000_000_000_000 }),
+				fc.oneof(
+					fc.integer({ min: -10, max: 2_100_000_000 }),
+					fc.double({ noDefaultInfinity: false }),
+				),
+				(atMs, timeS) => {
+					const expected =
+						Number.isInteger(timeS) &&
+						timeS > 0 &&
+						atMs - 7 * 86400000 <= timeS * 1000 &&
+						timeS * 1000 <= atMs + 60000
+							? new Date(timeS * 1000).toISOString()
+							: null
+					expect(fixTimeIso(timeS, atMs)).toBe(expected)
+				},
+			),
+			{ numRuns: 200 },
 		)
 	})
 })

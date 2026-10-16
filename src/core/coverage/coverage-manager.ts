@@ -115,6 +115,17 @@ export class CoverageManager {
 		return this.tracker.query(this.now(), protocol)
 	}
 
+	/** Delegates to the tracker; on a clear the per-entity dedupe maps are reset too. */
+	setStation(next: { lat: number; lon: number } | null): { cleared: boolean } {
+		const result = this.tracker.setStation(next)
+		if (result.cleared) {
+			this.lastAircraft.clear()
+			this.lastVessel.clear()
+			this.lastAircraftPos.clear()
+		}
+		return result
+	}
+
 	observeAircraft(state: AircraftState): void {
 		const pos = state.position
 		if (!pos) return

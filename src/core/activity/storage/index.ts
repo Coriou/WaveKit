@@ -30,6 +30,11 @@ export type {
 	ActivityStoreHandle,
 	ActivityStoreStats,
 	AdmitRejection,
+	ActivityTrail,
+	ActivityTrailPoint,
+	ActivityTrails,
+	ActivityTrailsQuery,
+	ActivityTrailsTruncation,
 	AdmitResult,
 	StoreIdentity,
 } from "./contract.js"

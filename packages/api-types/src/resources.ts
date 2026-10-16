@@ -123,6 +123,12 @@ export interface SdrHostStatus {
 
 	/** Error message if last fetch failed */
 	fetchError: string | null
+
+	/**
+	 * WG4: version reported by the SDR host (printable, at most 64 characters); null when the
+	 * host omits it or sends anything else. Absent on older cores.
+	 */
+	version?: string | null
 }
 
 // ============================================================================

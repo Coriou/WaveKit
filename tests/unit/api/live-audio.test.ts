@@ -114,6 +114,47 @@ describe("Live Audio Routes", () => {
 		}
 	})
 
+	it("accepts agc values, null, and rejects invalid agc", async () => {
+		for (const agc of ["off", "slow", "fast", null]) {
+			mockLiveDemod.reconfigure.mockClear()
+			const response = await app.inject({
+				method: "PATCH",
+				url: "/api/live-audio/config",
+				payload: { agc },
+			})
+			expect(response.statusCode).toBe(200)
+			expect(mockLiveDemod.reconfigure).toHaveBeenCalledWith({ agc })
+		}
+		const bad = await app.inject({
+			method: "PATCH",
+			url: "/api/live-audio/config",
+			payload: { agc: "medium" },
+		})
+		expect(bad.statusCode).toBe(400)
+	})
+
+	it("exposes agc in status and omits config.agc when unset", async () => {
+		const status = mockLiveDemod.getStatus() as LiveDemodStatus & {
+			agc?: string
+		}
+		mockLiveDemod.getStatus.mockReturnValue({ ...status, agc: "off" })
+		let body = JSON.parse(
+			(await app.inject({ method: "GET", url: "/api/live-audio/status" })).body,
+		) as { agc?: string; config: { agc?: string } }
+		expect(body.agc).toBe("off")
+		expect("agc" in body.config).toBe(false)
+		mockLiveDemod.getStatus.mockReturnValue({
+			...status,
+			agc: "slow",
+			config: { ...status.config, agc: "slow" },
+		})
+		body = JSON.parse(
+			(await app.inject({ method: "GET", url: "/api/live-audio/status" })).body,
+		) as { agc?: string; config: { agc?: string } }
+		expect(body.agc).toBe("slow")
+		expect(body.config.agc).toBe("slow")
+	})
+
 	it("POST /api/live-audio/start starts the pipeline", async () => {
 		const response = await app.inject({
 			method: "POST",

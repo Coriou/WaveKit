@@ -43,6 +43,7 @@ const sdrHostStatusSchema = {
 		available: { type: "boolean" },
 		sourceId: { type: "string" },
 		apiUrl: { type: "string" },
+		version: { type: ["string", "null"] },
 		uptime: { type: ["number", "null"] },
 		rtlTcp: {
 			type: ["object", "null"],

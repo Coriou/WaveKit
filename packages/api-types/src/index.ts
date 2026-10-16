@@ -21,9 +21,25 @@ export * from "./vessels.js"
 export * from "./aprs.js"
 export * from "./mesh.js"
 export * from "./coverage.js"
+export * from "./storage.js"
 
 export type {
+	StationEstimate,
+	StationEstimateBasis,
+	StationEstimateUnavailableReason,
+	StationErrorBody,
+	StationErrorCode,
+	StationField,
 	StationIdentity,
 	StationProvenance,
+	StationUpdate,
+	StationUpdateResult,
 	StationValue,
+} from "./station.js"
+export {
+	STATION_ESTIMATE_CACHE_MS,
+	STATION_ESTIMATE_MIN_UNCERTAINTY_KM,
+	STATION_ESTIMATE_ROUNDING_DEG,
+	STATION_ESTIMATE_UNCERTAINTY_STEP_KM,
+	STATION_FIELDS,
 } from "./station.js"

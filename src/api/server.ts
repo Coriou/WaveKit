@@ -13,6 +13,8 @@
 
 import type { StationIdentity } from "@wavekit/api-types"
 import { stationRoutes } from "./routes/station.js"
+import { stationEstimateRoutes } from "./routes/station-estimate.js"
+import { storageRoutes } from "./routes/storage.js"
 import type { FanoutTelemetryProvider } from "../core/source-fanout-router.js"
 import Fastify, { type FastifyInstance, type FastifyError } from "fastify"
 import fastifyCors from "@fastify/cors"
@@ -60,6 +62,9 @@ import { vesselRoutes } from "./routes/vessels.js"
 import { meshRoutes } from "./routes/mesh.js"
 import { coverageRoutes } from "./routes/coverage.js"
 import type { CoverageManager } from "../core/coverage/coverage-manager.js"
+import type { StationEstimateProvider } from "../core/station-estimate/contract.js"
+import type { StationService } from "../core/station/contract.js"
+import type { StorageReportProvider } from "../core/storage-report/contract.js"
 import { aprsRoutes } from "./routes/aprs.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
@@ -171,6 +176,18 @@ export interface ApiServerDependencies {
 	meshTracker?: MeshTracker | undefined
 	/** ADS-B and AIS coverage per bearing (WG3 req 7). */
 	coverage?: Pick<CoverageManager, "query"> | undefined
+	/**
+	 * WG4 slots (docs/specs/web-gaps-4): accepted but not mounted until each lane merges.
+	 * GET /api/storage (req 3).
+	 */
+	storageReport?: StorageReportProvider | undefined
+	/** WG4: GET /api/station/estimate (req 2). */
+	stationEstimate?: StationEstimateProvider | undefined
+	/**
+	 * WG4: live station identity and PATCH /api/station (req 6). PATCH mounts with the access
+	 * controller only while STATION_WRITE_REQUIRES_ACCESS is true.
+	 */
+	stationService?: StationService | undefined
 	/** APRS station, object and item current state (WG2 req 4). */
 	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
@@ -192,6 +209,9 @@ export interface ApiServerDependencies {
  */
 export class ApiServer {
 	private readonly station: StationIdentity | undefined
+	private readonly stationEstimate: StationEstimateProvider | undefined
+	private readonly stationService: StationService | undefined
+	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
 	private readonly bandPlans: BandPlanService | undefined
 	private readonly receiverCapabilitiesProvider:
@@ -255,6 +275,9 @@ export class ApiServer {
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.station = dependencies.station
+		this.stationEstimate = dependencies.stationEstimate
+		this.stationService = dependencies.stationService
+		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
 		this.bandPlans = dependencies.bandPlans
 		this.receiverCapabilitiesProvider =
@@ -1268,8 +1291,27 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		// PATCH mounts with the service and, while STATION_WRITE_REQUIRES_ACCESS, only with
+		// the access controller (protected mode), like the band-plan mutations.
 		if (this.station)
-			await this.app.register(stationRoutes, { station: this.station })
+			await this.app.register(stationRoutes, {
+				station: this.station,
+				...(this.stationService ? { service: this.stationService } : {}),
+				...(this.accessController
+					? {
+							authorizeMutation: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
+			})
+		// Absolute path plugin, mounted without a prefix like the station route
+		if (this.stationEstimate !== undefined)
+			await this.app.register(stationEstimateRoutes, {
+				estimate: this.stationEstimate,
+			})
+		// GET /api/storage under root admission, like the other read routes
+		if (this.storageReport !== undefined)
+			await this.app.register(storageRoutes, { report: this.storageReport })
 		// These child plugins inherit normal root admission in both access modes.
 		// Providers are borrowed; the composing runtime owns receiver disposal.
 		if (this.regionalRegistry !== undefined)
