@@ -34,8 +34,11 @@ export const DEFAULT_MEASURER_JIT_WARMUP = 64
 export const DEFAULT_MEASURER_WARMUP = 2
 export const DEFAULT_MEASURER_ITERATIONS = 16
 
-/** Thrown inside the default measurer when the bench wall budget is reached. */
-class BenchOvertime extends Error {}
+/** Thrown inside the bench when the wall budget is reached or a clock reading is invalid. */
+class BenchAbort extends Error {}
+
+/** Elapsed ms since the bench start; throws `BenchAbort` on an invalid reading. */
+type BenchClock = () => number
 
 /** Median of per-summary times: robust to one-off preemption or GC pauses on a loaded host. */
 function median(xs: Float64Array): number {
@@ -108,7 +111,7 @@ function profileWork(
 
 /** One summary through the hot path; returns [transfer ms, profile ms] via `out`. */
 function oneSummary(
-	now: () => number,
+	clock: BenchClock,
 	b: {
 		src: Float64Array
 		wire: Int16Array
@@ -118,14 +121,16 @@ function oneSummary(
 	jitter: number,
 	out: Float64Array,
 ): number {
-	const t0 = now()
+	const t0 = clock()
 	encodeInt16(b.src, b.wire, jitter)
 	const cloned = structuredClone(b.wire.buffer)
-	const t1 = now()
+	const t1 = clock()
 	const sink = profileWork(new Int16Array(cloned), b.held, b.u8)
-	const t2 = now()
+	const t2 = clock()
 	out[0] = t1 - t0
 	out[1] = t2 - t1
+	// A clock that steps backwards gives a negative duration: the median would hide it.
+	for (const d of out) if (!Number.isFinite(d) || d < 0) throw new BenchAbort()
 	return sink + cloned.byteLength
 }
 
@@ -154,9 +159,10 @@ function buffers(bins: number): {
  * up, and the running service is always warm), then per candidate runs
  * `DEFAULT_MEASURER_WARMUP` untimed and `DEFAULT_MEASURER_ITERATIONS` timed summaries and takes
  * the median. Buffers are allocated once per candidate. The clock is checked before every
- * summary; past `deadline` it throws `BenchOvertime`, which the resolver turns into fallback.
+ * summary; past `benchWallMs`, or on any invalid clock reading or duration, it throws
+ * `BenchAbort`, which the resolver turns into fallback.
  */
-function defaultMeasurer(now: () => number, deadline: number): BinsCapMeasurer {
+function defaultMeasurer(clock: BenchClock): BinsCapMeasurer {
 	let warmed = false
 	const times = new Float64Array(2)
 	let sink = 0
@@ -166,8 +172,8 @@ function defaultMeasurer(now: () => number, deadline: number): BinsCapMeasurer {
 		record?: (k: number) => void,
 	): void => {
 		for (let k = 0; k < count; k++) {
-			if (now() > deadline) throw new BenchOvertime()
-			sink += oneSummary(now, b, k & 1, times)
+			if (clock() > SPECTRUM_BINS_BUDGET.benchWallMs) throw new BenchAbort()
+			sink += oneSummary(clock, b, k & 1, times)
 			record?.(k)
 		}
 	}
@@ -209,19 +215,20 @@ export function resolveSpectrumBinsCap(
 			wallMs: 0,
 		}
 	const measurements: BinsCostSample[] = []
-	let now: () => number = () => performance.now()
+	const now: () => number = options?.now ?? (() => performance.now())
 	let start = 0
-	let started = false
+	/** Last valid elapsed reading; what every fallback reports. */
 	let wallMs = 0
-	/** Elapsed since `start`, or the last known finite value when the clock throws or is not finite. */
-	const elapsed = (): number => {
-		try {
-			const t = now() - start
-			if (Number.isFinite(t) && t >= 0) wallMs = t
-		} catch {
-			// keep the last known wallMs
-		}
-		return wallMs
+	/**
+	 * The only clock read after the start: elapsed since `start`, recorded as `wallMs`. A reading
+	 * that throws, is not finite, or goes before the start throws `BenchAbort` (fallback with
+	 * the last valid `wallMs`).
+	 */
+	const clock: BenchClock = () => {
+		const t = now() - start
+		if (!Number.isFinite(t) || t < 0) throw new BenchAbort()
+		wallMs = t
+		return t
 	}
 	const fallback = (): SpectrumBinsCapResult => ({
 		setting,
@@ -231,19 +238,14 @@ export function resolveSpectrumBinsCap(
 		wallMs,
 	})
 	try {
-		if (options?.now) now = options.now
 		start = now()
-		started = Number.isFinite(start)
-		const measure =
-			options?.measure ??
-			defaultMeasurer(now, start + SPECTRUM_BINS_BUDGET.benchWallMs)
+		if (!Number.isFinite(start)) return fallback()
+		const measure = options?.measure ?? defaultMeasurer(clock)
 		for (const bins of AUTO_CANDIDATES) {
 			const raw: unknown = measure(bins, DEFAULT_SUMMARY_HZ)
-			const t = now() - start
-			if (Number.isFinite(t) && t >= 0) wallMs = t
-			if (!Number.isFinite(t) || t > SPECTRUM_BINS_BUDGET.benchWallMs)
-				return fallback()
+			// Snapshot first: its getter reads are part of the measurement and its wall time.
 			const sample = snapshot(raw, bins)
+			if (clock() > SPECTRUM_BINS_BUDGET.benchWallMs) return fallback()
 			if (!sample) return fallback()
 			measurements.push(sample)
 			if (passes(sample))
@@ -257,7 +259,6 @@ export function resolveSpectrumBinsCap(
 			wallMs,
 		}
 	} catch {
-		if (started) elapsed()
 		return fallback()
 	}
 }

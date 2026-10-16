@@ -31,6 +31,9 @@ const table =
 	(costs: Record<number, Partial<BinsCostSample>>): BinsCapMeasurer =>
 	bins => ({ ...ok(bins), ...costs[bins] })
 
+/** Fixed clock: deterministic tests never depend on real elapsed time. */
+const now = (): number => 0
+
 const fits = (s: BinsCostSample): boolean =>
 	DIMS.every(k => s[k] * B.margin <= B[k])
 
@@ -109,6 +112,7 @@ describe("resolveSpectrumBinsCap", () => {
 
 	it.each(DIMS)("%s failing alone at 8192 gives 4096", dim => {
 		const res = resolveSpectrumBinsCap("auto", {
+			now,
 			measure: table({ 8192: { [dim]: limit[dim] * 1.01 } }),
 		})
 		expect(res).toMatchObject({ cap: 4096, source: "measured" })
@@ -119,6 +123,7 @@ describe("resolveSpectrumBinsCap", () => {
 		const bad = { [dim]: limit[dim] * 1.01 }
 		expect(
 			resolveSpectrumBinsCap("auto", {
+				now,
 				measure: table({ 8192: bad, 4096: bad }),
 			}),
 		).toMatchObject({
@@ -134,12 +139,13 @@ describe("resolveSpectrumBinsCap", () => {
 			profileMsPerSecond: 5 / 1.5,
 		}
 		expect(
-			resolveSpectrumBinsCap("auto", { measure: table({ 8192: at }) }).cap,
+			resolveSpectrumBinsCap("auto", { now, measure: table({ 8192: at }) }).cap,
 		).toBe(8192)
 		for (const dim of DIMS) {
 			const past = { ...at, [dim]: at[dim] * (1 + 1e-9) }
 			expect(
-				resolveSpectrumBinsCap("auto", { measure: table({ 8192: past }) }).cap,
+				resolveSpectrumBinsCap("auto", { now, measure: table({ 8192: past }) })
+					.cap,
 			).toBe(4096)
 		}
 	})
@@ -160,7 +166,7 @@ describe("resolveSpectrumBinsCap", () => {
 		["negative", (b: number) => ({ ...ok(b), cloneMsPerSecond: -1 })],
 		["wrong bins", (b: number) => ok(b + 1)],
 	] as [string, BinsCapMeasurer][])("%s gives fallback", (_n, measure) => {
-		expect(resolveSpectrumBinsCap("auto", { measure })).toMatchObject({
+		expect(resolveSpectrumBinsCap("auto", { now, measure })).toMatchObject({
 			cap: 2048,
 			source: "fallback",
 		})
@@ -257,6 +263,57 @@ describe("resolveSpectrumBinsCap", () => {
 			}),
 		})
 		expect(nan).toMatchObject({ source: "fallback", wallMs: 40 })
+	})
+
+	it("overtime spent in sample getters (during snapshot) gives fallback", () => {
+		let t = 0
+		const res = resolveSpectrumBinsCap("auto", {
+			now: () => t,
+			measure: bins => ({
+				bins,
+				summaryBytesPerSecond: 0,
+				cloneMsPerSecond: 0,
+				get profileMsPerSecond() {
+					t = B.benchWallMs + 1
+					return 0
+				},
+			}),
+		})
+		expect(res).toMatchObject({
+			cap: 2048,
+			source: "fallback",
+			wallMs: B.benchWallMs + 1,
+		})
+	})
+
+	it("default measurer: one NaN clock reading mid-bench gives fallback", () => {
+		let calls = 0
+		const res = resolveSpectrumBinsCap("auto", {
+			now: () => (++calls === 268 ? NaN : 0),
+		})
+		expect(calls).toBeGreaterThanOrEqual(268)
+		expect(res).toMatchObject({ cap: 2048, source: "fallback", wallMs: 0 })
+	})
+
+	it("default measurer: a clock stepping backwards gives fallback", () => {
+		let calls = 0
+		const res = resolveSpectrumBinsCap("auto", {
+			now: () => (++calls === 268 ? 5 : 10),
+		})
+		expect(res).toMatchObject({ cap: 2048, source: "fallback" })
+	})
+
+	it("default measurer: clock 0, 30, then throwing gives fallback with wallMs 30", () => {
+		let calls = 0
+		const res = resolveSpectrumBinsCap("auto", {
+			now: () => {
+				calls++
+				if (calls === 1) return 0
+				if (calls === 2) return 30
+				throw new Error("clock")
+			},
+		})
+		expect(res).toMatchObject({ cap: 2048, source: "fallback", wallMs: 30 })
 	})
 
 	it("default measurer stops on overtime and falls back", () => {
