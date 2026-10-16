@@ -1,3 +1,4 @@
+import type { ActivityRetentionPolicy } from "./contract.js"
 import { ActivityUnavailableError } from "./errors.js"
 
 /**
@@ -40,9 +41,27 @@ export interface ActivityLimits {
 	positionCoalesceMs: number
 	/** Entities tracked for coalescing; the least recently stored are evicted. */
 	positionCoalesceMaxEntities: number
+	/**
+	 * Which rows the row and byte caps remove (web-gaps-3 req 1.1). Age pruning is the
+	 * same prefix prune under both policies.
+	 */
+	retentionPolicy: ActivityRetentionPolicy
 }
 
 const MiB = 1024 * 1024
+
+/**
+ * PROVISIONAL (web-gaps-3 req 1.1): fair-share is the default pending the user's decision;
+ * flipping it to "oldest-first" is this one line. Caps, admission and `activity.enabled`
+ * are unchanged by either value.
+ */
+export const ACTIVITY_RETENTION_POLICY_DEFAULT: ActivityRetentionPolicy =
+	"fair-share"
+
+export const ACTIVITY_RETENTION_POLICIES: readonly ActivityRetentionPolicy[] = [
+	"fair-share",
+	"oldest-first",
+]
 
 /** One stored position-only update per aircraft or vessel per minute (WG1 req 7.6). */
 export const ACTIVITY_POSITION_COALESCE_MS = 60_000
@@ -86,11 +105,14 @@ export const ACTIVITY_LIMIT_DEFAULTS: Readonly<ActivityLimits> = Object.freeze({
 	gapMaxIntervalMs: 60_000,
 	positionCoalesceMs: ACTIVITY_POSITION_COALESCE_MS,
 	positionCoalesceMaxEntities: 20_000,
+	retentionPolicy: ACTIVITY_RETENTION_POLICY_DEFAULT,
 })
 
-const LIMIT_KEYS = Object.keys(
-	ACTIVITY_LIMIT_DEFAULTS,
-) as (keyof ActivityLimits)[]
+type NumericLimitKey = Exclude<keyof ActivityLimits, "retentionPolicy">
+
+const LIMIT_KEYS = (
+	Object.keys(ACTIVITY_LIMIT_DEFAULTS) as (keyof ActivityLimits)[]
+).filter((key): key is NumericLimitKey => key !== "retentionPolicy")
 
 /** Token math stores micro-tokens. Bursts above this overflow Number.MAX_SAFE_INTEGER. */
 const MAX_BURST = Math.floor(Number.MAX_SAFE_INTEGER / 1_000_000)
@@ -104,7 +126,11 @@ export function resolveActivityLimits(
 			const value = overrides[key]
 			if (value !== undefined) limits[key] = value
 		}
+		if (overrides.retentionPolicy !== undefined)
+			limits.retentionPolicy = overrides.retentionPolicy
 	}
+	if (!ACTIVITY_RETENTION_POLICIES.includes(limits.retentionPolicy))
+		throw new ActivityUnavailableError("Invalid activity retention policy")
 	for (const key of LIMIT_KEYS) {
 		const value = limits[key]
 		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)

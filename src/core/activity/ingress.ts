@@ -3,7 +3,11 @@ import type { DecoderOutput } from "../../decoders/types.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { createDecodeEnvelope, withPresentation } from "./envelope.js"
 import { presentDecoderOutputResult } from "./presentation/registry.js"
-import type { DecodeEnvelope, DecodeEnvelopeContext } from "./types.js"
+import type {
+	ActivityProvenanceLookup,
+	DecodeEnvelope,
+	DecodeEnvelopeContext,
+} from "./types.js"
 
 const LOG_INTERVAL_MS = 60_000
 
@@ -43,6 +47,11 @@ export interface ActivityIngressOptions {
 	logger: Logger
 	now?: () => Date
 	randomUUID?: () => string
+	/**
+	 * WG3 (web-gaps-3 req 5): decoder binding lookup for RF provenance. Null or omitted keeps
+	 * today's `{ sourceId: null, frequency: null }`. Frozen stub: lane P implements its use.
+	 */
+	resolveProvenance?: ActivityProvenanceLookup | null
 }
 
 /**

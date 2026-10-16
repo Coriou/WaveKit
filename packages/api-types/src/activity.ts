@@ -308,6 +308,42 @@ export interface ActivityStoreStats {
 	paused: boolean
 	/** `stopped` after the writer exits or a write times out. No restart in this batch. */
 	writer: "running" | "stopped"
+	/** WG3: retention policy and per-share usage. Optional for older cores. */
+	retention?: ActivityRetentionStats
+	/** WG3: Meshtastic flood copies not stored (not a loss). Optional for older cores. */
+	floodCopies?: number
+}
+
+/**
+ * WG3 retention policy. `fair-share` water-fills the row and byte caps across shares (decoder
+ * feeds); `oldest-first` removes the oldest rows of all feeds alike. Age pruning is the same.
+ */
+export type ActivityRetentionPolicy = "fair-share" | "oldest-first"
+
+/** One share: `decoder:<decoderId>`, or `kind:<kind>` for rows without a decoder. */
+export interface ActivityRetentionShare {
+	key: string
+	rows: number
+	/** Sum of stored record bytes (not on-disk bytes). */
+	bytes: number
+	/** ISO receivedAt of the share's oldest stored row; null when unknown. */
+	oldestReceivedAt: string | null
+}
+
+export interface ActivityRetentionStats {
+	/** The configured policy. */
+	policy: ActivityRetentionPolicy
+	/** The policy in force: `oldest-first` when fair-share fell back for this session. */
+	effective: ActivityRetentionPolicy
+	/** Largest first by rows, then key ascending; at most 64. */
+	shares: readonly ActivityRetentionShare[]
+	/** True when more than 64 shares exist. */
+	sharesTruncated: boolean
+	/**
+	 * Cap steps this session that removed an oldest-first prefix because no share was above
+	 * the fair level (req 1.12). 0 under `oldest-first`.
+	 */
+	prefixFallbackSteps: number
 }
 
 /** Client → server. `cursor` omitted starts live at the current committed max. */

@@ -1,7 +1,8 @@
 /**
  * Meshtastic node current state (WG2, docs/specs/web-gaps-2, requirements 5–6):
  * GET /api/mesh/nodes, /api/mesh/nodes/:nodeId, /api/mesh/stats and the `mesh` WebSocket
- * channel. In-memory only; no position history, telemetry or links.
+ * channel. In-memory only; no position history. WG3 (docs/specs/web-gaps-3, requirement 8)
+ * adds optional device telemetry (TELEMETRY_APP 67) and neighbour links (NEIGHBORINFO_APP 71).
  */
 
 export interface MeshPosition {
@@ -50,6 +51,39 @@ export interface MeshNode {
 	lastSeen: string
 	/** Last NODEINFO; null if none. */
 	lastNodeInfoAt: string | null
+	/** WG3: latest device metrics the node reported about itself; absent on older cores. */
+	telemetry?: MeshDeviceTelemetry | null
+	/**
+	 * WG3: neighbours from the node's latest NEIGHBORINFO report, at most 32, by nodeId
+	 * ascending; entries older than the node expiry (4 h) are dropped. Absent on older cores.
+	 */
+	neighbours?: MeshNeighbour[]
+}
+
+/** WG3: Telemetry.device_metrics (TELEMETRY_APP, port 67). Every metric is null when absent. */
+export interface MeshDeviceTelemetry {
+	/** 0-100 percent; null when absent or when the node reports external power. */
+	batteryPct: number | null
+	/** True when battery_level was above 100 (Meshtastic's "powered" convention). */
+	powered: boolean | null
+	voltageV: number | null
+	/** Percent of airtime the node hears as busy. */
+	channelUtilizationPct: number | null
+	/** Percent of airtime the node transmitted in the last hour. */
+	airUtilTxPct: number | null
+	uptimeS: number | null
+	/** ISO time the telemetry packet was received. */
+	at: string
+}
+
+/** WG3: one NeighborInfo.neighbors entry (NEIGHBORINFO_APP, port 71). */
+export interface MeshNeighbour {
+	/** `!` plus 8 lowercase hex digits; may be a node the tracker has not heard itself. */
+	nodeId: string
+	/** SNR at which the reporting node last heard this neighbour; null when absent. */
+	snrDb: number | null
+	/** ISO time of the report that carried this entry. */
+	at: string
 }
 
 export interface MeshTrackerStats {
@@ -67,6 +101,10 @@ export interface MeshTrackerStats {
 	latestNodeId: string | null
 	/** Nodes removed after maxAge (4 h) since start. */
 	expiredTotal: number
+	/** WG3: unique TELEMETRY_APP packets with device metrics applied. Absent on older cores. */
+	telemetryPackets?: number
+	/** WG3: unique NEIGHBORINFO_APP reports applied. Absent on older cores. */
+	neighbourReports?: number
 	timestamp: string
 }
 

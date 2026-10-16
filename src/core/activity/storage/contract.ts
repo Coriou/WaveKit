@@ -124,6 +124,13 @@ export type StoreMetaKey =
 	| "pruneWatermark"
 	| "pruneGeneration"
 	| "cursorKey"
+	/**
+	 * WG3 (web-gaps-3 req 3.1): greatest seq ever removed by a non-prefix (fair-share) delete;
+	 * "0" when none. Inserted OR IGNORE on open; schemaVersion stays 1.
+	 */
+	| "holeWatermark"
+	/** WG3 (req 3.2): increments once per transaction that opens a hole; "0" when none. */
+	| "holeGeneration"
 
 /**
  * v1 schema. The writer applies it inside one transaction on first open;
@@ -194,6 +201,13 @@ export interface StoreIdentity {
 	pruneGeneration: number
 	/** Greatest committed seq; "0" for an empty store. */
 	committedMax: string
+	/**
+	 * WG3 (web-gaps-3 req 3.1-3.5): greatest seq ever removed above pruneWatermark (a hole).
+	 * Decimal string. Absent or "0" on stores without holes; readers treat absent as "0".
+	 */
+	holeWatermark?: string
+	/** WG3: number of transactions that opened a hole. Absent means 0. */
+	holeGeneration?: number
 }
 
 /** Provided by the storage lane; consumed by the query lane and Main. */
@@ -237,6 +251,11 @@ export type AdmitRejection =
 	| "telemetry"
 	/** A position-only update inside its entity's coalescing window; counted, not a loss. */
 	| "coalesced"
+	/**
+	 * WG3 (web-gaps-3 req 6.1): a Meshtastic rebroadcast of an already kept `(from, id)` packet
+	 * inside the flood window; counted in `floodCopies`, not a loss.
+	 */
+	| "flood-copy"
 
 export type AdmitResult =
 	| { admitted: true }
@@ -263,6 +282,45 @@ export interface ActivityStoreStats {
 	paused: boolean
 	/** `stopped` after the writer exits or a write times out. No restart in this batch. */
 	writer: "running" | "stopped"
+	/** WG3 (req 2.1): retention policy and per-share usage. Absent until the writer reports it. */
+	retention?: ActivityRetentionStats
+	/** WG3 (req 6.6): Meshtastic flood copies not stored; not a loss. Absent on older cores. */
+	floodCopies?: number
+}
+
+/**
+ * WG3 retention policy (web-gaps-3 req 1). `fair-share` water-fills row and byte caps across
+ * shares; `oldest-first` is the pre-WG3 prefix prune.
+ */
+export type ActivityRetentionPolicy = "fair-share" | "oldest-first"
+
+/**
+ * One retention share (WG3 req 1.2): `decoder:<decoderId>` for rows with a decoder,
+ * `kind:<kind>` for rows without one.
+ */
+export interface ActivityRetentionShare {
+	key: string
+	rows: number
+	/** Sum of record_bytes. */
+	bytes: number
+	/** ISO receivedAt of the share's lowest-seq row; null when unknown. */
+	oldestReceivedAt: string | null
+}
+
+export interface ActivityRetentionStats {
+	/** The configured policy. */
+	policy: ActivityRetentionPolicy
+	/** The policy in force: `oldest-first` when fair-share fell back (req 1.11). */
+	effective: ActivityRetentionPolicy
+	/** Largest first by rows, then key ascending; at most 64. */
+	shares: readonly ActivityRetentionShare[]
+	/** True when more than 64 shares exist. */
+	sharesTruncated: boolean
+	/**
+	 * Cap steps this session that removed an oldest-first prefix because no share was above
+	 * the fair level (req 1.12). 0 under `oldest-first`.
+	 */
+	prefixFallbackSteps: number
 }
 
 /** Query filters shared by REST, facets and WS replay (query lane). */

@@ -20,6 +20,7 @@ export * from "./bandplans.js"
 export * from "./vessels.js"
 export * from "./aprs.js"
 export * from "./mesh.js"
+export * from "./coverage.js"
 
 export type {
 	StationIdentity,

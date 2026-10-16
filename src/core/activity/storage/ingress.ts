@@ -374,7 +374,10 @@ export class ActivityIngress {
 
 	private rejectEnvelope(
 		envelope: DecodeEnvelope,
-		reason: Exclude<AdmitRejection, "closed" | "telemetry" | "coalesced">,
+		reason: Exclude<
+			AdmitRejection,
+			"closed" | "telemetry" | "coalesced" | "flood-copy"
+		>,
 	): AdmitResult {
 		this.noteDrop(reason, envelope.receivedAt, envelope.decoderId, this.now())
 		return { admitted: false, reason }
@@ -383,7 +386,10 @@ export class ActivityIngress {
 	private rejectTransmission(
 		input: AnalogTransmissionAdmission,
 		bucket: string,
-		reason: Exclude<AdmitRejection, "closed" | "telemetry" | "coalesced">,
+		reason: Exclude<
+			AdmitRejection,
+			"closed" | "telemetry" | "coalesced" | "flood-copy"
+		>,
 	): AdmitResult {
 		this.noteDrop(reason, input.receivedAt, bucket, this.now())
 		return { admitted: false, reason }

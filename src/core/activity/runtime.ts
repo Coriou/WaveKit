@@ -8,10 +8,12 @@ import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ActivityQueryService } from "./storage/contract.js"
 import type {
+	ActivityRetentionPolicy,
 	ActivityStoreStats,
 	AnalogTransmissionPayload,
 } from "./storage/contract.js"
 import type { ActivityLimits } from "./storage/limits.js"
+import type { ActivityProvenanceLookup } from "./types.js"
 
 export type ActivityFailureCode =
 	| "ACTIVITY_UNAVAILABLE"
@@ -29,6 +31,8 @@ export interface ActivityRetentionOverrides {
 	maxRows?: number | undefined
 	maxDbBytes?: number | undefined
 	maxAgeMs?: number | undefined
+	/** WG3 (web-gaps-3 req 1.1); omitted keeps ACTIVITY_RETENTION_POLICY_DEFAULT. */
+	policy?: ActivityRetentionPolicy | undefined
 }
 
 export interface ActivityAdmissionOverrides {
@@ -94,6 +98,11 @@ export interface StartActivityRuntimeOptions {
 	probe?: () => Promise<{ ok: true } | { ok: false; reason: string }>
 	/** When false, failure logs carry the code only. */
 	discloseErrors?: boolean
+	/**
+	 * WG3 (web-gaps-3 req 5.2): decoder binding lookup for reception provenance, passed to
+	 * the ingress unchanged. Null or omitted keeps null provenance (pre-WG3 behaviour).
+	 */
+	resolveProvenance?: ActivityProvenanceLookup | null
 }
 
 /** Service that routes never call while Activity is disabled or unavailable. */
@@ -138,6 +147,7 @@ function mapLimits(
 	if (retention?.maxDbBytes !== undefined)
 		limits.maxDbBytes = retention.maxDbBytes
 	if (retention?.maxAgeMs !== undefined) limits.maxAgeMs = retention.maxAgeMs
+	if (retention?.policy !== undefined) limits.retentionPolicy = retention.policy
 	if (admission?.globalPerSecond !== undefined)
 		limits.globalRatePerSec = admission.globalPerSecond
 	if (admission?.globalBurst !== undefined)
@@ -314,6 +324,7 @@ export async function startActivityRuntime(
 				store.admit(envelope, present)
 			},
 			logger: options.logger,
+			resolveProvenance: options.resolveProvenance ?? null,
 		})
 		try {
 			options.setPublisher((decoderId, decoderType, output) => {

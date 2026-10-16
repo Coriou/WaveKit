@@ -745,9 +745,16 @@ csdr:
 # presence updates are stored once per entity per minute; first sightings,
 # identity changes, other fields and non-position AIS types are always
 # stored. N visible entities then add about N x 1440 rows a day: 300 fill the
-# 250_000-row cap in about 14 hours, and pruning is oldest-first for all
-# kinds. If node:sqlite is unusable the store reports "unavailable" and the
-# rest of WaveKit keeps running.
+# 250_000-row cap in about 14 hours. Age pruning (maxAgeMs) removes the oldest
+# rows of every feed. When the row or byte cap binds, retention.policy decides
+# which rows go: "fair-share" (default) removes the oldest rows of the
+# busiest decoder feeds first, so a feed below an equal share of the cap
+# (pages, APRS, mesh) keeps its rows until maxAgeMs and a busy ADS-B feed
+# holds the rest; "oldest-first"
+# removes the oldest rows of all feeds alike (the pre-WG3 behaviour). A
+# station with one feed behaves the same under both. If node:sqlite is
+# unusable the store reports "unavailable" and the rest of WaveKit keeps
+# running.
 # Disable with `activity: { enabled: false }` or
 # WAVEKIT_ACTIVITY__ENABLED=false.
 # activity:
@@ -756,6 +763,7 @@ csdr:
 #     maxRows: 250000
 #     maxDbBytes: 268435456
 #     maxAgeMs: 259200000
+#     policy: fair-share
 #   admission:
 #     globalPerSecond: 50
 #     globalBurst: 500
