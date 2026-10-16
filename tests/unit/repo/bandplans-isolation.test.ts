@@ -57,6 +57,8 @@ const ioOnlyImports = new Set([
 	"./storage.js",
 	"./service.js",
 	"./import/sdrpp.js",
+	"./import/sdrsharp.js",
+	"./import/gqrx.js",
 ])
 const ioModules = new Set(["index.ts", "service.ts", "storage.ts"])
 
