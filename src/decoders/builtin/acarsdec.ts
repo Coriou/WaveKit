@@ -24,6 +24,13 @@ import type {
 	DemodulationConfig,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import {
+	createOptionWarner,
+	readNumericArrayOption,
+	readNumericOption,
+	type NumericOptionWarn,
+} from "../option-values.js"
+import { ACARSDEC_BOUNDS } from "../options/acarsdec.js"
 
 /**
  * Configuration options for the ACARS decoder.
@@ -107,10 +114,14 @@ interface AcarsdecJsonOutput {
  */
 export class AcarsdecDecoder extends AudioDemodDecoder {
 	private options: AcarsdecOptions
+	private readonly warnOption: NumericOptionWarn
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
-		this.options = parseAcarsdecOptions(config)
+		this.warnOption = createOptionWarner((fields, message) =>
+			this.logger.warn(fields, message),
+		)
+		this.options = parseAcarsdecOptions(config, this.warnOption)
 	}
 
 	/**
@@ -118,7 +129,7 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 	 * Called by BaseDecoder.updateOptions().
 	 */
 	protected override onOptionsUpdated(): void {
-		this.options = parseAcarsdecOptions(this.config)
+		this.options = parseAcarsdecOptions(this.config, this.warnOption)
 		this.logger.debug(
 			{ inputSampleRate: this.options.inputSampleRate },
 			"Acarsdec options re-parsed after update",
@@ -273,13 +284,50 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 }
 
 /**
+ * extraArgs is a hand-written argv tail: at most 64 strings. Sliced before any
+ * iteration or spread; anything else is dropped. Warnings carry the key only.
+ */
+function readExtraArgs(
+	value: unknown,
+	warn: NumericOptionWarn,
+): string[] | undefined {
+	if (value === undefined || value === null) return undefined
+	if (!Array.isArray(value)) {
+		warn("extraArgs", "invalid")
+		return undefined
+	}
+	if (value.length > ACARSDEC_BOUNDS.maxExtraArgs) warn("extraArgs", "clamped")
+	const out: string[] = []
+	for (const entry of value.slice(
+		0,
+		ACARSDEC_BOUNDS.maxExtraArgs,
+	) as unknown[]) {
+		if (typeof entry === "string") out.push(entry)
+		else warn("extraArgs", "invalid")
+	}
+	return out
+}
+
+/**
  * Parses and validates decoder options from config.
  */
-function parseAcarsdecOptions(config: DecoderConfig): AcarsdecOptions {
+function parseAcarsdecOptions(
+	config: DecoderConfig,
+	warn: NumericOptionWarn,
+): AcarsdecOptions {
 	const options = config.options as Record<string, unknown>
 
 	// Frequencies (optional in this mode, but good to preserve)
-	let frequencies = config.frequencies ?? (options["frequencies"] as number[])
+	let frequencies = readNumericArrayOption(
+		config.frequencies ?? options["frequencies"],
+		{
+			key: "frequencies",
+			integer: true,
+			...ACARSDEC_BOUNDS.frequencyHz,
+		},
+		ACARSDEC_BOUNDS.maxFrequencies,
+		warn,
+	)
 	if (!frequencies || frequencies.length === 0) {
 		frequencies = [131_550_000, 131_725_000]
 	}
@@ -287,8 +335,16 @@ function parseAcarsdecOptions(config: DecoderConfig): AcarsdecOptions {
 	return {
 		frequencies,
 		gain: options["gain"] as number | undefined,
-		inputSampleRate: options["inputSampleRate"] as number | undefined,
-		extraArgs: options["extraArgs"] as string[] | undefined,
+		inputSampleRate: readNumericOption(
+			options["inputSampleRate"],
+			{
+				key: "inputSampleRate",
+				integer: false,
+				...ACARSDEC_BOUNDS.sampleRateHz,
+			},
+			warn,
+		),
+		extraArgs: readExtraArgs(options["extraArgs"], warn),
 	}
 }
 

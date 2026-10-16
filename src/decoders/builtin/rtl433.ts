@@ -22,6 +22,16 @@ import type {
 	DecoderRateRequirements,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import { readNumericArrayOption, readNumericOption } from "../option-values.js"
+import {
+	RTL433_EXTRA_ARGS_MAX,
+	RTL433_INPUT_SAMPLE_RATE_MAX_HZ,
+	RTL433_INPUT_SAMPLE_RATE_MIN_HZ,
+	RTL433_PROTOCOLS_MAX,
+	RTL433_PROTOCOL_ID_MAX,
+	RTL433_TARGET_SAMPLE_RATE_MAX_HZ,
+	RTL433_TARGET_SAMPLE_RATE_MIN_HZ,
+} from "../options/rtl433.js"
 
 /** Output format options for rtl_433 */
 export type Rtl433OutputFormat = "json" | "csv"
@@ -78,7 +88,7 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 	 */
 	private calculateEffectiveTargetRate(): number {
 		// Same helper as the pipeline and getRateAdapter(): integer decimation.
-		return iqDecimationRates(this.getIqDecimationConfig()).outputRate
+		return iqDecimationRates(this.boundedIqDecimationConfig()).outputRate
 	}
 
 	/**
@@ -118,15 +128,64 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 	 * Parses and validates decoder options from config.
 	 */
 	private parseOptions(options: Record<string, unknown>): Rtl433Options {
+		// WG7 HW.2: numbers are read by meaning (bounded, finite) before they
+		// become -R/-s arguments or part of the csdr shell pipeline.
+		const warn = this.optionWarn
 		return {
 			analyze: options["analyze"] as boolean | undefined,
-			protocols: options["protocols"] as number[] | undefined,
+			protocols: readNumericArrayOption(
+				options["protocols"],
+				{
+					key: "protocols",
+					integer: true,
+					min: 0,
+					max: RTL433_PROTOCOL_ID_MAX,
+				},
+				RTL433_PROTOCOLS_MAX,
+				warn,
+			),
 			outputFormat:
 				(options["outputFormat"] as Rtl433OutputFormat | undefined) ?? "json",
-			inputSampleRate: options["inputSampleRate"] as number | undefined,
-			targetSampleRate: options["targetSampleRate"] as number | undefined,
-			extraArgs: options["extraArgs"] as string[] | undefined,
+			// An exact 0 stays "absent" (the default rate), as before.
+			inputSampleRate: readNumericOption(
+				options["inputSampleRate"] === 0
+					? undefined
+					: options["inputSampleRate"],
+				{
+					key: "inputSampleRate",
+					integer: false,
+					min: RTL433_INPUT_SAMPLE_RATE_MIN_HZ,
+					max: RTL433_INPUT_SAMPLE_RATE_MAX_HZ,
+				},
+				warn,
+			),
+			targetSampleRate: readNumericOption(
+				options["targetSampleRate"],
+				{
+					key: "targetSampleRate",
+					integer: false,
+					min: RTL433_TARGET_SAMPLE_RATE_MIN_HZ,
+					max: RTL433_TARGET_SAMPLE_RATE_MAX_HZ,
+				},
+				warn,
+			),
+			extraArgs: this.parseExtraArgs(options["extraArgs"]),
 		}
+	}
+
+	/**
+	 * A hand-written argv tail: at most RTL433_EXTRA_ARGS_MAX entries, sliced
+	 * before anything iterates or spreads it (WG7 HW.2).
+	 */
+	private parseExtraArgs(value: unknown): string[] | undefined {
+		if (value === undefined || value === null) return undefined
+		if (!Array.isArray(value)) {
+			this.optionWarn("extraArgs", "invalid")
+			return undefined
+		}
+		if (value.length > RTL433_EXTRA_ARGS_MAX)
+			this.optionWarn("extraArgs", "clamped")
+		return value.slice(0, RTL433_EXTRA_ARGS_MAX).map(arg => String(arg))
 	}
 
 	/** Migrated to the opt-in core channelizer (addendum §7 step 3). */

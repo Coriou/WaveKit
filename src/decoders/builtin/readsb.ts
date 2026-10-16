@@ -22,6 +22,12 @@ import type {
 	DecoderRateRequirements,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import {
+	createOptionWarner,
+	readNumericOption,
+	type NumericOptionWarn,
+} from "../option-values.js"
+import { READSB_BOUNDS } from "../options/readsb.js"
 import type { RawAircraftMessage } from "@wavekit/api-types"
 
 /** Mode S / ADS-B carrier (1090ES). */
@@ -65,7 +71,7 @@ export interface ReadsbOptions {
 	/** RTL-TCP port for network mode (default: 1235) */
 	rtlTcpPort?: number | undefined
 	/** Gain setting for the RTL-SDR */
-	gain?: number | undefined
+	gain?: number | "auto" | undefined
 	/** PPM correction for the RTL-SDR */
 	ppm?: number | undefined
 	/** Output format: sbs, beast, or json (Requirement 22.3) */
@@ -164,6 +170,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	private options: ReadsbOptions
 	private lineBuffer: string = ""
 	private readonly station: ReadsbStationSource
+	private readonly warnOption: NumericOptionWarn
 
 	constructor(
 		config: DecoderConfig,
@@ -171,7 +178,10 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 		station: ReadsbStationSource = {},
 	) {
 		// Build the network producer config from decoder config
-		const options = parseReadsbOptions(config.options)
+		const warnOption = createOptionWarner((fields, message) =>
+			logger.warn(fields, message),
+		)
+		const options = parseReadsbOptions(config.options, warnOption)
 		const outputPort = options.outputPort ?? DEFAULT_PORTS[options.outputFormat]
 
 		const networkConfig: NetworkProducerConfig = {
@@ -183,6 +193,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 		super(networkConfig, logger)
 		this.options = options
+		this.warnOption = warnOption
 		this.station = typeof station === "function" ? station : { ...station }
 	}
 
@@ -242,7 +253,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 * If rtlTcpHost is configured, we use network mode where readsb controls the sample rate.
 	 */
 	protected override onOptionsUpdated(): void {
-		this.options = parseReadsbOptions(this.config.options)
+		this.options = parseReadsbOptions(this.config.options, this.warnOption)
 	}
 
 	protected getArgs(): string[] {
@@ -583,30 +594,80 @@ function coordinate(value: unknown, limit: number): number | undefined {
 }
 
 /**
+ * extraArgs is a hand-written argv tail: at most 64 strings. Sliced before any
+ * iteration or spread; anything else is dropped. Warnings carry the key only.
+ */
+function readExtraArgs(
+	value: unknown,
+	warn: NumericOptionWarn,
+): string[] | undefined {
+	if (value === undefined || value === null) return undefined
+	if (!Array.isArray(value)) {
+		warn("extraArgs", "invalid")
+		return undefined
+	}
+	if (value.length > READSB_BOUNDS.maxExtraArgs) warn("extraArgs", "clamped")
+	const out: string[] = []
+	for (const entry of value.slice(0, READSB_BOUNDS.maxExtraArgs) as unknown[]) {
+		if (typeof entry === "string") out.push(entry)
+		else warn("extraArgs", "invalid")
+	}
+	return out
+}
+
+/**
  * Parses and validates decoder options from config.
  */
-function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
+function parseReadsbOptions(
+	options: Record<string, unknown>,
+	warn: NumericOptionWarn,
+): ReadsbOptions {
+	const port = (key: string) =>
+		readNumericOption(
+			options[key],
+			{ key, integer: true, ...READSB_BOUNDS.port },
+			warn,
+		)
 	const outputFormat = (options["outputFormat"] as ReadsbOutputFormat) ?? "sbs"
 
 	return {
-		inputSampleRate: options["inputSampleRate"] as number | undefined,
+		inputSampleRate: readNumericOption(
+			options["inputSampleRate"],
+			{
+				key: "inputSampleRate",
+				integer: false,
+				...READSB_BOUNDS.sampleRateHz,
+			},
+			warn,
+		),
 		device: options["device"] as string | undefined,
 		deviceSerial: options["deviceSerial"] as string | undefined,
 		rtlTcpHost: options["rtlTcpHost"] as string | undefined,
-		rtlTcpPort: options["rtlTcpPort"] as number | undefined,
-		gain: options["gain"] as number | undefined,
-		ppm: options["ppm"] as number | undefined,
+		rtlTcpPort: port("rtlTcpPort"),
+		gain:
+			options["gain"] === "auto"
+				? "auto"
+				: readNumericOption(
+						options["gain"],
+						{ key: "gain", integer: false, ...READSB_BOUNDS.gainDb },
+						warn,
+					),
+		ppm: readNumericOption(
+			options["ppm"],
+			{ key: "ppm", integer: false, ...READSB_BOUNDS.ppm },
+			warn,
+		),
 		outputFormat:
 			outputFormat === "sbs" ||
 			outputFormat === "beast" ||
 			outputFormat === "json"
 				? outputFormat
 				: "sbs",
-		outputPort: options["outputPort"] as number | undefined,
+		outputPort: port("outputPort"),
 		enableMlat: options["enableMlat"] as boolean | undefined,
 		lat: coordinate(options["lat"], 90),
 		lon: coordinate(options["lon"], 180),
-		extraArgs: options["extraArgs"] as string[] | undefined,
+		extraArgs: readExtraArgs(options["extraArgs"], warn),
 	}
 }
 

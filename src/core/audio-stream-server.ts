@@ -465,11 +465,29 @@ export class AudioHttpServer {
 	private handle(req: http.IncomingMessage, res: http.ServerResponse): void {
 		if (this.access)
 			res.setHeader("Access-Control-Expose-Headers", "Retry-After")
+		// Legacy (no access adapter) only: credential-free wildcard CORS on every
+		// response. Protected listeners never reach this branch (fail closed).
+		else res.setHeader("Access-Control-Allow-Origin", "*")
 		const context = this.access?.admit(req, res)
 		if (this.access && !context) return
 		if (this.admissionStopped) {
 			res.writeHead(503, { "Cache-Control": "no-store" })
 			res.end("Service Unavailable")
+			return
+		}
+		if (!this.access && req.method === "OPTIONS") {
+			// Resolvers are pure lookups: no registration, no lease.
+			if (this.resolve(req)) {
+				res.writeHead(204, {
+					"Access-Control-Allow-Methods": "GET, OPTIONS",
+					"Access-Control-Allow-Headers": "Range",
+					"Access-Control-Max-Age": "600",
+				})
+				res.end()
+			} else {
+				res.statusCode = 404
+				res.end("Not Found")
+			}
 			return
 		}
 		const route = req.method === "GET" ? this.resolve(req) : null

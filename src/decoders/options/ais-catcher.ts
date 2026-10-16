@@ -3,7 +3,26 @@ import type { DecoderOptionDescriptor } from "@wavekit/api-types"
 import { numberOrText } from "./common.js"
 
 const frequencyHz = z.number().finite().positive()
-const port = z.number().int().min(1).max(65535)
+
+/** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
+export const AIS_CATCHER_BOUNDS = {
+	/** A hand-written argv tail; thousands of entries is a mistake or an attack. */
+	maxExtraArgs: 64,
+	/** Every TCP port. */
+	port: { min: 1, max: 65535 },
+	/** RTL-SDR tuner gains top out near 50 dB; 60 dB covers every supported SDR. */
+	gainDb: { min: 0, max: 60 },
+	/** Crystal error beyond +-1000 ppm is not a correction but a typo. */
+	ppm: { min: -1000, max: 1000 },
+	/** Below 1 kHz is no IQ stream; above 10 Msps is beyond any supported SDR front end. */
+	sampleRateHz: { min: 1_000, max: 10_000_000 },
+} as const
+
+const port = z
+	.number()
+	.int()
+	.min(AIS_CATCHER_BOUNDS.port.min)
+	.max(AIS_CATCHER_BOUNDS.port.max)
 /** YAML turns `00000001` or `0` into numbers, so identifiers accept both. */
 const stringOrNumber = z.union([z.string(), z.number()])
 
@@ -18,12 +37,34 @@ export const aisCatcherOptionsSchema = z
 		spyServerHost: z.string().nullable().optional(),
 		spyServerPort: port.nullable().optional(),
 		// `tuner=${gain}` and ppm.toString(): numeric text gives the same argument.
-		gain: numberOrText(z.number().finite()).optional(),
-		ppm: numberOrText(z.number().finite()).optional(),
+		gain: numberOrText(
+			z
+				.number()
+				.finite()
+				.min(AIS_CATCHER_BOUNDS.gainDb.min)
+				.max(AIS_CATCHER_BOUNDS.gainDb.max),
+		).optional(),
+		ppm: numberOrText(
+			z
+				.number()
+				.finite()
+				.min(AIS_CATCHER_BOUNDS.ppm.min)
+				.max(AIS_CATCHER_BOUNDS.ppm.max),
+		).optional(),
 		outputFormat: z.enum(["nmea", "json"]).nullable().optional(),
 		outputPort: port.nullable().optional(),
-		inputSampleRate: z.number().finite().positive().nullable().optional(),
-		extraArgs: z.array(z.string()).nullable().optional(),
+		inputSampleRate: z
+			.number()
+			.finite()
+			.min(AIS_CATCHER_BOUNDS.sampleRateHz.min)
+			.max(AIS_CATCHER_BOUNDS.sampleRateHz.max)
+			.nullable()
+			.optional(),
+		extraArgs: z
+			.array(z.string())
+			.max(AIS_CATCHER_BOUNDS.maxExtraArgs)
+			.nullable()
+			.optional(),
 		frequencies: z.array(frequencyHz).optional(),
 		frequency: frequencyHz.optional(),
 		channelHz: frequencyHz.nullable().optional(),
@@ -61,7 +102,8 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "extraArgs",
 		type: "string-list",
 		default: null,
-		description: "Additional AIS-catcher command line arguments.",
+		description:
+			"Additional AIS-catcher command line arguments (at most 64 entries).",
 	},
 	{
 		...base,
@@ -83,6 +125,8 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 		...base,
 		key: "gain",
 		type: "number",
+		min: AIS_CATCHER_BOUNDS.gainDb.min,
+		max: AIS_CATCHER_BOUNDS.gainDb.max,
 		unit: "dB",
 		default: null,
 		description: "Tuner gain (-gr tuner=).",
@@ -91,6 +135,8 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 		...base,
 		key: "inputSampleRate",
 		type: "number",
+		min: AIS_CATCHER_BOUNDS.sampleRateHz.min,
+		max: AIS_CATCHER_BOUNDS.sampleRateHz.max,
 		unit: "Hz",
 		default: 2400000,
 		description: "IQ sample rate of the source.",
@@ -116,6 +162,8 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 		...base,
 		key: "ppm",
 		type: "number",
+		min: AIS_CATCHER_BOUNDS.ppm.min,
+		max: AIS_CATCHER_BOUNDS.ppm.max,
 		unit: "ppm",
 		default: null,
 		description: "Frequency correction (-p).",

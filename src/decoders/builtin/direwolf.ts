@@ -18,6 +18,12 @@ import type {
 	DemodulationConfig,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import {
+	createOptionWarner,
+	readNumericOption,
+	type NumericOptionWarn,
+} from "../option-values.js"
+import { DIREWOLF_BOUNDS } from "../options/direwolf.js"
 import { NetworkConnectionError } from "../../utils/errors.js"
 
 /** Default KISS TCP port for direwolf */
@@ -143,6 +149,7 @@ export interface APRSData {
  */
 export class DirewolfDecoder extends AudioDemodDecoder {
 	private options: DirewolfOptions
+	private readonly warnOption: NumericOptionWarn
 	private kissBuffer: Buffer = Buffer.alloc(0)
 
 	// Network Consumer State (from NetworkProducerDecoder)
@@ -157,7 +164,10 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
-		this.options = parseDirewolfOptions(config.options)
+		this.warnOption = createOptionWarner((fields, message) =>
+			this.logger.warn(fields, message),
+		)
+		this.options = parseDirewolfOptions(config.options, this.warnOption)
 
 		// Set up network connection params
 		this.outputHost = "127.0.0.1" // Always local for spawned process
@@ -169,7 +179,7 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	 * Called by BaseDecoder.updateOptions().
 	 */
 	protected override onOptionsUpdated(): void {
-		this.options = parseDirewolfOptions(this.config.options)
+		this.options = parseDirewolfOptions(this.config.options, this.warnOption)
 		this.logger.debug(
 			{ inputSampleRate: this.options.inputSampleRate },
 			"Direwolf options re-parsed after update",
@@ -427,19 +437,67 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 }
 
 /**
+ * extraArgs is a hand-written argv tail: at most 64 strings. Sliced before any
+ * iteration or spread; anything else is dropped. Warnings carry the key only.
+ */
+function readExtraArgs(
+	value: unknown,
+	warn: NumericOptionWarn,
+): string[] | undefined {
+	if (value === undefined || value === null) return undefined
+	if (!Array.isArray(value)) {
+		warn("extraArgs", "invalid")
+		return undefined
+	}
+	if (value.length > DIREWOLF_BOUNDS.maxExtraArgs) warn("extraArgs", "clamped")
+	const out: string[] = []
+	for (const entry of value.slice(
+		0,
+		DIREWOLF_BOUNDS.maxExtraArgs,
+	) as unknown[]) {
+		if (typeof entry === "string") out.push(entry)
+		else warn("extraArgs", "invalid")
+	}
+	return out
+}
+
+/**
  * Parses and validates decoder options from config.
  */
 function parseDirewolfOptions(
 	options: Record<string, unknown>,
+	warn: NumericOptionWarn,
 ): DirewolfOptions {
+	const port = (key: string) =>
+		readNumericOption(
+			options[key],
+			{ key, integer: true, ...DIREWOLF_BOUNDS.port },
+			warn,
+		)
 	return {
 		audioDevice: options["audioDevice"] as string | undefined,
-		sampleRate: options["sampleRate"] as number | undefined,
-		kissPort: options["kissPort"] as number | undefined,
-		agwPort: options["agwPort"] as number | undefined,
+		sampleRate: readNumericOption(
+			options["sampleRate"],
+			{
+				key: "sampleRate",
+				integer: false,
+				...DIREWOLF_BOUNDS.audioSampleRateHz,
+			},
+			warn,
+		),
+		kissPort: port("kissPort"),
+		agwPort: port("agwPort"),
 		callsign: options["callsign"] as string | undefined,
-		extraArgs: options["extraArgs"] as string[] | undefined,
-		inputSampleRate: options["inputSampleRate"] as number | undefined,
+		extraArgs: readExtraArgs(options["extraArgs"], warn),
+		inputSampleRate: readNumericOption(
+			options["inputSampleRate"],
+			{
+				key: "inputSampleRate",
+				integer: false,
+				...DIREWOLF_BOUNDS.inputSampleRateHz,
+			},
+			warn,
+		),
 	}
 }
 

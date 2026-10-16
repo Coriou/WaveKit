@@ -23,11 +23,24 @@ import type {
 	DecoderRateRequirements,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import {
+	createOptionWarner,
+	readNumericArrayOption,
+	readNumericOption,
+	type NumericOptionWarn,
+} from "../option-values.js"
+import { DUMPVDL2_BOUNDS } from "../options/dumpvdl2.js"
 import type { ACARSMessage } from "./acarsdec.js"
 
 /**
  * Configuration options for the VDL2 decoder.
  */
+/**
+ * Parsed options whose frequency list kept at least one valid configured entry;
+ * the built-in defaults never gain configured provenance.
+ */
+const CONFIGURED_FREQUENCIES = new WeakSet<object>()
+
 export interface Dumpvdl2Options {
 	inputCenterFreq?: number | undefined
 	followCenter?: boolean | undefined
@@ -153,10 +166,14 @@ interface XidData {
  */
 export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	private options: Dumpvdl2Options
+	private readonly warnOption: NumericOptionWarn
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
-		this.options = parseDumpvdl2Options(config)
+		this.warnOption = createOptionWarner((fields, message) =>
+			this.logger.warn(fields, message),
+		)
+		this.options = parseDumpvdl2Options(config, this.warnOption)
 	}
 
 	/**
@@ -164,7 +181,7 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 * Called by BaseDecoder.updateOptions().
 	 */
 	protected override onOptionsUpdated(): void {
-		this.options = parseDumpvdl2Options(this.config)
+		this.options = parseDumpvdl2Options(this.config, this.warnOption)
 		this.logger.debug(
 			{ inputSampleRate: this.options.inputSampleRate },
 			"Dumpvdl2 options re-parsed after update",
@@ -200,9 +217,7 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 * list says which band it follows; without one the band is unknown.
 	 */
 	override getBandDeclaration(): DecoderBandDeclaration {
-		const configured =
-			this.config.frequencies ?? this.config.options["frequencies"]
-		const isConfigured = Array.isArray(configured) && configured.length > 0
+		const isConfigured = CONFIGURED_FREQUENCIES.has(this.options)
 		if (this.options.followCenter)
 			return isConfigured
 				? {
@@ -399,9 +414,37 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 }
 
 /**
+ * extraArgs is a hand-written argv tail: at most 64 strings. Sliced before any
+ * iteration or spread; anything else is dropped. Warnings carry the key only.
+ */
+function readExtraArgs(
+	value: unknown,
+	warn: NumericOptionWarn,
+): string[] | undefined {
+	if (value === undefined || value === null) return undefined
+	if (!Array.isArray(value)) {
+		warn("extraArgs", "invalid")
+		return undefined
+	}
+	if (value.length > DUMPVDL2_BOUNDS.maxExtraArgs) warn("extraArgs", "clamped")
+	const out: string[] = []
+	for (const entry of value.slice(
+		0,
+		DUMPVDL2_BOUNDS.maxExtraArgs,
+	) as unknown[]) {
+		if (typeof entry === "string") out.push(entry)
+		else warn("extraArgs", "invalid")
+	}
+	return out
+}
+
+/**
  * Parses and validates decoder options from config.
  */
-function parseDumpvdl2Options(config: DecoderConfig): Dumpvdl2Options {
+function parseDumpvdl2Options(
+	config: DecoderConfig,
+	warn: NumericOptionWarn,
+): Dumpvdl2Options {
 	const options = config.options as Record<string, unknown>
 
 	// Device serial for local mode (optional when using rtl_tcp)
@@ -410,30 +453,67 @@ function parseDumpvdl2Options(config: DecoderConfig): Dumpvdl2Options {
 
 	// RTL-TCP network mode options
 	const rtlTcpHost = options["rtlTcpHost"] as string | undefined
-	const rtlTcpPort = options["rtlTcpPort"] as number | undefined
+	const rtlTcpPort = readNumericOption(
+		options["rtlTcpPort"],
+		{ key: "rtlTcpPort", integer: true, ...DUMPVDL2_BOUNDS.port },
+		warn,
+	)
 
 	// Frequencies can come from config or options
-	let frequencies = config.frequencies ?? (options["frequencies"] as number[])
+	let frequencies = readNumericArrayOption(
+		config.frequencies ?? options["frequencies"],
+		{ key: "frequencies", integer: true, ...DUMPVDL2_BOUNDS.frequencyHz },
+		DUMPVDL2_BOUNDS.maxFrequencies,
+		warn,
+	)
+	const frequenciesConfigured =
+		frequencies !== undefined && frequencies.length > 0
 	if (!frequencies || frequencies.length === 0) {
 		// Default VDL2 frequencies (in Hz) - common European frequencies
 		frequencies = [136_650_000, 136_700_000, 136_975_000]
 	}
 
-	return {
-		inputCenterFreq: options["inputCenterFreq"] as number | undefined,
+	const parsed: Dumpvdl2Options = {
+		inputCenterFreq: readNumericOption(
+			options["inputCenterFreq"],
+			{ key: "inputCenterFreq", integer: true, ...DUMPVDL2_BOUNDS.frequencyHz },
+			warn,
+		),
 		followCenter: options["followCenter"] as boolean | undefined,
 		deviceSerial,
 		rtlTcpHost,
 		rtlTcpPort,
 		frequencies,
 		gain: options["gain"] as number | undefined,
-		ppm: options["ppm"] as number | undefined,
+		ppm: readNumericOption(
+			options["ppm"],
+			{ key: "ppm", integer: false, ...DUMPVDL2_BOUNDS.ppm },
+			warn,
+		),
 		outputFormat:
 			(options["outputFormat"] as "json" | "text" | undefined) ?? "json",
-		inputSampleRate: options["inputSampleRate"] as number | undefined,
-		targetSampleRate: options["targetSampleRate"] as number | undefined,
-		extraArgs: options["extraArgs"] as string[] | undefined,
+		inputSampleRate: readNumericOption(
+			options["inputSampleRate"],
+			{
+				key: "inputSampleRate",
+				integer: false,
+				...DUMPVDL2_BOUNDS.inputSampleRateHz,
+			},
+			warn,
+		),
+		targetSampleRate: readNumericOption(
+			options["targetSampleRate"],
+			{
+				key: "targetSampleRate",
+				integer: true,
+				...DUMPVDL2_BOUNDS.targetSampleRateHz,
+			},
+			warn,
+		),
+		extraArgs: readExtraArgs(options["extraArgs"], warn),
 	}
+	if (frequenciesConfigured) CONFIGURED_FREQUENCIES.add(parsed)
+	return parsed
 }
 
 /**
