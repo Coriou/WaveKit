@@ -31,6 +31,7 @@ describe("JobHits (WG2 req 13)", () => {
 				firstHitAt: "2026-10-13T12:00:00.000Z",
 				lastHitAt: "2026-10-13T12:00:02.000Z",
 				firstSeenInJob: true,
+				lastDurationMs: null,
 			},
 			{
 				jobId: "j_1",
@@ -39,6 +40,7 @@ describe("JobHits (WG2 req 13)", () => {
 				firstHitAt: "2026-10-13T12:00:01.000Z",
 				lastHitAt: "2026-10-13T12:00:01.000Z",
 				firstSeenInJob: false,
+				lastDurationMs: null,
 			},
 		])
 		expect(h.list(1).map(x => x.discoveryId)).toEqual(["d_a"])
