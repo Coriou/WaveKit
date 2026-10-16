@@ -46,8 +46,10 @@ export interface CoverageManagerOptions {
 }
 
 /**
- * Feeds ADS-B and AIS positions into a CoverageTracker. The per-entity last-position-time maps
- * are bounded by the trackers' own entity caps and cleared on `:lost`, so no extra cap is needed.
+ * Feeds ADS-B and AIS positions into a CoverageTracker. The per-entity maps follow the trackers'
+ * entities and are cleared on `:lost`: the aircraft maps are bounded by the aircraft tracker's
+ * expiry (`maxAge`; it has no entity cap), the vessel map by the vessel tracker's `maxVessels`
+ * cap and expiry. No extra cap is kept here.
  */
 export class CoverageManager {
 	private readonly tracker: CoverageTracker
