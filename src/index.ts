@@ -1329,6 +1329,8 @@ async function main(): Promise<void> {
 				activity,
 				station: stationService.identity(),
 				stationService,
+				// WG6 req 7: the validated config with env overrides, as the runtime uses it.
+				getConfig: () => config,
 				regionalRegistry,
 				receiverCapabilitiesProvider,
 				sourceManager,

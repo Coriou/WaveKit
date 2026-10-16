@@ -12,6 +12,7 @@
  */
 
 import type { StationIdentity } from "@wavekit/api-types"
+import { CONFIG_EXPORT_REQUIRES_ACCESS } from "@wavekit/api-types"
 import { stationRoutes } from "./routes/station.js"
 import { stationEstimateRoutes } from "./routes/station-estimate.js"
 import { storageRoutes } from "./routes/storage.js"
@@ -46,7 +47,10 @@ import {
 import { activityRoutes } from "./routes/activity.js"
 import { createActivitySubscriptions } from "./activity-subscriptions.js"
 import type { ActivitySubscriptionHub } from "./activity-subscriptions.js"
-import { healthRoutes } from "./routes/health.js"
+import { APP_VERSION, healthRoutes } from "./routes/health.js"
+import { configExportRoutes } from "./routes/config-export.js"
+import { decoderOptionDescriptors } from "../decoders/options/index.js"
+import type { Config } from "../config.js"
 import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
@@ -188,6 +192,12 @@ export interface ApiServerDependencies {
 	 * controller only while STATION_WRITE_REQUIRES_ACCESS is true.
 	 */
 	stationService?: StationService | undefined
+	/**
+	 * WG6 req 7: the effective configuration GET /api/config/export redacts. The route mounts
+	 * only with the access controller while CONFIG_EXPORT_REQUIRES_ACCESS is true; without this
+	 * provider it answers 503 CONFIG_EXPORT_UNAVAILABLE.
+	 */
+	getConfig?: (() => Config) | undefined
 	/** APRS station, object and item current state (WG2 req 4). */
 	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
@@ -211,6 +221,7 @@ export class ApiServer {
 	private readonly station: StationIdentity | undefined
 	private readonly stationEstimate: StationEstimateProvider | undefined
 	private readonly stationService: StationService | undefined
+	private readonly getConfig: (() => Config) | undefined
 	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
 	private readonly bandPlans: BandPlanService | undefined
@@ -277,6 +288,7 @@ export class ApiServer {
 		this.station = dependencies.station
 		this.stationEstimate = dependencies.stationEstimate
 		this.stationService = dependencies.stationService
+		this.getConfig = dependencies.getConfig
 		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
 		this.bandPlans = dependencies.bandPlans
@@ -1328,6 +1340,23 @@ export class ApiServer {
 								this.accessController!.authorizeMetadataMutation(request),
 						}
 					: {}),
+			})
+		// WG6 req 7: the redacted config export reveals the whole topology; it mounts only in
+		// protected mode (operator-grade re-check per request) while CONFIG_EXPORT_REQUIRES_ACCESS.
+		if (this.accessController || !CONFIG_EXPORT_REQUIRES_ACCESS)
+			await this.app.register(configExportRoutes, {
+				...(this.getConfig ? { getConfig: this.getConfig } : {}),
+				...(this.accessController
+					? {
+							authorize: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
+				version: APP_VERSION,
+				secretOptionKeys: type =>
+					(decoderOptionDescriptors(type) ?? [])
+						.filter(d => d.secret)
+						.map(d => d.key),
 			})
 		await this.app.register(receiverCapabilitiesRoutes, {
 			provider: this.receiverCapabilitiesProvider,
