@@ -2648,11 +2648,16 @@ keys, later ports count under `other`), `lastPortnum`, `decoderId`,
   airUtilTxPct, uptimeS, at }` from the node's latest device metrics, or null.
   A `battery_level` above 100 means `powered: true` and `batteryPct: null`; an
   absent metric is null; `at` is the packet's receive time. Values are reported
-  as sent (no rounding).
+  as sent, not rounded: `voltageV`, `channelUtilizationPct` and `airUtilTxPct`
+  are float32 values widened to a double (3.7 V arrives as
+  `3.700000047683716`), so clients should round them for display (6
+  significant digits stay within float32 precision). `snrDb` in `neighbours`
+  is float32 too.
 - `neighbours`: `[{ nodeId, snrDb, at }]` from the node's latest NeighborInfo
-  report, sorted by `nodeId`, at most 32. `nodeId` may be a node this receiver
-  has not heard. Entries older than 4 hours are dropped on cleanup (and the node
-  is sent as `mesh:update`).
+  report, sorted by `nodeId`, at most 32; a node listed twice in one report is
+  one entry with its best SNR (a known SNR beats null). `nodeId` may be a node
+  this receiver has not heard. Entries older than 4 hours are dropped on cleanup
+  (and the node is sent as `mesh:update`).
 
 #### GET /api/mesh/stats
 
@@ -2812,7 +2817,9 @@ weather, telemetry), any packet with weather or a message, and every other
 Meshtastic port are always stored.
 
 Meshtastic flood copies (WG3): a `meshtastic` reception with the same `from`,
-`id`, `portnum` and payload (`payloadB64`) as a reception queued at most 30 s
+`id` and `portnum` and the same payload hash (32-bit FNV-1a over `portnum` and
+`payloadB64`; two different payloads collide with probability about 2^-32, so a
+distinct packet is dropped that rarely) as a reception queued at most 30 s
 earlier (by `receivedAt`, inclusive) is dropped as `flood-copy`, on every port.
 The check runs after the closed and telemetry checks and before coalescing and
 rate limiting, so a copy takes no admission token and touches no coalescing
