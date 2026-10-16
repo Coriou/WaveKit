@@ -1160,6 +1160,17 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
+	 * Configs of the config-owned decoders managed now (created at startup or later),
+	 * in creation order. Scanner probes are left out: they record inside scanner storage.
+	 */
+	getConfiguredDecoderConfigs(): readonly DecoderConfig[] {
+		const configs: DecoderConfig[] = []
+		for (const state of this.decoders.values())
+			if (state.owner === "config") configs.push(state.config)
+		return configs
+	}
+
+	/**
 	 * Gets the status of a decoder by ID (Requirement 4.5).
 	 *
 	 * @param id - The decoder ID

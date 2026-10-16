@@ -1280,7 +1280,7 @@ async function main(): Promise<void> {
 			activityMaxDbBytes: activityLimits?.maxDbBytes ?? null,
 			scannerStorage: config.scanner.storage,
 			scanner: () => scanner,
-			decoders: () => config.decoders,
+			decoders: () => decoderManager.getConfiguredDecoderConfigs(),
 			accessDirectory,
 			logsDir: config.logging.dir,
 		})
