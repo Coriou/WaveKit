@@ -10,8 +10,10 @@
  * full CU8 stream.
  */
 import { EventEmitter } from "node:events"
+import { SPECTRUM_BINS_CAP_CHOICES } from "@wavekit/api-types"
 import type {
 	SpectrumActiveProfile,
+	SpectrumBinsCapView,
 	SpectrumBinEncoding,
 	SpectrumFrameEventData,
 	SpectrumOccupancyResponse,
@@ -42,6 +44,8 @@ import type {
 import type { PipelineHostMode } from "./pipeline-host.js"
 import {
 	BACKFILL_LIMITS,
+	PROFILE_BINS_CEILING,
+	PROFILE_BINS_FLOOR,
 	PROFILE_LIMITS,
 	SpectrumSubscribeOptionsSchema,
 } from "./subscribe-options.js"
@@ -165,6 +169,34 @@ export interface SpectrumServiceDeps {
 	createHost?: SpectrumEngineDeps["createHost"]
 	/** Called for every new engine instance before it starts (the probe pool's stream watch, Task 34). */
 	engineCreated?: (sourceId: string, engine: SpectrumEngine) => void
+	/**
+	 * WG8 req 5: the host bins cap, resolved once at startup (bin-cap.ts). Absent = the 2 048
+	 * floor and no `limits.binsCap` on the status. Read once at construction.
+	 */
+	binsCap?: () => SpectrumBinsCapView
+}
+
+/** Evaluates the cap dep once; any throw or a cap that is not 2 048, 4 096 or 8 192 falls back to the floor (safe answer). */
+function resolveBinsCap(dep: (() => SpectrumBinsCapView) | undefined): {
+	view: SpectrumBinsCapView | null
+	cap: number
+} {
+	if (!dep) return { view: null, cap: PROFILE_BINS_FLOOR }
+	try {
+		const view = dep()
+		const cap = view?.cap
+		if (
+			typeof cap === "number" &&
+			(SPECTRUM_BINS_CAP_CHOICES as readonly number[]).includes(cap)
+		)
+			return { view: { ...view }, cap }
+	} catch {
+		// fall through to the floor
+	}
+	return {
+		view: { setting: "auto", cap: PROFILE_BINS_FLOOR, source: "fallback" },
+		cap: PROFILE_BINS_FLOOR,
+	}
 }
 
 /** Max-hold of one profile on one source; `epoch` is the summary epoch its bins came from. */
@@ -302,8 +334,15 @@ export class SpectrumService extends EventEmitter {
 	private readonly sourceGen = new Map<string, number>()
 	private stopping = false
 
+	/** WG8: resolved once; the engine budget and the client clamp read the same cap. */
+	private readonly binsCap: {
+		view: SpectrumBinsCapView | null
+		cap: number
+	}
+
 	constructor(private readonly deps: SpectrumServiceDeps) {
 		super()
+		this.binsCap = resolveBinsCap(deps.binsCap)
 		this.log = createComponentLogger(deps.logger, "SpectrumService")
 		this.now = deps.now ?? Date.now
 	}
@@ -458,6 +497,8 @@ export class SpectrumService extends EventEmitter {
 			cfg.sampleRateHz,
 			this.deps.settings(),
 			this.deps.tuning(sourceId),
+			undefined,
+			this.binsCap.cap,
 		)
 		const differs =
 			want.fftSize !== cfg.fftSize ||
@@ -532,13 +573,26 @@ export class SpectrumService extends EventEmitter {
 			limits: {
 				maxProfiles: s.ws.spectrumMaxProfiles,
 				hz: { ...PROFILE_LIMITS.hz },
-				bins: { ...PROFILE_LIMITS.bins },
+				bins: { ...PROFILE_LIMITS.bins, max: this.clientBinsBound(s) },
+				...(this.binsCap.view ? { binsCap: { ...this.binsCap.view } } : {}),
 				averaging: { ...PROFILE_LIMITS.averaging },
 				backfill: { ...BACKFILL_LIMITS },
 			},
 			subscribers,
 			sources,
 		}
+	}
+
+	/** Largest client `bins`: min(cap, ws.spectrumSummaryBins, ceiling), never below the 128 minimum. */
+	private clientBinsBound(s: SpectrumSettings): number {
+		return Math.max(
+			PROFILE_LIMITS.bins.min,
+			Math.min(
+				this.binsCap.cap,
+				s.ws.spectrumSummaryBins,
+				PROFILE_BINS_CEILING,
+			),
+		)
 	}
 
 	allocation(): SpectrumAllocation {
@@ -597,6 +651,7 @@ export class SpectrumService extends EventEmitter {
 			routing: this.deps.routing,
 			tuner: this.deps.tuner,
 			settings: this.deps.settings,
+			binsCap: () => this.binsCap.cap,
 			tuning: () => this.deps.tuning(sourceId),
 			logger: this.deps.logger,
 			host: this.deps.engineHost ?? "thread",
@@ -846,7 +901,11 @@ export class SpectrumService extends EventEmitter {
 				)
 				return
 			}
-			const normalised = normaliseProfile(parsed.data, def)
+			const normalised = normaliseProfile(
+				parsed.data,
+				def,
+				this.clientBinsBound(this.deps.settings()),
+			)
 			adjusted = normalised.adjusted
 			const backfill = normaliseBackfillMs(parsed.data.backfillMs)
 			if (backfill.adjusted) adjusted.push("backfillMs")

@@ -65,6 +65,8 @@ export function normaliseProfile(
 		averaging?: number | undefined
 	},
 	fallback: SpectrumProfile,
+	/** WG8: the client bins ceiling (`clientBinsBound`); the default is today's 2 048. */
+	maxBins: number = PROFILE_LIMITS.bins.max,
 ): { profile: SpectrumProfile; adjusted: SpectrumProfileAdjustment[] } {
 	const adjusted: SpectrumProfileAdjustment[] = []
 	let hz = fallback.hz
@@ -76,7 +78,8 @@ export function normaliseProfile(
 		if (hz !== req.hz) adjusted.push("hz")
 	}
 	if (req.bins !== undefined) {
-		const { min, max } = PROFILE_LIMITS.bins
+		const { min } = PROFILE_LIMITS.bins
+		const max = maxBins
 		bins = clamp(Math.round(req.bins), min, max)
 		if (bins !== req.bins) adjusted.push("bins")
 	}
