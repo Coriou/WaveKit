@@ -1,6 +1,6 @@
 # Web gaps 5 design (WG5)
 
-Status: contract frozen; lanes in progress. Requirements in [requirements](requirements.md),
+Status: implemented. Requirements in [requirements](requirements.md),
 tasks in [tasks](tasks.md). Background: the Activity store
 ([activity recording catalog](../activity-recording-catalog/requirements.md)), WG2
 ([design](../web-gaps-2/design.md): presentation and the row budget), WG3

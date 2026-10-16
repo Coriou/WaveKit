@@ -1,6 +1,6 @@
 # Web gaps 5 requirements (WG5)
 
-Status: contract frozen; lanes AG, TA, AIS, V and B in progress. See [design](design.md) and
+Status: implemented (lanes AG, TA, AIS, V and B). See [design](design.md) and
 [tasks](tasks.md).
 
 ## Scope
