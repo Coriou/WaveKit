@@ -24,6 +24,13 @@ const DEFAULT_TIMEOUT_MS = 2000
 const BASE_BACKOFF_MS = 2000
 const MAX_BACKOFF_MS = 30000
 
+/** Pass a version string through only when it is short printable ASCII. */
+export function sanitizeHostVersion(value: unknown): string | null {
+	return typeof value === "string" && /^[\x20-\x7e]{1,64}$/.test(value)
+		? value
+		: null
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -289,7 +296,12 @@ export class SdrHostPoller extends EventEmitter {
 				throw new Error(`HTTP ${response.status}: ${response.statusText}`)
 			}
 
-			const data = (await response.json()) as {
+			const body: unknown = await response.json()
+			if (typeof body !== "object" || body === null || Array.isArray(body)) {
+				throw new Error("Malformed SDR host status body")
+			}
+			const data = body as {
+				version?: unknown
 				uptime?: number
 				rtlTcp?: {
 					running: boolean
@@ -388,6 +400,7 @@ export class SdrHostPoller extends EventEmitter {
 				available: true,
 				sourceId: config.sourceId,
 				apiUrl: config.apiUrl,
+				version: sanitizeHostVersion(data.version),
 				uptime: data.uptime ?? null,
 				rtlTcp: data.rtlTcp
 					? {
@@ -443,6 +456,7 @@ export class SdrHostPoller extends EventEmitter {
 			available: false,
 			sourceId: config.sourceId,
 			apiUrl: config.apiUrl,
+			version: null,
 			uptime: null,
 			rtlTcp: null,
 			rtlmux: null,

@@ -2,6 +2,8 @@ import type { FastifyInstance } from "fastify"
 import type { SdrHostSamplingHistory } from "@wavekit/api-types"
 import type { SdrHostConfig } from "../../config.js"
 
+export const SDR_HOST_VERSION = "1.0.0"
+
 /**
  * Registers GET /api/status endpoint.
  */
@@ -33,7 +35,7 @@ export function registerStatusRoutes(
 		}
 
 		return reply.send({
-			version: "1.0.0",
+			version: SDR_HOST_VERSION,
 			uptime,
 			dongle: preflightResult.dongle,
 			rtlTcp: {

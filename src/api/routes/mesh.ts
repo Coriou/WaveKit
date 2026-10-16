@@ -33,6 +33,7 @@ const positionSchema = {
 				lon: { type: "number" },
 				altitudeM: nullableNumber,
 				at: { type: "string" },
+				fixAt: nullableString,
 			},
 			required: ["lat", "lon", "altitudeM", "at"],
 		},

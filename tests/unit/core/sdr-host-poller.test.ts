@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
-import { SdrHostPoller } from "../../../src/core/sdr-host-poller.js"
+import * as fc from "fast-check"
+import {
+	SdrHostPoller,
+	sanitizeHostVersion,
+} from "../../../src/core/sdr-host-poller.js"
 import type { SdrHostStatus } from "@wavekit/api-types"
 import { createLogger } from "../../../src/utils/logger.js"
 
@@ -110,5 +114,79 @@ describe("SdrHostPoller API compatibility", () => {
 			{ id: 1, address: "192.168.1.3", bytesDropped: 2000 },
 			{ id: 2, address: "192.168.1.4", bytesDropped: 0 },
 		])
+	})
+
+	it.each([
+		["1.0.0", "1.0.0"],
+		[42, null],
+		[{ v: 1 }, null],
+		["x".repeat(65), null],
+		["x".repeat(64), "x".repeat(64)],
+		["1.0\u0007.0", null],
+		["", null],
+		[undefined, null],
+	])("version %j becomes %j", async (version, expected) => {
+		const status = await pollResponse({ version, uptime: 1 })
+		expect(status.version).toBe(expected)
+	})
+
+	it("reports a null version when the field is missing", async () => {
+		expect((await pollResponse({ uptime: 1 })).version).toBeNull()
+	})
+
+	it("the unavailable status has a null version", () => {
+		const poller = new SdrHostPoller(logger, [
+			{ sourceId: "a", apiUrl: "http://x" },
+		])
+		expect(poller.getStatus("a")?.version).toBeNull()
+	})
+
+	it.each([[null], [[1, 2]], ["text"], [7]])(
+		"survives a non-object body %j without throwing",
+		async body => {
+			const fetchFn = vi
+				.fn<typeof fetch>()
+				.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }))
+			const poller = new SdrHostPoller(
+				logger,
+				[{ sourceId: "a", apiUrl: "http://x" }],
+				{ fetchFn },
+			)
+			try {
+				const failed = new Promise<void>(resolve =>
+					poller.once("error", () => resolve()),
+				)
+				poller.start()
+				await failed
+				expect(poller.getStatus("a")?.available).toBe(false)
+				expect(poller.getStatus("a")?.version).toBeNull()
+			} finally {
+				poller.stop()
+			}
+		},
+	)
+})
+
+// Feature: web-gaps-4, Property 9: Poller hostility
+// Validates: Requirements 5.5
+describe("sanitizeHostVersion property", () => {
+	it("never throws and only passes 1-64 printable ASCII strings", () => {
+		fc.assert(
+			fc.property(fc.jsonValue(), value => {
+				const out = sanitizeHostVersion(value)
+				if (out !== null) {
+					expect(value).toBe(out)
+					expect(/^[\x20-\x7e]{1,64}$/.test(out)).toBe(true)
+				}
+			}),
+			{ numRuns: 200 },
+		)
+		fc.assert(
+			fc.property(fc.string({ minLength: 1, maxLength: 64 }), s => {
+				const ok = /^[\x20-\x7e]+$/.test(s)
+				expect(sanitizeHostVersion(s)).toBe(ok ? s : null)
+			}),
+			{ numRuns: 200 },
+		)
 	})
 })
