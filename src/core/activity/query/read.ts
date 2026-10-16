@@ -1,4 +1,8 @@
-import type { ActivityRecord, ActivitySummary } from "../storage/contract.js"
+import type {
+	ActivityRecord,
+	ActivitySummary,
+	ActivityTrails,
+} from "../storage/contract.js"
 import {
 	activityRecordCorrupt,
 	ActivityQueryInvalidError,
@@ -6,6 +10,7 @@ import {
 } from "./errors.js"
 import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
 import type { SqlDatabase, SqlValue } from "./sqlite.js"
+import { readTrails, type TrailsReadInput } from "./trails.js"
 import type { FacetDimension, NormalisedQuery } from "./validate.js"
 
 export interface SummaryRow {
@@ -38,6 +43,7 @@ export type ReadRequest =
 	| SearchReadRequest
 	| { op: "detail"; eventId: string }
 	| FacetsReadRequest
+	| { op: "trails"; input: TrailsReadInput }
 
 /** Store identity read in the same transaction as the rows. */
 export interface ObservedStore {
@@ -67,12 +73,18 @@ interface FacetsBody {
 	truncated: boolean
 }
 
-type ReadBody = SearchBody | DetailBody | FacetsBody
+interface TrailsBody {
+	op: "trails"
+	trails: ActivityTrails
+}
+
+type ReadBody = SearchBody | DetailBody | FacetsBody | TrailsBody
 
 export type ReadResult =
 	| (SearchBody & { observed: ObservedStore })
 	| (DetailBody & { observed: ObservedStore })
 	| (FacetsBody & { observed: ObservedStore })
+	| (TrailsBody & { observed: ObservedStore })
 
 const FACET_COLUMN: Record<FacetDimension, string> = {
 	category: "category",
@@ -374,6 +386,8 @@ function readBody(db: SqlDatabase, request: ReadRequest): ReadBody {
 			return { op: "detail", record: detail(db, request) }
 		case "facets":
 			return facets(db, request)
+		case "trails":
+			return { op: "trails", trails: readTrails(db, request.input) }
 		default:
 			throw new ActivityQueryInvalidError("Unknown activity read")
 	}
@@ -396,6 +410,8 @@ export function runRead(db: SqlDatabase, request: ReadRequest): ReadResult {
 			case "detail":
 				return { ...body, observed }
 			case "facets":
+				return { ...body, observed }
+			case "trails":
 				return { ...body, observed }
 			default:
 				throw new ActivityQueryInvalidError("Unknown activity read")
