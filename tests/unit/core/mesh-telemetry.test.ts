@@ -278,7 +278,8 @@ describe("mesh neighbours", () => {
 					if (age > 4 * HOUR) {
 						expect(ids).toEqual([])
 					} else {
-						const expected = second
+						// A node listed twice is one entry (one slot).
+						const expected = [...new Set(second)]
 							.map(n => "!" + n.toString(16).padStart(8, "0"))
 							.sort()
 							.slice(0, 32)
