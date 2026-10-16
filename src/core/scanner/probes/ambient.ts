@@ -125,8 +125,9 @@ export interface AmbientTrustBinding {
 
 /**
  * WG7 req 1.3: trust of an ambient decode at `hz` on `sourceId` from the decoder's provenance
- * binding. Fail closed: only `commanded`/`relay`, only when the binding's source (or, when it
- * names none, the decoder's resolved source) is `sourceId`, and only when `hz` lies within
+ * binding. Fail closed: only `commanded`/`relay`, only when the binding's source is `sourceId`
+ * (a binding without a source belongs to an external-input decoder and never counts), and only
+ * when `hz` lies within
  * SCANNER_AMBIENT_TARGET_TOLERANCE_HZ of one of the binding's own target frequencies (the
  * frequencies the trust was proven for). Anything else, a throw included, is undefined.
  */
@@ -134,13 +135,12 @@ export function ambientTrustFromBinding(
 	binding: AmbientTrustBinding | null | undefined,
 	hz: number,
 	sourceId: string,
-	resolvedSourceId: () => string | null | undefined,
 ): TuningTrust | undefined {
 	try {
 		if (!binding || !isTrusted(binding.tuningTrust)) return undefined
 		if (!Number.isFinite(hz)) return undefined
-		const bound = binding.sourceId ?? resolvedSourceId()
-		if (typeof bound !== "string" || bound !== sourceId) return undefined
+		if (typeof binding.sourceId !== "string" || binding.sourceId !== sourceId)
+			return undefined
 		const near = binding.targetFrequenciesHz.some(
 			t =>
 				Number.isFinite(t) &&

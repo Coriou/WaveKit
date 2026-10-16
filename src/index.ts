@@ -1025,9 +1025,6 @@ async function main(): Promise<void> {
 						ambientProvenance?.(decoderId),
 						hz,
 						sourceId,
-						() =>
-							decoderManager.getStatus(decoderId)?.sourceId ??
-							sourceRouting.getDefaultSourceId(),
 					),
 				digitalVoice,
 				liveDemod,

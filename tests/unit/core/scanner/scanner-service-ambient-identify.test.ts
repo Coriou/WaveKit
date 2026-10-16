@@ -146,7 +146,6 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 						: null,
 					hz,
 					sourceId,
-					() => "rtl",
 				)
 			},
 		})
@@ -391,57 +390,36 @@ describe("ambientTrustFromBinding (WG7 req 1.3)", () => {
 	})
 
 	it("trusts only commanded/relay on the same source within 1 kHz of a binding target", () => {
-		const rtl = () => "rtl"
-		expect(ambientTrustFromBinding(binding(), AIS_A, "rtl", rtl)).toBe(
-			"commanded",
-		)
+		expect(ambientTrustFromBinding(binding(), AIS_A, "rtl")).toBe("commanded")
 		expect(
 			ambientTrustFromBinding(
 				binding({ tuningTrust: "relay" }),
 				AIS_B + 1_000,
 				"rtl",
-				rtl,
 			),
 		).toBe("relay")
 		expect(
-			ambientTrustFromBinding(binding(), AIS_A + 1_001, "rtl", rtl),
+			ambientTrustFromBinding(binding(), AIS_A + 1_001, "rtl"),
 		).toBeUndefined()
 		expect(
 			ambientTrustFromBinding(
 				binding({ tuningTrust: "unverified" }),
 				AIS_A,
 				"rtl",
-				rtl,
 			),
 		).toBeUndefined()
-		expect(
-			ambientTrustFromBinding(binding(), AIS_A, "sdrpp", rtl),
-		).toBeUndefined()
+		expect(ambientTrustFromBinding(binding(), AIS_A, "sdrpp")).toBeUndefined()
 		expect(
 			ambientTrustFromBinding(
 				binding({ targetFrequenciesHz: [] }),
 				AIS_A,
 				"rtl",
-				rtl,
 			),
 		).toBeUndefined()
-		expect(ambientTrustFromBinding(null, AIS_A, "rtl", rtl)).toBeUndefined()
-		// No source on the binding: the decoder's resolved source decides.
+		expect(ambientTrustFromBinding(null, AIS_A, "rtl")).toBeUndefined()
+		// No source on the binding = an external-input decoder: never trusted.
 		expect(
-			ambientTrustFromBinding(binding({ sourceId: null }), AIS_A, "rtl", rtl),
-		).toBe("commanded")
-		expect(
-			ambientTrustFromBinding(
-				binding({ sourceId: null }),
-				AIS_A,
-				"rtl",
-				() => null,
-			),
-		).toBeUndefined()
-		expect(
-			ambientTrustFromBinding(binding({ sourceId: null }), AIS_A, "rtl", () => {
-				throw new Error("boom")
-			}),
+			ambientTrustFromBinding(binding({ sourceId: null }), AIS_A, "rtl"),
 		).toBeUndefined()
 	})
 
@@ -461,8 +439,7 @@ describe("ambientTrustFromBinding (WG7 req 1.3)", () => {
 				}),
 				fc.integer({ min: 161_000_000, max: 163_000_000 }),
 				fc.constantFrom("rtl", "sdrpp"),
-				fc.constantFrom("rtl", "sdrpp", null),
-				(trust, bound, targets, hz, sourceId, resolved) => {
+				(trust, bound, targets, hz, sourceId) => {
 					const got = ambientTrustFromBinding(
 						{
 							sourceId: bound,
@@ -471,11 +448,10 @@ describe("ambientTrustFromBinding (WG7 req 1.3)", () => {
 						},
 						hz,
 						sourceId,
-						() => resolved,
 					)
 					const ok =
 						(trust === "commanded" || trust === "relay") &&
-						(bound ?? resolved) === sourceId &&
+						bound === sourceId &&
 						targets.some(t => Math.abs(t - hz) <= 1_000)
 					expect(got).toBe(ok ? trust : undefined)
 				},
