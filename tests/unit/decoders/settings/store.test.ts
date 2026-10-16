@@ -621,3 +621,34 @@ describe("decoder settings store tmp file (WG8 R1)", () => {
 		)
 	})
 })
+
+describe("decoder settings store non-regular files (WG8 R1 r2)", () => {
+	const mkfifo = async (path: string): Promise<void> => {
+		const { execFileSync } = await import("node:child_process")
+		execFileSync("mkfifo", [path])
+	}
+
+	it("does not hang on a FIFO at the settings path and moves it aside", async () => {
+		await mkfifo(join(dir, FILE))
+		const { store } = await open()
+		expect(store.snapshot().decoders).toEqual({})
+		await store.write(valid(1))
+		expect((await nodeFs.lstat(join(dir, FILE))).isFile()).toBe(true)
+	}, 5_000)
+
+	it("does not follow a settings symlink to a FIFO", async () => {
+		const fifo = join(dir, "pipe")
+		await mkfifo(fifo)
+		await nodeFs.symlink(fifo, join(dir, FILE))
+		const { store } = await open()
+		expect(store.snapshot().decoders).toEqual({})
+	}, 5_000)
+
+	it("does not hang on a quarantined copy that links to a FIFO", async () => {
+		const fifo = join(dir, "pipe")
+		await mkfifo(fifo)
+		await nodeFs.symlink(fifo, join(dir, `${FILE}.corrupt-1`))
+		const { store } = await open()
+		expect(store.snapshot().decoders).toEqual({})
+	}, 5_000)
+})

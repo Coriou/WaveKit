@@ -3,6 +3,7 @@
  * (docs/specs/web-gaps-8, requirements 1.1 to 1.6, design "Decoder settings", Store).
  * Mirrors src/core/station/store.ts. The patch policy is not applied here (the service does it).
  */
+import { constants as fsConstants } from "node:fs"
 import * as nodeFs from "node:fs/promises"
 import { join } from "node:path"
 import { z } from "zod"
@@ -15,6 +16,7 @@ import {
 import type { DecoderSettingValue } from "@wavekit/api-types"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
+import { WaveKitError } from "../../utils/errors.js"
 import { safeErrorFields } from "../safe-error-fields.js"
 import {
 	DECODER_SETTINGS_SCHEMA_VERSION,
@@ -270,13 +272,18 @@ function emptyFile(revision: number): DecoderSettingsFile {
 
 type ReadResult = string | null | "oversized"
 
+const READ_FLAGS =
+	fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | fsConstants.O_NOFOLLOW
+
 async function readBounded(
 	fs: DecoderSettingsFs,
 	path: string,
 ): Promise<ReadResult> {
 	let handle
 	try {
-		handle = await fs.open(path, "r")
+		// Non-blocking and no symlink following: a FIFO, device or link at the path can neither
+		// hang startup nor redirect the read. Anything but a regular file is unreadable.
+		handle = await fs.open(path, READ_FLAGS)
 	} catch (error: unknown) {
 		const code = (error as NodeJS.ErrnoException).code
 		if (code === "ENOENT" || code === "ENOTDIR") return null
@@ -284,6 +291,12 @@ async function readBounded(
 	}
 	try {
 		const stat = await handle.stat()
+		if (!stat.isFile())
+			// Not a regular file (FIFO, device, ...): treated as unreadable by the caller.
+			throw new WaveKitError(
+				"Decoder settings path is not a regular file",
+				"DECODER_SETTINGS_NOT_REGULAR",
+			)
 		if (stat.size > DECODER_SETTINGS_FILE_MAX_BYTES) return "oversized"
 		const buffer = Buffer.alloc(DECODER_SETTINGS_FILE_MAX_BYTES + 1)
 		let length = 0
