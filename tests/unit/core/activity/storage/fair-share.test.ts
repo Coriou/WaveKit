@@ -152,6 +152,7 @@ describe("fair-share planner", () => {
 			rowLevel: null,
 			byteLevel: null,
 			residual: false,
+			overLevel: [],
 		})
 	})
 

@@ -9,7 +9,10 @@ import {
 	readActivityLiveBytes,
 	readActivityState,
 } from "../../../../../src/core/activity/storage/database.js"
-import { planFairStep } from "../../../../../src/core/activity/storage/fair-share.js"
+import {
+	indivisibleShare,
+	planFairStep,
+} from "../../../../../src/core/activity/storage/fair-share.js"
 import type { ActivityRetentionPolicy } from "../../../../../src/core/activity/storage/contract.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
 import type { SqliteDatabase } from "../../../../../src/core/activity/storage/sqlite.js"
@@ -690,5 +693,64 @@ describe("fair-share retention regressions, round 2", () => {
 		} finally {
 			db.close()
 		}
+	})
+})
+
+// Review round 3 (WG3 F).
+describe("fair-share retention regressions, round 3", () => {
+	it("tries over-level shares the budget left out before an indivisible step", async () => {
+		const db = await openSqliteFile(":memory:")
+		openActivityDatabase(db)
+		const rows = [
+			shareRow("a-big", "a", NOW, 60_000),
+			...Array.from({ length: 39 }, (_, index) =>
+				shareRow(`a-small${index}`, "a", NOW, 10),
+			),
+			shareRow("b-small", "b", NOW, 10),
+			shareRow("b-big", "b", NOW, 100_000),
+		]
+		expect(commitActivityBatch(db, rows).ok).toBe(true)
+		const usage = groupedScan(db)
+		const live = readActivityLiveBytes(db).dbBytes
+		// A byte cap whose level sits 5000 B under share a: a's oldest row cannot go.
+		const level = (usage.get("decoder:a")?.bytes ?? 0) - 5_000
+		let excess = 0
+		for (const share of usage.values())
+			excess += Math.max(0, share.bytes - level)
+		const maxDbBytes = Math.ceil((live - excess) / 0.95)
+		expect(live).toBeGreaterThan(maxDbBytes)
+		const session = createActivitySession(
+			db,
+			":memory:",
+			smallLimits({ maxDbBytes, pruneBatchRows: 1, pruneBurstBatches: 1 }),
+		)
+		try {
+			const wrote = writeOk(session, [])
+			expect(wrote.note).toBeUndefined()
+			expect(wrote.prune.deleted).toBe(1)
+			// b's small oldest row goes; a's big row is kept and nothing is counted.
+			expect(eventIds(db)).toContain("a-big")
+			expect(eventIds(db)).not.toContain("b-small")
+			expect(wrote.snapshot.retention.prefixFallbackSteps).toBe(0)
+			expect(sharesOf(wrote.snapshot.retention.shares)).toEqual(groupedScan(db))
+		} finally {
+			session.close()
+		}
+	})
+
+	it("picks the indivisible victim across all over-level shares", () => {
+		const shares = [
+			{ key: "a", rows: 100, bytes: 20_000 },
+			{ key: "b", rows: 1, bytes: 30_000 },
+		]
+		const plan = planFairStep({
+			shares,
+			rowTarget: null,
+			byteExcess: 12_000,
+			budget: 1,
+		})
+		expect(plan.allocations.map(a => a.key)).not.toContain("b")
+		expect(plan.overLevel.map(o => o.key)).toEqual(["b", "a"])
+		expect(indivisibleShare(plan, shares)).toBe("b")
 	})
 })

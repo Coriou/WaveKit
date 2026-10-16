@@ -150,7 +150,10 @@ describe("Property 1: Fair floor", () => {
 						{ minLength: 2, maxLength: 4 },
 					),
 					fc.integer({ min: 1, max: 40_000 }),
-					fc.integer({ min: 1, max: 30 }),
+					fc.oneof(
+						fc.integer({ min: 1, max: 3 }),
+						fc.integer({ min: 1, max: 30 }),
+					),
 					fc.boolean(),
 					async (blobs, byteExcess, budget, rowCap) => {
 						db.exec("DELETE FROM activity_fts")
@@ -184,24 +187,44 @@ describe("Property 1: Fair floor", () => {
 							})),
 							{ rowCount: totalRows, dbBytes: 0 },
 						)
-						// The writer's indivisible step: the fair step deleted nothing.
-						const pick =
-							fair.deleted === 0 ? indivisibleShare(plan, usages) : null
-						const step =
-							pick === null
-								? fair
-								: pruneActivityFair(
-										db,
-										{ incrementalVacuumPages: 0 },
-										[
-											{
-												decoderId: pick.slice("decoder:".length),
-												kind: "",
-												rows: 1,
-											},
-										],
-										{ rowCount: totalRows, dbBytes: 0 },
-									)
+						// The writer's composition after a fair step that deleted nothing: first the
+						// over-level shares the budget left out, then the indivisible step.
+						const target = (key: string, rows: number, minRows: number) => ({
+							decoderId: key.slice("decoder:".length),
+							kind: "",
+							rows,
+							minRows,
+							byteFloor: plan.byteLevel,
+							shareBytes: before.get(key)?.bytes ?? 0,
+						})
+						const allocated = new Set(plan.allocations.map(a => a.key))
+						let step = fair
+						let pick: string | null = null
+						if (fair.deleted === 0)
+							for (const o of plan.overLevel) {
+								if (allocated.has(o.key)) continue
+								const rows = Math.min(o.rows, budget)
+								const tried = pruneActivityFair(
+									db,
+									{ incrementalVacuumPages: 0 },
+									[target(o.key, rows, Math.min(o.minRows, rows))],
+									{ rowCount: totalRows, dbBytes: 0 },
+								)
+								if (tried.deleted > 0) {
+									step = tried
+									break
+								}
+							}
+						if (step.deleted === 0) {
+							pick = indivisibleShare(plan, usages)
+							if (pick !== null)
+								step = pruneActivityFair(
+									db,
+									{ incrementalVacuumPages: 0 },
+									[target(pick, 1, 1)],
+									{ rowCount: totalRows, dbBytes: 0 },
+								)
+						}
 						const after = groupedScan(db)
 						const deletedBy = new Map<string, number>()
 						for (const row of step.deletedRows) {
@@ -210,9 +233,7 @@ describe("Property 1: Fair floor", () => {
 						}
 						const excessOf = (key: string): number => {
 							const was = before.get(key) ?? { rows: 0, bytes: 0 }
-							const allocation = plan.allocations.find(a => a.key === key)
-							if (allocation?.byteFloor !== null && allocation !== undefined)
-								return was.bytes - allocation.byteFloor
+							if (plan.byteLevel !== null) return was.bytes - plan.byteLevel
 							return plan.rowLevel === null ? 0 : was.rows - plan.rowLevel
 						}
 						if (pick !== null) {
@@ -220,7 +241,8 @@ describe("Property 1: Fair floor", () => {
 							// Exactly one row, from the largest-excess share, ties key ascending.
 							expect(step.deleted).toBe(1)
 							expect(deletedBy.get(pick)).toBe(1)
-							for (const a of plan.allocations) {
+							// Across ALL over-level shares, not only the allocated ones.
+							for (const a of plan.overLevel) {
 								const other = excessOf(a.key)
 								expect(
 									other < excessOf(pick) ||
@@ -230,9 +252,10 @@ describe("Property 1: Fair floor", () => {
 						}
 						for (const [key, was] of before) {
 							const now = after.get(key) ?? { rows: 0, bytes: 0 }
-							const allocation = plan.allocations.find(a => a.key === key)
+							const allocation = plan.overLevel.find(a => a.key === key)
 							const deleted = deletedBy.get(key) ?? 0
 							if (deleted === 0) continue
+							expect(step.deleted).toBeLessThanOrEqual(budget)
 							// Never a share at or under the level.
 							expect(
 								(plan.byteLevel !== null && was.bytes > plan.byteLevel) ||

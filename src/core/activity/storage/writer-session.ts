@@ -313,6 +313,26 @@ export function createActivitySession(
 			if (!seed()) return oldestFirstStep(nowMs)
 			return fairShareStep(nowMs, burst)
 		}
+		// The budget may have left out over-level shares that can yield a whole row: try them,
+		// largest excess first, each within the budget, before declaring indivisibility.
+		const allocated = new Set(planned.allocations.map(a => a.key))
+		for (const candidate of planned.overLevel) {
+			if (allocated.has(candidate.key)) continue
+			const other = counters.get(candidate.key)
+			if (!other) continue
+			const rows = Math.min(candidate.rows, limits.pruneBatchRows)
+			const tried = runFair([
+				{
+					decoderId: other.decoderId,
+					kind: other.kind,
+					rows,
+					minRows: Math.min(candidate.minRows, rows),
+					byteFloor: candidate.byteFloor,
+					shareBytes: other.bytes,
+				},
+			])
+			if (tried.changed) return tried
+		}
 		// Indivisible step: every candidate would cross its share's byte floor. Delete the
 		// oldest row of the over-level share with the largest excess (ties key ascending),
 		// so the cap still binds and no share at or under the level loses a row. Counted in

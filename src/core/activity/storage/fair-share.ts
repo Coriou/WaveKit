@@ -80,6 +80,12 @@ export interface FairStepPlan {
 	readonly byteLevel: number | null
 	/** A cap is active with excess but no share is above its level (prefix fallback, 1.12). */
 	readonly residual: boolean
+	/**
+	 * Every share above a level, whether or not the budget reached it: `rows` is its whole
+	 * step excess. Largest excess first (record bytes above the byte level when the byte cap
+	 * is active, else rows above the row level), ties key ascending.
+	 */
+	readonly overLevel: readonly FairShareAllocation[]
 }
 
 function compareKey(a: string, b: string): number {
@@ -149,9 +155,24 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 	}
 	const residual =
 		(rowLevel !== null || byteLevel !== null) && over.length === 0
+	const usageOf = new Map(shares.map(s => [s.key, s]))
+	const metric = (key: string): number => {
+		const s = usageOf.get(key)
+		if (!s) return 0
+		if (byteLevel !== null) return s.bytes - byteLevel
+		return rowLevel === null ? 0 : s.rows - rowLevel
+	}
+	const overLevel: FairShareAllocation[] = over
+		.map(o => ({
+			key: o.key,
+			rows: o.excess,
+			minRows: o.rowEx,
+			byteFloor: byteLevel,
+		}))
+		.sort((a, b) => metric(b.key) - metric(a.key) || compareKey(a.key, b.key))
 	const budget = clean(input.budget)
 	if (budget < 1 || over.length === 0)
-		return { allocations: [], rowLevel, byteLevel, residual }
+		return { allocations: [], rowLevel, byteLevel, residual, overLevel }
 
 	let allocations: FairShareAllocation[]
 	if (over.length >= budget) {
@@ -200,14 +221,14 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 		}))
 	}
 	allocations.sort((a, b) => compareKey(a.key, b.key))
-	return { allocations, rowLevel, byteLevel, residual }
+	return { allocations, rowLevel, byteLevel, residual, overLevel }
 }
 
 /**
- * The share an indivisible step takes one row from: when a fair step deleted nothing because
- * every candidate would cross its byte floor, the allocated share with the largest excess
- * (record bytes above the byte level, else rows above the row level), ties key ascending.
- * Null when no allocated share is above a level.
+ * The share an indivisible step takes one row from, once no over-level share can delete a
+ * row without crossing its byte floor: across ALL over-level shares (not only the ones the
+ * budget allocated), the largest excess (record bytes above the byte level, else rows above
+ * the row level), ties key ascending. Null when no share is above a level.
  */
 export function indivisibleShare(
 	plan: FairStepPlan,
@@ -215,12 +236,12 @@ export function indivisibleShare(
 ): string | null {
 	const usage = new Map(normalizeShares(shares).map(s => [s.key, s]))
 	let best: { key: string; excess: number } | null = null
-	for (const allocation of plan.allocations) {
-		const share = usage.get(allocation.key)
+	for (const candidate of plan.overLevel) {
+		const share = usage.get(candidate.key)
 		if (!share || share.rows < 1) continue
 		const excess =
-			allocation.byteFloor !== null
-				? share.bytes - allocation.byteFloor
+			candidate.byteFloor !== null
+				? share.bytes - candidate.byteFloor
 				: plan.rowLevel === null
 					? 0
 					: share.rows - plan.rowLevel
@@ -228,9 +249,9 @@ export function indivisibleShare(
 		if (
 			best === null ||
 			excess > best.excess ||
-			(excess === best.excess && compareKey(allocation.key, best.key) < 0)
+			(excess === best.excess && compareKey(candidate.key, best.key) < 0)
 		)
-			best = { key: allocation.key, excess }
+			best = { key: candidate.key, excess }
 	}
 	return best?.key ?? null
 }
