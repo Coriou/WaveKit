@@ -20,7 +20,7 @@ import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
 import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
 import { WaveKitError } from "./utils/errors.js"
 import { PassThrough } from "node:stream"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
 	loadConfig,
@@ -135,6 +135,7 @@ import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
 import { openStationService } from "./core/station/station-service.js"
 import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
+import { createRecordingInventory } from "./core/recordings/inventory.js"
 import type {
 	DecoderSettingsManagerPort,
 	DecoderSettingsService,
@@ -145,6 +146,7 @@ import { STATION_WRITE_REQUIRES_ACCESS } from "./core/station/contract.js"
 import { createStorageReporter } from "./core/storage-report/reporter.js"
 import {
 	activityRetentionFromStats,
+	dsdFmeRecordingDir,
 	liveStorageReportSources,
 	storageActivityLimits,
 } from "./core/storage-report/areas-from-config.js"
@@ -337,6 +339,25 @@ export function decoderSettingsPort(
 			decoderManager.stageDecoderOptions(id, options),
 		isRestartPending: id => decoderManager.isRestartPending(id),
 	}
+}
+
+/**
+ * WG8 req 4.1: the dsd-fme per-call recording directories of the configured decoders (scanner
+ * probes are not configured decoders), sorted by decoder id so inventory ids stay stable.
+ */
+export function recordingDsdFmeDirs(
+	decoderManager: Pick<DecoderManager, "getConfiguredDecoderConfigs">,
+): { decoderId: string; dir: string }[] {
+	return decoderManager
+		.getConfiguredDecoderConfigs()
+		.filter(c => c.type === "dsd-fme")
+		.flatMap(c => {
+			const dir = dsdFmeRecordingDir(c.options)
+			return dir === null ? [] : [{ decoderId: c.id, dir }]
+		})
+		.sort((a, b) =>
+			a.decoderId < b.decoderId ? -1 : a.decoderId > b.decoderId ? 1 : 0,
+		)
 }
 
 /** Actual phase promises remain authoritative even when a caller races a timeout. */
@@ -1439,6 +1460,22 @@ async function main(): Promise<void> {
 					: activityRetentionFromStats(activity.stats(), activityLimits),
 			minFreeBytes: storageSources.minFreeBytes,
 		})
+		// WG8 req 4: read-only recordings inventory (protected routes only). dsd-fme per-call
+		// directories of the configured decoders (probes excluded), sorted by decoder id; the
+		// scanner's recordings root as its service resolves it, none without a scanner.
+		const recordingInventory = createRecordingInventory({
+			dsdFmeDirs: () => recordingDsdFmeDirs(decoderManager),
+			scannerRecordingsDir: () => {
+				if (scanner === null) return null
+				const storage = scanner.settings().storage
+				return join(
+					resolve(storage.dir ?? join(config.stateDir, "scanner")),
+					"recordings",
+				)
+			},
+			discoveryCentreHz: id => scanner?.getDiscovery(id)?.frequencyHz ?? null,
+			logger,
+		})
 
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
@@ -1499,6 +1536,7 @@ async function main(): Promise<void> {
 				aprsTracker: aprsTrackingManager.getTracker(),
 				stationEstimate,
 				storageReport,
+				recordingInventory,
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,

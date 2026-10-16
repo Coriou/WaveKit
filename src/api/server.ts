@@ -15,7 +15,10 @@ import type { StationIdentity } from "@wavekit/api-types"
 import {
 	CONFIG_EXPORT_REQUIRES_ACCESS,
 	DECODER_SETTINGS_REQUIRES_ACCESS,
+	RECORDINGS_REQUIRES_ACCESS,
 } from "@wavekit/api-types"
+import type { RecordingInventory } from "../core/recordings/inventory.js"
+import { recordingRoutes } from "./routes/recordings.js"
 import type { DecoderSettingsService } from "../decoders/settings/contract.js"
 import { stationRoutes } from "./routes/station.js"
 import { stationEstimateRoutes } from "./routes/station-estimate.js"
@@ -208,6 +211,11 @@ export interface ApiServerDependencies {
 	 * otherwise the legacy decoder routes (PATCH 501) are unchanged.
 	 */
 	decoderSettings?: DecoderSettingsService | undefined
+	/**
+	 * WG8 req 4: the read-only recordings inventory. GET /api/recordings and the download mount
+	 * only with the access controller while RECORDINGS_REQUIRES_ACCESS is true (legacy: 404).
+	 */
+	recordingInventory?: RecordingInventory | undefined
 	/** APRS station, object and item current state (WG2 req 4). */
 	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
@@ -232,6 +240,7 @@ export class ApiServer {
 	private readonly stationEstimate: StationEstimateProvider | undefined
 	private readonly stationService: StationService | undefined
 	private readonly decoderSettings: DecoderSettingsService | undefined
+	private readonly recordingInventory: RecordingInventory | undefined
 	private readonly getConfig: (() => Config) | undefined
 	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
@@ -300,6 +309,7 @@ export class ApiServer {
 		this.stationEstimate = dependencies.stationEstimate
 		this.stationService = dependencies.stationService
 		this.decoderSettings = dependencies.decoderSettings
+		this.recordingInventory = dependencies.recordingInventory
 		this.getConfig = dependencies.getConfig
 		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
@@ -1417,6 +1427,18 @@ export class ApiServer {
 					}
 				: {}),
 		})
+		// WG8 req 4: protected only; the download takes a lease like the scanner download
+		if (
+			this.recordingInventory &&
+			this.accessController &&
+			RECORDINGS_REQUIRES_ACCESS
+		)
+			await this.app.register(recordingRoutes, {
+				inventory: this.recordingInventory,
+				authorize: request =>
+					this.accessController!.authorizeMetadataMutation(request),
+				access: this.accessController,
+			})
 		// Band overrides (band defaults spec §5.2)
 		await this.app.register(decoderBandRoutes, {
 			decoderManager: this.decoderManager,
