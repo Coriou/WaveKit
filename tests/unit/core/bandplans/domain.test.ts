@@ -689,6 +689,24 @@ describe("band plan transitions", () => {
 		expect(repeat.changed).toBe(false)
 	})
 
+	// Feature: web-gaps-5, Property 12: Import round trip
+	// Validates: Requirements 7.6
+	it.each(["sdrpp-json", "sdrsharp-xml", "gqrx-csv"] as const)(
+		"stores the parsed %s format in the provenance",
+		format => {
+			const file = hashed(`community-${format}`)
+			const state = empty()
+			const base = parsed([storedBand("b-one", "One", null)], file.sha256)
+			const imported = transition(
+				state,
+				commit(state, file, [], { format }),
+				ctx("CA"),
+				{ ...base, preview: { ...base.preview, format } },
+			)
+			expect(imported.state.importedPacks[0]?.provenance.format).toBe(format)
+		},
+	)
+
 	it("commits an import, strips colour unless asked, and materializes the regional default stack", () => {
 		const file = hashed("community-a")
 		const state = empty()

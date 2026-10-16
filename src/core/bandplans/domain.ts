@@ -514,7 +514,7 @@ export const transition: BandPlanTransition = (
 				provenance: {
 					kind: "imported",
 					trust: "community-unverified",
-					format: "sdrpp-json",
+					format: parsedImport.preview.format,
 					sourceName: mutation.fileName,
 					author: mutation.author,
 					licence: mutation.licence,

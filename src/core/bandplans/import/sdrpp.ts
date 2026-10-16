@@ -9,38 +9,32 @@ import type { ImportSkipReason, StoredBand } from "@wavekit/api-types"
 import type {
 	ParsedImportPreview,
 	ParseSdrppBandPlan,
-	SdrppFailureReason,
-	SdrppParseFailure,
 	SdrppParseOptions,
 } from "../contract.js"
 import { aggregateImportReport, mapImportGroup } from "./group-map.js"
 import type { MappedImportRow } from "./group-map.js"
+import {
+	allocateId,
+	countSkip,
+	decodeStrictUtf8,
+	exceedsCodePoints,
+	invalid,
+	NAME_CODE_POINTS,
+	slugFromName,
+	sourceTypeOf,
+	TEXT_INVALID,
+	toStoredBand,
+	tooLarge,
+} from "./group-map.js"
+import type { NormalizedRow } from "./group-map.js"
 
 const META_CODE_POINTS = 80
-const NAME_CODE_POINTS = 80
-const SOURCE_TYPE_MAX = 64
-const SLUG_MAX = 56
-const ID_MAX = 64
-const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/
 const COLOUR_PATTERN = /^#[0-9a-fA-F]{6}$/
-const TEXT_INVALID = /[\p{Cc}\p{Cs}]/u
-
-const IMPORTED_PROVENANCE: StoredBand["provenance"] = Object.freeze({
-	kind: "imported",
-})
 
 interface DocumentRead {
 	ok: true
 	meta: ParsedImportPreview["meta"]
 	bands: readonly unknown[]
-}
-
-interface NormalizedRow {
-	readonly name: string
-	readonly sourceType: string
-	readonly startHz: number
-	readonly endHz: number
-	readonly colourHint: string | null
 }
 
 export const parseSdrppBandPlan: ParseSdrppBandPlan = (bytes, options) => {
@@ -56,7 +50,7 @@ function parseBody(
 	options: SdrppParseOptions,
 ): ReturnType<ParseSdrppBandPlan> {
 	if (bytes.length > BANDPLANS_LIMITS.importFileBytes) return tooLarge()
-	const text = decodeStrict(bytes)
+	const text = decodeStrictUtf8(bytes)
 	if (text === null) return invalid("encoding")
 	const parsed = parseJson(text)
 	if (!parsed.ok) return invalid("json")
@@ -119,28 +113,6 @@ function parseBody(
 		report: aggregateImportReport(document.bands.length, skipCounts, rows),
 	}
 	return { ok: true, value: { preview, bands } }
-}
-
-function tooLarge(): SdrppParseFailure {
-	return { ok: false, code: "BANDPLANS_IMPORT_TOO_LARGE", reason: "too-large" }
-}
-
-function invalid(reason: SdrppFailureReason): SdrppParseFailure {
-	return { ok: false, code: "BANDPLANS_IMPORT_INVALID", reason }
-}
-
-function decodeStrict(bytes: Uint8Array): string | null {
-	let view = bytes
-	const b0 = bytes[0]
-	const b1 = bytes[1]
-	const b2 = bytes[2]
-	if (bytes.length >= 3 && b0 === 0xef && b1 === 0xbb && b2 === 0xbf)
-		view = bytes.subarray(3)
-	try {
-		return new TextDecoder("utf-8", { fatal: true }).decode(view)
-	} catch {
-		return null
-	}
 }
 
 function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
@@ -225,107 +197,9 @@ function inspectRow(row: unknown): ImportSkipReason | NormalizedRow {
 	}
 }
 
-/** Trimmed, capped at 64 so it fits an operator override key. */
-function sourceTypeOf(type: string): string {
-	const trimmed = type.trim()
-	return trimmed.length <= SOURCE_TYPE_MAX
-		? trimmed
-		: trimmed.slice(0, SOURCE_TYPE_MAX)
-}
-
 function colourOf(trimmedType: string): string | null {
 	if (!COLOUR_PATTERN.test(trimmedType)) return null
 	return trimmedType.toLowerCase()
-}
-
-function toStoredBand(
-	id: string,
-	row: NormalizedRow,
-	group: StoredBand["group"],
-): StoredBand {
-	return {
-		id,
-		name: row.name,
-		startHz: row.startHz,
-		endHz: row.endHz,
-		group,
-		mode: null,
-		bandwidthHz: null,
-		stepHz: null,
-		skip: null,
-		channels: [],
-		parentId: null,
-		colourHint: row.colourHint,
-		registryRef: null,
-		scan: null,
-		provenance: IMPORTED_PROVENANCE,
-	}
-}
-
-/**
- * Lowercase, collapse non-alphanumerics to "-", trim dashes, keep at most
- * 56 characters, then prefix "b-" unless it starts with a letter. An empty
- * slug becomes "band". Later repeats get "-2", "-3", skipping ids already
- * used in this file.
- */
-function slugFromName(name: string): string {
-	let slug = name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-	if (slug.length > SLUG_MAX) slug = slug.slice(0, SLUG_MAX).replace(/-+$/g, "")
-	if (slug.length === 0) return "band"
-	if (!/^[a-z]/.test(slug)) return `b-${slug}`
-	return slug
-}
-
-function allocateId(base: string, used: Set<string>): string {
-	const first = reserve(base, used)
-	if (first !== null) return first
-	for (let n = 2; n <= 10_000; n++) {
-		const next = reserve(fitSuffix(base, n), used)
-		if (next !== null) return next
-	}
-	for (let n = 0; n <= 10_000; n++) {
-		const next = reserve(`b-${n.toString(16)}`, used)
-		if (next !== null) return next
-	}
-	// Unreachable within the 512-band pack cap. The outer catch stays total.
-	throw new Error("band-id")
-}
-
-function fitSuffix(base: string, n: number): string {
-	const suffix = `-${n}`
-	let stem = base
-	if (stem.length + suffix.length > ID_MAX)
-		stem = stem.slice(0, ID_MAX - suffix.length).replace(/-+$/g, "")
-	if (stem.length === 0 || !/^[a-z]/.test(stem)) stem = "band"
-	return stem + suffix
-}
-
-function reserve(id: string, used: Set<string>): string | null {
-	if (!ID_PATTERN.test(id) || used.has(id)) return null
-	used.add(id)
-	return id
-}
-
-function countSkip(
-	counts: Map<ImportSkipReason, number>,
-	reason: ImportSkipReason,
-): void {
-	counts.set(reason, (counts.get(reason) ?? 0) + 1)
-}
-
-function exceedsCodePoints(value: string, max: number): boolean {
-	let count = 0
-	for (let i = 0; i < value.length; ) {
-		const code = value.codePointAt(i)
-		if (code === undefined) break
-		count += 1
-		if (count > max) return true
-		i += code > 0xffff ? 2 : 1
-	}
-	return false
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

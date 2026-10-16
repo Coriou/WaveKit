@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic SDR# band plan written for WaveKit tests; not copied from any distribution. -->
+<ArrayOfRangeEntry xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <RangeEntry minFrequency="135000" maxFrequency="137800" mode="CW" step="100" color="FF4682B4">2200m Ham Band</RangeEntry>
+  <RangeEntry minFrequency="526500" maxFrequency="1606500" mode="AM" step="9000" color="ff90ee90">MW Broadcast</RangeEntry>
+  <RangeEntry minFrequency="3500000" maxFrequency="3800000" mode="LSB" step="500" color="#B0C4DE">80m Ham Band</RangeEntry>
+  <RangeEntry color="#FFDDA0DD" step="1000" mode="USB" maxFrequency="14350000" minFrequency="14000000">20m Ham &amp; Contest</RangeEntry>
+  <RangeEntry minFrequency="87500000" maxFrequency="108000000" mode="WFM" step="100000" color="FFFFA500">FM Broadcast</RangeEntry>
+  <RangeEntry minFrequency="108000000" maxFrequency="137000000" mode="AM" step="8330" color="FF87CEFA">Air Band</RangeEntry>
+  <RangeEntry minFrequency="144000000" maxFrequency="146000000" mode="NFM" step="12500" color="FFADFF2F">2m Ham Band</RangeEntry>
+  <RangeEntry minFrequency="156000000" maxFrequency="162025000" mode="NFM" step="25000" color="FF00CED1">Marine VHF</RangeEntry>
+  <RangeEntry minFrequency="433050000" maxFrequency="434790000" mode="NFM" step="25000" color="FFF0E68C">ISM 433 &#x2013; LPD</RangeEntry>
+  <!-- rows the importer skips -->
+  <RangeEntry minFrequency="446000000" maxFrequency="446200000" mode="NFM" step="12500" color="FFFFC0CB"></RangeEntry>
+  <RangeEntry minFrequency="500" maxFrequency="400" mode="AM" step="1" color="FF000000">Backwards</RangeEntry>
+  <RangeEntry maxFrequency="1000" mode="AM">No Minimum</RangeEntry>
+</ArrayOfRangeEntry>
