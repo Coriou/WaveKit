@@ -8,6 +8,7 @@ import {
 import {
 	cursorBehindWatermark,
 	formatSeq,
+	holeStateOf,
 	parseSeq,
 	snapshotLowerBoundPassed,
 } from "./seq.js"
@@ -27,6 +28,8 @@ export interface CursorPayload {
 	H?: string
 	lastSeq: string
 	pruneGeneration: number
+	/** WG3 hole generation. Tokens issued before WG3 omit it: read as 0. */
+	hg: number
 	expiresAt: string
 }
 
@@ -47,6 +50,7 @@ const KEYS = new Set([
 	"H",
 	"lastSeq",
 	"pruneGeneration",
+	"hg",
 	"expiresAt",
 ])
 
@@ -127,25 +131,27 @@ function decode(token: string, key: Buffer): CursorPayload {
 	}
 	const body = token.slice(0, dot)
 	const macText = token.slice(dot + 1)
-	if (
-		!/^[A-Za-z0-9_-]+$/.test(body) ||
-		!/^[A-Za-z0-9_-]+$/.test(macText)
-	) {
+	if (!/^[A-Za-z0-9_-]+$/.test(body) || !/^[A-Za-z0-9_-]+$/.test(macText)) {
 		throw new ActivityCursorInvalidError()
 	}
 	const presented = Buffer.from(macText, "base64url")
 	const expected = createHmac("sha256", requireKey(key)).update(body).digest()
 	if (!safeMacEqual(presented, expected)) throw new ActivityCursorInvalidError()
 	const record = readPayload(body)
-	if (record["v"] !== CURSOR_VERSION || record["queryVersion"] !== QUERY_VERSION) {
+	if (
+		record["v"] !== CURSOR_VERSION ||
+		record["queryVersion"] !== QUERY_VERSION
+	) {
 		throw new ActivityCursorInvalidError()
 	}
 	const order = record["order"]
-	if (order !== "asc" && order !== "desc") throw new ActivityCursorInvalidError()
+	if (order !== "asc" && order !== "desc")
+		throw new ActivityCursorInvalidError()
 	const queryHash = readString(record, "queryHash")
 	if (!/^[a-f0-9]{64}$/.test(queryHash)) throw new ActivityCursorInvalidError()
 	const expiresAt = readString(record, "expiresAt")
-	if (!Number.isFinite(Date.parse(expiresAt))) throw new ActivityCursorInvalidError()
+	if (!Number.isFinite(Date.parse(expiresAt)))
+		throw new ActivityCursorInvalidError()
 	const lastSeq = readString(record, "lastSeq")
 	parseSeq(lastSeq)
 	const payload: CursorPayload = {
@@ -157,6 +163,7 @@ function decode(token: string, key: Buffer): CursorPayload {
 		order,
 		lastSeq,
 		pruneGeneration: readGeneration(record["pruneGeneration"]),
+		hg: "hg" in record ? readGeneration(record["hg"]) : 0,
 		expiresAt,
 	}
 	const low = readOptionalSeq(record, "L")
@@ -168,7 +175,10 @@ function decode(token: string, key: Buffer): CursorPayload {
 			throw new ActivityCursorInvalidError()
 		}
 	}
-	if (payload.H !== undefined && parseSeq(payload.lastSeq) > parseSeq(payload.H)) {
+	if (
+		payload.H !== undefined &&
+		parseSeq(payload.lastSeq) > parseSeq(payload.H)
+	) {
 		throw new ActivityCursorInvalidError()
 	}
 	return payload
@@ -231,9 +241,16 @@ export function verifyCursor(input: VerifyCursorInput): CursorPayload {
 				"Activity snapshot lower bound moved",
 			)
 		}
+		if (holeStateOf(input.identity).generation > payload.hg) {
+			throw new ActivitySnapshotResetError(
+				"snapshot-reset",
+				"Activity snapshot lost rows to a hole",
+			)
+		}
 		return payload
 	}
-	if (cursorBehindWatermark(lastSeq, watermark)) throw new ActivityCursorGapError()
+	if (cursorBehindWatermark(lastSeq, watermark))
+		throw new ActivityCursorGapError()
 	return payload
 }
 
@@ -245,6 +262,8 @@ export interface CursorIssueInput {
 	lastSeq: bigint
 	low?: bigint
 	high?: bigint
+	/** Hole generation read with the rows this cursor follows. Defaults to 0. */
+	holeGeneration?: number
 	expiresAtMs: number
 }
 
@@ -259,9 +278,14 @@ export function issueCursor(input: CursorIssueInput): IssuedCursor {
 		order: input.order,
 		lastSeq: formatSeq(input.lastSeq),
 		pruneGeneration: input.identity.pruneGeneration,
+		hg: input.holeGeneration ?? 0,
 		expiresAt,
 	}
 	if (input.low !== undefined) payload.L = formatSeq(input.low)
 	if (input.high !== undefined) payload.H = formatSeq(input.high)
-	return { token: signCursor(payload, input.key), expiresAt, lastSeq: payload.lastSeq }
+	return {
+		token: signCursor(payload, input.key),
+		expiresAt,
+		lastSeq: payload.lastSeq,
+	}
 }

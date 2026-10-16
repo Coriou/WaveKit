@@ -1,7 +1,11 @@
-import { ActivityCursorInvalidError, activityRecordCorrupt } from "./errors.js"
+import {
+	ActivityCursorGapError,
+	ActivityCursorInvalidError,
+	activityRecordCorrupt,
+} from "./errors.js"
 
 /** SQLite signed 64-bit integer ceiling. Sequences never go negative. */
-const MAX_SEQ = 9223372036854775807n
+export const MAX_SEQ = 9223372036854775807n
 
 const DECIMAL = /^(0|[1-9][0-9]*)$/
 
@@ -63,4 +67,45 @@ export function snapshotLowerBoundPassed(
 	watermark: bigint,
 ): boolean {
 	return watermark > lowBarrier
+}
+
+/** Hole state as a reader sees it. Absent keys (stores older than WG3) read as 0. */
+export interface HoleState {
+	generation: number
+	watermark: bigint
+}
+
+export function holeStateOf(source: {
+	holeWatermark?: string | undefined
+	holeGeneration?: number | undefined
+}): HoleState {
+	return {
+		generation: source.holeGeneration ?? 0,
+		watermark: parseSeq(source.holeWatermark ?? "0"),
+	}
+}
+
+/** The newer of two hole states: both values only ever grow. */
+export function newerHoles(left: HoleState, right: HoleState): HoleState {
+	return {
+		generation: Math.max(left.generation, right.generation),
+		watermark:
+			left.watermark > right.watermark ? left.watermark : right.watermark,
+	}
+}
+
+/**
+ * Replay hole rule (web-gaps-3 4.4). A new generation with its hole watermark
+ * above the position may have removed a row the client has not received:
+ * `cursor-gap`. Otherwise every hole ever opened is at or below the position,
+ * so the replay adopts the generation. Returns the new base.
+ */
+export function checkReplayHoles(
+	base: number,
+	holes: HoleState,
+	position: bigint,
+): number {
+	if (holes.generation <= base) return base
+	if (holes.watermark > position) throw new ActivityCursorGapError()
+	return holes.generation
 }

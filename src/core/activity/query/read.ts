@@ -1,13 +1,10 @@
-import type {
-	ActivityRecord,
-	ActivitySummary,
-} from "../storage/contract.js"
+import type { ActivityRecord, ActivitySummary } from "../storage/contract.js"
 import {
 	activityRecordCorrupt,
 	ActivityQueryInvalidError,
 	ActivityReaderFailedError,
 } from "./errors.js"
-import { bindSeq, formatSeq, parseSeq, seqFromSqlite } from "./seq.js"
+import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
 import type { SqlDatabase, SqlValue } from "./sqlite.js"
 import type { FacetDimension, NormalisedQuery } from "./validate.js"
 
@@ -16,33 +13,41 @@ export interface SummaryRow {
 	summary: ActivitySummary
 }
 
+interface SearchReadRequest {
+	op: "search"
+	query: NormalisedQuery
+	order: "asc" | "desc"
+	limit: number
+	low: string
+	high: string
+	before: string | null
+	after: string | null
+}
+
+interface FacetsReadRequest {
+	op: "facets"
+	query: NormalisedQuery
+	dimensions: FacetDimension[]
+	low: string
+	high: string
+	scanCap: number
+	valueCap: number
+}
+
 export type ReadRequest =
-	| {
-		op: "search"
-		query: NormalisedQuery
-		order: "asc" | "desc"
-		limit: number
-		low: string
-		high: string
-		before: string | null
-		after: string | null
-	}
+	| SearchReadRequest
 	| { op: "detail"; eventId: string }
-	| {
-		op: "facets"
-		query: NormalisedQuery
-		dimensions: FacetDimension[]
-		low: string
-		high: string
-		scanCap: number
-		valueCap: number
-	}
+	| FacetsReadRequest
 
 /** Store identity read in the same transaction as the rows. */
 export interface ObservedStore {
 	storeUuid: string
 	restoreGeneration: number
 	pruneWatermark: string
+	/** WG3: "0" when the key is absent. */
+	holeWatermark: string
+	/** WG3: 0 when the key is absent. */
+	holeGeneration: number
 }
 
 interface SearchBody {
@@ -130,14 +135,19 @@ function appendFilters(
 	}
 	if (query.fts.kind === "impossible") where.push("1 = 0")
 	else if (query.fts.kind === "match") {
-		where.push("seq IN (SELECT rowid FROM activity_fts WHERE activity_fts MATCH ?)")
+		where.push(
+			"seq IN (SELECT rowid FROM activity_fts WHERE activity_fts MATCH ?)",
+		)
 		params.push(query.fts.match)
 	}
 }
 
-function bounds(
-	request: { low: string; high: string; before: string | null; after: string | null },
-): { where: string[]; params: SqlValue[] } {
+function bounds(request: {
+	low: string
+	high: string
+	before: string | null
+	after: string | null
+}): { where: string[]; params: SqlValue[] } {
 	const where = ["seq > ?", "seq <= ?"]
 	const params: SqlValue[] = [
 		bindSeq(parseSeq(request.low)),
@@ -168,7 +178,8 @@ function readSummary(
 	} catch {
 		throw activityRecordCorrupt("Activity summary JSON is corrupt")
 	}
-	if (!isRecord(parsed)) throw activityRecordCorrupt("Activity summary is not an object")
+	if (!isRecord(parsed))
+		throw activityRecordCorrupt("Activity summary is not an object")
 	return {
 		...(parsed as unknown as ActivitySummary),
 		eventId,
@@ -186,7 +197,8 @@ function readRecord(seq: bigint, json: unknown): ActivityRecord {
 	} catch {
 		throw activityRecordCorrupt("Activity record JSON is corrupt")
 	}
-	if (!isRecord(parsed)) throw activityRecordCorrupt("Activity record is not an object")
+	if (!isRecord(parsed))
+		throw activityRecordCorrupt("Activity record is not an object")
 	const rest: Record<string, unknown> = {}
 	for (const [key, value] of Object.entries(parsed)) {
 		if (key !== "commitSeq") rest[key] = value
@@ -194,7 +206,10 @@ function readRecord(seq: bigint, json: unknown): ActivityRecord {
 	return { ...rest, commitSeq: formatSeq(seq) } as ActivityRecord
 }
 
-function search(db: SqlDatabase, request: Extract<ReadRequest, { op: "search" }>): SummaryRow[] {
+function search(
+	db: SqlDatabase,
+	request: Extract<ReadRequest, { op: "search" }>,
+): SummaryRow[] {
 	if (!Number.isSafeInteger(request.limit) || request.limit < 1) {
 		throw new ActivityQueryInvalidError("limit is invalid")
 	}
@@ -282,7 +297,10 @@ function facets(
 	}
 	for (const dimension of request.dimensions) {
 		const bucket = counts.get(dimension) ?? new Map<string | null, number>()
-		const ranked = [...bucket.entries()].map(([value, count]) => ({ value, count }))
+		const ranked = [...bucket.entries()].map(([value, count]) => ({
+			value,
+			count,
+		}))
 		ranked.sort((left, right) => {
 			if (left.count !== right.count) return right.count - left.count
 			if (left.value === right.value) return 0
@@ -303,33 +321,49 @@ function facets(
 function readObserved(db: SqlDatabase): ObservedStore {
 	const rows = db
 		.prepare(
-			"SELECT key, value FROM store_meta WHERE key IN ('storeUuid', 'restoreGeneration', 'pruneWatermark')",
+			"SELECT key, value FROM store_meta WHERE key IN ('storeUuid', 'restoreGeneration', 'pruneWatermark', 'holeWatermark', 'holeGeneration')",
 		)
 		.all()
 	const map = new Map<string, string>()
 	for (const row of rows) {
 		const key = row["key"]
 		const value = row["value"]
-		if (typeof key === "string" && typeof value === "string") map.set(key, value)
+		if (typeof key === "string" && typeof value === "string")
+			map.set(key, value)
 	}
 	const storeUuid = map.get("storeUuid")
 	const generation = map.get("restoreGeneration")
 	const pruneWatermark = map.get("pruneWatermark")
+	const holeWatermark = map.get("holeWatermark") ?? "0"
+	const holeGenerationText = map.get("holeGeneration") ?? "0"
 	if (
 		storeUuid === undefined ||
 		storeUuid.length === 0 ||
 		generation === undefined ||
 		!/^\d+$/.test(generation) ||
 		pruneWatermark === undefined ||
-		!/^\d+$/.test(pruneWatermark)
+		!/^\d+$/.test(pruneWatermark) ||
+		!/^(0|[1-9]\d*)$/.test(holeWatermark) ||
+		!/^\d+$/.test(holeGenerationText)
 	) {
 		throw new ActivityReaderFailedError("Activity store meta is unreadable")
 	}
 	const restoreGeneration = Number(generation)
-	if (!Number.isSafeInteger(restoreGeneration)) {
+	const holeGeneration = Number(holeGenerationText)
+	if (
+		!Number.isSafeInteger(restoreGeneration) ||
+		!Number.isSafeInteger(holeGeneration) ||
+		BigInt(holeWatermark) > MAX_SEQ
+	) {
 		throw new ActivityReaderFailedError("Activity store meta is unreadable")
 	}
-	return { storeUuid, restoreGeneration, pruneWatermark }
+	return {
+		storeUuid,
+		restoreGeneration,
+		pruneWatermark,
+		holeWatermark,
+		holeGeneration,
+	}
 }
 
 function readBody(db: SqlDatabase, request: ReadRequest): ReadBody {

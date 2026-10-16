@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest"
 import { issueCursor } from "../../../../../src/core/activity/query/cursor.js"
 import { ActivityCursorInvalidError } from "../../../../../src/core/activity/query/errors.js"
-import { hashQuery, normaliseQuery } from "../../../../../src/core/activity/query/validate.js"
+import {
+	hashQuery,
+	normaliseQuery,
+} from "../../../../../src/core/activity/query/validate.js"
 import { DEFAULT_ACTIVITY_QUERY_LIMITS } from "../../../../../src/core/activity/query/service.js"
 import type { ActivityQueryService } from "../../../../../src/core/activity/storage/contract.js"
-import { createFixture, openQueryService, type ActivityFixture } from "./fixture.js"
+import {
+	createFixture,
+	openQueryService,
+	type ActivityFixture,
+} from "./fixture.js"
 
 describe("activity cursors", () => {
 	let fixture: ActivityFixture | undefined
@@ -65,7 +72,12 @@ describe("activity cursors", () => {
 
 	it("expires a continuation at the original snapshot time", async () => {
 		const { service: query, token, now } = await pageToken()
-		const first = await query.search({ query: {}, order: "asc", limit: 1, pageToken: token })
+		const first = await query.search({
+			query: {},
+			order: "asc",
+			limit: 1,
+			pageToken: token,
+		})
 		expect(first.items).toHaveLength(1)
 		const expiresAt = Date.parse(first.snapshot.expiresAt)
 		now.value = expiresAt
@@ -127,9 +139,15 @@ describe("activity cursors", () => {
 
 	it("resets when the store uuid changes", async () => {
 		const opened = await pageToken()
-		opened.fixture.setIdentity({ storeUuid: "00000000-0000-4000-8000-000000000000" })
+		opened.fixture.setIdentity({
+			storeUuid: "00000000-0000-4000-8000-000000000000",
+		})
 		await expect(
-			opened.service.search({ query: {}, order: "asc", pageToken: opened.token }),
+			opened.service.search({
+				query: {},
+				order: "asc",
+				pageToken: opened.token,
+			}),
 		).rejects.toMatchObject({ reason: "store-changed", statusCode: 409 })
 	})
 
@@ -137,7 +155,11 @@ describe("activity cursors", () => {
 		const opened = await pageToken()
 		opened.fixture.setIdentity({ restoreGeneration: 9 })
 		await expect(
-			opened.service.search({ query: {}, order: "asc", pageToken: opened.token }),
+			opened.service.search({
+				query: {},
+				order: "asc",
+				pageToken: opened.token,
+			}),
 		).rejects.toMatchObject({ reason: "store-changed", statusCode: 409 })
 	})
 
@@ -160,12 +182,15 @@ describe("activity cursors", () => {
 		service = openQueryService(fixture)
 		const page = await service.search({ query: {} })
 		const frames: { type: string }[] = []
-		const followed = service.replay({ query: {}, cursor: page.replayCursor }, {
-			send(frame) {
-				frames.push(frame)
-				return true
+		const followed = service.replay(
+			{ query: {}, cursor: page.replayCursor },
+			{
+				send(frame) {
+					frames.push(frame)
+					return true
+				},
 			},
-		})
+		)
 		followed.stop()
 		expect(frames[0]).toMatchObject({ type: "progress" })
 		expect(frames.some(frame => frame.type === "reset")).toBe(false)

@@ -58,6 +58,15 @@ export interface ActivityFixture {
 		patch: Partial<Pick<StoreIdentity, "storeUuid" | "restoreGeneration">>,
 	): void
 	corruptSummary(eventId: string): void
+	/**
+	 * Emulates the writer opening a hole (web-gaps-3 3.x): deletes the given
+	 * rows, raises holeWatermark to the greatest deleted seq and increments
+	 * holeGeneration in one transaction. `diverge` leaves the cached identity
+	 * untouched (a commit the main thread has not seen yet).
+	 */
+	openHole(seqs: readonly string[], options?: { diverge?: boolean }): void
+	/** Raw store_meta write; null deletes the key. */
+	writeRawMeta(key: string, value: string | null): void
 	notify(): void
 	listenerCount(): number
 	reset(): void
@@ -117,6 +126,9 @@ export async function createFixture(
 	)
 	const deleteRefs = db.prepare("DELETE FROM activity_refs WHERE seq = ?")
 	const deleteFts = db.prepare("DELETE FROM activity_fts WHERE rowid = ?")
+	const deleteRow = db.prepare("DELETE FROM activity WHERE seq = ?")
+	const deleteMeta = db.prepare("DELETE FROM store_meta WHERE key = ?")
+	const readMeta = db.prepare("SELECT value FROM store_meta WHERE key = ?")
 
 	function writeMeta(next: StoreIdentity): void {
 		const rows: readonly (readonly [string, string])[] = [
@@ -128,6 +140,13 @@ export async function createFixture(
 			["cursorKey", cursorKey.toString("hex")],
 		]
 		for (const [key, value] of rows) upsertMeta.run(key, value)
+		// Hole keys are written only by openHole/writeRawMeta and cleared by reset.
+		if (next.holeWatermark !== undefined) {
+			upsertMeta.run("holeWatermark", next.holeWatermark)
+		}
+		if (next.holeGeneration !== undefined) {
+			upsertMeta.run("holeGeneration", String(next.holeGeneration))
+		}
 	}
 
 	function snapshot(): StoreIdentity {
@@ -306,9 +325,41 @@ export async function createFixture(
 			}
 		},
 		corruptSummary(eventId) {
-			db.prepare(
-				"UPDATE activity SET summary_json = ? WHERE event_id = ?",
-			).run("{", eventId)
+			db.prepare("UPDATE activity SET summary_json = ? WHERE event_id = ?").run(
+				"{",
+				eventId,
+			)
+		},
+		openHole(seqs, options = {}) {
+			const onDisk = (key: string): string | undefined => {
+				const row = readMeta.get(key) as { value: string } | undefined
+				return row?.value
+			}
+			let watermark = BigInt(onDisk("holeWatermark") ?? "0")
+			const generation = Number(onDisk("holeGeneration") ?? "0") + 1
+			db.exec("BEGIN")
+			try {
+				for (const seq of seqs) {
+					deleteRefs.run(Number(seq))
+					deleteFts.run(Number(seq))
+					deleteRow.run(Number(seq))
+					if (BigInt(seq) > watermark) watermark = BigInt(seq)
+				}
+				upsertMeta.run("holeWatermark", watermark.toString(10))
+				upsertMeta.run("holeGeneration", String(generation))
+				db.exec("COMMIT")
+			} catch (error) {
+				db.exec("ROLLBACK")
+				throw error
+			}
+			if (options.diverge !== true) {
+				identity.holeWatermark = watermark.toString(10)
+				identity.holeGeneration = generation
+			}
+		},
+		writeRawMeta(key, value) {
+			if (value === null) deleteMeta.run(key)
+			else upsertMeta.run(key, value)
 		},
 		notify() {
 			const current = snapshot()
@@ -323,7 +374,11 @@ export async function createFixture(
 			db.exec("DELETE FROM activity")
 			seqs.length = 0
 			listeners.clear()
+			delete identity.holeWatermark
+			delete identity.holeGeneration
 			Object.assign(identity, initial)
+			deleteMeta.run("holeWatermark")
+			deleteMeta.run("holeGeneration")
 			writeMeta(identity)
 		},
 		async close() {
@@ -387,7 +442,9 @@ export function delay(ms: number): Promise<void> {
 	})
 }
 
-export function recordEventIds(frames: readonly ActivityReplayFrame[]): string[] {
+export function recordEventIds(
+	frames: readonly ActivityReplayFrame[],
+): string[] {
 	const ids: string[] = []
 	for (const frame of frames) {
 		if (frame.type !== "records") continue
@@ -419,7 +476,7 @@ export async function collectReplay(
 		timer = setTimeout(() => {
 			reject(
 				new Error(
-					`replay timed out after ${frames.length} frames ${JSON.stringify(frames.map(frame => frame.type === "records" ? { type: frame.type, n: frame.items.length, scannedThrough: frame.scannedThrough } : frame))}`,
+					`replay timed out after ${frames.length} frames ${JSON.stringify(frames.map(frame => (frame.type === "records" ? { type: frame.type, n: frame.items.length, scannedThrough: frame.scannedThrough } : frame)))}`,
 				),
 			)
 		}, timeoutMs)

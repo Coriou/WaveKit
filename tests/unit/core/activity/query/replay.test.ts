@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it } from "vitest"
 import { issueCursor } from "../../../../../src/core/activity/query/cursor.js"
 import { ActivityReaderFailedError } from "../../../../../src/core/activity/query/errors.js"
 import { startReplay } from "../../../../../src/core/activity/query/replay.js"
-import { hashQuery, normaliseQuery } from "../../../../../src/core/activity/query/validate.js"
+import {
+	hashQuery,
+	normaliseQuery,
+} from "../../../../../src/core/activity/query/validate.js"
 import { DEFAULT_ACTIVITY_QUERY_LIMITS } from "../../../../../src/core/activity/query/service.js"
 import type {
 	ActivityQuery,
@@ -42,7 +45,8 @@ function originCursor(
 async function waitFor(predicate: () => boolean): Promise<void> {
 	const started = Date.now()
 	while (!predicate()) {
-		if (Date.now() - started > 1_000) throw new Error("timed out waiting for replay")
+		if (Date.now() - started > 1_000)
+			throw new Error("timed out waiting for replay")
 		await delay(10)
 	}
 }
@@ -62,16 +66,18 @@ describe("activity replay", () => {
 		fixture = await createFixture()
 		const store = fixture
 		service = openQueryService(store)
-		const live = await collectReplay(service, { query }, frames => frames.length >= 1)
+		const live = await collectReplay(
+			service,
+			{ query },
+			frames => frames.length >= 1,
+		)
 		const first = live.frames[0]
 		expect(first).toMatchObject({ type: "progress", scannedThrough: "0" })
 		live.handle.stop()
 		store.insert({ eventId: "later" })
 		const cursor = first && first.type !== "reset" ? first.cursor : ""
-		const followed = await collectReplay(
-			service,
-			{ query, cursor },
-			frames => recordEventIds(frames).includes("later"),
+		const followed = await collectReplay(service, { query, cursor }, frames =>
+			recordEventIds(frames).includes("later"),
 		)
 		expect(recordEventIds(followed.frames)).toEqual(["later"])
 		followed.handle.stop()
@@ -121,7 +127,8 @@ describe("activity replay", () => {
 			frames => recordEventIds(frames).length === 3,
 		)
 		const cursor = caught.frames.find(frame => frame.type === "records")
-		if (!cursor || cursor.type !== "records") throw new Error("expected records")
+		if (!cursor || cursor.type !== "records")
+			throw new Error("expected records")
 		caught.handle.stop()
 
 		store.setIdentity({ pruneWatermark: cursor.scannedThrough })
@@ -141,27 +148,45 @@ describe("activity replay", () => {
 			{ query, cursor: cursor.cursor },
 			frames => frames.some(frame => frame.type === "reset"),
 		)
-		expect(gapped.frames.at(-1)).toMatchObject({ type: "reset", reason: "cursor-gap" })
+		expect(gapped.frames.at(-1)).toMatchObject({
+			type: "reset",
+			reason: "cursor-gap",
+		})
 		gapped.handle.stop()
 		store.setIdentity({ pruneWatermark: "0" })
 
-		const live = await collectReplay(service, { query }, frames => frames.length >= 1)
+		const live = await collectReplay(
+			service,
+			{ query },
+			frames => frames.length >= 1,
+		)
 		store.setIdentity({ storeUuid: "changed-store" })
 		store.notify()
 		await waitFor(() => live.frames.some(frame => frame.type === "reset"))
-		expect(live.frames.at(-1)).toMatchObject({ type: "reset", reason: "store-changed" })
+		expect(live.frames.at(-1)).toMatchObject({
+			type: "reset",
+			reason: "store-changed",
+		})
 		live.handle.stop()
 
 		const other = hashQuery(
-			normaliseQuery({ kinds: ["ingestion-gap"] }, DEFAULT_ACTIVITY_QUERY_LIMITS),
+			normaliseQuery(
+				{ kinds: ["ingestion-gap"] },
+				DEFAULT_ACTIVITY_QUERY_LIMITS,
+			),
 		)
-		expect(other).not.toBe(hashQuery(normaliseQuery(query, DEFAULT_ACTIVITY_QUERY_LIMITS)))
+		expect(other).not.toBe(
+			hashQuery(normaliseQuery(query, DEFAULT_ACTIVITY_QUERY_LIMITS)),
+		)
 		const changed = await collectReplay(
 			service,
 			{ query: { kinds: ["ingestion-gap"] }, cursor: originCursor(store, now) },
 			frames => frames.some(frame => frame.type === "reset"),
 		)
-		expect(changed.frames.at(-1)).toMatchObject({ type: "reset", reason: "query-changed" })
+		expect(changed.frames.at(-1)).toMatchObject({
+			type: "reset",
+			reason: "query-changed",
+		})
 		changed.handle.stop()
 
 		const fresh = originCursor(store, now, 1_000)
@@ -171,7 +196,10 @@ describe("activity replay", () => {
 			{ query, cursor: fresh },
 			frames => frames.some(frame => frame.type === "reset"),
 		)
-		expect(expired.frames.at(-1)).toMatchObject({ type: "reset", reason: "cursor-expired" })
+		expect(expired.frames.at(-1)).toMatchObject({
+			type: "reset",
+			reason: "cursor-expired",
+		})
 		expired.handle.stop()
 	})
 
@@ -179,7 +207,11 @@ describe("activity replay", () => {
 		fixture = await createFixture()
 		const store = fixture
 		service = openQueryService(store)
-		const live = await collectReplay(service, { query }, frames => frames.length >= 1)
+		const live = await collectReplay(
+			service,
+			{ query },
+			frames => frames.length >= 1,
+		)
 		const before = live.frames.length
 		live.handle.stop()
 		live.handle.stop()
@@ -200,13 +232,14 @@ describe("activity replay", () => {
 		const cursor = originCursor(store, Date.now())
 		store.divergePrune("2")
 		expect(store.store.identity().pruneWatermark).toBe("0")
-		const gapped = await collectReplay(
-			service,
-			{ query, cursor },
-			frames => frames.some(frame => frame.type === "reset"),
+		const gapped = await collectReplay(service, { query, cursor }, frames =>
+			frames.some(frame => frame.type === "reset"),
 		)
 		expect(recordEventIds(gapped.frames)).toEqual([])
-		expect(gapped.frames.at(-1)).toMatchObject({ type: "reset", reason: "cursor-gap" })
+		expect(gapped.frames.at(-1)).toMatchObject({
+			type: "reset",
+			reason: "cursor-gap",
+		})
 		gapped.handle.stop()
 	})
 
@@ -241,7 +274,9 @@ describe("activity replay", () => {
 				clientKey: "client",
 				read: () => {
 					reads += 1
-					return Promise.reject(new ActivityReaderFailedError("reader exploded"))
+					return Promise.reject(
+						new ActivityReaderFailedError("reader exploded"),
+					)
 				},
 				register() {},
 				unregister() {},
@@ -260,7 +295,10 @@ describe("activity replay", () => {
 		committed = 1n
 		for (const listener of listeners) listener(identity())
 		await waitFor(() => frames.some(frame => frame.type === "reset"))
-		expect(frames.at(-1)).toMatchObject({ type: "reset", reason: "reader-failed" })
+		expect(frames.at(-1)).toMatchObject({
+			type: "reset",
+			reason: "reader-failed",
+		})
 		expect(reads).toBe(1)
 		const before = frames.length
 		committed = 2n
@@ -275,12 +313,15 @@ describe("activity replay", () => {
 		service = openQueryService(fixture)
 		await service.close()
 		const frames: ActivityReplayFrame[] = []
-		const handle = service.replay({ query }, {
-			send(frame) {
-				frames.push(frame)
-				return true
+		const handle = service.replay(
+			{ query },
+			{
+				send(frame) {
+					frames.push(frame)
+					return true
+				},
 			},
-		})
+		)
 		expect(frames).toEqual([{ type: "reset", reason: "invalid-cursor" }])
 		handle.stop()
 		service = undefined
@@ -329,7 +370,9 @@ describe("activity replay", () => {
 				if (records && records.type === "records") {
 					const through = BigInt(records.scannedThrough)
 					const suffix = first.frames
-						.flatMap(frame => (frame.type === "records" ? [...frame.items] : []))
+						.flatMap(frame =>
+							frame.type === "records" ? [...frame.items] : [],
+						)
 						.filter(item => BigInt(item.commitSeq) > through)
 						.map(item => item.eventId)
 					const resumed = await collectReplay(
@@ -339,7 +382,9 @@ describe("activity replay", () => {
 							frames.some(frame => frame.type === "reset") ||
 							recordEventIds(frames).length >= suffix.length,
 					)
-					expect(resumed.frames.some(frame => frame.type === "reset")).toBe(false)
+					expect(resumed.frames.some(frame => frame.type === "reset")).toBe(
+						false,
+					)
 					expect(recordEventIds(resumed.frames)).toEqual(suffix)
 					resumed.handle.stop()
 				}

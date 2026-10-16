@@ -23,7 +23,10 @@ describe("activity search and detail", () => {
 		fixture = undefined
 	})
 
-	async function setup(): Promise<{ fixture: ActivityFixture; service: ActivityQueryService }> {
+	async function setup(): Promise<{
+		fixture: ActivityFixture
+		service: ActivityQueryService
+	}> {
 		fixture = await createFixture()
 		service = openQueryService(fixture)
 		return { fixture, service }
@@ -96,7 +99,10 @@ describe("activity search and detail", () => {
 				protocols: ["ais"],
 				categories: ["marine"],
 				frequencyHz: { min: 160_000_000, max: 170_000_000 },
-				producedAt: { from: "2026-02-01T00:00:00.000Z", to: "2026-03-15T00:00:00.000Z" },
+				producedAt: {
+					from: "2026-02-01T00:00:00.000Z",
+					to: "2026-03-15T00:00:00.000Z",
+				},
 				entityKey: "ship-1",
 				text: "beacon",
 				refs: [{ type: "callId", value: "call-1" }],
@@ -105,7 +111,10 @@ describe("activity search and detail", () => {
 		expect(filtered.items.map(item => item.eventId)).toEqual(["keep"])
 		const punctuation = await query.search({ query: { text: "..." } })
 		const whitespace = await query.search({ query: { text: "   " } })
-		expect(punctuation.items.map(item => item.eventId)).toEqual(["drop", "keep"])
+		expect(punctuation.items.map(item => item.eventId)).toEqual([
+			"drop",
+			"keep",
+		])
 		expect(whitespace.items.map(item => item.eventId)).toEqual(["drop", "keep"])
 	})
 
@@ -192,14 +201,16 @@ describe("activity search and detail", () => {
 
 	it("rejects a limit above the page max", async () => {
 		const { service: query } = await setup()
-		await expect(query.search({ query: {}, limit: 201 })).rejects.toBeInstanceOf(
-			ActivityQueryInvalidError,
-		)
+		await expect(
+			query.search({ query: {}, limit: 201 }),
+		).rejects.toBeInstanceOf(ActivityQueryInvalidError)
 	})
 
 	it("rejects an event id that contains a control character", async () => {
 		const { service: query } = await setup()
-		await expect(query.detail("bad\nid")).rejects.toBeInstanceOf(ActivityQueryInvalidError)
+		await expect(query.detail("bad\nid")).rejects.toBeInstanceOf(
+			ActivityQueryInvalidError,
+		)
 	})
 
 	it("finishes an in-flight search before closing the reader", async () => {
