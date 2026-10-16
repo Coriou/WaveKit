@@ -219,6 +219,60 @@ describe("TunerState.unknownFields", () => {
 			)
 		})
 
+		it("relay direct sampling above 2 is the Q branch, as in librtlsdr (WG5 R2)", () => {
+			controller.applyExternalCommand("rtl", 0x09, 3)
+			expect(controller.getState("rtl")!.directSampling).toBe("q")
+		})
+
+		it("a restore reconnect drops an inferred centre and rate back to the baseline (WG5 R2)", async () => {
+			await controller.setFrequency("rtl", 162_000_000, { accept: false })
+			await controller.setSampleRate("rtl", 2_400_000, { accept: false })
+			const events: unknown[] = []
+			controller.on("state-changed", (_id, state) => events.push(state))
+			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([])
+			expect(events).toHaveLength(1)
+			const state = controller.getState("rtl")!
+			expect(state.frequency).toBe(1_090_000_000)
+			expect(state.sampleRate).toBe(2_048_000)
+			expect(state.declaredOnlyFields).toEqual(["frequency", "sampleRate"])
+		})
+
+		it("a restore reconnect replays an accepted centre and keeps it proven", async () => {
+			await controller.setFrequency("rtl", 162_000_000)
+			await controller.setFrequency("rtl", 162_025_000, { accept: false })
+			expect(controller.synchronizeOnConnect("rtl").commands).toEqual([
+				"set-frequency",
+			])
+			const state = controller.getState("rtl")!
+			expect(state.frequency).toBe(162_025_000)
+			expect(state.declaredOnlyFields).toEqual(["sampleRate"])
+		})
+
+		it("a reset that only forgets inferred values returns them to the baseline (WG5 R2)", async () => {
+			create({ reconnectPolicy: "reset" })
+			await controller.setFrequency("rtl", 162_000_000, { accept: false })
+			controller.applyExternalCommand("rtl", 0x07, 1) // test mode: written, not accepted
+			expect(controller.synchronizeOnConnect("rtl").reset).toBe(false)
+			const state = controller.getState("rtl")!
+			expect(state.frequency).toBe(1_090_000_000)
+			expect(state.testMode).toBe(false)
+			expect(state.declaredOnlyFields).toEqual(["frequency", "sampleRate"])
+		})
+
+		it("a bulk configure writes a declared-only centre and rate equal to state (WG5 R2)", async () => {
+			await controller.configure("rtl", {
+				frequency: 1_090_000_000,
+				sampleRate: 2_048_000,
+			})
+			expect(controller.getState("rtl")).not.toHaveProperty(
+				"declaredOnlyFields",
+			)
+			const before = controller.getState("rtl")!.commandCount
+			await controller.configure("rtl", { frequency: 1_090_000_000 })
+			// Proven now: an equal value is skipped as before.
+			expect(controller.getState("rtl")!.commandCount).toBe(before)
+		})
+
 		it("survives the REST response schema", async () => {
 			const app = Fastify()
 			await app.register(tunerRoutes, { tunerController: controller })

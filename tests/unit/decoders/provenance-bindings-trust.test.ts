@@ -550,6 +550,13 @@ describe("trust from a real TunerController (WG5 R1)", () => {
 		expect(trust()).toBe("relay")
 	})
 
+	it("relay direct sampling 3 (Q branch in librtlsdr) is unverified (WG5 R2)", async () => {
+		const { tuner, trust, command } = setupReal()
+		await command()
+		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING, 3)
+		expect(trust()).toBe("unverified")
+	})
+
 	it("an ignored RTL-gap sample rate is unverified until an accepted rate", async () => {
 		const { tuner, trust, command } = setupReal()
 		await command()

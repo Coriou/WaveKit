@@ -633,8 +633,16 @@ export class TunerController extends EventEmitter {
 				updated = true
 				break
 			case RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING: {
+				// librtlsdr rtlsdr_set_direct_sampling: 0 off, 1 the I branch, any value
+				// above 1 the Q branch.
 				const nextMode: TunerDirectSampling | null =
-					value === 0 ? "off" : value === 1 ? "i" : value === 2 ? "q" : null
+					value === 0
+						? "off"
+						: value === 1
+							? "i"
+							: value >= 2 && value <= 0xffffffff
+								? "q"
+								: null
 				if (nextMode) {
 					state.directSampling = nextMode
 					updated = true
@@ -1003,15 +1011,22 @@ export class TunerController extends EventEmitter {
 			this.setControlMode(sourceId, "internal")
 		}
 
+		// A declared-only or unknown centre/rate equal to the request is still written, so
+		// a bulk PUT can prove it (WG5 R2); a proven equal value is skipped as before.
+		const proof = this.fieldProof(sourceId)
+		const unproven = new Set<TunerStateField>([
+			...proof.declaredOnlyFields,
+			...proof.unknownFields,
+		])
 		if (
 			updates.frequency !== undefined &&
-			updates.frequency !== state.frequency
+			(updates.frequency !== state.frequency || unproven.has("frequency"))
 		) {
 			await this.setFrequency(sourceId, updates.frequency, opts)
 		}
 		if (
 			updates.sampleRate !== undefined &&
-			updates.sampleRate !== state.sampleRate
+			(updates.sampleRate !== state.sampleRate || unproven.has("sampleRate"))
 		) {
 			await this.setSampleRate(sourceId, updates.sampleRate, opts)
 		}
@@ -1118,8 +1133,11 @@ export class TunerController extends EventEmitter {
 			this.desiredFields.delete(sourceId)
 			this.inferredFields.delete(sourceId)
 			this.ignoredRelayFields.delete(sourceId)
-			if (reset) {
+			// With nothing accepted every non-baseline value came from an inferred write or
+			// relay command, so a forget also returns the values to the baseline (WG5 R2).
+			if (reset || forgot)
 				this.applyBaselineFields(state, this.baselineCaps.get(sourceId))
+			if (reset) {
 				this.log.warn(
 					{ sourceId },
 					"Source reconnected: discarded accepted tuner state (reconnectPolicy=reset); receiver state unconfirmed",
@@ -1129,6 +1147,11 @@ export class TunerController extends EventEmitter {
 			if (reset || forgot || capsChanged) this.emitStateChanged(sourceId)
 			return { policy, commands: [], reset }
 		}
+
+		// An inferred (written, not accepted) centre or rate is never replayed, so after a
+		// reconnect the receiver may be elsewhere: drop its proof and, unless an accepted
+		// value is replayed below, return it to the baseline (WG5 R2).
+		const forgotTuning = this.forgetInferredTuning(sourceId, state, desired)
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
@@ -1175,7 +1198,8 @@ export class TunerController extends EventEmitter {
 			this.emit("command-sent", sourceId, name, value, "replay")
 		}
 		if (failure) this.emit("error", sourceId, failure)
-		if (plan.length > 0 || capsChanged) this.emitStateChanged(sourceId)
+		if (plan.length > 0 || capsChanged || forgotTuning)
+			this.emitStateChanged(sourceId)
 
 		return failure
 			? {
@@ -1331,6 +1355,33 @@ export class TunerController extends EventEmitter {
 
 	private decodeSignedInt32(value: number): number {
 		return value > 0x7fffffff ? value - 0x100000000 : value
+	}
+
+	/** Drops inferred frequency/sampleRate proof; true when one was dropped. */
+	private forgetInferredTuning(
+		sourceId: string,
+		state: TunerState,
+		desired: ReadonlyMap<DesiredField, number> | undefined,
+	): boolean {
+		const inferred = this.inferredFields.get(sourceId)
+		if (!inferred) return false
+		const caps = this.baselineCaps.get(sourceId)
+		let forgot = false
+		if (inferred.delete("frequency")) {
+			forgot = true
+			if (!desired?.has("frequency"))
+				state.frequency =
+					this.config.defaultFrequency ?? caps?.centerFreq ?? DEFAULT_FREQUENCY
+		}
+		if (inferred.delete("sampleRate")) {
+			forgot = true
+			if (!desired?.has("sampleRate"))
+				state.sampleRate =
+					this.config.defaultSampleRate ??
+					caps?.sampleRate ??
+					DEFAULT_SAMPLE_RATE
+		}
+		return forgot
 	}
 
 	/** Reset tunable fields to the startup baseline (control mode/counters kept). */
