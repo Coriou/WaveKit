@@ -510,6 +510,8 @@ export function readTelemetry(bytes: Uint8Array): MeshTelemetryFields | null {
 				deviceMetrics = metrics
 				return "handled"
 			}
+			// A later oneof member replaces device_metrics (last one wins).
+			if (field > TELEMETRY_DEVICE_METRICS) deviceMetrics = null
 			return "unknown"
 		})
 		if (!ok) return null

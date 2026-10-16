@@ -634,14 +634,16 @@ export class MeshTracker extends EventEmitter<MeshTrackerEvents> {
 			if (now - Date.parse(node.lastSeen) > this.limits.maxAgeMs)
 				doomed.push(id)
 		}
-		for (const node of this.nodes.values()) {
-			if (node.neighbours && node.neighbours.length > 0) {
-				node.neighbours = node.neighbours.filter(
-					n => now - Date.parse(n.at) <= this.limits.maxAgeMs,
-				)
-			}
-		}
 		for (const id of doomed) this.remove(id, "age")
+		for (const node of this.nodes.values()) {
+			if (!node.neighbours || node.neighbours.length === 0) continue
+			const kept = node.neighbours.filter(
+				n => now - Date.parse(n.at) <= this.limits.maxAgeMs,
+			)
+			if (kept.length === node.neighbours.length) continue
+			node.neighbours = kept
+			this.emit("mesh:update", node)
+		}
 		if (doomed.length > 0) {
 			this.log.debug(
 				{ removed: doomed.length, remaining: this.nodes.size },

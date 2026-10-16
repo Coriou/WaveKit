@@ -183,8 +183,13 @@ describe("mesh neighbours", () => {
 		expect(tracker.get("!00001000")?.neighbours).toHaveLength(1)
 		clock.now = T0 + 4 * HOUR + 1
 		send({ portnum: 1 }, clock.now)
+		const updates: string[] = []
+		tracker.on("mesh:update", node => updates.push(node.nodeId))
 		sweep()
 		expect(tracker.get("!00001000")?.neighbours).toEqual([])
+		expect(updates).toEqual(["!00001000"])
+		sweep()
+		expect(updates).toHaveLength(1)
 	})
 
 	it("does not let callers mutate tracker state", () => {

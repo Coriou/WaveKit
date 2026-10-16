@@ -221,6 +221,14 @@ describe("meshtastic telemetry and neighbour reader", () => {
 		expect(n?.neighbors).toEqual([{ nodeNum: 9, snr: null }])
 	})
 
+	it("lets a later oneof variant replace device_metrics", () => {
+		// device_metrics { battery_level: 50 } then an empty environment_metrics
+		const bytes = Uint8Array.from([0x12, 0x02, 0x08, 0x32, 0x1a, 0x00])
+		expect(readTelemetry(bytes)).toEqual({ deviceMetrics: null })
+		const reversed = Uint8Array.from([0x1a, 0x00, 0x12, 0x02, 0x08, 0x32])
+		expect(readTelemetry(reversed)?.deviceMetrics?.batteryLevel).toBe(50)
+	})
+
 	it("treats environment_metrics as a recognised other variant", () => {
 		const bytes = Uint8Array.from(sub(3, float(1, 21.5)))
 		expect(readTelemetry(bytes)).toEqual({ deviceMetrics: null })
