@@ -8,7 +8,7 @@ import pino from "pino"
 import { afterAll, describe, expect, it } from "vitest"
 import { ActivityStoreLockedError } from "../../../../../src/core/activity/storage/errors.js"
 import { openActivityStore } from "../../../../../src/core/activity/storage/store.js"
-import { envelope, logger, readRecords } from "./helpers.js"
+import { envelope, fixtureClock, logger, readRecords } from "./helpers.js"
 
 const repository = fileURLToPath(new URL("../../../../../", import.meta.url))
 const roots: string[] = []
@@ -43,6 +43,7 @@ describe("activity writer worker", () => {
 			logger,
 			execution: "thread",
 			workerUrl: pathToFileURL(outfile),
+			now: fixtureClock(),
 			limits: {
 				batchWindowMs: 0,
 				globalBurst: 10,

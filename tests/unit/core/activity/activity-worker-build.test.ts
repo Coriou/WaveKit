@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 import { createActivityQueryService } from "../../../../src/core/activity/query/service.js"
 import { openActivityStore } from "../../../../src/core/activity/storage/store.js"
-import { envelope, logger } from "./storage/helpers.js"
+import { envelope, fixtureClock, logger } from "./storage/helpers.js"
 
 const WRITER = "dist/activity-writer-worker.js"
 const QUERY = "dist/activity-query-worker.js"
@@ -23,6 +23,7 @@ describe.skipIf(!existsSync(WRITER) || !existsSync(QUERY))(
 				stateDir,
 				logger,
 				workerUrl: pathToFileURL(WRITER),
+				now: fixtureClock(),
 				limits: { batchWindowMs: 0 },
 			})
 			const service = createActivityQueryService({

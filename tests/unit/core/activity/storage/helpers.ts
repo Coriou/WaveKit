@@ -25,6 +25,19 @@ export async function tempDir(): Promise<string> {
 	return path
 }
 
+/**
+ * Fixture receivedAt values sit on 2026-10-12/13. A store clock anchored there (advancing in
+ * real time) keeps the 3-day age prune from deleting them once the wall clock moves on.
+ */
+export const FIXTURE_CLOCK_ANCHOR_MS = Date.parse("2026-10-13T00:00:00.000Z")
+
+export function fixtureClock(
+	anchorMs: number = FIXTURE_CLOCK_ANCHOR_MS,
+): () => number {
+	const started = Date.now()
+	return () => anchorMs + (Date.now() - started)
+}
+
 export async function openStore(
 	overrides: Partial<OpenActivityStoreOptions> = {},
 ): Promise<ActivityStoreHandle> {
@@ -33,6 +46,7 @@ export async function openStore(
 		stateDir,
 		logger,
 		execution: "inline",
+		now: fixtureClock(),
 		...overrides,
 		limits: {
 			batchWindowMs: 0,
