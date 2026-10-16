@@ -319,3 +319,59 @@ describe("option issue logs name known keys only (R2 MINOR 3)", () => {
 		await manager.destroy()
 	})
 })
+
+describe("safeErrorFields never throws and never trusts forged names (R3)", () => {
+	it("survives a throwing constructor getter, revoked proxies and descriptor traps", () => {
+		const getterBomb = {}
+		Object.defineProperty(getterBomb, "constructor", {
+			get() {
+				throw new Error("SECRET-getter")
+			},
+		})
+		expect(safeErrorFields(getterBomb)).toEqual({ type: "Object" })
+		const { proxy, revoke } = Proxy.revocable({}, {})
+		revoke()
+		expect(safeErrorFields(proxy)).toEqual({ type: "unknown" })
+		const trap = new Proxy(
+			{},
+			{
+				getOwnPropertyDescriptor() {
+					throw new Error("SECRET-trap")
+				},
+			},
+		)
+		expect(safeErrorFields(trap)).toEqual({ type: "unknown" })
+		const protoTrap = new Proxy(
+			{},
+			{
+				getPrototypeOf() {
+					throw new Error("SECRET-proto")
+				},
+			},
+		)
+		expect(safeErrorFields(protoTrap)).toEqual({ type: "unknown" })
+	})
+
+	it("ignores forged constructor names and getter codes", () => {
+		const forged: unknown = JSON.parse(
+			'{"constructor":{"name":"SecretHostToken123"},"code":"ENOENT"}',
+		)
+		expect(safeErrorFields(forged)).toEqual({ type: "Object", code: "ENOENT" })
+		class SecretHostToken123 extends Error {}
+		expect(safeErrorFields(new SecretHostToken123("x"))).toEqual({
+			type: "Error",
+		})
+		const err = new WaveKitError("fixed", "DECODER_X")
+		expect(safeErrorFields(err)).toEqual({
+			type: "WaveKitError",
+			code: "DECODER_X",
+		})
+		const getterCode = new Error("SECRET")
+		Object.defineProperty(getterCode, "code", {
+			get() {
+				throw new Error("SECRET-code")
+			},
+		})
+		expect(safeErrorFields(getterCode)).toEqual({ type: "Error" })
+	})
+})
