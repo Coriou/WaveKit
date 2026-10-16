@@ -61,9 +61,7 @@ export class PassiveRtlProxy extends EventEmitter {
 						{
 							port: this.port,
 							mode: this.inputStream ? "stream" : "proxy",
-							upstream: this.inputStream
-								? "internal"
-								: `${this.realHost}:${this.realPort}`,
+							upstream: this.inputStream ? "internal" : "tcp",
 						},
 						"Passive RTL Proxy started",
 					)

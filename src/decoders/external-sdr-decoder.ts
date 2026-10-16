@@ -179,10 +179,11 @@ export abstract class ExternalSdrDecoder
 
 		this.logger.info(
 			{
+				// Counts and presence only: argv and the serial are config text.
 				command,
-				args,
-				deviceSerial: this.config.deviceSerial,
-				frequencies: this.config.frequencies,
+				argCount: args.length,
+				hasDeviceSerial: this.config.deviceSerial.length > 0,
+				frequencyCount: this.config.frequencies.length,
 			},
 			"Starting external SDR decoder",
 		)
@@ -258,10 +259,7 @@ export abstract class ExternalSdrDecoder
 		await spawned
 		this.startTime = Date.now()
 		this.emit("started")
-		this.logger.info(
-			{ pid: this.process.pid, deviceSerial: this.config.deviceSerial },
-			"External SDR decoder started",
-		)
+		this.logger.info({ pid: this.process.pid }, "External SDR decoder started")
 	}
 
 	/**
@@ -431,7 +429,11 @@ export abstract class ExternalSdrDecoder
 	 */
 	updateOptions(updates: Record<string, unknown>): void {
 		this.config.options = { ...this.config.options, ...updates }
-		this.logger.debug({ updates }, "Decoder options updated")
+		// Count only: keys and values are option text (WG7 HW fix).
+		this.logger.debug(
+			{ updateCount: Object.keys(updates).length },
+			"Decoder options updated",
+		)
 		this.onOptionsUpdated()
 	}
 

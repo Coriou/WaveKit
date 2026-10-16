@@ -22,9 +22,12 @@ import type {
 	DecoderRateRequirements,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
-import { readNumericArrayOption, readNumericOption } from "../option-values.js"
 import {
-	RTL433_EXTRA_ARGS_MAX,
+	readExtraArgsOption,
+	readNumericArrayOption,
+	readNumericOption,
+} from "../option-values.js"
+import {
 	RTL433_INPUT_SAMPLE_RATE_MAX_HZ,
 	RTL433_INPUT_SAMPLE_RATE_MIN_HZ,
 	RTL433_PROTOCOLS_MAX,
@@ -169,23 +172,8 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 				},
 				warn,
 			),
-			extraArgs: this.parseExtraArgs(options["extraArgs"]),
+			extraArgs: readExtraArgsOption(options["extraArgs"], warn),
 		}
-	}
-
-	/**
-	 * A hand-written argv tail: at most RTL433_EXTRA_ARGS_MAX entries, sliced
-	 * before anything iterates or spreads it (WG7 HW.2).
-	 */
-	private parseExtraArgs(value: unknown): string[] | undefined {
-		if (value === undefined || value === null) return undefined
-		if (!Array.isArray(value)) {
-			this.optionWarn("extraArgs", "invalid")
-			return undefined
-		}
-		if (value.length > RTL433_EXTRA_ARGS_MAX)
-			this.optionWarn("extraArgs", "clamped")
-		return value.slice(0, RTL433_EXTRA_ARGS_MAX).map(arg => String(arg))
 	}
 
 	/** Migrated to the opt-in core channelizer (addendum §7 step 3). */

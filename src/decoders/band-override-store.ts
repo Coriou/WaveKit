@@ -87,15 +87,13 @@ export class BandOverrideStore {
 			text = await readFile(this.filePath, "utf8")
 		} catch (err) {
 			if (errorCode(err) === "ENOENT") {
-				this.log.debug(
-					{ file: this.filePath },
-					"No band override file; starting empty",
-				)
+				// No path or file content in logs (WG7 HW fix).
+				this.log.debug("No band override file; starting empty")
 				this.persistedState = true
 				return
 			}
 			this.log.warn(
-				{ err, file: this.filePath },
+				{ code: errorCode(err) },
 				"Band override file unreadable; starting empty",
 			)
 			this.persistedState = true
@@ -104,11 +102,8 @@ export class BandOverrideStore {
 		let raw: unknown
 		try {
 			raw = JSON.parse(text)
-		} catch (err) {
-			this.log.warn(
-				{ err, file: this.filePath },
-				"Band override file is not valid JSON; starting empty",
-			)
+		} catch {
+			this.log.warn("Band override file is not valid JSON; starting empty")
 			this.persistedState = true
 			return
 		}
@@ -118,7 +113,7 @@ export class BandOverrideStore {
 			this.readOnly = true
 			this.persistedState = false
 			this.log.warn(
-				{ file: this.filePath, version },
+				{ expectedVersion: FILE_VERSION },
 				"Band override file has an unknown version; ignoring it and keeping API overrides in memory only",
 			)
 			return
@@ -126,7 +121,7 @@ export class BandOverrideStore {
 		const parsed = StateFileSchema.safeParse(raw)
 		if (!parsed.success) {
 			this.log.warn(
-				{ file: this.filePath, issues: parsed.error.issues },
+				{ issueCount: parsed.error.issues.length },
 				"Band override file is invalid; starting empty",
 			)
 			this.persistedState = true
@@ -135,10 +130,7 @@ export class BandOverrideStore {
 		for (const [id, override] of Object.entries(parsed.data.overrides))
 			this.overrides.set(id, normalizeBandOverride(override))
 		this.persistedState = true
-		this.log.info(
-			{ file: this.filePath, count: this.overrides.size },
-			"Loaded band overrides",
-		)
+		this.log.info({ count: this.overrides.size }, "Loaded band overrides")
 	}
 
 	get(id: string): DecoderBandOverride | undefined {
@@ -191,7 +183,7 @@ export class BandOverrideStore {
 			return { persisted: true }
 		} catch (err) {
 			this.log.warn(
-				{ err, file },
+				{ code: errorCode(err) },
 				"Could not persist band overrides; applied in memory only",
 			)
 			await rm(tmp, { force: true }).catch(() => undefined)

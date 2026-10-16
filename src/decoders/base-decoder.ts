@@ -149,7 +149,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		const command = this.getCommand()
 		const args = this.getArgs()
 
-		this.logger.info({ command, args }, "Starting decoder process")
+		// argv carries option text: count only (WG7 HW fix).
+		this.logger.info(
+			{ command, argCount: args.length },
+			"Starting decoder process",
+		)
 
 		try {
 			this.process = spawn(command, args, {
@@ -447,7 +451,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 */
 	updateOptions(updates: Record<string, unknown>): void {
 		this.config.options = { ...this.config.options, ...updates }
-		this.logger.debug({ updates }, "Decoder options updated")
+		// Count only: keys and values are option text (WG7 HW fix).
+		this.logger.debug(
+			{ updateCount: Object.keys(updates).length },
+			"Decoder options updated",
+		)
 		this.onOptionsUpdated()
 	}
 

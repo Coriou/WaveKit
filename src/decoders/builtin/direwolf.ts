@@ -19,6 +19,7 @@ import type {
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 import {
+	readExtraArgsOption,
 	createOptionWarner,
 	readNumericOption,
 	type NumericOptionWarn,
@@ -334,11 +335,11 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		const host = this.outputHost
 		const port = this.outputPort
 
-		this.logger.info({ host, port }, "Connecting to Direwolf KISS output")
+		this.logger.info({ port }, "Connecting to Direwolf KISS output")
 
 		return new Promise<void>((resolve, reject) => {
 			this.tcpClient = createConnection({ host, port }, () => {
-				this.logger.info({ host, port }, "Connected to Direwolf KISS")
+				this.logger.info({ port }, "Connected to Direwolf KISS")
 				this.reconnectAttempts = 0
 				this.isReconnecting = false
 				resolve()
@@ -437,31 +438,6 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 }
 
 /**
- * extraArgs is a hand-written argv tail: at most 64 strings. Sliced before any
- * iteration or spread; anything else is dropped. Warnings carry the key only.
- */
-function readExtraArgs(
-	value: unknown,
-	warn: NumericOptionWarn,
-): string[] | undefined {
-	if (value === undefined || value === null) return undefined
-	if (!Array.isArray(value)) {
-		warn("extraArgs", "invalid")
-		return undefined
-	}
-	if (value.length > DIREWOLF_BOUNDS.maxExtraArgs) warn("extraArgs", "clamped")
-	const out: string[] = []
-	for (const entry of value.slice(
-		0,
-		DIREWOLF_BOUNDS.maxExtraArgs,
-	) as unknown[]) {
-		if (typeof entry === "string") out.push(entry)
-		else warn("extraArgs", "invalid")
-	}
-	return out
-}
-
-/**
  * Parses and validates decoder options from config.
  */
 function parseDirewolfOptions(
@@ -488,7 +464,7 @@ function parseDirewolfOptions(
 		kissPort: port("kissPort"),
 		agwPort: port("agwPort"),
 		callsign: options["callsign"] as string | undefined,
-		extraArgs: readExtraArgs(options["extraArgs"], warn),
+		extraArgs: readExtraArgsOption(options["extraArgs"], warn),
 		inputSampleRate: readNumericOption(
 			options["inputSampleRate"],
 			{
