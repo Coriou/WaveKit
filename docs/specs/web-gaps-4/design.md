@@ -1,6 +1,6 @@
 # Web gaps 4 design (WG4)
 
-Status: contract frozen (task 0.1); lane work not started. Requirement 6.9 is pending a user
+Status: implemented, pending gates (lanes merged and wired). Requirement 6.9 is pending a user
 decision (see "Station write layer"). Requirements in [requirements](requirements.md), tasks in
 [tasks](tasks.md). Background: the Activity store
 ([activity recording catalog](../activity-recording-catalog/requirements.md)), WG3
@@ -260,12 +260,12 @@ the scanner evidence directory with `maxRecordingsMb` and `minFreeDiskMb`; `digi
 `<stateDir>/station.json`; `logs` = `logging.dir` when set); estimate getters
 (`getTracker().getAll()` of the four trackers, `stationConfigured` from the station service);
 `openStationService` before the decoder registry, its `location()` read by the readsb factory
-(effective at readsb's next creation; Main checks whether a decoder restart re-reads it) and
+(read at each readsb start, so a decoder restart applies a changed location) and
 its `effectiveCountry` passed to band plans at start; coverage built from
 `stationService.location()` and wired through `onLocationChange` to `setStation`.
 `src/api/server.ts`: register `storageRoutes`, `stationEstimateRoutes` and the station route
-with `service` and, with the access controller only, `authorizeMutation`; make `trails`
-required on the query service after lane T merges.
+with `service` and, with the access controller only, `authorizeMutation`; `trails` is
+required on the query service since lane T merged.
 
 ## Correctness properties
 
@@ -274,9 +274,12 @@ required on the query service after lane T merges.
    every point is inside the window, every trail is strictly ordered, the caps hold, and
    `skippedRows` counts exactly the invalid positions in the scanned rows. _Validates 1.1,
    1.3–1.5._
-2. **Trails truncation keeps the newest.** When any bound cuts the result, every returned
-   point is newer than (or as new as, by seq) every refused point of the same bound.
-   _Validates 1.4._
+2. **Trails truncation keeps the newest.** When any bound cuts the result, each returned
+   trail holds its entity's newest accepted points (newest first, by seq), and a refused
+   entity is not newer than any returned trail's newest point. Points of different entities
+   are not ordered against each other: under the greedy rule an older point of an entity
+   already bound can be returned while a newer point of an entity refused by `entities` is
+   not. _Validates 1.4._
 3. **Estimate equivariance.** Rotating every contributor's longitude by any δ (with
    wrapping) rotates the unrounded estimate by δ within 1e-6°, including across the
    antimeridian. _Validates 2.4._

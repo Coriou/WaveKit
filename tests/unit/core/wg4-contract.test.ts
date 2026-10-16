@@ -98,10 +98,10 @@ describe("WG4 contract", () => {
 		expect(ACTIVITY_TRAILS_MAX_ENTITY_KEYS).toBe(64)
 	})
 
-	it("adds an optional trails method that the inert service rejects", async () => {
+	it("requires a trails method that the inert service rejects", async () => {
 		const service = inertActivityService()
 		expect(service.trails).toBeTypeOf("function")
-		await expect(service.trails?.({})).rejects.toMatchObject({
+		await expect(service.trails({})).rejects.toMatchObject({
 			code: "ACTIVITY_UNAVAILABLE",
 		})
 	})

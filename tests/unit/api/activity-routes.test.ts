@@ -65,6 +65,7 @@ function throwingService(): ActivityQueryService {
 		search: fail,
 		detail: fail,
 		facets: fail,
+		trails: fail,
 		replay: fail,
 		close: async () => {},
 	}

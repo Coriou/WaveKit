@@ -30,10 +30,10 @@ function stubService(
 		search: fail,
 		detail: fail,
 		facets: fail,
+		trails,
 		replay: fail,
 		close: async () => {},
 	}
-	if (trails) service.trails = trails
 	return service
 }
 
@@ -335,7 +335,7 @@ describe("GET /api/activity/trails", () => {
 		await app.close()
 	})
 
-	it("answers 500 when the reader fails, and when the service has no trails", async () => {
+	it("answers 500 when the reader fails", async () => {
 		const failing = Fastify({ logger: false })
 		await failing.register(activityRoutes, {
 			service: stubService(async () => {
@@ -350,17 +350,6 @@ describe("GET /api/activity/trails", () => {
 		expect(failed.statusCode).toBe(500)
 		expect(failed.json()).toMatchObject({ code: "ACTIVITY_QUERY_FAILED" })
 		await failing.close()
-		const missing = Fastify({ logger: false })
-		await missing.register(activityRoutes, {
-			service: stubService(undefined),
-			enabled: true,
-		})
-		const none = await missing.inject({
-			method: "GET",
-			url: "/api/activity/trails",
-		})
-		expect(none.statusCode).toBe(500)
-		await missing.close()
 	})
 })
 

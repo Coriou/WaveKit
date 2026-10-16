@@ -1,6 +1,6 @@
 # Web gaps 4 requirements (WG4)
 
-Status: contract frozen (task 0.1); lane work not started. Requirement 6.9 (who may write the
+Status: implemented, pending gates (lanes merged and wired). Requirement 6.9 (who may write the
 station) is pending a user decision; the frozen behaviour is the recommended one. See
 [design](design.md) and [tasks](tasks.md).
 

@@ -509,17 +509,7 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 				const query = trailsRequest(params)
 				return await withActivityClient(
 					activityClientKey(request, options.access),
-					() => {
-						const trails = options.service.trails
-						if (!trails) {
-							throw new ActivityQueryError(
-								"Activity trails are not available",
-								"ACTIVITY_QUERY_FAILED",
-								500,
-							)
-						}
-						return trails.call(options.service, query)
-					},
+					() => options.service.trails(query),
 				)
 			} catch (error) {
 				return sendError(reply, request, error)

@@ -22,3 +22,5 @@ export type {
 	ActivityStoreQueryHandle,
 } from "./service.js"
 export type { ReaderHostEvent } from "./reader-host.js"
+export { DEFAULT_TRAILS_READ_LIMITS, readTrails } from "./trails.js"
+export type { TrailsReadInput, TrailsReadLimits } from "./trails.js"

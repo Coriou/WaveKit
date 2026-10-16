@@ -351,11 +351,8 @@ export interface ActivityQueryService {
 		input: ActivityReplayRequest,
 		sink: ActivityReplaySink,
 	): ActivityReplayHandle
-	/**
-	 * WG4 bulk position trails (docs/specs/web-gaps-4, requirement 1). Optional until lane T
-	 * lands; Main makes it required at merge.
-	 */
-	trails?(input: ActivityTrailsQuery): Promise<ActivityTrails>
+	/** WG4 bulk position trails (docs/specs/web-gaps-4, requirement 1). */
+	trails(input: ActivityTrailsQuery): Promise<ActivityTrails>
 	close(): Promise<void>
 }
 
