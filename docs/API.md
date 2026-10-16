@@ -2927,7 +2927,12 @@ files; symlinks are counted, not followed), `files`, `exists`, `partial`,
 `retention`. `retention` is set on `activity` only (null elsewhere, and null when
 Activity is disabled or its stats fail): `policy`, `effective`, `maxRows`,
 `maxDbBytes`, `maxAgeMs`, `rows`, `oldestReceivedAt`, `shares` (at most 64) and
-`sharesTruncated`, from the store's own stats, not from the scan.
+`sharesTruncated`, from the store's own stats, not from the scan. A file is
+counted in one area only: a directory nested inside another area's directory
+(for example `logging.dir` inside `<stateDir>/activity`, or one dsd-fme WAV
+directory inside another) is left out of the outer area, and two areas configured
+with the same directory count it in the later one. The scanner-evidence `cap` is
+null when the scanner is not running.
 
 The scan is bounded per report: 50,000 entries, depth 16, 2,000 ms wall time
 (`statfs` included) and 8 filesystem calls in flight. When a bound is reached the

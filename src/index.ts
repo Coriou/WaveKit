@@ -1256,6 +1256,7 @@ async function main(): Promise<void> {
 				stateDir: config.stateDir,
 				activityMaxDbBytes: activityLimits?.maxDbBytes ?? null,
 				scannerStorage: config.scanner.storage,
+				scannerEnabled: scanner !== null,
 				decoders: config.decoders,
 				accessDirectory,
 				logsDir: config.logging.dir,
