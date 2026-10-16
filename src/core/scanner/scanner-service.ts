@@ -2190,24 +2190,23 @@ export class ScannerService extends EventEmitter {
 		for (const a of res.attributed ?? []) {
 			for (const jobId of a.jobIds) {
 				if (!this.jobs.has(jobId)) continue
-				this.hitsOf(jobId).record(
-					a.observationId,
-					a.discoveryId,
-					now,
-					a.created,
-				)
+				const hits = this.hitsOf(jobId)
+				hits.record(a.observationId, a.discoveryId, now, a.created)
+				// WG6 req 2.1: an observation credited after it ended (a single-block promotion
+				// attaching closed pending hits, or this ingest's own close) has its duration now.
+				const ended = this.store.endedDurationOf(a.observationId)
+				if (ended !== undefined)
+					hits.ended(a.observationId, a.discoveryId, ended)
 			}
 			report(a.discoveryId, a.jobIds)
 		}
 		// WG6 req 2.1: a closing observation sets its duration on every job entry it is the
 		// latest credit of (JobHits ignores jobs whose entry moved on or never credited it).
 		if (endReason) {
-			const durationMs = now - live.startedAt
-			const jobIds = new Set(live.jobIds)
-			for (const a of res.attributed ?? [])
-				if (a.observationId === live.observationId)
-					for (const j of a.jobIds) jobIds.add(j)
-			for (const jobId of jobIds)
+			const durationMs =
+				this.store.endedDurationOf(live.observationId) ??
+				now - live.startedAt
+			for (const jobId of live.jobIds)
 				this.hits
 					.get(jobId)
 					?.ended(live.observationId, res.discoveryId, durationMs)

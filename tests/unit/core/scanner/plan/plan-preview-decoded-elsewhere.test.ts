@@ -342,11 +342,12 @@ describe("skip excludes", () => {
 									h.covered.startHz >= e.startHz && h.covered.endHz <= e.endHz,
 								).toBe(false)
 					} else if (entries.length > 0) {
+						// None applied with entries present: only because applying would empty
+						// the plan, which the single warning says; the plan stays today's.
+						expect(notApplied).toHaveLength(1)
 						const plain = previewPlan(spec, context())
-						if (notApplied.length === 1) {
-							expect(p.plan).toEqual(plain.plan)
-							expect(plain.plan.hops.length).toBeGreaterThan(0)
-						}
+						expect(p.plan).toEqual(plain.plan)
+						expect(plain.plan.hops.length).toBeGreaterThan(0)
 					}
 				},
 			),

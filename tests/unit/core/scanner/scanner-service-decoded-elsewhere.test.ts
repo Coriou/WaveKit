@@ -239,6 +239,75 @@ describe("ScannerService decoded elsewhere (WG6 req 1)", () => {
 })
 
 describe("ScannerService last hit duration (WG6 req 2.1)", () => {
+	it("a promotion crediting an observation that already ended sets its duration", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		try {
+			await h.service.start()
+			const a = await h.service.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
+			})
+			const internals = h.service as unknown as {
+				store: {
+					ingest: (input: unknown) => unknown
+					endedDurationOf: (id: string) => number | undefined
+				}
+				ingest: (live: unknown, track: unknown, endReason?: string) => void
+			}
+			// The single-block promotion attaches the closed pending hit o_old and the open o_new.
+			internals.store.ingest = () => ({
+				discoveryId: "d_p",
+				change: "created",
+				attributed: [
+					{
+						observationId: "o_new",
+						discoveryId: "d_p",
+						jobIds: [a.id],
+						created: true,
+					},
+					{
+						observationId: "o_old",
+						discoveryId: "d_p",
+						jobIds: [a.id],
+						created: true,
+					},
+				],
+			})
+			internals.store.endedDurationOf = id =>
+				id === "o_old" ? 1_234 : undefined
+			internals.ingest(
+				{
+					observationId: "o_new",
+					sourceId: "rtl",
+					trackId: "t",
+					epoch: 0,
+					jobIds: [a.id],
+					discoveryId: null,
+					startedAt: Date.now(),
+					classification: {},
+					probeIds: new Set(),
+					lastActivityAt: 0,
+					lastIngestAt: 0,
+					lastTrack: null,
+					decoded: false,
+					encrypted: false,
+				},
+				{},
+			)
+			expect(h.service.jobHits(a.id, 10).hits).toEqual([
+				expect.objectContaining({
+					discoveryId: "d_p",
+					hits: 2,
+					lastDurationMs: 1_234,
+				}),
+			])
+		} finally {
+			await h.service.stop()
+			await rm(h.dir, { recursive: true, force: true })
+		}
+	}, 30_000)
+
 	it("sets lastDurationMs when the job's latest credited observation closes", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		try {
