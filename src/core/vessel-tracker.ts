@@ -9,6 +9,7 @@ import { EventEmitter } from "node:events"
 import type { Logger } from "@wavekit/shared"
 import { z } from "zod"
 import type {
+	VesselAton,
 	VesselClass,
 	VesselState,
 	VesselTrackerStats,
@@ -63,6 +64,11 @@ const shipReportSchema = z.object({
 	destination: z.string().nullish(),
 	eta: z.union([z.date(), z.string()]).nullish(),
 	draught: finite.nullish(),
+	channel: z.enum(["A", "B"]).nullish().catch(undefined),
+	altitudeM: finite.nullish().catch(undefined),
+	aidType: finite.nullish().catch(undefined),
+	virtualAid: z.boolean().nullish().catch(undefined),
+	offPosition: z.boolean().nullish().catch(undefined),
 })
 
 type ShipReport = z.infer<typeof shipReportSchema>
@@ -133,6 +139,15 @@ function acceptSog(value: number): boolean {
 	return value >= 0 && value < 102.3
 }
 
+/** Type 9 (SAR aircraft) carries whole knots 0..1022; 1023 is n/a. */
+function acceptSarSog(value: number): boolean {
+	return value >= 0 && value <= 1022
+}
+
+function sogAcceptor(messageType: number): (value: number) => boolean {
+	return messageType === 9 ? acceptSarSog : acceptSog
+}
+
 function acceptHeading(value: number): boolean {
 	return value >= 0 && value <= 359
 }
@@ -169,6 +184,20 @@ function prepareReport(data: unknown): unknown {
 	return record
 }
 
+/** Newest type 21 / type 9 values, kept beside the state and surfaced by class. */
+interface ClassFields {
+	aton: VesselAton | null
+	altitudeM: number | null
+}
+
+function acceptAltitude(value: number): boolean {
+	return Number.isInteger(value) && value >= 0 && value <= 4094
+}
+
+function acceptAidType(value: number): boolean {
+	return Number.isInteger(value) && value >= 0 && value <= 31
+}
+
 function emptyByClass(): Record<VesselClass, number> {
 	return {
 		A: 0,
@@ -186,6 +215,7 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 	/** Process order, used to break lastSeen ties for latestMmsi. */
 	private readonly order = new Map<string, number>()
 	private nextOrder = 0
+	private readonly classFields = new WeakMap<VesselState, ClassFields>()
 	private readonly limits: {
 		maxAgeMs: number
 		cleanupIntervalMs: number
@@ -379,7 +409,7 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 			draught: carriedNumber(report.draught, acceptDraught),
 			position: null,
 			cog: carriedNumber(report.cog, acceptCog),
-			sog: carriedNumber(report.sog, acceptSog),
+			sog: carriedNumber(report.sog, sogAcceptor(report.messageType)),
 			heading: carriedNumber(report.heading, acceptHeading),
 			navStatus: carriedNumber(report.navStatus, acceptNavStatus),
 			messageTypes: [report.messageType],
@@ -388,7 +418,12 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 			firstSeen: atIso,
 			lastSeen: atIso,
 			lastStaticAt: null,
+			channel: report.channel ?? null,
+			aton: null,
+			altitudeM: null,
 		}
+		this.classFields.set(state, { aton: null, altitudeM: null })
+		this.applyClassFields(state, report)
 		const lat = carriedNumber(report.lat, acceptLat)
 		const lon = carriedNumber(report.lon, acceptLon)
 		if (lat !== null && lon !== null) {
@@ -413,7 +448,7 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 		const eta = carriedEta(report.eta)
 		const draught = carriedNumber(report.draught, acceptDraught)
 		const cog = carriedNumber(report.cog, acceptCog)
-		const sog = carriedNumber(report.sog, acceptSog)
+		const sog = carriedNumber(report.sog, sogAcceptor(report.messageType))
 		const heading = carriedNumber(report.heading, acceptHeading)
 		const navStatus = carriedNumber(report.navStatus, acceptNavStatus)
 		const lat = carriedNumber(report.lat, acceptLat)
@@ -442,6 +477,29 @@ export class VesselTracker extends EventEmitter<VesselTrackerEvents> {
 		state.decoderId = decoderId
 		state.lastSeen = atIso
 		if (isStaticReport(report.messageType, name)) state.lastStaticAt = atIso
+		this.applyClassFields(state, report)
+	}
+
+	/** Channel, AtoN and SAR altitude: constant work per report. */
+	private applyClassFields(state: VesselState, report: ShipReport): void {
+		let fields = this.classFields.get(state)
+		if (!fields) {
+			fields = { aton: null, altitudeM: null }
+			this.classFields.set(state, fields)
+		}
+		if (report.channel != null) state.channel = report.channel
+		if (report.messageType === 21) {
+			fields.aton = {
+				aidType: carriedNumber(report.aidType, acceptAidType),
+				virtual: report.virtualAid ?? null,
+				offPosition: report.offPosition ?? null,
+			}
+		}
+		if (report.messageType === 9) {
+			fields.altitudeM = carriedNumber(report.altitudeM, acceptAltitude)
+		}
+		state.aton = state.vesselClass === "aton" ? fields.aton : null
+		state.altitudeM = state.vesselClass === "sar" ? fields.altitudeM : null
 	}
 
 	/**

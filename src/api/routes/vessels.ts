@@ -60,6 +60,16 @@ const vesselStateSchema = {
 		firstSeen: { type: "string" },
 		lastSeen: { type: "string" },
 		lastStaticAt: nullableString,
+		channel: { type: ["string", "null"] },
+		aton: {
+			type: ["object", "null"],
+			properties: {
+				aidType: nullableNumber,
+				virtual: { type: ["boolean", "null"] },
+				offPosition: { type: ["boolean", "null"] },
+			},
+		},
+		altitudeM: nullableNumber,
 	},
 	required: [
 		"mmsi",
