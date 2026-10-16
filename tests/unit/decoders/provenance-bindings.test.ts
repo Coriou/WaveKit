@@ -249,6 +249,6 @@ describe("decoder provenance index (WG3 req 5.2)", () => {
 			sourceId: "sdr-main",
 			frequency: null,
 		})
-		expect(ingress.counters().provenanceFailures ?? 0).toBe(0)
+		expect(ingress.counters().provenanceFailures).toBe(0)
 	})
 })

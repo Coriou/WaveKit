@@ -254,6 +254,7 @@ describe("built-row growth bounds", () => {
 			buildFailures: 0,
 			sinkFailures: 0,
 			presentationFailures: 0,
+			provenanceFailures: 0,
 		})
 	})
 })

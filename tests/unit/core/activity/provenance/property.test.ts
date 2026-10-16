@@ -126,7 +126,7 @@ describe("provenance property", () => {
 					}
 					const sid = b?.sourceId
 					const hz = expectedHz(type, data, b)
-					const failures = ingress.counters().provenanceFailures ?? 0
+					const failures = ingress.counters().provenanceFailures
 					if (failures === 1) {
 						// Rejected because of provenance: rebuilt with null, counted.
 						expect(p).toEqual({ sourceId: null, frequency: null })

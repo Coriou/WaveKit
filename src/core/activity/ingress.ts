@@ -25,10 +25,8 @@ export interface ActivityIngressCounters {
 	/**
 	 * Receptions whose provenance lookup or resolution threw, or whose envelope
 	 * was rejected because of provenance; each was kept with null provenance.
-	 * Present only once non-zero, so callers comparing the WG2 counter shape
-	 * keep working.
 	 */
-	provenanceFailures?: number
+	provenanceFailures: number
 }
 
 export interface ActivityIngress {
@@ -78,13 +76,13 @@ export function createActivityIngress(
 	const sink = options.sink
 	const lookup = options.resolveProvenance ?? null
 	const log = createComponentLogger(options.logger, "ActivityIngress")
-	const counts = {
+	const counts: ActivityIngressCounters = {
 		published: 0,
 		buildFailures: 0,
 		sinkFailures: 0,
 		presentationFailures: 0,
+		provenanceFailures: 0,
 	}
-	let provenanceFailures = 0
 	const lastLoggedAt = new Map<string, number>()
 
 	function logFailure(
@@ -118,7 +116,7 @@ export function createActivityIngress(
 	}
 
 	function noteProvenance(decoderId: string, err: unknown, at: number): void {
-		provenanceFailures++
+		counts.provenanceFailures++
 		logFailure(decoderId, "provenance", err, at)
 	}
 
@@ -208,9 +206,7 @@ export function createActivityIngress(
 			counts.published++
 		},
 		counters() {
-			return provenanceFailures === 0
-				? { ...counts }
-				: { ...counts, provenanceFailures }
+			return { ...counts }
 		},
 	}
 }

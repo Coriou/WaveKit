@@ -88,6 +88,7 @@ describe("activity ingress", () => {
 			buildFailures: 0,
 			sinkFailures: 0,
 			presentationFailures: 0,
+			provenanceFailures: 0,
 		})
 	})
 
@@ -148,6 +149,7 @@ describe("activity ingress", () => {
 			// A reception that cannot be built is never presented (1.7):
 			// only the presentation-free build failure counts.
 			presentationFailures: 0,
+			provenanceFailures: 0,
 		})
 		expect(lines).toHaveLength(1)
 		expect(lines[0]).toMatchObject({
@@ -182,6 +184,7 @@ describe("activity ingress", () => {
 			buildFailures: 0,
 			sinkFailures: 1,
 			presentationFailures: 0,
+			provenanceFailures: 0,
 		})
 		ingress.publish("adsb-1", "readsb", output())
 		expect(ids).toBe(2)
@@ -295,7 +298,7 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 		)
 		expect(presented[0]?.title).toEqual(baseline.presented[0]?.title)
 		expect(presented[0]?.fields).toEqual(baseline.presented[0]?.fields)
-		expect(counters.provenanceFailures).toBeUndefined()
+		expect(counters.provenanceFailures).toBe(0)
 	})
 
 	it("without a lookup keeps the payload frequency with a null source", () => {
@@ -389,6 +392,6 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 			timestamp: new Date(Number.NaN),
 		})
 		expect(counters).toMatchObject({ published: 0, buildFailures: 1 })
-		expect(counters.provenanceFailures).toBeUndefined()
+		expect(counters.provenanceFailures).toBe(0)
 	})
 })

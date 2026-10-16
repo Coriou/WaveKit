@@ -110,6 +110,7 @@ describe("activity presentation failure paths", () => {
 			buildFailures: 0,
 			sinkFailures: 0,
 			presentationFailures: 1,
+			provenanceFailures: 0,
 		})
 	})
 
@@ -180,6 +181,7 @@ describe("activity presentation failure paths", () => {
 				buildFailures: 0,
 				sinkFailures: 0,
 				presentationFailures: 1,
+				provenanceFailures: 0,
 			})
 		} finally {
 			spy.mockRestore()
