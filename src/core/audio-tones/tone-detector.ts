@@ -61,8 +61,14 @@ export class ToneDetector {
 	private rate = 0
 	private inputSamples = 0
 	/** Audio seconds summed per sample at its own rate (DCS gate; CTCSS keeps its rule). */
-	private dcsSeconds = 0
-	private secondsPerSample = 0
+	/** DCS audio time: closed rate segments plus samples of the current one (exact at boundaries). */
+	private dcsSecondsDone = 0
+	private segmentSamples = 0
+	/**
+	 * Set when unreadable audio arrives while a split sample is held: the held bytes would
+	 * misframe every later sample, so DCS stays blind until the format is re-armed.
+	 */
+	private dcsBlind = false
 	private decimFactor = 1
 	private decimSum = 0
 	private decimCount = 0
@@ -75,12 +81,14 @@ export class ToneDetector {
 		if (format.format !== "s16le" && format.format !== "f32le") {
 			// DCS evidence must not bridge audio it cannot read.
 			this.dcs.reset()
+			if (this.pendingLen > 0) this.dcsBlind = true
 			return
 		}
 		const width = format.format === "s16le" ? 2 : 4
 		if (this.format !== format.format || this.rate !== format.rate) {
 			this.pendingLen = 0
 			this.dcs.reset()
+			this.dcsBlind = false
 			this.format = format.format
 			this.armRate(format.rate)
 		}
@@ -114,8 +122,16 @@ export class ToneDetector {
 		const ctcssHz =
 			this.durationSeconds() < MIN_CTCSS_SECONDS ? null : this.ctcss.result()
 		const dcs =
-			this.dcsSeconds < DCS_MIN_AUDIO_SECONDS ? null : this.dcs.result()
+			this.dcsSeconds() < DCS_MIN_AUDIO_SECONDS ? null : this.dcs.result()
 		return { ctcssHz, dtmf: digits, dcs }
+	}
+
+	private dcsSeconds(): number {
+		const current =
+			this.rate > 0 && Number.isFinite(this.rate)
+				? this.segmentSamples / this.rate
+				: 0
+		return this.dcsSecondsDone + current
 	}
 
 	durationSeconds(): number {
@@ -132,8 +148,9 @@ export class ToneDetector {
 		this.format = null
 		this.rate = 0
 		this.inputSamples = 0
-		this.dcsSeconds = 0
-		this.secondsPerSample = 0
+		this.dcsSecondsDone = 0
+		this.segmentSamples = 0
+		this.dcsBlind = false
 		this.decimFactor = 1
 		this.decimSum = 0
 		this.decimCount = 0
@@ -144,8 +161,9 @@ export class ToneDetector {
 	}
 
 	private armRate(rate: number): void {
+		this.dcsSecondsDone = this.dcsSeconds()
+		this.segmentSamples = 0
 		this.rate = rate
-		this.secondsPerSample = rate > 0 && Number.isFinite(rate) ? 1 / rate : 0
 		this.decimSum = 0
 		this.decimCount = 0
 		this.fracFill = 0
@@ -173,7 +191,7 @@ export class ToneDetector {
 
 	private takeSample(sample: number): void {
 		this.inputSamples += 1
-		this.dcsSeconds += this.secondsPerSample
+		this.segmentSamples += 1
 		if (this.decimFactor === 0 && !this.fractional) return
 		const value = Number.isFinite(sample) ? sample : 0
 		if (!this.fractional) {
@@ -207,7 +225,7 @@ export class ToneDetector {
 		const value = Number.isFinite(sample) ? sample : 0
 		this.ctcss.pushSample(value)
 		this.dtmf.pushSample(value)
-		this.dcs.pushSample(value)
+		if (!this.dcsBlind) this.dcs.pushSample(value)
 	}
 }
 

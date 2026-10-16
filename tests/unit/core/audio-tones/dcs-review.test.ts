@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { DcsDecoder } from "../../../../src/core/audio-tones/dcs.js"
 import { ToneDetector } from "../../../../src/core/audio-tones/tone-detector.js"
-import { dcsBitStream, nrz } from "./dcs-synth.js"
+import { dcsAudio, dcsBitStream, nrz } from "./dcs-synth.js"
 
 function f32(samples: ArrayLike<number>): Buffer {
 	const out = Buffer.alloc(samples.length * 4)
@@ -80,5 +80,60 @@ describe("DCS review regressions", () => {
 		const fmt = { rate: 8_000, format: "f32le" as const }
 		detector.push(f32(nrz(dcsBitStream({ code: 0o23, bits: 80 }))), fmt)
 		expect(detector.result().dcs).toBeNull()
+	})
+
+	it("a held split sample before unreadable audio cannot misframe DCS", () => {
+		const s16 = (x: Float64Array): Buffer => {
+			const out = Buffer.alloc(x.length * 2)
+			for (let i = 0; i < x.length; i++)
+				out.writeInt16LE(Math.round((x[i] ?? 0) * 32_767), i * 2)
+			return out
+		}
+		const fmt = { rate: 8_000, format: "s16le" as const }
+		const audio = s16(nrz(dcsBitStream({ code: 0o23, bits: 160 })))
+		const detector = new ToneDetector()
+		detector.push(Buffer.from([0]), fmt)
+		detector.push(Buffer.alloc(64), {
+			rate: 8_000,
+			format: "u8" as unknown as "s16le",
+		})
+		detector.push(audio, fmt)
+		expect(detector.result().dcs).toBeNull()
+		// Re-arming the format (here a rate change and back) clears the hold.
+		detector.push(audio, { rate: 16_000, format: "s16le" })
+		detector.push(audio, fmt)
+		expect(detector.result().dcs).toEqual({ code: "023", polarity: "normal" })
+		const fresh = new ToneDetector()
+		fresh.push(audio, fmt)
+		expect(fresh.result().dcs).toEqual({ code: "023", polarity: "normal" })
+	})
+
+	it.each([8_000, 16_000, 44_100, 48_000])(
+		"counts exactly 0.75 s of audio at %i Hz as enough",
+		rate => {
+			const detector = new ToneDetector()
+			const n = Math.round(rate * 0.75)
+			detector.push(f32(new Float64Array(n)), { rate, format: "f32le" })
+			expect(
+				(detector as unknown as { dcsSeconds(): number }).dcsSeconds(),
+			).toBe(0.75)
+			const short = new ToneDetector()
+			short.push(f32(new Float64Array(n - 1)), { rate, format: "f32le" })
+			expect(
+				(short as unknown as { dcsSeconds(): number }).dcsSeconds(),
+			).toBeLessThan(0.75)
+		},
+	)
+
+	it("reports at the 16 kHz 0.75 s boundary", () => {
+		const audio = dcsAudio({
+			code: 0o23,
+			seconds: 0.75,
+			seed: 42,
+			rate: 16_000,
+		})
+		const detector = new ToneDetector()
+		detector.push(f32(audio), { rate: 16_000, format: "f32le" })
+		expect(detector.result().dcs).toEqual({ code: "023", polarity: "normal" })
 	})
 })
