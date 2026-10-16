@@ -551,19 +551,26 @@ curl -X PATCH http://localhost:9000/api/station \
 
 **Response** (200) `StationUpdateResult`: `station` (the new identity, as in
 `GET`), `revision`, `changed` (fields whose effective value changed, in field
-order), `appliesOnRestart` (`["readsb"]` when the effective location changed),
+order), `appliesOnRestart` (`["readsb"]` when the effective location changed; it
+concerns readsb instances without their own complete `lat`/`lon` options, which
+keep using those),
 `restartRequired` (`["country"]` when the country changed) and `coverageCleared`.
 A write always bumps `revision`, even when no effective value changed.
 
 | Code                        | HTTP | When                                                                                                                                     |
 | --------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `STATION_UPDATE_INVALID`    | 400  | Not a JSON object, malformed JSON, over 4,096 bytes, wrong content type, no or unknown field, invalid value, half a pair, bad `If-Match` |
-| `STATION_FIELD_PINNED`      | 409  | A field in the body is set by YAML or the environment (`fields` lists them); checked before the values                                   |
+| `STATION_FIELD_PINNED`      | 409  | A field in the body is set by YAML or the environment (`fields` lists them); checked after the shape and values                          |
 | `STATION_REVISION_MISMATCH` | 412  | `If-Match` is not the current `revision`                                                                                                 |
 | `STATION_STORE_UNAVAILABLE` | 503  | The store could not be written, the service is closed, or the revision counter is exhausted                                              |
 
 Error bodies are `{ error, code, message, fields? }` (`fields` on 409, and on 400
-when the invalid fields are known); nothing changes when a request fails.
+when the invalid fields are known); nothing changes when a request fails. Checks
+run in this order: the body's shape and every value (400), pinned fields (409),
+the `lat`/`lon` pair (400), then `If-Match` (412). `lat` and `lon` are pinned
+jointly: when YAML or the environment sets either, both are pinned, so with only
+`station.lat` in YAML a body `{ "lon": 2.35 }` is a 409 with `fields: ["lon"]`
+(not a half-pair 400).
 
 Persistence: the UI layer lives in `<stateDir>/station.json` (per field: value,
 provenance `ui` and write time; schema version 1, at most 4,096 bytes). It is

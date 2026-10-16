@@ -225,8 +225,9 @@ provenance and ISO times, serialise to ≤ ≈ 1 KiB, well under the 4 KiB bound
 **Service** (`openStationService`): layers = `stationOrigins(config)` and `config.station`
 (env/yaml), the stored UI fields, defaults. Effective field = first set layer in precedence
 order; provenance accordingly. lat/lon: an effective pair needs both from the same rule; a
-stored half pair is ignored. `update()`: serialised by a promise chain; checks pinned fields
-(409 with the request's pinned fields), validates (400), checks If-Match (412), writes (503 on
+stored half pair is ignored. `update()`: serialised by a promise chain; validates the shape
+and values (400), checks pinned fields (409 with the request's pinned fields; lat/lon are
+pinned jointly), checks the lat/lon pair (400), checks If-Match (412), writes (503 on
 failure, state unchanged), then swaps the in-memory layer, computes `changed`, calls
 `onLocationChange` when the effective location changed (a throw is logged, the update
 succeeds with `coverageCleared: false`), notifies `onChange` listeners, and returns
