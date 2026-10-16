@@ -7,12 +7,11 @@
  * received 0 to 30 000 ms earlier, both bounds inclusive, by `receivedAt`.
  * A backward step (negative delta) is never a copy.
  *
- * Pure: no clock, no I/O. Entries live in a Map keyed by `<from>:<id>`; a
- * ring of the last `maxEntries` remembers gives the insertion order, so the
- * oldest remember is evicted in O(1). (Evicting through `map.keys().next()`
- * walks V8's deleted-entry holes and cost about 40 us per call.) A key
- * remembered again moves to the newest slot; its old slot goes stale and
- * still counts toward the bound, so at most `maxEntries` entries are live.
+ * Pure: no clock, no I/O. Entries live in a Map keyed by `<from>:<id>` and
+ * on a doubly linked list in remember order (oldest at the head), so
+ * re-remember, forget and evict-oldest are all O(1). Only live entries count
+ * toward `maxEntries`. (Evicting through `map.keys().next()` walks V8's
+ * deleted-entry holes and cost about 40 us per call.)
  */
 
 export const FLOOD_WINDOW_MS = 30_000
@@ -35,7 +34,9 @@ interface FloodEntry {
 	eventId: string
 	atMs: number
 	hash: number
-	slot: number
+	key: string
+	prev: FloodEntry | undefined
+	next: FloodEntry | undefined
 }
 
 function isUint32(value: unknown): value is number {
@@ -99,14 +100,15 @@ export function floodKeyOf(
 
 export class FloodDedupe {
 	private readonly entries = new Map<string, FloodEntry>()
-	private readonly ring: (string | undefined)[]
-	private cursor = 0
+	private head: FloodEntry | undefined
+	private tail: FloodEntry | undefined
+	private readonly maxEntries: number
 
 	constructor(
 		private readonly windowMs: number = FLOOD_WINDOW_MS,
 		maxEntries: number = FLOOD_MAX_ENTRIES,
 	) {
-		this.ring = new Array<string | undefined>(Math.max(1, maxEntries))
+		this.maxEntries = Math.max(1, maxEntries)
 	}
 
 	get size(): number {
@@ -121,24 +123,59 @@ export class FloodDedupe {
 		return delta >= 0 && delta <= this.windowMs
 	}
 
-	/** Remembers a queued reception, replacing any entry for its key. */
+	/**
+	 * Remembers a queued reception, replacing any entry for its key and making
+	 * it the newest. Evicts the oldest live entry only at `maxEntries`.
+	 */
 	remember(key: FloodKey, eventId: string): void {
-		const slot = this.cursor
-		const oldest = this.ring[slot]
-		if (oldest !== undefined && this.entries.get(oldest)?.slot === slot)
-			this.entries.delete(oldest)
-		this.ring[slot] = key.key
-		this.cursor = slot + 1 === this.ring.length ? 0 : slot + 1
-		this.entries.set(key.key, {
+		const existing = this.entries.get(key.key)
+		if (existing) {
+			this.unlink(existing)
+			existing.eventId = eventId
+			existing.atMs = key.atMs
+			existing.hash = key.hash
+			this.append(existing)
+			return
+		}
+		if (this.entries.size >= this.maxEntries && this.head) {
+			const oldest = this.head
+			this.unlink(oldest)
+			this.entries.delete(oldest.key)
+		}
+		const entry: FloodEntry = {
 			eventId,
 			atMs: key.atMs,
 			hash: key.hash,
-			slot,
-		})
+			key: key.key,
+			prev: undefined,
+			next: undefined,
+		}
+		this.entries.set(key.key, entry)
+		this.append(entry)
 	}
 
 	/** Forgets `key` only while it still names `eventId` (a failed write). */
 	forget(key: string, eventId: string): void {
-		if (this.entries.get(key)?.eventId === eventId) this.entries.delete(key)
+		const entry = this.entries.get(key)
+		if (entry?.eventId !== eventId) return
+		this.unlink(entry)
+		this.entries.delete(key)
+	}
+
+	private append(entry: FloodEntry): void {
+		entry.prev = this.tail
+		entry.next = undefined
+		if (this.tail) this.tail.next = entry
+		else this.head = entry
+		this.tail = entry
+	}
+
+	private unlink(entry: FloodEntry): void {
+		if (entry.prev) entry.prev.next = entry.next
+		else this.head = entry.next
+		if (entry.next) entry.next.prev = entry.prev
+		else this.tail = entry.prev
+		entry.prev = undefined
+		entry.next = undefined
 	}
 }

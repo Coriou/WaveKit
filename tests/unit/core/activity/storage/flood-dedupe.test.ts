@@ -85,6 +85,43 @@ describe("floodKeyOf", () => {
 })
 
 describe("FloodDedupe", () => {
+	it("re-remembers do not consume capacity or evict other live entries", () => {
+		const dedupe = new FloodDedupe()
+		dedupe.remember(key(0, { id: 1 }), "a")
+		for (let i = 0; i < FLOOD_MAX_ENTRIES; i++)
+			dedupe.remember(
+				key(1, { id: 2, payloadB64: i % 2 === 0 ? "QQ==" : "Qg==" }),
+				`b${i}`,
+			)
+		expect(dedupe.size).toBe(2)
+		expect(dedupe.isCopy(key(2, { id: 1 }))).toBe(true)
+	})
+
+	it("forgets do not consume capacity or evict other live entries", () => {
+		const dedupe = new FloodDedupe()
+		dedupe.remember(key(0, { id: 1 }), "a")
+		for (let i = 0; i < FLOOD_MAX_ENTRIES * 2; i++) {
+			dedupe.remember(key(1, { id: 2 }), `b${i}`)
+			dedupe.forget("1:2", `b${i}`)
+		}
+		expect(dedupe.size).toBe(1)
+		expect(dedupe.isCopy(key(2, { id: 1 }))).toBe(true)
+	})
+
+	it("evicts only when live entries reach the bound", () => {
+		const dedupe = new FloodDedupe()
+		for (let id = 1; id < FLOOD_MAX_ENTRIES; id++)
+			dedupe.remember(key(0, { id }), `e${id}`)
+		dedupe.forget("1:1", "e1")
+		dedupe.remember(key(0, { id: FLOOD_MAX_ENTRIES }), "x")
+		dedupe.remember(key(0, { id: FLOOD_MAX_ENTRIES + 1 }), "y")
+		expect(dedupe.size).toBe(FLOOD_MAX_ENTRIES)
+		expect(dedupe.isCopy(key(1, { id: 2 }))).toBe(true)
+		dedupe.remember(key(0, { id: FLOOD_MAX_ENTRIES + 2 }), "z")
+		expect(dedupe.isCopy(key(1, { id: 2 }))).toBe(false)
+		expect(dedupe.isCopy(key(1, { id: 3 }))).toBe(true)
+	})
+
 	it("is a copy within [0, 30 000] ms inclusive, not outside or backward", () => {
 		const dedupe = new FloodDedupe()
 		dedupe.remember(key(1000), "e1")
@@ -199,8 +236,12 @@ describe("flood copies property", () => {
 				const keyOfEvent = new Map<string, string>()
 				let copies = 0
 				let admitted = 0
+				let failed = 0
+				let gapRows = 0
 				const failRows = (eventIds: readonly string[]): void => {
 					for (const eventId of eventIds) {
+						if (!eventId.startsWith("ev-")) continue
+						failed++
 						const k = keyOfEvent.get(eventId)
 						if (k !== undefined && kept.get(k)?.eventId === eventId)
 							kept.delete(k)
@@ -253,6 +294,7 @@ describe("flood copies property", () => {
 					}
 					const batch = gate.takeBatch(1000, 64 * 1024 * 1024)
 					const ids = batch.map(row => row.eventId)
+					gapRows += batch.filter(row => row.kind === "ingestion-gap").length
 					if (step.op === "ack") gate.ack(new Set(ids))
 					else if (step.op === "nack") {
 						gate.nack()
@@ -271,6 +313,11 @@ describe("flood copies property", () => {
 				expect(gate.dropped["rate-limited"]).toBe(0)
 				expect(gate.dropped["queue-full"]).toBe(0)
 				expect(gate.dropped["store-paused"]).toBe(0)
+				expect(gate.dropped["write-failed"]).toBe(failed)
+				if (failed === 0) {
+					expect(gapRows).toBe(0)
+					expect(gate.hasOpenEpisode()).toBe(false)
+				}
 			}),
 			{ numRuns: 200 },
 		)
