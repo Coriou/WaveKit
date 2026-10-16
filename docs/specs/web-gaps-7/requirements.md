@@ -66,7 +66,8 @@ without a frequency is evidence only when the decoder has exactly one target. A 
 of 0 or non-finite is no evidence. Anything unknown, missing, malformed or throwing is no
 evidence.
 Amended (WG7 Main): the decoder's provenance binding gives the trust. It counts only on the
-target's source (or, without a binding source, the decoder's resolved source) and only when the
+target's source (a binding without a source belongs to an external-input decoder and never
+counts) and only when the
 decode's frequency lies within 1 kHz of one of the binding's own target frequencies. Without a
 trust lookup no ambient trial is planned (identify behaves as before WG7).
 1.4 Evidence pairs with observations exactly as today (same source, `|centre − hz| ≤ max(1 500,

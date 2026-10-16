@@ -2817,7 +2817,8 @@ identity makes the target `identified`, with the same rule as a probe decode.
 A decode counts only when all of these hold (fail closed):
 
 - the decoder's reception `tuningTrust` is `commanded` or `relay`, never
-  `unverified`. Its provenance binding must be on the same source, and the
+  `unverified`. Its provenance binding must name the same source (a binding
+  without a source, as for an external-input decoder, never counts), and the
   decode's frequency must lie within 1 kHz of one of the binding's targets.
 - the decode carries its own frequency within 1 kHz of a decoder target. AIS
   channel `A` is 161 975 000 Hz and `B` is 162 025 000 Hz; a message without a
