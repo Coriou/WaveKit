@@ -222,7 +222,7 @@ describe("activity routes", () => {
 			url: "/api/activity/status",
 		})
 		expect(status.statusCode).toBe(200)
-		// WG3 req 2.1, 6.5: retention and floodCopies pass through the loose schema.
+		// WG3 req 2.1, 6.6: retention and floodCopies pass through the loose schema.
 		expect(status.json()).toEqual({ enabled: true, stats })
 
 		const search = await app.inject({

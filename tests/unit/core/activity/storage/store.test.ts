@@ -394,7 +394,7 @@ describe("activity store", () => {
 	})
 })
 
-// WG3 req 2.1, 6.5: status exposes the retention block and the flood-copy count.
+// WG3 req 2.1, 6.6: status exposes the retention block and the flood-copy count.
 describe("activity store stats: retention and flood copies", () => {
 	it("counts a Meshtastic flood copy and reports per-share retention", async () => {
 		const store = await openStore({
