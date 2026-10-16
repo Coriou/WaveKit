@@ -112,6 +112,22 @@ describe("StationService", () => {
 		expect(service.identity().revision).toBe(0)
 	})
 
+	it("400 before 409: an invalid value on a pinned field is invalid, a valid one is pinned", async () => {
+		const service = await open({ name: "Yard", lat: 10 })
+		const bad = await rejection(service.update({ lat: 91, lon: 0 }))
+		expect(bad.statusCode).toBe(400)
+		expect(bad.fields).toEqual(["lat"])
+		const unknown = await rejection(
+			service.update({ name: "Z", foo: 1 } as never),
+		)
+		expect(unknown.statusCode).toBe(400)
+		// A pinned half pair answers 409, not the set-together 400
+		const half = await rejection(service.update({ lon: 3 }))
+		expect(half.statusCode).toBe(409)
+		expect(half.fields).toEqual(["lon"])
+		expect(service.identity().revision).toBe(0)
+	})
+
 	it.each<[string, unknown, string[] | undefined]>([
 		["empty", {}, undefined],
 		["unknown key", { foo: 1 }, undefined],

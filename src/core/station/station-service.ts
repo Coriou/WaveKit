@@ -87,6 +87,11 @@ function validatePatch(patch: object, keys: string[]): ValidPatch {
 	if (bad.length > 0) {
 		throw invalid(`Invalid station field(s): ${bad.join(", ")}`, bad)
 	}
+	return out
+}
+
+/** lat and lon set or cleared together; checked after pinned fields, so a pinned half is 409. */
+function checkLocationPair(out: ValidPatch): void {
 	const hasLat = "lat" in out
 	const hasLon = "lon" in out
 	if (
@@ -95,7 +100,6 @@ function validatePatch(patch: object, keys: string[]): ValidPatch {
 	) {
 		throw invalid("lat and lon must be set or cleared together", ["lat", "lon"])
 	}
-	return out
 }
 
 function sameLocation(
@@ -152,6 +156,8 @@ export async function openStationService(
 			)
 		}
 		const keys = patchKeys(patch)
+		// Shape and values first (400), then pinned fields (409), then the lat/lon pair (400)
+		const valid = validatePatch(patch, keys)
 		const pinnedHit = STATION_FIELDS.filter(
 			field => keys.includes(field) && pinned.has(field),
 		)
@@ -162,7 +168,7 @@ export async function openStationService(
 				pinnedHit,
 			)
 		}
-		const valid = validatePatch(patch, keys)
+		checkLocationPair(valid)
 		if (ifMatch !== undefined && ifMatch !== store.revision) {
 			throw new StationUpdateError(
 				"STATION_REVISION_MISMATCH",
