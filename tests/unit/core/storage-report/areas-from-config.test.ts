@@ -327,6 +327,54 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 		}
 	})
 
+	it("a symlink root inside another root counts its link entry once", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-areas-"))
+		try {
+			await mkdir(join(dir, "d"))
+			await mkdir(join(dir, "target"))
+			await writeFile(join(dir, "d", "f"), Buffer.alloc(4))
+			await writeFile(join(dir, "target", "t"), Buffer.alloc(10))
+			await symlink(join(dir, "target"), join(dir, "d", "alias"))
+			const link = (await lstat(join(dir, "d", "alias"))).size
+			const [scanner, wav] = await scanStorageAreas([
+				{ id: "scanner-evidence", paths: [join(dir, "d")], capBytes: null },
+				{
+					id: "digital-voice-wav",
+					paths: [join(dir, "d", "alias")],
+					capBytes: null,
+				},
+			])
+			expect(scanner).toMatchObject({ files: 1, bytes: 4 })
+			expect(wav).toMatchObject({ files: 1, bytes: link })
+			// In one area the nested link root collapses into its parent's walk.
+			const [both] = await scanStorageAreas([
+				{
+					id: "digital-voice-wav",
+					paths: [join(dir, "d"), join(dir, "d", "alias")],
+					capBytes: null,
+				},
+			])
+			expect(both).toMatchObject({ files: 2, bytes: 4 + link })
+			// The same link listed twice by two areas counts in the later one.
+			const [first, second] = await scanStorageAreas([
+				{
+					id: "scanner-evidence",
+					paths: [join(dir, "d", "alias")],
+					capBytes: null,
+				},
+				{
+					id: "digital-voice-wav",
+					paths: [join(dir, "d", "alias")],
+					capBytes: null,
+				},
+			])
+			expect(first).toMatchObject({ files: 0, exists: true })
+			expect(second).toMatchObject({ files: 1, bytes: link })
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+	})
+
 	it("collapses case aliases on a case-insensitive filesystem", async ctx => {
 		const dir = await mkdtemp(join(tmpdir(), "wavekit-areas-"))
 		try {
