@@ -66,7 +66,7 @@ import { ScannerService } from "./core/scanner/scanner-service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
 import { bandPlanSkipSources } from "./core/scanner/plan/bandplan-skips.js"
-import { ambientTrustFromBinding } from "./core/scanner/probes/ambient.js"
+import { ambientTrustFromBinding } from "./core/scanner/probes/ambient-trust.js"
 import { createBandPlanUrlFetcher } from "./core/bandplan-url/fetch.js"
 import { BANDPLAN_URL_IMPORT_HOSTS } from "@wavekit/api-types"
 import { APP_VERSION } from "./api/routes/health.js"
@@ -1021,11 +1021,7 @@ async function main(): Promise<void> {
 				// source the ambient target names, at a frequency within 1 kHz of a binding target
 				// (the frequencies trust was proven for). Anything else: undefined (fail closed).
 				ambientTrust: (decoderId, hz, sourceId) =>
-					ambientTrustFromBinding(
-						ambientProvenance?.(decoderId),
-						hz,
-						sourceId,
-					),
+					ambientTrustFromBinding(ambientProvenance?.(decoderId), hz, sourceId),
 				digitalVoice,
 				liveDemod,
 				operatorActivity: liveDemodOperatorActivity(liveDemod),

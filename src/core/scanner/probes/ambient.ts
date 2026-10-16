@@ -10,13 +10,17 @@
 import { EventEmitter } from "node:events"
 import {
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
-	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 	type ScannerAmbientDecoderType,
 } from "@wavekit/api-types"
 import type { DsdFmeLinkLine } from "../../../decoders/builtin/dsd-fme-link.js"
 import type { DecoderManager } from "../../../decoders/manager.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import type { TuningTrust } from "../../spectrum/types.js"
+import { isTrusted } from "./ambient-trust.js"
+export {
+	ambientTrustFromBinding,
+	type AmbientTrustBinding,
+} from "./ambient-trust.js"
 import type { DecodeEvidence, ScannerProtocol } from "../types.js"
 import { parseAcars } from "./confirm/acars.js"
 import { parseAis } from "./confirm/ais.js"
@@ -112,45 +116,6 @@ const AMBIENT_TYPES = new Set([
 	"rtl433",
 	...NEW_INTERPRETERS.keys(),
 ])
-
-const isTrusted = (t: TuningTrust | undefined): boolean =>
-	t === "commanded" || t === "relay"
-
-/** The provenance binding fields the ambient trust rule reads (structural ActivityDecoderBinding). */
-export interface AmbientTrustBinding {
-	sourceId: string | null
-	targetFrequenciesHz: readonly number[]
-	tuningTrust: TuningTrust
-}
-
-/**
- * WG7 req 1.3: trust of an ambient decode at `hz` on `sourceId` from the decoder's provenance
- * binding. Fail closed: only `commanded`/`relay`, only when the binding's source is `sourceId`
- * (a binding without a source belongs to an external-input decoder and never counts), and only
- * when `hz` lies within
- * SCANNER_AMBIENT_TARGET_TOLERANCE_HZ of one of the binding's own target frequencies (the
- * frequencies the trust was proven for). Anything else, a throw included, is undefined.
- */
-export function ambientTrustFromBinding(
-	binding: AmbientTrustBinding | null | undefined,
-	hz: number,
-	sourceId: string,
-): TuningTrust | undefined {
-	try {
-		if (!binding || !isTrusted(binding.tuningTrust)) return undefined
-		if (!Number.isFinite(hz)) return undefined
-		if (typeof binding.sourceId !== "string" || binding.sourceId !== sourceId)
-			return undefined
-		const near = binding.targetFrequenciesHz.some(
-			t =>
-				Number.isFinite(t) &&
-				Math.abs(t - hz) <= SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
-		)
-		return near ? binding.tuningTrust : undefined
-	} catch {
-		return undefined
-	}
-}
 
 export class AmbientEvidence extends EventEmitter {
 	private readonly log: Logger
