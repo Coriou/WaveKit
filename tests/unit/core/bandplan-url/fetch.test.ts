@@ -445,3 +445,37 @@ describe("rule 6: errors and logs carry no body or query", () => {
 		for (const e of errors) expect(e).toBeInstanceOf(BandPlansError)
 	})
 })
+
+describe("body buffering (bounded memory)", () => {
+	it("copies 100 000 one-byte chunks into one cap-sized allocation", async () => {
+		const chunks = Array.from({ length: 100_000 }, (_, i) =>
+			Buffer.from([0x41 + (i % 26)]),
+		)
+		const { fetcher } = setup({ chunks })
+		const out = await fetcher(URL_OK, HOSTS)
+		expect(out.bytes.length).toBe(100_000)
+		expect(Buffer.from(out.bytes).equals(Buffer.concat(chunks))).toBe(true)
+		// A single backing allocation of the cap, not a concatenation of retained chunks.
+		expect(out.bytes.buffer.byteLength).toBe(MiB)
+		expect(out.bytes.byteOffset).toBe(0)
+	})
+
+	it("preallocates the announced Content-Length when within the cap", async () => {
+		const { fetcher } = setup({
+			headers: { "content-type": "text/plain", "content-length": "5" },
+			chunks: [Buffer.from("he"), Buffer.from("llo")],
+		})
+		const out = await fetcher(URL_OK, HOSTS)
+		expect(Buffer.from(out.bytes).toString()).toBe("hello")
+		expect(out.bytes.buffer.byteLength).toBe(5)
+	})
+
+	it("a body longer than announced (within the cap) still arrives intact", async () => {
+		const { fetcher } = setup({
+			headers: { "content-type": "text/plain", "content-length": "2" },
+			chunks: [Buffer.from("he"), Buffer.from("llo")],
+		})
+		const out = await fetcher(URL_OK, HOSTS)
+		expect(Buffer.from(out.bytes).toString()).toBe("hello")
+	})
+})

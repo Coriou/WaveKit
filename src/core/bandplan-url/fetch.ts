@@ -213,27 +213,38 @@ export function createBandPlanUrlFetcher(
 					return
 				}
 				const lengthText = headerValue(response.headers["content-length"])
+				let announced: number | undefined
 				if (lengthText !== undefined) {
 					const length = Number(lengthText.trim())
 					if (Number.isFinite(length) && length > maxBytes) {
 						finish(fail("BANDPLANS_IMPORT_TOO_LARGE"))
 						return
 					}
+					if (Number.isInteger(length) && length >= 0) announced = length
 				}
-				const chunks: Buffer[] = []
+				// One preallocated buffer (the announced length, else the cap); chunks are
+				// copied in as they arrive and never retained, so memory stays bounded by the cap.
+				let body = Buffer.alloc(announced ?? maxBytes)
 				let total = 0
 				response.on("data", (chunk: Buffer | string) => {
 					if (done) return
 					const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk
-					total += buf.length
-					if (total > maxBytes) {
+					const next = total + buf.length
+					if (next > maxBytes) {
 						finish(fail("BANDPLANS_IMPORT_TOO_LARGE"))
 						return
 					}
-					chunks.push(buf)
+					if (next > body.length) {
+						// The server sent more than it announced (still within the cap): grow once.
+						const grown = Buffer.alloc(maxBytes)
+						body.copy(grown, 0, 0, total)
+						body = grown
+					}
+					buf.copy(body, total)
+					total = next
 				})
 				response.on("end", () => {
-					const bytes = new Uint8Array(Buffer.concat(chunks, total))
+					const bytes = new Uint8Array(body.buffer, body.byteOffset, total)
 					log?.debug(
 						{ host, path: url.pathname, bytes: total },
 						"band-plan URL fetched",
