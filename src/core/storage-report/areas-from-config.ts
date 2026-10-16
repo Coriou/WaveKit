@@ -147,14 +147,18 @@ export interface LiveStorageAreaInputs extends Omit<
 	scannerStorage: StorageScannerStorage
 	/** The scanner now; null when it is not running. Read at each scan. */
 	scanner: () => StorageScannerView | null
-	/** The decoders now. Read at each scan. */
+	/**
+	 * The decoder list, read at each scan. Today it is the startup list (`config.decoders`):
+	 * decoders are only created at startup, so the list does not change at runtime yet.
+	 */
 	decoders: () => StorageAreaInputs["decoders"]
 }
 
 /**
  * Area and low-space providers for the storage reporter, evaluated at each scan (the
  * reporter's cache bounds how often): a runtime scanner settings change (storage dir,
- * maxRecordingsMb, minFreeDiskMb) or a decoder list change shows in the next report.
+ * maxRecordingsMb, minFreeDiskMb) shows in the next report, as would a decoder list
+ * change once decoders can be created after startup (today the list is the startup one).
  */
 export function liveStorageReportSources(inputs: LiveStorageAreaInputs): {
 	areas: () => StorageAreaSource[]
