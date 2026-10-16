@@ -31,6 +31,8 @@ const Hz = z.number().finite().min(1)
 
 /** Timers (call start delay, timeout, minimum duration): at most 24 h. */
 export const DSD_FME_DURATION_MS_MAX = 86_400_000
+/** extraArgs is a hand-written argv tail: 64 entries is far past any real one. */
+export const DSD_FME_EXTRA_ARGS_MAX = 64
 /** Linear `csdr gain` multiplier; equals audio-demod-decoder FM_GAIN_MAX (+60 dB). */
 export const DSD_FME_FM_GAIN_MAX = 1000
 /** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
@@ -70,6 +72,8 @@ export const dsdFmeOptionsSchema = z
 		// The adapter String()s every element before filtering reserved flags.
 		extraArgs: z
 			.array(z.union([z.string(), z.number(), z.boolean()]))
+			// Hand-written argv tail, capped (the adapter slices to the same bound).
+			.max(DSD_FME_EXTRA_ARGS_MAX)
 			.nullable()
 			.optional(),
 		// Linear csdr gain multiplier, 0 to +60 dB (the adapter clamps to it).
@@ -214,7 +218,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 		secret: true,
 		effect: "restart",
 		description:
-			"Extra dsd-fme arguments (mode and audio output flags are dropped); may carry privacy keys.",
+			"Extra dsd-fme arguments (mode and audio output flags are dropped); may carry privacy keys. At most 64 entries.",
 	},
 	{
 		key: "fmGain",

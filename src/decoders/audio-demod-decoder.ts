@@ -324,12 +324,22 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// Check for debug recording option
 		const debugPath = config.options["debugRecordPath"] as string | undefined
 		if (debugPath) {
-			this.debugRecording = {
-				path: debugPath,
-				stages:
-					(config.options["debugRecordStages"] as "demod" | "final" | "both") ??
-					"both",
+			// Enum checked before use; an unknown value records nothing (as before,
+			// when no stage matched) with a key-only warning (WG7 HW.2).
+			const rawStages = config.options["debugRecordStages"]
+			let stages: "demod" | "final" | "both" | undefined = "both"
+			if (
+				rawStages === "demod" ||
+				rawStages === "final" ||
+				rawStages === "both"
+			)
+				stages = rawStages
+			else if (rawStages !== undefined && rawStages !== null) {
+				this.optionWarn("debugRecordStages", "invalid")
+				stages = undefined
 			}
+			if (stages === undefined) return
+			this.debugRecording = { path: debugPath, stages }
 			this.logger.info(
 				// No path: option text never reaches the logs (WG7 HW.2).
 				{ stages: this.debugRecording.stages },

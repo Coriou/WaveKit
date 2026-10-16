@@ -13,6 +13,8 @@ const OUTPUT_FORMAT_VALUES = ["json", "text"] as const
 
 /** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
 export const DUMPVDL2_BOUNDS = {
+	/** A hand-written argv tail; thousands of entries is a mistake or an attack. */
+	maxExtraArgs: 64,
 	/** Tunable range of the supported SDRs (up to 6 GHz). */
 	frequencyHz: { min: 1, max: 6_000_000_000 },
 	/** VDL2 channels sit within 136.5-137 MHz; eight dwarfs the three in use. */
@@ -44,7 +46,11 @@ export const dumpvdl2OptionsSchema = z
 		channelHz: z.number().finite().positive().nullable().optional(),
 		// deviceSerial, gain, ppm, rtlTcpHost and rtlTcpPort are read but never used.
 		deviceSerial: z.string().nullable().optional(),
-		extraArgs: z.array(z.string()).nullable().optional(),
+		extraArgs: z
+			.array(z.string())
+			.max(DUMPVDL2_BOUNDS.maxExtraArgs)
+			.nullable()
+			.optional(),
 		followCenter: z.boolean().nullable().optional(),
 		// Empty falls back to the built-in channel list.
 		frequencies: z.array(Hz).max(DUMPVDL2_BOUNDS.maxFrequencies).optional(),
@@ -89,7 +95,7 @@ export const dumpvdl2OptionDescriptors: DecoderOptionDescriptor[] = [
 		default: null,
 		secret: false,
 		effect: "restart",
-		description: "Extra dumpvdl2 command-line arguments.",
+		description: "Extra dumpvdl2 command-line arguments (at most 64 entries).",
 	},
 	{
 		key: "followCenter",

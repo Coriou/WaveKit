@@ -475,6 +475,32 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 }
 
 /**
+ * extraArgs is a hand-written argv tail: at most 64 strings. Sliced before any
+ * iteration or spread; anything else is dropped. Warnings carry the key only.
+ */
+function readExtraArgs(
+	value: unknown,
+	warn: NumericOptionWarn,
+): string[] | undefined {
+	if (value === undefined || value === null) return undefined
+	if (!Array.isArray(value)) {
+		warn("extraArgs", "invalid")
+		return undefined
+	}
+	if (value.length > AIS_CATCHER_BOUNDS.maxExtraArgs)
+		warn("extraArgs", "clamped")
+	const out: string[] = []
+	for (const entry of value.slice(
+		0,
+		AIS_CATCHER_BOUNDS.maxExtraArgs,
+	) as unknown[]) {
+		if (typeof entry === "string") out.push(entry)
+		else warn("extraArgs", "invalid")
+	}
+	return out
+}
+
+/**
  * Parses and validates decoder options from config.
  */
 function parseAisCatcherOptions(
@@ -521,7 +547,7 @@ function parseAisCatcherOptions(
 			},
 			warn,
 		),
-		extraArgs: options["extraArgs"] as string[] | undefined,
+		extraArgs: readExtraArgs(options["extraArgs"], warn),
 	}
 }
 

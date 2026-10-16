@@ -251,3 +251,27 @@ describe("rtl433 logs at every level carry no option text", () => {
 		expect(lines.join("\n")).not.toContain(MARK)
 	})
 })
+
+describe("rtl433 extraArgs cap", () => {
+	const tail = (n: number) => {
+		const b = build({ extraArgs: Array(n).fill("-q") })
+		return {
+			n: b.view.getDecoderArgs().filter(a => a === "-q").length,
+			w: b.optionWarnings(),
+		}
+	}
+	it("64 pass silently, 65 and 200000 keep 64 with one warning", () => {
+		expect(tail(64)).toEqual({ n: 64, w: [] })
+		for (const n of [65, 200_000]) {
+			const r = tail(n)
+			expect(r.n).toBe(64)
+			expect(r.w).toEqual([
+				expect.objectContaining({ key: "extraArgs", issue: "clamped" }),
+			])
+		}
+		const ok = (n: number) =>
+			rtl433OptionsSchema.safeParse({ extraArgs: Array(n).fill("-q") }).success
+		expect(ok(64)).toBe(true)
+		expect(ok(65)).toBe(false)
+	})
+})

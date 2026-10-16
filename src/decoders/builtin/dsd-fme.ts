@@ -36,6 +36,7 @@ import { csdrNumber, deemphasisStage } from "../csdr-stages.js"
 import { readNumericOption, type NumericOptionRule } from "../option-values.js"
 import {
 	DSD_FME_DURATION_MS_MAX,
+	DSD_FME_EXTRA_ARGS_MAX,
 	DSD_FME_FM_GAIN_MAX,
 	DSD_FME_RECORDING_MAX_AGE_HOURS_MAX,
 	DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
@@ -676,15 +677,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	private parseExtraArgs(value: unknown): string[] | undefined {
 		if (!Array.isArray(value)) return undefined
+		// WG7 HW.2: a hand-written argv tail, sliced before iterating.
+		if (value.length > DSD_FME_EXTRA_ARGS_MAX)
+			this.optionWarn("extraArgs", "clamped")
+		const capped = value.slice(0, DSD_FME_EXTRA_ARGS_MAX)
 		const kept: string[] = []
 		const dropped: string[] = []
-		for (let i = 0; i < value.length; i++) {
-			const arg = String(value[i])
+		for (let i = 0; i < capped.length; i++) {
+			const arg = String(capped[i])
 			if (RESERVED_EXTRA_ARG.test(arg)) {
 				dropped.push(arg)
 				// "-o <device>": the device is the next argument.
-				if (arg === "-o" && i + 1 < value.length)
-					dropped.push(String(value[++i]))
+				if (arg === "-o" && i + 1 < capped.length)
+					dropped.push(String(capped[++i]))
 				continue
 			}
 			kept.push(arg)

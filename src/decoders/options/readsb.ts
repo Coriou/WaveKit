@@ -15,6 +15,8 @@ const Hz = z.number().finite().min(1)
 
 /** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
 export const READSB_BOUNDS = {
+	/** A hand-written argv tail; thousands of entries is a mistake or an attack. */
+	maxExtraArgs: 64,
 	/** Every TCP port. */
 	port: { min: 1, max: 65535 },
 	/** readsb gain in dB: 0..60 covers every supported SDR, and -10 is readsb's "maximum gain". */
@@ -41,7 +43,11 @@ export const readsbOptionsSchema = z
 		// device, deviceSerial and enableMlat are read but never used by the adapter.
 		deviceSerial: z.string().nullable().optional(),
 		enableMlat: z.boolean().nullable().optional(),
-		extraArgs: z.array(z.string()).nullable().optional(),
+		extraArgs: z
+			.array(z.string())
+			.max(READSB_BOUNDS.maxExtraArgs)
+			.nullable()
+			.optional(),
 		frequencies: z.array(Hz).optional(),
 		frequency: Hz.optional(),
 		// A bounded number (or its text) or the one readsb keyword "auto".
@@ -111,7 +117,7 @@ export const readsbOptionDescriptors: DecoderOptionDescriptor[] = [
 		default: null,
 		secret: false,
 		effect: "restart",
-		description: "Extra readsb command-line arguments.",
+		description: "Extra readsb command-line arguments (at most 64 entries).",
 	},
 	{
 		key: "frequencies",

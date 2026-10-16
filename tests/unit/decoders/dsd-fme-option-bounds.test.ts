@@ -353,3 +353,54 @@ describe("dsd-fme logs at every level carry no option text", () => {
 		expect(lines.join("\n")).not.toContain(MARK)
 	})
 })
+
+describe("dsd-fme extraArgs cap", () => {
+	const tail = (n: number) => {
+		const b = build({ extraArgs: Array(n).fill("-q") })
+		return {
+			n: b.view.getDecoderArgs().filter(a => a === "-q").length,
+			w: b.optionWarnings(),
+		}
+	}
+	it("64 pass silently, 65 and 200000 keep 64 with one warning", () => {
+		expect(tail(64)).toEqual({ n: 64, w: [] })
+		for (const n of [65, 200_000]) {
+			const r = tail(n)
+			expect(r.n).toBe(64)
+			expect(r.w).toEqual([
+				expect.objectContaining({ key: "extraArgs", issue: "clamped" }),
+			])
+		}
+		const ok = (n: number) =>
+			dsdFmeOptionsSchema.safeParse({ extraArgs: Array(n).fill("-q") }).success
+		expect(ok(64)).toBe(true)
+		expect(ok(65)).toBe(false)
+	})
+})
+
+describe("debugRecordStages is validated before use or logging", () => {
+	it("an unknown value is dropped key-only and never logged at any level", () => {
+		const MARK = "SECRET-STAGE-MARKER"
+		const lines: string[] = []
+		const logger = pino(
+			{ level: "trace" },
+			{ write: (line: string) => void lines.push(line) },
+		)
+		const decoder = new DsdFmeDecoder(
+			{
+				id: "t",
+				type: "dsd-fme",
+				enabled: true,
+				options: { debugRecordPath: "/tmp", debugRecordStages: MARK },
+			} as unknown as DecoderConfig,
+			logger,
+		) as unknown as {
+			getArgs(): string[]
+			debugRecording?: { stages?: string }
+		}
+		decoder.getArgs()
+		expect(decoder.debugRecording).toBeUndefined()
+		expect(lines.join("\n")).not.toContain(MARK)
+		expect(lines.some(l => l.includes('"key":"debugRecordStages"'))).toBe(true)
+	})
+})

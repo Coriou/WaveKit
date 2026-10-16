@@ -6,6 +6,8 @@ const frequencyHz = z.number().finite().positive()
 
 /** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
 export const AIS_CATCHER_BOUNDS = {
+	/** A hand-written argv tail; thousands of entries is a mistake or an attack. */
+	maxExtraArgs: 64,
 	/** Every TCP port. */
 	port: { min: 1, max: 65535 },
 	/** RTL-SDR tuner gains top out near 50 dB; 60 dB covers every supported SDR. */
@@ -58,7 +60,11 @@ export const aisCatcherOptionsSchema = z
 			.max(AIS_CATCHER_BOUNDS.sampleRateHz.max)
 			.nullable()
 			.optional(),
-		extraArgs: z.array(z.string()).nullable().optional(),
+		extraArgs: z
+			.array(z.string())
+			.max(AIS_CATCHER_BOUNDS.maxExtraArgs)
+			.nullable()
+			.optional(),
 		frequencies: z.array(frequencyHz).optional(),
 		frequency: frequencyHz.optional(),
 		channelHz: frequencyHz.nullable().optional(),
@@ -96,7 +102,8 @@ export const aisCatcherOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "extraArgs",
 		type: "string-list",
 		default: null,
-		description: "Additional AIS-catcher command line arguments.",
+		description:
+			"Additional AIS-catcher command line arguments (at most 64 entries).",
 	},
 	{
 		...base,

@@ -5,6 +5,8 @@ const frequencyHz = z.number().finite().positive()
 
 /** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
 export const ACARSDEC_BOUNDS = {
+	/** A hand-written argv tail; thousands of entries is a mistake or an attack. */
+	maxExtraArgs: 64,
 	/** Below 1 kHz is no IQ stream; above 10 Msps is beyond any supported SDR front end. */
 	sampleRateHz: { min: 1_000, max: 10_000_000 },
 	/** Tunable range of the supported SDRs (up to 6 GHz). */
@@ -30,7 +32,11 @@ export const acarsdecOptionsSchema = z
 			.max(ACARSDEC_BOUNDS.sampleRateHz.max)
 			.nullable()
 			.optional(),
-		extraArgs: z.array(z.string()).nullable().optional(),
+		extraArgs: z
+			.array(z.string())
+			.max(ACARSDEC_BOUNDS.maxExtraArgs)
+			.nullable()
+			.optional(),
 		channelHz: frequencyHz.nullable().optional(),
 		offsetHz: z.number().finite().optional(),
 		debugRecordPath: z.string().nullable().optional(),
@@ -73,7 +79,8 @@ export const acarsdecOptionDescriptors: DecoderOptionDescriptor[] = [
 		default: null,
 		secret: false,
 		effect: "restart",
-		description: "Additional acarsdec command line arguments.",
+		description:
+			"Additional acarsdec command line arguments (at most 64 entries).",
 	},
 	{
 		key: "frequencies",

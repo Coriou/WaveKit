@@ -6,6 +6,8 @@ const frequencyHz = z.number().finite().positive()
 
 /** Bounds by meaning (WG7 HW.2): what the radio hardware and the decoders can take. */
 export const DIREWOLF_BOUNDS = {
+	/** A hand-written argv tail; thousands of entries is a mistake or an attack. */
+	maxExtraArgs: 64,
 	/** Every TCP port. */
 	port: { min: 1, max: 65535 },
 	/** Below 1 kHz is no IQ stream; above 10 Msps is beyond any supported SDR front end. */
@@ -37,7 +39,11 @@ export const direwolfOptionsSchema = z
 		// Only `(agwPort ?? default).toString()`: numeric text gives the same argument.
 		agwPort: numberOrText(port, INTEGER_TEXT).nullable().optional(),
 		callsign: z.string().nullable().optional(),
-		extraArgs: z.array(z.string()).nullable().optional(),
+		extraArgs: z
+			.array(z.string())
+			.max(DIREWOLF_BOUNDS.maxExtraArgs)
+			.nullable()
+			.optional(),
 		inputSampleRate: z
 			.number()
 			.finite()
@@ -110,7 +116,8 @@ export const direwolfOptionDescriptors: DecoderOptionDescriptor[] = [
 		key: "extraArgs",
 		type: "string-list",
 		default: null,
-		description: "Additional Direwolf command line arguments.",
+		description:
+			"Additional Direwolf command line arguments (at most 64 entries).",
 	},
 	{
 		...base,

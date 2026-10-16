@@ -6,6 +6,8 @@ const frequencyHz = z.number().finite().positive()
 
 /** rtl_433 registers about 300 protocol decoders; 999 leaves room for new releases. */
 export const RTL433_PROTOCOL_ID_MAX = 999
+/** extraArgs is a hand-written argv tail: 64 entries is far past any real one. */
+export const RTL433_EXTRA_ARGS_MAX = 64
 /** At most 256 `-R` ids: a fraction of the registry, keeps argv bounded. */
 export const RTL433_PROTOCOLS_MAX = 256
 /** Equals iq-decimate-decoder SAMPLE_RATE_MAX_HZ: above every supported front end. */
@@ -50,7 +52,12 @@ export const rtl433OptionsSchema = z
 			.max(RTL433_TARGET_SAMPLE_RATE_MAX_HZ)
 			.nullable()
 			.optional(),
-		extraArgs: z.array(z.string()).nullable().optional(),
+		// Hand-written argv tail, capped (the adapter slices to the same bound).
+		extraArgs: z
+			.array(z.string())
+			.max(RTL433_EXTRA_ARGS_MAX)
+			.nullable()
+			.optional(),
 		// At most the decoder's channel limit of target frequencies.
 		frequencies: z.array(frequencyHz).max(RTL433_FREQUENCIES_MAX).optional(),
 		frequency: frequencyHz.optional(),
@@ -83,7 +90,8 @@ export const rtl433OptionDescriptors: DecoderOptionDescriptor[] = [
 		default: null,
 		secret: false,
 		effect: "restart",
-		description: "Additional rtl_433 command line arguments.",
+		description:
+			"Additional rtl_433 command line arguments. At most 64 entries.",
 	},
 	{
 		key: "frequencies",
