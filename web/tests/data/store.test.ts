@@ -83,6 +83,23 @@ describe("ApiClient", () => {
 		})
 	})
 
+	it("shares one in-flight bootstrap between concurrent callers", async () => {
+		let n = 0
+		const api = new ApiClient({
+			fetch: async () => {
+				n += 1
+				await new Promise(resolve => setTimeout(resolve, 5))
+				return json(404, { error: "Not Found", statusCode: 404 })
+			},
+		})
+		const [a, b] = await Promise.all([api.bootstrap(), api.bootstrap()])
+		expect(n).toBe(1)
+		expect(a).toEqual({ mode: "legacy" })
+		expect(b).toBe(a)
+		await api.bootstrap()
+		expect(n).toBe(2)
+	})
+
 	it("reports network failures as status 0", async () => {
 		const api = new ApiClient({
 			fetch: () => Promise.reject(new TypeError("Failed to fetch")),

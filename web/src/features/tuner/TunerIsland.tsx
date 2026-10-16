@@ -39,7 +39,7 @@ import {
 	wheelDirection,
 } from "./frequency.ts"
 import { MODES, modeSpec, modulationOf, type Modulation } from "./modes.ts"
-import { STEPS } from "./prefs.ts"
+import { effectiveStep, STEPS } from "./prefs.ts"
 
 interface EntryState {
 	typing: boolean
@@ -378,7 +378,8 @@ function TuningOptions() {
 	const status = useLiveStatus()
 	const hz = useTunedHz()
 	const view = useStore(data.bandplan, s => s.view)
-	const stepHz = useStore(prefs, s => s.stepHz)
+	const chosenStep = useStore(prefs, s => s.stepHz)
+	const bandStep = effectiveStep(null, view, hz)
 	const tuneError = useStore(tuning, s => s.error)
 	const audioError = useStore(data.liveAudio, s => s.error)
 	const band = hz === null ? null : bandAt(view, hz)
@@ -494,10 +495,17 @@ function TuningOptions() {
 				<span className="wkf-quiet wkf-small">Scroll the spectrum to step</span>
 			</div>
 			<div className="wk-shell-row" role="group" aria-label="Tuning step">
+				<Chip
+					pressed={chosenStep === null}
+					title={`The band plan's step here: ${formatStep(bandStep)}`}
+					onClick={() => prefs.setStep(null)}
+				>
+					{chosenStep === null ? `Auto · ${formatStep(bandStep)}` : "Auto"}
+				</Chip>
 				{STEPS.map(s => (
 					<Chip
 						key={s}
-						pressed={s === stepHz}
+						pressed={s === chosenStep}
 						title={
 							band?.band.stepHz === s
 								? `${band.band.name} steps by ${formatStep(s)}`

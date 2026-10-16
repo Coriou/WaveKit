@@ -3,7 +3,10 @@
  * hump (flat top, steep skirts), bursty signals only while keyed, and a small DC spike. Shapes are
  * precomputed per (centre, bins); a frame is a noise-table copy plus a max over the active humps.
  */
-import type { SpectrumFrameEventData } from "@wavekit/api-types"
+import type {
+	SpectrumFrameEventData,
+	SpectrumProfileAdjustment,
+} from "@wavekit/api-types"
 import {
 	MOCK_SIGNALS,
 	NOISE_FLOOR_DBFS,
@@ -13,6 +16,9 @@ import {
 import type { MockSignal } from "./data.ts"
 
 export const SPECTRUM_DEFAULT_HZ = 10
+/** Core WG1 backfill limits (src/core/spectrum/subscribe-options.ts BACKFILL_LIMITS). */
+export const SPECTRUM_BACKFILL_MAX_MS = 10_000
+export const SPECTRUM_BACKFILL_MAX_FRAMES = 64
 export const SPECTRUM_DEFAULT_BINS = 1024
 export const SPECTRUM_FFT_SIZE = 8192
 
@@ -176,8 +182,10 @@ export interface SpectrumSelection {
 	sourceId: string | null
 	hz: number
 	bins: number
-	adjusted: ("hz" | "bins")[]
+	adjusted: SpectrumProfileAdjustment[]
 	explicit: boolean
+	/** Backfill asked for, ms (0 = none), clamped to SPECTRUM_BACKFILL_MAX_MS. */
+	backfillMs: number
 }
 
 /** Normalises `options.spectrum` like the core: hz 0.5–25 snapped to 0.5, bins 128–2048 rounded. */
@@ -192,6 +200,7 @@ export function normaliseSpectrumOptions(
 			bins: SPECTRUM_DEFAULT_BINS,
 			adjusted: [],
 			explicit: false,
+			backfillMs: 0,
 		}
 	if (typeof raw !== "object" || Array.isArray(raw))
 		return { ok: false, message: "options.spectrum must be an object" }
@@ -199,7 +208,7 @@ export function normaliseSpectrumOptions(
 	const sourceId = o["sourceId"]
 	if (typeof sourceId !== "string" || sourceId.length === 0)
 		return { ok: false, message: "options.spectrum.sourceId is required" }
-	const adjusted: ("hz" | "bins")[] = []
+	const adjusted: SpectrumProfileAdjustment[] = []
 	let hz = SPECTRUM_DEFAULT_HZ
 	if (o["hz"] !== undefined) {
 		if (typeof o["hz"] !== "number" || !Number.isFinite(o["hz"]))
@@ -214,5 +223,23 @@ export function normaliseSpectrumOptions(
 		bins = Math.min(2048, Math.max(128, Math.round(o["bins"])))
 		if (bins !== o["bins"]) adjusted.push("bins")
 	}
-	return { ok: true, sourceId, hz, bins, adjusted, explicit: true }
+	let backfillMs = 0
+	if (o["backfillMs"] !== undefined) {
+		if (typeof o["backfillMs"] !== "number" || !Number.isFinite(o["backfillMs"]))
+			return { ok: false, message: "options.spectrum.backfillMs must be a number" }
+		backfillMs = Math.min(
+			SPECTRUM_BACKFILL_MAX_MS,
+			Math.max(0, Math.round(o["backfillMs"])),
+		)
+		if (backfillMs !== o["backfillMs"]) adjusted.push("backfillMs")
+	}
+	return {
+		ok: true,
+		sourceId,
+		hz,
+		bins,
+		adjusted,
+		explicit: true,
+		backfillMs,
+	}
 }

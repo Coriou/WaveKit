@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest"
 import {
 	captureSpan,
 	hzToTexU,
+	historyDepth,
+	HISTORY_MAX_ROWS,
+	HISTORY_MIN_ROWS,
 	hzToX,
 	panView,
 	splitHeight,
@@ -92,5 +95,31 @@ describe("layout", () => {
 		expect(visibleRows(700, 2, 1024)).toBe(350)
 		expect(visibleRows(4000, 1, 1024)).toBe(1024)
 		expect(visibleRows(0, 1, 1024)).toBe(1)
+	})
+})
+
+describe("historyDepth", () => {
+	it("holds one row per CSS px of the tallest plot, whatever the dpr", () => {
+		expect(historyDepth(900, 1)).toBe(900)
+		expect(historyDepth(900, 2)).toBe(900)
+		expect(historyDepth(1200, 1.5, 2)).toBe(600)
+	})
+
+	it("is bounded for GPU memory and never tiny", () => {
+		expect(historyDepth(5000, 2)).toBe(HISTORY_MAX_ROWS)
+		expect(historyDepth(100, 1)).toBe(HISTORY_MIN_ROWS)
+		expect(historyDepth(0, 0)).toBe(HISTORY_MIN_ROWS)
+	})
+
+	it("is deep enough for visibleRows to cover the waterfall band", () => {
+		for (const [h, dpr] of [
+			[900, 1],
+			[1440, 2],
+			[600, 3],
+		] as const) {
+			const depth = historyDepth(h, dpr)
+			const band = Math.round(h * 0.6 * dpr)
+			expect(visibleRows(band, dpr, depth)).toBe(Math.round(band / dpr))
+		}
 	})
 })

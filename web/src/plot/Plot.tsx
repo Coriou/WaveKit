@@ -50,16 +50,20 @@ import { AXIS_CSS, LANES_CSS, plotLayout } from "./layout.ts"
 export interface PlotProps {
 	data: DataLayer
 	className?: string
+	/** The user's chosen tuning step (wheel, keys, click snap); null or absent: the band plan's step. */
+	stepHz?: number | null
 }
 
 /** Frames per second and bins asked of the core. */
 const SPECTRUM_HZ = 25
+/** Ask the core for its whole backfill window (it clamps to its own limits). */
+const SPECTRUM_BACKFILL_MS = 10_000
 const SPECTRUM_BINS = 2048
 /** Bursty signals keep their label this long after the last burst. */
 const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
 
-export function Plot({ data, className }: PlotProps) {
+export function Plot({ data, className, stepHz }: PlotProps) {
 	const sourceId = useStore(data.sources, s => firstConnected(s.sources))
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
@@ -127,7 +131,10 @@ export function Plot({ data, className }: PlotProps) {
 	const tuned = tunedHz(tuner, liveStatus)
 	const vfoHz = plotState.pendingHz ?? tuned
 	const bandwidthHz = liveStatus?.config.bandwidth ?? 12_500
-	const step = tuningStep(plan, vfoHz)
+	const step =
+		stepHz !== null && stepHz !== undefined && stepHz > 0
+			? stepHz
+			: tuningStep(plan, vfoHz)
 
 	const context: PlotContext = {
 		sourceId,
@@ -185,6 +192,7 @@ export function Plot({ data, className }: PlotProps) {
 					sourceId={sourceId}
 					hz={SPECTRUM_HZ}
 					bins={SPECTRUM_BINS}
+					backfillMs={SPECTRUM_BACKFILL_MS}
 					view={plotState.view.spanHz === null ? null : view}
 					levels={levels}
 					layout={{ splitRatio: layout.splitRatio, gapCss: layout.gapCss }}

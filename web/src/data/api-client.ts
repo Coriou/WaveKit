@@ -125,12 +125,26 @@ export class ApiClient {
 		this.csrfToken = token
 	}
 
+	private bootstrapping: Promise<AccessState> | null = null
+
 	get access(): AccessState | null {
 		return this.accessState
 	}
 
-	/** Reads GET /api/access/bootstrap: 404 means a legacy core, 200 a protected one. */
-	async bootstrap(signal?: AbortSignal): Promise<AccessState> {
+	/**
+	 * Reads GET /api/access/bootstrap: 404 means a legacy core, 200 a protected one. Concurrent calls
+	 * share one request (the in-flight promise); a call after it settles asks again.
+	 */
+	bootstrap(signal?: AbortSignal): Promise<AccessState> {
+		if (this.bootstrapping) return this.bootstrapping
+		const run = this.fetchBootstrap(signal).finally(() => {
+			if (this.bootstrapping === run) this.bootstrapping = null
+		})
+		this.bootstrapping = run
+		return run
+	}
+
+	private async fetchBootstrap(signal?: AbortSignal): Promise<AccessState> {
 		try {
 			const body = await this.get<unknown>(
 				"/api/access/bootstrap",

@@ -158,3 +158,22 @@ export function maxOverBins(
 	}
 	return m
 }
+
+/** History depth bounds (texture rows): at least a small window's worth, at most WebGL2's minimum max size. */
+export const HISTORY_MIN_ROWS = 256
+export const HISTORY_MAX_ROWS = 2048
+
+/**
+ * Waterfall history depth for a canvas up to `heightCss` tall: enough rows that the waterfall reaches
+ * the bottom edge once history fills (one row per `rowHeightCss`), capped to bound GPU memory
+ * (depth × MAX_BINS bytes). Rows not received yet draw as the plot background.
+ */
+export function historyDepth(
+	heightCss: number,
+	dpr: number,
+	rowHeightCss = 1,
+): number {
+	const px = Math.max(0, heightCss) * Math.max(dpr, 0.25)
+	const rows = Math.ceil(px / Math.max(rowHeightCss * Math.max(dpr, 0.25), 0.25))
+	return Math.min(HISTORY_MAX_ROWS, Math.max(HISTORY_MIN_ROWS, rows))
+}

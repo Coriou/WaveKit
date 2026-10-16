@@ -6,7 +6,9 @@ import type {
 	SpectrumLevels,
 	SpectrumViewSpan,
 } from "./protocol.ts"
+import { DEFAULT_LAYOUT } from "./protocol.ts"
 import { rampFromTheme } from "./ramp.ts"
+import { historyDepth } from "./view.ts"
 
 export interface SpectrumCanvasProps {
 	/** Source to show; null unsubscribes. */
@@ -14,6 +16,11 @@ export interface SpectrumCanvasProps {
 	/** Frames per second and bins asked of the core (defaults: the core's). */
 	hz?: number
 	bins?: number
+	/**
+	 * Recent waterfall rows the core replays on subscribe (WG1 backfill, ms, the core clamps to its
+	 * limits), so the waterfall does not start empty.
+	 */
+	backfillMs?: number
 	/** Visible span; null or absent shows the whole capture. */
 	view?: SpectrumViewSpan | null
 	levels?: SpectrumLevels
@@ -52,7 +59,20 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 			"position:absolute;inset:0;width:100%;height:100%;display:block"
 		host.appendChild(canvas)
 		const initial = propsRef.current
+		// The texture depth is fixed for the engine's life: size it for the tallest this plot can get
+		// (the screen), so the waterfall reaches the bottom edge after any resize.
+		const dpr = window.devicePixelRatio || 1
+		const tallest = Math.max(
+			host.getBoundingClientRect().height,
+			window.screen?.availHeight ?? 0,
+			window.innerHeight,
+		)
 		const engine = new SpectrumEngine(canvas, {
+			historyRows: historyDepth(
+				tallest,
+				dpr,
+				initial.layout?.rowHeightCss ?? DEFAULT_LAYOUT.rowHeightCss,
+			),
 			...(initial.levels ? { levels: initial.levels } : {}),
 			...(initial.layout ? { layout: initial.layout } : {}),
 			ramp: initial.ramp ?? rampFromTheme(host),
@@ -97,7 +117,7 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 		}
 	}, [])
 
-	const { sourceId, hz, bins } = props
+	const { sourceId, hz, bins, backfillMs } = props
 	useEffect(() => {
 		const engine = engineRef.current
 		if (!engine) return
@@ -109,8 +129,9 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 			sourceId,
 			...(hz !== undefined ? { hz } : {}),
 			...(bins !== undefined ? { bins } : {}),
+			...(backfillMs !== undefined ? { backfillMs } : {}),
 		})
-	}, [sourceId, hz, bins])
+	}, [sourceId, hz, bins, backfillMs])
 
 	const viewStart = props.view?.startHz ?? null
 	const viewEnd = props.view?.endHz ?? null

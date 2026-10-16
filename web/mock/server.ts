@@ -47,7 +47,11 @@ import {
 	signalAt,
 } from "./data.ts"
 import type { MockMessage, MockSignal } from "./data.ts"
-import { normaliseSpectrumOptions, synthFrame } from "./spectrum.ts"
+import {
+	normaliseSpectrumOptions,
+	SPECTRUM_BACKFILL_MAX_FRAMES,
+	synthFrame,
+} from "./spectrum.ts"
 
 export interface MockServerOptions {
 	host?: string
@@ -287,6 +291,8 @@ export async function buildMockServer(
 		commandCount: 3,
 	}
 	let epoch = 1
+	/** When the current epoch began (backfill never crosses an epoch). */
+	let epochStartedAt = Date.now()
 	const decoderStats = new Map<string, number>()
 	const suspendedSince = new Map<string, string>()
 	const live = {
@@ -652,6 +658,17 @@ export async function buildMockServer(
 			)
 		stopSpectrum(client)
 		const { hz, bins, explicit } = parsed
+		// WG1 backfill like the core: recent frames of the current epoch, oldest first, at most
+		// SPECTRUM_BACKFILL_MAX_FRAMES (synthesised here, as if buffered).
+		const now = Date.now()
+		const periodMs = 1000 / hz
+		const backfillFrames =
+			explicit && parsed.backfillMs > 0
+				? Math.min(
+						SPECTRUM_BACKFILL_MAX_FRAMES,
+						Math.floor(Math.min(parsed.backfillMs, now - epochStartedAt) / periodMs),
+					)
+				: null
 		sendProfile(client, {
 			selection: explicit ? "source" : "default",
 			sourceId: explicit ? MOCK_SOURCE_ID : null,
@@ -663,7 +680,24 @@ export async function buildMockServer(
 					? "nearest"
 					: "exact",
 			adjusted: parsed.adjusted,
+			...(backfillFrames !== null ? { backfillFrames } : {}),
 		})
+		for (let k = backfillFrames ?? 0; k >= 1; k--)
+			send(client, {
+				type: "spectrum:frame",
+				channel: "spectrum",
+				data: {
+					...synthFrame({
+						sourceId: MOCK_SOURCE_ID,
+						centerHz: tuner.frequency,
+						bins,
+						hz,
+						epoch,
+						nowMs: now - k * periodMs,
+					}),
+					backfill: true,
+				},
+			})
 		const frame = (snapshot: boolean) =>
 			send(client, {
 				type: "spectrum:frame",
@@ -978,7 +1012,10 @@ export async function buildMockServer(
 					message: `Frequency ${hz} Hz is outside the tuner range (24–1766 MHz)`,
 				})
 			const before = new Map(decoders().map(d => [d.id, d.suspended]))
-			if (hz !== tuner.frequency) epoch += 1
+			if (hz !== tuner.frequency) {
+				epoch += 1
+				epochStartedAt = Date.now()
+			}
 			tuner.frequency = hz
 			tuner.commandCount += 1
 			tuner.lastCommandAt = new Date().toISOString()

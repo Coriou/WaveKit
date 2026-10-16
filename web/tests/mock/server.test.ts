@@ -355,6 +355,42 @@ describe("mock server WebSocket and audio", () => {
 		socket.close()
 	})
 
+	it("replays backfill frames of the current epoch, oldest first, before the snapshot", async () => {
+		await new Promise(resolve => setTimeout(resolve, 400))
+		const socket = new WebSocket(`${api.replace(/^http/, "ws")}/ws`)
+		const inbox = new Inbox(socket)
+		await new Promise(resolve => socket.once("open", resolve))
+		const snapshot = inbox.next(
+			m =>
+				m.type === "spectrum:frame" &&
+				(m.data as SpectrumFrameEventData).snapshot === true,
+		)
+		socket.send(
+			JSON.stringify({
+				type: "subscribe",
+				channels: ["spectrum"],
+				options: {
+					spectrum: { sourceId: "rtl-0", hz: 20, bins: 256, backfillMs: 10_000 },
+				},
+			}),
+		)
+		await snapshot
+		const profile = inbox.messages.find(m => m.type === "spectrum:profile")
+		const n = (profile?.data as SpectrumProfileEventData).backfillFrames ?? 0
+		expect(n).toBeGreaterThanOrEqual(1)
+		expect(n).toBeLessThanOrEqual(64)
+		const frames = inbox.messages
+			.filter(m => m.type === "spectrum:frame")
+			.map(m => m.data as SpectrumFrameEventData)
+		const backfill = frames.slice(0, n)
+		expect(backfill.every(f => f.backfill === true && !f.snapshot)).toBe(true)
+		const at = backfill.map(f => Date.parse(f.at))
+		expect(at).toEqual([...at].sort((a, b) => a - b))
+		expect(frames[n]?.snapshot).toBe(true)
+		expect(new Set(frames.map(f => f.epoch)).size).toBe(1)
+		socket.close()
+	})
+
 	it("walks an identify job over scanner:identify and feeds decoded messages", async () => {
 		const socket = new WebSocket(`${api.replace(/^http/, "ws")}/ws`)
 		const inbox = new Inbox(socket)
