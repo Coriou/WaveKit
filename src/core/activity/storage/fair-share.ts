@@ -61,7 +61,16 @@ export interface FairStepInput {
 
 export interface FairShareAllocation {
 	readonly key: string
+	/** At most this many of the share's oldest rows go in this step. */
 	readonly rows: number
+	/** Rows the row cap needs from the share this step (its row excess, at most `rows`). */
+	readonly minRows: number
+	/**
+	 * The share's byte level when the byte cap is active, else null. The writer deletes beyond
+	 * `minRows` only while the share's actual retained record bytes stay at or above this
+	 * floor (the first row of a step may cross it, so a step always progresses).
+	 */
+	readonly byteFloor: number | null
 }
 
 export interface FairStepPlan {
@@ -127,7 +136,7 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 		}
 	}
 
-	const over: { key: string; excess: number }[] = []
+	const over: { key: string; excess: number; rowEx: number }[] = []
 	for (const s of shares) {
 		const rowEx = rowLevel === null ? 0 : Math.max(0, s.rows - rowLevel)
 		const byteEx =
@@ -135,7 +144,8 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 				? 0
 				: rowsForBytes(s.rows, s.bytes, Math.max(0, s.bytes - byteLevel))
 		const excess = Math.min(s.rows, Math.max(rowEx, byteEx))
-		if (excess > 0) over.push({ key: s.key, excess })
+		if (excess > 0)
+			over.push({ key: s.key, excess, rowEx: Math.min(s.rows, rowEx) })
 	}
 	const residual =
 		(rowLevel !== null || byteLevel !== null) && over.length === 0
@@ -147,7 +157,12 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 	if (over.length >= budget) {
 		// Not enough budget for one row each: the largest excesses first, ties key ascending.
 		over.sort((a, b) => b.excess - a.excess || compareKey(a.key, b.key))
-		allocations = over.slice(0, budget).map(o => ({ key: o.key, rows: 1 }))
+		allocations = over.slice(0, budget).map(o => ({
+			key: o.key,
+			rows: 1,
+			minRows: Math.min(1, o.rowEx),
+			byteFloor: byteLevel,
+		}))
 	} else {
 		// One row each, then the rest proportional to (excess - 1) by largest remainder.
 		let sumExcess = 0
@@ -160,7 +175,7 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 			const num = weightSum === 0n ? 0n : rest * w
 			const quota = weightSum === 0n ? 0n : num / weightSum
 			const remainder = weightSum === 0n ? 0n : num % weightSum
-			return { key: o.key, rows: 1 + Number(quota), remainder }
+			return { key: o.key, rows: 1 + Number(quota), remainder, rowEx: o.rowEx }
 		})
 		let leftover = Number(rest)
 		for (const p of parts) leftover -= p.rows - 1
@@ -177,7 +192,12 @@ export function planFairStep(input: FairStepInput): FairStepPlan {
 				if (p) p.rows += 1
 			}
 		}
-		allocations = parts.map(p => ({ key: p.key, rows: p.rows }))
+		allocations = parts.map(p => ({
+			key: p.key,
+			rows: p.rows,
+			minRows: Math.min(p.rows, p.rowEx),
+			byteFloor: byteLevel,
+		}))
 	}
 	allocations.sort((a, b) => compareKey(a.key, b.key))
 	return { allocations, rowLevel, byteLevel, residual }

@@ -5,7 +5,9 @@ import {
 	activityLowWater,
 	commitActivityBatch,
 	openActivityDatabase,
+	pruneActivityFair,
 } from "../../../../../src/core/activity/storage/database.js"
+import { planFairStep } from "../../../../../src/core/activity/storage/fair-share.js"
 import type { ActivityRetentionPolicy } from "../../../../../src/core/activity/storage/contract.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
 import type { SqliteDatabase } from "../../../../../src/core/activity/storage/sqlite.js"
@@ -411,3 +413,174 @@ async function waitFor(check: () => boolean): Promise<void> {
 		await new Promise(resolve => setTimeout(resolve, 10))
 	expect(check()).toBe(true)
 }
+
+// Review round 1 (WG3 F): one regression per finding.
+describe("fair-share retention regressions", () => {
+	it("deletes by actual record bytes and keeps the byte floor (finding 1)", async () => {
+		const db = await openSqliteFile(":memory:")
+		try {
+			openActivityDatabase(db)
+			const rows = [
+				shareRow("big", "busy", NOW, 20_000),
+				...Array.from({ length: 9 }, (_, index) =>
+					shareRow(`small${index}`, "busy", NOW, 10),
+				),
+				shareRow("quiet", "quiet", NOW, 10),
+			]
+			expect(commitActivityBatch(db, rows).ok).toBe(true)
+			const usage = groupedScan(db)
+			const plan = planFairStep({
+				shares: [...usage].map(([key, value]) => ({ key, ...value })),
+				rowTarget: null,
+				byteExcess: rows[0]?.recordBytes ?? 0,
+				budget: 500,
+			})
+			const busyAllocation = plan.allocations.find(
+				a => a.key === "decoder:busy",
+			)
+			expect(busyAllocation?.byteFloor).toBe(plan.byteLevel)
+			const step = pruneActivityFair(
+				db,
+				{ incrementalVacuumPages: 0 },
+				plan.allocations.map(a => ({
+					decoderId: a.key.slice("decoder:".length),
+					kind: "",
+					rows: a.rows,
+					minRows: a.minRows,
+					byteFloor: a.byteFloor,
+					shareBytes: usage.get(a.key)?.bytes ?? 0,
+				})),
+				{ rowCount: rows.length, dbBytes: 0 },
+			)
+			expect(step.deleted).toBe(1)
+			expect(eventIds(db)).not.toContain("big")
+			expect(groupedScan(db).get("decoder:busy")?.bytes).toBeGreaterThanOrEqual(
+				plan.byteLevel ?? 0,
+			)
+		} finally {
+			db.close()
+		}
+	})
+
+	it("subtracts committed deletes when incremental_vacuum fails after COMMIT (finding 2)", async () => {
+		const raw = await openSqliteFile(":memory:")
+		let armed = false
+		const db: SqliteDatabase = {
+			prepare: sql => raw.prepare(sql),
+			close: () => {
+				raw.close()
+			},
+			exec: sql => {
+				if (armed && sql.startsWith("PRAGMA incremental_vacuum"))
+					throw new Error("injected vacuum failure")
+				raw.exec(sql)
+			},
+		}
+		const session = createActivitySession(
+			db,
+			":memory:",
+			smallLimits({
+				maxRows: 20,
+				incrementalVacuumPages: 1,
+				pruneBatchRows: 10,
+			}),
+		)
+		try {
+			writeOk(session, [
+				shareRow("quiet", "quiet"),
+				...Array.from({ length: 19 }, (_, index) =>
+					shareRow(`b${index}`, "busy"),
+				),
+			])
+			armed = true
+			const wrote = writeOk(session, [shareRow("over", "busy")])
+			armed = false
+			expect(wrote.prune.deleted).toBeGreaterThan(0)
+			expect(wrote.note).toMatch(/incremental vacuum failed/)
+			expect(eventIds(raw)).toContain("quiet")
+			expect(sharesOf(session.snapshot().retention.shares)).toEqual(
+				groupedScan(raw),
+			)
+		} finally {
+			armed = false
+			session.close()
+		}
+	})
+
+	it("checks drift before the one-share shortcut (finding 3)", async () => {
+		const db = await openSqliteFile(":memory:")
+		const session = createActivitySession(
+			db,
+			":memory:",
+			smallLimits({ maxRows: 20, pruneBatchRows: 10 }),
+		)
+		try {
+			writeOk(session, [shareRow("quiet", "quiet")])
+			expect(
+				commitActivityBatch(
+					db,
+					Array.from({ length: 20 }, (_, index) =>
+						shareRow(`busy${index}`, "busy"),
+					),
+				).ok,
+			).toBe(true)
+			const wrote = writeOk(session, [])
+			expect(wrote.prune.deleted).toBeGreaterThan(0)
+			expect(eventIds(db)).toContain("quiet")
+			expect(sharesOf(session.snapshot().retention.shares)).toEqual(
+				groupedScan(db),
+			)
+		} finally {
+			session.close()
+		}
+	})
+
+	it("re-plans in the same burst after a zero-delete step reseeds (finding 4)", async () => {
+		const db = await openSqliteFile(":memory:")
+		const maxRows = 20
+		const session = createActivitySession(
+			db,
+			":memory:",
+			smallLimits({ maxRows, pruneBatchRows: 10 }),
+		)
+		try {
+			writeOk(session, [
+				shareRow("quiet", "quiet"),
+				...Array.from({ length: 19 }, (_, index) =>
+					shareRow(`busy${index}`, "busy"),
+				),
+			])
+			db.exec(
+				"UPDATE activity SET decoder_id = 'renamed' WHERE decoder_id = 'busy'",
+			)
+			const wrote = writeOk(session, [shareRow("tick", "quiet")])
+			expect(wrote.snapshot.rows).toBeLessThanOrEqual(activityLowWater(maxRows))
+			expect(eventIds(db)).toContain("quiet")
+			expect(sharesOf(session.snapshot().retention.shares)).toEqual(
+				groupedScan(db),
+			)
+		} finally {
+			session.close()
+		}
+	})
+
+	it("credits the row that committed, not a skipped row with the same id (finding 5)", async () => {
+		const db = await openSqliteFile(":memory:")
+		const session = createActivitySession(db, ":memory:", smallLimits())
+		try {
+			const skipped = {
+				...shareRow("same", "skipped"),
+				recordJson: "x".repeat(150 * 1024),
+			}
+			const wrote = writeOk(session, [skipped, shareRow("same", "committed")])
+			expect(wrote.commit.committed).toBe(1)
+			expect(wrote.commit.writeFailed).toBe(1)
+			expect(sharesOf(wrote.snapshot.retention.shares)).toEqual(groupedScan(db))
+			expect(wrote.snapshot.retention.shares.map(share => share.key)).toEqual([
+				"decoder:committed",
+			])
+		} finally {
+			session.close()
+		}
+	})
+})

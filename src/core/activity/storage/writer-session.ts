@@ -97,6 +97,8 @@ export function createActivitySession(
 	let effective: ActivityRetentionPolicy = policy
 	let pendingNote: string | undefined
 	let prefixFallbackSteps = 0
+	/** A maintenance note from a step that still committed (vacuum failure). */
+	let stepNote: string | undefined
 	/** Wall time of the last seed scan (design F seed budget). */
 	let seedMs = 0
 	const seed = (): boolean => {
@@ -148,7 +150,14 @@ export function createActivitySession(
 	): PruneResult => {
 		const read = counters.live && preRead
 		const before = read ? readPrefixCandidates(db, limits.pruneBatchRows) : []
-		const step = pruneActivityPrefix(db, prefixLimits, nowMs, pressure)
+		let step: PruneResult
+		try {
+			step = pruneActivityPrefix(db, prefixLimits, nowMs, pressure)
+		} catch (error) {
+			// The prefix may have committed before incremental_vacuum threw: rebuild counters.
+			if (counters.live && !seed()) counters.drop()
+			throw error
+		}
 		if (step.changed && counters.live) {
 			// Every seq the prefix deleted is one of its candidates, all <= the new watermark.
 			const to = BigInt(step.watermark)
@@ -197,9 +206,14 @@ export function createActivitySession(
 
 	/** Fair-share step order: age prefix, else fair step, else stop (design "Step order"). */
 	const fairShareStep = (nowMs: number, burst: BurstState): PruneResult => {
+		const reading = readActivityPressure(db)
+		// Drift first (1.10): the one-share shortcut below must not trust stale counters.
+		if (counters.totalRows() !== reading.rowCount && !burst.reseeded) {
+			burst.reseeded = true
+			if (!seed()) return oldestFirstStep(nowMs)
+		}
 		// One share: its fair level is the low-water mark, so the step is today's (1.13).
 		if (counters.size() <= 1) return oldestFirstStep(nowMs)
-		const reading = readActivityPressure(db)
 		if (activityAgeActive(reading.oldestReceivedMs, limits.maxAgeMs, nowMs)) {
 			const aged = prefixStep(
 				{
@@ -233,11 +247,6 @@ export function createActivitySession(
 		if (!overRows && !overBytes) return unchanged
 		const capOnly = { ...limits, maxAgeMs: Number.POSITIVE_INFINITY }
 		const capPressure = { rowCap: rowCapPruning, byteCap: byteCapPruning }
-		if (counters.totalRows() !== reading.rowCount && !burst.reseeded) {
-			burst.reseeded = true
-			if (!seed()) return prefixStep(capOnly, nowMs, capPressure)
-			if (counters.size() <= 1) return oldestFirstStep(nowMs)
-		}
 		const plan = (): FairStepPlan =>
 			planFairStep({
 				shares: counters.usages(),
@@ -268,10 +277,15 @@ export function createActivitySession(
 					decoderId: share.decoderId,
 					kind: share.kind,
 					rows: allocation.rows,
+					minRows: allocation.minRows,
+					byteFloor: allocation.byteFloor,
+					shareBytes: share.bytes,
 				})
 		}
 		const step = pruneActivityFair(db, limits, targets, reading)
 		counters.subtract(step.deletedRows)
+		if (step.vacuumError !== undefined)
+			stepNote = `activity incremental vacuum failed: ${step.vacuumError}`
 		if (step.changed) {
 			adoptStep(step)
 			state = {
@@ -283,9 +297,11 @@ export function createActivitySession(
 				},
 			}
 		} else if (!burst.reseeded) {
-			// Counters named rows the share index does not hold: drift.
+			// Counters named rows the share index does not hold: drift. Reseed and re-plan in
+			// this same step; the burst flag keeps it to once per burst.
 			burst.reseeded = true
-			seed()
+			if (!seed()) return oldestFirstStep(nowMs)
+			return fairShareStep(nowMs, burst)
 		}
 		return step
 	}
@@ -314,7 +330,7 @@ export function createActivitySession(
 			}
 			const commit = commitActivityBatch(db, rows)
 			if (!commit.ok) return { ok: false, message: commit.message }
-			if (counters.live) counters.addCommitted(rows, commit.committedEventIds)
+			if (counters.live) counters.addCommitted(rows, commit.committedIndexes)
 			const previous = state.identity
 			let prune: PruneResult = {
 				deleted: 0,
@@ -326,6 +342,7 @@ export function createActivitySession(
 			}
 			let note: string | undefined = pendingNote
 			pendingNote = undefined
+			stepNote = undefined
 			try {
 				const started = clock()
 				const burst = limits.pruneBurstBatches
@@ -359,6 +376,7 @@ export function createActivitySession(
 			} catch (error) {
 				note = messageOf(error)
 			}
+			if (stepNote !== undefined) note ??= stepNote
 			try {
 				refresh("threshold")
 			} catch (error) {
@@ -472,14 +490,11 @@ class RetentionCounters {
 	/** O(1) per committed row, no SQL; a new share's oldest row is its first commit. */
 	addCommitted(
 		rows: readonly BuiltActivityRow[],
-		committedEventIds: readonly string[],
+		committedIndexes: readonly number[],
 	): void {
-		if (committedEventIds.length === 0) return
-		const byId = new Map<string, BuiltActivityRow>()
-		for (const row of rows)
-			if (!byId.has(row.eventId)) byId.set(row.eventId, row)
-		for (const eventId of committedEventIds) {
-			const row = byId.get(eventId)
+		// The row that committed, by batch index: a skipped row may share its event id.
+		for (const index of committedIndexes) {
+			const row = rows[index]
 			if (!row) continue
 			const key = retentionShareKey(row.decoderId, row.kind)
 			const share = this.shares.get(key)

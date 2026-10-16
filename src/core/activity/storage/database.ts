@@ -29,6 +29,11 @@ export interface CommitBatchSuccess {
 	duplicates: number
 	writeFailed: number
 	committedEventIds: string[]
+	/**
+	 * Batch index of each committed row, parallel to committedEventIds. A skipped or
+	 * duplicate row can share an event id with the row that committed.
+	 */
+	committedIndexes: number[]
 	duplicateEventIds: string[]
 	writeFailedEventIds: string[]
 }
@@ -141,6 +146,7 @@ export function commitActivityBatch(
 			duplicates: 0,
 			writeFailed: 0,
 			committedEventIds: [],
+			committedIndexes: [],
 			duplicateEventIds: [],
 			writeFailedEventIds: [],
 		}
@@ -156,11 +162,12 @@ export function commitActivityBatch(
 		"INSERT INTO activity_refs(seq, ref_type, ref_value) VALUES (?, ?, ?)",
 	)
 	const committedEventIds: string[] = []
+	const committedIndexes: number[] = []
 	const duplicateEventIds: string[] = []
 	const writeFailedEventIds: string[] = []
 	db.exec("BEGIN IMMEDIATE")
 	try {
-		for (const row of rows) {
+		for (const [index, row] of rows.entries()) {
 			const recordBytes = Buffer.byteLength(row.recordJson, "utf8")
 			if (
 				recordBytes > MAX_RECORD_BYTES ||
@@ -193,6 +200,7 @@ export function commitActivityBatch(
 				fts.run(seq, text)
 				for (const item of row.refs) ref.run(seq, item.type, item.value)
 				committedEventIds.push(row.eventId)
+				committedIndexes.push(index)
 			} catch (error) {
 				if (isUniqueConstraint(error)) {
 					duplicateEventIds.push(row.eventId)
@@ -215,6 +223,7 @@ export function commitActivityBatch(
 		duplicates: duplicateEventIds.length,
 		writeFailed: writeFailedEventIds.length,
 		committedEventIds,
+		committedIndexes,
 		duplicateEventIds,
 		writeFailedEventIds,
 	}
@@ -392,7 +401,14 @@ export interface ActivityPressureReading {
 export interface FairDeleteTarget {
 	decoderId: string | null
 	kind: string
+	/** At most this many oldest rows. */
 	rows: number
+	/** Rows deleted regardless of the byte floor (the row cap's share). Defaults to `rows`. */
+	minRows?: number
+	/** Beyond minRows, delete only while retained bytes stay >= this (first row may cross). */
+	byteFloor?: number | null
+	/** The share's record bytes before the step (the counters' value). */
+	shareBytes?: number
 }
 
 export interface FairPruneResult extends PruneResult {
@@ -400,6 +416,8 @@ export interface FairPruneResult extends PruneResult {
 	holeWatermark: string
 	holeGeneration: number
 	holeOpened: boolean
+	/** Set when incremental_vacuum failed after COMMIT; the deletes stand. */
+	vacuumError?: string
 }
 
 /**
@@ -541,8 +559,18 @@ export function pruneActivityFair(
 				target.decoderId === null
 					? byKind.all(target.kind, target.rows)
 					: byDecoder.all(target.decoderId, target.rows)
+			const minRows = Math.min(target.rows, target.minRows ?? target.rows)
+			const floor = target.byteFloor ?? null
+			let retained = target.shareBytes ?? 0
+			let taken = 0
 			for (const raw of rows) {
 				const row = prunedRow(raw)
+				if (taken >= minRows) {
+					if (floor === null || retained <= floor) break
+					if (taken > 0 && retained - row.recordBytes < floor) break
+				}
+				taken += 1
+				retained -= row.recordBytes
 				const bound = bindInteger(row.seq)
 				dropFts.run(bound)
 				dropRow.run(bound)
@@ -610,8 +638,14 @@ export function pruneActivityFair(
 		rollback(db)
 		throw error
 	}
-	if (result.changed && vacuumPages > 0)
-		db.exec(`PRAGMA incremental_vacuum(${vacuumPages})`)
+	if (result.changed && vacuumPages > 0) {
+		try {
+			db.exec(`PRAGMA incremental_vacuum(${vacuumPages})`)
+		} catch (error) {
+			result.vacuumError =
+				error instanceof Error ? error.message : String(error)
+		}
+	}
 	return result
 }
 

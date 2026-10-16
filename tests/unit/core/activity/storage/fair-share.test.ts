@@ -29,7 +29,9 @@ describe("fair-share planner", () => {
 			budget: 100,
 		})
 		expect(plan.rowLevel).toBe(490)
-		expect(plan.allocations).toEqual([{ key: "decoder:busy", rows: 100 }])
+		expect(plan.allocations).toEqual([
+			{ key: "decoder:busy", rows: 100, minRows: 100, byteFloor: null },
+		])
 		expect(plan.residual).toBe(false)
 	})
 
@@ -38,11 +40,11 @@ describe("fair-share planner", () => {
 		expect(
 			planFairStep({ shares: s, rowTarget: 95, byteExcess: null, budget: 50 })
 				.allocations,
-		).toEqual([{ key: "a", rows: 5 }])
+		).toEqual([{ key: "a", rows: 5, minRows: 5, byteFloor: null }])
 		expect(
 			planFairStep({ shares: s, rowTarget: 10, byteExcess: null, budget: 50 })
 				.allocations,
-		).toEqual([{ key: "a", rows: 50 }])
+		).toEqual([{ key: "a", rows: 50, minRows: 50, byteFloor: null }])
 	})
 
 	it("splits by largest remainder with key-ascending ties", () => {
@@ -58,9 +60,9 @@ describe("fair-share planner", () => {
 		})
 		expect(plan.rowLevel).toBe(10)
 		expect(plan.allocations).toEqual([
-			{ key: "a", rows: 4 },
-			{ key: "b", rows: 3 },
-			{ key: "c", rows: 3 },
+			{ key: "a", rows: 4, minRows: 4, byteFloor: null },
+			{ key: "b", rows: 3, minRows: 3, byteFloor: null },
+			{ key: "c", rows: 3, minRows: 3, byteFloor: null },
 		])
 	})
 
@@ -76,8 +78,8 @@ describe("fair-share planner", () => {
 			budget: 2,
 		})
 		expect(plan.allocations).toEqual([
-			{ key: "a", rows: 1 },
-			{ key: "b", rows: 1 },
+			{ key: "a", rows: 1, minRows: 1, byteFloor: null },
+			{ key: "b", rows: 1, minRows: 1, byteFloor: null },
 		])
 	})
 
@@ -93,7 +95,9 @@ describe("fair-share planner", () => {
 		})
 		// T = 51000, level = 50000: big frees 50000 bytes at 1000 B/row = 50 rows.
 		expect(plan.byteLevel).toBe(50_000)
-		expect(plan.allocations).toEqual([{ key: "big", rows: 50 }])
+		expect(plan.allocations).toEqual([
+			{ key: "big", rows: 50, minRows: 0, byteFloor: 50_000 },
+		])
 	})
 
 	it("byte excess at or above the total puts the level at 0", () => {
@@ -104,7 +108,9 @@ describe("fair-share planner", () => {
 			budget: 100,
 		})
 		expect(plan.byteLevel).toBe(0)
-		expect(plan.allocations).toEqual([{ key: "a", rows: 10 }])
+		expect(plan.allocations).toEqual([
+			{ key: "a", rows: 10, minRows: 0, byteFloor: 0 },
+		])
 	})
 
 	it("both caps take the larger excess", () => {
@@ -121,8 +127,8 @@ describe("fair-share planner", () => {
 		expect(plan.byteLevel).toBe(90_000)
 		// a: rows 10, bytes 0. b: rows 10, bytes 10000/1000 = 10.
 		expect(plan.allocations).toEqual([
-			{ key: "a", rows: 10 },
-			{ key: "b", rows: 10 },
+			{ key: "a", rows: 10, minRows: 10, byteFloor: 90_000 },
+			{ key: "b", rows: 10, minRows: 10, byteFloor: 90_000 },
 		])
 	})
 
@@ -163,7 +169,9 @@ describe("fair-share planner", () => {
 		})
 		expect(plan.rowLevel).toBe(0)
 		expect(plan.byteLevel).toBeNull()
-		expect(plan.allocations).toEqual([{ key: "c", rows: 7 }])
+		expect(plan.allocations).toEqual([
+			{ key: "c", rows: 7, minRows: 7, byteFloor: null },
+		])
 		expect(
 			planFairStep({
 				shares: [{ key: "a", rows: 10, bytes: 0 }],
