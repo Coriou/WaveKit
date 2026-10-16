@@ -350,3 +350,18 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 - [ ] Lost-browser recovery: the machine credential lists and revokes remembered browsers
   (`/api/access/machine/devices`, `…/revoke`, `…/revoke-all`), so Settings › Devices should
   point to it.
+
+**Found by the web app against a real core** (2026-10-16, main@23388b9, legacy mode, fake rtl_tcp)
+
+- [ ] Live audio has no `Access-Control-Allow-Origin` (`src/core/audio-stream-server.ts:59-67`), so a
+  page on the API origin cannot fetch the stream on the audio port. The web dev server proxies it.
+- [ ] `status.httpUrl` is hard-coded to `http://localhost:<port>` (`src/core/live-demodulator.ts:464`),
+  wrong for a remote browser.
+- [ ] The noise floor restarts from the first block after a retune (`src/core/live-demodulator.ts:534-535`,
+  `:856`): tuning onto a carrier already up sets the floor to the carrier, so auto squelch stays closed.
+- [ ] `PATCH /api/live-audio/config` out-of-range offset 400 has no `code`
+  (`src/api/routes/live-audio.ts:339-345`); while stopped the same PATCH is accepted and the next start
+  fails with `CHANNEL_OFFSET_OUT_OF_RANGE`.
+- [ ] Identify reports decoders whose binary is missing as `no-sync` (`src/core/scanner/identify.ts:359`,
+  `job-runner.ts:218`); one job went `candidate` then back to `trying` (`identify.ts:1384`).
+- [ ] With passive scanning off, a new spectrum subscriber gets no snapshot or backfill.
