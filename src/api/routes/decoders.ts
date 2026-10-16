@@ -12,7 +12,12 @@
  * - 20.3: Report health as "faulted" when crashed and exceeded restart limits
  */
 
-import type { FastifyInstance, FastifyPluginAsync } from "fastify"
+import type {
+	FastifyInstance,
+	FastifyPluginAsync,
+	FastifyReply,
+	FastifyRequest,
+} from "fastify"
 import { z } from "zod"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
@@ -38,6 +43,13 @@ import {
 } from "../serializers/decoder-status.js"
 import { decoderOptionDescriptors } from "../../decoders/options/index.js"
 import { WaveKitError } from "../../utils/errors.js"
+import type { DeniedAdmission } from "../../access/types.js"
+import {
+	DecoderSettingsError,
+	type DecoderSettingsService,
+} from "../../decoders/settings/contract.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { DECODER_SETTINGS_BODY_MAX_BYTES } from "@wavekit/api-types"
 
 /**
  * Decoder capabilities schema for response (Requirement 17.1)
@@ -84,6 +96,7 @@ const decoderOptionDescriptorsSchema = {
 			unit: { type: "string" },
 			default: { type: ["string", "number", "boolean", "null"] },
 			secret: { type: "boolean" },
+			patchable: { type: "boolean" },
 			effect: { type: "string", enum: ["restart"] },
 			description: { type: "string" },
 		},
@@ -155,6 +168,82 @@ const decoderConfigUpdateSchema = {
 export interface DecoderRoutesOptions {
 	decoderManager: DecoderManager
 	decoderRegistry?: DecoderRegistry | undefined
+	/**
+	 * WG8: live decoder settings. The settings GET and the working PATCH mount only when BOTH
+	 * `settings` and `authorizeSettings` are given (protected mode); either alone is legacy.
+	 */
+	settings?: DecoderSettingsService | undefined
+	/** WG8: mutation admission for the PATCH, run before any lookup or body parse. */
+	authorizeSettings?:
+		| ((request: FastifyRequest) => DeniedAdmission | undefined)
+		| undefined
+}
+
+/** WG8 req 2.2: `W/"n"`, `"n"` or bare `n` (station rules plus the weak form). */
+const IF_MATCH = /^(?:(?:W\/)?"(\d{1,19})"|(\d{1,19}))$/
+const PATCH_BODY_KEYS = new Set(["enabled", "options"])
+
+function sendJson(reply: FastifyReply, status: number, body: unknown) {
+	return reply
+		.status(status)
+		.header("Cache-Control", "no-store")
+		.type("application/json")
+		.send(JSON.stringify(body))
+}
+
+function sendSettingsDenial(reply: FastifyReply, denied: DeniedAdmission) {
+	for (const [name, value] of Object.entries(denied.headers))
+		reply.header(name, value)
+	return reply
+		.status(denied.status)
+		.type("application/json")
+		.send(JSON.stringify({ code: denied.code }))
+}
+
+const settingsError = (
+	code: "DECODER_OPTIONS_INVALID" | "DECODER_SETTINGS_LIMIT",
+	message: string,
+) => new DecoderSettingsError(code, message)
+
+const SETTINGS_UPDATE_FAILED = {
+	error: "Internal Server Error",
+	code: "DECODER_SETTINGS_UPDATE_FAILED",
+	message: "Decoder settings update failed",
+} as const
+
+/** Body shape of the protected PATCH: enabled boolean|null, options object, nothing else. */
+function isSettingsPatchShape(body: unknown): boolean {
+	if (typeof body !== "object" || body === null || Array.isArray(body))
+		return false
+	for (const key of Object.keys(body))
+		if (!PATCH_BODY_KEYS.has(key)) return false
+	const enabled: unknown = Reflect.get(body, "enabled")
+	if (
+		Object.hasOwn(body, "enabled") &&
+		enabled !== null &&
+		typeof enabled !== "boolean"
+	)
+		return false
+	const opts: unknown = Reflect.get(body, "options")
+	if (
+		Object.hasOwn(body, "options") &&
+		(typeof opts !== "object" || opts === null || Array.isArray(opts))
+	)
+		return false
+	return true
+}
+
+/** Parsed If-Match: undefined when absent, null when malformed or not a safe integer. */
+function parseIfMatch(
+	header: string | string[] | undefined,
+): number | null | undefined {
+	if (header === undefined) return undefined
+	if (typeof header !== "string") return null
+	const m = IF_MATCH.exec(header.trim())
+	const digits = m?.[1] ?? m?.[2]
+	if (digits === undefined) return null
+	const value = Number(digits)
+	return Number.isSafeInteger(value) ? value : null
 }
 
 /**
@@ -656,67 +745,194 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 		},
 	)
 
-	/**
-	 * PATCH /api/decoders/:id - Update decoder configuration
-	 * Requirement 9.9: Updates the decoder configuration
-	 */
-	fastify.patch<{
-		Params: { id: string }
-		Body: DecoderConfigUpdate
-		Reply: DecoderActionResponse | ErrorResponse
-	}>(
-		"/api/decoders/:id",
-		{
-			schema: {
-				tags: ["decoders"],
-				summary: "Update decoder configuration",
-				description: "Updates the configuration of a specific decoder",
-				params: {
-					type: "object",
-					properties: {
-						id: { type: "string", minLength: 1 },
+	const { settings, authorizeSettings } = options
+	if (settings && authorizeSettings) {
+		/** WG8 req 2.7: GET /api/decoders/:id/settings (root admission only). */
+		fastify.get<{ Params: { id: string } }>(
+			"/api/decoders/:id/settings",
+			{
+				schema: {
+					tags: ["decoders"],
+					summary: "Get decoder settings",
+					description:
+						"Effective settings of a configured decoder with their sources and the store revision",
+					params: {
+						type: "object",
+						properties: { id: { type: "string", minLength: 1 } },
+						required: ["id"],
 					},
-					required: ["id"],
-				},
-				body: decoderConfigUpdateSchema,
-				response: {
-					501: errorResponseSchema,
-					404: errorResponseSchema,
-					400: errorResponseSchema,
 				},
 			},
-		},
-		async (request, reply) => {
-			const { id } = request.params
-			const updates = request.body
-
-			// Check if decoder exists
-			const decoder = decoderManager.getDecoder(id)
-			if (!decoder) {
-				return reply.status(404).send({
+			async (request, reply) => {
+				const { id } = request.params
+				const notFound = {
 					error: "NotFound",
 					code: "DECODER_NOT_FOUND",
 					message: `Decoder with id '${id}' not found`,
-				})
-			}
+				}
+				if (!decoderManager.getDecoder(id))
+					return sendJson(reply, 404, notFound)
+				const owned = scannerOwnedConflict(decoderManager, id)
+				if (owned) return sendJson(reply, 409, owned)
+				const view = settings.view(id)
+				if (!view) return sendJson(reply, 404, notFound)
+				return sendJson(reply, 200, view)
+			},
+		)
 
-			// Validate that at least one field is being updated
-			if (updates.enabled === undefined && updates.options === undefined) {
-				return reply.status(400).send({
-					error: "BadRequest",
-					code: "NO_UPDATE_FIELDS",
-					message: "At least one field (enabled or options) must be provided",
-				})
-			}
+		/** WG8 req 2.2-2.6: PATCH /api/decoders/:id (protected), applied at the next start. */
+		fastify.route<{ Params: { id: string }; Body: unknown }>({
+			method: "PATCH",
+			url: "/api/decoders/:id",
+			bodyLimit: DECODER_SETTINGS_BODY_MAX_BYTES,
+			schema: {
+				tags: ["decoders"],
+				summary: "Update decoder settings",
+				description:
+					"JSON merge patch of the decoder override ({ enabled?: boolean | null, options?: object }); applies when the decoder next starts",
+				params: {
+					type: "object",
+					properties: { id: { type: "string", minLength: 1 } },
+					required: ["id"],
+				},
+			},
+			// onRequest runs before body parsing: a denial precedes any lookup or parser error.
+			onRequest: (request, reply, done) => {
+				const denied = authorizeSettings(request)
+				if (denied) {
+					void sendSettingsDenial(reply, denied)
+					return
+				}
+				done()
+			},
+			errorHandler: (error, request, reply) => {
+				const code = (error as { code?: unknown }).code
+				if (code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+					const err = settingsError(
+						"DECODER_SETTINGS_LIMIT",
+						"Body is too large",
+					)
+					void sendJson(reply, err.statusCode, err.toBody())
+					return
+				}
+				// Fastify's own parser answers (415, invalid JSON) are kept as on other routes.
+				if (typeof code === "string" && code.startsWith("FST_ERR_CTP_")) {
+					void reply.send(error)
+					return
+				}
+				request.log.error(
+					{ err: safeErrorFields(error) },
+					"decoder settings update failed",
+				)
+				void sendJson(reply, 500, SETTINGS_UPDATE_FAILED)
+			},
+			handler: async (request, reply) => {
+				const { id } = request.params
+				if (!decoderManager.getDecoder(id))
+					return sendJson(reply, 404, {
+						error: "NotFound",
+						code: "DECODER_NOT_FOUND",
+						message: `Decoder with id '${id}' not found`,
+					})
+				const owned = scannerOwnedConflict(decoderManager, id)
+				if (owned) return sendJson(reply, 409, owned)
+				const ifMatch = parseIfMatch(request.headers["if-match"])
+				if (ifMatch === null) {
+					const err = settingsError(
+						"DECODER_OPTIONS_INVALID",
+						"If-Match must be a revision",
+					)
+					return sendJson(reply, err.statusCode, err.toBody())
+				}
+				const body: unknown = request.body
+				if (!isSettingsPatchShape(body)) {
+					const err = settingsError(
+						"DECODER_OPTIONS_INVALID",
+						"Body must be a JSON object with only enabled (boolean or null) and options (object)",
+					)
+					return sendJson(reply, err.statusCode, err.toBody())
+				}
+				try {
+					const result = await settings.update(
+						id,
+						body,
+						ifMatch === undefined ? undefined : { ifMatch },
+					)
+					return sendJson(reply, 200, result)
+				} catch (error) {
+					if (error instanceof DecoderSettingsError)
+						return sendJson(reply, error.statusCode, error.toBody())
+					request.log.error(
+						{ err: safeErrorFields(error) },
+						"decoder settings update failed",
+					)
+					return sendJson(reply, 500, SETTINGS_UPDATE_FAILED)
+				}
+			},
+		})
+	} else {
+		/**
+		 * PATCH /api/decoders/:id - Update decoder configuration
+		 * Requirement 9.9: Updates the decoder configuration
+		 */
+		fastify.patch<{
+			Params: { id: string }
+			Body: DecoderConfigUpdate
+			Reply: DecoderActionResponse | ErrorResponse
+		}>(
+			"/api/decoders/:id",
+			{
+				schema: {
+					tags: ["decoders"],
+					summary: "Update decoder configuration",
+					description: "Updates the configuration of a specific decoder",
+					params: {
+						type: "object",
+						properties: {
+							id: { type: "string", minLength: 1 },
+						},
+						required: ["id"],
+					},
+					body: decoderConfigUpdateSchema,
+					response: {
+						501: errorResponseSchema,
+						404: errorResponseSchema,
+						400: errorResponseSchema,
+					},
+				},
+			},
+			async (request, reply) => {
+				const { id } = request.params
+				const updates = request.body
 
-			return reply.status(501).send({
-				error: "NotImplemented",
-				code: "DECODER_CONFIG_UPDATE_UNSUPPORTED",
-				message:
-					"Runtime decoder configuration updates are not implemented. Edit the YAML configuration and restart WaveKit; use the start/stop endpoints for lifecycle control.",
-			})
-		},
-	)
+				// Check if decoder exists
+				const decoder = decoderManager.getDecoder(id)
+				if (!decoder) {
+					return reply.status(404).send({
+						error: "NotFound",
+						code: "DECODER_NOT_FOUND",
+						message: `Decoder with id '${id}' not found`,
+					})
+				}
+
+				// Validate that at least one field is being updated
+				if (updates.enabled === undefined && updates.options === undefined) {
+					return reply.status(400).send({
+						error: "BadRequest",
+						code: "NO_UPDATE_FIELDS",
+						message: "At least one field (enabled or options) must be provided",
+					})
+				}
+
+				return reply.status(501).send({
+					error: "NotImplemented",
+					code: "DECODER_CONFIG_UPDATE_UNSUPPORTED",
+					message:
+						"Runtime decoder configuration updates are not implemented. Edit the YAML configuration and restart WaveKit; use the start/stop endpoints for lifecycle control.",
+				})
+			},
+		)
+	}
 
 	/**
 	 * GET /api/decoders/types - List available decoder types

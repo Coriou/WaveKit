@@ -18,6 +18,7 @@ const descriptors = vi.hoisted(() => ({
 			unit: "dB",
 			default: null,
 			secret: false,
+			patchable: true,
 			effect: "restart",
 			description: "Tuner gain",
 		},
@@ -84,6 +85,14 @@ describe("decoder types options and status optionIssues", () => {
 		})
 		expect(body[1]).toMatchObject({ type: "plain", caps: { input: "iq" } })
 		expect(body[1]).not.toHaveProperty("options")
+	})
+
+	it("WG8 req 2.8: descriptors carry patchable only where set", async () => {
+		const body = (await app.inject("/api/decoders/types")).json() as Array<{
+			options?: Array<Record<string, unknown>>
+		}>
+		expect(body[0]?.options?.[0]?.["patchable"]).toBe(true)
+		expect(body[0]?.options?.[1]).not.toHaveProperty("patchable")
 	})
 
 	it("status routes carry optionIssues", async () => {
