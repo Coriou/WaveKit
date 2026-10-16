@@ -916,20 +916,24 @@ export function planJob(
 	}
 }
 
-/** WG6 req 1.8: the decoder view is read at most once per plan; a throwing view means none. */
+/**
+ * WG6 req 1.8: the decoder view is read at most once per plan; a throwing or non-array view
+ * means none.
+ */
 function decodedElsewhereFor(
 	spec: NormalisedJobSpec,
 	ctx: PreviewContext,
 ): { ranges: DecodedElsewhereRange[]; issues: PlanIssue[] } {
 	if (ctx.decoderCoverage === undefined) return { ranges: [], issues: [] }
-	let views: readonly DecoderCoverageView[]
+	let r: ReturnType<typeof computeDecodedElsewhere>
 	try {
-		views = ctx.decoderCoverage()
+		const views: unknown = ctx.decoderCoverage()
+		if (!Array.isArray(views) || views.length === 0)
+			return { ranges: [], issues: [] }
+		r = computeDecodedElsewhere(views as readonly DecoderCoverageView[], spec)
 	} catch {
 		return { ranges: [], issues: [] }
 	}
-	if (views.length === 0) return { ranges: [], issues: [] }
-	const r = computeDecodedElsewhere(views, spec)
 	const issues: PlanIssue[] = []
 	if (r.truncated)
 		issues.push(

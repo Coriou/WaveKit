@@ -233,23 +233,33 @@ describe("decoded elsewhere is inert without views or flag", () => {
 	// Validates: Requirements 1.1, 1.6
 	it("no view, empty view list, untrusted views or a throwing view change nothing", () => {
 		fc.assert(
-			fc.property(specArb, untrustedArb, (spec, untrusted) => {
-				const base = previewPlan(spec, context())
-				const baseJob = planJob(base.spec, context())
-				const variants: (() => readonly DecoderCoverageView[])[] = [
-					() => [],
-					() => untrusted,
-					() => {
-						throw new Error("boom")
-					},
-				]
-				for (const v of variants) {
-					const ctx = withCoverage(v)
-					expect(previewPlan(spec, ctx)).toEqual(base)
-					expect(planJob(base.spec, ctx)).toEqual(baseJob)
-				}
-				expect("decodedElsewhere" in base).toBe(false)
-			}),
+			fc.property(
+				specArb,
+				untrustedArb,
+				fc.integer({ min: 0, max: 70 }),
+				(spec, untrusted, many) => {
+					const base = previewPlan(spec, context())
+					const baseJob = planJob(base.spec, context())
+					const variants: (() => readonly DecoderCoverageView[])[] = [
+						() => [],
+						() => untrusted,
+						() =>
+							Array.from(
+								{ length: many },
+								(_, i) => untrusted[i % untrusted.length]!,
+							),
+						() => {
+							throw new Error("boom")
+						},
+					]
+					for (const v of variants) {
+						const ctx = withCoverage(v)
+						expect(previewPlan(spec, ctx)).toEqual(base)
+						expect(planJob(base.spec, ctx)).toEqual(baseJob)
+					}
+					expect("decodedElsewhere" in base).toBe(false)
+				},
+			),
 			{ numRuns: 100 },
 		)
 	}, 60_000)
@@ -402,6 +412,41 @@ describe("skip excludes", () => {
 			context(),
 		)
 		expect(p.plan).toEqual(excluded.plan)
+	})
+
+	it("non-array or throwing view lists change nothing", () => {
+		const spec = sweep([{ startHz: 446_000_000, endHz: 446_200_000 }])
+		const base = previewPlan(spec, context())
+		const throwingLength = new Proxy([external("x", [446_100_000])], {
+			get(target, prop, receiver) {
+				if (prop === "length") throw new Error("length")
+				return Reflect.get(target, prop, receiver) as unknown
+			},
+		})
+		const variants: (() => readonly DecoderCoverageView[])[] = [
+			() => null as unknown as readonly DecoderCoverageView[],
+			() => undefined as unknown as readonly DecoderCoverageView[],
+			() => throwingLength,
+		]
+		for (const v of variants)
+			expect(previewPlan(spec, withCoverage(v))).toEqual(base)
+	})
+
+	it("65 untrusted views without the flag: no truncation, no change", () => {
+		const spec = sweep([{ startHz: 446_000_000, endHz: 446_200_000 }])
+		const base = previewPlan(spec, context())
+		const views = Array.from({ length: 65 }, (_, i) => ({
+			...external(`u${i}`, [446_100_000]),
+			running: false,
+		}))
+		const p = previewPlan(
+			spec,
+			withCoverage(() => views),
+		)
+		expect(p).toEqual(base)
+		expect(p.issues.some(i => i.code === "decoded-elsewhere-truncated")).toBe(
+			false,
+		)
 	})
 
 	it("surfaces the truncated warning in the preview", () => {

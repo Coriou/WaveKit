@@ -277,6 +277,69 @@ describe("computeDecodedElsewhere bounds", () => {
 		expect(res.truncated).toBe(true)
 	})
 
+	it("65 decoders failing the state gate: none counted, not truncated", () => {
+		const res = run(
+			Array.from({ length: 65 }, (_, i) =>
+				view({ id: `u${i}`, running: false }),
+			).concat(distinct(64)),
+		)
+		expect(res.ranges).toHaveLength(64)
+		expect(res.truncated).toBe(false)
+		expect(
+			run(Array.from({ length: 65 }, () => view({ running: false }))),
+		).toEqual({ ranges: [], truncated: false })
+	})
+
+	it("32 targets then a throwing element: the overflow is never read", () => {
+		const targetsHz = Array.from({ length: 33 }, (_, i) => 99.1e6 + i * 20_000)
+		Object.defineProperty(targetsHz, 32, {
+			get() {
+				throw new Error("overflow read")
+			},
+		})
+		const res = run([view({ band: band({ targetsHz }) })])
+		expect(res.ranges).toHaveLength(32)
+		expect(res.truncated).toBe(true)
+	})
+
+	it("an external target list past the bound is never read past it", () => {
+		const targetsHz = Array.from({ length: 33 }, (_, i) => 99.1e6 + i * 20_000)
+		Object.defineProperty(targetsHz, 32, {
+			get() {
+				throw new Error("overflow read")
+			},
+		})
+		const res = run([ext({ band: band({ targetsHz }) })])
+		expect(res.ranges).toHaveLength(32)
+		expect(res.truncated).toBe(true)
+	})
+
+	it("a view list past the bound never reads the overflow element", () => {
+		const views = distinct(64)
+		Object.defineProperty(views, 64, {
+			get() {
+				throw new Error("overflow read")
+			},
+		})
+		Object.defineProperty(views, "length", { value: 66 })
+		const res = run(views)
+		expect(res.ranges).toHaveLength(64)
+	})
+
+	it("a sourceId getter is read once: validation and emission agree", () => {
+		let reads = 0
+		const v = view()
+		Object.defineProperty(v, "sourceId", {
+			get() {
+				reads++
+				return reads === 1 ? "job" : "other"
+			},
+		})
+		const res = computeDecodedElsewhere([v], { ...spec(), sourceId: "job" })
+		expect(res.ranges).toEqual([])
+		expect(reads).toBe(1)
+	})
+
 	const items = (targets: number, ranges: number) =>
 		view({
 			band: band({
@@ -441,6 +504,34 @@ describe("computeDecodedElsewhere properties", () => {
 		)
 	})
 
+	it("overlapping enabled ranges yield one merged entry", () => {
+		const res = run(
+			[ext({ band: band({ targetsHz: [250_000], basis: "configured" }) })],
+			spec([
+				{ startHz: 100_000, endHz: 300_000 },
+				{ startHz: 200_000, endHz: 400_000 },
+			]),
+		)
+		expect(res.ranges).toHaveLength(1)
+		const wide = run(
+			[
+				view({
+					band: band({
+						targetsHz: [],
+						rangesHz: [{ minHz: 100_000, maxHz: 400_000 }],
+						captureCenterHz: 250_000,
+						windowHalfWidthHz: 200_000,
+					}),
+				}),
+			],
+			spec([
+				{ startHz: 100_000, endHz: 300_000 },
+				{ startHz: 200_000, endHz: 400_000 },
+			]),
+		)
+		expect(wide.ranges).toMatchObject([{ startHz: 100_000, endHz: 400_000 }])
+	})
+
 	// Feature: web-gaps-6, Property 3: Merge shape
 	// Validates: Requirements 1.2, 1.5
 	it("entries are clipped, disjoint per source, sorted, ids sorted and unique", () => {
@@ -464,12 +555,12 @@ describe("computeDecodedElsewhere properties", () => {
 					}))
 					const out = computeDecodedElsewhere(views, spec(ranges)).ranges
 					expect(out.length).toBeLessThanOrEqual(256)
-					const enabled = ranges.filter(r => r.enabled !== false)
+					const union = mergeEnabled(ranges)
 					for (const e of out) {
 						expect(e.startHz).toBeLessThanOrEqual(e.endHz)
-						expect(
-							enabled.some(r => e.startHz >= r.startHz && e.endHz <= r.endHz),
-						).toBe(true)
+						expect(union.some(([s, t]) => e.startHz >= s && e.endHz <= t)).toBe(
+							true,
+						)
 						expect(e.decoderIds.length).toBeGreaterThan(0)
 						expect([...new Set(e.decoderIds)].sort()).toEqual(e.decoderIds)
 					}
@@ -496,6 +587,20 @@ describe("computeDecodedElsewhere properties", () => {
 		)
 	})
 })
+
+function mergeEnabled(ranges: ScanRange[]): [number, number][] {
+	const sorted = ranges
+		.filter(r => r.enabled !== false)
+		.map((r): [number, number] => [r.startHz, r.endHz])
+		.sort((a, b) => a[0] - b[0])
+	const out: [number, number][] = []
+	for (const [s, e] of sorted) {
+		const last = out[out.length - 1]
+		if (last !== undefined && s <= last[1]) last[1] = Math.max(last[1], e)
+		else out.push([s, e])
+	}
+	return out
+}
 
 function status(over: Partial<DecoderStatus> = {}): DecoderStatus {
 	return {
@@ -559,7 +664,8 @@ describe("toDecoderCoverageView", () => {
 		)
 		expect(v.running).toBe(false)
 		expect(v.band).toBeNull()
-		expect(v.suspended).toBe(false)
+		expect(v.suspended).toBe(true)
+		expect(v.owner).toBe("scanner")
 		expect(
 			toDecoderCoverageView(
 				status({ bandAssessment: { verdict: "in-band" } }),
@@ -587,13 +693,19 @@ describe("toDecoderCoverageView", () => {
 		})
 	})
 
-	it("external input: sourceId null, configured targets as basis configured", () => {
+	it("external input: configured targets only under the assessment's own basis", () => {
 		const v = toDecoderCoverageView(
 			status({
 				sourceId: "ignored",
+				owner: "config",
+				suspended: false,
 				deviceSerial: "0001",
 				targetFrequenciesHz: [162_025_000],
-				bandAssessment: { verdict: "unknown", reasonCode: "external-input" },
+				bandAssessment: {
+					verdict: "unknown",
+					basis: "configured",
+					reasonCode: "external-input",
+				},
 			}),
 			"default",
 		)
@@ -605,6 +717,72 @@ describe("toDecoderCoverageView", () => {
 		})
 		const res = computeDecodedElsewhere([v], spec())
 		expect(res.ranges).toMatchObject([{ startHz: 162_018_750, sourceId: null }])
+	})
+
+	it("external input never gets a manufactured basis", () => {
+		const v = toDecoderCoverageView(
+			status({
+				owner: "config",
+				suspended: false,
+				targetFrequenciesHz: [100_000_000],
+				bandAssessment: { verdict: "unknown", reasonCode: "external-input" },
+			}),
+			"default",
+		)
+		expect(v.band).toMatchObject({ basis: null, targetsHz: [] })
+		expect(computeDecodedElsewhere([v], spec()).ranges).toEqual([])
+		const bogus = toDecoderCoverageView(
+			status({
+				owner: "config",
+				suspended: false,
+				targetFrequenciesHz: [100_000_000],
+				bandAssessment: {
+					verdict: "unknown",
+					basis: "made-up" as "configured",
+					reasonCode: "external-input",
+				},
+			}),
+			"default",
+		)
+		expect(bogus.band?.basis).toBeNull()
+		expect(computeDecodedElsewhere([bogus], spec()).ranges).toEqual([])
+	})
+
+	it("malformed or missing owner and suspension never count", () => {
+		const covering = {
+			sourceId: "s1",
+			bandAssessment: {
+				verdict: "in-band" as const,
+				basis: "protocol" as const,
+				targetsHz: [100_000_000],
+				captureCenterHz: 100_000_000,
+				windowHalfWidthHz: 1e6,
+			},
+		}
+		const cases: Partial<DecoderStatus>[] = [
+			{ owner: "unknown" as "config", suspended: false },
+			{ owner: "config", suspended: "true" as unknown as boolean },
+			{},
+			{
+				owner: "config",
+				suspended: false,
+				running: "yes" as unknown as boolean,
+			},
+			{
+				owner: "config",
+				suspended: false,
+				health: "weird" as DecoderStatus["health"],
+			},
+		]
+		for (const c of cases) {
+			const v = toDecoderCoverageView(status({ ...covering, ...c }), "d")
+			expect(computeDecodedElsewhere([v], spec()).ranges).toEqual([])
+		}
+		const ok = toDecoderCoverageView(
+			status({ ...covering, owner: "config", suspended: false }),
+			"d",
+		)
+		expect(computeDecodedElsewhere([ok], spec()).ranges).toHaveLength(1)
 	})
 
 	it("external input without assessment has no band", () => {
