@@ -243,3 +243,152 @@ describe("activity ingress", () => {
 		expect(ingress.counters().sinkFailures).toBe(1)
 	})
 })
+
+describe("activity ingress provenance (WG3 req 5)", () => {
+	function acars(frequency: unknown): DecoderOutput {
+		return {
+			timestamp: new Date(producedAt),
+			decoder: "acars-1",
+			type: "acars",
+			data: { frequency, text: "HELLO", tail: ".N123" },
+		}
+	}
+
+	function run(
+		lookup: Parameters<typeof createActivityIngress>[0]["resolveProvenance"],
+		out: DecoderOutput,
+		decoderType = "acarsdec",
+	) {
+		const plain: DecodeEnvelope[] = []
+		const presented: DecodeEnvelope[] = []
+		const ingress = createActivityIngress({
+			sink: (envelope, present) => {
+				plain.push(envelope)
+				presented.push(present())
+			},
+			logger: captureLogger().logger,
+			...(lookup === undefined ? {} : { resolveProvenance: lookup }),
+		})
+		ingress.publish(out.decoder, decoderType, out)
+		return { plain, presented, counters: ingress.counters() }
+	}
+
+	const binding = {
+		sourceId: "rtl-0",
+		targetFrequenciesHz: [131_550_000],
+		tuningTrust: "unverified" as const,
+	}
+
+	it("sets source and payload frequency without changing decodedData or presentation", () => {
+		const baseline = run(null, acars(131_725_000))
+		const { presented, counters } = run(() => binding, acars(131_725_000))
+		expect(presented[0]?.provenance).toEqual({
+			sourceId: "rtl-0",
+			frequency: {
+				hz: 131_725_000,
+				basis: "channel",
+				tuningTrust: "unverified",
+			},
+		})
+		expect(presented[0]?.decodedData).toEqual(
+			baseline.presented[0]?.decodedData,
+		)
+		expect(presented[0]?.title).toEqual(baseline.presented[0]?.title)
+		expect(presented[0]?.fields).toEqual(baseline.presented[0]?.fields)
+		expect(counters.provenanceFailures).toBeUndefined()
+	})
+
+	it("without a lookup keeps the payload frequency with a null source", () => {
+		const { presented } = run(undefined, acars(131_550_000))
+		expect(presented[0]?.provenance).toEqual({
+			sourceId: null,
+			frequency: {
+				hz: 131_550_000,
+				basis: "channel",
+				tuningTrust: "unverified",
+			},
+		})
+	})
+
+	it("a multi-target binding without payload frequency gives null frequency", () => {
+		const { presented } = run(
+			() => ({ ...binding, targetFrequenciesHz: [1, 2] }),
+			acars(undefined),
+		)
+		expect(presented[0]?.provenance).toEqual({
+			sourceId: "rtl-0",
+			frequency: null,
+		})
+	})
+
+	it("a throwing lookup keeps the reception with null provenance and counts it", () => {
+		const { presented, counters } = run(() => {
+			throw new Error("boom")
+		}, acars(131_550_000))
+		expect(presented).toHaveLength(1)
+		expect(presented[0]?.provenance).toEqual({
+			sourceId: null,
+			frequency: null,
+		})
+		expect(counters).toMatchObject({
+			published: 1,
+			buildFailures: 0,
+			provenanceFailures: 1,
+		})
+	})
+
+	it("an envelope rejected because of provenance is rebuilt with null provenance", () => {
+		const { presented, counters } = run(
+			() => ({ ...binding, sourceId: "x".repeat(129) }),
+			acars(131_550_000),
+		)
+		expect(presented[0]?.provenance).toEqual({
+			sourceId: null,
+			frequency: null,
+		})
+		expect(counters).toMatchObject({
+			published: 1,
+			buildFailures: 0,
+			provenanceFailures: 1,
+		})
+	})
+
+	it("a throwing payload getter is guarded and counted once", () => {
+		const data = { text: "x" }
+		Object.defineProperty(data, "frequency", {
+			enumerable: false,
+			get() {
+				throw new Error("getter")
+			},
+		})
+		const { presented, counters } = run(() => binding, {
+			...acars(0),
+			data,
+		})
+		// The envelope builder rejects this payload on its own; provenance must
+		// not add a second count or a throw.
+		expect(presented).toHaveLength(counters.published)
+		expect(counters.published + counters.buildFailures).toBe(1)
+		expect(counters.provenanceFailures).toBe(1)
+	})
+
+	it("only a failed rebuild counts as a build failure", () => {
+		const { plain, counters } = run(
+			() => binding,
+			acars(Number.NaN),
+			"acarsdec",
+		)
+		// decodedData with NaN may or may not build; either way nothing is double-counted.
+		expect(counters.buildFailures + counters.published).toBe(1)
+		expect(plain.length).toBe(counters.published)
+	})
+
+	it("a build failing for another reason is not a provenance failure", () => {
+		const { counters } = run(() => binding, {
+			...acars(131_550_000),
+			timestamp: new Date(Number.NaN),
+		})
+		expect(counters).toMatchObject({ published: 0, buildFailures: 1 })
+		expect(counters.provenanceFailures).toBeUndefined()
+	})
+})
