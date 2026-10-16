@@ -11,6 +11,8 @@
 		"./tokens/brand.css": "./tokens/brand.css",
 		"./tokens/typography.css": "./tokens/typography.css",
 		"./tokens/tokens.json": "./tokens/tokens.json",
+		"./tokens/ui.css": "./tokens/ui.css",
+		"./tokens/ui.json": "./tokens/ui.json",
 		"./brand.config.json": "./brand.config.json",
 		"./icons/categories.json": "./icons/categories.json",
 		"./logos/*": "./logos/*",

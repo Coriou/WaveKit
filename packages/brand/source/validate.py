@@ -239,6 +239,69 @@ def check_tokens(config: dict, geometry: dict, issues: list[str], result: dict) 
                 issues.append(f'tokens: {theme} {fg} on {bg} is {ratio:.2f}:1, below {minimum}:1')
 
 
+# UI kit (tokens/ui.css). The token block is the owner-approved colour set (THEME-TOKENS v2.1 plus
+# the band group hues, 2026-10-12): changing a colour means updating this hash with the owner's OK.
+UI_TOKEN_BLOCK_SHA256 = '77848de57b7ce3be2026fe9218d65dcaede64203de52942064f7861ed93aa259'
+UI_TEXT = ('--wk-text', '--wk-text-2', '--wk-text-3')
+
+
+def ui_rgba(value: str) -> tuple[float, float, float, float]:
+    value = value.strip()
+    if value.startswith('#'):
+        return (*(int(value[i:i + 2], 16) for i in (1, 3, 5)), 1.0)
+    r, g, b, *a = re.fullmatch(r'rgba?\((.*)\)', value.replace(' ', '')).group(1).split(',')
+    return float(r), float(g), float(b), float(a[0]) if a else 1.0
+
+
+def ui_over(fg: tuple, bg: tuple) -> str:
+    a = fg[3]
+    return '#' + ''.join(f'{round(fg[i] * a + bg[i] * (1 - a)):02x}' for i in range(3))
+
+
+def check_ui(issues: list[str], result: dict) -> None:
+    import hashlib
+    build_ui = load_module('build_ui')
+    css = (ROOT / 'tokens/ui.css').read_text(encoding='utf-8')
+    if not (ROOT / 'tokens/ui.json').is_file() or (ROOT / 'tokens/ui.json').read_text(encoding='utf-8') != build_ui.build():
+        issues.append('tokens/ui.json is stale: run python3 -I source/build_ui.py')
+    size = len(css.encode())
+    result['uiKitBytes'] = size
+    if size > 30 * 1024:
+        issues.append(f'tokens/ui.css is {size} bytes, over the 30 KB kit budget')
+    block = css.split('@layer wk-tokens{', 1)[1].split('/* scales', 1)[0]
+    if hashlib.sha256(block.encode()).hexdigest() != UI_TOKEN_BLOCK_SHA256:
+        issues.append('tokens/ui.css: the token block differs from the approved colours (owner approval needed)')
+    plain = build_ui.strip_comments(css)
+    scales = build_ui.layer(plain, 'wk-tokens')[len(build_ui.strip_comments(block)):]
+    for literal in re.findall(r'#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\([^)]*\)', scales):
+        if not literal.startswith('rgba(var(') and literal != 'rgba(0,0,0,.3)':
+            issues.append(f'tokens/ui.css: new colour {literal} in the scales (owner approval needed)')
+    for name in ('wk-base', 'wk-recipes'):
+        body = build_ui.layer(plain, name)
+        for literal in re.findall(r'#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\((?!var\()[^)]*\)', body):
+            issues.append(f'tokens/ui.css: colour literal {literal} in {name} (use a token)')
+    for scope, t in json.loads(build_ui.build())['scopes'].items():
+        bg = ui_rgba(t['--wk-plot-bg'])
+        grounds = {'ground': ui_over(bg, bg), 'surface': ui_over(ui_rgba(t['--wk-surface']), bg),
+                   'island': ui_over(ui_rgba(t['--wk-glass']), bg), 'solid': ui_over(ui_rgba(t['--wk-glass-strong']), bg)}
+        menu = ui_over(ui_rgba(t['--wk-fill-glass']), bg)
+        fill = ui_over(ui_rgba(t['--wk-fill']), bg)
+        pairs = [(f'{n} on {g}', t[n], c, 4.5) for n in UI_TEXT for g, c in {**grounds, 'menu': menu}.items()]
+        pairs += [(f'--wk-text-4 on {g}', t['--wk-text-4'], c, 4.5) for g, c in grounds.items()]
+        pairs += [(f'focus on {g}', ui_over(ui_rgba(t['--wk-focus']), ui_rgba(c)), c, 3) for g, c in grounds.items()]
+        sel = ui_over(ui_rgba(t['--wk-sel']), ui_rgba(grounds['solid']))
+        pairs += [('accent on sel', t['--wk-accent'], sel, 4.5), ('on-accent on accent', t['--wk-on-accent'], t['--wk-accent'], 4.5),
+                  ('amber on fill', t['--wk-amber'], fill, 4.5), ('danger on fill', t['--wk-danger'], fill, 4.5)]
+        worst = None
+        for label, fg, bgc, minimum in pairs:
+            ratio = contrast(ui_over(ui_rgba(fg), ui_rgba(bgc)), bgc)
+            if worst is None or ratio < worst[0]:
+                worst = (ratio, label)
+            if ratio < minimum:
+                issues.append(f'tokens/ui.css: {scope} {label} is {ratio:.2f}:1, below {minimum}:1')
+        result['contrast'][f'ui {scope}: lowest ({worst[1]})'] = round(worst[0], 2)
+
+
 def check_fonts(files: list[Path], config: dict, issues: list[str], result: dict) -> None:
     fonts = [f for f in files if f.suffix.lower() in FONT_SUFFIXES]
     result['fontFiles'] = len(fonts)
@@ -301,6 +364,7 @@ def check(render: bool = False) -> dict:
     check_react(geometry, issues)
     check_tokens(config, geometry, issues, result)
     check_fonts(files, config, issues, result)
+    check_ui(issues, result)
     if render:
         export = load_module('export')
         issues.extend(export.run(check=True))

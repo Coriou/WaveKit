@@ -1,2 +1,5 @@
 # Design canvas snapshots: kept byte-identical to the canvas artifact
 docs/web/canvas/
+# UI kit source: mirrored verbatim into the canvas Kit board; ui.json is generated
+packages/brand/tokens/ui.css
+packages/brand/tokens/ui.json

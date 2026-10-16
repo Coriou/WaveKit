@@ -8,11 +8,10 @@ Official baseline: **MAKE SENSE OF THE SPECTRUM**. In prose the name is **WaveKi
 logo artwork reads **wavekit**. Read [`AGENTS.md`](AGENTS.md) before changing anything;
 its rules are binding for people and agents alike.
 
-**Planned (owner, 2026-10-11):** the web dashboard's themed UI tokens (grounds, accents,
-focus and selection, `--wk-brand`; see `docs/web/THEME-TOKENS.md` on `design/web-dashboard`)
-become WaveKit's global design system and move into this package as `tokens/ui.css` and
-`tokens/ui.json`, validated like `brand.css`. Every surface (web app, Pi pages, later mobile)
-then consumes them from here.
+**UI kit (design system v1, 2026-10-16):** `tokens/ui.css` holds WaveKit's themed UI
+tokens (grounds, accents, focus and selection), the scales and the component recipes shared by the
+design canvas, the Pi pages and the web app. `tokens/ui.json` is generated from it by
+`source/build_ui.py`. See [`docs/ui-kit.md`](docs/ui-kit.md).
 
 ![WaveKit brand overview](previews/01-brand-overview.svg)
 
@@ -36,6 +35,7 @@ All paths are relative to `packages/brand/`.
 | Icon sprite (inline once, then `<use href="#wk-<slug>">`)   | `icons/categories.symbols.svg`                                                            |
 | Category ↔ signal mapping                                   | `icons/categories.json`                                                                   |
 | Colours, themes, spacing                                    | `tokens/brand.css` (CSS), `tokens/tokens.json` (data)                                     |
+| UI kit: themes, scales, component recipes                  | `tokens/ui.css` (CSS), `tokens/ui.json` (generated data)                                  |
 | Live typography + `@font-face`                              | `tokens/typography.css` → `fonts/`                                                        |
 | GitHub social preview / repo banner                         | `exports/social-card-1200x630.png`, `templates/repository-banner-1280x640.svg`            |
 | Decorative spectrum art (never data)                        | `artwork/spectrum-on-dark.svg` / `-on-light.svg`                                          |
@@ -56,10 +56,10 @@ icons/               8 categories × mono / on-light / on-dark, sprite, categori
 artwork/             decorative spectrum
 templates/           repo banner, social cards, editorial cover, webmanifest, email signature
 exports/             PNG/ICO rasters, regenerated from the SVGs by source/export.py
-tokens/              brand.css, typography.css, tokens.json
+tokens/              brand.css, typography.css, tokens.json, ui.css, ui.json (generated)
 fonts/               D-DIN Condensed + Noto Sans WOFF2, OFL licence beside each family
 react/               typed React components and the frozen geometry they draw
-source/              geometry.json, build.py, export.py, subset_fonts.py, validate.py
+source/              geometry.json, build.py, build_ui.py, export.py, subset_fonts.py, validate.py
 previews/            the three guideline boards (SVG)
 docs/                brand, logo, iconography, typography, integration, accessibility, sources
 licenses/            Tabler MIT notice (required with the icons) and attribution notes
