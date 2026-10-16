@@ -2718,7 +2718,23 @@ Activity reception) carries `channel`, `A` or `B`, from NMEA field 4 or
 AIS-catcher's JSON `channel`; a multi-sentence message takes it from its first
 fragment, and the key is absent when the channel is unknown. It sets the
 reception's provenance frequency: A is 161.975 MHz, B 162.025 MHz (see
-[Provenance](#provenance)). `VesselState` does not carry the channel.
+[Provenance](#provenance)). From WG5 `VesselState.channel` carries it too (see
+below).
+
+AIS types 4, 9 and 21 (WG5): on the NMEA path a base station report (type 4), a
+SAR aircraft report (type 9) and an aid-to-navigation report (type 21) decode to
+a position; a longitude of 181 or a latitude of 91 means no position. A short
+payload drops only the fields whose bits are missing. Type 9 also gives
+`altitudeM` (0–4094 m; 4094 means 4094 or higher; 4095, not available, is
+omitted) and `sog` in whole knots (0–1022). Type 21 gives `aidType` (ITU-R
+M.1371 aid type 0–31), the name with its extension (at most 34 characters),
+`virtualAid` and `offPosition` (only when the report's UTC second is 0–59). The
+AIS-catcher JSON path reads the same fields from `alt`, `aid_type`,
+`virtual_aid` and `off_position` and validates each field on its own: a field of
+the wrong type or out of range is dropped and the rest of the ship is kept.
+These four JSON key names follow AIS-catcher's naming but have not been checked
+against a real AIS-catcher sample. Types 4, 9 and 21 were already stored as full
+Activity rows (never coalesced).
 
 #### GET /api/vessels
 
@@ -2730,6 +2746,19 @@ fields (`name`, `callsign`, `imo`, `shipType`, `destination`, `eta`,
 `cog`, `sog`, `heading`, `navStatus` (null for the AIS "not available"
 values), `messageTypes`, `messageCount`, `decoderId`, `firstSeen`, `lastSeen`
 and `lastStaticAt`.
+
+Optional WG5 fields, always set by the WG5 tracker (null when unknown):
+
+- `channel` — `A` or `B`, from the newest message that carried a channel; a
+  message without one keeps the last.
+- `aton` — `{ aidType, virtual, offPosition }` (each nullable) from the newest
+  type 21, only for class `aton`; null for every other class.
+- `altitudeM` — SAR aircraft altitude in metres from the newest type 9 (0–4094,
+  4094 meaning 4094 or higher), only for class `sar`; null otherwise.
+
+A vessel classed `base-station` (it sent type 4 or 11) has `aton` and
+`altitudeM` null even if it also sent type 21 or 9. Values out of range are
+stored as null.
 
 #### GET /api/vessels/stats
 
@@ -3092,8 +3121,30 @@ and from a frequency the decoder itself reports in its payload. It is never
 inferred from decoded content or from a protocol constant. A decoder that reads
 its own device (external input, for example readsb with `rtlTcpHost`) has
 `sourceId: null`. `hz` is rounded to an integer in (0, 10^12]; anything else
-means no frequency. `tuningTrust` is `unverified` for every decoder: WaveKit
-does not verify the tuning the decoder hears.
+means no frequency.
+
+`tuningTrust` (WG5, superseding WG3's "unverified for every decoder") is
+`commanded` (the source is under WaveKit's internal control) or `relay` (it is
+under external control through the RTL-TCP relay) when the observed tuner state
+proves the decoder hears its targets, and `unverified` otherwise. All of these
+must hold:
+
+- the decoder reads a WaveKit tuner source (not its own device) and has at least
+  one target frequency;
+- the source's tuner state has a known, finite frequency and a positive sample
+  rate;
+- the source centre still equals the centre captured when the decoder was last
+  created or started (a retune makes it `unverified` until the decoder starts
+  again, even when the decoder already follows the new centre);
+- every target lies within 0.45 × sample rate of that centre (the usable 90 % of
+  the IQ bandwidth; ±1.08 MHz at 2.4 Msps).
+
+Tuner state comes from WaveKit's own tuning commands, relay commands and
+reconnect replay. A client that tunes the dongle host directly, bypassing
+WaveKit and the relay, is not observed, so trust can claim a centre the dongle
+no longer has. A removed tuner source drops its state: receptions on it are
+`unverified` until it is added again and reports state. Rows stored before WG5
+keep `unverified`.
 
 | Output                                                   | `frequency.hz`                                                                        |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -3118,8 +3169,14 @@ that carry provenance; rows stored before WG3 keep null provenance.
 Decoder receptions stored from WG2 on carry a presentation beside the
 unchanged `decodedData`: `protocol`, `category`, `entityKey`, `title`,
 `fields` and `position`. It is derived only from the output's own validated
-payload, never from RF context, and never converts units. `position` is
-`lat`/`lon` only and is omitted for `(0, 0)`. `entityKey` is null when the
+payload, never from RF context, and never converts units (except `altM`,
+below). `position` is `lat`/`lon` and is omitted for `(0, 0)`. From WG5 it may
+also carry `altM`, whole metres in −500..50,000 (anything else is omitted):
+ADS-B barometric altitude converted from feet (omitted for `ground`, whose
+elevation is unknown, and for an undecodable altitude), APRS `altitude` in feet,
+AIS type 9 `altitudeM` and Meshtastic `altitudeM`. Meshtastic POSITION (port 3)
+receptions now carry a position decoded from their payload (canonical base64 of
+at most 344 characters, 256 bytes). `entityKey` is null when the
 identifier is missing, malformed, or contains a control character
 (U+0000–U+001F or U+007F–U+009F). Keys are at most 128 bytes and match
 `^[a-z][a-z0-9-]*:[^:]+$`. A row has at most 6 fields and a title of at most
@@ -3150,8 +3207,15 @@ Presentation is computed only for receptions the store keeps: coalesced and
 rate-limited receptions cost what they did before WG2, and the internal
 `presentationFailures` counter counts kept receptions only.
 
-Row growth and retention: built-row growth from presentation is at most 160
-bytes for a position-only row and at most 1,100 bytes for any row. Measured
+Row growth and retention: built-row growth from presentation is at most 240
+bytes for a position-only row (160 bytes before WG5; raised so a typical fix
+keeps a five-digit `altM` and a mesh `!abcdef12 Position` title, 226 bytes at
+seven decimals, without rounding) and at most 1,100 bytes for any row. The raise
+costs at most 80 bytes per coalesced row, so at most 250,000 × 80 = 20 MB (about
+7.5 % of 256 MiB) at the row cap; rows a day are unchanged. When a row does not
+fit, its title is clipped and its coordinates rounded to six, five, then four
+decimals with `altM` kept; only when nothing fits at four or more decimals is the
+same tried without `altM`, before rounding further. Measured
 built-row bytes (summary + record + FTS), plain to presented:
 
 | Reception                                         | Plain | Presented | Growth        |
@@ -3352,8 +3416,10 @@ start earlier; null when the store is empty) and `generatedAt`. Trails are sorte
 by their newest point descending, then `entityKey`. A trail is `{ entityKey,
 category, protocol, points, truncated }`; `category` and `protocol` are those of
 its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending time
-(`altM` null when the stored position has none; today's presentations store
-`lat`/`lon` only, so it is null).
+(`altM` null when the stored position has none). From WG5 new rows carry `altM`
+(see [Presentation](#presentation)); older rows are not backfilled and keep null.
+Mesh trails were empty before WG5, because Meshtastic receptions had no
+position; new POSITION receptions now fill them.
 
 ```json
 {

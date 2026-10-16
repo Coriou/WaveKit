@@ -464,9 +464,13 @@ Activity `unavailable` and the rest running), and measured retention.
       frequency (`tuningTrust: "unverified"`).
 - [x] AIS radio channel on ship output (WG4): `channel` A/B from NMEA field 4
       or AIS-catcher JSON, so a dual-channel AIS decoder's receptions store
-      161.975 or 162.025 MHz. `VesselState` does not carry it yet.
-- [ ] Event-time channel frequency for offset probes and source retunes, and a
-      verified tuning trust.
+      161.975 or 162.025 MHz. From WG5 `VesselState` carries it too.
+- [x] Verified tuning trust (WG5): `tuningTrust` is `commanded` or `relay` when
+      the observed tuner state proves the decoder hears its targets, else
+      `unverified`. A retune of the dongle host that bypasses WaveKit and the
+      relay is not observed.
+- [ ] Event-time channel frequency for offset probes and source retunes (after a
+      retune, trust stays `unverified` until the decoder restarts).
 - [ ] Provide persistent, searchable events with paging and full-text indexing,
       including transcripts when available. Link discoveries, observations and
       recordings without making scanner recovery journals a public event API.
@@ -848,7 +852,9 @@ separate from scanner RF sweep coverage.
 - [x] Bulk position trails (WG4, partial): `GET /api/activity/trails` serves
       aircraft, vessel, APRS and mesh trails from the Activity store over a
       window (default 1 h, at most 24 h) under fixed caps. The Pi CPU cost of
-      the trails read is unmeasured.
+      the trails read is unmeasured. Mesh trails were empty until WG5, which
+      gave Meshtastic POSITION receptions a position; new rows also carry
+      `altM` (WG5; no backfill).
 - [ ] A time cursor over trails and a Pi-measured trails budget.
 - [x] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
       based on explicit station location and valid timestamped positions
@@ -856,9 +862,13 @@ separate from scanner RF sweep coverage.
 - [ ] Serve regional PMTiles, glyphs and style with bounded download/update and
       storage accounting; support the design's online fallback. Offline asset
       hosting follows the basic map and shared settings.
-- [ ] Extract positions from ACARS/VDL2 ADS-C/POS and AIS type 21 into the common
-      envelope, with fixtures, validity and entity provenance. Generic AIS JSON
-      lat/lon and current NMEA types 1/2/3 are only partial foundations.
+- [x] AIS types 4, 9 and 21 positions (WG5): base stations, SAR aircraft (with
+      altitude) and aids to navigation (with aid type, virtual and off-position
+      flags) decode to positions on the NMEA path; the JSON path is validated
+      field by field. The AIS-catcher JSON key names for the new fields are not
+      yet checked against a real sample.
+- [ ] Extract positions from ACARS/VDL2 ADS-C/POS into the common envelope, with
+      fixtures, validity and entity provenance.
 
 ## 9. Project license
 
