@@ -397,14 +397,31 @@ export interface MeshNeighborInfoFields {
 	neighbors: MeshNeighborFields[]
 }
 
-/** uint32: low 32 bits of the varint, unsigned. Wrong wire type is null. */
+/**
+ * uint32: low 32 bits of the varint, unsigned. Wrong wire type is null. Number arithmetic
+ * only (no BigInt): bytes 0-3 give bits 0-27, byte 4 its low 4 bits as bits 28-31, later
+ * bytes only bits above 31. Validation matches readVarintSlow: at most 10 bytes, the 10th
+ * holding bit 63 only, and a truncated varint is null.
+ */
 function readUint32(cursor: Cursor, wire: number): number | null {
 	if (wire !== WIRE_VARINT) return null
 	const small = readSmallVarint(cursor)
 	if (small >= 0) return small
-	const value = readVarintSlow(cursor)
-	if (value === null) return null
-	return Number(value & 0xffffffffn) >>> 0
+	let low = 0
+	let scale = 1
+	for (let i = 0; i < MAX_VARINT_BYTES; i++) {
+		if (cursor.offset >= cursor.end) return null
+		const byte = cursor.bytes[cursor.offset]
+		if (byte === undefined) return null
+		cursor.offset += 1
+		const data = byte & 0x7f
+		if (i === MAX_VARINT_BYTES - 1 && data > 1) return null
+		if (i < 4) low += data * scale
+		else if (i === 4) low += (data & 0x0f) * scale
+		scale *= 128
+		if ((byte & 0x80) === 0) return low >>> 0
+	}
+	return null
 }
 
 /** Scratch view for float decoding: avoids a DataView allocation per field. */

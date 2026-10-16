@@ -250,4 +250,36 @@ describe("meshtastic telemetry and neighbour reader", () => {
 		)
 		expect(n).toEqual({ nodeNum: 3, neighbors: [{ nodeNum: 4, snr: null }] })
 	})
+
+	// R1 7: uint32 fields decode 5- to 10-byte varints to their low 32 bits; an
+	// over-long, overflowing or truncated varint rejects the message.
+	it.each([
+		["0", [0x00], 0],
+		["2^31", [0x80, 0x80, 0x80, 0x80, 0x08], 0x80000000],
+		["2^32 - 1", [0xff, 0xff, 0xff, 0xff, 0x0f], 0xffffffff],
+		["2^32 (low bits 0)", [0x80, 0x80, 0x80, 0x80, 0x10], 0],
+		["2^35 + 5", [0x85, 0x80, 0x80, 0x80, 0x80, 0x01], 5],
+		["non-minimal 1", [0x81, 0x80, 0x80, 0x80, 0x00], 1],
+		["2^64 - 1", [...Array<number>(9).fill(0xff), 0x01], 0xffffffff],
+		["10th byte above bit 63", [...Array<number>(9).fill(0xff), 0x02], null],
+		["11 bytes", [...Array<number>(10).fill(0x80), 0x00], null],
+		["truncated", [0xff, 0xff, 0xff, 0xff, 0xff], null],
+	] as const)("decodes a node_id varint of %s", (_name, bytes, expected) => {
+		const n = readNeighborInfo(Uint8Array.from([0x08, ...bytes]))
+		expect(n === null ? null : n.nodeNum).toBe(expected)
+	})
+
+	it("decodes any uint32 node_id written as a 5-byte varint", () => {
+		fc.assert(
+			fc.property(u32, value => {
+				const bytes = [0, 7, 14, 21].map(
+					shift => ((value >>> shift) & 0x7f) | 0x80,
+				)
+				bytes.push((value >>> 28) & 0x0f)
+				const n = readNeighborInfo(Uint8Array.from([0x08, ...bytes]))
+				return n?.nodeNum === value
+			}),
+			{ numRuns: 200 },
+		)
+	})
 })
