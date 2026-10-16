@@ -19,6 +19,7 @@ import {
 	parseBeastMessage,
 	parseJsonAircraft,
 	createReadsbDecoder,
+	readsbDecoderFactory,
 	READSB_CAPS,
 	type AircraftData,
 	type ReadsbOutputFormat,
@@ -347,6 +348,94 @@ describe("createReadsbDecoder", () => {
 
 		expect(decoder).toBeInstanceOf(ReadsbDecoder)
 		expect(decoder.id).toBe("test-readsb")
+	})
+})
+
+// Feature: web-gaps-3, requirement 9.1: station location reaches readsb
+describe("readsb receiver location (WG3 req 9.1)", () => {
+	function args(
+		options: Record<string, unknown>,
+		station?: { lat?: number | undefined; lon?: number | undefined },
+	): string[] {
+		const config = createConfig({
+			options: { outputFormat: "sbs", ...options },
+		})
+		const decoder =
+			station === undefined
+				? createReadsbDecoder(config, testLogger)
+				: readsbDecoderFactory(station)(config, testLogger)
+		return (decoder as unknown as { getArgs(): string[] }).getArgs()
+	}
+	function location(argv: string[]): [string, string] | null {
+		const joined = argv.join(" ")
+		const lat = /--lat (\S+)/.exec(joined)
+		const lon = /--lon (\S+)/.exec(joined)
+		if (!lat?.[1] || !lon?.[1]) {
+			expect(lat).toBeNull()
+			expect(lon).toBeNull()
+			return null
+		}
+		return [lat[1], lon[1]]
+	}
+
+	it("passes the station location without MLAT", () => {
+		expect(location(args({}, { lat: 48.85, lon: 2.35 }))).toEqual([
+			"48.85",
+			"2.35",
+		])
+	})
+
+	it("passes decoder options location without MLAT", () => {
+		expect(location(args({ lat: 51.5, lon: -0.12 }))).toEqual(["51.5", "-0.12"])
+	})
+
+	it("decoder options win over the station", () => {
+		expect(
+			location(args({ lat: 51.5, lon: -0.12 }, { lat: 48.85, lon: 2.35 })),
+		).toEqual(["51.5", "-0.12"])
+	})
+
+	it("falls back to the station when options give only one coordinate", () => {
+		expect(location(args({ lat: 51.5 }, { lat: 48.85, lon: 2.35 }))).toEqual([
+			"48.85",
+			"2.35",
+		])
+	})
+
+	it("passes nothing when neither is known", () => {
+		expect(location(args({}))).toBeNull()
+		expect(location(args({}, {}))).toBeNull()
+		expect(location(args({}, { lat: 48.85 }))).toBeNull()
+		expect(location(args({ lon: 2 }, { lat: 48.85 }))).toBeNull()
+	})
+
+	it("is independent of enableMlat", () => {
+		for (const enableMlat of [true, false]) {
+			expect(location(args({ enableMlat }, { lat: 48.85, lon: 2.35 }))).toEqual(
+				["48.85", "2.35"],
+			)
+			expect(location(args({ enableMlat, lat: 1, lon: 2 }))).toEqual(["1", "2"])
+			expect(location(args({ enableMlat }))).toBeNull()
+		}
+	})
+
+	it("works in rtl_tcp network mode and survives an options update", () => {
+		const config = createConfig({
+			options: { outputFormat: "sbs", rtlTcpHost: "10.0.0.2" },
+		})
+		const decoder = readsbDecoderFactory({ lat: 10, lon: 20 })(
+			config,
+			testLogger,
+		)
+		const view = decoder as unknown as {
+			getArgs(): string[]
+			onOptionsUpdated(): void
+			config: DecoderConfig
+		}
+		expect(location(view.getArgs())).toEqual(["10", "20"])
+		view.config.options = { outputFormat: "sbs", rtlTcpHost: "10.0.0.3" }
+		view.onOptionsUpdated()
+		expect(location(view.getArgs())).toEqual(["10", "20"])
 	})
 })
 

@@ -95,7 +95,7 @@ import {
 	MULTIMON_CAPS,
 } from "./decoders/builtin/multimon-ng.js"
 import { createRtl433Decoder, RTL433_CAPS } from "./decoders/builtin/rtl433.js"
-import { createReadsbDecoder, READSB_CAPS } from "./decoders/builtin/readsb.js"
+import { readsbDecoderFactory, READSB_CAPS } from "./decoders/builtin/readsb.js"
 import {
 	createAcarsdecDecoder,
 	ACARSDEC_CAPS,
@@ -828,7 +828,15 @@ async function main(): Promise<void> {
 			MULTIMON_CAPS,
 		)
 		decoderRegistry.register("rtl433", createRtl433Decoder, RTL433_CAPS)
-		decoderRegistry.register("readsb", createReadsbDecoder, READSB_CAPS)
+		// readsb is the only decoder that receives the station location (WG3 req 9.1)
+		decoderRegistry.register(
+			"readsb",
+			readsbDecoderFactory({
+				lat: config.station.lat,
+				lon: config.station.lon,
+			}),
+			READSB_CAPS,
+		)
 		decoderRegistry.register("acarsdec", createAcarsdecDecoder, ACARSDEC_CAPS)
 		decoderRegistry.register(
 			"ais-catcher",

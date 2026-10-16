@@ -74,9 +74,9 @@ export interface ReadsbOptions {
 	outputPort?: number | undefined
 	/** Enable MLAT support */
 	enableMlat?: boolean | undefined
-	/** Receiver latitude for MLAT */
+	/** Receiver latitude (wins over `station.lat` when both coordinates are set) */
 	lat?: number | undefined
-	/** Receiver longitude for MLAT */
+	/** Receiver longitude (wins over `station.lon` when both coordinates are set) */
 	lon?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
@@ -145,11 +145,22 @@ const SBS_MSG_PATTERN =
  * - Beast: Binary format, efficient for feeders
  * - JSON: JSON Lines format, easy to parse
  */
+/** Receiver location from `config.station`; either coordinate may be unset. */
+export interface ReadsbStationLocation {
+	lat?: number | undefined
+	lon?: number | undefined
+}
+
 export class ReadsbDecoder extends NetworkProducerDecoder {
 	private options: ReadsbOptions
 	private lineBuffer: string = ""
+	private readonly station: ReadsbStationLocation
 
-	constructor(config: DecoderConfig, logger: Logger) {
+	constructor(
+		config: DecoderConfig,
+		logger: Logger,
+		station: ReadsbStationLocation = {},
+	) {
 		// Build the network producer config from decoder config
 		const options = parseReadsbOptions(config.options)
 		const outputPort = options.outputPort ?? DEFAULT_PORTS[options.outputFormat]
@@ -163,6 +174,19 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 		super(networkConfig, logger)
 		this.options = options
+		this.station = { lat: station.lat, lon: station.lon }
+	}
+
+	/**
+	 * Receiver location for readsb (WG3 req 9.1): the decoder options when both
+	 * coordinates are set, else the station when both are set, else none.
+	 */
+	private receiverLocation(): { lat: number; lon: number } | null {
+		const { lat, lon } = this.options
+		if (lat !== undefined && lon !== undefined) return { lat, lon }
+		if (this.station.lat !== undefined && this.station.lon !== undefined)
+			return { lat: this.station.lat, lon: this.station.lon }
+		return null
 	}
 
 	/**
@@ -303,12 +327,12 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 		// and disable the others to avoid port conflicts if multiple readsb instances run.
 		// Pinned readsb treats --net-only as a legacy alias for --net.
 
-		// MLAT configuration
-		if (this.options.enableMlat) {
-			if (this.options.lat !== undefined && this.options.lon !== undefined) {
-				args.push("--lat", this.options.lat.toString())
-				args.push("--lon", this.options.lon.toString())
-			}
+		// Receiver location (range, CPR local decode, MLAT), independent of
+		// enableMlat (WG3 req 9.1)
+		const location = this.receiverLocation()
+		if (location) {
+			args.push("--lat", location.lat.toString())
+			args.push("--lon", location.lon.toString())
 		}
 
 		// Additional arguments
@@ -737,6 +761,16 @@ export function createReadsbDecoder(
 	logger: Logger,
 ): ReadsbDecoder {
 	return new ReadsbDecoder(config, logger)
+}
+
+/**
+ * Registry factory that injects the station location (WG3 req 9.1). Explicit
+ * `lat`/`lon` decoder options still win.
+ */
+export function readsbDecoderFactory(
+	station: ReadsbStationLocation,
+): (config: DecoderConfig, logger: Logger) => ReadsbDecoder {
+	return (config, logger) => new ReadsbDecoder(config, logger, station)
 }
 
 /**
