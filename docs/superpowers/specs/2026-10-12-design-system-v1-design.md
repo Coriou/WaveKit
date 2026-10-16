@@ -1,7 +1,7 @@
 # Design system v1 (WaveKit UI kit) — design
 
 - **Date:** 2026-10-12
-- **Status:** approved in chat, awaiting written-spec review
+- **Status:** approved by the owner (2026-10-16). Plan: [2026-10-16-design-system-v1.md](../plans/2026-10-16-design-system-v1.md)
 - **Branch:** `design/web-dashboard`
 - **Sub-project:** A of three. A = design system v1 (this spec), B = Pi pages adopt the kit,
   C = web app foundation (stack, performance architecture, mock data server, canvas ↔ app
