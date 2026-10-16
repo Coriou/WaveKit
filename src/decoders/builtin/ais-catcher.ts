@@ -24,6 +24,7 @@ import type {
 	DecoderOutput,
 	DecoderRateRequirements,
 } from "../types.js"
+import { z } from "zod"
 import { configuredBandRequirements } from "../status-fields.js"
 import type { Logger } from "../../utils/logger.js"
 
@@ -200,7 +201,7 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 			// Parse JSON output
 			if (!trimmed.startsWith("{")) return null
 			try {
-				const json = JSON.parse(trimmed) as Record<string, unknown>
+				const json: unknown = JSON.parse(trimmed)
 				const ship = parseJsonShip(json)
 				if (ship) {
 					return {
@@ -598,6 +599,10 @@ function shipFromDecoded(
 	if (decoded.destination !== undefined) ship.destination = decoded.destination
 	if (decoded.eta !== undefined) ship.eta = decoded.eta
 	if (decoded.draught !== undefined) ship.draught = decoded.draught
+	if (decoded.altitudeM !== undefined) ship.altitudeM = decoded.altitudeM
+	if (decoded.aidType !== undefined) ship.aidType = decoded.aidType
+	if (decoded.virtualAid !== undefined) ship.virtualAid = decoded.virtualAid
+	if (decoded.offPosition !== undefined) ship.offPosition = decoded.offPosition
 	if (channel !== undefined) ship.channel = channel
 	return ship
 }
@@ -621,6 +626,14 @@ export interface DecodedAisPayload {
 	destination?: string | undefined
 	eta?: Date | undefined
 	draught?: number | undefined
+	/** Type 9 altitude in metres (0–4094). */
+	altitudeM?: number | undefined
+	/** Type 21 aid type (0–31). */
+	aidType?: number | undefined
+	/** Type 21 virtual aid flag. */
+	virtualAid?: boolean | undefined
+	/** Type 21 off-position flag (only when the UTC second is 0–59). */
+	offPosition?: boolean | undefined
 }
 
 export interface DecodeAisOptions {
@@ -663,6 +676,12 @@ export function decodeAisPayload(
 		applyType5(result, bits, options?.at ?? new Date())
 	} else if (messageType === 24) {
 		applyType24(result, bits)
+	} else if (messageType === 4) {
+		applyType4(result, bits)
+	} else if (messageType === 9) {
+		applyType9(result, bits)
+	} else if (messageType === 21) {
+		applyType21(result, bits)
 	}
 	return result
 }
@@ -756,6 +775,74 @@ function applyType24(result: DecodedAisPayload, bits: string): void {
 	}
 }
 
+/** Raw longitude 181° and latitude 91° (×600 000) mean not available. */
+const LON_NOT_AVAILABLE = 108_600_000
+const LAT_NOT_AVAILABLE = 54_600_000
+
+/** 28-bit longitude then 27-bit latitude; each is omitted when missing or not available. */
+function applyLonLat(
+	result: DecodedAisPayload,
+	bits: string,
+	lonStart: number,
+	latStart: number,
+): void {
+	const lonRaw = readSigned(bits, lonStart, 28)
+	const latRaw = readSigned(bits, latStart, 27)
+	if (lonRaw !== undefined && lonRaw !== LON_NOT_AVAILABLE)
+		result.lon = lonRaw / 600000
+	if (latRaw !== undefined && latRaw !== LAT_NOT_AVAILABLE)
+		result.lat = latRaw / 600000
+}
+
+/** Type 4 base station report: position only (ITU-R M.1371 bits 79–133). */
+function applyType4(result: DecodedAisPayload, bits: string): void {
+	applyLonLat(result, bits, 79, 107)
+}
+
+/** Type 9 SAR aircraft: altitude, whole-knot SOG, position, course. */
+function applyType9(result: DecodedAisPayload, bits: string): void {
+	const altitude = readUnsigned(bits, 38, 12)
+	if (altitude !== undefined && altitude !== 4095) result.altitudeM = altitude
+	const sog = readUnsigned(bits, 50, 10)
+	if (sog !== undefined && sog !== 1023) result.sog = sog
+	applyLonLat(result, bits, 61, 89)
+	const cog = readUnsigned(bits, 116, 12)
+	if (cog !== undefined && cog !== 3600) result.cog = cog / 10
+}
+
+/** Type 21 name extension starts here, in whole 6-bit characters (at most 14). */
+const TYPE21_EXTENSION_START = 272
+const TYPE21_EXTENSION_MAX_CHARS = 14
+const AIS_NAME_MAX_CHARS = 34
+
+/** Type 21 aid to navigation: aid type, name with extension, position, flags. */
+function applyType21(result: DecodedAisPayload, bits: string): void {
+	const aidType = readUnsigned(bits, 38, 5)
+	if (aidType !== undefined) result.aidType = aidType
+	const base = readAisRawText(bits, 43, 20)
+	if (base !== undefined) {
+		const extensionChars = Math.min(
+			TYPE21_EXTENSION_MAX_CHARS,
+			Math.max(0, Math.floor((bits.length - TYPE21_EXTENSION_START) / 6)),
+		)
+		const extension =
+			readAisRawText(bits, TYPE21_EXTENSION_START, extensionChars) ?? ""
+		const name = (base.replace(/@+$/, "") + extension)
+			.replace(/[@ ]+$/, "")
+			.trim()
+			.slice(0, AIS_NAME_MAX_CHARS)
+		if (name.length > 0) result.name = name
+	}
+	applyLonLat(result, bits, 164, 192)
+	const second = readUnsigned(bits, 253, 6)
+	const offPosition = readUnsigned(bits, 259, 1)
+	if (second !== undefined && second <= 59 && offPosition !== undefined) {
+		result.offPosition = offPosition === 1
+	}
+	const virtualAid = readUnsigned(bits, 269, 1)
+	if (virtualAid !== undefined) result.virtualAid = virtualAid === 1
+}
+
 /**
  * Next UTC occurrence of an AIS ETA. 0 / 24 / 60 and impossible dates are absent.
  */
@@ -832,8 +919,8 @@ function readSigned(
 	return parseSignedInt(bits.slice(start, end), width)
 }
 
-/** Six-bit text. Trailing "@" padding is removed; empty text is absent. */
-function readAisText(
+/** Six-bit text as decoded, padding kept; undefined when the bits are missing. */
+function readAisRawText(
 	bits: string,
 	start: number,
 	chars: number,
@@ -846,6 +933,17 @@ function readAisText(
 		text +=
 			value < 32 ? String.fromCharCode(value + 64) : String.fromCharCode(value)
 	}
+	return text
+}
+
+/** Six-bit text. Trailing "@" padding is removed; empty text is absent. */
+function readAisText(
+	bits: string,
+	start: number,
+	chars: number,
+): string | undefined {
+	const text = readAisRawText(bits, start, chars)
+	if (text === undefined) return undefined
 	const cleaned = text.trim().replace(/@+$/g, "").trim()
 	return cleaned.length > 0 ? cleaned : undefined
 }
@@ -861,53 +959,82 @@ function parseSignedInt(bits: string, bitLength: number): number {
 	return value
 }
 
+/** A field of the wrong type is dropped on its own; the ship survives. */
+const jsonNumber = z.number().finite().optional().catch(undefined)
+const jsonString = z.string().optional().catch(undefined)
+const jsonBoolean = z.boolean().optional().catch(undefined)
+
+/**
+ * AIS-catcher JSON line. Unknown keys are ignored. `aid_type`,
+ * `virtual_aid`, `off_position` and `alt` follow AIS-catcher's names.
+ */
+const AisCatcherJsonSchema = z.object({
+	mmsi: z.union([z.number(), z.string()]).nullish().catch(undefined),
+	type: jsonNumber,
+	msgtype: jsonNumber,
+	shipname: jsonString,
+	name: jsonString,
+	callsign: jsonString,
+	imo: jsonNumber,
+	shiptype: jsonNumber,
+	lat: jsonNumber,
+	lon: jsonNumber,
+	cog: jsonNumber,
+	speed: jsonNumber,
+	sog: jsonNumber,
+	heading: jsonNumber,
+	status: jsonNumber,
+	navstatus: jsonNumber,
+	destination: jsonString,
+	eta: z.unknown(),
+	draught: jsonNumber,
+	channel: z.unknown(),
+	aid_type: z.number().int().min(0).max(31).optional().catch(undefined),
+	virtual_aid: jsonBoolean,
+	off_position: jsonBoolean,
+	alt: z.number().finite().min(0).optional().catch(undefined),
+})
+
+function trimmedOrUndefined(value: string | undefined): string | undefined {
+	return value?.trim() || undefined
+}
+
 /**
  * Parses a JSON object into ShipData.
- * Handles AIS-catcher JSON output format.
+ * Handles AIS-catcher JSON output format, validated with Zod.
  *
- * @param json - JSON object from AIS-catcher
- * @returns ShipData or null if parsing fails
+ * @param json - JSON value from AIS-catcher
+ * @returns ShipData or null if there is no MMSI or the value is not an object
  */
-export function parseJsonShip(json: Record<string, unknown>): ShipData | null {
-	// AIS-catcher JSON format uses 'mmsi' field
-	const mmsi = json["mmsi"]
-	if (mmsi === undefined || mmsi === null) {
-		return null
-	}
-
-	// Convert MMSI to string, padded to 9 digits
-	const mmsiStr = String(mmsi).padStart(9, "0")
-
-	// Extract message type
-	const messageType =
-		(json["type"] as number) ?? (json["msgtype"] as number) ?? 0
+export function parseJsonShip(json: unknown): ShipData | null {
+	const parsed = AisCatcherJsonSchema.safeParse(json)
+	if (!parsed.success) return null
+	const data = parsed.data
+	if (data.mmsi === undefined || data.mmsi === null) return null
 
 	const ship: ShipData = {
-		mmsi: mmsiStr,
-		name:
-			(json["shipname"] as string)?.trim() ||
-			(json["name"] as string)?.trim() ||
-			undefined,
-		callsign: (json["callsign"] as string)?.trim() || undefined,
-		imo: json["imo"] as number | undefined,
-		shipType: json["shiptype"] as number | undefined,
-		lat: json["lat"] as number | undefined,
-		lon: json["lon"] as number | undefined,
-		cog: json["cog"] as number | undefined,
-		sog:
-			(json["speed"] as number | undefined) ??
-			(json["sog"] as number | undefined),
-		heading: json["heading"] as number | undefined,
-		navStatus:
-			(json["status"] as number | undefined) ??
-			(json["navstatus"] as number | undefined),
-		destination: (json["destination"] as string)?.trim() || undefined,
-		eta: json["eta"] ? parseEta(json["eta"]) : undefined,
-		draught: json["draught"] as number | undefined,
+		mmsi: String(data.mmsi).padStart(9, "0"),
+		name: trimmedOrUndefined(data.shipname) ?? trimmedOrUndefined(data.name),
+		callsign: trimmedOrUndefined(data.callsign),
+		imo: data.imo,
+		shipType: data.shiptype,
+		lat: data.lat,
+		lon: data.lon,
+		cog: data.cog,
+		sog: data.speed ?? data.sog,
+		heading: data.heading,
+		navStatus: data.status ?? data.navstatus,
+		destination: trimmedOrUndefined(data.destination),
+		eta: data.eta ? parseEta(data.eta) : undefined,
+		draught: data.draught,
 		lastSeen: new Date(),
-		messageType,
+		messageType: data.type ?? data.msgtype ?? 0,
 	}
-	const channel = normaliseAisChannel(json["channel"])
+	if (data.alt !== undefined) ship.altitudeM = data.alt
+	if (data.aid_type !== undefined) ship.aidType = data.aid_type
+	if (data.virtual_aid !== undefined) ship.virtualAid = data.virtual_aid
+	if (data.off_position !== undefined) ship.offPosition = data.off_position
+	const channel = normaliseAisChannel(data.channel)
 	if (channel !== undefined) ship.channel = channel
 	return ship
 }
