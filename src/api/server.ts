@@ -58,6 +58,8 @@ import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
 import { vesselRoutes } from "./routes/vessels.js"
 import { meshRoutes } from "./routes/mesh.js"
+import { coverageRoutes } from "./routes/coverage.js"
+import type { CoverageManager } from "../core/coverage/coverage-manager.js"
 import { aprsRoutes } from "./routes/aprs.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
@@ -167,6 +169,8 @@ export interface ApiServerDependencies {
 	vesselTracker?: VesselTracker | undefined
 	/** Meshtastic node current state (WG2 req 6). */
 	meshTracker?: MeshTracker | undefined
+	/** ADS-B and AIS coverage per bearing (WG3 req 7). */
+	coverage?: Pick<CoverageManager, "query"> | undefined
 	/** APRS station, object and item current state (WG2 req 4). */
 	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
@@ -217,6 +221,7 @@ export class ApiServer {
 	/** Detaches the vessel tracker listeners; the tracker outlives the server. */
 	private vesselWiring: (() => void) | null = null
 	private readonly meshTracker?: MeshTracker | undefined
+	private readonly coverage?: Pick<CoverageManager, "query"> | undefined
 	/** Detaches the mesh tracker listeners; the tracker outlives the server. */
 	private meshWiring: (() => void) | null = null
 	private readonly aprsTracker?: AprsTracker | undefined
@@ -270,6 +275,7 @@ export class ApiServer {
 		this.aircraftTracker = dependencies.aircraftTracker
 		this.vesselTracker = dependencies.vesselTracker
 		this.meshTracker = dependencies.meshTracker
+		this.coverage = dependencies.coverage
 		this.aprsTracker = dependencies.aprsTracker
 		this.scanner = dependencies.scanner
 		this.spectrum = dependencies.spectrum
@@ -1386,6 +1392,11 @@ export class ApiServer {
 			await this.app.register(meshRoutes, {
 				tracker: this.meshTracker,
 			})
+		}
+
+		// ADS-B and AIS coverage per bearing (WG3 req 7)
+		if (this.coverage) {
+			await this.app.register(coverageRoutes, { coverage: this.coverage })
 		}
 
 		// Signal discovery scanner (spec § 12.1)
