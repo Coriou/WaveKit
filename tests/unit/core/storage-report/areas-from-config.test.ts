@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import pino from "pino"
@@ -7,13 +7,33 @@ import { STORAGE_AREA_IDS } from "@wavekit/api-types"
 import {
 	activityRetentionFromStats,
 	dsdFmeRecordingDir,
-	isInside,
 	storageActivityLimits,
 	storageAreasFromConfig,
 	type StorageAreaInputs,
 } from "../../../../src/core/storage-report/areas-from-config.js"
 import { createStorageReporter } from "../../../../src/core/storage-report/reporter.js"
 import { scanStorageAreas } from "../../../../src/core/storage-report/scan.js"
+import type { StorageScanFs } from "../../../../src/core/storage-report/scan.js"
+import {
+	disjointStorageAreas,
+	isPathInside,
+} from "../../../../src/core/storage-report/roots.js"
+import type { StorageAreaSource } from "../../../../src/core/storage-report/contract.js"
+
+/** Every path exists: `.json` names are files, the rest directories; no realpath (text). */
+const everyPathFs: StorageScanFs = {
+	lstat: p =>
+		Promise.resolve({
+			size: 1,
+			isFile: () => p.endsWith(".json"),
+			isDirectory: () => !p.endsWith(".json"),
+			isSymbolicLink: () => false,
+		}),
+	readdir: () => Promise.resolve([]),
+}
+
+const disjoint = (areas: StorageAreaSource[]) =>
+	disjointStorageAreas(areas, everyPathFs)
 import { createDsdFmeDecoder } from "../../../../src/decoders/builtin/dsd-fme.js"
 import { ACTIVITY_LIMIT_DEFAULTS } from "../../../../src/core/activity/storage/limits.js"
 import type { ActivityStoreStats } from "../../../../src/core/activity/storage/contract.js"
@@ -108,7 +128,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 		})
 	})
 
-	it("collects every recording dsd-fme dir once and excludes those inside the scanner dir", () => {
+	it("collects every recording dsd-fme dir once; those inside the scanner dir are excluded from it", async () => {
 		const scannerDir = join(stateDir, "scanner")
 		const inside = join(scannerDir, "recordings", "dv")
 		const areas = storageAreasFromConfig(
@@ -130,47 +150,52 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			"/app/decoded_calls",
 			"/data/wav",
 		])
-		expect(byId.get("scanner-evidence")?.exclude).toEqual([inside])
+		const walked = await disjoint(areas)
+		expect(walked[1]?.exclude).toEqual([inside])
 		const none = storageAreasFromConfig(inputs())
 		expect(none[2]).toEqual({
 			id: "digital-voice-wav",
 			paths: [],
 			capBytes: null,
 		})
-		expect(none[1]).not.toHaveProperty("exclude")
+		expect((await disjoint(none))[1]).not.toHaveProperty("exclude")
 	})
 
-	it("treats names starting with .. as inside, the parent and siblings as outside", () => {
-		expect(isInside("/s/scanner/..calls", "/s/scanner")).toBe(true)
-		expect(isInside("/s/scanner/...", "/s/scanner")).toBe(true)
-		expect(isInside("/s/scanner", "/s/scanner")).toBe(true)
-		expect(isInside("/s", "/s/scanner")).toBe(false)
-		expect(isInside("/s/scanner2", "/s/scanner")).toBe(false)
-		expect(isInside("/s/other/x", "/s/scanner")).toBe(false)
+	it("treats names starting with .. as inside, the parent and siblings as outside", async () => {
+		expect(isPathInside("/s/scanner/..calls", "/s/scanner")).toBe(true)
+		expect(isPathInside("/s/scanner/...", "/s/scanner")).toBe(true)
+		expect(isPathInside("/s/scanner", "/s/scanner")).toBe(true)
+		expect(isPathInside("/s", "/s/scanner")).toBe(false)
+		expect(isPathInside("/s/scanner2", "/s/scanner")).toBe(false)
+		expect(isPathInside("/s/other/x", "/s/scanner")).toBe(false)
 		const dotted = join(stateDir, "scanner", "..calls")
-		const areas = storageAreasFromConfig(
-			inputs({
-				decoders: [
-					{ type: "dsd-fme", options: { output: "wav", wavDir: dotted } },
-				],
-			}),
+		const areas = await disjoint(
+			storageAreasFromConfig(
+				inputs({
+					decoders: [
+						{ type: "dsd-fme", options: { output: "wav", wavDir: dotted } },
+					],
+				}),
+			),
 		)
 		expect(areas[1]?.exclude).toEqual([dotted])
 	})
 
-	it("collapses nested roots of one area and excludes roots nested in another area", () => {
-		const areas = storageAreasFromConfig(
-			inputs({
-				decoders: [
-					{
-						type: "dsd-fme",
-						options: { output: "wav", wavDir: "/d/wav/nested" },
-					},
-					{ type: "dsd-fme", options: { output: "wav", wavDir: "/d/wav" } },
-				],
-				accessDirectory: join(stateDir, "operator-data", "access"),
-				logsDir: join(stateDir, "activity", "logs"),
-			}),
+	it("collapses nested roots of one area and excludes roots nested in another area", async () => {
+		const areas = await disjoint(
+			storageAreasFromConfig(
+				inputs({
+					decoders: [
+						{
+							type: "dsd-fme",
+							options: { output: "wav", wavDir: "/d/wav/nested" },
+						},
+						{ type: "dsd-fme", options: { output: "wav", wavDir: "/d/wav" } },
+					],
+					accessDirectory: join(stateDir, "operator-data", "access"),
+					logsDir: join(stateDir, "activity", "logs"),
+				}),
+			),
 		)
 		const byId = new Map(areas.map(a => [a.id, a]))
 		expect(byId.get("digital-voice-wav")?.paths).toEqual(["/d/wav"])
@@ -181,7 +206,9 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			join(stateDir, "activity", "logs"),
 		])
 		// logging.dir = stateDir: every other area under it is excluded from logs.
-		const wide = storageAreasFromConfig(inputs({ logsDir: stateDir }))
+		const wide = await disjoint(
+			storageAreasFromConfig(inputs({ logsDir: stateDir })),
+		)
 		expect(wide.find(a => a.id === "logs")?.exclude).toEqual([
 			join(stateDir, "activity"),
 			join(stateDir, "scanner"),
@@ -191,13 +218,15 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			join(stateDir, "station.json"),
 		])
 		// A shared root belongs to the later area only.
-		const shared = storageAreasFromConfig(
-			inputs({
-				scannerStorage: { dir: "/d/wav", maxRecordingsMb: 1 },
-				decoders: [
-					{ type: "dsd-fme", options: { output: "wav", wavDir: "/d/wav" } },
-				],
-			}),
+		const shared = await disjoint(
+			storageAreasFromConfig(
+				inputs({
+					scannerStorage: { dir: "/d/wav", maxRecordingsMb: 1 },
+					decoders: [
+						{ type: "dsd-fme", options: { output: "wav", wavDir: "/d/wav" } },
+					],
+				}),
+			),
 		)
 		expect(shared[1]?.exclude).toEqual(["/d/wav"])
 		expect(shared[2]).not.toHaveProperty("exclude")
@@ -255,6 +284,95 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			expect(byId.get("scanner-evidence")?.files).toBe(1)
 			const total = scans.reduce((sum, scan) => sum + scan.files, 0)
 			expect(total).toBe(6)
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it("resolves roots by real path: a symlinked alias neither drops nor double-counts", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-areas-"))
+		try {
+			await mkdir(join(dir, "wav", "nested"), { recursive: true })
+			await writeFile(join(dir, "wav", "nested", "call.wav"), Buffer.alloc(10))
+			await symlink(join(dir, "wav"), join(dir, "alias"))
+			const wavArea = (paths: string[]): StorageAreaSource[] => [
+				{ id: "digital-voice-wav", paths, capBytes: null },
+			]
+			const count = async (paths: string[]) => {
+				const [scan] = await scanStorageAreas(wavArea(paths))
+				return { files: scan?.files, bytes: scan?.bytes }
+			}
+			const link = (await lstat(join(dir, "alias"))).size
+			// alias is a symlink: its walk counts the link only, so alias/nested stays.
+			expect(
+				await count([join(dir, "alias"), join(dir, "alias", "nested")]),
+			).toEqual({ files: 2, bytes: link + 10 })
+			// wav's walk reaches alias/nested (same real directory): counted once.
+			expect(
+				await count([join(dir, "wav"), join(dir, "alias", "nested")]),
+			).toEqual({ files: 1, bytes: 10 })
+			// Across areas: the scanner dir reached through the alias is excluded from wav.
+			const [wav, scanner] = await scanStorageAreas([
+				{ id: "digital-voice-wav", paths: [join(dir, "wav")], capBytes: null },
+				{
+					id: "scanner-evidence",
+					paths: [join(dir, "alias", "nested")],
+					capBytes: null,
+				},
+			])
+			expect(wav).toMatchObject({ files: 0, bytes: 0, exists: true })
+			expect(scanner).toMatchObject({ files: 1, bytes: 10, exists: true })
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it("collapses case aliases on a case-insensitive filesystem", async ctx => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-areas-"))
+		try {
+			await mkdir(join(dir, "Wav", "nested"), { recursive: true })
+			await writeFile(join(dir, "Wav", "nested", "call.wav"), Buffer.alloc(10))
+			const insensitive = await lstat(join(dir, "wav")).then(
+				() => true,
+				() => false,
+			)
+			if (!insensitive) ctx.skip()
+			const [scan] = await scanStorageAreas([
+				{
+					id: "digital-voice-wav",
+					paths: [
+						join(dir, "WAV"),
+						join(dir, "wav", "NESTED"),
+						join(dir, "Wav"),
+					],
+					capBytes: null,
+				},
+			])
+			expect(scan).toMatchObject({ files: 1, bytes: 10 })
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it("an excluded root that exists reports exists: true", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-areas-"))
+		try {
+			await mkdir(join(dir, "shared"))
+			await writeFile(join(dir, "shared", "a"), Buffer.alloc(4))
+			const [scanner, wav] = await scanStorageAreas([
+				{
+					id: "scanner-evidence",
+					paths: [join(dir, "shared")],
+					capBytes: null,
+				},
+				{
+					id: "digital-voice-wav",
+					paths: [join(dir, "shared")],
+					capBytes: null,
+				},
+			])
+			expect(scanner).toMatchObject({ exists: true, files: 0, bytes: 0 })
+			expect(wav).toMatchObject({ exists: true, files: 1, bytes: 4 })
 		} finally {
 			await rm(dir, { recursive: true, force: true })
 		}

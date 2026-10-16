@@ -2942,11 +2942,15 @@ files; symlinks are counted, not followed), `files`, `exists`, `partial`,
 Activity is disabled or its stats fail): `policy`, `effective`, `maxRows`,
 `maxDbBytes`, `maxAgeMs`, `rows`, `oldestReceivedAt`, `shares` (at most 64) and
 `sharesTruncated`, from the store's own stats, not from the scan. A file is
-counted in one area only: a directory nested inside another area's directory
-(for example `logging.dir` inside `<stateDir>/activity`, or one dsd-fme WAV
-directory inside another) is left out of the outer area, and two areas configured
-with the same directory count it in the later one. The scanner-evidence `cap` is
-null when the scanner is not running.
+counted in one area only. Directories are compared by real path at each report
+(symlinked parents and case aliases resolve to the same directory): one that
+another area's walk reaches (for example `logging.dir` inside
+`<stateDir>/activity`, or one dsd-fme WAV directory inside another) is left out
+of the outer area, and two areas configured with the same directory count it in
+the later one; the earlier still reports `exists: true` with 0 bytes. A
+directory reached only through a symlink is not inside: the walk counts the
+link, not its target. The scanner-evidence `cap` is null when the scanner is not
+running.
 
 The scan is bounded per report: 50,000 entries, depth 16, 2,000 ms wall time
 (`statfs` included) and 8 filesystem calls in flight. When a bound is reached the

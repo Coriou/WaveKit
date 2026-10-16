@@ -3,7 +3,7 @@
  * areas iteratively with one shared budget (entries, depth, wall time, fs concurrency) and
  * never throws for filesystem errors: they become a per-area partialReason.
  */
-import { lstat, readdir } from "node:fs/promises"
+import { lstat, readdir, realpath } from "node:fs/promises"
 import path from "node:path"
 
 import {
@@ -14,6 +14,7 @@ import {
 import type { StorageAreaId, StoragePartialReason } from "@wavekit/api-types"
 
 import { STORAGE_SCAN_FS_CONCURRENCY } from "./contract.js"
+import { disjointStorageAreas } from "./roots.js"
 import type { StorageAreaSource } from "./contract.js"
 
 export interface StorageScanFs {
@@ -25,11 +26,14 @@ export interface StorageScanFs {
 	}>
 	/** Entry names. */
 	readdir(path: string): Promise<string[]>
+	/** Canonical real path; without it roots are compared as text. */
+	realpath?(path: string): Promise<string>
 }
 
 export const nodeStorageScanFs: StorageScanFs = {
 	lstat: p => lstat(p),
 	readdir: p => readdir(p),
+	realpath: p => realpath(p),
 }
 
 export interface StorageScanLimits {
@@ -147,7 +151,9 @@ export async function scanStorageAreas(
 		})
 
 	const run = async (): Promise<StorageAreaScan[]> => {
-		for (const area of areas) {
+		// Overlapping roots are resolved per report: directories may appear after startup.
+		const walked = await disjointStorageAreas(areas, fs)
+		for (const area of walked) {
 			if (bound !== null) {
 				results.push({
 					id: area.id,
@@ -203,7 +209,18 @@ export async function scanStorageAreas(
 		const inFlight = new Set<Promise<void>>()
 
 		const visit = async (item: WalkItem): Promise<void> => {
-			if (excluded.has(path.resolve(item.path))) return
+			if (excluded.has(path.resolve(item.path))) {
+				// An excluded root still exists for its area; another area counts it.
+				if (item.root && takeEntry()) {
+					try {
+						await fs.lstat(item.path)
+						if (!lateCheck() && frozen === null) scan.exists = true
+					} catch {
+						// Missing or unreadable: the other area reports it.
+					}
+				}
+				return
+			}
 			if (!takeEntry()) return
 			let stat: Awaited<ReturnType<StorageScanFs["lstat"]>>
 			try {

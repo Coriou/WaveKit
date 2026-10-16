@@ -3,7 +3,7 @@
  * design "Main wiring"): the area table in STORAGE_AREA_IDS order and the Activity
  * retention block. Paths are resolved to absolute and never leave the core.
  */
-import { isAbsolute, join, relative, resolve, sep } from "node:path"
+import { join, resolve } from "node:path"
 import type { StorageActivityRetention } from "@wavekit/api-types"
 import type {
 	ActivityRetentionPolicy,
@@ -64,44 +64,11 @@ export function dsdFmeRecordingDir(
 	return null
 }
 
-/** `child` is `parent` or below it; a name such as `..calls` is still inside. */
-export function isInside(child: string, parent: string): boolean {
-	const rel = relative(parent, child)
-	if (rel === "") return true
-	return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
-}
-
 /**
- * Makes the areas count every file at most once (lexically: the scan never follows
- * symlinks). Inside one area a root below another of its roots is dropped. Across areas
- * a root of one area below a root of another is excluded from the outer area; when two
- * areas share a root, it is excluded from the earlier one, so the later area keeps it.
+ * Storage areas in STORAGE_AREA_IDS order. Overlapping roots (a directory inside another
+ * area's, or one recording dir inside another) are resolved by real path at each scan
+ * (`disjointStorageAreas`), so each file is counted in one area.
  */
-function disjointAreas(areas: StorageAreaSource[]): StorageAreaSource[] {
-	const collapsed = areas.map(area => {
-		const unique = [...new Set(area.paths)]
-		const paths = unique.filter(
-			path => !unique.some(other => other !== path && isInside(path, other)),
-		)
-		return { area, paths }
-	})
-	return collapsed.map(({ area, paths }, index) => {
-		const exclude = [...(area.exclude ?? [])]
-		collapsed.forEach((other, otherIndex) => {
-			if (otherIndex === index) return
-			for (const inner of other.paths) {
-				const covered = paths.some(path =>
-					path === inner ? otherIndex > index : isInside(inner, path),
-				)
-				if (covered && !exclude.includes(inner)) exclude.push(inner)
-			}
-		})
-		const { exclude: _previous, ...rest } = area
-		return { ...rest, paths, ...(exclude.length > 0 ? { exclude } : {}) }
-	})
-}
-
-/** Storage areas in STORAGE_AREA_IDS order. */
 export function storageAreasFromConfig(
 	inputs: StorageAreaInputs,
 ): StorageAreaSource[] {
@@ -157,7 +124,7 @@ export function storageAreasFromConfig(
 	)
 	if (inputs.logsDir !== undefined && inputs.logsDir.length > 0)
 		areas.push({ id: "logs", paths: [resolve(inputs.logsDir)], capBytes: null })
-	return disjointAreas(areas)
+	return areas
 }
 
 /** Resolved Activity limits the retention block reports. */
