@@ -218,9 +218,10 @@ flips the constant.
 parse, Zod schema of `StationStoreFile`, each value re-validated with the field's
 `StationConfigSchema` entry). Corrupt → warn once, rename to `station.json.corrupt-<ms>`
 (remove older `station.json.corrupt-*` first so at most one stays), empty layer, revision
-seeded from the clock (ms) or above the lost file's readable `revision` (an unreadable file
-seeds the same way; a missing one is revision 0). Open first removes at most 16 stale
-`station.json.<pid>.tmp` files.
+`max(now ms × 1000, lost revision + 1)` when that is a safe integer, else `now ms × 1000` (an
+unreadable file, or a missing one while a quarantined copy is left, seeds the same way; a
+missing one without a copy is revision 0). Open first removes at most 16
+`station.json.<pid>.tmp` files of other pids untouched for 60 s.
 Write: `mkdir -p stateDir`, write `station.json.<pid>.tmp`, `fsync`, `rename`, best-effort
 directory `fsync`. Arithmetic: six fields, the longest values 256 + 128 characters, with
 provenance and ISO times, serialise to ≤ ≈ 1 KiB, well under the 4 KiB bound.

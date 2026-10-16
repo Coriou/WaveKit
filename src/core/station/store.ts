@@ -1,7 +1,7 @@
 /**
  * WG4 lane ST: the persisted UI layer `<stateDir>/station.json` (requirement 6.4, 6.7).
  */
-import { mkdir, open, readdir, rename, unlink } from "node:fs/promises"
+import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises"
 import { join } from "node:path"
 import { z } from "zod"
 import type { StationField } from "@wavekit/api-types"
@@ -25,53 +25,110 @@ export interface StationStoreState {
 const CORRUPT_PREFIX = `${STATION_STORE_FILE}.corrupt-`
 
 /** The write path's temporary file: `station.json.<pid>.tmp`. */
-const TMP_PATTERN = /^station\.json\.\d+\.tmp$/
+const TMP_PATTERN = /^station\.json\.(\d+)\.tmp$/
 
 /** Leftover temporary files removed per open (a crash leaves at most one per pid). */
 export const STATION_STORE_TMP_SWEEP_MAX = 16
 
+/** A temporary file younger than this may belong to a live writer and is kept. */
+export const STATION_STORE_TMP_STALE_MS = 60_000
+
+/** Revision steps per clock ms in a seed: room for many writes per ms before a collision. */
+const SEED_PER_MS = 1_000
+
 /**
- * The revision a fresh layer starts at after a corrupt or unreadable file: above any
- * revision the lost file can have held, so a stale `If-Match` cannot match again. The clock
- * (ms) is above every revision reachable by one write per ms; a still-readable `revision`
- * in the lost file raises it further.
+ * The revision a fresh layer starts at after the store was lost (corrupt, unreadable, or
+ * only a quarantined copy left): `max(now × 1000, lost + 1)`, so a stale `If-Match` cannot
+ * match a later write, unless that is not a safe integer, then `now × 1000` (never the
+ * counter's end, which would refuse every write). Not guaranteed across a clock rollback.
  */
-function seedRevision(now: number, bytes: Buffer | null): number {
-	let seed = Number.isFinite(now) ? Math.max(0, Math.floor(now)) : 0
-	if (bytes !== null) {
-		try {
-			const raw: unknown = JSON.parse(bytes.toString("utf8"))
-			const previous =
-				typeof raw === "object" && raw !== null && "revision" in raw
-					? raw.revision
-					: undefined
-			if (typeof previous === "number" && Number.isFinite(previous))
-				seed = Math.max(seed, Math.floor(previous) + 1)
-		} catch {
-			// Not JSON: the clock seed stands.
-		}
-	}
-	return Math.min(seed, Number.MAX_SAFE_INTEGER)
+export function seedStationRevision(
+	nowMs: number,
+	lostRevision: number | undefined,
+): number {
+	const base = Number.isFinite(nowMs)
+		? Math.max(0, Math.floor(nowMs)) * SEED_PER_MS
+		: 0
+	const safeBase = Number.isSafeInteger(base) ? base : 0
+	if (lostRevision === undefined) return safeBase
+	const seed = Math.max(safeBase, Math.floor(lostRevision) + 1)
+	return Number.isSafeInteger(seed) ? seed : safeBase
 }
 
-/** Removes `station.json.<pid>.tmp` files a crash left behind (bounded, best effort). */
-async function sweepTmp(stateDir: string, log: Logger): Promise<void> {
-	let entries: string[]
+/** The `revision` a lost file still carries, when it is JSON with a finite number there. */
+function lostRevisionOf(
+	bytes: Buffer | null | "oversized",
+): number | undefined {
+	if (bytes === null || bytes === "oversized") return undefined
 	try {
-		entries = await readdir(stateDir)
+		const raw: unknown = JSON.parse(bytes.toString("utf8"))
+		const value =
+			typeof raw === "object" && raw !== null && "revision" in raw
+				? raw.revision
+				: undefined
+		return typeof value === "number" && Number.isFinite(value)
+			? value
+			: undefined
 	} catch {
-		return
+		return undefined
 	}
-	const stale = entries
-		.filter(name => TMP_PATTERN.test(name))
-		.slice(0, STATION_STORE_TMP_SWEEP_MAX)
-	for (const name of stale) {
-		await unlink(join(stateDir, name)).catch((error: unknown) => {
+}
+
+async function listStateDir(stateDir: string): Promise<string[]> {
+	try {
+		return await readdir(stateDir)
+	} catch {
+		return []
+	}
+}
+
+/**
+ * Removes `station.json.<pid>.tmp` files a crash left behind: never the current process's
+ * own, never one modified in the last STATION_STORE_TMP_STALE_MS (bounded, best effort).
+ */
+async function sweepTmp(
+	stateDir: string,
+	entries: readonly string[],
+	nowMs: number,
+	log: Logger,
+): Promise<void> {
+	let removed = 0
+	for (const name of entries) {
+		if (removed >= STATION_STORE_TMP_SWEEP_MAX) break
+		const match = TMP_PATTERN.exec(name)
+		if (match === null || Number(match[1]) === process.pid) continue
+		const path = join(stateDir, name)
+		try {
+			const stat = await lstat(path)
+			if (!stat.isFile() || nowMs - stat.mtimeMs < STATION_STORE_TMP_STALE_MS)
+				continue
+			await unlink(path)
+			removed += 1
+		} catch (error: unknown) {
 			log.debug(
 				{ err: error, name },
 				"Could not remove a stale station tmp file",
 			)
-		})
+		}
+	}
+}
+
+/** The newest quarantined copy's revision, when one is left and readable. */
+async function quarantinedRevision(
+	stateDir: string,
+	entries: readonly string[],
+): Promise<{ found: boolean; revision: number | undefined }> {
+	const copies = entries
+		.filter(name => name.startsWith(CORRUPT_PREFIX))
+		.map(name => ({ name, at: Number(name.slice(CORRUPT_PREFIX.length)) }))
+		.sort((left, right) => (right.at || 0) - (left.at || 0))
+	const newest = copies[0]
+	if (newest === undefined) return { found: false, revision: undefined }
+	try {
+		const bytes = await readBounded(join(stateDir, newest.name))
+		return { found: true, revision: lostRevisionOf(bytes) }
+	} catch {
+		return { found: true, revision: undefined }
 	}
 }
 
@@ -212,7 +269,8 @@ async function quarantine(
 /**
  * Loads the UI layer. Missing is empty; corrupt, oversized or wrong-version is warned once,
  * moved to `station.json.corrupt-<ms>` and loads empty with a seeded revision (as does an
- * unreadable file). Stale temporary files of the write path are removed first. Never throws.
+ * unreadable file, or a missing one with a quarantined copy left). Stale temporary files of
+ * the write path are removed first. Never throws.
  */
 export async function loadStationStore(
 	stateDir: string,
@@ -220,7 +278,8 @@ export async function loadStationStore(
 	now: () => number = Date.now,
 ): Promise<StationStoreState> {
 	const path = join(stateDir, STATION_STORE_FILE)
-	await sweepTmp(stateDir, log)
+	const entries = await listStateDir(stateDir)
+	await sweepTmp(stateDir, entries, Date.now(), log)
 	let bytes: Buffer | null | "oversized"
 	try {
 		bytes = await readBounded(path)
@@ -229,9 +288,17 @@ export async function loadStationStore(
 			{ err: error },
 			"Station store unreadable; using an empty UI layer",
 		)
-		return { revision: seedRevision(now(), null), fields: {} }
+		return { revision: seedStationRevision(now(), undefined), fields: {} }
 	}
-	if (bytes === null) return { revision: 0, fields: {} }
+	if (bytes === null) {
+		// Missing, but a quarantined copy is left: the store was lost before (a restart
+		// after a corruption), so seed as on the first load.
+		const lost = await quarantinedRevision(stateDir, entries)
+		return {
+			revision: lost.found ? seedStationRevision(now(), lost.revision) : 0,
+			fields: {},
+		}
+	}
 	let reason: string
 	if (bytes === "oversized") {
 		reason = `larger than ${STATION_STORE_MAX_BYTES} bytes`
@@ -249,7 +316,7 @@ export async function loadStationStore(
 	const at = now()
 	await quarantine(stateDir, at, log)
 	return {
-		revision: seedRevision(at, bytes === "oversized" ? null : bytes),
+		revision: seedStationRevision(at, lostRevisionOf(bytes)),
 		fields: {},
 	}
 }

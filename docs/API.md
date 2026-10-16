@@ -578,11 +578,14 @@ written to a temporary file, synced and renamed before the change applies; write
 are serialised. A missing file is an empty layer. A corrupt, oversized or
 other-version file is logged once, moved aside to `station.json.corrupt-<ms>`
 (one kept) and loads empty; startup never fails on it. The empty layer (also after
-an unreadable file) starts at a `revision` seeded from the clock in ms, or above the
-lost file's `revision` when that is still readable, so an `If-Match` taken before
-cannot match a later write. Temporary files a crash left behind
-(`station.json.<pid>.tmp`, at most 16 per start) are removed at startup. The file is read in both
-access modes, so UI values written in protected mode still apply in legacy mode,
+an unreadable file, and at a later start while only the quarantined copy is left)
+starts at a `revision` of the clock in ms × 1,000, or one above the lost file's
+`revision` when that is still readable and higher (the clock seed alone when that
+would not be a safe integer), so an `If-Match` taken before cannot match a later
+write. This is not guaranteed if the clock went back across the store loss.
+Temporary files a crash left behind (`station.json.<pid>.tmp` of another process,
+untouched for 60 s; at most 16 per start) are removed at startup. The file is read
+in both access modes, so UI values written in protected mode still apply in legacy mode,
 where they cannot be changed.
 
 When a change applies:

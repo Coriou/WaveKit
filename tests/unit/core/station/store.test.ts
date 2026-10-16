@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { readdir, readFile, writeFile } from "node:fs/promises"
+import { readdir, readFile, utimes, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import {
 	loadStationStore,
+	seedStationRevision,
 	STATION_STORE_TMP_SWEEP_MAX,
 	writeStationStore,
 } from "../../../../src/core/station/store.js"
@@ -65,8 +66,8 @@ describe("station store load", () => {
 		await writeFile(join(dir, "station.json"), body)
 		const { logger, warn } = stubLogger()
 		const state = await loadStationStore(dir, logger, () => 1234)
-		// Seeded from the clock (the lost file's revision is 3 or 1, both lower).
-		expect(state).toEqual({ revision: 1234, fields: {} })
+		// Seeded from the clock × 1000 (the lost file's revision is 3 or 1, both lower).
+		expect(state).toEqual({ revision: 1_234_000, fields: {} })
 		expect(warn).toHaveBeenCalledTimes(1)
 		expect(await readdir(dir)).toEqual(["station.json.corrupt-1234"])
 	})
@@ -109,57 +110,87 @@ describe("station store load", () => {
 		expect(state.revision).toBe(3)
 	})
 
-	it("ignores and removes leftover .tmp files of the write path only", async () => {
-		await writeFile(
-			join(dir, "station.json.4242.tmp"),
-			file({ name: { value: "tmp", provenance: "ui", updatedAt: at } }),
-		)
-		await writeFile(join(dir, "station.json.7.tmp"), "x")
-		await writeFile(join(dir, "station.json.abc.tmp"), "keep")
-		await writeFile(join(dir, "other.json.1.tmp"), "keep")
+	it("removes only stale leftover .tmp files of other processes", async () => {
+		const old = new Date(Date.now() - 120_000)
+		const leftover = async (name: string, stale: boolean) => {
+			await writeFile(join(dir, name), "x")
+			if (stale) await utimes(join(dir, name), old, old)
+		}
+		// The active-writer case: a live write of this process, and a fresh one of another.
+		await leftover(`station.json.${process.pid}.tmp`, true)
+		await leftover("station.json.4242.tmp", false)
+		await leftover("station.json.4243.tmp", true)
+		await leftover("station.json.abc.tmp", true)
+		await leftover("other.json.1.tmp", true)
 		const { logger, warn } = stubLogger()
 		expect(await loadStationStore(dir, logger)).toEqual({
 			revision: 0,
 			fields: {},
 		})
 		expect(warn).not.toHaveBeenCalled()
-		expect((await readdir(dir)).sort()).toEqual([
-			"other.json.1.tmp",
-			"station.json.abc.tmp",
-		])
+		expect((await readdir(dir)).sort()).toEqual(
+			[
+				"other.json.1.tmp",
+				`station.json.${process.pid}.tmp`,
+				"station.json.4242.tmp",
+				"station.json.abc.tmp",
+			].sort(),
+		)
 	})
 
 	it("removes at most STATION_STORE_TMP_SWEEP_MAX leftovers per open", async () => {
+		const old = new Date(Date.now() - 120_000)
 		const count = STATION_STORE_TMP_SWEEP_MAX + 4
-		for (let pid = 0; pid < count; pid += 1)
-			await writeFile(join(dir, `station.json.${pid}.tmp`), "x")
+		for (let index = 0; index < count; index += 1) {
+			const name = join(dir, `station.json.${process.pid + 1 + index}.tmp`)
+			await writeFile(name, "x")
+			await utimes(name, old, old)
+		}
 		await loadStationStore(dir, stubLogger().logger)
 		expect(await readdir(dir)).toHaveLength(4)
 	})
 
-	it("seeds the revision after corruption so a pre-corruption If-Match cannot match", async () => {
-		// The lost file's revision is still readable and above the clock: seed past it.
+	it("seeds max(now x 1000, lost + 1), falling back to now x 1000 when unsafe", () => {
+		expect(seedStationRevision(1_000, undefined)).toBe(1_000_000)
+		expect(seedStationRevision(1, 5_000)).toBe(5_001)
+		expect(seedStationRevision(9, 3)).toBe(9_000)
+		expect(seedStationRevision(9, Number.MAX_SAFE_INTEGER)).toBe(9_000)
+		expect(seedStationRevision(9, 1e300)).toBe(9_000)
+		const now = Date.now()
+		expect(seedStationRevision(now, undefined)).toBe(now * 1_000)
+		expect(Number.isSafeInteger(now * 1_000)).toBe(true)
+	})
+
+	it("seeds the revision after corruption and again on the next start", async () => {
+		// The lost file's revision is still readable and above the clock seed: past it.
 		await writeFile(
 			join(dir, "station.json"),
 			JSON.stringify({ schemaVersion: 2, revision: 5_000, fields: {} }),
 		)
-		const high = await loadStationStore(dir, stubLogger().logger, () => 1_000)
-		expect(high.revision).toBe(5_001)
-		// Unparseable: the clock seeds it, above any revision written once per ms.
+		const first = await loadStationStore(dir, stubLogger().logger, () => 1)
+		expect(first.revision).toBe(5_001)
+		// Second restart with no write in between: station.json is missing, the
+		// quarantined copy is left, so the seed is the same rather than 0.
+		expect(await readdir(dir)).toEqual(["station.json.corrupt-1"])
+		const second = await loadStationStore(dir, stubLogger().logger, () => 2)
+		expect(second.revision).toBe(5_001)
+		// Unparseable: the clock seeds it.
 		await writeFile(join(dir, "station.json"), "{garbage")
-		const clock = await loadStationStore(dir, stubLogger().logger, () => 9_000)
+		const clock = await loadStationStore(dir, stubLogger().logger, () => 9)
 		expect(clock.revision).toBe(9_000)
-		// The seed never passes the safe-integer bound.
+		const again = await loadStationStore(dir, stubLogger().logger, () => 10)
+		expect(again.revision).toBe(10_000)
+		// A lost revision at the counter's end does not exhaust the fresh layer.
 		await writeFile(
 			join(dir, "station.json"),
-			JSON.stringify({ schemaVersion: 1, revision: -1, fields: {} }),
+			JSON.stringify({
+				schemaVersion: 1,
+				revision: Number.MAX_SAFE_INTEGER,
+				fields: [],
+			}),
 		)
-		const max = await loadStationStore(
-			dir,
-			stubLogger().logger,
-			() => Number.MAX_SAFE_INTEGER + 10,
-		)
-		expect(max.revision).toBe(Number.MAX_SAFE_INTEGER)
+		const max = await loadStationStore(dir, stubLogger().logger, () => 11)
+		expect(max.revision).toBe(11_000)
 	})
 })
 
