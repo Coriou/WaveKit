@@ -24,6 +24,11 @@ const context: PlotContext = {
 			endHz: 160_456_250,
 			flags: { burst: true, iqImage: false, edge: false },
 		},
+		{
+			startHz: 160_619_500,
+			endHz: 160_630_500,
+			flags: { burst: false, iqImage: false, edge: false },
+		},
 	],
 }
 
@@ -50,16 +55,28 @@ function setup(ctx: PlotContext = context) {
 describe("PlotController", () => {
 	it("a click inside the capture moves the live-audio channel, snapping to the signal", async () => {
 		const { c, calls, release } = setup()
-		// 1000 px: the signal at 160.450 is at x ≈ 0.0625; click 5 px off.
-		const x = (160_450_000 - capture.startHz) / 2_400_000 + 5 / 1000
+		// 1000 px: the signal at 160.625 is at x ≈ 0.135; click 5 px off.
+		const x = (160_625_000 - capture.startHz) / 2_400_000 + 5 / 1000
 		const done = c.clickAt(x, 1000)
-		expect(calls).toEqual(["offset -1050000"])
+		expect(calls).toEqual(["offset -875000"])
 		// The VFO shows the request until the core answers.
-		expect(c.vfoHz()).toBe(160_450_000)
+		expect(c.vfoHz()).toBe(160_625_000)
 		release()
 		await done
 		expect(c.store.get().pendingHz).toBeNull()
 		expect(c.vfoHz()).toBe(161_150_000)
+	})
+
+	it("a signal outside the core's usable 80 % recentres instead (identify would refuse it)", async () => {
+		const { c, calls } = setup()
+		const x = (160_450_000 - capture.startHz) / 2_400_000
+		const done = c.clickAt(x, 1000)
+		await Promise.resolve()
+		await Promise.resolve()
+		expect(calls).toEqual(["retune rtl0 160450000", "offset 0"])
+		expect(c.vfoHz()).toBe(160_450_000)
+		c.setContext({ ...context, tunedHz: 160_450_000 })
+		void done
 	})
 
 	it("a click on empty spectrum snaps to the step raster", () => {

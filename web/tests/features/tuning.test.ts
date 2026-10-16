@@ -45,19 +45,23 @@ describe("planTune (the tuning rule)", () => {
 		})
 	})
 
-	it("keeps the channel clear of the capture edges (half its bandwidth, at least 2 %)", () => {
+	it("keeps the channel inside the core's usable 80 % (identify's window), less half its bandwidth", () => {
 		expect(captureOf(ctx())).toEqual({
 			startHz: 160_300_000,
 			endHz: 162_700_000,
 		})
-		const edge = 162_700_000 - 48_000 // 2 % of 2.4 MS/s beats half of 12.5 kHz
+		// 10 % of 2.4 MS/s is unusable at each edge, then half of the 12.5 kHz channel
+		const edge = 162_700_000 - 240_000 - 6_250
 		expect(planTune(edge, ctx()).kind).toBe("offset")
 		expect(planTune(edge + 1, ctx()).kind).toBe("recentre")
+		const low = 160_300_000 + 240_000 + 6_250
+		expect(planTune(low, ctx()).kind).toBe("offset")
+		expect(planTune(low - 1, ctx()).kind).toBe("recentre")
 		expect(
-			planTune(162_700_000 - 75_000, ctx({ bandwidthHz: 150_000 })).kind,
+			planTune(162_700_000 - 315_000, ctx({ bandwidthHz: 150_000 })).kind,
 		).toBe("offset")
 		expect(
-			planTune(162_700_000 - 74_999, ctx({ bandwidthHz: 150_000 })).kind,
+			planTune(162_700_000 - 314_999, ctx({ bandwidthHz: 150_000 })).kind,
 		).toBe("recentre")
 	})
 

@@ -178,7 +178,8 @@ describe("tuning", () => {
 
 	it("moves the channel inside the capture, recentres outside it", () => {
 		const margin = edgeMargin(capture, 12_500)
-		expect(margin).toBe(48_000)
+		// the core's usable 80 % leaves 240 kHz at each edge, plus half the channel
+		expect(margin).toBe(246_250)
 		expect(tuneAction(161_150_000, 161_500_000, capture, margin)).toEqual({
 			kind: "offset",
 			offsetHz: -350_000,
@@ -190,6 +191,40 @@ describe("tuning", () => {
 		expect(tuneAction(156_800_000, 161_500_000, capture, margin).kind).toBe(
 			"retune",
 		)
+	})
+
+	it("only offsets onto frequencies the core will identify (usable window)", () => {
+		// Core rule, src/core/scanner/identify.ts inWindow() with USABLE_FRACTION 0.8
+		const coreInWindow = (hz: number, bw: number, centre: number, rate: number) =>
+			Math.abs(hz - centre) + bw / 2 <= (rate * 0.8) / 2
+		let seed = 0x2545f491
+		const rand = () => {
+			seed ^= seed << 13
+			seed ^= seed >>> 17
+			seed ^= seed << 5
+			return (seed >>> 0) / 0x1_0000_0000
+		}
+		for (let run = 0; run < 500; run++) {
+			const centre = Math.round(30e6 + rand() * 1.67e9)
+			const rate = Math.round(250_000 + rand() * 9.75e6)
+			const bw = Math.round(rand() * 200_000)
+			const hz = centre + (rand() - 0.5) * 1.2 * rate
+			const cap = { startHz: centre - rate / 2, endHz: centre + rate / 2 }
+			const action = tuneAction(hz, centre, cap, edgeMargin(cap, bw))
+			if (action.kind === "offset")
+				expect(coreInWindow(centre + action.offsetHz, bw, centre, rate)).toBe(
+					true,
+				)
+			else expect(action.centreHz).toBe(Math.round(hz))
+		}
+		// just inside and just outside the usable edge
+		const m = edgeMargin(capture, 12_500)
+		expect(tuneAction(capture.endHz - m, 161_500_000, capture, m).kind).toBe(
+			"offset",
+		)
+		expect(
+			tuneAction(capture.endHz - m + 1, 161_500_000, capture, m).kind,
+		).toBe("retune")
 	})
 
 	it("keeps the channel after a hardware move when the new capture holds it", () => {

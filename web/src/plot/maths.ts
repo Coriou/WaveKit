@@ -255,6 +255,13 @@ export type TuneAction =
 	| { kind: "retune"; centreHz: number }
 
 /**
+ * The share of the capture the core treats as usable: identify refuses a target (OUT_OF_WINDOW) unless
+ * |hz − centre| + bandwidth/2 ≤ sampleRate × USABLE_FRACTION / 2 (src/core/spectrum/spectrum-engine.ts
+ * USABLE_FRACTION, src/core/scanner/identify.ts inWindow, checked in scanner-service.ts identify()).
+ */
+export const USABLE_FRACTION = 0.8
+
+/**
  * Tuning to `hz`: inside the capture (clear of its edges by `marginHz`) the live-audio channel moves
  * (offset from the hardware centre); outside, the hardware recentres on it.
  */
@@ -264,18 +271,25 @@ export function tuneAction(
 	capture: SpectrumViewSpan,
 	marginHz: number,
 ): TuneAction {
+	const target = Math.round(hz)
 	const margin = Math.min(marginHz, spanWidth(capture) / 4)
-	if (hz >= capture.startHz + margin && hz <= capture.endHz - margin)
-		return { kind: "offset", offsetHz: Math.round(hz - hardwareCentreHz) }
-	return { kind: "retune", centreHz: Math.round(hz) }
+	if (target >= capture.startHz + margin && target <= capture.endHz - margin)
+		return { kind: "offset", offsetHz: Math.round(target - hardwareCentreHz) }
+	return { kind: "retune", centreHz: target }
 }
 
-/** Edge margin for the live-audio channel: half its bandwidth, at least 2 % of the capture. */
+/**
+ * Edge margin for the live-audio channel: the capture's unusable edge (1 − USABLE_FRACTION, half on each
+ * side) plus half the channel bandwidth, so a channel placed by offset is always one the core identifies.
+ */
 export function edgeMargin(
 	capture: SpectrumViewSpan,
 	bandwidthHz: number,
 ): number {
-	return Math.max(bandwidthHz / 2, spanWidth(capture) * 0.02)
+	return (
+		(spanWidth(capture) - spanWidth(capture) * USABLE_FRACTION) / 2 +
+		Math.max(0, bandwidthHz) / 2
+	)
 }
 
 /**
