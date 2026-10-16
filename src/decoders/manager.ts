@@ -18,7 +18,10 @@
  */
 
 import { EventEmitter } from "node:events"
-import type { DecoderOptionIssue } from "@wavekit/api-types"
+import type {
+	DecoderOptionIssue,
+	DecoderSettingValue,
+} from "@wavekit/api-types"
 import type { Readable } from "node:stream"
 import type {
 	Decoder,
@@ -193,6 +196,39 @@ interface DecoderState {
 	inputAttached: boolean
 	/** Scanner-only acquisition/startup identity; terminal tokens never become live again. */
 	scannerChannelAttempt: ScannerChannelAttempt | null
+	/**
+	 * WG8: option values staged for the next start (`null` removes the key);
+	 * null when nothing is staged. Configured decoders only.
+	 */
+	stagedOptions: Record<string, DecoderSettingValue | null> | null
+}
+
+/** A staged option value equals the current one (JSON values; absent = null). */
+function sameJsonValue(a: unknown, b: unknown): boolean {
+	if (a === b) return true
+	if (a === undefined || a === null) return b === undefined || b === null
+	if (b === undefined || b === null) return false
+	if (Array.isArray(a)) {
+		if (!Array.isArray(b) || a.length !== b.length) return false
+		return a.every((v, i) => sameJsonValue(v, b[i]))
+	}
+	if (Array.isArray(b)) return false
+	if (typeof a === "object" && typeof b === "object") {
+		const ar = a as Record<string, unknown>
+		const br = b as Record<string, unknown>
+		const keys = new Set([...Object.keys(ar), ...Object.keys(br)])
+		for (const k of keys) if (!sameJsonValue(ar[k], br[k])) return false
+		return true
+	}
+	return false
+}
+
+/** The rebuild of a decoder with staged options failed (fixed text, no cause). */
+export class DecoderRebuildError extends WaveKitError {
+	constructor() {
+		super("Decoder rebuild failed", "DECODER_REBUILD_FAILED")
+		this.name = "DecoderRebuildError"
+	}
 }
 
 interface DecoderSuspension {
@@ -662,6 +698,7 @@ export class DecoderManager extends EventEmitter {
 			input: probe?.input ?? null,
 			inputAttached: false,
 			scannerChannelAttempt: null,
+			stagedOptions: null,
 		}
 
 		this.decoders.set(config.id, state)
@@ -961,6 +998,9 @@ export class DecoderManager extends EventEmitter {
 		}
 		if (intent?.refuseIfHeld === true) this.assertNotHeld(state)
 
+		// WG8: staged options apply here, as if WaveKit booted with them.
+		this.rebuildIfPending(state)
+
 		if (intent) state.startMode = intent.startMode
 		this.log.info(
 			{ decoderId: id, startMode: state.startMode },
@@ -1168,6 +1208,128 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		await Promise.all(stopPromises)
+	}
+
+	/**
+	 * WG8 (DecoderSettingsManagerPort): stages option values for the next start
+	 * (`null` removes the key) and returns whether they differ from the
+	 * instance's current options. Unknown ids and scanner probes: false and
+	 * nothing staged. Never touches a running process.
+	 */
+	stageDecoderOptions(
+		id: string,
+		options: Readonly<Record<string, DecoderSettingValue | null>>,
+	): boolean {
+		const state = this.decoders.get(id)
+		if (!state || state.owner !== "config") return false
+		const staged: Record<string, DecoderSettingValue | null> = {
+			...(state.stagedOptions ?? {}),
+		}
+		for (const [key, value] of Object.entries(options))
+			staged[key] = value === null ? null : structuredClone(value)
+		state.stagedOptions = staged
+		if (!this.stagedDiffers(state)) state.stagedOptions = null
+		return state.stagedOptions !== null
+	}
+
+	/** WG8: true while the instance does not yet run with its staged options. */
+	isRestartPending(id: string): boolean {
+		const state = this.decoders.get(id)
+		if (!state || state.owner !== "config") return false
+		return this.stagedDiffers(state)
+	}
+
+	private stagedDiffers(state: DecoderState): boolean {
+		const staged = state.stagedOptions
+		if (!staged) return false
+		const current = state.config.options ?? {}
+		for (const [key, value] of Object.entries(staged))
+			if (!sameJsonValue(current[key], value)) return true
+		return false
+	}
+
+	/**
+	 * WG8: replaces a stopped instance with one built from the current config
+	 * plus the staged options, wired as `registerDecoder` wires a new one.
+	 * Without differing staged options it does nothing. A failure keeps the old
+	 * instance, config and staging, stops the decoder and throws
+	 * DecoderRebuildError.
+	 */
+	private rebuildIfPending(state: DecoderState): void {
+		if (state.owner !== "config" || !state.stagedOptions) return
+		if (!this.stagedDiffers(state)) {
+			state.stagedOptions = null
+			return
+		}
+		if (state.decoder.getStatus().running) return
+		const id = state.config.id
+		const options: Record<string, unknown> = { ...(state.config.options ?? {}) }
+		for (const [key, value] of Object.entries(state.stagedOptions)) {
+			if (value === null) delete options[key]
+			else options[key] = structuredClone(value)
+		}
+		const config: DecoderConfig = { ...state.config, options }
+		let decoder: Decoder
+		try {
+			decoder = this.registry.create(config, this.log)
+			const declared = decoder.getRateRequirements?.()
+			if (declared !== undefined) {
+				try {
+					validateDeclaredRateRequirements(
+						declared,
+						`decoders.${id}.rateRequirements`,
+					)
+				} catch (err) {
+					decoder.removeAllListeners()
+					throw err
+				}
+			}
+		} catch (err) {
+			this.log.error(
+				{ decoderId: id, err: safeErrorFields(err) },
+				"Decoder rebuild failed; previous instance kept",
+			)
+			const failure = new DecoderRebuildError()
+			state.intentionallyStopped = true
+			state.desiredRunning = false
+			state.startMode = "auto"
+			state.rateGeneration++
+			state.suspension = null
+			state.transition = null
+			this.cancelScheduledRestart(state)
+			this.unwireDecoderFromFanout(state)
+			state.lastError = createDecoderLastError(failure, "error")
+			this.updateDecoderHealth(state, "faulted")
+			this.emitStatusChanged(state)
+			throw failure
+		}
+		this.log.info(
+			{ decoderId: id, type: config.type },
+			"Rebuilding decoder with staged options",
+		)
+		// The old instance is stopped: drop its input and listeners.
+		if (state.branchId !== null || state.channel !== null)
+			this.detachBranch(state)
+		state.decoder.removeAllListeners()
+		state.decoder = decoder
+		state.config = config
+		state.stagedOptions = null
+		// Counters and derived views as on a fresh create.
+		state.versionValidation = this.config.validateVersions
+			? this.validateDecoderVersion(config)
+			: undefined
+		state.optionIssues = this.checkDecoderOptions(config)
+		delete state.inputCaps
+		state.restartCount = 0
+		state.consecutiveFailures = 0
+		state.currentDelay = this.config.restartDelay
+		state.lastError = null
+		state.lastOutputAt = null
+		state.lastStartedAt = null
+		this.updateDecoderHealth(state, "running")
+		this.setupDecoderEventHandlers(state)
+		this.refreshRatePlan(state)
+		this.emit("decoder:created", id)
 	}
 
 	/**
@@ -1598,6 +1760,7 @@ export class DecoderManager extends EventEmitter {
 				try {
 					// Wire to fanout and start
 					if (state.intentionallyStopped) return
+					this.rebuildIfPending(state)
 					const outcome = await this.wireDecoderToFanout(state)
 					if (state.intentionallyStopped) {
 						this.unwireDecoderFromFanout(state)
@@ -1607,9 +1770,11 @@ export class DecoderManager extends EventEmitter {
 						if (!outcome.superseded) this.holdForChannel(state, outcome)
 						return
 					}
-					await decoder.start()
+					await state.decoder.start()
 					this.recheckStaleChannel(this.selectedSourceId(state), state)
 				} catch (err) {
+					// A failed rebuild already left the decoder stopped with its error.
+					if (err instanceof DecoderRebuildError) return
 					state.lastError = createDecoderLastError(err, "error")
 					// Log failure but don't crash - failure isolation (Requirement 10.1)
 					this.log.error(
@@ -2733,6 +2898,7 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		try {
+			this.rebuildIfPending(state)
 			const outcome = await this.wireDecoderToFanout(state)
 			if (!this.stillWanted(state, generation)) return await abandon(false)
 			if (!outcome.wired) {
@@ -2742,6 +2908,7 @@ export class DecoderManager extends EventEmitter {
 			}
 			await state.decoder.start()
 		} catch (err) {
+			if (err instanceof DecoderRebuildError) return await abandon(false)
 			if (!this.stillWanted(state, generation)) return await abandon(false)
 			state.transition = null
 			// A real spawn failure: record it and use the normal backoff/budget.
