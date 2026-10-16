@@ -240,8 +240,9 @@ def check_tokens(config: dict, geometry: dict, issues: list[str], result: dict) 
 
 
 # UI kit (tokens/ui.css). The token block is the owner-approved colour set (THEME-TOKENS v2.1 plus
-# the band group hues, 2026-10-12): changing a colour means updating this hash with the owner's OK.
-UI_TOKEN_BLOCK_SHA256 = '77848de57b7ce3be2026fe9218d65dcaede64203de52942064f7861ed93aa259'
+# the band group hues, 2026-10-12; on 2026-10-16 the --wk-shadow* aliases became --wk-e1..e4 with the
+# same values, spec §4.6): changing a colour means updating this hash with the owner's OK.
+UI_TOKEN_BLOCK_SHA256 = 'fbf38b2524461b22625b9bea302b0623b823ee99c635d7b0bb28155c033c90bb'
 UI_TEXT = ('--wk-text', '--wk-text-2', '--wk-text-3')
 
 

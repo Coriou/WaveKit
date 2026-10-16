@@ -2,11 +2,16 @@
 
 Semantic colour tokens for the web dashboard, on three axes: **theme** (dark / light), **ground**
 (Ink, Graphite, True black for dark; Paper for light) and **accent** (phosphor, ice, violet, coral,
-mono). Every canvas board carries the same token block (section 7); the boards in
-[canvas/](canvas/) are the reference. v1 decided 2026-10-11 (light shell over a dark plot); v2 the
-same evening (grounds, paper light, everything light). See the decision log in
-[DESIGN.md](DESIGN.md). For the dev handoff this becomes the Tailwind/shadcn theme in
-`packages/brand`.
+mono). v1 decided 2026-10-11 (light shell over a dark plot); v2 the same evening (grounds, paper
+light, everything light). See the decision log in [DESIGN.md](DESIGN.md).
+
+**The values live in [`packages/brand/tokens/ui.css`](../../packages/brand/tokens/ui.css)**
+(layer `wk-tokens`) since design system v1 (2026-10-16); `tokens/ui.json` holds every token
+resolved per theme × ground × accent, and
+[`packages/brand/docs/ui-kit.md`](../../packages/brand/docs/ui-kit.md) is the recipe reference.
+This file keeps the rationale and the decision history. Where a value below disagrees with
+`ui.css`, `ui.css` wins. The canvas boards no longer carry their own copy: they import the Kit
+board, which mirrors `ui.css` (section 2.1).
 
 ## 1. Principles
 
@@ -42,7 +47,13 @@ everywhere a colour goes in this runtime: inline `style="…"`, JS-built style s
 `rgba(var(--wk-accent-rgb),.14)` works because the `-rgb` tokens hold `r,g,b` triplets.
 The one place `var()` does **not** work is `<canvas>` 2D drawing (section 5, rule 6).
 
-### 2.1 Helmet: token block first, as its own `<style>`
+### 2.1 Helmet: token block first, as its own `<style>` (until 2026-10-16)
+
+*History.* From v2 until design system v1, every board carried the block below. Since v1 a
+board's root starts with `<dc-import name="Kit" hint-size="0px,0px">`, whose helmet holds the
+canvas `@font-face` rules and `ui.css` verbatim (synced by `node scripts/web-canvas-kit.mjs
+docs/web/canvas/Kit.dc.html`; the drift test `tests/unit/repo/web-canvas-kit.test.ts` fails when
+they differ). The reasoning about copies still holds for the Kit board: one copy, one script.
 
 ```html
 <helmet>
@@ -119,7 +130,7 @@ scopes remain for previews: Settings' ground and accent swatches render a small 
 
 ## 3. Tokens
 
-All values exact; section 7 is the source of truth, these tables explain it.
+These tables explain the values; `ui.css` is the source of truth (section 7).
 
 ### 3.1 Grounds at a glance
 
@@ -141,24 +152,30 @@ neutral greys; its islands are more opaque so they still separate from the plot.
 
 `--wk-on-accent` equals the ground's surface on dark grounds and `#ffffff` on Paper.
 
-### 3.2 Glass and shadows
+### 3.2 Glass and elevation
 
 Dark grounds share v1's glass effect (`--wk-glass-fx: saturate(170%)`, `--wk-glass-hi:
 rgba(255,255,255,.08)`) and shadows (`0 12px 32px rgba(0,0,0,.35)` …, unchanged).
 
 Paper: `--wk-glass-fx: saturate(105%)`, `--wk-glass-hi: rgba(255,255,255,0)` (no top
 highlight), glass `rgba(251,248,241,.96)`, panel `.97`, strong `rgba(252,250,245,.985)`, wells
-`rgba(74,58,34,.07)` / `.05`. Shadows are warm and soft, a contact shadow plus a short ambient:
+`rgba(74,58,34,.07)` / `.05`. Shadows are warm and soft, a contact shadow plus a short ambient.
 
-| Token | Paper |
-|---|---|
-| `--wk-shadow` | `0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10)` |
-| `--wk-shadow-pop` | `0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12)` |
-| `--wk-shadow-tip` | `0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12)` |
-| `--wk-shadow-lg` | `0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13)` |
-| `--wk-shadow-drawer` | `0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16)` |
-| `--wk-shadow-xl` | `0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16)` |
-| `--wk-shadow-lift` | `0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20)` |
+Elevation (design system v1, spec §4.6): four levels, each `inset 0 1px 0 var(--wk-glass-hi)`
+(the top highlight, invisible on Paper) followed by the shadow below.
+
+| Token | Use | Dark shadow | Paper shadow |
+|---|---|---|---|
+| `--wk-e1` | islands | `0 12px 32px rgba(0,0,0,.35)` | `0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10)` |
+| `--wk-e2` | menus, toasts, tooltips, popovers | `0 12px 32px rgba(0,0,0,.4)` | `0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12)` |
+| `--wk-e3` | drawers, sheets, panes | `0 16px 40px rgba(0,0,0,.4)` | `0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13)` |
+| `--wk-e4` | dragging, lifted card | `0 28px 64px rgba(0,0,0,.55)` | `0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20)` |
+
+*History.* v2 had seven shadow tokens: `--wk-shadow`, `-pop`, `-tip`, `-lg`, `-drawer`, `-xl`
+and `-lift`, used with the highlight written out at every use. Design system v1 folded them into
+the four levels (`--wk-shadow` → e1; `-pop`, `-tip`, `-drawer` → e2; `-lg`, `-xl` → e3; `-lift` →
+e4), kept them as aliases while the boards migrated, and removed them on 2026-10-16 once no board
+used them. The e-levels keep the resolved values of `--wk-shadow`, `-pop`, `-lg` and `-lift`.
 
 Tiny shadows (blur ≤ 2 px, e.g. a knob's `0 1px 2px rgba(0,0,0,.35)`) stay literal.
 
@@ -179,7 +196,7 @@ Tiny shadows (blur ≤ 2 px, e.g. a knob's `0 1px 2px rgba(0,0,0,.35)`) stay lit
 | `--wk-line-solid` | `#22362f` | `#353638` | `#262626` | `#e0d9ca` | Solid separators, rails. |
 | `--wk-track` | `#2c443b` | `#424345` | `#363636` | `#8f8573` | Off tracks, inactive meters. |
 
-The tinted Ink families (ice, violet, coral, mono) have their own ramp in section 7, same
+The tinted Ink families (ice, violet, coral, mono) have their own ramp in `ui.css`, same
 lightness as Ink · phosphor.
 
 ### 3.4 Accent, amber, danger
@@ -216,7 +233,7 @@ On Ink the hairline tint follows the accent (mono uses `200,212,206`); Graphite 
 use neutral hairlines. "Coral" is pushed toward rose on purpose: a true coral (orange-pink) is
 indistinguishable from the danger red.
 
-### 3.6 Band groups (`--wk-grp-*`, proposed 2026-10-12, owner to approve)
+### 3.6 Band groups (`--wk-grp-*`, proposed and approved 2026-10-12)
 
 Identity colours for band plan display groups (spectrum lanes, Scan a band lanes, Settings ›
 Band plans). Seven categorical hues in a fixed order plus two neutrals; a ninth group never gets
@@ -244,6 +261,9 @@ Pagers yellow sits near the shell's amber ("not live"); amber is never used as a
 do not meet in one control.
 
 ## 4. Literal → token mapping
+
+*History.* The table the v2 sweep (2026-10-11) used to replace the v1 literals in the boards. New
+work uses the kit recipes and tokens directly.
 
 ### 4.1 Hex (every hex in the boards)
 
@@ -297,7 +317,7 @@ do not meet in one control.
 | `rgba(40,32,14,a)` | `var(--wk-amber-fill)` |
 | `rgba(255,122,107,a)` | `rgba(var(--wk-danger-rgb),a)` |
 | `inset 0 1px 0 rgba(255,255,255,.08|.1)` | `inset 0 1px 0 var(--wk-glass-hi)` |
-| shadows `rgba(0,0,0,a)` | the shadow token whose geometry matches (3.2): `12px 32px .35` → `--wk-shadow`; `12px 32px .4|.45` → `--wk-shadow-pop`; `8px 24px` → `--wk-shadow-tip`; `16px 40px .4` → `--wk-shadow-lg`; `16px 40px .5|.55` → `--wk-shadow-drawer`; `18px 48px *`, `24px 64px *` → `--wk-shadow-xl`; `28px 64px` → `--wk-shadow-lift` |
+| shadows `rgba(0,0,0,a)` | in v2, the shadow token whose geometry matched; today the elevation level (3.2), which includes the top highlight: `12px 32px .35` → `--wk-e1`; `12px 32px .4|.45`, `8px 24px`, `16px 40px .5|.55` → `--wk-e2`; `16px 40px .4`, `18px 48px *`, `24px 64px *` → `--wk-e3`; `28px 64px` → `--wk-e4` |
 | `saturate(160%|170%)` in `backdrop-filter` | `var(--wk-glass-fx)` |
 | `rgba(142,197,255,a)` `rgba(201,168,255,a)` | keep literal (Map data colours, per ground) |
 
@@ -320,11 +340,13 @@ Helmet CSS converts the same way (`outline:2px solid var(--wk-accent)`,
    `var(--wk-accent)`, text `var(--wk-on-accent)`. See §5.1.
 4. **Amber and red** are state colours: never use the accent for "paused / not live / caution"
    or for errors, and never use amber/red as decoration.
-5. **Glass recipe** for any floating surface:
-   `background: var(--wk-glass|-panel|-strong); border: 1px solid rgba(var(--wk-line-rgb),.14);
-   box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow…);
-   backdrop-filter: blur(22px) var(--wk-glass-fx)`. Paused/amber variant: `var(--wk-amber-glass)`
-   with `rgba(var(--wk-amber-rgb),.14)` edge.
+5. **Materials** for floating surfaces (design system v1, spec §4.7): glass (`.wk-island`,
+   `var(--wk-glass)` / `--wk-glass-panel`, line .14, `--wk-e1`, `--wk-blur` = `blur(24px)
+   var(--wk-glass-fx)` on dark grounds only), solid (`.wk-drawer`, `.wk-menu`, `.wk-toast`,
+   `.wk-tip`: no blur) and surface (`.wk-pane`). Paused/amber variant: `var(--wk-amber-glass)`
+   with `rgba(var(--wk-amber-rgb),.14)` edge (`data-tone="amber"`). v2's recipe was one blurred
+   glass (22 px) for every floating surface, drawers included; see the glass budget in
+   [`ui-kit.md`](../../packages/brand/docs/ui-kit.md).
 6. **Canvas** cannot read `var()`. Read the resolved tokens instead, once per
    (theme|ground|accent) key, from an element inside the board's scope:
    ```js
@@ -418,28 +440,18 @@ the board sweep so text-3 and text-4 stay distinguishable (Json keys vs strings)
 ¹ text-4 on the solid fill is just under 4.5:1 on Ink (unchanged from v1, dark must not move),
 Graphite and Paper. Avoid text-4 on `--wk-fill` in new work.
 
-## 7. The token block, verbatim
+## 7. The token block
 
-The source of truth. Every board's first helmet `<style>` is exactly this (19 lines).
+The token block now lives only in [`packages/brand/tokens/ui.css`](../../packages/brand/tokens/ui.css):
+the 19 lines between `@layer wk-tokens{` and `/* scales`, starting with the comment
+`/* wk-tokens v2 · copy verbatim, never edit per board */`. The scales of design system v1
+(type, space, heights, radius, motion) follow it in the same layer.
 
-```css
-/* wk-tokens v2 · copy verbatim, never edit per board */
-[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92;--wk-brand:#7becc7;--wk-focus:rgba(var(--wk-ink-rgb),.55);--wk-sel:rgba(var(--wk-accent-rgb),.12);--wk-chip:rgba(var(--wk-ink-rgb),.06)}
-[data-wk-theme="light"]{color-scheme:light;--wk-plot-bg:#f4f0e6;--wk-bg:#f4f0e6;--wk-surface:#fbf8f1;--wk-fill:#ebe5d8;--wk-fill-glass:rgba(251,248,241,.96);--wk-well:rgba(74,58,34,.07);--wk-well-glass:rgba(74,58,34,.05);--wk-glass:rgba(251,248,241,.96);--wk-glass-panel:rgba(251,248,241,.97);--wk-glass-strong:rgba(252,250,245,.985);--wk-glass-fx:saturate(105%);--wk-glass-hi:rgba(255,255,255,0);--wk-shadow:0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10);--wk-shadow-pop:0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12);--wk-shadow-tip:0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12);--wk-shadow-lg:0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13);--wk-shadow-drawer:0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16);--wk-shadow-xl:0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16);--wk-shadow-lift:0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20);--wk-text:#2a241c;--wk-text-soft:#3a3328;--wk-text-2:#4a4235;--wk-text-3:#5a5143;--wk-text-4:#72675a;--wk-text-5:#a39a89;--wk-ink-rgb:42,36,28;--wk-ink-2-rgb:74,66,53;--wk-ink-3-rgb:90,81,67;--wk-knob:#ffffff;--wk-line-solid:#e0d9ca;--wk-track:#8f8573;--wk-accent:#1d6b52;--wk-accent-rgb:29,107,82;--wk-line-rgb:74,58,34;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(252,241,214,.97);--wk-amber-fill:#f6e7c4;--wk-on-amber:#ffffff;--wk-danger:#a8321e;--wk-danger-rgb:214,64,48;--wk-danger-soft:#93291a;--wk-brand:#16735c}
-[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
-[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
-[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
-[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
-[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#225f92;--wk-accent-rgb:34,95,146}
-[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#5f45a8;--wk-accent-rgb:95,69,168}
-[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#9e3370;--wk-accent-rgb:158,51,112}
-[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#2a241c;--wk-accent-rgb:42,36,28}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="ice"]{--wk-plot-bg:#0d1319;--wk-bg:#0d1319;--wk-surface:#131a21;--wk-fill:#1b2833;--wk-fill-glass:rgba(27,40,51,.92);--wk-well:#0d1319;--wk-well-glass:rgba(13,19,25,.6);--wk-glass:rgba(19,26,33,.5);--wk-glass-panel:rgba(19,26,33,.66);--wk-glass-strong:rgba(19,26,33,.92);--wk-text:#f4f6f9;--wk-text-soft:#d9e2ea;--wk-text-2:#bac7d3;--wk-text-3:#8da1b2;--wk-text-4:#778796;--wk-text-5:#54616d;--wk-ink-rgb:244,246,249;--wk-ink-2-rgb:186,199,211;--wk-ink-3-rgb:141,161,178;--wk-knob:#f4f6f9;--wk-line-solid:#25333f;--wk-track:#2f404f;--wk-on-accent:#131a21}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="violet"]{--wk-plot-bg:#141119;--wk-bg:#141119;--wk-surface:#1a1820;--wk-fill:#292432;--wk-fill-glass:rgba(41,36,50,.92);--wk-well:#141119;--wk-well-glass:rgba(20,17,25,.6);--wk-glass:rgba(26,24,32,.5);--wk-glass-panel:rgba(26,24,32,.66);--wk-glass-strong:rgba(26,24,32,.92);--wk-text:#f6f6f9;--wk-text-soft:#e2dfe9;--wk-text-2:#c7c2d2;--wk-text-3:#a199b1;--wk-text-4:#878195;--wk-text-5:#615c6b;--wk-ink-rgb:246,246,249;--wk-ink-2-rgb:199,194,210;--wk-ink-3-rgb:161,153,177;--wk-knob:#f6f6f9;--wk-line-solid:#332e3e;--wk-track:#413a4e;--wk-on-accent:#1a1820}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="coral"]{--wk-plot-bg:#181013;--wk-bg:#181013;--wk-surface:#20161a;--wk-fill:#312128;--wk-fill-glass:rgba(49,33,40,.92);--wk-well:#181013;--wk-well-glass:rgba(24,16,19,.6);--wk-glass:rgba(32,22,26,.5);--wk-glass-panel:rgba(32,22,26,.66);--wk-glass-strong:rgba(32,22,26,.92);--wk-text:#f9f5f6;--wk-text-soft:#e9dde2;--wk-text-2:#d2c0c7;--wk-text-3:#b095a0;--wk-text-4:#947e87;--wk-text-5:#6b5a61;--wk-ink-rgb:249,245,246;--wk-ink-2-rgb:210,192,199;--wk-ink-3-rgb:176,149,160;--wk-knob:#f9f5f6;--wk-line-solid:#3d2b33;--wk-track:#4c3740;--wk-on-accent:#20161a}
-[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
-[data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
-[data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
-[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
-```
+- `python3 -I packages/brand/source/build_ui.py` regenerates `tokens/ui.json`;
+  `pnpm --filter @wavekit/brand validate` checks it, the contrast pairs and the block itself: the
+  validator pins the block by SHA-256 (`UI_TOKEN_BLOCK_SHA256` in `source/validate.py`), so a
+  changed colour fails until the owner approves it and the hash is updated.
+- The canvas gets the block through the Kit board (section 2.1); boards never copy it.
+- Until 2026-10-16 this section held a verbatim copy of the block. Changes since v2.1: the
+  `--wk-grp-*` lines (2026-10-12, section 3.6) and the elevation levels `--wk-e1` to `--wk-e4`
+  in place of the seven `--wk-shadow*` tokens (2026-10-16, section 3.2).

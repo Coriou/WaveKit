@@ -15,6 +15,17 @@ session and every machine can pick the work up.
   never designed directly in code. So the canvas must keep matching the app: the design-system
   pass gives every canvas component a named counterpart in the app (inventory board), and a
   change that lands in code without the canvas is a drift to fix.
+- **Explore, then promote** (design system v1, 2026-10-16). The tokens and component recipes have
+  one source, `packages/brand/tokens/ui.css`; the canvas Kit board mirrors it and every board
+  imports Kit. A new look starts on the canvas: a board tries it in a local `<style>` marked
+  `/* wk-explore: <what> */` (or inline). Once the owner approves it, the rule moves into
+  `ui.css` (`python3 -I packages/brand/source/build_ui.py`), Kit is re-synced
+  (`node scripts/web-canvas-kit.mjs docs/web/canvas/Kit.dc.html`) and republished, and the board
+  drops its local copy. `grep -l "wk-explore" docs/web/canvas` lists the open explorations; the
+  drift test (`tests/unit/repo/web-canvas-kit.test.ts`) fails when `ui.css` and Kit disagree.
+  New colours still need the owner's approval (the validator pins the token block by hash). The
+  web app (C) and the Pi pages (B) load the same file. Reference:
+  [`packages/brand/docs/ui-kit.md`](../../packages/brand/docs/ui-kit.md).
 - **Performance is a first-class requirement at every stage** (owner, 2026-10-12): the UI must be
   super responsive, fast and cheap to run. Design decisions count too: weigh the cost of what we
   draw (e.g. `backdrop-filter` glass over a 60 fps waterfall, large blurred surfaces, many live
@@ -68,6 +79,8 @@ Condensed + Noto Sans, Tabler-based icons).
 | Scan planner | "Scan a band" as a pane attached to the Scanner drawer (pushed in as a screen on narrow windows): presets and lanes from the active band plan, one-lane ruler, range table with channel spacing; running mode (capture window, pass fill, ticks, mid-run edits behind Apply). Wired into C | Active, second pass |
 | Identify | Every identify state of the tuned card | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
+| Kit | Styles only: `packages/brand/tokens/ui.css` verbatim plus the canvas fonts; every board imports it first | Mirror of `ui.css` |
+| Components | Design system v1: foundations and every recipe in three scopes (True black + Mono, Ink + phosphor, Paper + Mono), what each replaced, the recipe inventory | Active |
 
 ## Decision log
 
@@ -855,6 +868,44 @@ Condensed + Noto Sans, Tabler-based icons).
   - *Fixed on the way:* "This scan" only lists hits inside the scan's ranges; scan duration uses the
     shell's start time; the one-hop running ruler lost its glow and "covered" fill.
 
+- **Design system v1 approved (owner, 2026-10-16).** The
+  [spec](../superpowers/specs/2026-10-12-design-system-v1-design.md) and its
+  [plan](../superpowers/plans/2026-10-16-design-system-v1.md). One UI kit, canonical in
+  `packages/brand/tokens/ui.css`: the v2.1 token block moved in byte for byte (no new colours),
+  then the scales (type: ten sizes, weights 400 and 700 only; space; control heights; radius;
+  motion; elevation `--wk-e1` to `--wk-e4`), the base rules (focus, selection, reduced motion)
+  and one recipe per component, in three cascade layers (`wk-tokens`, `wk-base`, `wk-recipes`).
+  `tokens/ui.json` is generated from it; the brand validator checks contrast per scope, the 30 KB
+  budget and colour literals outside the token layer, and pins the token block by hash. On the
+  canvas, a "Design system" row holds the Kit board (styles only) and the Components board (every
+  recipe in three scopes beside the variants it replaced, and the inventory).
+  *Why:* the owner asked to "optimise everything": one recipe per component instead of copies
+  per board, and one file the canvas, the Pi pages and the web app all load, so they cannot drift.
+- **Boards migrated onto the kit (2026-10-16; canvas v98–v100).** Every board imports Kit as the
+  first child of its root and lost its token block, `@font-face` rules, copied rules and the
+  local switch, segment and colour-string helpers; state is passed with `aria-*` and `data-*`
+  attributes. Only the approved snaps of spec §4–§5 change what you see (sizes, heights, radii,
+  letter-spacing, quiet selected states); before and after shots of every board, dark and Paper,
+  checked it. Batches in their own harness copies: (a) Scanner, ScanPlanner, Identify;
+  (e) Spectrum, Map; (b) Settings, SettingsPhone, Palette; (c) Activity, Recordings, Messages,
+  Decode, Json; (d) Tuner, Receiver, Listen, Tuned, TunedGallery; then Immersive alone. The
+  `--wk-shadow*` aliases are removed: elevation is `--wk-e1` to `--wk-e4` only, with the same
+  values. [THEME-TOKENS.md](THEME-TOKENS.md) is now the rationale and history and points to
+  `ui.css` for values; [`ui-kit.md`](../../packages/brand/docs/ui-kit.md) is the recipe reference,
+  with the boards that use each recipe.
+- **Drawers are solid (owner, decided 2026-10-12 with the spec; applied 2026-10-16).** Activity,
+  Recordings, Scanner, Settings and the Map drawer use `.wk-drawer`: `--wk-glass-strong`, no
+  blur, `--wk-e3`. Menus, toasts and tooltips are solid too. Blur is left only on the glass
+  islands (one radius, 24 px, dark grounds only), never inside another blurred element, and never
+  on Paper. *Why:* a full-height blurred drawer over the waterfall re-blurs a large region every
+  frame.
+- **Order of the sub-projects: A → C → B (owner, 2026-10-16).** A, the design system, is done;
+  next is C, the web app foundation; B, the Pi pages (`packages/sdr-host/ui`) on the kit, comes
+  after it. This replaces the order A → B → C recorded on 2026-10-12 (spec §10).
+- **Immersive is the interface the web app implements (owner, 2026-10-16).** Sub-project C builds
+  C · Immersive, the chosen shell, with the boards it embeds; their states and interactions are
+  the acceptance criteria (see "Handoff to the dev team").
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -894,7 +945,12 @@ Condensed + Noto Sans, Tabler-based icons).
   in Scan a band? In Immersive's default view the tuned card and saved tags hide both lane names: fine,
   or should one name always win? Dropping a plan onto Your edits places it just below (or refuse?).
 - Island panels on smaller laptop screens; mobile layout.
-- Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
+- Design-system follow-ups (2026-10-16): the Tailwind/shadcn mapping and an app component per
+  recipe (the empty column of the inventory) come with C. Recipes no board uses yet: `.wk-grip`
+  (Immersive keeps its accent resize bar), `.wk-spinner`, `.wk-jump` (Settings keeps its own
+  jump-to fade). Glass budget: the Immersive dark views measured 10–11 blurred elements during
+  the migration against the 6 of spec §8; six are Spectrum's marker chips and zoom, the rest are
+  the islands. Make the marker chips solid when Immersive embeds Spectrum, or relax the count?
 - Theme follow-ups: the owner liked the themes (2026-10-11); confirm the Paper waterfall ramp (a / b / c on the Spectrum board) and
   delete the other two; more light grounds later (a cool "Mist"?) only if asked; whether the
   Ink tint should also follow the accent on the Pi image UI; the Map legend's "Aircraft"
@@ -908,6 +964,14 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
+**Next session: sub-project C, the web app foundation** (owner order 2026-10-16: A → C → B).
+Design system v1 (A) is done: canvas v100, every board on the kit, Kit and Components in the
+"Design system" row, `packages/brand/tokens/ui.css` the one source (decision log, 2026-10-16).
+C implements C · Immersive on that kit: a spec and plans for the real web app, covering the
+Tailwind/shadcn mapping of the recipes (and the app column of the inventory), the performance
+architecture and the mock data server (section 1 below). B, the Pi pages on the kit, follows C.
+New designs keep going through the canvas first (explore → promote, "How we work").
+
 **Resumed 2026-10-16** after four days of core-only work on main. The canvas (v85) is unchanged and
 matches `docs/web/canvas/`. The design system v1 spec
 ([2026-10-12-design-system-v1-design.md](../superpowers/specs/2026-10-12-design-system-v1-design.md),
@@ -915,9 +979,9 @@ approved in chat, written spec awaiting the owner's review) is now pushed. `orig
 is merged in, and CORE-GAPS.md is re-audited against it: web-gaps batches 1–3, band plans and
 scanner follow-ups ticked many items, and a new section lists core features the canvas does not
 draw yet (Activity holes and resets, reception provenance, retention, mesh telemetry and
-neighbours, coverage). Next, in order: the owner reviews the spec, then its implementation plan
-and step 1 (kit source in `packages/brand`). Drawing the new core features is a separate,
-smaller topic that can run alongside.
+neighbours, coverage). The owner then approved the spec and the design system v1 plan ran the
+same day (above). Drawing the new core features is a separate, smaller topic that can run
+alongside.
 
 Handoff written 2026-10-12 after the band plans pass (canvas v83, sticky v84) and the scanner
 one-hop / follow-hits polish (v85). Next: the design
@@ -938,10 +1002,13 @@ or tuning range by design: the web app must plan for an unknown gain table (inde
 where a reviewed source exists).
 
 **Band plans on the canvas, for the design-system pass:** the shared mock `wk-bandplan v1` is copied
-verbatim into Settings, ScanPlanner, Tuner, Palette and Spectrum (like the token block); the real app
-reads one plan store. The `--wk-grp-*` lines are now part of the token block (19 lines).
+verbatim into Settings, ScanPlanner, Tuner, Palette and Spectrum (as the token block was until the
+kit); the real app reads one plan store. The `--wk-grp-*` lines are now part of the token block (19 lines).
 
 ### 1. Design system v1 and web app foundation
+
+*Status 2026-10-16:* the design-system half is done (decision log). The Pi pages bullet below is
+sub-project B and comes after C; the performance-architecture bullet is where C starts.
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
 make it performant and efficient. Guidance agreed in chat (2026-10-11 late):
