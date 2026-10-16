@@ -1239,3 +1239,5 @@ Announcement for the CLI. Spec: [web-gaps-3](specs/web-gaps-3/requirements.md). 
 - Activity: decoder receptions now carry `provenance.sourceId` and `provenance.frequency` when known (null before); Meshtastic flood copies (same `from`, `id`, `portnum`, payload within 30 s) are no longer stored; paging and replay can now reset with the existing `snapshot-reset` / `cursor-gap` reasons when retention deletes a row that is not the oldest. No DTO, frame or reason changed. The CLI has no Activity view and ignores `activity` frames.
 - readsb now receives `--lat`/`--lon` from `station` whether or not `enableMlat` is set; explicit decoder options win. Decoder status is unchanged.
 - The retention policy (fair-share) and the `retention` and `floodCopies` fields of `GET /api/activity/status` follow in an update to this note.
+
+Update to the WG3 note (2026-10-16): for readsb, a complete valid decoder-option `lat`/`lon` pair wins over `station`; a single or invalid option coordinate falls back to the full station pair.

@@ -2625,7 +2625,10 @@ Device telemetry and neighbour links (WG3) are decoded from unique packets only
 sending node's `telemetry`; other telemetry variants are recognised and ignored.
 NEIGHBORINFO_APP (port 71) reports replace the sending node's `neighbours` when the
 report's `node_id` equals the packet's `from` (otherwise the packet counts in
-`invalidPackets`). A malformed payload counts in `decodeErrors` and changes nothing.
+`invalidPackets`). A malformed telemetry or NeighborInfo payload counts in
+`decodeErrors` and leaves `telemetry` and `neighbours` unchanged; as a unique packet
+it still creates or updates the node (counters, `lastSeen`, radio metadata) and sends
+`mesh:update`.
 Both fields are optional: older cores omit them.
 
 #### GET /api/mesh/nodes

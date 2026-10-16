@@ -789,7 +789,8 @@ position history belongs with §4a's event foundation; map reception coverage is
 separate from scanner RF sweep coverage.
 
 - [x] readsb receives `--lat`/`--lon` from `station` independently of
-      `enableMlat`; explicit decoder options still win (WG3).
+      `enableMlat`; a complete valid decoder-option coordinate pair wins (a
+      single option coordinate falls back to the full station pair) (WG3).
 - [ ] Make the station latitude/longitude/altitude configurable by clients
       (today YAML/env with provenance, `GET /api/station`). When unset, derive a visibly approximate location
       from received positions; do not use that estimate as authoritative station
