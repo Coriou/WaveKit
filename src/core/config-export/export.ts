@@ -203,6 +203,39 @@ function isSecretKey(key: string): boolean {
 export const SENSITIVE_KEY_PATTERN =
 	/(host|url|uri|addr|path|dir|file|serial|arg|cmd|command|exec|user|login|account|email|phone|callsign|owner|operator|endpoint|server|ip$|^ip|mac$)/i
 
+/**
+ * Exact dotted paths (`*` for an array index) that SENSITIVE_KEY_PATTERN matches by
+ * accident ("arg" in target/margin, "command", "file" in profiles). Each is a number or
+ * number array in ConfigSchema; the exemption holds only while the runtime value is a
+ * finite number (or an array of finite numbers), anything else stays redacted.
+ */
+export const CONFIG_EXPORT_SENSITIVE_NAME_EXEMPT_PATHS: readonly string[] =
+	Object.freeze([
+		// Frequency list in Hz of a decoder band ("arg" in targets).
+		"decoders.*.band.targetsHz",
+		// History length limit of the tuner relay ("command" in commandHistoryLimit).
+		"tunerRelay.commandHistoryLimit",
+		// Margin in dB for the automatic live demod choice ("arg" in margin).
+		"liveDemod.autoMarginDb",
+		// Minimum false-alarm target per MHz of the scanner detector ("arg" in target).
+		"scanner.detection.faTargetPerMhzMin",
+		// Margin in ppm of the scanner detector ("arg" in margin).
+		"scanner.detection.ppmMargin",
+		// Count limit of spectrum profiles per socket ("file" in profiles).
+		"scanner.ws.spectrumMaxProfiles",
+	])
+const exemptPaths = CONFIG_EXPORT_SENSITIVE_NAME_EXEMPT_PATHS.map(p =>
+	p.split("."),
+)
+
+function isFiniteNumberOrArray(value: unknown): boolean {
+	if (typeof value === "number") return Number.isFinite(value)
+	return (
+		Array.isArray(value) &&
+		value.every(item => typeof item === "number" && Number.isFinite(item))
+	)
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (value === null || typeof value !== "object") return false
 	const proto: unknown = Object.getPrototypeOf(value)
@@ -502,9 +535,13 @@ function walk(
 		const outKey = declared ? key : redactedKey(index)
 		// Outside options a sensitive-named object (sdrHost) is walked: its strings are
 		// redacted by the string rule and its own keys are checked again.
+		const exempt =
+			declared &&
+			isFiniteNumberOrArray(child) &&
+			exemptPaths.some(pattern => pathMatches([...path, key], pattern))
 		if (
 			isSecretKey(key) ||
-			(SENSITIVE_KEY_PATTERN.test(key) && !isPlainObject(child))
+			(!exempt && SENSITIVE_KEY_PATTERN.test(key) && !isPlainObject(child))
 		) {
 			out[outKey] = CONFIG_EXPORT_REDACTED
 			return

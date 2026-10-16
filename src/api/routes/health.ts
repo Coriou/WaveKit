@@ -30,8 +30,11 @@ import {
 	type ComponentHealth,
 } from "../../utils/health-check.js"
 
-// Application version (could be loaded from package.json in production)
-export const APP_VERSION = "1.0.0"
+// Root package.json version, injected at build time (esbuild and vitest define).
+export const APP_VERSION: string =
+	typeof __WAVEKIT_VERSION__ === "string"
+		? __WAVEKIT_VERSION__
+		: "0.0.0-unknown"
 
 // ============================================================================
 // Schema Definitions

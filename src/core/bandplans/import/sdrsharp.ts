@@ -257,7 +257,7 @@ class Tokenizer {
 	private reference(): string {
 		const s = this.s
 		const start = this.pos
-		const limit = Math.min(s.length, start + SDRSHARP_LIMITS.referenceChars + 1)
+		const limit = Math.min(s.length, start + SDRSHARP_LIMITS.referenceChars)
 		let end = start + 1
 		while (end < limit && s.charCodeAt(end) !== 0x3b) end++
 		if (end >= limit) reject()
