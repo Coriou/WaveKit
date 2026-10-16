@@ -382,4 +382,13 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 		expect(counters.buildFailures + counters.published).toBe(1)
 		expect(plain.length).toBe(counters.published)
 	})
+
+	it("a build failing for another reason is not a provenance failure", () => {
+		const { counters } = run(() => binding, {
+			...acars(131_550_000),
+			timestamp: new Date(Number.NaN),
+		})
+		expect(counters).toMatchObject({ published: 0, buildFailures: 1 })
+		expect(counters.provenanceFailures).toBeUndefined()
+	})
 })

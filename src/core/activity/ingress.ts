@@ -162,7 +162,6 @@ export function createActivityIngress(
 				// Rejected possibly because of provenance (req 5.7): keep the
 				// reception with null provenance; only a failed rebuild counts as
 				// a build failure.
-				noteProvenance(decoderId, err, receivedAt.getTime())
 				context = {
 					...context,
 					provenance: { sourceId: null, frequency: null },
@@ -173,6 +172,7 @@ export function createActivityIngress(
 					note(decoderId, "build", rebuildErr, receivedAt.getTime())
 					return
 				}
+				noteProvenance(decoderId, err, receivedAt.getTime())
 			}
 			const plain = envelope
 			const failed = (err: unknown): DecodeEnvelope => {
