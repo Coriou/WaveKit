@@ -24,9 +24,22 @@
  * `hysteresisDb` below it, and closes once `hangMs` of stream time has passed
  * since the last such block. Timing uses sample counts (stream time), so it
  * does not depend on how bursty the network delivers data.
+ *
+ * Noise mode (WG7 req 2.2, `setMode("noise")`): the gate follows a
+ * `NoiseSquelch` (FM quieting of the channel IQ) instead of the power
+ * threshold; the power measurement (`powerDbfs`) keeps running. The power
+ * ("power" mode, used by the manual and auto squelch) code path is unchanged.
  */
 
 import { Transform, type TransformCallback } from "node:stream"
+import {
+	NOISE_QUIETING_DB_DEFAULT,
+	NoiseSquelch,
+	validateNoiseQuietingDb,
+} from "./noise-squelch.js"
+
+/** Gate source: channel power ("power", manual/auto) or FM quieting ("noise"). */
+export type ChannelSquelchMode = "power" | "noise"
 
 export interface ChannelSquelchOptions {
 	/** Channel IQ sample rate in Hz (complex samples per second). */
@@ -37,6 +50,12 @@ export interface ChannelSquelchOptions {
 	hangMs?: number
 	/** Measurement block length in ms (default 10). */
 	blockMs?: number
+	/** Gate source (default "power"). */
+	mode?: ChannelSquelchMode
+	/** Channel bandwidth in Hz for the noise reference (default sampleRate / 2). */
+	bandwidthHz?: number
+	/** Noise-mode quieting threshold in dB (default 6, range 1–30). */
+	noiseQuietingDb?: number
 }
 
 /** Reported floor for an all-zero channel (matches the config minimum). */
@@ -69,6 +88,12 @@ export class ChannelSquelch {
 	private fillQ = 0
 	private lastI = 0
 	private lastQ = 0
+	private readonly sampleRate: number
+	private readonly bandwidthHz: number
+	private squelchMode: ChannelSquelchMode = "power"
+	private quietingDb: number
+	/** Created on the first switch to noise mode, then kept. */
+	private noise: NoiseSquelch | null = null
 
 	constructor(options: ChannelSquelchOptions) {
 		const blockSamples = Math.max(
@@ -82,6 +107,66 @@ export class ChannelSquelch {
 		this.thresholdDbfs = normalizeThreshold(options.thresholdDbfs)
 		this.gateOpen = this.thresholdDbfs === null
 		this.outputOpen = this.gateOpen
+		this.sampleRate = options.sampleRate
+		this.bandwidthHz =
+			options.bandwidthHz !== undefined &&
+			Number.isFinite(options.bandwidthHz) &&
+			options.bandwidthHz > 0
+				? options.bandwidthHz
+				: options.sampleRate / 2
+		this.quietingDb = validateNoiseQuietingDb(
+			options.noiseQuietingDb ?? NOISE_QUIETING_DB_DEFAULT,
+		)
+		if (options.mode === "noise") this.setMode("noise")
+	}
+
+	/** Current gate source. */
+	get mode(): ChannelSquelchMode {
+		return this.squelchMode
+	}
+
+	/** Noise-mode quieting threshold in dB. */
+	get noiseQuietingDb(): number {
+		return this.quietingDb
+	}
+
+	/** Quieting of the last noise-mode block in dB (null outside noise mode). */
+	get noiseQuietingLevelDb(): number | null {
+		return this.squelchMode === "noise" && this.noise
+			? this.noise.lastQuietingDb
+			: null
+	}
+
+	/**
+	 * Switches the gate source at runtime. Entering noise mode starts closed
+	 * with a fresh discriminator state; returning to power mode starts from
+	 * the power threshold's rest state (open when disabled, else closed).
+	 * No-op when the mode is unchanged.
+	 */
+	setMode(mode: ChannelSquelchMode): void {
+		if (mode === this.squelchMode) return
+		if (mode === "noise") {
+			this.noise ??= new NoiseSquelch({
+				sampleRate: this.sampleRate,
+				bandwidthHz: this.bandwidthHz,
+				quietingDb: this.quietingDb,
+				hangMs: this.hangMs,
+				hysteresisDb: this.hysteresisDb,
+			})
+			this.noise.reset()
+			this.squelchMode = "noise"
+			this.gateOpen = false
+			return
+		}
+		this.squelchMode = "power"
+		this.lastAboveMs = Number.NEGATIVE_INFINITY
+		this.gateOpen = this.thresholdDbfs === null
+	}
+
+	/** Sets the noise-mode quieting threshold (1–30 dB; throws otherwise). */
+	setNoiseQuietingDb(db: number): void {
+		this.quietingDb = validateNoiseQuietingDb(db)
+		this.noise?.setQuietingDb(db)
 	}
 
 	/** Current gate state (always true while disabled). */
@@ -98,7 +183,8 @@ export class ChannelSquelch {
 	/** Applies a new threshold (null/0 disables) without resetting timing. */
 	setThreshold(thresholdDbfs: number | null): void {
 		this.thresholdDbfs = normalizeThreshold(thresholdDbfs)
-		if (this.thresholdDbfs === null) this.gateOpen = true
+		if (this.thresholdDbfs === null && this.squelchMode === "power")
+			this.gateOpen = true
 	}
 
 	/** Gates complete blocks; a partial block waits for the next chunk. */
@@ -133,6 +219,11 @@ export class ChannelSquelch {
 				: this.smoothedPower +
 					(power - this.smoothedPower) *
 						Math.min(1, this.blockMs / REPORT_SMOOTHING_MS)
+
+		if (this.squelchMode === "noise" && this.noise) {
+			this.gateOpen = this.noise.processBlock(block)
+			return this.emitBlock(block)
+		}
 
 		const threshold = this.thresholdDbfs
 		if (threshold === null) return this.emitBlock(block)
