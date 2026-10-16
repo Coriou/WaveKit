@@ -18,7 +18,12 @@ import type {
 	DecoderOutput,
 } from "../../../src/decoders/types.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
-import { FakeSources, RateDecoder, iqCaps } from "../../mocks/rate-fakes.js"
+import {
+	FakeSources,
+	RateDecoder,
+	deferred,
+	iqCaps,
+} from "../../mocks/rate-fakes.js"
 
 const POCSAG = 466_075_000
 const ELSEWHERE = 1_090_000_000
@@ -593,5 +598,98 @@ describe("retired instance disposal", () => {
 		} finally {
 			vi.restoreAllMocks()
 		}
+	})
+})
+
+describe("rebuild races with a deferred retired stop", () => {
+	const flush = () => vi.advanceTimersByTimeAsync(0)
+
+	function track() {
+		const events: string[] = []
+		for (const name of [
+			"decoder:created",
+			"decoder:started",
+			"decoder:stopped",
+			"decoder:removed",
+		])
+			manager.on(name, (id: string) => {
+				if (id === "dec") events.push(name)
+			})
+		return events
+	}
+
+	function stageAndDefer(
+		options: Parameters<DecoderManager["stageDecoderOptions"]>[1] = { a: 1 },
+	) {
+		const old = create()
+		const gate = deferred()
+		old.stopGate = gate
+		manager.stageDecoderOptions("dec", options)
+		return { old, gate }
+	}
+
+	it("stopDecoder after the rebuild leaves the new instance stopped", async () => {
+		const { gate } = stageAndDefer()
+		const events = track()
+		await manager.startDecoder("dec", { startMode: "operator" })
+		await manager.stopDecoder("dec")
+		const mark = events.length
+		gate.resolve()
+		await flush()
+		expect(manager.getStatus("dec")?.running).toBe(false)
+		expect(instances[1]!.running).toBe(false)
+		expect(events.filter(e => e === "decoder:created")).toHaveLength(1)
+		expect(events.slice(mark)).not.toContain("decoder:started")
+	})
+
+	it("removeDecoder after the rebuild emits nothing more for the id", async () => {
+		const { gate } = stageAndDefer()
+		const events = track()
+		await manager.startDecoder("dec", { startMode: "operator" })
+		await manager.removeDecoder("dec")
+		const mark = events.length
+		expect(events).toContain("decoder:removed")
+		gate.resolve()
+		await flush()
+		expect(events.slice(mark)).toEqual([])
+		expect(instances[1]!.running).toBe(false)
+	})
+
+	it("concurrent starts build once and start the final adapter once", async () => {
+		stageAndDefer()
+		await Promise.all([
+			manager.startDecoder("dec", { startMode: "operator" }),
+			manager.startDecoder("dec", { startMode: "operator" }),
+		])
+		expect(creates).toHaveLength(2)
+		const fresh = manager.getDecoder("dec") as unknown as RateDecoder
+		expect(fresh).toBe(instances[1])
+		// Concurrent starts of one decoder may both call start(): unchanged from
+		// the frozen base without staging, so only the rebuild count is pinned here.
+		expect(fresh.listenerCount("output")).toBe(1)
+		expect(fresh.output.listenerCount("data")).toBeLessThanOrEqual(1)
+	})
+
+	it("a second start after the first resolves does not rebuild again", async () => {
+		const { gate } = stageAndDefer()
+		await manager.startDecoder("dec", { startMode: "operator" })
+		await manager.startDecoder("dec", { startMode: "operator" })
+		gate.resolve()
+		await flush()
+		expect(creates).toHaveLength(2)
+		expect(instances[1]!.starts).toBe(1)
+		expect(instances[1]!.listenerCount("output")).toBe(1)
+	})
+
+	it("staging again after the rebuild stays pending when the stop is released", async () => {
+		const { gate } = stageAndDefer({ a: "first" })
+		await manager.startDecoder("dec", { startMode: "operator" })
+		expect(manager.isRestartPending("dec")).toBe(false)
+		manager.stageDecoderOptions("dec", { a: "second" })
+		expect(manager.isRestartPending("dec")).toBe(true)
+		gate.resolve()
+		await flush()
+		expect(manager.isRestartPending("dec")).toBe(true)
+		expect(creates).toHaveLength(2)
 	})
 })
