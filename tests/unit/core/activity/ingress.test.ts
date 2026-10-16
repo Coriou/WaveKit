@@ -340,6 +340,22 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 		})
 	})
 
+	it("a throwing lookup on a reception that fails to build counts only the build failure", () => {
+		const out: DecoderOutput = {
+			...acars(131_550_000),
+			timestamp: new Date(Number.NaN),
+		}
+		const { plain, counters } = run(() => {
+			throw new Error("boom")
+		}, out)
+		expect(plain).toHaveLength(0)
+		expect(counters).toMatchObject({
+			published: 0,
+			buildFailures: 1,
+			provenanceFailures: 0,
+		})
+	})
+
 	it("an envelope rejected because of provenance is rebuilt with null provenance", () => {
 		const { presented, counters } = run(
 			() => ({ ...binding, sourceId: "x".repeat(129) }),
@@ -368,11 +384,11 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 			...acars(0),
 			data,
 		})
-		// The envelope builder rejects this payload on its own; provenance must
-		// not add a second count or a throw.
+		// Provenance must not add a throw. Its failure counts only when the
+		// reception is kept; a reception the builder drops is a build failure.
 		expect(presented).toHaveLength(counters.published)
 		expect(counters.published + counters.buildFailures).toBe(1)
-		expect(counters.provenanceFailures).toBe(1)
+		expect(counters.provenanceFailures).toBe(counters.published)
 	})
 
 	it("only a failed rebuild counts as a build failure", () => {

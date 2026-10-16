@@ -132,6 +132,9 @@ export function createActivityIngress(
 				return
 			}
 			let provenance: DecodeProvenance | null = null
+			// Counted only once the envelope is built: a reception dropped for
+			// another reason is a build failure, not a provenance failure.
+			let provenanceError: { err: unknown } | null = null
 			try {
 				provenance = resolveProvenance(
 					output,
@@ -140,7 +143,7 @@ export function createActivityIngress(
 				if (provenance.sourceId === null && provenance.frequency === null)
 					provenance = null
 			} catch (err) {
-				noteProvenance(decoderId, err, receivedAt.getTime())
+				provenanceError = { err }
 			}
 			let context: DecodeEnvelopeContext = {
 				eventId,
@@ -170,8 +173,10 @@ export function createActivityIngress(
 					note(decoderId, "build", rebuildErr, receivedAt.getTime())
 					return
 				}
-				noteProvenance(decoderId, err, receivedAt.getTime())
+				provenanceError = { err }
 			}
+			if (provenanceError !== null)
+				noteProvenance(decoderId, provenanceError.err, receivedAt.getTime())
 			const plain = envelope
 			const failed = (err: unknown): DecodeEnvelope => {
 				counts.presentationFailures++
