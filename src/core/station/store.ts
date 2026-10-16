@@ -24,6 +24,57 @@ export interface StationStoreState {
 
 const CORRUPT_PREFIX = `${STATION_STORE_FILE}.corrupt-`
 
+/** The write path's temporary file: `station.json.<pid>.tmp`. */
+const TMP_PATTERN = /^station\.json\.\d+\.tmp$/
+
+/** Leftover temporary files removed per open (a crash leaves at most one per pid). */
+export const STATION_STORE_TMP_SWEEP_MAX = 16
+
+/**
+ * The revision a fresh layer starts at after a corrupt or unreadable file: above any
+ * revision the lost file can have held, so a stale `If-Match` cannot match again. The clock
+ * (ms) is above every revision reachable by one write per ms; a still-readable `revision`
+ * in the lost file raises it further.
+ */
+function seedRevision(now: number, bytes: Buffer | null): number {
+	let seed = Number.isFinite(now) ? Math.max(0, Math.floor(now)) : 0
+	if (bytes !== null) {
+		try {
+			const raw: unknown = JSON.parse(bytes.toString("utf8"))
+			const previous =
+				typeof raw === "object" && raw !== null && "revision" in raw
+					? raw.revision
+					: undefined
+			if (typeof previous === "number" && Number.isFinite(previous))
+				seed = Math.max(seed, Math.floor(previous) + 1)
+		} catch {
+			// Not JSON: the clock seed stands.
+		}
+	}
+	return Math.min(seed, Number.MAX_SAFE_INTEGER)
+}
+
+/** Removes `station.json.<pid>.tmp` files a crash left behind (bounded, best effort). */
+async function sweepTmp(stateDir: string, log: Logger): Promise<void> {
+	let entries: string[]
+	try {
+		entries = await readdir(stateDir)
+	} catch {
+		return
+	}
+	const stale = entries
+		.filter(name => TMP_PATTERN.test(name))
+		.slice(0, STATION_STORE_TMP_SWEEP_MAX)
+	for (const name of stale) {
+		await unlink(join(stateDir, name)).catch((error: unknown) => {
+			log.debug(
+				{ err: error, name },
+				"Could not remove a stale station tmp file",
+			)
+		})
+	}
+}
+
 const FileSchema = z
 	.object({
 		schemaVersion: z.number(),
@@ -106,7 +157,9 @@ async function readBounded(path: string): Promise<Buffer | null | "oversized"> {
 	try {
 		handle = await open(path, "r")
 	} catch (error: unknown) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+		// No file can exist there: a missing file or a path through a non-directory.
+		const code = (error as NodeJS.ErrnoException).code
+		if (code === "ENOENT" || code === "ENOTDIR") return null
 		throw error
 	}
 	try {
@@ -158,7 +211,8 @@ async function quarantine(
 
 /**
  * Loads the UI layer. Missing is empty; corrupt, oversized or wrong-version is warned once,
- * moved to `station.json.corrupt-<ms>` and loads empty. Never throws.
+ * moved to `station.json.corrupt-<ms>` and loads empty with a seeded revision (as does an
+ * unreadable file). Stale temporary files of the write path are removed first. Never throws.
  */
 export async function loadStationStore(
 	stateDir: string,
@@ -166,6 +220,7 @@ export async function loadStationStore(
 	now: () => number = Date.now,
 ): Promise<StationStoreState> {
 	const path = join(stateDir, STATION_STORE_FILE)
+	await sweepTmp(stateDir, log)
 	let bytes: Buffer | null | "oversized"
 	try {
 		bytes = await readBounded(path)
@@ -174,7 +229,7 @@ export async function loadStationStore(
 			{ err: error },
 			"Station store unreadable; using an empty UI layer",
 		)
-		return { revision: 0, fields: {} }
+		return { revision: seedRevision(now(), null), fields: {} }
 	}
 	if (bytes === null) return { revision: 0, fields: {} }
 	let reason: string
@@ -191,8 +246,12 @@ export async function loadStationStore(
 		{ reason },
 		"Station store is corrupt; ignoring it and starting empty",
 	)
-	await quarantine(stateDir, now(), log)
-	return { revision: 0, fields: {} }
+	const at = now()
+	await quarantine(stateDir, at, log)
+	return {
+		revision: seedRevision(at, bytes === "oversized" ? null : bytes),
+		fields: {},
+	}
 }
 
 export function serializeStationStore(state: StationStoreState): string {

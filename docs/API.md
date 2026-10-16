@@ -577,7 +577,11 @@ provenance `ui` and write time; schema version 1, at most 4,096 bytes). It is
 written to a temporary file, synced and renamed before the change applies; writes
 are serialised. A missing file is an empty layer. A corrupt, oversized or
 other-version file is logged once, moved aside to `station.json.corrupt-<ms>`
-(one kept) and loads empty; startup never fails on it. The file is read in both
+(one kept) and loads empty; startup never fails on it. The empty layer (also after
+an unreadable file) starts at a `revision` seeded from the clock in ms, or above the
+lost file's `revision` when that is still readable, so an `If-Match` taken before
+cannot match a later write. Temporary files a crash left behind
+(`station.json.<pid>.tmp`, at most 16 per start) are removed at startup. The file is read in both
 access modes, so UI values written in protected mode still apply in legacy mode,
 where they cannot be changed.
 
