@@ -5,6 +5,7 @@ import { bandplansFor } from "../bandplan/index.js"
 import type { Bandplan, BandRegionCode } from "../bandplan/index.js"
 import type { FreqRange, IqFormat } from "../../spectrum/types.js"
 import type {
+	DecodedElsewhereRange,
 	DecoderCoverageView,
 	Hop,
 	HopPlan,
@@ -30,6 +31,7 @@ import type { HopPlanInput } from "./hop-planner.js"
 import { isRangeEnabled } from "./range-contract.js"
 import { lockoutExclusionsFor, planWithLockouts } from "./lockouts.js"
 import type { LockoutTarget } from "./lockouts.js"
+import { computeDecodedElsewhere } from "./decoded-elsewhere.js"
 import type { StoredScanJobSpec } from "./range-contract.js"
 
 /**
@@ -747,6 +749,8 @@ export function normaliseSpec(
 	}
 	const kind = spec.kind ?? "discover"
 	if (spec.signalsOnly !== undefined) prov["signalsOnly"] = "operator"
+	if (spec.skipDecodedElsewhere !== undefined)
+		prov["skipDecodedElsewhere"] = "operator"
 	if (kind === "monitor" && spec.signalsOnly === true) {
 		issues.push(
 			issue("signals-only-unsupported", "error", "monitor jobs need decoders"),
@@ -805,6 +809,8 @@ export function normaliseSpec(
 		provenance: prov,
 	}
 	if (spec.signalsOnly !== undefined) n.signalsOnly = spec.signalsOnly
+	if (spec.skipDecodedElsewhere !== undefined)
+		n.skipDecodedElsewhere = spec.skipDecodedElsewhere
 	return { spec: n, source, issues }
 }
 
@@ -844,19 +850,96 @@ export function planForSpec(
  * WG2 req 12: the job's plan with the lockout exclusions of its source. Sweep jobs only;
  * `lockoutExclusions` is absent for in-window jobs and when the source has no lockout inside the
  * job's enabled ranges, so plans and previews without lockouts are unchanged.
+ *
+ * WG6 req 1: `decodedElsewhere` lists the ranges other decoders cover (absent when none);
+ * `decodedElsewhereIssues` carries its warnings (absent when none). With `skipDecodedElsewhere`
+ * on a sweep job the ranges join the lockouts as exclusions unless that would empty the plan.
  */
 export function planJob(
 	spec: NormalisedJobSpec,
 	ctx: PreviewContext,
-): { plan: HopPlan; lockoutExclusions?: LockoutExclusion[] } {
+): {
+	plan: HopPlan
+	lockoutExclusions?: LockoutExclusion[]
+	decodedElsewhere?: DecodedElsewhereRange[]
+	decodedElsewhereIssues?: PlanIssue[]
+} {
+	const decoded = decodedElsewhereFor(spec, ctx)
 	const targets =
 		spec.mode === "sweep" ? ctx.lockouts?.(spec.sourceId) : undefined
 	const candidates =
 		targets === undefined || targets.length === 0
 			? []
 			: lockoutExclusionsFor(targets, spec.ranges.filter(isRangeEnabled))
-	if (candidates.length === 0) return { plan: planForSpec(spec, ctx) }
-	return planWithLockouts(extra => planForSpec(spec, ctx, extra), candidates)
+	const skip =
+		spec.mode === "sweep" &&
+		spec.skipDecodedElsewhere === true &&
+		decoded.ranges.length > 0
+	const issues = decoded.issues
+	// Today's plan (lockouts by their own rule) is computed first so the flag never changes
+	// which lockouts apply; decoded ranges are layered on top only when hops remain.
+	const base: { plan: HopPlan; lockoutExclusions?: LockoutExclusion[] } =
+		candidates.length === 0
+			? { plan: planForSpec(spec, ctx) }
+			: planWithLockouts(extra => planForSpec(spec, ctx, extra), candidates)
+	let result = base
+	let applied = false
+	if (skip) {
+		const locked: ScanExclusion[] = (base.lockoutExclusions ?? [])
+			.filter(x => x.applied)
+			.map(x => ({ startHz: x.startHz, endHz: x.endHz }))
+		const decodedEx: ScanExclusion[] = decoded.ranges.map(r => ({
+			startHz: r.startHz,
+			endHz: r.endHz,
+		}))
+		const plan = planForSpec(spec, ctx, [...locked, ...decodedEx])
+		if (plan.hops.length > 0 || base.plan.hops.length === 0) {
+			applied = true
+			result = { ...base, plan }
+		} else {
+			issues.push(
+				issue(
+					"decoded-elsewhere-not-applied",
+					"warning",
+					"skipping the ranges decoded elsewhere would leave no hop; none were skipped",
+					{ ranges: decoded.ranges.length },
+				),
+			)
+		}
+	}
+	return {
+		...result,
+		...(decoded.ranges.length > 0
+			? { decodedElsewhere: decoded.ranges.map(r => ({ ...r, applied })) }
+			: {}),
+		...(issues.length > 0 ? { decodedElsewhereIssues: issues } : {}),
+	}
+}
+
+/** WG6 req 1.8: the decoder view is read at most once per plan; a throwing view means none. */
+function decodedElsewhereFor(
+	spec: NormalisedJobSpec,
+	ctx: PreviewContext,
+): { ranges: DecodedElsewhereRange[]; issues: PlanIssue[] } {
+	if (ctx.decoderCoverage === undefined) return { ranges: [], issues: [] }
+	let views: readonly DecoderCoverageView[]
+	try {
+		views = ctx.decoderCoverage()
+	} catch {
+		return { ranges: [], issues: [] }
+	}
+	if (views.length === 0) return { ranges: [], issues: [] }
+	const r = computeDecodedElsewhere(views, spec)
+	const issues: PlanIssue[] = []
+	if (r.truncated)
+		issues.push(
+			issue(
+				"decoded-elsewhere-truncated",
+				"warning",
+				"too many decoders, targets or ranges: the decoded-elsewhere list is incomplete",
+			),
+		)
+	return { ranges: r.ranges, issues }
 }
 
 /** In-window jobs ignore per-range dwell, the same way they ignore the job dwell. */
@@ -1004,7 +1087,9 @@ export function previewPlan(
 	ctx: PreviewContext,
 ): PlanPreview {
 	const { spec: n, source, issues } = normaliseSpec(spec, ctx)
-	const { plan, lockoutExclusions } = planJob(n, ctx)
+	const { plan, lockoutExclusions, decodedElsewhere, decodedElsewhereIssues } =
+		planJob(n, ctx)
+	if (decodedElsewhereIssues) issues.push(...decodedElsewhereIssues)
 	const s = ctx.settings
 	const explained = issues.some(i => PLAN_EMPTY_CAUSES.has(i.code))
 	if (n.mode === "sweep" && plan.hops.length === 0 && !explained) {
@@ -1095,6 +1180,7 @@ export function previewPlan(
 		impact,
 		issues,
 		...(lockoutExclusions ? { lockoutExclusions } : {}),
+		...(decodedElsewhere ? { decodedElsewhere } : {}),
 	}
 }
 
@@ -1153,5 +1239,7 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 	}
 	if (n.thresholdDb !== null) out.thresholdDb = n.thresholdDb
 	if (n.signalsOnly !== undefined) out.signalsOnly = n.signalsOnly
+	if (n.skipDecodedElsewhere !== undefined)
+		out.skipDecodedElsewhere = n.skipDecodedElsewhere
 	return out
 }
