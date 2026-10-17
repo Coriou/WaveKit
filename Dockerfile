@@ -702,7 +702,7 @@ VOLUME ["/var/log/wavekit", "/var/run/wavekit"]
 WORKDIR /app
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD s6-svstat -u /run/service/wavekit-api > /dev/null 2>&1 || exit 1
+    CMD /command/s6-svstat -u /run/service/wavekit-api > /dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/init"]
 
@@ -815,7 +815,7 @@ RUN chmod -R 755 /etc/s6-overlay/s6-rc.d
 EXPOSE 5259
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD s6-svstat -u /run/service/sdrpp-server > /dev/null 2>&1 || exit 1
+    CMD /command/s6-svstat -u /run/service/sdrpp-server > /dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/init"]
 
