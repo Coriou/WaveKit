@@ -5,23 +5,30 @@
 import net from "node:net"
 
 const ID = /^[0-9a-f]{32}$/
-// Same filter as core's isDialableEndpoint: unicast, not loopback or link-local.
-const dialable = address => {
+// Same filter as core's isDialableEndpoint (src/core/endpoint-probe.ts): a
+// literal unicast IP in any spelling, never loopback, link-local, multicast,
+// mapped or with a zone id.
+// IPv6 rules sit in their own list: `::ffff:0:0/96` would also match IPv4 input.
+const blockedV4 = new net.BlockList()
+blockedV4.addSubnet("0.0.0.0", 8, "ipv4")
+blockedV4.addSubnet("127.0.0.0", 8, "ipv4")
+blockedV4.addSubnet("169.254.0.0", 16, "ipv4")
+blockedV4.addSubnet("224.0.0.0", 4, "ipv4")
+blockedV4.addSubnet("240.0.0.0", 4, "ipv4")
+const blockedV6 = new net.BlockList()
+blockedV6.addSubnet("::", 96, "ipv6")
+blockedV6.addSubnet("::ffff:0:0", 96, "ipv6")
+blockedV6.addSubnet("fe80::", 10, "ipv6")
+blockedV6.addSubnet("ff00::", 8, "ipv6")
+
+export function isDialableEndpoint(address) {
+	if (typeof address !== "string" || address.includes("%")) return false
 	const family = net.isIP(address)
-	if (family === 4) {
-		const [a, b] = address.split(".").map(Number)
-		return !(a === 0 || a === 127 || (a === 169 && b === 254) || a >= 224)
-	}
-	if (family !== 6) return false
-	const lower = address.toLowerCase()
-	return !(
-		lower === "::" ||
-		lower === "::1" ||
-		/^fe[89ab]/.test(lower) ||
-		lower.startsWith("ff") ||
-		lower.startsWith("::ffff:")
-	)
+	if (family === 0) return false
+	if (family === 4) return !blockedV4.check(address, "ipv4")
+	return !blockedV6.check(address, "ipv6") && !blockedV4.check(address, "ipv6")
 }
+
 const authority = (host, port) =>
 	net.isIPv6(host) ? `[${host}]:${port}` : `${host}:${port}`
 
@@ -80,15 +87,16 @@ export async function chooseEndpoint(
 		!self ||
 		!list ||
 		list.iqPort !== iqPort ||
+		list.apiPort !== apiPort ||
 		!Array.isArray(list.addresses)
 	)
 		return { host, reason: "no endpoint list; using the given host" }
 	for (const entry of list.addresses) {
 		const address = entry?.address
-		if (typeof address !== "string" || !dialable(address)) continue
+		if (typeof address !== "string" || !isDialableEndpoint(address)) continue
 		if (address === host)
 			return { host, reason: "given host is the best endpoint" }
-		const other = await receiverId(fetchFn, address, list.apiPort ?? apiPort)
+		const other = await receiverId(fetchFn, address, apiPort)
 		if (other?.id === self.id && (await header(address, iqPort)))
 			return {
 				host: address,

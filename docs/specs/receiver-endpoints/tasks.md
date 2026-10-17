@@ -12,6 +12,8 @@ Status: all tasks implemented and software-tested; the Pi side is merged, the co
   - _Requirements: 3.1–3.6_
   - **Property 2: No unverified switch**
   - **Property 3: Bounded switching and anchor fallback**
+  - **Property 4: Address filter is spelling-independent**
+  - **Property 5: Windowed fallback**
 - [x] 5 Bridge `--auto`
   - _Requirements: 4.1_
 - [x] 6 Checkpoint: touched tests, contracts, CLI suite, typecheck, lint; announce the source status contract (Main runs the full root suite)

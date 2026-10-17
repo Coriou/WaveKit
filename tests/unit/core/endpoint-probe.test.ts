@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import * as net from "node:net"
 import { once } from "node:events"
 import {
+	configuredApiPort,
 	createEndpointProbe,
 	isDialableEndpoint,
+	plainHttpApiUrl,
 	urlAuthority,
 } from "../../../src/core/endpoint-probe.js"
 
@@ -113,5 +115,17 @@ describe("endpoint probe", () => {
 		expect(
 			await createEndpointProbe({ fetchFn }).receiverId("192.0.2.69", 8080),
 		).toBeNull()
+	})
+
+	it("takes the probe's API port from the configured sdr-host URL, else 8080", () => {
+		expect(configuredApiPort(undefined)).toBe(8080)
+		expect(configuredApiPort("http://192.0.2.69:9000")).toBe(9000)
+		expect(configuredApiPort("http://pi.example")).toBe(80)
+		expect(configuredApiPort("https://pi.example/status")).toBe(443)
+		expect(plainHttpApiUrl(undefined)).toBe(true)
+		expect(plainHttpApiUrl("http://192.0.2.69:8080")).toBe(true)
+		expect(plainHttpApiUrl("http://192.0.2.69:8080/")).toBe(true)
+		expect(plainHttpApiUrl("https://192.0.2.69:8443")).toBe(false)
+		expect(plainHttpApiUrl("http://proxy.example/pi1")).toBe(false)
 	})
 })

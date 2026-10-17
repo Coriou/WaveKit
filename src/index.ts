@@ -131,7 +131,11 @@ import {
 	EndpointSelector,
 	type EndpointSelectionTarget,
 } from "./core/endpoint-selector.js"
-import { createEndpointProbe } from "./core/endpoint-probe.js"
+import {
+	configuredApiPort,
+	createEndpointProbe,
+	plainHttpApiUrl,
+} from "./core/endpoint-probe.js"
 import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
@@ -1459,8 +1463,16 @@ async function main(): Promise<void> {
 					s.type === "rtl_tcp" &&
 					s.host &&
 					s.port &&
-					s.sdrHost?.endpointSelection === "auto"
-						? [{ sourceId: s.id, configuredHost: s.host, port: s.port }]
+					s.sdrHost?.endpointSelection === "auto" &&
+					plainHttpApiUrl(s.sdrHost.apiUrl)
+						? [
+								{
+									sourceId: s.id,
+									configuredHost: s.host,
+									port: s.port,
+									apiPort: configuredApiPort(s.sdrHost.apiUrl),
+								},
+							]
 						: [],
 			)
 			if (endpointTargets.length > 0 && sdrHostPoller) {
@@ -1521,9 +1533,11 @@ async function main(): Promise<void> {
 			const reason =
 				s.type !== "rtl_tcp" || !s.host || !s.port
 					? "it applies only to rtl_tcp sources with a host and port"
-					: !endpointSelector
-						? "it needs resources.enabled and the SDR host poller"
-						: null
+					: !plainHttpApiUrl(s.sdrHost.apiUrl)
+						? "sdrHost.apiUrl must be a plain http://host[:port] URL"
+						: !endpointSelector
+							? "it needs resources.enabled and the SDR host poller"
+							: null
 			if (reason)
 				log.warn(
 					{ sourceId: s.id },

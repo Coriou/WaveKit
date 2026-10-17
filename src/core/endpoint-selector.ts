@@ -45,6 +45,12 @@ export interface EndpointSelectionTarget {
 	configuredHost: string
 	/** `port` from the source config; must equal the receiver's IQ port. */
 	port: number
+	/**
+	 * Port of the configured sdr-host API (from `sdrHost.apiUrl`, else 8080).
+	 * Candidates are probed on this port only, never on a reported one, so a
+	 * receiver's list cannot turn core into a scanner of arbitrary ports.
+	 */
+	apiPort: number
 }
 
 interface TargetState extends EndpointSelectionTarget {
@@ -154,12 +160,13 @@ export class EndpointSelector {
 			}
 			if (
 				endpoints.iqPort !== target.port ||
+				endpoints.apiPort !== target.apiPort ||
 				!endpoints.addresses.some(a => a.address === active)
 			)
 				return fallback("fallback: receiver no longer lists the endpoint")
 			if (receiverId !== target.verifiedReceiverId) {
 				// sdr-host restarted: keep the endpoint only if it is still the same receiver.
-				const seen = await this.probe.receiverId(active, endpoints.apiPort)
+				const seen = await this.probe.receiverId(active, target.apiPort)
 				if (!this.stillActive(target, active)) return
 				if (seen !== receiverId)
 					return fallback("fallback: receiver identity changed")
@@ -167,12 +174,21 @@ export class EndpointSelector {
 			}
 		}
 
-		if (endpoints.iqPort !== target.port) {
+		if (
+			endpoints.iqPort !== target.port ||
+			endpoints.apiPort !== target.apiPort
+		) {
 			if (!target.portMismatchLogged) {
 				target.portMismatchLogged = true
 				this.log.warn(
-					{ sourceId, port: target.port, iqPort: endpoints.iqPort },
-					"Endpoint selection idle: the source port is not the receiver's IQ port",
+					{
+						sourceId,
+						port: target.port,
+						iqPort: endpoints.iqPort,
+						apiPort: target.apiPort,
+						reportedApiPort: endpoints.apiPort,
+					},
+					"Endpoint selection idle: the receiver's ports differ from the configured source and API ports",
 				)
 			}
 			return
@@ -192,10 +208,7 @@ export class EndpointSelector {
 			)
 		if (!candidate) return
 
-		const seen = await this.probe.receiverId(
-			candidate.address,
-			endpoints.apiPort,
-		)
+		const seen = await this.probe.receiverId(candidate.address, target.apiPort)
 		if (!this.stillActive(target, active)) return
 		const ok =
 			seen === receiverId &&

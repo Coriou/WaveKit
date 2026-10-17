@@ -66,10 +66,39 @@ export const SOURCE_KEEPALIVE_DELAY_MS = 5000
 
 /** Reconnect delay after a deliberate endpoint switch (not a failure). */
 export const SOURCE_RETARGET_RECONNECT_MS = 250
-/** A session on a selected endpoint shorter than this counts as a failure. */
-export const SOURCE_ENDPOINT_STABLE_MS = 60_000
-/** Failures on a selected endpoint after which the source returns to its configured host. */
-export const SOURCE_ENDPOINT_FALLBACK_FAILURES = 2
+/**
+ * Fallback from a selected endpoint (receiver-endpoints 3.4): this many failures
+ * (a failed attempt, or any session that ends without a deliberate switch)
+ * within SOURCE_ENDPOINT_FAILURE_WINDOW_MS send the source back to its
+ * configured host. An endpoint that fails more often than every 300 s (3 inside
+ * 600 s) therefore falls back, whatever each session's length. A dead endpoint falls
+ * back after 3 refused attempts: the 250 ms switch delay, then reconnect
+ * backoff of 2-4 s and 4-8 s, about 12.3 s at most. Isolated drops more than
+ * 300 s apart never trigger it.
+ */
+export const SOURCE_ENDPOINT_FALLBACK_FAILURES = 3
+export const SOURCE_ENDPOINT_FAILURE_WINDOW_MS = 10 * 60_000
+
+/** Failure times on a selected endpoint, in a sliding window. */
+export class EndpointFailureWindow {
+	private times: number[] = []
+
+	constructor(
+		private readonly threshold = SOURCE_ENDPOINT_FALLBACK_FAILURES,
+		private readonly windowMs = SOURCE_ENDPOINT_FAILURE_WINDOW_MS,
+	) {}
+
+	/** Records a failure at `now`; true when the window now holds the threshold. */
+	record(now: number): boolean {
+		this.times = this.times.filter(t => now - t < this.windowMs)
+		this.times.push(now)
+		return this.times.length >= this.threshold
+	}
+
+	reset(): void {
+		this.times = []
+	}
+}
 
 // Re-export types from config for convenience
 export type { SourceConfig, SourceCaps } from "../config.js"
@@ -257,10 +286,8 @@ interface SourceState {
 	retargetPending: boolean
 	/** connect() still awaits its first attempt; that attempt must settle it. */
 	connectPending: boolean
-	/** Failed attempts and short sessions on the selected endpoint since the switch. */
-	endpointFailures: number
-	/** When the current session connected; null while not connected. */
-	sessionStartedAt: number | null
+	/** Failures on the selected endpoint since the last switch (sliding window). */
+	endpointFailures: EndpointFailureWindow
 
 	metricsTimer: ReturnType<typeof setInterval> | null
 	stallTimer: ReturnType<typeof setInterval> | null
@@ -747,8 +774,7 @@ export class SourceManager extends EventEmitter {
 			endpoint: null,
 			retargetPending: false,
 			connectPending: false,
-			endpointFailures: 0,
-			sessionStartedAt: null,
+			endpointFailures: new EndpointFailureWindow(),
 			metricsTimer: null,
 			stallTimer: null,
 			stopping: false,
@@ -1400,7 +1426,6 @@ export class SourceManager extends EventEmitter {
 					state.metricTicksSinceConnect = 0
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
-					state.sessionStartedAt = Date.now()
 					state.lastError = undefined
 					// Connected settlement precedes reentrant lifecycle notifications.
 					safeResolve()
@@ -1604,7 +1629,7 @@ export class SourceManager extends EventEmitter {
 					state.attempt === attempt &&
 					state.socket === socket
 				const wasConnected = state.connected
-				if (owns) this.noteEndpointClose(id, state, wasConnected)
+				if (owns) this.noteEndpointClose(id, state)
 				if (owns) {
 					attempt.phase = "closed"
 					attempt.sessionId = null
@@ -2108,32 +2133,20 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
-	 * Counts a closed session or failed attempt on a selected endpoint and, after
-	 * SOURCE_ENDPOINT_FALLBACK_FAILURES of them, sends the source back to its
-	 * configured host before the reconnect is scheduled (receiver-endpoints 3.4).
-	 * Independent of the receiver's API, so a dead endpoint is left even when no
-	 * poll report arrives. A deliberate switch never counts.
+	 * Counts a closed session or failed attempt on a selected endpoint and, once
+	 * EndpointFailureWindow fires, sends the source back to its configured host
+	 * before the reconnect is scheduled (receiver-endpoints 3.4). Independent of
+	 * the receiver's API, so a dead endpoint is left even when no poll report
+	 * arrives. A deliberate switch never counts.
 	 */
-	private noteEndpointClose(
-		id: string,
-		state: SourceState,
-		wasConnected: boolean,
-	): void {
-		const startedAt = state.sessionStartedAt
-		state.sessionStartedAt = null
+	private noteEndpointClose(id: string, state: SourceState): void {
 		if (state.activeHost === null || state.retargetPending) return
-		const stable =
-			wasConnected &&
-			startedAt !== null &&
-			Date.now() - startedAt >= SOURCE_ENDPOINT_STABLE_MS
-		state.endpointFailures = stable ? 0 : state.endpointFailures + 1
-		if (stable || state.endpointFailures < SOURCE_ENDPOINT_FALLBACK_FAILURES)
-			return
+		if (!state.endpointFailures.record(Date.now())) return
 		const left = state.activeHost
 		const configured = state.config.host
 		if (!configured) return
 		state.activeHost = null
-		state.endpointFailures = 0
+		state.endpointFailures.reset()
 		state.endpoint = {
 			configuredHost: configured,
 			activeHost: configured,
@@ -2192,7 +2205,7 @@ export class SourceManager extends EventEmitter {
 		const current = state.activeHost ?? state.config.host
 		if (host === current) return true
 		state.activeHost = host === state.config.host ? null : host
-		state.endpointFailures = 0
+		state.endpointFailures.reset()
 		state.endpoint = {
 			configuredHost: state.config.host,
 			activeHost: host,

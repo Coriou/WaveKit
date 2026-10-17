@@ -51,14 +51,25 @@ the ports is not reflected there (documented). `validate_stock` additionally req
 sdr-host API, which is the trust anchor; it never repoints its URL at a selected
 endpoint. After each successful poll it parses `receiverId` and `endpoints` with a
 Zod schema (`parseReceiverEndpoints`) and emits them as a separate
-`receiver-endpoints` event. Every address must pass `isDialableEndpoint`: a literal
-unicast IP that is not loopback, unspecified, link-local, multicast, broadcast or
-IPv4-mapped. Any other entry drops the whole report, and so does a redirected
-answer. The `status` event payload (`SdrHostStatus`) is unchanged, so
+`receiver-endpoints` event. Every address must pass `isDialableEndpoint`, which
+rejects zone ids (`%`) and non-literals, then classifies the address with
+`net.BlockList`, so expanded, compressed, upper-case and dotted-tail IPv6 spellings
+are judged by their value. IPv4 refuses 0/8, 127/8, 169.254/16, 224/4 and 240/4,
+which includes 255.255.255.255. IPv6 refuses ::/96 (unspecified, loopback and
+IPv4-compatible), ::ffff:0:0/96 (all IPv4-mapped), fe80::/10 and ff00::/8, and an
+IPv6 address is also checked against the IPv4 rules. The IPv6 rules sit in their
+own list because Node matches IPv4 input against `::ffff:0:0/96`. NAT64
+(64:ff9b::/96) and 6to4 (2002::/16) addresses are accepted: they reach only a
+translator's or relay's own network, never core's loopback, and a switch still needs
+the receiver's `receiverId` and an `RTL0` header. Any other entry
+drops the whole report, and so does a redirected answer. The `status` event payload (`SdrHostStatus`) is unchanged, so
 `/api/resources` stays byte-identical.
 
 `EndpointSelector` (`src/core/endpoint-selector.ts`) is created in `src/index.ts`
-only for startup sources that set `sdrHost.endpointSelection: auto`, and only when
+only for startup sources that set `sdrHost.endpointSelection: auto` and whose
+`sdrHost.apiUrl` is absent or a plain `http://host[:port]` URL (probes use
+`http://<addr>:<that port>/api/status`; an `https` or path-prefixed URL is warned
+and skipped), and only when
 the resource monitor and poller run. Otherwise startup logs a per-source warning
 with the reason. Sources added at runtime are not covered. The selector acts on a
 source only while its live config still matches the startup target (`rtl_tcp`,
@@ -71,12 +82,14 @@ that arrives mid-probe is dropped. On each report:
    receiver no longer lists the active address or its IQ port changed, or when the
    `receiverId` changed and the active address does not answer with the new one.
 2. It does nothing without a report, while the source is disconnected, within the
-   5-minute hold-down after an upgrade, or when the source port is not the
-   receiver's `iqPort` (warned once).
+   5-minute hold-down after an upgrade, or when the receiver's `iqPort` or
+   `apiPort` differs from the source port or the configured API port (warned
+   once). On a selected endpoint, such a difference sends the source home.
 3. The candidate is the first listed address that is ranked above the active host
    (a configured host that is not in the list counts as unranked) and is out of
    backoff. The probe (`src/core/endpoint-probe.ts`) checks that
-   `GET http://<addr>:<apiPort>/api/status` (2 s timeout, no redirects, body capped
+   `GET http://<addr>:<configured API port>/api/status` (the port of
+   `sdrHost.apiUrl`, else 8080, never a reported one; 2 s timeout, no redirects, body capped
    at 256 KB) returns the same `receiverId`, then that a TCP connection to
    `<addr>:<port>` returns 12 bytes starting `RTL0` within 3 s and is closed
    without sending anything. On success the selector calls `retarget`. On failure
@@ -85,8 +98,12 @@ that arrives mid-probe is dropped. On each report:
 
 Failure fallback lives in SourceManager, so it does not depend on the receiver's
 API answering. On a selected (non-configured) host, every failed attempt and every
-session shorter than 60 s counts. After 2 of them the source goes back to its
-configured host before the next reconnect is scheduled, its `endpoint` reads
+session that ends without a deliberate switch counts, whatever its length
+(`EndpointFailureWindow`). After 3 of them within 10 minutes the source goes back
+to its configured host before the next reconnect is scheduled. In numbers: an
+endpoint that fails more often than every 300 s falls back, a dead one falls back after 3
+refused attempts (250 ms plus backoffs of 2–4 s and 4–8 s, at most about 12.3 s),
+and drops more than 300 s apart never trigger it. On fallback its `endpoint` reads
 `fallback: selected endpoint failed`, and SourceManager emits `endpoint-fallback`.
 The selector then backs that address off.
 
@@ -130,6 +147,14 @@ Property 2: No unverified switch. For any sequence of poll results and probe out
 the active host changes to a candidate only on a step where both checks succeeded for
 that candidate and the receiver ID matched. Validates 3.2, 3.6.
 
-Property 3: Bounded switching and anchor fallback. For any sequence, switches are at
-least the hold-down apart, and two consecutive failures on a non-configured host always
-end at the configured host. Validates 3.3, 3.4.
+Property 3: Bounded switching and anchor fallback. For any sequence, upgrades are at
+least the hold-down apart, and an endpoint that SourceManager left is not chosen again
+within its backoff. Validates 3.3, 3.4.
+
+Property 4: Address filter is spelling-independent. For every expanded, compressed,
+upper-case or dotted-tail spelling of a refused IPv4, IPv6 or mapped address,
+`isDialableEndpoint` (and the bridge's copy) returns false. Documentation and private
+unicast addresses in any spelling return true, and false with a zone id. Validates 3.6.
+
+Property 5: Windowed fallback. `EndpointFailureWindow.record` fires exactly when the
+last 10 minutes hold at least 3 failures. Validates 3.4.

@@ -55,8 +55,9 @@ returns a valid `RTL0` header within a bounded timeout. The probe sends no comma
 does. Each source switches at most once per hold-down period. No candidate is retried
 before its own backoff has elapsed.
 
-3.4 When the active endpoint fails twice in a row, core falls back to the configured
-host and resumes normal reconnect backoff there. The configured host stays the anchor.
+3.4 When a selected endpoint fails 3 times within 10 minutes, core falls back to the
+configured host and resumes normal reconnect backoff there. A failure is a failed
+connection attempt, or any session that ends without a deliberate switch. The configured host stays the anchor.
 It is never rewritten in config.
 
 3.5 Source status reports the configured host, the active host, the reason for the last
@@ -70,6 +71,11 @@ other source. Any failed check, timeout, parse error or ID mismatch leaves the a
 host unchanged. Trust in a candidate comes from the configured host's own endpoint
 list plus a valid `RTL0` header on the candidate. A matching `receiverId` only
 confirms that the candidate is the same receiver; it authenticates nothing (1.4).
+A listed address must be a unicast IP in every spelling: never loopback, unspecified,
+link-local, multicast, reserved, broadcast, IPv4-mapped or IPv4-compatible, and never
+with a zone id. Core probes a candidate's API only on the configured API port, never
+on a port the receiver reports. A report whose `apiPort` or `iqPort` differs from the
+configured ones leaves selection idle.
 
 3.7 The CLI and web source-status guards accept the new `endpoint` field.
 The field is omitted, never null, while selection is `off`.

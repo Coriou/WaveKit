@@ -63,4 +63,23 @@ describe("pi-lan-bridge --auto endpoint choice (receiver-endpoints 4.1)", () => 
 		})
 		expect(named).toHaveBeenCalledTimes(1)
 	})
+
+	it("probes only the given API port and ignores a list that names another", async () => {
+		const header = vi.fn(async () => true)
+		const fetchFn = vi.fn<typeof fetch>(async () =>
+			Response.json({
+				receiverId: ID,
+				endpoints: {
+					iqPort: 5555,
+					apiPort: 22,
+					addresses: [{ address: "192.0.2.69", kind: "ethernet" }],
+				},
+			}),
+		)
+		expect((await choose("198.51.100.23", { fetchFn, header })).host).toBe(
+			"198.51.100.23",
+		)
+		expect(fetchFn).toHaveBeenCalledTimes(1)
+		expect(header).not.toHaveBeenCalled()
+	})
 })

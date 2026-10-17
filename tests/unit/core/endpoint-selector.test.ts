@@ -26,12 +26,13 @@ function report(
 	],
 	receiverId = ID,
 	iqPort = 5555,
+	apiPort = 8080,
 ): ReceiverEndpointsReport {
 	return {
 		receiverId,
 		endpoints: {
 			iqPort,
-			apiPort: 8080,
+			apiPort,
 			addresses: addresses.map(([address, kind]) => ({ address, kind })),
 		},
 	}
@@ -93,7 +94,9 @@ class FakeProbe implements EndpointProbe {
 	ids = new Map<string, string | null>()
 	headers = new Map<string, boolean>()
 	readonly calls: string[] = []
-	async receiverId(address: string) {
+	readonly apiPorts: number[] = []
+	async receiverId(address: string, apiPort: number) {
+		this.apiPorts.push(apiPort)
 		this.calls.push(`id ${address}`)
 		return this.ids.get(address) ?? null
 	}
@@ -111,7 +114,7 @@ function setup(configured = WIFI, holdDownMs = HOLD) {
 		logger,
 		sources,
 		probe,
-		[{ sourceId: "pi", configuredHost: configured, port: 5555 }],
+		[{ sourceId: "pi", configuredHost: configured, port: 5555, apiPort: 8080 }],
 		{ now: () => now, holdDownMs },
 	)
 	return {
@@ -246,6 +249,21 @@ describe("EndpointSelector", () => {
 		}
 		await t.send(report())
 		expect(t.sources.switches).toEqual([])
+	})
+
+	it("probes only the configured API port; a different reported apiPort idles selection", async () => {
+		const t = setup()
+		t.probe.ids.set(ETH, ID)
+		t.probe.headers.set(ETH, true)
+		await t.send(report(undefined, ID, 5555, 22))
+		expect(t.probe.calls).toEqual([])
+		expect(t.sources.switches).toEqual([])
+		await t.send(report())
+		expect(t.probe.apiPorts).toEqual([8080])
+		expect(t.sources.active).toBe(ETH)
+		// On a selected endpoint, a changed apiPort sends the source home.
+		await t.send(report(undefined, ID, 5555, 22))
+		expect(t.sources.active).toBe(WIFI)
 	})
 
 	it("treats a configured hostname or bridge address as unranked", async () => {
