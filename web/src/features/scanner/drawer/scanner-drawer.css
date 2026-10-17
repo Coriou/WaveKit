@@ -759,7 +759,8 @@
 	}
 	.wks-hist-time {
 		flex: none;
-		width: 52px;
+		min-width: 52px;
+		white-space: nowrap;
 		display: flex;
 		align-items: center;
 		gap: 4px;

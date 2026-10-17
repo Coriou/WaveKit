@@ -44,6 +44,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 		calls,
 		setTheme: p => void calls.push(["theme", p]),
 		setDevice: p => void calls.push(["device", p]),
+		setDisplay: p => void calls.push(["display", p]),
 		setStep: hz => void calls.push(["step", hz]),
 		setCardAt: id => void calls.push(["cardAt", id]),
 		setVolume: v => void calls.push(["volume", v]),
@@ -213,7 +214,13 @@ const VIEW: DecoderSettingsView = {
 function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 	return {
 		readOnly: false,
-		theme: { theme: "dark", ground: "black", accent: "mono" },
+		theme: {
+			theme: "dark",
+			ground: "black",
+			accent: "mono",
+			waterfall: "match",
+		},
+		display: { units: "nautical", timeFormat: "local-24h" },
 		device: { density: "comfy", motion: "system" },
 		stepHz: null,
 		cardAt: "al",

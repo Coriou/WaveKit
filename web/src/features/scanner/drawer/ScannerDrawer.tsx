@@ -6,6 +6,7 @@ import "./scanner-drawer.css"
 // The 2 Hz sweep progress is read only by the header count and the footer.
 import { useEffect, useRef } from "react"
 
+import { useDisplay } from "../../display.ts"
 import { useReadOnly, useServices } from "../../../app/context.ts"
 import { useStore } from "../../../data/index.ts"
 import { Drawer } from "../../../ui/Drawer.tsx"
@@ -30,6 +31,7 @@ import {
 } from "./state.ts"
 
 export function ScannerDrawer({ onClose }: { onClose: () => void }) {
+	useDisplay() // times follow Settings › Display
 	const { data } = useServices()
 	const scanner = data.scanner
 	const root = useRef<HTMLElement>(null)

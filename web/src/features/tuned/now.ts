@@ -7,6 +7,7 @@
 import type { ActivitySummary, DecodeField } from "@wavekit/api-types"
 
 import { fieldText, rowView } from "../activity/rows.ts"
+import { clockText } from "../display.ts"
 import { formatMHz } from "../format.ts"
 import { messageView } from "../messages/card.ts"
 
@@ -125,12 +126,10 @@ function pad(n: number): string {
 	return String(n).padStart(2, "0")
 }
 function hhmm(t: number): string {
-	const d = new Date(t)
-	return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+	return clockText(t)
 }
 function hhmmss(t: number): string {
-	const d = new Date(t)
-	return `${hhmm(t)}:${pad(d.getSeconds())}`
+	return clockText(t, { seconds: true })
 }
 /** "0:08", "1:12". */
 function clock(ms: number): string {

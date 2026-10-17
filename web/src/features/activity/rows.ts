@@ -7,6 +7,7 @@ import type {
 } from "@wavekit/api-types"
 import type { CategoryName } from "@wavekit/brand/react"
 
+import { clockText, convertMeasure, dateText, sameDay } from "../display.ts"
 import { formatMHz } from "../format.ts"
 
 export interface RowView {
@@ -82,7 +83,13 @@ const groupNumber = (n: number): string =>
 		: String(n)
 
 /** "18.4 °C", "36 000 ft", "Yes". Only measurements (with a unit) get digit groups: identifiers stay as sent. */
-export function fieldText(f: DecodeField): string {
+export function fieldText(field: DecodeField): string {
+	// speeds, distances, altitudes and temperatures follow Settings › Display › Units
+	const m =
+		typeof field.value === "number" && field.unit
+			? convertMeasure(field.value, field.unit)
+			: null
+	const f = m ? { ...field, value: m.value, unit: m.unit } : field
 	const v =
 		typeof f.value === "number"
 			? f.unit
@@ -222,11 +229,9 @@ function analogView(s: ActivitySummary): RowView {
 	}
 }
 
-/** "14:02" in local time. */
+/** "14:02" on the chosen clock (Settings › Display › Time). */
 export function timeText(iso: string): string {
-	const d = new Date(iso)
-	if (Number.isNaN(d.getTime())) return ""
-	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+	return clockText(iso)
 }
 
 /** The group a row sits under: "Just now" for the last minute, else its minute, else its day. */
@@ -234,10 +239,8 @@ export function groupLabel(iso: string, now: number): string {
 	const t = Date.parse(iso)
 	if (!Number.isFinite(t)) return ""
 	if (now - t < 60_000) return "Just now"
-	const d = new Date(t)
-	const today = new Date(now)
-	if (d.toDateString() === today.toDateString()) return timeText(iso)
-	return `${d.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ${timeText(iso)}`
+	if (sameDay(t, now)) return timeText(iso)
+	return `${dateText(t)} ${timeText(iso)}`
 }
 
 export type ListEntry =

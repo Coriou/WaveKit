@@ -1,7 +1,7 @@
 // GeoJSON for the Map's own sources (pure): graticule, range rings, coverage, the approximate-station area, mesh
 // links, trails (three fading segments, as the board) and the item markers.
 import type { Coverage } from "../../data/index.ts"
-import { circle, type LatLon } from "./geo.ts"
+import { circle, ringDistances, type LatLon } from "./geo.ts"
 import type { MapItem } from "./items.ts"
 import { glyphOf } from "./items.ts"
 import { GRID_STEPS } from "./style.ts"
@@ -57,12 +57,10 @@ export function graticule(c: LatLon): FeatureCollection {
 	return collection(out)
 }
 
-export const RING_KM = [5, 10, 25, 50, 100, 200, 300] as const
-
 export function rings(station: LatLon | null): FeatureCollection {
 	if (!station) return collection([])
 	return collection(
-		RING_KM.map(km => ({
+		ringDistances().map(({ km }) => ({
 			type: "Feature",
 			properties: { km },
 			geometry: { type: "LineString", coordinates: circle(station, km, 128) },

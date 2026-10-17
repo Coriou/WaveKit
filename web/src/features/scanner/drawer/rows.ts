@@ -20,6 +20,7 @@ import {
 	protocolName,
 	undecodedReasonText,
 } from "../../../data/index.ts"
+import { clockText as clock, dateText } from "../../display.ts"
 import { formatMHz, formatWidth } from "../../format.ts"
 
 // ---- small words
@@ -71,18 +72,12 @@ export function heardText(iso: string, now: number): string {
 	if (h < 48) return `${h} h`
 	const d = Math.floor(h / 24)
 	if (d < 30) return `${d} d`
-	return new Date(t).toLocaleDateString(undefined, {
-		day: "numeric",
-		month: "short",
-	})
+	return dateText(t)
 }
 
-/** "14:05" (24 h, local). */
+/** "14:05" on the chosen clock (Settings › Display › Time). */
 export function clockText(iso: string | number): string {
-	const t = typeof iso === "number" ? iso : Date.parse(iso)
-	if (!Number.isFinite(t)) return ""
-	const d = new Date(t)
-	return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+	return clock(iso)
 }
 
 /** "12 min", "1 h 5 min", "40 s". */
@@ -378,10 +373,7 @@ export function measuredText(d: Discovery): string {
 	parts.push(`SNR ${Math.round(d.signal.best.snrDb)} dB`)
 	const first = Date.parse(d.firstSeenAt)
 	if (Number.isFinite(first)) {
-		const day = new Date(first).toLocaleDateString(undefined, {
-			day: "numeric",
-			month: "short",
-		})
+		const day = dateText(first)
 		parts.push(`first heard ${day} ${clockText(first)}`)
 	}
 	if (d.airtimeMs > 0) parts.push(`${durationText(d.airtimeMs)} on air`)

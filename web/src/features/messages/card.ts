@@ -10,6 +10,7 @@ import type {
 } from "@wavekit/api-types"
 import type { CategoryName } from "@wavekit/brand/react"
 
+import { clockText } from "../display.ts"
 import { formatWidth } from "../format.ts"
 import { fieldText, protocolText, rowView } from "../activity/rows.ts"
 import { bearing, distanceKm, relativeText } from "../map/geo.ts"
@@ -214,10 +215,7 @@ function batteryWord(f: DecodeField): DecodeField {
 }
 
 function timeOf(iso: string): string {
-	const d = new Date(iso)
-	if (Number.isNaN(d.getTime())) return ""
-	const p = (n: number) => String(n).padStart(2, "0")
-	return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+	return clockText(iso, { seconds: true })
 }
 
 const MACHINE_TEXT = /^[\d\s*#\-+().,:/U[\]]+$/

@@ -9,6 +9,7 @@ import { useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
 import { Button } from "../../ui/Button.tsx"
 import { cx } from "../../ui/cx.ts"
+import { useDisplay } from "../display.ts"
 import { formatMHz } from "../format.ts"
 import { showOnMap } from "../map/focus.ts"
 import { fieldText, messageView, positionPlot, positionText } from "./card.ts"
@@ -46,7 +47,11 @@ export function MessageCard({
 }: MessageCardProps) {
 	const { data, tuning } = useServices()
 	const station = useStore(data.station, s => s.station)
-	const v = useMemo(() => messageView(item, record), [item, record])
+	const display = useDisplay()
+	const v = useMemo(
+		() => messageView(item, record),
+		[item, record, display], // time and units follow Settings › Display
+	)
 	const [raw, setRaw] = useState(jsonOpen)
 	const home =
 		station && station.lat.value !== null && station.lon.value !== null

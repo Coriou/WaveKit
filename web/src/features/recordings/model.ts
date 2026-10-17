@@ -7,6 +7,12 @@ import type {
 } from "@wavekit/api-types"
 
 import { parseFrequency } from "../activity/search.ts"
+import {
+	clockText,
+	dateText,
+	startOfDay as dayStart,
+	yearOf,
+} from "../display.ts"
 import { formatMHz } from "../format.ts"
 
 export type RecordingIcon = "voice" | "scan"
@@ -76,8 +82,7 @@ export function recordedAt(r: RecordingInventoryItem): Date {
 	return new Date(r.modifiedAt)
 }
 
-const startOfDay = (d: Date) =>
-	new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+const startOfDay = (d: Date) => dayStart(d)
 
 /** "Today", "Yesterday", "Thursday 8 October" (with the year when it is not this year). */
 export function dayLabel(d: Date, now: Date): string {
@@ -88,13 +93,14 @@ export function dayLabel(d: Date, now: Date): string {
 		weekday: "long",
 		day: "numeric",
 		month: "long",
-		...(d.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}),
+		...(yearOf(d) !== yearOf(now) ? { year: "numeric" } : {}),
 	}
-	return d.toLocaleDateString("en-GB", opts).replace(",", "")
+	return dateText(d, opts).replace(",", "")
 }
 
+/** "14:05" on the chosen clock (Settings › Display › Time). */
 export function timeLabel(d: Date): string {
-	return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
+	return clockText(d)
 }
 
 export interface DayGroup {

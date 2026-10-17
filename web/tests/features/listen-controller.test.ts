@@ -18,7 +18,13 @@ function status(over: Partial<LiveAudioStatus> = {}, offsetHz = 0) {
 		httpUrl: "http://localhost:3102/stream",
 		wavUrl: "http://localhost:3102/stream.wav",
 		clientCount: 1,
-		config: { modulation: "nfm", bandwidth: 12_500, squelch: 0, offsetHz, audioFormat: "s16le" },
+		config: {
+			modulation: "nfm",
+			bandwidth: 12_500,
+			squelch: 0,
+			offsetHz,
+			audioFormat: "s16le",
+		},
 		...over,
 	} as LiveAudioStatus
 }
@@ -85,7 +91,12 @@ describe("ListenController (Web Audio path)", () => {
 		vi.useFakeTimers()
 		const { c, calls, events } = setup(status())
 		await c.start()
-		events().onStats({ playing: true, bufferedMs: 200, underruns: 0, droppedSamples: 0 })
+		events().onStats({
+			playing: true,
+			bufferedMs: 200,
+			underruns: 0,
+			droppedSamples: 0,
+		})
 		expect(c.get().phase).toBe("playing")
 		events().onEnded("The audio stream ended")
 		expect(c.get().phase).toBe("connecting")

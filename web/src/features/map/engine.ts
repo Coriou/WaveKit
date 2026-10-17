@@ -16,7 +16,6 @@ import {
 	graticule,
 	links as linkFeatures,
 	markers,
-	RING_KM,
 	rings,
 	trailEnd,
 	trailHead,
@@ -24,7 +23,14 @@ import {
 	type Feature,
 	type FeatureCollection,
 } from "./features.ts"
-import { destination, distanceKm, kmPerPx, type LatLon } from "./geo.ts"
+import { displayStore } from "../display.ts"
+import {
+	destination,
+	distanceKm,
+	kmPerPx,
+	ringDistances,
+	type LatLon,
+} from "./geo.ts"
 import { drawGlyphs } from "./glyphs.ts"
 import {
 	countsOf,
@@ -213,6 +219,13 @@ export class MapEngine {
 			}),
 			deps.station.subscribe(dirtyItems),
 			deps.ui.subscribe((next, prev) => this.onUi(next, prev)),
+			// units: rings, labels and the hover line are drawn in them
+			displayStore.subscribe(() => {
+				this.staticDirty = true
+				this.itemsDirty = true
+				this.dynamicDirty = true
+				this.kick()
+			}),
 		)
 		const onVisible = () => {
 			if (!document.hidden) this.kick()
@@ -785,10 +798,12 @@ export class MapEngine {
 		let ringDraws: { text: string; x: number; y: number }[] = []
 		if (ui.overlays.rings && st && stationXY) {
 			const sxy = stationXY
-			const list = RING_KM.map(km => {
-				const q = map.project([destination(st, 90, km).lon, st.lat])
-				return { text: `${km} km`, r: Math.abs(q.x - sxy.x) }
-			}).filter(r => r.r >= 48 && r.r <= Math.max(W, H) * 1.6)
+			const list = ringDistances()
+				.map(({ km, text }) => {
+					const q = map.project([destination(st, 90, km).lon, st.lat])
+					return { text, r: Math.abs(q.x - sxy.x) }
+				})
+				.filter(r => r.r >= 48 && r.r <= Math.max(W, H) * 1.6)
 			ringDraws = placeRingLabels(list, {
 				cx: sxy.x,
 				cy: sxy.y,

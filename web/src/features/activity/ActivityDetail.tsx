@@ -8,6 +8,7 @@ import { fetchActivityRecord, queryParams } from "../../data/activity-feed.ts"
 import { errorMessage } from "../../data/index.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Label } from "../../ui/Label.tsx"
+import { clockText, dateText, useDisplay } from "../display.ts"
 import { formatMHz } from "../format.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { ActivityRow } from "./ActivityList.tsx"
@@ -15,16 +16,10 @@ import { rowView } from "./rows.ts"
 
 const RELATED = 6
 
+/** "8 Oct, 14:05:09" on the chosen clock. */
 function fullTime(iso: string): string {
-	const d = new Date(iso)
-	if (Number.isNaN(d.getTime())) return iso
-	return d.toLocaleString("en-GB", {
-		day: "numeric",
-		month: "short",
-		hour: "2-digit",
-		minute: "2-digit",
-		second: "2-digit",
-	})
+	const time = clockText(iso, { seconds: true })
+	return time ? `${dateText(iso)}, ${time}` : iso
 }
 
 export interface ActivityDetailProps {
@@ -36,6 +31,7 @@ export interface ActivityDetailProps {
 export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 	const { data, activity } = useServices()
 	const readOnly = useReadOnly()
+	useDisplay() // times and units follow Settings › Display
 	const [record, setRecord] = useState<ActivityRecord | null>(null)
 	const [state, setState] = useState<"loading" | "ready" | "gone" | "error">(
 		"loading",

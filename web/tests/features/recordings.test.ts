@@ -217,7 +217,10 @@ describe("WAV peaks", () => {
 			return b
 		}
 		expect(wavPeaks(wav(1, 8, [0, 0, 1, 1]), 2)?.peaks[1]).toBeCloseTo(1, 1)
-		expect(wavPeaks(wav(3, 32, [0.25, 0, 0, 0]), 2)?.peaks).toEqual([0.25 ** 0.75, 0])
+		expect(wavPeaks(wav(3, 32, [0.25, 0, 0, 0]), 2)?.peaks).toEqual([
+			0.25 ** 0.75,
+			0,
+		])
 		expect(parseWav(new ArrayBuffer(8))).toBeNull()
 		expect(parseWav(wav(2, 8, [0]))).toBeNull()
 	})

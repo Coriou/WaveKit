@@ -604,8 +604,10 @@
 		font-size: var(--wk-fs-md);
 	}
 	.wkf-earlier-t {
-		width: 40px;
+		/* 40 px fits 14:05; 12 h and UTC times grow it */
+		min-width: 40px;
 		flex: none;
+		white-space: nowrap;
 		color: var(--wk-text-3);
 		font-variant-numeric: tabular-nums;
 	}

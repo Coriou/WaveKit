@@ -21,7 +21,6 @@ import {
 	graticule,
 	markers,
 	rings,
-	RING_KM,
 	trailEnd,
 	trailHead,
 	trailSegments,
@@ -73,6 +72,10 @@ import {
 import { buildStyle, LAYER, themedPaint } from "../../src/features/map/style.ts"
 import { MapUi, parseStored } from "../../src/features/map/ui-store.ts"
 import { ROSCOFF } from "../../mock/map.ts"
+import { displayStore } from "../../src/features/display.ts"
+
+// the board's Map reads in km: these tests run in metric (Settings › Display › Units)
+displayStore.setLocal({ units: "metric" })
 import { buildMockServer, type MockServer } from "../../mock/server.ts"
 
 const STATION = { lat: ROSCOFF[0], lon: ROSCOFF[1] }
@@ -127,8 +130,11 @@ describe("geo", () => {
 		)
 		expect(toLocator(STATION.lat, STATION.lon)).toBe("IN88aq")
 		expect(flText(36_000)).toBe("FL360")
-		expect(flText(9_000)).toBe("9 000 ft")
-		expect(flText(3_480)).toBe("3 500 ft")
+		expect(flText(9_000)).toBe("2 750 m")
+		expect(flText(9_000, { units: "nautical", timeFormat: "utc" })).toBe(
+			"9 000 ft",
+		)
+		expect(flText(3_480)).toBe("1 050 m")
 	})
 
 	it("picks a round scale bar that fits", () => {
@@ -565,7 +571,7 @@ describe("features", () => {
 	it("draws rings, the approximate area and a graticule around the station", () => {
 		expect(rings(null).features).toEqual([])
 		const r = rings(STATION)
-		expect(r.features).toHaveLength(RING_KM.length)
+		expect(r.features).toHaveLength(7)
 		const ring = r.features[0]?.geometry
 		if (ring?.type === "LineString") {
 			const p = ring.coordinates[10]

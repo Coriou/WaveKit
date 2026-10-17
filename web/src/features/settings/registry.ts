@@ -108,6 +108,20 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.units",
+		"Display",
+		"Units",
+		"km miles knots feet metres meters speed distance altitude",
+		SETTINGS,
+	),
+	row(
+		"dp.time",
+		"Display",
+		"Time",
+		"clock timezone zulu utc gmt 12 hour 24 hour am pm",
+		SETTINGS,
+	),
+	row(
 		"dp.tags",
 		"Display",
 		"Tags for saved frequencies",
@@ -133,6 +147,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		"Display",
 		"Accent",
 		"colour color highlight tint theme phosphor ice violet coral mono",
+		SETTINGS,
+	),
+	row(
+		"dev.waterfall",
+		"Display",
+		"Waterfall colours",
+		"palette colors colours heat spectrum theme ramp classic amber mono sdr++",
 		SETTINGS,
 	),
 	row(

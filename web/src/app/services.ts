@@ -1,8 +1,11 @@
 // Everything the islands share, built once per app: the data layer and the slice's controllers.
 import type { DataLayer, DataLayerOptions } from "../data/index.ts"
 import { createDataLayer } from "../data/index.ts"
+import type { PreferencesState } from "../data/preferences-store.ts"
+import type { ReadableStore } from "../data/store.ts"
 import { ActivityController } from "../features/activity/controller.ts"
 import { ListenController } from "../features/listen/controller.ts"
+import { displayStore, type DisplayStore } from "../features/display.ts"
 import { DecodersFeed } from "../features/tuned/decoders.ts"
 import { TunedActivity } from "../features/tuned/feed.ts"
 import { TuningPrefs } from "../features/tuner/prefs.ts"
@@ -22,12 +25,24 @@ export interface AppServices {
 	dispose(): void
 }
 
+/** Core's units and time format decide while it has operator data; else the device's choice applies. */
+export function followDisplay(
+	prefs: ReadableStore<PreferencesState>,
+	store: DisplayStore = displayStore,
+): () => void {
+	const apply = (s: PreferencesState) =>
+		store.setCore(s.available === true ? s.values : null)
+	apply(prefs.get())
+	return prefs.subscribe(apply)
+}
+
 export function createServices(options: DataLayerOptions = {}): AppServices {
 	const data = createDataLayer(options)
 	const decoders = new DecodersFeed(data)
 	const listen = new ListenController(data.liveAudio)
 	const activity = new ActivityController(data)
 	const tuned = new TunedActivity(data)
+	const offDisplay = followDisplay(data.preferences)
 	return {
 		data,
 		tuning: new TuningController(data),
@@ -40,6 +55,7 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 			await Promise.all([data.start(), decoders.load()])
 		},
 		dispose() {
+			offDisplay()
 			listen.dispose()
 			activity.dispose()
 			tuned.dispose()

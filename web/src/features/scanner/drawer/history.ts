@@ -2,6 +2,8 @@
 // (GET /api/scanner/discoveries/:id/observations, newest first), and the last few with their length.
 import { z } from "zod/v4"
 
+import { clockText, hourOf, hourText } from "../../display.ts"
+
 export const HOURS = 24
 const HOUR_MS = 3_600_000
 /** One page is enough for a day of most signals; more than this reads "500+". */
@@ -56,7 +58,7 @@ export function dayHistory(
 	const currentHour = Math.floor(now / HOUR_MS) * HOUR_MS
 	const start = currentHour - (HOURS - 1) * HOUR_MS
 	const bars: HourBar[] = Array.from({ length: HOURS }, (_, i) => ({
-		hour: new Date(start + i * HOUR_MS).getHours(),
+		hour: hourOf(start + i * HOUR_MS),
 		count: 0,
 		airtime: 0,
 	}))
@@ -100,7 +102,7 @@ export function dayHistory(
 		more: nextCursor !== null && oldest >= start,
 		steady,
 		peak,
-		startHour: new Date(start).getHours(),
+		startHour: hourOf(start),
 	}
 }
 
@@ -115,7 +117,7 @@ export function barHeights(h: DayHistory, max = 26): number[] {
 	})
 }
 
-const hh = (hour: number) => `${String(hour).padStart(2, "0")}:00`
+const hh = (hour: number) => hourText(hour)
 
 export function countText(h: DayHistory): string {
 	if (h.steady) return "On all day"
@@ -167,10 +169,9 @@ export function lastTransmissions(
 		.slice(0, n)
 		.map(({ o, from }) => {
 			const to = ms(o.endedAt)
-			const d = new Date(from)
 			return {
 				id: o.id,
-				time: `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`,
+				time: clockText(from),
 				live: to === null,
 				length: to === null ? "On air" : lengthText(to - from),
 				snr: `SNR ${Math.round(o.snrDb)} dB`,

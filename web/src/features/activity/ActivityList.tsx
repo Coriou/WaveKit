@@ -19,6 +19,7 @@ import type { ActivityFeed } from "../../data/activity-feed.ts"
 import { compareSeq } from "../../data/activity-feed.ts"
 import { useReadOnly } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
+import { useDisplay } from "../display.ts"
 import { useNow } from "../hooks.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { activityLayout } from "./layout.ts"
@@ -85,7 +86,11 @@ export function ActivityList({
 		setScrollTop(0)
 	}, [cards])
 
-	const entries = useMemo(() => listEntries(items, now), [items, now])
+	const display = useDisplay()
+	const entries = useMemo(
+		() => listEntries(items, now),
+		[items, now, display], // group labels follow the time setting
+	)
 	const offsets = useMemo(() => {
 		void version
 		return prefixOffsets(
@@ -346,6 +351,7 @@ export const ActivityRow = memo(function ActivityRow({
 	fresh,
 	onOpen,
 }: RowProps) {
+	useDisplay() // the time follows Settings › Display
 	const v = rowView(item)
 	return (
 		<div

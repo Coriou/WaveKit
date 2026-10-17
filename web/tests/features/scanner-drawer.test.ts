@@ -405,9 +405,7 @@ describe("scanner drawer hit log", () => {
 		const e = hitEntries(hits, byId, new Set(), false).find(
 			x => x.hit.discoveryId === "old",
 		)!
-		expect(hitMeta(e)).toMatch(
-			/^1 hit · first \d\d:\d\d · last \d\d:\d\d$/,
-		)
+		expect(hitMeta(e)).toMatch(/^1 hit · first \d\d:\d\d · last \d\d:\d\d$/)
 		const ignored = {
 			...e,
 			discovery: disc({ operator: { lockout: true } }),

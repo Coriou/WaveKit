@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest"
+
+import { displayStore } from "../../src/features/display.ts"
+
+// distances in km, as the board (Settings › Display › Units)
+displayStore.setLocal({ units: "metric" })
 import type {
 	ActivityRecord,
 	ActivitySummary,

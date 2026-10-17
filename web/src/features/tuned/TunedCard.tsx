@@ -38,6 +38,7 @@ import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { decodersAt } from "./decoders.ts"
 import { DECODE_AS, identifyView, type IdentifyView } from "./identify-view.ts"
+import { useDisplay } from "../display.ts"
 import { nowView, type NowView } from "./now.ts"
 import { tunedCardStore } from "./place.ts"
 import { decoderLabel, signalBars, signalPresent } from "./signal.ts"
@@ -205,6 +206,7 @@ function fleetHere(types: readonly string[]): "aircraft" | "vessels" | null {
 }
 
 export function TunedCard() {
+	useDisplay() // times and units follow Settings › Display
 	const services = useServices()
 	const { data, decoders: feed, activity, tuning, tuned } = services
 	const readOnly = useReadOnly()

@@ -6,6 +6,7 @@ import type { Discovery } from "@wavekit/api-types"
 import { memo, useEffect, useMemo, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react"
 
+import { useDisplay } from "../../display.ts"
 import { useReadOnly, useServices } from "../../../app/context.ts"
 import { isIdentifyFinal, useStore } from "../../../data/index.ts"
 import { useNow, useTunerState } from "../../hooks.ts"
@@ -248,6 +249,7 @@ const DiscoveryItem = memo(function DiscoveryItem({
 	now,
 	measure,
 }: ItemProps) {
+	useDisplay() // times follow Settings › Display
 	const v = discoveryRow(discovery, now)
 	return (
 		<article

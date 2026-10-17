@@ -15,6 +15,7 @@ import type { RecordingInventoryItem } from "@wavekit/api-types"
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { errorMessage, useStore } from "../../data/index.ts"
 import { showAppToast } from "../../shell/toast.ts"
+import { useDisplay } from "../display.ts"
 import { shellStore } from "../../shell/store.ts"
 import { Drawer } from "../../ui/Drawer.tsx"
 import { Icon } from "../../ui/Icon.tsx"
@@ -338,7 +339,11 @@ function List({
 		const t = setInterval(() => setNow(new Date()), 60_000)
 		return () => clearInterval(t)
 	}, [])
-	const groups = useMemo(() => groupByDay(visible, now), [visible, now])
+	const display = useDisplay()
+	const groups = useMemo(
+		() => groupByDay(visible, now),
+		[visible, now, display], // day groups follow the time setting
+	)
 
 	const reveal = (id: string) =>
 		requestAnimationFrame(() =>
@@ -574,6 +579,7 @@ const Row = memo(function Row({
 	actions,
 	list,
 }: RowProps) {
+	useDisplay() // the time follows Settings › Display
 	const phase = useStore(player, s => (s.id === r.id ? s.phase : null))
 	const recordings = useServices().data.recordings
 	const keeping = useStore(recordings, s => s.keeping.has(r.id))
@@ -860,6 +866,7 @@ function PlayerBar({
 	player: RecordingPlayer
 	order: { current: readonly RecordingInventoryItem[] }
 }) {
+	useDisplay()
 	const id = useStore(player, s => s.id)
 	const phase = useStore(player, s => s.phase)
 	const pos = useStore(player, s => Math.floor(s.pos * 4) / 4)

@@ -9,6 +9,7 @@ import {
 	useMemo,
 	useRef,
 	useState,
+	useSyncExternalStore,
 	type KeyboardEvent,
 } from "react"
 
@@ -20,6 +21,7 @@ import { useDevicePrefs, useTheme } from "../../shell/hooks.ts"
 import { cardAnchorName } from "../../shell/layout.ts"
 import { shellStore } from "../../shell/store.ts"
 import { devicePrefsStore } from "../../shell/device-prefs.ts"
+import { displayStore } from "../display.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { useTunerState } from "../hooks.ts"
@@ -88,6 +90,11 @@ function useSnapshot(): SettingsSnapshot {
 	const live = useStore(data.liveAudio, s => s.status)
 	const station = useStore(data.station, s => s.station)
 	const prefs = useStore(data.preferences)
+	const display = useSyncExternalStore(
+		displayStore.subscribe,
+		displayStore.getLocal,
+		displayStore.getLocal,
+	)
 	const savedCount = useStore(data.savedFrequencies, s => s.items.length)
 	const bandplanEdits = useStore(data.bandplanStack, s =>
 		s.view
@@ -122,6 +129,7 @@ function useSnapshot(): SettingsSnapshot {
 			station,
 			preferences: prefs.available === true ? prefs.values : null,
 			preferenceDefaults: prefs.defaults,
+			display,
 			savedCount,
 			bandplanEdits,
 			decoders,
@@ -146,6 +154,7 @@ function useSnapshot(): SettingsSnapshot {
 		live,
 		station,
 		prefs,
+		display,
 		savedCount,
 		bandplanEdits,
 		decoders,
@@ -172,6 +181,7 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 		return {
 			setTheme: patch => themeStore.set(patch),
 			setDevice: patch => devicePrefsStore.set(patch),
+			setDisplay: patch => displayStore.setLocal(patch),
 			setStep: hz => services.prefs.setStep(hz),
 			setCardAt: id => cards.setAt(id, cardAnchorName(id)),
 			setVolume: v => services.listen.setVolume(v),

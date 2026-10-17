@@ -1,4 +1,13 @@
-// Geodesy and units for the Map (pure). Great-circle on a 6371 km sphere, as the board.
+// Geodesy and units for the Map (pure). Great-circle on a 6371 km sphere, as the board. Distances and altitudes
+// print in the units of Settings › Display (display.ts).
+import {
+	current as displayPrefs,
+	distanceText,
+	distanceUnit,
+	flightLevelText,
+	unitKm,
+	type DisplayPrefs,
+} from "../display.ts"
 
 const R_KM = 6371
 const rad = (d: number) => (d * Math.PI) / 180
@@ -51,10 +60,14 @@ export function cardinal(brg: number): string {
 	return CARDINALS[Math.round((((brg % 360) + 360) % 360) / 45) % 8] ?? "N"
 }
 
-/** "12.4 km NE" (one decimal under 10 km), as the selection panel's "From station". */
-export function relativeText(from: LatLon, to: LatLon): string {
+/** "12.4 km NE" (one decimal under 10), as the selection panel's "From station". */
+export function relativeText(
+	from: LatLon,
+	to: LatLon,
+	p: DisplayPrefs = displayPrefs(),
+): string {
 	const d = distanceKm(from, to)
-	return `${d.toFixed(d < 10 ? 1 : 0)} km ${cardinal(bearing(from, to))}`
+	return `${distanceText(d, p)} ${cardinal(bearing(from, to))}`
 }
 
 /** Kilometres per CSS pixel at a latitude and MapLibre zoom (512 px tiles). */
@@ -68,11 +81,29 @@ const SCALE_STEPS = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
 export function scaleBar(
 	kmPx: number,
 	maxPx = 110,
+	p: DisplayPrefs = displayPrefs(),
 ): { km: number; px: number; text: string } {
-	let km = SCALE_STEPS[0] ?? 0.1
-	for (const s of SCALE_STEPS) if (s / kmPx <= maxPx) km = s
-	const text = km < 1 ? `${Math.round(km * 1000)} m` : `${km} km`
+	const u = unitKm(p)
+	let n = SCALE_STEPS[0] ?? 0.1
+	for (const s of SCALE_STEPS) if ((s * u) / kmPx <= maxPx) n = s
+	const km = n * u
+	const text =
+		p.units === "metric" && n < 1
+			? `${Math.round(n * 1000)} m`
+			: `${n} ${distanceUnit(p)}`
 	return { km, px: Math.round(km / kmPx), text }
+}
+
+/** Range rings around the station, in round numbers of the chosen unit. */
+export function ringDistances(
+	p: DisplayPrefs = displayPrefs(),
+): readonly { km: number; text: string }[] {
+	const list =
+		p.units === "metric"
+			? [5, 10, 25, 50, 100, 200, 300]
+			: [3, 5, 10, 25, 50, 100, 150]
+	const u = unitKm(p)
+	return list.map(n => ({ km: n * u, text: `${n} ${distanceUnit(p)}` }))
 }
 
 export const fmtLat = (v: number) =>
@@ -94,11 +125,9 @@ export function toLocator(lat: number, lon: number): string {
 	return a + b + c
 }
 
-/** Feet as the board labels them: FL from 10 000 ft, else rounded feet with a thin space. */
-export function flText(ft: number): string {
-	if (ft >= 10_000) return `FL${String(Math.round(ft / 100)).padStart(3, "0")}`
-	const n = Math.round(ft / 100) * 100
-	return `${n.toLocaleString("en-GB").replace(/,/g, " ")} ft`
+/** Feet as the board labels them: FL from 10 000 ft, else rounded feet with a thin space (metres in metric). */
+export function flText(ft: number, p: DisplayPrefs = displayPrefs()): string {
+	return flightLevelText(ft, p)
 }
 
 /** A closed ring of `steps` points around `c` at `km` (GeoJSON order: [lon, lat]). */

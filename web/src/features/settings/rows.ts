@@ -27,6 +27,8 @@ import type {
 } from "../../data/index.ts"
 import type { CardAnchorId } from "../../shell/layout.ts"
 import type { Density, DevicePrefs, Motion } from "../../shell/device-prefs.ts"
+import type { DisplayPrefs, TimeFormat, Units } from "../display.ts"
+import { DEFAULT_DISPLAY } from "../display.ts"
 import type { ThemePrefs } from "../../shell/theme.ts"
 import { formatDb, formatRate, formatStep } from "../format.ts"
 import type { LiveAudioConfigPatch } from "../../data/live-audio-store.ts"
@@ -77,6 +79,8 @@ export interface SettingsSnapshot {
 	readonly station: StationIdentity | null
 	readonly preferences: Preferences | null
 	readonly preferenceDefaults: Preferences | null
+	/** Units and time kept by this browser, used while core has no preferences. */
+	readonly display: DisplayPrefs
 	readonly savedCount: number
 	/** Bands you edited or added in Settings › Band plans; null until the stack loads. */
 	readonly bandplanEdits: number | null
@@ -94,6 +98,7 @@ export interface SettingsSnapshot {
 export interface SettingsActions {
 	setTheme(patch: Partial<ThemePrefs>): void
 	setDevice(patch: Partial<DevicePrefs>): void
+	setDisplay(patch: Partial<DisplayPrefs>): void
 	setStep(hz: number | null): void
 	setCardAt(id: CardAnchorId): void
 	setVolume(volume: number): void
@@ -949,9 +954,76 @@ const MOTION_OPTS = opts([
 	["reduce", "Reduce"],
 ])
 
+const UNITS_OPTS = opts([
+	["metric", "Metric"],
+	["nautical", "Nautical"],
+	["imperial", "Imperial"],
+])
+const TIME_OPTS = opts([
+	["local-24h", "24 h"],
+	["local-12h", "12 h"],
+	["utc", "UTC"],
+])
+const WATERFALL_OPTS = opts([
+	["match", "Match accent"],
+	["amber", "Amber"],
+	["mono", "Mono"],
+	["classic", "Classic"],
+])
+
+/** Units and Time: core's preferences when it has them (every device), else this browser's. */
+function unitTimeRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
+	const p = s.preferences
+	const v = p ?? s.display
+	const def = p ? (s.preferenceDefaults ?? DEFAULT_DISPLAY) : DEFAULT_DISPLAY
+	const lock =
+		p && s.readOnly
+			? { disabled: "Read-only access: sign in on this WaveKit to change it" }
+			: {}
+	return [
+		{
+			id: "dp.units",
+			group: "display",
+			label: "Units",
+			help: "Nautical: knots, nautical miles, feet for altitude",
+			keys: words("km miles knots feet metres meters speed distance altitude"),
+			...(p ? {} : { device: true }),
+			widget: { kind: "seg", options: UNITS_OPTS },
+			value: v.units,
+			text: optionText(UNITS_OPTS, v.units),
+			def: { value: def.units, text: optionText(UNITS_OPTS, def.units) },
+			...lock,
+			write: x =>
+				p
+					? a.preference("units", x as Units)
+					: local(() => a.setDisplay({ units: x as Units })),
+		},
+		{
+			id: "dp.time",
+			group: "display",
+			label: "Time",
+			keys: words("clock timezone zulu utc gmt 12 hour 24 hour am pm"),
+			...(p ? {} : { device: true }),
+			widget: { kind: "seg", options: TIME_OPTS },
+			value: v.timeFormat,
+			text: optionText(TIME_OPTS, v.timeFormat),
+			def: {
+				value: def.timeFormat,
+				text: optionText(TIME_OPTS, def.timeFormat),
+			},
+			...lock,
+			write: x =>
+				p
+					? a.preference("timeFormat", x as TimeFormat)
+					: local(() => a.setDisplay({ timeFormat: x as TimeFormat })),
+		},
+	]
+}
+
 function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const rows: SettingRow[] = []
 	const p = s.preferences
+	if (p) rows.push(...unitTimeRows(s, a))
 	if (p) {
 		rows.push({
 			id: "dp.tags",
@@ -984,6 +1056,7 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 		value: null,
 		text: "Show all",
 	})
+	if (!p) rows.push(...unitTimeRows(s, a))
 	const t = s.theme
 	rows.push(
 		{
@@ -1031,6 +1104,22 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			def: { value: "mono", text: "Mono" },
 			write: v =>
 				local(() => a.setTheme({ accent: v as ThemePrefs["accent"] })),
+		},
+		{
+			id: "dev.waterfall",
+			group: "display",
+			label: "Waterfall colours",
+			help: "Match accent builds the waterfall from the ground and the accent",
+			keys: words(
+				"palette colors colours heat spectrum theme ramp classic amber mono sdr++",
+			),
+			device: true,
+			widget: { kind: "ramp", options: WATERFALL_OPTS },
+			value: t.waterfall,
+			text: optionText(WATERFALL_OPTS, t.waterfall),
+			def: { value: "match", text: "Match accent" },
+			write: v =>
+				local(() => a.setTheme({ waterfall: v as ThemePrefs["waterfall"] })),
 		},
 	)
 	const d = s.device

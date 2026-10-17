@@ -11,6 +11,12 @@ import type {
 } from "../../data/index.ts"
 import { token, type SearchToken } from "../activity/search.ts"
 import {
+	altitudeText,
+	climbText,
+	speedText,
+	temperatureText,
+} from "../display.ts"
+import {
 	destination,
 	distanceKm,
 	flText,
@@ -462,14 +468,14 @@ export function describe(it: MapItem): string {
 		case "aircraft":
 			return [
 				it.altFt !== null ? flText(it.altFt) : null,
-				it.speedKn !== null ? `${Math.round(it.speedKn)} kn` : null,
+				it.speedKn !== null ? speedText(it.speedKn) : null,
 			]
 				.filter(Boolean)
 				.join(" · ")
 		case "vessel":
 			return it.kind === "aton"
 				? aidTypeText(s.value)
-				: `${shipTypeText(s.value)} · ${it.moving && it.speedKn !== null ? it.speedKn.toFixed(1) : "0.0"} kn`
+				: `${shipTypeText(s.value)} · ${speedText(it.moving && it.speedKn !== null ? it.speedKn : 0, { digits: 1 })}`
 		case "aprs":
 			return aprsTypeText(s.value)
 		case "mesh":
@@ -499,8 +505,8 @@ export interface SelectionInfo {
 	readonly seen: string
 }
 
-const feet = (ft: number) =>
-	`${Math.round(ft).toLocaleString("en-GB").replace(/,/g, " ")} ft`
+const feet = (ft: number) => altitudeText(ft)
+const MPH_KN = 1.609344 / 1.852
 const c1 = (n: number) => (Math.round(n * 10) / 10).toFixed(1)
 
 export function selectionInfo(
@@ -546,12 +552,12 @@ export function selectionInfo(
 						vs === undefined
 							? "—"
 							: vs > 64
-								? `↑ ${Math.round(vs)} ft/min`
+								? `↑ ${climbText(vs)}`
 								: vs < -64
-									? `↓ ${Math.round(-vs)} ft/min`
+									? `↓ ${climbText(-vs)}`
 									: "Level",
 					],
-					["Speed", it.speedKn !== null ? `${Math.round(it.speedKn)} kn` : "—"],
+					["Speed", it.speedKn !== null ? speedText(it.speedKn) : "—"],
 					["Track", it.course !== null ? `${Math.round(it.course)}°` : "—"],
 					["Squawk", a.squawk ?? "—"],
 					["From station", rel],
@@ -598,7 +604,9 @@ export function selectionInfo(
 				fields: [
 					[
 						"Speed",
-						`${it.moving && it.speedKn !== null ? c1(it.speedKn) : "0.0"} kn`,
+						speedText(it.moving && it.speedKn !== null ? it.speedKn : 0, {
+							digits: 1,
+						}),
 					],
 					[
 						"Course",
@@ -620,7 +628,7 @@ export function selectionInfo(
 						[
 							"Temperature",
 							w.temperatureF !== null
-								? `${c1(((w.temperatureF - 32) * 5) / 9)} °C`
+								? temperatureText(((w.temperatureF - 32) * 5) / 9)
 								: "—",
 						],
 						[
@@ -630,7 +638,7 @@ export function selectionInfo(
 						[
 							"Wind",
 							w.windSpeedMph !== null
-								? `${Math.round(w.windSpeedMph * 1.609)} km/h${w.windDirectionDeg !== null ? ` from ${Math.round(w.windDirectionDeg)}°` : ""}`
+								? `${speedText(w.windSpeedMph * MPH_KN)}${w.windDirectionDeg !== null ? ` from ${Math.round(w.windDirectionDeg)}°` : ""}`
 								: "—",
 						],
 						[
@@ -644,7 +652,7 @@ export function selectionInfo(
 						[
 							"Speed",
 							it.moving && it.speedKn !== null
-								? `${Math.round(it.speedKn * 1.852)} km/h`
+								? speedText(it.speedKn)
 								: "Fixed",
 						],
 						[
@@ -656,11 +664,7 @@ export function selectionInfo(
 						["From station", rel],
 						[
 							"Altitude",
-							a.altitudeFt !== null
-								? `${Math.round(a.altitudeFt * 0.3048)
-										.toLocaleString("en-GB")
-										.replace(/,/g, " ")} m`
-								: "—",
+							a.altitudeFt !== null ? altitudeText(a.altitudeFt) : "—",
 						],
 					]
 			return {

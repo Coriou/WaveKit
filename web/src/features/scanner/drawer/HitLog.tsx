@@ -3,6 +3,7 @@
 import { WaveKitIcon } from "@wavekit/brand/react"
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import { useDisplay } from "../../display.ts"
 import { useReadOnly, useServices } from "../../../app/context.ts"
 import { useStore } from "../../../data/index.ts"
 import { openDiscovery } from "../ui-store.ts"
@@ -129,6 +130,7 @@ const HitRow = memo(function HitRow({
 	measure: (el: HTMLElement | null) => void
 	onToggle: (id: string) => void
 }) {
+	useDisplay() // times follow Settings › Display
 	const services = useServices()
 	const readOnly = useReadOnly()
 	const e: HitEntry = { hit, discovery, live, fresh }

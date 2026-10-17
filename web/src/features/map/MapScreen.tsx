@@ -28,6 +28,7 @@ import { isTypingTarget } from "../palette/keys.ts"
 import { focusSetting } from "../settings/registry.ts"
 import { mapFocus, takeMapFocus } from "./focus.ts"
 import { MapEngine, type EngineView } from "./engine.ts"
+import { useDisplay } from "../display.ts"
 import { fmtLat, fmtLon, kmPerPx, scaleBar, toLocator } from "./geo.ts"
 import { legend } from "./glyphs.ts"
 import {
@@ -525,6 +526,7 @@ function HoverTip({
 	engine: MapEngine
 	hover: NonNullable<MapUiState["hover"]>
 }) {
+	useDisplay() // units follow Settings › Display
 	const it = engine.item(hover.id)
 	if (!it) return null
 	return (
@@ -552,6 +554,7 @@ function Chooser({
 	chooser: NonNullable<MapUiState["chooser"]>
 	pal: MapPalette
 }) {
+	useDisplay() // units follow Settings › Display
 	const menu = useRef<HTMLDivElement>(null)
 	useEffect(() => {
 		menu.current
@@ -907,6 +910,7 @@ function Selection(props: {
 	bottomGap: number
 	onActivity: (it: MapItem) => void
 }) {
+	useDisplay() // units follow Settings › Display
 	const { engine, ui } = props
 	const now = useTick(true, 1000)
 	const readOnly = useReadOnly()
@@ -1005,6 +1009,7 @@ function ScaleBar({
 	right: number
 	bottom: number
 }) {
+	useDisplay() // units follow Settings › Display
 	const sb = scaleBar(kmPerPx(v.lat, v.zoom))
 	return (
 		<div className="wkm-scale" aria-hidden="true" style={{ right, bottom }}>

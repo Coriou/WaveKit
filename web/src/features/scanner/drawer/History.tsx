@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react"
 
 import { useServices } from "../../../app/context.ts"
 import { errorMessage, validated } from "../../../data/api-client.ts"
+import { hourText, useDisplay } from "../../display.ts"
 import { useNow } from "../../hooks.ts"
 import type { HistoryObservation } from "./history.ts"
 import {
@@ -51,14 +52,15 @@ export function DiscoveryHistory({ d }: { d: Discovery }) {
 		return () => abort.abort()
 	}, [data.api, d.id, d.lastSeenAt])
 
+	const display = useDisplay()
 	const day = useMemo(
 		() => (page ? dayHistory(page.items, now, page.nextCursor) : null),
-		[page, now],
+		[page, now, display], // hours follow the time setting
 	)
 	const txs = useMemo(
 		() =>
 			page && day && !day.steady ? lastTransmissions(page.items, now) : [],
-		[page, day, now],
+		[page, day, now, display],
 	)
 
 	if (!day)
@@ -94,7 +96,7 @@ export function DiscoveryHistory({ d }: { d: Discovery }) {
 				{day.bars.map((b, i) => (
 					<span
 						key={i}
-						title={`${String(b.hour).padStart(2, "0")}:00 · ${b.count} heard`}
+						title={`${hourText(b.hour)} · ${b.count} heard`}
 						data-empty={heights[i] === 0 ? "" : undefined}
 						data-now={i === last && heights[i] !== 0 ? "" : undefined}
 						style={{ height: Math.max(1, heights[i] ?? 0) }}
