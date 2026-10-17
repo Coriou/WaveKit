@@ -8,6 +8,7 @@
 import { EventEmitter } from "node:events"
 import * as net from "node:net"
 import type { Readable } from "node:stream"
+import { safeErrorFields } from "../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import { iqClientBufferLimit } from "./client-buffer.js"
 import type { BranchConfig, FanoutManager } from "./fanout-manager.js"
@@ -215,17 +216,32 @@ export class TunerRelay extends EventEmitter {
 		this.attachBranch()
 
 		return new Promise((resolve, reject) => {
-			this.server = net.createServer(socket =>
+			let listening = false
+			const server = net.createServer(socket =>
 				this.handleClientConnection(socket),
 			)
+			this.server = server
 
-			this.server.on("error", err => {
-				this.log.error({ err }, "Tuner relay server error")
-				this.emit("error", err)
-				reject(err)
+			server.on("error", err => {
+				if (!listening) {
+					this.log.error(
+						{ err: safeErrorFields(err) },
+						"Failed to start tuner relay server",
+					)
+					if (this.server === server) this.server = null
+					reject(err)
+					return
+				}
+				if (this.listenerCount("error") > 0) this.emit("error", err)
+				else
+					this.log.error(
+						{ err: safeErrorFields(err) },
+						"Tuner relay server error",
+					)
 			})
 
-			this.server.listen(this.config.port, this.config.host, () => {
+			server.listen(this.config.port, this.config.host, () => {
+				listening = true
 				this.log.info(
 					{
 						host: this.config.host,
