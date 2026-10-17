@@ -327,6 +327,36 @@ describe("merge aliases in the discovery store (WG10 req 1.5)", () => {
 		b.store.releaseAliases(survivor)
 		expect(b.store.aliasesOf(survivor)).toEqual([])
 	})
+
+	it("replaying a non-merge delete of an owner leaves the same alias table as runtime and snapshot (nothing stays detached)", () => {
+		const b = newStore()
+		const { survivor, dropped } = mergedPair(b)
+		const other = newStore()
+		const kept = mergedPair(other)
+		expect(b.store.delete(survivor)).toBe(true)
+		// runtime: the owner's removal settled and released its aliases
+		b.store.releaseAliases(survivor)
+		const table = (s: DiscoveryStore) => ({
+			survivor: s.aliasesOf(survivor),
+			owner: s.aliasOwner(dropped),
+			persisted: s.snapshot().aliases ?? [],
+		})
+		const runtime = table(b.store)
+		expect(runtime).toEqual({ survivor: [], owner: undefined, persisted: [] })
+		const replayed = newStore()
+		for (const e of b.entries)
+			replayed.store.replay(JSON.parse(JSON.stringify(e)) as JournalEntry)
+		expect(table(replayed.store)).toEqual(runtime)
+		const restored = newStore()
+		restored.store.restore(b.store.snapshot())
+		expect(table(restored.store)).toEqual(runtime)
+		// a live owner's aliases still replay as written
+		const live = newStore()
+		for (const e of other.entries)
+			live.store.replay(JSON.parse(JSON.stringify(e)) as JournalEntry)
+		expect(live.store.aliasesOf(kept.survivor)).toEqual([kept.dropped])
+		expect(live.store.aliasOwner(kept.dropped)).toBe(kept.survivor)
+	})
 })
 
 describe("alias folders in the evidence store (WG10 req 1.5)", () => {

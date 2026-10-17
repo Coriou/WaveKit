@@ -1995,7 +1995,12 @@ export class DiscoveryStore extends EventEmitter {
 			const previous = this.observationIndex.get(id)
 			if (previous !== undefined) this.unlinkObservation(previous)
 		}
-		for (const id of m.deleted) this.removeDiscovery(id)
+		for (const id of m.deleted) {
+			this.removeDiscovery(id)
+			// Replay only (no evidence removal follows): a deleted owner's aliases are released,
+			// as a settled runtime removal and a snapshot restore leave them (nothing detached).
+			this.aliasTable.release(id)
+		}
 		for (const a of m.aliases ?? []) {
 			this.aliasTable.release(a.id)
 			if (this.discoveries.has(a.id) || a.aliases.length === 0)
