@@ -478,7 +478,10 @@ export function Shell({
 						{pushedOn && PaneContent ? (
 							<PaneContent mode="screen" onHide={hidePane} />
 						) : (
-							<DrawerContent onClose={closeDrawer} />
+							<DrawerContent
+								onClose={closeDrawer}
+								paneRoom={L.drawer?.full === true}
+							/>
 						)}
 					</Suspense>
 				</div>

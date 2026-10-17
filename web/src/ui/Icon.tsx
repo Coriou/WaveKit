@@ -55,6 +55,17 @@ const PATHS = {
 		"M8 11v-4a4 4 0 1 1 8 0v4",
 	],
 	tune: ["M5 12h14", "M13 18l6 -6", "M13 6l6 6"],
+	columns: ["M4 4h16v16h-16z", "M9.33 4v16", "M14.67 4v16"],
+	grip: [
+		"M9 6m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+		"M9 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+		"M9 18m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+		"M15 6m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+		"M15 12m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+		"M15 18m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0",
+	],
+	"chevron-left": ["M15 6l-6 6l6 6"],
+	"chevron-right": ["M9 6l6 6l-6 6"],
 } as const satisfies Record<string, readonly string[]>
 
 export type IconName = keyof typeof PATHS

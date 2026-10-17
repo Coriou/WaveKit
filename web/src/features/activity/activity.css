@@ -353,3 +353,26 @@
 		line-height: 1.5;
 	}
 }
+
+/* columns: the header's Columns toggle (quiet selection) and Pin as column / Clear all in the search field */
+@layer wk-app {
+	.wka-cols-btn {
+		flex: none;
+		padding: 0 10px 0 8px;
+	}
+	.wka-cols-btn[aria-pressed="true"] {
+		background: var(--wk-sel);
+	}
+	.wka-clear {
+		flex: none;
+		padding: 0 10px;
+		background: rgba(var(--wk-accent-rgb), 0.06);
+		font-weight: 400;
+	}
+	.wka-pin {
+		flex: none;
+		padding: 0 10px 0 8px;
+		gap: 4px;
+		background: rgba(var(--wk-accent-rgb), 0.14);
+	}
+}

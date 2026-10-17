@@ -6,6 +6,7 @@ import { lazy, type ComponentType } from "react"
 
 import type { PaneContentProps } from "./drawers/types.ts"
 import type { DrawerId } from "./store.ts"
+import { activityPane, setActivityPaneOpen } from "../features/activity/pane.ts"
 import { closePlan, scannerUi } from "../features/scanner/ui-store.ts"
 
 export interface DrawerPane {
@@ -32,6 +33,15 @@ export const DRAWER_PANES: Readonly<Partial<Record<DrawerId, DrawerPane>>> = {
 		subscribe: listener => scannerUi.subscribe(() => listener()),
 		hide: closePlan,
 		Content: lazy(() => import("./drawers/ScanPlanPane.tsx")),
+	},
+	activity: {
+		label: "Activity columns",
+		pushIn: false,
+		task: false,
+		wanted: () => activityPane.get().open,
+		subscribe: listener => activityPane.subscribe(() => listener()),
+		hide: () => setActivityPaneOpen(false),
+		Content: lazy(() => import("./drawers/ActivityColumnsPane.tsx")),
 	},
 }
 

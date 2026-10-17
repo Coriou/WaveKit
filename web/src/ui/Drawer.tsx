@@ -14,6 +14,8 @@ export interface DrawerProps extends Omit<
 	title: string
 	/** Header content after the title (counts, actions). */
 	actions?: ReactNode
+	/** Header content at the far end, just before the close button. */
+	end?: ReactNode
 	onClose?: () => void
 	/** Accessible name of the close button; default "Close <title>". */
 	closeLabel?: string
@@ -24,6 +26,7 @@ export interface DrawerProps extends Omit<
 export function Drawer({
 	title,
 	actions,
+	end,
 	onClose,
 	closeLabel,
 	className,
@@ -40,6 +43,7 @@ export function Drawer({
 				<h2 className="wk-h2">{title}</h2>
 				{actions}
 				<span className="wk-drawer-gap" />
+				{end}
 				{onClose && (
 					<IconButton
 						close

@@ -1,0 +1,304 @@
+/* Activity's columns pane (Activity board, "Activity wide mode: the columns pane"): pinned searches side by side in
+   the shell's attached pane. The slot draws the opaque surface; columns are wells like the drawer's list. */
+@layer wk-app {
+	.wkac-pane {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.wkac-head {
+		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		height: 54px;
+		box-sizing: border-box;
+		padding: 8px 10px 2px 18px;
+	}
+	.wkac-count {
+		flex: none;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wkac-hide {
+		flex: none;
+		font-size: var(--wk-fs-md);
+		font-weight: 400;
+	}
+
+	/* empty: how to pin, and what you hear most */
+	.wkac-empty {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 12px;
+		padding: 24px;
+		text-align: center;
+	}
+	.wkac-empty p {
+		margin: 0;
+	}
+	.wkac-empty-title {
+		font-weight: 700;
+		font-size: var(--wk-fs-xl);
+		color: var(--wk-text-2);
+	}
+	.wkac-empty-text {
+		max-width: 380px;
+		font-size: var(--wk-fs-md);
+		line-height: 1.5;
+		color: var(--wk-text-3);
+	}
+	.wkac-empty-row {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 6px;
+		max-width: 520px;
+	}
+	.wkac-heard {
+		gap: 8px;
+		background: rgba(var(--wk-accent-rgb), 0.1);
+		font-size: var(--wk-fs-md);
+	}
+	.wkac-heard-n {
+		font-weight: 400;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wkac-empty .wk-chip {
+		font-weight: 400;
+	}
+
+	/* the columns: a sideways scroller that contains horizontal overscroll (no browser back-swipe) */
+	.wkac-body {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+		display: flex;
+	}
+	.wkac-cols {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		gap: 8px;
+		padding: 0 10px 10px;
+		overflow-x: auto;
+		overflow-y: hidden;
+		overscroll-behavior-x: contain;
+		scroll-snap-type: x proximity;
+		scroll-padding-right: 10px;
+	}
+	.wkac-col {
+		position: relative;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		scroll-snap-align: start;
+		border-radius: var(--wk-r-4);
+		background: var(--wk-well-glass);
+	}
+	.wkac-col[data-editing] {
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-accent-rgb), 0.35);
+	}
+	.wkac-col[data-over] {
+		box-shadow: inset 0 0 0 1.5px rgba(var(--wk-accent-rgb), 0.6);
+	}
+	.wkac-col[data-dragging] {
+		opacity: 0.5;
+	}
+	.wkac-colhead {
+		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: 44px;
+		padding: 0 4px 0 6px;
+		cursor: grab;
+	}
+	.wkac-grip {
+		flex: none;
+		color: var(--wk-text-4);
+	}
+	.wkac-title {
+		margin: 0;
+		min-width: 0;
+		font-family: var(--wk-font-head);
+		font-weight: 700;
+		font-size: var(--wk-fs-xl);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--wk-text-2);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkac-rename {
+		flex: 1;
+		min-width: 0;
+		font-size: var(--wk-fs-md);
+		font-weight: 700;
+	}
+	.wkac-menubtn {
+		flex: none;
+		color: var(--wk-text-3);
+	}
+	.wkac-menu {
+		position: absolute;
+		z-index: 3;
+		top: 40px;
+		right: 6px;
+		min-width: 190px;
+		/* solid: no blur behind it, so no see-through either */
+		background: var(--wk-fill);
+	}
+	.wkac-menu [aria-disabled="true"] {
+		color: var(--wk-text-5);
+		cursor: default;
+	}
+	.wkac-menu [data-danger] {
+		color: var(--wk-danger-soft);
+	}
+	.wkac-hint {
+		margin-left: auto;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-4);
+	}
+
+	/* a column's list is its own vertical scroller: it contains vertical overscroll only, so a sideways swipe over
+	   the cards still moves the pane */
+	.wka-listwrap.wkac-list {
+		margin: 0;
+		background: none;
+	}
+	.wkac-list .wka-list {
+		overflow-x: hidden;
+		overscroll-behavior: auto contain;
+		padding: 0 2px 8px;
+	}
+	.wkac-colempty {
+		position: absolute;
+		inset: 44px 0 auto;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 10px;
+		padding: 36px 16px;
+		text-align: center;
+		pointer-events: none;
+	}
+	.wkac-colempty > * {
+		pointer-events: auto;
+	}
+	.wkac-colempty p {
+		margin: 0;
+	}
+	.wkac-colempty-title {
+		font-weight: 700;
+		color: var(--wk-text-2);
+	}
+	.wkac-colempty-text {
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-3);
+		line-height: 1.5;
+	}
+	.wkac-clear {
+		color: var(--wk-accent);
+		font-size: var(--wk-fs-md);
+	}
+
+	/* Add a column: a dashed tile after the columns */
+	.wkac-add {
+		flex: none;
+		width: 184px;
+		box-sizing: border-box;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 10px;
+		border-radius: var(--wk-r-4);
+		border: 1px dashed var(--wk-line-18);
+		overflow-y: auto;
+		scroll-snap-align: end;
+	}
+	.wkac-add-title {
+		font-size: var(--wk-fs-xs);
+		font-weight: 700;
+		color: var(--wk-text-2);
+		padding: 4px 4px 2px;
+	}
+	.wkac-add-btn {
+		font: inherit;
+		cursor: pointer;
+		min-height: var(--wk-h-lg);
+		padding: 6px 10px;
+		border: 0;
+		border-radius: var(--wk-r-3);
+		background: rgba(var(--wk-accent-rgb), 0.06);
+		color: var(--wk-text-2);
+		font-size: var(--wk-fs-md);
+		text-align: left;
+	}
+	.wkac-add-btn:hover {
+		background: rgba(var(--wk-accent-rgb), 0.12);
+	}
+	.wkac-add-btn[data-primary] {
+		background: rgba(var(--wk-accent-rgb), 0.14);
+		color: var(--wk-accent);
+		font-weight: 700;
+	}
+	.wkac-add-hint {
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-4);
+		padding: 4px;
+		line-height: 1.45;
+	}
+
+	/* more columns than fit: the next one peeks in under a fade with "+N" */
+	.wkac-fade {
+		position: absolute;
+		top: 0;
+		bottom: 10px;
+		width: 64px;
+		pointer-events: none;
+		display: flex;
+		align-items: center;
+		box-sizing: border-box;
+	}
+	.wkac-fade[data-side="left"] {
+		left: 10px;
+		justify-content: flex-start;
+		padding-left: 6px;
+		border-radius: var(--wk-r-4) 0 0 var(--wk-r-4);
+		background: linear-gradient(270deg, transparent, var(--wk-surface) 75%);
+	}
+	.wkac-fade[data-side="right"] {
+		right: 10px;
+		justify-content: flex-end;
+		padding-right: 6px;
+		border-radius: 0 var(--wk-r-4) var(--wk-r-4) 0;
+		background: linear-gradient(90deg, transparent, var(--wk-surface) 75%);
+	}
+	.wkac-more {
+		pointer-events: auto;
+		gap: 2px;
+		border-radius: var(--wk-r-pill);
+		background: var(--wk-surface);
+		color: var(--wk-text-2);
+		font-size: var(--wk-fs-xs);
+		box-shadow: var(--wk-e2);
+	}
+	.wkac-fade[data-side="left"] .wkac-more {
+		padding: 0 10px 0 6px;
+	}
+	.wkac-fade[data-side="right"] .wkac-more {
+		padding: 0 6px 0 10px;
+	}
+}

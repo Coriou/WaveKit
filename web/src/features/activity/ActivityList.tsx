@@ -31,6 +31,10 @@ export interface ActivityListProps {
 	/** The row the detail shows (kept highlighted when coming back). */
 	openId: string | null
 	label: string
+	/** Extra class on the wrapper (a pane column drops the drawer's well margins). */
+	className?: string
+	/** `data-act-col` on the scroller: ← / → move focus across the pane's columns and the drawer's list. */
+	column?: string
 	ref?: Ref<HTMLDivElement>
 }
 
@@ -39,6 +43,8 @@ export function ActivityList({
 	onOpen,
 	openId,
 	label,
+	className,
+	column,
 	ref,
 }: ActivityListProps) {
 	const items = useStore(feed, s => s.items)
@@ -169,6 +175,15 @@ export function ActivityList({
 
 	const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
 		if (
+			(e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+			column !== undefined &&
+			e.target === e.currentTarget
+		) {
+			e.preventDefault()
+			focusSideways(e.currentTarget, e.key === "ArrowRight" ? 1 : -1)
+			return
+		}
+		if (
 			e.key !== "ArrowDown" &&
 			e.key !== "ArrowUp" &&
 			e.key !== "Enter" &&
@@ -208,7 +223,7 @@ export function ActivityList({
 	}
 
 	return (
-		<div className="wka-listwrap">
+		<div className={className ? `wka-listwrap ${className}` : "wka-listwrap"}>
 			{pending > 0 && (
 				<button type="button" className="wka-newpill" onClick={toTop}>
 					↑ {pending} new
@@ -220,6 +235,7 @@ export function ActivityList({
 				role="list"
 				aria-label={label}
 				tabIndex={0}
+				data-act-col={column}
 				onScroll={onScroll}
 				onKeyDown={onKeyDown}
 			>
@@ -260,6 +276,19 @@ export function ActivityList({
 			</div>
 		</div>
 	)
+}
+
+/** Moves focus to the next list left or right: the pane's columns in order, then the drawer's list. */
+export function focusSideways(from: HTMLElement, by: -1 | 1): void {
+	const lists = [...document.querySelectorAll<HTMLElement>("[data-act-col]")]
+	const order = [
+		...lists.filter(l => l.dataset["actCol"] !== "drawer"),
+		...lists.filter(l => l.dataset["actCol"] === "drawer"),
+	]
+	const next = order[order.indexOf(from) + by]
+	if (!next) return
+	next.focus({ preventScroll: true })
+	next.scrollIntoView?.({ block: "nearest", inline: "nearest" })
 }
 
 interface RowProps {

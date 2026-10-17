@@ -5,18 +5,28 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 
 import { useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
-import type { ActivityFeedState } from "../../data/activity-feed.ts"
+import type {
+	ActivityFeed,
+	ActivityFeedState,
+} from "../../data/activity-feed.ts"
 import { ActivityDetail } from "../../features/activity/ActivityDetail.tsx"
 import { ActivityList } from "../../features/activity/ActivityList.tsx"
+import { MAX_COLUMNS } from "../../features/activity/columns.ts"
 import {
 	activitySearchFocus,
 	takeActivitySearchFocus,
 } from "../../features/activity/focus.ts"
+import {
+	activityPane,
+	setActivityPaneOpen,
+} from "../../features/activity/pane.ts"
 import type { CategoryChipId } from "../../features/activity/search.ts"
 import { CATEGORY_CHIPS, suggest } from "../../features/activity/search.ts"
+import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
 import { Drawer } from "../../ui/Drawer.tsx"
 import { Icon } from "../../ui/Icon.tsx"
+import { showAppToast } from "../toast.ts"
 import type { DrawerContentProps } from "./types.ts"
 
 const RESET_TEXT: Record<NonNullable<ActivityFeedState["reset"]>, string> = {
@@ -28,15 +38,26 @@ const RESET_TEXT: Record<NonNullable<ActivityFeedState["reset"]>, string> = {
 	"reader-failed": "Reading Activity failed; the list was reloaded.",
 }
 
-// The Activity drawer (Activity board): search with typed chips, category chips with counts, pinned
-// searches as a switcher row, the live list, and an event's detail pushed in with Back.
-export default function ActivityDrawer({ onClose }: DrawerContentProps) {
+// The Activity drawer (Activity board): search with typed chips and Pin as column, category chips with counts,
+// the live list, and an event's detail pushed in with Back. With room, the header's Columns opens the pinned
+// searches side by side in the attached pane (ActivityColumnsPane); without, they are a switcher row here.
+export default function ActivityDrawer({
+	onClose,
+	paneRoom = false,
+}: DrawerContentProps) {
 	const { activity } = useServices()
-	const feed = activity.feed
 	useEffect(() => activity.attach(), [activity])
 	const openId = useStore(activity, s => s.openId)
 	const openItem = useStore(activity, s => s.openItem)
-	const paused = useStore(feed, s => s.paused)
+	const view = useStore(activity, s => s.view)
+	const hasColumns = useStore(activity, s => s.columns.length > 0)
+	useStore(activity, s => s.columns)
+	// no room for the pane: the switcher's pick is the list the drawer shows
+	const feed =
+		(!paneRoom && view !== "all" ? activity.columnFeed(view) : null) ??
+		activity.feed
+	const paused = useStore(activity.feed, s => s.paused)
+	const paneOpen = useStore(activityPane, s => s.open)
 	const list = useRef<HTMLDivElement>(null)
 
 	const back = () => {
@@ -59,24 +80,49 @@ export default function ActivityDrawer({ onClose }: DrawerContentProps) {
 							? "Paused: new events wait. Click to go live."
 							: "Live: new events appear at the top. Click to pause."
 					}
-					onClick={() => feed.setPaused(!paused)}
+					onClick={() => activity.setPaused(!paused)}
 				>
 					<span className="wka-live-dot" />
 					{paused ? "Paused" : "Live"}
 				</button>
 			}
+			end={
+				paneRoom && (
+					<Button
+						variant="ghost"
+						size="sm"
+						className="wka-cols-btn"
+						aria-pressed={paneOpen}
+						title={
+							paneOpen
+								? "Hide the columns"
+								: "Show your pinned searches as columns beside Activity"
+						}
+						onClick={() => setActivityPaneOpen(!paneOpen)}
+					>
+						<Icon name="columns" />
+						Columns
+					</Button>
+				)
+			}
 		>
 			<div className="wka-browse" hidden={openId !== null}>
-				<SearchBox />
+				<SearchBox room={paneRoom} />
 				<Categories />
-				<Pins />
-				<ListHeader />
-				<Notices />
+				{!paneRoom && hasColumns && <Switcher />}
+				<ListHeader feed={feed} room={paneRoom} />
+				<Notices feed={feed} />
 				<ActivityList
 					ref={list}
 					feed={feed}
 					openId={openId}
-					label={activity.title()}
+					column="drawer"
+					label={
+						feed === activity.feed
+							? activity.title()
+							: (activity.get().columns.find(c => c.id === view)?.title ??
+								activity.title())
+					}
 					onOpen={id => {
 						const item = feed.get().items.find(i => i.eventId === id) ?? null
 						if (item) activity.open(item)
@@ -90,9 +136,24 @@ export default function ActivityDrawer({ onClose }: DrawerContentProps) {
 	)
 }
 
-function SearchBox() {
+function SearchBox({ room }: { room: boolean }) {
 	const { activity } = useServices()
 	const tokens = useStore(activity, s => s.tokens)
+	const chip = useStore(activity, s => s.chip)
+	const editing = useStore(activity, s =>
+		s.editing === null
+			? null
+			: (s.columns.find(c => c.id === s.editing) ?? null),
+	)
+	const full = useStore(activity, s => s.columns.length >= MAX_COLUMNS)
+	const pinned = useStore(activity, s => {
+		void s.columns
+		void s.tokens
+		void s.chip
+		return activity.currentColumn()
+	})
+	const searching = tokens.length > 0 || chip !== null
+	const canPin = searching && (editing !== null || (!full && pinned === null))
 	const [text, setText] = useState("")
 	const input = useRef<HTMLInputElement>(null)
 	const options = suggest(text)
@@ -142,7 +203,19 @@ function SearchBox() {
 		} else if (e.key === "Escape" && text !== "") {
 			e.preventDefault()
 			setText("")
+		} else if (e.key === "Escape" && editing !== null) {
+			e.preventDefault()
+			activity.cancelEdit()
 		}
+	}
+
+	const pin = () => {
+		const name = editing?.title
+		const id = activity.pinSearch(room)
+		if (id === null) return
+		if (name !== undefined) showAppToast(`Column ${name} updated.`)
+		else if (!room)
+			showAppToast("Pinned. Switch to it in the row above the list.")
 	}
 
 	return (
@@ -173,6 +246,34 @@ function SearchBox() {
 					onChange={e => setText(e.target.value)}
 					onKeyDown={onKeyDown}
 				/>
+				{searching && (
+					<Button
+						variant="ghost"
+						size="sm"
+						className="wka-clear"
+						onClick={() => activity.clear()}
+					>
+						{editing ? "Cancel" : "Clear all"}
+					</Button>
+				)}
+				{canPin && (
+					<Button
+						variant="tonal"
+						size="sm"
+						className="wka-pin"
+						title={
+							editing
+								? `Save this search to the column ${editing.title}`
+								: room
+									? "Keep this search as a column beside Activity"
+									: "Keep this search as a column you can switch to"
+						}
+						onClick={pin}
+					>
+						<Icon name="pin" />
+						{editing ? "Update column" : "Pin as column"}
+					</Button>
+				)}
 			</div>
 			{options.length > 0 && (
 				<div className="wka-suggest" role="group" aria-label="Search as">
@@ -217,88 +318,95 @@ function Categories() {
 	)
 }
 
-function Pins() {
+// No room for the pane: the columns become a chip row that switches the drawer's list, with new-item counts.
+function Switcher() {
 	const { activity } = useServices()
-	const pins = useStore(activity, s => s.pins)
-	// Re-read the current pin when the search changes.
-	useStore(activity, s => s.tokens)
-	useStore(activity, s => s.chip)
-	const all = useStore(activity, s => s.tokens.length === 0 && s.chip === null)
-	const current = activity.currentPin()
-	if (pins.length === 0) return null
+	const columns = useStore(activity, s => s.columns)
+	const view = useStore(activity, s => s.view)
 	return (
-		<div className="wka-pins" role="group" aria-label="Pinned searches">
-			<Chip size="sm" pressed={all} onClick={() => activity.clear()}>
-				All activity
+		<div className="wka-pins" role="tablist" aria-label="Pinned columns">
+			<Chip
+				size="sm"
+				role="tab"
+				aria-selected={view === "all"}
+				pressed={view === "all"}
+				onClick={() => activity.pickView("all")}
+			>
+				All
 			</Chip>
-			{pins.map(p => (
-				<Chip
-					key={p.id}
-					size="sm"
-					pressed={current?.id === p.id}
-					onClick={() => activity.setSearch(p.tokens, p.chip)}
-				>
-					{p.title}
-				</Chip>
+			{columns.map(c => (
+				<SwitcherChip key={c.id} id={c.id} title={c.title} on={view === c.id} />
 			))}
 		</div>
 	)
 }
 
-function ListHeader() {
+function SwitcherChip({
+	id,
+	title,
+	on,
+}: {
+	id: string
+	title: string
+	on: boolean
+}) {
 	const { activity } = useServices()
-	const feed = activity.feed
+	const feed = activity.columnFeed(id)
+	// re-read the count when the column's list or what was seen moves
+	useStore(activity, s => s.seen[id])
+	const fresh = useStore(feed ?? activity.feed, () =>
+		on ? 0 : activity.newInColumn(id),
+	)
+	return (
+		<Chip
+			size="sm"
+			role="tab"
+			aria-selected={on}
+			pressed={on}
+			count={fresh > 0 ? fresh : undefined}
+			aria-label={fresh > 0 ? `${title}, ${fresh} new` : title}
+			onClick={() => activity.pickView(id)}
+		>
+			{title}
+		</Chip>
+	)
+}
+
+function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
+	const { activity } = useServices()
 	const count = useStore(feed, s => s.items.length)
 	const more = useStore(feed, s => s.nextPageToken !== null)
-	const tokens = useStore(activity, s => s.tokens)
-	const chip = useStore(activity, s => s.chip)
-	useStore(activity, s => s.pins)
-	const pinned = activity.currentPin()
-	const searching = tokens.length > 0 || chip !== null
+	const searching = useStore(
+		activity,
+		s => s.tokens.length > 0 || s.chip !== null,
+	)
+	const view = useStore(activity, s =>
+		room || s.view === "all"
+			? null
+			: (s.columns.find(c => c.id === s.view) ?? null),
+	)
+	useStore(activity, s => s.tokens)
+	useStore(activity, s => s.chip)
+	const title = view
+		? searching
+			? `${view.title} · ${activity.title()}`
+			: view.title
+		: searching
+			? activity.title()
+			: "All activity"
 	return (
 		<div className="wka-listhead">
-			<span className="wka-listtitle">
-				{searching ? activity.title() : "All activity"}
-			</span>
+			<span className="wka-listtitle">{title}</span>
 			<span className="wka-listcount">
 				{count}
 				{more ? "+" : ""}
 			</span>
-			<span className="wkf-gap" />
-			{searching &&
-				(pinned ? (
-					<button
-						type="button"
-						className="wka-link"
-						onClick={() => activity.unpin(pinned.id)}
-					>
-						Unpin
-					</button>
-				) : (
-					<button
-						type="button"
-						className="wka-link"
-						onClick={() => activity.pinCurrent()}
-					>
-						Pin search
-					</button>
-				))}
-			{searching && (
-				<button
-					type="button"
-					className="wka-link"
-					onClick={() => activity.clear()}
-				>
-					Clear
-				</button>
-			)}
 		</div>
 	)
 }
 
-function Notices() {
+function Notices({ feed }: { feed: ActivityFeed }) {
 	const { activity } = useServices()
-	const feed = activity.feed
 	const status = useStore(feed, s => s.status)
 	const reset = useStore(feed, s => s.reset)
 	const error = useStore(feed, s => s.error)
