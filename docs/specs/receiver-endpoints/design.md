@@ -4,12 +4,13 @@ Status: Pi side implemented (user stories 1–2); core and bridge design only. S
 
 ## Pi side (sdr-host and image)
 
-`packages/sdr-host/src/telemetry/endpoints.ts`: `rankEndpoints(interfaces, ports)` is a
-pure function over the `SdrHostNetworkInterface[]` that `HostCollector` already
-produces, which carries `kind`, `operstate`, `addresses`, `speedMbps`,
-`defaultRouteMetric` and `wireless`. The status route reads the latest host network
-reading. When that reading is unavailable, `endpoints` is `null` with a reason; it
-never falls back to `os.networkInterfaces()` inside the container.
+`packages/sdr-host/src/telemetry/endpoints.ts`: `rankEndpoints(interfaces)` is a pure
+function over the `SdrHostNetworkInterface[]` that `HostCollector` already produces,
+which carries `kind`, `operstate`, `addresses`, `speedMbps`, `defaultRouteMetric` and
+`wireless`. `endpointsFromTelemetry(network, { iqPort, apiPort })` wraps it for the
+status route, which reads the latest cached host network reading. When that reading
+is unavailable, `endpoints` is a bare `null`; the reason stays in `GET /api/host`
+`network.reason`. It never falls back to `os.networkInterfaces()` inside the container.
 
 DTO in `packages/api-types/src/sdr-host.ts`:
 
@@ -27,7 +28,8 @@ export interface SdrHostEndpoints {
 	apiPort: number
 	addresses: SdrHostEndpoint[] // best first
 }
-// SdrHostStatus gains: receiverId: string; endpoints: SdrHostEndpoints | null
+// The sdr-host GET /api/status body (no named DTO; not core's status) gains
+// receiverId: string and endpoints: SdrHostEndpoints | null.
 ```
 
 `receiverId`: `randomBytes(16)` as hex, generated once when sdr-host starts. Core only

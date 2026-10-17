@@ -521,6 +521,21 @@ describe("operator page host readouts", () => {
 			sub: "\u221250 dBm · 1.90 MB/s out · Ethernet up at 192.0.2.69: connect clients there",
 		})
 
+		// A link-local address is not one to point clients at.
+		host.network = reading([
+			{ ...eth, addresses: ["169.254.7.9", "192.0.2.69"] },
+			{ ...wlan, txBytesPerSec: 1_900_000 },
+		])
+		expect(readouts(host)?.network?.sub).toContain("Ethernet up at 192.0.2.69")
+		host.network = reading([
+			{ ...eth, addresses: ["169.254.7.9"] },
+			{ ...wlan, txBytesPerSec: 1_900_000 },
+		])
+		expect(readouts(host)?.network).toMatchObject({
+			state: "ok",
+			sub: "\u221250 dBm · 1.90 MB/s out",
+		})
+
 		// A wired port without carrier changes nothing.
 		host.network = reading([
 			{ ...eth, operstate: "down", speedMbps: null, defaultRouteMetric: null },

@@ -29,7 +29,8 @@ is reachable from any particular client.
 1.4 `GET /api/status` carries a `receiverId`: 128 random bits that identify one
 running sdr-host process and are the same on every address it serves. It changes when
 sdr-host restarts, which makes a comparison across a restart fail closed. It reveals
-nothing about the host.
+nothing about the host. It is not an authenticator: anyone on the LAN can read it, and
+it only shows that two addresses lead to the same running receiver.
 
 ## User story 2: on a home network, the receiver can be found without typing an address.
 
@@ -69,7 +70,9 @@ only ever a literal IP address that the configured sdr-host itself listed in its
 `endpoints`, fetched through the configured (or currently verified) API. Core never
 dials hostnames from that list. It never takes candidates from mDNS answers or any
 other source. Any failed check, timeout, parse error or ID mismatch leaves the active
-host unchanged.
+host unchanged. Trust in a candidate comes from the configured host's own endpoint
+list plus a valid `RTL0` header on the candidate. A matching `receiverId` only
+confirms that the candidate is the same receiver; it authenticates nothing (1.4).
 
 3.7 The CLI and web source-status guards accept the new `endpoint` field.
 The field is omitted, never null, while selection is `off`.

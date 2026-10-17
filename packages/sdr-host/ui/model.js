@@ -654,7 +654,11 @@ function idleWiredLink(network, primary) {
 	const wired = network.value.find(
 		i => i.kind === "ethernet" && i.operstate === "up" && i.speedMbps,
 	)
-	return wired?.addresses.find(a => !a.includes(":")) ?? null
+	// IPv4 only, and never link-local: a 169.254/16 address means no DHCP lease.
+	return (
+		wired?.addresses.find(a => !a.includes(":") && !a.startsWith("169.254.")) ??
+		null
+	)
 }
 
 export function setupLine(reading) {
