@@ -59,6 +59,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 		openTuner: () => void calls.push(["openTuner"]),
 		openShortcuts: () => void calls.push(["openShortcuts"]),
 		openBandPlans: () => void calls.push(["openBandPlans"]),
+		openDevices: () => void calls.push(["openDevices"]),
 	}
 }
 
@@ -255,6 +256,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 		decoderSettings: true,
 		version: "0.14.2",
 		accessMode: "protected",
+		devices: null,
 		storage: null,
 		exportUrl: "/api/config/export",
 		...over,
@@ -349,6 +351,38 @@ describe("Settings rows", () => {
 		expect(isChanged(byId(rows, "station.name"))).toBe(true)
 		expect(byId(rows, "station.location").text).toBe("48.727° N, 3.985° W")
 		expect(byId(rows, "station.location").effect?.kind).toBe("restart")
+	})
+
+	it("opens Signed-in devices when paired, and says to pair first when not", () => {
+		const a = actions()
+		const devices = [
+			{
+				deviceId: `device_${"a".repeat(42)}A`,
+				createdAt: 1,
+				renewedAt: 2,
+				expiresAt: 3,
+				current: true,
+				name: null,
+				kind: null,
+				lastSeenAt: null,
+			},
+		]
+		const row = byId(buildRows(snapshot({ devices }), a), "sys.devices")
+		expect(row.text).toBe("1 device")
+		expect(row.help).toBe("This browser")
+		if (row.widget.kind !== "link") throw new Error("not a link")
+		row.widget.action()
+		expect(a.calls).toEqual([["openDevices"]])
+		const unpaired = byId(
+			buildRows(snapshot({ readOnly: true }), a),
+			"sys.devices",
+		)
+		expect(unpaired.widget.kind).toBe("read")
+		expect(
+			buildRows(snapshot({ accessMode: "legacy" }), a).some(
+				r => r.id === "sys.devices",
+			),
+		).toBe(false)
 	})
 
 	it("keeps the station read-only on an open-access core", () => {

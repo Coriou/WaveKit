@@ -27,6 +27,12 @@ import type {
 
 export const CSRF_HEADER = "X-WaveKit-CSRF"
 
+// docs/API.md › remembered devices (session routes; the core exports no constants for them)
+export const ACCESS_DEVICES_ROUTE = "/api/access/devices"
+export const ACCESS_DEVICES_LABEL_ROUTE = "/api/access/devices/label"
+export const ACCESS_DEVICES_REVOKE_ROUTE = "/api/access/devices/revoke"
+export const ACCESS_DEVICES_REVOKE_ALL_ROUTE = "/api/access/devices/revoke-all"
+
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
 export type QueryValue =
@@ -190,6 +196,15 @@ export class ApiClient {
 	async refreshSession(): Promise<AccessSessionDto> {
 		const body = await this.post<unknown>(ACCESS_SESSION_REFRESH_ROUTE)
 		return this.adoptSession(body, "POST", ACCESS_SESSION_REFRESH_ROUTE)
+	}
+
+	/** POST /api/access/devices/revoke-all: ends every remembered session, this one too (token cleared). */
+	async revokeAllDevices(): Promise<void> {
+		try {
+			await this.post<unknown>(ACCESS_DEVICES_REVOKE_ALL_ROUTE)
+		} finally {
+			this.csrfToken = null
+		}
 	}
 
 	/** POST /api/access/session/logout: ends the session; the token is cleared whatever the answer. */

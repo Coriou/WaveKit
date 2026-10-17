@@ -2,6 +2,7 @@
 // make (actions). Only settings that work in this app and this core are rows; the rest of the canvas registry
 // waits on CORE-GAPS ("Settings store in core", "One settings schema"). Pure given the snapshot and the actions.
 import type {
+	AccessDeviceDto,
 	DecoderInfo,
 	DecoderSettingsUpdate,
 	DecoderSettingsView,
@@ -62,6 +63,7 @@ import {
 import { sourceTitle } from "../receiver/summary.ts"
 import { STEPS } from "../tuner/prefs.ts"
 import { decoderRows } from "./decoder-rows.ts"
+import { devicesCount, devicesSummary } from "./devices.ts"
 import {
 	optionText,
 	type SettingOption,
@@ -105,6 +107,8 @@ export interface SettingsSnapshot {
 	readonly decoderSettings: boolean
 	readonly version: string | null
 	readonly accessMode: "legacy" | "protected" | null
+	/** Remembered devices (protected core, this browser paired); null until loaded or without a session. */
+	readonly devices: readonly AccessDeviceDto[] | null
 	readonly storage: StorageReport | null
 	readonly exportUrl: string
 }
@@ -128,6 +132,7 @@ export interface SettingsActions {
 	openTuner(): void
 	openShortcuts(): void
 	openBandPlans(): void
+	openDevices(): void
 }
 
 const OK: SettingWriteResult = { ok: true }
@@ -1399,7 +1404,7 @@ function mapRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 
 // ---- system
 
-function systemRows(s: SettingsSnapshot): SettingRow[] {
+function systemRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const rows: SettingRow[] = []
 	if (s.version !== null)
 		rows.push({
@@ -1426,6 +1431,40 @@ function systemRows(s: SettingsSnapshot): SettingRow[] {
 			text: s.accessMode === "protected" ? "Protected" : "Open",
 			lock: "Set at deploy (access.mode)",
 		})
+	if (s.accessMode === "protected") {
+		const keys = words(
+			"devices signed in sign out log out logout paired browsers phones tablets revoke lost",
+		)
+		rows.push(
+			s.readOnly
+				? {
+						id: "sys.devices",
+						group: "system",
+						label: "Signed-in devices",
+						help: "Pair this browser to see them and sign them out",
+						keys,
+						widget: { kind: "read" },
+						value: null,
+						text: "Not paired",
+					}
+				: {
+						id: "sys.devices",
+						group: "system",
+						label: "Signed-in devices",
+						help: s.devices
+							? devicesSummary(s.devices)
+							: "Browsers and apps paired with this WaveKit",
+						keys,
+						widget: {
+							kind: "link",
+							text: s.devices ? devicesCount(s.devices.length) : "Show",
+							action: a.openDevices,
+						},
+						value: s.devices?.length ?? null,
+						text: s.devices ? devicesCount(s.devices.length) : "Show",
+					},
+		)
+	}
 	rows.push({
 		id: "sys.config",
 		group: "system",
@@ -1457,6 +1496,6 @@ export function buildRows(
 		...storageRows(s),
 		...mapRows(s, a),
 		...displayRows(s, a),
-		...systemRows(s),
+		...systemRows(s, a),
 	]
 }
