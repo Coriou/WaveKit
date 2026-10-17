@@ -338,6 +338,7 @@ describe("protected development server", () => {
 				"./src/access-command.ts",
 				"./src/core/activity/storage/activity-writer-worker.ts",
 				"./src/core/activity/query/activity-query-worker.ts",
+				"./src/core/scanner/store/snapshot-worker.ts",
 			],
 			{ cwd: repository, timeout: 110_000 },
 		)

@@ -162,6 +162,17 @@ import {
 	type RuntimeSettingsOverrides,
 } from "./store/persistence.js"
 import {
+	passiveCostDecision,
+	passiveProbationDue,
+	windowedUtilization,
+	type EluSample,
+} from "./passive-cost.js"
+import {
+	PASSIVE_COST_LIMIT_DEFAULT,
+	PASSIVE_COST_RECHECK_MS,
+	PASSIVE_COST_WINDOW_MS,
+} from "./passive-cost-contract.js"
+import {
 	SCANNER_SETTINGS_BOUNDS,
 	applySettingsPatch,
 	mergeScannerSettings,
@@ -200,7 +211,6 @@ import type {
 	PlanPreview,
 	ScanJobSpec,
 	ScanRange,
-	ScannerConfidence,
 	ScannerProtocol,
 	ScannerSettings,
 	UndecodedReason,
@@ -327,8 +337,6 @@ const RECENT_KEEP_MS = 10_000
 const RECONFIRM_AFTER_MS = 15 * 60_000
 /** Task 29 review, finding 6: bound on waiting for the source caps to show a restored tuning. */
 const RESTORE_CAPS_TIMEOUT_MS = 1_000
-const PASSIVE_COST_WINDOW_MS = 60_000
-const PASSIVE_COST_LIMIT = 0.25
 /** Track ids closed by the service (real or synthesized), kept to ignore their late events (R2). */
 const CLOSED_TRACKS_KEEP = 4096
 const BURST_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set([
@@ -447,8 +455,16 @@ export class ScannerService extends EventEmitter {
 	private readonly hits = new Map<string, JobHits>()
 	/** Store changes raised inside one ingest, emitted after its hits are counted (WG2 req 13.2). */
 	private ingestChanges: [string, StoreChange][] | null = null
-	/** § 10.7: engine instances the passive cost rule already judged (once, at openedAt + 60 s). */
-	private readonly costChecked = new WeakSet<SpectrumEngine>()
+	/**
+	 * § 10.7 / WG11 req 2: when the passive guard last judged each source's running engine. An entry
+	 * for another (replaced) engine counts as never checked, so the first window applies again.
+	 */
+	private readonly costCheckedAt = new Map<
+		string,
+		{ engine: SpectrumEngine; at: number; sample: EluSample | null }
+	>()
+	/** WG11 review M2: when the passive guard disabled each source (for the probation re-enable). */
+	private readonly passiveDisabledAt = new Map<string, number>()
 	private readonly live = new Map<string, LiveObservation>()
 	private recent: LiveObservation[] = []
 	private readonly bestPsd = new Map<
@@ -1207,7 +1223,8 @@ export class ScannerService extends EventEmitter {
 		}
 		if (this.arbiter) await attempt(() => this.arbiter.dispose())
 		if (this.stateLoaded)
-			await attempt(() => this.persistence.writeSnapshot(this.store.snapshot()))
+			await attempt(() => this.persistence.writeSnapshotOf(this.store))
+		await attempt(() => this.persistence.closeSnapshotWorker())
 		if (this.startupAttempted && this.persistence)
 			await attempt(() => this.persistJobs())
 		return failed
@@ -1940,8 +1957,8 @@ export class ScannerService extends EventEmitter {
 
 	/**
 	 * WG11 req 5.3: the scanner identity of a live track of `sourceId`, for the spectrum service's
-	 * frame tracks. O(1): one `live` map lookup and one store lookup. Never throws; null when the
-	 * track is unknown, of another source, ended, or has no discovery. `trackId` is the full
+	 * frame tracks. O(1): one `live` map lookup, then `discoveryIdOf` (the merge survivor) and
+	 * `identityOf` (scalars, no clone). Never throws; null when the track is unknown, of another source, ended, or has no discovery. `trackId` is the full
 	 * tracker id of the chain's current track (after a max-duration rollover, the successor's).
 	 * Keyed on it with the same-source check, two sources' equal suffixes never cross-match.
 	 */
@@ -1958,7 +1975,9 @@ export class ScannerService extends EventEmitter {
 				!live.discoveryId
 			)
 				return null
-			const d = this.store.get(live.discoveryId)
+			const id = this.store.discoveryIdOf(live.observationId)
+			if (id === undefined) return null
+			const d = this.store.identityOf(id)
 			if (!d || !d.protocol || !d.confidence) return null
 			return {
 				discoveryId: d.id,
@@ -3609,7 +3628,7 @@ export class ScannerService extends EventEmitter {
 			impact: () =>
 				this.arbiter.impact(record.spec.sourceId, record.spec, record.id),
 			undecoded: (live, reason) => this.markUndecoded(live, reason),
-			discoveryCounts: jobId => this.discoveryCounts(jobId),
+			discoveryCounts: jobId => this.store.countsByJob(jobId),
 			awaitRestoredCaps: (sourceId, snapshot, restored) =>
 				this.awaitRestoredCaps(sourceId, snapshot, restored),
 			persist: () => void this.persistJobs(),
@@ -4253,12 +4272,6 @@ export class ScannerService extends EventEmitter {
 		return out
 	}
 
-	private discoveryCounts(jobId: string): Record<ScannerConfidence, number> {
-		const counts = { activity: 0, candidate: 0, classified: 0, decoded: 0 }
-		for (const d of this.allDiscoveries({ jobId })) counts[d.confidence] += 1
-		return counts
-	}
-
 	private readonly resumeActivities = new Map<string, ResumeActivity>()
 	private readonly resumeViews = new Map<string, string>()
 	private operatorActivityOff: (() => void) | undefined
@@ -4733,7 +4746,7 @@ export class ScannerService extends EventEmitter {
 		this.snapshotRequested = false
 		this.snapshotInFlight = true
 		this.persistence
-			.writeSnapshot(this.store.snapshot())
+			.writeSnapshotOf(this.store)
 			.then(
 				() => {
 					this.snapshotFailed = false
@@ -4836,34 +4849,105 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * § 10.7: passive off for a source whose engine costs > 25 % of a core over its first minute.
-	 * Evaluated once per engine instance, at openedAt + 60 s (later load from sweeps never counts).
+	 * § 10.7 / WG11 req 2: passive off for a source whose spectrum engine costs more than the limit
+	 * (`scanner.passive.maxEngineUtilization`, default 0.25 of a core). Judged `PASSIVE_COST_WINDOW_MS`
+	 * after the engine opened, then every `PASSIVE_COST_RECHECK_MS`; a disabled source comes back at
+	 * or below `limit × PASSIVE_COST_CLEAR_RATIO`.
 	 */
 	private async checkPassiveCost(now: number): Promise<void> {
+		const limit =
+			this.settings().passive.maxEngineUtilization ?? PASSIVE_COST_LIMIT_DEFAULT
+		// WG11 review M2: a disabled source whose engine closed (no display holds it) gets probation.
+		for (const [sourceId, disabledAt] of [...this.passiveDisabledAt]) {
+			const engineOpen = this.spectrum.engine(sourceId) !== undefined
+			if (engineOpen) continue
+			this.costCheckedAt.delete(sourceId)
+			if (
+				!passiveProbationDue({
+					disabled: this.passiveDisabled.has(sourceId),
+					engineOpen,
+					sinceDisabledMs: now - disabledAt,
+				})
+			)
+				continue
+			this.passiveDisabled.delete(sourceId)
+			this.passiveDisabledAt.delete(sourceId)
+			this.log.info(
+				{ sourceId },
+				"Passive scanning on probation: re-enabling to re-measure the spectrum engine",
+			)
+			await this.refreshPassive()
+		}
 		for (const sourceId of this.spectrum.sourceIds()) {
 			const openedAt = this.spectrum.openedAt(sourceId)
 			const engine = this.spectrum.engine(sourceId)
-			if (
-				!engine ||
-				openedAt === null ||
-				this.costChecked.has(engine) ||
-				now - openedAt < PASSIVE_COST_WINDOW_MS
-			)
+			if (!engine || openedAt === null) {
+				this.costCheckedAt.delete(sourceId)
 				continue
-			this.costChecked.add(engine)
-			if (this.passiveDisabled.has(sourceId)) continue
-			if (!this.jobs.has(`passive-${sourceId}`)) continue
-			const utilization = engine.utilization()
-			if (utilization === null || utilization <= PASSIVE_COST_LIMIT) continue
-			this.passiveDisabled.set(
-				sourceId,
-				`engine-cpu ${(utilization * 100).toFixed(0)} % of a core`,
-			)
-			this.log.warn(
-				{ sourceId, utilization },
-				"Passive scanning disabled: spectrum engine too costly on this host",
-			)
-			await this.refreshPassive()
+			}
+			const previous = this.costCheckedAt.get(sourceId)
+			const sameEngine = previous?.engine === engine
+			const lastCheck = sameEngine ? previous.at : null
+			const disabled = this.passiveDisabled.has(sourceId)
+			// Only a source with a passive job to turn off, or one this guard disabled, is judged.
+			if (!disabled && !this.jobs.has(`passive-${sourceId}`)) continue
+			const sinceOpenMs = now - openedAt
+			const sinceLastCheckMs = lastCheck === null ? null : now - lastCheck
+			const due =
+				sinceLastCheckMs === null
+					? sinceOpenMs >= PASSIVE_COST_WINDOW_MS
+					: sinceLastCheckMs >= PASSIVE_COST_RECHECK_MS
+			if (!due) continue
+			// WG11 review M1: utilization over the window since the previous check of this engine (the
+			// first check: since the worker started at open), never the engine's whole life.
+			// WG11 review: the sample carries its worker generation; a replaced worker (reconfigure) is a
+			// fresh window even when its counters exceed the previous worker's.
+			const worker = engine.eluSample()
+			const sample: EluSample | null =
+				worker === null
+					? null
+					: {
+							idle: worker.elu.idle,
+							active: worker.elu.active,
+							generation: worker.generation,
+						}
+			const utilization =
+				sample === null
+					? engine.utilization()
+					: windowedUtilization(
+							sample,
+							sameEngine ? (previous.sample ?? null) : null,
+						)
+			// An unknown reading is no judgement: the window keeps running until one is measurable.
+			if (utilization === null) continue
+			this.costCheckedAt.set(sourceId, { engine, at: now, sample })
+			const decision = passiveCostDecision({
+				utilization,
+				limit,
+				disabled,
+				sinceOpenMs,
+				sinceLastCheckMs,
+			})
+			if (decision === "disable") {
+				this.passiveDisabled.set(
+					sourceId,
+					`engine-cpu ${(utilization * 100).toFixed(0)} % of a core`,
+				)
+				this.passiveDisabledAt.set(sourceId, now)
+				this.log.warn(
+					{ sourceId, utilization },
+					"Passive scanning disabled: spectrum engine too costly on this host",
+				)
+				await this.refreshPassive()
+			} else if (decision === "clear") {
+				this.passiveDisabled.delete(sourceId)
+				this.passiveDisabledAt.delete(sourceId)
+				this.log.info(
+					{ sourceId, utilization },
+					"Passive scanning re-enabled: spectrum engine within budget",
+				)
+				await this.refreshPassive()
+			}
 		}
 	}
 

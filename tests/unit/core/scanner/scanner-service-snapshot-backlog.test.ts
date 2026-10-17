@@ -76,7 +76,7 @@ describe("ScannerService snapshot backlog", () => {
 			release = resolve
 		})
 		const write = vi
-			.spyOn(internals.persistence, "writeSnapshot")
+			.spyOn(internals.persistence, "writeSnapshotOf")
 			.mockImplementationOnce(() => stalled)
 			.mockImplementation(() => Promise.resolve())
 		const snapshot = vi.spyOn(internals.store, "snapshot")
@@ -86,7 +86,7 @@ describe("ScannerService snapshot backlog", () => {
 			internals.tick()
 		}
 		expect(write).toHaveBeenCalledTimes(1)
-		expect(snapshot).toHaveBeenCalledTimes(1)
+		expect(snapshot).not.toHaveBeenCalled() // the mocked writeSnapshotOf takes the store itself
 		release()
 		await stalled
 		await new Promise<void>(resolve => setImmediate(resolve))
@@ -98,7 +98,7 @@ describe("ScannerService snapshot backlog", () => {
 	it("retries after a failed snapshot: dirty again, in-flight flag cleared", async () => {
 		const { internals, clock } = harness()
 		const write = vi
-			.spyOn(internals.persistence, "writeSnapshot")
+			.spyOn(internals.persistence, "writeSnapshotOf")
 			.mockImplementationOnce(() =>
 				Promise.reject(new WaveKitError("disk", "SCANNER_PERSIST_FAILED")),
 			)
@@ -138,7 +138,7 @@ describe("ScannerService snapshot backlog", () => {
 	it("still snapshots every interval while writes keep up", async () => {
 		const { internals, clock } = harness()
 		const write = vi
-			.spyOn(internals.persistence, "writeSnapshot")
+			.spyOn(internals.persistence, "writeSnapshotOf")
 			.mockImplementation(() => Promise.resolve())
 		for (let i = 0; i < 5; i++) {
 			internals.dirty = true
@@ -157,7 +157,7 @@ describe("ScannerService snapshot backlog", () => {
 			release = resolve
 		})
 		const write = vi
-			.spyOn(internals.persistence, "writeSnapshot")
+			.spyOn(internals.persistence, "writeSnapshotOf")
 			.mockImplementation(() => pending)
 		const append = vi.spyOn(internals.persistence, "append")
 		append.mockImplementation(() =>
@@ -192,7 +192,7 @@ describe("ScannerService snapshot backlog", () => {
 			() => Promise.resolve(),
 		]
 		const write = vi
-			.spyOn(internals.persistence, "writeSnapshot")
+			.spyOn(internals.persistence, "writeSnapshotOf")
 			.mockImplementation(() =>
 				(outcomes.shift() ?? (() => Promise.resolve()))(),
 			)
@@ -246,7 +246,7 @@ describe("ScannerService snapshot backlog", () => {
 			releaseParked = resolve
 		})
 		const write = vi
-			.spyOn(persistence, "writeSnapshot")
+			.spyOn(persistence, "writeSnapshotOf")
 			.mockImplementationOnce(() => parked)
 		const { discoveryId } = internals.store.ingest(
 			makeObs({ id: "o1", centreHz: 446_000_000, startedAt: clock.t }),

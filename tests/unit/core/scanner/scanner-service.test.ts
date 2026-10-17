@@ -1140,7 +1140,7 @@ describe("ScannerService", () => {
 		await b.service.stop()
 	})
 
-	it("judges an engine's passive cost once, over its first minute (finding 10)", async () => {
+	it("judges an engine's passive cost over its first minute, then every five minutes (finding 10, WG11 req 2)", async () => {
 		const h = serviceHarness()
 		await h.service.start()
 		const internals = internalsOf(h)
@@ -1148,9 +1148,9 @@ describe("ScannerService", () => {
 		const openedAt = h.service.spectrum.openedAt("rtl")!
 		engine.utilization = () => 0.1
 		await internals.checkPassiveCost(openedAt + 61_000)
-		// later sweep load on the shared engine never disables passive scanning
+		// WG11 req 2: no check is due before the five minute recheck, so a spike in between is ignored
 		engine.utilization = () => 0.9
-		await internals.checkPassiveCost(openedAt + 3_600_000)
+		await internals.checkPassiveCost(openedAt + 61_000 + 299_000)
 		expect(h.service.getJob("passive-rtl")).toBeDefined()
 		await h.service.stop()
 		const costly = serviceHarness()

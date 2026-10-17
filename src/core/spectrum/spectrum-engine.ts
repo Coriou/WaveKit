@@ -52,6 +52,7 @@ import {
 	type PipelineHost,
 	type PipelineHostHandlers,
 	type PipelineHostMode,
+	type WorkerEluSample,
 } from "./pipeline-host.js"
 
 /** Pre-channelizer usable fraction of the captured span (§ 5.3). */
@@ -697,6 +698,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	/** Worker utilisation since the pipeline started (§ 10.7 passive cost rule). */
 	utilization(): number | null {
 		return this.host?.utilization() ?? null
+	}
+
+	/**
+	 * WG11 req 2.2: the current pipeline worker's raw cumulative event-loop sample; null without a
+	 * pipeline or when not measurable (inline). A recreated pipeline starts a new cumulative sample
+	 * under a new worker generation.
+	 */
+	eluSample(): WorkerEluSample | null {
+		return this.host?.eluSample?.() ?? null
 	}
 
 	/** Applies new tuning (fftSize, integration, k) by recreating the pipeline. */

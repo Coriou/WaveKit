@@ -14,7 +14,10 @@ afterEach(async () => {
 
 interface Internals {
 	live: Map<string, LiveObservation>
-	store: { get(id: string): unknown }
+	store: {
+		discoveryIdOf(observationId: string): string | undefined
+		identityOf(id: string): unknown
+	}
 }
 
 function setup(discovery: unknown) {
@@ -24,8 +27,10 @@ function setup(discovery: unknown) {
 		await rm(h.dir, { recursive: true, force: true })
 	})
 	const internals = h.service as unknown as Internals
+	const survivors: Record<string, string> = { o_1: "d_1", o_3: "d_gone" }
 	internals.store = {
-		get: id => (id === "d_1" ? discovery : undefined),
+		discoveryIdOf: o => survivors[o],
+		identityOf: id => (id === "d_1" ? discovery : undefined),
 	}
 	const obs = (over: Partial<LiveObservation> = {}): LiveObservation =>
 		({
@@ -58,7 +63,10 @@ describe("ScannerService.trackIdentity", () => {
 		const { service, internals, obs } = setup(DISCOVERY)
 		internals.live.set("t1", obs())
 		internals.live.set("t2", obs({ trackId: "t2", discoveryId: null }))
-		internals.live.set("t3", obs({ trackId: "t3", discoveryId: "d_gone" }))
+		internals.live.set(
+			"t3",
+			obs({ trackId: "t3", observationId: "o_3", discoveryId: "d_gone" }),
+		)
 		expect(service.trackIdentity("other", "t1")).toBeNull()
 		expect(service.trackIdentity("rtl", "nope")).toBeNull()
 		expect(service.trackIdentity("rtl", "t2")).toBeNull()
@@ -82,7 +90,8 @@ describe("ScannerService.trackIdentity", () => {
 		const { service, internals, obs } = setup(DISCOVERY)
 		internals.live.set("t1", obs())
 		internals.store = {
-			get: () => {
+			discoveryIdOf: () => "d_1",
+			identityOf: () => {
 				throw new Error("boom")
 			},
 		}

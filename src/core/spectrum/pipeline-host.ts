@@ -5,6 +5,7 @@
  * transferred buffers handed back through `handlers.buffer`.
  */
 import { existsSync } from "node:fs"
+import type { EventLoopUtilization } from "node:perf_hooks"
 import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
@@ -36,8 +37,25 @@ export interface PipelineHost {
 	artefactMasks?(): Promise<ArtefactMasks>
 	/** Worker event-loop utilisation (0–1) since start; null when not measurable (inline). */
 	utilization(): number | null
+	/**
+	 * WG11 req 2.2: the worker's raw cumulative event-loop sample (since the worker started), for a
+	 * caller that measures its own window by difference, tagged with the worker's generation (unique
+	 * per started worker in this process) so the caller can tell a replacement worker apart even when
+	 * its counters exceed the old one's; null when not measurable. Optional: test hosts need not
+	 * implement it.
+	 */
+	eluSample?(): WorkerEluSample | null
 	close(): Promise<void>
 }
+
+/** WG11 req 2.2: a cumulative worker event-loop sample and the generation of the worker it came from. */
+export interface WorkerEluSample {
+	generation: number
+	elu: EventLoopUtilization
+}
+
+/** Bumped on every worker start, process-wide, so no two workers share a generation. */
+let nextWorkerGeneration = 0
 
 export type PipelineHostMode = "thread" | "inline"
 
@@ -102,6 +120,10 @@ export class InlinePipelineHost implements PipelineHost {
 		return null
 	}
 
+	eluSample(): WorkerEluSample | null {
+		return null
+	}
+
 	close(): Promise<void> {
 		this.pipeline = null
 		return Promise.resolve()
@@ -134,6 +156,7 @@ export class ThreadPipelineHost implements PipelineHost {
 	private closing = false
 	private exited = false
 	private fatalReported = false
+	private readonly generation: number
 
 	constructor(
 		cfg: PipelineConfig,
@@ -149,6 +172,7 @@ export class ThreadPipelineHost implements PipelineHost {
 			)
 		}
 		this.worker = new Worker(workerUrl, { name: `spectrum-${cfg.sourceId}` })
+		this.generation = ++nextWorkerGeneration
 		this.eluStart = this.worker.performance.eventLoopUtilization()
 		this.worker.on("message", (raw: unknown) => this.onMessage(raw))
 		this.worker.on("error", err => this.reportFatal(asError(err))) // @types/node types the listener arg as unknown
@@ -243,6 +267,14 @@ export class ThreadPipelineHost implements PipelineHost {
 		if (this.exited) return null
 		return this.worker.performance.eventLoopUtilization(this.eluStart)
 			.utilization
+	}
+
+	eluSample(): WorkerEluSample | null {
+		if (this.exited) return null
+		return {
+			generation: this.generation,
+			elu: this.worker.performance.eventLoopUtilization(),
+		}
 	}
 
 	async close(): Promise<void> {
