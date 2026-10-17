@@ -21,6 +21,7 @@ import { showAppToast } from "../../shell/toast.ts"
 import { useTunerState } from "../hooks.ts"
 import { openPalette } from "../palette/request.ts"
 import { decoderLabel } from "../tuned/signal.ts"
+import { BandPlansPage } from "./bandplans/BandPlansPage.tsx"
 import { DecoderPageHead, DecoderStatus } from "./DecoderPage.tsx"
 import { SetIcon, type SetIconName } from "./icons.tsx"
 import { groupSummary, settingsItems, type SettingsItem } from "./items.ts"
@@ -46,6 +47,7 @@ import {
 } from "./rows.ts"
 import { SettingRowView } from "./SettingRowView.tsx"
 import "./settings.css"
+import "./bandplans/bandplans.css"
 
 const GROUP_ICON: Record<SettingGroupId, SetIconName> = {
 	station: "antenna",
@@ -61,6 +63,7 @@ const GROUP_ICON: Record<SettingGroupId, SetIconName> = {
 /** Below this drawer width the phone layout applies (groups as screens, no rail): the board's container rule. */
 const PHONE_W = 460
 const SPY_AT = 0.3
+const BANDPLANS = "bandplans"
 
 const OK: SettingWriteResult = { ok: true }
 const toResult = (ok: boolean, message: string): SettingWriteResult =>
@@ -80,6 +83,12 @@ function useSnapshot(): SettingsSnapshot {
 	const station = useStore(data.station, s => s.station)
 	const prefs = useStore(data.preferences)
 	const savedCount = useStore(data.savedFrequencies, s => s.items.length)
+	const bandplanEdits = useStore(data.bandplanStack, s =>
+		s.view
+			? new Set(s.view.edits.map(e => `${e.packId}/${e.bandId}`)).size +
+				s.view.operatorBands.length
+			: null,
+	)
 	const decoders = useStore(services.decoders, s => s.decoders)
 	const decoderSettings = useStore(data.decoderSettings)
 	const system = useStore(data.system)
@@ -106,6 +115,7 @@ function useSnapshot(): SettingsSnapshot {
 			preferences: prefs.available === true ? prefs.values : null,
 			preferenceDefaults: prefs.defaults,
 			savedCount,
+			bandplanEdits,
 			decoders,
 			decoderTypes: decoderSettings.types,
 			decoderViews: decoderSettings.views,
@@ -127,6 +137,7 @@ function useSnapshot(): SettingsSnapshot {
 		station,
 		prefs,
 		savedCount,
+		bandplanEdits,
 		decoders,
 		decoderSettings,
 		system,
@@ -135,7 +146,7 @@ function useSnapshot(): SettingsSnapshot {
 	])
 }
 
-function useActions(): SettingsActions {
+function useActions(openPage: (page: string) => void): SettingsActions {
 	const services = useServices()
 	return useMemo(() => {
 		const { data } = services
@@ -185,21 +196,28 @@ function useActions(): SettingsActions {
 			decoder: (id, patch) => data.decoderSettings.update(id, patch),
 			openTuner: () => shellStore.openPanel("tuner"),
 			openShortcuts: () => openPalette("keys"),
+			openBandPlans: () => openPage(BANDPLANS),
 		}
-	}, [services])
+	}, [services, openPage])
 }
 
 export function SettingsView({ onClose }: { onClose: () => void }) {
 	const services = useServices()
 	const { data } = services
 	const snapshot = useSnapshot()
-	const actions = useActions()
+	const [page, setPage] = useState<string | null>(null)
+	/** The band open in Band plans' editor (`packId/bandId`). */
+	const [band, setBand] = useState<string | null>(null)
+	const openPage = useCallback((p: string) => {
+		setBand(null)
+		setPage(p)
+	}, [])
+	const actions = useActions(openPage)
 	const rows = useMemo(() => buildRows(snapshot, actions), [snapshot, actions])
 	const byId = useMemo(() => new Map(rows.map(r => [r.id, r])), [rows])
 
 	const [query, setQuery] = useState("")
 	const [filters, setFilters] = useState<SettingFilter[]>([])
-	const [page, setPage] = useState<string | null>(null)
 	const [only, setOnly] = useState<SettingGroupId | null>(null)
 	const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
 	const [pending, setPending] = useState<PendingChange[]>([])
@@ -218,6 +236,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 	useEffect(() => {
 		void data.system.load()
 		void data.station.load()
+		void data.bandplanStack.load()
 	}, [data])
 	const decoderIds = useMemo(
 		() => snapshot.decoders.map(d => d.id).join("\u0000"),
@@ -253,9 +272,10 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		page === null &&
 		query.trim() === "" &&
 		filters.length === 0
+	const bandplans = page === BANDPLANS
 	const items = useMemo(
 		() =>
-			showGroups
+			showGroups || bandplans
 				? []
 				: settingsItems({
 						rows,
@@ -266,7 +286,18 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 						open,
 						pageName,
 					}),
-		[showGroups, rows, query, filters, page, phone, only, open, pageName],
+		[
+			showGroups,
+			bandplans,
+			rows,
+			query,
+			filters,
+			page,
+			phone,
+			only,
+			open,
+			pageName,
+		],
 	)
 
 	// ---- the palette's "Open in Settings ›": open the right group, page or fold, then flash the row
@@ -278,6 +309,11 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		if (!row) return
 		setQuery("")
 		setFilters([])
+		// ⌘K's "Band plans" opens the page itself
+		if (id === "station.bandplans") {
+			openPage(BANDPLANS)
+			return
+		}
 		setPage(row.page ?? null)
 		setOnly(row.group)
 		if (row.more)
@@ -285,7 +321,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		setFlash(id)
 		const t = setTimeout(() => setFlash(null), 1600)
 		return () => clearTimeout(t)
-	}, [wanted, rows, byId])
+	}, [wanted, rows, byId, openPage])
 	useEffect(() => {
 		if (flash === null) return
 		const raf = requestAnimationFrame(() =>
@@ -293,7 +329,11 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 				?.querySelector(`[data-setting="${CSS.escape(flash)}"]`)
 				?.scrollIntoView({ block: "center" }),
 		)
-		return () => cancelAnimationFrame(raf)
+		const t = setTimeout(() => setFlash(null), 1600)
+		return () => {
+			cancelAnimationFrame(raf)
+			clearTimeout(t)
+		}
 	}, [flash])
 
 	// ---- changes
@@ -391,13 +431,38 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 	).length
 	const pageDecoder =
 		page === null ? null : snapshot.decoders.find(d => d.id === page)
-	const title = pageDecoder
-		? decoderLabel(pageDecoder.type)
-		: phone && only !== null && query === "" && filters.length === 0
-			? groupOf(only).label
-			: "Settings"
-	const back =
-		page !== null
+	const bandName = useStore(data.bandplanStack, s => {
+		if (!band || !s.view) return null
+		const [packId, bandId] = band.split("/")
+		if (packId === "operator")
+			return s.view.operatorBands.find(b => b.id === bandId)?.name ?? null
+		const edit = s.view.edits.find(
+			e => e.packId === packId && e.bandId === bandId,
+		)
+		return (
+			edit?.set.name ??
+			s.packs[packId ?? ""]?.bands.find(b => b.id === bandId)?.name ??
+			null
+		)
+	})
+	const title = bandplans
+		? (bandName ?? "Band plans")
+		: pageDecoder
+			? decoderLabel(pageDecoder.type)
+			: phone && only !== null && query === "" && filters.length === 0
+				? groupOf(only).label
+				: "Settings"
+	const back = bandplans
+		? band !== null
+			? { label: "Band plans", go: () => setBand(null) }
+			: {
+					label: "Station",
+					go: () => {
+						setPage(null)
+						setFlash("station.bandplans")
+					},
+				}
+		: page !== null
 			? {
 					label: phone || only !== null ? "Decoders" : "Settings",
 					go: () => setPage(null),
@@ -812,41 +877,53 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 					tabIndex={-1}
 					onScroll={onScroll}
 				>
-					{showGroups
-						? SETTING_GROUPS.map(g => {
-								const dot = railDots.get(g.id)
-								return (
-									<button
-										key={g.id}
-										type="button"
-										className="wk-row wkf-set-glink"
-										onClick={() => setOnly(g.id)}
-									>
-										<span className="wk-tile">
-											<SetIcon name={GROUP_ICON[g.id]} size={16} />
+					{bandplans ? (
+						<BandPlansPage
+							band={band}
+							onBand={(key: string | null) => {
+								setBand(key)
+								scrollRef.current?.scrollTo({ top: 0 })
+							}}
+							host={rootRef.current}
+							phone={phone}
+						/>
+					) : showGroups ? (
+						SETTING_GROUPS.map(g => {
+							const dot = railDots.get(g.id)
+							return (
+								<button
+									key={g.id}
+									type="button"
+									className="wk-row wkf-set-glink"
+									onClick={() => setOnly(g.id)}
+								>
+									<span className="wk-tile">
+										<SetIcon name={GROUP_ICON[g.id]} size={16} />
+									</span>
+									<span className="wkf-grow wkf-set-dec-text">
+										<b>{g.label}</b>
+										<span className="wkf-ellipsis wkf-set-quiet">
+											{groupSummary(rows, g.id)}
 										</span>
-										<span className="wkf-grow wkf-set-dec-text">
-											<b>{g.label}</b>
-											<span className="wkf-ellipsis wkf-set-quiet">
-												{groupSummary(rows, g.id)}
-											</span>
-										</span>
-										{dot && (
-											<span
-												aria-hidden="true"
-												className="wkf-set-dot"
-												data-tone={dot}
-											/>
-										)}
-										<SetIcon
-											name="chevron-right"
-											size={16}
-											className="wkf-set-chev"
+									</span>
+									{dot && (
+										<span
+											aria-hidden="true"
+											className="wkf-set-dot"
+											data-tone={dot}
 										/>
-									</button>
-								)
-							})
-						: items.map(renderItem)}
+									)}
+									<SetIcon
+										name="chevron-right"
+										size={16}
+										className="wkf-set-chev"
+									/>
+								</button>
+							)
+						})
+					) : (
+						items.map(renderItem)
+					)}
 				</div>
 			</div>
 

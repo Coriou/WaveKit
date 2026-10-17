@@ -11,6 +11,7 @@ import { workerSocketFactory } from "./events-relay.ts"
 import type { Fleets } from "./fleets.ts"
 import { createFleets } from "./fleets.ts"
 import { BandplanStore } from "./bandplan-store.ts"
+import { BandplanStackStore } from "./bandplan-stack-store.ts"
 import { CoverageStore } from "./coverage-store.ts"
 import { DecoderSettingsStore } from "./decoder-settings-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
@@ -43,6 +44,8 @@ export interface DataLayer {
 	receiver: ReceiverStore
 	liveAudio: LiveAudioStore
 	bandplan: BandplanStore
+	/** Settings › Band plans: the stack, packs and writes. */
+	bandplanStack: BandplanStackStore
 	identify: IdentifyStore
 	/** Saved frequencies (core operator data; protected mode only). */
 	savedFrequencies: SavedFrequenciesStore
@@ -112,6 +115,10 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		receiver,
 		liveAudio: new LiveAudioStore(api, events),
 		bandplan: new BandplanStore(api, events),
+		bandplanStack: new BandplanStackStore(api, events, () => {
+			void layer.bandplan.load()
+			void layer.scanner.loadBandplans()
+		}),
 		identify: new IdentifyStore(api, events),
 		savedFrequencies,
 		scanner: new ScannerStore(api, events),
@@ -148,6 +155,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.receiver.dispose()
 			layer.liveAudio.dispose()
 			layer.bandplan.dispose()
+			layer.bandplanStack.dispose()
 			layer.identify.dispose()
 			layer.savedFrequencies.dispose()
 			layer.scanner.dispose()
@@ -235,6 +243,15 @@ export type {
 } from "./live-audio-store.ts"
 export { BandplanStore, bandAt, bandsAt, channelAt } from "./bandplan-store.ts"
 export type { BandplanState } from "./bandplan-store.ts"
+export {
+	BandplanStackStore,
+	bandplanWriteError,
+} from "./bandplan-stack-store.ts"
+export type {
+	BandplanStackState,
+	ImportCommit,
+	ImportFile,
+} from "./bandplan-stack-store.ts"
 export { IdentifyStore, isIdentifyFinal } from "./identify-store.ts"
 export {
 	SavedFrequenciesStore,

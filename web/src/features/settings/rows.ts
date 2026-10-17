@@ -72,6 +72,8 @@ export interface SettingsSnapshot {
 	readonly preferences: Preferences | null
 	readonly preferenceDefaults: Preferences | null
 	readonly savedCount: number
+	/** Bands you edited or added in Settings › Band plans; null until the stack loads. */
+	readonly bandplanEdits: number | null
 	readonly decoders: readonly DecoderInfo[]
 	readonly decoderTypes: Readonly<Record<string, DecoderTypeInfo>>
 	readonly decoderViews: Readonly<Record<string, DecoderSettingsView>>
@@ -98,6 +100,7 @@ export interface SettingsActions {
 	decoder(id: string, patch: DecoderSettingsUpdate): Promise<SettingWriteResult>
 	openTuner(): void
 	openShortcuts(): void
+	openBandPlans(): void
 }
 
 const OK: SettingWriteResult = { ok: true }
@@ -216,6 +219,9 @@ export function formatLocation(lat: number | null, lon: number | null): string {
 	return `${ns}, ${ew}`
 }
 
+const bandplanText = (n: number | null) =>
+	n === null ? "Open" : n === 0 ? "No edits" : `${n} edit${n === 1 ? "" : "s"}`
+
 function stationRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const st = s.station
 	if (!st) return []
@@ -298,6 +304,22 @@ function stationRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 				"write",
 				field("country", v => (v ? String(v) : null)),
 			),
+		},
+		{
+			id: "station.bandplans",
+			group: "station",
+			label: "Band plans",
+			help: "Band and channel names for the spectrum, Tuner, scans and ⌘K",
+			keys: words(
+				"band plan bandplan bands channels frequency allocations import sdr++ sdrpp gqrx sdr# sdrsharp csv xml",
+			),
+			widget: {
+				kind: "link",
+				text: bandplanText(s.bandplanEdits),
+				action: a.openBandPlans,
+			},
+			value: s.bandplanEdits,
+			text: bandplanText(s.bandplanEdits),
 		},
 		{
 			id: "station.callsign",

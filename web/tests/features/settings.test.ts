@@ -53,6 +53,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 		decoder: rec("decoder"),
 		openTuner: () => void calls.push(["openTuner"]),
 		openShortcuts: () => void calls.push(["openShortcuts"]),
+		openBandPlans: () => void calls.push(["openBandPlans"]),
 	}
 }
 
@@ -233,6 +234,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 			showSavedFrequencyLabels: true,
 		},
 		savedCount: 3,
+		bandplanEdits: 3,
 		decoders: [POCSAG],
 		decoderTypes: TYPES,
 		decoderViews: { "pocsag-1": VIEW },
