@@ -1531,7 +1531,17 @@ export class IdentifyRunner implements JobDriver {
 				}).hypotheses[0]
 			: undefined
 		const analog = t.analog.result
-		const analogVerdict = analogVerdictOf(analog)
+		const classified =
+			discovery !== undefined &&
+			CONFIDENCE_RANK[discovery.confidence] >= CONFIDENCE_RANK.classified
+		// WG10 R1 m3: a digital signal heard through live audio also opens the squelch, so analog evidence
+		// never replaces a classified digital protocol: the digital candidate is the result (as before analog
+		// evidence existed) and `result.analog` is only supplementary.
+		const digitalClassified =
+			classified &&
+			discovery !== undefined &&
+			!IDENTIFY_ANALOG_PROTOCOLS.includes(discovery.protocol)
+		const analogVerdict = digitalClassified ? null : analogVerdictOf(analog)
 		const state = identifyVerdict({
 			analog: analogVerdict,
 			artefact,
@@ -1544,12 +1554,12 @@ export class IdentifyRunner implements JobDriver {
 			discoveryConfidence: discovery?.confidence ?? null,
 			topScore: top?.score ?? 0,
 		})
-		const classified =
-			discovery !== undefined &&
-			CONFIDENCE_RANK[discovery.confidence] >= CONFIDENCE_RANK.classified
-		// WG10 req 3.4: analog evidence names the protocol unless a digital decode (or capped identity) did.
+		// WG10 req 3.4: analog evidence names the protocol unless a digital decode (or capped identity) or a
+		// classified digital discovery did.
 		const analogProtocol =
-			analog && t.decoded === null ? t.analog.resultProtocol : null
+			analog && t.decoded === null && !digitalClassified
+				? t.analog.resultProtocol
+				: null
 		const protocol =
 			state === "unidentified"
 				? undefined
@@ -1590,7 +1600,8 @@ export class IdentifyRunner implements JobDriver {
 			),
 			...(artefact ? { artefact } : {}),
 			...(ended ? { ended } : {}),
-			// A digital decode won: the analog evidence is not part of the result.
+			// A digital decode won: the analog evidence is not part of the result (beside a classified digital
+			// candidate it is supplementary).
 			...(analog && !artefact && t.decoded === null ? { analog } : {}),
 			...(unavailableTypes.length > 0
 				? { decodersUnavailable: unavailableTypes }
