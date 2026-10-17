@@ -44,6 +44,7 @@ export function Seg<T extends string>({
 }: SegProps<T>) {
 	const group = useRef<HTMLDivElement>(null)
 	const enabled = options.filter(o => !o.disabled)
+	const checked = options.some(o => o.value === value)
 	const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
 		const step =
 			e.key === "ArrowRight" || e.key === "ArrowDown"
@@ -89,6 +90,8 @@ export function Seg<T extends string>({
 		>
 			{options.map(o => {
 				const on = o.value === value
+				// with no option checked (an unknown value) the first enabled one keeps the tab stop
+				const stop = on || (!checked && o === enabled[0])
 				return (
 					<button
 						key={o.value}
@@ -98,7 +101,7 @@ export function Seg<T extends string>({
 						aria-label={o.ariaLabel}
 						data-value={o.value}
 						disabled={o.disabled}
-						tabIndex={on ? 0 : -1}
+						tabIndex={stop ? 0 : -1}
 						onClick={() => onChange(o.value)}
 					>
 						{o.label}

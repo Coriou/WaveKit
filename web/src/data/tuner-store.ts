@@ -78,6 +78,11 @@ export class TunerStore extends Store<TunerStoreState> {
 		}
 	}
 
+	/** Takes a state the core answered to another write (the Receiver island's settings). */
+	receive(state: TunerState): void {
+		this.put(state.sourceId, state)
+	}
+
 	dispose(): void {
 		for (const fn of this.cleanup.splice(0)) fn()
 	}

@@ -1,0 +1,200 @@
+/* Receiver island controls (docs/web/canvas/Receiver.dc.html). Layout only: materials, colours and
+   states come from the ui.css recipes and tokens. */
+@layer wk-app {
+	.wkf-rx-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+	.wkf-rx-row [data-quiet] {
+		color: var(--wk-text-3);
+	}
+
+	/* sample rate: the inline confirmation before the core restarts the stream */
+	.wkf-rx-confirm {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 8px;
+		padding: 10px 12px;
+		border-radius: 8px;
+		background: var(--wk-fill);
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-2);
+	}
+
+	/* gain: the slider over the tuner's gain table, ticks under the track */
+	.wkf-rx-gain {
+		height: 34px;
+		box-sizing: border-box;
+		padding-top: 10px;
+		align-items: flex-start;
+	}
+	.wkf-rx-gain[data-dim] {
+		opacity: 0.35;
+	}
+	.wkf-rx-gain[data-pending] .wk-slider-knob {
+		box-shadow:
+			var(--wk-knob-shadow),
+			0 0 0 3px rgba(var(--wk-accent-rgb), 0.25);
+	}
+	.wkf-rx-gain .wk-slider-knob {
+		top: 12px;
+	}
+	.wkf-rx-gain > input[type="range"] {
+		height: 100%;
+		cursor: ew-resize;
+	}
+	.wkf-rx-gain > input[type="range"]:disabled {
+		cursor: not-allowed;
+	}
+	.wkf-rx-ticks {
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: 22px;
+		display: flex;
+		justify-content: space-between;
+		pointer-events: none;
+	}
+	.wkf-rx-ticks > span {
+		width: 1px;
+		height: 3px;
+		background: var(--wk-track);
+	}
+	.wkf-rx-ticks > span[data-major] {
+		height: 6px;
+	}
+	.wkf-rx-ticks > span[data-on] {
+		background: rgba(var(--wk-accent-rgb), 0.6);
+	}
+
+	/* switch rows and the correction stepper */
+	.wkf-rx-toggles {
+		display: flex;
+		flex-direction: column;
+	}
+	.wkf-rx-toggle {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		min-height: 52px;
+		padding: 6px 0;
+		justify-content: center;
+		border-bottom: 1px solid rgba(var(--wk-line-rgb), 0.08);
+	}
+	.wkf-rx-toggle:last-child {
+		border-bottom: 0;
+	}
+	.wkf-rx-toggle-text {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.wkf-rx-toggle-text [data-warn] {
+		color: var(--wk-amber);
+	}
+	.wkf-rx-toggle .wk-switch {
+		margin: 0 -6px;
+	}
+	.wkf-rx-stepper {
+		display: flex;
+		align-items: center;
+		border: 1px solid rgba(var(--wk-line-rgb), 0.18);
+		border-radius: 6px;
+	}
+	.wkf-rx-stepper[data-pending] {
+		border-color: rgba(var(--wk-accent-rgb), 0.5);
+	}
+	.wkf-rx-stepper > button {
+		font: inherit;
+		font-size: 16px;
+		color: var(--wk-text-2);
+		cursor: pointer;
+		width: 34px;
+		height: 32px;
+		border: 0;
+		background: transparent;
+	}
+	.wkf-rx-stepper > button:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
+	}
+	.wkf-rx-stepper > span {
+		min-width: 40px;
+		text-align: center;
+	}
+
+	/* Advanced */
+	.wkf-rx-adv {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkf-rx-adv-btn {
+		font: inherit;
+		color: var(--wk-text-3);
+		cursor: pointer;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: 32px;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		font-family: var(--wk-font-head);
+		font-size: var(--wk-fs-xs);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+	}
+	.wkf-rx-adv-chev {
+		transform: rotate(-90deg);
+		transition: transform var(--wk-dur-3) var(--wk-ease-out);
+	}
+	.wkf-rx-adv-chev[data-open] {
+		transform: rotate(0deg);
+	}
+	.wkf-rx-adv-body {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding-top: 6px;
+	}
+	.wkf-rx-adv-body .wk-seg {
+		border: 0;
+	}
+
+	/* who has the tuner, locks and inline errors */
+	.wkf-rx-lock,
+	.wkf-rx-owner {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 12px 14px;
+		border-radius: 8px;
+		background: var(--wk-fill);
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-2);
+	}
+	.wkf-rx-lock {
+		color: var(--wk-amber);
+	}
+	.wkf-rx-error {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		font-size: var(--wk-fs-sm);
+	}
+	.wkf-rx-dismiss {
+		flex: none;
+		display: inline-grid;
+		place-items: center;
+		width: 20px;
+		height: 20px;
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+	}
+}
