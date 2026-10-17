@@ -3,7 +3,7 @@ import "./messages.css"
 
 import type { ActivitySummary } from "@wavekit/api-types"
 import { WaveKitIcon } from "@wavekit/brand/react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
@@ -13,7 +13,7 @@ import { Chip } from "../../ui/Chip.tsx"
 import { estimateCardHeight } from "../activity/rows.ts"
 import { CATEGORY_CHIPS } from "../activity/search.ts"
 import { MessageCard } from "./MessageCard.tsx"
-import { GALLERY_STEP, dealColumns, galleryColumns } from "./gallery.ts"
+import { GALLERY_STEP, dealStable, galleryColumns } from "./gallery.ts"
 
 export interface GalleryInsets {
 	/** Bottom of the top row (Tuner, Receiver). */
@@ -24,8 +24,17 @@ export interface GalleryInsets {
 	bottom: number
 }
 
-const height = (item: ActivitySummary) =>
-	estimateCardHeight({ type: "row", key: item.eventId, item })
+// each live batch deals every card shown again: guess a card's height once
+const heights = new WeakMap<ActivitySummary, number>()
+const height = (item: ActivitySummary) => {
+	let h = heights.get(item)
+	if (h === undefined) {
+		h = estimateCardHeight({ type: "row", key: item.eventId, item })
+		heights.set(item, h)
+	}
+	return h
+}
+const keyOf = (item: ActivitySummary) => item.eventId
 
 // The Messages view (Messages board, gallery variant): Activity's live feed as decoded message cards in up to three
 // columns, under the islands. It shares Activity's search, category and Live / Paused; Details opens the event in the
@@ -100,15 +109,34 @@ export default function MessagesGallery({ insets }: { insets: GalleryInsets }) {
 	}
 
 	const cols = galleryColumns(width)
-	const columns = useMemo(
-		() => dealColumns(items.slice(0, shown), cols, height),
-		[items, shown, cols],
-	)
+	// cards keep their column while live ones arrive on top; a new search or column count deals again
+	const placed = useRef<{
+		cols: number
+		chip: typeof chip
+		tokens: typeof tokens
+		at: ReadonlyMap<string, number>
+	} | null>(null)
+	const columns = useMemo(() => {
+		const p = placed.current
+		const keep = p?.cols === cols && p.chip === chip && p.tokens === tokens
+		const dealt = dealStable(
+			items.slice(0, shown),
+			cols,
+			height,
+			keyOf,
+			keep ? p.at : null,
+		)
+		placed.current = { cols, chip, tokens, at: dealt.placed }
+		return dealt.columns
+	}, [items, shown, cols, chip, tokens])
 	const searching = tokens.length > 0 || chip !== null
-	const open = (item: ActivitySummary) => {
-		activity.open(item)
-		shellStore.openDrawer("activity")
-	}
+	const open = useCallback(
+		(item: ActivitySummary) => {
+			activity.open(item)
+			shellStore.openDrawer("activity")
+		},
+		[activity],
+	)
 
 	return (
 		<section
@@ -199,13 +227,12 @@ export default function MessagesGallery({ insets }: { insets: GalleryInsets }) {
 					{columns.map((col, i) => (
 						<div key={i} className="wkg-col">
 							{col.map(item => (
-								<div key={item.eventId} role="listitem">
-									<MessageCard
-										item={item}
-										readOnly={readOnly}
-										onOpen={() => open(item)}
-									/>
-								</div>
+								<GalleryCard
+									key={item.eventId}
+									item={item}
+									readOnly={readOnly}
+									onOpen={open}
+								/>
 							))}
 						</div>
 					))}
@@ -222,6 +249,27 @@ export default function MessagesGallery({ insets }: { insets: GalleryInsets }) {
 		</section>
 	)
 }
+
+// Memoised: a live batch re-renders the gallery, not the cards already shown.
+const GalleryCard = memo(function GalleryCard({
+	item,
+	readOnly,
+	onOpen,
+}: {
+	item: ActivitySummary
+	readOnly: boolean
+	onOpen: (item: ActivitySummary) => void
+}) {
+	return (
+		<div role="listitem">
+			<MessageCard
+				item={item}
+				readOnly={readOnly}
+				onOpen={() => onOpen(item)}
+			/>
+		</div>
+	)
+})
 
 function GalleryNote({
 	available,

@@ -22,14 +22,44 @@ export function dealColumns<T>(
 	columns: number,
 	height: (item: T) => number,
 ): T[][] {
+	return dealStable(items, columns, height, () => "", null).columns
+}
+
+/**
+ * dealColumns that keeps every card already placed (`placed`: key to column) in its column, so a live card arriving
+ * on top does not move the others (each move remounts a card). Kept cards count first; the new ones then go, in
+ * order, to the shortest column. Returns the placement of the cards dealt, for the next call.
+ */
+export function dealStable<T>(
+	items: readonly T[],
+	columns: number,
+	height: (item: T) => number,
+	key: (item: T) => string,
+	placed: ReadonlyMap<string, number> | null,
+): { columns: T[][]; placed: Map<string, number> } {
 	const n = Math.max(1, Math.floor(columns))
-	const out: T[][] = Array.from({ length: n }, () => [])
+	const col = new Array<number>(items.length).fill(-1)
 	const tall = new Array<number>(n).fill(0)
-	for (const item of items) {
+	if (placed)
+		items.forEach((item, i) => {
+			const c = placed.get(key(item))
+			if (c === undefined || c >= n) return
+			col[i] = c
+			tall[c] = (tall[c] ?? 0) + height(item) + GALLERY_GAP
+		})
+	items.forEach((item, i) => {
+		if (col[i] !== -1) return
 		let at = 0
 		for (let c = 1; c < n; c++) if ((tall[c] ?? 0) < (tall[at] ?? 0)) at = c
-		out[at]?.push(item)
+		col[i] = at
 		tall[at] = (tall[at] ?? 0) + height(item) + GALLERY_GAP
-	}
-	return out
+	})
+	const out: T[][] = Array.from({ length: n }, () => [])
+	const next = new Map<string, number>()
+	items.forEach((item, i) => {
+		const c = col[i] ?? 0
+		out[c]?.push(item)
+		next.set(key(item), c)
+	})
+	return { columns: out, placed: next }
 }

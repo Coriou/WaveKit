@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import {
 	GALLERY_GAP,
 	dealColumns,
+	dealStable,
 	galleryColumns,
 } from "../../src/features/messages/gallery.ts"
 
@@ -34,5 +35,49 @@ describe("Messages view gallery", () => {
 
 	it("treats a zero column count as one", () => {
 		expect(dealColumns([1, 2], 0, () => 10)).toEqual([[1, 2]])
+	})
+})
+
+describe("Messages view gallery, live cards", () => {
+	const h: Record<string, number> = {
+		a: 300,
+		b: 100,
+		c: 100,
+		d: 50,
+		e: 50,
+		f: 80,
+		g: 80,
+	}
+	const height = (x: string) => h[x] ?? 0
+	const key = (x: string) => x
+
+	it("deals like dealColumns with nothing placed yet", () => {
+		const items = ["a", "b", "c", "d", "e"]
+		expect(dealStable(items, 3, height, key, null).columns).toEqual(
+			dealColumns(items, 3, height),
+		)
+	})
+
+	it("keeps placed cards in their column when new ones arrive on top", () => {
+		const first = dealStable(["a", "b", "c", "d", "e"], 3, height, key, null)
+		const next = dealStable(
+			["f", "g", "a", "b", "c", "d", "e"],
+			3,
+			height,
+			key,
+			first.placed,
+		)
+		for (const x of ["a", "b", "c", "d", "e"])
+			expect(next.placed.get(x)).toBe(first.placed.get(x))
+		// the new cards go to the shortest columns, on top of them
+		expect(next.columns).toEqual([["a"], ["f", "b", "d"], ["g", "c", "e"]])
+	})
+
+	it("forgets cards that left and deals again past the column count", () => {
+		const first = dealStable(["a", "b", "c"], 3, height, key, null)
+		const next = dealStable(["b", "c"], 2, height, key, first.placed)
+		expect(next.placed.has("a")).toBe(false)
+		expect(next.columns.flat().sort()).toEqual(["b", "c"])
+		expect(next.columns.length).toBe(2)
 	})
 })
