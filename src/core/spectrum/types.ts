@@ -51,6 +51,11 @@ export interface PendingEpoch {
 	gainKey: string
 	tuningTrust: TuningTrust
 	centreChanged: boolean
+	/**
+	 * WG9 req 3.4: stale-content discard cap for a non-scanner retune (ms). Absent = the
+	 * pipeline's own cap (the scanner's epochs never set it).
+	 */
+	staleMaxMs?: number
 }
 
 export interface TrackFlags {

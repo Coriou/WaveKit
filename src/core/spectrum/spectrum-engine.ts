@@ -13,6 +13,7 @@ import type { BranchTelemetry, FanoutManager } from "../fanout-manager.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
+import { tuningTrustOf } from "../tuning-trust.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { defaultFftSize } from "./fft.js"
@@ -35,6 +36,11 @@ import type {
 import { bytesPerSample } from "./frame-source.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { IqRing } from "./iq-ring.js"
+import {
+	blockSamplesOf,
+	frameTrust,
+	operatorRetuneTiming,
+} from "./retune-settle.js"
 import {
 	createPipelineHost,
 	type PipelineHost,
@@ -65,6 +71,13 @@ const EPOCH_COMMANDS: ReadonlySet<string> = new Set([
 	"set-tuner-gain-index",
 	"set-tuner-if-gain",
 ])
+
+/** The weaker of two labels: `unverified` beats `relay`, which beats `commanded`. */
+function mergeTrust(a: TuningTrust, b: TuningTrust): TuningTrust {
+	if (a === "unverified" || b === "unverified") return "unverified"
+	if (a === "relay" || b === "relay") return "relay"
+	return "commanded"
+}
 
 const IQ_FORMATS: ReadonlySet<string> = new Set([
 	"U8_IQ",
@@ -162,8 +175,15 @@ export interface SpectrumEngineDeps {
 	sources: Pick<SourceManager, "getCaps" | "getStream"> &
 		Pick<EventEmitter, "on" | "off">
 	routing: Pick<SourceFanoutRouter, "getFanout" | "releaseUnused">
+	/**
+	 * WG9 req 3.2: `tuningWrittenOnConnection` is present on the real TunerController
+	 * (SpectrumService passes it through); when present and false, a label the state rule
+	 * would make `commanded`/`relay` is demoted to `unverified`.
+	 */
 	tuner:
-		| (Pick<TunerController, "getState"> & Pick<EventEmitter, "on" | "off">)
+		| (Pick<TunerController, "getState"> &
+				Partial<Pick<TunerController, "tuningWrittenOnConnection">> &
+				Pick<EventEmitter, "on" | "off">)
 		| null
 	settings: () => SpectrumSettings
 	/** WG8: the resolved, validated bins cap (SpectrumService). Absent = the 2 048 floor. */
@@ -321,8 +341,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		trust: TuningTrust
 		commandSample: number
 		bufferedSamples: number
+		/** WG9 req 3.3: the centre a set-frequency command wrote (one epoch per retune). */
+		centreHz?: number
+		/**
+		 * WG9 req 3.1/3.2: merge the shared state rule into `trust` at flush, after the
+		 * tuner finished the update that fired the event (a relay command updates caps
+		 * before it records the accepted value; reconnect reconciliation before replay events).
+		 */
+		checkState: boolean
 	} | null = null
 	private readonly pendingMeta = new Map<number, EngineEpoch>()
+	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
+	private readonly verifiedFrom = new Map<number, number>()
+	/** The current epoch's entry of `verifiedFrom` (null: no unverified window). */
+	private currentVerifiedFrom: number | null = null
 	/**
 	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
 	 * has not arrived yet, in post order. A thread host can still deliver the
@@ -420,6 +452,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.awaitingPayload = false
 		this.streamStartByte = 0
 		this.pendingMeta.clear()
+		this.verifiedFrom.clear()
 		this.openingStreams.length = 0
 		this.beginStream(this.initialTrust())
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
@@ -725,6 +758,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.pool.length = 0
 			// The old host's pending epochs and stream starts never arrive.
 			this.pendingMeta.clear()
+			this.verifiedFrom.clear()
 			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
 			if (this.masks) this.send({ kind: "masks", ...this.masks })
@@ -749,10 +783,25 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	private initialTrust(): TuningTrust {
-		const state = this.deps.tuner?.getState(this.sourceId)
-		if (state && !(state.unknownFields ?? []).includes("frequency"))
-			return "commanded"
-		return "unverified"
+		return this.stateTrust()
+	}
+
+	/**
+	 * WG9 req 3.1/3.2: the shared fail-closed rule on the current tuner state, demoted to
+	 * `unverified` when the tuner reports no frequency and sample-rate write on this connection.
+	 */
+	private stateTrust(): TuningTrust {
+		const tuner = this.deps.tuner
+		if (!tuner) return "unverified"
+		const trust = tuningTrustOf(tuner.getState(this.sourceId))
+		if (trust === "unverified") return trust
+		const written = tuner.tuningWrittenOnConnection
+		if (
+			typeof written === "function" &&
+			written.call(tuner, this.sourceId) !== true
+		)
+			return "unverified"
+		return trust
 	}
 
 	private beginStream(trust: TuningTrust): void {
@@ -1082,6 +1131,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					settleMode: ev.settleMode,
 				}
 				if (ev.settleMode === "marker") this.marker = true
+				this.currentVerifiedFrom = this.verifiedFrom.get(ev.epoch) ?? null
+				this.verifiedFrom.delete(ev.epoch)
 			} else if (ev.kind === "untracked-retune") {
 				// § 4.7: the pipeline already started an unverified epoch (Task 10b); record it, post nothing.
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
@@ -1100,7 +1151,31 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.lastStats = ev.stats
 				if (ev.stats.stuckTestMode) this.marker = false
 			}
-			this.emit("pipeline", ev, this.currentEpoch())
+			this.emit("pipeline", ev, this.epochFor(ev))
+		}
+	}
+
+	/** WG9 req 3.4: a block that starts before a non-scanner retune's network settle is `unverified`. */
+	private epochFor(ev: PipelineEvent): EngineEpoch {
+		const epoch = this.currentEpoch()
+		const from = this.currentVerifiedFrom
+		if (
+			from === null ||
+			ev.kind !== "block-summary" ||
+			ev.summary.epoch !== epoch.epoch ||
+			!this.cfg
+		)
+			return epoch
+		const blockStart =
+			ev.summary.endSample -
+			blockSamplesOf(
+				this.cfg.integrationMs,
+				this.cfg.sampleRateHz,
+				this.cfg.fftSize,
+			)
+		return {
+			...epoch,
+			tuningTrust: frameTrust(epoch.tuningTrust, blockStart, from),
 		}
 	}
 
@@ -1148,7 +1223,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private readonly onCommandSent = (
 		sourceId: string,
 		command: string,
-		_value: number,
+		value: number,
 		origin?: TunerCommandOrigin,
 	): void => {
 		if (
@@ -1158,7 +1233,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		)
 			return
 		if (!EPOCH_COMMANDS.has(command)) return
-		this.queueExternal("commanded")
+		const trust =
+			this.stateTrust() === "unverified" ? "unverified" : "commanded"
+		this.queueExternal(
+			trust,
+			command === "set-frequency" && Number.isFinite(value) ? value : undefined,
+		)
 	}
 
 	private readonly onStateChanged = (
@@ -1170,7 +1250,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const previous = this.lastTunerKey
 		this.lastTunerKey = key
 		if (this.suppressed > 0 || previous === null || previous === key) return
-		if (state.controlMode === "external") this.queueExternal("relay")
+		if (state.controlMode === "external")
+			this.queueExternal("relay", undefined, true)
 	}
 
 	private readonly onCapsChanged = (
@@ -1179,15 +1260,16 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	): void => {
 		if (sourceId !== this.sourceId || !this.running) return
 		if (caps.sampleRate !== this.cfg?.sampleRateHz) {
-			if (this.suppressed === 0) this.queueExternal(this.externalTrust())
+			if (this.suppressed === 0)
+				this.queueExternal("commanded", undefined, true)
 			return
 		}
 		if (this.suppressed > 0) return
 		if (
 			caps.centerFreq !== undefined &&
-			caps.centerFreq !== this.current.centreHz
+			caps.centerFreq !== this.expectedCentre()
 		) {
-			this.queueExternal(this.externalTrust())
+			this.queueExternal("commanded", undefined, true)
 		}
 	}
 
@@ -1200,15 +1282,17 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (!this.running || this.restarting) return
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		if (caps?.centerFreq === undefined) return
+		if (caps.centerFreq !== this.expectedCentre())
+			this.queueExternal("commanded", undefined, true)
+	}
+
+	/** The latest centre submitted or queued (current, opening streams, pending epochs, a queued command). */
+	private expectedCentre(): number {
 		let expected = this.current.centreHz
 		for (const meta of this.openingStreams) expected = meta.centreHz
 		for (const meta of this.pendingMeta.values()) expected = meta.centreHz
-		if (caps.centerFreq !== expected) this.queueExternal(this.externalTrust())
-	}
-
-	private externalTrust(): TuningTrust {
-		const state = this.deps.tuner?.getState(this.sourceId)
-		return state?.controlMode === "external" ? "relay" : "commanded"
+		const queued = this.externalPending?.centreHz
+		return queued ?? expected
 	}
 
 	private tunerKey(state: TunerState | undefined): string | null {
@@ -1243,15 +1327,16 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	/** Captures the command position now; posts at its microtask or at the next branch delivery, whichever comes first. */
-	private queueExternal(trust: TuningTrust): void {
+	private queueExternal(
+		trust: TuningTrust,
+		centreHz?: number,
+		checkState = false,
+	): void {
 		if (!this.running) return
 		if (this.externalPending) {
-			if (
-				trust === "unverified" ||
-				(trust === "relay" && this.externalPending.trust !== "unverified")
-			) {
-				this.externalPending.trust = trust
-			}
+			if (centreHz !== undefined) this.externalPending.centreHz = centreHz
+			if (checkState) this.externalPending.checkState = true
+			this.externalPending.trust = mergeTrust(this.externalPending.trust, trust)
 			return
 		}
 		const clock = this.sampleClock()
@@ -1259,6 +1344,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			trust,
 			commandSample: clock.commandSample,
 			bufferedSamples: clock.bufferedSamples,
+			...(centreHz !== undefined ? { centreHz } : {}),
+			checkState,
 		}
 		queueMicrotask(() => this.flushExternal())
 	}
@@ -1267,6 +1354,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const pending = this.externalPending
 		this.externalPending = null
 		if (!pending || !this.running || this.restarting) return
+		if (pending.checkState)
+			pending.trust = mergeTrust(pending.trust, this.stateTrust())
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		if (!caps) return
 		if (caps.sampleRate !== this.cfg?.sampleRateHz) {
@@ -1275,13 +1364,29 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		}
 		const fs = caps.sampleRate
 		const s = this.deps.settings()
-		const centreHz =
-			this.centreOverride ?? caps.centerFreq ?? this.current.centreHz
-		this.submitEpoch({
-			epoch: this.allocateEpoch(),
+		// WG9 req 3.4: never the scanner's own retune (the arbiter submits those directly).
+		const timing = operatorRetuneTiming({
 			commandSample: pending.commandSample,
 			bufferedSamples: pending.bufferedSamples,
-			settleSamples: Math.round((s.sweep.settleMs.network * fs) / 1000),
+			sampleRateHz: fs,
+			networkSettleMs: s.sweep.settleMs.network,
+		})
+		// A host-reported centre that disagrees with ours is never `commanded` or `relay`.
+		if (this.centreOverride !== null)
+			pending.trust = mergeTrust(pending.trust, "unverified")
+		const centreHz =
+			this.centreOverride ??
+			pending.centreHz ??
+			caps.centerFreq ??
+			this.current.centreHz
+		const epoch = this.allocateEpoch()
+		if (timing.verifiedFromSample !== null)
+			this.verifiedFrom.set(epoch, timing.verifiedFromSample)
+		this.submitEpoch({
+			epoch,
+			commandSample: pending.commandSample,
+			bufferedSamples: pending.bufferedSamples,
+			settleSamples: timing.settleSamples,
 			expectMarker: false,
 			markerTimeoutSamples: 0,
 			pllSettleSamples: 0,
@@ -1290,6 +1395,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			gainKey: gainKeyOf(this.deps.tuner?.getState(this.sourceId)),
 			tuningTrust: pending.trust,
 			centreChanged: centreHz !== this.current.centreHz,
+			staleMaxMs: timing.staleMaxMs,
 		})
 	}
 

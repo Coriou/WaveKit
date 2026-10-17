@@ -535,7 +535,7 @@ export class SpectrumPipeline {
 			absKey: this.absKey(p.gainKey),
 			settledStart: null,
 			settleMode: p.expectMarker ? "marker" : "timer",
-			staleLeft: staleRef ? this.maxStaleBlocks : 0,
+			staleLeft: staleRef ? this.staleBlocksFor(p) : 0,
 			staleRef,
 		}
 		this.startEpochState()
@@ -545,6 +545,12 @@ export class SpectrumPipeline {
 				p.commandSample + p.bufferedSamples + p.settleSamples,
 				"timer",
 			)
+	}
+
+	/** WG9 req 3.4: a non-scanner retune caps the stale discard at its own `staleMaxMs`. */
+	private staleBlocksFor(p: PendingEpoch): number {
+		if (p.staleMaxMs === undefined) return this.maxStaleBlocks
+		return Math.min(this.maxStaleBlocks, Math.ceil(p.staleMaxMs / this.blockMs))
 	}
 
 	private onNewStream(

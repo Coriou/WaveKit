@@ -47,6 +47,7 @@ function make(hostCentre?: HostCentreReader) {
 	const sources = new FakeSources()
 	const fanout = new FakeFanout()
 	let host: Host | null = null
+	const tuner = new FakeTuner()
 	const engine = new SpectrumEngine({
 		sourceId: "rtl",
 		sources,
@@ -54,13 +55,13 @@ function make(hostCentre?: HostCentreReader) {
 			getFanout: () => fanout as never,
 			releaseUnused: () => undefined,
 		},
-		tuner: new FakeTuner(),
+		tuner,
 		settings: () => testSettings(),
 		logger: pino({ level: "silent" }),
 		createHost: (_cfg, handlers) => (host = new Host(handlers)),
 		...(hostCentre ? { hostCentre, hostCentrePollMs: 20 } : {}),
 	})
-	return { engine, fanout, host: () => host! }
+	return { engine, fanout, tuner, host: () => host! }
 }
 
 describe("SpectrumEngine trust", () => {
@@ -87,6 +88,27 @@ describe("SpectrumEngine trust", () => {
 		expect(engine.warnings().map(w => [w.code, w.deltaHz])).toEqual([
 			["host-centre-mismatch", 150_000],
 		])
+		await engine.stop()
+	})
+
+	it("keeps an operator retune unverified while the host-reported centre override is active", async () => {
+		const { engine, tuner, host } = make({
+			read: () => Promise.resolve(446_250_000),
+		})
+		await engine.start()
+		await new Promise(resolve => setTimeout(resolve, 60))
+		await settle()
+		tuner.emit("command-sent", "rtl", "set-frequency", 446_300_000, "rest")
+		await settle()
+		const pendings = host()
+			.inputs.filter(
+				(i): i is Extract<PipelineInput, { kind: "pending-epoch" }> =>
+					i.kind === "pending-epoch",
+			)
+			.map(i => i.pending)
+		expect(pendings.length).toBeGreaterThan(0)
+		expect(pendings.at(-1)).toMatchObject({ tuningTrust: "unverified" })
+		for (const p of pendings) expect(p.tuningTrust).toBe("unverified")
 		await engine.stop()
 	})
 })
