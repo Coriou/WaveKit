@@ -21,3 +21,10 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - `data.ts` holds the canvas data (signals, band plan, decoders, messages, identify plans),
   `spectrum.ts` the frame synthesis, `audio.ts` the audio server, `server.ts` the routes and
   `buildMockServer()` (used by `web/tests/mock`).
+- Receiver controls live in `receiver.ts` (registered from one marked block in `server.ts`): the tuner
+  setting routes and `PATCH /api/tuner/:id/config` with the core's validation codes and messages,
+  `GET /api/receiver-capabilities[/:id]` for an RTL-SDR with an R820T (29-step gain table, rate
+  presets, 15 controls) and `GET /api/tuner-relay` (port 1234, exclusive). Writes emit
+  `tuner:command-sent` then `tuner:state-changed`; a new sample rate bumps the spectrum epoch (the
+  synthetic frames keep their 2.4 MS/s span). `WAVEKIT_MOCK_RELAY_CLIENT=1` starts with an SDR++
+  client holding the tuner (`TUNER_CONTROL_EXTERNAL` until the panel takes control back).

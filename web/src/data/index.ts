@@ -9,6 +9,7 @@ import { EventsClient } from "./events-client.ts"
 import { BandplanStore } from "./bandplan-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
+import { ReceiverStore } from "./receiver-store.ts"
 import { SourcesStore } from "./sources-store.ts"
 import { Store } from "./store.ts"
 import { TunerStore } from "./tuner-store.ts"
@@ -26,6 +27,8 @@ export interface DataLayer {
 	connection: Store<ConnectionState>
 	sources: SourcesStore
 	tuner: TunerStore
+	/** Receiver settings: capabilities, relay status and per-control writes. */
+	receiver: ReceiverStore
 	liveAudio: LiveAudioStore
 	bandplan: BandplanStore
 	identify: IdentifyStore
@@ -55,13 +58,19 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 	const access = new Store<AccessStoreState>({ access: null, error: null })
 	const connection = new Store<ConnectionState>(events.state)
 	const offState = events.onState(state => connection.set(state))
+	const tuner = new TunerStore(api, events)
+	const receiver = new ReceiverStore(api, events, {
+		tunerState: id => tuner.get().bySource[id],
+		onState: state => tuner.receive(state),
+	})
 	const layer: DataLayer = {
 		api,
 		events,
 		access,
 		connection,
 		sources: new SourcesStore(api, events),
-		tuner: new TunerStore(api, events),
+		tuner,
+		receiver,
 		liveAudio: new LiveAudioStore(api, events),
 		bandplan: new BandplanStore(api, events),
 		identify: new IdentifyStore(api, events),
@@ -77,12 +86,14 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 				layer.tuner.load(),
 				layer.liveAudio.load(),
 				layer.bandplan.load(),
+				layer.receiver.loadRelay(),
 			])
 		},
 		dispose() {
 			offState()
 			layer.sources.dispose()
 			layer.tuner.dispose()
+			layer.receiver.dispose()
 			layer.liveAudio.dispose()
 			layer.bandplan.dispose()
 			layer.identify.dispose()
@@ -122,6 +133,23 @@ export type { ReadableStore } from "./store.ts"
 export { SourcesStore } from "./sources-store.ts"
 export type { SourcesState } from "./sources-store.ts"
 export { TunerStore } from "./tuner-store.ts"
+export { ReceiverStore, toControlError } from "./receiver-store.ts"
+export type {
+	CapsEntry,
+	ControlError,
+	ControlStatus,
+	ReceiverStoreState,
+} from "./receiver-store.ts"
+export { createReceiverApi, settingRequest } from "./receiver-api.ts"
+export type {
+	ReceiverApi,
+	ReceiverCaps,
+	ReceiverControlCaps,
+	ReceiverGainTableCaps,
+	ReceiverSetting,
+	ReceiverSettingKey,
+	TunerRelayView,
+} from "./receiver-api.ts"
 export type { TunerStoreState } from "./tuner-store.ts"
 export { LiveAudioStore, tunedHz } from "./live-audio-store.ts"
 export type {

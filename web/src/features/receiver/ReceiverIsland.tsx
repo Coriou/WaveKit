@@ -1,26 +1,84 @@
-// The Receiver island (docs/web/canvas/Receiver.dc.html), read-only for now: source, sample rate, gain
-// (TunerState.gain is in 0.1 dB), AGC and the rest of the tuner state. Controls come with a later lot.
-import { useServices } from "../../app/context.ts"
+// The Receiver island (docs/web/canvas/Receiver.dc.html): the source, then its tuner settings as
+// controls: sample rate (confirmed inline, the core restarts the stream), gain on the tuner's own gain
+// table or auto, RTL AGC, bias-T, offset tuning, frequency correction and, under Advanced, direct
+// sampling. Values are the core's (TunerState); a control shows its target only while its write is in
+// flight. When the tuner cannot be changed (read-only access, an external client has it, offline) the
+// panel says why and disables the controls instead of failing on click.
+import { useEffect, useId, useState, type CSSProperties } from "react"
+import type { TunerState } from "@wavekit/api-types"
+
+import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
+import type {
+	ControlStatus,
+	ReceiverCaps,
+	ReceiverSettingKey,
+} from "../../data/index.ts"
 import type { IslandSlot } from "../../shell/ShellIsland.tsx"
+import { Button } from "../../ui/Button.tsx"
+import { Chip } from "../../ui/Chip.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { Label } from "../../ui/Label.tsx"
-import { formatMHz, formatRate } from "../format.ts"
+import { Seg } from "../../ui/Seg.tsx"
+import { Switch } from "../../ui/Switch.tsx"
+import { formatDb, formatMHz, formatRate } from "../format.ts"
 import { useTunerState } from "../hooks.ts"
 import {
-	gainText,
-	isUnknown,
-	receiverSummary,
-	sourceTitle,
-	switchText,
-} from "./summary.ts"
+	capsNote,
+	controlAvailability,
+	controlErrorText,
+	controlNote,
+	isUnknownField,
+	rateLabel,
+	rateWarning,
+	receiverLock,
+	sampleRateOptions,
+	tunerName,
+	type ReceiverControlId,
+} from "./controls.ts"
+import {
+	gainAt,
+	gainDb,
+	gainHint,
+	gainSteps,
+	nearestGainIndex,
+} from "./gain.ts"
+import { receiverSummary, sourceTitle } from "./summary.ts"
+import "./receiver.css"
 
-function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
+/** The value to show: the in-flight target, else the core's. */
+function shown<T>(status: ControlStatus | undefined, core: T): T {
+	return status?.pending && status.target !== null ? (status.target as T) : core
+}
+
+function useReceiver() {
 	const { data } = useServices()
 	const tuner = useTunerState()
+	const sourceId = tuner?.sourceId ?? null
 	const source = useStore(data.sources, s =>
 		tuner ? s.sources.find(x => x.id === tuner.sourceId) : s.sources[0],
 	)
+	const capsEntry = useStore(data.receiver, s =>
+		sourceId === null ? undefined : s.caps[sourceId],
+	)
+	const controls = useStore(data.receiver, s =>
+		sourceId === null ? undefined : s.controls[sourceId],
+	)
+	const relay = useStore(data.receiver, s => s.relay)
+	return {
+		data,
+		tuner,
+		sourceId,
+		source,
+		capsEntry,
+		caps: capsEntry?.caps ?? null,
+		controls,
+		relay,
+	}
+}
+
+function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
+	const { tuner, source } = useReceiver()
 	const connected = source?.connected ?? false
 	return (
 		<button
@@ -46,34 +104,454 @@ function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
 	)
 }
 
-function ReceiverPanel() {
-	const { data } = useServices()
-	const tuner = useTunerState()
-	const source = useStore(data.sources, s =>
-		tuner ? s.sources.find(x => x.id === tuner.sourceId) : s.sources[0],
+function ControlError({
+	status,
+	onDismiss,
+}: {
+	status: ControlStatus | undefined
+	onDismiss: () => void
+}) {
+	if (!status?.error) return null
+	return (
+		<span className="wkf-warn wkf-rx-error" role="alert">
+			<span className="wkf-grow">{controlErrorText(status.error)}</span>
+			<button
+				type="button"
+				className="wkf-rx-dismiss"
+				aria-label="Dismiss"
+				onClick={onDismiss}
+			>
+				<Icon name="close" size={14} />
+			</button>
+		</span>
 	)
-	const error = useStore(data.tuner, s => s.error)
-	const stats: { k: string; v: string }[] = tuner
-		? [
-				{ k: "Centre", v: `${formatMHz(tuner.frequency)} MHz` },
-				{ k: "Sample rate", v: formatRate(tuner.sampleRate) },
-				{ k: "Gain", v: gainText(tuner) },
-				{ k: "RTL AGC", v: switchText(tuner, "agcMode") },
-				{ k: "Bias-T", v: switchText(tuner, "biasTee") },
-				{
-					k: "PPM",
-					v: isUnknown(tuner, "ppm") ? "Unknown" : String(tuner.ppm),
-				},
-			]
-		: []
+}
+
+interface SectionProps {
+	tuner: TunerState
+	caps: ReceiverCaps | null
+	locked: boolean
+	status: (key: ReceiverSettingKey) => ControlStatus | undefined
+	dismiss: (key: ReceiverSettingKey) => void
+}
+
+function SampleRate({ tuner, caps, locked, status, dismiss }: SectionProps) {
+	const { data } = useServices()
+	const [confirmHz, setConfirmHz] = useState<number | null>(null)
+	const rate = status("sampleRate")
+	const avail = controlAvailability("sampleRate", caps)
+	const current = shown(rate, tuner.sampleRate)
+	const options = sampleRateOptions(caps, tuner.sampleRate)
+	const disabled = locked || !avail.enabled || rate?.pending === true
+	// a stale confirmation goes once the panel locks or the rate moved elsewhere
+	const asking = confirmHz !== null && !disabled && confirmHz !== current
+	const declaredOnly = tuner.declaredOnlyFields?.includes("sampleRate") ?? false
+	const warn = rateWarning(confirmHz ?? current)
+	return (
+		<div className="wkf-field">
+			<Label>Sample rate</Label>
+			{options.length > 0 ? (
+				<Seg
+					label="Sample rate"
+					columns={3}
+					value={String(asking ? confirmHz : current)}
+					options={options.map(hz => ({
+						value: String(hz),
+						label: rateLabel(hz),
+						ariaLabel: formatRate(hz),
+						disabled,
+					}))}
+					onChange={value => {
+						const hz = Number(value)
+						setConfirmHz(hz === current ? null : hz)
+					}}
+				/>
+			) : (
+				<span className="wkf-quiet wkf-small">{formatRate(current)}</span>
+			)}
+			{!avail.enabled && avail.reason && (
+				<span className="wkf-quiet wkf-small">{avail.reason}</span>
+			)}
+			{asking && (
+				<div
+					className="wkf-rx-confirm"
+					role="group"
+					aria-label="Confirm sample rate"
+				>
+					<span className="wkf-grow">
+						Switch to {formatRate(confirmHz)}? The core restarts the stream: the
+						spectrum starts over and decoders resync.
+					</span>
+					<Button size="sm" variant="ghost" onClick={() => setConfirmHz(null)}>
+						Cancel
+					</Button>
+					<Button
+						size="sm"
+						variant="primary"
+						onClick={() => {
+							const hz = confirmHz
+							setConfirmHz(null)
+							void data.receiver.write(tuner.sourceId, {
+								key: "sampleRate",
+								value: hz,
+							})
+						}}
+					>
+						Switch
+					</Button>
+				</div>
+			)}
+			{rate?.pending && (
+				<span className="wkf-quiet wkf-small" role="status">
+					Restarting the stream at {formatRate(current)}…
+				</span>
+			)}
+			{declaredOnly && !rate?.pending && (
+				<span className="wkf-quiet wkf-small">
+					From the configuration: WaveKit has not set it since the receiver
+					connected.
+				</span>
+			)}
+			{warn && <span className="wkf-warn wkf-small">{warn}</span>}
+			<ControlError status={rate} onDismiss={() => dismiss("sampleRate")} />
+		</div>
+	)
+}
+
+function Gain({ tuner, caps, locked, status, dismiss }: SectionProps) {
+	const { data } = useServices()
+	const gain = status("gain")
+	const mode = status("gainMode")
+	const avail = controlAvailability("gain", caps)
+	const steps = gainSteps(caps)
+	const auto = shown(mode, tuner.gainMode) === "agc"
+	const modeUnknown = isUnknownField(tuner, "gainMode") && !mode?.pending
+	const gainUnknown = isUnknownField(tuner, "gain") && !gain?.pending
+	const value = shown(gain, tuner.gain)
+	const index = nearestGainIndex(steps, value)
+	const last = Math.max(1, steps.valuesTenthsDb.length - 1)
+	const disabled = locked || !avail.enabled
+	const text = modeUnknown
+		? "Unknown"
+		: auto
+			? "Auto"
+			: gainUnknown
+				? "Unknown"
+				: gainDb(value)
+	const pending = gain?.pending === true || mode?.pending === true
+	const major = steps.source === "table" ? 7 : 10
+	const setGain = (tenthsDb: number) =>
+		void data.receiver.setManualGain(tuner.sourceId, tenthsDb)
+	return (
+		<div className="wkf-field">
+			<div className="wkf-rx-row">
+				<Label className="wkf-grow">Gain</Label>
+				<span
+					className="wkf-strong wkf-num"
+					data-quiet={auto || modeUnknown || gainUnknown || undefined}
+					aria-live="polite"
+				>
+					{text}
+					{pending && <span className="wk-sr"> (applying)</span>}
+				</span>
+				<Chip
+					size="sm"
+					pressed={auto && !modeUnknown}
+					disabled={disabled}
+					onClick={() => {
+						if (auto && !modeUnknown) setGain(gainAt(steps, index))
+						else
+							void data.receiver.write(tuner.sourceId, {
+								key: "gainMode",
+								value: "agc",
+							})
+					}}
+				>
+					Auto
+				</Chip>
+			</div>
+			<div
+				className="wk-slider wkf-rx-gain"
+				data-dim={auto || undefined}
+				data-pending={pending || undefined}
+				style={{ "--wk-value": String(index / last) } as CSSProperties}
+			>
+				<div className="wk-slider-track">
+					<div className="wk-slider-fill" />
+				</div>
+				<div className="wkf-rx-ticks" aria-hidden="true">
+					{steps.valuesTenthsDb.map((v, i) => (
+						<span
+							key={v}
+							data-major={i % major === 0 || undefined}
+							data-on={(i <= index && !auto) || undefined}
+						/>
+					))}
+				</div>
+				<div className="wk-slider-knob" />
+				<input
+					type="range"
+					min={0}
+					max={steps.valuesTenthsDb.length - 1}
+					step={1}
+					value={index}
+					disabled={disabled}
+					aria-label="Tuner gain"
+					aria-valuetext={
+						auto ? `Auto, last manual ${gainDb(value)}` : gainDb(value)
+					}
+					onChange={e => setGain(gainAt(steps, Number(e.target.value)))}
+				/>
+			</div>
+			<span className="wkf-quiet wkf-small">
+				{avail.enabled ? gainHint(steps) : avail.reason}
+			</span>
+			<ControlError
+				status={mode?.error ? mode : gain}
+				onDismiss={() => {
+					dismiss("gainMode")
+					dismiss("gain")
+				}}
+			/>
+		</div>
+	)
+}
+
+function ToggleRow({
+	id,
+	label,
+	sub,
+	tuner,
+	caps,
+	locked,
+	status,
+	dismiss,
+}: SectionProps & {
+	id: Extract<ReceiverControlId, "agcMode" | "biasTee" | "offsetTuning">
+	label: string
+	sub: string
+}) {
+	const { data } = useServices()
+	const labelId = useId()
+	const st = status(id)
+	const avail = controlAvailability(id, caps)
+	const on = shown(st, tuner[id])
+	const unknown = isUnknownField(tuner, id) && !st?.pending
+	const note = st?.pending
+		? "Applying…"
+		: unknown
+			? "Unknown: not set since the receiver connected"
+			: avail.reason
+	return (
+		<div className="wkf-rx-toggle">
+			<div className="wkf-rx-row">
+				<span className="wkf-grow wkf-rx-toggle-text">
+					<span className="wkf-strong" id={labelId}>
+						{label}
+					</span>
+					<span className="wkf-quiet wkf-small">{sub}</span>
+					{note && (
+						<span
+							className="wkf-quiet wkf-small"
+							data-warn={(!avail.enabled && !st?.pending) || undefined}
+						>
+							{note}
+						</span>
+					)}
+				</span>
+				<Switch
+					size="row"
+					checked={on}
+					aria-labelledby={labelId}
+					aria-busy={st?.pending || undefined}
+					disabled={locked || !avail.enabled || st?.pending === true}
+					onChange={next =>
+						void data.receiver.write(tuner.sourceId, { key: id, value: next })
+					}
+				/>
+			</div>
+			<ControlError status={st} onDismiss={() => dismiss(id)} />
+		</div>
+	)
+}
+
+function Ppm({ tuner, caps, locked, status, dismiss }: SectionProps) {
+	const { data } = useServices()
+	const st = status("ppm")
+	const avail = controlAvailability("ppm", caps)
+	const rule = caps?.controls.find(c => c.id === "ppm")?.command.validation.rule
+	const range =
+		rule?.kind === "integer-range"
+			? { min: rule.min, max: rule.max }
+			: { min: -500, max: 500 }
+	const value = shown(st, tuner.ppm)
+	const unknown = isUnknownField(tuner, "ppm") && !st?.pending
+	const disabled = locked || !avail.enabled
+	const step = (delta: number) => {
+		const next = Math.min(range.max, Math.max(range.min, value + delta))
+		if (next !== value)
+			void data.receiver.write(tuner.sourceId, { key: "ppm", value: next })
+	}
+	return (
+		<div className="wkf-rx-toggle">
+			<div className="wkf-rx-row">
+				<span className="wkf-grow wkf-rx-toggle-text">
+					<span className="wkf-strong">Frequency correction</span>
+					<span className="wkf-quiet wkf-small">
+						{unknown
+							? "Unknown: not set since the receiver connected"
+							: (avail.reason ?? "Crystal error in parts per million")}
+					</span>
+				</span>
+				<div
+					className="wkf-rx-stepper"
+					role="group"
+					aria-label="Frequency correction"
+					data-pending={st?.pending || undefined}
+				>
+					<button
+						type="button"
+						aria-label="Decrease correction"
+						disabled={disabled || value <= range.min}
+						onClick={() => step(-1)}
+					>
+						−
+					</button>
+					<span className="wkf-num wkf-strong" aria-live="polite">
+						{unknown ? "?" : `${value > 0 ? "+" : ""}${formatDb(value, 0)}`}
+						<span className="wk-sr"> ppm</span>
+					</span>
+					<button
+						type="button"
+						aria-label="Increase correction"
+						disabled={disabled || value >= range.max}
+						onClick={() => step(1)}
+					>
+						+
+					</button>
+				</div>
+			</div>
+			<ControlError status={st} onDismiss={() => dismiss("ppm")} />
+		</div>
+	)
+}
+
+function Advanced(props: SectionProps) {
+	const { tuner, caps, locked, status, dismiss } = props
+	const { data } = useServices()
+	const [open, setOpen] = useState(false)
+	const regionId = useId()
+	const st = status("directSampling")
+	const avail = controlAvailability("directSampling", caps)
+	const value = shown(st, tuner.directSampling)
+	const unknown = isUnknownField(tuner, "directSampling") && !st?.pending
+	const disabled = locked || !avail.enabled || st?.pending === true
+	return (
+		<div className="wkf-rx-adv">
+			<button
+				type="button"
+				className="wkf-rx-adv-btn"
+				aria-expanded={open}
+				aria-controls={regionId}
+				onClick={() => setOpen(!open)}
+			>
+				<Icon
+					name="chevron-down"
+					size={14}
+					className="wkf-rx-adv-chev"
+					data-open={open || undefined}
+				/>
+				Advanced
+			</button>
+			{open && (
+				<div id={regionId} className="wkf-rx-adv-body">
+					<div className="wkf-rx-row">
+						<span className="wkf-grow wkf-rx-toggle-text">
+							<span className="wkf-strong">Direct sampling</span>
+							<span className="wkf-quiet wkf-small">
+								{st?.pending
+									? "Applying…"
+									: unknown
+										? "Unknown: not set since the receiver connected"
+										: avail.reason}
+							</span>
+						</span>
+						<Seg
+							label="Direct sampling"
+							value={unknown ? "" : value}
+							options={[
+								{ value: "off", label: "Off", disabled },
+								{ value: "i", label: "I", ariaLabel: "I branch", disabled },
+								{ value: "q", label: "Q", ariaLabel: "Q branch", disabled },
+							]}
+							onChange={mode => {
+								if (mode === "off" || mode === "i" || mode === "q")
+									void data.receiver.write(tuner.sourceId, {
+										key: "directSampling",
+										value: mode,
+									})
+							}}
+						/>
+					</div>
+					<ControlError
+						status={st}
+						onDismiss={() => dismiss("directSampling")}
+					/>
+				</div>
+			)}
+		</div>
+	)
+}
+
+function throughput(kibPerSecond: number | undefined): string {
+	if (kibPerSecond === undefined) return "—"
+	return `${((kibPerSecond * 1024) / 1e6).toFixed(1)} MB/s`
+}
+
+function ReceiverPanel() {
+	const { data, tuner, sourceId, source, capsEntry, caps, controls, relay } =
+		useReceiver()
+	const readOnly = useReadOnly()
+	const tunerError = useStore(data.tuner, s => s.error)
+	useEffect(() => {
+		void data.receiver.loadRelay()
+		if (sourceId !== null) void data.receiver.loadCaps(sourceId)
+	}, [data, sourceId])
+	const lock = receiverLock({ tuner, source, readOnly, relay })
+	const name = tunerName(caps)
+	const status = (key: ReceiverSettingKey) => controls?.[key]
+	const dismiss = (key: ReceiverSettingKey) => {
+		if (sourceId !== null) data.receiver.dismiss(sourceId, key)
+	}
+	const reclaim = controls?.controlMode
+	const stats: { k: string; v: string }[] = [
+		{ k: "Throughput", v: throughput(source?.dataRate) },
+		{
+			k: "Level",
+			v:
+				source?.signalLevelDbfs === undefined
+					? "—"
+					: `${formatDb(source.signalLevelDbfs)} dBFS`,
+		},
+		{ k: "Centre", v: tuner ? `${formatMHz(tuner.frequency)} MHz` : "—" },
+	]
+	const note = capsNote(capsEntry)
+	const owner = controlNote(tuner, relay)
 	return (
 		<>
 			<div className="wkf-rx-title">
 				<div className="wkf-grow">
-					<div className="wkf-rx-name">{sourceTitle(source, tuner)}</div>
+					<div className="wkf-rx-name">
+						{name ? `RTL-SDR · ${name}` : sourceTitle(source, tuner)}
+					</div>
 					<div className="wkf-quiet">
-						{[source?.type, source?.url].filter(Boolean).join(" · ") ||
-							"Unknown source"}
+						{[
+							name ? sourceTitle(source, tuner) : null,
+							source?.type,
+							source?.url,
+						]
+							.filter(Boolean)
+							.join(" · ") || "Unknown source"}
 					</div>
 				</div>
 				<span
@@ -81,35 +559,123 @@ function ReceiverPanel() {
 					data-size="md"
 					data-variant={source?.connected ? "accent" : "amber"}
 				>
-					{source?.connected ? "Connected" : "Offline"}
+					{source?.connected
+						? source.activity?.state === "streaming"
+							? "Streaming"
+							: "Connected"
+						: "Offline"}
 				</span>
 			</div>
-			{stats.length > 0 ? (
-				<dl className="wkf-rx-stats">
-					{stats.map(s => (
-						<div key={s.k}>
-							<dt>{s.k}</dt>
-							<dd>{s.v}</dd>
-						</div>
-					))}
-				</dl>
-			) : (
-				<span className="wkf-quiet">No tuner-controlled source.</span>
+			<dl className="wkf-rx-stats">
+				{stats.map(s => (
+					<div key={s.k}>
+						<dt>{s.k}</dt>
+						<dd>{s.v}</dd>
+					</div>
+				))}
+			</dl>
+			{lock.locked && lock.reason && (
+				<div className="wkf-rx-lock" role="status">
+					<span className="wkf-grow">{lock.reason}</span>
+					{lock.canReclaim && tuner && !readOnly && (
+						<Button
+							size="sm"
+							variant="tonal"
+							disabled={reclaim?.pending === true}
+							onClick={() =>
+								void data.receiver.write(tuner.sourceId, {
+									key: "controlMode",
+									value: "internal",
+								})
+							}
+						>
+							Take control
+						</Button>
+					)}
+				</div>
 			)}
-			{tuner?.controlMode === "external" && (
-				<span className="wkf-warn">
-					SDR++ controls this receiver: WaveKit does not retune it.
-				</span>
-			)}
+			<ControlError status={reclaim} onDismiss={() => dismiss("controlMode")} />
 			{source?.lastError && (
 				<span className="wkf-warn">{source.lastError}</span>
 			)}
-			{error && <span className="wkf-warn">{error}</span>}
-			<Label>Settings</Label>
-			<span className="wkf-quiet wkf-small">
-				Sample rate, gain and AGC are read-only here for now. Change them in the
-				CLI or the config.
-			</span>
+			{tuner?.lastError && (
+				<span className="wkf-warn">
+					Last tuner command failed: {tuner.lastError}
+				</span>
+			)}
+			{tunerError && <span className="wkf-warn">{tunerError}</span>}
+			{note && <span className="wkf-quiet wkf-small">{note}</span>}
+			{tuner ? (
+				<>
+					<SampleRate
+						tuner={tuner}
+						caps={caps}
+						locked={lock.locked}
+						status={status}
+						dismiss={dismiss}
+					/>
+					<Gain
+						tuner={tuner}
+						caps={caps}
+						locked={lock.locked}
+						status={status}
+						dismiss={dismiss}
+					/>
+					<div className="wkf-rx-toggles">
+						<ToggleRow
+							id="agcMode"
+							label="RTL AGC"
+							sub="Digital gain inside the RTL2832"
+							tuner={tuner}
+							caps={caps}
+							locked={lock.locked}
+							status={status}
+							dismiss={dismiss}
+						/>
+						<ToggleRow
+							id="biasTee"
+							label="Bias‑T"
+							sub="Powers an LNA through the antenna port"
+							tuner={tuner}
+							caps={caps}
+							locked={lock.locked}
+							status={status}
+							dismiss={dismiss}
+						/>
+						<ToggleRow
+							id="offsetTuning"
+							label="Offset tuning"
+							sub="Moves the DC spike out of the band (E4000)"
+							tuner={tuner}
+							caps={caps}
+							locked={lock.locked}
+							status={status}
+							dismiss={dismiss}
+						/>
+						<Ppm
+							tuner={tuner}
+							caps={caps}
+							locked={lock.locked}
+							status={status}
+							dismiss={dismiss}
+						/>
+					</div>
+					<Advanced
+						tuner={tuner}
+						caps={caps}
+						locked={lock.locked}
+						status={status}
+						dismiss={dismiss}
+					/>
+				</>
+			) : (
+				<span className="wkf-quiet">No tuner-controlled source.</span>
+			)}
+			{owner && (
+				<div className="wkf-rx-owner">
+					<span className="wkf-grow">{owner}</span>
+				</div>
+			)}
 		</>
 	)
 }

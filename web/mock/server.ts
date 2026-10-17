@@ -35,6 +35,8 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import { createAudioServer } from "./audio.ts"
+import { registerReceiverMock } from "./receiver.ts"
+import type { ReceiverMockControls } from "./receiver.ts"
 import {
 	DECODER_SEEDS,
 	DEFAULT_CENTER_HZ,
@@ -80,6 +82,8 @@ export interface MockServer {
 		audioPort: number
 	}>
 	close(): Promise<void>
+	/** Receiver controls (./receiver.ts): simulate a relay client taking the tuner. */
+	receiver: ReceiverMockControls
 }
 
 /** The core's rtl_tcp frequency range (TunerValidationError beyond it). */
@@ -1087,6 +1091,27 @@ export async function buildMockServer(
 		},
 	)
 
+	// --- Receiver controls (./receiver.ts): tuner settings, capabilities, relay. Begin. ---
+	const receiver = registerReceiverMock(app, {
+		sourceId: MOCK_SOURCE_ID,
+		tuner,
+		broadcast,
+		restartStream: () => {
+			// the core restarts the IQ stream: spectrum history never crosses the new epoch
+			epoch += 1
+			epochStartedAt = Date.now()
+			broadcast("sources", "source:status", sourceStatus())
+		},
+		retune: async hz => {
+			await app.inject({
+				method: "POST",
+				url: `/api/tuner/${encodeURIComponent(MOCK_SOURCE_ID)}/frequency`,
+				payload: { hz },
+			})
+		},
+	})
+	// --- Receiver controls. End. ---
+
 	app.get("/api/live-audio/status", async () => liveStatus())
 	app.post("/api/live-audio/start", async () => {
 		if (!live.running) {
@@ -1610,6 +1635,7 @@ export async function buildMockServer(
 	return {
 		app,
 		audio,
+		receiver,
 		async listen() {
 			await new Promise<void>((resolve, reject) => {
 				audio.once("error", reject)
@@ -1649,6 +1675,9 @@ async function main(): Promise<void> {
 		...(audioOrigin !== undefined ? { audioOrigin } : {}),
 	})
 	const { apiUrl, audioUrl } = await server.listen()
+	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)
+	if (env["WAVEKIT_MOCK_RELAY_CLIENT"] === "1")
+		server.receiver.relayClient(true)
 	process.stdout.write(
 		`WaveKit mock API on ${apiUrl} (ws ${apiUrl.replace(/^http/, "ws")}/ws), audio on ${audioUrl}/stream.wav\n`,
 	)
