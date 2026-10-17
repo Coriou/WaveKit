@@ -55,42 +55,43 @@ Every Pi colour already had a kit twin with the same value, except the two grati
 Type snaps follow design system §4.1 (15 → 16, 17 → 16, 28 → 26; letter-spacing `.1em` for
 uppercase labels and `.02em` for headings; `.06`/`.08` go):
 
-| Role                                             | Before               | After                                              |
-| ------------------------------------------------ | -------------------- | -------------------------------------------------- |
-| Verdict                                          | D-DIN 700 32 / 28    | `--wk-fs-display-2` / `--wk-fs-display-1`, `.02em` |
-| Nameplate page name                              | D-DIN 700 20 `.06em` | `--wk-fs-2xl`, `.1em`                              |
-| Section legend                                   | D-DIN 700 15 paper-2 | `.wk-label[data-strong]` (13, `.1em`, text-3)      |
-| Contact word                                     | D-DIN 700 15         | `.wk-label[data-strong]`, state colour             |
-| Channel and row names                            | D-DIN 400 15 `.06em` | `--wk-fs-lg` (14), `.1em`, text-2                  |
-| Diagnostics group title, scope axis              | D-DIN 400 13         | `.wk-label` (12, `.1em`, text-3)                   |
-| Step name                                        | D-DIN 700 17 / 15    | `--wk-fs-xl` / `--wk-fs-lg`, `.1em`                |
-| Body, row values, client address and rate        | Noto 16 / 15         | `--wk-fs-xl` (16)                                  |
-| Verdict detail, setup note                       | Noto 15              | `--wk-fs-xl` (16)                                  |
-| Channel value                                    | Noto 17              | `--wk-fs-xl` (16)                                  |
-| Body-sm (rate lines, host, facts, clock caption) | Noto 14              | `--wk-fs-lg`                                       |
-| Caption (sub-lines, notes, readout)              | Noto 13              | `--wk-fs-md`                                       |
-| Plot labels                                      | Noto 12              | `--wk-fs-xs`                                       |
-| Rate unit, setup clock                           | 20                   | `--wk-fs-2xl`                                      |
-| Endpoint address                                 | mono 14              | `--wk-font-mono`, `--wk-fs-lg`                     |
-| Rate figure                                      | Noto 40              | stays local (`--pi-fs-rate: 40px`), see §5         |
+| Role                                             | Before               | After                                                              |
+| ------------------------------------------------ | -------------------- | ------------------------------------------------------------------ |
+| Verdict                                          | D-DIN 700 32 / 28    | `--wk-fs-display-2` / `--wk-fs-display-1`, `.02em`                 |
+| Nameplate page name                              | D-DIN 700 20 `.06em` | `--wk-fs-2xl`, `.1em`                                              |
+| Section legend                                   | D-DIN 700 15 paper-2 | `.wk-label[data-strong]` (13, `.1em`, text-3)                      |
+| Contact word                                     | D-DIN 700 15         | `.wk-label[data-strong]`, state colour                             |
+| Channel and row names                            | D-DIN 400 15 `.06em` | `--wk-fs-lg` (14), `.1em`, text-2                                  |
+| Diagnostics group title, scope axis              | D-DIN 400 13         | `.wk-label` (12, `.1em`, text-3)                                   |
+| Step name                                        | D-DIN 700 17 / 15    | `--wk-fs-xl` / `--wk-fs-lg`, `.1em`                                |
+| Body, row values, client address and rate        | Noto 16 / 15         | `--wk-fs-xl` (16)                                                  |
+| Setup note                                       | Noto 15              | `--wk-fs-xl` (16)                                                  |
+| Verdict detail                                   | Noto 15              | `--wk-fs-lg` (14): at 16 the copy overflows its two reserved lines |
+| Channel value                                    | Noto 17              | `--wk-fs-xl` (16)                                                  |
+| Body-sm (rate lines, host, facts, clock caption) | Noto 14              | `--wk-fs-lg`                                                       |
+| Caption (sub-lines, notes, readout)              | Noto 13              | `--wk-fs-md`                                                       |
+| Plot labels                                      | Noto 12              | `--wk-fs-xs`                                                       |
+| Rate unit, setup clock                           | 20                   | `--wk-fs-2xl`                                                      |
+| Endpoint address                                 | mono 14              | `--wk-font-mono`, `--wk-fs-lg`                                     |
+| Rate figure                                      | Noto 40              | stays local (`--pi-fs-rate: 40px`), see §5                         |
 
 ## 4. Kit recipes that replace local rules
 
-| Local rule (deleted)                                 | Kit replacement                                                |
-| ---------------------------------------------------- | -------------------------------------------------------------- |
-| `:root` colour, font and space tokens                | `[data-wk-theme]` tokens                                       |
-| `body` font, colour, smoothing; `color-scheme`       | `wk-base` on `[data-wk-theme]`                                 |
-| `::selection` (phosphor fill, ink text)              | `wk-base` selection (accent at .28)                            |
-| `:focus-visible` 2 px phosphor, offset 3             | `wk-base` focus: 1.5 px `--wk-focus`, offset 2 (scope keeps 6) |
-| `prefers-reduced-motion` block                       | `wk-base` reduced-motion rule                                  |
-| `.visually-hidden`                                   | `.wk-sr`                                                       |
-| `.legend`                                            | `.wk-label[data-strong]`                                       |
-| `.diag-group__title`, `.scope__axis` type            | `.wk-label`                                                    |
-| `.endpoint__url` / `.endpoint__copy` surfaces, hover | `.wk-field` shell with a `.wk-btn[data-variant="tonal"]`       |
-| `.meter`, `.meter__fill`                             | `.wk-meter`, `.wk-meter-fill` driven by `--wk-level`           |
-| `.scope__readout` surface                            | `.wk-tip`                                                      |
-| `.boot-open a` (phosphor face, hover hex)            | `.wk-btn[data-variant="primary"][data-size="lg"]`, 44 px tall  |
-| `@keyframes blink`, `@keyframes running`             | kit `wk-pulse` (opacity only)                                  |
+| Local rule (deleted)                                 | Kit replacement                                                                                        |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `:root` colour, font and space tokens                | `[data-wk-theme]` tokens                                                                               |
+| `body` font, colour, smoothing; `color-scheme`       | `wk-base` on `[data-wk-theme]`                                                                         |
+| `::selection` (phosphor fill, ink text)              | `wk-base` selection (accent at .28)                                                                    |
+| `:focus-visible` 2 px phosphor, offset 3             | `wk-base` focus: 1.5 px `--wk-focus`, offset 2 (scope keeps 6)                                         |
+| `prefers-reduced-motion` block                       | `wk-base` reduced-motion rule                                                                          |
+| `.visually-hidden`                                   | `.wk-sr`                                                                                               |
+| `.legend`                                            | `.wk-label[data-strong]`                                                                               |
+| `.diag-group__title`, `.scope__axis` type            | `.wk-label`                                                                                            |
+| `.endpoint__url` / `.endpoint__copy` surfaces, hover | `.wk-field` shell with a `.wk-btn[data-variant="tonal"]`                                               |
+| `.meter`, `.meter__fill`                             | `.wk-meter`, `.wk-meter-fill` driven by `--wk-level` (6 px tall, accent fill when ok; was 4 px text-2) |
+| `.scope__readout` surface                            | `.wk-tip` (adds the kit's hairline and `--wk-e2` shadow)                                               |
+| `.boot-open a` (phosphor face, hover hex)            | `.wk-btn[data-variant="primary"][data-size="lg"]`, 44 px tall                                          |
+| `@keyframes blink`, `@keyframes running`             | kit `wk-pulse` (opacity only)                                                                          |
 
 ## 5. What stays Pi-specific, and why
 
