@@ -5,6 +5,7 @@ export class FakeRenderer implements SceneRenderer {
 	rows: { index: number; first: number; count: number }[] = []
 	peaks: number[][] = []
 	traces: number[][] = []
+	offsets: number[][] = []
 	draws: DrawParams[] = []
 	size: [number, number] = [0, 0]
 	ramps = 0
@@ -20,6 +21,9 @@ export class FakeRenderer implements SceneRenderer {
 	}
 	uploadTrace(row: Uint8Array, count: number): void {
 		this.traces.push(Array.from(row.subarray(0, count)))
+	}
+	uploadRowOffsets(offsets: Float32Array): void {
+		this.offsets.push(Array.from(offsets))
 	}
 	setRamp(): void {
 		this.ramps++

@@ -62,7 +62,9 @@ tick: the recording id on events, map tiles from core and batched `aircraft` fra
   until frames at the new centre arrive. What core should provide: (1) that measurement on the
   Pi receiver for a burst of retunes 50–500 kHz apart; (2) a retune path that drops superseded
   requests instead of queueing them, keeps tuner arbitration and scanner preemption, and says in
-  the reply (or on the next frame) which centre the frame is for; (3) a frame-level `centreHz`
+  the reply (or on the next frame) which centre the frame is for; (2b) an option on that retune to
+  keep the live-audio channel on its absolute frequency (move the offset in the same step), since
+  two requests today let the tuned readout jump between them; (3) a frame-level `centreHz`
   that is exact the moment the hardware has moved, so the client can place each frame without
   guessing (today `tuning trust` marks old-centre blocks `unverified`).
 - [ ] Wide-band panorama: an operator-started sweep that hops one source across a frequency

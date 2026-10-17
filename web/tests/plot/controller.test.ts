@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest"
-import { FIT_VIEW, resolveView } from "../../src/plot/maths.ts"
+import { FIT_VIEW } from "../../src/plot/maths.ts"
 import { GAP_CSS, plotLayout } from "../../src/plot/layout.ts"
 import {
 	EMPTY_CONTEXT,
+	FOLLOW_RETUNE_MS,
+	FREE_RELEASE_MS,
 	PlotController,
 	type PlotActions,
 	type PlotContext,
+	type PlotTimers,
 } from "../../src/plot/plot-store.ts"
 
 const capture = { startHz: 160_300_000, endHz: 162_700_000 }
@@ -50,6 +53,63 @@ function setup(ctx: PlotContext = context) {
 	const c = new PlotController(actions)
 	c.setContext(ctx)
 	return { c, calls, release: () => release() }
+}
+
+function fakeTimers(): PlotTimers & { advance(ms: number): void } {
+	let now = 0
+	let jobs: { at: number; fn: () => void; id: number }[] = []
+	let ids = 0
+	return {
+		now: () => now,
+		setTimeout: (fn, ms) => {
+			const id = ++ids
+			jobs.push({ at: now + ms, fn, id })
+			return id
+		},
+		clearTimeout: handle => {
+			jobs = jobs.filter(j => j.id !== handle)
+		},
+		advance(ms) {
+			now += ms
+			for (;;) {
+				const due = jobs.filter(j => j.at <= now).sort((a, b) => a.at - b.at)[0]
+				if (!due) return
+				jobs = jobs.filter(j => j !== due)
+				due.fn()
+			}
+		},
+	}
+}
+
+async function flush(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve()
+}
+
+/** A controller whose retunes and offsets answer at once, with a settable capture. */
+function setupFollowing(timers: PlotTimers) {
+	const calls: string[] = []
+	const c = new PlotController(
+		{
+			retune: (hz, id) => {
+				calls.push(`retune ${id} ${hz}`)
+				return Promise.resolve()
+			},
+			setOffset: offset => {
+				calls.push(`offset ${offset}`)
+				return Promise.resolve()
+			},
+		},
+		undefined,
+		timers,
+	)
+	c.setContext(context)
+	const ctx = (cap: { startHz: number; endHz: number }) =>
+		c.setContext({
+			...context,
+			capture: cap,
+			centreHz: (cap.startHz + cap.endHz) / 2,
+		})
+	return { c, calls, ctx }
 }
 
 describe("PlotController", () => {
@@ -128,28 +188,110 @@ describe("PlotController", () => {
 		expect(calls).toEqual([])
 	})
 
-	it("dragging pans; past the capture edge it retunes and keeps the channel", async () => {
-		const { c, calls, release } = setup()
+	it("zoomed in, a drag inside the capture only pans", async () => {
+		const { c, calls } = setup()
 		c.zoom(0.5, 4) // 600 kHz in the middle
 		c.beginPan()
-		c.dragPan(-2000, 1000) // two view widths right: 1.2 MHz, 300 kHz past the edge
-		const shown = c.visibleSpan()
-		expect(shown?.endHz).toBe(capture.endHz)
+		c.dragPan(-500, 1000) // half a view right: 300 kHz, still inside
+		expect(c.visibleSpan()?.startHz).toBeCloseTo(161_500_000, 3)
+		await c.endPan()
+		expect(calls).toEqual([])
+		expect(c.store.get().free).toBeNull()
+		expect(c.visibleSpan()?.startHz).toBeCloseTo(161_500_000, 3)
+	})
+
+	it("past the capture the picture slides at once and the receiver follows during the drag", async () => {
+		const timers = fakeTimers()
+		const { c, calls, ctx } = setupFollowing(timers)
+		c.beginPan()
+		// At Fit, drag left by a quarter of the plot: 600 kHz up.
+		c.dragPan(-250, 1000)
+		expect(c.visibleSpan()).toEqual({
+			startHz: capture.startHz + 600_000,
+			endHz: capture.endHz + 600_000,
+		})
+		await flush()
+		expect(calls[0]).toBe("retune rtl0 162100000")
+		// The live channel keeps its frequency while the new capture holds it.
+		expect(calls[1]).toBe(`offset ${161_150_000 - 162_100_000}`)
+		// More drag before FOLLOW_RETUNE_MS: queued, latest wins.
+		c.dragPan(-300, 1000)
+		c.dragPan(-400, 1000)
+		await flush()
+		expect(calls.length).toBe(2)
+		timers.advance(FOLLOW_RETUNE_MS)
+		await flush()
+		expect(calls[2]).toBe("retune rtl0 162460000")
 		const done = c.endPan()
-		await Promise.resolve()
-		expect(calls[0]).toBe("retune rtl0 161800000")
-		await Promise.resolve()
-		expect(calls[1]).toBe(`offset ${161_150_000 - 161_800_000}`)
-		release()
 		await done
-		// After the hardware move the view shows what was dragged to.
-		const moved = {
-			startHz: capture.startHz + 300_000,
-			endHz: capture.endHz + 300_000,
-		}
-		const after = resolveView(c.store.get().view, moved)
-		expect(after.startHz).toBeCloseTo(162_400_000, 3)
-		expect(after.endHz).toBeCloseTo(163_000_000, 3)
+		// Frames at the new centre arrive: the slid view becomes a view of the capture again.
+		expect(c.store.get().free).not.toBeNull()
+		ctx({
+			startHz: capture.startHz + 960_000,
+			endHz: capture.endHz + 960_000,
+		})
+		c.captureChanged()
+		expect(c.store.get().free).toBeNull()
+		expect(c.store.get().view).toEqual(FIT_VIEW)
+	})
+
+	it("a drag that ends sends the last target at once", async () => {
+		const timers = fakeTimers()
+		const { c, calls } = setupFollowing(timers)
+		c.beginPan()
+		c.dragPan(-250, 1000)
+		await flush()
+		c.dragPan(-500, 1000)
+		await c.endPan()
+		expect(calls.filter(x => x.startsWith("retune"))).toEqual([
+			"retune rtl0 162100000",
+			"retune rtl0 162700000",
+		])
+	})
+
+	it("a refused retune snaps the picture back and stops following", async () => {
+		const timers = fakeTimers()
+		const calls: string[] = []
+		const c = new PlotController(
+			{
+				retune: hz => {
+					calls.push(`retune ${hz}`)
+					return Promise.reject(new Error("scanner holds the receiver"))
+				},
+				setOffset: () => Promise.resolve(),
+			},
+			undefined,
+			timers,
+		)
+		c.setContext(context)
+		c.beginPan()
+		c.dragPan(-250, 1000)
+		await flush()
+		expect(c.store.get().free).toBeNull()
+		c.dragPan(-400, 1000)
+		timers.advance(1000)
+		await c.endPan()
+		expect(calls).toEqual(["retune 162100000"])
+	})
+
+	it("a slid view gives up waiting for frames after FREE_RELEASE_MS", async () => {
+		const timers = fakeTimers()
+		const { c } = setupFollowing(timers)
+		c.beginPan()
+		c.dragPan(-250, 1000)
+		await c.endPan()
+		expect(c.store.get().free).not.toBeNull()
+		timers.advance(FREE_RELEASE_MS)
+		expect(c.store.get().free).toBeNull()
+	})
+
+	it("the horizontal wheel slides past the capture too", async () => {
+		const timers = fakeTimers()
+		const { c, calls } = setupFollowing(timers)
+		c.panFraction(0.5)
+		expect(c.visibleSpan()?.startHz).toBe(capture.startHz + 1_200_000)
+		await flush()
+		expect(calls[0]).toBe("retune rtl0 162700000")
 	})
 
 	it("a small drag never retunes", async () => {

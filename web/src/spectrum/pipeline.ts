@@ -236,7 +236,8 @@ export class SpectrumPipeline {
 		if (!scene || !axis) return
 		for (let age = history.filled - 1; age >= 0; age--) {
 			const row = history.row(age)
-			if (row) scene.addRow(axis, row, axis.binCount)
+			const rowAxis = history.rowAxis(age) ?? axis
+			if (row) scene.addRow(rowAxis, row, axis.binCount)
 		}
 	}
 

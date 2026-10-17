@@ -1,7 +1,7 @@
 // The plot (docs/web/canvas/Spectrum.dc.html, DESIGN.md "Spectrum interaction"): spectrum trace and waterfall drawn
 // by the spectrum worker, with DOM overlays updated from frame meta (≤ 10/s) and the stores, never per bin.
 // Click tunes (snapping to a signal), wheel steps, ctrl/⌘ + wheel and pinch zoom around the cursor, drag pans
-// (and retunes past the capture edge), arrows/PageUp/PageDown/+/−/0 on the focused plot. Dragging the VFO
+// (past the capture the picture slides at once and the receiver follows, plot-store.ts `free`), arrows/PageUp/PageDown/+/−/0 on the focused plot. Dragging the VFO
 // tunes, its edges (once zoomed in) set the bandwidth, the dashed line sets the squelch (use-handles.ts). Shift-drag
 // marks a range and offers "Scan this range"; scanner discoveries tag the row under the band lanes. Right-click (long
 // press, or the menu key) opens the signal menu: Identify, Decode as…, Listen, Save (SignalMenu.tsx).
@@ -182,12 +182,14 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 			: null
 	const capStart = capture?.startHz ?? null
 	const capEnd = capture?.endHz ?? null
+	// A view slid past the capture (plot-store.ts `free`) shows as is until the frames catch up.
 	const view = useMemo(
 		() =>
 			capStart === null || capEnd === null
 				? null
-				: resolveView(plotState.view, { startHz: capStart, endHz: capEnd }),
-		[capStart, capEnd, plotState.view],
+				: (plotState.free ??
+					resolveView(plotState.view, { startHz: capStart, endHz: capEnd })),
+		[capStart, capEnd, plotState.view, plotState.free],
 	)
 	const hover = useMemo(() => new Store<Hover>(null), [])
 	const range = useMemo(() => new Store<RangeSelection | null>(null), [])
@@ -227,6 +229,11 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		scanHasReceiver,
 	}
 	controller.setContext(context)
+	const tunerCentre = context.centreHz
+	useEffect(
+		() => controller.captureChanged(),
+		[controller, capStart, capEnd, tunerCentre],
+	)
 
 	const layout = plotLayout(size.h, discRow ? DISCOVERY_ROW_CSS : 0)
 	const unverified = shownMeta?.tuningTrust === "unverified"
@@ -301,7 +308,9 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 					hz={SPECTRUM_HZ}
 					bins={bins}
 					backfillMs={SPECTRUM_BACKFILL_MS}
-					view={plotState.view.spanHz === null ? null : view}
+					view={
+						plotState.free ?? (plotState.view.spanHz === null ? null : view)
+					}
 					levels={levels}
 					layout={{
 						splitRatio: layout.splitRatio,

@@ -98,6 +98,11 @@ export interface MockServerOptions {
 	 * the most bins a client gets, served as `limits.bins.max`. Default 2048, like the shipped config.
 	 */
 	spectrumBins?: number
+	/**
+	 * Delay before a REST retune takes effect and answers, ms (WAVEKIT_MOCK_RETUNE_MS). Default 0; about
+	 * 300 is what the core measured from a retune to the first frame at the new centre (ROADMAP §8).
+	 */
+	retuneMs?: number
 }
 
 export interface MockServer {
@@ -1372,6 +1377,8 @@ export async function buildMockServer(
 					code: "TUNER_VALIDATION_ERROR",
 					message: `frequency out of range: ${hz} (expected ${TUNER_MIN_HZ}-${TUNER_MAX_HZ})`,
 				})
+			const delay = options.retuneMs ?? 0
+			if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
 			applyFrequency(hz, "rest")
 			// an operator write: a running sweep pauses (preempted-operator)
 			scanner.operatorWrite()
@@ -2036,6 +2043,7 @@ async function main(): Promise<void> {
 	const loadEnv = env["WAVEKIT_MOCK_LOAD"]
 	const adsbEnv = env["WAVEKIT_MOCK_ADSB_RATE"]
 	const spectrumBinsEnv = env["WAVEKIT_MOCK_SPECTRUM_BINS"]
+	const retuneEnv = env["WAVEKIT_MOCK_RETUNE_MS"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
@@ -2046,6 +2054,7 @@ async function main(): Promise<void> {
 		...(spectrumBinsEnv !== undefined
 			? { spectrumBins: Number(spectrumBinsEnv) }
 			: {}),
+		...(retuneEnv !== undefined ? { retuneMs: Number(retuneEnv) } : {}),
 	})
 	const { apiUrl, audioUrl } = await server.listen()
 	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)

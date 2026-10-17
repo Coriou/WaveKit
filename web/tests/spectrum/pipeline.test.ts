@@ -162,6 +162,14 @@ describe("SpectrumPipeline (OffscreenCanvas path)", () => {
 			type: "spectrum:frame",
 			data: frame({ epoch: 3, startHz: 446_000_000 }),
 		})
+		// A retune keeps the rows too (each at its own frequency); a new bin width does not.
+		expect(t.ofType("reset")).toEqual([])
+		t.frames.tick()
+		expect(t.renderer.draws.at(-1)?.filled).toBe(4)
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ epoch: 3, binHz: 2000 }),
+		})
 		expect(t.ofType("reset").map(r => r.reason)).toEqual(["axis"])
 	})
 

@@ -158,13 +158,15 @@ describe("spectrum of a real core", () => {
 		expect(calls.at(-2)).toBe("retune local-iq 448500000")
 	})
 
-	it("ends a drag past the edge on the hardware centre, not the frame's middle", async () => {
+	it("recentres a drag past the edge on the hardware centre, not the frame's middle", async () => {
 		const { c, calls } = setup()
 		c.zoom(0.5, 4) // 410 kHz around the frame's middle (446.52542 MHz: 500 Hz above the centre)
 		c.beginPan()
-		c.dragPan(-2000, 1000) // two view widths right: 205 kHz past the frame's edge
+		c.dragPan(-2000, 1000) // two view widths right: 820 kHz, past the frame's edge
 		await c.endPan()
-		expect(calls).toEqual(["retune local-iq 446729920", "offset -205000"])
+		// The next frame's middle lands on the dragged view's (447.34542 MHz); the tuned channel
+		// would fall outside the new capture, so its offset stays.
+		expect(calls).toEqual(["retune local-iq 447344920"])
 	})
 
 	it("snaps a click on a carrier to the channel it covers", () => {

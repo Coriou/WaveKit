@@ -5,7 +5,12 @@
  */
 
 import { levelsToLinear } from "./codec.ts"
-import { PeakHold, TraceAverage, axisResetReason } from "./history.ts"
+import {
+	PeakHold,
+	TraceAverage,
+	axisResetReason,
+	axisShifted,
+} from "./history.ts"
 import type {
 	ResetReason,
 	RowAxis,
@@ -37,6 +42,10 @@ export class SpectrumScene {
 	private readonly peak: PeakHold
 	private readonly average: TraceAverage
 	private axis: RowAxis | null = null
+	/** startHz of each ring row; rows from before a retune keep theirs. */
+	private readonly starts: Float64Array
+	/** Each row's start in bins from the newest row's (uploaded to the renderer). */
+	private readonly offsets: Float32Array
 	private next = 0
 	private filled = 0
 	private lastRowAt: number | null = null
@@ -56,16 +65,27 @@ export class SpectrumScene {
 		this.now = opts.now ?? (() => performance.now())
 		this.peak = new PeakHold(opts.texWidth)
 		this.average = new TraceAverage(opts.texWidth)
+		this.starts = new Float64Array(opts.depth)
+		this.offsets = new Float32Array(opts.depth)
 		this.applySize()
 	}
 
 	/** Adds the newest row; clears the history first when its axis differs. */
 	addRow(axis: RowAxis, row: Uint8Array, count: number): ResetReason | null {
 		const reason = axisResetReason(this.axis, axis)
+		const shifted = reason === null && axisShifted(this.axis, axis)
 		if (reason !== null) this.reset()
+		if (shifted) {
+			// A retune: the trace and peak restart on the new bins, the waterfall keeps its rows.
+			this.peak.reset()
+			this.average.reset()
+			this.lastRowAt = null
+		}
 		this.axis = axis
 		const index = this.next
+		this.starts[index] = axis.startHz
 		this.renderer.uploadRow(index, row, count)
+		if (shifted || this.offsets[index] !== 0) this.uploadOffsets(axis)
 		this.next = (index + 1) % this.depth
 		if (this.filled < this.depth) this.filled++
 		this.average.update(row, count, this.layout.traceAlpha)
@@ -85,6 +105,10 @@ export class SpectrumScene {
 		this.axis = null
 		this.next = 0
 		this.filled = 0
+		if (this.offsets.some(o => o !== 0)) {
+			this.offsets.fill(0)
+			this.renderer.uploadRowOffsets(this.offsets)
+		}
 		this.lastRowAt = null
 		this.peak.reset()
 		this.average.reset()
@@ -149,6 +173,19 @@ export class SpectrumScene {
 			lineHalfWidth: 0.625 * this.size.dpr,
 			peakHold: this.layout.peakHold,
 		}
+	}
+
+	/** Row offsets from the newest row, in bins, for the rows held. */
+	private uploadOffsets(axis: RowAxis): void {
+		const n = Math.min(this.depth, this.filled + 1)
+		for (let k = 0; k < this.depth; k++) {
+			const i = (this.next - k + this.depth) % this.depth
+			this.offsets[i] =
+				k < n
+					? ((this.starts[i] ?? axis.startHz) - axis.startHz) / axis.binHz
+					: 0
+		}
+		this.renderer.uploadRowOffsets(this.offsets)
 	}
 
 	render(): void {

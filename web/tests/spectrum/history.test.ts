@@ -4,6 +4,7 @@ import {
 	PeakHold,
 	WaterfallHistory,
 	axisResetReason,
+	axisShifted,
 	profileAckKeepsRows,
 	profileEventResets,
 } from "../../src/spectrum/history.ts"
@@ -43,14 +44,20 @@ describe("history reset rule", () => {
 		expect(axisResetReason(axis, { ...axis, epoch: 0 })).toBeNull()
 	})
 
-	it("resets on sourceId, profile, binHz, startHz and binCount changes", () => {
+	it("resets on sourceId, profile, binHz and binCount changes", () => {
 		expect(axisResetReason(axis, { ...axis, sourceId: "pi" })).toBe("source")
 		expect(axisResetReason(axis, { ...axis, profile: "10:512" })).toBe("axis")
 		expect(axisResetReason(axis, { ...axis, binHz: 2000 })).toBe("axis")
-		expect(axisResetReason(axis, { ...axis, startHz: 445_000_001 })).toBe(
-			"axis",
-		)
 		expect(axisResetReason(axis, { ...axis, binCount: 1024 })).toBe("axis")
+	})
+
+	it("a retune (startHz only) keeps the rows, marked as shifted", () => {
+		const moved = { ...axis, startHz: 445_250_000 }
+		expect(axisResetReason(axis, moved)).toBeNull()
+		expect(axisShifted(axis, moved)).toBe(true)
+		expect(axisShifted(axis, { ...axis, epoch: 4 })).toBe(false)
+		expect(axisShifted(axis, { ...moved, binHz: 2000 })).toBe(false)
+		expect(axisShifted(null, moved)).toBe(false)
 	})
 
 	it("an ack serving the held source and profile again keeps the rows", () => {
@@ -154,7 +161,13 @@ describe("WaterfallHistory", () => {
 		expect(h.begin({ ...axis, epoch: 9 })).toBeNull()
 		expect(h.filled).toBe(2)
 		expect(h.axis?.epoch).toBe(9)
-		expect(h.begin({ ...axis, epoch: 9, startHz: 446_000_000 })).toBe("axis")
+		expect(h.begin({ ...axis, epoch: 9, startHz: 446_000_000 })).toBeNull()
+		h.commit()
+		expect(h.filled).toBe(3)
+		// Each row keeps the frequency it was measured at.
+		expect(h.rowAxis(0)?.startHz).toBe(446_000_000)
+		expect(h.rowAxis(1)?.startHz).toBe(445_000_000)
+		expect(h.begin({ ...axis, binHz: 2000 })).toBe("axis")
 		expect(h.filled).toBe(0)
 	})
 })

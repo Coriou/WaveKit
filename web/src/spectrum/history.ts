@@ -18,8 +18,10 @@ export function axisOf(frame: SpectrumFrameEventData): RowAxis {
 }
 
 /**
- * Whether a row of `next` cannot sit under rows of `prev`: a change of sourceId, profile, binHz or
- * startHz (binCount too, as it sets the row width). docs/API.md also names epoch, but the core opens
+ * Whether a row of `next` cannot sit under rows of `prev`: a change of sourceId, profile or binHz
+ * (binCount too, as it sets the row width). A retune only moves startHz: the older rows stay, each
+ * drawn at its own frequency (axisShifted), so dragging the spectrum never wipes the waterfall.
+ * docs/API.md also names epoch, but the core opens
  * a new epoch without moving the axis (a gain change, an untracked-retune alarm on an unverified
  * tuner, a same-centre hop), so clearing on it wiped the waterfall every few seconds. The picture
  * keeps the rows of an earlier epoch when its frequency axis is unchanged; nothing here analyses them.
@@ -33,11 +35,19 @@ export function axisResetReason(
 	if (
 		prev.profile !== next.profile ||
 		prev.binHz !== next.binHz ||
-		prev.startHz !== next.startHz ||
 		prev.binCount !== next.binCount
 	)
 		return "axis"
 	return null
+}
+
+/** Whether `next` is the same axis as `prev` moved in frequency (a retune), the rows kept. */
+export function axisShifted(prev: RowAxis | null, next: RowAxis): boolean {
+	return (
+		prev !== null &&
+		axisResetReason(prev, next) === null &&
+		prev.startHz !== next.startHz
+	)
 }
 
 /**
@@ -75,6 +85,8 @@ export class WaterfallHistory {
 	readonly width: number
 	readonly data: Uint8Array
 	private readonly rows: Uint8Array[]
+	/** startHz of each ring row (rows of one history differ only by a retune). */
+	private readonly starts: Float64Array
 	/** Ring index of the next row to write. */
 	private headIndex = 0
 	private filledRows = 0
@@ -87,6 +99,7 @@ export class WaterfallHistory {
 		this.rows = Array.from({ length: depth }, (_, i) =>
 			this.data.subarray(i * width, (i + 1) * width),
 		)
+		this.starts = new Float64Array(depth)
 	}
 
 	get axis(): RowAxis | null {
@@ -119,6 +132,7 @@ export class WaterfallHistory {
 	/** Makes the slot the newest row; returns its ring index. */
 	commit(): number {
 		const index = this.headIndex
+		this.starts[index] = this.currentAxis?.startHz ?? 0
 		this.headIndex = (this.headIndex + 1) % this.depth
 		if (this.filledRows < this.depth) this.filledRows++
 		return index
@@ -129,6 +143,14 @@ export class WaterfallHistory {
 		if (age < 0 || age >= this.filledRows) return null
 		const index = (this.headIndex - 1 - age + this.depth * 2) % this.depth
 		return this.rows[index] ?? null
+	}
+
+	/** The axis row `age` rows back was measured on (the current one moved to its startHz). */
+	rowAxis(age = 0): RowAxis | null {
+		const axis = this.currentAxis
+		if (!axis || age < 0 || age >= this.filledRows) return null
+		const index = (this.headIndex - 1 - age + this.depth * 2) % this.depth
+		return { ...axis, startHz: this.starts[index] ?? axis.startHz }
 	}
 
 	rowAt(index: number): Uint8Array {

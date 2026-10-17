@@ -5,6 +5,8 @@
  * Shared by the OffscreenCanvas worker path and the main-thread fallback: it only needs a
  * WebGL2RenderingContext. The waterfall is an R8 texture used as a ring (one texSubImage2D per row);
  * levels, view mapping and ring position are uniforms, so a view or level change re-uploads nothing.
+ * Each waterfall row has an offset in bins from the newest row (R32F, one texel per ring row): after a
+ * retune the older rows stay at their own frequency, and what no row covers is hatched, never invented.
  */
 
 import { RAMP_SIZE } from "./ramp.ts"
@@ -36,6 +38,8 @@ export interface SceneRenderer {
 	uploadRow(index: number, row: Uint8Array, count: number): void
 	uploadPeak(row: Uint8Array, count: number): void
 	uploadTrace(row: Uint8Array, count: number): void
+	/** Per ring row: its start in bins from the newest row's start (0 for the newest). */
+	uploadRowOffsets(offsets: Float32Array): void
 	setRamp(rgba: Uint8Array): void
 	draw(params: DrawParams): void
 	dispose(): void
@@ -58,6 +62,7 @@ uniform sampler2D u_wf;
 uniform sampler2D u_peak;
 uniform sampler2D u_trace;
 uniform sampler2D u_ramp;
+uniform sampler2D u_rowOff; // R32F, one texel per ring row: start in bins from the newest row
 uniform vec2 u_size;      // canvas, device px
 uniform float u_tracePx;  // trace band height from the top, device px
 uniform vec3 u_map;       // texture u = x * scale + offset; limit
@@ -79,8 +84,9 @@ vec4 ramp(float t) {
 	return texture(u_ramp, vec2(clamp(t, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0, 0.5));
 }
 
-float texU(float px) {
-	return u_map.y + (px / u_size.x) * u_map.x;
+// Texture u at px for a row whose bins start \`sh\` texture widths above the newest row's.
+float texU(float px, float sh) {
+	return u_map.y + (px / u_size.x) * u_map.x - sh;
 }
 
 bool inCapture(float u) {
@@ -104,10 +110,10 @@ float level(float s) {
 // (at most one bin per px) it is the LINEAR sample at the middle; zoomed out it is the MAX over the
 // covered bins, so a narrow signal never falls between pixels. At most MAX_TAPS fetches: wider spans
 // are strided (view.ts coveredBins mirrors this).
-float sampleSpan(sampler2D tex, int row, float v, float a, float b) {
-	float t0 = texU(a) * u_texWidth;
-	float t1 = texU(b) * u_texWidth;
-	if (t1 - t0 <= 1.0) return texture(tex, vec2(clampU(texU(0.5 * (a + b))), v)).r;
+float sampleSpan(sampler2D tex, int row, float v, float a, float b, float sh) {
+	float t0 = texU(a, sh) * u_texWidth;
+	float t1 = texU(b, sh) * u_texWidth;
+	if (t1 - t0 <= 1.0) return texture(tex, vec2(clampU(texU(0.5 * (a + b), sh)), v)).r;
 	float last = u_map.z * u_texWidth - 1.0;
 	int i0 = int(clamp(floor(t0), 0.0, last));
 	int i1 = int(clamp(ceil(t1) - 1.0, 0.0, last));
@@ -131,19 +137,27 @@ float traceY(float s) {
 // Coverage of a vertical stroke through the trace at px: spans the pixel's own level and the levels
 // half a pixel either side, so steep slopes stay connected.
 float stroke(sampler2D tex, int row, float v, float px, float y, float yc, float halfWidth) {
-	float y0 = traceY(sampleSpan(tex, row, v, px - 1.0, px));
-	float y1 = traceY(sampleSpan(tex, row, v, px, px + 1.0));
+	float y0 = traceY(sampleSpan(tex, row, v, px - 1.0, px, 0.0));
+	float y1 = traceY(sampleSpan(tex, row, v, px, px + 1.0, 0.0));
 	float lo = min(min(y0, y1), yc) - halfWidth;
 	float hi = max(max(y0, y1), yc) + halfWidth;
 	return clamp(min(y - lo, hi - y) + 0.5, 0.0, 1.0);
+}
+
+// Faint diagonal hatch over what no frame covers yet (a view dragged past the capture).
+vec3 hatched(vec3 bg, float px, float y) {
+	float pitch = 9.0 * max(u_lineHalf / 0.625, 1.0);
+	float on = step(mod(px + y, pitch), pitch * 0.14);
+	return mix(bg, ramp(0.6).rgb, 0.10 * on);
 }
 
 void main() {
 	float px = gl_FragCoord.x;
 	float y = u_size.y - gl_FragCoord.y; // device px from the top
 	vec4 bg = ramp(0.0);
-	float u = texU(px);
-	bool hasData = u_filled > 0.5 && inCapture(u);
+	float u = texU(px, 0.0);
+	bool any = u_filled > 0.5;
+	bool hasData = any && inCapture(u);
 	float wfTop = u_tracePx + u_gapPx;
 
 	if (y >= u_tracePx) {
@@ -155,20 +169,26 @@ void main() {
 		// Waterfall: newest row at the top of the band.
 		float wy = (y - wfTop) / max(u_size.y - wfTop, 1.0);
 		float age = floor(wy * u_rows);
-		if (!hasData || age >= u_filled) {
+		if (!any || age >= u_filled) {
 			outColor = bg;
 			return;
 		}
 		float index = rowIndex(age);
-		float s = sampleSpan(u_wf, int(index), (index + 0.5) / u_depth, px - 0.5, px + 0.5);
+		float sh = texelFetch(u_rowOff, ivec2(int(index), 0), 0).r / u_texWidth;
+		if (!inCapture(texU(px, sh))) {
+			outColor = vec4(hatched(bg.rgb, px, y), 1.0);
+			return;
+		}
+		float s = sampleSpan(u_wf, int(index), (index + 0.5) / u_depth, px - 0.5, px + 0.5, sh);
 		outColor = vec4(ramp(level(s)).rgb, 1.0);
 		return;
 	}
 
 	vec3 color = bg.rgb;
+	if (any && !hasData) color = hatched(color, px, y);
 	if (hasData) {
 		// Trace and fill from the smoothed row (one texel row), as on the design board.
-		float yc = traceY(sampleSpan(u_trace, 0, 0.5, px - 0.5, px + 0.5));
+		float yc = traceY(sampleSpan(u_trace, 0, 0.5, px - 0.5, px + 0.5, 0.0));
 		vec4 lineColor = ramp(0.82);
 		if (y > yc) {
 			// Fill under the trace: a fixed vertical gradient over the band (.30 at the top, .06 at
@@ -178,7 +198,7 @@ void main() {
 			color = mix(color, lineColor.rgb, a);
 		}
 		if (u_peakOn > 0.5) {
-			float pc = traceY(sampleSpan(u_peak, 0, 0.5, px - 0.5, px + 0.5));
+			float pc = traceY(sampleSpan(u_peak, 0, 0.5, px - 0.5, px + 0.5, 0.0));
 			float p = stroke(u_peak, 0, 0.5, px, y, pc, u_lineHalf * 0.8);
 			color = mix(color, ramp(1.0).rgb, 0.16 * p);
 		}
@@ -194,6 +214,7 @@ type Uniforms = Record<
 	| "u_peak"
 	| "u_trace"
 	| "u_ramp"
+	| "u_rowOff"
 	| "u_size"
 	| "u_tracePx"
 	| "u_map"
@@ -217,6 +238,7 @@ export class SpectrumRenderer implements SceneRenderer {
 	private readonly peak: WebGLTexture
 	private readonly trace: WebGLTexture
 	private readonly ramp: WebGLTexture
+	private readonly rowOff: WebGLTexture
 	private readonly u: Uniforms
 	private readonly texWidth: number
 	private readonly depth: number
@@ -231,11 +253,15 @@ export class SpectrumRenderer implements SceneRenderer {
 		this.peak = texture(gl, gl.R8, texWidth, 1)
 		this.trace = texture(gl, gl.R8, texWidth, 1)
 		this.ramp = texture(gl, gl.RGBA8, RAMP_SIZE, 1)
+		// Float textures are not filterable in core WebGL2: NEAREST, read with texelFetch.
+		this.rowOff = texture(gl, gl.R32F, depth, 1, gl.NEAREST)
+		this.uploadRowOffsets(new Float32Array(depth))
 		const names = [
 			"u_wf",
 			"u_peak",
 			"u_trace",
 			"u_ramp",
+			"u_rowOff",
 			"u_size",
 			"u_tracePx",
 			"u_map",
@@ -289,6 +315,14 @@ export class SpectrumRenderer implements SceneRenderer {
 		this.uploadLine(this.trace, row, count)
 	}
 
+	uploadRowOffsets(offsets: Float32Array): void {
+		const gl = this.gl
+		const n = Math.min(offsets.length, this.depth)
+		if (n <= 0) return
+		gl.bindTexture(gl.TEXTURE_2D, this.rowOff)
+		gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, n, 1, gl.RED, gl.FLOAT, offsets)
+	}
+
 	private uploadLine(tex: WebGLTexture, row: Uint8Array, count: number): void {
 		const gl = this.gl
 		const n = Math.min(count, this.texWidth, row.length)
@@ -335,6 +369,7 @@ export class SpectrumRenderer implements SceneRenderer {
 		bindUnit(gl, 1, this.peak, this.u.u_peak)
 		bindUnit(gl, 2, this.ramp, this.u.u_ramp)
 		bindUnit(gl, 3, this.trace, this.u.u_trace)
+		bindUnit(gl, 4, this.rowOff, this.u.u_rowOff)
 		gl.uniform2f(this.u.u_size, w, h)
 		gl.uniform1f(this.u.u_tracePx, p.tracePx)
 		gl.uniform3f(this.u.u_map, p.map.scale, p.map.offset, p.map.limit)
@@ -356,6 +391,7 @@ export class SpectrumRenderer implements SceneRenderer {
 		gl.deleteTexture(this.peak)
 		gl.deleteTexture(this.trace)
 		gl.deleteTexture(this.ramp)
+		gl.deleteTexture(this.rowOff)
 		gl.deleteVertexArray(this.vao)
 		gl.deleteProgram(this.program)
 	}
@@ -389,12 +425,13 @@ function texture(
 	format: number,
 	width: number,
 	height: number,
+	filter: number = gl.LINEAR,
 ): WebGLTexture {
 	const tex = must(gl.createTexture(), "texture")
 	gl.bindTexture(gl.TEXTURE_2D, tex)
 	gl.texStorage2D(gl.TEXTURE_2D, 1, format, width, height)
-	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter)
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter)
 	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
 	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
 	return tex

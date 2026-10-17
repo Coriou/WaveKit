@@ -13,6 +13,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Spectrum limits: `GET /api/spectrum` serves `limits.bins.max` 2048, like the shipped config.
   `WAVEKIT_MOCK_SPECTRUM_BINS=<n>` (512–8192) raises the summary budget (`spectrumSummaryBins`), so
   Settings › FFT size offers 4096 and 8192 (`spectrumBins` in `buildMockServer()`).
+- Retune latency: `WAVEKIT_MOCK_RETUNE_MS=<ms>` delays each `POST /api/tuner/:sourceId/frequency`
+  before it takes effect and answers (`retuneMs`), to try dragging the spectrum past the capture
+  as on a real receiver (about 300 ms to the first frame at the new centre, ROADMAP §8).
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

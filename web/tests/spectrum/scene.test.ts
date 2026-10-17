@@ -55,11 +55,26 @@ describe("SpectrumScene", () => {
 		const { scene } = setup()
 		scene.addRow(axis, new Uint8Array(4), 4)
 		scene.addRow(axis, new Uint8Array(4), 4)
-		expect(scene.addRow({ ...axis, startHz: 2e8 }, new Uint8Array(4), 4)).toBe(
+		expect(scene.addRow({ ...axis, binHz: 500 }, new Uint8Array(4), 4)).toBe(
 			"axis",
 		)
 		expect(scene.drawParams().filled).toBe(1)
 		expect(scene.drawParams().newest).toBe(0)
+	})
+
+	it("a retune keeps the rows and gives each its offset from the newest row", () => {
+		const { renderer, scene } = setup()
+		scene.addRow(axis, new Uint8Array(4), 4)
+		scene.addRow(axis, new Uint8Array(4), 4)
+		// The receiver moved up 2 bins: older rows sit 2 bins below the newest one.
+		expect(
+			scene.addRow({ ...axis, startHz: 1e8 + 2000 }, new Uint8Array(4), 4),
+		).toBeNull()
+		expect(scene.drawParams().filled).toBe(3)
+		expect(renderer.offsets.at(-1)).toEqual([-2, -2, 0])
+		// Ring wraps over the oldest row: offsets follow the slot.
+		scene.addRow({ ...axis, startHz: 1e8 + 3000 }, new Uint8Array(4), 4)
+		expect(renderer.offsets.at(-1)).toEqual([0, -3, -1])
 	})
 
 	it("view and level changes only invalidate (no row re-upload)", () => {
@@ -100,7 +115,7 @@ describe("SpectrumScene", () => {
 		expect(renderer.traces.at(-1)).toEqual([100, 100, 100, 100])
 		scene.addRow(axis, Uint8Array.from([0, 200, 100, 100]), 4)
 		expect(renderer.traces.at(-1)).toEqual([65, 135, 100, 100])
-		// A new axis starts the average over.
+		// A retune starts the average over (its bins are other frequencies).
 		scene.addRow({ ...axis, startHz: 2e8 }, Uint8Array.from([7, 7, 7, 7]), 4)
 		expect(renderer.traces.at(-1)).toEqual([7, 7, 7, 7])
 	})
