@@ -12,6 +12,7 @@ import {
 	useLayoutEffect,
 	useRef,
 	useState,
+	useSyncExternalStore,
 	type ComponentType,
 	type CSSProperties,
 	type ReactNode,
@@ -24,6 +25,8 @@ import { useShell } from "./hooks.ts"
 import { DEFAULT_GEOMETRY, shellLayout, type ShellGeometry } from "./layout.ts"
 import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
+import { PaneSlot } from "./PaneSlot.tsx"
+import { DRAWER_PANES, paneOf } from "./panes.ts"
 import {
 	shellStore,
 	type Closed,
@@ -153,7 +156,19 @@ export function Shell({
 			return sameGeometry(prev, next) ? prev : next
 		})
 	}, [])
-	const L = shellLayout(geo, state.drawer)
+	// the open drawer's attached pane (src/shell/panes.ts): wanted now, attached when the layout has room for it
+	const paneDecl = paneOf(state.drawer)
+	const paneWanted = useSyncExternalStore(
+		paneDecl.subscribe,
+		paneDecl.wanted,
+		paneDecl.wanted,
+	)
+	const pane = paneDecl.pane
+	const L = shellLayout(
+		geo,
+		state.drawer,
+		pane ? { want: paneWanted, pushIn: pane.pushIn } : null,
+	)
 	useLayoutEffect(() => {
 		measure()
 		if (typeof ResizeObserver === "undefined") {
@@ -172,17 +187,57 @@ export function Shell({
 		state.view,
 		L.card !== null,
 		L.dockHidden,
+		L.pane !== null,
 	])
 
 	// a between-rows drawer shares the right side with the Receiver panel: the open panel wins (board)
 	const drawerShown =
 		state.drawer !== null && (L.full || state.panel !== "receiver")
 
+	// ---- panes: a task pane opened from elsewhere (⌘K, Shift-drag, the Tuner's scan row) opens its drawer; another
+	// drawer, or none, drops it (the drawer's × closes both)
+	useEffect(() => {
+		const offs: (() => void)[] = []
+		for (const [id, decl] of Object.entries(DRAWER_PANES) as [
+			DrawerId,
+			NonNullable<(typeof DRAWER_PANES)[DrawerId]>,
+		][]) {
+			if (!decl.task) continue
+			let was = decl.wanted()
+			offs.push(
+				decl.subscribe(() => {
+					const now = decl.wanted()
+					if (now && !was && store.getState().drawer !== id)
+						store.openDrawer(id)
+					was = now
+				}),
+				store.subscribe(() => {
+					if (store.getState().drawer !== id && decl.wanted()) decl.hide()
+				}),
+			)
+		}
+		return () => {
+			for (const off of offs) off()
+		}
+	}, [store])
+
 	// ---- keyboard: Escape closes the topmost layer; ⌘K / Ctrl+K the palette; ⌘, / Ctrl+, Settings
+	const paneShownRef = useRef<(() => void) | null>(null)
+	paneShownRef.current =
+		pane && paneWanted && (L.pane !== null || L.pushed) ? pane.hide : null
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (e.defaultPrevented) return
 			if (e.key === "Escape") {
+				// an open pane goes before its drawer (the palette and an island panel are above both)
+				const s = store.getState()
+				const hidePane = paneShownRef.current
+				if (!s.palette && !s.panel && hidePane) {
+					e.preventDefault()
+					hidePane()
+					drawerBox.current?.focus({ preventScroll: true })
+					return
+				}
 				const closed = store.escape()
 				if (closed) {
 					e.preventDefault()
@@ -212,6 +267,22 @@ export function Shell({
 			drawerBox.current?.focus({ preventScroll: true })
 		lastDrawer.current = state.drawer
 	}, [state.drawer])
+
+	// move focus into the pane when it attaches (the push-in screen lands in the drawer box)
+	const paneBox = useRef<HTMLDivElement>(null)
+	const paneOn = drawerShown && L.pane !== null && pane !== null && paneWanted
+	useEffect(() => {
+		if (paneOn) paneBox.current?.focus({ preventScroll: true })
+	}, [paneOn])
+	const pushedOn = drawerShown && L.pushed && pane !== null
+	useEffect(() => {
+		if (pushedOn) drawerBox.current?.focus({ preventScroll: true })
+	}, [pushedOn])
+
+	const hidePane = useCallback(() => {
+		pane?.hide()
+		drawerBox.current?.focus({ preventScroll: true })
+	}, [pane])
 
 	const closeDrawer = useCallback(() => {
 		const id = store.getState().drawer
@@ -245,6 +316,7 @@ export function Shell({
 	)
 
 	const DrawerContent = state.drawer ? DRAWER_CONTENT[state.drawer] : null
+	const PaneContent = pane?.Content ?? null
 	const d = L.drawer
 	return (
 		<div ref={root} className="wk-shell" data-view={state.view}>
@@ -300,6 +372,7 @@ export function Shell({
 					data-wk-region=""
 					className="wk-shell-drawer"
 					data-full={d.full || undefined}
+					data-pane={paneOn || pushedOn || undefined}
 					style={{
 						top: d.top,
 						bottom: d.bottom,
@@ -322,9 +395,29 @@ export function Shell({
 							</Drawer>
 						}
 					>
-						<DrawerContent onClose={closeDrawer} />
+						{pushedOn && PaneContent ? (
+							<PaneContent mode="screen" onHide={hidePane} />
+						) : (
+							<DrawerContent onClose={closeDrawer} />
+						)}
 					</Suspense>
 				</div>
+			)}
+
+			{paneOn && L.pane && pane && PaneContent && (
+				<PaneSlot ref={paneBox} rect={L.pane} label={pane.label}>
+					<Suspense
+						fallback={
+							<span
+								className="wk-spinner wk-shell-pane-wait"
+								role="status"
+								aria-label="Loading"
+							/>
+						}
+					>
+						<PaneContent mode="pane" onHide={hidePane} />
+					</Suspense>
+				</PaneSlot>
 			)}
 
 			{state.palette && (

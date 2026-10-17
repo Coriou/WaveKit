@@ -59,4 +59,62 @@ describe("shellLayout", () => {
 		expect(L.rxTop).toBe(G + 56 + 8)
 		expect(L.dockHidden).toBe(true)
 	})
+
+	describe("drawer + attached pane", () => {
+		const want = { want: true, pushIn: true }
+
+		it("attaches left of a full-height drawer, between the island rows, one px over its border", () => {
+			const L = shellLayout(at(1440), "scanner", want)
+			expect(L.full).toBe(true)
+			expect(L.pushed).toBe(false)
+			expect(L.pane).toEqual({
+				top: G + 56 + G,
+				bottom: G + 64 + G,
+				left: G,
+				right: G + 420 - 1,
+				width: 1440 - G - (G + 420 - 1),
+			})
+			// the tuned card hides while the pane covers the plot
+			expect(L.card).toBeNull()
+		})
+
+		it("attaches from about 1164 px with the default islands", () => {
+			expect(shellLayout(at(1164), "scanner", want).pane).not.toBeNull()
+			const narrow = shellLayout(at(1163), "scanner", want)
+			expect(narrow.pane).toBeNull()
+			expect(narrow.pushed).toBe(true)
+		})
+
+		it("needs more room while the Tuner is wider (a scan row): about 1196 px", () => {
+			const scan = { tuner: { w: 472, h: 92 } }
+			expect(shellLayout(at(1195, 900, scan), "scanner", want).pane).toBeNull()
+			const L = shellLayout(at(1196, 900, scan), "scanner", want)
+			expect(L.pane?.top).toBe(G + 92 + G)
+		})
+
+		it("without room the plan is pushed into a full-width drawer between the rows", () => {
+			const L = shellLayout(at(1150), "scanner", want)
+			expect(L.pushed).toBe(true)
+			expect(L.pane).toBeNull()
+			expect(L.drawer).toMatchObject({
+				width: null,
+				top: L.topRow,
+				full: false,
+			})
+			expect(L.card).toBeNull()
+		})
+
+		it("a pane that does not push in shows nothing when there is no room", () => {
+			const L = shellLayout(at(1000), "activity", { want: true, pushIn: false })
+			expect(L.pane).toBeNull()
+			expect(L.pushed).toBe(false)
+		})
+
+		it("a pane not wanted changes nothing", () => {
+			const a = shellLayout(at(1440), "scanner", { want: false, pushIn: true })
+			const b = shellLayout(at(1440), "scanner")
+			expect(a).toEqual({ ...b })
+			expect(a.pane).toBeNull()
+		})
+	})
 })

@@ -60,6 +60,24 @@ export interface DrawerRect {
 	readonly full: boolean
 }
 
+/** The attached pane: left of a full-height drawer, between the top island row and the bottom row. */
+export interface PaneRect {
+	readonly top: number
+	readonly bottom: number
+	readonly left: number
+	/** Distance from the right edge: the pane's right edge sits 1 px over the drawer's border (one outline). */
+	readonly right: number
+	readonly width: number
+}
+
+/** What the open drawer asks of its attached pane (docs/web/DESIGN.md, "drawer + attached pane"). */
+export interface PaneRequest {
+	/** The drawer wants its pane shown now. */
+	readonly want: boolean
+	/** Without room for the pane, its content is pushed into a full-width drawer as a screen. */
+	readonly pushIn: boolean
+}
+
 export interface ShellLayout {
 	/** The drawer covers the full height on the right; the Receiver and dock step aside. */
 	readonly full: boolean
@@ -76,11 +94,16 @@ export interface ShellLayout {
 	readonly card: { readonly x: number; readonly y: number } | null
 	/** Bottom of the top row (where between-rows drawers start). */
 	readonly topRow: number
+	/** The drawer's attached pane, or null (not wanted, or no room for it). */
+	readonly pane: PaneRect | null
+	/** The pane is wanted but has no room: the drawer is full width and shows the pane's content as a screen. */
+	readonly pushed: boolean
 }
 
 export function shellLayout(
 	g: ShellGeometry,
 	drawerId: DrawerId | null,
+	paneRequest: PaneRequest | null = null,
 ): ShellLayout {
 	const { W, H } = g
 	const stacked = G + g.tuner.w + G + g.rx.w + G > W
@@ -101,10 +124,25 @@ export function shellLayout(
 	const bottomRow =
 		G + (dockHidden ? g.listen.h : Math.max(g.listen.h, DOCK_H)) + G
 
+	// the pane attaches only beside a full-height drawer (the Receiver then clears the Tuner: about 1164 px with the
+	// default islands, more while the Tuner shows a scan row); otherwise a push-in pane takes the full-width drawer
+	const paneWanted = drawerId !== null && paneRequest?.want === true
+	const pane: PaneRect | null =
+		paneWanted && full
+			? {
+					top: topRow,
+					bottom: bottomRow,
+					left: G,
+					right: G + dW - 1,
+					width: W - G - (G + dW - 1),
+				}
+			: null
+	const pushed = paneWanted && !full && paneRequest.pushIn
+
 	let drawer: DrawerRect | null = null
 	if (drawerId) {
 		if (full) drawer = { top: G, bottom: G, right: G, width: dW, full: true }
-		else if (W < FULL_MIN_VW)
+		else if (W < FULL_MIN_VW || pushed)
 			drawer = {
 				top: topRow,
 				bottom: bottomRow,
@@ -131,8 +169,13 @@ export function shellLayout(
 	// the card's home is one gutter above Listen's live top edge; it hides on narrow windows (board: <= 1100 px) and
 	// when an open panel leaves no room under the top row
 	const cardY = H - G - g.listenLiveH - G - g.cardH
+	// the tuned card hides while a pane covers the plot (attached or pushed in)
 	const card =
-		W > FULL_MIN_VW && cardY >= topRow && G + CARD_W <= freeW - G
+		W > FULL_MIN_VW &&
+		cardY >= topRow &&
+		G + CARD_W <= freeW - G &&
+		pane === null &&
+		!pushed
 			? { x: G, y: cardY }
 			: null
 
@@ -146,5 +189,7 @@ export function shellLayout(
 		compact,
 		card,
 		topRow,
+		pane,
+		pushed,
 	}
 }

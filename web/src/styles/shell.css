@@ -301,6 +301,43 @@
 		animation: wk-rise var(--wk-dur-4) var(--wk-ease-out);
 	}
 
+	/* drawers are solid (design): the slot gives every drawer the opaque surface and no blur, so the spectrum never
+	   shows through a list, at any width. An attached pane (src/shell/PaneSlot.tsx) shares that surface and one
+	   outline; its right edge overlaps the drawer's border by 1 px. */
+	.wk-shell-drawer {
+		--wk-glass-strong: var(--wk-surface);
+	}
+	.wk-shell-drawer > .wk-drawer,
+	.wk-shell-drawer > * {
+		backdrop-filter: none;
+	}
+	.wk-shell-paneslot {
+		position: absolute;
+		z-index: 4;
+		animation: wk-rise var(--wk-dur-4) var(--wk-ease-out);
+		transition: right var(--wk-dur-4) var(--wk-ease-inout);
+	}
+	.wk-shell-paneslot:focus {
+		outline: none;
+	}
+	.wk-shell-pane-bg {
+		position: absolute;
+		inset: 0;
+		box-sizing: border-box;
+		/* no shadow cast onto the drawer */
+		clip-path: inset(-96px 0 -96px -96px);
+	}
+	.wk-shell-pane-body {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		border-radius: var(--wk-r-5) 0 0 var(--wk-r-5);
+		overflow: hidden;
+	}
+	.wk-shell-pane-wait {
+		place-self: center;
+	}
+
 	/* palette: a solid sheet over the Palette board's scrim */
 	[data-wk-theme] {
 		--wka-scrim: color-mix(in srgb, var(--wk-plot-bg) 28%, transparent);
