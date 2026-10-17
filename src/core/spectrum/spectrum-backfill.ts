@@ -9,14 +9,12 @@ import type { SpectrumFrameEventData } from "@wavekit/api-types"
 import type { EngineEpoch } from "./spectrum-engine.js"
 import type { BlockSummary } from "./types.js"
 import { BACKFILL_LIMITS } from "./subscribe-options.js"
-import {
-	applyAverage,
-	averagingOf,
-	type SpectrumProfile,
-} from "./spectrum-averaging.js"
+import type { TuningTrust } from "./types.js"
+import { averagingOf, type SpectrumProfile } from "./spectrum-averaging.js"
 import {
 	BIN_ENCODING,
 	accumulateHold,
+	averageTrusted,
 	encodeBins,
 	reduceMaxHold,
 	summariesPerFrame,
@@ -112,6 +110,8 @@ interface BuiltRun {
 	raw: Float32Array
 	factor: number
 	newest: SummaryStamp
+	/** WG9 R3: the worst label of the run's summaries. */
+	trust: TuningTrust
 }
 
 function holdRun(
@@ -125,12 +125,15 @@ function holdRun(
 			reduceMaxHold(stamp.summary.bins, profile.bins),
 			stamp.summary.epoch,
 			stamp.summary.stream,
+			stamp.epoch.tuningTrust,
 		)
 	}
+	const newest = run[run.length - 1]!
 	return {
 		raw: hold?.bins ?? new Float32Array(),
 		factor: hold?.factor ?? 1,
-		newest: run[run.length - 1]!,
+		newest,
+		trust: hold?.trust ?? newest.epoch.tuningTrust,
 	}
 }
 
@@ -141,6 +144,7 @@ function frameFromRun(
 	sampleRateHz: number,
 	fftSize: number,
 	bins: ArrayLike<number>,
+	trust: TuningTrust,
 	backfill: boolean,
 ): SpectrumFrameEventData {
 	const summary = run.newest.summary
@@ -148,7 +152,7 @@ function frameFromRun(
 		sourceId,
 		profile: profile.key,
 		epoch: summary.epoch,
-		tuningTrust: run.newest.epoch.tuningTrust,
+		tuningTrust: trust,
 		centerHz: summary.centreHz,
 		sampleRateHz: summary.sampleRateHz,
 		binHz: summary.binHz * run.factor,
@@ -177,8 +181,16 @@ function framesFromRuns(
 	const built = runs.map(run => holdRun(run, profile))
 	const n = averagingOf(profile)
 	let avg: Float32Array | null = null
+	let avgTrust: TuningTrust | undefined
 	return built.map(run => {
-		const bins = n > 1 ? (avg = applyAverage(avg, run.raw, n)) : run.raw
+		let bins = run.raw
+		let trust = run.trust
+		// WG9 R3: the live rule; an unverified average restarts at the first trusted run.
+		if (n > 1) {
+			const next = averageTrusted(avg, avgTrust, run.raw, run.trust, n)
+			avg = bins = next.avg
+			avgTrust = trust = next.trust
+		}
 		return frameFromRun(
 			run,
 			profile,
@@ -186,6 +198,7 @@ function framesFromRuns(
 			sampleRateHz,
 			fftSize,
 			bins,
+			trust,
 			backfill,
 		)
 	})

@@ -326,3 +326,120 @@ describe("SpectrumEngine operator retune settle (WG9 req 3.4)", () => {
 		await engine.stop()
 	})
 })
+
+describe("SpectrumEngine operator retune window (WG9 R3 minors)", () => {
+	async function retuned() {
+		const made = makeEngine(1000)
+		const { engine, sources, fanout, tuner, hosts } = made
+		await engine.start()
+		fanout.write(Buffer.alloc(4000, 7))
+		await settle()
+		tuner.emit("command-sent", "rtl", "set-frequency", 446_300_000, "rest")
+		sources.setCaps("rtl", { centerFreq: 446_300_000 })
+		await settle()
+		const p = hosts[0]!.pendings()[0]!
+		const cfg = engine.config()!
+		const block = blockSamplesOf(cfg.integrationMs, FS, cfg.fftSize)
+		const verifiedFrom = p.commandSample + p.bufferedSamples + FS
+		const start = p.commandSample + p.bufferedSamples + p.settleSamples
+		return { ...made, p, block, verifiedFrom, start }
+	}
+	const track = (epoch: number, startSample: number): TrackSnapshot =>
+		({ epoch, startSample, tuningTrust: "commanded" }) as TrackSnapshot
+
+	it("closes the status window on a track or transient that starts at or past the network settle", async () => {
+		for (const kind of ["track-open", "transient"] as const) {
+			const { engine, hosts, p, verifiedFrom, start } = await retuned()
+			hosts[0]!.handlers.events([
+				{
+					kind: "epoch-started",
+					epoch: p.epoch,
+					startSample: start,
+					settleMode: "timer",
+				},
+				{ kind: "track-open", track: track(p.epoch, verifiedFrom - 1) },
+			])
+			// a track still inside the window keeps status unverified
+			expect(engine.currentEpoch().tuningTrust).toBe("unverified")
+			hosts[0]!.handlers.events([
+				kind === "track-open"
+					? { kind, track: track(p.epoch, verifiedFrom) }
+					: {
+							kind,
+							centreHz: 446_300_000,
+							epoch: p.epoch,
+							sample: verifiedFrom,
+						},
+			])
+			// the pipeline emits tracks before the block summary: status does not lag them
+			expect(engine.currentEpoch().tuningTrust).toBe("commanded")
+			await engine.stop()
+		}
+	})
+
+	it("keeps a track opened before the settle unverified across a commanded block, its update and its close", async () => {
+		const { engine, hosts, p, block, verifiedFrom, start } = await retuned()
+		const seen: { kind: string; trust: string }[] = []
+		engine.on("pipeline", (ev: PipelineEvent, ep: EngineEpoch) => {
+			if (ev.kind !== "epoch-started")
+				seen.push({ kind: ev.kind, trust: ep.tuningTrust })
+		})
+		const early = track(p.epoch, start)
+		hosts[0]!.handlers.events([
+			{
+				kind: "epoch-started",
+				epoch: p.epoch,
+				startSample: start,
+				settleMode: "timer",
+			},
+			{ kind: "track-open", track: early },
+			{
+				kind: "block-summary",
+				summary: summary(p.epoch, verifiedFrom + block),
+			},
+			{ kind: "track-update", track: early },
+			{ kind: "track-close", track: early, endReason: "quiet" },
+		])
+		expect(seen).toEqual([
+			{ kind: "track-open", trust: "unverified" },
+			{ kind: "block-summary", trust: "commanded" },
+			{ kind: "track-update", trust: "unverified" },
+			{ kind: "track-close", trust: "unverified" },
+		])
+		expect(engine.currentEpoch().tuningTrust).toBe("commanded")
+		await engine.stop()
+	})
+
+	it("prunes the network-settle entry of an older stream's pending epoch at the new stream's start", async () => {
+		const { engine, sources, fanout, hosts, p } = await retuned()
+		const verifiedFrom = (): Map<number, number> =>
+			(engine as unknown as { verifiedFrom: Map<number, number> }).verifiedFrom
+		// the first stream's own start, then the retune is pending
+		hosts[0]!.handlers.events([
+			{
+				kind: "epoch-started",
+				epoch: p.epoch - 1,
+				startSample: 0,
+				settleMode: "none",
+			},
+		])
+		expect(verifiedFrom().has(p.epoch)).toBe(true)
+		// the source reconnects before the retune's epoch started
+		sources.emit("disconnected", "rtl")
+		sources.emit("payload-started", "rtl")
+		fanout.write(Buffer.alloc(4000, 7))
+		await settle()
+		const opened = hosts[0]!.inputs.find(i => i.kind === "new-stream")
+		expect(opened).toBeDefined()
+		hosts[0]!.handlers.events([
+			{
+				kind: "epoch-started",
+				epoch: p.epoch + 1,
+				startSample: 0,
+				settleMode: "none",
+			},
+		])
+		expect(verifiedFrom().size).toBe(0)
+		await engine.stop()
+	})
+})
