@@ -35,6 +35,8 @@ import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
+import { recordingKeepKeyOf } from "./contract.js"
+import type { RecordingProtection } from "./contract.js"
 import { compareEntries, paginate, parseInventoryQuery } from "./cursor.js"
 import type { InventoryEntry } from "./cursor.js"
 import {
@@ -126,6 +128,22 @@ export interface RecordingInventoryOptions {
 	now?: () => number
 	logger: Logger
 	fs?: RecordingFsPort
+	/**
+	 * WG9: the deletion decision. When given, every listed item carries `kept` (read at list
+	 * time, not cached); when absent the items are exactly the WG8 items (no `kept` property).
+	 */
+	protection?: RecordingProtection
+}
+
+/** WG9: an opened, verified recording (the caller owns and closes `handle`). */
+export interface OpenedRecording {
+	handle: RecordingFileHandle
+	/** The file name (a basename). */
+	name: string
+	/** The absolute path that was opened (never logged nor sent). */
+	path: string
+	/** The verified fstat of the handle (dev, ino, size, mtime). */
+	stat: RecordingStats
 }
 
 export interface RecordingInventory {
@@ -138,9 +156,13 @@ export interface RecordingInventory {
 	 * An open, verified handle on an eligible recording and its file name, or null. The caller
 	 * owns (closes) the handle. Never throws.
 	 */
-	open(
-		id: string,
-	): Promise<{ handle: RecordingFileHandle; name: string } | null>
+	open(id: string): Promise<OpenedRecording | null>
+	/**
+	 * WG9: drops the listing cache (after a delete, Keep or unkeep). Always present on the
+	 * inventory createRecordingInventory returns; optional in the type so WG8 test doubles of
+	 * the interface still type-check.
+	 */
+	invalidate?(): void
 }
 
 export class RecordingInventoryError extends WaveKitError {
@@ -300,6 +322,9 @@ export function createRecordingInventory(
 	const headerCache = new Map<string, number | null>()
 	let snapshot: Snapshot | null = null
 	let inFlight: Promise<Snapshot> | null = null
+	/** Bumped by invalidate(): a scan started before it neither serves nor fills the cache. */
+	let generation = 0
+	let inFlightGeneration = 0
 
 	const lstat = (p: string): Promise<RecordingStats> =>
 		sem.run(() => fs.lstat(p))
@@ -313,6 +338,61 @@ export function createRecordingInventory(
 			if (isSkip(err)) return false
 			throw err
 		}
+	}
+
+	/**
+	 * WG9 R2: a configured root that is itself a symlink, resolved by realpath once (operator
+	 * config is trusted), as the deleters resolve it: its real directory and identity. Null when
+	 * the root was missing, a real directory or a dangling link at first sight (today's
+	 * behaviour). Memoised per configured path for the inventory's lifetime.
+	 */
+	const rootPins = new Map<
+		string,
+		Promise<{ real: string; dev: number; ino: number } | null>
+	>()
+	function pinRoot(
+		abs: string,
+	): Promise<{ real: string; dev: number; ino: number } | null> {
+		let pin = rootPins.get(abs)
+		if (pin === undefined) {
+			pin = (async () => {
+				try {
+					if (!(await lstat(abs)).isSymbolicLink()) return null
+					const real = await sem.run(() => fs.realpath(abs))
+					const st = await lstat(real)
+					if (st.isSymbolicLink() || !st.isDirectory()) return null
+					return { real, dev: st.dev, ino: st.ino }
+				} catch {
+					return null
+				}
+			})()
+			rootPins.set(abs, pin)
+		}
+		return pin
+	}
+
+	/**
+	 * The base to list a configured root from: the root itself when it is not pinned, the
+	 * pinned real directory while its identity holds, or null (counted as a source error) once
+	 * that identity changed, so nothing under it is listed or resolved (fail closed).
+	 */
+	async function rootBase(abs: string, counts: Counts): Promise<string | null> {
+		const pin = await pinRoot(abs)
+		if (pin === null) return abs
+		try {
+			const st = await lstat(pin.real)
+			if (
+				!st.isSymbolicLink() &&
+				st.isDirectory() &&
+				st.dev === pin.dev &&
+				st.ino === pin.ino
+			)
+				return pin.real
+		} catch {
+			// Gone: changed.
+		}
+		counts.sourceErrors++
+		return null
 	}
 
 	/** Current dsd-fme sources: configured order, real directories, first realpath owner wins. */
@@ -335,9 +415,9 @@ export function createRecordingInventory(
 				counts.sourceErrors++
 				continue
 			}
-			const dir = path.resolve(entry.dir)
 			try {
-				if (!(await isRealDir(dir))) continue
+				const dir = await rootBase(path.resolve(entry.dir), counts)
+				if (dir === null || !(await isRealDir(dir))) continue
 				const real = await sem.run(() => fs.realpath(dir))
 				if (seen.has(real)) continue
 				seen.add(real)
@@ -349,7 +429,15 @@ export function createRecordingInventory(
 		return out
 	}
 
-	function scannerRoot(counts: Counts): string | null {
+	/** `<scanner storage>/recordings`, under the pinned real storage root when it is a symlink. */
+	async function scannerRoot(counts: Counts): Promise<string | null> {
+		const root = scannerRootConfigured(counts)
+		if (root === null) return null
+		const base = await rootBase(path.dirname(root), counts)
+		return base === null ? null : path.join(base, path.basename(root))
+	}
+
+	function scannerRootConfigured(counts: Counts): string | null {
 		try {
 			const root = options.scannerRecordingsDir()
 			if (root === null) return null
@@ -603,7 +691,7 @@ export function createRecordingInventory(
 			}
 		}
 
-		const root = scannerRoot(counts)
+		const root = await scannerRoot(counts)
 		const memo = new Map<string, number | null>()
 		if (root !== null && !truncated) {
 			let realRoot: string | null = null
@@ -730,13 +818,15 @@ export function createRecordingInventory(
 			t - snapshot.at < RECORDINGS_LIST_CACHE_MS
 		)
 			return snapshot
-		if (!inFlight) {
+		if (!inFlight || inFlightGeneration !== generation) {
 			const p = scan()
+			const gen = generation
 			inFlight = p
+			inFlightGeneration = gen
 			void p
 				.then(
 					s => {
-						snapshot = s
+						if (gen === generation) snapshot = s
 					},
 					() => undefined,
 				)
@@ -770,7 +860,7 @@ export function createRecordingInventory(
 		const name = sm?.[2]
 		if (d === undefined || name === undefined) return []
 		if (scanId(d, name) !== id) return []
-		const root = scannerRoot(newCounts())
+		const root = await scannerRoot(newCounts())
 		if (root === null || !(await isRealDir(root))) return []
 		const realRoot = await sem.run(() => fs.realpath(root))
 		const out: Location[] = []
@@ -803,21 +893,23 @@ export function createRecordingInventory(
 	}
 
 	/** Open the first eligible location of `id` and verify the opened object, or null. */
-	async function openId(
-		id: string,
-	): Promise<{ handle: RecordingFileHandle; loc: Location } | null> {
+	async function openId(id: string): Promise<{
+		handle: RecordingFileHandle
+		stat: RecordingStats
+		loc: Location
+	} | null> {
 		const at = now()
 		const loc = await firstEligible(id, at)
 		if (!loc) return null
-		const handle = await openVerified(loc, at)
-		return handle ? { handle, loc } : null
+		const opened = await openVerified(loc, at)
+		return opened ? { ...opened, loc } : null
 	}
 
 	/** Open `loc` (O_NOFOLLOW, O_NONBLOCK) and verify it; the caller owns the handle. */
 	async function openVerified(
 		loc: Location,
 		at: number,
-	): Promise<RecordingFileHandle | null> {
+	): Promise<{ handle: RecordingFileHandle; stat: RecordingStats } | null> {
 		let handle: RecordingFileHandle
 		try {
 			handle = await sem.run(() => fs.open(loc.file, OPEN_FLAGS))
@@ -827,8 +919,9 @@ export function createRecordingInventory(
 		const h = handle
 		let ok = false
 		try {
-			ok = (await verifyOpened(h, loc, at, null)) !== null
-			return ok ? h : null
+			const stat = await verifyOpened(h, loc, at, null)
+			ok = stat !== null
+			return stat !== null ? { handle: h, stat } : null
 		} catch {
 			return null
 		} finally {
@@ -843,8 +936,11 @@ export function createRecordingInventory(
 				throw new RecordingInventoryError("RECORDINGS_QUERY_INVALID")
 			const s = await current()
 			const page = paginate(s.entries, q)
+			const protection = options.protection
 			return {
-				items: page.items,
+				items: protection
+					? page.items.map(item => withKept(item, protection))
+					: page.items,
 				nextCursor: page.nextCursor,
 				scannedFiles: s.scannedFiles,
 				truncated: s.truncated,
@@ -867,12 +963,33 @@ export function createRecordingInventory(
 		async open(id) {
 			try {
 				const opened = await openId(id)
-				return opened ? { handle: opened.handle, name: opened.loc.name } : null
+				return opened
+					? {
+							handle: opened.handle,
+							name: opened.loc.name,
+							path: opened.loc.file,
+							stat: opened.stat,
+						}
+					: null
 			} catch {
 				return null
 			}
 		},
+
+		invalidate() {
+			generation++
+			snapshot = null
+		},
 	}
+}
+
+/** A copy of `item` with `kept` (fail closed: an id without a key reads kept). */
+function withKept(
+	item: RecordingInventoryItem,
+	protection: RecordingProtection,
+): RecordingInventoryItem {
+	const key = recordingKeepKeyOf(item.id)
+	return { ...item, kept: key === null ? true : protection.isProtected(key) }
 }
 
 function toItem(

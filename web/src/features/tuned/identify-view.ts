@@ -133,6 +133,7 @@ const REASON: Readonly<
 	"needs-channelizer": "needs the channelizer",
 	"unsupported-format": "unsupported format",
 	"no-ambient-decoder": "no decoder running here",
+	"decoder-unavailable": "decoder could not start",
 }
 
 export function trialRow(

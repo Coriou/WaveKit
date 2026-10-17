@@ -982,8 +982,9 @@ describe("recordings inventory handle bounds and budgets", () => {
 			scannedFiles: 0,
 			truncated: true,
 		})
-		// dsd dir, root, dv and analog at most, plus one lstat per entered folder
-		expect(over.lstats).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 4)
+		// dsd dir, root, dv and analog at most, plus one lstat per entered folder, plus the
+		// storage root's one-time pin lstat (WG9 R2, once per inventory, not per scan)
+		expect(over.lstats).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 5)
 		expect(over.readdirs).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 2)
 	})
 
@@ -1243,6 +1244,149 @@ describe("recordings inventory scanner kinds", () => {
 		)
 		const opened = await inventory.open("scan:d_x~call.wav")
 		expect(opened?.name).toBe("call.wav")
+		await opened?.handle.close()
+	})
+})
+
+// ---------------------------------------------------------------------------------------------
+// WG9 lane RK: golden of today's items (captured from the frozen WG8 code), protection and
+// invalidation
+
+describe("recordings inventory WG9 kept and invalidate", () => {
+	let root = ""
+
+	afterEach(async () => {
+		if (root) await rm(root, { recursive: true, force: true })
+		root = ""
+	})
+
+	const MTIME_S = 1_792_000_000
+	const NOW = MTIME_S * 1000 + 60_000
+
+	async function setup(): Promise<{ dsd: string; scan: string }> {
+		root = await mkdtemp(path.join(tmpdir(), "wk-rec-kept-"))
+		const dsd = path.join(root, "dsd")
+		const scan = path.join(root, "scan")
+		const put = async (p: string): Promise<void> => {
+			await mkdir(path.dirname(p), { recursive: true })
+			await writeFile(p, wav(16_000))
+			await utimes(p, MTIME_S, MTIME_S)
+		}
+		await put(path.join(dsd, DSD("120000")))
+		await put(path.join(scan, "dv", "d_x", "call.wav"))
+		return { dsd, scan }
+	}
+
+	function over(
+		s: { dsd: string; scan: string },
+		extra: Partial<RecordingInventoryOptions> = {},
+	): ReturnType<typeof createRecordingInventory> {
+		return createRecordingInventory({
+			dsdFmeDirs: () => [{ decoderId: "a", dir: s.dsd }],
+			scannerRecordingsDir: () => s.scan,
+			discoveryCentreHz: () => 446_000_000,
+			now: () => NOW,
+			logger: fakeLogger().logger,
+			...extra,
+		})
+	}
+
+	const GOLDEN = [
+		{
+			id: `dsd:0~${DSD("120000")}`,
+			kind: "dsd-fme-call",
+			decoderId: "a",
+			discoveryId: null,
+			startedAtLocal: "2026-10-16T12:00:00",
+			modifiedAt: new Date(MTIME_S * 1000).toISOString(),
+			bytes: 16_044,
+			durationMs: 1000,
+			callType: "group",
+			talkgroup: "100",
+			source: "2001",
+			frequencyHz: null,
+		},
+		{
+			id: "scan:d_x~call.wav",
+			kind: "scanner-dv",
+			decoderId: null,
+			discoveryId: "d_x",
+			startedAtLocal: null,
+			modifiedAt: new Date(MTIME_S * 1000).toISOString(),
+			bytes: 16_044,
+			durationMs: 1000,
+			callType: null,
+			talkgroup: null,
+			source: null,
+			frequencyHz: 446_000_000,
+		},
+	]
+
+	it("without protection lists today's items exactly (golden, no kept property)", async () => {
+		const page = await over(await setup()).list({})
+		const items = [...page.items].sort((a, b) => a.id.localeCompare(b.id))
+		expect(items).toStrictEqual(GOLDEN)
+		for (const item of items) expect(Object.hasOwn(item, "kept")).toBe(false)
+		expect(JSON.stringify(items)).toBe(JSON.stringify(GOLDEN))
+	})
+
+	it("with protection marks each item kept from the port at list time (fail closed)", async () => {
+		const kept = new Set<string>()
+		let ready = true
+		const asked: string[] = []
+		const protection = {
+			isProtected: (k: string) => {
+				asked.push(k)
+				return !ready || kept.has(k)
+			},
+			isDsdFmeFileProtected: () => true,
+			isScannerFileProtected: () => true,
+			discoveryHoldsKept: () => true,
+		}
+		const inv = over(await setup(), { protection })
+		const keptOf = async () =>
+			Object.fromEntries((await inv.list({})).items.map(i => [i.id, i.kept]))
+		expect(await keptOf()).toEqual({
+			[GOLDEN[0]?.id ?? ""]: false,
+			[GOLDEN[1]?.id ?? ""]: false,
+		})
+		// Keys, never inventory ids or paths: the dsd index is not part of the key.
+		expect(asked.sort()).toEqual([`dsd~${DSD("120000")}`, "scan:d_x~call.wav"])
+		kept.add("scan:d_x~call.wav")
+		expect((await keptOf())["scan:d_x~call.wav"]).toBe(true)
+		ready = false
+		expect(Object.values(await keptOf())).toEqual([true, true])
+		const page = await inv.list({})
+		for (const item of page.items) {
+			const { kept: _k, ...rest } = item
+			expect(GOLDEN).toContainEqual(rest)
+		}
+	})
+
+	it("invalidate drops the 2 s listing cache, including a scan already in flight", async () => {
+		const s = await setup()
+		const inv = over(s)
+		expect((await inv.list({})).items).toHaveLength(2)
+		await rm(path.join(s.dsd, DSD("120000")))
+		expect((await inv.list({})).items).toHaveLength(2)
+		inv.invalidate?.()
+		expect((await inv.list({})).items).toHaveLength(1)
+		const inflight = inv.list({})
+		await rm(path.join(s.scan, "dv", "d_x", "call.wav"))
+		inv.invalidate?.()
+		await inflight
+		expect((await inv.list({})).items).toHaveLength(0)
+	})
+
+	it("open returns the opened path and the verified fstat additively", async () => {
+		const s = await setup()
+		const opened = await over(s).open(`dsd:0~${DSD("120000")}`)
+		expect(opened?.name).toBe(DSD("120000"))
+		expect(opened?.path).toBe(path.join(s.dsd, DSD("120000")))
+		const st = await lstat(path.join(s.dsd, DSD("120000")))
+		expect(opened?.stat.ino).toBe(st.ino)
+		expect(opened?.stat.dev).toBe(st.dev)
+		expect(opened?.stat.size).toBe(16_044)
 		await opened?.handle.close()
 	})
 })

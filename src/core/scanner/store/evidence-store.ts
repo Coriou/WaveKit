@@ -8,9 +8,10 @@
  * from the last 10 s and files of `keep` discoveries are never deleted. Writes stop while free disk
  * is below `minFreeDiskMb`.
  */
-import { existsSync } from "node:fs"
+import { existsSync, lstatSync, realpathSync } from "node:fs"
 import {
 	copyFile,
+	lstat,
 	mkdir,
 	readdir,
 	readFile,
@@ -20,10 +21,14 @@ import {
 	rmdir,
 	stat,
 	statfs,
+	unlink,
 } from "node:fs/promises"
 import { join, relative, resolve } from "node:path"
 import { z } from "zod"
+import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
+import type { RecordingProtection } from "../../recordings/contract.js"
 import { RECORDING_IN_PROGRESS_MS } from "../../../decoders/builtin/call-recordings.js"
+import { ScannerApiError } from "../errors.js"
 import { WaveKitError } from "../../../utils/errors.js"
 import { createComponentLogger } from "../../../utils/logger.js"
 import type { Logger } from "../../../utils/logger.js"
@@ -80,6 +85,23 @@ interface StoredFile {
 	probe: boolean
 	bytes: number
 	mtimeMs: number
+	/** WG9 req 2.5 (protection port only): each directory `collect()` walked to the file, with its lstat identity. */
+	chain?: DirIdentity[]
+}
+
+interface DirIdentity {
+	path: string
+	dev: number
+	ino: number
+}
+
+/** WG9 req 2.5: true when every directory in the chain is still the real one first listed. */
+async function chainIntact(chain: readonly DirIdentity[]): Promise<boolean> {
+	for (const d of chain) {
+		const now = await realDirectory(d.path)
+		if (now === null || now.dev !== d.dev || now.ino !== d.ino) return false
+	}
+	return true
 }
 
 const PsdFileSchema = z.object({ snrDb: z.number() }).passthrough()
@@ -135,6 +157,44 @@ async function listDir(dir: string): Promise<string[]> {
 	}
 }
 
+/**
+ * WG9 req 2.5 (protection port only): the lstat identity of a real directory, or null when
+ * the path is missing, a symlink or not a directory. Retention and guarded removal never
+ * descend through an alias, so a protection answer always names the file it unlinks.
+ */
+async function realDirectory(
+	path: string,
+): Promise<{ dev: number; ino: number } | null> {
+	try {
+		const info = await lstat(path)
+		return info.isDirectory() && !info.isSymbolicLink()
+			? { dev: info.dev, ino: info.ino }
+			: null
+	} catch (err) {
+		if (errorCode(err) === "ENOENT" || errorCode(err) === "ENOTDIR") return null
+		throw err
+	}
+}
+
+/**
+ * WG9 R2: the configured storage root when it is itself a symlink, resolved by realpath once
+ * at construction (operator config is trusted): its real directory and identity. Null when
+ * the root is missing, a real directory or a dangling link, which keeps today's behaviour.
+ */
+function pinStorageRoot(
+	abs: string,
+): { real: string; dev: number; ino: number } | null {
+	try {
+		if (!lstatSync(abs).isSymbolicLink()) return null
+		const real = realpathSync(abs)
+		const info = lstatSync(real)
+		if (info.isSymbolicLink() || !info.isDirectory()) return null
+		return { real, dev: info.dev, ino: info.ino }
+	} catch {
+		return null
+	}
+}
+
 /** `<dir>`, `<dir>/WAV`, `<dir>/wav` (as `findWavFileAsync`), deduplicated by real path; missing ones are skipped. */
 async function wavDirs(dir: string): Promise<string[]> {
 	const seen = new Set<string>()
@@ -187,6 +247,11 @@ export class EvidenceStore {
 	private readonly isDiscoveryLive: (id: string) => boolean
 	private analog: AnalogOperations | null = null
 	private readonly analogIo: AnalogOperationIo | undefined
+	/** WG9 req 2.5: the deletion decision; absent keeps today's behaviour. */
+	private readonly protection: RecordingProtection | undefined
+	private readonly keepLog: Logger
+	/** WG9 R2: the identity of a symlinked configured root's real directory; null otherwise. */
+	private readonly rootPin: { dev: number; ino: number } | null
 
 	constructor(opts: {
 		dir: string
@@ -197,14 +262,63 @@ export class EvidenceStore {
 		/** Required by production producers; standalone stores may own admission themselves. */
 		isDiscoveryLive?: (id: string) => boolean
 		analogIo?: AnalogOperationIo
+		/** WG9 req 2.5: kept recordings survive retention and block discovery removal. */
+		protection?: RecordingProtection
 	}) {
-		this.root = resolve(opts.dir)
+		// WG9 R2: a symlinked configured root is followed once; its real directory is the base,
+		// so symlinks below it stay refused and a later re-pointed link has no effect.
+		const configured = resolve(opts.dir)
+		const pin = pinStorageRoot(configured)
+		this.root = pin?.real ?? configured
+		this.rootPin = pin === null ? null : { dev: pin.dev, ino: pin.ino }
 		this.caps = { ...opts.caps }
 		this.log = createComponentLogger(opts.logger, "EvidenceStore")
+		this.keepLog = createComponentLogger(opts.logger, "RecordingKeeps")
 		this.now = opts.now
 		this.statfs = opts.statfs ?? defaultStatfs
 		this.isDiscoveryLive = opts.isDiscoveryLive ?? (() => true)
 		this.analogIo = opts.analogIo
+		this.protection = opts.protection
+	}
+
+	/**
+	 * WG9 R2 (pinned root only): true while the real root is still the directory first resolved.
+	 * A changed identity refuses every deleter (fail closed) and logs a count.
+	 */
+	private async rootIntact(): Promise<boolean> {
+		const pin = this.rootPin
+		if (pin === null) return true
+		const now = await realDirectory(this.root).catch(() => null)
+		if (now !== null && now.dev === pin.dev && now.ino === pin.ino) return true
+		this.log.warn(
+			{ rootChanged: 1 },
+			"Scanner storage root changed; deletion refused",
+		)
+		return false
+	}
+
+	/** Fail closed: a throwing port answers protected. */
+	private holdsKept(discoveryId: string): boolean {
+		if (!this.protection) return false
+		try {
+			return this.protection.discoveryHoldsKept(discoveryId) !== false
+		} catch {
+			return true
+		}
+	}
+
+	private keptFile(f: StoredFile): boolean {
+		if (!this.protection || f.category !== "recordings" || f.probe) return false
+		try {
+			return (
+				this.protection.isScannerFileProtected(
+					f.discoveryId,
+					f.path.split("/").at(-1) ?? "",
+				) !== false
+			)
+		} catch {
+			return true
+		}
 	}
 
 	configureAnalog(adapter: AnalogMetadataAdapter): void {
@@ -228,6 +342,16 @@ export class EvidenceStore {
 			}),
 			freeBytes: async () => (await this.statfs(this.root)).freeBytes,
 			...(this.analogIo ? { io: this.analogIo } : {}),
+			...(this.protection
+				? {
+						protection: this.protection,
+						keptSkipped: (count: number) =>
+							this.keepLog.info(
+								{ count },
+								"Kept scanner recordings left in place",
+							),
+					}
+				: {}),
 		})
 	}
 	get analogAuthorityReady(): boolean {
@@ -531,12 +655,34 @@ export class EvidenceStore {
 		assertDiscoveryId(discoveryId)
 		const pending = this.removals.get(discoveryId)
 		if (pending) return pending
+		// WG9 req 2.6: no cascade to kept media (fixed text; the id is not echoed).
+		if (this.holdsKept(discoveryId))
+			throw new ScannerApiError(
+				"Discovery holds kept recordings",
+				SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+				409,
+			)
 		// Fence admission synchronously and drain accepted writes/moves before removal.
 		const removal = Promise.resolve()
 			.then(async () => {
+				// WG9 R2: a pinned root whose identity changed stays pending (fail closed).
+				if (!(await this.rootIntact()))
+					throw new WaveKitError(
+						"Scanner storage root changed",
+						"SCANNER_EVIDENCE_CLEANUP_PENDING",
+					)
 				// Long analog settlement drains outside the publication queue it may itself need.
 				if (this.analog) await this.analog.deleteDiscovery(discoveryId)
 				await this.serialise(discoveryId, async () => {
+					if (!(await this.rootIntact()))
+						throw new WaveKitError(
+							"Scanner storage root changed",
+							"SCANNER_EVIDENCE_CLEANUP_PENDING",
+						)
+					if (this.protection) {
+						await this.removeGuarded(discoveryId)
+						return
+					}
 					await rm(join(this.root, "evidence", discoveryId), {
 						recursive: true,
 						force: true,
@@ -549,6 +695,7 @@ export class EvidenceStore {
 				})
 			})
 			.catch((cause: unknown) => {
+				if (cause instanceof ScannerApiError) throw cause
 				throw new WaveKitError(
 					"Scanner evidence cleanup remains pending",
 					"SCANNER_EVIDENCE_CLEANUP_PENDING",
@@ -567,9 +714,130 @@ export class EvidenceStore {
 		}
 	}
 
+	/**
+	 * WG9 req 2.6 with a protection port: each recording file is unlinked only in the same
+	 * synchronous turn as its protection answer, so a Keep that commits during the drain
+	 * survives. A protected file stops the removal and leaves the folders in place.
+	 */
+	private async removeGuarded(discoveryId: string): Promise<void> {
+		const refuse = (): never => {
+			throw new ScannerApiError(
+				"Discovery holds kept recordings",
+				SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+				409,
+			)
+		}
+		const unlinkGone = async (path: string): Promise<void> => {
+			try {
+				await unlink(path)
+			} catch (err) {
+				if (errorCode(err) !== "ENOENT") throw err
+			}
+		}
+		const pending = (): never => {
+			throw new WaveKitError(
+				"Scanner evidence cleanup remains pending",
+				"SCANNER_EVIDENCE_CLEANUP_PENDING",
+			)
+		}
+		// A missing ancestor holds nothing; a symlinked or non-directory one is never descended.
+		const safeAncestor = async (path: string): Promise<boolean> => {
+			try {
+				const info = await lstat(path)
+				return info.isDirectory() && !info.isSymbolicLink()
+			} catch (err) {
+				if (errorCode(err) === "ENOENT") return true
+				throw err
+			}
+		}
+		const recordings = join(this.root, "recordings")
+		let refused = false
+		for (const kind of RECORDING_KINDS) {
+			const kindDir = join(recordings, kind)
+			const kindSafe = async (): Promise<boolean> =>
+				(await safeAncestor(recordings)) && (await safeAncestor(kindDir))
+			if (!(await kindSafe())) {
+				refused = true
+				continue
+			}
+			const dir = join(kindDir, discoveryId)
+			let top
+			try {
+				top = await lstat(dir)
+			} catch (err) {
+				if (errorCode(err) === "ENOENT") continue
+				throw err
+			}
+			// A symlinked or non-directory discovery entry: remove the entry itself, as rm -rf did, never its target.
+			if (!top.isDirectory()) {
+				if (this.holdsKept(discoveryId)) refuse()
+				await unlinkGone(dir)
+				continue
+			}
+			// WG9 req 2.5: the identities each per-file unlink re-verifies.
+			const chain: DirIdentity[] = []
+			for (const path of [recordings, kindDir, dir]) {
+				const id = (await realDirectory(path)) ?? pending()
+				chain.push({ path, ...id })
+			}
+			if (chain[2]?.dev !== top.dev || chain[2]?.ino !== top.ino) pending()
+			let entries
+			try {
+				entries = await readdir(dir, { withFileTypes: true })
+			} catch (err) {
+				if (errorCode(err) === "ENOENT") continue
+				throw err
+			}
+			for (const entry of entries) {
+				const path = join(dir, entry.name)
+				if (entry.isDirectory()) {
+					// Retention never lists nested folders, so they hold no inventoried media; rm does not follow links.
+					// The folder and its ancestors must still be the real ones listed, or rm would recurse into an alias.
+					if (!(await chainIntact(chain))) pending()
+					await rm(path, { recursive: true, force: true })
+					continue
+				}
+				// Regular files and symlinks (unlinked as links, never followed); anything else goes with the folder.
+				if (!entry.isFile() && !entry.isSymbolicLink()) continue
+				// The folder and its ancestors must still be the real ones listed: a swap for an alias stops here.
+				if (!(await chainIntact(chain))) pending()
+				let kept = true
+				try {
+					kept =
+						this.protection?.isScannerFileProtected(discoveryId, entry.name) !==
+						false
+				} catch {
+					kept = true
+				}
+				if (kept) refuse()
+				await unlinkGone(path)
+			}
+			if (this.holdsKept(discoveryId)) refuse()
+			// The folder and its ancestors must still be the ones first lstat-verified.
+			const again = await realDirectory(dir)
+			if (
+				!(await kindSafe()) ||
+				again === null ||
+				again.dev !== top.dev ||
+				again.ino !== top.ino
+			)
+				pending()
+			// Only non-media entries remain; rm -rf on the lstat-verified folder does not follow links.
+			await rm(dir, { recursive: true, force: true })
+		}
+		if (this.holdsKept(discoveryId)) refuse()
+		if (refused || !(await safeAncestor(join(this.root, "evidence")))) pending()
+		await rm(join(this.root, "evidence", discoveryId), {
+			recursive: true,
+			force: true,
+		})
+	}
+
 	async retention(
 		keepDiscoveryIds: ReadonlySet<string>,
 	): Promise<{ deleted: string[] }> {
+		// WG9 R2: a pinned root whose identity changed deletes nothing (fail closed).
+		if (!(await this.rootIntact())) return { deleted: [] }
 		const now = this.now()
 		const files = await this.collect()
 		const isProtected = (f: StoredFile): boolean =>
@@ -577,17 +845,29 @@ export class EvidenceStore {
 			now - f.mtimeMs < RECORDING_IN_PROGRESS_MS ||
 			keepDiscoveryIds.has(f.discoveryId) ||
 			(this.analog?.protectedDiscovery(f.discoveryId) ?? false) ||
-			/^analog-[0-9a-f-]{36}\.wav$/i.test(f.path.split("/").at(-1) ?? "")
+			/^analog-[0-9a-f-]{36}\.wav$/i.test(f.path.split("/").at(-1) ?? "") ||
+			this.keptFile(f)
 		const byAge = [...files].sort(
 			(a, b) =>
 				a.mtimeMs - b.mtimeMs || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0),
 		)
 		const gone = new Set<string>()
 		const deleted: string[] = []
-		const remove = async (f: StoredFile): Promise<void> => {
-			await rm(f.path, { force: true })
+		const remove = async (f: StoredFile): Promise<boolean> => {
+			if (this.protection) {
+				// WG9 req 2.5: every listed directory is re-verified first (a swapped one skips the
+				// file); then the decision and a single-syscall unlink share one turn (rm lstats first).
+				if (!(await chainIntact(f.chain ?? []))) return false
+				if (this.keptFile(f)) return false
+				try {
+					await unlink(f.path)
+				} catch (err) {
+					if (errorCode(err) !== "ENOENT") throw err
+				}
+			} else await rm(f.path, { force: true })
 			gone.add(f.path)
 			deleted.push(f.rel)
+			return true
 		}
 		const maxAgeMs = this.caps.maxAgeDays * DAY_MS
 		for (const f of byAge)
@@ -604,8 +884,7 @@ export class EvidenceStore {
 				if (total <= capBytes) break
 				if (f.category !== category || gone.has(f.path) || isProtected(f))
 					continue
-				await remove(f)
-				total -= f.bytes
+				if (await remove(f)) total -= f.bytes
 			}
 		}
 		if (this.analog)
@@ -641,20 +920,38 @@ export class EvidenceStore {
 
 	private async collect(): Promise<StoredFile[]> {
 		const out: StoredFile[] = []
+		// WG9 req 2.5: with a protection port, never descend an aliased directory or count a symlink.
+		const guarded = this.protection !== undefined
+		// Unguarded: always descend, no identity chain. Guarded: the real directory's identity or null.
+		const descend = async (
+			dir: string,
+			chain: readonly DirIdentity[],
+		): Promise<DirIdentity[] | null> => {
+			if (!guarded) return []
+			const id = await realDirectory(dir)
+			return id === null ? null : [...chain, { path: dir, ...id }]
+		}
 		const scan = async (
 			base: string,
 			category: StoredFile["category"],
+			parent: readonly DirIdentity[],
 		): Promise<void> => {
+			const baseChain = await descend(base, parent)
+			if (baseChain === null) return
 			for (const discoveryId of await listDir(base)) {
 				const probe = category === "recordings" && PROBE_DIR.test(discoveryId)
 				if (!probe && !DISCOVERY_ID.test(discoveryId)) continue
 				const top = join(base, discoveryId)
 				// a probe's dsd-fme may write into WAV/ or wav/ (Task 17 linking); those bytes count against the cap too
-				for (const dir of probe ? await wavDirs(top) : [top])
+				const topChain = await descend(top, baseChain)
+				if (topChain === null) continue
+				for (const dir of probe ? await wavDirs(top) : [top]) {
+					const chain = dir === top ? topChain : await descend(dir, topChain)
+					if (chain === null) continue
 					for (const name of await listDir(dir)) {
 						const path = join(dir, name)
 						try {
-							const s = await stat(path)
+							const s = guarded ? await lstat(path) : await stat(path)
 							if (
 								s.isFile() &&
 								!(this.analog?.ownsArtifact(relative(this.root, path)) ?? false)
@@ -667,16 +964,24 @@ export class EvidenceStore {
 									probe,
 									bytes: s.size,
 									mtimeMs: s.mtimeMs,
+									...(guarded ? { chain } : {}),
 								})
 						} catch (err) {
 							if (errorCode(err) !== "ENOENT") throw err
 						}
 					}
+				}
 			}
 		}
-		for (const kind of RECORDING_KINDS)
-			await scan(join(this.root, "recordings", kind), "recordings")
-		await scan(join(this.root, "evidence"), "evidence")
+		const recordings = await descend(join(this.root, "recordings"), [])
+		if (recordings !== null)
+			for (const kind of RECORDING_KINDS)
+				await scan(
+					join(this.root, "recordings", kind),
+					"recordings",
+					recordings,
+				)
+		await scan(join(this.root, "evidence"), "evidence", [])
 		return out
 	}
 
@@ -685,12 +990,20 @@ export class EvidenceStore {
 			...RECORDING_KINDS.map(k => join(this.root, "recordings", k)),
 			join(this.root, "evidence"),
 		]
-		for (const base of bases)
+		const guarded = this.protection !== undefined
+		if (
+			guarded &&
+			(await realDirectory(join(this.root, "recordings"))) === null
+		)
+			bases.splice(0, RECORDING_KINDS.length)
+		for (const base of bases) {
+			if (guarded && (await realDirectory(base)) === null) continue
 			for (const discoveryId of await listDir(base)) {
 				if (!DISCOVERY_ID.test(discoveryId)) continue
 				const dir = join(base, discoveryId)
 				if ((await listDir(dir)).length === 0)
 					await rmdir(dir).catch(() => undefined)
 			}
+		}
 	}
 }

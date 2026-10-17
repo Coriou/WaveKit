@@ -828,12 +828,18 @@ export interface ScannerIdentifyTrial {
 	/** WG7: `ambient` = evidence of a decoder already running there (no probe). */
 	transport: "offset" | "channel" | "ambient" | null
 	outcome: ScannerTrialOutcome
-	/** Why an `unsupported` trial cannot run. WG7: `no-ambient-decoder` for an ambient-only protocol nobody decodes there. */
+	/**
+	 * Why an `unsupported` trial cannot run. WG7: `no-ambient-decoder` for an ambient-only protocol
+	 * nobody decodes there. WG9: `decoder-unavailable` when the trial's decoder program could not
+	 * run (missing or not executable) before it produced any output; the outcome stays
+	 * `unsupported` so clients with a closed outcome list keep parsing.
+	 */
 	reason?:
 		| "no-decoder"
 		| "needs-channelizer"
 		| "unsupported-format"
 		| "no-ambient-decoder"
+		| "decoder-unavailable"
 }
 /** WG7 req 1.2: decoder types whose running instances name ambient-only protocols. */
 export type ScannerAmbientDecoderType =

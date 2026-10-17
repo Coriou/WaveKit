@@ -401,6 +401,13 @@ export class TunerController extends EventEmitter {
 	 */
 	private ignoredRelayFields: Map<string, Set<TunerStateField>> = new Map()
 	private acceptanceSeq = 0
+	/**
+	 * WG9 req 3.2: frequency/sampleRate written on the current connection, by this core
+	 * (an API write or a reconnect replay) or by an accepted relay command. Cleared when a
+	 * new connection is synchronised, so a value proven on an earlier connection and not
+	 * re-sent on this one never backs a `commanded` or `relay` label.
+	 */
+	private connectionTuningWrites: Map<string, Set<TunerStateField>> = new Map()
 	/** Caps metadata as first registered, before any accepted command. */
 	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
 
@@ -471,6 +478,7 @@ export class TunerController extends EventEmitter {
 		this.desiredFields.delete(sourceId)
 		this.inferredFields.delete(sourceId)
 		this.ignoredRelayFields.delete(sourceId)
+		this.connectionTuningWrites.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
 		this.emit("source-removed", sourceId)
@@ -730,6 +738,7 @@ export class TunerController extends EventEmitter {
 				this.markWrittenNotAccepted(sourceId, command)
 			} else {
 				this.markAccepted(sourceId, command)
+				this.markConnectionWrite(sourceId, command)
 			}
 			// Gain commands imply manual mode on the relay path (state above).
 			if (
@@ -1123,6 +1132,8 @@ export class TunerController extends EventEmitter {
 		const state = this.tunerStates.get(sourceId)
 		if (!state) return { policy, commands: [], reset: false }
 		const desired = this.desiredFields.get(sourceId)
+		// A new connection: nothing is written on it yet (WG9 req 3.2).
+		this.connectionTuningWrites.delete(sourceId)
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
@@ -1168,6 +1179,7 @@ export class TunerController extends EventEmitter {
 			}
 			const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
 			written.push({ value, name })
+			this.markConnectionWrite(sourceId, cmd)
 			const field = stateFieldOf(cmd)
 			if (field !== undefined) this.clearIgnoredRelayField(sourceId, field)
 		}
@@ -1253,6 +1265,36 @@ export class TunerController extends EventEmitter {
 	}
 
 	// === State Accessors ===
+
+	/**
+	 * WG9 req 3.2: true only when both frequency and sample rate were written on the
+	 * current connection (an API write, a reconnect replay, or an accepted relay command).
+	 * A caps change from reconnect reconciliation with no such write is `unverified`.
+	 */
+	tuningWrittenOnConnection(sourceId: string): boolean {
+		const written = this.connectionTuningWrites.get(sourceId)
+		return (
+			written !== undefined &&
+			written.has("frequency") &&
+			written.has("sampleRate")
+		)
+	}
+
+	private markConnectionWrite(sourceId: string, cmd: number): void {
+		const field =
+			cmd === RTL_TCP_COMMANDS.SET_FREQUENCY
+				? "frequency"
+				: cmd === RTL_TCP_COMMANDS.SET_SAMPLE_RATE
+					? "sampleRate"
+					: undefined
+		if (field === undefined || !this.tunerStates.has(sourceId)) return
+		let written = this.connectionTuningWrites.get(sourceId)
+		if (!written) {
+			written = new Set()
+			this.connectionTuningWrites.set(sourceId, written)
+		}
+		written.add(field)
+	}
 
 	getState(sourceId: string): TunerState | undefined {
 		const state = this.tunerStates.get(sourceId)
@@ -1554,6 +1596,7 @@ export class TunerController extends EventEmitter {
 			this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
 			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)
 			else this.markAccepted(sourceId, cmd)
+			this.markConnectionWrite(sourceId, cmd)
 			const state = this.tunerStates.get(sourceId)
 			if (state) {
 				state.commandCount++

@@ -13,6 +13,7 @@ import type {
 } from "../types.js"
 import type { Segment } from "./segmenter.js"
 import type { PersistentFeature } from "../retune-alarm.js"
+import { frameTrust } from "../retune-settle.js"
 import type { ImageCandidate } from "./iq-image.js"
 
 /**
@@ -47,6 +48,8 @@ interface EpochInfo {
 	epoch: number
 	centreHz: number
 	tuningTrust: TuningTrust
+	/** WG9 req 3.4: a track that starts before this sample is `unverified` (null: no window). */
+	verifiedFromSample: number | null
 }
 
 const ENV_MAX_MS = 1000
@@ -151,6 +154,7 @@ export class Tracker {
 		epoch: 0,
 		centreHz: 0,
 		tuningTrust: "unverified",
+		verifiedFromSample: null,
 	}
 	private readonly updateEvery: number
 
@@ -167,9 +171,16 @@ export class Tracker {
 		epoch: number
 		centreHz: number
 		tuningTrust: TuningTrust
+		verifiedFromSample?: number
 	}): PipelineEvent[] {
 		const events = this.closeAll("retune")
-		this.epoch = { ...e }
+		this.epoch = {
+			stream: e.stream,
+			epoch: e.epoch,
+			centreHz: e.centreHz,
+			tuningTrust: e.tuningTrust,
+			verifiedFromSample: e.verifiedFromSample ?? null,
+		}
 		return events
 	}
 
@@ -563,7 +574,11 @@ export class Tracker {
 				f.duty ?? t.blocks / Math.max(1, t.lastOnBlock - t.openedAtBlock + 1),
 			spectralShape: spectralShape(mean, a, e, binHz),
 			flags: { ...t.flags },
-			tuningTrust: t.epoch.tuningTrust,
+			tuningTrust: frameTrust(
+				t.epoch.tuningTrust,
+				t.startSample,
+				t.epoch.verifiedFromSample,
+			),
 		}
 		if (f.acf30 !== undefined) snap.acf30 = f.acf30
 		if (f.acf60 !== undefined) snap.acf60 = f.acf60

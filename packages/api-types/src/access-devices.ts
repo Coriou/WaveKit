@@ -24,11 +24,15 @@ const clockSchema = z.number().int().nonnegative().safe()
 const deviceIdSchema = z
 	.string()
 	.regex(/^device_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/)
-/** Trimmed, 1–64 characters, at most 128 bytes, no C0/C1 controls or bidi overrides. */
+/**
+ * Trimmed, 1–64 characters, at most 128 bytes, well-formed UTF-16 (no lone surrogates,
+ * which TextEncoder would re-spell as U+FFFD), no C0/C1 controls or bidi overrides.
+ */
 export const accessDeviceNameSchema = z
 	.string()
 	.refine(
 		value =>
+			value.isWellFormed() &&
 			value === value.trim() &&
 			value.length >= 1 &&
 			[...value].length <= ACCESS_DEVICES_LIMITS.nameMaxLength &&

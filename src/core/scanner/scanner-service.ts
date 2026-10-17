@@ -44,7 +44,9 @@ import type {
 import {
 	SCANNER_AMBIENT_PROTOCOLS,
 	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
+	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 } from "@wavekit/api-types"
+import type { RecordingProtection } from "../recordings/contract.js"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -224,6 +226,8 @@ import type { AnalogCut } from "./store/analog-operations.js"
 
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
+	/** WG9 req 2.5-2.6: the recording deletion decision; absent keeps today's behaviour. */
+	readonly recordingProtection?: RecordingProtection
 	readonly construction?: ScannerLifecycleOwner
 	readonly channels?: ChannelProvider | null
 	readonly channelUsableFraction?: number
@@ -626,6 +630,13 @@ export class ScannerService extends EventEmitter {
 				newId: () => ulid(this.now()),
 				minSurfaceBlocks: deps.settings.detection.minSurfaceBlocks,
 				rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
+				logger: this.log,
+				...(deps.recordingProtection
+					? {
+							discoveryHoldsKept: (id: string) =>
+								deps.recordingProtection?.discoveryHoldsKept(id) ?? true,
+						}
+					: {}),
 			})
 			this.evidence = new EvidenceStore({
 				dir: this.storageDir,
@@ -633,6 +644,9 @@ export class ScannerService extends EventEmitter {
 				logger: deps.logger,
 				now: this.now,
 				isDiscoveryLive: id => this.store.get(id) !== undefined,
+				...(deps.recordingProtection
+					? { protection: deps.recordingProtection }
+					: {}),
 			})
 			this.evidence.configureAnalog({
 				authorityHealthy: () =>
@@ -1773,12 +1787,21 @@ export class ScannerService extends EventEmitter {
 		if (!discovery) {
 			try {
 				if (!(await this.evidence.hasAnalogCleanup(id))) return false
-				await this.evidence.removeDiscovery(id)
-				return true
 			} catch {
 				throw this.recordingCleanupPending()
 			}
+			this.refuseIfHoldsKept(id)
+			try {
+				await this.evidence.removeDiscovery(id)
+				return true
+			} catch (err: unknown) {
+				// The per-file deletion decision refused (a Keep committed after the pre-check).
+				if (err instanceof ScannerApiError) throw err
+				throw this.recordingCleanupPending()
+			}
 		}
+		// WG9 req 2.6: refuse before any mutation; no cascade to kept media.
+		this.refuseIfHoldsKept(id)
 		// Fence producer intake before the deletion mutation can notify reentrant readers.
 		for (const owner of this.channelRecordingOwners.values()) {
 			if (this.store.discoveryIdOf(owner.observationId) === id) {
@@ -4387,6 +4410,24 @@ export class ScannerService extends EventEmitter {
 		} finally {
 			if (registered !== null) this.recordingAppends.delete(registered)
 		}
+	}
+
+	/** Fail closed: a throwing port refuses. Fixed text; the id is not echoed. */
+	private refuseIfHoldsKept(id: string): void {
+		const port = this.deps.recordingProtection
+		if (!port) return
+		let holds = true
+		try {
+			holds = port.discoveryHoldsKept(id) !== false
+		} catch {
+			holds = true
+		}
+		if (holds)
+			throw new ScannerApiError(
+				"Discovery holds kept recordings",
+				SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+				409,
+			)
 	}
 
 	private recordingCleanupPending(): ScannerApiError {

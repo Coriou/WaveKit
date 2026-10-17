@@ -8,6 +8,7 @@ import type {
 	TunerCommandOrigin,
 	TunerControlMode,
 	TunerState,
+	TunerStateField,
 } from "@wavekit/api-types"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DigitalVoiceService } from "../digital-voice.js"
@@ -20,6 +21,7 @@ import { gainKeyOf, type EpochClock } from "../spectrum/spectrum-engine.js"
 import type { LeaseTunerFields, PersistedLease } from "./store/persistence.js"
 import type { Impact, NormalisedJobSpec, ScannerSettings } from "./types.js"
 import type { PendingEpoch } from "../spectrum/types.js"
+import { tuningTrustOf } from "../tuning-trust.js"
 import { ConstructorListenerRegistration } from "./channel/consumer-lifecycle.js"
 
 export type TunerFieldValues = LeaseTunerFields
@@ -68,7 +70,32 @@ export type ArbiterTuner = Pick<
 	| "setTestMode"
 	| "on"
 	| "off"
->
+> &
+	// WG9 req 3.1/3.2: present on the real controller; a double without it skips the check.
+	Partial<Pick<TunerController, "tuningWrittenOnConnection">>
+
+/**
+ * WG9 req 3.1: a hop's epoch trust by the shared fail-closed rule. The hop itself commands the
+ * frequency (after the epoch is posted, in the same bracket), so only a frequency entry is
+ * exempted; a malformed list stays as it is and answers `unverified`.
+ */
+function hopTrust(state: TunerState): PendingEpoch["tuningTrust"] {
+	const exempt = (list: unknown): unknown =>
+		Array.isArray(list)
+			? (list as unknown[]).filter(f => f !== "frequency")
+			: list
+	const unknownFields = exempt(state.unknownFields)
+	const declaredOnlyFields = exempt(state.declaredOnlyFields)
+	return tuningTrustOf({
+		controlMode: state.controlMode,
+		...(unknownFields !== undefined
+			? { unknownFields: unknownFields as TunerStateField[] }
+			: {}),
+		...(declaredOnlyFields !== undefined
+			? { declaredOnlyFields: declaredOnlyFields as TunerStateField[] }
+			: {}),
+	})
+}
 
 export interface ArbiterDeps {
 	tuner: ArbiterTuner
@@ -388,18 +415,29 @@ export class TunerArbiter extends EventEmitter {
 		const opts: TunerWriteOptions = { origin: "scanner" }
 		let state = this.requireState(sourceId)
 		let rateChanged = false
+		// WG9 req 3.1: the hop commands the rate too whenever it is unproven: declared only, or
+		// not written on this connection (a job without its own rate re-sends the declared one).
+		// An unknown rate is a placeholder, so without a job rate it is never written (unverified).
+		const rateUnknown = (state.unknownFields ?? []).includes("sampleRate")
+		const rateUnproven =
+			rateUnknown ||
+			(state.declaredOnlyFields ?? []).includes("sampleRate") ||
+			this.deps.tuner.tuningWrittenOnConnection?.(sourceId) === false
+		const rateTarget =
+			target.sampleRateHz ??
+			(rateUnproven && !rateUnknown ? state.sampleRate : null)
 		if (
-			target.sampleRateHz !== null &&
-			(target.sampleRateHz !== state.sampleRate ||
-				(state.unknownFields ?? []).includes("sampleRate"))
+			rateTarget !== null &&
+			(rateTarget !== state.sampleRate || rateUnproven)
 		) {
+			const rateBefore = rateUnknown ? null : state.sampleRate
 			await this.markChanged(lease, ["sampleRate"])
 			this.assertHeld(lease)
 			guard()
 			clock.suppressExternal(true)
 			try {
 				writesStarted = true
-				await this.deps.tuner.setSampleRate(sourceId, target.sampleRateHz, opts)
+				await this.deps.tuner.setSampleRate(sourceId, rateTarget, opts)
 			} catch (err) {
 				throw new WaveKitError(
 					`Sample rate write failed: ${toError(err).message}`,
@@ -411,7 +449,8 @@ export class TunerArbiter extends EventEmitter {
 			}
 			this.assertHeld(lease)
 			state = this.requireState(sourceId)
-			rateChanged = true
+			// Re-sending the same rate starts no new stream, so the hop keeps its markers.
+			rateChanged = rateBefore !== rateTarget
 		}
 		const fs = state.sampleRate
 		// unknownFields values are placeholders (controller: gainMode "agc", gain 0), never a reason to skip a write.
@@ -454,7 +493,7 @@ export class TunerArbiter extends EventEmitter {
 				target.gainTenthsDb !== null
 					? `m:${target.gainTenthsDb}`
 					: gainKeyOf(state),
-			tuningTrust: "commanded",
+			tuningTrust: hopTrust(state),
 			centreChanged: target.centreHz !== clock.currentEpoch().centreHz,
 		}
 		clock.suppressExternal(true)

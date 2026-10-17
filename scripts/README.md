@@ -32,6 +32,27 @@ Syncs the design canvas Kit board with the UI kit source
 node scripts/web-canvas-kit.mjs docs/web/canvas/Kit.dc.html [--check]
 ```
 
+### `bench/zoom-workload.ts`
+
+Zoom sustained workload benchmark (measurement only, web-gaps-9 §4). It runs a
+separate long FFT over contiguous seeded CU8 for one to eight viewed slices, on
+top of a 2048-point detector proxy, fed in real-time paced 50 ms chunks. Each
+cell is checked against the viewed-slice-spectrum budgets (incremental core
+0.10 per source and 0.20 total, event-loop p99 increase 2 ms, no missed 250 ms
+deadlines, bounded RSS). Output: `samples.jsonl`, `summary.json`, `meta.json`
+under `--out` (default `output/bench/zoom-<ISO>/`) and a table on stdout.
+
+**Usage:**
+
+```bash
+node scripts/bench/build-zoom-workload.mjs   # bundles to output/bench/zoom-workload.mjs
+node output/bench/zoom-workload.mjs --smoke
+node output/bench/zoom-workload.mjs --fs 2048000 --fft 8192..262144 --rate 5,10 --slices 1,2,4 --duration 60
+```
+
+Other flags: `--variant fft,ddc` (shift and decimate before the FFT),
+`--no-detector`, `--span-hz`, `--gap`, `--seed`.
+
 ### `demod-test.sh`
 
 A shell script to test the manual demodulation pipeline on recorded IQ files. Useful for replicating the production `csdr` pipeline and verifying decodability with `multimon-ng`.

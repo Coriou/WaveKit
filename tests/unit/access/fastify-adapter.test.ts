@@ -484,6 +484,8 @@ describe("unmounted root Fastify access hooks", () => {
 				const result = await env.app.inject(request)
 				expect(result.statusCode).toBe(503)
 				expect(result.headers["access-control-allow-origin"]).toBe(origin)
+				// WG9 1.2: a shutdown 503 never carries the preflight cache header.
+				expect(result.headers["access-control-max-age"]).toBeUndefined()
 			}
 			const upgrade = await rejected(address, env.headers)
 			expect(upgrade.status).toBe(503)
@@ -561,6 +563,7 @@ describe("unmounted root Fastify access hooks", () => {
 		})
 		expect(preflight.statusCode).toBe(204)
 		expect(preflight.body).toBe("")
+		expect(preflight.headers["access-control-max-age"]).toBe("600")
 		expect(
 			(
 				await env.app.inject({

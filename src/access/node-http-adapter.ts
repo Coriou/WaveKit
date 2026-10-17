@@ -133,7 +133,10 @@ export class NodeHttpAccessAdapter {
 		const original = accessRequestFromHttp(request, "audio")
 		const admission = this.#policy.evaluate(original)
 		if (this.#disposed) {
-			this.#deny(response, 503, "ACCESS_UNAVAILABLE", admission.headers)
+			// WG9 1.2: a shutdown 503 must not tell the browser to cache a preflight.
+			const { "Access-Control-Max-Age": _maxAge, ...headers } =
+				admission.headers
+			this.#deny(response, 503, "ACCESS_UNAVAILABLE", headers)
 			return undefined
 		}
 		if (admission.kind === "deny") {

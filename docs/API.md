@@ -208,6 +208,98 @@ kept and to run `devices list` after restart. It prints no credential. Restart t
 core before the new credential is used. A running server's old persistence hook
 cannot write the previous binding.
 
+### Browser pairing for a web origin (WG9)
+
+A web app served on the same scheme and hostname as `access.publicOrigins.api`, on
+another port, pairs and uses the API directly. Add its exact origin to
+`access.allowedOrigins`; there is no other key. Request and response shapes, route
+names, the cookie name, the CSRF header and the preflight bound are shared in
+`@wavekit/api-types` (`access-pairing.ts`).
+
+```yaml
+access:
+  mode: protected
+  listenerScheme: https
+  exposure: tls-termination
+  allowedOrigins:
+    - https://receiver.example:9443 # API
+    - https://receiver.example:9446 # web app
+  publicOrigins: { api: "https://receiver.example:9443", ... }
+```
+
+Another hostname or site is unsupported by design. The session cookie is host-only
+and `SameSite=Strict`, so a cross-site request never carries it; `SameSite=None`
+would depend on third-party cookies, which browsers block; an https page cannot
+call an http API (mixed content); and the access design binds browser, API and
+audio to one hostname. `localhost` and `127.0.0.1` are different sites.
+
+Routes (JSON bodies; every access error body is `{ "code" }` only):
+
+- `POST /api/access/pairing-codes` (machine credential only): 201
+  `{ "code": "ABCDE-FGHIJ", "expiresInSeconds": 600 }`. A code lasts 10 minutes;
+  at most 4 are pending (429 `PAIRING_CAPACITY`).
+- `POST /api/access/pair` (allowed `Origin` required): strict body
+  `{ "code", "name"?, "kind"? }`. The hyphen in the code is optional. `name` and
+  `kind` follow the device label rules above and are committed with the session in
+  one write. 201 `{ "deviceId", "expiresAt", "csrfToken" }` with `Set-Cookie`.
+  Errors: 400 `MALFORMED_REQUEST` (an unknown key, a bad code shape, name or kind;
+  the code is not consumed), 403 `ORIGIN_FORBIDDEN` / `HOST_FORBIDDEN`, 401
+  `PAIRING_INVALID` (unknown, used or expired code), 429 `PAIRING_RATE_LIMITED`
+  with `Retry-After: 60` (5 attempts a minute per address, 60 globally), 429
+  `SESSION_CAPACITY`, 503 `ACCESS_UNAVAILABLE`.
+- `GET /api/access/session`: 200 with the same DTO; 401 `AUTH_REQUIRED` without a
+  valid cookie.
+- `POST /api/access/session/refresh` (cookie and CSRF): 200 DTO with a new
+  `expiresAt` and `Set-Cookie`.
+- `POST /api/access/session/logout` (cookie and CSRF): 200 `{ "revoked": true }`;
+  the cookie is cleared and the session's WebSocket and audio streams close.
+- `GET`/`HEAD /api/access/devices`, `POST /api/access/devices/label`,
+  `/revoke` and `/revoke-all`: as described above.
+
+Cookie: `wavekit_session=<token>; Path=/; HttpOnly; SameSite=Strict; Max-Age=<at
+most 2592000>`, plus `; Secure` when `listenerScheme` is `https`. No `Domain`, so
+the cookie is host-only and shared by every port of the hostname.
+
+CORS: only an exactly allowed `Origin` is echoed, with
+`Access-Control-Allow-Credentials: true`. `Origin: null` and foreign origins get
+403 `ORIGIN_FORBIDDEN` with no `Access-Control-Allow-*` header. An allowed
+preflight answers 204 with methods `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS`,
+headers `Authorization, Content-Type, X-WaveKit-CSRF, X-Correlation-Id, Range` and
+`Access-Control-Max-Age: 600` (below every browser's own ceiling, so at most one
+preflight per origin, URL, method and header set every 10 minutes). No other
+outcome carries `Access-Control-Max-Age`: a denied preflight does not, and neither
+does a 503 `ACCESS_UNAVAILABLE` preflight while the API or an audio listener shuts
+down. `Retry-After` is an exposed response header.
+
+CSRF: every unsafe cookie request needs an allowed `Origin` and
+`X-WaveKit-CSRF: <csrfToken>`, otherwise 403 `CSRF_REQUIRED`. Keep the token in
+memory only; after a reload, `GET /api/access/session` returns it again. WebSocket
+upgrades need the cookie and an allowed `Origin`.
+
+```js
+const api = "https://receiver.example:9443"
+await fetch(`${api}/api/access/bootstrap`, { credentials: "include" })
+let s = await (
+	await fetch(`${api}/api/access/pair`, {
+		method: "POST",
+		credentials: "include",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ code, name: "Kitchen tablet", kind: "browser" }),
+	})
+).json() // { deviceId, expiresAt, csrfToken }: keep in memory
+const call = (path, init = {}) =>
+	fetch(`${api}${path}`, {
+		...init,
+		credentials: "include",
+		headers: { ...init.headers, "X-WaveKit-CSRF": s.csrfToken },
+	})
+// renew before expiresAt
+s = await (await call("/api/access/session/refresh", { method: "POST" })).json()
+// 401 AUTH_REQUIRED: the session is gone; ask the operator for a new code and pair again
+// 403 CSRF_REQUIRED (the token was lost): GET /api/access/session reads it again
+await call("/api/access/session/logout", { method: "POST" })
+```
+
 ## REST Endpoints
 
 ### Health & Status
@@ -1183,6 +1275,14 @@ Fields:
 - `effectiveSampleRate` — demodulation and audio sample rate in Hz (source rate /
   `decimationFactor`; usually fractional).
 - `wavUrl` — the audio stream behind a streaming WAV header.
+- `httpUrl`, `wavUrl` host (WG9) — with `access.publicOrigins.analogAudio` set
+  they use that origin. Otherwise the stored value is
+  `http://localhost:<httpPort>/...`; in legacy mode this route rewrites that host
+  per response from the request's own `Host` header (an ASCII DNS name, a dotted
+  IPv4 address or a bracketed IPv6 address; its port is ignored and `httpPort` is
+  kept), and adds `Cache-Control: no-store`. A missing, repeated or invalid `Host`
+  keeps `localhost`. `X-Forwarded-*` is never read. Protected mode, the WebSocket
+  status events and the stored status are unchanged.
 - `pipelineHealth` — `running`, `starting`, `stopped` or `error`. A crashed CSDR
   pipeline restarts automatically with exponential backoff (1 s doubling to 30 s,
   10 consecutive attempts; a run of 30 s resets the count). `pipelineRestarts`
@@ -1216,7 +1316,13 @@ Configuration notes:
   60 s, while a signal 20 dB above a stable floor stays open for at least 20 s.
   Long continuous signals can eventually enter the floor estimate. Pipeline
   rebuilds, source capability changes (including retained-pipeline retunes), and
-  mode changes reset the estimate. This is not calibrated noise measurement.
+  mode changes reset the estimate. After a retained-pipeline retune
+  the first block seeds the floor at the lower of the previous floor and its own
+  power (WG9), so a carrier already on the new frequency does not become its own
+  floor; a retune onto a noisier band then opens on noise until the open rise
+  (0.4 dB/s) catches up, about 15 s for a 10 dB step with margin 6 dB. Cold
+  starts, rebuilds and mode changes seed from the first block alone. This is not
+  calibrated noise measurement.
 - `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
   (above voice: a high-pass at 0.6 of the channel's audio Nyquist) and compares it
@@ -1391,6 +1497,11 @@ Update live demodulator configuration. DSP changes restart the pipeline; `squelc
 `squelchMode`, `autoMarginDb`, `noiseQuietingDb` and `toneSquelch` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
+The 400 body (WG9) is `{ "error": "Bad Request", "code", "message" }`: `code` is
+`VALIDATION_ERROR` for a value the configuration schema refuses and
+`CHANNEL_OFFSET_OUT_OF_RANGE` for an offset outside the capture. The submitted
+value is never echoed. With access configured, `message` is `Request failed`, as for
+the other protected errors.
 
 `agc` takes `off`, `slow`, `fast` or `null`; `null` deletes the key and returns to
 the per-modulation default. Setting, changing or deleting the key is a DSP change
@@ -2146,6 +2257,11 @@ curl http://localhost:9000/api/digital-voice/status
 `call` is the first active call on any decoder (else `null`); each decoder also
 reports `lastCall` once a call has ended. Counters are cumulative since startup.
 
+The top-level and per-decoder `httpUrl` and `wavUrl` follow the same host rule as
+[`GET /api/live-audio/status`](#get-apilive-audiostatus) (WG9): with
+`access.publicOrigins.digitalAudio` unset, legacy mode rewrites the `localhost`
+fallback per response from the request's `Host`.
+
 #### POST /api/digital-voice/start
 
 Starts the stream server. `409` (`DIGITAL_VOICE_UNAVAILABLE`) when no dsd-fme
@@ -2865,7 +2981,14 @@ curl -X PATCH http://localhost:9000/api/scanner/discoveries/d_01JA2T7B9S0KQ4M3XZ
 #### DELETE /api/scanner/discoveries/:id
 
 Deletes the discovery with its evidence and recordings (`scanner:discovery`
-`change: "deleted"`). **204**; 404 `SCANNER_NOT_FOUND`.
+`change: "deleted"`). **204**; 404 `SCANNER_NOT_FOUND`; 409
+`SCANNER_DISCOVERY_HOLDS_KEPT_RECORDINGS` (WG9) when one of its recordings is kept
+(see [Recordings](#recordings)): nothing changes; unkeep first. The check runs
+before any change and again before each recording file is unlinked: if a Keep
+commits while the delete runs, the discovery is already gone but the kept file and
+its folder stay (files removed before it stay removed) and the request answers
+409. Inactive pruning and capacity eviction skip a discovery that holds a kept
+recording.
 
 Success waits for accepted evidence writes and recording moves to drain and
 for the discovery's evidence/recording folders to be removed. Live and recent
@@ -2906,6 +3029,10 @@ audio if it was idle.
 	"wavUrl": "http://localhost:8081/stream.wav"
 }
 ```
+
+`httpUrl` and `wavUrl` are the live-audio stream URLs, with the same host rule as
+[`GET /api/live-audio/status`](#get-apilive-audiostatus) (WG9): in legacy mode the
+`localhost` fallback follows the request's `Host` per response.
 
 409 `OUT_OF_WINDOW` with `details` saying why:
 
@@ -3033,6 +3160,11 @@ engine epoch before the deadline. Otherwise it ends `timeout`, `not-needed` or
 `cancelled` like other trials. A protocol named in `protocols` with no covering
 decoder is `unsupported` with reason `no-ambient-decoder`. An accepted ambient
 identity makes the target `identified`, with the same rule as a probe decode.
+
+A probe trial whose decoder cannot run (WG9) ends `unsupported` with reason
+`decoder-unavailable`: the binary fails to spawn (`ENOENT` or `EACCES`) or exits
+with code 126 or 127, without a signal, before any output. Every other exit keeps
+its previous outcome. No outcome value was added; `reason` is free text.
 
 A decode counts only when all of these hold (fail closed):
 
@@ -3173,7 +3305,9 @@ curl http://localhost:9000/api/spectrum
 `profiles[].key` carries the `:a<n>` suffix for an averaged profile.
 `SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
 (`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
-floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
+floor, `k` per range, `settleMode`, `tuningTrust` (WG9: `unverified` while an
+operator retune's frames are still `unverified`, until the first block at or past
+the network settle), `warnings`
 (`untracked-retune` | `host-centre-mismatch`, with `deltaHz`), the summary
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile) and `lastError?`.
@@ -3501,7 +3635,7 @@ area with no path, such as `digital-voice-wav` without a recording dsd-fme, repo
 | `scanner-evidence`  | `automatic` | Scanner evidence (`scanner.storage.dir`, default `<stateDir>/scanner`), minus any dsd-fme WAV directory inside it | `scanner.storage.maxRecordingsMb`        |
 | `digital-voice-wav` | `other`     | Per-call WAV directories of the dsd-fme decoders that record                                                      | null                                     |
 | `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
-| `operator-data`     | `state`     | Operator data                                                                                                     | null                                     |
+| `operator-data`     | `state`     | Operator data and the recording keep store (`recording-keeps.json`)                                               | null                                     |
 | `access`            | `state`     | Private access state (protected mode only)                                                                        | null                                     |
 | `decoder-overrides` | `state`     | Decoder band overrides and decoder settings (`decoder-settings.json`)                                             | null                                     |
 | `station`           | `state`     | The station UI layer (`station.json`)                                                                             | null                                     |
@@ -3535,8 +3669,8 @@ bytes, 0 files and the same reason. The first reason wins. A permission error is
 path is `exists: false` and not partial. A partial area's `bytes` and `files` are
 lower bounds.
 
-`kept` is always null: recordings protected by Keep are scanner-internal and not
-reported yet. `lowSpace` describes the only automatic low-space behaviour:
+`kept` is always null: kept bytes (recording Keep, WG9) are not reported here
+yet. `lowSpace` describes the only automatic low-space behaviour:
 `policy` is `scanner-evidence-stops-writing` (scanner evidence stops writing when
 the available space is below `scanner.storage.minFreeDiskMb`), `minFreeBytes` is
 that threshold in bytes (null without a scanner) and `state` is `low` when
@@ -3596,8 +3730,9 @@ dsd-fme decoders that record, and the scanner recordings
 none when no scanner runs). DTOs in `packages/api-types/src/recordings.ts`.
 While `RECORDINGS_REQUIRES_ACCESS` is true both routes exist only in protected
 mode; nothing is mounted in legacy mode (404). The inventory never writes,
-renames, deletes or trims a file. Keep, delete and trim belong to the
-recording catalog, which stays gated.
+renames, deletes or trims a file. Keep, unkeep and delete (WG9,
+[spec](specs/web-gaps-9/requirements.md)) are described below; trim and export
+belong to the recording catalog, which stays gated.
 
 #### GET /api/recordings
 
@@ -3635,6 +3770,9 @@ keys, `limit=10abc` or a malformed cursor answer 400
 
 - Order: newest `modifiedAt` first, ties by id; follow `nextCursor` (null on
   the last page). Each item appears exactly once across pages.
+- `kept` (WG9, optional in `@wavekit/api-types`; older cores omit it): true when
+  the recording is kept, a delete of it is in progress, or the keep store is not
+  usable (fail closed); read at list time.
 - `id` is opaque and never a path: `dsd:<n>~<basename>` (n = the position of
   the recording directory in the inventory's source list, dsd-fme decoders
   sorted by id) or `scan:<recordingId>`. A configuration change can renumber
@@ -3671,6 +3809,82 @@ unknown, malformed or no longer eligible id is 404 `RECORDING_NOT_FOUND`.
 Errors: `{ error, code, message }` with `RECORDINGS_QUERY_INVALID` (400),
 `RECORDING_NOT_FOUND` (404) or `RECORDINGS_UNAVAILABLE` (503). Error bodies and
 log lines name no path, file name, directory or decoder option.
+
+#### PUT and DELETE /api/recordings/:id/keep, DELETE /api/recordings/:id
+
+Keep protects one recording from every WaveKit deletion owner (the dsd-fme call
+pruner, scanner evidence retention, discovery removal and analog retention)
+until it is unkept. `PUT` keeps, `DELETE` on `/keep` unkeeps; both are
+idempotent and answer 200 `{ "id", "kept", "changed" }` (`changed: false` when it
+already was so). `DELETE /api/recordings/:id` removes a dsd-fme call recording:
+200 `{ "id", "deleted": true }`. Scanner recordings can be kept and unkept but
+not deleted here (409 `RECORDING_DELETE_UNSUPPORTED`). Unkeeping is allowed after
+the file is gone.
+
+Protected mode only: the routes are mounted with the inventory while
+`RECORDING_KEEPS_REQUIRES_ACCESS` is true and the access controller is present
+(legacy: 404). They take the same mutation admission as the other protected
+operator writes (cookie and CSRF, or the machine credential), checked before the
+body is read; a body is ignored and at most 1 KiB (413). `Cache-Control:
+no-store`.
+
+Keys are never paths: a dsd-fme call is kept by its call name, a scanner
+recording by its recording id. A dsd-fme key covers every same-named call in
+every dsd-fme recording directory: Keep protects all of them, unkeep unprotects
+all of them, and delete removes only the one the id names. Keep re-opens and verifies
+the file through the inventory and protects it before that check, so a pruner
+running at the same moment never removes it. Delete renames the verified file
+into a private `0700` directory next to it, checks it is still the same file,
+then unlinks it; a file that changed answers 404. A recording directory that
+other users may write (group or other write without the sticky bit) refuses
+delete with 500 `RECORDING_DELETE_FAILED` (logged once per refusal, no path):
+another user could rebind the private directory's name. Fix the directory mode,
+for example `chmod go-w <dir>` (or `chmod +t <dir>` for a shared directory), then
+retry. A crash between the rename and the unlink leaves a `.wavekit-delete-*`
+directory that is neither listed nor swept.
+
+A configured recording root that is itself a symbolic link (a dsd-fme recording
+directory such as `data/recordings -> /Volumes/usb/recs`, or the scanner storage
+directory) is resolved once, at startup: the pruner, scanner retention, discovery
+removal and the inventory then work through its real directory, and a link
+re-pointed later has no effect. A symbolic link below that real directory is
+still never followed. If the real directory is later replaced (its device and
+inode no longer match), deletion from that root stops (fail closed, a count is
+logged) until the core restarts. A root that does not exist at startup keeps
+the plain-directory rules, so a link created there later is not followed.
+
+The keep store is `<stateDir>/recording-keeps.json` (`RECORDING_KEEPS_FILE_NAME`,
+counted in the `operator-data` storage area): written to a temporary file,
+synced, renamed and the directory synced. It opens before any decoder in both
+access modes, so a keep made in protected mode also protects in legacy mode.
+Bounds: 2 000 entries, 512 MiB of kept bytes (the default dsd-fme call cap, each
+file counted at its size when kept) and a 1 MiB file; past an entry or byte bound
+Keep answers 409 `RECORDING_KEEP_LIMIT`. Kept dsd-fme bytes still count toward the
+pruner's size cap. A missing file is an empty store. An unreadable, malformed or
+over-bound file is left in place and the store is `failed`: every recording
+counts as kept, nothing is pruned or deleted, and Keep, unkeep and delete answer
+503 `RECORDING_KEEPS_UNAVAILABLE` until the file is fixed and the core restarts.
+While the store loads every answer is "kept" too.
+
+| Code                           | Status | When                                                      |
+| ------------------------------ | ------ | --------------------------------------------------------- |
+| `RECORDING_NOT_FOUND`          | 404    | Unknown, malformed or no longer eligible id; file changed |
+| `RECORDING_KEPT`               | 409    | Delete of a kept recording (unkeep first)                 |
+| `RECORDING_BUSY`               | 409    | A Keep and a delete of the same recording overlapped      |
+| `RECORDING_KEEP_LIMIT`         | 409    | Keep would pass 2 000 entries or 512 MiB                  |
+| `RECORDING_DELETE_UNSUPPORTED` | 409    | Delete of a scanner recording                             |
+| `RECORDING_KEEP_FAILED`        | 500    | Keep or unkeep failed otherwise (fixed text per action)   |
+| `RECORDING_DELETE_FAILED`      | 500    | Delete failed otherwise, or a shared writable directory   |
+| `RECORDING_KEEPS_UNAVAILABLE`  | 503    | The keep store is loading, failed or cannot be written    |
+
+Bodies are `{ error, code, message }` with fixed text; no path, file name or
+submitted value. Statuses are pinned in `RECORDING_ERROR_STATUS`.
+
+```bash
+# <id> URL-encoded, as listed by GET /api/recordings
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  http://localhost:9000/api/recordings/<id>/keep
+```
 
 ## Activity
 
@@ -5043,8 +5257,11 @@ ready, each closed transmission is also stored as an `analog-transmission`
 
 - `frequency`: the tuned centre of the demodulator's source plus `offsetHz`
   when the transmission opened. `tuningTrust` is `commanded` under WaveKit
-  control and `relay` under external (SDR++) control. Null when the source
-  has no tuner state or its centre is an unconfirmed placeholder.
+  control and `relay` under external (SDR++) control, with the same strict rule
+  as spectrum frames (WG9): both the centre and the sample rate must have been
+  written or relayed on the current connection, else `unverified` (declared-only
+  values, a failed reconnect replay). Null when the source has no tuner state or
+  its centre is an unconfirmed placeholder.
 - `endedAt`: for a `squelch` close, the last above-threshold block (in noise mode
   the last quieted block; the close time minus the squelch hang, 250 ms, never
   before `startedAt`); for every other reason, the close time. Since the WG7 noise
@@ -5330,7 +5547,21 @@ One frame per source and profile:
   upper bound across sweep settles and gaps.
 - The max-hold restarts when the epoch changes, so a frame never mixes two
   centres. `tuningTrust: "unverified"` means the frequency axis may be wrong
-  (grey it out). `masks` are RF ranges: the DC spike (`dcHz ± dcGuardHz`) and
+  (grey it out). From WG9 the label follows the same strict rule as receptions:
+  `commanded` (internal control) or `relay` (external control) only when both the
+  centre and the sample rate were written by WaveKit or seen in an accepted relay
+  command on the current connection. A value only declared by the configuration or
+  the source caps, a failed reconnect replay or a `reconnectPolicy: reset`
+  reconnect gives `unverified`. One retune is one epoch, centred on the commanded
+  frequency. After an operator (non-scanner) retune the display settles for 150 ms
+  (blocks still at the old centre are discarded for at most 150 ms) instead of
+  `scanner.sweep.settleMs.network`, and frames published before the network settle
+  (1000 ms by default) has elapsed since the command are `unverified`. Scanner
+  hops keep their own settle and take the same strict rule: a hop also commands
+  the sample rate when it is only declared or was not written on the current
+  connection (the job's rate, else the declared one), so a normal sweep stays
+  `commanded`; an unknown rate without a job rate leaves the hop `unverified`.
+  `masks` are RF ranges: the DC spike (`dcHz ± dcGuardHz`) and
   every masked spur line.
 - `snapshot: true` marks the current-state frame sent right after an ack (the
   latest block of the current epoch at the client's profile; none while a

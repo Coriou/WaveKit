@@ -51,6 +51,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-8](web-gaps-8/requirements.md): decoder settings store and protected decoder PATCH
   applied on restart, read-only recordings inventory with download, spectrum bins above 2 048
   by a measured host cap (WG8)
+- [web-gaps-9](web-gaps-9/requirements.md): browser pairing for a web app on another port,
+  recording Keep and deletion behind one deletion decision, strict tuning trust and faster
+  operator retunes, zoom workload benchmark, minors (WG9)
 
 ## The three files
 

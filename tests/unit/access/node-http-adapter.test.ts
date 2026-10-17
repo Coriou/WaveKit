@@ -298,6 +298,30 @@ describe("unmounted original-request Node HTTP audio boundary", () => {
 		expect(env.clock.count()).toBe(0)
 	})
 
+	it("caches an allowed preflight for 600 s but never a shutdown 503 preflight (WG9 1.2)", async () => {
+		const env = await fixture()
+		const preflight = [
+			"Origin",
+			origin,
+			"Access-Control-Request-Method",
+			"GET",
+			"Access-Control-Request-Headers",
+			"Range",
+		]
+		const allowed = await read(env.port, preflight, "/stream", "OPTIONS")
+		expect(allowed.status).toBe(204)
+		expect(allowed.headers["access-control-max-age"]).toBe("600")
+		env.adapter.dispose()
+		const stopped = await read(env.port, preflight, "/stream", "OPTIONS")
+		expect(stopped.status).toBe(503)
+		expect(JSON.parse(stopped.body.toString())).toEqual({
+			code: "ACCESS_UNAVAILABLE",
+		})
+		expect(stopped.headers["access-control-allow-origin"]).toBe(origin)
+		expect(stopped.headers["access-control-max-age"]).toBeUndefined()
+		expect(env.registrations()).toBe(0)
+	})
+
 	it.each([
 		["wrong host", ["Host", "evil.lan:9000"], 400],
 		["wrong origin", ["Origin", "http://evil.lan:9000"], 403],

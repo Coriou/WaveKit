@@ -503,8 +503,21 @@ export class SessionStore {
 	}
 
 	create(
-		options: { replacePrincipalId?: string } = {},
+		options: {
+			replacePrincipalId?: string
+			name?: string
+			kind?: AccessDeviceKind
+		} = {},
 	): Promise<SessionCreation> {
+		// Detach the label before validating so the queued write uses exactly the checked values.
+		const { name, kind } = options
+		if (
+			(name !== undefined && !accessDeviceNameSchema.safeParse(name).success) ||
+			(kind !== undefined && !accessDeviceKindSchema.safeParse(kind).success)
+		)
+			return Promise.reject(
+				new WaveKitError("Invalid device label", "ACCESS_DEVICE_INVALID"),
+			)
 		return this.#enqueue(async () => {
 			const now = this.#now()
 			const next = this.#remaining(now)
@@ -531,8 +544,8 @@ export class SessionStore {
 					createdAt: now,
 					renewedAt: now,
 					expiresAt: now + this.#ttl,
-					name: null,
-					kind: null,
+					name: name ?? null,
+					kind: kind ?? null,
 					lastSeenAt: null,
 				}
 				next.set(deviceId, record)

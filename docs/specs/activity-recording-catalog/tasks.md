@@ -80,6 +80,11 @@ Main assigns owners at each remaining gate.
       write cessation and accounting. Properties7–8, full deletion-path matrix tests,
       ENOSPC/statfs failures and stale two-store recovery. Enable per-recording Keep only
       after no bypass remains. Preserve unrelated scanner recovery/evidence behavior.
+      Amended (WG9): [web-gaps-9](../web-gaps-9/requirements.md) requirement 2 adds Keep, unkeep
+      and dsd-fme call deletion on the legacy inventory before checkpoint B, keyed by call name or
+      scanner recording id, behind one synchronous deletion decision that every existing deletion
+      owner consults (fail closed: an unknown keep store protects everything). The catalog ids,
+      generation-fenced scanner handshake, file leases, delete intents and reserve stay open here.
       _Requirements: 5.1–5.5, 4.5, 7.2._
 - [ ] **7. Protected playback and WAV trim/export.** Depends on6 and mounted access.
       Implement metadata CAS, validated PCM WAV Range/seek, trim virtual media, pinned

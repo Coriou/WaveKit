@@ -1371,7 +1371,7 @@ describe("Task42 owned prepared-link operations", () => {
 			true,
 		)
 	})
-	it("rejects a symlink at the configured storage root itself", async () => {
+	it("follows a symlink at the configured storage root itself once (WG9 R2: operator config is trusted)", async () => {
 		const owner = await harness()
 		const aliases = await realpath(
 			await mkdtemp(join(tmpdir(), "wavekit-root-link-")),
@@ -1380,11 +1380,11 @@ describe("Task42 owned prepared-link operations", () => {
 		const configured = join(aliases, "storage")
 		await symlink(owner.root, configured)
 		const h = await harness({ root: configured })
-		expect(h.evidence.analogAuthorityReady).toBe(false)
-		const op = h.begin()
-		await op.ready.catch(() => undefined)
-		expect((await op.finish()).outcome).toBe("failed")
-		expect(existsSync(privateDir(owner.root, op.operationId))).toBe(false)
+		expect(h.evidence.analogAuthorityReady).toBe(true)
+		const receipt = await record(h)
+		expect(receipt.outcome).toBe("finalized")
+		// Written under the real directory the link named at construction.
+		expect(existsSync(join(owner.root, receipt.artifact!))).toBe(true)
 	})
 	it("refuses a symlink final ancestor and leaves foreign storage untouched", async () => {
 		const h = await harness()

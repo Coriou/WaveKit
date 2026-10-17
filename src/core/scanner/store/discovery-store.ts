@@ -9,6 +9,8 @@
  */
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
+import { createComponentLogger, createLogger } from "../../../utils/logger.js"
+import type { Logger } from "../../../utils/logger.js"
 import type { LockoutTarget } from "../plan/lockouts.js"
 import {
 	frequencyKey,
@@ -90,7 +92,14 @@ export interface DiscoveryStoreOptions {
 	newId: () => string
 	minSurfaceBlocks?: number
 	rasters?: (sourceId: string, centreHz: number) => Raster[]
+	/** WG9 req 2.6: inactive prune and capacity eviction skip a discovery holding kept recordings. */
+	discoveryHoldsKept?: (discoveryId: string) => boolean
+	/** WG9 R2: the eviction-blocked-by-kept warning; a module-level fallback logger without one. */
+	logger?: Logger
 }
+
+/** Created on first need only, so a store that never logs creates no logger. */
+let fallbackLog: Logger | null = null
 export type RecordingLinkState = "linked" | "cut" | "encrypted-dropped" | "none"
 export interface StoreSnapshot {
 	discoveries: Discovery[]
@@ -356,13 +365,32 @@ export class DiscoveryStore extends EventEmitter {
 	>()
 	private appliedSeq = 0
 
+	private readonly holdsKept: (discoveryId: string) => boolean
+	private readonly injectedLog: Logger | undefined
+	/** The kept-blocked count last warned, so a full store does not warn on every ingest. */
+	private keptBlockedWarned = 0
+
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
+		this.injectedLog = opts.logger
+			? createComponentLogger(opts.logger, "DiscoveryStore")
+			: undefined
 		this.maxDiscoveries = opts.maxDiscoveries
 		this.now = opts.now
 		this.newId = opts.newId
 		this.minSurfaceBlocks = opts.minSurfaceBlocks ?? 2
 		this.rastersFor = opts.rasters ?? (() => [])
+		const holds = opts.discoveryHoldsKept
+		// Fail closed: a throwing port answers "holds kept".
+		this.holdsKept = holds
+			? id => {
+					try {
+						return holds(id) !== false
+					} catch {
+						return true
+					}
+				}
+			: () => false
 	}
 
 	ingest(input: ObservationInput): Ingested {
@@ -856,7 +884,8 @@ export class DiscoveryStore extends EventEmitter {
 			if (
 				d.operator?.keep === true ||
 				d.operator?.lockout === true ||
-				d.lastSeenAt >= cutoff
+				d.lastSeenAt >= cutoff ||
+				this.holdsKept(d.id)
 			)
 				continue
 			removed.push(d.id)
@@ -1672,7 +1701,37 @@ export class DiscoveryStore extends EventEmitter {
 			this.deleteInto(op, victim)
 		}
 		this.finish("evict", op)
+		if (fits) this.keptBlockedWarned = 0
+		else this.warnKeptBlocked()
 		return fits
+	}
+
+	/**
+	 * WG9 R2: eviction found no victim and kept recordings held some otherwise evictable
+	 * discoveries: one warn with the count (fixed text, no ids), again only when it changes.
+	 */
+	private warnKeptBlocked(): void {
+		let held = 0
+		for (const d of this.discoveries.values())
+			if (
+				d.confidence !== "decoded" &&
+				d.operator?.keep !== true &&
+				d.operator?.lockout !== true &&
+				this.holdsKept(d.id)
+			)
+				held++
+		if (held === 0 || held === this.keptBlockedWarned) return
+		this.keptBlockedWarned = held
+		const log =
+			this.injectedLog ??
+			(fallbackLog ??= createComponentLogger(
+				createLogger({ level: "info" }),
+				"DiscoveryStore",
+			))
+		log.warn(
+			{ heldByKept: held },
+			"Discovery eviction cannot make room: discoveries hold kept recordings",
+		)
 	}
 
 	/**
@@ -1685,7 +1744,8 @@ export class DiscoveryStore extends EventEmitter {
 			if (
 				d.confidence === "decoded" ||
 				d.operator?.keep === true ||
-				d.operator?.lockout === true
+				d.operator?.lockout === true ||
+				this.holdsKept(d.id)
 			)
 				continue
 			if (

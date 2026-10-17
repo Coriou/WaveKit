@@ -1,3 +1,4 @@
+import { ACCESS_PREFLIGHT_MAX_AGE_SECONDS } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 import { normalizeAuthority, normalizeOrigin } from "./authority.js"
 import { sessionCredentialBinding, verifyMachineToken } from "./credentials.js"
@@ -308,6 +309,9 @@ export class AccessPolicy {
 				"Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
 			headers["Access-Control-Allow-Methods"] = PREFLIGHT_METHODS.join(", ")
 			headers["Access-Control-Allow-Headers"] = PREFLIGHT_HEADERS.join(", ")
+			headers["Access-Control-Max-Age"] = String(
+				ACCESS_PREFLIGHT_MAX_AGE_SECONDS,
+			)
 			return { kind: "preflight", status: 204, headers }
 		}
 
