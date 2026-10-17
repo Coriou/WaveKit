@@ -4,6 +4,7 @@ import { createDataLayer } from "../data/index.ts"
 import { ActivityController } from "../features/activity/controller.ts"
 import { ListenController } from "../features/listen/controller.ts"
 import { DecodersFeed } from "../features/tuned/decoders.ts"
+import { TunedActivity } from "../features/tuned/feed.ts"
 import { TuningPrefs } from "../features/tuner/prefs.ts"
 import { TuningController } from "../features/tuning.ts"
 
@@ -15,6 +16,8 @@ export interface AppServices {
 	decoders: DecodersFeed
 	/** The Activity drawer's search, open event, pinned searches and feed. */
 	activity: ActivityController
+	/** The tuned card's channel Activity (now and earlier). */
+	tuned: TunedActivity
 	start(): Promise<void>
 	dispose(): void
 }
@@ -24,6 +27,7 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 	const decoders = new DecodersFeed(data)
 	const listen = new ListenController(data.liveAudio)
 	const activity = new ActivityController(data)
+	const tuned = new TunedActivity(data)
 	return {
 		data,
 		tuning: new TuningController(data),
@@ -31,12 +35,14 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 		listen,
 		decoders,
 		activity,
+		tuned,
 		async start() {
 			await Promise.all([data.start(), decoders.load()])
 		},
 		dispose() {
 			listen.dispose()
 			activity.dispose()
+			tuned.dispose()
 			decoders.dispose()
 			data.dispose()
 		},

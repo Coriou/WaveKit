@@ -1,30 +1,42 @@
 // The tuned card (docs/web/canvas/Tuned.dc.html, TunedGallery, Identify; DESIGN.md "Tuned card reworked"):
-// header (type tile, protocol + band, state, frequency, signal bars) → the "now" block (band, channel and
-// what decodes here, or Identify while it runs) → actions. Identify never moves the receiver. While a sweep moves the
-// receiver the card hides (the Tuner's hold row says where it is); on a hit it is that signal's card, "Held by the scan".
-import { useEffect } from "react"
+// header (type tile that drags the card, protocol + band, state, frequency, signal bars, minimise) → the "now" block
+// (what was last heard on the channel, by kind: call, transmission, count, message, audio; or band and channel when
+// nothing was, or Identify while it runs) → up to two earlier rows → actions (Map, Activity, Save, ⋯ with Identify,
+// Pin, Copy). Identify never moves the receiver. While a sweep moves the receiver the card hides (the Tuner's hold
+// row says where it is); on a hit it is that signal's card, "Held by the scan". A pinned card keeps its frequency.
+import { WaveKitIcon } from "@wavekit/brand/react"
+import { useEffect, useRef, useState } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import {
 	bandAt,
 	channelAt,
+	inputOf,
 	isIdentifyFinal,
 	useStore,
 } from "../../data/index.ts"
+import { CardHandle } from "../../shell/CardHandle.tsx"
 import { shellStore } from "../../shell/store.ts"
+import { showAppToast } from "../../shell/toast.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Icon, type IconName } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { Island } from "../../ui/Island.tsx"
+import { Kbd } from "../../ui/Kbd.tsx"
 import { Label } from "../../ui/Label.tsx"
 import { formatDb, formatMHz, formatWidth } from "../format.ts"
 import { useLiveStatus, useNow, useSettledHz } from "../hooks.ts"
+import { showOnMap } from "../map/focus.ts"
+import { messageView } from "../messages/card.ts"
 import { groupName } from "../tuner/band.ts"
 import { modeSpec, modulationOf } from "../tuner/modes.ts"
+import { defaultGroup, defaultSaveName, saveInput } from "../tuner/saved.ts"
 import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { decodersAt } from "./decoders.ts"
 import { identifyView, type IdentifyView } from "./identify-view.ts"
+import { nowView, type NowView } from "./now.ts"
+import { tunedCardStore } from "./place.ts"
 import { decoderLabel, signalBars, signalPresent } from "./signal.ts"
 
 function IdentifyBlock({
@@ -112,42 +124,217 @@ function IdentifyBlock({
 	)
 }
 
+function NowBlock({ now }: { now: NowView }) {
+	const msg = now.kind === "msg"
+	return (
+		<>
+			{now.eyebrow && <Label>{now.eyebrow}</Label>}
+			{msg && now.title && <span className="wkf-now-title">{now.title}</span>}
+			{now.big !== null && (
+				<div className="wkf-big-row">
+					{now.locked && (
+						<Icon
+							name="lock"
+							size={18}
+							className="wkf-lock"
+							role="img"
+							aria-hidden={undefined}
+							aria-label="Encrypted"
+						/>
+					)}
+					<span
+						className="wkf-big"
+						data-count={now.kind === "count" || undefined}
+					>
+						{now.big}
+					</span>
+					{now.bigUnit && <span className="wkf-big-unit">{now.bigUnit}</span>}
+				</div>
+			)}
+			{now.line && <span className="wkf-line">{now.line}</span>}
+			{now.body && (
+				<p
+					className="wkf-now-body"
+					data-msg={msg || undefined}
+					data-mono={now.mono || undefined}
+					data-quote={now.quote || undefined}
+				>
+					{now.body}
+				</p>
+			)}
+			{now.chips.length > 0 && (
+				<div className="wkf-now-chips">
+					{now.chips.map(c => (
+						<span key={`${c.k}:${c.v}`} className="wkf-now-chip">
+							{c.k && <span className="wkf-quiet">{c.k}</span>} {c.v}
+						</span>
+					))}
+				</div>
+			)}
+			{now.rateBars && (
+				<div className="wkf-rate">
+					<div className="wkf-rate-bars" aria-hidden="true">
+						{now.rateBars.map((h, i) => (
+							<span
+								key={i}
+								style={{ height: `${Math.max(8, Math.round(h * 100))}%` }}
+								data-last={i === now.rateBars!.length - 1 || undefined}
+							/>
+						))}
+					</div>
+					<span className="wkf-rate-text">{now.rate}</span>
+				</div>
+			)}
+		</>
+	)
+}
+
+interface MenuItem {
+	label: string
+	icon: IconName
+	key?: string
+	pick: () => void
+}
+
+function MoreMenu({
+	items,
+	onClose,
+}: {
+	items: readonly MenuItem[]
+	onClose: (refocus: boolean) => void
+}) {
+	const ref = useRef<HTMLDivElement>(null)
+	useEffect(() => {
+		ref.current?.querySelector<HTMLButtonElement>("button")?.focus()
+		const away = (e: PointerEvent) => {
+			if (!ref.current?.parentElement?.contains(e.target as Node))
+				onClose(false)
+		}
+		document.addEventListener("pointerdown", away)
+		return () => document.removeEventListener("pointerdown", away)
+	}, [onClose])
+	return (
+		<div
+			ref={ref}
+			role="menu"
+			aria-label="More actions"
+			className="wk-menu wkf-card-menu"
+			onKeyDown={e => {
+				const list = [
+					...(ref.current?.querySelectorAll<HTMLButtonElement>("button") ?? []),
+				]
+				const at = list.indexOf(document.activeElement as HTMLButtonElement)
+				if (e.key === "Escape") {
+					e.preventDefault()
+					e.stopPropagation()
+					onClose(true)
+				} else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+					e.preventDefault()
+					const next =
+						(at + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length
+					list[next]?.focus()
+				}
+			}}
+		>
+			{items.map(m => (
+				<button
+					key={m.label}
+					type="button"
+					role="menuitem"
+					className="wk-option"
+					onClick={() => {
+						onClose(true)
+						m.pick()
+					}}
+				>
+					<Icon name={m.icon} size={16} />
+					<span className="wkf-grow">{m.label}</span>
+					{m.key && <Kbd>{m.key}</Kbd>}
+				</button>
+			))}
+		</div>
+	)
+}
+
+/** The fleet a card shows a count for, from the decoders on its channel. */
+function fleetHere(types: readonly string[]): "aircraft" | "vessels" | null {
+	if (types.some(t => t === "readsb" || t === "dump1090")) return "aircraft"
+	if (types.includes("ais-catcher")) return "vessels"
+	return null
+}
+
 export function TunedCard() {
-	const { data, decoders: feed, activity } = useServices()
+	const services = useServices()
+	const { data, decoders: feed, activity, tuning, tuned } = services
 	const readOnly = useReadOnly()
 	const settledHz = useSettledHz()
 	const sweep = useSweep()
 	const sweepState = sweep?.state
 	// on a hit, the card is that signal's card (live audio follows the scan there)
 	const { heldHz, held } = useHeld(sweep)
-	const hz =
+	const tunedNow =
 		sweepState === "holding"
 			? (heldHz ?? held?.frequencyHz ?? settledHz)
 			: settledHz
+	const card = useStore(tunedCardStore)
+	const pinned = card.pinnedHz
+	// a pinned card keeps its frequency when you tune away
+	const hz = pinned ?? tunedNow
+	const onIt = pinned === null || pinned === tunedNow
 	const status = useLiveStatus()
 	const view = useStore(data.bandplan, s => s.view)
 	const level = useStore(data.liveAudio, s => s.level)
 	const decoders = useStore(feed, s => s.decoders)
+	const savedState = useStore(data.savedFrequencies)
 	const id = useStore(data.identify)
 	const running =
 		id.starting || (id.job !== null && !isIdentifyFinal(id.event?.state))
-	const now = useNow(running, 250)
+	const tick = useNow(running, 250)
+	const clock = useNow(true, 1000)
+	const [menu, setMenu] = useState(false)
+	const moreRef = useRef<HTMLButtonElement>(null)
+	const lineRef = useRef<HTMLButtonElement>(null)
+	const chevRef = useRef<HTMLButtonElement>(null)
+	const focusAfterMin = useRef<boolean | null>(null)
 
 	const bw = status?.config.bandwidth || 12_500
 	const tolerance = Math.max(bw / 2, 3000)
-	const band = hz === null ? null : bandAt(view, hz)
-	const channel = hz === null ? null : channelAt(band, hz)
 	const here = hz === null ? [] : decodersAt(decoders, hz, tolerance)
-	const active = here.filter(d => d.running && !d.suspended)
-	const idView = identifyView(id, now)
-	const idHere =
-		idView.phase !== "idle" &&
-		(id.targetHz === null ||
-			hz === null ||
-			Math.abs(id.targetHz - hz) <= tolerance)
+	const types = here.map(d => d.type)
+	const fleet = fleetHere(types)
+
+	// the channel's Activity, once the frequency settles
+	useEffect(() => {
+		tuned.follow(hz === null ? null : { hz, toleranceHz: tolerance })
+	}, [tuned, hz, tolerance])
+	const span = useStore(tuned.span)
+	const items = useStore(tuned.feed, s => s.items)
+	const fresh = span !== null && span.hz === hz
+
+	// vessels or aircraft in range: the fleet store attaches only while the card counts them
+	const fleetStore =
+		fleet === "aircraft"
+			? data.fleets.aircraft
+			: fleet === "vessels"
+				? data.fleets.vessels
+				: null
+	useEffect(() => fleetStore?.attach(), [fleetStore])
+	const aircraftN = useStore(data.fleets.aircraft, s => s.entries.size)
+	const vesselsN = useStore(data.fleets.vessels, s => s.entries.size)
+	const fleetN =
+		fleet === "aircraft" ? aircraftN : fleet === "vessels" ? vesselsN : null
+
+	// keep focus on the control after the header swaps between the line and the chevron
+	useEffect(() => {
+		const want = focusAfterMin.current
+		if (want === null || want !== card.minimised) return
+		focusAfterMin.current = null
+		;(want ? lineRef : chevRef).current?.focus({ preventScroll: true })
+	}, [card.minimised])
 
 	const startIdentify = () => {
 		if (hz === null || readOnly) return
+		if (!onIt) void tuning.tune(hz)
 		const opts =
 			status && status.config.bandwidth > 0
 				? { bandwidthHz: status.config.bandwidth }
@@ -174,8 +361,8 @@ export function TunedCard() {
 		return () => document.removeEventListener("keydown", onKey)
 	})
 
-	if (sweepMoving(sweepState)) return null
-	const heldByScan = sweepState === "holding"
+	if (sweepMoving(sweepState) && pinned === null) return null
+	const heldByScan = sweepState === "holding" && onIt
 
 	if (hz === null)
 		return (
@@ -189,19 +376,51 @@ export function TunedCard() {
 			</Island>
 		)
 
-	const mode = status ? modeSpec(status.config.modulation) : null
-	const bandMode = modulationOf(band?.band.mode)
-	const proto = active[0]
-		? decoderLabel(active[0].type)
-		: here[0]
-			? decoderLabel(here[0].type)
-			: mode
-				? `${mode.label}`
-				: "Unknown"
-	const protoSub = [band?.band.name, channel?.name].filter(Boolean).join(" · ")
-	const live = status?.running === true && level !== null
+	const band = bandAt(view, hz)
+	const channel = channelAt(band, hz)
+	const active = here.filter(d => d.running && !d.suspended)
+	const idView = identifyView(id, tick)
+	const idHere =
+		idView.phase !== "idle" &&
+		(id.targetHz === null || Math.abs(id.targetHz - hz) <= tolerance)
+
+	const live = onIt && status?.running === true && level !== null
 	const present = live ? signalPresent(level) : false
 	const squelchOpen = present === true
+	const now = nowView({
+		items: fresh ? items : [],
+		decoderTypes: types,
+		modulation: onIt ? (status?.config.modulation ?? null) : null,
+		channelName: channel?.name ?? null,
+		bandMode: modulationOf(band?.band.mode),
+		hz,
+		count: fleet && fleetN !== null ? { fleet, n: fleetN } : null,
+		live: squelchOpen,
+		now: clock,
+	})
+	const voice = now.kind === "call" || now.kind === "tx"
+
+	const mode = status ? modeSpec(status.config.modulation) : null
+	const bandMode = modulationOf(band?.band.mode)
+	const bandSays =
+		bandMode !== null && mode !== null && bandMode !== status?.config.modulation
+	const plainLine = active.length
+		? `Decoded here by ${active.map(d => d.type).join(", ")}. Nothing heard yet.`
+		: here.length
+			? `${here.map(d => d.type).join(", ")} listens here but is not running`
+			: bandSays
+				? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
+				: "Nothing decodes this frequency. Identify finds out what it is."
+	const proto =
+		now.protocol ??
+		(active[0]
+			? decoderLabel(active[0].type)
+			: here[0]
+				? decoderLabel(here[0].type)
+				: mode
+					? mode.label
+					: "Unknown")
+	const protoSub = [band?.band.name, channel?.name].filter(Boolean).join(" · ")
 	const snr =
 		live && level.channelPowerDbfs !== null && level.noiseFloorDbfs !== null
 			? level.channelPowerDbfs - level.noiseFloorDbfs
@@ -209,140 +428,407 @@ export function TunedCard() {
 	const bars = signalBars(snr)
 	const levelTitle = live
 		? `Signal ${level.channelPowerDbfs === null ? "unknown" : `${formatDb(level.channelPowerDbfs)} dBFS`}${snr === null ? "" : ` · SNR ${Math.round(snr)} dB`}`
-		: "Signal level shows while listening"
-	const stateText =
-		idHere && idView.running
-			? "Identifying"
-			: heldByScan
-				? "Held by the scan"
-				: active.length
-					? `Decoding · ${active.map(d => d.type).join(", ")}`
-					: here.length
-						? `${here[0]?.type ?? "Decoder"} paused${here[0]?.suspended ? " · off band" : ""}`
-						: squelchOpen
-							? "Signal present"
-							: live
-								? present === null
-									? "Squelch off"
-									: "Quiet"
-								: "Not decoded here"
-	const stateTone =
-		idHere && idView.running
-			? "accent"
-			: heldByScan || active.length || squelchOpen
+		: onIt
+			? "Signal level shows while listening"
+			: "Pinned. Tune to it for the signal level."
+	const idRunning = idHere && idView.running
+	const stateText = idRunning
+		? "Identifying"
+		: heldByScan
+			? "Held by the scan"
+			: !onIt
+				? (now.quiet ?? "Pinned · not tuned")
+				: squelchOpen && voice
+					? now.kind === "call"
+						? "Call in progress"
+						: "Transmitting"
+					: now.quiet && !(squelchOpen && now.kind === "plain")
+						? now.quiet
+						: active.length
+							? `Decoding · ${active.map(d => d.type).join(", ")}`
+							: here.length
+								? `${here[0]?.type ?? "Decoder"} paused${here[0]?.suspended ? " · off band" : ""}`
+								: squelchOpen
+									? "Signal present"
+									: live
+										? present === null
+											? "Squelch off"
+											: "Quiet"
+										: "Not decoded here"
+	const liveState = idRunning || heldByScan || (onIt && squelchOpen)
+	const stateTone = liveState
+		? "accent"
+		: now.locked
+			? "amber"
+			: active.length && onIt
 				? "accent"
 				: "quiet"
-	const tile: IconName = active.length
+	const icon = now.latest ? messageView(now.latest).icon : null
+	const tileLive = onIt && (active.length > 0 || squelchOpen)
+	const tileIcon: IconName = active.length
 		? "activity"
 		: status?.running
 			? "headphones"
 			: "scanner"
+	const tile = (
+		<span
+			className="wkf-tile"
+			data-live={tileLive || undefined}
+			aria-hidden="true"
+		>
+			{icon ? (
+				<WaveKitIcon name={icon} size={18} />
+			) : (
+				<Icon name={tileIcon} size={18} />
+			)}
+		</span>
+	)
+
+	// ---- actions (Tuned.dc.html: the card's own row; Identify and Pin in ⋯ except for unknown signals)
+	const savedHere =
+		savedState.items.find(f => Math.abs(f.frequencyHz - hz) < 1) ?? null
+	const canSave = savedState.status === "ready" && !readOnly
+	const toggleSave = () => {
+		if (!canSave) return
+		if (savedHere) {
+			const back = inputOf(savedHere)
+			data.savedFrequencies.remove(savedHere.id).then(
+				() =>
+					showAppToast(`Removed ${savedHere.name}`, {
+						undo: () =>
+							void data.savedFrequencies.create(back).catch(() => undefined),
+					}),
+				() => undefined,
+			)
+			return
+		}
+		const input = saveInput(
+			{
+				hz,
+				config: onIt ? (status?.config ?? null) : null,
+				bandMode,
+			},
+			defaultSaveName(hz, channel?.name, band?.band.name),
+			defaultGroup(band?.band.group),
+		)
+		data.savedFrequencies.create(input).then(
+			created =>
+				showAppToast(`Saved ${created.name}`, {
+					undo: () =>
+						void data.savedFrequencies
+							.remove(created.id)
+							.catch(() => undefined),
+				}),
+			() => undefined,
+		)
+	}
+	const saveTitle = !canSave
+		? savedState.status === "unavailable"
+			? "Saved frequencies need the core's operator data (protected mode)"
+			: readOnly
+				? "Read-only access"
+				: "Saved frequencies are loading"
+		: savedHere
+			? `Saved as ${savedHere.name}. Click to remove.`
+			: "Save this frequency"
+	const openMap = () => {
+		if (now.mapId) showOnMap(now.mapId)
+		else shellStore.setView("map")
+	}
+	const openActivity = () => activity.showFrequency(hz, bw)
+	const togglePin = () => tunedCardStore.pin(pinned === null ? hz : null)
+	const copyFreq = () => {
+		try {
+			void navigator.clipboard?.writeText(formatMHz(hz)).then(
+				() => showAppToast(`Copied ${formatMHz(hz)}`),
+				() => undefined,
+			)
+		} catch {
+			// clipboard blocked
+		}
+	}
+	const unknown = now.kind === "plain" && here.length === 0
+
+	const menuItems: MenuItem[] = []
+	if (!onIt)
+		menuItems.push({
+			label: `Tune to ${formatMHz(hz)}`,
+			icon: "tune",
+			pick: () => void tuning.tune(hz),
+		})
+	if (!unknown && !idRunning)
+		menuItems.push({
+			label: "Identify",
+			icon: "scanner",
+			key: "I",
+			pick: startIdentify,
+		})
+	if (idRunning && !unknown)
+		menuItems.push({
+			label: "Stop identifying",
+			icon: "close",
+			pick: closeIdentify,
+		})
+	if (!unknown)
+		menuItems.push({
+			label: pinned === null ? "Pin this card" : "Unpin card",
+			icon: "pin",
+			pick: togglePin,
+		})
+	menuItems.push({ label: "Copy frequency", icon: "copy", pick: copyFreq })
+
+	const minimised = card.minimised
+	const toggleMin = () => {
+		focusAfterMin.current = !minimised
+		setMenu(false)
+		tunedCardStore.setMinimised(!minimised)
+	}
+	const shortId = idRunning
+		? `${proto} · Identifying`
+		: now.shortId || (unknown ? "Unidentified" : proto)
+	const lineState = idRunning
+		? "Identifying"
+		: heldByScan
+			? "Held"
+			: liveState
+				? "Live"
+				: ""
 
 	return (
 		<Island
 			className="wk-shell-card wkf-card"
 			role="region"
 			aria-label="Tuned signal"
+			data-min={minimised || undefined}
 		>
 			<div className="wkf-card-head">
-				<span
-					className="wkf-tile"
-					data-live={active.length > 0 || squelchOpen || undefined}
-					aria-hidden="true"
-				>
-					<Icon name={tile} size={18} />
-				</span>
-				<div className="wkf-card-title">
-					<div className="wkf-card-proto">
-						<span className="wkf-proto">{proto}</span>
-						{protoSub && <span className="wkf-proto-sub">{protoSub}</span>}
-					</div>
-					<div className="wkf-state" data-tone={stateTone}>
-						<span className="wkf-dot" aria-hidden="true" />
-						<span className="wkf-ellipsis" title={stateText}>
-							{stateText}
+				<CardHandle>{tile}</CardHandle>
+				{minimised ? (
+					<button
+						ref={lineRef}
+						type="button"
+						className="wkf-card-line"
+						aria-expanded="false"
+						aria-label="Expand card"
+						aria-describedby="wkf-card-line-text"
+						title={`${formatMHz(hz)} MHz · ${shortId} · ${stateText} · click to expand`}
+						onClick={toggleMin}
+					>
+						<span id="wkf-card-line-text" className="wkf-card-line-text">
+							<span className="wkf-num wkf-strong">{formatMHz(hz)}</span>
+							<span className="wkf-card-line-id">{shortId}</span>
+							{lineState && (
+								<span className="wkf-state" data-tone="accent">
+									<span className="wkf-dot" aria-hidden="true" />
+									<span aria-hidden="true">{lineState}</span>
+									<span className="wk-sr">{stateText}</span>
+								</span>
+							)}
 						</span>
-					</div>
-				</div>
-				<div className="wkf-card-freq" title={levelTitle}>
-					<span className="wkf-num wkf-strong">{formatMHz(hz)}</span>
-					<span className="wkf-bars" role="img" aria-label={levelTitle}>
-						{[2, 4, 6, 8, 10].map((h, i) => (
-							<span
-								key={h}
-								style={{ height: h }}
-								data-on={i < bars || undefined}
-							/>
-						))}
-					</span>
-				</div>
-			</div>
-
-			<div className="wkf-well">
-				{idHere ? (
-					<IdentifyBlock view={idView} onClose={closeIdentify} />
+						<Icon name="chevron-up" size={16} className="wkf-quiet" />
+					</button>
 				) : (
 					<>
-						<Label>
-							{band
-								? `${groupName(band.band.group)} · ${band.band.name}`
-								: "No band plan entry"}
-						</Label>
-						<div className="wkf-big-row">
-							<span className="wkf-big">
-								{channel ? channel.name : formatMHz(hz)}
-							</span>
-							{!channel && <span className="wkf-big-unit">MHz</span>}
+						<div className="wkf-card-title">
+							<div className="wkf-card-proto">
+								<span className="wkf-proto">{proto}</span>
+								{protoSub && <span className="wkf-proto-sub">{protoSub}</span>}
+							</div>
+							<div className="wkf-state" data-tone={stateTone}>
+								<span
+									className="wkf-dot"
+									aria-hidden="true"
+									data-pulse={liveState || undefined}
+								/>
+								<span className="wkf-ellipsis" title={stateText}>
+									{stateText}
+								</span>
+							</div>
 						</div>
-						<span className="wkf-line">
-							{active.length
-								? `Decoded here by ${active.map(d => d.type).join(", ")}`
-								: here.length
-									? `${here.map(d => d.type).join(", ")} listens here but is not running`
-									: bandMode && mode && bandMode !== status?.config.modulation
-										? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
-										: "Nothing decodes this frequency. Identify finds out what it is."}
-						</span>
-						{status && (
-							<span className="wkf-line wkf-quiet wkf-small">
-								{mode?.label ?? status.config.modulation} ·{" "}
-								{formatWidth(status.config.bandwidth)} channel
+						<div className="wkf-card-freq" title={levelTitle}>
+							<span className="wkf-card-freq-row">
+								{pinned !== null && (
+									<Icon
+										name="pin"
+										size={12}
+										className="wkf-pin-mark"
+										role="img"
+										aria-hidden={undefined}
+										aria-label="Pinned"
+									/>
+								)}
+								<span className="wkf-num wkf-strong">{formatMHz(hz)}</span>
 							</span>
-						)}
+							<span className="wkf-bars" role="img" aria-label={levelTitle}>
+								{[2, 4, 6, 8, 10].map((h, i) => (
+									<span
+										key={h}
+										style={{ height: h }}
+										data-on={i < bars || undefined}
+									/>
+								))}
+							</span>
+						</div>
+						<IconButton
+							ref={chevRef}
+							size="sm"
+							label="Minimise card"
+							title="Minimise card"
+							aria-expanded="true"
+							className="wkf-quiet-btn wkf-card-chev"
+							onClick={toggleMin}
+						>
+							<Icon name="chevron-down" size={16} />
+						</IconButton>
 					</>
 				)}
 			</div>
 
-			<div className="wkf-actions">
-				{idHere && idView.running ? (
-					<Button variant="tonal" className="wkf-grow" onClick={closeIdentify}>
-						Stop
-					</Button>
-				) : (
-					<Button
-						variant="primary"
-						className="wkf-grow"
-						disabled={readOnly}
-						title="Identify this signal  I"
-						onClick={startIdentify}
-					>
-						<Icon name="scanner" size={15} />
-						{idHere ? "Identify again" : "Identify"}
-					</Button>
-				)}
-				<Button
-					variant="tonal"
-					title="What was heard on this channel"
-					onClick={() =>
-						hz === null
-							? shellStore.openDrawer("activity")
-							: activity.showFrequency(hz, bw)
-					}
-				>
-					<Icon name="activity" size={15} />
-					Activity
-				</Button>
-			</div>
+			{!minimised && (
+				<>
+					<div className="wkf-well">
+						{idHere ? (
+							<IdentifyBlock view={idView} onClose={closeIdentify} />
+						) : now.kind !== "plain" ? (
+							<NowBlock now={now} />
+						) : (
+							<>
+								<Label>
+									{band
+										? `${groupName(band.band.group)} · ${band.band.name}`
+										: "No band plan entry"}
+								</Label>
+								<div className="wkf-big-row">
+									<span className="wkf-big">
+										{channel ? channel.name : formatMHz(hz)}
+									</span>
+									{!channel && <span className="wkf-big-unit">MHz</span>}
+								</div>
+								<span className="wkf-line">{plainLine}</span>
+								{status && (
+									<span className="wkf-line wkf-quiet wkf-small">
+										{mode?.label ?? status.config.modulation} ·{" "}
+										{formatWidth(status.config.bandwidth)} channel
+									</span>
+								)}
+							</>
+						)}
+					</div>
+
+					{!idHere && now.earlier.length > 0 && (
+						<section
+							aria-label="Recent on this frequency"
+							className="wkf-earlier"
+						>
+							<h3 className="wk-label">
+								{voice ? "Earlier on this frequency" : "Earlier"}
+							</h3>
+							{now.earlier.map(r => (
+								<button
+									key={r.id}
+									type="button"
+									className="wk-row wkf-earlier-row"
+									data-size="dense"
+									title="Open in Activity"
+									onClick={() => {
+										activity.open(r.item)
+										shellStore.openDrawer("activity")
+									}}
+								>
+									<span className="wkf-earlier-t">{r.time}</span>
+									<span className="wkf-earlier-a">{r.a}</span>
+									{r.b && <span className="wkf-earlier-b">{r.b}</span>}
+								</button>
+							))}
+						</section>
+					)}
+
+					<div className="wkf-actions">
+						{menu && (
+							<MoreMenu
+								items={menuItems}
+								onClose={refocus => {
+									setMenu(false)
+									if (refocus) moreRef.current?.focus()
+								}}
+							/>
+						)}
+						{idRunning ? (
+							<Button
+								variant="tonal"
+								className="wkf-grow"
+								onClick={closeIdentify}
+							>
+								Stop
+							</Button>
+						) : unknown || idHere ? (
+							<Button
+								variant="primary"
+								className="wkf-grow"
+								disabled={readOnly}
+								title="Identify this signal  I"
+								onClick={startIdentify}
+							>
+								<Icon name="scanner" size={15} />
+								{idHere ? "Identify again" : "Identify"}
+							</Button>
+						) : null}
+						{now.map && !idRunning && (
+							<Button variant="tonal" className="wkf-grow" onClick={openMap}>
+								<Icon name="map" size={15} />
+								Map
+							</Button>
+						)}
+						{!unknown && now.kind !== "audio" && (
+							<Button
+								variant="tonal"
+								className="wkf-grow"
+								title="What was heard on this channel"
+								onClick={openActivity}
+							>
+								<Icon name="activity" size={15} />
+								Activity
+							</Button>
+						)}
+						<IconButton
+							className="wkf-act-icon"
+							label={savedHere ? "Saved" : "Save"}
+							title={saveTitle}
+							pressed={savedHere !== null}
+							disabled={!canSave}
+							onClick={toggleSave}
+						>
+							<Icon name="bookmark" size={15} />
+						</IconButton>
+						{unknown && (
+							<IconButton
+								className="wkf-act-icon"
+								label={pinned === null ? "Pin" : "Unpin"}
+								title={
+									pinned === null
+										? "Pin this card. It keeps showing this frequency when you tune away."
+										: "Unpin card"
+								}
+								pressed={pinned !== null}
+								onClick={togglePin}
+							>
+								<Icon name="pin" size={15} />
+							</IconButton>
+						)}
+						<IconButton
+							ref={moreRef}
+							className="wkf-act-icon"
+							label="More actions"
+							title="More actions"
+							aria-haspopup="menu"
+							aria-expanded={menu}
+							onClick={() => setMenu(m => !m)}
+						>
+							<Icon name="dots" size={15} />
+						</IconButton>
+					</div>
+				</>
+			)}
 		</Island>
 	)
 }
