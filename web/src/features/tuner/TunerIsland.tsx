@@ -25,12 +25,7 @@ import { Label } from "../../ui/Label.tsx"
 import { formatMHz, formatStep, formatWidth } from "../format.ts"
 import { useLiveStatus, useTunedHz } from "../hooks.ts"
 import { squelchForModulation } from "../listen/audio.ts"
-import {
-	channelSuggestions,
-	groupColour,
-	groupName,
-	type ChannelSuggestion,
-} from "./band.ts"
+import { groupColour, groupName } from "./band.ts"
 import {
 	clickDirection,
 	frequencyDigits,
@@ -41,26 +36,49 @@ import {
 } from "./frequency.ts"
 import { MODES, modeSpec, modulationOf, type Modulation } from "./modes.ts"
 import { effectiveStep, STEPS } from "./prefs.ts"
+import {
+	activeSuggestion,
+	entrySuggestions,
+	entryTarget,
+	type EntrySuggestion,
+} from "./saved.ts"
+import { SavedSection, useRecall } from "./SavedFrequencies.tsx"
 
 interface EntryState {
 	typing: boolean
 	q: string
 	sel: number
+	/** The operator moved through the suggestions with the arrows (Enter then takes one over a typed number). */
+	navigated: boolean
 	/** The panel was open before typing (restored on close). */
 	panelWasOpen: boolean
 }
 
 type EntryStore = Store<EntryState>
 
+const CLOSED_ENTRY: EntryState = {
+	typing: false,
+	q: "",
+	sel: 0,
+	navigated: false,
+	panelWasOpen: false,
+}
+
 function openEntry(entry: EntryStore, q: string): void {
 	const wasOpen = shellStore.getState().panel === "tuner"
-	entry.set({ typing: true, q, sel: 0, panelWasOpen: wasOpen })
+	entry.set({
+		typing: true,
+		q,
+		sel: 0,
+		navigated: false,
+		panelWasOpen: wasOpen,
+	})
 	shellStore.openPanel("tuner")
 }
 
 function closeEntry(entry: EntryStore): void {
 	const { panelWasOpen } = entry.get()
-	entry.set({ typing: false, q: "", sel: 0, panelWasOpen: false })
+	entry.set(CLOSED_ENTRY)
 	if (!panelWasOpen && shellStore.getState().panel === "tuner")
 		shellStore.closePanel()
 }
@@ -157,8 +175,10 @@ function Digits({ entry }: { entry: EntryStore }) {
 
 function EntryInput({ entry }: { entry: EntryStore }) {
 	const { tuning, data } = useServices()
-	const { q, sel } = useStore(entry)
+	const { q, sel, navigated } = useStore(entry)
 	const view = useStore(data.bandplan, s => s.view)
+	const saved = useStore(data.savedFrequencies, s => s.items)
+	const recall = useRecall()
 	const input = useRef<HTMLInputElement>(null)
 	useEffect(() => {
 		const el = input.current
@@ -167,13 +187,17 @@ function EntryInput({ entry }: { entry: EntryStore }) {
 		el.setSelectionRange(el.value.length, el.value.length)
 	}, [])
 	const commit = () => {
-		const sugg = channelSuggestions(view, q)
-		const picked = sugg[sel]
 		const parsed = parseFrequency(q, tuning.displayHz() ?? 0)
-		const hz = picked ? picked.hz : parsed.kind === "ok" ? parsed.hz : null
-		if (hz === null) return
+		const target = entryTarget(
+			parsed,
+			entrySuggestions(view, saved, q),
+			sel,
+			navigated,
+		)
+		if (!target) return
 		closeEntry(entry)
-		void tuning.tune(hz)
+		if (target.kind === "saved") recall(target.saved)
+		else void tuning.tune(target.hz)
 	}
 	return (
 		<>
@@ -181,9 +205,25 @@ function EntryInput({ entry }: { entry: EntryStore }) {
 				ref={input}
 				className="wkf-entry"
 				value={q}
-				onChange={e => entry.update(s => ({ ...s, q: e.target.value, sel: 0 }))}
+				onChange={e =>
+					entry.update(s => ({
+						...s,
+						q: e.target.value,
+						sel: 0,
+						navigated: false,
+					}))
+				}
 				onKeyDown={e => {
-					const n = channelSuggestions(view, q).length
+					const n = entrySuggestions(view, saved, q).length
+					const move = (dir: 1 | -1) => {
+						e.preventDefault()
+						const parsed = parseFrequency(q, tuning.displayHz() ?? 0)
+						entry.update(s => {
+							const at = activeSuggestion(parsed, s.sel, s.navigated)
+							const next = at < 0 ? (dir > 0 ? 0 : n - 1) : (at + dir + n) % n
+							return { ...s, sel: next, navigated: true }
+						})
+					}
 					if (e.key === "Enter") {
 						e.preventDefault()
 						commit()
@@ -191,15 +231,10 @@ function EntryInput({ entry }: { entry: EntryStore }) {
 						e.preventDefault()
 						e.stopPropagation()
 						closeEntry(entry)
-					} else if (e.key === "ArrowDown" && n) {
-						e.preventDefault()
-						entry.update(s => ({ ...s, sel: (s.sel + 1) % n }))
-					} else if (e.key === "ArrowUp" && n) {
-						e.preventDefault()
-						entry.update(s => ({ ...s, sel: (s.sel - 1 + n) % n }))
-					}
+					} else if (e.key === "ArrowDown" && n) move(1)
+					else if (e.key === "ArrowUp" && n) move(-1)
 				}}
-				aria-label="Type a frequency, channel or step"
+				aria-label="Type a frequency, channel, saved name or step"
 				placeholder="161.15 · ch 16 · +25k"
 				spellCheck={false}
 				autoComplete="off"
@@ -266,15 +301,19 @@ function TunerHead({ ctx, entry }: { ctx: IslandContext; entry: EntryStore }) {
 
 function EntryAssist({ entry }: { entry: EntryStore }) {
 	const { tuning, data } = useServices()
-	const { q, sel } = useStore(entry)
+	const { q, sel, navigated } = useStore(entry)
 	const view = useStore(data.bandplan, s => s.view)
+	const saved = useStore(data.savedFrequencies, s => s.items)
+	const recall = useRecall()
 	const status = useLiveStatus()
 	const current = tuning.displayHz() ?? 0
 	const parsed = parseFrequency(q, current)
-	const sugg = channelSuggestions(view, q)
-	const pick = (s: ChannelSuggestion) => {
+	const sugg = entrySuggestions(view, saved, q)
+	const active = activeSuggestion(parsed, sel, navigated)
+	const pick = (s: EntrySuggestion) => {
 		closeEntry(entry)
-		void tuning.tune(s.hz)
+		if (s.kind === "saved") recall(s.saved)
+		else void tuning.tune(s.hz)
 	}
 	let preview: ReactNode
 	if (parsed.kind === "ok") {
@@ -304,11 +343,11 @@ function EntryAssist({ entry }: { entry: EntryStore }) {
 		)
 	} else if (parsed.kind === "error") {
 		preview = <span className="wkf-assist-err">{parsed.message}</span>
-	} else if (!sugg.length) {
+	} else if (parsed.kind === "empty" || !sugg.length) {
 		preview = (
 			<span className="wkf-assist-help">
 				Type MHz (161.15), kHz (161150k), GHz (1.09g), a channel (ch 16, pmr 3),
-				or a step from here (+25k).
+				a saved name, or a step from here (+25k).
 			</span>
 		)
 	}
@@ -326,20 +365,30 @@ function EntryAssist({ entry }: { entry: EntryStore }) {
 							key={s.key}
 							type="button"
 							role="option"
-							aria-selected={i === sel}
+							aria-selected={i === active}
 							className="wk-option"
 							data-size="touch"
-							onMouseEnter={() => entry.update(x => ({ ...x, sel: i }))}
+							onMouseEnter={() =>
+								entry.update(x =>
+									x.sel === i && x.navigated
+										? x
+										: { ...x, sel: i, navigated: true },
+								)
+							}
 							onClick={() => pick(s)}
 						>
-							<span
-								className="wkf-swatch"
-								style={{ background: groupColour(s.group) }}
-							/>
+							{s.kind === "saved" ? (
+								<span className="wkf-saved-dot" />
+							) : (
+								<span
+									className="wkf-swatch"
+									style={{ background: groupColour(s.channel.group) }}
+								/>
+							)}
 							<span className="wkf-grow wkf-ellipsis">
 								<b>{s.label}</b>
 							</span>
-							<span className="wkf-quiet">{s.band}</span>
+							<span className="wkf-quiet">{s.sub}</span>
 							<span className="wkf-assist-f">{formatMHz(s.hz)}</span>
 						</button>
 					))}
@@ -530,6 +579,7 @@ function TuningOptions() {
 					{tuneError ?? audioError}
 				</span>
 			)}
+			<SavedSection />
 		</>
 	)
 }
@@ -541,16 +591,11 @@ function TunerPanel({ entry }: { entry: EntryStore }) {
 
 /** The Tuner island slot. One per app (it holds the typed-entry state). */
 export function createTunerSlot(): IslandSlot {
-	const entry: EntryStore = new Store<EntryState>({
-		typing: false,
-		q: "",
-		sel: 0,
-		panelWasOpen: false,
-	})
+	const entry: EntryStore = new Store<EntryState>(CLOSED_ENTRY)
 	// closing the panel (Escape, the trigger, another island) ends typing
 	shellStore.subscribe(() => {
 		if (shellStore.getState().panel !== "tuner" && entry.get().typing)
-			entry.set({ typing: false, q: "", sel: 0, panelWasOpen: false })
+			entry.set(CLOSED_ENTRY)
 	})
 	return {
 		panelLabel: "Tuning options",

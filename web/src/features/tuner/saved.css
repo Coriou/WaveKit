@@ -1,0 +1,118 @@
+/* Tuner: saved frequencies (docs/web/canvas/Tuner.dc.html "Saved": 44 px rows bleeding 10 px past the panel
+   padding, the tuned row tinted, the save form on --wk-fill-glass). */
+@layer wk-app {
+	.wkf-xs {
+		font-size: var(--wk-fs-xs);
+	}
+	.wkf-saved {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkf-saved-head {
+		align-items: center;
+	}
+	.wkf-saved-add {
+		color: var(--wk-accent);
+	}
+	.wkf-saved-list {
+		display: flex;
+		flex-direction: column;
+		max-height: 264px;
+		overflow-y: auto;
+		margin: 0 -10px;
+		overscroll-behavior: contain;
+	}
+	.wkf-saved-row {
+		display: flex;
+		align-items: center;
+		border-radius: 8px;
+	}
+	.wkf-saved-row[data-tuned] {
+		background: rgba(var(--wk-accent-rgb), 0.08);
+	}
+	.wkf-saved-row[data-pending] {
+		opacity: 0.6;
+	}
+	.wkf-saved-pick {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		height: var(--wk-h-touch);
+		padding: 0 4px 0 10px;
+		text-align: left;
+		border-radius: 8px;
+		color: inherit;
+		font: inherit;
+		cursor: pointer;
+	}
+	.wkf-saved-pick:hover {
+		background: rgba(var(--wk-ink-rgb), 0.05);
+	}
+	.wkf-saved-text {
+		display: flex;
+		flex-direction: column;
+	}
+	.wkf-saved-f {
+		color: var(--wk-text-2);
+		font-size: var(--wk-fs-md);
+		font-variant-numeric: tabular-nums;
+	}
+	.wkf-saved-edit {
+		color: var(--wk-text-4);
+	}
+	.wkf-saved-edit:hover,
+	.wkf-saved-edit:focus-visible {
+		color: var(--wk-text);
+	}
+	.wkf-saved-remove {
+		color: var(--wk-accent);
+	}
+	.wkf-saved-rename {
+		flex: 1;
+		min-width: 0;
+		height: var(--wk-h-lg);
+		margin: 0 4px 0 6px;
+		padding: 0 6px;
+		background: var(--wk-well-glass);
+		border-color: var(--wk-line-30);
+		font-weight: 700;
+	}
+	.wkf-save {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 14px;
+		margin: 4px 0 8px;
+		border-radius: 8px;
+		background: var(--wk-fill-glass);
+	}
+	.wkf-save-label {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-3);
+	}
+	.wkf-save-name {
+		height: var(--wk-h-lg);
+		padding: 0 12px;
+		background: var(--wk-well-glass);
+		border-color: var(--wk-line-14);
+	}
+	.wkf-save-actions {
+		display: flex;
+		gap: 8px;
+		justify-content: flex-end;
+	}
+	/* Typed entry: a saved suggestion's dot is the accent (the board's `dot`), channels keep their group swatch. */
+	.wkf-saved-dot {
+		width: 8px;
+		height: 8px;
+		flex: none;
+		border-radius: 50%;
+		background: var(--wk-accent);
+	}
+}

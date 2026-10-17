@@ -7,6 +7,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   audio on port + 1 (`WAVEKIT_MOCK_AUDIO_PORT`, advertised as `WAVEKIT_MOCK_AUDIO_ORIGIN`,
   default `http://localhost:3102`) at `/stream.wav` and `/stream`.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
+- Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
+  saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with
+  the revision token and core's error bodies, `operator-data:snapshot` on subscribe and
+  `operator-data:updated` after each change. Seeds are `MOCK_SAVED_FREQUENCIES` in `data.ts`.
+  A real legacy core answers 404 there; the web app then says saved frequencies are unavailable.
 - `/stream` sends the core's `X-Audio-Format` / `X-Sample-Rate` / `X-Channels` headers and, like a
   legacy core since WG7, `Access-Control-Allow-Origin: *` on every answer and a 204 preflight on the
   stream paths: the page fetches it cross-origin directly. While live audio is stopped the connection

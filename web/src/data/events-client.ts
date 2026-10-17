@@ -82,6 +82,9 @@ export interface EventMap {
 	"spectrum:profile": SpectrumProfileEventData
 	"spectrum:frame": SpectrumFrameEventData
 	"bandplans:changed": BandPlansChangedEventData
+	/** An OperatorDataReadDto, unvalidated: SavedFrequenciesStore parses it with operatorDataReadDtoSchema. */
+	"operator-data:snapshot": unknown
+	"operator-data:updated": unknown
 	"activity:subscribed": { id: string }
 	"activity:unsubscribed": { id: string }
 	"activity:records": ActivityRecordsMessage["data"]

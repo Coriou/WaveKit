@@ -16,6 +16,7 @@ import type {
 	PlanProvenance,
 	ResolvedBand,
 	ResolvedBandPlanView,
+	SavedFrequencyInput,
 	ScannerClass,
 	ScannerProtocol,
 } from "@wavekit/api-types"
@@ -1664,5 +1665,61 @@ export const MOCK_TRANSMISSIONS: readonly {
 		title: "2 m repeater · F4ABC",
 		ctcssHz: 123.0,
 		dtmf: null,
+	},
+]
+
+/**
+ * Saved frequencies (Tuner.dc.html / Immersive.dc.html `saved`, Palette.dc.html adds PMR446 ch 1), in
+ * core's operator-data shape. Three sit inside the default capture (160.3–162.7 MHz) so the spectrum
+ * shows their tags; PMR446 ch 1 keeps the CTCSS tone its transmissions carry.
+ */
+export const MOCK_SAVED_FREQUENCIES: readonly SavedFrequencyInput[] = [
+	{
+		name: "DMR repeater",
+		frequencyHz: 161_150_000,
+		mode: "nfm",
+		bandwidthHz: 12_500,
+		tone: { kind: "none" },
+		group: "Local",
+	},
+	{
+		name: "AIS channel A",
+		frequencyHz: 161_975_000,
+		mode: "nfm",
+		bandwidthHz: 25_000,
+		tone: { kind: "none" },
+		group: "Marine",
+	},
+	{
+		name: "Port ops",
+		frequencyHz: 160_625_000,
+		mode: "nfm",
+		bandwidthHz: 12_500,
+		tone: { kind: "none" },
+		group: "Marine",
+	},
+	{
+		name: "Marine ch 16",
+		frequencyHz: 156_800_000,
+		mode: "nfm",
+		bandwidthHz: 12_500,
+		tone: { kind: "none" },
+		group: "Marine",
+	},
+	{
+		name: "PMR446 ch 1",
+		frequencyHz: 446_006_250,
+		mode: "nfm",
+		bandwidthHz: 12_500,
+		tone: { kind: "ctcss", frequencyTenthsHz: 770 },
+		group: "Local",
+	},
+	{
+		name: "Tower",
+		frequencyHz: 118_100_000,
+		mode: "am",
+		bandwidthHz: 8_330,
+		tone: { kind: "none" },
+		group: "Aviation",
 	},
 ]

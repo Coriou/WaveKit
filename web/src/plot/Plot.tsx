@@ -56,6 +56,7 @@ import { SquelchLine, VfoEdges } from "./HandleOverlays.tsx"
 import { EDGE_GRAB_MIN_PX } from "./handles.ts"
 import { useHandles, type HandleFrame } from "./use-handles.ts"
 import type { SpectrumProbe } from "../spectrum/index.ts"
+import { SavedTags } from "./SavedTags.tsx"
 
 export interface PlotProps {
 	data: DataLayer
@@ -319,6 +320,13 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 							style={{ top: layout.traceCss + AXIS_CSS, height: LANES_CSS }}
 						>
 							<Lanes plan={plan} view={view} widthPx={size.w} />
+							<SavedTags
+								data={data}
+								controller={controller}
+								view={view}
+								widthPx={size.w}
+								tunedHz={vfoHz}
+							/>
 						</div>
 						{vfoHz !== null &&
 							vfoHz >= view.startHz - bandwidthHz &&

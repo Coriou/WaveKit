@@ -10,6 +10,7 @@ import { BandplanStore } from "./bandplan-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
 import { ReceiverStore } from "./receiver-store.ts"
+import { SavedFrequenciesStore } from "./saved-frequencies-store.ts"
 import { SourcesStore } from "./sources-store.ts"
 import { Store } from "./store.ts"
 import { TunerStore } from "./tuner-store.ts"
@@ -32,6 +33,8 @@ export interface DataLayer {
 	liveAudio: LiveAudioStore
 	bandplan: BandplanStore
 	identify: IdentifyStore
+	/** Saved frequencies (core operator data; protected mode only). */
+	savedFrequencies: SavedFrequenciesStore
 	/** Detects the access mode, opens /ws and loads every store. Never rejects. */
 	start(): Promise<void>
 	dispose(): void
@@ -74,6 +77,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		liveAudio: new LiveAudioStore(api, events),
 		bandplan: new BandplanStore(api, events),
 		identify: new IdentifyStore(api, events),
+		savedFrequencies: new SavedFrequenciesStore(api, events),
 		async start() {
 			try {
 				access.set({ access: await api.bootstrap(), error: null })
@@ -87,6 +91,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 				layer.liveAudio.load(),
 				layer.bandplan.load(),
 				layer.receiver.loadRelay(),
+				layer.savedFrequencies.load(),
 			])
 		},
 		dispose() {
@@ -97,6 +102,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.liveAudio.dispose()
 			layer.bandplan.dispose()
 			layer.identify.dispose()
+			layer.savedFrequencies.dispose()
 			events.disconnect()
 		},
 	}
@@ -109,6 +115,7 @@ export {
 	CSRF_HEADER,
 	errorMessage,
 	isApiError,
+	validated,
 } from "./api-client.ts"
 export type {
 	AccessState,
@@ -159,4 +166,17 @@ export type {
 export { BandplanStore, bandAt, bandsAt, channelAt } from "./bandplan-store.ts"
 export type { BandplanState } from "./bandplan-store.ts"
 export { IdentifyStore, isIdentifyFinal } from "./identify-store.ts"
+export {
+	SavedFrequenciesStore,
+	applyOps,
+	checkInput,
+	compareSaved,
+	inputOf,
+	isPendingId,
+} from "./saved-frequencies-store.ts"
+export type {
+	SavedFrequenciesState,
+	SavedFrequenciesStatus,
+	SavedFrequencyRow,
+} from "./saved-frequencies-store.ts"
 export type { IdentifyOptions, IdentifyState } from "./identify-store.ts"

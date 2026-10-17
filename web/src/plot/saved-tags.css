@@ -1,0 +1,52 @@
+/* Saved-frequency tags (Spectrum board: 18 px chips at top 3 px of the 24 px lane row, 4 px radius, accent text on a
+   12 % accent tint, bookmark 10 px). The tint sits on the plot ground so the chip is opaque: lane names give way. */
+@layer wk-app {
+	.wk-plot-saved {
+		position: absolute;
+		top: 3px;
+		z-index: 20;
+		height: 18px;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 6px 0 4px;
+		border: 0;
+		border-radius: 4px;
+		background:
+			linear-gradient(
+				rgba(var(--wk-accent-rgb), 0.12),
+				rgba(var(--wk-accent-rgb), 0.12)
+			),
+			var(--wk-plot-bg);
+		color: var(--wk-accent);
+		font: inherit;
+		font-size: 11px;
+		font-weight: 700;
+		line-height: 18px;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.wk-plot-saved > svg {
+		flex: none;
+	}
+	.wk-plot-saved > span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wk-plot-saved:hover,
+	.wk-plot-saved[data-tuned] {
+		background:
+			linear-gradient(
+				rgba(var(--wk-accent-rgb), 0.22),
+				rgba(var(--wk-accent-rgb), 0.22)
+			),
+			var(--wk-plot-bg);
+	}
+	.wk-plot-saved:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 2px rgba(var(--wk-accent-rgb), 0.55);
+	}
+	.wk-plot-saved[data-pending] {
+		opacity: 0.6;
+	}
+}
