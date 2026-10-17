@@ -37,6 +37,8 @@ access:
     - 127.0.0.1:__WAVEKIT_DEV_API_PORT__
   allowedOrigins:
     - http://127.0.0.1:__WAVEKIT_DEV_API_PORT__
+    # A web app on another port of the same hostname (WG9 req 1.1): add its origin here.
+    # - http://127.0.0.1:5173
   audio:
     analog:
       allowedAuthorities:
