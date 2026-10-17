@@ -225,6 +225,17 @@ The probe pool remembers a decoder type found unavailable for `PROBE_UNAVAILABLE
 clears it. A genuine `no-sync` (the decoder ran and heard nothing) stays `no-sync`.
 3.6 The CLI identify guard keeps parsing every new payload (outcome and state unchanged; `decoder`
 and `reason` free text; new result fields stripped); the lane runs the guard check.
+3.7 **Activity hygiene (added at Main, R2 as landed).** The transmission tracker publishes (WS,
+Activity, identify evidence alike) a squelch opening only when, after merging re-opens within
+`ANALOG_TRANSMISSION_MERGE_GAP_MS` (1500 ms) of the audio end, its summed segment audio is at least
+`ANALOG_TRANSMISSION_MIN_MS` (500 ms; a max-duration continuation is exempt) and, on nfm/wfm, one
+segment has at least `ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS` (3) FM-quieted 10 ms blocks (blocks
+while closed or across segments never add up). A resumed segment that confirms a CTCSS tone or DCS
+code different from the one the transmission had confirmed is a new transmission from its own
+start; the earlier one ends at its gap end with its own tone. Every qualifying opening is exactly
+one published transmission. Identify waits, at most `IDENTIFY_ANALOG_SETTLE_MS` (1750 ms) past a
+target's deadline, on an open match or a held (pending) opening started by the deadline before
+deciding `timeout`; such a trial never ends `no-sync`. Live audio gating is unchanged.
 
 ## 4. Startup log minors
 
