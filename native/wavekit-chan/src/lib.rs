@@ -4,6 +4,7 @@ pub mod channel;
 pub mod convert;
 pub mod design;
 pub mod disposal;
+pub mod iqcap;
 pub mod plan;
 mod preparation;
 pub mod protocol;
