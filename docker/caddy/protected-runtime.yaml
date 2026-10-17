@@ -28,6 +28,10 @@ access:
     - "receiver.example:9443"
   allowedOrigins:
     - "https://receiver.example:9443"
+    # Optional web app on its own port of the API hostname (the commented
+    # 9446 site in Caddyfile). Same scheme and hostname as publicOrigins.api;
+    # another hostname is refused by the configuration check.
+    # - "https://receiver.example:9446"
   audio:
     analog:
       allowedAuthorities:
