@@ -58,7 +58,6 @@ import {
 	SAMPLE_RATE_HZ,
 	USABLE_FRACTION,
 	buildDecoders,
-	buildResolvedBandPlan,
 	decoderInBand,
 	identifyPlanFor,
 	signalActive,
@@ -69,6 +68,7 @@ import { registerMapMock } from "./map.ts"
 import type { MapMock } from "./map.ts"
 import { registerRecordingsMock } from "./recordings.ts"
 import { registerOperatorData } from "./operator-data.ts"
+import { registerBandPlansMock } from "./bandplans.ts"
 import {
 	normaliseSpectrumOptions,
 	SPECTRUM_BACKFILL_MAX_FRAMES,
@@ -1526,8 +1526,9 @@ export async function buildMockServer(
 		raw: { bandwidth: 0, deEmphasis: false },
 	}))
 
-	const resolved = buildResolvedBandPlan()
-	app.get("/api/bandplans/resolved", async () => resolved)
+	const bandplans = registerBandPlansMock(app, {
+		onCommit: token => broadcast("bandplans", "bandplans:changed", token),
+	})
 
 	app.post<{
 		Body: {
@@ -1885,7 +1886,7 @@ export async function buildMockServer(
 				send(client, {
 					type: "bandplans:changed",
 					channel: "bandplans",
-					data: { storeId: null, revision: 0 },
+					data: bandplans.token(),
 				})
 		}
 	}
