@@ -58,6 +58,7 @@ const PendingEpochSchema = z.object({
 	gainKey: z.string(),
 	tuningTrust: TuningTrustSchema,
 	centreChanged: z.boolean(),
+	staleMaxMs: z.number().nonnegative().optional(),
 })
 
 export const PipelineInputSchema = z.discriminatedUnion("kind", [

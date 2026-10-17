@@ -37,6 +37,11 @@ import { bytesPerSample } from "./frame-source.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { IqRing } from "./iq-ring.js"
 import {
+	blockSamplesOf,
+	frameTrust,
+	operatorRetuneTiming,
+} from "./retune-settle.js"
+import {
 	createPipelineHost,
 	type PipelineHost,
 	type PipelineHostHandlers,
@@ -346,6 +351,10 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		checkState: boolean
 	} | null = null
 	private readonly pendingMeta = new Map<number, EngineEpoch>()
+	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
+	private readonly verifiedFrom = new Map<number, number>()
+	/** The current epoch's entry of `verifiedFrom` (null: no unverified window). */
+	private currentVerifiedFrom: number | null = null
 	/**
 	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
 	 * has not arrived yet, in post order. A thread host can still deliver the
@@ -443,6 +452,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.awaitingPayload = false
 		this.streamStartByte = 0
 		this.pendingMeta.clear()
+		this.verifiedFrom.clear()
 		this.openingStreams.length = 0
 		this.beginStream(this.initialTrust())
 		const reader = this.deps.hostCentre ?? nullHostCentreReader
@@ -748,6 +758,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.pool.length = 0
 			// The old host's pending epochs and stream starts never arrive.
 			this.pendingMeta.clear()
+			this.verifiedFrom.clear()
 			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
 			if (this.masks) this.send({ kind: "masks", ...this.masks })
@@ -1120,6 +1131,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					settleMode: ev.settleMode,
 				}
 				if (ev.settleMode === "marker") this.marker = true
+				this.currentVerifiedFrom = this.verifiedFrom.get(ev.epoch) ?? null
+				this.verifiedFrom.delete(ev.epoch)
 			} else if (ev.kind === "untracked-retune") {
 				// § 4.7: the pipeline already started an unverified epoch (Task 10b); record it, post nothing.
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
@@ -1138,7 +1151,31 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.lastStats = ev.stats
 				if (ev.stats.stuckTestMode) this.marker = false
 			}
-			this.emit("pipeline", ev, this.currentEpoch())
+			this.emit("pipeline", ev, this.epochFor(ev))
+		}
+	}
+
+	/** WG9 req 3.4: a block that starts before a non-scanner retune's network settle is `unverified`. */
+	private epochFor(ev: PipelineEvent): EngineEpoch {
+		const epoch = this.currentEpoch()
+		const from = this.currentVerifiedFrom
+		if (
+			from === null ||
+			ev.kind !== "block-summary" ||
+			ev.summary.epoch !== epoch.epoch ||
+			!this.cfg
+		)
+			return epoch
+		const blockStart =
+			ev.summary.endSample -
+			blockSamplesOf(
+				this.cfg.integrationMs,
+				this.cfg.sampleRateHz,
+				this.cfg.fftSize,
+			)
+		return {
+			...epoch,
+			tuningTrust: frameTrust(epoch.tuningTrust, blockStart, from),
 		}
 	}
 
@@ -1327,16 +1364,26 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		}
 		const fs = caps.sampleRate
 		const s = this.deps.settings()
+		// WG9 req 3.4: never the scanner's own retune (the arbiter submits those directly).
+		const timing = operatorRetuneTiming({
+			commandSample: pending.commandSample,
+			bufferedSamples: pending.bufferedSamples,
+			sampleRateHz: fs,
+			networkSettleMs: s.sweep.settleMs.network,
+		})
 		const centreHz =
 			this.centreOverride ??
 			pending.centreHz ??
 			caps.centerFreq ??
 			this.current.centreHz
+		const epoch = this.allocateEpoch()
+		if (timing.verifiedFromSample !== null)
+			this.verifiedFrom.set(epoch, timing.verifiedFromSample)
 		this.submitEpoch({
-			epoch: this.allocateEpoch(),
+			epoch,
 			commandSample: pending.commandSample,
 			bufferedSamples: pending.bufferedSamples,
-			settleSamples: Math.round((s.sweep.settleMs.network * fs) / 1000),
+			settleSamples: timing.settleSamples,
 			expectMarker: false,
 			markerTimeoutSamples: 0,
 			pllSettleSamples: 0,
@@ -1345,6 +1392,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			gainKey: gainKeyOf(this.deps.tuner?.getState(this.sourceId)),
 			tuningTrust: pending.trust,
 			centreChanged: centreHz !== this.current.centreHz,
+			staleMaxMs: timing.staleMaxMs,
 		})
 	}
 

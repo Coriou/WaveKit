@@ -15,6 +15,12 @@ export async function startSpectrumRtlTcp(opts: {
 	seed: number
 	/** Counter chunks (20 ms each) sent after every TEST_MODE 1 → 0 transition. */
 	markerChunks?: number
+	/**
+	 * WG9 TT.2: models bridge buffering. Each chunk is generated at the current frequency and
+	 * written `sendDelayMs` later, so samples reach the client that long after a command took
+	 * effect. 0 / absent: written at once (the original behaviour).
+	 */
+	sendDelayMs?: number
 }): Promise<SpectrumRtlTcp> {
 	const frames: [number, number][] = []
 	const rng = mulberry32(opts.seed)
@@ -24,6 +30,11 @@ export async function startSpectrumRtlTcp(opts: {
 	let counterChunksLeft = 0
 	let counter = 0
 	const sockets = new Set<net.Socket>()
+	const delayMs = opts.sendDelayMs ?? 0
+	const delayed = new Set<NodeJS.Timeout>()
+	const send = (bytes: Uint8Array): void => {
+		for (const s of sockets) if (!s.destroyed) s.write(Buffer.from(bytes))
+	}
 	const server = net.createServer(socket => {
 		sockets.add(socket)
 		socket.on("error", () => undefined)
@@ -67,7 +78,15 @@ export async function startSpectrumRtlTcp(opts: {
 			}
 			bytes = packCu8(iq.re, iq.im)
 		}
-		for (const s of sockets) if (!s.destroyed) s.write(Buffer.from(bytes))
+		if (delayMs <= 0) send(bytes)
+		else {
+			const t = setTimeout(() => {
+				delayed.delete(t)
+				send(bytes)
+			}, delayMs)
+			t.unref()
+			delayed.add(t)
+		}
 	}, 20)
 	timer.unref()
 	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
@@ -78,6 +97,8 @@ export async function startSpectrumRtlTcp(opts: {
 		frequency: () => frequency,
 		close: async () => {
 			clearInterval(timer)
+			for (const t of delayed) clearTimeout(t)
+			delayed.clear()
 			for (const s of sockets) s.destroy()
 			await new Promise<void>(resolve => server.close(() => resolve()))
 		},
