@@ -630,6 +630,7 @@ export class ScannerService extends EventEmitter {
 				newId: () => ulid(this.now()),
 				minSurfaceBlocks: deps.settings.detection.minSurfaceBlocks,
 				rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
+				logger: this.log,
 				...(deps.recordingProtection
 					? {
 							discoveryHoldsKept: (id: string) =>
