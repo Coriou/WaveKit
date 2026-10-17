@@ -39,6 +39,7 @@ import {
 	DECODER_SEEDS,
 	DEFAULT_CENTER_HZ,
 	MOCK_MESSAGES,
+	MOCK_SAVED_FREQUENCIES,
 	MOCK_SOURCE_ID,
 	MOCK_TRANSMISSIONS,
 	NOISE_FLOOR_DBFS,
@@ -52,6 +53,7 @@ import {
 	signalAt,
 } from "./data.ts"
 import type { MockMessage, MockSignal } from "./data.ts"
+import { registerOperatorData } from "./operator-data.ts"
 import {
 	normaliseSpectrumOptions,
 	SPECTRUM_BACKFILL_MAX_FRAMES,
@@ -998,6 +1000,11 @@ export async function buildMockServer(
 		timestamp: new Date().toISOString(),
 	})
 	app.get("/health", async () => ok())
+	// Operator data as a protected core serves it (core mounts it in protected mode only).
+	const operatorData = registerOperatorData(app, {
+		seeds: MOCK_SAVED_FREQUENCIES,
+		onCommit: dto => broadcast("operator-data", "operator-data:updated", dto),
+	})
 	app.get("/health/live", async () => ok())
 	app.get("/health/ready", async () => ok())
 	// GET /api/access/bootstrap is deliberately not mounted: a legacy core answers it with 404.
@@ -1528,7 +1535,7 @@ export async function buildMockServer(
 			})
 			return
 		}
-		for (const c of channels) if (c !== "operator-data") client.channels.add(c)
+		for (const c of channels) client.channels.add(c)
 		send(client, {
 			type: "subscribed",
 			data: { channels: [...client.channels] },
@@ -1536,6 +1543,12 @@ export async function buildMockServer(
 		const opts = isRecord(parsed["options"]) ? parsed["options"] : {}
 		for (const c of new Set(channels)) {
 			if (c === "spectrum") subscribeSpectrum(client, opts["spectrum"])
+			if (c === "operator-data")
+				send(client, {
+					type: "operator-data:snapshot",
+					channel: "operator-data",
+					data: operatorData.readDto(),
+				})
 			if (c === "bandplans")
 				send(client, {
 					type: "bandplans:changed",

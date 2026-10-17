@@ -48,6 +48,7 @@ import {
 } from "./maths.ts"
 import { PlotController, type PlotContext } from "./plot-store.ts"
 import { AXIS_CSS, LANES_CSS, plotLayout } from "./layout.ts"
+import { SavedTags } from "./SavedTags.tsx"
 
 export interface PlotProps {
 	data: DataLayer
@@ -259,6 +260,13 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 							style={{ top: layout.traceCss + AXIS_CSS, height: LANES_CSS }}
 						>
 							<Lanes plan={plan} view={view} widthPx={size.w} />
+							<SavedTags
+								data={data}
+								controller={controller}
+								view={view}
+								widthPx={size.w}
+								tunedHz={vfoHz}
+							/>
 						</div>
 						{vfoHz !== null &&
 							vfoHz >= view.startHz - bandwidthHz &&

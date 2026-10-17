@@ -3,7 +3,17 @@
  * and /health). Protected-mode aware: cookie credentials, the access bootstrap (404 = legacy
  * core) and `X-WaveKit-CSRF` on unsafe methods once a CSRF token is known.
  */
-import type { AccessBootstrapDto } from "@wavekit/api-types"
+import {
+	operatorDataReadDtoSchema,
+	operatorDataWriteDtoSchema,
+} from "@wavekit/api-types"
+import type {
+	AccessBootstrapDto,
+	ExpectedToken,
+	OperatorDataReadDto,
+	OperatorDataWriteDto,
+	SavedFrequencyInput,
+} from "@wavekit/api-types"
 
 export const CSRF_HEADER = "X-WaveKit-CSRF"
 
@@ -199,6 +209,60 @@ export class ApiClient {
 		return this.request<T>("DELETE", path, undefined, options)
 	}
 
+	// ---- operator data (src/operator-data/routes.ts; protected mode only, 404 on a legacy core)
+
+	/** GET /api/operator-data, validated. */
+	async getOperatorData(signal?: AbortSignal): Promise<OperatorDataReadDto> {
+		const path = "/api/operator-data"
+		const body = await this.get<unknown>(path, signal ? { signal } : {})
+		return validated(operatorDataReadDtoSchema, body, "GET", path)
+	}
+
+	/** POST /api/operator-data/saved-frequencies (201): the new snapshot and the new id. */
+	createSavedFrequency(
+		expected: ExpectedToken,
+		frequency: SavedFrequencyInput,
+	): Promise<OperatorDataWriteDto> {
+		return this.operatorWrite("POST", "/api/operator-data/saved-frequencies", {
+			expected,
+			frequency,
+		})
+	}
+
+	/** PUT /api/operator-data/saved-frequencies/:id: replaces every field (rename included). */
+	replaceSavedFrequency(
+		id: string,
+		expected: ExpectedToken,
+		frequency: SavedFrequencyInput,
+	): Promise<OperatorDataWriteDto> {
+		return this.operatorWrite(
+			"PUT",
+			`/api/operator-data/saved-frequencies/${encodeURIComponent(id)}`,
+			{ expected, frequency },
+		)
+	}
+
+	/** DELETE /api/operator-data/saved-frequencies/:id (the token travels in the body). */
+	deleteSavedFrequency(
+		id: string,
+		expected: ExpectedToken,
+	): Promise<OperatorDataWriteDto> {
+		return this.operatorWrite(
+			"DELETE",
+			`/api/operator-data/saved-frequencies/${encodeURIComponent(id)}`,
+			{ expected },
+		)
+	}
+
+	private async operatorWrite(
+		method: "POST" | "PUT" | "DELETE",
+		path: string,
+		body: unknown,
+	): Promise<OperatorDataWriteDto> {
+		const answer = await this.request<unknown>(method, path, body)
+		return validated(operatorDataWriteDtoSchema, answer, method, path)
+	}
+
 	async request<T>(
 		method: string,
 		path: string,
@@ -256,6 +320,33 @@ export class ApiClient {
 		}
 		return parsed as T
 	}
+}
+
+interface SafeParser<T> {
+	safeParse(
+		value: unknown,
+	):
+		| { success: true; data: T }
+		| { success: false; error: { issues: { message: string }[] } }
+}
+
+/** Zod at the boundary: a body that does not match the DTO is an ApiError (`RESPONSE_INVALID`). */
+export function validated<T>(
+	schema: SafeParser<T>,
+	body: unknown,
+	method: string,
+	path: string,
+): T {
+	const result = schema.safeParse(body)
+	if (result.success) return result.data
+	throw new ApiError({
+		status: 200,
+		code: "RESPONSE_INVALID",
+		message: `Unexpected answer from ${path}: ${result.error.issues[0]?.message ?? "invalid"}`,
+		body,
+		method,
+		path,
+	})
 }
 
 /** A short human message for any thrown value. */
