@@ -290,6 +290,18 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 - [ ] Position extraction from ACARS / VDL2 (ADS-C, `POS` reports) into the common envelope.
   Partly: AIS aids to navigation (type 21) are tracked as vessel class `aton` with position.
 - [ ] Optional: aircraft route and military flag (enrichment has registration, type, operator).
+- [ ] Which fleets this core tracks, in one place (bootstrap or a capabilities route). Today each
+  fleet route is mounted only with its tracker, so the web app reads a 404 as "not tracked here"
+  and cannot tell a tracker that is off from a core too old to have it.
+- [ ] Optional: batched or rate-limited `aircraft` frames for busy airspace (the channel sends
+  every update, one frame per aircraft per message); the web app coalesces into one render per
+  250 ms meanwhile.
+- Web app lot 6 (2026-10-17) uses what is ticked above. Meanwhile, in the browser: ADS-B trails come
+  from `trackHistory`, other trails only from positions seen since the page opened; the timeline
+  chip shows Live only (no replay); an unset station location is estimated from the positions
+  heard and shown as approximate (coverage stays off until it is set); tiles are OpenFreeMap online
+  and, when they cannot load, the map shows data on a plain sea ("Basemap unavailable · data
+  only"); ACARS sits in the layers rail as unavailable.
 
 **Settings and station**
 - [ ] Station identity: set from the UI, passed to the other decoders (direwolf `callsign` parsed,

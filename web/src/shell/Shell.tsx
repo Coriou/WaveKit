@@ -328,7 +328,9 @@ export function Shell({
 			</div>
 			{state.view === "map" && (
 				<Suspense fallback={null}>
-					<MapView />
+					<MapView
+						insets={{ top: L.topRow, right: L.rxRight, phone: L.dockHidden }}
+					/>
 				</Suspense>
 			)}
 

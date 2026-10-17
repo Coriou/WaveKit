@@ -247,8 +247,8 @@ const DECODER_CONFIG: Readonly<Record<string, Record<string, unknown>>> = {
 	readsb: {
 		deviceSerial: "00001090",
 		gain: "auto",
-		lat: 48.39,
-		lon: -4.49,
+		lat: 48.7051,
+		lon: -3.975,
 		outputFormat: "beast",
 	},
 }
@@ -543,10 +543,10 @@ export function registerSettingsMock(
 	// --- station state: the persisted UI layer
 	let stationRevision = 2
 	const ui: Partial<Record<StationField, string | number>> = {
-		name: "Brest harbour",
-		lat: 48.383,
-		lon: -4.495,
-		altM: 32,
+		name: "Roscoff harbour",
+		lat: 48.7051,
+		lon: -3.975,
+		altM: 18,
 	}
 	const stationValueOf = (field: StationField) => {
 		const configured = STATION_CONFIG[field]

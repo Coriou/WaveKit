@@ -64,6 +64,8 @@ import {
 	signalAt,
 } from "./data.ts"
 import type { MockMessage, MockSignal } from "./data.ts"
+import { registerMapMock } from "./map.ts"
+import type { MapMock } from "./map.ts"
 import { registerOperatorData } from "./operator-data.ts"
 import {
 	normaliseSpectrumOptions,
@@ -99,6 +101,8 @@ export interface MockServer {
 	scanner: ScannerMock
 	/** Settings routes (./settings.ts): station, decoder settings, storage, export. */
 	settings: SettingsMock
+	/** Map fleets and coverage (./map.ts). */
+	map: MapMock
 }
 
 /** The core's rtl_tcp frequency range (TunerValidationError beyond it). */
@@ -1197,6 +1201,16 @@ export async function buildMockServer(
 		broadcast: (channel, type, data) => broadcast(channel, type, data),
 		lifecycle,
 	})
+	// --- Map (./map.ts): aircraft, vessels, APRS, mesh and coverage around the Settings station.
+	const map = registerMapMock(app, {
+		broadcast: (channel, type, data) => broadcast(channel, type, data),
+		station: () => {
+			const st = settings.station()
+			return st.lat.value !== null && st.lon.value !== null
+				? { lat: st.lat.value, lon: st.lon.value }
+				: null
+		},
+	})
 	// GET /api/access/bootstrap is deliberately not mounted: a legacy core answers it with 404.
 
 	app.get("/api/sources", async () => [sourceStatus()])
@@ -1924,6 +1938,7 @@ export async function buildMockServer(
 		receiver,
 		scanner,
 		settings,
+		map,
 		async listen() {
 			await new Promise<void>((resolve, reject) => {
 				audio.once("error", reject)

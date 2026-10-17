@@ -93,6 +93,19 @@ export interface EventMap {
 	/** An OperatorDataReadDto, unvalidated: SavedFrequenciesStore parses it with operatorDataReadDtoSchema. */
 	"operator-data:snapshot": unknown
 	"operator-data:updated": unknown
+	/** Fleet channels (aircraft, vessels, aprs, mesh): unvalidated, FleetStore parses each with its schema. */
+	"aircraft:new": unknown
+	"aircraft:update": unknown
+	"aircraft:lost": unknown
+	"vessel:new": unknown
+	"vessel:update": unknown
+	"vessel:lost": unknown
+	"aprs:new": unknown
+	"aprs:update": unknown
+	"aprs:lost": unknown
+	"mesh:new": unknown
+	"mesh:update": unknown
+	"mesh:lost": unknown
 	"activity:subscribed": { id: string }
 	"activity:unsubscribed": { id: string }
 	"activity:records": ActivityRecordsMessage["data"]

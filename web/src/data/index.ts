@@ -6,7 +6,10 @@ import type { AccessState, ApiClientOptions, FetchLike } from "./api-client.ts"
 import { ApiClient, errorMessage } from "./api-client.ts"
 import type { ConnectionState, SocketFactory } from "./events-client.ts"
 import { EventsClient } from "./events-client.ts"
+import type { Fleets } from "./fleets.ts"
+import { createFleets } from "./fleets.ts"
 import { BandplanStore } from "./bandplan-store.ts"
+import { CoverageStore } from "./coverage-store.ts"
 import { DecoderSettingsStore } from "./decoder-settings-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
@@ -50,6 +53,10 @@ export interface DataLayer {
 	system: SystemStore
 	/** Operator preferences, derived from the saved-frequencies operator-data read. */
 	preferences: PreferencesStore
+	/** Aircraft, vessels, APRS and mesh current state; each attaches on demand (the Map view). */
+	fleets: Fleets
+	/** ADS-B and AIS coverage per bearing; attaches on demand. */
+	coverage: CoverageStore
 	/** Detects the access mode, opens /ws and loads every store. Never rejects. */
 	start(): Promise<void>
 	dispose(): void
@@ -99,6 +106,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		decoderSettings: new DecoderSettingsStore(api),
 		system: new SystemStore(api),
 		preferences: new PreferencesStore(api, savedFrequencies),
+		fleets: createFleets(api, events),
+		coverage: new CoverageStore(api),
 		async start() {
 			try {
 				access.set({ access: await api.bootstrap(), error: null })
@@ -163,6 +172,25 @@ export type {
 	SubscribeOptions,
 } from "./events-client.ts"
 export { Store, useStore } from "./store.ts"
+export { FleetStore } from "./fleet-store.ts"
+export type {
+	FleetEntry,
+	FleetSpec,
+	FleetState,
+	FleetStatus,
+	FleetStoreOptions,
+	TrailPoint,
+} from "./fleet-store.ts"
+export {
+	AIRCRAFT_SPEC,
+	APRS_SPEC,
+	MESH_SPEC,
+	VESSEL_SPEC,
+	createFleets,
+} from "./fleets.ts"
+export type { Aircraft, Aprs, Fleets, Mesh, Vessel } from "./fleets.ts"
+export { CoverageStore } from "./coverage-store.ts"
+export type { Coverage, CoverageState } from "./coverage-store.ts"
 export type { ReadableStore } from "./store.ts"
 export { SourcesStore } from "./sources-store.ts"
 export type { SourcesState } from "./sources-store.ts"
