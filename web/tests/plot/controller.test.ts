@@ -251,6 +251,78 @@ describe("PlotController", () => {
 		])
 	})
 
+	it("a click right after a drag tunes where it was clicked, from the centre the drag asked for", async () => {
+		const timers = fakeTimers()
+		const calls: string[] = []
+		let answer: () => void = () => undefined
+		const c = new PlotController(
+			{
+				retune: (hz, id) => {
+					calls.push(`retune ${id} ${hz}`)
+					// A real receiver: the retune answers late, and meta later still.
+					return new Promise<void>(resolve => {
+						answer = resolve
+					})
+				},
+				setOffset: offset => {
+					calls.push(`offset ${offset}`)
+					return Promise.resolve()
+				},
+			},
+			undefined,
+			timers,
+		)
+		c.setContext(context)
+		c.beginPan()
+		c.dragPan(-250, 1000)
+		expect(calls).toEqual(["retune rtl0 162100000"])
+		void c.endPan()
+		// On screen 160.9–163.3 MHz; click at 60 %: 162.3375 MHz, inside the capture at 162.1.
+		const done = c.clickAt(0.6, 1000)
+		expect(c.vfoHz()).toBe(162_337_500)
+		answer()
+		await flush()
+		await done
+		// The drag's own offset is dropped and the click's is worked out against 162.1, not 161.5.
+		expect(calls).toEqual(["retune rtl0 162100000", "offset 237500"])
+		// The picture does not jump back to the old capture under the click.
+		expect(c.visibleSpan()?.endHz).toBeGreaterThan(capture.endHz)
+	})
+
+	it("a click outside the capture right after a drag recentres there last", async () => {
+		const timers = fakeTimers()
+		const calls: string[] = []
+		const answers: (() => void)[] = []
+		const c = new PlotController(
+			{
+				retune: (hz, id) => {
+					calls.push(`retune ${id} ${hz}`)
+					return new Promise<void>(resolve => answers.push(resolve))
+				},
+				setOffset: offset => {
+					calls.push(`offset ${offset}`)
+					return Promise.resolve()
+				},
+			},
+			undefined,
+			timers,
+		)
+		c.setContext(context)
+		c.beginPan()
+		c.dragPan(-250, 1000)
+		c.dragPan(-400, 1000)
+		void c.endPan()
+		const done = c.clickAt(0.99, 1000)
+		for (let i = 0; i < 4; i++) {
+			answers.shift()?.()
+			await flush()
+		}
+		await done
+		expect(calls.at(-2)).toMatch(/^retune rtl0 1636/)
+		expect(calls.at(-1)).toBe("offset 0")
+		expect(calls.filter(x => x.startsWith("offset"))).toEqual(["offset 0"])
+	})
+
 	it("a refused retune snaps the picture back and stops following", async () => {
 		const timers = fakeTimers()
 		const calls: string[] = []

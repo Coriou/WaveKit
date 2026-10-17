@@ -31,6 +31,9 @@ import { TUNER_RANGE } from "../features/tuner/frequency.ts"
 /** The scale Auto has found for the shown source; Settings › Spectrum range: Fixed holds it. */
 export const autoLevelsNow = new Store<SpectrumLevels>(DEFAULT_LEVELS)
 
+/** Highest band-ruler level (band-ruler.ts RULER_LEVELS, the whole tuner range). */
+export const RULER_MAX_LEVEL = 3
+
 export interface PlotState {
 	view: PlotView
 	/** A tune request in flight: the VFO shows it until the core answers. */
@@ -41,11 +44,27 @@ export interface PlotState {
 	 * hatched. Cleared, back to a `view` relative to the capture, once the frames have caught up.
 	 */
 	free: SpectrumViewSpan | null
+	/**
+	 * The band ruler's width step (band-ruler.ts RULER_LEVELS): zooming out past Fit widens the ruler,
+	 * since the spectrum cannot show more than the capture; zooming in narrows it back first.
+	 */
+	ruler: number
 }
 
 export class PlotStore extends Store<PlotState> {
 	constructor(initial: Partial<PlotState> = {}) {
-		super({ view: FIT_VIEW, pendingHz: null, free: null, ...initial })
+		super({
+			view: FIT_VIEW,
+			pendingHz: null,
+			free: null,
+			ruler: 0,
+			...initial,
+		})
+	}
+
+	setRuler(level: number): void {
+		const ruler = Math.max(0, Math.min(RULER_MAX_LEVEL, Math.round(level)))
+		if (ruler !== this.get().ruler) this.update(s => ({ ...s, ruler }))
 	}
 
 	setFree(free: SpectrumViewSpan | null): void {
@@ -160,6 +179,15 @@ export class PlotController {
 		parked: false,
 	}
 	private releaseTimer: unknown = null
+	/** Bumped by a tune: follow retunes from before it no longer move the live channel. */
+	private followGen = 0
+	/**
+	 * The hardware centre last asked for, until the core reports it: meta lags a retune, and a tune worked
+	 * out against the old centre lands the channel off the clicked frequency.
+	 */
+	private commanded: number | null = null
+	/** Zoom travel (natural log of the factor) past Fit, turned into ruler steps of ×2. */
+	private rulerAcc = 0
 	private seq = 0
 
 	constructor(
@@ -173,7 +201,21 @@ export class PlotController {
 	}
 
 	setContext(ctx: PlotContext): void {
+		const moved = ctx.centreHz !== this.ctx.centreHz
 		this.ctx = ctx
+		// The core reported the centre asked for, or settled elsewhere (clamped) with nothing pending.
+		if (
+			this.commanded !== null &&
+			ctx.centreHz !== null &&
+			(Math.abs(ctx.centreHz - this.commanded) < 1_000 ||
+				(moved && !this.follow.inFlight))
+		)
+			this.commanded = null
+	}
+
+	/** The hardware centre the next request works from: the one last asked for, else the core's. */
+	private centreHz(): number | null {
+		return this.commanded ?? this.ctx.centreHz
 	}
 
 	/** The span on screen, or null before the first frame. */
@@ -194,7 +236,8 @@ export class PlotController {
 	 * the usable 80 %, and edgeMargin() would then cut the unusable edge a second time.
 	 */
 	hardwareCapture(): SpectrumViewSpan | null {
-		const { capture, centreHz, sampleRateHz } = this.ctx
+		const { capture, sampleRateHz } = this.ctx
+		const centreHz = this.centreHz()
 		if (centreHz !== null && sampleRateHz !== null && sampleRateHz > 0)
 			return {
 				startHz: centreHz - sampleRateHz / 2,
@@ -205,10 +248,27 @@ export class PlotController {
 
 	/** Tunes to `hz`: inside the capture the live-audio channel moves, outside the hardware recentres. */
 	tuneTo(hz: number): Promise<void> {
-		const { capture, centreHz, sourceId } = this.ctx
+		if (!this.ctx.capture || !(hz > 0)) return Promise.resolve()
+		const seq = ++this.seq
+		// A tune supersedes a drag's retunes still queued or in flight: none of their offsets may land
+		// after it, and it is worked out once the one in flight has answered, from the centre that one set.
+		const inFlight = this.follow.inFlight
+		this.cancelFollow()
+		const shown = this.visibleSpan()
+		this.store.update(s => ({ ...s, pendingHz: Math.round(hz) }))
+		const go = (): Promise<unknown> => this.sendTune(hz, shown)
+		const run = inFlight ? inFlight.then(go) : go()
+		return run.then(
+			() => this.settle(seq),
+			() => this.settle(seq),
+		)
+	}
+
+	private sendTune(hz: number, shown: SpectrumViewSpan | null): Promise<unknown> {
+		const { capture, sourceId } = this.ctx
+		const centreHz = this.centreHz()
 		const hardware = this.hardwareCapture()
-		if (!capture || !hardware || centreHz === null || !(hz > 0))
-			return Promise.resolve()
+		if (!capture || !hardware || centreHz === null) return Promise.resolve()
 		const action: ReturnType<typeof tuneAction> = this.ctx.scanHasReceiver
 			? { kind: "retune", centreHz: Math.round(hz) }
 			: tuneAction(
@@ -217,26 +277,41 @@ export class PlotController {
 					hardware,
 					edgeMargin(hardware, this.ctx.bandwidthHz),
 				)
-		const seq = ++this.seq
-		this.dropFree()
-		this.store.update(s => ({ ...s, pendingHz: Math.round(hz) }))
-		let run: Promise<unknown>
 		if (action.kind === "offset") {
+			// From a slid view the picture stays where it is until frames catch up (captureChanged):
+			// dropping it for the view from before the slide made the spectrum jump under the click.
+			const free = this.store.get().free
+			if (free) {
+				if (hz < free.startHz || hz > free.endHz)
+					this.store.setFree(shiftSpan(free, hz - spanCentre(free)))
+				this.armRelease()
+				return this.actions
+					.setOffset(action.offsetHz)
+					.finally(() => this.captureChanged())
+			}
 			this.store.setView(followHz(this.store.get().view, capture, hz))
-			run = this.actions.setOffset(action.offsetHz)
-		} else if (sourceId !== null) {
-			// Recentre: the channel goes back to the middle, the view keeps its zoom around it.
-			this.store.setView({ ...this.store.get().view, centreOffsetHz: 0 })
-			run = this.actions
-				.retune(action.centreHz, sourceId)
-				.then(() => this.actions.setOffset(0))
-		} else {
-			run = Promise.resolve()
+			return this.actions.setOffset(action.offsetHz)
 		}
-		return run.then(
-			() => this.settle(seq),
-			() => this.settle(seq),
-		)
+		this.dropFree()
+		if (sourceId === null) return Promise.resolve()
+		// Recentre: the channel goes back to the middle, the view keeps its zoom around it, and the
+		// picture slides there at once (hatched until frames at the new centre arrive).
+		this.store.setView({ ...this.store.get().view, centreOffsetHz: 0 })
+		if (shown && Math.abs(hz - spanCentre(shown)) > spanWidth(shown) * 0.02) {
+			this.store.setFree(shiftSpan(shown, hz - spanCentre(shown)))
+			this.armRelease()
+		}
+		this.commanded = action.centreHz
+		return this.actions
+			.retune(action.centreHz, sourceId)
+			.then(
+				() => this.actions.setOffset(0),
+				(err: unknown) => {
+					this.commanded = null
+					throw err
+				},
+			)
+			.finally(() => this.captureChanged())
 	}
 
 	/** The frequency at screen x (0–1), snapped to the signal under it, else to the step raster. */
@@ -275,7 +350,20 @@ export class PlotController {
 	zoom(anchorX: number, factor: number): void {
 		const capture = this.ctx.capture
 		if (!capture || !(factor > 0)) return
-		const free = this.store.get().free
+		const st = this.store.get()
+		const atFit = !st.free && st.view.spanHz === null
+		// Out past Fit widens the band ruler; in, the ruler narrows back before the spectrum zooms.
+		if ((factor < 1 && atFit) || (factor > 1 && st.ruler > 0)) {
+			this.rulerAcc += Math.log(factor)
+			const steps = Math.trunc(this.rulerAcc / (Math.LN2 - 1e-9))
+			if (steps !== 0) {
+				this.rulerAcc -= steps * Math.LN2
+				this.store.setRuler(st.ruler - steps)
+			}
+			return
+		}
+		this.rulerAcc = 0
+		const free = st.free
 		if (free) {
 			// Zooming a slid view: around the cursor, never wider than the capture.
 			const width = Math.min(
@@ -410,7 +498,7 @@ export class PlotController {
 		const f = this.follow
 		if (f.inFlight || f.timer !== null || f.target === null) return
 		const capture = this.ctx.capture
-		const from = f.sent ?? this.ctx.centreHz
+		const from = f.sent ?? this.centreHz()
 		if (
 			capture &&
 			from !== null &&
@@ -440,6 +528,7 @@ export class PlotController {
 		f.sent = centre
 		f.lastAt = this.timers.now()
 		const dragging = this.pan !== null
+		const gen = this.followGen
 		const hardware = this.hardwareCapture()
 		const keep =
 			keepHz !== null && sampleRateHz !== null && hardware
@@ -450,10 +539,12 @@ export class PlotController {
 						edgeMargin(hardware, this.ctx.bandwidthHz),
 					)
 				: null
+		this.commanded = centre
 		const run = this.actions
 			.retune(centre, sourceId)
 			// Out of the new capture, the channel goes to its middle once the drag is over (as tuneTo).
 			.then(() => {
+				if (gen !== this.followGen) return undefined
 				f.parked = keep === null && dragging
 				if (keep !== null) return this.actions.setOffset(keep)
 				return dragging ? undefined : this.actions.setOffset(0)
@@ -462,12 +553,15 @@ export class PlotController {
 				() => undefined,
 				() => {
 					// Refused (the scan holds the receiver, read-only…): stop following, snap back.
+					if (gen !== this.followGen) return
+					this.commanded = null
 					f.failed = true
 					f.target = null
 				},
 			)
 			.then(() => {
 				f.inFlight = null
+				if (gen !== this.followGen) return
 				if (f.failed) {
 					this.dropFree()
 					return
@@ -479,6 +573,18 @@ export class PlotController {
 		return run
 	}
 
+	/** Drops queued follow retunes and disowns the one in flight. */
+	private cancelFollow(): void {
+		const f = this.follow
+		if (f.timer !== null) {
+			this.timers.clearTimeout(f.timer)
+			f.timer = null
+		}
+		f.target = null
+		f.parked = false
+		this.followGen++
+	}
+
 	/** Sends the queued target now (end of a drag) and resolves once every retune has answered. */
 	private flushFollow(keepHz: number | null): Promise<void> {
 		const f = this.follow
@@ -486,7 +592,9 @@ export class PlotController {
 			this.timers.clearTimeout(f.timer)
 			f.timer = null
 		}
+		const gen = this.followGen
 		const waitAll = (): Promise<void> => {
+			if (gen !== this.followGen) return Promise.resolve()
 			if (f.inFlight) return f.inFlight.then(waitAll)
 			if (f.target !== null && !f.failed) {
 				f.lastAt = -Infinity
@@ -497,7 +605,7 @@ export class PlotController {
 		}
 		return waitAll()
 			.then(() => {
-				const park = f.parked && !f.failed
+				const park = f.parked && !f.failed && gen === this.followGen
 				f.parked = false
 				return park ? this.actions.setOffset(0) : undefined
 			})
