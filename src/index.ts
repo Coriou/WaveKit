@@ -20,6 +20,7 @@ import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
 import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
 import { WaveKitError } from "./utils/errors.js"
 import { PassThrough } from "node:stream"
+import { realpath } from "node:fs/promises"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
@@ -139,7 +140,14 @@ import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
 import { createRecordingInventory } from "./core/recordings/inventory.js"
 import { openRecordingKeepService } from "./core/recordings/keep-service.js"
 import { lateBoundRecordingProtection } from "./core/recordings/late-bound-protection.js"
-import type { RecordingKeepService } from "./core/recordings/contract.js"
+import type {
+	RecordingKeepService,
+	ScannerRecordingDeleter,
+} from "./core/recordings/contract.js"
+import { RecordingKeepError } from "./core/recordings/contract.js"
+import { RECORDING_DELETE_UNSUPPORTED_TEXT } from "./core/recordings/verified-unlink.js"
+import { sweepRecordingDeleteLeftovers } from "./core/recordings/delete-sweep.js"
+import { keptSummaryOf } from "./core/recordings/kept-summary.js"
 import { setCallRecordingProtection } from "./decoders/builtin/call-recordings.js"
 import type {
 	DecoderSettingsManagerPort,
@@ -159,6 +167,12 @@ import {
 	tunerFrequencyAt,
 	wireAnalogTransmissions,
 } from "./core/analog-transmission.js"
+import type { AnalogTransmissionTracker } from "./core/analog-transmission.js"
+import {
+	createAnalogEvidenceLog,
+	liveAudioMonitoring,
+} from "./core/scanner/analog-evidence.js"
+import type { AnalogEvidenceLog } from "./core/scanner/analog-evidence.js"
 import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder, DecoderConfig } from "./decoders/types.js"
@@ -358,6 +372,100 @@ export function analogFrequencyAt(
 		id => tuner.getState(id),
 		id => tuner.tuningWrittenOnConnection(id),
 	)
+}
+
+/**
+ * WG10 req 3.1-3.2: the analog evidence log identify reads. `monitoring` reads the live
+ * demodulator status and the tuner state lazily at call time, checks the target's own source and
+ * treats a tuner frequency the controller does not know as not monitoring (fail closed).
+ */
+export function identifyAnalogEvidence(deps: {
+	liveDemod: Pick<LiveDemodulator, "getStatus">
+	tuner: Pick<TunerController, "getState">
+	logger?: Logger
+}): AnalogEvidenceLog {
+	return createAnalogEvidenceLog({
+		...(deps.logger
+			? { logger: createComponentLogger(deps.logger, "AnalogEvidence") }
+			: {}),
+		monitoring: (sourceId, hz, toleranceHz) => {
+			const state = deps.tuner.getState(sourceId)
+			const tunerHz =
+				state === undefined ||
+				(Array.isArray(state.unknownFields) &&
+					state.unknownFields.includes("frequency"))
+					? null
+					: state.frequency
+			return liveAudioMonitoring(
+				deps.liveDemod.getStatus(),
+				tunerHz,
+				hz,
+				toleranceHz,
+				sourceId,
+			)
+		},
+	})
+}
+
+/**
+ * WG10 req 3.1: feeds the tracker's open and closed events into the evidence log. The tracker is
+ * built after the scanner service, so the log handed to the scanner stays empty until then
+ * (identify answers `no-sync`/`no-live-audio`, never a false positive).
+ */
+export function feedAnalogEvidence(
+	tracker: Pick<AnalogTransmissionTracker, "on"> &
+		Partial<Pick<AnalogTransmissionTracker, "pending">>,
+	log: Pick<AnalogEvidenceLog, "record"> &
+		Partial<Pick<AnalogEvidenceLog, "setPending">>,
+): void {
+	tracker.on("transmission", event => {
+		log.record(event)
+	})
+	// WG10 R2: identify counts a not yet published opening at its deadline as `timeout`.
+	if (typeof tracker.pending === "function")
+		log.setPending?.(() => tracker.pending?.() ?? null)
+}
+
+/**
+ * WG10 req 1.1: the keep service's scanner deleter, bound late: until the scanner service exists
+ * (and when it failed to start) a `scan:` delete answers 409 RECORDING_DELETE_UNSUPPORTED.
+ */
+export function lateBoundScannerDeleter(
+	scanner: () => Pick<ScannerService, "scannerRecordingDeleter"> | null,
+): ScannerRecordingDeleter {
+	return {
+		deleteRecording(recordingId, stillDeletable) {
+			const deleter = scanner()?.scannerRecordingDeleter()
+			if (!deleter)
+				return Promise.reject(
+					new RecordingKeepError(
+						"RECORDING_DELETE_UNSUPPORTED",
+						RECORDING_DELETE_UNSUPPORTED_TEXT,
+					),
+				)
+			return deleter.deleteRecording(recordingId, stillDeletable)
+		},
+	}
+}
+
+/**
+ * WG10 req 1.9 (Main, rk2 review minor 3): the directory directly holding the scanner's `d_*`
+ * recording folders, under the realpath of the configured storage root (the sweep refuses a
+ * symlinked root, the evidence store follows it once). Null when the root does not resolve.
+ */
+export async function scannerDeleteSweepDir(
+	stateDir: string,
+	storageDir: string | null | undefined,
+	resolveReal: (path: string) => Promise<string> = realpath,
+): Promise<string | null> {
+	try {
+		const root = await resolveReal(
+			resolve(storageDir || join(stateDir, "scanner")),
+		)
+		return join(root, "recordings", "dv")
+	} catch {
+		return null
+	}
 }
 
 /**
@@ -840,6 +948,12 @@ async function main(): Promise<void> {
 		)
 		admissionGates.push(() => liveDemod.shutdownAdmission())
 		own(50, () => liveDemod.stop())
+		// WG10 req 3: identify's analog evidence; fed by the transmission tracker once it exists.
+		const analogEvidence = identifyAnalogEvidence({
+			liveDemod,
+			tuner: tunerController,
+			logger,
+		})
 		const digitalVoiceConfig = DigitalVoiceConfigSchema.parse(
 			config.digitalVoice ?? {},
 		)
@@ -1041,6 +1155,10 @@ async function main(): Promise<void> {
 			stateDir: config.stateDir,
 			inventory: recordingInventory,
 			logger,
+			// WG10 req 1.1: delete routes exist in protected mode only.
+			...(protectedMode
+				? { scannerDeleter: lateBoundScannerDeleter(() => scanner) }
+				: {}),
 		})
 		recordingKeeps = keeps
 		own(67, () => keeps.close())
@@ -1092,6 +1210,22 @@ async function main(): Promise<void> {
 
 		// WG8 req 3.1: re-attach digital voice to a rebuilt instance. Registered before startAll.
 		followRebuiltVoiceDecoders(decoderManager, digitalVoice, voiceAttached)
+
+		// WG10 req 1.9: interrupted recording deletes, swept after the keep service resolved and
+		// the decoders exist, before any decoder or the scanner starts. Protected mode only (the
+		// delete routes exist only there); the keep service's state() is the readiness proof.
+		if (protectedMode) {
+			await sweepRecordingDeleteLeftovers({
+				dsdFmeDirs: recordingDsdFmeDirs(decoderManager).map(d => d.dir),
+				scannerRecordingsDir: await scannerDeleteSweepDir(
+					config.stateDir,
+					config.scanner.storage.dir,
+				),
+				protection: keeps,
+				logger,
+			})
+			checkpoint()
+		}
 
 		// Step 7b: Signal discovery scanner + core spectrum service (docs/SCANNER.md).
 		// Built after the decoders and digital voice so probes and ambient evidence
@@ -1148,6 +1282,7 @@ async function main(): Promise<void> {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				analogEvidence,
 				recordingProtection: keeps,
 				construction: scannerConstruction,
 				channels,
@@ -1515,6 +1650,8 @@ async function main(): Promise<void> {
 					? null
 					: activityRetentionFromStats(activity.stats(), activityLimits),
 			minFreeBytes: storageSources.minFreeBytes,
+			// WG10 req 1.8: keep totals in protected mode; legacy reports `kept: null`.
+			...(protectedMode ? { kept: () => keptSummaryOf(keeps) } : {}),
 		})
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
@@ -1867,7 +2004,20 @@ async function main(): Promise<void> {
 				wsBroadcaster.broadcastLiveAudioTransmission(event)
 			},
 			sink: () => activity.transmissionSink(),
+			// WG10 activity hygiene: short or carrier-less squelch openings are not published.
+			onSuppressed: (reason, event) => {
+				log.debug(
+					{
+						reason,
+						transmissionId: event.transmissionId,
+						durationMs: event.durationMs,
+						suppressed: transmissions.suppressed(),
+					},
+					"Analog transmission suppressed (activity hygiene)",
+				)
+			},
 		})
+		feedAnalogEvidence(transmissions, analogEvidence)
 		own(7, () => transmissions.stop())
 		shutdown.register({
 			name: "analog-transmissions",

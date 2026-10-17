@@ -822,6 +822,8 @@ export interface ScannerIdentifyTrial {
 		| "direwolf"
 		| "rtl433"
 		| ScannerAmbientDecoderType
+		/** WG10 req 3.2: analog evidence from the live demodulator's closed transmissions. */
+		| "live-audio"
 		| null
 	/** dsd-fme mode (`auto`, `nxdn`, `nxdn48`, `dpmr`) or the decoder name; null for an `unsupported` trial. */
 	mode: string | null
@@ -832,7 +834,10 @@ export interface ScannerIdentifyTrial {
 	 * Why an `unsupported` trial cannot run. WG7: `no-ambient-decoder` for an ambient-only protocol
 	 * nobody decodes there. WG9: `decoder-unavailable` when the trial's decoder program could not
 	 * run (missing or not executable) before it produced any output; the outcome stays
-	 * `unsupported` so clients with a closed outcome list keep parsing.
+	 * `unsupported` so clients with a closed outcome list keep parsing. WG10: `no-live-audio` for
+	 * an analog trial when live audio was not running or not tuned to the target for the whole
+	 * window; `decoder-unavailable` also when the probe pool remembers the decoder type as
+	 * unavailable (PROBE_UNAVAILABLE_MEMO_MS) and the trial is not spawned.
 	 */
 	reason?:
 		| "no-decoder"
@@ -840,6 +845,7 @@ export interface ScannerIdentifyTrial {
 		| "unsupported-format"
 		| "no-ambient-decoder"
 		| "decoder-unavailable"
+		| "no-live-audio"
 }
 /** WG7 req 1.2: decoder types whose running instances name ambient-only protocols. */
 export type ScannerAmbientDecoderType =
@@ -880,6 +886,36 @@ export interface ScannerIdentifyMeasurements {
 	class: ScannerClass
 }
 export type ScannerArtefactKind = "dc" | "spur" | "image" | "rfi"
+/** WG10 req 3.1: closed live-audio transmissions considered per identify target (oldest dropped). */
+export const IDENTIFY_ANALOG_MAX_TRANSMISSIONS = 32
+/** WG10 req 3.1: a transmission that ended this long before the job started still counts. */
+export const IDENTIFY_ANALOG_LOOKBACK_MS = 30_000
+/** WG10 req 3.5: how long the probe pool remembers a decoder type whose program could not run. */
+export const PROBE_UNAVAILABLE_MEMO_MS = 300_000
+/** WG10 req 3.5: probe decoder types `decodersUnavailable` can name. */
+export type ScannerProbeDecoderType =
+	| "dsd-fme"
+	| "multimon-ng"
+	| "direwolf"
+	| "rtl433"
+/**
+ * WG10 req 3.4: analog evidence for an identify target, from the live demodulator's closed
+ * transmissions within the target's tolerance. Only what the transmission tracker reported.
+ */
+export interface ScannerIdentifyAnalog {
+	source: "live-audio"
+	modulation: "nfm" | "wfm" | "am" | "dsb"
+	/** Matching closed transmissions (at most IDENTIFY_ANALOG_MAX_TRANSMISSIONS). */
+	transmissions: number
+	/** The latest matching transmission (the `live-audio:transmission` id). */
+	transmissionId: string
+	/** One of the 50 standard CTCSS tones heard on the latest tone-bearing match, or null. */
+	ctcssHz: number | null
+	/** DCS code heard (WG6 polarity rules), or null. */
+	dcs: { code: string; polarity: "normal" | "inverted" } | null
+	/** Tuning trust of the latest matching transmission's frequency. */
+	tuningTrust: TuningTrust
+}
 export interface ScannerIdentifyResult {
 	protocol?: ScannerProtocol
 	confidence: ScannerConfidence
@@ -891,6 +927,10 @@ export interface ScannerIdentifyResult {
 	artefact?: ScannerArtefactKind
 	/** The target ended early: the tuned window moved off it (retune, sweep takeover); open trials are `cancelled`. */
 	ended?: "window-moved"
+	/** WG10 req 3.4: present when a closed live-audio transmission matched the target. */
+	analog?: ScannerIdentifyAnalog
+	/** WG10 req 3.5: probe decoder types that could not run during this job (sorted, unique); absent when none. */
+	decodersUnavailable?: ScannerProbeDecoderType[]
 }
 /** `scanner:identify` (one stream per target; `all: true` gives one per surfaced emission). */
 export interface ScannerIdentifyEventData {

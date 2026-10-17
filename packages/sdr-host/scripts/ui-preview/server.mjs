@@ -559,6 +559,8 @@ function host(name, now) {
 				: 4000
 			: 0,
 		wireless: null,
+		speedMbps: up && kind === "ethernet" ? 100 : null,
+		defaultRouteMetric: up ? (kind === "ethernet" ? 100 : 600) : null,
 		...extra,
 	})
 	const network =

@@ -753,6 +753,44 @@ describe("SpectrumService", () => {
 		await h.service.stop()
 	})
 
+	it("carries the untracked-retune suspect and last-command age into the status warnings (WG10 req 2.9)", async () => {
+		const h = make({ fake: true })
+		await h.service.start()
+		await h.service.acquire("rtl", "job:a")
+		const host = h.host("rtl")
+		host.epoch(1, true)
+		host.emit(
+			{
+				kind: "untracked-retune",
+				epoch: 2,
+				startSample: 0,
+				deltaHz: -273_000,
+				suspected: "iq-byte-slip",
+			},
+			{ kind: "epoch-started", epoch: 2, startSample: 0, settleMode: "timer" },
+		)
+		host.emit({
+			kind: "untracked-retune",
+			epoch: 2,
+			startSample: 0,
+			deltaHz: null,
+			suspected: "signal-change",
+			newEpoch: false,
+		})
+		const rtl = h.service.status().sources.find(s => s.sourceId === "rtl")
+		const warnings = rtl?.warnings ?? []
+		expect(warnings.map(w => [w.code, w.deltaHz, w.suspected])).toEqual([
+			["untracked-retune", -273_000, "iq-byte-slip"],
+			["untracked-retune", null, "signal-change"],
+		])
+		// No tuner command on this engine yet: the age is null, present on the wire.
+		for (const w of warnings) {
+			expect("lastCommandAgeMs" in w).toBe(true)
+			expect(w.lastCommandAgeMs).toBeNull()
+		}
+		await h.service.stop()
+	})
+
 	it("releases demand on unsubscribe, disconnect and a subscribe still in flight, and survives unsubscribe → subscribe in one tick", async () => {
 		const h = make({ fake: true })
 		await h.service.start()

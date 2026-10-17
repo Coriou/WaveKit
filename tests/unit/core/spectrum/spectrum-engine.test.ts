@@ -463,7 +463,14 @@ describe("SpectrumEngine untracked retunes (§ 4.7)", () => {
 			startSample: 4096,
 		})
 		expect(engine.warnings()).toEqual([
-			{ code: "untracked-retune", deltaHz: -12_500, at: expect.any(Number) },
+			{
+				code: "untracked-retune",
+				deltaHz: -12_500,
+				at: expect.any(Number),
+				// WG10 req 2.9: an event without a classification reads external-control.
+				suspected: "external-control",
+				lastCommandAgeMs: null,
+			},
 		])
 		await engine.stop()
 	})

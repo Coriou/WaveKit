@@ -1,0 +1,19 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Announces the receiver on the local link. Discovery only: clients choose
+     an address from GET /api/status endpoints. Ports are the image defaults. -->
+<service-group>
+  <name replace-wildcards="yes">WaveKit receiver on %h</name>
+  <service>
+    <type>_wavekit-sdr._tcp</type>
+    <port>8080</port>
+    <txt-record>v=1</txt-record>
+    <txt-record>iq=5555</txt-record>
+    <txt-record>path=/api/status</txt-record>
+  </service>
+  <service>
+    <type>_http._tcp</type>
+    <port>80</port>
+    <txt-record>path=/</txt-record>
+  </service>
+</service-group>

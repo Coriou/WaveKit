@@ -510,11 +510,15 @@ describe("LiveDemodulator WG7", () => {
 			})
 			const events: AnalogTransmissionEventData[] = []
 			const payloads: AnalogTransmissionPayload[] = []
+			// WG10 activity hygiene: a transmission under ANALOG_TRANSMISSION_MIN_MS is not
+			// published, so the carrier lasts 1 s on the tracker clock.
+			let t = 1_700_000_000_000
 			const tracker = wireAnalogTransmissions({
 				source: liveDemod,
 				frequencyAt: () => null,
 				broadcast: event => events.push(event),
 				sink: () => payload => payloads.push(payload),
+				now: () => t,
 			})
 			// Noise mode gates even with squelch 0 (operator activity, transmissions).
 			expect(liveDemodSquelchGates({ squelchMode: "noise", squelch: 0 })).toBe(
@@ -522,6 +526,7 @@ describe("LiveDemodulator WG7", () => {
 			)
 			await liveDemod.start()
 			feed(carrierBlock(-30), 20)
+			t += 1000
 			feed(Buffer.alloc(BLOCK_SAMPLES * 8), 40)
 			tracker.stop()
 			expect(events.map(e => e.state)).toEqual(["open", "closed"])
@@ -542,15 +547,19 @@ describe("LiveDemodulator WG7", () => {
 		it("a mode switch mid-transmission closes it with config", async () => {
 			liveDemod = create({ squelch: -50 })
 			const events: AnalogTransmissionEventData[] = []
+			let t = 1_700_000_000_000
 			const tracker = wireAnalogTransmissions({
 				source: liveDemod,
 				frequencyAt: () => null,
 				broadcast: event => events.push(event),
 				sink: () => null,
+				now: () => t,
 			})
 			await liveDemod.start()
 			feed(carrierBlock(-30), 10)
 			expect(liveDemod.isSquelchOpen()).toBe(true)
+			// WG10 activity hygiene: long enough to be published (ANALOG_TRANSMISSION_MIN_MS).
+			t += 1000
 			await liveDemod.reconfigure({ squelchMode: "noise" })
 			expect(liveDemod.isSquelchOpen()).toBe(false)
 			expect(events.map(e => [e.state, e.closeReason])).toEqual([

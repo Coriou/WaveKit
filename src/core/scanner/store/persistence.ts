@@ -59,6 +59,7 @@ import {
 	ScannerClassSchema,
 	ScannerProtocolSchema,
 	StoreMutationSchema,
+	DiscoveryAliasEntrySchema,
 } from "./schemas.js"
 
 const FILE_VERSION = 1
@@ -118,6 +119,8 @@ export interface LoadedState {
 	engines: Record<string, EngineState>
 	droppedLines: number
 	recordingOperations?: PreparedRecordingMetadata[]
+	/** WG10 req 1.5: merge aliases from the snapshot (journal entries replay on top). */
+	aliases?: { id: string; aliases: string[] }[]
 	recoveryHealth: "healthy" | "degraded"
 }
 
@@ -343,6 +346,7 @@ const SnapshotFileSchema = z
 		corrections: z
 			.array(z.object({ sourceId: z.string().min(1), hz: z.number() }))
 			.default([]),
+		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
 	})
 	.strict()
 const JobsFileSchema = z.object({
@@ -525,6 +529,7 @@ export class ScannerPersistence {
 			engines,
 			droppedLines: journal.dropped,
 			recordingOperations: snapshot.recordingOperations ?? [],
+			...(snapshot.aliases ? { aliases: snapshot.aliases } : {}),
 			recoveryHealth: this.authorityHealth,
 		}
 	}
@@ -595,6 +600,7 @@ export class ScannerPersistence {
 			observations: s.observations,
 			corrections: s.corrections,
 			recordingOperations: prepared.data,
+			...(s.aliases && s.aliases.length > 0 ? { aliases: s.aliases } : {}),
 		})
 		return this.enqueue(async () => {
 			await atomicWrite(join(this.root, SNAPSHOT_FILE), text)
@@ -754,6 +760,7 @@ export class ScannerPersistence {
 			observations: parsed.data.observations as Observation[],
 			corrections: parsed.data.corrections,
 			recordingOperations: parsed.data.recordingOperations ?? [],
+			...(parsed.data.aliases ? { aliases: parsed.data.aliases } : {}),
 			lastSeq: parsed.data.lastSeq,
 		}
 	}

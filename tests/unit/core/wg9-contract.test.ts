@@ -257,6 +257,8 @@ describe("WG9 contract", () => {
 				| "unsupported-format"
 				| "no-ambient-decoder"
 				| "decoder-unavailable"
+				// WG10 req 3.2: analog trial without live audio on the target
+				| "no-live-audio"
 			>(true),
 		).toBe(true)
 		expect(

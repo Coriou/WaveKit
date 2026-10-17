@@ -42,10 +42,22 @@ export interface SpectrumFrameEventData {
 	at: string
 }
 
+/** WG10 req 2.9: what an untracked-retune warning most likely means. */
+export type SpectrumWarningSuspect =
+	| "iq-byte-slip"
+	| "signal-change"
+	| "external-control"
+/** WG10 req 2.9: one warn log line per source per this interval (the warning list keeps all). */
+export const SPECTRUM_WARNING_LOG_INTERVAL_MS = 60_000
+
 export interface SpectrumWarning {
 	code: "untracked-retune" | "host-centre-mismatch"
 	deltaHz: number | null
 	at: string
+	/** WG10 req 2.9: untracked-retune only; absent on host-centre-mismatch. */
+	suspected?: SpectrumWarningSuspect
+	/** WG10 req 2.9: ms since this core's last tuner command on the source; null when none. */
+	lastCommandAgeMs?: number | null
 }
 
 export interface SpectrumSourceStatus {

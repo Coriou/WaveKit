@@ -26,7 +26,9 @@ import type * as http from "node:http"
 import { Transform, type Readable } from "node:stream"
 import { z } from "zod"
 import {
+	LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
+	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_SQUELCH_MODES,
 	type LiveAudioSquelchMode,
 } from "@wavekit/api-types"
@@ -48,7 +50,14 @@ import {
 } from "./audio-stream-server.js"
 import { csdrChildEnv } from "../decoders/csdr-buffers.js"
 import { signalDecoder } from "../decoders/process-tools.js"
+import { safeErrorFields } from "../decoders/safe-error-fields.js"
 import { ChannelSquelch } from "./channel-squelch.js"
+import { ComplexSampleAligner, FrontSwapFeed } from "./live-audio-aligner.js"
+import {
+	SilenceFill,
+	systemSilenceClock,
+	type SilenceFillClock,
+} from "./live-audio-silence.js"
 import {
 	ToneSquelchGate,
 	type ToneSquelchTone,
@@ -174,11 +183,58 @@ export interface LiveDemodulatorOptions {
 	stopTimeoutMs?: number
 	/** A client that accepts nothing for this long is disconnected. */
 	clientStallTimeoutMs?: number
+	/** Test/bench seam: spawns one CSDR stage (default: /bin/sh -c in its own group). */
+	spawnStage?: (command: string) => ChildProcess
+	/** WG10: clock and timers of the silence fill and the front swap timeout. */
+	clock?: SilenceFillClock
 }
+
+type InjectedOptionKeys =
+	| "httpAccess"
+	| "publicOrigin"
+	| "httpHost"
+	| "spawnStage"
+	| "clock"
+type ResolvedOptions = Required<
+	Omit<LiveDemodulatorOptions, InjectedOptionKeys>
+> &
+	Pick<LiveDemodulatorOptions, InjectedOptionKeys>
+
+/** WG10 req 2.3: a new front started by an offset change, not yet switched in. */
+interface PendingFrontSwap {
+	front: ChildProcess
+	aligner: ComplexSampleAligner
+	command: string
+	finish: (outcome: FrontSwapOutcome) => void
+}
+
+type FrontSwapOutcome =
+	| "first"
+	| "swapped"
+	| "timeout"
+	| "failed"
+	| "superseded"
+	| "aborted"
 
 interface PipelineRun {
 	front: ChildProcess
 	back: ChildProcess
+	/**
+	 * WG10 req 2.3: whole complex samples from a swapped-in front to the
+	 * squelch; null for the run's first front (piped directly, as before).
+	 */
+	frontAligner: ComplexSampleAligner | null
+	frontCommand: string
+	backCommand: string
+	/** Removes the current front's run-failure handlers (before a swap kills it). */
+	detachFront: () => void
+	swap: PendingFrontSwap | null
+	/**
+	 * WG10 req 2.3: the reported gate is held closed while an offset swap is
+	 * pending, so the transmission closes as "config" as on a full restart and
+	 * a carrier on the new offset opens a new one at the switch.
+	 */
+	gateHeld: boolean
 	squelch: ChannelSquelch
 	squelchStream: Transform
 	startedAt: number
@@ -212,6 +268,13 @@ interface PipelineRun {
 	failed: boolean
 }
 
+/**
+ * WG10 req 2.3: written to the measured squelch stream at a front switch
+ * (identity-compared, never forwarded): an explicit alignment reset that runs
+ * after the old front's queued bytes and before the new front's first byte.
+ */
+const SQUELCH_ALIGNMENT_RESET = Buffer.alloc(0)
+
 // Each measurement advances one 10 ms block of stream time.
 const LEVEL_BLOCK_SECONDS = 0.01
 /**
@@ -234,10 +297,7 @@ const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"iqDcBlock",
 ])
 
-const DEFAULTS: Required<
-	Omit<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
-> &
-	Pick<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost"> = {
+const DEFAULTS: ResolvedOptions = {
 	levelHz: 10,
 	restartBaseDelayMs: 1000,
 	restartMaxDelayMs: 30_000,
@@ -255,12 +315,15 @@ export class LiveDemodulator extends EventEmitter {
 	private readonly fanoutManager: FanoutManager | SourceFanoutRouter
 	private branchFanout: FanoutManager | null = null
 	private legacySourceId: string | null = null
-	private readonly options: Required<
-		Omit<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
-	> &
-		Pick<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
+	private readonly options: ResolvedOptions
+	private readonly clock: SilenceFillClock
+	private readonly silence: SilenceFill
+	/** Stream format of the last run started (a restart after failure compares it). */
+	private lastRunStream: StreamFormat | null = null
 	private levelTimer: ReturnType<typeof setInterval> | null = null
 	private reportedSquelchOpen = false
+	/** WG10 activity hygiene: blocks with carrier evidence, monotonic (see carrierBlocks()). */
+	private carrierBlockCount = 0
 	/**
 	 * Set only while `stop()` or a transmission-closing `reconfigure()` is in
 	 * progress. `stopRun` emits `squelch-changed(false)` before `stopped` or
@@ -313,6 +376,8 @@ export class LiveDemodulator extends EventEmitter {
 		this.audio.on("client-disconnected", (id: string) =>
 			this.emit("client-disconnected", id),
 		)
+		this.clock = options.clock ?? systemSilenceClock
+		this.silence = new SilenceFill(this.audio, this.clock)
 		this.http = new AudioHttpServer(
 			this.log,
 			"Live demodulator",
@@ -381,6 +446,7 @@ export class LiveDemodulator extends EventEmitter {
 
 		this.closeOverride = "stopped"
 		try {
+			this.silence.disarm("stop")
 			this.clearRestartTimer()
 			this.unsubscribeFromSourceCapsChanges()
 			if (this.run) await this.stopRun(this.run)
@@ -421,22 +487,38 @@ export class LiveDemodulator extends EventEmitter {
 			validated.sourceId !== previous.sourceId &&
 			resolvedBefore !== resolvedAfter
 		// Union of both key sets: `agc: null` deletes a key, which must still count as a change.
-		const pipelineChanged = (
+		const changedPipelineKeys = (
 			[
 				...new Set([...Object.keys(previous), ...Object.keys(validated)]),
 			] as Array<keyof LiveDemodConfig>
-		).some(key => {
+		).filter(key => {
 			if (NODE_ONLY_KEYS.has(key)) return false
 			if (key === "sourceId") return sourceChanged
 			return validated[key] !== previous[key]
 		})
+		const pipelineChanged = changedPipelineKeys.length > 0
 		const active = this.http.listening || this.run !== null
 
 		// Validate the new source and RF plan before detaching the current stream.
+		let swapPlan: { front: string } | null = null
 		if (sourceChanged || (active && pipelineChanged)) {
 			const sourceId = sourceChanged ? resolvedAfter : this.activeSourceId
 			if (!sourceId) throw this.noSourceError()
-			this.planFor(sourceId, validated)
+			const planned = this.planFor(sourceId, validated)
+			// WG10 req 2.3: an offset-only change keeps the back stage and clients.
+			const run = this.run
+			if (
+				!sourceChanged &&
+				run !== null &&
+				!run.stopping &&
+				changedPipelineKeys.length === 1 &&
+				changedPipelineKeys[0] === "offsetHz" &&
+				planned.plan.channelSampleRate === run.stream.rate &&
+				planned.plan.back === run.backCommand &&
+				planned.caps.sampleRate === run.sourceSampleRate &&
+				planned.caps.format === run.sourceFormat
+			)
+				swapPlan = { front: planned.plan.front }
 		}
 
 		this.config = validated
@@ -482,7 +564,22 @@ export class LiveDemodulator extends EventEmitter {
 
 			if (restarting) {
 				this.consecutiveFailures = 0
-				await this.restartPipeline("configuration changed")
+				const run = this.run
+				if (swapPlan !== null && run !== null) {
+					// The transmission closes as "config", as on a full restart.
+					run.gateHeld = true
+					this.publishSquelchChange()
+					this.closeOverride = null
+					const outcome = await this.swapFront(run, swapPlan.front)
+					if (outcome === "timeout" || outcome === "failed") {
+						this.log.warn(
+							{ outcome },
+							"Live demodulation front swap failed; restarting pipeline",
+						)
+						if (this.run === run)
+							await this.restartPipeline("front swap failed")
+					}
+				} else await this.restartPipeline("configuration changed")
 			}
 
 			if (portChanged && this.http.listening) {
@@ -543,7 +640,25 @@ export class LiveDemodulator extends EventEmitter {
 
 	/** Scanner activity adapter: running gate only; stopped/failed is closed. */
 	isSquelchOpen(): boolean {
-		return this.run !== null && !this.run.stopping && this.run.squelch.open
+		return (
+			this.run !== null &&
+			!this.run.stopping &&
+			!this.run.gateHeld &&
+			this.run.squelch.open
+		)
+	}
+
+	/**
+	 * WG10 activity hygiene: monotonic count of measured blocks that carried an FM carrier
+	 * (`ChannelSquelch.blockCarrier`), or null when the running pipeline has no carrier
+	 * evidence (not nfm/wfm, or not running). The analog transmission tracker takes the
+	 * difference across a transmission; the count never affects audio.
+	 */
+	carrierBlocks(): number | null {
+		const run = this.run
+		if (run === null || run.stopping || !run.squelch.hasCarrierEvidence)
+			return null
+		return this.carrierBlockCount
 	}
 
 	/** Channel-squelch hang in use, in milliseconds. */
@@ -590,6 +705,15 @@ export class LiveDemodulator extends EventEmitter {
 			this.config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
 		)
 		run.squelch.setMode(this.config.squelchMode === "noise" ? "noise" : "power")
+		// WG10 req 2.6: squelchMode changes without a restart (modulation restarts).
+		run.squelch.setCarrierObserver(
+			this.config.squelchMode === "auto" &&
+				LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation),
+		)
+		// WG10 activity hygiene: carrier evidence for transmissions, every squelch mode.
+		run.squelch.setCarrierEvidence(
+			LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation),
+		)
 	}
 
 	/** WG7 req 3.1: (re)builds the tone gate when the configured tone changes. */
@@ -625,20 +749,29 @@ export class LiveDemodulator extends EventEmitter {
 	private measureRun(run: PipelineRun): void {
 		if (this.run !== run || run.stopping) return
 		const power = run.squelch.powerDbfs
+		// WG10 req 2.6: a block whose FM quieting shows a carrier never seeds or
+		// raises the floor (always false without the auto nfm/wfm observer).
+		// A runtime switch out of auto keeps the run's observer: gate on the mode.
+		const quieted =
+			this.config.squelchMode === "auto" && run.squelch.blockQuieted()
 		if (power !== null) {
 			// Constant-memory lower envelope: falls are immediate; a slower open
 			// rise preserves calls but eventually recovers from sustained noise steps.
 			if (run.noiseFloorDbfs === null) {
-				// WG9 req 5.6: after a retune, a carrier already present must not
-				// become its own floor; the previous floor bounds the seed once.
-				// Auto squelch only: manual and noise modes seed from power alone.
-				const previous =
-					this.config.squelchMode === "auto" ? run.retuneFloorDbfs : null
-				run.retuneFloorDbfs = null
-				run.noiseFloorDbfs =
-					previous !== null && previous < power ? previous : power
+				// A quieted block leaves the floor absent; the remembered retune
+				// floor waits for the first unquieted block.
+				if (!quieted) {
+					// WG9 req 5.6: after a retune, a carrier already present must not
+					// become its own floor; the previous floor bounds the seed once.
+					// Auto squelch only: manual and noise modes seed from power alone.
+					const previous =
+						this.config.squelchMode === "auto" ? run.retuneFloorDbfs : null
+					run.retuneFloorDbfs = null
+					run.noiseFloorDbfs =
+						previous !== null && previous < power ? previous : power
+				}
 			} else if (power < run.noiseFloorDbfs) run.noiseFloorDbfs = power
-			else {
+			else if (!quieted) {
 				const riseRate = run.squelch.open
 					? AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND
 					: AUTO_FLOOR_CLOSED_RISE_DB_PER_SECOND
@@ -654,17 +787,34 @@ export class LiveDemodulator extends EventEmitter {
 		run.squelch.setNoiseFloorDbfs(run.noiseFloorDbfs)
 		this.applySquelchThreshold(run)
 		this.publishSquelchChange()
+		// WG10 activity hygiene: counted after the edge, so a transmission opened by this
+		// block (its tracker snapshot taken inside publishSquelchChange) includes it.
+		if (run.squelch.blockCarrier()) this.carrierBlockCount += 1
 	}
 
 	private measuredSquelchStream(
 		squelch: ChannelSquelch,
 		sampleRate: number,
 		measured: () => void,
+		frontMeasured: () => void,
 	): Transform {
 		const blockBytes = Math.max(1, Math.round(sampleRate * 0.01)) * 8
 		let remainder = Buffer.alloc(0)
+		let awaitingFront = false
 		return new Transform({
 			transform(chunk: Buffer, _encoding, callback) {
+				if (chunk === SQUELCH_ALIGNMENT_RESET) {
+					// WG10 req 2.3: drop the old front's partial complex sample.
+					const whole = remainder.length - (remainder.length % 8)
+					if (whole !== remainder.length)
+						remainder = Buffer.from(remainder.subarray(0, whole))
+					// WG10 R1 m1: in stream order (after the old front's last bytes), the gate,
+					// hang and carrier observer start afresh for the new channel.
+					squelch.resetGate()
+					awaitingFront = true
+					callback()
+					return
+				}
 				const data = remainder.length
 					? Buffer.concat([remainder, chunk])
 					: chunk
@@ -675,6 +825,10 @@ export class LiveDemodulator extends EventEmitter {
 					)
 					offset += blockBytes
 					measured()
+					if (awaitingFront) {
+						awaitingFront = false
+						frontMeasured()
+					}
 					for (const block of output) this.push(block)
 				}
 				remainder = Buffer.from(data.subarray(offset))
@@ -786,14 +940,7 @@ export class LiveDemodulator extends EventEmitter {
 			// A second retune before any block keeps the first remembered floor.
 			// Auto squelch only (its threshold derives from the floor); manual and
 			// noise modes reset as before.
-			if (this.run) {
-				if (
-					this.config.squelchMode === "auto" &&
-					this.run.noiseFloorDbfs !== null
-				)
-					this.run.retuneFloorDbfs = this.run.noiseFloorDbfs
-				this.run.noiseFloorDbfs = null
-			}
+			if (this.run) this.resetFloorForRetune(this.run)
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
@@ -812,6 +959,13 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.sourceManager.on("caps-changed", this.capsChangedHandler)
+	}
+
+	/** WG9 req 5.6 retune floor handling (also applied by a front swap, WG10 2.3). */
+	private resetFloorForRetune(run: PipelineRun): void {
+		if (this.config.squelchMode === "auto" && run.noiseFloorDbfs !== null)
+			run.retuneFloorDbfs = run.noiseFloorDbfs
+		run.noiseFloorDbfs = null
 	}
 
 	private capsNeedRestart(caps: SourceCaps): boolean {
@@ -970,15 +1124,31 @@ export class LiveDemodulator extends EventEmitter {
 			...(this.config.bandwidth > 0
 				? { bandwidthHz: this.config.bandwidth }
 				: {}),
+			// WG10 req 2.6: the FM quieting observer exists only in auto nfm/wfm.
+			...(this.config.squelchMode === "auto" &&
+			LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation)
+				? { carrierObserver: true }
+				: {}),
+			// WG10 activity hygiene: carrier evidence for transmissions (never gates).
+			...(LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation)
+				? { carrierEvidence: true }
+				: {}),
 		})
 		const run: PipelineRun = {
 			front: this.spawnStage(plan.front),
 			back: this.spawnStage(plan.back),
+			frontAligner: null,
+			frontCommand: plan.front,
+			backCommand: plan.back,
+			detachFront: () => undefined,
+			swap: null,
+			gateHeld: false,
 			squelch,
 			squelchStream: this.measuredSquelchStream(
 				squelch,
 				plan.channelSampleRate,
 				() => this.measureRun(run),
+				() => this.releaseSwapHold(run),
 			),
 			noiseFloorDbfs: null,
 			retuneFloorDbfs: null,
@@ -993,6 +1163,7 @@ export class LiveDemodulator extends EventEmitter {
 			failed: false,
 		}
 		this.run = run
+		this.lastRunStream = stream
 		this.applyToneSquelch(run)
 		this.audio.configure(stream)
 
@@ -1003,6 +1174,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private spawnStage(command: string): ChildProcess {
+		if (this.options.spawnStage) return this.options.spawnStage(command)
 		return spawn("/bin/sh", ["-c", command], {
 			env: csdrChildEnv(),
 			stdio: ["pipe", "pipe", "pipe"],
@@ -1010,37 +1182,61 @@ export class LiveDemodulator extends EventEmitter {
 		})
 	}
 
+	private ignoreStreamError(role: string): (err: Error) => void {
+		return (err: Error) =>
+			this.log.debug({ err, role }, "Live demodulation stream error")
+	}
+
+	/** Pipe error handlers and the stderr log of one stage. */
+	private wireStageIo(role: "front" | "back", proc: ChildProcess): void {
+		proc.stdin?.on("error", this.ignoreStreamError(`${role}.stdin`))
+		proc.stdout?.on("error", this.ignoreStreamError(`${role}.stdout`))
+		proc.stderr?.on("error", this.ignoreStreamError(`${role}.stderr`))
+		proc.stderr?.on("data", (data: Buffer) => {
+			const message = data.toString().trim()
+			if (!message) return
+			this.lastError = message
+			this.log.warn({ message, role }, "Live demodulation stderr")
+		})
+	}
+
+	/**
+	 * Run-failure handlers of one stage; the returned function removes them
+	 * (a swapped-out front's exit is not a run failure, WG10 req 2.3).
+	 */
+	private wireStageLifecycle(
+		run: PipelineRun,
+		role: "front" | "back",
+		proc: ChildProcess,
+	): () => void {
+		const onError = (err: Error) => {
+			this.log.error({ err, role }, "Live demodulation process error")
+			this.handleRunFailure(run, `${role} process error: ${err.message}`)
+		}
+		const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+			if (run.stopping) return
+			this.handleRunFailure(
+				run,
+				`Live demodulation ${role} process exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+			)
+		}
+		proc.on("error", onError)
+		proc.once("exit", onExit)
+		return () => {
+			proc.off("error", onError)
+			proc.off("exit", onExit)
+			// A late error of a stage being discarded must not throw.
+			proc.on("error", this.ignoreStreamError(`${role}.process`))
+		}
+	}
+
 	private wireRun(run: PipelineRun): void {
 		const { front, back, squelchStream } = run
-		const ignore = (role: string) => (err: Error) =>
-			this.log.debug({ err, role }, "Live demodulation stream error")
-
-		for (const [role, proc] of [
-			["front", front],
-			["back", back],
-		] as const) {
-			proc.on("error", err => {
-				this.log.error({ err, role }, "Live demodulation process error")
-				this.handleRunFailure(run, `${role} process error: ${err.message}`)
-			})
-			proc.once("exit", (code, signal) => {
-				if (run.stopping) return
-				this.handleRunFailure(
-					run,
-					`Live demodulation ${role} process exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
-				)
-			})
-			proc.stdin?.on("error", ignore(`${role}.stdin`))
-			proc.stdout?.on("error", ignore(`${role}.stdout`))
-			proc.stderr?.on("error", ignore(`${role}.stderr`))
-			proc.stderr?.on("data", (data: Buffer) => {
-				const message = data.toString().trim()
-				if (!message) return
-				this.lastError = message
-				this.log.warn({ message, role }, "Live demodulation stderr")
-			})
-		}
-		squelchStream.on("error", ignore("squelch"))
+		run.detachFront = this.wireStageLifecycle(run, "front", front)
+		this.wireStageLifecycle(run, "back", back)
+		this.wireStageIo("front", front)
+		this.wireStageIo("back", back)
+		squelchStream.on("error", this.ignoreStreamError("squelch"))
 
 		if (this.branchStream && front.stdin) this.branchStream.pipe(front.stdin)
 		if (front.stdout && back.stdin) {
@@ -1051,10 +1247,123 @@ export class LiveDemodulator extends EventEmitter {
 		})
 	}
 
+	/**
+	 * WG10 req 2.3: make-before-break of the front stage. The branch feeds
+	 * both fronts until the new one's first channel IQ (or the timeout, an
+	 * error or an exit); the back process, its stdin and every client stay.
+	 */
+	private swapFront(
+		run: PipelineRun,
+		command: string,
+	): Promise<FrontSwapOutcome> {
+		run.swap?.finish("superseded")
+		const front = this.spawnStage(command)
+		const branch = front.stdin ? this.branchStream : null
+		const feed = front.stdin ? new FrontSwapFeed(front.stdin) : null
+		const feedListener = (chunk: Buffer) => feed?.push(chunk)
+		return new Promise<FrontSwapOutcome>(resolve => {
+			let settled = false
+			const aligner = new ComplexSampleAligner(() => finish("first"))
+			const onError = (err: Error) => {
+				this.log.warn(
+					{ err: safeErrorFields(err) },
+					"Live demodulation swap front process error",
+				)
+				finish("failed")
+			}
+			const onExit = () => finish("failed")
+			const timer = this.clock.setTimer(
+				() => finish("timeout"),
+				LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS,
+			)
+			const swap: PendingFrontSwap = {
+				front,
+				aligner,
+				command,
+				finish: outcome => finish(outcome),
+			}
+			const finish = (outcome: FrontSwapOutcome) => {
+				if (settled) return
+				settled = true
+				this.clock.clearTimer(timer)
+				front.off("error", onError)
+				front.off("exit", onExit)
+				front.on("error", this.ignoreStreamError("front.process"))
+				branch?.off("data", feedListener)
+				if (run.swap === swap) run.swap = null
+				if (outcome === "first" && this.run === run && !run.stopping) {
+					this.switchFront(run, swap)
+					resolve("swapped")
+					return
+				}
+				this.discardFront(front, aligner)
+				resolve(outcome === "first" ? "aborted" : outcome)
+			}
+			run.swap = swap
+			front.on("error", onError)
+			front.once("exit", onExit)
+			this.wireStageIo("front", front)
+			aligner.on("error", this.ignoreStreamError("front.align"))
+			if (front.stdout) front.stdout.pipe(aligner)
+			// No backpressure from the starting front on the running one (bounded).
+			branch?.on("data", feedListener)
+		})
+	}
+
+	/** Switches the squelch input to the new front at a whole complex sample. */
+	private switchFront(run: PipelineRun, swap: PendingFrontSwap): void {
+		const old = run.front
+		const oldAligner = run.frontAligner
+		run.detachFront()
+		if (oldAligner !== null) {
+			oldAligner.unpipe(run.squelchStream)
+			oldAligner.resetAlignment()
+		} else old.stdout?.unpipe(run.squelchStream)
+		// Sequenced after the old front's last queued bytes: the squelch drops
+		// a partial complex sample there, so the new front starts aligned.
+		run.squelchStream.write(SQUELCH_ALIGNMENT_RESET)
+		run.front = swap.front
+		run.frontAligner = swap.aligner
+		run.frontCommand = swap.command
+		run.detachFront = this.wireStageLifecycle(run, "front", swap.front)
+		if (this.branchStream && swap.front.stdin)
+			this.branchStream.pipe(swap.front.stdin)
+		swap.aligner.pipe(run.squelchStream)
+		this.resetFloorForRetune(run)
+		this.discardFront(old, oldAligner)
+		// WG10 R1 m1: the gate stays held until the squelch has measured the first block of
+		// the new front (releaseSwapHold), so the old channel's open gate or hang never
+		// publishes a transmission on the new offset.
+		this.log.debug("Live demodulation front swapped")
+	}
+
+	/** WG10 R1 m1: the first block of the new front was measured; the gate is live again. */
+	private releaseSwapHold(run: PipelineRun): void {
+		if (this.run !== run || run.stopping || run.swap !== null) return
+		if (!run.gateHeld) return
+		run.gateHeld = false
+		this.publishSquelchChange()
+	}
+
+	/** Unpipes and stops a front that no run uses. */
+	private discardFront(
+		front: ChildProcess,
+		aligner: ComplexSampleAligner | null,
+	): void {
+		if (this.branchStream && front.stdin) this.branchStream.unpipe(front.stdin)
+		front.stdout?.unpipe()
+		aligner?.unpipe()
+		for (const stream of [front.stdin, front.stdout, front.stderr])
+			stream?.destroy()
+		aligner?.destroy()
+		void this.killGroup(front)
+	}
+
 	private handleRunFailure(run: PipelineRun, reason: string): void {
 		if (this.run !== run || run.stopping || run.failed) return
 		run.failed = true
 		this.run = null
+		this.silence.disarm("failure")
 		this.stopLevelPublishing()
 		this.publishSquelchChange()
 		this.pipelineHealth = "error"
@@ -1121,11 +1430,32 @@ export class LiveDemodulator extends EventEmitter {
 	private async restartPipeline(reason: string): Promise<void> {
 		this.clearRestartTimer()
 		this.log.info({ reason }, "Restarting live demodulation pipeline")
+		const previousStream = this.run?.stream ?? this.lastRunStream
 		const stopping = this.run ? this.stopRun(this.run) : null
 		// stopRun emits squelch-changed(false) before it waits on the processes.
 		this.closeOverride = null
+		// WG10 req 2.2: attached clients hear silence until the new run's audio
+		// when the restart keeps the stream format.
+		const planned = this.plannedStream()
+		if (
+			this.audio.size > 0 &&
+			previousStream !== null &&
+			previousStream.rate === planned.rate &&
+			previousStream.format === planned.format
+		) {
+			this.silence.arm(planned)
+			this.log.debug(
+				{ clients: this.audio.size },
+				"Live audio silence fill armed",
+			)
+		}
 		if (stopping) await stopping
-		await this.startPipeline()
+		try {
+			await this.startPipeline()
+		} catch (err) {
+			this.silence.disarm("failure")
+			throw err
+		}
 		const stream = this.plannedStream()
 		this.audio.closeWhere(
 			client =>
@@ -1147,10 +1477,14 @@ export class LiveDemodulator extends EventEmitter {
 			this.stopLevelPublishing()
 			this.publishSquelchChange()
 		}
+		const pending = run.swap
+		run.swap = null
+		pending?.finish("aborted")
 		if (this.branchStream && run.front.stdin) {
 			this.branchStream.unpipe(run.front.stdin)
 		}
 		run.front.stdout?.unpipe()
+		run.frontAligner?.unpipe()
 		run.squelchStream.unpipe()
 		for (const stream of [
 			run.front.stdin,
@@ -1162,6 +1496,7 @@ export class LiveDemodulator extends EventEmitter {
 		]) {
 			stream?.destroy()
 		}
+		run.frontAligner?.destroy()
 		run.squelchStream.destroy()
 
 		await Promise.all([run.front, run.back].map(proc => this.killGroup(proc)))
@@ -1242,6 +1577,8 @@ export class LiveDemodulator extends EventEmitter {
 
 	private handleAudioData(chunk: Buffer): void {
 		const run = this.run
+		// WG10 req 2.2: the new run's first audio ends the silence fill.
+		if (run !== null) this.silence.disarm("audio")
 		const phase = run?.pcmPhase ?? 0
 		if (run !== null) run.pcmPhase = (phase + chunk.length) % 4
 		const tone = run?.tone ?? null

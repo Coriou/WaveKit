@@ -52,9 +52,32 @@
  * `NoiseSquelch` (FM quieting of the channel IQ) instead of the power
  * threshold; the power measurement (`powerDbfs`) keeps running. The power
  * ("power" mode, used by the manual and auto squelch) code path is unchanged.
+ *
+ * Carrier observer (WG10 req 2.6, `carrierObserver: true`, built by the owner
+ * only for the auto squelch on nfm/wfm): a second `NoiseSquelch` measures the
+ * FM quieting of every block at `LIVE_AUDIO_NOISE_QUIETING_DB.default`;
+ * `blockQuieted()` tells the owner whether the last measured block carried a
+ * carrier, so a quieted block never seeds or raises the owner's floor. While
+ * the owner has no floor (`setNoiseFloorDbfs(null)` or never set) the gate in
+ * power mode follows the observer's open/closed decision instead of the power
+ * threshold, so a carrier already present at start or after a retune is heard
+ * at once. Once a floor exists the power path runs unchanged. Order: the
+ * observer measures inside `process()`, before it returns the block, so an
+ * owner callback run after `process()` for that block (the live
+ * demodulator's `measureRun`) sees `blockQuieted()` of that same block.
+ * Without the option nothing of this runs (byte-identical traces).
+ *
+ * Carrier evidence (WG10 activity hygiene, `carrierEvidence: true`, built by the owner
+ * for nfm/wfm in every squelch mode): `blockCarrier()` tells whether the last measured
+ * block carried a carrier, for the analog transmission tracker only. It reads the
+ * observer when one exists (auto), the noise gate's own quieting against its threshold
+ * in noise mode, and otherwise (manual) a passive `NoiseSquelch` meter at
+ * `LIVE_AUDIO_NOISE_QUIETING_DB.default`. The meter never drives the gate, the floor or
+ * `blockQuieted()`: audio gating is identical with and without it.
  */
 
 import { Transform, type TransformCallback } from "node:stream"
+import { LIVE_AUDIO_NOISE_QUIETING_DB } from "@wavekit/api-types"
 import {
 	NOISE_QUIETING_DB_DEFAULT,
 	NoiseSquelch,
@@ -79,6 +102,16 @@ export interface ChannelSquelchOptions {
 	bandwidthHz?: number
 	/** Noise-mode quieting threshold in dB (default 6, range 1–30). */
 	noiseQuietingDb?: number
+	/**
+	 * WG10 req 2.6: builds the FM quieting observer (auto nfm/wfm only).
+	 * Default false: no observer, `blockQuieted()` always false.
+	 */
+	carrierObserver?: boolean
+	/**
+	 * WG10 activity hygiene: measures `blockCarrier()` (nfm/wfm). Never changes the gate.
+	 * Default false: `blockCarrier()` always false, `hasCarrierEvidence` false.
+	 */
+	carrierEvidence?: boolean
 }
 
 /** Reported floor for an all-zero channel (matches the config minimum). */
@@ -122,6 +155,18 @@ export class ChannelSquelch {
 	private quietingDb: number
 	/** Created on the first switch to noise mode, then kept. */
 	private noise: NoiseSquelch | null = null
+	/** WG10 req 2.6: FM quieting observer (null unless `carrierObserver`). */
+	private observer: NoiseSquelch | null
+	/** Last measured block's quieting ≥ the observer threshold. */
+	private lastBlockQuieted = false
+	/** The owner's last floor estimate was finite (a floor exists). */
+	private ownerFloorKnown = false
+	/** WG10 activity hygiene: carrier evidence wanted (nfm/wfm). */
+	private evidenceEnabled: boolean
+	/** Passive quieting meter (built lazily, only without observer in power mode). */
+	private evidenceMeter: NoiseSquelch | null = null
+	/** Last measured block carried a carrier (evidence only, never gating). */
+	private lastBlockCarrier = false
 
 	constructor(options: ChannelSquelchOptions) {
 		const blockSamples = Math.max(
@@ -145,7 +190,74 @@ export class ChannelSquelch {
 		this.quietingDb = validateNoiseQuietingDb(
 			options.noiseQuietingDb ?? NOISE_QUIETING_DB_DEFAULT,
 		)
+		this.observer =
+			options.carrierObserver === true ? this.createObserver() : null
+		this.evidenceEnabled = options.carrierEvidence === true
 		if (options.mode === "noise") this.setMode("noise")
+	}
+
+	/**
+	 * WG10 req 2.6: builds (fresh state) or drops the carrier observer at runtime, so
+	 * the owner keeps it only in auto nfm/wfm. Dropping clears the last quieting
+	 * (`blockQuieted()` false) and returns the gate to the frozen power path. No-op
+	 * when unchanged.
+	 */
+	setCarrierObserver(enabled: boolean): void {
+		if (enabled === (this.observer !== null)) return
+		this.observer = enabled ? this.createObserver() : null
+		this.lastBlockQuieted = false
+	}
+
+	private createObserver(): NoiseSquelch {
+		return new NoiseSquelch({
+			sampleRate: this.sampleRate,
+			bandwidthHz: this.bandwidthHz,
+			quietingDb: LIVE_AUDIO_NOISE_QUIETING_DB.default,
+			hangMs: this.hangMs,
+			hysteresisDb: this.hysteresisDb,
+		})
+	}
+
+	/**
+	 * WG10 activity hygiene: turns carrier evidence on or off at runtime (the owner keeps it
+	 * on for nfm/wfm). Off clears `blockCarrier()`. Never touches the gate.
+	 */
+	setCarrierEvidence(enabled: boolean): void {
+		if (enabled === this.evidenceEnabled) return
+		this.evidenceEnabled = enabled
+		this.evidenceMeter = null
+		this.lastBlockCarrier = false
+	}
+
+	/** Whether `blockCarrier()` measures anything (WG10 activity hygiene). */
+	get hasCarrierEvidence(): boolean {
+		return this.evidenceEnabled
+	}
+
+	/**
+	 * WG10 activity hygiene: the last measured block carried a carrier (observer quieting at
+	 * the default, the noise gate's quieting at its own threshold, or the passive meter).
+	 * False without `carrierEvidence`, before the first block and for an unusable block.
+	 */
+	blockCarrier(): boolean {
+		return this.lastBlockCarrier
+	}
+
+	/** Whether the carrier observer exists (WG10 req 2.6). */
+	get hasCarrierObserver(): boolean {
+		return this.observer !== null
+	}
+
+	/**
+	 * WG10 req 2.6: true when the last measured block's FM quieting is at
+	 * least `LIVE_AUDIO_NOISE_QUIETING_DB.default` (a carrier is present).
+	 * Always false without the observer, before the first block, and for a
+	 * block without a usable quieting (NaN, silent IQ): fail closed, so an
+	 * unknown block is treated as noise by the gate but the owner's floor
+	 * logic is the frozen one.
+	 */
+	blockQuieted(): boolean {
+		return this.lastBlockQuieted
 	}
 
 	/** Current gate source. */
@@ -229,9 +341,28 @@ export class ChannelSquelch {
 	setNoiseFloorDbfs(floorDbfs: number | null): void {
 		if (floorDbfs === null || !Number.isFinite(floorDbfs)) {
 			this.floorDbfs = null
+			this.ownerFloorKnown = false
 			return
 		}
+		this.ownerFloorKnown = true
 		if (!this.gateOpen) this.floorDbfs = floorDbfs
+	}
+
+	/**
+	 * WG10 R1 m1: a front swap (new channel offset). The gate returns to its rest state
+	 * (closed unless disabled), the hang and the noise and carrier-observer state start
+	 * afresh, so nothing measured on the old channel opens the gate on the new one. The
+	 * owner's floor estimate is its own (reset on retune); the output phase stays continuous.
+	 */
+	resetGate(): void {
+		this.gateOpen = this.squelchMode === "power" && this.thresholdDbfs === null
+		this.lastAboveMs = Number.NEGATIVE_INFINITY
+		this.smoothedPower = null
+		this.noise?.reset()
+		if (this.observer !== null) this.observer = this.createObserver()
+		this.lastBlockQuieted = false
+		this.evidenceMeter = null
+		this.lastBlockCarrier = false
 	}
 
 	/** Gates complete blocks; a partial block waits for the next chunk. */
@@ -267,13 +398,36 @@ export class ChannelSquelch {
 					(power - this.smoothedPower) *
 						Math.min(1, this.blockMs / REPORT_SMOOTHING_MS)
 
+		const observer = this.observer
+		let observerOpen = false
+		if (observer !== null) {
+			observerOpen = observer.processBlock(block)
+			const quieting = observer.lastQuietingDb
+			this.lastBlockQuieted =
+				quieting !== null && quieting >= LIVE_AUDIO_NOISE_QUIETING_DB.default
+		}
+
 		if (this.squelchMode === "noise" && this.noise) {
 			this.gateOpen = this.noise.processBlock(block)
+			if (this.evidenceEnabled) {
+				const q = this.noise.lastQuietingDb
+				this.lastBlockCarrier = q !== null && q >= this.noise.quietingDb
+			}
 			return this.emitBlock(block)
 		}
+		if (this.evidenceEnabled) this.measureCarrierEvidence(block)
 
 		const threshold = this.thresholdDbfs
 		if (threshold === null) return this.emitBlock(block)
+
+		if (observer !== null && !this.ownerFloorKnown) {
+			// WG10 req 2.6: no floor yet; the quieting decision drives the gate.
+			// An open observer refreshes the power hang so the handover to the
+			// power path (first floor) does not chop a carrier at once.
+			this.gateOpen = observerOpen
+			if (observerOpen) this.lastAboveMs = this.streamMs
+			return this.emitBlock(block)
+		}
 
 		const levelDbfs = toDbfs(power)
 		if (levelDbfs >= threshold) {
@@ -294,6 +448,19 @@ export class ChannelSquelch {
 			}
 		}
 		return this.emitBlock(block)
+	}
+
+	/** WG10 activity hygiene: evidence in power mode (observer, else the passive meter). */
+	private measureCarrierEvidence(block: Buffer): void {
+		if (this.observer !== null) {
+			this.lastBlockCarrier = this.lastBlockQuieted
+			return
+		}
+		this.evidenceMeter ??= this.createObserver()
+		this.evidenceMeter.processBlock(block)
+		const q = this.evidenceMeter.lastQuietingDb
+		this.lastBlockCarrier =
+			q !== null && q >= LIVE_AUDIO_NOISE_QUIETING_DB.default
 	}
 
 	/** Passes (rotated) IQ or the muted vector, keeping the phase continuous. */

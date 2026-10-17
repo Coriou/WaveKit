@@ -5,7 +5,16 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises"
+import {
+	lstat,
+	mkdir,
+	open,
+	readdir,
+	readFile,
+	rename,
+	rm,
+	unlink,
+} from "node:fs/promises"
 import { join } from "node:path"
 import type { ScannerCapture } from "@wavekit/api-types"
 import { z } from "zod"
@@ -99,9 +108,9 @@ export class CaptureStore {
 	 */
 	async init(): Promise<void> {
 		const tmpDir = join(this.opts.dir, ".tmp")
-		await mkdir(tmpDir, { recursive: true })
-		for (const f of await readdir(tmpDir))
-			await rm(join(tmpDir, f), { force: true })
+		// A non-directory `.tmp` makes mkdir fail; sweepStaging then refuses it (req 1.10).
+		await mkdir(tmpDir, { recursive: true }).catch(() => undefined)
+		await this.sweepStaging(tmpDir)
 		const files = await readdir(this.opts.dir)
 		for (const f of files) {
 			if (!f.endsWith(".scanner.json")) continue
@@ -112,13 +121,46 @@ export class CaptureStore {
 		}
 		for (const f of files) {
 			const id = CAPTURE_FILE.exec(f)?.[1]
-			const torn = f.endsWith(".tmp")
+			const torn = f !== ".tmp" && f.endsWith(".tmp")
 			const orphan = id !== undefined && !this.index.has(id)
 			if (!torn && !orphan) continue
+			// WG10 req 1.10: only regular files are leftovers (the staging directory is not).
+			const st = await lstat(join(this.opts.dir, f)).catch(() => null)
+			if (!st?.isFile()) continue
 			await rm(join(this.opts.dir, f), { force: true }).catch((err: unknown) =>
 				this.log.warn({ err, file: f }, "Removing a capture leftover failed"),
 			)
 		}
+	}
+
+	/**
+	 * WG10 req 1.10: unlinks the regular files left in the staging directory. A staging
+	 * directory that is a symbolic link or not a directory is not swept; entries that are not
+	 * regular files stay and are counted (no name in the log).
+	 */
+	private async sweepStaging(tmpDir: string): Promise<void> {
+		const st = await lstat(tmpDir).catch(() => null)
+		if (!st?.isDirectory()) {
+			this.log.warn(
+				"Capture staging directory is not a plain directory; not swept",
+			)
+			return
+		}
+		let left = 0
+		for (const f of await readdir(tmpDir)) {
+			const p = join(tmpDir, f)
+			const e = await lstat(p).catch(() => null)
+			if (!e) continue
+			if (!e.isFile()) {
+				left += 1
+				continue
+			}
+			await unlink(p).catch(() => {
+				left += 1
+			})
+		}
+		if (left > 0)
+			this.log.warn({ left }, "Capture staging entries that are not files left")
 	}
 
 	tempPath(id: string): string {

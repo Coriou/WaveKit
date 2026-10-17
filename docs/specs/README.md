@@ -23,6 +23,8 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [lora-decoder](lora-decoder/requirements.md)
 - [operator-data](operator-data/requirements.md)
 - [receiver-capabilities](receiver-capabilities/requirements.md)
+- [receiver-endpoints](receiver-endpoints/requirements.md): a receiver's ranked addresses and
+  DNS-SD advertisement; core moves IQ to the best verified endpoint (design)
 - [regional-display-registry](regional-display-registry/requirements.md)
 - [scanner-followups](scanner-followups/requirements.md): running-job range edits,
   per-range fields, signals only, preempting job, identity search (SF1)
@@ -54,6 +56,10 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-9](web-gaps-9/requirements.md): browser pairing for a web app on another port,
   recording Keep and deletion behind one deletion decision, strict tuning trust and faster
   operator retunes, zoom workload benchmark, minors (WG9)
+- [web-gaps-10](web-gaps-10/requirements.md): scanner recording delete, merge and eviction
+  folder protection, kept totals and delete leftover sweep; live audio that survives
+  click-to-tune, a carrier-aware auto squelch, operator rate proof and the untracked-retune root
+  cause; identify for analog voice and unavailable decoders (WG10)
 
 ## The three files
 

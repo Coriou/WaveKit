@@ -254,6 +254,9 @@ describe("analog transmission properties", () => {
 					const tracker = new AnalogTransmissionTracker({
 						source,
 						maxDurationMs: 5_000,
+						// WG10 activity hygiene off: WG1 pairing (open only while gated) is pinned
+						// here; the hygiene properties live in analog-transmission-hygiene.property.
+						hygiene: { mergeGapMs: 0, minDurationMs: 0, minCarrierBlocks: 0 },
 						now: () => now,
 						randomUUID: () => `id-${seq++}`,
 						frequencyAt: (_sourceId, offsetHz) => {

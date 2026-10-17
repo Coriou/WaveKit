@@ -19,6 +19,13 @@ export type LiveAudioSquelchMode = "manual" | "auto" | "noise"
 export const LIVE_AUDIO_SQUELCH_MODES: readonly LiveAudioSquelchMode[] =
 	Object.freeze(["manual", "auto", "noise"])
 /** WG7 req 2.2: noise squelch quieting threshold in dB (default, inclusive range). */
+/** WG10 req 2.2: silence chunk length while a restart keeps the stream format. */
+export const LIVE_AUDIO_SILENCE_CHUNK_MS = 20
+/** WG10 req 2.2: silence fill per restart at most (then clients wait as before). */
+export const LIVE_AUDIO_SILENCE_FILL_MAX_MS = 5_000
+/** WG10 req 2.3: an offset change falls back to a full restart when the new front is silent this long. */
+export const LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS = 2_000
+
 export const LIVE_AUDIO_NOISE_QUIETING_DB = Object.freeze({
 	default: 6,
 	min: 1,

@@ -16,6 +16,21 @@ vi.mock("node:child_process", () => ({ spawn: vi.fn() }))
 
 import { spawn } from "node:child_process"
 
+/**
+ * WG10 req 2.6: constant-magnitude channel noise (pseudo-random phase per
+ * sample). Its power equals the old DC fixture's, but it is not FM-quieted,
+ * so the auto nfm carrier observer treats it as noise, not as a carrier.
+ */
+function writeNoise(block: Buffer, amplitude: number, stride = 8): void {
+	let seed = 0x2545f491
+	for (let i = 0; i * stride < block.length; i++) {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+		const phase = (seed / 4294967296) * 2 * Math.PI
+		block.writeFloatLE(amplitude * Math.cos(phase), i * stride)
+		block.writeFloatLE(amplitude * Math.sin(phase), i * stride + 4)
+	}
+}
+
 const testLogger = createLogger({ level: "fatal" })
 let nextPid = 5_000_000
 
@@ -137,7 +152,7 @@ describe("LiveDemodulator auto floor re-seed after retune (WG9 5.6)", () => {
 	/** Feeds 10 ms channel blocks of constant power (stream time, not wall time). */
 	async function feedPower(dbfs: number, blocks: number): Promise<void> {
 		const block = Buffer.alloc(250 * 8)
-		for (let i = 0; i < 250; i++) block.writeFloatLE(10 ** (dbfs / 20), i * 8)
+		writeNoise(block, 10 ** (dbfs / 20))
 		processes[1]!.stdin.resume()
 		for (let i = 0; i < blocks; i++) {
 			await new Promise<void>(resolve =>

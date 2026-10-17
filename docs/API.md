@@ -1129,6 +1129,20 @@ curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \
   -H "Content-Type: application/json" -d '{"hz":144800000}'
 ```
 
+**Rate proof (WG10, deliberate behaviour change).** In internal control mode, the
+first operator frequency command on a connection first writes the sample rate the
+core already holds, when that rate is declared only or was not written on the current
+connection. `PATCH /api/tuner/:sourceId/config` with a frequency and no sample rate
+does the same. The value never changes; the write is a command of origin `rest`, so
+labels that need both frequency and rate written on the current connection (WG9,
+for example `live-audio:transmission` frequencies) turn `commanded` after the first
+operator tune instead of staying `unverified`. At most one extra rtl_tcp
+command per connection; concurrent requests share one write. Never written when the
+rate is unknown (placeholder), under external or relay control, or when the rate is
+already written on this connection. A failed rate write fails the request with the
+usual tuner error and no frequency write. The scanner's hop rule (WG9) is unchanged:
+both paths write the same value at most once per connection.
+
 #### POST /api/tuner/:sourceId/control-mode
 
 Release control to SDR++ (`external`) or reclaim (`internal`).
@@ -1323,6 +1337,12 @@ Configuration notes:
   (0.4 dB/s) catches up, about 15 s for a 10 dB step with margin 6 dB. Cold
   starts, rebuilds and mode changes seed from the first block alone. This is not
   calibrated noise measurement.
+  WG10, `nfm` and `wfm` only: a block whose FM quieting is at least the noise-squelch
+  default (6 dB, a carrier is present) never seeds the floor and never raises it
+  (falls still apply); until the first unquieted block seeds the floor, the gate
+  follows the quieting decision, as in `noise` mode, so a strong carrier already
+  present at start or after a retune is heard at once instead of becoming the floor.
+  `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` and the manual and noise modes are unchanged.
 - `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
   (above voice: a high-pass at 0.6 of the channel's audio Nyquist) and compares it
@@ -1502,6 +1522,20 @@ The 400 body (WG9) is `{ "error": "Bad Request", "code", "message" }`: `code` is
 `CHANNEL_OFFSET_OUT_OF_RANGE` for an offset outside the capture. The submitted
 value is never echoed. With access configured, `message` is `Request failed`, as for
 the other protected errors.
+
+**Continuity (WG10).** Stream clients are disconnected only when the stream's sample
+rate or sample format changes (or `httpPort` moves). A restart that keeps the format
+(a DSP change, a source caps change) keeps every client attached
+and sends silence in the stream format, in 20 ms chunks, until the new pipeline's
+first audio, for at most 5 000 ms per restart; it stops at the first real audio, a
+stop or a failure (no silence during the backoff before a failure restart). The silence never reaches tone detection, transmissions or
+recordings. An `offsetHz`-only change (click-to-tune inside the capture) does not
+restart the pipeline: a new front stage starts with the new offset next to the old
+one, the squelch input switches to it at a whole complex sample once it produces
+channel IQ, and the old front stops (make-before-break); the back stage and the
+clients are kept. If the new front fails or produces nothing within 2 000 ms, the
+change falls back to a full restart with silence fill. Players therefore no longer
+see their buffer run dry ("Connecting…") on click-to-tune.
 
 `agc` takes `off`, `slow`, `fast` or `null`; `null` deletes the key and returns to
 the per-modulation default. Setting, changing or deleting the key is a DSP change
@@ -3165,6 +3199,62 @@ A probe trial whose decoder cannot run (WG9) ends `unsupported` with reason
 `decoder-unavailable`: the binary fails to spawn (`ENOENT` or `EACCES`) or exits
 with code 126 or 127, without a signal, before any output. Every other exit keeps
 its previous outcome. No outcome value was added; `reason` is free text.
+WG10: the probe pool remembers a decoder type found unavailable for 300 s
+(`PROBE_UNAVAILABLE_MEMO_MS`); meanwhile identify plans that type's trials as
+`unsupported`/`decoder-unavailable` without spawning, and a successful start of the
+type clears it. `result.decodersUnavailable` lists the probe decoder types (`dsd-fme`,
+`multimon-ng`, `direwolf`, `rtl433`; sorted, unique) that could not run during this
+job; absent when none. A decoder that ran and heard nothing stays `no-sync`.
+
+**Analog voice (WG10).** Identify reads the live demodulator's analog transmissions
+(`live-audio:transmission`). The `analog-fm` and `analog-am` trials are ambient trials
+of decoder `live-audio` (`transport: "ambient"` while they run, `mode`: the
+transmission's modulation once matched). Without a protocol list in the request, both are planned
+whenever either one is scored (the classifier cannot tell FM from AM voice); with a protocol list,
+only the analog protocols it names are planned (`planAnalogTrials`). A transmission matches a target when it is on the job's source, its
+frequency lies within the target's tolerance (`max(1 kHz, bandwidth/2)`) and it is
+open or ended no earlier than 30 s (`IDENTIFY_ANALOG_LOOKBACK_MS`) before the job
+started; the core keeps the latest 32 (`IDENTIFY_ANALOG_MAX_TRANSMISSIONS`). `nfm` or
+`wfm` answers `analog-fm`, `am` or `dsb` answers `analog-am`; other modulations are
+no evidence. Outcomes: `decoded` once a matching closed transmission exists;
+`timeout` when only a matching open one is present at the target's deadline;
+`no-sync` when live audio was on the target during the window but nothing matched;
+`unsupported` with reason `no-live-audio` when live audio was not running on the
+job's source, or not tuned within the tolerance, for the whole window. A match is a
+stop like an accepted identity unless `exhaustive`; a digital decode keeps priority
+and then no `analog` is reported (a classified digital discovery keeps its protocol; analog evidence
+is supplementary and only appears in `result.analog`). Identify reads the same published
+transmissions as WebSocket and Activity, so the activity hygiene rules below
+([live-audio:transmission](#live-audiotransmission)) apply: a flapping or carrier-less squelch
+opening is never evidence, and a closed event arrives up to the merge gap (1.5 s) after the audio
+ended. A trial that sees a matching open transmission at the target's deadline, or an opening
+the tracker still holds back (under the 500 ms minimum, started by the deadline), therefore
+waits up to 1 750 ms past the deadline (`IDENTIFY_ANALOG_SETTLE_MS`: merge gap plus the 250 ms
+hang; fixed from the deadline): a closed match that ended by the deadline in that time decodes,
+otherwise the trial ends `timeout` (never `no-sync`). Tone detection runs over every merged
+segment, so a merged transmission gives the detector more audio, not less; a different speaker
+with a different confirmed tone is a separate transmission. A matching transmission with a CTCSS tone or a DCS
+code on a `commanded` or `relay` frequency makes the target `identified` with
+protocol `analog-fm` (or `analog-am`), confidence `classified` and
+`result.metadata.ctcssHz` when a CTCSS tone was heard; without a tone, or on an
+`unverified` frequency, the target is `candidate` with the same protocol. Only tones
+the transmission tracker reported are used. `result.analog`:
+
+```json
+{
+	"source": "live-audio",
+	"modulation": "nfm",
+	"transmissions": 2,
+	"transmissionId": "a3f1c2d4-1b2c-4d5e-8f90-123456789abc",
+	"ctcssHz": 88.5,
+	"dcs": null,
+	"tuningTrust": "commanded"
+}
+```
+
+Identify never starts or retunes live audio: to identify analog voice, listen on the
+target (or have listened in the last 30 s). The outcome and state lists are unchanged;
+`live-audio` and `no-live-audio` are new values of the free-text `decoder` and `reason`.
 
 A decode counts only when all of these hold (fail closed):
 
@@ -3308,9 +3398,23 @@ curl http://localhost:9000/api/spectrum
 floor, `k` per range, `settleMode`, `tuningTrust` (WG9: `unverified` while an
 operator retune's frames are still `unverified`, until the first block at or past
 the network settle), `warnings`
-(`untracked-retune` | `host-centre-mismatch`, with `deltaHz`), the summary
+(`untracked-retune` | `host-centre-mismatch`, with `deltaHz` and `at`), the summary
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile) and `lastError?`.
+
+Untracked-retune warnings (WG10) carry two optional fields, absent on
+`host-centre-mismatch`. `suspected`: `iq-byte-slip` (the vanished features reappear
+mirrored about the centre: I and Q swapped; a label only: on U8 IQ the engine no
+longer re-aligns the stream, it only reports the suspicion), `signal-change` (a
+closed strong track ended and every vanished feature had a width-matched survivor
+explained by it: centre within `max(1 bin, width/4)`, width in
+`[width/2 - 2 bins, 2*width + 2 bins]`; no new epoch starts and the trust labels keep
+their value; the decision can wait up to the track hang plus 2 blocks) or `external-control`
+(anything else, typically another client retuning the receiver). `lastCommandAgeMs`:
+milliseconds since this core's last tuner command on the source, null when none. The
+warning list keeps every warning; the warn log line is limited to one per source per
+60 s (`SPECTRUM_WARNING_LOG_INTERVAL_MS`) with a suppressed count. A strong
+transmission ending no longer raises an `untracked-retune` with `deltaHz` null.
 
 Spectrum detail above 2 048 bins (WG8). `scanner.ws.spectrumBinsCap` (config
 only: `"auto"`, 2048, 4096 or 8192; absent means `"auto"`, so the parsed config
@@ -3669,8 +3773,11 @@ bytes, 0 files and the same reason. The first reason wins. A permission error is
 path is `exists: false` and not partial. A partial area's `bytes` and `files` are
 lower bounds.
 
-`kept` is always null: kept bytes (recording Keep, WG9) are not reported here
-yet. `lowSpace` describes the only automatic low-space behaviour:
+`kept` (WG10) reports the recording keep store in protected mode:
+`{ "state": "ready", "recordings", "bytes", "maxRecordings": 2000, "maxBytes": 536870912 }`
+(each file counted at its size when kept; no filesystem access), `{ "state": "loading" }`
+or `{ "state": "failed" }` (every recording protected, no counts). Legacy mode reports
+`null`; read null as "not reported". `lowSpace` describes the only automatic low-space behaviour:
 `policy` is `scanner-evidence-stops-writing` (scanner evidence stops writing when
 the available space is below `scanner.storage.minFreeDiskMb`), `minFreeBytes` is
 that threshold in bytes (null without a scanner) and `state` is `low` when
@@ -3816,9 +3923,18 @@ Keep protects one recording from every WaveKit deletion owner (the dsd-fme call
 pruner, scanner evidence retention, discovery removal and analog retention)
 until it is unkept. `PUT` keeps, `DELETE` on `/keep` unkeeps; both are
 idempotent and answer 200 `{ "id", "kept", "changed" }` (`changed: false` when it
-already was so). `DELETE /api/recordings/:id` removes a dsd-fme call recording:
-200 `{ "id", "deleted": true }`. Scanner recordings can be kept and unkept but
-not deleted here (409 `RECORDING_DELETE_UNSUPPORTED`). Unkeeping is allowed after
+already was so). `DELETE /api/recordings/:id` removes a dsd-fme call recording
+or (WG10) a scanner digital voice recording (`scan:` id, a file under
+`recordings/dv/<discovery>/`): 200 `{ "id", "deleted": true }`. A scanner delete
+follows the same rules and also updates the scanner's bookkeeping: the id leaves its
+observation, the discovery's `evidence.recordings` drops by one (never below zero),
+the change is journaled and a `scanner:discovery` `updated` event is sent. The file is
+unlinked first; if the bookkeeping then fails the answer is still 200 (a count is
+logged) and the dangling id resolves to no file. An analog scanner recording
+(`analog-<uuid>.wav`) or a scanner that is not running answers 409
+`RECORDING_DELETE_UNSUPPORTED`; a recording whose discovery is being removed 409
+`RECORDING_BUSY`; a file the scanner no longer owns, a symbolic link on the way or a
+folder swapped during the delete 404 with nothing deleted. Unkeeping is allowed after
 the file is gone.
 
 Protected mode only: the routes are mounted with the inventory while
@@ -3840,8 +3956,31 @@ other users may write (group or other write without the sticky bit) refuses
 delete with 500 `RECORDING_DELETE_FAILED` (logged once per refusal, no path):
 another user could rebind the private directory's name. Fix the directory mode,
 for example `chmod go-w <dir>` (or `chmod +t <dir>` for a shared directory), then
-retry. A crash between the rename and the unlink leaves a `.wavekit-delete-*`
-directory that is neither listed nor swept.
+retry. The delete records its progress by name inside the private directory: the
+moved file keeps its own name until its identity check passed, then is renamed
+`verified` just before the unlink. A crash leaves a `.wavekit-delete-*` directory
+that is never listed; at the next start in protected mode (WG10), before any
+decoder or the scanner runs, a bounded sweep (at most 64 directories) visits the
+dsd-fme recording directories with their `WAV`/`wav` folders and every scanner
+`recordings/dv/<discovery>` folder. It acts only on a directory that is provably
+WaveKit's (the exact name pattern, a real directory with no symbolic link from the
+configured root, owned by the core's user, mode exactly `0700`): a lone `verified`
+file is unlinked while the keep store is ready; a lone entry named like a recording
+is put back under its name, never replacing a file; an empty directory is removed;
+anything else (including WG9-format `recording` entries) is left and counted. One
+info line with counts, never a name or path. Legacy mode does not sweep.
+
+Discovery merges (WG10, both modes): the dropped discovery's recording and evidence
+folders stay where they are and the survivor adopts them as aliases (persisted, at
+most 64 per discovery; past that the oldest is released and its folder becomes an
+orphan, warned as a count). Alias folders count as the survivor's: its Keep protects
+them in retention, their recording ids keep resolving, a kept file in any alias makes
+the survivor hold kept recordings (409 on its removal), and removing the survivor
+removes the alias folders too, file by file through the keep decision. A capacity
+eviction now removes the evicted discovery's folders and aliases like an inactive
+prune (a discovery holding kept recordings is still never evicted, and kept files
+stay). Merges and evictions made before WG10 keep their orphan folders, which follow
+the normal age and size caps.
 
 A configured recording root that is itself a symbolic link (a dsd-fme recording
 directory such as `data/recordings -> /Volumes/usb/recs`, or the scanner storage
@@ -3872,7 +4011,7 @@ While the store loads every answer is "kept" too.
 | `RECORDING_KEPT`               | 409    | Delete of a kept recording (unkeep first)                 |
 | `RECORDING_BUSY`               | 409    | A Keep and a delete of the same recording overlapped      |
 | `RECORDING_KEEP_LIMIT`         | 409    | Keep would pass 2 000 entries or 512 MiB                  |
-| `RECORDING_DELETE_UNSUPPORTED` | 409    | Delete of a scanner recording                             |
+| `RECORDING_DELETE_UNSUPPORTED` | 409    | Delete of an analog scanner recording, or no scanner      |
 | `RECORDING_KEEP_FAILED`        | 500    | Keep or unkeep failed otherwise (fixed text per action)   |
 | `RECORDING_DELETE_FAILED`      | 500    | Delete failed otherwise, or a shared writable directory   |
 | `RECORDING_KEEPS_UNAVAILABLE`  | 503    | The keep store is loading, failed or cannot be written    |
@@ -3926,7 +4065,8 @@ The store holds three kinds:
   when WaveKit knows them; see [Provenance](#provenance).
 - `analog-transmission`: one record per closed
   [`live-audio:transmission`](#live-audiotransmission) of the live
-  demodulator. `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
+  demodulator (WG10: merged, at least 500 ms of audio, carrier evidence on nfm/wfm; see
+  activity hygiene there). `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
   and `payload` is `AnalogTransmissionPayload` (the closed event without
   `state`). The summary has `category: "voice"`, `protocol: "analog"`, the
   source id, `frequencyHz` from the event-time frequency (null when unknown),
@@ -5232,6 +5372,48 @@ change these events. Sent whether Activity is enabled or not; when it is
 ready, each closed transmission is also stored as an `analog-transmission`
 [Activity](#activity) record.
 
+Activity hygiene (WG10, a deliberate behaviour change). A weak far signal or noise
+flapping across the squelch used to produce one transmission per crossing (hundreds
+of 0–1 s Voice rows). The tracker now applies three rules, in every squelch mode, to
+everything it publishes (these events, Activity rows and identify's analog evidence
+alike); live audio gating and playback are unchanged:
+
+1. Merge: a squelch close ends a segment at `endMs = max(segment start, close − 250 ms
+   hang)`. A re-open at `t` with `t − endMs ≤ 1500 ms` (`ANALOG_TRANSMISSION_MERGE_GAP_MS`)
+   on the same source, modulation, bandwidth, offset, squelch mode and frequency continues
+   the same transmission (same id and start; power, tone and audio accumulate). Otherwise,
+   or 1.5 s after `endMs`, the transmission is final with `endedAt = endMs`. `stopped`,
+   `config`, `retune` and `max-duration` closes are final at once; a stop or config
+   change during the gap closes at `endMs` with `closeReason: "squelch"`.
+   Different speakers (R2): a resumed segment runs its own tone detector. Once it
+   confirms a CTCSS tone or DCS code (the usual 0.75 s of audio) and the transmission
+   had confirmed a different one by its last segment end (no tone in common), the held
+   transmission is final at its `endMs` with that earlier tone and the segment becomes a
+   new transmission (new id) starting at the segment's own start. An untoned or not yet
+   confirmed segment, or the same tone, still merges (fades).
+2. Minimum duration: a transmission whose summed segment audio (each segment's
+   `endMs − start`, gaps not counted) is under 500 ms (`ANALOG_TRANSMISSION_MIN_MS`) is
+   not published, so short blips that merge do not qualify through the gaps between
+   them. `durationMs` is still the span from the first start to the last `endMs`. The
+   continuation opened after a `max-duration` close is exempt (rule 3 still applies).
+3. Carrier evidence (`nfm`, `wfm`): one segment of the transmission needs at least 3
+   measured 10 ms blocks with FM quieting (`ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS`);
+   blocks of different segments never add up, and blocks while the squelch is closed
+   never count. The evidence is the auto-squelch carrier observer, the noise gate's
+   quieting at its own threshold in noise mode, or in manual mode a passive quieting
+   meter at the default 6 dB that never gates (measured cost per 10 ms block: about
+   2 µs at the 25 kHz nfm channel rate, 8 µs at the 293 kHz wfm one, under 0.1 % of
+   one core). Without it the transmission is not published. Other modulations skip
+   this rule. A pipeline that reports no count when a segment resumes (restart) keeps
+   the last known count as that segment's base.
+
+The open event is held back until the transmission qualifies: during the transmission
+once the summed audio (the open segment counted up to `now − 250 ms`) reaches 500 ms
+and the carrier rule holds, else at finalisation, directly followed by the closed event.
+A suppressed transmission sends nothing. Suppressions are counted
+(`suppressed(): { short, noCarrier }` on the tracker) and logged at debug. The event
+shape is unchanged.
+
 ```json
 {
 	"type": "live-audio:transmission",
@@ -5281,7 +5463,7 @@ ready, each closed transmission is also stored as an `analog-transmission`
   once if the squelch is still open.
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
   level samples; null before the first one. Every open is followed by exactly
-  one closed event, also on shutdown.
+  one closed event, also on shutdown (WG10: only published transmissions send an open).
 - `tone` (WG2): `{ ctcssHz, dtmf, dcs }`, on closed events only (always all
   three keys from WG6 cores; `dcs` is absent from older cores; absent on open
   events). `ctcssHz` is one of the 50 standard CTCSS tones
@@ -5409,13 +5591,14 @@ most 1/s per (job, target); the latest state is always delivered.
 - `trials[]`: `{protocol, decoder, mode, transport, outcome, reason?}`. Outcomes:
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
-  `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`; `mode` and
-  `transport` null),
+  `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
+  `decoder-unavailable` (WG9), `no-live-audio` (WG10); `mode` and `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false) and
   `cancelled`. `transport` is `offset`, `channel` or `ambient` (WG7: an
-  already-running AIS, ACARS, VDL2 or LoRa decoder; see `POST /api/scanner/identify`).
-- `result`: see `POST /api/scanner/identify`, including `artefact?` and
-  `ended?: "window-moved"`.
+  already-running AIS, ACARS, VDL2 or LoRa decoder; WG10: decoder `live-audio` for
+  `analog-fm` / `analog-am`; see `POST /api/scanner/identify`).
+- `result`: see `POST /api/scanner/identify`, including `artefact?`,
+  `ended?: "window-moved"`, and (WG10) `analog?` and `decodersUnavailable?`.
 
 If `all: true` finds nothing within `timeoutMs`, no `scanner:identify` is sent;
 the job completes with `identify.targets: []` (`scanner:job`).

@@ -8,6 +8,7 @@ import type {
 	StorageActivityRetention,
 	StorageArea,
 	StorageFilesystem,
+	StorageKeptSummary,
 	StorageLowSpaceState,
 	StorageReport,
 } from "@wavekit/api-types"
@@ -93,6 +94,14 @@ export function createStorageReporter(
 		}
 	}
 
+	function readKept(): StorageKeptSummary | null {
+		try {
+			return options.kept?.() ?? null
+		} catch {
+			return null
+		}
+	}
+
 	async function readFilesystem(): Promise<StorageFilesystem | null> {
 		try {
 			const s = await statfs(options.stateDir)
@@ -167,7 +176,7 @@ export function createStorageReporter(
 			cachedUntil: new Date(started + cacheMs).toISOString(),
 			filesystem,
 			areas: out,
-			kept: null,
+			kept: readKept(),
 			lowSpace: {
 				policy: "scanner-evidence-stops-writing",
 				minFreeBytes: min,

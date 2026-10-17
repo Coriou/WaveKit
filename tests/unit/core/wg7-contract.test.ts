@@ -94,6 +94,8 @@ describe("WG7 contract", () => {
 				| "direwolf"
 				| "rtl433"
 				| Api.ScannerAmbientDecoderType
+				// WG10 req 3.2 widens the decoder with the live-audio analog evidence
+				| "live-audio"
 				| null
 			>(true),
 		).toBe(true)

@@ -81,6 +81,8 @@ function run(
 		now: () => 1_700_000_000_000,
 		randomUUID: () => `tx-${++seq}`,
 		createToneDetector: detector,
+		// WG10 activity hygiene off: this suite pins the DCS copy, not merge/minimum/carrier.
+		hygiene: { mergeGapMs: 0, minDurationMs: 0, minCarrierBlocks: 0 },
 	})
 	tracker.on("transmission", event => events.push(event))
 	tracker.start()

@@ -71,6 +71,21 @@ fix time; the SDR host version; and the APRS repeated-digipeater `*` marker on
 live direwolf paths. Open: csdr `-p slow` support awaits an image smoke test, and
 the Pi CPU cost of trails and AGC is unmeasured. No CLI or web change.
 
+Landed in the 2026-10-17 web-gap batch 10 (WG10, core only, [spec](specs/web-gaps-10/requirements.md)):
+live audio that keeps playing through restarts (silence fill, clients kept) and
+click-to-tune without a pipeline restart (front-stage swap; offset-change gap p90
+1 039 ms → 23 ms in a loaded stand-in bench, zero disconnects); an auto squelch floor
+that a strong FM carrier cannot seed; the first operator tune on a connection proves
+the held sample rate, so trust labels turn `commanded`; untracked-retune root cause
+work with `suspected` / `lastCommandAgeMs` warning fields and a rate-limited warn
+log; identify for analog voice from live-audio transmissions (`result.analog`,
+CTCSS/DCS) and `result.decodersUnavailable` with a 300 s unavailable-decoder memo;
+no startup warning for a passive scanner job before its source connects; analog voice
+activity hygiene (a deliberate behaviour change): squelch re-opens within 1.5 s merge
+into one transmission, transmissions under 500 ms and nfm/wfm ones without FM-quieting
+carrier evidence are not published (WS, Activity, identify), while live audio gating is
+unchanged. No CLI or web change required.
+
 Order of the remaining core gaps, by what they unblock in the dashboard:
 
 1. **Event foundation**: envelope publication, a persistent event store with
@@ -579,6 +594,14 @@ open. Missing proof retains ownership rather than admitting a successor.
       (`transport: "ambient"`, no probe). Only `commanded`/`relay` tuning trust
       at the decoder's own target frequency counts, and the identity needs two
       clean decodes. Open: acceptance on real AIS, ACARS, VDL2 and LoRa traffic.
+- [x] Identify for analog voice (WG10): `analog-fm` / `analog-am` trials read the
+      live demodulator's transmissions near the target (decoder `live-audio`); a
+      CTCSS or DCS tone on a `commanded`/`relay` frequency makes the target
+      `identified`, otherwise `candidate`; `no-live-audio` when live audio was not on
+      the target. `result.decodersUnavailable` names probe decoders that could not
+      run (remembered 300 s, not respawned meanwhile). Open: analog identify needs
+      live audio on the target (an in-process FM demodulator or a probe FM decoder
+      would lift that); real-RF acceptance on PMR446 with CTCSS.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
@@ -616,6 +639,10 @@ and status. Shared browser audio and richer controls remain open.
       and decoded voice while retaining manual selection. Reuse scanner S3's
       routing and arbitration; its planned 8 kHz HTTP monitor is a foundation,
       not completion of this item. Avoid disconnecting clients on rate changes.
+      WG10: the HTTP stream now keeps its clients through every restart that
+      keeps the format (silence fill, at most 5 s) and swaps only the front stage
+      on an offset change. Open: no silence during the 1-30 s failure-restart
+      backoff; a rate or format change still reconnects; real-RF and Pi CPU checks.
 - [x] Add automatic floor-based and noise squelch, and update controls without
       unnecessary pipeline restarts. Preserve current threshold/hang behavior
       and fix the observed noise tail. Auto squelch landed in the 2026-10-12
@@ -624,7 +651,9 @@ and status. Shared browser audio and richer controls remain open.
       below the threshold no longer hold the gate; about 260 ms of unmuted audio
       after carrier loss in the synthetic test). Synthetic evidence only:
       real-RF acceptance open (csdr back-chain delay, the 6 dB default at
-      12 dB CNR, WFM pilot harmonics), Pi CPU unmeasured.
+      12 dB CNR, WFM pilot harmonics), Pi CPU unmeasured. WG10: in auto mode on
+      NFM/WFM an FM-quieted block (a carrier) never seeds or raises the floor
+      (observer 24-36 µs per 10 ms block); real-RF check on a nearby handheld open.
 - [x] Live-audio AGC off/slow/fast including FM (WG4): `liveDemod.agc` and
       PATCH `agc` (null resets); absent keeps the per-modulation chain unchanged.
       Open: csdr `-p slow` at the pinned csdr is unverified until an image smoke
@@ -677,11 +706,26 @@ recording Keep protects one recording independently.
       scanner retention, discovery removal and analog retention consult (fail
       closed: an unusable keep store protects everything). Inventory items carry
       `kept`. Bounds 2 000 entries and 512 MiB kept.
-- [ ] Recording follow-ups from WG9: delete scanner recordings (409
-      `RECORDING_DELETE_UNSUPPORTED` today); discovery merge and capacity eviction
-      can leave orphan recording folders; a crash between delete's rename and
-      unlink leaves a `.wavekit-delete-*` directory that nothing sweeps (it may hold
-      a displaced foreign file); a failed keep store stops all recording pruning,
+- [x] Recording follow-ups (WG10, protected mode): delete scanner digital voice
+      recordings (`scan:` ids) with the scanner bookkeeping updated; merge aliases
+      keep a dropped discovery's folders protected and removable with the survivor;
+      a capacity eviction removes the evicted folders; keep totals in the storage
+      report (`kept`); a startup sweep of interrupted-delete directories (protected
+      mode only); the capture store no longer warns about its staging directory.
+      Downgrade note: merge `aliases` were added to the strict scanner snapshot and
+      journal schemas without a file-version bump, so a pre-WG10 build started on
+      scanner state written after any merge fails strict parsing and loads an
+      empty scanner state. Back up the scanner state directory before rolling back.
+- [ ] Recording follow-ups still open after WG10: analog scanner recordings cannot be
+      deleted (409); merges and evictions made before WG10 keep their orphan
+      folders; aliases are released only after the owner's removal succeeded (a
+      failed removal keeps them for the retry), but a deleted or evicted owner's
+      alias list is not journaled, so a crash before its removal finished can orphan
+      alias folders (kept files stay protected by their keys); WG9-format delete leftovers
+      (`recording` entries) are left and counted; deleting a recording of an owner
+      already dropped but not yet fenced answers 404 rather than 409
+      `RECORDING_BUSY` (nothing is touched); the scanner delete's lstat count is
+      6 plus twice the directory depth, above the design's 6; a failed keep store stops all recording pruning,
       so the disk can fill until it is fixed; kept scanner recordings can block
       discovery capacity eviction, so new discoveries are refused while every
       evictable one holds a kept recording (one warn with a count). A symlinked
@@ -868,6 +912,15 @@ same view, and a program can do the watching more reliably than a person.
       the observed tuner state proves the tuning). The spectrum axis and
       `declaredStream.centerFrequencyHz` still come from config or core
       metadata. Fix those, or show them as untrusted.
+      WG10 untracked-retune findings: in the core, a strong transmitter whose
+      images and intermodulation lines end together raised the alarm with Δ null;
+      it is now `signal-change` (no new epoch, labels kept). An I/Q byte slip in
+      the core, a command epoch landing a block late and a reconnect were ruled
+      out by tests; only a server-side byte drop upstream of the core could still
+      mirror the spectrum, which U8 sources now detect (`iq-byte-slip`, one-byte
+      re-align). Warnings carry `suspected` and `lastCommandAgeMs`. Open: a large
+      Δ seen live is not reproduced; a retune that leaves two old positions
+      covered could still read as `signal-change`.
 
 ### Spectrum contract amendment for scanner S1-B
 
@@ -916,6 +969,13 @@ and measured limits belong to that session's delta/review.
   5 transforms a second, at most 2 slices per source, 0.20 core in total; N 131 072
   and above fail CPU or memory. Until the Pi run (pending), the Pi proposal is
   N ≤ 32 768, 5/s, 1 slice per source and 2 in total, in a worker; Pi 3 N ≤ 16 384.
+  Measured on a Raspberry Pi 3B with the same bench at 2.048 Msps: the JavaScript
+  detector proxy alone saturates one core (0.99), so every zoom cell fails; one
+  transform takes about 5 ms at N 8 192 up to 200 ms at N 131 072. Conclusion: zoom
+  limits depend on the core host, not the receiver. A Pi-class core host needs the
+  zoom FFT off the main thread, preferably in Rust (a `wavekit-chan` extension), and
+  even then has no headroom while the JS detector runs; caps must come from a
+  measurement on the host that runs the core.
 - [ ] Measure coalesced REST drag-to-tune and accepted-state latency; then decide
   WS tuning. Any transport reuses authorization, ordering, scanner preemption
   and tuner origin semantics. WG9 measured the operator retune to first frame at

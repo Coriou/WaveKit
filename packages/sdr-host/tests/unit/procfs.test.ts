@@ -4,6 +4,7 @@ import {
 	parseLoadavg,
 	parseMeminfo,
 	parseMilliCelsius,
+	parseDefaultRoutes,
 	parseNetDev,
 	parseNetWireless,
 	parseProcStat,
@@ -72,6 +73,26 @@ describe("procfs parsers", () => {
 			].join("\n"),
 		)
 		expect(wireless.get("wlan0")).toEqual({ quality: 58, signalDbm: -52 })
+	})
+
+	it("keeps the lowest IPv4 default-route metric per interface", () => {
+		const routes = parseDefaultRoutes(
+			[
+				"Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+				"eth0\t00000000\tFE01A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0",
+				"wlan0\t00000000\t0156A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0",
+				"wlan0\t00000000\t0156A8C0\t0003\t0\t0\t20600\t00000000\t0\t0\t0",
+				// Subnet routes and routes that are not up are not default routes.
+				"eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0",
+				"usb0\t00000000\t0101A8C0\t0002\t0\t0\t50\t00000000\t0\t0\t0",
+				"garbage",
+			].join("\n"),
+		)
+		expect([...routes]).toEqual([
+			["eth0", 100],
+			["wlan0", 600],
+		])
+		expect(parseDefaultRoutes("").size).toBe(0)
 	})
 
 	it("parses thermal millidegrees within physical bounds", () => {
