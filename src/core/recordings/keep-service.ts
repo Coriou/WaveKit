@@ -63,7 +63,9 @@ export interface RecordingDeleteFs {
 	lstat(p: string): Promise<{
 		dev: number
 		ino: number
+		mode: number
 		isFile(): boolean
+		isDirectory(): boolean
 		isSymbolicLink(): boolean
 	}>
 	unlink(p: string): Promise<void>
@@ -409,6 +411,19 @@ export async function openRecordingKeepService(
 			log.warn({}, "Recording delete refused: the file changed")
 			throw notFound()
 		}
+		// Another uid able to write the recording directory (group or other write without the
+		// sticky bit) could rebind the private directory's name: refuse the whole delete.
+		const parent = await deleteFs.lstat(nodePath.dirname(filePath))
+		if ((parent.mode & 0o022) !== 0 && (parent.mode & 0o1000) === 0) {
+			log.warn(
+				{},
+				"Recording delete refused: the recording directory is writable by other users",
+			)
+			throw new WaveKitError(
+				RECORDING_DELETE_FAILED_TEXT,
+				"RECORDING_DELETE_FAILED",
+			)
+		}
 		// A failure here answers 500 RECORDING_DELETE_FAILED with nothing renamed.
 		const privateDir = await deleteFs.mkdtemp(
 			nodePath.join(
@@ -419,6 +434,25 @@ export async function openRecordingKeepService(
 		const innerPath = nodePath.join(privateDir, RECORDING_DELETE_INNER_NAME)
 		const removeDir = (): Promise<void> =>
 			deleteFs.rmdir(privateDir).catch(() => undefined)
+		let dirId: FileId
+		try {
+			dirId = await deleteFs.lstat(privateDir)
+		} catch (error: unknown) {
+			await removeDir()
+			throw error
+		}
+		const isOurDir = (d: FileId): boolean =>
+			!d.isSymbolicLink() &&
+			d.isDirectory() &&
+			d.dev === dirId.dev &&
+			d.ino === dirId.ino
+		if (!isOurDir(dirId)) {
+			await removeDir()
+			throw new WaveKitError(
+				RECORDING_DELETE_FAILED_TEXT,
+				"RECORDING_DELETE_FAILED",
+			)
+		}
 		try {
 			await deleteFs.rename(filePath, innerPath)
 		} catch (error: unknown) {
@@ -442,6 +476,23 @@ export async function openRecordingKeepService(
 		}
 		const match = sameFile(moved, handleStat)
 		if (match && ready() && !protecting.has(key)) {
+			// The private directory itself must still be ours: a rename of it plus a symlink at
+			// its name would redirect the unlink outside. Checked last, so the unlink below is
+			// issued in the same turn as this lstat result. If it changed, everything is left in
+			// place and nothing is unlinked.
+			// Residual: a same-uid process rebinding the directory (or the inner name) between
+			// this lstat and the unlink is not closed; that needs unlinkat/fstatat on a
+			// directory descriptor, which Node does not offer.
+			let dirNow: FileId | null
+			try {
+				dirNow = await deleteFs.lstat(privateDir)
+			} catch {
+				dirNow = null
+			}
+			if (dirNow === null || !isOurDir(dirNow)) {
+				log.warn({}, "Recording delete refused: the file changed")
+				throw notFound()
+			}
 			try {
 				await deleteFs.unlink(innerPath)
 			} catch (error: unknown) {

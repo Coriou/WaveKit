@@ -154,8 +154,20 @@ state.keptOnDisk = () => {
 const fileId = (e: { ino: number; link: boolean }) => ({
 	dev: 1,
 	ino: e.ino,
+	mode: e.link ? 0o120777 : 0o100644,
 	isFile: () => !e.link,
+	isDirectory: () => false,
 	isSymbolicLink: () => e.link,
+})
+
+/** A modelled directory (the recording directory or a private delete directory): 0755. */
+const dirId = (name: string) => ({
+	dev: 1,
+	ino: -1 - [...name].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) | 0, 7),
+	mode: 0o40755,
+	isFile: () => false,
+	isDirectory: () => true,
+	isSymbolicLink: () => false,
 })
 
 /** The model key of a delete path: relative to `/rec`, so private directories nest. */
@@ -165,7 +177,9 @@ let nextDir = 0
 const deleteFs: RecordingDeleteFs = {
 	lstat: async p => {
 		await state.yieldPoint("delete:lstat")
-		const e = state.rec.get(rel(p))
+		const d = rel(p)
+		if (d === "/rec" || state.dirs.has(d)) return dirId(d)
+		const e = state.rec.get(d)
 		if (!e) throw err("ENOENT")
 		return fileId(e)
 	},

@@ -3,7 +3,9 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
+	renameSync,
 	rmSync,
+	symlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs"
@@ -233,5 +235,71 @@ describe("pruneCallRecordings with a protection port", () => {
 		const r = await prune(SMALL_MB)
 		expect(r.protectedSkipped).toBe(0)
 		expect(calls).toEqual([])
+	})
+})
+
+describe("pruneCallRecordings with a protection port never follows symlinks", () => {
+	let outside = ""
+	beforeEach(() => {
+		outside = mkdtempSync(path.join(tmpdir(), "wavekit-calls-outside-"))
+		const file = path.join(outside, C1)
+		writeFileSync(file, Buffer.alloc(3000))
+		const t = (NOW - 300 * H) / 1000
+		utimesSync(file, t, t)
+	})
+	afterEach(() => {
+		rmSync(outside, { recursive: true, force: true })
+	})
+
+	it("skips a symlinked WAV directory: a call-named file behind it survives", async () => {
+		const calls: Call[] = []
+		rmSync(path.join(dir, "WAV"), { recursive: true })
+		symlinkSync(outside, path.join(dir, "WAV"))
+		setCallRecordingProtection(
+			port(() => false),
+			fakeLogger(calls),
+		)
+		const r = await prune(1)
+		expect(readdirSync(outside)).toEqual([C1])
+		expect(r.deleted.every(f => !f.startsWith(path.join(dir, "WAV")))).toBe(
+			true,
+		)
+		expect(calls).toEqual([
+			{
+				level: "info",
+				args: [
+					{ unsafeSkipped: 1 },
+					"Per-call recording retention skipped symlinked or non-directory entries",
+				],
+			},
+		])
+		expect(JSON.stringify(calls)).not.toContain(outside)
+	})
+
+	it("skips a symlinked root directory and everything under it", async () => {
+		const real = `${dir}-real`
+		renameSync(dir, real)
+		symlinkSync(real, dir)
+		try {
+			setCallRecordingProtection(port(() => false))
+			const r = await prune(1)
+			expect(r.deleted).toEqual([])
+			expect(readdirSync(real)).toContain(C1)
+			expect(readdirSync(path.join(real, "WAV"))).toContain(C3)
+		} finally {
+			rmSync(dir, { force: true })
+			renameSync(real, dir)
+		}
+	})
+
+	it("never unlinks a symlinked candidate file (nor its target)", async () => {
+		const link = path.join(dir, C2)
+		rmSync(link)
+		symlinkSync(path.join(outside, C1), link)
+		setCallRecordingProtection(port(() => false))
+		const r = await prune(1)
+		expect(r.deleted).not.toContain(link)
+		expect(readdirSync(outside)).toEqual([C1])
+		expect(readdirSync(dir)).toContain(C2)
 	})
 })

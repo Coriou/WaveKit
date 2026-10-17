@@ -804,12 +804,11 @@ describe("recording keep service", () => {
 			const f = await fixture()
 			const foreign = path.join(f.root, "foreign.wav")
 			await writeFile(foreign, "FOREIGN")
-			let calls = 0
 			let swapErrors = 0
 			const fsx = realDeleteFs({
 				lstat: async p => {
 					const st = await nodeFs.lstat(p)
-					if (++calls === 2) {
+					if (path.basename(p) === "recording") {
 						// A writer in the shared directory replaces every private entry it can name.
 						for (const n of await readdir(f.dsd))
 							if (n.startsWith(".wavekit-delete-"))
@@ -869,6 +868,69 @@ describe("recording keep service", () => {
 			await lstat(path.join(f.dsd, NAME))
 			// The pruner did run: the unkept neighbour is gone.
 			await expect(lstat(path.join(f.dsd, NAME2))).rejects.toMatchObject({
+				code: "ENOENT",
+			})
+		})
+
+		it("round 3: renaming the private directory and planting a symlink at its name does not redirect the unlink", async () => {
+			const f = await fixture()
+			const outside = path.join(f.root, "outside")
+			await mkdir(outside)
+			const foreign = path.join(outside, "recording")
+			await writeFile(foreign, "FOREIGN")
+			let movedDir = ""
+			const fsx = realDeleteFs({
+				lstat: async p => {
+					const st = await nodeFs.lstat(p)
+					if (movedDir === "" && path.basename(p) === "recording") {
+						const dir = path.dirname(p)
+						movedDir = `${dir}-moved`
+						await nodeFs.rename(dir, movedDir)
+						await nodeFs.symlink(outside, dir)
+					}
+					return st
+				},
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_NOT_FOUND",
+				status: 404,
+			})
+			expect(fsx.unlinked).toEqual([])
+			expect(await readFile(foreign, "utf8")).toBe("FOREIGN")
+			expect((await lstat(path.join(movedDir, "recording"))).isFile()).toBe(
+				true,
+			)
+			expect(svc.mutexCount()).toBe(0)
+			noSecretsLogged(f)
+		})
+
+		it("round 3: a group-writable recording directory without the sticky bit refuses the delete (500)", async () => {
+			const f = await fixture()
+			await nodeFs.chmod(f.dsd, 0o775)
+			const fsx = realDeleteFs()
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_DELETE_FAILED",
+				message: "Recording could not be deleted",
+			})
+			expect(fsx.unlinked).toEqual([])
+			expect((await lstat(path.join(f.dsd, NAME))).isFile()).toBe(true)
+			expect(await privateNames(f)).toEqual([])
+			expect(JSON.stringify(f.logs.calls)).toContain(
+				"Recording delete refused: the recording directory is writable by other users",
+			)
+			noSecretsLogged(f)
+		})
+
+		it("round 3: a world-writable recording directory with the sticky bit still deletes", async () => {
+			const f = await fixture()
+			await nodeFs.chmod(f.dsd, 0o1777)
+			const svc = await f.open({ deleteFs: realDeleteFs() })
+			await expect(svc.remove(DSD_ID)).resolves.toMatchObject({
+				deleted: true,
+			})
+			await expect(lstat(path.join(f.dsd, NAME))).rejects.toMatchObject({
 				code: "ENOENT",
 			})
 		})

@@ -125,13 +125,82 @@ async function listWavFiles(dir: string): Promise<RecordingFile[]> {
 	return files
 }
 
+/**
+ * True when `dir` is a real directory (lstat: not a symlink). Missing is "safe" (it lists
+ * as empty, as before). Only used while a protection port is installed.
+ */
+async function isRealDirOrMissing(dir: string): Promise<boolean> {
+	try {
+		const st = await fs.lstat(dir)
+		return !st.isSymbolicLink() && st.isDirectory()
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return true
+		throw err
+	}
+}
+
+/**
+ * The guarded listing used while a protection port is installed (WG9 req 2.5): a scanned
+ * directory that is a symlink or not a real directory (or lies under one of the scanned
+ * directories that is) is never listed, so nothing in it is ever unlinked; a candidate that
+ * is a symlink is never a candidate (lstat, fail closed). The port only knows dsd-fme
+ * basenames, so following a link could reach a kept recording it cannot recognise.
+ */
+async function listWavFilesGuarded(
+	dirs: readonly string[],
+): Promise<{ files: RecordingFile[]; unsafeSkipped: number }> {
+	let unsafeSkipped = 0
+	const unsafe: string[] = []
+	for (const dir of dirs) {
+		if (!(await isRealDirOrMissing(dir))) unsafe.push(path.resolve(dir))
+	}
+	const files: RecordingFile[] = []
+	for (const dir of dirs) {
+		const abs = path.resolve(dir)
+		if (unsafe.some(u => abs === u || abs.startsWith(u + path.sep))) {
+			unsafeSkipped++
+			continue
+		}
+		let names: string[]
+		try {
+			names = await fs.readdir(dir)
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") continue
+			throw err
+		}
+		for (const name of names) {
+			if (!isDsdFmeRecording(name)) continue
+			const file = path.join(dir, name)
+			try {
+				const stat = await fs.lstat(file)
+				if (stat.isSymbolicLink()) {
+					unsafeSkipped++
+				} else if (stat.isFile()) {
+					files.push({ path: file, size: stat.size, mtimeMs: stat.mtimeMs })
+				}
+			} catch {
+				// Removed meanwhile.
+			}
+		}
+	}
+	return { files, unsafeSkipped }
+}
+
 /** Applies the retention policy to the dsd-fme recordings directly in `dirs`. */
 export async function pruneCallRecordings(
 	dirs: readonly string[],
 	retention: CallRecordingRetention,
 	nowMs: number = Date.now(),
 ): Promise<PruneResult> {
-	const files = (await Promise.all(dirs.map(listWavFiles))).flat()
+	let files: RecordingFile[]
+	let unsafeSkipped = 0
+	if (protectionPort === null) {
+		files = (await Promise.all(dirs.map(listWavFiles))).flat()
+	} else {
+		const guarded = await listWavFilesGuarded(dirs)
+		files = guarded.files
+		unsafeSkipped = guarded.unsafeSkipped
+	}
 	files.sort((a, b) => a.mtimeMs - b.mtimeMs)
 
 	const maxAgeMs = retention.maxAgeHours * 3_600_000
@@ -177,6 +246,12 @@ export async function pruneCallRecordings(
 		skipLog().info(
 			{ protectedSkipped },
 			"Per-call recording retention skipped kept recordings",
+		)
+	}
+	if (unsafeSkipped > 0) {
+		skipLog().info(
+			{ unsafeSkipped },
+			"Per-call recording retention skipped symlinked or non-directory entries",
 		)
 	}
 	return { deleted, keptFiles: kept.length, keptBytes: total, protectedSkipped }
