@@ -7,7 +7,7 @@
  * persistence module.
  */
 import { getHeapStatistics } from "node:v8"
-import { parentPort } from "node:worker_threads"
+import { parentPort, threadId } from "node:worker_threads"
 import { WaveKitError } from "../../../utils/errors.js"
 import { atomicWriteChunks } from "./atomic-write.js"
 import { SnapshotMirror, snapshotChunks } from "./snapshot-mirror.js"
@@ -134,7 +134,11 @@ async function writeHeld(
 	const started = performance.now()
 	let bytes: number
 	try {
-		bytes = await atomicWriteChunks(file, snapshotChunks(capture))
+		bytes = await atomicWriteChunks(
+			file,
+			snapshotChunks(capture),
+			`worker-${threadId}`,
+		)
 	} catch {
 		post({ type: "failed", id, reason: "io", heapUsedBytes: heapUsed() })
 		return

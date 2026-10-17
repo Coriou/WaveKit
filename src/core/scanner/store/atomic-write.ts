@@ -14,13 +14,21 @@ export async function atomicWrite(
 	await atomicWriteChunks(file, [data])
 }
 
-/** `atomicWrite` of the concatenation of `chunks`, written piece by piece; resolves to the bytes written. */
+/**
+ * `atomicWrite` of the concatenation of `chunks`, written piece by piece; resolves to the bytes
+ * written. `tmpTag` keeps a writer on another thread of this process (the snapshot worker) off
+ * the main thread's `<file>.<pid>.tmp`, so a late worker write or rename never touches it.
+ */
 export async function atomicWriteChunks(
 	file: string,
 	chunks: Iterable<string | Uint8Array>,
+	tmpTag?: string,
 ): Promise<number> {
 	let bytes = 0
-	const tmp = `${file}.${process.pid}.tmp`
+	const tmp =
+		tmpTag === undefined
+			? `${file}.${process.pid}.tmp`
+			: `${file}.${process.pid}.${tmpTag}.tmp`
 	try {
 		await mkdir(dirname(file), { recursive: true })
 		const handle = await open(tmp, "w")

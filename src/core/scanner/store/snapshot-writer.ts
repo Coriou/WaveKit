@@ -472,8 +472,19 @@ export class SnapshotWriter {
 		this.queuedBytes = 0
 		this.dropLines()
 		this.failures += 1
-		if (port !== null) void port.terminate().catch(() => undefined)
-		this.settleCommit({ ok: false, reason: "worker-failed" })
+		// The fallback writes only once the worker is gone, so no late worker rename can
+		// publish an older snapshot over the main thread's newer one.
+		const commit = this.commit
+		this.commit = null
+		if (commit !== null) clearTimeout(commit.timer)
+		const settle = (): void =>
+			commit?.resolve({ ok: false, reason: "worker-failed" })
+		if (port !== null)
+			void port
+				.terminate()
+				.catch(() => undefined)
+				.then(settle)
+		else settle()
 		if (this.failures >= 2) {
 			if (!this.disabled)
 				this.log.warn(

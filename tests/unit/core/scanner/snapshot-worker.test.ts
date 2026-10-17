@@ -1,16 +1,23 @@
 /**
  * WG11 req 3.5/3.6: ScannerPersistence.writeSnapshotOf through the real snapshot worker (built
  * from the ts entry with esbuild, as the activity worker tests do) and through fake worker ports
- * for crash, hostile message, timeout and overflow paths. The store is a local test double: a
- * DiscoveryStore with `recordCounts` and `snapshotParts` derived from `snapshot()` (subagent A
- * adds the real O(1) ones to discovery-store.ts).
+ * for crash, hostile message, timeout and overflow paths. The store is the real DiscoveryStore
+ * with a switch that corrupts its `snapshotParts` for the validation test.
  */
-import { appendFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import {
+	appendFile,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { build } from "esbuild"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { atomicWriteChunks } from "../../../../src/core/scanner/store/atomic-write.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type {
 	DiscoveryStoreOptions,
@@ -299,7 +306,12 @@ describe("snapshot worker (WG11 req 3.5)", () => {
 
 /** A port around the real worker whose behaviour a test can corrupt. */
 function wrapped(
-	mode: { crashOnCommit?: boolean; garbage?: boolean; silentCommit?: boolean },
+	mode: {
+		crashOnCommit?: boolean
+		garbage?: boolean
+		silentCommit?: boolean
+		events?: string[]
+	},
 	made: { count: number },
 ) {
 	return ({
@@ -337,7 +349,14 @@ function wrapped(
 				onExit = l
 				inner.onExit(l)
 			},
-			terminate: () => inner.terminate(),
+			terminate: async () => {
+				const out = await inner.terminate()
+				if (mode.events !== undefined) {
+					await new Promise(resolve => setTimeout(resolve, 20))
+					mode.events.push("terminated")
+				}
+				return out
+			},
 		}
 	}
 }
@@ -395,6 +414,29 @@ describe("snapshot worker failures (WG11 req 3.5)", () => {
 			await h.p.writeSnapshotOf(h.store)
 			expect(await h.file()).toBe(want)
 			expect(h.p.snapshotWorkerStatus()?.failures).toBe(1)
+		} finally {
+			await h.close()
+		}
+	})
+
+	it("a timed-out worker is gone before the main path writes that snapshot", async () => {
+		const made = { count: 0 }
+		const events: string[] = []
+		const h = await harness({
+			factory: wrapped({ silentCommit: true, events }, made),
+			commitTimeoutMs: 50,
+		})
+		try {
+			h.ops(20)
+			await h.p.writeSnapshotOf(h.store)
+			h.ops(10)
+			const want = h.expected()
+			const done = h.p.writeSnapshotOf(h.store).then(() => {
+				events.push("written")
+			})
+			await done
+			expect(events).toEqual(["terminated", "written"])
+			expect(await h.file()).toBe(want)
 		} finally {
 			await h.close()
 		}
@@ -458,5 +500,22 @@ describe("snapshot worker fallback warnings (WG11 req 3.5)", () => {
 			suppressed: 2,
 		})
 		expect(writer.status()).toMatchObject({ fallbacks: 4, divergences: 3 })
+	})
+})
+
+describe("worker temporary file (WG11 req 3.5)", () => {
+	it("a tagged write never touches the main thread's <file>.<pid>.tmp", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wk-sc-tmp-"))
+		try {
+			const file = join(dir, "snapshot.json")
+			const mainTmp = `${file}.${process.pid}.tmp`
+			await writeFile(mainTmp, "main in progress")
+			const bytes = await atomicWriteChunks(file, ["a", "bc"], "worker-7")
+			expect(bytes).toBe(3)
+			expect(await readFile(file, "utf8")).toBe("abc")
+			expect(await readFile(mainTmp, "utf8")).toBe("main in progress")
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
 	})
 })
