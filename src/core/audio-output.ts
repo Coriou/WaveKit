@@ -13,6 +13,7 @@ import { EventEmitter } from "node:events"
 import * as net from "node:net"
 import type { Readable } from "node:stream"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
+import { safeErrorFields } from "../decoders/safe-error-fields.js"
 import { MAX_CLIENT_BUFFER_BYTES } from "./client-buffer.js"
 
 export interface AudioOutputConfig {
@@ -62,17 +63,29 @@ export class AudioOutput extends EventEmitter {
 		}
 
 		return new Promise((resolve, reject) => {
-			this.server = net.createServer(socket =>
+			let listening = false
+			const server = net.createServer(socket =>
 				this.handleClientConnection(socket),
 			)
+			this.server = server
 
-			this.server.on("error", err => {
-				this.log.error({ err }, "Server error")
-				this.emit("error", err)
-				reject(err)
+			server.on("error", err => {
+				if (!listening) {
+					// Startup failure: the rejection is the report. No port or host in the log.
+					this.log.error(
+						{ err: safeErrorFields(err) },
+						"Failed to start audio output server",
+					)
+					if (this.server === server) this.server = null
+					reject(err)
+					return
+				}
+				if (this.listenerCount("error") > 0) this.emit("error", err)
+				else this.log.error({ err: safeErrorFields(err) }, "Server error")
 			})
 
-			this.server.listen(this.config.port, () => {
+			server.listen(this.config.port, () => {
+				listening = true
 				this.log.info(
 					{
 						port: this.config.port,

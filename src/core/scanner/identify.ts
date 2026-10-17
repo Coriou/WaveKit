@@ -580,6 +580,8 @@ interface RunState {
 	queuedUntil: number | null
 	endsAt: number | null
 	seen: Map<ScannerProtocol, TrialSeen>
+	/** WG9 req 5.4: the pool reported this run's decoder program cannot run. */
+	unavailable: boolean
 }
 
 interface TargetState {
@@ -650,6 +652,7 @@ export class IdentifyRunner implements JobDriver {
 		this.log = createComponentLogger(deps.logger, `Identify:${deps.record.id}`)
 		deps.probes.on("probe-state", this.onProbeState)
 		deps.probes.on("evidence", this.onPoolEvidence)
+		deps.probes.on("decoder-unavailable", this.onDecoderUnavailable)
 	}
 
 	private get sourceId(): string {
@@ -1115,6 +1118,7 @@ export class IdentifyRunner implements JobDriver {
 			queuedUntil: null,
 			endsAt: null,
 			seen: new Map(),
+			unavailable: false,
 		}
 		if ("started" in res) {
 			t.active.push(state)
@@ -1219,7 +1223,17 @@ export class IdentifyRunner implements JobDriver {
 			r.endsAt !== null &&
 			this.deps.now() < r.endsAt &&
 			![...r.seen.values()].some(seen => seen.identity !== null)
-		this.setTrials(t, r.runIndex, protocol => {
+		// WG9 req 5.4: a run whose decoder program could not run and that saw no
+		// output is no decoder verdict either; it is unsupported, not no-sync.
+		const unavailable =
+			why === "stopped" &&
+			r.unavailable &&
+			![...r.seen.values()].some(seen => seen.output)
+		this.setTrials(t, r.runIndex, (protocol, trial) => {
+			if (unavailable) {
+				trial.reason = "decoder-unavailable"
+				return "unsupported"
+			}
 			if (cutShort) return "cancelled"
 			const outcome = trialOutcome(r.seen.get(protocol))
 			return stop && outcome !== "decoded" ? "not-needed" : outcome
@@ -1407,6 +1421,16 @@ export class IdentifyRunner implements JobDriver {
 
 	// === probe pool events ===
 
+	/** WG9 req 5.4: marks the run; its "stopped" state follows and ends it. */
+	private readonly onDecoderUnavailable = (
+		probeId: string,
+		req: ProbeRequest,
+	): void => {
+		if (req.jobId !== this.record.id) return
+		const hit = this.findRun(r => r.probeId === probeId)
+		if (hit) hit.r.unavailable = true
+	}
+
 	private readonly onProbeState = (
 		probeId: string,
 		state: string,
@@ -1591,5 +1615,6 @@ export class IdentifyRunner implements JobDriver {
 		this.detached = true
 		this.deps.probes.off("probe-state", this.onProbeState)
 		this.deps.probes.off("evidence", this.onPoolEvidence)
+		this.deps.probes.off("decoder-unavailable", this.onDecoderUnavailable)
 	}
 }

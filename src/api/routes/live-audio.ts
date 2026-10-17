@@ -9,6 +9,7 @@ import type {
 	LiveDemodulator,
 	LiveDemodReconfigureUpdates as ReconfigureUpdates,
 } from "../../core/live-demodulator.js"
+import { deriveLegacyAudioUrl, requestHostHeader } from "./legacy-audio-host.js"
 import { LIVE_AUDIO_NOISE_QUIETING_DB } from "@wavekit/api-types"
 import type {
 	LiveAudioToneSquelch,
@@ -187,6 +188,13 @@ const presetsResponseSchema = {
 
 export interface LiveAudioRoutesOptions {
 	liveDemod: LiveDemodulator
+	/** Access is configured: PATCH 400 messages use the global handler's redacted text. */
+	redactErrors?: boolean
+	/**
+	 * Legacy mode only (WG9 5.5): rewrite the localhost fallback stream URLs of
+	 * the status response with the request's own Host. Absent: today's URLs.
+	 */
+	legacyAudioHost?: boolean
 }
 
 export const liveAudioRoutes: FastifyPluginAsync<
@@ -276,7 +284,25 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				},
 			},
 		},
-		async () => toApiLiveDemodStatus(liveDemod.getStatus()),
+		async (request, reply) => {
+			const status = toApiLiveDemodStatus(liveDemod.getStatus())
+			if (options.legacyAudioHost !== true) return status
+			// Per response only: never stored, logged or broadcast.
+			const host = requestHostHeader(request)
+			const port = status.config.httpPort
+			const httpUrl = deriveLegacyAudioUrl(status.httpUrl, host, port)
+			const wavUrl =
+				status.wavUrl === undefined
+					? undefined
+					: deriveLegacyAudioUrl(status.wavUrl, host, port)
+			if (httpUrl === status.httpUrl && wavUrl === status.wavUrl) return status
+			void reply.header("Cache-Control", "no-store")
+			return {
+				...status,
+				httpUrl,
+				...(wavUrl === undefined ? {} : { wavUrl }),
+			}
+		},
 	)
 
 	fastify.post<{ Reply: { success: boolean } }>(
@@ -320,7 +346,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 		Body: Omit<Partial<LiveDemodConfig>, "agc"> & {
 			agc?: LiveDemodConfig["agc"] | null
 		}
-		Reply: LiveDemodStatus | { error: string; message: string }
+		Reply: LiveDemodStatus | { error: string; code: string; message: string }
 	}>(
 		"/api/live-audio/config",
 		{
@@ -388,8 +414,10 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				) {
 					return reply.code(400).send({
 						error: "Bad Request",
-						message:
-							err instanceof ZodError
+						code: err instanceof ZodError ? "VALIDATION_ERROR" : err.code,
+						message: options.redactErrors
+							? "Request failed"
+							: err instanceof ZodError
 								? ConfigValidationError.formatZodError(err)
 								: err.message,
 					})

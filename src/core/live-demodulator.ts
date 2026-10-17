@@ -202,6 +202,12 @@ interface PipelineRun {
 	 */
 	pcmTailMuted: boolean
 	noiseFloorDbfs: number | null
+	/**
+	 * WG9 req 5.6: the floor held before a retained-pipeline retune reset it.
+	 * The first measured block after the reset seeds min(this, power), then it
+	 * is cleared; null on cold start, so that path seeds from power alone.
+	 */
+	retuneFloorDbfs: number | null
 	stopping: boolean
 	failed: boolean
 }
@@ -449,8 +455,10 @@ export class LiveDemodulator extends EventEmitter {
 		)
 			this.closeOverride = "config"
 		try {
-			if (this.run && validated.squelchMode !== previous.squelchMode)
+			if (this.run && validated.squelchMode !== previous.squelchMode) {
 				this.run.noiseFloorDbfs = null
+				this.run.retuneFloorDbfs = null
+			}
 			if (this.run) {
 				this.applySquelchConfig(this.run)
 				this.applySquelchThreshold(this.run)
@@ -620,8 +628,14 @@ export class LiveDemodulator extends EventEmitter {
 		if (power !== null) {
 			// Constant-memory lower envelope: falls are immediate; a slower open
 			// rise preserves calls but eventually recovers from sustained noise steps.
-			if (run.noiseFloorDbfs === null || power < run.noiseFloorDbfs)
-				run.noiseFloorDbfs = power
+			if (run.noiseFloorDbfs === null) {
+				// WG9 req 5.6: after a retune, a carrier already present must not
+				// become its own floor; the previous floor bounds the seed once.
+				const previous = run.retuneFloorDbfs
+				run.retuneFloorDbfs = null
+				run.noiseFloorDbfs =
+					previous !== null && previous < power ? previous : power
+			} else if (power < run.noiseFloorDbfs) run.noiseFloorDbfs = power
 			else {
 				const riseRate = run.squelch.open
 					? AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND
@@ -765,7 +779,14 @@ export class LiveDemodulator extends EventEmitter {
 		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
 			if (sourceId !== this.activeSourceId) return
 			// Retunes can retain the DSP pipeline but invalidate its floor estimate.
-			if (this.run) this.run.noiseFloorDbfs = null
+			// WG9 req 5.6: the reset stays; the floor it drops is remembered so the
+			// first block after it seeds from the lower of that and the new power.
+			// A second retune before any block keeps the first remembered floor.
+			if (this.run) {
+				if (this.run.noiseFloorDbfs !== null)
+					this.run.retuneFloorDbfs = this.run.noiseFloorDbfs
+				this.run.noiseFloorDbfs = null
+			}
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
@@ -953,6 +974,7 @@ export class LiveDemodulator extends EventEmitter {
 				() => this.measureRun(run),
 			),
 			noiseFloorDbfs: null,
+			retuneFloorDbfs: null,
 			startedAt: Date.now(),
 			sourceSampleRate: caps.sampleRate,
 			sourceFormat: caps.format,

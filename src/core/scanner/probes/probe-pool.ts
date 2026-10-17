@@ -188,6 +188,8 @@ type StopReason =
 	| "job-ended"
 	| "shutdown"
 	| "error"
+	/** WG9 req 5.4: the probe's decoder program could not run. */
+	| "unavailable"
 
 interface ProbeRecord {
 	probeId: string
@@ -245,6 +247,36 @@ const PROBE_INPUT_MAX_QUEUED = 8 * 1024 * 1024
 /** Pre-roll is clamped to this, so pre-roll plus the first live bytes stay under PROBE_INPUT_MAX_QUEUED. */
 const PRE_ROLL_MAX_BYTES = PROBE_INPUT_MAX_QUEUED - 2 * PROBE_INPUT_HWM
 const DEFAULT_START_LATENCY_MS = 400
+/** WG9 req 5.4: `/bin/sh -c` exit statuses for a command that is not executable (126) or not found (127). */
+const SHELL_UNAVAILABLE_EXIT_CODES: ReadonlySet<number> = new Set([126, 127])
+/** WG9 req 5.4: spawn errno codes meaning the program itself cannot run. */
+const SPAWN_UNAVAILABLE_ERRNO: ReadonlySet<string> = new Set([
+	"ENOENT",
+	"EACCES",
+])
+
+/**
+ * WG9 req 5.4: true only for a launch failure whose cause is a spawn errno of a
+ * missing or non-executable program. Anything else (unknown, wrapped otherwise,
+ * other errno) is not "unavailable".
+ */
+export function isSpawnUnavailableError(err: unknown): boolean {
+	if (!(err instanceof WaveKitError) || err.code !== "DECODER_SPAWN_ERROR")
+		return false
+	const cause: unknown = err.cause
+	if (!(cause instanceof Error)) return false
+	const errno = (cause as NodeJS.ErrnoException).code
+	return typeof errno === "string" && SPAWN_UNAVAILABLE_ERRNO.has(errno)
+}
+
+/** WG9 req 5.4: only a numeric 126/127 exit status qualifies; signals and unknown codes never do. */
+export function isUnavailableExit(code: unknown, signal: unknown): boolean {
+	return (
+		signal === null &&
+		typeof code === "number" &&
+		SHELL_UNAVAILABLE_EXIT_CODES.has(code)
+	)
+}
 /** Slack around a capcode's pairing window (§ 6.4 "within the hold", ± 2 s). */
 export const PAIRING_GAP_MS = 2000
 /** Hold of the multimon-ng POCSAG/FLEX mode (§ 6.4); also the ambient pairing window. */
@@ -1141,6 +1173,8 @@ export class ProbePool extends EventEmitter {
 					{ err, probeId, decoderType: mode.decoderType },
 					removed ? "Probe removed during its start" : "Probe failed to start",
 				)
+				if (rec.firstOutputAt === null && isSpawnUnavailableError(err))
+					this.reportUnavailable(rec)
 				void this.stopProbe(rec, "error").catch((cleanupError: unknown) => {
 					this.cleanupFailed = true
 					this.retainedCleanup.add(rec)
@@ -1281,6 +1315,32 @@ export class ProbePool extends EventEmitter {
 		})
 		if (this.isStopping(rec)) return
 		const emitter = decoder as unknown as EventEmitter
+		// WG9 req 5.4: attached in the same task as the spawn resolved, so an exit
+		// event (a later macrotask) cannot be missed. Only a 126/127 exit before any
+		// output stops the probe as "decoder unavailable"; every other exit keeps
+		// today's path (the hold runs out).
+		const onExit = (code: unknown, signal: unknown): void => {
+			if (this.isStopping(rec) || rec.firstOutputAt !== null) return
+			if (!isUnavailableExit(code, signal)) return
+			this.reportUnavailable(rec)
+			void this.stopProbe(rec, "unavailable").catch((err: unknown) => {
+				this.cleanupFailed = true
+				this.retainedCleanup.add(rec)
+				this.log.warn(
+					{ err, probeId: rec.probeId },
+					"Unavailable probe cleanup failed",
+				)
+			})
+		}
+		rec.detach.push(() => {
+			emitter.off("exit", onExit)
+			if (emitter.listeners("exit").includes(onExit))
+				throw new WaveKitError(
+					"Probe exit listener removal is unverified",
+					"SCANNER_PROBE_CLEANUP_UNKNOWN",
+				)
+		})
+		emitter.on("exit", onExit)
 		if (rec.dvChannel && dv)
 			dv.attachDecoder(rec.decoderId, emitter as unknown as VoiceCallSource)
 		if (this.isStopping(rec)) return
@@ -1506,6 +1566,26 @@ export class ProbePool extends EventEmitter {
 		}
 		if (notificationFailures.length > 0) throw notificationFailures[0]
 		this.pump()
+	}
+
+	/**
+	 * WG9 req 5.4: tells listeners (identify) that this probe's decoder program
+	 * cannot run, before the probe's "stopped" state. Carries no decoder text or
+	 * paths; a listener failure is logged and never blocks the stop.
+	 */
+	private reportUnavailable(rec: ProbeRecord): void {
+		this.log.warn(
+			{ probeId: rec.probeId, decoderType: rec.mode.decoderType },
+			"Probe decoder unavailable",
+		)
+		try {
+			this.emit("decoder-unavailable", rec.probeId, rec.req)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err, probeId: rec.probeId },
+				"Decoder-unavailable listener failed",
+			)
+		}
 	}
 
 	// === output ===
