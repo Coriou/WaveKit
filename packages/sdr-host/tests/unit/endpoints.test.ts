@@ -28,12 +28,12 @@ describe("rankEndpoints", () => {
 			rankEndpoints([
 				iface("wlan0", {
 					kind: "wireless",
-					addresses: ["192.168.86.23", "fe80::1", "2001:db8::23"],
+					addresses: ["192.0.2.23", "fe80::1", "2001:db8::23"],
 					wireless: { linkQuality: 40, signalDbm: -70 },
 					defaultRouteMetric: 600,
 				}),
 				iface("eth0", {
-					addresses: ["2001:db8::69", "192.168.1.69", "169.254.3.4"],
+					addresses: ["2001:db8::69", "198.51.100.69", "169.254.3.4"],
 					speedMbps: 100,
 					defaultRouteMetric: 100,
 				}),
@@ -41,7 +41,7 @@ describe("rankEndpoints", () => {
 			]),
 		).toEqual([
 			{
-				address: "192.168.1.69",
+				address: "198.51.100.69",
 				family: "IPv4",
 				interface: "eth0",
 				kind: "ethernet",
@@ -57,7 +57,7 @@ describe("rankEndpoints", () => {
 				signalDbm: null,
 			},
 			{
-				address: "192.168.86.23",
+				address: "192.0.2.23",
 				family: "IPv4",
 				interface: "wlan0",
 				kind: "wireless",
