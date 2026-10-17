@@ -80,6 +80,48 @@
 	.wka-chips {
 		margin-top: 10px;
 	}
+	.wka-chips-sep {
+		flex: none;
+		width: 1px;
+		height: 20px;
+		margin: 0 2px;
+		align-self: center;
+		background: var(--wk-line-08);
+	}
+	/* time range: the chip and its menu under it */
+	.wka-range {
+		position: relative;
+		display: inline-flex;
+	}
+	.wka-range-menu {
+		position: absolute;
+		top: calc(100% + 4px);
+		right: 0;
+		z-index: 30;
+		width: 260px;
+	}
+	.wka-range-custom {
+		display: grid;
+		gap: 8px;
+		padding: 6px 10px 8px;
+	}
+	.wka-range-custom label {
+		display: grid;
+		gap: 4px;
+	}
+	.wka-range-custom .wk-input {
+		width: 100%;
+		border-color: var(--wk-line-14);
+		font-size: var(--wk-fs-md);
+		color-scheme: inherit;
+	}
+	.wka-range-hint {
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+	}
+	.wka-range-custom .wk-btn {
+		justify-self: end;
+	}
 	.wka-pins {
 		margin-top: 8px;
 		padding-top: 8px;

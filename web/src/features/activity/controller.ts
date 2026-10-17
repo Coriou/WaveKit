@@ -21,6 +21,8 @@ import {
 	sameColumnSearch,
 } from "./columns.ts"
 import { setActivityPaneOpen } from "./pane.ts"
+import type { TimeRange } from "./scope.ts"
+import { ANY_TIME, sameRange, scopeTitle, scopedQuery } from "./scope.ts"
 import type { CategoryChipId, SearchToken } from "./search.ts"
 import {
 	CATEGORY_CHIPS,
@@ -47,9 +49,16 @@ export interface ActivityViewState {
 	seen: Readonly<Record<string, string>>
 	/** Count per category for the current search without its chip; null until loaded. */
 	counts: Readonly<Record<string, number>> | null
+	/** The time range every list shows (the drawer's and each column). */
+	range: TimeRange
+	/** "With audio": only transmissions and calls, in every list. */
+	audio: boolean
 }
 
 const COLUMNS_KEY = "wavekit.web.activity.pins"
+
+/** Now, to the minute: a rolling range keeps the same bounds (and the columns their feeds) within a minute. */
+const scopeNow = () => Math.floor(Date.now() / 60_000) * 60_000
 
 const KNOWN_CATEGORIES = new Set<unknown>(
 	CATEGORY_CHIPS.flatMap(c => c.categories),
@@ -142,6 +151,8 @@ export class ActivityController extends Store<ActivityViewState> {
 			view: "all",
 			seen: {},
 			counts: null,
+			range: ANY_TIME,
+			audio: false,
 		})
 		this.data = data
 		this.feed = new ActivityFeed(data.api, data.events)
@@ -160,12 +171,48 @@ export class ActivityController extends Store<ActivityViewState> {
 	/** The query the list shows, or null when the search cannot match anything. */
 	query(): ActivityQuery | null {
 		const s = this.get()
-		return buildQuery(s.tokens, s.chip)
+		return scopedQuery(buildQuery(s.tokens, s.chip), s, scopeNow())
 	}
 
 	title(): string {
 		const s = this.get()
-		return searchTitle(s.tokens, s.chip)
+		const scope = scopeTitle(s, Date.now())
+		if (s.tokens.length === 0 && s.chip === null && scope !== "") return scope
+		const search = searchTitle(s.tokens, s.chip)
+		return scope === "" ? search : `${search} · ${scope}`
+	}
+
+	/** The time range for every list; a rolling one ("Last hour") is measured from now. */
+	setRange(range: TimeRange): void {
+		if (sameRange(this.get().range, range)) return
+		this.update(s => ({ ...s, range, openId: null, openItem: null }))
+		this.refresh()
+	}
+
+	setAudio(audio: boolean): void {
+		if (this.get().audio === audio) return
+		this.update(s => ({ ...s, audio, openId: null, openItem: null }))
+		this.refresh()
+	}
+
+	/** Puts a whole view back at once (a deep link): search, scope and the open event. */
+	restore(
+		v: Pick<ActivityViewState, "tokens" | "chip" | "range" | "audio"> & {
+			openId: string | null
+		},
+	): void {
+		this.update(s => ({
+			...s,
+			tokens: v.tokens,
+			chip: v.chip,
+			range: v.range,
+			audio: v.audio,
+			editing: null,
+			view: "all",
+			openId: v.openId,
+			openItem: v.openId !== null && s.openId === v.openId ? s.openItem : null,
+		}))
+		this.refresh()
 	}
 
 	/** The drawer mounted: follow the feed and the columns. Returns the detach. */
@@ -427,6 +474,7 @@ export class ActivityController extends Store<ActivityViewState> {
 	/** Makes one feed per column and, while attached, points each at its search under the drawer's. */
 	private syncColumns(force = false): void {
 		const s = this.get()
+		const now = scopeNow()
 		const ids = new Set(s.columns.map(c => c.id))
 		for (const [id, f] of this.columnFeeds)
 			if (!ids.has(id)) {
@@ -456,12 +504,15 @@ export class ActivityController extends Store<ActivityViewState> {
 			if (this.attached === 0) continue
 			// while a column's search is being edited, that column previews the drawer's search and the others
 			// show their own (the edit is not a filter on them)
-			const q =
+			const q = scopedQuery(
 				s.editing === null
 					? columnQuery(col, s)
 					: s.editing === col.id
 						? buildQuery(s.tokens, s.chip)
-						: columnQuery(col, { tokens: [], chip: null })
+						: columnQuery(col, { tokens: [], chip: null }),
+				s,
+				now,
+			)
 			const key = JSON.stringify(q)
 			if (!force && this.columnQueries.get(col.id) === key) continue
 			this.columnQueries.set(col.id, key)
@@ -490,7 +541,7 @@ export class ActivityController extends Store<ActivityViewState> {
 	/** Chip counts: the search without its chip, so every chip shows what it would add. */
 	private async loadCounts(): Promise<void> {
 		const s = this.get()
-		const base = buildQuery(s.tokens, null)
+		const base = scopedQuery(buildQuery(s.tokens, null), s, scopeNow())
 		this.countsAbort?.abort()
 		if (base === null) {
 			this.update(v => ({ ...v, counts: {} }))

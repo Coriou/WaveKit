@@ -210,6 +210,8 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   range and plain text, newest-first paging with a snapshot; fair-share retention (WG3 §1).
 - [ ] Facet counts for "With audio". Partly: `POST /api/activity/facets` counts category,
   protocol, decoder, source and kind for the current query and time range (≤32 values each).
+  Until the recording id is on the event, the web app's "With audio" keeps the voice category
+  (transmissions and calls), recorded or not (2026-10-17).
 - [ ] Digital call metadata: DMR tier, talker alias and error rate. Partly: `colourCode`, `nac`,
   `ran` and `algorithmId` on digital voice calls (WG2 §10); P25 phase is the protocol value.
 - [x] Message rate history per decoder: `decoderStatus.rateHistory` (messages per minute, last 15,

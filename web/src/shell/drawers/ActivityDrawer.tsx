@@ -26,6 +26,8 @@ import {
 } from "../../features/activity/pane.ts"
 import type { CategoryChipId } from "../../features/activity/search.ts"
 import { CATEGORY_CHIPS, suggest } from "../../features/activity/search.ts"
+import { ScopeChips } from "../../features/activity/ScopeChips.tsx"
+import { rangeEnded } from "../../features/activity/scope.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
 import { Drawer } from "../../ui/Drawer.tsx"
@@ -320,6 +322,7 @@ function Categories() {
 					</Chip>
 				)
 			})}
+			<ScopeChips />
 		</div>
 	)
 }
@@ -384,7 +387,11 @@ function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	const more = useStore(feed, s => s.nextPageToken !== null)
 	const searching = useStore(
 		activity,
-		s => s.tokens.length > 0 || s.chip !== null,
+		s =>
+			s.tokens.length > 0 ||
+			s.chip !== null ||
+			s.audio ||
+			s.range.kind !== "any",
 	)
 	const view = useStore(activity, s =>
 		room || s.view === "all"
@@ -393,6 +400,8 @@ function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	)
 	useStore(activity, s => s.tokens)
 	useStore(activity, s => s.chip)
+	useStore(activity, s => s.range)
+	useStore(activity, s => s.audio)
 	const title = view
 		? searching
 			? `${view.title} · ${activity.title()}`
@@ -437,7 +446,12 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 	const available = useStore(feed, s => s.available)
 	const empty = useStore(feed, s => s.items.length === 0)
 	const query = useStore(feed, s => s.query)
-	const tokens = useStore(activity, s => s.tokens)
+	const narrowed = useStore(
+		activity,
+		s => s.tokens.length > 0 || s.chip !== null || s.audio,
+	)
+	const range = useStore(activity, s => s.range)
+	const ended = rangeEnded(range, Date.now())
 	if (!available)
 		return (
 			<p className="wka-note">
@@ -476,14 +490,26 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 				</p>
 			)}
 			{status === "loading" && empty && <Skeleton label="Activity" />}
-			{status === "live" && empty && (
+			{status === "live" && ended && (
 				<p className="wka-note">
-					{query === null || tokens.length > 0
+					This range has ended, so nothing new appears.{" "}
+					<button
+						type="button"
+						className="wka-link"
+						onClick={() => activity.setRange({ kind: "any" })}
+					>
+						Any time
+					</button>
+				</p>
+			)}
+			{status === "live" && empty && !ended && (
+				<p className="wka-note">
+					{narrowed || range.kind !== "any"
 						? "Nothing matches this search yet. New matches appear here as they are heard."
 						: "Nothing heard yet. Decoded messages and calls appear here as they arrive."}
 				</p>
 			)}
-			{status === "idle" && query === null && tokens.length > 0 && (
+			{status === "idle" && query === null && narrowed && (
 				<p className="wka-note">
 					These filters cannot match together. Remove one.
 				</p>
