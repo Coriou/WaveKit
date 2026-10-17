@@ -253,6 +253,12 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   connection chip, renews at half the time left, keeps the CSRF token in memory and drops it on a 401;
   checked against `make dev-protected` (pair 201, a preferences PATCH 200 with the token after a reload).
   Still the gap: TLS / proxy acceptance and a default deployment with operator data.
+- [ ] Serve the web app (2026-10-17, PWA batch): the core, or the Caddy TLS profile, serves the
+  `web/dist` build at `/` beside `/api` and `/ws`, over HTTPS. `sw.js`, `index.html` and
+  `manifest.webmanifest` go out with `Cache-Control: no-cache` (the worker finds new builds),
+  `assets/*` as `immutable` (hashed names), the manifest as `application/manifest+json`. Without
+  HTTPS (plain `http://pi.local:…`) Chrome will not install the app, and the service worker and the
+  AudioWorklet do not run; `localhost` is exempt.
 - [x] Device `name` / `kind` and `lastSeenAt` (hour resolution), set with
   `POST /api/access/devices/label` (WG2 §11).
 - [ ] A read-only access role (view spectrum, activity and scanner results; no receiver

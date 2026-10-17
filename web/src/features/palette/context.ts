@@ -3,6 +3,7 @@ import { useEffect, useMemo } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
+import { pwaState } from "../../pwa/pwa.ts"
 import { useShell, useTheme } from "../../shell/hooks.ts"
 import { browserStorage } from "../../shell/theme.ts"
 import { useTunedHz, useTunerState } from "../hooks.ts"
@@ -42,6 +43,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	)
 	const relay = useStore(data.receiver, s => s.relay)
 	const accessMode = useStore(data.access, s => s.access?.mode ?? null)
+	const pwa = useStore(pwaState)
 
 	// scan presets and receiver capabilities, once
 	useEffect(() => {
@@ -98,6 +100,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			shell,
 			recent: recentList.ids(now),
 			boost: (id: string) => recentList.boost(id, now),
+			pwa,
 		}
 		// recentVersion: the list changed (a row ran)
 	}, [
@@ -117,5 +120,6 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		sweep,
 		shell,
 		recentVersion,
+		pwa,
 	])
 }

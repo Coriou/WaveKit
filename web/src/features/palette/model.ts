@@ -44,6 +44,7 @@ import {
 	type CommandIntent,
 } from "./parse.ts"
 import { rank } from "./rank.ts"
+import { installHint, type PwaState } from "../../pwa/state.ts"
 
 // ---- inputs
 
@@ -86,6 +87,8 @@ export interface PaletteContext {
 	/** Ids by frecency, best first. */
 	readonly recent: readonly string[]
 	readonly boost: (id: string) => number
+	/** Installing as an app (pwa.ts); absent: no install row. */
+	readonly pwa?: PwaState
 }
 
 // ---- outputs
@@ -245,6 +248,7 @@ export type PaletteAction =
 	| { readonly kind: "discovery"; readonly id: string }
 	| { readonly kind: "setting"; readonly entry: SettingEntry }
 	| { readonly kind: "copy"; readonly text: string; readonly label: string }
+	| { readonly kind: "install" }
 
 /** One line of the effect bar: `Gain 28.0 dB → 32.8 dB`. */
 export interface Effect {
@@ -863,6 +867,34 @@ export class PaletteModel {
 				},
 			),
 		)
+	}
+
+	/** « Install WaveKit »: the browser's prompt where it gives one, else how to install (or why it can't). */
+	private installItem(): PaletteItem | null {
+		const p = this.#c.pwa
+		if (!p || p.standalone) return null
+		const base = {
+			id: "app:install",
+			title: "Install WaveKit",
+			glyph: "install",
+			keys: [
+				"install",
+				"app",
+				"add to dock",
+				"desktop",
+				"pwa",
+				"window",
+				"shortcut",
+			],
+		} as const
+		return p.canPrompt
+			? {
+					...base,
+					sub: "Open it in its own window, from the dock or the app list",
+					action: { kind: "install" },
+					does: "Asks your browser to install WaveKit as an app",
+				}
+			: { ...base, sub: installHint(p), info: true }
 	}
 
 	viewItem(v: (typeof VIEWS)[number]): PaletteItem {
@@ -1522,6 +1554,7 @@ export class PaletteModel {
 						},
 						does: `Copies “${mhz(c.tunedHz)}” to the clipboard`,
 					},
+			this.installItem(),
 			{
 				id: "scope:set",
 				title: "All settings",

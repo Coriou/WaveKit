@@ -19,6 +19,7 @@ import { modeSpec } from "../tuner/modes.ts"
 import { recallSaved, saveInput } from "../tuner/saved.ts"
 import { modulationOf } from "../tuner/modes.ts"
 import { bandAt } from "../../data/bandplan-store.ts"
+import { promptInstall } from "../../pwa/pwa.ts"
 import type { ActivityToken, PaletteAction, Preview } from "./model.ts"
 
 export interface RunResult {
@@ -326,6 +327,10 @@ export async function runAction(
 			case "copy":
 				await navigator.clipboard.writeText(action.text)
 				return { text: action.label }
+			case "install":
+				return (await promptInstall())
+					? { text: "Installing WaveKit" }
+					: { text: null }
 		}
 	} catch (error) {
 		return { text: `Not done: ${errorMessage(error)}`, tone: "warn" }

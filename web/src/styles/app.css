@@ -17,6 +17,16 @@
 		position: fixed;
 		inset: 0;
 	}
+	/* Installed app (pwa.ts sets data-wk-display): no rubber-band scroll of the whole window, and on a phone's
+	   home screen the islands stay clear of the notch and the home indicator (the insets are 0 on a desktop). */
+	[data-wk-display="standalone"],
+	[data-wk-display="standalone"] body {
+		overscroll-behavior: none;
+	}
+	[data-wk-display="standalone"] .wk-shell {
+		inset: env(safe-area-inset-top) env(safe-area-inset-right)
+			env(safe-area-inset-bottom) env(safe-area-inset-left);
+	}
 
 	/* Display › Motion: Reduce (or the system setting, resolved into data-wk-motion) stills every slide and glide,
 	   as ui.css does under prefers-reduced-motion */
