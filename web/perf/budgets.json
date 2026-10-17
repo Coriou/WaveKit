@@ -1,0 +1,37 @@
+{
+	"scenarios": {
+		"spectrum": {
+			"minFps": 50,
+			"maxJank": 0.12,
+			"maxBusy": 0.3,
+			"maxScript": 0.12
+		},
+		"spectrum+activity": {
+			"minFps": 45,
+			"maxJank": 0.2,
+			"maxBusy": 0.6,
+			"maxScript": 0.2,
+			"maxLongTaskMsPerS": 50
+		},
+		"spectrum+scanner": {
+			"minFps": 50,
+			"maxJank": 0.12,
+			"maxBusy": 0.32,
+			"maxScript": 0.12
+		},
+		"map": { "maxScript": 0.4 },
+		"map+activity": { "maxScript": 0.4 },
+		"messages": {
+			"minFps": 30,
+			"maxBusy": 0.85,
+			"maxScript": 0.25,
+			"maxLongTaskMsPerS": 500
+		}
+	},
+	"leak": {
+		"maxHeapSlopeMb": 0.5,
+		"maxHeapGrowthMb": 4,
+		"maxNodeGrowth": 100,
+		"maxListenerGrowth": 40
+	}
+}

@@ -13,5 +13,5 @@
 		"types": ["node", "vite/client"],
 		"tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo"
 	},
-	"include": ["src", "mock", "tests", "build", "vite.config.ts"]
+	"include": ["src", "mock", "tests", "build", "perf", "vite.config.ts"]
 }

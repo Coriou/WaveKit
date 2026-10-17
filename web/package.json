@@ -12,7 +12,8 @@
 		"mock": "node --experimental-strip-types ./mock/server.ts",
 		"lint": "eslint -c ../eslint.config.js .",
 		"test": "vitest run --passWithNoTests",
-		"typecheck": "pnpm -w exec tsc -p web/tsconfig.json --noEmit"
+		"typecheck": "pnpm -w exec tsc -p web/tsconfig.json --noEmit",
+		"perf": "node --experimental-strip-types --no-warnings ./perf/bench.ts"
 	},
 	"dependencies": {
 		"@wavekit/api-types": "workspace:*",
@@ -30,6 +31,7 @@
 		"@types/ws": "^8.5.14",
 		"@vitejs/plugin-react": "^5.2.0",
 		"fastify": "^5.3.3",
+		"playwright-core": "1.56.1",
 		"typescript": "^5.9.3",
 		"vite": "^7.3.1",
 		"vitest": "^3.2.4",
