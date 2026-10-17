@@ -697,7 +697,11 @@ export class JobRunner implements JobDriver {
 		if (!memory) return
 		const live = this.tracks.get(trackId)?.live
 		if (live?.discoveryId && live.acceptedIdentity)
-			memory.recordDecode(live.discoveryId)
+			try {
+				memory.recordDecode(live.discoveryId)
+			} catch {
+				// The memory never throws by contract; a broken one changes nothing here.
+			}
 	}
 
 	/**
@@ -723,7 +727,11 @@ export class JobRunner implements JobDriver {
 			.status()
 			.find(p => p.probeId === hold.probeId && p.jobId === this.record.id)
 		if (probe?.state !== "confirming") return
-		memory.recordMiss(live.discoveryId, probe.protocol)
+		try {
+			memory.recordMiss(live.discoveryId, probe.protocol)
+		} catch {
+			// As above: a throwing memory must not escape the hold timer.
+		}
 	}
 
 	/**

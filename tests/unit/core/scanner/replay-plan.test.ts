@@ -103,6 +103,17 @@ describe("planReplayTrials", () => {
 		expect(out.map(t => [t.protocol, t.known])).toEqual([["dmr", true]])
 	})
 
+	it("a prior of 0 removes the known protocol too (requirement 1.3)", () => {
+		const out = planReplayTrials(
+			input({ track: null, knownProtocol: "dmr", priors: { dmr: 0 } }),
+		)
+		expect(out).toEqual([])
+		const withTrack = planReplayTrials(
+			input({ knownProtocol: "dmr", priors: { dmr: 0 } }),
+		)
+		expect(withTrack.some(t => t.known)).toBe(false)
+	})
+
 	it("no track, no known: modes of protocols with prior > 0, by prior; never analog, ambient or rtl433", () => {
 		const out = planReplayTrials(
 			input({
@@ -193,6 +204,7 @@ describe("planReplayTrials", () => {
 					}
 					const replayable =
 						c.known !== null &&
+						c.priors[c.known] !== 0 &&
 						[
 							"dmr",
 							"p25p1",

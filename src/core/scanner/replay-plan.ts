@@ -64,7 +64,9 @@ export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
 		const mode = replayModeOf(protocol)
 		if (mode) candidates.push({ protocol, mode, known })
 	}
-	if (input.knownProtocol !== null) add(input.knownProtocol, true)
+	// A prior of 0 removes a protocol (requirement 1.3), the known one included.
+	if (input.knownProtocol !== null && input.priors[input.knownProtocol] !== 0)
+		add(input.knownProtocol, true)
 	if (input.track) {
 		for (const h of identifyScores(input.track, {
 			priors: input.priors,
