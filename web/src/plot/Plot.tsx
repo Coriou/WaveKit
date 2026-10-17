@@ -15,7 +15,7 @@ import {
 	useState,
 	type RefObject,
 } from "react"
-import type { ResolvedBandPlanView } from "@wavekit/api-types"
+import type { Discovery, ResolvedBandPlanView } from "@wavekit/api-types"
 
 import type { DataLayer, SavedFrequencyRow } from "../data/index.ts"
 import { Store, tunedHz, useStore } from "../data/index.ts"
@@ -81,7 +81,11 @@ import {
 	useDiscoveryFetch,
 	useDiscoveryRow,
 } from "./DiscoveryTags.tsx"
-import { discoveryTagFilter } from "./discovery-tags.ts"
+import {
+	discoveryTagFilter,
+	identifiedAt,
+	identifiedLabel,
+} from "./discovery-tags.ts"
 import {
 	dragRange,
 	finishRange,
@@ -165,6 +169,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const gateRef = useRef<LabelGateState>(EMPTY_LABEL_GATE)
 	const [labelled, setLabelled] = useState<readonly GatedSignal[]>([])
 	const savedItems = useStore(data.savedFrequencies, s => s.items)
+	const discoveries = useStore(data.scanner, s => s.discoveries.byId)
 
 	const bodyRef = useRef<HTMLDivElement>(null)
 	const [size, setSize] = useState({ w: 0, h: 0 })
@@ -266,12 +271,14 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		tunedHz: vfoHz,
 		plan,
 		saved: savedItems,
+		discoveries,
 	})
 	gateCtx.current = {
 		mode: device.signalLabels,
 		tunedHz: vfoHz,
 		plan,
 		saved: savedItems,
+		discoveries,
 	}
 
 	const onFrameMeta = (m: SpectrumFrameMeta) => {
@@ -290,7 +297,8 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 			tunedHz: g.tunedHz,
 			isNamed: (hz, widthHz) =>
 				namedChannelAt(g.plan, hz, widthHz) ||
-				savedNear(g.saved, hz, widthHz) !== null,
+				savedNear(g.saved, hz, widthHz) !== null ||
+				identifiedAt(g.discoveries.values(), hz, widthHz) !== null,
 		})
 		setLabelled(gatedSignals(gateRef.current))
 	}
@@ -385,6 +393,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 								signals={labelled}
 								plan={plan}
 								saved={savedItems}
+								discoveries={discoveries}
 								view={view}
 								widthPx={size.w}
 								traceCss={layout.traceCss}
@@ -732,6 +741,7 @@ function SignalLabels({
 	signals: gated,
 	plan,
 	saved,
+	discoveries,
 	view,
 	widthPx,
 	traceCss,
@@ -742,6 +752,7 @@ function SignalLabels({
 	signals: readonly GatedSignal[]
 	plan: ResolvedBandPlanView | null
 	saved: readonly SavedFrequencyRow[]
+	discoveries: ReadonlyMap<string, Discovery>
 	view: SpectrumViewSpan
 	widthPx: number
 	traceCss: number
@@ -761,13 +772,21 @@ function SignalLabels({
 				})),
 				plan,
 			).map(s => {
-				// a saved frequency names the signal before the band plan does
+				// what was identified there names the signal first, then a saved frequency, then the band plan
+				const d = identifiedAt(discoveries.values(), s.hz, s.widthHz)
+				if (d)
+					return {
+						...s,
+						label: identifiedLabel(d),
+						sub: formatMHz(s.hz, 3),
+						known: true,
+					}
 				const f = savedNear(saved, s.hz, s.widthHz)
 				return f
 					? { ...s, label: f.name, sub: formatMHz(s.hz, 3), known: true }
 					: s
 			}),
-		[shown, plan, saved],
+		[shown, plan, saved, discoveries],
 	)
 	const placed: PlacedLabel[] = useMemo(
 		() =>

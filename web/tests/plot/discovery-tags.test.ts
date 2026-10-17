@@ -7,6 +7,8 @@ import { ScannerStore } from "../../src/data/scanner-store.ts"
 import {
 	discoveryFetchSpan,
 	discoveryTagFilter,
+	identifiedAt,
+	identifiedLabel,
 	discoveryTier,
 	hasTaggable,
 	placeDiscoveryTags,
@@ -237,5 +239,24 @@ describe("discovery tags follow Signal labels", () => {
 		expect(discoveryTagFilter("named")).toBe("decoded")
 		expect(discoveryTagFilter("clear")).toBe("all")
 		expect(discoveryTagFilter("all")).toBe("all")
+	})
+})
+
+describe("identified signal", () => {
+	it("names a signal by the closest decoded discovery, never a guess or an ignored one", () => {
+		const list = [
+			disc("maybe", 100, { confidence: "candidate" }),
+			disc("far", 110),
+			disc("near", 102),
+			disc("ignored", 100, { operator: { lockout: true } }),
+		]
+		expect(identifiedAt(list, at(100), 12_500)?.id).toBe("near")
+		expect(identifiedAt(list, at(100), 2_000)).toBeNull()
+		expect(identifiedAt([list[0]!], at(100), 12_500)).toBeNull()
+	})
+
+	it("labels it with the decoder's words, not an operator's name", () => {
+		const d = disc("x", 0, { operator: { label: "DMR repeater" } })
+		expect(identifiedLabel(d)).toBe("DMR · CC 1")
 	})
 })

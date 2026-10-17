@@ -6,8 +6,10 @@ import type { Discovery } from "@wavekit/api-types"
 
 import {
 	confidenceRank,
+	confidenceText,
 	discoveryTitle,
 	formatWait,
+	identityText,
 } from "../data/scanner-format.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import type { SignalLabelsMode } from "./label-gate.ts"
@@ -189,6 +191,33 @@ export function hasTaggable(
 ): boolean {
 	for (const d of byId.values()) if (taggable(d, only)) return true
 	return false
+}
+
+/**
+ * The decoded discovery on a spectrum signal, or null: Signal labels name the signal by what was identified there
+ * ("DMR · CC 1") before a saved frequency or the band plan does. The closest within max(3 kHz, half the signal's
+ * width); an Ignored (locked-out) one never names it.
+ */
+export function identifiedAt(
+	items: Iterable<Discovery>,
+	hz: number,
+	widthHz: number,
+): Discovery | null {
+	const tol = Math.max(3000, widthHz / 2)
+	let best: Discovery | null = null
+	for (const d of items) {
+		if (d.confidence !== "decoded" || d.operator?.lockout) continue
+		const off = Math.abs(d.frequencyHz - hz)
+		if (off <= tol && (!best || off < Math.abs(best.frequencyHz - hz))) best = d
+	}
+	return best
+}
+
+/** What a signal chip says for an identified signal: the decoder's words ("DMR · CC 1"), not a name someone gave it. */
+export function identifiedLabel(d: Discovery): string {
+	const what = confidenceText(d)
+	const id = identityText(d.identity)
+	return id ? `${what} · ${id}` : what
 }
 
 export interface FetchedSpan {
