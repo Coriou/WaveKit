@@ -3,6 +3,7 @@ import { segment } from "./emissions/segmenter.js"
 import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
 import { Tracker } from "./emissions/tracker.js"
 import type { TrackerBlock } from "./emissions/tracker.js"
+import { blockTrackOf } from "./frame-tracks.js"
 import { flagIqImages } from "./emissions/iq-image.js"
 import type {
 	BlockSummary,
@@ -1563,19 +1564,25 @@ export class SpectrumPipeline {
 			bins,
 			floorDbfs,
 			thresholdDb: k,
-			tracks: segs.map(s => ({
-				startHz: this.rfLow(ep, s.startBin),
-				endHz: this.rfLow(ep, s.endBin),
-				flags: {
-					burst: burstSet.has(s),
-					iqImage: this.imageTracks.some(
-						t =>
-							t.centreHz >= this.rfLow(ep, s.startBin) &&
-							t.centreHz <= this.rfLow(ep, s.endBin),
-					),
-					edge: s.flags.edge,
-				},
-			})),
+			// WG11 req 5.1: the tracker's own association of each segment in this block (no geometry).
+			tracks: segs.map(s =>
+				blockTrackOf(
+					this.rfLow(ep, s.startBin),
+					this.rfLow(ep, s.endBin),
+					{
+						burst: burstSet.has(s),
+						iqImage: this.imageTracks.some(
+							t =>
+								t.centreHz >= this.rfLow(ep, s.startBin) &&
+								t.centreHz <= this.rfLow(ep, s.endBin),
+						),
+						edge: s.flags.edge,
+					},
+					this.tracker.associationOf(s),
+					this.fs,
+					this.cfg.minSurfaceBlocks,
+				),
+			),
 			masks: { dcHz: ep.centreHz, dcGuardHz: this.dcGuardHz, spurRanges },
 			floorOccupied,
 			overload,

@@ -19,6 +19,7 @@ import type {
 	SpectrumBinsCapView,
 	SpectrumBinEncoding,
 	SpectrumFrameEventData,
+	SpectrumFrameTrack,
 	SpectrumOccupancyResponse,
 	SpectrumProfileAdjustment,
 	SpectrumProfileEventData,
@@ -31,6 +32,9 @@ import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { TunerController } from "../tuner-controller.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { frameTrackScannerOf } from "./frame-tracks.js"
+import type { SpectrumTrackIdentityLookup } from "./track-identity-contract.js"
 import {
 	OccupancyHistory,
 	OccupancyStateSchema,
@@ -38,6 +42,7 @@ import {
 } from "./occupancy.js"
 import type {
 	BlockSummary,
+	BlockTrack,
 	EngineState,
 	FreqRange,
 	PipelineConfig,
@@ -98,6 +103,8 @@ export {
 	type SpectrumProfile,
 } from "./spectrum-averaging.js"
 const MAX_SINCE_MS = 168 * 3_600_000
+/** WG11 req 5.3: a failing or malformed identity lookup logs one fixed-text debug line per minute. */
+export const TRACK_IDENTITY_LOG_INTERVAL_MS = 60_000
 const TOP_N = 10
 
 /** The default profile from ws.spectrumHz/spectrumBins, averaging off (settings are already bounded). */
@@ -406,6 +413,9 @@ export class SpectrumService extends EventEmitter {
 	/** M1: bumped on each permanent removal. */
 	private readonly sourceGen = new Map<string, number>()
 	private stopping = false
+	/** WG11 req 5.3: the scanner's identity of a frame track (wired by Main); null: no `scanner` field. */
+	private trackIdentity: SpectrumTrackIdentityLookup | null = null
+	private trackIdentityLoggedAt = Number.NEGATIVE_INFINITY
 
 	/** WG8: resolved once; the engine budget and the client clamp read the same cap. */
 	private readonly binsCap: {
@@ -418,6 +428,15 @@ export class SpectrumService extends EventEmitter {
 		this.binsCap = resolveBinsCap(deps.binsCap)
 		this.log = createComponentLogger(deps.logger, "SpectrumService")
 		this.now = deps.now ?? Date.now
+	}
+
+	/**
+	 * WG11 req 5.3: sets (or clears with null) the scanner identity port. Frames built after
+	 * the call (live, snapshot, backfill, status) read it; a throwing or absent lookup, or a
+	 * malformed answer, gives no `scanner` field.
+	 */
+	setTrackIdentityLookup(lookup: SpectrumTrackIdentityLookup | null): void {
+		this.trackIdentity = lookup
 	}
 
 	/** Loads occupancy histories of every eligible source (engines start on demand). */
@@ -1443,6 +1462,7 @@ export class SpectrumService extends EventEmitter {
 		const entry = this.entries.get(sel.sourceId)
 		const cfg = entry?.engine.config()
 		if (!entry || !cfg) return []
+		const sourceId = sel.sourceId
 		const cur = entry.engine.currentEpoch()
 		const snapshotted = snapshots.some(s => s.sourceId === sel.sourceId)
 		return buildBackfillFrames({
@@ -1457,7 +1477,52 @@ export class SpectrumService extends EventEmitter {
 			integrationMs: cfg.integrationMs,
 			sampleRateHz: cfg.sampleRateHz,
 			fftSize: cfg.fftSize,
+			tracks: tracks => this.frameTracks(sourceId, tracks),
 		})
+	}
+
+	/**
+	 * WG11 req 5.1-5.3: a frame's tracks. The fields the pipeline recorded with the block are
+	 * already on them; with a lookup, a track with an id gets the scanner's identity for this
+	 * source, read once per track per frame. The summary's tracks are never mutated (the ring
+	 * and the other profile groups share them); without a lookup or an id they are returned
+	 * as they are (the frozen frame).
+	 */
+	private frameTracks(
+		sourceId: string,
+		tracks: BlockTrack[],
+	): SpectrumFrameTrack[] {
+		const lookup = this.trackIdentity
+		if (lookup === null || !tracks.some(t => t.trackId !== undefined))
+			return tracks
+		return tracks.map(t => {
+			if (t.trackId === undefined) return t
+			let answer: unknown
+			try {
+				answer = lookup(sourceId, t.trackId)
+			} catch (err: unknown) {
+				this.logTrackIdentity("Spectrum track identity lookup failed", err)
+				return t
+			}
+			if (answer === null) return t
+			const scanner = frameTrackScannerOf(answer)
+			if (scanner === null) {
+				this.logTrackIdentity(
+					"Spectrum track identity lookup returned an invalid identity",
+				)
+				return t
+			}
+			return { ...t, scanner }
+		})
+	}
+
+	private logTrackIdentity(msg: string, err?: unknown): void {
+		const now = this.now()
+		if (now - this.trackIdentityLoggedAt < TRACK_IDENTITY_LOG_INTERVAL_MS)
+			return
+		this.trackIdentityLoggedAt = now
+		if (err === undefined) this.log.debug(msg)
+		else this.log.debug({ error: safeErrorFields(err) }, msg)
 	}
 
 	/**
@@ -1568,7 +1633,7 @@ export class SpectrumService extends EventEmitter {
 			binEncoding: BIN_ENCODING,
 			floorDbfs: summary.floorDbfs,
 			thresholdDb: summary.thresholdDb,
-			tracks: summary.tracks,
+			tracks: this.frameTracks(sourceId, summary.tracks),
 			masks: summary.masks,
 			at: new Date(this.now()).toISOString(),
 		}

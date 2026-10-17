@@ -133,7 +133,22 @@ export interface BlockTrack {
 	startHz: number
 	endHz: number
 	/** burst: short-path burst segment (Task 10a); iqImage: mirror image (Task 11a); edge: touches the usable span in-window. */
-	flags: { burst: boolean; iqImage: boolean; edge: boolean }
+	flags: { burst: boolean; iqImage: boolean; edge: boolean; spur?: boolean }
+	/**
+	 * WG11 req 5.1 (frame-tracks.ts): set only when the tracker associated this segment with an
+	 * open track in this same block; then also `flags.spur`. Absent on an untracked segment.
+	 */
+	trackId?: string
+	/** The track's SNR against the core's floor, 0.5 dB grid. */
+	snrDb?: number
+	/** The track's peak, 0.5 dB grid. */
+	peakDbfs?: number
+	/** On-blocks so far. */
+	blocks?: number
+	/** (lastSample − startSample) / fs, ms. */
+	ageMs?: number
+	/** Display surfacing rule (req 5.1). */
+	surfaced?: boolean
 }
 
 export interface PipelineStats {

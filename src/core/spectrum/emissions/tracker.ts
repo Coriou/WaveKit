@@ -15,6 +15,7 @@ import type { Segment } from "./segmenter.js"
 import type { PersistentFeature } from "../retune-alarm.js"
 import { frameTrust } from "../retune-settle.js"
 import type { ImageCandidate } from "./iq-image.js"
+import type { TrackAssociation } from "../frame-tracks.js"
 
 /**
  * Per-epoch emission tracks (spec §4.2, §6.2): matches each block's segments to open tracks by bin
@@ -157,6 +158,11 @@ export class Tracker {
 		verifiedFromSample: null,
 	}
 	private readonly updateEvery: number
+	/**
+	 * WG11 req 5.1: this block's segment → track decisions (matched, opened or re-opened at
+	 * max-duration). Rebuilt by every `block()`; read by the pipeline's summary of that block.
+	 */
+	private readonly assoc = new Map<Segment, OpenTrack>()
 
 	constructor(private readonly opts: TrackerOptions) {
 		this.updateEvery = Math.max(1, Math.round(1000 / opts.blockMs))
@@ -210,6 +216,7 @@ export class Tracker {
 		)
 		const events: PipelineEvent[] = []
 		const matched = new Set<OpenTrack>()
+		this.assoc.clear()
 		const order = segments
 			.map((_, i) => i)
 			.sort((x, y) => (segments[y]?.peakDb ?? 0) - (segments[x]?.peakDb ?? 0))
@@ -220,6 +227,7 @@ export class Tracker {
 			if (t) {
 				matched.add(t)
 				this.extend(t, s, b, n)
+				this.assoc.set(s, t)
 				continue
 			}
 			if (b.gap) continue
@@ -234,6 +242,7 @@ export class Tracker {
 			}
 			const nt = this.openTrack(s, b, n, blockSamples)
 			matched.add(nt)
+			this.assoc.set(s, nt)
 			events.push({ kind: "track-open", track: this.snapshot(nt, n) })
 		}
 		for (const t of [...this.open]) {
@@ -252,6 +261,8 @@ export class Tracker {
 				events.push(this.close(t, "max-duration", n))
 				const nt = this.openTrack(seg, b, n, blockSamples)
 				nt.justOpened = false
+				// the segment now belongs to the successor (same block, fresh id)
+				if (this.assoc.get(seg) === t) this.assoc.set(seg, nt)
 				events.push({ kind: "track-open", track: this.snapshot(nt, n) })
 				continue
 			}
@@ -265,6 +276,29 @@ export class Tracker {
 			}
 		}
 		return events
+	}
+
+	/**
+	 * WG11 req 5.1: the tracker's own decision for `s` in the last `block()` (no geometry): the
+	 * associated track's state as of now, or null for a segment it did not associate (a gap
+	 * block, a transient, a segment of an earlier block). Call before the next `block()`.
+	 */
+	associationOf(s: Segment): TrackAssociation | null {
+		const t = this.assoc.get(s)
+		if (t === undefined || t.lastOnBlock !== this.blockNo) return null
+		return {
+			trackId: t.id,
+			snrDb: trackSnrDb(t),
+			peakDbfs: t.peakDbfs,
+			blocks: t.blocks,
+			startSample: t.startSample,
+			lastSample: t.lastSample,
+			maxBlockSnrDb: t.maxBlockSnrDb,
+			thresholdDb: t.thresholdDb,
+			spur: t.flags.spur,
+			iqImage: t.flags.iqImage,
+			burst: t.flags.burst,
+		}
 	}
 
 	closeAll(reason: ObservationEndReason): PipelineEvent[] {
@@ -548,7 +582,6 @@ export class Tracker {
 		const f = this.features(t)
 		const blocks = Math.max(1, t.blocks)
 		const bandMean = t.bandLinSum / blocks
-		const floorMean = t.floorLinSum / blocks
 		const snap: TrackSnapshot = {
 			trackId: t.id,
 			sourceId: this.opts.sourceId,
@@ -561,11 +594,7 @@ export class Tracker {
 			obwMethod: useDb ? "-20dB" : "on-bins",
 			peakDbfs: t.peakDbfs,
 			meanDbfs: 10 * Math.log10(Math.max(bandMean, 1e-30)),
-			snrDb:
-				10 *
-				Math.log10(
-					Math.max(bandMean - floorMean, 1e-30) / Math.max(floorMean, 1e-30),
-				),
+			snrDb: trackSnrDb(t),
 			floorDbfs: t.floorDbSum / blocks,
 			thresholdDb: t.thresholdDb,
 			blocks: t.blocks,
@@ -584,4 +613,17 @@ export class Tracker {
 		if (f.acf60 !== undefined) snap.acf60 = f.acf60
 		return snap
 	}
+}
+
+/** The snapshot's SNR: mean band power over mean floor power across the track's blocks, dB. */
+function trackSnrDb(t: OpenTrack): number {
+	const blocks = Math.max(1, t.blocks)
+	const bandMean = t.bandLinSum / blocks
+	const floorMean = t.floorLinSum / blocks
+	return (
+		10 *
+		Math.log10(
+			Math.max(bandMean - floorMean, 1e-30) / Math.max(floorMean, 1e-30),
+		)
+	)
 }
