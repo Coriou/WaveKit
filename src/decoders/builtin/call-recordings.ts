@@ -17,6 +17,10 @@
 import { promises as fs } from "node:fs"
 import * as path from "node:path"
 
+import type { RecordingProtection } from "../../core/recordings/contract.js"
+import type { Logger } from "../../utils/logger.js"
+import { createComponentLogger } from "../../utils/logger.js"
+
 export interface CallRecordingRetention {
 	/** Keep at most this many megabytes (MiB) of recordings. */
 	maxTotalMb: number
@@ -28,6 +32,39 @@ export interface PruneResult {
 	deleted: string[]
 	keptFiles: number
 	keptBytes: number
+	/**
+	 * Files the age or size rule chose but the recording protection port kept (WG9 req 2.5).
+	 * Present only while a port is installed, so the result is unchanged without one.
+	 */
+	protectedSkipped?: number
+}
+
+let protectionPort: RecordingProtection | null = null
+let protectionLog: Logger | null = null
+
+/**
+ * Installs the deletion decision the pruner consults before each unlink (WG9 req 2.5); null
+ * restores the unprotected behaviour. The optional logger receives the skipped count only
+ * (never a name or path).
+ */
+export function setCallRecordingProtection(
+	protection: RecordingProtection | null,
+	logger?: Logger,
+): void {
+	protectionPort = protection
+	protectionLog =
+		protection !== null && logger !== undefined
+			? createComponentLogger(logger, "CallRecordings")
+			: null
+}
+
+/** Fail closed: a throwing port counts as protected. */
+function isProtectedFile(port: RecordingProtection, file: string): boolean {
+	try {
+		return port.isDsdFmeFileProtected(path.basename(file)) !== false
+	} catch {
+		return true
+	}
 }
 
 /** dsd-fme's final per-call recording name. */
@@ -87,12 +124,21 @@ export async function pruneCallRecordings(
 	const deleted: string[] = []
 	const kept: RecordingFile[] = []
 	let total = files.reduce((sum, file) => sum + file.size, 0)
+	let protectedSkipped = 0
 
 	for (const file of files) {
 		const age = nowMs - file.mtimeMs
 		const inProgress = age < RECORDING_IN_PROGRESS_MS
 		const expired = age > maxAgeMs
 		if (!inProgress && (expired || total > maxBytes)) {
+			// Read the port per file, synchronously, right before the unlink (WG9 req 2.5).
+			const port = protectionPort
+			if (port !== null && isProtectedFile(port, file.path)) {
+				// Kept: it still counts toward the total (size accounting unchanged).
+				protectedSkipped++
+				kept.push(file)
+				continue
+			}
 			try {
 				await fs.unlink(file.path)
 				deleted.push(file.path)
@@ -109,5 +155,14 @@ export async function pruneCallRecordings(
 		kept.push(file)
 	}
 
-	return { deleted, keptFiles: kept.length, keptBytes: total }
+	if (protectionPort === null) {
+		return { deleted, keptFiles: kept.length, keptBytes: total }
+	}
+	if (protectedSkipped > 0) {
+		protectionLog?.info(
+			{ protectedSkipped },
+			"Per-call recording retention skipped kept recordings",
+		)
+	}
+	return { deleted, keptFiles: kept.length, keptBytes: total, protectedSkipped }
 }
