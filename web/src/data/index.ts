@@ -13,6 +13,7 @@ import { createFleets } from "./fleets.ts"
 import { BandplanStore } from "./bandplan-store.ts"
 import { BandplanStackStore } from "./bandplan-stack-store.ts"
 import { CoverageStore } from "./coverage-store.ts"
+import { TrailHistoryStore } from "./trail-history-store.ts"
 import { DecoderSettingsStore } from "./decoder-settings-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
@@ -70,6 +71,8 @@ export interface DataLayer {
 	fleets: Fleets
 	/** ADS-B and AIS coverage per bearing; attaches on demand. */
 	coverage: CoverageStore
+	/** Stored position history for the Map's trails; attaches on demand. */
+	trailHistory: TrailHistoryStore
 	/** Detects the access mode, opens /ws and loads every store. Never rejects. */
 	start(): Promise<void>
 	dispose(): void
@@ -139,6 +142,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		preferences: new PreferencesStore(api, savedFrequencies),
 		fleets: createFleets(api, events),
 		coverage: new CoverageStore(api),
+		trailHistory: new TrailHistoryStore(api, events),
 		async start() {
 			try {
 				access.set({ access: await api.bootstrap(), error: null })
@@ -225,6 +229,8 @@ export {
 } from "./fleets.ts"
 export type { Aircraft, Aprs, Fleets, Mesh, Vessel } from "./fleets.ts"
 export { CoverageStore } from "./coverage-store.ts"
+export { TrailHistoryStore, withHistory } from "./trail-history-store.ts"
+export type { TrailHistoryState } from "./trail-history-store.ts"
 export type { Coverage, CoverageState } from "./coverage-store.ts"
 export type { ReadableStore } from "./store.ts"
 export { SourcesStore } from "./sources-store.ts"

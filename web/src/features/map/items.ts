@@ -10,6 +10,7 @@ import type {
 	TrailPoint,
 	Vessel,
 } from "../../data/index.ts"
+import { withHistory } from "../../data/index.ts"
 import { token, type SearchToken } from "../activity/search.ts"
 import {
 	altitudeText,
@@ -212,8 +213,28 @@ export interface FleetSnapshots {
 	readonly mesh: FleetState<Mesh>
 }
 
-/** Every entry with a position, in drawing order (mesh, APRS, AtoN, vessels, aircraft on top). */
-export function itemsOf(f: FleetSnapshots): MapItem[] {
+/** The item's Activity entity key, as GET /api/activity/trails names its trail. */
+export function entityKeyOf(it: MapItem): string {
+	const s = it.source
+	switch (s.kind) {
+		case "aircraft":
+			return `icao:${s.value.icao.toUpperCase()}`
+		case "vessel":
+			return `mmsi:${s.value.mmsi}`
+		case "aprs":
+		case "mesh":
+			return s.value.key
+	}
+}
+
+/**
+ * Every entry with a position, in drawing order (mesh, APRS, AtoN, vessels, aircraft on top). With the
+ * stored history (by entity key), each trail starts with the stored points older than its own.
+ */
+export function itemsOf(
+	f: FleetSnapshots,
+	history?: ReadonlyMap<string, readonly TrailPoint[]>,
+): MapItem[] {
 	const out: MapItem[] = []
 	const add = <T>(
 		s: FleetState<T>,
@@ -221,7 +242,9 @@ export function itemsOf(f: FleetSnapshots): MapItem[] {
 	) => {
 		for (const e of s.entries.values()) {
 			const it = fn(e)
-			if (it) out.push(it)
+			if (!it) continue
+			const past = history?.get(entityKeyOf(it))
+			out.push(past ? { ...it, trail: withHistory(it.trail, past) } : it)
 		}
 	}
 	add(f.mesh, meshItem)

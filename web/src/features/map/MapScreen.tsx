@@ -236,6 +236,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			f.aprs.attach(),
 			f.mesh.attach(),
 			data.coverage.attach(),
+			data.trailHistory.attach(),
 		]
 		return () => {
 			for (const off of offs) off()
@@ -254,6 +255,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			overlay: cv,
 			fleets: data.fleets,
 			coverage: data.coverage,
+			trailHistory: data.trailHistory,
 			station: data.station,
 			ui,
 			themeScope: el,

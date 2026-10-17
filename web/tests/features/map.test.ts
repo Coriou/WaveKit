@@ -5,6 +5,7 @@ import fc from "fast-check"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 
 import type { FleetEntry, FleetState } from "../../src/data/fleet-store.ts"
+import { trailsSchema } from "../../src/data/trail-history-store.ts"
 import {
 	aircraftSchema,
 	aprsSchema,
@@ -42,6 +43,7 @@ import {
 	agoText,
 	countsOf,
 	describe as describeItem,
+	entityKeyOf,
 	glyphOf,
 	itemsOf,
 	labelPriority,
@@ -280,6 +282,50 @@ describe("items from the mock's fleets", () => {
 		expect(items.at(-1)?.kind).toBe("aircraft")
 		expect(items[0]?.kind).toBe("mesh")
 		expect(new Set(items.map(i => i.id)).size).toBe(items.length)
+	})
+
+	it("finds every moving item's stored trail by its Activity entity key and puts it in front", async () => {
+		const res = await server.app.inject({
+			method: "GET",
+			url: "/api/activity/trails",
+		})
+		const body = trailsSchema.parse(res.json())
+		const history = new Map(
+			body.trails.map(t => [
+				t.entityKey,
+				t.points.map(([at, lat, lon]) => ({ lat, lon, at })),
+			]),
+		)
+		const moving = items.filter(i => i.kind !== "aton" && i.moving)
+		expect(moving.length).toBeGreaterThan(30)
+		for (const it of moving) expect(history.has(entityKeyOf(it))).toBe(true)
+		const fleets = {
+			aircraft: fleet(
+				aircraft,
+				a => a.icao,
+				a => a.position !== undefined,
+			),
+			vessels: fleet(
+				vessels,
+				v => v.mmsi,
+				v => v.position !== null,
+			),
+			aprs: fleet(
+				aprs,
+				s => s.key,
+				s => s.position !== null,
+			),
+			mesh: fleet(
+				mesh,
+				m => m.nodeId,
+				m => m.position !== null,
+			),
+		}
+		const withPast = itemsOf(fleets, history)
+		const afr = withPast.find(i => i.name === "AFR1234")
+		expect(afr?.trail.length).toBeGreaterThan(1)
+		const times = afr?.trail.map(p => p.at) ?? []
+		expect([...times].sort((x, y) => x - y)).toEqual(times)
 	})
 
 	it("chooses the board's glyphs", () => {

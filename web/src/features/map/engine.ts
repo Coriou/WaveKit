@@ -7,7 +7,12 @@ import "maplibre-gl/dist/maplibre-gl.css"
 import { Map as MapLibreMap, Marker } from "maplibre-gl"
 import type { GeoJSONSource, MapMouseEvent } from "maplibre-gl"
 
-import type { CoverageStore, Fleets, StationStore } from "../../data/index.ts"
+import type {
+	CoverageStore,
+	Fleets,
+	StationStore,
+	TrailHistoryStore,
+} from "../../data/index.ts"
 import { Store } from "../../data/store.ts"
 import {
 	approxArea,
@@ -93,6 +98,7 @@ export interface EngineDeps {
 	readonly overlay: HTMLCanvasElement
 	readonly fleets: Fleets
 	readonly coverage: CoverageStore
+	readonly trailHistory: TrailHistoryStore
 	readonly station: StationStore
 	readonly ui: MapUi
 	/** The element whose computed style holds the theme tokens. */
@@ -225,6 +231,10 @@ export class MapEngine {
 				this.kick()
 			}),
 			deps.station.subscribe(dirtyItems),
+			deps.trailHistory.subscribe(() => {
+				this.trailsDirty = true
+				dirtyItems()
+			}),
 			deps.ui.subscribe((next, prev) => this.onUi(next, prev)),
 			// units: rings, labels and the hover line are drawn in them
 			// Map › Trail length and Labels
@@ -463,12 +473,15 @@ export class MapEngine {
 	private rebuildItems(): void {
 		this.itemsDirty = false
 		const f = this.deps.fleets
-		const all = itemsOf({
-			aircraft: f.aircraft.get(),
-			vessels: f.vessels.get(),
-			aprs: f.aprs.get(),
-			mesh: f.mesh.get(),
-		})
+		const all = itemsOf(
+			{
+				aircraft: f.aircraft.get(),
+				vessels: f.vessels.get(),
+				aprs: f.aprs.get(),
+				mesh: f.mesh.get(),
+			},
+			this.deps.trailHistory.get().trails,
+		)
 		const identity = this.deps.station.get().station
 		const station = stationOf(
 			identity ? { lat: identity.lat.value, lon: identity.lon.value } : null,

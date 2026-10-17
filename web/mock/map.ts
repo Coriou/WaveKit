@@ -19,6 +19,9 @@ import type {
 	AircraftState,
 	AircraftTrackerStats,
 	AprsStation,
+	ActivityTrail,
+	ActivityTrailPoint,
+	ActivityTrails,
 	AprsTrackerStats,
 	CoverageProtocolSummary,
 	CoverageResponse,
@@ -1165,6 +1168,69 @@ export function registerMapMock(
 			return meshState(m, now())
 		},
 	)
+
+	// GET /api/activity/trails (WG4): the stored positions of the last hour, one per entity per 60 s
+	// (the core's position coalescing), oldest first; an aircraft's trail starts on its current lap.
+	app.get("/api/activity/trails", async () => {
+		const at = now()
+		const from = at - 3_600_000
+		const trails: ActivityTrail[] = []
+		const add = (
+			entityKey: string,
+			category: ActivityTrail["category"],
+			protocol: string,
+			pos: (ms: number) => { lat: number; lon: number } | null,
+		) => {
+			const points: ActivityTrailPoint[] = []
+			for (let ms = at - ((at - from) % 60_000); ms >= from; ms -= 60_000) {
+				const p = pos(ms)
+				if (!p) break
+				points.push([
+					ms,
+					Math.round(p.lat * 1e5) / 1e5,
+					Math.round(p.lon * 1e5) / 1e5,
+					null,
+				])
+			}
+			if (points.length > 0)
+				trails.push({
+					entityKey,
+					category,
+					protocol,
+					points: points.reverse(),
+					truncated: false,
+				})
+		}
+		const ts = (ms: number) => (ms - startedAt) / 1000
+		for (const a of aircraft) {
+			const lap = aircraftAt(a, ts(at)).lap
+			add(`icao:${a.icao}`, "aircraft", "adsb", ms => {
+				const p = aircraftAt(a, ts(ms))
+				return p.lap === lap ? p : null
+			})
+		}
+		for (const v of vessels)
+			if (v.vesselClass !== "aton")
+				add(`mmsi:${v.mmsi}`, "marine", "ais", ms => vesselAt(v, ts(ms)))
+		for (const s of aprs)
+			add(`callsign:${s.callsign}`, "aprs", "aprs", ms => aprsAt(s, ts(ms)))
+		for (const m of mesh)
+			add(`node:${m.nodeId}`, "mesh", "meshtastic", ms => meshAt(m, ts(ms)))
+		const pointCount = trails.reduce((n, t) => n + t.points.length, 0)
+		const answer: ActivityTrails = {
+			producedFrom: HHMM(from),
+			producedTo: HHMM(at),
+			trails,
+			pointCount,
+			scannedRows: pointCount,
+			skippedRows: 0,
+			truncated: false,
+			truncation: [],
+			retentionFloor: HHMM(startedAt - 3 * 86_400_000),
+			generatedAt: HHMM(at),
+		}
+		return answer
+	})
 
 	app.get<{ Querystring: { protocol?: string } }>(
 		"/api/coverage",
