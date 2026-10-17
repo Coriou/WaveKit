@@ -83,9 +83,9 @@ const DAY_MS = 86_400_000
 const APPEND_OVERHEAD_BYTES = 512
 /**
  * Queued journal heap past which appends are refused (fail closed). With the accounting above it
- * is a true upper bound on the heap the journal backlog holds: 32 MiB, e.g. at most ~15k typical
- * 1.8 kB one-byte lines (each charged 2 x 1.8 kB + 512 B = ~4.1 kB) or ~54k minimal ~100-unit
- * lines (each charged 712 B).
+ * is a true upper bound on the heap the journal backlog holds: 32 MiB, e.g. at most ~8.2k typical
+ * 1.8 kB lines (each charged 2 x 1.8 kB + 512 B = 4,112 B) or ~47k minimal ~100-unit lines (each
+ * charged 712 B).
  */
 const DEFAULT_MAX_JOURNAL_BACKLOG_BYTES = 32 * 1024 * 1024
 /** Error code of an append refused because the journal backlog is full. */
