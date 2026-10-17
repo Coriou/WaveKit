@@ -106,7 +106,7 @@ export type MainToWorker =
 
 export type WorkerToMain =
 	| { type: "meta"; meta: SpectrumFrameMeta }
-	/** History was cleared (new profile, source, epoch or axis). */
+	/** History was cleared (new profile, source or frequency axis). */
 	| { type: "reset"; reason: ResetReason }
 	/** Fallback path only: one decoded row (byte v ↔ v / 2 − 127.5 dBFS), `binCount` bytes used. */
 	| { type: "row"; axis: RowAxis; buffer: ArrayBuffer; binCount: number }
@@ -116,12 +116,7 @@ export type WorkerToMain =
 	/** Answer to a probe: the peak dBFS there, null when no row covers it. */
 	| { type: "probe"; id: number; db: number | null }
 
-export type ResetReason =
-	| "profile"
-	| "subscription"
-	| "source"
-	| "epoch"
-	| "axis"
+export type ResetReason = "profile" | "subscription" | "source" | "axis"
 
 export const DEFAULT_LAYOUT: SpectrumLayout = {
 	splitRatio: 0.3,

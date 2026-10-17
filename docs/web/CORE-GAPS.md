@@ -461,3 +461,14 @@ core source and run against the mock, not yet against a live core)
   deleting the discovery. Delete has no restore, so Undo holds the request for 6 s before sending it.
 - [ ] `GET /api/storage` reports `kept: null`; the footer sums the kept items' sizes itself. The
   report gives no retention age for call recordings, so the drawer cannot say when calls expire.
+
+**Found by the web app, waterfall clearing** (2026-10-17, branch `claude/project-thread-afdtom`; read from the
+core source, reported against a live core)
+
+- [ ] docs/API.md tells clients to reset the waterfall on every epoch change and every `spectrum:profile`.
+  The core opens a new epoch without moving the frequency axis (gain change, same-centre hop, untracked-retune
+  alarm on an unverified tuner, `src/core/spectrum/pipeline.ts` `startUntrackedEpoch`), and a reconnect acks
+  the same profile again, so following the rule wiped the waterfall every few seconds. The web app now keeps
+  rows while sourceId, profile, binHz, startHz and binCount hold, and drops backfill rows it already has. The
+  API rule should say the same for display, and how often untracked-retune alarms fire on an unverified tuner
+  is worth a look (each one also closes every track).

@@ -5,7 +5,12 @@
 
 import type { SpectrumFrameEventData } from "@wavekit/api-types"
 import { decodeBase64Into } from "./codec.ts"
-import { WaterfallHistory, axisOf, profileEventResets } from "./history.ts"
+import {
+	WaterfallHistory,
+	axisOf,
+	profileAckKeepsRows,
+	profileEventResets,
+} from "./history.ts"
 import {
 	MAX_BINS,
 	type InitMessage,
@@ -109,6 +114,10 @@ export class SpectrumPipeline {
 	private decodeErrorReported = false
 	/** The next frame's meta goes out at once (first frame after a reset). */
 	private metaFresh = true
+	/** `at` (ms) of the newest row held. */
+	private newestAt: number | null = null
+	/** After an ack that kept the rows: frames at or before this (ms) are already held. */
+	private heldUntil: number | null = null
 	private state: {
 		size: SpectrumSize
 		layout: SpectrumLayout
@@ -198,7 +207,11 @@ export class SpectrumPipeline {
 		if (msg.type === "spectrum:profile") {
 			const data = msg.data
 			const sourceId = this.subscription?.sourceId ?? null
-			if (profileEventResets(data, sourceId)) this.reset("profile")
+			if (profileAckKeepsRows(data, this.history?.axis ?? null)) {
+				// Backfill and the snapshot replay rows the history already holds.
+				this.heldUntil = this.newestAt
+				this.metaFresh = true
+			} else if (profileEventResets(data, sourceId)) this.reset("profile")
 			const out: WorkerToMain = { type: "profile", outcome: data.outcome }
 			if (data.code !== undefined) out.code = data.code
 			if (data.message !== undefined) out.message = data.message
@@ -301,6 +314,8 @@ export class SpectrumPipeline {
 	}
 
 	private reset(reason: ResetReason): void {
+		this.newestAt = null
+		this.heldUntil = null
 		this.history?.reset()
 		this.scene?.reset()
 		this.metaFresh = true
@@ -311,9 +326,17 @@ export class SpectrumPipeline {
 		const history = this.history
 		const sub = this.subscription
 		if (!history || !sub || frame.sourceId !== sub.sourceId) return
+		const at = Date.parse(frame.at)
+		if (this.heldUntil !== null) {
+			if (at <= this.heldUntil) return
+			this.heldUntil = null
+		}
 		const axis = axisOf(frame)
+		const epochChanged =
+			history.axis !== null && history.axis.epoch !== frame.epoch
 		const reason = history.begin(axis)
 		if (reason !== null) {
+			this.newestAt = null
 			this.scene?.reset()
 			this.deps.post({ type: "reset", reason })
 		}
@@ -330,6 +353,7 @@ export class SpectrumPipeline {
 		}
 		const count = Math.min(n, frame.binCount)
 		history.commit()
+		this.newestAt = Number.isFinite(at) ? at : null
 		if (this.scene) {
 			this.scene.addRow(axis, slot, count)
 		} else if (this.inFlight < MAX_ROWS_IN_FLIGHT) {
@@ -338,7 +362,8 @@ export class SpectrumPipeline {
 			this.inFlight++
 			this.deps.post({ type: "row", axis, buffer, binCount: count }, [buffer])
 		}
-		if (reason !== null || this.metaFresh) this.meta.flush(frame)
+		if (reason !== null || epochChanged || this.metaFresh)
+			this.meta.flush(frame)
 		else this.meta.push(frame)
 		this.metaFresh = false
 	}

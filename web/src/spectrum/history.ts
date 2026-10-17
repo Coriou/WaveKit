@@ -18,8 +18,11 @@ export function axisOf(frame: SpectrumFrameEventData): RowAxis {
 }
 
 /**
- * docs/API.md client rule: never merge rows across a change of sourceId, epoch, profile, binHz or
- * startHz (epochs compared for equality only). binCount is included because it sets the row width.
+ * Whether a row of `next` cannot sit under rows of `prev`: a change of sourceId, profile, binHz or
+ * startHz (binCount too, as it sets the row width). docs/API.md also names epoch, but the core opens
+ * a new epoch without moving the axis (a gain change, an untracked-retune alarm on an unverified
+ * tuner, a same-centre hop), so clearing on it wiped the waterfall every few seconds. The picture
+ * keeps the rows of an earlier epoch when its frequency axis is unchanged; nothing here analyses them.
  */
 export function axisResetReason(
 	prev: RowAxis | null,
@@ -27,7 +30,6 @@ export function axisResetReason(
 ): ResetReason | null {
 	if (prev === null) return null
 	if (prev.sourceId !== next.sourceId) return "source"
-	if (prev.epoch !== next.epoch) return "epoch"
 	if (
 		prev.profile !== next.profile ||
 		prev.binHz !== next.binHz ||
@@ -49,6 +51,23 @@ export function profileEventResets(
 	if (event.outcome === "removed" && event.selection === "default")
 		return event.removedSourceId === sourceId
 	return true
+}
+
+/**
+ * Whether a `spectrum:profile` ack keeps the rows held under `axis`: the same source and profile
+ * served again (a reconnect or a repeated subscribe), or a rejected request, which keeps the
+ * previous selection. The frames that follow land on the same axis, and `begin` still clears the
+ * history if they do not.
+ */
+export function profileAckKeepsRows(
+	event: SpectrumProfileEventData,
+	axis: RowAxis | null,
+): boolean {
+	if (axis === null || event.selection !== "source") return false
+	if (event.sourceId !== axis.sourceId) return false
+	if (event.outcome === "rejected") return true
+	if (event.outcome !== "exact" && event.outcome !== "nearest") return false
+	return event.profile?.key === axis.profile
 }
 
 export class WaterfallHistory {

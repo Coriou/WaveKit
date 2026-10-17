@@ -91,7 +91,7 @@ describe("SpectrumPipeline (OffscreenCanvas path)", () => {
 		expect(t.renderer.rows.length).toBe(0)
 	})
 
-	it("resets on spectrum:profile and on an epoch change, and flushes meta at once", () => {
+	it("resets on a spectrum:profile for another profile, and flushes meta at once", () => {
 		const t = setup(true)
 		t.pipeline.onServer({ type: "spectrum:frame", data: frame({}) })
 		t.pipeline.onServer({ type: "spectrum:frame", data: frame({}) })
@@ -100,9 +100,9 @@ describe("SpectrumPipeline (OffscreenCanvas path)", () => {
 			data: {
 				selection: "source",
 				sourceId: "rtl",
-				profile: null,
+				profile: { key: "10:512", hz: 10, bins: 512 },
 				effectiveHz: null,
-				outcome: "exact",
+				outcome: "nearest",
 				adjusted: [],
 			},
 		})
@@ -110,14 +110,64 @@ describe("SpectrumPipeline (OffscreenCanvas path)", () => {
 		const metaBefore = t.ofType("meta").length
 		t.pipeline.onServer({
 			type: "spectrum:frame",
-			data: frame({ tuningTrust: "unverified" }),
+			data: frame({ profile: "10:512", tuningTrust: "unverified" }),
 		})
 		expect(t.ofType("meta").length).toBe(metaBefore + 1)
 		expect(t.ofType("meta").at(-1)?.meta.tuningTrust).toBe("unverified")
-		t.pipeline.onServer({ type: "spectrum:frame", data: frame({ epoch: 2 }) })
-		expect(t.ofType("reset").map(r => r.reason)).toEqual(["profile", "epoch"])
 		t.frames.tick()
 		expect(t.renderer.draws.at(-1)?.filled).toBe(1)
+	})
+
+	it("keeps the waterfall across a new epoch on the same axis and sends its meta at once", () => {
+		const t = setup(true)
+		t.pipeline.onServer({ type: "spectrum:frame", data: frame({}) })
+		t.pipeline.onServer({ type: "spectrum:frame", data: frame({}) })
+		const metaBefore = t.ofType("meta").length
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ epoch: 2, tuningTrust: "unverified" }),
+		})
+		expect(t.ofType("reset")).toEqual([])
+		expect(t.ofType("meta").length).toBe(metaBefore + 1)
+		expect(t.ofType("meta").at(-1)?.meta.epoch).toBe(2)
+		t.frames.tick()
+		expect(t.renderer.draws.at(-1)?.filled).toBe(3)
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ epoch: 3, startHz: 446_000_000 }),
+		})
+		expect(t.ofType("reset").map(r => r.reason)).toEqual(["axis"])
+	})
+
+	it("keeps the waterfall when a reconnect acks the same profile, and skips replayed rows", () => {
+		const t = setup(true)
+		const at = (s: number) => `2026-10-16T12:00:0${s}.000Z`
+		for (const s of [0, 1, 2])
+			t.pipeline.onServer({
+				type: "spectrum:frame",
+				data: frame({ at: at(s) }),
+			})
+		t.pipeline.onServer({
+			type: "spectrum:profile",
+			data: {
+				selection: "source",
+				sourceId: "rtl",
+				profile: { key: "25:2048", hz: 25, bins: 2048 },
+				effectiveHz: 25,
+				outcome: "exact",
+				adjusted: [],
+				backfillFrames: 3,
+			},
+		})
+		expect(t.ofType("reset")).toEqual([])
+		// Backfill replays 1 and 2 (held), then 3 and 4 are new.
+		for (const s of [1, 2, 3, 4])
+			t.pipeline.onServer({
+				type: "spectrum:frame",
+				data: frame({ at: at(s) }),
+			})
+		t.frames.tick()
+		expect(t.renderer.draws.at(-1)?.filled).toBe(5)
 	})
 
 	it("throttles meta to ≤ 10 per second at 25 frames per second", () => {

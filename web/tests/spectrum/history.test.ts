@@ -4,6 +4,7 @@ import {
 	PeakHold,
 	WaterfallHistory,
 	axisResetReason,
+	profileAckKeepsRows,
 	profileEventResets,
 } from "../../src/spectrum/history.ts"
 import type { RowAxis } from "../../src/spectrum/protocol.ts"
@@ -37,17 +38,46 @@ describe("history reset rule", () => {
 		expect(axisResetReason(axis, { ...axis })).toBeNull()
 	})
 
-	it("resets on sourceId, epoch, profile, binHz, startHz and binCount changes", () => {
+	it("keeps rows across a new epoch on the same frequency axis", () => {
+		expect(axisResetReason(axis, { ...axis, epoch: 4 })).toBeNull()
+		expect(axisResetReason(axis, { ...axis, epoch: 0 })).toBeNull()
+	})
+
+	it("resets on sourceId, profile, binHz, startHz and binCount changes", () => {
 		expect(axisResetReason(axis, { ...axis, sourceId: "pi" })).toBe("source")
-		expect(axisResetReason(axis, { ...axis, epoch: 4 })).toBe("epoch")
-		// Epochs restart with the engine: compared for equality only.
-		expect(axisResetReason(axis, { ...axis, epoch: 0 })).toBe("epoch")
 		expect(axisResetReason(axis, { ...axis, profile: "10:512" })).toBe("axis")
 		expect(axisResetReason(axis, { ...axis, binHz: 2000 })).toBe("axis")
 		expect(axisResetReason(axis, { ...axis, startHz: 445_000_001 })).toBe(
 			"axis",
 		)
 		expect(axisResetReason(axis, { ...axis, binCount: 1024 })).toBe("axis")
+	})
+
+	it("an ack serving the held source and profile again keeps the rows", () => {
+		expect(profileAckKeepsRows(profile({}), axis)).toBe(true)
+		expect(profileAckKeepsRows(profile({ outcome: "nearest" }), axis)).toBe(
+			true,
+		)
+		expect(
+			profileAckKeepsRows(
+				profile({ outcome: "rejected", profile: null }),
+				axis,
+			),
+		).toBe(true)
+		expect(profileAckKeepsRows(profile({}), null)).toBe(false)
+		expect(
+			profileAckKeepsRows(
+				profile({ profile: { key: "10:512", hz: 10, bins: 512 } }),
+				axis,
+			),
+		).toBe(false)
+		expect(profileAckKeepsRows(profile({ sourceId: "pi" }), axis)).toBe(false)
+		expect(profileAckKeepsRows(profile({ selection: "default" }), axis)).toBe(
+			false,
+		)
+		expect(profileAckKeepsRows(profile({ outcome: "removed" }), axis)).toBe(
+			false,
+		)
 	})
 
 	it("every spectrum:profile resets, except a default-selection removal of another source", () => {
@@ -121,9 +151,11 @@ describe("WaterfallHistory", () => {
 		h.commit()
 		h.begin(axis)
 		h.commit()
-		expect(h.begin({ ...axis, epoch: 9 })).toBe("epoch")
-		expect(h.filled).toBe(0)
+		expect(h.begin({ ...axis, epoch: 9 })).toBeNull()
+		expect(h.filled).toBe(2)
 		expect(h.axis?.epoch).toBe(9)
+		expect(h.begin({ ...axis, epoch: 9, startHz: 446_000_000 })).toBe("axis")
+		expect(h.filled).toBe(0)
 	})
 })
 
