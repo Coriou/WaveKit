@@ -83,6 +83,7 @@ export async function openDecoderSettingsService(
 	let orphans = 0
 	let retyped = 0
 	let dropped = 0
+	let shadowed = 0
 	const loaded = store.snapshot()
 	for (const id of Object.keys(loaded.decoders)) {
 		const entry = loaded.decoders[id]
@@ -103,6 +104,7 @@ export async function openDecoderSettingsService(
 			config.options,
 		)
 		dropped += sanitized.dropped
+		shadowed += sanitized.shadowed
 		applied.set(id, { ...entry, options: sanitized.options })
 	}
 	const entries = Object.keys(loaded.decoders).length
@@ -118,8 +120,8 @@ export async function openDecoderSettingsService(
 		)
 	if (dropped > 0)
 		log.warn(
-			{ dropped },
-			"Decoder settings stored options dropped (no longer patchable or valid)",
+			{ dropped, shadowed },
+			"Decoder settings stored options dropped (no longer patchable, invalid, or shadowed by configured frequencies)",
 		)
 
 	let chain: Promise<unknown> = Promise.resolve()

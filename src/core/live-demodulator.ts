@@ -631,7 +631,9 @@ export class LiveDemodulator extends EventEmitter {
 			if (run.noiseFloorDbfs === null) {
 				// WG9 req 5.6: after a retune, a carrier already present must not
 				// become its own floor; the previous floor bounds the seed once.
-				const previous = run.retuneFloorDbfs
+				// Auto squelch only: manual and noise modes seed from power alone.
+				const previous =
+					this.config.squelchMode === "auto" ? run.retuneFloorDbfs : null
 				run.retuneFloorDbfs = null
 				run.noiseFloorDbfs =
 					previous !== null && previous < power ? previous : power
@@ -782,8 +784,13 @@ export class LiveDemodulator extends EventEmitter {
 			// WG9 req 5.6: the reset stays; the floor it drops is remembered so the
 			// first block after it seeds from the lower of that and the new power.
 			// A second retune before any block keeps the first remembered floor.
+			// Auto squelch only (its threshold derives from the floor); manual and
+			// noise modes reset as before.
 			if (this.run) {
-				if (this.run.noiseFloorDbfs !== null)
+				if (
+					this.config.squelchMode === "auto" &&
+					this.run.noiseFloorDbfs !== null
+				)
 					this.run.retuneFloorDbfs = this.run.noiseFloorDbfs
 				this.run.noiseFloorDbfs = null
 			}

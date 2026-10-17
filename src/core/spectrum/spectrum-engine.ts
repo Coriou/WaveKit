@@ -354,12 +354,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
 	private readonly verifiedFrom = new Map<number, number>()
 	/**
-	 * The current epoch's entry of `verifiedFrom` (null: no unverified window, or the window
-	 * closed at the first block the frames label with the epoch's own trust).
+	 * The current epoch's entry of `verifiedFrom` (null: no unverified window). Events whose
+	 * data starts before it are `unverified` for the whole epoch.
 	 */
 	private currentVerifiedFrom: number | null = null
 	/** The epoch `currentVerifiedFrom` belongs to. */
 	private currentVerifiedEpoch: number | null = null
+	/** Status reads `unverified` until the first block at or past the current epoch's settle. */
+	private statusWindowOpen = false
 	/**
 	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
 	 * has not arrived yet, in post order. A thread host can still deliver the
@@ -589,6 +591,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 */
 	currentEpoch(): EngineEpoch {
 		if (
+			this.statusWindowOpen &&
 			this.currentVerifiedFrom !== null &&
 			this.currentVerifiedEpoch === this.current.epoch
 		)
@@ -1147,6 +1150,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				if (ev.settleMode === "marker") this.marker = true
 				this.currentVerifiedFrom = this.verifiedFrom.get(ev.epoch) ?? null
 				this.currentVerifiedEpoch = ev.epoch
+				this.statusWindowOpen = this.currentVerifiedFrom !== null
 				this.verifiedFrom.delete(ev.epoch)
 			} else if (ev.kind === "untracked-retune") {
 				// § 4.7: the pipeline already started an unverified epoch (Task 10b); record it, post nothing.
@@ -1170,30 +1174,49 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		}
 	}
 
-	/** WG9 req 3.4: a block that starts before a non-scanner retune's network settle is `unverified`. */
+	/**
+	 * WG9 req 3.4: an event of the current non-scanner epoch whose data starts before the
+	 * retune's network settle is `unverified`: a block summary by its first sample, a track
+	 * (open, update, close) by its start sample (the pipeline labels the snapshot the same way,
+	 * from `PendingEpoch.verifiedFromSample`), a transient by its sample. Other events and
+	 * other epochs keep the epoch's label.
+	 */
 	private epochFor(ev: PipelineEvent): EngineEpoch {
 		// The raw epoch: non-block events keep the epoch's own label, as before.
 		const epoch = { ...this.current }
 		const from = this.currentVerifiedFrom
-		if (
-			from === null ||
-			this.currentVerifiedEpoch !== epoch.epoch ||
-			ev.kind !== "block-summary" ||
-			ev.summary.epoch !== epoch.epoch ||
-			!this.cfg
-		)
-			return epoch
-		const blockStart =
-			ev.summary.endSample -
-			blockSamplesOf(
-				this.cfg.integrationMs,
-				this.cfg.sampleRateHz,
-				this.cfg.fftSize,
-			)
-		const tuningTrust = frameTrust(epoch.tuningTrust, blockStart, from)
-		// The first block at or past the settle closes the window for status too.
-		if (blockStart >= from) this.currentVerifiedFrom = null
-		return { ...epoch, tuningTrust }
+		if (from === null || this.currentVerifiedEpoch !== epoch.epoch) return epoch
+		const start = this.eventStart(ev, epoch.epoch)
+		if (start === null) return epoch
+		// The first block at or past the settle closes the window for status (frames,
+		// tracks and transients keep their own data-start rule).
+		if (ev.kind === "block-summary" && start >= from)
+			this.statusWindowOpen = false
+		return { ...epoch, tuningTrust: frameTrust(epoch.tuningTrust, start, from) }
+	}
+
+	/** The first sample of a current-epoch event's data, or null (not sample-bound or another epoch). */
+	private eventStart(ev: PipelineEvent, epoch: number): number | null {
+		switch (ev.kind) {
+			case "block-summary":
+				if (ev.summary.epoch !== epoch || !this.cfg) return null
+				return (
+					ev.summary.endSample -
+					blockSamplesOf(
+						this.cfg.integrationMs,
+						this.cfg.sampleRateHz,
+						this.cfg.fftSize,
+					)
+				)
+			case "track-open":
+			case "track-update":
+			case "track-close":
+				return ev.track.epoch === epoch ? ev.track.startSample : null
+			case "transient":
+				return ev.epoch === epoch ? ev.sample : null
+			default:
+				return null
+		}
 	}
 
 	// === Internals: epoch triggers (§ 4.6, § 4.7) ===
@@ -1413,6 +1436,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			tuningTrust: pending.trust,
 			centreChanged: centreHz !== this.current.centreHz,
 			staleMaxMs: timing.staleMaxMs,
+			...(timing.verifiedFromSample !== null
+				? { verifiedFromSample: timing.verifiedFromSample }
+				: {}),
 		})
 	}
 

@@ -22,6 +22,8 @@ describe("deriveLegacyAudioUrl", () => {
 		["192.168.1.20:3000", "http://192.168.1.20:8081/stream"],
 		["0.0.0.0", "http://0.0.0.0:8081/stream"],
 		["[fe80::1]:3000", "http://[fe80::1]:8081/stream"],
+		["[FE80::ABCD]:3000", "http://[fe80::abcd]:8081/stream"],
+		["[::FFFF:10.0.0.1]", "http://[::ffff:10.0.0.1]:8081/stream"],
 		["[::ffff:10.0.0.1]", "http://[::ffff:10.0.0.1]:8081/stream"],
 		["wavekit", "http://wavekit:8081/stream"],
 		["a-b.example.org:65535", "http://a-b.example.org:8081/stream"],
@@ -372,6 +374,37 @@ describe("legacyAudioHost route option", () => {
 			expect(res.body).toBe(url.includes("live") ? LIVE_GOLDEN : DV_GOLDEN)
 			expect(res.headers["cache-control"]).toBeUndefined()
 		}
+	})
+
+	it("option true, mixed ports: only URLs on the digital-voice port derive; one on another port stays unchanged", async () => {
+		const { app, dv } = await build(true)
+		const first = dv.decoders[0]!
+		dv.decoders.push({
+			...first,
+			decoderId: "other",
+			httpUrl: "http://localhost:9999/decoders/other/stream",
+			wavUrl: "http://localhost:8082/decoders/other/stream.wav",
+		})
+		const res = await app.inject({
+			method: "GET",
+			url: "/api/digital-voice/status",
+			headers: { host: "pi.local:3000" },
+		})
+		expect(res.headers["cache-control"]).toBe("no-store")
+		const body = res.json<typeof dv>()
+		expect(body.httpUrl).toBe("http://pi.local:8082/decoders/dsd%20x/stream")
+		expect(body.decoders[0]?.httpUrl).toBe(
+			"http://pi.local:8082/decoders/dsd%20x/stream",
+		)
+		expect(body.decoders[1]?.httpUrl).toBe(
+			"http://localhost:9999/decoders/other/stream",
+		)
+		expect(body.decoders[1]?.wavUrl).toBe(
+			"http://pi.local:8082/decoders/other/stream.wav",
+		)
+		expect(dv.decoders[1]?.wavUrl).toBe(
+			"http://localhost:8082/decoders/other/stream.wav",
+		)
 	})
 
 	it("option true never reads X-Forwarded-Host", async () => {

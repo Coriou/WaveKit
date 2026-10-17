@@ -165,6 +165,8 @@ describe("pair body name and kind (WG9 req 1.5)", () => {
 			{ code, name: "a\u0000b" },
 			{ code, name: "a\u0085b" },
 			{ code, name: "a\u001bb" },
+			{ code, name: "a\ud800b" }, // lone high surrogate
+			{ code, name: "\udc00" }, // lone low surrogate
 			{ code, name: " padded" },
 			{ code, name: "padded " },
 			{ code, name: "" },

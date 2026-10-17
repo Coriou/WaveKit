@@ -11,6 +11,7 @@ import type {
 import type {
 	BlockSummary,
 	EngineState,
+	TrackSnapshot,
 	PendingEpoch,
 	PipelineEvent,
 	PipelineInput,
@@ -155,6 +156,7 @@ describe("SpectrumEngine operator retune settle (WG9 req 3.4)", () => {
 		const pendings = hosts[0]!.pendings()
 		expect(pendings).toEqual([scanner])
 		expect("staleMaxMs" in pendings[0]!).toBe(false)
+		expect("verifiedFromSample" in pendings[0]!).toBe(false)
 		// its blocks keep the epoch label from the first one (no unverified window)
 		const seen: EngineEpoch[] = []
 		engine.on("pipeline", (_ev: PipelineEvent, ep: EngineEpoch) =>
@@ -231,6 +233,70 @@ describe("SpectrumEngine operator retune settle (WG9 req 3.4)", () => {
 		await engine.stop()
 	})
 
+	it("carries the network-settle sample in the pending epoch and labels track and transient events by their start (WG9 R1 M1)", async () => {
+		const { engine, sources, fanout, tuner, hosts } = makeEngine(1000)
+		await engine.start()
+		fanout.write(Buffer.alloc(4000, 7))
+		await settle()
+		tuner.emit("command-sent", "rtl", "set-frequency", 446_300_000, "rest")
+		sources.setCaps("rtl", { centerFreq: 446_300_000 })
+		await settle()
+		const p = hosts[0]!.pendings()[0]!
+		const verifiedFrom = p.commandSample + p.bufferedSamples + FS
+		expect(p.verifiedFromSample).toBe(verifiedFrom)
+		const start = p.commandSample + p.bufferedSamples + p.settleSamples
+		const prior = engine.currentEpoch()
+		const seen: { kind: string; trust: string }[] = []
+		engine.on("pipeline", (ev: PipelineEvent, ep: EngineEpoch) => {
+			if (ev.kind !== "epoch-started")
+				seen.push({ kind: ev.kind, trust: ep.tuningTrust })
+		})
+		const track = (startSample: number, epoch = p.epoch): TrackSnapshot =>
+			({ epoch, startSample, tuningTrust: "commanded" }) as TrackSnapshot
+		hosts[0]!.handlers.events([
+			// the previous epoch's track closes on the retune with its own label
+			{
+				kind: "track-close",
+				track: track(10, prior.epoch),
+				endReason: "retune",
+			},
+			{
+				kind: "epoch-started",
+				epoch: p.epoch,
+				startSample: start,
+				settleMode: "timer",
+			},
+			{ kind: "track-open", track: track(start) },
+			{ kind: "track-update", track: track(verifiedFrom - 1) },
+			{ kind: "track-close", track: track(start), endReason: "quiet" },
+			{
+				kind: "transient",
+				centreHz: 446_300_000,
+				epoch: p.epoch,
+				sample: start,
+			},
+			{ kind: "track-open", track: track(verifiedFrom) },
+			{
+				kind: "transient",
+				centreHz: 446_300_000,
+				epoch: p.epoch,
+				sample: verifiedFrom,
+			},
+			{ kind: "stale-discard", epoch: p.epoch, blocks: 1 },
+		])
+		expect(seen).toEqual([
+			{ kind: "track-close", trust: prior.tuningTrust },
+			{ kind: "track-open", trust: "unverified" },
+			{ kind: "track-update", trust: "unverified" },
+			{ kind: "track-close", trust: "unverified" },
+			{ kind: "transient", trust: "unverified" },
+			{ kind: "track-open", trust: "commanded" },
+			{ kind: "transient", trust: "commanded" },
+			{ kind: "stale-discard", trust: "commanded" },
+		])
+		await engine.stop()
+	})
+
 	it("has no unverified window when the network settle is within the operator settle", async () => {
 		const { engine, sources, fanout, tuner, hosts } = makeEngine(100)
 		await engine.start()
@@ -241,6 +307,7 @@ describe("SpectrumEngine operator retune settle (WG9 req 3.4)", () => {
 		await settle()
 		const p = hosts[0]!.pendings()[0]!
 		expect(p.settleSamples).toBe(Math.round((100 * FS) / 1000))
+		expect("verifiedFromSample" in p).toBe(false)
 		const start = p.commandSample + p.bufferedSamples + p.settleSamples
 		const seen: string[] = []
 		engine.on("pipeline", (ev: PipelineEvent, ep: EngineEpoch) => {
