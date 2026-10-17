@@ -25,6 +25,7 @@ import type {
 } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 import { ToneDetector } from "./audio-tones/tone-detector.js"
+import { tuningTrustOf } from "./tuning-trust.js"
 import type { TonePcmFormat } from "./audio-tones/tone-detector.js"
 import {
 	liveDemodSquelchGates,
@@ -134,27 +135,44 @@ type _LiveDemodulatorIsAnalogSource = AssertExtends<
 	AnalogTransmissionSource
 >
 
+/** The tuner state fields the analog frequency port reads. */
+type TunerFrequencyState = Pick<
+	TunerState,
+	"frequency" | "controlMode" | "unknownFields" | "declaredOnlyFields"
+>
+
 /**
  * Event-time frequency port from the tuner (WG1 req 3.4): the tuned centre
- * plus the demodulator offset. Trust follows the spectrum engine's rule
- * (external control is "relay", otherwise "commanded"). Null when the source
- * has no tuner state or its centre is a placeholder the core never commanded
- * or observed.
+ * plus the demodulator offset. Trust follows the shared fail-closed rule
+ * (`tuningTrustOf`, WG9 req 3.1): `unverified` while frequency or sample rate
+ * is unknown or only declared, else "relay" for external control and
+ * "commanded" for internal. The optional `writtenOnConnection` (the tuner
+ * controller's `tuningWrittenOnConnection`, WG9 req 3.2) demotes a label to
+ * `unverified` when it reports false. Null when the source has no tuner state
+ * or its centre is a placeholder the core never commanded or observed.
  */
 export function tunerFrequencyAt(
-	getState: (
-		sourceId: string,
-	) =>
-		| Pick<TunerState, "frequency" | "controlMode" | "unknownFields">
-		| undefined,
+	getState: (sourceId: string) => TunerFrequencyState | undefined,
+	writtenOnConnection?: (sourceId: string) => boolean,
 ): AnalogTransmissionTrackerOptions["frequencyAt"] {
 	return (sourceId, offsetHz) => {
 		const state = getState(sourceId)
-		if (!state || state.unknownFields?.includes("frequency")) return null
-		return {
-			hz: state.frequency + offsetHz,
-			tuningTrust: state.controlMode === "external" ? "relay" : "commanded",
-		}
+		if (
+			typeof state !== "object" ||
+			state === null ||
+			!Number.isFinite(state.frequency) ||
+			(Array.isArray(state.unknownFields) &&
+				state.unknownFields.includes("frequency"))
+		)
+			return null
+		let tuningTrust = tuningTrustOf(state)
+		if (
+			tuningTrust !== "unverified" &&
+			writtenOnConnection !== undefined &&
+			writtenOnConnection(sourceId) !== true
+		)
+			tuningTrust = "unverified"
+		return { hz: state.frequency + offsetHz, tuningTrust }
 	}
 }
 
