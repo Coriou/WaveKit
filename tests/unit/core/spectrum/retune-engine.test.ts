@@ -204,18 +204,29 @@ describe("SpectrumEngine operator retune settle (WG9 req 3.4)", () => {
 				startSample: start,
 				settleMode: "timer",
 			},
-			...ends.map(e => ({
+		])
+		// tt minor: status agrees with the frames while the unverified window is open
+		expect(engine.currentEpoch().tuningTrust).toBe("unverified")
+		hosts[0]!.handlers.events(
+			ends.slice(0, 2).map(e => ({
 				kind: "block-summary" as const,
 				summary: summary(p.epoch, e),
 			})),
-		])
+		)
+		expect(engine.currentEpoch().tuningTrust).toBe("unverified")
+		hosts[0]!.handlers.events(
+			ends.slice(2).map(e => ({
+				kind: "block-summary" as const,
+				summary: summary(p.epoch, e),
+			})),
+		)
 		expect(seen.map(s => s.trust)).toEqual([
 			"unverified",
 			"unverified",
 			"commanded",
 			"commanded",
 		])
-		// the epoch itself keeps its label (status, scanner consumers)
+		// the first block at or past the network settle closes the window for status too
 		expect(engine.currentEpoch().tuningTrust).toBe("commanded")
 		await engine.stop()
 	})

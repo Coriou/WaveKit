@@ -353,8 +353,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private readonly pendingMeta = new Map<number, EngineEpoch>()
 	/** WG9 req 3.4: per non-scanner epoch, the first sample past the network settle. */
 	private readonly verifiedFrom = new Map<number, number>()
-	/** The current epoch's entry of `verifiedFrom` (null: no unverified window). */
+	/**
+	 * The current epoch's entry of `verifiedFrom` (null: no unverified window, or the window
+	 * closed at the first block the frames label with the epoch's own trust).
+	 */
 	private currentVerifiedFrom: number | null = null
+	/** The epoch `currentVerifiedFrom` belongs to. */
+	private currentVerifiedEpoch: number | null = null
 	/**
 	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
 	 * has not arrived yet, in post order. A thread host can still deliver the
@@ -578,7 +583,16 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (!on && this.suppressed === 0) this.checkSuppressedCentre()
 	}
 
+	/**
+	 * WG9 (tt minor): status agrees with the frames: while a non-scanner retune's unverified
+	 * window is open (no block at or past the network settle yet), the epoch reads `unverified`.
+	 */
 	currentEpoch(): EngineEpoch {
+		if (
+			this.currentVerifiedFrom !== null &&
+			this.currentVerifiedEpoch === this.current.epoch
+		)
+			return { ...this.current, tuningTrust: "unverified" }
 		return { ...this.current }
 	}
 
@@ -1132,6 +1146,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				}
 				if (ev.settleMode === "marker") this.marker = true
 				this.currentVerifiedFrom = this.verifiedFrom.get(ev.epoch) ?? null
+				this.currentVerifiedEpoch = ev.epoch
 				this.verifiedFrom.delete(ev.epoch)
 			} else if (ev.kind === "untracked-retune") {
 				// § 4.7: the pipeline already started an unverified epoch (Task 10b); record it, post nothing.
@@ -1157,10 +1172,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/** WG9 req 3.4: a block that starts before a non-scanner retune's network settle is `unverified`. */
 	private epochFor(ev: PipelineEvent): EngineEpoch {
-		const epoch = this.currentEpoch()
+		// The raw epoch: non-block events keep the epoch's own label, as before.
+		const epoch = { ...this.current }
 		const from = this.currentVerifiedFrom
 		if (
 			from === null ||
+			this.currentVerifiedEpoch !== epoch.epoch ||
 			ev.kind !== "block-summary" ||
 			ev.summary.epoch !== epoch.epoch ||
 			!this.cfg
@@ -1173,10 +1190,10 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.cfg.sampleRateHz,
 				this.cfg.fftSize,
 			)
-		return {
-			...epoch,
-			tuningTrust: frameTrust(epoch.tuningTrust, blockStart, from),
-		}
+		const tuningTrust = frameTrust(epoch.tuningTrust, blockStart, from)
+		// The first block at or past the settle closes the window for status too.
+		if (blockStart >= from) this.currentVerifiedFrom = null
+		return { ...epoch, tuningTrust }
 	}
 
 	// === Internals: epoch triggers (§ 4.6, § 4.7) ===
