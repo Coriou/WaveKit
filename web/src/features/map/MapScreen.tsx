@@ -4,6 +4,8 @@
 // basemap in use. Loaded only when the Map view opens (the Shell lazy-loads it), so MapLibre stays off the main chunk.
 import "./map.css"
 
+import type { ActivitySummary } from "@wavekit/api-types"
+
 import {
 	useCallback,
 	useEffect,
@@ -14,10 +16,14 @@ import {
 	type PointerEvent as ReactPointerEvent,
 } from "react"
 
-import { useServices } from "../../app/context.ts"
+import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/store.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore } from "../../shell/theme.ts"
+import { buildQuery } from "../activity/search.ts"
+import { messageView } from "../messages/card.ts"
+import { MessageCard } from "../messages/MessageCard.tsx"
+import { useActivityRecord, useLatestActivity } from "../messages/record.ts"
 import { isTypingTarget } from "../palette/keys.ts"
 import { focusSetting } from "../settings/registry.ts"
 import { mapFocus, takeMapFocus } from "./focus.ts"
@@ -881,6 +887,15 @@ function OverlaysMenu(props: {
 	)
 }
 
+/**
+ * APRS stations and mesh nodes are what they send: their latest message always shows. An aircraft's or a vessel's
+ * reports repeat the fields above, so only a message with text does (ACARS, an AIS safety message).
+ */
+function showsMessage(it: MapItem, latest: ActivitySummary): boolean {
+	if (it.kind === "aprs" || it.kind === "mesh") return true
+	return messageView(latest).text !== null
+}
+
 function Selection(props: {
 	engine: MapEngine
 	ui: MapUi
@@ -894,7 +909,15 @@ function Selection(props: {
 }) {
 	const { engine, ui } = props
 	const now = useTick(true, 1000)
+	const readOnly = useReadOnly()
 	const it = engine.item(props.id)
+	// the item's latest decoded message, followed live (keyed by the item: its position moves every tick)
+	const latest = useLatestActivity(
+		it ? props.id : null,
+		it ? buildQuery([activityTokenOf(it)], null) : null,
+		"map-selected",
+	)
+	const record = useActivityRecord(latest ? latest.eventId : null)
 	if (!it) return null
 	const info = selectionInfo(it, engine.stationPoint(), now)
 	const icon = LAYER_ICONS[it.layer]
@@ -957,6 +980,18 @@ function Selection(props: {
 					Activity
 				</button>
 			</div>
+			{latest && showsMessage(it, latest) && (
+				<section className="wkm-msg" aria-label="Latest message">
+					<h3 className="wk-label">Latest message</h3>
+					<MessageCard
+						item={latest}
+						record={record}
+						flat
+						noMap
+						readOnly={readOnly}
+					/>
+				</section>
+			)}
 		</aside>
 	)
 }

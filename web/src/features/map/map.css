@@ -374,6 +374,14 @@
 		color: var(--wk-text-3);
 		overflow-wrap: anywhere;
 	}
+	/* the selected item's latest decoded message (the Decode board card, flat) */
+	.wkm-msg {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding-top: 12px;
+		border-top: 1px solid var(--wk-line-solid);
+	}
 	.wkm-actions {
 		display: flex;
 		gap: 6px;
