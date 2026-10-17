@@ -32,6 +32,8 @@ the end lists what core now provides that the canvas does not draw. Default depl
 Re-checked 2026-10-17 (evening) against `origin/main@2c7f0a3`: since `221c0a3` main only added the
 urgent coordination note on the session CSRF token, now applied in the web app (Access, below). Nothing to
 tick: the recording id on events, map tiles from core and batched `aircraft` frames are still open.
+Re-checked 2026-10-17 (night) against `origin/main@a1558f6`: main added the second web note (audio
+credentials, applied) and a scanner persistence backlog bound (heap fix). Nothing to tick.
 
 **Owner to decide first** (core specs on main lock these; the web design differs)
 - Resolved 2026-10-12: activity categories. The decode-envelope spec was amended (req 4.4) to
