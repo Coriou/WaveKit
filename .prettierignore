@@ -3,3 +3,5 @@ docs/web/canvas/
 # UI kit source: mirrored verbatim into the canvas Kit board; ui.json is generated
 packages/brand/tokens/ui.css
 packages/brand/tokens/ui.json
+# Vendored copy of the UI kit for the Pi pages: byte-identical to packages/brand/tokens/ui.css
+packages/sdr-host/ui/brand/ui.css

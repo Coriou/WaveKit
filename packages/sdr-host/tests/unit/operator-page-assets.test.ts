@@ -53,4 +53,25 @@ describe("operator page assets", () => {
 			expect(createHash("sha256").update(body).digest("hex")).toBe(hash)
 		}
 	})
+
+	// The kit is canonical in packages/brand; a stale copy here lets the Pi
+	// pages drift from the canvas and the web app.
+	it("keeps every vendored brand file identical to its packages/brand source", () => {
+		const readme = read("ui/brand/README.md")
+		const sources = [...readme.matchAll(/^\| `([^`]+)` +\| `([^`]+)` +\|$/gm)]
+		expect(sources.map(([, file]) => file)).toContain("ui.css")
+		const recorded = [...readme.matchAll(/^[0-9a-f]{64} {2}(\S+)$/gm)].map(
+			m => m[1],
+		)
+		const brand = path.resolve(PKG, "../brand")
+		for (const [, file = "", source = ""] of sources) {
+			expect(recorded, `${file} has no recorded hash`).toContain(file)
+			const copy = fs.readFileSync(path.join(UI, "brand", file))
+			const original = fs.readFileSync(path.join(brand, source))
+			expect(
+				copy.equals(original),
+				`ui/brand/${file} differs from packages/brand/${source}; copy it again and update README.md`,
+			).toBe(true)
+		}
+	})
 })

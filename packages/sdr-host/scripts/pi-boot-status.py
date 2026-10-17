@@ -34,7 +34,9 @@ ASSETS = {
     '/brand/D-DINCondensed.woff2': ('brand/D-DINCondensed.woff2', 'font/woff2'),
     '/brand/D-DINCondensed-Bold.woff2': ('brand/D-DINCondensed-Bold.woff2', 'font/woff2'),
     '/brand/NotoSans-Regular.woff2': ('brand/NotoSans-Regular.woff2', 'font/woff2'),
-    '/brand/wavekit-wordmark-on-dark.svg': ('brand/wavekit-wordmark-on-dark.svg', 'image/svg+xml'),
+    '/brand/NotoSans-Bold.woff2': ('brand/NotoSans-Bold.woff2', 'font/woff2'),
+    '/brand/ui.css': ('brand/ui.css', 'text/css; charset=utf-8'),
+    '/brand/wavekit-wordmark-white.svg': ('brand/wavekit-wordmark-white.svg', 'image/svg+xml'),
     '/brand/favicon.svg': ('brand/favicon.svg', 'image/svg+xml'),
 }
 # Relayed request headers: content negotiation and revalidation only. Host is
