@@ -476,3 +476,12 @@ core source, reported against a live core)
   rows while sourceId, profile, binHz, startHz and binCount hold, and drops backfill rows it already has. The
   API rule should say the same for display, and how often untracked-retune alarms fire on an unverified tuner
   is worth a look (each one also closes every track).
+
+**Found by the web app, display preferences** (2026-10-17, branch `claude/project-thread-afdtom`; read from
+`packages/api-types/src/operator-data.ts`)
+
+- [ ] `waterfallPalette` is `phosphor | amber | mono`, but the design (DESIGN.md "Waterfall colours") offers
+  Match accent, Amber, Mono and Classic, and "Phosphor" is gone (Match accent with the phosphor accent is the
+  same ramp). The web app keeps Waterfall colours per browser, as DESIGN.md's "On this device" says, and does
+  not read or write the core preference. To sync it, the enum would become `match | amber | mono | classic`.
+  `units` and `timeFormat` are used as they are (protected mode; in open mode each browser keeps its own).
