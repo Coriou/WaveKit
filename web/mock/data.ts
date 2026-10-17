@@ -467,6 +467,21 @@ const CTCSS: Readonly<Record<number, number>> = {
 	145637500: 123.0,
 }
 
+/**
+ * A plan cut to the protocols asked for ("Decode as…"): only their trials run, and an answer for another protocol is
+ * not given (the core drops protocols the signal's class cannot carry, so nothing may be tried at all).
+ */
+export function onlyProtocols(
+	plan: IdentifyPlan,
+	protocols: readonly ScannerProtocol[],
+): IdentifyPlan {
+	if (protocols.length === 0) return plan
+	const trials = plan.trials.filter(t => protocols.includes(t.protocol))
+	if (plan.protocol !== undefined && protocols.includes(plan.protocol))
+		return { ...plan, trials }
+	return { state: "unidentified", class: plan.class, trials }
+}
+
 /** The plan for a target: a known one, a generic one by kind, or unidentified off-signal. */
 export function identifyPlanFor(signal: MockSignal | null): IdentifyPlan {
 	if (!signal) return { state: "unidentified", class: "unknown", trials: [] }

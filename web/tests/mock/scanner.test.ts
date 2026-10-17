@@ -20,7 +20,13 @@ import {
 	heldDiscoveryId,
 	skipPatch,
 } from "../../src/features/tuner/scan-hold.ts"
-import { DISCOVERY_SEEDS, MOCK_SIGNALS } from "../../mock/data.ts"
+import {
+	DISCOVERY_SEEDS,
+	MOCK_SIGNALS,
+	identifyPlanFor,
+	onlyProtocols,
+	signalAt,
+} from "../../mock/data.ts"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
 
@@ -827,5 +833,19 @@ describe("mock scanner WebSocket", () => {
 				),
 		).toBe(false)
 		await post(`/api/scanner/jobs/${job.id}/cancel`)
+	})
+})
+
+describe("mock identify: Decode as…", () => {
+	it("tries only the protocols asked for and answers only for them", () => {
+		const plan = identifyPlanFor(signalAt(161_150_000))
+		const dmr = onlyProtocols(plan, ["dmr"])
+		expect(dmr.trials.every(t => t.protocol === "dmr")).toBe(true)
+		const pocsag = onlyProtocols(plan, ["pocsag"])
+		expect(pocsag.state).toBe("unidentified")
+		expect(pocsag.protocol).toBeUndefined()
+		expect(pocsag.trials.every(t => t.protocol === "pocsag")).toBe(true)
+		expect(onlyProtocols(plan, ["ism"]).trials).toEqual([])
+		expect(onlyProtocols(plan, [])).toBe(plan)
 	})
 })

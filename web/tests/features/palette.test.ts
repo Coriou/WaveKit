@@ -334,6 +334,21 @@ describe("palette: rows", () => {
 		expect(flatten(g)[i]?.title).toBe("AM")
 	})
 
+	it("offers Decode as… with one Identify per protocol", () => {
+		const m = new PaletteModel(ctx())
+		const root = flatten(m.build(null, "decode as"))
+		expect(root[0]).toMatchObject({ id: "scope:decode", scope: "decode" })
+		const rows = m.scopeItems("decode")
+		expect(rows.find(r => r.id === "decode:dmr")?.action).toEqual({
+			kind: "identify",
+			hz: 161_150_000,
+			protocols: ["dmr"],
+		})
+		expect(
+			new PaletteModel(ctx({ readOnly: true })).scopeItems("decode"),
+		).toEqual([])
+	})
+
 	it("reads typed text in a value scope as that command", () => {
 		const g = new PaletteModel(ctx()).build("bw", "20")
 		expect(g[0]?.label).toBe("Set")

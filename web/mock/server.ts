@@ -33,6 +33,7 @@ import type {
 	ScannerIdentifyEventData,
 	ScannerIdentifyResult,
 	ScannerIdentifyTrial,
+	ScannerProtocol,
 	SpectrumProfileEventData,
 	TunerState,
 } from "@wavekit/api-types"
@@ -60,6 +61,7 @@ import {
 	buildDecoders,
 	decoderInBand,
 	identifyPlanFor,
+	onlyProtocols,
 	signalActive,
 	signalAt,
 } from "./data.ts"
@@ -919,12 +921,13 @@ export async function buildMockServer(
 		hz: number,
 		bandwidthHz: number | undefined,
 		timeoutMs: number,
+		protocols: readonly ScannerProtocol[] = [],
 	): ScanJob => {
 		jobCounter += 1
 		const id = `j_${Date.now().toString(36).toUpperCase()}${String(jobCounter).padStart(4, "0")}`
 		const now = new Date().toISOString()
 		const signal = signalAt(hz)
-		const plan = identifyPlanFor(signal)
+		const plan = onlyProtocols(identifyPlanFor(signal), protocols)
 		const bw = bandwidthHz ?? signal?.bwHz ?? 12_500
 		const centre = tuner.frequency
 		const half = (SAMPLE_RATE_HZ * USABLE_FRACTION) / 2
@@ -1040,7 +1043,7 @@ export async function buildMockServer(
 						? { frequencyHz: hz, bandwidthHz }
 						: { frequencyHz: hz },
 				timeoutMs,
-				protocols: [],
+				protocols: [...protocols],
 				exhaustive: false,
 				record: true,
 				targets: [event("waiting-for-signal", trialsAt(-1))],
@@ -1535,6 +1538,7 @@ export async function buildMockServer(
 			sourceId?: string
 			target: { frequencyHz?: number; bandwidthHz?: number; all?: true }
 			timeoutMs?: number
+			protocols?: string[]
 		}
 	}>(
 		"/api/scanner/identify",
@@ -1573,7 +1577,7 @@ export async function buildMockServer(
 			},
 		},
 		async (request, reply) => {
-			const { sourceId, target, timeoutMs } = request.body
+			const { sourceId, target, timeoutMs, protocols } = request.body
 			if (sourceId !== undefined && sourceId !== MOCK_SOURCE_ID)
 				return reply.code(400).send({
 					error: "WaveKitError",
@@ -1605,7 +1609,14 @@ export async function buildMockServer(
 				})
 			return reply
 				.code(201)
-				.send(identify(hz, target.bandwidthHz, timeoutMs ?? 15_000))
+				.send(
+					identify(
+						hz,
+						target.bandwidthHz,
+						timeoutMs ?? 15_000,
+						(protocols ?? []) as ScannerProtocol[],
+					),
+				)
 		},
 	)
 	app.get("/api/activity", async (request, reply) => {

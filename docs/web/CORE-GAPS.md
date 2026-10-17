@@ -393,6 +393,10 @@ re-checked 2026-10-17 on the branch after merging main 1da448e1)
 - [ ] Identify reports decoders whose binary is missing as `no-sync` (`src/core/scanner/identify.ts:461`,
   `job-runner.ts:229`); one job went `candidate` then back to `trying` (`identify.ts:1384`). The first
   is still so on main (every dsd-fme trial "No sync" here); the bounce did not recur in the re-check.
+- [ ] "Decode as…" (web app) is Identify with `protocols: [one]`, but the core keeps only protocols a
+  compatible class lists (`identifyScores`, `src/core/scanner/identify.ts:279`) and never probes AIS, ACARS,
+  VDL2 or LoRa. So the operator cannot force a decoder the classifier rules out: the card says "It does not
+  look like DMR, so nothing was tried". Wanted: a `force` flag that runs the asked protocol's probe anyway.
 - [ ] With passive scanning off, a new spectrum subscriber gets no snapshot or backfill. Still so: with
   `scanner.passive.enabled: false` and nothing else using the source the engine is idle, the ack says
   `backfillFrames: 0` and the first live frame follows about 170 ms later.

@@ -251,10 +251,10 @@ export async function runAction(
 			}
 			case "identify": {
 				const bw = s.data.liveAudio.get().status?.config.bandwidth
-				await s.data.identify.start(
-					action.hz,
-					bw !== undefined && bw > 0 ? { bandwidthHz: bw } : {},
-				)
+				await s.data.identify.start(action.hz, {
+					...(bw !== undefined && bw > 0 ? { bandwidthHz: bw } : {}),
+					...(action.protocols ? { protocols: [...action.protocols] } : {}),
+				})
 				return { text: done }
 			}
 			case "save": {

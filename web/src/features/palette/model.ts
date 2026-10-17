@@ -7,6 +7,7 @@ import type {
 	ResolvedBandPlanView,
 	SavedFrequency,
 	ScanJob,
+	ScannerProtocol,
 } from "@wavekit/api-types"
 
 import { bandAt, channelAt } from "../../data/bandplan-store.ts"
@@ -32,6 +33,7 @@ import {
 	SAVE_GROUPS,
 	savedMeta,
 } from "../tuner/saved.ts"
+import { DECODE_AS } from "../tuned/identify-view.ts"
 import type { GlyphName } from "./glyphs.ts"
 import {
 	parseCommand,
@@ -102,6 +104,7 @@ export type ScopeId =
 	| "scan"
 	| "set"
 	| "keys"
+	| "decode"
 
 export interface ScopeMeta {
 	readonly title: string
@@ -154,6 +157,7 @@ export const SCOPES: Readonly<Record<ScopeId, ScopeMeta>> = {
 	scan: { title: "Scan a band", placeholder: "Choose a band to sweep" },
 	set: { title: "Settings", placeholder: "Find a setting" },
 	keys: { title: "Keyboard shortcuts", placeholder: "Find a shortcut" },
+	decode: { title: "Decode as", placeholder: "Choose a protocol to try" },
 }
 
 /** Scopes whose values are found from the root ("amber" → Accent › …, "graphite" → Dark ground › Graphite). */
@@ -194,6 +198,13 @@ export interface ActivityAction {
 	readonly label: string
 }
 
+export interface IdentifyAction {
+	readonly kind: "identify"
+	readonly hz: number
+	/** Decode as…: only these protocols. */
+	readonly protocols?: readonly ScannerProtocol[]
+}
+
 export type PaletteAction =
 	| TuneAction
 	| { readonly kind: "recall"; readonly saved: SavedFrequency }
@@ -206,7 +217,7 @@ export type PaletteAction =
 	| { readonly kind: "step"; readonly hz: number | null }
 	| { readonly kind: "volume"; readonly value: number }
 	| { readonly kind: "listen"; readonly on: boolean }
-	| { readonly kind: "identify"; readonly hz: number }
+	| IdentifyAction
 	| SaveAction
 	| { readonly kind: "view"; readonly id: ViewId }
 	| { readonly kind: "drawer"; readonly id: DrawerId }
@@ -914,6 +925,10 @@ export class PaletteModel {
 				return this.settingItems()
 			case "keys":
 				return this.rootCommands().filter(r => r.kbd && r.kbd.length > 0)
+			case "decode":
+				return DECODE_AS.map(p => this.decodeAsItem(p)).filter(
+					(x): x is PaletteItem => x !== null,
+				)
 		}
 	}
 
@@ -1041,6 +1056,34 @@ export class PaletteModel {
 			action: { kind: "identify", hz: c.tunedHz },
 			does: `Runs Identify in the tuned card on ${mhz(c.tunedHz)}`,
 			done: `Identifying ${mhz(c.tunedHz)}`,
+		}
+	}
+
+	decodeScopeItem(): PaletteItem | null {
+		const c = this.#c
+		if (c.tunedHz === null || c.readOnly) return null
+		return {
+			id: "scope:decode",
+			title: "Decode as…",
+			sub: `Try one decoder on ${mhz(c.tunedHz)} · never moves the receiver`,
+			glyph: "identify",
+			scope: "decode",
+			keys: ["force decoder", "try protocol", "decode with"],
+		}
+	}
+
+	decodeAsItem(p: (typeof DECODE_AS)[number]): PaletteItem | null {
+		const c = this.#c
+		if (c.tunedHz === null || c.readOnly) return null
+		return {
+			id: `decode:${p.id}`,
+			title: p.label,
+			sub: `With ${p.by} on ${mhz(c.tunedHz)}`,
+			glyph: "identify",
+			keys: [`decode as ${p.label}`],
+			action: { kind: "identify", hz: c.tunedHz, protocols: [p.id] },
+			does: `Tries ${p.label} in the tuned card on ${mhz(c.tunedHz)}`,
+			done: `Trying ${p.label} on ${mhz(c.tunedHz)}`,
 		}
 	}
 
@@ -1377,6 +1420,7 @@ export class PaletteModel {
 				"search",
 			),
 			this.identifyItem(),
+			this.decodeScopeItem(),
 			{
 				id: "scope:scan",
 				title: "Scan a band…",

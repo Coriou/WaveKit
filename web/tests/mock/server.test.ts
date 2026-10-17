@@ -210,6 +210,15 @@ describe("mock server REST", () => {
 		expect([...starts].sort((a, b) => a - b)).toEqual(starts)
 	})
 
+	it("keeps Decode as… to the protocols asked for", async () => {
+		const created = await inject("POST", "/api/scanner/identify", {
+			target: { frequencyHz: 161_150_000 },
+			protocols: ["pocsag"],
+		})
+		expect(created.statusCode).toBe(201)
+		expect(created.json<ScanJob>().identify?.protocols).toEqual(["pocsag"])
+	})
+
 	it("starts identify jobs inside the window only", async () => {
 		const created = await inject("POST", "/api/scanner/identify", {
 			target: { frequencyHz: 161_150_000 },
