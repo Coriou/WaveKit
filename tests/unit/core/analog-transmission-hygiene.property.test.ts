@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	ANALOG_TRANSMISSION_MERGE_GAP_MS,
 	ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS,
 	ANALOG_TRANSMISSION_MIN_MS,
 } from "../../../src/core/analog-transmission.js"
@@ -27,8 +28,8 @@ const stepArb: fc.Arbitrary<Step> = fc.oneof(
 
 describe("analog transmission hygiene properties (WG10)", () => {
 	it("merged output never overlaps, rows never exceed opens, every row qualifies", () => {
-		// Feature: web-gaps-10, Property: activity hygiene merge and filter
-		// Validates: activity hygiene rules 1-3 (merge gap, minimum duration, carrier evidence)
+		// Feature: web-gaps-10, Property 11: Hygiene output is sound
+		// Validates: Requirements 3.7
 		fc.assert(
 			fc.property(
 				fc.array(stepArb, { maxLength: 60 }),
@@ -93,6 +94,67 @@ describe("analog transmission hygiene properties (WG10)", () => {
 					expect(h.rows.length + s.short + s.noCarrier).toBeLessThanOrEqual(
 						opens,
 					)
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+
+	it("a qualifying opening is exactly one row; carrier blocks while closed never count", () => {
+		// Feature: web-gaps-10, Property 12: A qualifying opening is exactly one row
+		// Validates: Requirements 3.7
+		const HANG = 250
+		const segmentArb = fc.record({
+			openMs: fc.integer({ min: 0, max: 150 }).map(n => n * 10),
+			carrier: fc.integer({ min: 0, max: 6 }),
+			closedCarrier: fc.integer({ min: 0, max: 20 }),
+			gapMs: fc.integer({ min: 0, max: 3_000 }),
+		})
+		fc.assert(
+			fc.property(
+				fc.array(segmentArb, { minLength: 1, maxLength: 40 }),
+				fc.boolean(),
+				(segments, carrierKnown) => {
+					const h = hygieneHarness()
+					if (!carrierKnown) h.source.carrier = null
+					// Oracle: group segments whose re-open lies within the merge gap of the audio end.
+					const groups: Array<{
+						start: number
+						audioMs: number
+						best: number
+					}> = []
+					let lastEnd = Number.NEGATIVE_INFINITY
+					for (const seg of segments) {
+						const openAt = h.now()
+						h.source.gate(true)
+						if (h.source.carrier !== null) h.source.carrier += seg.carrier
+						h.advance(seg.openMs)
+						h.source.level()
+						h.source.gate(false)
+						// Quieted blocks counted while the squelch is closed (not this transmission's).
+						if (h.source.carrier !== null) h.source.carrier += seg.closedCarrier
+						const audioMs = Math.max(0, seg.openMs - HANG)
+						const group = groups[groups.length - 1]
+						if (group && openAt - lastEnd <= ANALOG_TRANSMISSION_MERGE_GAP_MS) {
+							group.audioMs += audioMs
+							group.best = Math.max(group.best, seg.carrier)
+						} else groups.push({ start: openAt, audioMs, best: seg.carrier })
+						lastEnd = openAt + audioMs
+						h.advance(seg.gapMs)
+					}
+					h.advance(ANALOG_TRANSMISSION_MERGE_GAP_MS + 1)
+					h.tracker.stop()
+					const expected = groups
+						.filter(
+							g =>
+								g.audioMs >= ANALOG_TRANSMISSION_MIN_MS &&
+								(!carrierKnown ||
+									g.best >= ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS),
+						)
+						.map(g => new Date(g.start).toISOString())
+					expect(h.rows.map(r => r.startedAt)).toEqual(expected)
+					const s = h.tracker.suppressed()
+					expect(h.rows.length + s.short + s.noCarrier).toBe(groups.length)
 				},
 			),
 			{ numRuns: 200 },

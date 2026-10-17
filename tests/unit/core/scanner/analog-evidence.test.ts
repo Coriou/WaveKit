@@ -340,3 +340,36 @@ describe("liveAudioMonitoring (WG10 3.2)", () => {
 		).toBe(true)
 	})
 })
+
+describe("pending opening (WG10 R2 m3)", () => {
+	it("pendingNear copies the tracker's held opening when it lies near the target", () => {
+		const { log: l } = log()
+		expect(l.pendingNear("rtl", HZ, 1000)).toEqual([])
+		let held: AnalogTransmissionEventData | null = event({ state: "open" })
+		l.setPending(() => held)
+		expect(l.pendingNear("rtl", HZ + 900, 1000)).toEqual([
+			expect.objectContaining({ transmissionId: "tx1", endedAtMs: null }),
+		])
+		expect(l.pendingNear("rtl", HZ + 1100, 1000)).toEqual([])
+		expect(l.pendingNear("sdrpp", HZ, 1000)).toEqual([])
+		// Never in the ring: transmissionsNear does not see it.
+		expect(l.transmissionsNear("rtl", HZ, 1000, 0)).toEqual([])
+		held = event()
+		expect(l.pendingNear("rtl", HZ, 1000)).toEqual([])
+		held = null
+		expect(l.pendingNear("rtl", HZ, 1000)).toEqual([])
+	})
+
+	it("a throwing or malformed pending source is no evidence", () => {
+		const { log: l } = log()
+		l.setPending(() => {
+			throw new Error("boom")
+		})
+		expect(l.pendingNear("rtl", HZ, 1000)).toEqual([])
+		l.setPending(
+			() => ({ nope: true }) as unknown as AnalogTransmissionEventData,
+		)
+		expect(l.pendingNear("rtl", HZ, 1000)).toEqual([])
+		expect(l.pendingNear("rtl", Number.NaN, 1000)).toEqual([])
+	})
+})

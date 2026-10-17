@@ -16,16 +16,23 @@
  *     id, start, power and tone state). Otherwise, or at `endMs + gap` (a timer, also
  *     checked on level samples), the transmission is final with `endedAt = endMs`.
  *     Stop, config, retune and max-duration closes are final at once, never merged.
- *  2. Minimum duration: a final transmission with `durationMs < ANALOG_TRANSMISSION_MIN_MS`
- *     is suppressed (`suppressed().short`).
+ *     Tone split (R2): a resumed segment runs its own tone detector next to the
+ *     transmission's; once it confirms a CTCSS tone or DCS code and the transmission's tone
+ *     at the last segment end (snapshot) confirmed a different one, the held part is final
+ *     at its gap end with the snapshot tone and the segment becomes a new transmission
+ *     starting at its own start. An untoned or unconfirmed segment still merges (fades).
+ *  2. Minimum duration: a final transmission whose summed segment audio (each segment's
+ *     audio end − start, gaps excluded) is under ANALOG_TRANSMISSION_MIN_MS is suppressed
+ *     (`suppressed().short`). A max-duration continuation is exempt.
  *  3. Carrier evidence: when the source reports `carrierBlocks()` (nfm/wfm in every squelch
- *     mode), a transmission needs at least ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS blocks
- *     with FM quieting while its segments were open, else it is suppressed
- *     (`suppressed().noCarrier`). A null count (am, ssb, ...) or a failing source skips the rule.
- * The open event is held back until the transmission qualifies: on a level sample once
- * `now - hang - start >= ANALOG_TRANSMISSION_MIN_MS` (so the final duration is at least
- * the minimum) and the carrier rule holds, or at finalisation. An announced transmission
- * is always published closed; a suppressed one emits nothing.
+ *     mode), one segment of the transmission needs at least ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS
+ *     blocks with FM quieting (blocks of different segments never add up), else it is
+ *     suppressed (`suppressed().noCarrier`). A null count at the first open (am, ssb, ...) or
+ *     a failing source skips the rule; a null count later keeps the last known base.
+ * The open event is held back until the transmission qualifies: on a level sample once the
+ * summed audio including `now - hang - segment start` reaches ANALOG_TRANSMISSION_MIN_MS (so
+ * the final audio is at least the minimum) and the carrier rule holds, or at finalisation.
+ * An announced transmission is always published closed; a suppressed one emits nothing.
  */
 import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
@@ -196,13 +203,40 @@ interface OpenTransmission {
 	gapEndMs: number
 	/** The open event was published. */
 	announced: boolean
-	/** Carrier blocks of closed segments. */
-	carrierBlocks: number
-	/** Source count at the open segment's start; null when the rule does not apply. */
+	/** Most carrier blocks of one closed segment (segments never add up). */
+	bestSegmentCarrier: number
+	/** Summed audio of closed segments (audio end − segment start), ms. */
+	audioMs: number
+	/** A max-duration continuation: exempt from the minimum duration. */
+	continuation: boolean
+	/** Tone at the last segment end (null tone when none was confirmed). */
+	segmentEndTone: AnalogTransmissionTone | null
+	/** A resumed segment that may still split off on a different confirmed tone. */
+	split: SegmentSplit | null
+	/** Last known source count (the open segment's base); null when the rule does not apply. */
 	carrierBase: number | null
 	/** The carrier rule applies (the source reported a count at the first open). */
 	carrierRequired: boolean
 	cancelTimer: (() => void) | null
+}
+
+/** The held part of a transmission while a resumed segment may split off (WG10 R2). */
+interface SegmentSplit {
+	/** The transmission's tone at the last segment end: the held part's tone on a split. */
+	heldTone: AnalogTransmissionTone
+	heldGapEndMs: number
+	heldAudioMs: number
+	heldBestSegmentCarrier: number
+	heldPeak: number | null
+	heldPowerSum: number
+	heldPowerCount: number
+	/** This segment only. */
+	detector: ToneDetectorPort
+	audioSeconds: number
+	audioRemainder: number
+	peak: number | null
+	powerSum: number
+	powerCount: number
 }
 
 type AssertExtends<T extends U, U> = T
@@ -389,6 +423,19 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		}
 	}
 
+	/**
+	 * WG10 R2 (identify): the held transmission while its open segment has not yet reached the
+	 * minimum audio (so not announced and still able to qualify), else null. Shape of an open event.
+	 */
+	pending(): AnalogTransmissionEventData | null {
+		const open = this.transmission
+		if (!open || open.announced || !open.segmentOpen || open.continuation)
+			return null
+		if (this.audioSoFar(open, this.clock()) >= this.hygiene.minDurationMs)
+			return null
+		return this.openEvent(open)
+	}
+
 	/** The announced transmission (also while in its merge gap), else null. */
 	current(): AnalogTransmissionEventData | null {
 		const open = this.transmission
@@ -435,13 +482,17 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				return
 			}
 			this.notePower(open, level.channelPowerDbfs)
-			this.announceIfQualified(open, now)
-			if (now - open.startedAtMs >= this.maxDurationMs) {
+			this.splitIfToneChanged(open, now)
+			const current = this.transmission
+			if (current === null) return
+			this.announceIfQualified(current, now)
+			if (now - current.startedAtMs >= this.maxDurationMs) {
 				this.close("max-duration", now)
-				this.reopenIfHeld(now)
+				// m5: the continuation is exempt from the minimum duration (carrier rule applies).
+				this.reopenIfHeld(now, true)
 				return
 			}
-			if (this.frequencyDrifted(open)) {
+			if (this.frequencyDrifted(current)) {
 				this.close("retune", now)
 				this.reopenIfHeld(now)
 			}
@@ -467,6 +518,25 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.toneErrorCount += 1
 			this.toneBroken = true
 		}
+		const split = open.split
+		if (split === null || this.toneBroken) return
+		const counter = {
+			audioSeconds: split.audioSeconds,
+			audioRemainder: split.audioRemainder,
+		}
+		this.noteAudio(counter, chunk, format)
+		split.audioSeconds = counter.audioSeconds
+		split.audioRemainder = counter.audioRemainder
+		try {
+			split.detector.push(chunk, format)
+		} catch {
+			// A failing segment detector only loses the split; the transmission's tone stands.
+			open.split = null
+			return
+		}
+		this.guard(() => {
+			this.splitIfToneChanged(open, this.clock())
+		})
 	}
 
 	private readonly handleStopped = (): void => {
@@ -532,7 +602,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		return "squelch"
 	}
 
-	private openTransmission(now: number): void {
+	private openTransmission(now: number, continuation = false): void {
 		let status: LiveDemodStatus
 		try {
 			status = this.source.getStatus()
@@ -574,7 +644,11 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			segmentStartMs: now,
 			gapEndMs: now,
 			announced: false,
-			carrierBlocks: 0,
+			bestSegmentCarrier: 0,
+			audioMs: 0,
+			continuation,
+			segmentEndTone: null,
+			split: null,
 			carrierBase: null,
 			carrierRequired: false,
 			cancelTimer: null,
@@ -606,13 +680,23 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 				reason === "squelch"
 					? Math.max(open.segmentStartMs, closeAt - this.hangMs())
 					: closeAt
+			open.audioMs += Math.max(0, endedMs - open.segmentStartMs)
 		} else {
 			reason = "squelch"
 			endedMs = open.gapEndMs
 		}
-		const tone = this.finishTone(open)
+		this.finalise(open, reason, endedMs, this.finishTone(open))
+	}
+
+	/** Publishes a final transmission when announced or qualified, else counts the suppression. */
+	private finalise(
+		open: OpenTransmission,
+		reason: AnalogTransmissionCloseReason,
+		endedMs: number,
+		tone: AnalogTransmissionTone,
+	): void {
 		const event = this.closedEvent(open, reason, endedMs, tone)
-		const rejected = open.announced ? null : this.rejection(open, endedMs)
+		const rejected = open.announced ? null : this.rejection(open)
 		if (rejected !== null) {
 			this.suppressedCounts[rejected] += 1
 			try {
@@ -633,7 +717,10 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private endSegment(open: OpenTransmission, closeAt: number): void {
 		this.collectCarrier(open)
 		open.segmentOpen = false
+		open.split = null
 		open.gapEndMs = Math.max(open.segmentStartMs, closeAt - this.hangMs())
+		open.audioMs += open.gapEndMs - open.segmentStartMs
+		open.segmentEndTone = this.snapshotTone(open)
 		this.detachPcm()
 		if (this.hygiene.mergeGapMs <= 0) {
 			this.close("squelch", closeAt)
@@ -683,9 +770,81 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.cancelGapTimer(open)
 		open.segmentOpen = true
 		open.segmentStartMs = now
-		open.carrierBase = open.carrierRequired ? this.readCarrierBlocks() : null
+		// m4: a null count on resume (pipeline restart) keeps the last known base.
+		if (open.carrierRequired)
+			open.carrierBase = this.readCarrierBlocks() ?? open.carrierBase
+		open.split = null
+		const heldTone = open.segmentEndTone
+		if (heldTone !== null && toneKeys(heldTone).length > 0) {
+			const detector = this.makeSegmentDetector()
+			if (detector !== null)
+				open.split = {
+					heldTone,
+					heldGapEndMs: open.gapEndMs,
+					heldAudioMs: open.audioMs,
+					heldBestSegmentCarrier: open.bestSegmentCarrier,
+					heldPeak: open.peak,
+					heldPowerSum: open.powerSum,
+					heldPowerCount: open.powerCount,
+					detector,
+					audioSeconds: 0,
+					audioRemainder: 0,
+					peak: null,
+					powerSum: 0,
+					powerCount: 0,
+				}
+		}
 		this.attachPcm()
 		this.announceIfQualified(open, now)
+	}
+
+	/**
+	 * WG10 R2 (M2): once the resumed segment confirms a CTCSS tone or DCS code the held part
+	 * did not have (and the held part confirmed one), the held part is final at its gap end
+	 * with its snapshot tone and the segment continues as a new transmission from its start.
+	 */
+	private splitIfToneChanged(open: OpenTransmission, now: number): void {
+		const split = open.split
+		if (split === null || this.transmission !== open || !open.segmentOpen)
+			return
+		const segmentTone = gatedTone(split.detector, split.audioSeconds)
+		if (segmentTone === null || !tonesDiffer(split.heldTone, segmentTone))
+			return
+		const held: OpenTransmission = {
+			...open,
+			segmentOpen: false,
+			gapEndMs: split.heldGapEndMs,
+			audioMs: split.heldAudioMs,
+			bestSegmentCarrier: split.heldBestSegmentCarrier,
+			peak: split.heldPeak,
+			powerSum: split.heldPowerSum,
+			powerCount: split.heldPowerCount,
+			split: null,
+			cancelTimer: null,
+		}
+		const next: OpenTransmission = {
+			...open,
+			transmissionId: this.newId(),
+			startedAtMs: open.segmentStartMs,
+			startedAt: new Date(open.segmentStartMs).toISOString(),
+			peak: split.peak,
+			powerSum: split.powerSum,
+			powerCount: split.powerCount,
+			detector: split.detector,
+			audioSeconds: split.audioSeconds,
+			audioRemainder: split.audioRemainder,
+			gapEndMs: open.segmentStartMs,
+			announced: false,
+			bestSegmentCarrier: 0,
+			audioMs: 0,
+			continuation: false,
+			segmentEndTone: null,
+			split: null,
+			cancelTimer: null,
+		}
+		this.transmission = next
+		this.finalise(held, "squelch", split.heldGapEndMs, split.heldTone)
+		if (this.transmission === next) this.announceIfQualified(next, now)
 	}
 
 	private cancelGapTimer(open: OpenTransmission): void {
@@ -699,23 +858,37 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		}
 	}
 
-	/** Adds the open segment's carrier blocks (a failing or reset count adds none). */
+	/**
+	 * Ends the open segment's carrier count: keeps the best single segment (a failing or reset
+	 * count adds none; a null count keeps the last known base).
+	 */
 	private collectCarrier(open: OpenTransmission): void {
 		if (!open.carrierRequired || open.carrierBase === null) return
 		const nowCount = this.readCarrierBlocks()
-		if (nowCount !== null && nowCount >= open.carrierBase)
-			open.carrierBlocks += nowCount - open.carrierBase
+		if (nowCount === null) return
+		if (nowCount >= open.carrierBase)
+			open.bestSegmentCarrier = Math.max(
+				open.bestSegmentCarrier,
+				nowCount - open.carrierBase,
+			)
 		open.carrierBase = nowCount
 	}
 
+	/** Best single-segment carrier count so far, the open segment included. */
 	private carrierSoFar(open: OpenTransmission): number {
-		let total = open.carrierBlocks
+		let best = open.bestSegmentCarrier
 		if (open.segmentOpen && open.carrierBase !== null) {
 			const nowCount = this.readCarrierBlocks()
 			if (nowCount !== null && nowCount >= open.carrierBase)
-				total += nowCount - open.carrierBase
+				best = Math.max(best, nowCount - open.carrierBase)
 		}
-		return total
+		return best
+	}
+
+	/** Summed audio so far: closed segments plus the open one up to `now - hang`. */
+	private audioSoFar(open: OpenTransmission, now: number): number {
+		if (!open.segmentOpen) return open.audioMs
+		return open.audioMs + Math.max(0, now - this.hangMs() - open.segmentStartMs)
 	}
 
 	private readCarrierBlocks(): number | null {
@@ -730,26 +903,27 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	/** Why a final transmission is not published, or null when it qualifies. */
 	private rejection(
 		open: OpenTransmission,
-		endedMs: number,
 	): keyof AnalogTransmissionSuppressed | null {
-		if (endedMs - open.startedAtMs < this.hygiene.minDurationMs) return "short"
+		if (!open.continuation && open.audioMs < this.hygiene.minDurationMs)
+			return "short"
 		if (
 			open.carrierRequired &&
-			open.carrierBlocks < this.hygiene.minCarrierBlocks
+			open.bestSegmentCarrier < this.hygiene.minCarrierBlocks
 		)
 			return "noCarrier"
 		return null
 	}
 
 	/**
-	 * Publishes the open event once the final duration is bound to reach the minimum (the
-	 * audio end is at least `now - hang` while a segment is open) and the carrier rule holds.
+	 * Publishes the open event once the summed audio is bound to reach the minimum (the
+	 * open segment's audio end is at least `now - hang`) and the carrier rule holds.
 	 */
 	private announceIfQualified(open: OpenTransmission, now: number): void {
 		if (open.announced || !open.segmentOpen) return
 		if (
+			!open.continuation &&
 			this.hygiene.minDurationMs > 0 &&
-			now - this.hangMs() - open.startedAtMs < this.hygiene.minDurationMs
+			this.audioSoFar(open, now) < this.hygiene.minDurationMs
 		)
 			return
 		if (
@@ -761,17 +935,16 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.publish(this.openEvent(open))
 	}
 
-	private reopenIfHeld(now: number): void {
+	private reopenIfHeld(now: number, continuation = false): void {
 		if (this.transmission || !this.attached) return
 		if (!this.squelchIsOpen() || !this.canOpen()) return
-		this.openTransmission(now)
+		this.openTransmission(now, continuation)
 	}
 
 	private notePower(open: OpenTransmission, power: number | null): void {
 		if (typeof power !== "number" || !Number.isFinite(power)) return
-		open.powerCount += 1
-		open.powerSum += power
-		if (open.peak === null || power > open.peak) open.peak = power
+		addPower(open, power)
+		if (open.split !== null) addPower(open.split, power)
 	}
 
 	private frequencyDrifted(open: OpenTransmission): boolean {
@@ -914,7 +1087,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 
 	private noteAudio(
-		open: OpenTransmission,
+		open: { audioSeconds: number; audioRemainder: number },
 		chunk: Buffer,
 		format: TonePcmFormat,
 	): void {
@@ -929,16 +1102,25 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private finishTone(open: OpenTransmission): AnalogTransmissionTone {
 		if (this.toneBroken) return { ctcssHz: null, dtmf: null, dcs: null }
 		try {
-			const tone = open.detector.result()
-			const dcs =
-				open.audioSeconds < DCS_MIN_AUDIO_SECONDS ? null : copyDcs(tone.dcs)
-			if (open.audioSeconds < 0.75) {
-				return { ctcssHz: null, dtmf: tone.dtmf, dcs }
-			}
-			return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf, dcs }
+			return gateTone(open.detector.result(), open.audioSeconds)
 		} catch {
 			this.toneErrorCount += 1
 			return { ctcssHz: null, dtmf: null, dcs: null }
+		}
+	}
+
+	/** The transmission's tone at a segment end (split reference); a failure is no tone. */
+	private snapshotTone(open: OpenTransmission): AnalogTransmissionTone | null {
+		if (this.toneBroken) return null
+		return gatedTone(open.detector, open.audioSeconds)
+	}
+
+	/** A fresh detector for a resumed segment; a failing factory means no split. */
+	private makeSegmentDetector(): ToneDetectorPort | null {
+		try {
+			return this.createToneDetector()
+		} catch {
+			return null
 		}
 	}
 
@@ -964,6 +1146,59 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			// Drop the update. State was left consistent by close-before-emit.
 		}
 	}
+}
+
+/** CTCSS needs 0.75 s and DCS DCS_MIN_AUDIO_SECONDS of audio; a malformed DCS is none. */
+function gateTone(
+	tone: AnalogTransmissionTone,
+	audioSeconds: number,
+): AnalogTransmissionTone {
+	const dcs = audioSeconds < DCS_MIN_AUDIO_SECONDS ? null : copyDcs(tone.dcs)
+	if (audioSeconds < 0.75) return { ctcssHz: null, dtmf: tone.dtmf, dcs }
+	return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf, dcs }
+}
+
+/** Gated detector result, or null when the detector throws. */
+function gatedTone(
+	detector: ToneDetectorPort,
+	audioSeconds: number,
+): AnalogTransmissionTone | null {
+	try {
+		return gateTone(detector.result(), audioSeconds)
+	} catch {
+		return null
+	}
+}
+
+/** Confirmed CTCSS / DCS identities of a tone ("c:88.5", "d:023:normal"). */
+function toneKeys(tone: AnalogTransmissionTone): string[] {
+	const keys: string[] = []
+	if (typeof tone.ctcssHz === "number" && Number.isFinite(tone.ctcssHz))
+		keys.push(`c:${tone.ctcssHz}`)
+	const dcs = tone.dcs
+	if (dcs !== null && dcs !== undefined)
+		keys.push(`d:${dcs.code}:${dcs.polarity}`)
+	return keys
+}
+
+/** Both sides confirmed a tone and none is shared: a different speaker (M2). */
+function tonesDiffer(
+	held: AnalogTransmissionTone,
+	segment: AnalogTransmissionTone,
+): boolean {
+	const a = toneKeys(held)
+	const b = toneKeys(segment)
+	if (a.length === 0 || b.length === 0) return false
+	return !b.some(k => a.includes(k))
+}
+
+function addPower(
+	into: { peak: number | null; powerSum: number; powerCount: number },
+	power: number,
+): void {
+	into.powerCount += 1
+	into.powerSum += power
+	if (into.peak === null || power > into.peak) into.peak = power
 }
 
 /** A finite non-negative override, else the default. */

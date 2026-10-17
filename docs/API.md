@@ -3222,9 +3222,13 @@ is supplementary and only appears in `result.analog`). Identify reads the same p
 transmissions as WebSocket and Activity, so the activity hygiene rules below
 ([live-audio:transmission](#live-audiotransmission)) apply: a flapping or carrier-less squelch
 opening is never evidence, and a closed event arrives up to the merge gap (1.5 s) after the audio
-ended, so a transmission that ends just before a target's deadline can be seen still open there
-(`timeout`). Tone detection runs over every merged segment, so a merged transmission gives the
-detector more audio, not less. A matching transmission with a CTCSS tone or a DCS
+ended. A trial that sees a matching open transmission at the target's deadline, or an opening
+the tracker still holds back (under the 500 ms minimum, started by the deadline), therefore
+waits up to 1 750 ms past the deadline (`IDENTIFY_ANALOG_SETTLE_MS`: merge gap plus the 250 ms
+hang; fixed from the deadline): a closed match that ended by the deadline in that time decodes,
+otherwise the trial ends `timeout` (never `no-sync`). Tone detection runs over every merged
+segment, so a merged transmission gives the detector more audio, not less; a different speaker
+with a different confirmed tone is a separate transmission. A matching transmission with a CTCSS tone or a DCS
 code on a `commanded` or `relay` frequency makes the target `identified` with
 protocol `analog-fm` (or `analog-am`), confidence `classified` and
 `result.metadata.ctcssHz` when a CTCSS tone was heard; without a tone, or on an
@@ -4056,7 +4060,7 @@ The store holds three kinds:
   when WaveKit knows them; see [Provenance](#provenance).
 - `analog-transmission`: one record per closed
   [`live-audio:transmission`](#live-audiotransmission) of the live
-  demodulator (WG10: merged, at least 500 ms, with carrier evidence on nfm/wfm; see
+  demodulator (WG10: merged, at least 500 ms of audio, carrier evidence on nfm/wfm; see
   activity hygiene there). `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
   and `payload` is `AnalogTransmissionPayload` (the closed event without
   `state`). The summary has `category: "voice"`, `protocol: "analog"`, the
@@ -5376,18 +5380,31 @@ alike); live audio gating and playback are unchanged:
    or 1.5 s after `endMs`, the transmission is final with `endedAt = endMs`. `stopped`,
    `config`, `retune` and `max-duration` closes are final at once; a stop or config
    change during the gap closes at `endMs` with `closeReason: "squelch"`.
-2. Minimum duration: a final transmission with `durationMs < 500`
-   (`ANALOG_TRANSMISSION_MIN_MS`) is not published.
-3. Carrier evidence (`nfm`, `wfm`): a transmission needs at least 3 measured 10 ms
-   blocks with FM quieting (`ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS`) while its segments
-   were open: the auto-squelch carrier observer, the noise gate's quieting at its own
-   threshold in noise mode, or in manual mode a passive quieting meter at the default
-   6 dB that never gates. Without it the transmission is not published. Other
-   modulations skip this rule.
+   Different speakers (R2): a resumed segment runs its own tone detector. Once it
+   confirms a CTCSS tone or DCS code (the usual 0.75 s of audio) and the transmission
+   had confirmed a different one by its last segment end (no tone in common), the held
+   transmission is final at its `endMs` with that earlier tone and the segment becomes a
+   new transmission (new id) starting at the segment's own start. An untoned or not yet
+   confirmed segment, or the same tone, still merges (fades).
+2. Minimum duration: a transmission whose summed segment audio (each segment's
+   `endMs − start`, gaps not counted) is under 500 ms (`ANALOG_TRANSMISSION_MIN_MS`) is
+   not published, so short blips that merge do not qualify through the gaps between
+   them. `durationMs` is still the span from the first start to the last `endMs`. The
+   continuation opened after a `max-duration` close is exempt (rule 3 still applies).
+3. Carrier evidence (`nfm`, `wfm`): one segment of the transmission needs at least 3
+   measured 10 ms blocks with FM quieting (`ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS`);
+   blocks of different segments never add up, and blocks while the squelch is closed
+   never count. The evidence is the auto-squelch carrier observer, the noise gate's
+   quieting at its own threshold in noise mode, or in manual mode a passive quieting
+   meter at the default 6 dB that never gates (measured cost per 10 ms block: about
+   2 µs at the 25 kHz nfm channel rate, 8 µs at the 293 kHz wfm one, under 0.1 % of
+   one core). Without it the transmission is not published. Other modulations skip
+   this rule. A pipeline that reports no count when a segment resumes (restart) keeps
+   the last known count as that segment's base.
 
 The open event is held back until the transmission qualifies: during the transmission
-once `now − 250 ms − start ≥ 500 ms` and the carrier rule holds (so the final duration
-is at least the minimum), else at finalisation, directly followed by the closed event.
+once the summed audio (the open segment counted up to `now − 250 ms`) reaches 500 ms
+and the carrier rule holds, else at finalisation, directly followed by the closed event.
 A suppressed transmission sends nothing. Suppressions are counted
 (`suppressed(): { short, noCarrier }` on the tracker) and logged at debug. The event
 shape is unchanged.

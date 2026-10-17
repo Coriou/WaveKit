@@ -63,5 +63,10 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
       `decodersUnavailable`, warning fields, operator rate write, live audio continuity; ROADMAP;
       SCANNER; coordination note for the CLI and the web session) and the CLI grep.
   - _Requirements: 5.2_
+- [x] MA.R2 Activity hygiene review fixes: summed segment audio, single-segment carrier, tone
+      split between speakers, carrier base on resume, max-duration continuation, identify settle
+      wait and pending opening; meter micro-benchmark.
+  - _Requirements: 3.2, 3.7_
+  - **Property 11: Hygiene output is sound**, **Property 12: A qualifying opening is exactly one row**
 - [ ] MA.3 Checkpoint: full root suite, typecheck, lint; spec status and ticks.
   - _Requirements: 6.1, 6.2_

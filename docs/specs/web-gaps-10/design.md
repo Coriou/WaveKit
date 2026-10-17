@@ -82,6 +82,8 @@ probe pool decoder-unavailable → memo (type, 300 s) → identify planning + de
 | SM silence fill      | per 20 ms while a restart is filling    | one zero buffer of 20 ms reused per format, written to each client; ≤ 250 writes per restart                | counted writes, injected clock                  |
 | SM front swap        | per offset change                       | one extra front process for ≤ swap time; branch bytes written twice meanwhile                               | stand-in harness: gap p50/p90/max, load average |
 | SM quieting observer | per 10 ms block, auto nfm/wfm only      | ≤ 2 % of one core at a 25 kHz channel rate; zero in other modes                                             | micro-benchmark of the block step, reported     |
+| MA hygiene meter     | per 10 ms block, manual nfm/wfm only    | ≤ 2 % of one core at the nfm and wfm channel rates (R2: 1.9 µs at 25 kHz, 8.3 µs at 293 kHz per block)      | `scripts/bench/carrier-meter.ts`, load avg 5.0  |
+| MA hygiene tracker   | per squelch edge, PCM chunk, level      | O(1); a second tone detector only in a resumed segment after a toned one                                    | by construction                                 |
 | SM alarm extras      | per alarm candidate block only          | O(features × segments), as the alarm                                                                        | by construction                                 |
 | SM rate write        | first operator frequency per connection | one extra rtl_tcp command                                                                                   | counted commands in tests                       |
 | ID evidence log      | per transmission event                  | O(1) append, ring of 32                                                                                     | by construction                                 |
@@ -222,7 +224,23 @@ verdict stays one function: digital decode first, then analog-with-tone-and-trus
 supplementary (`result.analog`). `planAnalogTrials` plans both analog protocols when either is
 scored and the request has no protocol list; with a list it plans only the analog protocols
 named. The evidence log reads the tracker's published transmissions, so the activity hygiene
-rules (merge within 1.5 s, minimum 500 ms, carrier evidence on nfm/wfm) apply to identify too.
+rules (requirement 3.7) apply to identify too.
+
+**Activity hygiene (Main, requirement 3.7; R2 as landed)** (`analog-transmission.ts`). One held
+transmission of squelch segments. A segment's audio is `max(start, close − hang) − start`; the
+transmission's audio is the sum (gaps excluded), its `durationMs` the span. Carrier evidence is the
+source's monotonic `carrierBlocks()` count taken per segment (base at the segment open, a null
+count on resume keeps the last base); the rule takes the best single segment, not a share or a sum.
+At each segment end the tracker snapshots the transmission's gated tone; a resumed segment after a
+toned snapshot gets a second detector and its own power and audio counters, and when that detector
+confirms a CTCSS/DCS identity disjoint from the snapshot's, the held part is finalised at its gap
+end (snapshot tone, held counters) and the segment is promoted to a new transmission (new id, its
+own start, the second detector). `pending()` exposes an unannounced open segment still under the
+minimum audio; Main binds it into the evidence log (`setPending`, `pendingNear`, an optional port
+method) so identify's `analogStep` treats it like an open match at the deadline. Identify keeps a
+live-audio trial with an open or pending match running until `deadline + IDENTIFY_ANALOG_SETTLE_MS`
+(other ambient trials still end at the deadline), then `timeout`. Manual nfm/wfm keeps the passive
+meter for both modulations: measured well inside the budget (table above), so wfm is not restricted.
 
 **Unavailable memo** (`probe-pool.ts`): `unavailableTypes()` (types seen `decoder-unavailable`
 within 300 s, cleared by a successful start of the type), checked by identify at planning;
@@ -288,3 +306,10 @@ has no caps, via an exact Main diff; a test shows the `connected` retry builds i
 10. **Memo is honest.** For random probe event sequences, a trial is `decoder-unavailable` only
     for a type observed unavailable within the memo window (or in this job) and never after a
     successful start of that type. _Validates 3.5._
+11. **Hygiene output is sound.** For random squelch, carrier, level and clock sequences, published
+    rows never overlap, never exceed the openings, each opens once then closes once on WS, and
+    every row lasts at least the minimum with carrier evidence on nfm/wfm. _Validates 3.7._
+12. **A qualifying opening is exactly one row.** For random segment sequences (open time, quieted
+    blocks while open and while closed, gaps inside and past the merge gap), the published rows are
+    exactly the oracle's merge groups with summed audio ≥ 500 ms and (nfm/wfm) one segment with ≥ 3
+    quieted blocks, in order and by start; every other group is counted suppressed. _Validates 3.7._

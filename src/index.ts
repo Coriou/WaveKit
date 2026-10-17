@@ -412,12 +412,17 @@ export function identifyAnalogEvidence(deps: {
  * (identify answers `no-sync`/`no-live-audio`, never a false positive).
  */
 export function feedAnalogEvidence(
-	tracker: Pick<AnalogTransmissionTracker, "on">,
-	log: Pick<AnalogEvidenceLog, "record">,
+	tracker: Pick<AnalogTransmissionTracker, "on"> &
+		Partial<Pick<AnalogTransmissionTracker, "pending">>,
+	log: Pick<AnalogEvidenceLog, "record"> &
+		Partial<Pick<AnalogEvidenceLog, "setPending">>,
 ): void {
 	tracker.on("transmission", event => {
 		log.record(event)
 	})
+	// WG10 R2: identify counts a not yet published opening at its deadline as `timeout`.
+	if (typeof tracker.pending === "function")
+		log.setPending?.(() => tracker.pending?.() ?? null)
 }
 
 /**

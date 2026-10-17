@@ -30,11 +30,20 @@ export const ANALOG_EVIDENCE_MAX_ID_LENGTH = 128
 export interface AnalogEvidenceLog extends IdentifyAnalogEvidence {
 	/** Records one tracker event; a malformed event is dropped. Never throws. */
 	record(event: AnalogTransmissionEventData): void
+	/** WG10 R2: binds the tracker's pending opening (late: the tracker is built after the log). */
+	setPending(pending: (() => AnalogTransmissionEventData | null) | null): void
+	pendingNear(
+		sourceId: string,
+		hz: number,
+		toleranceHz: number,
+	): readonly AnalogEvidenceTransmission[]
 }
 
 export interface AnalogEvidenceLogOptions {
 	now?: () => number
 	monitoring: (sourceId: string, hz: number, toleranceHz: number) => boolean
+	/** WG10 R2: the tracker's held, not yet published opening (`AnalogTransmissionTracker.pending`). */
+	pending?: () => AnalogTransmissionEventData | null
 	logger?: Logger
 }
 
@@ -142,7 +151,34 @@ export function createAnalogEvidenceLog(
 	/** Insertion order = age: the first entry is the oldest. */
 	const ring = new Map<string, AnalogEvidenceTransmission>()
 	let lastWarnAt = Number.NEGATIVE_INFINITY
+	let pending = options.pending ?? null
 	return {
+		setPending(next) {
+			pending = next
+		},
+		pendingNear(sourceId, hz, toleranceHz) {
+			try {
+				if (
+					pending === null ||
+					!Number.isFinite(hz) ||
+					!Number.isFinite(toleranceHz) ||
+					toleranceHz < 0
+				)
+					return []
+				const t = evidenceOf(pending())
+				if (
+					t === null ||
+					t.endedAtMs !== null ||
+					t.sourceId !== sourceId ||
+					!(Math.abs(t.hz - hz) <= toleranceHz)
+				)
+					return []
+				return [t]
+			} catch {
+				// A failing tracker is no pending evidence.
+				return []
+			}
+		},
 		record(event: AnalogTransmissionEventData): void {
 			try {
 				const t = evidenceOf(event)

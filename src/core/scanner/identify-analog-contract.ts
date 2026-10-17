@@ -38,4 +38,14 @@ export interface IdentifyAnalogEvidence {
 	): readonly AnalogEvidenceTransmission[]
 	/** True when live audio is running on `sourceId` now with its channel (known frequency) within `toleranceHz` of `hz`. */
 	monitoring(sourceId: string, hz: number, toleranceHz: number): boolean
+	/**
+	 * WG10 R2 (optional): the tracker's held opening that is not yet published because it has not
+	 * reached the minimum audio (activity hygiene), as an open transmission, when it lies on
+	 * `sourceId` within `toleranceHz` of `hz`; else empty. Absent: no pending evidence.
+	 */
+	pendingNear?(
+		sourceId: string,
+		hz: number,
+		toleranceHz: number,
+	): readonly AnalogEvidenceTransmission[]
 }
