@@ -25,6 +25,12 @@ import {
 	cardPlace as defaultCardPlace,
 	type CardPlaceStore,
 } from "./card-place.ts"
+import { DrawerGrip } from "./DrawerGrip.tsx"
+import {
+	drawerWidths as defaultDrawerWidths,
+	wantedDrawerW,
+	type DrawerWidthStore,
+} from "./drawer-width.ts"
 import { Drawer } from "../ui/Drawer.tsx"
 import { Icon } from "../ui/Icon.tsx"
 import type { DrawerContentProps } from "./drawers/types.ts"
@@ -81,6 +87,8 @@ export interface ShellProps {
 	store?: ShellStore
 	/** Where the tuned card sits (wanted anchor, remembered per browser, and the live drag). */
 	cardStore?: CardPlaceStore
+	/** Each drawer's wanted width (resized from its left edge, remembered per browser). */
+	drawerWidthStore?: DrawerWidthStore
 }
 
 const keyOf = (c: Closed): string =>
@@ -115,8 +123,11 @@ export function Shell({
 	card,
 	store = shellStore,
 	cardStore = defaultCardPlace,
+	drawerWidthStore = defaultDrawerWidths,
 }: ShellProps) {
 	const state = useShell(store)
+	const widths = useStore(drawerWidthStore)
+	const [resizing, setResizing] = useState(false)
 	// the shell re-renders when the wanted anchor changes or a drag starts or ends, never on pointer moves
 	const cardAt = useStore(cardStore, s => s.at)
 	const dragging = useStore(cardStore, s => s.drag !== null)
@@ -205,7 +216,11 @@ export function Shell({
 		geo,
 		state.drawer,
 		pane ? { want: paneWanted, pushIn: pane.pushIn } : null,
-		{ at: cardAt, rxOpen: state.panel === "receiver" },
+		{
+			at: cardAt,
+			rxOpen: state.panel === "receiver",
+			...(state.drawer ? { drawerW: wantedDrawerW(widths, state.drawer) } : {}),
+		},
 	)
 	// the card's handle reads this frame on pointer and key events
 	useLayoutEffect(() => {
@@ -368,7 +383,12 @@ export function Shell({
 	const PaneContent = pane?.Content ?? null
 	const d = L.drawer
 	return (
-		<div ref={root} className="wk-shell" data-view={state.view}>
+		<div
+			ref={root}
+			className="wk-shell"
+			data-view={state.view}
+			data-resizing={resizing || undefined}
+		>
 			<div className="wk-shell-plot">
 				{plot ?? <div className="wk-plot-placeholder" aria-hidden="true" />}
 			</div>
@@ -480,6 +500,20 @@ export function Shell({
 				</PaneSlot>
 			)}
 
+			{drawerShown && d && d.resizable && d.width !== null && !pushedOn && (
+				<DrawerGrip
+					id={state.drawer}
+					name={DRAWER_TITLE[state.drawer]}
+					store={drawerWidthStore}
+					width={d.width}
+					maxW={d.maxW}
+					x={geo.W - d.right - d.width}
+					top={d.top}
+					bottom={d.bottom}
+					onResizing={setResizing}
+				/>
+			)}
+
 			{L.dockHidden && (
 				<button
 					ref={triggerRef("palette")}
@@ -499,7 +533,12 @@ export function Shell({
 				<CardAnnouncer />
 			</CardPlaceContext.Provider>
 
-			{!state.palette && <ShellToast lifted={!L.dockHidden} />}
+			{!state.palette && (
+				<ShellToast
+					lifted={!L.dockHidden}
+					centre={drawerShown && L.full ? L.freeW / 2 : null}
+				/>
+			)}
 
 			{state.palette && (
 				<Suspense fallback={null}>
@@ -577,7 +616,14 @@ function CardTargets({
 }
 
 /** The app toast (src/shell/toast.ts): bottom centre, above the dock. */
-function ShellToast({ lifted }: { lifted: boolean }) {
+function ShellToast({
+	lifted,
+	centre,
+}: {
+	lifted: boolean
+	/** Centre of the free plot area beside a full-height drawer, else null (the window's centre). */
+	centre: number | null
+}) {
 	const toast = useStore(appToast)
 	if (!toast) return null
 	return (
@@ -586,6 +632,7 @@ function ShellToast({ lifted }: { lifted: boolean }) {
 			className="wk-toast wk-shell-toast"
 			data-tone={toast.tone}
 			data-lifted={lifted || undefined}
+			style={centre === null ? undefined : { left: centre }}
 		>
 			<span className="wk-shell-toast-text">{toast.text}</span>
 			{toast.undo ? (

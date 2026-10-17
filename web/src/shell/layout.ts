@@ -66,6 +66,10 @@ export interface DrawerRect {
 	/** Px width, or null when it spans from the left gutter. */
 	readonly width: number | null
 	readonly full: boolean
+	/** The left edge has a resize grip (full height, or between the rows with a set width). */
+	readonly resizable: boolean
+	/** The widest the grip may take it to now (640 px, less what the Receiver needs beside a full-height drawer). */
+	readonly maxW: number
 }
 
 /** The attached pane: left of a full-height drawer, between the top island row and the bottom row. */
@@ -289,6 +293,8 @@ export interface CardOptions {
 	readonly at?: string
 	/** The Receiver panel is open: a between-rows drawer is not shown, so the card need not clear it. */
 	readonly rxOpen?: boolean
+	/** The open drawer's wanted width (src/shell/drawer-width.ts); its default when omitted. */
+	readonly drawerW?: number
 }
 
 export function shellLayout(
@@ -307,7 +313,7 @@ export function shellLayout(
 	// widest drawer that still leaves the Tuner and the slid Receiver on the top row, and Listen and a compact dock on the bottom
 	const drMax =
 		W - G - Math.max(G + g.tuner.w + G + g.rx.w + G, minX + DOCK_COMPACT + G)
-	const want = drawerId ? DRAWER_W[drawerId] : 0
+	const want = drawerId ? (cardOpts.drawerW ?? DRAWER_W[drawerId]) : 0
 	const dW = drawerId ? Math.min(want, drMax) : 0
 	const full = drawerId !== null && W >= FULL_MIN_VW && dW >= DR_MIN
 	const clearR = full ? dW + G : 0
@@ -333,7 +339,16 @@ export function shellLayout(
 
 	let drawer: DrawerRect | null = null
 	if (drawerId) {
-		if (full) drawer = { top: G, bottom: G, right: G, width: dW, full: true }
+		if (full)
+			drawer = {
+				top: G,
+				bottom: G,
+				right: G,
+				width: dW,
+				full: true,
+				resizable: true,
+				maxW: Math.max(DR_MIN, Math.min(DR_MAX, drMax)),
+			}
 		else if (W < FULL_MIN_VW || pushed)
 			drawer = {
 				top: topRow,
@@ -341,6 +356,8 @@ export function shellLayout(
 				right: G,
 				width: null,
 				full: false,
+				resizable: false,
+				maxW: DR_MAX,
 			}
 		else
 			drawer = {
@@ -349,6 +366,8 @@ export function shellLayout(
 				right: G,
 				width: Math.min(want, W - 2 * G),
 				full: false,
+				resizable: true,
+				maxW: Math.max(DR_MIN, Math.min(DR_MAX, W - 2 * G)),
 			}
 	}
 

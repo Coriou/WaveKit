@@ -396,6 +396,53 @@
 	.wk-shell-drawer > * {
 		backdrop-filter: none;
 	}
+	/* the drawer's resize grip (Immersive board): faint accent bar, full accent and taller on hover, focus and drag */
+	.wk-shell-grip {
+		position: absolute;
+		z-index: 5;
+		width: 20px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border-radius: 6px;
+		cursor: col-resize;
+		touch-action: none;
+	}
+	.wk-shell-grip:focus-visible {
+		outline-offset: -2px;
+	}
+	.wk-shell-grip-bar {
+		width: 4px;
+		height: 40px;
+		border-radius: 2px;
+		background: rgba(var(--wk-accent-rgb), 0.45);
+		opacity: 0.4;
+		transition:
+			opacity var(--wk-dur-2),
+			background var(--wk-dur-2),
+			height var(--wk-dur-2);
+	}
+	.wk-shell-grip:hover .wk-shell-grip-bar,
+	.wk-shell-grip:focus-visible .wk-shell-grip-bar,
+	.wk-shell-grip[data-on] .wk-shell-grip-bar {
+		opacity: 1;
+		background: var(--wk-accent);
+		height: 56px;
+	}
+	.wk-shell-grip-layer {
+		position: absolute;
+		inset: 0;
+		z-index: 9;
+		cursor: col-resize;
+	}
+	/* while resizing, the drawer, its pane, the Receiver, the dock and the card follow the pointer without easing */
+	.wk-shell[data-resizing] .wk-shell-drawer,
+	.wk-shell[data-resizing] .wk-shell-paneslot,
+	.wk-shell[data-resizing] .wk-shell-island,
+	.wk-shell[data-resizing] .wk-dock,
+	.wk-shell[data-resizing] .wk-shell-cardslot {
+		transition: none;
+	}
 	.wk-shell-paneslot {
 		position: absolute;
 		z-index: 4;
