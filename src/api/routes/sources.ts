@@ -15,6 +15,7 @@ import {
 	sourceActivitySchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
+	sourceEndpointSchema,
 } from "@wavekit/api-types"
 import { SourceConfigSchema } from "../../config.js"
 import type {
@@ -124,6 +125,7 @@ const extendedSourceStatusSchema = {
 		rateMismatch: sourceRateMismatchSchema,
 		signalFlat: sourceSignalFlatSchema,
 		signalLevelDbfs: { type: "number" },
+		endpoint: sourceEndpointSchema,
 		assignments: {
 			type: "array",
 			items: decoderAssignmentSchema,
@@ -162,6 +164,7 @@ const sourceStatusSchema = {
 		rateMismatch: sourceRateMismatchSchema,
 		signalFlat: sourceSignalFlatSchema,
 		signalLevelDbfs: { type: "number" },
+		endpoint: sourceEndpointSchema,
 	},
 	required: [
 		"id",

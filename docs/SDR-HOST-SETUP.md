@@ -294,7 +294,10 @@ with `dns-sd -B _wavekit-sdr._tcp` on a Mac or `avahi-browse -r _wavekit-sdr._tc
 on Linux. The file carries the image's default ports, so a compose override of
 `SDR_HOST_RTLMUX__PORT` or `SDR_HOST_API__PORT` is not reflected there. mDNS
 reaches only the subnet it is sent on, so use it to find the receiver and use
-`endpoints` to choose the address. avahi announces port 8080 from the first boot,
+`endpoints` to choose the address. WaveKit does that for an rtl_tcp source with
+`sdrHost.endpointSelection: auto` (see `docs/API.md`, "Receiver endpoint"). The Mac
+loopback bridge does it once at start with
+`node scripts/pi-lan-bridge.mjs --auto <receiver-host>`. avahi announces port 8080 from the first boot,
 before first-boot setup has started sdr-host, so for a few minutes the announcement
 points at a port nothing listens on yet. That is harmless, since discovery is only
 a convenience.

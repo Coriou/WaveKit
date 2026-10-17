@@ -521,6 +521,23 @@ and on a caps rate/format/kind change, (re)connect and disconnect. An interval
 with no bytes (`waiting`/`stale`) breaks a run and never raises it. Audio PCM,
 `auto` formats and recordings are not measured (no `signalLevelDbfs`).
 
+**Receiver endpoint (rtl_tcp sources with an SDR host).** With
+`sdrHost.endpointSelection: auto` on the source (omitted or `off` by default; it
+needs the resource monitor and the SDR host poller), core reads the receiver's own
+address list from the configured SDR host's `/api/status` (`receiverId`,
+`endpoints`). It moves the IQ connection to a better listed address, for example
+the Pi's Ethernet address when the source dials its Wi-Fi address, once that
+address answers with the same `receiverId` and an `RTL0` header. It falls back to
+the configured host after three failures there within 10 minutes (failed connects or
+ended sessions), or when the receiver stops listing the address or restarts as a
+different process. Only literal unicast IPs from the configured receiver's list are
+ever dialed, never loopback, link-local, mapped or mDNS answers, and its API is probed
+only on the configured API port. Upgrades are at least
+5 minutes apart. Only sources present at startup are covered. Such a source carries `endpoint: { configuredHost,
+activeHost, reason, at }` (also on `source:status` and in `/api/status`); `url`
+stays the configured address. Other sources never carry `endpoint`. See
+[receiver-endpoints](specs/receiver-endpoints/design.md).
+
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
 (source config, default 15000, `0` disables) means the peer is dead or the

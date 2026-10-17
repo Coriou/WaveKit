@@ -128,6 +128,15 @@ import {
 } from "./decoders/builtin/lora-meshtastic.js"
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
+import {
+	EndpointSelector,
+	type EndpointSelectionTarget,
+} from "./core/endpoint-selector.js"
+import {
+	configuredApiPort,
+	createEndpointProbe,
+	plainHttpApiUrl,
+} from "./core/endpoint-probe.js"
 import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
@@ -1399,6 +1408,7 @@ async function main(): Promise<void> {
 		let resourceAggregator: ResourceAggregator | undefined
 		let containerMonitor: ContainerMonitor | undefined
 		let sdrHostPoller: SdrHostPoller | undefined
+		let endpointSelector: EndpointSelector | undefined
 		let backpressureTracker: SourceBackpressureTracker | undefined
 
 		if (config.resources.enabled) {
@@ -1451,6 +1461,46 @@ async function main(): Promise<void> {
 				)
 			}
 
+			// Receiver endpoint selection (receiver-endpoints 3.1): opt-in per source.
+			const endpointTargets: EndpointSelectionTarget[] = config.sources.flatMap(
+				s =>
+					s.type === "rtl_tcp" &&
+					s.host &&
+					s.port &&
+					s.sdrHost?.endpointSelection === "auto" &&
+					plainHttpApiUrl(s.sdrHost.apiUrl)
+						? [
+								{
+									sourceId: s.id,
+									configuredHost: s.host,
+									port: s.port,
+									apiPort: configuredApiPort(s.sdrHost.apiUrl),
+								},
+							]
+						: [],
+			)
+			if (endpointTargets.length > 0 && sdrHostPoller) {
+				const selector = new EndpointSelector(
+					logger,
+					sourceManager,
+					createEndpointProbe(),
+					endpointTargets,
+				)
+				endpointSelector = selector
+				sdrHostPoller.on("receiver-endpoints", (sourceId, report) => {
+					selector.onReport(sourceId, report).catch((err: unknown) => {
+						log.warn({ err, sourceId }, "Endpoint selection failed")
+					})
+				})
+				sourceManager.on("endpoint-fallback", (sourceId, host) => {
+					selector.onFallback(sourceId, host)
+				})
+				log.info(
+					{ sources: endpointTargets.map(t => t.sourceId) },
+					"Receiver endpoint selection enabled",
+				)
+			}
+
 			// Create backpressure tracker
 			backpressureTracker = new SourceBackpressureTracker(
 				logger,
@@ -1482,7 +1532,24 @@ async function main(): Promise<void> {
 			)
 		}
 
+		for (const s of config.sources) {
+			if (s.sdrHost?.endpointSelection !== "auto") continue
+			const reason =
+				s.type !== "rtl_tcp" || !s.host || !s.port
+					? "it applies only to rtl_tcp sources with a host and port"
+					: !plainHttpApiUrl(s.sdrHost.apiUrl)
+						? "sdrHost.apiUrl must be a plain http://host[:port] URL"
+						: !endpointSelector
+							? "it needs resources.enabled and the SDR host poller"
+							: null
+			if (reason)
+				log.warn(
+					{ sourceId: s.id },
+					`Receiver endpoint selection stays off for this source: ${reason}`,
+				)
+		}
 		own(20, () => {
+			endpointSelector?.stop()
 			resourceAggregator?.stop()
 			sdrHostPoller?.stop()
 			containerMonitor?.stop()

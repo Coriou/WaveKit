@@ -229,7 +229,10 @@ See [SDR host setup](SDR-HOST-SETUP.md) for installation and recovery.
 
 When the Pi is available, copy the local RTL profile, set the source host to the
 Pi's address and its port to 5555. Optionally enable the SDR host poller and
-set `sdrHost.apiUrl` / `sdrHost.rtlmuxStatsUrl` to its status endpoints. Select
+set `sdrHost.apiUrl` / `sdrHost.rtlmuxStatsUrl` to its status endpoints. If the
+Pi has both Wi-Fi and a cable, `sdrHost.endpointSelection: auto` lets core move
+the IQ stream to its verified Ethernet address (see
+[SDR host setup](SDR-HOST-SETUP.md#wired-ethernet-next-to-wi-fi)). Select
 that config with `WAVEKIT_CONFIG`. For a directly connected dongle, select the
 local RTL profile instead.
 

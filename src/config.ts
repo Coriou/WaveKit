@@ -83,6 +83,13 @@ export const SourceConfigSchema = z.object({
 			apiUrl: z.string().url().optional(),
 			/** URL to rtlmux stats endpoint (e.g., "http://192.168.1.50:5556/stats.json") */
 			rtlmuxStatsUrl: z.string().url().optional(),
+			/**
+			 * Receiver endpoint selection (rtl_tcp only). `auto` moves the IQ
+			 * connection to a better address that this sdr-host itself lists
+			 * (for example its Ethernet address), after verifying it; omitted or
+			 * `off` keeps the configured host. See docs/specs/receiver-endpoints.
+			 */
+			endpointSelection: z.enum(["auto", "off"]).optional(),
 		})
 		.optional(),
 	/** Scanner role and passive discovery for this source (default shared, passive). */
