@@ -14,6 +14,7 @@ import type {
 	DecoderCreatedEventData,
 	DecoderOutputMessage,
 	DecoderRemovedEventData,
+	DigitalVoiceStatus,
 	DecoderStatusEventData,
 	LiveAudioConfig,
 	LiveAudioLevel,
@@ -81,6 +82,9 @@ export interface EventMap {
 	"live-audio:stopped": unknown
 	"live-audio:error": unknown
 	"live-audio:transmission": AnalogTransmissionEventData
+	"digital-voice:status": DigitalVoiceStatus
+	/** A call edge (start, encryption change, end); DigitalVoiceStore reloads the status on it. */
+	"digital-voice:call": unknown
 	"scanner:job": ScanJob
 	"scanner:identify": ScannerIdentifyEventData
 	"scanner:progress": ScannerProgressEventData

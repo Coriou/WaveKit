@@ -12,6 +12,11 @@ export interface AudioSource {
 	sampleRate(): number | null
 	tunedHz(): number
 	onClient(delta: number, bytes: number): void
+	/**
+	 * Decoded digital voice on `/voice` and `/voice.wav` (the core serves it on its own port): the rate
+	 * while the stream runs, else null; `talking()` says when a call plays (else silence).
+	 */
+	voice?: { sampleRate(): number | null; talking(): boolean }
 }
 
 const CHUNK_MS = 20
@@ -40,8 +45,11 @@ function stream(
 	req: IncomingMessage,
 	res: ServerResponse,
 	wav: boolean,
+	voice = false,
 ): void {
-	const rate = source.sampleRate()
+	const rateOf = () =>
+		voice ? (source.voice?.sampleRate() ?? null) : source.sampleRate()
+	const rate = rateOf()
 	if (rate === null) {
 		// The core's audio server only listens while live audio runs: the client sees a refused or
 		// dropped connection (fetch rejects), never an HTTP error.
@@ -60,23 +68,31 @@ function stream(
 			"X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
 	})
 	if (wav) res.write(wavHeader(rate))
-	source.onClient(1, 0)
+	if (!voice) source.onClient(1, 0)
 	const samples = Math.round((rate * CHUNK_MS) / 1000)
 	let phase = 0
 	const timer = setInterval(() => {
-		if (source.sampleRate() !== rate) {
+		if (rateOf() !== rate) {
 			res.end()
 			return
 		}
 		const hz = source.tunedHz()
 		const signal = signalAt(hz)
-		const keyed = signal !== null && signalActive(signal, Date.now() / 1000)
-		const toneHz = signal ? 500 + (Math.round(signal.hz / 1000) % 400) : 0
+		const keyed = voice
+			? source.voice?.talking() === true
+			: signal !== null && signalActive(signal, Date.now() / 1000)
+		// decoded voice: a warbling tone with no hiss, so it sounds unlike the analog channel
+		const toneHz = voice
+			? 400 + 120 * Math.sin(Date.now() / 160)
+			: signal
+				? 500 + (Math.round(signal.hz / 1000) % 400)
+				: 0
 		const buf = Buffer.alloc(samples * 2)
 		const step = (2 * Math.PI * toneHz) / rate
 		for (let i = 0; i < samples; i++) {
 			let v: number
-			if (keyed) {
+			if (voice && !keyed) v = 0
+			else if (keyed) {
 				v = Math.sin(phase) * 0.25 + (Math.random() - 0.5) * 0.02
 				phase += step
 			} else v = (Math.random() - 0.5) * 0.06
@@ -84,14 +100,14 @@ function stream(
 		}
 		if (phase > 1e6) phase %= 2 * Math.PI
 		res.write(buf)
-		source.onClient(0, buf.length)
+		if (!voice) source.onClient(0, buf.length)
 	}, CHUNK_MS)
 	let stopped = false
 	const stop = () => {
 		if (stopped) return
 		stopped = true
 		clearInterval(timer)
-		source.onClient(-1, 0)
+		if (!voice) source.onClient(-1, 0)
 	}
 	req.on("close", stop)
 	res.on("error", stop)
@@ -100,7 +116,11 @@ function stream(
 export function createAudioServer(source: AudioSource): Server {
 	return createServer((req, res) => {
 		const path = (req.url ?? "/").split("?")[0]
-		const known = path === "/stream" || path === "/stream.wav"
+		const known =
+			path === "/stream" ||
+			path === "/stream.wav" ||
+			path === "/voice" ||
+			path === "/voice.wav"
 		res.setHeader("Access-Control-Allow-Origin", "*")
 		// WG7 req 8.2: a legacy core answers a preflight on a stream path, 404 elsewhere
 		if (req.method === "OPTIONS" && known) {
@@ -116,6 +136,10 @@ export function createAudioServer(source: AudioSource): Server {
 			return stream(source, req, res, true)
 		if (req.method === "GET" && path === "/stream")
 			return stream(source, req, res, false)
+		if (req.method === "GET" && path === "/voice.wav")
+			return stream(source, req, res, true, true)
+		if (req.method === "GET" && path === "/voice")
+			return stream(source, req, res, false, true)
 		res.writeHead(404, { "Content-Type": "application/json" })
 		res.end(JSON.stringify({ error: "Not Found" }))
 	})

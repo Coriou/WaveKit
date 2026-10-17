@@ -196,6 +196,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.disc",
+		"Display",
+		"Discoveries on the spectrum",
+		"scanner found tags auto band map decoded clutter",
+		SETTINGS,
+	),
+	row(
 		"dev.card",
 		"Display",
 		"Tuned card position",

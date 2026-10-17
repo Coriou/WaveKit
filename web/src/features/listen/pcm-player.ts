@@ -59,6 +59,7 @@ export class PcmPlayer {
 	private ready: Promise<AudioWorkletNode> | null = null
 	private abort: AbortController | null = null
 	private volume = 1
+	private tap: ((samples: Float32Array, rate: number) => void) | null = null
 	private readonly events: PcmPlayerEvents
 
 	constructor(events: PcmPlayerEvents) {
@@ -117,6 +118,18 @@ export class PcmPlayer {
 		if (this.ctx?.state === "running") this.ctx.suspend().catch(() => undefined)
 	}
 
+	/** Receives a copy of every decoded chunk (Listen › Record); null stops it. */
+	setTap(tap: ((samples: Float32Array, rate: number) => void) | null): void {
+		this.tap = tap
+	}
+
+	/** What the device and context add after the ring, ms. */
+	outputLatencyMs(): number {
+		const ctx = this.ctx
+		if (!ctx) return 0
+		return ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000
+	}
+
 	setVolume(volume: number): void {
 		this.volume = volume
 		const gain = this.gain
@@ -165,6 +178,7 @@ export class PcmPlayer {
 				const { done, value } = await reader.read()
 				if (done) break
 				const samples = decoder.push(value)
+				if (samples.length > 0 && this.tap) this.tap(samples.slice(), rate)
 				if (samples.length > 0)
 					node.port.postMessage({ type: "pcm", samples } satisfies ToWorklet, [
 						samples.buffer,

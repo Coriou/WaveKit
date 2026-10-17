@@ -214,7 +214,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const viewRef = useRef(view)
 	viewRef.current = view
 	useDiscoveryFetch(data.scanner, view)
-	const discRow = useDiscoveryRow(data.scanner)
+	const discRow = useDiscoveryRow(data.scanner, device.discoveryTags)
 	const scanHasReceiver = useStore(data.scanner, s =>
 		scanHasReceiverOf(s.sweep),
 	)
@@ -448,6 +448,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 									controller={controller}
 									view={view}
 									widthPx={size.w}
+									mode={device.discoveryTags}
 								/>
 							</div>
 						)}

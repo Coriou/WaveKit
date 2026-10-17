@@ -1,4 +1,4 @@
-// Display › On this device: density, motion, the spectrum's range, averaging, FFT size and signal labels, and the Map's tiles,
+// Display › On this device: density, motion, the spectrum's range, averaging, FFT size, signal labels and discovery tags, and the Map's tiles,
 // trail length and labels (Settings › Map), persisted in localStorage and applied as data-wk-density /
 // data-wk-motion on <html>. Motion "system" resolves through prefers-reduced-motion, so CSS and code only ever
 // test data-wk-motion="reduce". Pure apart from the storage, element and media query passed in (tests use fakes).
@@ -40,6 +40,10 @@ export function fftBins(size: FftSize, binsMax: number | null): number {
 	return Math.max(128, Math.min(size, binsMax ?? FFT_FALLBACK_MAX))
 }
 
+/** Display › Discoveries on the spectrum (DESIGN.md "Auto band map = discoveries"): every one, decoded ones, or none. */
+export const DISCOVERY_TAG_MODES = ["all", "decoded", "off"] as const
+export type DiscoveryTagMode = (typeof DISCOVERY_TAG_MODES)[number]
+
 /** Map › Beyond the offline map: OpenFreeMap's tiles, or a blank ground that asks nothing of anyone. */
 export const MAP_TILES = ["online", "blank"] as const
 export type MapTiles = (typeof MAP_TILES)[number]
@@ -70,6 +74,8 @@ export interface DevicePrefs {
 	readonly fftSize: FftSize
 	/** Which spectrum signals get a chip (plot/label-gate.ts). */
 	readonly signalLabels: SignalLabelsMode
+	/** Which scanner discoveries tag the spectrum (plot/discovery-tags.ts). */
+	readonly discoveryTags: DiscoveryTagMode
 	readonly mapTiles: MapTiles
 	readonly mapTrail: MapTrail
 	readonly mapLabels: MapLabels
@@ -83,6 +89,7 @@ export const DEFAULT_DEVICE: DevicePrefs = {
 	averaging: "low",
 	fftSize: 8192,
 	signalLabels: "clear",
+	discoveryTags: "all",
 	mapTiles: "online",
 	mapTrail: 15,
 	mapLabels: "normal",
@@ -144,6 +151,11 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 			SIGNAL_LABELS,
 			o["signalLabels"],
 			DEFAULT_DEVICE.signalLabels,
+		),
+		discoveryTags: pick(
+			DISCOVERY_TAG_MODES,
+			o["discoveryTags"],
+			DEFAULT_DEVICE.discoveryTags,
 		),
 		mapTiles: pick(MAP_TILES, o["mapTiles"], DEFAULT_DEVICE.mapTiles),
 		mapTrail: (MAP_TRAILS as readonly unknown[]).includes(o["mapTrail"])
@@ -233,6 +245,7 @@ export class DevicePrefsStore {
 			next.averaging === prev.averaging &&
 			next.fftSize === prev.fftSize &&
 			next.signalLabels === prev.signalLabels &&
+			next.discoveryTags === prev.discoveryTags &&
 			next.mapTiles === prev.mapTiles &&
 			next.mapTrail === prev.mapTrail &&
 			next.mapLabels === prev.mapLabels

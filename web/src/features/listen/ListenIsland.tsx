@@ -1,6 +1,7 @@
 // The Listen island (docs/web/canvas/Listen.dc.html): listen button, level meter with the squelch line,
 // and the Audio options panel (squelch, volume). <AudioOutput/> holds the page's one <audio> element.
 import { useEffect, useState, type CSSProperties } from "react"
+import type { LiveAudioStatus } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
@@ -11,6 +12,11 @@ import { Icon } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { IslandHead } from "../../ui/Island.tsx"
 import { Label } from "../../ui/Label.tsx"
+import { Seg, type SegOption } from "../../ui/Seg.tsx"
+import { Switch } from "../../ui/Switch.tsx"
+import { shellStore } from "../../shell/store.ts"
+import { showAppToast } from "../../shell/toast.ts"
+import { focusSetting } from "../settings/registry.ts"
 import { formatDb, formatMHz, formatRate } from "../format.ts"
 import { useLiveStatus, useSettledHz } from "../hooks.ts"
 import { modeSpec } from "../tuner/modes.ts"
@@ -25,17 +31,72 @@ import {
 	noiseSquelchFits,
 	squelchSetting,
 	squelchThreshold,
+	voiceSource,
 } from "./audio.ts"
 import type { ListenPhase } from "./controller.ts"
+import { recordClock, recordFileName } from "./recorder.ts"
+import {
+	agcOf,
+	deemphOf,
+	deemphPatch,
+	hearHint,
+	LOW_CUT_HZ,
+	lowCutSub,
+	noiseReductionSub,
+	offeredTone,
+	playsDigital,
+	toneGateOn,
+	toneSquelchFits,
+	toneSquelchPatch,
+	toneText,
+	voiceRoute,
+	type AgcChoice,
+	type DeemphChoice,
+	type HearChoice,
+	type VoiceRoute,
+} from "./sound.ts"
+
+/** The decoded-voice stream for the tuned channel (a dsd-fme decoder on it), or null. */
+export function useVoiceRoute(): VoiceRoute | null {
+	const { data, decoders } = useServices()
+	const voice = useStore(data.digitalVoice, s => s.status)
+	const list = useStore(decoders, s => s.decoders)
+	const status = useLiveStatus()
+	const hz = useSettledHz()
+	const tolerance = Math.max((status?.config.bandwidth || 12_500) / 2, 3000)
+	return voiceRoute(list, voice, hz, tolerance)
+}
 
 /** The page's audio output, bound to the listen controller; reattaches when the stream itself changes. */
 export function AudioOutput() {
-	const { listen } = useServices()
+	const { data, listen } = useServices()
 	const status = useLiveStatus()
 	const base =
 		typeof location === "undefined" ? "http://localhost/" : location.href
-	const access = useStore(useServices().data.access, s => s.access)
-	const source = audioSource(status, base, access?.mode === "protected")
+	const access = useStore(data.access, s => s.access)
+	const credentials = access?.mode === "protected"
+	const hear = useStore(listen, s => s.hear)
+	const wanted = useStore(listen, s => s.wanted)
+	const route = useVoiceRoute()
+	const digital = playsDigital(hear, route)
+	const voiceRunning = useStore(data.digitalVoice, s => s.status?.running)
+	// analog plays until the decoded voice stream is up; both need live audio running (Listen drives the
+	// squelch meter, and a null source would end listening)
+	const source =
+		digital && route && voiceRunning && status?.running
+			? voiceSource(route, base, credentials)
+			: audioSource(status, base, credentials)
+	// the decoded voice stream starts on demand, like live audio does on Listen
+	useEffect(() => {
+		if (!wanted || !digital || voiceRunning) return
+		data.digitalVoice.ensureRunning().catch((error: unknown) => {
+			showAppToast(
+				`Decoded voice could not start: ${error instanceof Error ? error.message : "the core refused"}`,
+				{ tone: "warn" },
+			)
+			listen.setHear("analog")
+		})
+	}, [data, listen, wanted, digital, voiceRunning])
 	const key = audioAttachKey(source)
 	// the source object is rebuilt every render; the key says when it really changed
 	useEffect(() => listen.setSource(key, source), [listen, key])
@@ -91,9 +152,23 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 	const { power, threshold, open } = useLevel()
 	const on = state.wanted
 	const mode = status ? modeSpec(status.config.modulation).label : null
-	const sub = [mode, hz === null ? null : formatMHz(hz)]
-		.filter(Boolean)
-		.join(" · ")
+	const route = useVoiceRoute()
+	const digital = on && playsDigital(state.hear, route) && route !== null
+	// a tone gate set on another channel stays on the core: say so while it holds the audio
+	const gate =
+		status?.config.toneSquelch && status.config.toneSquelch.kind !== "none"
+			? status.config.toneSquelch
+			: null
+	const sub = digital
+		? [
+				`${route.protocol ?? "Digital"} voice`,
+				route.call ?? (hz === null ? null : formatMHz(hz)),
+			]
+				.filter(Boolean)
+				.join(" · ")
+		: on && gate && status?.toneSquelch?.state === "waiting"
+			? `Waiting for ${toneText(gate)}`
+			: [mode, hz === null ? null : formatMHz(hz)].filter(Boolean).join(" · ")
 	const toggle = () => {
 		if (state.phase === "blocked") return listen.resume()
 		void (on ? listen.stop() : listen.start())
@@ -127,7 +202,12 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 			</button>
 			<div className="wk-shell-listen-text">
 				<div>
-					<b>{TITLE[state.phase]}</b>{" "}
+					<b>
+						{state.phase === "playing" &&
+						(!open || status?.toneSquelch?.state === "waiting")
+							? "Squelched"
+							: TITLE[state.phase]}
+					</b>{" "}
 					{follow ? (
 						<span className="wk-shell-sub wkf-following" title={follow.title}>
 							<Icon name="scanner" size={13} />
@@ -283,6 +363,7 @@ function ListenPanel() {
 					over the noise floor as conditions change. Noise (FM) opens when a
 					carrier quiets the receiver noise.
 				</span>
+				{status && <ToneSquelch status={status} canEdit={canEdit} />}
 			</div>
 
 			<div className="wkf-field">
@@ -311,6 +392,9 @@ function ListenPanel() {
 				<span className="wkf-quiet wkf-small">This browser only.</span>
 			</div>
 
+			{status && <WhatYouHear status={status} />}
+			{status && <Sound status={status} canEdit={canEdit} />}
+
 			{status && (
 				<span className="wkf-quiet wkf-small">
 					{running
@@ -328,7 +412,274 @@ function ListenPanel() {
 					{listenError ?? audioError ?? status?.lastError}
 				</span>
 			)}
+			<RecordRow />
+			<Button
+				variant="ghost"
+				className="wkf-listen-more"
+				onClick={() => {
+					focusSetting("au.squelch")
+					shellStore.openDrawer("settings")
+				}}
+			>
+				All audio settings
+				<Icon name="chevron-right" size={16} />
+			</Button>
 		</>
+	)
+}
+
+/** Tone squelch: offered for the tone heard on the channel (or already set), NFM only. */
+function ToneSquelch({
+	status,
+	canEdit,
+}: {
+	status: LiveAudioStatus
+	canEdit: boolean
+}) {
+	const { data, tuned } = useServices()
+	const hz = useSettledHz()
+	const span = useStore(tuned.span)
+	const items = useStore(tuned.feed, s => s.items)
+	const fresh = span !== null && span.hz === hz
+	const config = status.config
+	const tone = offeredTone(config.toneSquelch, fresh ? items : [])
+	if (!tone || !toneSquelchFits(config.modulation)) return null
+	const on = toneGateOn(config)
+	const text = toneText(tone)
+	const state = status.toneSquelch?.state
+	const heard = config.toneSquelch === undefined || !on
+	return (
+		<button
+			type="button"
+			className="wkf-tone-row"
+			aria-pressed={on}
+			disabled={!canEdit}
+			onClick={() =>
+				void data.liveAudio
+					.setConfig(toneSquelchPatch(!on, tone))
+					.catch(() => undefined)
+			}
+		>
+			<span className="wkf-tone-text">
+				<b>
+					Tone squelch{" "}
+					<span className="wkf-tone-tone">
+						· {text}
+						{heard ? " detected" : state === "open" ? " heard" : ""}
+					</span>
+				</b>
+				<span className="wkf-quiet wkf-small">
+					{on
+						? state === "waiting"
+							? `Waiting for ${text}. Other users on this channel stay silent.`
+							: `Opens only for ${text}. Other users on this channel stay silent.`
+						: "Open only for this tone, ignore other users sharing the channel."}
+				</span>
+			</span>
+			<span className="wk-switch" aria-checked={on} aria-hidden="true" />
+		</button>
+	)
+}
+
+const HEAR_OPTIONS: ReadonlyArray<SegOption<HearChoice>> = [
+	{ value: "auto", label: "Auto" },
+	{ value: "analog", label: "Analog" },
+	{
+		value: "digital",
+		// "Decoded" alone where the island is narrow (phone)
+		label: (
+			<>
+				Decoded<span className="wkf-hear-long"> voice</span>
+			</>
+		),
+		ariaLabel: "Decoded voice",
+	},
+]
+
+/** What you hear: the analog audio or the decoded voice of a dsd-fme decoder on the channel. */
+function WhatYouHear({ status }: { status: LiveAudioStatus }) {
+	const { listen } = useServices()
+	const hear = useStore(listen, s => s.hear)
+	const route = useVoiceRoute()
+	const mode = modeSpec(status.config.modulation).label
+	return (
+		<div className="wkf-field">
+			<Label>What you hear</Label>
+			<Seg
+				label="Audio source"
+				wide
+				options={HEAR_OPTIONS}
+				value={hear}
+				onChange={v => listen.setHear(v)}
+			/>
+			<div className="wkf-hear-hint">
+				<span className="wkf-hear-dot" aria-hidden="true" />
+				<span>{hearHint(hear, route, mode)}</span>
+			</div>
+		</div>
+	)
+}
+
+const AGC_OPTIONS: ReadonlyArray<{ value: AgcChoice; label: string }> = [
+	{ value: "off", label: "Off" },
+	{ value: "slow", label: "Slow" },
+	{ value: "fast", label: "Fast" },
+]
+const DEEMPH_OPTIONS: ReadonlyArray<{ value: DeemphChoice; label: string }> = [
+	{ value: "off", label: "Off" },
+	{ value: "50", label: "50 µs" },
+	{ value: "75", label: "75 µs" },
+]
+
+/** Sound: the core's level control, de-emphasis, low-cut and noise reduction (Settings › Audio has the rest). */
+function Sound({
+	status,
+	canEdit,
+}: {
+	status: LiveAudioStatus
+	canEdit: boolean
+}) {
+	const { data } = useServices()
+	const c = status.config
+	const apply = (patch: Parameters<typeof data.liveAudio.setConfig>[0]) =>
+		void data.liveAudio.setConfig(patch).catch(() => undefined)
+	const lock = <T extends string>(
+		o: ReadonlyArray<{ value: T; label: string }>,
+	) => o.map(x => ({ ...x, disabled: !canEdit }))
+	return (
+		<div className="wkf-field">
+			<Label>Sound</Label>
+			<div className="wkf-sound-row">
+				<b>Level control</b>
+				<Seg
+					label="Level control"
+					options={lock(AGC_OPTIONS)}
+					value={agcOf(status)}
+					onChange={v => apply({ agc: v })}
+				/>
+			</div>
+			<div className="wkf-sound-row">
+				<b>De-emphasis</b>
+				<Seg
+					label="De-emphasis"
+					options={lock(DEEMPH_OPTIONS)}
+					value={deemphOf(c)}
+					onChange={v => apply(deemphPatch(v))}
+				/>
+			</div>
+			<SoundSwitch
+				label="Cut low rumble"
+				sub={lowCutSub(c)}
+				checked={c.highPass > 0}
+				disabled={!canEdit}
+				onChange={on => apply({ highPass: on ? LOW_CUT_HZ : 0 })}
+			/>
+			<SoundSwitch
+				label="Noise reduction"
+				sub={noiseReductionSub(c)}
+				checked={c.noiseReduction !== "off"}
+				disabled={!canEdit}
+				onChange={on => apply({ noiseReduction: on ? "voice" : "off" })}
+			/>
+		</div>
+	)
+}
+
+function SoundSwitch({
+	label,
+	sub,
+	checked,
+	disabled,
+	onChange,
+}: {
+	label: string
+	sub: string
+	checked: boolean
+	disabled: boolean
+	onChange: (on: boolean) => void
+}) {
+	return (
+		<label className="wkf-sound-switch" data-disabled={disabled || undefined}>
+			<span className="wkf-tone-text">
+				<b>{label}</b>
+				<span className="wkf-quiet wkf-small">{sub}</span>
+			</span>
+			<Switch
+				size="row"
+				checked={checked}
+				disabled={disabled}
+				aria-label={label}
+				onChange={onChange}
+			/>
+		</label>
+	)
+}
+
+/** Saves the file the browser way: a temporary link to the blob. */
+function download(blob: Blob, name: string): void {
+	const url = URL.createObjectURL(blob)
+	const a = document.createElement("a")
+	a.href = url
+	a.download = name
+	document.body.appendChild(a)
+	a.click()
+	a.remove()
+	setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
+/** Record audio: keeps what plays here and saves it as a WAV in the browser's downloads. */
+function RecordRow() {
+	const { listen } = useServices()
+	const recording = useStore(listen, s => s.recording)
+	const wanted = useStore(listen, s => s.wanted)
+	const latency = useStore(listen, s => s.latencyMs)
+	const hz = useSettledHz()
+	const save = (wav: Blob, startedAt: number) => {
+		const name = recordFileName(hz, startedAt)
+		download(wav, name)
+		showAppToast(`Saved ${name}`)
+	}
+	const toggle = () => {
+		if (recording) {
+			const wav = listen.stopRecording()
+			if (wav) save(wav, recording.startedAt)
+			return
+		}
+		listen.startRecording(save)
+	}
+	const can = listen.canRecord && wanted
+	return (
+		<div className="wkf-rec-row">
+			<Button
+				variant="outline"
+				size="lg"
+				className="wkf-rec-btn"
+				aria-pressed={recording !== null}
+				disabled={!can && recording === null}
+				title={
+					!listen.canRecord
+						? "This browser cannot record live audio"
+						: !wanted
+							? "Listen first: recording keeps what plays here"
+							: "Saved as a WAV file in this browser's downloads"
+				}
+				onClick={toggle}
+			>
+				<span className="wkf-rec-dot" aria-hidden="true" />
+				{recording
+					? `Recording · ${recordClock(recording.seconds)}`
+					: "Record audio"}
+			</Button>
+			<span className="wkf-gap" />
+			{latency !== null && (
+				<span
+					className="wkf-quiet wkf-small wkf-num"
+					title="Buffered in this browser plus the audio device; the core's pipeline adds to it"
+				>
+					Latency ≈ {latency} ms
+				</span>
+			)}
+		</div>
 	)
 }
 

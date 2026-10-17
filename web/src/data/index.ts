@@ -20,6 +20,7 @@ import { DecoderSettingsStore } from "./decoder-settings-store.ts"
 import { AccessDevicesStore } from "./access-devices-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
+import { DigitalVoiceStore } from "./digital-voice-store.ts"
 import { PreferencesStore } from "./preferences-store.ts"
 import { ReceiverStore } from "./receiver-store.ts"
 import { RecordingsStore } from "./recordings-store.ts"
@@ -56,6 +57,8 @@ export interface DataLayer {
 	/** Receiver settings: capabilities, relay status and per-control writes. */
 	receiver: ReceiverStore
 	liveAudio: LiveAudioStore
+	/** Decoded digital voice streams (dsd-fme) and their calls. */
+	digitalVoice: DigitalVoiceStore
 	bandplan: BandplanStore
 	/** Settings › Band plans: the stack, packs and writes. */
 	bandplanStack: BandplanStackStore
@@ -170,6 +173,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		tuner,
 		receiver,
 		liveAudio: new LiveAudioStore(api, events),
+		digitalVoice: new DigitalVoiceStore(api, events),
 		bandplan: new BandplanStore(api, events),
 		bandplanStack: new BandplanStackStore(api, events, () => {
 			void layer.bandplan.load()
@@ -236,6 +240,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.tuner.dispose()
 			layer.receiver.dispose()
 			layer.liveAudio.dispose()
+			layer.digitalVoice.dispose()
 			layer.bandplan.dispose()
 			layer.bandplanStack.dispose()
 			layer.scanPresets.dispose()
@@ -253,6 +258,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.sources.load(),
 			layer.tuner.load(),
 			layer.liveAudio.load(),
+			layer.digitalVoice.load(),
 			layer.bandplan.load(),
 			layer.receiver.loadRelay(),
 			layer.savedFrequencies.load(),

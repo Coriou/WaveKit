@@ -51,6 +51,7 @@ describe("device prefs", () => {
 			averaging: "low",
 			fftSize: 8192,
 			signalLabels: "clear",
+			discoveryTags: "all",
 			mapTiles: "online",
 			mapTrail: 15,
 			mapLabels: "normal",
@@ -60,6 +61,12 @@ describe("device prefs", () => {
 		expect(
 			parseDevicePrefs(JSON.stringify({ density: "compact", motion: "fast" })),
 		).toEqual({ ...DEFAULT_DEVICE, density: "compact" })
+		expect(
+			parseDevicePrefs(JSON.stringify({ discoveryTags: "decoded" })),
+		).toEqual({ ...DEFAULT_DEVICE, discoveryTags: "decoded" })
+		expect(parseDevicePrefs(JSON.stringify({ discoveryTags: "some" }))).toEqual(
+			DEFAULT_DEVICE,
+		)
 		expect(
 			parseDevicePrefs(
 				JSON.stringify({ mapTiles: "blank", mapTrail: 60, mapLabels: "many" }),
