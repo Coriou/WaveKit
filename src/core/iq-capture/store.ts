@@ -209,6 +209,11 @@ export class IqCaptureStore {
 			this.countHostile()
 			return false
 		}
+		// Confirmed live while being written: the finished file is moot.
+		if (e.pendingDiscard !== null) {
+			this.remove(e, e.pendingDiscard)
+			return false
+		}
 		const bytes = samples * IQ_CAPTURE_BYTES_PER_SAMPLE
 		if (
 			!Number.isSafeInteger(samples) ||
@@ -237,11 +242,14 @@ export class IqCaptureStore {
 		return viewOf(e)
 	}
 
-	/** The capture ended without a usable file (aborted, tool exit, timeout, failed proof). */
+	/**
+	 * The capture ended without a usable file (aborted, tool exit, timeout, failed proof). One
+	 * confirmed live while being written counts as that discard instead.
+	 */
 	fail(captureId: string): void {
 		const e = this.entries.get(captureId)
 		if (!e || e.state === "ready") return
-		this.remove(e, "failed")
+		this.remove(e, e.pendingDiscard ?? "failed")
 	}
 
 	/** Discard by reason; deferred while a replay of it runs. */
@@ -282,8 +290,9 @@ export class IqCaptureStore {
 				e.pendingDiscard !== null
 			)
 				continue
-			if (e.state === "capturing") continue
-			this.remove(e, "confirmed-live")
+			// Still being written: discarded when the tool finishes or aborts it (the caller ends it).
+			if (e.state === "capturing") e.pendingDiscard = "confirmed-live"
+			else this.remove(e, "confirmed-live")
 			n++
 		}
 		return n
@@ -347,6 +356,20 @@ export class IqCaptureStore {
 			n++
 		}
 		return n
+	}
+
+	/**
+	 * The earliest instant (clock ms) a finished capture reaches the orphan TTL, null when none
+	 * is due; captures with a deferred discard are skipped (they go when their replay ends).
+	 */
+	nextExpiryAt(): number | null {
+		let at: number | null = null
+		for (const e of this.entries.values()) {
+			if (e.finishedAtMs === null || e.pendingDiscard !== null) continue
+			const due = e.finishedAtMs + IQ_CAPTURE_ORPHAN_TTL_MS
+			if (at === null || due < at) at = due
+		}
+		return at
 	}
 
 	/** The unlink of a removed entry finished (or failed for good): its bytes are free. */

@@ -181,6 +181,42 @@ describe("IqCaptureStore ownership and discard", () => {
 		])
 	})
 
+	it("confirmLive on a capture being written counts confirmed-live when it finishes or aborts", () => {
+		const { store, removed } = makeStore()
+		store.admit(req(), id(1), 1)
+		store.admit(req(), id(2), 1)
+		expect(store.confirmLive("s1", "o1")).toBe(2)
+		// Still reserved while the tool writes; not claimable, not offered.
+		expect(store.get(id(1))?.pendingDiscard).toBe("confirmed-live")
+		expect(
+			store.near("s1", 446_006_250, 1000, { observationId: "o1", limit: 5 }),
+		).toEqual([])
+		expect(store.confirmLive("s1", "o1")).toBe(0)
+		expect(store.captured(id(1), 1000, 0)).toBe(false)
+		store.fail(id(2))
+		expect(removed.map(r => [r[0].captureId, r[1]])).toEqual([
+			[id(1), "confirmed-live"],
+			[id(2), "confirmed-live"],
+		])
+		expect(store.counters().discarded["confirmed-live"]).toBe(2)
+		expect(store.counters().failed).toBe(0)
+	})
+
+	it("nextExpiryAt is the earliest finish plus the TTL, skipping deferred discards", () => {
+		const { store, advance } = makeStore()
+		expect(store.nextExpiryAt()).toBeNull()
+		store.admit(req(), id(1), 1)
+		expect(store.nextExpiryAt()).toBeNull()
+		finish(store, id(1))
+		advance(5)
+		store.admit(req(), id(2), 1)
+		finish(store, id(2))
+		expect(store.nextExpiryAt()).toBe(1_000_000 + IQ_CAPTURE_ORPHAN_TTL_MS)
+		store.beginReplay(id(1))
+		store.discard(id(1), "result")
+		expect(store.nextExpiryAt()).toBe(1_000_005 + IQ_CAPTURE_ORPHAN_TTL_MS)
+	})
+
 	it("orphan TTL: discarded 600 000 ms after its finish, not before", () => {
 		const { store, removed, advance } = makeStore()
 		store.admit(req(), id(1), 1)
@@ -337,7 +373,6 @@ describe("Property 11: capture store bounds", () => {
 									e =>
 										e.sourceId === `s${o.src}` &&
 										e.observationId === `o${o.obs}` &&
-										e.state !== "capturing" &&
 										!e.replayStarted &&
 										e.pendingDiscard === null,
 								).length

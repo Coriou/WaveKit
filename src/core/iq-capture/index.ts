@@ -1,4 +1,4 @@
-/** WG11 lane IQ: capture service and replay queue (shapes in ./shapes.js, imported separately). */
+/** WG11 lane IQ: capture service and replay queue (shapes in ./shapes.js: imported by the scanner, which hands them over with `setShapes`). */
 export {
 	captureBandwidthHz,
 	createIqCaptureService,

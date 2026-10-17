@@ -92,7 +92,12 @@ type Behaviour = "write" | "silent"
 
 async function setup(
 	over: Partial<IqCaptureServiceOptions> = {},
-	opts: { behaviour?: Behaviour; samples?: number; enoent?: boolean } = {},
+	opts: {
+		behaviour?: Behaviour
+		samples?: number
+		enoent?: boolean
+		noShapes?: boolean
+	} = {},
 ) {
 	const root = path.join(base, `r${n++}`)
 	await fsp.mkdir(root)
@@ -129,7 +134,7 @@ async function setup(
 		storageRoot: root,
 		protectedMode: true,
 		logger,
-		shapes: SHAPES,
+		...(opts.noShapes ? {} : { shapes: SHAPES }),
 		now: () => timers.t + 1_000_000,
 		spawn: sp.spawn,
 		randomUUID: () => {
@@ -419,6 +424,84 @@ describe("IqCaptureService capture flow", () => {
 		expect("captureId" in b && s.svc.view(b.captureId)).toBeNull()
 		expect(s.svc.counters().discarded["orphan-ttl"]).toBe(1)
 		await s.svc.stop()
+	})
+
+	it("orphan TTL is exact: kept at 599 999 ms after its finish, discarded at 600 000 ms", async () => {
+		const s = await setup()
+		await running(s)
+		const a = s.svc.capture(req())
+		await flush(10)
+		const cid = "captureId" in a ? a.captureId : ""
+		expect(s.svc.view(cid)).not.toBeNull()
+		s.timers.advance(599_999)
+		expect(s.svc.view(cid)).not.toBeNull()
+		s.timers.advance(1)
+		expect(s.svc.view(cid)).toBeNull()
+		expect(s.svc.counters().discarded["orphan-ttl"]).toBe(1)
+		await s.svc.stop()
+	})
+
+	it("orphan TTL re-arms for a later capture after an earlier one is gone", async () => {
+		const s = await setup()
+		await running(s)
+		const a = s.svc.capture(req())
+		await flush(10)
+		s.timers.advance(1000)
+		const b = s.svc.capture(req({ observationId: "other" }))
+		await flush(10)
+		const bid = "captureId" in b ? b.captureId : ""
+		expect("captureId" in a && s.svc.confirmLive("src", "obs")).toBe(1)
+		s.timers.advance(599_999)
+		expect(s.svc.view(bid)).not.toBeNull()
+		s.timers.advance(1)
+		expect(s.svc.view(bid)).toBeNull()
+		await s.svc.stop()
+	})
+
+	it("confirmLive on a capture still being written ends it and counts it confirmed-live", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const a = s.svc.capture(req())
+		const cid = "captureId" in a ? a.captureId : ""
+		expect(s.svc.confirmLive("src", "obs")).toBe(1)
+		expect(child.commands()).toContainEqual({ type: "end", id: cid })
+		// The tool finishes the file after the end command: discarded, not queued.
+		const outDir = child.args[child.args.indexOf("--out-dir") + 1] ?? ""
+		fs.writeFileSync(path.join(outDir, `${cid}.cf32`), Buffer.alloc(800), {
+			mode: 0o600,
+		})
+		const finished: string[] = []
+		s.svc.onFinished(v => finished.push(v.captureId))
+		child.event({ type: "captured", id: cid, samples: 100, gapSamples: 0 })
+		await flush(10)
+		expect(finished).toEqual([])
+		expect(s.svc.view(cid)).toBeNull()
+		expect(s.svc.counters().discarded["confirmed-live"]).toBe(1)
+		expect(s.svc.counters().failed).toBe(0)
+		expect(fs.readdirSync(outDir)).toEqual([])
+		// An aborted one counts the same.
+		const b = s.svc.capture(req({ reason: "identify" }))
+		const bid = "captureId" in b ? b.captureId : ""
+		expect(s.svc.confirmLive("src", "obs")).toBe(1)
+		child.event({ type: "aborted", id: bid, reason: "bound" })
+		await flush(10)
+		expect(s.svc.counters().discarded["confirmed-live"]).toBe(2)
+		expect(s.svc.counters().failed).toBe(0)
+		await s.svc.stop()
+	})
+
+	it("shapes may be set after construction, before start; without them capture is off", async () => {
+		const late = await setup({}, { noShapes: true })
+		late.svc.setShapes(SHAPES)
+		await running(late)
+		expect(late.svc.state()).toBe("on")
+		expect(late.svc.capture(req())).toHaveProperty("captureId")
+		await late.svc.stop()
+		const none = await setup({}, { noShapes: true })
+		await running(none)
+		expect(none.svc.state()).toBe("unavailable")
+		expect(none.sp.children).toEqual([])
+		await none.svc.stop()
 	})
 
 	it("a capture with no tool answer is dropped after its bound plus grace", async () => {

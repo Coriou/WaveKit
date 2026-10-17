@@ -95,8 +95,11 @@ export interface IqCaptureServiceOptions {
 	/** True only in protected access mode. */
 	protectedMode: boolean
 	logger: Logger
-	/** Replay shapes per decoder type; the capture bandwidth is their widest passband. */
-	shapes: IqReplayShapes
+	/**
+	 * Replay shapes per decoder type; the capture bandwidth is their widest passband. May be given
+	 * later through `setShapes` (the scanner owns them), but before `start`.
+	 */
+	shapes?: IqReplayShapes
 	now?: () => number
 	spawn?: SpawnFn
 	randomUUID?: () => string
@@ -127,6 +130,8 @@ export interface IqCaptureService extends IqCapturePort {
 	stop(): Promise<void>
 	/** Ensures the directory and removes leftovers of an earlier run (idempotent; off → no-op). */
 	sweep(): Promise<SweepResult>
+	/** Sets the replay shapes (before `start`; ignored once started). */
+	setShapes(shapes: IqReplayShapes): void
 	attachSource(sourceId: string, source: IqCaptureSourceAttach): void
 	detachSource(sourceId: string): void
 	/**
@@ -153,7 +158,7 @@ export interface IqCaptureService extends IqCapturePort {
 		reason: IqCaptureDiscardReason,
 		holder?: string,
 	): boolean
-	/** Applies the orphan TTL now (also runs on a 10 s timer). */
+	/** Applies the orphan TTL now (also runs on a timer armed for the earliest deadline). */
 	expire(): number
 	state(): IqCaptureServiceState
 	counters(): IqCaptureServiceCounters
@@ -165,7 +170,6 @@ const RESTART_BASE_MS = 1_000
 const RESTART_MAX_MS = 30_000
 const GIVE_UP_FAILURES = 5
 const GIVE_UP_WINDOW_MS = 600_000
-const EXPIRE_INTERVAL_MS = 10_000
 /** A capture without `captured`/`aborted` this long after its bound is dropped. */
 const CAPTURE_GRACE_MS = 10_000
 const REPLAY_TIMEOUT_MS = 30_000
@@ -208,7 +212,8 @@ class Service implements IqCaptureService {
 	private readonly uid: number | null
 	private readonly cfg: IqCaptureConfig | undefined
 	private readonly root: string
-	private readonly bandwidthHz: number
+	private shapes: IqReplayShapes | null
+	private bandwidthHz = 0
 	private st: IqCaptureServiceState = "idle"
 	private dir: string | null = null
 	private store: IqCaptureStore | null = null
@@ -217,6 +222,7 @@ class Service implements IqCaptureService {
 	private readonly replays = new Map<string, Set<ChildProcess>>()
 	private readonly captureTimers = new Map<string, unknown>()
 	private expireTimer: unknown = null
+	private expireAt: number | null = null
 	private readonly unlinks = new Set<Promise<void>>()
 	private toolTotals: IqToolCounters = {
 		droppedBytes: 0,
@@ -241,12 +247,17 @@ class Service implements IqCaptureService {
 		this.uid = o.uid === undefined ? processUid() : o.uid
 		this.cfg = o.config?.enabled === true ? o.config : undefined
 		this.root = path.resolve(o.storageRoot)
-		this.bandwidthHz = captureBandwidthHz(o.shapes)
+		this.shapes = o.shapes ?? null
 		this.events.setMaxListeners(0)
 	}
 
 	state(): IqCaptureServiceState {
 		return this.st
+	}
+
+	setShapes(shapes: IqReplayShapes): void {
+		if (this.st !== "idle" || this.starting) return
+		this.shapes = shapes
 	}
 
 	start(): Promise<void> {
@@ -267,10 +278,13 @@ class Service implements IqCaptureService {
 		}
 		await this.sweep()
 		if (this.st !== "idle") return
-		if (!this.dir) {
+		if (!this.dir || !this.shapes) {
+			if (!this.shapes)
+				this.log.warn("IQ capture has no replay shapes; capture is off")
 			this.st = "unavailable"
 			return
 		}
+		this.bandwidthHz = captureBandwidthHz(this.shapes)
 		this.store = new IqCaptureStore({
 			capBytes: Math.min(
 				IQ_CAPTURE_TOTAL_MAX_BYTES,
@@ -282,7 +296,6 @@ class Service implements IqCaptureService {
 		})
 		this.st = "on"
 		for (const slot of this.slots.values()) this.spawnTool(slot)
-		this.armExpire()
 		this.log.info("IQ capture started")
 	}
 
@@ -322,6 +335,7 @@ class Service implements IqCaptureService {
 		this.st = "stopped"
 		if (this.expireTimer !== null) this.timers.clearTimeout(this.expireTimer)
 		this.expireTimer = null
+		this.expireAt = null
 		for (const t of this.captureTimers.values()) this.timers.clearTimeout(t)
 		this.captureTimers.clear()
 		const stops: Promise<void>[] = []
@@ -486,7 +500,9 @@ class Service implements IqCaptureService {
 	}
 
 	expire(): number {
-		return this.store?.expire() ?? 0
+		const n = this.store?.expire() ?? 0
+		this.armExpire()
+		return n
 	}
 
 	heldBytes(): number {
@@ -664,20 +680,20 @@ class Service implements IqCaptureService {
 	confirmLive(sourceId: string, observationId: string): number {
 		const store = this.store
 		if (!store) return 0
-		let n = 0
-		for (const e of store.all()) {
-			if (
-				e.state === "capturing" &&
-				e.sourceId === sourceId &&
-				e.observationId === observationId
-			) {
-				// Still being written: nothing replayed it yet, so it is moot too.
-				this.endCapture(e)
-				store.fail(e.captureId)
-				n++
-			}
-		}
-		return n + store.confirmLive(sourceId, observationId)
+		// Still being written: the store marks it confirmed-live and drops it when the tool
+		// finishes or aborts it; ending it now makes that prompt.
+		const writing = store
+			.all()
+			.filter(
+				e =>
+					e.state === "capturing" &&
+					e.pendingDiscard === null &&
+					e.sourceId === sourceId &&
+					e.observationId === observationId,
+			)
+		const n = store.confirmLive(sourceId, observationId)
+		for (const e of writing) this.endCapture(e)
+		return n
 	}
 
 	openReplay(
@@ -701,9 +717,11 @@ class Service implements IqCaptureService {
 		const cfg = this.cfg
 		if (!store || !cfg || this.st !== "on" || !this.dir) return null
 		if (decoderType === "rtl433") return null
-		const shape = Object.hasOwn(this.o.shapes, decoderType)
-			? this.o.shapes[decoderType]
-			: undefined
+		const shapes = this.shapes
+		const shape =
+			shapes && Object.hasOwn(shapes, decoderType)
+				? shapes[decoderType]
+				: undefined
 		if (!shape) return null
 		const e = store.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
@@ -911,6 +929,7 @@ class Service implements IqCaptureService {
 			store.discard(ev.id, "invalid")
 			return
 		}
+		this.armExpire()
 		this.proveFinished(ev.id, e.bytes)
 	}
 
@@ -965,13 +984,29 @@ class Service implements IqCaptureService {
 			proc.counters[k] = 0
 	}
 
+	/**
+	 * Property 11: one timer armed for the earliest orphan deadline, so a capture is discarded
+	 * exactly IQ_CAPTURE_ORPHAN_TTL_MS after its finish (no polling slack). Re-armed whenever a
+	 * capture finishes and after every expiry pass.
+	 */
 	private armExpire(): void {
-		this.expireTimer = this.timers.setTimeout(() => {
-			this.expireTimer = null
-			if (this.st !== "on") return
-			this.expire()
-			this.armExpire()
-		}, EXPIRE_INTERVAL_MS)
+		const store = this.store
+		const at = this.st === "on" && store ? store.nextExpiryAt() : null
+		if (at === this.expireAt && (at === null || this.expireTimer !== null))
+			return
+		if (this.expireTimer !== null) this.timers.clearTimeout(this.expireTimer)
+		this.expireTimer = null
+		this.expireAt = at
+		if (at === null) return
+		this.expireTimer = this.timers.setTimeout(
+			() => {
+				this.expireTimer = null
+				this.expireAt = null
+				if (this.st !== "on") return
+				this.expire()
+			},
+			Math.max(0, at - this.now()),
+		)
 	}
 
 	private onRemove(
