@@ -11,6 +11,7 @@ import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
 import { ReceiverStore } from "./receiver-store.ts"
 import { SavedFrequenciesStore } from "./saved-frequencies-store.ts"
+import { ScannerStore } from "./scanner-store.ts"
 import { SourcesStore } from "./sources-store.ts"
 import { Store } from "./store.ts"
 import { TunerStore } from "./tuner-store.ts"
@@ -35,6 +36,8 @@ export interface DataLayer {
 	identify: IdentifyStore
 	/** Saved frequencies (core operator data; protected mode only). */
 	savedFrequencies: SavedFrequenciesStore
+	/** Scanner status, jobs (sweep, passive, progress) and band plans; discoveries load on first refreshDiscoveries(). */
+	scanner: ScannerStore
 	/** Detects the access mode, opens /ws and loads every store. Never rejects. */
 	start(): Promise<void>
 	dispose(): void
@@ -78,6 +81,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		bandplan: new BandplanStore(api, events),
 		identify: new IdentifyStore(api, events),
 		savedFrequencies: new SavedFrequenciesStore(api, events),
+		scanner: new ScannerStore(api, events),
 		async start() {
 			try {
 				access.set({ access: await api.bootstrap(), error: null })
@@ -92,6 +96,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 				layer.bandplan.load(),
 				layer.receiver.loadRelay(),
 				layer.savedFrequencies.load(),
+				layer.scanner.load(),
 			])
 		},
 		dispose() {
@@ -103,6 +108,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.bandplan.dispose()
 			layer.identify.dispose()
 			layer.savedFrequencies.dispose()
+			layer.scanner.dispose()
 			events.disconnect()
 		},
 	}
@@ -180,3 +186,46 @@ export type {
 	SavedFrequencyRow,
 } from "./saved-frequencies-store.ts"
 export type { IdentifyOptions, IdentifyState } from "./identify-store.ts"
+export {
+	ScannerStore,
+	absorbedBy,
+	deriveJobs,
+	discoveryComparator,
+	matchesDiscoveryQuery,
+	planIssues,
+	progressOfJob,
+	takeoverImpact,
+} from "./scanner-store.ts"
+export type {
+	DiscoveryOperatorPatch,
+	DiscoveryPage,
+	DiscoveryQuery,
+	DiscoverySort,
+	PatchJobResult,
+	ScannerDiscoveriesState,
+	ScannerListenResult,
+	ScannerState,
+	ScannerStoreOptions,
+} from "./scanner-store.ts"
+export {
+	confidenceCapText,
+	confidenceRank,
+	confidenceText,
+	discoveryTitle,
+	formatWait,
+	heldFrequencyHz,
+	identityQuery,
+	identityText,
+	isJobActive,
+	jobStateLine,
+	jobTone,
+	protocolName,
+	sweepProgress,
+	trialOutcomeText,
+	undecodedReasonText,
+} from "./scanner-format.ts"
+export type {
+	JobStateLineOptions,
+	JobTone,
+	SweepProgress,
+} from "./scanner-format.ts"

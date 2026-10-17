@@ -19,7 +19,11 @@ import type {
 	LiveAudioLevel,
 	LiveAudioStatus,
 	ScanJob,
+	ScannerActivityEventData,
+	ScannerDiscoveryEventData,
 	ScannerIdentifyEventData,
+	ScannerProgressEventData,
+	ScannerStatus,
 	SourceRemovedEventData,
 	SourceStatusEventData,
 	SpectrumFrameEventData,
@@ -79,6 +83,10 @@ export interface EventMap {
 	"live-audio:transmission": AnalogTransmissionEventData
 	"scanner:job": ScanJob
 	"scanner:identify": ScannerIdentifyEventData
+	"scanner:progress": ScannerProgressEventData
+	"scanner:discovery": ScannerDiscoveryEventData
+	"scanner:activity": ScannerActivityEventData
+	"scanner:status": ScannerStatus
 	"spectrum:profile": SpectrumProfileEventData
 	"spectrum:frame": SpectrumFrameEventData
 	"bandplans:changed": BandPlansChangedEventData
