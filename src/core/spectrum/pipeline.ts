@@ -1610,7 +1610,7 @@ export class SpectrumPipeline {
 			"SpectrumPipeline",
 		)
 		this.logger.warn(
-			"track ids exceed the frame track id bound; frame track fields omitted (shorten the source id)",
+			"track ids exceed the frame track id bound; frame track fields omitted (shorten or simplify the source id)",
 		)
 	}
 
