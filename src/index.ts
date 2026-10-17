@@ -1361,11 +1361,6 @@ async function main(): Promise<void> {
 			})
 			scannerConstructionSettled = true
 			scannerConstruction.completeConstruction({ ok: true })
-			// WG11 req 5.3: frame tracks carry the scanner's identity of a live track.
-			const identityScanner = scanner
-			identityScanner.spectrum.setTrackIdentityLookup((sourceId, trackId) =>
-				identityScanner.trackIdentity(sourceId, trackId),
-			)
 			await scanner.start()
 			checkpoint()
 		} catch (err) {
@@ -1951,10 +1946,7 @@ async function main(): Promise<void> {
 		// a still-open rtl_tcp socket (spec § 10.3).
 		shutdown.register({
 			name: "scanner",
-			handler: () => {
-				scanner?.spectrum.setTrackIdentityLookup(null)
-				return scannerPhases.producerSettled()
-			},
+			handler: scannerPhases.producerSettled,
 			timeout: 5000,
 		})
 

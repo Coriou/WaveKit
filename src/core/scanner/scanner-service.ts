@@ -676,6 +676,11 @@ export class ScannerService extends EventEmitter {
 					this.probes.watchEngine(sourceId, engine)
 				},
 			})
+			// WG11 req 5.3: frame tracks carry the scanner's identity of a live track (null-safe,
+			// owned here so the entry-point composition is unchanged).
+			this.spectrum.setTrackIdentityLookup((sourceId, trackId) =>
+				this.trackIdentity(sourceId, trackId),
+			)
 			this.store = new DiscoveryStore({
 				maxDiscoveries: deps.settings.storage.maxDiscoveries,
 				now: this.now,
