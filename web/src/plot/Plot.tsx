@@ -3,7 +3,8 @@
 // Click tunes (snapping to a signal), wheel steps, ctrl/⌘ + wheel and pinch zoom around the cursor, drag pans
 // (and retunes past the capture edge), arrows/PageUp/PageDown/+/−/0 on the focused plot. Dragging the VFO
 // tunes, its edges (once zoomed in) set the bandwidth, the dashed line sets the squelch (use-handles.ts). Shift-drag
-// marks a range and offers "Scan this range"; scanner discoveries tag the row under the band lanes.
+// marks a range and offers "Scan this range"; scanner discoveries tag the row under the band lanes. Right-click (long
+// press, or the menu key) opens the signal menu: Identify, Decode as…, Listen, Save (SignalMenu.tsx).
 import "./plot.css"
 
 import {
@@ -71,6 +72,11 @@ import {
 	type RangeSelection,
 } from "./range-select.ts"
 import { RANGE_OFFER_CLASS, RangeSelect } from "./RangeSelect.tsx"
+import {
+	SIGNAL_MENU_CLASS,
+	SignalMenu,
+	type SignalMenuAt,
+} from "./SignalMenu.tsx"
 
 export interface PlotProps {
 	data: DataLayer
@@ -170,6 +176,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	)
 	const hover = useMemo(() => new Store<Hover>(null), [])
 	const range = useMemo(() => new Store<RangeSelection | null>(null), [])
+	const sigMenu = useMemo(() => new Store<SignalMenuAt | null>(null), [])
 	const viewRef = useRef(view)
 	viewRef.current = view
 	useDiscoveryFetch(data.scanner, view)
@@ -245,7 +252,12 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	handleFrame.current = frame
 	const clearHover = useMemo(() => () => hover.set(null), [hover])
 	useHandles(bodyRef, handleFrame, handles, controller, clearHover)
-	useInteraction(bodyRef, controller, hover, size.w, range, viewRef)
+	const traceRef = useRef(layout.traceCss)
+	traceRef.current = layout.traceCss
+	useInteraction(bodyRef, controller, hover, size.w, range, viewRef, {
+		menu: sigMenu,
+		traceCss: traceRef,
+	})
 	const edgesShown =
 		bandwidthRange !== null &&
 		!readOnly &&
@@ -408,6 +420,15 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 						/>
 						<HoverLine hover={hover} />
 						<RangeSelect range={range} view={view} />
+						<SignalMenu
+							menu={sigMenu}
+							tunedHz={tuned}
+							widthPx={size.w}
+							heightPx={size.h}
+							onClose={refocus => {
+								if (refocus) bodyRef.current?.focus({ preventScroll: true })
+							}}
+						/>
 					</>
 				)}
 				{sourceId === null && (
@@ -645,6 +666,7 @@ function SignalLabels({
 				<div
 					key={l.hz}
 					className="wk-plot-sig"
+					data-hz={l.hz}
 					data-tuned={l.tuned ? "" : undefined}
 					data-unknown={l.known ? undefined : ""}
 					data-burst={burstAt.get(l.hz) ? "" : undefined}
@@ -727,6 +749,10 @@ function useInteraction(
 	widthPx: number,
 	range: Store<RangeSelection | null>,
 	viewRef: RefObject<SpectrumViewSpan | null>,
+	sig: {
+		menu: Store<SignalMenuAt | null>
+		traceCss: RefObject<number>
+	},
 ): void {
 	const widthRef = useRef(widthPx)
 	widthRef.current = widthPx
@@ -756,6 +782,12 @@ function useInteraction(
 		}
 
 		const onDown = (e: PointerEvent) => {
+			if (e.button === 0 && sig.menu.get()) {
+				// a press outside the open signal menu only closes it
+				if (!(e.target as Element).closest(`.${SIGNAL_MENU_CLASS}`))
+					sig.menu.set(null)
+				return
+			}
 			// Chips, the zoom control and the range offer handle their own presses.
 			if (
 				e.button !== 0 ||
@@ -854,7 +886,9 @@ function useInteraction(
 			if (!drag && !rangeDrag) hover.set(null)
 		}
 		const onWheel = (e: WheelEvent) => {
+			if ((e.target as Element).closest(`.${SIGNAL_MENU_CLASS}`)) return
 			e.preventDefault()
+			sig.menu.set(null)
 			const dy = wheelPixels(e.deltaY, e.deltaMode)
 			const dx = wheelPixels(e.deltaX, e.deltaMode)
 			if (e.ctrlKey || e.metaKey) {
@@ -874,6 +908,11 @@ function useInteraction(
 				return
 			}
 			if (e.target !== el) return
+			if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+				e.preventDefault()
+				openFromKey()
+				return
+			}
 			const action = keyAction(e.key, {
 				shift: e.shiftKey,
 				ctrl: e.ctrlKey,
@@ -883,6 +922,59 @@ function useInteraction(
 			if (action && controller.key(action)) e.preventDefault()
 		}
 
+		// Right-click, long press or the menu key: the signal menu at the signal under the pointer (a signal
+		// label: its own frequency; from the keyboard: the tuned frequency, at the VFO).
+		let keyedAt = 0
+		const openFromKey = () => {
+			const view = viewRef.current
+			const hz = controller.vfoHz()
+			if (!view || hz === null) return
+			const r = el.getBoundingClientRect()
+			const x = ((hz - view.startHz) / spanWidth(view)) * r.width
+			keyedAt = performance.now()
+			sig.menu.set({
+				hz,
+				x: Math.min(Math.max(0, x), r.width),
+				y: Math.round((sig.traceCss.current ?? 0) / 2),
+			})
+		}
+		const onMenu = (e: MouseEvent) => {
+			const target = e.target as Element
+			if (target.closest(`.${SIGNAL_MENU_CLASS}, .${RANGE_OFFER_CLASS}`)) return
+			e.preventDefault()
+			// the menu key already opened it (its keydown came first)
+			if (performance.now() - keyedAt < 500) return
+			if (drag) {
+				drag = null
+				delete el.dataset["dragging"]
+				void controller.endPan()
+			}
+			pointers.clear()
+			hover.set(null)
+			if (e.button !== 2 && e.clientX === 0 && e.clientY === 0) {
+				openFromKey()
+				return
+			}
+			const view = viewRef.current
+			if (!view) return
+			const r = el.getBoundingClientRect()
+			const x = e.clientX - r.left
+			const label = target.closest<HTMLElement>("[data-hz]")
+			const fromLabel = Number(label?.dataset["hz"])
+			// a label snaps like a click at its own frequency (the track's centre is not the channel)
+			const at =
+				label && Number.isFinite(fromLabel)
+					? (fromLabel - view.startHz) / spanWidth(view)
+					: x / Math.max(1, r.width)
+			const hz = controller.signalAt(Math.min(1, Math.max(0, at)), r.width)
+			if (hz === null) return
+			sig.menu.set({
+				hz,
+				x: Math.min(Math.max(0, x), r.width),
+				y: Math.min(Math.max(0, e.clientY - r.top), r.height),
+			})
+		}
+
 		el.addEventListener("pointerdown", onDown)
 		el.addEventListener("pointermove", onMove)
 		el.addEventListener("pointerup", onUp)
@@ -890,7 +982,9 @@ function useInteraction(
 		el.addEventListener("pointerleave", onLeave)
 		el.addEventListener("wheel", onWheel, { passive: false })
 		el.addEventListener("keydown", onKey)
+		el.addEventListener("contextmenu", onMenu)
 		return () => {
+			el.removeEventListener("contextmenu", onMenu)
 			el.removeEventListener("pointerdown", onDown)
 			el.removeEventListener("pointermove", onMove)
 			el.removeEventListener("pointerup", onUp)
@@ -899,5 +993,5 @@ function useInteraction(
 			el.removeEventListener("wheel", onWheel)
 			el.removeEventListener("keydown", onKey)
 		}
-	}, [ref, controller, hover, range, viewRef])
+	}, [ref, controller, hover, range, viewRef, sig.menu, sig.traceCss])
 }

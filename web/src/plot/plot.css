@@ -394,4 +394,26 @@
 		color: var(--wk-text-3);
 		pointer-events: none;
 	}
+
+	/* Right-click signal menu (SignalMenu.tsx): anchored at the pointer, opening towards the room left */
+	.wk-plot-sigmenu {
+		position: absolute;
+		width: 0;
+		height: 0;
+		z-index: 31;
+	}
+	.wk-plot-sigmenu-list {
+		position: absolute;
+		min-width: 248px;
+		display: flex;
+		flex-direction: column;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		cursor: default;
+		background: var(--wk-glass-strong);
+	}
+	.wk-plot-sigmenu-list .wk-option {
+		flex: none;
+		white-space: nowrap;
+	}
 }

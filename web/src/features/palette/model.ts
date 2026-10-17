@@ -191,6 +191,8 @@ export interface SaveAction {
 	readonly hz: number
 	readonly name: string
 	readonly group: string
+	/** A frequency other than the tuned one: its mode comes from the band plan, not live audio. */
+	readonly fromBand?: boolean
 }
 export interface ActivityAction {
 	readonly kind: "activity"

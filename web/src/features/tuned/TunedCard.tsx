@@ -24,8 +24,8 @@ import { Button } from "../../ui/Button.tsx"
 import { Icon, type IconName } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { Island } from "../../ui/Island.tsx"
-import { Kbd } from "../../ui/Kbd.tsx"
 import { Label } from "../../ui/Label.tsx"
+import { ActionMenu, type ActionMenuItem } from "../ActionMenu.tsx"
 import { formatDb, formatMHz, formatWidth } from "../format.ts"
 import { useLiveStatus, useNow, useSettledHz } from "../hooks.ts"
 import { showOnMap } from "../map/focus.ts"
@@ -194,82 +194,6 @@ function NowBlock({ now }: { now: NowView }) {
 				</div>
 			)}
 		</>
-	)
-}
-
-interface MenuItem {
-	label: string
-	icon: IconName
-	key?: string
-	/** Quiet text after the label (the decoder a protocol runs on). */
-	hint?: string
-	/** Picking it keeps the menu open (a submenu). */
-	stay?: boolean
-	pick: () => void
-}
-
-function MoreMenu({
-	items,
-	label = "More actions",
-	onClose,
-}: {
-	items: readonly MenuItem[]
-	label?: string
-	onClose: (refocus: boolean) => void
-}) {
-	const ref = useRef<HTMLDivElement>(null)
-	useEffect(() => {
-		ref.current?.querySelector<HTMLButtonElement>("button")?.focus()
-	}, [label])
-	useEffect(() => {
-		const away = (e: PointerEvent) => {
-			if (!ref.current?.parentElement?.contains(e.target as Node))
-				onClose(false)
-		}
-		document.addEventListener("pointerdown", away)
-		return () => document.removeEventListener("pointerdown", away)
-	}, [onClose])
-	return (
-		<div
-			ref={ref}
-			role="menu"
-			aria-label={label}
-			className="wk-menu wkf-card-menu"
-			onKeyDown={e => {
-				const list = [
-					...(ref.current?.querySelectorAll<HTMLButtonElement>("button") ?? []),
-				]
-				const at = list.indexOf(document.activeElement as HTMLButtonElement)
-				if (e.key === "Escape") {
-					e.preventDefault()
-					e.stopPropagation()
-					onClose(true)
-				} else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-					e.preventDefault()
-					const next =
-						(at + (e.key === "ArrowDown" ? 1 : -1) + list.length) % list.length
-					list[next]?.focus()
-				}
-			}}
-		>
-			{items.map(m => (
-				<button
-					key={m.label}
-					type="button"
-					role="menuitem"
-					className="wk-option"
-					onClick={() => {
-						if (!m.stay) onClose(true)
-						m.pick()
-					}}
-				>
-					<Icon name={m.icon} size={16} />
-					<span className="wkf-grow">{m.label}</span>
-					{m.hint && <span className="wkf-menu-hint">{m.hint}</span>}
-					{m.key && <Kbd>{m.key}</Kbd>}
-				</button>
-			))}
-		</div>
 	)
 }
 
@@ -585,7 +509,7 @@ export function TunedCard() {
 	const closeFull = () => setFullId(null)
 	const full = fullItem !== null && !idHere
 
-	const decodeItems: MenuItem[] = [
+	const decodeItems: ActionMenuItem[] = [
 		{
 			label: "Back",
 			icon: "chevron-left",
@@ -599,7 +523,7 @@ export function TunedCard() {
 			pick: () => startIdentify([p.id]),
 		})),
 	]
-	const menuItems: MenuItem[] = []
+	const menuItems: ActionMenuItem[] = []
 	if (!onIt)
 		menuItems.push({
 			label: `Tune to ${formatMHz(hz)}`,
@@ -843,7 +767,7 @@ export function TunedCard() {
 
 					<div className="wkf-actions">
 						{menu && (
-							<MoreMenu
+							<ActionMenu
 								items={menu === "decode" ? decodeItems : menuItems}
 								label={menu === "decode" ? "Decode as" : "More actions"}
 								onClose={refocus => {

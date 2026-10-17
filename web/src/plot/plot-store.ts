@@ -162,15 +162,21 @@ export class PlotController {
 		)
 	}
 
-	/** A click at screen x (0–1): snaps to the signal under it, else to the step raster. */
-	clickAt(x: number, widthPx: number): Promise<void> {
+	/** The frequency at screen x (0–1), snapped to the signal under it, else to the step raster. */
+	signalAt(x: number, widthPx: number): number | null {
 		const view = this.visibleSpan()
-		if (!view) return Promise.resolve()
+		if (!view) return null
 		const hz = view.startHz + x * spanWidth(view)
-		const snapped =
+		return (
 			snapToTrackChannel(hz, this.ctx.tracks, view, widthPx, this.ctx.stepHz) ??
 			snapToStep(hz, this.ctx.stepHz)
-		return this.tuneTo(snapped)
+		)
+	}
+
+	/** A click at screen x (0–1): tunes to `signalAt`. */
+	clickAt(x: number, widthPx: number): Promise<void> {
+		const hz = this.signalAt(x, widthPx)
+		return hz === null ? Promise.resolve() : this.tuneTo(hz)
 	}
 
 	/** `times` tuning steps up (dir 1) or down (dir −1). */

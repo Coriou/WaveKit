@@ -262,7 +262,9 @@ export async function runAction(
 				const input = saveInput(
 					{
 						hz: action.hz,
-						config: s.data.liveAudio.get().status?.config ?? null,
+						config: action.fromBand
+							? null
+							: (s.data.liveAudio.get().status?.config ?? null),
 						bandMode: modulationOf(band?.band.mode),
 					},
 					action.name,

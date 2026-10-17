@@ -399,6 +399,13 @@
 		font-size: var(--wk-fs-xs);
 		color: var(--wk-text-3);
 	}
+	.wkf-menu-head {
+		padding: 4px 10px 6px;
+		font-size: var(--wk-fs-xs);
+		font-variant-numeric: tabular-nums;
+		color: var(--wk-text-3);
+		white-space: nowrap;
+	}
 
 	/* Tuned card: the message opened in full (Decode board card, flat), scrolling inside the well */
 	.wkf-well[data-full] {
