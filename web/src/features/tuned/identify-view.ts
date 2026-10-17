@@ -134,6 +134,7 @@ const REASON: Readonly<
 	"unsupported-format": "unsupported format",
 	"no-ambient-decoder": "no decoder running here",
 	"decoder-unavailable": "decoder could not start",
+	"no-live-audio": "live audio was not on it",
 }
 
 export function trialRow(
