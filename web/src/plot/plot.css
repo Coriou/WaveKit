@@ -79,6 +79,22 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
+		/* label-gate.ts: a chip fades in, and fades out where it stood (LEAVE_MS) */
+		animation: wk-plot-sig-in 200ms ease-out;
+		transition: opacity 200ms ease-out;
+	}
+	.wk-plot-sig[data-leaving] {
+		opacity: 0;
+		pointer-events: none;
+	}
+	[data-wk-motion="reduce"] .wk-plot-sig {
+		animation: none;
+		transition: none;
+	}
+	@keyframes wk-plot-sig-in {
+		from {
+			opacity: 0;
+		}
 	}
 	.wk-plot-sig > button {
 		display: flex;

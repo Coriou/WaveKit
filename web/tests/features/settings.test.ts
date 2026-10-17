@@ -653,6 +653,26 @@ describe("Settings items", () => {
 		expect(byId(blank, "map.online").help).toContain("No tiles are fetched")
 	})
 
+	it("keeps Signal labels on this device, after the FFT size", async () => {
+		const a = actions()
+		const list = buildRows(snapshot(), a)
+		const ids = list.filter(r => r.device).map(r => r.id)
+		expect(ids[ids.indexOf("dp.fft") + 1]).toBe("dp.labels")
+		const labels = byId(list, "dp.labels")
+		expect(labels.text).toBe("Clear")
+		expect(labels.def?.value).toBe("clear")
+		await labels.write?.("named")
+		expect(a.calls).toContainEqual(["device", { signalLabels: "named" }])
+		const all = byId(
+			buildRows(
+				snapshot({ device: { ...DEFAULT_DEVICE, signalLabels: "all" } }),
+				a,
+			),
+			"dp.labels",
+		)
+		expect(all.help).toBe("Every signal WaveKit finds, even faint ones")
+	})
+
 	it("offers FFT sizes up to what this core serves, saying why the others cannot be picked", async () => {
 		const a = actions()
 		const list = buildRows(snapshot(), a)

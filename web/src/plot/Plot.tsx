@@ -17,7 +17,7 @@ import {
 } from "react"
 import type { ResolvedBandPlanView } from "@wavekit/api-types"
 
-import type { DataLayer } from "../data/index.ts"
+import type { DataLayer, SavedFrequencyRow } from "../data/index.ts"
 import { Store, tunedHz, useStore } from "../data/index.ts"
 import {
 	DEFAULT_LEVELS,
@@ -38,6 +38,7 @@ import {
 	freqTicks,
 	holdTracks,
 	keyAction,
+	namedChannelAt,
 	lanePieces,
 	pinchFactor,
 	placeLabels,
@@ -87,6 +88,13 @@ import {
 	SignalMenu,
 	type SignalMenuAt,
 } from "./SignalMenu.tsx"
+import {
+	EMPTY_LABEL_GATE,
+	gatedSignals,
+	stepLabelGate,
+	type GatedSignal,
+	type LabelGateState,
+} from "./label-gate.ts"
 
 export interface PlotProps {
 	data: DataLayer
@@ -147,6 +155,10 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const [engineError, setEngineError] = useState<string | null>(null)
 	const heldRef = useRef<{ track: Track; seenAt: number }[]>([])
 	const [tracks, setTracks] = useState<readonly Track[]>([])
+	// Settings › Signal labels: which signals get a chip, followed across frames (label-gate.ts)
+	const gateRef = useRef<LabelGateState>(EMPTY_LABEL_GATE)
+	const [labelled, setLabelled] = useState<readonly GatedSignal[]>([])
+	const savedItems = useStore(data.savedFrequencies, s => s.items)
 
 	const bodyRef = useRef<HTMLDivElement>(null)
 	const [size, setSize] = useState({ w: 0, h: 0 })
@@ -231,6 +243,19 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const layout = plotLayout(size.h, discRow ? DISCOVERY_ROW_CSS : 0)
 	const unverified = shownMeta?.tuningTrust === "unverified"
 
+	const gateCtx = useRef({
+		mode: device.signalLabels,
+		tunedHz: vfoHz,
+		plan,
+		saved: savedItems,
+	})
+	gateCtx.current = {
+		mode: device.signalLabels,
+		tunedHz: vfoHz,
+		plan,
+		saved: savedItems,
+	}
+
 	const onFrameMeta = (m: SpectrumFrameMeta) => {
 		setMeta(m)
 		setLevels(prev => autoLevels(m.floorDbfs, prev))
@@ -241,12 +266,23 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 			TRACK_HOLD_MS,
 		)
 		setTracks(heldRef.current.map(h => h.track))
+		const g = gateCtx.current
+		gateRef.current = stepLabelGate(gateRef.current, m, performance.now(), {
+			mode: g.mode,
+			tunedHz: g.tunedHz,
+			isNamed: (hz, widthHz) =>
+				namedChannelAt(g.plan, hz, widthHz) ||
+				savedNear(g.saved, hz, widthHz) !== null,
+		})
+		setLabelled(gatedSignals(gateRef.current))
 	}
 	const onStatus = (status: SpectrumEngineStatus) => {
 		if (status.type === "error") setEngineError(status.message)
 		if (status.type === "reset" && status.reason !== "profile") {
 			heldRef.current = []
 			setTracks([])
+			gateRef.current = EMPTY_LABEL_GATE
+			setLabelled([])
 		}
 	}
 
@@ -326,8 +362,9 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 							/>
 							<DbScale levels={levels} traceCss={layout.traceCss} />
 							<SignalLabels
-								tracks={tracks}
+								signals={labelled}
 								plan={plan}
+								saved={savedItems}
 								view={view}
 								widthPx={size.w}
 								traceCss={layout.traceCss}
@@ -644,9 +681,25 @@ const Lanes = memo(function Lanes({
 	)
 })
 
+/** A saved frequency on the signal, by its name. */
+function savedNear(
+	saved: readonly SavedFrequencyRow[],
+	hz: number,
+	widthHz: number,
+): SavedFrequencyRow | null {
+	const tol = Math.max(3000, widthHz / 2)
+	let best: SavedFrequencyRow | null = null
+	for (const f of saved) {
+		const d = Math.abs(f.frequencyHz - hz)
+		if (d <= tol && (!best || d < Math.abs(best.frequencyHz - hz))) best = f
+	}
+	return best
+}
+
 function SignalLabels({
-	tracks,
+	signals: gated,
 	plan,
+	saved,
 	view,
 	widthPx,
 	traceCss,
@@ -654,8 +707,9 @@ function SignalLabels({
 	tunedHz: tuned,
 	onPick,
 }: {
-	tracks: readonly Track[]
+	signals: readonly GatedSignal[]
 	plan: ResolvedBandPlanView | null
+	saved: readonly SavedFrequencyRow[]
 	view: SpectrumViewSpan
 	widthPx: number
 	traceCss: number
@@ -663,10 +717,25 @@ function SignalLabels({
 	tunedHz: number | null
 	onPick: (hz: number) => void
 }) {
-	const signals = useMemo(() => describeTracks(tracks, plan), [tracks, plan])
-	const burstAt = useMemo(
-		() => new Map(signals.map(s => [s.hz, s.burst])),
-		[signals],
+	const shown = useMemo(() => gated.filter(g => !g.leaving), [gated])
+	const signals = useMemo(
+		() =>
+			describeTracks(
+				shown.map(g => ({
+					startHz: g.hz - g.widthHz / 2,
+					endHz: g.hz + g.widthHz / 2,
+					flags: { burst: g.burst, iqImage: false, edge: false },
+					peakDb: g.peakDb,
+				})),
+				plan,
+			).map(s => {
+				// a saved frequency names the signal before the band plan does
+				const f = savedNear(saved, s.hz, s.widthHz)
+				return f
+					? { ...s, label: f.name, sub: formatMHz(s.hz, 3), known: true }
+					: s
+			}),
+		[shown, plan, saved],
 	)
 	const placed: PlacedLabel[] = useMemo(
 		() =>
@@ -680,20 +749,45 @@ function SignalLabels({
 			}),
 		[signals, view.startHz, view.endHz, widthPx, traceCss, levels, tuned],
 	)
+	// Each chip keyed by its followed signal; a leaving one fades where it last stood.
+	const lastAt = useRef(new Map<number, PlacedLabel & { burst: boolean }>())
+	const chips: (PlacedLabel & {
+		id: number
+		burst: boolean
+		leaving: boolean
+	})[] = []
+	const byHz = new Map(shown.map(g => [g.hz, g]))
+	for (const l of placed) {
+		const g = byHz.get(l.hz)
+		if (!g) continue
+		lastAt.current.set(g.id, { ...l, burst: g.burst })
+		chips.push({ ...l, id: g.id, burst: g.burst, leaving: false })
+	}
+	const live = new Set(gated.map(g => g.id))
+	for (const g of gated) {
+		if (!g.leaving) continue
+		const last = lastAt.current.get(g.id)
+		if (last) chips.push({ ...last, id: g.id, leaving: true })
+	}
+	for (const id of lastAt.current.keys())
+		if (!live.has(id)) lastAt.current.delete(id)
 	return (
 		<>
-			{placed.map(l => (
+			{chips.map(l => (
 				<div
-					key={l.hz}
+					key={l.id}
 					className="wk-plot-sig"
 					data-hz={l.hz}
 					data-tuned={l.tuned ? "" : undefined}
 					data-unknown={l.known ? undefined : ""}
-					data-burst={burstAt.get(l.hz) ? "" : undefined}
+					data-burst={l.burst ? "" : undefined}
+					data-leaving={l.leaving ? "" : undefined}
+					aria-hidden={l.leaving ? true : undefined}
 					style={{ left: l.x, top: l.top }}
 				>
 					<button
 						type="button"
+						tabIndex={l.leaving ? -1 : undefined}
 						aria-label={
 							l.known
 								? `Tune to ${l.label} ${formatMHz(l.hz, 4)} MHz`

@@ -37,6 +37,7 @@ import type {
 	Motion,
 	SpectrumRange,
 } from "../../shell/device-prefs.ts"
+import type { SignalLabelsMode } from "../../plot/label-gate.ts"
 import { FFT_SIZES, MAP_TRAILS, fftBins } from "../../shell/device-prefs.ts"
 import type { DisplayPrefs, TimeFormat, Units } from "../display.ts"
 import { DEFAULT_DISPLAY } from "../display.ts"
@@ -1018,6 +1019,16 @@ const RANGE_OPTS = opts([
 	["auto", "Auto"],
 	["fixed", "Fixed"],
 ])
+const SIGNAL_LABEL_OPTS = opts([
+	["named", "Named"],
+	["clear", "Clear"],
+	["all", "All"],
+])
+const SIGNAL_LABEL_HELP: Readonly<Record<SignalLabelsMode, string>> = {
+	named: "Only the tuned signal and named channels",
+	clear: "Named signals, and unknown ones that stand clear of the noise",
+	all: "Every signal WaveKit finds, even faint ones",
+}
 const AVERAGING_OPTS = opts([
 	["off", "Off"],
 	["low", "Low"],
@@ -1235,6 +1246,20 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			write: v => local(() => a.setDevice({ averaging: v as Averaging })),
 		},
 		fftRow(d, s.spectrumLimits, a),
+		{
+			id: "dp.labels",
+			group: "display",
+			label: "Signal labels",
+			help: SIGNAL_LABEL_HELP[d.signalLabels],
+			keys: words("signal labels tags chips names spectrum noise clutter"),
+			device: true,
+			widget: { kind: "seg", options: SIGNAL_LABEL_OPTS },
+			value: d.signalLabels,
+			text: optionText(SIGNAL_LABEL_OPTS, d.signalLabels),
+			def: { value: "clear", text: "Clear" },
+			write: v =>
+				local(() => a.setDevice({ signalLabels: v as SignalLabelsMode })),
+		},
 	)
 	rows.push({
 		id: "dev.density",

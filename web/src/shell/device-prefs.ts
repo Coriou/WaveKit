@@ -1,8 +1,9 @@
-// Display › On this device: density, motion, the spectrum's range, averaging and FFT size, and the Map's tiles,
+// Display › On this device: density, motion, the spectrum's range, averaging, FFT size and signal labels, and the Map's tiles,
 // trail length and labels (Settings › Map), persisted in localStorage and applied as data-wk-density /
 // data-wk-motion on <html>. Motion "system" resolves through prefers-reduced-motion, so CSS and code only ever
 // test data-wk-motion="reduce". Pure apart from the storage, element and media query passed in (tests use fakes).
 
+import { SIGNAL_LABELS, type SignalLabelsMode } from "../plot/label-gate.ts"
 import {
 	browserStorage,
 	type AttributeTarget,
@@ -67,6 +68,8 @@ export interface DevicePrefs {
 	readonly averaging: Averaging
 	/** Bins asked of the core; the core serves at most its limit (fftBins). */
 	readonly fftSize: FftSize
+	/** Which spectrum signals get a chip (plot/label-gate.ts). */
+	readonly signalLabels: SignalLabelsMode
 	readonly mapTiles: MapTiles
 	readonly mapTrail: MapTrail
 	readonly mapLabels: MapLabels
@@ -79,6 +82,7 @@ export const DEFAULT_DEVICE: DevicePrefs = {
 	fixedLevels: null,
 	averaging: "low",
 	fftSize: 8192,
+	signalLabels: "clear",
 	mapTiles: "online",
 	mapTrail: 15,
 	mapLabels: "normal",
@@ -136,6 +140,11 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 		fftSize: (FFT_SIZES as readonly unknown[]).includes(o["fftSize"])
 			? (o["fftSize"] as FftSize)
 			: DEFAULT_DEVICE.fftSize,
+		signalLabels: pick(
+			SIGNAL_LABELS,
+			o["signalLabels"],
+			DEFAULT_DEVICE.signalLabels,
+		),
 		mapTiles: pick(MAP_TILES, o["mapTiles"], DEFAULT_DEVICE.mapTiles),
 		mapTrail: (MAP_TRAILS as readonly unknown[]).includes(o["mapTrail"])
 			? (o["mapTrail"] as MapTrail)
@@ -223,6 +232,7 @@ export class DevicePrefsStore {
 			sameLevels(next.fixedLevels, prev.fixedLevels) &&
 			next.averaging === prev.averaging &&
 			next.fftSize === prev.fftSize &&
+			next.signalLabels === prev.signalLabels &&
 			next.mapTiles === prev.mapTiles &&
 			next.mapTrail === prev.mapTrail &&
 			next.mapLabels === prev.mapLabels

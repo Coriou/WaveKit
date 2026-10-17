@@ -187,6 +187,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.labels",
+		"Display",
+		"Signal labels",
+		"tags chips names spectrum noise clutter",
+		SETTINGS,
+	),
+	row(
 		"dev.card",
 		"Display",
 		"Tuned card position",
