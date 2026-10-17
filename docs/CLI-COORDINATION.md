@@ -1383,3 +1383,29 @@ Spec: [receiver-endpoints](specs/receiver-endpoints/requirements.md). Everything
 - Pi sdr-host `GET /api/status` adds `receiverId` (random per sdr-host process; not an authenticator) and `endpoints { iqPort, apiPort, addresses[] }` (best first: wired with carrier, then other, then Wi-Fi). `GET /api/host` interfaces add `speedMbps` and `defaultRouteMetric`. New api-types `SdrHostEndpoint`, `SdrHostEndpoints`. Core's `SdrHostStatus` (`/api/resources`) is unchanged. Images announce `_wavekit-sdr._tcp` (8080) and `_http._tcp` (80) through avahi.
 - Core: `sources[].sdrHost.endpointSelection: auto | off` (optional, no default). With `auto` on an rtl_tcp source present at startup, core moves the IQ connection to a better address that the configured sdr-host lists itself, after checking that the address answers with the same `receiverId` and an `RTL0` header. It falls back to the configured host after three failures there within 10 minutes.
 - Source status (REST `/api/sources`, `/api/status`, WebSocket `source:status`) gains optional `endpoint: { configuredHost, activeHost, reason, at }` (`SourceEndpoint`, `sourceEndpointSchema`), only on sources with `auto`. `url` stays the configured address. CLI: `cli/source/data/guards.ts` `guardSource` picks known fields and ignores `endpoint` (tested); no CLI change needed. Web: show `activeHost` and `reason` when `endpoint` is present.
+
+#### URGENT for the web session: protected mode needs the session CSRF token — 2026-10-17
+
+Top priority for the web app (`claude/project-thread-afdtom`). Against a protected core, every unsafe request
+from the web app is refused with 403: click-to-tune (`PATCH /api/live-audio/config`,
+`POST /api/tuner/:id/frequency`), live audio stop, scanner job cancel and resume, and any settings save. A
+paired browser therefore cannot tune or stop a scan.
+
+Cause: `web/src/data/api-client.ts` sends `X-WaveKit-CSRF` only once a token is known, but nothing ever calls
+`setCsrfToken`. The session cookie is HttpOnly, so the token has to come from the API.
+
+Fix (web side, core already supports it):
+
+1. At startup, when `GET /api/access/bootstrap` reports a protected core with `sessionAvailable`, call
+   `GET /api/access/session` with `credentials: "include"`. On 200 the body is the `AccessSessionDto`
+   (`packages/api-types/src/access-pairing.ts`); pass its `csrfToken` to `setCsrfToken`. On 401 the browser is
+   not paired: show the pairing screen.
+2. After `POST /api/access/pair` (201) and `POST /api/access/session/refresh`, set the token from the response
+   body in the same way. Clear it on logout or a 401.
+3. Keep the token in memory only (never localStorage). Send it with `credentials: "include"` and the page
+   `Origin` on every unsafe method, scanner and live-audio routes included.
+4. A minimal pairing screen (enter the one-time code from `node dist/access-command.js pair …`) replaces the
+   console workaround. The contract and an example flow are in `docs/API.md` (Access, pairing).
+
+Core needs no change. A request with the cookie, `Origin` and `X-WaveKit-CSRF` from the session succeeds today
+(verified against a protected core: scanner cancel 200).
