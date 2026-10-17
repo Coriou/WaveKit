@@ -686,7 +686,24 @@ export interface MapMockContext {
 	now?: () => number
 	/** Simulation step, ms. Default 1000. */
 	tickMs?: number
+	/** Fleet multiplier for load tests (WAVEKIT_MOCK_LOAD): each entity gets `load - 1` seeded copies. Default 1. */
+	load?: number
 }
+
+/** `items` plus `load - 1` copies of each, made distinct by `copy(item, k)` (k from 1). */
+export function multiplyFleet<T>(
+	items: readonly T[],
+	load: number,
+	copy: (item: T, k: number) => T,
+): T[] {
+	const n = Math.max(1, Math.floor(load))
+	const out = [...items]
+	for (let k = 1; k < n; k++) for (const item of items) out.push(copy(item, k))
+	return out
+}
+
+const hexSuffix = (id: string, k: number): string =>
+	(id.slice(0, -2) + (k & 0xff).toString(16).padStart(2, "0")).toUpperCase()
 
 export interface MapMock {
 	/** Runs one simulation step now (tests). */
@@ -706,10 +723,37 @@ export function registerMapMock(
 	const startedAt = now()
 	const t = () => (now() - startedAt) / 1000
 
-	const aircraft = makeAircraft()
-	const vessels = makeVessels()
-	const aprs = makeAprs()
-	const mesh = makeMesh()
+	const load = ctx.load ?? 1
+	const aircraft = multiplyFleet(makeAircraft(), load, (a, k) => ({
+		...a,
+		icao: hexSuffix(a.icao, k),
+		callsign: `${a.callsign.slice(0, 5)}${k}`,
+		trk: (a.trk + k * 37) % 360,
+		lat: a.lat + ((k * 0.13) % 0.9) - 0.45,
+		lon: a.lon + ((k * 0.29) % 1.4) - 0.7,
+	}))
+	const vessels = multiplyFleet(makeVessels(), load, (v, k) => ({
+		...v,
+		mmsi: `${v.mmsi.slice(0, -2)}${String(k).padStart(2, "0")}`,
+		name: `${v.name} ${k}`,
+		phaseS: v.phaseS + k * 97,
+	}))
+	const aprs = multiplyFleet(makeAprs(), load, (s, k) => ({
+		...s,
+		callsign: `${s.callsign}-${k}`,
+		a: [
+			s.a[0] + ((k * 0.07) % 0.3) - 0.15,
+			s.a[1] + ((k * 0.11) % 0.4) - 0.2,
+		] as const,
+	}))
+	const mesh = multiplyFleet(makeMesh(), load, (m, k) => ({
+		...m,
+		nodeId: `${m.nodeId.slice(0, -2)}${(k & 0xff).toString(16).padStart(2, "0")}`,
+		a: [
+			m.a[0] + ((k * 0.05) % 0.2) - 0.1,
+			m.a[1] + ((k * 0.09) % 0.3) - 0.15,
+		] as const,
+	}))
 
 	// per-entity bookkeeping: message counts, first seen, last report, last broadcast
 	const firstSeen = new Map<string, number>()

@@ -8,7 +8,7 @@
  * answers the view with the route-not-found 404 (code NOT_FOUND, not DECODER_NOT_FOUND) and the
  * PATCH with 501 DECODER_CONFIG_UPDATE_UNSUPPORTED: `available` is then false.
  */
-import { z } from "zod"
+import { z } from "zod/v4"
 import type {
 	DecoderLog,
 	DecoderLogLine,

@@ -4,7 +4,7 @@
  * yaml values are pinned against UI writes (409 STATION_FIELD_PINNED). PATCH is mounted only by a
  * protected core (`writable: true` in the identity); a legacy core serves the GET alone.
  */
-import { z } from "zod"
+import { z } from "zod/v4"
 import { STATION_FIELDS } from "@wavekit/api-types"
 import type {
 	StationField,

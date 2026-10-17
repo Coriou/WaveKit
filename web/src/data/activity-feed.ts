@@ -11,7 +11,7 @@ import type {
 	ActivitySearchPage,
 	ActivitySummary,
 } from "@wavekit/api-types"
-import { z } from "zod"
+import { z } from "zod/v4"
 
 import type { ApiClient, QueryValue } from "./api-client.ts"
 import { errorMessage, validated } from "./api-client.ts"
