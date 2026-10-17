@@ -83,6 +83,8 @@ export class SpectrumEngine {
 	private layout: SpectrumLayout
 	private latestMeta: SpectrumFrameMeta | null = null
 	private disposed = false
+	private probeSeq = 0
+	private readonly probes = new Map<number, (db: number | null) => void>()
 
 	constructor(canvas: HTMLCanvasElement, opts: SpectrumEngineOptions = {}) {
 		this.canvas = canvas
@@ -178,6 +180,16 @@ export class SpectrumEngine {
 		else this.post({ type: "resize", size })
 	}
 
+	/** The newest row's peak dBFS over [startHz, endHz] (hover readout); null when nothing is there. */
+	probe(startHz: number, endHz: number): Promise<number | null> {
+		if (this.disposed) return Promise.resolve(null)
+		const id = ++this.probeSeq
+		return new Promise(resolve => {
+			this.probes.set(id, resolve)
+			this.post({ type: "probe", id, startHz, endHz })
+		})
+	}
+
 	/** Per-frame axis meta, at most ~10 per second. Returns an unsubscribe function. */
 	onFrameMeta(cb: (meta: SpectrumFrameMeta) => void): () => void {
 		this.metaListeners.add(cb)
@@ -203,6 +215,8 @@ export class SpectrumEngine {
 		this.scene = null
 		this.metaListeners.clear()
 		this.statusListeners.clear()
+		for (const resolve of this.probes.values()) resolve(null)
+		this.probes.clear()
 	}
 
 	private post(msg: MainToWorker, transfer: Transferable[] = []): void {
@@ -228,6 +242,10 @@ export class SpectrumEngine {
 				this.latestMeta = null
 				this.scene?.reset()
 				this.emitStatus(msg)
+				return
+			case "probe":
+				this.probes.get(msg.id)?.(msg.db)
+				this.probes.delete(msg.id)
 				return
 			case "connection":
 			case "profile":

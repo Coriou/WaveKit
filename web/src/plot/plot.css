@@ -280,6 +280,74 @@
 	.wk-plot-vfo[data-pending]::after {
 		background: rgba(var(--wk-accent-rgb), 0.4);
 	}
+	.wk-plot-vfo[data-active] {
+		background: rgba(var(--wk-accent-rgb), 0.16);
+	}
+
+	/* Grab handles (use-handles.ts hit-tests them; the elements below never take the pointer) */
+	.wk-plot-body[data-handle="vfo"] {
+		cursor: grab;
+	}
+	.wk-plot-body[data-handle-drag="vfo"] {
+		cursor: grabbing;
+	}
+	.wk-plot-body[data-handle^="edge"],
+	.wk-plot-body[data-handle-drag^="edge"] {
+		cursor: ew-resize;
+	}
+	.wk-plot-body[data-handle="squelch"],
+	.wk-plot-body[data-handle-drag="squelch"] {
+		cursor: ns-resize;
+	}
+	.wk-plot-vfo-edge {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 10px;
+		display: flex;
+		justify-content: center;
+		outline: none;
+	}
+	.wk-plot-vfo-edge[data-side="left"] {
+		left: -5px;
+	}
+	.wk-plot-vfo-edge[data-side="right"] {
+		right: -5px;
+	}
+	.wk-plot-vfo-edge::before {
+		content: "";
+		width: 2px;
+		height: 100%;
+		background: rgba(var(--wk-accent-rgb), 0.55);
+	}
+	.wk-plot-vfo-edge:focus-visible::before {
+		width: 3px;
+		background: var(--wk-accent);
+	}
+	.wk-plot-sq {
+		position: absolute;
+		height: 0;
+		border-top: 1px dashed rgba(var(--wk-amber-rgb), 0.75);
+		pointer-events: none;
+		outline: none;
+	}
+	.wk-plot-sq[data-auto] {
+		border-top-color: rgba(var(--wk-amber-rgb), 0.5);
+	}
+	.wk-plot-sq > span {
+		position: absolute;
+		right: 0;
+		top: -17px;
+		font-family: var(--wk-font-head);
+		font-size: 11px;
+		letter-spacing: 0.1em;
+		color: var(--wk-amber);
+		white-space: nowrap;
+	}
+	.wk-plot-sq:focus-visible {
+		border-top-style: solid;
+		box-shadow: 0 0 0 2px rgba(var(--wk-amber-rgb), 0.35);
+	}
 	.wk-plot-hover {
 		position: absolute;
 		top: 0;

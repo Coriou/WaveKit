@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, type RefObject } from "react"
 import { SpectrumEngine, type SpectrumEngineStatus } from "./engine.ts"
 import type {
 	SpectrumFrameMeta,
@@ -29,8 +29,16 @@ export interface SpectrumCanvasProps {
 	ramp?: Uint8Array
 	onFrameMeta?: (meta: SpectrumFrameMeta) => void
 	onStatus?: (status: SpectrumEngineStatus) => void
+	/** Filled with the engine's level probe while mounted (hover readout); null otherwise. */
+	probeRef?: RefObject<SpectrumProbe | null>
 	className?: string
 }
+
+/** The newest row's peak dBFS over [startHz, endHz], null when no row covers it. */
+export type SpectrumProbe = (
+	startHz: number,
+	endHz: number,
+) => Promise<number | null>
 
 const fill = { position: "relative", width: "100%", height: "100%" } as const
 const THEME_ATTRIBUTES = [
@@ -78,6 +86,9 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 			ramp: initial.ramp ?? rampFromTheme(host),
 		})
 		engineRef.current = engine
+		const probeRef = initial.probeRef
+		if (probeRef)
+			probeRef.current = (startHz, endHz) => engine.probe(startHz, endHz)
 		const offMeta = engine.onFrameMeta(meta =>
 			propsRef.current.onFrameMeta?.(meta),
 		)
@@ -109,6 +120,7 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 		return () => {
 			observer.disconnect()
 			themeObserver.disconnect()
+			if (probeRef) probeRef.current = null
 			offMeta()
 			offStatus()
 			engine.dispose()

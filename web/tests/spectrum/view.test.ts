@@ -6,6 +6,7 @@ import {
 	HISTORY_MAX_ROWS,
 	HISTORY_MIN_ROWS,
 	hzToX,
+	levelOver,
 	panView,
 	splitHeight,
 	texMapping,
@@ -121,5 +122,30 @@ describe("historyDepth", () => {
 			const band = Math.round(h * 0.6 * dpr)
 			expect(visibleRows(band, dpr, depth)).toBe(Math.round(band / dpr))
 		}
+	})
+})
+
+describe("levelOver (hover readout)", () => {
+	// bins of 1 kHz from 100.000 MHz; byte v ↔ v / 2 − 127.5 dBFS
+	const ax = { startHz: 100_000_000, binHz: 1000, binCount: 6 }
+	const row = Uint8Array.from([10, 20, 100, 40, 50, 60])
+
+	it("reads the peak over the bins a span covers", () => {
+		expect(levelOver(row, ax, 100_000_500, 100_003_500)).toBe(100 / 2 - 127.5)
+		expect(levelOver(row, ax, 100_003_000, 100_005_000)).toBe(50 / 2 - 127.5)
+	})
+
+	it("reads the bin under a span narrower than a bin", () => {
+		expect(levelOver(row, ax, 100_001_200, 100_001_400)).toBe(20 / 2 - 127.5)
+		expect(levelOver(row, ax, 100_004_400, 100_004_400)).toBe(50 / 2 - 127.5)
+	})
+
+	it("clamps to the row and answers null off it", () => {
+		expect(levelOver(row, ax, 99_990_000, 100_000_900)).toBe(10 / 2 - 127.5)
+		expect(levelOver(row, ax, 99_990_000, 99_999_000)).toBeNull()
+		expect(levelOver(row, ax, 100_006_000, 100_007_000)).toBeNull()
+		expect(levelOver(row, { ...ax, binHz: 0 }, 100_000_000, 100_001_000)).toBe(
+			null,
+		)
 	})
 })

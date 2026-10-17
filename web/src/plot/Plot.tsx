@@ -1,7 +1,8 @@
 // The plot (docs/web/canvas/Spectrum.dc.html, DESIGN.md "Spectrum interaction"): spectrum trace and waterfall drawn
 // by the spectrum worker, with DOM overlays updated from frame meta (≤ 10/s) and the stores, never per bin.
 // Click tunes (snapping to a signal), wheel steps, ctrl/⌘ + wheel and pinch zoom around the cursor, drag pans
-// (and retunes past the capture edge), arrows/PageUp/PageDown/+/−/0 on the focused plot.
+// (and retunes past the capture edge), arrows/PageUp/PageDown/+/−/0 on the focused plot. Dragging the VFO
+// tunes, its edges (once zoomed in) set the bandwidth, the dashed line sets the squelch (use-handles.ts).
 import "./plot.css"
 
 import {
@@ -48,6 +49,13 @@ import {
 } from "./maths.ts"
 import { PlotController, type PlotContext } from "./plot-store.ts"
 import { AXIS_CSS, LANES_CSS, plotLayout } from "./layout.ts"
+import { isReadOnly } from "../app/context.ts"
+import { modeSpec } from "../features/tuner/modes.ts"
+import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
+import { SquelchLine, VfoEdges } from "./HandleOverlays.tsx"
+import { EDGE_GRAB_MIN_PX } from "./handles.ts"
+import { useHandles, type HandleFrame } from "./use-handles.ts"
+import type { SpectrumProbe } from "../spectrum/index.ts"
 
 export interface PlotProps {
 	data: DataLayer
@@ -82,6 +90,20 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		[data],
 	)
 	const plotState = useStore(controller.store)
+	const readOnly = useStore(data.access, isReadOnly)
+	// VFO, band-edge and squelch-line drags (handles.ts), written through the islands' paths.
+	const handles = useMemo(
+		() =>
+			new HandleController({
+				tune: hz => controller.tuneTo(hz),
+				setBandwidth: bandwidth => data.liveAudio.setConfig({ bandwidth }),
+				setSquelch: squelch =>
+					data.liveAudio.setConfig({ squelchMode: "manual", squelch }),
+			}),
+		[controller, data],
+	)
+	const handleState = useStore(handles.store)
+	const probeRef = useRef<SpectrumProbe | null>(null)
 
 	const [meta, setMeta] = useState<SpectrumFrameMeta | null>(null)
 	// the scale follows the core's noise floor (frames carry floorDbfs)
@@ -133,8 +155,16 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	)
 	const hover = useMemo(() => new Store<Hover>(null), [])
 	const tuned = tunedHz(tuner, liveStatus)
-	const vfoHz = plotState.pendingHz ?? tuned
-	const bandwidthHz = liveStatus?.config.bandwidth ?? 12_500
+	const vfoHz = handleState.vfoHz ?? plotState.pendingHz ?? tuned
+	const bandwidthHz =
+		handleState.bandwidthHz ?? liveStatus?.config.bandwidth ?? 12_500
+	// The mode's limits; no edges without a live channel filter on this source (RAW, no live audio).
+	const bandwidthRange =
+		liveStatus &&
+		liveStatus.sourceId === sourceId &&
+		liveStatus.config.bandwidth > 0
+			? modeSpec(liveStatus.config.modulation).bw
+			: null
 	const step =
 		stepHz !== null && stepHz !== undefined && stepHz > 0
 			? stepHz
@@ -174,7 +204,29 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		}
 	}
 
+	const frame: HandleFrame = {
+		view,
+		widthPx: size.w,
+		traceCss: layout.traceCss,
+		levels,
+		vfoHz,
+		bandwidthHz,
+		bandwidthRange,
+		stepHz: step,
+		readOnly,
+		squelchDbfs: () =>
+			handles.store.get().squelchDbfs ?? squelchLineDbfs(data.liveAudio.get()),
+	}
+	const handleFrame = useRef(frame)
+	handleFrame.current = frame
+	const clearHover = useMemo(() => () => hover.set(null), [hover])
+	useHandles(bodyRef, handleFrame, handles, controller, clearHover)
 	useInteraction(bodyRef, controller, hover, size.w)
+	const edgesShown =
+		bandwidthRange !== null &&
+		!readOnly &&
+		view !== null &&
+		(bandwidthHz / spanWidth(view)) * size.w >= EDGE_GRAB_MIN_PX
 
 	const decimals = view ? readoutDecimals(spanWidth(view)) : 3
 	const ariaLabel =
@@ -202,6 +254,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 					layout={{ splitRatio: layout.splitRatio, gapCss: layout.gapCss }}
 					onFrameMeta={onFrameMeta}
 					onStatus={onStatus}
+					probeRef={probeRef}
 				/>
 				{size.w > 0 && view && (
 					<>
@@ -252,7 +305,14 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 										{formatMHz(vfoHz, decimals)}
 									</span>
 								)}
-							<HoverTag hover={hover} view={view} decimals={decimals} />
+							<HoverTag
+								hover={hover}
+								view={view}
+								decimals={decimals}
+								widthPx={size.w}
+								probeRef={probeRef}
+								tick={shownMeta?.at ?? null}
+							/>
 						</div>
 						<div
 							className="wk-plot-band wk-plot-lanes"
@@ -266,12 +326,34 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 								<div
 									className="wk-plot-vfo"
 									data-pending={plotState.pendingHz !== null ? "" : undefined}
+									data-active={handleState.active !== null ? "" : undefined}
 									style={{
 										left: `${pct(vfoHz, view)}%`,
 										width: `${(bandwidthHz / spanWidth(view)) * 100}%`,
 									}}
-								/>
+								>
+									{edgesShown && bandwidthRange && (
+										<VfoEdges
+											handles={handles}
+											bandwidthHz={bandwidthHz}
+											range={bandwidthRange}
+											readOnly={readOnly}
+										/>
+									)}
+								</div>
 							)}
+						<SquelchLine
+							liveAudio={data.liveAudio}
+							handles={handles}
+							preview={handleState.squelchDbfs}
+							view={view}
+							widthPx={size.w}
+							traceCss={layout.traceCss}
+							levels={levels}
+							vfoHz={vfoHz}
+							bandwidthHz={bandwidthHz}
+							readOnly={readOnly}
+						/>
 						<HoverLine hover={hover} />
 					</>
 				)}
@@ -308,24 +390,48 @@ function HoverLine({ hover }: { hover: Store<Hover> }) {
 	return <div className="wk-plot-hover" style={{ left: `${h.x * 100}%` }} />
 }
 
+/** Frequency and level under the cursor; the level is the newest row's peak over the pixel (worker probe). */
 function HoverTag({
 	hover,
 	view,
 	decimals,
+	widthPx,
+	probeRef,
+	tick,
 }: {
 	hover: Store<Hover>
 	view: SpectrumViewSpan
 	decimals: number
+	widthPx: number
+	probeRef: RefObject<SpectrumProbe | null>
+	/** Changes with each frame meta (≤ 10/s): the level is read again. */
+	tick: string | null
 }) {
 	const h = useStore(hover)
-	if (!h) return null
-	const hz = view.startHz + h.x * spanWidth(view)
+	const [db, setDb] = useState<number | null>(null)
+	const asked = useRef(0)
+	const hz = h ? view.startHz + h.x * spanWidth(view) : null
+	const halfPx = spanWidth(view) / Math.max(1, widthPx) / 2
+	useEffect(() => {
+		const probe = probeRef.current
+		if (hz === null || !probe) {
+			setDb(null)
+			return
+		}
+		// Replies arrive in order; a newer ask supersedes, but an older answer still shows meanwhile.
+		const seq = ++asked.current
+		void probe(hz - halfPx, hz + halfPx).then(v => {
+			if (seq === asked.current) setDb(v)
+		})
+	}, [hz, halfPx, tick, probeRef])
+	if (!h || hz === null) return null
 	return (
 		<span
 			className="wk-plot-chip wk-plot-hover-tag"
 			style={{ left: `${h.x * 100}%` }}
 		>
 			{formatMHz(hz, decimals + 1)} MHz
+			{db !== null && ` · ${String(Math.round(db)).replace("-", "−")} dB`}
 		</span>
 	)
 }

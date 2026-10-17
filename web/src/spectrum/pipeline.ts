@@ -21,6 +21,7 @@ import {
 } from "./protocol.ts"
 import type { SceneRenderer } from "./renderer.ts"
 import { SpectrumScene } from "./scene.ts"
+import { levelOver } from "./view.ts"
 import {
 	type FrameCancel,
 	type FrameRequest,
@@ -150,10 +151,26 @@ export class SpectrumPipeline {
 				)
 					this.pool.push(msg.buffer)
 				return
+			case "probe":
+				this.deps.post({
+					type: "probe",
+					id: msg.id,
+					db: this.probe(msg.startHz, msg.endHz),
+				})
+				return
 			case "dispose":
 				this.dispose()
 				return
 		}
+	}
+
+	/** The newest row's peak dBFS over [startHz, endHz]; null without a row there. */
+	probe(startHz: number, endHz: number): number | null {
+		const history = this.history
+		const axis = history?.axis
+		const row = history?.row(0)
+		if (!axis || !row) return null
+		return levelOver(row, axis, startHz, endHz)
 	}
 
 	/** Socket input. */

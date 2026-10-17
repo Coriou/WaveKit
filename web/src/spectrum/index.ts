@@ -4,7 +4,11 @@ export {
 	type SpectrumEngineOptions,
 	type SpectrumEngineStatus,
 } from "./engine.ts"
-export { SpectrumCanvas, type SpectrumCanvasProps } from "./spectrum-canvas.tsx"
+export {
+	SpectrumCanvas,
+	type SpectrumCanvasProps,
+	type SpectrumProbe,
+} from "./spectrum-canvas.tsx"
 export {
 	DEFAULT_LAYOUT,
 	DEFAULT_LEVELS,
@@ -26,6 +30,7 @@ export {
 	captureSpan,
 	coveredBins,
 	hzToX,
+	levelOver,
 	maxOverBins,
 	MAX_TAPS,
 	panView,

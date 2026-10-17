@@ -98,6 +98,8 @@ export type MainToWorker =
 	| { type: "resize"; size: SpectrumSize }
 	/** Fallback path: a row buffer the main thread has uploaded, back for reuse. */
 	| { type: "recycle"; buffer: ArrayBuffer }
+	/** The newest row's level over [startHz, endHz] (the hover readout); answered with a `probe`. */
+	| { type: "probe"; id: number; startHz: number; endHz: number }
 	| { type: "dispose" }
 
 export type WorkerToMain =
@@ -109,6 +111,8 @@ export type WorkerToMain =
 	| { type: "connection"; state: "connecting" | "open" | "closed" }
 	| { type: "profile"; outcome: string; code?: string; message?: string }
 	| { type: "error"; message: string }
+	/** Answer to a probe: the peak dBFS there, null when no row covers it. */
+	| { type: "probe"; id: number; db: number | null }
 
 export type ResetReason =
 	| "profile"

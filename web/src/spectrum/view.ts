@@ -4,6 +4,7 @@
  * hold RF frequencies to the Hz).
  */
 
+import { byteToDb } from "./codec.ts"
 import type { SpectrumViewSpan } from "./protocol.ts"
 
 export interface BinAxis {
@@ -174,6 +175,34 @@ export function historyDepth(
 	rowHeightCss = 1,
 ): number {
 	const px = Math.max(0, heightCss) * Math.max(dpr, 0.25)
-	const rows = Math.ceil(px / Math.max(rowHeightCss * Math.max(dpr, 0.25), 0.25))
+	const rows = Math.ceil(
+		px / Math.max(rowHeightCss * Math.max(dpr, 0.25), 0.25),
+	)
 	return Math.min(HISTORY_MAX_ROWS, Math.max(HISTORY_MIN_ROWS, rows))
+}
+
+/**
+ * Peak level (dBFS) of `row` over [startHz, endHz] on `axis`, or null when the span misses the row. A span
+ * narrower than a bin reads the bin under its middle. Byte v ↔ v / 2 − 127.5 dBFS.
+ */
+export function levelOver(
+	row: ArrayLike<number>,
+	axis: { startHz: number; binHz: number; binCount: number },
+	startHz: number,
+	endHz: number,
+): number | null {
+	const n = Math.min(axis.binCount, row.length)
+	if (!(axis.binHz > 0) || n <= 0) return null
+	const lo = Math.min(startHz, endHz)
+	const hi = Math.max(startHz, endHz)
+	let first = Math.floor((lo - axis.startHz) / axis.binHz)
+	let last = Math.ceil((hi - axis.startHz) / axis.binHz) - 1
+	if (last < first)
+		first = last = Math.floor(((lo + hi) / 2 - axis.startHz) / axis.binHz)
+	if (last < 0 || first >= n) return null
+	first = Math.max(0, first)
+	last = Math.min(n - 1, last)
+	let peak = 0
+	for (let i = first; i <= last; i++) peak = Math.max(peak, row[i] ?? 0)
+	return byteToDb(peak)
 }

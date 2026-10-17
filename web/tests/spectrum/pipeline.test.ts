@@ -189,3 +189,36 @@ describe("SpectrumPipeline (fallback path)", () => {
 		expect(t.ofType("row")[0]?.buffer.byteLength).toBe(MAX_BINS)
 	})
 })
+
+describe("SpectrumPipeline probe", () => {
+	it("answers with the newest row's peak, null before any row", () => {
+		const t = setup(true)
+		t.pipeline.handle({
+			type: "probe",
+			id: 1,
+			startHz: 445_000_000,
+			endHz: 445_001_000,
+		})
+		expect(t.ofType("probe")).toEqual([{ type: "probe", id: 1, db: null }])
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ bytes: [10, 20, 30, 40] }),
+		})
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ bytes: [50, 60, 70, 80] }),
+		})
+		// bins of 1 kHz from 445.000 MHz: [445.001, 445.003) covers bins 1 and 2 of the newest row
+		t.pipeline.handle({
+			type: "probe",
+			id: 2,
+			startHz: 445_001_000,
+			endHz: 445_003_000,
+		})
+		expect(t.ofType("probe")[1]).toEqual({
+			type: "probe",
+			id: 2,
+			db: 70 / 2 - 127.5,
+		})
+	})
+})
