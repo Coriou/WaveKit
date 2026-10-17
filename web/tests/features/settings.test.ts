@@ -44,6 +44,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 		calls,
 		setTheme: p => void calls.push(["theme", p]),
 		setStep: hz => void calls.push(["step", hz]),
+		setCardAt: id => void calls.push(["cardAt", id]),
 		setVolume: v => void calls.push(["volume", v]),
 		receiver: rec("receiver"),
 		manualGain: rec("manualGain"),
@@ -213,6 +214,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 		readOnly: false,
 		theme: { theme: "dark", ground: "black", accent: "mono" },
 		stepHz: null,
+		cardAt: "al",
 		volume: 0.8,
 		tuner: TUNER,
 		source: undefined,
@@ -541,6 +543,24 @@ describe("Settings items", () => {
 			"rx.direct",
 			"rx.offset",
 		])
+	})
+
+	it("offers the tuned card's three places, and where you left it", async () => {
+		const a = actions()
+		const named = byId(buildRows(snapshot(), a), "dev.card")
+		expect(named.text).toBe("Above Listen")
+		expect(named.device).toBe(true)
+		expect(
+			named.widget.kind === "select" && named.widget.options.map(o => o.label),
+		).toEqual(["Above Listen", "Bottom right", "Top right"])
+		const dragged = byId(buildRows(snapshot({ cardAt: "ml" }), a), "dev.card")
+		expect(dragged.text).toBe("Where you left it")
+		expect(
+			dragged.widget.kind === "select" &&
+				dragged.widget.options.map(o => o.value),
+		).toEqual(["al", "br", "tr", "ml"])
+		await dragged.write?.("tr")
+		expect(a.calls).toContainEqual(["cardAt", "tr"])
 	})
 
 	it("crumbs device rows and matches accents loosely", () => {

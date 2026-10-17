@@ -25,6 +25,7 @@ import type {
 	SettingWriteResult,
 	TunerRelayView,
 } from "../../data/index.ts"
+import type { CardAnchorId } from "../../shell/layout.ts"
 import type { ThemePrefs } from "../../shell/theme.ts"
 import { formatDb, formatRate, formatStep } from "../format.ts"
 import type { LiveAudioConfigPatch } from "../../data/live-audio-store.ts"
@@ -59,6 +60,8 @@ export interface SettingsSnapshot {
 	readonly readOnly: boolean
 	readonly theme: ThemePrefs
 	readonly stepHz: number | null
+	/** The anchor the tuned card wants (this browser only). */
+	readonly cardAt: CardAnchorId
 	readonly volume: number
 	readonly tuner: TunerState | undefined
 	readonly source: ExtendedSourceStatus | undefined
@@ -88,6 +91,7 @@ export interface SettingsSnapshot {
 export interface SettingsActions {
 	setTheme(patch: Partial<ThemePrefs>): void
 	setStep(hz: number | null): void
+	setCardAt(id: CardAnchorId): void
 	setVolume(volume: number): void
 	receiver(setting: ReceiverSetting): Promise<SettingWriteResult>
 	manualGain(tenthsDb: number): Promise<SettingWriteResult>
@@ -925,6 +929,13 @@ const ACCENT_OPTS = opts([
 	["coral", "Coral"],
 	["mono", "Mono"],
 ])
+// the canvas's three named places; any other anchor is one you dragged the card to
+const CARD_OPTS = opts([
+	["al", "Above Listen"],
+	["br", "Bottom right"],
+	["tr", "Top right"],
+])
+const CARD_OTHER = "Where you left it"
 
 function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const rows: SettingRow[] = []
@@ -1010,6 +1021,22 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 				local(() => a.setTheme({ accent: v as ThemePrefs["accent"] })),
 		},
 	)
+	const cardOpts = CARD_OPTS.some(o => o.value === s.cardAt)
+		? CARD_OPTS
+		: [...CARD_OPTS, { value: s.cardAt, label: CARD_OTHER }]
+	rows.push({
+		id: "dev.card",
+		group: "display",
+		label: "Tuned card position",
+		help: "Or drag the card by its icon",
+		keys: words("tuned card float move anchor above listen corner place"),
+		device: true,
+		widget: { kind: "select", options: cardOpts },
+		value: s.cardAt,
+		text: optionText(cardOpts, s.cardAt),
+		def: { value: "al", text: "Above Listen" },
+		write: v => local(() => a.setCardAt(v as CardAnchorId)),
+	})
 	const stepOpts: SettingOption[] = [
 		{ value: "plan", label: "Band plan" },
 		...STEPS.map(hz => ({ value: String(hz), label: formatStep(hz) })),

@@ -161,6 +161,11 @@ const ANCHORS: readonly AnchorSpec[] = [
 ]
 const CARD_ALIAS: Readonly<Record<string, CardAnchorId>> = { bl: "al" }
 
+/** An anchor's spoken name ("top left"). */
+export function cardAnchorName(id: CardAnchorId): string {
+	return ANCHORS.find(a => a.id === id)?.name ?? id
+}
+
 /** A free card anchor: the card's top-left there. */
 export interface CardAnchor extends Point {
 	readonly id: CardAnchorId

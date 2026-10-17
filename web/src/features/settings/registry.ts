@@ -135,6 +135,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		"colour color highlight tint theme phosphor ice violet coral mono",
 		SETTINGS,
 	),
+	row(
+		"dev.card",
+		"Display",
+		"Tuned card position",
+		"tuned card float move anchor above listen corner place",
+		SETTINGS,
+	),
 	row("tn.step", "Display", "Tuning step", "channel spacing", SETTINGS),
 	row("sys.config", "System", "Configuration", "backup export yaml", SETTINGS),
 	row(

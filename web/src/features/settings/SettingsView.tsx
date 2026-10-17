@@ -3,6 +3,7 @@
 // restart something or touch the hardware, decoder pages, and on a phone the groups as screens of their own.
 import {
 	useCallback,
+	useContext,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
@@ -14,7 +15,9 @@ import {
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
 import type { SettingWriteResult } from "../../data/index.ts"
+import { CardPlaceContext } from "../../shell/CardHandle.tsx"
 import { useTheme } from "../../shell/hooks.ts"
+import { cardAnchorName } from "../../shell/layout.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { showAppToast } from "../../shell/toast.ts"
@@ -75,6 +78,7 @@ function useSnapshot(): SettingsSnapshot {
 	const readOnly = useReadOnly()
 	const theme = useTheme()
 	const stepHz = useStore(services.prefs, s => s.stepHz)
+	const cardAt = useStore(useContext(CardPlaceContext), s => s.at)
 	const volume = useStore(services.listen, s => s.volume)
 	const tuner = useTunerState()
 	const sources = useStore(data.sources, s => s.sources)
@@ -102,6 +106,7 @@ function useSnapshot(): SettingsSnapshot {
 			readOnly,
 			theme,
 			stepHz,
+			cardAt,
 			volume,
 			tuner,
 			source,
@@ -129,6 +134,7 @@ function useSnapshot(): SettingsSnapshot {
 		readOnly,
 		theme,
 		stepHz,
+		cardAt,
 		volume,
 		tuner,
 		sources,
@@ -148,6 +154,7 @@ function useSnapshot(): SettingsSnapshot {
 
 function useActions(openPage: (page: string) => void): SettingsActions {
 	const services = useServices()
+	const cards = useContext(CardPlaceContext)
 	return useMemo(() => {
 		const { data } = services
 		const sourceId = () => {
@@ -161,6 +168,7 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 		return {
 			setTheme: patch => themeStore.set(patch),
 			setStep: hz => services.prefs.setStep(hz),
+			setCardAt: id => cards.setAt(id, cardAnchorName(id)),
 			setVolume: v => services.listen.setVolume(v),
 			async receiver(setting) {
 				const id = sourceId()
@@ -198,7 +206,7 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 			openShortcuts: () => openPalette("keys"),
 			openBandPlans: () => openPage(BANDPLANS),
 		}
-	}, [services, openPage])
+	}, [services, cards, openPage])
 }
 
 export function SettingsView({ onClose }: { onClose: () => void }) {
