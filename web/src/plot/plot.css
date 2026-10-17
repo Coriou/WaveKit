@@ -39,6 +39,29 @@
 	}
 
 	/* dB scale */
+	/* Grid over the trace (design board: line colour at .065, .10 on Paper) */
+	.wk-plot-grid {
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+	}
+	.wk-plot-grid > i {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: rgba(var(--wk-line-rgb), 0.065);
+	}
+	.wk-plot-grid > i[data-h] {
+		bottom: auto;
+		left: 0;
+		right: 0;
+		width: auto;
+		height: 1px;
+	}
+	[data-wk-theme="light"] .wk-plot-grid > i {
+		background: rgba(var(--wk-line-rgb), 0.1);
+	}
 	.wk-plot-db {
 		position: absolute;
 		left: 10px;
@@ -78,6 +101,12 @@
 	}
 	.wk-plot-sig b {
 		font-weight: 700;
+	}
+	/* Not identified yet: the frequency alone, quieter than a named signal. */
+	.wk-plot-sig[data-unknown] b {
+		font-weight: 500;
+		color: var(--wk-text-2);
+		font-variant-numeric: tabular-nums;
 	}
 	.wk-plot-sig-sub {
 		color: var(--wk-text-3);

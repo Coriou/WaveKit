@@ -142,7 +142,7 @@ describe("axes", () => {
 
 	it("dB ticks follow the renderer's mapping and keep clear of the edges", () => {
 		const levels = { minDb: -120, maxDb: -20 }
-		expect(dbToTraceY(-20, levels, 300)).toBeCloseTo(1.5, 6)
+		expect(dbToTraceY(-20, levels, 300)).toBeCloseTo(1.25, 6)
 		expect(dbToTraceY(-120, levels, 300)).toBeCloseTo(299, 6)
 		const ticks = dbTicks(levels, 300)
 		expect(ticks.map(t => t.db)).toEqual([-40, -60, -80, -100])
@@ -195,8 +195,12 @@ describe("tuning", () => {
 
 	it("only offsets onto frequencies the core will identify (usable window)", () => {
 		// Core rule, src/core/scanner/identify.ts inWindow() with USABLE_FRACTION 0.8
-		const coreInWindow = (hz: number, bw: number, centre: number, rate: number) =>
-			Math.abs(hz - centre) + bw / 2 <= (rate * 0.8) / 2
+		const coreInWindow = (
+			hz: number,
+			bw: number,
+			centre: number,
+			rate: number,
+		) => Math.abs(hz - centre) + bw / 2 <= (rate * 0.8) / 2
 		let seed = 0x2545f491
 		const rand = () => {
 			seed ^= seed << 13
@@ -356,7 +360,11 @@ describe("signal labels", () => {
 		expect(other?.label).toBe("NFM")
 		expect(other?.burst).toBe(true)
 		expect(other?.sub).toBe("161.150")
-		expect(none?.label).toBe("Signal")
+		// Not identified: the frequency alone, after named signals.
+		expect(none?.label).toBe("50.005")
+		expect(none?.sub).toBeNull()
+		expect(none?.known).toBe(false)
+		expect(ch16?.known).toBe(true)
 	})
 
 	it("holds a bursty track between bursts, then lets it go", () => {
@@ -378,6 +386,8 @@ describe("signal labels", () => {
 			label,
 			sub: "161.150",
 			burst: false,
+			known: true,
+			peakDb: null,
 		})
 		const signals = [
 			sig(500, "A", 8),
@@ -417,5 +427,35 @@ describe("signal labels", () => {
 				tunedHz: null,
 			}),
 		).toEqual([])
+	})
+
+	it("anchors a chip just above its peak and runs the lead down to it", () => {
+		const view = { startHz: 0, endHz: 1000 }
+		const levels = { minDb: -120, maxDb: -20 }
+		const sig = (hz: number, peakDb: number, known = true) => ({
+			hz,
+			widthHz: 10,
+			label: known ? "NFM" : "0.000",
+			sub: null,
+			burst: false,
+			known,
+			peakDb,
+		})
+		const [loud, quiet] = placeLabels(
+			[sig(300, -90, false), sig(700, -40)],
+			view,
+			{ widthPx: 1000, traceCss: 300, tunedHz: null, levels },
+		)
+		// Named first, whatever its level; each sits over its own peak.
+		expect(loud?.hz).toBe(700)
+		expect(quiet?.hz).toBe(300)
+		const yLoud = (1 - 80 / 100) * (300 - 2 * 0.625 - 1) + 2 * 0.625
+		expect(loud?.top).toBeCloseTo(Math.max(8, yLoud - 46), 5)
+		const yQuiet = (1 - 30 / 100) * (300 - 2 * 0.625 - 1) + 2 * 0.625
+		expect(quiet?.top).toBeCloseTo(yQuiet - 46, 5)
+		expect((quiet?.top ?? 0) + 28 + (quiet?.lead ?? 0)).toBeCloseTo(
+			yQuiet - 8,
+			5,
+		)
 	})
 })

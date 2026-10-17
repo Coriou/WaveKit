@@ -126,8 +126,8 @@ export function traceYToDb(
 	levels: SpectrumLevels,
 	traceCss: number,
 ): number {
-	// dbToTraceY: y = top + (1 − t) · (traceCss − top − 1), top = 1.5
-	const top = 1.5
+	// dbToTraceY: y = top + (1 − t) · (traceCss − top − 1), top = 1.25 (twice the line half-width)
+	const top = 1.25
 	const room = traceCss - top - 1
 	const range = levels.maxDb - levels.minDb
 	if (!(room > 0) || !(range > 0)) return levels.minDb

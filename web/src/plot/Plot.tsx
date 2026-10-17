@@ -286,6 +286,12 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 							className="wk-plot-band"
 							style={{ top: 0, height: layout.traceCss }}
 						>
+							<Grid
+								levels={levels}
+								traceCss={layout.traceCss}
+								view={view}
+								widthPx={size.w}
+							/>
 							<DbScale levels={levels} traceCss={layout.traceCss} />
 							<SignalLabels
 								tracks={tracks}
@@ -293,6 +299,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 								view={view}
 								widthPx={size.w}
 								traceCss={layout.traceCss}
+								levels={levels}
 								tunedHz={vfoHz}
 								onPick={hz => void controller.tuneTo(hz)}
 							/>
@@ -484,6 +491,30 @@ function HoverTag({
 
 // ── Overlays ─────────────────────────────────────────────────────────────────────────────────────
 
+/** The board's faint grid over the trace: a line per dB label and per frequency tick. */
+const Grid = memo(function Grid({
+	levels,
+	traceCss,
+	view,
+	widthPx,
+}: {
+	levels: { minDb: number; maxDb: number }
+	traceCss: number
+	view: SpectrumViewSpan
+	widthPx: number
+}) {
+	return (
+		<div className="wk-plot-grid" aria-hidden="true">
+			{dbTicks(levels, traceCss).map(t => (
+				<i key={`d${t.db}`} data-h="" style={{ top: Math.round(t.y) }} />
+			))}
+			{freqTicks(view, widthPx).map(t => (
+				<i key={`f${t.hz}`} style={{ left: `${t.x * 100}%` }} />
+			))}
+		</div>
+	)
+})
+
 const DbScale = memo(function DbScale({
 	levels,
 	traceCss,
@@ -578,6 +609,7 @@ function SignalLabels({
 	view,
 	widthPx,
 	traceCss,
+	levels,
 	tunedHz: tuned,
 	onPick,
 }: {
@@ -586,6 +618,7 @@ function SignalLabels({
 	view: SpectrumViewSpan
 	widthPx: number
 	traceCss: number
+	levels: SpectrumLevels
 	tunedHz: number | null
 	onPick: (hz: number) => void
 }) {
@@ -599,11 +632,12 @@ function SignalLabels({
 			placeLabels(signals, view, {
 				widthPx,
 				traceCss,
+				levels,
 				tunedHz: tuned,
 				// Keep clear of the zoom control.
 				taken: [[widthPx - 230, traceCss - 46, widthPx, traceCss]],
 			}),
-		[signals, view.startHz, view.endHz, widthPx, traceCss, tuned],
+		[signals, view.startHz, view.endHz, widthPx, traceCss, levels, tuned],
 	)
 	return (
 		<>
@@ -612,12 +646,17 @@ function SignalLabels({
 					key={l.hz}
 					className="wk-plot-sig"
 					data-tuned={l.tuned ? "" : undefined}
+					data-unknown={l.known ? undefined : ""}
 					data-burst={burstAt.get(l.hz) ? "" : undefined}
 					style={{ left: l.x, top: l.top }}
 				>
 					<button
 						type="button"
-						aria-label={`Tune to ${l.label} ${formatMHz(l.hz, 4)} MHz`}
+						aria-label={
+							l.known
+								? `Tune to ${l.label} ${formatMHz(l.hz, 4)} MHz`
+								: `Tune to the signal at ${formatMHz(l.hz, 4)} MHz`
+						}
 						onClick={() => onPick(l.hz)}
 					>
 						<span className="wk-plot-sig-dot" aria-hidden="true" />

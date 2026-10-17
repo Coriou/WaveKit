@@ -166,8 +166,8 @@ export function freqTicks(view: SpectrumViewSpan, widthPx: number): FreqTick[] {
 	return out
 }
 
-/** Line half-width of the trace in CSS px (the renderer's 0.75 · dpr device px). */
-const LINE_HALF_CSS = 0.75
+/** Line half-width of the trace in CSS px (the renderer's 0.625 · dpr device px). */
+const LINE_HALF_CSS = 0.625
 
 /** CSS px from the top of the trace band where `db` sits (the renderer's mapping). */
 export function dbToTraceY(
@@ -620,6 +620,10 @@ export interface SignalInfo {
 	label: string
 	sub: string | null
 	burst: boolean
+	/** Named by the band plan (a channel or the band's mode); else the label is the frequency. */
+	known: boolean
+	/** Peak dBFS over the track (anchors the chip above it); null when unknown. */
+	peakDb: number | null
 }
 
 function channelNear(
@@ -651,7 +655,8 @@ function narrowestBand(
 
 /**
  * What to call each track: the plan channel at its centre ("Marine ch 16"), else the band's mode
- * ("NFM") with the frequency as detail, else "Signal".
+ * ("NFM") with the frequency as detail, else just the frequency (core does not identify signals on
+ * the spectrum yet: CORE-GAPS "Auto band map for spectrum labels").
  */
 export function describeTracks(
 	tracks: readonly Track[],
@@ -661,15 +666,26 @@ export function describeTracks(
 		const hz = (t.startHz + t.endHz) / 2
 		const widthHz = t.endHz - t.startHz
 		const freq = formatMHz(hz, 3)
-		const base = { hz, widthHz, burst: t.flags.burst }
+		const base = {
+			hz,
+			widthHz,
+			burst: t.flags.burst,
+			peakDb: t.peakDb ?? null,
+		}
 		if (plan) {
 			const hit = channelNear(plan, hz, Math.max(3000, widthHz / 2))
-			if (hit) return { ...base, label: hit.channel.name, sub: freq }
+			if (hit)
+				return { ...base, label: hit.channel.name, sub: freq, known: true }
 			const band = narrowestBand(plan, hz)
 			if (band?.band.mode)
-				return { ...base, label: band.band.mode.toUpperCase(), sub: freq }
+				return {
+					...base,
+					label: band.band.mode.toUpperCase(),
+					sub: freq,
+					known: true,
+				}
 		}
-		return { ...base, label: "Signal", sub: freq }
+		return { ...base, label: freq, sub: null, known: false }
 	})
 }
 
@@ -703,11 +719,14 @@ export interface PlacedLabel {
 	label: string
 	sub: string | null
 	tuned: boolean
+	known: boolean
 }
 
 export interface LabelOptions {
 	widthPx: number
 	traceCss: number
+	/** Trace levels, to anchor each chip above its signal's peak. */
+	levels?: SpectrumLevels
 	tunedHz: number | null
 	/** Rectangles already taken, [x0, y0, x1, y1] px. */
 	taken?: [number, number, number, number][]
@@ -718,11 +737,15 @@ export interface LabelOptions {
 const LABEL_H = 28
 const LABEL_ROW = 30
 const LABEL_TOP = 8
+/** Chip top sits this far above its signal's peak; the lead line runs down to just above it. */
+const LABEL_ABOVE_PEAK = 46
+const LEAD_GAP = 8
 
 /**
- * Places signal chips without overlap: the tuned signal first, then the widest; each tries the top
- * row, then lower rows, then a compact form without its detail, and is dropped when it still clashes
- * (the signal stays clickable).
+ * Places signal chips without overlap, as on the design board: the tuned signal first, then named
+ * signals, then the strongest. Each chip sits just above its signal's peak and tries one and two rows
+ * higher, then a compact form without its detail, and is dropped when it still clashes (the signal
+ * stays clickable). Without a level the chip starts from the top rows.
  */
 export function placeLabels(
 	signals: readonly SignalInfo[],
@@ -742,12 +765,15 @@ export function placeLabels(
 		1,
 		Math.min(3, Math.floor((opts.traceCss - LABEL_TOP - 24) / LABEL_ROW)),
 	)
+	const levels = opts.levels
 	const order = signals
 		.filter(s => s.hz >= view.startHz && s.hz <= view.endHz)
 		.map(s => ({ s, tuned: isTuned(s) }))
 		.sort(
 			(a, b) =>
 				Number(b.tuned) - Number(a.tuned) ||
+				Number(b.s.known) - Number(a.s.known) ||
+				(b.s.peakDb ?? -Infinity) - (a.s.peakDb ?? -Infinity) ||
 				b.s.widthHz - a.s.widthHz ||
 				a.s.hz - b.s.hz,
 		)
@@ -763,10 +789,29 @@ export function placeLabels(
 					[compact, false],
 				]
 			: [[compact, false]]
+		const peakY =
+			levels && s.peakDb !== null
+				? dbToTraceY(s.peakDb, levels, opts.traceCss)
+				: null
+		// Lowest allowed spot: above the peak, never into the bottom of the band.
+		const lowest = Math.min(
+			opts.traceCss - LABEL_H - 16,
+			peakY === null
+				? LABEL_TOP + (rows - 1) * LABEL_ROW
+				: peakY - LABEL_ABOVE_PEAK,
+		)
+		const tops: number[] = []
+		for (let row = 0; row < rows; row++) {
+			const top =
+				peakY === null
+					? LABEL_TOP + row * LABEL_ROW
+					: Math.max(LABEL_TOP, lowest) - row * LABEL_ROW
+			if (top >= LABEL_TOP && !tops.includes(top)) tops.push(top)
+		}
 		let placed = false
 		for (const [w, withSub] of forms) {
-			for (let row = 0; row < rows && !placed; row++) {
-				const top = LABEL_TOP + row * LABEL_ROW
+			for (const top of tops) {
+				if (placed) break
 				const r: [number, number, number, number] = [
 					x - w / 2 - 3,
 					top - 2,
@@ -785,10 +830,14 @@ export function placeLabels(
 					hz: s.hz,
 					x,
 					top,
-					lead: 10,
+					lead:
+						peakY === null
+							? 10
+							: Math.max(6, peakY - LEAD_GAP - (top + LABEL_H)),
 					label: s.label,
 					sub: withSub ? s.sub : null,
 					tuned,
+					known: s.known,
 				})
 				placed = true
 			}

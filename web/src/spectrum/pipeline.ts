@@ -54,7 +54,14 @@ export interface PipelineDeps {
 	timers: TimerApi
 }
 
-export function frameMeta(frame: SpectrumFrameEventData): SpectrumFrameMeta {
+/** Track peaks are rounded to this many dB so the labels anchored on them do not jitter. */
+const TRACK_PEAK_STEP_DB = 3
+
+/** Frame meta; `row` (the frame's decoded bins) gives each track its peak level for the labels. */
+export function frameMeta(
+	frame: SpectrumFrameEventData,
+	row: Uint8Array | null = null,
+): SpectrumFrameMeta {
 	return {
 		sourceId: frame.sourceId,
 		centerHz: frame.centerHz,
@@ -64,7 +71,16 @@ export function frameMeta(frame: SpectrumFrameEventData): SpectrumFrameMeta {
 		sampleRateHz: frame.sampleRateHz,
 		floorDbfs: frame.floorDbfs,
 		thresholdDb: frame.thresholdDb,
-		tracks: frame.tracks,
+		tracks: frame.tracks.map(t => {
+			const db = row ? levelOver(row, frame, t.startHz, t.endHz) : null
+			return {
+				...t,
+				peakDb:
+					db === null
+						? null
+						: Math.round(db / TRACK_PEAK_STEP_DB) * TRACK_PEAK_STEP_DB,
+			}
+		}),
 		tuningTrust: frame.tuningTrust,
 		epoch: frame.epoch,
 		at: frame.at,
@@ -105,7 +121,11 @@ export class SpectrumPipeline {
 		this.deps = deps
 		this.meta = new Throttle(
 			META_INTERVAL_MS,
-			frame => deps.post({ type: "meta", meta: frameMeta(frame) }),
+			frame =>
+				deps.post({
+					type: "meta",
+					meta: frameMeta(frame, this.history?.row(0) ?? null),
+				}),
 			deps.timers,
 		)
 	}
