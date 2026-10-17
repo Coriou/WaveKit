@@ -80,8 +80,11 @@ the held sample rate, so trust labels turn `commanded`; untracked-retune root ca
 work with `suspected` / `lastCommandAgeMs` warning fields and a rate-limited warn
 log; identify for analog voice from live-audio transmissions (`result.analog`,
 CTCSS/DCS) and `result.decodersUnavailable` with a 300 s unavailable-decoder memo;
-no startup warning for a passive scanner job before its source connects. No CLI or
-web change required.
+no startup warning for a passive scanner job before its source connects; analog voice
+activity hygiene (a deliberate behaviour change): squelch re-opens within 1.5 s merge
+into one transmission, transmissions under 500 ms and nfm/wfm ones without FM-quieting
+carrier evidence are not published (WS, Activity, identify), while live audio gating is
+unchanged. No CLI or web change required.
 
 Order of the remaining core gaps, by what they unblock in the dashboard:
 

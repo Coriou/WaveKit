@@ -194,12 +194,12 @@ features (10 s tracks, `spurs.rfCarriers()`) vanishing together when it unkeys (
 core command whose epoch boundary lands one block late, so the alarm compares across the retune
 (live audio does not retune; scanner hop rate write; relay replay; 2.8); (4) reconnect. The
 alarm gains two classifiers run only when it fires: mirror (most vanished features reappear at
-`2·centre − f` within tolerance → `iq-byte-slip`, and the engine re-aligns by one byte when the
-format is U8 and the mirror persists over two consecutive blocks, a lane decision recorded with
-its test) and transmission end (the vanished features belonged to tracks closed in this block
-or the previous one, or to lines first seen with such a track → `signal-change`, no new epoch:
-the features are dropped from `prevPersistent` and the epoch keeps its label). `external-control`
-otherwise. `lastCommandAgeMs` from the engine's last `command-sent` time.
+`2·centre − f` within tolerance → `iq-byte-slip`; as landed (R1) this is a `suspected` label
+only: the engine no longer re-aligns a U8 stream on a mirror) and transmission end (as landed:
+a closed strong track, and width-matched survivors of the old scene, at least 2: centre within
+`max(1 bin, width/4)`, width in `[width/2 - 2 bins, 2*width + 2 bins]` → `signal-change`, no new
+epoch: the features are dropped from `prevPersistent` and the epoch keeps its label; the
+decision can wait up to the track hang plus 2 blocks). `external-control` otherwise. `lastCommandAgeMs` from the engine's last `command-sent` time.
 
 ## Identify for analog voice (lane ID)
 
@@ -218,7 +218,11 @@ IDENTIFY_ANALOG_LOOKBACK_MS` and tracks whether `monitoring` was ever true; outc
 per requirements 3.2 to 3.4. `identifyVerdict` gains an optional `analog` input (pure) so the
 verdict stays one function: digital decode first, then analog-with-tone-and-trust =
 `identified`, analog otherwise = at least `candidate`. Without the port: byte-identical
-(goldens).
+(goldens). As landed (R1): a classified digital discovery keeps its protocol; analog evidence is
+supplementary (`result.analog`). `planAnalogTrials` plans both analog protocols when either is
+scored and the request has no protocol list; with a list it plans only the analog protocols
+named. The evidence log reads the tracker's published transmissions, so the activity hygiene
+rules (merge within 1.5 s, minimum 500 ms, carrier evidence on nfm/wfm) apply to identify too.
 
 **Unavailable memo** (`probe-pool.ts`): `unavailableTypes()` (types seen `decoder-unavailable`
 within 300 s, cleared by a successful start of the type), checked by identify at planning;

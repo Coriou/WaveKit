@@ -180,6 +180,10 @@ transmission ended, `external-control` otherwise) and `lastCommandAgeMs` (time s
 last command on the source; null when none). The warn log is rate-limited to one line per source
 per `SPECTRUM_WARNING_LOG_INTERVAL_MS` (60 000 ms) with a suppressed count; the warning list
 keeps every warning.
+As landed (R1): a U8 mirror no longer re-aligns the stream; `iq-byte-slip` is a `suspected`
+label only. `signal-change` needs a closed strong track and width-matched survivors (at least 2):
+a survivor's centre lies within `max(1 bin, width/4)` of the feature and its width within
+`[width/2 - 2 bins, 2*width + 2 bins]`. The decision can wait up to the track hang plus 2 blocks.
 2.10 Nothing in 2.x changes the spectrum frame, transmission or WebSocket shapes beyond the
 optional warning fields; trust label values change only by 2.8.
 
@@ -211,7 +215,8 @@ or a DCS code and trust `commanded` or `relay` makes the target `identified` wit
 `unverified`, the target is at least `candidate` with the same protocol and `result.analog`.
 `result.analog` carries the source (`live-audio`), modulation, number of matching transmissions,
 the latest transmission id, its CTCSS tone or null, its DCS code or null and its tuning trust.
-Never a tone the tracker did not report.
+Never a tone the tracker did not report. As landed (R1): a classified digital discovery keeps its
+protocol; analog evidence never replaces it and stays supplementary in `result.analog`.
 3.5 **Unavailable decoders said clearly.** `result.decodersUnavailable` lists the probe decoder
 types (sorted, unique) whose program could not run during this job (WG9 `decoder-unavailable`).
 The probe pool remembers a decoder type found unavailable for `PROBE_UNAVAILABLE_MEMO_MS`

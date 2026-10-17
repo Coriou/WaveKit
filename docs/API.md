@@ -3204,8 +3204,9 @@ job; absent when none. A decoder that ran and heard nothing stays `no-sync`.
 **Analog voice (WG10).** Identify reads the live demodulator's analog transmissions
 (`live-audio:transmission`). The `analog-fm` and `analog-am` trials are ambient trials
 of decoder `live-audio` (`transport: "ambient"` while they run, `mode`: the
-transmission's modulation once matched). Both are planned whenever either protocol is scored or
-requested. A transmission matches a target when it is on the job's source, its
+transmission's modulation once matched). Without a protocol list in the request, both are planned
+whenever either one is scored (the classifier cannot tell FM from AM voice); with a protocol list,
+only the analog protocols it names are planned (`planAnalogTrials`). A transmission matches a target when it is on the job's source, its
 frequency lies within the target's tolerance (`max(1 kHz, bandwidth/2)`) and it is
 open or ended no earlier than 30 s (`IDENTIFY_ANALOG_LOOKBACK_MS`) before the job
 started; the core keeps the latest 32 (`IDENTIFY_ANALOG_MAX_TRANSMISSIONS`). `nfm` or
@@ -3216,7 +3217,14 @@ no evidence. Outcomes: `decoded` once a matching closed transmission exists;
 `unsupported` with reason `no-live-audio` when live audio was not running on the
 job's source, or not tuned within the tolerance, for the whole window. A match is a
 stop like an accepted identity unless `exhaustive`; a digital decode keeps priority
-and then no `analog` is reported. A matching transmission with a CTCSS tone or a DCS
+and then no `analog` is reported (a classified digital discovery keeps its protocol; analog evidence
+is supplementary and only appears in `result.analog`). Identify reads the same published
+transmissions as WebSocket and Activity, so the activity hygiene rules below
+([live-audio:transmission](#live-audiotransmission)) apply: a flapping or carrier-less squelch
+opening is never evidence, and a closed event arrives up to the merge gap (1.5 s) after the audio
+ended, so a transmission that ends just before a target's deadline can be seen still open there
+(`timeout`). Tone detection runs over every merged segment, so a merged transmission gives the
+detector more audio, not less. A matching transmission with a CTCSS tone or a DCS
 code on a `commanded` or `relay` frequency makes the target `identified` with
 protocol `analog-fm` (or `analog-am`), confidence `classified` and
 `result.metadata.ctcssHz` when a CTCSS tone was heard; without a tone, or on an
@@ -3387,10 +3395,12 @@ budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 
 Untracked-retune warnings (WG10) carry two optional fields, absent on
 `host-centre-mismatch`. `suspected`: `iq-byte-slip` (the vanished features reappear
-mirrored about the centre: I and Q swapped; on U8 IQ, a mirror seen over two
-consecutive blocks makes the engine drop one byte to re-align), `signal-change` (a
-strong transmission ended and its images or intermodulation lines vanished with it;
-no new epoch starts and the trust labels keep their value) or `external-control`
+mirrored about the centre: I and Q swapped; a label only: on U8 IQ the engine no
+longer re-aligns the stream, it only reports the suspicion), `signal-change` (a
+closed strong track ended and every vanished feature had a width-matched survivor
+explained by it: centre within `max(1 bin, width/4)`, width in
+`[width/2 - 2 bins, 2*width + 2 bins]`; no new epoch starts and the trust labels keep
+their value; the decision can wait up to the track hang plus 2 blocks) or `external-control`
 (anything else, typically another client retuning the receiver). `lastCommandAgeMs`:
 milliseconds since this core's last tuner command on the source, null when none. The
 warning list keeps every warning; the warn log line is limited to one per source per
@@ -4046,7 +4056,8 @@ The store holds three kinds:
   when WaveKit knows them; see [Provenance](#provenance).
 - `analog-transmission`: one record per closed
   [`live-audio:transmission`](#live-audiotransmission) of the live
-  demodulator. `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
+  demodulator (WG10: merged, at least 500 ms, with carrier evidence on nfm/wfm; see
+  activity hygiene there). `eventId` is the `transmissionId`, `producedAt` is `endedAt`,
   and `payload` is `AnalogTransmissionPayload` (the closed event without
   `state`). The summary has `category: "voice"`, `protocol: "analog"`, the
   source id, `frequencyHz` from the event-time frequency (null when unknown),
@@ -5352,6 +5363,35 @@ change these events. Sent whether Activity is enabled or not; when it is
 ready, each closed transmission is also stored as an `analog-transmission`
 [Activity](#activity) record.
 
+Activity hygiene (WG10, a deliberate behaviour change). A weak far signal or noise
+flapping across the squelch used to produce one transmission per crossing (hundreds
+of 0–1 s Voice rows). The tracker now applies three rules, in every squelch mode, to
+everything it publishes (these events, Activity rows and identify's analog evidence
+alike); live audio gating and playback are unchanged:
+
+1. Merge: a squelch close ends a segment at `endMs = max(segment start, close − 250 ms
+   hang)`. A re-open at `t` with `t − endMs ≤ 1500 ms` (`ANALOG_TRANSMISSION_MERGE_GAP_MS`)
+   on the same source, modulation, bandwidth, offset, squelch mode and frequency continues
+   the same transmission (same id and start; power, tone and audio accumulate). Otherwise,
+   or 1.5 s after `endMs`, the transmission is final with `endedAt = endMs`. `stopped`,
+   `config`, `retune` and `max-duration` closes are final at once; a stop or config
+   change during the gap closes at `endMs` with `closeReason: "squelch"`.
+2. Minimum duration: a final transmission with `durationMs < 500`
+   (`ANALOG_TRANSMISSION_MIN_MS`) is not published.
+3. Carrier evidence (`nfm`, `wfm`): a transmission needs at least 3 measured 10 ms
+   blocks with FM quieting (`ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS`) while its segments
+   were open: the auto-squelch carrier observer, the noise gate's quieting at its own
+   threshold in noise mode, or in manual mode a passive quieting meter at the default
+   6 dB that never gates. Without it the transmission is not published. Other
+   modulations skip this rule.
+
+The open event is held back until the transmission qualifies: during the transmission
+once `now − 250 ms − start ≥ 500 ms` and the carrier rule holds (so the final duration
+is at least the minimum), else at finalisation, directly followed by the closed event.
+A suppressed transmission sends nothing. Suppressions are counted
+(`suppressed(): { short, noCarrier }` on the tracker) and logged at debug. The event
+shape is unchanged.
+
 ```json
 {
 	"type": "live-audio:transmission",
@@ -5401,7 +5441,7 @@ ready, each closed transmission is also stored as an `analog-transmission`
   once if the squelch is still open.
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
   level samples; null before the first one. Every open is followed by exactly
-  one closed event, also on shutdown.
+  one closed event, also on shutdown (WG10: only published transmissions send an open).
 - `tone` (WG2): `{ ctcssHz, dtmf, dcs }`, on closed events only (always all
   three keys from WG6 cores; `dcs` is absent from older cores; absent on open
   events). `ctcssHz` is one of the 50 standard CTCSS tones
