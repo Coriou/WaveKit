@@ -319,7 +319,12 @@ describe("protected audio CORS (access adapter)", () => {
 		expect(replies.at(-1)?.status).toBe(503)
 		for (const reply of replies)
 			expect(reply.headers["access-control-allow-origin"]).not.toBe("*")
-		expect(replies[3]?.headers["access-control-max-age"]).not.toBe("600")
+		// WG9 req 1.2: an allowed protected preflight is cacheable for 600 s (origin-specific,
+		// never `*`); every other reply, including the shutdown 503, carries no Max-Age.
+		expect(replies[3]?.headers["access-control-max-age"]).toBe("600")
+		for (const [i, reply] of replies.entries())
+			if (i !== 3)
+				expect(reply.headers["access-control-max-age"]).toBeUndefined()
 	})
 })
 

@@ -49,12 +49,24 @@ const dsd = (
 	options: { mode: "auto", ...options },
 })
 
+/**
+ * A port outside the OS ephemeral range (macOS 49152+), probed on the wildcard address the
+ * service binds, so a concurrent listen(0) elsewhere cannot take it between release and bind.
+ */
 async function freePort(): Promise<number> {
-	const server = http.createServer()
-	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
-	const { port } = server.address() as AddressInfo
-	await new Promise<void>(resolve => server.close(() => resolve()))
-	return port
+	for (let attempt = 0; attempt < 200; attempt++) {
+		const port = 36000 + Math.floor(Math.random() * 6000)
+		const server = http.createServer()
+		const ok = await new Promise<boolean>(resolve => {
+			server.once("error", () => resolve(false))
+			server.listen(port, () => resolve(true))
+		})
+		if (!ok) continue
+		const { port: bound } = server.address() as AddressInfo
+		await new Promise<void>(resolve => server.close(() => resolve()))
+		return bound
+	}
+	throw new Error("No free test port after 200 attempts")
 }
 
 describe("DigitalVoiceService runtime channels", () => {
