@@ -134,6 +134,28 @@ describe("classifyAlarm (WG10 req 2.9)", () => {
 		)
 	})
 
+	it("review WG10 R1 M2: survivors covered only by a wide new occupancy are no evidence (external-control); similar-width survivors are", () => {
+		const features: PersistentFeature[] = [
+			{ rfHz: C + 20_000, widthHz: 17_000 },
+			{ rfHz: C + 45_000, widthHz: 17_000 },
+			{ rfHz: C - 34_000, widthHz: 3000 },
+			{ rfHz: C - 68_000, widthHz: 3000 },
+			{ rfHz: C - 90_000, widthHz: 3000 },
+		]
+		const input = { ...base, features, deltaHz: null, ended: always }
+		const cover = [{ startHz: C, endHz: C + 65_000, centreHz: C + 32_500 }]
+		expect(classifyAlarm({ ...input, segments: cover })).toBe(
+			"external-control",
+		)
+		const same = [seg(C + 20_000, 8500), seg(C + 45_200, 8500)]
+		expect(classifyAlarm({ ...input, segments: same })).toBe("signal-change")
+		// A survivor twice-plus too wide, or off its centre by more than width / 4, fails.
+		const wide = [seg(C + 20_000, 8500), seg(C + 45_000, 18_500)]
+		expect(classifyAlarm({ ...input, segments: wide })).toBe("external-control")
+		const off = [seg(C + 20_000, 8500), seg(C + 49_500, 8500)]
+		expect(classifyAlarm({ ...input, segments: off })).toBe("external-control")
+	})
+
 	it("features on the centre or with an invisible mirror never count toward a mirror", () => {
 		const features: PersistentFeature[] = [
 			{ rfHz: C, widthHz: 1000 },
