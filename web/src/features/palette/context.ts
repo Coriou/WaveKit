@@ -41,6 +41,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		sourceId === null ? null : (s.caps[sourceId]?.caps ?? null),
 	)
 	const relay = useStore(data.receiver, s => s.relay)
+	const accessMode = useStore(data.access, s => s.access?.mode ?? null)
 
 	// scan presets and receiver capabilities, once
 	useEffect(() => {
@@ -87,6 +88,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 			chosenStepHz,
 			receiver,
 			readOnly,
+			accessMode,
 			theme,
 			saved,
 			bandplan,
@@ -107,6 +109,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 		bandplan,
 		receiver,
 		readOnly,
+		accessMode,
 		theme,
 		saved,
 		discoveries,

@@ -2,6 +2,7 @@
 // make (actions). Only settings that work in this app and this core are rows; the rest of the canvas registry
 // waits on CORE-GAPS ("Settings store in core", "One settings schema"). Pure given the snapshot and the actions.
 import type {
+	AccessDeviceDto,
 	DecoderInfo,
 	DecoderSettingsUpdate,
 	DecoderSettingsView,
@@ -37,6 +38,7 @@ import type {
 	Motion,
 	SpectrumRange,
 } from "../../shell/device-prefs.ts"
+import type { SignalLabelsMode } from "../../plot/label-gate.ts"
 import { FFT_SIZES, MAP_TRAILS, fftBins } from "../../shell/device-prefs.ts"
 import type { DisplayPrefs, TimeFormat, Units } from "../display.ts"
 import { DEFAULT_DISPLAY } from "../display.ts"
@@ -61,6 +63,7 @@ import {
 import { sourceTitle } from "../receiver/summary.ts"
 import { STEPS } from "../tuner/prefs.ts"
 import { decoderRows } from "./decoder-rows.ts"
+import { devicesCount, devicesSummary } from "./devices.ts"
 import {
 	optionText,
 	type SettingOption,
@@ -104,6 +107,8 @@ export interface SettingsSnapshot {
 	readonly decoderSettings: boolean
 	readonly version: string | null
 	readonly accessMode: "legacy" | "protected" | null
+	/** Remembered devices (protected core, this browser paired); null until loaded or without a session. */
+	readonly devices: readonly AccessDeviceDto[] | null
 	readonly storage: StorageReport | null
 	readonly exportUrl: string
 }
@@ -127,6 +132,9 @@ export interface SettingsActions {
 	openTuner(): void
 	openShortcuts(): void
 	openBandPlans(): void
+	openDevices(): void
+	/** The browser's position as a Location value; absent where the browser has no geolocation. */
+	locate?: () => Promise<{ value: string } | { error: string }>
 }
 
 const OK: SettingWriteResult = { ok: true }
@@ -331,7 +339,19 @@ function stationRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			label: "Location",
 			help: "Latitude, longitude. Used by ADS-B and the map, never shared.",
 			keys: words("position latitude longitude coordinates gps qth lat lon"),
-			widget: textWidget("48.727, -3.985", parseLocation, "decimal"),
+			widget: {
+				...textWidget("48.727, -3.985", parseLocation, "decimal"),
+				...optional(
+					"fill",
+					a.locate && writable && !locLock
+						? {
+								label: "Use my location",
+								busyLabel: "Locating…",
+								run: a.locate,
+							}
+						: undefined,
+				),
+			},
 			value: lat === null || lon === null ? null : `${lat}, ${lon}`,
 			text: formatLocation(lat, lon),
 			def: { value: null, text: "Not set" },
@@ -1018,6 +1038,16 @@ const RANGE_OPTS = opts([
 	["auto", "Auto"],
 	["fixed", "Fixed"],
 ])
+const SIGNAL_LABEL_OPTS = opts([
+	["named", "Named"],
+	["clear", "Clear"],
+	["all", "All"],
+])
+const SIGNAL_LABEL_HELP: Readonly<Record<SignalLabelsMode, string>> = {
+	named: "Only the tuned signal and named channels",
+	clear: "Named signals, and unknown ones that stand clear of the noise",
+	all: "Every signal WaveKit finds, even faint ones",
+}
 const AVERAGING_OPTS = opts([
 	["off", "Off"],
 	["low", "Low"],
@@ -1235,6 +1265,20 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			write: v => local(() => a.setDevice({ averaging: v as Averaging })),
 		},
 		fftRow(d, s.spectrumLimits, a),
+		{
+			id: "dp.labels",
+			group: "display",
+			label: "Signal labels",
+			help: SIGNAL_LABEL_HELP[d.signalLabels],
+			keys: words("signal labels tags chips names spectrum noise clutter"),
+			device: true,
+			widget: { kind: "seg", options: SIGNAL_LABEL_OPTS },
+			value: d.signalLabels,
+			text: optionText(SIGNAL_LABEL_OPTS, d.signalLabels),
+			def: { value: "clear", text: "Clear" },
+			write: v =>
+				local(() => a.setDevice({ signalLabels: v as SignalLabelsMode })),
+		},
 	)
 	rows.push({
 		id: "dev.density",
@@ -1374,7 +1418,7 @@ function mapRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 
 // ---- system
 
-function systemRows(s: SettingsSnapshot): SettingRow[] {
+function systemRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const rows: SettingRow[] = []
 	if (s.version !== null)
 		rows.push({
@@ -1401,6 +1445,40 @@ function systemRows(s: SettingsSnapshot): SettingRow[] {
 			text: s.accessMode === "protected" ? "Protected" : "Open",
 			lock: "Set at deploy (access.mode)",
 		})
+	if (s.accessMode === "protected") {
+		const keys = words(
+			"devices signed in sign out log out logout paired browsers phones tablets revoke lost",
+		)
+		rows.push(
+			s.readOnly
+				? {
+						id: "sys.devices",
+						group: "system",
+						label: "Signed-in devices",
+						help: "Pair this browser to see them and sign them out",
+						keys,
+						widget: { kind: "read" },
+						value: null,
+						text: "Not paired",
+					}
+				: {
+						id: "sys.devices",
+						group: "system",
+						label: "Signed-in devices",
+						help: s.devices
+							? devicesSummary(s.devices)
+							: "Browsers and apps paired with this WaveKit",
+						keys,
+						widget: {
+							kind: "link",
+							text: s.devices ? devicesCount(s.devices.length) : "Show",
+							action: a.openDevices,
+						},
+						value: s.devices?.length ?? null,
+						text: s.devices ? devicesCount(s.devices.length) : "Show",
+					},
+		)
+	}
 	rows.push({
 		id: "sys.config",
 		group: "system",
@@ -1432,6 +1510,6 @@ export function buildRows(
 		...storageRows(s),
 		...mapRows(s, a),
 		...displayRows(s, a),
-		...systemRows(s),
+		...systemRows(s, a),
 	]
 }

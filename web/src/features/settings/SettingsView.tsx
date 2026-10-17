@@ -29,6 +29,8 @@ import { useTunerState } from "../hooks.ts"
 import { openPalette } from "../palette/request.ts"
 import { decoderLabel } from "../tuned/signal.ts"
 import { BandPlansPage } from "./bandplans/BandPlansPage.tsx"
+import { DevicesPage } from "./DevicesPage.tsx"
+import { canLocate, locate } from "./geolocate.ts"
 import { DecoderPageHead, DecoderStatus } from "./DecoderPage.tsx"
 import { SetIcon, type SetIconName } from "./icons.tsx"
 import { groupSummary, settingsItems, type SettingsItem } from "./items.ts"
@@ -71,6 +73,7 @@ const GROUP_ICON: Record<SettingGroupId, SetIconName> = {
 const PHONE_W = 460
 const SPY_AT = 0.3
 const BANDPLANS = "bandplans"
+const DEVICES = "devices"
 
 const OK: SettingWriteResult = { ok: true }
 const toResult = (ok: boolean, message: string): SettingWriteResult =>
@@ -109,6 +112,7 @@ function useSnapshot(): SettingsSnapshot {
 	const binsMax = useStore(data.spectrumLimits, s => s.binsMax)
 	const binsCap = useStore(data.spectrumLimits, s => s.binsCap)
 	const access = useStore(data.access, s => s.access)
+	const devices = useStore(data.devices, s => s.devices)
 	return useMemo(() => {
 		const sourceId = tuner?.sourceId
 		const source = tuner
@@ -142,6 +146,7 @@ function useSnapshot(): SettingsSnapshot {
 			decoderSettings: decoderSettings.available !== false,
 			version: system.version,
 			accessMode: access ? access.mode : null,
+			devices,
 			storage: system.storage,
 			exportUrl: data.system.configExportUrl(),
 		}
@@ -167,6 +172,7 @@ function useSnapshot(): SettingsSnapshot {
 		decoderSettings,
 		system,
 		access,
+		devices,
 		data.system,
 	])
 }
@@ -233,6 +239,8 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 			openTuner: () => shellStore.openPanel("tuner"),
 			openShortcuts: () => openPalette("keys"),
 			openBandPlans: () => openPage(BANDPLANS),
+			openDevices: () => openPage(DEVICES),
+			...(canLocate() ? { locate: () => locate() } : {}),
 		}
 	}, [services, cards, openPage])
 }
@@ -274,6 +282,10 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		void data.station.load()
 		void data.bandplanStack.load()
 	}, [data])
+	const paired = useStore(data.access, s => s.session !== null)
+	useEffect(() => {
+		if (paired) void data.devices.load()
+	}, [data, paired])
 	const decoderIds = useMemo(
 		() => snapshot.decoders.map(d => d.id).join("\u0000"),
 		[snapshot.decoders],
@@ -309,9 +321,10 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		query.trim() === "" &&
 		filters.length === 0
 	const bandplans = page === BANDPLANS
+	const devicesPage = page === DEVICES
 	const items = useMemo(
 		() =>
-			showGroups || bandplans
+			showGroups || bandplans || devicesPage
 				? []
 				: settingsItems({
 						rows,
@@ -325,6 +338,7 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 		[
 			showGroups,
 			bandplans,
+			devicesPage,
 			rows,
 			query,
 			filters,
@@ -483,11 +497,13 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 	})
 	const title = bandplans
 		? (bandName ?? "Band plans")
-		: pageDecoder
-			? decoderLabel(pageDecoder.type)
-			: phone && only !== null && query === "" && filters.length === 0
-				? groupOf(only).label
-				: "Settings"
+		: devicesPage
+			? "Signed-in devices"
+			: pageDecoder
+				? decoderLabel(pageDecoder.type)
+				: phone && only !== null && query === "" && filters.length === 0
+					? groupOf(only).label
+					: "Settings"
 	const back = bandplans
 		? band !== null
 			? { label: "Band plans", go: () => setBand(null) }
@@ -498,14 +514,22 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 						setFlash("station.bandplans")
 					},
 				}
-		: page !== null
+		: devicesPage
 			? {
-					label: phone || only !== null ? "Decoders" : "Settings",
-					go: () => setPage(null),
+					label: "System",
+					go: () => {
+						setPage(null)
+						setFlash("sys.devices")
+					},
 				}
-			: phone && only !== null && query === "" && filters.length === 0
-				? { label: "Settings", go: () => setOnly(null) }
-				: null
+			: page !== null
+				? {
+						label: phone || only !== null ? "Decoders" : "Settings",
+						go: () => setPage(null),
+					}
+				: phone && only !== null && query === "" && filters.length === 0
+					? { label: "Settings", go: () => setOnly(null) }
+					: null
 	const toggleFilter = (f: SettingFilter) =>
 		setFilters(list =>
 			list.includes(f) ? list.filter(x => x !== f) : [...list, f],
@@ -923,6 +947,8 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 							host={rootRef.current}
 							phone={phone}
 						/>
+					) : devicesPage ? (
+						<DevicesPage onSignedOut={() => setPage(null)} />
 					) : showGroups ? (
 						SETTING_GROUPS.map(g => {
 							const dot = railDots.get(g.id)

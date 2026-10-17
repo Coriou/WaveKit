@@ -57,6 +57,7 @@ describe("live audio from a real core", () => {
 			wavUrl: "http://localhost:8081/stream.wav",
 			format: "s16le",
 			rate: 24975.60975609756,
+			credentials: false,
 		})
 		expect(audioSource(status, "http://127.0.0.1:9000/")?.httpUrl).toBe(
 			"http://localhost:8081/stream",

@@ -21,3 +21,8 @@ export { Kbd } from "./Kbd.tsx"
 export { Label, type LabelProps } from "./Label.tsx"
 export { Seg, type SegOption, type SegProps } from "./Seg.tsx"
 export { Switch, type SwitchProps } from "./Switch.tsx"
+export {
+	Skeleton,
+	type SkeletonProps,
+	type SkeletonShape,
+} from "./Skeleton.tsx"

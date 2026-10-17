@@ -17,6 +17,7 @@ import { BandplanStackStore } from "./bandplan-stack-store.ts"
 import { CoverageStore } from "./coverage-store.ts"
 import { TrailHistoryStore } from "./trail-history-store.ts"
 import { DecoderSettingsStore } from "./decoder-settings-store.ts"
+import { AccessDevicesStore } from "./access-devices-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
 import { PreferencesStore } from "./preferences-store.ts"
@@ -92,6 +93,10 @@ export interface DataLayer {
 	}): Promise<void>
 	/** Ends this browser's session (read-only until paired again). */
 	logout(): Promise<void>
+	/** Settings › Devices: the remembered devices (a browser session only); loads on first load(). */
+	devices: AccessDevicesStore
+	/** Signs out every remembered device, this browser too (read-only until paired again). */
+	revokeAllDevices(): Promise<void>
 	dispose(): void
 }
 
@@ -126,12 +131,16 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		error: null,
 		session: null,
 	})
+	const devices = new AccessDevicesStore(api)
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null
 	const setSession = (session: AccessSessionDto | null) => {
 		if (refreshTimer) clearTimeout(refreshTimer)
 		refreshTimer = null
 		access.set({ ...access.get(), session })
-		if (session === null) return
+		if (session === null) {
+			devices.clear()
+			return
+		}
 		refreshTimer = setTimeout(
 			() => {
 				api.refreshSession().then(setSession, (error: unknown) => {
@@ -207,6 +216,14 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		async logout() {
 			try {
 				await api.logout()
+			} finally {
+				setSession(null)
+			}
+		},
+		devices,
+		async revokeAllDevices() {
+			try {
+				await api.revokeAllDevices()
 			} finally {
 				setSession(null)
 			}

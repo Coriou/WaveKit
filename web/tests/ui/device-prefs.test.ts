@@ -50,6 +50,7 @@ describe("device prefs", () => {
 			fixedLevels: null,
 			averaging: "low",
 			fftSize: 8192,
+			signalLabels: "clear",
 			mapTiles: "online",
 			mapTrail: 15,
 			mapLabels: "normal",

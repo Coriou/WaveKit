@@ -31,6 +31,7 @@ import { Chip } from "../../ui/Chip.tsx"
 import { Drawer } from "../../ui/Drawer.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { Seg } from "../../ui/Seg.tsx"
+import { Skeleton } from "../../ui/Skeleton.tsx"
 import { showAppToast } from "../toast.ts"
 import type { DrawerContentProps } from "./types.ts"
 
@@ -474,7 +475,7 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 					</button>
 				</p>
 			)}
-			{status === "loading" && empty && <p className="wka-note">Loading…</p>}
+			{status === "loading" && empty && <Skeleton label="Activity" />}
 			{status === "live" && empty && (
 				<p className="wka-note">
 					{query === null || tokens.length > 0

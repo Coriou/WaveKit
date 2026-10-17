@@ -59,6 +59,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 		openTuner: () => void calls.push(["openTuner"]),
 		openShortcuts: () => void calls.push(["openShortcuts"]),
 		openBandPlans: () => void calls.push(["openBandPlans"]),
+		openDevices: () => void calls.push(["openDevices"]),
 	}
 }
 
@@ -255,6 +256,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 		decoderSettings: true,
 		version: "0.14.2",
 		accessMode: "protected",
+		devices: null,
 		storage: null,
 		exportUrl: "/api/config/export",
 		...over,
@@ -333,7 +335,8 @@ describe("Settings rows", () => {
 		)
 		const ids = new Set(rows.map(r => r.id))
 		for (const e of SETTINGS_REGISTRY)
-			if (e.place.kind === "settings") expect(ids, e.id).toContain(e.id)
+			if (e.place.kind === "settings" && !e.protectedOnly)
+				expect(ids, e.id).toContain(e.id)
 		expect(byId(rows, "st.activity").text).toBe(
 			"3 days · 250,000 messages · 256 MB",
 		)
@@ -349,6 +352,62 @@ describe("Settings rows", () => {
 		expect(isChanged(byId(rows, "station.name"))).toBe(true)
 		expect(byId(rows, "station.location").text).toBe("48.727° N, 3.985° W")
 		expect(byId(rows, "station.location").effect?.kind).toBe("restart")
+	})
+
+	it("offers Use my location on a writable Location when the browser can locate", () => {
+		const a = actions()
+		const located = { ...a, locate: () => Promise.resolve({ value: "1, 2" }) }
+		const fill = (row: SettingRow) =>
+			row.widget.kind === "text" ? row.widget.fill : undefined
+		expect(
+			fill(byId(buildRows(snapshot(), located), "station.location"))?.label,
+		).toBe("Use my location")
+		expect(fill(byId(buildRows(snapshot(), a), "station.location"))).toBe(
+			undefined,
+		)
+		expect(
+			fill(
+				byId(
+					buildRows(
+						snapshot({ station: { ...STATION, writable: false } }),
+						located,
+					),
+					"station.location",
+				),
+			),
+		).toBe(undefined)
+	})
+
+	it("opens Signed-in devices when paired, and says to pair first when not", () => {
+		const a = actions()
+		const devices = [
+			{
+				deviceId: `device_${"a".repeat(42)}A`,
+				createdAt: 1,
+				renewedAt: 2,
+				expiresAt: 3,
+				current: true,
+				name: null,
+				kind: null,
+				lastSeenAt: null,
+			},
+		]
+		const row = byId(buildRows(snapshot({ devices }), a), "sys.devices")
+		expect(row.text).toBe("1 device")
+		expect(row.help).toBe("This browser")
+		if (row.widget.kind !== "link") throw new Error("not a link")
+		row.widget.action()
+		expect(a.calls).toEqual([["openDevices"]])
+		const unpaired = byId(
+			buildRows(snapshot({ readOnly: true }), a),
+			"sys.devices",
+		)
+		expect(unpaired.widget.kind).toBe("read")
+		expect(
+			buildRows(snapshot({ accessMode: "legacy" }), a).some(
+				r => r.id === "sys.devices",
+			),
+		).toBe(false)
 	})
 
 	it("keeps the station read-only on an open-access core", () => {
@@ -651,6 +710,26 @@ describe("Settings items", () => {
 			a,
 		)
 		expect(byId(blank, "map.online").help).toContain("No tiles are fetched")
+	})
+
+	it("keeps Signal labels on this device, after the FFT size", async () => {
+		const a = actions()
+		const list = buildRows(snapshot(), a)
+		const ids = list.filter(r => r.device).map(r => r.id)
+		expect(ids[ids.indexOf("dp.fft") + 1]).toBe("dp.labels")
+		const labels = byId(list, "dp.labels")
+		expect(labels.text).toBe("Clear")
+		expect(labels.def?.value).toBe("clear")
+		await labels.write?.("named")
+		expect(a.calls).toContainEqual(["device", { signalLabels: "named" }])
+		const all = byId(
+			buildRows(
+				snapshot({ device: { ...DEFAULT_DEVICE, signalLabels: "all" } }),
+				a,
+			),
+			"dp.labels",
+		)
+		expect(all.help).toBe("Every signal WaveKit finds, even faint ones")
 	})
 
 	it("offers FFT sizes up to what this core serves, saying why the others cannot be picked", async () => {

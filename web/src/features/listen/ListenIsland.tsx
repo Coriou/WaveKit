@@ -34,7 +34,8 @@ export function AudioOutput() {
 	const status = useLiveStatus()
 	const base =
 		typeof location === "undefined" ? "http://localhost/" : location.href
-	const source = audioSource(status, base)
+	const access = useStore(useServices().data.access, s => s.access)
+	const source = audioSource(status, base, access?.mode === "protected")
 	const key = audioAttachKey(source)
 	// the source object is rebuilt every render; the key says when it really changed
 	useEffect(() => listen.setSource(key, source), [listen, key])

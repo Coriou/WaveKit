@@ -11,6 +11,7 @@ import { useReadOnly, useServices } from "../../../app/context.ts"
 import { useStore } from "../../../data/index.ts"
 import { Drawer } from "../../../ui/Drawer.tsx"
 import { Seg } from "../../../ui/Seg.tsx"
+import { Skeleton } from "../../../ui/Skeleton.tsx"
 import { Switch } from "../../../ui/Switch.tsx"
 import { useNow, useTunerState } from "../../hooks.ts"
 import { closePlan, openDiscovery, openPlan, scannerUi } from "../ui-store.ts"
@@ -315,12 +316,7 @@ function Discoveries() {
 					</button>
 				</p>
 			)}
-			{!loaded && loading && (
-				<p className="wks-note">
-					<span className="wk-spinner" aria-hidden="true" /> Loading
-					discoveries…
-				</p>
-			)}
+			{!loaded && loading && <Skeleton rows={6} label="discoveries" />}
 			{loaded &&
 				count === 0 &&
 				!loading &&

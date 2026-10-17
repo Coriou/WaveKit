@@ -29,7 +29,7 @@ function status(over: Partial<LiveAudioStatus> = {}, offsetHz = 0) {
 	} as LiveAudioStatus
 }
 
-function setup(initial: LiveAudioStatus) {
+function setup(initial: LiveAudioStatus, credentials = false) {
 	let current = initial
 	const liveAudio = {
 		get: () => ({ status: current }),
@@ -40,7 +40,10 @@ function setup(initial: LiveAudioStatus) {
 	let events: PcmPlayerEvents | null = null
 	const player: ListenPlayer = {
 		unlock: rate => void calls.push(`unlock ${rate}`),
-		play: s => void calls.push(`play ${s.url} ${s.format} ${s.rate}`),
+		play: s =>
+			void calls.push(
+				`play ${s.url} ${s.format} ${s.rate}${s.credentials ? " cred" : ""}`,
+			),
 		stop: () => void calls.push("stop"),
 		setVolume: () => undefined,
 		dispose: () => void calls.push("dispose"),
@@ -53,7 +56,7 @@ function setup(initial: LiveAudioStatus) {
 	})
 	const feed = (s: LiveAudioStatus) => {
 		current = s
-		const src = audioSource(s, BASE)
+		const src = audioSource(s, BASE, credentials)
 		c.setSource(audioAttachKey(src), src)
 	}
 	feed(initial)
@@ -70,6 +73,14 @@ describe("ListenController (Web Audio path)", () => {
 			"play http://localhost:3102/stream s16le 16000",
 		])
 		expect(c.get().phase).toBe("connecting")
+	})
+
+	it("sends the session cookie to the audio port on a protected core", async () => {
+		const { c, calls } = setup(status(), true)
+		await c.start()
+		expect(calls.at(-1)).toBe(
+			"play http://localhost:3102/stream s16le 16000 cred",
+		)
 	})
 
 	it("does not reattach on a retune: the core's stream follows tuning", async () => {

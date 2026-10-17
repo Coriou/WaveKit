@@ -53,7 +53,9 @@ describe("audio follows tuning", () => {
 			wavUrl: "http://localhost:3102/stream.wav",
 			format: "s16le",
 			rate: 16_000,
+			credentials: false,
 		})
+		expect(audioSource(status(), BASE, true)?.credentials).toBe(true)
 		const rel = audioSource(
 			status({ httpUrl: "/stream", wavUrl: "/stream.wav" }),
 			BASE,

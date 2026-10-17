@@ -642,6 +642,17 @@ function channelNear(
 	return best
 }
 
+/** True when a band-plan channel sits on the signal: it has a name, not just a frequency. */
+export function namedChannelAt(
+	plan: ResolvedBandPlanView | null,
+	hz: number,
+	widthHz: number,
+): boolean {
+	return (
+		plan !== null && channelNear(plan, hz, Math.max(3000, widthHz / 2)) !== null
+	)
+}
+
 function narrowestBand(
 	view: ResolvedBandPlanView,
 	hz: number,

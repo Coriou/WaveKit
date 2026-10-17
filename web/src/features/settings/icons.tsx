@@ -145,6 +145,49 @@ const PATHS = {
 	plus: ["M12 5v14", "M5 12h14"],
 	search: ["M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0", "M21 21l-6 -6"],
 	x: ["M6 6l12 12", "M18 6l-12 12"],
+	// Settings › Devices and Station › Location (Tabler, same 24 px outline set)
+	browser: [
+		"M4 5a1 1 0 0 1 1 -1h14a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1z",
+		"M4 8h16",
+		"M8 4v4",
+	],
+	phone: [
+		"M6 5a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v14a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-14z",
+		"M11 4h2",
+		"M12 17v.01",
+	],
+	tablet: [
+		"M5 4a1 1 0 0 1 1 -1h12a1 1 0 0 1 1 1v16a1 1 0 0 1 -1 1h-12a1 1 0 0 1 -1 -1v-16z",
+		"M11 17a1 1 0 1 0 2 0a1 1 0 0 0 -2 0",
+	],
+	desktop: [
+		"M3 5a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-10z",
+		"M7 20h10",
+		"M9 16v4",
+		"M15 16v4",
+	],
+	terminal: [
+		"M8 9l3 3l-3 3",
+		"M13 15h3",
+		"M3 6a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2z",
+	],
+	logout: [
+		"M14 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2",
+		"M9 12h12l-3 -3",
+		"M18 15l3 -3",
+	],
+	pencil: [
+		"M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4",
+		"M13.5 6.5l4 4",
+	],
+	locate: [
+		"M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
+		"M4 12a8 8 0 1 0 16 0a8 8 0 1 0 -16 0",
+		"M12 2v2",
+		"M12 20v2",
+		"M20 12h2",
+		"M2 12h2",
+	],
 } as const satisfies Record<string, readonly string[]>
 
 export type SetIconName = keyof typeof PATHS

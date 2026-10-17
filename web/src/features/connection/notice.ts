@@ -79,3 +79,37 @@ export function pairError(code: string | null, answered: boolean): string {
 				: "Can’t reach the receiver. Try again."
 	}
 }
+
+/** Where the chip sits on a wide window: whole or title-only in the top-row gap, else under the top row. */
+export interface ChipPlace {
+	/** Left edge of the box the chip centres in, its width, and its top. */
+	x: number
+	w: number
+	top: number
+	/** The detail line is dropped to fit the gap. */
+	titleOnly: boolean
+}
+
+/** Room kept between the chip and the islands on each side. */
+export const CHIP_MARGIN = 12
+
+/**
+ * The gap between the Tuner and the Receiver takes the whole chip, else its title alone; otherwise the chip drops
+ * under the top row, centred in the free plot (beside a full-height drawer). Pure; widths are the chip's natural ones.
+ */
+export function chipPlace(
+	slot: {
+		gap: { x: number; w: number } | null
+		freeW: number
+		topRow: number
+	},
+	fullW: number,
+	titleW: number,
+): ChipPlace {
+	const room = slot.gap ? slot.gap.w - 2 * CHIP_MARGIN : -1
+	if (slot.gap && fullW <= room)
+		return { x: slot.gap.x, w: slot.gap.w, top: 16, titleOnly: false }
+	if (slot.gap && titleW <= room)
+		return { x: slot.gap.x, w: slot.gap.w, top: 16, titleOnly: true }
+	return { x: 0, w: slot.freeW, top: slot.topRow, titleOnly: false }
+}

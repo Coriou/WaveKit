@@ -87,6 +87,7 @@ function ctx(over: Partial<PaletteContext> = {}): PaletteContext {
 			lockReason: null,
 		},
 		readOnly: false,
+		accessMode: null,
 		theme: DEFAULT_THEME,
 		saved: SAVED,
 		bandplan: buildResolvedBandPlan(),
@@ -313,6 +314,16 @@ describe("palette: rows", () => {
 		expect(inline).toBeGreaterThanOrEqual(0)
 		expect(t[inline + 1]).toBe("Theme — Display")
 		expect(items[inline + 1]?.opens).toBe("Open in Settings ›")
+	})
+
+	it("lists Signed-in devices only on a protected core, found by sign out", () => {
+		const find = (accessMode: "legacy" | "protected" | null) =>
+			titles(
+				flatten(new PaletteModel(ctx({ accessMode })).build(null, "sign out")),
+			).includes("Signed-in devices — System")
+		expect(find("protected")).toBe(true)
+		expect(find("legacy")).toBe(false)
+		expect(find(null)).toBe(false)
 	})
 
 	it("offers Activity lookups for digits, search last", () => {

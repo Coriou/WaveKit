@@ -15,6 +15,8 @@ export interface SettingEntry {
 	/** Words people search with ("dark mode", "oled"). */
 	readonly keys: readonly string[]
 	readonly place: SettingPlace
+	/** Listed only on a protected core (the drawer has the row only there). */
+	readonly protectedOnly?: boolean
 }
 
 const SETTINGS: SettingPlace = { kind: "settings" }
@@ -187,6 +189,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.labels",
+		"Display",
+		"Signal labels",
+		"tags chips names spectrum noise clutter",
+		SETTINGS,
+	),
+	row(
 		"dev.card",
 		"Display",
 		"Tuned card position",
@@ -194,6 +203,16 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row("tn.step", "Display", "Tuning step", "channel spacing", SETTINGS),
+	{
+		...row(
+			"sys.devices",
+			"System",
+			"Signed-in devices",
+			"devices sign out log out logout paired browsers phones tablets revoke lost",
+			SETTINGS,
+		),
+		protectedOnly: true,
+	},
 	row("sys.config", "System", "Configuration", "backup export yaml", SETTINGS),
 	row(
 		"tn.saved",
@@ -203,6 +222,15 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		TUNER,
 	),
 ]
+
+/** The entries this core has: protected-only ones need a protected core (`accessMode` "protected"). */
+export function settingsFor(
+	accessMode: "legacy" | "protected" | null,
+): readonly SettingEntry[] {
+	return accessMode === "protected"
+		? SETTINGS_REGISTRY
+		: SETTINGS_REGISTRY.filter(e => !e.protectedOnly)
+}
 
 /** The setting a place should highlight (the palette's "Open in Settings ›"); consumed by that place. */
 export const settingFocus = new Store<{ id: string | null }>({ id: null })

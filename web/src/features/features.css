@@ -898,6 +898,25 @@
 		pointer-events: none;
 		max-width: calc(100vw - 32px);
 	}
+	/* placed by the shell's overlay slot (left, top, max-width inline) on a wide window */
+	.wkf-conn-chip {
+		max-width: 100%;
+		box-sizing: border-box;
+	}
+	.wkf-conn-chip > b,
+	.wkf-conn-detail {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkf-conn-chip > b {
+		flex: none;
+	}
+	.wkf-conn-chip[data-title-only] .wkf-conn-detail {
+		/* kept in the flow at zero width so its natural width can still be read */
+		max-width: 0;
+		margin-left: -8px;
+	}
 	@media (max-width: 1099px) {
 		.wkf-conn {
 			top: auto;

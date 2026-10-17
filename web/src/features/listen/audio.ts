@@ -57,12 +57,21 @@ export interface AudioStreamSource {
 	wavUrl: string | null
 	format: PcmFormat
 	rate: number
+	/**
+	 * Send the session cookie to the audio port (a protected core: the stream is cross-origin and
+	 * answers 401 without it). False on a legacy core, whose wildcard CORS refuses credentials.
+	 */
+	credentials: boolean
 }
 
-/** The stream to play; null while live audio is stopped or has no URL. `base`: the page's URL. */
+/**
+ * The stream to play; null while live audio is stopped or has no URL. `base`: the page's URL;
+ * `credentials`: the core is protected (see AudioStreamSource.credentials).
+ */
 export function audioSource(
 	status: LiveAudioStatus | null,
 	base: string,
+	credentials = false,
 ): AudioStreamSource | null {
 	if (!status?.running) return null
 	const httpUrl = reachableAudioUrl(status.httpUrl, base)
@@ -73,6 +82,7 @@ export function audioSource(
 		wavUrl,
 		format: status.config.audioFormat === "f32le" ? "f32le" : "s16le",
 		rate: status.effectiveSampleRate,
+		credentials,
 	}
 }
 
@@ -86,7 +96,7 @@ export function audioAttachKey(
 	source: AudioStreamSource | null,
 ): string | null {
 	if (!source) return null
-	return `${source.httpUrl ?? ""}|${source.wavUrl ?? ""}|${source.format}|${source.rate}`
+	return `${source.httpUrl ?? ""}|${source.wavUrl ?? ""}|${source.format}|${source.rate}|${source.credentials ? "cred" : ""}`
 }
 
 /**
