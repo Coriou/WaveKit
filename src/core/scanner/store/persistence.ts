@@ -72,6 +72,24 @@ const ENGINE_DIR = "engine"
 const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
 const JOURNAL_NAME = /^observations-(\d{8})\.jsonl$/
 const DAY_MS = 86_400_000
+/**
+ * Heap a queued journal line may hold, charged against the cap: 2 bytes per UTF-16 unit (a
+ * two-byte string at worst; JSON lines are usually one-byte, i.e. half that) plus
+ * `APPEND_OVERHEAD_BYTES` for what each pending append keeps alive besides its text: the string
+ * header and array slot, the `.then(() => seq)` promise, reaction and closure, and the caller's
+ * `.catch` promise, reaction and closure. Measured in the OOM heap snapshot at roughly
+ * 300-480 B per queued line, so 512 B is an upper bound.
+ */
+const APPEND_OVERHEAD_BYTES = 512
+/**
+ * Queued journal heap past which appends are refused (fail closed). With the accounting above it
+ * is a true upper bound on the heap the journal backlog holds: 32 MiB, e.g. at most ~8.2k typical
+ * 1.8 kB lines (each charged 2 x 1.8 kB + 512 B = 4,112 B) or ~47k minimal ~100-unit lines (each
+ * charged 712 B).
+ */
+const DEFAULT_MAX_JOURNAL_BACKLOG_BYTES = 32 * 1024 * 1024
+/** Error code of an append refused because the journal backlog is full. */
+export const SCANNER_JOURNAL_BACKLOG_CODE = "SCANNER_JOURNAL_BACKLOG"
 
 export interface LeaseTunerFields {
 	frequency: number
@@ -448,6 +466,24 @@ function parseJournalLine(line: string): JournalEntry | null {
 	return parsed.success ? parsed.data : null
 }
 
+/** Journal lines written together by one append (group commit). */
+interface JournalBatch {
+	name: string
+	lines: string[]
+	bytes: number
+	minSeq: number
+	maxSeq: number
+	written: Promise<void>
+}
+
+/** A queued snapshot write; `text` is dropped once written or superseded. */
+interface SnapshotSlot {
+	text: string | null
+	lastSeq: number
+	/** The newer write that superseded this one; its settlement is this one's. */
+	successor: Promise<void> | null
+}
+
 export class ScannerPersistence {
 	private readonly root: string
 	private readonly log: Logger
@@ -456,6 +492,20 @@ export class ScannerPersistence {
 	private readonly fileMaxSeq = new Map<string, number>()
 	private readonly fileBytes = new Map<string, number>()
 	private chain: Promise<unknown> = Promise.resolve()
+	/** The newest snapshot still waiting on the chain; a later one supersedes it (bounded backlog). */
+	private queuedSnapshot: SnapshotSlot | null = null
+	/** The journal batch at the chain's tail, still collecting lines (group commit). */
+	private openBatch: JournalBatch | null = null
+	/** Journal lines enqueued but not yet written or failed, and the heap charged for them (`backlog()`). */
+	private queuedLines = 0
+	private queuedBytes = 0
+	/** Highest and lowest refused seq not yet covered by a durable snapshot; lines above `holeFrom` are not written. */
+	private refusedMax: number | null = null
+	private holeFrom: number | null = null
+	private refusedCount = 0
+	/** lastSeq of the newest snapshot queued or written (null after it failed). */
+	private coverSeq: number | null = null
+	private readonly maxJournalBacklogBytes: number
 	private nextSeq = 1
 	private durableLastSeq = 0
 	private loaded = false
@@ -466,13 +516,19 @@ export class ScannerPersistence {
 		return this.authorityHealth
 	}
 
-	/** `appendFile` is injectable for the short-write test; default `fs/promises.appendFile`. */
+	/**
+	 * `appendFile` is injectable for the short-write test; default `fs/promises.appendFile`.
+	 * `maxJournalBacklogBytes`: charged journal backlog heap past which appends are refused (default 32 MiB).
+	 */
 	constructor(opts: {
 		dir: string
 		logger: Logger
 		now: () => number
 		appendFile?: (path: string, data: string) => Promise<void>
+		maxJournalBacklogBytes?: number
 	}) {
+		this.maxJournalBacklogBytes =
+			opts.maxJournalBacklogBytes ?? DEFAULT_MAX_JOURNAL_BACKLOG_BYTES
 		this.root = resolve(opts.dir)
 		this.log = createComponentLogger(opts.logger, "ScannerPersistence")
 		this.now = opts.now
@@ -548,35 +604,135 @@ export class ScannerPersistence {
 		return { jobs, leases, settings, engines }
 	}
 
-	append(entry: Omit<JournalEntry, "seq">): Promise<number> {
+	/**
+	 * Group commit: lines appended while the chain is busy join one batch, written by a single
+	 * append when its turn comes, so a slow disk or a busy event loop cannot queue one chain step
+	 * per line. Fail closed past `maxJournalBacklogBytes`: the append is refused instead of growing
+	 * the heap without bound. A refused seq is a hole replay must never step over, so from then on
+	 * no later line is written, and appends stay refused, until a snapshot covering every refused
+	 * seq is queued (later lines then follow it) and written. `reserved` appends (recording
+	 * operations, at most 16 at a time) skip the byte cap but not the hole rule.
+	 */
+	append(
+		entry: Omit<JournalEntry, "seq">,
+		opts: { reserved?: boolean } = {},
+	): Promise<number> {
 		if (!this.loaded) return Promise.reject(notLoaded())
 		const seq = this.nextSeq++
 		const line = `${JSON.stringify({ seq, at: entry.at, op: entry.op, payload: entry.payload })}\n`
+		const cost = line.length * 2 + APPEND_OVERHEAD_BYTES
+		const overCap =
+			opts.reserved !== true &&
+			this.queuedBytes + cost > this.maxJournalBacklogBytes
+		const uncovered =
+			this.refusedMax !== null &&
+			(this.coverSeq === null || this.coverSeq < this.refusedMax)
+		if (overCap || uncovered) return this.refuse(seq)
 		const name = journalName(this.now())
-		return this.enqueue(async () => {
-			const dir = join(this.root, JOURNAL_DIR)
-			const path = join(dir, name)
-			const knownBytes = this.fileBytes.get(name) ?? 0 // load() sized every existing file; a new file is 0
-			try {
-				await mkdir(dir, { recursive: true })
-				await this.appendFile(path, line)
-			} catch (err) {
-				// A partial line would glue onto the next one and lose both at load: cut back to the known size.
-				await truncate(path, knownBytes).catch(() => undefined)
-				this.log.warn(
-					{ err, file: path, seq },
-					"Journal append failed; truncated the partial line",
-				)
-				throw new WaveKitError(
-					`Could not append to ${path}`,
-					"SCANNER_PERSIST_FAILED",
-					err instanceof Error ? err : undefined,
-				)
+		let batch = this.openBatch
+		if (batch === null || batch.name !== name) {
+			const fresh: JournalBatch = {
+				name,
+				lines: [],
+				bytes: 0,
+				minSeq: seq,
+				maxSeq: seq,
+				written: Promise.resolve(),
 			}
-			this.fileMaxSeq.set(name, Math.max(this.fileMaxSeq.get(name) ?? 0, seq))
-			this.fileBytes.set(name, knownBytes + Buffer.byteLength(line))
-			return seq
-		})
+			fresh.written = this.enqueue(() => this.writeBatch(fresh))
+			// After enqueue, which closes any earlier batch: only the chain's tail collects lines.
+			this.openBatch = fresh
+			batch = fresh
+		}
+		batch.lines.push(line)
+		batch.bytes += cost
+		batch.maxSeq = seq
+		this.queuedLines += 1
+		this.queuedBytes += cost
+		return batch.written.then(() => seq)
+	}
+
+	private refuse(seq: number): Promise<number> {
+		this.refusedMax = seq
+		this.holeFrom ??= seq
+		this.refusedCount += 1
+		this.openBatch = null // no batch spans a hole
+		if (this.refusedCount === 1)
+			this.log.warn(
+				{ seq, queuedBytes: this.queuedBytes },
+				"Journal backlog full; refusing appends until a snapshot covers them",
+			)
+		return Promise.reject(
+			new WaveKitError(
+				"Scanner journal backlog full",
+				SCANNER_JOURNAL_BACKLOG_CODE,
+			),
+		)
+	}
+
+	/** A durable snapshot up to `lastSeq` closes the hole it covers. */
+	private snapshotDurable(lastSeq: number): void {
+		this.durableLastSeq = Math.max(this.durableLastSeq, lastSeq)
+		if (this.refusedMax === null) return
+		if (lastSeq >= this.refusedMax) {
+			this.log.info(
+				{ refused: this.refusedCount, lastSeq },
+				"Journal hole covered by a snapshot; appends accepted again",
+			)
+			this.refusedMax = null
+			this.holeFrom = null
+			this.refusedCount = 0
+		} else if (this.holeFrom !== null && lastSeq >= this.holeFrom) {
+			// Some refused seq above lastSeq is still uncovered; stay conservative.
+			this.holeFrom = lastSeq + 1
+		}
+	}
+
+	private async writeBatch(batch: JournalBatch): Promise<void> {
+		if (this.openBatch === batch) this.openBatch = null
+		this.queuedLines -= batch.lines.length
+		if (this.holeFrom !== null && batch.minSeq > this.holeFrom) {
+			// Behind an uncovered hole: never written (a later snapshot carries these mutations).
+			batch.lines = []
+			this.queuedBytes -= batch.bytes
+			throw new WaveKitError(
+				"Scanner journal backlog full",
+				SCANNER_JOURNAL_BACKLOG_CODE,
+			)
+		}
+		const text = batch.lines.join("")
+		batch.lines = []
+		const dir = join(this.root, JOURNAL_DIR)
+		const path = join(dir, batch.name)
+		const knownBytes = this.fileBytes.get(batch.name) ?? 0 // load() sized every existing file; a new file is 0
+		try {
+			await mkdir(dir, { recursive: true })
+			await this.appendFile(path, text)
+		} catch (err) {
+			// The whole batch is lost: a hole like a refusal, so no later line is written past it
+			// until a snapshot covers it (replay must never apply later lines on a stale base).
+			this.refusedMax = Math.max(this.refusedMax ?? 0, batch.maxSeq)
+			this.holeFrom = Math.min(this.holeFrom ?? Infinity, batch.minSeq)
+			this.openBatch = null
+			// A partial line would glue onto the next one and lose both at load: cut back to the known size.
+			await truncate(path, knownBytes).catch(() => undefined)
+			this.log.warn(
+				{ err, file: path, seq: batch.maxSeq },
+				"Journal append failed; truncated the partial line",
+			)
+			throw new WaveKitError(
+				`Could not append to ${path}`,
+				"SCANNER_PERSIST_FAILED",
+				err instanceof Error ? err : undefined,
+			)
+		} finally {
+			this.queuedBytes -= batch.bytes
+		}
+		this.fileMaxSeq.set(
+			batch.name,
+			Math.max(this.fileMaxSeq.get(batch.name) ?? 0, batch.maxSeq),
+		)
+		this.fileBytes.set(batch.name, knownBytes + Buffer.byteLength(text))
 	}
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
@@ -602,10 +758,54 @@ export class ScannerPersistence {
 			recordingOperations: prepared.data,
 			...(s.aliases && s.aliases.length > 0 ? { aliases: s.aliases } : {}),
 		})
-		return this.enqueue(async () => {
-			await atomicWrite(join(this.root, SNAPSHOT_FILE), text)
-			this.durableLastSeq = Math.max(this.durableLastSeq, lastSeq)
+		// A slow disk must not queue one full-store text per call (the 2 GB heap OOM): a newer
+		// snapshot supersedes one that has not started, which drops its text and settles with the
+		// newer write. The newest keeps its own place after every append up to its lastSeq.
+		const slot: SnapshotSlot = { text, lastSeq, successor: null }
+		const superseded = this.queuedSnapshot
+		this.queuedSnapshot = slot
+		this.coverSeq = lastSeq
+		const own = this.enqueue(async () => {
+			if (this.queuedSnapshot === slot) this.queuedSnapshot = null
+			const body = slot.text
+			if (body === null) return
+			slot.text = null
+			try {
+				await atomicWrite(join(this.root, SNAPSHOT_FILE), body)
+			} catch (err) {
+				// Lines queued after this snapshot no longer follow a covering one.
+				if (this.coverSeq === slot.lastSeq) this.coverSeq = null
+				throw err
+			}
+			this.snapshotDurable(slot.lastSeq)
 		})
+		const done = own.then(() => slot.successor ?? undefined)
+		if (superseded) {
+			superseded.text = null
+			superseded.successor = done
+		}
+		return done
+	}
+
+	/**
+	 * Disk work still queued: at most one snapshot text whatever the disk speed. `journalBytes` is
+	 * the heap charged for queued journal lines (an upper bound, see `APPEND_OVERHEAD_BYTES`).
+	 */
+	backlog(): {
+		snapshots: number
+		snapshotBytes: number
+		journalLines: number
+		journalBytes: number
+		refusedLines: number
+	} {
+		const text = this.queuedSnapshot?.text ?? null
+		return {
+			snapshots: text === null ? 0 : 1,
+			snapshotBytes: text === null ? 0 : text.length,
+			journalLines: this.queuedLines,
+			journalBytes: this.queuedBytes,
+			refusedLines: this.refusedCount,
+		}
 	}
 
 	/** `leases`: persisted leases whose job is gone (written only when there are some). */
@@ -717,6 +917,7 @@ export class ScannerPersistence {
 	}
 
 	private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+		this.openBatch = null
 		const next = this.chain.then(fn)
 		this.chain = next.catch(() => undefined)
 		return next

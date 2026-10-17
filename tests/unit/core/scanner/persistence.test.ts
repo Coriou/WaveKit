@@ -187,7 +187,7 @@ describe("ScannerPersistence journal", () => {
 		})
 	})
 
-	it("truncates a failed partial append so the next line starts clean and nothing else is lost", async () => {
+	it("truncates a failed partial append so the next line starts clean, and writes nothing past the hole until a snapshot covers it", async () => {
 		await withDir(async dir => {
 			let failNext = false
 			const shortWrite = async (path: string, data: string): Promise<void> => {
@@ -208,7 +208,14 @@ describe("ScannerPersistence journal", () => {
 			expect(await p.append(entry(T0))).toBe(1)
 			failNext = true
 			await expect(p.append(entry(T0))).rejects.toBeInstanceOf(WaveKitError)
-			expect(await p.append(entry(T0))).toBe(3)
+			// Seq 2 is a hole: line 3 would replay on a base missing 2, so it is refused.
+			await expect(p.append(entry(T0))).rejects.toBeInstanceOf(WaveKitError)
+			await p.writeSnapshot({
+				discoveries: [],
+				observations: [],
+				corrections: [],
+			})
+			expect(await p.append(entry(T0))).toBe(4)
 			const [file] = await journalFiles(dir)
 			const text = await readFile(join(dir, "journal", file ?? ""), "utf8")
 			expect(text.split("\n").filter(l => l !== "")).toHaveLength(2)
@@ -217,7 +224,8 @@ describe("ScannerPersistence journal", () => {
 				logger,
 				now: () => T0,
 			}).load()
-			expect(loaded.entries.map(e => e.seq)).toEqual([1, 3])
+			expect(loaded.lastSeq).toBe(3)
+			expect(loaded.entries.map(e => e.seq)).toEqual([4])
 			expect(loaded.droppedLines).toBe(0)
 		})
 	})

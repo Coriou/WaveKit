@@ -147,6 +147,7 @@ import {
 	type StorageCaps,
 } from "./store/evidence-store.js"
 import {
+	SCANNER_JOURNAL_BACKLOG_CODE,
 	ScannerPersistence,
 	type LoadedState,
 	type PersistedJob,
@@ -311,6 +312,8 @@ const COVERAGE_EVENTS = [
 ] as const
 
 const SNAPSHOT_EVERY_MS = 10_000
+/** Fastest on-demand snapshot after a journal hole (a full-store clone + stringify each). */
+const SNAPSHOT_REQUEST_MIN_MS = 1_000
 const MAINTENANCE_EVERY_MS = 5 * 60_000
 const STATUS_EVERY_MS = 1_000
 const RECENT_KEEP_MS = 10_000
@@ -495,6 +498,13 @@ export class ScannerService extends EventEmitter {
 	private readonly operatorLost = new Set<string>()
 	private timer: NodeJS.Timeout | null = null
 	private lastSnapshotAt = 0
+	/** The periodic snapshot still being written: no second clone + stringify while it lags. */
+	private snapshotInFlight = false
+	/** A journal hole asked for a snapshot sooner than the periodic interval. */
+	private snapshotRequested = false
+	private snapshotFailed = false
+	/** Maintenance still running behind a slow disk: the next one waits for it. */
+	private maintenanceInFlight = false
 	private lastMaintenanceAt = 0
 	private lastStatusAt = 0
 	private lastStatusJson = ""
@@ -4426,12 +4436,26 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		this.dirty = true
 		if (!this.stateLoaded) return
-		const appended = this.persistence.append(entry)
-		if (this.recordingAppends.has(entry))
-			this.recordingAppends.set(entry, appended)
-		void appended.catch((err: unknown) =>
-			this.log.warn({ err }, "Journal append failed"),
+		// Recording operations (at most 16 in flight) are reserved: never refused by the byte cap.
+		const recording = this.recordingAppends.has(entry)
+		const appended = this.persistence.append(
+			entry,
+			recording ? { reserved: true } : {},
 		)
+		if (recording) this.recordingAppends.set(entry, appended)
+		void appended.catch((err: unknown) => {
+			// Persistence logs a refusal episode once and a failed batch once; a snapshot carries
+			// the mutation, so request it now rather than warn per line.
+			if (
+				err instanceof WaveKitError &&
+				(err.code === SCANNER_JOURNAL_BACKLOG_CODE ||
+					err.code === "SCANNER_PERSIST_FAILED")
+			) {
+				this.requestSnapshot()
+				return
+			}
+			this.log.warn({ err }, "Journal append failed")
+		})
 	}
 
 	private async acknowledgeRecordingMutation(
@@ -4601,23 +4625,70 @@ export class ScannerService extends EventEmitter {
 			this.emitProgressFor(null)
 			this.track(this.checkPassiveCost(now), "Passive cost check failed")
 		}
+		if (this.dirty && now - this.lastSnapshotAt >= this.snapshotInterval())
+			this.startSnapshot(now)
 		if (
-			this.stateLoaded &&
-			this.dirty &&
-			now - this.lastSnapshotAt >= SNAPSHOT_EVERY_MS
+			!this.maintenanceInFlight &&
+			now - this.lastMaintenanceAt >= MAINTENANCE_EVERY_MS
 		) {
-			this.lastSnapshotAt = now
-			this.dirty = false
-			this.persistence
-				.writeSnapshot(this.store.snapshot())
-				.catch((err: unknown) =>
-					this.log.warn({ err }, "Snapshot write failed"),
-				)
-		}
-		if (now - this.lastMaintenanceAt >= MAINTENANCE_EVERY_MS) {
 			this.lastMaintenanceAt = now
-			this.track(this.maintenance(), "Scanner maintenance failed")
+			this.maintenanceInFlight = true
+			this.track(
+				this.maintenance().finally(() => {
+					this.maintenanceInFlight = false
+				}),
+				"Scanner maintenance failed",
+			)
 		}
+	}
+
+	/**
+	 * Single-flight periodic snapshot: no second clone + stringify while one is being written. A
+	 * failed write leaves the state dirty, so it is retried.
+	 */
+	private startSnapshot(now: number): void {
+		if (!this.stateLoaded || this.snapshotInFlight) return
+		this.lastSnapshotAt = now
+		this.dirty = false
+		this.snapshotRequested = false
+		this.snapshotInFlight = true
+		this.persistence
+			.writeSnapshot(this.store.snapshot())
+			.then(
+				() => {
+					this.snapshotFailed = false
+				},
+				(err: unknown) => {
+					// Refused journal lines rely on a later snapshot: retry.
+					this.dirty = true
+					this.snapshotFailed = true
+					this.log.warn({ err }, "Snapshot write failed")
+				},
+			)
+			.finally(() => {
+				this.snapshotInFlight = false
+			})
+	}
+
+	/**
+	 * A journal hole (refused or failed lines) blocks every append, recording operations
+	 * included, until a snapshot covers it: snapshot now instead of at the next 10 s interval,
+	 * still single-flight and at most once per SNAPSHOT_REQUEST_MIN_MS (the tick picks a
+	 * deferred request up), or per SNAPSHOT_EVERY_MS after a failed snapshot.
+	 */
+	private requestSnapshot(): void {
+		this.dirty = true
+		this.snapshotRequested = true
+		const now = this.now()
+		if (now - this.lastSnapshotAt >= this.snapshotInterval())
+			this.startSnapshot(now)
+	}
+
+	/** A failing disk falls back to the periodic interval: no full-store stringify every second. */
+	private snapshotInterval(): number {
+		return this.snapshotRequested && !this.snapshotFailed
+			? SNAPSHOT_REQUEST_MIN_MS
+			: SNAPSHOT_EVERY_MS
 	}
 
 	/** Tick work stop() awaits (S1-B final review, finding 5). Never rejects. */
