@@ -566,9 +566,9 @@ describe("palette: running rows", async () => {
 		await runAction(f.services, { kind: "setting", entry }, null)
 		expect(shellStore.getState().drawer).toBe("settings")
 		expect(settingFocus.get().id).toBe("dev.accent")
-		const gain = SETTINGS_REGISTRY.find(e => e.id === "rx.gain")!
-		await runAction(f.services, { kind: "setting", entry: gain }, null)
-		expect(shellStore.getState().panel).toBe("receiver")
+		const saved = SETTINGS_REGISTRY.find(e => e.id === "tn.saved")!
+		await runAction(f.services, { kind: "setting", entry: saved }, null)
+		expect(shellStore.getState().panel).toBe("tuner")
 	})
 
 	it("starts Scan a band with the chosen preset", async () => {

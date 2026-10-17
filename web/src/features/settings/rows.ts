@@ -1,0 +1,1076 @@
+// The rows of the Settings drawer, built from what the app knows (a snapshot of its stores) and the writes it can
+// make (actions). Only settings that work in this app and this core are rows; the rest of the canvas registry
+// waits on CORE-GAPS ("Settings store in core", "One settings schema"). Pure given the snapshot and the actions.
+import type {
+	DecoderInfo,
+	DecoderSettingsUpdate,
+	DecoderSettingsView,
+	DecoderTypeInfo,
+	ExtendedSourceStatus,
+	LiveAudioStatus,
+	PreferenceKey,
+	Preferences,
+	StationIdentity,
+	StationProvenance,
+	StationUpdate,
+	StorageReport,
+	TunerState,
+} from "@wavekit/api-types"
+
+import type {
+	ControlStatus,
+	ReceiverCaps,
+	ReceiverSetting,
+	ReceiverSettingKey,
+	SettingWriteResult,
+	TunerRelayView,
+} from "../../data/index.ts"
+import type { ThemePrefs } from "../../shell/theme.ts"
+import { formatDb, formatRate, formatStep } from "../format.ts"
+import type { LiveAudioConfigPatch } from "../../data/live-audio-store.ts"
+import {
+	controlAvailability,
+	controlErrorText,
+	rateLabel,
+	rateWarning,
+	receiverLock,
+	sampleRateOptions,
+	type ReceiverControlId,
+} from "../receiver/controls.ts"
+import {
+	gainAt,
+	gainDb,
+	gainSteps,
+	nearestGainIndex,
+} from "../receiver/gain.ts"
+import { sourceTitle } from "../receiver/summary.ts"
+import { STEPS } from "../tuner/prefs.ts"
+import { decoderRows } from "./decoder-rows.ts"
+import {
+	optionText,
+	type SettingOption,
+	type SettingRow,
+	type SettingValue,
+	type TextWidget,
+} from "./model.ts"
+
+export interface SettingsSnapshot {
+	/** A protected core without a session: everything shows, nothing changes. */
+	readonly readOnly: boolean
+	readonly theme: ThemePrefs
+	readonly stepHz: number | null
+	readonly volume: number
+	readonly tuner: TunerState | undefined
+	readonly source: ExtendedSourceStatus | undefined
+	readonly caps: ReceiverCaps | null
+	readonly controls: Readonly<
+		Partial<Record<ReceiverSettingKey, ControlStatus>>
+	>
+	readonly relay: TunerRelayView | null
+	readonly live: LiveAudioStatus | null
+	readonly station: StationIdentity | null
+	readonly preferences: Preferences | null
+	readonly preferenceDefaults: Preferences | null
+	readonly savedCount: number
+	readonly decoders: readonly DecoderInfo[]
+	readonly decoderTypes: Readonly<Record<string, DecoderTypeInfo>>
+	readonly decoderViews: Readonly<Record<string, DecoderSettingsView>>
+	/** False: this core keeps no decoder settings (legacy access mode). */
+	readonly decoderSettings: boolean
+	readonly version: string | null
+	readonly accessMode: "legacy" | "protected" | null
+	readonly storage: StorageReport | null
+	readonly exportUrl: string
+}
+
+export interface SettingsActions {
+	setTheme(patch: Partial<ThemePrefs>): void
+	setStep(hz: number | null): void
+	setVolume(volume: number): void
+	receiver(setting: ReceiverSetting): Promise<SettingWriteResult>
+	manualGain(tenthsDb: number): Promise<SettingWriteResult>
+	audio(patch: LiveAudioConfigPatch): Promise<SettingWriteResult>
+	station(patch: StationUpdate): Promise<SettingWriteResult>
+	preference(
+		key: PreferenceKey,
+		value: Preferences[PreferenceKey],
+	): Promise<SettingWriteResult>
+	decoder(id: string, patch: DecoderSettingsUpdate): Promise<SettingWriteResult>
+	openTuner(): void
+	openShortcuts(): void
+}
+
+const OK: SettingWriteResult = { ok: true }
+/** A write kept by this browser: applied at once, never fails. */
+const local = (fn: () => void): Promise<SettingWriteResult> => {
+	fn()
+	return Promise.resolve(OK)
+}
+const opts = (list: readonly (readonly [string, string])[]): SettingOption[] =>
+	list.map(([value, label]) => ({ value, label }))
+
+/** Each keyword, plus each pair of neighbours ("dark mode"). */
+export function words(text: string): string[] {
+	const w = text ? text.split(" ") : []
+	return w.concat(w.slice(1).map((x, i) => `${w[i]} ${x}`))
+}
+
+// ---- station
+
+/** ISO 3166 codes the core accepts for `station.country` (src/config.ts stationCountries). */
+const COUNTRY_CODES =
+	"AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW".split(
+		" ",
+	)
+
+let countryNames: Intl.DisplayNames | null | undefined
+function countryName(code: string): string {
+	if (countryNames === undefined) {
+		try {
+			countryNames = new Intl.DisplayNames(["en"], { type: "region" })
+		} catch {
+			countryNames = null
+		}
+	}
+	return countryNames?.of(code) ?? code
+}
+
+let countryOptions: SettingOption[] | null = null
+function countries(): SettingOption[] {
+	countryOptions ??= [
+		{ value: "", label: "Not set" },
+		...COUNTRY_CODES.map(c => ({ value: c, label: countryName(c) })).sort(
+			(a, b) => a.label.localeCompare(b.label),
+		),
+	]
+	return countryOptions
+}
+
+const PROVENANCE_LOCK: Partial<Record<StationProvenance, string>> = {
+	env: "Set in the environment · change it there",
+	yaml: "Set in the YAML configuration · change it there",
+}
+
+const ENV_NAMES: Record<string, string> = {
+	name: "WAVEKIT_STATION_NAME",
+	callsign: "WAVEKIT_CALLSIGN",
+	country: "WAVEKIT_COUNTRY",
+}
+
+/** Lock note of a station field pinned by env or YAML (core precedence env > yaml > ui > default). */
+function stationLock(
+	field: string,
+	provenance: StationProvenance,
+): string | undefined {
+	if (provenance === "env" && ENV_NAMES[field])
+		return `Set by ${ENV_NAMES[field]} · change it in the environment`
+	return PROVENANCE_LOCK[provenance]
+}
+
+const CALLSIGN = /^[A-Z0-9]{3,7}(-[0-9]{1,2})?$/i
+
+const textWidget = (
+	placeholder: string,
+	parse: TextWidget["parse"],
+	inputMode: "text" | "decimal" = "text",
+): TextWidget => ({
+	kind: "text",
+	placeholder,
+	inputMode,
+	parse,
+	format: v => (v === null ? "" : Array.isArray(v) ? v.join(", ") : String(v)),
+})
+
+/** "48.727, -3.985" (or with N/S/E/W): both or neither. */
+export function parseLocation(
+	text: string,
+): { value: SettingValue } | { error: string } {
+	const t = text.trim()
+	if (!t) return { value: null }
+	const parts = t.split(/[,;\s]+/).filter(Boolean)
+	if (parts.length !== 2)
+		return { error: "Type latitude and longitude, like 48.727, -3.985" }
+	const num = (s: string, pos: string, neg: string) => {
+		const m = /^(-?\d+(?:[.,]\d+)?)°?([A-Za-z])?$/.exec(s)
+		if (!m) return Number.NaN
+		const v = Number((m[1] ?? "").replace(",", "."))
+		const h = m[2]?.toUpperCase()
+		if (h === undefined) return v
+		if (h === pos) return v
+		if (h === neg) return -v
+		return Number.NaN
+	}
+	const lat = num(parts[0] ?? "", "N", "S")
+	const lon = num(parts[1] ?? "", "E", "W")
+	if (!Number.isFinite(lat) || lat < -90 || lat > 90)
+		return { error: "Latitude goes from −90 to 90" }
+	if (!Number.isFinite(lon) || lon < -180 || lon > 180)
+		return { error: "Longitude goes from −180 to 180" }
+	return { value: `${lat}, ${lon}` }
+}
+
+export function formatLocation(lat: number | null, lon: number | null): string {
+	if (lat === null || lon === null) return "Not set"
+	const ns = `${Math.abs(lat).toFixed(3)}° ${lat < 0 ? "S" : "N"}`
+	const ew = `${Math.abs(lon).toFixed(3)}° ${lon < 0 ? "W" : "E"}`
+	return `${ns}, ${ew}`
+}
+
+function stationRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
+	const st = s.station
+	if (!st) return []
+	const writable = st.writable === true && !s.readOnly
+	const notWritable = s.readOnly
+		? "Read-only access: sign in on this WaveKit to change it"
+		: st.writable === true
+			? undefined
+			: "This WaveKit keeps the station read-only (open access mode) · set it in the YAML"
+	const field = <K extends keyof StationUpdate>(
+		key: K,
+		toPatch: (v: SettingValue) => StationUpdate[K],
+	) =>
+		writable
+			? (v: SettingValue) => a.station({ [key]: toPatch(v) } as StationUpdate)
+			: undefined
+	const lockOf = (k: string, p: StationProvenance) =>
+		stationLock(k, p) ?? (writable ? undefined : notWritable)
+	const lat = st.lat.value
+	const lon = st.lon.value
+	const locLock =
+		stationLock("lat", st.lat.provenance) ??
+		stationLock("lon", st.lon.provenance)
+	const rows: SettingRow[] = [
+		{
+			id: "station.name",
+			group: "station",
+			label: "Station name",
+			help: "Shown on your other devices",
+			keys: words("title name"),
+			widget: textWidget("WaveKit", t => ({ value: t.trim() || null })),
+			value: st.name.value,
+			text: st.name.value ?? "Not set",
+			def: { value: null, text: "Not set" },
+			...optional("lock", lockOf("name", st.name.provenance)),
+			...optional(
+				"write",
+				field("name", v => (v === null ? null : String(v))),
+			),
+		},
+		{
+			id: "station.location",
+			group: "station",
+			label: "Location",
+			help: "Latitude, longitude. Used by ADS-B and the map, never shared.",
+			keys: words("position latitude longitude coordinates gps qth lat lon"),
+			widget: textWidget("48.727, -3.985", parseLocation, "decimal"),
+			value: lat === null || lon === null ? null : `${lat}, ${lon}`,
+			text: formatLocation(lat, lon),
+			def: { value: null, text: "Not set" },
+			effect: {
+				kind: "restart",
+				text: "Restarts ADS-B (readsb takes the position at start)",
+				short: "restarts ADS-B",
+			},
+			...optional("lock", locLock ?? (writable ? undefined : notWritable)),
+			...optional(
+				"write",
+				writable
+					? (v: SettingValue) => {
+							if (v === null) return a.station({ lat: null, lon: null })
+							const [la, lo] = String(v).split(",").map(Number)
+							return a.station({ lat: la ?? null, lon: lo ?? null })
+						}
+					: undefined,
+			),
+		},
+		{
+			id: "station.country",
+			group: "station",
+			label: "Country",
+			help: `Picks the band plan and legal limits · region ${st.region}`,
+			keys: words("region nation band plan legal limits locale"),
+			widget: { kind: "select", options: countries() },
+			value: st.country.value ?? "",
+			text: st.country.value ? countryName(st.country.value) : "Not set",
+			def: { value: "", text: "Not set" },
+			...optional("lock", lockOf("country", st.country.provenance)),
+			...optional(
+				"write",
+				field("country", v => (v ? String(v) : null)),
+			),
+		},
+		{
+			id: "station.callsign",
+			group: "station",
+			label: "Callsign",
+			help: "For APRS and the map",
+			keys: words("call sign ham amateur licence license"),
+			widget: textWidget("Optional", t => {
+				const v = t.trim().toUpperCase()
+				if (!v) return { value: null }
+				return CALLSIGN.test(v)
+					? { value: v }
+					: { error: "Use letters and digits only, like F4ABC or F4ABC-9" }
+			}),
+			value: st.callsign.value,
+			text: st.callsign.value ?? "Not set",
+			def: { value: null, text: "Not set" },
+			...optional("lock", lockOf("callsign", st.callsign.provenance)),
+			...optional(
+				"write",
+				field("callsign", v => (v === null ? null : String(v))),
+			),
+		},
+		{
+			id: "station.saved",
+			group: "station",
+			label: "Saved frequencies",
+			help: "Managed in the Tuner, shared by every device",
+			keys: words("bookmarks memories favourites favorites channels"),
+			widget: {
+				kind: "link",
+				text: `${s.savedCount} saved`,
+				action: a.openTuner,
+			},
+			value: s.savedCount,
+			text: `${s.savedCount} saved`,
+		},
+		{
+			id: "station.altitude",
+			group: "station",
+			label: "Altitude",
+			help: "Antenna height above sea level, for ADS-B range",
+			keys: words("height elevation altitude metres meters"),
+			more: true,
+			widget: { kind: "stepper", min: -500, max: 9000, step: 1, unit: " m" },
+			value: st.altM.value,
+			text: st.altM.value === null ? "Not set" : `${st.altM.value} m`,
+			def: { value: null, text: "Not set" },
+			...optional("lock", lockOf("altM", st.altM.provenance)),
+			...optional(
+				"write",
+				field("altM", v => (v === null ? null : Number(v))),
+			),
+		},
+	]
+	return rows
+}
+
+/** `{ [key]: value }` only when the value is defined (exactOptionalPropertyTypes). */
+function optional<K extends string, V>(
+	key: K,
+	value: V | undefined,
+): { [P in K]?: V } {
+	return (value === undefined ? {} : { [key]: value }) as { [P in K]?: V }
+}
+
+// ---- receiver
+
+const RX_KEYS: Record<ReceiverControlId, ReceiverSettingKey> = {
+	gain: "gain",
+	agcMode: "agcMode",
+	sampleRate: "sampleRate",
+	ppm: "ppm",
+	biasTee: "biasTee",
+	directSampling: "directSampling",
+	offsetTuning: "offsetTuning",
+}
+
+function receiverRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
+	const tuner = s.tuner
+	const source = s.source
+	const rows: SettingRow[] = [
+		{
+			id: "rx.source",
+			group: "receiver",
+			label: "Source",
+			help: source
+				? [
+						source.url ?? source.type,
+						source.connected ? "streaming" : "not connected",
+					]
+						.filter(Boolean)
+						.join(" · ")
+				: "No source yet",
+			keys: words("dongle rtl_tcp sdr++ host input"),
+			widget: { kind: "read" },
+			value: source?.id ?? null,
+			text: source ? sourceTitle(source, tuner) : "None",
+			lock: "Set in the YAML configuration (sources)",
+		},
+	]
+	if (!tuner) return rows
+	const lock = receiverLock({
+		tuner,
+		source,
+		readOnly: s.readOnly,
+		relay: s.relay,
+	})
+	const ctl = (id: ReceiverControlId) => {
+		const avail = controlAvailability(id, s.caps)
+		const status = s.controls[RX_KEYS[id]]
+		const disabled = lock.locked
+			? (lock.reason ?? "The receiver is not yours to change right now")
+			: avail.enabled
+				? undefined
+				: (avail.reason ?? "Not available")
+		return {
+			...optional("disabled", disabled),
+			...optional(
+				"error",
+				status?.error ? controlErrorText(status.error) : undefined,
+			),
+			...(status?.pending ? { busy: true } : {}),
+		}
+	}
+	const shown = <T>(key: ReceiverSettingKey, core: T): T => {
+		const st = s.controls[key]
+		return st?.pending && st.target !== null ? (st.target as T) : core
+	}
+	const write =
+		(make: (v: SettingValue) => ReceiverSetting) => (v: SettingValue) =>
+			a.receiver(make(v))
+
+	const rate = shown("sampleRate", tuner.sampleRate)
+	const rates = sampleRateOptions(s.caps, tuner.sampleRate)
+	rows.push({
+		id: "rx.rate",
+		group: "receiver",
+		label: "Sample rate",
+		help: "Wider shows more spectrum and uses more CPU",
+		keys: words("span bandwidth sdr ms/s msps"),
+		widget:
+			rates.length > 5
+				? {
+						kind: "select",
+						options: rates.map(hz => ({
+							value: String(hz),
+							label: formatRate(hz),
+						})),
+					}
+				: {
+						kind: "seg",
+						options: rates.map(hz => ({
+							value: String(hz),
+							label: rateLabel(hz),
+						})),
+					},
+		value: String(rate),
+		text: formatRate(rate),
+		effect: {
+			kind: "restart",
+			text: "Restarts the stream: decoders pause for a moment",
+			short: "restarts the stream",
+		},
+		warn: v => rateWarning(Number(v)),
+		...ctl("sampleRate"),
+		write: write(v => ({ key: "sampleRate", value: Number(v) })),
+	})
+
+	const steps = gainSteps(s.caps)
+	const auto = shown("gainMode", tuner.gainMode) === "agc"
+	const gain = shown("gain", tuner.gain)
+	const gainOptions: SettingOption[] = [
+		{ value: "auto", label: "Auto (tuner AGC)" },
+		...steps.valuesTenthsDb
+			.slice()
+			.reverse()
+			.map(v => ({ value: String(v), label: gainDb(v) })),
+	]
+	// the select lists the tuner's table: show the nearest step when the core reports a value between two
+	const gainValue = auto
+		? "auto"
+		: String(gainAt(steps, nearestGainIndex(steps, gain)))
+	rows.push({
+		id: "rx.gain",
+		group: "receiver",
+		label: "Gain",
+		help: "Also on the Receiver island",
+		keys: words("rf gain lna amplification auto"),
+		widget: { kind: "select", options: gainOptions },
+		value: gainValue,
+		text: auto ? "Auto" : gainDb(gain),
+		...ctl("gain"),
+		write: v =>
+			v === "auto"
+				? a.receiver({ key: "gainMode", value: "agc" })
+				: a.manualGain(Number(v)),
+	})
+
+	const ppm = shown("ppm", tuner.ppm)
+	rows.push({
+		id: "rx.ppm",
+		group: "receiver",
+		label: "Frequency correction",
+		help: "Crystal error. Tune a known signal and adjust until it centres.",
+		keys: words("ppm crystal offset calibration xtal drift"),
+		widget: { kind: "stepper", min: -200, max: 200, step: 1, unit: " ppm" },
+		value: ppm,
+		text: `${ppm} ppm`,
+		def: { value: 0, text: "0 ppm" },
+		...ctl("ppm"),
+		write: write(v => ({ key: "ppm", value: Number(v) })),
+	})
+
+	const bias = shown("biasTee", tuner.biasTee)
+	rows.push({
+		id: "rx.biasT",
+		group: "receiver",
+		label: "Bias‑T",
+		help: "Powers an LNA through the antenna port",
+		keys: words("lna power bias tee antenna"),
+		widget: { kind: "switch" },
+		value: bias,
+		text: bias ? "On" : "Off",
+		def: { value: false, text: "Off" },
+		effect: {
+			kind: "hardware",
+			text: "Sends 4.5 V up the antenna cable. Only with an LNA that needs it.",
+			short: "turns on antenna power",
+		},
+		...ctl("biasTee"),
+		write: write(v => ({ key: "biasTee", value: v === true })),
+	})
+
+	const direct = shown("directSampling", tuner.directSampling)
+	rows.push({
+		id: "rx.direct",
+		group: "receiver",
+		label: "Direct sampling",
+		help: "For HF below 24 MHz",
+		keys: words("hf shortwave direct sampling i q"),
+		more: true,
+		widget: {
+			kind: "seg",
+			options: opts([
+				["off", "Off"],
+				["i", "I"],
+				["q", "Q"],
+			]),
+		},
+		value: direct,
+		text: optionText(
+			opts([
+				["off", "Off"],
+				["i", "I branch"],
+				["q", "Q branch"],
+			]),
+			direct,
+		),
+		def: { value: "off", text: "Off" },
+		effect: {
+			kind: "hardware",
+			text: "Switches the dongle input",
+			short: "switches the dongle input",
+		},
+		...ctl("directSampling"),
+		write: write(v => ({
+			key: "directSampling",
+			value: v === "i" || v === "q" ? v : "off",
+		})),
+	})
+
+	const offset = shown("offsetTuning", tuner.offsetTuning)
+	rows.push({
+		id: "rx.offset",
+		group: "receiver",
+		label: "Offset tuning",
+		help: "Moves the DC spike out of the band (E4000)",
+		keys: words("e4000 dc spike offset"),
+		more: true,
+		widget: { kind: "switch" },
+		value: offset,
+		text: offset ? "On" : "Off",
+		def: { value: false, text: "Off" },
+		effect: {
+			kind: "hardware",
+			text: "Retunes the dongle",
+			short: "retunes the dongle",
+		},
+		...ctl("offsetTuning"),
+		write: write(v => ({ key: "offsetTuning", value: v === true })),
+	})
+
+	const agc = shown("agcMode", tuner.agcMode)
+	rows.push({
+		id: "rx.rtlAgc",
+		group: "receiver",
+		label: "RTL AGC",
+		help: "Digital gain inside the RTL2832",
+		keys: words("digital gain agc rtl2832"),
+		more: true,
+		widget: { kind: "switch" },
+		value: agc,
+		text: agc ? "On" : "Off",
+		def: { value: false, text: "Off" },
+		...ctl("agcMode"),
+		write: write(v => ({ key: "agcMode", value: v === true })),
+	})
+
+	if (s.relay)
+		rows.push({
+			id: "rx.relay",
+			group: "receiver",
+			label: "Share with SDR++",
+			help:
+				s.relay.clientsConnected > 0
+					? "An rtl_tcp relay · a client is connected"
+					: "An rtl_tcp relay · no client",
+			keys: words("relay rtl_tcp sdr++ sdrpp share"),
+			more: true,
+			widget: { kind: "read" },
+			value: s.relay.enabled,
+			text: s.relay.enabled ? "On" : "Off",
+			lock: "Set in the YAML configuration (tunerRelay)",
+		})
+	return rows
+}
+
+// ---- audio
+
+const NR = opts([
+	["off", "Off"],
+	["voice", "Voice"],
+	["narrow-band", "Narrow band"],
+	["noaa-apt", "NOAA APT"],
+])
+
+function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
+	const rows: SettingRow[] = []
+	const st = s.live
+	const disabled = s.readOnly
+		? "Read-only access: sign in on this WaveKit to change it"
+		: undefined
+	if (st) {
+		const c = st.config
+		const mode = c.squelchMode ?? "manual"
+		const sq =
+			mode === "manual" && c.squelch >= 0
+				? "off"
+				: mode === "manual"
+					? "level"
+					: mode
+		const noiseFits = c.modulation === "nfm" || c.modulation === "wfm"
+		const sqOpts: SettingOption[] = [
+			{ value: "auto", label: "Auto" },
+			{
+				value: "noise",
+				label: "Noise",
+				...(noiseFits ? {} : { disabled: "FM only (NFM, WFM)" }),
+			},
+			{ value: "level", label: "Level" },
+			{ value: "off", label: "Off" },
+		]
+		const w =
+			(patch: (v: SettingValue) => LiveAudioConfigPatch) => (v: SettingValue) =>
+				a.audio(patch(v))
+		rows.push({
+			id: "au.squelch",
+			group: "audio",
+			label: "Squelch",
+			help: "Auto keeps it above the noise floor; Noise (FM) opens when a carrier quiets the noise",
+			keys: words("threshold sql noise squelch gate"),
+			widget: { kind: "seg", options: sqOpts },
+			value: sq,
+			text: optionText(sqOpts, sq),
+			...optional("disabled", disabled),
+			write: w(v =>
+				v === "auto"
+					? { squelchMode: "auto" }
+					: v === "noise"
+						? { squelchMode: "noise" }
+						: v === "off"
+							? { squelchMode: "manual", squelch: 0 }
+							: {
+									squelchMode: "manual",
+									squelch: c.squelch < 0 ? c.squelch : -60,
+								},
+			),
+		})
+		if (sq === "level")
+			rows.push({
+				id: "au.threshold",
+				group: "audio",
+				label: "Squelch level",
+				help: "Opens above this channel power. Or drag the line in Listen.",
+				keys: words("squelch threshold level dbfs"),
+				widget: {
+					kind: "stepper",
+					min: -120,
+					max: -1,
+					step: 1,
+					unit: " dBFS",
+				},
+				value: c.squelch,
+				text: `${formatDb(c.squelch, 0)} dBFS`,
+				...optional("disabled", disabled),
+				write: w(v => ({ squelchMode: "manual", squelch: Number(v) })),
+			})
+		const margin = c.autoMarginDb ?? 6
+		rows.push({
+			id: "au.margin",
+			group: "audio",
+			label: "Auto squelch margin",
+			help: "How far above the noise floor Auto opens",
+			keys: words("squelch sql threshold auto margin"),
+			widget: { kind: "stepper", min: 0, max: 40, step: 1, unit: " dB" },
+			value: margin,
+			text: `${margin} dB`,
+			def: { value: 6, text: "6 dB" },
+			...optional("disabled", disabled),
+			write: w(v => ({ autoMarginDb: Number(v) })),
+		})
+		const agcDefault = ["am", "cw", "dsb", "usb", "lsb"].includes(c.modulation)
+			? "fast"
+			: "off"
+		const agc = c.agc ?? agcDefault
+		const agcOpts = opts([
+			["off", "Off"],
+			["slow", "Slow"],
+			["fast", "Fast"],
+		])
+		rows.push({
+			id: "au.agc",
+			group: "audio",
+			label: "Level control",
+			help: "Evens out loud and quiet stations",
+			keys: words("agc automatic gain loudness level"),
+			widget: { kind: "seg", options: agcOpts },
+			value: agc,
+			text: optionText(agcOpts, agc),
+			def: { value: agcDefault, text: optionText(agcOpts, agcDefault) },
+			...optional("disabled", disabled),
+			write: w(v => ({ agc: v === "slow" || v === "fast" ? v : "off" })),
+		})
+		const de = c.deEmphasis ? String(c.deEmphasisTau) : "off"
+		const deOpts = opts([
+			["off", "Off"],
+			["50", "50 µs"],
+			["75", "75 µs"],
+		])
+		rows.push({
+			id: "au.deemph",
+			group: "audio",
+			label: "De-emphasis",
+			help: "For FM broadcast: 50 µs in Europe, 75 µs in the Americas",
+			keys: words("deemphasis de-emphasis fm broadcast tau"),
+			widget: { kind: "seg", options: deOpts },
+			value: de,
+			text: optionText(deOpts, de),
+			def: { value: "off", text: "Off" },
+			...optional("disabled", disabled),
+			write: w(v =>
+				v === "50" || v === "75"
+					? { deEmphasis: true, deEmphasisTau: v === "50" ? 50 : 75 }
+					: { deEmphasis: false },
+			),
+		})
+		rows.push({
+			id: "au.nr",
+			group: "audio",
+			label: "Noise reduction",
+			help: "Softens hiss between words",
+			keys: words("noise reduction hiss nr denoise"),
+			more: true,
+			widget: { kind: "select", options: NR },
+			value: c.noiseReduction,
+			text: optionText(NR, c.noiseReduction),
+			def: { value: "off", text: "Off" },
+			...optional("disabled", disabled),
+			write: w(v => ({
+				noiseReduction: NR.some(o => o.value === v)
+					? (v as LiveAudioStatus["config"]["noiseReduction"])
+					: "off",
+			})),
+		})
+		rows.push({
+			id: "au.hp",
+			group: "audio",
+			label: "Cut low rumble",
+			help: "High-pass filter; 0 is off",
+			keys: words("high pass highpass rumble hum filter"),
+			more: true,
+			widget: { kind: "stepper", min: 0, max: 5000, step: 50, unit: " Hz" },
+			value: c.highPass,
+			text: c.highPass ? `${c.highPass} Hz` : "Off",
+			def: { value: 0, text: "Off" },
+			...optional("disabled", disabled),
+			write: w(v => ({ highPass: Number(v) })),
+		})
+		rows.push({
+			id: "au.lp",
+			group: "audio",
+			label: "Cut high hiss",
+			help: "Low-pass filter; 0 is off",
+			keys: words("low pass lowpass hiss treble filter"),
+			more: true,
+			widget: { kind: "stepper", min: 0, max: 20000, step: 100, unit: " Hz" },
+			value: c.lowPass,
+			text: c.lowPass ? `${c.lowPass} Hz` : "Off",
+			def: { value: 0, text: "Off" },
+			...optional("disabled", disabled),
+			write: w(v => ({ lowPass: Number(v) })),
+		})
+		rows.push({
+			id: "au.format",
+			group: "audio",
+			label: "Stream format",
+			help: "Sent to the browser and the app",
+			keys: words("pcm sample rate format bits"),
+			more: true,
+			widget: { kind: "read" },
+			value: c.audioFormat,
+			text: `${formatRate(st.effectiveSampleRate).replace("MS/s", "MHz")} · ${c.audioFormat === "s16le" ? "16-bit" : "32-bit float"}`,
+		})
+	}
+	rows.push({
+		id: "au.volume",
+		group: "audio",
+		label: "Volume",
+		help: "Also in Listen",
+		keys: words("loudness volume level"),
+		device: true,
+		widget: {
+			kind: "slider",
+			min: 0,
+			max: 1,
+			step: 0.01,
+			format: v => `${Math.round(v * 100)} %`,
+		},
+		value: s.volume,
+		text: `${Math.round(s.volume * 100)} %`,
+		write: v => {
+			a.setVolume(Number(v))
+			return Promise.resolve(OK)
+		},
+	})
+	return rows
+}
+
+// ---- storage
+
+const MB = 1024 * 1024
+export function formatBytes(n: number): string {
+	if (n >= 1024 * MB) return `${(n / (1024 * MB)).toFixed(1)} GB`
+	if (n >= MB) return `${Math.round(n / MB)} MB`
+	if (n >= 1024) return `${Math.round(n / 1024)} kB`
+	return `${n} B`
+}
+
+function storageRows(s: SettingsSnapshot): SettingRow[] {
+	const r = s.storage
+	if (!r) return []
+	const rows: SettingRow[] = []
+	const act = r.areas.find(x => x.id === "activity")
+	const ret = act?.retention
+	if (ret) {
+		const days = Math.round(ret.maxAgeMs / 86_400_000)
+		const parts = [
+			`${days} day${days === 1 ? "" : "s"}`,
+			`${ret.maxRows.toLocaleString("en")} messages`,
+			formatBytes(ret.maxDbBytes),
+		]
+		rows.push({
+			id: "st.activity",
+			group: "storage",
+			label: "Keep Activity for",
+			help: "The oldest messages go first when any limit is reached",
+			keys: words("retention history messages expire days database"),
+			widget: { kind: "read" },
+			value: days,
+			text: parts.join(" · "),
+			lock: "Set in the YAML configuration (activity.retention)",
+		})
+	}
+	return rows
+}
+
+// ---- display
+
+const THEME_OPTS = opts([
+	["dark", "Dark"],
+	["light", "Light"],
+])
+const GROUND_OPTS = opts([
+	["ink", "Ink"],
+	["graphite", "Graphite"],
+	["black", "True black"],
+])
+const ACCENT_OPTS = opts([
+	["phosphor", "Phosphor"],
+	["ice", "Ice"],
+	["violet", "Violet"],
+	["coral", "Coral"],
+	["mono", "Mono"],
+])
+
+function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
+	const rows: SettingRow[] = []
+	const p = s.preferences
+	if (p) {
+		rows.push({
+			id: "dp.tags",
+			group: "display",
+			label: "Tags for saved frequencies",
+			help: "Their names on the spectrum",
+			keys: words("saved frequency labels names tags spectrum"),
+			widget: { kind: "switch" },
+			value: p.showSavedFrequencyLabels,
+			text: p.showSavedFrequencyLabels ? "On" : "Off",
+			def: {
+				value: s.preferenceDefaults?.showSavedFrequencyLabels ?? true,
+				text:
+					(s.preferenceDefaults?.showSavedFrequencyLabels ?? true)
+						? "On"
+						: "Off",
+			},
+			...(s.readOnly
+				? { disabled: "Read-only access: sign in on this WaveKit to change it" }
+				: {}),
+			write: v => a.preference("showSavedFrequencyLabels", v === true),
+		})
+	}
+	rows.push({
+		id: "dp.keys",
+		group: "display",
+		label: "Keyboard shortcuts",
+		keys: words("keymap hotkeys keys shortcuts"),
+		widget: { kind: "link", text: "Show all", action: a.openShortcuts },
+		value: null,
+		text: "Show all",
+	})
+	const t = s.theme
+	rows.push(
+		{
+			id: "dev.theme",
+			group: "display",
+			label: "Theme",
+			keys: words(
+				"appearance dark mode light mode night day colour scheme color",
+			),
+			device: true,
+			widget: { kind: "seg", options: THEME_OPTS },
+			value: t.theme,
+			text: optionText(THEME_OPTS, t.theme),
+			def: { value: "dark", text: "Dark" },
+			write: v => local(() => a.setTheme({ theme: v as ThemePrefs["theme"] })),
+		},
+		{
+			id: "dev.ground",
+			group: "display",
+			label: "Dark ground",
+			help: "Used when the theme is dark",
+			keys: words(
+				"theme dark background ink graphite grey gray black true black oled amoled night",
+			),
+			device: true,
+			widget: { kind: "seg", options: GROUND_OPTS },
+			value: t.ground,
+			text: optionText(GROUND_OPTS, t.ground),
+			def: { value: "black", text: "True black" },
+			write: v =>
+				local(() => a.setTheme({ ground: v as ThemePrefs["ground"] })),
+		},
+		{
+			id: "dev.accent",
+			group: "display",
+			label: "Accent",
+			help: "Selection and the tuned signal",
+			keys: words(
+				"colour color highlight tint theme phosphor ice violet coral mono",
+			),
+			device: true,
+			widget: { kind: "seg", options: ACCENT_OPTS },
+			value: t.accent,
+			text: optionText(ACCENT_OPTS, t.accent),
+			def: { value: "mono", text: "Mono" },
+			write: v =>
+				local(() => a.setTheme({ accent: v as ThemePrefs["accent"] })),
+		},
+	)
+	const stepOpts: SettingOption[] = [
+		{ value: "plan", label: "Band plan" },
+		...STEPS.map(hz => ({ value: String(hz), label: formatStep(hz) })),
+	]
+	const step = s.stepHz === null ? "plan" : String(s.stepHz)
+	rows.push({
+		id: "tn.step",
+		group: "display",
+		label: "Tuning step",
+		help: "The wheel and arrow keys tune by it. Band plan follows the band you are in.",
+		keys: words("step channel spacing wheel arrows"),
+		device: true,
+		widget: { kind: "select", options: stepOpts },
+		value: step,
+		text: optionText(stepOpts, step),
+		def: { value: "plan", text: "Band plan" },
+		write: v => {
+			a.setStep(v === "plan" ? null : Number(v))
+			return Promise.resolve(OK)
+		},
+	})
+	return rows
+}
+
+// ---- system
+
+function systemRows(s: SettingsSnapshot): SettingRow[] {
+	const rows: SettingRow[] = []
+	if (s.version !== null)
+		rows.push({
+			id: "sys.version",
+			group: "system",
+			label: "Version",
+			keys: words("version update upgrade release"),
+			widget: { kind: "read" },
+			value: s.version,
+			text: `WaveKit ${s.version}`,
+		})
+	if (s.accessMode !== null)
+		rows.push({
+			id: "sys.access",
+			group: "system",
+			label: "Access",
+			help:
+				s.accessMode === "protected"
+					? "Devices sign in to change things"
+					: "Anyone on the network can listen and change things",
+			keys: words("access sign in login security protected open devices"),
+			widget: { kind: "read" },
+			value: s.accessMode,
+			text: s.accessMode === "protected" ? "Protected" : "Open",
+			lock: "Set at deploy (access.mode)",
+		})
+	rows.push({
+		id: "sys.config",
+		group: "system",
+		label: "Configuration",
+		help: "The running configuration as one YAML file, secrets left out",
+		keys: words("backup export yaml config download"),
+		widget: {
+			kind: "buttons",
+			buttons: [
+				{ label: "Export", action: () => undefined, href: s.exportUrl },
+			],
+		},
+		value: null,
+		text: "Export",
+	})
+	return rows
+}
+
+/** Every row the drawer shows, in group order (decoder page rows carry `page`). */
+export function buildRows(
+	s: SettingsSnapshot,
+	a: SettingsActions,
+): SettingRow[] {
+	return [
+		...stationRows(s, a),
+		...receiverRows(s, a),
+		...audioRows(s, a),
+		...decoderRows(s, a),
+		...storageRows(s),
+		...displayRows(s, a),
+		...systemRows(s),
+	]
+}
