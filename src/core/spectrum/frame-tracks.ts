@@ -25,9 +25,9 @@ import type { BlockTrack } from "./types.js"
 export const FRAME_TRACK_ID_MAX_CHARS = 30
 /** Longest scanner `discoveryId` on a frame (store ids are `d_` + a 26-char ULID; a UUID fits too). */
 export const FRAME_TRACK_DISCOVERY_ID_MAX_CHARS = 36
-/** `blocks` bound: ≤ 7 digits (a track closes at maxTrackMs = 120 s, ≤ 24 000 blocks at 5 ms). */
+/** `blocks` bound: ≤ 7 digits; a longer rollover chain saturates at the bound on frames. */
 export const FRAME_TRACK_BLOCKS_MAX = 9_999_999
-/** `ageMs` bound: ≤ 8 digits (≈ 27.8 h; a track closes at maxTrackMs = 120 s). */
+/** `ageMs` bound: ≤ 8 digits (≈ 27.8 h); a longer rollover chain saturates at the bound on frames. */
 export const FRAME_TRACK_AGE_MS_MAX = 99_999_999
 /** `snrDb` / `peakDbfs` bound: |x| ≤ 999.5, so at most 6 characters on the 0.5 dB grid. */
 export const FRAME_TRACK_DB_ABS_MAX = 999.5
@@ -143,12 +143,14 @@ export function blockTrackOf(
 	if (snr !== null) out.snrDb = snr
 	const peak = roundHalfDb(a.peakDbfs)
 	if (peak !== null) out.peakDbfs = peak
-	if (isCount(a.blocks, FRAME_TRACK_BLOCKS_MAX)) out.blocks = a.blocks
+	if (isCount(a.blocks, Number.MAX_SAFE_INTEGER))
+		out.blocks = Math.min(a.blocks, FRAME_TRACK_BLOCKS_MAX)
 	const age =
 		sampleRateHz > 0
 			? Math.round(((a.lastSample - a.startSample) / sampleRateHz) * 1000)
 			: Number.NaN
-	if (isCount(age, FRAME_TRACK_AGE_MS_MAX)) out.ageMs = age
+	if (isCount(age, Number.MAX_SAFE_INTEGER))
+		out.ageMs = Math.min(age, FRAME_TRACK_AGE_MS_MAX)
 	out.surfaced = surfacedOf(
 		{ ...a, iqImage: a.iqImage || flags.iqImage },
 		minSurfaceBlocks,

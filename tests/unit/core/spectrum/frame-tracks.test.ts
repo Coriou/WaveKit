@@ -179,7 +179,26 @@ describe("blockTrackOf", () => {
 			FS,
 			2,
 		)
-		expect(old.ageMs).toBeUndefined()
+		// A rollover chain older than the bound saturates rather than losing the field.
+		expect(old.ageMs).toBe(FRAME_TRACK_AGE_MS_MAX)
+		const many = blockTrackOf(
+			1,
+			2,
+			FLAGS,
+			assoc({ blocks: FRAME_TRACK_BLOCKS_MAX + 1 }),
+			FS,
+			2,
+		)
+		expect(many.blocks).toBe(FRAME_TRACK_BLOCKS_MAX)
+		const atBlocks = blockTrackOf(
+			1,
+			2,
+			FLAGS,
+			assoc({ blocks: FRAME_TRACK_BLOCKS_MAX }),
+			FS,
+			2,
+		)
+		expect(atBlocks.blocks).toBe(FRAME_TRACK_BLOCKS_MAX)
 		const atAge = blockTrackOf(
 			1,
 			2,
