@@ -21,6 +21,7 @@ import {
 	AccessRuntimeConfigSchema,
 	validateProtectedRuntimeMapping,
 } from "./access/runtime-config.js"
+import { normalizeOrigin } from "./access/authority.js"
 import {
 	CSDR_BUFFER_MAX_ELEMENTS,
 	CSDR_BUFFER_MIN_ELEMENTS,
@@ -287,6 +288,22 @@ export const LiveDemodConfigSchema = z
 		 * default: AM, CW, DSB, USB and LSB `fast`; NFM, WFM and raw none.
 		 */
 		agc: z.enum(LIVE_AUDIO_AGC_MODES_TUPLE).optional(),
+		/**
+		 * Legacy access mode only: the origin advertised in the live-audio status
+		 * `httpUrl` / `wavUrl` (e.g. `http://receiver.lan:8081`), for browsers on
+		 * another machine. Canonical `scheme://host[:port]`, no path. Absent:
+		 * `http://localhost:<httpPort>`. Protected mode advertises
+		 * `access.publicOrigins.analogAudio` and ignores it. Config only: never
+		 * part of the runtime config (see splitLiveDemodConfig).
+		 */
+		publicOrigin: z
+			.string()
+			.max(320)
+			.refine(value => normalizeOrigin(value) === value, {
+				message:
+					"publicOrigin must be a canonical http(s) origin (scheme://host[:port], no path)",
+			})
+			.optional(),
 	})
 	.superRefine((value, ctx) => {
 		if (value.modulation !== "raw" && value.bandwidth <= 0) {
@@ -828,6 +845,19 @@ export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>
 export type TunerRelayConfig = z.infer<typeof TunerRelayConfigSchema>
 export type LiveDemodConfig = z.infer<typeof LiveDemodConfigSchema>
+
+/**
+ * Splits the config-only `publicOrigin` off a parsed live-demod config: the
+ * runtime config (status, PATCH, WebSocket `live-audio:config`) never carries
+ * it; the origin goes to the LiveDemodulator options in legacy mode.
+ */
+export function splitLiveDemodConfig(parsed: LiveDemodConfig): {
+	config: LiveDemodConfig
+	publicOrigin: string | undefined
+} {
+	const { publicOrigin, ...config } = parsed
+	return { config, publicOrigin }
+}
 export type DigitalVoiceConfig = z.infer<typeof DigitalVoiceConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>

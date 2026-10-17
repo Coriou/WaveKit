@@ -26,6 +26,7 @@ import {
 	loadConfig,
 	DigitalVoiceConfigSchema,
 	LiveDemodConfigSchema,
+	splitLiveDemodConfig,
 	sourceScannerConfig,
 	type Config,
 } from "./config.js"
@@ -802,7 +803,8 @@ async function main(): Promise<void> {
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
 		})
-		const liveDemodConfig = LiveDemodConfigSchema.parse(config.liveDemod ?? {})
+		const { config: liveDemodConfig, publicOrigin: legacyAudioOrigin } =
+			splitLiveDemodConfig(LiveDemodConfigSchema.parse(config.liveDemod ?? {}))
 		const liveDemod = new LiveDemodulator(
 			logger,
 			sourceManager,
@@ -814,7 +816,9 @@ async function main(): Promise<void> {
 						publicOrigin: config.access.publicOrigins.analogAudio,
 						httpHost: config.access.audio.analog.bindHost,
 					}
-				: {},
+				: legacyAudioOrigin !== undefined
+					? { publicOrigin: legacyAudioOrigin }
+					: {},
 		)
 		admissionGates.push(() => liveDemod.shutdownAdmission())
 		own(50, () => liveDemod.stop())
