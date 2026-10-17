@@ -139,24 +139,35 @@ describe("tuned card helpers", () => {
 })
 
 describe("connection and access", () => {
-	const legacy = { access: { mode: "legacy" } as AccessState, error: null }
+	const legacy = {
+		access: { mode: "legacy" } as AccessState,
+		error: null,
+		session: null,
+	}
 	const protectedNoSession = {
 		access: {
 			mode: "protected",
 			bootstrap: {
 				access: {
 					mode: "protected",
-					sessionAvailable: false,
+					sessionAvailable: true,
 					pairingAvailable: true,
 				},
 			},
 		} as unknown as AccessState,
 		error: null,
+		session: null,
 	}
-	it("is read-only on a protected core without a session", () => {
+	const session = {
+		deviceId: `device_${"a".repeat(43)}`,
+		expiresAt: 1,
+		csrfToken: "t".repeat(43),
+	}
+	it("is read-only on a protected core until this browser has a session", () => {
 		expect(isReadOnly(legacy)).toBe(false)
 		expect(isReadOnly(protectedNoSession)).toBe(true)
-		expect(isReadOnly({ access: null, error: null })).toBe(false)
+		expect(isReadOnly({ ...protectedNoSession, session })).toBe(false)
+		expect(isReadOnly({ access: null, error: null, session: null })).toBe(false)
 	})
 
 	it("stays quiet while connected and says why otherwise", () => {
@@ -171,13 +182,30 @@ describe("connection and access", () => {
 		expect(
 			connectionNotice(
 				"closed",
-				{ access: null, error: "Network error" },
+				{ access: null, error: "Network error", session: null },
 				false,
 			)?.title,
 		).toBe("Can’t reach the receiver")
 		expect(connectionNotice("open", protectedNoSession, true)).toMatchObject({
 			title: "Pair this browser",
 			tone: "amber",
+			pair: true,
+		})
+		const noPairing = {
+			...protectedNoSession,
+			access: {
+				mode: "protected",
+				bootstrap: {
+					access: {
+						mode: "protected",
+						sessionAvailable: false,
+						pairingAvailable: false,
+					},
+				},
+			} as unknown as AccessState,
+		}
+		expect(connectionNotice("open", noPairing, true)).toMatchObject({
+			pair: false,
 		})
 	})
 })

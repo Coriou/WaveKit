@@ -924,4 +924,74 @@
 		width: 14px;
 		height: 14px;
 	}
+	button.wkf-conn-chip {
+		pointer-events: auto;
+		cursor: pointer;
+		font: inherit;
+		color: inherit;
+	}
+
+	/* ---- pairing sheet: centred over the app, a bottom sheet on a phone */
+	.wkf-pair-scrim {
+		position: fixed;
+		inset: 0;
+		z-index: 40;
+		background: rgba(0, 0, 0, 0.36);
+	}
+	.wkf-pair-sheet {
+		position: fixed;
+		z-index: 41;
+		left: 16px;
+		right: 16px;
+		top: 96px;
+		max-width: 420px;
+		margin: 0 auto;
+		border-radius: 12px;
+		background: var(--wk-surface);
+		border: 1px solid var(--wk-line-14);
+		box-shadow: var(--wk-e3);
+	}
+	@media (max-width: 599px) {
+		.wkf-pair-sheet {
+			left: 0;
+			right: 0;
+			top: auto;
+			bottom: 0;
+			max-width: none;
+			border-radius: 14px 14px 0 0;
+		}
+	}
+	.wkf-pair-head {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 12px 10px 4px 18px;
+		font-size: 15px;
+	}
+	.wkf-pair-body {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		padding: 0 18px 18px;
+	}
+	.wkf-pair-body p {
+		margin: 0 0 6px;
+		line-height: 1.45;
+	}
+	.wkf-pair-label {
+		font-weight: 700;
+		margin-top: 4px;
+	}
+	.wkf-pair-err {
+		margin: 0;
+		font-size: 12.5px;
+		line-height: 1.45;
+		color: var(--wk-danger-soft);
+	}
+	.wkf-pair-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+		margin-top: 8px;
+	}
 }

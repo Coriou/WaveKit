@@ -2,8 +2,10 @@
  * The web app's data layer: one ApiClient, one EventsClient and the domain stores wired to
  * them. createDataLayer() is the only place that builds them; nothing here is global.
  */
+import type { AccessDeviceKind, AccessSessionDto } from "@wavekit/api-types"
+
 import type { AccessState, ApiClientOptions, FetchLike } from "./api-client.ts"
-import { ApiClient, errorMessage } from "./api-client.ts"
+import { ApiClient, errorMessage, isApiError } from "./api-client.ts"
 import type { ConnectionState, SocketFactory } from "./events-client.ts"
 import { EventsClient } from "./events-client.ts"
 import type { WorkerLike } from "./events-relay.ts"
@@ -33,6 +35,13 @@ import { TunerStore } from "./tuner-store.ts"
 export interface AccessStoreState {
 	access: AccessState | null
 	error: string | null
+	/** This browser's session on a protected core (null: not paired, or a legacy core). */
+	session: AccessSessionDto | null
+}
+
+/** Half the time left, at least a minute, within what setTimeout can hold. */
+export function refreshDelayMs(expiresAt: number, now: number): number {
+	return Math.min(Math.max((expiresAt - now) / 2, 60_000), 2 ** 31 - 1)
 }
 
 export interface DataLayer {
@@ -73,8 +82,16 @@ export interface DataLayer {
 	coverage: CoverageStore
 	/** Stored position history for the Map's trails; attaches on demand. */
 	trailHistory: TrailHistoryStore
-	/** Detects the access mode, opens /ws and loads every store. Never rejects. */
+	/** Detects the access mode, reads this browser's session, opens /ws and loads every store. Never rejects. */
 	start(): Promise<void>
+	/** Pairs this browser with a one-time code, then reconnects and reloads. Rejects with an ApiError. */
+	pair(input: {
+		code: string
+		name?: string
+		kind?: AccessDeviceKind
+	}): Promise<void>
+	/** Ends this browser's session (read-only until paired again). */
+	logout(): Promise<void>
 	dispose(): void
 }
 
@@ -104,7 +121,29 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		...(options.wsUrl !== undefined ? { url: options.wsUrl } : {}),
 		...(createSocket !== null ? { createSocket } : {}),
 	})
-	const access = new Store<AccessStoreState>({ access: null, error: null })
+	const access = new Store<AccessStoreState>({
+		access: null,
+		error: null,
+		session: null,
+	})
+	let refreshTimer: ReturnType<typeof setTimeout> | null = null
+	const setSession = (session: AccessSessionDto | null) => {
+		if (refreshTimer) clearTimeout(refreshTimer)
+		refreshTimer = null
+		access.set({ ...access.get(), session })
+		if (session === null) return
+		refreshTimer = setTimeout(
+			() => {
+				api.refreshSession().then(setSession, (error: unknown) => {
+					// 401 already cleared the session (onSessionLost); a network error retries later
+					if (isApiError(error) && error.status === 401) return
+					setSession(access.get().session)
+				})
+			},
+			refreshDelayMs(session.expiresAt, Date.now()),
+		)
+	}
+	const offSessionLost = api.onSessionLost(() => setSession(null))
 	const connection = new Store<ConnectionState>(events.state)
 	const offState = events.onState(state => connection.set(state))
 	const tuner = new TunerStore(api, events)
@@ -145,26 +184,37 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		trailHistory: new TrailHistoryStore(api, events),
 		async start() {
 			try {
-				access.set({ access: await api.bootstrap(), error: null })
+				const state = await api.bootstrap()
+				access.set({ access: state, error: null, session: null })
+				if (
+					state.mode === "protected" &&
+					state.bootstrap.access.sessionAvailable
+				)
+					setSession(await api.getSession())
 			} catch (error) {
-				access.set({ access: null, error: errorMessage(error) })
+				access.set({ access: null, error: errorMessage(error), session: null })
 			}
 			events.connect()
-			await Promise.all([
-				layer.sources.load(),
-				layer.tuner.load(),
-				layer.liveAudio.load(),
-				layer.bandplan.load(),
-				layer.receiver.loadRelay(),
-				layer.savedFrequencies.load(),
-				layer.scanner.load(),
-				layer.station.load(),
-				layer.decoderSettings.loadTypes(),
-				layer.spectrumLimits.load(),
-			])
+			await loadAll()
+		},
+		async pair(input) {
+			setSession(await api.pair(input))
+			// the socket opened before pairing had no cookie: reopen it, then reload with the session
+			events.disconnect()
+			events.connect()
+			await loadAll()
+		},
+		async logout() {
+			try {
+				await api.logout()
+			} finally {
+				setSession(null)
+			}
 		},
 		dispose() {
 			offState()
+			offSessionLost()
+			if (refreshTimer) clearTimeout(refreshTimer)
 			layer.sources.dispose()
 			layer.tuner.dispose()
 			layer.receiver.dispose()
@@ -180,6 +230,20 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.recordings.dispose()
 			events.disconnect()
 		},
+	}
+	async function loadAll(): Promise<void> {
+		await Promise.all([
+			layer.sources.load(),
+			layer.tuner.load(),
+			layer.liveAudio.load(),
+			layer.bandplan.load(),
+			layer.receiver.loadRelay(),
+			layer.savedFrequencies.load(),
+			layer.scanner.load(),
+			layer.station.load(),
+			layer.decoderSettings.loadTypes(),
+			layer.spectrumLimits.load(),
+		])
 	}
 	return layer
 }

@@ -12,12 +12,9 @@ export function useServices(): AppServices {
 	return services
 }
 
-/** A protected core without a browser session: the app shows data but changes nothing. */
+/** A protected core without a session for this browser: the app shows data but changes nothing. */
 export function isReadOnly(state: AccessStoreState): boolean {
-	const access = state.access
-	return (
-		access?.mode === "protected" && !access.bootstrap.access.sessionAvailable
-	)
+	return state.access?.mode === "protected" && state.session === null
 }
 
 export function useReadOnly(): boolean {

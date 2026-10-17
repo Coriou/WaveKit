@@ -1,14 +1,22 @@
 /**
  * REST client for the core API. Same origin by default (the Vite dev server proxies /api, /ws
  * and /health). Protected-mode aware: cookie credentials, the access bootstrap (404 = legacy
- * core) and `X-WaveKit-CSRF` on unsafe methods once a CSRF token is known.
+ * core) and `X-WaveKit-CSRF` on unsafe methods once a CSRF token is known. The token comes from the
+ * session routes (read, pair, refresh) and lives in memory only; a 401 clears it.
  */
 import {
+	ACCESS_PAIR_ROUTE,
+	ACCESS_SESSION_LOGOUT_ROUTE,
+	ACCESS_SESSION_REFRESH_ROUTE,
+	ACCESS_SESSION_ROUTE,
+	accessSessionDtoSchema,
 	operatorDataReadDtoSchema,
 	operatorDataWriteDtoSchema,
 } from "@wavekit/api-types"
 import type {
 	AccessBootstrapDto,
+	AccessDeviceKind,
+	AccessSessionDto,
 	ExpectedToken,
 	OperatorDataReadDto,
 	OperatorDataWriteDto,
@@ -135,6 +143,72 @@ export class ApiClient {
 	/** The CSRF token of the current browser session (protected mode); null clears it. */
 	setCsrfToken(token: string | null): void {
 		this.csrfToken = token
+	}
+
+	private readonly sessionLostHandlers = new Set<() => void>()
+
+	/** Fires when a request with a session token answers 401 (the session is gone). */
+	onSessionLost(handler: () => void): () => void {
+		this.sessionLostHandlers.add(handler)
+		return () => this.sessionLostHandlers.delete(handler)
+	}
+
+	// ---- browser session (docs/API.md › Browser pairing; protected mode only)
+
+	/** GET /api/access/session: the session of this browser's cookie, or null on 401 (not paired). */
+	async getSession(signal?: AbortSignal): Promise<AccessSessionDto | null> {
+		try {
+			const body = await this.get<unknown>(
+				ACCESS_SESSION_ROUTE,
+				signal ? { signal } : {},
+			)
+			return this.adoptSession(body, "GET", ACCESS_SESSION_ROUTE)
+		} catch (error) {
+			if (error instanceof ApiError && error.status === 401) {
+				this.csrfToken = null
+				return null
+			}
+			throw error
+		}
+	}
+
+	/** POST /api/access/pair (201): redeems a one-time code; the cookie comes with the answer. */
+	async pair(input: {
+		code: string
+		name?: string
+		kind?: AccessDeviceKind
+	}): Promise<AccessSessionDto> {
+		const body = await this.post<unknown>(ACCESS_PAIR_ROUTE, {
+			code: input.code,
+			...(input.name !== undefined ? { name: input.name } : {}),
+			...(input.kind !== undefined ? { kind: input.kind } : {}),
+		})
+		return this.adoptSession(body, "POST", ACCESS_PAIR_ROUTE)
+	}
+
+	/** POST /api/access/session/refresh: a new `expiresAt` (and the token again). */
+	async refreshSession(): Promise<AccessSessionDto> {
+		const body = await this.post<unknown>(ACCESS_SESSION_REFRESH_ROUTE)
+		return this.adoptSession(body, "POST", ACCESS_SESSION_REFRESH_ROUTE)
+	}
+
+	/** POST /api/access/session/logout: ends the session; the token is cleared whatever the answer. */
+	async logout(): Promise<void> {
+		try {
+			await this.post<unknown>(ACCESS_SESSION_LOGOUT_ROUTE)
+		} finally {
+			this.csrfToken = null
+		}
+	}
+
+	private adoptSession(
+		body: unknown,
+		method: string,
+		path: string,
+	): AccessSessionDto {
+		const session = validated(accessSessionDtoSchema, body, method, path)
+		this.csrfToken = session.csrfToken
+		return session
 	}
 
 	private bootstrapping: Promise<AccessState> | null = null
@@ -373,6 +447,10 @@ export class ApiClient {
 			}
 		}
 		if (!response.ok) {
+			if (response.status === 401 && this.csrfToken !== null) {
+				this.csrfToken = null
+				for (const handler of this.sessionLostHandlers) handler()
+			}
 			const fields = errorFields(parsed)
 			throw new ApiError({
 				status: response.status,
