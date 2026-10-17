@@ -33,6 +33,7 @@ import type {
 	Averaging,
 	Density,
 	DevicePrefs,
+	DiscoveryTagMode,
 	MapLabels,
 	MapTiles,
 	Motion,
@@ -1048,6 +1049,16 @@ const SIGNAL_LABEL_HELP: Readonly<Record<SignalLabelsMode, string>> = {
 	clear: "Named signals, and unknown ones that stand clear of the noise",
 	all: "Every signal WaveKit finds, even faint ones",
 }
+const DISCOVERY_TAG_OPTS = opts([
+	["all", "All"],
+	["decoded", "Decoded only"],
+	["off", "Off"],
+])
+const DISCOVERY_TAG_HELP: Readonly<Record<DiscoveryTagMode, string>> = {
+	all: "What the scanner found, under the saved-frequency tags",
+	decoded: "Only what the scanner decoded",
+	off: "The spectrum shows no discoveries",
+}
 const AVERAGING_OPTS = opts([
 	["off", "Off"],
 	["low", "Low"],
@@ -1278,6 +1289,22 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			def: { value: "clear", text: "Clear" },
 			write: v =>
 				local(() => a.setDevice({ signalLabels: v as SignalLabelsMode })),
+		},
+		{
+			id: "dp.disc",
+			group: "display",
+			label: "Discoveries on the spectrum",
+			help: DISCOVERY_TAG_HELP[d.discoveryTags],
+			keys: words(
+				"discoveries scanner found tags auto band map spectrum decoded clutter",
+			),
+			device: true,
+			widget: { kind: "seg", options: DISCOVERY_TAG_OPTS },
+			value: d.discoveryTags,
+			text: optionText(DISCOVERY_TAG_OPTS, d.discoveryTags),
+			def: { value: "all", text: "All" },
+			write: v =>
+				local(() => a.setDevice({ discoveryTags: v as DiscoveryTagMode })),
 		},
 	)
 	rows.push({
