@@ -11,12 +11,12 @@ decoded; analog evidence no longer stops digital trials; narrow digital modes ar
 6.25 kHz rasters; the band-scan DMR classification gap is root-caused; the passive CPU guard
 re-checks; a stop of an ended scan is clean); scanner store CPU in wide sweeps; configured gain
 and AGC written on connect; stable signal tracks on spectrum frames; and a bounded narrowband IQ
-capture on detection that identify can replay into the probe decoders.
+capture on detection, replayed into the probe decoders after the transmission ended, whose
+result is remembered per discovery so the next transmission tries the known decoder first.
 
 Out of scope: web UI and CLI features (coordination note and the CLI guard widening only); drag
 retune and a wide panorama (later, with a native zoom); the native live demodulation engine
-(later, behind a flag); background replay of captures outside an identify job; IQ capture in
-legacy access mode; a new npm dependency or a new Rust crate; the channelizer (stays off) and S2
+(later, behind a flag); IQ capture in legacy access mode; persisting captures across a restart; a new npm dependency or a new Rust crate; the channelizer (stays off) and S2
 (stays disabled); scanner defaults, the Activity caps and admission limits, the access default
 (`legacy`); the files pinned by the band-plans spec (`src/decoders/band-region.ts`,
 `src/decoders/band-defaults.ts`, `src/core/scanner/bandplan/index.ts`,
@@ -41,6 +41,8 @@ receiver write is byte-identical to the WG11 base except these deliberate change
   `failed` job turned `cancelled` and its end actions ran again).
 - 2.2: the passive CPU guard re-checks every 5 minutes; a disabled passive job can come back,
   with one info log line.
+- 1.7: an identify target whose discovery has a known decoded protocol plans that protocol's run
+  first (order only; every other trial still runs unless it decodes).
 - 5.1: `spectrum:frame` tracks carry the new optional fields (frame bytes grow, design § budgets).
 - 6.x and 4.x are off by default (no key, no write, no process, no file).
 
@@ -94,6 +96,20 @@ parses.
 end action, no event, no persistence write. An unknown id stays 404. Pause and resume of an
 ended job keep today's 409 (`SCANNER_INVALID_TRANSITION`). A cancel racing a natural completion
 ends in exactly one terminal state. Identify jobs follow the same rule. Documented in docs/API.md.
+1.7 **Known protocol first.** A discovery's known protocol is its `protocol` while its
+confidence is `decoded` and its known-protocol miss count is below `KNOWN_PROTOCOL_MAX_MISSES`
+(2). The scanner reuses the discovery store's existing fields (`protocol`, `confidence`,
+`identity`, the observations' accepted decode evidence) as this memory; no new persisted field.
+Identify and replay planning order the known protocol's probe mode first (`planReplayTrials`,
+identify plan); the other plausible trials follow in today's order and still run when the known
+one does not decode (order only, never a removal).
+1.8 **Memory decays safely.** A known-protocol trial (live probe, identify run or replay) that
+ran its full hold on a transmission of the discovery and did not decode counts one miss for that
+discovery (in memory, per process); a decode of any protocol resets the count to zero. At
+`KNOWN_PROTOCOL_MAX_MISSES` consecutive misses the discovery has no known protocol for planning
+(full trials, capture as for an undecoded signal) until a decode. A miss never changes the
+discovery's stored protocol or confidence (the ladder's own rules do). A decode of another
+protocol on the discovery follows the store's existing rules (protocol change, merge).
 
 ## 2. Passive CPU guard
 
@@ -189,10 +205,11 @@ unchanged); pinned by the contract test.
 work; measured.
 5.6 Tracks per frame, the frame cadence and every other frame field are unchanged.
 
-## 6. IQ capture on detection and replay into identify
+## 6. IQ capture on detection, replay and result
 
-As a web user identifying a short transmission I want the core to keep a few seconds of its
-narrowband IQ and replay it into the digital decoders, so a missed live window is not a miss.
+As a web user I want a transmission identified even when it ended before a decoder could run:
+the core keeps a few seconds of its narrowband IQ, replays it into the digital decoders off-air,
+remembers the answer and throws the IQ away.
 
 6.1 **Off by default, protected only.** `scanner.iqCapture` (optional config object; `enabled`
 default false) starts the capture only in protected access mode; in legacy mode it is not
@@ -206,41 +223,58 @@ capture request it shifts and decimates the requested RF channel to `IQ_CAPTURE_
 up to `IQ_CAPTURE_MAX_MS` (4 000 ms) in total, and writes one file. Gaps are reported, never
 filled silently.
 6.3 **On detection.** For a source with capture enabled, the scanner requests a capture when a
-transmission's track surfaces and its discovery is below `classified`, it is not a spur or an
-image, it lies in the usable span, at most `IQ_CAPTURE_PER_SOURCE_PER_MINUTE` (6) per source per
-minute and `IQ_CAPTURE_MAX_CONCURRENT` (2) at once; the capture ends at the track's close (plus
-the tracker hang) or the bound. An identify job also requests a capture of its resolved track
-when none exists for it.
-6.4 **Bounded store.** Captures live in `<scanner storage>/iq-captures` (directory mode 0700,
-files 0600, names `<uuid v4>.cf32`, regular files only, no symbolic link on the way). Each file
-is at most `IQ_CAPTURE_MAX_BYTES` (1 536 000); the total at most
-`scanner.iqCapture.maxTotalMb` (default and maximum 256 MiB, `IQ_CAPTURE_TOTAL_MAX_BYTES`). At
-the cap the oldest capture not in use is evicted (counted); if all are in use, the new request is
-refused (counted). A capture is deleted when the identify jobs that used it finished, or
-`IQ_CAPTURE_RETENTION_MS` (24 h) after it was taken, whichever comes first. Captures do not
-survive a restart: the startup sweep removes only files matching the name grammar (regular
-files, owned by this uid) and leaves anything else (counted).
-6.5 **Replay transport.** A probe transport `replay` feeds a probe decoder (`dsd-fme`,
+transmission's track surfaces and its discovery has no confirmed result for this transmission
+yet (below `decoded`, or `decoded` with a known protocol that a live probe has not confirmed on
+this observation), it is not a spur or an image, it lies in the usable span, at most
+`IQ_CAPTURE_PER_SOURCE_PER_MINUTE` (6) per source per minute and `IQ_CAPTURE_MAX_CONCURRENT` (2)
+at once; the capture ends at the track's close (plus the tracker hang) or the bound. An identify
+job also requests a capture of its resolved track when none exists for it.
+6.4 **Queue order (binding).** capture → queue → replay trials → result → discard. A finished
+capture enters a FIFO replay queue (one per core, bounded by the store cap). Its trials come from
+`planReplayTrials` (known protocol first, requirement 1.7; then the probe modes `identifyScores`
+gives the captured track, narrow digital included per 1.3) and run one at a time through the
+`replay` transport. The first accepted decode (H2) is the result and ends the remaining trials;
+otherwise the result is "no decode" once every trial ended. The result is delivered to the
+scanner (decode evidence on the capture's observation in the capture's epoch, the undecoded
+reason otherwise, miss counting per 1.8) and the capture is discarded at once.
+6.5 **Live confirmation skips the replay.** When a live probe or an identify run decodes the
+transmission's observation before its capture's replay started, the capture is discarded
+unreplayed (counted). A capture whose replay started finishes it.
+6.6 **Bounded store, short life.** Captures live in `<scanner storage>/iq-captures` (directory
+mode 0700, files 0600, names `<uuid v4>.cf32`, regular files only, no symbolic link on the way).
+Each file is at most `IQ_CAPTURE_MAX_BYTES` (1 536 000); the total at most
+`scanner.iqCapture.maxTotalMb` (default and maximum 256 MiB, `IQ_CAPTURE_TOTAL_MAX_BYTES`). A
+capture is discarded as soon as its result exists (6.4) or a live confirmation made it moot
+(6.5). A capture that never got a result (queue backlog, decoders unavailable, replay never
+started) is discarded `IQ_CAPTURE_ORPHAN_TTL_MS` (600 000 ms) after it finished. At the cap a
+new capture request is refused (counted; the queue drains first). Captures do not survive a
+restart: the startup sweep removes only files matching the name grammar (regular files, owned by
+this uid) and leaves anything else (counted).
+6.7 **Replay transport.** A probe transport `replay` feeds a probe decoder (`dsd-fme`,
 `multimon-ng`, `direwolf`; never `rtl433`) the capture filtered to that decoder type's probe
 channel shape (bandwidth, transition, rate and format of `PROBE_CHANNEL_REQUESTS`), faster than
 real time, then ends the input. At most `IQ_REPLAY_MAX_PROBES` (1) replay probe runs at once;
-it counts against the CPU budget and guard like any probe.
-6.6 **Identify uses captures.** An identify target with captures near it (same source, frequency
-within the tolerance, trust `commanded` or `relay`, or the same observation id) at most
-`IDENTIFY_REPLAY_MAX_CAPTURES` (2), newest first, gets replay trials (transport `replay`) for its
-probe protocols not decoded live, after its live runs. A replay decode counts like a live one
-(H2 acceptance, epoch of the capture). The trial list may then hold a live and a replay trial
-for one protocol.
-6.7 **Fail closed.** A capture whose source epoch changed during it, whose file is missing,
-oversized, not a regular file or not ours, or whose process failed is never replayed: no
-replay trial is planned for it (a replay found bad after planning ends `cancelled`). A missing
-binary disables capture with one warn; identify works as before.
-6.8 **No leaks.** Logs and bodies name no path, file name, capture id or frequency from a
+it counts against the CPU budget and guard like any probe, at a priority below identify and
+above passive.
+6.8 **Identify uses captures.** An identify target with a queued capture near it (same source,
+frequency within the tolerance, trust `commanded` or `relay`, or the same observation id), at
+most `IDENTIFY_REPLAY_MAX_CAPTURES` (2) newest first, takes them over from the queue: the
+identify job runs their replay trials (transport `replay`) after its live runs for the probe
+protocols not decoded live, and the capture is discarded when the identify target reaches its
+result. A replay decode counts like a live one (H2 acceptance, epoch of the capture). The trial
+list may then hold a live and a replay trial for one protocol.
+6.9 **Fail closed.** A capture whose source epoch changed during it, whose file is missing,
+oversized, not a regular file or not ours, or whose process failed is never replayed: it is
+discarded (counted) and no replay trial is planned for it (a replay found bad after planning ends
+`cancelled`, no verdict, no miss). A missing binary disables capture with one warn; identify and
+the scanner work as before.
+6.10 **No leaks.** Logs and bodies name no path, file name, capture id or frequency from a
 file; counts, codes and fixed text only. Control messages to the native tool are bounded
 (4 KiB per line) and validated on both sides; the tool refuses anything else.
-6.9 **Measured.** The lane reports the native tool's CPU at 2.048 and 2.4 Msps idle (ring only)
-and with 2 captures active, its resident memory, the main-thread cost of the tap feed, and the
-replay wall time per decoder, with the load average.
+6.11 **Measured.** The lane reports the native tool's CPU at 2.048 and 2.4 Msps idle (ring only)
+and with 2 captures active, its resident memory, the main-thread cost of the tap feed, the
+replay wall time per decoder, and the queue drain rate (captures per minute at one replay probe),
+with the load average.
 
 ## 7. Main items
 
@@ -248,7 +282,8 @@ replay wall time per decoder, with the load average.
 snapshot worker, passive cost, track identity getter, capture triggers), the identify and
 probe-pool wiring of the replay transport (after lane ID merges), the gain config into the tuner
 controller, the track identity lookup into the spectrum service, the snapshot worker and the
-capture tool into the build and the Docker image.
+capture tool into the build and the Docker image, the replay queue (planner from lane ID, result
+sink and live-confirmation discard into the scanner) and the known-protocol memory.
 7.2 docs/API.md, ROADMAP, SCANNER and the coordination note (for the CLI and the web session)
 describe every new value, field, bound and rule; the CLI guards are checked.
 7.3 docs/ROADMAP.md folds the performance and native-code audit (now: zoom through the native

@@ -14,8 +14,9 @@ reporting.
 
 - [x] 0.1 Freeze the contract: `heard` outcome and `replay` transports with the CLI guard; frame
       track fields; `config` command origin; per-source tuner config, passive cost limit and IQ
-      capture config; passive cost, IQ capture and track identity contract modules.
-  - _Requirements: 1.1, 1.5, 2.1, 4.1, 4.2, 5.1, 5.3, 5.4, 6.1–6.6_
+      capture config; passive cost, IQ capture (with the replay queue planner and result sink) and
+      track identity contract modules; known-protocol memory contract.
+  - _Requirements: 1.1, 1.5, 1.7, 1.8, 2.1, 4.1, 4.2, 5.1, 5.3, 5.4, 6.1–6.8_
 
 ## Lane ID: identify and scan quality
 
@@ -28,6 +29,10 @@ reporting.
       ended job.
   - _Requirements: 1.4, 1.6_
   - **Property 4: A stop is clean**
+- [ ] ID.3 Known protocol first and its decay (`createKnownProtocolMemory`, identify order, job
+      driver miss and decode counting); `planReplayTrials` for the replay queue.
+  - _Requirements: 1.7, 1.8, 6.4_
+  - **Property 14: Known first, decays safely**
 
 ## Lane SC: passive guard and scanner store CPU
 
@@ -61,18 +66,21 @@ reporting.
 - [ ] IQ.1 `wavekit-iqcap` (ring, capture, replay) with crate tests and a native bench.
   - _Requirements: 6.2, 6.8, 6.9_
   - **Property 12: Capture DSP is chunk-invariant**
-- [ ] IQ.2 Bridge, bounded store, startup sweep, `createIqCaptureService`.
-  - _Requirements: 6.1, 6.3, 6.4, 6.7, 6.8_
-  - **Property 11: Capture store bounds**, **Property 13: Sweep touches only provable captures**
-- [ ] IQ.3 Replay transport; exact diffs for identify, probe pool, scanner service and the
-      Dockerfile.
-  - _Requirements: 6.5–6.7_
+- [ ] IQ.2 Bridge, bounded store with discard at the result and the orphan TTL, startup sweep,
+      `createIqCaptureService`; the replay queue (`createIqReplayQueue`).
+  - _Requirements: 6.1, 6.3–6.6, 6.9, 6.10_
+  - **Property 11: Capture store bounds**, **Property 13: Sweep touches only provable captures**,
+    **Property 15: Queue order holds**
+- [ ] IQ.3 Replay transport; exact diffs for identify (claim, replay trials, settle), probe pool,
+      scanner service (trigger, live confirmation, `applyReplayResult`) and the Dockerfile.
+  - _Requirements: 6.5, 6.7–6.9_
 
 ## Main
 
 - [ ] MA.1 Merge the lanes; apply their scanner-service diffs (ID, SC, TR, IQ in that order) and
       the IQ identify / probe-pool diffs after ID; `src/index.ts` wiring (tuner config, track
-      identity lookup, IQ capture service and replay transport); build entry for the snapshot
+      identity lookup, IQ capture service, replay queue with `planReplayTrials` and
+      `applyReplayResult`, replay transport, one known-protocol memory); build entry for the snapshot
       worker; Dockerfile and Makefile for `wavekit-iqcap`; contract test updates.
   - _Requirements: 7.1_
 - [ ] MA.2 Docs: API.md (`heard`, `replay`, cancel of an ended job, frame track fields, `config`
