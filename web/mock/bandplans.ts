@@ -37,12 +37,94 @@ import type {
 	ImportGroupOverride,
 	ImportPreview,
 	ImportUrlPreview,
+	OperatorScanPreset,
 	PlanStackEntry,
 	ResolvedBand,
 	ResolvedBandPlanView,
+	ScanExclusion,
+	ScanJobSpec,
+	ScanPreset,
+	ScanPresetJob,
+	ScanPresetListView,
+	ScanRange,
 } from "@wavekit/api-types"
-import { BAND_SEEDS, merge, subtract, toBand } from "./data.ts"
+import {
+	BAND_SEEDS,
+	SCANNER_BANDPLANS,
+	merge,
+	subtract,
+	toBand,
+} from "./data.ts"
 import type { Interval } from "./data.ts"
+
+// ---- scan presets (src/core/bandplans/presets.ts)
+
+const PRESET_COMBINATIONS = [
+	{
+		id: "builtin-combo-ism-srd",
+		name: "ISM / SRD",
+		planIds: ["ism-433", "ism-868", "ism-169"],
+	},
+	{
+		id: "builtin-combo-personal-radio",
+		name: "Personal radio",
+		planIds: ["pmr446", "dpmr446", "cb"],
+	},
+	{
+		id: "builtin-combo-land-mobile-marine",
+		name: "Land mobile + Marine",
+		planIds: ["vhf-land-mobile", "marine-vhf"],
+	},
+] as const
+
+function presetJob(bandplans: readonly string[]): ScanPresetJob {
+	return {
+		mode: null,
+		bandplans: [...bandplans],
+		ranges: [],
+		exclusions: [],
+		protocols: [],
+		sensitivity: null,
+		thresholdDb: null,
+		fftSize: null,
+		integrationMs: null,
+		dwellMs: null,
+		settleMs: null,
+	}
+}
+
+function presetToJobSpec(preset: ScanPreset): ScanJobSpec {
+	const job = preset.job
+	const spec: ScanJobSpec = { name: preset.name }
+	if (job.mode !== null) spec.mode = job.mode
+	if (job.bandplans.length > 0) spec.bandplans = [...job.bandplans]
+	if (job.ranges.length > 0)
+		spec.ranges = job.ranges.map(
+			(r): ScanRange => ({
+				startHz: r.startHz,
+				endHz: r.endHz,
+				rasters: r.rasters.map(x => ({ ...x })),
+				obwHz: [...r.obwHz],
+				protocols: [...r.protocols],
+			}),
+		)
+	if (job.exclusions.length > 0)
+		spec.exclusions = job.exclusions.map(
+			(x): ScanExclusion => ({
+				startHz: x.startHz,
+				endHz: x.endHz,
+				...(x.reason !== null ? { reason: x.reason } : {}),
+			}),
+		)
+	if (job.protocols.length > 0) spec.protocols = [...job.protocols]
+	if (job.sensitivity !== null) spec.sensitivity = job.sensitivity
+	if (job.thresholdDb !== null) spec.thresholdDb = job.thresholdDb
+	if (job.fftSize !== null) spec.fftSize = job.fftSize
+	if (job.integrationMs !== null) spec.integrationMs = job.integrationMs
+	if (job.dwellMs !== null) spec.dwellMs = job.dwellMs
+	if (job.settleMs !== null) spec.settleMs = job.settleMs
+	return spec
+}
 
 export interface MockBandPlans {
 	view(): BandPlanStackView
@@ -334,6 +416,7 @@ interface State {
 	imported: BandPlanPack[]
 	operatorBands: Band[]
 	edits: BandEdit[]
+	presets: OperatorScanPreset[]
 }
 
 const PACK_NAMES = {
@@ -437,6 +520,29 @@ export function registerBandPlansMock(
 				? [{ packId: seed.from, bandId: seed.id, set, updatedAt: seededAt }]
 				: []
 		}),
+		presets: [
+			{
+				kind: "operator",
+				id: randomUUID(),
+				name: "Harbour channels",
+				job: {
+					...presetJob([]),
+					mode: "sweep",
+					ranges: [
+						{
+							startHz: 156_500_000,
+							endHz: 157_450_000,
+							rasters: [{ spacingHz: 25_000, firstChannelHz: 156_500_000 }],
+							obwHz: [],
+							protocols: ["analog-fm"],
+						},
+					],
+					sensitivity: "high",
+				},
+				createdAt: seededAt,
+				updatedAt: seededAt,
+			},
+		],
 	}
 
 	const token = () => ({ storeId: state.storeId, revision: state.revision })
@@ -547,6 +653,52 @@ export function registerBandPlansMock(
 			hidden: hidden.sort(),
 		}
 	}
+
+	/** src/core/bandplans/presets.ts: one built-in per scanner band plan, then the combinations, then yours. */
+	const builtinPresets = (): ScanPreset[] => {
+		const ids = new Set(SCANNER_BANDPLANS.map(p => p.id))
+		return [
+			...SCANNER_BANDPLANS.map(
+				(p): ScanPreset => ({
+					kind: "builtin",
+					id: `builtin-${p.id}`,
+					name: p.name,
+					region: "EU",
+					job: presetJob([p.id]),
+				}),
+			),
+			...PRESET_COMBINATIONS.flatMap(c => {
+				const planIds = c.planIds.filter(id => ids.has(id))
+				return planIds.length < 2
+					? []
+					: [
+							{
+								kind: "builtin" as const,
+								id: c.id,
+								name: c.name,
+								region: "EU" as const,
+								job: presetJob(planIds),
+							},
+						]
+			}),
+		]
+	}
+	const allPresets = (): ScanPreset[] => [
+		...builtinPresets(),
+		...structuredClone(state.presets),
+	]
+	const presetIssues = (p: ScanPreset) =>
+		p.job.bandplans
+			.filter(id => !SCANNER_BANDPLANS.some(b => b.id === id))
+			.map(bandplanId => ({ code: "unknown-bandplan" as const, bandplanId }))
+	const presetsView = (): ScanPresetListView => ({
+		store: store(),
+		context: { region: "EU", effectiveCountry: "FR" },
+		presets: allPresets().map(preset => {
+			const issues = presetIssues(preset)
+			return { preset, applicable: issues.length === 0, issues }
+		}),
+	})
 
 	const commit = (createdId: string | null = null): BandPlanWriteDto => {
 		state.revision += 1
@@ -695,6 +847,38 @@ export function registerBandPlansMock(
 				}
 				return commit(id)
 			}
+			case "create-preset": {
+				if (state.presets.length >= BANDPLANS_LIMITS.presets)
+					throw new BandPlansFailure("BANDPLANS_QUOTA")
+				const at = new Date(now()).toISOString()
+				const id = randomUUID()
+				state.presets.push({
+					kind: "operator",
+					id,
+					name: m.preset.name,
+					job: m.preset.job,
+					createdAt: at,
+					updatedAt: at,
+				})
+				return commit(id)
+			}
+			case "replace-preset": {
+				const i = state.presets.findIndex(p => p.id === m.presetId)
+				const prev = state.presets[i]
+				if (!prev) throw new BandPlansFailure("BANDPLANS_NOT_FOUND")
+				state.presets[i] = {
+					...prev,
+					name: m.preset.name,
+					job: m.preset.job,
+					updatedAt: new Date(now()).toISOString(),
+				}
+				return commit()
+			}
+			case "delete-preset":
+				if (!state.presets.some(p => p.id === m.presetId))
+					throw new BandPlansFailure("BANDPLANS_NOT_FOUND")
+				state.presets = state.presets.filter(p => p.id !== m.presetId)
+				return commit()
 			default:
 				throw new BandPlansFailure("BANDPLANS_INVALID")
 		}
@@ -745,6 +929,20 @@ export function registerBandPlansMock(
 
 	app.get("/api/bandplans", async () => view())
 	app.get("/api/bandplans/resolved", async () => resolved())
+	app.get("/api/bandplans/presets", async () => presetsView())
+	app.get(
+		"/api/bandplans/presets/:presetId/job",
+		handle(request => {
+			const preset = allPresets().find(p => p.id === param(request, "presetId"))
+			if (!preset) throw new BandPlansFailure("BANDPLANS_NOT_FOUND")
+			return {
+				presetId: preset.id,
+				region: "EU",
+				spec: presetToJobSpec(preset),
+				issues: presetIssues(preset),
+			}
+		}),
+	)
 	app.get(
 		"/api/bandplans/packs/:packId",
 		handle(request => {
@@ -843,6 +1041,30 @@ export function registerBandPlansMock(
 			["bandId"],
 		],
 		["POST", "/api/bandplans/imports", "commit-import", COMMIT_KEYS, 201, []],
+		[
+			"POST",
+			"/api/bandplans/presets",
+			"create-preset",
+			["expected", "preset"],
+			201,
+			[],
+		],
+		[
+			"PUT",
+			"/api/bandplans/presets/:presetId",
+			"replace-preset",
+			["expected", "preset"],
+			200,
+			["presetId"],
+		],
+		[
+			"DELETE",
+			"/api/bandplans/presets/:presetId",
+			"delete-preset",
+			["expected"],
+			200,
+			["presetId"],
+		],
 	]
 	for (const [method, url, type, keys, status, params] of routes)
 		app.route({

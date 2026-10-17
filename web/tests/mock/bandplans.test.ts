@@ -6,6 +6,8 @@ import type {
 	ImportPreview,
 	ImportUrlPreview,
 	ResolvedBandPlanView,
+	ScanPresetJobView,
+	ScanPresetListView,
 } from "@wavekit/api-types"
 import { buildResolvedBandPlan } from "../../mock/data.ts"
 import { INTERNATIONAL_URL } from "../../mock/bandplans.ts"
@@ -228,5 +230,58 @@ describe("mock band plans", () => {
 		expect(diff.upToDate).toBe(false)
 		expect(diff.changed).toHaveLength(2)
 		expect(diff.added.map(b => b.name)).toEqual(["PMR446"])
+	})
+
+	it("serves the region's built-in presets and yours, and creates, replaces and deletes yours", async () => {
+		const list = () => get<ScanPresetListView>("/api/bandplans/presets")
+		const first = await list()
+		const ids = first.presets.map(v => v.preset.id)
+		expect(ids).toContain("builtin-airband")
+		expect(ids).toContain("builtin-combo-personal-radio")
+		const mine = first.presets.filter(v => v.preset.kind === "operator")
+		expect(mine.map(v => v.preset.name)).toEqual(["Harbour channels"])
+
+		const job = {
+			mode: "sweep",
+			bandplans: ["marine-vhf"],
+			ranges: [],
+			exclusions: [],
+			protocols: [],
+			sensitivity: null,
+			thresholdDb: null,
+			fftSize: null,
+			integrationMs: null,
+			dwellMs: null,
+			settleMs: null,
+		}
+		const created = await write("POST", "/api/bandplans/presets", {
+			preset: { name: "Marine watch", job },
+		})
+		expect(created.statusCode).toBe(201)
+		const id = created.json<BandPlanWriteDto>().createdId
+		expect((await list()).presets.some(v => v.preset.id === id)).toBe(true)
+		const spec = await get<ScanPresetJobView>(
+			`/api/bandplans/presets/${id}/job`,
+		)
+		expect(spec.spec).toMatchObject({
+			name: "Marine watch",
+			mode: "sweep",
+			bandplans: ["marine-vhf"],
+		})
+
+		const replaced = await write("PUT", `/api/bandplans/presets/${id}`, {
+			preset: { name: "Marine", job },
+		})
+		expect(replaced.statusCode).toBe(200)
+		expect(
+			(await list()).presets.find(v => v.preset.id === id)?.preset.name,
+		).toBe("Marine")
+		const bad = await write("POST", "/api/bandplans/presets", {
+			preset: { name: "Empty", job: { ...job, bandplans: [] } },
+		})
+		expect(bad.statusCode).toBe(400)
+		const gone = await write("DELETE", `/api/bandplans/presets/${id}`, {})
+		expect(gone.statusCode).toBe(200)
+		expect((await list()).presets.some(v => v.preset.id === id)).toBe(false)
 	})
 })
