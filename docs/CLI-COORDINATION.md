@@ -1409,3 +1409,21 @@ Fix (web side, core already supports it):
 
 Core needs no change. A request with the cookie, `Origin` and `X-WaveKit-CSRF` from the session succeeds today
 (verified against a protected core: scanner cancel 200).
+
+#### URGENT for the web session (2): protected audio streams need credentials — 2026-10-17
+
+Against a protected core, Listen answers 401 ("The audio stream answered 401"). Live audio is served on its own
+port (for example `http://127.0.0.1:8081/stream`), so it is cross-origin from the page. The session cookie is sent
+only with credentials included: `web/src/features/listen/pcm-player.ts` fetches with `{ signal, cache: "no-store" }`.
+
+Fix (web side; core already allows the paired origin with `Access-Control-Allow-Credentials: true` on the audio
+listener):
+
+1. `fetch(source.url, { signal, cache: "no-store", credentials: "include" })` for the PCM stream. Do the same for
+   the digital voice stream and any recording download that goes to an audio port.
+2. If the `<audio>` WAV fallback is used, set `crossOrigin = "use-credentials"` on the element.
+3. Keep `reachableAudioUrl` as is: the URL must stay on the configured audio origin (`publicOrigins`), not be
+   rewritten through the dev proxy, or the core refuses the authority.
+
+Verified against a protected core: the analog and digital streams answer 200 with data when the cookie is sent
+cross-port.
