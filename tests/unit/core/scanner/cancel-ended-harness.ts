@@ -139,6 +139,11 @@ export function jobHarness(opts: HarnessOptions = {}) {
 			},
 			follow: () => undefined,
 			status: () => [...probes.values()],
+			// A fixed-mode fake: a confirming probe's one mode ran its full hold when the job's does.
+			fullHoldCovers: (probeId: string) => {
+				const p = probes.get(probeId)
+				return p?.state === "confirming" ? [p.protocol] : []
+			},
 			startLatencyMs: () => 0,
 		},
 		decoders: {

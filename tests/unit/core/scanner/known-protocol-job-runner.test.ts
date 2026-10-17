@@ -91,14 +91,14 @@ describe("job driver known-protocol counting (WG11 1.7, 1.8)", () => {
 		expect(log).toEqual(["miss:d_1:dmr"])
 	})
 
-	it("the memory ignores a full-hold miss of another protocol", async () => {
+	it("a full-hold miss of another protocol's mode is not counted", async () => {
 		const { memory, log, inner } = recordingMemory()
 		const h = await running({ knownProtocols: memory })
 		const track = makeTrack()
 		h.runner.onTrack(makeLive(track), track, true)
 		h.setProbeProtocol("p0", "nxdn48")
 		await vi.advanceTimersByTimeAsync(HOLD_MS)
-		expect(log).toEqual(["miss:d_1:nxdn48"])
+		expect(log).toEqual([])
 		expect(inner.size()).toBe(0)
 	})
 

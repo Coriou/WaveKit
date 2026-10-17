@@ -252,7 +252,9 @@ export interface JobRunnerDeps {
 		| "follow"
 		| "status"
 		| "startLatencyMs"
-	>
+	> &
+		/** WG11 1.8: the pool's per-mode full-hold record; absent (a fake): no miss is counted. */
+		Partial<Pick<ProbePool, "fullHoldCovers">>
 	decoders: Pick<DecoderManager, "holdSource" | "releaseSource">
 	settings: () => ScannerSettings
 	openEngine: (sourceId: string) => Promise<SpectrumEngine>
@@ -705,13 +707,13 @@ export class JobRunner implements JobDriver {
 	}
 
 	/**
-	 * WG11 1.8: the confirm hold timer of a window probe expired without a confirmation, so the
-	 * probe ran its full hold. It counts a miss only when the probe is still this job's and
-	 * running (`confirming`: not unavailable, not stopped or cut short by the pool), the
-	 * observation has a discovery and accepted no new identity during the hold; the memory
-	 * ignores the miss unless the probe's current mode is the discovery's known protocol. A
-	 * track that closed, a cancel, a pause or a sweep hop releases the probe elsewhere and
-	 * never gets here, so none of them is a miss.
+	 * WG11 1.8: the confirm hold timer of a window probe expired without a confirmation. It counts
+	 * a miss of the discovery's known protocol only when one of the probe's modes covering it ran
+	 * its full mode hold (the pool's per-mode record: the probe's current mode says nothing, it
+	 * may already have stepped on, or be stopping for the step), the probe is still this job's,
+	 * the observation has a discovery and accepted no new identity during the hold. A mode cut
+	 * short by the job hold, an unavailable or never-confirming mode, a track that closed, a
+	 * cancel, a pause or a sweep hop (they release the probe elsewhere) is never a miss.
 	 */
 	private recordFullHoldMiss(
 		live: LiveObservation,
@@ -723,14 +725,19 @@ export class JobRunner implements JobDriver {
 		const memory = this.deps.knownProtocols
 		if (!memory || !this.driving || live.discoveryId === null) return
 		if (live.acceptedIdentity !== hold.identityAtStart) return
-		const probe = this.deps.probes
-			.status()
-			.find(p => p.probeId === hold.probeId && p.jobId === this.record.id)
-		if (probe?.state !== "confirming") return
 		try {
-			memory.recordMiss(live.discoveryId, probe.protocol)
+			const probes = this.deps.probes
+			const probe = probes
+				.status()
+				.find(p => p.probeId === hold.probeId && p.jobId === this.record.id)
+			if (!probe) return
+			const known = memory.known(live.discoveryId)
+			if (known === null) return
+			const covers = probes.fullHoldCovers?.(hold.probeId) ?? []
+			if (!covers.includes(known)) return
+			memory.recordMiss(live.discoveryId, known)
 		} catch {
-			// As above: a throwing memory must not escape the hold timer.
+			// As above: a throwing memory or pool must not escape the hold timer.
 		}
 	}
 

@@ -2123,10 +2123,26 @@ export class IdentifyRunner implements JobDriver {
 		if (why === "decoded" || unavailable || r.endsAt === null) return
 		if (why === "stopped" && this.deps.now() < r.endsAt) return
 		if ([...r.seen.values()].some(seen => seen.identity !== null)) return
+		// Review m2: the transmission must cover the whole known hold. A track that closed before
+		// the run (trials on its last snapshot) or during it is no longer live at the hold's end.
+		if (!this.trackLive(t)) return
 		try {
 			memory.recordMiss(known.discoveryId, known.protocol)
 		} catch {
 			// The memory never throws by contract; a broken one changes nothing here.
+		}
+	}
+
+	/** The target's resolved track is still live in the current epoch (never throws: false). */
+	private trackLive(t: TargetState): boolean {
+		const view = t.view
+		if (!view || t.gone) return false
+		try {
+			return this.currentTracks().some(
+				v => v.trackId === view.trackId && v.epoch === view.epoch,
+			)
+		} catch {
+			return false
 		}
 	}
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { withBandBurstPrior } from "../../../../src/core/scanner/band-scan-burst-prior.js"
+import {
+	createBandRangeCache,
+	withBandBurstPrior,
+} from "../../../../src/core/scanner/band-scan-burst-prior.js"
 import {
 	bandplansFor,
 	priorsFor,
@@ -60,7 +63,7 @@ const bandPriors = () =>
 	)
 const FIXED = {
 	priors: withBandBurstPrior(
-		{ ...EMPTY, rangesListProtocols: false },
+		{ ...EMPTY, rangesListProtocols: false, sweep: true },
 		bandPriors,
 	),
 	protocols: [] as ScannerProtocol[],
@@ -112,7 +115,12 @@ describe("band-scan DMR: spectral class at the sweep's decision (1.4 d)", () => 
 })
 
 describe("withBandBurstPrior", () => {
-	const empty = { priors: {}, protocols: [], rangesListProtocols: false }
+	const empty = {
+		priors: {},
+		protocols: [],
+		rangesListProtocols: false,
+		sweep: true,
+	}
 	const band = (ism: number) => () => ({ ism })
 
 	it("fills ism from the band plan only when the job says nothing at the frequency", () => {
@@ -150,6 +158,7 @@ describe("withBandBurstPrior", () => {
 		withBandBurstPrior({ ...empty, rangesListProtocols: true }, count)
 		withBandBurstPrior({ ...empty, protocols: ["ism"] }, count)
 		withBandBurstPrior({ ...empty, priors: { ism: 0.5 } }, count)
+		withBandBurstPrior({ ...empty, sweep: false }, count)
 		expect(calls).toBe(0)
 	})
 
@@ -188,5 +197,101 @@ describe("withBandBurstPrior", () => {
 		expect(
 			withBandBurstPrior(empty, () => priorsFor(ranges, 100_000_000)),
 		).toEqual({})
+	})
+})
+
+describe("withBandBurstPrior: sweep only (review M1)", () => {
+	const US_RANGES = bandplansFor("US").flatMap(b => b.ranges)
+	const EU_RANGES = bandplansFor("EU").flatMap(b => b.ranges)
+	const OOK_HZ = 433_920_000
+	const ook = makeTrack({
+		id: "ook",
+		centreHz: OOK_HZ,
+		startedAt: 0,
+		blocks: 3,
+	})
+	const ctx = (sweep: boolean) => ({
+		priors: {},
+		protocols: [] as ScannerProtocol[],
+		rangesListProtocols: false,
+		sweep,
+	})
+	const classAt = (sweep: boolean, ranges: typeof US_RANGES) =>
+		classifySpectral(ook, {
+			priors: withBandBurstPrior(ctx(sweep), () => priorsFor(ranges, OOK_HZ)),
+			protocols: [],
+		}).class
+
+	it("US 433.92 MHz: the plans there list no ISM (ism prior 0.25)", () => {
+		expect(priorsFor(US_RANGES, OOK_HZ).ism).toBe(0.25)
+	})
+
+	it("US 433.92 MHz OOK stays ook-burst in a silent non-sweep context (in-window, nothing covering)", () => {
+		expect(classAt(false, US_RANGES)).toBe("ook-burst")
+		expect(classifySpectral(ook, { priors: {}, protocols: [] }).class).toBe(
+			"ook-burst",
+		)
+	})
+
+	it("US 433.92 MHz OOK stays ook-burst in a passive context (passive jobs are not sweeps)", () => {
+		// The passive job's ranges list no protocols at 433.92 MHz: same context as above.
+		const priors = withBandBurstPrior(ctx(false), () => {
+			throw new Error("the band plan must not be read")
+		})
+		expect(priors).toEqual({})
+		expect(classifySpectral(ook, { priors, protocols: [] }).class).toBe(
+			"ook-burst",
+		)
+	})
+
+	it("EU 433.92 MHz (ism-433 lists ism): ook-burst in a sweep and outside one", () => {
+		expect(classAt(true, EU_RANGES)).toBe("ook-burst")
+		expect(classAt(false, EU_RANGES)).toBe("ook-burst")
+	})
+
+	it("the sweep DMR case (135-174 MHz) still classifies probe-able", () => {
+		const young = makeTrack({
+			id: "d",
+			centreHz: VHF_HZ,
+			startedAt: 0,
+			blocks: 3,
+		})
+		for (const ranges of [US_RANGES, EU_RANGES]) {
+			const c = classifySpectral(young, {
+				priors: withBandBurstPrior(ctx(true), () => priorsFor(ranges, VHF_HZ)),
+				protocols: [],
+			})
+			expect(probeModesFor(c.class, [])[0]?.covers).toContain("dmr")
+		}
+	})
+})
+
+describe("createBandRangeCache (review m3)", () => {
+	it("computes the ranges once per plan set, keyed by plan identity", () => {
+		const cache = createBandRangeCache()
+		const a = cache(bandplansFor("EU"))
+		// bandplansFor returns a fresh array of the same plan objects: a cache hit.
+		expect(cache(bandplansFor("EU"))).toBe(a)
+		expect(a.every(r => (r.protocols ?? []).length > 0)).toBe(true)
+		const us = cache(bandplansFor("US"))
+		expect(us).not.toBe(a)
+		expect(cache([])).toEqual([])
+	})
+
+	it("answers the same priors as the full range list", () => {
+		const cache = createBandRangeCache()
+		for (const region of ["EU", "US"] as const) {
+			const full = bandplansFor(region).flatMap(b => b.ranges)
+			for (const hz of [
+				100_000_000,
+				135_500_000,
+				VHF_HZ,
+				433_920_000,
+				446_006_250,
+			])
+				expect(priorsFor(cache(bandplansFor(region)), hz)).toEqual(
+					priorsFor(full, hz),
+				)
+		}
 	})
 })

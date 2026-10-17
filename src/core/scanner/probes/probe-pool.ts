@@ -236,6 +236,8 @@ interface ProbeRecord {
 	decoderAttempted: boolean
 	dvAttempted: boolean
 	allocatedPorts: number[]
+	/** WG11 1.8: covers of this probe's modes that ran their full mode hold unconfirmed (carried across steps). */
+	fullHoldCovers: ScannerProtocol[]
 }
 
 /** Stream events of one engine, watched once a request names its source. */
@@ -728,6 +730,14 @@ export class ProbePool extends EventEmitter {
 		}))
 	}
 
+	/**
+	 * WG11 req 1.8: the protocols covered by the probe's modes that ran their full mode hold without
+	 * a confirmation (the mode timer fired while confirming). Unknown probe: none.
+	 */
+	fullHoldCovers(probeId: string): readonly ScannerProtocol[] {
+		return this.records.get(probeId)?.fullHoldCovers ?? []
+	}
+
 	startLatencyMs(
 		decoderType: ProbeDecoderType,
 		transport: ProbeTransport,
@@ -1082,7 +1092,11 @@ export class ProbePool extends EventEmitter {
 		transport: TransportStrategy,
 		ctx: TransportContext,
 		probeIdOverride: string | null,
-		carry: { calls: ProbeCall[]; recordDir: string | null } | null = null,
+		carry: {
+			calls: ProbeCall[]
+			recordDir: string | null
+			fullHoldCovers?: ScannerProtocol[]
+		} | null = null,
 	): string {
 		const mode = modes[modeIndex]!
 		this.seq += 1
@@ -1137,6 +1151,7 @@ export class ProbePool extends EventEmitter {
 			decoderAttempted: false,
 			dvAttempted: false,
 			allocatedPorts: [],
+			fullHoldCovers: carry?.fullHoldCovers ?? [],
 		}
 		if (mode.decoderType === "multimon-ng") {
 			rec.capcodes = new CapcodeWindows(mode.holdMs, () =>
@@ -1415,6 +1430,8 @@ export class ProbePool extends EventEmitter {
 	private async onModeTimeout(rec: ProbeRecord): Promise<void> {
 		if (this.isStopping(rec) || rec.confirmed || rec.state !== "confirming")
 			return
+		for (const p of rec.mode.covers)
+			if (!rec.fullHoldCovers.includes(p)) rec.fullHoldCovers.push(p)
 		const next = rec.modeIndex + 1
 		if (next >= rec.modes.length) return
 		const engine = this.deps.engines(rec.req.sourceId)
@@ -1438,6 +1455,7 @@ export class ProbePool extends EventEmitter {
 		this.start(rec.req, rec.modes, next, rec.transport, ctx, rec.probeId, {
 			calls: rec.calls,
 			recordDir: rec.recordDir,
+			fullHoldCovers: rec.fullHoldCovers,
 		})
 	}
 

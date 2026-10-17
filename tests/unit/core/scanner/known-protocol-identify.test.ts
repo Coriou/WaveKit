@@ -24,7 +24,14 @@ function spawnError(errno: string): DecoderSpawnError {
 	return new DecoderSpawnError("probe", "/bin/sh", cause)
 }
 
-type Outcome = "miss" | "decode" | "cut-short" | "unavailable" | "cancelled"
+type Outcome =
+	| "miss"
+	| "decode"
+	| "cut-short"
+	| "unavailable"
+	| "cancelled"
+	| "closed-at-start"
+	| "closed-during"
 
 async function runOnce(opts: {
 	confidence: string
@@ -52,6 +59,12 @@ async function runOnce(opts: {
 		h.decoders.emitLink(id, linkLine(1, h.clock.now))
 		h.decoders.emitLink(id, linkLine(1, h.clock.now + 30))
 		await flushAsync()
+	}
+	// Review m2: the transmission ends before the known run's hold does.
+	if (opts.outcome === "closed-at-start") h.tracks.splice(0)
+	if (opts.outcome === "closed-during") {
+		await h.advance(500)
+		h.tracks.splice(0)
 	}
 	if (opts.outcome === "cancelled") {
 		await h.advance(500)
@@ -128,7 +141,13 @@ describe("known protocol first (WG11 1.7)", () => {
 		expect(mem.misses.get("d_1")).toBe(0)
 	})
 
-	for (const outcome of ["cut-short", "unavailable", "cancelled"] as const)
+	for (const outcome of [
+		"cut-short",
+		"unavailable",
+		"cancelled",
+		"closed-at-start",
+		"closed-during",
+	] as const)
 		it(`${outcome} is never a miss`, async () => {
 			const { mem, h } = await runOnce({
 				confidence: "decoded",
@@ -136,7 +155,8 @@ describe("known protocol first (WG11 1.7)", () => {
 				outcome,
 			})
 			const nx = h.last()?.trials.find(t => t.protocol === "nxdn96")
-			expect(nx?.outcome).not.toBe("no-sync")
+			// A closed track still runs its trials to the hold on its last snapshot.
+			if (!outcome.startsWith("closed")) expect(nx?.outcome).not.toBe("no-sync")
 			expect(mem.calls.filter(c => c.startsWith("miss"))).toEqual([])
 			expect(mem.misses.get("d_1")).toBe(1)
 		})
