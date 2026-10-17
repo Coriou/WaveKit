@@ -39,6 +39,7 @@ import type {
 	ScannerSettingsView,
 	ScannerStatus,
 	SpectrumBinsCapView,
+	SpectrumFrameTrackScanner,
 	SpectrumSourceStatus,
 } from "@wavekit/api-types"
 import {
@@ -1935,6 +1936,38 @@ export class ScannerService extends EventEmitter {
 
 	deleteCapture(id: string): Promise<boolean> {
 		return this.captures.delete(id)
+	}
+
+	/**
+	 * WG11 req 5.3: the scanner identity of a live track of `sourceId`, for the spectrum service's
+	 * frame tracks. O(1): one `live` map lookup and one store lookup. Never throws; null when the
+	 * track is unknown, of another source, ended, or has no discovery. `trackId` is the full
+	 * tracker id of the chain's current track (after a max-duration rollover, the successor's).
+	 * Keyed on it with the same-source check, two sources' equal suffixes never cross-match.
+	 */
+	trackIdentity(
+		sourceId: string,
+		trackId: string,
+	): SpectrumFrameTrackScanner | null {
+		try {
+			const live = this.live.get(trackId)
+			if (
+				!live ||
+				live.sourceId !== sourceId ||
+				live.endedAt !== undefined ||
+				!live.discoveryId
+			)
+				return null
+			const d = this.store.get(live.discoveryId)
+			if (!d || !d.protocol || !d.confidence) return null
+			return {
+				discoveryId: d.id,
+				protocol: d.protocol,
+				confidence: d.confidence,
+			}
+		} catch {
+			return null
+		}
 	}
 
 	async listen(discoveryId: string): Promise<ListenResult> {
