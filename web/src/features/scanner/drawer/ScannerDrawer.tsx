@@ -2,7 +2,7 @@ import "./scanner-drawer.css"
 
 // The Scanner drawer (Scanner board; DESIGN.md "Scanner second pass"): header "Scanner · count · Scan a
 // band · ×", Watch here as one row (or Show plan / Hide plan while a sweep runs, with its live hit log),
-// the discoveries list with typed-chip search and sort, the toast and a footer honest about coverage.
+// the discoveries list with typed-chip search and sort, and a footer honest about coverage (results land in the app toast).
 // The 2 Hz sweep progress is read only by the header count and the footer.
 import { useEffect, useRef } from "react"
 
@@ -13,7 +13,6 @@ import { Seg } from "../../../ui/Seg.tsx"
 import { Switch } from "../../../ui/Switch.tsx"
 import { useNow, useTunerState } from "../../hooks.ts"
 import { closePlan, openDiscovery, openPlan, scannerUi } from "../ui-store.ts"
-import { dismissToast, drawerToast } from "./actions.ts"
 import { DiscoveryList } from "./DiscoveryList.tsx"
 import { HitLog } from "./HitLog.tsx"
 import { ScanIcon } from "./icons.tsx"
@@ -111,7 +110,6 @@ export function ScannerDrawer({ onClose }: { onClose: () => void }) {
 					)}
 				</>
 			)}
-			<Toast />
 			<Footer />
 			<MoreMenu root={root} />
 		</Drawer>
@@ -354,42 +352,6 @@ function Discoveries() {
 				))}
 			{(count > 0 || !loaded) && <DiscoveryList />}
 		</>
-	)
-}
-
-function Toast() {
-	const toast = useStore(drawerToast)
-	if (!toast) return null
-	return (
-		<div
-			role="status"
-			className="wk-toast wks-toast"
-			data-inline=""
-			data-tone={toast.tone}
-		>
-			<span className="wks-toast-text">{toast.text}</span>
-			{toast.undo ? (
-				<button
-					type="button"
-					className="wk-btn"
-					data-variant="tonal"
-					data-size="sm"
-					onClick={toast.undo}
-				>
-					Undo
-				</button>
-			) : (
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Dismiss"
-					onClick={dismissToast}
-				>
-					<ScanIcon name="close" size={14} />
-				</button>
-			)}
-		</div>
 	)
 }
 
