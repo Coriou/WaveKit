@@ -32,9 +32,38 @@ describe("shellLayout", () => {
 			right: G,
 			width: 420,
 			full: true,
+			resizable: true,
+			maxW: 1440 - G - (G + 440 + G + 300 + G),
 		})
 		expect(L.rxRight).toBe(G + 420 + G)
 		expect(L.dockX + 460).toBeLessThanOrEqual(1440 - 420 - G - G)
+	})
+
+	it("a resized drawer takes its wanted width; the Receiver and dock follow", () => {
+		const L = shellLayout(at(1440), "activity", null, { drawerW: 520 })
+		expect(L.drawer?.width).toBe(520)
+		expect(L.rxRight).toBe(G + 520 + G)
+		expect(L.freeW).toBe(1440 - 520 - G)
+		expect(L.dockX + 460).toBeLessThanOrEqual(1440 - 520 - G - G)
+	})
+
+	it("a wanted width beyond the room left is capped where the Receiver would reach the Tuner", () => {
+		const L = shellLayout(at(1280), "activity", null, { drawerW: 640 })
+		const drMax = 1280 - G - (G + 440 + G + 300 + G)
+		expect(L.drawer).toMatchObject({ width: drMax, maxW: drMax })
+	})
+
+	it("between the rows the drawer keeps its grip; spanning from the left gutter it has none", () => {
+		// 1150 px: no room for 360 px beside the Receiver, so the drawer sits between the rows at its wanted width
+		const mid = shellLayout(at(1150), "activity", null, { drawerW: 480 })
+		expect(mid.full).toBe(false)
+		expect(mid.drawer).toMatchObject({
+			width: 480,
+			resizable: true,
+			maxW: 640,
+		})
+		const narrow = shellLayout(at(1000), "scanner", null, { drawerW: 480 })
+		expect(narrow.drawer).toMatchObject({ width: null, resizable: false })
 	})
 
 	it("the drawer gives up width before the Receiver reaches the Tuner", () => {

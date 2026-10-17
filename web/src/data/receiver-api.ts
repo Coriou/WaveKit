@@ -4,7 +4,7 @@
  * (src/api/routes/receiver-capabilities.ts) and GET /api/tuner-relay (mounted only with a relay).
  * The schemas keep the fields the web app reads and tolerate additions from newer cores.
  */
-import { z } from "zod"
+import { z } from "zod/v4"
 import type {
 	TunerControlMode,
 	TunerDirectSampling,

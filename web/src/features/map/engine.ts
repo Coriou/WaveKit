@@ -18,6 +18,8 @@ import {
 	markers,
 	RING_KM,
 	rings,
+	trailEnd,
+	trailHead,
 	trailSegments,
 	type Feature,
 	type FeatureCollection,
@@ -96,6 +98,8 @@ const INITIAL_ZOOM = 7.6
 /** The board centres the view a little north of the station, so the rings sit under the islands' gap. */
 const NORTH_BIAS_DEG = 0.12
 const BASEMAP_TIMEOUT_MS = 10_000
+/** Trail bodies are re-sent at most this often; their heads follow the markers on every push. */
+const TRAIL_BODY_MS = 2000
 
 export class MapEngine {
 	readonly view: Store<EngineView>
@@ -109,6 +113,10 @@ export class MapEngine {
 	private staticDirty = true
 	private dynamicDirty = true
 	private lastPush = 0
+	/** Trail bodies go out every TRAIL_BODY_MS (or on a layer change); heads with every push. */
+	private trailsDirty = true
+	private lastTrailPush = 0
+	private trailEnds = new Map<string, LatLon>()
 	private raf = 0
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private drawn: { it: MapItem; at: LatLon }[] = []
@@ -392,12 +400,14 @@ export class MapEngine {
 		vis(LAYER.places, o.labels)
 		vis(LAYER.links, o.links && s.layers.mesh)
 		vis(LAYER.trails, o.trails)
+		vis(LAYER.trailHeads, o.trails)
 	}
 
 	private onUi(next: MapUiState, prev: MapUiState): void {
 		if (next.layers !== prev.layers || next.overlays !== prev.overlays) {
 			if (this.loaded) this.applyVisibility(next)
 			this.itemsDirty = true
+			this.trailsDirty = true
 		}
 		if (
 			next.selected !== prev.selected ||
@@ -427,6 +437,12 @@ export class MapEngine {
 		const point = station.kind === "none" ? null : station
 		this.items = withinRange(all, point)
 		this.byId = new Map(this.items.map(i => [i.id, i]))
+		// a trail whose item left goes at once, not with the next body push
+		for (const id of this.trailEnds.keys())
+			if (!this.byId.has(id)) {
+				this.trailsDirty = true
+				break
+			}
 		const prev = this.view.get().station
 		const moved =
 			prev.kind !== station.kind ||
@@ -577,12 +593,7 @@ export class MapEngine {
 			.map(it => ({ it, at: predict(it, now) }))
 		this.drawn = drawn
 		this.setData(SRC.items, markers(drawn, ui.selected))
-		const trails: Feature[] = []
-		if (ui.overlays.trails)
-			for (const d of drawn)
-				if (d.it.trail.length > 0)
-					trails.push(...trailSegments(d.it, d.at, now, this.colourOf(d.it)))
-		this.setData(SRC.trails, collection(trails))
+		this.pushTrails(drawn, now, ui.overlays.trails)
 		if (ui.overlays.links && ui.layers.mesh) {
 			const at = new Map(drawn.map(d => [d.it.id, d.at]))
 			this.setData(
@@ -596,6 +607,38 @@ export class MapEngine {
 				),
 			)
 		}
+	}
+
+	/**
+	 * Trails in two parts: the bodies (most of the coordinates) at most every TRAIL_BODY_MS, and with every push
+	 * a short head from each body's end to the marker, so the line follows the marker without a gap.
+	 */
+	private pushTrails(
+		drawn: readonly { it: MapItem; at: LatLon }[],
+		now: number,
+		on: boolean,
+	): void {
+		if (this.trailsDirty || now - this.lastTrailPush >= TRAIL_BODY_MS) {
+			this.trailsDirty = false
+			this.lastTrailPush = now
+			this.trailEnds = new Map()
+			const bodies: Feature[] = []
+			if (on)
+				for (const d of drawn) {
+					const end = trailEnd(d.it, now)
+					if (!end) continue
+					bodies.push(...trailSegments(d.it, null, now, this.colourOf(d.it)))
+					this.trailEnds.set(d.it.id, end)
+				}
+			this.setData(SRC.trails, collection(bodies))
+		}
+		const heads: Feature[] = []
+		if (on)
+			for (const d of drawn) {
+				const from = this.trailEnds.get(d.it.id)
+				if (from) heads.push(trailHead(from, d.at, this.colourOf(d.it)))
+			}
+		this.setData(SRC.trailHeads, collection(heads))
 	}
 
 	private onMove(): void {

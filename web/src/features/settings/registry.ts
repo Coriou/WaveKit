@@ -53,6 +53,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"station.bandplans",
+		"Station",
+		"Band plans",
+		"band plan bandplan bands channels allocations import sdr++ gqrx sdr# csv",
+		SETTINGS,
+	),
+	row(
 		"station.callsign",
 		"Station",
 		"Callsign",

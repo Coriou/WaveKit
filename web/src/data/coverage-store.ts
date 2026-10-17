@@ -4,7 +4,7 @@
  * `reason: "no-station-location"` when no location is configured. In memory only on the core and
  * not pushed: the Map refreshes it while it is open (every `refreshMs`).
  */
-import { z } from "zod"
+import { z } from "zod/v4"
 import { COVERAGE_PROTOCOLS } from "@wavekit/api-types"
 import type { CoverageResponse } from "@wavekit/api-types"
 

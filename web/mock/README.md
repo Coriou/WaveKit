@@ -6,6 +6,10 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - API and `/ws` on `127.0.0.1:3101` (`WAVEKIT_MOCK_PORT`, `WAVEKIT_MOCK_HOST`); synthetic live
   audio on port + 1 (`WAVEKIT_MOCK_AUDIO_PORT`, advertised as `WAVEKIT_MOCK_AUDIO_ORIGIN`,
   default `http://localhost:3102`) at `/stream.wav` and `/stream`.
+- Load tests: `WAVEKIT_MOCK_LOAD=<n>` multiplies the fleets (aircraft, vessels, APRS, mesh) by `n`
+  with seeded copies, and the decoder message rate by `n` (`load` in `buildMockServer()`).
+  `WAVEKIT_MOCK_ADSB_RATE=<r>` sends `r` `aircraft:update` per aircraft per second, as a core on
+  SBS output does (one per decoded message; `adsbRate`).
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with

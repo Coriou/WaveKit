@@ -716,7 +716,7 @@ export function buildDecoders(
 
 // --- Band plan (wk-bandplan v1) ---
 
-interface BandSeed {
+export interface BandSeed {
 	id: string
 	name: string
 	group: DisplayGroup
@@ -746,7 +746,7 @@ const pmrChannels = Array.from({ length: 16 }, (_, i) => ({
 	aliases: [`pmr ${i + 1}`, `pmr${i + 1}`],
 }))
 
-const BAND_SEEDS: readonly BandSeed[] = [
+export const BAND_SEEDS: readonly BandSeed[] = [
 	{
 		id: "cb",
 		name: "CB 27 MHz",
@@ -1049,7 +1049,7 @@ const CITATIONS = {
 	],
 } as const
 
-function toBand(seed: BandSeed): Band {
+export function toBand(seed: BandSeed): Band {
 	const channels: BandChannel[] = (seed.channels ?? []).map(c => ({
 		id: c.id,
 		name: c.name,
@@ -1082,12 +1082,12 @@ function toBand(seed: BandSeed): Band {
 	}
 }
 
-interface Interval {
+export interface Interval {
 	startHz: number
 	endHz: number
 }
 
-function merge(intervals: readonly Interval[]): Interval[] {
+export function merge(intervals: readonly Interval[]): Interval[] {
 	const sorted = [...intervals].sort(
 		(a, b) => a.startHz - b.startHz || a.endHz - b.endHz,
 	)
@@ -1101,7 +1101,7 @@ function merge(intervals: readonly Interval[]): Interval[] {
 	return out
 }
 
-function subtract(
+export function subtract(
 	startHz: number,
 	endHz: number,
 	cover: readonly Interval[],

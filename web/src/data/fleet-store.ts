@@ -10,7 +10,7 @@
  * into ages against the core's own "now" (the list timestamp, or the entity's last update for a
  * WebSocket message), so a clock difference between the core and the browser does not move them.
  */
-import type { ZodType, ZodTypeDef } from "zod"
+import type { ZodType } from "zod/v4"
 
 import type { ApiClient } from "./api-client.ts"
 import { ApiError, errorMessage } from "./api-client.ts"
@@ -67,7 +67,7 @@ export interface FleetSpec<T> {
 		readonly lost: EventType
 	}
 	/** Validates one entity. */
-	readonly item: ZodType<T, ZodTypeDef, unknown>
+	readonly item: ZodType<T, unknown>
 	/** The list body: its items and the core's time of the answer (ms). */
 	readonly list: (body: unknown) => { items: unknown[]; now: number } | null
 	/** The key of a `lost` message's data, or null when it does not parse. */

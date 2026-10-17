@@ -16,6 +16,7 @@ import {
 	makeMesh,
 	makeVessels,
 	meshAt,
+	multiplyFleet,
 	registerMapMock,
 	vesselAt,
 } from "../../mock/map.ts"
@@ -285,5 +286,42 @@ describe("mock map WebSocket", () => {
 		)
 		socket.close()
 		expect(aircraftSchema.safeParse(got.data).success).toBe(true)
+	})
+})
+
+describe("mock load multiplier", () => {
+	it("adds load - 1 distinct copies of each entity", () => {
+		const base = makeVessels()
+		const out = multiplyFleet(base, 3, (v, k) => ({
+			...v,
+			mmsi: `${v.mmsi}-${k}`,
+		}))
+		expect(out).toHaveLength(base.length * 3)
+		expect(new Set(out.map(v => v.mmsi)).size).toBe(out.length)
+		expect(multiplyFleet(base, 0.5, v => v)).toHaveLength(base.length)
+	})
+
+	it("serves load × the aircraft", async () => {
+		const app = Fastify()
+		registerMapMock(app, {
+			broadcast: () => {},
+			station: () => ({ lat: ROSCOFF[0], lon: ROSCOFF[1] }),
+			load: 4,
+		})
+		const one = Fastify()
+		registerMapMock(one, {
+			broadcast: () => {},
+			station: () => ({ lat: ROSCOFF[0], lon: ROSCOFF[1] }),
+		})
+		const count = async (a: typeof app) =>
+			(
+				(await a.inject({ url: "/api/aircraft" })).json() as {
+					aircraft: { icao: string }[]
+				}
+			).aircraft
+		const [many, few] = await Promise.all([count(app), count(one)])
+		expect(many.length).toBe(few.length * 4)
+		expect(new Set(many.map(a => a.icao)).size).toBe(many.length)
+		await Promise.all([app.close(), one.close()])
 	})
 })

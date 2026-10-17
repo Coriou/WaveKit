@@ -58,7 +58,6 @@ import {
 	SAMPLE_RATE_HZ,
 	USABLE_FRACTION,
 	buildDecoders,
-	buildResolvedBandPlan,
 	decoderInBand,
 	identifyPlanFor,
 	signalActive,
@@ -69,6 +68,7 @@ import { registerMapMock } from "./map.ts"
 import type { MapMock } from "./map.ts"
 import { registerRecordingsMock } from "./recordings.ts"
 import { registerOperatorData } from "./operator-data.ts"
+import { registerBandPlansMock } from "./bandplans.ts"
 import {
 	normaliseSpectrumOptions,
 	SPECTRUM_BACKFILL_MAX_FRAMES,
@@ -85,6 +85,10 @@ export interface MockServerOptions {
 	audioOrigin?: string
 	/** Interval between mock decoder messages, ms. Default 3000. */
 	messageIntervalMs?: number
+	/** Load multiplier for performance work: fleets × load, decoder messages × load. Default 1. */
+	load?: number
+	/** Aircraft updates per aircraft per second (WAVEKIT_MOCK_ADSB_RATE). Default 1. */
+	adsbRate?: number
 }
 
 export interface MockServer {
@@ -404,7 +408,8 @@ export async function buildMockServer(
 	const host = options.host ?? "127.0.0.1"
 	const port = options.port ?? 3101
 	const audioPort = options.audioPort ?? (port === 0 ? 0 : port + 1)
-	const messageEvery = Math.max(250, options.messageIntervalMs ?? 3000)
+	const load = Math.max(1, options.load ?? 1)
+	const messageEvery = Math.max(20, (options.messageIntervalMs ?? 3000) / load)
 	let audioOrigin = options.audioOrigin ?? `http://localhost:${audioPort}`
 	const startedAt = Date.now()
 
@@ -779,8 +784,9 @@ export async function buildMockServer(
 	const onTick = () => {
 		tick += 1
 		if (live.running) broadcast("live-audio", "live-audio:level", level())
-		if (Date.now() - lastMessageAt >= messageEvery) {
-			lastMessageAt = Date.now()
+		// several per tick under load (messageEvery below the 250 ms tick)
+		while (Date.now() - lastMessageAt >= messageEvery) {
+			lastMessageAt += messageEvery
 			emitMessage()
 		}
 		if (tick % 20 === 0) broadcast("sources", "source:status", sourceStatus())
@@ -1213,6 +1219,8 @@ export async function buildMockServer(
 	})
 	// --- Map (./map.ts): aircraft, vessels, APRS, mesh and coverage around the Settings station.
 	const map = registerMapMock(app, {
+		load,
+		...(options.adsbRate !== undefined ? { adsbRate: options.adsbRate } : {}),
 		broadcast: (channel, type, data) => broadcast(channel, type, data),
 		station: () => {
 			const st = settings.station()
@@ -1518,8 +1526,9 @@ export async function buildMockServer(
 		raw: { bandwidth: 0, deEmphasis: false },
 	}))
 
-	const resolved = buildResolvedBandPlan()
-	app.get("/api/bandplans/resolved", async () => resolved)
+	const bandplans = registerBandPlansMock(app, {
+		onCommit: token => broadcast("bandplans", "bandplans:changed", token),
+	})
 
 	app.post<{
 		Body: {
@@ -1877,7 +1886,7 @@ export async function buildMockServer(
 				send(client, {
 					type: "bandplans:changed",
 					channel: "bandplans",
-					data: { storeId: null, revision: 0 },
+					data: bandplans.token(),
 				})
 		}
 	}
@@ -1984,11 +1993,15 @@ async function main(): Promise<void> {
 	const port = Number(env["WAVEKIT_MOCK_PORT"] ?? 3101)
 	const audioPortEnv = env["WAVEKIT_MOCK_AUDIO_PORT"]
 	const audioOrigin = env["WAVEKIT_MOCK_AUDIO_ORIGIN"]
+	const loadEnv = env["WAVEKIT_MOCK_LOAD"]
+	const adsbEnv = env["WAVEKIT_MOCK_ADSB_RATE"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
 		...(audioPortEnv !== undefined ? { audioPort: Number(audioPortEnv) } : {}),
 		...(audioOrigin !== undefined ? { audioOrigin } : {}),
+		...(loadEnv !== undefined ? { load: Number(loadEnv) } : {}),
+		...(adsbEnv !== undefined ? { adsbRate: Number(adsbEnv) } : {}),
 	})
 	const { apiUrl, audioUrl } = await server.listen()
 	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)

@@ -8,7 +8,7 @@
  * The schemas read only what the web app uses (unknown fields are dropped); the type checks at the
  * bottom keep each schema accepting the DTO in packages/api-types.
  */
-import { z } from "zod"
+import { z } from "zod/v4"
 import type {
 	AircraftState,
 	AprsStation,
@@ -275,7 +275,7 @@ export const meshSchema = z.object({
 	viaMqtt: z.boolean(),
 	packetCount: num,
 	duplicateCopies: num,
-	portnums: z.record(num),
+	portnums: z.record(z.string(), num),
 	lastPortnum: num,
 	decoderId: z.string(),
 	firstSeen: iso,

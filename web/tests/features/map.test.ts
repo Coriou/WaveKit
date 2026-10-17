@@ -22,6 +22,8 @@ import {
 	markers,
 	rings,
 	RING_KM,
+	trailEnd,
+	trailHead,
 	trailSegments,
 } from "../../src/features/map/features.ts"
 import {
@@ -627,6 +629,36 @@ describe("features", () => {
 		expect(trailSegments(item({ trail: old }), STATION, NOW, "#fff")).toEqual(
 			[],
 		)
+	})
+
+	it("draws a body without its head, and the head from the body's end to the marker", () => {
+		const trail = Array.from({ length: 13 }, (_, k) => {
+			const at = NOW - (12 - k) * 15_000
+			const p = destination(STATION, 270, (12 - k) * 2)
+			return { lat: p.lat, lon: p.lon, at }
+		})
+		const it = item({ trail })
+		const body = trailSegments(it, null, NOW, "#fff")
+		const last = trail[trail.length - 1]
+		const newest = body[0]?.geometry
+		expect(newest?.type).toBe("LineString")
+		const coords = newest?.type === "LineString" ? newest.coordinates : []
+		expect(coords[coords.length - 1]).toEqual([last?.lon, last?.lat])
+		const end = trailEnd(it, NOW)
+		expect(end).toEqual({ lat: last?.lat, lon: last?.lon })
+		const head = trailHead(end ?? STATION, STATION, "#fff")
+		expect(head.properties?.["a"]).toBe(0.5)
+		expect(head.geometry).toEqual({
+			type: "LineString",
+			coordinates: [
+				[last?.lon, last?.lat],
+				[STATION.lon, STATION.lat],
+			],
+		})
+		expect(trailEnd(item({ trail: [] }), NOW)).toBeNull()
+		expect(trailEnd(item({ kind: "aton", trail }), NOW)).toBeNull()
+		const old = trail.map(p => ({ ...p, at: p.at - 3_600_000 }))
+		expect(trailEnd(item({ trail: old }), NOW)).toBeNull()
 	})
 })
 
