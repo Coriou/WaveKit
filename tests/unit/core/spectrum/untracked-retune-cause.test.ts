@@ -243,29 +243,81 @@ describe("cause 1: I/Q byte slip", () => {
 })
 
 describe("cause 2: a strong transmitter with its images and IM lines ending together", () => {
-	it("is signal-change: no new epoch, labels kept (2.9; frozen: a Δ-null unverified epoch)", () => {
+	it("is signal-change when the transmitter keyed after startup: no new epoch, labels kept (2.9; frozen: a Δ-null unverified epoch)", () => {
+		// Bystanders from the start; the transmitter keys at 2 s (past the startup window) for 10.6 s.
+		// Two bystanders inside the usable span (−110 kHz is outside it): ALARM_MIN_SURVIVORS.
+		const IN_VIEW: Tone[] = [
+			[-90_000, 0.08],
+			[-50_000, 0.08],
+		]
+		const end = Math.round(12.6 * FS)
 		const h = play("U8_IQ", [
-			u8(scene(3, [...TX, ...BYSTANDERS], 10.6)),
-			u8(scene(5, BYSTANDERS, 1)),
+			u8(scene(8, IN_VIEW, 2)),
+			u8(scene(3, [...TX, ...IN_VIEW], 10.6)),
+			u8(scene(5, IN_VIEW, 1)),
 		])
-		// frozen: [{ kind, epoch: 2, startSample: 2726400, deltaHz: null }]
-		expect(h.of("untracked-retune")).toEqual([
-			{
-				kind: "untracked-retune",
-				epoch: 1,
-				startSample: 2_726_400,
-				deltaHz: null,
-				suspected: "signal-change",
-				newEpoch: false,
-			},
-		])
+		const alarms = h.of("untracked-retune")
+		expect(alarms).toHaveLength(1)
+		expect(alarms[0]).toMatchObject({
+			epoch: 1,
+			deltaHz: null,
+			suspected: "signal-change",
+			newEpoch: false,
+		})
+		expect(alarms[0]!.startSample).toBeGreaterThan(end)
 		expect(h.of("epoch-started").map(e => e.epoch)).toEqual([1])
-		const late = h.tracks().filter(t => t.lastSample > 2_726_400)
+		const late = h.tracks().filter(t => t.lastSample > end)
 		expect(late.length).toBeGreaterThan(0)
 		expect(
 			late.every(t => t.epoch === 1 && t.tuningTrust === "commanded"),
 		).toBe(true)
-	}, 30_000)
+	}, 60_000)
+
+	it("a strong transmitter open since startup gives no co-birth credit: its lines vanishing stay external-control", () => {
+		const h = play("U8_IQ", [
+			u8(scene(3, [...TX, ...BYSTANDERS], 10.6)),
+			u8(scene(5, BYSTANDERS, 1)),
+		])
+		const alarms = h.of("untracked-retune")
+		expect(alarms).toHaveLength(1)
+		expect(alarms[0]).toMatchObject({ suspected: "external-control", epoch: 2 })
+	}, 60_000)
+
+	it("review R1 regression: a strong open carrier and a surviving feature, retuned beyond the view, is external-control with a new epoch", () => {
+		// A weak feature from the start; a strong carrier and a line keyed together at 2 s. The
+		// receiver then moves beyond the view: the new scene happens to cover only the old −60 kHz.
+		const h = play("U8_IQ", [
+			u8(scene(9, [[-60_000, 0.1]], 2)),
+			u8(
+				scene(
+					10,
+					[
+						[-60_000, 0.1],
+						[34_000, 0.5],
+						[70_000, 0.05],
+					],
+					10.6,
+				),
+			),
+			u8(
+				scene(
+					11,
+					[
+						[-60_000, 0.1],
+						[15_000, 0.08],
+					],
+					1,
+				),
+			),
+		])
+		const alarms = h.of("untracked-retune")
+		expect(alarms).toHaveLength(1)
+		expect(alarms[0]).toMatchObject({ suspected: "external-control" })
+		expect(alarms[0]).not.toHaveProperty("newEpoch")
+		expect(h.of("epoch-started").some(e => e.epoch === alarms[0]!.epoch)).toBe(
+			true,
+		)
+	}, 60_000)
 
 	it("everything vanishing (no bystander left) stays external-control with a new epoch (fail safe)", () => {
 		const h = play("U8_IQ", [u8(scene(3, TX, 10.6)), u8(scene(5, [], 1))])

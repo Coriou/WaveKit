@@ -100,7 +100,7 @@ describe("classifyAlarm (WG10 req 2.9)", () => {
 
 	// Feature: web-gaps-10, Property 8: Alarm classification
 	// Validates: Requirements 2.9
-	it("signal-change exactly when Δ is null, some feature stays, and every vanished feature ended", () => {
+	it("signal-change exactly when Δ is null, at least two features stay, and every vanished feature ended", () => {
 		fc.assert(
 			fc.property(
 				offsets.filter(os => os.length >= 5),
@@ -124,7 +124,7 @@ describe("classifyAlarm (WG10 req 2.9)", () => {
 						ended: f => endedSet.has(f),
 					})
 					const expected =
-						allEnded && !withDelta && alarm!.deltaHz === null
+						kept >= 2 && allEnded && !withDelta && alarm!.deltaHz === null
 							? "signal-change"
 							: "external-control"
 					expect(got).toBe(expected)

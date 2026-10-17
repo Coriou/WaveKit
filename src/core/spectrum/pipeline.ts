@@ -1171,6 +1171,12 @@ export class SpectrumPipeline {
 				(t.closedBlock !== null || vanished.some(f => near(f).includes(t))),
 		)
 		const coBirth = ALARM_CO_BIRTH_S * this.fs
+		// Co-birth is measured from the strong track's own start, and gives no credit to a strong
+		// track born in the epoch's first ALARM_CO_BIRTH_S (everything opens then) unless it has
+		// already closed (positive end evidence).
+		const startup = (ep.settledStart ?? 0) + coBirth
+		const credits = (s: (typeof strong)[number]): boolean =>
+			s.closedBlock !== null || s.startSample > startup
 		return classifyAlarm({
 			features: this.prevPersistent,
 			segments: segRanges,
@@ -1183,7 +1189,10 @@ export class SpectrumPipeline {
 					t =>
 						strong.includes(t) ||
 						strong.some(
-							s => Math.abs(t.startSample - s.startSample) <= coBirth,
+							s =>
+								credits(s) &&
+								t.startSample >= s.startSample - coBirth &&
+								t.startSample <= s.startSample + coBirth,
 						),
 				),
 		})

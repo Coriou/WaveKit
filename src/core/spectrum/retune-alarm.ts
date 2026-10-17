@@ -20,6 +20,8 @@ export interface SegmentRange {
 
 export const ALARM_MIN_FEATURES = 3
 export const ALARM_FRACTION = 0.6
+/** WG10 req 2.9: signal-change needs this many eligible features still in place (fail closed). */
+export const ALARM_MIN_SURVIVORS = 2
 const MIN_SHIFT_MATCHES = 2
 const EPS = 1e-9
 
@@ -108,8 +110,9 @@ export type AlarmSuspect = SpectrumWarningSuspect
  *   ALARM_FRACTION of those whose mirror `2·centre − f` is visible, reappear in a segment at the
  *   mirror (an I/Q swap mirrors the spectrum about the centre).
  * - `signal-change`: no common shift (Δ null), every vanished feature belongs to a strong
- *   transmission that ended (the caller's `ended`), and at least one eligible feature is still
- *   present (a scene where everything vanished is never explained away: fail safe).
+ *   transmission that ended (the caller's `ended`), and eligible features are still
+ *   present (at least ALARM_MIN_SURVIVORS: a scene that moved and left one coincidental
+ *   match, or vanished entirely, is never explained away: fail closed).
  * - `external-control` otherwise (the safe answer: a new unverified epoch).
  */
 export function classifyAlarm(input: {
@@ -147,7 +150,7 @@ export function classifyAlarm(input: {
 	if (
 		input.deltaHz === null &&
 		vanished.length > 0 &&
-		vanished.length < eligible.length &&
+		eligible.length - vanished.length >= ALARM_MIN_SURVIVORS &&
 		vanished.every(f => input.ended(f))
 	)
 		return "signal-change"
