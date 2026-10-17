@@ -174,11 +174,11 @@
 								<path class="lane__ticks" d="" />
 							</svg>
 						</div>
-						<p class="scope__axis" aria-hidden="true">
+						<p class="scope__axis wk-label" aria-hidden="true">
 							<span>5 min ago</span><span>now</span>
 						</p>
 						<div class="scope__marker" id="marker" hidden></div>
-						<p class="scope__readout" id="marker-readout" hidden></p>
+						<p class="scope__readout wk-tip" id="marker-readout" hidden></p>
 					</figure>
 				</section>
 
@@ -187,9 +187,15 @@
 						<h2 class="legend wk-label" data-strong id="stream-heading">
 							IQ stream
 						</h2>
-						<div class="endpoint">
+						<div class="endpoint wk-field">
 							<code class="endpoint__url" id="endpoint">—</code>
-							<button class="endpoint__copy" id="endpoint-copy" type="button">
+							<button
+								class="endpoint__copy wk-btn"
+								id="endpoint-copy"
+								type="button"
+								data-variant="tonal"
+								data-size="lg"
+							>
 								Copy
 							</button>
 						</div>
@@ -309,8 +315,8 @@
 										><span class="glyph"></span
 										><span class="row__text">—</span></span
 									><span class="row__sub row__sub--meter"
-										><span class="meter" aria-hidden="true"
-											><span class="meter__fill"></span></span
+										><span class="meter wk-meter" aria-hidden="true"
+											><span class="wk-meter-fill"></span></span
 										><span class="row__subtext"></span
 									></span>
 								</dd>

@@ -524,8 +524,10 @@ function renderHost() {
 		setRow(el, r ?? null, fresh)
 		if (el.dataset.key === "network") el.dataset.bars = String(r?.bars ?? 0)
 		if (el.dataset.key === "disk")
-			el.querySelector(".meter__fill").style.transform =
-				`scaleX(${r?.meter ?? 0})`
+			el.querySelector(".wk-meter-fill").style.setProperty(
+				"--wk-level",
+				String(r?.meter ?? 0),
+			)
 	}
 	setRow($("row-setup"), state.host ? setupRow(state.host.setup) : null, fresh)
 }
@@ -580,7 +582,7 @@ function buildDiagnostics(root, groups) {
 	for (const group of groups) {
 		const section = el("section", "diag-group")
 		section.dataset.key = group.key
-		const title = el("h3", "diag-group__title", group.title)
+		const title = el("h3", "diag-group__title wk-label", group.title)
 		const list = el("dl", "facts")
 		for (const fact of group.facts) {
 			const row = el("div", "fact")
