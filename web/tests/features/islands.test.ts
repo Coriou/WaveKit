@@ -7,7 +7,10 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import { isReadOnly } from "../../src/app/context.ts"
-import { connectionNotice } from "../../src/features/connection/notice.ts"
+import {
+	chipPlace,
+	connectionNotice,
+} from "../../src/features/connection/notice.ts"
 import {
 	gainText,
 	receiverSummary,
@@ -207,5 +210,31 @@ describe("connection and access", () => {
 		expect(connectionNotice("open", noPairing, true)).toMatchObject({
 			pair: false,
 		})
+	})
+})
+
+describe("connection chip place", () => {
+	const gap = { x: 456, w: 328 }
+	it("takes the top-row gap whole, then title only", () => {
+		const slot = { gap, freeW: 1100, topRow: 88 }
+		expect(chipPlace(slot, 300, 180)).toEqual({
+			...gap,
+			top: 16,
+			titleOnly: false,
+		})
+		expect(chipPlace(slot, 460, 180)).toEqual({
+			...gap,
+			top: 16,
+			titleOnly: true,
+		})
+	})
+	it("drops under the top row, centred in the free plot, when the gap is too tight or stacked", () => {
+		const under = { x: 0, w: 848, top: 88, titleOnly: false }
+		expect(
+			chipPlace({ gap: { x: 456, w: 92 }, freeW: 848, topRow: 88 }, 460, 180),
+		).toEqual(under)
+		expect(chipPlace({ gap: null, freeW: 848, topRow: 88 }, 100, 80)).toEqual(
+			under,
+		)
 	})
 })

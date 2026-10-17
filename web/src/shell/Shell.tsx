@@ -39,6 +39,8 @@ import { useShell } from "./hooks.ts"
 import {
 	CARD_W,
 	DEFAULT_GEOMETRY,
+	FULL_MIN_VW,
+	G,
 	nearestAnchor,
 	shellLayout,
 	type CardAnchor,
@@ -50,6 +52,7 @@ import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
 import { DRAWER_PANES, paneOf } from "./panes.ts"
 import { appToast, dismissAppToast } from "./toast.ts"
+import { overlaySlot, sameSlot, type OverlaySlot } from "./overlay-slot.ts"
 import {
 	shellStore,
 	type Closed,
@@ -261,6 +264,26 @@ export function Shell({
 	// a between-rows drawer shares the right side with the Receiver panel: the open panel wins (board)
 	const drawerShown =
 		state.drawer !== null && (L.full || state.panel !== "receiver")
+
+	// the connection chip's room (src/shell/overlay-slot.ts): the top-row gap, else the free plot under the top row
+	const freeW = drawerShown && L.full ? L.freeW : null
+	useLayoutEffect(() => {
+		const tunerR = G + geo.tunerLive.w
+		const rxL = (freeW ?? geo.W) - G - geo.rxLive.w
+		const next: OverlaySlot | null =
+			geo.W < FULL_MIN_VW
+				? null
+				: {
+						gap:
+							L.rxTop === G && rxL > tunerR
+								? { x: tunerR, w: rxL - tunerR }
+								: null,
+						freeW: freeW ?? geo.W,
+						topRow: L.topRow,
+					}
+		if (!sameSlot(overlaySlot.get(), next)) overlaySlot.set(next)
+	})
+	useEffect(() => () => overlaySlot.set(null), [])
 
 	// ---- panes: a task pane opened from elsewhere (⌘K, Shift-drag, the Tuner's scan row) opens its drawer; another
 	// drawer, or none, drops it (the drawer's × closes both)
@@ -549,7 +572,7 @@ export function Shell({
 			{!state.palette && (
 				<ShellToast
 					lifted={!L.dockHidden}
-					centre={drawerShown && L.full ? L.freeW / 2 : null}
+					centre={freeW === null ? null : freeW / 2}
 				/>
 			)}
 
