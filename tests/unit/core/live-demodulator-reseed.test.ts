@@ -220,4 +220,32 @@ describe("LiveDemodulator auto floor re-seed after retune (WG9 5.6)", () => {
 		expect(openBlocks * 10).toBeGreaterThan(10_000)
 		expect(openBlocks * 10).toBeLessThan(20_000)
 	})
+	// WG9 R1 M2: the re-seed is the auto threshold's; manual and noise keep frozen 5669c187 behaviour.
+	for (const mode of ["manual", "noise"] as const) {
+		it(`${mode} mode keeps the frozen retune reset: the first block after it seeds from its own power`, async () => {
+			await liveDemod.reconfigure({ squelchMode: mode, squelch: -50 })
+			await feedPower(-80, 100)
+			expect(liveDemod.getStatus().noiseFloorDbfs).toBeCloseTo(-80)
+			sourceManager.emitCaps(101_000_000)
+			expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
+			await feedPower(-60, 1)
+			// Smoothed block power reads a little under -60; frozen code never held -80 here.
+			expect(liveDemod.getStatus().noiseFloorDbfs).toBeGreaterThan(-75)
+		})
+
+		it(`${mode} mode cold start seeds from the first block`, async () => {
+			await liveDemod.reconfigure({ squelchMode: mode, squelch: -50 })
+			await feedPower(-60, 10)
+			expect(liveDemod.getStatus().noiseFloorDbfs).toBeCloseTo(-60)
+		})
+
+		it(`a ${mode}-mode retune leaves nothing for a later switch to auto`, async () => {
+			await liveDemod.reconfigure({ squelchMode: mode, squelch: -50 })
+			await feedPower(-80, 100)
+			sourceManager.emitCaps(101_000_000)
+			await liveDemod.reconfigure({ squelchMode: "auto" })
+			await feedPower(-60, 1)
+			expect(liveDemod.getStatus().noiseFloorDbfs).toBeGreaterThan(-75)
+		})
+	}
 })
