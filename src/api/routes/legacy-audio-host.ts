@@ -39,6 +39,10 @@ function isDnsName(value: string): boolean {
 	const labels = value.split(".")
 	// An all-numeric dotted name is either a valid quad (handled earlier) or junk.
 	if (labels.every(label => /^\d+$/.test(label))) return false
+	// WHATWG URL parsing reads a numeric or hex last label as IPv4 (a.1 is
+	// rejected, 0x7f.0.0.1 becomes 127.0.0.1): refuse such names.
+	const last = labels[labels.length - 1] ?? ""
+	if (/^(\d+|0x[0-9a-f]*)$/.test(last)) return false
 	return labels.every(
 		label => label.length <= MAX_DNS_LABEL && DNS_LABEL.test(label),
 	)
@@ -103,7 +107,18 @@ export function deriveLegacyAudioUrl(
 	if (typeof hostHeader !== "string") return baseUrl
 	const host = parseLegacyHost(hostHeader)
 	if (host === undefined) return baseUrl
-	return `http://${host}:${audioPort}${baseUrl.slice(prefix.length)}`
+	const derived = `http://${host}:${audioPort}${baseUrl.slice(prefix.length)}`
+	// The URL parser must read back exactly the name or IPv4 we validated
+	// (a bracketed IPv6 is already checked by isIPv6 and may be re-spelled).
+	try {
+		const parsed = new URL(derived)
+		if (!host.startsWith("[") && parsed.host !== `${host}:${audioPort}`) {
+			return baseUrl
+		}
+	} catch {
+		return baseUrl
+	}
+	return derived
 }
 
 interface RequestHostSource {

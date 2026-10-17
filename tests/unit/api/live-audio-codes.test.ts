@@ -5,6 +5,9 @@ import { describe, expect, it, vi } from "vitest"
 import { liveAudioRoutes } from "../../../src/api/routes/live-audio.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
 
+const SUCCESS_GOLDEN =
+	'{"enabled":true,"running":true,"sourceId":"rtl-pi","sourceConnected":true,"sourceIqSampleRate":2400000,"config":{"enabled":true,"httpPort":8081,"modulation":"nfm","bandwidth":12500,"squelch":0,"noiseReduction":"off","lowPass":0,"highPass":0,"gain":10,"deEmphasis":false,"deEmphasisTau":50,"audioFormat":"s16le","iqDcBlock":true,"sourceId":"rtl-pi","squelchMode":"manual","autoMarginDb":6,"noiseQuietingDb":6,"offsetHz":0},"effectiveSampleRate":25000,"decimationFactor":96,"httpUrl":"http://localhost:8081/stream","clientCount":0,"bytesStreamed":0,"pipelineHealth":"running","wavUrl":"http://localhost:8081/stream.wav","pipelineRestarts":0}'
+
 const HOSTILE = "SECRET-<script>-9999"
 
 async function app(reconfigure: () => unknown, redactErrors?: boolean) {
@@ -116,5 +119,7 @@ describe("live audio PATCH 400 codes (WG9 5.3)", () => {
 		expect(res.statusCode, res.body).toBe(200)
 		expect(res.json()).toMatchObject({ enabled: true, running: true })
 		expect(res.json()).not.toHaveProperty("code")
+		// Body recorded from the frozen route (5669c187) with this fake.
+		expect(res.body).toBe(SUCCESS_GOLDEN)
 	})
 })

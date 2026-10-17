@@ -90,6 +90,16 @@ describe("deriveLegacyAudioUrl", () => {
 		expect(deriveLegacyAudioUrl(BASE, "pi.local", Number.NaN)).toBe(BASE)
 	})
 
+	it("refuses names a URL parser would read as IPv4 or reject", () => {
+		const base = "http://localhost:8081/stream"
+		for (const host of ["a.1", "0x7f.0.0.1", "foo.0x", "x.123", "a.b.0x1f"]) {
+			expect(deriveLegacyAudioUrl(base, host, 8081)).toBe(base)
+		}
+		expect(deriveLegacyAudioUrl(base, "a1.example", 8081)).toBe(
+			"http://a1.example:8081/stream",
+		)
+	})
+
 	it("keeps the base path verbatim", () => {
 		expect(
 			deriveLegacyAudioUrl(
