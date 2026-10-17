@@ -1,9 +1,9 @@
 ---
 name: WaveKit Receiver
-description: Read-only operator pages served by the Pi (receiver status and first-boot setup), built on the WaveKit UI kit (design system v1, dark theme, phosphor accent) as a phosphor scope on an ink field.
+description: Read-only operator pages served by the Pi (receiver status and first-boot setup), built on the WaveKit UI kit (design system v1, dark theme, mono accent) as a scope on a neutral field.
 kit: "ui/brand/ui.css (byte copy of packages/brand/tokens/ui.css)"
 colors:
-  field: "var(--wk-surface) #111c19"
+  field: "var(--wk-surface) #171a1b"
   well: "var(--wk-well) #0b1512"
   raised: "var(--wk-fill) #192b24"
   track: "var(--wk-track) #2c443b"
@@ -11,7 +11,7 @@ colors:
   text-2: "var(--wk-text-2) #b9cac1"
   text-3: "var(--wk-text-3) #8ba598"
   lamp-off: "var(--wk-text-5) #52645d"
-  accent: "var(--wk-accent) #7becc7"
+  accent: "var(--wk-accent) #e6ece9"
   grat: "var(--wk-line-08)"
   grat-major: "var(--wk-line-14)"
   ok: "var(--wk-accent)"
@@ -118,7 +118,7 @@ components:
 
 > **On the kit (2026-10-17):** both pages load the WaveKit UI kit (`ui/brand/ui.css`, a byte
 > copy of `packages/brand/tokens/ui.css`, checked by `tests/unit/operator-page-assets.test.ts`)
-> and set `data-wk-theme="dark"` on `<html>`, default ground and accent. Colours, type, space,
+> and set `data-wk-theme="dark" data-wk-accent="mono"` on `<html>` (owner, 2026-10-17: monochrome, as in the web app). Colours, type, space,
 > radii, focus, selection and reduced motion come from the kit; Pi-specific parts (the
 > instrument and the page layout) are local and use kit tokens only. Mapping and reasons:
 > `docs/superpowers/specs/2026-10-17-pi-pages-kit-design.md`. Ground and accent are the owner's
@@ -166,15 +166,15 @@ How the pages keep still:
 
 ## Colors
 
-Every colour is a kit token (`ui/brand/ui.css`, dark theme, default ground and accent). The Pi's old names map one to one onto kit tokens with the same values; the table is in the spec. No colour is defined locally.
+Every colour is a kit token (`ui/brand/ui.css`, dark theme, mono accent). The Pi's old names map one to one onto kit tokens with the same values; the table is in the spec. No colour is defined locally.
 
 ### Primary
 
-- **Accent** (`--wk-accent`, `#7becc7`, phosphor): the flow trace and its wash, the headline rate when fresh and healthy, filled ok lamps, a healthy client's sparkline, the storage meter fill when ok, done and current step bars, the drawn done-check, the Copy button text (kit tonal button), and the "Open receiver status" button face (kit primary button). `ok` is the accent: a healthy state is drawn as live signal.
+- **Accent** (`--wk-accent`, `#e6ece9` in mono): the flow trace and its wash, the headline rate when fresh and healthy, filled ok lamps, a healthy client's sparkline, the storage meter fill when ok, done and current step bars, the drawn done-check, the Copy button text (kit tonal button), and the "Open receiver status" button face (kit primary button). `ok` is the accent: a healthy state is drawn as live signal.
 
 ### Neutral
 
-- **Field** (`--wk-surface`, `#111c19`): page background and `theme-color`; text on accent fills (`--wk-on-accent`).
+- **Field** (`--wk-surface`, `#171a1b` in mono): page background and `theme-color`; text on accent fills (`--wk-on-accent`).
 - **Well** (`--wk-well`, `#0b1512`): the screen's surface.
 - **Fill** (`--wk-fill`, `#192b24`): behind the kit's tooltip (`.wk-tip`, the cursor readout, at 92%).
 - **Track** (`--wk-track`, `#2c443b`): unlit Wi-Fi bars and the pending step bar. The kit meter uses its own `--wk-line-solid` track.
@@ -300,7 +300,7 @@ Shared rules: no axes or tick labels (the figure beside the chart gives the valu
 
 ### Nameplate
 
-- **Structure:** the vendored wordmark-on-dark SVG (132px wide, 120px below 560px, never retyped), the page name in nameplate type, the host name in text-3, then contact at the right. No rules. The baseline lockup is not used because these headers are narrower than its 320px minimum. The favicon is the vendored `favicon.svg`.
+- **Structure:** the vendored white wordmark SVG (132px wide, 120px below 560px, never retyped), the page name in nameplate type, the host name in text-3, then contact at the right. No rules. The baseline lockup is not used because these headers are narrower than its 320px minimum. The favicon is the vendored `favicon.svg`.
 
 ### Contact
 

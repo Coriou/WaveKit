@@ -47,8 +47,8 @@ const UI_FILES: Record<
 		immutable: true,
 	},
 	"/brand/ui.css": { file: "brand/ui.css", type: "text/css; charset=utf-8" },
-	"/brand/wavekit-wordmark-on-dark.svg": {
-		file: "brand/wavekit-wordmark-on-dark.svg",
+	"/brand/wavekit-wordmark-white.svg": {
+		file: "brand/wavekit-wordmark-white.svg",
 		type: "image/svg+xml",
 	},
 	"/brand/favicon.svg": { file: "brand/favicon.svg", type: "image/svg+xml" },

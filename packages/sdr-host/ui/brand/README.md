@@ -9,7 +9,7 @@ differs from its source in `packages/brand`.
 
 | File                           | Copied from `packages/brand/`            |
 | ------------------------------ | ---------------------------------------- |
-| `wavekit-wordmark-on-dark.svg` | `logos/wavekit-wordmark-on-dark.svg`     |
+| `wavekit-wordmark-white.svg` | `logos/wavekit-wordmark-white.svg`     |
 | `favicon.svg`                  | `marks/favicon.svg`                      |
 | `D-DINCondensed.woff2`         | `fonts/d-din/D-DINCondensed.woff2`       |
 | `D-DINCondensed-Bold.woff2`    | `fonts/d-din/D-DINCondensed-Bold.woff2`  |
@@ -39,7 +39,7 @@ used because these headers are narrower than its 320 px minimum.
 SHA-256:
 
 ```
-f3cc7670cc6b928f5170c2626eec61a88db9a1a45ebe9d8cc97c6041fed000c1  wavekit-wordmark-on-dark.svg
+1e4bbad924674da6f97aa38321de5840f28a5bf51c9682629d7052719adffeac  wavekit-wordmark-white.svg
 8b08c4fea346531727780895897a3244c8c99c4ac5115437f6efb3f0cabdab0f  favicon.svg
 662bb4d950dbe9772c180362867645a5100ee98599495354d006d84063dd1f96  D-DINCondensed.woff2
 ba78aaedb4ff282c63c1aa5e35a5fcfff69b1a349bba6dc7c040631069b4bc29  D-DINCondensed-Bold.woff2
