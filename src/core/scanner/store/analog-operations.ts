@@ -1619,7 +1619,12 @@ export class AnalogOperations {
 			const owned = [...this.inventory.intents.values()].filter(
 				intent => intent.discoveryId === id,
 			)
+			// WG9 R2: refuse before the first mutation when any owned artifact is kept now.
+			if (owned.some(intent => this.keptArtifact(intent))) throw keptRefusal()
 			for (const intent of owned) {
+				// WG9 R2: a Keep committed during an earlier intent's awaits refuses here, in the same
+				// exclusive section, before the alias, the marker or the metadata is touched.
+				if (this.keptArtifact(intent)) throw keptRefusal()
 				this.available.delete(intent.alias)
 				// Explicit DELETE may remove quarantined media only under strict matching ownership.
 				await this.validateCleanupMarker(intent)

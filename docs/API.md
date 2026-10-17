@@ -3823,15 +3823,30 @@ operator writes (cookie and CSRF, or the machine credential), checked before the
 body is read; a body is ignored and at most 1 KiB (413). `Cache-Control:
 no-store`.
 
-Keys are never paths: a dsd-fme call is kept by its call name (in every dsd-fme
-directory), a scanner recording by its recording id. Keep re-opens and verifies
+Keys are never paths: a dsd-fme call is kept by its call name, a scanner
+recording by its recording id. A dsd-fme key covers every same-named call in
+every dsd-fme recording directory: Keep protects all of them, unkeep unprotects
+all of them, and delete removes only the one the id names. Keep re-opens and verifies
 the file through the inventory and protects it before that check, so a pruner
 running at the same moment never removes it. Delete renames the verified file
 into a private `0700` directory next to it, checks it is still the same file,
 then unlinks it; a file that changed answers 404. A recording directory that
 other users may write (group or other write without the sticky bit) refuses
-delete with 500 `RECORDING_DELETE_FAILED`. A crash between the rename and the
-unlink leaves a `.wavekit-delete-*` directory that is neither listed nor swept.
+delete with 500 `RECORDING_DELETE_FAILED` (logged once per refusal, no path):
+another user could rebind the private directory's name. Fix the directory mode,
+for example `chmod go-w <dir>` (or `chmod +t <dir>` for a shared directory), then
+retry. A crash between the rename and the unlink leaves a `.wavekit-delete-*`
+directory that is neither listed nor swept.
+
+A configured recording root that is itself a symbolic link (a dsd-fme recording
+directory such as `data/recordings -> /Volumes/usb/recs`, or the scanner storage
+directory) is resolved once, at startup: the pruner, scanner retention, discovery
+removal and the inventory then work through its real directory, and a link
+re-pointed later has no effect. A symbolic link below that real directory is
+still never followed. If the real directory is later replaced (its device and
+inode no longer match), deletion from that root stops (fail closed, a count is
+logged) until the core restarts. A root that does not exist at startup keeps
+the plain-directory rules, so a link created there later is not followed.
 
 The keep store is `<stateDir>/recording-keeps.json` (`RECORDING_KEEPS_FILE_NAME`,
 counted in the `operator-data` storage area): written to a temporary file,
