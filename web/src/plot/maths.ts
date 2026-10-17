@@ -307,6 +307,54 @@ export function snapToTrackChannel(
 	return channel >= t.startHz && channel <= t.endHz ? channel : centre
 }
 
+/** Click magnet around a signal's channel, CSS px: closer than this, a click lands on the signal. */
+export const CLICK_SNAP_PX = 4
+
+/**
+ * The finest round precision (1 or 5 × 10ⁿ Hz, at least 1 Hz) a screen pixel can tell apart at this
+ * zoom: a click means the frequency under the pointer, not the step raster.
+ */
+export function clickPrecisionHz(
+	view: SpectrumViewSpan,
+	widthPx: number,
+): number {
+	const hzPerPx = spanWidth(view) / Math.max(1, widthPx)
+	if (!(hzPerPx > 1)) return 1
+	const decade = 10 ** Math.floor(Math.log10(hzPerPx))
+	return hzPerPx >= 5 * decade ? 5 * decade : decade
+}
+
+/**
+ * The frequency a click at `hz` tunes to: the channel of a signal whose channel (or centre) is within
+ * `snapPx` of the click, else exactly the clicked frequency at the zoom's precision. Unlike
+ * snapToTrackChannel, a click elsewhere inside a wide signal stays where it was made.
+ */
+export function clickHz(
+	hz: number,
+	tracks: readonly Track[],
+	view: SpectrumViewSpan,
+	widthPx: number,
+	stepHz: number,
+	snapPx = CLICK_SNAP_PX,
+): number {
+	const pad = snapPx * (spanWidth(view) / Math.max(1, widthPx))
+	let best: number | null = null
+	let bestD = Infinity
+	for (const t of tracks) {
+		const centre = (t.startHz + t.endHz) / 2
+		const channel = snapToStep(centre, stepHz)
+		const target = channel >= t.startHz && channel <= t.endHz ? channel : centre
+		const d = Math.abs(hz - target)
+		if (d <= pad && d < bestD) {
+			best = target
+			bestD = d
+		}
+	}
+	if (best !== null) return best
+	const precision = clickPrecisionHz(view, widthPx)
+	return Math.round(hz / precision) * precision
+}
+
 /** Rounds to the step raster. */
 export function snapToStep(hz: number, stepHz: number): number {
 	const step = stepHz > 0 ? stepHz : DEFAULT_STEP_HZ

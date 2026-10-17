@@ -6,7 +6,7 @@
  */
 
 import type { SpectrumLevels, SpectrumViewSpan } from "../spectrum/index.ts"
-import { dbToTraceY, snapToStep, spanWidth } from "./maths.ts"
+import { clickPrecisionHz, dbToTraceY, spanWidth } from "./maths.ts"
 
 export type HandleKind = "vfo" | "edge-left" | "edge-right" | "squelch"
 
@@ -192,9 +192,11 @@ export function vfoDragHz(
 	dxPx: number,
 	widthPx: number,
 	spanHz: number,
-	stepHz: number,
 ): number {
-	return snapToStep(startHz + (dxPx / Math.max(1, widthPx)) * spanHz, stepHz)
+	// Like a click, a drag lands where the pointer is, at the zoom's precision (not the step raster).
+	const precision = clickPrecisionHz({ startHz: 0, endHz: spanHz }, widthPx)
+	const hz = startHz + (dxPx / Math.max(1, widthPx)) * spanHz
+	return Math.round(hz / precision) * precision
 }
 
 /** A slider key on a handle: dir and size, or null for keys the handle leaves alone. */

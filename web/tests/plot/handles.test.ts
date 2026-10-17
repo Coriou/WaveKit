@@ -230,13 +230,14 @@ describe("bandwidth from an edge", () => {
 })
 
 describe("vfoDragHz", () => {
-	it("moves by the dragged distance from where the drag began, on the step", () => {
-		// 200 Hz per px: 50 px is 10 kHz, snapped to 12.5 kHz
-		expect(vfoDragHz(161_100_000, 50, 1000, 200_000, 12_500)).toBe(161_112_500)
-		expect(vfoDragHz(161_100_000, -125, 1000, 200_000, 12_500)).toBe(
-			161_075_000,
-		)
-		expect(vfoDragHz(161_100_000, 0, 1000, 200_000, 12_500)).toBe(161_100_000)
+	it("moves by the dragged distance from where the drag began, at the zoom's precision", () => {
+		// 200 Hz per px: 50 px is 10 kHz, kept as is (no step raster)
+		expect(vfoDragHz(161_100_000, 50, 1000, 200_000)).toBe(161_110_000)
+		expect(vfoDragHz(161_100_000, -125, 1000, 200_000)).toBe(161_075_000)
+		expect(vfoDragHz(161_100_000, 0, 1000, 200_000)).toBe(161_100_000)
+		// 200 Hz per px rounds to 100 Hz: 3 px from 161.1 MHz is 161.1006 MHz
+		expect(vfoDragHz(161_100_000, 3, 1000, 200_000)).toBe(161_100_600)
+		expect(vfoDragHz(161_100_030, 1, 1000, 200_000)).toBe(161_100_200)
 	})
 })
 

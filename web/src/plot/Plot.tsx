@@ -320,7 +320,6 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		vfoHz,
 		bandwidthHz,
 		bandwidthRange,
-		stepHz: step,
 		readOnly,
 		squelchDbfs: () =>
 			handles.store.get().squelchDbfs ?? squelchLineDbfs(data.liveAudio.get()),

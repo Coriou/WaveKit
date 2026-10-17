@@ -32,7 +32,6 @@ export interface HandleFrame {
 	bandwidthHz: number
 	/** The mode's bandwidth limits; null: no channel filter to resize (RAW, no live audio). */
 	bandwidthRange: BandwidthRange | null
-	stepHz: number
 	readOnly: boolean
 	/** The squelch threshold drawn now (live, read from the store), null when hidden. */
 	squelchDbfs: () => number | null
@@ -139,7 +138,7 @@ export function useHandles(
 			const { x, y, w } = local(e)
 			if (d.kind === "vfo") {
 				handles.dragVfo(
-					vfoDragHz(d.startHz, e.clientX - d.x, w, d.spanHz, f.stepHz),
+					vfoDragHz(d.startHz, e.clientX - d.x, w, d.spanHz),
 				)
 			} else if (d.kind === "squelch") {
 				handles.setSquelch(squelchAtY(y, f.levels, f.traceCss))

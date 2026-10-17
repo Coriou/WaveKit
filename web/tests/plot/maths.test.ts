@@ -22,6 +22,8 @@ import {
 	resolveView,
 	snapToStep,
 	snapToTrack,
+	clickHz,
+	clickPrecisionHz,
 	stepHz,
 	tuneAction,
 	tuningStep,
@@ -167,6 +169,27 @@ describe("tuning", () => {
 		// Zoomed in, the same click is too far.
 		const zoomed = { startHz: 161_100_000, endHz: 161_200_000 }
 		expect(snapToTrack(161_175_000, tracks, zoomed, 1000)).toBeNull()
+	})
+
+	it("a click lands on a signal's channel only right on it, else exactly where it was made", () => {
+		const tracks = [track(161_100_000, 161_200_000)]
+		// 1000 px over 2.4 MHz: 2.4 kHz per px (1 kHz precision), 4 px ≈ 9.6 kHz of magnet.
+		expect(clickHz(161_155_000, tracks, capture, 1000, 12_500)).toBe(
+			161_150_000,
+		)
+		expect(clickHz(161_180_400, tracks, capture, 1000, 12_500)).toBe(
+			161_180_000,
+		)
+		expect(clickHz(161_904_300, [], capture, 1000, 12_500)).toBe(161_904_000)
+		// Zoomed to 100 kHz over 1000 px (100 Hz per px): 100 Hz precision.
+		const zoomed = { startHz: 161_100_000, endHz: 161_200_000 }
+		expect(clickHz(161_123_456, [], zoomed, 1000, 12_500)).toBe(161_123_500)
+	})
+
+	it("click precision is the finest 1 or 5 × 10ⁿ Hz a pixel can tell apart", () => {
+		expect(clickPrecisionHz(capture, 1000)).toBe(1000)
+		expect(clickPrecisionHz({ startHz: 0, endHz: 6_000_000 }, 1000)).toBe(5000)
+		expect(clickPrecisionHz({ startHz: 0, endHz: 500 }, 1000)).toBe(1)
 	})
 
 	it("steps on the raster", () => {

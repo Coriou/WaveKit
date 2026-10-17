@@ -115,8 +115,8 @@ function setupFollowing(timers: PlotTimers) {
 describe("PlotController", () => {
 	it("a click inside the capture moves the live-audio channel, snapping to the signal", async () => {
 		const { c, calls, release } = setup()
-		// 1000 px: the signal at 160.625 is at x ≈ 0.135; click 5 px off.
-		const x = (160_625_000 - capture.startHz) / 2_400_000 + 5 / 1000
+		// 1000 px: the signal at 160.625 is at x ≈ 0.135; click 3 px off (inside the click magnet).
+		const x = (160_625_000 - capture.startHz) / 2_400_000 + 3 / 1000
 		const done = c.clickAt(x, 1000)
 		expect(calls).toEqual(["offset -875000"])
 		// The VFO shows the request until the core answers.
@@ -139,10 +139,26 @@ describe("PlotController", () => {
 		void done
 	})
 
-	it("a click on empty spectrum snaps to the step raster", () => {
+	it("a click on empty spectrum tunes exactly there, at the zoom's precision (not the step raster)", () => {
 		const { c, calls } = setup()
-		void c.clickAt((161_904_000 - capture.startHz) / 2_400_000, 1000)
-		expect(calls).toEqual([`offset ${161_900_000 - 161_500_000}`])
+		// 1000 px over 2.4 MHz: 2.4 kHz per px, so the click rounds to 1 kHz.
+		void c.clickAt((161_904_300 - capture.startHz) / 2_400_000, 1000)
+		expect(calls).toEqual([`offset ${161_904_000 - 161_500_000}`])
+	})
+
+	it("a click inside a wide signal but away from its channel stays where it was made", () => {
+		const { c, calls } = setup({
+			...context,
+			tracks: [
+				{
+					startHz: 161_100_000,
+					endHz: 161_200_000,
+					flags: { burst: false, iqImage: false, edge: false },
+				},
+			],
+		})
+		void c.clickAt((161_180_000 - capture.startHz) / 2_400_000, 1000)
+		expect(calls).toEqual([`offset ${161_180_000 - 161_500_000}`])
 	})
 
 	it("tuning outside the capture recentres the hardware and zeroes the offset", async () => {
@@ -285,14 +301,14 @@ describe("PlotController", () => {
 		c.dragPan(-250, 1000)
 		expect(calls).toEqual(["retune rtl0 162100000"])
 		void c.endPan()
-		// On screen 160.9–163.3 MHz; click at 60 %: 162.3375 MHz, inside the capture at 162.1.
+		// On screen 160.9–163.3 MHz; click at 60 %: 162.34 MHz, inside the capture at 162.1.
 		const done = c.clickAt(0.6, 1000)
-		expect(c.vfoHz()).toBe(162_337_500)
+		expect(c.vfoHz()).toBe(162_340_000)
 		answer()
 		await flush()
 		await done
 		// The drag's own offset is dropped and the click's is worked out against 162.1, not 161.5.
-		expect(calls).toEqual(["retune rtl0 162100000", "offset 237500"])
+		expect(calls).toEqual(["retune rtl0 162100000", "offset 240000"])
 		// The picture does not jump back to the old capture under the click.
 		expect(c.visibleSpan()?.endHz).toBeGreaterThan(capture.endHz)
 	})

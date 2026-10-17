@@ -18,6 +18,7 @@ import {
 	followHz,
 	offsetKeeping,
 	resolveView,
+	clickHz,
 	snapToStep,
 	snapToTrackChannel,
 	spanCentre,
@@ -266,20 +267,23 @@ export class PlotController {
 		)
 	}
 
-	private sendTune(hz: number, shown: SpectrumViewSpan | null): Promise<unknown> {
+	private sendTune(
+		hz: number,
+		shown: SpectrumViewSpan | null,
+	): Promise<unknown> {
 		const { capture, sourceId } = this.ctx
 		const centreHz = this.centreHz()
 		const hardware = this.hardwareCapture()
 		if (!capture || !hardware || centreHz === null) return Promise.resolve()
 		const action: ReturnType<typeof tuneAction> =
 			this.ctx.scanHasReceiver || this.ctx.centreTuning
-			? { kind: "retune", centreHz: Math.round(hz) }
-			: tuneAction(
-					hz,
-					centreHz,
-					hardware,
-					edgeMargin(hardware, this.ctx.bandwidthHz),
-				)
+				? { kind: "retune", centreHz: Math.round(hz) }
+				: tuneAction(
+						hz,
+						centreHz,
+						hardware,
+						edgeMargin(hardware, this.ctx.bandwidthHz),
+					)
 		if (action.kind === "offset") {
 			// From a slid view the picture stays where it is until frames catch up (captureChanged):
 			// dropping it for the view from before the slide made the spectrum jump under the click.
@@ -328,10 +332,17 @@ export class PlotController {
 		)
 	}
 
-	/** A click at screen x (0–1): tunes to `signalAt`. */
+	/**
+	 * A click at screen x (0–1): tunes exactly to the clicked frequency at the zoom's precision, or to a
+	 * signal's channel when the click is right on it (clickHz). The step raster is for the wheel and keys.
+	 */
 	clickAt(x: number, widthPx: number): Promise<void> {
-		const hz = this.signalAt(x, widthPx)
-		return hz === null ? Promise.resolve() : this.tuneTo(hz)
+		const view = this.visibleSpan()
+		if (!view) return Promise.resolve()
+		const hz = view.startHz + x * spanWidth(view)
+		return this.tuneTo(
+			clickHz(hz, this.ctx.tracks, view, widthPx, this.ctx.stepHz),
+		)
 	}
 
 	/** `times` tuning steps up (dir 1) or down (dir −1). */
