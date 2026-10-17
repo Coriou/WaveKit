@@ -390,6 +390,9 @@ export function heldDiscoveryId(
 	return best?.id ?? null
 }
 
+/** The reason a Skip writes on its exclusion; it tells a Skip apart from the plan's own skips. */
+export const SKIP_REASON = "Skipped"
+
 /**
  * Skip: the job's exclusions plus the held channel (± half its bandwidth, at least 6.25 kHz), for
  * PATCH /api/scanner/jobs/:id. Core drops the frequency at the next hop for the rest of this scan.
@@ -406,7 +409,33 @@ export function skipPatch(
 	if (have.some(e => e.startHz <= startHz && e.endHz >= endHz))
 		return { exclusions: have }
 	return {
-		exclusions: [...have, { startHz, endHz, reason: "Skipped" }],
+		exclusions: [...have, { startHz, endHz, reason: SKIP_REASON }],
+	}
+}
+
+/** How a frequency sits in the job's skips: "you" (a Skip from this scan, removable), "plan" (the plan's), or null. */
+export function skipState(
+	job: Pick<ScanJob, "spec">,
+	hz: number,
+): "you" | "plan" | null {
+	let plan = false
+	for (const e of job.spec.exclusions) {
+		if (hz < e.startHz || hz > e.endHz) continue
+		if (e.reason === SKIP_REASON) return "you"
+		plan = true
+	}
+	return plan ? "plan" : null
+}
+
+/** Undoes Skip: the job's exclusions without the "Skipped" ones that hold `hz`. */
+export function unskipPatch(
+	job: Pick<ScanJob, "spec">,
+	hz: number,
+): ScanJobSpec {
+	return {
+		exclusions: job.spec.exclusions.filter(
+			e => e.reason !== SKIP_REASON || hz < e.startHz || hz > e.endHz,
+		),
 	}
 }
 

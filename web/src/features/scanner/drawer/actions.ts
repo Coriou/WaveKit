@@ -1,7 +1,11 @@
 // What the open discovery's actions do: Listen (tunes first when it is outside the capture), Save
 // frequency (a saved frequency prefilled from the discovery), Identify again (in the tuned span only),
 // Keep, Ignore (the core's lockout, with Undo), Delete and Copy; results land in the app toast.
-import type { Discovery, SavedFrequencyInput } from "@wavekit/api-types"
+import type {
+	Discovery,
+	SavedFrequencyInput,
+	ScanJob,
+} from "@wavekit/api-types"
 
 import type { AppServices } from "../../../app/services.ts"
 import {
@@ -12,6 +16,7 @@ import {
 } from "../../../data/index.ts"
 import { dismissAppToast, showAppToast } from "../../../shell/toast.ts"
 import { formatMHz } from "../../format.ts"
+import { skipPatch, unskipPatch } from "../../tuner/scan-hold.ts"
 import { defaultGroup } from "../../tuner/saved.ts"
 import { modeSpec, type Modulation } from "../../tuner/modes.ts"
 
@@ -187,6 +192,37 @@ export async function setIgnored(
 		else showToast(`${f3(d.frequencyHz)} is back in probes and scans`)
 	} catch (error) {
 		showToast(`Could not change it: ${errorMessage(error)}`, { tone: "warn" })
+	}
+}
+
+/** Skip (this scan only, from the hit log): the sweep stops visiting its channel; again puts it back. */
+export async function setSkipped(
+	services: AppServices,
+	job: ScanJob,
+	d: Discovery,
+	skip: boolean,
+): Promise<void> {
+	const scanner = services.data.scanner
+	try {
+		await scanner.patchJob(
+			job.id,
+			skip
+				? skipPatch(job, d.frequencyHz, d.bandwidthHz)
+				: unskipPatch(job, d.frequencyHz),
+		)
+		if (skip)
+			showToast(`Skipping ${f3(d.frequencyHz)} for the rest of this scan`, {
+				undo: () => {
+					dismissToast()
+					const now = scanner.get().jobs.get(job.id)
+					if (now) void setSkipped(services, now, d, false)
+				},
+			})
+		else showToast(`${f3(d.frequencyHz)} is back in this scan`)
+	} catch (error) {
+		showToast(`Could not change the scan: ${errorMessage(error)}`, {
+			tone: "warn",
+		})
 	}
 }
 

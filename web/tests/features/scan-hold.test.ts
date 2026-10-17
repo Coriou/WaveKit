@@ -7,7 +7,9 @@ import {
 	holdRowModel,
 	holdSaveName,
 	skipPatch,
+	skipState,
 	sweepLive,
+	unskipPatch,
 	sweepMoving,
 	type HoldRowInput,
 } from "../../src/features/tuner/scan-hold.ts"
@@ -342,6 +344,26 @@ describe("scan hold helpers", () => {
 		// without a frequency, the strongest
 		expect(heldDiscoveryId({ id: "j1" }, activity, null)).toBe("far")
 		expect(heldDiscoveryId({ id: "j1" }, [], 1)).toBeNull()
+	})
+
+	it("skipState tells a Skip from the plan's skips, and unskipPatch removes only the Skip", () => {
+		const j = job()
+		const planned = job({
+			spec: {
+				...j.spec,
+				exclusions: [
+					{ startHz: 161_000_000, endHz: 161_100_000, reason: "Broadcast" },
+				],
+			},
+		})
+		expect(skipState(planned, 161_150_000)).toBeNull()
+		expect(skipState(planned, 161_050_000)).toBe("plan")
+		const p = skipPatch(planned, 161_150_000, 12_500)
+		const skipped = job({ spec: { ...j.spec, exclusions: p.exclusions ?? [] } })
+		expect(skipState(skipped, 161_150_000)).toBe("you")
+		expect(unskipPatch(skipped, 161_150_000).exclusions).toEqual(
+			planned.spec.exclusions,
+		)
 	})
 
 	it("skipPatch adds the held channel to the job's exclusions once", () => {

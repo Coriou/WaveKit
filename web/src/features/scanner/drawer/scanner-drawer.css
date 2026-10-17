@@ -319,7 +319,8 @@
 		background: var(--wk-well-glass);
 		box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb), 0.14);
 	}
-	.wks-item[data-ignored] {
+	.wks-item[data-ignored],
+	.wks-item[data-skipped]:not([data-open]) {
 		opacity: 0.6;
 	}
 	.wks-row {

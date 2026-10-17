@@ -1,13 +1,16 @@
 // The live hit log of the running scan ("This scan"): what the sweep heard, live ones first, then the new
 // ones, then the most recent; "New only" keeps the discoveries this scan found first. Windowed like the list.
+// An open row can Skip its channel for the rest of this scan (the Tuner's scan row does it for the held one).
+import type { ScanJob } from "@wavekit/api-types"
 import { WaveKitIcon } from "@wavekit/brand/react"
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { useDisplay } from "../../display.ts"
 import { useReadOnly, useServices } from "../../../app/context.ts"
-import { useStore } from "../../../data/index.ts"
+import { isJobActive, useStore } from "../../../data/index.ts"
+import { skipState } from "../../tuner/scan-hold.ts"
 import { openDiscovery } from "../ui-store.ts"
-import { listenTo, setIgnored, toggleSaved } from "./actions.ts"
+import { listenTo, setIgnored, setSkipped, toggleSaved } from "./actions.ts"
 import { ScanIcon } from "./icons.tsx"
 import type { HitEntry } from "./rows.ts"
 import { discoveryRow, frequencyParts, hitEntries, hitMeta } from "./rows.ts"
@@ -20,6 +23,7 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 	const { data } = useServices()
 	const scanner = data.scanner
 	const hits = useStore(scanner, s => s.jobHits.get(jobId) ?? EMPTY)
+	const job = useStore(scanner, s => s.jobs.get(jobId) ?? null)
 	const byId = useStore(scanner, s => s.discoveries.byId)
 	const activeNow = useStore(scanner, s => s.activeNow)
 	const newOnly = useStore(drawerView, s => s.newOnly)
@@ -104,6 +108,7 @@ export function HitLog({ jobId, oneHop }: { jobId: string; oneHop: boolean }) {
 									discovery={e.discovery}
 									live={e.live}
 									fresh={e.fresh}
+									job={job}
 									open={openId === e.hit.discoveryId}
 									measure={v.measure}
 									onToggle={toggle}
@@ -122,10 +127,12 @@ const HitRow = memo(function HitRow({
 	discovery,
 	live,
 	fresh,
+	job,
 	open,
 	measure,
 	onToggle,
 }: HitEntry & {
+	job: ScanJob | null
 	open: boolean
 	measure: (el: HTMLElement | null) => void
 	onToggle: (id: string) => void
@@ -142,6 +149,9 @@ const HitRow = memo(function HitRow({
 		d ? s.items.some(f => f.frequencyHz === Math.round(d.frequencyHz)) : false,
 	)
 	const ignored = d?.operator?.lockout === true
+	// only while the scan runs: an ended job's skips change nothing
+	const skip =
+		d && job && isJobActive(job.state) ? skipState(job, d.frequencyHz) : null
 	return (
 		<article
 			data-key={id}
@@ -150,6 +160,7 @@ const HitRow = memo(function HitRow({
 			className="wks-item"
 			data-open={open || undefined}
 			data-ignored={ignored || undefined}
+			data-skipped={skip !== null || undefined}
 		>
 			<button
 				type="button"
@@ -182,6 +193,7 @@ const HitRow = memo(function HitRow({
 								: ""}
 						</span>
 						<span className="wks-gap" />
+						{skip !== null && <span className="wk-tag">Skipped</span>}
 						{e.fresh && (
 							<span className="wk-tag" data-variant="accent">
 								New
@@ -248,6 +260,29 @@ const HitRow = memo(function HitRow({
 							<ScanIcon name="eye-off" size={14} />
 							<span className="wks-hit-lbl">
 								{ignored ? "Ignored" : "Ignore"}
+							</span>
+						</button>
+					)}
+					{!readOnly && job && isJobActive(job.state) && (
+						<button
+							type="button"
+							className="wk-btn"
+							data-variant="ghost"
+							aria-pressed={skip !== null}
+							aria-label={skip !== null ? "Skipped" : "Skip"}
+							disabled={skip === "plan"}
+							title={
+								skip === "plan"
+									? "The plan already skips it"
+									: skip === "you"
+										? "Put it back in this scan"
+										: "This scan only: the sweep stops visiting it"
+							}
+							onClick={() => void setSkipped(services, job, d, skip === null)}
+						>
+							<ScanIcon name="skip" size={14} />
+							<span className="wks-hit-lbl">
+								{skip !== null ? "Skipped" : "Skip"}
 							</span>
 						</button>
 					)}
