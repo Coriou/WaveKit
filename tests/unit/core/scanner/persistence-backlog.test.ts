@@ -241,7 +241,7 @@ describe("ScannerPersistence bounded backlog", () => {
 		})
 	})
 
-	it("rejects every append of a failed batch, truncates it, and writes later appends cleanly", async () => {
+	it("an I/O-failed batch is a hole: no batch queued behind it is written until a snapshot covers it", async () => {
 		await withDir(async dir => {
 			let release!: () => void
 			const gate = new Promise<void>(resolve => {
@@ -267,23 +267,78 @@ describe("ScannerPersistence bounded backlog", () => {
 			await p.load()
 			const first = p.append(entry())
 			await until(() => calls, 1)
-			const batch = [p.append(entry()), p.append(entry()), p.append(entry())]
-			const outcomes = Promise.allSettled(batch)
+			const failing = [p.append(entry()), p.append(entry()), p.append(entry())]
+			const jobs = p.writeJobs([]) // other chain work closes the batch
+			const behind = p.append(entry()) // seq 5: its own batch, queued behind the failing one
+			const settled = Promise.allSettled([...failing, behind])
 			release()
 			expect(await first).toBe(1)
-			for (const outcome of await outcomes) {
+			await jobs
+			const outcomes = await settled
+			for (const outcome of outcomes.slice(0, 3)) {
 				expect(outcome.status).toBe("rejected")
 				if (outcome.status === "rejected")
-					expect(outcome.reason).toBeInstanceOf(WaveKitError)
+					expect(outcome.reason).toMatchObject({
+						code: "SCANNER_PERSIST_FAILED",
+					})
 			}
-			expect(await p.append(entry())).toBe(5)
+			expect(outcomes[3]).toMatchObject({
+				status: "rejected",
+				reason: { code: SCANNER_JOURNAL_BACKLOG_CODE },
+			})
+			// Still uncovered: refused until a snapshot covers seqs 2..6.
+			await expect(p.append(entry())).rejects.toMatchObject({
+				code: SCANNER_JOURNAL_BACKLOG_CODE,
+			})
+			await p.writeSnapshot(snapshot(3))
+			expect(await p.append(entry())).toBe(7)
+			const text = await readFile(
+				join(dir, "journal", "observations-20261017.jsonl"),
+				"utf8",
+			)
+			expect(
+				text
+					.split("\n")
+					.filter(l => l !== "")
+					.map(l => (JSON.parse(l) as { seq: number }).seq),
+			).toEqual([1, 7])
 			const loaded = await new ScannerPersistence({
 				dir,
 				logger,
 				now: () => T0,
 			}).load()
-			expect(loaded.entries.map(e => e.seq)).toEqual([1, 5])
+			expect(loaded.lastSeq).toBe(6)
+			expect(loaded.entries.map(e => e.seq)).toEqual([7])
 			expect(loaded.droppedLines).toBe(0)
+		})
+	})
+
+	it("charges each queued line 2 bytes per UTF-16 unit plus the per-append overhead against the cap", async () => {
+		await withDir(async dir => {
+			const stall = stalledAppend()
+			const line = `${JSON.stringify({ seq: 2, at: entry().at, op: "observation", payload: entry().payload })}\n`
+			const charge = line.length * 2 + 512
+			const cap = charge * 10
+			const p = new ScannerPersistence({
+				dir,
+				logger,
+				now: () => T0,
+				appendFile: stall.fn,
+				maxJournalBacklogBytes: cap,
+			})
+			await p.load()
+			const first = p.append(entry())
+			await until(stall.calls, 1)
+			const queued = Array.from({ length: 20 }, () => p.append(entry()))
+			const settled = Promise.allSettled(queued)
+			// The in-flight seq 1 stays charged until written; seqs 2..9 share `line`'s length, so
+			// 9 charges fit in 10 and seq 10 (one unit longer) does not: the rest is refused.
+			expect(p.backlog().journalLines).toBe(8)
+			expect(p.backlog().journalBytes).toBe(9 * charge)
+			stall.release()
+			await first
+			const outcomes = await settled
+			expect(outcomes.filter(o => o.status === "fulfilled")).toHaveLength(8)
 		})
 	})
 

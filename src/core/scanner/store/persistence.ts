@@ -72,7 +72,21 @@ const ENGINE_DIR = "engine"
 const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
 const JOURNAL_NAME = /^observations-(\d{8})\.jsonl$/
 const DAY_MS = 86_400_000
-/** Queued journal text past which appends are refused (fail closed, bounded heap). */
+/**
+ * Heap a queued journal line may hold, charged against the cap: 2 bytes per UTF-16 unit (a
+ * two-byte string at worst; JSON lines are usually one-byte, i.e. half that) plus
+ * `APPEND_OVERHEAD_BYTES` for what each pending append keeps alive besides its text: the string
+ * header and array slot, the `.then(() => seq)` promise, reaction and closure, and the caller's
+ * `.catch` promise, reaction and closure. Measured in the OOM heap snapshot at roughly
+ * 300-480 B per queued line, so 512 B is an upper bound.
+ */
+const APPEND_OVERHEAD_BYTES = 512
+/**
+ * Queued journal heap past which appends are refused (fail closed). With the accounting above it
+ * is a true upper bound on the heap the journal backlog holds: 32 MiB, e.g. at most ~15k typical
+ * 1.8 kB one-byte lines (each charged 2 x 1.8 kB + 512 B = ~4.1 kB) or ~54k minimal ~100-unit
+ * lines (each charged 712 B).
+ */
 const DEFAULT_MAX_JOURNAL_BACKLOG_BYTES = 32 * 1024 * 1024
 /** Error code of an append refused because the journal backlog is full. */
 export const SCANNER_JOURNAL_BACKLOG_CODE = "SCANNER_JOURNAL_BACKLOG"
@@ -482,7 +496,7 @@ export class ScannerPersistence {
 	private queuedSnapshot: SnapshotSlot | null = null
 	/** The journal batch at the chain's tail, still collecting lines (group commit). */
 	private openBatch: JournalBatch | null = null
-	/** Journal lines and their bytes enqueued but not yet written or failed (`backlog()`). */
+	/** Journal lines enqueued but not yet written or failed, and the heap charged for them (`backlog()`). */
 	private queuedLines = 0
 	private queuedBytes = 0
 	/** Highest and lowest refused seq not yet covered by a durable snapshot; lines above `holeFrom` are not written. */
@@ -504,7 +518,7 @@ export class ScannerPersistence {
 
 	/**
 	 * `appendFile` is injectable for the short-write test; default `fs/promises.appendFile`.
-	 * `maxJournalBacklogBytes`: queued journal text past which appends are refused (default 32 MiB).
+	 * `maxJournalBacklogBytes`: charged journal backlog heap past which appends are refused (default 32 MiB).
 	 */
 	constructor(opts: {
 		dir: string
@@ -606,9 +620,10 @@ export class ScannerPersistence {
 		if (!this.loaded) return Promise.reject(notLoaded())
 		const seq = this.nextSeq++
 		const line = `${JSON.stringify({ seq, at: entry.at, op: entry.op, payload: entry.payload })}\n`
+		const cost = line.length * 2 + APPEND_OVERHEAD_BYTES
 		const overCap =
 			opts.reserved !== true &&
-			this.queuedBytes + line.length > this.maxJournalBacklogBytes
+			this.queuedBytes + cost > this.maxJournalBacklogBytes
 		const uncovered =
 			this.refusedMax !== null &&
 			(this.coverSeq === null || this.coverSeq < this.refusedMax)
@@ -630,10 +645,10 @@ export class ScannerPersistence {
 			batch = fresh
 		}
 		batch.lines.push(line)
-		batch.bytes += line.length
+		batch.bytes += cost
 		batch.maxSeq = seq
 		this.queuedLines += 1
-		this.queuedBytes += line.length
+		this.queuedBytes += cost
 		return batch.written.then(() => seq)
 	}
 
@@ -694,6 +709,11 @@ export class ScannerPersistence {
 			await mkdir(dir, { recursive: true })
 			await this.appendFile(path, text)
 		} catch (err) {
+			// The whole batch is lost: a hole like a refusal, so no later line is written past it
+			// until a snapshot covers it (replay must never apply later lines on a stale base).
+			this.refusedMax = Math.max(this.refusedMax ?? 0, batch.maxSeq)
+			this.holeFrom = Math.min(this.holeFrom ?? Infinity, batch.minSeq)
+			this.openBatch = null
 			// A partial line would glue onto the next one and lose both at load: cut back to the known size.
 			await truncate(path, knownBytes).catch(() => undefined)
 			this.log.warn(
@@ -767,7 +787,10 @@ export class ScannerPersistence {
 		return done
 	}
 
-	/** Disk work still queued: at most one snapshot text whatever the disk speed. */
+	/**
+	 * Disk work still queued: at most one snapshot text whatever the disk speed. `journalBytes` is
+	 * the heap charged for queued journal lines (an upper bound, see `APPEND_OVERHEAD_BYTES`).
+	 */
 	backlog(): {
 		snapshots: number
 		snapshotBytes: number
