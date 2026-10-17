@@ -282,6 +282,10 @@ retain their original scope. Backend verification is recorded below.
       infer mounted pairing/session or unlock. No local backend check substitutes for
       deployment, RF/native, capacity or physical evidence acceptance. Task 9 remains
       a separate connected-client release gate.
+      Amended (WG9): [web-gaps-9](../web-gaps-9/requirements.md) requirement 1 adds the local
+      evidence for a web origin on another port of the API hostname (separate-origin
+      acceptance test, preflight cache, pairing DTOs and contract); deployment acceptance stays
+      open here.
       _Requirements: 1.1–1.3, 3.6, 4.8, 6.2–6.5_
 - [ ] 15. (WG2 lane D) Device names, kinds and coarse last-seen: snapshot version 2
       migration, `POST /api/access/devices/label`, hour-aligned last-seen on
