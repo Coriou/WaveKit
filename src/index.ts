@@ -1476,6 +1476,9 @@ async function main(): Promise<void> {
 						log.warn({ err, sourceId }, "Endpoint selection failed")
 					})
 				})
+				sourceManager.on("endpoint-fallback", (sourceId, host) => {
+					selector.onFallback(sourceId, host)
+				})
 				log.info(
 					{ sources: endpointTargets.map(t => t.sourceId) },
 					"Receiver endpoint selection enabled",
@@ -1513,13 +1516,20 @@ async function main(): Promise<void> {
 			)
 		}
 
-		if (
-			!endpointSelector &&
-			config.sources.some(s => s.sdrHost?.endpointSelection === "auto")
-		)
-			log.warn(
-				"Receiver endpoint selection needs resource monitoring and the SDR host poller; it stays off",
-			)
+		for (const s of config.sources) {
+			if (s.sdrHost?.endpointSelection !== "auto") continue
+			const reason =
+				s.type !== "rtl_tcp" || !s.host || !s.port
+					? "it applies only to rtl_tcp sources with a host and port"
+					: !endpointSelector
+						? "it needs resources.enabled and the SDR host poller"
+						: null
+			if (reason)
+				log.warn(
+					{ sourceId: s.id },
+					`Receiver endpoint selection stays off for this source: ${reason}`,
+				)
+		}
 		own(20, () => {
 			endpointSelector?.stop()
 			resourceAggregator?.stop()

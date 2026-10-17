@@ -151,6 +151,36 @@ describe("SourceManager.retarget", () => {
 		expect(manager.getStatus("pi")?.endpoint?.activeHost).toBe("127.0.0.1")
 	})
 
+	it("returns a failing selected endpoint to the configured host on its own after two failures", async () => {
+		const a = await rtlPeer("127.0.0.1", 0, 0x11)
+		cleanup.push(() => a.close())
+		const port = (a.server.address() as net.AddressInfo).port
+		// Nothing listens on ::1 at this port, so every attempt there is refused.
+		const probe = net.createServer()
+		const free = await new Promise<boolean>(resolve => {
+			probe.once("error", () => resolve(false))
+			probe.listen({ host: "::1", port, ipv6Only: true }, () => resolve(true))
+		})
+		if (free) await new Promise<void>(resolve => probe.close(() => resolve()))
+		if (!free) return
+		const manager = new SourceManager(logger)
+		cleanup.push(() => manager.disconnectAll())
+		await manager.connect(config(port))
+		manager.trackEndpoint("pi")
+		const left = new Promise<string>(resolve =>
+			manager.once("endpoint-fallback", (_id, host) => resolve(host)),
+		)
+		manager.retarget("pi", "::1", "verified ethernet endpoint")
+		expect(await left).toBe("::1")
+		expect(manager.getActiveHost("pi")).toBe("127.0.0.1")
+		expect(manager.getStatus("pi")?.endpoint).toMatchObject({
+			configuredHost: "127.0.0.1",
+			activeHost: "127.0.0.1",
+			reason: "fallback: selected endpoint failed",
+		})
+		await until(() => a.connections === 2, 10_000)
+	}, 20_000)
+
 	it("refuses recordings and unknown sources, and is a no-op for the current host", () => {
 		const manager = new SourceManager(logger)
 		expect(manager.retarget("missing", "::1", "x")).toBe(false)

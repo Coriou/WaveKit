@@ -6,7 +6,8 @@
  * a candidate is only ever a literal IP that the configured sdr-host listed
  * itself (fetched by SdrHostPoller from the configured API), it must answer
  * with the same `receiverId` and serve an `RTL0` header, and any failure leaves
- * the active host as it is. The receiverId is not an authenticator; it only
+ * the active host as it is. SourceManager itself returns a failing endpoint to
+ * the configured host (see onFallback). The receiverId is not an authenticator; it only
  * shows that two addresses lead to the same running receiver. Never consumes
  * mDNS answers.
  */
@@ -20,13 +21,19 @@ export const ENDPOINT_SWITCH_HOLD_DOWN_MS = 5 * 60_000
 /** First wait before a failed candidate is probed again; doubles per failure. */
 export const ENDPOINT_CANDIDATE_BACKOFF_MS = 60_000
 export const ENDPOINT_CANDIDATE_BACKOFF_MAX_MS = 30 * 60_000
-/** Reconnect failures on a selected endpoint that send the source back home. */
-export const ENDPOINT_FALLBACK_FAILURES = 2
+
+/** The parts of a source config that selection checks are unchanged. */
+export interface EndpointSourceConfig {
+	type: string
+	host?: string | undefined
+	port?: number | undefined
+	sdrHost?: { endpointSelection?: "auto" | "off" | undefined } | undefined
+}
 
 export interface EndpointSelectorSources {
-	getStatus(
-		id: string,
-	): { connected: boolean; reconnectAttempts: number } | undefined
+	getStatus(id: string): { connected: boolean } | undefined
+	/** The live source config; selection acts only while it is still the target's. */
+	getConfig(id: string): EndpointSourceConfig | undefined
 	getActiveHost(id: string): string | undefined
 	trackEndpoint(id: string): boolean
 	retarget(id: string, host: string, reason: string): boolean
@@ -82,6 +89,33 @@ export class EndpointSelector {
 	}
 
 	/**
+	 * SourceManager left a failed endpoint for the configured host (it does so on
+	 * its own, without waiting for a report): back that address off.
+	 */
+	onFallback(sourceId: string, host: string): void {
+		const target = this.targets.get(sourceId)
+		if (!target) return
+		this.markFailed(target, host)
+		target.verifiedReceiverId = null
+	}
+
+	/**
+	 * The source is still the one configured at startup with selection on. A
+	 * source removed and re-added under the same id with another host, port or
+	 * setting is left alone.
+	 */
+	private eligible(target: TargetState): boolean {
+		const config = this.sources.getConfig(target.sourceId)
+		return (
+			config !== undefined &&
+			config.type === "rtl_tcp" &&
+			config.host === target.configuredHost &&
+			config.port === target.port &&
+			config.sdrHost?.endpointSelection === "auto"
+		)
+	}
+
+	/**
 	 * One poll result from the configured sdr-host API. Serialised per source:
 	 * a report that arrives while the previous one is still probing is dropped.
 	 */
@@ -104,7 +138,7 @@ export class EndpointSelector {
 		report: ReceiverEndpointsReport | null,
 	): Promise<void> {
 		const { sourceId, configuredHost } = target
-		if (!this.sources.trackEndpoint(sourceId)) return
+		if (!this.eligible(target) || !this.sources.trackEndpoint(sourceId)) return
 		const status = this.sources.getStatus(sourceId)
 		const active = this.sources.getActiveHost(sourceId)
 		if (!status || active === undefined) return
@@ -118,8 +152,6 @@ export class EndpointSelector {
 				target.verifiedReceiverId = null
 				this.sources.retarget(sourceId, configuredHost, reason)
 			}
-			if (status.reconnectAttempts >= ENDPOINT_FALLBACK_FAILURES)
-				return fallback("fallback: selected endpoint stopped answering")
 			if (
 				endpoints.iqPort !== target.port ||
 				!endpoints.addresses.some(a => a.address === active)
@@ -177,7 +209,9 @@ export class EndpointSelector {
 			)
 			return
 		}
-		target.backoff.delete(candidate.address)
+		// Keep the backoff step: an endpoint that fails again waits longer (anti-flap).
+		const backoff = target.backoff.get(candidate.address)
+		if (backoff) backoff.until = -Infinity
 		target.verifiedReceiverId = receiverId
 		target.lastSwitchAt = this.now()
 		this.sources.retarget(
@@ -191,6 +225,7 @@ export class EndpointSelector {
 	private stillActive(target: TargetState, active: string): boolean {
 		return (
 			!this.stopped &&
+			this.eligible(target) &&
 			this.sources.getActiveHost(target.sourceId) === active &&
 			this.sources.getStatus(target.sourceId) !== undefined
 		)

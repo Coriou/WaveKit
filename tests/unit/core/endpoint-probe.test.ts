@@ -3,6 +3,7 @@ import * as net from "node:net"
 import { once } from "node:events"
 import {
 	createEndpointProbe,
+	isDialableEndpoint,
 	urlAuthority,
 } from "../../../src/core/endpoint-probe.js"
 
@@ -36,14 +37,17 @@ describe("endpoint probe", () => {
 			socket.write(Buffer.from("RTL0\0\0"))
 			setTimeout(() => socket.write(Buffer.from([0, 5, 0, 0, 0, 29, 1, 2])), 10)
 		})
-		const probe = createEndpointProbe()
+		const probe = createEndpointProbe({ isAllowed: () => true })
 		expect(await probe.rtlTcpHeader("127.0.0.1", port)).toBe(true)
 		await vi.waitFor(() => expect(closed).toBe(true))
 		expect(Buffer.concat(received).length).toBe(0)
 	})
 
 	it("rejects a wrong magic, an early close, silence and hostnames", async () => {
-		const probe = createEndpointProbe({ iqTimeoutMs: 100 })
+		const probe = createEndpointProbe({
+			iqTimeoutMs: 100,
+			isAllowed: () => true,
+		})
 		const wrong = await serve(s => s.end(Buffer.from("HTTP/1.1 200")))
 		const early = await serve(s => s.end(Buffer.from("RTL0")))
 		const silent = await serve(() => {})
@@ -70,5 +74,44 @@ describe("endpoint probe", () => {
 		expect(await probe.receiverId("evil.example", 8080)).toBeNull()
 		expect(fetchFn).toHaveBeenCalledTimes(4)
 		expect(urlAuthority("192.0.2.69", 5555)).toBe("192.0.2.69:5555")
+	})
+
+	it("refuses loopback, unspecified, link-local, multicast and mapped addresses by default", async () => {
+		for (const address of [
+			"127.0.0.1",
+			"0.0.0.0",
+			"169.254.169.254",
+			"224.0.0.251",
+			"255.255.255.255",
+			"::1",
+			"::",
+			"fe80::1",
+			"ff02::fb",
+			"::ffff:192.0.2.1",
+			"wavekit-pi.local",
+		])
+			expect(isDialableEndpoint(address)).toBe(false)
+		for (const address of [
+			"192.0.2.69",
+			"198.51.100.23",
+			"10.0.0.2",
+			"2001:db8::69",
+		])
+			expect(isDialableEndpoint(address)).toBe(true)
+		const fetchFn = vi.fn<typeof fetch>()
+		const probe = createEndpointProbe({ fetchFn })
+		expect(await probe.receiverId("169.254.169.254", 80)).toBeNull()
+		expect(await probe.rtlTcpHeader("127.0.0.1", 5555)).toBe(false)
+		expect(fetchFn).not.toHaveBeenCalled()
+	})
+
+	it("refuses an oversized status body", async () => {
+		const fetchFn = vi.fn<typeof fetch>(
+			async () =>
+				new Response(`{"receiverId":"${ID}","pad":"${"x".repeat(300_000)}"}`),
+		)
+		expect(
+			await createEndpointProbe({ fetchFn }).receiverId("192.0.2.69", 8080),
+		).toBeNull()
 	})
 })

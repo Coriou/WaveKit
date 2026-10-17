@@ -66,6 +66,10 @@ export const SOURCE_KEEPALIVE_DELAY_MS = 5000
 
 /** Reconnect delay after a deliberate endpoint switch (not a failure). */
 export const SOURCE_RETARGET_RECONNECT_MS = 250
+/** A session on a selected endpoint shorter than this counts as a failure. */
+export const SOURCE_ENDPOINT_STABLE_MS = 60_000
+/** Failures on a selected endpoint after which the source returns to its configured host. */
+export const SOURCE_ENDPOINT_FALLBACK_FAILURES = 2
 
 // Re-export types from config for convenience
 export type { SourceConfig, SourceCaps } from "../config.js"
@@ -164,6 +168,11 @@ export interface SourceManagerEvents {
 	 * per connection. Through rtlmux this means the upstream dongle is back.
 	 */
 	"payload-started": (sourceId: string) => void
+	/**
+	 * A selected endpoint failed repeatedly and the source went back to its
+	 * configured host (receiver-endpoints 3.4); `host` is the endpoint left.
+	 */
+	"endpoint-fallback": (sourceId: string, host: string) => void
 }
 
 // Exponential backoff constants
@@ -246,6 +255,12 @@ interface SourceState {
 	endpoint: SourceEndpoint | null
 	/** The next reconnect follows a deliberate switch: short delay, no backoff step. */
 	retargetPending: boolean
+	/** connect() still awaits its first attempt; that attempt must settle it. */
+	connectPending: boolean
+	/** Failed attempts and short sessions on the selected endpoint since the switch. */
+	endpointFailures: number
+	/** When the current session connected; null while not connected. */
+	sessionStartedAt: number | null
 
 	metricsTimer: ReturnType<typeof setInterval> | null
 	stallTimer: ReturnType<typeof setInterval> | null
@@ -731,6 +746,9 @@ export class SourceManager extends EventEmitter {
 			activeHost: null,
 			endpoint: null,
 			retargetPending: false,
+			connectPending: false,
+			endpointFailures: 0,
+			sessionStartedAt: null,
 			metricsTimer: null,
 			stallTimer: null,
 			stopping: false,
@@ -778,9 +796,12 @@ export class SourceManager extends EventEmitter {
 			}
 		} else {
 			// Attempt initial connection for network sources
+			state.connectPending = true
 			try {
 				await this.attemptConnection(config.id)
+				state.connectPending = false
 			} catch (err) {
+				state.connectPending = false
 				// IMPORTANT: Keep the source registered even if the initial connection fails.
 				// This allows the built-in reconnection loop to bring the source back when
 				// the remote (e.g. pi-iq) reboots or becomes temporarily unavailable.
@@ -1379,6 +1400,7 @@ export class SourceManager extends EventEmitter {
 					state.metricTicksSinceConnect = 0
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
+					state.sessionStartedAt = Date.now()
 					state.lastError = undefined
 					// Connected settlement precedes reentrant lifecycle notifications.
 					safeResolve()
@@ -1582,6 +1604,7 @@ export class SourceManager extends EventEmitter {
 					state.attempt === attempt &&
 					state.socket === socket
 				const wasConnected = state.connected
+				if (owns) this.noteEndpointClose(id, state, wasConnected)
 				if (owns) {
 					attempt.phase = "closed"
 					attempt.sessionId = null
@@ -2085,6 +2108,52 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
+	 * Counts a closed session or failed attempt on a selected endpoint and, after
+	 * SOURCE_ENDPOINT_FALLBACK_FAILURES of them, sends the source back to its
+	 * configured host before the reconnect is scheduled (receiver-endpoints 3.4).
+	 * Independent of the receiver's API, so a dead endpoint is left even when no
+	 * poll report arrives. A deliberate switch never counts.
+	 */
+	private noteEndpointClose(
+		id: string,
+		state: SourceState,
+		wasConnected: boolean,
+	): void {
+		const startedAt = state.sessionStartedAt
+		state.sessionStartedAt = null
+		if (state.activeHost === null || state.retargetPending) return
+		const stable =
+			wasConnected &&
+			startedAt !== null &&
+			Date.now() - startedAt >= SOURCE_ENDPOINT_STABLE_MS
+		state.endpointFailures = stable ? 0 : state.endpointFailures + 1
+		if (stable || state.endpointFailures < SOURCE_ENDPOINT_FALLBACK_FAILURES)
+			return
+		const left = state.activeHost
+		const configured = state.config.host
+		if (!configured) return
+		state.activeHost = null
+		state.endpointFailures = 0
+		state.endpoint = {
+			configuredHost: configured,
+			activeHost: configured,
+			reason: "fallback: selected endpoint failed",
+			at: new Date().toISOString(),
+		}
+		this.logger.warn(
+			{ sourceId: id, from: left, to: configured },
+			"Source endpoint failed; back to the configured host",
+		)
+		this.emit("endpoint-fallback", id, left)
+	}
+
+	/** A copy of a source's config (endpoint selection checks it is unchanged). */
+	getConfig(id: string): SourceConfig | undefined {
+		const state = this.sources.get(id)
+		return state ? structuredClone(state.config) : undefined
+	}
+
+	/**
 	 * Starts reporting endpoint selection for a network source (receiver-endpoints
 	 * 3.5). Idempotent; returns false for unknown or recording sources.
 	 */
@@ -2123,6 +2192,7 @@ export class SourceManager extends EventEmitter {
 		const current = state.activeHost ?? state.config.host
 		if (host === current) return true
 		state.activeHost = host === state.config.host ? null : host
+		state.endpointFailures = 0
 		state.endpoint = {
 			configuredHost: state.config.host,
 			activeHost: host,
@@ -2134,13 +2204,12 @@ export class SourceManager extends EventEmitter {
 			"Source endpoint switched",
 		)
 		const attempt = state.attempt
-		// The initial attempt settles connect(); let it finish and switch afterwards.
-		const initial = state.reconnectAttempts === 0 && !state.connected
+		// connect()'s first attempt settles connect(); it switches on its next attempt.
 		if (
 			attempt &&
 			this.isActiveAttempt(state, attempt) &&
 			(attempt.phase === "connected" ||
-				(attempt.phase === "connecting" && !initial))
+				(attempt.phase === "connecting" && !state.connectPending))
 		) {
 			state.retargetPending = true
 			attempt.socket.destroy()

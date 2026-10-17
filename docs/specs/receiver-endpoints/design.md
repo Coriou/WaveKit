@@ -50,43 +50,55 @@ the ports is not reflected there (documented). `validate_stock` additionally req
 `SdrHostPoller` (`src/core/sdr-host-poller.ts`) keeps polling only the configured
 sdr-host API, which is the trust anchor; it never repoints its URL at a selected
 endpoint. After each successful poll it parses `receiverId` and `endpoints` with a
-Zod schema (`parseReceiverEndpoints`; any non-literal address drops the whole
-report) and emits them as a separate `receiver-endpoints` event. The `status`
-event payload (`SdrHostStatus`) is unchanged, so `/api/resources` stays
-byte-identical.
+Zod schema (`parseReceiverEndpoints`) and emits them as a separate
+`receiver-endpoints` event. Every address must pass `isDialableEndpoint`: a literal
+unicast IP that is not loopback, unspecified, link-local, multicast, broadcast or
+IPv4-mapped. Any other entry drops the whole report, and so does a redirected
+answer. The `status` event payload (`SdrHostStatus`) is unchanged, so
+`/api/resources` stays byte-identical.
 
 `EndpointSelector` (`src/core/endpoint-selector.ts`) is created in `src/index.ts`
-only when a source sets `sdrHost.endpointSelection: auto` and the resource monitor
-and poller run. Otherwise it is not constructed and startup logs a warning. It keeps
-per source `{verifiedReceiverId, lastSwitchAt, per-candidate backoff, busy}`.
-Reports are serialised per source: one that arrives mid-probe is dropped. On each
-report:
+only for startup sources that set `sdrHost.endpointSelection: auto`, and only when
+the resource monitor and poller run. Otherwise startup logs a per-source warning
+with the reason. Sources added at runtime are not covered. The selector acts on a
+source only while its live config still matches the startup target (`rtl_tcp`,
+same host and port, `auto`). A source removed and re-added under the same ID with
+another host or setting is left alone. It keeps per source `{verifiedReceiverId,
+lastSwitchAt, per-candidate backoff, busy}`. Reports are serialised per source: one
+that arrives mid-probe is dropped. On each report:
 
 1. While a non-configured host is active, it falls back to `configuredHost` when the
-   source has 2 or more reconnect failures, when the receiver no longer lists the
-   active address or its IQ port changed, or when the `receiverId` changed and the
-   active address does not answer with the new one. A fallback backs the address
-   off.
+   receiver no longer lists the active address or its IQ port changed, or when the
+   `receiverId` changed and the active address does not answer with the new one.
 2. It does nothing without a report, while the source is disconnected, within the
    5-minute hold-down after an upgrade, or when the source port is not the
    receiver's `iqPort` (warned once).
 3. The candidate is the first listed address that is ranked above the active host
    (a configured host that is not in the list counts as unranked) and is out of
    backoff. The probe (`src/core/endpoint-probe.ts`) checks that
-   `GET http://<addr>:<apiPort>/api/status` (2 s timeout, no redirects) returns the
-   same `receiverId`, then that a TCP connection to `<addr>:<port>` returns 12 bytes
-   starting `RTL0` within 3 s and is closed without sending anything. On success the
-   selector calls `retarget`. On failure the candidate backs off for 60 s, doubling
-   up to 30 min.
+   `GET http://<addr>:<apiPort>/api/status` (2 s timeout, no redirects, body capped
+   at 256 KB) returns the same `receiverId`, then that a TCP connection to
+   `<addr>:<port>` returns 12 bytes starting `RTL0` within 3 s and is closed
+   without sending anything. On success the selector calls `retarget`. On failure
+   the candidate backs off for 60 s, doubling up to 30 min. A later successful
+   switch keeps the step, so a flapping endpoint waits longer each time.
+
+Failure fallback lives in SourceManager, so it does not depend on the receiver's
+API answering. On a selected (non-configured) host, every failed attempt and every
+session shorter than 60 s counts. After 2 of them the source goes back to its
+configured host before the next reconnect is scheduled, its `endpoint` reads
+`fallback: selected endpoint failed`, and SourceManager emits `endpoint-fallback`.
+The selector then backs that address off.
 
 `SourceManager.retarget(id, host, reason)` keeps the registration, its stream, the
 fanout and decoder assignments. It sets a host override that the next connection
 attempt dials, then closes the current session. The ordinary reconnect path, the
 same one that recovers from a receiver reboot, dials the new host after 250 ms
-without a backoff step. Tuning is restored as on any reconnect. A pending initial
-attempt is left to settle `connect()`. `getStatus().url` stays the configured URL.
-`trackEndpoint(id)` starts the optional `endpoint` status field, and
-`getActiveHost(id)` reads the override.
+without a backoff step. Tuning is restored as on any reconnect. Only the first
+attempt of a still-pending `connect()` is left to settle. `getStatus().url` stays
+the configured URL. `trackEndpoint(id)` starts the optional `endpoint` status
+field, `getActiveHost(id)` reads the override, and `getConfig(id)` returns a copy
+of the live config.
 
 `config.ts`: `sdrHost.endpointSelection: z.enum(["auto", "off"]).optional()` has no
 default, so parsed configs and config export gain no key. Omitted or `off` means
@@ -95,13 +107,17 @@ reason, at }` (`SourceEndpoint`, `sourceEndpointSchema` in the REST source and
 health schemas), present only for tracked sources. The CLI `guardSource` picks
 known fields, so it ignores `endpoint`; that is tested.
 
-The bridge (`scripts/pi-lan-bridge.mjs --auto`) applies the same checks once at
-start through `scripts/pi-lan-bridge-select.mjs`, a plain ESM module with no
-dependencies.
+The bridge (`scripts/pi-lan-bridge.mjs --auto`) applies the same checks and address
+filter once at start through `scripts/pi-lan-bridge-select.mjs`, a plain ESM
+module with no dependencies.
 
-Known limit: `SourceBackpressureTracker` matches rtlmux clients by local socket
-address. Behind NAT, as in the measured home setup, it already falls back to the
-sum over all clients; selection does not change that.
+Known limits:
+
+- `SourceBackpressureTracker` matches rtlmux clients by local socket address.
+  Behind NAT, as in the measured home setup, it already falls back to the sum over
+  all clients.
+- A configured hostname counts as unranked, so a source that dials `pi.local`
+  reconnects once even when the name already resolves to the best address.
 
 ## Correctness properties
 

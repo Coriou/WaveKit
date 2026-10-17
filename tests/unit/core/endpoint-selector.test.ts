@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest"
 import * as fc from "fast-check"
 import {
-	ENDPOINT_FALLBACK_FAILURES,
+	ENDPOINT_CANDIDATE_BACKOFF_MS,
 	EndpointSelector,
 	type EndpointSelectorSources,
 } from "../../../src/core/endpoint-selector.js"
@@ -37,20 +37,33 @@ function report(
 	}
 }
 
+interface FakeConfig {
+	type: string
+	host: string
+	port: number
+	sdrHost?: { endpointSelection?: "auto" | "off" }
+}
+
 class FakeSources implements EndpointSelectorSources {
 	active: string
 	connected = true
-	reconnectAttempts = 0
 	tracked = false
+	config: FakeConfig
 	readonly switches: Array<{ host: string; reason: string }> = []
 	constructor(readonly configured: string) {
 		this.active = configured
+		this.config = {
+			type: "rtl_tcp",
+			host: configured,
+			port: 5555,
+			sdrHost: { endpointSelection: "auto" },
+		}
 	}
 	getStatus() {
-		return {
-			connected: this.connected,
-			reconnectAttempts: this.reconnectAttempts,
-		}
+		return { connected: this.connected }
+	}
+	getConfig() {
+		return this.config
 	}
 	getActiveHost() {
 		return this.active
@@ -63,6 +76,16 @@ class FakeSources implements EndpointSelectorSources {
 		this.active = host
 		this.switches.push({ host, reason })
 		return true
+	}
+	/** What SourceManager does on its own after repeated endpoint failures. */
+	failBack(selector: EndpointSelector) {
+		const left = this.active
+		this.active = this.configured
+		this.switches.push({
+			host: this.configured,
+			reason: "fallback: selected endpoint failed",
+		})
+		selector.onFallback("pi", left)
 	}
 }
 
@@ -80,7 +103,7 @@ class FakeProbe implements EndpointProbe {
 	}
 }
 
-function setup(configured = WIFI) {
+function setup(configured = WIFI, holdDownMs = HOLD) {
 	let now = 1_000_000
 	const sources = new FakeSources(configured)
 	const probe = new FakeProbe()
@@ -89,7 +112,7 @@ function setup(configured = WIFI) {
 		sources,
 		probe,
 		[{ sourceId: "pi", configuredHost: configured, port: 5555 }],
-		{ now: () => now, holdDownMs: HOLD },
+		{ now: () => now, holdDownMs },
 	)
 	return {
 		sources,
@@ -99,6 +122,7 @@ function setup(configured = WIFI) {
 			now += ms
 		},
 		send: (r: ReceiverEndpointsReport | null) => selector.onReport("pi", r),
+		failBack: () => sources.failBack(selector),
 	}
 }
 
@@ -145,22 +169,16 @@ describe("EndpointSelector", () => {
 		expect(t.sources.switches).toEqual([])
 	})
 
-	it("falls back to the configured host after repeated failures, a delisted endpoint or a new receiver", async () => {
+	it("backs off an endpoint SourceManager left, and falls back on a delisted endpoint or a new receiver", async () => {
 		const t = setup()
 		t.probe.ids.set(ETH, ID)
 		t.probe.headers.set(ETH, true)
 		await t.send(report())
 		expect(t.sources.active).toBe(ETH)
 
-		t.sources.reconnectAttempts = ENDPOINT_FALLBACK_FAILURES
-		await t.send(report())
+		t.failBack()
 		expect(t.sources.active).toBe(WIFI)
-		expect(t.sources.switches.at(-1)?.reason).toMatch(
-			/^fallback: selected endpoint stopped/,
-		)
-
-		// Hold-down: no immediate return to the endpoint that just failed.
-		t.sources.reconnectAttempts = 0
+		// Hold-down and backoff: no immediate return to the endpoint that just failed.
 		await t.send(report())
 		expect(t.sources.active).toBe(WIFI)
 		t.advance(HOLD)
@@ -184,7 +202,53 @@ describe("EndpointSelector", () => {
 		expect(t.sources.switches.at(-1)?.reason).toMatch(/identity changed/)
 	})
 
-	it("treats a configured hostname or bridge address as unranked and never dials hostnames", async () => {
+	it("keeps the doubled backoff across a successful switch so a flapping endpoint waits longer", async () => {
+		const t = setup(WIFI, 0) // no hold-down: only the backoff gates
+		t.probe.ids.set(ETH, ID)
+		t.probe.headers.set(ETH, true)
+		await t.send(report())
+		t.failBack() // backoff 60 s
+		t.advance(ENDPOINT_CANDIDATE_BACKOFF_MS)
+		await t.send(report())
+		expect(t.sources.active).toBe(ETH)
+		t.failBack() // doubles to 120 s, not reset by the switch
+		t.advance(ENDPOINT_CANDIDATE_BACKOFF_MS)
+		await t.send(report())
+		expect(t.sources.active).toBe(WIFI)
+		t.advance(ENDPOINT_CANDIDATE_BACKOFF_MS)
+		await t.send(report())
+		expect(t.sources.active).toBe(ETH)
+	})
+
+	it("leaves a source alone once its config is no longer the selection target", async () => {
+		const changes: Array<Partial<FakeConfig>> = [
+			{ host: "203.0.113.5" },
+			{ port: 1234 },
+			{ sdrHost: { endpointSelection: "off" } },
+			{ sdrHost: {} },
+		]
+		for (const change of changes) {
+			const t = setup()
+			t.probe.ids.set(ETH, ID)
+			t.probe.headers.set(ETH, true)
+			t.sources.config = { ...t.sources.config, ...change }
+			t.sources.active = t.sources.config.host
+			await t.send(report())
+			expect(t.sources.tracked).toBe(false)
+			expect(t.sources.switches).toEqual([])
+		}
+		// A config change while a probe is in flight cancels the switch.
+		const t = setup()
+		t.probe.headers.set(ETH, true)
+		t.probe.receiverId = async () => {
+			t.sources.config = { ...t.sources.config, host: "203.0.113.5" }
+			return ID
+		}
+		await t.send(report())
+		expect(t.sources.switches).toEqual([])
+	})
+
+	it("treats a configured hostname or bridge address as unranked", async () => {
 		const t = setup("127.0.0.1")
 		t.probe.ids.set(ETH, ID)
 		t.probe.headers.set(ETH, true)
@@ -209,34 +273,39 @@ describe("EndpointSelector", () => {
 	})
 })
 
+const ALL = [ETH, WIFI, "203.0.113.5"]
 const step = fc.record({
-	addresses: fc
-		.subarray([ETH, WIFI, "203.0.113.5"])
-		.chain(list =>
-			fc.shuffledSubarray(list, {
-				minLength: list.length,
-				maxLength: list.length,
-			}),
-		),
+	addresses: fc.subarray(ALL).chain(list =>
+		fc.shuffledSubarray(list, {
+			minLength: list.length,
+			maxLength: list.length,
+		}),
+	),
 	receiverId: fc.constantFrom(ID, OTHER_ID),
 	idAnswers: fc.dictionary(
-		fc.constantFrom(ETH, WIFI, "203.0.113.5"),
+		fc.constantFrom(...ALL),
 		fc.option(fc.constantFrom(ID, OTHER_ID), { nil: null }),
 	),
-	headerOk: fc.dictionary(
-		fc.constantFrom(ETH, WIFI, "203.0.113.5"),
-		fc.boolean(),
-	),
+	headerOk: fc.dictionary(fc.constantFrom(...ALL), fc.boolean()),
 	connected: fc.boolean(),
-	reconnectAttempts: fc.nat(3),
+	failBack: fc.boolean(),
 	advanceMs: fc.integer({ min: 0, max: 2 * HOLD }),
 	nullReport: fc.boolean(),
 })
+type Step = typeof step extends fc.Arbitrary<infer T> ? T : never
+
+const toReport = (s: Step): ReceiverEndpointsReport | null =>
+	s.nullReport
+		? null
+		: report(
+				s.addresses.map(a => [a, a === WIFI ? "wireless" : "ethernet"]),
+				s.receiverId,
+			)
 
 describe("EndpointSelector properties", () => {
 	// Feature: receiver-endpoints, Property 2: No unverified switch
 	// Validates: Requirements 3.2, 3.6
-	it("only ever moves to a listed literal address after both checks pass for the reported receiver", async () => {
+	it("only ever moves to a listed address after both checks pass for the reported receiver", async () => {
 		await fc.assert(
 			fc.asyncProperty(
 				fc.array(step, { minLength: 1, maxLength: 12 }),
@@ -247,17 +316,9 @@ describe("EndpointSelector properties", () => {
 						t.probe.headers = new Map(Object.entries(s.headerOk))
 						t.probe.calls.length = 0
 						t.sources.connected = s.connected
-						t.sources.reconnectAttempts = s.reconnectAttempts
+						if (s.failBack && t.sources.active !== WIFI) t.failBack()
 						t.advance(s.advanceMs)
-						const r = s.nullReport
-							? null
-							: report(
-									s.addresses.map(a => [
-										a,
-										a === WIFI ? "wireless" : "ethernet",
-									]),
-									s.receiverId,
-								)
+						const r = toReport(s)
 						const before = t.sources.switches.length
 						await t.send(r)
 						for (const sw of t.sources.switches.slice(before)) {
@@ -279,7 +340,7 @@ describe("EndpointSelector properties", () => {
 
 	// Feature: receiver-endpoints, Property 3: Bounded switching and anchor fallback
 	// Validates: Requirements 3.3, 3.4
-	it("keeps upgrades a hold-down apart and always returns home after repeated failures", async () => {
+	it("keeps upgrades a hold-down apart and never returns to a failed endpoint inside its backoff", async () => {
 		await fc.assert(
 			fc.asyncProperty(
 				fc.array(step, { minLength: 1, maxLength: 12 }),
@@ -287,40 +348,32 @@ describe("EndpointSelector properties", () => {
 					const t = setup()
 					let clock = 0
 					let lastUpgrade = -Infinity
+					const failedAt = new Map<string, number>()
 					for (const s of steps) {
 						t.probe.ids = new Map(Object.entries(s.idAnswers))
 						t.probe.headers = new Map(Object.entries(s.headerOk))
 						t.sources.connected = s.connected
-						t.sources.reconnectAttempts = s.reconnectAttempts
+						if (s.failBack && t.sources.active !== WIFI) {
+							failedAt.set(t.sources.active, clock)
+							t.failBack()
+							expect(t.sources.active).toBe(WIFI)
+						}
 						t.advance(s.advanceMs)
 						clock += s.advanceMs
-						const wasAway = t.sources.active !== WIFI
 						const before = t.sources.switches.length
-						await t.send(
-							s.nullReport
-								? null
-								: report(
-										s.addresses.map(a => [
-											a,
-											a === WIFI ? "wireless" : "ethernet",
-										]),
-										s.receiverId,
-									),
-						)
+						await t.send(toReport(s))
 						const made = t.sources.switches.slice(before)
 						expect(made.length).toBeLessThanOrEqual(1)
 						for (const sw of made) {
-							if (sw.host !== WIFI) {
-								expect(clock - lastUpgrade).toBeGreaterThanOrEqual(HOLD)
-								lastUpgrade = clock
-							}
+							if (sw.host === WIFI) continue
+							expect(clock - lastUpgrade).toBeGreaterThanOrEqual(HOLD)
+							lastUpgrade = clock
+							const failed = failedAt.get(sw.host)
+							if (failed !== undefined)
+								expect(clock - failed).toBeGreaterThanOrEqual(
+									ENDPOINT_CANDIDATE_BACKOFF_MS,
+								)
 						}
-						if (
-							wasAway &&
-							!s.nullReport &&
-							s.reconnectAttempts >= ENDPOINT_FALLBACK_FAILURES
-						)
-							expect(t.sources.active).toBe(WIFI)
 					}
 				},
 			),

@@ -5,6 +5,23 @@
 import net from "node:net"
 
 const ID = /^[0-9a-f]{32}$/
+// Same filter as core's isDialableEndpoint: unicast, not loopback or link-local.
+const dialable = address => {
+	const family = net.isIP(address)
+	if (family === 4) {
+		const [a, b] = address.split(".").map(Number)
+		return !(a === 0 || a === 127 || (a === 169 && b === 254) || a >= 224)
+	}
+	if (family !== 6) return false
+	const lower = address.toLowerCase()
+	return !(
+		lower === "::" ||
+		lower === "::1" ||
+		/^fe[89ab]/.test(lower) ||
+		lower.startsWith("ff") ||
+		lower.startsWith("::ffff:")
+	)
+}
 const authority = (host, port) =>
 	net.isIPv6(host) ? `[${host}]:${port}` : `${host}:${port}`
 
@@ -68,7 +85,7 @@ export async function chooseEndpoint(
 		return { host, reason: "no endpoint list; using the given host" }
 	for (const entry of list.addresses) {
 		const address = entry?.address
-		if (typeof address !== "string" || net.isIP(address) === 0) continue
+		if (typeof address !== "string" || !dialable(address)) continue
 		if (address === host)
 			return { host, reason: "given host is the best endpoint" }
 		const other = await receiverId(fetchFn, address, list.apiPort ?? apiPort)

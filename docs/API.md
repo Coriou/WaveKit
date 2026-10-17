@@ -528,10 +528,11 @@ address list from the configured SDR host's `/api/status` (`receiverId`,
 `endpoints`). It moves the IQ connection to a better listed address, for example
 the Pi's Ethernet address when the source dials its Wi-Fi address, once that
 address answers with the same `receiverId` and an `RTL0` header. It falls back to
-the configured host after two reconnect failures, or when the receiver stops
-listing the address or restarts as a different process. Only literal IPs from the
-configured receiver's list are ever dialed, never mDNS answers. Upgrades are at
-least 5 minutes apart. Such a source carries `endpoint: { configuredHost,
+the configured host after two failures there (failed connects, or sessions shorter
+than 60 s), or when the receiver stops listing the address or restarts as a
+different process. Only literal unicast IPs from the configured receiver's list are
+ever dialed, never loopback, link-local or mDNS answers. Upgrades are at least
+5 minutes apart. Only sources present at startup are covered. Such a source carries `endpoint: { configuredHost,
 activeHost, reason, at }` (also on `source:status` and in `/api/status`); `url`
 stays the configured address. Other sources never carry `endpoint`. See
 [receiver-endpoints](specs/receiver-endpoints/design.md).

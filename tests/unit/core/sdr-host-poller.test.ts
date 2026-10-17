@@ -273,5 +273,27 @@ describe("SdrHostPoller receiver endpoints (receiver-endpoints 1.1, 3.6)", () =>
 		hostname.endpoints.addresses[1]!.address = "wavekit-pi.local"
 		expect(await reportFor({ ...base, ...hostname })).toBeNull()
 		expect(await reportFor({ ...base, ...fields, endpoints: null })).toBeNull()
+		const loopback = structuredClone(fields)
+		loopback.endpoints.addresses[0]!.address = "127.0.0.1"
+		expect(await reportFor({ ...base, ...loopback })).toBeNull()
+	})
+
+	it("ignores the endpoint list of a redirected answer", async () => {
+		const response = Response.json({ ...base, ...fields })
+		Object.defineProperty(response, "redirected", { value: true })
+		const poller = new SdrHostPoller(
+			logger,
+			[{ sourceId: "pi", apiUrl: "http://192.0.2.1:8080" }],
+			{ fetchFn: vi.fn<typeof fetch>().mockResolvedValue(response) },
+		)
+		const report = new Promise<unknown>(resolve =>
+			poller.once("receiver-endpoints", (_id, value) => resolve(value)),
+		)
+		poller.start()
+		try {
+			expect(await report).toBeNull()
+		} finally {
+			poller.stop()
+		}
 	})
 })

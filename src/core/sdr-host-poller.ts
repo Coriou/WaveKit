@@ -12,8 +12,8 @@
  */
 
 import { EventEmitter } from "node:events"
-import { isIP } from "node:net"
 import { z } from "zod"
+import { isDialableEndpoint } from "./endpoint-probe.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { SdrHostStatus } from "@wavekit/api-types"
 
@@ -49,7 +49,7 @@ const ReceiverEndpointsSchema = z.object({
 					address: z
 						.string()
 						.max(64)
-						.refine(value => isIP(value) !== 0, "not a literal IP"),
+						.refine(isDialableEndpoint, "not a dialable literal IP"),
 					kind: z.enum(["ethernet", "wireless", "other"]),
 				}),
 			)
@@ -489,7 +489,11 @@ export class SdrHostPoller extends EventEmitter {
 				lastFetchedAt: new Date().toISOString(),
 				fetchError: null,
 			}
-			return { status, endpoints: parseReceiverEndpoints(body) }
+			// A redirected answer is not the configured API's own list (3.6).
+			return {
+				status,
+				endpoints: response.redirected ? null : parseReceiverEndpoints(body),
+			}
 		} finally {
 			clearTimeout(timeoutId)
 		}
