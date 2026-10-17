@@ -43,6 +43,7 @@ function actions(): SettingsActions & { calls: unknown[][] } {
 	return {
 		calls,
 		setTheme: p => void calls.push(["theme", p]),
+		setDevice: p => void calls.push(["device", p]),
 		setStep: hz => void calls.push(["step", hz]),
 		setCardAt: id => void calls.push(["cardAt", id]),
 		setVolume: v => void calls.push(["volume", v]),
@@ -213,6 +214,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 	return {
 		readOnly: false,
 		theme: { theme: "dark", ground: "black", accent: "mono" },
+		device: { density: "comfy", motion: "system" },
 		stepHz: null,
 		cardAt: "al",
 		volume: 0.8,
@@ -561,6 +563,25 @@ describe("Settings items", () => {
 		).toEqual(["al", "br", "tr", "ml"])
 		await dragged.write?.("tr")
 		expect(a.calls).toContainEqual(["cardAt", "tr"])
+	})
+
+	it("keeps Density and Motion on this device, around the card position", async () => {
+		const a = actions()
+		const list = buildRows(
+			snapshot({ device: { density: "compact", motion: "system" } }),
+			a,
+		)
+		const ids = list.filter(r => r.device).map(r => r.id)
+		expect(ids.indexOf("dev.density")).toBe(ids.indexOf("dev.card") - 1)
+		expect(ids.indexOf("dev.motion")).toBe(ids.indexOf("dev.card") + 1)
+		const density = byId(list, "dev.density")
+		expect(density.text).toBe("Compact")
+		const motion = byId(list, "dev.motion")
+		expect(motion.text).toBe("Follow system")
+		await motion.write?.("reduce")
+		await density.write?.("comfy")
+		expect(a.calls).toContainEqual(["device", { motion: "reduce" }])
+		expect(a.calls).toContainEqual(["device", { density: "comfy" }])
 	})
 
 	it("crumbs device rows and matches accents loosely", () => {

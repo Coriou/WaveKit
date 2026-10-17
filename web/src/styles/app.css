@@ -17,4 +17,36 @@
 		position: fixed;
 		inset: 0;
 	}
+
+	/* Display › Motion: Reduce (or the system setting, resolved into data-wk-motion) stills every slide and glide,
+	   as ui.css does under prefers-reduced-motion */
+	[data-wk-motion="reduce"] *,
+	[data-wk-motion="reduce"] *::before,
+	[data-wk-motion="reduce"] *::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+
+	/* Display › Density: Compact fits more rows in lists and drawers. Fixed touch heights only shrink under a
+	   fine pointer, so a phone keeps its 44 px targets. */
+	[data-wk-density="compact"] .wk-row:not([data-size="dense"]) {
+		padding-top: 6px;
+		padding-bottom: 6px;
+	}
+	[data-wk-density="compact"] .wkf-set-row {
+		padding-top: 7px;
+		padding-bottom: 7px;
+	}
+	@media (pointer: fine) {
+		[data-wk-density="compact"] .wkp-row {
+			min-height: 36px;
+			padding-top: 4px;
+			padding-bottom: 4px;
+		}
+		[data-wk-density="compact"] .wkf-saved-pick {
+			height: var(--wk-h-lg);
+		}
+	}
 }

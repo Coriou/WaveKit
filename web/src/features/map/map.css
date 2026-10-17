@@ -74,10 +74,9 @@
 			opacity: 0;
 		}
 	}
-	@media (prefers-reduced-motion: reduce) {
-		.wkm-station-pulse {
-			animation: none;
-		}
+	/* motion: Display › Motion, which follows prefers-reduced-motion unless set to Reduce */
+	[data-wk-motion="reduce"] .wkm-station-pulse {
+		animation: none;
 	}
 
 	.wkm-grow {

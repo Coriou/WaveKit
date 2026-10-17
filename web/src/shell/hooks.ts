@@ -1,5 +1,10 @@
 import { useSyncExternalStore } from "react"
 
+import {
+	devicePrefsStore,
+	type DevicePrefs,
+	type DevicePrefsStore,
+} from "./device-prefs.ts"
 import { shellStore, type ShellState, type ShellStore } from "./store.ts"
 import { themeStore, type ThemePrefs, type ThemeStore } from "./theme.ts"
 
@@ -8,5 +13,11 @@ export function useShell(store: ShellStore = shellStore): ShellState {
 }
 
 export function useTheme(store: ThemeStore = themeStore): ThemePrefs {
+	return useSyncExternalStore(store.subscribe, store.getState, store.getState)
+}
+
+export function useDevicePrefs(
+	store: DevicePrefsStore = devicePrefsStore,
+): DevicePrefs {
 	return useSyncExternalStore(store.subscribe, store.getState, store.getState)
 }

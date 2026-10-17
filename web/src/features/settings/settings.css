@@ -703,12 +703,14 @@
 	.wkf-set[data-phone] .wkf-set-stats {
 		grid-template-columns: minmax(0, 1fr);
 	}
-	@media (prefers-reduced-motion: reduce) {
-		.wkf-set-apply,
-		.wkf-set-menu,
-		.wkf-set-row[data-flash],
-		.wkf-set-dec[data-flash] {
-			animation: none;
-		}
+	/* motion: Display › Motion, which follows prefers-reduced-motion unless set to Reduce */
+	[data-wk-motion="reduce"]
+		:is(
+			.wkf-set-apply,
+			.wkf-set-menu,
+			.wkf-set-row[data-flash],
+			.wkf-set-dec[data-flash]
+		) {
+		animation: none;
 	}
 }

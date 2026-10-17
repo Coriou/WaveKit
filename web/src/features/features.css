@@ -453,10 +453,9 @@
 			opacity: 0.35;
 		}
 	}
-	@media (prefers-reduced-motion: reduce) {
-		.wkf-dot[data-pulse] {
-			animation: none;
-		}
+	/* motion: Display › Motion, which follows prefers-reduced-motion unless set to Reduce */
+	[data-wk-motion="reduce"] .wkf-dot[data-pulse] {
+		animation: none;
 	}
 
 	/* Tuned card: the now block by kind */

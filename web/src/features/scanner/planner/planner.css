@@ -454,15 +454,14 @@
 		background: var(--wk-pl-hit);
 		animation: wk-ping 1.4s var(--wk-ease-out) infinite;
 	}
-	@media (prefers-reduced-motion: reduce) {
-		.wk-pl-hit[data-active] .wk-pl-hitdot::after {
-			animation: none;
-			opacity: 0.35;
-			transform: scale(1.8);
-		}
-		.wk-pl-window {
-			transition: none;
-		}
+	/* motion: Display › Motion, which follows prefers-reduced-motion unless set to Reduce */
+	[data-wk-motion="reduce"] .wk-pl-hit[data-active] .wk-pl-hitdot::after {
+		animation: none;
+		opacity: 0.35;
+		transform: scale(1.8);
+	}
+	[data-wk-motion="reduce"] .wk-pl-window {
+		transition: none;
 	}
 
 	/* the tools row under the ruler */

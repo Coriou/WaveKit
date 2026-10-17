@@ -26,6 +26,7 @@ import type {
 	TunerRelayView,
 } from "../../data/index.ts"
 import type { CardAnchorId } from "../../shell/layout.ts"
+import type { Density, DevicePrefs, Motion } from "../../shell/device-prefs.ts"
 import type { ThemePrefs } from "../../shell/theme.ts"
 import { formatDb, formatRate, formatStep } from "../format.ts"
 import type { LiveAudioConfigPatch } from "../../data/live-audio-store.ts"
@@ -59,6 +60,8 @@ export interface SettingsSnapshot {
 	/** A protected core without a session: everything shows, nothing changes. */
 	readonly readOnly: boolean
 	readonly theme: ThemePrefs
+	/** Density and motion (this browser only). */
+	readonly device: DevicePrefs
 	readonly stepHz: number | null
 	/** The anchor the tuned card wants (this browser only). */
 	readonly cardAt: CardAnchorId
@@ -90,6 +93,7 @@ export interface SettingsSnapshot {
 
 export interface SettingsActions {
 	setTheme(patch: Partial<ThemePrefs>): void
+	setDevice(patch: Partial<DevicePrefs>): void
 	setStep(hz: number | null): void
 	setCardAt(id: CardAnchorId): void
 	setVolume(volume: number): void
@@ -936,6 +940,14 @@ const CARD_OPTS = opts([
 	["tr", "Top right"],
 ])
 const CARD_OTHER = "Where you left it"
+const DENSITY_OPTS = opts([
+	["comfy", "Comfortable"],
+	["compact", "Compact"],
+])
+const MOTION_OPTS = opts([
+	["system", "Follow system"],
+	["reduce", "Reduce"],
+])
 
 function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const rows: SettingRow[] = []
@@ -1021,6 +1033,20 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 				local(() => a.setTheme({ accent: v as ThemePrefs["accent"] })),
 		},
 	)
+	const d = s.device
+	rows.push({
+		id: "dev.density",
+		group: "display",
+		label: "Density",
+		help: "Compact fits more rows in lists and drawers",
+		keys: words("density compact comfortable spacing rows dense tight"),
+		device: true,
+		widget: { kind: "seg", options: DENSITY_OPTS },
+		value: d.density,
+		text: optionText(DENSITY_OPTS, d.density),
+		def: { value: "comfy", text: "Comfortable" },
+		write: v => local(() => a.setDevice({ density: v as Density })),
+	})
 	const cardOpts = CARD_OPTS.some(o => o.value === s.cardAt)
 		? CARD_OPTS
 		: [...CARD_OPTS, { value: s.cardAt, label: CARD_OTHER }]
@@ -1036,6 +1062,19 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 		text: optionText(cardOpts, s.cardAt),
 		def: { value: "al", text: "Above Listen" },
 		write: v => local(() => a.setCardAt(v as CardAnchorId)),
+	})
+	rows.push({
+		id: "dev.motion",
+		group: "display",
+		label: "Motion",
+		help: "Reduce turns off slides and glides",
+		keys: words("animation reduce motion transitions slides accessibility"),
+		device: true,
+		widget: { kind: "seg", options: MOTION_OPTS },
+		value: d.motion,
+		text: optionText(MOTION_OPTS, d.motion),
+		def: { value: "system", text: "Follow system" },
+		write: v => local(() => a.setDevice({ motion: v as Motion })),
 	})
 	const stepOpts: SettingOption[] = [
 		{ value: "plan", label: "Band plan" },

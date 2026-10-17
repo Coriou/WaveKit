@@ -16,9 +16,10 @@ import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
 import type { SettingWriteResult } from "../../data/index.ts"
 import { CardPlaceContext } from "../../shell/CardHandle.tsx"
-import { useTheme } from "../../shell/hooks.ts"
+import { useDevicePrefs, useTheme } from "../../shell/hooks.ts"
 import { cardAnchorName } from "../../shell/layout.ts"
 import { shellStore } from "../../shell/store.ts"
+import { devicePrefsStore } from "../../shell/device-prefs.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { useTunerState } from "../hooks.ts"
@@ -77,6 +78,7 @@ function useSnapshot(): SettingsSnapshot {
 	const { data } = services
 	const readOnly = useReadOnly()
 	const theme = useTheme()
+	const device = useDevicePrefs()
 	const stepHz = useStore(services.prefs, s => s.stepHz)
 	const cardAt = useStore(useContext(CardPlaceContext), s => s.at)
 	const volume = useStore(services.listen, s => s.volume)
@@ -105,6 +107,7 @@ function useSnapshot(): SettingsSnapshot {
 		return {
 			readOnly,
 			theme,
+			device,
 			stepHz,
 			cardAt,
 			volume,
@@ -133,6 +136,7 @@ function useSnapshot(): SettingsSnapshot {
 	}, [
 		readOnly,
 		theme,
+		device,
 		stepHz,
 		cardAt,
 		volume,
@@ -167,6 +171,7 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 		}
 		return {
 			setTheme: patch => themeStore.set(patch),
+			setDevice: patch => devicePrefsStore.set(patch),
 			setStep: hz => services.prefs.setStep(hz),
 			setCardAt: id => cards.setAt(id, cardAnchorName(id)),
 			setVolume: v => services.listen.setVolume(v),

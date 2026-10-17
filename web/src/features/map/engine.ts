@@ -67,6 +67,7 @@ import {
 	themedPaint,
 } from "./style.ts"
 import type { MapUi, MapUiState } from "./ui-store.ts"
+import { devicePrefsStore } from "../../shell/device-prefs.ts"
 
 export type BasemapState = "loading" | "online" | "unavailable"
 
@@ -98,6 +99,9 @@ const INITIAL_ZOOM = 7.6
 /** The board centres the view a little north of the station, so the rings sit under the islands' gap. */
 const NORTH_BIAS_DEG = 0.12
 const BASEMAP_TIMEOUT_MS = 10_000
+/** A camera move's duration, or none when motion is reduced (Display › Motion). */
+const glide = (ms: number): number =>
+	devicePrefsStore.reducesMotion() ? 0 : ms
 /** Trail bodies are re-sent at most this often; their heads follow the markers on every push. */
 const TRAIL_BODY_MS = 2000
 
@@ -273,13 +277,17 @@ export class MapEngine {
 			this.view.get().centred && st
 				? { around: [st.lon, st.lat] as [number, number] }
 				: {}
-		this.map.easeTo({ zoom: this.map.getZoom() + dz, duration: 200, ...around })
+		this.map.easeTo({
+			zoom: this.map.getZoom() + dz,
+			duration: glide(200),
+			...around,
+		})
 	}
 
 	panBy(dx: number, dy: number): void {
 		this.deps.ui.setFollow(false)
 		this.setView({ centred: false })
-		this.map.panBy([dx, dy], { duration: 120 })
+		this.map.panBy([dx, dy], { duration: glide(120) })
 	}
 
 	recentre(): void {
@@ -291,7 +299,7 @@ export class MapEngine {
 				st.lon,
 				st.lat + NORTH_BIAS_DEG * 2 ** (INITIAL_ZOOM - this.map.getZoom()),
 			],
-			duration: 300,
+			duration: glide(300),
 		})
 		this.setView({ centred: true })
 	}

@@ -165,10 +165,9 @@
 			padding: 0 8px;
 		}
 	}
-	@media (prefers-reduced-motion: reduce) {
-		.wkf-hold-bar > span {
-			transition: none;
-		}
+	/* motion: Display › Motion, which follows prefers-reduced-motion unless set to Reduce */
+	[data-wk-motion="reduce"] .wkf-hold-bar > span {
+		transition: none;
 	}
 
 	/* Listen: "Following the scan" in the subtitle's place (Listen board `following`) */
