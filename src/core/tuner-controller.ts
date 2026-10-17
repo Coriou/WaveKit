@@ -566,6 +566,9 @@ export class TunerController extends EventEmitter {
 	 */
 	noteSourceConnected(sourceId: string): void {
 		this.configWriteDue.add(sourceId)
+		// Proof is per connection: nothing is written on the new one yet.
+		if (this.configProvenFields.delete(sourceId))
+			this.emitStateChanged(sourceId)
 	}
 
 	// === Control Mode ===
@@ -1488,6 +1491,10 @@ export class TunerController extends EventEmitter {
 		const frames = configured.frames.filter(([cmd]) => {
 			if (cmd === RTL_TCP_COMMANDS.SET_GAIN)
 				return !held("gain") && !held("gainMode")
+			// A held gain is replayed as SET_GAIN, which switches the tuner to
+			// manual: a configured gain mode would be claimed but overridden.
+			if (cmd === RTL_TCP_COMMANDS.SET_GAIN_MODE)
+				return !held("gainMode") && !held("gain")
 			const field = stateFieldOf(cmd)
 			return field !== undefined && !held(field)
 		})

@@ -273,16 +273,15 @@ describe("WG11 GN: configured gain and AGC on connect", () => {
 		])
 	})
 
-	it("a REST gain wins on restore; the configured mode and AGC are still written first", async () => {
+	it("a REST gain wins on restore and holds the mode (SET_GAIN implies manual); AGC still written first", async () => {
 		const h = configured(MANUAL_496)
 		h.sources.emit("payload-started", SRC)
 		await h.controller.setGain(SRC, 300, { origin: "rest" })
 		h.snapshot()
 		h.connect()
 		const s = h.snapshot()
-		expect(s.frames).toEqual(["0300000001", "0800000000", "040000012c"])
+		expect(s.frames).toEqual(["0800000000", "040000012c"])
 		expect(s.sent).toEqual([
-			["set-gain-mode", 1, "config"],
 			["set-agc-mode", 0, "config"],
 			["set-gain", 300, "replay"],
 		])
@@ -497,7 +496,8 @@ describe("WG11 GN Property 9", () => {
 								v & 0xff,
 							]).toString("hex")
 						const manual = tuner.gainMode === "manual"
-						if (!held.has("gainMode")) out.push(hex(3, manual ? 1 : 0))
+						if (!held.has("gainMode") && !held.has("gain"))
+							out.push(hex(3, manual ? 1 : 0))
 						if (
 							manual &&
 							tuner.gainDb !== undefined &&
@@ -587,5 +587,28 @@ describe("WG11 GN Property 9", () => {
 			),
 			{ numRuns: 150 },
 		)
+	})
+})
+
+describe("configured gain review fixes", () => {
+	it("config agc plus a REST gain: no configured gain mode claimed over the replayed SET_GAIN", async () => {
+		const h = configured({ gainMode: "agc", agcMode: true })
+		h.sources.emit("payload-started", SRC)
+		await h.controller.setGain(SRC, 300, { origin: "rest" })
+		h.snapshot()
+		h.connect()
+		const s = h.snapshot()
+		expect(s.frames).toEqual(["0800000001", "040000012c"])
+		expect(s.state.unknownFields ?? []).toContain("gainMode")
+	})
+
+	it("a new connection clears the configured proof until its first payload writes again", () => {
+		const h = configured(MANUAL_496)
+		h.connect()
+		expect(h.snapshot().state.unknownFields ?? []).not.toContain("gain")
+		h.sources.emit("connected", SRC)
+		expect(h.snapshot().state.unknownFields ?? []).toContain("gain")
+		h.sources.emit("payload-started", SRC)
+		expect(h.snapshot().state.unknownFields ?? []).not.toContain("gain")
 	})
 })
