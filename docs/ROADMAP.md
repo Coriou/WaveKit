@@ -86,6 +86,101 @@ into one transmission, transmissions under 500 ms and nfm/wfm ones without FM-qu
 carrier evidence are not published (WS, Activity, identify), while live audio gating is
 unchanged. No CLI or web change required.
 
+### Performance and native DSP plan (2026-10-17)
+
+A read-only performance audit of the core found that the cost is dominated by two
+things: full-rate IQ copied into one csdr process chain per analog consumer (with
+pipes and format conversion between stages), and the JavaScript FFT of the
+detector spectrum. Node itself is not the bottleneck; the main thread mostly routes
+buffers. The detector FFT (radix-2 in JS, N = fs/1000, so 2048 at 2.048 Msps, every
+sample transformed) costs 6–8 % of a Mac core but saturates a Pi 3B core (0.99, §8).
+On a Pi 3 four independent decoder chains need 5.37 cores where one shared front
+end needs 0.99 ([Pi channelizer research](RESEARCH-2026-10-08-PI-CHANNELIZER.md)).
+
+Direction: grow `wavekit-chan` into the single per-source Rust DSP engine. It
+already reads each source's CU8 stream once and serves channels over Unix sockets.
+It stays a child process (crash isolation, already built and tested in the image,
+warm channel opens of a few milliseconds, no blocking of the Node event loop); an
+N-API binding would only pay for small, frequent synchronous calls, which none of
+these are. Spectrum frames get a small binary framed side channel; channel and
+audio streams stay raw. Ideas and published algorithms are taken from SDR++ (one
+front end and a splitter feeding every VFO and the FFT, retune by changing only the
+NCO phase increment, re-tap without losing filter history, multistage power-of-two
+decimation, peak-follower AGC, hysteresis squelch); no code is copied. The rules
+every hot-path change follows are in [PERFORMANCE.md](PERFORMANCE.md). Web-UI
+features come first; an optimisation is scheduled as a feature when it is the
+cheapest way to ship one.
+
+Now:
+
+1. **Viewed-slice zoom as a `wavekit-chan` zoom output, plus an in-place `tune`
+   request.** NCO and decimation to the viewed span with the existing channel
+   chain, then a small windowed FFT (`rustfft`) at 5 transforms a second or less,
+   framed to Node. A 128 kHz span at 2.048 Msps (÷16) with a 4096-point FFT gives
+   31.25 Hz bins, the same resolution as a full-rate N 65 536 transform, for the
+   cost of one decimating channel (about 0.1 Mac core in the capacity report) and
+   no main-thread work. `tune` changes the NCO phase increment so the slice pans
+   without a close and reopen. This replaces the JavaScript-worker zoom decision
+   in §8. The truthful-axis contract of the viewed-slice design still holds: the
+   output reports its own `Fs/N`, window, NCO and passband ripple, and resets at
+   gaps and seams. Tests: a golden tone at a known offset (bin, `Fs/N`, ENBW),
+   chunk-split invariance, and a comparison with the JS zoom bench.
+2. **Quick wins.** Delete `src/core/format-converter.ts` (only its own unit test
+   imports it). In the spectrum worker, keep the Zod parse for `init` and control
+   messages but use a cheap structural guard on the hot `input` message (an
+   internal, transferred boundary), and drop the extra `bytes.slice()` copy in
+   `FrameSource.push` (the engine already pools transferred buffers). Measure
+   both worker changes before and after.
+
+WG12:
+
+- **Rust live demodulator, phase A**: a `demod` channel kind in `wavekit-chan` for
+  NFM and AM with in-place retune and bandwidth re-tap, power squelch with
+  hysteresis plus the existing noise squelch, feeding the current HTTP live audio
+  and then the planned 48 kHz WebSocket stream (§5b). It sits behind a config flag
+  with the csdr chain as the fallback. It removes two shells and 4–9 processes per
+  listener, the restart gap on bandwidth and mode changes (offset changes already
+  swap only the front stage since WG10) and the csdr dependency that has no macOS
+  build. Tests: synthetic FM/AM with SINAD bounds, phase continuity and no sample
+  gap across a retune, A/B against csdr on fixtures, squelch latency goldens, and
+  CTCSS surviving the chain.
+- **Drag retune and a wide-band panorama** in the web dashboard, built on the Rust
+  zoom output and `tune` (see the drag-to-tune measurement in §8).
+
+Next:
+
+- Rust demodulator phase B: WFM stereo, SSB/CW/DSB, AGC modes in the engine, noise
+  blanker and notch (the §5b audio DSP item).
+- A Rust detector frame engine (convert, window, FFT, power and block
+  accumulation), with floor, detection and tracking kept in the TypeScript worker
+  and the JS backend kept as the fallback. It must match the existing detector
+  goldens across backends; it unblocks per-client `fftSize` up to 16 384 and
+  higher bin caps on modest hosts.
+- DC blocking, IQ swap and optional IQ imbalance correction once per source in the
+  engine, opt-in per consumer (the §8 DC/IQ item); then remove the ignored
+  `iqDcBlock` flag.
+
+Later:
+
+- Channelizer internals: reused scratch buffers instead of per-chunk
+  allocations, an f32 NCO with block resync that vectorises, and more than one DSP
+  thread (today one thread runs every channel's DSP, which limits headroom at
+  N = 8 in the capacity report). Re-baseline the bit-exact properties deliberately.
+- Channelizer on by default and csdr retired for IQ consumers (`IqDecimateDecoder`
+  and `AudioDemodDecoder` read channels; analog decoders read `demod` audio). Ship
+  the binary everywhere first: a missing binary must not suspend decoders.
+- Scanner evidence and recorder DSP (the JS channel decimator and FM demodulator)
+  moved to engine channels and demod outputs.
+- An FFT fast-convolution filter bank, only if the channel count grows past
+  about 16.
+- Smaller JavaScript clean-ups while those paths remain: one preallocated block
+  assembler for live-audio squelch instead of two re-blockers, `Float32Array` views
+  instead of per-float reads, one reused buffer for muted blocks and for the paced
+  PCM output, and an f32 radix-4 JS FFT as a stopgap fallback.
+
+Not planned for Rust: tone detection (Goertzel banks), level tracking, the audio
+client registry, the tuner relay, and the access and API paths.
+
 Order of the remaining core gaps, by what they unblock in the dashboard:
 
 1. **Event foundation**: envelope publication, a persistent event store with
@@ -700,8 +795,8 @@ recording Keep protects one recording independently.
       opaque ids, time, talkgroup, duration and size (frequency only when
       known), and `GET /api/recordings/:id/file` downloads the whole file (no
       `Range`). WaveKit changes no file; the catalog below stays open.
-- [x] Keep individual recordings (WG9, protected mode only): `PUT`/`DELETE
-      /api/recordings/:id/keep` and `DELETE /api/recordings/:id` for dsd-fme
+- [x] Keep individual recordings (WG9, protected mode only):
+      `PUT`/`DELETE /api/recordings/:id/keep` and `DELETE /api/recordings/:id` for dsd-fme
       calls, behind one synchronous deletion decision that the dsd-fme pruner,
       scanner retention, discovery removal and analog retention consult (fail
       closed: an unusable keep store protects everything). Inventory items carry
@@ -905,7 +1000,9 @@ same view, and a program can do the watching more reliably than a person.
       as confirmation. Recording IQ around detected bursts also gives
       automatic fixture capture for decoder goldens.
 - [ ] Keep the engine behind an interface so a native backend can take over.
-      `wavekit-chan` already reads the full CU8 stream per source.
+      `wavekit-chan` already reads the full CU8 stream per source. A Rust detector
+      frame engine with the JS backend as fallback is in the "Next" list of the
+      performance plan above.
 - [ ] A stale `caps.centerFreq` (a retune from SDR++ that bypasses the relay)
       puts the frequency axis and every emission centre on the wrong RF. Partly
       solved: decoder receptions carry the WG5 tuning trust (`unverified` unless
@@ -945,50 +1042,53 @@ and measured limits belong to that session's delta/review.
   late join/reconnect snapshots, retune boundaries and demand cleanup. Announce
   final contracts in `docs/CLI-COORDINATION.md` before landing.
 - [ ] Follow-up: genuine higher-resolution FFT of the viewed slice, with bounded
-  DSP work and unchanged full-stream detection. Magnifying/cropping published
-  bins does not satisfy this item.
-  Prepared Sol/Astra design: benchmark a separate longer raw-IQ FFT at bounded
-  display cadence, then select the viewed bins from that new transform. Require
-  real contiguous samples and report its own `Fs/N`, observation duration, window
-  and sample support separately from detector resolution and delivery cadence.
-  Preserve detector conversion arithmetic, deduplicate overlapping sample ranges
-  and reset at gap/marker/settle/stream boundaries. Borrowed raw arrays must remain
-  synchronous and display accumulation bounded. Translation/anti-alias decimation
-  is a measured optimization if the simpler transform exceeds available headroom.
-  Implementation waits for reviewed Task 37a contracts/summary measurements and
-  the 35a/38 shared-file window; sustained zoom workload measurements then choose
-  FFT, memory, rate and DSP-profile limits.
-  WG9 measured the sustained zoom workload on the Mac (`scripts/bench/zoom-workload.ts`,
-  2.048 Msps, 128 kHz span, 60 s cells, a loaded machine, so indicative only): the
-  event-loop rule (+2 ms p99), not CPU, is the binding limit while the zoom FFT runs
-  on the main thread. One transform takes about 2.3 ms at N 32 768, 7 ms at 65 536
-  and 18 ms at 131 072, so above about N 16 384 almost any main-thread placement
-  fails; incremental CPU alone would allow N 65 536 at 5/s with 1-2 slices (0.015 to
-  0.058 core). Decision: the zoom transform belongs in a worker (the spectrum worker
-  or its own). Proposed Mac caps in a worker: N ≤ 65 536 (31.25 Hz bins), at most
-  5 transforms a second, at most 2 slices per source, 0.20 core in total; N 131 072
-  and above fail CPU or memory. Until the Pi run (pending), the Pi proposal is
-  N ≤ 32 768, 5/s, 1 slice per source and 2 in total, in a worker; Pi 3 N ≤ 16 384.
-  Measured on a Raspberry Pi 3B with the same bench at 2.048 Msps: the JavaScript
-  detector proxy alone saturates one core (0.99), so every zoom cell fails; one
-  transform takes about 5 ms at N 8 192 up to 200 ms at N 131 072. Conclusion: zoom
-  limits depend on the core host, not the receiver. A Pi-class core host needs the
-  zoom FFT off the main thread, preferably in Rust (a `wavekit-chan` extension), and
-  even then has no headroom while the JS detector runs; caps must come from a
-  measurement on the host that runs the core.
+      DSP work and unchanged full-stream detection. Magnifying/cropping published
+      bins does not satisfy this item.
+      Prepared Sol/Astra design: benchmark a separate longer raw-IQ FFT at bounded
+      display cadence, then select the viewed bins from that new transform. Require
+      real contiguous samples and report its own `Fs/N`, observation duration, window
+      and sample support separately from detector resolution and delivery cadence.
+      Preserve detector conversion arithmetic, deduplicate overlapping sample ranges
+      and reset at gap/marker/settle/stream boundaries. Borrowed raw arrays must remain
+      synchronous and display accumulation bounded. Translation/anti-alias decimation
+      is a measured optimization if the simpler transform exceeds available headroom.
+      Implementation waits for reviewed Task 37a contracts/summary measurements and
+      the 35a/38 shared-file window; sustained zoom workload measurements then choose
+      FFT, memory, rate and DSP-profile limits.
+      WG9 measured the sustained zoom workload on the Mac (`scripts/bench/zoom-workload.ts`,
+      2.048 Msps, 128 kHz span, 60 s cells, a loaded machine, so indicative only): the
+      event-loop rule (+2 ms p99), not CPU, is the binding limit while the zoom FFT runs
+      on the main thread. One transform takes about 2.3 ms at N 32 768, 7 ms at 65 536
+      and 18 ms at 131 072, so above about N 16 384 almost any main-thread placement
+      fails; incremental CPU alone would allow N 65 536 at 5/s with 1-2 slices (0.015 to
+      0.058 core). Decision: the zoom transform belongs in a worker (the spectrum worker
+      or its own). Proposed Mac caps in a worker: N ≤ 65 536 (31.25 Hz bins), at most
+      5 transforms a second, at most 2 slices per source, 0.20 core in total; N 131 072
+      and above fail CPU or memory. Until the Pi run (pending), the Pi proposal is
+      N ≤ 32 768, 5/s, 1 slice per source and 2 in total, in a worker; Pi 3 N ≤ 16 384.
+      Measured on a Raspberry Pi 3B with the same bench at 2.048 Msps: the JavaScript
+      detector proxy alone saturates one core (0.99), so every zoom cell fails; one
+      transform takes about 5 ms at N 8 192 up to 200 ms at N 131 072. Conclusion: zoom
+      limits depend on the core host, not the receiver. A Pi-class core host needs the
+      zoom FFT off the main thread, preferably in Rust (a `wavekit-chan` extension), and
+      even then has no headroom while the JS detector runs; caps must come from a
+      measurement on the host that runs the core.
+      Superseded 2026-10-17: the zoom transform moves to a `wavekit-chan` zoom output
+      (DDC to the viewed span plus a small Rust FFT, panned in place by `tune`) instead
+      of a JavaScript worker; see "Performance and native DSP plan" above.
 - [ ] Measure coalesced REST drag-to-tune and accepted-state latency; then decide
-  WS tuning. Any transport reuses authorization, ordering, scanner preemption
-  and tuner origin semantics. WG9 measured the operator retune to first frame at
-  the new centre offline (fake rtl_tcp on loopback, 50 retunes per injected delay,
-  network settle 1000 ms): p90 1148 ms before, 264 ms after at zero delay (280 ms
-  at 100 ms, 383 ms at 250 ms, 611 ms at 500 ms, where some old-centre blocks show
-  but are labelled `unverified`). The 150 ms operator display settle replaces the
-  1 s network settle for display; frames stay `unverified` until the network
-  settle. Revisit WS tuning with these numbers; a real-receiver measurement is
-  open.
+      WS tuning. Any transport reuses authorization, ordering, scanner preemption
+      and tuner origin semantics. WG9 measured the operator retune to first frame at
+      the new centre offline (fake rtl_tcp on loopback, 50 retunes per injected delay,
+      network settle 1000 ms): p90 1148 ms before, 264 ms after at zero delay (280 ms
+      at 100 ms, 383 ms at 250 ms, 611 ms at 500 ms, where some old-centre blocks show
+      but are labelled `unverified`). The 150 ms operator display settle replaces the
+      1 s network settle for display; frames stay `unverified` until the network
+      settle. Revisit WS tuning with these numbers; a real-receiver measurement is
+      open. Drag retune is planned for WG12 on top of the Rust zoom output and `tune`.
 - [ ] Implement source/channel DC removal, IQ correction and IQ swap as measured
-  sample-processing controls. Existing DC/image/spur masks only affect detection
-  and display; the ignored legacy IQ DC-block flag must not imply correction.
+      sample-processing controls. Existing DC/image/spur masks only affect detection
+      and display; the ignored legacy IQ DC-block flag must not imply correction.
 
 ## 8b. Positions, maps and coverage
 
