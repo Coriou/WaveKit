@@ -15,9 +15,11 @@ import type { StationIdentity } from "@wavekit/api-types"
 import {
 	CONFIG_EXPORT_REQUIRES_ACCESS,
 	DECODER_SETTINGS_REQUIRES_ACCESS,
+	RECORDING_KEEPS_REQUIRES_ACCESS,
 	RECORDINGS_REQUIRES_ACCESS,
 } from "@wavekit/api-types"
 import type { RecordingInventory } from "../core/recordings/inventory.js"
+import type { RecordingKeepService } from "../core/recordings/contract.js"
 import { recordingRoutes } from "./routes/recordings.js"
 import type { DecoderSettingsService } from "../decoders/settings/contract.js"
 import { stationRoutes } from "./routes/station.js"
@@ -216,6 +218,11 @@ export interface ApiServerDependencies {
 	 * only with the access controller while RECORDINGS_REQUIRES_ACCESS is true (legacy: 404).
 	 */
 	recordingInventory?: RecordingInventory | undefined
+	/**
+	 * WG9 req 2.1: the recording keep service. Keep, unkeep and delete mount only with the
+	 * inventory and the access controller while RECORDING_KEEPS_REQUIRES_ACCESS is true.
+	 */
+	recordingKeeps?: RecordingKeepService | undefined
 	/** APRS station, object and item current state (WG2 req 4). */
 	aprsTracker?: AprsTracker | undefined
 	scanner?: ScannerService | undefined
@@ -241,6 +248,7 @@ export class ApiServer {
 	private readonly stationService: StationService | undefined
 	private readonly decoderSettings: DecoderSettingsService | undefined
 	private readonly recordingInventory: RecordingInventory | undefined
+	private readonly recordingKeeps: RecordingKeepService | undefined
 	private readonly getConfig: (() => Config) | undefined
 	private readonly storageReport: StorageReportProvider | undefined
 	private readonly regionalRegistry: RegionalRegistry | null | undefined
@@ -310,6 +318,7 @@ export class ApiServer {
 		this.stationService = dependencies.stationService
 		this.decoderSettings = dependencies.decoderSettings
 		this.recordingInventory = dependencies.recordingInventory
+		this.recordingKeeps = dependencies.recordingKeeps
 		this.getConfig = dependencies.getConfig
 		this.storageReport = dependencies.storageReport
 		this.regionalRegistry = dependencies.regionalRegistry
@@ -1438,6 +1447,14 @@ export class ApiServer {
 				authorize: request =>
 					this.accessController!.authorizeMetadataMutation(request),
 				access: this.accessController,
+				// WG9 req 2.1: Keep, unkeep and delete behind the same mutation admission
+				...(this.recordingKeeps && RECORDING_KEEPS_REQUIRES_ACCESS
+					? {
+							keeps: this.recordingKeeps,
+							authorizeMutation: request =>
+								this.accessController!.authorizeMetadataMutation(request),
+						}
+					: {}),
 			})
 		// Band overrides (band defaults spec §5.2)
 		await this.app.register(decoderBandRoutes, {

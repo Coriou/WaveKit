@@ -81,7 +81,10 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			{ id: "bandplans", paths: [join(stateDir, "bandplans")], capBytes: null },
 			{
 				id: "operator-data",
-				paths: [join(stateDir, "operator-data")],
+				paths: [
+					join(stateDir, "operator-data"),
+					join(stateDir, "recording-keeps.json"),
+				],
 				capBytes: null,
 			},
 			{ id: "access", paths: ["/run/wavekit/access"], capBytes: null },
@@ -219,6 +222,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			join(stateDir, "scanner"),
 			join(stateDir, "bandplans"),
 			join(stateDir, "operator-data"),
+			join(stateDir, "recording-keeps.json"),
 			join(stateDir, "decoder-band-overrides.json"),
 			join(stateDir, "decoder-settings.json"),
 			join(stateDir, "station.json"),

@@ -5,7 +5,10 @@
  */
 import { join, resolve } from "node:path"
 import type { StorageActivityRetention } from "@wavekit/api-types"
-import { DECODER_SETTINGS_FILE_NAME } from "@wavekit/api-types"
+import {
+	DECODER_SETTINGS_FILE_NAME,
+	RECORDING_KEEPS_FILE_NAME,
+} from "@wavekit/api-types"
 import type {
 	ActivityRetentionPolicy,
 	ActivityStoreStats,
@@ -101,7 +104,11 @@ export function storageAreasFromConfig(
 		{ id: "bandplans", paths: [join(stateDir, "bandplans")], capBytes: null },
 		{
 			id: "operator-data",
-			paths: [join(stateDir, "operator-data")],
+			// The WG9 recording keep store is operator state too (no new area id)
+			paths: [
+				join(stateDir, "operator-data"),
+				join(stateDir, RECORDING_KEEPS_FILE_NAME),
+			],
 			capBytes: null,
 		},
 	]

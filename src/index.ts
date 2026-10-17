@@ -136,6 +136,10 @@ import { createStationEstimator } from "./core/station-estimate/provider.js"
 import { openStationService } from "./core/station/station-service.js"
 import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
 import { createRecordingInventory } from "./core/recordings/inventory.js"
+import { openRecordingKeepService } from "./core/recordings/keep-service.js"
+import { lateBoundRecordingProtection } from "./core/recordings/late-bound-protection.js"
+import type { RecordingKeepService } from "./core/recordings/contract.js"
+import { setCallRecordingProtection } from "./decoders/builtin/call-recordings.js"
 import type {
 	DecoderSettingsManagerPort,
 	DecoderSettingsService,
@@ -1006,6 +1010,39 @@ async function main(): Promise<void> {
 			"Built-in decoders registered",
 		)
 
+		// WG8 req 4: read-only recordings inventory (protected routes only). dsd-fme per-call
+		// directories of the configured decoders (probes excluded), sorted by decoder id; the
+		// scanner's recordings root as its service resolves it, none without a scanner.
+		// WG9 req 2.5, 2.7: built before any decoder with the deletion decision bound late (the
+		// keep service needs the inventory); until it is bound every answer is "protected".
+		let recordingKeeps: RecordingKeepService | undefined
+		const recordingInventory = createRecordingInventory({
+			dsdFmeDirs: () => recordingDsdFmeDirs(decoderManager),
+			scannerRecordingsDir: () => {
+				if (scanner === null) return null
+				const storage = scanner.settings().storage
+				return join(
+					resolve(storage.dir ?? join(config.stateDir, "scanner")),
+					"recordings",
+				)
+			},
+			discoveryCentreHz: id => scanner?.getDiscovery(id)?.frequencyHz ?? null,
+			logger,
+			protection: lateBoundRecordingProtection(() => recordingKeeps),
+		})
+		// WG9 req 2.3-2.5: the keep store (<stateDir>/recording-keeps.json), loaded in both modes
+		// before any decoder exists, so no pruner runs while it loads; a bad file leaves it failed
+		// (everything protected). Keep, unkeep and delete routes are mounted in protected mode only.
+		const keeps = await openRecordingKeepService({
+			stateDir: config.stateDir,
+			inventory: recordingInventory,
+			logger,
+		})
+		recordingKeeps = keeps
+		own(67, () => keeps.close())
+		checkpoint()
+		setCallRecordingProtection(keeps, logger)
+
 		// Step 7: Create decoders from configuration. dsd-fme decoders are first
 		// pointed at the digital voice stream (-o udp to a local socket).
 		// Overrides apply BEFORE the digital-voice preparation, which rewrites dsd-fme output.
@@ -1107,6 +1144,7 @@ async function main(): Promise<void> {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				recordingProtection: keeps,
 				construction: scannerConstruction,
 				channels,
 				channelUsableFraction: config.channelizer.usableFraction,
@@ -1474,23 +1512,6 @@ async function main(): Promise<void> {
 					: activityRetentionFromStats(activity.stats(), activityLimits),
 			minFreeBytes: storageSources.minFreeBytes,
 		})
-		// WG8 req 4: read-only recordings inventory (protected routes only). dsd-fme per-call
-		// directories of the configured decoders (probes excluded), sorted by decoder id; the
-		// scanner's recordings root as its service resolves it, none without a scanner.
-		const recordingInventory = createRecordingInventory({
-			dsdFmeDirs: () => recordingDsdFmeDirs(decoderManager),
-			scannerRecordingsDir: () => {
-				if (scanner === null) return null
-				const storage = scanner.settings().storage
-				return join(
-					resolve(storage.dir ?? join(config.stateDir, "scanner")),
-					"recordings",
-				)
-			},
-			discoveryCentreHz: id => scanner?.getDiscovery(id)?.frequencyHz ?? null,
-			logger,
-		})
-
 		// Band plans never stop core: a storage failure leaves built-ins readable.
 		// The API server closes it after HTTP drain; own() covers a failed construction.
 		let publishBandPlans: BandPlansCommitSink | undefined
@@ -1551,6 +1572,7 @@ async function main(): Promise<void> {
 				stationEstimate,
 				storageReport,
 				recordingInventory,
+				recordingKeeps: keeps,
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
