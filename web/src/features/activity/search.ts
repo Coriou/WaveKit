@@ -200,20 +200,27 @@ function intersect(
 	return a === null ? [...b] : a.filter(c => b.includes(c))
 }
 
+/** The categories a chip stands for. */
+export function chipCategories(
+	chip: CategoryChipId,
+): readonly ActivityCategory[] {
+	return CATEGORY_CHIPS.find(c => c.id === chip)?.categories ?? []
+}
+
 /**
  * One core query for the tokens and the category chip, or null when they cannot match anything
- * (two frequencies, or categories that exclude each other).
+ * (two frequencies, or categories that exclude each other). `within` narrows further: each set is
+ * AND-ed in (a column's own categories under the drawer's search).
  */
 export function buildQuery(
 	tokens: readonly SearchToken[],
 	chip: CategoryChipId | null,
+	within: readonly (readonly ActivityCategory[])[] = [],
 ): ActivityQuery | null {
 	const q: ActivityQuery = {}
 	let categories: ActivityCategory[] | null = null
-	if (chip !== null) {
-		const def = CATEGORY_CHIPS.find(c => c.id === chip)
-		if (def) categories = [...def.categories]
-	}
+	if (chip !== null) categories = [...chipCategories(chip)]
+	for (const set of within) categories = intersect(categories, set)
 	const words: string[] = []
 	for (const t of tokens) {
 		const cats = TOKEN_CATEGORIES[t.kind]

@@ -1,12 +1,26 @@
-// The Activity drawer's state outside React: the search (tokens + category chip), the open event,
-// pinned searches (per browser until the core keeps them: CORE-GAPS "Activity columns and pinned
-// searches"), and the feed it drives. The tuned card opens it on a frequency through showFrequency().
+// The Activity drawer's state outside React: the search (tokens + category chip), the open event, the
+// columns (pinned searches, per browser until the core keeps them: CORE-GAPS "Activity columns and
+// pinned searches"), and the feeds they drive: the drawer's list and one per column, each column's
+// search narrowed by the drawer's. The tuned card opens it on a frequency through showFrequency().
 import type { ActivityQuery, ActivitySummary } from "@wavekit/api-types"
 
 import type { DataLayer } from "../../data/index.ts"
-import { ActivityFeed, fetchCategoryCounts } from "../../data/activity-feed.ts"
+import {
+	ActivityFeed,
+	compareSeq,
+	fetchCategoryCounts,
+} from "../../data/activity-feed.ts"
 import { Store } from "../../data/store.ts"
 import { shellStore } from "../../shell/store.ts"
+import type { ActivityColumn } from "./columns.ts"
+import {
+	MAX_COLUMNS,
+	columnQuery,
+	dropColumn,
+	moveColumn,
+	sameColumnSearch,
+} from "./columns.ts"
+import { setActivityPaneOpen } from "./pane.ts"
 import type { CategoryChipId, SearchToken } from "./search.ts"
 import {
 	CATEGORY_CHIPS,
@@ -16,13 +30,6 @@ import {
 	token,
 } from "./search.ts"
 
-export interface PinnedSearch {
-	id: string
-	title: string
-	tokens: readonly SearchToken[]
-	chip: CategoryChipId | null
-}
-
 export interface ActivityViewState {
 	tokens: readonly SearchToken[]
 	chip: CategoryChipId | null
@@ -30,52 +37,88 @@ export interface ActivityViewState {
 	openId: string | null
 	/** Its summary (it may come from the detail's related rows, not the list). */
 	openItem: ActivitySummary | null
-	pins: readonly PinnedSearch[]
+	/** Pinned searches, shown as columns in the pane or as the switcher row. */
+	columns: readonly ActivityColumn[]
+	/** The column whose search the drawer's search is editing ("Update column"), or null. */
+	editing: string | null
+	/** No room for the pane: the list the drawer shows, "all" or a column id (the switcher row). */
+	view: string
+	/** Per column, the newest commitSeq seen in the switcher (its new count starts after it). */
+	seen: Readonly<Record<string, string>>
 	/** Count per category for the current search without its chip; null until loaded. */
 	counts: Readonly<Record<string, number>> | null
 }
 
-const PINS_KEY = "wavekit.web.activity.pins"
-const MAX_PINS = 12
+const COLUMNS_KEY = "wavekit.web.activity.pins"
 
-function readPins(): PinnedSearch[] {
+const KNOWN_CATEGORIES = new Set<unknown>(
+	CATEGORY_CHIPS.flatMap(c => c.categories),
+)
+
+const isToken = (t: unknown): t is SearchToken =>
+	typeof t === "object" &&
+	t !== null &&
+	typeof (t as SearchToken).kind === "string" &&
+	typeof (t as SearchToken).value === "string" &&
+	typeof (t as SearchToken).label === "string"
+
+/** Reads the columns (older pinned searches included: they carry no `named` or `categories`). */
+export function readColumns(raw: string | null): ActivityColumn[] {
+	if (!raw) return []
 	try {
-		const raw = globalThis.localStorage?.getItem(PINS_KEY)
-		if (!raw) return []
 		const parsed = JSON.parse(raw) as unknown
 		if (!Array.isArray(parsed)) return []
-		return parsed
-			.filter(
-				(p): p is PinnedSearch =>
-					typeof p === "object" &&
-					p !== null &&
-					typeof (p as PinnedSearch).id === "string" &&
-					typeof (p as PinnedSearch).title === "string" &&
-					Array.isArray((p as PinnedSearch).tokens),
-			)
-			.slice(0, MAX_PINS)
+		const out: ActivityColumn[] = []
+		for (const p of parsed) {
+			if (typeof p !== "object" || p === null) continue
+			const c = p as Partial<ActivityColumn>
+			if (typeof c.id !== "string" || typeof c.title !== "string") continue
+			if (!Array.isArray(c.tokens) || !c.tokens.every(isToken)) continue
+			const chip = CATEGORY_CHIPS.some(x => x.id === c.chip)
+				? (c.chip as CategoryChipId)
+				: null
+			const categories =
+				Array.isArray(c.categories) &&
+				c.categories.length > 0 &&
+				c.categories.every(x => KNOWN_CATEGORIES.has(x))
+					? c.categories
+					: null
+			if (c.tokens.length === 0 && chip === null && categories === null)
+				continue
+			out.push({
+				id: c.id,
+				title: c.title,
+				named: c.named === true,
+				tokens: c.tokens,
+				chip,
+				categories,
+			})
+		}
+		return out.slice(0, MAX_COLUMNS)
 	} catch {
 		return []
 	}
 }
 
-function writePins(pins: readonly PinnedSearch[]): void {
+function load(key: string): string | null {
 	try {
-		globalThis.localStorage?.setItem(PINS_KEY, JSON.stringify(pins))
+		return globalThis.localStorage?.getItem(key) ?? null
 	} catch {
-		// Private windows and full storage: pins stay for this page only.
+		return null
 	}
 }
 
-const sameSearch = (
-	a: { tokens: readonly SearchToken[]; chip: CategoryChipId | null },
-	b: { tokens: readonly SearchToken[]; chip: CategoryChipId | null },
-): boolean =>
-	a.chip === b.chip &&
-	a.tokens.length === b.tokens.length &&
-	a.tokens.every(
-		(t, i) => t.kind === b.tokens[i]?.kind && t.value === b.tokens[i]?.value,
-	)
+function save(key: string, value: string): void {
+	try {
+		globalThis.localStorage?.setItem(key, value)
+	} catch {
+		// Private windows and full storage: kept for this page only.
+	}
+}
+
+let columnSeq = 0
+const newColumnId = () =>
+	`col-${Date.now().toString(36)}-${(columnSeq++).toString(36)}`
 
 export class ActivityController extends Store<ActivityViewState> {
 	readonly feed: ActivityFeed
@@ -84,6 +127,9 @@ export class ActivityController extends Store<ActivityViewState> {
 	private countsAbort: AbortController | null = null
 	private countsTimer: ReturnType<typeof setTimeout> | null = null
 	private readonly offFeed: () => void
+	/** One feed per column, kept while the column exists; it follows the core only while the drawer is open. */
+	private readonly columnFeeds = new Map<string, ActivityFeed>()
+	private readonly columnQueries = new Map<string, string>()
 
 	constructor(data: DataLayer) {
 		super({
@@ -91,7 +137,10 @@ export class ActivityController extends Store<ActivityViewState> {
 			chip: null,
 			openId: null,
 			openItem: null,
-			pins: readPins(),
+			columns: readColumns(load(COLUMNS_KEY)),
+			editing: null,
+			view: "all",
+			seen: {},
 			counts: null,
 		})
 		this.data = data
@@ -119,14 +168,19 @@ export class ActivityController extends Store<ActivityViewState> {
 		return searchTitle(s.tokens, s.chip)
 	}
 
-	/** The drawer mounted: follow the feed. Returns the detach. */
+	/** The drawer mounted: follow the feed and the columns. Returns the detach. */
 	attach(): () => void {
 		this.attached += 1
-		if (this.attached === 1) this.refresh()
+		if (this.attached === 1) {
+			this.refresh()
+			this.syncColumns(true)
+		}
 		return () => {
 			this.attached -= 1
 			if (this.attached === 0) {
 				this.feed.stop()
+				for (const f of this.columnFeeds.values()) f.stop()
+				this.columnQueries.clear()
 				this.countsAbort?.abort()
 				if (this.countsTimer !== null) clearTimeout(this.countsTimer)
 				this.countsTimer = null
@@ -164,8 +218,16 @@ export class ActivityController extends Store<ActivityViewState> {
 		this.refresh()
 	}
 
+	/** Clears the search (and leaves a column's edit). */
 	clear(): void {
+		this.update(s => ({ ...s, editing: null }))
 		this.setSearch([], null)
+	}
+
+	/** Live / Paused, for the drawer's list and every column. */
+	setPaused(paused: boolean): void {
+		this.feed.setPaused(paused)
+		for (const f of this.columnFeeds.values()) f.setPaused(paused)
 	}
 
 	/** Opens an event's detail (null goes back to the list). */
@@ -184,37 +246,167 @@ export class ActivityController extends Store<ActivityViewState> {
 			bandwidthHz !== undefined && bandwidthHz > 0
 				? Math.max(1000, Math.round(bandwidthHz / 2))
 				: undefined
+		this.update(s => ({ ...s, editing: null, view: "all" }))
 		this.setSearch([frequencyToken(hz, span)], null)
 		shellStore.openDrawer("activity")
 	}
 
-	/** Pins the current search; returns false when it is already pinned or there is nothing to pin. */
-	pinCurrent(): boolean {
+	// ---- columns
+
+	/** A column's own feed (its search under the drawer's), or null for an unknown id. */
+	columnFeed(id: string): ActivityFeed | null {
+		return this.columnFeeds.get(id) ?? null
+	}
+
+	/** The column whose search is the drawer's search now, if any. */
+	currentColumn(): ActivityColumn | null {
 		const s = this.get()
-		if (s.tokens.length === 0 && s.chip === null) return false
-		if (s.pins.some(p => sameSearch(p, s))) return false
-		const pin: PinnedSearch = {
-			id: `pin-${Date.now().toString(36)}`,
-			title: searchTitle(s.tokens, s.chip),
-			tokens: s.tokens,
-			chip: s.chip,
+		return (
+			s.columns.find(
+				c =>
+					c.categories === null &&
+					sameColumnSearch(c, { ...s, categories: null }),
+			) ?? null
+		)
+	}
+
+	/**
+	 * Pin as column: the drawer's search becomes a column and the search clears (it narrows every column). With room
+	 * the pane opens; without, the switcher shows the new column. While editing a column, its search is updated instead.
+	 * Returns the column's id, or null when there was nothing to pin or no place left.
+	 */
+	pinSearch(room: boolean): string | null {
+		const s = this.get()
+		if (s.tokens.length === 0 && s.chip === null) return null
+		const title = searchTitle(s.tokens, s.chip)
+		if (s.editing !== null) {
+			const id = s.editing
+			this.setColumns(
+				s.columns.map(c =>
+					c.id === id
+						? {
+								...c,
+								tokens: s.tokens,
+								chip: s.chip,
+								categories: null,
+								title: c.named ? c.title : title,
+							}
+						: c,
+				),
+			)
+			this.update(v => ({ ...v, editing: null }))
+			this.setSearch([], null)
+			return id
 		}
-		const pins = [...s.pins, pin].slice(-MAX_PINS)
-		writePins(pins)
-		this.update(v => ({ ...v, pins }))
-		return true
+		const id = this.addColumn(
+			{ title, tokens: s.tokens, chip: s.chip, categories: null },
+			room,
+		)
+		if (id !== null) this.setSearch([], null)
+		return id
 	}
 
-	unpin(id: string): void {
-		const pins = this.get().pins.filter(p => p.id !== id)
-		writePins(pins)
-		this.update(v => ({ ...v, pins }))
-	}
-
-	/** The pin matching the current search, if any. */
-	currentPin(): PinnedSearch | null {
+	/** Adds a column (a preset, a heard suggestion, the search); with room the pane opens, without the switcher picks it. */
+	addColumn(
+		def: Pick<ActivityColumn, "title" | "tokens" | "chip" | "categories">,
+		room: boolean,
+	): string | null {
 		const s = this.get()
-		return s.pins.find(p => sameSearch(p, s)) ?? null
+		const had = s.columns.find(c => sameColumnSearch(c, def))
+		if (had) {
+			this.showColumn(had.id, room)
+			return had.id
+		}
+		if (s.columns.length >= MAX_COLUMNS) return null
+		const col: ActivityColumn = { ...def, id: newColumnId(), named: false }
+		this.setColumns([...s.columns, col])
+		this.showColumn(col.id, room)
+		return col.id
+	}
+
+	private showColumn(id: string, room: boolean): void {
+		if (room) setActivityPaneOpen(true)
+		else this.pickView(id)
+	}
+
+	renameColumn(id: string, title: string): void {
+		const t = title.trim()
+		const cols = this.get().columns
+		const col = cols.find(c => c.id === id)
+		if (!col || t === "" || t === col.title) return
+		this.setColumns(
+			cols.map(c => (c.id === id ? { ...c, title: t, named: true } : c)),
+		)
+	}
+
+	/** Edit search: the column's tokens go into the drawer's search, whose pin button becomes "Update column". */
+	editColumn(id: string): void {
+		const col = this.get().columns.find(c => c.id === id)
+		if (!col) return
+		this.update(s => ({ ...s, editing: id }))
+		this.setSearch(col.tokens, col.chip)
+	}
+
+	/** Leaves a column's edit and clears the search it loaded. */
+	cancelEdit(): void {
+		if (this.get().editing === null) return
+		this.clear()
+	}
+
+	moveColumn(id: string, by: -1 | 1): void {
+		this.setColumns(moveColumn(this.get().columns, id, by))
+	}
+
+	dropColumn(dragId: string, targetId: string): void {
+		this.setColumns(dropColumn(this.get().columns, dragId, targetId))
+	}
+
+	/** Removes a column; returns an undo that puts it back where it was. */
+	removeColumn(id: string): (() => void) | null {
+		const before = this.get().columns
+		const at = before.findIndex(c => c.id === id)
+		const col = before[at]
+		if (!col) return null
+		this.setColumns(before.filter(c => c.id !== id))
+		this.update(s => ({
+			...s,
+			editing: s.editing === id ? null : s.editing,
+			view: s.view === id ? "all" : s.view,
+		}))
+		return () => {
+			const now = this.get().columns
+			if (now.some(c => c.id === id) || now.length >= MAX_COLUMNS) return
+			const next = [...now]
+			next.splice(Math.min(at, next.length), 0, col)
+			this.setColumns(next)
+		}
+	}
+
+	/** The switcher row (no room for the pane): which list the drawer shows. */
+	pickView(view: string): void {
+		this.update(s => {
+			const seen = { ...s.seen }
+			for (const id of [s.view, view]) {
+				const top = this.columnFeeds.get(id)?.get().items[0]?.commitSeq
+				if (top !== undefined) seen[id] = top
+			}
+			return { ...s, view, seen, openId: null, openItem: null }
+		})
+	}
+
+	/** Items a column got since it was last shown in the switcher. */
+	newInColumn(id: string): number {
+		const feed = this.columnFeeds.get(id)
+		if (!feed) return 0
+		const seen = this.get().seen[id]
+		const items = feed.get().items
+		if (seen === undefined) return 0
+		let n = 0
+		for (const i of items) {
+			if (compareSeq(i.commitSeq, seen) <= 0) break
+			n += 1
+		}
+		return n
 	}
 
 	dispose(): void {
@@ -222,14 +414,67 @@ export class ActivityController extends Store<ActivityViewState> {
 		this.countsAbort?.abort()
 		if (this.countsTimer !== null) clearTimeout(this.countsTimer)
 		this.feed.dispose()
+		for (const f of this.columnFeeds.values()) f.dispose()
+		this.columnFeeds.clear()
+	}
+
+	private setColumns(columns: readonly ActivityColumn[]): void {
+		save(COLUMNS_KEY, JSON.stringify(columns))
+		this.update(s => ({ ...s, columns }))
+		this.syncColumns()
+	}
+
+	/** Makes one feed per column and, while attached, points each at its search under the drawer's. */
+	private syncColumns(force = false): void {
+		const s = this.get()
+		const ids = new Set(s.columns.map(c => c.id))
+		for (const [id, f] of this.columnFeeds)
+			if (!ids.has(id)) {
+				f.dispose()
+				this.columnFeeds.delete(id)
+				this.columnQueries.delete(id)
+			}
+		for (const col of s.columns) {
+			let f = this.columnFeeds.get(col.id)
+			if (!f) {
+				f = new ActivityFeed(this.data.api, this.data.events, {
+					maxItems: 1000,
+					pageSize: 50,
+				})
+				f.setPaused(this.feed.get().paused)
+				this.columnFeeds.set(col.id, f)
+				// the first load marks what the switcher has seen
+				const id = col.id
+				const off = f.subscribe(v => {
+					if (v.status !== "live") return
+					off()
+					const top = v.items[0]?.commitSeq
+					if (top !== undefined && this.get().seen[id] === undefined)
+						this.update(x => ({ ...x, seen: { ...x.seen, [id]: top } }))
+				})
+			}
+			if (this.attached === 0) continue
+			// while a column's search is being edited, that column previews the drawer's search and the others
+			// show their own (the edit is not a filter on them)
+			const q =
+				s.editing === null
+					? columnQuery(col, s)
+					: s.editing === col.id
+						? buildQuery(s.tokens, s.chip)
+						: columnQuery(col, { tokens: [], chip: null })
+			const key = JSON.stringify(q)
+			if (!force && this.columnQueries.get(col.id) === key) continue
+			this.columnQueries.set(col.id, key)
+			void f.setQuery(q)
+		}
 	}
 
 	private refresh(counts = true): void {
 		if (this.attached === 0) return
 		void this.feed.setQuery(this.query())
+		this.syncColumns()
 		if (counts) this.scheduleCounts(0)
 	}
-
 	private scheduleCounts(delayMs: number): void {
 		if (this.attached === 0) return
 		if (this.countsTimer !== null) {
