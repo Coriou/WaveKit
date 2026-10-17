@@ -11,6 +11,10 @@ import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
 import { z } from "zod"
+import {
+	PROBE_UNAVAILABLE_MEMO_MS,
+	type ScannerProbeDecoderType,
+} from "@wavekit/api-types"
 import type { DsdFmeLinkLine } from "../../../decoders/builtin/dsd-fme-link.js"
 import type { DecoderManager } from "../../../decoders/manager.js"
 import type { DecoderConfig } from "../../../decoders/types.js"
@@ -541,6 +545,8 @@ export class ProbePool extends EventEmitter {
 	private readonly byDecoder = new Map<string, ProbeRecord>()
 	private readonly queue: ProbeRequest[] = []
 	private readonly latency = new Map<string, number>()
+	/** WG10 req 3.5: decoder type -> time it last reported unavailable. At most one entry per type. */
+	private readonly unavailableAt = new Map<ScannerProbeDecoderType, number>()
 	private readonly watches = new Map<string, StreamWatch>()
 	/** Engines whose "stop" the pool saw: never watched again (S1-B final review, finding 9). */
 	private readonly stoppedEngines = new WeakSet<ProbeEngineView>()
@@ -1189,6 +1195,18 @@ export class ProbePool extends EventEmitter {
 	}
 
 	/**
+	 * WG10 req 3.5: probe decoder types that reported unavailable less than PROBE_UNAVAILABLE_MEMO_MS
+	 * before `now`. The bound is exclusive: an entry exactly PROBE_UNAVAILABLE_MEMO_MS old has expired.
+	 * A successful start of the type clears it. Bounded by the number of decoder types.
+	 */
+	unavailableTypes(now: number): ReadonlySet<ScannerProbeDecoderType> {
+		const out = new Set<ScannerProbeDecoderType>()
+		for (const [type, at] of this.unavailableAt)
+			if (now - at < PROBE_UNAVAILABLE_MEMO_MS) out.add(type)
+		return out
+	}
+
+	/**
 	 * stopProbe can run while launch awaits. A method call, not an inline `rec.state === "stopping"`: TypeScript keeps
 	 * the first inline check's narrowing across the awaits and rejects the second one (TS2367).
 	 */
@@ -1313,6 +1331,9 @@ export class ProbePool extends EventEmitter {
 			jobId: req.jobId,
 			...(rec.input ? { input: rec.input } : {}),
 		})
+		// WG10 req 3.5: the program spawned, so the type is no longer unavailable. A later 126/127 exit
+		// (a later macrotask) records it again.
+		this.unavailableAt.delete(rec.mode.decoderType)
 		if (this.isStopping(rec)) return
 		const emitter = decoder as unknown as EventEmitter
 		// WG9 req 5.4: attached in the same task as the spawn resolved, so an exit
@@ -1574,6 +1595,7 @@ export class ProbePool extends EventEmitter {
 	 * paths; a listener failure is logged and never blocks the stop.
 	 */
 	private reportUnavailable(rec: ProbeRecord): void {
+		this.unavailableAt.set(rec.mode.decoderType, this.now())
 		this.log.warn(
 			{ probeId: rec.probeId, decoderType: rec.mode.decoderType },
 			"Probe decoder unavailable",

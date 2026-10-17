@@ -1,0 +1,5727 @@
+{
+	"nfm-9k-nothing-decodes": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "running"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "candidate",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			],
+			"result": {
+				"protocol": "pocsag",
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_t1",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 11000,
+					"peakDbfs": -40,
+					"snrDb": 30,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"class": "fsk2-wide"
+				}
+			}
+		}
+	],
+	"wide-12k-nothing-decodes": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "running"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "candidate",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			],
+			"result": {
+				"protocol": "pocsag",
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_t1",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 12000,
+					"peakDbfs": -40,
+					"snrDb": 30,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"class": "fsk2-wide"
+				}
+			}
+		}
+	],
+	"analog-fm-only-request": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "candidate",
+			"trials": [
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				}
+			],
+			"result": {
+				"protocol": "pocsag",
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_t1",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 12000,
+					"peakDbfs": -40,
+					"snrDb": 30,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"class": "fsk2-wide"
+				}
+			}
+		}
+	],
+	"analog-am-only-request": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "candidate",
+			"trials": [],
+			"result": {
+				"protocol": "dmr",
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_t1",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 8000,
+					"peakDbfs": -40,
+					"snrDb": 30,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"class": "fsk4-12k5"
+				}
+			}
+		}
+	],
+	"dmr-decoded": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "not-needed"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "identified",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "not-needed"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "not-needed"
+				}
+			],
+			"result": {
+				"protocol": "dmr",
+				"confidence": "decoded",
+				"identity": {
+					"kind": "dmr-cc",
+					"value": "1"
+				},
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_t1",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 9000,
+					"peakDbfs": -40,
+					"snrDb": 30,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"acf30": -0.94,
+					"acf60": 0.99,
+					"class": "tdma-ms"
+				}
+			}
+		}
+	],
+	"dmr-decoded-exhaustive": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "running"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "identified",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "decoded"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dstar",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			],
+			"result": {
+				"protocol": "dmr",
+				"confidence": "decoded",
+				"identity": {
+					"kind": "dmr-cc",
+					"value": "1"
+				},
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_t1",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 9000,
+					"peakDbfs": -40,
+					"snrDb": 30,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"acf30": -0.94,
+					"acf60": 0.99,
+					"class": "tdma-ms"
+				}
+			}
+		}
+	],
+	"dc-artefact": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "unidentified",
+			"trials": [],
+			"result": {
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"measurements": {
+					"source": "spectrum",
+					"centreHz": 446125000,
+					"obwHz": null,
+					"peakDbfs": -50,
+					"snrDb": 30,
+					"floorDbfs": -80,
+					"dutyCycle": null,
+					"class": "unknown"
+				},
+				"artefact": "dc"
+			}
+		}
+	],
+	"no-signal-timeout": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "unidentified",
+			"trials": [],
+			"result": {
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"measurements": {
+					"source": "spectrum",
+					"centreHz": 446125000,
+					"obwHz": null,
+					"peakDbfs": -50,
+					"snrDb": 30,
+					"floorDbfs": -80,
+					"dutyCycle": null,
+					"class": "unknown"
+				}
+			}
+		}
+	],
+	"all-two-tracks": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "running"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446300000,
+			"state": "candidate",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			],
+			"result": {
+				"protocol": "pocsag",
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_b",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446300000,
+					"obwHz": 12000,
+					"peakDbfs": -40,
+					"snrDb": 40,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"class": "fsk2-wide"
+				}
+			}
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "running"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "candidate",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			],
+			"result": {
+				"protocol": "pocsag",
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_a",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 11000,
+					"peakDbfs": -40,
+					"snrDb": 20,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"class": "fsk2-wide"
+				}
+			}
+		}
+	],
+	"spawn-enoent-unavailable": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "running"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "candidate",
+			"trials": [
+				{
+					"protocol": "pocsag",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "flex",
+					"decoder": "multimon-ng",
+					"mode": "multimon-ng",
+					"transport": "offset",
+					"outcome": "unsupported",
+					"reason": "decoder-unavailable"
+				},
+				{
+					"protocol": "aprs",
+					"decoder": "direwolf",
+					"mode": "direwolf",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "analog-fm",
+					"decoder": null,
+					"mode": null,
+					"transport": null,
+					"outcome": "unsupported",
+					"reason": "no-decoder"
+				},
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "ysf",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "p25p1",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "no-sync"
+				},
+				{
+					"protocol": "nxdn96",
+					"decoder": "dsd-fme",
+					"mode": "nxdn",
+					"transport": "offset",
+					"outcome": "no-sync"
+				}
+			],
+			"result": {
+				"protocol": "pocsag",
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"observationId": "o_t1",
+				"measurements": {
+					"source": "track",
+					"centreHz": 446125000,
+					"obwHz": 12000,
+					"peakDbfs": -40,
+					"snrDb": 30,
+					"floorDbfs": -75,
+					"dutyCycle": 1,
+					"class": "fsk2-wide"
+				}
+			}
+		}
+	]
+}

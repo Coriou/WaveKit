@@ -791,7 +791,12 @@ export class SpectrumService extends EventEmitter {
 			await engine.start()
 		} catch (err) {
 			this.errors.set(sourceId, errorMessage(err))
-			this.log.warn({ err, sourceId }, "Spectrum engine failed to start")
+			// WG10 req 4.2: before the source has caps (boot, ahead of `connected`) this is an expected state.
+			const preConnect = this.deps.sources.getCaps(sourceId) === undefined
+			this.log[preConnect ? "debug" : "warn"](
+				{ err, sourceId },
+				"Spectrum engine failed to start",
+			)
 			// Undo any partial setup (branch, listeners, host).
 			void engine.stop().catch(() => undefined)
 			throw err
