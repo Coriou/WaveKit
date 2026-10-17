@@ -16,16 +16,20 @@ import type { DecoderConfig } from "../../../../src/decoders/types.js"
 import { makeTmp, removeTmp, stubLogger } from "../../core/station/helpers.js"
 
 const DROP_MESSAGE =
-	"Decoder settings stored options dropped (no longer patchable or valid)"
+	"Decoder settings stored options dropped (no longer patchable, invalid, or shadowed by configured frequencies)"
 
 describe("sanitizeStoredOptions shadowed frequency keys", () => {
 	it("without a configuration argument a lone frequency key is kept (golden)", () => {
 		expect(
 			sanitizeStoredOptions("acarsdec", { frequency: 131_725_000 }),
-		).toEqual({ options: { frequency: 131_725_000 }, dropped: 0 })
+		).toEqual({ options: { frequency: 131_725_000 }, dropped: 0, shadowed: 0 })
 		expect(
 			sanitizeStoredOptions("acarsdec", { frequencies: [131_550_000] }),
-		).toEqual({ options: { frequencies: [131_550_000] }, dropped: 0 })
+		).toEqual({
+			options: { frequencies: [131_550_000] },
+			dropped: 0,
+			shadowed: 0,
+		})
 	})
 
 	it("top-level frequencies drops both stored keys", () => {
@@ -38,6 +42,7 @@ describe("sanitizeStoredOptions shadowed frequency keys", () => {
 		expect(out.options).not.toHaveProperty("frequencies")
 		expect(out.options).not.toHaveProperty("frequency")
 		expect(out.dropped).toBe(2)
+		expect(out.shadowed).toBe(2)
 	})
 
 	it("a kept stored frequencies shadows a stored frequency", () => {
@@ -50,6 +55,7 @@ describe("sanitizeStoredOptions shadowed frequency keys", () => {
 		expect(out).toEqual({
 			options: { frequencies: [131_550_000] },
 			dropped: 1,
+			shadowed: 1,
 		})
 	})
 
@@ -60,7 +66,7 @@ describe("sanitizeStoredOptions shadowed frequency keys", () => {
 			undefined,
 			{ frequencies: [131_550_000] },
 		)
-		expect(out).toEqual({ options: {}, dropped: 1 })
+		expect(out).toEqual({ options: {}, dropped: 1, shadowed: 1 })
 	})
 
 	it("an invalid stored frequencies is dropped and does not shadow frequency", () => {
@@ -70,7 +76,11 @@ describe("sanitizeStoredOptions shadowed frequency keys", () => {
 			undefined,
 			{},
 		)
-		expect(out).toEqual({ options: { frequency: 131_725_000 }, dropped: 1 })
+		expect(out).toEqual({
+			options: { frequency: 131_725_000 },
+			dropped: 1,
+			shadowed: 0,
+		})
 	})
 
 	it("unshadowed keys are kept as before", () => {
@@ -80,7 +90,11 @@ describe("sanitizeStoredOptions shadowed frequency keys", () => {
 			undefined,
 			{ extraArgs: ["-v"] },
 		)
-		expect(out).toEqual({ options: { frequency: 131_725_000 }, dropped: 0 })
+		expect(out).toEqual({
+			options: { frequency: 131_725_000 },
+			dropped: 0,
+			shadowed: 0,
+		})
 	})
 })
 
@@ -132,6 +146,7 @@ describe("Property 10: shadowed keys dropped", () => {
 						}
 					}
 					expect(out.dropped).toBe(base.dropped + removed)
+					expect(out.shadowed).toBe(base.shadowed + removed)
 					if (top === undefined && configFreqs === undefined) {
 						const storedFreqs = Object.hasOwn(base.options, "frequencies")
 						if (!storedFreqs) expect(out).toEqual(base)
@@ -189,7 +204,7 @@ describe("decoder settings service drops shadowed stored keys at load", () => {
 		expect(effective).not.toHaveProperty("frequencies")
 		expect(effective).not.toHaveProperty("frequency")
 		const drops = warn.mock.calls.filter(c => c[1] === DROP_MESSAGE)
-		expect(drops).toEqual([[{ dropped: 2 }, DROP_MESSAGE]])
+		expect(drops).toEqual([[{ dropped: 2, shadowed: 2 }, DROP_MESSAGE]])
 		expect(JSON.stringify(warn.mock.calls)).not.toContain("131550000")
 		expect(JSON.stringify(warn.mock.calls)).not.toContain("131725000")
 		// Load never rewrites the file.

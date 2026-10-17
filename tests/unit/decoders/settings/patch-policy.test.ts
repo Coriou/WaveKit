@@ -275,6 +275,7 @@ describe("sanitizeStoredOptions", () => {
 		const out = sanitizeStoredOptions("dsd-fme", stored)
 		expect(out.options).toEqual({ frequency: 851_000_000 })
 		expect(out.dropped).toBe(6)
+		expect(out.shadowed).toBe(0)
 		expect(Object.getPrototypeOf(out.options)).toBe(Object.prototype)
 	})
 
@@ -282,6 +283,7 @@ describe("sanitizeStoredOptions", () => {
 		expect(sanitizeStoredOptions("nope", { frequency: 1 })).toEqual({
 			options: {},
 			dropped: 1,
+			shadowed: 0,
 		})
 	})
 })

@@ -305,7 +305,10 @@ describe("decoder settings service", () => {
 		expect(effective.options["extraArgs"]).toEqual(["-M", "level"])
 		expect(effective.options).not.toHaveProperty("outputFormat")
 		expect(effective.options["analyze"]).toBe(true)
-		expect(warn).toHaveBeenCalledWith({ dropped: 2 }, expect.any(String))
+		expect(warn).toHaveBeenCalledWith(
+			{ dropped: 2, shadowed: 0 },
+			expect.any(String),
+		)
 		expect(
 			await readFile(join(stateDir, DECODER_SETTINGS_FILE_NAME), "utf8"),
 		).toBe(raw)
