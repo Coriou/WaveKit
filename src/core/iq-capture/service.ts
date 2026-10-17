@@ -228,7 +228,17 @@ class Service implements IqCaptureService {
 	private readonly timers: IqToolTimers
 	private readonly uid: number | null
 	private readonly cfg: IqCaptureConfig | undefined
+	/** The configured root (resolved, may run through operator symlinks above it). */
 	private readonly root: string
+	/**
+	 * Astra re-review 3 #1: the canonical root (realpath of the nearest existing ancestor plus the
+	 * missing tail, created 0700), its anchor (that realpath) and the root's identity. Every guard
+	 * check runs from the anchor, so a later swap of the root or a component below the anchor is
+	 * refused; ancestors above the anchor are operator territory (macOS /tmp → /private/tmp).
+	 */
+	private canonical: string | null = null
+	private anchor: string | null = null
+	private rootId: DirIdentity | null = null
 	private shapes: IqReplayShapes | null
 	private bandwidthHz = 0
 	private st: IqCaptureServiceState = "idle"
@@ -315,13 +325,7 @@ class Service implements IqCaptureService {
 			this.log.info("IQ capture is not started in legacy access mode")
 			return
 		}
-		if (!(await pathExists(this.root))) {
-			try {
-				await fsp.mkdir(this.root, { recursive: true, mode: 0o700 })
-			} catch {
-				// proven (and refused) by the sweep's directory proof below
-			}
-		}
+		await this.canonicalize(true)
 		await this.sweep()
 		if (this.st !== "idle") return
 		if (!this.dir || !this.shapes) {
@@ -355,8 +359,11 @@ class Service implements IqCaptureService {
 		if (!this.dir) {
 			// Astra re-review 2 #5: before the scanner created its storage root there is nothing to
 			// sweep; capture is not disabled (start creates the root and proves the directory).
-			if (!(await pathExists(this.root))) return zero
-			const ensured = await ensureCaptureDir(this.root, this.uid)
+			if (!(await this.canonicalize(false))) return zero
+			const anchor = this.anchor
+			const canonical = this.canonical
+			if (!anchor || !canonical) return zero
+			const ensured = await ensureCaptureDir(canonical, this.uid)
 			if ("refused" in ensured) {
 				this.log.warn(
 					{ code: ensured.refused },
@@ -365,7 +372,7 @@ class Service implements IqCaptureService {
 				this.st = "unavailable"
 				return zero
 			}
-			const identity = captureDirIdentitySync(this.root, ensured.dir)
+			const identity = captureDirIdentitySync(anchor, ensured.dir)
 			if (!identity) {
 				this.dirRefused()
 				this.st = "unavailable"
@@ -375,10 +382,11 @@ class Service implements IqCaptureService {
 			this.dirId = identity
 		}
 		const identity = this.dirId
-		if (!identity) return zero
+		const sweepAnchor = this.anchor
+		if (!identity || !sweepAnchor) return zero
 		const result = await sweepCaptureDir(this.dir, {
 			uid: this.uid,
-			guard: { root: this.root, identity },
+			guard: { root: sweepAnchor, identity },
 		})
 		if (result.refused) {
 			this.dirRefused()
@@ -981,10 +989,68 @@ class Service implements IqCaptureService {
 		if (this.st === "on") this.turnOff()
 	}
 
+	/**
+	 * Resolves the canonical root once (see `canonical`). Without `create` a missing root is not
+	 * created (false: nothing there yet). Fixed refusals only; nothing path-like is logged.
+	 */
+	private async canonicalize(create: boolean): Promise<boolean> {
+		if (this.canonical) return true
+		let existing = this.root
+		const tail: string[] = []
+		while (!(await pathExists(existing))) {
+			const parent = path.dirname(existing)
+			if (parent === existing) return false
+			tail.unshift(path.basename(existing))
+			existing = parent
+		}
+		if (tail.length > 0 && !create) return false
+		let anchor: string
+		try {
+			anchor = await fsp.realpath(existing)
+		} catch {
+			return false
+		}
+		let cur = anchor
+		for (const part of tail) {
+			cur = path.join(cur, part)
+			try {
+				await fsp.mkdir(cur, { mode: 0o700 })
+			} catch (err: unknown) {
+				if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false
+			}
+		}
+		const rootId = captureDirIdentitySync(anchor, cur)
+		if (!rootId) return false
+		this.anchor = anchor
+		this.canonical = cur
+		this.rootId = rootId
+		return true
+	}
+
+	/** The canonical root is still the proven one: chain from the anchor, no link, same dev/ino. */
+	private rootOk(): boolean {
+		const anchor = this.anchor
+		const canonical = this.canonical
+		const id = this.rootId
+		return (
+			anchor !== null &&
+			canonical !== null &&
+			id !== null &&
+			dirStillProvenSync(anchor, canonical, id)
+		)
+	}
+
 	private dirOk(): boolean {
 		const dir = this.dir
 		const id = this.dirId
-		if (dir && id && dirStillProvenSync(this.root, dir, id)) return true
+		if (
+			dir &&
+			id &&
+			this.rootOk() &&
+			this.anchor &&
+			dirStillProvenSync(this.anchor, dir, id)
+		)
+			return true
 		this.dirRefused()
 		return false
 	}
@@ -995,7 +1061,9 @@ class Service implements IqCaptureService {
 		file: string,
 		bytes: number,
 	): { fd: number; size: number } | null {
-		const v = openVerifiedCaptureSync(this.root, file, bytes, this.uid)
+		const anchor = this.anchor
+		if (!anchor) return null
+		const v = openVerifiedCaptureSync(anchor, file, bytes, this.uid)
 		if (!v) return null
 		try {
 			const ino = fs.fstatSync(v.fd).ino
@@ -1235,14 +1303,20 @@ class Service implements IqCaptureService {
 		const identity = this.dirId
 		const ino = this.fileIno.get(captureId)
 		this.fileIno.delete(captureId)
-		if (dir && identity && isCaptureId(captureId)) {
+		const anchor = this.anchor
+		if (dir && identity && anchor && isCaptureId(captureId)) {
+			if (!this.rootOk()) {
+				this.dirRefused()
+				if (bytes > 0) this.store?.released(bytes)
+				return
+			}
 			const names = [
 				`${captureId}.cf32`,
 				...(tmp ? [`${captureId}.cf32.tmp`] : []),
 			]
 			for (const name of names) {
 				const r = unlinkProvenSync(
-					this.root,
+					anchor,
 					dir,
 					identity,
 					name,

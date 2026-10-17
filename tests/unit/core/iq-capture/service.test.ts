@@ -975,3 +975,105 @@ describe("IqCaptureService sweep before the storage root exists (Astra re-review
 		await svc.stop()
 	})
 })
+
+describe("IqCaptureService canonical storage root (Astra re-review 3, #1)", () => {
+	async function aliased() {
+		const s = await setup()
+		const outside = path.join(base, `outside-root-${n++}`)
+		await fsp.mkdir(outside)
+		const alias = path.join(base, `alias-${n++}`)
+		await fsp.symlink(outside, alias)
+		const svc = createIqCaptureService({
+			config: CFG,
+			storageRoot: path.join(alias, "new-root"),
+			protectedMode: true,
+			logger: s.logger,
+			shapes: SHAPES,
+			now: () => s.timers.t,
+			spawn: s.sp.spawn,
+			timers: s.timers,
+			env: {},
+		})
+		const canonical = path.join(fs.realpathSync(outside), "new-root")
+		return { s, svc, outside, alias, canonical }
+	}
+	const outDirOf = (s: Awaited<ReturnType<typeof setup>>) => {
+		const run = s.sp.children.find(c => c.args[0] === "run")
+		return run?.args[run.args.indexOf("--out-dir") + 1]
+	}
+
+	it("a symlinked ancestor (operator territory, like /tmp) works: everything happens under the canonical root", async () => {
+		const { s, svc, canonical } = await aliased()
+		svc.attachSource("src", {
+			sampleRateHz: FS,
+			centerHz: CENTER,
+			epoch: 3,
+			engine: s.engine,
+		})
+		await svc.start()
+		await flush()
+		expect(svc.state()).toBe("on")
+		expect(outDirOf(s)).toBe(path.join(canonical, "iq-captures"))
+		expect(fs.lstatSync(canonical).isDirectory()).toBe(true)
+		expect(fs.statSync(canonical).mode & 0o777).toBe(0o700)
+		await svc.stop()
+	})
+
+	it("a later swap of the canonical root for a symlink is refused (nothing outside unlinked, capture off)", async () => {
+		const { s, svc, canonical } = await aliased()
+		svc.attachSource("src", {
+			sampleRateHz: FS,
+			centerHz: CENTER,
+			epoch: 3,
+			engine: s.engine,
+		})
+		await svc.start()
+		await flush()
+		s.engine.push(FS)
+		const got = svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		await flush(10)
+		const elsewhere = path.join(base, `elsewhere-${n++}`)
+		await fsp.mkdir(path.join(elsewhere, "iq-captures"), {
+			recursive: true,
+			mode: 0o700,
+		})
+		const victim = path.join(elsewhere, "iq-captures", `${id}.cf32`)
+		await fsp.writeFile(victim, "must stay", { mode: 0o600 })
+		await fsp.rename(canonical, `${canonical}.old`)
+		await fsp.symlink(elsewhere, canonical)
+		svc.discard(id, "result")
+		await flush(10)
+		expect(fs.existsSync(victim)).toBe(true)
+		expect(svc.state()).toBe("unavailable")
+		await svc.stop()
+	})
+
+	it("a later swap of the canonical root for another real directory is refused", async () => {
+		const { s, svc, canonical } = await aliased()
+		svc.attachSource("src", {
+			sampleRateHz: FS,
+			centerHz: CENTER,
+			epoch: 3,
+			engine: s.engine,
+		})
+		await svc.start()
+		await flush()
+		s.engine.push(FS)
+		const got = svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		await flush(10)
+		await fsp.rename(canonical, `${canonical}.old`)
+		await fsp.mkdir(path.join(canonical, "iq-captures"), {
+			recursive: true,
+			mode: 0o700,
+		})
+		const victim = path.join(canonical, "iq-captures", `${id}.cf32`)
+		await fsp.writeFile(victim, "must stay", { mode: 0o600 })
+		svc.discard(id, "result")
+		await flush(10)
+		expect(fs.existsSync(victim)).toBe(true)
+		expect(svc.state()).toBe("unavailable")
+		await svc.stop()
+	})
+})
