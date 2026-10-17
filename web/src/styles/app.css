@@ -59,4 +59,29 @@
 			height: var(--wk-h-lg);
 		}
 	}
+
+	/* The fresh-row flash on the compositor: the accent wash is a pseudo-element whose opacity fades. The recipe's
+	   background-color animation repaints the whole list window every frame, and a busy feed always has a row
+	   flashing (perf bench: Activity over the spectrum, main thread 72 % → 30 % busy at CPU ×4). */
+	.wk-row[data-fresh],
+	.wka-carditem[data-fresh] > .wkd-card {
+		position: relative;
+		animation: none;
+	}
+	.wk-row[data-fresh]::after,
+	.wka-carditem[data-fresh] > .wkd-card::after {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		background: rgba(var(--wk-accent-rgb), 0.11);
+		opacity: 0;
+		pointer-events: none;
+		animation: wk-fresh-fade var(--wk-dur-flash) var(--wk-ease-out);
+	}
+	@keyframes wk-fresh-fade {
+		from {
+			opacity: 1;
+		}
+	}
 }
