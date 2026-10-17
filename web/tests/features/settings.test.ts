@@ -729,28 +729,9 @@ describe("Settings items", () => {
 			),
 			"dp.labels",
 		)
-		expect(all.help).toBe("Every signal WaveKit finds, even faint ones")
-	})
-
-	it("keeps Discoveries on the spectrum on this device, after Signal labels", async () => {
-		const a = actions()
-		const list = buildRows(snapshot(), a)
-		const ids = list.filter(r => r.device).map(r => r.id)
-		expect(ids[ids.indexOf("dp.labels") + 1]).toBe("dp.disc")
-		const disc = byId(list, "dp.disc")
-		expect(disc.text).toBe("All")
-		expect(disc.def?.value).toBe("all")
-		await disc.write?.("decoded")
-		expect(a.calls).toContainEqual(["device", { discoveryTags: "decoded" }])
-		const off = byId(
-			buildRows(
-				snapshot({ device: { ...DEFAULT_DEVICE, discoveryTags: "off" } }),
-				a,
-			),
-			"dp.disc",
+		expect(all.help).toBe(
+			"Every signal WaveKit finds, even faint ones, and every discovery",
 		)
-		expect(off.text).toBe("Off")
-		expect(off.help).toBe("The spectrum shows no discoveries")
 	})
 
 	it("offers FFT sizes up to what this core serves, saying why the others cannot be picked", async () => {

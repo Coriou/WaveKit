@@ -34,7 +34,6 @@ import type {
 	Density,
 	ClickTuning,
 	DevicePrefs,
-	DiscoveryTagMode,
 	MapLabels,
 	MapTiles,
 	Motion,
@@ -1046,19 +1045,11 @@ const SIGNAL_LABEL_OPTS = opts([
 	["all", "All"],
 ])
 const SIGNAL_LABEL_HELP: Readonly<Record<SignalLabelsMode, string>> = {
-	named: "Only the tuned signal and named channels",
-	clear: "Named signals, and unknown ones that stand clear of the noise",
-	all: "Every signal WaveKit finds, even faint ones",
-}
-const DISCOVERY_TAG_OPTS = opts([
-	["all", "All"],
-	["decoded", "Decoded only"],
-	["off", "Off"],
-])
-const DISCOVERY_TAG_HELP: Readonly<Record<DiscoveryTagMode, string>> = {
-	all: "What the scanner found, under the saved-frequency tags",
-	decoded: "Only what the scanner decoded",
-	off: "The spectrum shows no discoveries",
+	named:
+		"Only what is identified: the tuned signal, named channels and decoded discoveries",
+	clear:
+		"Named signals, unknown ones that stand clear of the noise, and every discovery",
+	all: "Every signal WaveKit finds, even faint ones, and every discovery",
 }
 const CLICK_TUNING_OPTS = opts([
 	["free", "Free"],
@@ -1066,7 +1057,8 @@ const CLICK_TUNING_OPTS = opts([
 ])
 const CLICK_TUNING_HELP: Readonly<Record<ClickTuning, string>> = {
 	free: "A click moves the listening channel; the receiver recentres only past the capture's edge",
-	centre: "Every tune recentres the receiver on the signal, so it stays in the middle",
+	centre:
+		"Every tune recentres the receiver on the signal, so it stays in the middle",
 }
 const AVERAGING_OPTS = opts([
 	["off", "Off"],
@@ -1290,7 +1282,9 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			group: "display",
 			label: "Signal labels",
 			help: SIGNAL_LABEL_HELP[d.signalLabels],
-			keys: words("signal labels tags chips names spectrum noise clutter"),
+			keys: words(
+				"signal labels tags chips names spectrum noise clutter discoveries scanner decoded identified",
+			),
 			device: true,
 			widget: { kind: "seg", options: SIGNAL_LABEL_OPTS },
 			value: d.signalLabels,
@@ -1298,22 +1292,6 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			def: { value: "clear", text: "Clear" },
 			write: v =>
 				local(() => a.setDevice({ signalLabels: v as SignalLabelsMode })),
-		},
-		{
-			id: "dp.disc",
-			group: "display",
-			label: "Discoveries on the spectrum",
-			help: DISCOVERY_TAG_HELP[d.discoveryTags],
-			keys: words(
-				"discoveries scanner found tags auto band map spectrum decoded clutter",
-			),
-			device: true,
-			widget: { kind: "seg", options: DISCOVERY_TAG_OPTS },
-			value: d.discoveryTags,
-			text: optionText(DISCOVERY_TAG_OPTS, d.discoveryTags),
-			def: { value: "all", text: "All" },
-			write: v =>
-				local(() => a.setDevice({ discoveryTags: v as DiscoveryTagMode })),
 		},
 		{
 			id: "dp.tune",

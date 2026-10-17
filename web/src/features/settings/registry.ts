@@ -192,14 +192,7 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		"dp.labels",
 		"Display",
 		"Signal labels",
-		"tags chips names spectrum noise clutter",
-		SETTINGS,
-	),
-	row(
-		"dp.disc",
-		"Display",
-		"Discoveries on the spectrum",
-		"scanner found tags auto band map decoded clutter",
+		"tags chips names spectrum noise clutter discoveries scanner decoded identified",
 		SETTINGS,
 	),
 	row(

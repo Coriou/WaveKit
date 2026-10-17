@@ -10,10 +10,10 @@ import type { DataLayer } from "../data/index.ts"
 import { useStore } from "../data/index.ts"
 import type { ScannerStore } from "../data/scanner-store.ts"
 import { useNow } from "../features/hooks.ts"
-import type { DiscoveryTagMode } from "../shell/device-prefs.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import {
 	discoveryFetchSpan,
+	type DiscoveryTagFilter,
 	hasTaggable,
 	placeDiscoveryTags,
 	type FetchedSpan,
@@ -30,15 +30,14 @@ function scannerUp(s: ReturnType<ScannerStore["get"]>): boolean {
 	return s.statusErrorCode === null && s.status !== null
 }
 
-/** True while the discovery row has something to show under `mode` (Off: never): the plot keeps its gap for it. */
+/** True while the discovery row has something to show (`only`: which discoveries count): the plot keeps its gap for it. */
 export function useDiscoveryRow(
 	scanner: ScannerStore,
-	mode: DiscoveryTagMode = "all",
+	only: DiscoveryTagFilter = "all",
 ): boolean {
 	return useStore(
 		scanner,
-		s =>
-			mode !== "off" && scannerUp(s) && hasTaggable(s.discoveries.byId, mode),
+		s => scannerUp(s) && hasTaggable(s.discoveries.byId, only),
 	)
 }
 
@@ -94,8 +93,8 @@ export interface DiscoveryTagsProps {
 	controller: PlotController
 	view: SpectrumViewSpan
 	widthPx: number
-	/** Display › Discoveries on the spectrum; Off draws none. */
-	mode?: DiscoveryTagMode
+	/** Which discoveries are tagged (Settings › Signal labels, through discoveryTagFilter). */
+	only?: DiscoveryTagFilter
 }
 
 export const DiscoveryTags = memo(function DiscoveryTags({
@@ -103,7 +102,7 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 	controller,
 	view,
 	widthPx,
-	mode = "all",
+	only = "all",
 }: DiscoveryTagsProps) {
 	const byId = useStore(data.scanner, s => s.discoveries.byId)
 	const activeNow = useStore(data.scanner, s => s.activeNow)
@@ -113,16 +112,14 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 	const savedHz = useMemo(() => saved.map(f => f.frequencyHz), [saved])
 	const placed = useMemo(
 		() =>
-			mode === "off"
-				? []
-				: placeDiscoveryTags(byId.values(), view, {
-						widthPx,
-						activeNow,
-						now,
-						savedHz,
-						only: mode,
-					}),
-		[byId, activeNow, now, savedHz, view.startHz, view.endHz, widthPx, mode],
+			placeDiscoveryTags(byId.values(), view, {
+				widthPx,
+				activeNow,
+				now,
+				savedHz,
+				only,
+			}),
+		[byId, activeNow, now, savedHz, view.startHz, view.endHz, widthPx, only],
 	)
 	return (
 		<>

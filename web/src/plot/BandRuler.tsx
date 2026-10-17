@@ -20,7 +20,6 @@ import {
 import type { ResolvedBandPlanView } from "@wavekit/api-types"
 
 import type { DataLayer } from "../data/index.ts"
-import type { DiscoveryTagMode } from "../shell/device-prefs.ts"
 import { useStore } from "../data/index.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import {
@@ -34,6 +33,7 @@ import {
 	rulerXToHz,
 } from "./band-ruler.ts"
 import { useDiscoveryFetch } from "./DiscoveryTags.tsx"
+import type { DiscoveryTagFilter } from "./discovery-tags.ts"
 import { formatMHz, spanCentre, spanWidth, zoomLabel } from "./maths.ts"
 import { RULER_MAX_LEVEL, type PlotController } from "./plot-store.ts"
 
@@ -49,8 +49,8 @@ export interface BandRulerProps {
 	/** Top, CSS px from the top of the plot body. */
 	top: number
 	tunedHz: number | null
-	/** Display › Discoveries on the spectrum: which ones the heard strip counts (Off: none). */
-	discoveries?: DiscoveryTagMode
+	/** Which discoveries the heard strip counts (Settings › Signal labels, through discoveryTagFilter). */
+	discoveries?: DiscoveryTagFilter
 }
 
 /** Wheel travel (px) per ruler level. */
@@ -118,7 +118,7 @@ export const BandRuler = memo(function BandRuler({
 		// the view only seeds the first centre (followCentre keeps it after)
 		[centre, captureWidth, level],
 	)
-	useDiscoveryFetch(data.scanner, mode === "off" ? null : span)
+	useDiscoveryFetch(data.scanner, span)
 	const trackPx = Math.max(40, widthPx - START_PX - END_PX)
 
 	const savedItems = useStore(data.savedFrequencies, s => s.items)
@@ -143,15 +143,13 @@ export const BandRuler = memo(function BandRuler({
 	)
 	const heard = useMemo(
 		() =>
-			mode === "off"
-				? []
-				: activityBins(
-						[...discoveries.values()]
-							.filter(d => mode === "all" || d.confidence === "decoded")
-							.map(d => d.frequencyHz),
-						span,
-						trackPx,
-					),
+			activityBins(
+				[...discoveries.values()]
+					.filter(d => mode === "all" || d.confidence === "decoded")
+					.map(d => d.frequencyHz),
+				span,
+				trackPx,
+			),
 		[discoveries, span, trackPx, mode],
 	)
 

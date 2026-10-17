@@ -1,4 +1,4 @@
-// Display › On this device: density, motion, the spectrum's range, averaging, FFT size, signal labels and discovery tags, and the Map's tiles,
+// Display › On this device: density, motion, the spectrum's range, averaging, FFT size and signal labels, and the Map's tiles,
 // trail length and labels (Settings › Map), persisted in localStorage and applied as data-wk-density /
 // data-wk-motion on <html>. Motion "system" resolves through prefers-reduced-motion, so CSS and code only ever
 // test data-wk-motion="reduce". Pure apart from the storage, element and media query passed in (tests use fakes).
@@ -40,10 +40,6 @@ export function fftBins(size: FftSize, binsMax: number | null): number {
 	return Math.max(128, Math.min(size, binsMax ?? FFT_FALLBACK_MAX))
 }
 
-/** Display › Discoveries on the spectrum (DESIGN.md "Auto band map = discoveries"): every one, decoded ones, or none. */
-export const DISCOVERY_TAG_MODES = ["all", "decoded", "off"] as const
-export type DiscoveryTagMode = (typeof DISCOVERY_TAG_MODES)[number]
-
 /**
  * Display › Click to tune (SDR++'s Normal / Center tuning, SDR#'s Free / Center): the click moves the listening
  * channel and the display stays, or every tune recentres the receiver on it.
@@ -81,8 +77,6 @@ export interface DevicePrefs {
 	readonly fftSize: FftSize
 	/** Which spectrum signals get a chip (plot/label-gate.ts). */
 	readonly signalLabels: SignalLabelsMode
-	/** Which scanner discoveries tag the spectrum (plot/discovery-tags.ts). */
-	readonly discoveryTags: DiscoveryTagMode
 	/** What a click on the spectrum moves (plot/plot-store.ts tuneTo). */
 	readonly clickTuning: ClickTuning
 	readonly mapTiles: MapTiles
@@ -98,7 +92,6 @@ export const DEFAULT_DEVICE: DevicePrefs = {
 	averaging: "low",
 	fftSize: 8192,
 	signalLabels: "clear",
-	discoveryTags: "all",
 	clickTuning: "free",
 	mapTiles: "online",
 	mapTrail: 15,
@@ -161,11 +154,6 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 			SIGNAL_LABELS,
 			o["signalLabels"],
 			DEFAULT_DEVICE.signalLabels,
-		),
-		discoveryTags: pick(
-			DISCOVERY_TAG_MODES,
-			o["discoveryTags"],
-			DEFAULT_DEVICE.discoveryTags,
 		),
 		clickTuning: pick(
 			CLICK_TUNINGS,
@@ -260,7 +248,6 @@ export class DevicePrefsStore {
 			next.averaging === prev.averaging &&
 			next.fftSize === prev.fftSize &&
 			next.signalLabels === prev.signalLabels &&
-			next.discoveryTags === prev.discoveryTags &&
 			next.clickTuning === prev.clickTuning &&
 			next.mapTiles === prev.mapTiles &&
 			next.mapTrail === prev.mapTrail &&

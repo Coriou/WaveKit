@@ -6,6 +6,7 @@ import { EventsClient } from "../../src/data/events-client.ts"
 import { ScannerStore } from "../../src/data/scanner-store.ts"
 import {
 	discoveryFetchSpan,
+	discoveryTagFilter,
 	discoveryTier,
 	hasTaggable,
 	placeDiscoveryTags,
@@ -228,5 +229,13 @@ describe("ScannerStore.fetchDiscoveries", () => {
 		expect(d.query).toEqual({})
 		expect(d.loaded).toBe(false)
 		store.dispose()
+	})
+})
+
+describe("discovery tags follow Signal labels", () => {
+	it("Named tags decoded discoveries only; Clear and All tag them all", () => {
+		expect(discoveryTagFilter("named")).toBe("decoded")
+		expect(discoveryTagFilter("clear")).toBe("all")
+		expect(discoveryTagFilter("all")).toBe("all")
 	})
 })

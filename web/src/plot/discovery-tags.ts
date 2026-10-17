@@ -10,8 +10,17 @@ import {
 	formatWait,
 } from "../data/scanner-format.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
+import type { SignalLabelsMode } from "./label-gate.ts"
 
 export type DiscoveryTier = "active" | "recent" | "older"
+
+/** Which discoveries are tagged: all of them, or the decoded ones. */
+export type DiscoveryTagFilter = "all" | "decoded"
+
+/** Settings › Signal labels drives the discovery row too: Named shows only what is identified (decoded). */
+export function discoveryTagFilter(mode: SignalLabelsMode): DiscoveryTagFilter {
+	return mode === "named" ? "decoded" : "all"
+}
 
 export interface PlacedDiscoveryTag {
 	id: string
@@ -41,8 +50,8 @@ export interface DiscoveryTagOptions {
 	now: number
 	/** Saved frequencies (Hz): a discovery within half its bandwidth of one is not tagged. */
 	savedHz?: readonly number[]
-	/** "decoded": decoded discoveries only (Display › Discoveries on the spectrum). Default all. */
-	only?: "all" | "decoded"
+	/** "decoded": decoded discoveries only (Signal labels › Named). Default all. */
+	only?: DiscoveryTagFilter
 	/** Board metrics: 11 px text ≈ 5.9 px a character, padding + dot + gap 22 px; a dot-only chip 15 px. */
 	charPx?: number
 	chromePx?: number
@@ -70,7 +79,7 @@ export function discoveryTier(
 /** Whether the spectrum tags this discovery at all (Ignore is the core's lockout: never). */
 export function taggable(
 	d: Pick<Discovery, "operator" | "confidence">,
-	only: "all" | "decoded" = "all",
+	only: DiscoveryTagFilter = "all",
 ): boolean {
 	if (d.operator?.lockout) return false
 	return only === "all" || d.confidence === "decoded"
@@ -176,7 +185,7 @@ export function placeDiscoveryTags(
 /** Whether any discovery in `byId` could be tagged (the row shows, so the layout keeps it while panning). */
 export function hasTaggable(
 	byId: ReadonlyMap<string, Pick<Discovery, "operator" | "confidence">>,
-	only: "all" | "decoded" = "all",
+	only: DiscoveryTagFilter = "all",
 ): boolean {
 	for (const d of byId.values()) if (taggable(d, only)) return true
 	return false

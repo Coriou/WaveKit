@@ -81,6 +81,7 @@ import {
 	useDiscoveryFetch,
 	useDiscoveryRow,
 } from "./DiscoveryTags.tsx"
+import { discoveryTagFilter } from "./discovery-tags.ts"
 import {
 	dragRange,
 	finishRange,
@@ -214,7 +215,8 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const viewRef = useRef(view)
 	viewRef.current = view
 	useDiscoveryFetch(data.scanner, view)
-	const discRow = useDiscoveryRow(data.scanner, device.discoveryTags)
+	const discOnly = discoveryTagFilter(device.signalLabels)
+	const discRow = useDiscoveryRow(data.scanner, discOnly)
 	const scanHasReceiver = useStore(data.scanner, s =>
 		scanHasReceiverOf(s.sweep),
 	)
@@ -449,7 +451,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 									controller={controller}
 									view={view}
 									widthPx={size.w}
-									mode={device.discoveryTags}
+									only={discOnly}
 								/>
 							</div>
 						)}
@@ -523,7 +525,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 						LANES_CSS +
 						(discRow ? DISCOVERY_ROW_CSS : 0)
 					}
-					discoveries={device.discoveryTags}
+					discoveries={discOnly}
 					tunedHz={vfoHz}
 				/>
 			)}
