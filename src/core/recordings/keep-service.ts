@@ -14,7 +14,9 @@
  * path or file name. Imports stay minimal (contract, store, inventory types) so the deleters can
  * import the port without pulling runtime modules into the startup bundle.
  */
+import { randomBytes } from "node:crypto"
 import * as nodeFs from "node:fs/promises"
+import * as nodePath from "node:path"
 import {
 	RECORDING_INVENTORY_ID,
 	RECORDING_KEEPS_MAX_BYTES,
@@ -66,12 +68,24 @@ export interface RecordingDeleteFs {
 		isSymbolicLink(): boolean
 	}>
 	unlink(p: string): Promise<void>
+	/** Moves the recording to the private delete name (same directory, atomic). */
+	rename(from: string, to: string): Promise<void>
+	/** Restores a moved file without replacing what now holds the name (EEXIST then). */
+	link(existing: string, newPath: string): Promise<void>
 }
 
 const nodeDeleteFs: RecordingDeleteFs = {
 	lstat: p => nodeFs.lstat(p),
 	unlink: p => nodeFs.unlink(p),
+	rename: (a, b) => nodeFs.rename(a, b),
+	link: (a, b) => nodeFs.link(a, b),
 }
+
+/**
+ * The private name a delete moves the recording to before its final check: same directory,
+ * not a dsd-fme or scanner name, so neither the pruner nor the inventory lists it.
+ */
+export const RECORDING_DELETE_PRIVATE_PREFIX = ".wavekit-delete-"
 
 export interface RecordingKeepServiceOptions {
 	stateDir: string
@@ -261,22 +275,31 @@ export async function openRecordingKeepService(
 			throw new RecordingKeepError("RECORDING_BUSY", RECORDING_BUSY_TEXT)
 		return withMutex(key, async () => {
 			if (!ready()) throw unavailable()
-			// Idempotent: already kept (committed) answers changed:false without a write. The keep
-			// key is the stable identity, so no file check is needed to keep it kept.
-			if (store?.snapshot().keeps.some(e => e.key === key))
-				return { id: inventoryId, kept: true, changed: false }
-			const opened = await inventory.open(inventoryId)
-			if (!opened) throw notFound()
+			const alreadyKept =
+				store?.snapshot().keeps.some(e => e.key === key) === true
+			const wasProtecting = protecting.has(key)
+			// Pending keep: protected from before the inventory open, so a deleter that runs during
+			// the open, the close or the write sees it protected. Cleared again on any failure.
+			protect(key)
 			let bytes: number
 			try {
-				bytes = opened.stat.size
-			} finally {
-				await opened.handle.close().catch(() => undefined)
+				// Verified even when already kept: a vanished or ineligible file answers 404 (only
+				// unkeep tolerates a gone file).
+				const opened = await inventory.open(inventoryId)
+				if (!opened) throw notFound()
+				try {
+					bytes = opened.stat.size
+				} finally {
+					await opened.handle.close().catch(() => undefined)
+				}
+				if (!Number.isSafeInteger(bytes) || bytes < 0) throw notFound()
+			} catch (error: unknown) {
+				if (!wasProtecting && !alreadyKept) unprotect(key)
+				if (error instanceof RecordingKeepError) throw error
+				log.warn({ err: safeErrorFields(error) }, "Recording Keep failed")
+				throw unavailable()
 			}
-			if (!Number.isSafeInteger(bytes) || bytes < 0) throw notFound()
-			const wasProtecting = protecting.has(key)
-			// Protect before the write: a deleter that runs now sees it protected.
-			protect(key)
+			if (alreadyKept) return { id: inventoryId, kept: true, changed: false }
 			try {
 				await commit(file => {
 					if (file.keeps.some(e => e.key === key)) return file
@@ -340,6 +363,87 @@ export async function openRecordingKeepService(
 		})
 	}
 
+	type FileId = Awaited<ReturnType<RecordingDeleteFs["lstat"]>>
+	const sameFile = (a: FileId, b: { dev: number; ino: number }): boolean =>
+		!a.isSymbolicLink() && a.isFile() && a.dev === b.dev && a.ino === b.ino
+
+	/**
+	 * Unlinks exactly the opened file. The path is first moved (atomic rename) to a private
+	 * name in the same directory; the private name is then checked against the handle (device,
+	 * inode, a regular file, not a link) and unlinked only on a match. A file swapped in at any
+	 * step before the rename is moved, found foreign and put back with `link` (which never
+	 * replaces what now holds the name); nothing is deleted and the answer is 404. If the name
+	 * was taken again meanwhile, the foreign file is left under the private name (never
+	 * deleted) and a fixed-text warning is logged.
+	 */
+	async function deleteVerified(
+		key: RecordingKeepKey,
+		filePath: string,
+		handleStat: { dev: number; ino: number },
+	): Promise<void> {
+		let pre: FileId
+		try {
+			pre = await deleteFs.lstat(filePath)
+		} catch (error: unknown) {
+			if (errCode(error) === "ENOENT" || errCode(error) === "ENOTDIR")
+				throw notFound()
+			throw error
+		}
+		if (!sameFile(pre, handleStat)) {
+			log.warn({}, "Recording delete refused: the file changed")
+			throw notFound()
+		}
+		const privatePath = nodePath.join(
+			nodePath.dirname(filePath),
+			`${RECORDING_DELETE_PRIVATE_PREFIX}${randomBytes(12).toString("hex")}`,
+		)
+		try {
+			await deleteFs.rename(filePath, privatePath)
+		} catch (error: unknown) {
+			if (errCode(error) === "ENOENT" || errCode(error) === "ENOTDIR")
+				throw notFound()
+			throw error
+		}
+		let moved: FileId | null
+		try {
+			moved = await deleteFs.lstat(privatePath)
+		} catch (error: unknown) {
+			if (errCode(error) !== "ENOENT") throw error
+			moved = null
+		}
+		if (moved === null) {
+			// The private name was removed under us: nothing of ours is left to delete.
+			log.warn({}, "Recording delete refused: the file changed")
+			throw notFound()
+		}
+		const match = sameFile(moved, handleStat)
+		if (match && ready() && !protecting.has(key)) {
+			try {
+				await deleteFs.unlink(privatePath)
+			} catch (error: unknown) {
+				if (errCode(error) === "ENOENT") throw notFound()
+				throw error
+			}
+			return
+		}
+		// Put it back without clobbering: link fails EEXIST when the name is taken again.
+		let restored = false
+		try {
+			await deleteFs.link(privatePath, filePath)
+			restored = true
+		} catch (error: unknown) {
+			log.warn(
+				{ left: 1, err: safeErrorFields(error) },
+				"Recording delete could not restore a file; it is left under a private name",
+			)
+		}
+		if (restored) await deleteFs.unlink(privatePath).catch(() => undefined)
+		if (match)
+			throw new RecordingKeepError("RECORDING_KEPT", RECORDING_KEPT_TEXT)
+		log.warn({}, "Recording delete refused: the file changed")
+		throw notFound()
+	}
+
 	async function remove(inventoryId: string): Promise<RecordingDeleteResult> {
 		if (!ready()) throw unavailable()
 		const m =
@@ -367,34 +471,7 @@ export async function openRecordingKeepService(
 				const opened = await inventory.open(inventoryId)
 				if (!opened) throw notFound()
 				try {
-					const handleStat = await opened.handle.stat()
-					let pathStat: Awaited<ReturnType<RecordingDeleteFs["lstat"]>>
-					try {
-						pathStat = await deleteFs.lstat(opened.path)
-					} catch (error: unknown) {
-						if (errCode(error) === "ENOENT" || errCode(error) === "ENOTDIR")
-							throw notFound()
-						throw error
-					}
-					// The path must still name the opened file: not a link, same device and inode.
-					// A swap is refused as not found (the recording the id named is no longer there).
-					if (
-						pathStat.isSymbolicLink() ||
-						!pathStat.isFile() ||
-						pathStat.dev !== handleStat.dev ||
-						pathStat.ino !== handleStat.ino
-					) {
-						log.warn({}, "Recording delete refused: the file changed")
-						throw notFound()
-					}
-					if (!ready() || protecting.has(key))
-						throw new RecordingKeepError("RECORDING_KEPT", RECORDING_KEPT_TEXT)
-					try {
-						await deleteFs.unlink(opened.path)
-					} catch (error: unknown) {
-						if (errCode(error) === "ENOENT") throw notFound()
-						throw error
-					}
+					await deleteVerified(key, opened.path, await opened.handle.stat())
 				} catch (error: unknown) {
 					if (error instanceof RecordingKeepError) throw error
 					log.warn({ err: safeErrorFields(error) }, "Recording delete failed")

@@ -191,3 +191,142 @@ describe("recording keep routes", () => {
 		},
 	)
 })
+
+describe("recording keep routes: review fixes (WG9 RK)", () => {
+	let app: FastifyInstance
+	const warn = vi.fn()
+	afterEach(async () => {
+		warn.mockClear()
+		await app.close()
+	})
+	async function build(svc: Fake, deny: boolean) {
+		app = Fastify({ logger: false })
+		app.addHook("onRequest", async request => {
+			request.log = {
+				warn,
+				info: () => {},
+				error: () => {},
+				debug: () => {},
+				trace: () => {},
+				fatal: () => {},
+			} as never
+		})
+		await app.register(recordingRoutes, {
+			inventory: { list: async () => ({ items: [] }), open: async () => null },
+			authorize: () => undefined,
+			access: {},
+			keeps: svc,
+			authorizeMutation: () =>
+				deny
+					? ({ status: 403, code: "AUTH_FORBIDDEN", headers: {} } as never)
+					: undefined,
+		} as unknown as RecordingRoutesOptions)
+		await app.ready()
+	}
+	const calls = [
+		["PUT", KEEP],
+		["DELETE", KEEP],
+		["DELETE", DEL],
+	] as const
+	const malformed = {
+		headers: { "content-type": "application/json" },
+		payload: "{not json",
+	}
+
+	it.each(calls)(
+		"finding 4: %s %s denial wins over a malformed body",
+		async (method, url) => {
+			const svc = fake()
+			await build(svc, true)
+			const res = await app.inject({ method, url, ...malformed })
+			expect(res.statusCode).toBe(403)
+			expect(res.json()).toEqual({ code: "AUTH_FORBIDDEN" })
+			expect(svc.keep).not.toHaveBeenCalled()
+			expect(svc.unkeep).not.toHaveBeenCalled()
+			expect(svc.remove).not.toHaveBeenCalled()
+		},
+	)
+
+	it.each(calls)(
+		"finding 4: %s %s denial wins over an oversized body",
+		async (method, url) => {
+			const svc = fake()
+			await build(svc, true)
+			const res = await app.inject({
+				method,
+				url,
+				headers: { "content-type": "application/json" },
+				payload: "x".repeat(4096),
+			})
+			expect(res.statusCode).toBe(403)
+		},
+	)
+
+	it.each(calls)(
+		"finding 4: %s %s authorized malformed small body is ignored",
+		async (method, url) => {
+			const svc = fake()
+			await build(svc, false)
+			const res = await app.inject({ method, url, ...malformed })
+			expect(res.statusCode).toBe(200)
+			const text = await app.inject({
+				method,
+				url,
+				headers: { "content-type": "text/weird" },
+				payload: "abc",
+			})
+			expect(text.statusCode).toBe(200)
+		},
+	)
+
+	it.each(calls)(
+		"finding 4: %s %s authorized body over 1 KiB is 413, service not called",
+		async (method, url) => {
+			const svc = fake()
+			await build(svc, false)
+			const res = await app.inject({
+				method,
+				url,
+				headers: { "content-type": "application/octet-stream" },
+				payload: Buffer.alloc(1025),
+			})
+			expect(res.statusCode).toBe(413)
+			expect(svc.keep).not.toHaveBeenCalled()
+			expect(svc.unkeep).not.toHaveBeenCalled()
+			expect(svc.remove).not.toHaveBeenCalled()
+		},
+	)
+
+	it("finding 5: each operation's 500 carries its own fixed text", async () => {
+		const svc = fake()
+		const boom = new Error("ENOENT /var/rec/x")
+		svc.keep.mockRejectedValue(boom)
+		svc.unkeep.mockRejectedValue(boom)
+		svc.remove.mockRejectedValue(boom)
+		await build(svc, false)
+		const k = await app.inject({ method: "PUT", url: KEEP })
+		expect(k.statusCode).toBe(500)
+		expect(k.json()).toEqual({
+			error: "Internal Server Error",
+			code: "RECORDING_KEEP_FAILED",
+			message: "Recording could not be kept",
+		})
+		const u = await app.inject({ method: "DELETE", url: KEEP })
+		expect(u.json()).toEqual({
+			error: "Internal Server Error",
+			code: "RECORDING_KEEP_FAILED",
+			message: "Recording could not be unkept",
+		})
+		const d = await app.inject({ method: "DELETE", url: DEL })
+		expect(d.json()).toEqual({
+			error: "Internal Server Error",
+			code: "RECORDING_DELETE_FAILED",
+			message: "Recording could not be deleted",
+		})
+		expect(warn.mock.calls.map(c => c[1])).toEqual([
+			"Recording keep failed",
+			"Recording unkeep failed",
+			"Recording delete failed",
+		])
+	})
+})

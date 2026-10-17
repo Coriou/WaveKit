@@ -19,7 +19,7 @@ import * as path from "node:path"
 
 import type { RecordingProtection } from "../../core/recordings/contract.js"
 import type { Logger } from "../../utils/logger.js"
-import { createComponentLogger } from "../../utils/logger.js"
+import { createComponentLogger, createLogger } from "../../utils/logger.js"
 
 export interface CallRecordingRetention {
 	/** Keep at most this many megabytes (MiB) of recordings. */
@@ -43,9 +43,24 @@ let protectionPort: RecordingProtection | null = null
 let protectionLog: Logger | null = null
 
 /**
+ * The skipped-count log when no logger was injected (the frozen one-argument form): a
+ * module-level logger created on first need, as src/access/sessions.ts does, so a port-null
+ * run never creates one and its behaviour and logs stay byte-identical.
+ */
+let fallbackLog: Logger | null = null
+function skipLog(): Logger {
+	if (protectionLog !== null) return protectionLog
+	fallbackLog ??= createComponentLogger(
+		createLogger({ level: "info" }),
+		"CallRecordings",
+	)
+	return fallbackLog
+}
+
+/**
  * Installs the deletion decision the pruner consults before each unlink (WG9 req 2.5); null
- * restores the unprotected behaviour. The optional logger receives the skipped count only
- * (never a name or path).
+ * restores the unprotected behaviour. The skipped count (never a name or path) is logged to
+ * the optional logger, or to a module-level fallback logger without one.
  */
 export function setCallRecordingProtection(
 	protection: RecordingProtection | null,
@@ -159,7 +174,7 @@ export async function pruneCallRecordings(
 		return { deleted, keptFiles: kept.length, keptBytes: total }
 	}
 	if (protectedSkipped > 0) {
-		protectionLog?.info(
+		skipLog().info(
 			{ protectedSkipped },
 			"Per-call recording retention skipped kept recordings",
 		)

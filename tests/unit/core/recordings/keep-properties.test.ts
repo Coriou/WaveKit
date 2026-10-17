@@ -61,6 +61,59 @@ function memFs(content: Buffer | null): RecordingKeepsFs {
 	return fs as unknown as RecordingKeepsFs
 }
 
+/** A writable in-memory fs (the store's write path: exclusive create, write, sync, rename). */
+function writableMemFs(): RecordingKeepsFs & { files: Map<string, Buffer> } {
+	const files = new Map<string, Buffer>()
+	const err = (code: string) => Object.assign(new Error(code), { code })
+	const fs = {
+		files,
+		open: async (p: string, flags: unknown) => {
+			if (flags === "r")
+				return { sync: async () => undefined, close: async () => undefined }
+			if (flags === "wx") {
+				if (files.has(p)) throw err("EEXIST")
+				files.set(p, Buffer.alloc(0))
+				return {
+					writeFile: async (body: string) => {
+						files.set(p, Buffer.from(body, "utf8"))
+					},
+					sync: async () => undefined,
+					close: async () => undefined,
+				}
+			}
+			const c = files.get(p)
+			if (c === undefined) throw err("ENOENT")
+			return {
+				stat: async () => ({ isFile: () => true, size: c.length }),
+				read: async (buf: Buffer, off: number, len: number, pos: number) => {
+					const n = Math.max(0, Math.min(len, c.length - pos))
+					c.copy(buf, off, pos, pos + n)
+					return { bytesRead: n }
+				},
+				close: async () => undefined,
+			}
+		},
+		rename: async (a: string, b: string) => {
+			const c = files.get(a)
+			if (c === undefined) throw err("ENOENT")
+			files.delete(a)
+			files.set(b, c)
+		},
+		unlink: async (p: string) => {
+			if (!files.delete(p)) throw err("ENOENT")
+		},
+		readdir: async (dir: string) =>
+			[...files.keys()]
+				.filter(k => k.startsWith(`${dir}/`))
+				.map(k => k.slice(dir.length + 1)),
+		lstat: async () => {
+			throw err("ENOENT")
+		},
+		mkdir: async () => undefined,
+	}
+	return fs as unknown as RecordingKeepsFs & { files: Map<string, Buffer> }
+}
+
 const callName = fc
 	.tuple(
 		fc.integer({ min: 0, max: 99_999_999 }),
@@ -118,6 +171,45 @@ const OVER_ENTRIES_TEXT = serializeRecordingKeepsFile({
 })
 
 describe("recording keep properties", () => {
+	it(
+		"round trips every valid file through store.write and a reload",
+		{ timeout: 20_000 },
+		async () => {
+			// Feature: web-gaps-9, Property 3: keep store round trip and fail closed
+			// Validates: Requirements 2.3, 2.4
+			await fc.assert(
+				fc.asyncProperty(validFile, validFile, async (first, second) => {
+					const fs = writableMemFs()
+					const a = await openRecordingKeepStore({
+						stateDir: "/state",
+						log: silent,
+						fs,
+					})
+					expect(a.state()).toBe("ready")
+					expect(a.snapshot().revision).toBe(0)
+					await a.write(first)
+					expect(a.snapshot()).toEqual(first)
+					await a.write(second)
+					expect(a.snapshot()).toEqual(second)
+					await a.close()
+					// Only the store file is left (no tmp), and a reload yields what was written.
+					expect([...fs.files.keys()]).toEqual([
+						`/state/${RECORDING_KEEPS_FILE_NAME}`,
+					])
+					const b = await openRecordingKeepStore({
+						stateDir: "/state",
+						log: silent,
+						fs,
+					})
+					expect(b.state()).toBe("ready")
+					expect(b.snapshot()).toEqual(second)
+					await b.close()
+				}),
+				{ numRuns: 100 },
+			)
+		},
+	)
+
 	it(
 		"round trips every valid file and fails closed on every corruption",
 		{ timeout: 20_000 },

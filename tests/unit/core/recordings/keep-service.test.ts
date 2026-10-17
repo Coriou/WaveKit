@@ -11,6 +11,7 @@ import {
 	writeFile,
 } from "node:fs/promises"
 import * as nodeFs from "node:fs/promises"
+import { readdir } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -19,6 +20,10 @@ import {
 	RECORDING_KEEPS_MAX_BYTES,
 	RECORDING_KEEPS_MAX_ENTRIES,
 } from "@wavekit/api-types"
+import {
+	pruneCallRecordings,
+	setCallRecordingProtection,
+} from "../../../../src/decoders/builtin/call-recordings.js"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import type { RecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import { openRecordingKeepService } from "../../../../src/core/recordings/keep-service.js"
@@ -364,6 +369,8 @@ describe("recording keep service", () => {
 					unlinks++
 					await nodeFs.unlink(p)
 				},
+				rename: (a, b) => nodeFs.rename(a, b),
+				link: (a, b) => nodeFs.link(a, b),
 			}
 			const svc = await f.open({ deleteFs })
 			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
@@ -385,6 +392,8 @@ describe("recording keep service", () => {
 				lstat: p => nodeFs.lstat(p),
 				unlink: () =>
 					Promise.reject(Object.assign(new Error("gone"), { code: "ENOENT" })),
+				rename: (a, b) => nodeFs.rename(a, b),
+				link: (a, b) => nodeFs.link(a, b),
 			},
 		})
 		await expect(svc.remove(DSD_ID)).rejects.toMatchObject({ status: 404 })
@@ -393,6 +402,7 @@ describe("recording keep service", () => {
 	it("refuses Keep with RECORDING_BUSY while a delete is in progress, and protects meanwhile", async () => {
 		const f = await fixture()
 		let releaseLstat = (): void => undefined
+		let held = false
 		let entered = (): void => undefined
 		const inLstat = new Promise<void>(r => {
 			entered = r
@@ -400,13 +410,18 @@ describe("recording keep service", () => {
 		const svc = await f.open({
 			deleteFs: {
 				lstat: async p => {
-					entered()
-					await new Promise<void>(r => {
-						releaseLstat = r
-					})
+					if (!held) {
+						held = true
+						entered()
+						await new Promise<void>(r => {
+							releaseLstat = r
+						})
+					}
 					return nodeFs.lstat(p)
 				},
 				unlink: p => nodeFs.unlink(p),
+				rename: (a, b) => nodeFs.rename(a, b),
+				link: (a, b) => nodeFs.link(a, b),
 			},
 		})
 		const del = svc.remove(DSD_ID)
@@ -575,5 +590,237 @@ describe("recording keep service", () => {
 		const text = await storeText(f)
 		await expect(svc.keep(DSD_ID2)).rejects.toMatchObject({ status: 503 })
 		expect(await storeText(f)).toBe(text)
+	})
+
+	describe("review fixes (WG9 RK)", () => {
+		afterEach(() => {
+			setCallRecordingProtection(null)
+		})
+
+		const realDeleteFs = (
+			over: Partial<RecordingDeleteFs> = {},
+		): RecordingDeleteFs & { unlinked: string[] } => {
+			const unlinked: string[] = []
+			return {
+				unlinked,
+				lstat: p => nodeFs.lstat(p),
+				unlink: async p => {
+					unlinked.push(p)
+					await nodeFs.unlink(p)
+				},
+				rename: (a, b) => nodeFs.rename(a, b),
+				link: (a, b) => nodeFs.link(a, b),
+				...over,
+			}
+		}
+		const privateNames = async (f: Fixture): Promise<string[]> =>
+			(await readdir(f.dsd)).filter(n => n.startsWith(".wavekit-delete-"))
+
+		it("finding 1: a file swapped in right after the path check is not unlinked", async () => {
+			const f = await fixture()
+			const target = path.join(f.dsd, NAME)
+			const other = path.join(f.root, "other.wav")
+			await writeFile(other, "OTHER")
+			let swapped = false
+			const fsx = realDeleteFs({
+				lstat: async p => {
+					const st = await nodeFs.lstat(p)
+					if (!swapped) {
+						swapped = true
+						// The swap lands after the check passed, before anything else runs.
+						await rename(target, path.join(f.root, "moved.wav"))
+						await nodeFs.copyFile(other, target)
+					}
+					return st
+				},
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_NOT_FOUND",
+			})
+			expect(await readFile(target, "utf8")).toBe("OTHER")
+			await lstat(path.join(f.root, "moved.wav"))
+			expect(await privateNames(f)).toEqual([])
+			noSecretsLogged(f)
+		})
+
+		it("finding 1: a file swapped in between the rename and the private check is not unlinked", async () => {
+			const f = await fixture()
+			const target = path.join(f.dsd, NAME)
+			const other = path.join(f.root, "other.wav")
+			await writeFile(other, "OTHER")
+			const fsx = realDeleteFs({
+				rename: async (a, b) => {
+					await nodeFs.rename(a, b)
+					await rename(b, path.join(f.root, "moved.wav"))
+					await nodeFs.copyFile(other, b)
+				},
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_NOT_FOUND",
+			})
+			expect(
+				fsx.unlinked.every(p =>
+					path.basename(p).startsWith(".wavekit-delete-"),
+				),
+			).toBe(true)
+			// The foreign file is put back under the free name, the private name is gone.
+			expect(await readFile(target, "utf8")).toBe("OTHER")
+			await lstat(path.join(f.root, "moved.wav"))
+			expect(await privateNames(f)).toEqual([])
+		})
+
+		it("finding 1: a symlink swapped in right after the path check is not followed or unlinked", async () => {
+			const f = await fixture()
+			const target = path.join(f.dsd, NAME)
+			const other = path.join(f.root, "other.wav")
+			await writeFile(other, "OTHER")
+			let swapped = false
+			const fsx = realDeleteFs({
+				lstat: async p => {
+					const st = await nodeFs.lstat(p)
+					if (!swapped) {
+						swapped = true
+						await rename(target, path.join(f.root, "moved.wav"))
+						await symlink(other, target)
+					}
+					return st
+				},
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_NOT_FOUND",
+			})
+			expect(await readFile(other, "utf8")).toBe("OTHER")
+			await lstat(target)
+			await lstat(path.join(f.root, "moved.wav"))
+			expect(await privateNames(f)).toEqual([])
+		})
+
+		it("finding 1: a foreign file is left under the private name when its name is taken again", async () => {
+			const f = await fixture()
+			const target = path.join(f.dsd, NAME)
+			const fsx = realDeleteFs({
+				rename: async (a, b) => {
+					await nodeFs.rename(a, b)
+					await rename(b, path.join(f.root, "moved.wav"))
+					await writeFile(b, "FOREIGN")
+					await writeFile(target, "NEW")
+				},
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_NOT_FOUND",
+			})
+			expect(fsx.unlinked).toEqual([])
+			expect(await readFile(target, "utf8")).toBe("NEW")
+			const left = await privateNames(f)
+			expect(left).toHaveLength(1)
+			expect(await readFile(path.join(f.dsd, left[0] ?? ""), "utf8")).toBe(
+				"FOREIGN",
+			)
+			expect(JSON.stringify(f.logs.calls)).toContain(
+				"Recording delete could not restore a file; it is left under a private name",
+			)
+			noSecretsLogged(f)
+		})
+
+		it("finding 1: the path gone at the rename answers 404 and deletes nothing", async () => {
+			const f = await fixture()
+			const fsx = realDeleteFs({
+				rename: () =>
+					Promise.reject(Object.assign(new Error("gone"), { code: "ENOENT" })),
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({ status: 404 })
+			expect(fsx.unlinked).toEqual([])
+			await lstat(path.join(f.dsd, NAME))
+		})
+
+		it("finding 1: a delete unlinks only the private name of the verified file", async () => {
+			const f = await fixture()
+			const fsx = realDeleteFs()
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).resolves.toMatchObject({ deleted: true })
+			expect(fsx.unlinked).toHaveLength(1)
+			expect(path.basename(fsx.unlinked[0] ?? "")).toMatch(
+				/^\.wavekit-delete-[0-9a-f]{24}$/,
+			)
+			await expect(lstat(path.join(f.dsd, NAME))).rejects.toMatchObject({
+				code: "ENOENT",
+			})
+			expect(await privateNames(f)).toEqual([])
+		})
+
+		it("finding 2: the real pruner running during Keep's open and close does not delete the file", async () => {
+			const f = await fixture()
+			let svc: RecordingKeepServiceInternal | null = null
+			const prune = async (): Promise<void> => {
+				await pruneCallRecordings(
+					[f.dsd],
+					{ maxTotalMb: 0, maxAgeHours: 0 },
+					f.now,
+				)
+			}
+			const inv: RecordingInventory = {
+				...f.inventory,
+				open: async id => {
+					await prune()
+					const opened = await f.inventory.open(id)
+					await prune()
+					if (!opened) return opened
+					const close = opened.handle.close.bind(opened.handle)
+					const handle = Object.assign(Object.create(opened.handle) as object, {
+						close: async () => {
+							await prune()
+							await close()
+							await prune()
+						},
+					}) as typeof opened.handle
+					return { ...opened, handle }
+				},
+			}
+			svc = (await openRecordingKeepService({
+				stateDir: f.stateDir,
+				inventory: inv,
+				logger: f.logs.logger,
+				now: () => f.now,
+			})) as RecordingKeepServiceInternal
+			setCallRecordingProtection(svc)
+			await expect(svc.keep(DSD_ID)).resolves.toMatchObject({
+				kept: true,
+				changed: true,
+			})
+			await lstat(path.join(f.dsd, NAME))
+			// The pruner did run: the unkept neighbour is gone.
+			await expect(lstat(path.join(f.dsd, NAME2))).rejects.toMatchObject({
+				code: "ENOENT",
+			})
+		})
+
+		it("finding 2: a failed Keep clears its pending protection", async () => {
+			const f = await fixture()
+			const svc = await f.open()
+			await unlink(path.join(f.dsd, NAME))
+			await expect(svc.keep(DSD_ID)).rejects.toMatchObject({ status: 404 })
+			expect(svc.isDsdFmeFileProtected(NAME)).toBe(false)
+			expect(svc.mutexCount()).toBe(0)
+		})
+
+		it("finding 3: Keep of an already kept key whose file vanished answers 404", async () => {
+			const f = await fixture()
+			const svc = await f.open()
+			await svc.keep(DSD_ID)
+			await unlink(path.join(f.dsd, NAME))
+			f.inventory.invalidate?.()
+			await expect(svc.keep(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_NOT_FOUND",
+				status: 404,
+			})
+			// Still kept: only unkeep removes it.
+			expect(svc.isDsdFmeFileProtected(NAME)).toBe(true)
+			await expect(svc.unkeep(DSD_ID)).resolves.toMatchObject({ changed: true })
+		})
 	})
 })
