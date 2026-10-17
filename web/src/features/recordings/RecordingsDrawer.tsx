@@ -20,6 +20,7 @@ import { shellStore } from "../../shell/store.ts"
 import { Drawer } from "../../ui/Drawer.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { Seg } from "../../ui/Seg.tsx"
+import { Skeleton } from "../../ui/Skeleton.tsx"
 import { token as activityToken } from "../activity/search.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { formatMHz } from "../format.ts"
@@ -401,12 +402,7 @@ function List({
 		}
 	}
 
-	if (!loaded)
-		return (
-			<p className="wkr-note">
-				<span className="wk-spinner" aria-hidden="true" /> Loading recordings…
-			</p>
-		)
+	if (!loaded) return <Skeleton round label="recordings" />
 	const searching = tokens.length > 0 || text.trim() !== ""
 	return (
 		<>

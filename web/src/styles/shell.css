@@ -467,7 +467,8 @@
 		overflow: hidden;
 	}
 	.wk-shell-pane-wait {
-		place-self: center;
+		align-self: start;
+		padding: 56px 16px 16px;
 	}
 
 	/* phone: the dock is hidden; one search island opens ⌘K, which reaches every view and drawer */

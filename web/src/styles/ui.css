@@ -22,4 +22,116 @@
 		gap: 14px;
 		padding: 4px 18px 18px;
 	}
+	/* Skeleton (ui/Skeleton.tsx): drawers and lists while their code or first page loads. The shape of the rows in
+	   the kit's fill, a slow wave down them, a late fade-in so a fast load never flashes, then a quiet caption. */
+	.wk-skel {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		animation: wk-skel-in var(--wk-dur-3) var(--wk-ease-out) 120ms both;
+	}
+	.wk-skel-bar {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+		padding: 2px 0 10px;
+	}
+	.wk-skel-field {
+		height: var(--wk-h-md);
+		border-radius: var(--wk-r-3);
+		background: var(--wk-fill);
+	}
+	.wk-skel-chips {
+		display: flex;
+		gap: 6px;
+	}
+	.wk-skel-chips span {
+		width: 64px;
+		height: 24px;
+		border-radius: var(--wk-r-pill);
+		background: var(--wk-fill);
+	}
+	.wk-skel-chips span:nth-child(2) {
+		width: 52px;
+	}
+	.wk-skel-chips span:nth-child(3) {
+		width: 76px;
+	}
+	.wk-skel-caption {
+		margin: 0;
+		padding: 0 2px 6px;
+		font-size: var(--wk-fs-xs);
+		line-height: 16px;
+		color: var(--wk-text-4);
+		animation: wk-skel-in var(--wk-dur-3) var(--wk-ease-out) 1s both;
+	}
+	.wk-skel-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-height: 52px;
+		padding: 0 6px 0 10px;
+		animation: wk-skel-wave 1.6s var(--wk-ease-inout) calc(var(--i, 0) * 90ms)
+			infinite;
+	}
+	.wk-skel[data-shape="settings"] .wk-skel-row {
+		min-height: 56px;
+		padding: 0 4px;
+		border-bottom: 1px solid var(--wk-line-08);
+	}
+	.wk-skel-tile {
+		width: 32px;
+		height: 32px;
+		flex: none;
+		border-radius: var(--wk-r-3);
+		background: var(--wk-fill);
+	}
+	.wk-skel-tile[data-round] {
+		border-radius: 50%;
+	}
+	.wk-skel-lines {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
+	}
+	.wk-skel-lines span {
+		height: 9px;
+		border-radius: var(--wk-r-pill);
+		background: var(--wk-fill);
+	}
+	.wk-skel-lines span + span {
+		height: 7px;
+		opacity: 0.7;
+	}
+	.wk-skel-end {
+		width: 34px;
+		height: 8px;
+		flex: none;
+		border-radius: var(--wk-r-pill);
+		background: var(--wk-fill);
+		opacity: 0.7;
+	}
+	.wk-skel[data-shape="settings"] .wk-skel-end {
+		width: 72px;
+		height: 24px;
+		border-radius: var(--wk-r-3);
+		opacity: 1;
+	}
+	@keyframes wk-skel-in {
+		from {
+			opacity: 0;
+		}
+	}
+	@keyframes wk-skel-wave {
+		50% {
+			opacity: 0.45;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.wk-skel-row {
+			animation: none;
+		}
+	}
 }

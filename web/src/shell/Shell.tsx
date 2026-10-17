@@ -33,6 +33,7 @@ import {
 } from "./drawer-width.ts"
 import { Drawer } from "../ui/Drawer.tsx"
 import { Icon } from "../ui/Icon.tsx"
+import { Skeleton } from "../ui/Skeleton.tsx"
 import type { DrawerContentProps } from "./drawers/types.ts"
 import { useShell } from "./hooks.ts"
 import {
@@ -477,10 +478,11 @@ export function Shell({
 								onClose={closeDrawer}
 								aria-busy="true"
 							>
-								<span
-									className="wk-spinner"
-									role="status"
-									aria-label="Loading"
+								<Skeleton
+									toolbar
+									shape={state.drawer === "settings" ? "settings" : "list"}
+									round={state.drawer === "recordings"}
+									label={DRAWER_TITLE[state.drawer]}
 								/>
 							</Drawer>
 						}
@@ -501,11 +503,9 @@ export function Shell({
 				<PaneSlot ref={paneBox} rect={L.pane} label={pane.label}>
 					<Suspense
 						fallback={
-							<span
-								className="wk-spinner wk-shell-pane-wait"
-								role="status"
-								aria-label="Loading"
-							/>
+							<div className="wk-shell-pane-wait">
+								<Skeleton rows={6} label={pane.label} />
+							</div>
 						}
 					>
 						<PaneContent mode="pane" onHide={hidePane} />
