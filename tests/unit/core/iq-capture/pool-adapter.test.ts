@@ -97,10 +97,11 @@ describe("replay pool adapter", () => {
 		})
 	})
 
-	it("an accepted identity is decoded", async () => {
+	it("an accepted identity with a clean replay-end is decoded", async () => {
 		const { pool, start } = setup()
 		const run = start()
 		pool.emit("evidence", "p1", pool.requests[0], ev(true))
+		pool.emit("replay-end", "p1")
 		pool.emit("probe-state", "p1", "stopped", pool.requests[0])
 		await expect(run.result).resolves.toEqual({
 			outcome: "decoded",
@@ -190,5 +191,16 @@ describe("replay pool adapter", () => {
 		adapter.dispose()
 		await expect(run.result).resolves.toMatchObject({ outcome: "cancelled" })
 		expect(pool.listenerCount("probe-state")).toBe(0)
+	})
+
+	it("an accepted identity without a clean replay-end is cancelled, the identity discarded (Astra re-review 2, #1)", async () => {
+		const { pool, start } = setup()
+		const run = start()
+		pool.emit("evidence", "p1", pool.requests[0], ev(true))
+		pool.emit("probe-state", "p1", "stopped", pool.requests[0])
+		await expect(run.result).resolves.toEqual({
+			outcome: "cancelled",
+			decoded: null,
+		})
 	})
 })

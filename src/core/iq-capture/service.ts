@@ -17,6 +17,7 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process"
 import { randomUUID as nodeRandomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
 import * as fs from "node:fs"
+import * as fsp from "node:fs/promises"
 import path from "node:path"
 import { PassThrough, type Readable } from "node:stream"
 import { childAccessEnvironment } from "../../access/runtime-hygiene.js"
@@ -314,6 +315,13 @@ class Service implements IqCaptureService {
 			this.log.info("IQ capture is not started in legacy access mode")
 			return
 		}
+		if (!(await pathExists(this.root))) {
+			try {
+				await fsp.mkdir(this.root, { recursive: true, mode: 0o700 })
+			} catch {
+				// proven (and refused) by the sweep's directory proof below
+			}
+		}
 		await this.sweep()
 		if (this.st !== "idle") return
 		if (!this.dir || !this.shapes) {
@@ -345,6 +353,9 @@ class Service implements IqCaptureService {
 		if (this.st === "stopped" || this.st === "unavailable" || this.st === "on")
 			return zero
 		if (!this.dir) {
+			// Astra re-review 2 #5: before the scanner created its storage root there is nothing to
+			// sweep; capture is not disabled (start creates the root and proves the directory).
+			if (!(await pathExists(this.root))) return zero
 			const ensured = await ensureCaptureDir(this.root, this.uid)
 			if ("refused" in ensured) {
 				this.log.warn(
@@ -1245,6 +1256,16 @@ class Service implements IqCaptureService {
 			}
 		}
 		if (bytes > 0) this.store?.released(bytes)
+	}
+}
+
+/** lstat answers ENOENT: false; any other answer (even an error) counts as present (proven later). */
+async function pathExists(p: string): Promise<boolean> {
+	try {
+		await fsp.lstat(p)
+		return true
+	} catch (err: unknown) {
+		return (err as NodeJS.ErrnoException).code !== "ENOENT"
 	}
 }
 

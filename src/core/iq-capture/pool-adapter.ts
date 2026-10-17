@@ -3,8 +3,8 @@
  * typed structurally (Main passes the real `ProbePool`), so this file needs no pool change to compile.
  *
  * One probe per request: `request` asks the pool for a `replay` probe on the replay transport; the run's
- * `result` settles when the probe stopped. Outcome: an accepted identity → `decoded`; the decoder reached
- * its clean end (pool event `replay-end`) → `no-sync` (no output), `crc-errors` (CRC failures) or
+ * `result` settles when the probe stopped. Outcome, only after the clean end: an accepted identity →
+ * `decoded`; the decoder reached its clean end (pool event `replay-end`) → `no-sync` (no output), `crc-errors` (CRC failures) or
  * `timeout` (output, no identity); anything else (cancel, failure, preemption, a decoder that never
  * exited within its hold plus grace) → `cancelled`.
  * A request the pool could not start is withdrawn from the pool's own queue (the replay queue retries).
@@ -99,8 +99,10 @@ export function createPoolReplayProbes(
 	const releaseListeners = new Set<() => void>()
 
 	const outcomeOf = (a: Active): IqReplayProbeAnswer => {
-		if (a.decoded) return { outcome: "decoded", decoded: a.decoded }
+		// Astra re-review 2 #1: only a clean replay-end is a verdict; an identity seen before a
+		// failed or cut end is discarded.
 		if (!a.complete) return { outcome: "cancelled", decoded: null }
+		if (a.decoded) return { outcome: "decoded", decoded: a.decoded }
 		return {
 			outcome: !a.output
 				? "no-sync"

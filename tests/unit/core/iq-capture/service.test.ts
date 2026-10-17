@@ -948,3 +948,30 @@ describe("IqCaptureService Astra review (BLOCKING, MAJOR d)", () => {
 		expect(fourth).toHaveProperty("captureId")
 	})
 })
+
+describe("IqCaptureService sweep before the storage root exists (Astra re-review 2, #5)", () => {
+	it("a missing root is nothing to sweep and does not disable capture; start then creates the dir", async () => {
+		const s = await setup()
+		const missing = path.join(base, `late-root-${n++}`)
+		const svc = createIqCaptureService({
+			config: CFG,
+			storageRoot: missing,
+			protectedMode: true,
+			logger: s.logger,
+			shapes: SHAPES,
+			now: () => s.timers.t,
+			spawn: s.sp.spawn,
+			timers: s.timers,
+			env: {},
+		})
+		expect(await svc.sweep()).toEqual({ removed: 0, left: 0, failed: 0 })
+		expect(svc.state()).toBe("idle")
+		await fsp.mkdir(missing)
+		await svc.start()
+		expect(svc.state()).toBe("on")
+		expect(fs.statSync(path.join(missing, "iq-captures")).isDirectory()).toBe(
+			true,
+		)
+		await svc.stop()
+	})
+})
