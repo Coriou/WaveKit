@@ -166,7 +166,10 @@ describe("TunerController origin tags and test mode", () => {
 			{ frequency: 144_800_000, gainMode: "manual", gain: 250 },
 			{ origin: "rest" },
 		)
-		expect(sent.map(s => s.origin)).toEqual(["rest", "rest", "rest"])
+		// WG10 req 2.8: the first operator frequency on a connection proves the held sample
+		// rate first (once per connection), tagged with the same origin.
+		expect(sent.map(s => s.origin)).toEqual(["rest", "rest", "rest", "rest"])
+		expect(sent[0]?.command).toBe("set-sample-rate")
 	})
 
 	it("reconnect replay reports origin replay", async () => {
