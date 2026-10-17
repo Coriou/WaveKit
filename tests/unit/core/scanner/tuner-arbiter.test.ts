@@ -912,6 +912,105 @@ describe("TunerArbiter lease discipline", () => {
 		expect(h.clock.suppressed).toBe(0)
 	})
 
+	describe("WG9 req 3.1: hop epoch trust by the shared rule", () => {
+		const hop = {
+			centreHz: 446_037_500,
+			gainTenthsDb: null,
+			sampleRateHz: null,
+		}
+
+		it("a proven rate: no rate write, frequency only, commanded with markers", async () => {
+			const h = harness()
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			const pending = await h.arbiter.retune(r.lease, hop)
+			expect(h.tuner.sent.map(c => c.name)).toEqual([
+				"set-test-mode",
+				"set-frequency",
+				"set-test-mode",
+			])
+			expect(pending).toMatchObject({
+				tuningTrust: "commanded",
+				expectMarker: true,
+			})
+		})
+
+		it("a declared-only rate: the hop commands the declared rate first, then stays commanded with markers", async () => {
+			const h = harness()
+			h.tuner.declared.set("rtl", new Set(["frequency", "sampleRate"]))
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			const first = await h.arbiter.retune(r.lease, hop)
+			expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+				["set-sample-rate", 2_048_000],
+				["set-test-mode", 1],
+				["set-frequency", 446_037_500],
+				["set-test-mode", 0],
+			])
+			expect(first).toMatchObject({
+				tuningTrust: "commanded",
+				expectMarker: true,
+				sampleRateHz: 2_048_000,
+			})
+			// Proven now: the next hop sends the frequency only.
+			h.tuner.sent.length = 0
+			const next = await h.arbiter.retune(r.lease, {
+				...hop,
+				centreHz: 447_012_500,
+			})
+			expect(h.tuner.sent.map(c => c.name)).toEqual([
+				"set-test-mode",
+				"set-frequency",
+				"set-test-mode",
+			])
+			expect(next.tuningTrust).toBe("commanded")
+		})
+
+		it("a rate not written on this connection is re-sent once; then frequency only", async () => {
+			const h = harness()
+			h.tuner.connectionWrites = new Set()
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			const first = await h.arbiter.retune(r.lease, hop)
+			expect(h.tuner.sent.map(c => c.name)).toEqual([
+				"set-sample-rate",
+				"set-test-mode",
+				"set-frequency",
+				"set-test-mode",
+			])
+			expect(first.tuningTrust).toBe("commanded")
+			h.tuner.sent.length = 0
+			await h.arbiter.retune(r.lease, { ...hop, centreHz: 447_012_500 })
+			expect(h.tuner.sent.map(c => c.name)).not.toContain("set-sample-rate")
+		})
+
+		it("an unknown rate without a job rate is never written and the hop is unverified", async () => {
+			const h = harness(["sampleRate"])
+			const r = h.arbiter.acquire("a", "rtl", 50)
+			if (!r.ok) throw new Error("acquire failed")
+			const pending = await h.arbiter.retune(r.lease, hop)
+			expect(h.tuner.sent.map(c => c.name)).not.toContain("set-sample-rate")
+			expect(pending.tuningTrust).toBe("unverified")
+		})
+
+		it("an unknown or declared-only frequency is commanded by the hop itself", async () => {
+			for (const setup of [
+				(h: ReturnType<typeof harness>) =>
+					h.tuner.declared.set("rtl", new Set(["frequency"])),
+				(h: ReturnType<typeof harness>) =>
+					h.tuner.known.get("rtl")?.delete("frequency"),
+			]) {
+				const h = harness()
+				setup(h)
+				const r = h.arbiter.acquire("a", "rtl", 50)
+				if (!r.ok) throw new Error("acquire failed")
+				const pending = await h.arbiter.retune(r.lease, hop)
+				expect(pending.tuningTrust).toBe("commanded")
+				expect(h.tuner.sent.map(c => c.name)).not.toContain("set-sample-rate")
+			}
+		})
+	})
+
 	it("reports unknown changed fields as unrestorable and never writes them", async () => {
 		const h = harness(["gain", "gainMode"])
 		const r = h.arbiter.acquire("a", "rtl", 50)
