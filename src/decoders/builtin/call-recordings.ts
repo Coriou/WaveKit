@@ -82,6 +82,90 @@ function isProtectedFile(port: RecordingProtection, file: string): boolean {
 	}
 }
 
+/**
+ * WG9 R2: an operator-configured recording root that is itself a symlink, resolved by
+ * realpath once (operator config is trusted). Deleters use `real` as their base, so a symlink
+ * below it is still refused, and refuse the whole root when the real directory's identity
+ * (dev/ino) no longer matches. Only symlinked roots are pinned: a real directory root keeps
+ * today's per-run checks unchanged.
+ */
+export interface PinnedRecordingRoot {
+	/** The configured path (absolute). */
+	readonly configured: string
+	/** realpath of the configured path at first resolution. */
+	readonly real: string
+	readonly dev: number
+	readonly ino: number
+}
+
+const rootPins = new Map<string, Promise<PinnedRecordingRoot | null>>()
+
+async function resolveRecordingRoot(
+	abs: string,
+): Promise<PinnedRecordingRoot | null> {
+	try {
+		if (!(await fs.lstat(abs)).isSymbolicLink()) return null
+		const real = await fs.realpath(abs)
+		const st = await fs.lstat(real)
+		if (st.isSymbolicLink() || !st.isDirectory()) return null
+		return { configured: abs, real, dev: st.dev, ino: st.ino }
+	} catch {
+		// Missing (or unreadable) at first resolution: today's behaviour.
+		return null
+	}
+}
+
+/**
+ * The pin of a configured recording root, resolved once per process per configured path; null
+ * when the root was not a symlink to a directory at that moment (missing, a real directory, a
+ * dangling link), which keeps today's behaviour for it.
+ */
+export function pinRecordingRoot(
+	dir: string,
+): Promise<PinnedRecordingRoot | null> {
+	const abs = path.resolve(dir)
+	let pin = rootPins.get(abs)
+	if (pin === undefined) {
+		pin = resolveRecordingRoot(abs)
+		rootPins.set(abs, pin)
+	}
+	return pin
+}
+
+/** Test seam: forgets every pin (a fresh process). */
+export function resetRecordingRootPins(): void {
+	rootPins.clear()
+}
+
+/** True while the pinned real root is still the same real directory (fail closed). */
+export async function recordingRootIntact(
+	pin: PinnedRecordingRoot,
+): Promise<boolean> {
+	try {
+		const st = await fs.lstat(pin.real)
+		return (
+			!st.isSymbolicLink() &&
+			st.isDirectory() &&
+			st.dev === pin.dev &&
+			st.ino === pin.ino
+		)
+	} catch {
+		return false
+	}
+}
+
+/** `p` re-based from the configured root onto the pinned real root (other paths unchanged). */
+export function rebaseOnRecordingRoot(
+	pin: PinnedRecordingRoot,
+	p: string,
+): string {
+	const abs = path.resolve(p)
+	if (abs === pin.configured) return pin.real
+	if (abs.startsWith(pin.configured + path.sep))
+		return path.join(pin.real, abs.slice(pin.configured.length + 1))
+	return p
+}
+
 /** dsd-fme's final per-call recording name. */
 export const DSD_FME_CALL_WAV = /^\d{8}_\d{6}_\d{5}_.*_TGT_.*_SRC_.*\.wav$/
 /** dsd-fme's in-progress recording name. */
@@ -186,12 +270,36 @@ async function listWavFilesGuarded(
 	return { files, unsafeSkipped }
 }
 
-/** Applies the retention policy to the dsd-fme recordings directly in `dirs`. */
+/**
+ * Applies the retention policy to the dsd-fme recordings directly in `dirs`. With `root` (the
+ * configured recording directory the dirs live in, WG9 R2), a root that was a symlink at its
+ * first resolution is followed once: the dirs are re-based on its real directory, and a real
+ * directory whose identity changed since is refused (nothing deleted, a count logged).
+ */
 export async function pruneCallRecordings(
 	dirs: readonly string[],
 	retention: CallRecordingRetention,
 	nowMs: number = Date.now(),
+	root?: string,
 ): Promise<PruneResult> {
+	if (root !== undefined) {
+		const pin = await pinRecordingRoot(root)
+		if (pin !== null) {
+			if (!(await recordingRootIntact(pin))) {
+				skipLog().warn(
+					{ rootChanged: 1 },
+					"Per-call recording retention refused a recording root that changed",
+				)
+				return {
+					deleted: [],
+					keptFiles: 0,
+					keptBytes: 0,
+					...(protectionPort !== null ? { protectedSkipped: 0 } : {}),
+				}
+			}
+			dirs = dirs.map(d => rebaseOnRecordingRoot(pin, d))
+		}
+	}
 	let files: RecordingFile[]
 	let unsafeSkipped = 0
 	if (protectionPort === null) {

@@ -787,3 +787,96 @@ describe("round-4 review fixes: a directory swapped during the deleter's awaits 
 		expect(existsSync(join(root, "recordings/dv/d_X/z/inner.bin"))).toBe(true)
 	})
 })
+
+describe("WG9 R2 review fixes (m2, m4)", () => {
+	it("m2: a Keep committed between the caller's pre-check and the analog loop leaves metadata and alias untouched", async () => {
+		const { port, kept } = mutableProtection()
+		let inverses = 0
+		const h = await analogHarness(port, () => inverses++)
+		const name = h.artifact.split("/").at(-1) ?? ""
+		const alias = `${h.discoveryId}~${name}`
+		expect(h.evidence.recordingPath(alias)).not.toBeNull()
+		// removeDiscovery's synchronous holdsKept pre-check passes; the Keep commits before the loop.
+		const pending = h.evidence
+			.removeDiscovery(h.discoveryId)
+			.catch((e: unknown) => e)
+		kept.add(alias)
+		const err = await pending
+		expect(err).toBeInstanceOf(ScannerApiError)
+		expect(err).toMatchObject({
+			code: SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+			statusCode: 409,
+		})
+		expect(inverses).toBe(0)
+		expect(existsSync(join(h.root, h.artifact))).toBe(true)
+		expect(h.evidence.recordingPath(alias)).toBe(join(h.root, h.artifact))
+		// Unkept, the same removal completes.
+		kept.clear()
+		await h.evidence.removeDiscovery(h.discoveryId)
+		expect(inverses).toBe(1)
+		expect(existsSync(join(h.root, h.artifact))).toBe(false)
+	})
+
+	it("m4: eviction blocked by kept recordings warns once with a count (fixed text, no ids)", () => {
+		const warn = vi.fn()
+		const l: Record<string, unknown> = {
+			warn,
+			info: vi.fn(),
+			debug: vi.fn(),
+			error: vi.fn(),
+		}
+		l["child"] = () => l
+		const store = new DiscoveryStore({
+			maxDiscoveries: 2,
+			now: () => T0,
+			newId: counterIds(),
+			discoveryHoldsKept: () => true,
+			logger: l as unknown as ReturnType<typeof createLogger>,
+		})
+		const ingest = (i: number) =>
+			store.ingest(
+				makeObs({
+					id: `a${i}`,
+					centreHz: CH + i * 100_000,
+					startedAt: T0 + i * 1000,
+					blocks: 2,
+				}),
+			)
+		ingest(0)
+		ingest(1)
+		expect(warn).not.toHaveBeenCalled()
+		expect(ingest(2).change).toBe("transient")
+		expect(warn).toHaveBeenCalledTimes(1)
+		expect(warn.mock.calls[0]).toEqual([
+			{ heldByKept: 2 },
+			"Discovery eviction cannot make room: discoveries hold kept recordings",
+		])
+		// The same count again does not repeat the warning on every ingest.
+		ingest(3)
+		expect(warn).toHaveBeenCalledTimes(1)
+		// Without kept recordings blocking (a plain full store of decoded ones), no warning.
+		const quiet = vi.fn()
+		const q: Record<string, unknown> = {
+			warn: quiet,
+			info: vi.fn(),
+			debug: vi.fn(),
+		}
+		q["child"] = () => q
+		const plain = new DiscoveryStore({
+			maxDiscoveries: 2,
+			now: () => T0,
+			newId: counterIds(),
+			logger: q as unknown as ReturnType<typeof createLogger>,
+		})
+		for (const i of [0, 1, 2])
+			plain.ingest(
+				makeObs({
+					id: `b${i}`,
+					centreHz: CH + i * 100_000,
+					startedAt: T0 + i * 1000,
+					blocks: 2,
+				}),
+			)
+		expect(quiet).not.toHaveBeenCalled()
+	})
+})

@@ -682,8 +682,15 @@ recording Keep protects one recording independently.
       can leave orphan recording folders; a crash between delete's rename and
       unlink leaves a `.wavekit-delete-*` directory that nothing sweeps (it may hold
       a displaced foreign file); a failed keep store stops all recording pruning,
-      so the disk can fill until it is fixed; with Keep wired, a symlinked dsd-fme
-      or scanner recording directory is not pruned (logged count). Accepted
+      so the disk can fill until it is fixed; kept scanner recordings can block
+      discovery capacity eviction, so new discoveries are refused while every
+      evictable one holds a kept recording (one warn with a count). A symlinked
+      configured recording root is resolved once at startup (WG9 R2), but a
+      symlinked `recordings/` or `evidence/` folder inside the scanner storage
+      root is still refused (not pruned), and the analog store's internal
+      cleanup paths (abort and recovery cleanup) do not re-check the pinned
+      root's identity, only the retention and discovery-removal entry points
+      do. Accepted
       residual: Node has no `unlinkat`/`fstatat`, so a process of the same user that
       rebinds the private delete directory, or a retention folder, between the last
       identity check and the unlink can redirect that unlink; another user is

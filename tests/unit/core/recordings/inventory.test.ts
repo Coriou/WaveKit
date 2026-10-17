@@ -982,8 +982,9 @@ describe("recordings inventory handle bounds and budgets", () => {
 			scannedFiles: 0,
 			truncated: true,
 		})
-		// dsd dir, root, dv and analog at most, plus one lstat per entered folder
-		expect(over.lstats).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 4)
+		// dsd dir, root, dv and analog at most, plus one lstat per entered folder, plus the
+		// storage root's one-time pin lstat (WG9 R2, once per inventory, not per scan)
+		expect(over.lstats).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 5)
 		expect(over.readdirs).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 2)
 	})
 

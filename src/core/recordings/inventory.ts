@@ -340,6 +340,61 @@ export function createRecordingInventory(
 		}
 	}
 
+	/**
+	 * WG9 R2: a configured root that is itself a symlink, resolved by realpath once (operator
+	 * config is trusted), as the deleters resolve it: its real directory and identity. Null when
+	 * the root was missing, a real directory or a dangling link at first sight (today's
+	 * behaviour). Memoised per configured path for the inventory's lifetime.
+	 */
+	const rootPins = new Map<
+		string,
+		Promise<{ real: string; dev: number; ino: number } | null>
+	>()
+	function pinRoot(
+		abs: string,
+	): Promise<{ real: string; dev: number; ino: number } | null> {
+		let pin = rootPins.get(abs)
+		if (pin === undefined) {
+			pin = (async () => {
+				try {
+					if (!(await lstat(abs)).isSymbolicLink()) return null
+					const real = await sem.run(() => fs.realpath(abs))
+					const st = await lstat(real)
+					if (st.isSymbolicLink() || !st.isDirectory()) return null
+					return { real, dev: st.dev, ino: st.ino }
+				} catch {
+					return null
+				}
+			})()
+			rootPins.set(abs, pin)
+		}
+		return pin
+	}
+
+	/**
+	 * The base to list a configured root from: the root itself when it is not pinned, the
+	 * pinned real directory while its identity holds, or null (counted as a source error) once
+	 * that identity changed, so nothing under it is listed or resolved (fail closed).
+	 */
+	async function rootBase(abs: string, counts: Counts): Promise<string | null> {
+		const pin = await pinRoot(abs)
+		if (pin === null) return abs
+		try {
+			const st = await lstat(pin.real)
+			if (
+				!st.isSymbolicLink() &&
+				st.isDirectory() &&
+				st.dev === pin.dev &&
+				st.ino === pin.ino
+			)
+				return pin.real
+		} catch {
+			// Gone: changed.
+		}
+		counts.sourceErrors++
+		return null
+	}
+
 	/** Current dsd-fme sources: configured order, real directories, first realpath owner wins. */
 	async function dsdSources(counts: Counts): Promise<DsdSource[]> {
 		let configured: readonly { decoderId: string; dir: string }[]
@@ -360,9 +415,9 @@ export function createRecordingInventory(
 				counts.sourceErrors++
 				continue
 			}
-			const dir = path.resolve(entry.dir)
 			try {
-				if (!(await isRealDir(dir))) continue
+				const dir = await rootBase(path.resolve(entry.dir), counts)
+				if (dir === null || !(await isRealDir(dir))) continue
 				const real = await sem.run(() => fs.realpath(dir))
 				if (seen.has(real)) continue
 				seen.add(real)
@@ -374,7 +429,15 @@ export function createRecordingInventory(
 		return out
 	}
 
-	function scannerRoot(counts: Counts): string | null {
+	/** `<scanner storage>/recordings`, under the pinned real storage root when it is a symlink. */
+	async function scannerRoot(counts: Counts): Promise<string | null> {
+		const root = scannerRootConfigured(counts)
+		if (root === null) return null
+		const base = await rootBase(path.dirname(root), counts)
+		return base === null ? null : path.join(base, path.basename(root))
+	}
+
+	function scannerRootConfigured(counts: Counts): string | null {
 		try {
 			const root = options.scannerRecordingsDir()
 			if (root === null) return null
@@ -628,7 +691,7 @@ export function createRecordingInventory(
 			}
 		}
 
-		const root = scannerRoot(counts)
+		const root = await scannerRoot(counts)
 		const memo = new Map<string, number | null>()
 		if (root !== null && !truncated) {
 			let realRoot: string | null = null
@@ -797,7 +860,7 @@ export function createRecordingInventory(
 		const name = sm?.[2]
 		if (d === undefined || name === undefined) return []
 		if (scanId(d, name) !== id) return []
-		const root = scannerRoot(newCounts())
+		const root = await scannerRoot(newCounts())
 		if (root === null || !(await isRealDir(root))) return []
 		const realRoot = await sem.run(() => fs.realpath(root))
 		const out: Location[] = []
