@@ -23,6 +23,19 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `running`, and `dataRate` is KiB/s.
 - Spectrum subscriptions honour `backfillMs` like the core (WG1): up to 64 recent frames of the
   current epoch, oldest first, `backfill: true`, counted in the ack's `backfillFrames`.
+- Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
+  schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
+  bandplans (plus a `pager-466` plan), plan previews from a port of the core's planner (hops,
+  sweep period, poi, estimates, impact naming the running mock decoders, lockouts, issues), jobs
+  (create with takeover consent, pause / resume / cancel / delete, live PATCH with `range-locked`,
+  hits) and discoveries (seeded from `DISCOVERY_SEEDS`, the core's filters, sort, cursor, operator
+  PATCH, delete, observations, listen). A passive in-window job is always present; a sweep steps the
+  mock tuner hop by hop (origin `scanner`), holds on active mock signals and emits `scanner:job`,
+  `scanner:progress` (2 Hz), `scanner:discovery`, `scanner:activity` and `scanner:status` through a
+  per-key limiter like the core's. Operator tuner writes pause it `preempted-operator` until
+  `resumeAt` (60 s after the last write by default); identify results update their discovery.
+  Not mocked: decoded-elsewhere and band-plan skip layers, probes, recordings, evidence, captures
+  (an empty list), monitor jobs.
 - `data.ts` holds the canvas data (signals, band plan, decoders, messages, identify plans),
   `spectrum.ts` the frame synthesis, `audio.ts` the audio server, `server.ts` the routes and
   `buildMockServer()` (used by `web/tests/mock`).

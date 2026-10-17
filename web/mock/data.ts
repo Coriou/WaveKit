@@ -8,16 +8,20 @@
 import type {
 	ActivityCategory,
 	Band,
+	Bandplan,
 	BandChannel,
 	BandProvenance,
 	DecoderInfo,
+	DiscoveryMetadata,
 	DisplayGroup,
+	Identity,
 	LiveAudioConfig,
 	PlanProvenance,
 	ResolvedBand,
 	ResolvedBandPlanView,
 	SavedFrequencyInput,
 	ScannerClass,
+	ScannerConfidence,
 	ScannerProtocol,
 } from "@wavekit/api-types"
 
@@ -1723,3 +1727,594 @@ export const MOCK_SAVED_FREQUENCIES: readonly SavedFrequencyInput[] = [
 		group: "Aviation",
 	},
 ]
+
+// --- Scanner (GET /api/scanner/bandplans, seeded discoveries) ---
+
+const MHZ = (mhz: number) => Math.round(mhz * 1e6)
+const LAND_MOBILE_OBW = [9000, 11_000, 4500]
+const LAND_MOBILE: ScannerProtocol[] = [
+	"dmr",
+	"analog-fm",
+	"p25p1",
+	"nxdn48",
+	"nxdn96",
+]
+
+/**
+ * The core's built-in bandplans for region EU (src/core/scanner/bandplan/builtin.ts through
+ * bandplansFor("EU"), same order and values), plus `pager-466`: the French 466 MHz paging block
+ * of the canvas band plan (`pg466`), which the core has no built-in for.
+ */
+export const SCANNER_BANDPLANS: readonly Bandplan[] = [
+	{
+		id: "airband",
+		region: "EU",
+		name: "Airband (8.33 / 25 kHz)",
+		ranges: [
+			{
+				startHz: MHZ(118),
+				endHz: MHZ(137),
+				rasters: [
+					{ spacingHz: 25_000, firstChannelHz: MHZ(118) },
+					{ spacingHz: 25_000 / 3, firstChannelHz: MHZ(118) },
+				],
+				obwHz: [],
+				protocols: ["analog-am"],
+				bandplanId: "airband",
+			},
+		],
+	},
+	{
+		id: "cb",
+		region: "EU",
+		name: "CB (40 CEPT channels)",
+		ranges: (
+			[
+				[26.965, 26.985],
+				[27.005, 27.035],
+				[27.055, 27.085],
+				[27.105, 27.135],
+				[27.155, 27.185],
+				[27.205, 27.405],
+			] as const
+		).map(([a, b]) => ({
+			startHz: MHZ(a),
+			endHz: MHZ(b),
+			rasters: [{ spacingHz: 10_000, firstChannelHz: MHZ(a) }],
+			obwHz: [],
+			protocols: ["analog-am", "analog-fm"] as ScannerProtocol[],
+			bandplanId: "cb",
+		})),
+	},
+	{
+		id: "ism-169",
+		region: "EU",
+		name: "169 MHz metering (Wize / wireless M-Bus)",
+		ranges: [
+			{
+				startHz: MHZ(169.4),
+				endHz: MHZ(169.475),
+				obwHz: [],
+				protocols: ["ism"],
+				bandplanId: "ism-169",
+			},
+		],
+	},
+	{
+		id: "pager-vhf",
+		region: "EU",
+		name: "VHF paging (169 MHz metering band excluded)",
+		ranges: [
+			{
+				startHz: MHZ(137),
+				endHz: MHZ(169.4) - 1,
+				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(137) }],
+				obwHz: [12_000],
+				protocols: ["pocsag", "flex"],
+				bandplanId: "pager-vhf",
+			},
+			{
+				startHz: MHZ(169.475) + 1,
+				endHz: MHZ(174),
+				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(137) }],
+				obwHz: [12_000],
+				protocols: ["pocsag", "flex"],
+				bandplanId: "pager-vhf",
+			},
+		],
+	},
+	{
+		id: "pmr446",
+		region: "EU",
+		name: "PMR446",
+		ranges: [
+			{
+				startHz: MHZ(446),
+				endHz: MHZ(446.2),
+				rasters: [
+					{ spacingHz: 12_500, firstChannelHz: MHZ(446.00625) },
+					{ spacingHz: 6250, firstChannelHz: MHZ(446.003125) },
+				],
+				obwHz: [9000, 11_000],
+				protocols: ["analog-fm", "dmr", "dpmr"],
+				bandplanId: "pmr446",
+			},
+		],
+	},
+	{
+		id: "dpmr446",
+		region: "EU",
+		name: "dPMR446 / NXDN 6.25 kHz",
+		ranges: [
+			{
+				startHz: MHZ(446),
+				endHz: MHZ(446.2),
+				rasters: [{ spacingHz: 6250, firstChannelHz: MHZ(446.003125) }],
+				obwHz: [4500],
+				protocols: ["dpmr", "nxdn48"],
+				bandplanId: "dpmr446",
+			},
+		],
+	},
+	{
+		id: "uhf-land-mobile",
+		region: "all",
+		name: "UHF land mobile",
+		ranges: [
+			{
+				startHz: MHZ(400),
+				endHz: MHZ(470),
+				rasters: [
+					{ spacingHz: 12_500, firstChannelHz: MHZ(400.00625) },
+					{ spacingHz: 6250, firstChannelHz: MHZ(400.003125) },
+				],
+				obwHz: LAND_MOBILE_OBW,
+				protocols: LAND_MOBILE,
+				bandplanId: "uhf-land-mobile",
+			},
+		],
+	},
+	{
+		id: "vhf-land-mobile",
+		region: "all",
+		name: "VHF land mobile",
+		ranges: [
+			{
+				startHz: MHZ(136),
+				endHz: MHZ(174),
+				rasters: [
+					{ spacingHz: 12_500, firstChannelHz: MHZ(136.00625) },
+					{ spacingHz: 6250, firstChannelHz: MHZ(136.003125) },
+				],
+				obwHz: LAND_MOBILE_OBW,
+				protocols: [...LAND_MOBILE, "pocsag"],
+				bandplanId: "vhf-land-mobile",
+			},
+		],
+	},
+	{
+		id: "amateur-2m",
+		region: "EU",
+		name: "Amateur 2 m",
+		ranges: [
+			{
+				startHz: MHZ(144),
+				endHz: MHZ(146),
+				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(144) }],
+				obwHz: [11_000, 16_000],
+				protocols: ["analog-fm", "aprs", "dstar", "dmr", "ysf"],
+				bandplanId: "amateur-2m",
+			},
+		],
+	},
+	{
+		id: "amateur-70cm",
+		region: "EU",
+		name: "Amateur 70 cm",
+		ranges: [
+			{
+				startHz: MHZ(430),
+				endHz: MHZ(440),
+				rasters: [
+					{ spacingHz: 12_500, firstChannelHz: MHZ(430) },
+					{ spacingHz: 25_000, firstChannelHz: MHZ(430) },
+				],
+				obwHz: [9000, 11_000, 16_000],
+				protocols: ["analog-fm", "dstar", "dmr", "ysf", "p25p1"],
+				bandplanId: "amateur-70cm",
+			},
+		],
+	},
+	{
+		id: "aprs",
+		region: "EU",
+		name: "APRS 144.800",
+		ranges: [
+			{
+				startHz: MHZ(144.8) - 8000,
+				endHz: MHZ(144.8) + 8000,
+				rasters: [{ spacingHz: 25_000, firstChannelHz: MHZ(144.8) }],
+				obwHz: [16_000],
+				protocols: ["aprs"],
+				bandplanId: "aprs",
+			},
+		],
+	},
+	{
+		id: "ism-433",
+		region: "EU",
+		name: "ISM 433 MHz",
+		ranges: [
+			{
+				startHz: MHZ(433.05),
+				endHz: MHZ(434.79),
+				obwHz: [],
+				protocols: ["ism"],
+				bandplanId: "ism-433",
+			},
+		],
+	},
+	{
+		id: "ism-868",
+		region: "EU",
+		name: "ISM 868 MHz",
+		ranges: [
+			{
+				startHz: MHZ(863),
+				endHz: MHZ(870),
+				obwHz: [],
+				protocols: ["ism"],
+				bandplanId: "ism-868",
+			},
+		],
+	},
+	{
+		id: "marine-vhf",
+		region: "all",
+		name: "Marine VHF (AIS excluded)",
+		ranges: [
+			{
+				startHz: MHZ(156),
+				endHz: MHZ(161.9625),
+				rasters: [{ spacingHz: 25_000, firstChannelHz: MHZ(156) }],
+				obwHz: [16_000],
+				protocols: ["analog-fm"],
+				bandplanId: "marine-vhf",
+			},
+			{
+				startHz: MHZ(161.9875),
+				endHz: MHZ(162.0125),
+				rasters: [{ spacingHz: 25_000, firstChannelHz: MHZ(156) }],
+				obwHz: [16_000],
+				protocols: ["analog-fm"],
+				bandplanId: "marine-vhf",
+			},
+		],
+	},
+	{
+		id: "pager-466",
+		region: "EU",
+		name: "Pagers 466 MHz (e*Message)",
+		ranges: [
+			{
+				startHz: MHZ(466.025),
+				endHz: MHZ(466.23),
+				rasters: [{ spacingHz: 12_500, firstChannelHz: MHZ(466.025) }],
+				obwHz: [12_000],
+				protocols: ["pocsag", "flex"],
+				bandplanId: "pager-466",
+			},
+		],
+	},
+]
+
+/** A seeded discovery (Brittany), on one of MOCK_SIGNALS; the scanner mock fills the rest. */
+export interface DiscoverySeed {
+	mhz: number
+	protocol: ScannerProtocol
+	confidence: ScannerConfidence
+	class: ScannerClass
+	identity?: Identity
+	metadata?: Partial<DiscoveryMetadata>
+	encrypted?: boolean
+	operator?: {
+		label?: string
+		notes?: string
+		lockout?: boolean
+		keep?: boolean
+	}
+	/** Last heard this many minutes ago. */
+	agoMin: number
+	/** First heard this many days ago. */
+	firstDays: number
+	observations: number
+	/** Also heard by the seeded marine sweep (MOCK_SWEEP_JOB_ID). */
+	swept?: boolean
+}
+
+export const DISCOVERY_SEEDS: readonly DiscoverySeed[] = [
+	{
+		mhz: 161.15,
+		protocol: "dmr",
+		confidence: "decoded",
+		class: "tdma-ms",
+		identity: { kind: "dmr-cc", value: "1" },
+		metadata: { talkgroups: ["2081", "9"], sources: ["2081045"], slots: [1] },
+		operator: { label: "DMR repeater", keep: true },
+		agoMin: 1,
+		firstDays: 21,
+		observations: 412,
+	},
+	{
+		mhz: 163.0875,
+		protocol: "p25p1",
+		confidence: "decoded",
+		class: "fsk4-12k5",
+		identity: { kind: "p25-nac", value: "293" },
+		metadata: { talkgroups: ["1201"], sources: ["4410022"] },
+		agoMin: 9,
+		firstDays: 12,
+		observations: 88,
+	},
+	{
+		mhz: 160.45,
+		protocol: "pocsag",
+		confidence: "decoded",
+		class: "fsk2-wide",
+		identity: { kind: "pocsag-capcode", value: "1234567" },
+		metadata: { capcodes: ["1234567", "1234570"] },
+		agoMin: 2,
+		firstDays: 30,
+		observations: 960,
+	},
+	{
+		mhz: 466.025,
+		protocol: "flex",
+		confidence: "candidate",
+		class: "fsk2-wide",
+		agoMin: 240,
+		firstDays: 4,
+		observations: 37,
+	},
+	{
+		mhz: 156.8,
+		protocol: "analog-fm",
+		confidence: "classified",
+		class: "analog-fm",
+		operator: {
+			label: "Marine ch 16",
+			notes: "Distress and calling; traffic moves to a working channel",
+			keep: true,
+		},
+		agoMin: 6,
+		firstDays: 27,
+		observations: 233,
+		swept: true,
+	},
+	{
+		mhz: 156.6,
+		protocol: "analog-fm",
+		confidence: "classified",
+		class: "analog-fm",
+		operator: { label: "Port ops ch 12" },
+		agoMin: 35,
+		firstDays: 27,
+		observations: 61,
+		swept: true,
+	},
+	{
+		mhz: 144.8,
+		protocol: "aprs",
+		confidence: "decoded",
+		class: "afsk-fm",
+		identity: { kind: "aprs-call", value: "F4ABC-9" },
+		metadata: { callsigns: ["F4ABC-9", "F6XYZ-13"] },
+		agoMin: 3,
+		firstDays: 30,
+		observations: 1204,
+	},
+	{
+		mhz: 145.5,
+		protocol: "analog-fm",
+		confidence: "classified",
+		class: "analog-fm",
+		agoMin: 180,
+		firstDays: 9,
+		observations: 14,
+	},
+	{
+		mhz: 145.6375,
+		protocol: "analog-fm",
+		confidence: "classified",
+		class: "analog-fm",
+		metadata: { ctcssHz: 123 },
+		operator: { label: "Relay Brest" },
+		agoMin: 50,
+		firstDays: 18,
+		observations: 73,
+	},
+	{
+		mhz: 433.92,
+		protocol: "ism",
+		confidence: "decoded",
+		class: "ook-burst",
+		identity: { kind: "ism-model", value: "Acurite-Tower" },
+		metadata: { ismModels: ["Acurite-Tower", "Toyota", "Generic-Remote"] },
+		agoMin: 1,
+		firstDays: 25,
+		observations: 2210,
+	},
+	{
+		mhz: 433.075,
+		protocol: "unknown",
+		confidence: "activity",
+		class: "unknown",
+		agoMin: 600,
+		firstDays: 2,
+		observations: 3,
+	},
+	{
+		mhz: 446.00625,
+		protocol: "analog-fm",
+		confidence: "classified",
+		class: "analog-fm",
+		metadata: { ctcssHz: 77 },
+		agoMin: 15,
+		firstDays: 14,
+		observations: 140,
+	},
+	{
+		mhz: 446.03125,
+		protocol: "analog-fm",
+		confidence: "candidate",
+		class: "analog-fm",
+		agoMin: 95,
+		firstDays: 6,
+		observations: 22,
+	},
+	{
+		mhz: 446.09375,
+		protocol: "dmr",
+		confidence: "decoded",
+		class: "tdma-ms",
+		identity: { kind: "dmr-cc", value: "3" },
+		metadata: { talkgroups: ["99"], slots: [1] },
+		encrypted: true,
+		agoMin: 420,
+		firstDays: 3,
+		observations: 11,
+	},
+	{
+		mhz: 160.625,
+		protocol: "analog-fm",
+		confidence: "classified",
+		class: "analog-fm",
+		metadata: { ctcssHz: 88.5 },
+		agoMin: 4,
+		firstDays: 30,
+		observations: 512,
+		swept: true,
+	},
+	{
+		mhz: 160.9,
+		protocol: "carrier",
+		confidence: "activity",
+		class: "carrier",
+		operator: { label: "Spur", lockout: true },
+		agoMin: 1,
+		firstDays: 30,
+		observations: 4900,
+	},
+	{
+		mhz: 161.425,
+		protocol: "analog-fm",
+		confidence: "classified",
+		class: "analog-fm",
+		agoMin: 20,
+		firstDays: 11,
+		observations: 45,
+	},
+	{
+		mhz: 162.4,
+		protocol: "carrier",
+		confidence: "activity",
+		class: "carrier",
+		agoMin: 1,
+		firstDays: 30,
+		observations: 3120,
+	},
+	{
+		mhz: 161.975,
+		protocol: "ais",
+		confidence: "decoded",
+		class: "gmsk-narrow",
+		identity: { kind: "ais-mmsi", value: "227006760" },
+		agoMin: 1,
+		firstDays: 30,
+		observations: 8800,
+	},
+	{
+		mhz: 162.025,
+		protocol: "ais",
+		confidence: "decoded",
+		class: "gmsk-narrow",
+		identity: { kind: "ais-mmsi", value: "228237700" },
+		agoMin: 1,
+		firstDays: 30,
+		observations: 7650,
+	},
+	{
+		mhz: 131.725,
+		protocol: "acars",
+		confidence: "decoded",
+		class: "unknown",
+		identity: { kind: "acars-reg", value: "F-GKXA" },
+		agoMin: 8,
+		firstDays: 16,
+		observations: 301,
+	},
+	{
+		mhz: 136.975,
+		protocol: "vdl2",
+		confidence: "decoded",
+		class: "unknown",
+		identity: { kind: "vdl2-addr", value: "3944A1" },
+		agoMin: 5,
+		firstDays: 16,
+		observations: 655,
+	},
+	{
+		mhz: 118.1,
+		protocol: "analog-am",
+		confidence: "classified",
+		class: "analog-fm",
+		operator: { label: "Tower" },
+		agoMin: 12,
+		firstDays: 16,
+		observations: 190,
+	},
+	{
+		mhz: 119.7,
+		protocol: "analog-am",
+		confidence: "candidate",
+		class: "analog-fm",
+		agoMin: 75,
+		firstDays: 5,
+		observations: 19,
+	},
+	{
+		mhz: 868.3,
+		protocol: "ism",
+		confidence: "decoded",
+		class: "fsk2-wide",
+		identity: { kind: "ism-model", value: "LaCrosse-TX29IT" },
+		metadata: { ismModels: ["LaCrosse-TX29IT", "Fineoffset-WH51"] },
+		agoMin: 2,
+		firstDays: 20,
+		observations: 1530,
+	},
+	{
+		mhz: 868.95,
+		protocol: "ism",
+		confidence: "decoded",
+		class: "fsk2-wide",
+		identity: { kind: "ism-model", value: "Wireless-MBus" },
+		metadata: { ismModels: ["Wireless-MBus"] },
+		agoMin: 30,
+		firstDays: 8,
+		observations: 96,
+	},
+	{
+		mhz: 869.525,
+		protocol: "lora",
+		confidence: "decoded",
+		class: "wideband",
+		identity: { kind: "lora-node", value: "!a1b2c3d4" },
+		agoMin: 7,
+		firstDays: 10,
+		observations: 210,
+	},
+]
+
+/** The seeded, ended marine sweep the swept discoveries list in `jobIds`. */
+export const MOCK_SWEEP_JOB_ID = "j_01JBRZMOCKMARINE0000000000"

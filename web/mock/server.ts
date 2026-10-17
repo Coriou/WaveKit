@@ -38,6 +38,8 @@ import type {
 import { createAudioServer } from "./audio.ts"
 import { registerReceiverMock } from "./receiver.ts"
 import type { ReceiverMockControls } from "./receiver.ts"
+import { registerScannerMock } from "./scanner.ts"
+import type { ScannerMock } from "./scanner.ts"
 import {
 	DECODER_SEEDS,
 	DEFAULT_CENTER_HZ,
@@ -87,6 +89,8 @@ export interface MockServer {
 	close(): Promise<void>
 	/** Receiver controls (./receiver.ts): simulate a relay client taking the tuner. */
 	receiver: ReceiverMockControls
+	/** Scanner mock (./scanner.ts). */
+	scanner: ScannerMock
 }
 
 /** The core's rtl_tcp frequency range (TunerValidationError beyond it). */
@@ -442,7 +446,6 @@ export async function buildMockServer(
 	}
 	const activity: ActivitySummary[] = []
 	let seq = 1000
-	const jobs = new Map<string, ScanJob>()
 	let jobCounter = 0
 	const clients = new Set<Client>()
 	const timers = new Set<ReturnType<typeof setTimeout>>()
@@ -1011,10 +1014,10 @@ export async function buildMockServer(
 				targets: [event("waiting-for-signal", trialsAt(-1))],
 			},
 		}
-		jobs.set(id, job)
+		scanner.identifyJobs.set(id, job)
 
 		const update = (e: ScannerIdentifyEventData, done = false) => {
-			const current = jobs.get(id)
+			const current = scanner.identifyJobs.get(id)
 			if (
 				!current ||
 				(current.state !== "running" && current.state !== "starting")
@@ -1071,13 +1074,19 @@ export async function buildMockServer(
 			return r
 		}
 		const steps = plan.trials.length
-		const finish = () =>
-			update(event(plan.state, trialsAt(steps), resultFor()), true)
+		const finish = () => {
+			const current = scanner.identifyJobs.get(id)
+			if (!current || current.state !== "running") return
+			const result = resultFor()
+			// the core records the identify observation: the result names its discovery
+			scanner.identified(id, result)
+			update(event(plan.state, trialsAt(steps), result), true)
+		}
 		// The core's order: waiting-for-signal first, then the job turns "running" (about 1 s later on a
 		// real core; compressed here).
 		later(80, () => update(event("waiting-for-signal", trialsAt(-1))))
 		later(300, () => {
-			const current = jobs.get(id)
+			const current = scanner.identifyJobs.get(id)
 			if (!current || current.state !== "starting") return
 			current.state = "running"
 			current.startedAt = new Date().toISOString()
@@ -1164,6 +1173,58 @@ export async function buildMockServer(
 		},
 	)
 
+	/** A frequency write as the core's tuner controller applies it (`rest` or `scanner` origin). */
+	const applyFrequency = (hz: number, origin: "rest" | "scanner") => {
+		const sourceId = MOCK_SOURCE_ID
+		const before = new Map(decoders().map(d => [d.id, d.suspended]))
+		if (hz !== tuner.frequency) {
+			epoch += 1
+			epochStartedAt = Date.now()
+		}
+		tuner.frequency = hz
+		tuner.commandCount += 1
+		tuner.lastCommandAt = new Date().toISOString()
+		broadcast("tuner", "tuner:command-sent", {
+			sourceId,
+			command: "set_frequency",
+			value: hz,
+			origin,
+		})
+		broadcast("tuner", "tuner:state-changed", { sourceId, state: tuner })
+		for (const d of decoders()) {
+			if (before.get(d.id) === d.suspended) continue
+			if (d.suspended) suspendedSince.set(d.id, new Date().toISOString())
+			else suspendedSince.delete(d.id)
+			broadcast(
+				"decoders",
+				"decoder:status",
+				decoders().find(x => x.id === d.id),
+			)
+		}
+		broadcast("sources", "source:status", sourceStatus())
+	}
+
+	// --- Scanner (./scanner.ts): status, settings, bandplans, plans, jobs, discoveries. ---
+	const scanner = registerScannerMock(app, {
+		sourceId: MOCK_SOURCE_ID,
+		tuner,
+		broadcast,
+		retune: hz => applyFrequency(hz, "scanner"),
+		decoders,
+		liveStatus,
+		liveListen: offsetHz => {
+			live.config = { ...live.config, offsetHz, sourceId: MOCK_SOURCE_ID }
+			broadcast("live-audio", "live-audio:config", liveStatus().config)
+			if (!live.running) {
+				live.running = true
+				broadcast("live-audio", "live-audio:started", {
+					sourceId: MOCK_SOURCE_ID,
+				})
+			}
+			broadcast("live-audio", "live-audio:status", liveStatus())
+		},
+	})
+
 	const tunerNotFound = (reply: FastifyReply, sourceId: string) =>
 		reply.code(404).send({
 			error: "TunerSourceNotFoundError",
@@ -1201,32 +1262,9 @@ export async function buildMockServer(
 					code: "TUNER_VALIDATION_ERROR",
 					message: `frequency out of range: ${hz} (expected ${TUNER_MIN_HZ}-${TUNER_MAX_HZ})`,
 				})
-			const before = new Map(decoders().map(d => [d.id, d.suspended]))
-			if (hz !== tuner.frequency) {
-				epoch += 1
-				epochStartedAt = Date.now()
-			}
-			tuner.frequency = hz
-			tuner.commandCount += 1
-			tuner.lastCommandAt = new Date().toISOString()
-			broadcast("tuner", "tuner:command-sent", {
-				sourceId,
-				command: "set_frequency",
-				value: hz,
-				origin: "rest",
-			})
-			broadcast("tuner", "tuner:state-changed", { sourceId, state: tuner })
-			for (const d of decoders()) {
-				if (before.get(d.id) === d.suspended) continue
-				if (d.suspended) suspendedSince.set(d.id, new Date().toISOString())
-				else suspendedSince.delete(d.id)
-				broadcast(
-					"decoders",
-					"decoder:status",
-					decoders().find(x => x.id === d.id),
-				)
-			}
-			broadcast("sources", "source:status", sourceStatus())
+			applyFrequency(hz, "rest")
+			// an operator write: a running sweep pauses (preempted-operator)
+			scanner.operatorWrite()
 			return tuner
 		},
 	)
@@ -1236,6 +1274,7 @@ export async function buildMockServer(
 		sourceId: MOCK_SOURCE_ID,
 		tuner,
 		broadcast,
+		onCommand: () => scanner.operatorWrite(),
 		restartStream: () => {
 			// the core restarts the IQ stream: spectrum history never crosses the new epoch
 			epoch += 1
@@ -1463,6 +1502,14 @@ export async function buildMockServer(
 					message: `unknown scanner source ${sourceId}`,
 					correlationId: randomUUID(),
 				})
+			const holder = scanner.sweepHolder()
+			if (holder !== null)
+				return reply.code(409).send({
+					error: "ScannerApiError",
+					code: "SCANNER_SOURCE_BUSY",
+					message: `A sweep (scanner job ${holder}) holds this source's tuner; identify works in a still window`,
+					details: { reason: "held", holderJobId: holder },
+				})
 			// Identify of the whole window: the mock answers for the strongest signal in it.
 			const centre = tuner.frequency
 			const half = (SAMPLE_RATE_HZ * USABLE_FRACTION) / 2
@@ -1482,20 +1529,6 @@ export async function buildMockServer(
 				.send(identify(hz, target.bandwidthHz, timeoutMs ?? 15_000))
 		},
 	)
-	app.get<{ Params: { id: string } }>(
-		"/api/scanner/jobs/:id",
-		async (request, reply) => {
-			const job = jobs.get(request.params.id)
-			if (!job)
-				return reply.code(404).send({
-					error: "NotFound",
-					code: "SCANNER_NOT_FOUND",
-					message: `Job ${request.params.id} not found`,
-				})
-			return job
-		},
-	)
-
 	app.get("/api/activity", async (request, reply) => {
 		const params = (request.query ?? {}) as Record<string, unknown>
 		let query: ActivityQuery
@@ -1845,6 +1878,7 @@ export async function buildMockServer(
 		app,
 		audio,
 		receiver,
+		scanner,
 		async listen() {
 			await new Promise<void>((resolve, reject) => {
 				audio.once("error", reject)

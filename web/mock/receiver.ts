@@ -32,6 +32,8 @@ export interface ReceiverMockContext {
 	restartStream: () => void
 	/** Retunes through the mock's frequency route logic (PATCH config with `frequency`). */
 	retune: (hz: number) => Promise<void>
+	/** An operator (REST) tuner write was sent: the scanner mock pauses a running sweep. */
+	onCommand?: () => void
 }
 
 export interface ReceiverMockControls {
@@ -214,6 +216,7 @@ export function registerReceiverMock(
 			origin: "rest",
 		})
 		stateChanged()
+		ctx.onCommand?.()
 	}
 
 	const known = (field: NonNullable<TunerState["unknownFields"]>[number]) => {
