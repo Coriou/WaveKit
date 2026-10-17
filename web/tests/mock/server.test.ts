@@ -279,6 +279,49 @@ describe("mock server REST", () => {
 			{ code: "ACTIVITY_QUERY_INVALID" },
 		)
 	})
+
+	it("searches activity by whole words, counts categories and returns records", async () => {
+		const found = (
+			await inject("GET", "/api/activity?text=1234567&limit=50")
+		).json<ActivitySearchPage>()
+		expect(found.items.length).toBeGreaterThan(0)
+		expect(
+			(
+				await inject("GET", "/api/activity?text=123456&limit=50")
+			).json<ActivitySearchPage>().items,
+		).toHaveLength(0)
+		const facets = (
+			await inject("POST", "/api/activity/facets", {
+				query: {},
+				dimensions: ["category"],
+			})
+		).json<{ facets: Record<string, { value: string; count: number }[]> }>()
+		const paging = facets.facets["category"]?.find(f => f.value === "paging")
+		expect(paging?.count).toBeGreaterThan(0)
+
+		const all = (
+			await inject("GET", "/api/activity?limit=500")
+		).json<ActivitySearchPage>().items
+		const reception = all.find(i => i.kind === "decoder-reception")
+		const analog = all.find(i => i.kind === "analog-transmission")
+		const gap = all.find(i => i.kind === "ingestion-gap")
+		expect(gap?.title).toBe("Ingestion gap (rate-limited)")
+		const record = (
+			await inject("GET", `/api/activity/${reception?.eventId ?? ""}`)
+		).json<{
+			kind: string
+			payload: { fields: unknown[]; decodedData: unknown }
+		}>()
+		expect(record.kind).toBe("decoder-reception")
+		expect(record.payload.fields).toEqual(reception?.fields)
+		expect(
+			(await inject("GET", `/api/activity/${analog?.eventId ?? ""}`)).json(),
+		).toMatchObject({
+			kind: "analog-transmission",
+			payload: { closeReason: "squelch" },
+		})
+		expect((await inject("GET", "/api/activity/evt_nope")).statusCode).toBe(404)
+	})
 })
 
 interface Envelope {

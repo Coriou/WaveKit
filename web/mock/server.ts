@@ -19,6 +19,7 @@ import {
 } from "@wavekit/api-types"
 import type {
 	ActivityQuery,
+	ActivityRecord,
 	ActivitySearchPage,
 	ActivitySummary,
 	DecoderInfo,
@@ -139,6 +140,7 @@ const ACTIVITY_PARAMS = new Set([
 	"pageToken",
 ])
 const ACTIVITY_ID = /^[A-Za-z0-9_-]{1,64}$/
+const WORD = /[\p{L}\p{N}]+/gu
 
 interface SpectrumSub {
 	sourceId: string
@@ -198,11 +200,22 @@ function matchesQuery(item: ActivitySummary, q: ActivityQuery): boolean {
 	if (q.producedAt?.to !== undefined && item.producedAt > q.producedAt.to)
 		return false
 	if (q.text !== undefined) {
-		const needle = q.text.toLowerCase()
-		const hay = [item.title ?? "", ...item.fields.map(f => String(f.value))]
-			.join(" ")
-			.toLowerCase()
-		if (!hay.includes(needle)) return false
+		// The core's FTS: every word of the text must be a whole word of the event (AND).
+		const words = q.text.toLowerCase().match(WORD) ?? []
+		if (words.length > 0) {
+			const hay = new Set(
+				[
+					item.title ?? "",
+					item.protocol ?? "",
+					item.entityKey ?? "",
+					...item.fields.map(f => String(f.value)),
+				]
+					.join(" ")
+					.toLowerCase()
+					.match(WORD) ?? [],
+			)
+			if (!words.every(w => hay.has(w))) return false
+		}
 	}
 	return true
 }
@@ -264,6 +277,97 @@ function queryFromWire(raw: unknown): ActivityQuery {
 	if (raw === undefined) return {}
 	if (!isRecord(raw)) throw new QueryError("query must be an object")
 	return raw as ActivityQuery
+}
+
+/** The stored record behind a mock summary (GET /api/activity/:eventId). */
+function recordOf(item: ActivitySummary): ActivityRecord {
+	const base = {
+		version: 1 as const,
+		eventId: item.eventId,
+		commitSeq: item.commitSeq,
+		producedAt: item.producedAt,
+		receivedAt: item.receivedAt,
+	}
+	const field = (key: string) => item.fields.find(f => f.key === key)?.value
+	if (item.kind === "ingestion-gap") {
+		const dropped = field("dropped")
+		return {
+			...base,
+			kind: "ingestion-gap",
+			payload: {
+				reason: "rate-limited",
+				dropped: typeof dropped === "number" ? dropped : 0,
+				decoderIds: item.decoderId ? [item.decoderId] : [],
+				fromReceivedAt: item.receivedAt,
+				toReceivedAt: item.receivedAt,
+			},
+		}
+	}
+	if (item.kind === "analog-transmission") {
+		const ms = field("durationMs")
+		const durationMs = typeof ms === "number" ? ms : 0
+		const ctcss = field("ctcssHz")
+		const mod = field("modulation")
+		const dtmf = field("dtmf")
+		return {
+			...base,
+			kind: "analog-transmission",
+			payload: {
+				transmissionId: item.eventId,
+				sourceId: item.sourceId ?? MOCK_SOURCE_ID,
+				startedAt: new Date(
+					Date.parse(item.producedAt) - durationMs,
+				).toISOString(),
+				endedAt: item.producedAt,
+				durationMs,
+				frequency:
+					item.frequencyHz === null
+						? null
+						: { hz: item.frequencyHz, tuningTrust: "commanded" },
+				modulation: mod === "am" ? "am" : "nfm",
+				bandwidthHz: 12_500,
+				squelchMode: "auto",
+				thresholdDbfs: -62,
+				peakChannelPowerDbfs: -38.5,
+				meanChannelPowerDbfs: -44.2,
+				closeReason: "squelch",
+				tone: {
+					ctcssHz: typeof ctcss === "number" ? ctcss : null,
+					dtmf: typeof dtmf === "string" ? dtmf : null,
+					dcs: null,
+				},
+			},
+		}
+	}
+	const decodedData: Record<string, string | number | boolean | null> = {}
+	for (const f of item.fields) decodedData[f.key] = f.value
+	const payload = {
+		version: 1 as const,
+		eventId: item.eventId,
+		producedAt: item.producedAt,
+		receivedAt: item.receivedAt,
+		decoderId: item.decoderId ?? "unknown",
+		outputType: "message",
+		protocol: item.protocol,
+		category: item.category,
+		entityKey: item.entityKey,
+		title: item.title,
+		fields: item.fields,
+		provenance: {
+			sourceId: item.sourceId,
+			frequency:
+				item.frequencyHz === null
+					? null
+					: {
+							hz: item.frequencyHz,
+							basis: "channel" as const,
+							tuningTrust: "commanded" as const,
+						},
+		},
+		decodedData,
+		...(item.position ? { position: item.position } : {}),
+	}
+	return { ...base, kind: "decoder-reception", payload }
 }
 
 const emptyMetadata = (): DiscoveryMetadata => ({
@@ -528,17 +632,23 @@ export async function buildMockServer(
 					build: t => {
 						seq += 1
 						const iso = new Date(t).toISOString()
+						// The core's transmission summary fields (src/core/activity/storage/row.ts).
 						const fields: ActivitySummary["fields"][number][] = [
 							{
-								key: "duration",
+								key: "durationMs",
 								label: "Duration",
-								value: tx.durationMs / 1000,
-								unit: "s",
+								value: tx.durationMs,
+								unit: "ms",
+							},
+							{
+								key: "modulation",
+								label: "Modulation",
+								value: tx.hz < 137e6 ? "am" : "nfm",
 							},
 						]
 						if (tx.ctcssHz !== null)
 							fields.push({
-								key: "ctcss",
+								key: "ctcssHz",
 								label: "CTCSS",
 								value: tx.ctcssHz,
 								unit: "Hz",
@@ -553,7 +663,7 @@ export async function buildMockServer(
 							receivedAt: iso,
 							decoderId: null,
 							sourceId: MOCK_SOURCE_ID,
-							protocol: null,
+							protocol: "analog",
 							category: "voice",
 							frequencyHz: tx.hz,
 							entityKey: null,
@@ -564,6 +674,29 @@ export async function buildMockServer(
 				})
 			}
 		}
+		// One ingestion gap in the history, as the core writes when it sheds load.
+		items.push({
+			at: now - 20 * 60_000,
+			build: t => {
+				seq += 1
+				const iso = new Date(t).toISOString()
+				return {
+					eventId: `evt_${seq.toString(36)}`,
+					commitSeq: String(seq),
+					kind: "ingestion-gap",
+					producedAt: iso,
+					receivedAt: iso,
+					decoderId: null,
+					sourceId: null,
+					protocol: null,
+					category: "other",
+					frequencyHz: null,
+					entityKey: null,
+					title: "Ingestion gap (rate-limited)",
+					fields: [{ key: "dropped", label: "Dropped", value: 37 }],
+				}
+			},
+		})
 		for (const item of items.sort((a, b) => a.at - b.at))
 			activity.push(item.build(Math.min(item.at, now - 1000)))
 	}
@@ -1430,6 +1563,69 @@ export async function buildMockServer(
 		}
 		return page
 	})
+
+	app.post("/api/activity/facets", async (request, reply) => {
+		const body = isRecord(request.body) ? request.body : {}
+		let query: ActivityQuery
+		try {
+			query = queryFromWire(body["query"])
+		} catch (error) {
+			return reply.code(400).send({
+				error: "ActivityQueryError",
+				code: "ACTIVITY_QUERY_INVALID",
+				message: error instanceof Error ? error.message : "Invalid query",
+			})
+		}
+		const dims = Array.isArray(body["dimensions"])
+			? body["dimensions"].filter(
+					(
+						d,
+					): d is "category" | "protocol" | "decoderId" | "sourceId" | "kind" =>
+						d === "category" ||
+						d === "protocol" ||
+						d === "decoderId" ||
+						d === "sourceId" ||
+						d === "kind",
+				)
+			: []
+		const matched = activity.filter(item => matchesQuery(item, query))
+		const facets: Record<string, { value: string | null; count: number }[]> = {}
+		for (const dim of dims) {
+			const counts = new Map<string | null, number>()
+			for (const item of matched) {
+				const v = item[dim]
+				counts.set(v, (counts.get(v) ?? 0) + 1)
+			}
+			facets[dim] = [...counts]
+				.map(([value, count]) => ({ value, count }))
+				.sort(
+					(a, b) =>
+						b.count - a.count || String(a.value).localeCompare(String(b.value)),
+				)
+				.slice(0, 32)
+		}
+		const highWater = activity[activity.length - 1]?.commitSeq ?? "0"
+		return {
+			facets,
+			scanned: matched.length,
+			truncated: false,
+			snapshot: { lowBarrier: activity[0]?.commitSeq ?? "0", highWater },
+		}
+	})
+
+	app.get<{ Params: { eventId: string } }>(
+		"/api/activity/:eventId",
+		async (request, reply) => {
+			const item = activity.find(i => i.eventId === request.params.eventId)
+			if (!item)
+				return reply.code(404).send({
+					error: "NotFound",
+					code: "NOT_FOUND",
+					message: "Activity event not found",
+				})
+			return recordOf(item)
+		},
+	)
 
 	function strongestIn(startHz: number, endHz: number): MockSignal | null {
 		let best: MockSignal | null = null

@@ -110,7 +110,7 @@ function IdentifyBlock({
 }
 
 export function TunedCard() {
-	const { data, decoders: feed } = useServices()
+	const { data, decoders: feed, activity } = useServices()
 	const readOnly = useReadOnly()
 	const hz = useSettledHz()
 	const status = useLiveStatus()
@@ -316,7 +316,12 @@ export function TunedCard() {
 				)}
 				<Button
 					variant="tonal"
-					onClick={() => shellStore.openDrawer("activity")}
+					title="What was heard on this channel"
+					onClick={() =>
+						hz === null
+							? shellStore.openDrawer("activity")
+							: activity.showFrequency(hz, bw)
+					}
 				>
 					<Icon name="activity" size={15} />
 					Activity
