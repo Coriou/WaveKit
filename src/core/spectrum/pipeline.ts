@@ -524,6 +524,9 @@ export class SpectrumPipeline {
 			epoch,
 			centreHz: p.centreHz,
 			tuningTrust: p.tuningTrust,
+			...(p.verifiedFromSample !== undefined
+				? { verifiedFromSample: p.verifiedFromSample }
+				: {}),
 		}
 		this.emit(this.tracker.beginEpoch(info))
 		this.emit(this.wideband.beginEpoch(info))

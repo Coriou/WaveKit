@@ -1155,27 +1155,43 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		}
 	}
 
-	/** WG9 req 3.4: a block that starts before a non-scanner retune's network settle is `unverified`. */
+	/**
+	 * WG9 req 3.4: an event of the current non-scanner epoch whose data starts before the
+	 * retune's network settle is `unverified`: a block summary by its first sample, a track
+	 * (open, update, close) by its start sample (the pipeline labels the snapshot the same way,
+	 * from `PendingEpoch.verifiedFromSample`), a transient by its sample. Other events and
+	 * other epochs keep the epoch's label.
+	 */
 	private epochFor(ev: PipelineEvent): EngineEpoch {
 		const epoch = this.currentEpoch()
 		const from = this.currentVerifiedFrom
-		if (
-			from === null ||
-			ev.kind !== "block-summary" ||
-			ev.summary.epoch !== epoch.epoch ||
-			!this.cfg
-		)
-			return epoch
-		const blockStart =
-			ev.summary.endSample -
-			blockSamplesOf(
-				this.cfg.integrationMs,
-				this.cfg.sampleRateHz,
-				this.cfg.fftSize,
-			)
-		return {
-			...epoch,
-			tuningTrust: frameTrust(epoch.tuningTrust, blockStart, from),
+		if (from === null) return epoch
+		const start = this.eventStart(ev, epoch.epoch)
+		if (start === null) return epoch
+		return { ...epoch, tuningTrust: frameTrust(epoch.tuningTrust, start, from) }
+	}
+
+	/** The first sample of a current-epoch event's data, or null (not sample-bound or another epoch). */
+	private eventStart(ev: PipelineEvent, epoch: number): number | null {
+		switch (ev.kind) {
+			case "block-summary":
+				if (ev.summary.epoch !== epoch || !this.cfg) return null
+				return (
+					ev.summary.endSample -
+					blockSamplesOf(
+						this.cfg.integrationMs,
+						this.cfg.sampleRateHz,
+						this.cfg.fftSize,
+					)
+				)
+			case "track-open":
+			case "track-update":
+			case "track-close":
+				return ev.track.epoch === epoch ? ev.track.startSample : null
+			case "transient":
+				return ev.epoch === epoch ? ev.sample : null
+			default:
+				return null
 		}
 	}
 
@@ -1396,6 +1412,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			tuningTrust: pending.trust,
 			centreChanged: centreHz !== this.current.centreHz,
 			staleMaxMs: timing.staleMaxMs,
+			...(timing.verifiedFromSample !== null
+				? { verifiedFromSample: timing.verifiedFromSample }
+				: {}),
 		})
 	}
 

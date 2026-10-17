@@ -56,6 +56,11 @@ export interface PendingEpoch {
 	 * pipeline's own cap (the scanner's epochs never set it).
 	 */
 	staleMaxMs?: number
+	/**
+	 * WG9 req 3.4: first sample past a non-scanner retune's network settle. Tracks that start
+	 * before it are `unverified`. Absent = no unverified window (the scanner's epochs never set it).
+	 */
+	verifiedFromSample?: number
 }
 
 export interface TrackFlags {
