@@ -11,6 +11,7 @@
 import type {
 	DiscoveryMetadata,
 	ScanJobProgress,
+	ScannerIdentifyAnalog,
 	ScannerIdentifyEventData,
 	ScannerIdentifyMeasurements,
 	ScannerIdentifyRequest,
@@ -19,10 +20,12 @@ import type {
 	ScannerIdentifyTrial,
 	ScannerIdentifyView,
 	ScannerAmbientDecoderType,
+	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 } from "@wavekit/api-types"
 import {
 	IDENTIFY_AMBIENT_MAX_TRIALS,
+	IDENTIFY_ANALOG_LOOKBACK_MS,
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
 	SCANNER_AMBIENT_PROTOCOLS,
 	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
@@ -40,6 +43,10 @@ import {
 	classifySpectral,
 } from "./classify/classifier.js"
 import { ScannerApiError } from "./errors.js"
+import type {
+	AnalogEvidenceTransmission,
+	IdentifyAnalogEvidence,
+} from "./identify-analog-contract.js"
 import {
 	JOB_STARTUP_CAP_MS,
 	type JobDriver,
@@ -463,22 +470,215 @@ export function trialOutcome(
 	return seen.crcFailures > 0 ? "crc-errors" : "timeout"
 }
 
+/** WG10 req 3.4: what the verdict needs from matching analog evidence (absent/null: none). */
+export interface IdentifyVerdictAnalog {
+	/** The reported transmission carried a CTCSS tone or a DCS code. */
+	tone: boolean
+	/** Its frequency trust is `commanded` or `relay`. */
+	trusted: boolean
+}
+
 export function identifyVerdict(v: {
 	artefact: ArtefactKind | null
 	decoded: boolean
 	heardIdentity: boolean
 	discoveryConfidence: ScannerConfidence | null
 	topScore: number
+	analog?: IdentifyVerdictAnalog | null
 }): "identified" | "candidate" | "unidentified" {
 	if (v.artefact) return "unidentified"
 	if (v.decoded) return "identified"
 	if (v.heardIdentity) return "candidate" // an identity capped by a leak/intermod flag (§ 6.2)
+	// WG10 req 3.4: a digital decode wins; analog voice is identified only with a reported tone on a trusted frequency.
+	if (v.analog)
+		return v.analog.tone && v.analog.trusted ? "identified" : "candidate"
 	if (
 		v.discoveryConfidence !== null &&
 		CONFIDENCE_RANK[v.discoveryConfidence] >= CONFIDENCE_RANK.classified
 	)
 		return "candidate"
 	return v.topScore >= IDENTIFY_CANDIDATE_SCORE ? "candidate" : "unidentified"
+}
+
+/** WG10 req 3.2: the analog protocols live-audio evidence answers, and the modulations that answer each. */
+export const IDENTIFY_ANALOG_PROTOCOLS: readonly ScannerProtocol[] = [
+	"analog-fm",
+	"analog-am",
+]
+const ANALOG_MODULATIONS: Readonly<
+	Partial<Record<ScannerProtocol, ReadonlySet<string>>>
+> = {
+	"analog-fm": new Set(["nfm", "wfm"]),
+	"analog-am": new Set(["am", "dsb"]),
+}
+
+export interface AnalogTarget {
+	sourceId: string
+	hz: number
+	toleranceHz: number
+	/** Job start − IDENTIFY_ANALOG_LOOKBACK_MS. */
+	sinceMs: number
+}
+
+/**
+ * WG10 req 3.1/3.2 (pure, fail closed): the port's transmissions that answer `protocol` at the target,
+ * re-checked here whatever the port returned: same source, finite frequency within the tolerance,
+ * a modulation of the protocol, open or ended at or after `sinceMs`. `closed` newest first.
+ */
+export function analogMatches(
+	transmissions: readonly AnalogEvidenceTransmission[],
+	target: AnalogTarget,
+	protocol: ScannerProtocol,
+): { closed: AnalogEvidenceTransmission[]; open: boolean } {
+	const modulations = ANALOG_MODULATIONS[protocol]
+	const closed: AnalogEvidenceTransmission[] = []
+	let open = false
+	if (!modulations || !Array.isArray(transmissions)) return { closed, open }
+	for (const x of transmissions) {
+		if (
+			typeof x !== "object" ||
+			x === null ||
+			x.sourceId !== target.sourceId ||
+			typeof x.hz !== "number" ||
+			!Number.isFinite(x.hz) ||
+			!(Math.abs(x.hz - target.hz) <= target.toleranceHz) ||
+			!modulations.has(x.modulation)
+		)
+			continue
+		if (x.endedAtMs === null) open = true
+		else if (
+			typeof x.endedAtMs === "number" &&
+			Number.isFinite(x.endedAtMs) &&
+			x.endedAtMs >= target.sinceMs
+		)
+			closed.push(x)
+	}
+	closed.sort((a, b) => (b.endedAtMs ?? 0) - (a.endedAtMs ?? 0))
+	return { closed, open }
+}
+
+/** WG10 req 3.4 (pure): `result.analog` from the latest closed match; only what the tracker reported. */
+export function analogResultOf(
+	closed: readonly AnalogEvidenceTransmission[],
+): ScannerIdentifyAnalog | null {
+	const latest = closed[0]
+	if (!latest) return null
+	const modulation = latest.modulation
+	if (
+		modulation !== "nfm" &&
+		modulation !== "wfm" &&
+		modulation !== "am" &&
+		modulation !== "dsb"
+	)
+		return null
+	const ctcss = latest.ctcssHz
+	const dcs = latest.dcs
+	return {
+		source: "live-audio",
+		modulation,
+		transmissions: closed.length,
+		transmissionId: latest.transmissionId,
+		ctcssHz: typeof ctcss === "number" && Number.isFinite(ctcss) ? ctcss : null,
+		dcs:
+			dcs &&
+			typeof dcs.code === "string" &&
+			(dcs.polarity === "normal" || dcs.polarity === "inverted")
+				? { code: dcs.code, polarity: dcs.polarity }
+				: null,
+		tuningTrust:
+			latest.tuningTrust === "commanded" || latest.tuningTrust === "relay"
+				? latest.tuningTrust
+				: "unverified",
+	}
+}
+
+/** WG10 req 3.4 (pure): the verdict input of `result.analog`. */
+export function analogVerdictOf(
+	a: ScannerIdentifyAnalog | null,
+): IdentifyVerdictAnalog | null {
+	if (!a) return null
+	return {
+		tone: a.ctcssHz !== null || a.dcs !== null,
+		trusted: a.tuningTrust === "commanded" || a.tuningTrust === "relay",
+	}
+}
+
+/**
+ * WG10 req 3.2: with the analog port, the analog trials become ambient `live-audio` trials (no run, mode
+ * unknown until a transmission matches). When either analog protocol is scored, or the request names one,
+ * the other one is planned too (the classifier cannot tell FM from AM voice); `protocols` still restricts.
+ */
+export function planAnalogTrials(
+	trials: readonly IdentifyPlannedTrial[],
+	protocols: readonly ScannerProtocol[],
+): IdentifyPlannedTrial[] {
+	const live = (protocol: ScannerProtocol): IdentifyPlannedTrial => ({
+		protocol,
+		score: 0,
+		decoder: "live-audio",
+		mode: null,
+		transport: "ambient",
+		run: null,
+	})
+	const out = trials.map(p =>
+		IDENTIFY_ANALOG_PROTOCOLS.includes(p.protocol) && p.run === null
+			? { ...live(p.protocol), score: p.score }
+			: p,
+	)
+	const only = protocols.length > 0 ? new Set(protocols) : null
+	const wanted = only
+		? IDENTIFY_ANALOG_PROTOCOLS.filter(p => only.has(p))
+		: out.some(p => IDENTIFY_ANALOG_PROTOCOLS.includes(p.protocol))
+			? IDENTIFY_ANALOG_PROTOCOLS
+			: []
+	for (const p of wanted)
+		if (!out.some(x => x.protocol === p)) out.push(live(p))
+	return out
+}
+
+const PROBE_DECODER_TYPES: ReadonlySet<string> =
+	new Set<ScannerProbeDecoderType>([
+		"dsd-fme",
+		"multimon-ng",
+		"direwolf",
+		"rtl433",
+	])
+
+/**
+ * WG10 req 3.5 (pure): the plan's trials whose run's decoder type `memo` names become `unsupported`/
+ * `decoder-unavailable` with no mode, no transport and no run; `skip` holds the runs never to request,
+ * `used` the memo types that matched a run (sorted).
+ */
+export function applyUnavailableMemo(
+	plan: IdentifyPlan,
+	memo: ReadonlySet<string>,
+): {
+	trials: IdentifyPlannedTrial[]
+	skip: Set<number>
+	used: ScannerProbeDecoderType[]
+} {
+	const skip = new Set<number>()
+	const used = new Set<ScannerProbeDecoderType>()
+	plan.runs.forEach((run, i) => {
+		const type = run.mode.decoderType
+		if (memo.has(type) && PROBE_DECODER_TYPES.has(type)) {
+			skip.add(i)
+			used.add(type as ScannerProbeDecoderType)
+		}
+	})
+	const trials = plan.trials.map((p): IdentifyPlannedTrial => {
+		if (p.run === null || !skip.has(p.run)) return p
+		return {
+			protocol: p.protocol,
+			score: p.score,
+			decoder: p.decoder,
+			mode: null,
+			transport: null,
+			reason: "decoder-unavailable",
+			run: null,
+		}
+	})
+	return { trials, skip, used: [...used].sort() }
 }
 
 /** § 10.8 measurements: from the track, else the strongest summary bin within the tolerance. */
@@ -545,7 +745,8 @@ export interface IdentifyDeps {
 		| "status"
 		| "on"
 		| "off"
-	>
+	> &
+		ProbeUnavailableMemo
 	engine: (sourceId: string) => { currentEpoch(): EngineEpoch } | undefined
 	/**
 	 * `artefactOf(hz, epoch, masks)` on the engine's current masks (Task 32 carries them from the worker).
@@ -570,6 +771,25 @@ export interface IdentifyDeps {
 	now: () => number
 	/** WG7 req 1.5: running ambient decoders covering a frequency (AmbientEvidence.coverageAt). Absent: no ambient trials. */
 	ambient?: IdentifyAmbientLookup
+	/** WG10 req 3.1: the live demodulator's transmissions. Absent: analog trials stay `unsupported`/`no-decoder`. */
+	analogEvidence?: IdentifyAnalogEvidence
+}
+
+/**
+ * WG10 req 3.5: the probe pool's unavailable memo (`ProbePool.unavailableTypes`). Optional and checked at
+ * run time: a pool without it, or one that throws, is an empty memo.
+ */
+export interface ProbeUnavailableMemo {
+	unavailableTypes?: (now: number) => ReadonlySet<ScannerProbeDecoderType>
+}
+
+/** WG10: one target's analog evidence state. */
+interface AnalogState {
+	/** `monitoring` answered true on some tick of this target. */
+	everMonitored: boolean
+	/** Evidence of the trial that decoded (the first one; the newest on a tie). */
+	result: ScannerIdentifyAnalog | null
+	resultProtocol: ScannerProtocol | null
 }
 
 interface RunState {
@@ -608,6 +828,9 @@ interface TargetState {
 	result: ScannerIdentifyResult | null
 	/** WG7: running ambient trials end `timeout` at this time (the wait deadline, or plan time + timeoutMs for `all`). */
 	ambientUntil: number
+	/** WG10 req 3.5: plan runs not requested because the memo names their decoder type. */
+	memoSkip: Set<number>
+	analog: AnalogState
 }
 
 const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
@@ -646,6 +869,9 @@ export class IdentifyRunner implements JobDriver {
 	private requesting = false
 	private detached = false
 	private ambientErrorLogged = false
+	private analogErrorLogged = false
+	/** WG10 req 3.5: probe decoder types unavailable during this job (memo at planning, or reported). */
+	private readonly unavailableTypes = new Set<ScannerProbeDecoderType>()
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -901,6 +1127,8 @@ export class IdentifyRunner implements JobDriver {
 			decoded: null,
 			result: null,
 			ambientUntil: Number.POSITIVE_INFINITY,
+			memoSkip: new Set(),
+			analog: { everMonitored: false, result: null, resultProtocol: null },
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -1010,6 +1238,9 @@ export class IdentifyRunner implements JobDriver {
 				},
 			),
 		)
+		if (this.deps.analogEvidence)
+			plan.trials = planAnalogTrials(plan.trials, this.deps.identify.protocols)
+		t.memoSkip = this.applyMemo(plan)
 		t.plan = plan
 		t.ambientUntil = Number.isFinite(t.deadline)
 			? t.deadline
@@ -1038,6 +1269,7 @@ export class IdentifyRunner implements JobDriver {
 	private tryStep(t: TargetState, now: number): void {
 		const plan = t.plan
 		if (!plan) return
+		if (this.analogStep(t, now)) this.emitTarget(t)
 		for (const r of [...t.active]) {
 			if (r.endsAt !== null && now >= r.endsAt) {
 				this.endRun(t, r, "hold")
@@ -1086,7 +1318,8 @@ export class IdentifyRunner implements JobDriver {
 		if (!view || !run) return false
 		t.nextRun += 1
 		// Completed before an in-window epoch change: not run again.
-		if (run.protocols.every(p => t.done.has(p))) return true
+		if (run.protocols.every(p => t.done.has(p)) || t.memoSkip.has(runIndex))
+			return true
 		const fs = this.deps.engine(this.sourceId)?.currentEpoch().sampleRateHz ?? 0
 		const preRollSamples = Math.round(
 			(this.deps.settings().hold.preRollMs * fs) / 1000,
@@ -1231,6 +1464,10 @@ export class IdentifyRunner implements JobDriver {
 			![...r.seen.values()].some(seen => seen.output)
 		this.setTrials(t, r.runIndex, (protocol, trial) => {
 			if (unavailable) {
+				if (PROBE_DECODER_TYPES.has(r.run.mode.decoderType))
+					this.unavailableTypes.add(
+						r.run.mode.decoderType as ScannerProbeDecoderType,
+					)
 				trial.reason = "decoder-unavailable"
 				return "unsupported"
 			}
@@ -1281,7 +1518,10 @@ export class IdentifyRunner implements JobDriver {
 					protocols: [],
 				}).hypotheses[0]
 			: undefined
+		const analog = t.analog.result
+		const analogVerdict = analogVerdictOf(analog)
 		const state = identifyVerdict({
+			analog: analogVerdict,
 			artefact,
 			// identified = an identity this job's trials accepted (H2) on a discovery not capped below decoded; a discovery
 			// decoded earlier (another PTT, passive discovery) without a decode now is a candidate carrying its identity
@@ -1295,23 +1535,38 @@ export class IdentifyRunner implements JobDriver {
 		const classified =
 			discovery !== undefined &&
 			CONFIDENCE_RANK[discovery.confidence] >= CONFIDENCE_RANK.classified
+		// WG10 req 3.4: analog evidence names the protocol unless a digital decode (or capped identity) did.
+		const analogProtocol =
+			analog && t.decoded === null ? t.analog.resultProtocol : null
 		const protocol =
 			state === "unidentified"
 				? undefined
 				: (t.decoded?.protocol ??
+					analogProtocol ??
 					(classified ? discovery?.protocol : top?.protocol))
 		const identity =
 			state === "unidentified"
 				? undefined
-				: (t.decoded?.identity ?? discovery?.identity)
+				: (t.decoded?.identity ??
+					(analogProtocol !== null && discovery?.protocol !== analogProtocol
+						? undefined
+						: discovery?.identity))
+		const analogIdentified = analogProtocol !== null && state === "identified"
+		const baseMetadata = discovery?.metadata ?? emptyMetadata()
+		const unavailableTypes = [...this.unavailableTypes].sort()
 		for (const trial of t.trials)
 			if (trial.outcome === "pending" || trial.outcome === "running")
 				trial.outcome = "cancelled"
 		t.result = {
 			...(protocol ? { protocol } : {}),
-			confidence: discovery?.confidence ?? (t.decoded ? "decoded" : "activity"),
+			confidence: analogIdentified
+				? "classified"
+				: (discovery?.confidence ?? (t.decoded ? "decoded" : "activity")),
 			...(identity ? { identity } : {}),
-			metadata: discovery?.metadata ?? emptyMetadata(),
+			metadata:
+				analogProtocol !== null && analog && analog.ctcssHz !== null
+					? { ...baseMetadata, ctcssHz: analog.ctcssHz }
+					: baseMetadata,
 			...(discovery ? { discoveryId: discovery.id } : {}),
 			...(latest ? { observationId: latest.observationId } : {}),
 			// After a window move the latest summary shows another window: measure from the track or not at all.
@@ -1323,6 +1578,10 @@ export class IdentifyRunner implements JobDriver {
 			),
 			...(artefact ? { artefact } : {}),
 			...(ended ? { ended } : {}),
+			...(analog && !artefact ? { analog } : {}),
+			...(unavailableTypes.length > 0
+				? { decodersUnavailable: unavailableTypes }
+				: {}),
 		}
 		t.state = state
 		this.emitTarget(t)
@@ -1505,6 +1764,7 @@ export class IdentifyRunner implements JobDriver {
 			const trial = t.trials.find(
 				x =>
 					x.transport === "ambient" &&
+					x.decoder !== "live-audio" &&
 					x.protocol === ev.protocol &&
 					x.outcome === "running",
 			)
@@ -1524,6 +1784,123 @@ export class IdentifyRunner implements JobDriver {
 			this.emitTarget(t)
 			return
 		}
+	}
+
+	// === WG10: analog evidence and the unavailable memo ===
+
+	/** Applies the probe pool's memo to a fresh plan; records the types it used. */
+	private applyMemo(plan: IdentifyPlan): Set<number> {
+		const memo = this.memoTypes()
+		if (memo.size === 0) return new Set()
+		const out = applyUnavailableMemo(plan, memo)
+		plan.trials = out.trials
+		for (const type of out.used) this.unavailableTypes.add(type)
+		return out.skip
+	}
+
+	private memoTypes(): ReadonlySet<string> {
+		const probes = this.deps.probes
+		if (typeof probes.unavailableTypes !== "function") return new Set()
+		try {
+			const got = probes.unavailableTypes(this.deps.now())
+			const out = new Set<string>()
+			if (got instanceof Set)
+				for (const x of got as Set<unknown>)
+					if (typeof x === "string" && PROBE_DECODER_TYPES.has(x)) out.add(x)
+			return out
+		} catch {
+			return new Set()
+		}
+	}
+
+	/**
+	 * WG10 req 3.2/3.3: re-reads the analog evidence for the target's running `live-audio` trials. A closed
+	 * match decodes its trial (a stop unless exhaustive); at the ambient deadline the rest end `timeout` (an
+	 * open match only), `no-sync` (live audio was on the target) or `unsupported`/`no-live-audio`. True when a
+	 * trial changed. A throwing port is no evidence and not monitoring.
+	 */
+	private analogStep(t: TargetState, now: number): boolean {
+		const port = this.deps.analogEvidence
+		if (!port) return false
+		const running = t.trials.filter(
+			x => x.decoder === "live-audio" && x.outcome === "running",
+		)
+		if (running.length === 0) return false
+		const target: AnalogTarget = {
+			sourceId: this.sourceId,
+			hz: t.targetHz,
+			toleranceHz: t.toleranceHz,
+			sinceMs:
+				(this.record.startedAt ?? this.record.createdAt) -
+				IDENTIFY_ANALOG_LOOKBACK_MS,
+		}
+		let monitoring = false
+		let list: readonly AnalogEvidenceTransmission[] = []
+		try {
+			monitoring =
+				port.monitoring(target.sourceId, target.hz, target.toleranceHz) === true
+		} catch {
+			this.analogUnavailable()
+		}
+		try {
+			list = port.transmissionsNear(
+				target.sourceId,
+				target.hz,
+				target.toleranceHz,
+				target.sinceMs,
+			)
+		} catch {
+			this.analogUnavailable()
+		}
+		if (monitoring) t.analog.everMonitored = true
+		const atDeadline = now >= t.ambientUntil
+		let changed = false
+		let decoded = false
+		let best: {
+			protocol: ScannerProtocol
+			analog: ScannerIdentifyAnalog
+			endedAtMs: number
+		} | null = null
+		for (const trial of running) {
+			const m = analogMatches(list, target, trial.protocol)
+			const analog = analogResultOf(m.closed)
+			if (analog && !atDeadline) {
+				trial.outcome = "decoded"
+				trial.mode = analog.modulation
+				decoded = true
+				changed = true
+				const endedAtMs = m.closed[0]?.endedAtMs ?? 0
+				if (!best || endedAtMs > best.endedAtMs)
+					best = { protocol: trial.protocol, analog, endedAtMs }
+				continue
+			}
+			if (!atDeadline) continue
+			changed = true
+			if (m.open) trial.outcome = "timeout"
+			else if (t.analog.everMonitored) trial.outcome = "no-sync"
+			else {
+				trial.outcome = "unsupported"
+				trial.mode = null
+				trial.transport = null
+				trial.reason = "no-live-audio"
+			}
+		}
+		if (best && t.analog.result === null) {
+			t.analog.result = best.analog
+			t.analog.resultProtocol = best.protocol
+		}
+		// Req 3.3: a match stops the waiting trials unless exhaustive. Probe runs keep going so a digital decode
+		// still wins (a digital signal heard through live audio also opens the squelch).
+		if (decoded && !this.deps.identify.exhaustive)
+			this.endAmbient(t, "not-needed")
+		return changed
+	}
+
+	/** Fixed message, no exception payload; once per job. */
+	private analogUnavailable(): void {
+		if (this.analogErrorLogged) return
+		this.analogErrorLogged = true
+		this.log.warn("Analog evidence unavailable; no analog trials evidence")
 	}
 
 	// === helpers ===
