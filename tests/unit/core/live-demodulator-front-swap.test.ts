@@ -213,10 +213,38 @@ describe("LiveDemodulator front swap (WG10 req 2.3)", () => {
 		const done = h.demod.reconfigure({ offsetHz: 6000 })
 		await waitFor(() => h.processes.length === 3)
 		expect(h.demod.isSquelchOpen()).toBe(false)
+		// WG10 R1 m1: the gate reopens once the squelch measured a whole block of the new front.
 		await writeAndSettle(h.processes[2]!.stdout, channelIq(10, 0.5))
 		await done
+		expect(edges).toEqual(["false:config"])
+		await writeAndSettle(h.processes[2]!.stdout, channelIq(BLOCK_SAMPLES, 0.5))
 		expect(edges).toEqual(["false:config", "true:null"])
 		expect(h.demod.transmissionCloseOverride()).toBeNull()
+	})
+
+	it("review WG10 R1 m1: an open gate and its hang on the old offset never publish a transmission on the new one", async () => {
+		const h = await startHarness({ squelch: -30, squelchMode: "manual" })
+		await writeAndSettle(
+			h.current().front.stdout,
+			channelIq(BLOCK_SAMPLES * 2, 0.5),
+		)
+		expect(h.demod.isSquelchOpen()).toBe(true)
+		const edges: string[] = []
+		h.demod.on("squelch-changed", open =>
+			edges.push(`${open}:${h.demod.transmissionCloseOverride()}`),
+		)
+		const done = h.demod.reconfigure({ offsetHz: 6000 })
+		await waitFor(() => h.processes.length === 3)
+		const newFront = h.processes[2]!
+		// The new offset is quiet: well inside the old gate's 250 ms hang.
+		await writeAndSettle(newFront.stdout, channelIq(BLOCK_SAMPLES * 3, 0.001))
+		await done
+		await delay(5)
+		expect(edges).toEqual(["false:config"])
+		expect(h.demod.isSquelchOpen()).toBe(false)
+		// A carrier on the new offset opens it as a new transmission.
+		await writeAndSettle(newFront.stdout, channelIq(BLOCK_SAMPLES, 0.5))
+		expect(edges).toEqual(["false:config", "true:null"])
 	})
 
 	it("applies the retune floor handling at the switch (auto squelch)", async () => {

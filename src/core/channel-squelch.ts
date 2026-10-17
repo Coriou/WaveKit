@@ -303,6 +303,21 @@ export class ChannelSquelch {
 		if (!this.gateOpen) this.floorDbfs = floorDbfs
 	}
 
+	/**
+	 * WG10 R1 m1: a front swap (new channel offset). The gate returns to its rest state
+	 * (closed unless disabled), the hang and the noise and carrier-observer state start
+	 * afresh, so nothing measured on the old channel opens the gate on the new one. The
+	 * owner's floor estimate is its own (reset on retune); the output phase stays continuous.
+	 */
+	resetGate(): void {
+		this.gateOpen = this.squelchMode === "power" && this.thresholdDbfs === null
+		this.lastAboveMs = Number.NEGATIVE_INFINITY
+		this.smoothedPower = null
+		this.noise?.reset()
+		if (this.observer !== null) this.observer = this.createObserver()
+		this.lastBlockQuieted = false
+	}
+
 	/** Gates complete blocks; a partial block waits for the next chunk. */
 	process(chunk: Buffer): Buffer[] {
 		const data =
