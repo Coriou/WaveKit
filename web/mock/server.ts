@@ -23,6 +23,7 @@ import type {
 	ActivitySearchPage,
 	ActivitySummary,
 	DecoderInfo,
+	DigitalVoiceStatus,
 	DiscoveryMetadata,
 	ExtendedSourceStatus,
 	JsonValue,
@@ -541,6 +542,93 @@ export async function buildMockServer(
 		}
 	}
 
+	/** The CTCSS tone (Hz) the mock's transmissions use on the tuned channel, or null. */
+	const toneHere = (): number | null =>
+		MOCK_TRANSMISSIONS.find(t => Math.abs(t.hz - tunedHz()) <= 6250)?.ctcssHz ??
+		null
+	const toneGateState = (open: boolean): "off" | "waiting" | "open" => {
+		const gate = live.config.toneSquelch
+		if (!gate || gate.kind === "none") return "off"
+		const heard = toneHere()
+		return open &&
+			gate.kind === "ctcss" &&
+			heard !== null &&
+			Math.round(heard * 10) === gate.frequencyTenthsHz
+			? "open"
+			: "waiting"
+	}
+
+	// --- Digital voice (dsd-fme): the decoded voice stream on the audio port's /voice. ---
+	const VOICE_RATE = 8000
+	const voice = { running: false, clients: 0 }
+	/** The dsd-fme decoder's call: on while the tuned channel is one of its targets and keyed. */
+	const voiceCall = (): { talking: boolean; hz: number | null } => {
+		const seed = DECODER_SEEDS.find(d => d.type === "dsd-fme")
+		const hz = tunedHz()
+		const target = seed?.targetsHz.find(t => Math.abs(t - hz) <= 6250) ?? null
+		const signal = target === null ? null : signalAt(hz)
+		return {
+			talking: signal !== null && signalActive(signal, Date.now() / 1000),
+			hz: target,
+		}
+	}
+	const digitalVoiceStatus = (): DigitalVoiceStatus => {
+		const { talking, hz } = voiceCall()
+		const call =
+			talking && hz !== null
+				? {
+						decoderId: "dsd-fme",
+						callId: `call_${Math.floor(Date.now() / 20_000)}`,
+						protocol: "dmr",
+						talkgroup: 2081,
+						source: 2081045,
+						slot: 1,
+						encrypted: false,
+						active: true,
+						startedAt: new Date(
+							Math.floor(Date.now() / 20_000) * 20_000,
+						).toISOString(),
+					}
+				: null
+		return {
+			enabled: true,
+			running: voice.running,
+			config: {
+				enabled: true,
+				httpPort: audioPort,
+				voiceSlot: 1,
+				jitterBufferMs: 200,
+				maxBufferMs: 1000,
+			},
+			sampleRate: VOICE_RATE,
+			audioFormat: "s16le",
+			channels: 1,
+			httpUrl: `${audioOrigin}/voice`,
+			wavUrl: `${audioOrigin}/voice.wav`,
+			clientCount: voice.clients,
+			bytesStreamed: 0,
+			decoders: [
+				{
+					decoderId: "dsd-fme",
+					mode: "auto",
+					udpPort: 0,
+					httpUrl: `${audioOrigin}/voice`,
+					wavUrl: `${audioOrigin}/voice.wav`,
+					clientCount: voice.clients,
+					bytesStreamed: 0,
+					datagramsReceived: 0,
+					datagramsRejected: 0,
+					encryptedDatagramsDropped: 0,
+					droppedSamples: 0,
+					underruns: 0,
+					bufferedMs: 0,
+					call,
+				},
+			],
+			call,
+		}
+	}
+
 	const liveStatus = (): LiveAudioStatus => {
 		const status: LiveAudioStatus = {
 			enabled: live.config.enabled,
@@ -570,8 +658,8 @@ export async function buildMockServer(
 				(["am", "cw", "dsb", "usb", "lsb"].includes(live.config.modulation)
 					? "fast"
 					: "off")
-			// WG7 req 3.4: the mock never sets a tone gate
-			status.toneSquelch = { state: "off" }
+			// WG7 req 3.4: the gate opens while a transmission with the set tone is on the air
+			status.toneSquelch = { state: toneGateState(l.squelchOpen) }
 		}
 		return status
 	}
@@ -1408,6 +1496,22 @@ export async function buildMockServer(
 	})
 	// --- Receiver controls. End. ---
 
+	app.get("/api/digital-voice/status", async () => digitalVoiceStatus())
+	app.post("/api/digital-voice/start", async () => {
+		if (!voice.running) {
+			voice.running = true
+			broadcast("digital-voice", "digital-voice:status", digitalVoiceStatus())
+		}
+		return { success: true }
+	})
+	app.post("/api/digital-voice/stop", async () => {
+		if (voice.running) {
+			voice.running = false
+			broadcast("digital-voice", "digital-voice:status", digitalVoiceStatus())
+		}
+		return { success: true }
+	})
+
 	app.get("/api/live-audio/status", async () => liveStatus())
 	app.post("/api/live-audio/start", async () => {
 		if (!live.running) {
@@ -1531,6 +1635,41 @@ export async function buildMockServer(
 					return bad("deEmphasisTau: must be 50 or 75")
 				next.deEmphasisTau = tau
 			}
+			const tone = body["toneSquelch"]
+			if (tone !== undefined) {
+				if (!isRecord(tone)) return bad("body/toneSquelch must be object")
+				if (tone["kind"] === "none") next.toneSquelch = { kind: "none" }
+				else if (
+					tone["kind"] === "ctcss" &&
+					typeof tone["frequencyTenthsHz"] === "number"
+				)
+					next.toneSquelch = {
+						kind: "ctcss",
+						frequencyTenthsHz: tone["frequencyTenthsHz"],
+					}
+				else if (
+					tone["kind"] === "dcs" &&
+					typeof tone["code"] === "string" &&
+					(tone["polarity"] === "normal" || tone["polarity"] === "inverted")
+				)
+					next.toneSquelch = {
+						kind: "dcs",
+						code: tone["code"],
+						polarity: tone["polarity"],
+					}
+				else return bad("toneSquelch: invalid value")
+			}
+			// WG7 req 3.1: a tone gate is NFM-only
+			if (
+				next.toneSquelch !== undefined &&
+				next.toneSquelch.kind !== "none" &&
+				next.modulation !== "nfm"
+			)
+				return reply.code(400).send({
+					error: "Bad Request",
+					message:
+						"Configuration validation failed:\n  - toneSquelch: tone squelch requires nfm modulation",
+				})
 			const format = body["audioFormat"]
 			if (format !== undefined) {
 				if (format !== "s16le" && format !== "f32le")
@@ -1979,6 +2118,10 @@ export async function buildMockServer(
 		onClient: (delta, bytes) => {
 			live.clients = Math.max(0, live.clients + delta)
 			live.bytes += bytes
+		},
+		voice: {
+			sampleRate: () => (voice.running ? VOICE_RATE : null),
+			talking: () => voiceCall().talking,
 		},
 	})
 
