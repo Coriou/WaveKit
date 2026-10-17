@@ -65,7 +65,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<sc-if value="{{hasTone}}" hint-placeholder-val="{{false}}">
 					<button aria-pressed="{{toneSq}}" onClick="{{toggleToneSq}}" style="text-align: left; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 8px 12px; border-radius: var(--wk-r-4); background: var(--wk-fill)">
 						<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
-							<span style="font-weight: 700">Tone squelch <span style="font-weight: 400; color: var(--wk-accent)">· {{toneText}} detected</span></span>
+							<span style="font-weight: 700">Tone squelch <span style="font-weight: 400; color: var(--wk-accent)">· {{toneText}}{{toneSuffix}}</span></span>
 							<span style="font-size: var(--wk-fs-sm); color: var(--wk-text-3)">{{toneSub}}</span>
 						</span>
 						<span class="wk-switch" aria-checked="{{toneSq}}" aria-hidden="true" style="margin: 0 -6px"></span>
@@ -122,18 +122,24 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			</div>
 
 			<div style="display: flex; align-items: center; gap: 12px; padding-top: 4px; border-top: 1px solid var(--wk-line-08)">
-				<button class="wk-btn" data-variant="outline" data-size="lg" aria-pressed="{{rec}}" onClick="{{toggleRec}}" style="padding: 0 14px 0 12px; margin-top: 12px; gap: 8px">
+				<button class="wk-btn" data-variant="outline" data-size="lg" aria-pressed="{{rec}}" onClick="{{toggleRec}}" disabled="{{recOff}}" title="{{recTitle}}" style="padding: 0 14px 0 12px; margin-top: 12px; gap: 8px">
 					<span style="width: 10px; height: 10px; border-radius: 50%; background: var(--wk-danger)"></span>{{recLabel}}
 				</button>
 				<div style="flex: 1"></div>
-				<span style="margin-top: 12px; font-size: var(--wk-fs-sm); color: var(--wk-text-3); font-variant-numeric: tabular-nums">Latency ≈ 180 ms</span>
+				<span title="Buffered in this browser plus the audio device; the core's pipeline adds to it" style="margin-top: 12px; font-size: var(--wk-fs-sm); color: var(--wk-text-3); font-variant-numeric: tabular-nums">Latency ≈ 180 ms</span>
 			</div>
+			<sc-if value="{{hasSavedNote}}" hint-placeholder-val="{{false}}">
+				<div role="status" style="display: flex; align-items: center; gap: 8px; margin-top: -12px; font-size: var(--wk-fs-sm); color: var(--wk-text-3); line-height: 1.4">
+					<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"></path><path d="M7 11l5 5l5 -5"></path><path d="M12 4l0 12"></path></svg>
+					<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">Saved {{savedName}}</span>
+				</div>
+			</sc-if>
 			<button class="wk-btn" data-variant="ghost" onClick="{{openSettings}}" style="align-self: flex-start; gap: 4px; padding: 0 6px 0 8px; margin: -6px 0 -6px -8px; color: var(--wk-accent)">All audio settings<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
 		</div>
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"onSettings":{"editor":null},"expanded":{"editor":"boolean","default":true},"direction":{"editor":"enum","options":["down","up"],"default":"down"},"following":{"editor":"boolean","default":false},"followingText":{"editor":null},"$preview":{"width":440,"height":760}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"onSettings":{"editor":null},"expanded":{"editor":"boolean","default":true},"direction":{"editor":"enum","options":["down","up"],"default":"down"},"following":{"editor":"boolean","default":false},"toneDemo":{"editor":"enum","options":["none","detected","squelch on"],"default":"none"},"onSaved":{"editor":null},"followingText":{"editor":null},"$preview":{"width":440,"height":760}}'>
 const FLOOR = -108;
 const pc = db => Math.max(0, Math.min(100, (db + 120) / 100 * 100));
 const dbt = db => String(Math.round(db)).replace('-', '−') + ' dB';
@@ -144,8 +150,24 @@ class Component extends DCLogic {
 		super(props);
 		this.state = { listening: true, vol: 72, sq: -102, sqAuto: true, src: 'auto', agc: 'slow', deemph: 'off', hp: true, nr: false, rec: false, toneSq: false, tone: '', base: -57, digital: true, call: 'TG 2081 · radio 2081045', modeLabel: 'NFM', open: true, lvl: -60 };
 	}
-	get(k) { const v = this.props.values; return v && v[k] !== undefined ? v[k] : this.state[k]; }
-	set(k, v) { if (this.props.onSet) this.props.onSet(k, v); else this.setState({ [k]: v }); }
+	get(k) {
+		const v = this.props.values;
+		if (v && v[k] !== undefined) return v[k];
+		// standalone: the toneDemo tweak puts the board on a channel with CTCSS 88.5 Hz, the gate off or on
+		const d = this.props.toneDemo || 'none';
+		if (d !== 'none' && (k === 'tone' || k === 'toneSq' || k === 'base' || k === 'digital' || k === 'src')) {
+			if (this.state[k + 'Set']) return this.state[k];
+			return k === 'tone' ? 'CTCSS 88.5 Hz' : k === 'toneSq' ? d === 'squelch on' : k === 'base' ? -64 : k === 'digital' ? false : 'auto';
+		}
+		return this.state[k];
+	}
+	set(k, v) { if (this.props.onSet) this.props.onSet(k, v); else this.setState({ [k]: v, [k + 'Set']: true }); }
+	// Record audio keeps what plays here and the browser saves it as a WAV in its downloads (web: recorder.ts recordFileName)
+	saveName() {
+		const p = n => String(n).padStart(2, '0'), d = new Date(this.recAt || Date.now());
+		const f = this.props.values && this.props.values.freq;
+		return 'WaveKit' + (f ? ' ' + (f / 1e6).toFixed(3) + ' MHz' : ' 160.625 MHz') + ' ' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + '-' + p(d.getMinutes()) + '-' + p(d.getSeconds()) + '.wav';
+	}
 	componentDidMount() {
 		this.timer = setInterval(() => {
 			const base = this.get('base');
@@ -166,6 +188,9 @@ class Component extends DCLogic {
 		const expanded = this.props.onToggle ? !!this.props.expanded : this.state.open;
 		const agc = this.get('agc'), de = this.get('deemph');
 		const rec = this.get('rec');
+		// tone squelch: the gate waits for its tone and opens when a transmission carries it
+		const tone = (this.get('tone') || '').replace(/^CTCSS /, ''), toneOn = !!this.get('toneSq') && !!tone;
+		const toneWaiting = toneOn && !open;
 		const flag = (k, label, sub) => ({ label, sub, on: !!this.get(k), pick: () => this.set(k, !this.get(k)) });
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
@@ -182,7 +207,7 @@ class Component extends DCLogic {
 			btnBg: listening ? 'var(--wk-accent)' : 'transparent',
 			btnFg: listening ? 'var(--wk-on-accent)' : 'var(--wk-accent)',
 			btnBorder: listening ? 'var(--wk-accent)' : 'rgba(var(--wk-line-rgb),.18)',
-			title: !listening ? 'Listen' : open ? 'Listening' : 'Squelched',
+			title: !listening ? 'Listen' : open && !toneWaiting ? 'Listening' : 'Squelched',
 			following: listening && !!this.props.following,
 			// the shell says what the scan plays: "Hearing PMR446 ch 3", or a one-hop watch waiting for a channel to come alive
 			followText: this.props.followingText || 'Following the scan',
@@ -190,9 +215,9 @@ class Component extends DCLogic {
 				: /^(Waits for a channel|Hits only logged)$/.test(this.props.followingText) ? this.props.followingText + ' · the scan keeps the receiver where it is'
 				: 'The scan moved the audio to ' + this.props.followingText + ' and plays it until it goes quiet, plus 2 s. The receiver stays where it is.',
 			notFollowing: !(listening && this.props.following),
-			subtitle: !listening ? 'Audio is off' : playsDigital ? (digital ? 'DMR voice · ' + this.get('call') : 'Waiting for digital voice') : this.get('modeLabel') + ' audio',
+			subtitle: !listening ? 'Audio is off' : toneWaiting ? 'Waiting for ' + tone : playsDigital ? (digital ? 'DMR voice · ' + this.get('call') : 'Waiting for digital voice') : this.get('modeLabel') + ' audio',
 			lvl: pc(lvl) / 100,
-			lvlColor: open && listening ? 'var(--wk-accent)' : 'var(--wk-text-5)',
+			lvlColor: open && listening && !toneWaiting ? 'var(--wk-accent)' : 'var(--wk-text-5)',
 			meterFill: open ? 'rgba(var(--wk-accent-rgb),.55)' : 'rgba(var(--wk-ink-3-rgb),.4)',
 			lvlText: dbt(lvl),
 			sq,
@@ -210,9 +235,10 @@ class Component extends DCLogic {
 			srcs: [['auto', 'Auto'], ['analog', 'Analog'], ['digital', 'Decoded voice']].map(([id, label]) => ({ label, ...seg(src, id), pick: () => this.set('src', id) })),
 			srcHint: playsDigital ? (digital ? 'DMR detected. Playing decoded voice, slot 1.' : 'No digital voice on this channel yet.') : src === 'auto' ? 'No digital voice detected. Playing ' + this.get('modeLabel') + ' audio.' : 'Playing demodulated ' + this.get('modeLabel') + ' audio.',
 			hasTone: !!this.get('tone'),
-			toneText: this.get('tone') || '',
+			toneText: tone,
+			toneSuffix: !toneOn ? ' detected' : open ? ' heard' : '',
 			toneSq: !!this.get('toneSq'),
-			toneSub: this.get('toneSq') ? 'Opens only for ' + this.get('tone') + '. Other users on this channel stay silent.' : 'Open only for this tone, ignore other users sharing the channel.',
+			toneSub: !toneOn ? 'Open only for this tone, ignore other users sharing the channel.' : (toneWaiting ? 'Waiting for ' : 'Opens only for ') + tone + '. Other users on this channel stay silent.',
 			toggleToneSq: () => this.set('toneSq', !this.get('toneSq')),
 			segs: [
 				{ label: 'Level control', opts: [['off', 'Off'], ['slow', 'Slow'], ['fast', 'Fast']].map(([id, label]) => ({ label, ...seg(agc, id), pick: () => this.set('agc', id) })) },
@@ -224,7 +250,17 @@ class Component extends DCLogic {
 			],
 			rec,
 			recLabel: rec ? 'Recording · 0:07' : 'Record audio',
-			toggleRec: () => this.set('rec', !rec)
+			recOff: !rec && !listening,
+			recTitle: !listening ? 'Listen first: recording keeps what plays here' : 'Saved as a WAV file in this browser’s downloads',
+			hasSavedNote: !rec && !!this.state.savedName && !this.props.onSaved,
+			savedName: this.state.savedName || '',
+			toggleRec: () => {
+				if (rec) {
+					const name = this.saveName();
+					if (this.props.onSaved) this.props.onSaved(name); else this.setState({ savedName: name });
+				} else this.recAt = Date.now();
+				this.set('rec', !rec);
+			}
 		};
 	}
 }

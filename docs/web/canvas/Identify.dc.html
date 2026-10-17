@@ -25,14 +25,14 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<h2 class="wk-h2">{{g.title}}</h2>
 				<span style="font-size: var(--wk-fs-md); color: var(--wk-text-3)">{{g.sub}}</span>
 			</div>
-			<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 320px)); gap: 24px; align-items: start">
+			<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 340px)); gap: 24px; align-items: start">
 				<sc-for list="{{g.cards}}" as="c" hint-placeholder-count="4">
 					<figure style="margin: 0; display: flex; flex-direction: column; gap: 12px">
 						<figcaption style="display: flex; flex-direction: column; gap: 4px; min-height: 62px">
 							<span style="font-family: var(--wk-font-head); font-weight: 700; font-size: var(--wk-fs-xl); line-height: 1.2">{{c.name}}</span>
 							<span style="font-size: var(--wk-fs-md); line-height: 1.4; color: var(--wk-text-3)">{{c.when}}</span>
 						</figcaption>
-						<dc-import name="Tuned" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" freq="{{c.f}}" identify="{{c.id}}" scan-hold="{{c.hold}}" scan-resume="{{c.resume}}" watch-demo="{{c.watch}}" variant="floating" hint-size="320px,360px"></dc-import>
+						<dc-import name="Tuned" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" freq="{{c.f}}" identify="{{c.id}}" scan-hold="{{c.hold}}" scan-resume="{{c.resume}}" watch-demo="{{c.watch}}" wait-until="{{c.wait}}" variant="floating" hint-size="340px,360px"></dc-import>
 					</figure>
 				</sc-for>
 			</div>
@@ -40,16 +40,17 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</sc-for>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"$preview":{"width":1440,"height":2420}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"$preview":{"width":1440,"height":2900}}'>
 class Component extends DCLogic {
 	renderVals() {
-		const c = (f, id, name, when, hold, more) => Object.assign({ f, id, name, when, hold: !!hold, resume: null, watch: false }, more || {});
+		const c = (f, id, name, when, hold, more) => Object.assign({ f, id, name, when, hold: !!hold, resume: null, watch: false, wait: false }, more || {});
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			groups: [
 				{ title: 'While it runs', sub: 'Up to 15 s on the tuned frequency. S1 tries one decoder at a time; S2 runs them in parallel.', cards: [
 					c(466025000, 'waiting', 'Waiting', 'Nothing to measure until the signal transmits. The bar counts down to the 15 s timeout.'),
+					c(161700000, 'waiting', 'Waiting until a transmission', 'Wait until a transmission is on: one wait across as many jobs as it takes, counted up, until something transmits or Stop.', false, { wait: true }),
 					c(167512500, 'trying', 'Trying', 'One row per decoder, each with its outcome. The measured line appears with the first transmission.'),
 					c(466025000, 'interrupted', 'Interrupted', 'You tuned away mid-run. Nothing is kept; shown if you come back to the frequency.')
 				] },
@@ -57,6 +58,7 @@ class Component extends DCLogic {
 					c(161150000, 'identified', 'Identified', 'A decoder synced. The card becomes that signal’s normal card, with Save and Open in Scanner.'),
 					c(167512500, 'maybe', 'Maybe', 'Looks like a known protocol but no decoder synced. The reason sits on the tag.'),
 					c(162400000, 'unidentified', 'Not identified', 'Nothing synced. What was measured stays, so the result is still useful.'),
+					c(161700000, 'nothing heard', 'Nothing heard', 'The wait ran out with no transmission. Turn on Wait until a transmission to keep listening.'),
 					c(160600000, 'artefact', 'Artefact', 'Answered at once from the receiver’s settings: centre spike, spur or mirror image.')
 				] },
 				{ title: 'While a scan has the receiver', sub: 'A sweep moves the receiver every few seconds, so identify waits for the user to pause it.', cards: [

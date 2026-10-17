@@ -14,7 +14,15 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 /* Paper: plot labels are ink on the sheet with a hairline, not glass chips (blur is already none on Paper via --wk-blur) */
 [data-wk-theme="light"] .wk-sq{border-top-color:var(--wk-amber) !important}
 [data-wk-theme="light"] .wk-sig{box-shadow:none !important}
-[data-wk-theme="light"] .wk-zoom{background:var(--wk-surface) !important;border-color:rgba(var(--wk-line-rgb),.22) !important;box-shadow:var(--wk-e2) !important}
+/* the band ruler (web: band-ruler.css): a well with a hairline, the view as an ink window, the zoom at its end. Flat, no glass */
+.wk-rl-track{position:relative;flex:1;min-width:40px;height:18px;border-radius:4px;background:var(--wk-well);box-shadow:inset 0 0 0 1px rgba(var(--wk-line-rgb),.08);overflow:hidden;cursor:pointer;touch-action:none;outline:none}
+.wk-rl-track:focus-visible{box-shadow:inset 0 0 0 1px rgba(var(--wk-line-rgb),.08),0 0 0 2px var(--wk-focus)}
+.wk-rl-zoom>button{width:22px;height:20px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--wk-text-3);font:inherit;font-size:13px;line-height:20px;cursor:pointer}
+.wk-rl-zoom>button:hover:not(:disabled){background:var(--wk-chip);color:var(--wk-text)}
+.wk-rl-zoom>button:disabled{opacity:.35;cursor:default}
+.wk-rl-zoom>button:focus-visible{outline:2px solid var(--wk-focus);outline-offset:1px}
+/* what no frame covers yet, while the view is dragged past the capture and the receiver follows: a faint hatch, never invented data */
+.wk-uncovered{position:absolute;top:0;bottom:0;pointer-events:none;background:repeating-linear-gradient(135deg,rgba(var(--wk-ink-rgb),.07) 0 1px,transparent 1px 9px)}
 [data-wk-theme="light"] .wk-hover{background:var(--wk-surface) !important;border-color:rgba(var(--wk-line-rgb),.26) !important;box-shadow:var(--wk-e2)}
 /* discovery ticks on the frequency scale: one new to the scan pings twice (kit wk-ping; reduced motion ends it at once) */
 .wk-disc-new{opacity:0;animation:wk-ping 1.2s var(--wk-ease-out) 2}
@@ -57,14 +65,9 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					<span style="position: absolute; right: 0; top: -17px; font-family: var(--wk-font-head); font-size: 11px; letter-spacing: .1em; color: var(--wk-amber)">SQUELCH</span>
 				</div>
 			</sc-if>
-			<div class="wk-zoom" style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 4px; border-radius: 8px; background: var(--wk-glass-strong); border: 1px solid var(--wk-line-14); box-shadow: inset 0 1px 0 var(--wk-glass-hi)" onPointerDown="{{stop}}">
-				<button class="wk-icon-btn" data-size="sm" onClick="{{zoomOut}}" aria-label="Zoom out" style="font-size: 16px">−</button>
-				<div style="position: relative; width: 84px; height: 6px; border-radius: 3px; background: var(--wk-line-solid)" aria-hidden="true">
-					<div style="position: absolute; top: 0; bottom: 0; left: {{ovLeft}}%; width: max(3px, {{ovWidth}}%); border-radius: 3px; background: var(--wk-accent)"></div>
-				</div>
-				<button class="wk-icon-btn" data-size="sm" onClick="{{zoomIn}}" aria-label="Zoom in" style="font-size: 16px">+</button>
-				<button class="wk-btn" data-variant="ghost" data-size="sm" onClick="{{zoomFit}}" aria-label="Show the whole capture" style="padding: 0 7px; min-width: 44px; color: var(--wk-text-3); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums">{{zoomText}}</button>
-			</div>
+			<sc-for list="{{uncovered}}" as="u" hint-placeholder-count="0">
+				<div class="wk-uncovered" style="left: {{u.left}}%; width: {{u.width}}%"></div>
+			</sc-for>
 		</div>
 		<div style="position: relative; height: 30px; flex: none; border-top: 1px solid rgba(var(--wk-line-rgb),.08); background: var(--wk-plot-bg); overflow: hidden">
 			<sc-for list="{{scaleTicks}}" as="k" hint-placeholder-count="0">
@@ -103,8 +106,42 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</sc-for>
 			</div>
 		</sc-if>
+		<!-- Band ruler (2026-10-17, as the web app draws it, band-ruler.ts): a wide stretch of the band around the view, from 8 captures up
+		to the whole tuner range. The band plan as quiet colour, where the scanner heard things as a density strip from the foot, saved
+		frequencies as accent dots, the view as an ink window, the tuned frequency as a tick. Press or drag and the view goes there at once,
+		the receiver follows. The row ends with the plot's one zoom: − and + zoom the spectrum around the VFO; past Fit, − widens the ruler. -->
+		<div onPointerDown="{{stop}}" onPointerMove="{{stop}}" style="position: relative; height: 26px; flex: none; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 8px; border-bottom: 1px solid rgba(var(--wk-line-rgb),.08); background: var(--wk-plot-bg)">
+			<span aria-hidden="true" style="flex: none; width: 44px; font-size: 11px; color: var(--wk-text-4); font-variant-numeric: tabular-nums; white-space: nowrap">{{rlStart}}</span>
+			<div ref="{{refs.ruler}}" class="wk-rl-track" role="slider" tabindex="0" aria-label="Band ruler: press or drag to move the spectrum there" aria-valuetext="{{rlValue}}" onPointerDown="{{rlDown}}" onPointerMove="{{rlMove}}" onPointerUp="{{rlUp}}" onPointerCancel="{{rlUp}}" onPointerLeave="{{rlLeave}}" onKeyDown="{{rlKey}}" style="cursor: {{rlCursor}}">
+				<sc-for list="{{rlBands}}" as="b" hint-placeholder-count="3">
+					<i title="{{b.title}}" style="position: absolute; display: block; pointer-events: none; top: 0; bottom: 0; left: {{b.left}}%; width: {{b.width}}%; background: {{b.c}}; opacity: {{b.op}}"></i>
+				</sc-for>
+				<sc-for list="{{rlHeard}}" as="h" hint-placeholder-count="4">
+					<i style="position: absolute; display: block; pointer-events: none; bottom: 2px; left: {{h.left}}%; width: {{h.width}}%; height: {{h.h}}px; border-radius: 1px 1px 0 0; background: rgba(var(--wk-ink-3-rgb),.55)"></i>
+				</sc-for>
+				<sc-for list="{{rlSaved}}" as="d" hint-placeholder-count="2">
+					<i style="position: absolute; display: block; pointer-events: none; top: 3px; left: {{d.left}}%; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--wk-accent)"></i>
+				</sc-for>
+				<i style="position: absolute; display: block; pointer-events: none; top: 1px; bottom: 1px; left: {{rlWinL}}%; width: {{rlWinW}}%; min-width: 4px; border-radius: 3px; background: rgba(var(--wk-ink-rgb),.12); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-rgb),.32)"></i>
+				<sc-if value="{{rlTunedOn}}" hint-placeholder-val="{{true}}">
+					<i style="position: absolute; display: block; pointer-events: none; top: 4px; bottom: 4px; left: {{rlTuned}}%; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--wk-text)"></i>
+				</sc-if>
+				<sc-if value="{{rlReadOn}}" hint-placeholder-val="{{false}}">
+					<span style="position: absolute; top: 1px; left: {{rlReadX}}px; height: 16px; width: 120px; box-sizing: border-box; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 6px; border-radius: 3px; background: var(--wk-glass-strong); font-size: 10.5px; color: var(--wk-text); font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none">{{rlReadHz}}<sc-if value="{{rlReadHasBand}}" hint-placeholder-val="{{true}}"><em style="overflow: hidden; text-overflow: ellipsis; font-style: normal; color: var(--wk-text-3)">{{rlReadBand}}</em></sc-if></span>
+				</sc-if>
+			</div>
+			<span aria-hidden="true" style="flex: none; width: 58px; font-size: 11px; color: var(--wk-text-4); font-variant-numeric: tabular-nums; white-space: nowrap">{{rlEnd}} MHz</span>
+			<span class="wk-rl-zoom" style="flex: none; display: flex; align-items: center; gap: 1px; padding: 1px; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.1)">
+				<button onClick="{{zoomOut}}" disabled="{{zoomOutOff}}" aria-label="Zoom out" title="{{zoomOutTitle}}">−</button>
+				<button onClick="{{zoomFit}}" disabled="{{zoomFitOff}}" aria-label="{{zoomFitLabel}}" style="width: auto; min-width: 40px; padding: 0 6px; font-size: 11px; font-variant-numeric: tabular-nums">{{zoomText}}</button>
+				<button onClick="{{zoomIn}}" disabled="{{zoomInOff}}" aria-label="Zoom in">+</button>
+			</span>
+		</div>
 		<div style="position: relative; flex: 1; min-height: 0">
 			<canvas ref="{{refs.wf}}" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block"></canvas>
+			<sc-for list="{{uncovered}}" as="u" hint-placeholder-count="0">
+				<div class="wk-uncovered" style="left: {{u.left}}%; width: {{u.width}}%"></div>
+			</sc-for>
 		</div>
 
 		<sc-if value="{{vfoVisible}}" hint-placeholder-val="{{true}}">
@@ -154,8 +191,10 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match"},"paperRamp":{"editor":"enum","options":["a","b","c"],"default":"a","section":"Theme"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"discoveries":{"editor":null},"discoveryTags":{"editor":"enum","options":["all","decoded","off"],"default":"all"},"trust":{"editor":"enum","options":["ok","unverified"],"default":"ok"},"onView":{"editor":null},"onScanRange":{"editor":null},"scan":{"editor":null},"scanDemo":{"editor":"enum","options":["off","watch","watch-hit","sweep"],"default":"off"},"signalMenu":{"editor":"enum","options":["off","open","decode as","read-only"],"default":"off"},"listening":{"editor":null,"tsType":"boolean"},"readOnly":{"editor":null,"tsType":"boolean"},"onSignalAction":{"editor":null},"$preview":{"width":1440,"height":640}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match"},"paperRamp":{"editor":"enum","options":["a","b","c"],"default":"a","section":"Theme"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"discoveries":{"editor":null},"discoveryTags":{"editor":"enum","options":["all","decoded","off"],"default":"all"},"trust":{"editor":"enum","options":["ok","unverified"],"default":"ok"},"onView":{"editor":null},"onScanRange":{"editor":null},"scan":{"editor":null},"scanDemo":{"editor":"enum","options":["off","watch","watch-hit","sweep"],"default":"off"},"signalMenu":{"editor":"enum","options":["off","open","decode as","read-only"],"default":"off"},"dragDemo":{"editor":"enum","options":["off","past the capture"],"default":"off"},"retuneMs":{"editor":"range","min":100,"max":1500,"step":50,"unit":"ms","default":300},"listening":{"editor":null,"tsType":"boolean"},"readOnly":{"editor":null,"tsType":"boolean"},"onSignalAction":{"editor":null},"$preview":{"width":1440,"height":640}}'>
 const BINS = 4096, HIST = 900, RATE = 24, MIN_SPAN = 100e3, LO = 24e6, HI = 1.9e9;
+// band ruler widths in captures, close to the whole tuner range (web: band-ruler.ts RULER_LEVELS); it recentres once the view's centre leaves its middle 60 %
+const RULER_LEVELS = [8, 32, 128, Infinity], RULER_FOLLOW = 0.6;
 const ICON = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
 	marine: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
@@ -362,7 +401,10 @@ class Component extends DCLogic {
 		super(props);
 		const cap = props.sampleRate ?? 2.4e6;
 		const c = 161.5e6;
-		this.state = { vfo: 161150000, hover: null, center: c, viewL: c - cap / 2, viewSpan: cap, dragging: null };
+		// dataC: the centre the frames come from. Dragging past the capture moves `center` (the view) at once; the receiver follows
+		// one retune at a time (retuneMs), and what the frames do not cover yet is hatched until they catch up
+		this.state = { vfo: 161150000, hover: null, center: c, dataC: c, viewL: c - cap / 2, viewSpan: cap, dragging: null, rlLevel: 0, rlHover: null, rlPress: false };
+		this.rlC = null;
 		this.hist = new Float32Array(HIST * BINS);
 		this.histC = new Float64Array(HIST);
 		this.head = -1; this.count = 0; this.maps = new Map(); this.dirty = true; this.wheelAcc = 0;
@@ -379,7 +421,8 @@ class Component extends DCLogic {
 			},
 			spec: el => { this.specEl = el; },
 			menu: el => { this.menuEl = el; },
-			wf: el => { this.wfEl = el; }
+			wf: el => { this.wfEl = el; },
+			ruler: el => { this.rulerEl = el; }
 		};
 		this.frame = this.frame.bind(this);
 		this.stop = e => e.stopPropagation();
@@ -450,8 +493,40 @@ class Component extends DCLogic {
 			this.setView(anchor - frac * span, span);
 		};
 		this.zoomIn = () => this.zoomBy(0.5);
-		this.zoomOut = () => this.zoomBy(2);
-		this.zoomFit = () => { const cap = this.cap(); this.setView(this.state.center - cap / 2, cap); };
+		this.zoomOut = () => { if (this.zoomedIn()) this.zoomBy(2); else this.setState({ rlLevel: Math.min(RULER_LEVELS.length - 1, this.state.rlLevel + 1) }); };
+		this.zoomFit = () => { if (this.zoomedIn()) { const cap = this.cap(); this.setView(this.state.center - cap / 2, cap); } else this.setState({ rlLevel: 0 }); };
+		// the band ruler: press or drag and the view goes there at once (the receiver follows); hover reads frequency and band
+		this.rlFrac = e => { const r = this.rulerEl.getBoundingClientRect(); return { x: e.clientX - r.left, w: r.width, f: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) }; };
+		this.rlDown = e => {
+			e.stopPropagation();
+			if (e.button !== 0 || !this.rulerEl) return;
+			this.rulerEl.setPointerCapture(e.pointerId);
+			this.rlDrag = true;
+			const sp = this.rulerSpan(), p = this.rlFrac(e);
+			this.centreAt(sp.a + p.f * (sp.b - sp.a));
+			this.setState({ rlPress: true, rlHover: null });
+		};
+		this.rlMove = e => {
+			e.stopPropagation();
+			if (!this.rulerEl) return;
+			const sp = this.rulerSpan(), p = this.rlFrac(e), f = sp.a + p.f * (sp.b - sp.a);
+			if (this.rlDrag) this.centreAt(f);
+			else this.setState({ rlHover: { f, x: p.x, w: p.w }, hover: null });
+		};
+		this.rlUp = e => {
+			this.rlDrag = false;
+			if (this.rulerEl && this.rulerEl.hasPointerCapture && this.rulerEl.hasPointerCapture(e.pointerId)) this.rulerEl.releasePointerCapture(e.pointerId);
+			this.setState({ rlPress: false });
+		};
+		this.rlLeave = () => { if (!this.rlDrag) this.setState({ rlHover: null }); };
+		// arrows move by a view width, Shift by a tenth of the ruler
+		this.rlKey = e => {
+			const dir = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+			if (!dir) return;
+			e.preventDefault();
+			const sp = this.rulerSpan(), s = this.state;
+			this.centreAt(s.viewL + s.viewSpan / 2 + dir * (e.shiftKey ? (sp.b - sp.a) / 10 : s.viewSpan));
+		};
 		// right-click (long press on touch) on a signal or its tag: the signal menu at the pointer, on the signal a click would tune
 		this.onCtx = e => {
 			e.preventDefault();
@@ -474,6 +549,31 @@ class Component extends DCLogic {
 	cap() { return this.props.sampleRate ?? 2.4e6; }
 	vfo() { return this.props.vfo ?? this.state.vfo; }
 	clampSpan(span) { return Math.min(this.cap(), Math.max(MIN_SPAN, span)); }
+	zoomedIn() { return this.state.viewSpan < this.cap() / 1.05; }
+	centreAt(f) { const s = this.state; this.setView(f - s.viewSpan / 2, s.viewSpan, f); }
+	retuneMs() { return this.props.retuneMs ?? 300; }
+	// the receiver follows the view: one retune in flight, the latest centre wins when it lands; the drag demo holds it
+	follow() {
+		if (this.followT || this.props.dragDemo === 'past the capture') return;
+		this.followT = setTimeout(() => {
+			this.followT = null;
+			const c = this.state.center;
+			if (c === this.state.dataC) return;
+			this.dirty = true;
+			this.setState({ dataC: c });
+			this.follow();
+		}, this.retuneMs());
+	}
+	// the ruler's stretch around the view, kept inside the tuner's range; it recentres when the view's centre leaves its middle
+	rulerSpan() {
+		const s = this.state, cap = this.cap(), mid = s.viewL + s.viewSpan / 2;
+		const width = Math.min(HI - LO, cap * RULER_LEVELS[s.rlLevel]);
+		const at = c => { const a = Math.max(LO, Math.min(HI - width, c - width / 2)); return { a, b: a + width }; };
+		if (this.rlC === null || this.rlW !== width) this.rlC = mid;
+		else { const sp = at(this.rlC), m = width * (1 - RULER_FOLLOW) / 2; if (mid < sp.a + m || mid > sp.b - m) this.rlC = mid; }
+		this.rlW = width;
+		return at(this.rlC);
+	}
 	fAt(clientX) {
 		const r = this.boxEl.getBoundingClientRect();
 		return this.state.viewL + (clientX - r.left) / r.width * this.state.viewSpan;
@@ -488,6 +588,7 @@ class Component extends DCLogic {
 		viewL = Math.min(c + cap / 2 - span, Math.max(c - cap / 2, viewL));
 		this.dirty = true;
 		this.setState({ center: c, viewL, viewSpan: span });
+		if (c !== this.state.dataC) this.follow();
 	}
 	ensureVisible(f) {
 		const cap = this.cap(), s = this.state, margin = cap * 0.02;
@@ -507,7 +608,14 @@ class Component extends DCLogic {
 		const step = this.props.step ?? 12500;
 		return best ? best.f : Math.round(f / step) * step;
 	}
-	clickTune(x) { this.tuneTo(this.snapAt(x)); }
+	clickTune(x) {
+		const f = this.fAt(x), s = this.state, w = this.boxEl.clientWidth || 1, hzPx = s.viewSpan / w;
+		let best = null;
+		for (const g of SIG) if (Math.abs(g.f - f) <= 4 * hzPx && (!best || Math.abs(g.f - f) < Math.abs(best.f - f))) best = g;
+		if (best) { this.tuneTo(best.f); return; }
+		const dec = hzPx > 1 ? Math.pow(10, Math.floor(Math.log10(hzPx))) : 1, q = hzPx >= 5 * dec ? 5 * dec : dec;
+		this.tuneTo(Math.round(f / q) * q);
+	}
 	// the open menu: one the viewer opened, else the signalMenu tweak's demo on AIS channel A (right of the tuned DMR repeater)
 	menuNow() {
 		if (this.state.menu) return this.state.menu;
@@ -563,7 +671,7 @@ class Component extends DCLogic {
 		const f = this.state.viewL + frac * this.state.viewSpan;
 		let db = null;
 		if (this.avg) {
-			const b = Math.floor((f - (this.state.center - this.cap() / 2)) / (this.cap() / BINS));
+			const b = Math.floor((f - (this.avgC - this.cap() / 2)) / (this.cap() / BINS));
 			if (b >= 0 && b < BINS) db = Math.round(this.avg[b]);
 		}
 		this.setState({ hover: { left: frac * 100, text: (f / 1e6).toFixed(4) + ' MHz' + (db === null ? '' : '  ·  ' + String(db).replace('-', '−') + ' dB') } });
@@ -588,8 +696,10 @@ class Component extends DCLogic {
 			this.tuneTo(Math.round((this.vfo() + dir * step) / step) * step);
 		}
 	}
-	componentDidMount() { this.syncKeyed(); this.raf = requestAnimationFrame(this.frame); this.emitView(); }
-	componentWillUnmount() { clearTimeout(this.sentT); cancelAnimationFrame(this.raf); if (this.ro) this.ro.disconnect(); if (this.boxEl) this.boxEl.removeEventListener('wheel', this.onWheel); }
+	componentDidMount() { this.syncKeyed(); this.raf = requestAnimationFrame(this.frame); this.emitView(); if (this.props.dragDemo === 'past the capture') this.dragDemo(); }
+	// the dragDemo tweak: the view dragged 45 % of a capture past its right edge, the receiver's retune not landed yet
+	dragDemo() { clearTimeout(this.followT); this.followT = null; const s = this.state; this.setView(s.viewL + this.cap() * 0.45, s.viewSpan); }
+	componentWillUnmount() { clearTimeout(this.sentT); clearTimeout(this.followT); cancelAnimationFrame(this.raf); if (this.ro) this.ro.disconnect(); if (this.boxEl) this.boxEl.removeEventListener('wheel', this.onWheel); }
 	measureBox() { const w = this.boxEl ? this.boxEl.clientWidth : 0; if (w && w !== this.state.boxW) { this.dirty = true; this.setState({ boxW: w }); } }
 	// tells the shell which part of the band is on screen (optional; the shell no longer uses it since the band strip went)
 	emitView() {
@@ -618,6 +728,7 @@ class Component extends DCLogic {
 	componentDidUpdate(prev) {
 		this.syncKeyed();
 		if (this.props.signalMenu !== prev.signalMenu) this.setState({ menu: null, menuDemoOff: false });
+		if (this.props.dragDemo !== prev.dragDemo) { if (this.props.dragDemo === 'past the capture') this.dragDemo(); else this.follow(); }
 		// focus goes to the first row when the menu opens or switches list (arrows move, Esc closes)
 		if (this.menuFocus && this.menuEl) { this.menuFocus = false; const b = this.menuEl.querySelector('button'); if (b) b.focus(); }
 		if (this.props.scanDemo !== prev.scanDemo && this.props.scanDemo && this.props.scanDemo !== 'off' && this.props.scan === undefined) { const c = this.scan(), m = Math.round((c.a + c.b) / 2); this.setView(m - this.cap() / 2, this.cap(), m); }
@@ -720,7 +831,7 @@ class Component extends DCLogic {
 	}
 	pushRow(t) {
 		this.head = (this.head + 1) % HIST;
-		const c = this.state.center;
+		const c = this.state.dataC;
 		this.histC[this.head] = c;
 		this.gen(t, c, this.row || (this.row = new Float32Array(BINS)));
 		this.hist.set(this.row, this.head * BINS);
@@ -771,10 +882,10 @@ class Component extends DCLogic {
 			this.pushRow(this.last);
 			if (!this.dirty) {
 				this.wctx.drawImage(this.wfEl, 0, 0, this.w, this.wh - 1, 0, 1, this.w, this.wh - 1);
-				this.paintRow(this.rowImg.data, 0, this.hist, this.head * BINS, this.mapFor(this.state.center));
+				this.paintRow(this.rowImg.data, 0, this.hist, this.head * BINS, this.mapFor(this.histC[this.head]));
 				this.wctx.putImageData(this.rowImg, 0, 0);
 			}
-			if (!this.avg || this.avgC !== this.state.center) { this.avg = Float32Array.from(this.row); this.peak = Float32Array.from(this.row); this.avgC = this.state.center; }
+			if (!this.avg || this.avgC !== this.state.dataC) { this.avg = Float32Array.from(this.row); this.peak = Float32Array.from(this.row); this.avgC = this.state.dataC; }
 			else for (let i = 0; i < BINS; i++) { this.avg[i] += (this.row[i] - this.avg[i]) * 0.35; this.peak[i] = Math.max(this.peak[i] - 0.12, this.avg[i]); }
 			rows++;
 		}
@@ -811,7 +922,7 @@ class Component extends DCLogic {
 	draw() {
 		if (!this.avg) return;
 		const c = this.sctx, W = this.specEl.width, H = this.specEl.height, d = this.dpr, n = this.w, s = this.state;
-		const m = this.mapFor(s.center);
+		const m = this.mapFor(this.avgC);
 		c.clearRect(0, 0, W, H);
 		c.lineWidth = 1;
 		const T = this.tokens(), paper = T.theme === 'light', a = T.acc.join(',');
@@ -887,7 +998,7 @@ class Component extends DCLogic {
 		if (scOn) taken.push([scLabelX - 4, 2, scLabelX + 10 + scName.length * 6.4, scSub ? 40 : 26]);
 		const hitIn = scOn && sc.hitHz && inView(sc.hitHz);
 		const clash = r => r[0] < 34 || taken.some(o => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]);
-		const markers = (this.props.showMarkers ?? true) ? SIG.filter(x => x.label && inView(x.f)).sort((a, b) => (b.f === vfo) - (a.f === vfo) || b.p - a.p).map(x => {
+		const markers = (this.props.showMarkers ?? true) ? SIG.filter(x => x.label && inView(x.f) && Math.abs(x.f - s.dataC) <= cap / 2).sort((a, b) => (b.f === vfo) - (a.f === vfo) || b.p - a.p).map(x => {
 			const px = pct(x.f) / 100 * w, pref = Math.max(4, yOf(x.p, specH) - 46);
 			const full = 44 + x.label.length * 7.4 + (x.sub ? 6 + x.sub.length * 6.6 : 0), compact = 40 + x.label.length * 7.4;
 			for (const [wd, hasSub] of [[full, !!x.sub], [compact, false]]) {
@@ -944,6 +1055,19 @@ class Component extends DCLogic {
 		const unverified = this.props.trust === 'unverified';
 		const zoom = cap / span;
 		const h = s.hover;
+		// band ruler
+		const rs = this.rulerSpan(), rW = rs.b - rs.a, rx = f => (f - rs.a) / rW * 100;
+		const rd = rW >= 50e6 ? 0 : 1, rMHz = (f, d) => (f / 1e6).toFixed(d);
+		const rBands = LANES.filter(b => b.to > rs.a && b.from < rs.b).sort((a, b) => a.depth - b.depth).map(b => ({ left: rx(Math.max(b.from, rs.a)), width: (Math.min(b.to, rs.b) - Math.max(b.from, rs.a)) / rW * 100, c: 'var(--wk-grp-' + b.group + ')', op: b.depth ? 0.24 : 0.14, title: b.title }));
+		const trackW = Math.max(40, w - 230), cols = Math.max(1, Math.floor(trackW / 6)), count = new Array(cols).fill(0);
+		(this.props.discoveries ?? DISCOVERIES).forEach(d => { if (!d.ignored && d.hz >= rs.a && d.hz <= rs.b) count[Math.min(cols - 1, Math.floor((d.hz - rs.a) / rW * cols))]++; });
+		const cmax = Math.max(1, ...count);
+		const rHeard = count.map((n, i) => n ? { left: i / cols * 100, width: 100 / cols * 0.8, h: 2 + Math.round(n / cmax * 6) } : null).filter(Boolean);
+		const rh = s.rlHover, rhBand = rh ? bpBandAt(rh.f / 1e6) : null;
+		const zIn = span < cap / 1.05;
+		const uncov = [], dL = s.dataC - cap / 2, dR = s.dataC + cap / 2;
+		if (L < dL) uncov.push({ left: 0, width: Math.min(100, (dL - L) / span * 100) });
+		if (R > dR) { const a = Math.max(0, (dR - L) / span * 100); uncov.push({ left: a, width: 100 - a }); }
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
@@ -994,9 +1118,19 @@ class Component extends DCLogic {
 			hasSq: typeof this.props.squelch === 'number' && this.props.squelch > -120 && inView(vfo),
 			sqTop: typeof this.props.squelch === 'number' ? yOf(this.props.squelch, specH) : 0,
 			zoomIn: this.zoomIn, zoomOut: this.zoomOut, zoomFit: this.zoomFit,
-			zoomText: zoom < 1.05 ? 'Fit' : (zoom < 10 ? zoom.toFixed(1) : Math.round(zoom)) + '×',
-			ovLeft: (L - (s.center - cap / 2)) / cap * 100,
-			ovWidth: span / cap * 100,
+			zoomText: zIn ? (zoom < 10 ? zoom.toFixed(1) : Math.round(zoom)) + '×' : 'Fit',
+			zoomInOff: span <= MIN_SPAN * 1.01, zoomOutOff: !zIn && s.rlLevel >= RULER_LEVELS.length - 1, zoomFitOff: !zIn && s.rlLevel === 0,
+			zoomOutTitle: zIn ? 'Zoom out' : 'Zoom out: widen the band ruler', zoomFitLabel: zIn ? 'Show the whole capture' : 'Zoom',
+			uncovered: uncov,
+			rlStart: rMHz(rs.a, rd), rlEnd: rMHz(rs.b, rd), rlValue: ((L + span / 2) / 1e6).toFixed(3) + ' MHz',
+			rlBands: rBands, rlHeard: rHeard,
+			rlSaved: (this.props.saved || []).filter(x => x.f >= rs.a && x.f <= rs.b).map(x => ({ left: rx(x.f) })),
+			rlWinL: Math.max(0, rx(L)), rlWinW: Math.max(0, Math.min(100, rx(R)) - Math.max(0, rx(L))),
+			rlTunedOn: vfo >= rs.a && vfo <= rs.b, rlTuned: rx(vfo),
+			rlReadOn: !!rh && !s.rlPress, rlReadX: rh ? Math.max(0, Math.min(rh.w - 120, rh.x - 60)) : 0,
+			rlReadHz: rh ? rMHz(rh.f, rW >= 50e6 ? 1 : 3) : '', rlReadBand: rhBand ? rhBand.name : '', rlReadHasBand: !!rhBand,
+			rlCursor: s.rlPress ? 'grabbing' : 'pointer',
+			rlDown: this.rlDown, rlMove: this.rlMove, rlUp: this.rlUp, rlLeave: this.rlLeave, rlKey: this.rlKey,
 			hovering: !!h && !s.dragging && !mn,
 			hoverLeft: h ? h.left : 0,
 			hoverText: h ? h.text : '',

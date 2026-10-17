@@ -22,7 +22,7 @@
       "expand": "fill",
       "h": 900,
       "is_interactive": true,
-      "title": "C · Immersive — the signal is the app, chrome floats",
+      "title": "C · Immersive — the signal is the app, chrome floats (pairing sheet, update toast)",
       "w": 1440,
       "x": 0,
       "y": 0
@@ -104,7 +104,7 @@
       "expand": "fill",
       "h": 640,
       "is_interactive": true,
-      "title": "Spectrum + waterfall (shared, live mock) — every decoded signal type at a realistic frequency",
+      "title": "Spectrum + waterfall (shared, live mock) — every decoded signal type at a realistic frequency; band ruler with the zoom, drag past the capture",
       "w": 1440,
       "x": 0,
       "y": 1300
@@ -145,9 +145,9 @@
       "x": 500,
       "y": 8100,
       "w": 1440,
-      "h": 1880,
+      "h": 2900,
       "is_interactive": true,
-      "title": "Identify — every state of the tuned card while it identifies a signal"
+      "title": "Identify — every state of the tuned card while it identifies a signal, Wait until a transmission and Nothing heard included"
     },
     "ScanPlanner.dc.html": {
       "x": 2020,
@@ -159,7 +159,7 @@
     },
     "Kit.dc.html": {
       "x": 1540,
-      "y": 10300,
+      "y": 11340,
       "w": 320,
       "h": 80,
       "is_interactive": true,
@@ -167,7 +167,7 @@
     },
     "Components.dc.html": {
       "x": 0,
-      "y": 10300,
+      "y": 11340,
       "w": 1440,
       "h": 6800,
       "is_interactive": true,
@@ -245,7 +245,7 @@
       "text": "Design system",
       "w": 240,
       "x": 0,
-      "y": 10020
+      "y": 11060
     }
   },
   "order": [

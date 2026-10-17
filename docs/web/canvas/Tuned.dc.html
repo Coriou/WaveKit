@@ -129,6 +129,14 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<sc-if value="{{idHasLine}}" hint-placeholder-val="{{false}}">
 					<span style="font-size: var(--wk-fs-md); color: var(--wk-text-2); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden">{{idLine}}</span>
 				</sc-if>
+				<!-- Wait until a transmission (2026-10-17, as the web app has it): one wait across as many jobs as it takes, counted up,
+				no countdown, until a transmission is tried or Stop. Shown while waiting, and after a wait where nothing came. -->
+				<sc-if value="{{idUntilShow}}" hint-placeholder-val="{{false}}">
+					<label style="display: flex; align-items: center; gap: 12px; min-height: 36px; font-size: var(--wk-fs-md); color: var(--wk-text-2); cursor: pointer">
+						<span style="flex: 1">Wait until a transmission</span>
+						<button class="wk-switch" role="switch" aria-checked="{{idUntil}}" onClick="{{toggleUntil}}" aria-label="Wait until a transmission" title="{{idUntilTitle}}"></button>
+					</label>
+				</sc-if>
 				<sc-if value="{{idHasTrials}}" hint-placeholder-val="{{false}}">
 					<ol aria-label="Decoders tried" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column">
 						<sc-for list="{{idTrials}}" as="r" hint-placeholder-count="4">
@@ -301,7 +309,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"freq":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onAction":{"editor":null},"variant":{"editor":"enum","options":["panel","floating"],"default":"panel"},"identify":{"editor":"enum","options":["","waiting","trying","identified","maybe","unidentified","artefact","blocked","interrupted","not decoded"],"default":""},"messageOpen":{"editor":"boolean","default":false},"scanHold":{"editor":"boolean","default":false},"scanText":{"editor":null,"tsType":"string"},"scanResume":{"editor":null},"onScan":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"watchDemo":{"editor":"boolean","default":false},"identifyRun":{"editor":null,"tsType":"number"},"onGrab":{"editor":null},"onGrabKey":{"editor":null},"lifted":{"editor":null,"tsType":"boolean"},"minimised":{"editor":"boolean","default":false},"onMinimise":{"editor":null},"$preview":{"width":344,"height":860}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"freq":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onAction":{"editor":null},"variant":{"editor":"enum","options":["panel","floating"],"default":"panel"},"identify":{"editor":"enum","options":["","waiting","trying","identified","maybe","unidentified","nothing heard","artefact","blocked","interrupted","not decoded"],"default":""},"waitUntil":{"editor":"boolean","default":false},"messageOpen":{"editor":"boolean","default":false},"scanHold":{"editor":"boolean","default":false},"scanText":{"editor":null,"tsType":"string"},"scanResume":{"editor":null},"onScan":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"watchDemo":{"editor":"boolean","default":false},"identifyRun":{"editor":null,"tsType":"number"},"onGrab":{"editor":null},"onGrabKey":{"editor":null},"lifted":{"editor":null,"tsType":"boolean"},"minimised":{"editor":"boolean","default":false},"onMinimise":{"editor":null},"$preview":{"width":344,"height":860}}'>
 const ICON = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
 	analog: ['M3 12c2 -6 4 -6 6 0s4 6 6 0s4 -6 6 0'],
@@ -475,6 +483,8 @@ const planFor = (freq, x) => {
 			line: wfm ? 'Wide FM with a stereo pilot · nothing to decode' : 'Sounds like speech' + (tone ? ' with ' + tone : '') + ' · no digital decoder synced' } };
 };
 
+// how long a wait until a transmission has lasted: "8 s", "2 min 05 s" (web: identify-view.ts formatWaited)
+const waited = sec => { const t = Math.max(0, Math.floor(sec)); return t < 60 ? t + ' s' : Math.floor(t / 60) + ' min ' + String(t % 60).padStart(2, '0') + ' s'; };
 class Component extends DCLogic {
 	constructor(props) {
 		super(props);
@@ -487,6 +497,12 @@ class Component extends DCLogic {
 		this.closeMenu = () => this.setState({ menu: false });
 		this.toggleMenu = () => this.setState({ menu: !this.state.menu, decodeList: false });
 		this.menuKey = e => { if (e.key === 'Escape') { e.stopPropagation(); this.setState({ menu: false }); } };
+		this.toggleUntil = e => {
+			if (e) e.preventDefault();
+			const on = !this.untilOn(), v = this.idView(this.freq(), infoFor(this.freq()));
+			this.setState({ untilSig: on, untilTouched: true });
+			if (on && v && v.phase === 'nothing') this.startId(false);
+		};
 		this.idClose = () => this.setState({ run: null, stopped: null, idTouched: true, menu: false });
 		// Minimise: Immersive owns the state (minimised + onMinimise); standalone, the card keeps its own, seeded by the tweak.
 		this.toggleMin = () => {
@@ -549,6 +565,8 @@ class Component extends DCLogic {
 	}
 	tune(f) { if (this.props.onTune) this.props.onTune(f); else this.setState({ freq: f }); }
 	act(id, f) { if (this.props.onAction) this.props.onAction(id, f, { type: id, hz: f }); }
+	// "Wait until a transmission": remembered per browser in the app; here the waitUntil tweak until the viewer flips it
+	untilOn() { return this.state.untilTouched ? !!this.state.untilSig : !!this.props.waitUntil; }
 	startId(longer, holdOk, proto) {
 		const hz = this.freq(), ok = holdOk || this.state.holdOk;
 		this.setState({ run: { hz, t0: Date.now(), longer: !!longer, blocked: !!this.props.scanHold && !ok, proto: proto || null }, stopped: null, idTouched: true, menu: false, decodeList: false, msgOpen: null, holdOk: ok });
@@ -574,7 +592,8 @@ class Component extends DCLogic {
 			if (forced === 'artefact') return { phase: 'artefact', plan: plan.art ? plan : { art: ART[CENTRE], trials: [] } };
 			if (forced === 'blocked') return { phase: 'blocked', plan };
 			if (forced === 'interrupted') return { phase: 'interrupted', plan, done: Math.min(2, n), to: 161150000 };
-			if (forced === 'waiting') return { phase: 'waiting', plan, left: 9, win: 15 };
+			if (forced === 'waiting') return this.untilOn() ? { phase: 'waiting', plan, until: true, waited: 19, left: 15, win: 15 } : { phase: 'waiting', plan, left: 9, win: 15 };
+			if (forced === 'nothing heard') return { phase: 'nothing', plan, done: 0, win: 15 };
 			if (forced === 'not decoded') return { phase: 'not decoded', plan: Object.assign({}, plan, { trials: [['DMR', 'dsd-fme', 'nosync']] }), done: 1, win: 15, proto: DECODE_AS[0] };
 			if (forced === 'trying') return { phase: 'trying', plan, done: Math.min(2, n - 1), left: 7, win: 15 };
 			return { phase: forced, plan, done: n, win: 15 };
@@ -586,6 +605,7 @@ class Component extends DCLogic {
 			if (plan.art) return { phase: 'artefact', plan };
 			const win = r.longer ? 60 : 15, e = (Date.now() - r.t0) / 1000;
 			const wait = r.longer ? 3 : plan.quick ? 1.2 : 2.6, step = r.longer ? 2.6 : 1.1;
+			if (this.untilOn() && e < wait) return { phase: 'waiting', plan, until: true, waited: e, left: win, win };
 			if (e < wait) return { phase: 'waiting', plan, left: win - e, win };
 			const k = Math.floor((e - wait) / step);
 			// Hold the last row's answer for a beat before the card changes.
@@ -684,7 +704,7 @@ class Component extends DCLogic {
 		} else if (ph === 'blocked') {
 			actions.push(btn('pause-scan', 'Pause the scan and identify', I.pause, { primary: true, pick: () => { this.act('pause-scan', freq); this.startId(false, true); } }));
 			menu.push(miPin, miCopy);
-		} else if (ph === 'interrupted') {
+		} else if (ph === 'interrupted' || ph === 'nothing') {
 			actions.push(btn('identify', 'Identify again', I.again, { primary: true, pick: startId }));
 			actions.push(btn('save', saved ? 'Saved' : 'Save', A.save, { iconOnly: true, title: saved ? 'Saved' : 'Save this frequency', pressed: saved, pick: toggleSave }));
 			menu.push(miPin, miCopy);
@@ -747,7 +767,9 @@ class Component extends DCLogic {
 		else if (ph === 'maybe' || ph === 'unidentified') idTrials = plan.trials.map(tr => row(tr, tr[2]));
 		const res = plan.result || {};
 		let idTitle = '', idSecs = '', idLine = '', idNote = '', idReason = '', big = false;
-		if (ph === 'waiting') { idTitle = 'Waiting for a transmission'; idSecs = ' · ' + Math.max(0, Math.ceil(v.left)) + ' s'; }
+		if (ph === 'waiting' && v.until) { idTitle = 'Waiting for a transmission'; idSecs = ' · ' + waited(v.waited); idLine = 'Listening until one comes.'; }
+		else if (ph === 'waiting') { idTitle = 'Waiting for a transmission'; idSecs = ' · ' + Math.max(0, Math.ceil(v.left)) + ' s'; }
+		else if (ph === 'nothing') { idTitle = 'Nothing heard'; big = true; idLine = 'No transmission in ' + v.win + ' s.'; }
 		else if (ph === 'trying' && v.proto) { idTitle = 'Trying ' + v.proto[1]; }
 		else if (ph === 'not decoded') { idTitle = 'Not decoded'; big = true; idNote = 'Added to discoveries'; idLine = raw.kind === 'unknown' ? 'No ' + v.proto[1] + ' sync in ' + v.win + ' s.' : 'Looks like ' + raw.proto + '. It does not look like ' + v.proto[1] + ', so nothing was tried.'; }
 		else if (ph === 'trying') { idTitle = 'Trying decoders'; idSecs = ' · ' + Math.min(v.done + 1, n) + ' of ' + n; }
@@ -788,7 +810,9 @@ class Component extends DCLogic {
 			idOn, idEyebrow: v && v.proto ? 'Decode as ' + v.proto[1] : 'Identify', idCloseLabel: running ? 'Stop identifying' : 'Close', idClose: this.idClose,
 			idTitle, idSecs, idTitleSize: big ? 'var(--wk-fs-3xl)' : 'var(--wk-fs-lg)', idTitleFont: big ? 'var(--wk-font-head)' : 'inherit', idTitleC: 'var(--wk-text)',
 			idHasReason: !!idReason, idReason,
-			idHasBar: running, idBarW: running ? Math.round((left / v.win) * 1000) / 10 : 0, idBarC: 'var(--wk-accent)',
+			idHasBar: running && !(v && v.until),
+			idUntilShow: (ph === 'waiting' && !v.proto) || ph === 'nothing', idUntil: this.untilOn(), toggleUntil: this.toggleUntil,
+			idUntilTitle: this.untilOn() ? 'Identify keeps listening, job after job, until a transmission comes' : 'Stop after 15 s if nothing transmits', idBarW: running ? Math.round((left / v.win) * 1000) / 10 : 0, idBarC: 'var(--wk-accent)',
 			idWindow: running ? v.win : 15, idLeft: Math.ceil(left), idLeftText: Math.ceil(left) + ' seconds left',
 			idHasLine: !!idLine, idLine,
 			idHasTrials: idTrials.length > 0, idTrials,
