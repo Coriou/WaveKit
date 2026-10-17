@@ -104,6 +104,22 @@ export interface StorageArea {
 
 export type StorageLowSpaceState = "ok" | "low" | "unknown"
 
+/** WG10 req 1.8: kept recordings while the keep store is ready (bytes at their size when kept). */
+export interface StorageKeptReady {
+	state: "ready"
+	recordings: number
+	bytes: number
+	/** RECORDING_KEEPS_MAX_ENTRIES */
+	maxRecordings: number
+	/** RECORDING_KEEPS_MAX_BYTES */
+	maxBytes: number
+}
+/** WG10 req 1.8: the keep store is loading or failed (every recording protected); no counts. */
+export interface StorageKeptUnavailable {
+	state: "loading" | "failed"
+}
+export type StorageKeptSummary = StorageKeptReady | StorageKeptUnavailable
+
 export interface StorageReport {
 	generatedAt: string
 	/** generatedAt + STORAGE_REPORT_CACHE_MS; requests before it share this report. */
@@ -112,8 +128,11 @@ export interface StorageReport {
 	filesystem: StorageFilesystem | null
 	/** Configured areas, in STORAGE_AREA_IDS order. */
 	areas: readonly StorageArea[]
-	/** Keep (protected) recordings are scanner-internal and not reported yet. */
-	kept: null
+	/**
+	 * WG10 req 1.8: the recording keep store; null when no keep service is wired (legacy mode).
+	 * No filesystem access: totals as stored at Keep time.
+	 */
+	kept: StorageKeptSummary | null
 	lowSpace: {
 		/** The only low-space behaviour: scanner evidence stops writing below minFreeBytes. */
 		policy: "scanner-evidence-stops-writing"

@@ -114,3 +114,59 @@ export class RecordingKeepError extends WaveKitError {
 		this.status = RECORDING_ERROR_STATUS[code]
 	}
 }
+
+// --- WG10 additions (docs/specs/web-gaps-10, requirement 1) ---
+
+/**
+ * WG10 req 1.9: a private delete directory `mkdtemp` created next to a recording
+ * (`RECORDING_DELETE_PRIVATE_PREFIX` + six characters).
+ */
+export const RECORDING_DELETE_PRIVATE_DIR = /^\.wavekit-delete-[A-Za-z0-9]{6}$/
+/** WG10 req 1.9: the moved entry's name once its identity check passed (unlinked next). */
+export const RECORDING_DELETE_VERIFIED_NAME = "verified"
+/** WG10 req 1.9: private directories one startup sweep acts on at most (the rest are left, counted). */
+export const RECORDING_DELETE_SWEEP_MAX_DIRS = 64
+/** WG10 req 1.5: merge aliases one discovery holds at most (the oldest is released beyond). */
+export const DISCOVERY_RECORDING_ALIASES_MAX = 64
+
+/** WG10 req 1.8: totals of the keep store (bytes as stored at Keep time). */
+export interface RecordingKeepTotals {
+	recordings: number
+	bytes: number
+}
+
+/** WG10 req 1.8: what the storage report reads; `totals()` is null unless the state is `ready`. */
+export interface RecordingKeepTotalsSource {
+	state(): "loading" | "ready" | "failed"
+	totals(): RecordingKeepTotals | null
+}
+
+/**
+ * WG10 req 1.1-1.3: the scanner side of a `scan:` delete, called by the keep service under the
+ * key's mutex with the key marked deleting. `stillDeletable()` is the deletion decision for this
+ * key (false while kept or the store is not ready); the deleter calls it in the same synchronous
+ * turn as its unlink and deletes nothing when it answers false. Resolves `deleted` (file unlinked;
+ * bookkeeping attempted after) or `not-found` (no such verified file, or it changed). Throws
+ * `RecordingKeepError` `RECORDING_DELETE_UNSUPPORTED` (analog recording, not scanner-owned) or
+ * `RECORDING_BUSY` (the discovery is being removed); any other error is a 500 for the caller.
+ */
+export interface ScannerRecordingDeleter {
+	deleteRecording(
+		recordingId: string,
+		stillDeletable: () => boolean,
+	): Promise<"deleted" | "not-found">
+}
+
+/** WG10 req 1.9: counts of one startup sweep of delete leftovers (never names or paths). */
+export interface RecordingDeleteSweepResult {
+	/** Private directories found (bounded by RECORDING_DELETE_SWEEP_MAX_DIRS acted on). */
+	found: number
+	/** `verified` entries unlinked. */
+	deleted: number
+	/** Unverified (or now protected) entries put back under their name. */
+	restored: number
+	/** Empty private directories removed. */
+	removedEmpty: number
+	/** Directories left in place (not provably ours, unexpected content, taken name, over the bound). */
+	left: number
+}
