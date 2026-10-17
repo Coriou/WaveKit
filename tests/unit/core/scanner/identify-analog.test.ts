@@ -15,6 +15,7 @@ import type {
 import { IDENTIFY_ANALOG_LOOKBACK_MS } from "@wavekit/api-types"
 import { createAnalogEvidenceLog } from "../../../../src/core/scanner/analog-evidence.js"
 import {
+	IDENTIFY_ANALOG_SETTLE_MS,
 	IdentifyRunner,
 	analogMatches,
 	analogResultOf,
@@ -35,6 +36,7 @@ import {
 	identifyAnalogEvidence,
 } from "../../../../src/index.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
+import { hygieneHarness } from "../analog-transmission-hygiene-fakes.js"
 import {
 	TARGET_HZ,
 	fakeInner,
@@ -72,6 +74,11 @@ class FakePort implements IdentifyAnalogEvidence {
 	monitoring(): boolean {
 		if (this.throwMonitoring) throw new Error("boom")
 		return this.live
+	}
+	/** WG10 R2: the tracker's held, not yet published opening (unfiltered, like `list`). */
+	pendingList: AnalogEvidenceTransmission[] = []
+	pendingNear(): readonly AnalogEvidenceTransmission[] {
+		return this.pendingList
 	}
 }
 
@@ -335,6 +342,68 @@ describe("identify analog trials (WG10 3.2)", () => {
 		expect(h.last()?.result).not.toHaveProperty("analog")
 		// The deadline is the wait timeout from the job start.
 		expect(h.clock.now).toBeGreaterThanOrEqual(START + 15_000)
+	})
+
+	it("review WG10 R2 m3: an open match at the deadline that closes by the deadline within the settle wait decodes", async () => {
+		const h = harness()
+		h.port.list = [tx({ endedAtMs: null })]
+		await h.start()
+		const deadline = (h.record.startedAt ?? START) + 15_000
+		while (h.clock.now < deadline) await h.advance(500)
+		expect(h.trials()).toEqual({
+			"analog-fm": "running",
+			"analog-am": "no-sync",
+		})
+		// The closed event arrives a merge gap after the audio end (just before the deadline).
+		h.port.list = [tx({ endedAtMs: deadline - 100 })]
+		await h.advance(500)
+		expect(h.trials()["analog-fm"]).toBe("decoded")
+		expect(h.last()?.result?.analog).toMatchObject({ ctcssHz: 88.5 })
+	})
+
+	it("review WG10 R2 m3: the settle wait is bounded: a match still open ends timeout IDENTIFY_ANALOG_SETTLE_MS past the deadline", async () => {
+		expect(IDENTIFY_ANALOG_SETTLE_MS).toBe(1_500 + 250)
+		const h = harness()
+		h.port.list = [tx({ endedAtMs: null, ctcssHz: null })]
+		await h.start()
+		const deadline = (h.record.startedAt ?? START) + 15_000
+		let decidedAt: number | null = null
+		for (let i = 0; i < 200 && !ENDED.includes(h.record.state); i++) {
+			await h.advance(100)
+			if (decidedAt === null && h.trials()["analog-fm"] === "timeout")
+				decidedAt = h.clock.now
+		}
+		expect(decidedAt).not.toBeNull()
+		expect(decidedAt!).toBeGreaterThanOrEqual(
+			deadline + IDENTIFY_ANALOG_SETTLE_MS,
+		)
+		expect(decidedAt!).toBeLessThanOrEqual(
+			deadline + IDENTIFY_ANALOG_SETTLE_MS + 100,
+		)
+		expect(ENDED).toContain(h.record.state)
+	})
+
+	it("review WG10 R2 m3: a pending opening started near the deadline is timeout, not no-sync", async () => {
+		const h = harness()
+		await h.start()
+		const deadline = (h.record.startedAt ?? START) + 15_000
+		h.port.pendingList = [
+			tx({ endedAtMs: null, startedAtMs: deadline - 300, ctcssHz: null }),
+		]
+		await h.settle(500, 80)
+		expect(h.trials()).toEqual({
+			"analog-fm": "timeout",
+			"analog-am": "no-sync",
+		})
+		// An opening that started after the deadline is not this job's evidence.
+		const late = harness()
+		await late.start()
+		const lateDeadline = (late.record.startedAt ?? START) + 15_000
+		late.port.pendingList = [
+			tx({ endedAtMs: null, startedAtMs: lateDeadline + 10, ctcssHz: null }),
+		]
+		await late.settle(500, 80)
+		expect(late.trials()["analog-fm"]).toBe("no-sync")
 	})
 
 	it("a transmission closing mid-window decodes on the next tick", async () => {
@@ -777,6 +846,20 @@ describe("Main wiring: live demodulator transmissions feed identify (WG10 MA.1)"
 		)
 		return { log, tracker }
 	}
+
+	it("review WG10 R2 m3: feedAnalogEvidence binds the tracker's pending opening", () => {
+		const h = hygieneHarness()
+		const log = createAnalogEvidenceLog({ monitoring: () => true })
+		feedAnalogEvidence(h.tracker, log)
+		h.source.gate(true)
+		h.source.carrier! += 10
+		h.advance(300)
+		expect(log.pendingNear("rtl0", 446_000_000, 1000)).toHaveLength(1)
+		h.advance(500)
+		h.source.level()
+		expect(log.pendingNear("rtl0", 446_000_000, 1000)).toEqual([])
+		expect(log.transmissionsNear("rtl0", 446_000_000, 1000, 0)).toHaveLength(1)
+	})
 
 	it("a closed transmission near the target with CTCSS names analog-fm", async () => {
 		const { log, tracker } = wired({})

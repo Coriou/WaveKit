@@ -11,6 +11,7 @@ import { AnalogTransmissionTracker } from "../../../src/core/analog-transmission
 import type {
 	AnalogTransmissionHygiene,
 	AnalogTransmissionSource,
+	AnalogTransmissionTrackerOptions,
 } from "../../../src/core/analog-transmission.js"
 import type {
 	LiveAudioLevel,
@@ -115,7 +116,13 @@ export interface PendingTimer {
 	cancelled: boolean
 }
 
-export function hygieneHarness(hygiene?: Partial<AnalogTransmissionHygiene>) {
+export function hygieneHarness(
+	hygiene?: Partial<AnalogTransmissionHygiene>,
+	extra?: Pick<
+		AnalogTransmissionTrackerOptions,
+		"createToneDetector" | "maxDurationMs"
+	>,
+) {
 	const source = new HygieneSource()
 	let now = 1_700_000_000_000
 	let seq = 0
@@ -140,6 +147,7 @@ export function hygieneHarness(hygiene?: Partial<AnalogTransmissionHygiene>) {
 		},
 		onSuppressed: reason => suppressedLog.push(reason),
 		...(hygiene === undefined ? {} : { hygiene }),
+		...extra,
 	})
 	tracker.on("transmission", event => events.push(event))
 	tracker.on("closed", payload => rows.push(payload))

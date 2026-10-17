@@ -502,6 +502,14 @@ export function identifyVerdict(v: {
 	return v.topScore >= IDENTIFY_CANDIDATE_SCORE ? "candidate" : "unidentified"
 }
 
+/**
+ * WG10 R2: how long past its deadline an analog trial with an open (or not yet published) match waits
+ * for that transmission's closed event: the tracker's merge gap (1500 ms) plus the squelch hang
+ * (250 ms), since a transmission whose audio ended by the deadline is final at most that late. Fixed
+ * from the deadline, so the wait is bounded whatever the evidence does.
+ */
+export const IDENTIFY_ANALOG_SETTLE_MS = 1_750
+
 /** WG10 req 3.2: the analog protocols live-audio evidence answers, and the modulations that answer each. */
 export const IDENTIFY_ANALOG_PROTOCOLS: readonly ScannerProtocol[] = [
 	"analog-fm",
@@ -799,6 +807,8 @@ export interface ProbeUnavailableMemo {
 interface AnalogState {
 	/** `monitoring` answered true on some tick of this target. */
 	everMonitored: boolean
+	/** WG10 R2: protocols with an open or pending match seen at or after the deadline (decided `timeout`). */
+	openSeen: Set<ScannerProtocol>
 	/** Evidence of the trial that decoded (the first one; the newest on a tie). */
 	result: ScannerIdentifyAnalog | null
 	resultProtocol: ScannerProtocol | null
@@ -1140,7 +1150,12 @@ export class IdentifyRunner implements JobDriver {
 			result: null,
 			ambientUntil: Number.POSITIVE_INFINITY,
 			memoSkip: new Set(),
-			analog: { everMonitored: false, result: null, resultProtocol: null },
+			analog: {
+				everMonitored: false,
+				openSeen: new Set(),
+				result: null,
+				resultProtocol: null,
+			},
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -1294,7 +1309,15 @@ export class IdentifyRunner implements JobDriver {
 				this.emitTarget(t)
 			}
 		}
-		if (now >= t.ambientUntil && this.endAmbient(t, "timeout"))
+		// Live-audio trials are decided by analogStep (which may wait IDENTIFY_ANALOG_SETTLE_MS past the deadline).
+		if (
+			now >= t.ambientUntil &&
+			this.endAmbient(
+				t,
+				"timeout",
+				x => !(this.deps.analogEvidence && x.decoder === "live-audio"),
+			)
+		)
 			this.emitTarget(t)
 		if (!this.fillRuns(t, now)) return
 		// A target with running ambient trials waits for their evidence or deadline.
@@ -1841,7 +1864,9 @@ export class IdentifyRunner implements JobDriver {
 	 * WG10 req 3.2/3.3: re-reads the analog evidence for the target's running `live-audio` trials. A closed
 	 * match decodes its trial (a stop unless exhaustive); at the ambient deadline the rest end `timeout` (an
 	 * open match only), `no-sync` (live audio was on the target) or `unsupported`/`no-live-audio`. True when a
-	 * trial changed. A throwing port is no evidence and not monitoring.
+	 * trial changed. A throwing port is no evidence and not monitoring. R2: a trial with an open match, or a
+	 * pending opening (`pendingNear`, started by the deadline), keeps running until a closed match that
+	 * ended by the deadline decodes it or IDENTIFY_ANALOG_SETTLE_MS past the deadline, then ends `timeout`.
 	 */
 	private analogStep(t: TargetState, now: number): boolean {
 		const port = this.deps.analogEvidence
@@ -1879,6 +1904,23 @@ export class IdentifyRunner implements JobDriver {
 		}
 		if (monitoring) t.analog.everMonitored = true
 		const atDeadline = now >= t.ambientUntil
+		// WG10 R2: an opening the tracker holds back (under the minimum audio) that started by the deadline.
+		let pending: readonly AnalogEvidenceTransmission[] = []
+		if (atDeadline && typeof port.pendingNear === "function") {
+			try {
+				pending = (
+					port.pendingNear(target.sourceId, target.hz, target.toleranceHz) ?? []
+				).filter(
+					x =>
+						typeof x === "object" &&
+						x !== null &&
+						x.startedAtMs <= t.ambientUntil,
+				)
+			} catch {
+				this.analogUnavailable()
+			}
+		}
+		const settled = now >= t.ambientUntil + IDENTIFY_ANALOG_SETTLE_MS
 		let changed = false
 		let decoded = false
 		let best: {
@@ -1901,8 +1943,13 @@ export class IdentifyRunner implements JobDriver {
 				continue
 			}
 			if (!atDeadline) continue
+			// R2: an open or pending match waits (bounded) for its closed event before deciding `timeout`.
+			if (m.open || analogMatches(pending, target, trial.protocol).open) {
+				t.analog.openSeen.add(trial.protocol)
+				if (!settled) continue
+			}
 			changed = true
-			if (m.open) trial.outcome = "timeout"
+			if (t.analog.openSeen.has(trial.protocol)) trial.outcome = "timeout"
 			else if (t.analog.everMonitored) trial.outcome = "no-sync"
 			else {
 				trial.outcome = "unsupported"
@@ -1937,11 +1984,15 @@ export class IdentifyRunner implements JobDriver {
 		)
 	}
 
-	/** Ends every running ambient trial of `t` with `outcome`; true when one ended. */
-	private endAmbient(t: TargetState, outcome: ScannerTrialOutcome): boolean {
+	/** Ends every running ambient trial of `t` (those `which` selects) with `outcome`; true when one ended. */
+	private endAmbient(
+		t: TargetState,
+		outcome: ScannerTrialOutcome,
+		which: (trial: ScannerIdentifyTrial) => boolean = () => true,
+	): boolean {
 		let ended = false
 		for (const x of t.trials)
-			if (x.transport === "ambient" && x.outcome === "running") {
+			if (x.transport === "ambient" && x.outcome === "running" && which(x)) {
 				x.outcome = outcome
 				ended = true
 			}
