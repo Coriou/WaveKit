@@ -879,10 +879,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (this.pruning) return
 		this.pruning = true
 		try {
-			const result = await pruneCallRecordings([dir, path.join(dir, "WAV")], {
-				maxTotalMb: this.options.perCallRecordingMaxTotalMb,
-				maxAgeHours: this.options.perCallRecordingMaxAgeHours,
-			})
+			// WG9 R2: `dir` is the configured root (a symlinked one is resolved once and pinned).
+			const result = await pruneCallRecordings(
+				[dir, path.join(dir, "WAV")],
+				{
+					maxTotalMb: this.options.perCallRecordingMaxTotalMb,
+					maxAgeHours: this.options.perCallRecordingMaxAgeHours,
+				},
+				Date.now(),
+				dir,
+			)
 			if (result.deleted.length > 0) {
 				this.logger.info(
 					{

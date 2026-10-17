@@ -8,7 +8,7 @@
  * from the last 10 s and files of `keep` discoveries are never deleted. Writes stop while free disk
  * is below `minFreeDiskMb`.
  */
-import { existsSync } from "node:fs"
+import { existsSync, lstatSync, realpathSync } from "node:fs"
 import {
 	copyFile,
 	lstat,
@@ -176,6 +176,25 @@ async function realDirectory(
 	}
 }
 
+/**
+ * WG9 R2: the configured storage root when it is itself a symlink, resolved by realpath once
+ * at construction (operator config is trusted): its real directory and identity. Null when
+ * the root is missing, a real directory or a dangling link, which keeps today's behaviour.
+ */
+function pinStorageRoot(
+	abs: string,
+): { real: string; dev: number; ino: number } | null {
+	try {
+		if (!lstatSync(abs).isSymbolicLink()) return null
+		const real = realpathSync(abs)
+		const info = lstatSync(real)
+		if (info.isSymbolicLink() || !info.isDirectory()) return null
+		return { real, dev: info.dev, ino: info.ino }
+	} catch {
+		return null
+	}
+}
+
 /** `<dir>`, `<dir>/WAV`, `<dir>/wav` (as `findWavFileAsync`), deduplicated by real path; missing ones are skipped. */
 async function wavDirs(dir: string): Promise<string[]> {
 	const seen = new Set<string>()
@@ -231,6 +250,8 @@ export class EvidenceStore {
 	/** WG9 req 2.5: the deletion decision; absent keeps today's behaviour. */
 	private readonly protection: RecordingProtection | undefined
 	private readonly keepLog: Logger
+	/** WG9 R2: the identity of a symlinked configured root's real directory; null otherwise. */
+	private readonly rootPin: { dev: number; ino: number } | null
 
 	constructor(opts: {
 		dir: string
@@ -244,7 +265,12 @@ export class EvidenceStore {
 		/** WG9 req 2.5: kept recordings survive retention and block discovery removal. */
 		protection?: RecordingProtection
 	}) {
-		this.root = resolve(opts.dir)
+		// WG9 R2: a symlinked configured root is followed once; its real directory is the base,
+		// so symlinks below it stay refused and a later re-pointed link has no effect.
+		const configured = resolve(opts.dir)
+		const pin = pinStorageRoot(configured)
+		this.root = pin?.real ?? configured
+		this.rootPin = pin === null ? null : { dev: pin.dev, ino: pin.ino }
 		this.caps = { ...opts.caps }
 		this.log = createComponentLogger(opts.logger, "EvidenceStore")
 		this.keepLog = createComponentLogger(opts.logger, "RecordingKeeps")
@@ -253,6 +279,22 @@ export class EvidenceStore {
 		this.isDiscoveryLive = opts.isDiscoveryLive ?? (() => true)
 		this.analogIo = opts.analogIo
 		this.protection = opts.protection
+	}
+
+	/**
+	 * WG9 R2 (pinned root only): true while the real root is still the directory first resolved.
+	 * A changed identity refuses every deleter (fail closed) and logs a count.
+	 */
+	private async rootIntact(): Promise<boolean> {
+		const pin = this.rootPin
+		if (pin === null) return true
+		const now = await realDirectory(this.root).catch(() => null)
+		if (now !== null && now.dev === pin.dev && now.ino === pin.ino) return true
+		this.log.warn(
+			{ rootChanged: 1 },
+			"Scanner storage root changed; deletion refused",
+		)
+		return false
 	}
 
 	/** Fail closed: a throwing port answers protected. */
@@ -623,9 +665,20 @@ export class EvidenceStore {
 		// Fence admission synchronously and drain accepted writes/moves before removal.
 		const removal = Promise.resolve()
 			.then(async () => {
+				// WG9 R2: a pinned root whose identity changed stays pending (fail closed).
+				if (!(await this.rootIntact()))
+					throw new WaveKitError(
+						"Scanner storage root changed",
+						"SCANNER_EVIDENCE_CLEANUP_PENDING",
+					)
 				// Long analog settlement drains outside the publication queue it may itself need.
 				if (this.analog) await this.analog.deleteDiscovery(discoveryId)
 				await this.serialise(discoveryId, async () => {
+					if (!(await this.rootIntact()))
+						throw new WaveKitError(
+							"Scanner storage root changed",
+							"SCANNER_EVIDENCE_CLEANUP_PENDING",
+						)
 					if (this.protection) {
 						await this.removeGuarded(discoveryId)
 						return
@@ -783,6 +836,8 @@ export class EvidenceStore {
 	async retention(
 		keepDiscoveryIds: ReadonlySet<string>,
 	): Promise<{ deleted: string[] }> {
+		// WG9 R2: a pinned root whose identity changed deletes nothing (fail closed).
+		if (!(await this.rootIntact())) return { deleted: [] }
 		const now = this.now()
 		const files = await this.collect()
 		const isProtected = (f: StoredFile): boolean =>
