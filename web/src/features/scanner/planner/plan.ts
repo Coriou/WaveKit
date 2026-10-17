@@ -571,6 +571,11 @@ export function passTime(ms: number): string {
 	return `${Math.round(t / 6) / 10} min`
 }
 
+/** How long a full pass takes, after "full pass": "under 1 s", else "≈ 10 s" (never "≈ < 1 s"). */
+export function passPhrase(ms: number): string {
+	return ms < 1000 ? "under 1 s" : `≈ ${passTime(ms)}`
+}
+
 /** "Full pass ≈ 10 s · 26 hops", or one hop: "One hop · parks at 446.100". */
 export function previewSummary(
 	preview: Pick<PlanPreview, "plan" | "sweepPeriodMs">,
@@ -579,12 +584,7 @@ export function previewSummary(
 	if (hops.length === 1 && hops[0])
 		return `One hop · parks at ${formatMHz(hops[0].centreHz)}`
 	const ms = preview.sweepPeriodMs
-	const pass =
-		ms === null
-			? "Full pass"
-			: ms < 1000
-				? "Full pass under 1 s"
-				: `Full pass ≈ ${passTime(ms)}`
+	const pass = ms === null ? "Full pass" : `Full pass ${passPhrase(ms)}`
 	return `${pass} · ${hops.length} hops`
 }
 

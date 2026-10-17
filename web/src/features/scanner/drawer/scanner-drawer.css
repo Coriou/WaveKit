@@ -152,8 +152,8 @@
 		padding-bottom: 5px;
 	}
 	.wks-field > input {
-		flex: 1 1 110px;
-		min-width: 110px;
+		flex: 1 1 88px;
+		min-width: 72px;
 	}
 	.wks-token-kind {
 		margin-right: 4px;

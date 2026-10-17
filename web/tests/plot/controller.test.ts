@@ -95,6 +95,15 @@ describe("PlotController", () => {
 		await done
 	})
 
+	it("while a sweep has the receiver, a click inside the capture recentres (the scan pauses)", async () => {
+		const { c, calls } = setup({ ...context, scanHasReceiver: true })
+		const done = c.clickAt((161_900_000 - capture.startHz) / 2_400_000, 1000)
+		await Promise.resolve()
+		await Promise.resolve()
+		expect(calls).toEqual(["retune rtl0 161900000", "offset 0"])
+		void done
+	})
+
 	it("wheel notches step from the pending frequency, so fast scrolling accumulates", () => {
 		const { c, calls } = setup()
 		void c.wheelStep(-100) // a notch: one step up

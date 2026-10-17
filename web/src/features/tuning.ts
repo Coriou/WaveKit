@@ -3,7 +3,7 @@
 // outside it recentres the hardware on the target (offset back to 0). One rule for the app: the inside /
 // outside decision is the plot's tuneAction() + edgeMargin() (web/src/plot/maths.ts, lot C5a), which the
 // plot's click, scroll and drag use; planTune() applies it to the tuner state for the Tuner island.
-import type { LiveAudioStatus, TunerState } from "@wavekit/api-types"
+import type { LiveAudioStatus, ScanJob, TunerState } from "@wavekit/api-types"
 import type { DataLayer } from "../data/index.ts"
 import { errorMessage, Store, tunedHz } from "../data/index.ts"
 import { edgeMargin, tuneAction } from "../plot/maths.ts"
@@ -80,7 +80,22 @@ export function tuneContext(
 	}
 }
 
-type TuningData = Pick<DataLayer, "tuner" | "liveAudio">
+/**
+ * Whether the operator's sweep has the receiver (starting, stepping or holding on a hit). Its next hop
+ * retunes the hardware, so a tune then always recentres: only a tuner write pauses the scan
+ * (`preempted-operator`, "Scan paused · resumes in …"); a live-audio offset alone would be swept away.
+ */
+export function scanHasReceiver(
+	sweep: Pick<ScanJob, "state"> | null | undefined,
+): boolean {
+	const s = sweep?.state
+	return (
+		s === "pending" || s === "starting" || s === "running" || s === "holding"
+	)
+}
+
+type TuningData = Pick<DataLayer, "tuner" | "liveAudio"> &
+	Partial<Pick<DataLayer, "scanner">>
 
 /** Applies one plan: an offset PATCH, or a hardware retune followed by resetting the offset. */
 export async function applyTunePlan(
@@ -103,7 +118,8 @@ export async function tuneTo(data: TuningData, hz: number): Promise<TunePlan> {
 	const tuner = data.tuner.state()
 	const ctx = tuneContext(tuner, data.liveAudio.get().status)
 	if (!tuner || !ctx) throw new Error("No tuner source")
-	const plan = planTune(hz, ctx)
+	const scanning = scanHasReceiver(data.scanner?.get().sweep)
+	const plan = planTune(hz, scanning ? { ...ctx, offsetAvailable: false } : ctx)
 	await applyTunePlan(data, plan, tuner.sourceId)
 	return plan
 }

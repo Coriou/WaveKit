@@ -6,6 +6,7 @@ import { createDataLayer } from "../../src/data/index.ts"
 import type { DataLayer, FetchLike } from "../../src/data/index.ts"
 import {
 	planTune,
+	scanHasReceiver,
 	tuneContext,
 	TuningController,
 	captureOf,
@@ -204,5 +205,47 @@ describe("TuningController against the mock core", () => {
 		await tuning.tune(2_000_000_000) // the core's rtl_tcp range stops at 1900 MHz
 		expect(tuning.get().targetHz).toBeNull()
 		expect(tuning.get().error).toMatch(/frequency out of range/)
+	})
+
+	it("while a sweep has the receiver, a tune inside the window recentres so the scan pauses", async () => {
+		const tuning = new TuningController(data)
+		await tuning.tune(161_500_000)
+		const job = await data.scanner.startJob(
+			{
+				mode: "sweep",
+				ranges: [{ startHz: 156_000_000, endHz: 162_000_000 }],
+				integrationMs: 5,
+				dwellMs: 60_000,
+				hold: { policy: "never" },
+			},
+			{ takeover: true },
+		)
+		expect(scanHasReceiver(data.scanner.get().sweep)).toBe(true)
+		const jobState = async () =>
+			(
+				await server.app.inject({
+					method: "GET",
+					url: `/api/scanner/jobs/${job.id}`,
+				})
+			).json<{ state: string; reason?: string }>()
+		for (let i = 0; i < 50 && (await jobState()).state !== "running"; i++)
+			await new Promise(resolve => setTimeout(resolve, 20))
+		await data.tuner.load()
+		const centre = data.tuner.state()?.frequency ?? 0
+		// well inside the capture: without a sweep this would be an offset PATCH only
+		await tuning.tune(centre + 200_000)
+		expect(data.tuner.state()?.frequency).toBe(centre + 200_000)
+		expect(data.liveAudio.get().status?.config.offsetHz ?? 0).toBe(0)
+		expect(await jobState()).toMatchObject({
+			state: "paused",
+			reason: "preempted-operator",
+		})
+		await server.app.inject({
+			method: "POST",
+			url: `/api/scanner/jobs/${job.id}/cancel`,
+		})
+		expect(scanHasReceiver(null)).toBe(false)
+		expect(scanHasReceiver({ state: "paused" })).toBe(false)
+		expect(scanHasReceiver({ state: "holding" })).toBe(true)
 	})
 })

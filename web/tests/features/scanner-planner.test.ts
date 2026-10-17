@@ -19,6 +19,7 @@ import {
 	parseMHz,
 	presetOn,
 	presetsOf,
+	passPhrase,
 	previewSummary,
 	protocolLabels,
 	rangeError,
@@ -401,6 +402,12 @@ describe("planner: footer words", () => {
 				},
 			}),
 		).toBe("One hop · parks at 446.100")
+	})
+
+	it('a sub-second pass reads "under 1 s", never "≈ < 1 s" (running footer and setup)', () => {
+		expect(passPhrase(400)).toBe("under 1 s")
+		expect(passPhrase(9600)).toBe("≈ 10 s")
+		expect(passPhrase(0)).toBe("under 1 s")
 	})
 
 	it("the consent line names who the sweep pauses", () => {

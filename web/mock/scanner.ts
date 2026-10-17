@@ -2129,7 +2129,10 @@ interface JobRec {
 	hopIndex: number
 	sweepIndex: number
 	visited: Set<number>
+	/** The held track (a tracker id like the core's scheduler, never a discovery id). */
 	holdingOn: string | null
+	/** The held signal's frequency, while holding. */
+	heldHz: number | null
 	counts: { observations: number; transients: number }
 	timer: ReturnType<typeof setTimeout> | null
 	/** Observations open on the current hop (closed when the hop or hold ends). */
@@ -2813,6 +2816,7 @@ export function registerScannerMock(
 		if (reason) r.reason = reason
 		else delete r.reason
 		r.holdingOn = null
+		r.heldHz = null
 		r.resumeAt = null
 		r.endedAt = Date.now()
 		touch(r)
@@ -2862,24 +2866,31 @@ export function registerScannerMock(
 		}
 		const strongest = [...heard].sort((a, b) => b.powerDbfs - a.powerDbfs)[0]
 		if (strongest && r.spec.hold.policy !== "never") {
-			const held = r.open.find(o => o.hz === strongest.hz)
 			r.state = "holding"
-			r.holdingOn = held?.discoveryId ?? null
+			// like the core's scheduler: the hold names a tracker track, not a discovery
+			r.holdingOn = newId("trk")
+			r.heldHz = strongest.hz
 			touch(r)
 			emitJob(r)
 			stopTimers(r)
 			r.timer = later(Math.min(MOCK_HOLD_MS, r.spec.hold.maxHoldMs), () => {
 				r.timer = null
-				if (r.state !== "holding") return
-				r.state = "running"
-				r.holdingOn = null
-				touch(r)
-				emitJob(r)
-				advance(r)
+				if (r.state === "holding") endHold(r)
 			})
 			return
 		}
 		scheduleStep(r)
+	}
+
+	/** The hold ends (quiet, timed out, or its frequency was skipped): back to running, next hop. */
+	const endHold = (r: JobRec) => {
+		stopTimers(r)
+		r.state = "running"
+		r.holdingOn = null
+		r.heldHz = null
+		touch(r)
+		emitJob(r)
+		advance(r)
 	}
 
 	const advance = (r: JobRec) => {
@@ -2929,6 +2940,7 @@ export function registerScannerMock(
 		r.state = "paused"
 		r.reason = reason
 		r.holdingOn = null
+		r.heldHz = null
 		if (!keepLease) r.lease = false
 		touch(r)
 	}
@@ -2987,6 +2999,7 @@ export function registerScannerMock(
 			sweepIndex: 0,
 			visited: new Set(),
 			holdingOn: null,
+			heldHz: null,
 			counts: { observations: 0, transients: 0 },
 			timer: null,
 			open: [],
@@ -3387,6 +3400,15 @@ export function registerScannerMock(
 				else delete r.lockoutExclusions
 				if (r.hopIndex >= r.plan.hops.length) r.hopIndex = 0
 				touch(r)
+				// src/core/scanner/job-runner.ts replan: a probe on a now-excluded frequency is
+				// released, so the hold ends and the sweep moves on (Skip on a held hit)
+				const heldHz = r.heldHz
+				if (
+					r.state === "holding" &&
+					heldHz !== null &&
+					r.spec.exclusions.some(x => heldHz >= x.startHz && heldHz <= x.endHz)
+				)
+					endHold(r)
 				const job = toDto(r)
 				offer(`job:${r.id}`, "scanner:job", job)
 				return { job, plan: structuredClone(p.plan), issues: p.issues }

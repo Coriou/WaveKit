@@ -15,6 +15,11 @@ import type {
 	ScannerStatus,
 	TunerState,
 } from "@wavekit/api-types"
+import { heldFrequencyHz } from "../../src/data/scanner-format.ts"
+import {
+	heldDiscoveryId,
+	skipPatch,
+} from "../../src/features/tuner/scan-hold.ts"
 import { DISCOVERY_SEEDS, MOCK_SIGNALS } from "../../mock/data.ts"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
@@ -737,7 +742,9 @@ describe("mock scanner WebSocket", () => {
 						162_400_000,
 			)
 		).data as ScannerDiscoveryEventData
-		expect(holding.progress.holdingOn).toBe(discovery.discovery.id)
+		// like the core's scheduler, the hold names a tracker track, never a discovery id
+		expect(holding.progress.holdingOn).toMatch(/^trk_/)
+		expect(holding.progress.holdingOn).not.toBe(discovery.discovery.id)
 		expect(discovery.change).toBe("updated")
 		expect(discovery.jobHits?.[0]).toMatchObject({
 			jobId: job.id,
@@ -757,6 +764,13 @@ describe("mock scanner WebSocket", () => {
 			jobIds: [job.id],
 			frequencyHz: 162_400_000,
 		})
+		// the web app finds the held signal from scanner:activity (no probe in the mock), as with a core
+		expect(heldFrequencyHz(holding, holding.progress.holdingOn, [active])).toBe(
+			162_400_000,
+		)
+		expect(heldDiscoveryId(holding, [active], 162_400_000)).toBe(
+			discovery.discovery.id,
+		)
 		await inbox.next(
 			m =>
 				m.type === "scanner:activity" &&
@@ -767,6 +781,51 @@ describe("mock scanner WebSocket", () => {
 		).json()) as ScanJobHitsResponse
 		expect(hits.stats.hits).toBeGreaterThanOrEqual(1)
 		expect(hits.hits[0]?.discoveryId).toBe(discovery.discovery.id)
+		await post(`/api/scanner/jobs/${job.id}/cancel`)
+	})
+	it("Skip on a held hit releases the hold and leaves the frequency out", async () => {
+		const inbox = await connect()
+		// 162.400 MHz carries an always-on carrier, the only signal in this range
+		const job = (
+			await post("/api/scanner/jobs", {
+				mode: "sweep",
+				ranges: [{ startHz: 162_300_000, endHz: 162_500_000 }],
+				protocols: ["analog-fm"],
+				integrationMs: 5,
+				dwellMs: 60,
+				hold: { policy: "hold", maxHoldMs: 60_000 },
+				takeover: true,
+			})
+		).body as ScanJob
+		const holding = (await inbox.next(isJob(job.id, "holding"))).data as ScanJob
+		const mark = inbox.messages.length
+		// the hold row's skipPatch: the held channel ± half its bandwidth
+		const res = await fetch(`${api}/api/scanner/jobs/${job.id}`, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(skipPatch(holding, 162_400_000, 14_000)),
+		})
+		const patched = (await res.json()) as { job: ScanJob }
+		expect(res.status, JSON.stringify(patched)).toBe(200)
+		expect(patched.job.spec.exclusions).toContainEqual({
+			startHz: 162_393_000,
+			endHz: 162_407_000,
+			reason: "Skipped",
+		})
+		// the hold ends at once (the core releases the probe), not after maxHoldMs
+		expect(patched.job.state).not.toBe("holding")
+		await inbox.next(isJob(job.id, "running"), 2000, mark)
+		await sleep(600)
+		expect(
+			inbox.messages
+				.slice(mark)
+				.some(
+					m =>
+						m.type === "scanner:job" &&
+						(m.data as ScanJob).id === job.id &&
+						(m.data as ScanJob).state === "holding",
+				),
+		).toBe(false)
 		await post(`/api/scanner/jobs/${job.id}/cancel`)
 	})
 })

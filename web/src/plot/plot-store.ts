@@ -62,6 +62,8 @@ export interface PlotContext {
 	bandwidthHz: number
 	stepHz: number
 	tracks: readonly Track[]
+	/** The operator's sweep has the receiver: a tune recentres the hardware so the scan pauses. */
+	scanHasReceiver?: boolean
 }
 
 export interface PlotActions {
@@ -131,12 +133,14 @@ export class PlotController {
 		const hardware = this.hardwareCapture()
 		if (!capture || !hardware || centreHz === null || !(hz > 0))
 			return Promise.resolve()
-		const action = tuneAction(
-			hz,
-			centreHz,
-			hardware,
-			edgeMargin(hardware, this.ctx.bandwidthHz),
-		)
+		const action: ReturnType<typeof tuneAction> = this.ctx.scanHasReceiver
+			? { kind: "retune", centreHz: Math.round(hz) }
+			: tuneAction(
+					hz,
+					centreHz,
+					hardware,
+					edgeMargin(hardware, this.ctx.bandwidthHz),
+				)
 		const seq = ++this.seq
 		this.store.update(s => ({ ...s, pendingHz: Math.round(hz) }))
 		let run: Promise<unknown>

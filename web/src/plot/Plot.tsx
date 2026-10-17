@@ -52,6 +52,7 @@ import { PlotController, type PlotContext } from "./plot-store.ts"
 import { AXIS_CSS, DISCOVERY_ROW_CSS, LANES_CSS, plotLayout } from "./layout.ts"
 import { isReadOnly } from "../app/context.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
+import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
 import { SquelchLine, VfoEdges } from "./HandleOverlays.tsx"
 import { EDGE_GRAB_MIN_PX } from "./handles.ts"
@@ -173,6 +174,9 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	viewRef.current = view
 	useDiscoveryFetch(data.scanner, view)
 	const discRow = useDiscoveryRow(data.scanner)
+	const scanHasReceiver = useStore(data.scanner, s =>
+		scanHasReceiverOf(s.sweep),
+	)
 	const tuned = tunedHz(tuner, liveStatus)
 	const vfoHz = handleState.vfoHz ?? plotState.pendingHz ?? tuned
 	const bandwidthHz =
@@ -198,6 +202,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		bandwidthHz,
 		stepHz: step,
 		tracks,
+		scanHasReceiver,
 	}
 	controller.setContext(context)
 

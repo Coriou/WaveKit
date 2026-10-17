@@ -54,7 +54,7 @@ import {
 	type RunDraft,
 } from "./pending.ts"
 import {
-	passTime,
+	passPhrase,
 	protocolLabels,
 	sentence,
 	skipsIn,
@@ -775,7 +775,7 @@ function RunFooter({ job }: { job: ScanJob }) {
 	if (hops === 1)
 		text = `Watching · the receiver stays at ${formatMHz(job.plan.hops[0]?.centreHz ?? 0)}`
 	else
-		text = `Pass ${sp.pass} · ${sp.percent} %${period !== null ? ` · full pass ≈ ${passTime(period)}` : ""}`
+		text = `Pass ${sp.pass} · ${sp.percent} %${period !== null ? ` · full pass ${passPhrase(period)}` : ""}`
 	const word = job.state === "running" ? null : jobStateLine(job, { now })
 	return (
 		<span

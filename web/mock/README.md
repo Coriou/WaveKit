@@ -30,7 +30,8 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   (create with takeover consent, pause / resume / cancel / delete, live PATCH with `range-locked`,
   hits) and discoveries (seeded from `DISCOVERY_SEEDS`, the core's filters, sort, cursor, operator
   PATCH, delete, observations, listen). A passive in-window job is always present; a sweep steps the
-  mock tuner hop by hop (origin `scanner`), holds on active mock signals and emits `scanner:job`,
+  mock tuner hop by hop (origin `scanner`), holds on active mock signals (`holdingOn` is a track id, as in the core; a PATCH whose exclusions
+  cover the held frequency ends the hold) and emits `scanner:job`,
   `scanner:progress` (2 Hz), `scanner:discovery`, `scanner:activity` and `scanner:status` through a
   per-key limiter like the core's. Operator tuner writes pause it `preempted-operator` until
   `resumeAt` (60 s after the last write by default); identify results update their discovery.
