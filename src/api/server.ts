@@ -1461,15 +1461,22 @@ export class ApiServer {
 			})
 		}
 
+		// WG9 5.3 / 5.5: with access configured the live-audio PATCH 400 redacts like the
+		// global error handler; in legacy mode only, the localhost fallback stream URLs
+		// follow the request's Host per response.
 		if (this.liveDemod) {
 			await this.app.register(liveAudioRoutes, {
 				liveDemod: this.liveDemod,
+				...(this.access === undefined
+					? { legacyAudioHost: true }
+					: { redactErrors: true }),
 			})
 		}
 
 		if (this.digitalVoice) {
 			await this.app.register(digitalVoiceRoutes, {
 				digitalVoice: this.digitalVoice,
+				...(this.access === undefined ? { legacyAudioHost: true } : {}),
 			})
 		}
 
