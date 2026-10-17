@@ -1,0 +1,1016 @@
+/**
+ * IQ capture service (WG11 req 6.1-6.9): implements `IqCapturePort` over one supervised
+ * `wavekit-iqcap run` process per attached IQ source, the in-memory store and the capture
+ * directory `<scanner storage>/iq-captures`.
+ *
+ * Off unless `scanner.iqCapture.enabled` and protected access mode: absent or disabled means no
+ * process, no directory, no file and no filesystem call at all; legacy mode logs one info line.
+ * Logs carry fixed text and counts only (never ids, paths, frequencies or tool output).
+ *
+ * Replay input (`openReplay`): the file is proven (lstat chain from the configured root, regular,
+ * ours, mode 0600, size bound, whole samples), opened with O_NOFOLLOW, fstat-compared with the
+ * proof (dev, ino, size), and that open descriptor is handed to `wavekit-iqcap replay` as its fd 3
+ * with `--in /dev/fd/3`: the tool reads exactly the inode that was proven, whatever happens to
+ * the name afterwards.
+ */
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process"
+import { randomUUID as nodeRandomUUID } from "node:crypto"
+import { EventEmitter } from "node:events"
+import * as fs from "node:fs"
+import * as fsp from "node:fs/promises"
+import path from "node:path"
+import { PassThrough, type Readable } from "node:stream"
+import { childAccessEnvironment } from "../../access/runtime-hygiene.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { WaveKitError } from "../../utils/errors.js"
+import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import type { ProbeDecoderType } from "../scanner/probes/probe-pool.js"
+import {
+	IQ_CAPTURE_MAX_MS,
+	IQ_CAPTURE_PREROLL_MAX_MS,
+	IQ_CAPTURE_TOTAL_MAX_BYTES,
+	type IqCaptureDiscardReason,
+	type IqCapturePort,
+	type IqCaptureRefusal,
+	type IqCaptureRequest,
+	type IqCaptureView,
+} from "../scanner/iq-capture-contract.js"
+import {
+	ensureCaptureDir,
+	openVerifiedCaptureSync,
+	processUid,
+} from "./fs-guard.js"
+import {
+	IqToolProcess,
+	realTimers,
+	type IqToolCounters,
+	type IqToolTimers,
+	type SpawnFn,
+} from "./process.js"
+import { isCaptureId, type IqToolEvent } from "./protocol.js"
+import {
+	IqCaptureStore,
+	type IqCaptureCounters,
+	type IqCaptureEntry,
+} from "./store.js"
+import { sweepCaptureDir, type SweepResult } from "./sweep.js"
+
+/** `scanner.iqCapture` after parsing (src/config.ts). */
+export interface IqCaptureConfig {
+	enabled: boolean
+	maxTotalMb: number
+	maxCaptureMs: number
+	preRollMs: number
+	binaryPath: string
+}
+
+/** A replay decoder shape: the probe channel's passband and transition (PROBE_CHANNEL_REQUESTS). */
+export interface IqReplayShape {
+	bandwidthHz: number
+	transitionHz: number
+}
+export type IqReplayDecoderType = Exclude<ProbeDecoderType, "rtl433">
+export type IqReplayShapes = Readonly<
+	Record<IqReplayDecoderType, IqReplayShape>
+>
+
+/** The spectrum engine surface the service uses (structural; `SpectrumEngine` satisfies it). */
+export interface IqCaptureEngine {
+	tap(listener: (startSample: number, bytes: Uint8Array) => void): () => void
+	liveEdge(): number
+}
+
+export interface IqCaptureSourceAttach {
+	sampleRateHz: number
+	centerHz: number
+	epoch: number
+	engine: IqCaptureEngine
+}
+
+export interface IqCaptureServiceOptions {
+	/** `scanner.iqCapture`; undefined (absent) or `enabled: false` keeps everything off. */
+	config: IqCaptureConfig | undefined
+	/** The scanner storage directory; captures live in `<storageRoot>/iq-captures`. */
+	storageRoot: string
+	/** True only in protected access mode. */
+	protectedMode: boolean
+	logger: Logger
+	/** Replay shapes per decoder type; the capture bandwidth is their widest passband. */
+	shapes: IqReplayShapes
+	now?: () => number
+	spawn?: SpawnFn
+	randomUUID?: () => string
+	timers?: IqToolTimers
+	env?: NodeJS.ProcessEnv
+	/** Test seam; defaults to process.getuid(). */
+	uid?: number | null
+}
+
+export type IqCaptureServiceState =
+	| "idle"
+	| "off"
+	| "not-protected"
+	| "unavailable"
+	| "on"
+	| "stopped"
+
+export interface IqCaptureServiceCounters extends IqCaptureCounters {
+	tool: IqToolCounters
+	toolRestarts: number
+	toolGiveUps: number
+	replayFailures: number
+	sweep: SweepResult
+}
+
+export interface IqCaptureService extends IqCapturePort {
+	start(): Promise<void>
+	stop(): Promise<void>
+	/** Ensures the directory and removes leftovers of an earlier run (idempotent; off → no-op). */
+	sweep(): Promise<SweepResult>
+	attachSource(sourceId: string, source: IqCaptureSourceAttach): void
+	detachSource(sourceId: string): void
+	/**
+	 * The source's engine epoch changed (retune, rate change, stream restart): open captures are
+	 * dropped, the tool restarts with a fresh ring and sample count. Without `next.epoch` every
+	 * request is refused `epoch-changed` until the source is flushed or attached with one.
+	 */
+	flush(
+		sourceId: string,
+		next?: { epoch?: number; centerHz?: number; sampleRateHz?: number },
+	): void
+	/** A capture finished and was proven; it is queued (returns the unsubscribe). */
+	onFinished(listener: (view: IqCaptureView) => void): () => void
+	/** The capture's view while it is ready, else null. */
+	view(captureId: string): IqCaptureView | null
+	/** Holder of a capture (null = queued / unheld); undefined when gone. */
+	holderOf(captureId: string): string | null | undefined
+	/**
+	 * Discards a capture held by `holder` or by nobody (deferred while it replays); false when it
+	 * is gone or held by someone else.
+	 */
+	discard(
+		captureId: string,
+		reason: IqCaptureDiscardReason,
+		holder?: string,
+	): boolean
+	/** Applies the orphan TTL now (also runs on a 10 s timer). */
+	expire(): number
+	state(): IqCaptureServiceState
+	counters(): IqCaptureServiceCounters
+	/** Bytes held against the cap. */
+	heldBytes(): number
+}
+
+const RESTART_BASE_MS = 1_000
+const RESTART_MAX_MS = 30_000
+const GIVE_UP_FAILURES = 5
+const GIVE_UP_WINDOW_MS = 600_000
+const EXPIRE_INTERVAL_MS = 10_000
+/** A capture without `captured`/`aborted` this long after its bound is dropped. */
+const CAPTURE_GRACE_MS = 10_000
+const REPLAY_TIMEOUT_MS = 30_000
+/** Safety margin inside the tool's ring and below its current count (seconds). */
+const RING_MARGIN_S = 0.25
+/** The kernel pipe buffer the tool may not have read yet (bytes; Linux and macOS default). */
+const PIPE_BUFFER_BYTES = 64 * 1024
+
+interface SourceSlot {
+	sourceId: string
+	sampleRateHz: number
+	centerHz: number
+	epoch: number
+	engine: IqCaptureEngine
+	untap: () => void
+	proc: IqToolProcess | null
+	failures: number[]
+	restartTimer: unknown
+	givenUp: boolean
+	ids: Set<string>
+}
+
+/** The capture bandwidth: the widest replay passband (computed, not hardcoded). */
+export function captureBandwidthHz(shapes: IqReplayShapes): number {
+	return Math.max(...Object.values(shapes).map(s => s.bandwidthHz))
+}
+
+export function createIqCaptureService(
+	options: IqCaptureServiceOptions,
+): IqCaptureService {
+	return new Service(options)
+}
+
+class Service implements IqCaptureService {
+	private readonly log: Logger
+	private readonly now: () => number
+	private readonly spawn: SpawnFn
+	private readonly uuid: () => string
+	private readonly timers: IqToolTimers
+	private readonly uid: number | null
+	private readonly cfg: IqCaptureConfig | undefined
+	private readonly root: string
+	private readonly bandwidthHz: number
+	private st: IqCaptureServiceState = "idle"
+	private dir: string | null = null
+	private store: IqCaptureStore | null = null
+	private readonly slots = new Map<string, SourceSlot>()
+	private readonly events = new EventEmitter()
+	private readonly replays = new Map<string, Set<ChildProcess>>()
+	private readonly captureTimers = new Map<string, unknown>()
+	private expireTimer: unknown = null
+	private readonly unlinks = new Set<Promise<void>>()
+	private toolTotals: IqToolCounters = {
+		droppedBytes: 0,
+		gapCommands: 0,
+		oversizeLines: 0,
+		invalidLines: 0,
+		unsentCommands: 0,
+	}
+	private toolRestarts = 0
+	private toolGiveUps = 0
+	private replayFailures = 0
+	private sweepTotals: SweepResult = { removed: 0, left: 0, failed: 0 }
+	private warnedGiveUp = false
+	private starting: Promise<void> | null = null
+
+	constructor(private readonly o: IqCaptureServiceOptions) {
+		this.log = createComponentLogger(o.logger, "IqCapture")
+		this.now = o.now ?? Date.now
+		this.spawn = o.spawn ?? (nodeSpawn as SpawnFn)
+		this.uuid = o.randomUUID ?? nodeRandomUUID
+		this.timers = o.timers ?? realTimers
+		this.uid = o.uid === undefined ? processUid() : o.uid
+		this.cfg = o.config?.enabled === true ? o.config : undefined
+		this.root = path.resolve(o.storageRoot)
+		this.bandwidthHz = captureBandwidthHz(o.shapes)
+		this.events.setMaxListeners(0)
+	}
+
+	state(): IqCaptureServiceState {
+		return this.st
+	}
+
+	start(): Promise<void> {
+		this.starting ??= this.doStart()
+		return this.starting
+	}
+
+	private async doStart(): Promise<void> {
+		if (this.st !== "idle") return
+		if (!this.cfg) {
+			this.st = "off"
+			return
+		}
+		if (!this.o.protectedMode) {
+			this.st = "not-protected"
+			this.log.info("IQ capture is not started in legacy access mode")
+			return
+		}
+		await this.sweep()
+		if (this.st !== "idle") return
+		if (!this.dir) {
+			this.st = "unavailable"
+			return
+		}
+		this.store = new IqCaptureStore({
+			capBytes: Math.min(
+				IQ_CAPTURE_TOTAL_MAX_BYTES,
+				this.cfg.maxTotalMb * 1024 * 1024,
+			),
+			maxCaptureMs: Math.min(IQ_CAPTURE_MAX_MS, this.cfg.maxCaptureMs),
+			now: this.now,
+			onRemove: (entry, reason) => this.onRemove(entry, reason),
+		})
+		this.st = "on"
+		for (const slot of this.slots.values()) this.spawnTool(slot)
+		this.armExpire()
+		this.log.info("IQ capture started")
+	}
+
+	async sweep(): Promise<SweepResult> {
+		const zero: SweepResult = { removed: 0, left: 0, failed: 0 }
+		if (!this.cfg || !this.o.protectedMode) return zero
+		if (this.st === "stopped" || this.st === "unavailable") return zero
+		if (!this.dir) {
+			const ensured = await ensureCaptureDir(this.root, this.uid)
+			if ("refused" in ensured) {
+				this.log.warn(
+					{ code: ensured.refused },
+					"IQ capture directory refused; capture is off",
+				)
+				this.st = "unavailable"
+				return zero
+			}
+			this.dir = ensured.dir
+		}
+		const result = await sweepCaptureDir(this.dir, { uid: this.uid })
+		this.sweepTotals = {
+			removed: this.sweepTotals.removed + result.removed,
+			left: this.sweepTotals.left + result.left,
+			failed: this.sweepTotals.failed + result.failed,
+		}
+		if (result.removed + result.left + result.failed > 0)
+			this.log.info(
+				{ removed: result.removed, left: result.left, failed: result.failed },
+				"IQ capture sweep",
+			)
+		return result
+	}
+
+	async stop(): Promise<void> {
+		if (this.starting) await this.starting.catch(() => {})
+		const wasOn = this.st === "on"
+		this.st = "stopped"
+		if (this.expireTimer !== null) this.timers.clearTimeout(this.expireTimer)
+		this.expireTimer = null
+		for (const t of this.captureTimers.values()) this.timers.clearTimeout(t)
+		this.captureTimers.clear()
+		const stops: Promise<void>[] = []
+		for (const slot of this.slots.values()) {
+			slot.untap()
+			if (slot.restartTimer !== null)
+				this.timers.clearTimeout(slot.restartTimer)
+			slot.restartTimer = null
+			if (slot.proc) {
+				this.addToolCounters(slot.proc)
+				stops.push(slot.proc.stop())
+			}
+			slot.proc = null
+		}
+		this.slots.clear()
+		for (const children of this.replays.values())
+			for (const child of children) killGroup(child, "SIGKILL")
+		if (this.store) {
+			for (const e of this.store.all()) {
+				if (e.state === "capturing") this.store.fail(e.captureId)
+				else this.store.discard(e.captureId, "shutdown")
+			}
+		}
+		await Promise.allSettled(stops)
+		await this.waitReplays()
+		await Promise.allSettled([...this.unlinks])
+		if (wasOn) this.log.info("IQ capture stopped")
+	}
+
+	private async waitReplays(): Promise<void> {
+		const waits: Promise<void>[] = []
+		for (const children of this.replays.values())
+			for (const child of children)
+				waits.push(
+					new Promise<void>(resolve => {
+						if (child.exitCode !== null || child.signalCode !== null) resolve()
+						else child.once("close", () => resolve())
+					}),
+				)
+		await Promise.allSettled(waits)
+	}
+
+	attachSource(sourceId: string, source: IqCaptureSourceAttach): void {
+		if (!this.cfg || !this.o.protectedMode || this.st === "stopped") return
+		if (
+			!(Number.isFinite(source.sampleRateHz) && source.sampleRateHz > 0) ||
+			!Number.isFinite(source.centerHz)
+		)
+			return
+		this.detachSource(sourceId)
+		const slot: SourceSlot = {
+			sourceId,
+			sampleRateHz: source.sampleRateHz,
+			centerHz: source.centerHz,
+			epoch: source.epoch,
+			engine: source.engine,
+			untap: () => {},
+			proc: null,
+			failures: [],
+			restartTimer: null,
+			givenUp: false,
+			ids: new Set(),
+		}
+		slot.untap = source.engine.tap((start, bytes) => {
+			try {
+				slot.proc?.feed(start, bytes)
+			} catch {
+				// never break the engine's tap loop
+			}
+		})
+		this.slots.set(sourceId, slot)
+		if (this.st === "on") this.spawnTool(slot)
+	}
+
+	detachSource(sourceId: string): void {
+		const slot = this.slots.get(sourceId)
+		if (!slot) return
+		this.slots.delete(sourceId)
+		slot.untap()
+		if (slot.restartTimer !== null) this.timers.clearTimeout(slot.restartTimer)
+		slot.restartTimer = null
+		this.dropOpen(slot)
+		const proc = slot.proc
+		slot.proc = null
+		if (proc) {
+			this.addToolCounters(proc)
+			void proc.stop()
+		}
+	}
+
+	flush(
+		sourceId: string,
+		next?: { epoch?: number; centerHz?: number; sampleRateHz?: number },
+	): void {
+		const slot = this.slots.get(sourceId)
+		if (!slot) return
+		slot.epoch =
+			next?.epoch !== undefined && Number.isFinite(next.epoch)
+				? next.epoch
+				: Number.NaN
+		if (next?.centerHz !== undefined && Number.isFinite(next.centerHz))
+			slot.centerHz = next.centerHz
+		if (
+			next?.sampleRateHz !== undefined &&
+			Number.isFinite(next.sampleRateHz) &&
+			next.sampleRateHz > 0
+		)
+			slot.sampleRateHz = next.sampleRateHz
+		this.dropOpen(slot)
+		// The pipes cannot order a flush against bytes still queued: a fresh process is exact.
+		const proc = slot.proc
+		slot.proc = null
+		if (proc) {
+			this.addToolCounters(proc)
+			proc.send({ type: "flush" })
+			void proc.stop()
+		}
+		if (this.st === "on" && !slot.givenUp && slot.restartTimer === null)
+			this.spawnTool(slot)
+	}
+
+	onFinished(listener: (view: IqCaptureView) => void): () => void {
+		this.events.on("finished", listener)
+		return () => this.events.off("finished", listener)
+	}
+
+	view(captureId: string): IqCaptureView | null {
+		const e = this.store?.get(captureId)
+		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
+		return {
+			captureId: e.captureId,
+			sourceId: e.sourceId,
+			observationId: e.observationId,
+			epoch: e.epoch,
+			rfHz: e.rfHz,
+			tuningTrust: e.tuningTrust,
+			capturedAtMs: e.finishedAtMs ?? e.requestedAtMs,
+			durationMs: Math.round((e.samples * 1000) / 48_000),
+			gapSamples: e.gapSamples,
+		}
+	}
+
+	holderOf(captureId: string): string | null | undefined {
+		const e = this.store?.get(captureId)
+		return e ? e.holder : undefined
+	}
+
+	discard(
+		captureId: string,
+		reason: IqCaptureDiscardReason,
+		holder?: string,
+	): boolean {
+		const e = this.store?.get(captureId)
+		if (!e || !this.store) return false
+		if (e.holder !== null && e.holder !== holder) return false
+		if (e.state === "capturing") {
+			this.endCapture(e)
+			this.store.fail(captureId)
+			return true
+		}
+		return this.store.discard(captureId, reason)
+	}
+
+	expire(): number {
+		return this.store?.expire() ?? 0
+	}
+
+	heldBytes(): number {
+		return this.store?.heldBytes() ?? 0
+	}
+
+	counters(): IqCaptureServiceCounters {
+		const base: IqCaptureCounters = this.store?.counters() ?? {
+			accepted: 0,
+			refused: {
+				disabled: 0,
+				"not-protected": 0,
+				unavailable: 0,
+				"rate-limited": 0,
+				busy: 0,
+				full: 0,
+				"epoch-changed": 0,
+				invalid: 0,
+			},
+			discarded: {
+				result: 0,
+				"confirmed-live": 0,
+				"orphan-ttl": 0,
+				invalid: 0,
+				shutdown: 0,
+			},
+			failed: 0,
+			hostileEvents: 0,
+		}
+		const tool = { ...this.toolTotals }
+		for (const slot of this.slots.values()) {
+			if (!slot.proc) continue
+			for (const k of Object.keys(tool) as (keyof IqToolCounters)[])
+				tool[k] += slot.proc.counters[k]
+		}
+		return {
+			...base,
+			refused: { ...base.refused, ...this.offRefusals },
+			tool,
+			toolRestarts: this.toolRestarts,
+			toolGiveUps: this.toolGiveUps,
+			replayFailures: this.replayFailures,
+			sweep: { ...this.sweepTotals },
+		}
+	}
+
+	/** Refusals counted while the store does not exist (off / legacy / unavailable). */
+	private readonly offRefusals: Partial<Record<IqCaptureRefusal, number>> = {}
+
+	// === IqCapturePort ===
+
+	near(
+		sourceId: string,
+		hz: number,
+		toleranceHz: number,
+		opts: { observationId: string | null; limit: number },
+	): readonly IqCaptureView[] {
+		try {
+			return this.store?.near(sourceId, hz, toleranceHz, opts) ?? []
+		} catch {
+			return []
+		}
+	}
+
+	capture(
+		req: IqCaptureRequest,
+	): { captureId: string } | { refused: IqCaptureRefusal } {
+		try {
+			return this.doCapture(req)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
+			return this.refuse("invalid")
+		}
+	}
+
+	private refuse(reason: IqCaptureRefusal): { refused: IqCaptureRefusal } {
+		if (this.store) return this.store.refuse(reason)
+		this.offRefusals[reason] = (this.offRefusals[reason] ?? 0) + 1
+		return { refused: reason }
+	}
+
+	private doCapture(
+		req: IqCaptureRequest,
+	): { captureId: string } | { refused: IqCaptureRefusal } {
+		if (!this.cfg) return this.refuse("disabled")
+		if (!this.o.protectedMode) return this.refuse("not-protected")
+		const store = this.store
+		if (this.st !== "on" || !store) return this.refuse("unavailable")
+		if (
+			typeof req !== "object" ||
+			req === null ||
+			typeof req.sourceId !== "string" ||
+			!Number.isFinite(req.rfHz) ||
+			!Number.isSafeInteger(req.fromSample) ||
+			!Number.isFinite(req.epoch) ||
+			(req.reason !== "detection" && req.reason !== "identify") ||
+			(req.observationId !== null && typeof req.observationId !== "string") ||
+			(req.tuningTrust !== "commanded" &&
+				req.tuningTrust !== "relay" &&
+				req.tuningTrust !== "unverified")
+		)
+			return this.refuse("invalid")
+		const slot = this.slots.get(req.sourceId)
+		const proc = slot?.proc
+		if (!slot || slot.givenUp || !proc?.ready) return this.refuse("unavailable")
+		const fs_ = slot.sampleRateHz
+		const offsetHz = req.rfHz - slot.centerHz
+		if (Math.abs(offsetHz) > fs_ / 2 - this.bandwidthHz / 2)
+			return this.refuse("invalid")
+		const preRollSamples = Math.round(
+			(Math.min(this.cfg.preRollMs, IQ_CAPTURE_PREROLL_MAX_MS) * fs_) / 1000,
+		)
+		const wanted = proc.toTool(req.fromSample - preRollSamples)
+		if (wanted === null) return this.refuse("unavailable")
+		const submitted = proc.submittedSamples()
+		const margin = Math.ceil(RING_MARGIN_S * fs_)
+		const ringSamples = Math.floor((IQ_CAPTURE_PREROLL_MAX_MS * fs_) / 1000)
+		const lo = Math.max(0, submitted - ringSamples + margin)
+		const hi = Math.max(
+			0,
+			submitted -
+				Math.ceil((proc.queuedBytes() + PIPE_BUFFER_BYTES) / 2) -
+				margin,
+		)
+		const fromSample = Math.min(hi, Math.max(lo, wanted))
+		const captureId = this.uuid()
+		if (!isCaptureId(captureId)) return this.refuse("invalid")
+		const admitted = store.admit(req, captureId, slot.epoch)
+		if ("refused" in admitted) return admitted
+		const maxMs = Math.min(IQ_CAPTURE_MAX_MS, this.cfg.maxCaptureMs)
+		slot.ids.add(captureId)
+		const sent = proc.send({
+			type: "capture",
+			id: captureId,
+			offsetHz,
+			fromSample,
+			maxMs,
+		})
+		if (!sent) {
+			slot.ids.delete(captureId)
+			store.fail(captureId)
+			return this.refuse("unavailable")
+		}
+		this.captureTimers.set(
+			captureId,
+			this.timers.setTimeout(() => {
+				this.captureTimers.delete(captureId)
+				const e = this.store?.get(captureId)
+				if (e?.state === "capturing") this.store?.fail(captureId)
+			}, maxMs + CAPTURE_GRACE_MS),
+		)
+		return { captureId }
+	}
+
+	end(captureId: string): void {
+		const e = this.store?.get(captureId)
+		if (e?.state === "capturing") this.endCapture(e)
+	}
+
+	private endCapture(e: IqCaptureEntry): void {
+		const slot = this.slots.get(e.sourceId)
+		if (slot?.ids.has(e.captureId))
+			slot.proc?.send({ type: "end", id: e.captureId })
+	}
+
+	claim(captureId: string, holder: string): boolean {
+		if (typeof holder !== "string" || holder.length === 0) return false
+		return this.store?.claim(captureId, holder) ?? false
+	}
+
+	settle(captureId: string, holder: string): void {
+		this.store?.settle(captureId, holder)
+	}
+
+	confirmLive(sourceId: string, observationId: string): number {
+		const store = this.store
+		if (!store) return 0
+		let n = 0
+		for (const e of store.all()) {
+			if (
+				e.state === "capturing" &&
+				e.sourceId === sourceId &&
+				e.observationId === observationId
+			) {
+				// Still being written: nothing replayed it yet, so it is moot too.
+				this.endCapture(e)
+				store.fail(e.captureId)
+				n++
+			}
+		}
+		return n + store.confirmLive(sourceId, observationId)
+	}
+
+	openReplay(
+		captureId: string,
+		decoderType: ProbeDecoderType,
+	): Readable | null {
+		try {
+			return this.doOpenReplay(captureId, decoderType)
+		} catch (err: unknown) {
+			this.replayFailures++
+			this.log.warn({ err: safeErrorFields(err) }, "IQ replay could not start")
+			return null
+		}
+	}
+
+	private doOpenReplay(
+		captureId: string,
+		decoderType: ProbeDecoderType,
+	): Readable | null {
+		const store = this.store
+		const cfg = this.cfg
+		if (!store || !cfg || this.st !== "on" || !this.dir) return null
+		if (decoderType === "rtl433") return null
+		const shape = Object.hasOwn(this.o.shapes, decoderType)
+			? this.o.shapes[decoderType]
+			: undefined
+		if (!shape) return null
+		const e = store.get(captureId)
+		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
+		const file = path.join(this.dir, `${captureId}.cf32`)
+		const verified = openVerifiedCaptureSync(this.root, file, e.bytes, this.uid)
+		if (!verified) {
+			store.discard(captureId, "invalid")
+			return null
+		}
+		if (!store.beginReplay(captureId)) {
+			fs.closeSync(verified.fd)
+			return null
+		}
+		let child: ChildProcess
+		try {
+			child = this.spawn(
+				cfg.binaryPath,
+				[
+					"replay",
+					"--in",
+					"/dev/fd/3",
+					"--bandwidth",
+					String(shape.bandwidthHz),
+					"--transition",
+					String(shape.transitionHz),
+				],
+				{
+					env: this.o.env ?? childAccessEnvironment(process.env),
+					detached: process.platform !== "win32",
+					stdio: ["ignore", "pipe", "pipe", verified.fd],
+				},
+			)
+		} catch (err: unknown) {
+			fs.closeSync(verified.fd)
+			store.endReplay(captureId)
+			throw err
+		}
+		// The child holds its own copy of the descriptor.
+		fs.closeSync(verified.fd)
+		let set = this.replays.get(captureId)
+		if (!set) {
+			set = new Set()
+			this.replays.set(captureId, set)
+		}
+		set.add(child)
+		const out = new PassThrough()
+		out.on("error", () => {})
+		const limit = verified.size
+		let bytes = 0
+		let failed = false
+		const fail = () => {
+			if (failed) return
+			failed = true
+			this.replayFailures++
+			killGroup(child, "SIGKILL")
+			out.destroy(new WaveKitError("IQ replay failed", "IQ_REPLAY_FAILED"))
+		}
+		const timer = this.timers.setTimeout(fail, REPLAY_TIMEOUT_MS)
+		child.on("error", () => fail())
+		child.stderr?.on("error", () => {})
+		child.stderr?.resume()
+		const stdout = child.stdout
+		stdout?.on("error", () => fail())
+		stdout?.on("data", (chunk: Buffer) => {
+			if (failed) return
+			bytes += chunk.length
+			if (bytes > limit) {
+				fail()
+				return
+			}
+			if (!out.write(chunk)) {
+				stdout.pause()
+				out.once("drain", () => stdout.resume())
+			}
+		})
+		out.on("close", () => {
+			// The consumer went away: the replay has no reader any more.
+			if (child.exitCode === null && child.signalCode === null)
+				killGroup(child, "SIGKILL")
+		})
+		child.once("close", (code: number | null) => {
+			this.timers.clearTimeout(timer)
+			set.delete(child)
+			if (set.size === 0) this.replays.delete(captureId)
+			if (!failed) {
+				if (code === 0 && bytes === limit) out.end()
+				else fail()
+			}
+			store.endReplay(captureId)
+		})
+		return out
+	}
+
+	// === Tool supervision ===
+
+	private spawnTool(slot: SourceSlot): void {
+		const cfg = this.cfg
+		if (!cfg || this.st !== "on" || !this.dir || slot.givenUp) return
+		if (this.slots.get(slot.sourceId) !== slot) return
+		const proc = new IqToolProcess({
+			binaryPath: cfg.binaryPath,
+			sampleRateHz: slot.sampleRateHz,
+			ringMs: IQ_CAPTURE_PREROLL_MAX_MS,
+			outDir: this.dir,
+			maxMs: Math.min(IQ_CAPTURE_MAX_MS, cfg.maxCaptureMs),
+			bandwidthHz: this.bandwidthHz,
+			spawn: this.spawn,
+			env: this.o.env ?? childAccessEnvironment(process.env),
+			timers: this.timers,
+		})
+		slot.proc = proc
+		proc.on("event", (ev: IqToolEvent) => {
+			if (slot.proc !== proc) return
+			this.onToolEvent(slot, ev)
+		})
+		proc.once("exit", (failed: boolean, code: string | null) => {
+			if (slot.proc !== proc) return
+			slot.proc = null
+			this.addToolCounters(proc)
+			this.dropOpen(slot)
+			if (this.st !== "on" || this.slots.get(slot.sourceId) !== slot) return
+			if (code === "ENOENT") {
+				this.binaryMissing()
+				return
+			}
+			if (!failed) return
+			this.onToolFailure(slot)
+		})
+		proc.start()
+	}
+
+	private binaryMissing(): void {
+		if (this.st !== "on") return
+		this.st = "unavailable"
+		this.log.warn("IQ capture tool not found; capture is off")
+		for (const slot of this.slots.values()) {
+			if (slot.restartTimer !== null)
+				this.timers.clearTimeout(slot.restartTimer)
+			slot.restartTimer = null
+			this.dropOpen(slot)
+			const proc = slot.proc
+			slot.proc = null
+			if (proc) void proc.stop()
+		}
+	}
+
+	private onToolFailure(slot: SourceSlot): void {
+		const now = this.now()
+		slot.failures = slot.failures.filter(t => now - t < GIVE_UP_WINDOW_MS)
+		slot.failures.push(now)
+		if (slot.failures.length >= GIVE_UP_FAILURES) {
+			slot.givenUp = true
+			this.toolGiveUps++
+			if (!this.warnedGiveUp) {
+				this.warnedGiveUp = true
+				this.log.warn(
+					{ failures: slot.failures.length },
+					"IQ capture tool keeps failing; capture is off for that source",
+				)
+			}
+			return
+		}
+		const delay = Math.min(
+			RESTART_MAX_MS,
+			RESTART_BASE_MS * 2 ** (slot.failures.length - 1),
+		)
+		slot.restartTimer = this.timers.setTimeout(() => {
+			slot.restartTimer = null
+			this.toolRestarts++
+			this.spawnTool(slot)
+		}, delay)
+	}
+
+	private onToolEvent(slot: SourceSlot, ev: IqToolEvent): void {
+		const store = this.store
+		if (!store) return
+		if (ev.type === "ready") return
+		if (ev.type === "error") {
+			if (ev.id !== undefined && slot.ids.has(ev.id)) {
+				const e = store.get(ev.id)
+				if (e?.state === "capturing") {
+					slot.ids.delete(ev.id)
+					store.fail(ev.id)
+				}
+			}
+			return
+		}
+		if (!slot.ids.has(ev.id)) {
+			store.countHostile()
+			return
+		}
+		const e = store.get(ev.id)
+		if (!e || e.state !== "capturing") {
+			store.countHostile()
+			return
+		}
+		slot.ids.delete(ev.id)
+		this.clearCaptureTimer(ev.id)
+		if (ev.type === "aborted") {
+			store.fail(ev.id)
+			return
+		}
+		if (!store.captured(ev.id, ev.samples, ev.gapSamples)) return
+		if (e.epoch !== slot.epoch) {
+			store.discard(ev.id, "invalid")
+			return
+		}
+		this.proveFinished(ev.id, e.bytes)
+	}
+
+	private proveFinished(captureId: string, bytes: number): void {
+		const dir = this.dir
+		if (!dir) return
+		const file = path.join(dir, `${captureId}.cf32`)
+		void Promise.resolve().then(() => {
+			const store = this.store
+			if (!store || this.st !== "on") return
+			const v = openVerifiedCaptureSync(this.root, file, bytes, this.uid)
+			if (!v) {
+				store.discard(captureId, "invalid")
+				return
+			}
+			fs.closeSync(v.fd)
+			const view = store.ready(captureId)
+			if (!view) return
+			for (const listener of this.events.listeners("finished")) {
+				try {
+					;(listener as (v: IqCaptureView) => void)(view)
+				} catch (err: unknown) {
+					this.log.warn(
+						{ err: safeErrorFields(err) },
+						"IQ capture listener failed",
+					)
+				}
+			}
+		})
+	}
+
+	private clearCaptureTimer(captureId: string): void {
+		const t = this.captureTimers.get(captureId)
+		if (t !== undefined) this.timers.clearTimeout(t)
+		this.captureTimers.delete(captureId)
+	}
+
+	/** Drops every capture the slot's process is still writing. */
+	private dropOpen(slot: SourceSlot): void {
+		for (const id of slot.ids) {
+			this.clearCaptureTimer(id)
+			this.store?.fail(id)
+		}
+		slot.ids.clear()
+	}
+
+	private addToolCounters(proc: IqToolProcess): void {
+		for (const k of Object.keys(this.toolTotals) as (keyof IqToolCounters)[])
+			this.toolTotals[k] += proc.counters[k]
+		// Counted once: zero the process's own counters.
+		for (const k of Object.keys(proc.counters) as (keyof IqToolCounters)[])
+			proc.counters[k] = 0
+	}
+
+	private armExpire(): void {
+		this.expireTimer = this.timers.setTimeout(() => {
+			this.expireTimer = null
+			if (this.st !== "on") return
+			this.expire()
+			this.armExpire()
+		}, EXPIRE_INTERVAL_MS)
+	}
+
+	private onRemove(
+		entry: IqCaptureEntry,
+		_reason: IqCaptureDiscardReason | "failed",
+	): void {
+		for (const slot of this.slots.values()) slot.ids.delete(entry.captureId)
+		this.clearCaptureTimer(entry.captureId)
+		const dir = this.dir
+		if (!dir || !isCaptureId(entry.captureId)) {
+			this.store?.released(entry.bytes)
+			return
+		}
+		const base = path.join(dir, `${entry.captureId}.cf32`)
+		const p = Promise.allSettled([fsp.unlink(base), fsp.unlink(`${base}.tmp`)])
+			.then(() => {
+				this.store?.released(entry.bytes)
+			})
+			.finally(() => this.unlinks.delete(p))
+		this.unlinks.add(p)
+	}
+}
+
+function killGroup(child: ChildProcess, sig: NodeJS.Signals): void {
+	if (child.exitCode !== null || child.signalCode !== null) return
+	const pid = child.pid
+	if (pid === undefined || pid <= 1) {
+		// No process group to signal (never spawned): ChildProcess.kill is a no-op then.
+		child.kill(sig)
+		return
+	}
+	try {
+		if (process.platform !== "win32") process.kill(-pid, sig)
+		else child.kill(sig)
+	} catch {
+		try {
+			child.kill(sig)
+		} catch {
+			// gone
+		}
+	}
+}
