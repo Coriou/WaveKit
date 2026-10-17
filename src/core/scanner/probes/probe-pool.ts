@@ -293,6 +293,13 @@ const ADMISSION_RANK = {
 	undecoded: 1,
 	reconfirm: 2,
 } as const
+/**
+ * Hold of the dsd-fme `auto` mode that decodes DMR: the DMR late entry (1337 + 360 + 100 ms,
+ * `DEFAULT_CONFIRM_HOLD_MS["tdma-ms"]`, identify's `IDENTIFY_MIN_HOLD_MS`). WG11 req 1.4: it was
+ * 600 ms, so a `tdma-ms` request (class hold 1800 ms) left the DMR mode max(600, 1800 − 2000 for
+ * the nxdn step) = 600 ms, too short for any DMR sync.
+ */
+export const DSD_AUTO_HOLD_MS = 1800
 const DSD_AUTO_COVERS: ScannerProtocol[] = [
 	"dmr",
 	"p25p1",
@@ -337,7 +344,7 @@ export function probeModesFor(
 		case "tdma-ms":
 		case "fsk4-12k5":
 			modes = [
-				dsd("auto", "dmr", DSD_AUTO_COVERS, 600),
+				dsd("auto", "dmr", DSD_AUTO_COVERS, DSD_AUTO_HOLD_MS),
 				dsd("nxdn", "nxdn96", ["nxdn96"], 2000),
 			]
 			break
