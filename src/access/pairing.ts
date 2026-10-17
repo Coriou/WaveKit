@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import { performance } from "node:perf_hooks"
-import { z } from "zod"
+import { accessPairRequestSchema } from "@wavekit/api-types"
+import type { AccessDeviceKind } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 import {
 	admissionDenial,
@@ -20,7 +21,6 @@ const WINDOW_MS = 60_000
 const MAX_CODES = 4
 const MAX_ADDRESSES = 128
 const ADDRESS_IDLE_MS = 10 * 60_000
-const redeemSchema = z.object({ code: z.string().min(10).max(11) }).strict()
 
 export interface PairingServiceOptions {
 	policy: AccessPolicy
@@ -207,9 +207,15 @@ export class PairingService {
 				...headers,
 				"Retry-After": "60",
 			})
-		const parsed = redeemSchema.safeParse(body)
+		// Strict parse (unknown keys, including prototype names, refused) before any
+		// reservation; a refused body never touches the code. The name is never logged.
+		const parsed = accessPairRequestSchema.safeParse(body)
 		const code = parsed.success ? normalizeCode(parsed.data.code) : null
-		if (!code) return flowDenial(400, "MALFORMED_REQUEST", headers)
+		if (!parsed.success || !code)
+			return flowDenial(400, "MALFORMED_REQUEST", headers)
+		const label: { name?: string; kind?: AccessDeviceKind } = {}
+		if (parsed.data.name !== undefined) label.name = parsed.data.name
+		if (parsed.data.kind !== undefined) label.kind = parsed.data.kind
 		const hash = hashCode(code)
 		const pending = this.#codes.get(hash)
 		if (!pending || pending.reserved || pending.expiresAt <= now)
@@ -217,7 +223,7 @@ export class PairingService {
 		// Synchronous reservation closes concurrent redemption before the first await.
 		pending.reserved = true
 		try {
-			const created = await this.#sessions.create()
+			const created = await this.#sessions.create(label)
 			if (created.kind === "capacity")
 				return flowDenial(429, created.code, headers)
 			this.#codes.delete(hash)
