@@ -342,6 +342,20 @@ export function decoderSettingsPort(
 }
 
 /**
+ * WG9 req 3.2: the analog transmission frequency label. The strict state rule, demoted to
+ * `unverified` unless the controller wrote both frequency and sample rate on the current
+ * connection (a failed reconnect replay proves nothing).
+ */
+export function analogFrequencyAt(
+	tuner: Pick<TunerController, "getState" | "tuningWrittenOnConnection">,
+): ReturnType<typeof tunerFrequencyAt> {
+	return tunerFrequencyAt(
+		id => tuner.getState(id),
+		id => tuner.tuningWrittenOnConnection(id),
+	)
+}
+
+/**
  * WG8 req 4.1: the dsd-fme per-call recording directories of the configured decoders (scanner
  * probes are not configured decoders), sorted by decoder id so inventory ids stay stable.
  */
@@ -1822,7 +1836,7 @@ async function main(): Promise<void> {
 		// close. own(7) does the same on a failed startup (Activity is own(8)).
 		const transmissions = wireAnalogTransmissions({
 			source: liveDemod,
-			frequencyAt: tunerFrequencyAt(id => tunerController.getState(id)),
+			frequencyAt: analogFrequencyAt(tunerController),
 			broadcast: event => {
 				wsBroadcaster.broadcastLiveAudioTransmission(event)
 			},
