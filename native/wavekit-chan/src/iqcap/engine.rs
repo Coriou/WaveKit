@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 
 /// Open captures at once (contract `IQ_CAPTURE_MAX_CONCURRENT`).
 pub const MAX_OPEN: usize = 2;
@@ -91,8 +91,31 @@ impl Ring {
     }
 }
 
+/// A filesystem object's identity (device, inode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FsId {
+    dev: u64,
+    ino: u64,
+}
+
+/// Astra BLOCKING: `path` must still be the out-dir proven at start: a real directory (no link),
+/// same device and inode.
+fn dir_still(path: &Path, id: FsId) -> bool {
+    matches!(std::fs::symlink_metadata(path), Ok(m)
+        if m.file_type().is_dir() && m.dev() == id.dev && m.ino() == id.ino)
+}
+
+/// `path` must be the very file we hold: a regular file (no link) with the handle's dev/ino.
+fn file_still(path: &Path, id: FsId) -> bool {
+    matches!(std::fs::symlink_metadata(path), Ok(m)
+        if m.file_type().is_file() && m.dev() == id.dev && m.ino() == id.ino)
+}
+
 struct Capture {
     id: String,
+    /// The out-dir's and the tmp file's identity: every remove/link re-proves both first.
+    dir_id: FsId,
+    file_id: FsId,
     offset_hz: f64,
     dsp: CaptureDsp,
     file: Option<BufWriter<File>>,
@@ -135,20 +158,47 @@ impl Capture {
         self.budget_in == 0 || self.out_samples >= self.max_out
     }
 
-    fn discard(&mut self) {
-        self.file = None;
-        let _ = std::fs::remove_file(&self.tmp);
+    /// The out-dir and `<id>.cf32.tmp` are still the proven directory and our own file.
+    fn proven(&self) -> bool {
+        self.tmp
+            .parent()
+            .is_some_and(|dir| dir_still(dir, self.dir_id))
+            && file_still(&self.tmp, self.file_id)
     }
 
-    /// Flushes and publishes `<id>.cf32` without ever replacing an existing file.
+    /// Astra BLOCKING: drops the capture. The data goes through our own handle first (truncated,
+    /// buffered bytes never written), so a swapped name can never take it; the name is removed
+    /// only when the directory and the file are re-proven right before, else it is left alone.
+    /// False when the proof failed (nothing removed).
+    fn discard(&mut self) -> bool {
+        if let Some(w) = self.file.take() {
+            let (file, _unwritten) = w.into_parts();
+            let _ = file.set_len(0);
+        }
+        if self.proven() {
+            let _ = std::fs::remove_file(&self.tmp);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Flushes and publishes `<id>.cf32` without ever replacing an existing file, only into the
+    /// proven out-dir from our own proven tmp file (re-checked before the link and the remove).
     fn finalize(&mut self) -> std::io::Result<()> {
         let mut f = self.file.take().ok_or(ErrorKind::BrokenPipe)?;
         f.flush()?;
         let file = f.into_inner().map_err(|e| e.into_error())?;
         file.sync_data()?;
-        drop(file);
+        if !self.proven() {
+            let _ = file.set_len(0);
+            return Err(ErrorKind::PermissionDenied.into());
+        }
         let r = std::fs::hard_link(&self.tmp, &self.done);
-        let _ = std::fs::remove_file(&self.tmp);
+        if self.proven() {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+        drop(file);
         r
     }
 }
@@ -161,6 +211,8 @@ pub struct Engine {
     carry: Option<u8>,
     caps: Vec<Capture>,
     used: HashSet<String>,
+    /// The out-dir's identity at start (Astra BLOCKING).
+    dir_id: FsId,
 }
 
 /// Whether the process keeps running after a control line.
@@ -197,10 +249,13 @@ impl Engine {
         if !cfg.out_dir.is_absolute() {
             return Err("out-dir must be absolute".into());
         }
-        match std::fs::symlink_metadata(&cfg.out_dir) {
-            Ok(m) if m.file_type().is_dir() => {}
+        let dir_id = match std::fs::symlink_metadata(&cfg.out_dir) {
+            Ok(m) if m.file_type().is_dir() => FsId {
+                dev: m.dev(),
+                ino: m.ino(),
+            },
             _ => return Err("out-dir must be an existing directory (not a symlink)".into()),
-        }
+        };
         let ring_samples = (cfg.sample_rate * cfg.ring_ms).div_ceil(1000) as usize;
         Ok(Engine {
             ring: Ring::new(ring_samples),
@@ -210,6 +265,7 @@ impl Engine {
             carry: None,
             caps: Vec::new(),
             used: HashSet::new(),
+            dir_id,
         })
     }
 
@@ -289,7 +345,8 @@ impl Engine {
 
     pub fn abort_all(&mut self, reason: &str, events: &mut Vec<Value>) {
         for mut c in self.caps.drain(..) {
-            c.discard();
+            // A failed proof leaves the name alone and reports `io` (the directory changed).
+            let reason = if c.discard() { reason } else { "io" };
             events.push(json!({"type": "aborted", "id": c.id, "reason": reason}));
         }
     }
@@ -388,6 +445,9 @@ impl Engine {
         {
             return Err("out-of-range");
         }
+        if !dir_still(&self.cfg.out_dir, self.dir_id) {
+            return Err("io");
+        }
         let tmp = self.cfg.out_dir.join(format!("{id}.cf32.tmp"));
         let done = self.cfg.out_dir.join(format!("{id}.cf32"));
         if std::fs::symlink_metadata(&done).is_ok() {
@@ -403,12 +463,26 @@ impl Engine {
             Err(e) if e.kind() == ErrorKind::AlreadyExists => return Err("duplicate-id"),
             Err(_) => return Err("io"),
         };
+        let file_id = match file.metadata() {
+            Ok(m) => FsId {
+                dev: m.dev(),
+                ino: m.ino(),
+            },
+            Err(_) => return Err("io"),
+        };
+        // Created in the proven directory (a swap between the check and the open shows here).
+        if !dir_still(&self.cfg.out_dir, self.dir_id) || !file_still(&tmp, file_id) {
+            let _ = file.set_len(0);
+            return Err("io");
+        }
         if self.used.len() < MAX_REMEMBERED_IDS {
             self.used.insert(id.to_owned());
         }
         let max_out = (max_ms * CAPTURE_RATE_HZ / 1000).min(MAX_FILE_BYTES / 8);
         let mut c = Capture {
             id: id.to_owned(),
+            dir_id: self.dir_id,
+            file_id,
             offset_hz,
             dsp: CaptureDsp::new(&self.design, offset_hz),
             file: Some(BufWriter::with_capacity(64 * 1024, file)),

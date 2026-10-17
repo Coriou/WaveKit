@@ -4,8 +4,9 @@
  *
  * One probe per request: `request` asks the pool for a `replay` probe on the replay transport; the run's
  * `result` settles when the probe stopped. Outcome: an accepted identity → `decoded`; the decoder reached
- * its clean end (pool event `replay-end`) or the full hold → `no-sync` (no output), `crc-errors` (CRC
- * failures) or `timeout` (output, no identity); anything else (cancel, failure, preemption) → `cancelled`.
+ * its clean end (pool event `replay-end`) → `no-sync` (no output), `crc-errors` (CRC failures) or
+ * `timeout` (output, no identity); anything else (cancel, failure, preemption, a decoder that never
+ * exited within its hold plus grace) → `cancelled`.
  * A request the pool could not start is withdrawn from the pool's own queue (the replay queue retries).
  */
 import type { EventEmitter } from "node:events"
@@ -215,11 +216,9 @@ export function createPoolReplayProbes(
 			}
 			a.probeId ??= res.started
 			byProbe.set(res.started, a)
-			// A decoder that never exits: the full hold is the verdict, then the probe is released.
-			a.timer = timers.setTimeout(() => {
-				a.complete = true
-				release(a)
-			}, r.mode.holdMs + graceMs)
+			// A decoder that never exits: released after its hold plus grace. Only a clean replay-end
+			// is a verdict (Astra MAJOR 1: the input may have failed): otherwise `cancelled`.
+			a.timer = timers.setTimeout(() => release(a), r.mode.holdMs + graceMs)
 			return {
 				run: {
 					result,

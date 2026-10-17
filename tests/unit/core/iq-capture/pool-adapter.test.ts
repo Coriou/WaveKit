@@ -136,16 +136,32 @@ describe("replay pool adapter", () => {
 		await expect(run2.result).resolves.toMatchObject({ outcome: "cancelled" })
 	})
 
-	it("a probe that never exits is ended after its hold as a completed run", async () => {
+	it("a probe that never exits is ended after its hold as cancelled, no verdict (Astra MAJOR 1)", async () => {
+		// The replay input may have failed while the decoder never exited: only a clean
+		// replay-end is a verdict.
 		const { pool, timers, start } = setup()
 		const run = start()
 		pool.emit("evidence", "p1", pool.requests[0], ev(false))
 		timers.fns[0]!()
+		pool.emit("probe-state", "p1", "stopped", pool.requests[0])
+		await expect(run.result).resolves.toEqual({
+			outcome: "cancelled",
+			decoded: null,
+		})
+		expect(pool.released).toEqual(["p1"])
+	})
+
+	it("a clean replay-end before the hold timer still gives the verdict", async () => {
+		const { pool, timers, start } = setup()
+		const run = start()
+		pool.emit("evidence", "p1", pool.requests[0], ev(false))
+		pool.emit("replay-end", "p1")
+		timers.fns[0]!()
+		pool.emit("probe-state", "p1", "stopped", pool.requests[0])
 		await expect(run.result).resolves.toEqual({
 			outcome: "timeout",
 			decoded: null,
 		})
-		expect(pool.released).toEqual(["p1"])
 	})
 
 	it("a deferral withdraws the pool's queued copy and reports the reason", () => {

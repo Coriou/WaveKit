@@ -465,3 +465,73 @@ fn replay_checks_files_and_keeps_length() {
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
 }
+
+/// Astra BLOCKING: the out-dir is renamed away and replaced by a symlink to a foreign directory
+/// holding a sentinel `<id>.cf32.tmp` (and `<id>.cf32` slot). The tool must never remove, rename
+/// or link through the swapped path: the sentinel stays intact.
+fn swap_out_dir(p: &Proc, id: &str) -> PathBuf {
+    let foreign = p.dir.0.join("foreign");
+    std::fs::create_dir_all(&foreign).unwrap();
+    std::fs::write(foreign.join(format!("{id}.cf32.tmp")), b"sentinel").unwrap();
+    std::fs::rename(p.dir.out(), p.dir.0.join("out.old")).unwrap();
+    std::os::unix::fs::symlink(&foreign, p.dir.out()).unwrap();
+    foreign
+}
+
+#[test]
+fn swapped_out_dir_shutdown_keeps_a_foreign_tmp() {
+    let mut p = Proc::spawn(1000);
+    p.feed(1000);
+    p.capture(ID1, 0, 1000);
+    p.sync();
+    let foreign = swap_out_dir(&p, ID1);
+    p.send(r#"{"type":"shutdown"}"#);
+    let e = p.next();
+    assert_eq!(
+        (e["type"].as_str(), e["id"].as_str()),
+        (Some("aborted"), Some(ID1)),
+        "{e}"
+    );
+    assert_eq!(p.wait_exit(), Some(0));
+    assert_eq!(
+        std::fs::read(foreign.join(format!("{ID1}.cf32.tmp"))).unwrap(),
+        b"sentinel"
+    );
+}
+
+#[test]
+fn swapped_out_dir_flush_keeps_a_foreign_tmp() {
+    let mut p = Proc::spawn(1000);
+    p.feed(1000);
+    p.capture(ID1, 0, 1000);
+    p.sync();
+    let foreign = swap_out_dir(&p, ID1);
+    p.send(r#"{"type":"flush"}"#);
+    assert_eq!(p.next()["type"], "aborted");
+    p.sync();
+    assert_eq!(
+        std::fs::read(foreign.join(format!("{ID1}.cf32.tmp"))).unwrap(),
+        b"sentinel"
+    );
+}
+
+#[test]
+fn swapped_out_dir_completion_publishes_nothing_there() {
+    let mut p = Proc::spawn(1000);
+    p.feed(1000);
+    p.capture(ID1, 0, 1000);
+    p.sync();
+    let foreign = swap_out_dir(&p, ID1);
+    p.send(&format!(r#"{{"type":"end","id":"{ID1}"}}"#));
+    let e = p.next();
+    assert_eq!(
+        (e["type"].as_str(), e["reason"].as_str()),
+        (Some("aborted"), Some("io")),
+        "{e}"
+    );
+    assert_eq!(
+        std::fs::read(foreign.join(format!("{ID1}.cf32.tmp"))).unwrap(),
+        b"sentinel"
+    );
+    assert!(!foreign.join(format!("{ID1}.cf32")).exists());
+}
