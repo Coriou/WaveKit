@@ -9,9 +9,26 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
 - Exception: operator data (`operator-data.ts`) is served as a protected core serves it, so the
   saved frequencies show: `GET /api/operator-data`, saved-frequency create / replace / delete with
-  the revision token and core's error bodies, `operator-data:snapshot` on subscribe and
+  the revision token and core's error bodies, preference patches, `operator-data:snapshot` on subscribe and
   `operator-data:updated` after each change. Seeds are `MOCK_SAVED_FREQUENCIES` in `data.ts`.
   A real legacy core answers 404 there; the web app then says saved frequencies are unavailable.
+- Exception: the Settings routes (`settings.ts`, registered from one marked block in `server.ts`)
+  are mounted as a protected core mounts them, so the Settings drawer can be exercised. A real
+  legacy core serves `GET /api/station` only (no PATCH, `writable` absent or false), answers
+  `GET /api/decoders/:id/settings` with the route 404 (`NOT_FOUND`) and `PATCH /api/decoders/:id`
+  with 501 `DECODER_CONFIG_UPDATE_UNSUPPORTED`, and does not mount `GET /api/config/export`.
+  Mocked: `GET` / `PATCH /api/station` (`writable: true`, revision as If-Match, country pinned
+  by YAML, core's validation order and bodies, `changed`, `appliesOnRestart: ["readsb"]` on a
+  move, `coverageCleared` beyond 1 km); `GET /api/decoders/types` with the core's option
+  descriptors and patch allowlist (`decoder-options.ts`, a snapshot of `src/decoders/options`);
+  `GET /api/decoders/:id/settings` and the WG8 merge patch `PATCH /api/decoders/:id` (If-Match,
+  `DECODER_OPTIONS_INVALID` issues with core's rule text, `DECODER_OPTION_NOT_PATCHABLE`,
+  `pendingRestart` until a start or restart); `POST /api/decoders/:id/{start,stop,restart}` with
+  `DECODER_ALREADY_RUNNING` / `DECODER_NOT_RUNNING`; `GET /api/decoders/:id/log?lines=` (synthetic
+  lines); `GET /api/storage` (every area, activity retention, filesystem); `GET /api/config/export`
+  (redacted YAML); `GET /api/status` (`version`, `uptime`). Preferences:
+  `PATCH /api/operator-data/preferences` (`patch-preferences` `set` / `reset`) in
+  `operator-data.ts`.
 - `/stream` sends the core's `X-Audio-Format` / `X-Sample-Rate` / `X-Channels` headers and, like a
   legacy core since WG7, `Access-Control-Allow-Origin: *` on every answer and a 204 preflight on the
   stream paths: the page fetches it cross-origin directly. While live audio is stopped the connection

@@ -12,6 +12,8 @@ import type {
 	ExpectedToken,
 	OperatorDataReadDto,
 	OperatorDataWriteDto,
+	PreferenceKey,
+	PreferenceOverrides,
 	SavedFrequencyInput,
 } from "@wavekit/api-types"
 
@@ -137,6 +139,11 @@ export class ApiClient {
 
 	private bootstrapping: Promise<AccessState> | null = null
 
+	/** The absolute (or same-origin) URL of a core path, for links and downloads. */
+	url(path: string, query?: Readonly<Record<string, QueryValue>>): string {
+		return `${this.baseUrl}${path}${buildQuery(query)}`
+	}
+
 	get access(): AccessState | null {
 		return this.accessState
 	}
@@ -254,8 +261,23 @@ export class ApiClient {
 		)
 	}
 
+	/**
+	 * PATCH /api/operator-data/preferences (`patch-preferences`): `set` overrides, `reset` returns
+	 * keys to core's defaults; nonempty, a key in at most one of them.
+	 */
+	patchPreferences(
+		expected: ExpectedToken,
+		change: { set?: PreferenceOverrides; reset?: readonly PreferenceKey[] },
+	): Promise<OperatorDataWriteDto> {
+		return this.operatorWrite("PATCH", "/api/operator-data/preferences", {
+			expected,
+			...(change.set !== undefined ? { set: change.set } : {}),
+			...(change.reset !== undefined ? { reset: change.reset } : {}),
+		})
+	}
+
 	private async operatorWrite(
-		method: "POST" | "PUT" | "DELETE",
+		method: "POST" | "PUT" | "PATCH" | "DELETE",
 		path: string,
 		body: unknown,
 	): Promise<OperatorDataWriteDto> {

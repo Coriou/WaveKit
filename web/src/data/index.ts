@@ -7,13 +7,17 @@ import { ApiClient, errorMessage } from "./api-client.ts"
 import type { ConnectionState, SocketFactory } from "./events-client.ts"
 import { EventsClient } from "./events-client.ts"
 import { BandplanStore } from "./bandplan-store.ts"
+import { DecoderSettingsStore } from "./decoder-settings-store.ts"
 import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
+import { PreferencesStore } from "./preferences-store.ts"
 import { ReceiverStore } from "./receiver-store.ts"
 import { SavedFrequenciesStore } from "./saved-frequencies-store.ts"
 import { ScannerStore } from "./scanner-store.ts"
 import { SourcesStore } from "./sources-store.ts"
+import { StationStore } from "./station-store.ts"
 import { Store } from "./store.ts"
+import { SystemStore } from "./system-store.ts"
 import { TunerStore } from "./tuner-store.ts"
 
 export interface AccessStoreState {
@@ -38,6 +42,14 @@ export interface DataLayer {
 	savedFrequencies: SavedFrequenciesStore
 	/** Scanner status, jobs (sweep, passive, progress) and band plans; discoveries load on first refreshDiscoveries(). */
 	scanner: ScannerStore
+	/** Station identity with provenance; writes when `writable` (protected core). */
+	station: StationStore
+	/** Decoder types and option descriptors (loaded at start); settings views load per decoder. */
+	decoderSettings: DecoderSettingsStore
+	/** Version, uptime and storage report; loads on first load() (the Settings drawer). */
+	system: SystemStore
+	/** Operator preferences, derived from the saved-frequencies operator-data read. */
+	preferences: PreferencesStore
 	/** Detects the access mode, opens /ws and loads every store. Never rejects. */
 	start(): Promise<void>
 	dispose(): void
@@ -69,6 +81,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		tunerState: id => tuner.get().bySource[id],
 		onState: state => tuner.receive(state),
 	})
+	const savedFrequencies = new SavedFrequenciesStore(api, events)
 	const layer: DataLayer = {
 		api,
 		events,
@@ -80,8 +93,12 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		liveAudio: new LiveAudioStore(api, events),
 		bandplan: new BandplanStore(api, events),
 		identify: new IdentifyStore(api, events),
-		savedFrequencies: new SavedFrequenciesStore(api, events),
+		savedFrequencies,
 		scanner: new ScannerStore(api, events),
+		station: new StationStore(api),
+		decoderSettings: new DecoderSettingsStore(api),
+		system: new SystemStore(api),
+		preferences: new PreferencesStore(api, savedFrequencies),
 		async start() {
 			try {
 				access.set({ access: await api.bootstrap(), error: null })
@@ -97,6 +114,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 				layer.receiver.loadRelay(),
 				layer.savedFrequencies.load(),
 				layer.scanner.load(),
+				layer.station.load(),
+				layer.decoderSettings.loadTypes(),
 			])
 		},
 		dispose() {
@@ -109,6 +128,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.identify.dispose()
 			layer.savedFrequencies.dispose()
 			layer.scanner.dispose()
+			layer.decoderSettings.dispose()
+			layer.preferences.dispose()
 			events.disconnect()
 		},
 	}
@@ -181,11 +202,36 @@ export {
 	isPendingId,
 } from "./saved-frequencies-store.ts"
 export type {
+	OperatorDataDto,
 	SavedFrequenciesState,
 	SavedFrequenciesStatus,
 	SavedFrequencyRow,
 } from "./saved-frequencies-store.ts"
 export type { IdentifyOptions, IdentifyState } from "./identify-store.ts"
+export type {
+	SettingWriteError,
+	SettingWriteOk,
+	SettingWriteResult,
+} from "./setting-write.ts"
+export { STATION_FIELD_RULES, StationStore } from "./station-store.ts"
+export type { StationState } from "./station-store.ts"
+export {
+	DECODER_LOG_LINES,
+	DecoderSettingsStore,
+	decoderFieldErrors,
+} from "./decoder-settings-store.ts"
+export type {
+	DecoderAction,
+	DecoderSettingsState,
+} from "./decoder-settings-store.ts"
+export { SystemStore } from "./system-store.ts"
+export type { SystemState } from "./system-store.ts"
+export {
+	PREFERENCE_DEFAULTS,
+	PREFERENCE_KEYS,
+	PreferencesStore,
+} from "./preferences-store.ts"
+export type { PreferenceSource, PreferencesState } from "./preferences-store.ts"
 export {
 	ScannerStore,
 	absorbedBy,

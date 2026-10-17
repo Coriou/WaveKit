@@ -2,8 +2,8 @@
  * Mock operator data: the saved-frequency routes of src/operator-data/routes.ts and the `operator-data`
  * channel (a snapshot on subscribe, `operator-data:updated` after each change). Same revision token,
  * status codes and error bodies as core (src/operator-data/transport.ts); requests are validated with
- * the core's own schemas from @wavekit/api-types. Saved frequencies and the label preference only:
- * preference patches and command usage are not mocked.
+ * the core's own schemas from @wavekit/api-types. Saved frequencies and preferences
+ * (`patch-preferences` with `set` / `reset`); command usage is not mocked.
  */
 import { randomUUID } from "node:crypto"
 import type { FastifyInstance, FastifyReply } from "fastify"
@@ -11,6 +11,7 @@ import {
 	OPERATOR_DATA_ERROR_DEFINITIONS,
 	OPERATOR_DATA_LIMITS,
 	mutationSchema,
+	preferenceKeySchema,
 	snapshotSchema,
 } from "@wavekit/api-types"
 import type {
@@ -20,6 +21,7 @@ import type {
 	OperatorDataReadDto,
 	OperatorDataSnapshot,
 	OperatorDataWriteDto,
+	Preferences,
 	SavedFrequencyInput,
 } from "@wavekit/api-types"
 
@@ -47,6 +49,14 @@ class OperatorFailure extends Error {
 		this.current = current
 	}
 }
+
+/** Core's PREFERENCE_DEFAULTS (src/operator-data/domain.ts). */
+const PREFERENCE_DEFAULTS: Readonly<Preferences> = Object.freeze({
+	units: "nautical",
+	timeFormat: "local-24h",
+	waterfallPalette: "phosphor",
+	showSavedFrequencyLabels: true,
+})
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -84,26 +94,20 @@ export function registerOperatorData(
 		commandUsage: [],
 	}
 
+	const provenanceOf = (key: keyof Preferences) =>
+		Object.hasOwn(snapshot.preferenceOverrides, key)
+			? ("operator" as const)
+			: ("default" as const)
+
 	const readDto = (): OperatorDataReadDto => ({
 		snapshot: structuredClone(snapshot),
 		preferences: {
-			values: {
-				units: "nautical",
-				timeFormat: "local-24h",
-				waterfallPalette: "phosphor",
-				showSavedFrequencyLabels: true,
-				...snapshot.preferenceOverrides,
-			},
+			values: { ...PREFERENCE_DEFAULTS, ...snapshot.preferenceOverrides },
 			provenance: {
-				units: "default",
-				timeFormat: "default",
-				waterfallPalette: "default",
-				showSavedFrequencyLabels: Object.hasOwn(
-					snapshot.preferenceOverrides,
-					"showSavedFrequencyLabels",
-				)
-					? "operator"
-					: "default",
+				units: provenanceOf("units"),
+				timeFormat: provenanceOf("timeFormat"),
+				waterfallPalette: provenanceOf("waterfallPalette"),
+				showSavedFrequencyLabels: provenanceOf("showSavedFrequencyLabels"),
 			},
 		},
 		capabilities: {
@@ -175,6 +179,24 @@ export function registerOperatorData(
 			next.savedFrequencies = next.savedFrequencies.filter(
 				f => f.id !== mutation.id,
 			)
+		} else if (mutation.type === "patch-preferences") {
+			// Core's domain: reset removes overrides, set assigns them; unchanged values keep the revision.
+			changed = false
+			const overrides = next.preferenceOverrides
+			for (const key of mutation.reset ?? [])
+				if (Object.hasOwn(overrides, key)) {
+					delete overrides[key]
+					changed = true
+				}
+			for (const key of preferenceKeySchema.options)
+				if (
+					mutation.set &&
+					Object.hasOwn(mutation.set, key) &&
+					overrides[key] !== mutation.set[key]
+				) {
+					Object.assign(overrides, { [key]: mutation.set[key] })
+					changed = true
+				}
 		} else throw new OperatorFailure("OPERATOR_DATA_INVALID")
 		if (changed) next.revision += 1
 		const valid = snapshotSchema.safeParse(next)
@@ -239,6 +261,14 @@ export function registerOperatorData(
 					),
 				),
 			),
+	)
+
+	app.patch("/api/operator-data/preferences", async (request, reply) =>
+		handle(reply, 200, () =>
+			apply(
+				parse("patch-preferences", request.body, ["expected", "set", "reset"]),
+			),
+		),
 	)
 
 	return { snapshot: () => structuredClone(snapshot), readDto }

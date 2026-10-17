@@ -24,6 +24,9 @@ import { ApiError, errorMessage } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
 import { Store } from "./store.ts"
 
+/** An operator-data answer: GET (with effective preferences) or a write (snapshot only). */
+export type OperatorDataDto = OperatorDataReadDto | OperatorDataWriteDto
+
 export type SavedFrequenciesStatus =
 	| "idle"
 	| "loading"
@@ -175,6 +178,10 @@ export class SavedFrequenciesStore extends Store<SavedFrequenciesState> {
 	private queue: Promise<unknown> = Promise.resolve()
 	private inflight: Promise<void> | null = null
 	private readonly clock: () => string
+	private readonly dataListeners = new Set<(dto: OperatorDataDto) => void>()
+	private lastDto: OperatorDataDto | null = null
+	/** Core's default of the label preference (learned from read DTOs). */
+	private defaultShowLabels = true
 
 	constructor(
 		api: ApiClient,
@@ -279,6 +286,27 @@ export class SavedFrequenciesStore extends Store<SavedFrequenciesState> {
 		})
 	}
 
+	/**
+	 * The last operator-data answer this store accepted (read DTO, write DTO or live event), for
+	 * stores that share the read (preferences). Null before the first.
+	 */
+	operatorData(): OperatorDataDto | null {
+		return this.lastDto
+	}
+
+	/** Runs after each accepted operator-data answer. */
+	onOperatorData(listener: (dto: OperatorDataDto) => void): () => void {
+		this.dataListeners.add(listener)
+		return () => {
+			this.dataListeners.delete(listener)
+		}
+	}
+
+	/** Takes the answer of an operator-data write made elsewhere (preferences); false when stale. */
+	absorb(dto: OperatorDataWriteDto): boolean {
+		return this.accept(dto)
+	}
+
 	clearError(): void {
 		this.update(s => (s.error === null ? s : { ...s, error: null }))
 	}
@@ -310,17 +338,22 @@ export class SavedFrequenciesStore extends Store<SavedFrequenciesState> {
 	}
 
 	/** Takes a snapshot from core (REST answer or live event) when it is newer than ours. */
-	private accept(dto: OperatorDataReadDto | OperatorDataWriteDto): boolean {
+	private accept(dto: OperatorDataDto): boolean {
 		const snapshot = dto.snapshot
 		const current = this.get()
 		if (!isNewer(snapshot, current.token) && current.status === "ready")
 			return false
 		this.base = snapshot.savedFrequencies
+		if (
+			"preferences" in dto &&
+			dto.preferences.provenance.showSavedFrequencyLabels === "default"
+		)
+			this.defaultShowLabels = dto.preferences.values.showSavedFrequencyLabels
 		const showLabels =
 			"preferences" in dto
 				? dto.preferences.values.showSavedFrequencyLabels
 				: (snapshot.preferenceOverrides.showSavedFrequencyLabels ??
-					current.showLabels)
+					this.defaultShowLabels)
 		this.set({
 			...current,
 			status: "ready",
@@ -329,6 +362,8 @@ export class SavedFrequenciesStore extends Store<SavedFrequenciesState> {
 			showLabels,
 			error: null,
 		})
+		this.lastDto = dto
+		for (const listener of [...this.dataListeners]) listener(dto)
 		return true
 	}
 

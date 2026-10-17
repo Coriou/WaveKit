@@ -41,6 +41,12 @@ import type { ReceiverMockControls } from "./receiver.ts"
 import { registerScannerMock } from "./scanner.ts"
 import type { ScannerMock } from "./scanner.ts"
 import {
+	MOCK_VERSION,
+	createDecoderLifecycle,
+	registerSettingsMock,
+} from "./settings.ts"
+import type { SettingsMock } from "./settings.ts"
+import {
 	DECODER_SEEDS,
 	DEFAULT_CENTER_HZ,
 	MOCK_MESSAGES,
@@ -91,6 +97,8 @@ export interface MockServer {
 	receiver: ReceiverMockControls
 	/** Scanner mock (./scanner.ts). */
 	scanner: ScannerMock
+	/** Settings routes (./settings.ts): station, decoder settings, storage, export. */
+	settings: SettingsMock
 }
 
 /** The core's rtl_tcp frequency range (TunerValidationError beyond it). */
@@ -460,13 +468,17 @@ export async function buildMockServer(
 
 	// --- Helpers ---
 
+	/** Operator start / stop / restart over the band-derived statuses (./settings.ts). */
+	const lifecycle = createDecoderLifecycle()
 	const decoders = (): DecoderInfo[] =>
-		buildDecoders(
-			tuner.frequency,
-			startedAt,
-			Date.now(),
-			decoderStats,
-			suspendedSince,
+		lifecycle.adjust(
+			buildDecoders(
+				tuner.frequency,
+				startedAt,
+				Date.now(),
+				decoderStats,
+				suspendedSince,
+			),
 		)
 
 	const tunedHz = () => tuner.frequency + (live.config.offsetHz ?? 0)
@@ -1153,6 +1165,38 @@ export async function buildMockServer(
 	})
 	app.get("/health/live", async () => ok())
 	app.get("/health/ready", async () => ok())
+	// GET /api/status: version and uptime (seconds) as core's health routes report them.
+	app.get("/api/status", async () => {
+		const uptime = Math.round((Date.now() - startedAt) / 1000)
+		const list = decoders()
+		const timestamp = new Date().toISOString()
+		const up = { status: "up" as const, lastCheck: timestamp }
+		return {
+			status: "healthy",
+			uptime,
+			version: MOCK_VERSION,
+			sources: [sourceStatus()],
+			decoders: list,
+			audio: { outputPort: 3103, clientsConnected: 0 },
+			health: {
+				status: "healthy",
+				timestamp,
+				uptime,
+				components: {
+					api: up,
+					decoders: Object.fromEntries(list.map(d => [d.id, up])),
+					source: up,
+				},
+			},
+		}
+	})
+	// --- Settings (./settings.ts): station, decoder types / settings / lifecycle / log, storage,
+	// config export. Writable routes are mounted as on a protected core (see README).
+	const settings = registerSettingsMock(app, {
+		decoders,
+		broadcast: (channel, type, data) => broadcast(channel, type, data),
+		lifecycle,
+	})
 	// GET /api/access/bootstrap is deliberately not mounted: a legacy core answers it with 404.
 
 	app.get("/api/sources", async () => [sourceStatus()])
@@ -1879,6 +1923,7 @@ export async function buildMockServer(
 		audio,
 		receiver,
 		scanner,
+		settings,
 		async listen() {
 			await new Promise<void>((resolve, reject) => {
 				audio.once("error", reject)
