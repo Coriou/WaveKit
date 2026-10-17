@@ -14,7 +14,6 @@
  * path or file name. Imports stay minimal (contract, store, inventory types) so the deleters can
  * import the port without pulling runtime modules into the startup bundle.
  */
-import { randomBytes } from "node:crypto"
 import * as nodeFs from "node:fs/promises"
 import * as nodePath from "node:path"
 import {
@@ -68,10 +67,17 @@ export interface RecordingDeleteFs {
 		isSymbolicLink(): boolean
 	}>
 	unlink(p: string): Promise<void>
-	/** Moves the recording to the private delete name (same directory, atomic). */
+	/** Moves the recording into the private delete directory (same filesystem, atomic). */
 	rename(from: string, to: string): Promise<void>
-	/** Restores a moved file without replacing what now holds the name (EEXIST then). */
+	/** Restores a moved regular file without replacing what now holds the name (EEXIST then). */
 	link(existing: string, newPath: string): Promise<void>
+	/** Creates the private delete directory (mode 0700) next to the recording. */
+	mkdtemp(prefix: string): Promise<string>
+	/** Removes the private delete directory; fails when it is not empty (left in place then). */
+	rmdir(p: string): Promise<void>
+	readlink(p: string): Promise<string>
+	/** Restores a moved symlink as a symlink (EEXIST when the name is taken; never clobbers). */
+	symlink(target: string, p: string): Promise<void>
 }
 
 const nodeDeleteFs: RecordingDeleteFs = {
@@ -79,13 +85,20 @@ const nodeDeleteFs: RecordingDeleteFs = {
 	unlink: p => nodeFs.unlink(p),
 	rename: (a, b) => nodeFs.rename(a, b),
 	link: (a, b) => nodeFs.link(a, b),
+	mkdtemp: prefix => nodeFs.mkdtemp(prefix),
+	rmdir: p => nodeFs.rmdir(p),
+	readlink: p => nodeFs.readlink(p),
+	symlink: (target, p) => nodeFs.symlink(target, p),
 }
 
 /**
- * The private name a delete moves the recording to before its final check: same directory,
- * not a dsd-fme or scanner name, so neither the pruner nor the inventory lists it.
+ * The private directory a delete moves the recording into before its final check: created by
+ * `mkdtemp` (mode 0700) in the recording's directory, a directory and not a dsd-fme or scanner
+ * name, so neither the pruner nor the inventory lists it.
  */
 export const RECORDING_DELETE_PRIVATE_PREFIX = ".wavekit-delete-"
+/** The fixed name of the moved recording inside the private directory. */
+export const RECORDING_DELETE_INNER_NAME = "recording"
 
 export interface RecordingKeepServiceOptions {
 	stateDir: string
@@ -368,13 +381,16 @@ export async function openRecordingKeepService(
 		!a.isSymbolicLink() && a.isFile() && a.dev === b.dev && a.ino === b.ino
 
 	/**
-	 * Unlinks exactly the opened file. The path is first moved (atomic rename) to a private
-	 * name in the same directory; the private name is then checked against the handle (device,
-	 * inode, a regular file, not a link) and unlinked only on a match. A file swapped in at any
-	 * step before the rename is moved, found foreign and put back with `link` (which never
-	 * replaces what now holds the name); nothing is deleted and the answer is 404. If the name
-	 * was taken again meanwhile, the foreign file is left under the private name (never
-	 * deleted) and a fixed-text warning is logged.
+	 * Unlinks exactly the opened file. The path is moved (atomic rename) into a fresh private
+	 * directory (`mkdtemp`, mode 0700, same directory so same filesystem) under a fixed inner
+	 * name; the inner path is checked against the handle (device, inode, a regular file) and
+	 * unlinked only on a match, then the directory is removed. A file swapped in before the
+	 * rename is moved, found foreign and put back by entry type (a regular file with `link`, a
+	 * symlink with `readlink` + `symlink`; both fail EEXIST and never replace what now holds the
+	 * name); nothing is deleted and the answer is 404. If it cannot be put back it is left in the
+	 * private directory (never deleted) and a fixed-text warning is logged.
+	 * Residual: a same-uid process writing into this fresh 0700 directory between the inner
+	 * lstat and unlink could get its entry unlinked; such a process could unlink the recording itself.
 	 */
 	async function deleteVerified(
 		key: RecordingKeepKey,
@@ -393,55 +409,88 @@ export async function openRecordingKeepService(
 			log.warn({}, "Recording delete refused: the file changed")
 			throw notFound()
 		}
-		const privatePath = nodePath.join(
-			nodePath.dirname(filePath),
-			`${RECORDING_DELETE_PRIVATE_PREFIX}${randomBytes(12).toString("hex")}`,
+		// A failure here answers 500 RECORDING_DELETE_FAILED with nothing renamed.
+		const privateDir = await deleteFs.mkdtemp(
+			nodePath.join(
+				nodePath.dirname(filePath),
+				RECORDING_DELETE_PRIVATE_PREFIX,
+			),
 		)
+		const innerPath = nodePath.join(privateDir, RECORDING_DELETE_INNER_NAME)
+		const removeDir = (): Promise<void> =>
+			deleteFs.rmdir(privateDir).catch(() => undefined)
 		try {
-			await deleteFs.rename(filePath, privatePath)
+			await deleteFs.rename(filePath, innerPath)
 		} catch (error: unknown) {
+			await removeDir()
 			if (errCode(error) === "ENOENT" || errCode(error) === "ENOTDIR")
 				throw notFound()
 			throw error
 		}
 		let moved: FileId | null
 		try {
-			moved = await deleteFs.lstat(privatePath)
+			moved = await deleteFs.lstat(innerPath)
 		} catch (error: unknown) {
 			if (errCode(error) !== "ENOENT") throw error
 			moved = null
 		}
 		if (moved === null) {
-			// The private name was removed under us: nothing of ours is left to delete.
+			// The inner name was removed under us: nothing of ours is left to delete.
+			await removeDir()
 			log.warn({}, "Recording delete refused: the file changed")
 			throw notFound()
 		}
 		const match = sameFile(moved, handleStat)
 		if (match && ready() && !protecting.has(key)) {
 			try {
-				await deleteFs.unlink(privatePath)
+				await deleteFs.unlink(innerPath)
 			} catch (error: unknown) {
-				if (errCode(error) === "ENOENT") throw notFound()
+				if (errCode(error) === "ENOENT") {
+					await removeDir()
+					throw notFound()
+				}
 				throw error
 			}
+			await removeDir()
 			return
 		}
-		// Put it back without clobbering: link fails EEXIST when the name is taken again.
-		let restored = false
-		try {
-			await deleteFs.link(privatePath, filePath)
-			restored = true
-		} catch (error: unknown) {
+		if (!(await restoreMoved(moved, innerPath, filePath)))
 			log.warn(
-				{ left: 1, err: safeErrorFields(error) },
+				{ left: 1 },
 				"Recording delete could not restore a file; it is left under a private name",
 			)
-		}
-		if (restored) await deleteFs.unlink(privatePath).catch(() => undefined)
+		await removeDir()
 		if (match)
 			throw new RecordingKeepError("RECORDING_KEPT", RECORDING_KEPT_TEXT)
 		log.warn({}, "Recording delete refused: the file changed")
 		throw notFound()
+	}
+
+	/**
+	 * Puts a moved entry back under its original name by type, never clobbering: a regular file
+	 * with `link`, a symlink with `readlink` + `symlink` (`link` on a symlink hard-links its target
+	 * on macOS). The inner name is unlinked only after the restore succeeded. Any other type or
+	 * any error: false, and the entry stays in the private directory.
+	 */
+	async function restoreMoved(
+		moved: FileId,
+		innerPath: string,
+		filePath: string,
+	): Promise<boolean> {
+		try {
+			if (moved.isSymbolicLink()) {
+				const target = await deleteFs.readlink(innerPath)
+				await deleteFs.symlink(target, filePath)
+			} else if (moved.isFile()) {
+				await deleteFs.link(innerPath, filePath)
+			} else {
+				return false
+			}
+		} catch {
+			return false
+		}
+		await deleteFs.unlink(innerPath).catch(() => undefined)
+		return true
 	}
 
 	async function remove(inventoryId: string): Promise<RecordingDeleteResult> {

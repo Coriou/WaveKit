@@ -26,6 +26,8 @@ const world = vi.hoisted(() => {
 	}
 	const state = {
 		rec: new Map<string, Entry>(),
+		/** Private delete directories (relative to `/rec`). */
+		dirs: new Set<string>(),
 		store: new Map<string, Buffer>(),
 		nextIno: 1,
 		failStore: false,
@@ -41,7 +43,10 @@ const world = vi.hoisted(() => {
 	const pruner = {
 		readdir: async (): Promise<string[]> => {
 			await state.yieldPoint("prune:readdir")
-			return [...state.rec.keys()]
+			return [
+				...[...state.rec.keys()].filter(k => !k.includes("/")),
+				...state.dirs,
+			]
 		},
 		stat: async (p: string) => {
 			await state.yieldPoint("prune:stat")
@@ -153,36 +158,74 @@ const fileId = (e: { ino: number; link: boolean }) => ({
 	isSymbolicLink: () => e.link,
 })
 
+/** The model key of a delete path: relative to `/rec`, so private directories nest. */
+const rel = (p: string): string => (p.startsWith("/rec/") ? p.slice(5) : p)
+let nextDir = 0
+
 const deleteFs: RecordingDeleteFs = {
 	lstat: async p => {
 		await state.yieldPoint("delete:lstat")
-		const e = state.rec.get(base(p))
+		const e = state.rec.get(rel(p))
 		if (!e) throw err("ENOENT")
 		return fileId(e)
 	},
+	mkdtemp: async prefix => {
+		await state.yieldPoint("delete:mkdtemp")
+		const d = `${prefix}${nextDir++}`
+		state.dirs.add(rel(d))
+		return d
+	},
+	rmdir: async p => {
+		await state.yieldPoint("delete:rmdir")
+		const d = rel(p)
+		if (!state.dirs.has(d)) throw err("ENOENT")
+		if ([...state.rec.keys()].some(k => k.startsWith(`${d}/`)))
+			throw err("ENOTEMPTY")
+		state.dirs.delete(d)
+	},
 	rename: async (a, b) => {
 		await state.yieldPoint("delete:rename")
-		const e = state.rec.get(base(a))
+		const e = state.rec.get(rel(a))
 		if (!e) throw err("ENOENT")
-		state.rec.delete(base(a))
-		state.rec.set(base(b), e)
+		state.rec.delete(rel(a))
+		state.rec.set(rel(b), e)
 	},
 	link: async (a, b) => {
 		await state.yieldPoint("delete:link")
-		const e = state.rec.get(base(a))
+		const e = state.rec.get(rel(a))
 		if (!e) throw err("ENOENT")
-		if (state.rec.has(base(b))) throw err("EEXIST")
-		state.rec.set(base(b), e)
+		if (state.rec.has(rel(b))) throw err("EEXIST")
+		state.rec.set(rel(b), e)
+	},
+	readlink: async p => {
+		await state.yieldPoint("delete:readlink")
+		const e = state.rec.get(rel(p))
+		if (!e) throw err("ENOENT")
+		if (!e.link) throw err("EINVAL")
+		return `ino:${e.ino}`
+	},
+	symlink: async (target, p) => {
+		await state.yieldPoint("delete:symlink")
+		if (state.rec.has(rel(p))) throw err("EEXIST")
+		// Modelled as the same entry: a symlink recreated with the same target.
+		const moved = [...state.rec.values()].find(
+			e => e.link && `ino:${e.ino}` === target,
+		)
+		if (!moved) throw err("ENOENT")
+		state.rec.set(rel(p), moved)
 	},
 	unlink: async p => {
 		await state.yieldPoint("delete:unlink")
-		const e = state.rec.get(base(p))
+		const e = state.rec.get(rel(p))
 		if (!e) throw err("ENOENT")
-		if (!state.opened.has(e.ino) || e.link)
+		state.rec.delete(rel(p))
+		// A violation is an inode losing its LAST name when it is not the verified inode; a foreign
+		// inode restored under its original name and then unlinked from the private name is fine.
+		const stillNamed = [...state.rec.values()].includes(e)
+		if (!stillNamed && (!state.opened.has(e.ino) || e.link))
 			state.violations.push("delete unlinked an unverified inode")
-		if (state.keptOnDisk().has(`dsd~${e.origin}`))
+		if (!stillNamed && state.keptOnDisk().has(`dsd~${e.origin}`))
 			state.violations.push(`delete unlinked a kept file ${e.origin}`)
-		state.rec.delete(base(p))
 	},
 }
 
@@ -245,6 +288,7 @@ it("no interleaving of Keep, unkeep, delete, store failure, swaps and the pruner
 			fc.array(op, { minLength: 1, maxLength: 10 }),
 			async (s, preKept, ops) => {
 				state.rec.clear()
+				state.dirs.clear()
 				state.store.clear()
 				state.opened.clear()
 				state.violations = []

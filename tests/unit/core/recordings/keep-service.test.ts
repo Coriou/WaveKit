@@ -371,6 +371,10 @@ describe("recording keep service", () => {
 				},
 				rename: (a, b) => nodeFs.rename(a, b),
 				link: (a, b) => nodeFs.link(a, b),
+				mkdtemp: prefix => nodeFs.mkdtemp(prefix),
+				rmdir: p => nodeFs.rmdir(p),
+				readlink: p => nodeFs.readlink(p),
+				symlink: (t, p) => nodeFs.symlink(t, p),
 			}
 			const svc = await f.open({ deleteFs })
 			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
@@ -394,6 +398,10 @@ describe("recording keep service", () => {
 					Promise.reject(Object.assign(new Error("gone"), { code: "ENOENT" })),
 				rename: (a, b) => nodeFs.rename(a, b),
 				link: (a, b) => nodeFs.link(a, b),
+				mkdtemp: prefix => nodeFs.mkdtemp(prefix),
+				rmdir: p => nodeFs.rmdir(p),
+				readlink: p => nodeFs.readlink(p),
+				symlink: (t, p) => nodeFs.symlink(t, p),
 			},
 		})
 		await expect(svc.remove(DSD_ID)).rejects.toMatchObject({ status: 404 })
@@ -422,6 +430,10 @@ describe("recording keep service", () => {
 				unlink: p => nodeFs.unlink(p),
 				rename: (a, b) => nodeFs.rename(a, b),
 				link: (a, b) => nodeFs.link(a, b),
+				mkdtemp: prefix => nodeFs.mkdtemp(prefix),
+				rmdir: p => nodeFs.rmdir(p),
+				readlink: p => nodeFs.readlink(p),
+				symlink: (t, p) => nodeFs.symlink(t, p),
 			},
 		})
 		const del = svc.remove(DSD_ID)
@@ -610,6 +622,10 @@ describe("recording keep service", () => {
 				},
 				rename: (a, b) => nodeFs.rename(a, b),
 				link: (a, b) => nodeFs.link(a, b),
+				mkdtemp: prefix => nodeFs.mkdtemp(prefix),
+				rmdir: p => nodeFs.rmdir(p),
+				readlink: p => nodeFs.readlink(p),
+				symlink: (t, p) => nodeFs.symlink(t, p),
 				...over,
 			}
 		}
@@ -662,7 +678,7 @@ describe("recording keep service", () => {
 			})
 			expect(
 				fsx.unlinked.every(p =>
-					path.basename(p).startsWith(".wavekit-delete-"),
+					path.basename(path.dirname(p)).startsWith(".wavekit-delete-"),
 				),
 			).toBe(true)
 			// The foreign file is put back under the free name, the private name is gone.
@@ -693,7 +709,12 @@ describe("recording keep service", () => {
 				code: "RECORDING_NOT_FOUND",
 			})
 			expect(await readFile(other, "utf8")).toBe("OTHER")
-			await lstat(target)
+			// Restored as the symlink it was, not as a hard link to its target.
+			expect((await lstat(target)).isSymbolicLink()).toBe(true)
+			expect(await nodeFs.readlink(target)).toBe(other)
+			expect(fsx.unlinked.every(p => path.basename(p) === "recording")).toBe(
+				true,
+			)
 			await lstat(path.join(f.root, "moved.wav"))
 			expect(await privateNames(f)).toEqual([])
 		})
@@ -717,9 +738,13 @@ describe("recording keep service", () => {
 			expect(await readFile(target, "utf8")).toBe("NEW")
 			const left = await privateNames(f)
 			expect(left).toHaveLength(1)
-			expect(await readFile(path.join(f.dsd, left[0] ?? ""), "utf8")).toBe(
-				"FOREIGN",
-			)
+			expect(
+				await readFile(path.join(f.dsd, left[0] ?? "", "recording"), "utf8"),
+			).toBe("FOREIGN")
+			// The inventory never lists the private directory or what it holds.
+			const ids = (await f.inventory.list({})).items.map(i => i.id)
+			expect(ids.some(id => id.includes(".wavekit-delete-"))).toBe(false)
+			expect(ids.some(id => id.includes("recording"))).toBe(false)
 			expect(JSON.stringify(f.logs.calls)).toContain(
 				"Recording delete could not restore a file; it is left under a private name",
 			)
@@ -744,12 +769,61 @@ describe("recording keep service", () => {
 			const svc = await f.open({ deleteFs: fsx })
 			await expect(svc.remove(DSD_ID)).resolves.toMatchObject({ deleted: true })
 			expect(fsx.unlinked).toHaveLength(1)
-			expect(path.basename(fsx.unlinked[0] ?? "")).toMatch(
-				/^\.wavekit-delete-[0-9a-f]{24}$/,
+			expect(path.basename(fsx.unlinked[0] ?? "")).toBe("recording")
+			expect(path.basename(path.dirname(fsx.unlinked[0] ?? ""))).toMatch(
+				/^\.wavekit-delete-/,
 			)
 			await expect(lstat(path.join(f.dsd, NAME))).rejects.toMatchObject({
 				code: "ENOENT",
 			})
+			expect(await privateNames(f)).toEqual([])
+		})
+
+		it("round 2: mkdtemp failing answers 500 RECORDING_DELETE_FAILED with nothing renamed", async () => {
+			const f = await fixture()
+			let renames = 0
+			const fsx = realDeleteFs({
+				mkdtemp: () =>
+					Promise.reject(Object.assign(new Error("full"), { code: "ENOSPC" })),
+				rename: async (a, b) => {
+					renames++
+					await nodeFs.rename(a, b)
+				},
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).rejects.toMatchObject({
+				code: "RECORDING_DELETE_FAILED",
+			})
+			expect(renames).toBe(0)
+			expect(fsx.unlinked).toEqual([])
+			await lstat(path.join(f.dsd, NAME))
+			expect(await privateNames(f)).toEqual([])
+		})
+
+		it("round 2: a shared-directory swap of the private entry after the inner lstat is not unlinked", async () => {
+			const f = await fixture()
+			const foreign = path.join(f.root, "foreign.wav")
+			await writeFile(foreign, "FOREIGN")
+			let calls = 0
+			let swapErrors = 0
+			const fsx = realDeleteFs({
+				lstat: async p => {
+					const st = await nodeFs.lstat(p)
+					if (++calls === 2) {
+						// A writer in the shared directory replaces every private entry it can name.
+						for (const n of await readdir(f.dsd))
+							if (n.startsWith(".wavekit-delete-"))
+								await nodeFs.rename(foreign, path.join(f.dsd, n)).catch(() => {
+									swapErrors++
+								})
+					}
+					return st
+				},
+			})
+			const svc = await f.open({ deleteFs: fsx })
+			await expect(svc.remove(DSD_ID)).resolves.toMatchObject({ deleted: true })
+			expect(swapErrors).toBe(1)
+			expect(await readFile(foreign, "utf8")).toBe("FOREIGN")
 			expect(await privateNames(f)).toEqual([])
 		})
 

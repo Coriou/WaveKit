@@ -58,8 +58,8 @@ const MUTATION_ERRORS: Record<number, string> = {
 }
 type MutationOp = "keep" | "unkeep" | "remove"
 /**
- * 500 bodies, fixed text per operation. `RECORDING_DELETE_FAILED` is a contract code;
- * `RECORDING_KEEP_FAILED` (Keep and unkeep) is a proposed contract addition.
+ * 500 bodies, fixed text per operation. Both 500 codes are proposed contract additions:
+ * `RECORDING_KEEP_FAILED` (Keep and unkeep) and `RECORDING_DELETE_FAILED` (delete).
  */
 const FAILED_BODIES: Record<
 	MutationOp,
