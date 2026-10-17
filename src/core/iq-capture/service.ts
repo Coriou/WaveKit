@@ -17,7 +17,6 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process"
 import { randomUUID as nodeRandomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
 import * as fs from "node:fs"
-import * as fsp from "node:fs/promises"
 import path from "node:path"
 import { PassThrough, type Readable } from "node:stream"
 import { childAccessEnvironment } from "../../access/runtime-hygiene.js"
@@ -37,8 +36,12 @@ import {
 } from "../scanner/iq-capture-contract.js"
 import {
 	ensureCaptureDir,
+	captureDirIdentitySync,
+	dirStillProvenSync,
 	openVerifiedCaptureSync,
 	processUid,
+	unlinkProvenSync,
+	type DirIdentity,
 } from "./fs-guard.js"
 import {
 	IqToolProcess,
@@ -123,6 +126,8 @@ export interface IqCaptureServiceCounters extends IqCaptureCounters {
 	toolRestarts: number
 	toolGiveUps: number
 	replayFailures: number
+	/** The capture directory failed its re-proof (swapped, linked): capture went off. */
+	dirRefusals: number
 	sweep: SweepResult
 }
 
@@ -234,7 +239,6 @@ class Service implements IqCaptureService {
 	private readonly captureTimers = new Map<string, unknown>()
 	private expireTimer: unknown = null
 	private expireAt: number | null = null
-	private readonly unlinks = new Set<Promise<void>>()
 	/** Recently removed capture ids (bounded, oldest evicted): their late tool events are not hostile. */
 	private readonly forgotten = new Set<string>()
 	/**
@@ -242,6 +246,18 @@ class Service implements IqCaptureService {
 	 * their concurrency slot taken until the tool's final event for them or its exit; then the files
 	 * (`.cf32`, `.cf32.tmp`) are unlinked and the bytes released. At most one per open tool capture.
 	 */
+	/**
+	 * Review MAJOR d: the process writing each open capture, independent of the source slot (a
+	 * detach, flush or restart replaces the slot's process). Cleared at that process's final event
+	 * for the id or its exit.
+	 */
+	private readonly writers = new Map<string, IqToolProcess>()
+	/** Review BLOCKING: the proven directory's identity, re-checked before every file operation. */
+	private dirId: DirIdentity | null = null
+	/** Inode of each proven capture file (checked again before its unlink). */
+	private readonly fileIno = new Map<string, number>()
+	private dirRefusals = 0
+	private warnedDir = false
 	private readonly zombies = new Map<
 		string,
 		{ bytes: number; proc: IqToolProcess }
@@ -338,9 +354,25 @@ class Service implements IqCaptureService {
 				this.st = "unavailable"
 				return zero
 			}
+			const identity = captureDirIdentitySync(this.root, ensured.dir)
+			if (!identity) {
+				this.dirRefused()
+				this.st = "unavailable"
+				return zero
+			}
 			this.dir = ensured.dir
+			this.dirId = identity
 		}
-		const result = await sweepCaptureDir(this.dir, { uid: this.uid })
+		const identity = this.dirId
+		if (!identity) return zero
+		const result = await sweepCaptureDir(this.dir, {
+			uid: this.uid,
+			guard: { root: this.root, identity },
+		})
+		if (result.refused) {
+			this.dirRefused()
+			this.st = "unavailable"
+		}
 		this.sweepTotals = {
 			removed: this.sweepTotals.removed + result.removed,
 			left: this.sweepTotals.left + result.left,
@@ -386,7 +418,6 @@ class Service implements IqCaptureService {
 		}
 		await Promise.allSettled(stops)
 		await this.waitReplays()
-		await Promise.allSettled([...this.unlinks])
 		if (wasOn) this.log.info("IQ capture stopped")
 	}
 
@@ -560,6 +591,7 @@ class Service implements IqCaptureService {
 			toolRestarts: this.toolRestarts,
 			toolGiveUps: this.toolGiveUps,
 			replayFailures: this.replayFailures,
+			dirRefusals: this.dirRefusals,
 			sweep: { ...this.sweepTotals },
 		}
 	}
@@ -679,6 +711,7 @@ class Service implements IqCaptureService {
 			store.fail(captureId)
 			return this.refuse("unavailable")
 		}
+		this.writers.set(captureId, proc)
 		this.captureTimers.set(
 			captureId,
 			this.timers.setTimeout(() => {
@@ -763,7 +796,8 @@ class Service implements IqCaptureService {
 		const e = store.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
 		const file = path.join(this.dir, `${captureId}.cf32`)
-		const verified = openVerifiedCaptureSync(this.root, file, e.bytes, this.uid)
+		if (!this.dirOk()) return null
+		const verified = this.openProven(captureId, file, e.bytes)
 		if (!verified) {
 			store.discard(captureId, "invalid")
 			return null
@@ -871,6 +905,22 @@ class Service implements IqCaptureService {
 		})
 		slot.proc = proc
 		proc.on("event", (ev: IqToolEvent) => {
+			// Per process, whatever the slot holds now: the end of this process's own captures.
+			if (ev.type !== "ready" && ev.id !== undefined) {
+				const id = ev.id
+				if (this.writers.get(id) === proc) this.writers.delete(id)
+				const z = this.zombies.get(id)
+				if (z && z.proc === proc) {
+					// The tool's final event for a capture Node already removed: files and bytes go now.
+					this.reap(id)
+					return
+				}
+				if (slot.proc !== proc) {
+					// A late file of a replaced process is never kept (review m2, MAJOR d).
+					if (ev.type === "captured") this.unlinkFiles(id, false)
+					return
+				}
+			}
 			if (slot.proc !== proc) return
 			this.onToolEvent(slot, ev)
 		})
@@ -879,8 +929,12 @@ class Service implements IqCaptureService {
 			if (slot.proc !== proc) return
 			for (const id of [...slot.ids]) this.store?.fail(id)
 		})
-		// Whatever ended it, the tool wrote nothing more: its remaining zombies are released.
+		// Whatever ended it, the tool writes nothing more: it is no writer any more, and its remaining
+		// zombies are released. Registered first: the slot's exit handler then drops its open
+		// captures as not being written.
 		proc.once("exit", () => {
+			for (const [id, w] of [...this.writers])
+				if (w === proc) this.writers.delete(id)
 			for (const [id, z] of [...this.zombies])
 				if (z.proc === proc) this.reap(id)
 		})
@@ -902,8 +956,57 @@ class Service implements IqCaptureService {
 
 	private binaryMissing(): void {
 		if (this.st !== "on") return
-		this.st = "unavailable"
 		this.log.warn("IQ capture tool not found; capture is off")
+		this.turnOff()
+	}
+
+	/** Review BLOCKING: the directory is not the proven one any more: counted, capture off. */
+	private dirRefused(): void {
+		this.dirRefusals++
+		if (!this.warnedDir) {
+			this.warnedDir = true
+			this.log.warn("IQ capture directory changed; capture is off")
+		}
+		if (this.st === "on") this.turnOff()
+	}
+
+	private dirOk(): boolean {
+		const dir = this.dir
+		const id = this.dirId
+		if (dir && id && dirStillProvenSync(this.root, dir, id)) return true
+		this.dirRefused()
+		return false
+	}
+
+	/** Opens a capture file after the directory proof, recording (or checking) its inode. */
+	private openProven(
+		captureId: string,
+		file: string,
+		bytes: number,
+	): { fd: number; size: number } | null {
+		const v = openVerifiedCaptureSync(this.root, file, bytes, this.uid)
+		if (!v) return null
+		try {
+			const ino = fs.fstatSync(v.fd).ino
+			const known = this.fileIno.get(captureId)
+			if (known !== undefined && known !== ino) {
+				fs.closeSync(v.fd)
+				return null
+			}
+			this.fileIno.set(captureId, ino)
+			return v
+		} catch {
+			try {
+				fs.closeSync(v.fd)
+			} catch {
+				// closed
+			}
+			return null
+		}
+	}
+
+	private turnOff(): void {
+		this.st = "unavailable"
 		for (const slot of this.slots.values()) {
 			if (slot.restartTimer !== null)
 				this.timers.clearTimeout(slot.restartTimer)
@@ -957,12 +1060,6 @@ class Service implements IqCaptureService {
 			return
 		}
 		if (!slot.ids.has(ev.id)) {
-			const z = this.zombies.get(ev.id)
-			// The tool's final event for a capture Node already removed: its files and bytes go now.
-			if (z && z.proc === slot.proc) {
-				this.reap(ev.id)
-				return
-			}
 			// A late answer for a capture Node already ended (timeout, flush, discard) is expected;
 			// a late file is never kept (review m2).
 			if (this.forgotten.has(ev.id)) {
@@ -999,7 +1096,11 @@ class Service implements IqCaptureService {
 		void Promise.resolve().then(() => {
 			const store = this.store
 			if (!store || this.st !== "on") return
-			const v = openVerifiedCaptureSync(this.root, file, bytes, this.uid)
+			if (!this.dirOk()) {
+				store.discard(captureId, "invalid")
+				return
+			}
+			const v = this.openProven(captureId, file, bytes)
 			if (!v) {
 				store.discard(captureId, "invalid")
 				return
@@ -1078,21 +1179,18 @@ class Service implements IqCaptureService {
 		)
 	}
 
-	/** Zombies of a tool still running for its source (they hold its open-capture slots). */
+	/** Captures Node removed that some process still writes (each holds a concurrency slot). */
 	private openInTool(): number {
-		let n = 0
-		for (const z of this.zombies.values())
-			for (const slot of this.slots.values()) if (slot.proc === z.proc) n++
-		return n
+		return this.zombies.size
 	}
 
 	private onRemove(
 		entry: IqCaptureEntry,
 		_reason: IqCaptureDiscardReason | "failed",
 	): void {
-		let writer: IqToolProcess | null = null
-		for (const slot of this.slots.values())
-			if (slot.ids.delete(entry.captureId) && slot.proc) writer = slot.proc
+		for (const slot of this.slots.values()) slot.ids.delete(entry.captureId)
+		const writer = this.writers.get(entry.captureId) ?? null
+		this.writers.delete(entry.captureId)
 		this.forget(entry.captureId)
 		this.clearCaptureTimer(entry.captureId)
 		if (!this.dir || !isCaptureId(entry.captureId)) {
@@ -1102,6 +1200,7 @@ class Service implements IqCaptureService {
 		if (entry.state === "capturing" && writer) {
 			// Review m2/m4: the tool still writes it. Ended now; files and bytes go at its final event.
 			this.zombies.set(entry.captureId, { bytes: entry.bytes, proc: writer })
+			this.writers.set(entry.captureId, writer)
 			if (writer.ready) writer.send({ type: "end", id: entry.captureId })
 			return
 		}
@@ -1115,23 +1214,37 @@ class Service implements IqCaptureService {
 		this.unlinkFiles(captureId, true, z.bytes)
 	}
 
-	/** Unlinks `<id>.cf32` (and `.tmp`), then releases `bytes` against the cap. */
+	/**
+	 * Unlinks `<id>.cf32` (and `.tmp`) after re-proving the directory and each file (review
+	 * BLOCKING; synchronous, so nothing interleaves), then releases `bytes` against the cap. A
+	 * failed proof unlinks nothing and turns capture off.
+	 */
 	private unlinkFiles(captureId: string, tmp: boolean, bytes = 0): void {
 		const dir = this.dir
-		if (!dir || !isCaptureId(captureId)) {
-			if (bytes > 0) this.store?.released(bytes)
-			return
+		const identity = this.dirId
+		const ino = this.fileIno.get(captureId)
+		this.fileIno.delete(captureId)
+		if (dir && identity && isCaptureId(captureId)) {
+			const names = [
+				`${captureId}.cf32`,
+				...(tmp ? [`${captureId}.cf32.tmp`] : []),
+			]
+			for (const name of names) {
+				const r = unlinkProvenSync(
+					this.root,
+					dir,
+					identity,
+					name,
+					this.uid,
+					name.endsWith(".cf32") ? ino : undefined,
+				)
+				if (r === "refused") {
+					this.dirRefused()
+					break
+				}
+			}
 		}
-		const base = path.join(dir, `${captureId}.cf32`)
-		const p = Promise.allSettled([
-			fsp.unlink(base),
-			...(tmp ? [fsp.unlink(`${base}.tmp`)] : []),
-		])
-			.then(() => {
-				if (bytes > 0) this.store?.released(bytes)
-			})
-			.finally(() => this.unlinks.delete(p))
-		this.unlinks.add(p)
+		if (bytes > 0) this.store?.released(bytes)
 	}
 }
 

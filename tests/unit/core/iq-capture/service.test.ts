@@ -862,3 +862,89 @@ describe("IqCaptureService Main review 1 (m1, m2, m4, M2)", () => {
 		await s.svc.stop()
 	})
 })
+
+describe("IqCaptureService Astra review (BLOCKING, MAJOR d)", () => {
+	it("BLOCKING: discard refuses a swapped capture directory (nothing outside is unlinked, capture off)", async () => {
+		const s = await setup()
+		await running(s)
+		const got = s.svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		await flush(10)
+		const dir = path.join(s.root, "iq-captures")
+		const outside = path.join(base, `outside-${n++}`)
+		await fsp.mkdir(outside, { mode: 0o700 })
+		const victim = path.join(outside, `${id}.cf32`)
+		await fsp.writeFile(victim, "must stay", { mode: 0o600 })
+		await fsp.rename(dir, `${dir}.old`)
+		await fsp.symlink(outside, dir)
+		s.svc.discard(id, "result")
+		await flush(10)
+		const preserved = fs.existsSync(victim)
+		const state = s.svc.state()
+		const refusals = s.svc.counters().dirRefusals
+		await s.svc.stop()
+		expect(preserved).toBe(true)
+		expect(state).toBe("unavailable")
+		expect(refusals).toBeGreaterThanOrEqual(1)
+	})
+
+	it("BLOCKING: a directory replaced by another real directory (other inode) is refused too", async () => {
+		const s = await setup()
+		await running(s)
+		const got = s.svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		await flush(10)
+		const dir = path.join(s.root, "iq-captures")
+		await fsp.rename(dir, `${dir}.old`)
+		await fsp.mkdir(dir, { mode: 0o700 })
+		const victim = path.join(dir, `${id}.cf32`)
+		await fsp.writeFile(victim, "must stay", { mode: 0o600 })
+		s.svc.discard(id, "result")
+		await flush(10)
+		const preserved = fs.existsSync(victim)
+		await s.svc.stop()
+		expect(preserved).toBe(true)
+	})
+
+	it("MAJOR d: detach holds bytes until the old writer exits and removes its late publication", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		child.autoExit = false
+		const got = s.svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		s.svc.detachSource("src")
+		await flush(10)
+		const heldBeforeExit = s.svc.heldBytes()
+		const file = path.join(s.root, "iq-captures", `${id}.cf32`)
+		fs.writeFileSync(file, Buffer.alloc(4800 * 8), { mode: 0o600 })
+		child.event({ type: "captured", id, samples: 4800, gapSamples: 0 })
+		child.exit(0)
+		await flush(10)
+		const leftAfterExit = fs.existsSync(file)
+		const heldAfterExit = s.svc.heldBytes()
+		await s.svc.stop()
+		expect({ heldBeforeExit, leftAfterExit, heldAfterExit }).toEqual({
+			heldBeforeExit: 4000 * 48 * 8,
+			leftAfterExit: false,
+			heldAfterExit: 0,
+		})
+	})
+
+	it("MAJOR d: replacing a writer (flush) does not free its still-open concurrency slots", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		child.autoExit = false
+		s.svc.capture(req())
+		s.svc.capture(req())
+		s.svc.flush("src", { epoch: 4 })
+		await flush(10)
+		s.engine.push(1000)
+		const third = s.svc.capture(req({ epoch: 4 }))
+		child.exit(0)
+		await flush(10)
+		const fourth = s.svc.capture(req({ epoch: 4 }))
+		await s.svc.stop()
+		expect(third).toEqual({ refused: "busy" })
+		expect(fourth).toHaveProperty("captureId")
+	})
+})

@@ -181,3 +181,75 @@ export async function verifyCaptureFile(
 	}
 	return true
 }
+
+/** The capture directory's identity, recorded once proven (review BLOCKING). */
+export interface DirIdentity {
+	dev: number
+	ino: number
+}
+
+/** Lstat chain from `root` to `dir`: a real directory (no link anywhere); its dev/ino, else null. */
+export function captureDirIdentitySync(
+	root: string,
+	dir: string,
+): DirIdentity | null {
+	const st = lstatChainSync(root, dir)
+	if (!st || !st.isDirectory()) return null
+	return { dev: st.dev, ino: st.ino }
+}
+
+/** The directory is still the one recorded: chain re-proven, no link, same dev/ino. */
+export function dirStillProvenSync(
+	root: string,
+	dir: string,
+	identity: DirIdentity,
+): boolean {
+	const now = captureDirIdentitySync(root, dir)
+	return now !== null && now.dev === identity.dev && now.ino === identity.ino
+}
+
+export type GuardedUnlink = "removed" | "missing" | "refused"
+
+/**
+ * Unlinks `<dir>/<name>` only after re-proving the directory (chain, no link, recorded dev/ino) and
+ * the file (a regular file of ours, on the directory's device, not a link; `expectIno` when the file
+ * identity was recorded at its proof). Sync: nothing interleaves between the proofs and the unlink.
+ * "refused": the directory or file is not what it must be (the caller turns capture off).
+ */
+export function unlinkProvenSync(
+	root: string,
+	dir: string,
+	identity: DirIdentity,
+	name: string,
+	uid: number | null,
+	expectIno?: number,
+): GuardedUnlink {
+	if (name.includes("/") || name.includes(path.sep) || name.startsWith("."))
+		return "refused"
+	if (!dirStillProvenSync(root, dir, identity)) return "refused"
+	const file = path.join(dir, name)
+	let st: Stats
+	try {
+		st = fs.lstatSync(file)
+	} catch (err: unknown) {
+		return (err as NodeJS.ErrnoException).code === "ENOENT"
+			? "missing"
+			: "refused"
+	}
+	if (
+		st.isSymbolicLink() ||
+		!st.isFile() ||
+		!isOurs(st, uid) ||
+		st.dev !== identity.dev ||
+		(expectIno !== undefined && st.ino !== expectIno)
+	)
+		return "refused"
+	try {
+		fs.unlinkSync(file)
+		return "removed"
+	} catch (err: unknown) {
+		return (err as NodeJS.ErrnoException).code === "ENOENT"
+			? "missing"
+			: "refused"
+	}
+}

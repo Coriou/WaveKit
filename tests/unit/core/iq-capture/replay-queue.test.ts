@@ -658,14 +658,14 @@ describe("IqReplayQueue leaves identify's captures alone (Main review M2)", () =
 		return { q, port, p, results }
 	}
 
-	it("a capture whose observation has an active identify target is skipped unclaimed", async () => {
+	it("a capture whose observation has an active identify target is parked unclaimed", async () => {
 		const s = withSkip(v => v.captureId === id(1))
 		s.port.add(id(1))
 		s.port.add(id(2))
 		await flush()
 		expect(s.port.holderOf(id(1))).toBeNull()
 		expect(s.results.map(r => r.captureId)).toEqual([id(2)])
-		expect(s.q.counters().skipped).toBe(1)
+		expect(s.q.counters().parked).toBe(1)
 	})
 
 	it("a throwing predicate fails closed: the capture is skipped", async () => {
@@ -700,5 +700,94 @@ describe("IqReplayQueue leaves identify's captures alone (Main review M2)", () =
 		await flush()
 		expect(s.p.requests).toEqual([])
 		expect(s.port.holderOf(id(3))).toBe("identify-job")
+	})
+})
+
+describe("IqReplayQueue keeps skipped captures queued (Astra MAJOR c)", () => {
+	function parked() {
+		const port = new FakePort()
+		const p = makeProbes(() => miss)
+		const timers = new Timers()
+		const state = { activeIdentify: true }
+		const results: IqReplayResult[] = []
+		const q = createIqReplayQueue({
+			port,
+			probes: p.probes,
+			planner: () => [trial("dmr")],
+			sink: r => results.push(r),
+			planInput: capture => ({
+				capture,
+				track: null,
+				knownProtocol: null,
+				priors: {},
+				narrowRaster: false,
+			}),
+			skip: () => state.activeIdentify,
+			logger: spyLogger().logger,
+			timers,
+		})
+		q.start()
+		return { port, p, timers, state, results, q }
+	}
+
+	it("a skipped unclaimed capture rejoins the queue on the retry timer once identify ended", async () => {
+		const s = parked()
+		s.port.add(id(100))
+		await flush()
+		expect(s.p.requests).toHaveLength(0)
+		expect(s.q.size()).toBe(1)
+		s.state.activeIdentify = false
+		s.timers.fireAll()
+		await flush()
+		const got = {
+			requests: s.p.requests.length,
+			held: s.port.holderOf(id(100)),
+			size: s.q.size(),
+			results: s.results.length,
+		}
+		await s.q.stop()
+		expect(got).toEqual({ requests: 1, held: undefined, size: 0, results: 1 })
+	})
+
+	it("recheck() (identify job ended) replays it at once; while still skipped it waits without spinning", async () => {
+		const s = parked()
+		s.port.add(id(101))
+		await flush()
+		// One retry timer at most, re-armed only when it fires.
+		expect(s.timers.q.size).toBe(1)
+		s.timers.fireAll()
+		await flush()
+		expect(s.timers.q.size).toBe(1)
+		expect(s.p.requests).toHaveLength(0)
+		s.state.activeIdentify = false
+		s.q.recheck()
+		await flush()
+		expect(s.results.map(r => r.captureId)).toEqual([id(101)])
+		expect(s.timers.q.size).toBe(0)
+		await s.q.stop()
+	})
+
+	it("a parked capture identify claimed, or one that is gone, leaves the queue", async () => {
+		const s = parked()
+		s.port.add(id(102))
+		s.port.add(id(103))
+		await flush()
+		s.port.claim(id(102), "j_ident")
+		s.port.discard(id(103), "orphan-ttl")
+		s.state.activeIdentify = false
+		s.q.recheck()
+		await flush()
+		expect(s.p.requests).toHaveLength(0)
+		expect(s.q.size()).toBe(0)
+		await s.q.stop()
+	})
+
+	it("stop discards parked captures without a result", async () => {
+		const s = parked()
+		s.port.add(id(104))
+		await flush()
+		await s.q.stop()
+		expect(s.port.discarded).toEqual([[id(104), "shutdown"]])
+		expect(s.timers.q.size).toBe(0)
 	})
 })

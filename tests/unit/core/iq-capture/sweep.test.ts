@@ -5,6 +5,7 @@ import path from "node:path"
 import fc from "fast-check"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
+	captureDirIdentitySync,
 	ensureCaptureDir,
 	openVerifiedCaptureSync,
 } from "../../../../src/core/iq-capture/fs-guard.js"
@@ -216,5 +217,38 @@ describe("Property 13: sweep touches only provable captures", () => {
 			left: 1,
 			failed: 0,
 		})
+	})
+})
+
+describe("sweep re-proves the directory before each unlink (review BLOCKING)", () => {
+	it("a directory swapped for a symlink after the listing deletes nothing outside", async () => {
+		const root = await freshRoot()
+		const got = await ensureCaptureDir(root, UID)
+		const dir = "dir" in got ? got.dir : ""
+		await fsp.writeFile(path.join(dir, `${ID}.cf32`), "x", { mode: 0o600 })
+		const outside = path.join(base, `outside-${n++}`)
+		await fsp.mkdir(outside, { mode: 0o700 })
+		const victim = path.join(outside, `${ID}.cf32`)
+		await fsp.writeFile(victim, "must stay", { mode: 0o600 })
+		const identity = captureDirIdentitySync(root, dir)
+		expect(identity).not.toBeNull()
+		const io: SweepFs = {
+			readdir: async d => {
+				const names = await fsp.readdir(d)
+				await fsp.rename(dir, `${dir}.old`)
+				await fsp.symlink(outside, dir)
+				return names
+			},
+			lstat: f => fsp.lstat(f),
+			unlink: f => fsp.unlink(f),
+		}
+		const res = await sweepCaptureDir(dir, {
+			uid: UID,
+			fs: io,
+			guard: { root, identity: identity! },
+		})
+		expect(fs.existsSync(victim)).toBe(true)
+		expect(res.removed).toBe(0)
+		expect(res.refused).toBe(true)
 	})
 })

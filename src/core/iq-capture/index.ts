@@ -27,3 +27,4 @@ export {
 	type IqReplayQueuePort,
 } from "./replay-queue.js"
 export { sweepCaptureDir, type SweepResult } from "./sweep.js"
+export { replayMissEligible } from "./replay-miss.js"

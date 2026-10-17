@@ -4,10 +4,10 @@
  *
  * FIFO of finished captures. For the head entry the queue takes the capture over (`claim` as
  * IQ_REPLAY_QUEUE_HOLDER; a capture already claimed or reserved by an identify job, one whose
- * observation an identify target works on (`skip`), discarded, expired or confirmed live is
- * skipped), asks the injected planner for its trials (known protocol first, at most
- * IQ_REPLAY_MAX_TRIALS), and runs them one replay probe at a time through the injected
- * `probes`. The first accepted decode ends the trials. Exactly one `sink(result)` per capture that
+ * observation an identify target works on (`skip`: parked, kept queued and re-checked),
+ * discarded, expired or confirmed live is skipped), asks the injected planner for its trials
+ * (known protocol first, at most IQ_REPLAY_MAX_TRIALS), and runs them one replay probe at a time
+ * through the injected `probes`. The first accepted decode ends the trials. Exactly one `sink(result)` per capture that
  * reached its trials, then `settle` discards it. A probe request deferred for a transient reason
  * (IQ_REPLAY_RETRIABLE_DEFERRALS) waits in place: it is retried on the pool's next slot release or
  * after 1 s, never in a loop, and for at most IQ_REPLAY_DEFER_MAX_MS per capture, after which its
@@ -129,6 +129,8 @@ export interface IqReplayQueueCounters {
 	deferrals: number
 	/** Captures whose trials gave up on transient deferrals after IQ_REPLAY_DEFER_MAX_MS. */
 	deferGiveUps: number
+	/** Times a capture was parked because an identify job works on its observation. */
+	parked: number
 	sinkErrors: number
 	plannerErrors: number
 }
@@ -140,6 +142,11 @@ export interface IqReplayQueue {
 	stop(): Promise<void>
 	/** Adds a finished capture (also done by the `onFinished` subscription). */
 	enqueue(view: IqCaptureView): void
+	/**
+	 * Re-checks the parked captures (`skip` was true) now; the scanner calls it when an identify job
+	 * ends. Parked captures are also re-checked every IQ_REPLAY_DEFER_RETRY_MS (one timer at most).
+	 */
+	recheck(): void
 	size(): number
 	counters(): IqReplayQueueCounters
 	/** Resolves when the queue is empty and idle (tests, bench). */
@@ -184,6 +191,9 @@ class Queue implements IqReplayQueue {
 	private readonly timers: IqReplayQueueTimers
 	private readonly now: () => number
 	private readonly fifo: string[] = []
+	/** Review MAJOR c: captures left for an identify job; they stay queued until it lets go. */
+	private readonly parked: string[] = []
+	private parkTimer: unknown = null
 	private readonly known = new Set<string>()
 	private current: Current | null = null
 	private stopped = false
@@ -198,6 +208,7 @@ class Queue implements IqReplayQueue {
 		trials: 0,
 		deferrals: 0,
 		deferGiveUps: 0,
+		parked: 0,
 		sinkErrors: 0,
 		plannerErrors: 0,
 	}
@@ -223,7 +234,26 @@ class Queue implements IqReplayQueue {
 	}
 
 	size(): number {
-		return this.fifo.length + (this.current ? 1 : 0)
+		return this.fifo.length + this.parked.length + (this.current ? 1 : 0)
+	}
+
+	recheck(): void {
+		if (this.stopped) return
+		if (this.parkTimer !== null) this.timers.clearTimeout(this.parkTimer)
+		this.parkTimer = null
+		// Parked captures go back to the head, in their order: they finished before the others.
+		this.fifo.unshift(...this.parked.splice(0))
+		this.pump()
+		this.armPark()
+	}
+
+	private armPark(): void {
+		if (this.stopped || this.parked.length === 0 || this.parkTimer !== null)
+			return
+		this.parkTimer = this.timers.setTimeout(() => {
+			this.parkTimer = null
+			this.recheck()
+		}, IQ_REPLAY_DEFER_RETRY_MS)
 	}
 
 	counters(): IqReplayQueueCounters {
@@ -240,6 +270,9 @@ class Queue implements IqReplayQueue {
 		this.stopped = true
 		this.off?.()
 		this.off = null
+		if (this.parkTimer !== null) this.timers.clearTimeout(this.parkTimer)
+		this.parkTimer = null
+		this.fifo.push(...this.parked.splice(0))
 		const cur = this.current
 		this.current = null
 		if (cur) {
@@ -272,17 +305,24 @@ class Queue implements IqReplayQueue {
 		while (!this.stopped && !this.current) {
 			const id = this.fifo.shift()
 			if (id === undefined) {
+				this.armPark()
 				this.notifyIdle()
 				return
 			}
 			this.known.delete(id)
 			const view = this.d.port.view(id)
-			if (
-				!view ||
-				this.d.port.holderOf(id) !== null ||
-				this.isSkipped(view) ||
-				!this.d.port.claim(id, IQ_REPLAY_QUEUE_HOLDER)
-			) {
+			if (!view || this.d.port.holderOf(id) !== null) {
+				this.c.skipped++
+				continue
+			}
+			if (this.isSkipped(view)) {
+				// Left for the identify job; re-checked on recheck() or the retry timer.
+				this.known.add(id)
+				this.parked.push(id)
+				this.c.parked++
+				continue
+			}
+			if (!this.d.port.claim(id, IQ_REPLAY_QUEUE_HOLDER)) {
 				this.c.skipped++
 				continue
 			}
