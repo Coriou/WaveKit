@@ -175,18 +175,22 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   8082 digital, clients dropped on rate change (ROADMAP §5b).
 - [x] `live-audio:level` on WS at 10 Hz (configurable 10–20) while running: `channelPowerDbfs`,
   `noiseFloorDbfs`, `squelchOpen`, `thresholdDbfs` (`LiveAudioLevel`).
-- [ ] `squelchMode: noise`. Partly: `squelchMode: manual | auto` with `autoMarginDb`, and
-  squelch changes apply without a pipeline restart (`NODE_ONLY_KEYS` in `live-demodulator.ts`).
-- [ ] Configurable AGC (off / slow / fast, and any AGC on FM; today `csdr agc -p fast` is
-  hard-coded), real noise reduction, noise blanker, notch, CW BFO, real DSB.
+- [x] `squelchMode: noise` (WG7, NFM and WFM), with `manual | auto` and `autoMarginDb`.
+- [x] Configurable AGC (`agc: off | slow | fast`, WG4). Still the gap: real noise reduction
+  (Listen's switch sends `noiseReduction: voice`), noise blanker, notch, CW BFO, real DSB.
+- [ ] Decoded voice routed per channel: Listen › What you hear plays a dsd-fme decoder's stream
+  (`GET /api/digital-voice/status`, `decoders[].httpUrl`) when one of its `targetFrequenciesHz`
+  sits in the tuned channel. The core has no dsd-fme on the live channel itself, so tuning to a
+  digital channel no decoder watches plays analog only.
 
 **Analog transmissions** (one package: a squelch-delimited event carries all of these)
 - [x] Analog transmission events (start, end, duration, frequency) from squelch:
   `live-audio:transmission` and the `analog-transmission` Activity kind (WG1 §3–4).
 - [ ] Analog vs digital detected per transmission on shared channels (ROADMAP §5b), so
   "What you hear: Auto" switches per transmission and the event carries the mode.
-- [ ] DCS detection (code and polarity at 134.4 bit/s), tone on live status while a
-  transmission is open, and tone squelch. Partly: CTCSS (50 standard tones) on each closed
+- [ ] Tone on live status while a transmission is open (Listen offers the tone of the last
+  closed transmission). Done: tone squelch (`toneSquelch`, WG7, NFM; Listen offers it), DCS on
+  closed transmissions (WG6). Partly: CTCSS (50 standard tones) on each closed
   transmission as `tone.ctcssHz`, stored and searchable as text (WG2 §7); saved frequencies
   store a tone (ctcss, dcs code + polarity); scanner discoveries carry `ctcssHz` (S2, disabled).
 - [x] DTMF on the tuned analog channel: digits on each closed transmission as `tone.dtmf` (up to
@@ -303,7 +307,8 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   returns it to normal retention (discovery `keep` protects an emitter's evidence, not one
   recording).
 - [ ] Manual recordings (Listen › Record) with name, note and a non-destructive trim (in/out
-  points stored on the item, applied on play and download).
+  points stored on the item, applied on play and download). Today Listen › Record audio keeps
+  what the browser plays and saves a WAV in its downloads; nothing reaches the Recordings drawer.
 - [ ] Operator IQ capture of the viewed span (8-bit IQ, ~4.8 MB/s at 2.4 MS/s): start and stop
   with a maximum length, live elapsed time and size, what was decoded during it; playback as a
   source with seek and "back to live" (spectrum, audio and every decoder run on it); export
