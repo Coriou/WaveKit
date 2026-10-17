@@ -3,7 +3,9 @@ import { segment } from "./emissions/segmenter.js"
 import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
 import { Tracker } from "./emissions/tracker.js"
 import type { TrackerBlock } from "./emissions/tracker.js"
-import { blockTrackOf } from "./frame-tracks.js"
+import { blockTrackOf, isFrameTrackId } from "./frame-tracks.js"
+import { createComponentLogger, createLogger } from "../../utils/logger.js"
+import type { Logger } from "../../utils/logger.js"
 import { flagIqImages } from "./emissions/iq-image.js"
 import type {
 	BlockSummary,
@@ -238,12 +240,19 @@ export class SpectrumPipeline {
 	/** IQ-image tracks of the last block, for artefactMasks() and the block summary's `iqImage` (emitWithImages). */
 	private imageTracks: { centreHz: number; obwHz: number }[] = []
 	private out: PipelineEvent[] = []
+	private logger: Logger | null
+	private warnedTrackId = false
 
 	constructor(
 		private readonly cfg: PipelineConfig,
 		/** `provisionalWindowMs` (default 30 s) is a test knob: P24 runs the comb property at 3 s. */
-		deps: { now?: () => number; provisionalWindowMs?: number } = {},
+		deps: {
+			now?: () => number
+			provisionalWindowMs?: number
+			logger?: Logger
+		} = {},
 	) {
+		this.logger = deps.logger ?? null
 		const now = deps.now ?? Date.now
 		this.n = cfg.fftSize
 		this.fs = cfg.sampleRateHz
@@ -1565,8 +1574,12 @@ export class SpectrumPipeline {
 			floorDbfs,
 			thresholdDb: k,
 			// WG11 req 5.1: the tracker's own association of each segment in this block (no geometry).
-			tracks: segs.map(s =>
-				blockTrackOf(
+			tracks: segs.map(s => {
+				const assoc = this.tracker.associationOf(s)
+				if (assoc && !this.warnedTrackId && !isFrameTrackId(assoc.trackId))
+					this.warnTrackIdBound()
+				// Surfaced rule uses the spectrum detection config's minSurfaceBlocks (the scanner may use runtime settings).
+				return blockTrackOf(
 					this.rfLow(ep, s.startBin),
 					this.rfLow(ep, s.endBin),
 					{
@@ -1578,15 +1591,27 @@ export class SpectrumPipeline {
 						),
 						edge: s.flags.edge,
 					},
-					this.tracker.associationOf(s),
+					assoc,
 					this.fs,
 					this.cfg.minSurfaceBlocks,
-				),
-			),
+				)
+			}),
 			masks: { dcHz: ep.centreHz, dcGuardHz: this.dcGuardHz, spurRanges },
 			floorOccupied,
 			overload,
 		}
+	}
+
+	/** One fixed-text warning per pipeline; never echoes the id or the sourceId. */
+	private warnTrackIdBound(): void {
+		this.warnedTrackId = true
+		this.logger ??= createComponentLogger(
+			createLogger({ level: "warn" }),
+			"SpectrumPipeline",
+		)
+		this.logger.warn(
+			"track ids exceed the frame track id bound; frame track fields omitted (shorten the source id)",
+		)
 	}
 
 	private maybeStats(): void {

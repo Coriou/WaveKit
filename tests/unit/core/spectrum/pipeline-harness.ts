@@ -1,4 +1,5 @@
 import { SpectrumPipeline } from "../../../../src/core/spectrum/pipeline.js"
+import type { Logger } from "../../../../src/utils/logger.js"
 import type {
 	FreqRange,
 	PendingEpoch,
@@ -61,7 +62,7 @@ export class Harness {
 
 	constructor(
 		over: Partial<PipelineConfig> = {},
-		deps: { provisionalWindowMs?: number } = {},
+		deps: { provisionalWindowMs?: number; logger?: Logger } = {},
 	) {
 		this.config = pipelineConfig(over)
 		this.pipeline = new SpectrumPipeline(this.config, { now: () => 0, ...deps })
