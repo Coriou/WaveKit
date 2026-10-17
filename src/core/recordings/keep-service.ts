@@ -14,8 +14,6 @@
  * path or file name. Imports stay minimal (contract, store, inventory types) so the deleters can
  * import the port without pulling runtime modules into the startup bundle.
  */
-import * as nodeFs from "node:fs/promises"
-import * as nodePath from "node:path"
 import {
 	RECORDING_INVENTORY_ID,
 	RECORDING_KEEPS_MAX_BYTES,
@@ -26,7 +24,6 @@ import type {
 	RecordingKeepResult,
 } from "@wavekit/api-types"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
-import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
 import {
@@ -40,7 +37,10 @@ import type {
 	RecordingKeepEntry,
 	RecordingKeepKey,
 	RecordingKeepService,
+	RecordingKeepTotals,
+	RecordingKeepTotalsSource,
 	RecordingKeepsFile,
+	ScannerRecordingDeleter,
 } from "./contract.js"
 import type { RecordingInventory } from "./inventory.js"
 import {
@@ -49,57 +49,31 @@ import {
 	openRecordingKeepStore,
 } from "./keep-store.js"
 import type { RecordingKeepStore, RecordingKeepsFs } from "./keep-store.js"
+import {
+	RECORDING_BUSY_TEXT,
+	RECORDING_DELETE_FAILED_TEXT,
+	RECORDING_DELETE_UNSUPPORTED_TEXT,
+	nodeRecordingDeleteFs,
+	verifiedUnlink,
+} from "./verified-unlink.js"
+import type { RecordingDeleteFs } from "./verified-unlink.js"
 
 export const RECORDING_NOT_FOUND_TEXT = "Recording not found"
 export const RECORDING_KEPT_TEXT = "Recording is kept; unkeep it first"
-export const RECORDING_BUSY_TEXT =
-	"Another operation on this recording is in progress"
-export const RECORDING_DELETE_UNSUPPORTED_TEXT =
-	"This recording cannot be deleted"
-export const RECORDING_DELETE_FAILED_TEXT = "Recording could not be deleted"
-
-/** The calls a delete makes on the opened path (injectable for tests). */
-export interface RecordingDeleteFs {
-	lstat(p: string): Promise<{
-		dev: number
-		ino: number
-		mode: number
-		isFile(): boolean
-		isDirectory(): boolean
-		isSymbolicLink(): boolean
-	}>
-	unlink(p: string): Promise<void>
-	/** Moves the recording into the private delete directory (same filesystem, atomic). */
-	rename(from: string, to: string): Promise<void>
-	/** Restores a moved regular file without replacing what now holds the name (EEXIST then). */
-	link(existing: string, newPath: string): Promise<void>
-	/** Creates the private delete directory (mode 0700) next to the recording. */
-	mkdtemp(prefix: string): Promise<string>
-	/** Removes the private delete directory; fails when it is not empty (left in place then). */
-	rmdir(p: string): Promise<void>
-	readlink(p: string): Promise<string>
-	/** Restores a moved symlink as a symlink (EEXIST when the name is taken; never clobbers). */
-	symlink(target: string, p: string): Promise<void>
+export {
+	RECORDING_BUSY_TEXT,
+	RECORDING_DELETE_FAILED_TEXT,
+	RECORDING_DELETE_UNSUPPORTED_TEXT,
 }
 
-const nodeDeleteFs: RecordingDeleteFs = {
-	lstat: p => nodeFs.lstat(p),
-	unlink: p => nodeFs.unlink(p),
-	rename: (a, b) => nodeFs.rename(a, b),
-	link: (a, b) => nodeFs.link(a, b),
-	mkdtemp: prefix => nodeFs.mkdtemp(prefix),
-	rmdir: p => nodeFs.rmdir(p),
-	readlink: p => nodeFs.readlink(p),
-	symlink: (target, p) => nodeFs.symlink(target, p),
-}
+export type { RecordingDeleteFs } from "./verified-unlink.js"
+export { RECORDING_DELETE_PRIVATE_PREFIX } from "./verified-unlink.js"
 
 /**
- * The private directory a delete moves the recording into before its final check: created by
- * `mkdtemp` (mode 0700) in the recording's directory, a directory and not a dsd-fme or scanner
- * name, so neither the pruner nor the inventory lists it.
+ * WG9's fixed name of the moved recording inside the private directory. WG10 deletes no longer
+ * use it (the moved entry keeps its basename, then becomes `verified`); a WG9-format leftover
+ * carries it and the startup sweep leaves it in place.
  */
-export const RECORDING_DELETE_PRIVATE_PREFIX = ".wavekit-delete-"
-/** The fixed name of the moved recording inside the private directory. */
 export const RECORDING_DELETE_INNER_NAME = "recording"
 
 export interface RecordingKeepServiceOptions {
@@ -111,10 +85,20 @@ export interface RecordingKeepServiceOptions {
 	storeFs?: RecordingKeepsFs
 	/** Test seam: the delete's `lstat` and `unlink`. */
 	deleteFs?: RecordingDeleteFs
+	/**
+	 * WG10 req 1.1: the scanner side of a `scan:` delete. Absent: a `scan:` delete answers 409
+	 * RECORDING_DELETE_UNSUPPORTED (WG9 behaviour).
+	 */
+	scannerDeleter?: ScannerRecordingDeleter
 }
 
+/** WG10 req 1.8: the service also reports the keep store's totals. */
+export type OpenedRecordingKeepService = RecordingKeepService &
+	RecordingKeepTotalsSource
+
 /** The service plus a test-only view of its bounded maps. */
-export interface RecordingKeepServiceInternal extends RecordingKeepService {
+export interface RecordingKeepServiceInternal
+	extends RecordingKeepService, RecordingKeepTotalsSource {
 	/** Keys with a live mutex entry (0 when idle). */
 	mutexCount(): number
 }
@@ -137,12 +121,6 @@ function limit(): RecordingKeepError {
 	)
 }
 
-function errCode(err: unknown): string | undefined {
-	if (typeof err !== "object" || err === null) return undefined
-	const code = (err as { code?: unknown }).code
-	return typeof code === "string" ? code : undefined
-}
-
 /** The discovery id of a scanner keep key, or null for a dsd key. */
 function discoveryOf(key: RecordingKeepKey): string | null {
 	const m = RECORDING_KEEP_KEY.exec(key)
@@ -155,10 +133,11 @@ function discoveryOf(key: RecordingKeepKey): string | null {
  */
 export async function openRecordingKeepService(
 	options: RecordingKeepServiceOptions,
-): Promise<RecordingKeepService> {
+): Promise<OpenedRecordingKeepService> {
 	const log = createComponentLogger(options.logger, "RecordingKeeps")
 	const inventory = options.inventory
-	const deleteFs = options.deleteFs ?? nodeDeleteFs
+	const deleteFs = options.deleteFs ?? nodeRecordingDeleteFs
+	const scannerDeleter = options.scannerDeleter
 	const nowFn = options.now ?? Date.now
 	let store: RecordingKeepStore | null = null
 	try {
@@ -201,6 +180,15 @@ export async function openRecordingKeepService(
 	}
 	if (store && ready()) for (const e of store.snapshot().keeps) protect(e.key)
 
+	/** WG10 req 1.8: count and byte sum of the committed keeps (recomputed per write, O(1) read). */
+	let totals: RecordingKeepTotals = { recordings: 0, bytes: 0 }
+	function setTotals(file: RecordingKeepsFile): void {
+		let bytes = 0
+		for (const e of file.keeps) bytes += e.bytes
+		totals = { recordings: file.keeps.length, bytes }
+	}
+	if (store && ready()) setTotals(store.snapshot())
+
 	/** Runs `fn` alone for `key`; the map entry is removed once nothing waits on it. */
 	async function withMutex<T>(
 		key: RecordingKeepKey,
@@ -237,6 +225,7 @@ export async function openRecordingKeepService(
 			if (!s || !ready()) throw unavailable()
 			const next = change(s.snapshot())
 			await s.write(next)
+			setTotals(next)
 		}
 		const result = commitChain.then(run)
 		commitChain = result.catch(() => undefined)
@@ -378,170 +367,22 @@ export async function openRecordingKeepService(
 		})
 	}
 
-	type FileId = Awaited<ReturnType<RecordingDeleteFs["lstat"]>>
-	const sameFile = (a: FileId, b: { dev: number; ino: number }): boolean =>
-		!a.isSymbolicLink() && a.isFile() && a.dev === b.dev && a.ino === b.ino
-
-	/**
-	 * Unlinks exactly the opened file. The path is moved (atomic rename) into a fresh private
-	 * directory (`mkdtemp`, mode 0700, same directory so same filesystem) under a fixed inner
-	 * name; the inner path is checked against the handle (device, inode, a regular file) and
-	 * unlinked only on a match, then the directory is removed. A file swapped in before the
-	 * rename is moved, found foreign and put back by entry type (a regular file with `link`, a
-	 * symlink with `readlink` + `symlink`; both fail EEXIST and never replace what now holds the
-	 * name); nothing is deleted and the answer is 404. If it cannot be put back it is left in the
-	 * private directory (never deleted) and a fixed-text warning is logged.
-	 * Residual: a same-uid process writing into this fresh 0700 directory between the inner
-	 * lstat and unlink could get its entry unlinked; such a process could unlink the recording itself.
-	 */
+	/** WG9 delete through the shared WG10 verified unlink; kept or busy answers 409. */
 	async function deleteVerified(
 		key: RecordingKeepKey,
 		filePath: string,
 		handleStat: { dev: number; ino: number },
 	): Promise<void> {
-		let pre: FileId
-		try {
-			pre = await deleteFs.lstat(filePath)
-		} catch (error: unknown) {
-			if (errCode(error) === "ENOENT" || errCode(error) === "ENOTDIR")
-				throw notFound()
-			throw error
-		}
-		if (!sameFile(pre, handleStat)) {
-			log.warn({}, "Recording delete refused: the file changed")
-			throw notFound()
-		}
-		// Another uid able to write the recording directory (group or other write without the
-		// sticky bit) could rebind the private directory's name: refuse the whole delete.
-		const parent = await deleteFs.lstat(nodePath.dirname(filePath))
-		if ((parent.mode & 0o022) !== 0 && (parent.mode & 0o1000) === 0) {
-			log.warn(
-				{},
-				"Recording delete refused: the recording directory is writable by other users",
-			)
-			throw new WaveKitError(
-				RECORDING_DELETE_FAILED_TEXT,
-				"RECORDING_DELETE_FAILED",
-			)
-		}
-		// A failure here answers 500 RECORDING_DELETE_FAILED with nothing renamed.
-		const privateDir = await deleteFs.mkdtemp(
-			nodePath.join(
-				nodePath.dirname(filePath),
-				RECORDING_DELETE_PRIVATE_PREFIX,
-			),
-		)
-		const innerPath = nodePath.join(privateDir, RECORDING_DELETE_INNER_NAME)
-		const removeDir = (): Promise<void> =>
-			deleteFs.rmdir(privateDir).catch(() => undefined)
-		let dirId: FileId
-		try {
-			dirId = await deleteFs.lstat(privateDir)
-		} catch (error: unknown) {
-			await removeDir()
-			throw error
-		}
-		const isOurDir = (d: FileId): boolean =>
-			!d.isSymbolicLink() &&
-			d.isDirectory() &&
-			d.dev === dirId.dev &&
-			d.ino === dirId.ino
-		if (!isOurDir(dirId)) {
-			await removeDir()
-			throw new WaveKitError(
-				RECORDING_DELETE_FAILED_TEXT,
-				"RECORDING_DELETE_FAILED",
-			)
-		}
-		try {
-			await deleteFs.rename(filePath, innerPath)
-		} catch (error: unknown) {
-			await removeDir()
-			if (errCode(error) === "ENOENT" || errCode(error) === "ENOTDIR")
-				throw notFound()
-			throw error
-		}
-		let moved: FileId | null
-		try {
-			moved = await deleteFs.lstat(innerPath)
-		} catch (error: unknown) {
-			if (errCode(error) !== "ENOENT") throw error
-			moved = null
-		}
-		if (moved === null) {
-			// The inner name was removed under us: nothing of ours is left to delete.
-			await removeDir()
-			log.warn({}, "Recording delete refused: the file changed")
-			throw notFound()
-		}
-		const match = sameFile(moved, handleStat)
-		if (match && ready() && !protecting.has(key)) {
-			// The private directory itself must still be ours: a rename of it plus a symlink at
-			// its name would redirect the unlink outside. Checked last, so the unlink below is
-			// issued in the same turn as this lstat result. If it changed, everything is left in
-			// place and nothing is unlinked.
-			// Residual: a same-uid process rebinding the directory (or the inner name) between
-			// this lstat and the unlink is not closed; that needs unlinkat/fstatat on a
-			// directory descriptor, which Node does not offer.
-			let dirNow: FileId | null
-			try {
-				dirNow = await deleteFs.lstat(privateDir)
-			} catch {
-				dirNow = null
-			}
-			if (dirNow === null || !isOurDir(dirNow)) {
-				log.warn({}, "Recording delete refused: the file changed")
-				throw notFound()
-			}
-			try {
-				await deleteFs.unlink(innerPath)
-			} catch (error: unknown) {
-				if (errCode(error) === "ENOENT") {
-					await removeDir()
-					throw notFound()
-				}
-				throw error
-			}
-			await removeDir()
-			return
-		}
-		if (!(await restoreMoved(moved, innerPath, filePath)))
-			log.warn(
-				{ left: 1 },
-				"Recording delete could not restore a file; it is left under a private name",
-			)
-		await removeDir()
-		if (match)
+		const outcome = await verifiedUnlink({
+			filePath,
+			handleStat,
+			stillDeletable: () => ready() && !protecting.has(key),
+			fs: deleteFs,
+			log,
+		})
+		if (outcome === "not-found") throw notFound()
+		if (outcome === "protected")
 			throw new RecordingKeepError("RECORDING_KEPT", RECORDING_KEPT_TEXT)
-		log.warn({}, "Recording delete refused: the file changed")
-		throw notFound()
-	}
-
-	/**
-	 * Puts a moved entry back under its original name by type, never clobbering: a regular file
-	 * with `link`, a symlink with `readlink` + `symlink` (`link` on a symlink hard-links its target
-	 * on macOS). The inner name is unlinked only after the restore succeeded. Any other type or
-	 * any error: false, and the entry stays in the private directory.
-	 */
-	async function restoreMoved(
-		moved: FileId,
-		innerPath: string,
-		filePath: string,
-	): Promise<boolean> {
-		try {
-			if (moved.isSymbolicLink()) {
-				const target = await deleteFs.readlink(innerPath)
-				await deleteFs.symlink(target, filePath)
-			} else if (moved.isFile()) {
-				await deleteFs.link(innerPath, filePath)
-			} else {
-				return false
-			}
-		} catch {
-			return false
-		}
-		await deleteFs.unlink(innerPath).catch(() => undefined)
-		return true
 	}
 
 	async function remove(inventoryId: string): Promise<RecordingDeleteResult> {
@@ -551,7 +392,9 @@ export async function openRecordingKeepService(
 				? RECORDING_INVENTORY_ID.exec(inventoryId)
 				: null
 		if (!m) throw notFound()
-		if (m[3] !== undefined)
+		const scannerId = m[3]
+		const deleter = scannerDeleter
+		if (scannerId !== undefined && deleter === undefined)
 			throw new RecordingKeepError(
 				"RECORDING_DELETE_UNSUPPORTED",
 				RECORDING_DELETE_UNSUPPORTED_TEXT,
@@ -568,20 +411,9 @@ export async function openRecordingKeepService(
 				if (!ready()) throw unavailable()
 				if (protecting.has(key))
 					throw new RecordingKeepError("RECORDING_KEPT", RECORDING_KEPT_TEXT)
-				const opened = await inventory.open(inventoryId)
-				if (!opened) throw notFound()
-				try {
-					await deleteVerified(key, opened.path, await opened.handle.stat())
-				} catch (error: unknown) {
-					if (error instanceof RecordingKeepError) throw error
-					log.warn({ err: safeErrorFields(error) }, "Recording delete failed")
-					throw new RecordingKeepError(
-						"RECORDING_DELETE_FAILED",
-						RECORDING_DELETE_FAILED_TEXT,
-					)
-				} finally {
-					await opened.handle.close().catch(() => undefined)
-				}
+				if (scannerId !== undefined && deleter !== undefined)
+					await deleteScanner(key, scannerId, deleter)
+				else await deleteDsd(key, inventoryId)
 				log.info({}, "Recording deleted")
 				return { id: inventoryId, deleted: true as const }
 			})
@@ -589,6 +421,54 @@ export async function openRecordingKeepService(
 			clearDeleting(key)
 			invalidate()
 		}
+	}
+
+	async function deleteDsd(
+		key: RecordingKeepKey,
+		inventoryId: string,
+	): Promise<void> {
+		const opened = await inventory.open(inventoryId)
+		if (!opened) throw notFound()
+		try {
+			await deleteVerified(key, opened.path, await opened.handle.stat())
+		} catch (error: unknown) {
+			if (error instanceof RecordingKeepError) throw error
+			log.warn({ err: safeErrorFields(error) }, "Recording delete failed")
+			throw new RecordingKeepError(
+				"RECORDING_DELETE_FAILED",
+				RECORDING_DELETE_FAILED_TEXT,
+			)
+		} finally {
+			await opened.handle.close().catch(() => undefined)
+		}
+	}
+
+	/** WG10 req 1.1-1.3: the scanner side verifies, unlinks and updates its bookkeeping. */
+	async function deleteScanner(
+		key: RecordingKeepKey,
+		recordingId: string,
+		deleter: ScannerRecordingDeleter,
+	): Promise<void> {
+		let outcome: "deleted" | "not-found"
+		try {
+			outcome = await deleter.deleteRecording(
+				recordingId,
+				() => ready() && !protecting.has(key),
+			)
+		} catch (error: unknown) {
+			if (error instanceof RecordingKeepError) throw error
+			log.warn({ err: safeErrorFields(error) }, "Recording delete failed")
+			throw new RecordingKeepError(
+				"RECORDING_DELETE_FAILED",
+				RECORDING_DELETE_FAILED_TEXT,
+			)
+		}
+		if (outcome === "deleted") return
+		// The deleter deletes nothing while the decision is false: name why.
+		if (!ready()) throw unavailable()
+		if (protecting.has(key))
+			throw new RecordingKeepError("RECORDING_KEPT", RECORDING_KEPT_TEXT)
+		throw notFound()
 	}
 
 	const service: RecordingKeepServiceInternal = {
@@ -611,6 +491,7 @@ export async function openRecordingKeepService(
 		unkeep,
 		remove,
 		state: () => (store === null ? "failed" : store.state()),
+		totals: () => (ready() ? { ...totals } : null),
 		async close() {
 			await commitChain
 			await store?.close()

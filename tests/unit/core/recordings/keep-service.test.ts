@@ -712,9 +712,12 @@ describe("recording keep service", () => {
 			// Restored as the symlink it was, not as a hard link to its target.
 			expect((await lstat(target)).isSymbolicLink()).toBe(true)
 			expect(await nodeFs.readlink(target)).toBe(other)
-			expect(fsx.unlinked.every(p => path.basename(p) === "recording")).toBe(
-				true,
-			)
+			// WG10 req 1.9: the moved entry keeps its own name in the private directory.
+			expect(
+				fsx.unlinked.every(p =>
+					path.basename(path.dirname(p)).startsWith(".wavekit-delete-"),
+				),
+			).toBe(true)
 			await lstat(path.join(f.root, "moved.wav"))
 			expect(await privateNames(f)).toEqual([])
 		})
@@ -739,7 +742,8 @@ describe("recording keep service", () => {
 			const left = await privateNames(f)
 			expect(left).toHaveLength(1)
 			expect(
-				await readFile(path.join(f.dsd, left[0] ?? "", "recording"), "utf8"),
+				// WG10 req 1.9: left under the recording's own name (never verified).
+				await readFile(path.join(f.dsd, left[0] ?? "", NAME), "utf8"),
 			).toBe("FOREIGN")
 			// The inventory never lists the private directory or what it holds.
 			const ids = (await f.inventory.list({})).items.map(i => i.id)
@@ -769,7 +773,8 @@ describe("recording keep service", () => {
 			const svc = await f.open({ deleteFs: fsx })
 			await expect(svc.remove(DSD_ID)).resolves.toMatchObject({ deleted: true })
 			expect(fsx.unlinked).toHaveLength(1)
-			expect(path.basename(fsx.unlinked[0] ?? "")).toBe("recording")
+			// WG10 req 1.9: renamed to `verified` after the identity check.
+			expect(path.basename(fsx.unlinked[0] ?? "")).toBe("verified")
 			expect(path.basename(path.dirname(fsx.unlinked[0] ?? ""))).toMatch(
 				/^\.wavekit-delete-/,
 			)
@@ -808,7 +813,8 @@ describe("recording keep service", () => {
 			const fsx = realDeleteFs({
 				lstat: async p => {
 					const st = await nodeFs.lstat(p)
-					if (path.basename(p) === "recording") {
+					// WG10 req 1.9: the final entry check is on `verified`.
+					if (path.basename(p) === "verified") {
 						// A writer in the shared directory replaces every private entry it can name.
 						for (const n of await readdir(f.dsd))
 							if (n.startsWith(".wavekit-delete-"))
@@ -876,13 +882,14 @@ describe("recording keep service", () => {
 			const f = await fixture()
 			const outside = path.join(f.root, "outside")
 			await mkdir(outside)
-			const foreign = path.join(outside, "recording")
+			const foreign = path.join(outside, "verified")
 			await writeFile(foreign, "FOREIGN")
 			let movedDir = ""
 			const fsx = realDeleteFs({
 				lstat: async p => {
 					const st = await nodeFs.lstat(p)
-					if (movedDir === "" && path.basename(p) === "recording") {
+					// WG10 req 1.9: the last entry check is on `verified`.
+					if (movedDir === "" && path.basename(p) === "verified") {
 						const dir = path.dirname(p)
 						movedDir = `${dir}-moved`
 						await nodeFs.rename(dir, movedDir)
@@ -898,9 +905,7 @@ describe("recording keep service", () => {
 			})
 			expect(fsx.unlinked).toEqual([])
 			expect(await readFile(foreign, "utf8")).toBe("FOREIGN")
-			expect((await lstat(path.join(movedDir, "recording"))).isFile()).toBe(
-				true,
-			)
+			expect((await lstat(path.join(movedDir, "verified"))).isFile()).toBe(true)
 			expect(svc.mutexCount()).toBe(0)
 			noSecretsLogged(f)
 		})
