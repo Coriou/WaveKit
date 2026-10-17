@@ -11,6 +11,7 @@ import {
 	TunedCard,
 } from "../features/index.ts"
 import { useStore } from "../data/index.ts"
+import { PaletteKeys } from "../features/palette/PaletteKeys.tsx"
 import { Plot } from "../plot/index.ts"
 import { Shell } from "../shell/Shell.tsx"
 import { ServicesContext } from "./context.ts"
@@ -55,6 +56,7 @@ export function App() {
 				listen={listenSlot}
 				card={<TunedCard />}
 			/>
+			<PaletteKeys />
 			<ConnectionChip />
 			<AudioOutput />
 		</ServicesContext>

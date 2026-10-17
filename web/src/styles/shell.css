@@ -338,6 +338,46 @@
 		place-self: center;
 	}
 
+	/* phone: the dock is hidden; one search island opens ⌘K, which reaches every view and drawer */
+	.wk-shell-find {
+		position: absolute;
+		right: 16px;
+		bottom: 16px;
+		z-index: 3;
+		width: 48px;
+		height: 48px;
+		border-radius: var(--wk-r-5);
+	}
+	@media (max-width: 760px) {
+		/* Listen leaves room for the search island on its right */
+		.wk-shell-island[data-island="listen"] {
+			max-width: calc(100% - 88px);
+		}
+	}
+
+	/* the app toast: bottom centre, above the dock (or the phone's bottom row) */
+	.wk-shell-toast {
+		position: absolute;
+		left: 50%;
+		bottom: 80px;
+		translate: -50% 0;
+		z-index: 12;
+		max-width: calc(100% - 32px);
+		height: auto;
+		min-height: var(--wk-h-touch);
+	}
+	.wk-shell-toast[data-lifted] {
+		bottom: 84px;
+	}
+	.wk-shell-toast[data-tone="warn"] {
+		color: var(--wk-amber);
+	}
+	.wk-shell-toast-text {
+		min-width: 0;
+		padding: 8px 0;
+		line-height: 1.4;
+	}
+
 	/* palette: a solid sheet over the Palette board's scrim */
 	[data-wk-theme] {
 		--wka-scrim: color-mix(in srgb, var(--wk-plot-bg) 28%, transparent);
@@ -376,6 +416,11 @@
 		justify-content: space-between;
 		gap: 12px;
 		flex-wrap: wrap;
+		border-radius: var(--wk-r-3);
+	}
+	/* ⌘K "Open in Settings ›" lands here */
+	.wk-shell-setting[data-flash] {
+		animation: wk-row-flash 1.6s var(--wk-ease-out);
 	}
 	.wk-shell-empty {
 		margin: 0;

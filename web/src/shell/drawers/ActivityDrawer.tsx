@@ -8,6 +8,10 @@ import { useStore } from "../../data/index.ts"
 import type { ActivityFeedState } from "../../data/activity-feed.ts"
 import { ActivityDetail } from "../../features/activity/ActivityDetail.tsx"
 import { ActivityList } from "../../features/activity/ActivityList.tsx"
+import {
+	activitySearchFocus,
+	takeActivitySearchFocus,
+} from "../../features/activity/focus.ts"
 import type { CategoryChipId } from "../../features/activity/search.ts"
 import { CATEGORY_CHIPS, suggest } from "../../features/activity/search.ts"
 import { Chip } from "../../ui/Chip.tsx"
@@ -92,6 +96,16 @@ function SearchBox() {
 	const [text, setText] = useState("")
 	const input = useRef<HTMLInputElement>(null)
 	const options = suggest(text)
+
+	// ⌘K "Search Activity": focus the field, after the shell has moved focus into the opened drawer
+	const focusWanted = useStore(activitySearchFocus, s => s.pending)
+	useEffect(() => {
+		if (!focusWanted) return
+		const t = setTimeout(() => {
+			if (takeActivitySearchFocus()) input.current?.focus()
+		}, 0)
+		return () => clearTimeout(t)
+	}, [focusWanted])
 
 	// "/" from anywhere outside a text field jumps to the search.
 	useEffect(() => {

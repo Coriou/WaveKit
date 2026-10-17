@@ -19,7 +19,9 @@ import {
 	type Ref,
 } from "react"
 
+import { useStore } from "../data/store.ts"
 import { Drawer } from "../ui/Drawer.tsx"
+import { Icon } from "../ui/Icon.tsx"
 import type { DrawerContentProps } from "./drawers/types.ts"
 import { useShell } from "./hooks.ts"
 import { DEFAULT_GEOMETRY, shellLayout, type ShellGeometry } from "./layout.ts"
@@ -27,6 +29,7 @@ import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
 import { DRAWER_PANES, paneOf } from "./panes.ts"
+import { appToast, dismissAppToast } from "./toast.ts"
 import {
 	shellStore,
 	type Closed,
@@ -420,10 +423,67 @@ export function Shell({
 				</PaneSlot>
 			)}
 
+			{L.dockHidden && (
+				<button
+					ref={triggerRef("palette")}
+					type="button"
+					className="wk-island wk-icon-btn wk-shell-find"
+					data-size="touch"
+					aria-label="Search and go to"
+					aria-haspopup="dialog"
+					aria-expanded={state.palette}
+					onClick={() => store.openPalette()}
+				>
+					<Icon name="search" />
+				</button>
+			)}
+
+			{!state.palette && <ShellToast lifted={!L.dockHidden} />}
+
 			{state.palette && (
 				<Suspense fallback={null}>
 					<Palette onClose={closePalette} />
 				</Suspense>
+			)}
+		</div>
+	)
+}
+
+/** The app toast (src/shell/toast.ts): bottom centre, above the dock. */
+function ShellToast({ lifted }: { lifted: boolean }) {
+	const toast = useStore(appToast)
+	if (!toast) return null
+	return (
+		<div
+			role="status"
+			className="wk-toast wk-shell-toast"
+			data-tone={toast.tone}
+			data-lifted={lifted || undefined}
+		>
+			<span className="wk-shell-toast-text">{toast.text}</span>
+			{toast.undo ? (
+				<button
+					type="button"
+					className="wk-btn"
+					data-variant="tonal"
+					data-size="sm"
+					onClick={() => {
+						toast.undo?.()
+						dismissAppToast()
+					}}
+				>
+					Undo
+				</button>
+			) : (
+				<button
+					type="button"
+					className="wk-icon-btn"
+					data-size="sm"
+					aria-label="Dismiss"
+					onClick={dismissAppToast}
+				>
+					<Icon name="close" size={14} />
+				</button>
 			)}
 		</div>
 	)
