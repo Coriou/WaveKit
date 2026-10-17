@@ -50,6 +50,7 @@ import {
 } from "./audio-stream-server.js"
 import { csdrChildEnv } from "../decoders/csdr-buffers.js"
 import { signalDecoder } from "../decoders/process-tools.js"
+import { safeErrorFields } from "../decoders/safe-error-fields.js"
 import { ChannelSquelch } from "./channel-squelch.js"
 import { ComplexSampleAligner, FrontSwapFeed } from "./live-audio-aligner.js"
 import {
@@ -689,6 +690,11 @@ export class LiveDemodulator extends EventEmitter {
 			this.config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
 		)
 		run.squelch.setMode(this.config.squelchMode === "noise" ? "noise" : "power")
+		// WG10 req 2.6: squelchMode changes without a restart (modulation restarts).
+		run.squelch.setCarrierObserver(
+			this.config.squelchMode === "auto" &&
+				LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation),
+		)
 	}
 
 	/** WG7 req 3.1: (re)builds the tone gate when the configured tone changes. */
@@ -1222,7 +1228,10 @@ export class LiveDemodulator extends EventEmitter {
 			let settled = false
 			const aligner = new ComplexSampleAligner(() => finish("first"))
 			const onError = (err: Error) => {
-				this.log.warn({ err }, "Live demodulation swap front process error")
+				this.log.warn(
+					{ err: safeErrorFields(err) },
+					"Live demodulation swap front process error",
+				)
 				finish("failed")
 			}
 			const onExit = () => finish("failed")

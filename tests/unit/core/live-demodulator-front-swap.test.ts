@@ -44,7 +44,20 @@ function sampleValues(chunks: Buffer[]): number[] {
 	return values
 }
 
-const BLOCK_SAMPLES = 250 // 10 ms at the 25 kHz default channel rate
+const BLOCK_SAMPLES = 250
+
+/** Constant-magnitude, pseudo-random-phase channel noise (not FM-quieted). */
+function noiseIq(samples: number, amplitude: number): Buffer {
+	const buffer = Buffer.alloc(samples * 8)
+	let seed = 0x2545f491
+	for (let i = 0; i < samples; i++) {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+		const phase = (seed / 4294967296) * 2 * Math.PI
+		buffer.writeFloatLE(amplitude * Math.cos(phase), i * 8)
+		buffer.writeFloatLE(amplitude * Math.sin(phase), i * 8 + 4)
+	}
+	return buffer
+} // 10 ms at the 25 kHz default channel rate
 
 async function startHarness(config: Record<string, unknown> = {}) {
 	harness = await createDemodHarness({ config })
@@ -211,7 +224,7 @@ describe("LiveDemodulator front swap (WG10 req 2.3)", () => {
 		await h.demod.reconfigure({ squelchMode: "auto" })
 		await writeAndSettle(
 			h.current().front.stdout,
-			channelIq(BLOCK_SAMPLES * 5, 0.001),
+			noiseIq(BLOCK_SAMPLES * 5, 0.001),
 		)
 		expect(h.demod.getStatus().noiseFloorDbfs).toBeDefined()
 		const done = h.demod.reconfigure({ offsetHz: 6000 })

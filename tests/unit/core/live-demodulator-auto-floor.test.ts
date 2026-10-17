@@ -185,3 +185,61 @@ describe("LiveDemodulator auto floor after a runtime mode switch (WG10 req 2.6)"
 		expect(run.noiseFloorDbfs).toBe(-5)
 	})
 })
+
+describe("LiveDemodulator carrier observer follows a runtime squelchMode change (WG10 req 2.6)", () => {
+	type Real = {
+		hasCarrierObserver: boolean
+		blockQuieted(): boolean
+		open: boolean
+	}
+	it("manual→auto builds the observer; a quieted block does not seed", async () => {
+		harness = await createDemodHarness({
+			config: { squelchMode: "manual", modulation: "nfm", squelch: -40 },
+		})
+		await harness.demod.start()
+		const internals = harness.demod as unknown as Internals
+		const run = internals.run!
+		expect((run.squelch as Real).hasCarrierObserver).toBe(false)
+		await harness.demod.reconfigure({ squelchMode: "auto" })
+		expect(harness.processes).toHaveLength(2)
+		expect((run.squelch as Real).hasCarrierObserver).toBe(true)
+		const squelch = fakeSquelch()
+		run.squelch = squelch
+		run.noiseFloorDbfs = null
+		squelch.powerDbfs = -5
+		squelch.quieted = true
+		internals.measureRun(run)
+		expect(run.noiseFloorDbfs).toBeNull()
+	})
+
+	it("auto→manual drops the observer; the gate follows the manual threshold", async () => {
+		harness = await createDemodHarness({
+			config: { squelchMode: "auto", modulation: "nfm" },
+		})
+		await harness.demod.start()
+		const run = (harness.demod as unknown as Internals).run!
+		const real = run.squelch as Real
+		expect(real.hasCarrierObserver).toBe(true)
+		await harness.demod.reconfigure({ squelchMode: "manual", squelch: -40 })
+		expect(real.hasCarrierObserver).toBe(false)
+		expect(real.blockQuieted()).toBe(false)
+		expect(run.noiseFloorDbfs).toBeNull()
+		// A steady -10 dBFS carrier block, then a -70 dBFS one, with no floor.
+		const { channelIq, writeAndSettle } =
+			await import("./live-demodulator-continuity-fakes.js")
+		const front = harness.current().front
+		await writeAndSettle(
+			front.stdout,
+			channelIq(250, 10 ** (-10 / 20) / Math.SQRT2),
+		)
+		expect(real.blockQuieted()).toBe(false)
+		expect(harness.demod.getStatus().thresholdDbfs).toBe(-40)
+		expect(harness.demod.isSquelchOpen()).toBe(true)
+		await writeAndSettle(
+			front.stdout,
+			channelIq(25_000, 10 ** (-80 / 20) / Math.SQRT2),
+		)
+		// Below -40 after the hang: closed by the manual threshold.
+		expect(harness.demod.isSquelchOpen()).toBe(false)
+	})
+})

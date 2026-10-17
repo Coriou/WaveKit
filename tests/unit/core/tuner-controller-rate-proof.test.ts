@@ -182,6 +182,32 @@ describe("proveSampleRateForFrequency (WG10 req 2.8)", () => {
 		expect(t.frames.map(f => f[0])).toEqual([SET_SAMPLE_RATE, SET_FREQUENCY])
 	})
 
+	it("two concurrent calls on a fresh connection write exactly one rate command", async () => {
+		const t = make()
+		const results = await Promise.all([
+			t.controller.proveSampleRateForFrequency("rtl-1", REST),
+			t.controller.proveSampleRateForFrequency("rtl-1", REST),
+		])
+		expect(results.sort()).toEqual([false, true])
+		expect(t.rateWrites()).toHaveLength(1)
+	})
+
+	it("concurrent callers share a failure; a later request retries", async () => {
+		const t = make()
+		t.fail.cmd = SET_SAMPLE_RATE
+		const results = await Promise.allSettled([
+			t.controller.proveSampleRateForFrequency("rtl-1", REST),
+			t.controller.proveSampleRateForFrequency("rtl-1", REST),
+		])
+		expect(results.map(r => r.status)).toEqual(["rejected", "rejected"])
+		expect(t.frames).toEqual([])
+		t.fail.cmd = null
+		expect(await t.controller.proveSampleRateForFrequency("rtl-1", REST)).toBe(
+			true,
+		)
+		expect(t.rateWrites()).toHaveLength(1)
+	})
+
 	it("scanner path (setFrequency directly) is unchanged: no rate write", async () => {
 		const t = make()
 		await t.controller.setFrequency("rtl-1", 162_000_000, { origin: "scanner" })

@@ -413,6 +413,13 @@ export class TunerController extends EventEmitter {
 	 * proved on the current connection. Reset with `connectionTuningWrites`.
 	 */
 	private rateProvedOnConnection: Set<string> = new Set()
+	/** In-flight proof write per source, tagged with the connection epoch it serves. */
+	private rateProofInFlight: Map<
+		string,
+		{ epoch: number; promise: Promise<boolean> }
+	> = new Map()
+	/** Per-source connection epoch, advanced where the proof flag resets. */
+	private rateProofEpoch: Map<string, number> = new Map()
 	/** Caps metadata as first registered, before any accepted command. */
 	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
 
@@ -485,6 +492,11 @@ export class TunerController extends EventEmitter {
 		this.ignoredRelayFields.delete(sourceId)
 		this.connectionTuningWrites.delete(sourceId)
 		this.rateProvedOnConnection.delete(sourceId)
+		this.rateProofInFlight.delete(sourceId)
+		this.rateProofEpoch.set(
+			sourceId,
+			(this.rateProofEpoch.get(sourceId) ?? 0) + 1,
+		)
 		this.baselineCaps.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
 		this.emit("source-removed", sourceId)
@@ -823,9 +835,26 @@ export class TunerController extends EventEmitter {
 			this.rateProvedOnConnection.add(sourceId)
 			return false
 		}
-		await this.setSampleRate(sourceId, hz, opts)
-		this.rateProvedOnConnection.add(sourceId)
-		return true
+		// Concurrent callers on the same connection share one write (and its failure).
+		const epoch = this.rateProofEpoch.get(sourceId) ?? 0
+		const pending = this.rateProofInFlight.get(sourceId)
+		if (pending !== undefined && pending.epoch === epoch) {
+			await pending.promise
+			return false
+		}
+		const promise = (async () => {
+			try {
+				await this.setSampleRate(sourceId, hz, opts)
+				if ((this.rateProofEpoch.get(sourceId) ?? 0) === epoch)
+					this.rateProvedOnConnection.add(sourceId)
+				return true
+			} finally {
+				if (this.rateProofInFlight.get(sourceId)?.epoch === epoch)
+					this.rateProofInFlight.delete(sourceId)
+			}
+		})()
+		this.rateProofInFlight.set(sourceId, { epoch, promise })
+		return promise
 	}
 
 	async setSampleRate(
@@ -1195,6 +1224,11 @@ export class TunerController extends EventEmitter {
 		// A new connection: nothing is written on it yet (WG9 req 3.2).
 		this.connectionTuningWrites.delete(sourceId)
 		this.rateProvedOnConnection.delete(sourceId)
+		this.rateProofInFlight.delete(sourceId)
+		this.rateProofEpoch.set(
+			sourceId,
+			(this.rateProofEpoch.get(sourceId) ?? 0) + 1,
+		)
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0

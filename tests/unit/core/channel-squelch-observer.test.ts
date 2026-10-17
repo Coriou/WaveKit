@@ -302,6 +302,29 @@ describe("ChannelSquelch carrier observer (WG10 req 2.6)", () => {
 		expect(squelch.open).toBe(true)
 	})
 
+	it("setCarrierObserver toggles the observer at runtime", () => {
+		const [carrier] = blocksOf([{ kind: "carrier", db: -2 }], 12)
+		const squelch = observerSquelch({ carrierObserver: false })
+		expect(squelch.hasCarrierObserver).toBe(false)
+		squelch.setCarrierObserver(true)
+		expect(squelch.hasCarrierObserver).toBe(true)
+		squelch.process(carrier!)
+		expect(squelch.blockQuieted()).toBe(true)
+		expect(squelch.open).toBe(true)
+		// Dropped (owner switched to manual): no quieting, frozen power path.
+		squelch.setCarrierObserver(false)
+		expect(squelch.hasCarrierObserver).toBe(false)
+		expect(squelch.blockQuieted()).toBe(false)
+		const fresh = observerSquelch({ carrierObserver: false })
+		const dropped = observerSquelch()
+		dropped.setCarrierObserver(false)
+		for (const b of blocksOf(fixedSequence(), 13)) {
+			expect(sameBlocks(dropped.process(b), fresh.process(b))).toBe(true)
+			expect(dropped.open).toBe(fresh.open)
+			expect(dropped.blockQuieted()).toBe(false)
+		}
+	})
+
 	it("blockQuieted() during measure reflects the block just processed", () => {
 		// The live demodulator calls process(block) then its measure callback.
 		const squelch = observerSquelch()

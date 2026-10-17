@@ -143,7 +143,7 @@ export class ChannelSquelch {
 	/** Created on the first switch to noise mode, then kept. */
 	private noise: NoiseSquelch | null = null
 	/** WG10 req 2.6: FM quieting observer (null unless `carrierObserver`). */
-	private readonly observer: NoiseSquelch | null
+	private observer: NoiseSquelch | null
 	/** Last measured block's quieting ≥ the observer threshold. */
 	private lastBlockQuieted = false
 	/** The owner's last floor estimate was finite (a floor exists). */
@@ -172,16 +172,30 @@ export class ChannelSquelch {
 			options.noiseQuietingDb ?? NOISE_QUIETING_DB_DEFAULT,
 		)
 		this.observer =
-			options.carrierObserver === true
-				? new NoiseSquelch({
-						sampleRate: this.sampleRate,
-						bandwidthHz: this.bandwidthHz,
-						quietingDb: LIVE_AUDIO_NOISE_QUIETING_DB.default,
-						hangMs: this.hangMs,
-						hysteresisDb: this.hysteresisDb,
-					})
-				: null
+			options.carrierObserver === true ? this.createObserver() : null
 		if (options.mode === "noise") this.setMode("noise")
+	}
+
+	/**
+	 * WG10 req 2.6: builds (fresh state) or drops the carrier observer at runtime, so
+	 * the owner keeps it only in auto nfm/wfm. Dropping clears the last quieting
+	 * (`blockQuieted()` false) and returns the gate to the frozen power path. No-op
+	 * when unchanged.
+	 */
+	setCarrierObserver(enabled: boolean): void {
+		if (enabled === (this.observer !== null)) return
+		this.observer = enabled ? this.createObserver() : null
+		this.lastBlockQuieted = false
+	}
+
+	private createObserver(): NoiseSquelch {
+		return new NoiseSquelch({
+			sampleRate: this.sampleRate,
+			bandwidthHz: this.bandwidthHz,
+			quietingDb: LIVE_AUDIO_NOISE_QUIETING_DB.default,
+			hangMs: this.hangMs,
+			hysteresisDb: this.hysteresisDb,
+		})
 	}
 
 	/** Whether the carrier observer exists (WG10 req 2.6). */

@@ -38,6 +38,21 @@ vi.mock("node:child_process", () => {
 
 import { spawn } from "node:child_process"
 
+/**
+ * WG10 req 2.6: constant-magnitude channel noise (pseudo-random phase per
+ * sample). Its power equals the old DC fixture's, but it is not FM-quieted,
+ * so the auto nfm carrier observer treats it as noise, not as a carrier.
+ */
+function writeNoise(block: Buffer, amplitude: number, stride = 8): void {
+	let seed = 0x2545f491
+	for (let i = 0; i * stride < block.length; i++) {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
+		const phase = (seed / 4294967296) * 2 * Math.PI
+		block.writeFloatLE(amplitude * Math.cos(phase), i * stride)
+		block.writeFloatLE(amplitude * Math.sin(phase), i * stride + 4)
+	}
+}
+
 const testLogger = createLogger({ level: "fatal" })
 
 let nextPid = 4_000_000
@@ -394,7 +409,7 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.isSquelchOpen()).toBe(true)
 		await liveDemod.reconfigure({ squelch: -50 })
 		const quiet = Buffer.alloc(250 * 8)
-		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		writeNoise(quiet, 1e-4)
 		processes[0]!.stdout.write(quiet)
 		expect(liveDemod.isSquelchOpen()).toBe(false)
 		expect(gates).toHaveBeenLastCalledWith(false)
@@ -416,11 +431,11 @@ describe("LiveDemodulator", () => {
 		await liveDemod.start()
 		await liveDemod.reconfigure({ squelchMode: "auto", autoMarginDb: 6 })
 		const quiet = Buffer.alloc(250 * 8)
-		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		writeNoise(quiet, 1e-4)
 		processes[0]!.stdout.write(quiet)
 		expect(liveDemod.getStatus().thresholdDbfs).toBeCloseTo(-74)
 		const signal = Buffer.alloc(250 * 8)
-		for (let i = 0; i < 250; i++) signal.writeFloatLE(0.01, i * 8)
+		writeNoise(signal, 0.01)
 		processes[0]!.stdout.write(signal)
 		expect(liveDemod.isSquelchOpen()).toBe(true)
 		await liveDemod.reconfigure({ autoMarginDb: 10 })
@@ -439,7 +454,7 @@ describe("LiveDemodulator", () => {
 
 	async function feedPower(dbfs: number, seconds: number): Promise<void> {
 		const block = Buffer.alloc(250 * 8)
-		for (let i = 0; i < 250; i++) block.writeFloatLE(10 ** (dbfs / 20), i * 8)
+		writeNoise(block, 10 ** (dbfs / 20))
 		processes[1]!.stdin.resume()
 		for (let i = 0; i < seconds * 100; i++) {
 			await new Promise<void>(resolve =>
@@ -520,7 +535,7 @@ describe("LiveDemodulator", () => {
 		const gates = vi.fn()
 		liveDemod.on("squelch-changed", gates)
 		const quiet = Buffer.alloc(250 * 8)
-		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		writeNoise(quiet, 1e-4)
 		processes[0]!.stdout.write(quiet.subarray(0, 3))
 		expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
 		processes[0]!.stdout.write(quiet.subarray(3))
@@ -923,7 +938,7 @@ describe("LiveDemodulator", () => {
 		})
 		await liveDemod.reconfigure({ squelch: -50 })
 		const quiet = Buffer.alloc(250 * 8)
-		for (let i = 0; i < 250; i++) quiet.writeFloatLE(1e-4, i * 8)
+		writeNoise(quiet, 1e-4)
 		processes[0]!.stdout.write(quiet)
 		expect(liveDemod.isSquelchOpen()).toBe(false)
 		expect(reasons).toEqual([null])
