@@ -15,6 +15,10 @@ export interface SpectrumCanvasProps {
 	sourceId: string | null
 	/** Frames per second and bins asked of the core (defaults: the core's). */
 	hz?: number
+	/**
+	 * Also the waterfall texture width (at least MAX_BINS), fixed for the canvas's life: key the canvas
+	 * on it to change it (a new engine, so the waterfall starts again from the backfill).
+	 */
 	bins?: number
 	/**
 	 * Recent waterfall rows the core replays on subscribe (WG1 backfill, ms, the core clamps to its
@@ -77,6 +81,7 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 			window.innerHeight,
 		)
 		const engine = new SpectrumEngine(canvas, {
+			...(initial.bins !== undefined ? { texWidth: initial.bins } : {}),
 			historyRows: historyDepth(
 				tallest,
 				dpr,

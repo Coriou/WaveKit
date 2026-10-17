@@ -54,7 +54,11 @@ import {
 	PlotController,
 	type PlotContext,
 } from "./plot-store.ts"
-import { AVERAGING_ALPHA, spectrumLevels } from "../shell/device-prefs.ts"
+import {
+	AVERAGING_ALPHA,
+	fftBins,
+	spectrumLevels,
+} from "../shell/device-prefs.ts"
 import { useDevicePrefs } from "../shell/hooks.ts"
 import { AXIS_CSS, DISCOVERY_ROW_CSS, LANES_CSS, plotLayout } from "./layout.ts"
 import { isReadOnly } from "../app/context.ts"
@@ -95,7 +99,6 @@ export interface PlotProps {
 const SPECTRUM_HZ = 25
 /** Ask the core for its whole backfill window (it clamps to its own limits). */
 const SPECTRUM_BACKFILL_MS = 10_000
-const SPECTRUM_BINS = 2048
 /** Bursty signals keep their label this long after the last burst. */
 const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
@@ -137,6 +140,9 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const [autoScale, setLevels] = useState<SpectrumLevels>(DEFAULT_LEVELS)
 	const device = useDevicePrefs()
 	const levels = spectrumLevels(device, autoScale)
+	// Settings › FFT size, within what the core serves; a new size remounts the canvas (texture width).
+	const binsMax = useStore(data.spectrumLimits, s => s.binsMax)
+	const bins = fftBins(device.fftSize, binsMax)
 	useEffect(() => autoLevelsNow.set(autoScale), [autoScale])
 	const [engineError, setEngineError] = useState<string | null>(null)
 	const heldRef = useRef<{ track: Track; seenAt: number }[]>([])
@@ -290,9 +296,10 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 				aria-label={ariaLabel}
 			>
 				<SpectrumCanvas
+					key={bins}
 					sourceId={sourceId}
 					hz={SPECTRUM_HZ}
-					bins={SPECTRUM_BINS}
+					bins={bins}
 					backfillMs={SPECTRUM_BACKFILL_MS}
 					view={plotState.view.spanHz === null ? null : view}
 					levels={levels}

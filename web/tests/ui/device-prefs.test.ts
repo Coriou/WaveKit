@@ -5,6 +5,7 @@ import {
 	DEVICE_STORAGE_KEY,
 	deviceAttributes,
 	DevicePrefsStore,
+	fftBins,
 	parseDevicePrefs,
 	spectrumLevels,
 	type MotionQuery,
@@ -48,12 +49,33 @@ describe("device prefs", () => {
 			spectrumRange: "auto",
 			fixedLevels: null,
 			averaging: "low",
+			fftSize: 8192,
 		})
 		expect(parseDevicePrefs(null)).toEqual(DEFAULT_DEVICE)
 		expect(parseDevicePrefs("{bad")).toEqual(DEFAULT_DEVICE)
 		expect(
 			parseDevicePrefs(JSON.stringify({ density: "compact", motion: "fast" })),
 		).toEqual({ ...DEFAULT_DEVICE, density: "compact" })
+	})
+
+	it("keeps an FFT size from the list and asks the core for no more than it serves", () => {
+		const raw = (o: object) => parseDevicePrefs(JSON.stringify(o))
+		expect(raw({ fftSize: 4096 }).fftSize).toBe(4096)
+		for (const bad of [1000, "4096", 32768, null])
+			expect(raw({ fftSize: bad }).fftSize).toBe(8192)
+		expect(fftBins(8192, 2048)).toBe(2048)
+		expect(fftBins(4096, 8192)).toBe(4096)
+		expect(fftBins(16384, 8192)).toBe(8192)
+		expect(fftBins(8192, 3000)).toBe(3000)
+		// limits not known yet: what every core serves
+		expect(fftBins(8192, null)).toBe(2048)
+		const store = new DevicePrefsStore(new FakeStorage(), null, null)
+		let changes = 0
+		store.subscribe(() => changes++)
+		store.set({ fftSize: 8192 })
+		expect(changes).toBe(0)
+		store.set({ fftSize: 4096 })
+		expect(changes).toBe(1)
 	})
 
 	it("keeps the spectrum's range and averaging, dropping a scale that makes no sense", () => {

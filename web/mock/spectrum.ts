@@ -40,10 +40,14 @@ export interface FrameGeometry {
  * engine's summary (FFT bins grouped down to SPECTRUM_SUMMARY_BINS), max-reduced by a whole factor to at
  * most `bins` bins. So binCount is usually below the bins asked for (820 for 1024 on a real core).
  */
-export function frameGeometry(centerHz: number, bins: number): FrameGeometry {
+export function frameGeometry(
+	centerHz: number,
+	bins: number,
+	summaryBins: number = SPECTRUM_SUMMARY_BINS,
+): FrameGeometry {
 	const nativeBinHz = SAMPLE_RATE_HZ / SPECTRUM_FFT_SIZE
 	const native = Math.floor((SAMPLE_RATE_HZ * USABLE_FRACTION) / nativeBinHz)
-	const group = Math.max(1, Math.ceil(native / SPECTRUM_SUMMARY_BINS))
+	const group = Math.max(1, Math.ceil(native / summaryBins))
 	const summaryCount = Math.ceil(native / group)
 	const summaryBinHz = nativeBinHz * group
 	const factor = Math.max(1, Math.ceil(summaryCount / Math.max(1, bins)))
@@ -83,11 +87,11 @@ const noise = new Float32Array(NOISE_SIZE)
 
 const layouts = new Map<string, Layout>()
 
-function layout(centerHz: number, bins: number): Layout {
-	const key = `${centerHz}:${bins}`
+function layout(centerHz: number, bins: number, summaryBins: number): Layout {
+	const key = `${centerHz}:${bins}:${summaryBins}`
 	const cached = layouts.get(key)
 	if (cached) return cached
-	const geometry = frameGeometry(centerHz, bins)
+	const geometry = frameGeometry(centerHz, bins, summaryBins)
 	const { startHz, binHz, binCount } = geometry
 	const endHz = startHz + binCount * binHz
 	const humps: Hump[] = []
@@ -139,6 +143,8 @@ export interface FrameInput {
 	epoch: number
 	nowMs: number
 	snapshot?: boolean
+	/** The engine's summary budget (scanner.ws.spectrumSummaryBins); default SPECTRUM_SUMMARY_BINS. */
+	summaryBins?: number
 	/** 0..1, picks the noise window; defaults to Math.random(). */
 	random?: () => number
 }
@@ -146,7 +152,11 @@ export interface FrameInput {
 /** One `spectrum:frame` payload. */
 export function synthFrame(input: FrameInput): SpectrumFrameEventData {
 	const { centerHz } = input
-	const lay = layout(centerHz, input.bins)
+	const lay = layout(
+		centerHz,
+		input.bins,
+		input.summaryBins ?? SPECTRUM_SUMMARY_BINS,
+	)
 	const bins = lay.binCount
 	const random = input.random ?? Math.random
 	const tSec = input.nowMs / 1000
@@ -233,9 +243,10 @@ export interface SpectrumSelection {
 	backfillMs: number
 }
 
-/** Normalises `options.spectrum` like the core: hz 0.5–25 snapped to 0.5, bins 128–2048 rounded. */
+/** Normalises `options.spectrum` like the core: hz 0.5–25 snapped to 0.5, bins 128–`binsMax` rounded. */
 export function normaliseSpectrumOptions(
 	raw: unknown,
+	binsMax = SPECTRUM_SUMMARY_BINS,
 ): SpectrumSelection | { ok: false; message: string } {
 	if (raw === undefined || raw === null)
 		return {
@@ -265,7 +276,7 @@ export function normaliseSpectrumOptions(
 	if (o["bins"] !== undefined) {
 		if (typeof o["bins"] !== "number" || !Number.isFinite(o["bins"]))
 			return { ok: false, message: "options.spectrum.bins must be a number" }
-		bins = Math.min(2048, Math.max(128, Math.round(o["bins"])))
+		bins = Math.min(binsMax, Math.max(128, Math.round(o["bins"])))
 		if (bins !== o["bins"]) adjusted.push("bins")
 	}
 	let backfillMs = 0

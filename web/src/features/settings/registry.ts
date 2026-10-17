@@ -171,6 +171,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.fft",
+		"Display",
+		"FFT size",
+		"resolution bins detail waterfall",
+		SETTINGS,
+	),
+	row(
 		"dev.card",
 		"Display",
 		"Tuned card position",

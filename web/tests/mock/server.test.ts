@@ -13,6 +13,7 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import { buildMockServer } from "../../mock/server.ts"
+import { frameGeometry, normaliseSpectrumOptions } from "../../mock/spectrum.ts"
 import type { MockServer } from "../../mock/server.ts"
 
 describe("mock server REST", () => {
@@ -44,6 +45,26 @@ describe("mock server REST", () => {
 		})
 		expect((await inject("GET", "/health/live")).statusCode).toBe(200)
 		expect((await inject("GET", "/api/access/bootstrap")).statusCode).toBe(404)
+	})
+
+	it("serves spectrum limits like the shipped config, and wider rows with a bigger summary budget", async () => {
+		const status = (await inject("GET", "/api/spectrum")).json<{
+			limits: { bins: { max: number } }
+		}>()
+		expect(status.limits.bins.max).toBe(2048)
+		const asked = { sourceId: "rtl-0", bins: 8192 }
+		expect(normaliseSpectrumOptions(asked)).toMatchObject({
+			bins: 2048,
+			adjusted: ["bins"],
+		})
+		expect(normaliseSpectrumOptions(asked, 8192)).toMatchObject({
+			bins: 8192,
+			adjusted: [],
+		})
+		// 2.4 MS/s, 8192-point FFT, 80 % usable: 6553 native bins once the summary keeps them all
+		expect(frameGeometry(100e6, 8192, 8192).binCount).toBe(6553)
+		expect(frameGeometry(100e6, 4096, 8192).binCount).toBeLessThanOrEqual(4096)
+		expect(frameGeometry(100e6, 8192).binCount).toBeLessThanOrEqual(2048)
 	})
 
 	it("serves one rtl_tcp IQ source and the decoders with their band check", async () => {

@@ -8,7 +8,7 @@ export interface SpectrumSubscription {
 	sourceId: string
 	/** Frames per second asked of the core (0.5–25). */
 	hz?: number
-	/** Bins asked of the core (128–2048). */
+	/** Bins asked of the core (128 up to its `limits.bins.max`: 2048 to 8192). */
 	bins?: number
 	/** Waterfall backfill to replay after the ack, ms (0–10000). */
 	backfillMs?: number
@@ -90,6 +90,8 @@ export interface InitMessage {
 	levels: SpectrumLevels
 	ramp: Uint8Array
 	historyRows: number
+	/** Waterfall texture width: the widest row this engine takes (at least MAX_BINS). */
+	texWidth: number
 }
 
 export type MainToWorker =
@@ -136,5 +138,5 @@ export const DEFAULT_LEVELS: SpectrumLevels = { minDb: -120, maxDb: -20 }
 /** Waterfall rows kept (texture height). */
 export const DEFAULT_HISTORY_ROWS = 1024
 
-/** Widest row the core sends (`bins` ≤ 2048); the waterfall texture width. */
+/** Widest row a core sends without a bins cap (`bins` ≤ 2048); the default waterfall texture width. */
 export const MAX_BINS = 2048

@@ -30,6 +30,8 @@ export interface SpectrumEngineOptions {
 	wsUrl?: string
 	/** Waterfall rows kept (texture height); default 1024. */
 	historyRows?: number
+	/** Widest row taken (waterfall texture width); default MAX_BINS. Set it to the bins asked of the core. */
+	texWidth?: number
 	layout?: Partial<SpectrumLayout>
 	levels?: SpectrumLevels
 	/** 256 × RGBA; default the dark Match-accent ramp. */
@@ -92,6 +94,7 @@ export class SpectrumEngine {
 		const levels = opts.levels ?? DEFAULT_LEVELS
 		const ramp = opts.ramp ?? matchAccentRamp(DEFAULT_THEME)
 		const historyRows = opts.historyRows ?? DEFAULT_HISTORY_ROWS
+		const texWidth = Math.max(MAX_BINS, opts.texWidth ?? MAX_BINS)
 		const size = canvasSize(canvas)
 		this.worker = new Worker(new URL("./spectrum.worker.ts", import.meta.url), {
 			type: "module",
@@ -113,6 +116,7 @@ export class SpectrumEngine {
 			levels,
 			ramp,
 			historyRows,
+			texWidth,
 		}
 		if (!opts.forceMainThread && supportsOffscreenWebgl2()) {
 			const offscreen = canvas.transferControlToOffscreen()
@@ -123,7 +127,7 @@ export class SpectrumEngine {
 		const gl = canvas.getContext("webgl2", CONTEXT_OPTIONS)
 		this.mode = gl ? "main" : "none"
 		if (gl) {
-			const renderer = new SpectrumRenderer(gl, MAX_BINS, historyRows)
+			const renderer = new SpectrumRenderer(gl, texWidth, historyRows)
 			const frame = animationFrame()
 			const scheduler = new RenderScheduler(
 				() => this.scene?.render(),
@@ -134,7 +138,7 @@ export class SpectrumEngine {
 			this.scheduler = scheduler
 			this.scene = new SpectrumScene(renderer, {
 				depth: historyRows,
-				texWidth: MAX_BINS,
+				texWidth,
 				layout: this.layout,
 				levels,
 				size,

@@ -106,6 +106,8 @@ function useSnapshot(): SettingsSnapshot {
 	const decoders = useStore(services.decoders, s => s.decoders)
 	const decoderSettings = useStore(data.decoderSettings)
 	const system = useStore(data.system)
+	const binsMax = useStore(data.spectrumLimits, s => s.binsMax)
+	const binsCap = useStore(data.spectrumLimits, s => s.binsCap)
 	const access = useStore(data.access, s => s.access)
 	return useMemo(() => {
 		const sourceId = tuner?.sourceId
@@ -133,6 +135,7 @@ function useSnapshot(): SettingsSnapshot {
 			display,
 			savedCount,
 			bandplanEdits,
+			spectrumLimits: { binsMax, binsCap },
 			decoders,
 			decoderTypes: decoderSettings.types,
 			decoderViews: decoderSettings.views,
@@ -158,6 +161,8 @@ function useSnapshot(): SettingsSnapshot {
 		display,
 		savedCount,
 		bandplanEdits,
+		binsMax,
+		binsCap,
 		decoders,
 		decoderSettings,
 		system,

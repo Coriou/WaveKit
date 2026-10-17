@@ -25,6 +25,7 @@ import { ScannerStore } from "./scanner-store.ts"
 import { SourcesStore } from "./sources-store.ts"
 import { StationStore } from "./station-store.ts"
 import { Store } from "./store.ts"
+import { SpectrumLimitsStore } from "./spectrum-limits-store.ts"
 import { SystemStore } from "./system-store.ts"
 import { TunerStore } from "./tuner-store.ts"
 
@@ -59,6 +60,8 @@ export interface DataLayer {
 	decoderSettings: DecoderSettingsStore
 	/** Version, uptime and storage report; loads on first load() (the Settings drawer). */
 	system: SystemStore
+	/** The core's spectrum limits (most bins a client may ask for); loaded at start. */
+	spectrumLimits: SpectrumLimitsStore
 	/** Recording inventory, Keep and delete (protected core); loads on first refresh() (the Recordings drawer). */
 	recordings: RecordingsStore
 	/** Operator preferences, derived from the saved-frequencies operator-data read. */
@@ -131,6 +134,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		station: new StationStore(api),
 		decoderSettings: new DecoderSettingsStore(api),
 		system: new SystemStore(api),
+		spectrumLimits: new SpectrumLimitsStore(api),
 		recordings: new RecordingsStore(api),
 		preferences: new PreferencesStore(api, savedFrequencies),
 		fleets: createFleets(api, events),
@@ -152,6 +156,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 				layer.scanner.load(),
 				layer.station.load(),
 				layer.decoderSettings.loadTypes(),
+				layer.spectrumLimits.load(),
 			])
 		},
 		dispose() {
@@ -291,12 +296,14 @@ export type {
 	DecoderAction,
 	DecoderSettingsState,
 } from "./decoder-settings-store.ts"
+export { SpectrumLimitsStore } from "./spectrum-limits-store.ts"
 export { SystemStore } from "./system-store.ts"
 export {
 	RECORDING_DELETE_GRACE_MS,
 	RecordingsStore,
 } from "./recordings-store.ts"
 export type { RecordingsState } from "./recordings-store.ts"
+export type { SpectrumLimitsState } from "./spectrum-limits-store.ts"
 export type { SystemState } from "./system-store.ts"
 export {
 	PREFERENCE_DEFAULTS,

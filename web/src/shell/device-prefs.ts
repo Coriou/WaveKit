@@ -1,4 +1,4 @@
-// Display › On this device: density, motion and the spectrum's range and averaging, persisted in localStorage and applied as data-wk-density /
+// Display › On this device: density, motion and the spectrum's range, averaging and FFT size, persisted in localStorage and applied as data-wk-density /
 // data-wk-motion on <html>. Motion "system" resolves through prefers-reduced-motion, so CSS and code only ever
 // test data-wk-motion="reduce". Pure apart from the storage, element and media query passed in (tests use fakes).
 
@@ -27,6 +27,17 @@ export const AVERAGING_ALPHA: Readonly<Record<Averaging, number>> = {
 	high: 0.12,
 }
 
+/** FFT size choices (Settings › FFT size): the bins asked of the core, up to its `limits.bins.max`. */
+export const FFT_SIZES = [2048, 4096, 8192, 16384] as const
+export type FftSize = (typeof FFT_SIZES)[number]
+/** What a core without spectrum limits serves (no WG8 bins cap): the floor of every cap. */
+export const FFT_FALLBACK_MAX = 2048
+
+/** The bins the plot asks for: the chosen size, within what this core serves (`binsMax`, null: unknown). */
+export function fftBins(size: FftSize, binsMax: number | null): number {
+	return Math.max(128, Math.min(size, binsMax ?? FFT_FALLBACK_MAX))
+}
+
 /** A spectrum scale in dBFS, bottom and top. */
 export interface FixedLevels {
 	readonly minDb: number
@@ -41,6 +52,8 @@ export interface DevicePrefs {
 	/** The scale Fixed holds: where Auto stood when Fixed was picked. */
 	readonly fixedLevels: FixedLevels | null
 	readonly averaging: Averaging
+	/** Bins asked of the core; the core serves at most its limit (fftBins). */
+	readonly fftSize: FftSize
 }
 
 export const DEFAULT_DEVICE: DevicePrefs = {
@@ -49,6 +62,7 @@ export const DEFAULT_DEVICE: DevicePrefs = {
 	spectrumRange: "auto",
 	fixedLevels: null,
 	averaging: "low",
+	fftSize: 8192,
 }
 export const DEVICE_STORAGE_KEY = "wavekit.web.device"
 
@@ -100,6 +114,9 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 		),
 		fixedLevels: parseLevels(o["fixedLevels"]),
 		averaging: pick(AVERAGINGS, o["averaging"], DEFAULT_DEVICE.averaging),
+		fftSize: (FFT_SIZES as readonly unknown[]).includes(o["fftSize"])
+			? (o["fftSize"] as FftSize)
+			: DEFAULT_DEVICE.fftSize,
 	}
 }
 
@@ -180,7 +197,8 @@ export class DevicePrefsStore {
 			next.motion === prev.motion &&
 			next.spectrumRange === prev.spectrumRange &&
 			sameLevels(next.fixedLevels, prev.fixedLevels) &&
-			next.averaging === prev.averaging
+			next.averaging === prev.averaging &&
+			next.fftSize === prev.fftSize
 		)
 			return
 		this.#prefs = next

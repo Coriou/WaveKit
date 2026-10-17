@@ -74,6 +74,8 @@ import { registerBandPlansMock } from "./bandplans.ts"
 import {
 	normaliseSpectrumOptions,
 	SPECTRUM_BACKFILL_MAX_FRAMES,
+	SPECTRUM_BACKFILL_MAX_MS,
+	SPECTRUM_SUMMARY_BINS,
 	synthFrame,
 } from "./spectrum.ts"
 
@@ -91,6 +93,11 @@ export interface MockServerOptions {
 	load?: number
 	/** Aircraft updates per aircraft per second (WAVEKIT_MOCK_ADSB_RATE). Default 1. */
 	adsbRate?: number
+	/**
+	 * The engine's summary budget, scanner.ws.spectrumSummaryBins (WAVEKIT_MOCK_SPECTRUM_BINS, 512–8192):
+	 * the most bins a client gets, served as `limits.bins.max`. Default 2048, like the shipped config.
+	 */
+	spectrumBins?: number
 }
 
 export interface MockServer {
@@ -411,6 +418,10 @@ export async function buildMockServer(
 	const port = options.port ?? 3101
 	const audioPort = options.audioPort ?? (port === 0 ? 0 : port + 1)
 	const load = Math.max(1, options.load ?? 1)
+	const summaryBins = Math.min(
+		8192,
+		Math.max(512, Math.round(options.spectrumBins ?? SPECTRUM_SUMMARY_BINS)),
+	)
 	const messageEvery = Math.max(20, (options.messageIntervalMs ?? 3000) / load)
 	let audioOrigin = options.audioOrigin ?? `http://localhost:${audioPort}`
 	const startedAt = Date.now()
@@ -815,7 +826,7 @@ export async function buildMockServer(
 		send(client, { type: "spectrum:profile", data, channel: "spectrum" })
 
 	const subscribeSpectrum = (client: Client, raw: unknown) => {
-		const parsed = normaliseSpectrumOptions(raw)
+		const parsed = normaliseSpectrumOptions(raw, summaryBins)
 		const previous = client.spectrum
 		const reject = (
 			code: "SPECTRUM_OPTIONS_INVALID" | "SPECTRUM_SOURCE_NOT_FOUND",
@@ -884,6 +895,7 @@ export async function buildMockServer(
 						sourceId: MOCK_SOURCE_ID,
 						centerHz: tuner.frequency,
 						bins,
+						summaryBins,
 						hz,
 						epoch,
 						nowMs: now - k * periodMs,
@@ -899,6 +911,7 @@ export async function buildMockServer(
 					sourceId: MOCK_SOURCE_ID,
 					centerHz: tuner.frequency,
 					bins,
+					summaryBins,
 					hz,
 					epoch,
 					nowMs: Date.now(),
@@ -1188,6 +1201,22 @@ export async function buildMockServer(
 	})
 	app.get("/health/live", async () => ok())
 	app.get("/health/ready", async () => ok())
+	// GET /api/spectrum: the limits the web app reads (Settings › FFT size); bins.max as WG8 serves it.
+	app.get("/api/spectrum", async () => ({
+		limits: {
+			maxProfiles: 4,
+			hz: { min: 0.5, max: 25, step: 0.5 },
+			bins: { min: 128, max: summaryBins },
+			binsCap: { setting: "auto", cap: 8192, source: "measured" },
+			averaging: { min: 1, max: 32 },
+			backfill: {
+				maxMs: SPECTRUM_BACKFILL_MAX_MS,
+				maxFrames: SPECTRUM_BACKFILL_MAX_FRAMES,
+				maxBytes: 512 * 1024,
+			},
+		},
+		subscribers: [...clients].filter(c => c.spectrum !== null).length,
+	}))
 	// GET /api/status: version and uptime (seconds) as core's health routes report them.
 	app.get("/api/status", async () => {
 		const uptime = Math.round((Date.now() - startedAt) / 1000)
@@ -2006,6 +2035,7 @@ async function main(): Promise<void> {
 	const audioOrigin = env["WAVEKIT_MOCK_AUDIO_ORIGIN"]
 	const loadEnv = env["WAVEKIT_MOCK_LOAD"]
 	const adsbEnv = env["WAVEKIT_MOCK_ADSB_RATE"]
+	const spectrumBinsEnv = env["WAVEKIT_MOCK_SPECTRUM_BINS"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
@@ -2013,6 +2043,9 @@ async function main(): Promise<void> {
 		...(audioOrigin !== undefined ? { audioOrigin } : {}),
 		...(loadEnv !== undefined ? { load: Number(loadEnv) } : {}),
 		...(adsbEnv !== undefined ? { adsbRate: Number(adsbEnv) } : {}),
+		...(spectrumBinsEnv !== undefined
+			? { spectrumBins: Number(spectrumBinsEnv) }
+			: {}),
 	})
 	const { apiUrl, audioUrl } = await server.listen()
 	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)

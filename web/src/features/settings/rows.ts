@@ -16,6 +16,7 @@ import type {
 	StorageReport,
 	TunerState,
 } from "@wavekit/api-types"
+import { SPECTRUM_BINS_CAP_CEILING } from "@wavekit/api-types"
 
 import type {
 	ControlStatus,
@@ -23,6 +24,7 @@ import type {
 	ReceiverSetting,
 	ReceiverSettingKey,
 	SettingWriteResult,
+	SpectrumLimitsState,
 	TunerRelayView,
 } from "../../data/index.ts"
 import type { CardAnchorId } from "../../shell/layout.ts"
@@ -33,6 +35,7 @@ import type {
 	Motion,
 	SpectrumRange,
 } from "../../shell/device-prefs.ts"
+import { FFT_SIZES, fftBins } from "../../shell/device-prefs.ts"
 import type { DisplayPrefs, TimeFormat, Units } from "../display.ts"
 import { DEFAULT_DISPLAY } from "../display.ts"
 import type { ThemePrefs } from "../../shell/theme.ts"
@@ -90,6 +93,8 @@ export interface SettingsSnapshot {
 	readonly savedCount: number
 	/** Bands you edited or added in Settings › Band plans; null until the stack loads. */
 	readonly bandplanEdits: number | null
+	/** The core's spectrum limits (GET /api/spectrum): FFT sizes above `binsMax` cannot be picked. */
+	readonly spectrumLimits: Pick<SpectrumLimitsState, "binsMax" | "binsCap">
 	readonly decoders: readonly DecoderInfo[]
 	readonly decoderTypes: Readonly<Record<string, DecoderTypeInfo>>
 	readonly decoderViews: Readonly<Record<string, DecoderSettingsView>>
@@ -135,6 +140,43 @@ const opts = (list: readonly (readonly [string, string])[]): SettingOption[] =>
 export function words(text: string): string[] {
 	const w = text ? text.split(" ") : []
 	return w.concat(w.slice(1).map((x, i) => `${w[i]} ${x}`))
+}
+
+function fftRow(
+	d: DevicePrefs,
+	limits: SettingsSnapshot["spectrumLimits"],
+	a: SettingsActions,
+): SettingRow {
+	const served = fftBins(d.fftSize, limits.binsMax)
+	return {
+		id: "dp.fft",
+		group: "display",
+		label: "FFT size",
+		help:
+			served < d.fftSize
+				? `Using ${served}: this WaveKit sends up to ${served} bins`
+				: "Larger shows finer detail and reacts more slowly",
+		keys: words("fft size resolution bins detail spectrum waterfall"),
+		device: true,
+		widget: {
+			kind: "select",
+			options: FFT_SIZES.map(n => ({
+				value: String(n),
+				label: String(n),
+				...optional("disabled", fftSizeBlocked(n, limits)),
+			})),
+		},
+		value: String(d.fftSize),
+		text: String(d.fftSize),
+		def: { value: "8192", text: "8192" },
+		write: v => {
+			const n = Number(v)
+			const size = FFT_SIZES.find(x => x === n)
+			return local(() => {
+				if (size !== undefined) a.setDevice({ fftSize: size })
+			})
+		},
+	}
 }
 
 // ---- station
@@ -979,6 +1021,27 @@ const AVERAGING_OPTS = opts([
 	["low", "Low"],
 	["high", "High"],
 ])
+/** No core sends more bins than this yet (WG8 SPECTRUM_BINS_CAP_CEILING). */
+const FFT_CEILING = SPECTRUM_BINS_CAP_CEILING
+
+/** Why an FFT size above what this core serves cannot be picked; undefined when it can. */
+export function fftSizeBlocked(
+	size: number,
+	limits: Pick<SpectrumLimitsState, "binsMax" | "binsCap">,
+): string | undefined {
+	const max = limits.binsMax
+	if (max !== null && size <= max) return undefined
+	if (size > FFT_CEILING)
+		return `No WaveKit sends more than ${FFT_CEILING} bins yet`
+	if (max === null) return "This WaveKit did not report its spectrum limits"
+	const cap = limits.binsCap
+	if (cap && size > cap.cap)
+		return cap.source === "measured"
+			? `This host measured its limit at ${cap.cap} bins`
+			: `This host is capped at ${cap.cap} bins`
+	return `Raise scanner.ws.spectrumSummaryBins to ${size} to use it`
+}
+
 const WATERFALL_OPTS = opts([
 	["match", "Match accent"],
 	["amber", "Amber"],
@@ -1169,6 +1232,7 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			def: { value: "low", text: "Low" },
 			write: v => local(() => a.setDevice({ averaging: v as Averaging })),
 		},
+		fftRow(d, s.spectrumLimits, a),
 	)
 	rows.push({
 		id: "dev.density",

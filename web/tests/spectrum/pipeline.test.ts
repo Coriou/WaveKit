@@ -12,20 +12,24 @@ import type { SocketHandlers } from "../../src/spectrum/socket.ts"
 import { FakeFrames, FakeRenderer, FakeTimers } from "./fakes.ts"
 import { frame } from "./frames.ts"
 
-function setup(withCanvas: boolean) {
+function setup(withCanvas: boolean, texWidth = MAX_BINS) {
 	const posted: { msg: WorkerToMain; transfer: Transferable[] }[] = []
 	const subs: (SpectrumSubscription | null)[] = []
 	const renderer = new FakeRenderer()
 	const frames = new FakeFrames()
 	const timers = new FakeTimers()
 	let handlers: SocketHandlers | null = null
+	const widths: number[] = []
 	const pipeline = new SpectrumPipeline({
 		post: (msg, transfer) => posted.push({ msg, transfer: transfer ?? [] }),
 		openSocket: (_url, h) => {
 			handlers = h
 			return { setSubscription: s => subs.push(s), dispose: () => {} }
 		},
-		createRenderer: () => renderer,
+		createRenderer: (_canvas, width) => {
+			widths.push(width)
+			return renderer
+		},
 		frame: frames,
 		timers,
 	})
@@ -37,6 +41,7 @@ function setup(withCanvas: boolean) {
 		levels: DEFAULT_LEVELS,
 		ramp: new Uint8Array(1024),
 		historyRows: 16,
+		texWidth,
 		...(withCanvas ? { canvas: {} as OffscreenCanvas } : {}),
 	}
 	pipeline.handle(init)
@@ -54,6 +59,7 @@ function setup(withCanvas: boolean) {
 		posted,
 		subs,
 		renderer,
+		widths,
 		frames,
 		timers,
 		ofType,
@@ -80,6 +86,26 @@ describe("SpectrumPipeline (OffscreenCanvas path)", () => {
 		t.frames.tick()
 		expect(t.renderer.draws.length).toBe(1)
 		expect(t.ofType("row")).toEqual([])
+	})
+
+	it("takes rows as wide as the texture it was given (FFT size above 2048)", () => {
+		const t = setup(true, 8192)
+		expect(t.widths).toEqual([8192])
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ bytes: new Array<number>(6553).fill(40) }),
+		})
+		expect(t.renderer.rows.map(r => r.count)).toEqual([6553])
+		// never narrower than the default
+		expect(setup(true, 512).widths).toEqual([MAX_BINS])
+		const fallback = setup(false, 8192)
+		fallback.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ bytes: new Array<number>(6553).fill(40) }),
+		})
+		const row = fallback.ofType("row")[0]
+		expect(row?.binCount).toBe(6553)
+		expect(row?.buffer.byteLength).toBe(8192)
 	})
 
 	it("ignores frames of other sources (default selection fan-out)", () => {

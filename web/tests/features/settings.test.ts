@@ -25,6 +25,7 @@ import { SETTINGS_REGISTRY } from "../../src/features/settings/registry.ts"
 import { DEFAULT_DEVICE } from "../../src/shell/device-prefs.ts"
 import {
 	buildRows,
+	fftSizeBlocked,
 	formatLocation,
 	parseLocation,
 	type SettingsActions,
@@ -247,6 +248,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 		},
 		savedCount: 3,
 		bandplanEdits: 3,
+		spectrumLimits: { binsMax: 2048, binsCap: null },
 		decoders: [POCSAG],
 		decoderTypes: TYPES,
 		decoderViews: { "pocsag-1": VIEW },
@@ -625,6 +627,58 @@ describe("Settings items", () => {
 		expect(held.help).toBe(
 			"Holds −105 to −5 dBFS, where Auto stood when you picked Fixed",
 		)
+	})
+
+	it("offers FFT sizes up to what this core serves, saying why the others cannot be picked", async () => {
+		const a = actions()
+		const list = buildRows(snapshot(), a)
+		const ids = list.filter(r => r.device).map(r => r.id)
+		expect(ids[ids.indexOf("dp.avg") + 1]).toBe("dp.fft")
+		const fft = byId(list, "dp.fft")
+		expect(fft.value).toBe("8192")
+		expect(fft.def?.value).toBe("8192")
+		expect(fft.help).toBe("Using 2048: this WaveKit sends up to 2048 bins")
+		const options = fft.widget.kind === "select" ? fft.widget.options : []
+		expect(options.map(o => [o.value, o.disabled])).toEqual([
+			["2048", undefined],
+			["4096", "Raise scanner.ws.spectrumSummaryBins to 4096 to use it"],
+			["8192", "Raise scanner.ws.spectrumSummaryBins to 8192 to use it"],
+			["16384", "No WaveKit sends more than 8192 bins yet"],
+		])
+		await fft.write?.("4096")
+		await fft.write?.("1234")
+		expect(a.calls).toContainEqual(["device", { fftSize: 4096 }])
+		expect(a.calls.filter(c => c[0] === "device")).toHaveLength(1)
+		const wide = byId(
+			buildRows(
+				snapshot({
+					spectrumLimits: {
+						binsMax: 4096,
+						binsCap: { setting: "auto", cap: 4096, source: "measured" },
+					},
+				}),
+				a,
+			),
+			"dp.fft",
+		)
+		expect(wide.help).toBe("Using 4096: this WaveKit sends up to 4096 bins")
+		const wideOptions = wide.widget.kind === "select" ? wide.widget.options : []
+		expect(wideOptions[2]?.disabled).toBe(
+			"This host measured its limit at 4096 bins",
+		)
+		expect(fftSizeBlocked(4096, { binsMax: null, binsCap: null })).toBe(
+			"This WaveKit did not report its spectrum limits",
+		)
+		const full = byId(
+			buildRows(
+				snapshot({
+					spectrumLimits: { binsMax: 8192, binsCap: null },
+				}),
+				a,
+			),
+			"dp.fft",
+		)
+		expect(full.help).toBe("Larger shows finer detail and reacts more slowly")
 	})
 
 	it("crumbs device rows and matches accents loosely", () => {

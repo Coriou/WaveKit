@@ -110,6 +110,8 @@ export class SpectrumPipeline {
 	private readonly meta: Throttle<SpectrumFrameEventData>
 	private subscription: SpectrumSubscription | null = null
 	private readonly pool: ArrayBuffer[] = []
+	/** Waterfall texture width and row buffer size (init). */
+	private texWidth = MAX_BINS
 	private inFlight = 0
 	private decodeErrorReported = false
 	/** The next frame's meta goes out at once (first frame after a reset). */
@@ -175,7 +177,7 @@ export class SpectrumPipeline {
 			case "recycle":
 				this.inFlight = Math.max(0, this.inFlight - 1)
 				if (
-					msg.buffer.byteLength >= MAX_BINS &&
+					msg.buffer.byteLength >= this.texWidth &&
 					this.pool.length < MAX_ROWS_IN_FLIGHT
 				)
 					this.pool.push(msg.buffer)
@@ -256,7 +258,8 @@ export class SpectrumPipeline {
 			ramp: msg.ramp,
 			view: null,
 		}
-		this.history = new WaterfallHistory(msg.historyRows, MAX_BINS)
+		this.texWidth = Math.max(MAX_BINS, msg.texWidth)
+		this.history = new WaterfallHistory(msg.historyRows, this.texWidth)
 		if (msg.canvas) this.attachRenderer(msg.canvas, msg.historyRows)
 		this.socket = this.deps.openSocket(msg.wsUrl, {
 			message: m => this.onServer(m),
@@ -270,7 +273,7 @@ export class SpectrumPipeline {
 		if (!state) return
 		let renderer: SceneRenderer | null = null
 		try {
-			renderer = this.deps.createRenderer(canvas, MAX_BINS, depth)
+			renderer = this.deps.createRenderer(canvas, this.texWidth, depth)
 		} catch (err) {
 			this.deps.post({
 				type: "error",
@@ -293,7 +296,7 @@ export class SpectrumPipeline {
 		const scheduler = this.scheduler
 		const scene = new SpectrumScene(renderer, {
 			depth,
-			texWidth: MAX_BINS,
+			texWidth: this.texWidth,
 			layout: state.layout,
 			levels: state.levels,
 			size: state.size,
@@ -357,7 +360,7 @@ export class SpectrumPipeline {
 		if (this.scene) {
 			this.scene.addRow(axis, slot, count)
 		} else if (this.inFlight < MAX_ROWS_IN_FLIGHT) {
-			const buffer = this.pool.pop() ?? new ArrayBuffer(MAX_BINS)
+			const buffer = this.pool.pop() ?? new ArrayBuffer(this.texWidth)
 			new Uint8Array(buffer, 0, count).set(slot.subarray(0, count))
 			this.inFlight++
 			this.deps.post({ type: "row", axis, buffer, binCount: count }, [buffer])
