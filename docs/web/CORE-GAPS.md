@@ -377,3 +377,21 @@ re-checked 2026-10-17 on the branch after merging main 1da448e1)
 - [ ] With passive scanning off, a new spectrum subscriber gets no snapshot or backfill. Still so: with
   `scanner.passive.enabled: false` and nothing else using the source the engine is idle, the ack says
   `backfillFrames: 0` and the first live frame follows about 170 ms later.
+
+**Found by the web app, main screen pass** (2026-10-17, branch `claude/project-thread-afdtom` after merging
+main f0b71383; read from the core source, not yet re-run against a live core)
+
+- [ ] Saved frequencies (operator data) are only mounted in protected mode (`src/index.ts:1568`), so a
+  default legacy core answers 404 and the web app shows "saved frequencies unavailable". The design wants
+  them shared by every client whatever the access mode.
+- [ ] No order field or reorder route for saved frequencies; the web app sorts by frequency.
+- [ ] `PATCH /api/tuner/:sourceId/config` skips a setting equal to the placeholder value even when it is
+  listed in `unknownFields` (only frequency and sample rate count as unproven), so the web app uses the
+  single-setting POST routes.
+- [ ] Tuner state does not say who released control (relay client or operator); the web app infers it from
+  `/api/tuner-relay`. Receiver capabilities carry no `owner` / `controlMode`, and physical support for
+  bias-T and direct sampling is always `unknown`.
+- [ ] No read-only signal for the access role: a protected core only answers 401/403 (`AUTH_REQUIRED`,
+  `CSRF_REQUIRED`) after a write is tried.
+- [ ] Receiver board items with no data: dropped-samples counter, "Remove DC spike" and "IQ correction" as
+  tuner settings (`liveDemod.iqDcBlock` is the nearest).
