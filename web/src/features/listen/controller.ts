@@ -22,7 +22,12 @@ export interface ListenState {
 /** The part of PcmPlayer the controller drives (a fake in tests). */
 export interface ListenPlayer {
 	unlock(rateHint: number | null): void
-	play(source: { url: string; format: AudioStreamSource["format"]; rate: number }): void
+	play(source: {
+		url: string
+		format: AudioStreamSource["format"]
+		rate: number
+		credentials?: boolean
+	}): void
 	stop(): void
 	setVolume(volume: number): void
 	dispose(): void
@@ -30,7 +35,9 @@ export interface ListenPlayer {
 
 export interface ListenControllerOptions {
 	/** Builds the Web Audio player; null forces the <audio> fallback. Default: PcmPlayer where supported. */
-	createPlayer?: ((events: ConstructorParameters<typeof PcmPlayer>[0]) => ListenPlayer) | null
+	createPlayer?:
+		| ((events: ConstructorParameters<typeof PcmPlayer>[0]) => ListenPlayer)
+		| null
 }
 
 const VOLUME_KEY = "wavekit.web.volume"
@@ -68,7 +75,10 @@ export class ListenController extends Store<ListenState> {
 	/** A recording is playing in this tab: live audio keeps streaming, muted. */
 	private held = false
 
-	constructor(liveAudio: LiveAudioStore, options: ListenControllerOptions = {}) {
+	constructor(
+		liveAudio: LiveAudioStore,
+		options: ListenControllerOptions = {},
+	) {
 		super({ wanted: false, phase: "off", volume: readVolume(), error: null })
 		this.liveAudio = liveAudio
 		const events = {
@@ -234,12 +244,20 @@ export class ListenController extends Store<ListenState> {
 			if (!source.httpUrl) return
 			this.attachedKey = this.key
 			if (this.get().phase !== "playing") this.setPhase("connecting")
-			this.player.play({ url: source.httpUrl, format: source.format, rate: source.rate })
+			this.player.play({
+				url: source.httpUrl,
+				format: source.format,
+				rate: source.rate,
+				credentials: source.credentials,
+			})
 			return
 		}
 		const el = this.el
 		if (!el || !source.wavUrl) return
 		this.attachedKey = this.key
+		// set before src: the element fetches with the session cookie on a protected core
+		if (source.credentials) el.crossOrigin = "use-credentials"
+		else el.removeAttribute("crossorigin")
 		el.src = source.wavUrl
 		el.volume = this.outVolume()
 		if (this.get().phase !== "playing") this.setPhase("connecting")

@@ -17,6 +17,8 @@ export interface PcmSource {
 	/** Used when the response does not expose X-Audio-Format / X-Sample-Rate. */
 	format: PcmFormat
 	rate: number
+	/** Include the session cookie (a protected core's audio port is cross-origin). */
+	credentials?: boolean
 }
 
 export interface PcmPlayerEvents {
@@ -140,7 +142,11 @@ export class PcmPlayer {
 	private async pump(source: PcmSource, signal: AbortSignal): Promise<void> {
 		const ready = this.ready
 		if (!ready) throw new Error("Audio is not unlocked")
-		const response = await fetch(source.url, { signal, cache: "no-store" })
+		const response = await fetch(source.url, {
+			signal,
+			cache: "no-store",
+			...(source.credentials ? { credentials: "include" as const } : {}),
+		})
 		if (!response.ok || !response.body)
 			throw new Error(`The audio stream answered ${response.status}`)
 		const headers = response.headers
