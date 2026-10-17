@@ -25,12 +25,14 @@ import type {
 } from "@wavekit/api-types"
 import {
 	IDENTIFY_AMBIENT_MAX_TRIALS,
+	DCS_STANDARD_CODES,
 	IDENTIFY_ANALOG_LOOKBACK_MS,
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
 	SCANNER_AMBIENT_PROTOCOLS,
 	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 } from "@wavekit/api-types"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import { CTCSS_HZ } from "../audio-tones/ctcss.js"
 import type { ArtefactKind } from "../spectrum/artefacts.js"
 import {
 	USABLE_FRACTION,
@@ -518,12 +520,18 @@ export interface AnalogTarget {
 	toleranceHz: number
 	/** Job start − IDENTIFY_ANALOG_LOOKBACK_MS. */
 	sinceMs: number
+	/** The job/ambient end: a transmission that ended after it is not this job's evidence. */
+	untilMs?: number
 }
+
+const ANALOG_CTCSS: ReadonlySet<number> = new Set(CTCSS_HZ)
+const ANALOG_DCS: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
 
 /**
  * WG10 req 3.1/3.2 (pure, fail closed): the port's transmissions that answer `protocol` at the target,
  * re-checked here whatever the port returned: same source, finite frequency within the tolerance,
- * a modulation of the protocol, open or ended at or after `sinceMs`. `closed` newest first.
+ * a modulation of the protocol, open or ended at or after `sinceMs` (and at or before `untilMs` when
+ * given). `closed` newest first.
  */
 export function analogMatches(
 	transmissions: readonly AnalogEvidenceTransmission[],
@@ -549,7 +557,8 @@ export function analogMatches(
 		else if (
 			typeof x.endedAtMs === "number" &&
 			Number.isFinite(x.endedAtMs) &&
-			x.endedAtMs >= target.sinceMs
+			x.endedAtMs >= target.sinceMs &&
+			(target.untilMs === undefined || x.endedAtMs <= target.untilMs)
 		)
 			closed.push(x)
 	}
@@ -578,10 +587,13 @@ export function analogResultOf(
 		modulation,
 		transmissions: closed.length,
 		transmissionId: latest.transmissionId,
-		ctcssHz: typeof ctcss === "number" && Number.isFinite(ctcss) ? ctcss : null,
+		// Re-checked against the standard tables as analog-evidence does: a non-standard tone is no tone.
+		ctcssHz:
+			typeof ctcss === "number" && ANALOG_CTCSS.has(ctcss) ? ctcss : null,
 		dcs:
 			dcs &&
 			typeof dcs.code === "string" &&
+			ANALOG_DCS.has(dcs.code) &&
 			(dcs.polarity === "normal" || dcs.polarity === "inverted")
 				? { code: dcs.code, polarity: dcs.polarity }
 				: null,
@@ -1578,7 +1590,8 @@ export class IdentifyRunner implements JobDriver {
 			),
 			...(artefact ? { artefact } : {}),
 			...(ended ? { ended } : {}),
-			...(analog && !artefact ? { analog } : {}),
+			// A digital decode won: the analog evidence is not part of the result.
+			...(analog && !artefact && t.decoded === null ? { analog } : {}),
 			...(unavailableTypes.length > 0
 				? { decodersUnavailable: unavailableTypes }
 				: {}),
@@ -1833,6 +1846,7 @@ export class IdentifyRunner implements JobDriver {
 			sinceMs:
 				(this.record.startedAt ?? this.record.createdAt) -
 				IDENTIFY_ANALOG_LOOKBACK_MS,
+			untilMs: t.ambientUntil,
 		}
 		let monitoring = false
 		let list: readonly AnalogEvidenceTransmission[] = []
@@ -1864,7 +1878,8 @@ export class IdentifyRunner implements JobDriver {
 		for (const trial of running) {
 			const m = analogMatches(list, target, trial.protocol)
 			const analog = analogResultOf(m.closed)
-			if (analog && !atDeadline) {
+			// A closed match (ended at or before the deadline) decodes even when first seen on the deadline tick.
+			if (analog) {
 				trial.outcome = "decoded"
 				trial.mode = analog.modulation
 				decoded = true

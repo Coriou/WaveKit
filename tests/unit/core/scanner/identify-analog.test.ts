@@ -341,6 +341,53 @@ describe("identify analog trials (WG10 3.2)", () => {
 		expect(h.clock.now).toBeLessThan(START + 15_000)
 	})
 
+	it("a transmission closing just before the deadline, first seen on the deadline tick, decodes", async () => {
+		const h = harness()
+		h.port.list = [tx({ endedAtMs: null })]
+		await h.start()
+		while (h.clock.now < START + 14_000) await h.advance(1000)
+		expect(h.trials()["analog-fm"]).toBe("running")
+		h.port.list = [tx({ endedAtMs: START + 14_900 })]
+		await h.advance(2000)
+		// The deadline was processed on this tick (the unmatched trial ended) and the closed match still decoded.
+		expect(h.trials()).toEqual({
+			"analog-fm": "decoded",
+			"analog-am": "no-sync",
+		})
+		expect(h.last()?.result?.analog).toMatchObject({ ctcssHz: 88.5 })
+	})
+
+	it("a closed match that ended after the job/ambient end is no evidence", () => {
+		const target = {
+			sourceId: "rtl",
+			hz: TARGET_HZ,
+			toleranceHz: 5000,
+			sinceMs: START - IDENTIFY_ANALOG_LOOKBACK_MS,
+			untilMs: START + 15_000,
+		}
+		expect(
+			analogMatches([tx({ endedAtMs: START + 15_001 })], target, "analog-fm")
+				.closed,
+		).toEqual([])
+		expect(
+			analogMatches([tx({ endedAtMs: START + 15_000 })], target, "analog-fm")
+				.closed,
+		).toHaveLength(1)
+	})
+
+	it("a non-standard DCS code or CTCSS tone from the port is treated as no tone", async () => {
+		const h = harness()
+		h.port.list = [
+			tx({ ctcssHz: 123.4, dcs: { code: "999", polarity: "normal" } }),
+		]
+		await h.start()
+		await h.settle()
+		expect(h.trials()["analog-fm"]).toBe("decoded")
+		expect(h.last()?.state).toBe("candidate")
+		expect(h.last()?.result?.analog).toMatchObject({ ctcssHz: null, dcs: null })
+		expect(h.last()?.result?.metadata).not.toHaveProperty("ctcssHz")
+	})
+
 	it("live audio never on the target: unsupported/no-live-audio", async () => {
 		const h = harness()
 		h.port.live = false
@@ -485,6 +532,8 @@ describe("digital decode keeps priority (WG10 3.3)", () => {
 			expect(e.result?.protocol).toBe("dmr")
 			expect(e.result?.confidence).toBe("decoded")
 			expect(e.result?.metadata).not.toHaveProperty("ctcssHz")
+			// The digital decode won: no analog evidence in the result, even after an earlier analog decode.
+			expect(e.result).not.toHaveProperty("analog")
 			expect(e.trials.find(t => t.protocol === "dmr")?.outcome).toBe("decoded")
 		})
 	}
