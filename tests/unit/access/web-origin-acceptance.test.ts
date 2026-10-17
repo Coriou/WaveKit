@@ -92,7 +92,7 @@ function expectCookieAttributes(
 	expect(attributes).toContain("httponly")
 	expect(cookies[0]).toMatch(/;\s*SameSite=Strict(;|$)/)
 	expect(cookies[0]).toMatch(/;\s*Path=\/(;|$)/)
-	expect(cookies[0]).toMatch(/;\s*Max-Age=\d+(;|$)/)
+	expect(cookies[0]).toMatch(/;\s*Max-Age=2592000(;|$)/)
 	expect(attributes).not.toContain("domain")
 	if (scheme === "https") expect(attributes).toContain("secure")
 	else expect(attributes).not.toContain("secure")

@@ -10,6 +10,7 @@ import {
 	generateMachineToken,
 	sessionCredentialBinding,
 } from "../../../src/access/credentials.js"
+import { serializeSessionCookie } from "../../../src/access/cookies.js"
 import { PairingService } from "../../../src/access/pairing.js"
 import type { IssuedPairingCode } from "../../../src/access/pairing.js"
 import { AccessPolicy } from "../../../src/access/policy.js"
@@ -113,7 +114,11 @@ describe("pair body name and kind (WG9 req 1.5)", () => {
 			"expiresAt",
 			"csrfToken",
 		])
-		expect(paired.cookie?.value).toBeDefined()
+		expect(paired.cookie).toBeDefined()
+		if (!paired.cookie) throw new Error("Expected cookie")
+		expect(serializeSessionCookie(paired.cookie)).toMatch(
+			/^wavekit_session=[A-Za-z0-9_-]+; Path=\/; HttpOnly; SameSite=Strict; Max-Age=2592000$/,
+		)
 		expect(env.sessions.snapshotRememberedDevices()[0]).toMatchObject({
 			name: null,
 			kind: null,
@@ -197,6 +202,15 @@ describe("pair body name and kind (WG9 req 1.5)", () => {
 		const env = await setup()
 		await expect(env.sessions.create({ name: " x" })).rejects.toThrow()
 		expect(env.persist).not.toHaveBeenCalled()
+	})
+
+	it("store create writes the label it validated even if the caller mutates it", async () => {
+		const env = await setup()
+		const options: { name?: string } = { name: "valid" }
+		const pending = env.sessions.create(options)
+		options.name = " padded"
+		expect((await pending).kind).toBe("created")
+		expect(env.sessions.snapshotRememberedDevices()[0]?.name).toBe("valid")
 	})
 
 	// Feature: web-gaps-9, Property 2: Pair body fails closed

@@ -93,14 +93,20 @@ function closeServer(server: Server): Promise<void> {
 async function holdPorts(count: number): Promise<Server[]> {
 	const held: Server[] = []
 	const ports = new Set<number>()
-	while (held.length < count) {
+	for (let attempt = 0; held.length < count; attempt += 1) {
+		if (attempt >= 200) throw new Error("No free test port after 200 attempts")
 		const port = 24000 + Math.floor(Math.random() * 6000)
 		if (ports.has(port)) continue
 		const server = createServer((_request, response) => {
 			response.writeHead(200, { "Content-Type": "text/html" })
 			response.end("<!doctype html><title>web app</title>")
 		})
-		if ((await listenOn(server, port)) !== null) continue
+		const failure = await listenOn(server, port)
+		if (failure === "EADDRINUSE") continue
+		if (failure !== null) {
+			await Promise.all(held.map(closeServer))
+			throw new Error(`Test port reservation failed: ${failure}`)
+		}
 		ports.add(port)
 		held.push(server)
 	}
