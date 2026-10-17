@@ -54,6 +54,10 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-9](web-gaps-9/requirements.md): browser pairing for a web app on another port,
   recording Keep and deletion behind one deletion decision, strict tuning trust and faster
   operator retunes, zoom workload benchmark, minors (WG9)
+- [web-gaps-10](web-gaps-10/requirements.md): scanner recording delete, merge and eviction
+  folder protection, kept totals and delete leftover sweep; live audio that survives
+  click-to-tune, a carrier-aware auto squelch, operator rate proof and the untracked-retune root
+  cause; identify for analog voice and unavailable decoders (WG10)
 
 ## The three files
 
