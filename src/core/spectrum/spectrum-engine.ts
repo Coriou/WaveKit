@@ -1371,6 +1371,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			sampleRateHz: fs,
 			networkSettleMs: s.sweep.settleMs.network,
 		})
+		// A host-reported centre that disagrees with ours is never `commanded` or `relay`.
+		if (this.centreOverride !== null)
+			pending.trust = mergeTrust(pending.trust, "unverified")
 		const centreHz =
 			this.centreOverride ??
 			pending.centreHz ??
