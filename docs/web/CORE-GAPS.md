@@ -57,6 +57,24 @@ tick: the recording id on events, map tiles from core and batched `aircraft` fra
   sends recent frames marked as backfill before live frames (WG1 §1, `spectrum-backfill.ts`).
 - [ ] Low-latency tuner control over WebSocket (`ClientMessage` is still subscribe/unsubscribe
   only) for drag-to-pan. Depends on the ROADMAP §8 measurement of coalesced REST drag-to-tune.
+  Owner, 2026-10-17: navigating the spectrum must be fluid. The web app now retunes *during* a
+  drag (latest wins, at most one request in flight, a few per second) and slides the old frames
+  until frames at the new centre arrive. What core should provide: (1) that measurement on the
+  Pi receiver for a burst of retunes 50–500 kHz apart; (2) a retune path that drops superseded
+  requests instead of queueing them, keeps tuner arbitration and scanner preemption, and says in
+  the reply (or on the next frame) which centre the frame is for; (3) a frame-level `centreHz`
+  that is exact the moment the hardware has moved, so the client can place each frame without
+  guessing (today `tuning trust` marks old-centre blocks `unverified`).
+- [ ] Wide-band panorama: an operator-started sweep that hops one source across a frequency
+  range (say 88–470 MHz) and returns one stitched power spectrum, each segment with its own
+  capture time, like `rtl_power`. Owner, 2026-10-17: the spectrum must let the operator go
+  anywhere in the band, beyond the visible capture, without inventing IQ: the panorama shows
+  what was really measured, dated. Partly: scanner sweeps already hop and measure per hop
+  (`src/core/scanner/job-runner.ts`) and the web Band ruler shows the last 24 h of scanner
+  occupancy; still the gap: a route or WS channel that returns the per-hop FFT bins themselves
+  (not only discoveries), a bin count per segment the client can ask for, takeover and
+  resume semantics like scanner sweeps (the source's decoders pause), and tests on the
+  stitching (overlap, DC spike and edge roll-off trimmed per segment).
 
 **Band plans and presets** (one package: Spectrum labels, typed entry, ⌘K, Scanner).
 Owner, 2026-10-12: band plans adapt to the user, configurable in core and in the UI, and WaveKit
