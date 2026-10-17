@@ -499,6 +499,23 @@ class BootStatusTests(unittest.TestCase):
         policy = (script_dir / 'wavekit-wifi-powersave.conf').read_text()
         self.assertIn('[connection]\nwifi.powersave=2', policy)
 
+    def test_image_announces_the_receiver_over_dns_sd(self):
+        import xml.etree.ElementTree as ElementTree
+        self.assertEqual(builder.IMAGE_SUPPORT['wavekit-avahi.service'], '/etc/avahi/services/wavekit-sdr-host.service')
+        group = ElementTree.parse(ROOT / 'packages/sdr-host/scripts/wavekit-avahi.service').getroot()
+        services = {
+            service.findtext('type'): (service.findtext('port'), [t.text for t in service.findall('txt-record')])
+            for service in group.findall('service')
+        }
+        self.assertEqual(services, {
+            '_wavekit-sdr._tcp': ('8080', ['v=1', 'iq=5555', 'path=/api/status']),
+            '_http._tcp': ('80', ['path=/']),
+        })
+        # The announced ports are the sdr-host defaults the image runs with.
+        compose = (ROOT / 'packages/sdr-host/docker-compose.yml').read_text()
+        self.assertIn('SDR_HOST_RTLMUX__PORT:-5555', compose)
+        self.assertIn('SDR_HOST_API__PORT:-8080', compose)
+
 
 
 class BootReportTests(unittest.TestCase):

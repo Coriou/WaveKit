@@ -97,6 +97,31 @@ export interface SdrHostNetworkInterface {
 	rxBytesPerSec: number | null
 	txBytesPerSec: number | null
 	wireless: { linkQuality: number; signalDbm: number } | null
+	/** Negotiated wired link speed; null for Wi-Fi or without carrier. */
+	speedMbps: number | null
+	/**
+	 * Lowest IPv4 default-route metric through this interface, null when it has
+	 * none. The lowest metric across interfaces is the Pi's preferred uplink; it
+	 * says nothing about which address a client chose to connect to.
+	 */
+	defaultRouteMetric: number | null
+}
+
+/** One address a client may dial for this receiver (receiver-endpoints 1.3). */
+export interface SdrHostEndpoint {
+	address: string
+	family: "IPv4" | "IPv6"
+	interface: string
+	kind: "ethernet" | "wireless" | "other"
+	speedMbps: number | null
+	signalDbm: number | null
+}
+
+/** `GET /api/status` `endpoints`: ports and addresses, best first. */
+export interface SdrHostEndpoints {
+	iqPort: number
+	apiPort: number
+	addresses: SdrHostEndpoint[]
 }
 
 export interface SdrHostTelemetry {

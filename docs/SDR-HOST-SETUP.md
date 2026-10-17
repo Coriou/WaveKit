@@ -177,7 +177,7 @@ WaveKit running on your computer. It is read-only.
   clients means delivery is idle; sampling continues.
 - **This Pi**: power (under-voltage now, from the kernel's `rpi_volt` sensor,
   and dips counted since the receiver service started), network (Wi-Fi signal
-  as bars with the dBm value), storage backing Docker and uptime. On images,
+  as bars with the dBm value, or the wired link speed), storage backing Docker and uptime. On images,
   Uptime also names an unexpected restart (see below). Every value is marked
   stale or unavailable when it cannot be read.
 - **Diagnostics** holds process ids, counter resets, measurement sources,
@@ -240,6 +240,64 @@ Replace `wlan0` if the Wi-Fi interface has a different name. Disabling power
 saving is a latency policy, not evidence that undervoltage or IQ loss is fixed.
 Image-content checks, clean-card setup, patched-runtime checks and sustained
 streaming acceptance remain separate results.
+
+### Wired Ethernet next to Wi-Fi
+
+A full 2.048 Msps U8 stream is about 4.1 MB/s (33 Mbit/s) per client. A Pi 3's
+2.4 GHz radio at a fair signal (around -70 dBm) delivers roughly half of that,
+so rtlmux drops data and decoders hear gaps. Its 100 Mbit/s Ethernet port
+carries the stream with room to spare. Plug it in whenever you can.
+
+The image keeps NetworkManager's default route metrics: a wired connection gets
+100 and Wi-Fi gets 600, so the Pi's own traffic leaves over Ethernet whenever
+the port has carrier and falls back to Wi-Fi when the cable is pulled. Clients
+still choose the address they connect to. A client that dials the Wi-Fi
+address is served over Wi-Fi even with the cable in, so point WaveKit at the
+Ethernet address. The status page warns under "This Pi" when IQ leaves over
+Wi-Fi while a wired link is up and names the wired address.
+`GET /api/host` reports `speedMbps` and `defaultRouteMetric` for each
+interface.
+
+The two links may sit on different subnets, for example a mesh Wi-Fi router
+behind the ISP box that the cable goes to. A client on the inner network can
+usually still reach the outer subnet through the mesh router's NAT. Test it
+with `nc -z <ethernet-ip> 5555`.
+
+To prefer Wi-Fi anyway, or to make the choice explicit, set a connection's
+metric (lower wins). On a headless Pi, keep a way back in before changing
+the link you are connected through:
+
+```bash
+nmcli -f NAME,DEVICE connection show
+sudo nmcli connection modify "<wired connection>" ipv4.route-metric 700 ipv6.route-metric 700
+sudo nmcli connection up "<wired connection>"
+# undo: set both metrics back to -1 (the default) and bring it up again
+```
+
+### Finding the receiver and its addresses
+
+`GET /api/status` lists every address a client may dial in `endpoints`, best
+first: a wired link with carrier, then other links, then Wi-Fi. Within a kind,
+the lower route metric comes first, and IPv4 comes before IPv6. Link-local and
+loopback addresses are left out. Each entry names its interface, its kind, the
+wired speed or the Wi-Fi signal. Reachability depends on the client, so the
+list never claims it. `endpoints` is `null` when the container cannot see the
+host network. `receiverId` is a random ID for the running sdr-host process,
+the same on every address it serves, so a client can confirm that two addresses
+lead to the same receiver. It changes when sdr-host restarts.
+
+Dedicated images also announce the receiver over DNS-SD through the Pi's
+avahi-daemon (`/etc/avahi/services/wavekit-sdr-host.service`). The announcement
+is `_wavekit-sdr._tcp` on port 8080 with TXT `v=1`, `iq=5555` and
+`path=/api/status`, plus `_http._tcp` on port 80 for the status page. Browse it
+with `dns-sd -B _wavekit-sdr._tcp` on a Mac or `avahi-browse -r _wavekit-sdr._tcp`
+on Linux. The file carries the image's default ports, so a compose override of
+`SDR_HOST_RTLMUX__PORT` or `SDR_HOST_API__PORT` is not reflected there. mDNS
+reaches only the subnet it is sent on, so use it to find the receiver and use
+`endpoints` to choose the address. avahi announces port 8080 from the first boot,
+before first-boot setup has started sdr-host, so for a few minutes the announcement
+points at a port nothing listens on yet. That is harmless, since discovery is only
+a convenience.
 
 ## Troubleshooting
 

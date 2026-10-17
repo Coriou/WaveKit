@@ -151,6 +151,28 @@ export function parseNetWireless(text: string): Map<string, WirelessLink> {
 	return result
 }
 
+const RTF_UP = 0x1
+
+/**
+ * IPv4 default routes from /proc/net/route: interface -> lowest metric. The
+ * interface with the lowest metric is the one the host's own traffic uses.
+ */
+export function parseDefaultRoutes(text: string): Map<string, number> {
+	const result = new Map<string, number>()
+	for (const line of text.split("\n").slice(1)) {
+		const [name, destination, , flags, , , metric, mask] = line
+			.trim()
+			.split(/\s+/)
+		if (!name || destination !== "00000000" || mask !== "00000000") continue
+		const value = Number(metric)
+		if ((Number.parseInt(flags ?? "", 16) & RTF_UP) === 0) continue
+		if (!Number.isInteger(value) || value < 0) continue
+		const previous = result.get(name)
+		if (previous === undefined || value < previous) result.set(name, value)
+	}
+	return result
+}
+
 /** Kernel thermal zones report millidegrees Celsius. */
 export function parseMilliCelsius(text: string): number | null {
 	if (!/^-?\d+$/.test(text.trim())) return null

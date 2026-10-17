@@ -37,6 +37,7 @@ IMAGE_SUPPORT = {
     'wavekit-journald.conf': '/etc/systemd/journald.conf.d/90-wavekit.conf',
     'pi-boot-report.py': '/usr/local/lib/wavekit/boot-report.py',
     'wavekit-boot-report.service': '/etc/systemd/system/wavekit-boot-report.service',
+    'wavekit-avahi.service': '/etc/avahi/services/wavekit-sdr-host.service',
 }
 
 
@@ -232,6 +233,8 @@ def validate_stock(fs):
         raise ValueError('Base requires cloud-init and Python 3')
     if not fs.exists('/usr/sbin/NetworkManager'):
         raise ValueError('Base requires NetworkManager for the image Wi-Fi policy')
+    if not fs.exists('/usr/sbin/avahi-daemon'):
+        raise ValueError('Base requires avahi-daemon for the receiver DNS-SD announcement')
     unit_path = '/usr/lib/systemd/system/cloud-final.service'
     if not fs.exists(unit_path):
         unit_path = '/lib/systemd/system/cloud-final.service'

@@ -13,6 +13,7 @@ import {
 	cpuBusyFraction,
 	parseLoadavg,
 	parseMeminfo,
+	parseDefaultRoutes,
 	parseMilliCelsius,
 	parseNetDev,
 	parseNetWireless,
@@ -506,6 +507,11 @@ export class HostCollector {
 		const wireless =
 			wirelessText === null ? new Map() : parseNetWireless(wirelessText)
 		const addresses = this.networkInterfaces()
+		const routeText = this.read(path.join(this.procRoot, "net", "route"))
+		const defaultRoutes =
+			routeText === null
+				? new Map<string, number>()
+				: parseDefaultRoutes(routeText)
 
 		const result: SdrHostNetworkInterface[] = physical.map(name => {
 			const isWireless =
@@ -535,6 +541,11 @@ export class HostCollector {
 				this.netSamples.set(name, history)
 			}
 			const link = wireless.get(name)
+			// sysfs speed is the negotiated wired rate; -1 or EINVAL without carrier.
+			// Wi-Fi drivers report a nominal figure unrelated to throughput.
+			const speed = isWireless
+				? null
+				: Number(this.read(path.join(netBase, name, "speed"))?.trim())
 			return {
 				name,
 				kind: isWireless ? "wireless" : type === "1" ? "ethernet" : "other",
@@ -552,6 +563,9 @@ export class HostCollector {
 				wireless: link
 					? { linkQuality: link.quality, signalDbm: link.signalDbm }
 					: null,
+				speedMbps:
+					speed !== null && Number.isInteger(speed) && speed > 0 ? speed : null,
+				defaultRouteMetric: defaultRoutes.get(name) ?? null,
 			}
 		})
 		this.set(this.network, result, null, at)
