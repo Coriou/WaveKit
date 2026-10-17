@@ -1525,6 +1525,7 @@ export class ApiServer {
 			await this.app.register(scannerRoutes, {
 				scanner: this.scanner,
 				...(this.accessController ? { access: this.accessController } : {}),
+				...(this.access === undefined ? { legacyAudioHost: true } : {}),
 			})
 		}
 		if (this.spectrum) {

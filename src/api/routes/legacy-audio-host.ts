@@ -141,3 +141,19 @@ export function requestHostHeader(
 	if (values.length > 1) return values
 	return request.headers.host
 }
+
+const LOCALHOST_AUDIO_URL = /^http:\/\/localhost:(\d{1,5})\//
+
+/**
+ * Rewrite a localhost fallback audio URL whose port is read from the URL itself (a route
+ * that relays a stored stream URL without knowing which audio listener made it). Same
+ * fail-closed rules as `deriveLegacyAudioUrl`.
+ */
+export function deriveLegacyAudioUrlFromBase(
+	baseUrl: string,
+	hostHeader: string | readonly string[] | undefined,
+): string {
+	const port = LOCALHOST_AUDIO_URL.exec(baseUrl)?.[1]
+	if (port === undefined) return baseUrl
+	return deriveLegacyAudioUrl(baseUrl, hostHeader, Number(port))
+}

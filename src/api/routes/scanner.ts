@@ -16,6 +16,10 @@
  */
 import type { ReadStream } from "node:fs"
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
+import {
+	deriveLegacyAudioUrlFromBase,
+	requestHostHeader,
+} from "./legacy-audio-host.js"
 import { createReadStream } from "node:fs"
 import type { ScannerIdentifyRequest } from "@wavekit/api-types"
 import type {
@@ -93,6 +97,11 @@ export type ScannerRouteService = Pick<
 export interface ScannerRoutesOptions {
 	scanner: ScannerRouteService
 	access?: FastifyAccessController
+	/**
+	 * Legacy mode only (WG9 5.5): the listen answer's localhost fallback stream URLs
+	 * follow the request's own Host, per response. Absent: the stored URLs.
+	 */
+	legacyAudioHost?: boolean
 }
 
 interface DiscoveryQuery {
@@ -792,7 +801,16 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		},
 		async (request, reply) => {
 			try {
-				return await scanner.listen(request.params.id)
+				const result = await scanner.listen(request.params.id)
+				if (options.legacyAudioHost !== true) return result
+				// Per response only: never stored, logged or broadcast.
+				const host = requestHostHeader(request)
+				const httpUrl = deriveLegacyAudioUrlFromBase(result.httpUrl, host)
+				const wavUrl = deriveLegacyAudioUrlFromBase(result.wavUrl, host)
+				if (httpUrl === result.httpUrl && wavUrl === result.wavUrl)
+					return result
+				void reply.header("Cache-Control", "no-store")
+				return { ...result, httpUrl, wavUrl }
 			} catch (err) {
 				return sendError(reply, err)
 			}

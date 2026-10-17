@@ -1,6 +1,6 @@
 /**
  * WG9 req 5.3 / 5.5 (Main wiring): through the real ApiServer, legacy mode derives the
- * live-audio and digital-voice stream URLs from the request Host and keeps the live-audio
+ * live-audio, digital-voice and scanner listen stream URLs from the request Host and keeps the live-audio
  * PATCH 400 message; protected mode keeps the localhost URLs and redacts the message like the
  * global error handler.
  */
@@ -162,6 +162,18 @@ function dependencies(
 		digitalVoice: Object.assign(new EventEmitter(), {
 			getStatus: () => digitalStatus(),
 		}),
+		scanner: Object.assign(new EventEmitter(), {
+			settings: () => ({ ws: { maxMessagesPerSecond: 10 } }),
+			listen: () =>
+				Promise.resolve({
+					mode: "live-audio",
+					sourceId: "rtl",
+					frequencyHz: 446_056_250,
+					offsetHz: 0,
+					httpUrl: "http://localhost:8081/stream",
+					wavUrl: "http://localhost:8081/stream.wav",
+				}),
+		}),
 		...extra,
 	} as unknown as ApiServerDependencies
 }
@@ -206,6 +218,17 @@ describe("legacy audio host and live-audio redaction through the API server (WG9
 		expect(body.decoders[0]?.wavUrl).toBe(
 			"http://receiver.lan:8082/decoders/dsd/stream.wav",
 		)
+
+		const listen = await app.inject({
+			method: "POST",
+			url: "/api/scanner/discoveries/d_1/listen",
+			headers,
+		})
+		expect(listen.statusCode).toBe(200)
+		expect(listen.json()).toMatchObject({
+			httpUrl: "http://receiver.lan:8081/stream",
+			wavUrl: "http://receiver.lan:8081/stream.wav",
+		})
 
 		const patch = await app.inject({
 			method: "PATCH",
@@ -271,6 +294,17 @@ describe("legacy audio host and live-audio redaction through the API server (WG9
 		expect(body.decoders[0]?.httpUrl).toBe(
 			"http://localhost:8082/decoders/dsd/stream",
 		)
+
+		const listen = await app.inject({
+			method: "POST",
+			url: "/api/scanner/discoveries/d_1/listen",
+			headers,
+		})
+		expect(listen.statusCode).toBe(200)
+		expect(listen.json()).toMatchObject({
+			httpUrl: "http://localhost:8081/stream",
+			wavUrl: "http://localhost:8081/stream.wav",
+		})
 
 		const patch = await app.inject({
 			method: "PATCH",
