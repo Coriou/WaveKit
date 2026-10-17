@@ -17,6 +17,8 @@
  * at most once an hour, counted), the worker is restarted once, and after a second failure the
  * main thread writes every snapshot for the life of the process (warned once).
  */
+import { rename, rm } from "node:fs/promises"
+import { totalmem } from "node:os"
 import { Worker } from "node:worker_threads"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -33,15 +35,54 @@ import type {
 export const MESSAGE_OVERHEAD_BYTES = 256
 /** Charged bytes of unacknowledged messages past which the mirror goes stale (not queued further). */
 export const DEFAULT_SNAPSHOT_QUEUE_BYTES = 16 * 1024 * 1024
+/** Floor of the commit timeout (review m4): small snapshots get a minute. */
 export const DEFAULT_SNAPSHOT_COMMIT_TIMEOUT_MS = 60_000
+/** The slowest disk the commit timeout allows for: 1 MiB/s of snapshot text. */
+export const SNAPSHOT_COMMIT_BYTES_PER_SECOND = 1024 * 1024
+/** Ceiling of the scaled commit timeout: a commit never holds the persistence queue past 10 min. */
+export const MAX_SNAPSHOT_COMMIT_TIMEOUT_MS = 600_000
+
 /**
- * A failed worker's snapshot waits for the worker to exit (so no late rename lands after the
- * fallback), but at most this long: a worker that never exits must not stall the persistence
- * queue. Past it the worker is abandoned and snapshots stay on the main thread for good.
+ * Review m4: the commit timeout scales with the expected text size, `max(base, ceil(bytes /
+ * 1 MiB/s) s)`, capped at `max(base, 10 min)`. `bytes` is the larger of the last written text and
+ * the last reset text (the main path's snapshot), so a store that grows between commits is judged
+ * against its recent size; a timeout fails over to the main thread, which then writes that one.
+ */
+export function snapshotCommitTimeoutMs(baseMs: number, bytes: number): number {
+	const scaled =
+		Number.isFinite(bytes) && bytes > 0
+			? Math.ceil(bytes / SNAPSHOT_COMMIT_BYTES_PER_SECOND) * 1000
+			: 0
+	return Math.max(baseMs, Math.min(MAX_SNAPSHOT_COMMIT_TIMEOUT_MS, scaled))
+}
+
+/**
+ * A failed worker's snapshot waits for the worker to exit before the fallback writes, but at most
+ * this long: a worker that never exits must not stall the persistence queue. Past it the worker is
+ * abandoned and snapshots stay on the main thread for good. An abandoned worker can at worst write
+ * its own tmp file late: only the main thread renames, and only for its live, current commit.
  */
 export const DEFAULT_SNAPSHOT_TERMINATE_WAIT_MS = 10_000
-/** Old-space limit of the worker; an out-of-memory worker exits and fails over to the main thread. */
-export const DEFAULT_SNAPSHOT_WORKER_HEAP_MB = 1024
+export const MIN_SNAPSHOT_WORKER_HEAP_MB = 256
+export const MAX_SNAPSHOT_WORKER_HEAP_MB = 2048
+
+/**
+ * Old-space limit of the worker (review m2): a quarter of the host memory, clamped to
+ * [256 MiB, 2 GiB]. The worker holds the mirror (about one snapshot text of record JSON) plus one
+ * capture of references, and during a reset the reset text and its parse besides; an
+ * out-of-memory worker exits and fails over to the main thread, so the limit only bounds the
+ * worker, never correctness.
+ */
+export function defaultSnapshotWorkerHeapMb(
+	totalBytes: number = totalmem(),
+): number {
+	const quarterMb = Math.floor(totalBytes / 4 / (1024 * 1024))
+	if (!Number.isFinite(quarterMb)) return MIN_SNAPSHOT_WORKER_HEAP_MB
+	return Math.min(
+		MAX_SNAPSHOT_WORKER_HEAP_MB,
+		Math.max(MIN_SNAPSHOT_WORKER_HEAP_MB, quarterMb),
+	)
+}
 const WARN_INTERVAL_MS = 3_600_000
 
 /** Worker entry after esbuild flattens this module into dist/index.js (dist/snapshot-worker.js). */
@@ -124,8 +165,23 @@ type Posted =
 
 interface PendingCommit {
 	id: number
+	file: string
+	/** The worker writes only this file; the main thread renames it or removes it. */
+	tmp: string
 	resolve: (r: CommitResult) => void
 	timer: ReturnType<typeof setTimeout>
+}
+
+/** Tmp file the worker writes for commit `id`, off the main thread's `<file>.<pid>.tmp`. */
+export function snapshotWorkerTmp(file: string, id: number): string {
+	return `${file}.${process.pid}.worker-${id}.tmp`
+}
+
+/** Removes a commit's tmp file (never published), then reports the outcome. */
+function discard(commit: PendingCommit, result: CommitResult): void {
+	void rm(commit.tmp, { force: true })
+		.catch(() => undefined)
+		.then(() => commit.resolve(result))
 }
 
 export class SnapshotWriter {
@@ -159,6 +215,7 @@ export class SnapshotWriter {
 	private lastTextBytes: number | null = null
 	private lastBuildMs: number | null = null
 	private lastWriteMs: number | null = null
+	private lastResetChars = 0
 
 	constructor(opts: SnapshotWriterOptions) {
 		this.log = opts.logger
@@ -170,7 +227,7 @@ export class SnapshotWriter {
 			opts.commitTimeoutMs ?? DEFAULT_SNAPSHOT_COMMIT_TIMEOUT_MS
 		this.terminateWaitMs =
 			opts.terminateWaitMs ?? DEFAULT_SNAPSHOT_TERMINATE_WAIT_MS
-		this.heapMb = opts.heapMb ?? DEFAULT_SNAPSHOT_WORKER_HEAP_MB
+		this.heapMb = opts.heapMb ?? defaultSnapshotWorkerHeapMb()
 	}
 
 	/** The mirror tracks the store: a snapshot can go to the worker. */
@@ -248,6 +305,7 @@ export class SnapshotWriter {
 			return
 		}
 		const charged = text.length * 2 + MESSAGE_OVERHEAD_BYTES
+		this.lastResetChars = text.length
 		this.resetInFlight = true
 		this.posted.push({ kind: "reset", charged })
 		if (!this.send({ type: "reset", text, seq, charged })) return
@@ -283,11 +341,24 @@ export class SnapshotWriter {
 		return this.post(message, charged) ? id : null
 	}
 
-	/** Writes request `id` to `file`; resolves (never rejects) with the outcome. */
+	/** The commit timeout for the next commit (`snapshotCommitTimeoutMs`). */
+	commitTimeout(): number {
+		return snapshotCommitTimeoutMs(
+			this.commitTimeoutMs,
+			Math.max(this.lastTextBytes ?? 0, this.lastResetChars),
+		)
+	}
+
+	/**
+	 * Writes request `id` to `file`; resolves (never rejects) with the outcome. The worker writes
+	 * and fsyncs its own tmp file; this thread renames it over `file` only when the worker answers
+	 * this live commit, and removes it on every other outcome.
+	 */
 	commitTo(id: number, file: string): Promise<CommitResult> {
 		const port = this.port
 		if (port === null || this.disabled || this.commit !== null)
 			return Promise.resolve({ ok: false, reason: "worker-failed" })
+		const tmp = snapshotWorkerTmp(file, id)
 		return new Promise<CommitResult>(resolve => {
 			const timer = setTimeout(() => {
 				this.fail(
@@ -296,10 +367,10 @@ export class SnapshotWriter {
 						"SCANNER_SNAPSHOT_WORKER",
 					),
 				)
-			}, this.commitTimeoutMs)
+			}, this.commitTimeout())
 			timer.unref()
-			this.commit = { id, resolve, timer }
-			this.send({ type: "commit", id, file })
+			this.commit = { id, file, tmp, resolve, timer }
+			this.send({ type: "commit", id, tmp })
 		})
 	}
 
@@ -451,12 +522,20 @@ export class SnapshotWriter {
 			this.lastTextBytes = m.bytes
 			this.lastBuildMs = m.buildMs
 			this.lastWriteMs = m.writeMs
-			this.settleCommit({
+			// Detached first: a worker failure from here on cannot settle it or start a fallback
+			// while the rename is in flight; the persistence queue waits for this result.
+			this.commit = null
+			clearTimeout(commit.timer)
+			const written: CommitResult = {
 				ok: true,
 				bytes: m.bytes,
 				buildMs: m.buildMs,
 				writeMs: m.writeMs,
-			})
+			}
+			void rename(commit.tmp, commit.file).then(
+				() => commit.resolve(written),
+				() => discard(commit, { ok: false, reason: "io" }),
+			)
 			return
 		}
 		// A diverged or broken mirror: the main path writes this one and resets it.
@@ -469,7 +548,7 @@ export class SnapshotWriter {
 		if (commit === null) return
 		this.commit = null
 		clearTimeout(commit.timer)
-		commit.resolve(result)
+		discard(commit, result)
 	}
 
 	/** Worker crash, error, timeout or protocol violation: restart once, then main thread for good. */
@@ -482,8 +561,8 @@ export class SnapshotWriter {
 		this.queuedBytes = 0
 		this.dropLines()
 		this.failures += 1
-		// The fallback writes only once the worker is gone, so no late worker rename can
-		// publish an older snapshot over the main thread's newer one.
+		// The fallback writes only once the worker is gone (or abandoned) and this commit's tmp is
+		// removed; the worker never renames, so nothing it writes later can replace the file.
 		const commit = this.commit
 		this.commit = null
 		if (commit !== null) clearTimeout(commit.timer)
@@ -491,11 +570,12 @@ export class SnapshotWriter {
 		const settle = (): void => {
 			if (settled) return
 			settled = true
-			commit?.resolve({ ok: false, reason: "worker-failed" })
+			if (commit !== null)
+				discard(commit, { ok: false, reason: "worker-failed" })
 		}
 		if (port !== null) {
 			const abandon = setTimeout(() => {
-				// Still running: it may yet rename its own tmp file, so never use a worker again.
+				// Still running: it may yet write its tmp file (never renamed), so never use a worker again.
 				this.failures = Math.max(this.failures, 2)
 				this.disabled = true
 				settle()

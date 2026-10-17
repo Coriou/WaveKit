@@ -1,7 +1,7 @@
 /**
  * Tmp file + fsync + rename, as in BandOverrideStore.write. Shared by ScannerPersistence (which
- * re-exports it), the EvidenceStore (Task 17) and the snapshot worker (WG11 req 3.5), so the
- * worker bundle does not pull in the persistence module.
+ * re-exports it) and the EvidenceStore (Task 17); the snapshot worker (WG11 req 3.5) uses only
+ * `writeChunksSynced`, so its bundle does not pull in the persistence module.
  */
 import { mkdir, open, rename, rm } from "node:fs/promises"
 import { dirname } from "node:path"
@@ -24,13 +24,38 @@ export async function atomicWriteChunks(
 	chunks: Iterable<string | Uint8Array>,
 	tmpTag?: string,
 ): Promise<number> {
-	let bytes = 0
+	let bytes: number
 	const tmp =
 		tmpTag === undefined
 			? `${file}.${process.pid}.tmp`
 			: `${file}.${process.pid}.${tmpTag}.tmp`
 	try {
-		await mkdir(dirname(file), { recursive: true })
+		bytes = await writeChunksSynced(tmp, chunks)
+		await rename(tmp, file)
+		return bytes
+	} catch (err) {
+		await rm(tmp, { force: true }).catch(() => undefined)
+		throw new WaveKitError(
+			`Could not write ${file}`,
+			"SCANNER_PERSIST_FAILED",
+			err instanceof Error ? err : undefined,
+		)
+	}
+}
+
+/**
+ * Writes `chunks` to `tmp` (created or truncated, parent made) and fsyncs it; resolves to the
+ * bytes written. No rename: the snapshot worker writes only its own tmp file and the main thread
+ * publishes it (review m3), so an abandoned worker can never replace the target. On failure the
+ * tmp file is removed and the error rethrown.
+ */
+export async function writeChunksSynced(
+	tmp: string,
+	chunks: Iterable<string | Uint8Array>,
+): Promise<number> {
+	let bytes = 0
+	try {
+		await mkdir(dirname(tmp), { recursive: true })
 		const handle = await open(tmp, "w")
 		try {
 			for (const chunk of chunks) {
@@ -42,14 +67,9 @@ export async function atomicWriteChunks(
 		} finally {
 			await handle.close()
 		}
-		await rename(tmp, file)
 		return bytes
 	} catch (err) {
 		await rm(tmp, { force: true }).catch(() => undefined)
-		throw new WaveKitError(
-			`Could not write ${file}`,
-			"SCANNER_PERSIST_FAILED",
-			err instanceof Error ? err : undefined,
-		)
+		throw err
 	}
 }

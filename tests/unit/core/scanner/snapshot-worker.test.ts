@@ -8,6 +8,7 @@ import {
 	appendFile,
 	mkdir,
 	mkdtemp,
+	readdir,
 	readFile,
 	rm,
 	writeFile,
@@ -497,6 +498,86 @@ describe("snapshot worker failures (WG11 req 3.5)", () => {
 			})
 			expect(h.p.snapshotWorkerStatus()?.fallbacks).toBe(0)
 		} finally {
+			await h.close()
+		}
+	})
+})
+
+/**
+ * A real worker whose commit is held back and whose terminate never completes (and does not stop
+ * it): after the writer abandons it, `release()` forwards the held commit, so the worker writes
+ * its older capture late. Resolves once the worker answered that commit.
+ */
+function lateWorker(made: { count: number }) {
+	const late: {
+		release: () => Promise<void>
+		inner: SnapshotWorkerPort | null
+	} = {
+		release: () => Promise.resolve(),
+		inner: null,
+	}
+	const factory = ({
+		url,
+		heapMb,
+	}: {
+		url: URL
+		heapMb: number
+	}): SnapshotWorkerPort => {
+		made.count += 1
+		const inner = defaultSnapshotWorkerFactory({ url, heapMb })
+		late.inner = inner
+		let answered: (() => void) | null = null
+		inner.onMessage(v => {
+			const t = (v as { type?: unknown }).type
+			if (t === "written" || t === "failed") answered?.()
+		})
+		return {
+			postMessage: (m: SnapshotWorkerRequest) => {
+				if (m.type === "commit") {
+					late.release = () =>
+						new Promise<void>(resolve => {
+							answered = resolve
+							inner.postMessage(m)
+						})
+					return
+				}
+				inner.postMessage(m)
+			},
+			onMessage: l => inner.onMessage(l),
+			onError: l => inner.onError(l),
+			onExit: l => inner.onExit(l),
+			terminate: () => new Promise<never>(() => undefined),
+		}
+	}
+	return { late, factory }
+}
+
+describe("abandoned snapshot worker (WG11 req 3.5, review m3)", () => {
+	it("a worker abandoned after the terminate wait cannot publish its older snapshot over the fallback", async () => {
+		const made = { count: 0 }
+		const { late, factory } = lateWorker(made)
+		const h = await harness({
+			factory,
+			commitTimeoutMs: 50,
+			terminateWaitMs: 50,
+		})
+		try {
+			h.ops(20)
+			await h.p.writeSnapshotOf(h.store) // main path; worker started and reset
+			h.ops(10)
+			await h.p.writeSnapshotOf(h.store) // worker capture held, commit times out, abandoned
+			expect(h.p.snapshotWorkerStatus()?.state).toBe("disabled")
+			h.ops(10)
+			const want = h.expected()
+			await h.p.writeSnapshotOf(h.store) // main thread, newer state
+			expect(await h.file()).toBe(want)
+			await late.release() // the abandoned worker now writes its older capture
+			await new Promise(resolve => setTimeout(resolve, 20))
+			expect(await h.file()).toBe(want)
+			const leftovers = (await readdir(h.dir)).filter(f => f.endsWith(".tmp"))
+			expect(leftovers.length).toBeLessThanOrEqual(1) // at most the late worker's own tmp
+		} finally {
+			await late.inner?.terminate()
 			await h.close()
 		}
 	})

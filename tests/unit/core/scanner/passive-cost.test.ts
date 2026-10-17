@@ -1,6 +1,10 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import { passiveCostDecision } from "../../../../src/core/scanner/passive-cost.js"
+import {
+	PASSIVE_PROBATION_MS,
+	passiveCostDecision,
+	passiveProbationDue,
+} from "../../../../src/core/scanner/passive-cost.js"
 import {
 	PASSIVE_COST_CLEAR_RATIO,
 	PASSIVE_COST_RECHECK_MS,
@@ -147,6 +151,73 @@ describe("Property 5: Passive guard decides by the limit", () => {
 						if (decision === "disable") disabled = true
 						if (decision === "clear") disabled = false
 					}
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+})
+
+describe("passiveProbationDue (WG11 SC, Main decision M2)", () => {
+	const due = { disabled: true, engineOpen: false }
+	it("is 15 minutes, three recheck periods", () => {
+		expect(PASSIVE_PROBATION_MS).toBe(3 * PASSIVE_COST_RECHECK_MS)
+		expect(PASSIVE_PROBATION_MS).toBe(900_000)
+	})
+
+	it("is due at the bound and not one millisecond below", () => {
+		expect(
+			passiveProbationDue({ ...due, sinceDisabledMs: PASSIVE_PROBATION_MS }),
+		).toBe(true)
+		expect(
+			passiveProbationDue({
+				...due,
+				sinceDisabledMs: PASSIVE_PROBATION_MS - 1,
+			}),
+		).toBe(false)
+	})
+
+	it("is never due for an enabled source, an open engine or an unknown or non-finite time", () => {
+		const t = PASSIVE_PROBATION_MS * 2
+		expect(
+			passiveProbationDue({ ...due, disabled: false, sinceDisabledMs: t }),
+		).toBe(false)
+		expect(
+			passiveProbationDue({ ...due, engineOpen: true, sinceDisabledMs: t }),
+		).toBe(false)
+		expect(passiveProbationDue({ ...due, sinceDisabledMs: null })).toBe(false)
+		expect(
+			passiveProbationDue({
+				...due,
+				sinceDisabledMs: Number.POSITIVE_INFINITY,
+			}),
+		).toBe(false)
+		expect(passiveProbationDue({ ...due, sinceDisabledMs: Number.NaN })).toBe(
+			false,
+		)
+	})
+
+	// Feature: web-gaps-11, Property 5: Passive guard decides by the limit
+	// Validates: Requirements 2.2, 2.3
+	it("is due exactly for a disabled source with no open engine past the probation", () => {
+		fc.assert(
+			fc.property(
+				fc.boolean(),
+				fc.boolean(),
+				fc.option(fc.double({ min: -1e7, max: 1e7 }), { nil: null }),
+				(disabled, engineOpen, sinceDisabledMs) => {
+					const got = passiveProbationDue({
+						disabled,
+						engineOpen,
+						sinceDisabledMs,
+					})
+					const want =
+						disabled &&
+						!engineOpen &&
+						sinceDisabledMs !== null &&
+						Number.isFinite(sinceDisabledMs) &&
+						sinceDisabledMs >= 900_000
+					expect(got).toBe(want)
 				},
 			),
 			{ numRuns: 200 },

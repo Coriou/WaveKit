@@ -13,6 +13,14 @@ const before = (a: IndexedCentre, centreHz: number, id: string): boolean =>
 
 export class CentreIndex {
 	private readonly lists = new Map<string, IndexedCentre[]>()
+	/**
+	 * Non-finite centres refused by `add` (review m6), skipped without a warning. A NaN sorts
+	 * nowhere and would break the binary search for its finite neighbours. ±Infinity never passed
+	 * the linear distance test; a NaN did (`NaN > tol` is false, so it matched any probe of its
+	 * family), which was a defect, not behaviour to keep. Among finite centres results are
+	 * unchanged.
+	 */
+	private refused = 0
 
 	private static key(sourceId: string, family: string): string {
 		return `${sourceId}\u0000${family}`
@@ -36,6 +44,10 @@ export class CentreIndex {
 	}
 
 	add(sourceId: string, family: string, centreHz: number, id: string): void {
+		if (!Number.isFinite(centreHz)) {
+			this.refused += 1
+			return
+		}
 		const key = CentreIndex.key(sourceId, family)
 		let list = this.lists.get(key)
 		if (list === undefined) {
@@ -49,15 +61,16 @@ export class CentreIndex {
 	}
 
 	remove(sourceId: string, family: string, centreHz: number, id: string): void {
+		if (!Number.isFinite(centreHz)) return // never added
 		const key = CentreIndex.key(sourceId, family)
 		const list = this.lists.get(key)
 		if (list === undefined) return
 		const i = CentreIndex.lowerBound(list, centreHz, id)
 		const e = list[i]
-		if (e !== undefined && e.id === id && Object.is(e.centreHz, centreHz))
+		if (e !== undefined && e.id === id && e.centreHz === centreHz)
 			list.splice(i, 1)
 		else {
-			// defensive (a NaN centre sorts nowhere): linear removal keeps the index exact
+			// defensive: linear removal keeps the index exact
 			const j = list.findIndex(x => x.id === id)
 			if (j >= 0) list.splice(j, 1)
 		}
@@ -83,6 +96,11 @@ export class CentreIndex {
 			if (e === undefined || e.centreHz > highHz) break
 			visit(e)
 		}
+	}
+
+	/** Non-finite centres refused since construction (tests). */
+	refusedNonFinite(): number {
+		return this.refused
 	}
 
 	/** Entries per (source, family), for tests and the bound check. */

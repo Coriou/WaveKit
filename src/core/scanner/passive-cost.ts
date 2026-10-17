@@ -28,3 +28,26 @@ export function passiveCostDecision(
 		return "clear"
 	return "keep"
 }
+
+/**
+ * WG11 (Main decision on review M2): a guard-disabled source whose engine has closed (headless, no
+ * display holding it) is re-enabled for probation after three recheck periods (15 min); the next
+ * open is judged again by the usual first check.
+ */
+export const PASSIVE_PROBATION_MS = 3 * PASSIVE_COST_RECHECK_MS
+
+/** Pure: true iff disabled, no engine open and at least `PASSIVE_PROBATION_MS` since disabling. */
+export function passiveProbationDue(input: {
+	disabled: boolean
+	engineOpen: boolean
+	sinceDisabledMs: number | null
+}): boolean {
+	const { disabled, engineOpen, sinceDisabledMs } = input
+	return (
+		disabled &&
+		!engineOpen &&
+		sinceDisabledMs !== null &&
+		Number.isFinite(sinceDisabledMs) &&
+		sinceDisabledMs >= PASSIVE_PROBATION_MS
+	)
+}

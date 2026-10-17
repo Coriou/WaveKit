@@ -35,11 +35,15 @@ export interface SnapshotRequest {
 	counts: MirrorCounts
 	charged: number
 }
-/** Write the held text of `id` to `file` (tmp + fsync + rename). */
+/**
+ * Write the held text of `id` to `tmp` and fsync it, then answer `written`. The worker never
+ * renames: the main thread publishes `tmp` over the snapshot file only for its live, current
+ * commit, and removes it otherwise (review m3).
+ */
 export interface CommitRequest {
 	type: "commit"
 	id: number
-	file: string
+	tmp: string
 }
 export type SnapshotWorkerRequest =
 	| LinesRequest
@@ -90,7 +94,7 @@ interface Loose {
 	seq?: unknown
 	head?: unknown
 	counts?: unknown
-	file?: unknown
+	tmp?: unknown
 	lastSeq?: unknown
 	savedAt?: unknown
 	corrections?: unknown
@@ -158,7 +162,9 @@ export function isSnapshotWorkerRequest(
 				nonNegInt(v.charged)
 			)
 		case "commit":
-			return nonNegInt(v.id) && typeof v.file === "string"
+			return (
+				nonNegInt(v.id) && typeof v.tmp === "string" && v.tmp.endsWith(".tmp")
+			)
 		default:
 			return false
 	}

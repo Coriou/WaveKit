@@ -617,6 +617,22 @@ export class DiscoveryStore extends EventEmitter {
 		return this.observationIndex.get(observationId)?.discoveryId
 	}
 
+	/**
+	 * WG11 (Main's identity accessor): protocol and confidence of a live discovery, O(1), as a fresh
+	 * object built from its scalars (no clone of the discovery); undefined when unknown. Pair with
+	 * `discoveryIdOf` to follow an observation to its surviving discovery after a merge.
+	 */
+	identityOf(
+		discoveryId: string,
+	):
+		| { id: string; protocol: ScannerProtocol; confidence: ScannerConfidence }
+		| undefined {
+		const d = this.discoveries.get(discoveryId)
+		return d === undefined
+			? undefined
+			: { id: d.id, protocol: d.protocol, confidence: d.confidence }
+	}
+
 	/** WG6 req 2.1: duration of an in-memory observation that has ended; undefined while open or unknown. */
 	endedDurationOf(observationId: string): number | undefined {
 		const o = this.observationIndex.get(observationId)
@@ -1253,6 +1269,8 @@ export class DiscoveryStore extends EventEmitter {
 		let best: Discovery | undefined
 		let bestDist = Number.POSITIVE_INFINITY
 		const centre = obs.track.centreHz
+		// review m6: a non-finite centre never matched today's distance test; the index holds none
+		if (!Number.isFinite(centre)) return undefined
 		this.syncIndex()
 		// WG11 req 3.1: the window is widened by 1 Hz so float rounding of centre ± tol cannot drop a
 		// hit; the exact distance test below is today's.

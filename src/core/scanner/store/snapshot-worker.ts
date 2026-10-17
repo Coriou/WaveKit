@@ -3,13 +3,14 @@
  * mirror, applies journal lines and removals in message order, builds the snapshot text when a
  * request arrives (a capture of the record texts, so it matches the state at that request's
  * lastSeq, holding references to the mirror's strings rather than a copy) and writes it on commit
- * in pieces. At most one capture is held: a newer request replaces it. Must not import the
+ * in pieces to the tmp file the main thread named, fsynced; the main thread renames it (the
+ * worker never touches the snapshot file itself). At most one capture is held: a newer request replaces it. Must not import the
  * persistence module.
  */
 import { getHeapStatistics } from "node:v8"
-import { parentPort, threadId } from "node:worker_threads"
+import { parentPort } from "node:worker_threads"
 import { WaveKitError } from "../../../utils/errors.js"
-import { atomicWriteChunks } from "./atomic-write.js"
+import { writeChunksSynced } from "./atomic-write.js"
 import { SnapshotMirror, snapshotChunks } from "./snapshot-mirror.js"
 import type { CapturedSnapshot } from "./snapshot-mirror.js"
 import { isSnapshotWorkerRequest } from "./snapshot-protocol.js"
@@ -85,6 +86,11 @@ async function handle(m: SnapshotWorkerRequest): Promise<void> {
 			const started = performance.now()
 			const counts = mirror.counts()
 			let reason: SnapshotFailReason | null = null
+			// Review m1: counts + lastSeq suffice, no content hash. The mirror is fed only by the
+			// store's ordered journal lines and removals (same records, same order, one sequence
+			// number per mutation), so equal lastSeq means it applied exactly the mutations the store
+			// made; a lost or reordered message moves lastSeq or a count, and a line that fails to
+			// apply marks the mirror broken. The counts catch a removal the journal does not number.
 			if (mirror.broken() !== null) reason = "broken"
 			else if (
 				mirror.lastSeq() !== m.head.lastSeq ||
@@ -119,26 +125,22 @@ async function handle(m: SnapshotWorkerRequest): Promise<void> {
 				return
 			}
 			// Not awaited on the message chain: lines keep applying while the disk is slow. The main
-			// thread commits one snapshot at a time, so two writes never share the tmp file.
-			void writeHeld(m.id, m.file, h.capture, h.buildMs)
+			// thread commits one snapshot at a time and names a tmp file per commit.
+			void writeHeld(m.id, m.tmp, h.capture, h.buildMs)
 		}
 	}
 }
 
 async function writeHeld(
 	id: number,
-	file: string,
+	tmp: string,
 	capture: CapturedSnapshot,
 	buildMs: number,
 ): Promise<void> {
 	const started = performance.now()
 	let bytes: number
 	try {
-		bytes = await atomicWriteChunks(
-			file,
-			snapshotChunks(capture),
-			`worker-${threadId}`,
-		)
+		bytes = await writeChunksSynced(tmp, snapshotChunks(capture))
 	} catch {
 		post({ type: "failed", id, reason: "io", heapUsedBytes: heapUsed() })
 		return
