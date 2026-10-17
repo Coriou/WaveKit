@@ -1,7 +1,10 @@
 import type { BandPlanService, BandPlanServiceOptions } from "./contract.js"
 import { builtinPackIdFor, projectBuiltinPacks } from "./builtin-packs.js"
 import { transition } from "./domain.js"
+import { parseGqrxBandPlan } from "./import/gqrx.js"
 import { parseSdrppBandPlan } from "./import/sdrpp.js"
+import { parseSdrSharpBandPlan } from "./import/sdrsharp.js"
+import { diffImportedBands } from "./import/update-diff.js"
 import {
 	builtinPresetsFor,
 	presetIssuesFor,
@@ -36,5 +39,10 @@ export function openBandPlanService(
 		presetIssuesFor,
 		presetToJobSpec,
 		scannerBandplans: resolveScannerBandplans,
+		importParsers: {
+			"sdrsharp-xml": parseSdrSharpBandPlan,
+			"gqrx-csv": parseGqrxBandPlan,
+		},
+		diffImportedBands,
 	})
 }

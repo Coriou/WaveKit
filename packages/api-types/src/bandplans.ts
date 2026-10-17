@@ -146,6 +146,17 @@ export type BandChannel = z.infer<typeof bandChannelSchema>
 
 // --- Provenance ---
 
+/**
+ * Import file formats. WG5 (web-gaps-5 req 7.1) adds SDR# `BandPlan.xml` and Gqrx
+ * `bandplan.csv`; a server advertises the formats it parses in `capabilities.importFormats`.
+ */
+export const BANDPLAN_IMPORT_FORMATS = [
+	"sdrpp-json",
+	"sdrsharp-xml",
+	"gqrx-csv",
+] as const
+export type BandPlanImportFormat = (typeof BANDPLAN_IMPORT_FORMATS)[number]
+
 export interface BandPlanCitation {
 	readonly title: string
 	readonly url: string
@@ -155,12 +166,24 @@ export const importedProvenanceSchema = z
 		kind: z.literal("imported"),
 		/** Imported data is always "community, unverified"; "verified" needs a registry link. */
 		trust: z.literal("community-unverified"),
-		format: z.literal("sdrpp-json"),
+		/** WG5: the imported file's format; state written before WG5 holds "sdrpp-json". */
+		format: z.enum(BANDPLAN_IMPORT_FORMATS),
 		sourceName: bandPlanTextSchema(128),
 		author: bandPlanTextSchema(80).nullable(),
 		licence: bandPlanTextSchema(80).nullable(),
 		importedAt: timestampSchema,
 		sha256: z.string().regex(/^[0-9a-f]{64}$/),
+		/** WG6: the https URL the file was fetched from; absent for uploads and pre-WG6 state. */
+		sourceUrl: z.lazy(() => bandPlanImportUrlSchema).optional(),
+		/**
+		 * WG7 (web-gaps-7 req 10.2): the group overrides the import was committed with, applied
+		 * again by the update check; absent for imports without overrides and pre-WG7 state.
+		 */
+		groupOverrides: z
+			.lazy(() =>
+				z.array(importGroupOverrideSchema).max(BANDPLANS_LIMITS.groupOverrides),
+			)
+			.optional(),
 	})
 	.strict()
 export type ImportedProvenance = z.infer<typeof importedProvenanceSchema>
@@ -358,7 +381,7 @@ export const presetRangeSchema = z
 			)
 			.max(8),
 		obwHz: z.array(z.number().positive().max(10_000_000)).max(8),
-		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(17),
+		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(21),
 	})
 	.strict()
 	.refine(value => value.startHz < value.endHz, "Empty range")
@@ -382,6 +405,10 @@ export const BANDPLAN_SCANNER_PROTOCOLS = [
 	"digital-unknown",
 	"carrier",
 	"unknown",
+	"ais",
+	"acars",
+	"vdl2",
+	"lora",
 ] as const satisfies readonly ScannerProtocol[]
 // Compile-time completeness: every ScannerProtocol is listed.
 const protocolCompleteness: Exclude<
@@ -419,7 +446,7 @@ export const scanPresetJobSchema = z
 					.refine(value => value.startHz <= value.endHz, "Inverted exclusion"),
 			)
 			.max(BANDPLANS_LIMITS.presetExclusions),
-		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(17),
+		protocols: z.array(z.custom<ScannerProtocol>(isScannerProtocol)).max(21),
 		sensitivity: z.enum(["low", "normal", "high"]).nullable(),
 		thresholdDb: z.number().min(0).max(40).nullable(),
 		fftSize: z
@@ -565,9 +592,77 @@ export const bandPlanStateSchema = z
 	})
 export type BandPlanState = z.infer<typeof bandPlanStateSchema>
 
+// --- WG6: import by URL (web-gaps-6 requirement 5) ---
+
+/**
+ * WG6 (E-URL): hosts core may fetch a band-plan file from. Exact, lower-case host names; no
+ * subdomains, IP literals or ports. [] disables URL import (403 BANDPLANS_URL_IMPORT_DISABLED);
+ * file import is unaffected. One-constant switch.
+ */
+export const BANDPLAN_URL_IMPORT_HOSTS: readonly string[] = Object.freeze([
+	"raw.githubusercontent.com",
+])
+/** WG6 req 5.3: bounds of one URL fetch. */
+export const BANDPLANS_URL_LIMITS = Object.freeze({
+	/** UTF-16 code units of the URL. */
+	urlChars: 2048,
+	/** Response body bytes (streamed; the fetch aborts past it). Same as the file import cap. */
+	responseBytes: 1024 * 1024,
+	/** Whole fetch: DNS, connect, TLS, headers and body. */
+	totalTimeoutMs: 10_000,
+	/** Fetches in flight per process; another request meanwhile is 503 BANDPLANS_BUSY. */
+	inFlight: 1,
+})
+/** Content types accepted from the server (parameters such as charset ignored). */
+export const BANDPLAN_URL_CONTENT_TYPES: readonly string[] = Object.freeze([
+	"text/plain",
+	"application/json",
+	"application/xml",
+	"text/xml",
+	"text/csv",
+	"application/octet-stream",
+])
+function isPlainHttpsUrl(value: string): boolean {
+	// WG7 req 10.1: judge the raw string as the fetcher does, since WHATWG parsing drops an
+	// explicit default port (`:443`) and an empty fragment (`#`) before the checks below.
+	if (/[\u0000- \u007f\\#]/.test(value)) return false
+	const schemeEnd = value.indexOf("//")
+	if (schemeEnd < 0 || value.slice(0, schemeEnd).toLowerCase() !== "https:")
+		return false
+	const rest = value.slice(schemeEnd + 2)
+	const authorityEnd = rest.search(/[/?]/)
+	const authority = authorityEnd < 0 ? rest : rest.slice(0, authorityEnd)
+	if (authority.includes(":") || authority.includes("@") || authority === "")
+		return false
+	let url: URL
+	try {
+		url = new URL(value)
+	} catch {
+		return false
+	}
+	return (
+		url.protocol === "https:" &&
+		url.username === "" &&
+		url.password === "" &&
+		url.port === "" &&
+		url.hash === ""
+	)
+}
+/**
+ * Syntactic URL rule (req 5.2): https, no credentials, no explicit port, no fragment, at most
+ * 2 048 characters. Core also checks the host allowlist and every resolved address.
+ */
+export const bandPlanImportUrlSchema = z
+	.string()
+	.min(1)
+	.max(BANDPLANS_URL_LIMITS.urlChars)
+	.refine(
+		isPlainHttpsUrl,
+		"Expected an https URL without credentials, port or fragment",
+	)
+
 // --- SDR++ import ---
 
-export const BANDPLAN_IMPORT_FORMATS = ["sdrpp-json"] as const
 export const importGroupOverrideSchema = z
 	.object({ sourceType: z.string().min(0).max(64), group: displayGroupSchema })
 	.strict()
@@ -591,6 +686,20 @@ const importFileFields = {
 /** POST /api/bandplans/imports/preview. Never persists anything. */
 export const importPreviewRequestSchema = z.object(importFileFields).strict()
 export type ImportPreviewRequest = z.infer<typeof importPreviewRequestSchema>
+/**
+ * WG6: POST /api/bandplans/imports/preview-url (protected only). Core fetches the URL once and
+ * answers an ImportUrlPreview; nothing is persisted.
+ */
+export const importUrlPreviewRequestSchema = z
+	.object({
+		url: bandPlanImportUrlSchema,
+		format: importFileFields.format,
+		groupOverrides: importFileFields.groupOverrides,
+	})
+	.strict()
+export type ImportUrlPreviewRequest = z.infer<
+	typeof importUrlPreviewRequestSchema
+>
 
 export type ImportSkipReason =
 	| "unnamed"
@@ -628,7 +737,7 @@ export interface ImportReport {
 	readonly colourHints: number
 }
 export interface ImportPreview {
-	readonly format: "sdrpp-json"
+	readonly format: BandPlanImportFormat
 	readonly fileName: string
 	readonly bytes: number
 	/** SHA-256 (lowercase hex) of the decoded file bytes; display and provenance only. */
@@ -652,6 +761,49 @@ export interface ImportPreview {
 	readonly report: ImportReport
 }
 
+/**
+ * WG6: an ImportPreview of a fetched URL. `contentBase64` is the fetched file (at most 1 MiB
+ * decoded): the client commits it through POST /api/bandplans/imports with `sourceUrl`.
+ */
+export interface ImportUrlPreview extends ImportPreview {
+	readonly sourceUrl: string
+	readonly contentBase64: string
+}
+/** WG6 req 6.2: one band of an update diff. */
+export interface BandPlanUpdateBand {
+	readonly id: string
+	readonly name: string
+	readonly startHz: number
+	readonly endHz: number
+}
+/** WG6 req 6.2: a band present in both versions whose fields differ. */
+export interface BandPlanUpdateChangedBand extends BandPlanUpdateBand {
+	/** Band fields that differ (sorted), e.g. ["endHz", "mode"]. */
+	readonly fields: readonly string[]
+}
+/**
+ * WG6: POST /api/bandplans/packs/:packId/check-update (protected only). Re-fetches the pack's
+ * `sourceUrl` and compares the fresh file with the committed pack. Never persists anything;
+ * applying is an explicit commit of `preview` with `replacesPackId`.
+ */
+export interface BandPlanUpdateCheck {
+	readonly packId: string
+	readonly sourceUrl: string
+	readonly checkedAt: string
+	/** sha256 of the committed file. */
+	readonly currentSha256: string
+	/** sha256 of the fetched file. */
+	readonly fetchedSha256: string
+	/** Same bytes: no diff and no preview. */
+	readonly upToDate: boolean
+	/** Bands by id; each list sorted by startHz then id, at most BANDPLANS_LIMITS.bandsPerPack. */
+	readonly added: readonly BandPlanUpdateBand[]
+	readonly removed: readonly BandPlanUpdateBand[]
+	readonly changed: readonly BandPlanUpdateChangedBand[]
+	/** Null when up to date. */
+	readonly preview: ImportUrlPreview | null
+}
+
 /** Commit fields, also embedded in the commit-import mutation. */
 export const importCommitFieldsSchema = z
 	.object({
@@ -667,6 +819,11 @@ export const importCommitFieldsSchema = z
 		replacesPackId: importedPackIdSchema.nullable(),
 		/** Append to the bottom of the stack (materializing the default stack if null). */
 		addToStack: z.boolean(),
+		/**
+		 * WG6: the URL of an ImportUrlPreview; the preview digest then binds it too. Absent or
+		 * null for uploaded files (digest unchanged).
+		 */
+		sourceUrl: bandPlanImportUrlSchema.nullable().optional(),
 	})
 	.strict()
 export type ImportCommitRequest = z.infer<typeof importCommitFieldsSchema>
@@ -806,6 +963,11 @@ export interface BandPlanCapabilities {
 	/** Mutation and import routes are mounted (protected mode only). */
 	readonly writable: boolean
 	readonly importFormats: readonly (typeof BANDPLAN_IMPORT_FORMATS)[number][]
+	/**
+	 * WG6: hosts URL import may fetch from; [] when URL import is off (no fetcher, empty
+	 * allowlist or not writable). Sent by WG6 cores.
+	 */
+	readonly urlImportHosts?: readonly string[]
 }
 export interface PlanStackEntryView extends PlanStackEntry {
 	readonly kind: "builtin" | "imported"
@@ -927,7 +1089,7 @@ export const BANDPLANS_ERROR_DEFINITIONS = {
 	BANDPLANS_IMPORT_TOO_LARGE: [413, "Import file is too large."],
 	BANDPLANS_IMPORT_INVALID: [
 		422,
-		"Import file is not a usable SDR++ band plan.",
+		"Import file is not a usable band plan of the selected format.",
 	],
 	BANDPLANS_IMPORT_MISMATCH: [
 		409,
@@ -935,6 +1097,13 @@ export const BANDPLANS_ERROR_DEFINITIONS = {
 	],
 	BANDPLANS_BUSY: [503, "Band plans are busy."],
 	BANDPLANS_UNAVAILABLE: [503, "Band-plan storage is unavailable."],
+	BANDPLANS_URL_IMPORT_DISABLED: [403, "Band-plan import by URL is disabled."],
+	BANDPLANS_URL_REFUSED: [
+		422,
+		"The URL is not an allowed https band-plan source.",
+	],
+	BANDPLANS_URL_FETCH_FAILED: [502, "The band-plan URL could not be fetched."],
+	BANDPLANS_URL_TIMEOUT: [504, "The band-plan URL fetch timed out."],
 } as const
 export type BandPlansErrorCode = keyof typeof BANDPLANS_ERROR_DEFINITIONS
 export const bandPlansErrorCodeSchema = z.enum([
@@ -949,6 +1118,10 @@ export const bandPlansErrorCodeSchema = z.enum([
 	"BANDPLANS_IMPORT_MISMATCH",
 	"BANDPLANS_BUSY",
 	"BANDPLANS_UNAVAILABLE",
+	"BANDPLANS_URL_IMPORT_DISABLED",
+	"BANDPLANS_URL_REFUSED",
+	"BANDPLANS_URL_FETCH_FAILED",
+	"BANDPLANS_URL_TIMEOUT",
 ])
 /** `details.current` only on BANDPLANS_CONFLICT. */
 export interface BandPlansErrorDto {

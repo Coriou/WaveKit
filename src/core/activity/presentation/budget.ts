@@ -51,8 +51,12 @@ export const LONG_TEXT_BYTES = 126
  * object title the other APRS fields, 16 bytes grows the built row by 1,097.
  */
 export const APRS_TEXT_BYTES = 16
-/** Req 1.8. A 1.6 reception, and any other reception. */
-export const ROW_GROWTH_COALESCED_BYTES = 160
+/**
+ * Req 1.8 (WG5 req 4.7). A 1.6 reception, and any other reception. 240
+ * keeps a typical coalesced fix with a five-digit `altM` and a mesh
+ * `!abcdef12 Position` title (226 bytes at seven decimals) unrounded.
+ */
+export const ROW_GROWTH_COALESCED_BYTES = 240
 export const ROW_GROWTH_MAX_BYTES = 1_100
 export const ELLIPSIS = "…"
 
@@ -306,9 +310,32 @@ export function childRecord(
 	return value as Record<string, unknown>
 }
 
-/** Finite in-range lat/lon, never exactly (0, 0), never altitude. */
+/** Req 4.5: altitudes outside -500..50 000 m are omitted. */
+export const MIN_ALT_M = -500
+export const MAX_ALT_M = 50_000
+export const FEET_TO_METRES = 0.3048
+
+/**
+ * Whole metres in -500..50 000, else undefined. No allocation: one round
+ * and two compares. `-0` becomes `0`.
+ */
+export function altitudeMetres(metres: unknown): number | undefined {
+	if (typeof metres !== "number" || !Number.isFinite(metres)) return undefined
+	const rounded = Math.round(metres)
+	if (rounded < MIN_ALT_M || rounded > MAX_ALT_M) return undefined
+	return rounded + 0
+}
+
+/** Feet (aircraft barometric, APRS) to whole metres by the 4.5 rule. */
+export function altitudeFromFeet(feet: unknown): number | undefined {
+	if (typeof feet !== "number" || !Number.isFinite(feet)) return undefined
+	return altitudeMetres(feet * FEET_TO_METRES)
+}
+
+/** Finite in-range lat/lon, never exactly (0, 0); `altM` when given and valid. */
 export function readPosition(
 	data: Record<string, unknown>,
+	altM?: number,
 ): DecodePosition | undefined {
 	const lat = data["lat"]
 	const lon = data["lon"]
@@ -316,7 +343,8 @@ export function readPosition(
 	if (!Number.isFinite(lat) || !Number.isFinite(lon)) return undefined
 	if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return undefined
 	if (lat === 0 && lon === 0) return undefined
-	return { lat, lon }
+	const alt = altitudeMetres(altM)
+	return alt === undefined ? { lat, lon } : { lat, lon, altM: alt }
 }
 
 export interface FieldDraft {
@@ -549,7 +577,13 @@ function roundPosition(
 	if (!Number.isFinite(lat) || !Number.isFinite(lon)) return undefined
 	if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return undefined
 	if (lat === 0 && lon === 0) return undefined
-	return { lat, lon }
+	return position.altM === undefined
+		? { lat, lon }
+		: { lat, lon, altM: position.altM }
+}
+
+function withoutAltitude(position: DecodePosition): DecodePosition {
+	return { lat: position.lat, lon: position.lon }
 }
 
 function reshape(
@@ -662,20 +696,27 @@ export function fitRowBudget(
 	// The longest title that fits at full precision or six decimal places
 	// (~0.1 m) wins. Coarser fixes are used only when no title fits at that
 	// precision. Each candidate is rounded from the original, so 51.5 cannot
-	// become 52.
+	// become 52. `altM` rides on every rounded candidate; when nothing with
+	// it fits at four or more decimals, the same candidates are tried
+	// without it before rounding further (req 4.7).
 	const title = current.title
+	const hasAltitude = originalPosition?.altM !== undefined
 	const attempt = (
 		nextTitle: string | null | undefined,
 		digits: number | undefined,
+		keepAltitude: boolean,
 	): DecodePresentation | undefined => {
 		const patch: {
 			title?: string | null
 			position?: DecodePosition | null
 		} = {}
 		if (nextTitle !== undefined) patch.title = nextTitle
-		if (digits !== undefined) {
+		if (digits !== undefined || !keepAltitude) {
 			if (!originalPosition) return undefined
-			const position = roundPosition(originalPosition, digits)
+			const base = keepAltitude
+				? originalPosition
+				: withoutAltitude(originalPosition)
+			const position = digits === undefined ? base : roundPosition(base, digits)
 			if (!position) return undefined
 			patch.position = position
 		}
@@ -691,28 +732,54 @@ export function fitRowBudget(
 			clipped.push(clipTitle(value, chars))
 		return clipped
 	}
+	const altitudeModes = hasAltitude ? [true, false] : [true]
 	if (title) {
 		const clipped = clippedTitles(title)
-		for (const nextTitle of clipped) {
-			const fitted = attempt(nextTitle, undefined)
-			if (fitted) return fitted
+		// Four or more decimals: with altM first, then without.
+		for (const keep of altitudeModes) {
+			for (const nextTitle of clipped) {
+				const fitted = attempt(nextTitle, undefined, keep)
+				if (fitted) return fitted
+				if (originalPosition) {
+					const rounded = attempt(nextTitle, 6, keep)
+					if (rounded) return rounded
+				}
+			}
 			if (originalPosition) {
-				const rounded = attempt(nextTitle, 6)
-				if (rounded) return rounded
+				for (const digits of [5, 4]) {
+					for (const nextTitle of clipped) {
+						const fitted = attempt(nextTitle, digits, keep)
+						if (fitted) return fitted
+					}
+				}
 			}
 		}
 		if (originalPosition) {
-			for (const digits of [5, 4, 3, 2, 1, 0]) {
-				for (const nextTitle of clipped) {
-					const fitted = attempt(nextTitle, digits)
-					if (fitted) return fitted
+			for (const digits of [3, 2, 1, 0]) {
+				for (const keep of altitudeModes) {
+					for (const nextTitle of clipped) {
+						const fitted = attempt(nextTitle, digits, keep)
+						if (fitted) return fitted
+					}
 				}
 			}
 		}
 	} else if (originalPosition) {
-		for (const digits of [6, 5, 4, 3, 2, 1, 0]) {
-			const fitted = attempt(undefined, digits)
-			if (fitted) return fitted
+		for (const keep of altitudeModes) {
+			if (!keep) {
+				const fitted = attempt(undefined, undefined, false)
+				if (fitted) return fitted
+			}
+			for (const digits of [6, 5, 4]) {
+				const fitted = attempt(undefined, digits, keep)
+				if (fitted) return fitted
+			}
+		}
+		for (const digits of [3, 2, 1, 0]) {
+			for (const keep of altitudeModes) {
+				const fitted = attempt(undefined, digits, keep)
+				if (fitted) return fitted
+			}
 		}
 	}
 

@@ -10,8 +10,13 @@
  * full CU8 stream.
  */
 import { EventEmitter } from "node:events"
+import {
+	SPECTRUM_BINS_CAP_CHOICES,
+	SPECTRUM_BINS_CAP_SETTINGS,
+} from "@wavekit/api-types"
 import type {
 	SpectrumActiveProfile,
+	SpectrumBinsCapView,
 	SpectrumBinEncoding,
 	SpectrumFrameEventData,
 	SpectrumOccupancyResponse,
@@ -42,6 +47,8 @@ import type {
 import type { PipelineHostMode } from "./pipeline-host.js"
 import {
 	BACKFILL_LIMITS,
+	PROFILE_BINS_CEILING,
+	PROFILE_BINS_FLOOR,
 	PROFILE_LIMITS,
 	SpectrumSubscribeOptionsSchema,
 } from "./subscribe-options.js"
@@ -49,6 +56,7 @@ import {
 	admitProfile,
 	applyAverage,
 	averagingOf,
+	makeProfile,
 	normaliseProfile,
 	profileKey,
 	profileView,
@@ -91,8 +99,13 @@ const MAX_SINCE_MS = 168 * 3_600_000
 const TOP_N = 10
 
 /** The default profile from ws.spectrumHz/spectrumBins, averaging off (settings are already bounded). */
-export function defaultProfile(s: SpectrumSettings): SpectrumProfile {
-	const { spectrumHz: hz, spectrumBins: bins } = s.ws
+export function defaultProfile(
+	s: SpectrumSettings,
+	/** WG8: the client bins bound; the served default never exceeds it. */
+	maxBins: number = Number.POSITIVE_INFINITY,
+): SpectrumProfile {
+	const hz = s.ws.spectrumHz
+	const bins = Math.min(s.ws.spectrumBins, maxBins)
 	return { key: profileKey(hz, bins), hz, bins }
 }
 
@@ -165,6 +178,60 @@ export interface SpectrumServiceDeps {
 	createHost?: SpectrumEngineDeps["createHost"]
 	/** Called for every new engine instance before it starts (the probe pool's stream watch, Task 34). */
 	engineCreated?: (sourceId: string, engine: SpectrumEngine) => void
+	/**
+	 * WG8 req 5: the host bins cap, resolved once at startup (bin-cap.ts). Absent = the 2 048
+	 * floor and no `limits.binsCap` on the status. Read once at construction.
+	 */
+	binsCap?: () => SpectrumBinsCapView
+}
+
+const BINS_CAP_FALLBACK: SpectrumBinsCapView = {
+	setting: "auto",
+	cap: PROFILE_BINS_FLOOR,
+	source: "fallback",
+}
+
+/**
+ * Evaluates the cap dep once and reads each field once into a snapshot; only an allowlisted,
+ * self-consistent {setting, cap, source} is kept (extra fields are ignored). Any throw, missing
+ * or unknown value, or contradiction ("fallback" with a cap other than the floor, "config" with
+ * setting !== cap, "measured" with a fixed setting) answers the floor with source "fallback".
+ */
+function resolveBinsCap(dep: (() => SpectrumBinsCapView) | undefined): {
+	view: SpectrumBinsCapView | null
+	cap: number
+} {
+	if (!dep) return { view: null, cap: PROFILE_BINS_FLOOR }
+	try {
+		const raw: unknown = dep()
+		if (typeof raw === "object" && raw !== null) {
+			const r = raw as Record<string, unknown>
+			const setting = r["setting"]
+			const cap = r["cap"]
+			const source = r["source"]
+			const settingOk = (
+				SPECTRUM_BINS_CAP_SETTINGS as readonly unknown[]
+			).includes(setting)
+			const capOk =
+				typeof cap === "number" &&
+				(SPECTRUM_BINS_CAP_CHOICES as readonly number[]).includes(cap)
+			const consistent =
+				(source === "fallback" && cap === PROFILE_BINS_FLOOR) ||
+				(source === "config" && setting === cap) ||
+				(source === "measured" && setting === "auto")
+			if (settingOk && capOk && consistent) {
+				const view: SpectrumBinsCapView = {
+					setting: setting as SpectrumBinsCapView["setting"],
+					cap,
+					source,
+				}
+				return { view, cap }
+			}
+		}
+	} catch {
+		// fall through to the floor
+	}
+	return { view: { ...BINS_CAP_FALLBACK }, cap: PROFILE_BINS_FLOOR }
 }
 
 /** Max-hold of one profile on one source; `epoch` is the summary epoch its bins came from. */
@@ -302,8 +369,15 @@ export class SpectrumService extends EventEmitter {
 	private readonly sourceGen = new Map<string, number>()
 	private stopping = false
 
+	/** WG8: resolved once; the engine budget and the client clamp read the same cap. */
+	private readonly binsCap: {
+		view: SpectrumBinsCapView | null
+		cap: number
+	}
+
 	constructor(private readonly deps: SpectrumServiceDeps) {
 		super()
+		this.binsCap = resolveBinsCap(deps.binsCap)
 		this.log = createComponentLogger(deps.logger, "SpectrumService")
 		this.now = deps.now ?? Date.now
 	}
@@ -458,6 +532,8 @@ export class SpectrumService extends EventEmitter {
 			cfg.sampleRateHz,
 			this.deps.settings(),
 			this.deps.tuning(sourceId),
+			undefined,
+			this.binsCap.cap,
 		)
 		const differs =
 			want.fftSize !== cfg.fftSize ||
@@ -496,7 +572,7 @@ export class SpectrumService extends EventEmitter {
 
 	status(): SpectrumStatus {
 		const s = this.deps.settings()
-		const def = defaultProfile(s)
+		const def = this.servedDefault(s)
 		const profiles: SpectrumActiveProfile[] = []
 		for (const [sourceId, entry] of this.entries) {
 			const cfg = entry.engine.config()
@@ -532,7 +608,8 @@ export class SpectrumService extends EventEmitter {
 			limits: {
 				maxProfiles: s.ws.spectrumMaxProfiles,
 				hz: { ...PROFILE_LIMITS.hz },
-				bins: { ...PROFILE_LIMITS.bins },
+				bins: { ...PROFILE_LIMITS.bins, max: this.clientBinsBound(s) },
+				...(this.binsCap.view ? { binsCap: { ...this.binsCap.view } } : {}),
 				averaging: { ...PROFILE_LIMITS.averaging },
 				backfill: { ...BACKFILL_LIMITS },
 			},
@@ -541,8 +618,26 @@ export class SpectrumService extends EventEmitter {
 		}
 	}
 
+	/** The default profile as served: ws.spectrumBins bounded by `clientBinsBound` (WG8). */
+	private servedDefault(s: SpectrumSettings): SpectrumProfile {
+		return defaultProfile(s, this.clientBinsBound(s))
+	}
+
+	/** Largest client `bins`: min(cap, ws.spectrumSummaryBins, ceiling), never below the 128 minimum. */
+	private clientBinsBound(s: SpectrumSettings): number {
+		return Math.max(
+			PROFILE_LIMITS.bins.min,
+			Math.min(
+				this.binsCap.cap,
+				s.ws.spectrumSummaryBins,
+				PROFILE_BINS_CEILING,
+			),
+		)
+	}
+
 	allocation(): SpectrumAllocation {
-		const defKey = this.defaultKey ?? defaultProfile(this.deps.settings()).key
+		const defKey =
+			this.defaultKey ?? this.servedDefault(this.deps.settings()).key
 		const reserved = new Set<string>()
 		const built = new Set<string>()
 		for (const state of this.clients.values()) {
@@ -597,6 +692,7 @@ export class SpectrumService extends EventEmitter {
 			routing: this.deps.routing,
 			tuner: this.deps.tuner,
 			settings: this.deps.settings,
+			binsCap: () => this.binsCap.cap,
 			tuning: () => this.deps.tuning(sourceId),
 			logger: this.deps.logger,
 			host: this.deps.engineHost ?? "thread",
@@ -846,17 +942,27 @@ export class SpectrumService extends EventEmitter {
 				)
 				return
 			}
-			const normalised = normaliseProfile(parsed.data, def)
+			const normalised = normaliseProfile(
+				parsed.data,
+				def,
+				this.clientBinsBound(this.deps.settings()),
+			)
 			adjusted = normalised.adjusted
 			const backfill = normaliseBackfillMs(parsed.data.backfillMs)
 			if (backfill.adjusted) adjusted.push("backfillMs")
-			const profile = this.admit(
+			const bound = this.clientBinsBound(this.deps.settings())
+			let profile = this.admit(
 				clientId,
 				sourceId,
 				normalised.profile,
 				def,
 				adjusted,
 			)
+			// WG8: an admission fallback never serves more bins than the advertised bound.
+			if (profile.bins > bound) {
+				profile = makeProfile(profile.hz, bound, averagingOf(profile))
+				if (!adjusted.includes("bins")) adjusted.push("bins")
+			}
 			selection = {
 				sourceId,
 				profile,
@@ -1048,7 +1154,7 @@ export class SpectrumService extends EventEmitter {
 	 * default, with a notice for `current` (a remapped `next` reports in its commit ack).
 	 */
 	private syncDefault(): SpectrumProfile {
-		const def = defaultProfile(this.deps.settings())
+		const def = this.servedDefault(this.deps.settings())
 		if (def.key === this.defaultKey) return def
 		const prev = this.defaultKey
 		this.defaultKey = def.key

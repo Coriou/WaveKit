@@ -1,6 +1,6 @@
 # Web gaps 4 tasks (WG4)
 
-Status: implemented, pending gates: 0.1, the lane tasks and MA.2 done. See [requirements](requirements.md)
+Status: implemented; gates passed at 23388b9b. 0.1, the lane tasks and MA.2 done. See [requirements](requirements.md)
 and [design](design.md). Lanes T, D, S, A, X and ST work in parallel against the frozen
 contract and touch only their own paths; Main (MA.\*) owns the composition files
 (`src/index.ts`, `src/api/server.ts`, barrels, `src/config.ts`, `config/*`), the frozen

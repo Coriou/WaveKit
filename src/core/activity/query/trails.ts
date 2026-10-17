@@ -14,6 +14,18 @@ import type {
 } from "../storage/contract.js"
 import { activityRecordCorrupt, ActivityQueryInvalidError } from "./errors.js"
 import type { SqlDatabase, SqlValue } from "./sqlite.js"
+import {
+	createStepWalk,
+	numberOf,
+	pieceParams,
+	startOf,
+	WALK_CHUNK_ROWS,
+	WALK_RANGE_WHERE,
+	WALK_TIE_WHERE,
+	walkStart,
+	type StepCursor,
+	type StepPiece,
+} from "./walk.js"
 
 export interface TrailsReadLimits {
 	maxPoints: number
@@ -109,6 +121,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export function parseTrailPosition(json: unknown): TrailPosition | null {
 	let value: unknown = json
 	if (typeof json === "string") {
+		// SQLite keeps the first of duplicate keys, JSON.parse the last: refuse a
+		// repeated lat, lon or altM so both sides read the row the same way. Escaped
+		// keys (`"l\u0061t"`) could hide a duplicate from the text check and position
+		// rows never need escapes, so any backslash is refused. Nested objects named
+		// lat, lon or altM repeat the quoted key and are refused too (fail-safe: walk
+		// and probe both use this parser, so they agree).
+		if (
+			json.includes("\\") ||
+			json.indexOf('"lat"') !== json.lastIndexOf('"lat"') ||
+			json.indexOf('"lon"') !== json.lastIndexOf('"lon"') ||
+			json.indexOf('"altM"') !== json.lastIndexOf('"altM"')
+		)
+			return null
 		try {
 			value = JSON.parse(json) as unknown
 		} catch {
@@ -336,25 +361,8 @@ function checkLimits(input: TrailsReadInput): void {
 	}
 }
 
-function numberOf(value: unknown, what: string): number {
-	if (typeof value === "number") return value
-	if (typeof value === "bigint") return Number(value)
-	throw activityRecordCorrupt(`Activity ${what} is not a number`)
-}
-
-/** An exclusive walk position: rows strictly below (ms, seq) remain. */
-interface StepCursor {
-	ms: number
-	seq: number
-}
-
-/** A seekable index range: a run of one millisecond, or whole milliseconds lo..hi. */
-type StepPiece =
-	| { kind: "tie"; ms: number; below: number; low: number }
-	| { kind: "range"; lo: number; hi: number }
-
 /** Index rows of the window examined per step of the newest-first walk. */
-export const TRAILS_CHUNK_ROWS = 4_096
+export const TRAILS_CHUNK_ROWS = WALK_CHUNK_ROWS
 
 function toTrailRow(row: Record<string, unknown>): TrailRow {
 	const entityKey = row["entity_key"]
@@ -406,53 +414,13 @@ export function readTrails(
 	// AND seq >= ?`) or a range of whole milliseconds (`produced_at_ms BETWEEN ? AND ?`).
 	// A step first finds its end on the index alone (covering), then reads the filtered
 	// rows of its pieces; the clock is checked before every statement after the first.
-	const MAX_SEQ = Number.MAX_SAFE_INTEGER
-	const START: StepCursor = { ms: input.producedToMs, seq: MAX_SEQ }
-	const tieEndStatement = db.prepare(
-		`SELECT COUNT(*) AS n, MIN(seq) AS s FROM (SELECT seq FROM activity INDEXED BY activity_produced
-		WHERE produced_at_ms = ? AND seq < ? ORDER BY seq DESC LIMIT ?)`,
-	)
-	const rangeEndStatement = db.prepare(
-		`SELECT produced_at_ms, seq FROM activity INDEXED BY activity_produced
-		WHERE produced_at_ms BETWEEN ? AND ?
-		ORDER BY produced_at_ms DESC, seq DESC LIMIT 1 OFFSET ?`,
-	)
-	/** The step below `cursor` (exclusive): its pieces in walk order and the next cursor. */
+	const START: StepCursor = walkStart(input.producedToMs)
+	const walk = createStepWalk(db, { fromMs, chunk })
 	const planStep = (
 		cursor: StepCursor,
-	): { pieces: StepPiece[]; next: StepCursor | null } => {
-		const tie = tieEndStatement.get(cursor.ms, cursor.seq, chunk)
-		const count = numberOf(tie?.["n"] ?? 0, "count")
-		if (count > 0) {
-			const low = numberOf(tie?.["s"], "seq")
-			return {
-				pieces: [{ kind: "tie", ms: cursor.ms, below: cursor.seq, low }],
-				next: { ms: cursor.ms, seq: low },
-			}
-		}
-		const hi = cursor.ms - 1
-		if (hi < fromMs) return { pieces: [], next: null }
-		const end = rangeEndStatement.get(fromMs, hi, chunk - 1)
-		if (end === undefined)
-			return { pieces: [{ kind: "range", lo: fromMs, hi }], next: null }
-		const endMs = numberOf(end["produced_at_ms"], "producedAt")
-		const endSeq = numberOf(end["seq"], "seq")
-		const pieces: StepPiece[] = []
-		if (endMs + 1 <= hi) pieces.push({ kind: "range", lo: endMs + 1, hi })
-		pieces.push({ kind: "tie", ms: endMs, below: MAX_SEQ, low: endSeq })
-		return { pieces, next: { ms: endMs, seq: endSeq } }
-	}
-	/** The cursor just above a piece: everything newer is consumed. */
-	const startOf = (piece: StepPiece): StepCursor =>
-		piece.kind === "tie"
-			? { ms: piece.ms, seq: piece.below }
-			: { ms: piece.hi, seq: MAX_SEQ }
-	const pieceParams = (piece: StepPiece): SqlValue[] =>
-		piece.kind === "tie"
-			? [piece.ms, piece.below, piece.low]
-			: [piece.lo, piece.hi]
-	const TIE_WHERE = "produced_at_ms = ? AND seq < ? AND seq >= ?"
-	const RANGE_WHERE = "produced_at_ms BETWEEN ? AND ?"
+	): { pieces: StepPiece[]; next: StepCursor | null } => walk.planStep(cursor)
+	const TIE_WHERE = WALK_TIE_WHERE
+	const RANGE_WHERE = WALK_RANGE_WHERE
 	const scanSelect = `SELECT seq, produced_at_ms, entity_key, category, protocol,
 		CASE WHEN json_valid(summary_json) AND json_type(summary_json, '$.position') = 'object'
 			THEN json_extract(summary_json, '$.position') END AS position

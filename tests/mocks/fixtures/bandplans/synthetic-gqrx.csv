@@ -1,0 +1,6 @@
+# Synthetic Gqrx band plan (self-written, not a real allocation)
+# minFreq, maxFreq, mode, step, color, name
+start,end,mode,step,color,name
+87500000,108000000,WFM,100000,#ff0000,Synthetic broadcast
+118000000,137000000,AM,25000,#00ff00,Synthetic air
+144000000,146000000,NFM,12500,#8000ffff,Synthetic ham, with comma

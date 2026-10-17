@@ -25,6 +25,7 @@ import type {
 } from "../spectrum/spectrum-engine.js"
 import type { Lease, LeaseLostReason, TunerArbiter } from "./tuner-arbiter.js"
 import type {
+	BandPlanSkipRange,
 	Classification,
 	DecodeEvidence,
 	FailReason,
@@ -33,6 +34,7 @@ import type {
 	Impact,
 	Identity,
 	JobState,
+	DecodedElsewhereRange,
 	LockoutExclusion,
 	NormalisedJobSpec,
 	PauseReason,
@@ -68,6 +70,10 @@ export interface JobRecord {
 	counts: { observations: number; transients: number }
 	/** WG2 req 12.2: runtime lockout exclusions of the current plan (sweep jobs; never persisted). */
 	lockoutExclusions?: LockoutExclusion[]
+	/** WG6 req 1.2: runtime decoded-elsewhere ranges of the current plan (never persisted). */
+	decodedElsewhere?: DecodedElsewhereRange[]
+	/** WG7 req 6.3: runtime band-plan skip ranges of the current plan (never persisted). */
+	bandPlanSkips?: BandPlanSkipRange[]
 }
 
 export interface LiveObservation {
@@ -117,6 +123,11 @@ export interface JobDriver {
 	/** § 4.7: the source moved without a command the core saw (pipeline `untracked-retune`). */
 	onUntrackedRetune(): void
 	onEvidence(probeId: string, ev: DecodeEvidence): void
+	/**
+	 * WG7 req 1.5: ambient evidence (origin `ambient`) paired with one of this job's live
+	 * observations. Optional: drivers without it ignore ambient evidence (as before WG7).
+	 */
+	onAmbientEvidence?(observationId: string, ev: DecodeEvidence): void
 	/**
 	 * The arbiter revoked `lease`. The job event is chosen inside the dispatch chain from the state
 	 * the job has then (R1: a REST or relay loss while `starting` is a `tuner-error`).

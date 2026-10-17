@@ -9,11 +9,33 @@ import type {
 	LiveDemodulator,
 	LiveDemodReconfigureUpdates as ReconfigureUpdates,
 } from "../../core/live-demodulator.js"
-import type { LiveDemodConfig, LiveDemodStatus } from "@wavekit/api-types"
+import { LIVE_AUDIO_NOISE_QUIETING_DB } from "@wavekit/api-types"
+import type {
+	LiveAudioToneSquelch,
+	LiveDemodConfig,
+	LiveDemodStatus,
+} from "@wavekit/api-types"
 import type {
 	LiveDemodConfig as CoreLiveDemodConfig,
 	LiveDemodStatus as CoreLiveDemodStatus,
 } from "../../core/live-demodulator.js"
+
+/**
+ * WG7 req 3.1: the saved-frequency tone shape, flat (Fastify's ajv strips
+ * properties inside `oneOf` branches); the core's Zod schema enforces the exact
+ * variant, the standard tones and the NFM-only rule.
+ */
+const toneSquelchSchema = {
+	type: "object",
+	properties: {
+		kind: { type: "string", enum: ["none", "ctcss", "dcs"] },
+		frequencyTenthsHz: { type: "integer", minimum: 600, maximum: 3000 },
+		code: { type: "string", pattern: "^[0-7]{3}$" },
+		polarity: { type: "string", enum: ["normal", "inverted"] },
+	},
+	required: ["kind"],
+	additionalProperties: false,
+} as const
 
 const liveDemodConfigSchema = {
 	type: "object",
@@ -27,8 +49,14 @@ const liveDemodConfigSchema = {
 		},
 		bandwidth: { type: "number" },
 		squelch: { type: "number" },
-		squelchMode: { type: "string", enum: ["manual", "auto"] },
+		squelchMode: { type: "string", enum: ["manual", "auto", "noise"] },
 		autoMarginDb: { type: "number", minimum: 0, maximum: 40 },
+		noiseQuietingDb: {
+			type: "number",
+			minimum: LIVE_AUDIO_NOISE_QUIETING_DB.min,
+			maximum: LIVE_AUDIO_NOISE_QUIETING_DB.max,
+		},
+		toneSquelch: toneSquelchSchema,
 		noiseReduction: {
 			type: "string",
 			enum: ["off", "voice", "noaa-apt", "narrow-band"],
@@ -86,6 +114,13 @@ const liveDemodStatusSchema = {
 		noiseFloorDbfs: { type: "number" },
 		thresholdDbfs: { type: "number" },
 		agc: { type: "string", enum: ["off", "slow", "fast"] },
+		toneSquelch: {
+			type: "object",
+			properties: {
+				state: { type: "string", enum: ["off", "waiting", "open"] },
+			},
+			required: ["state"],
+		},
 	},
 	required: [
 		"enabled",
@@ -170,6 +205,11 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			squelch: config.squelch,
 			squelchMode: config.squelchMode ?? "manual",
 			autoMarginDb: config.autoMarginDb ?? 6,
+			noiseQuietingDb:
+				config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
+			...(config.toneSquelch !== undefined
+				? { toneSquelch: copyTone(config.toneSquelch) }
+				: {}),
 			noiseReduction: config.noiseReduction,
 			lowPass: config.lowPass,
 			highPass: config.highPass,
@@ -218,6 +258,9 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				? { squelchOpen: status.squelchOpen }
 				: {}),
 			...(status.agc !== undefined ? { agc: status.agc } : {}),
+			...(status.toneSquelch !== undefined
+				? { toneSquelch: { state: status.toneSquelch.state } }
+				: {}),
 		}
 	}
 
@@ -308,6 +351,12 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				...(body.autoMarginDb !== undefined
 					? { autoMarginDb: body.autoMarginDb }
 					: {}),
+				...(body.noiseQuietingDb !== undefined
+					? { noiseQuietingDb: body.noiseQuietingDb }
+					: {}),
+				...(body.toneSquelch !== undefined
+					? { toneSquelch: body.toneSquelch }
+					: {}),
 				...(body.noiseReduction !== undefined
 					? { noiseReduction: body.noiseReduction }
 					: {}),
@@ -376,4 +425,15 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			}
 		},
 	)
+}
+
+function copyTone(tone: LiveAudioToneSquelch): LiveAudioToneSquelch {
+	switch (tone.kind) {
+		case "ctcss":
+			return { kind: "ctcss", frequencyTenthsHz: tone.frequencyTenthsHz }
+		case "dcs":
+			return { kind: "dcs", code: tone.code, polarity: tone.polarity }
+		default:
+			return { kind: "none" }
+	}
 }

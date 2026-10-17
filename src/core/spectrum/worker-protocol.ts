@@ -3,9 +3,11 @@
  * Inbound worker messages are validated with Zod; outbound events are
  * produced by SpectrumPipeline and only checked for their envelope.
  */
+import { SPECTRUM_SUMMARY_BINS_MAX } from "@wavekit/api-types"
 import { z } from "zod"
 import type { ArtefactMasks } from "./artefacts.js"
 import { EngineStateSchema } from "./engine-state.js"
+import { wireEventProblem } from "./summary-wire.js"
 import type {
 	EngineState,
 	PipelineConfig,
@@ -34,7 +36,7 @@ export const PipelineConfigSchema = z.object({
 	minSurfaceBlocks: z.number().int().min(1),
 	thresholdDb: z.number().nullable(),
 	faTargetPerMhzMin: z.number().positive(),
-	spectrumBins: z.number().int().min(16).max(4096),
+	spectrumBins: z.number().int().min(16).max(SPECTRUM_SUMMARY_BINS_MAX),
 	trackHangMs: z.number().nonnegative(),
 	maxTracks: z.number().int().positive(),
 	maxTrackMs: z.number().positive(),
@@ -116,6 +118,7 @@ export type MainToWorker =
 	| { type: "close" }
 
 export type WorkerToMain =
+	/** Block summaries may be in wire form (summary-wire.ts); the host decodes them. */
 	| { type: "events"; events: PipelineEvent[] }
 	| { type: "buffer"; buffer: ArrayBuffer }
 	| { type: "engine-state"; requestId: number; state: EngineState }
@@ -126,10 +129,16 @@ export type WorkerToMain =
 export const WorkerToMainSchema = z.discriminatedUnion("type", [
 	z.object({
 		type: z.literal("events"),
+		// Block-summary bins may travel as int16 half-dB (summary-wire.ts): flag, type and length checked here.
 		events: z.array(
-			z.custom<PipelineEvent>(
-				v => typeof v === "object" && v !== null && "kind" in v,
-			),
+			z
+				.custom<PipelineEvent>(
+					v => typeof v === "object" && v !== null && "kind" in v,
+				)
+				.superRefine((ev, ctx) => {
+					const problem = wireEventProblem(ev, SPECTRUM_SUMMARY_BINS_MAX)
+					if (problem) ctx.addIssue({ code: "custom", message: problem })
+				}),
 		),
 	}),
 	z.object({ type: z.literal("buffer"), buffer: z.instanceof(ArrayBuffer) }),

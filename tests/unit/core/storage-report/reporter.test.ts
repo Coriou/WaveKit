@@ -286,4 +286,53 @@ describe("storage reporter", () => {
 		expect(limits?.concurrency).toBe(7)
 		expect(limits?.maxWallMs).toBeLessThanOrEqual(1)
 	})
+
+	it("reads area and minFreeBytes providers at each scan, not on cache hits", async () => {
+		let t = 0
+		let list: StorageAreaSource[] = [src("activity", 100)]
+		let min: number | null = null
+		const areas = vi.fn(() => list)
+		const minFreeBytes = vi.fn(() => min)
+		const scan = vi.fn(okScan)
+		const rep = make(
+			{ areas, minFreeBytes, now: () => t },
+			{ scan, cacheMs: 500 },
+		)
+		// Not read at construction.
+		expect(areas).not.toHaveBeenCalled()
+		const [first, shared] = await Promise.all([rep.report(), rep.report()])
+		expect(shared).toBe(first)
+		expect(first.areas.map(a => a.id)).toEqual(["activity"])
+		expect(first.lowSpace).toMatchObject({
+			minFreeBytes: null,
+			state: "unknown",
+		})
+		expect(areas).toHaveBeenCalledTimes(1)
+		expect(minFreeBytes).toHaveBeenCalledTimes(1)
+		// A runtime change waits for the cache to expire.
+		list = [src("logs"), src("scanner-evidence", 7), src("activity", 100)]
+		min = 1
+		t = 499
+		expect(await rep.report()).toBe(first)
+		expect(areas).toHaveBeenCalledTimes(1)
+		t = 500
+		const next = await rep.report()
+		expect(next.areas.map(a => [a.id, a.cap])).toEqual([
+			["activity", { bytes: 100 }],
+			["scanner-evidence", { bytes: 7 }],
+			["logs", null],
+		])
+		expect(next.lowSpace).toMatchObject({ minFreeBytes: 1, state: "ok" })
+		expect(scan).toHaveBeenCalledTimes(2)
+		expect(areas).toHaveBeenCalledTimes(2)
+		expect(minFreeBytes).toHaveBeenCalledTimes(2)
+	})
+
+	it("rejects a scan whose provider returns invalid areas, uncached", async () => {
+		let list: StorageAreaSource[] = [src("logs"), src("logs")]
+		const rep = make({ areas: () => list })
+		await expect(rep.report()).rejects.toThrow(WaveKitError)
+		list = [src("logs")]
+		expect((await rep.report()).areas.map(a => a.id)).toEqual(["logs"])
+	})
 })

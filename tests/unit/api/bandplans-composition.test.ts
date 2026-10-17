@@ -1,10 +1,15 @@
 import { EventEmitter } from "node:events"
 import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import pino from "pino"
 import { afterEach, describe, expect, it } from "vitest"
-import type { BandPlanStackView } from "@wavekit/api-types"
+import type {
+	BandPlanStackView,
+	BandPlanPackView,
+	ImportPreview,
+} from "@wavekit/api-types"
 import { ApiServer } from "../../../src/api/server.js"
 import type { ApiServerDependencies } from "../../../src/api/server.js"
 import { SourceManager } from "../../../src/core/source-manager.js"
@@ -273,4 +278,84 @@ describe("band-plan routes mounted by ApiServer", () => {
 			}
 		},
 	)
+
+	it("advertises all three import formats and imports each end to end in protected mode (WG5)", async () => {
+		const env = await setup(true)
+		const view = await readView(env, env.authorized)
+		expect(view.capabilities.importFormats).toEqual([
+			"sdrpp-json",
+			"sdrsharp-xml",
+			"gqrx-csv",
+		])
+		const fixtures = join(
+			dirname(fileURLToPath(import.meta.url)),
+			"../../mocks/fixtures/bandplans",
+		)
+		const files = [
+			["sdrpp-json", "synthetic-sdrpp.json"],
+			["sdrsharp-xml", "sdrsharp/BandPlan.xml"],
+			["gqrx-csv", "synthetic-gqrx.csv"],
+		] as const
+		for (const [format, file] of files) {
+			const fileBody = {
+				format,
+				fileName: basename(file),
+				contentBase64: (await readFile(join(fixtures, file))).toString(
+					"base64",
+				),
+				groupOverrides: [],
+			}
+			const anonymous = await env.app.inject({
+				method: "POST",
+				url: "/api/bandplans/imports/preview",
+				headers: { ...env.anonymous, origin },
+				payload: fileBody,
+			})
+			expect(anonymous.statusCode).toBe(401)
+			const previewResponse = await env.app.inject({
+				method: "POST",
+				url: "/api/bandplans/imports/preview",
+				headers: { ...env.authorized, origin },
+				payload: fileBody,
+			})
+			expect(previewResponse.statusCode, format).toBe(200)
+			const preview = previewResponse.json<ImportPreview>()
+			expect(preview.format).toBe(format)
+			expect(preview.bands.length).toBeGreaterThan(0)
+			const current = await readView(env, env.authorized)
+			if (current.store.state !== "available" || current.store.storeId === null)
+				throw new Error("store unavailable")
+			const commit = await env.app.inject({
+				method: "POST",
+				url: "/api/bandplans/imports",
+				headers: { ...env.authorized, origin },
+				payload: {
+					...fileBody,
+					expected: {
+						storeId: current.store.storeId,
+						revision: current.store.revision,
+					},
+					previewDigest: preview.previewDigest,
+					name: `WG5 ${format}`,
+					author: null,
+					licence: null,
+					keepColourHints: true,
+					replacesPackId: null,
+					addToStack: true,
+				},
+			})
+			expect(commit.statusCode, format).toBe(201)
+			const { createdId } = commit.json<{ createdId: string | null }>()
+			expect(createdId).toMatch(/^imported-[0-9a-f]{12}$/)
+			const pack = await env.app.inject({
+				url: `/api/bandplans/packs/${String(createdId)}`,
+				headers: env.authorized,
+			})
+			expect(pack.statusCode).toBe(200)
+			expect(pack.json<BandPlanPackView>().pack).toMatchObject({
+				kind: "imported",
+				provenance: { kind: "imported", format },
+			})
+		}
+	})
 })

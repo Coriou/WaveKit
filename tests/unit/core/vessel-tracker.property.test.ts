@@ -85,7 +85,11 @@ function reference(reports: Report[]): VesselState {
 		firstSeen: "",
 		lastSeen: "",
 		lastStaticAt: null,
+		channel: null,
+		aton: null,
+		altitudeM: null,
 	}
+	let atonSeen: VesselState["aton"] = null
 	for (const report of reports) {
 		const atIso = new Date(report.at).toISOString()
 		const name = cleanText(report.name)
@@ -102,7 +106,11 @@ function reference(reports: Report[]): VesselState {
 		const eta = cleanEta(report.eta)
 		const draught = keepNumber(report.draught, value => value > 0)
 		const cog = keepNumber(report.cog, value => value >= 0 && value < 360)
-		const sog = keepNumber(report.sog, value => value >= 0 && value < 102.3)
+		const sog = keepNumber(report.sog, value =>
+			report.messageType === 9
+				? value >= 0 && value <= 1022
+				: value >= 0 && value < 102.3,
+		)
 		const heading = keepNumber(
 			report.heading,
 			value => value >= 0 && value <= 359,
@@ -137,6 +145,11 @@ function reference(reports: Report[]): VesselState {
 			state.messageTypes.sort((a, b) => a - b)
 		}
 		state.vesselClass = classFor(state.messageTypes)
+		// Reports here carry no AtoN fields: a type 21 leaves them null.
+		if (report.messageType === 21) {
+			atonSeen = { aidType: null, virtual: null, offPosition: null }
+		}
+		state.aton = state.vesselClass === "aton" ? atonSeen : null
 		state.messageCount += 1
 		state.decoderId = report.decoderId
 		state.lastSeen = atIso

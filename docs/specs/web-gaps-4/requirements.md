@@ -1,8 +1,7 @@
 # Web gaps 4 requirements (WG4)
 
-Status: implemented, pending gates (lanes merged and wired). Requirement 6.9 (who may write the
-station) is pending a user decision; the frozen behaviour is the recommended one. See
-[design](design.md) and [tasks](tasks.md).
+Status: implemented. Requirement 6.9 (who may write the station) is decided: protected-only
+(E1, 2026-10-16). See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 
@@ -194,8 +193,8 @@ Concurrent patches are serialised.
 a fresh file. A stored value that fails validation, or a stored lat without lon, is ignored.
 6.8 `GET /api/station` shall become live: it returns the effective identity with `revision`
 and `writable`, in both access modes.
-6.9 **Pending user decision (E1).** While `STATION_WRITE_REQUIRES_ACCESS` is `true` (frozen
-default), PATCH is mounted only with the access controller (protected mode) behind
+6.9 **Decided (E1): protected-only.** While `STATION_WRITE_REQUIRES_ACCESS` is `true` (the
+shipped value), PATCH is mounted only with the access controller (protected mode) behind
 `authorizeMetadataMutation`; in legacy mode it does not exist (404) and `writable` is false.
 With the constant `false`, PATCH is also mounted in legacy mode, without an authorization hook.
 Flipping it is a one-line change; the route tests run under both values.

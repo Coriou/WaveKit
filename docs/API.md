@@ -262,6 +262,10 @@ curl http://localhost:9000/health/ready
 #### GET /api/status
 
 Full system status including sources, decoders, audio output, and tuner relay (if enabled).
+`version` is the root `package.json` version. It is put into the bundle at build time
+(`build-file.mjs`; vitest defines the same value), so a built image, `pnpm run dev` and
+tests all report the same version. The same value names the version in the config export
+header and in the band-plan URL fetcher's `User-Agent`.
 
 ```bash
 curl http://localhost:9000/api/status
@@ -657,7 +661,7 @@ When unavailable, `lat`, `lon` and `uncertaintyKm` are null and `reason` is set.
 
 Layered display band plans: a read-only built-in pack per region (`builtin-eu`,
 `builtin-us`, `builtin-ca`, `builtin-au`, `builtin-nz`, `builtin-jp`,
-`builtin-cn`), up to 8 imported SDR++ packs (`imported-` plus 12 hex digits), and
+`builtin-cn`), up to 8 imported packs (`imported-` plus 12 hex digits; SDR++, SDR# or Gqrx), and
 an operator layer (`operator`) that always sits above the ordered stack. A `null`
 stored stack follows the default: the built-in pack of the scanner `region`.
 Operator edits override single fields of a pack band without changing the pack.
@@ -706,8 +710,10 @@ access code-only body and headers.
 | `POST`   | `/api/bandplans/operator-bands`                   | Create an operator band (`band`); 201                                                                       |
 | `PUT`    | `/api/bandplans/operator-bands/:bandId`           | Replace an operator band (`band`)                                                                           |
 | `DELETE` | `/api/bandplans/operator-bands/:bandId`           | Delete an operator band                                                                                     |
-| `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++ file; persists nothing                                                                       |
+| `POST`   | `/api/bandplans/imports/preview`                  | Parse an SDR++, SDR# or Gqrx file; persists nothing                                                         |
 | `POST`   | `/api/bandplans/imports`                          | Commit a previewed import; 201                                                                              |
+| `POST`   | `/api/bandplans/imports/preview-url`              | WG6: fetch an allowlisted https URL once and preview it; persists nothing                                   |
+| `POST`   | `/api/bandplans/packs/:packId/check-update`       | WG6: re-fetch a URL-imported pack and diff it against the committed pack; persists nothing                  |
 | `POST`   | `/api/bandplans/presets`                          | Create an operator scan preset (`preset`); 201                                                              |
 | `PUT`    | `/api/bandplans/presets/:presetId`                | Replace an operator preset (`preset`)                                                                       |
 | `DELETE` | `/api/bandplans/presets/:presetId`                | Delete an operator preset                                                                                   |
@@ -721,7 +727,7 @@ pack, operator band or preset (otherwise `null`), with 201 for creates and 200
 otherwise. Pack-edit routes take built-in or imported pack ids; the operator layer
 is changed through `/operator-bands` instead (`operator` there returns 400).
 
-Import preview takes `format: "sdrpp-json"`, `fileName`, `contentBase64` and
+Import preview takes `format` (one of `capabilities.importFormats`), `fileName`, `contentBase64` and
 `groupOverrides` (`{ sourceType, group }`, 64 max). It returns the file metadata,
 `sha256` of the decoded bytes, `previewDigest`, proposed bands and a skip/mapping
 report. `previewDigest` is a SHA-256 binding the file bytes and the set of
@@ -738,6 +744,115 @@ derived from the region and read-only (409 `BANDPLANS_READ_ONLY`).
 Limits: JSON bodies 64 KiB, import bodies 1.5 MiB, decoded import files 1 MiB and
 4096 rows, 512 bands per pack, 256 operator bands, 1024 edits, 64 presets. All
 limits are returned in the stack view under `limits`.
+
+Import formats (WG5): `capabilities.importFormats` lists the formats this core
+parses: `sdrpp-json` (SDR++ band plan JSON), `sdrsharp-xml` (SDR# `BandPlan.xml`) and
+`gqrx-csv` (Gqrx `bandplan.csv`). A format the core does not parse is 422
+`BANDPLANS_IMPORT_INVALID`. Files are uploaded in the request body, or fetched by
+core from an allowlisted URL (WG6, below). Imports, like every band-plan write,
+need protected mode. The
+imported pack's provenance records the file's `format`; state written before WG5
+reads as `sdrpp-json`.
+
+- `sdrsharp-xml`: strict UTF-8 (a BOM is stripped; UTF-16 is rejected). The root
+  must be `ArrayOfRangeEntry`; each `RangeEntry` child is one row
+  (`minFrequency`, `maxFrequency`, `mode`, `step`, `color` attributes; the element
+  text is the name). Any other child is a `malformed-row` skip. A hand-written,
+  single-pass reader with fixed bounds: no DOCTYPE, entity declaration, CDATA or
+  processing instruction after the optional `<?xml ...?>` declaration (each is
+  422 with reason `xml`, and file content is never echoed); depth at most 4, at
+  most 16 attributes of at most 1,024 characters, element text at most 1,024
+  characters, comments at most 4,096 characters, names at most 128 characters,
+  only the five predefined entities and numeric references of at most 12
+  characters.
+- `gqrx-csv`: strict UTF-8, lines split on LF (a trailing CR removed), blank and
+  `#` lines skipped (not counted as rows), `start,end,mode,step,color,name` split
+  on the first five commas and trimmed. A line over 1,024 characters or with fewer
+  than six fields is a `malformed-row` skip; a header line counts as a row and is
+  skipped.
+
+Both use the SDR++ row rules (decimal integer frequencies, edges, ranges, text,
+duplicates), map `step` to `stepHz` and `color` (`AARRGGBB`, `RRGGBB`, `#RRGGBB` or
+`#AARRGGBB`) to a `#rrggbb` colour hint, use the mode text as the `sourceType` for
+group mapping, and return preview `meta` all null. Mode map (case-insensitive,
+trimmed; anything else is no mode):
+
+| File mode                                         | Band mode |
+| ------------------------------------------------- | --------- |
+| `AM`                                              | `am`      |
+| `FM`, `NFM`, `Narrow FM`                          | `nfm`     |
+| `WFM`, `WFM (mono)`, `WFM (stereo)`, `WFM (OIRT)` | `wfm`     |
+| `USB`, `LSB`, `DSB`                               | same      |
+| `CW`, `CW-L`, `CW-U`, `CWL`, `CWU`                | `cw`      |
+| `RAW`                                             | `raw`     |
+
+Parsing a 1 MiB, 4,096-row file takes about 27 ms (SDR#) and 11 ms (Gqrx) on the
+development Mac.
+
+Import by URL (WG6). Protected mode only, mounted with the other writes and
+re-authorized before any fetch. `capabilities.urlImportHosts` lists the host
+allowlist (`raw.githubusercontent.com`) when URL import is on and `[]`
+otherwise (legacy mode, or no fetcher). `POST /api/bandplans/imports/preview-url`
+takes `{ url, format, groupOverrides }`, fetches the URL once and answers the
+usual import preview plus `sourceUrl` and the fetched file as `contentBase64`.
+Commit it through `POST /api/bandplans/imports` with `sourceUrl` added; the
+`previewDigest` then also binds the URL, and the pack's provenance records
+`sourceUrl`. A commit with `sourceUrl` must match a URL preview this core issued
+in the last 15 minutes (at most 32 remembered, oldest dropped) for the same
+digest, URL and bytes, and uses it up; otherwise it is 409
+`BANDPLANS_IMPORT_MISMATCH` (a client cannot claim a URL it did not fetch
+through core). A commit without `sourceUrl` computes exactly the earlier digest.
+
+Group overrides (WG7). A commit stores its `groupOverrides` in the pack's
+provenance (`provenance.groupOverrides`, sorted by `sourceType` as the digest
+sorts them, at most 64; absent when there are none). This applies to uploads
+and URL imports. A re-import with `replacesPackId` takes the overrides of the
+new commit. `check-update` applies the stored overrides to the fresh file, so
+the diff compares like with like. Packs stored before WG7 load unchanged and
+are checked without overrides.
+
+URL and fetch rules: `https:` only, no user info, no explicit port (also not
+`:443`), no fragment (also not an empty `#`), at most 2,048 characters, and an
+exact lower-case host from the allowlist (no IP literal). Since WG7 the request
+schema judges the raw string as the fetcher does. A control character, space,
+DEL, backslash or `#` is refused, and the authority must have no `:` or `@`.
+One known difference fails safe. The schema still accepts a percent-encoded or
+Unicode-dot host such as `https://%70lans.example.org/a` or
+`https://plans。example.org/a`. The fetcher then refuses it, because it
+requires the lower-cased raw authority to equal the parsed host name (422
+`BANDPLANS_URL_REFUSED`). Core resolves the host
+itself and refuses the URL if any resolved address is loopback, private (RFC
+1918), link-local, CGNAT, unspecified, broadcast, multicast, reserved or
+documentation space, IPv6 unique-local or link-local; IPv4-mapped
+(`::ffff:0:0/96`) and NAT64 (`64:ff9b::/96`) addresses are refused as whole
+blocks, so NAT64-only hosts cannot import. It connects only to the checked
+address (no second lookup) with TLS verification and SNI for the host, follows
+no redirect, accepts only status 200, sends no cookies, credentials or proxy
+settings, asks for `identity` encoding and refuses a compressed body, accepts
+only `text/plain`, `application/json`, `application/xml`, `text/xml`, `text/csv`
+and `application/octet-stream`, stops past 1 MiB (also when `Content-Length`
+announces more) and gives up after 10 s in total. One fetch runs at a time per
+process. Logs carry the host and path, never the query string or response
+bytes.
+
+`POST /api/bandplans/packs/:packId/check-update` re-fetches the `sourceUrl` of a
+URL-imported pack under the same rules (the host must still be allowlisted)
+and answers `{ packId, sourceUrl, checkedAt, currentSha256, fetchedSha256,
+upToDate, added, removed, changed, preview }`. Same bytes give `upToDate: true`,
+empty lists and `preview: null`. Otherwise the file is parsed with the pack's
+format and compared with the pack's imported bands by id: `added`, `removed` and
+`changed` (each with its differing field names, sorted), each list sorted by
+`startHz`, then id. `preview` is a URL preview to commit with `replacesPackId`
+(operator edits are kept, as for a re-import). A file that no longer parses
+answers its parser error. There is no automatic or periodic check. 404
+`BANDPLANS_NOT_FOUND` for an unknown pack; 400 `BANDPLANS_INVALID` for a pack
+without `sourceUrl`.
+
+URL errors: 403 `BANDPLANS_URL_IMPORT_DISABLED` (URL import off), 422
+`BANDPLANS_URL_REFUSED` (URL, address or media type refused), 502
+`BANDPLANS_URL_FETCH_FAILED` (network, TLS, redirect or status), 504
+`BANDPLANS_URL_TIMEOUT`, 413 `BANDPLANS_IMPORT_TOO_LARGE`, 503 `BANDPLANS_BUSY`
+(another fetch is running).
 
 Errors use `{ error: "BandPlansError", code, message }`: 400 `BANDPLANS_INVALID`,
 404 `BANDPLANS_NOT_FOUND`, 409 `BANDPLANS_CONFLICT`, `BANDPLANS_READ_ONLY`,
@@ -803,6 +918,32 @@ Unexpected response encoding/serialization failure uses 500 `FAILED`.
 Root denial envelopes and headers remain unchanged. Full contract:
 [receiver capabilities specification](specs/receiver-capabilities/design.md).
 
+`sampleRatePresets` (WG6) suggests sample rates worth offering: on `rtl_tcp`
+sources `{ state: "suggested", provenance: "wavekit-rtl-rate-presets", valuesHz }`
+with the fixed list 250000, 1024000, 1536000, 1792000, 1920000, 2048000,
+2160000, 2400000, 2560000, 2880000 and 3200000 Hz (the CLI's list, each inside
+the accepted sample-rate ranges); elsewhere `{ state: "not-applicable", reason:
+"non-rtl-transport" }`. These are WaveKit suggestions, not receiver evidence:
+they say nothing about the device or its model.
+
+`gainTable` (WG7, always sent) suggests the gain steps of an RTL-SDR tuner.
+It is `{ state: "suggested", provenance: "librtlsdr-tuner-gains", tuner,
+valuesTenthsDb }` when three conditions hold: the session's current peer header
+is `advertised`, its `tunerType` has a table, and its `gainCount` equals that
+table's length. The values are the librtlsdr `rtlsdr_get_tuner_gains` list
+(`RTL_TUNER_GAIN_TABLES`, tenths of dB, ascending), and a value's index is the
+`gainIndex` the same librtlsdr would use. The tables are E4000 (type 1, 14
+values), FC0012 (2, 5), FC0013 (3, 23), R820T (5, 29) and R828D (6, the same 29).
+Otherwise the field is `{ state: "unknown", reason }`. The reason is checked in
+this order: `header-not-advertised`, `no-gain-table` (FC2580 and unknown tuners,
+whose librtlsdr list is only the placeholder 0), `unlisted-tuner-type`, then
+`gain-count-mismatch`. On other transports it is `{ state: "not-applicable",
+reason: "non-rtl-transport" }`. Like `sampleRatePresets`, it is a suggestion
+matched on two advertised integers, not receiver evidence. The gain command's
+validation (0–500) is unchanged. Ten listed values fall outside it (E4000 1,
+FC0012 2, FC0013 7) and the command still rejects them. Tuning ranges are not
+reported: librtlsdr has no per-tuner range table to match against.
+
 ### Tuner
 
 #### GET /api/tuner
@@ -837,7 +978,12 @@ commands are dropped, so those two tuner fields may over-claim.
 **`unknownFields`** lists the fields whose value is only a placeholder: nothing
 was commanded through this API, no relay client was seen commanding it, and
 (for `frequency`/`sampleRate`) neither the tuner config nor the source caps
-declare it. On a source whose gain was set on the SDR host this reads e.g.
+declare it. A `frequency` or `sampleRate` a relay client set to a value the
+controller ignored is also listed until the next accepted value (the relay
+forwards the raw command upstream, so the receiver may be there).
+**`declaredOnlyFields`** (WG5) lists `frequency`/`sampleRate` whose value comes
+only from that declared baseline: nothing wrote or observed it since the start or
+the last reset reconnect. Absent when empty. On a source whose gain was set on the SDR host this reads e.g.
 `["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
 "AGC 0.0 dB". A gain mode the relay path infers from a client's gain command
 counts as observed (it is not replayed on reconnect). The field values keep
@@ -1000,6 +1146,9 @@ curl http://localhost:9000/api/live-audio/status
 		"modulation": "nfm",
 		"bandwidth": 12500,
 		"squelch": -40,
+		"squelchMode": "manual",
+		"autoMarginDb": 6,
+		"noiseQuietingDb": 6,
 		"noiseReduction": "off",
 		"lowPass": 0,
 		"highPass": 0,
@@ -1019,7 +1168,8 @@ curl http://localhost:9000/api/live-audio/status
 	"pipelineHealth": "running",
 	"pipelineRestarts": 0,
 	"channelPowerDbfs": -61.3,
-	"squelchOpen": false
+	"squelchOpen": false,
+	"toneSquelch": { "state": "off" }
 }
 ```
 
@@ -1043,6 +1193,13 @@ Fields:
 - `agc` (WG4) — the effective AGC mode of the chain after the modulation
   default: `off`, `slow` or `fast` (always `off` for `raw`), on every status.
   `config.agc` is present only when it is set. Optional in `@wavekit/api-types`; older cores omit both.
+- `toneSquelch` (WG7) — the tone squelch gate while the pipeline runs: `{ state }`
+  with `off` (no tone set), `waiting` (squelch closed or the tone not heard yet: the
+  stream carries silence) or `open` (tone heard: audio passes). Absent while stopped
+  and from older cores.
+- `config.squelchMode`, `config.autoMarginDb` and (WG7) `config.noiseQuietingDb`
+  are always present in config and status responses, with their defaults (`manual`,
+  6 and 6) when not set. `config.toneSquelch` is present only when it is set.
 
 Configuration notes:
 
@@ -1055,10 +1212,74 @@ Configuration notes:
   Long continuous signals can eventually enter the floor estimate. Pipeline
   rebuilds, source capability changes (including retained-pipeline retunes), and
   mode changes reset the estimate. This is not calibrated noise measurement.
-  There is no `noise` mode.
+- `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
+  10 ms block it measures the high-frequency noise of the FM discriminator output
+  (above voice: a high-pass at 0.6 of the channel's audio Nyquist) and compares it
+  with the noise-only reference of the same chain. The gate opens on a block at
+  least `noiseQuietingDb` below the reference, stays open within 2 dB of that and
+  closes 250 ms after the last such block, like the power squelch. The reference
+  needs no calibration and is not stored: the metric does not depend on the signal
+  scale, so it depends only on the channel filter cutoff relative to the channel
+  rate. It is a table entry computed once per cutoff by a deterministic
+  fixed-seed simulation (65 536 Gaussian noise samples through the channel filter,
+  about 10 ms of CPU, cached for the process), not a closed-form value. A block
+  with a non-finite sample, or with fewer than half usable samples, counts as
+  noise, so NaN or silent IQ never opens the gate. `squelch` and `autoMarginDb` are
+  kept but do not gate in noise mode; `thresholdDbfs` reports the configured
+  `squelch`. Config validation and PATCH answer 400 for `noise` with any other
+  modulation, and for a PATCH that changes the modulation of a `noise` config to a
+  non-FM one. Measured on synthetic channels only: noise alone never opened the
+  gate in 10 minutes, and a carrier at 12 dB carrier-to-noise ratio opens it within
+  50 ms. At 12 dB the median quieting is about 6.9 dB, close to the default, so a
+  lower default may follow the real-RF acceptance. CPU about 8 ns per channel IQ
+  sample on the Mac (budget 50 ns).
+- `noiseQuietingDb` (WG7) — the noise squelch threshold, 1–30 dB (default 6); used
+  in `noise` mode only.
+- `toneSquelch` (WG7, NFM only) — a CTCSS or DCS tone squelch gate, in the
+  saved-frequency tone shape: `{ "kind": "none" }`,
+  `{ "kind": "ctcss", "frequencyTenthsHz": 885 }` or
+  `{ "kind": "dcs", "code": "023", "polarity": "normal" }`. Absent or `none` means
+  no tone gate. A CTCSS value must be one of the 50 standard tones (in tenths of a
+  Hz) and a DCS code one of the standard codes; other values, and a tone with any
+  modulation other than `nfm`, answer 400. With a tone set, the audio sent to
+  stream clients is muted (zero samples, stream timing kept) until the squelch is
+  open and the tone is heard: for CTCSS the 50-tone detector picks the configured
+  tone in 2 consecutive 500 ms analysis blocks (250 ms hop; first open after about
+  750 ms of open squelch); for DCS the configured code, or its inverted twin (the
+  same bit stream), is decoded in 2 consecutive words. The gate closes after 2
+  analysis blocks without the tone (CTCSS) or 2 word periods without a matching
+  word (DCS), and at once when the squelch closes. In synthetic tests it opens
+  within 1.0 s for CTCSS and DCS and never opens on a tone one standard step away
+  or on the DCS-free corpora. The gate mutes audio only: `live-audio:transmission`
+  events, Activity rows, tone results (`tone.ctcssHz`, `tone.dcs`) and level events
+  are unchanged, so other users' transmissions on the channel are still recorded.
+  CPU about 4 ms per second of audio for CTCSS and 1 ms for DCS on the Mac
+  (budget 5 ms). The saved-frequency store does not apply its tones itself
+  (operator data `capabilities.toneSquelch` stays `false`): a client sets
+  `toneSquelch` here.
 - `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
+  Noise tail (WG7): with a threshold just above the channel noise, the 2 dB band
+  below it used to reach into the noise, so noise blocks kept the gate open for a
+  random time after the carrier stopped (measured about 0.26 s to over 1.6 s in a
+  synthetic pipeline, the "~0.75 s noise tail"). Now a block inside that band that
+  is also less than 2 dB above the channel's noise floor estimate (the same lower
+  envelope as auto mode, kept in manual mode too) no longer keeps the gate open.
+  The floor used by this rule is the one measured while the gate was closed: it
+  is frozen while the gate is open and follows the estimate again after it closes,
+  so a long transmission is never judged against its own carrier level. Auto mode
+  at a margin of 4 dB or more behaves exactly as before; below 4 dB the band lies
+  in the noise, so a fade into it no longer holds the gate.
+  In the same test the unmuted audio after carrier loss is now about 260 ms for
+  every seed, within the bound of the 250 ms hang, one 10 ms block and the
+  modelled csdr release batch (41 ms at 25 kHz); auto mode at its defaults was
+  already there and is unchanged. Threshold, hysteresis,
+  hang and the auto floor are unchanged; without a floor estimate the gate behaves
+  as before. A carrier that fades to within 2 dB of the floor for longer than the
+  hang can now close and reopen the transmission, because such blocks cannot be
+  told from noise. Real-RF acceptance of the tail (and of the csdr back-chain
+  delay) is open.
 - `gain` — audio gain after demodulation (default 2, formerly 10; for FM, ±5 kHz
   deviation at 0.8 full scale at a 25 kHz demod rate). Modes without AGC follow the
   gain directly: `raw` is about 5× (14 dB) quieter than before unless `gain` is set
@@ -1102,6 +1323,19 @@ When the rate or format changes (sample-rate change, `audioFormat` change) the
 server ends existing streams; reconnect to get the new parameters. A client that
 falls behind keeps at most about one second of queued audio (the oldest audio is
 dropped); a client that accepts nothing for 30 s is disconnected.
+
+Cross-origin use (WG7). In legacy access mode, every response of the audio HTTP
+servers carries `Access-Control-Allow-Origin: *` beside
+`Access-Control-Expose-Headers`, and never `Access-Control-Allow-Credentials`.
+The servers are the live demodulator (`/stream`, `/stream.wav`) and digital
+voice (`/decoders/<id>/stream[.wav]`). Their 404 and 503 answers carry the
+header too, so a web app on another origin can `fetch()` the stream. `OPTIONS`
+on a stream path answers 204 with `Access-Control-Allow-Origin: *`,
+`Access-Control-Allow-Methods: GET, OPTIONS`, `Access-Control-Allow-Headers:
+Range` and `Access-Control-Max-Age: 600`. Other paths stay 404, and a non-GET
+method answers 404 with `*`. Protected mode is unchanged. The access layer
+answers preflights and echoes only an allowed origin, with credentials, as for
+REST. `*` is never sent. `Access-Control-Allow-Private-Network` is not sent.
 
 ```bash
 # Self-describing: no format flags
@@ -1149,7 +1383,7 @@ curl -X POST http://localhost:9000/api/live-audio/stop
 #### PATCH /api/live-audio/config
 
 Update live demodulator configuration. DSP changes restart the pipeline; `squelch`,
-`squelchMode` and `autoMarginDb` changes apply immediately without a restart; an `httpPort` change moves the stream
+`squelchMode`, `autoMarginDb`, `noiseQuietingDb` and `toneSquelch` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
 
@@ -1315,6 +1549,7 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 | `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                       |
 | `owner`               | `"config"` or `"scanner"`: who created the instance. Scanner probes are `"scanner"`; their start/stop/restart and band routes answer 409 `DECODER_OWNED_BY_SCANNER`. Sent by current cores.                                                                                                                                                       |
 | `scannerJobId`        | The scanner job that owns a probe; present only with `owner: "scanner"`.                                                                                                                                                                                                                                                                          |
+| `optionIssues`        | WG6, report only: problems with the instance's `options` found when it was created (config, API create and scanner probes), `[{ path, code, message }]` with `code` `unknown-key`, `invalid-value` or `truncated`. `[]` when valid; absent for a type without an option schema. At most 32 entries (the 32nd is a `truncated` entry counting the rest); `path` and `message` ≤ 256 UTF-16 code units; messages never echo option values. The decoder is created and started exactly as before (`DECODER_OPTIONS_ENFORCE` is false); one warn log per decoder lists the issue paths. |
 | `ephemeral`           | `true` for runtime-only instances (scanner probes: not in config, never persisted, announced by `decoder:created` / `decoder:removed`). Hide or group them in decoder lists.                                                                                                                                                                       |
 
 `health` after an unexpected exit:
@@ -1497,6 +1732,83 @@ for every decoder selecting that source. 404 for an unknown source; 400 for a
 non-positive or non-integer rate and, for `rtl_tcp` sources, for rates
 librtlsdr rejects (valid: 225001–300000 and 900001–3200000 Hz).
 
+#### GET /api/decoders/types
+
+Registered decoder types: `[{ type, caps, options? }]`. `options` (WG6) lists
+one descriptor per documented option key of the type, sorted by key: `{ key,
+type, enumValues?, min?, max?, unit?, default, secret, effect: "restart",
+description }`. It is absent for a type without an option schema. Keys whose
+value is key material or may carry it (Meshtastic `channelKey`, dsd-fme
+`extraArgs`) have `secret: true`; the config export redacts them. Every option
+takes effect on the next start (`effect: "restart"`).
+
+WG8 adds `patchable` to a descriptor: `true` when the protected
+`PATCH /api/decoders/:id` may set the key (see
+[decoder settings](#get-apidecodersidsettings)). Absent means false, so an
+older core reads as not patchable. Patchable keys are receive tuning and
+decode parameters whose value is a bounded number, a boolean or a closed set:
+
+| Type              | Patchable keys                                                                                         |
+| ----------------- | ------------------------------------------------------------------------------------------------------ |
+| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                         |
+| `ais-catcher`     | `gain`, `ppm`                                                                                          |
+| `readsb`          | `ppm`                                                                                                  |
+| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`                      |
+| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                                         |
+| `rtl433`          | `analyze`, `protocols`                                                                                 |
+| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                       |
+
+Never patchable, by meaning: `extraArgs`; secrets; free-text `string` and
+`object` options; a `string-list` without a closed set; anything naming a path,
+file, directory, host, address, port, device, serial, URL or station identity
+(`lat`, `lon`, `callsign`); output routing (`output*`, `udp*`, `agwPort`,
+`kissPort`); recording, retention and debug capture; the input format; the
+rate-plan inputs (`inputSampleRate`, `targetSampleRate`, `inputCenterFreq`,
+`followCenter`, `sampleRate`, `channelHz`, `offsetHz`, lora `oversampling`);
+and any key the digital-voice preparation reads or rewrites (dsd-fme `mode`,
+`output`, `udpHost`, `udpPort`, `voiceSlot`). A string `gain` (readsb,
+dumpvdl2) and options an adapter does not use (acarsdec `gain`, dumpvdl2 `ppm`)
+stay false. The core re-checks these rules at runtime, not only through the
+descriptors.
+
+Bounded options (WG7). Every built-in adapter reads its numeric options through
+one helper. The helper coerces numeric text as the option schema does. A
+non-finite or non-numeric value counts as absent, so the adapter default
+applies. A value out of range is clamped to the option's bounds. One warning
+is logged per decoder and key, naming the key and the issue, never the value.
+Decoder logs carry no option text. The schemas and descriptors carry the same
+bounds. Argv and pipeline commands for every decoder in `config/*.yaml` and the
+test fixtures are byte-identical to before. A shell pipeline (`sh -c`) carries
+an option only as a finite number formatted by the helper (for example the
+csdr `gain` stage): `fmGain: "1; rm -rf /"` counts as absent, so only a number reaches the shell.
+
+| Option                                                        | Bound                                                                              |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `ppm`                                                         | −1000 to 1000                                                                      |
+| ports (`udpPort` and others)                                  | 1–65535 (dsd-fme `udpPort` out of range is dropped, not clamped)                   |
+| `inputSampleRate`                                             | 1 kHz–64 Msps (demod bases, multimon-ng, dsd-fme, rtl_433); 1 kHz–10 Msps (others) |
+| ais-catcher `gain`                                            | 0–60 dB                                                                            |
+| readsb `gain`                                                 | −10 to 60 dB or `auto`; other text is dropped                                      |
+| dumpvdl2 `targetSampleRate`                                   | 105 000–2 100 000 (oversample 1–20); `frequencies` 1 Hz–6 GHz                      |
+| rtl_433 `targetSampleRate`                                    | 250 kHz–3.2 Msps                                                                   |
+| multimon-ng `verbosity`                                       | integer 0–10 (one `-v` per step)                                                   |
+| multimon-ng high-pass / low-pass, filter gain, `fmGain`       | 0–11 025 Hz; ±60 dB; linear 0–1000                                                 |
+| dsd-fme durations, `callTimeoutMs`, retention, total size     | 0–24 h; (0, 24 h]; at most 8760 h; at most 1 048 576 MB                            |
+| demod base `filterTransition`, `filterCutoff`, `audioLowPass` | 0–0.5; 0–0.5; 0–96 kHz                                                             |
+| direwolf `sampleRate`                                         | 8–192 kHz                                                                          |
+
+Arrays that become argv entries are bounded. Entries past a bound are dropped
+with a key-only warning:
+
+- `frequencies`: at most 8 for acarsdec and dumpvdl2, at most 64 for multimon-ng.
+- rtl_433 `protocols`: at most 256, ids 0–999. A list whose every entry is
+  invalid gives no `-R`, which means rtl_433's defaults, the same as absent.
+- multimon-ng `modes`: deduplicated, at most 8.
+- `extraArgs` (every adapter): at most 64 entries. Each entry must be a string
+  of at most 4 096 bytes, and all entries together at most 65 536 bytes.
+
+`extraArgs` is the operator's escape hatch: config only, with no flag allowlist.
+
 #### GET /api/decoders/:id
 
 Get status of a specific decoder.
@@ -1616,28 +1928,124 @@ line }] }`, oldest first. Each decoder keeps at most 500 lines of 4096 character
 These are raw decoder output and can contain decoded data; network frames from
 producers such as readsb are not turned into log lines. 404 for an unknown id.
 
-#### PATCH /api/decoders/:id
+#### GET /api/decoders/:id/settings
 
-Update decoder configuration.
+Decoder settings (WG8, [spec](specs/web-gaps-8/requirements.md)). A persisted
+override layer, `<stateDir>/decoder-settings.json`, holds per decoder id and
+type an optional `enabled` and a map of option values. Precedence: override >
+configuration (YAML with `WAVEKIT_` environment overrides) > adapter default.
+The loaded configuration is never mutated, and `GET /api/config/export` stays
+the YAML/env configuration (overrides are not exported). The store loads in
+both access modes, so overrides written in protected mode keep applying; the
+routes exist only in protected mode (`DECODER_SETTINGS_REQUIRES_ACCESS`).
 
-```bash
-curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
-  -H "Content-Type: application/json" \
-  -d '{
-    "options": {
-      "mode": "dmr"
-    }
-  }'
-```
-
-**Response** (200 OK):
+GET runs under root admission (an authenticated browser session or device) and
+answers `DecoderSettingsView` with `Cache-Control: no-store`:
 
 ```json
 {
-	"id": "dsd-main",
-	"message": "Configuration updated, restart required"
+	"decoderId": "dsd-main",
+	"type": "dsd-fme",
+	"revision": 3,
+	"enabled": { "value": true, "source": "config" },
+	"options": [
+		{ "key": "callTimeoutMs", "source": "override", "patchable": true, "secret": false, "present": true, "value": 2500 },
+		{ "key": "udpPort", "source": "config", "patchable": false, "secret": false, "present": true }
+	],
+	"undocumentedKeys": 0,
+	"pendingRestart": true
 }
 ```
+
+- `options` lists every documented key of the type in descriptor order with
+  its `source` (`override`, `config` or `default`), `patchable`, `secret` and
+  `present` (an override or the configuration sets it). `value` appears only
+  on a patchable, non-secret key (null = the adapter default applies); secret
+  and non-patchable keys show only `{ present }`. A frequency key that a
+  higher-priority source shadows (top-level `frequencies` over
+  `options.frequencies` over `options.frequency`) is `patchable: false` for
+  that decoder, and PATCH refuses it with `DECODER_OPTION_NOT_PATCHABLE`
+  (a revert with null stays allowed).
+- `undocumentedKeys` counts configured keys the type does not document; they
+  are never named.
+- `enabled` is autostart at boot: it is applied when the decoder is created at
+  WaveKit startup and never starts or stops a running decoder.
+- `pendingRestart` is true while the running instance does not yet have the
+  effective options.
+- `overrideIgnored: "type-changed"`: the stored entry has another type than
+  the configured decoder; it is ignored until a PATCH replaces it. Entries for
+  ids that are not configured are kept in the file, ignored and logged as a
+  count (no ids).
+
+404 `DECODER_NOT_FOUND` for an unknown id, 409 `DECODER_OWNED_BY_SCANNER` for
+a scanner probe.
+
+#### PATCH /api/decoders/:id
+
+Protected mode: a JSON merge patch of the settings, re-authorized like the
+other protected mutations. Body `{ enabled?: boolean | null, options?: { <key>:
+value | null } }`: a value sets the override, `null` removes it (the configured
+value or the default applies again), an absent key is unchanged; at least one
+key, at most 64 option keys, only `enabled` and `options` (checked strictly,
+no coercion: `"true"` is not a boolean). Optional `If-Match: <revision>`
+(`W/"n"`, `"n"` or `n`; the `revision` of the view) guards against a lost
+update.
+
+```bash
+curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
+	-H 'Content-Type: application/json' -H 'If-Match: 3' \
+	-d '{"options":{"callTimeoutMs":3000,"fmGain":null}}'
+```
+
+200 `DecoderSettingsUpdateResult`: `{ settings, revision, changed,
+pendingRestart }`, where `changed` lists the keys whose effective value changed
+(`enabled` first, then options in descriptor order).
+
+Each patched key is validated with its own option schema, and the merged
+effective options with the type's cross-key rules; a problem already present in
+configured keys the patch does not touch never fails the patch. A refused
+patch changes nothing. Error bodies `{ error, code, message, issues?, keys?,
+unknownKeys? }` never carry a submitted value:
+
+| Status | Code                                 | When                                                                                                       |
+| ------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id        |
+| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`) or undocumented keys (counted in `unknownKeys`, never named)       |
+| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                            |
+| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                            |
+| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                                 |
+| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                       |
+| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                              |
+
+A denial answers before the body is parsed, with the access code-only body.
+
+Applying: the PATCH restarts nothing. It stages the effective options on the
+decoder; the next start (operator start or restart, an automatic restart, or
+the next boot) rebuilds the adapter from its current configuration with the
+staged keys set or removed, announces it with `decoder:created` for the same
+id, then starts it. Status, caps, band and rate assessment, provenance, ambient
+targets, audio and digital-voice wiring follow the rebuilt instance. A rebuild
+that fails keeps the previous instance and configuration, leaves the decoder
+stopped with `lastError` "Decoder rebuild failed", and `pendingRestart` stays
+true.
+
+Store: writes are serialised and atomic (an exclusively created temporary
+file, fsync, rename). Bounds: file 256 KiB, 256 decoder entries, 64 option keys
+per entry, values of the patchable types only. A corrupt, over-bound or
+unreadable file is moved aside (`decoder-settings.json.corrupt-<ms>`, one kept)
+and the store starts empty with a seeded revision, so a stale `If-Match` never
+matches; a missing file starts empty at revision 0. The store reads only a
+regular file and never follows a symbolic link: a link or FIFO planted at the
+path is moved aside the same way. A settings file that is a symlink (or any
+non-regular file) is moved aside as unreadable and the store starts empty; the
+link target is untouched; `stateDir` itself may be a symlink. A stored key that is no longer patchable or
+valid is dropped in memory (counted). The file is counted in the
+`decoder-overrides` storage area.
+
+Legacy mode (and protected mode without the settings service): unchanged. A
+valid body answers 501 `DECODER_CONFIG_UPDATE_UNSUPPORTED`; 404 for an unknown
+decoder, 400 `NO_UPDATE_FIELDS` for an empty body; there is no GET settings
+route. Edit the YAML configuration and restart WaveKit.
 
 ### Digital Voice
 
@@ -1954,6 +2362,64 @@ When applying them would leave no hop, none applies and all have
 `applied: false`. The key is absent for in-window plans and when no lockout
 falls inside the ranges. Lockout exclusions are never written into the spec.
 
+Plans also say which parts of the ranges decoders elsewhere already decode
+(WG6): `decodedElsewhere: [{ startHz, endHz, sourceId, decoderIds, applied }]`.
+A decoder counts only when its own state proves the coverage (fail closed):
+it is running, healthy (`running` or `idle`), not suspended, configured (scanner
+probes never count) and on a different source than the job (a job retunes its
+own source, so those decoders lose their coverage while it scans). A decoder on
+a WaveKit source needs an `in-band` band verdict with a known capture centre
+`c` and window half-width `w`: each target `t` within the window covers
+`[t − 6 250, t + 6 250]` clipped to `[c − w, c + w]`, and each band range is
+clipped to the window. External-input decoders (`sourceId: null`) would cover
+their targets only with a `configured`, `protocol` or `override` band basis;
+today's band check reports external inputs as `unknown`, so they never
+contribute. Entries are clipped to the enabled ranges, merged per `sourceId`
+(touching intervals merge, decoder ids are sorted and unique) and sorted by
+`startHz`, then `sourceId` (null last). At most 64 decoders, 32 targets plus
+ranges per decoder and 256 entries are examined or reported; past a bound the
+plan gets one `decoded-elsewhere-truncated` warning, only when some entry is
+reported. The key is absent when nothing is covered.
+
+`skipDecodedElsewhere: true` (sweep jobs, optional, live-editable) applies the
+entries as exclusions after the lockouts (lockouts keep their own rule and are
+never dropped for them). If that would leave no hop, none applies (all
+`applied: false`) and the plan gets one `decoded-elsewhere-not-applied`
+warning. In-window jobs report the entries but never apply them. Without the
+flag the hops are exactly today's. Coverage is read when a plan is computed
+(preview, create, PATCH, restore and the lockout replans). It is also read
+after decoder changes (WG7; this replaces the WG6 "plan-time only" rule). Each
+decoder change triggers a refresh: created, started, stopped, error,
+restarting, max-restarts, removed, health or status change. The refresh runs
+2 s after the last change, at most once per 30 s, and no later than 30 s after
+the first pending change. A decoder that keeps flapping cannot postpone it
+forever. A refresh compares a fingerprint of the fields the trust rule reads,
+so an unchanged view does nothing. Otherwise every live sweep job is replanned
+through the lockout path: `scanner:job` is sent only when a job's list
+changed, and hops change only for a job with `skipDecodedElsewhere`. A
+throwing view counts as no coverage.
+
+Band-plan skips (WG7): `skipBandPlanSkips: true` (optional, absent = false,
+live-editable) turns the band-plan bands marked `skip` into exclusions of a
+sweep plan. The sources are the resolved band-plan view: the operator layer
+and every enabled pack, built-in or imported. Each band whose effective
+`skip` is set contributes its resolved segments (the parts no higher layer
+names); hidden or shadowed parts contribute nothing. At most 1 024 segments
+are examined, in view order. Plans list them as `bandPlanSkips: [{ startHz,
+endHz, bandKeys, applied }]`: clipped to the enabled ranges, merged
+(overlapping or touching become one, `bandKeys` sorted and unique), sorted by
+`startHz`, at most 256. Jobs carry the same key, runtime only, like
+`lockoutExclusions`. Sweep and in-window plans both report the entries; only
+sweep jobs with the flag apply them. They apply after the lockouts and before
+decoded-elsewhere ranges. If applying them would leave no hop, none applies
+(all `applied: false`) and the plan gets one `bandplan-skips-not-applied`
+warning. Past a bound, the plan gets one `bandplan-skips-truncated` warning,
+only when some entry is reported. The key is absent when there is no entry.
+Without the flag the hops are exactly today's. A missing or throwing band-plan
+view yields no entries. Skips are read only when a plan is computed (preview,
+create, PATCH, restore, replans). A band-plan edit never replans a running
+job, so a new skip applies at the job's next plan.
+
 #### POST /api/scanner/jobs
 
 Creates a job (`ScanJobSpec`, every field optional; defaults in
@@ -2123,6 +2589,11 @@ is created, edited or restored). Setting, clearing or deleting a lockout
 replans every live sweep job on the discovery's sources whose list changes and
 sends `scanner:job`.
 
+Jobs also carry the `decodedElsewhere` entries of their current plan (WG6; see
+`POST /api/scanner/plan`), runtime only like `lockoutExclusions`. They are
+recomputed at the same points and after decoder changes (WG7 refresh). WG7
+`bandPlanSkips` entries are carried the same way.
+
 `progress.hitStats` (WG2) is `{ discoveries, hits, newDiscoveries, truncated }`
 since the job started: see `GET /api/scanner/jobs/:id/hits`.
 
@@ -2131,7 +2602,7 @@ since the job started: see `GET /api/scanner/jobs/:id/hits`.
 Live edit. The hop plan changes at the next hop; detection masks, protocol
 matching, probes and `signalsOnly` change as soon as the PATCH returns. Allowed keys: `thresholdDb`,
 `sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
-`capture`, `signalsOnly` and `ranges`; other keys are ignored. The keys are merged into the spec the job
+`capture`, `signalsOnly`, `skipDecodedElsewhere`, `skipBandPlanSkips` and `ranges`; other keys are ignored. The keys are merged into the spec the job
 was created with (only `sourceId` and `mode` are pinned), so derived fields
 follow the edit and keep their provenance: `{"sensitivity": "high"}` gives
 100 ms integration unless the job set `integrationMs` itself. While the job
@@ -2277,14 +2748,19 @@ track is credited once too). `?limit=n` (1–500, default 100). 404
 			"hits": 9,
 			"firstHitAt": "2026-10-13T14:00:02.000Z",
 			"lastHitAt": "2026-10-13T14:02:11.000Z",
-			"firstSeenInJob": true
+			"firstSeenInJob": true,
+			"lastDurationMs": 2350
 		}
 	]
 }
 ```
 
 `hits` is most recent hit first. `firstSeenInJob` means an observation of this
-job created the discovery. In memory only: the counts reset when the job
+job created the discovery. `lastDurationMs` (WG6) is the length in ms of the
+most recent ended observation credited to the discovery in this job: null
+until one has ended, and while a newer observation is open it keeps the
+previous value; the same
+entries ride on `jobHits` in `scanner:discovery` events. In memory only: the counts reset when the job
 starts (not on resume), are dropped when the job is deleted and are empty after
 a restart. At most 2,000 discoveries are tracked per job; further hits count
 in `stats.hits` only. The counts are best-effort: the job remembers the last
@@ -2537,6 +3013,42 @@ earlier) or `unidentified`, with `result`: `protocol?`, `confidence`,
 signal) and `ended?: "window-moved"` (the window moved off the target; open
 trials are `cancelled`).
 
+**Ambient identify (WG7).** `ais`, `acars`, `vdl2` and `lora` have no probe
+decoder: identify names them from a decoder that already runs there
+(`ais-catcher`, `acarsdec`, `dumpvdl2`, `lora-meshtastic`). Identify never
+starts, stops or retunes such a decoder. When a running, healthy, config-owned,
+not suspended decoder of those types on the job's source (external-input
+decoders never count) has a target frequency within the target's tolerance
+(at least 1 kHz), the target gets one trial per protocol (at most 8):
+`{ "protocol": "ais", "decoder": "ais-catcher", "mode": "ais-catcher",
+"transport": "ambient", "outcome": "running" }`. Ambient trials hold no probe
+and never delay probe trials. One ends `decoded` when that decoder's evidence
+with an accepted identity pairs with the target's observation in the same
+engine epoch before the deadline. Otherwise it ends `timeout`, `not-needed` or
+`cancelled` like other trials. A protocol named in `protocols` with no covering
+decoder is `unsupported` with reason `no-ambient-decoder`. An accepted ambient
+identity makes the target `identified`, with the same rule as a probe decode.
+
+A decode counts only when all of these hold (fail closed):
+
+- the decoder's reception `tuningTrust` is `commanded` or `relay`, never
+  `unverified`. Its provenance binding must name the same source (a binding
+  without a source, as for an external-input decoder, never counts), and the
+  decode's frequency must lie within 1 kHz of one of the binding's targets.
+- the decode carries its own frequency within 1 kHz of a decoder target. AIS
+  channel `A` is 161 975 000 Hz and `B` is 162 025 000 Hz; a message without a
+  channel does not count. ACARS without a frequency counts only for a decoder
+  with exactly one target. A VDL2 frequency of 0 does not count.
+- it is CRC-clean: ACARS `error` 0, AIS sentences that passed the checksum,
+  dumpvdl2 frames as emitted, and Meshtastic packets from RF (never `viaMqtt`).
+- the observation's track centre is within 1 kHz of the decode's frequency, so
+  a wide track near a channel is never named by it.
+
+The identity is attached on its second clean decode within one engine epoch.
+Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
+(`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
+of these types, or without tuning trust, identify behaves as before WG7.
+
 #### GET /api/scanner/captures
 
 Burst IQ captures (job option `capture`, [SCANNER.md](SCANNER.md#burst-iq-capture-fixtures)), newest first:
@@ -2661,6 +3173,34 @@ floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile) and `lastError?`.
 
+Spectrum detail above 2 048 bins (WG8). `scanner.ws.spectrumBinsCap` (config
+only: `"auto"`, 2048, 4096 or 8192; absent means `"auto"`, so the parsed config
+and its export are unchanged) caps the summary and client bins of every source.
+`"auto"` runs one startup micro-benchmark (at most 200 ms wall, logged once as
+`{ setting, cap, source, wallMs }`) and picks the largest of 8 192 and 4 096
+whose measured cost, times 1.5, fits the budgets (summary traffic 512 KiB/s,
+clone 10 ms/s, per-profile work 5 ms/s at the summary rate); 2 048 is the floor
+and is never measured, and a failing bench gives 2 048. The Mac picks 8 192;
+the measured cap on a Raspberry Pi 3 is 2 048. Block summaries cross the
+worker boundary as lossless 16-bit half-dB integers (about 2 B per bin).
+
+- `limits.binsCap` (`SpectrumBinsCapView`, optional; older cores omit it):
+  `{ setting, cap, source }`, `source` `config` (a fixed setting), `measured`
+  (the bench) or `fallback` (the bench failed).
+- `limits.bins.max` is `min(cap, scanner.ws.spectrumSummaryBins)`. The summary
+  budget `spectrumSummaryBins` accepts 512–8 192 (default 2 048 unchanged), so
+  with the shipped config `limits.bins.max` stays 2 048 on every host and
+  every subscribe, frame and limit is as before. An operator raises
+  `spectrumSummaryBins` for more detail.
+- A client may ask `options.spectrum.bins` up to 8 192; a value above the bound
+  is clamped with `adjusted: ["bins"]`.
+- Real detail above 2 048 bins also needs `scanner.detection.fftSize` ≥ 4 096
+  at 2.048 Msps, where the `auto` FFT size is 2 048 (`binCount` is never
+  upsampled; the actual count is in
+  `summaryBinCount` and the frame's `binCount`).
+- The default profile (`scanner.ws.spectrumBins`) keeps 128–2 048 and the
+  default 512. Viewed-slice zoom is still gated.
+
 An unexpected worker exit, fatal worker error or failed pipeline replacement
 invalidates the engine and its cached live spectrum. Status reports
 `engine: "error"` with `lastError`; stale summaries are not served as live.
@@ -2718,7 +3258,23 @@ Activity reception) carries `channel`, `A` or `B`, from NMEA field 4 or
 AIS-catcher's JSON `channel`; a multi-sentence message takes it from its first
 fragment, and the key is absent when the channel is unknown. It sets the
 reception's provenance frequency: A is 161.975 MHz, B 162.025 MHz (see
-[Provenance](#provenance)). `VesselState` does not carry the channel.
+[Provenance](#provenance)). From WG5 `VesselState.channel` carries it too (see
+below).
+
+AIS types 4, 9 and 21 (WG5): on the NMEA path a base station report (type 4), a
+SAR aircraft report (type 9) and an aid-to-navigation report (type 21) decode to
+a position; a longitude of 181 or a latitude of 91 means no position. A short
+payload drops only the fields whose bits are missing. Type 9 also gives
+`altitudeM` (0–4094 m; 4094 means 4094 or higher; 4095, not available, is
+omitted) and `sog` in whole knots (0–1022). Type 21 gives `aidType` (ITU-R
+M.1371 aid type 0–31), the name with its extension (at most 34 characters),
+`virtualAid` and `offPosition` (only when the report's UTC second is 0–59). The
+AIS-catcher JSON path reads the same fields from `alt`, `aid_type`,
+`virtual_aid` and `off_position` and validates each field on its own: a field of
+the wrong type or out of range is dropped and the rest of the ship is kept.
+These four JSON key names follow AIS-catcher's naming but have not been checked
+against a real AIS-catcher sample. Types 4, 9 and 21 were already stored as full
+Activity rows (never coalesced).
 
 #### GET /api/vessels
 
@@ -2730,6 +3286,19 @@ fields (`name`, `callsign`, `imo`, `shipType`, `destination`, `eta`,
 `cog`, `sog`, `heading`, `navStatus` (null for the AIS "not available"
 values), `messageTypes`, `messageCount`, `decoderId`, `firstSeen`, `lastSeen`
 and `lastStaticAt`.
+
+Optional WG5 fields, always set by the WG5 tracker (null when unknown):
+
+- `channel` — `A` or `B`, from the newest message that carried a channel; a
+  message without one keeps the last.
+- `aton` — `{ aidType, virtual, offPosition }` (each nullable) from the newest
+  type 21, only for class `aton`; null for every other class.
+- `altitudeM` — SAR aircraft altitude in metres from the newest type 9 (0–4094,
+  4094 meaning 4094 or higher), only for class `sar`; null otherwise.
+
+A vessel classed `base-station` (it sent type 4 or 11) has `aton` and
+`altitudeM` null even if it also sent type 21 or 9. Values out of range are
+stored as null.
 
 #### GET /api/vessels/stats
 
@@ -2929,7 +3498,7 @@ area with no path, such as `digital-voice-wav` without a recording dsd-fme, repo
 | `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
 | `operator-data`     | `state`     | Operator data                                                                                                     | null                                     |
 | `access`            | `state`     | Private access state (protected mode only)                                                                        | null                                     |
-| `decoder-overrides` | `state`     | Decoder band overrides                                                                                            | null                                     |
+| `decoder-overrides` | `state`     | Decoder band overrides and decoder settings (`decoder-settings.json`)                                             | null                                     |
 | `station`           | `state`     | The station UI layer (`station.json`)                                                                             | null                                     |
 | `logs`              | `other`     | `logging.dir` (only when set)                                                                                     | null                                     |
 
@@ -2969,6 +3538,134 @@ that threshold in bytes (null without a scanner) and `state` is `low` when
 `filesystem.availableBytes` is below it, `ok` when not, `unknown` without either.
 WaveKit does not shorten any retention because space is low; the report only
 states the configured caps and retention.
+
+### Config export
+
+`GET /api/config/export` (WG6) downloads the effective configuration (the YAML
+file, `WAVEKIT_` environment overrides and defaults, as validated at startup)
+as redacted YAML: `Content-Type: application/yaml; charset=utf-8`,
+`Content-Disposition: attachment`, `Cache-Control: no-store`, with a first
+comment line naming the WaveKit version and saying the export is redacted.
+Export only: there is no import.
+
+While `CONFIG_EXPORT_REQUIRES_ACCESS` is true the route exists only in protected
+mode and re-authorizes every request like the other operator routes (an
+authenticated session or device; a denial keeps the access code-only body). In
+legacy mode it is not mounted (404).
+
+Redaction fails closed. `access` is reduced to `{ mode }`. A value whose key
+(any path segment) matches `/(key|psk|secret|passw|token|cred|auth|cookie|cert|salt)/i`
+becomes `"<redacted>"` whatever its type or depth (numbers too: dsd-fme numeric
+keys). WG7 exempts six exact paths outside decoder options that the pattern
+matches only by accident. Each is a number (or number array) in the schema
+whose meaning is a frequency, margin or limit:
+`decoders.*.band.targetsHz`, `tunerRelay.commandHistoryLimit`,
+`liveDemod.autoMarginDb`, `scanner.detection.faTargetPerMhzMin`,
+`scanner.detection.ppmMargin` and `scanner.ws.spectrumMaxProfiles`. They are
+kept only while the value is a finite number or an array of finite numbers.
+Anything else at those paths stays redacted. `station.lat`, `station.lon` and `station.altM` are redacted. Inside
+`decoders[].options` a key is exported only when the type's option schema
+declares it and a descriptor documents it (see `GET /api/decoders/types`);
+other keys are dropped and only their number is reported, as
+`"<unknown-options>": n`. A kept option string must be allowlisted
+(`CONFIG_EXPORT_OPTION_ALLOWLIST`) and a member of the option's enum or literal
+set; a kept number must be a closed-set member or on a reviewed per-type numeric
+allowlist; an option the type describes as `secret: true` is redacted whatever
+its value. Outside options a string is kept only at
+`CONFIG_EXPORT_KEPT_STRING_PATHS` (ids, types and similar) or when the config
+schema limits it to a closed set (enum or literal), and numbers and booleans
+only where the schema declares that type, so host names, URLs, file paths,
+names and callsigns are redacted. The lists live in
+`packages/api-types/src/config-export.ts`. The body is at most 256 KiB; larger
+is 500 `CONFIG_EXPORT_FAILED`. Without a config provider the route answers 503
+`CONFIG_EXPORT_UNAVAILABLE`. Error bodies are `{ error: "ConfigExportError",
+code, message }`. The redaction defaults (decision E2) were confirmed on
+2026-10-16: protected mode only, fail closed by meaning.
+
+### Recordings
+
+A read-only inventory of the WAV recordings WaveKit already writes (WG8,
+[spec](specs/web-gaps-8/requirements.md)): the per-call recordings of the
+dsd-fme decoders that record, and the scanner recordings
+(`recordings/{dv,analog}/<discoveryId>/` under the scanner storage directory;
+none when no scanner runs). DTOs in `packages/api-types/src/recordings.ts`.
+While `RECORDINGS_REQUIRES_ACCESS` is true both routes exist only in protected
+mode; nothing is mounted in legacy mode (404). The inventory never writes,
+renames, deletes or trims a file. Keep, delete and trim belong to the
+recording catalog, which stays gated.
+
+#### GET /api/recordings
+
+Re-authorized like the other protected operator routes; `Cache-Control:
+no-store`. Query: `limit` (1–200, default 50), `cursor` (opaque, at most 512
+characters), `kind` (`dsd-fme-call`, `scanner-dv`, `scanner-analog`) and
+`decoderId` (exact match). The query is checked strictly (unknown or repeated
+keys, `limit=10abc` or a malformed cursor answer 400
+`RECORDINGS_QUERY_INVALID`).
+
+```json
+{
+	"items": [
+		{
+			"id": "dsd:0~20261016_141503_12345_DMR_GROUP_TGT_9_SRC_2301234.wav",
+			"kind": "dsd-fme-call",
+			"decoderId": "dsd-main",
+			"discoveryId": null,
+			"startedAtLocal": "2026-10-16T14:15:03",
+			"modifiedAt": "2026-10-16T12:15:21.402Z",
+			"bytes": 288044,
+			"durationMs": 18000,
+			"callType": "group",
+			"talkgroup": "9",
+			"source": "2301234",
+			"frequencyHz": null
+		}
+	],
+	"nextCursor": null,
+	"scannedFiles": 1,
+	"truncated": false,
+	"scannedAt": "2026-10-16T12:16:00.000Z"
+}
+```
+
+- Order: newest `modifiedAt` first, ties by id; follow `nextCursor` (null on
+  the last page). Each item appears exactly once across pages.
+- `id` is opaque and never a path: `dsd:<n>~<basename>` (n = the position of
+  the recording directory in the inventory's source list, dsd-fme decoders
+  sorted by id) or `scan:<recordingId>`. A configuration change can renumber
+  `n`, so an old id may stop resolving; list again.
+- `startedAtLocal` (local time, no zone) comes from the file name only when it
+  is a real date and time; `durationMs` from the RIFF header of a plain PCM
+  WAV, else null; `callType`, `talkgroup` and `source` from a dsd-fme name
+  (digits only, else null); `frequencyHz` only for a scanner recording whose
+  discovery centre is known. dsd-fme names carry no frequency, so it is null:
+  the frequency is never guessed.
+- Never listed: files modified in the last 10 s (still being written),
+  `TEMP_` files, live probe folders (`probe-*`), names that match neither the
+  dsd-fme call pattern nor the scanner recording id, symbolic links and
+  non-regular files. Files that vanish during a scan are skipped.
+- Bounds: at most 2 000 files examined per scan (`truncated` then true), at
+  most 4 KiB read per header, 8 filesystem operations in flight; the listing is
+  cached for 2 s and header results by path, size and mtime. Measured on the
+  Mac at the 2 000-file bound: about 290 ms cold and about 210 ms warm (every
+  rescan re-verifies each file; budgets 500 ms and 300 ms).
+
+#### GET /api/recordings/:id/file
+
+Whole-file download under the protected download lease (429 `ACCESS_CAPACITY`,
+401 `AUTH_REQUIRED`, 503 `ACCESS_UNAVAILABLE` as the scanner download).
+`Content-Type: audio/wav`, `Content-Disposition: attachment;
+filename="<basename>"`, `Accept-Ranges: none`, `Cache-Control: no-store`. No
+`Range` support: a request with `Range` gets the whole file with 200, so a
+browser player must buffer the file to seek. The id is checked against
+`RECORDING_INVENTORY_ID` before any filesystem lookup and resolved again at
+request time with the listing's rules; the opened file is verified (regular,
+not fresh, the same file the directory names, no symbolic link on the way). An
+unknown, malformed or no longer eligible id is 404 `RECORDING_NOT_FOUND`.
+
+Errors: `{ error, code, message }` with `RECORDINGS_QUERY_INVALID` (400),
+`RECORDING_NOT_FOUND` (404) or `RECORDINGS_UNAVAILABLE` (503). Error bodies and
+log lines name no path, file name, directory or decoder option.
 
 ## Activity
 
@@ -3017,9 +3714,12 @@ The store holds three kinds:
   `decoderId: null`, a title such as `NFM 446.00625 MHz` (or
   `NFM transmission` without a frequency) and fields `durationMs` (ms),
   `modulation` and `peakChannelPowerDbfs` (dBFS, when known), plus `ctcssHz`
-  (label `CTCSS`, Hz) and `dtmf` (label `DTMF`) when the closed event's
-  `tone` has them; those values are also searchable text. Older rows have
-  no `tone`. Search with `kinds=analog-transmission`, by source or frequency. Admission is
+  (label `CTCSS`, Hz), `dtmf` (label `DTMF`) and `dcs` (label `DCS`, such as
+  `023N`; WG6) when the closed event's `tone` has them; those values are also
+  searchable text, and a DCS code is indexed under both spellings
+  (`DCS 023N` and its twin `DCS 047I`), so a search for either finds the row.
+  Older rows have no `tone` (or no `tone.dcs`). A WG7 `noise`-mode row carries
+  `squelchMode: "noise"` and `noiseQuietingDb`. Search with `kinds=analog-transmission`, by source or frequency. Admission is
   non-blocking and counted like decoder receptions, with one per-decoder
   token bucket per source (`analog:<sourceId>`).
 - `ingestion-gap`: written when rows are dropped.
@@ -3092,8 +3792,47 @@ and from a frequency the decoder itself reports in its payload. It is never
 inferred from decoded content or from a protocol constant. A decoder that reads
 its own device (external input, for example readsb with `rtlTcpHost`) has
 `sourceId: null`. `hz` is rounded to an integer in (0, 10^12]; anything else
-means no frequency. `tuningTrust` is `unverified` for every decoder: WaveKit
-does not verify the tuning the decoder hears.
+means no frequency.
+
+`tuningTrust` (WG5, superseding WG3's "unverified for every decoder") is
+`commanded` (the source is under WaveKit's internal control) or `relay` (it is
+under external control through the RTL-TCP relay) when the observed tuner state
+proves the decoder hears its targets, and `unverified` otherwise. All of these
+must hold:
+
+- the decoder reads a WaveKit tuner source (not its own device) and has at least
+  one target frequency;
+- the source's tuner state has a known, finite frequency and a positive sample
+  rate, and both were proven: written by WaveKit (an API or scanner command or a
+  reconnect replay) or seen in a relay client's accepted command. A value only
+  declared by the configuration baseline (`tuner.defaultFrequency`, the source
+  caps `centerFreq`/`sampleRate`) does not count (it is listed in the tuner
+  state's `declaredOnlyFields`): after a fresh start, a core-only restart while
+  rtlmux replays relay-set values, or a `reconnectPolicy: reset` reconnect, the
+  receiver may be elsewhere, so trust is `unverified` until WaveKit or a relay
+  client sets both again. A relay frequency or rate the controller ignored (out of
+  range, or an RTL rate gap) is forwarded upstream anyway, so it makes the field
+  unknown until the next accepted value;
+- direct sampling is `off` (in direct sampling the receiver does not use the
+  tuner centre; a relay value above 2 is the Q branch, as in librtlsdr). After a
+  fresh start or a reset reconnect `off` is an unproven placeholder (listed in
+  `unknownFields`) that the rule still accepts: a local rtl_tcp left in direct
+  sampling by an earlier client can read `commanded`. rtlmux drops direct sampling
+  commands, so the Raspberry Pi path is unaffected;
+- the source centre still equals the centre captured when the decoder was last
+  created or started (a retune makes it `unverified` until the decoder starts
+  again, even when the decoder already follows the new centre);
+- every target lies within 0.45 × sample rate of that centre (the usable 90 % of
+  the IQ bandwidth; ±1.08 MHz at 2.4 Msps).
+
+Tuner state comes from WaveKit's own tuning commands, relay commands and
+reconnect replay. A reconnect under either policy forgets a centre or rate that
+WaveKit wrote without accepting it (it is not replayed), returning it to the
+baseline. A client that tunes the dongle host directly, bypassing
+WaveKit and the relay, is not observed, so trust can claim a centre the dongle
+no longer has. A removed tuner source drops its state: receptions on it are
+`unverified` until it is added again and reports state. Rows stored before WG5
+keep `unverified`.
 
 | Output                                                   | `frequency.hz`                                                                        |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -3118,8 +3857,14 @@ that carry provenance; rows stored before WG3 keep null provenance.
 Decoder receptions stored from WG2 on carry a presentation beside the
 unchanged `decodedData`: `protocol`, `category`, `entityKey`, `title`,
 `fields` and `position`. It is derived only from the output's own validated
-payload, never from RF context, and never converts units. `position` is
-`lat`/`lon` only and is omitted for `(0, 0)`. `entityKey` is null when the
+payload, never from RF context, and never converts units (except `altM`,
+below). `position` is `lat`/`lon` and is omitted for `(0, 0)`. From WG5 it may
+also carry `altM`, whole metres in −500..50,000 (anything else is omitted):
+ADS-B barometric altitude converted from feet (omitted for `ground`, whose
+elevation is unknown, and for an undecodable altitude), APRS `altitude` in feet,
+AIS type 9 `altitudeM` and Meshtastic `altitudeM`. Meshtastic POSITION (port 3)
+receptions now carry a position decoded from their payload (canonical base64 of
+at most 344 characters, 256 bytes). `entityKey` is null when the
 identifier is missing, malformed, or contains a control character
 (U+0000–U+001F or U+007F–U+009F). Keys are at most 128 bytes and match
 `^[a-z][a-z0-9-]*:[^:]+$`. A row has at most 6 fields and a title of at most
@@ -3150,8 +3895,15 @@ Presentation is computed only for receptions the store keeps: coalesced and
 rate-limited receptions cost what they did before WG2, and the internal
 `presentationFailures` counter counts kept receptions only.
 
-Row growth and retention: built-row growth from presentation is at most 160
-bytes for a position-only row and at most 1,100 bytes for any row. Measured
+Row growth and retention: built-row growth from presentation is at most 240
+bytes for a position-only row (160 bytes before WG5; raised so a typical fix
+keeps a five-digit `altM` and a mesh `!abcdef12 Position` title, 226 bytes at
+seven decimals, without rounding) and at most 1,100 bytes for any row. The raise
+costs at most 80 bytes per coalesced row, so at most 250,000 × 80 = 20 MB (about
+7.5 % of 256 MiB) at the row cap; rows a day are unchanged. When a row does not
+fit, its title is clipped and its coordinates rounded to six, five, then four
+decimals with `altM` kept; only when nothing fits at four or more decimals is the
+same tried without `altM`, before rounding further. Measured
 built-row bytes (summary + record + FTS), plain to presented:
 
 | Reception                                         | Plain | Presented | Growth        |
@@ -3352,8 +4104,10 @@ start earlier; null when the store is empty) and `generatedAt`. Trails are sorte
 by their newest point descending, then `entityKey`. A trail is `{ entityKey,
 category, protocol, points, truncated }`; `category` and `protocol` are those of
 its newest point; `points` are `[producedAtMs, lat, lon, altM]` in ascending time
-(`altM` null when the stored position has none; today's presentations store
-`lat`/`lon` only, so it is null).
+(`altM` null when the stored position has none). From WG5 new rows carry `altM`
+(see [Presentation](#presentation)); older rows are not backfilled and keep null.
+Mesh trails were empty before WG5, because Meshtastic receptions had no
+position; new POSITION receptions now fill them.
 
 ```json
 {
@@ -3401,6 +4155,106 @@ the window or the filters to see older points. The 1,000 ms reader deadline
 `ACTIVITY_QUERY_TIMEOUT` with no partial result, and the reader worker is stopped
 and a new one starts for the next query (within the reader's 5 s startup budget).
 Errors are those of [Query and cursor errors](#query-and-cursor-errors).
+
+### GET /api/activity/bandmap
+
+Automatic band map (WG5): stored Activity rows counted per frequency bucket over a
+`producedAt` window, from the rows' provenance frequency (see
+[Provenance](#provenance)). One snapshot read: no cursor, no paging. Counts are
+stored rows, not receptions: coalesced and dropped receptions are not counted, so
+a bucket's `rows` is not a message rate.
+
+Query parameters (an unknown one is 400 `ACTIVITY_QUERY_INVALID`):
+
+- `producedFrom`, `producedTo` — the window, both inclusive, strict ISO 8601 as
+  for trails. `producedTo` defaults to now, `producedFrom` to `producedTo` minus
+  24 hours; at most 72 hours. Windows before 1970 are rejected.
+- `minHz`, `maxHz` — inclusive range, decimal integers; default 0 to
+  2,000,000,000. `maxHz` at most 100,000,000,000 and `maxHz - minHz` at most
+  2,000,000,000; `minHz > maxHz` is 400.
+- `bucketHz` — 1,000 to 1,000,000, default 12,500.
+- `categories`, `protocols` — comma-separated or repeated. `protocols` matches the
+  row's protocol column, as search does.
+
+A bucket is `[startHz, startHz + bucketHz)` with `startHz = floor(hz / bucketHz) ×
+bucketHz`. Rows are grouped by `protocol`, or by `kind` when the protocol is null.
+Each bucket carries `startHz`, `rows`, `lastAt` (newest row), `protocols` (at most
+8 groups, rows descending then name; each `{ protocol, category, rows, entities,
+lastAt }`, `category` of the group's newest row), `otherRows` (rows of the groups
+past the eighth; `rows` = the listed groups' rows + `otherRows`) and `topEntities`
+(at most 3 `{ entityKey, rows }`). At most 1,000 buckets are returned: past that
+the most recently active ones are kept (`lastAt` descending), returned in `startHz`
+order, and `buckets` is added to `truncation`, with the rows of the dropped buckets
+in `droppedRows`. `countedRows` is the rows placed in buckets before that cap;
+`noFrequencyRows` is matched rows without a frequency (never bucketed); rows with a
+frequency outside `minHz`..`maxHz` are neither counted nor returned.
+
+**Response** (200) `ActivityBandMap`: `producedFrom`, `producedTo`, `minHz`,
+`maxHz`, `bucketHz` (effective), `buckets` (`startHz` ascending), `scannedRows`,
+`countedRows`, `noFrequencyRows`, `droppedRows`, `truncated`, `truncation` (in the
+order `scan-rows`, `time-limit`, `buckets`), `coveredFrom`, `retentionFloor` and
+`generatedAt`.
+
+### GET /api/activity/timeline
+
+Activity timeline (WG5): stored rows per time bucket and category over a window,
+every kind included. Query parameters: `producedFrom`, `producedTo` (default the
+last hour, at most 72 hours), `bucketMs` (10,000 to 3,600,000, default 60,000),
+`categories`, `protocols` (comma-separated or repeated) and `entityKey` (repeated,
+at most 64, never split on commas). Buckets are epoch-aligned (`startMs =
+floor(ms / bucketMs) × bucketMs`) and dense: every bucket from the one holding
+`producedFrom` to the one holding `producedTo` is present, empty ones with
+`total: 0`. A window of more than 1,440 buckets is 400. Each bucket is `{ startMs,
+total, counts }`, `counts` holding only the non-zero categories. **Response** (200)
+`ActivityTimeline`: `producedFrom`, `producedTo`, `bucketMs`, `buckets`,
+`totalRows` (the sum of the totals), `scannedRows`, `truncated`, `truncation`
+(`scan-rows`, `time-limit`), `coveredFrom`, `retentionFloor` and `generatedAt`.
+
+### Aggregate reads (band map and timeline)
+
+Both reads walk the window newest first in steps of at most 4,096 index rows,
+whatever the filters match, on the same reader and admission as search and
+trails. Two bounds can cut a read, and either gives a normal 200 with
+`truncated: true`:
+
+- `scan-rows`: at most 250,000 index rows of the window are examined. The store
+  holds at most 250,000 rows (about 11.5 hours of the WG3 docs mix of about
+  520,000 rows a day), so this binds only when the store is above its cap between
+  prune passes.
+- `time-limit`: a 600 ms wall-time budget, checked before every statement.
+
+`coveredFrom` says how far back the counts are exact: they are exact for rows
+produced at or after it. It equals `producedFrom` when the read is complete, and is
+later when a bound stopped it (the oldest step boundary fully examined; under
+`scan-rows`, 1 ms above the newest row left unexamined). When the budget is spent
+before any row was examined it is `producedTo` + 1 ms, which is outside the window
+on purpose: nothing in it is exact. Show the
+part before `coveredFrom` as incomplete rather than as no activity. `retentionFloor`
+is the `producedAt` of the oldest stored row (null when the store is empty); nothing
+older exists.
+
+The 1,000 ms reader deadline is a backstop, as for trails: past it the answer is
+429 `ACTIVITY_QUERY_TIMEOUT` and the reader worker is restarted. Activity disabled
+is 404 `ACTIVITY_DISABLED`; an unavailable store is 503 `ACTIVITY_UNAVAILABLE`.
+Other errors are those of [Query and cursor errors](#query-and-cursor-errors). In
+protected mode both are ordinary reads (an authenticated session or device, like
+every other read). A client should poll them at most every 30 s or so: they are
+snapshots, not live feeds, and each read occupies the single reader.
+
+Measured on the development Mac with 250,000 rows scanned (load average 8 to 14,
+WG5 R1): band map about 370 to 490 ms (earlier runs 355 to 470 ms), timeline about
+220 to 245 ms for 72 h in 180 s buckets and 225 to 230 ms for 24 h in 60 s buckets
+(1,440 buckets; about 384 ms in an earlier loaded run). Budgets are restated as
+measured, not optimised: on the worst row packing a band map stops at the 600 ms
+budget with `time-limit` and still answers 200. A window holding exactly 250,000
+rows is complete (a one-row probe finds nothing left), not `scan-rows`. Raspberry Pi
+figures are not measured yet. Response size: a busy station has a few hundred
+active 12.5 kHz buckets (about 0.1 to 0.2 MB). The worst case, 1,000 buckets each
+with 8 groups of 64-character protocols and 3 entity keys of 128 characters, is
+about 1.9 MB of plain ASCII (measured 1,894,277 bytes) and about 2.8 MB when every
+character needs JSON escaping (measured 2,766,767 bytes). The largest timeline
+(1,440 buckets) is about 98 kB. Both routes are exempt from the 512 KiB search page
+budget, as trails.
 
 ### GET /api/activity/:eventId
 
@@ -3515,7 +4369,7 @@ for trails) starts only after the reader is ready. A reader that cannot start is
 | `ACTIVITY_SNAPSHOT_RESET`    | 409  | `reason`: `cursor-expired`, `store-changed`, `query-changed`, or `snapshot-reset` |
 | `ACTIVITY_CURSOR_GAP`        | 410  | `lastSeq` is strictly below the prune watermark. A cursor exactly at the watermark is not a gap. `reason`: `cursor-gap` |
 | `ACTIVITY_QUERY_BUSY`        | 429  | Reader admission is full |
-| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms; 1,000 ms for trails) after the reader was ready |
+| `ACTIVITY_QUERY_TIMEOUT`     | 429  | The read passed its deadline (250 ms; 1,000 ms for trails, band map and timeline) after the reader was ready |
 | `ACTIVITY_QUERY_FAILED`      | 500  | The reader did not start, the reader failed, or the store read failed |
 | `ACTIVITY_QUERY_CLOSED`      | 503  | The query service is closed |
 | `ACTIVITY_RECORD_CORRUPT`    | 500  | A stored record failed validation |
@@ -3694,7 +4548,9 @@ the client gets the default profile (`scanner.ws.spectrumHz` ×
 ```
 
 - `hz` is snapped to 0.5 and clamped to 0.5–25; `bins` is rounded and
-  clamped to 128–2048; omitted fields take the default's values.
+  clamped to 128..`limits.bins.max` (2048 with the default summary budget;
+  up to 8192 where the host bins cap and `scanner.ws.spectrumSummaryBins`
+  allow, WG8); omitted fields take the default's values.
 - One source and one profile per client. Subscribing again switches without a
   gap; subscribing without options returns to the default selection.
   `unsubscribe` or a disconnect releases the demand.
@@ -4151,8 +5007,9 @@ first complete IQ block; `thresholdDbfs` is the threshold in effect.
 On the `live-audio` channel: one squelch-delimited analog transmission of the
 live demodulator, sent once with `state: "open"` and once with
 `state: "closed"` (same `transmissionId`, a UUID). Produced only while the
-squelch gates (auto mode, or manual with a non-zero threshold); with manual
-squelch 0 nothing is sent. Sent whether Activity is enabled or not; when it is
+squelch gates (auto mode, noise mode, or manual with a non-zero threshold); with
+manual squelch 0 nothing is sent. A tone squelch gate (`toneSquelch`) does not
+change these events. Sent whether Activity is enabled or not; when it is
 ready, each closed transmission is also stored as an `analog-transmission`
 [Activity](#activity) record.
 
@@ -4183,29 +5040,48 @@ ready, each closed transmission is also stored as an `analog-transmission`
   when the transmission opened. `tuningTrust` is `commanded` under WaveKit
   control and `relay` under external (SDR++) control. Null when the source
   has no tuner state or its centre is an unconfirmed placeholder.
-- `endedAt`: for a `squelch` close, the last above-threshold block (the close
-  time minus the squelch hang, 250 ms, never before `startedAt`); for every
-  other reason, the close time. `endedAt`, `durationMs` and `closeReason` are null
+- `endedAt`: for a `squelch` close, the last above-threshold block (in noise mode
+  the last quieted block; the close time minus the squelch hang, 250 ms, never
+  before `startedAt`); for every other reason, the close time. Since the WG7 noise
+  tail fix a transmission that the tail used to prolong ends earlier, because noise
+  blocks just below the threshold no longer hold the squelch open (see `squelch`
+  under [GET /api/live-audio/status](#get-apilive-audiostatus)); start times are
+  unchanged.
+- `squelchMode` is `manual`, `auto` or (WG7) `noise`; `noiseQuietingDb` (WG7) is
+  the quieting threshold in effect when the transmission opened, present in
+  `noise` mode only. `thresholdDbfs` is the configured `squelch` in noise mode. `endedAt`, `durationMs` and `closeReason` are null
   while open.
 - `closeReason`: `squelch` (normal close), `retune` (the event-time frequency
   moved by more than 1 Hz while open), `config` (a reconfigure that restarts
   the pipeline or changes source, modulation, bandwidth, offset or squelch
-  mode; a threshold-only change keeps it open), `stopped`, or `max-duration`
+  mode; a threshold-only, `noiseQuietingDb` or `toneSquelch` change keeps it open), `stopped`, or `max-duration`
   (10 minutes). After `retune` or `max-duration` a new transmission opens at
   once if the squelch is still open.
 - `peakChannelPowerDbfs` and `meanChannelPowerDbfs` cover the transmission's
   level samples; null before the first one. Every open is followed by exactly
   one closed event, also on shutdown.
-- `tone` (WG2): `{ ctcssHz, dtmf }`, on closed events only (always both keys;
-  absent on open events). `ctcssHz` is one of the 50 standard CTCSS tones
+- `tone` (WG2): `{ ctcssHz, dtmf, dcs }`, on closed events only (always all
+  three keys from WG6 cores; `dcs` is absent from older cores; absent on open
+  events). `ctcssHz` is one of the 50 standard CTCSS tones
   (67.0–254.1 Hz) heard through the transmission, null when none qualified or
   the transmission was shorter than 750 ms. `dtmf` is the DTMF symbols
   (`0-9`, `*`, `#`, `A-D`) in order, at most 32, each held at least 40 ms
   within the standard twist (−8 to +4 dB); null when none. Detection runs on
   the demodulated audio (decimated to 8 kHz) only while a transmission is
-  open; it is always on and has no config key. DCS is not detected. Tones need a
+  open; it is always on and has no config key. Tones need a
   demodulated audio rate of at least 8 kHz; below that `tone` is
-  `{ ctcssHz: null, dtmf: null }`.
+  `{ ctcssHz: null, dtmf: null, dcs: null }`.
+  `dcs` (WG6) is `{ code, polarity }` or null: `code` is three octal digits of
+  the 104-code standard table, `polarity` `normal` or `inverted`. DCS is
+  134.4 bit/s sub-audible data in 23-bit Golay(23,12) words; a code is
+  reported only after at least 3 consecutive identical valid words and only for
+  transmissions with at least 0.75 s of audio, and an ambiguous stream is null
+  (the detector never guesses). Polarity is as received through WaveKit's FM
+  demodulator. Every code's inverted word is a rotation of exactly one other
+  code's word (023N is the same bit stream as 047I, 025N as 244I, 026N as 464I,
+  754N as 116I), so the bit stream alone cannot tell a code from its twin:
+  receivers whose discriminator polarity differs from WaveKit's see the twin.
+  The twin is never sent; derive it, or search either spelling.
 
 #### digital-voice:call
 
@@ -4311,9 +5187,11 @@ most 1/s per (job, target); the latest state is always delivered.
 - `trials[]`: `{protocol, decoder, mode, transport, outcome, reason?}`. Outcomes:
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
-  `needs-channelizer`, `unsupported-format`; `mode` and `transport` null),
+  `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`; `mode` and
+  `transport` null),
   `not-needed` (an earlier trial decoded and `exhaustive` is false) and
-  `cancelled`.
+  `cancelled`. `transport` is `offset`, `channel` or `ambient` (WG7: an
+  already-running AIS, ACARS, VDL2 or LoRa decoder; see `POST /api/scanner/identify`).
 - `result`: see `POST /api/scanner/identify`, including `artefact?` and
   `ended?: "window-moved"`.
 
@@ -4439,8 +5317,8 @@ One frame per source and profile:
   bin `i` is centred at `startHz + (i + 0.5) × binHz`.
 - `binCount ≤ bins`, never upsampled; `binHz` is the true width and
   `nativeBinHz` is `fs / fftSize` (`binHz / nativeBinHz` is the max-hold
-  factor). The engine summary budget (`scanner.ws.spectrumSummaryBins`, 2048)
-  caps the detail.
+  factor). The engine summary budget (`min(scanner.ws.spectrumSummaryBins,
+  host bins cap)`, 2048 by default) caps the detail.
 - Cadence: one frame per `ceil(blockHz / hz)` block summaries, with
   `blockHz = 1000 / integrationMs` (20 at the default): 25 Hz gives 20 Hz, 10 or
   15 Hz gives 10 Hz. `effectiveHz` is that cadence while blocks flow and an
@@ -4701,6 +5579,11 @@ Scanner and spectrum routes answer with the flat body
 The API does not currently implement rate limiting. For production deployments, consider placing a reverse proxy (nginx, Caddy) in front of WaveKit.
 
 ## CORS
+
+The audio stream ports have their own rule (WG7): legacy mode sends
+`Access-Control-Allow-Origin: *` without credentials, and protected mode allows
+only the access layer's allowed origins. See
+[GET /stream](#get-httplocalhost8081stream-and-streamwav).
 
 CORS is enabled by default, allowing requests from any origin. Configure via:
 

@@ -689,6 +689,24 @@ describe("band plan transitions", () => {
 		expect(repeat.changed).toBe(false)
 	})
 
+	// Feature: web-gaps-5, Property 12: Import round trip
+	// Validates: Requirements 7.6
+	it.each(["sdrpp-json", "sdrsharp-xml", "gqrx-csv"] as const)(
+		"stores the parsed %s format in the provenance",
+		format => {
+			const file = hashed(`community-${format}`)
+			const state = empty()
+			const base = parsed([storedBand("b-one", "One", null)], file.sha256)
+			const imported = transition(
+				state,
+				commit(state, file, [], { format }),
+				ctx("CA"),
+				{ ...base, preview: { ...base.preview, format } },
+			)
+			expect(imported.state.importedPacks[0]?.provenance.format).toBe(format)
+		},
+	)
+
 	it("commits an import, strips colour unless asked, and materializes the regional default stack", () => {
 		const file = hashed("community-a")
 		const state = empty()
@@ -1537,5 +1555,35 @@ describe("band plan transitions", () => {
 			),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+describe("WG6 preview digest golden (uploads unchanged)", () => {
+	// Values recorded from the pre-WG6 previewDigestFor before the sourceUrl argument existed.
+	const SHA_A = "a".repeat(64)
+	const SHA_B = "0123456789abcdef".repeat(4)
+	const OVERRIDES = [
+		{ sourceType: "ham", group: "amateur" },
+		{ sourceType: "air", group: "air" },
+	] as const
+	it("pins the upload digest for absent and null sourceUrl", () => {
+		const gold =
+			"cefad5a498d7e1048788e015d3bc9422f89aee9d5d60564d25fdf25aba897c63"
+		expect(previewDigestFor(SHA_A, [])).toBe(gold)
+		expect(previewDigestFor(SHA_A, [], null)).toBe(gold)
+		expect(previewDigestFor(SHA_A, [], undefined)).toBe(gold)
+	})
+	it("pins the upload digest with overrides", () => {
+		expect(previewDigestFor(SHA_B, [...OVERRIDES])).toBe(
+			"884c8d5bfe54c912c5672d14c5954e05b99b8aa2be6f6d6665b4833668cb62b9",
+		)
+	})
+	it("binds a non-null sourceUrl", () => {
+		const upload = previewDigestFor(SHA_A, [])
+		const a = previewDigestFor(SHA_A, [], "https://example.org/a.json")
+		const b = previewDigestFor(SHA_A, [], "https://example.org/b.json")
+		expect(a).toMatch(/^[0-9a-f]{64}$/)
+		expect(a).not.toBe(upload)
+		expect(a).not.toBe(b)
 	})
 })

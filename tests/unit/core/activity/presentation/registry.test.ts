@@ -37,7 +37,8 @@ describe("activity presentation registry", () => {
 			title: "ual123",
 			position: { lat: 51.5, lon: -0.12 },
 		})
-		expect(view?.position).not.toHaveProperty("altM")
+		// WG5 req 4.1: barometric feet to whole metres.
+		expect(view?.position?.altM).toBe(Math.round(35_000 * 0.3048))
 		expect(view?.fields?.map(field => field.key)).toEqual([
 			"squawk",
 			"altitude",

@@ -107,4 +107,38 @@ describe("vessel routes", () => {
 			})
 		}
 	})
+
+	it("includes channel, aton and altitudeM", async () => {
+		const { app, tracker } = await appWith()
+		open.push(app)
+		const at = new Date("2026-06-15T12:00:00.000Z")
+		tracker.processShip(
+			"ais",
+			{
+				mmsi: "1",
+				messageType: 21,
+				channel: "B",
+				aidType: 3,
+				virtualAid: false,
+			},
+			at,
+		)
+		tracker.processShip(
+			"ais",
+			{ mmsi: "2", messageType: 9, altitudeM: 300 },
+			at,
+		)
+		const aton = await app.inject({ method: "GET", url: "/api/vessels/1" })
+		expect(aton.json()).toMatchObject({
+			channel: "B",
+			aton: { aidType: 3, virtual: false, offPosition: null },
+			altitudeM: null,
+		})
+		const sar = await app.inject({ method: "GET", url: "/api/vessels/2" })
+		expect(sar.json()).toMatchObject({
+			channel: null,
+			aton: null,
+			altitudeM: 300,
+		})
+	})
 })

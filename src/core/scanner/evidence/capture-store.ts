@@ -43,6 +43,10 @@ const ExtrasSchema = z.object({
 				"pocsag-capcode",
 				"aprs-call",
 				"ism-model",
+				"ais-mmsi",
+				"acars-reg",
+				"vdl2-addr",
+				"lora-node",
 			]),
 			value: z.string(),
 		})

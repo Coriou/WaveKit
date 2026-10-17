@@ -7,6 +7,7 @@ import { parentPort } from "node:worker_threads"
 import { WaveKitError } from "../../utils/errors.js"
 import type { PipelineConfig, PipelineEvent, PipelineInput } from "./types.js"
 import { SpectrumPipeline } from "./pipeline.js"
+import { encodeEventsForWire } from "./summary-wire.js"
 import { MainToWorkerSchema, type WorkerToMain } from "./worker-protocol.js"
 
 const port = parentPort
@@ -63,7 +64,11 @@ port.on("message", (raw: unknown) => {
 				} catch (err) {
 					post({ type: "error", message: errorMessage(err) })
 				}
-				if (events.length > 0) post({ type: "events", events })
+				if (events.length > 0) {
+					const transfer: ArrayBuffer[] = []
+					encodeEventsForWire(events, transfer)
+					post({ type: "events", events }, transfer)
+				}
 			}
 			if (input.kind === "bytes") {
 				const buffer = input.bytes.buffer as ArrayBuffer

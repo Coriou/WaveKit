@@ -4,6 +4,15 @@ import type {
 	StationProvenance,
 	BandRegion,
 } from "@wavekit/api-types"
+import {
+	DCS_STANDARD_CODES,
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
+	LIVE_AUDIO_TONE_SQUELCH_MODULATIONS,
+	SPECTRUM_SUMMARY_BINS_MAX,
+	toneSchema,
+} from "@wavekit/api-types"
+import { CTCSS_HZ } from "./core/audio-tones/ctcss.js"
 import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
@@ -231,9 +240,21 @@ export const LiveDemodConfigSchema = z
 		 * demodulation (|IQ| = 1 is 0 dBFS). 0 disables squelch (open).
 		 */
 		squelch: z.number().min(-160).max(0).default(0),
-		/** manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`. */
-		squelchMode: z.enum(["manual", "auto"]).optional(),
+		/**
+		 * manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`;
+		 * WG7 noise (NFM/WFM): FM discriminator quieting of at least `noiseQuietingDb`.
+		 */
+		squelchMode: z.enum(["manual", "auto", "noise"]).optional(),
 		autoMarginDb: z.number().finite().min(0).max(40).optional(),
+		/** WG7: noise squelch quieting threshold in dB (runtime default 6). */
+		noiseQuietingDb: z
+			.number()
+			.finite()
+			.min(LIVE_AUDIO_NOISE_QUIETING_DB.min)
+			.max(LIVE_AUDIO_NOISE_QUIETING_DB.max)
+			.optional(),
+		/** WG7: tone squelch gate (NFM only); absent or `none` = no tone gate. */
+		toneSquelch: toneSchema.optional(),
 		noiseReduction: z
 			.enum(["off", "voice", "noaa-apt", "narrow-band"])
 			.default("off"),
@@ -274,6 +295,38 @@ export const LiveDemodConfigSchema = z
 				message: "bandwidth must be greater than 0 for non-raw modulation",
 				path: ["bandwidth"],
 			})
+		}
+		// WG7 req 2.3, 3.1: noise squelch is FM-only, tone squelch NFM-only, standard tones only.
+		if (
+			value.squelchMode === "noise" &&
+			!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(value.modulation)
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "noise squelch requires nfm or wfm modulation",
+				path: ["squelchMode"],
+			})
+		}
+		const tone = value.toneSquelch
+		if (tone !== undefined && tone.kind !== "none") {
+			if (!LIVE_AUDIO_TONE_SQUELCH_MODULATIONS.includes(value.modulation))
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: "tone squelch requires nfm modulation",
+					path: ["toneSquelch"],
+				})
+			const standard =
+				tone.kind === "ctcss"
+					? (CTCSS_HZ as readonly number[]).some(
+							hz => Math.round(hz * 10) === tone.frequencyTenthsHz,
+						)
+					: DCS_STANDARD_CODES.includes(tone.code)
+			if (!standard)
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: "tone squelch requires a standard CTCSS tone or DCS code",
+					path: ["toneSquelch"],
+				})
 		}
 	})
 
@@ -528,9 +581,28 @@ export const ScannerConfigSchema = z
 				spectrumHz: z.number().finite().min(0.5).max(25).default(10),
 				spectrumBins: z.number().int().min(128).max(2048).default(512),
 				/** Engine summary-detail budget: block-summary bins per source (config only; never per client, never PATCHed). */
-				spectrumSummaryBins: z.number().int().min(512).max(2048).default(2048),
+				spectrumSummaryBins: z
+					.number()
+					.int()
+					.min(512)
+					.max(SPECTRUM_SUMMARY_BINS_MAX)
+					.default(2048),
 				/** Distinct active non-default spectrum profiles over all sources (config only). */
 				spectrumMaxProfiles: z.number().int().min(1).max(16).default(4),
+				/**
+				 * WG8 req 5.2: host cap on summary and client bins (config only). Absent or "auto"
+				 * measures the host once at startup (floor 2048, ceiling 8192); no default is
+				 * filled in, so the parsed config and its export stay as before. Clients get at most
+				 * min(cap, spectrumSummaryBins) bins; the default profile stays within spectrumBins.
+				 */
+				spectrumBinsCap: z
+					.union([
+						z.literal("auto"),
+						z.literal(2048),
+						z.literal(4096),
+						z.literal(8192),
+					])
+					.optional(),
 			})
 			.default({}),
 	})

@@ -12,10 +12,15 @@ import type {
 	ActivityReplaySink,
 	ActivitySearchPage,
 	ActivitySearchRequest,
+	ActivityBandMap,
+	ActivityBandMapQuery,
+	ActivityTimeline,
+	ActivityTimelineQuery,
 	ActivityTrails,
 	ActivityTrailsQuery,
 	StoreIdentity,
 } from "../storage/contract.js"
+import type { AggregatesReadLimits } from "./aggregates.js"
 import { QueryAdmission } from "./admission.js"
 import { issueCursor, verifyCursor } from "./cursor.js"
 import {
@@ -51,6 +56,8 @@ import {
 import {
 	hashQuery,
 	normaliseQuery,
+	normaliseBandMapQuery,
+	normaliseTimelineQuery,
 	normaliseTrailsQuery,
 	parseDimensions,
 	parseLimit,
@@ -91,6 +98,10 @@ export interface ActivityQueryLimits {
 	trailsDeadlineMs: number
 	/** WG4: cooperative budget of the trails scan plus its older-points check; past it `time-limit`. */
 	trailsWallBudgetMs: number
+	/** WG5: deadline of one band map or timeline read (backstop). */
+	aggregatesDeadlineMs: number
+	/** WG5: cooperative wall budget of an aggregate walk; past it `time-limit`. */
+	aggregatesWallBudgetMs: number
 	maxQueued: number
 	maxExecuting: number
 	maxInFlightPerClient: number
@@ -111,6 +122,8 @@ export const DEFAULT_ACTIVITY_QUERY_LIMITS: ActivityQueryLimits = {
 	deadlineMs: 250,
 	trailsDeadlineMs: 1_000,
 	trailsWallBudgetMs: TRAILS_WALL_BUDGET_MS,
+	aggregatesDeadlineMs: 1_000,
+	aggregatesWallBudgetMs: 600,
 	maxQueued: 4,
 	maxExecuting: 1,
 	maxInFlightPerClient: 1,
@@ -129,6 +142,8 @@ export interface ActivityQueryServiceOptions {
 	limits?: Partial<ActivityQueryLimits>
 	/** Test override of the trails read bounds, merged over DEFAULT_TRAILS_READ_LIMITS. */
 	trailsLimits?: Partial<TrailsReadLimits>
+	/** Test override of the aggregate read bounds, merged over DEFAULT_AGGREGATES_READ_LIMITS. */
+	aggregatesLimits?: Partial<AggregatesReadLimits>
 	/** Test hook. A number, or a function sampled once per read. */
 	readerDelayMs?: number | (() => number)
 	onReaderEvent?: (event: ReaderHostEvent) => void
@@ -446,6 +461,52 @@ export function createActivityQueryService(
 			)
 			if (result.op !== "trails") throw new ActivityReaderFailedError()
 			return result.trails
+		},
+
+		async bandMap(input: ActivityBandMapQuery): Promise<ActivityBandMap> {
+			if (closed) throw new ActivityQueryClosedError()
+			const nowMs = now()
+			const query = normaliseBandMapQuery(input, nowMs)
+			const result = await perform(
+				currentClient(),
+				{
+					op: "bandmap",
+					input: {
+						...query,
+						limits: {
+							...options.aggregatesLimits,
+							wallBudgetMs: limits.aggregatesWallBudgetMs,
+						},
+						nowMs,
+					},
+				},
+				limits.aggregatesDeadlineMs,
+			)
+			if (result.op !== "bandmap") throw new ActivityReaderFailedError()
+			return result.bandMap
+		},
+
+		async timeline(input: ActivityTimelineQuery): Promise<ActivityTimeline> {
+			if (closed) throw new ActivityQueryClosedError()
+			const nowMs = now()
+			const query = normaliseTimelineQuery(input, nowMs)
+			const result = await perform(
+				currentClient(),
+				{
+					op: "timeline",
+					input: {
+						...query,
+						limits: {
+							...options.aggregatesLimits,
+							wallBudgetMs: limits.aggregatesWallBudgetMs,
+						},
+						nowMs,
+					},
+				},
+				limits.aggregatesDeadlineMs,
+			)
+			if (result.op !== "timeline") throw new ActivityReaderFailedError()
+			return result.timeline
 		},
 
 		replay(

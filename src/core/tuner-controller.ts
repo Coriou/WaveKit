@@ -323,6 +323,8 @@ export interface TunerControllerEvents {
 		origin?: TunerCommandOrigin,
 	) => void
 	"control-mode-changed": (sourceId: string, mode: TunerControlMode) => void
+	/** WG5: the source's tuner state is gone (removeSource); getState now returns undefined. */
+	"source-removed": (sourceId: string) => void
 	error: (sourceId: string, error: Error) => void
 }
 
@@ -392,6 +394,12 @@ export class TunerController extends EventEmitter {
 	private desiredFields: Map<string, Map<DesiredField, number>> = new Map()
 	/** Fields inferred from observed relay commands (known, never replayed). */
 	private inferredFields: Map<string, Set<TunerStateField>> = new Map()
+	/**
+	 * WG5: frequency/sampleRate a relay client set to a value the controller ignored
+	 * (the relay forwards raw bytes upstream before validation, so the receiver may be
+	 * there). Unknown until the next accepted or written value.
+	 */
+	private ignoredRelayFields: Map<string, Set<TunerStateField>> = new Map()
 	private acceptanceSeq = 0
 	/** Caps metadata as first registered, before any accepted command. */
 	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
@@ -462,8 +470,10 @@ export class TunerController extends EventEmitter {
 		this.controlModeOrigins.delete(sourceId)
 		this.desiredFields.delete(sourceId)
 		this.inferredFields.delete(sourceId)
+		this.ignoredRelayFields.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
+		this.emit("source-removed", sourceId)
 	}
 
 	// === Control Mode ===
@@ -537,6 +547,7 @@ export class TunerController extends EventEmitter {
 					this.sourceManager.updateSourceCaps(sourceId, { centerFreq: value })
 					updated = true
 				} else {
+					this.markIgnoredRelayField(sourceId, "frequency")
 					this.log.warn(
 						{ sourceId, command: cmdName, value },
 						"Ignoring out-of-range frequency from relay",
@@ -558,6 +569,7 @@ export class TunerController extends EventEmitter {
 						)
 					}
 				} else {
+					this.markIgnoredRelayField(sourceId, "sampleRate")
 					this.log.warn(
 						{ sourceId, command: cmdName, value },
 						"Ignoring out-of-range sample rate from relay",
@@ -621,8 +633,16 @@ export class TunerController extends EventEmitter {
 				updated = true
 				break
 			case RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING: {
+				// librtlsdr rtlsdr_set_direct_sampling: 0 off, 1 the I branch, any value
+				// above 1 the Q branch.
 				const nextMode: TunerDirectSampling | null =
-					value === 0 ? "off" : value === 1 ? "i" : value === 2 ? "q" : null
+					value === 0
+						? "off"
+						: value === 1
+							? "i"
+							: value >= 2 && value <= 0xffffffff
+								? "q"
+								: null
 				if (nextMode) {
 					state.directSampling = nextMode
 					updated = true
@@ -991,15 +1011,22 @@ export class TunerController extends EventEmitter {
 			this.setControlMode(sourceId, "internal")
 		}
 
+		// A declared-only or unknown centre/rate equal to the request is still written, so
+		// a bulk PUT can prove it (WG5 R2); a proven equal value is skipped as before.
+		const proof = this.fieldProof(sourceId)
+		const unproven = new Set<TunerStateField>([
+			...proof.declaredOnlyFields,
+			...proof.unknownFields,
+		])
 		if (
 			updates.frequency !== undefined &&
-			updates.frequency !== state.frequency
+			(updates.frequency !== state.frequency || unproven.has("frequency"))
 		) {
 			await this.setFrequency(sourceId, updates.frequency, opts)
 		}
 		if (
 			updates.sampleRate !== undefined &&
-			updates.sampleRate !== state.sampleRate
+			(updates.sampleRate !== state.sampleRate || unproven.has("sampleRate"))
 		) {
 			await this.setSampleRate(sourceId, updates.sampleRate, opts)
 		}
@@ -1099,19 +1126,32 @@ export class TunerController extends EventEmitter {
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
+			// Inferred or ignored-relay fields alone are no reset, but their proof is gone too.
+			const forgot =
+				(this.inferredFields.get(sourceId)?.size ?? 0) > 0 ||
+				(this.ignoredRelayFields.get(sourceId)?.size ?? 0) > 0
 			this.desiredFields.delete(sourceId)
 			this.inferredFields.delete(sourceId)
-			if (reset) {
+			this.ignoredRelayFields.delete(sourceId)
+			// With nothing accepted every non-baseline value came from an inferred write or
+			// relay command, so a forget also returns the values to the baseline (WG5 R2).
+			if (reset || forgot)
 				this.applyBaselineFields(state, this.baselineCaps.get(sourceId))
+			if (reset) {
 				this.log.warn(
 					{ sourceId },
 					"Source reconnected: discarded accepted tuner state (reconnectPolicy=reset); receiver state unconfirmed",
 				)
 			}
 			const capsChanged = this.reconcileCaps(sourceId, state)
-			if (reset || capsChanged) this.emitStateChanged(sourceId)
+			if (reset || forgot || capsChanged) this.emitStateChanged(sourceId)
 			return { policy, commands: [], reset }
 		}
+
+		// An inferred (written, not accepted) centre or rate is never replayed, so after a
+		// reconnect the receiver may be elsewhere: drop its proof and, unless an accepted
+		// value is replayed below, return it to the baseline (WG5 R2).
+		const forgotTuning = this.forgetInferredTuning(sourceId, state, desired)
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
@@ -1128,6 +1168,8 @@ export class TunerController extends EventEmitter {
 			}
 			const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
 			written.push({ value, name })
+			const field = stateFieldOf(cmd)
+			if (field !== undefined) this.clearIgnoredRelayField(sourceId, field)
 		}
 
 		if (written.length > 0) {
@@ -1156,7 +1198,8 @@ export class TunerController extends EventEmitter {
 			this.emit("command-sent", sourceId, name, value, "replay")
 		}
 		if (failure) this.emit("error", sourceId, failure)
-		if (plan.length > 0 || capsChanged) this.emitStateChanged(sourceId)
+		if (plan.length > 0 || capsChanged || forgotTuning)
+			this.emitStateChanged(sourceId)
 
 		return failure
 			? {
@@ -1314,6 +1357,33 @@ export class TunerController extends EventEmitter {
 		return value > 0x7fffffff ? value - 0x100000000 : value
 	}
 
+	/** Drops inferred frequency/sampleRate proof; true when one was dropped. */
+	private forgetInferredTuning(
+		sourceId: string,
+		state: TunerState,
+		desired: ReadonlyMap<DesiredField, number> | undefined,
+	): boolean {
+		const inferred = this.inferredFields.get(sourceId)
+		if (!inferred) return false
+		const caps = this.baselineCaps.get(sourceId)
+		let forgot = false
+		if (inferred.delete("frequency")) {
+			forgot = true
+			if (!desired?.has("frequency"))
+				state.frequency =
+					this.config.defaultFrequency ?? caps?.centerFreq ?? DEFAULT_FREQUENCY
+		}
+		if (inferred.delete("sampleRate")) {
+			forgot = true
+			if (!desired?.has("sampleRate"))
+				state.sampleRate =
+					this.config.defaultSampleRate ??
+					caps?.sampleRate ??
+					DEFAULT_SAMPLE_RATE
+		}
+		return forgot
+	}
+
 	/** Reset tunable fields to the startup baseline (control mode/counters kept). */
 	private applyBaselineFields(state: TunerState, caps?: SourceCaps): void {
 		state.frequency =
@@ -1335,7 +1405,27 @@ export class TunerController extends EventEmitter {
 		delete state.tunerGainIndex
 	}
 
+	private markIgnoredRelayField(
+		sourceId: string,
+		field: TunerStateField,
+	): void {
+		let ignored = this.ignoredRelayFields.get(sourceId)
+		if (!ignored) {
+			ignored = new Set()
+			this.ignoredRelayFields.set(sourceId, ignored)
+		}
+		ignored.add(field)
+	}
+
+	private clearIgnoredRelayField(
+		sourceId: string,
+		field: TunerStateField,
+	): void {
+		this.ignoredRelayFields.get(sourceId)?.delete(field)
+	}
+
 	private markInferred(sourceId: string, field: TunerStateField): void {
+		this.clearIgnoredRelayField(sourceId, field)
 		let inferred = this.inferredFields.get(sourceId)
 		if (!inferred) {
 			inferred = new Set()
@@ -1347,6 +1437,9 @@ export class TunerController extends EventEmitter {
 	private markAccepted(sourceId: string, cmd: number): void {
 		const field = COMMAND_FIELDS[cmd]
 		if (!field) return
+		const stateField = stateFieldOf(cmd)
+		if (stateField !== undefined)
+			this.clearIgnoredRelayField(sourceId, stateField)
 		let desired = this.desiredFields.get(sourceId)
 		if (!desired) {
 			desired = new Map()
@@ -1497,26 +1590,41 @@ export class TunerController extends EventEmitter {
 	}
 
 	private cloneState(state: TunerState): TunerState {
-		const { unknownFields: _stale, ...fields } = state
-		const unknownFields = this.unknownFields(state.sourceId)
+		const {
+			unknownFields: _stale,
+			declaredOnlyFields: _staleDeclared,
+			...fields
+		} = state
+		const { unknownFields, declaredOnlyFields } = this.fieldProof(
+			state.sourceId,
+		)
 		return {
 			...fields,
 			tunerIfGain: state.tunerIfGain
 				? { ...state.tunerIfGain }
 				: state.tunerIfGain,
 			...(unknownFields.length > 0 ? { unknownFields } : {}),
+			...(declaredOnlyFields.length > 0 ? { declaredOnlyFields } : {}),
 		}
 	}
 
 	/**
-	 * Fields backed by nothing: not commanded through the API, not seen in a
-	 * relay client's command (both tracked as accepted desired fields), and
-	 * for frequency/sampleRate not declared by config or the source caps.
+	 * `unknownFields`: fields backed by nothing: not commanded through the API, not
+	 * seen in a relay client's command (both tracked as accepted desired fields), and
+	 * for frequency/sampleRate not declared by config or the source caps; plus a
+	 * frequency/sampleRate whose last relay value was ignored (WG5).
+	 * `declaredOnlyFields` (WG5): frequency/sampleRate known only from that declared
+	 * baseline, never written by WaveKit or seen from a relay client since the start or
+	 * the last reset reconnect, so the receiver may be elsewhere.
 	 */
-	private unknownFields(sourceId: string): TunerStateField[] {
+	private fieldProof(sourceId: string): {
+		unknownFields: TunerStateField[]
+		declaredOnlyFields: TunerStateField[]
+	} {
 		const accepted: ReadonlyMap<string, number> | undefined =
 			this.desiredFields.get(sourceId)
 		const inferred = this.inferredFields.get(sourceId)
+		const ignored = this.ignoredRelayFields.get(sourceId)
 		const baseline = this.baselineCaps.get(sourceId)
 		const declared = new Set<TunerStateField>()
 		if (
@@ -1529,10 +1637,19 @@ export class TunerController extends EventEmitter {
 			baseline?.sampleRate !== undefined
 		)
 			declared.add("sampleRate")
-		return STATE_FIELDS.filter(
-			field =>
-				!declared.has(field) && !accepted?.has(field) && !inferred?.has(field),
-		)
+		const proven = (field: TunerStateField): boolean =>
+			accepted?.has(field) === true || inferred?.has(field) === true
+		return {
+			unknownFields: STATE_FIELDS.filter(
+				field =>
+					ignored?.has(field) === true ||
+					(!declared.has(field) && !proven(field)),
+			),
+			declaredOnlyFields: STATE_FIELDS.filter(
+				field =>
+					declared.has(field) && !proven(field) && ignored?.has(field) !== true,
+			),
+		}
 	}
 
 	private isSameTunerIfGain(

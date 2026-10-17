@@ -127,6 +127,9 @@ original evidence or losing a file during download.
 6.1 Serve media by catalog ID under trusted protected-runtime policy. Validate and
 admit before headers, files, jobs or producers; enforce session and file leases
 through asynchronous setup, streaming, cancellation and revocation.
+Amended (WG8): the read-only legacy inventory ([web-gaps-8](../web-gaps-8/requirements.md)
+requirement 4) serves whole-file downloads by an opaque inventory id (never a path, not a
+catalog id) under the protected download lease, without Range; it is not catalog playback.
 6.2 Advertise format-specific playback/seek/download capabilities only after media
 validation. Bound concurrent streams, ranges, bytes and duration. No client paths,
 redirected credentials or shell interpolation.
@@ -148,6 +151,10 @@ presentation preference keys require the operator-data owner's typed agreement.
 7.1 Keep this lane design-only. Gate public DTOs, mounts and shared recording/audio
 changes on assigned ownership, accepted scanner S1, settled S2/S3 producer contracts
 and protected-runtime integration. No frontend redesign is part of this spec.
+Amended (WG8): a protected, read-only inventory of the existing dsd-fme and scanner WAV
+recordings (`GET /api/recordings`, [web-gaps-8](../web-gaps-8/requirements.md) requirement 4)
+is allocated before checkpoint B. It writes, renames and deletes nothing and has no Keep,
+delete or trim; managed recordings, Keep and capacity stay behind checkpoint B and tasks 5–6.
 7.2 Verify correctness properties with at least 100 generated runs, deterministic
 crash/fault schedules and representative sanitized fixtures. Include actual native
 closure/restart and storage capacity validation before enabling production writes.

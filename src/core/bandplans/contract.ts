@@ -10,6 +10,7 @@ import type {
 	BandEdit,
 	BandEditField,
 	BandPlanContext,
+	BandPlanImportFormat,
 	BandPlanMutation,
 	BandPlanPack,
 	BandPlanPackView,
@@ -17,6 +18,7 @@ import type {
 	BandPlansErrorCode,
 	BandPlanStackView,
 	BandPlanState,
+	BandPlanUpdateCheck,
 	BandRegion,
 	BuiltinScanPreset,
 	DisplayGroup,
@@ -25,6 +27,7 @@ import type {
 	ImportGroupRule,
 	ImportPreview,
 	ImportSkipReason,
+	ImportUrlPreview,
 	PlanStackEntry,
 	ResolvedBandPlanView,
 	ScanJobSpec,
@@ -136,6 +139,13 @@ export interface BandPlanServiceOptions {
 	 * failure latches a store that had opened. Listener failures are ignored.
 	 */
 	readonly onStoreUnavailable?: (reason: BandPlanStoreUnavailableReason) => void
+	/**
+	 * WG6 req 5.1: fetches band-plan URLs (Main injects the real fetcher in src/index.ts).
+	 * Absent: URL import and update checks answer 403 BANDPLANS_URL_IMPORT_DISABLED.
+	 */
+	readonly urlFetcher?: BandPlanUrlFetcher
+	/** WG6: allowlist the service checks and advertises; default BANDPLAN_URL_IMPORT_HOSTS. */
+	readonly urlImportHosts?: readonly string[]
 	/** Test seams. */
 	readonly domain?: Partial<Omit<DomainContext, "region">>
 	readonly storageStage?: (stage: string) => void | Promise<void>
@@ -156,6 +166,18 @@ export interface BandPlanService {
 	presetJob(presetId: string): ScanPresetJobView
 	/** Validates and parses an ImportPreviewRequest synchronously; persists nothing. */
 	previewImport(request: unknown): ImportPreview
+	/**
+	 * WG6 req 5.1: validates an ImportUrlPreviewRequest, fetches the URL once through the
+	 * injected fetcher and previews the bytes like previewImport; persists nothing. Optional
+	 * until lane U implements it.
+	 */
+	previewImportUrl?(request: unknown): Promise<ImportUrlPreview>
+	/**
+	 * WG6 req 6.1: re-fetches an imported pack's sourceUrl and diffs it with the committed pack;
+	 * persists nothing. BANDPLANS_NOT_FOUND for an unknown pack; BANDPLANS_INVALID for a pack
+	 * without sourceUrl. Optional until lane U implements it.
+	 */
+	checkImportUpdate?(packId: string): Promise<BandPlanUpdateCheck>
 	/** Validates `input` as BandPlanMutation before admission; bounded serialized queue. */
 	mutate(input: unknown): Promise<BandPlanMutationResult>
 	/** Rejects new work, drains admitted work, releases the store lock. Idempotent. */
@@ -198,6 +220,10 @@ export type SdrppFailureReason =
 	| "empty"
 	| "row-limit"
 	| "too-large"
+	/** WG5: SDR# XML that is not well formed or uses a forbidden construct (DTD, entity, CDATA). */
+	| "xml"
+	/** WG5: a Gqrx CSV document that cannot be read as lines of fields. */
+	| "csv"
 export interface SdrppParseFailure {
 	readonly ok: false
 	readonly code: "BANDPLANS_IMPORT_TOO_LARGE" | "BANDPLANS_IMPORT_INVALID"
@@ -212,6 +238,19 @@ export type ParseSdrppBandPlan = (
 	bytes: Uint8Array,
 	options: SdrppParseOptions,
 ) => SdrppParseResult
+
+/**
+ * WG5 (web-gaps-5 req 7): every import parser has the SDR++ signature and rules: total on
+ * bytes, never throws, size-checked before decoding. `parseSdrSharpBandPlan`
+ * (import/sdrsharp.ts) and `parseGqrxBandPlan` (import/gqrx.ts).
+ */
+export type BandPlanImportParser = ParseSdrppBandPlan
+/** Parsers of the non-SDR++ formats; a format without one is rejected as invalid. */
+export type BandPlanImportParsers = Readonly<
+	Partial<
+		Record<Exclude<BandPlanImportFormat, "sdrpp-json">, BandPlanImportParser>
+	>
+>
 
 // --- Lane D: presets.ts (pure) ---
 
@@ -263,9 +302,14 @@ export type ScannerBandplanProvider = () => readonly Bandplan[]
  * overrides sorted by sourceType (code-unit order). Order of the request's overrides
  * does not matter; any change to the bytes or the override set changes the digest.
  */
+/**
+ * WG6 req 5.1: a non-null `sourceUrl` (URL import) is bound into the digest; absent or null
+ * yields exactly the pre-WG6 digest.
+ */
 export type PreviewDigestFor = (
 	fileSha256: string,
 	groupOverrides: readonly ImportGroupOverride[],
+	sourceUrl?: string | null,
 ) => string
 
 // --- BP2 lane W: src/api/websocket/bandplans-broadcast-adapter.ts ---
@@ -292,3 +336,24 @@ export type SendBandPlansSnapshot = (
 	port: BandPlansBroadcastPort,
 	clientId: string,
 ) => BandPlansSnapshotOutcome
+
+// --- WG6 lane U: the URL fetcher type; its code lives outside src/core/bandplans (I/O-free) ---
+
+/** One fetched band-plan file. */
+export interface BandPlanUrlFetchResult {
+	/** Response body, at most BANDPLANS_URL_LIMITS.responseBytes. */
+	readonly bytes: Uint8Array
+	/** Media type without parameters, lower-case; null when absent. */
+	readonly contentType: string | null
+}
+/**
+ * WG6 req 5.2-5.5: fetches one https URL whose host is in `hosts`, refusing private, loopback,
+ * link-local, CGNAT, multicast and ULA addresses after DNS resolution (connecting to the checked
+ * address only), following no redirect, sending no credentials or cookies, capping the body and
+ * the total time. Rejects with BandPlansError: BANDPLANS_URL_REFUSED, BANDPLANS_URL_FETCH_FAILED,
+ * BANDPLANS_URL_TIMEOUT, BANDPLANS_IMPORT_TOO_LARGE or BANDPLANS_BUSY (one fetch in flight).
+ */
+export type BandPlanUrlFetcher = (
+	url: string,
+	hosts: readonly string[],
+) => Promise<BandPlanUrlFetchResult>

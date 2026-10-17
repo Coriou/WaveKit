@@ -33,6 +33,7 @@ import type {
 import type { Logger } from "../utils/logger.js"
 import { DecoderSpawnError } from "../utils/errors.js"
 import { createComponentLogger } from "../utils/logger.js"
+import { safeErrorFields } from "./safe-error-fields.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
 const GRACEFUL_STOP_TIMEOUT = 5000
@@ -66,7 +67,10 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		this.stats.bytesIn += chunk.length
 	}
 	private readonly handleInputError = (err: Error): void => {
-		this.logger.warn({ err }, "Decoder input stream error")
+		this.logger.warn(
+			{ err: safeErrorFields(err) },
+			"Decoder input stream error",
+		)
 	}
 	protected outputStream: PassThrough
 	protected audioOutputStream: PassThrough | null = null
@@ -149,7 +153,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		const command = this.getCommand()
 		const args = this.getArgs()
 
-		this.logger.info({ command, args }, "Starting decoder process")
+		// argv carries option text: count only (WG7 HW fix).
+		this.logger.info(
+			{ command, argCount: args.length },
+			"Starting decoder process",
+		)
 
 		try {
 			this.process = spawn(command, args, {
@@ -176,7 +184,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 		// Handle spawn errors (e.g., command not found)
 		this.process.on("error", (err: Error) => {
-			this.logger.error({ err }, "Decoder process error")
+			this.logger.error({ err: safeErrorFields(err) }, "Decoder process error")
 			this.stats.errors++
 			if (this.listenerCount("error") > 0) {
 				this.emit("error", new DecoderSpawnError(this.id, command, err))
@@ -189,7 +197,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				signalDecoder(proc, "SIGKILL")
 			} catch (err) {
 				this.logger.error(
-					{ err, pid: proc.pid },
+					{ err: safeErrorFields(err), pid: proc.pid },
 					"Failed to clean up decoder process group",
 				)
 			}
@@ -245,7 +253,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		// Input can be attached after start; stdin errors must always be handled.
 		this.process.stdin?.on("error", err => {
 			if ((err as NodeJS.ErrnoException).code !== "EPIPE") {
-				this.logger.warn({ err }, "Decoder stdin error")
+				this.logger.warn({ err: safeErrorFields(err) }, "Decoder stdin error")
 			}
 		})
 
@@ -447,7 +455,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 */
 	updateOptions(updates: Record<string, unknown>): void {
 		this.config.options = { ...this.config.options, ...updates }
-		this.logger.debug({ updates }, "Decoder options updated")
+		// Count only: keys and values are option text (WG7 HW fix).
+		this.logger.debug(
+			{ updateCount: Object.keys(updates).length },
+			"Decoder options updated",
+		)
 		this.onOptionsUpdated()
 	}
 
@@ -493,7 +505,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			const output = this.parseOutput(line)
 			if (output) this.emitOutput(output)
 		} catch (err) {
-			this.logger.warn({ line, err }, "Failed to parse decoder output")
+			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
+			this.logger.warn(
+				{ line, err: safeErrorFields(err) },
+				"Failed to parse decoder output",
+			)
 			this.stats.errors++
 		}
 	}

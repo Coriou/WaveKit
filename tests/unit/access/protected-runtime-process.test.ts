@@ -535,15 +535,33 @@ async function fixture() {
 	roots.push(root)
 	const ports: number[] = []
 	const held: Server[] = []
-	for (let index = 0; index < 5; index++) {
+	// The core binds these ports only after releasePorts() and a full process boot. A port
+	// from listen(0) is in the OS ephemeral range, where any concurrent test's listen(0) or
+	// outbound connection can take it in that window (seen as EADDRINUSE on the audio port).
+	// Reserve outside the ephemeral ranges (Linux 32768+, macOS 49152+) and away from the
+	// decoder defaults (30003, 30005, ...), so only another explicit pick can collide.
+	while (ports.length < 5) {
+		const port = 24000 + Math.floor(Math.random() * 6000)
+		if (ports.includes(port)) continue
 		const server = createServer()
+		const bound = async (host: string, probe: Server) =>
+			new Promise<string | null>(resolve => {
+				probe.once("error", (error: NodeJS.ErrnoException) =>
+					resolve(error.code ?? "unknown"),
+				)
+				probe.listen(port, host, () => resolve(null))
+			})
+		// AudioOutput listens on the wildcard address: the port must be free there too
+		// (a host without IPv6 answers EAFNOSUPPORT/EADDRNOTAVAIL: nothing to check).
+		const wildcard = createServer()
+		const wildcardError = await bound("::", wildcard)
+		if (wildcardError === "EADDRINUSE" || wildcardError === "EACCES") continue
+		if (wildcard.listening)
+			await new Promise<void>(resolve => wildcard.close(() => resolve()))
+		if ((await bound("127.0.0.1", server)) !== null) continue
 		reservations.push(server)
 		held.push(server)
-		await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
-		const address = server.address()
-		if (!address || typeof address === "string")
-			throw new Error("Missing reserved port")
-		ports.push(address.port)
+		ports.push(port)
 	}
 	const [api, analog, digital, raw, relay] = ports as [
 		number,

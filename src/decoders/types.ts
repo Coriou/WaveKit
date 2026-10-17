@@ -19,6 +19,7 @@ import type { EventEmitter } from "node:events"
 import type { Readable } from "node:stream"
 import type {
 	DecoderBandAssessment,
+	DecoderOptionIssue,
 	DecoderRateAssessment,
 	DecoderRateRequirements,
 	DecoderStartMode,
@@ -349,6 +350,8 @@ export interface DecoderStatus {
 	scannerJobId?: string | undefined
 	/** True only for scanner probes (runtime-only). */
 	ephemeral?: true | undefined
+	/** WG6 req 3.3: option problems against the type's schema; absent when it has none. */
+	optionIssues?: DecoderOptionIssue[] | undefined
 }
 
 /** Why and since when a decoder is suspended for its source rate or band. */

@@ -1,3 +1,8 @@
+import {
+	DCS_CODE_SET,
+	DCS_STANDARD_CODES,
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+} from "@wavekit/api-types"
 import { isCtcssToneHz } from "../../audio-tones/ctcss.js"
 import { isDtmfDigitString } from "../../audio-tones/dtmf.js"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -321,6 +326,14 @@ function transmissionRow(
 			value: payload.tone.dtmf,
 		})
 	}
+	const dcs = payload.tone?.dcs ?? null
+	if (dcs !== null) {
+		fields.push({
+			key: "dcs",
+			label: "DCS",
+			value: dcsLabel(dcs),
+		})
+	}
 	const summaryJson = fitTransmissionSummary({
 		eventId: record.eventId,
 		kind: "analog-transmission",
@@ -340,6 +353,11 @@ function transmissionRow(
 	if (payload.tone?.ctcssHz != null)
 		ftsParts.push(`CTCSS ${payload.tone.ctcssHz}`)
 	if (payload.tone?.dtmf != null) ftsParts.push(payload.tone.dtmf)
+	if (dcs !== null) {
+		ftsParts.push(`DCS ${dcsLabel(dcs)}`)
+		const twin = dcsTwinOf(dcs)
+		if (twin !== null) ftsParts.push(`DCS ${dcsLabel(twin)}`)
+	}
 	return {
 		eventId: record.eventId,
 		kind: "analog-transmission",
@@ -390,6 +408,9 @@ function storedTransmission(
 		modulation: payload.modulation,
 		bandwidthHz: payload.bandwidthHz,
 		squelchMode: payload.squelchMode,
+		...(payload.noiseQuietingDb === undefined
+			? {}
+			: { noiseQuietingDb: payload.noiseQuietingDb }),
 		thresholdDbfs: payload.thresholdDbfs,
 		peakChannelPowerDbfs: payload.peakChannelPowerDbfs,
 		meanChannelPowerDbfs: payload.meanChannelPowerDbfs,
@@ -400,6 +421,17 @@ function storedTransmission(
 					tone: {
 						ctcssHz: payload.tone.ctcssHz,
 						dtmf: payload.tone.dtmf,
+						...(payload.tone.dcs === undefined
+							? {}
+							: {
+									dcs:
+										payload.tone.dcs === null
+											? null
+											: {
+													code: payload.tone.dcs.code,
+													polarity: payload.tone.dcs.polarity,
+												},
+								}),
 					},
 				}),
 	}
@@ -801,9 +833,72 @@ function isTransmissionFrequency(
 	return trust === "commanded" || trust === "relay" || trust === "unverified"
 }
 
+type StoredDcs = { code: string; polarity: "normal" | "inverted" }
+
+const dcsLabel = (dcs: StoredDcs): string =>
+	`${dcs.code}${dcs.polarity === "normal" ? "N" : "I"}`
+
+const DCS_MASK = (1 << 23) - 1
+const DCS_STANDARD_SET: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
+let dcsTwins: Map<string, string> | undefined
+
+/** Golay(23,12) word of a 9-bit code, generator 0xC75 (TIA-603 layout, 100 prefix). */
+function dcsWord(code: number): number {
+	const data = code | (0b100 << 9)
+	let r = data << 11
+	for (let i = 22; i >= 11; i--) if (r & (1 << i)) r ^= 0xc75 << (i - 11)
+	return ((data << 11) | r) & DCS_MASK
+}
+
+/** Standard code whose word is a rotation of the complement, built once per process. */
+function dcsTwinTable(): Map<string, string> {
+	if (dcsTwins) return dcsTwins
+	const byWord = new Map<number, string>()
+	for (const code of DCS_STANDARD_CODES)
+		byWord.set(dcsWord(Number.parseInt(code, 8)), code)
+	const table = new Map<string, string>()
+	for (const code of DCS_STANDARD_CODES) {
+		const inverted = ~dcsWord(Number.parseInt(code, 8)) & DCS_MASK
+		for (let k = 0; k < 23; k++) {
+			const rotated = ((inverted >>> k) | (inverted << (23 - k))) & DCS_MASK
+			const other = byWord.get(rotated)
+			if (other !== undefined) {
+				table.set(code, other)
+				break
+			}
+		}
+	}
+	dcsTwins = table
+	return table
+}
+
+/** The same transmission read the other way round: twin code, flipped polarity. */
+function dcsTwinOf(dcs: StoredDcs): StoredDcs | null {
+	const code = dcsTwinTable().get(dcs.code)
+	if (code === undefined) return null
+	return {
+		code,
+		polarity: dcs.polarity === "normal" ? "inverted" : "normal",
+	}
+}
+
+function isDcs(value: unknown): boolean {
+	if (value === null) return true
+	const body = plain(value)
+	if (!body || !sameKeys(body, ["code", "polarity"])) return false
+	const code = body["code"]
+	if (typeof code !== "string" || !/^[0-7]{3}$/.test(code)) return false
+	if (DCS_CODE_SET === "standard" && !DCS_STANDARD_SET.has(code)) return false
+	return body["polarity"] === "normal" || body["polarity"] === "inverted"
+}
+
 function isTone(value: unknown): boolean {
 	const body = plain(value)
-	if (!body || !sameKeys(body, ["ctcssHz", "dtmf"])) return false
+	if (!body) return false
+	if (!sameKeys(body, ["ctcssHz", "dtmf"])) {
+		if (!sameKeys(body, ["ctcssHz", "dtmf", "dcs"])) return false
+		if (!isDcs(body["dcs"])) return false
+	}
 	const hz = body["ctcssHz"]
 	if (hz !== null && (typeof hz !== "number" || !isCtcssToneHz(hz)))
 		return false
@@ -813,15 +908,34 @@ function isTone(value: unknown): boolean {
 	return true
 }
 
-/** Exactly the WG1 keys, or those keys plus a valid `tone`. */
+/**
+ * Exactly the WG1 keys, plus optionally a valid `tone` and (WG7 req 2.4) a `noiseQuietingDb`
+ * that only a `noise`-mode transmission carries.
+ */
 function transmissionKeysOk(body: Record<string, unknown>): boolean {
 	const present = Object.keys(body)
-	const withTone = present.includes("tone")
-	if (withTone) {
-		if (present.length !== TRANSMISSION_KEYS.length + 1) return false
+	let optional = 0
+	if (present.includes("tone")) {
 		if (!isTone(body["tone"])) return false
-	} else if (present.length !== TRANSMISSION_KEYS.length) return false
+		optional += 1
+	}
+	if (present.includes("noiseQuietingDb")) {
+		if (!isNoiseQuietingDb(body["noiseQuietingDb"])) return false
+		if (body["squelchMode"] !== "noise") return false
+		optional += 1
+	}
+	if (present.length !== TRANSMISSION_KEYS.length + optional) return false
 	return TRANSMISSION_KEYS.every(key => present.includes(key))
+}
+
+/** WG7 req 2.2: the quieting threshold range (`LIVE_AUDIO_NOISE_QUIETING_DB`). */
+function isNoiseQuietingDb(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isFinite(value) &&
+		value >= LIVE_AUDIO_NOISE_QUIETING_DB.min &&
+		value <= LIVE_AUDIO_NOISE_QUIETING_DB.max
+	)
 }
 
 function isTransmission(value: unknown): value is AnalogTransmissionPayload {
@@ -852,7 +966,11 @@ function isTransmission(value: unknown): value is AnalogTransmissionPayload {
 		!Number.isFinite(body["bandwidthHz"])
 	)
 		return false
-	if (body["squelchMode"] !== "manual" && body["squelchMode"] !== "auto")
+	if (
+		body["squelchMode"] !== "manual" &&
+		body["squelchMode"] !== "auto" &&
+		body["squelchMode"] !== "noise"
+	)
 		return false
 	if (
 		typeof body["thresholdDbfs"] !== "number" ||

@@ -38,6 +38,19 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [web-gaps-4](web-gaps-4/requirements.md): bulk position trails, approximate station
   location, storage report, live-audio AGC, AIS channel, Meshtastic fix time, SDR host
   version, station write layer (WG4)
+- [web-gaps-5](web-gaps-5/requirements.md): automatic band map and activity timeline,
+  trail altitude and Meshtastic trail positions, AIS types 4/9/21 and the vessel channel,
+  verified tuning trust, SDR# and Gqrx band-plan import (WG5)
+- [web-gaps-6](web-gaps-6/requirements.md): decoded-elsewhere ranges on scanner plans and
+  per-hit duration, decoder option schemas (report only), DCS on analog transmissions,
+  band-plan import by URL with update check, redacted config export, sample-rate presets (WG6)
+- [web-gaps-7](web-gaps-7/requirements.md): ambient identify for AIS, ACARS, VDL2 and LoRa,
+  noise and tone squelch with the noise-tail fix, suggested gain tables, opt-in band-plan skip
+  exclusions and decoded-elsewhere refresh, audio stream CORS, bounded decoder options, minors
+  (WG7)
+- [web-gaps-8](web-gaps-8/requirements.md): decoder settings store and protected decoder PATCH
+  applied on restart, read-only recordings inventory with download, spectrum bins above 2 048
+  by a measured host cap (WG8)
 
 ## The three files
 

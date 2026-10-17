@@ -7,6 +7,7 @@ import {
 import { EventEmitter } from "node:events"
 import { type Readable } from "node:stream"
 import { type Logger } from "../utils/logger.js"
+import { safeErrorFields } from "./safe-error-fields.js"
 
 /**
  * PassiveRtlProxy - A TCP proxy/server for RTL-TCP clients.
@@ -61,9 +62,7 @@ export class PassiveRtlProxy extends EventEmitter {
 						{
 							port: this.port,
 							mode: this.inputStream ? "stream" : "proxy",
-							upstream: this.inputStream
-								? "internal"
-								: `${this.realHost}:${this.realPort}`,
+							upstream: this.inputStream ? "internal" : "tcp",
 						},
 						"Passive RTL Proxy started",
 					)
@@ -121,7 +120,10 @@ export class PassiveRtlProxy extends EventEmitter {
 		})
 
 		clientSocket.on("error", err => {
-			this.logger.error({ err }, "Client connection error (Stream Mode)")
+			this.logger.error(
+				{ err: safeErrorFields(err) },
+				"Client connection error (Stream Mode)",
+			)
 			// Don't destroy input stream! It's shared.
 			stream.unpipe(clientSocket)
 		})
@@ -152,12 +154,18 @@ export class PassiveRtlProxy extends EventEmitter {
 		})
 
 		upstreamSocket.on("error", err => {
-			this.logger.error({ err }, "Upstream connection error")
+			this.logger.error(
+				{ err: safeErrorFields(err) },
+				"Upstream connection error",
+			)
 			clientSocket.destroy()
 		})
 
 		clientSocket.on("error", err => {
-			this.logger.error({ err }, "Client connection error")
+			this.logger.error(
+				{ err: safeErrorFields(err) },
+				"Client connection error",
+			)
 			upstreamSocket.destroy()
 		})
 

@@ -87,6 +87,11 @@ const FAMILY: Readonly<Record<ScannerProtocol, ProtocolFamily>> = {
 	"digital-unknown": "unknown",
 	carrier: "carrier",
 	unknown: "unknown",
+	// WG7 req 1.1: packet data named from running decoders (ambient evidence only).
+	ais: "packet",
+	acars: "packet",
+	vdl2: "packet",
+	lora: "packet",
 }
 
 export function familyOf(p: ScannerProtocol): ProtocolFamily {

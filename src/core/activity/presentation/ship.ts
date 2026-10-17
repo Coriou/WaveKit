@@ -2,6 +2,7 @@ import type { ShipData } from "../../../decoders/builtin/ais-catcher.js"
 import { isCoalescibleShape } from "../storage/coalesce.js"
 import type { DecodePresentation } from "../types.js"
 import {
+	altitudeMetres,
 	canonicalMmsi,
 	clampTitle,
 	entityKey,
@@ -29,7 +30,10 @@ const shipPayload = objectSchema({
 	lon: asNumber,
 })
 
-/** AIS vessel. Speed stays in the payload's knots; no unit conversion. */
+/**
+ * AIS vessel. Speed stays in the payload's knots; no unit conversion.
+ * `altM` from `altitudeM` (type 9 SAR aircraft, metres; req 4.3).
+ */
 export function presentShip(data: unknown): DecodePresentation | undefined {
 	const payload = parsePayload(shipPayload, data)
 	if (!payload) return undefined
@@ -78,7 +82,7 @@ export function presentShip(data: unknown): DecodePresentation | undefined {
 		protocol: "ais",
 		entityKey: key,
 		title,
-		position: readPosition(payload),
+		position: readPosition(payload, altitudeMetres(ship.altitudeM)),
 		fields,
 	})
 }

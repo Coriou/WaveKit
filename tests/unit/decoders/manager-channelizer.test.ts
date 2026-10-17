@@ -665,6 +665,27 @@ describe("failure accounting across invalidations (Review Focus 3)", () => {
 		expect(restarting).toEqual(["dec", "dec"])
 	})
 
+	it("an invalidation restart that applies staged options keeps the accounting (WG8 R1)", async () => {
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(20)
+		expect(status()).toMatchObject({ running: true, restartCount: 1 })
+		const lastError = status().lastError
+		expect(lastError).toBeDefined()
+		expect(manager.stageDecoderOptions("dec", { extra: 1 })).toBe(true)
+		provider.invalidate("rtl", ["dec-g1"])
+		await settle()
+		const rebuilt = decoders.get("dec")!
+		expect(rebuilt).not.toBe(decoder)
+		expect(manager.getDecoder("dec")).toBe(rebuilt)
+		expect(rebuilt.running).toBe(true)
+		expect(status()).toMatchObject({ running: true, restartCount: 1 })
+		expect(status().lastError).toEqual(lastError)
+		rebuilt.crash()
+		expect(status().restartCount).toBe(2)
+	})
+
 	it("a decoder crashing between invalidations still reaches maxRestarts", async () => {
 		await manager.destroy()
 		setup({ maxRestarts: 2 })

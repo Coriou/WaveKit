@@ -8,8 +8,15 @@
  */
 import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
+import {
+	DCS_CODE_SET,
+	DCS_MIN_AUDIO_SECONDS,
+	DCS_STANDARD_CODES,
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+} from "@wavekit/api-types"
 import type {
 	AnalogTransmissionCloseReason,
+	AnalogTransmissionDcs,
 	AnalogTransmissionEventData,
 	AnalogTransmissionFrequency,
 	AnalogTransmissionPayload,
@@ -106,7 +113,9 @@ interface OpenTransmission {
 	frequency: AnalogTransmissionFrequency | null
 	modulation: AnalogTransmissionEventData["modulation"]
 	bandwidthHz: number
-	squelchMode: "manual" | "auto"
+	squelchMode: "manual" | "auto" | "noise"
+	/** WG7 req 2.4: the quieting threshold in effect (noise mode only). */
+	noiseQuietingDb: number | undefined
 	thresholdDbfs: number
 	config: TransmissionConfigIdentity
 	peak: number | null
@@ -176,6 +185,9 @@ export function toActivityPayload(
 		modulation: event.modulation,
 		bandwidthHz: event.bandwidthHz,
 		squelchMode: event.squelchMode,
+		...(event.noiseQuietingDb === undefined
+			? {}
+			: { noiseQuietingDb: event.noiseQuietingDb }),
 		thresholdDbfs: event.thresholdDbfs,
 		peakChannelPowerDbfs: event.peakChannelPowerDbfs,
 		meanChannelPowerDbfs: event.meanChannelPowerDbfs,
@@ -186,9 +198,21 @@ export function toActivityPayload(
 					tone: {
 						ctcssHz: event.tone.ctcssHz,
 						dtmf: event.tone.dtmf,
+						dcs: copyDcs(event.tone.dcs),
 					},
 				}),
 	}
+}
+
+/** Defensive fresh copy of a detector-supplied DCS; anything malformed becomes null. */
+function copyDcs(value: unknown): AnalogTransmissionDcs | null {
+	if (typeof value !== "object" || value === null) return null
+	const { code, polarity } = value as { code?: unknown; polarity?: unknown }
+	if (typeof code !== "string" || !/^[0-7]{3}$/.test(code)) return null
+	if (DCS_CODE_SET === "standard" && !DCS_STANDARD_CODES.includes(code))
+		return null
+	if (polarity !== "normal" && polarity !== "inverted") return null
+	return { code, polarity }
 }
 
 export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTrackerEvents> {
@@ -367,6 +391,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const offsetHz = status.config.offsetHz ?? 0
 		const frequency = this.sampleFrequency(status.sourceId, offsetHz)
 		const threshold = status.thresholdDbfs
+		const squelchMode = status.config.squelchMode ?? "manual"
 		this.toneBroken = false
 		const detector = this.makeDetector()
 		this.transmission = {
@@ -377,7 +402,12 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			frequency,
 			modulation: status.config.modulation,
 			bandwidthHz: status.config.bandwidth,
-			squelchMode: status.config.squelchMode ?? "manual",
+			squelchMode,
+			noiseQuietingDb:
+				squelchMode === "noise"
+					? (status.config.noiseQuietingDb ??
+						LIVE_AUDIO_NOISE_QUIETING_DB.default)
+					: undefined,
 			thresholdDbfs:
 				typeof threshold === "number" && Number.isFinite(threshold)
 					? threshold
@@ -510,6 +540,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			modulation: open.modulation,
 			bandwidthHz: open.bandwidthHz,
 			squelchMode: open.squelchMode,
+			...(open.noiseQuietingDb === undefined
+				? {}
+				: { noiseQuietingDb: open.noiseQuietingDb }),
 			thresholdDbfs: open.thresholdDbfs,
 			peakChannelPowerDbfs: open.peak,
 			meanChannelPowerDbfs: meanOf(open),
@@ -534,6 +567,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			modulation: open.modulation,
 			bandwidthHz: open.bandwidthHz,
 			squelchMode: open.squelchMode,
+			...(open.noiseQuietingDb === undefined
+				? {}
+				: { noiseQuietingDb: open.noiseQuietingDb }),
 			thresholdDbfs: open.thresholdDbfs,
 			peakChannelPowerDbfs: open.peak,
 			meanChannelPowerDbfs: meanOf(open),
@@ -550,7 +586,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			this.toneBroken = true
 			return {
 				push() {},
-				result: () => ({ ctcssHz: null, dtmf: null }),
+				result: () => ({ ctcssHz: null, dtmf: null, dcs: null }),
 				reset() {},
 			}
 		}
@@ -570,14 +606,18 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 
 	private finishTone(open: OpenTransmission): AnalogTransmissionTone {
-		if (this.toneBroken) return { ctcssHz: null, dtmf: null }
+		if (this.toneBroken) return { ctcssHz: null, dtmf: null, dcs: null }
 		try {
 			const tone = open.detector.result()
-			if (open.audioSeconds < 0.75) return { ctcssHz: null, dtmf: tone.dtmf }
-			return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf }
+			const dcs =
+				open.audioSeconds < DCS_MIN_AUDIO_SECONDS ? null : copyDcs(tone.dcs)
+			if (open.audioSeconds < 0.75) {
+				return { ctcssHz: null, dtmf: tone.dtmf, dcs }
+			}
+			return { ctcssHz: tone.ctcssHz, dtmf: tone.dtmf, dcs }
 		} catch {
 			this.toneErrorCount += 1
-			return { ctcssHz: null, dtmf: null }
+			return { ctcssHz: null, dtmf: null, dcs: null }
 		}
 	}
 

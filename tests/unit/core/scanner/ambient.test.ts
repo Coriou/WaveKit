@@ -26,7 +26,14 @@ describe("AmbientEvidence", () => {
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
 			targetOf: id =>
-				id === "dmr-cfg" ? { sourceId: "rtl", hz: 446_193_750 } : null,
+				id === "dmr-cfg"
+					? {
+							sourceId: "rtl",
+							hz: 446_193_750,
+							targetsHz: [446_193_750],
+							external: false,
+						}
+					: null,
 			epochOf: () => epoch,
 			logger: pino({ level: "silent" }),
 		})
@@ -80,9 +87,20 @@ describe("AmbientEvidence", () => {
 			decoders: decoders as never,
 			targetOf: id =>
 				id === "pager-cfg"
-					? { sourceId: "rtl", hz: 153_350_000 }
+					? {
+							sourceId: "rtl",
+							hz: 153_350_000,
+							targetsHz: [153_350_000],
+							external: false,
+						}
 					: id === "nxdn-cfg"
-						? { sourceId: "rtl", hz: 446_106_250, nxdn: "nxdn48" }
+						? {
+								sourceId: "rtl",
+								hz: 446_106_250,
+								nxdn: "nxdn48",
+								targetsHz: [446_106_250],
+								external: false,
+							}
 						: null,
 			epochOf: () => 3,
 			logger: pino({ level: "silent" }),
@@ -160,7 +178,14 @@ describe("AmbientEvidence", () => {
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
 			targetOf: id =>
-				id === "ism-cfg" ? { sourceId: "rtl", hz: 433_920_000 } : null,
+				id === "ism-cfg"
+					? {
+							sourceId: "rtl",
+							hz: 433_920_000,
+							targetsHz: [433_920_000],
+							external: false,
+						}
+					: null,
 			epochOf: () => 3,
 			logger: pino({ level: "silent" }),
 			now: () => clock.now,
@@ -207,7 +232,14 @@ describe("AmbientEvidence", () => {
 		const ambient = new AmbientEvidence({
 			decoders: decoders as never,
 			targetOf: id =>
-				id === "pager-cfg" ? { sourceId: "rtl", hz: 153_350_000 } : null,
+				id === "pager-cfg"
+					? {
+							sourceId: "rtl",
+							hz: 153_350_000,
+							targetsHz: [153_350_000],
+							external: false,
+						}
+					: null,
 			epochOf: () => epoch,
 			logger: pino({ level: "silent" }),
 			now: () => clock.now,

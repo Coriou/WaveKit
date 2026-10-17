@@ -75,6 +75,7 @@ const tunerStateSchema = {
 		lastError: { type: "string" },
 		commandCount: { type: "integer" },
 		unknownFields: { type: "array", items: { type: "string" } },
+		declaredOnlyFields: { type: "array", items: { type: "string" } },
 	},
 	required: [
 		"sourceId",
