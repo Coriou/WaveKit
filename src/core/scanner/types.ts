@@ -658,7 +658,12 @@ export interface BandPlanSkipSource {
  */
 export interface ScannerSettings {
 	enabled: boolean
-	passive: { enabled: boolean; offsetProbes: boolean }
+	passive: {
+		enabled: boolean
+		offsetProbes: boolean
+		/** WG11 req 2.1: config only; absent means 0.25 (PASSIVE_COST_LIMIT_DEFAULT). */
+		maxEngineUtilization?: number | undefined
+	}
 	cpuBudgetCores: number
 	cpuGuardPercent: number
 	maxProbes: { offset: number; channel: number }
@@ -698,4 +703,15 @@ export interface ScannerSettings {
 		/** WG8 req 5.2: config only; absent means "auto" (the bins cap; see SpectrumBinsCapSetting). */
 		spectrumBinsCap?: "auto" | 2048 | 4096 | 8192 | undefined
 	}
+	/** WG11 req 6.1: config only, protected access mode only; absent means no IQ capture. */
+	iqCapture?: ScannerIqCaptureConfig | undefined
+}
+
+/** WG11 req 6.1: `scanner.iqCapture` (bounds in src/config.ts and iq-capture-contract.ts). */
+export interface ScannerIqCaptureConfig {
+	enabled: boolean
+	maxTotalMb: number
+	maxCaptureMs: number
+	preRollMs: number
+	binaryPath: string
 }

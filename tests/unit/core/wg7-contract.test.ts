@@ -83,7 +83,8 @@ describe("WG7 contract", () => {
 		expect(
 			same<
 				Api.ScannerIdentifyTrial["transport"],
-				"offset" | "channel" | "ambient" | null
+				// WG11 req 6.6: identify replay trials
+				"offset" | "channel" | "ambient" | "replay" | null
 			>(true),
 		).toBe(true)
 		expect(

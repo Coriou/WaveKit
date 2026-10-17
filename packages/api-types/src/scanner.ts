@@ -530,7 +530,8 @@ export interface ScanJobProbe {
 	trackId: string
 	targetHz: number
 	protocol: ScannerProtocol
-	transport: "offset" | "channel"
+	/** WG11 req 6.5: `replay` = a probe fed from an IQ capture, not the live stream. */
+	transport: "offset" | "channel" | "replay"
 	state: "confirming" | "following" | "stopping"
 	startedAt: string
 }
@@ -667,7 +668,12 @@ export interface ScannerStatus {
 /** The bare settings object (core `ScannerSettings`). */
 export interface ScannerSettingsValues {
 	enabled: boolean
-	passive: { enabled: boolean; offsetProbes: boolean }
+	passive: {
+		enabled: boolean
+		offsetProbes: boolean
+		/** WG11 req 2.1: config only; absent means 0.25 (PASSIVE_COST_LIMIT_DEFAULT). */
+		maxEngineUtilization?: number | undefined
+	}
 	cpuBudgetCores: number
 	cpuGuardPercent: number
 	maxProbes: { offset: number; channel: number }
@@ -713,6 +719,20 @@ export interface ScannerSettingsValues {
 		/** WG8 req 5.2: config only; absent means "auto". */
 		spectrumBinsCap?: "auto" | 2048 | 4096 | 8192 | undefined
 	}
+	/** WG11 req 6.1: config only; absent means no IQ capture. */
+	iqCapture?: ScannerIqCaptureSettings | undefined
+}
+/** WG11 req 6.1: narrowband IQ capture on detection (protected access mode only; off by default). */
+export interface ScannerIqCaptureSettings {
+	enabled: boolean
+	/** Total capture storage, at most 256 MiB. */
+	maxTotalMb: number
+	/** One capture, pre-roll included, at most 4000 ms. */
+	maxCaptureMs: number
+	/** Pre-roll before the track start, at most 2000 ms (the native ring). */
+	preRollMs: number
+	/** The native capture tool (`wavekit-iqcap`). */
+	binaryPath: string
 }
 export type ScannerSettingProvenance = "config" | "runtime" | "default"
 export interface ScannerSettingBounds {
@@ -813,6 +833,11 @@ export type ScannerTrialOutcome =
 	| "unsupported"
 	| "not-needed"
 	| "cancelled"
+	/**
+	 * WG11 req 1.1: a `live-audio` trial whose matching transmission carried no CTCSS tone or
+	 * DCS code (a squelch opening was heard; nothing was decoded).
+	 */
+	| "heard"
 export interface ScannerIdentifyTrial {
 	protocol: ScannerProtocol
 	/** The decoder that runs the trial or, for an `unsupported` one, would run it; null when none exists (`no-decoder`). */
@@ -827,8 +852,11 @@ export interface ScannerIdentifyTrial {
 		| null
 	/** dsd-fme mode (`auto`, `nxdn`, `nxdn48`, `dpmr`) or the decoder name; null for an `unsupported` trial. */
 	mode: string | null
-	/** WG7: `ambient` = evidence of a decoder already running there (no probe). */
-	transport: "offset" | "channel" | "ambient" | null
+	/**
+	 * WG7: `ambient` = evidence of a decoder already running there (no probe). WG11 req 6.6:
+	 * `replay` = a probe decoder fed from a narrowband IQ capture of the target.
+	 */
+	transport: "offset" | "channel" | "ambient" | "replay" | null
 	outcome: ScannerTrialOutcome
 	/**
 	 * Why an `unsupported` trial cannot run. WG7: `no-ambient-decoder` for an ambient-only protocol

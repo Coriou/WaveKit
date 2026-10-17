@@ -170,7 +170,7 @@ const trial = z.object({
 	protocol: text,
 	decoder: text.nullable(),
 	mode: text.nullable(),
-	transport: z.enum(["offset", "channel", "ambient"]).nullable(),
+	transport: z.enum(["offset", "channel", "ambient", "replay"]).nullable(),
 	outcome: z.enum([
 		"pending",
 		"running",
@@ -182,6 +182,7 @@ const trial = z.object({
 		"unsupported",
 		"not-needed",
 		"cancelled",
+		"heard",
 	]),
 	reason: text.optional(),
 })
@@ -243,7 +244,7 @@ const job = z.object({
 				decoderId: id,
 				targetHz: hz,
 				protocol: text,
-				transport: z.enum(["offset", "channel"]),
+				transport: z.enum(["offset", "channel", "replay"]),
 				state: text,
 			}),
 			128,

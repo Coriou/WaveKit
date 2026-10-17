@@ -55,7 +55,8 @@ import {
 import { interpretMultimon } from "./confirm/multimon.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 
-export type ProbeTransport = "offset" | "channel"
+/** WG11 req 6.5: `replay` feeds the decoder an IQ capture (lane IQ). */
+export type ProbeTransport = "offset" | "channel" | "replay"
 export type ProbeState = "starting" | "confirming" | "following" | "stopping"
 export type ProbeDecoderType = "dsd-fme" | "multimon-ng" | "direwolf" | "rtl433"
 

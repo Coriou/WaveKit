@@ -1,5 +1,7 @@
 /** Core spectrum service DTOs (waterfalls for the CLI/web and the scanner). */
 
+import type { ScannerConfidence, ScannerProtocol } from "./scanner.js"
+
 export type SpectrumBinEncoding = "u8-halfdb-127.5"
 
 export interface SpectrumFrameEventData {
@@ -20,11 +22,7 @@ export interface SpectrumFrameEventData {
 	binEncoding: SpectrumBinEncoding
 	floorDbfs: number
 	thresholdDb: number
-	tracks: {
-		startHz: number
-		endHz: number
-		flags: { burst: boolean; iqImage: boolean; edge: boolean }
-	}[]
+	tracks: SpectrumFrameTrack[]
 	/** DC spike at the tuned centre ± guard; baseband spurs as RF ranges (§ 4.9). */
 	masks: {
 		dcHz: number
@@ -41,6 +39,39 @@ export interface SpectrumFrameEventData {
 	backfill?: true
 	at: string
 }
+
+/**
+ * One segment of the frame's block (RF). WG11 req 5.1: a segment the tracker associated with an
+ * open track also carries that track's stable id and its stats from the same block; a segment
+ * without a track carries none of the optional fields.
+ */
+export interface SpectrumFrameTrack {
+	startHz: number
+	endHz: number
+	/** WG11: `spur` = the track lies wholly on a spur line (never surfaced, never probed). */
+	flags: { burst: boolean; iqImage: boolean; edge: boolean; spur?: boolean }
+	/** The tracker's id: stable for the emission's life, burst gaps within the hang included. */
+	trackId?: string
+	/** Against the core's own floor and threshold; rounded to 0.5 dB. */
+	snrDb?: number
+	peakDbfs?: number
+	/** Integration blocks the track was on so far. */
+	blocks?: number
+	/** Since the track opened, from sample counts (`at` − ageMs ≈ first seen). */
+	ageMs?: number
+	/** Display surfacing rule: not a spur or image; a burst at threshold + 3 dB, else ≥ minSurfaceBlocks blocks. */
+	surfaced?: boolean
+	/** The scanner's discovery for this track, when it has one. */
+	scanner?: SpectrumFrameTrackScanner
+}
+/** WG11 req 5.1: the scanner's identity of a frame track. */
+export interface SpectrumFrameTrackScanner {
+	discoveryId: string
+	protocol: ScannerProtocol
+	confidence: ScannerConfidence
+}
+/** WG11 req 5.5: JSON bytes a frame track may grow by with every optional field present. */
+export const SPECTRUM_FRAME_TRACK_MAX_EXTRA_BYTES = 260
 
 /** WG10 req 2.9: what an untracked-retune warning most likely means. */
 export type SpectrumWarningSuspect =

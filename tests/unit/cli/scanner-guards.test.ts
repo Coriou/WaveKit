@@ -381,6 +381,77 @@ describe("strict identify attribution projection", () => {
 			"ais-mmsi",
 		)
 	})
+
+	it("accepts WG11 heard analog trials, replay trials and replay probes", () => {
+		const target = SCAN_JOB.identify!.targets[0]!
+		const base = wire()
+		const parsed = guardScan("job", {
+			...base,
+			progress: {
+				...base.progress,
+				probes: [
+					{
+						probeId: "p1",
+						decoderId: "d1",
+						targetHz: 446_006_250,
+						protocol: "dpmr",
+						transport: "replay",
+						state: "confirming",
+					},
+				],
+			},
+			identify: {
+				...base.identify,
+				targets: [
+					{
+						...target,
+						state: "candidate",
+						trials: [
+							{
+								...target.trials[0]!,
+								protocol: "analog-fm",
+								decoder: "live-audio",
+								mode: "nfm",
+								transport: "ambient",
+								outcome: "heard",
+							},
+							{
+								...target.trials[0]!,
+								protocol: "dpmr",
+								decoder: "dsd-fme",
+								mode: "dpmr",
+								transport: "replay",
+								outcome: "no-sync",
+							},
+						],
+					},
+				],
+			},
+		})
+		expect(parsed?.identify?.targets[0]?.trials.map(t => t.outcome)).toEqual([
+			"heard",
+			"no-sync",
+		])
+		expect(parsed?.identify?.targets[0]?.trials[1]?.transport).toBe("replay")
+		expect(parsed?.progress.probes[0]?.transport).toBe("replay")
+	})
+
+	it("still refuses an unknown trial outcome or transport", () => {
+		const target = SCAN_JOB.identify!.targets[0]!
+		for (const trial of [
+			{ ...target.trials[0]!, outcome: "identified" },
+			{ ...target.trials[0]!, transport: "stream" },
+		])
+			expect(
+				guardScan("job", {
+					...wire(),
+					identify: {
+						...wire().identify,
+						targets: [{ ...target, trials: [trial] }],
+					},
+				}),
+			).toBeUndefined()
+	})
 })
 
 it("keeps whole-window and optional-width identify requests inspectable, but cannot attribute them to exact-width submission", async () => {

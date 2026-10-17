@@ -54,6 +54,42 @@ export const SourceScannerConfigSchema = z.object({
 })
 
 /**
+ * WG11 req 4.1: the receiver gain this rtl_tcp source should come up with, written on every new
+ * connection unless the REST API or the relay set a value in this process. `manual` needs
+ * `gainDb` (0 to 50 dB, 0.1 dB steps); `agc` refuses it. `agcMode` is the RTL2832 digital AGC.
+ */
+export const SourceTunerConfigSchema = z
+	.object({
+		gainMode: z.enum(["manual", "agc"]),
+		gainDb: z
+			.number()
+			.finite()
+			.min(0)
+			.max(50)
+			.refine(
+				v => Math.abs(v * 10 - Math.round(v * 10)) < 1e-6,
+				"gainDb must be a multiple of 0.1 dB",
+			)
+			.optional(),
+		agcMode: z.boolean().optional(),
+	})
+	.strict()
+	.superRefine((v, ctx) => {
+		if (v.gainMode === "manual" && v.gainDb === undefined)
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["gainDb"],
+				message: "gainDb is required when gainMode is manual",
+			})
+		if (v.gainMode === "agc" && v.gainDb !== undefined)
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["gainDb"],
+				message: "gainDb is not allowed when gainMode is agc",
+			})
+	})
+
+/**
  * Schema for SDR source configuration.
  * Supports rtl_tcp, SDR++ network sink, and recording sources.
  */
@@ -93,6 +129,8 @@ export const SourceConfigSchema = z.object({
 		.optional(),
 	/** Scanner role and passive discovery for this source (default shared, passive). */
 	scanner: SourceScannerConfigSchema.optional(),
+	/** WG11: configured gain written on connect (rtl_tcp only; absent: nothing is written). */
+	tuner: SourceTunerConfigSchema.optional(),
 })
 
 /**
@@ -517,6 +555,11 @@ export const ScannerConfigSchema = z
 				enabled: z.boolean().default(true),
 				/** Pre-channelizer offset probes for passive jobs (each costs a full-rate chain). */
 				offsetProbes: z.boolean().default(false),
+				/**
+				 * WG11 req 2.1: passive is disabled above this spectrum engine utilization (fraction of
+				 * one core). Config only; absent means 0.25, so the parsed config is unchanged.
+				 */
+				maxEngineUtilization: z.number().finite().min(0.05).max(1).optional(),
 			})
 			.default({}),
 		cpuBudgetCores: z.number().finite().min(0.1).max(64).default(1),
@@ -612,6 +655,23 @@ export const ScannerConfigSchema = z
 					.optional(),
 			})
 			.default({}),
+		/**
+		 * WG11 req 6.1: narrowband IQ capture on detection, replayed into identify. Config only,
+		 * protected access mode only; absent means off, so the parsed config is unchanged.
+		 */
+		iqCapture: z
+			.object({
+				enabled: z.boolean().default(false),
+				/** Total capture storage (IQ_CAPTURE_TOTAL_MAX_BYTES = 256 MiB at most). */
+				maxTotalMb: z.number().int().min(16).max(256).default(256),
+				/** One capture, pre-roll included (IQ_CAPTURE_MAX_MS). */
+				maxCaptureMs: z.number().int().min(500).max(4000).default(4000),
+				/** Pre-roll before the track start (IQ_CAPTURE_PREROLL_MAX_MS, the native ring). */
+				preRollMs: z.number().int().min(0).max(2000).default(500),
+				binaryPath: z.string().min(1).default("wavekit-iqcap"),
+			})
+			.strict()
+			.optional(),
 	})
 	.superRefine((value, ctx) => {
 		if (value.hold.preRollMs > value.ringSeconds * 1000) {
@@ -830,6 +890,7 @@ export const ConfigSchema = z
 
 export type SourceCaps = z.infer<typeof SourceCapsSchema>
 export type SourceConfig = z.infer<typeof SourceConfigSchema>
+export type SourceTunerConfig = z.infer<typeof SourceTunerConfigSchema>
 export type DecoderCaps = z.infer<typeof DecoderCapsSchema>
 export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>

@@ -170,8 +170,11 @@ export interface TunerConfigUpdate extends Partial<
 	>
 > {}
 
-/** Who issued a tuner write: the REST API, the scanner, or reconnect replay. */
-export type TunerCommandOrigin = "rest" | "scanner" | "replay"
+/**
+ * Who issued a tuner write: the REST API, the scanner, or reconnect replay. WG11 req 4.2:
+ * `config` = the source's configured gain, gain mode or AGC written on a new connection.
+ */
+export type TunerCommandOrigin = "rest" | "scanner" | "replay" | "config"
 
 /** `tuner:command-sent` on the `tuner` channel. */
 export interface TunerCommandSentEventData {
