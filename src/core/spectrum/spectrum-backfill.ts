@@ -5,9 +5,12 @@
  * BlockSummary.bins is a fresh array per summary (pipeline.summary) and postMessage clones it
  * on the worker path. Nothing writes those arrays afterwards, so the ring keeps the reference.
  */
-import type { SpectrumFrameEventData } from "@wavekit/api-types"
+import type {
+	SpectrumFrameEventData,
+	SpectrumFrameTrack,
+} from "@wavekit/api-types"
 import type { EngineEpoch } from "./spectrum-engine.js"
-import type { BlockSummary } from "./types.js"
+import type { BlockSummary, BlockTrack } from "./types.js"
 import { BACKFILL_LIMITS } from "./subscribe-options.js"
 import type { TuningTrust } from "./types.js"
 import { averagingOf, type SpectrumProfile } from "./spectrum-averaging.js"
@@ -40,6 +43,11 @@ export interface BackfillBuild {
 	integrationMs: number
 	sampleRateHz: number
 	fftSize: number
+	/**
+	 * WG11 req 5.2: the frame tracks of a replayed summary (its recorded fields plus the scanner
+	 * identity looked up when sent). Absent: the summary's tracks as they are.
+	 */
+	tracks?: (tracks: BlockTrack[]) => SpectrumFrameTrack[]
 }
 
 /** `ceil(maxMs / integrationMs) + 1` summaries: a full window plus the snapshot summary. */
@@ -146,6 +154,7 @@ function frameFromRun(
 	bins: ArrayLike<number>,
 	trust: TuningTrust,
 	backfill: boolean,
+	tracks: ((tracks: BlockTrack[]) => SpectrumFrameTrack[]) | undefined,
 ): SpectrumFrameEventData {
 	const summary = run.newest.summary
 	return {
@@ -163,7 +172,7 @@ function frameFromRun(
 		binEncoding: BIN_ENCODING,
 		floorDbfs: summary.floorDbfs,
 		thresholdDb: summary.thresholdDb,
-		tracks: summary.tracks,
+		tracks: tracks ? tracks(summary.tracks) : summary.tracks,
 		masks: summary.masks,
 		...(backfill ? { backfill: true as const } : {}),
 		at: new Date(run.newest.atMs).toISOString(),
@@ -177,6 +186,7 @@ function framesFromRuns(
 	sampleRateHz: number,
 	fftSize: number,
 	backfill: boolean,
+	tracks?: (tracks: BlockTrack[]) => SpectrumFrameTrack[],
 ): SpectrumFrameEventData[] {
 	const built = runs.map(run => holdRun(run, profile))
 	const n = averagingOf(profile)
@@ -200,6 +210,7 @@ function framesFromRuns(
 			bins,
 			trust,
 			backfill,
+			tracks,
 		)
 	})
 }
@@ -234,6 +245,7 @@ export function buildBackfillFrames(
 			req.sampleRateHz,
 			req.fftSize,
 			true,
+			req.tracks,
 		),
 	)
 }

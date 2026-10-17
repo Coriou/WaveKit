@@ -15,6 +15,7 @@ import type { Segment } from "./segmenter.js"
 import type { PersistentFeature } from "../retune-alarm.js"
 import { frameTrust } from "../retune-settle.js"
 import type { ImageCandidate } from "./iq-image.js"
+import type { TrackAssociation } from "../frame-tracks.js"
 
 /**
  * Per-epoch emission tracks (spec §4.2, §6.2): matches each block's segments to open tracks by bin
@@ -142,6 +143,28 @@ interface OpenTrack {
 	flags: TrackFlags
 	flagsChanged: boolean
 	justOpened: boolean
+	/**
+	 * WG11 req 5.1: the frame chain this track continues after a max-duration rollover (null: the
+	 * track starts its chain). Frame-only state: never in a TrackSnapshot or a tracker event.
+	 */
+	chain: ChainBase | null
+}
+
+/**
+ * The part of a frame chain before its current track (WG11 req 5.1): the chain's first tracker
+ * id and start, and the predecessors' totals without the rollover block (that block is counted
+ * by the current track, which re-opens on the same segment of the same block).
+ */
+interface ChainBase {
+	id: string
+	startSample: number
+	blocks: number
+	bandLinSum: number
+	floorLinSum: number
+	peakDbfs: number
+	maxBlockSnrDb: number
+	spur: boolean
+	iqImage: boolean
 }
 
 export class Tracker {
@@ -157,6 +180,11 @@ export class Tracker {
 		verifiedFromSample: null,
 	}
 	private readonly updateEvery: number
+	/**
+	 * WG11 req 5.1: this block's segment → track decisions (matched, opened or re-opened at
+	 * max-duration). Rebuilt by every `block()`; read by the pipeline's summary of that block.
+	 */
+	private readonly assoc = new Map<Segment, OpenTrack>()
 
 	constructor(private readonly opts: TrackerOptions) {
 		this.updateEvery = Math.max(1, Math.round(1000 / opts.blockMs))
@@ -210,6 +238,7 @@ export class Tracker {
 		)
 		const events: PipelineEvent[] = []
 		const matched = new Set<OpenTrack>()
+		this.assoc.clear()
 		const order = segments
 			.map((_, i) => i)
 			.sort((x, y) => (segments[y]?.peakDb ?? 0) - (segments[x]?.peakDb ?? 0))
@@ -220,6 +249,7 @@ export class Tracker {
 			if (t) {
 				matched.add(t)
 				this.extend(t, s, b, n)
+				this.assoc.set(s, t)
 				continue
 			}
 			if (b.gap) continue
@@ -234,6 +264,7 @@ export class Tracker {
 			}
 			const nt = this.openTrack(s, b, n, blockSamples)
 			matched.add(nt)
+			this.assoc.set(s, nt)
 			events.push({ kind: "track-open", track: this.snapshot(nt, n) })
 		}
 		for (const t of [...this.open]) {
@@ -252,6 +283,9 @@ export class Tracker {
 				events.push(this.close(t, "max-duration", n))
 				const nt = this.openTrack(seg, b, n, blockSamples)
 				nt.justOpened = false
+				nt.chain = chainBaseOf(t, nt)
+				// the segment now belongs to the successor (same block, fresh id)
+				if (this.assoc.get(seg) === t) this.assoc.set(seg, nt)
 				events.push({ kind: "track-open", track: this.snapshot(nt, n) })
 				continue
 			}
@@ -265,6 +299,31 @@ export class Tracker {
 			}
 		}
 		return events
+	}
+
+	/**
+	 * WG11 req 5.1: the tracker's own decision for `s` in the last `block()` (no geometry): the
+	 * associated track's state as of now, or null for a segment it did not associate (a gap
+	 * block, a transient, a segment of an earlier block). Call before the next `block()`.
+	 */
+	associationOf(s: Segment): TrackAssociation | null {
+		const t = this.assoc.get(s)
+		if (t === undefined || t.lastOnBlock !== this.blockNo) return null
+		const c = chainTotalsOf(t)
+		return {
+			trackId: c.id,
+			trackerId: t.id,
+			snrDb: snrDbOf(c.bandLinSum, c.floorLinSum, c.blocks),
+			peakDbfs: c.peakDbfs,
+			blocks: c.blocks,
+			startSample: c.startSample,
+			lastSample: t.lastSample,
+			maxBlockSnrDb: c.maxBlockSnrDb,
+			thresholdDb: t.thresholdDb,
+			spur: c.spur,
+			iqImage: c.iqImage,
+			burst: t.flags.burst,
+		}
 	}
 
 	closeAll(reason: ObservationEndReason): PipelineEvent[] {
@@ -421,6 +480,7 @@ export class Tracker {
 			},
 			flagsChanged: false,
 			justOpened: true,
+			chain: null,
 		}
 		this.open.push(t)
 		this.extend(t, s, b, n)
@@ -548,7 +608,6 @@ export class Tracker {
 		const f = this.features(t)
 		const blocks = Math.max(1, t.blocks)
 		const bandMean = t.bandLinSum / blocks
-		const floorMean = t.floorLinSum / blocks
 		const snap: TrackSnapshot = {
 			trackId: t.id,
 			sourceId: this.opts.sourceId,
@@ -561,11 +620,7 @@ export class Tracker {
 			obwMethod: useDb ? "-20dB" : "on-bins",
 			peakDbfs: t.peakDbfs,
 			meanDbfs: 10 * Math.log10(Math.max(bandMean, 1e-30)),
-			snrDb:
-				10 *
-				Math.log10(
-					Math.max(bandMean - floorMean, 1e-30) / Math.max(floorMean, 1e-30),
-				),
+			snrDb: trackSnrDb(t),
 			floorDbfs: t.floorDbSum / blocks,
 			thresholdDb: t.thresholdDb,
 			blocks: t.blocks,
@@ -583,5 +638,69 @@ export class Tracker {
 		if (f.acf30 !== undefined) snap.acf30 = f.acf30
 		if (f.acf60 !== undefined) snap.acf60 = f.acf60
 		return snap
+	}
+}
+
+/** The snapshot's SNR: mean band power over mean floor power across the track's blocks, dB. */
+function trackSnrDb(t: OpenTrack): number {
+	return snrDbOf(t.bandLinSum, t.floorLinSum, t.blocks)
+}
+
+function snrDbOf(bandLinSum: number, floorLinSum: number, n: number): number {
+	const blocks = Math.max(1, n)
+	const bandMean = bandLinSum / blocks
+	const floorMean = floorLinSum / blocks
+	return (
+		10 *
+		Math.log10(
+			Math.max(bandMean - floorMean, 1e-30) / Math.max(floorMean, 1e-30),
+		)
+	)
+}
+
+/**
+ * WG11 req 5.1: a track's frame chain totals (its own state on top of its chain base). SNR is
+ * the chain's mean band over mean floor and the peak and best block SNR its maxima, like the
+ * lifetime mean / max of a single track; spur and image are sticky across the chain.
+ */
+function chainTotalsOf(t: OpenTrack): ChainBase {
+	const c = t.chain
+	if (c === null)
+		return {
+			id: t.id,
+			startSample: t.startSample,
+			blocks: t.blocks,
+			bandLinSum: t.bandLinSum,
+			floorLinSum: t.floorLinSum,
+			peakDbfs: t.peakDbfs,
+			maxBlockSnrDb: t.maxBlockSnrDb,
+			spur: t.flags.spur,
+			iqImage: t.flags.iqImage,
+		}
+	return {
+		id: c.id,
+		startSample: c.startSample,
+		blocks: c.blocks + t.blocks,
+		bandLinSum: c.bandLinSum + t.bandLinSum,
+		floorLinSum: c.floorLinSum + t.floorLinSum,
+		peakDbfs: Math.max(c.peakDbfs, t.peakDbfs),
+		maxBlockSnrDb: Math.max(c.maxBlockSnrDb, t.maxBlockSnrDb),
+		spur: c.spur || t.flags.spur,
+		iqImage: c.iqImage || t.flags.iqImage,
+	}
+}
+
+/**
+ * The chain base of `next`, which re-opened at max-duration on the segment and block that also
+ * extended `prev`: prev's chain totals minus next's own (that one shared block), so the block
+ * is counted once.
+ */
+function chainBaseOf(prev: OpenTrack, next: OpenTrack): ChainBase {
+	const p = chainTotalsOf(prev)
+	return {
+		...p,
+		blocks: Math.max(0, p.blocks - next.blocks),
+		bandLinSum: Math.max(0, p.bandLinSum - next.bandLinSum),
+		floorLinSum: Math.max(0, p.floorLinSum - next.floorLinSum),
 	}
 }

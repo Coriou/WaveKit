@@ -7,7 +7,8 @@
  * (non-finite, out of the int16 range, off the 0.5 dB grid, or -0) keeps today's
  * number[]. Pure functions, O(bins), single pass.
  */
-import type { PipelineEvent } from "./types.js"
+import { sanitizeBlockTrack } from "./frame-tracks.js"
+import type { BlockSummary, BlockTrack, PipelineEvent } from "./types.js"
 
 /** The only wire encoding the host accepts (the flag on a wire block-summary event). */
 export const SUMMARY_BINS_ENCODING = "i16-half-db" as const
@@ -80,6 +81,7 @@ export function decodeEventsFromWire(events: PipelineEvent[]): void {
 	for (let i = 0; i < events.length; i++) {
 		const ev = events[i]
 		if (ev?.kind !== "block-summary") continue
+		sanitizeSummaryTracks(ev.summary)
 		const wire = ev as Partial<WireBlockSummaryEvent>
 		if (!wire.binsI16 || !ev.summary) continue
 		ev.summary.bins = decodeSummaryBins(wire.binsI16)
@@ -87,6 +89,18 @@ export function decodeEventsFromWire(events: PipelineEvent[]): void {
 		delete wire.binsI16
 		delete wire.binCount
 	}
+}
+
+/**
+ * WG11 req 5.1/5.5: the frame-track fields of a summary from the worker, bounded in place
+ * (frame-tracks.ts `sanitizeBlockTrack`): a malformed field is dropped, never the summary.
+ * O(tracks); non-object tracks are left to the frame guard as today.
+ */
+export function sanitizeSummaryTracks(summary: BlockSummary | undefined): void {
+	const tracks = (summary as { tracks?: unknown } | undefined)?.tracks
+	if (!Array.isArray(tracks)) return
+	for (const t of tracks as unknown[])
+		if (typeof t === "object" && t !== null) sanitizeBlockTrack(t as BlockTrack)
 }
 
 /**
