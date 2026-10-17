@@ -506,6 +506,8 @@ export interface SnapshotWorkerOptions {
 	/** Charged bytes of unacknowledged worker messages (default 16 MiB). */
 	maxQueuedBytes?: number
 	commitTimeoutMs?: number
+	/** How long a failed worker may take to exit before its snapshot falls back anyway (10 s). */
+	terminateWaitMs?: number
 	heapMb?: number
 }
 
@@ -845,6 +847,9 @@ export class ScannerPersistence {
 					: {}),
 				...(o.commitTimeoutMs !== undefined
 					? { commitTimeoutMs: o.commitTimeoutMs }
+					: {}),
+				...(o.terminateWaitMs !== undefined
+					? { terminateWaitMs: o.terminateWaitMs }
 					: {}),
 				...(o.heapMb !== undefined ? { heapMb: o.heapMb } : {}),
 			})

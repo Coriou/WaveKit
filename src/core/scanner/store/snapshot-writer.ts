@@ -34,6 +34,12 @@ export const MESSAGE_OVERHEAD_BYTES = 256
 /** Charged bytes of unacknowledged messages past which the mirror goes stale (not queued further). */
 export const DEFAULT_SNAPSHOT_QUEUE_BYTES = 16 * 1024 * 1024
 export const DEFAULT_SNAPSHOT_COMMIT_TIMEOUT_MS = 60_000
+/**
+ * A failed worker's snapshot waits for the worker to exit (so no late rename lands after the
+ * fallback), but at most this long: a worker that never exits must not stall the persistence
+ * queue. Past it the worker is abandoned and snapshots stay on the main thread for good.
+ */
+export const DEFAULT_SNAPSHOT_TERMINATE_WAIT_MS = 10_000
 /** Old-space limit of the worker; an out-of-memory worker exits and fails over to the main thread. */
 export const DEFAULT_SNAPSHOT_WORKER_HEAP_MB = 1024
 const WARN_INTERVAL_MS = 3_600_000
@@ -85,6 +91,7 @@ export interface SnapshotWriterOptions {
 	factory?: SnapshotWorkerFactory
 	maxQueuedBytes?: number
 	commitTimeoutMs?: number
+	terminateWaitMs?: number
 	heapMb?: number
 }
 
@@ -128,6 +135,7 @@ export class SnapshotWriter {
 	private readonly factory: SnapshotWorkerFactory
 	private readonly maxQueuedBytes: number
 	private readonly commitTimeoutMs: number
+	private readonly terminateWaitMs: number
 	private readonly heapMb: number
 	private port: SnapshotWorkerPort | null = null
 	/** True while the worker's mirror tracks the store (reset applied in order, nothing dropped). */
@@ -160,6 +168,8 @@ export class SnapshotWriter {
 		this.maxQueuedBytes = opts.maxQueuedBytes ?? DEFAULT_SNAPSHOT_QUEUE_BYTES
 		this.commitTimeoutMs =
 			opts.commitTimeoutMs ?? DEFAULT_SNAPSHOT_COMMIT_TIMEOUT_MS
+		this.terminateWaitMs =
+			opts.terminateWaitMs ?? DEFAULT_SNAPSHOT_TERMINATE_WAIT_MS
 		this.heapMb = opts.heapMb ?? DEFAULT_SNAPSHOT_WORKER_HEAP_MB
 	}
 
@@ -477,14 +487,28 @@ export class SnapshotWriter {
 		const commit = this.commit
 		this.commit = null
 		if (commit !== null) clearTimeout(commit.timer)
-		const settle = (): void =>
+		let settled = false
+		const settle = (): void => {
+			if (settled) return
+			settled = true
 			commit?.resolve({ ok: false, reason: "worker-failed" })
-		if (port !== null)
+		}
+		if (port !== null) {
+			const abandon = setTimeout(() => {
+				// Still running: it may yet rename its own tmp file, so never use a worker again.
+				this.failures = Math.max(this.failures, 2)
+				this.disabled = true
+				settle()
+			}, this.terminateWaitMs)
+			abandon.unref()
 			void port
 				.terminate()
 				.catch(() => undefined)
-				.then(settle)
-		else settle()
+				.then(() => {
+					clearTimeout(abandon)
+					settle()
+				})
+		} else settle()
 		if (this.failures >= 2) {
 			if (!this.disabled)
 				this.log.warn(

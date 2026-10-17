@@ -311,6 +311,7 @@ function wrapped(
 		garbage?: boolean
 		silentCommit?: boolean
 		events?: string[]
+		hangTerminate?: boolean
 	},
 	made: { count: number },
 ) {
@@ -350,6 +351,10 @@ function wrapped(
 				inner.onExit(l)
 			},
 			terminate: async () => {
+				if (mode.hangTerminate === true) {
+					void inner.terminate()
+					return new Promise<never>(() => undefined)
+				}
 				const out = await inner.terminate()
 				if (mode.events !== undefined) {
 					await new Promise(resolve => setTimeout(resolve, 20))
@@ -437,6 +442,27 @@ describe("snapshot worker failures (WG11 req 3.5)", () => {
 			await done
 			expect(events).toEqual(["terminated", "written"])
 			expect(await h.file()).toBe(want)
+		} finally {
+			await h.close()
+		}
+	})
+
+	it("a worker that never exits is abandoned after the terminate wait; the snapshot still lands", async () => {
+		const made = { count: 0 }
+		const h = await harness({
+			factory: wrapped({ silentCommit: true, hangTerminate: true }, made),
+			commitTimeoutMs: 50,
+			terminateWaitMs: 50,
+		})
+		try {
+			h.ops(20)
+			await h.p.writeSnapshotOf(h.store)
+			h.ops(10)
+			const want = h.expected()
+			await h.p.writeSnapshotOf(h.store)
+			expect(await h.file()).toBe(want)
+			expect(h.p.snapshotWorkerStatus()?.state).toBe("disabled")
+			expect(made.count).toBe(1)
 		} finally {
 			await h.close()
 		}
