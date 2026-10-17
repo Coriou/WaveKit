@@ -165,8 +165,8 @@ describe("spectrum of a real core", () => {
 		c.dragPan(-2000, 1000) // two view widths right: 820 kHz, past the frame's edge
 		await c.endPan()
 		// The next frame's middle lands on the dragged view's (447.34542 MHz); the tuned channel
-		// would fall outside the new capture, so its offset stays.
-		expect(calls).toEqual(["retune local-iq 447344920"])
+		// would fall outside the new capture, so it goes to the middle.
+		expect(calls).toEqual(["retune local-iq 447344920", "offset 0"])
 	})
 
 	it("snaps a click on a carrier to the channel it covers", () => {

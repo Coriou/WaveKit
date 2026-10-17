@@ -4,6 +4,8 @@ export const AXIS_CSS = 30
 export const LANES_CSS = 24
 /** The discovery tag row under the lanes (Spectrum board), only while the scanner has something to tag. */
 export const DISCOVERY_ROW_CSS = 20
+/** The band ruler under the lanes and the discovery row (BandRuler.tsx). */
+export const RULER_CSS = 26
 /** The gap the renderer leaves between trace and waterfall for the axis and the lanes. */
 export const GAP_CSS = AXIS_CSS + LANES_CSS
 /** Trace height on a tall plot (Immersive board: 300 px). */

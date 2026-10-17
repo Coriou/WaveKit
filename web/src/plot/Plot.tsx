@@ -60,7 +60,14 @@ import {
 	spectrumLevels,
 } from "../shell/device-prefs.ts"
 import { useDevicePrefs } from "../shell/hooks.ts"
-import { AXIS_CSS, DISCOVERY_ROW_CSS, LANES_CSS, plotLayout } from "./layout.ts"
+import {
+	AXIS_CSS,
+	DISCOVERY_ROW_CSS,
+	LANES_CSS,
+	RULER_CSS,
+	plotLayout,
+} from "./layout.ts"
+import { BandRuler } from "./BandRuler.tsx"
 import { isReadOnly } from "../app/context.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
@@ -235,7 +242,10 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		[controller, capStart, capEnd, tunerCentre],
 	)
 
-	const layout = plotLayout(size.h, discRow ? DISCOVERY_ROW_CSS : 0)
+	const layout = plotLayout(
+		size.h,
+		(discRow ? DISCOVERY_ROW_CSS : 0) + RULER_CSS,
+	)
 	const unverified = shownMeta?.tuningTrust === "unverified"
 
 	const onFrameMeta = (m: SpectrumFrameMeta) => {
@@ -469,6 +479,23 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 					</div>
 				)}
 			</div>
+			{size.w > 0 && view && capture && (
+				<BandRuler
+					data={data}
+					controller={controller}
+					plan={plan}
+					view={view}
+					capture={capture}
+					widthPx={size.w}
+					top={
+						layout.traceCss +
+						AXIS_CSS +
+						LANES_CSS +
+						(discRow ? DISCOVERY_ROW_CSS : 0)
+					}
+					tunedHz={vfoHz}
+				/>
+			)}
 		</div>
 	)
 }

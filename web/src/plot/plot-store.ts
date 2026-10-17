@@ -148,6 +148,8 @@ export class PlotController {
 		lastAt: number
 		timer: unknown
 		failed: boolean
+		/** A retune during the drag left the live channel out of the capture (fixed at the end). */
+		parked: boolean
 	} = {
 		target: null,
 		sent: null,
@@ -155,6 +157,7 @@ export class PlotController {
 		lastAt: -Infinity,
 		timer: null,
 		failed: false,
+		parked: false,
 	}
 	private releaseTimer: unknown = null
 	private seq = 0
@@ -329,6 +332,13 @@ export class PlotController {
 		this.slideTo(shiftSpan(pan.start, deltaHz), true)
 	}
 
+	/** During a press or drag on the band ruler: the view's centre goes to `hz`, the receiver follows. */
+	centreAt(hz: number): void {
+		const pan = this.pan
+		if (!pan) return
+		this.slideTo(shiftSpan(pan.start, hz - spanCentre(pan.start)), true)
+	}
+
 	/**
 	 * Ends a drag. Inside the capture the view simply stays where it was dragged; past it, the last
 	 * retune goes out now and the slid picture holds until frames at the new centre arrive.
@@ -429,6 +439,7 @@ export class PlotController {
 		f.target = null
 		f.sent = centre
 		f.lastAt = this.timers.now()
+		const dragging = this.pan !== null
 		const hardware = this.hardwareCapture()
 		const keep =
 			keepHz !== null && sampleRateHz !== null && hardware
@@ -441,7 +452,12 @@ export class PlotController {
 				: null
 		const run = this.actions
 			.retune(centre, sourceId)
-			.then(() => (keep !== null ? this.actions.setOffset(keep) : undefined))
+			// Out of the new capture, the channel goes to its middle once the drag is over (as tuneTo).
+			.then(() => {
+				f.parked = keep === null && dragging
+				if (keep !== null) return this.actions.setOffset(keep)
+				return dragging ? undefined : this.actions.setOffset(0)
+			})
 			.then(
 				() => undefined,
 				() => {
@@ -479,10 +495,20 @@ export class PlotController {
 			}
 			return Promise.resolve()
 		}
-		return waitAll().then(() => {
-			f.failed = false
-			f.sent = null
-		})
+		return waitAll()
+			.then(() => {
+				const park = f.parked && !f.failed
+				f.parked = false
+				return park ? this.actions.setOffset(0) : undefined
+			})
+			.then(
+				() => undefined,
+				() => undefined,
+			)
+			.then(() => {
+				f.failed = false
+				f.sent = null
+			})
 	}
 
 	private armRelease(): void {

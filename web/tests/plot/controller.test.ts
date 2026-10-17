@@ -224,6 +224,8 @@ describe("PlotController", () => {
 		expect(calls[2]).toBe("retune rtl0 162460000")
 		const done = c.endPan()
 		await done
+		// 161.15 MHz is out of the capture at 162.46: the channel goes to the middle at the end.
+		expect(calls.slice(3)).toEqual(["offset 0"])
 		// Frames at the new centre arrive: the slid view becomes a view of the capture again.
 		expect(c.store.get().free).not.toBeNull()
 		ctx({
@@ -283,6 +285,21 @@ describe("PlotController", () => {
 		expect(c.store.get().free).not.toBeNull()
 		timers.advance(FREE_RELEASE_MS)
 		expect(c.store.get().free).toBeNull()
+	})
+
+	it("the band ruler moves the view's centre anywhere and the receiver follows", async () => {
+		const timers = fakeTimers()
+		const { c, calls } = setupFollowing(timers)
+		c.beginPan()
+		c.centreAt(446_000_000)
+		expect(c.visibleSpan()).toEqual({
+			startHz: 446_000_000 - 1_200_000,
+			endHz: 446_000_000 + 1_200_000,
+		})
+		await c.endPan()
+		expect(calls[0]).toBe("retune rtl0 446000000")
+		// The tuned channel is far outside the new capture: it goes to the middle, as a click there would.
+		expect(calls.slice(1)).toEqual(["offset 0"])
 	})
 
 	it("the horizontal wheel slides past the capture too", async () => {

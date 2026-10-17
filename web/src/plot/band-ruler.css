@@ -1,0 +1,101 @@
+/* The band ruler under the band lanes (BandRuler.tsx). Flat, no glass: it is part of the plot's furniture. */
+@layer wk-app {
+	.wk-ruler {
+		position: absolute;
+		/* The ruler sits beside the plot body: offset by the body's own top. */
+		margin-top: var(--wk-plot-inset-top, 84px);
+		left: 0;
+		right: 0;
+		height: 26px;
+		box-sizing: border-box;
+		border-bottom: 1px solid rgba(var(--wk-line-rgb), 0.08);
+		background: var(--wk-plot-bg);
+		overflow: hidden;
+		cursor: pointer;
+		touch-action: none;
+		isolation: isolate;
+	}
+	.wk-ruler[data-pressed] {
+		cursor: grabbing;
+	}
+	.wk-ruler > i {
+		position: absolute;
+		display: block;
+		pointer-events: none;
+	}
+	.wk-ruler > i[title] {
+		pointer-events: auto;
+	}
+	.wk-ruler-band {
+		bottom: 3px;
+		height: 3px;
+		border-radius: 1px;
+		opacity: 0.55;
+	}
+	.wk-ruler-band[data-depth="1"] {
+		bottom: 7px;
+		opacity: 0.8;
+	}
+	.wk-ruler-tick {
+		position: absolute;
+		top: 2px;
+		transform: translateX(-50%);
+		font-size: 10px;
+		line-height: 12px;
+		color: var(--wk-text-4);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		pointer-events: none;
+	}
+	.wk-ruler-found,
+	.wk-ruler-saved {
+		bottom: 3px;
+		width: 2px;
+		margin-left: -1px;
+		border-radius: 1px;
+	}
+	.wk-ruler-found {
+		height: 7px;
+		background: rgba(var(--wk-ink-3-rgb), 0.7);
+	}
+	.wk-ruler-saved {
+		height: 11px;
+		background: var(--wk-accent);
+	}
+	.wk-ruler-capture {
+		top: 1px;
+		bottom: 1px;
+		min-width: 2px;
+		box-sizing: border-box;
+		border: 1px dashed rgba(var(--wk-line-rgb), 0.35);
+		border-radius: 3px;
+	}
+	.wk-ruler-view {
+		top: 1px;
+		bottom: 1px;
+		min-width: 3px;
+		box-sizing: border-box;
+		border: 1px solid rgba(var(--wk-accent-rgb), 0.75);
+		border-radius: 3px;
+		background: rgba(var(--wk-accent-rgb), 0.14);
+	}
+	.wk-ruler-tuned {
+		top: 0;
+		bottom: 0;
+		width: 1px;
+		background: var(--wk-text);
+		opacity: 0.7;
+	}
+	.wk-ruler-span {
+		position: absolute;
+		right: 6px;
+		top: 2px;
+		padding: 0 4px;
+		font-size: 10px;
+		line-height: 12px;
+		color: var(--wk-text-4);
+		background: var(--wk-plot-bg);
+		border-radius: 3px;
+		z-index: 1;
+	}
+}
