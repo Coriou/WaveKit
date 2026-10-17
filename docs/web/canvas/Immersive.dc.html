@@ -40,7 +40,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 <div ref="{{refs.root}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: relative; height: 100vh; min-height: 760px; background: var(--wk-plot-bg); color: var(--wk-text); font-family: var(--wk-font-ui); overflow: hidden">
 	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
 	<div style="position: absolute; inset: 0">
-		<dc-import name="Spectrum" on-settings="{{openSetting}}" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" scan="{{specScan}}" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
+		<dc-import name="Spectrum" on-settings="{{openSetting}}" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" scan="{{specScan}}" on-scan-range="{{scanRange}}" listening="{{sigListening}}" on-signal-action="{{sigAction}}" hint-size="100%,100%"></dc-import>
 
 		<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; inset: 0; z-index: 1">
@@ -381,6 +381,15 @@ class Component extends DCLogic {
 			else if (id === 'copy') this.commit(null, 'Copied ' + (f / 1e6).toFixed(f % 1000 ? 4 : 3));
 			// 'identify' and 'pin' are handled inside the card
 			else if (id === 'save' && !this.state.saved.some(x => x.f === f)) this.commit({ saved: this.state.saved.concat([{ f, label: DETECTED[f] || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' MHz');
+		};
+		// the spectrum's right-click menu: its rows run what ⌘K and the card run (the plot has already tuned when it had to)
+		this.sigAction = a => {
+			const fv = (a.hz / 1e6).toFixed(3);
+			if (a.kind === 'identify') this.identify(a.hz);
+			else if (a.kind === 'listen') this.setState({ listening: true });
+			else if (a.kind === 'activity') this.cardAction('activity', a.hz);
+			else if (a.kind === 'copy') this.commit(null, 'Copied ' + fv);
+			else if (a.kind === 'save' && !this.state.saved.some(x => x.f === a.hz)) this.commit({ saved: this.state.saved.concat([{ f: a.hz, label: a.name, group: a.group, mode: this.state.mode, bw: this.state.bw }]) }, 'Saved “' + a.name + '” in ' + a.group);
 		};
 		this.setSource = src => this.setState({ source: src });
 		this.setWatch = on => this.setState({ watchOn: on });
@@ -801,6 +810,7 @@ class Component extends DCLogic {
 			discs, hold, stage,
 			scannerSweep: hold || (sw ? sw : { state: 'watching', preset: 'This span', startHz: s.freq - capHz / 2, endHz: s.freq + capHz / 2, hop: 1, hops: 1, sweepS: 0, coverage: 100 }),
 			scanAction: this.scanAction, identify: this.identify,
+			sigAction: this.sigAction, sigListening: !!s.listening,
 			idRun: base.idRun || 0,
 			scanHold: live,
 			// the card hides while the sweep moves; on a hit it is that signal's card, "Held by the scan" (the frequency shows top right)

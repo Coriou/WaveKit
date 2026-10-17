@@ -913,8 +913,11 @@ Condensed + Noto Sans, Tabler-based icons).
   picker and jump-to-time, bulk actions (export, copy, audio clip). Columns pane: whether a
   column can have its own Live/Pause and audio follow (auto-play new calls in one column only);
   whether Recordings wants the pane (a player and trim beside the list?).
-- Right-click menus on signals (Listen, Decode as…, Save). Should reuse palette
-  commands so both stay in sync.
+- Right-click menus on signals: drawn 2026-10-17 on the Spectrum board (tweak `signalMenu`),
+  from the web app's menu: the frequency and channel on a quiet first line, Identify (`I`),
+  Decode as… (a list of the 14 protocols the core can probe, with their decoder, and Back),
+  Listen here / Tune here / Listen, Save frequency (suggested group), Show in Activity, Copy
+  frequency; read-only keeps the last two. Rows run the palette's actions, tuning there first.
 - Tuned card placement: answered 2026-10-11 (drag by the type tile, magnetic snap to
   anchors). Pinning a second card to watch another frequency is not planned.
 - Palette follow-ups: should tuning previews retune the hardware (as drawn) or show a

@@ -22,7 +22,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 </helmet>
 <div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--wk-plot-bg); color: var(--wk-text); font-family: var(--wk-font-ui); overflow: hidden; user-select: none; touch-action: none">
 	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
-	<div ref="{{refs.box}}" onPointerDown="{{onDown}}" onPointerMove="{{onMove}}" onPointerUp="{{onUp}}" onPointerCancel="{{onUp}}" onPointerLeave="{{onLeave}}" style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; cursor: {{cursor}}">
+	<div ref="{{refs.box}}" onContextMenu="{{onCtx}}" onPointerDown="{{onDown}}" onPointerMove="{{onMove}}" onPointerUp="{{onUp}}" onPointerCancel="{{onUp}}" onPointerLeave="{{onLeave}}" style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; cursor: {{cursor}}">
 		<div style="height: {{topInset}}px; flex: none"></div>
 		<div style="position: relative; height: {{specH}}px; flex: none">
 			<canvas ref="{{refs.spec}}" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block"></canvas>
@@ -44,7 +44,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			</sc-if>
 			<sc-for list="{{markers}}" as="m" hint-placeholder-count="4">
 				<div style="position: absolute; left: {{m.left}}%; top: {{m.top}}px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center">
-					<button class="wk-sig" onPointerDown="{{stop}}" onClick="{{m.pick}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 8px; border-radius: 6px; background: var(--wk-glass-strong); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi); color: var(--wk-text); font-size: 12px; white-space: nowrap">
+					<button class="wk-sig" onPointerDown="{{stop}}" onClick="{{m.pick}}" onContextMenu="{{m.ctx}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px 0 8px; border-radius: 6px; background: var(--wk-glass-strong); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi); color: var(--wk-text); font-size: 12px; white-space: nowrap">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 						<span style="font-weight: 700">{{m.label}}</span>
 						<sc-if value="{{m.hasSub}}" hint-placeholder-val="{{true}}"><span style="color: var(--wk-text-3)">{{m.sub}}</span></sc-if>
@@ -136,10 +136,25 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				<span class="wk-hover" style="position: absolute; top: {{hoverTagTop}}px; left: 0; transform: translateX(-50%); height: 20px; line-height: 20px; padding: 0 8px; border-radius: 4px; background: var(--wk-fill); border: 1px solid var(--wk-line-14); font-size: 11px; z-index: 1; white-space: nowrap; font-variant-numeric: tabular-nums">{{hoverText}}</span>
 			</div>
 		</sc-if>
+		<sc-if value="{{menuOn}}" hint-placeholder-val="{{false}}">
+			<div onPointerDown="{{stop}}" onContextMenu="{{noCtx}}" style="position: absolute; left: {{menuX}}px; top: {{menuY}}px; width: 0; height: 0; z-index: 3">
+				<div ref="{{refs.menu}}" class="wk-menu" role="menu" aria-label="{{menuLabel}}" onKeyDown="{{menuKey}}" style="position: absolute; left: {{menuL}}; right: {{menuR}}; top: {{menuT}}; bottom: {{menuB}}; min-width: 248px; max-height: {{menuMaxH}}px; display: flex; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; cursor: default; background: var(--wk-glass-strong)">
+					<div aria-hidden="true" style="padding: 4px 10px 6px; font-size: var(--wk-fs-xs); font-variant-numeric: tabular-nums; color: var(--wk-text-3); white-space: nowrap">{{menuHead}}</div>
+					<sc-for list="{{menuRows}}" as="m" hint-placeholder-count="6">
+						<button class="wk-option" role="menuitem" onClick="{{m.pick}}" style="flex: none; white-space: nowrap">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+							<span style="flex: 1">{{m.label}}</span>
+							<sc-if value="{{m.hasHint}}" hint-placeholder-val="{{false}}"><span style="font-size: var(--wk-fs-xs); color: var(--wk-text-3)">{{m.hint}}</span></sc-if>
+							<sc-if value="{{m.hasKey}}" hint-placeholder-val="{{false}}"><kbd class="wk-kbd">{{m.key}}</kbd></sc-if>
+						</button>
+					</sc-for>
+				</div>
+			</div>
+		</sc-if>
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match"},"paperRamp":{"editor":"enum","options":["a","b","c"],"default":"a","section":"Theme"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"discoveries":{"editor":null},"discoveryTags":{"editor":"enum","options":["all","decoded","off"],"default":"all"},"trust":{"editor":"enum","options":["ok","unverified"],"default":"ok"},"onView":{"editor":null},"onScanRange":{"editor":null},"scan":{"editor":null},"scanDemo":{"editor":"enum","options":["off","watch","watch-hit","sweep"],"default":"off"},"$preview":{"width":1440,"height":640}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["match","amber","mono","classic"],"default":"match"},"paperRamp":{"editor":"enum","options":["a","b","c"],"default":"a","section":"Theme"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"discoveries":{"editor":null},"discoveryTags":{"editor":"enum","options":["all","decoded","off"],"default":"all"},"trust":{"editor":"enum","options":["ok","unverified"],"default":"ok"},"onView":{"editor":null},"onScanRange":{"editor":null},"scan":{"editor":null},"scanDemo":{"editor":"enum","options":["off","watch","watch-hit","sweep"],"default":"off"},"signalMenu":{"editor":"enum","options":["off","open","decode as","read-only"],"default":"off"},"listening":{"editor":null,"tsType":"boolean"},"readOnly":{"editor":null,"tsType":"boolean"},"onSignalAction":{"editor":null},"$preview":{"width":1440,"height":640}}'>
 const BINS = 4096, HIST = 900, RATE = 24, MIN_SPAN = 100e3, LO = 24e6, HI = 1.9e9;
 const ICON = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
@@ -152,6 +167,18 @@ const ICON = {
 	aviation: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2'],
 	mesh: ['m10.82 7.2 -5.14 9.6M13.18 7.2l5.14 9.6M7 19h10', 'M9.5 5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M2 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M17 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0']
 };
+// right-click signal menu (web: plot/signal-menu.ts): row icons, and the protocols Decode as… can probe with their decoder
+const SM_ICON = {
+	identify: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'],
+	listen: ['M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z', 'M15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z', 'M4 15v-3a8 8 0 0 1 16 0v3'],
+	tune: ['M5 12h14', 'M13 18l6 -6', 'M13 6l6 6'],
+	save: ['M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z'],
+	activity: ['M3 12h4l3 8l4 -16l3 8h4'],
+	copy: ['M8 10a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z', 'M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2'],
+	back: ['M15 6l-6 6l6 6']
+};
+const DECODE_AS = [['dmr', 'DMR', 'dsd-fme'], ['p25p1', 'P25', 'dsd-fme'], ['p25p2', 'P25 Phase 2', 'dsd-fme'], ['nxdn48', 'NXDN', 'dsd-fme'], ['nxdn96', 'NXDN 96', 'dsd-fme'], ['ysf', 'YSF', 'dsd-fme'], ['dstar', 'D-STAR', 'dsd-fme'], ['dpmr', 'dPMR', 'dsd-fme'], ['pocsag', 'POCSAG', 'multimon-ng'], ['flex', 'FLEX', 'multimon-ng'], ['aprs', 'APRS', 'Direwolf'], ['ism', 'ISM sensors', 'rtl_433'], ['analog-fm', 'FM voice', 'voice detection'], ['analog-am', 'AM voice', 'voice detection']];
+const SM_W = 248, SM_H = 300;
 const SIG = [
 	// FM broadcast: wide, always on, no decoder (audio only)
 	{ f: 88.600e6, bw: 180e3, p: -60, kind: 'wfm' },
@@ -351,6 +378,7 @@ class Component extends DCLogic {
 				this.measureBox();
 			},
 			spec: el => { this.specEl = el; },
+			menu: el => { this.menuEl = el; },
 			wf: el => { this.wfEl = el; }
 		};
 		this.frame = this.frame.bind(this);
@@ -359,6 +387,8 @@ class Component extends DCLogic {
 		this.grabVfo = grab('vfo'); this.grabL = grab('edge'); this.grabR = grab('edge');
 		this.onDown = e => {
 			if (e.button !== 0 || !this.boxEl) return;
+			// a press beside an open menu only closes it
+			if (this.menuNow()) { this.closeMenu(); return; }
 			// Shift-drag marks a range to scan; any other press clears a marked one
 			if (!this.drag && e.shiftKey) this.drag = { kind: 'range', x: e.clientX, moved: false, f0: this.fAt(e.clientX) };
 			else if (this.state.rsel) this.setState({ rsel: null });
@@ -409,7 +439,7 @@ class Component extends DCLogic {
 			const range = { startHz: r.a, endHz: r.b };
 			if (this.props.onScanRange) this.props.onScanRange(range);
 			clearTimeout(this.sentT);
-			this.setState({ rsel: null, sent: (r.a / 1e6).toFixed(3) + '–' + (r.b / 1e6).toFixed(3) });
+			this.setState({ toast: null, rsel: null, sent: (r.a / 1e6).toFixed(3) + '–' + (r.b / 1e6).toFixed(3) });
 			this.sentT = setTimeout(() => this.setState({ sent: null }), 2500);
 		};
 		this.zoomBy = k => {
@@ -422,6 +452,24 @@ class Component extends DCLogic {
 		this.zoomIn = () => this.zoomBy(0.5);
 		this.zoomOut = () => this.zoomBy(2);
 		this.zoomFit = () => { const cap = this.cap(); this.setView(this.state.center - cap / 2, cap); };
+		// right-click (long press on touch) on a signal or its tag: the signal menu at the pointer, on the signal a click would tune
+		this.onCtx = e => {
+			e.preventDefault();
+			if (!this.boxEl || this.drag) return;
+			const r = this.boxEl.getBoundingClientRect();
+			this.menuFocus = true;
+			this.setState({ menu: { hz: this.snapAt(e.clientX), x: e.clientX - r.left, y: e.clientY - r.top, decode: false }, hover: null });
+		};
+		this.noCtx = e => { e.preventDefault(); e.stopPropagation(); };
+		this.closeMenu = () => this.setState({ menu: null, menuDemoOff: true });
+		this.menuKey = e => {
+			const list = this.menuEl ? Array.from(this.menuEl.querySelectorAll('button')) : [];
+			const at = list.indexOf(document.activeElement);
+			if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.closeMenu(); }
+			else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && list.length) { e.preventDefault(); list[(at + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length].focus(); }
+		};
+		// standalone, the board confirms on its own status chip; in the shell, the app toast does
+		this.note = t => { clearTimeout(this.sentT); this.setState({ sent: null, toast: t }); this.sentT = setTimeout(() => this.setState({ toast: null }), 2500); };
 	}
 	cap() { return this.props.sampleRate ?? 2.4e6; }
 	vfo() { return this.props.vfo ?? this.state.vfo; }
@@ -451,12 +499,62 @@ class Component extends DCLogic {
 		if (this.props.onTune) this.props.onTune(f);
 		else { this.setState({ vfo: f }); this.ensureVisible(f); }
 	}
-	clickTune(x) {
+	// the signal under the pointer, else the nearest tuning step
+	snapAt(x) {
 		const f = this.fAt(x), tol = this.state.viewSpan / 60;
 		let best = null;
 		for (const s of SIG) if (Math.abs(s.f - f) < tol && (!best || Math.abs(s.f - f) < Math.abs(best.f - f))) best = s;
 		const step = this.props.step ?? 12500;
-		this.tuneTo(best ? best.f : Math.round(f / step) * step);
+		return best ? best.f : Math.round(f / step) * step;
+	}
+	clickTune(x) { this.tuneTo(this.snapAt(x)); }
+	// the open menu: one the viewer opened, else the signalMenu tweak's demo on AIS channel A (right of the tuned DMR repeater)
+	menuNow() {
+		if (this.state.menu) return this.state.menu;
+		const d = this.props.signalMenu;
+		if (!d || d === 'off' || this.state.menuDemoOff) return null;
+		return { hz: 161975000, demo: true, decode: d === 'decode as' };
+	}
+	readOnlyNow() { return this.props.readOnly ?? this.props.signalMenu === 'read-only'; }
+	// the menu's first line: the frequency, then the saved name, the plan's channel or the band
+	menuHead(hz) {
+		const sv = (this.props.saved || []).find(x => Math.round(x.f) === Math.round(hz));
+		const ch = CHAN_HZ.find(c => c.f === Math.round(hz)), band = bpBandAt(hz / 1e6);
+		const name = sv ? sv.label : ch ? ch.name : band ? band.name : null;
+		return (hz / 1e6).toFixed(3) + ' MHz' + (name ? ' · ' + name : '');
+	}
+	// rows (web: signal-menu.ts): each runs the same action as ⌘K, tuning there first when it is not the tuned signal
+	menuRows(m) {
+		const hz = m.hz, here = Math.round(this.vfo()) === Math.round(hz), ro = this.readOnlyNow(), listening = !!this.props.listening;
+		const mhz = (hz / 1e6).toFixed(3) + ' MHz';
+		const run = (a, note, keep) => () => {
+			if (!here && !ro && a.kind !== 'activity' && a.kind !== 'copy' && a.kind !== 'save') this.tuneTo(hz);
+			if (this.props.onSignalAction) this.props.onSignalAction(Object.assign({ hz }, a));
+			else if (note) this.note(note);
+			if (!keep) this.closeMenu();
+		};
+		const row = (label, icon, pick, extra) => Object.assign({ label, icon, pick, hasHint: false, hint: '', hasKey: false, key: '' }, extra || {});
+		if (m.decode) {
+			const back = row('Back', SM_ICON.back, () => { this.menuFocus = true; this.setState({ menu: Object.assign({}, m, { decode: false }), menuDemoOff: true }); });
+			return [back].concat(DECODE_AS.map(([id, label, by]) => row(label, SM_ICON.identify, run({ kind: 'identify', protocols: [id] }, 'Trying ' + label + ' on ' + mhz), { hasHint: true, hint: by })));
+		}
+		const rows = [];
+		if (!ro) {
+			rows.push(row('Identify', SM_ICON.identify, run({ kind: 'identify' }, 'Identifying ' + mhz), { hasKey: true, key: 'I' }));
+			rows.push(row('Decode as…', SM_ICON.identify, () => { this.menuFocus = true; this.setState({ menu: Object.assign({}, m, { decode: true }), menuDemoOff: true }); }));
+		}
+		if (!here && !ro) rows.push(row(listening ? 'Tune here' : 'Listen here', listening ? SM_ICON.tune : SM_ICON.listen, run({ kind: listening ? 'tune' : 'listen' }, listening ? 'Tuned to ' + mhz : 'Listening on ' + mhz)));
+		else if (here && !listening) rows.push(row('Listen', SM_ICON.listen, run({ kind: 'listen' }, 'Listening on ' + mhz)));
+		const saved = (this.props.saved || []).some(x => Math.round(x.f) === Math.round(hz));
+		if (!ro && !saved) {
+			const band = bpBandAt(hz / 1e6), ch = CHAN_HZ.find(c => c.f === Math.round(hz));
+			const name = ch ? ch.name : band ? band.name : 'Saved ' + (hz / 1e6).toFixed(3);
+			const group = band && band.group === 'marine' ? 'Marine' : band && band.group === 'air' ? 'Aviation' : 'Local';
+			rows.push(row('Save frequency', SM_ICON.save, run({ kind: 'save', name, group }, 'Saved “' + name + '” in ' + group), { hasHint: true, hint: group }));
+		}
+		rows.push(row('Show in Activity', SM_ICON.activity, run({ kind: 'activity' }, 'Activity opens on ' + mhz)));
+		rows.push(row('Copy frequency', SM_ICON.copy, run({ kind: 'copy' }, 'Copied ' + (hz / 1e6).toFixed(3))));
+		return rows;
 	}
 	hoverAt(x) {
 		if (!this.boxEl) return;
@@ -472,6 +570,7 @@ class Component extends DCLogic {
 	}
 	onWheel(e) {
 		e.preventDefault();
+		if (this.menuNow()) this.closeMenu();
 		const s = this.state;
 		if (e.ctrlKey || e.metaKey) {
 			const f0 = this.fAt(e.clientX), frac = (f0 - s.viewL) / s.viewSpan;
@@ -518,6 +617,9 @@ class Component extends DCLogic {
 	}
 	componentDidUpdate(prev) {
 		this.syncKeyed();
+		if (this.props.signalMenu !== prev.signalMenu) this.setState({ menu: null, menuDemoOff: false });
+		// focus goes to the first row when the menu opens or switches list (arrows move, Esc closes)
+		if (this.menuFocus && this.menuEl) { this.menuFocus = false; const b = this.menuEl.querySelector('button'); if (b) b.focus(); }
 		if (this.props.scanDemo !== prev.scanDemo && this.props.scanDemo && this.props.scanDemo !== 'off' && this.props.scan === undefined) { const c = this.scan(), m = Math.round((c.a + c.b) / 2); this.setView(m - this.cap() / 2, this.cap(), m); }
 		this.emitView();
 		if ((prev.sampleRate ?? 2.4e6) !== this.cap()) {
@@ -795,7 +897,7 @@ class Component extends DCLogic {
 					const r = [px - wd / 2 - 3, top - 2, px + wd / 2 + 3, top + 28];
 					if (clash(r)) continue;
 					taken.push(r);
-					return { left: pct(x.f), top, lead: 10 - dy, label: x.label, sub: x.sub, hasSub, freq: (x.f / 1e6).toFixed(3), icon: ICON[x.cat], border: x.f === vfo ? 'rgba(var(--wk-accent-rgb),.55)' : this.props.theme === 'light' ? 'rgba(var(--wk-line-rgb),.30)' : 'rgba(var(--wk-line-rgb),.14)', pick: e => { e.stopPropagation(); this.tuneTo(x.f); } };
+					return { left: pct(x.f), top, lead: 10 - dy, label: x.label, sub: x.sub, hasSub, freq: (x.f / 1e6).toFixed(3), icon: ICON[x.cat], border: x.f === vfo ? 'rgba(var(--wk-accent-rgb),.55)' : this.props.theme === 'light' ? 'rgba(var(--wk-line-rgb),.30)' : 'rgba(var(--wk-line-rgb),.14)', pick: e => { e.stopPropagation(); this.tuneTo(x.f); }, ctx: e => { e.preventDefault(); e.stopPropagation(); if (!this.boxEl) return; const r = this.boxEl.getBoundingClientRect(); this.menuFocus = true; this.setState({ menu: { hz: x.f, x: e.clientX - r.left, y: e.clientY - r.top, decode: false }, hover: null }); } };
 				}
 			}
 			return null;
@@ -834,6 +936,11 @@ class Component extends DCLogic {
 					pick: e => { e.stopPropagation(); this.tuneTo(d.hz); }
 				};
 			});
+		// signal menu: the demo sits where a right-click on its signal would put it
+		const mn = this.menuNow();
+		const mm = mn ? Object.assign({}, mn, mn.demo ? { x: pct(mn.hz) / 100 * w, y: inset + specH * 0.42 } : null) : null;
+		const boxH = inset + specH + 54 + (this.boxEl ? Math.max(0, this.boxEl.clientHeight - inset - specH - 54) : 300);
+		const mLeft = mm && mm.x + SM_W > w && mm.x >= SM_W, mUp = mm && mm.y + SM_H > boxH && mm.y >= boxH / 2;
 		const unverified = this.props.trust === 'unverified';
 		const zoom = cap / span;
 		const h = s.hover;
@@ -851,6 +958,12 @@ class Component extends DCLogic {
 			// every discovery in view also marks the frequency scale, so a sweep that moves the view still shows what it found
 			scaleTicks: tagMode === 'off' ? [] : discAll.filter(d => inView(d.hz)).map(d => ({ left: pct(d.hz), fresh: !!d.fresh, c: d.active || d.fresh ? 'var(--wk-accent)' : d.conf === 'heard' ? 'rgba(var(--wk-ink-3-rgb),.7)' : 'rgba(var(--wk-accent-rgb),.6)', title: d.label + ' · ' + (d.hz / 1e6).toFixed(4) + ' MHz' + (d.fresh ? ' · new in this scan' : '') })),
 			discTags,
+			menuOn: !!mm, menuX: mm ? mm.x : 0, menuY: mm ? mm.y : 0,
+			menuL: mLeft ? 'auto' : '0', menuR: mLeft ? '0' : 'auto', menuT: mUp ? 'auto' : '0', menuB: mUp ? '0' : 'auto',
+			menuMaxH: mm ? Math.max(160, (mUp ? mm.y : boxH - mm.y) - 8) : 0,
+			menuLabel: mm && mm.decode ? 'Decode as' : 'Signal actions',
+			menuHead: mm ? this.menuHead(mm.hz) : '', menuRows: mm ? this.menuRows(mm) : [],
+			menuKey: this.menuKey, noCtx: this.noCtx, onCtx: this.onCtx,
 			unverified,
 			trustDim: unverified ? 0.45 : 1,
 			refs: this.refsObj,
@@ -864,7 +977,7 @@ class Component extends DCLogic {
 			rselTop: inset + 10,
 			rselText: s.rsel ? (s.rsel.a / 1e6).toFixed(3) + '–' + (s.rsel.b / 1e6).toFixed(3) : '',
 			scanSel: this.scanSel, clearSel: this.clearSel,
-			hasSent: !!s.sent, sentText: s.sent ? 'Scan a band opens with ' + s.sent + ' MHz' : '',
+			hasSent: !!s.sent || !!s.toast, sentText: s.toast || (s.sent ? 'Scan a band opens with ' + s.sent + ' MHz' : ''),
 			cursor: s.dragging === 'range' ? 'col-resize' : s.dragging === 'pan' ? 'grabbing' : s.dragging === 'edge' ? 'ew-resize' : s.dragging === 'vfo' ? 'grabbing' : 'crosshair',
 			topInset: inset,
 			specH,
@@ -884,7 +997,7 @@ class Component extends DCLogic {
 			zoomText: zoom < 1.05 ? 'Fit' : (zoom < 10 ? zoom.toFixed(1) : Math.round(zoom)) + '×',
 			ovLeft: (L - (s.center - cap / 2)) / cap * 100,
 			ovWidth: span / cap * 100,
-			hovering: !!h && !s.dragging,
+			hovering: !!h && !s.dragging && !mn,
 			hoverLeft: h ? h.left : 0,
 			hoverText: h ? h.text : '',
 			hoverTagTop: specH + 5

@@ -521,7 +521,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 								</sc-if>
 
 								<sc-if value="{{r.isWf}}" hint-placeholder-val="{{false}}">
-									<div role="radiogroup" aria-labelledby="{{r.labelId}}" class="wk-wfg" style="display: grid; grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr)); gap: 6px; width: 100%">
+									<div role="radiogroup" aria-labelledby="{{r.labelId}}" class="wk-wfg" style="display: grid; grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr)); gap: 6px; width: 100%">
 										<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="4">
 											<button role="radio" class="wk-wfb" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; border-radius: 8px; text-align: left">
 												<span class="wk-gring" style="display: block; padding: 2px; border-radius: 8px; border: 2px solid {{o.ring}}; transition: border-color var(--wk-dur-2)">
@@ -537,7 +537,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 									<span style="position: relative; display: inline-flex; align-items: center; min-width: 0">
 										<span aria-hidden="true" style="display: {{r.swD}}; width: 10px; height: 10px; margin-right: 8px; border-radius: var(--wk-r-1); background: {{r.selSw}}; flex: none"></span>
 										<select class="wk-select" data-size="{{r.ctlSize}}" value="{{r.selVal}}" onChange="{{r.onSel}}" aria-labelledby="{{r.labelId}}" style="min-width: 96px; max-width: 200px; cursor: pointer">
-											<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><option value="{{o.v}}">{{o.label}}</option></sc-for>
+											<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><option value="{{o.v}}" disabled="{{o.off}}">{{o.label}}</option></sc-for>
 										</select>
 										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position: absolute; right: 10px; top: 50%; margin-top: -7px; pointer-events: none"><path d="M6 9l6 6l6 -6"></path></svg>
 									</span>
@@ -1020,7 +1020,7 @@ const R = [
 	S('dp.units', 'display', 'Units', { kind: 'seg', opts: [['metric', 'Metric'], ['nautical', 'Nautical'], ['imperial', 'Imperial']], def: 'nautical', sub: 'Nautical: knots, nautical miles, feet for altitude', alias: 'km miles knots feet' }),
 	S('dp.time', 'display', 'Time', { kind: 'seg', opts: [['24', '24 h'], ['12', '12 h'], ['utc', 'UTC']], def: '24', alias: 'clock timezone zulu' }),
 	S('dp.lang', 'display', 'Language', { kind: 'sel', opts: [['en', 'English'], ['fr', 'Français']], def: 'en' }),
-	S('dp.fft', 'display', 'FFT size', { kind: 'sel', opts: [[2048, '2048'], [4096, '4096'], [8192, '8192'], [16384, '16384']], def: 8192, more: true, sub: 'Larger shows finer detail and reacts more slowly', alias: 'resolution bins' }),
+	S('dp.fft', 'display', 'FFT size', { kind: 'sel', opts: [[2048, '2048'], [4096, '4096'], [8192, '8192'], [16384, '16384']], def: 8192, limit: 2048, more: true, sub: 'Larger shows finer detail and reacts more slowly', alias: 'resolution bins' }), // limit: the core's limits.bins.max (GET /api/spectrum); 2048 with the shipped config, 8192 at most
 	S('dp.avg', 'display', 'Averaging', { kind: 'seg', opts: [['off', 'Off'], ['low', 'Low'], ['high', 'High']], def: 'low', more: true, sub: 'Smooths the spectrum line' }),
 	S('dp.tags', 'display', 'Tags for saved frequencies', { kind: 'sw', def: true, more: true, sub: 'On the spectrum', alias: 'saved-frequency labels' }), // polish 2026-10-11
 	S('dp.keys', 'display', 'Keyboard shortcuts', { kind: 'link', text: 'Show all', act: 'shortcuts', more: true, alias: 'keymap hotkeys keys' }),
@@ -1062,7 +1062,8 @@ const WIDE = { text: 1, secret: 1, freqs: 1, chips: 1, slider: 1, ground: 1, wf:
 const WF = {
 	// same stops as Spectrum's rampStops() (Paper uses ramp a)
 	dark: {
-		match: 'var(--wk-plot-bg) 0%, rgba(var(--wk-accent-rgb),.3) 40%, rgba(var(--wk-accent-rgb),.62) 70%, var(--wk-accent) 86%, var(--wk-text) 100%',
+		// Spectrum's dark Match: deep accent at 30 and 50 %, mid accent at 70 %, the accent at 86 %, ink at the top
+		match: 'var(--wk-plot-bg) 0%, color-mix(in oklab, var(--wk-accent) 16%, var(--wk-plot-bg)) 30%, color-mix(in oklab, var(--wk-accent) 38%, var(--wk-plot-bg)) 50%, color-mix(in oklab, var(--wk-accent) 66%, var(--wk-plot-bg)) 70%, var(--wk-accent) 86%, var(--wk-text) 100%',
 		amber: 'var(--wk-plot-bg) 0%, rgb(40,34,54) 35%, rgb(130,60,82) 60%, #f2b84b 82%, rgb(255,246,222) 100%',
 		mono: 'var(--wk-plot-bg) 0%, rgba(var(--wk-ink-rgb),.3) 55%, var(--wk-text) 100%',
 		classic: 'var(--wk-plot-bg) 0%, rgb(16,40,120) 25%, rgb(20,140,200) 45%, rgb(40,210,200) 62%, rgb(240,220,60) 78%, rgb(240,110,30) 90%, rgb(200,30,30) 100%'
@@ -1307,6 +1308,8 @@ class Component extends DCLogic {
 		else if (x.failed) { note = 'Not saved yet'; noteC = 'var(--wk-amber)'; noteBtn = 'Retry'; noteAct = () => this.retry(); }
 		else if (x.pending) { note = (warn ? warn + '. ' : '') + 'Waiting for Apply · ' + d.effText; noteC = 'var(--wk-amber)'; noteBtn = 'Undo'; noteAct = () => { const p = Object.assign({}, s.pending); delete p[id]; this.setState({ pending: p }); }; }
 		else if (warn) { note = warn; noteC = 'var(--wk-amber)'; }
+		// FFT size above what this core sends: the plot asks for the most it can get and says so (sizes above it are greyed)
+		else if (d.limit && Number(v) > d.limit) note = 'Using ' + d.limit + ': this WaveKit sends up to ' + d.limit + ' bins';
 		else if (locked) note = d.lockNote || 'Set by ' + d.lock + '. Change it in the environment.';
 		const barC = err ? 'var(--wk-danger)' : (x.pending || x.failed) ? 'var(--wk-amber)' : x.changed ? 'var(--wk-accent)' : '';
 		const kind = locked ? 'read' : d.kind;
@@ -1315,6 +1318,7 @@ class Component extends DCLogic {
 		const wide = !!WIDE[kind] || (kind === 'seg' && segWidth(d.opts) > (this.phone() ? 150 : 184)) || (kind === 'swatch' && this.phone());
 		const opts = (d.opts || []).map(o => Object.assign({ v: String(o[0]), label: o[1], pick: () => this.setVal(id, o[0]) }, segc(eq(o[0], v))));
 		// a select whose value is not one of its options (the tuned card dragged to another anchor) names it instead of going blank
+		if (kind === 'sel' && d.limit) opts.forEach(o => { o.off = Number(o.v) > d.limit; });
 		if (kind === 'sel' && d.other && v !== undefined && !opts.some(o => o.on)) opts.push(Object.assign({ v: String(v), label: d.other, pick: () => {} }, segc(true)));
 		// accent swatches: each one opens its own scope, so var(--wk-accent) is that accent in the current theme
 		// on the current ground
