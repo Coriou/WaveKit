@@ -47,6 +47,10 @@
 	.wk-shell-island[data-island="listen"] {
 		width: 340px;
 	}
+	/* the Listen board widens to 420 while Audio options are open */
+	.wk-shell-island[data-island="listen"][data-open] {
+		width: 420px;
+	}
 	.wk-shell-panel {
 		box-sizing: border-box;
 		padding: 20px;

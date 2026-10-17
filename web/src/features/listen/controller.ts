@@ -7,6 +7,9 @@ import type { LiveAudioStore } from "../../data/index.ts"
 import type { AudioStreamSource } from "./audio.ts"
 import { PcmPlayer, pcmPlayerSupported } from "./pcm-player.ts"
 import type { RingStats } from "./pcm.ts"
+import { WavRecorder } from "./recorder.ts"
+import type { HearChoice } from "./sound.ts"
+import { readHearChoice, writeHearChoice } from "./sound.ts"
 
 export type ListenPhase = "off" | "connecting" | "playing" | "blocked" | "error"
 
@@ -17,6 +20,12 @@ export interface ListenState {
 	/** 0–1, this browser only. */
 	volume: number
 	error: string | null
+	/** Listen › What you hear, this browser only. */
+	hear: HearChoice
+	/** Listen › Record audio: seconds recorded, null when not recording. */
+	recording: { seconds: number; startedAt: number } | null
+	/** Output latency while playing (jitter buffer plus the device), ms; null otherwise. */
+	latencyMs: number | null
 }
 
 /** The part of PcmPlayer the controller drives (a fake in tests). */
@@ -31,6 +40,9 @@ export interface ListenPlayer {
 	stop(): void
 	setVolume(volume: number): void
 	dispose(): void
+	/** Copies of the decoded stream chunks (recording); absent on fakes that cannot record. */
+	setTap?(tap: ((samples: Float32Array, rate: number) => void) | null): void
+	outputLatencyMs?(): number
 }
 
 export interface ListenControllerOptions {
@@ -74,12 +86,22 @@ export class ListenController extends Store<ListenState> {
 	private unbind: (() => void) | null = null
 	/** A recording is playing in this tab: live audio keeps streaming, muted. */
 	private held = false
+	private recorder: WavRecorder | null = null
+	private recordEnd: ((wav: Blob, startedAt: number) => void) | null = null
 
 	constructor(
 		liveAudio: LiveAudioStore,
 		options: ListenControllerOptions = {},
 	) {
-		super({ wanted: false, phase: "off", volume: readVolume(), error: null })
+		super({
+			wanted: false,
+			phase: "off",
+			volume: readVolume(),
+			error: null,
+			hear: readHearChoice(),
+			recording: null,
+			latencyMs: null,
+		})
 		this.liveAudio = liveAudio
 		const events = {
 			onStats: (stats: RingStats) => this.onStats(stats),
@@ -162,9 +184,16 @@ export class ListenController extends Store<ListenState> {
 
 	/** Stops playing here; stops the core's live audio when no other client listens. */
 	async stop(): Promise<void> {
+		this.endRecording()
 		this.clearTimer()
 		this.detach()
-		this.set({ ...this.get(), wanted: false, phase: "off", error: null })
+		this.set({
+			...this.get(),
+			wanted: false,
+			phase: "off",
+			error: null,
+			latencyMs: null,
+		})
 		const status = this.liveAudio.get().status
 		if (status?.running && status.clientCount <= 1) {
 			try {
@@ -189,6 +218,64 @@ export class ListenController extends Store<ListenState> {
 		writeVolume(v)
 		this.update(s => ({ ...s, volume: v }))
 		this.applyVolume()
+	}
+
+	setHear(hear: HearChoice): void {
+		writeHearChoice(hear)
+		this.update(s => ({ ...s, hear }))
+	}
+
+	/** Recording needs the low-latency path (the <audio> fallback gives no samples). */
+	get canRecord(): boolean {
+		return this.player?.setTap !== undefined
+	}
+
+	/** Starts keeping what plays here; `onEnd` gets the file when it stops by itself (cap, stream replaced). */
+	startRecording(onEnd: (wav: Blob, startedAt: number) => void): boolean {
+		if (!this.player?.setTap || this.recorder) return false
+		const rec = new WavRecorder()
+		this.recorder = rec
+		this.recordEnd = onEnd
+		this.set({
+			...this.get(),
+			recording: { seconds: 0, startedAt: rec.startedAt },
+		})
+		let shown = 0
+		this.player.setTap((samples, rate) => {
+			if (this.recorder !== rec) return
+			if (!rec.push(samples, rate)) {
+				this.endRecording()
+				return
+			}
+			const secs = Math.floor(rec.seconds)
+			if (secs !== shown) {
+				shown = secs
+				this.update(s => ({
+					...s,
+					recording: { seconds: secs, startedAt: rec.startedAt },
+				}))
+			}
+		})
+		return true
+	}
+
+	/** Ends a recording that stopped by itself (or with Listen) and hands its file to `onEnd`. */
+	private endRecording(): void {
+		const rec = this.recorder
+		const onEnd = this.recordEnd
+		const wav = this.stopRecording()
+		if (rec && wav && onEnd) onEnd(wav, rec.startedAt)
+	}
+
+	/** Stops recording; the WAV, or null when nothing was recording. */
+	stopRecording(): Blob | null {
+		const rec = this.recorder
+		if (!rec) return null
+		this.recorder = null
+		this.recordEnd = null
+		this.player?.setTap?.(null)
+		this.update(s => ({ ...s, recording: null }))
+		return rec.toWav()
 	}
 
 	/** Mutes live audio while a recording plays here (the stream stays attached), and unmutes it after. */
@@ -222,6 +309,14 @@ export class ListenController extends Store<ListenState> {
 	private onStats(stats: RingStats): void {
 		const s = this.get()
 		if (!s.wanted || this.attachedKey === null || s.phase === "blocked") return
+		// to 10 ms: a reading that changes every stats tick would redraw the panel for nothing
+		const latency = stats.playing
+			? Math.round(
+					(stats.bufferedMs + (this.player?.outputLatencyMs?.() ?? 0)) / 10,
+				) * 10
+			: null
+		if (latency !== s.latencyMs)
+			this.update(x => ({ ...x, latencyMs: latency }))
 		if (stats.playing) {
 			this.retries = 0
 			this.setPhase("playing")

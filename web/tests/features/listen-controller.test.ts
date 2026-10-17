@@ -158,3 +158,47 @@ describe("ListenController hold (a recording plays here)", () => {
 		expect(volumes.slice(-4)).toEqual([0.6, 0, 0, 0.4])
 	})
 })
+
+describe("ListenController recording", () => {
+	it("records what the player decodes and hands the file over when listening stops", async () => {
+		let tap: ((s: Float32Array, rate: number) => void) | null = null
+		const player: ListenPlayer = {
+			unlock: () => undefined,
+			play: () => undefined,
+			stop: () => undefined,
+			setVolume: () => undefined,
+			dispose: () => undefined,
+			setTap: t => {
+				tap = t
+			},
+			outputLatencyMs: () => 20,
+		}
+		const liveAudio = {
+			get: () => ({ status: status() }),
+			start: vi.fn(() => Promise.resolve()),
+			stop: vi.fn(() => Promise.resolve()),
+		} as unknown as LiveAudioStore
+		const c = new ListenController(liveAudio, { createPlayer: () => player })
+		expect(c.canRecord).toBe(true)
+		await c.start()
+		const ended: Blob[] = []
+		expect(c.startRecording(wav => void ended.push(wav))).toBe(true)
+		expect(c.startRecording(() => undefined)).toBe(false)
+		tap!(new Float32Array(16_000), 16_000)
+		expect(c.get().recording?.seconds).toBe(1)
+		await c.stop()
+		expect(tap).toBeNull()
+		expect(c.get().recording).toBeNull()
+		expect(ended).toHaveLength(1)
+		expect(ended[0]!.size).toBe(44 + 32_000)
+	})
+
+	it("cannot record on the <audio> fallback", () => {
+		const liveAudio = {
+			get: () => ({ status: null }),
+		} as unknown as LiveAudioStore
+		const c = new ListenController(liveAudio, { createPlayer: null })
+		expect(c.canRecord).toBe(false)
+		expect(c.startRecording(() => undefined)).toBe(false)
+	})
+})

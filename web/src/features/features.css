@@ -846,6 +846,104 @@
 	.wk-shell-listen-btn:disabled {
 		opacity: 0.5;
 	}
+	/* tone squelch row, Sound switches (Listen board: fill row with a switch) */
+	.wkf-tone-row {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		min-height: 52px;
+		padding: 8px 12px;
+		border-radius: var(--wk-r-4);
+		background: var(--wk-fill);
+		text-align: left;
+	}
+	.wkf-tone-row:disabled {
+		opacity: 0.5;
+	}
+	.wkf-tone-row > .wk-switch {
+		margin: 0 -6px;
+	}
+	.wkf-tone-text {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.wkf-tone-tone {
+		font-weight: 400;
+		color: var(--wk-accent);
+	}
+	.wkf-hear-hint {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 10px 12px;
+		border-radius: 8px;
+		background: var(--wk-fill);
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-2);
+	}
+	@media (max-width: 480px) {
+		.wkf-hear-long {
+			display: none;
+		}
+	}
+	.wkf-hear-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		flex: none;
+		background: var(--wk-accent);
+	}
+	.wkf-sound-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
+	.wkf-sound-row > b {
+		flex: 1;
+	}
+	.wkf-sound-switch {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		min-height: 44px;
+	}
+	.wkf-sound-switch[data-disabled] {
+		opacity: 0.5;
+	}
+	.wkf-sound-switch > .wk-switch {
+		margin: 0 -6px;
+	}
+	.wkf-rec-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding-top: 12px;
+		border-top: 1px solid var(--wk-line-08);
+	}
+	.wkf-rec-btn {
+		gap: 8px;
+		padding: 0 14px 0 12px;
+	}
+	.wkf-rec-btn[aria-pressed="true"] {
+		border-color: rgba(var(--wk-danger-rgb), 0.55);
+		background: rgba(var(--wk-danger-rgb), 0.12);
+	}
+	.wkf-rec-dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		background: var(--wk-danger);
+	}
+	.wkf-listen-more {
+		align-self: flex-start;
+		gap: 4px;
+		padding: 0 6px 0 8px;
+		margin: -6px 0 -6px -8px;
+		color: var(--wk-accent);
+	}
 
 	/* ---- Receiver */
 	.wkf-rx-dot[data-off] {

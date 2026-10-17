@@ -86,6 +86,18 @@ export function audioSource(
 	}
 }
 
+/** A decoded-voice stream (dsd-fme, s16le mono at the digital voice rate) as this page plays it. */
+export function voiceSource(
+	route: { httpUrl: string; wavUrl: string; rate: number },
+	base: string,
+	credentials = false,
+): AudioStreamSource | null {
+	const httpUrl = reachableAudioUrl(route.httpUrl, base)
+	const wavUrl = reachableAudioUrl(route.wavUrl, base)
+	if (!httpUrl && !wavUrl) return null
+	return { httpUrl, wavUrl, format: "s16le", rate: route.rate, credentials }
+}
+
 /**
  * When this key changes the player reattaches: a new stream URL, format or sample rate (the core ends
  * the stream on a rate change), or the pipeline coming up. Tuning is not part of it: the core's
