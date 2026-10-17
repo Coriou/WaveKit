@@ -100,6 +100,15 @@ describe("deriveLegacyAudioUrl", () => {
 		)
 	})
 
+	it("derives with the default HTTP port 80", () => {
+		expect(
+			deriveLegacyAudioUrl("http://localhost:80/stream", "pi.local", 80),
+		).toBe("http://pi.local:80/stream")
+		expect(
+			deriveLegacyAudioUrl("http://localhost:80/stream", "10.0.0.5", 80),
+		).toBe("http://10.0.0.5:80/stream")
+	})
+
 	it("keeps the base path verbatim", () => {
 		expect(
 			deriveLegacyAudioUrl(

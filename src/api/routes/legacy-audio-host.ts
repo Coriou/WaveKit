@@ -112,7 +112,7 @@ export function deriveLegacyAudioUrl(
 	// (a bracketed IPv6 is already checked by isIPv6 and may be re-spelled).
 	try {
 		const parsed = new URL(derived)
-		if (!host.startsWith("[") && parsed.host !== `${host}:${audioPort}`) {
+		if (!host.startsWith("[") && parsed.hostname !== host) {
 			return baseUrl
 		}
 	} catch {

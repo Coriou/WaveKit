@@ -43,6 +43,14 @@ describe("TunerRelay start failure (WG9 5.1)", () => {
 		expect(text).toBe("Failed to start tuner relay server")
 		expect(JSON.stringify(fields)).not.toContain(String(port))
 		expect(JSON.stringify(fields)).not.toContain("127.0.0.1")
+		const state = relay as unknown as {
+			branchId: unknown
+			dataHandler: unknown
+			branchStream: unknown
+		}
+		expect(state.branchId).toBeNull()
+		expect(state.dataHandler).toBeNull()
+		expect(state.branchStream).toBeNull()
 	})
 
 	it("emits a post-listen error only with a listener, else logs", async () => {

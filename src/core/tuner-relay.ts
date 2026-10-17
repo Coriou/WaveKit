@@ -228,7 +228,10 @@ export class TunerRelay extends EventEmitter {
 						{ err: safeErrorFields(err) },
 						"Failed to start tuner relay server",
 					)
-					if (this.server === server) this.server = null
+					if (this.server === server) {
+						this.server = null
+						this.detachBranch()
+					}
 					reject(err)
 					return
 				}
