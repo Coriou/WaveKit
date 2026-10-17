@@ -2441,6 +2441,23 @@ export function registerScannerMock(
 			if (s.confidence === "candidate" && PROTOCOL_DECODER[s.protocol] !== null)
 				d.undecodedReason = "no-sync"
 			const observations: Observation[] = []
+			// a day of earlier transmissions for the opened row's "Last 24 h", busier in daytime
+			const older = Math.min(60, Math.max(0, s.observations - 3))
+			const day: number[] = []
+			for (let k = 0; k < older; k++) {
+				const at =
+					last -
+					20 * 60_000 -
+					(((k * 7919 + index * 104_729) % 1380) + 1) * 60_000
+				const hour = new Date(at).getHours()
+				if (at > first && (hour >= 7 || (k + index) % 3 === 0)) day.push(at)
+			}
+			for (const at of day.sort((x, y) => x - y))
+				observations.push(
+					observationOf(d, at, jobIds, {
+						endedAt: at + Math.round((signal.on ?? 2) * 1000),
+					}),
+				)
 			for (let k = 2; k >= 0; k--) {
 				const at = last - k * 7 * 60_000
 				observations.push(

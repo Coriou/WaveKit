@@ -17,6 +17,7 @@ import {
 	saveOperatorText,
 	toggleSaved,
 } from "./actions.ts"
+import { DiscoveryHistory } from "./History.tsx"
 import { DotsIcon, ScanIcon } from "./icons.tsx"
 import { moreMenu } from "./MoreMenu.tsx"
 import type { DiscoveryRowView, ListEntry } from "./rows.ts"
@@ -420,6 +421,7 @@ function DiscoveryDetail({
 						))}
 					</ul>
 				)}
+				<DiscoveryHistory d={d} />
 				<Actions d={d} readOnly={readOnly} services={services} />
 			</div>
 		</div>
