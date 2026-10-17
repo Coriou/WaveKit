@@ -25,7 +25,7 @@ import {
 } from "../../shell/theme.ts"
 import { formatDb, formatMHz, formatRate, formatWidth } from "../format.ts"
 import type { Preset } from "../scanner/planner/plan.ts"
-import { SETTINGS_REGISTRY, type SettingEntry } from "../settings/registry.ts"
+import { settingsFor, type SettingEntry } from "../settings/registry.ts"
 import { channelSuggestions } from "../tuner/band.ts"
 import { modeSpec, MODES, type Modulation } from "../tuner/modes.ts"
 import { STEPS } from "../tuner/prefs.ts"
@@ -73,6 +73,8 @@ export interface PaletteContext {
 	readonly receiver: ReceiverContext | null
 	/** A protected core without a session: nothing can be changed on the core. */
 	readonly readOnly: boolean
+	/** The core's access mode (null until known): some settings exist only on a protected core. */
+	readonly accessMode: "legacy" | "protected" | null
 	readonly theme: ThemePrefs
 	/** Null when the core keeps no saved frequencies (legacy mode). */
 	readonly saved: readonly SavedFrequency[] | null
@@ -907,7 +909,7 @@ export class PaletteModel {
 	}
 
 	settingItems(): PaletteItem[] {
-		return SETTINGS_REGISTRY.map(e => this.settingItem(e))
+		return settingsFor(this.#c.accessMode).map(e => this.settingItem(e))
 	}
 
 	scopeItems(scope: ScopeId, q = ""): PaletteItem[] {
@@ -1524,7 +1526,7 @@ export class PaletteModel {
 				id: "scope:set",
 				title: "All settings",
 				glyph: "settings",
-				value: String(SETTINGS_REGISTRY.length),
+				value: String(settingsFor(c.accessMode).length),
 				keys: ["settings", "preferences", "options", "configuration", "config"],
 				scope: "set",
 			},
@@ -1588,7 +1590,7 @@ export class PaletteModel {
 			return d ? this.discoveryItem(d) : null
 		}
 		if (id.startsWith("set:")) {
-			const e = SETTINGS_REGISTRY.find(x => `set:${x.id}` === id)
+			const e = settingsFor(c.accessMode).find(x => `set:${x.id}` === id)
 			return e ? this.settingItem(e) : null
 		}
 		const root = this.rootCommands().find(x => x.id === id)

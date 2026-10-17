@@ -335,7 +335,8 @@ describe("Settings rows", () => {
 		)
 		const ids = new Set(rows.map(r => r.id))
 		for (const e of SETTINGS_REGISTRY)
-			if (e.place.kind === "settings") expect(ids, e.id).toContain(e.id)
+			if (e.place.kind === "settings" && !e.protectedOnly)
+				expect(ids, e.id).toContain(e.id)
 		expect(byId(rows, "st.activity").text).toBe(
 			"3 days · 250,000 messages · 256 MB",
 		)
