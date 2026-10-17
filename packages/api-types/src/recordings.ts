@@ -152,6 +152,8 @@ export type RecordingKeepErrorCode =
 	| "RECORDING_KEEP_LIMIT"
 	| "RECORDING_DELETE_UNSUPPORTED"
 	| "RECORDING_KEEPS_UNAVAILABLE"
+	| "RECORDING_KEEP_FAILED"
+	| "RECORDING_DELETE_FAILED"
 
 /** WG9: status of every inventory, Keep and delete error code. */
 export const RECORDING_ERROR_STATUS: Readonly<
@@ -170,6 +172,10 @@ export const RECORDING_ERROR_STATUS: Readonly<
 	RECORDING_DELETE_UNSUPPORTED: 409,
 	/** The keep store is loading, unreadable or cannot be written. */
 	RECORDING_KEEPS_UNAVAILABLE: 503,
+	/** Keep or unkeep failed for another reason (WG9 amendment); fixed per-operation text. */
+	RECORDING_KEEP_FAILED: 500,
+	/** Delete failed for another reason, including a shared writable folder (WG9 amendment). */
+	RECORDING_DELETE_FAILED: 500,
 })
 
 /** WG9 Keep/delete error body (fixed text; never a path, file name or submitted value). */

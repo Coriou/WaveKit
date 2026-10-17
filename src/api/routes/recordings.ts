@@ -42,7 +42,10 @@ export interface RecordingRoutesOptions {
 	authorizeMutation?: (request: FastifyRequest) => DeniedAdmission | undefined
 }
 
-type MutationErrorCode = RecordingKeepErrorCode | "RECORDING_NOT_FOUND"
+type FailedCode = "RECORDING_KEEP_FAILED" | "RECORDING_DELETE_FAILED"
+type MutationErrorCode =
+	| Exclude<RecordingKeepErrorCode, FailedCode>
+	| "RECORDING_NOT_FOUND"
 const MUTATION_MESSAGES: Record<MutationErrorCode, string> = {
 	RECORDING_NOT_FOUND: "Recording not found",
 	RECORDING_KEPT: "Recording is kept; unkeep it first",
@@ -58,12 +61,12 @@ const MUTATION_ERRORS: Record<number, string> = {
 }
 type MutationOp = "keep" | "unkeep" | "remove"
 /**
- * 500 bodies, fixed text per operation. Both 500 codes are proposed contract additions:
- * `RECORDING_KEEP_FAILED` (Keep and unkeep) and `RECORDING_DELETE_FAILED` (delete).
+ * 500 bodies, fixed text per operation: `RECORDING_KEEP_FAILED` (Keep and unkeep) and
+ * `RECORDING_DELETE_FAILED` (delete), both in the WG9 contract (amendment).
  */
 const FAILED_BODIES: Record<
 	MutationOp,
-	{ error: string; code: string; message: string }
+	RecordingKeepErrorBody & { code: FailedCode }
 > = {
 	keep: {
 		error: "Internal Server Error",
@@ -186,13 +189,18 @@ export async function recordingRoutes(
 						reply.header("Cache-Control", "no-store")
 						if (err instanceof RecordingKeepError) {
 							const code = err.code
-							const status = RECORDING_ERROR_STATUS[code] ?? err.status
-							const body: RecordingKeepErrorBody = {
-								error: MUTATION_ERRORS[status] ?? "Error",
-								code: code as RecordingKeepErrorCode,
-								message: MUTATION_MESSAGES[code],
+							if (
+								code !== "RECORDING_KEEP_FAILED" &&
+								code !== "RECORDING_DELETE_FAILED"
+							) {
+								const status = RECORDING_ERROR_STATUS[code] ?? err.status
+								const body: RecordingKeepErrorBody = {
+									error: MUTATION_ERRORS[status] ?? "Error",
+									code: code as RecordingKeepErrorCode,
+									message: MUTATION_MESSAGES[code],
+								}
+								return reply.code(status).send(body)
 							}
-							return reply.code(status).send(body)
 						}
 						request.log.warn({ err: safeErrorFields(err) }, FAILED_LOGS[op])
 						return reply.code(500).send(FAILED_BODIES[op])

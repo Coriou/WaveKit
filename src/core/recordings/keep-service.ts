@@ -575,9 +575,9 @@ export async function openRecordingKeepService(
 				} catch (error: unknown) {
 					if (error instanceof RecordingKeepError) throw error
 					log.warn({ err: safeErrorFields(error) }, "Recording delete failed")
-					throw new WaveKitError(
-						RECORDING_DELETE_FAILED_TEXT,
+					throw new RecordingKeepError(
 						"RECORDING_DELETE_FAILED",
+						RECORDING_DELETE_FAILED_TEXT,
 					)
 				} finally {
 					await opened.handle.close().catch(() => undefined)

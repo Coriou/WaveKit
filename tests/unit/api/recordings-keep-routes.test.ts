@@ -1,4 +1,5 @@
 import Fastify from "fastify"
+import { RECORDING_ERROR_STATUS } from "@wavekit/api-types"
 import type { FastifyInstance } from "fastify"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { RecordingKeepError } from "../../../src/core/recordings/contract.js"
@@ -328,5 +329,30 @@ describe("recording keep routes: review fixes (WG9 RK)", () => {
 			"Recording unkeep failed",
 			"Recording delete failed",
 		])
+	})
+
+	it("contract amendment: a typed RECORDING_DELETE_FAILED answers its contract status with the fixed delete text", async () => {
+		const svc = fake()
+		svc.remove.mockRejectedValue(
+			new RecordingKeepError("RECORDING_DELETE_FAILED", "internal detail"),
+		)
+		svc.keep.mockRejectedValue(
+			new RecordingKeepError("RECORDING_KEEP_FAILED", "internal detail"),
+		)
+		await build(svc, false)
+		const d = await app.inject({ method: "DELETE", url: DEL })
+		expect(d.statusCode).toBe(RECORDING_ERROR_STATUS.RECORDING_DELETE_FAILED)
+		expect(d.json()).toEqual({
+			error: "Internal Server Error",
+			code: "RECORDING_DELETE_FAILED",
+			message: "Recording could not be deleted",
+		})
+		const k = await app.inject({ method: "PUT", url: KEEP })
+		expect(k.statusCode).toBe(RECORDING_ERROR_STATUS.RECORDING_KEEP_FAILED)
+		expect(k.json()).toEqual({
+			error: "Internal Server Error",
+			code: "RECORDING_KEEP_FAILED",
+			message: "Recording could not be kept",
+		})
 	})
 })
