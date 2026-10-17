@@ -6,6 +6,7 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import type { DigitalVoiceStatus } from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
 import type { DigitalVoiceService } from "../../core/digital-voice.js"
+import { deriveLegacyAudioUrl, requestHostHeader } from "./legacy-audio-host.js"
 
 const nullableString = { type: ["string", "null"] } as const
 const nullableNumber = { type: ["number", "null"] } as const
@@ -164,6 +165,11 @@ const errorResponseSchema = {
 
 export interface DigitalVoiceRoutesOptions {
 	digitalVoice: DigitalVoiceService
+	/**
+	 * Legacy mode only (WG9 5.5): rewrite the localhost fallback stream URLs of
+	 * the status response with the request's own Host. Absent: today's URLs.
+	 */
+	legacyAudioHost?: boolean
 }
 
 export const digitalVoiceRoutes: FastifyPluginAsync<
@@ -182,7 +188,36 @@ export const digitalVoiceRoutes: FastifyPluginAsync<
 				response: { 200: digitalVoiceStatusSchema },
 			},
 		},
-		async () => digitalVoice.getStatus(),
+		async (request, reply) => {
+			const status = digitalVoice.getStatus()
+			if (options.legacyAudioHost !== true) return status
+			// Per response only: copies, never the stored status; never logged.
+			const host = requestHostHeader(request)
+			const port = status.config.httpPort
+			const derive = (url: string): string =>
+				deriveLegacyAudioUrl(url, host, port)
+			const decoders = status.decoders.map(d => ({
+				...d,
+				httpUrl: derive(d.httpUrl),
+				wavUrl: derive(d.wavUrl),
+			}))
+			const changed =
+				derive(status.httpUrl) !== status.httpUrl ||
+				derive(status.wavUrl) !== status.wavUrl ||
+				decoders.some(
+					(d, i) =>
+						d.httpUrl !== status.decoders[i]?.httpUrl ||
+						d.wavUrl !== status.decoders[i]?.wavUrl,
+				)
+			if (!changed) return status
+			void reply.header("Cache-Control", "no-store")
+			return {
+				...status,
+				httpUrl: derive(status.httpUrl),
+				wavUrl: derive(status.wavUrl),
+				decoders,
+			}
+		},
 	)
 
 	fastify.post<{
