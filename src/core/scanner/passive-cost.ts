@@ -52,16 +52,22 @@ export function passiveProbationDue(input: {
 	)
 }
 
-/** The cumulative `idle` / `active` milliseconds of an event-loop sample (`EventLoopUtilization`). */
+/**
+ * The cumulative `idle` / `active` milliseconds of an event-loop sample (`EventLoopUtilization`),
+ * with the generation of the worker that produced it (bumped on every worker (re)start).
+ */
 export interface EluSample {
 	idle: number
 	active: number
+	generation: number
 }
 
 /**
  * WG11 (Main decision on review M1): utilization over the window between two cumulative samples of
- * the same worker; with no previous sample, or one from an earlier worker (counters went back), the
- * window is the worker's whole life so far. Null for an empty or non-finite window.
+ * the same worker; with no previous sample, or one from another worker generation (or, defensively,
+ * counters that went back), the window is the current worker's whole life so far. A replacement
+ * worker is identified by its generation, never by its counters alone: a fresh worker's counters
+ * can exceed the old one's. Null for an empty or non-finite window.
  */
 export function windowedUtilization(
 	current: EluSample,
@@ -69,6 +75,7 @@ export function windowedUtilization(
 ): number | null {
 	const fresh =
 		previous === null ||
+		current.generation !== previous.generation ||
 		current.idle < previous.idle ||
 		current.active < previous.active
 	const active = fresh ? current.active : current.active - previous.active

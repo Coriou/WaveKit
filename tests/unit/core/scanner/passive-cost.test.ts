@@ -229,23 +229,42 @@ describe("passiveProbationDue (WG11 SC, Main decision M2)", () => {
 describe("windowedUtilization (WG11 review M1)", () => {
 	it("measures the window between two samples of the same worker", () => {
 		expect(
-			windowedUtilization({ idle: 360, active: 84 }, { idle: 6, active: 54 }),
+			windowedUtilization(
+				{ idle: 360, active: 84, generation: 1 },
+				{ idle: 6, active: 54, generation: 1 },
+			),
 		).toBeCloseTo(30 / 384)
 	})
 
 	it("uses the whole life without a previous sample or after a worker restart", () => {
-		expect(windowedUtilization({ idle: 6, active: 54 }, null)).toBeCloseTo(0.9)
 		expect(
-			windowedUtilization({ idle: 1, active: 1 }, { idle: 6, active: 54 }),
+			windowedUtilization({ idle: 6, active: 54, generation: 1 }, null),
+		).toBeCloseTo(0.9)
+		expect(
+			windowedUtilization(
+				{ idle: 1, active: 1, generation: 1 },
+				{ idle: 6, active: 54, generation: 1 },
+			),
 		).toBe(0.5)
+	})
+
+	it("uses the fresh worker's whole life when the generation changes, even with larger counters", () => {
+		// Review MAJOR repro: the old worker disabled at 90 %; the replacement's true 25 % must not
+		// be read as the 8.75 % a subtraction across workers would give.
+		const old = { idle: 6000, active: 54000, generation: 1 }
+		const fresh = { idle: 225000, active: 75000, generation: 2 }
+		expect(windowedUtilization(fresh, old)).toBeCloseTo(0.25)
 	})
 
 	it("is null for an empty or non-finite window", () => {
 		expect(
-			windowedUtilization({ idle: 5, active: 5 }, { idle: 5, active: 5 }),
+			windowedUtilization(
+				{ idle: 5, active: 5, generation: 1 },
+				{ idle: 5, active: 5, generation: 1 },
+			),
 		).toBeNull()
 		expect(
-			windowedUtilization({ idle: Number.NaN, active: 1 }, null),
+			windowedUtilization({ idle: Number.NaN, active: 1, generation: 1 }, null),
 		).toBeNull()
 	})
 })

@@ -268,6 +268,36 @@ describe("snapshot mirror property (WG11 req 3.5)", () => {
 	})
 })
 
+describe("snapshot mirror seq gaps (WG11 review)", () => {
+	it("marks the mirror broken on a lost line between otherwise contiguous seqs", () => {
+		const run = seededStore()
+		applySeededOps(run, mulberry32(13), 40)
+		expect(run.entries.length).toBeGreaterThan(3)
+		const mirror = new SnapshotMirror()
+		mirror.applyLine(lineOf(1, run.entries[0]!))
+		// seq 2 is lost; seq 3 alone would leave lastSeq and possibly the counts matching
+		run.entries.slice(2).forEach((e, i) => mirror.applyLine(lineOf(i + 3, e)))
+		expect(mirror.broken()).toBe("seq gap")
+	})
+
+	it("accepts the line right after a reset's seq and refuses one past it", () => {
+		const run = seededStore()
+		applySeededOps(run, mulberry32(14), 20)
+		const s = run.store.snapshot()
+		const text = frozenText(s, 7, SAVED_AT)
+		const next = run.entries[0]!
+		const ok = new SnapshotMirror()
+		ok.resetFromText(text, 7)
+		ok.applyLine(lineOf(8, next))
+		expect(ok.broken()).toBeNull()
+		expect(ok.lastSeq()).toBe(8)
+		const gap = new SnapshotMirror()
+		gap.resetFromText(text, 7)
+		gap.applyLine(lineOf(9, next))
+		expect(gap.broken()).toBe("seq gap")
+	})
+})
+
 describe("snapshot mirror copies (WG11 req 3.5)", () => {
 	it("holds texts, not references: mutating the store's records or the journal payload changes nothing", () => {
 		const run = seededStore()

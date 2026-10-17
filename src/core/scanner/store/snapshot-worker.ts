@@ -87,10 +87,11 @@ async function handle(m: SnapshotWorkerRequest): Promise<void> {
 			const counts = mirror.counts()
 			let reason: SnapshotFailReason | null = null
 			// Review m1: counts + lastSeq suffice, no content hash. The mirror is fed only by the
-			// store's ordered journal lines and removals (same records, same order, one sequence
-			// number per mutation), so equal lastSeq means it applied exactly the mutations the store
-			// made; a lost or reordered message moves lastSeq or a count, and a line that fails to
-			// apply marks the mirror broken. The counts catch a removal the journal does not number.
+			// store's ordered journal lines and removals, one contiguous sequence number per mutation
+			// (refused ones included) from the reset's seq on; a line whose seq is not the previous
+			// one + 1 (a lost line, even one between otherwise matching updates) or that fails to
+			// apply marks the mirror broken, a lost tail moves lastSeq, and the counts catch a removal
+			// the journal does not number.
 			if (mirror.broken() !== null) reason = "broken"
 			else if (
 				mirror.lastSeq() !== m.head.lastSeq ||

@@ -168,7 +168,7 @@ export class SnapshotMirror {
 		return n
 	}
 
-	/** One journal line (`{"seq":…,"at":…,"op":…,"payload":…}\n`). Malformed or out of order: broken. */
+	/** One journal line (`{"seq":…,"at":…,"op":…,"payload":…}\n`). Malformed, out of order or past a seq gap: broken. */
 	applyLine(line: string): void {
 		if (this.brokenReason !== null) return
 		let raw: unknown
@@ -189,6 +189,12 @@ export class SnapshotMirror {
 		if (this.brokenReason !== null) return
 		if (!Number.isSafeInteger(seq) || seq <= this.seq) {
 			this.brokenReason = "out-of-order line"
+			return
+		}
+		// Persistence assigns contiguous seqs and feeds every one (refused ones too) after a reset
+		// at the last seq, so a gap is a lost line: one the counts and lastSeq alone can miss.
+		if (seq !== this.seq + 1) {
+			this.brokenReason = "seq gap"
 			return
 		}
 		const m = parsePayload(payload)

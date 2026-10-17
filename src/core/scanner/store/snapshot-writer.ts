@@ -60,7 +60,9 @@ export function snapshotCommitTimeoutMs(baseMs: number, bytes: number): number {
  * A failed worker's snapshot waits for the worker to exit before the fallback writes, but at most
  * this long: a worker that never exits must not stall the persistence queue. Past it the worker is
  * abandoned and snapshots stay on the main thread for good. An abandoned worker can at worst write
- * its own tmp file late: only the main thread renames, and only for its live, current commit.
+ * its own tmp file late: only the main thread renames, and only for its live, current commit. The
+ * abandoned commit's tmp path is remembered and removed again when the worker finally exits, at
+ * every later main-thread snapshot (`sweepAbandoned`) and at close.
  */
 export const DEFAULT_SNAPSHOT_TERMINATE_WAIT_MS = 10_000
 export const MIN_SNAPSHOT_WORKER_HEAP_MB = 256
@@ -216,6 +218,8 @@ export class SnapshotWriter {
 	private lastBuildMs: number | null = null
 	private lastWriteMs: number | null = null
 	private lastResetChars = 0
+	/** Tmp files of commits whose worker was abandoned while it could still write them. */
+	private readonly abandonedTmps = new Set<string>()
 
 	constructor(opts: SnapshotWriterOptions) {
 		this.log = opts.logger
@@ -405,6 +409,20 @@ export class SnapshotWriter {
 		this.port = null
 		this.settleCommit({ ok: false, reason: "worker-failed" })
 		if (port !== null) await port.terminate().catch(() => undefined)
+		await this.sweepAbandoned()
+	}
+
+	/**
+	 * Removes again the tmp files an abandoned worker may have written late (never renamed). The
+	 * paths stay remembered: a worker that has not exited could still write after this sweep.
+	 */
+	async sweepAbandoned(): Promise<void> {
+		if (this.abandonedTmps.size === 0) return
+		await Promise.all(
+			[...this.abandonedTmps].map(tmp =>
+				rm(tmp, { force: true }).catch(() => undefined),
+			),
+		)
 	}
 
 	private admit(charge: number): boolean {
@@ -574,19 +592,29 @@ export class SnapshotWriter {
 				discard(commit, { ok: false, reason: "worker-failed" })
 		}
 		if (port !== null) {
+			let abandoned: string | null = null
 			const abandon = setTimeout(() => {
 				// Still running: it may yet write its tmp file (never renamed), so never use a worker again.
 				this.failures = Math.max(this.failures, 2)
 				this.disabled = true
+				if (commit !== null) {
+					abandoned = commit.tmp
+					this.abandonedTmps.add(abandoned)
+				}
 				settle()
 			}, this.terminateWaitMs)
 			abandon.unref()
 			void port
 				.terminate()
 				.catch(() => undefined)
-				.then(() => {
+				.then(async () => {
 					clearTimeout(abandon)
 					settle()
+					// Gone at last: whatever it wrote late is removed, and it can write no more.
+					const tmp = abandoned
+					if (tmp === null) return
+					await rm(tmp, { force: true }).catch(() => undefined)
+					this.abandonedTmps.delete(tmp)
 				})
 		} else settle()
 		if (this.failures >= 2) {

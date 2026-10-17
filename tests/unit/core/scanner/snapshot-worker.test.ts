@@ -574,8 +574,41 @@ describe("abandoned snapshot worker (WG11 req 3.5, review m3)", () => {
 			await late.release() // the abandoned worker now writes its older capture
 			await new Promise(resolve => setTimeout(resolve, 20))
 			expect(await h.file()).toBe(want)
+			const tmps = async () =>
+				(await readdir(h.dir)).filter(f => f.endsWith(".tmp"))
+			// the late tmp is swept by the next main-thread snapshot, though the worker never exits
+			h.ops(5)
+			const next = h.expected()
+			await h.p.writeSnapshotOf(h.store)
+			expect(await h.file()).toBe(next)
+			expect(await tmps()).toEqual([])
+		} finally {
+			await late.inner?.terminate()
+			await h.close()
+		}
+	})
+})
+
+describe("abandoned snapshot worker tmp sweep at close (WG11 review)", () => {
+	it("close removes a tmp file the abandoned worker wrote late", async () => {
+		const made = { count: 0 }
+		const { late, factory } = lateWorker(made)
+		const h = await harness({
+			factory,
+			commitTimeoutMs: 50,
+			terminateWaitMs: 50,
+		})
+		try {
+			h.ops(20)
+			await h.p.writeSnapshotOf(h.store)
+			h.ops(10)
+			await h.p.writeSnapshotOf(h.store) // abandoned
+			expect(h.p.snapshotWorkerStatus()?.state).toBe("disabled")
+			await late.release() // late write after the fallback's cleanup
+			await new Promise(resolve => setTimeout(resolve, 20))
+			await h.p.closeSnapshotWorker()
 			const leftovers = (await readdir(h.dir)).filter(f => f.endsWith(".tmp"))
-			expect(leftovers.length).toBeLessThanOrEqual(1) // at most the late worker's own tmp
+			expect(leftovers).toEqual([])
 		} finally {
 			await late.inner?.terminate()
 			await h.close()

@@ -975,6 +975,7 @@ export class ScannerPersistence {
 		}
 		this.writtenSeq = Math.max(this.writtenSeq, lastSeq)
 		this.snapshotDurable(lastSeq)
+		await this.writer?.sweepAbandoned()
 	}
 
 	/**
@@ -1005,6 +1006,7 @@ export class ScannerPersistence {
 		}
 		this.writtenSeq = Math.max(this.writtenSeq, built.lastSeq)
 		this.snapshotDurable(built.lastSeq)
+		await this.writer?.sweepAbandoned()
 	}
 
 	/**
