@@ -672,24 +672,7 @@
 		color: var(--wk-text-2);
 	}
 
-	/* toast and footer */
-	.wks-toast {
-		flex: none;
-		display: flex;
-		margin: 0 10px 8px;
-		height: auto;
-		min-height: var(--wk-h-touch);
-		padding-right: 6px;
-	}
-	.wks-toast[data-tone="warn"] {
-		color: var(--wk-amber);
-	}
-	.wks-toast-text {
-		flex: 1;
-		min-width: 0;
-		padding: 8px 0;
-		line-height: 1.4;
-	}
+	/* footer */
 	.wks-footer {
 		flex: none;
 		display: flex;

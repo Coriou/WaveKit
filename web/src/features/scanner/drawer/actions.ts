@@ -1,6 +1,6 @@
 // What the open discovery's actions do: Listen (tunes first when it is outside the capture), Save
 // frequency (a saved frequency prefilled from the discovery), Identify again (in the tuned span only),
-// Keep, Ignore (the core's lockout, with Undo), Delete and Copy; plus the drawer's one toast.
+// Keep, Ignore (the core's lockout, with Undo), Delete and Copy; results land in the app toast.
 import type { Discovery, SavedFrequencyInput } from "@wavekit/api-types"
 
 import type { AppServices } from "../../../app/services.ts"
@@ -9,8 +9,8 @@ import {
 	discoveryTitle,
 	errorMessage,
 	isApiError,
-	Store,
 } from "../../../data/index.ts"
+import { dismissAppToast, showAppToast } from "../../../shell/toast.ts"
 import { formatMHz } from "../../format.ts"
 import { defaultGroup } from "../../tuner/saved.ts"
 import { modeSpec, type Modulation } from "../../tuner/modes.ts"
@@ -66,39 +66,10 @@ export function inCapture(
 	return Math.abs(hz - tuner.frequency) <= half
 }
 
-// ---- toast
+// ---- toast: the app's one toast (src/shell/toast.ts), above the dock in the free plot area
 
-export interface DrawerToast {
-	id: number
-	text: string
-	undo?: () => void
-	tone?: "warn"
-}
-
-export const drawerToast = new Store<DrawerToast | null>(null)
-let toastSeq = 0
-let toastTimer: ReturnType<typeof setTimeout> | null = null
-
-export function showToast(
-	text: string,
-	options: { undo?: () => void; tone?: "warn" } = {},
-): void {
-	const t: DrawerToast = { id: ++toastSeq, text }
-	if (options.undo) t.undo = options.undo
-	if (options.tone) t.tone = options.tone
-	drawerToast.set(t)
-	if (toastTimer) clearTimeout(toastTimer)
-	toastTimer = setTimeout(() => {
-		toastTimer = null
-		if (drawerToast.get()?.id === t.id) drawerToast.set(null)
-	}, 6000)
-}
-
-export function dismissToast(): void {
-	if (toastTimer) clearTimeout(toastTimer)
-	toastTimer = null
-	drawerToast.set(null)
-}
+export const showToast = showAppToast
+export const dismissToast = dismissAppToast
 
 // ---- runners (talk to the core; failures land in the toast)
 
