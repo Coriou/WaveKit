@@ -300,6 +300,105 @@ export function encodeType24B(fields: Type24BFields): ArmoredPayload {
 		.finish()
 }
 
+export interface Type4Fields {
+	mmsi: number
+	lonRaw: number
+	latRaw: number
+}
+
+export interface Type9Fields {
+	mmsi: number
+	/** 0–4095 (4095 not available). */
+	altitude: number
+	/** Whole knots 0–1023 (1023 not available). */
+	sogKnots: number
+	lonRaw: number
+	latRaw: number
+	cogTenths: number
+}
+
+export interface Type21Fields {
+	mmsi: number
+	aidType: number
+	/** Up to 34 AIS text characters; above 20 they go to the name extension. */
+	name: string
+	lonRaw: number
+	latRaw: number
+	/** UTC second 0–63 (60–63 not available). */
+	second: number
+	offPosition: boolean
+	virtualAid: boolean
+	/** Extra bits appended after the extension (0–5), to test partial characters. */
+	trailingBits?: string
+}
+
+/** Type 4 base station report. 168 bits. */
+export function encodeType4(fields: Type4Fields): ArmoredPayload {
+	return header(4, fields.mmsi)
+		.u(2026, 14)
+		.u(1, 4)
+		.u(1, 5)
+		.u(0, 5)
+		.u(0, 6)
+		.u(0, 6)
+		.u(0, 1)
+		.s(fields.lonRaw, 28)
+		.s(fields.latRaw, 27)
+		.u(1, 4)
+		.u(0, 10)
+		.u(0, 1)
+		.u(0, 19)
+		.finish()
+}
+
+/** Type 9 SAR aircraft position. 168 bits. */
+export function encodeType9(fields: Type9Fields): ArmoredPayload {
+	return header(9, fields.mmsi)
+		.u(fields.altitude, 12)
+		.u(fields.sogKnots, 10)
+		.u(0, 1)
+		.s(fields.lonRaw, 28)
+		.s(fields.latRaw, 27)
+		.u(fields.cogTenths, 12)
+		.u(60, 6)
+		.u(0, 8)
+		.u(0, 1)
+		.u(0, 3)
+		.u(0, 1)
+		.u(0, 1)
+		.u(0, 20)
+		.finish()
+}
+
+/** Type 21 aid to navigation. 272 bits plus the name extension. */
+export function encodeType21(fields: Type21Fields): ArmoredPayload {
+	if (fields.name.length > 34) throw new Error("type 21 name is at most 34")
+	const writer = header(21, fields.mmsi)
+		.u(fields.aidType, 5)
+		.text(fields.name.slice(0, 20), 20)
+		.u(0, 1)
+		.s(fields.lonRaw, 28)
+		.s(fields.latRaw, 27)
+		.u(0, 9)
+		.u(0, 9)
+		.u(0, 6)
+		.u(0, 6)
+		.u(1, 4)
+		.u(fields.second, 6)
+		.u(fields.offPosition ? 1 : 0, 1)
+		.u(0, 8)
+		.u(0, 1)
+		.u(fields.virtualAid ? 1 : 0, 1)
+		.u(0, 1)
+		.u(0, 1)
+	const extension = fields.name.slice(20)
+	if (extension.length > 0) writer.text(extension, extension.length)
+	if (fields.trailingBits) {
+		for (const bit of fields.trailingBits) writer.u(bit === "1" ? 1 : 0, 1)
+	}
+	return writer.finish()
+}
+
 export const AIS_TEXT_ALPHABET = TEXT_ALPHABET
 
 /** Fixed vessels encoded into generated-nmea.txt. */

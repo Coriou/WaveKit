@@ -13,9 +13,12 @@ import type {
 	ActivityQueryService,
 	ActivityRefType,
 	ActivitySearchRequest,
+	ActivityBandMapQuery,
+	ActivityTimelineQuery,
 	ActivityTrailsQuery,
 } from "../../core/activity/storage/contract.js"
 import { ActivityQueryError } from "../../core/activity/query/errors.js"
+import { parseDecimalInteger } from "../../core/activity/query/validate.js"
 import { withActivityClient } from "../../core/activity/query/service.js"
 import type { ActivityUnavailableState } from "../../core/activity/runtime.js"
 import { errorResponseSchema, looseObjectSchema } from "./scanner-schemas.js"
@@ -184,6 +187,242 @@ function trailsRequest(params: Record<string, unknown>): ActivityTrailsQuery {
 			keys.push(value)
 		}
 		if (keys.length > 0) request.entityKeys = keys
+	}
+	return request
+}
+
+const BANDMAP_PARAMS = new Set([
+	"producedFrom",
+	"producedTo",
+	"minHz",
+	"maxHz",
+	"bucketHz",
+	"categories",
+	"protocols",
+])
+
+const TIMELINE_PARAMS = new Set([
+	"producedFrom",
+	"producedTo",
+	"bucketMs",
+	"categories",
+	"protocols",
+	"entityKey",
+])
+
+const truncationSchema = { type: "array", items: { type: "string" } } as const
+
+const bandMapResponseSchema = {
+	type: "object",
+	properties: {
+		producedFrom: { type: "string" },
+		producedTo: { type: "string" },
+		minHz: { type: "integer" },
+		maxHz: { type: "integer" },
+		bucketHz: { type: "integer" },
+		buckets: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					startHz: { type: "integer" },
+					rows: { type: "integer" },
+					lastAt: { type: "string" },
+					protocols: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								protocol: { type: "string" },
+								category: { type: "string" },
+								rows: { type: "integer" },
+								entities: { type: "integer" },
+								lastAt: { type: "string" },
+							},
+							required: ["protocol", "category", "rows", "entities", "lastAt"],
+						},
+					},
+					otherRows: { type: "integer" },
+					topEntities: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								entityKey: { type: "string" },
+								rows: { type: "integer" },
+							},
+							required: ["entityKey", "rows"],
+						},
+					},
+				},
+				required: [
+					"startHz",
+					"rows",
+					"lastAt",
+					"protocols",
+					"otherRows",
+					"topEntities",
+				],
+			},
+		},
+		scannedRows: { type: "integer" },
+		countedRows: { type: "integer" },
+		noFrequencyRows: { type: "integer" },
+		droppedRows: { type: "integer" },
+		truncated: { type: "boolean" },
+		truncation: truncationSchema,
+		coveredFrom: { type: "string" },
+		retentionFloor: { type: ["string", "null"] },
+		generatedAt: { type: "string" },
+	},
+	required: [
+		"producedFrom",
+		"producedTo",
+		"minHz",
+		"maxHz",
+		"bucketHz",
+		"buckets",
+		"scannedRows",
+		"countedRows",
+		"noFrequencyRows",
+		"droppedRows",
+		"truncated",
+		"truncation",
+		"coveredFrom",
+		"retentionFloor",
+		"generatedAt",
+	],
+} as const
+
+const timelineResponseSchema = {
+	type: "object",
+	properties: {
+		producedFrom: { type: "string" },
+		producedTo: { type: "string" },
+		bucketMs: { type: "integer" },
+		buckets: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					startMs: { type: "integer" },
+					total: { type: "integer" },
+					counts: {
+						type: "object",
+						additionalProperties: { type: "integer" },
+					},
+				},
+				required: ["startMs", "total", "counts"],
+			},
+		},
+		totalRows: { type: "integer" },
+		scannedRows: { type: "integer" },
+		truncated: { type: "boolean" },
+		truncation: truncationSchema,
+		coveredFrom: { type: "string" },
+		retentionFloor: { type: ["string", "null"] },
+		generatedAt: { type: "string" },
+	},
+	required: [
+		"producedFrom",
+		"producedTo",
+		"bucketMs",
+		"buckets",
+		"totalRows",
+		"scannedRows",
+		"truncated",
+		"truncation",
+		"coveredFrom",
+		"retentionFloor",
+		"generatedAt",
+	],
+} as const
+
+function invalidParam(message: string): ActivityQueryError {
+	return new ActivityQueryError(message, "ACTIVITY_QUERY_INVALID", 400)
+}
+
+/** Shared aggregate params: times, categories and protocols (comma lists or repeated). */
+function aggregateBase(
+	params: Record<string, unknown>,
+	allowed: ReadonlySet<string>,
+	label: string,
+): {
+	producedFrom?: string
+	producedTo?: string
+	categories?: ActivityCategory[]
+	protocols?: string[]
+} {
+	for (const key of Object.keys(params)) {
+		if (!allowed.has(key)) {
+			throw invalidParam(`Unknown activity ${label} parameter ${key}`)
+		}
+	}
+	const request: {
+		producedFrom?: string
+		producedTo?: string
+		categories?: ActivityCategory[]
+		protocols?: string[]
+	} = {}
+	for (const name of ["producedFrom", "producedTo"] as const) {
+		const value = params[name]
+		if (value === undefined) continue
+		if (typeof value !== "string")
+			throw invalidParam(`${name} must be a string`)
+		request[name] = value
+	}
+	if (params["categories"] !== undefined) {
+		const values = asStrings(params["categories"])
+		if (values.length > 0)
+			request.categories = values as unknown as ActivityCategory[]
+	}
+	if (params["protocols"] !== undefined) {
+		const values = asStrings(params["protocols"])
+		if (values.length > 0) request.protocols = values
+	}
+	return request
+}
+
+function bandMapRequest(params: Record<string, unknown>): ActivityBandMapQuery {
+	const request: ActivityBandMapQuery & Record<string, unknown> = aggregateBase(
+		params,
+		BANDMAP_PARAMS,
+		"bandmap",
+	)
+	for (const name of ["minHz", "maxHz", "bucketHz"] as const) {
+		const value = params[name]
+		if (value === undefined) continue
+		if (typeof value !== "string")
+			throw invalidParam(`${name} must be a string`)
+		request[name] = parseDecimalInteger(value, name)
+	}
+	return request
+}
+
+function timelineRequest(
+	params: Record<string, unknown>,
+): ActivityTimelineQuery {
+	const request: ActivityTimelineQuery & Record<string, unknown> =
+		aggregateBase(params, TIMELINE_PARAMS, "timeline")
+	const bucketMs = params["bucketMs"]
+	if (bucketMs !== undefined) {
+		if (typeof bucketMs !== "string") {
+			throw invalidParam("bucketMs must be a string")
+		}
+		request["bucketMs"] = parseDecimalInteger(bucketMs, "bucketMs")
+	}
+	const entityKey = params["entityKey"]
+	if (entityKey !== undefined) {
+		// Entity keys may contain commas: repeated parameters only, never split.
+		const raw = Array.isArray(entityKey) ? entityKey : [entityKey]
+		const keys: string[] = []
+		for (const value of raw) {
+			if (typeof value !== "string") {
+				throw invalidParam("entityKey must be a string")
+			}
+			keys.push(value)
+		}
+		if (keys.length > 0) request["entityKeys"] = keys
 	}
 	return request
 }
@@ -510,6 +749,70 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 				return await withActivityClient(
 					activityClientKey(request, options.access),
 					() => options.service.trails(query),
+				)
+			} catch (error) {
+				return sendError(reply, request, error)
+			}
+		},
+	)
+
+	fastify.get(
+		"/api/activity/bandmap",
+		{
+			schema: {
+				tags,
+				summary: "Band map: decoded rows per frequency bucket",
+				querystring: { type: "object", additionalProperties: true },
+				response: {
+					200: bandMapResponseSchema,
+					...disabledReply,
+					400: errorResponseSchema,
+					429: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const blockedReply = blocked(options, reply)
+			if (blockedReply) return blockedReply
+			try {
+				const params = request.query as Record<string, unknown>
+				const query = bandMapRequest(params)
+				return await withActivityClient(
+					activityClientKey(request, options.access),
+					() => options.service.bandMap(query),
+				)
+			} catch (error) {
+				return sendError(reply, request, error)
+			}
+		},
+	)
+
+	fastify.get(
+		"/api/activity/timeline",
+		{
+			schema: {
+				tags,
+				summary: "Timeline: rows per time bucket and category",
+				querystring: { type: "object", additionalProperties: true },
+				response: {
+					200: timelineResponseSchema,
+					...disabledReply,
+					400: errorResponseSchema,
+					429: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const blockedReply = blocked(options, reply)
+			if (blockedReply) return blockedReply
+			try {
+				const params = request.query as Record<string, unknown>
+				const query = timelineRequest(params)
+				return await withActivityClient(
+					activityClientKey(request, options.access),
+					() => options.service.timeline(query),
 				)
 			} catch (error) {
 				return sendError(reply, request, error)

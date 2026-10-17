@@ -8,8 +8,26 @@ import type {
 	ActivityQuery,
 	ActivityRefType,
 	ActivityTrailsQuery,
+	ActivityBandMapQuery,
+	ActivityTimelineQuery,
 } from "../storage/contract.js"
 import {
+	ACTIVITY_BANDMAP_DEFAULT_BUCKET_HZ,
+	ACTIVITY_BANDMAP_DEFAULT_MAX_HZ,
+	ACTIVITY_BANDMAP_DEFAULT_MIN_HZ,
+	ACTIVITY_BANDMAP_DEFAULT_WINDOW_MS,
+	ACTIVITY_BANDMAP_MAX_BUCKET_HZ,
+	ACTIVITY_BANDMAP_MAX_HZ,
+	ACTIVITY_BANDMAP_MAX_SPAN_HZ,
+	ACTIVITY_BANDMAP_MAX_WINDOW_MS,
+	ACTIVITY_BANDMAP_MIN_BUCKET_HZ,
+	ACTIVITY_TIMELINE_DEFAULT_BUCKET_MS,
+	ACTIVITY_TIMELINE_DEFAULT_WINDOW_MS,
+	ACTIVITY_TIMELINE_MAX_BUCKET_MS,
+	ACTIVITY_TIMELINE_MAX_BUCKETS,
+	ACTIVITY_TIMELINE_MAX_ENTITY_KEYS,
+	ACTIVITY_TIMELINE_MAX_WINDOW_MS,
+	ACTIVITY_TIMELINE_MIN_BUCKET_MS,
 	ACTIVITY_TRAILS_DEFAULT_WINDOW_MS,
 	ACTIVITY_TRAILS_MAX_ENTITY_KEYS,
 	ACTIVITY_TRAILS_MAX_WINDOW_MS,
@@ -420,6 +438,207 @@ export function normaliseTrailsQuery(
 		)
 	}
 	const query: NormalisedTrailsQuery = { producedFromMs, producedToMs }
+	if (raw.categories && raw.categories.length > 0) {
+		query.categories = uniqueSorted(raw.categories)
+	}
+	if (raw.protocols && raw.protocols.length > 0) {
+		query.protocols = uniqueSorted(raw.protocols)
+	}
+	if (raw.entityKeys && raw.entityKeys.length > 0) {
+		query.entityKeys = uniqueSorted(raw.entityKeys)
+	}
+	return query
+}
+
+/**
+ * Strict decimal integer: a safe non-negative integer number, or a string of 1 to 15 ASCII
+ * digits (no sign, space, fraction, exponent or hex). Anything else is 400.
+ */
+export function parseDecimalInteger(value: unknown, label: string): number {
+	if (typeof value === "number") {
+		if (Number.isSafeInteger(value) && value >= 0) return value
+	} else if (typeof value === "string" && /^\d{1,15}$/.test(value)) {
+		return Number(value)
+	}
+	throw new ActivityQueryInvalidError(
+		`${label} must be a non-negative decimal integer`,
+	)
+}
+
+const aggregateBaseShape = {
+	producedFrom: z.string().min(1).max(40).optional(),
+	producedTo: z.string().min(1).max(40).optional(),
+	categories: z.array(z.enum(CATEGORIES)).max(64).optional(),
+	protocols: z.array(idSchema).max(64).optional(),
+}
+
+const bandMapQuerySchema = z
+	.object({
+		...aggregateBaseShape,
+		minHz: z.union([z.number(), z.string()]).optional(),
+		maxHz: z.union([z.number(), z.string()]).optional(),
+		bucketHz: z.union([z.number(), z.string()]).optional(),
+	})
+	.strict()
+
+const timelineQuerySchema = z
+	.object({
+		...aggregateBaseShape,
+		bucketMs: z.union([z.number(), z.string()]).optional(),
+		entityKeys: z
+			.array(idSchema)
+			.max(ACTIVITY_TIMELINE_MAX_ENTITY_KEYS)
+			.optional(),
+	})
+	.strict()
+
+function aggregateWindow(
+	raw: { producedFrom?: string | undefined; producedTo?: string | undefined },
+	nowMs: number,
+	defaultWindowMs: number,
+	maxWindowMs: number,
+	maxLabel: string,
+): { producedFromMs: number; producedToMs: number } {
+	const producedToMs =
+		raw.producedTo === undefined
+			? nowMs
+			: parseStrictTime(raw.producedTo, "producedTo")
+	const producedFromMs =
+		raw.producedFrom === undefined
+			? producedToMs - defaultWindowMs
+			: parseStrictTime(raw.producedFrom, "producedFrom")
+	if (!representable(producedFromMs) || !representable(producedToMs)) {
+		throw new ActivityQueryInvalidError(
+			"The window is outside the representable time range",
+		)
+	}
+	if (producedFromMs > producedToMs) {
+		throw new ActivityQueryInvalidError(
+			"producedFrom must not exceed producedTo",
+		)
+	}
+	if (producedToMs - producedFromMs > maxWindowMs) {
+		throw new ActivityQueryInvalidError(
+			`The window must not exceed ${maxLabel}`,
+		)
+	}
+	return { producedFromMs, producedToMs }
+}
+
+/** Validated band map filter (the reader input, minus limits and clock). */
+export interface NormalisedBandMapQuery {
+	producedFromMs: number
+	producedToMs: number
+	minHz: number
+	maxHz: number
+	bucketHz: number
+	categories?: string[]
+	protocols?: string[]
+}
+
+export function normaliseBandMapQuery(
+	input: ActivityBandMapQuery | unknown,
+	nowMs: number,
+): NormalisedBandMapQuery {
+	const parsed = bandMapQuerySchema.safeParse(input ?? {})
+	if (!parsed.success) throw invalid(parsed.error)
+	const raw = parsed.data
+	const window = aggregateWindow(
+		raw,
+		nowMs,
+		ACTIVITY_BANDMAP_DEFAULT_WINDOW_MS,
+		ACTIVITY_BANDMAP_MAX_WINDOW_MS,
+		"72 hours",
+	)
+	const minHz =
+		raw.minHz === undefined
+			? ACTIVITY_BANDMAP_DEFAULT_MIN_HZ
+			: parseDecimalInteger(raw.minHz, "minHz")
+	const maxHz =
+		raw.maxHz === undefined
+			? ACTIVITY_BANDMAP_DEFAULT_MAX_HZ
+			: parseDecimalInteger(raw.maxHz, "maxHz")
+	const bucketHz =
+		raw.bucketHz === undefined
+			? ACTIVITY_BANDMAP_DEFAULT_BUCKET_HZ
+			: parseDecimalInteger(raw.bucketHz, "bucketHz")
+	if (minHz > maxHz) {
+		throw new ActivityQueryInvalidError("minHz must not exceed maxHz")
+	}
+	if (maxHz > ACTIVITY_BANDMAP_MAX_HZ) {
+		throw new ActivityQueryInvalidError(
+			`maxHz must not exceed ${ACTIVITY_BANDMAP_MAX_HZ}`,
+		)
+	}
+	if (maxHz - minHz > ACTIVITY_BANDMAP_MAX_SPAN_HZ) {
+		throw new ActivityQueryInvalidError(
+			`maxHz - minHz must not exceed ${ACTIVITY_BANDMAP_MAX_SPAN_HZ}`,
+		)
+	}
+	if (
+		bucketHz < ACTIVITY_BANDMAP_MIN_BUCKET_HZ ||
+		bucketHz > ACTIVITY_BANDMAP_MAX_BUCKET_HZ
+	) {
+		throw new ActivityQueryInvalidError(
+			`bucketHz must be from ${ACTIVITY_BANDMAP_MIN_BUCKET_HZ} to ${ACTIVITY_BANDMAP_MAX_BUCKET_HZ}`,
+		)
+	}
+	const query: NormalisedBandMapQuery = { ...window, minHz, maxHz, bucketHz }
+	if (raw.categories && raw.categories.length > 0) {
+		query.categories = uniqueSorted(raw.categories)
+	}
+	if (raw.protocols && raw.protocols.length > 0) {
+		query.protocols = uniqueSorted(raw.protocols)
+	}
+	return query
+}
+
+/** Validated timeline filter (the reader input, minus limits and clock). */
+export interface NormalisedTimelineQuery {
+	producedFromMs: number
+	producedToMs: number
+	bucketMs: number
+	categories?: string[]
+	protocols?: string[]
+	entityKeys?: string[]
+}
+
+export function normaliseTimelineQuery(
+	input: ActivityTimelineQuery | unknown,
+	nowMs: number,
+): NormalisedTimelineQuery {
+	const parsed = timelineQuerySchema.safeParse(input ?? {})
+	if (!parsed.success) throw invalid(parsed.error)
+	const raw = parsed.data
+	const window = aggregateWindow(
+		raw,
+		nowMs,
+		ACTIVITY_TIMELINE_DEFAULT_WINDOW_MS,
+		ACTIVITY_TIMELINE_MAX_WINDOW_MS,
+		"72 hours",
+	)
+	const bucketMs =
+		raw.bucketMs === undefined
+			? ACTIVITY_TIMELINE_DEFAULT_BUCKET_MS
+			: parseDecimalInteger(raw.bucketMs, "bucketMs")
+	if (
+		bucketMs < ACTIVITY_TIMELINE_MIN_BUCKET_MS ||
+		bucketMs > ACTIVITY_TIMELINE_MAX_BUCKET_MS
+	) {
+		throw new ActivityQueryInvalidError(
+			`bucketMs must be from ${ACTIVITY_TIMELINE_MIN_BUCKET_MS} to ${ACTIVITY_TIMELINE_MAX_BUCKET_MS}`,
+		)
+	}
+	const buckets =
+		Math.floor(window.producedToMs / bucketMs) -
+		Math.floor(window.producedFromMs / bucketMs) +
+		1
+	if (buckets > ACTIVITY_TIMELINE_MAX_BUCKETS) {
+		throw new ActivityQueryInvalidError(
+			`The window holds ${buckets} buckets; at most ${ACTIVITY_TIMELINE_MAX_BUCKETS}`,
+		)
+	}
+	const query: NormalisedTimelineQuery = { ...window, bucketMs }
 	if (raw.categories && raw.categories.length > 0) {
 		query.categories = uniqueSorted(raw.categories)
 	}

@@ -34,6 +34,8 @@ function stubService(
 		detail: fail,
 		facets: fail,
 		trails,
+		bandMap: fail,
+		timeline: fail,
 		replay: fail,
 		close: async () => {},
 	}

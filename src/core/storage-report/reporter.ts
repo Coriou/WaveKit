@@ -12,7 +12,11 @@ import type {
 	StorageReport,
 } from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
-import type { StorageReportOptions, StorageReportProvider } from "./contract.js"
+import type {
+	StorageAreaSource,
+	StorageReportOptions,
+	StorageReportProvider,
+} from "./contract.js"
 import { scanStorageAreas } from "./scan.js"
 import { DEFAULT_STORAGE_SCAN_LIMITS } from "./scan.js"
 import type { StorageScanFs, StorageScanLimits } from "./scan.js"
@@ -37,25 +41,42 @@ export function createStorageReporter(
 	internal: StorageReporterInternals = {},
 ): StorageReportProvider {
 	const order = new Map(STORAGE_AREA_IDS.map((id, i) => [id, i]))
-	const seen = new Set<string>()
-	for (const area of options.areas) {
-		if (!order.has(area.id)) {
-			throw new WaveKitError(
-				`Unknown storage area id: ${String(area.id)}`,
-				"STORAGE_AREA_INVALID",
-			)
+	/** Validated areas in STORAGE_AREA_IDS order. */
+	const ordered = (
+		sources: readonly StorageAreaSource[],
+	): StorageAreaSource[] => {
+		const seen = new Set<string>()
+		for (const area of sources) {
+			if (!order.has(area.id)) {
+				throw new WaveKitError(
+					`Unknown storage area id: ${String(area.id)}`,
+					"STORAGE_AREA_INVALID",
+				)
+			}
+			if (seen.has(area.id)) {
+				throw new WaveKitError(
+					`Duplicate storage area id: ${area.id}`,
+					"STORAGE_AREA_INVALID",
+				)
+			}
+			seen.add(area.id)
 		}
-		if (seen.has(area.id)) {
-			throw new WaveKitError(
-				`Duplicate storage area id: ${area.id}`,
-				"STORAGE_AREA_INVALID",
-			)
-		}
-		seen.add(area.id)
+		return [...sources].sort(
+			(a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
+		)
 	}
-	const areas = [...options.areas].sort(
-		(a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),
-	)
+	const areaOption = options.areas
+	// A static list fails at construction; a provider is read (and checked) per scan.
+	let currentAreas: () => StorageAreaSource[]
+	if (typeof areaOption === "function") {
+		currentAreas = () => ordered(areaOption())
+	} else {
+		const fixed = ordered(areaOption)
+		currentAreas = () => fixed
+	}
+	const minFreeOption = options.minFreeBytes
+	const currentMinFree = (): number | null =>
+		typeof minFreeOption === "function" ? minFreeOption() : minFreeOption
 	const now = options.now ?? Date.now
 	const scan = internal.scan ?? scanStorageAreas
 	const statfs = internal.statfs ?? nodeStatfs
@@ -89,6 +110,8 @@ export function createStorageReporter(
 
 	async function build(): Promise<StorageReport> {
 		const started = now()
+		const areas = currentAreas()
+		const min = currentMinFree()
 		const limits: StorageScanLimits = {
 			...DEFAULT_STORAGE_SCAN_LIMITS,
 			...internal.limits,
@@ -135,7 +158,6 @@ export function createStorageReporter(
 				retention: source.id === "activity" ? readRetention() : null,
 			}
 		})
-		const min = options.minFreeBytes
 		let state: StorageLowSpaceState = "unknown"
 		if (min !== null && filesystem !== null) {
 			state = filesystem.availableBytes < min ? "low" : "ok"

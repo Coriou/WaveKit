@@ -121,7 +121,7 @@ beforeEach(() => {
 describe("activity presentation cost on the common path (WG2 req 1, R1 A)", () => {
 	it.each([
 		["Beast aircraft", beast("4ca1d3")],
-		["SBS position needing rounding", sbsPosition("4ca1d3")],
+		["SBS position (float32 coordinates)", sbsPosition("4ca1d3")],
 		["APRS position", aprsPosition()],
 	])(
 		"a stored %s builds one envelope and one row, and a coalesced repeat is never presented",
@@ -157,10 +157,11 @@ describe("activity presentation cost on the common path (WG2 req 1, R1 A)", () =
 	it("fits an SBS position by arithmetic: no extra envelope or row is built", () => {
 		const output = sbsPosition("4ca1d3")
 		const result = presentDecoderOutputResult(output, "sbs")
-		// Rounded to fit the 160-byte coalesced bound.
+		// Fits the 240-byte coalesced bound (WG5 req 4.7) unrounded.
 		expect(result.presentation?.position).toBeDefined()
-		expect(result.presentation?.position?.lat).not.toBe(51.477500915527344)
+		expect(result.presentation?.position?.lat).toBe(51.477500915527344)
+		expect(result.presentation?.position?.altM).toBe(10_668)
 		expect(rows).not.toHaveBeenCalled()
-		expect(creates).toHaveBeenCalledTimes(1)
+		expect(creates).not.toHaveBeenCalled()
 	})
 })

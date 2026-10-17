@@ -26,6 +26,11 @@ import type * as http from "node:http"
 import { Transform, type Readable } from "node:stream"
 import { z } from "zod"
 import {
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+	LIVE_AUDIO_SQUELCH_MODES,
+	type LiveAudioSquelchMode,
+} from "@wavekit/api-types"
+import {
 	LiveDemodConfigSchema,
 	type LiveDemodConfig as BaseLiveDemodConfig,
 	type SourceCaps,
@@ -44,6 +49,10 @@ import {
 import { csdrChildEnv } from "../decoders/csdr-buffers.js"
 import { signalDecoder } from "../decoders/process-tools.js"
 import { ChannelSquelch } from "./channel-squelch.js"
+import {
+	ToneSquelchGate,
+	type ToneSquelchTone,
+} from "./audio-tones/tone-squelch.js"
 import { liveDemodTransmissionConfigChanged } from "./live-demod-activity.js"
 import {
 	DEFAULT_IQ_SAMPLE_RATE,
@@ -56,16 +65,29 @@ import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
 
-/** Local schema until Main adds these fields to startup configuration. */
+/**
+ * Runtime schema: the startup schema (with its WG7 refinements: noise squelch
+ * only on nfm/wfm, tone squelch only on nfm with a standard tone) plus the
+ * runtime defaults of the squelch keys.
+ */
 export const LiveDemodRuntimeConfigSchema = LiveDemodConfigSchema.and(
 	z.object({
-		squelchMode: z.enum(["manual", "auto"]).default("manual"),
+		squelchMode: z
+			.enum(LIVE_AUDIO_SQUELCH_MODES as [LiveAudioSquelchMode])
+			.default("manual"),
 		autoMarginDb: z.number().finite().min(0).max(40).default(6),
+		noiseQuietingDb: z
+			.number()
+			.finite()
+			.min(LIVE_AUDIO_NOISE_QUIETING_DB.min)
+			.max(LIVE_AUDIO_NOISE_QUIETING_DB.max)
+			.default(LIVE_AUDIO_NOISE_QUIETING_DB.default),
 	}),
 )
 export type LiveDemodConfig = BaseLiveDemodConfig & {
-	squelchMode?: "manual" | "auto" | undefined
+	squelchMode?: "manual" | "auto" | "noise" | undefined
 	autoMarginDb?: number | undefined
+	noiseQuietingDb?: number | undefined
 }
 export interface LiveAudioLevel {
 	sourceId: string
@@ -102,6 +124,8 @@ export interface LiveDemodStatus {
 	lastError?: string
 	/** WG4: AGC in the running chain after the modulation default. */
 	agc?: "off" | "slow" | "fast"
+	/** WG7 req 3.4: tone squelch gate state, while running. */
+	toneSquelch?: { state: "off" | "waiting" | "open" }
 }
 
 /** reconfigure() input; `agc: null` deletes the key (modulation default). */
@@ -121,7 +145,9 @@ export interface LiveDemodEvents {
 	"client-disconnected": (clientId: string) => void
 	/**
 	 * Demodulated PCM, only while something is listening (WG2 req 7.6).
-	 * The chunk is the same buffer written to audio clients.
+	 * The chunk is the buffer written to audio clients; with a tone squelch
+	 * gate (WG7 req 3.3) it is emitted unmuted, before the gate may zero it
+	 * in place, so listeners must consume it synchronously.
 	 */
 	pcm: (
 		chunk: Buffer,
@@ -159,6 +185,22 @@ interface PipelineRun {
 	sourceSampleRate: number
 	sourceFormat: SourceCaps["format"] | undefined
 	stream: StreamFormat
+	/**
+	 * WG7 tone squelch: null without a tone; `gate` null when the gate could
+	 * not be built for this run (audio stays muted: an unproven tone is absent).
+	 */
+	tone: { gate: ToneSquelchGate | null; key: string } | null
+	/**
+	 * PCM bytes delivered this run, mod 4 (a multiple of every sample width):
+	 * a gate built mid-stream starts at the stream's sample framing.
+	 */
+	pcmPhase: number
+	/**
+	 * Tone gate decision for the sample straddling the last chunk's end (true:
+	 * muted), so its remaining bytes in the next chunk get the same decision
+	 * and muting only ever zeroes whole samples.
+	 */
+	pcmTailMuted: boolean
 	noiseFloorDbfs: number | null
 	stopping: boolean
 	failed: boolean
@@ -181,6 +223,8 @@ const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"squelch",
 	"squelchMode",
 	"autoMarginDb",
+	"noiseQuietingDb",
+	"toneSquelch",
 	"iqDcBlock",
 ])
 
@@ -407,7 +451,11 @@ export class LiveDemodulator extends EventEmitter {
 		try {
 			if (this.run && validated.squelchMode !== previous.squelchMode)
 				this.run.noiseFloorDbfs = null
-			if (this.run) this.applySquelchThreshold(this.run)
+			if (this.run) {
+				this.applySquelchConfig(this.run)
+				this.applySquelchThreshold(this.run)
+				this.applyToneSquelch(this.run)
+			}
 			this.publishSquelchChange()
 
 			if (sourceChanged && this.activeSourceId) {
@@ -480,6 +528,7 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		if (this.lastError) status.lastError = this.lastError
 		status.agc = effectiveAgc(this.config.modulation, this.config.agc)
+		if (run) status.toneSquelch = { state: toneSquelchState(run) }
 
 		return status
 	}
@@ -507,6 +556,8 @@ export class LiveDemodulator extends EventEmitter {
 		const open = this.isSquelchOpen()
 		if (open === this.reportedSquelchOpen) return
 		this.reportedSquelchOpen = open
+		// WG7 req 3.2: the tone gate closes at once with the squelch.
+		if (!open) this.run?.tone?.gate?.reset()
 		this.emit("squelch-changed", open)
 	}
 
@@ -523,6 +574,44 @@ export class LiveDemodulator extends EventEmitter {
 
 	private applySquelchThreshold(run: PipelineRun): void {
 		run.squelch.setThreshold(this.effectiveThreshold(run))
+	}
+
+	/** WG7 req 2.1: gate source and quieting threshold (Node-only, no restart). */
+	private applySquelchConfig(run: PipelineRun): void {
+		run.squelch.setNoiseQuietingDb(
+			this.config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
+		)
+		run.squelch.setMode(this.config.squelchMode === "noise" ? "noise" : "power")
+	}
+
+	/** WG7 req 3.1: (re)builds the tone gate when the configured tone changes. */
+	private applyToneSquelch(run: PipelineRun): void {
+		const tone = configuredTone(this.config)
+		if (tone === null) {
+			run.tone = null
+			return
+		}
+		const key = JSON.stringify(tone)
+		if (run.tone?.key === key) return
+		const gate = this.buildToneGate(tone, run.stream.rate)
+		// Align the new gate with the byte stream it joins mid-way.
+		gate?.skip(run.pcmPhase, run.stream.format)
+		run.tone = { gate, key }
+	}
+
+	private buildToneGate(
+		tone: ToneSquelchTone,
+		rate: number,
+	): ToneSquelchGate | null {
+		try {
+			return new ToneSquelchGate(tone, rate)
+		} catch (err) {
+			this.log.warn(
+				{ err, rate },
+				"Tone squelch gate unavailable for this pipeline; live audio stays muted",
+			)
+			return null
+		}
 	}
 
 	private measureRun(run: PipelineRun): void {
@@ -543,6 +632,10 @@ export class LiveDemodulator extends EventEmitter {
 				)
 			}
 		}
+		// WG7 req 4.1: keeps the hysteresis hold band out of the channel noise.
+		// The squelch samples this estimate only while closed (it rises while
+		// open), so a held carrier is never judged against its own level.
+		run.squelch.setNoiseFloorDbfs(run.noiseFloorDbfs)
 		this.applySquelchThreshold(run)
 		this.publishSquelchChange()
 	}
@@ -843,6 +936,12 @@ export class LiveDemodulator extends EventEmitter {
 			thresholdDbfs:
 				this.config.squelchMode === "auto" ? -0.001 : this.config.squelch,
 			hangMs: SQUELCH_HANG_MS,
+			mode: this.config.squelchMode === "noise" ? "noise" : "power",
+			noiseQuietingDb:
+				this.config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
+			...(this.config.bandwidth > 0
+				? { bandwidthHz: this.config.bandwidth }
+				: {}),
 		})
 		const run: PipelineRun = {
 			front: this.spawnStage(plan.front),
@@ -858,10 +957,14 @@ export class LiveDemodulator extends EventEmitter {
 			sourceSampleRate: caps.sampleRate,
 			sourceFormat: caps.format,
 			stream,
+			tone: null,
+			pcmPhase: 0,
+			pcmTailMuted: false,
 			stopping: false,
 			failed: false,
 		}
 		this.run = run
+		this.applyToneSquelch(run)
 		this.audio.configure(stream)
 
 		this.wireRun(run)
@@ -1109,7 +1212,60 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private handleAudioData(chunk: Buffer): void {
+		const run = this.run
+		const phase = run?.pcmPhase ?? 0
+		if (run !== null) run.pcmPhase = (phase + chunk.length) % 4
+		const tone = run?.tone ?? null
+		if (run === null || tone === null) {
+			if (run !== null) run.pcmTailMuted = false
+			this.audio.write(chunk)
+			this.emitPcm(chunk)
+			return
+		}
+		// WG7 req 3.2, 3.3: the pcm listeners (transmission tone detection)
+		// see the unmuted audio; only what clients hear is muted.
+		this.emitPcm(chunk)
+		const format = run.stream.format
+		const width = format === "s16le" ? 2 : 4
+		// Bytes completing the sample split by the previous chunk: they take
+		// that sample's decision, so muting zeroes whole samples only.
+		const lead = Math.min(chunk.length, (width - (phase % width)) % width)
+		const leadMuted = run.pcmTailMuted
+		const gate = tone.gate
+		if (gate === null || !run.squelch.open) {
+			// Without a gate, or while the squelch is closed, clients hear
+			// silence. Evidence accumulates only while the squelch is open:
+			// PCM still draining from the back chain after a close must not
+			// re-arm the gate (req 3.5). Skipped bytes still advance the framing.
+			if (gate !== null) gate.skip(chunk.length, format)
+			if (leadMuted) chunk.fill(0, 0, lead)
+			if (chunk.length > lead) {
+				chunk.fill(0, lead)
+				run.pcmTailMuted = true
+			}
+		} else {
+			// The gate's state applies per slice of at most TONE_SLICE_MS that
+			// starts on a sample boundary, so a large chunk is not passed or
+			// muted whole by its final state.
+			if (lead > 0) {
+				gate.push(chunk, format, 0, lead)
+				if (leadMuted) chunk.fill(0, 0, lead)
+			}
+			const slice =
+				Math.max(1, Math.round((run.stream.rate * TONE_SLICE_MS) / 1000)) *
+				width
+			for (let start = lead; start < chunk.length; start += slice) {
+				const end = Math.min(chunk.length, start + slice)
+				gate.push(chunk, format, start, end)
+				const muted = !gate.open()
+				if (muted) chunk.fill(0, start, end)
+				run.pcmTailMuted = muted
+			}
+		}
 		this.audio.write(chunk)
+	}
+
+	private emitPcm(chunk: Buffer): void {
 		if (this.listenerCount("pcm") === 0) return
 		const stream = this.run?.stream ?? this.plannedStream()
 		let announced = this.pcmFormat
@@ -1123,4 +1279,21 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		this.emit("pcm", chunk, announced)
 	}
+}
+
+/** Tone gate decisions apply to PCM slices of at most this length (WG7 req 3.2). */
+const TONE_SLICE_MS = 10
+
+/** The configured tone of a tone squelch gate, or null (absent, `none` or not NFM). */
+function configuredTone(config: LiveDemodConfig): ToneSquelchTone | null {
+	const tone = config.toneSquelch
+	if (tone === undefined || tone.kind === "none") return null
+	if (config.modulation !== "nfm") return null
+	return tone
+}
+
+function toneSquelchState(run: PipelineRun): "off" | "waiting" | "open" {
+	if (run.tone === null) return "off"
+	if (!run.squelch.open || run.tone.gate === null) return "waiting"
+	return run.tone.gate.state
 }

@@ -31,6 +31,7 @@ import type {
 import type { Logger } from "../utils/logger.js"
 import { DecoderSpawnError } from "../utils/errors.js"
 import { createComponentLogger } from "../utils/logger.js"
+import { safeErrorFields } from "./safe-error-fields.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
 const GRACEFUL_STOP_TIMEOUT = 5000
@@ -179,10 +180,11 @@ export abstract class ExternalSdrDecoder
 
 		this.logger.info(
 			{
+				// Counts and presence only: argv and the serial are config text.
 				command,
-				args,
-				deviceSerial: this.config.deviceSerial,
-				frequencies: this.config.frequencies,
+				argCount: args.length,
+				hasDeviceSerial: this.config.deviceSerial.length > 0,
+				frequencyCount: this.config.frequencies.length,
 			},
 			"Starting external SDR decoder",
 		)
@@ -212,7 +214,7 @@ export abstract class ExternalSdrDecoder
 
 		// Handle spawn errors (e.g., command not found)
 		this.process.on("error", (err: Error) => {
-			this.logger.error({ err }, "Decoder process error")
+			this.logger.error({ err: safeErrorFields(err) }, "Decoder process error")
 			this.stats.errors++
 			if (this.listenerCount("error") > 0) {
 				this.emit("error", new DecoderSpawnError(this.id, command, err))
@@ -258,10 +260,7 @@ export abstract class ExternalSdrDecoder
 		await spawned
 		this.startTime = Date.now()
 		this.emit("started")
-		this.logger.info(
-			{ pid: this.process.pid, deviceSerial: this.config.deviceSerial },
-			"External SDR decoder started",
-		)
+		this.logger.info({ pid: this.process.pid }, "External SDR decoder started")
 	}
 
 	/**
@@ -431,7 +430,11 @@ export abstract class ExternalSdrDecoder
 	 */
 	updateOptions(updates: Record<string, unknown>): void {
 		this.config.options = { ...this.config.options, ...updates }
-		this.logger.debug({ updates }, "Decoder options updated")
+		// Count only: keys and values are option text (WG7 HW fix).
+		this.logger.debug(
+			{ updateCount: Object.keys(updates).length },
+			"Decoder options updated",
+		)
 		this.onOptionsUpdated()
 	}
 
@@ -467,7 +470,11 @@ export abstract class ExternalSdrDecoder
 				}
 			}
 		} catch (err) {
-			this.logger.warn({ line, err }, "Failed to parse decoder output")
+			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
+			this.logger.warn(
+				{ line, err: safeErrorFields(err) },
+				"Failed to parse decoder output",
+			)
 			this.stats.errors++
 		}
 	}

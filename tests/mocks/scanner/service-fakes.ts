@@ -6,8 +6,15 @@ import type {
 	DecoderConfig,
 	DecoderStatus,
 } from "../../../src/decoders/types.js"
-import { ScannerService } from "../../../src/core/scanner/scanner-service.js"
-import type { ScannerSettings } from "../../../src/core/scanner/types.js"
+import {
+	ScannerService,
+	type ScannerServiceDeps,
+} from "../../../src/core/scanner/scanner-service.js"
+import type {
+	BandPlanSkipSource,
+	DecoderCoverageView,
+	ScannerSettings,
+} from "../../../src/core/scanner/types.js"
 import type { Bandplan } from "../../../src/core/scanner/bandplan/index.js"
 import { ArbiterFakeTuner } from "./arbiter-fakes.js"
 import { FakeFanout, FakeSources, testSettings } from "./engine-fakes.js"
@@ -54,12 +61,18 @@ export function serviceHarness(
 		liveCaps?: boolean
 		decoderConfigs?: DecoderConfig[]
 		bandplans?: () => readonly Bandplan[]
+		decoderCoverage?: () => readonly DecoderCoverageView[]
+		bandPlanSkips?: () => readonly BandPlanSkipSource[]
+		ambientTrust?: ScannerServiceDeps["ambientTrust"]
+		/** Source and tuner centre (default CENTRE). */
+		centreHz?: number
 	} = {},
 ) {
+	const centre = opts.centreHz ?? CENTRE
 	const dir = opts.dir ?? mkdtempSync(join(tmpdir(), "wk-scan-"))
 	const sources = new FakeSources("rtl", {
 		sampleRate: FS,
-		centerFreq: CENTRE,
+		centerFreq: centre,
 	})
 	const configCaps = sources.getCaps("rtl")!
 	// liveCaps: false = boot before SourceManager.connect(): getCaps() is undefined until "connected"
@@ -69,7 +82,7 @@ export function serviceHarness(
 	const tuner = new ArbiterFakeTuner()
 	tuner.addSource("rtl")
 	tuner.states.get("rtl")!.sampleRate = FS
-	tuner.states.get("rtl")!.frequency = CENTRE
+	tuner.states.get("rtl")!.frequency = centre
 	// Like TunerController: a successful frequency or rate write updates the source caps before it resolves.
 	tuner.setFrequency = async (sourceId, hz, writeOpts) => {
 		await ArbiterFakeTuner.prototype.setFrequency.call(
@@ -112,6 +125,9 @@ export function serviceHarness(
 		decoderConfigs: opts.decoderConfigs ?? [],
 		region: "EU",
 		...(opts.bandplans ? { bandplans: opts.bandplans } : {}),
+		...(opts.decoderCoverage ? { decoderCoverage: opts.decoderCoverage } : {}),
+		...(opts.bandPlanSkips ? { bandPlanSkips: opts.bandPlanSkips } : {}),
+		...(opts.ambientTrust ? { ambientTrust: opts.ambientTrust } : {}),
 		stateDir: dir,
 		sources: sources as never,
 		routing: {

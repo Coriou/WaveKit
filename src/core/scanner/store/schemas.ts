@@ -45,6 +45,10 @@ export const ScannerProtocolSchema = z.enum([
 	"digital-unknown",
 	"carrier",
 	"unknown",
+	"ais",
+	"acars",
+	"vdl2",
+	"lora",
 ])
 export const ScannerClassSchema = z.enum([
 	"fsk4-12k5",
@@ -98,6 +102,10 @@ const IdentitySchema = z.object({
 		"pocsag-capcode",
 		"aprs-call",
 		"ism-model",
+		"ais-mmsi",
+		"acars-reg",
+		"vdl2-addr",
+		"lora-node",
 	]),
 	value: z.string(),
 })

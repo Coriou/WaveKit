@@ -347,6 +347,40 @@ describe("strict identify attribution projection", () => {
 				expect(parsed?.identify?.targets[0]?.result?.ended).toBe("window-moved")
 			}
 	})
+
+	it("accepts WG7 ambient trials (AIS/ACARS/VDL2/LoRa decoded by a running decoder)", () => {
+		const target = SCAN_JOB.identify!.targets[0]!
+		const parsed = guardScan("job", {
+			...wire(),
+			identify: {
+				...wire().identify,
+				targets: [
+					{
+						...target,
+						state: "identified",
+						trials: [
+							{
+								...target.trials[0]!,
+								protocol: "ais",
+								decoder: "ais-catcher",
+								transport: "ambient",
+								outcome: "decoded",
+							},
+						],
+						result: {
+							...target.result!,
+							protocol: "ais",
+							identity: { kind: "ais-mmsi", value: "244123456" },
+						},
+					},
+				],
+			},
+		})
+		expect(parsed?.identify?.targets[0]?.trials[0]?.transport).toBe("ambient")
+		expect(parsed?.identify?.targets[0]?.result?.identity?.kind).toBe(
+			"ais-mmsi",
+		)
+	})
 })
 
 it("keeps whole-window and optional-width identify requests inspectable, but cannot attribute them to exact-width submission", async () => {

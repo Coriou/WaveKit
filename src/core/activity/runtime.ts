@@ -118,6 +118,8 @@ export function inertActivityService(): ActivityQueryService {
 		detail: async () => fail(),
 		facets: async () => fail(),
 		trails: async () => fail(),
+		bandMap: async () => fail(),
+		timeline: async () => fail(),
 		replay: () => fail(),
 		close: async () => {},
 	}

@@ -46,7 +46,10 @@ export interface AnalogTransmissionPayload {
 	} | null
 	modulation: "nfm" | "wfm" | "am" | "usb" | "lsb" | "dsb" | "cw" | "raw"
 	bandwidthHz: number
-	squelchMode: "manual" | "auto"
+	/** WG7: `noise` added (web-gaps-7 req 2.4). */
+	squelchMode: "manual" | "auto" | "noise"
+	/** WG7 req 2.4: present in `noise` mode only. */
+	noiseQuietingDb?: number
 	thresholdDbfs: number
 	peakChannelPowerDbfs: number | null
 	meanChannelPowerDbfs: number | null
@@ -60,6 +63,11 @@ export interface AnalogTransmissionPayload {
 		ctcssHz: number | null
 		/** DTMF symbols `0-9*#A-D` in order, at most 32; null when none. */
 		dtmf: string | null
+		/**
+		 * WG6: DCS code and polarity, or null when none qualified. Present on transmissions
+		 * produced since WG6; absent on records stored before it.
+		 */
+		dcs?: { code: string; polarity: "normal" | "inverted" } | null
 	}
 }
 
@@ -353,7 +361,94 @@ export interface ActivityQueryService {
 	): ActivityReplayHandle
 	/** WG4 bulk position trails (docs/specs/web-gaps-4, requirement 1). */
 	trails(input: ActivityTrailsQuery): Promise<ActivityTrails>
+	/** WG5 automatic band map (docs/specs/web-gaps-5, requirements 1 and 3). */
+	bandMap(input: ActivityBandMapQuery): Promise<ActivityBandMap>
+	/** WG5 activity timeline (docs/specs/web-gaps-5, requirements 2 and 3). */
+	timeline(input: ActivityTimelineQuery): Promise<ActivityTimeline>
 	close(): Promise<void>
+}
+
+/** WG5: identical copies of the api-types aggregate DTOs (wg5-contract test asserts identity). */
+export type ActivityAggregateTruncation = "scan-rows" | "time-limit"
+export type ActivityBandMapTruncation = ActivityAggregateTruncation | "buckets"
+
+export interface ActivityBandMapQuery {
+	producedFrom?: string
+	producedTo?: string
+	minHz?: number
+	maxHz?: number
+	bucketHz?: number
+	categories?: readonly ActivityCategory[]
+	protocols?: readonly string[]
+}
+
+export interface ActivityBandMapProtocol {
+	protocol: string
+	category: ActivityCategory
+	rows: number
+	entities: number
+	lastAt: string
+}
+
+export interface ActivityBandMapEntity {
+	entityKey: string
+	rows: number
+}
+
+export interface ActivityBandMapBucket {
+	startHz: number
+	rows: number
+	lastAt: string
+	protocols: readonly ActivityBandMapProtocol[]
+	otherRows: number
+	topEntities: readonly ActivityBandMapEntity[]
+}
+
+export interface ActivityBandMap {
+	producedFrom: string
+	producedTo: string
+	minHz: number
+	maxHz: number
+	bucketHz: number
+	buckets: readonly ActivityBandMapBucket[]
+	scannedRows: number
+	countedRows: number
+	noFrequencyRows: number
+	droppedRows: number
+	truncated: boolean
+	truncation: readonly ActivityBandMapTruncation[]
+	coveredFrom: string
+	retentionFloor: string | null
+	generatedAt: string
+}
+
+export interface ActivityTimelineQuery {
+	producedFrom?: string
+	producedTo?: string
+	bucketMs?: number
+	categories?: readonly ActivityCategory[]
+	protocols?: readonly string[]
+	entityKeys?: readonly string[]
+}
+
+export interface ActivityTimelineBucket {
+	startMs: number
+	total: number
+	counts: Partial<Record<ActivityCategory, number>>
+}
+
+export interface ActivityTimeline {
+	producedFrom: string
+	producedTo: string
+	bucketMs: number
+	buckets: readonly ActivityTimelineBucket[]
+	totalRows: number
+	scannedRows: number
+	truncated: boolean
+	truncation: readonly ActivityAggregateTruncation[]
+	coveredFrom: string
+	retentionFloor: string | null
+	generatedAt: string
 }
 
 /** WG4: identical copies of the api-types trails DTOs (wg4-contract test asserts identity). */

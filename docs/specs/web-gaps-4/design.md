@@ -1,7 +1,6 @@
 # Web gaps 4 design (WG4)
 
-Status: implemented, pending gates (lanes merged and wired). Requirement 6.9 is pending a user
-decision (see "Station write layer"). Requirements in [requirements](requirements.md), tasks in
+Status: implemented. Requirement 6.9 is decided: protected-only (see "Station write layer"). Requirements in [requirements](requirements.md), tasks in
 [tasks](tasks.md). Background: the Activity store
 ([activity recording catalog](../activity-recording-catalog/requirements.md)), WG3
 ([design](../web-gaps-3/design.md): RF provenance, coverage per bearing, mesh telemetry).
@@ -22,7 +21,7 @@ decision (see "Station write layer"). Requirements in [requirements](requirement
 | `packages/api-types/src/station.ts`                                  | `StationProvenance` gains `ui`; optional `StationIdentity.revision`/`writable`; `StationField`, `STATION_FIELDS`, `StationUpdate`, `StationUpdateResult`, `StationErrorCode`, `StationErrorBody`; `STATION_ESTIMATE_ROUNDING_DEG` (0.05), `STATION_ESTIMATE_MIN_UNCERTAINTY_KM` (10), `STATION_ESTIMATE_UNCERTAINTY_STEP_KM` (5), `STATION_ESTIMATE_CACHE_MS` (60 000), `StationEstimateUnavailableReason`, `StationEstimateBasis`, `StationEstimate` (barrel exports listed in `index.ts`) |
 | `src/core/station-estimate/contract.ts` (new)                        | `STATION_ESTIMATE_WEIGHTS`, `STATION_ESTIMATE_MQTT_WEIGHT`, `STATION_ESTIMATE_MIN_ENTITIES` (10), `STATION_ESTIMATE_MIN_DIRECT` (3), `STATION_ESTIMATE_MAX_POINTS` (8 000), `STATION_ESTIMATE_MAX_ITERATIONS` (50), `STATION_ESTIMATE_MAX_POSITION_AGE_MS` (4 h), `StationEstimateSources`, `StationEstimateProvider`                                                                                                                                                                       |
 | `src/config.ts`                                                      | exported `stationOrigins(config)` and `StationConfigOrigin` (`yaml` / `env`); `stationIdentity` unchanged                                                                                                                                                                                                                                                                                                                                                                                   |
-| `src/core/station/contract.ts` (new)                                 | `STATION_WRITE_REQUIRES_ACCESS` (`true`, pending E1), `STATION_STORE_FILE`, `STATION_STORE_SCHEMA_VERSION` (1), `STATION_STORE_MAX_BYTES` (4 096), `STATION_STORE_CORRUPT_KEEP` (1), `STATION_COVERAGE_RESET_M` (1 000), `StationStoredValue`, `StationStoreFile`, `StationService`, `StationServiceOptions`                                                                                                                                                                                |
+| `src/core/station/contract.ts` (new)                                 | `STATION_WRITE_REQUIRES_ACCESS` (`true`, E1 decided), `STATION_STORE_FILE`, `STATION_STORE_SCHEMA_VERSION` (1), `STATION_STORE_MAX_BYTES` (4 096), `STATION_STORE_CORRUPT_KEEP` (1), `STATION_COVERAGE_RESET_M` (1 000), `StationStoredValue`, `StationStoreFile`, `StationService`, `StationServiceOptions`                                                                                                                                                                                |
 | `src/api/server.ts`                                                  | optional `ApiServerDependencies.storageReport`, `stationEstimate`, `stationService` (accepted, not mounted until Main wires each lane)                                                                                                                                                                                                                                                                                                                                                      |
 
 `tests/unit/core/wg4-contract.test.ts` pins the constants, the trails copy identity, the
@@ -208,11 +207,15 @@ absent, fractional or out of window → null; an old SDR host replies `"1.0.0"`,
 
 ## Station write layer (lane ST)
 
-**Pending user decision (E1).** The frozen behaviour is: a station-only persisted layer now,
-shaped as per-field value plus provenance so a future settings store can absorb it; PATCH
-mounted only in protected mode (`STATION_WRITE_REQUIRES_ACCESS = true`). The alternative
-(`false`) mounts PATCH in legacy mode too. Both are implemented and tested; the decision only
-flips the constant.
+**Decided (E1, 2026-10-16): protected-only.** A station-only persisted layer, shaped as
+per-field value plus provenance so a future settings store can absorb it; PATCH is mounted only
+in protected mode (`STATION_WRITE_REQUIRES_ACCESS = true`). Legacy mode has no caller identity,
+and the station location is persistent state that moves coverage and readsb, so an anonymous
+LAN client must not change it; band-plan import (WG5) follows the same rule. The `false` path
+(PATCH in legacy mode too) stays implemented and tested; revisit it once browser access lands.
+Amended (WG8): the WG8 decoder settings store ([web-gaps-8](../web-gaps-8/design.md)) is a
+separate layer for decoder options and `enabled`; the station layer keeps its own store and
+precedence (env > yaml > ui).
 
 **Store** (`src/core/station/store.ts`): load at open (`readFile`, size check ≤ 4 096 B, JSON
 parse, Zod schema of `StationStoreFile`, each value re-validated with the field's

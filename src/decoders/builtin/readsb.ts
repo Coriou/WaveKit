@@ -22,7 +22,15 @@ import type {
 	DecoderRateRequirements,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import {
+	readExtraArgsOption,
+	createOptionWarner,
+	readNumericOption,
+	type NumericOptionWarn,
+} from "../option-values.js"
+import { READSB_BOUNDS } from "../options/readsb.js"
 import type { RawAircraftMessage } from "@wavekit/api-types"
+import { safeErrorFields } from "../safe-error-fields.js"
 
 /** Mode S / ADS-B carrier (1090ES). */
 export const ADSB_FREQUENCY_HZ = 1_090_000_000
@@ -65,7 +73,7 @@ export interface ReadsbOptions {
 	/** RTL-TCP port for network mode (default: 1235) */
 	rtlTcpPort?: number | undefined
 	/** Gain setting for the RTL-SDR */
-	gain?: number | undefined
+	gain?: number | "auto" | undefined
 	/** PPM correction for the RTL-SDR */
 	ppm?: number | undefined
 	/** Output format: sbs, beast, or json (Requirement 22.3) */
@@ -164,6 +172,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	private options: ReadsbOptions
 	private lineBuffer: string = ""
 	private readonly station: ReadsbStationSource
+	private readonly warnOption: NumericOptionWarn
 
 	constructor(
 		config: DecoderConfig,
@@ -171,7 +180,10 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 		station: ReadsbStationSource = {},
 	) {
 		// Build the network producer config from decoder config
-		const options = parseReadsbOptions(config.options)
+		const warnOption = createOptionWarner((fields, message) =>
+			logger.warn(fields, message),
+		)
+		const options = parseReadsbOptions(config.options, warnOption)
 		const outputPort = options.outputPort ?? DEFAULT_PORTS[options.outputFormat]
 
 		const networkConfig: NetworkProducerConfig = {
@@ -183,6 +195,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 		super(networkConfig, logger)
 		this.options = options
+		this.warnOption = warnOption
 		this.station = typeof station === "function" ? station : { ...station }
 	}
 
@@ -197,7 +210,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 				station = this.station()
 			} catch (error: unknown) {
 				this.logger.warn(
-					{ err: error },
+					{ err: safeErrorFields(error) },
 					"Station location lookup failed; starting readsb without it",
 				)
 				return {}
@@ -242,7 +255,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 * If rtlTcpHost is configured, we use network mode where readsb controls the sample rate.
 	 */
 	protected override onOptionsUpdated(): void {
-		this.options = parseReadsbOptions(this.config.options)
+		this.options = parseReadsbOptions(this.config.options, this.warnOption)
 	}
 
 	protected getArgs(): string[] {
@@ -562,6 +575,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 				}
 			} catch {
 				// Skip invalid JSON lines
+				// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
 				this.logger.debug({ line: trimmed }, "Failed to parse JSON line")
 			}
 		}
@@ -585,28 +599,56 @@ function coordinate(value: unknown, limit: number): number | undefined {
 /**
  * Parses and validates decoder options from config.
  */
-function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
+function parseReadsbOptions(
+	options: Record<string, unknown>,
+	warn: NumericOptionWarn,
+): ReadsbOptions {
+	const port = (key: string) =>
+		readNumericOption(
+			options[key],
+			{ key, integer: true, ...READSB_BOUNDS.port },
+			warn,
+		)
 	const outputFormat = (options["outputFormat"] as ReadsbOutputFormat) ?? "sbs"
 
 	return {
-		inputSampleRate: options["inputSampleRate"] as number | undefined,
+		inputSampleRate: readNumericOption(
+			options["inputSampleRate"],
+			{
+				key: "inputSampleRate",
+				integer: false,
+				...READSB_BOUNDS.sampleRateHz,
+			},
+			warn,
+		),
 		device: options["device"] as string | undefined,
 		deviceSerial: options["deviceSerial"] as string | undefined,
 		rtlTcpHost: options["rtlTcpHost"] as string | undefined,
-		rtlTcpPort: options["rtlTcpPort"] as number | undefined,
-		gain: options["gain"] as number | undefined,
-		ppm: options["ppm"] as number | undefined,
+		rtlTcpPort: port("rtlTcpPort"),
+		gain:
+			options["gain"] === "auto"
+				? "auto"
+				: readNumericOption(
+						options["gain"],
+						{ key: "gain", integer: false, ...READSB_BOUNDS.gainDb },
+						warn,
+					),
+		ppm: readNumericOption(
+			options["ppm"],
+			{ key: "ppm", integer: false, ...READSB_BOUNDS.ppm },
+			warn,
+		),
 		outputFormat:
 			outputFormat === "sbs" ||
 			outputFormat === "beast" ||
 			outputFormat === "json"
 				? outputFormat
 				: "sbs",
-		outputPort: options["outputPort"] as number | undefined,
+		outputPort: port("outputPort"),
 		enableMlat: options["enableMlat"] as boolean | undefined,
 		lat: coordinate(options["lat"], 90),
 		lon: coordinate(options["lon"], 180),
-		extraArgs: options["extraArgs"] as string[] | undefined,
+		extraArgs: readExtraArgsOption(options["extraArgs"], warn),
 	}
 }
 

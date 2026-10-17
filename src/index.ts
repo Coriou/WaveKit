@@ -20,7 +20,7 @@ import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
 import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
 import { WaveKitError } from "./utils/errors.js"
 import { PassThrough } from "node:stream"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import {
 	loadConfig,
@@ -64,6 +64,12 @@ import type {
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
 import { ScannerService } from "./core/scanner/scanner-service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
+import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
+import { bandPlanSkipSources } from "./core/scanner/plan/bandplan-skips.js"
+import { ambientTrustFromBinding } from "./core/scanner/probes/ambient-trust.js"
+import { createBandPlanUrlFetcher } from "./core/bandplan-url/fetch.js"
+import { BANDPLAN_URL_IMPORT_HOSTS } from "@wavekit/api-types"
+import { APP_VERSION } from "./api/routes/health.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { createDecoderManagerOptions } from "./decoders/manager-options.js"
@@ -96,6 +102,7 @@ import {
 import { createRtl433Decoder, RTL433_CAPS } from "./decoders/builtin/rtl433.js"
 import { readsbDecoderFactory, READSB_CAPS } from "./decoders/builtin/readsb.js"
 import { createDecoderProvenanceIndex } from "./decoders/provenance-bindings.js"
+import type { ActivityProvenanceLookup } from "./core/activity/types.js"
 import { CoverageManager } from "./core/coverage/coverage-manager.js"
 import {
 	createAcarsdecDecoder,
@@ -127,12 +134,21 @@ import { MeshTrackingManager } from "./core/mesh-tracking-manager.js"
 import { AprsTrackingManager } from "./core/aprs-tracking-manager.js"
 import { createStationEstimator } from "./core/station-estimate/provider.js"
 import { openStationService } from "./core/station/station-service.js"
+import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
+import { createRecordingInventory } from "./core/recordings/inventory.js"
+import type {
+	DecoderSettingsManagerPort,
+	DecoderSettingsService,
+} from "./decoders/settings/contract.js"
+import { openDecoderSettingsService } from "./decoders/settings/service.js"
+import { toApiDecoderStatus } from "./api/serializers/decoder-status.js"
 import { STATION_WRITE_REQUIRES_ACCESS } from "./core/station/contract.js"
 import { createStorageReporter } from "./core/storage-report/reporter.js"
 import {
 	activityRetentionFromStats,
+	dsdFmeRecordingDir,
+	liveStorageReportSources,
 	storageActivityLimits,
-	storageAreasFromConfig,
 } from "./core/storage-report/areas-from-config.js"
 import {
 	tunerFrequencyAt,
@@ -159,10 +175,10 @@ const startTime = Date.now()
  * @param log - Logger instance
  * @returns Cleanup function to detach audio sources
  */
-function wireDecoderAudioToOutput(
-	decoderManager: DecoderManager,
-	fanoutManager: FanoutManager,
-	audioOutput: AudioOutput,
+export function wireDecoderAudioToOutput(
+	decoderManager: Pick<DecoderManager, "on" | "getDecoder" | "getAllDecoders">,
+	fanoutManager: Pick<FanoutManager, "addBranch">,
+	audioOutput: Pick<AudioOutput, "attachSource" | "detachSource">,
 	config: Config, // Added config parameter
 	log: Logger,
 ): () => void {
@@ -189,6 +205,10 @@ function wireDecoderAudioToOutput(
 		const decoder = decoderManager.getDecoder(decoderId)
 		if (!decoder) return
 
+		// WG8: a rebuilt instance (staged settings, next start) replaces the one piped before
+		const piped = pipedDecoders.get(decoderId)
+		if (piped !== undefined && piped !== decoder) unwireDecoderAudio(decoderId)
+
 		const audioStream = decoder.getAudioOutput()
 		if (audioStream && !pipedDecoders.has(decoderId)) {
 			audioStream.pipe(combinedAudioStream, { end: false })
@@ -211,6 +231,14 @@ function wireDecoderAudioToOutput(
 			log.debug({ decoderId }, "Decoder audio output unwired from AudioOutput")
 		}
 	}
+
+	// WG8: drop a replaced instance's audio pipe as soon as the rebuild is announced
+	// (decoder:created with a known id); decoder:started then wires the new instance.
+	decoderManager.on("decoder:created", (decoderId: string) => {
+		const piped = pipedDecoders.get(decoderId)
+		if (piped !== undefined && piped !== decoderManager.getDecoder(decoderId))
+			unwireDecoderAudio(decoderId)
+	})
 
 	// Wire audio when decoders start
 	decoderManager.on("decoder:started", (decoderId: string) => {
@@ -258,6 +286,78 @@ interface ScannerRuntimePhaseDependencies {
 	stopChannelizer(): Promise<void>
 	attemptLocalCleanup(): Promise<readonly CleanupOutcome[]>
 	finalizeStopNative(producerOutcome: CleanupOutcome): Promise<void>
+}
+
+/**
+ * WG8 req 1.5: the decoder configurations created at boot, override applied (`enabled` and
+ * patchable options). Without a settings file each entry deep-equals the configured one.
+ */
+export function effectiveDecoderConfigs(
+	settings: Pick<DecoderSettingsService, "effectiveConfig">,
+	configs: readonly DecoderConfig[],
+): DecoderConfig[] {
+	return configs.map(c => settings.effectiveConfig(c))
+}
+
+/**
+ * WG8 req 3.1: a rebuild at next start announces the new instance with decoder:created (same
+ * id) before decoder:started. Digital voice follows the new instance once; attachDecoder
+ * detaches the replaced instance's listener first. Only ids in `attached` (configured decoders
+ * attached at boot) are followed: scanner probes attach in the probe pool.
+ */
+export function followRebuiltVoiceDecoders(
+	decoderManager: Pick<DecoderManager, "on" | "getDecoder">,
+	digitalVoice: Pick<DigitalVoiceService, "attachDecoder">,
+	attached: Map<string, Decoder>,
+): void {
+	decoderManager.on("decoder:created", (decoderId: string) => {
+		const previous = attached.get(decoderId)
+		if (previous === undefined) return
+		const decoder = decoderManager.getDecoder(decoderId)
+		if (decoder === undefined || decoder === previous) return
+		digitalVoice.attachDecoder(decoderId, decoder)
+		attached.set(decoderId, decoder)
+	})
+}
+
+/**
+ * WG8 req 2.4: the settings service's view of the DecoderManager. The port speaks the API
+ * status DTO (the service reads only `owner`); staging goes straight to the manager.
+ */
+export function decoderSettingsPort(
+	decoderManager: Pick<
+		DecoderManager,
+		"getStatus" | "stageDecoderOptions" | "isRestartPending"
+	>,
+): DecoderSettingsManagerPort {
+	return {
+		getStatus: id => {
+			const status = decoderManager.getStatus(id)
+			return status === undefined ? undefined : toApiDecoderStatus(status)
+		},
+		stageDecoderOptions: (id, options) =>
+			decoderManager.stageDecoderOptions(id, options),
+		isRestartPending: id => decoderManager.isRestartPending(id),
+	}
+}
+
+/**
+ * WG8 req 4.1: the dsd-fme per-call recording directories of the configured decoders (scanner
+ * probes are not configured decoders), sorted by decoder id so inventory ids stay stable.
+ */
+export function recordingDsdFmeDirs(
+	decoderManager: Pick<DecoderManager, "getConfiguredDecoderConfigs">,
+): { decoderId: string; dir: string }[] {
+	return decoderManager
+		.getConfiguredDecoderConfigs()
+		.filter(c => c.type === "dsd-fme")
+		.flatMap(c => {
+			const dir = dsdFmeRecordingDir(c.options)
+			return dir === null ? [] : [{ decoderId: c.id, dir }]
+		})
+		.sort((a, b) =>
+			a.decoderId < b.decoderId ? -1 : a.decoderId > b.decoderId ? 1 : 0,
+		)
 }
 
 /** Actual phase promises remain authoritative even when a caller races a timeout. */
@@ -785,6 +885,15 @@ async function main(): Promise<void> {
 		})
 		own(12, () => stationService.close())
 		checkpoint()
+		// WG8 req 1-3: decoder settings overrides (<stateDir>/decoder-settings.json), loaded in
+		// both modes; read-only until the manager port is set. Export stays YAML-only.
+		const decoderSettings = await openDecoderSettingsService({
+			configs: config.decoders,
+			stateDir: config.stateDir,
+			logger,
+		})
+		own(12, () => decoderSettings.close())
+		checkpoint()
 		const decoderRegistry = new DecoderRegistry()
 		const decoderManager = new DecoderManager(
 			decoderRegistry,
@@ -795,6 +904,8 @@ async function main(): Promise<void> {
 		)
 
 		runtimeDecoders = decoderManager
+		// WG8 req 2.4: PATCH stages effective option values on the manager (next start)
+		decoderSettings.setManager(decoderSettingsPort(decoderManager))
 
 		// Wire DecoderManager to SourceManager for dynamic sample rate handling
 		decoderManager.setSourceManager(sourceManager, sourceRouting)
@@ -883,9 +994,15 @@ async function main(): Promise<void> {
 
 		// Step 7: Create decoders from configuration. dsd-fme decoders are first
 		// pointed at the digital voice stream (-o udp to a local socket).
-		let decoderConfigs: DecoderConfig[] = config.decoders
+		// Overrides apply BEFORE the digital-voice preparation, which rewrites dsd-fme output.
+		const effectiveDecoders = effectiveDecoderConfigs(
+			decoderSettings,
+			config.decoders,
+		)
+		let decoderConfigs: DecoderConfig[] = effectiveDecoders
 		try {
-			decoderConfigs = await digitalVoice.prepareDecoderConfigs(config.decoders)
+			decoderConfigs =
+				await digitalVoice.prepareDecoderConfigs(effectiveDecoders)
 			checkpoint()
 		} catch (err) {
 			if (stopping) throw err
@@ -894,10 +1011,13 @@ async function main(): Promise<void> {
 				"Digital voice setup failed; decoders keep their output",
 			)
 		}
+		// Configured instances digital voice follows; scanner probes attach in the probe pool.
+		const voiceAttached = new Map<string, Decoder>()
 		for (const decoderConfig of decoderConfigs) {
 			try {
 				const decoder = decoderManager.createDecoder(decoderConfig)
 				digitalVoice.attachDecoder(decoderConfig.id, decoder)
+				voiceAttached.set(decoderConfig.id, decoder)
 				log.info(
 					{ decoderId: decoderConfig.id, type: decoderConfig.type },
 					"Decoder created",
@@ -915,6 +1035,9 @@ async function main(): Promise<void> {
 			}
 		}
 
+		// WG8 req 3.1: re-attach digital voice to a rebuilt instance. Registered before startAll.
+		followRebuiltVoiceDecoders(decoderManager, digitalVoice, voiceAttached)
+
 		// Step 7b: Signal discovery scanner + core spectrum service (docs/SCANNER.md).
 		// Built after the decoders and digital voice so probes and ambient evidence
 		// can attach, and started before any source connects, so a persisted tuner
@@ -931,6 +1054,10 @@ async function main(): Promise<void> {
 		const bandPlanLog = createComponentLogger(logger, "BandPlans")
 		let bandPlanService: BandPlanService | undefined
 		let bandPlanViewWarned = false
+		let bandPlanSkipsWarned = false
+		// WG7 req 1.3: the decoder provenance index is built after the scanner starts; until then
+		// ambient AIS/ACARS/VDL2/LoRa decodes have no trust and are no evidence (fail closed).
+		let ambientProvenance: ActivityProvenanceLookup | null = null
 		const scannerBandplans = createScannerBandplanProvider(
 			() => bandPlanService?.view(),
 			bandRegion.code,
@@ -944,6 +1071,24 @@ async function main(): Promise<void> {
 			},
 		)
 		const { channelTier, ...scannerSettings } = config.scanner
+		// WG8 req 5.2: the host bins cap, resolved once (bounded bench, or the configured value)
+		const spectrumBinsCap = resolveSpectrumBinsCap(
+			config.scanner.ws.spectrumBinsCap ?? "auto",
+		)
+		log.info(
+			{
+				setting: spectrumBinsCap.setting,
+				cap: spectrumBinsCap.cap,
+				source: spectrumBinsCap.source,
+				wallMs: spectrumBinsCap.wallMs,
+			},
+			"Spectrum bins cap resolved",
+		)
+		const spectrumBinsCapView = Object.freeze({
+			setting: spectrumBinsCap.setting,
+			cap: spectrumBinsCap.cap,
+			source: spectrumBinsCap.source,
+		})
 		try {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
@@ -964,6 +1109,7 @@ async function main(): Promise<void> {
 					: {}),
 				sourceConfigs: config.sources,
 				decoderConfigs,
+				spectrumBinsCap: () => spectrumBinsCapView,
 				region: bandRegion.code,
 				bandplans: scannerBandplans,
 				stateDir: config.stateDir,
@@ -971,6 +1117,46 @@ async function main(): Promise<void> {
 				routing: sourceRouting,
 				tuner: tunerController,
 				decoders: decoderManager,
+				// WG6 req 1.1: read once per plan; the mapper and the plan fail closed (a
+				// decoder counts only when its own running state and band assessment prove it).
+				decoderCoverage: () => {
+					try {
+						const defaultSourceId = sourceRouting.getDefaultSourceId() ?? null
+						return decoderManager
+							.getAllStatus()
+							.map(s => toDecoderCoverageView(s, defaultSourceId))
+					} catch (err) {
+						log.warn(
+							protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+							"Decoder statuses unavailable; plans claim no decoded-elsewhere ranges",
+						)
+						return []
+					}
+				},
+				// WG7 req 6.2, 6.6: skip-marked band-plan segments, read once per plan (legacy and
+				// protected mode alike). Fails closed: no band-plan service yet, or a throwing
+				// view, means no skips (logged once).
+				bandPlanSkips: () => {
+					try {
+						return bandPlanService
+							? bandPlanSkipSources(bandPlanService.resolved())
+							: []
+					} catch (err) {
+						if (!bandPlanSkipsWarned) {
+							bandPlanSkipsWarned = true
+							bandPlanLog.warn(
+								protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+								"Band-plan view unavailable; plans apply no band-plan skips",
+							)
+						}
+						return []
+					}
+				},
+				// WG7 req 1.3: the decoder's own provenance binding; only commanded/relay, on the very
+				// source the ambient target names, at a frequency within 1 kHz of a binding target
+				// (the frequencies trust was proven for). Anything else: undefined (fail closed).
+				ambientTrust: (decoderId, hz, sourceId) =>
+					ambientTrustFromBinding(ambientProvenance?.(decoderId), hz, sourceId),
 				digitalVoice,
 				liveDemod,
 				operatorActivity: liveDemodOperatorActivity(liveDemod),
@@ -1220,12 +1406,16 @@ async function main(): Promise<void> {
 		own(15, disposeReceiverAfterApi)
 
 		// WG3 req 5: RF provenance on receptions from each decoder's binding (config and
-		// scanner probes alike), kept current on decoder create/remove. tuningTrust is
-		// "unverified" for every decoder (Main decision on req 5.3).
-		const decoderProvenance = createDecoderProvenanceIndex(decoderManager, () =>
-			sourceRouting.getDefaultSourceId(),
+		// scanner probes alike), kept current on decoder create/remove. WG5 req 6:
+		// tuningTrust is "commanded" (internal control) or "relay" (external) when the
+		// observed tuner state proves the decoder hears its targets, else "unverified".
+		const decoderProvenance = createDecoderProvenanceIndex(
+			decoderManager,
+			() => sourceRouting.getDefaultSourceId(),
+			tunerController,
 		)
 		own(8, () => decoderProvenance.dispose())
+		ambientProvenance = decoderProvenance.lookup
 
 		// Activity runs when config.activity.enabled (the default). A failed probe or open
 		// logs and leaves the rest of WaveKit running.
@@ -1243,32 +1433,48 @@ async function main(): Promise<void> {
 		own(8, () => activity.close())
 		checkpoint()
 
-		// WG4 req 3: storage report over the areas WaveKit writes. Areas follow the
-		// startup config; Activity retention is read per report (null when disabled,
-		// a throwing stats() reports retention: null).
+		// WG4 req 3: storage report over the areas WaveKit writes. Areas and the low-space
+		// threshold are read at each scan (cache misses), so runtime scanner settings and
+		// the scanner's presence show; Activity retention is read per report (null when
+		// disabled, a throwing stats() reports retention: null). Scanner probes record
+		// inside scanner storage, already its area.
 		const activityLimits = storageActivityLimits(config.activity.retention)
 		const accessDirectory = access
 			? (process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? null)
 			: null
+		const storageSources = liveStorageReportSources({
+			stateDir: config.stateDir,
+			activityMaxDbBytes: activityLimits?.maxDbBytes ?? null,
+			scannerStorage: config.scanner.storage,
+			scanner: () => scanner,
+			decoders: () => decoderManager.getConfiguredDecoderConfigs(),
+			accessDirectory,
+			logsDir: config.logging.dir,
+		})
 		const storageReport = createStorageReporter({
 			stateDir: config.stateDir,
-			areas: storageAreasFromConfig({
-				stateDir: config.stateDir,
-				activityMaxDbBytes: activityLimits?.maxDbBytes ?? null,
-				scannerStorage: config.scanner.storage,
-				scannerEnabled: scanner !== null,
-				decoders: config.decoders,
-				accessDirectory,
-				logsDir: config.logging.dir,
-			}),
+			areas: storageSources.areas,
 			activityRetention: () =>
 				activity.status === "disabled" || activityLimits === null
 					? null
 					: activityRetentionFromStats(activity.stats(), activityLimits),
-			minFreeBytes:
-				scanner !== null
-					? config.scanner.storage.minFreeDiskMb * 1024 * 1024
-					: null,
+			minFreeBytes: storageSources.minFreeBytes,
+		})
+		// WG8 req 4: read-only recordings inventory (protected routes only). dsd-fme per-call
+		// directories of the configured decoders (probes excluded), sorted by decoder id; the
+		// scanner's recordings root as its service resolves it, none without a scanner.
+		const recordingInventory = createRecordingInventory({
+			dsdFmeDirs: () => recordingDsdFmeDirs(decoderManager),
+			scannerRecordingsDir: () => {
+				if (scanner === null) return null
+				const storage = scanner.settings().storage
+				return join(
+					resolve(storage.dir ?? join(config.stateDir, "scanner")),
+					"recordings",
+				)
+			},
+			discoveryCentreHz: id => scanner?.getDiscovery(id)?.frequencyHz ?? null,
+			logger,
 		})
 
 		// Band plans never stop core: a storage failure leaves built-ins readable.
@@ -1281,6 +1487,13 @@ async function main(): Promise<void> {
 				effectiveCountry: stationService.identity().effectiveCountry,
 			},
 			writable: protectedMode,
+			// WG6 req 5: URL import and update checks; the service turns them off unless writable
+			// (protected mode), so the legacy service advertises `urlImportHosts: []`.
+			urlFetcher: createBandPlanUrlFetcher({
+				userAgent: `WaveKit/${APP_VERSION}`,
+				logger,
+			}),
+			urlImportHosts: BANDPLAN_URL_IMPORT_HOSTS,
 			onCommit: event => publishBandPlans?.(event),
 			onStoreUnavailable: reason => {
 				bandPlanLog.warn({ reason }, "Band-plan store unavailable")
@@ -1299,6 +1512,10 @@ async function main(): Promise<void> {
 				activity,
 				station: stationService.identity(),
 				stationService,
+				// WG8 req 2: mounted by the server only in protected mode (the access controller)
+				decoderSettings,
+				// WG6 req 7: the validated config with env overrides, as the runtime uses it.
+				getConfig: () => config,
 				regionalRegistry,
 				receiverCapabilitiesProvider,
 				sourceManager,
@@ -1319,6 +1536,7 @@ async function main(): Promise<void> {
 				aprsTracker: aprsTrackingManager.getTracker(),
 				stationEstimate,
 				storageReport,
+				recordingInventory,
 				scanner: scanner ?? undefined,
 				spectrum: scanner?.spectrum,
 				logger,
@@ -1497,6 +1715,15 @@ async function main(): Promise<void> {
 			name: "station",
 			handler: async () => {
 				await stationService.close()
+			},
+			timeout: 2000,
+		})
+
+		// Same position: no settings PATCH is in flight once the API server has stopped
+		shutdown.register({
+			name: "decoder-settings",
+			handler: async () => {
+				await decoderSettings.close()
 			},
 			timeout: 2000,
 		})

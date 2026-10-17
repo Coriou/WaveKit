@@ -25,12 +25,18 @@ export interface StorageAreaSource {
 export interface StorageReportOptions {
 	/** The filesystem reported is the one holding stateDir. */
 	stateDir: string
-	/** In STORAGE_AREA_IDS order; ids unique. */
-	areas: readonly StorageAreaSource[]
+	/**
+	 * Ids unique. A function is evaluated at each scan (cache misses only), so areas
+	 * follow runtime changes; a static list is validated at construction.
+	 */
+	areas: readonly StorageAreaSource[] | (() => readonly StorageAreaSource[])
 	/** Activity limits and usage; null or throwing means `retention: null` on the activity area. */
 	activityRetention?: () => StorageActivityRetention | null
-	/** Scanner evidence minFreeDiskMb in bytes; null when the scanner is not configured. */
-	minFreeBytes: number | null
+	/**
+	 * Scanner evidence minFreeDiskMb in bytes; null when the scanner is not configured.
+	 * A function is evaluated at each scan, like `areas`.
+	 */
+	minFreeBytes: number | null | (() => number | null)
 	now?: () => number
 }
 

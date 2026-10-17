@@ -412,7 +412,7 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.isSquelchOpen()).toBe(false)
 	})
 
-	it("changes auto squelch live, retaining processes and rejecting unsupported noise mode", async () => {
+	it("changes auto squelch live, retaining processes and rejecting an unknown mode", async () => {
 		await liveDemod.start()
 		await liveDemod.reconfigure({ squelchMode: "auto", autoMarginDb: 6 })
 		const quiet = Buffer.alloc(250 * 8)
@@ -428,9 +428,10 @@ describe("LiveDemodulator", () => {
 		await liveDemod.reconfigure({ squelchMode: "manual", squelch: 0 })
 		expect(liveDemod.getStatus().thresholdDbfs).toBe(0)
 		expect(spawnMock).toHaveBeenCalledTimes(2)
+		// WG7: "noise" is a mode now (live-demodulator-wg7.test.ts); unknown modes stay refused.
 		await expect(
 			liveDemod.reconfigure({
-				squelchMode: "noise",
+				squelchMode: "loud",
 			} as unknown as Partial<LiveDemodConfig>),
 		).rejects.toThrow()
 		await expect(liveDemod.reconfigure({ autoMarginDb: 41 })).rejects.toThrow()

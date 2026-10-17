@@ -24,7 +24,7 @@ class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 	running = true
 	squelchOpen = false
 	squelch = -40
-	squelchMode: "manual" | "auto" = "manual"
+	squelchMode: "manual" | "auto" | "noise" = "manual"
 	sourceId = "rtl0"
 	/** When set, config events omit sourceId while status keeps `sourceId`. */
 	omitConfiguredSourceId = false
@@ -468,10 +468,11 @@ describe("analog transmission tracker", () => {
 		source.emit("pcm", Buffer.alloc(2), { rate: 8_000, format: "s16le" })
 		source.gate(false)
 		expect(events[0]).not.toHaveProperty("tone")
-		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: "5" })
+		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: "5", dcs: null })
 		expect(toActivityPayload(events[1]!).tone).toEqual({
 			ctcssHz: null,
 			dtmf: "5",
+			dcs: null,
 		})
 
 		const held = harness({
@@ -488,7 +489,7 @@ describe("analog transmission tracker", () => {
 			format: "s16le",
 		})
 		held.source.gate(false)
-		expect(held.events[1]?.tone).toEqual({ ctcssHz: 100, dtmf: "5" })
+		expect(held.events[1]?.tone).toEqual({ ctcssHz: 100, dtmf: "5", dcs: null })
 	})
 
 	it("keeps detecting across an odd s16le split and a close on the remainder", () => {
@@ -511,10 +512,11 @@ describe("analog transmission tracker", () => {
 		})
 		source.gate(false)
 		expect(events[0]).not.toHaveProperty("tone")
-		expect(events[1]?.tone).toEqual({ ctcssHz: 100, dtmf: null })
+		expect(events[1]?.tone).toEqual({ ctcssHz: 100, dtmf: null, dcs: null })
 		expect(toActivityPayload(events[1]!).tone).toEqual({
 			ctcssHz: 100,
 			dtmf: null,
+			dcs: null,
 		})
 		expect(source.listenerCount("pcm")).toBe(0)
 
@@ -525,7 +527,11 @@ describe("analog transmission tracker", () => {
 			format: "s16le",
 		})
 		mid.source.gate(false)
-		expect(mid.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(mid.events[1]?.tone).toEqual({
+			ctcssHz: null,
+			dtmf: null,
+			dcs: null,
+		})
 		expect(mid.source.listenerCount("pcm")).toBe(0)
 	})
 
@@ -542,7 +548,7 @@ describe("analog transmission tracker", () => {
 		source.gate(true)
 		source.emit("pcm", tone.pcm, { rate: tone.rate, format: tone.format })
 		source.gate(false)
-		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: "5" })
+		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: "5", dcs: null })
 	})
 
 	it("survives a throwing detector, a throwing factory, and NaN samples", () => {
@@ -572,7 +578,11 @@ describe("analog transmission tracker", () => {
 			"open",
 			"closed",
 		])
-		expect(throwing.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(throwing.events[1]?.tone).toEqual({
+			ctcssHz: null,
+			dtmf: null,
+			dcs: null,
+		})
 		expect(throwing.source.listenerCount("pcm")).toBe(0)
 
 		const factory = harness({
@@ -584,7 +594,11 @@ describe("analog transmission tracker", () => {
 		factory.source.emit("pcm", Buffer.alloc(4), format)
 		factory.source.gate(false)
 		expect(factory.tracker.toneErrors()).toBe(1)
-		expect(factory.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(factory.events[1]?.tone).toEqual({
+			ctcssHz: null,
+			dtmf: null,
+			dcs: null,
+		})
 
 		const result = harness({
 			createToneDetector: () => ({
@@ -599,7 +613,11 @@ describe("analog transmission tracker", () => {
 		result.source.emit("pcm", Buffer.alloc(4), format)
 		result.source.gate(false)
 		expect(result.tracker.toneErrors()).toBe(1)
-		expect(result.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(result.events[1]?.tone).toEqual({
+			ctcssHz: null,
+			dtmf: null,
+			dcs: null,
+		})
 
 		const nan = harness()
 		const samples = Buffer.alloc(16)
@@ -609,7 +627,11 @@ describe("analog transmission tracker", () => {
 			nan.source.emit("pcm", samples, { rate: 8_000, format: "f32le" }),
 		).not.toThrow()
 		nan.source.gate(false)
-		expect(nan.events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(nan.events[1]?.tone).toEqual({
+			ctcssHz: null,
+			dtmf: null,
+			dcs: null,
+		})
 		expect(nan.tracker.toneErrors()).toBe(0)
 	})
 
@@ -622,7 +644,7 @@ describe("analog transmission tracker", () => {
 		})
 		tracker.stop()
 		expect(events[1]).toMatchObject({ closeReason: "stopped" })
-		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null })
+		expect(events[1]?.tone).toEqual({ ctcssHz: null, dtmf: null, dcs: null })
 		expect(source.listenerCount("pcm")).toBe(0)
 		expect(() =>
 			source.emit("pcm", Buffer.alloc(4), { rate: 8_000, format: "s16le" }),

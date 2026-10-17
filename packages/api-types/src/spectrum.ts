@@ -82,7 +82,10 @@ export interface SpectrumSubscribeOptions {
 	sourceId: string
 	/** 0.5–25, snapped to 0.5 Hz; default `scanner.ws.spectrumHz`. */
 	hz?: number
-	/** 128–2048, rounded to an integer; default `scanner.ws.spectrumBins`. */
+	/**
+	 * 128 to SpectrumLimits.bins.max (2048 unless the host cap and summary budget allow more,
+	 * WG8), rounded to an integer; default `scanner.ws.spectrumBins`.
+	 */
 	bins?: number
 	/**
 	 * Per-client averaging (WG1): exponential average over this many frames of the profile, in the dBFS
@@ -162,10 +165,46 @@ export interface SpectrumActiveProfile extends SpectrumProfileView {
 	effectiveHz: number | null
 }
 
+/**
+ * WG8 (docs/specs/web-gaps-8, requirement 5): `scanner.ws.spectrumBinsCap`. "auto" (also when
+ * the key is absent) measures the host once at startup; a number fixes the cap.
+ */
+export type SpectrumBinsCapSetting = "auto" | 2048 | 4096 | 8192
+export const SPECTRUM_BINS_CAP_SETTINGS: readonly SpectrumBinsCapSetting[] =
+	Object.freeze(["auto", 2048, 4096, 8192])
+/** WG8 req 5.2: the caps "auto" may pick, ascending; the first is the floor (never measured). */
+export const SPECTRUM_BINS_CAP_CHOICES: readonly (2048 | 4096 | 8192)[] =
+	Object.freeze([2048, 4096, 8192])
+export const SPECTRUM_BINS_CAP_FLOOR = 2048
+export const SPECTRUM_BINS_CAP_CEILING = 8192
+/** WG8 req 5.3: upper bound of `scanner.ws.spectrumSummaryBins` once the worker carries it. */
+export const SPECTRUM_SUMMARY_BINS_MAX = 8192
+/**
+ * WG8 req 5.2: host budgets of one source's summary stream at a candidate cap. The measured
+ * cost times `margin` must fit every budget; `benchWallMs` bounds the whole startup bench.
+ */
+export const SPECTRUM_BINS_BUDGET = Object.freeze({
+	summaryBytesPerSecond: 512 * 1024,
+	cloneMsPerSecond: 10,
+	profileMsPerSecond: 5,
+	margin: 1.5,
+	benchWallMs: 200,
+})
+/** WG8 req 5.4: how the bins cap was chosen. */
+export interface SpectrumBinsCapView {
+	setting: SpectrumBinsCapSetting
+	cap: number
+	/** config: a fixed setting; measured: the startup bench; fallback: the bench failed (floor). */
+	source: "config" | "measured" | "fallback"
+}
+
 export interface SpectrumLimits {
 	maxProfiles: number
 	hz: { min: number; max: number; step: number }
+	/** WG8: max = min(bins cap, ws.spectrumSummaryBins) (2048 with the default summary budget). */
 	bins: { min: number; max: number }
+	/** WG8 req 5.4: the bins cap behind `bins.max`. Sent by WG8 cores. */
+	binsCap?: SpectrumBinsCapView
 	/** Frames of `averaging` (WG1); 1 = off. */
 	averaging: { min: number; max: number }
 	/** Backfill bounds per subscribe (WG1): window, frames and serialized frame bytes. */

@@ -18,6 +18,7 @@ const BODY: ScanJobHitsResponse = {
 			firstHitAt: "2026-10-13T12:00:00.000Z",
 			lastHitAt: "2026-10-13T12:00:05.000Z",
 			firstSeenInJob: true,
+			lastDurationMs: null,
 		},
 	],
 }

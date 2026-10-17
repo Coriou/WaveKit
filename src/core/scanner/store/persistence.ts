@@ -208,6 +208,10 @@ export const NormalisedJobSpecSchema = z.object({
 		.default(() => ({ ...DEFAULT_CAPTURE })),
 	// SF1: absent on jobs persisted before signals-only existed (= false)
 	signalsOnly: z.boolean().optional(),
+	// WG6: absent on jobs persisted before WG6 (= false)
+	skipDecodedElsewhere: z.boolean().optional(),
+	// WG7: absent on jobs persisted before WG7 (= false)
+	skipBandPlanSkips: z.boolean().optional(),
 	provenance: z.record(
 		z.enum(["operator", "bandplan", "measured", "config", "default"]),
 	),

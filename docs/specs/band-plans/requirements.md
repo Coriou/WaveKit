@@ -19,6 +19,9 @@ data); the scanner consuming the resolved stack (BP2); country packs or any new 
 data; numeric US FRS rows; URL fetch, "Check for update", SDR# XML and Gqrx CSV import;
 bundled community packs; deriving "verified" from registry links. BP2 (section 11) brings
 the scanner consumption of the stack into scope, limited to built-in plan data.
+Amended (WG8): a settings store for decoder options and `enabled` only (override over YAML/env,
+protected writes) is specified in [web-gaps-8](../web-gaps-8/requirements.md) requirement 1;
+a general settings store stays out of scope.
 
 ## 1. Authority isolation
 
@@ -119,6 +122,9 @@ commit it.
 
 6.1 Import shall accept SDR++ band-plan JSON only, as uploaded file bytes (base64 in a
 JSON body). Core shall fetch no URL.
+_Amended by [web-gaps-5 7.1](../web-gaps-5/requirements.md) (SDR# and Gqrx formats) and
+[web-gaps-6 5.1–5.7](../web-gaps-6/requirements.md): core may fetch an https URL on an
+allowlisted host, once per protected request, under the WG6 SSRF rules._
 6.2 Files larger than 1 MiB shall be rejected with `BANDPLANS_IMPORT_TOO_LARGE` before
 decoding. Bytes shall be decoded as strict UTF-8 (a leading BOM ignored) and parsed once.
 6.3 Parsing shall be a total function on bytes: every input yields a preview or a typed
@@ -209,6 +215,10 @@ enabled stack entry, in stack order, whose pack is built-in, the plans of
 `hidden: true` edit and any plan id already taken from a higher entry. Imported packs,
 operator bands, `skip`, all other edit fields, segments and shadowing shall not change
 the list.
+_Amended by [web-gaps-7 6.1–6.7](../web-gaps-7/requirements.md): `skip` still does not change
+this list; the resolved skip-marked segments reach a scan plan only as exclusions of a job
+that opts in with `skipBandPlanSkips`, evaluated when that job's plan is computed (a band-plan
+edit never replans a running job, so 1.2 holds)._
 11.2 With the default stack and no edits, including an unavailable store, the effective
 scanner list shall deep-equal `bandplansFor(region)` for every `BandRegion`. The four
 files pinned by 1.1 shall stay byte-identical, and scanner defaults, ranges, rasters,

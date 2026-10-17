@@ -24,6 +24,10 @@ const protocolEnum = [
 	"digital-unknown",
 	"carrier",
 	"unknown",
+	"ais",
+	"acars",
+	"vdl2",
+	"lora",
 ] as const
 const identityKindEnum = [
 	"dmr-cc",
@@ -35,6 +39,10 @@ const identityKindEnum = [
 	"pocsag-capcode",
 	"aprs-call",
 	"ism-model",
+	"ais-mmsi",
+	"acars-reg",
+	"vdl2-addr",
+	"lora-node",
 ] as const
 /** SF1 `identity=<kind>:<value>`: a known IdentityKind, a colon, a non-empty value. */
 export const IDENTITY_QUERY = new RegExp(
@@ -219,6 +227,10 @@ export const scanJobSpecSchema = {
 		},
 		// SF1: no decoder trials of the job's own (discover jobs only)
 		signalsOnly: { type: "boolean" },
+		// WG6 1.6: drop sweep hops already decoded elsewhere
+		skipDecodedElsewhere: { type: "boolean" },
+		// WG7 6.1: drop sweep hops inside skip-marked band-plan ranges
+		skipBandPlanSkips: { type: "boolean" },
 	},
 	additionalProperties: false,
 } as const
@@ -329,6 +341,9 @@ export const jobHitsResponseSchema = {
 					firstHitAt: { type: "string" },
 					lastHitAt: { type: "string" },
 					firstSeenInJob: { type: "boolean" },
+					lastDurationMs: {
+						anyOf: [{ type: "integer", minimum: 0 }, { type: "null" }],
+					},
 				},
 				required: [
 					"jobId",

@@ -5,6 +5,7 @@
  */
 import { join, resolve } from "node:path"
 import type { StorageActivityRetention } from "@wavekit/api-types"
+import { DECODER_SETTINGS_FILE_NAME } from "@wavekit/api-types"
 import type {
 	ActivityRetentionPolicy,
 	ActivityStoreStats,
@@ -113,7 +114,11 @@ export function storageAreasFromConfig(
 	areas.push(
 		{
 			id: "decoder-overrides",
-			paths: [join(stateDir, BAND_OVERRIDE_FILE_NAME)],
+			// Band overrides and the WG8 decoder settings store share the area (no new id)
+			paths: [
+				join(stateDir, BAND_OVERRIDE_FILE_NAME),
+				join(stateDir, DECODER_SETTINGS_FILE_NAME),
+			],
 			capBytes: null,
 		},
 		{
@@ -125,6 +130,64 @@ export function storageAreasFromConfig(
 	if (inputs.logsDir !== undefined && inputs.logsDir.length > 0)
 		areas.push({ id: "logs", paths: [resolve(inputs.logsDir)], capBytes: null })
 	return areas
+}
+
+/** The scanner storage settings a report reads (ScannerService.settings().storage). */
+export interface StorageScannerStorage {
+	dir: string | null
+	maxRecordingsMb: number
+	minFreeDiskMb: number
+}
+
+/** The running scanner as the storage report sees it. */
+export interface StorageScannerView {
+	settings(): { storage: StorageScannerStorage }
+}
+
+export interface LiveStorageAreaInputs extends Omit<
+	StorageAreaInputs,
+	"scannerStorage" | "scannerEnabled" | "decoders"
+> {
+	/** Configured `scanner.storage`; used while no scanner runs. */
+	scannerStorage: StorageScannerStorage
+	/** The scanner now; null when it is not running. Read at each scan. */
+	scanner: () => StorageScannerView | null
+	/**
+	 * The decoder list, read at each scan: the decoder manager's current config-owned
+	 * decoders (`getConfiguredDecoderConfigs`), so one created or removed after startup
+	 * shows in the next report. Scanner probes are not listed (scanner storage covers them).
+	 */
+	decoders: () => StorageAreaInputs["decoders"]
+}
+
+/**
+ * Area and low-space providers for the storage reporter, evaluated at each scan (the
+ * reporter's cache bounds how often): a runtime scanner settings change (storage dir,
+ * maxRecordingsMb, minFreeDiskMb) shows in the next report, as does a decoder created or
+ * removed after startup.
+ */
+export function liveStorageReportSources(inputs: LiveStorageAreaInputs): {
+	areas: () => StorageAreaSource[]
+	minFreeBytes: () => number | null
+} {
+	const { scanner, decoders, scannerStorage, ...fixed } = inputs
+	return {
+		areas: () => {
+			const running = scanner()
+			return storageAreasFromConfig({
+				...fixed,
+				scannerStorage: running?.settings().storage ?? scannerStorage,
+				scannerEnabled: running !== null,
+				decoders: decoders(),
+			})
+		},
+		minFreeBytes: () => {
+			const running = scanner()
+			return running === null
+				? null
+				: running.settings().storage.minFreeDiskMb * MiB
+		},
+	}
 }
 
 /** Resolved Activity limits the retention block reports. */

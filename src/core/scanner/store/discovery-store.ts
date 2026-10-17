@@ -478,6 +478,14 @@ export class DiscoveryStore extends EventEmitter {
 		return this.observationIndex.get(observationId)?.discoveryId
 	}
 
+	/** WG6 req 2.1: duration of an in-memory observation that has ended; undefined while open or unknown. */
+	endedDurationOf(observationId: string): number | undefined {
+		const o = this.observationIndex.get(observationId)
+		return o === undefined || o.endedAt === undefined
+			? undefined
+			: recordDuration(o)
+	}
+
 	/**
 	 * Appends accepted evidence to `Observation.decode` (§ 7.1 "accepted values only"): CRC-clean, the
 	 * observation's epoch (P17, as the probe pool's rule in Task 34), not stamped after that epoch ended

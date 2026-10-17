@@ -185,7 +185,13 @@ describe("scanner config section (spec § 12.3)", () => {
 		const parsed = ScannerConfigSchema.parse({})
 		expect(parsed.ws.spectrumSummaryBins).toBe(2048)
 		expect(parsed.ws.spectrumMaxProfiles).toBe(4)
-		for (const bad of [4096, 256])
+		// WG8 req 5.3: the summary budget max is SPECTRUM_SUMMARY_BINS_MAX (8192)
+		for (const ok of [512, 4096, 8192])
+			expect(
+				ScannerConfigSchema.parse({ ws: { spectrumSummaryBins: ok } }).ws
+					.spectrumSummaryBins,
+			).toBe(ok)
+		for (const bad of [8193, 16384, 256, 511])
 			expect(
 				ScannerConfigSchema.safeParse({ ws: { spectrumSummaryBins: bad } })
 					.success,

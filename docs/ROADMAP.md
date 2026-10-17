@@ -47,8 +47,8 @@ manual/auto squelch without pipeline restarts, per-decoder `rateHistory` and a
 bounded `GET /api/decoders/:id/log`, per-hop scanner protocols, automatic resume
 held by identify and live listening (`resumeAt`, `resumeHeldBy`, Stay here), and
 cited built-in band plan corrections (EU airband, PMR446/dPMR446, CB, 169 MHz
-metering). Still open from that list: noise squelch, recording activity as a resume
-hold and an EU 466 MHz pager plan without a citable primary source.
+metering). Still open from that list: recording activity as a resume hold and an
+EU 466 MHz pager plan without a citable primary source (noise squelch landed in WG7).
 
 Landed in the 2026-10-13 web-gap batch 2 (WG2, core only, [spec](specs/web-gaps-2/requirements.md)):
 Activity presentation (category, protocol, entity key, title, fields, position)
@@ -90,10 +90,17 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
    Batch 2 landed server-side: the scanner reads the effective
    built-in plans of the stack (hidden bands leave it), import commits bind a
    preview digest, a never-persisted legacy store reports `storeId: null`, and a
-   `bandplans` WebSocket channel announces changes. Remaining: CLI and web
-   consumption, SDR#, Gqrx and URL import, verified packs (gated), a general
-   settings store with YAML/env/UI provenance (spec pending), and country from
-   the station location (gated).
+   `bandplans` WebSocket channel announces changes. WG5 added SDR# XML and Gqrx
+   CSV import. WG6 added import by URL from an allowlisted host (protected
+   mode, SSRF-hardened fetch) and a manual check for update. WG7 stores the
+   committed group overrides so the update check applies them, aligns the URL
+   schema with the fetcher, and lets a scan opt in to band-plan `skip` bands as
+   exclusions (`skipBandPlanSkips`). Remaining: CLI and
+   web consumption, verified packs
+   (gated), a general
+   settings store with YAML/env/UI provenance (WG8 landed the decoder-scope
+   store: decoder options and `enabled`; station, scanner and live audio keep
+   their own layers), and country from the station location (gated).
 4. **Scanner and listening follow-ups**: scanner follow-ups batch 1 landed
    server-side: running-range edits (enable, protocols, name, dwell and
    sensitivity per range, applied at the next hop), signals-only jobs, the
@@ -169,7 +176,8 @@ gates. The detailed workstreams:
 
 Live-audio evidence from 2026-10-09 remains valid: silent idle squelch, clear
 NFM at an offset, intelligible DMR and two PTT presses producing two calls.
-Open follow-ups include the ~0.75 s squelch noise tail, a DMR call ending by
+Open follow-ups include real-RF acceptance of the WG7 squelch noise tail fix
+(the ~0.75 s tail is fixed in a synthetic pipeline test), a DMR call ending by
 fallback timeout when its terminator was missed, and lazy live-demod start.
 Most measured playback lag was ffplay buffering; measure actual client stages
 before changing buffer defaults. See [DIGITAL-VOICE.md](DIGITAL-VOICE.md).
@@ -291,11 +299,14 @@ pending. Coordinate any live receiver/network changes with the hardware session.
       unknown third-party requirements remain explicit. A channelizer cannot
       recover RF bandwidth absent from the capture. Hardware/live acceptance
       and source capability presets remain separate work.
-- [ ] Expose per-tuner gain values and sample-rate presets through core capability
-      discovery. Core already supports gain in tenths dB and gain index, and
-      validates RTL sample-rate ranges; CLI presets are currently client-local.
-      Reuse that foundation, report table provenance/unknown values honestly,
-      and share presets with both clients.
+- [x] Sample-rate presets through core capability discovery (WG6):
+      `sampleRatePresets` on receiver capabilities suggests the CLI's 11 RTL
+      rates on `rtl_tcp` sources (suggestions, not receiver evidence).
+- [x] Expose per-tuner gain values through core capability discovery (WG7):
+      `gainTable` on receiver capabilities is the cited librtlsdr list when the
+      advertised tuner type and gain count match it, else `unknown` with a
+      reason (a suggestion, not receiver evidence). Tuning ranges are open:
+      librtlsdr has no per-tuner range table to cite.
 - [ ] Decided 2026-10-08: no lossy bit reduction, no lossless-only compression
       (measured 0.68–0.86 at real gains), no decoders on the Pi for now. Details
       and measurements: `docs/RESEARCH-2026-10-08-WIFI-IQ-TRANSPORT.md`.
@@ -379,6 +390,33 @@ without renewal or online-presence claims. See the
 - [x] Device names, kinds and coarse last-seen (WG2, access amendment 4.9–4.12):
       operator labels via `POST /api/access/devices/label`, `lastSeenAt` as a UTC
       hour, at most 768 writes a day.
+- [x] Decoder option schemas, report only (WG6): `optionIssues` on decoder
+      status and option descriptors on `GET /api/decoders/types`; the
+      prerequisite of a decoder `PATCH` (WG8 made it work in protected mode;
+      legacy mode still answers 501).
+- [x] Redacted config export (WG6, export half): `GET /api/config/export`,
+      protected mode only, fail-closed redaction. Config import remains open.
+      The redaction defaults (E2) were confirmed on 2026-10-16. WG7 exports six
+      reviewed numeric paths that the sensitive-name pattern matched by
+      accident.
+- [x] Audio streams across origins (WG7): in legacy mode the live and
+      digital-voice audio servers send `Access-Control-Allow-Origin: *`
+      (no credentials) and answer `OPTIONS` preflights. Protected mode is
+      unchanged (allowed origins only).
+- [x] Bounded numeric decoder options (WG7): every adapter clamps or falls back
+      by meaning and warns once per key without the value. Argv arrays are
+      capped, and `extraArgs` is limited to 64 strings of at most 4 096 bytes
+      (65 536 in total). Shell pipelines carry only formatted finite numbers.
+      multimon-ng `verbosity` is 0–10. Configured argv is unchanged.
+- [x] Decoder settings store and `PATCH /api/decoders/:id` (WG8, protected
+      mode only): a persisted override layer (`decoder-settings.json`,
+      override > YAML/env config > default) for `enabled` (autostart at boot)
+      and the options whose descriptor says `patchable` (never paths, hosts,
+      ports, devices, `extraArgs` or secrets); merge patch with `If-Match`,
+      applied by rebuilding the adapter at its next start;
+      `GET /api/decoders/:id/settings` shows each value's source. The config
+      export stays YAML/env only. Open: applying a patch without a restart,
+      rate-plan keys, config import.
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
       bounded replay and explicit gaps when history is unavailable.
@@ -464,9 +502,13 @@ Activity `unavailable` and the rest running), and measured retention.
       frequency (`tuningTrust: "unverified"`).
 - [x] AIS radio channel on ship output (WG4): `channel` A/B from NMEA field 4
       or AIS-catcher JSON, so a dual-channel AIS decoder's receptions store
-      161.975 or 162.025 MHz. `VesselState` does not carry it yet.
-- [ ] Event-time channel frequency for offset probes and source retunes, and a
-      verified tuning trust.
+      161.975 or 162.025 MHz. From WG5 `VesselState` carries it too.
+- [x] Verified tuning trust (WG5): `tuningTrust` is `commanded` or `relay` when
+      the observed tuner state proves the decoder hears its targets, else
+      `unverified`. A retune of the dongle host that bypasses WaveKit and the
+      relay is not observed.
+- [ ] Event-time channel frequency for offset probes and source retunes (after a
+      retune, trust stays `unverified` until the decoder restarts).
 - [ ] Provide persistent, searchable events with paging and full-text indexing,
       including transcripts when available. Link discoveries, observations and
       recordings without making scanner recovery journals a public event API.
@@ -521,6 +563,22 @@ open. Missing proof retains ownership rather than admitting a successor.
 - [x] Per-job hit statistics (WG2): hits per discovery, `GET /api/scanner/jobs/:id/hits`,
       `hitStats` on progress and `jobHits` on discovery events; in memory,
       best-effort past 2,000 discoveries or 4,096 credited observations.
+- [x] Decoded elsewhere and last hit duration (WG6): plans and jobs report the
+      ranges running decoders on other sources provably cover
+      (`decodedElsewhere`, fail-closed trust rule), skipped only with
+      `skipDecodedElsewhere`; `lastDurationMs` per job hit. WG7 refreshes the
+      ranges after decoder changes (2 s debounce, at most every 30 s, at most
+      30 s late). Open: external-input decoders never contribute until their
+      band check proves targets.
+- [x] Band plans to scanner exclusions (WG7): `skipBandPlanSkips` turns
+      `skip`-marked bands of the resolved band-plan view into sweep exclusions
+      (`bandPlanSkips`, after lockouts and before decoded-elsewhere ranges,
+      never emptying a plan). A band-plan edit applies at the job's next plan.
+- [x] Ambient identify for AIS, ACARS, VDL2 and LoRa (WG7): identify names
+      these from an already-running config-owned decoder on the same source
+      (`transport: "ambient"`, no probe). Only `commanded`/`relay` tuning trust
+      at the decoder's own target frequency counts, and the identity needs two
+      clean decodes. Open: acceptance on real AIS, ACARS, VDL2 and LoRa traffic.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
@@ -558,9 +616,15 @@ and status. Shared browser audio and richer controls remain open.
       and decoded voice while retaining manual selection. Reuse scanner S3's
       routing and arbitration; its planned 8 kHz HTTP monitor is a foundation,
       not completion of this item. Avoid disconnecting clients on rate changes.
-- [ ] Add automatic floor-based and noise squelch, and update controls without
+- [x] Add automatic floor-based and noise squelch, and update controls without
       unnecessary pipeline restarts. Preserve current threshold/hang behavior
-      and fix the observed noise tail.
+      and fix the observed noise tail. Auto squelch landed in the 2026-10-12
+      batch; WG7 added the opt-in `squelchMode: "noise"` (FM quieting, NFM/WFM,
+      `noiseQuietingDb` default 6 dB) and fixed the noise tail (noise blocks just
+      below the threshold no longer hold the gate; about 260 ms of unmuted audio
+      after carrier loss in the synthetic test). Synthetic evidence only:
+      real-RF acceptance open (csdr back-chain delay, the 6 dB default at
+      12 dB CNR, WFM pilot harmonics), Pi CPU unmeasured.
 - [x] Live-audio AGC off/slow/fast including FM (WG4): `liveDemod.agc` and
       PATCH `agc` (null resets); absent keeps the per-modulation chain unchanged.
       Open: csdr `-p slow` at the pinned csdr is unverified until an image smoke
@@ -570,9 +634,17 @@ and status. Shared browser audio and richer controls remain open.
       these controls.
 - [x] Detect CTCSS and DTMF on analog transmissions (WG2): `tone` on closed
       `live-audio:transmission` events and `analog-transmission` Activity rows.
-- [ ] Decode DCS code/polarity; expose tones on live status, saved frequencies and
-      tone squelch (deferred from WG2). Reuse scanner Task 41 channel features; its
-      DCS presence boolean is not a decoded code.
+- [x] Decode DCS code/polarity on closed analog transmissions (WG6): `tone.dcs`
+      on `live-audio:transmission` and Activity rows, searchable under both twin
+      spellings. Synthetic corpora only; real-RF acceptance and Pi CPU are open.
+- [ ] Expose tones on live status, saved frequencies and tone squelch (deferred
+      from WG2). Partly done: WG7 live tone squelch (`liveDemod.toneSquelch`,
+      NFM only, standard CTCSS tones and DCS codes in the saved-frequency tone
+      shape) mutes the live audio until the tone is heard, with
+      `toneSquelch.state` on live status; events, rows and tone results are
+      unchanged. Saved frequencies store a tone but do not apply it (operator
+      data `capabilities.toneSquelch` is `false`), and the tone currently heard
+      is not on live status. Real-RF acceptance and Pi CPU are open.
 - [ ] Emit analog transmission start/end/duration events from squelch with stable
       identity and recording links. Detector tracks and squelch transmissions
       have different boundaries; reconcile them explicitly.
@@ -594,6 +666,11 @@ recording Keep protects one recording independently.
 - [ ] Record analog transmissions and digital calls automatically across supported
       live and scanner paths; expose bounded retention and playback by ID with
       seek. Scanner WAV download alone does not provide seek or all-call coverage.
+- [x] Read-only recordings inventory (WG8, protected mode only):
+      `GET /api/recordings` lists the dsd-fme per-call and scanner WAVs with
+      opaque ids, time, talkgroup, duration and size (frequency only when
+      known), and `GET /api/recordings/:id/file` downloads the whole file (no
+      `Range`). WaveKit changes no file; the catalog below stays open.
 - [ ] Keep/star individual recordings across clients; un-keeping restores normal
       retention. Define disk reserve/low-space behavior and coordinate the
       digital WAV pruner with scanner/catalog retention before enabling this.
@@ -738,8 +815,12 @@ same view, and a program can do the watching more reliably than a person.
       CLI. Late-joining clients get a matching snapshot. WG1 adds opt-in
       per-client waterfall backfill (`backfillMs`, up to 10 s / 64 frames of
       the current epoch) and per-client exponential averaging (`averaging`
-      1–32); `fftSize` and `bins` stay capped at 2048 until a Pi-class CPU
-      measurement. Scanner Task 37a owns
+      1–32). WG8 lifts the 2048 bins cap where the host can afford it:
+      `scanner.ws.spectrumBinsCap` (`auto` measures once at startup; up to
+      8192, the Mac picks 8192, a Pi 3 stays at 2048), with a lossless int16
+      worker wire; clients get at most min(cap, `spectrumSummaryBins`), so the
+      shipped config and the default profile are unchanged. Viewed-slice zoom
+      stays gated. Scanner Task 37a owns
       this service; support bounded simultaneous profiles and source selection
       without client preferences changing detector behavior. Preserve the planned scanner
       10 Hz / 512-bin default for subscriptions without options.
@@ -759,8 +840,11 @@ same view, and a program can do the watching more reliably than a person.
 - [ ] Keep the engine behind an interface so a native backend can take over.
       `wavekit-chan` already reads the full CU8 stream per source.
 - [ ] A stale `caps.centerFreq` (a retune from SDR++ that bypasses the relay)
-      puts the frequency axis and every emission centre on the wrong RF. Fix it
-      or show it as untrusted.
+      puts the frequency axis and every emission centre on the wrong RF. Partly
+      solved: decoder receptions carry the WG5 tuning trust (`unverified` unless
+      the observed tuner state proves the tuning). The spectrum axis and
+      `declaredStream.centerFrequencyHz` still come from config or core
+      metadata. Fix those, or show them as untrusted.
 
 ### Spectrum contract amendment for scanner S1-B
 
@@ -848,17 +932,30 @@ separate from scanner RF sweep coverage.
 - [x] Bulk position trails (WG4, partial): `GET /api/activity/trails` serves
       aircraft, vessel, APRS and mesh trails from the Activity store over a
       window (default 1 h, at most 24 h) under fixed caps. The Pi CPU cost of
-      the trails read is unmeasured.
+      the trails read is unmeasured. Mesh trails were empty until WG5, which
+      gave Meshtastic POSITION receptions a position; new rows also carry
+      `altM` (WG5; no backfill).
 - [ ] A time cursor over trails and a Pi-measured trails budget.
+- [x] Activity band map and timeline (WG5): `GET /api/activity/bandmap` counts
+      stored rows per 12.5 kHz bucket by protocol with top entities, and
+      `GET /api/activity/timeline` counts rows per epoch-aligned time bucket and
+      category, both over a window of at most 72 h under the 250,000-row scan cap
+      and a 600 ms budget, with `coveredFrom` marking how far back the counts are
+      exact. Pi CPU cost unmeasured; the timeline is a first step towards a time
+      cursor over trails.
 - [x] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
       based on explicit station location and valid timestamped positions
       (WG3, `GET /api/coverage`, in memory).
 - [ ] Serve regional PMTiles, glyphs and style with bounded download/update and
       storage accounting; support the design's online fallback. Offline asset
       hosting follows the basic map and shared settings.
-- [ ] Extract positions from ACARS/VDL2 ADS-C/POS and AIS type 21 into the common
-      envelope, with fixtures, validity and entity provenance. Generic AIS JSON
-      lat/lon and current NMEA types 1/2/3 are only partial foundations.
+- [x] AIS types 4, 9 and 21 positions (WG5): base stations, SAR aircraft (with
+      altitude) and aids to navigation (with aid type, virtual and off-position
+      flags) decode to positions on the NMEA path; the JSON path is validated
+      field by field. The AIS-catcher JSON key names for the new fields are not
+      yet checked against a real sample.
+- [ ] Extract positions from ACARS/VDL2 ADS-C/POS into the common envelope, with
+      fixtures, validity and entity provenance.
 
 ## 9. Project license
 

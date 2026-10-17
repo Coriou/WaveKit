@@ -27,6 +27,10 @@ const PROTOCOL_OF: Record<IdentityKind, ScannerProtocol> = {
 	"pocsag-capcode": "pocsag",
 	"aprs-call": "aprs",
 	"ism-model": "ism",
+	"ais-mmsi": "ais",
+	"acars-reg": "acars",
+	"vdl2-addr": "vdl2",
+	"lora-node": "lora",
 }
 const KINDS = Object.keys(PROTOCOL_OF) as IdentityKind[]
 

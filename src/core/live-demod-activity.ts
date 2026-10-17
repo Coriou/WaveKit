@@ -4,12 +4,17 @@ import type { LiveDemodConfig, LiveDemodStatus } from "./live-demodulator.js"
 /**
  * Manual mode gates only when the threshold is non-zero. Squelch 0 stays open
  * for the whole run, so it is not operator activity and not a transmission.
+ * Auto and (WG7 req 2.4) noise mode always gate.
  */
 export function liveDemodSquelchGates(config: {
-	squelchMode?: "manual" | "auto" | undefined
+	squelchMode?: "manual" | "auto" | "noise" | undefined
 	squelch: number
 }): boolean {
-	return config.squelchMode === "auto" || config.squelch !== 0
+	return (
+		config.squelchMode === "auto" ||
+		config.squelchMode === "noise" ||
+		config.squelch !== 0
+	)
 }
 
 /** Fields whose change ends an open analog transmission with reason `config`. */
@@ -18,7 +23,7 @@ export interface TransmissionConfigIdentity {
 	modulation: LiveDemodConfig["modulation"]
 	bandwidth: number
 	offsetHz?: number | undefined
-	squelchMode?: "manual" | "auto" | undefined
+	squelchMode?: "manual" | "auto" | "noise" | undefined
 }
 
 /**
@@ -78,7 +83,7 @@ export interface ActivitySource {
  *
  * Audio holds the resume timer only while someone is listening (at least one
  * audio client) through a squelch that actually gates: manual mode with a
- * non-zero threshold, or auto mode. Squelch 0 is open for the whole run, so
+ * non-zero threshold, auto mode or noise mode. Squelch 0 is open for the whole run, so
  * counting it would hold an always-on demodulator forever and no scan would
  * resume. No recorder reports activity yet, so `recording` stays false.
  */

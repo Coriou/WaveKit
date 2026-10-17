@@ -7,7 +7,9 @@ import { STORAGE_AREA_IDS } from "@wavekit/api-types"
 import {
 	activityRetentionFromStats,
 	dsdFmeRecordingDir,
+	liveStorageReportSources,
 	storageActivityLimits,
+	type StorageScannerStorage,
 	storageAreasFromConfig,
 	type StorageAreaInputs,
 } from "../../../../src/core/storage-report/areas-from-config.js"
@@ -85,7 +87,10 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			{ id: "access", paths: ["/run/wavekit/access"], capBytes: null },
 			{
 				id: "decoder-overrides",
-				paths: [join(stateDir, "decoder-band-overrides.json")],
+				paths: [
+					join(stateDir, "decoder-band-overrides.json"),
+					join(stateDir, "decoder-settings.json"),
+				],
 				capBytes: null,
 			},
 			{
@@ -215,6 +220,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			join(stateDir, "bandplans"),
 			join(stateDir, "operator-data"),
 			join(stateDir, "decoder-band-overrides.json"),
+			join(stateDir, "decoder-settings.json"),
 			join(stateDir, "station.json"),
 		])
 		// A shared root belongs to the later area only.
@@ -549,5 +555,93 @@ describe("Activity retention mapping", () => {
 			shares: [],
 			sharesTruncated: false,
 		})
+	})
+})
+
+describe("liveStorageReportSources (WG5: areas follow runtime changes)", () => {
+	const MiB = 1024 * 1024
+	const configured: StorageScannerStorage = {
+		dir: "/cfg/scanner",
+		maxRecordingsMb: 10,
+		minFreeDiskMb: 100,
+	}
+
+	it("reads the scanner settings and decoders at each call", async () => {
+		let storage: StorageScannerStorage = { ...configured }
+		let running = true
+		const scanner = { settings: () => ({ storage }) }
+		let decoders: StorageAreaInputs["decoders"] = []
+		const sources = liveStorageReportSources({
+			stateDir: "/state",
+			activityMaxDbBytes: 5,
+			scannerStorage: configured,
+			scanner: () => (running ? scanner : null),
+			decoders: () => decoders,
+			accessDirectory: null,
+		})
+		const area = (id: StorageAreaSource["id"]) =>
+			sources.areas().find(a => a.id === id)
+		expect(area("scanner-evidence")).toMatchObject({
+			paths: [resolve("/cfg/scanner")],
+			capBytes: 10 * MiB,
+		})
+		expect(area("digital-voice-wav")?.paths).toEqual([])
+		expect(sources.minFreeBytes()).toBe(100 * MiB)
+
+		// Runtime scanner settings and a new recording decoder show on the next call.
+		storage = { dir: "/run/scanner", maxRecordingsMb: 20, minFreeDiskMb: 7 }
+		decoders = [
+			{ type: "dsd-fme", options: { output: "wav", wavDir: "/run/wav" } },
+		]
+		expect(area("scanner-evidence")).toMatchObject({
+			paths: [resolve("/run/scanner")],
+			capBytes: 20 * MiB,
+		})
+		expect(area("digital-voice-wav")?.paths).toEqual([resolve("/run/wav")])
+		expect(sources.minFreeBytes()).toBe(7 * MiB)
+
+		// The scanner gone: configured dir, no cap, no low-space threshold.
+		running = false
+		expect(area("scanner-evidence")).toMatchObject({
+			paths: [resolve("/cfg/scanner")],
+			capBytes: null,
+		})
+		expect(sources.minFreeBytes()).toBeNull()
+
+		// Through the reporter: one provider read per scan, cached in between.
+		running = true
+		let t = 0
+		const reporter = createStorageReporter(
+			{
+				stateDir: "/state",
+				areas: sources.areas,
+				minFreeBytes: sources.minFreeBytes,
+				now: () => t,
+			},
+			{
+				cacheMs: 1_000,
+				statfs: () =>
+					Promise.resolve({ blocks: 1, bfree: 1, bavail: 1, bsize: 1 }),
+				scan: areas =>
+					Promise.resolve(
+						areas.map(a => ({
+							id: a.id,
+							bytes: 0,
+							files: 0,
+							exists: false,
+							partialReason: null,
+						})),
+					),
+			},
+		)
+		const cap = async () =>
+			(await reporter.report()).areas.find(a => a.id === "scanner-evidence")
+				?.cap
+		expect(await cap()).toEqual({ bytes: 20 * MiB })
+		storage = { ...storage, maxRecordingsMb: 30, minFreeDiskMb: 9 }
+		expect(await cap()).toEqual({ bytes: 20 * MiB })
+		t = 1_000
+		expect(await cap()).toEqual({ bytes: 30 * MiB })
+		expect((await reporter.report()).lowSpace.minFreeBytes).toBe(9 * MiB)
 	})
 })

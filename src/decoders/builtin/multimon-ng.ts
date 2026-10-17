@@ -12,6 +12,16 @@
  */
 
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import { readNumericOption } from "../option-values.js"
+import {
+	MULTIMON_FILTER_GAIN_DB_MAX,
+	MULTIMON_FILTER_HZ_MAX,
+	MULTIMON_FM_GAIN_MAX,
+	MULTIMON_MODES_MAX,
+	MULTIMON_SAMPLE_RATE_MAX_HZ,
+	MULTIMON_SAMPLE_RATE_MIN_HZ,
+	MULTIMON_VERBOSITY_MAX,
+} from "../options/multimon-ng.js"
 import type {
 	DecoderCaps,
 	DecoderConfig,
@@ -126,33 +136,112 @@ export class MultimonDecoder extends AudioDemodDecoder {
 		const rawModes = options["modes"] as MultimonMode[] | undefined
 		const modes = this.validateModes(rawModes)
 
+		// WG7 HW.2: every number is read by meaning (bounded, finite) before it
+		// becomes a -v count, an argument or part of the csdr shell pipeline.
+		const warn = this.optionWarn
 		return {
 			modes,
-			verbosity: options["verbosity"] as number | undefined,
+			verbosity: readNumericOption(
+				options["verbosity"],
+				{
+					key: "verbosity",
+					integer: true,
+					min: 0,
+					max: MULTIMON_VERBOSITY_MAX,
+				},
+				warn,
+			),
 			charset: options["charset"] as string | undefined,
-			filters: options["filters"] as MultimonFilterOptions | undefined,
-			inputSampleRate: options["inputSampleRate"] as number | undefined,
-			fmGain: options["fmGain"] as number | undefined,
+			filters: this.parseFilters(options["filters"]),
+			// An exact 0 stays "absent" (the default rate), as before.
+			inputSampleRate: readNumericOption(
+				options["inputSampleRate"] === 0
+					? undefined
+					: options["inputSampleRate"],
+				{
+					key: "inputSampleRate",
+					integer: false,
+					min: MULTIMON_SAMPLE_RATE_MIN_HZ,
+					max: MULTIMON_SAMPLE_RATE_MAX_HZ,
+				},
+				warn,
+			),
+			fmGain: readNumericOption(
+				options["fmGain"],
+				{ key: "fmGain", integer: false, min: 0, max: MULTIMON_FM_GAIN_MAX },
+				warn,
+			),
+		}
+	}
+
+	/** Audio filter numbers, bounded by meaning (WG7 HW.2). */
+	private parseFilters(value: unknown): MultimonFilterOptions | undefined {
+		if (value === undefined || value === null) return undefined
+		if (typeof value !== "object" || Array.isArray(value)) {
+			this.optionWarn("filters", "invalid")
+			return undefined
+		}
+		const filters = value as Record<string, unknown>
+		const hz = (key: "highpass" | "lowpass"): number | undefined =>
+			readNumericOption(
+				filters[key],
+				{
+					key: `filters.${key}`,
+					integer: false,
+					min: 0,
+					max: MULTIMON_FILTER_HZ_MAX,
+				},
+				this.optionWarn,
+			)
+		return {
+			highpass: hz("highpass"),
+			lowpass: hz("lowpass"),
+			gain: readNumericOption(
+				filters["gain"],
+				{
+					key: "filters.gain",
+					integer: false,
+					min: -MULTIMON_FILTER_GAIN_DB_MAX,
+					max: MULTIMON_FILTER_GAIN_DB_MAX,
+				},
+				this.optionWarn,
+			),
 		}
 	}
 
 	/**
 	 * Validates and filters modes to only include supported ones.
 	 */
-	private validateModes(rawModes: MultimonMode[] | undefined): MultimonMode[] {
-		if (!rawModes || rawModes.length === 0) {
+	private validateModes(value: MultimonMode[] | undefined): MultimonMode[] {
+		if (value !== undefined && value !== null && !Array.isArray(value)) {
+			this.optionWarn("modes", "invalid")
+			return ["POCSAG512", "POCSAG1200", "POCSAG2400"]
+		}
+		if (!value || value.length === 0) {
 			// Default to all POCSAG modes if none specified
 			return ["POCSAG512", "POCSAG1200", "POCSAG2400"]
 		}
 
-		const validModes = rawModes.filter(mode => MULTIMON_MODES.includes(mode))
+		// WG7 HW.2: at most one entry per known mode is read (MULTIMON_MODES_MAX);
+		// duplicates are dropped keeping first-seen order, so each -a appears once.
+		if (value.length > MULTIMON_MODES_MAX) this.optionWarn("modes", "clamped")
+		const rawModes = value.slice(0, MULTIMON_MODES_MAX)
+		const validModes = [
+			...new Set(rawModes.filter(mode => MULTIMON_MODES.includes(mode))),
+		]
+		const validCount = rawModes.filter(mode =>
+			MULTIMON_MODES.includes(mode),
+		).length
+		if (validModes.length !== validCount) this.optionWarn("modes", "clamped")
 
-		if (validModes.length !== rawModes.length) {
-			const invalidModes = rawModes.filter(
-				mode => !MULTIMON_MODES.includes(mode),
-			)
+		if (validCount !== rawModes.length) {
+			// Count only: the invalid entries are option text (WG7 HW.2).
 			this.logger.warn(
-				{ invalidModes, validModes: MULTIMON_MODES },
+				{
+					key: "modes",
+					invalidCount: rawModes.length - validCount,
+					validModes: MULTIMON_MODES,
+				},
 				"Some modes are invalid and will be ignored",
 			)
 		}

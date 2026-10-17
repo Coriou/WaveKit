@@ -455,6 +455,8 @@ export function openQueryService(
 		detail: eventId => track(service.detail(eventId)),
 		facets: input => track(service.facets(input)),
 		trails: input => track(service.trails(input)),
+		bandMap: input => track(service.bandMap(input)),
+		timeline: input => track(service.timeline(input)),
 		replay: (input, sink) => service.replay(input, sink),
 		async close() {
 			draining = true

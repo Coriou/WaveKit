@@ -17,6 +17,7 @@ import type {
 } from "./types.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { SpectrumPipeline } from "./pipeline.js"
+import { decodeEventsFromWire } from "./summary-wire.js"
 import { WorkerToMainSchema, type MainToWorker } from "./worker-protocol.js"
 
 export interface PipelineHostHandlers {
@@ -278,6 +279,7 @@ export class ThreadPipelineHost implements PipelineHost {
 		const message = parsed.data
 		switch (message.type) {
 			case "events":
+				decodeEventsFromWire(message.events)
 				this.handlers.events(message.events)
 				return
 			case "buffer":

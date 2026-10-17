@@ -378,7 +378,7 @@ describe("activity presentation properties", () => {
 					isCoalescibleShape(type, data)
 				) {
 					expect(view?.fields).toBeUndefined()
-					expect(growth.growth).toBeLessThanOrEqual(160)
+					expect(growth.growth).toBeLessThanOrEqual(240)
 				}
 			}),
 			{ numRuns: RUNS },

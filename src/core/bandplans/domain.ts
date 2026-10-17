@@ -264,19 +264,25 @@ function compareCodeUnit(left: string, right: string): number {
 	return 0
 }
 
-/** Order of `groupOverrides` does not change the digest. Source types are unique by schema. */
+/**
+ * Order of `groupOverrides` does not change the digest. Source types are unique by schema.
+ * WG6: a non-null `sourceUrl` adds a trailing `"sourceUrl"` key; absent or null keeps the
+ * pre-WG6 canonical JSON byte for byte (golden-tested).
+ */
 export const previewDigestFor: PreviewDigestFor = (
 	fileSha256,
 	groupOverrides,
+	sourceUrl,
 ) => {
 	const pairs = groupOverrides
 		.map(override => [override.sourceType, override.group] as const)
 		.sort((left, right) => compareCodeUnit(left[0], right[0]))
+	const canonical =
+		sourceUrl === undefined || sourceUrl === null
+			? { v: 1, sha256: fileSha256, groupOverrides: pairs }
+			: { v: 1, sha256: fileSha256, groupOverrides: pairs, sourceUrl }
 	return createHash("sha256")
-		.update(
-			JSON.stringify({ v: 1, sha256: fileSha256, groupOverrides: pairs }),
-			"utf8",
-		)
+		.update(JSON.stringify(canonical), "utf8")
 		.digest("hex")
 }
 
@@ -471,7 +477,11 @@ export const transition: BandPlanTransition = (
 		case "commit-import": {
 			if (!parsedImport) throw new BandPlansError("BANDPLANS_IMPORT_INVALID")
 			const fileSha256 = sha256Base64(mutation.contentBase64)
-			const digest = previewDigestFor(fileSha256, mutation.groupOverrides)
+			const digest = previewDigestFor(
+				fileSha256,
+				mutation.groupOverrides,
+				mutation.sourceUrl,
+			)
 			if (
 				digest !== mutation.previewDigest ||
 				parsedImport.preview.sha256 !== fileSha256
@@ -514,12 +524,23 @@ export const transition: BandPlanTransition = (
 				provenance: {
 					kind: "imported",
 					trust: "community-unverified",
-					format: "sdrpp-json",
+					format: parsedImport.preview.format,
 					sourceName: mutation.fileName,
 					author: mutation.author,
 					licence: mutation.licence,
 					importedAt: serverTime(context, floors),
 					sha256: parsedImport.preview.sha256,
+					...(typeof mutation.sourceUrl === "string"
+						? { sourceUrl: mutation.sourceUrl }
+						: {}),
+					// Sorted as the digest sorts them; absent when none (pre-WG7 shape).
+					...(mutation.groupOverrides.length > 0
+						? {
+								groupOverrides: [...mutation.groupOverrides].sort((a, b) =>
+									compareCodeUnit(a.sourceType, b.sourceType),
+								),
+							}
+						: {}),
 				},
 				bands,
 			})

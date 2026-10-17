@@ -286,6 +286,16 @@ describe("TunerController reconnect synchronization", () => {
 	it("ignores unknown sources", () => {
 		expect(controller.synchronizeOnConnect("missing").commands).toEqual([])
 	})
+
+	it("emits source-removed once for a removed source, not for an unknown one", () => {
+		const removed: string[] = []
+		controller.on("source-removed", sourceId => removed.push(sourceId))
+		controller.removeSource("missing")
+		controller.removeSource("rtl-1")
+		controller.removeSource("rtl-1")
+		expect(removed).toEqual(["rtl-1"])
+		expect(controller.getState("rtl-1")).toBeUndefined()
+	})
 })
 
 describe("Pi reboot scenario: SDR++ left caps at 2.16 Msps / 446.866968 MHz", () => {

@@ -165,7 +165,7 @@ describe("WG4 contract", () => {
 	})
 
 	it("pins the station write constants", () => {
-		// Feature: web-gaps-4, requirement 6.9 (pending the access decision)
+		// Feature: web-gaps-4, requirement 6.9 (E1 decided: protected-only)
 		expect(STATION_WRITE_REQUIRES_ACCESS).toBe(true)
 		expect(STATION_STORE_FILE).toBe("station.json")
 		expect(STATION_STORE_SCHEMA_VERSION).toBe(1)

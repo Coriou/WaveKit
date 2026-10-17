@@ -38,7 +38,12 @@ import type {
 	ScannerProgressEventData,
 	ScannerSettingsView,
 	ScannerStatus,
+	SpectrumBinsCapView,
 	SpectrumSourceStatus,
+} from "@wavekit/api-types"
+import {
+	SCANNER_AMBIENT_PROTOCOLS,
+	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 } from "@wavekit/api-types"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
@@ -102,6 +107,7 @@ import {
 	type AmbientEvidenceEvent,
 	type AmbientTarget,
 } from "./probes/ambient.js"
+import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import {
 	ProbePool,
 	offsetTransport,
@@ -158,6 +164,7 @@ import type {
 	ObservationEndReason,
 	PipelineEvent,
 	TrackSnapshot,
+	TuningTrust,
 } from "../spectrum/types.js"
 import type {
 	Classification,
@@ -167,6 +174,10 @@ import type {
 	HopPlan,
 	Identity,
 	Impact,
+	BandPlanSkipRange,
+	BandPlanSkipSource,
+	DecodedElsewhereRange,
+	DecoderCoverageView,
 	LockoutExclusion,
 	NormalisedJobSpec,
 	Observation,
@@ -180,6 +191,11 @@ import type {
 	UndecodedReason,
 } from "./types.js"
 import { AMBIENT_PAIR_MS } from "./types.js"
+import {
+	coverageFingerprint,
+	createCoverageRefresh,
+	type CoverageRefresh,
+} from "./plan/coverage-refresh.js"
 
 import type { ChannelProvider } from "../channelizer/types.js"
 import type { CleanupOutcome } from "../channelizer/settlement-observer.js"
@@ -242,7 +258,45 @@ export interface ScannerServiceDeps {
 	tickMs?: number
 	operatorActivity?: OperatorActivityPort
 	hostCentre?: HostCentreReader
+	/**
+	 * WG6 req 1.1: the decoders plans may treat as covering frequencies elsewhere, read once per
+	 * plan. Absent: no `decodedElsewhere` and plans exactly as before. A throw counts as none.
+	 */
+	decoderCoverage?: () => readonly DecoderCoverageView[]
+	/**
+	 * WG8 req 5.4: the host bins cap resolved once at startup, handed to the spectrum service
+	 * (client bound, `limits.binsCap`, engine summary budget). Absent: the frozen 2048 floor.
+	 */
+	spectrumBinsCap?: () => SpectrumBinsCapView
+	/**
+	 * WG7 req 6.2: the skip-marked band-plan segments, read once per plan. Absent: no
+	 * `bandPlanSkips` and plans exactly as before. A throw counts as none.
+	 */
+	bandPlanSkips?: () => readonly BandPlanSkipSource[]
+	/**
+	 * WG7 req 1.3: reception trust of a config-owned ambient decoder whose decode at `hz` lies
+	 * on `sourceId` (the source its ambient target names). Absent: ambient AIS, ACARS, VDL2 and
+	 * LoRa decodes are never evidence. Only `commanded`/`relay` count; a throw counts as none.
+	 */
+	ambientTrust?: (
+		decoderId: string,
+		hz: number,
+		sourceId: string,
+	) => TuningTrust | undefined
 }
+
+/** WG7 req 7.1: decoder manager events after which decoded-elsewhere ranges are refreshed. */
+const COVERAGE_EVENTS = [
+	"decoder:created",
+	"decoder:started",
+	"decoder:stopped",
+	"decoder:error",
+	"decoder:restarting",
+	"decoder:max-restarts",
+	"decoder:removed",
+	"decoder:health",
+	"decoder:status-changed",
+] as const
 
 const SNAPSHOT_EVERY_MS = 10_000
 const MAINTENANCE_EVERY_MS = 5 * 60_000
@@ -557,6 +611,7 @@ export class ScannerService extends EventEmitter {
 				now: this.now,
 				engineHost: deps.engineHost ?? "thread",
 				...(deps.hostCentre ? { hostCentre: deps.hostCentre } : {}),
+				...(deps.spectrumBinsCap ? { binsCap: deps.spectrumBinsCap } : {}),
 				// From the open, so the pool's lag guard sees every stream boundary (Task 34).
 				engineCreated: (sourceId, engine) => {
 					// This hook runs BEFORE engine.start; revoke queued capabilities before extra work.
@@ -677,6 +732,7 @@ export class ScannerService extends EventEmitter {
 					this.spectrum.engine(sourceId)?.currentEpoch().epoch ?? null,
 				logger: deps.logger,
 				now: this.now,
+				...(deps.ambientTrust ? { tuningTrustOf: deps.ambientTrust } : {}),
 			})
 			this.channelTaps = deps.channelOwnership
 				? new ChannelTaps({
@@ -901,6 +957,7 @@ export class ScannerService extends EventEmitter {
 		this.probes.on("recordings", this.onProbeRecordings)
 		this.probes.on("probe-state", this.onProbeState)
 		this.ambient.on("evidence", this.onAmbientEvidence)
+		this.startCoverageRefresh()
 		// A lease whose job was deleted is persisted unattached: its recovery still runs (H4).
 		const leases = [
 			...loaded.jobs.flatMap(j => (j.lease ? [j.lease] : [])),
@@ -1019,6 +1076,7 @@ export class ScannerService extends EventEmitter {
 				registration.settled = true
 			})
 		}
+		await attempt(() => this.stopCoverageRefresh())
 		await attempt(() =>
 			this.deps.sources.off("connected", this.onSourceConnected),
 		)
@@ -1264,6 +1322,12 @@ export class ScannerService extends EventEmitter {
 			...(preview.lockoutExclusions
 				? { lockoutExclusions: preview.lockoutExclusions }
 				: {}),
+			...(preview.decodedElsewhere
+				? { decodedElsewhere: preview.decodedElsewhere }
+				: {}),
+			...(preview.bandPlanSkips
+				? { bandPlanSkips: preview.bandPlanSkips }
+				: {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -1328,6 +1392,8 @@ export class ScannerService extends EventEmitter {
 			"protocols",
 			"capture",
 			"signalsOnly",
+			"skipDecodedElsewhere",
+			"skipBandPlanSkips",
 		]
 		// S1-B final review, finding 7: the operator's own input, not the normalised spec, so derived
 		// fields (integration, dwell, …) follow the patch and keep honest provenance. Only the source
@@ -1385,6 +1451,8 @@ export class ScannerService extends EventEmitter {
 		record.issues = preview.issues
 		record.updatedAt = this.now()
 		setLockouts(record, preview.lockoutExclusions)
+		setDecodedElsewhere(record, preview.decodedElsewhere)
+		setBandPlanSkips(record, preview.bandPlanSkips)
 		this.requireDriver(id).replan(preview.spec, preview.plan)
 		const { sourceId } = record.spec
 		// The lease holder's tuning drives the engine (finding 2); its scheduler follows on the next own epoch.
@@ -1591,6 +1659,36 @@ export class ScannerService extends EventEmitter {
 
 	private lockoutReplanQueued = false
 
+	/** WG7 req 7: decoded-elsewhere refresh on decoder changes (only with a coverage view). */
+	private coverageRefresh: CoverageRefresh | null = null
+
+	private readonly onCoverageEvent = (): void => {
+		this.coverageRefresh?.notify()
+	}
+
+	private startCoverageRefresh(): void {
+		const coverage = this.deps.decoderCoverage
+		if (!coverage || this.coverageRefresh) return
+		this.coverageRefresh = createCoverageRefresh({
+			fingerprint: () => coverageFingerprint(coverage()),
+			onRefresh: () => this.scheduleLockoutReplan(),
+			onError: err =>
+				this.log.warn(
+					{ errName: err instanceof Error ? err.name : typeof err },
+					"Decoded-elsewhere refresh failed",
+				),
+		})
+		for (const event of COVERAGE_EVENTS)
+			this.deps.decoders.on(event, this.onCoverageEvent)
+	}
+
+	private stopCoverageRefresh(): void {
+		for (const event of COVERAGE_EVENTS)
+			this.deps.decoders.off(event, this.onCoverageEvent)
+		this.coverageRefresh?.dispose()
+		this.coverageRefresh = null
+	}
+
 	private scheduleLockoutReplan(): void {
 		if (this.lockoutReplanQueued) return
 		this.lockoutReplanQueued = true
@@ -1633,13 +1731,30 @@ export class ScannerService extends EventEmitter {
 				)
 				continue
 			}
-			if (
+			const lockoutsSame =
 				JSON.stringify(next.lockoutExclusions ?? []) ===
 				JSON.stringify(record.lockoutExclusions ?? [])
+			if (
+				lockoutsSame &&
+				JSON.stringify(next.decodedElsewhere ?? []) ===
+					JSON.stringify(record.decodedElsewhere ?? []) &&
+				JSON.stringify(next.bandPlanSkips ?? []) ===
+					JSON.stringify(record.bandPlanSkips ?? [])
 			)
 				continue
 			setLockouts(record, next.lockoutExclusions)
+			setDecodedElsewhere(record, next.decodedElsewhere)
+			setBandPlanSkips(record, next.bandPlanSkips)
 			record.updatedAt = this.now()
+			// WG6/WG7: only the decoded-elsewhere or band-plan skip list changed and the plan did not
+			// (skip off, or not applied): reported only, the job keeps its hop position.
+			if (
+				lockoutsSame &&
+				JSON.stringify(next.plan) === JSON.stringify(record.plan)
+			) {
+				this.emitJob(record)
+				continue
+			}
 			driver.replan(record.spec, next.plan)
 			const { sourceId } = record.spec
 			touched.add(sourceId)
@@ -2164,14 +2279,25 @@ export class ScannerService extends EventEmitter {
 		for (const a of res.attributed ?? []) {
 			for (const jobId of a.jobIds) {
 				if (!this.jobs.has(jobId)) continue
-				this.hitsOf(jobId).record(
-					a.observationId,
-					a.discoveryId,
-					now,
-					a.created,
-				)
+				const hits = this.hitsOf(jobId)
+				hits.record(a.observationId, a.discoveryId, now, a.created)
+				// WG6 req 2.1: an observation credited after it ended (a single-block promotion
+				// attaching closed pending hits, or this ingest's own close) has its duration now.
+				const ended = this.store.endedDurationOf(a.observationId)
+				if (ended !== undefined)
+					hits.ended(a.observationId, a.discoveryId, ended)
 			}
 			report(a.discoveryId, a.jobIds)
+		}
+		// WG6 req 2.1: a closing observation sets its duration on every job entry it is the
+		// latest credit of (JobHits ignores jobs whose entry moved on or never credited it).
+		if (endReason) {
+			const durationMs =
+				this.store.endedDurationOf(live.observationId) ?? now - live.startedAt
+			for (const jobId of live.jobIds)
+				this.hits
+					.get(jobId)
+					?.ended(live.observationId, res.discoveryId, durationMs)
 		}
 		live.discoveryId = res.discoveryId
 		live.decoded = this.store.get(res.discoveryId)?.confidence === "decoded"
@@ -2828,17 +2954,27 @@ export class ScannerService extends EventEmitter {
 
 	private readonly onAmbientEvidence = (e: AmbientEvidenceEvent): void => {
 		const now = this.now()
+		const ambientOnly = SCANNER_AMBIENT_PROTOCOLS.includes(e.ev.protocol)
 		const candidates = [...this.live.values(), ...this.recent].filter(o => {
 			const t = o.lastTrack
 			if (o.sourceId !== e.sourceId || !t) return false
-			if (Math.abs(t.centreHz - e.hz) > Math.max(1500, t.obwHz / 2))
-				return false
+			// WG7: an ambient-only decode (AIS, ACARS, VDL2, LoRa) names only a track within the
+			// 1 kHz decode tolerance, so a wide track near its channel is never named by it.
+			const tolHz = ambientOnly
+				? SCANNER_AMBIENT_TARGET_TOLERANCE_HZ
+				: Math.max(1500, t.obwHz / 2)
+			if (Math.abs(t.centreHz - e.hz) > tolHz) return false
 			return (
 				e.ev.at >= o.startedAt - AMBIENT_PAIR_MS &&
 				e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
 			)
 		})
-		for (const live of candidates) this.applyEvidence(live, e.ev)
+		for (const live of candidates) {
+			this.applyEvidence(live, e.ev)
+			// WG7 req 1.5: identify jobs pairing this observation may decode an ambient trial.
+			for (const jobId of live.jobIds)
+				this.drivers.get(jobId)?.onAmbientEvidence?.(live.observationId, e.ev)
+		}
 	}
 
 	private applyEvidence(live: LiveObservation, ev: DecodeEvidence): void {
@@ -3078,31 +3214,30 @@ export class ScannerService extends EventEmitter {
 		return this.recent.find(o => o.observationId === observationId)
 	}
 
+	/**
+	 * The ambient target of a config-owned decoder (WG7 resolveAmbientTargets; the existing types
+	 * unchanged). The manager's current config wins, so decoders created after start resolve; the
+	 * startup configs remain the fallback for managers without that view.
+	 */
 	private ambientTarget(decoderId: string): AmbientTarget | null {
-		const cfg = this.deps.decoderConfigs.find(c => c.id === decoderId)
+		const cfg =
+			this.liveDecoderConfig(decoderId) ??
+			this.deps.decoderConfigs.find(c => c.id === decoderId)
 		if (!cfg) return null
-		const sourceId = cfg.sourceId ?? this.deps.routing.getDefaultSourceId()
-		if (!sourceId) return null
-		// The NXDN flavour of a dsd-fme decoder comes from its mode (Task 34 carry).
-		const nxdn =
-			cfg.type === "dsd-fme"
-				? cfg.options["mode"] === "nxdn48"
-					? ("nxdn48" as const)
-					: ("nxdn96" as const)
-				: undefined
-		const withNxdn = (hz: number): AmbientTarget =>
-			nxdn ? { sourceId, hz, nxdn } : { sourceId, hz }
-		const listed =
-			cfg.frequencies?.[0] ??
-			(typeof cfg.options["frequency"] === "number"
-				? cfg.options["frequency"]
-				: undefined)
-		if (listed !== undefined) return withNxdn(listed)
-		const centre = this.deps.sources.getCaps(sourceId)?.centerFreq
-		if (centre === undefined) return null
-		const offset =
-			typeof cfg.options["offsetHz"] === "number" ? cfg.options["offsetHz"] : 0
-		return withNxdn(centre + offset)
+		return resolveAmbientTargets(cfg, {
+			defaultSourceId: () => this.deps.routing.getDefaultSourceId(),
+			caps: sourceId => this.deps.sources.getCaps(sourceId),
+			inputKind: id => this.deps.decoders.getDecoder(id)?.caps.input,
+		})
+	}
+
+	private liveDecoderConfig(decoderId: string): DecoderConfig | undefined {
+		const decoders = this.deps.decoders as Partial<
+			Pick<DecoderManager, "getConfiguredDecoderConfigs">
+		>
+		if (typeof decoders.getConfiguredDecoderConfigs !== "function")
+			return undefined
+		return decoders.getConfiguredDecoderConfigs().find(c => c.id === decoderId)
 	}
 
 	// === arbiter and source events ===
@@ -3407,6 +3542,14 @@ export class ScannerService extends EventEmitter {
 				"",
 			// [S2] Task 40 replaces this with Boolean(this.deps.channels): parallel channel trials.
 			channelizer: () => false,
+			// WG7 req 1.5: running config-owned ambient decoders covering the target. Without a trust
+			// source no ambient decode can ever count, so no ambient trial is planned (as before WG7).
+			...(this.deps.ambientTrust
+				? {
+						ambient: (sourceId: string, hz: number, toleranceHz: number) =>
+							this.ambient.coverageAt(sourceId, hz, toleranceHz),
+					}
+				: {}),
 			settings: () => this.settings(),
 			emit: data => this.emit("identify", data),
 			logger: this.deps.logger,
@@ -3657,9 +3800,14 @@ export class ScannerService extends EventEmitter {
 		if (pj.id.startsWith("passive-")) return
 		let plan: HopPlan
 		let lockoutExclusions: LockoutExclusion[] | undefined
+		let decodedElsewhere: DecodedElsewhereRange[] | undefined
+		let bandPlanSkips: BandPlanSkipRange[] | undefined
 		let failed = false
 		try {
-			;({ plan, lockoutExclusions } = planJob(pj.spec, this.previewContext()))
+			;({ plan, lockoutExclusions, decodedElsewhere, bandPlanSkips } = planJob(
+				pj.spec,
+				this.previewContext(),
+			))
 		} catch (err) {
 			this.log.warn(
 				{ err, jobId: pj.id },
@@ -3687,6 +3835,8 @@ export class ScannerService extends EventEmitter {
 			unrestorable: [],
 			counts: { observations: 0, transients: 0 },
 			...(lockoutExclusions && !failed ? { lockoutExclusions } : {}),
+			...(decodedElsewhere && !failed ? { decodedElsewhere } : {}),
+			...(bandPlanSkips && !failed ? { bandPlanSkips } : {}),
 		}
 		const driver = this.createDriver(record)
 		this.jobs.set(record.id, record)
@@ -3851,6 +4001,25 @@ export class ScannerService extends EventEmitter {
 			bandplans: this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
 			tunerRange: () => ({ startHz: 24_000_000, endHz: 1_766_000_000 }),
 			lockouts: sourceId => this.store.lockouts(sourceId),
+			...(this.deps.decoderCoverage
+				? { decoderCoverage: this.deps.decoderCoverage }
+				: {}),
+			...(this.deps.bandPlanSkips
+				? { bandPlanSkips: this.bandPlanSkipsRead }
+				: {}),
+		}
+	}
+
+	/** WG7 req 6.6: a throwing band-plan view counts as none (fail closed: nothing skipped). */
+	private readonly bandPlanSkipsRead = (): readonly BandPlanSkipSource[] => {
+		try {
+			return this.deps.bandPlanSkips?.() ?? []
+		} catch (err) {
+			this.log.warn(
+				{ errName: err instanceof Error ? err.name : typeof err },
+				"Band-plan skip view failed; planning without band-plan skips",
+			)
+			return []
 		}
 	}
 
@@ -4019,6 +4188,10 @@ export class ScannerService extends EventEmitter {
 			...(record.lockoutExclusions
 				? { lockoutExclusions: record.lockoutExclusions }
 				: {}),
+			...(record.decodedElsewhere
+				? { decodedElsewhere: record.decodedElsewhere }
+				: {}),
+			...(record.bandPlanSkips ? { bandPlanSkips: record.bandPlanSkips } : {}),
 			progress: driver
 				? { ...driver.progress(), hitStats: this.hitStatsOf(record.id) }
 				: {
@@ -4554,6 +4727,24 @@ function setLockouts(
 ): void {
 	if (lockoutExclusions) record.lockoutExclusions = lockoutExclusions
 	else delete record.lockoutExclusions
+}
+
+/** WG6 req 1.2: the record's runtime decoded-elsewhere ranges follow its current plan. */
+function setDecodedElsewhere(
+	record: JobRecord,
+	decodedElsewhere: DecodedElsewhereRange[] | undefined,
+): void {
+	if (decodedElsewhere) record.decodedElsewhere = decodedElsewhere
+	else delete record.decodedElsewhere
+}
+
+/** WG7 req 6.3: the record's runtime band-plan skip ranges follow its current plan. */
+function setBandPlanSkips(
+	record: JobRecord,
+	bandPlanSkips: BandPlanSkipRange[] | undefined,
+): void {
+	if (bandPlanSkips) record.bandPlanSkips = bandPlanSkips
+	else delete record.bandPlanSkips
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */

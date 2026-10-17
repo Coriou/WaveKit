@@ -110,7 +110,7 @@ export interface LoraMeshtasticOptions {
 	effectiveTargetRate: number
 }
 
-const RawOptionsSchema = z
+export const RawOptionsSchema = z
 	.object({
 		region: z.enum(LORA_REGIONS),
 		preset: z.enum(LORA_PRESETS),
@@ -422,6 +422,7 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 		try {
 			parsed = JSON.parse(trimmed)
 		} catch {
+			// Decoder output line: documented diagnostic exception to the no-option-text log rule (Main, WG7 HW R2).
 			this.logger.debug({ line: trimmed }, "Failed to parse wrapper output")
 			return null
 		}

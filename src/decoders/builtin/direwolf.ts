@@ -18,7 +18,15 @@ import type {
 	DemodulationConfig,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import {
+	readExtraArgsOption,
+	createOptionWarner,
+	readNumericOption,
+	type NumericOptionWarn,
+} from "../option-values.js"
+import { DIREWOLF_BOUNDS } from "../options/direwolf.js"
 import { NetworkConnectionError } from "../../utils/errors.js"
+import { safeErrorFields } from "../safe-error-fields.js"
 
 /** Default KISS TCP port for direwolf */
 const DEFAULT_KISS_PORT = 8001
@@ -143,6 +151,7 @@ export interface APRSData {
  */
 export class DirewolfDecoder extends AudioDemodDecoder {
 	private options: DirewolfOptions
+	private readonly warnOption: NumericOptionWarn
 	private kissBuffer: Buffer = Buffer.alloc(0)
 
 	// Network Consumer State (from NetworkProducerDecoder)
@@ -157,7 +166,10 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
-		this.options = parseDirewolfOptions(config.options)
+		this.warnOption = createOptionWarner((fields, message) =>
+			this.logger.warn(fields, message),
+		)
+		this.options = parseDirewolfOptions(config.options, this.warnOption)
 
 		// Set up network connection params
 		this.outputHost = "127.0.0.1" // Always local for spawned process
@@ -169,7 +181,7 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	 * Called by BaseDecoder.updateOptions().
 	 */
 	protected override onOptionsUpdated(): void {
-		this.options = parseDirewolfOptions(this.config.options)
+		this.options = parseDirewolfOptions(this.config.options, this.warnOption)
 		this.logger.debug(
 			{ inputSampleRate: this.options.inputSampleRate },
 			"Direwolf options re-parsed after update",
@@ -324,11 +336,11 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		const host = this.outputHost
 		const port = this.outputPort
 
-		this.logger.info({ host, port }, "Connecting to Direwolf KISS output")
+		this.logger.info({ port }, "Connecting to Direwolf KISS output")
 
 		return new Promise<void>((resolve, reject) => {
 			this.tcpClient = createConnection({ host, port }, () => {
-				this.logger.info({ host, port }, "Connected to Direwolf KISS")
+				this.logger.info({ port }, "Connected to Direwolf KISS")
 				this.reconnectAttempts = 0
 				this.isReconnecting = false
 				resolve()
@@ -339,7 +351,10 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 			})
 
 			this.tcpClient.on("error", (err: Error) => {
-				this.logger.error({ err }, "KISS connection error")
+				this.logger.error(
+					{ err: safeErrorFields(err) },
+					"KISS connection error",
+				)
 				if (!this.isReconnecting && this.reconnectAttempts === 0) {
 					this.scheduleReconnect()
 					resolve()
@@ -431,15 +446,38 @@ export class DirewolfDecoder extends AudioDemodDecoder {
  */
 function parseDirewolfOptions(
 	options: Record<string, unknown>,
+	warn: NumericOptionWarn,
 ): DirewolfOptions {
+	const port = (key: string) =>
+		readNumericOption(
+			options[key],
+			{ key, integer: true, ...DIREWOLF_BOUNDS.port },
+			warn,
+		)
 	return {
 		audioDevice: options["audioDevice"] as string | undefined,
-		sampleRate: options["sampleRate"] as number | undefined,
-		kissPort: options["kissPort"] as number | undefined,
-		agwPort: options["agwPort"] as number | undefined,
+		sampleRate: readNumericOption(
+			options["sampleRate"],
+			{
+				key: "sampleRate",
+				integer: false,
+				...DIREWOLF_BOUNDS.audioSampleRateHz,
+			},
+			warn,
+		),
+		kissPort: port("kissPort"),
+		agwPort: port("agwPort"),
 		callsign: options["callsign"] as string | undefined,
-		extraArgs: options["extraArgs"] as string[] | undefined,
-		inputSampleRate: options["inputSampleRate"] as number | undefined,
+		extraArgs: readExtraArgsOption(options["extraArgs"], warn),
+		inputSampleRate: readNumericOption(
+			options["inputSampleRate"],
+			{
+				key: "inputSampleRate",
+				integer: false,
+				...DIREWOLF_BOUNDS.inputSampleRateHz,
+			},
+			warn,
+		),
 	}
 }
 

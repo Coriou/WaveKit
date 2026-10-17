@@ -1,7 +1,9 @@
 import type { MeshtasticPacket } from "../../../decoders/builtin/lora-meshtastic.js"
+import { readPosition as readMeshPosition } from "../../meshtastic-protobuf.js"
 import { isCoalescibleShape } from "../storage/coalesce.js"
-import type { DecodePresentation } from "../types.js"
+import type { DecodePosition, DecodePresentation } from "../types.js"
 import {
+	altitudeMetres,
 	clampTitle,
 	entityKey,
 	asNumber,
@@ -9,6 +11,7 @@ import {
 	objectSchema,
 	parsePayload,
 	presentation,
+	readPosition,
 	takeFields,
 } from "./budget.js"
 
@@ -69,9 +72,55 @@ function portName(portnum: number | undefined): string {
 	return PORT_NAMES[portnum] ?? `Port ${portnum}`
 }
 
+/** PortNum POSITION_APP. */
+const PORT_POSITION = 3
+/** 256 bytes of Position protobuf, as canonical base64 (req 4.4). */
+export const MESH_POSITION_MAX_BYTES = 256
+export const MESH_POSITION_MAX_B64 = 344
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/
+
 /**
- * Mesh packet. Position is omitted: the coordinates live in the protobuf
- * payload, which this mapper does not decode.
+ * Strict canonical base64, the mesh tracker's rules with the 256-byte cap:
+ * length a multiple of 4, standard alphabet, at most two trailing `=`, and
+ * re-encoding gives the same text. Empty is no payload here.
+ */
+function decodePositionBytes(text: string): Uint8Array | null {
+	if (text.length === 0 || text.length > MESH_POSITION_MAX_B64) return null
+	if (text.length % 4 !== 0 || !BASE64_RE.test(text)) return null
+	const bytes = Buffer.from(text, "base64")
+	if (bytes.length > MESH_POSITION_MAX_BYTES) return null
+	if (bytes.toString("base64") !== text) return null
+	return bytes
+}
+
+/**
+ * Position of a portnum 3 packet (req 4.4): `lat`/`lon` by the shared rule
+ * (finite, in range, not (0, 0)) and `altM` from `altitudeM` (req 4.5).
+ * Anything undecodable is no position; never throws.
+ */
+export function meshPosition(
+	portnum: unknown,
+	payloadB64: unknown,
+): DecodePosition | undefined {
+	if (portnum !== PORT_POSITION || typeof payloadB64 !== "string")
+		return undefined
+	try {
+		const bytes = decodePositionBytes(payloadB64)
+		if (!bytes) return undefined
+		const decoded = readMeshPosition(bytes)
+		if (!decoded) return undefined
+		return readPosition(
+			{ lat: decoded.lat, lon: decoded.lon },
+			altitudeMetres(decoded.altitudeM),
+		)
+	} catch {
+		return undefined
+	}
+}
+
+/**
+ * Mesh packet. A POSITION packet (portnum 3) carries the position decoded
+ * from `payloadB64`; other ports have none.
  */
 export function presentMeshtastic(
 	data: unknown,
@@ -114,6 +163,7 @@ export function presentMeshtastic(
 		protocol: "meshtastic",
 		entityKey: node === null ? null : entityKey("node", node),
 		title,
+		position: meshPosition(portnum, payload["payloadB64"]),
 		fields,
 	})
 }

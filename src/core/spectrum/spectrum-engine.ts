@@ -16,6 +16,7 @@ import type { TunerController } from "../tuner-controller.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { defaultFftSize } from "./fft.js"
+import { PROFILE_BINS_FLOOR } from "./subscribe-options.js"
 import type {
 	CfarMaskRange,
 	EngineState,
@@ -165,6 +166,8 @@ export interface SpectrumEngineDeps {
 		| (Pick<TunerController, "getState"> & Pick<EventEmitter, "on" | "off">)
 		| null
 	settings: () => SpectrumSettings
+	/** WG8: the resolved, validated bins cap (SpectrumService). Absent = the 2 048 floor. */
+	binsCap?: () => number
 	tuning?: () => EngineTuning
 	logger: Logger
 	host?: PipelineHostMode
@@ -214,6 +217,8 @@ export function buildPipelineConfig(
 	s: SpectrumSettings,
 	tuning: EngineTuning,
 	persisted?: EngineState,
+	/** WG8: the host bins cap; the summary budget is min(ws.spectrumSummaryBins, cap). Default: the floor. */
+	binsCap: number = PROFILE_BINS_FLOOR,
 ): PipelineConfig {
 	const sensitivity = tuning.sensitivity ?? s.detection.sensitivity
 	const fftSize =
@@ -242,7 +247,7 @@ export function buildPipelineConfig(
 		minSurfaceBlocks: s.detection.minSurfaceBlocks,
 		thresholdDb: tuning.thresholdDb,
 		faTargetPerMhzMin,
-		spectrumBins: s.ws.spectrumSummaryBins, // engine summary budget; client bins are applied by SpectrumService (Task 37a)
+		spectrumBins: Math.min(s.ws.spectrumSummaryBins, binsCap), // engine summary budget; client bins are applied by SpectrumService (Task 37a)
 		trackHangMs: 500,
 		maxTracks: 512,
 		maxTrackMs: 120_000,
@@ -649,6 +654,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.deps.settings(),
 			tuning,
 			this.persisted,
+			this.deps.binsCap?.(),
 		)
 		this.cfg = cfg
 		const generation = ++this.generation
