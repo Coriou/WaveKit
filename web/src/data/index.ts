@@ -15,6 +15,7 @@ import { IdentifyStore } from "./identify-store.ts"
 import { LiveAudioStore } from "./live-audio-store.ts"
 import { PreferencesStore } from "./preferences-store.ts"
 import { ReceiverStore } from "./receiver-store.ts"
+import { RecordingsStore } from "./recordings-store.ts"
 import { SavedFrequenciesStore } from "./saved-frequencies-store.ts"
 import { ScannerStore } from "./scanner-store.ts"
 import { SourcesStore } from "./sources-store.ts"
@@ -51,6 +52,8 @@ export interface DataLayer {
 	decoderSettings: DecoderSettingsStore
 	/** Version, uptime and storage report; loads on first load() (the Settings drawer). */
 	system: SystemStore
+	/** Recording inventory, Keep and delete (protected core); loads on first refresh() (the Recordings drawer). */
+	recordings: RecordingsStore
 	/** Operator preferences, derived from the saved-frequencies operator-data read. */
 	preferences: PreferencesStore
 	/** Aircraft, vessels, APRS and mesh current state; each attaches on demand (the Map view). */
@@ -105,6 +108,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		station: new StationStore(api),
 		decoderSettings: new DecoderSettingsStore(api),
 		system: new SystemStore(api),
+		recordings: new RecordingsStore(api),
 		preferences: new PreferencesStore(api, savedFrequencies),
 		fleets: createFleets(api, events),
 		coverage: new CoverageStore(api),
@@ -139,6 +143,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.scanner.dispose()
 			layer.decoderSettings.dispose()
 			layer.preferences.dispose()
+			layer.recordings.dispose()
 			events.disconnect()
 		},
 	}
@@ -253,6 +258,11 @@ export type {
 	DecoderSettingsState,
 } from "./decoder-settings-store.ts"
 export { SystemStore } from "./system-store.ts"
+export {
+	RECORDING_DELETE_GRACE_MS,
+	RecordingsStore,
+} from "./recordings-store.ts"
+export type { RecordingsState } from "./recordings-store.ts"
 export type { SystemState } from "./system-store.ts"
 export {
 	PREFERENCE_DEFAULTS,

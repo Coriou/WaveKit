@@ -111,3 +111,28 @@ describe("ListenController (Web Audio path)", () => {
 		expect(calls.at(-1)).toBe("unlock 16000")
 	})
 })
+
+describe("ListenController hold (a recording plays here)", () => {
+	it("mutes live audio while held and restores the operator's volume after", () => {
+		const volumes: number[] = []
+		const liveAudio = {
+			get: () => ({ status: status() }),
+		} as unknown as LiveAudioStore
+		const c = new ListenController(liveAudio, {
+			createPlayer: () => ({
+				unlock: () => undefined,
+				play: () => undefined,
+				stop: () => undefined,
+				setVolume: v => void volumes.push(v),
+				dispose: () => undefined,
+			}),
+		})
+		c.setVolume(0.6)
+		c.hold(true)
+		expect(c.isHeld).toBe(true)
+		c.setVolume(0.4)
+		expect(c.get().volume).toBe(0.4)
+		c.hold(false)
+		expect(volumes.slice(-4)).toEqual([0.6, 0, 0, 0.4])
+	})
+})

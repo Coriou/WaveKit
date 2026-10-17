@@ -66,6 +66,7 @@ import {
 import type { MockMessage, MockSignal } from "./data.ts"
 import { registerMapMock } from "./map.ts"
 import type { MapMock } from "./map.ts"
+import { registerRecordingsMock } from "./recordings.ts"
 import { registerOperatorData } from "./operator-data.ts"
 import {
 	normaliseSpectrumOptions,
@@ -1211,6 +1212,8 @@ export async function buildMockServer(
 				: null
 		},
 	})
+	// --- Recordings (./recordings.ts): the WG8 inventory, WG9 Keep and delete, synthetic WAV files.
+	const recordings = registerRecordingsMock(app)
 	// GET /api/access/bootstrap is deliberately not mounted: a legacy core answers it with 404.
 
 	app.get("/api/sources", async () => [sourceStatus()])
@@ -1915,6 +1918,7 @@ export async function buildMockServer(
 	})
 
 	app.addHook("onClose", async () => {
+		recordings.stop()
 		for (const t of timers) clearTimeout(t)
 		timers.clear()
 		for (const client of clients) {

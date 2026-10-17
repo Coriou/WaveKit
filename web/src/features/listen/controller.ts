@@ -65,6 +65,8 @@ export class ListenController extends Store<ListenState> {
 	private readonly liveAudio: LiveAudioStore
 	private readonly player: ListenPlayer | null
 	private unbind: (() => void) | null = null
+	/** A recording is playing in this tab: live audio keeps streaming, muted. */
+	private held = false
 
 	constructor(liveAudio: LiveAudioStore, options: ListenControllerOptions = {}) {
 		super({ wanted: false, phase: "off", volume: readVolume(), error: null })
@@ -97,7 +99,7 @@ export class ListenController extends Store<ListenState> {
 		this.unbind = null
 		this.el = el
 		if (!el || this.player) return
-		el.volume = this.get().volume
+		el.volume = this.outVolume()
 		const on = (type: string, fn: () => void) => {
 			el.addEventListener(type, fn)
 			return () => el.removeEventListener(type, fn)
@@ -174,10 +176,30 @@ export class ListenController extends Store<ListenState> {
 
 	setVolume(volume: number): void {
 		const v = Math.min(1, Math.max(0, volume))
-		if (this.el) this.el.volume = v
-		this.player?.setVolume(v)
 		writeVolume(v)
 		this.update(s => ({ ...s, volume: v }))
+		this.applyVolume()
+	}
+
+	/** Mutes live audio while a recording plays here (the stream stays attached), and unmutes it after. */
+	hold(held: boolean): void {
+		if (this.held === held) return
+		this.held = held
+		this.applyVolume()
+	}
+
+	get isHeld(): boolean {
+		return this.held
+	}
+
+	private outVolume(): number {
+		return this.held ? 0 : this.get().volume
+	}
+
+	private applyVolume(): void {
+		const v = this.outVolume()
+		if (this.el) this.el.volume = v
+		this.player?.setVolume(v)
 	}
 
 	dispose(): void {
@@ -219,7 +241,7 @@ export class ListenController extends Store<ListenState> {
 		if (!el || !source.wavUrl) return
 		this.attachedKey = this.key
 		el.src = source.wavUrl
-		el.volume = this.get().volume
+		el.volume = this.outVolume()
 		if (this.get().phase !== "playing") this.setPhase("connecting")
 		el.play().catch((error: unknown) => {
 			if (error instanceof DOMException && error.name === "NotAllowedError")

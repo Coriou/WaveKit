@@ -440,3 +440,19 @@ core source and run against the mock, not yet against a live core)
 - [ ] A discovery's own 24 h history (hourly airtime or last transmissions) for the activity strip of the
   opened row. Partly: `/discoveries/:id/observations` (paged) and `/api/spectrum/occupancy` (per 12.5 kHz bin).
 - [ ] Deleting a discovery cannot be undone (no restore), so the web app asks first instead of offering Undo.
+
+**Found by the web app, Recordings pass** (2026-10-17, branch `claude/project-thread-afdtom`; read from the
+core source and run against the mock, not yet against a live core)
+
+- [ ] The inventory (`GET /api/recordings`, WG8) and Keep / delete (WG9) mount only in protected mode, so a
+  default legacy core shows "Recordings need access protection".
+- [ ] No event when a recording appears, is kept or is deleted: the drawer re-reads the list every 20 s
+  while it is open, and another client's Keep shows up only then.
+- [ ] The file route answers without ranges (`Accept-Ranges: none`): the web app fetches the whole WAV once
+  to play and seek it, and draws the waveform from the same file (no core peaks yet).
+- [ ] Inventory items carry no protocol, frequency (for calls), channel or slot, and no link to the Activity
+  event: the drawer names calls by talkgroup and shows "Show in Activity" as a talkgroup search.
+- [ ] Scanner recordings cannot be deleted one by one (`RECORDING_DELETE_UNSUPPORTED`); the drawer points to
+  deleting the discovery. Delete has no restore, so Undo holds the request for 6 s before sending it.
+- [ ] `GET /api/storage` reports `kept: null`; the footer sums the kept items' sizes itself. The
+  report gives no retention age for call recordings, so the drawer cannot say when calls expire.

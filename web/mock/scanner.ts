@@ -63,6 +63,7 @@ import {
 	SCANNER_BANDPLANS,
 	USABLE_FRACTION,
 	identifyPlanFor,
+	seedDiscoveryId,
 	signalActive,
 } from "./data.ts"
 import type { MockSignal } from "./data.ts"
@@ -2400,7 +2401,7 @@ export function registerScannerMock(
 				...(s.swept ? [MOCK_SWEEP_JOB_ID] : []),
 			]
 			const d: Discovery = {
-				id: `d_01JBRZSEED${String(index).padStart(2, "0")}${hz.toString(36).toUpperCase()}`,
+				id: seedDiscoveryId(index, hz),
 				frequencyHz: hz,
 				frequencyKey: `r:${hz}`,
 				measuredOffsetHz: ((index * 37) % 9) * 40 - 160,

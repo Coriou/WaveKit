@@ -216,6 +216,50 @@ export class ApiClient {
 		return this.request<T>("DELETE", path, undefined, options)
 	}
 
+	/**
+	 * GET of a binary body (a recording file): same credentials as JSON requests, the error body
+	 * parsed as JSON when it is. Rejects with an ApiError like request().
+	 */
+	async blob(path: string, options: RequestOptions = {}): Promise<Blob> {
+		const init: RequestInit = { method: "GET", credentials: "include" }
+		if (options.signal) init.signal = options.signal
+		let response: Response
+		try {
+			response = await this.fetchImpl(
+				`${this.baseUrl}${path}${buildQuery(options.query)}`,
+				init,
+			)
+		} catch (error) {
+			if (error instanceof DOMException && error.name === "AbortError")
+				throw error
+			throw new ApiError({
+				status: 0,
+				code: "NETWORK_ERROR",
+				message: error instanceof Error ? error.message : "Network error",
+				body: null,
+				method: "GET",
+				path,
+			})
+		}
+		if (response.ok) return response.blob()
+		const text = await response.text()
+		let parsed: unknown = text
+		try {
+			parsed = JSON.parse(text) as unknown
+		} catch {
+			// not JSON: keep the text
+		}
+		const fields = errorFields(parsed)
+		throw new ApiError({
+			status: response.status,
+			code: fields.code,
+			message: fields.message ?? `GET ${path} failed with ${response.status}`,
+			body: parsed,
+			method: "GET",
+			path,
+		})
+	}
+
 	// ---- operator data (src/operator-data/routes.ts; protected mode only, 404 on a legacy core)
 
 	/** GET /api/operator-data, validated. */

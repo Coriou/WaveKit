@@ -2032,6 +2032,11 @@ export interface DiscoverySeed {
 	swept?: boolean
 }
 
+/** The id of seeded discovery `index` (the scanner mock and the recordings mock share it). */
+export function seedDiscoveryId(index: number, hz: number): string {
+	return `d_01JBRZSEED${String(index).padStart(2, "0")}${hz.toString(36).toUpperCase()}`
+}
+
 export const DISCOVERY_SEEDS: readonly DiscoverySeed[] = [
 	{
 		mhz: 161.15,
