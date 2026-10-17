@@ -216,12 +216,13 @@ body:has([data-wk-theme="light"]){background:#d9e3e6}
 		<sc-if value="{{tilesOffline}}" hint-placeholder-val="{{true}}"><span>Offline map · 400 km around you · 412 MB</span></sc-if>
 		<sc-if value="{{tilesOnline}}" hint-placeholder-val="{{false}}"><span>Online map (OpenFreeMap) · <button onClick="{{downloadTiles}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: var(--wk-accent); font-size: 11px; font-weight: 700">Download for offline</button></span></sc-if>
 		<sc-if value="{{tilesDownloading}}" hint-placeholder-val="{{false}}"><span>Downloading map for your area · {{dlPct}} %</span></sc-if>
-		<span>·</span>
-		<span>© OpenStreetMap · Natural Earth</span>
+		<sc-if value="{{tilesBlank}}" hint-placeholder-val="{{false}}"><button onClick="{{openMapSetting}}" title="Settings › Map › Beyond the offline map" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: var(--wk-text-3); font-size: 11px">Blank map · no online tiles</button></sc-if>
+		<sc-if value="{{notBlank}}" hint-placeholder-val="{{true}}"><span>·</span>
+		<span>© OpenStreetMap · Natural Earth</span></sc-if>
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"embedded":{"editor":null},"onAction":{"editor":null},"location":{"editor":"enum","options":["set","approximate"],"default":"set"},"tiles":{"editor":"enum","options":["offline","online","downloading"],"default":"offline"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"embedded":{"editor":null},"onAction":{"editor":null},"location":{"editor":"enum","options":["set","approximate"],"default":"set"},"tiles":{"editor":"enum","options":["offline","online","downloading","blank"],"default":"offline"},"onSettings":{"editor":null},"$preview":{"width":1440,"height":900}}'>
 // ---------- geography ----------
 // Land: Natural Earth 10m for the wide area, OSM coastline (ODbL) simplified to ~50 m
 // around Roscoff (box LOC). Rings are flat [lon, lat, lon, lat, …]. Edges lying on a
@@ -679,7 +680,8 @@ class Component extends DCLogic {
 		// cached margin or the zoom/overlays change, otherwise the cached bitmap is blitted
 		const s = this.state, z = s.zoom, M = 256, c = this.center(), st = this.station();
 		const th = this.themeKey(), pal = th.pal, A = th.acc, Ln = th.line;
-		const key = [z, W, H, dpr, s.ov.rings, s.ov.coverage, st[0], st[1], th.key, pal.sea, pal.land, A, Ln].join('|');
+		const blank = (s.tiles || this.props.tiles) === 'blank';
+		const key = [z, W, H, dpr, s.ov.rings, s.ov.coverage, st[0], st[1], th.key, pal.sea, pal.land, A, Ln, blank].join('|');
 		const tl = [c[0] - W / 2, c[1] - H / 2];
 		if (this.stat && this.stat.key === key && tl[0] >= this.stat.x && tl[1] >= this.stat.y && tl[0] + W <= this.stat.x + W + 2 * M && tl[1] + H <= this.stat.y + H + 2 * M) return this.stat;
 		const cv = (this.stat && this.stat.cv) || document.createElement('canvas');
@@ -699,17 +701,17 @@ class Component extends DCLogic {
 		const vis = RINGS.filter(r => inView(r.bb));
 		// one path for every ring: no hairline seams where clipped pieces meet
 		g.lineJoin = 'round';
-		if (pal.shallow) {
+		if (pal.shallow && !blank) {
 			// chart shallow-water band: a wide coastline stroke, the land fill then hides its inland half
 			g.beginPath();
 			vis.forEach(r => r.coast.forEach(line => line.forEach((p, i) => { const q = P(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); })));
 			g.strokeStyle = pal.shallow; g.lineWidth = pal.shallowW * Math.min(1.4, Math.max(0.6, (z - 6) / 4)); g.stroke();
 		}
 		g.beginPath();
-		vis.forEach(r => { r.pts.forEach((p, i) => { const q = P(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }); g.closePath(); });
+		if (!blank) vis.forEach(r => { r.pts.forEach((p, i) => { const q = P(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }); g.closePath(); });
 		g.fillStyle = pal.land; g.fill();
 		g.beginPath();
-		vis.forEach(r => r.coast.forEach(line => line.forEach((p, i) => { const q = P(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); })));
+		if (!blank) vis.forEach(r => r.coast.forEach(line => line.forEach((p, i) => { const q = P(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); })));
 		g.lineJoin = 'round';
 		g.strokeStyle = pal.coastHalo(Ln); g.lineWidth = 5; g.stroke();
 		g.strokeStyle = pal.coast(Ln); g.lineWidth = pal.coastW; g.stroke();
@@ -868,7 +870,8 @@ class Component extends DCLogic {
 			});
 		}
 		const placeDraws = [];
-		if (s.ov.labels) {
+		// place and sea names come with the tiles: a Blank map has none
+		if (s.ov.labels && (s.tiles || this.props.tiles) !== 'blank') {
 			PLACES.slice().sort((a, b) => a[4] - b[4]).forEach(([n, lo, la, minZ]) => {
 				if (z < minZ) return;
 				const q = this.toXY(la, lo);
@@ -1026,6 +1029,8 @@ class Component extends DCLogic {
 			stationText: this.approx() ? 'Station approximate' : 'Station ' + toLocator(st[0], st[1]),
 			tilesOffline: tiles === 'offline' || (tiles === 'downloading' && s.dl >= 100),
 			tilesOnline: tiles === 'online',
+			// Settings › Map › Beyond the offline map = Blank: no tile or font requests, the data on a plain sea
+			tilesBlank: tiles === 'blank', notBlank: tiles !== 'blank', openMapSetting: () => this.props.onSettings && this.props.onSettings('map.online'),
 			tilesDownloading: tiles === 'downloading' && s.dl < 100,
 			dlPct: String(Math.min(100, 38 + s.dl)),
 			downloadTiles: () => this.setState({ tiles: 'downloading', dl: 0 }),

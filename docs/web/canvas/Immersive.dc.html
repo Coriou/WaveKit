@@ -44,7 +44,12 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 
 		<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; inset: 0; z-index: 1">
-				<dc-import name="Map" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" embedded="{{true}}" on-action="{{mapAction}}" hint-size="100%,100%"></dc-import>
+				<dc-import name="Map" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" embedded="{{true}}" on-action="{{mapAction}}" on-settings="{{openSetting}}" hint-size="100%,100%"></dc-import>
+			</div>
+		</sc-if>
+		<sc-if value="{{showMessages}}" hint-placeholder-val="{{false}}">
+			<div style="position: absolute; inset: 0; z-index: 1; background: var(--wk-bg)">
+				<dc-import name="Messages" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" variant="gallery" embedded="{{true}}" top-inset="{{msgTop}}" right-inset="{{msgRight}}" on-tune="{{tune}}" hint-size="100%,100%"></dc-import>
 			</div>
 		</sc-if>
 
@@ -255,7 +260,8 @@ const DR_MIN = 360, DR_MAX = 640;
 // From 1100 px a drawer floats over the plot's right side at full height; the plot never moves, the Receiver and the card
 // slide left to clear it. The drawer gives up width before the Receiver would reach the Tuner; below 1100 px (or with no
 // room for 360 px) it overlays between the island rows instead. Dock width with the active label showing, for the collision check.
-const FULL_MIN_VW = 1100, DOCK_WIDE = 460, DOCK_COMPACT = 380;
+// dock widths with Messages as a third view (the web app measured 496 and 424)
+const FULL_MIN_VW = 1100, DOCK_WIDE = 496, DOCK_COMPACT = 424;
 // Tuned card anchors in the free plot area: each is pushed off the islands along its own axis, or dropped if it still collides.
 // "Above Listen" (the default) sits left-aligned with the Listen island, one gutter above it, and rides up when Listen
 // expands; it replaces the old bottom-left anchor, which ended up in the same place ('bl' still resolves to it).
@@ -266,7 +272,7 @@ const ANCHORS = [
 	{ id: 'bc', name: 'bottom centre', h: 'c', v: 'b' }, { id: 'br', name: 'bottom right', h: 'r', v: 'b' }
 ];
 const CARD_ALIAS = { bl: 'al' };
-const VIEWS = ['spectrum', 'map'];
+const VIEWS = ['spectrum', 'map', 'messages'];
 const hits = (a, b) => a.x < b.x + b.w + G - 1 && b.x < a.x + a.w + G - 1 && a.y < b.y + b.h + G - 1 && b.y < a.y + a.h + G - 1;
 const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -742,7 +748,8 @@ class Component extends DCLogic {
 		// The view and an open drawer are both selected; only the view shows its label, so the dock keeps its width.
 		const NAV = [
 			{ id: 'spectrum', label: 'Spectrum', d: ['M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10'] },
-			{ id: 'map', label: 'Map', d: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] }
+			{ id: 'map', label: 'Map', d: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] },
+			{ id: 'messages', label: 'Messages', d: ['M21 14l-3 -3h-7a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1h9a1 1 0 0 1 1 1v10', 'M14 15v2a1 1 0 0 1 -1 1h-7l-3 3v-10a1 1 0 0 1 1 -1h2'] }
 		];
 		const DRAWER_NAV = [
 			{ id: 'activity', label: 'Activity', d: ['M3 12h4l3 8l4 -16l3 8h4'] },
@@ -751,7 +758,7 @@ class Component extends DCLogic {
 		];
 		// ---- shell grid
 		const drawer = this.drawerId();
-		const view = base.view === 'map' ? 'map' : 'spectrum';
+		const view = base.view === 'map' || base.view === 'messages' ? base.view : 'spectrum';
 		const L = this.shellLayout(base, { drawer, rxOpen: s.open === 'rx', pane: drawer === 'scanner' && (base.planner === 'compose' || (base.planner === 'running' && !!hold)) });
 		this.layout = L;
 		// a between-rows drawer shares the right side with the Receiver panel, so the open panel wins; a full-height one
@@ -861,6 +868,8 @@ class Component extends DCLogic {
 			tunerOpen: s.open === 'tuner', rxOpen: s.open === 'rx', listenOpen: s.open === 'listen',
 			toggleTuner: this.toggleTuner, toggleRx: this.toggleRx, toggleListen: this.toggleListen,
 			showMap: view === 'map', mapAction: this.mapAction,
+			// Messages: the gallery under the top islands, beside an open drawer
+			showMessages: view === 'messages', msgTop: 88, msgRight: drawerOn && L.dW ? L.dW + G : 0,
 			navViews: NAV.map(n => navItem(n, true)), navDrawers: DRAWER_NAV.map(n => navItem(n, false)),
 			refs: this.refsObj,
 			// drawer slot; the Receiver slides to clear a full-height drawer

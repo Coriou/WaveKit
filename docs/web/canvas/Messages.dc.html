@@ -16,7 +16,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 <div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="box-sizing: border-box; width: 100%; height: {{rootH}}; display: flex; flex-direction: column; gap: 14px; padding: {{pad}}; color: var(--wk-text); font-family: var(--wk-font-ui); font-size: var(--wk-fs-lg); background: {{rootBg}}; border-radius: {{rootRadius}}; border: {{rootBorder}}; box-shadow: {{rootShadow}}; backdrop-filter: {{rootBlur}}">
 	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
 	<header style="display: flex; align-items: center; gap: 10px; flex: none">
-		<h2 class="wk-h2">Activity</h2>
+		<h2 class="wk-h2">{{heading}}</h2>
 		<span style="display: flex; align-items: center; gap: 6px; font-size: var(--wk-fs-sm); color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</span>
 		<div style="flex: 1"></div>
 		<button class="wk-btn" data-variant="outline" onClick="{{togglePause}}" style="padding: 0 10px; color: var(--wk-text-2); font-weight: 400">{{pauseLabel}}</button>
@@ -46,7 +46,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"variant":{"editor":"enum","options":["gallery","feed"],"default":"gallery"},"onTune":{"editor":null},"onClose":{"editor":null},"$preview":{"width":1440,"height":1500}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"variant":{"editor":"enum","options":["gallery","feed"],"default":"gallery"},"onTune":{"editor":null},"onClose":{"editor":null},"embedded":{"editor":null},"topInset":{"editor":null,"tsType":"number"},"rightInset":{"editor":null,"tsType":"number"},"$preview":{"width":1440,"height":1500}}'>
 const CATS = [
 	['voice', 'Voice', ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0']],
 	['aircraft', 'Aircraft', ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7']],
@@ -82,7 +82,7 @@ class Component extends DCLogic {
 		this.state = { cat: 'all', paused: false };
 	}
 	renderVals() {
-		const feed = this.props.variant === 'feed';
+		const feed = this.props.variant === 'feed', emb = !!this.props.embedded;
 		const cat = this.state.cat;
 		const count = id => MSGS.filter(m => id === 'all' || m.cat === id).length;
 		const chip = (id, label, icon) => {
@@ -93,8 +93,10 @@ class Component extends DCLogic {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			feed,
-			rootH: feed ? '100%' : 'auto',
-			pad: feed ? '18px' : '40px',
+			// gallery as the dock's third view (Immersive): fills the window under the top islands, above the dock, beside a drawer
+			heading: feed ? 'Activity' : 'Messages',
+			rootH: feed || emb ? '100%' : 'auto',
+			pad: feed ? '18px' : emb ? (this.props.topInset ?? 88) + 'px ' + (40 + (this.props.rightInset || 0)) + 'px 104px 40px' : '40px',
 			rootBg: feed ? 'var(--wk-glass-panel)' : 'var(--wk-bg)',
 			rootRadius: feed ? 'var(--wk-r-5)' : '0',
 			rootBorder: feed ? '1px solid var(--wk-line-14)' : '0',
