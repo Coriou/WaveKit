@@ -325,12 +325,14 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 **New in core, not on the canvas yet** (2026-10-16)
 - [ ] Activity storage health: retention policy (fair-share) and per-share usage, coalesced
   positions and `floodCopies` from `GET /api/activity/status` (WG3 §1–2), in a storage / health view.
-- [ ] Activity read states: a replay `reset` with its reason (`cursor-gap`, `cursor-expired`,
+- [x] Activity read states: a replay `reset` with its reason (`cursor-gap`, `cursor-expired`,
   `store-changed`, `query-changed`, `invalid-cursor`, `reader-failed`), holes in the store (WG3 §4)
-  and the overflow close `activity:closed`, each as a visible state of the Activity list.
-- [ ] Reception provenance in row detail: `sourceId`, `frequency.hz` and `tuningTrust`
+  and the overflow close `activity:closed`, each as a visible state of the Activity list. Web app
+  lot 2 (2026-10-17): a reset reloads the snapshot and says why, ingestion gaps are quiet rows,
+  `activity:closed` resumes from the cursors without a notice.
+- [x] Reception provenance in row detail: `sourceId`, `frequency.hz` and `tuningTrust`
   (`commanded | relay | unverified`) per reception (WG3 §5); ACARS frequency absent when the
-  decoder omits it.
+  decoder omits it. Shown in the Activity detail (web app lot 2).
 - [ ] Meshtastic flood copies: `duplicateCopies` per node and copies kept out of Activity (WG3 §6).
 - [ ] Mesh node telemetry: battery % (or powered), voltage, channel and air utilisation, uptime
   (float32 values, round for display) on the node card (WG3 §8).
@@ -395,3 +397,19 @@ main f0b71383; read from the core source, not yet re-run against a live core)
   `CSRF_REQUIRED`) after a write is tried.
 - [ ] Receiver board items with no data: dropped-samples counter, "Remove DC spike" and "IQ correction" as
   tuner settings (`liveDemod.iqDcBlock` is the nearest).
+
+**Found by the web app, Activity pass** (2026-10-17, branch `claude/project-thread-afdtom`; read from the
+core source and run against the mock, not yet against a live core)
+
+- [ ] Typed Activity filters by field: the web app turns "TG 2081", "capcode 1234567", "MMSI …", "CTCSS
+  88.5" into a plain-text term narrowed by category, because `entityKey` formats are not documented per
+  decoder and there is no `field = value` filter. It can match the same number in another field.
+- [ ] Text search matches whole words only (`src/core/activity/query/fts.ts`): "12345" does not find
+  capcode 1234567 and "F4AB" does not find F4ABC-9. A prefix match on the last word would serve
+  search-as-you-type.
+- [ ] Ingestion-gap summaries carry the reason only inside the title (`Ingestion gap (rate-limited)`);
+  the web app parses it. A `reason` field (and the decoder ids) on the summary would avoid that.
+- [ ] No audio behind Activity rows: analog transmissions and calls carry no recording id, so the list
+  has no play button and no "Play conversation" (see Recordings, "The recording id on the event").
+- [ ] Pinned searches are kept per browser (localStorage) until operator preferences hold them (see
+  Settings, "Activity columns and pinned searches").
