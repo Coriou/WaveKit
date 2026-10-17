@@ -26,6 +26,8 @@ export interface MessageCardProps {
 	/** The JSON starts open. */
 	jsonOpen?: boolean
 	jsonMaxHeight?: number
+	/** No position preview (on the Map, where the position is already shown). */
+	noMap?: boolean
 	/** In a feed of cards: a Details button that opens the event's detail. */
 	onOpen?: () => void
 	className?: string
@@ -38,6 +40,7 @@ export function MessageCard({
 	readOnly = false,
 	jsonOpen = false,
 	jsonMaxHeight = 280,
+	noMap = false,
 	onOpen,
 	className,
 }: MessageCardProps) {
@@ -49,7 +52,7 @@ export function MessageCard({
 		station && station.lat.value !== null && station.lon.value !== null
 			? { lat: station.lat.value, lon: station.lon.value }
 			: null
-	const plot = v.position ? positionPlot(home, v.position) : null
+	const plot = v.position && !noMap ? positionPlot(home, v.position) : null
 	const hz = v.frequencyHz
 	const json = v.raw
 

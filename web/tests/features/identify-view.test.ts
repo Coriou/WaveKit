@@ -7,6 +7,8 @@ import type {
 } from "@wavekit/api-types"
 import type { IdentifyState } from "../../src/data/index.ts"
 import {
+	DECODE_AS,
+	decodeAsName,
 	identifyView,
 	measuredLine,
 	resultDetails,
@@ -80,6 +82,7 @@ const state = (
 	starting: false,
 	error: null,
 	errorCode: null,
+	protocols: [],
 	...over,
 })
 
@@ -90,6 +93,7 @@ const IDLE: IdentifyState = {
 	starting: false,
 	error: null,
 	errorCode: null,
+	protocols: [],
 }
 
 describe("identifyView", () => {
@@ -278,6 +282,57 @@ describe("identifyView", () => {
 			"Looks like a steady carrier. No decoder synced in 15 s.",
 		)
 		expect(v.measured).toMatch(/steady$/)
+	})
+
+	it("names a Decode as… in the eyebrow and the answer", () => {
+		const trying = identifyView(
+			state(
+				{ state: "trying", trials: [trial("dmr", "running")] },
+				{ protocols: ["dmr"] },
+			),
+			T0 + 2000,
+		)
+		expect(trying).toMatchObject({
+			eyebrow: "Decode as DMR",
+			title: "Trying DMR",
+		})
+		const failed = identifyView(
+			state(
+				{
+					state: "unidentified",
+					trials: [trial("dmr", "no-sync")],
+					result: result({ confidence: "activity" }),
+				},
+				{ protocols: ["dmr"] },
+			),
+			T0 + 15_000,
+		)
+		expect(failed.title).toBe("Not decoded")
+		expect(failed.line).toMatch(/DMR did not sync in 15 s\.$/)
+		const none = identifyView(
+			state(
+				{
+					state: "unidentified",
+					trials: [],
+					result: result({ confidence: "activity" }),
+				},
+				{ protocols: ["pocsag"] },
+			),
+			T0 + 15_000,
+		)
+		expect(none.line).toMatch(
+			/It does not look like POCSAG, so nothing was tried\.$/,
+		)
+		expect(identifyView(state(null), T0).eyebrow).toBe("Identify")
+	})
+
+	it("offers only protocols Identify can probe for Decode as…", () => {
+		const ids = DECODE_AS.map(p => p.id)
+		expect(ids).toContain("dmr")
+		expect(ids).not.toContain("ais")
+		expect(ids).not.toContain("acars")
+		expect(new Set(ids).size).toBe(ids.length)
+		expect(decodeAsName(["pocsag", "flex"])).toBe("POCSAG or FLEX")
 	})
 
 	it("answers an artefact at once from the receiver's settings", () => {

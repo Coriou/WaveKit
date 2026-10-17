@@ -25,6 +25,8 @@ export interface IdentifyState {
 	error: string | null
 	/** The core's code, e.g. OUT_OF_WINDOW. */
 	errorCode: string | null
+	/** The protocols asked for ("Decode as…"); empty tries every plausible one. */
+	protocols: readonly ScannerProtocol[]
 }
 
 export interface IdentifyOptions {
@@ -53,6 +55,7 @@ const INITIAL: IdentifyState = {
 	starting: false,
 	error: null,
 	errorCode: null,
+	protocols: [],
 }
 
 export class IdentifyStore extends Store<IdentifyState> {
@@ -85,7 +88,12 @@ export class IdentifyStore extends Store<IdentifyState> {
 	async start(hz: number, options: IdentifyOptions = {}): Promise<ScanJob> {
 		const generation = ++this.generation
 		this.early.clear()
-		this.set({ ...INITIAL, targetHz: hz, starting: true })
+		this.set({
+			...INITIAL,
+			targetHz: hz,
+			starting: true,
+			protocols: options.protocols ?? [],
+		})
 		const body: ScannerIdentifyRequest = {
 			target:
 				options.bandwidthHz !== undefined

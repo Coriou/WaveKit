@@ -389,6 +389,51 @@
 	.wkf-card-menu .wk-option {
 		white-space: nowrap;
 	}
+	/* Decode as…: fourteen protocols scroll inside the menu */
+	.wkf-card-menu[aria-label="Decode as"] {
+		max-height: 320px;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+	.wkf-menu-hint {
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+	}
+
+	/* Tuned card: the message opened in full (Decode board card, flat), scrolling inside the well */
+	.wkf-well[data-full] {
+		max-height: min(56vh, 520px);
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		gap: 4px;
+	}
+	.wkf-full-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		height: 16px;
+	}
+	.wkf-full-head .wk-icon-btn {
+		margin: -4px -6px -4px 0;
+	}
+	.wkf-open-msg {
+		align-self: flex-start;
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		margin: -2px 0 -4px;
+		padding: 2px 0;
+		border: 0;
+		background: none;
+		font: inherit;
+		font-size: var(--wk-fs-sm);
+		font-weight: 700;
+		color: var(--wk-accent);
+		cursor: pointer;
+	}
+	.wkf-open-msg:hover {
+		text-decoration: underline;
+	}
 
 	/* Tuned card: minimise (one line: frequency, protocol and identity, a live dot) */
 	.wkf-card[data-min] {

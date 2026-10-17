@@ -2,10 +2,12 @@
 // header (type tile that drags the card, protocol + band, state, frequency, signal bars, minimise) → the "now" block
 // (what was last heard on the channel, by kind: call, transmission, count, message, audio; or band and channel when
 // nothing was, or Identify while it runs) → up to two earlier rows → actions (Map, Activity, Save, ⋯ with Identify,
-// Pin, Copy). Identify never moves the receiver. While a sweep moves the receiver the card hides (the Tuner's hold
+// Decode as…, Pin, Copy). A message opens in full as the decoded message card (Decode board) inside the card, in a
+// scrolling well; Decode as… is Identify cut to one protocol. Identify never moves the receiver. While a sweep moves the receiver the card hides (the Tuner's hold
 // row says where it is); on a hit it is that signal's card, "Held by the scan". A pinned card keeps its frequency.
 import { WaveKitIcon } from "@wavekit/brand/react"
-import { useEffect, useRef, useState } from "react"
+import type { ScannerProtocol } from "@wavekit/api-types"
+import { lazy, Suspense, useEffect, useRef, useState } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import {
@@ -28,16 +30,22 @@ import { formatDb, formatMHz, formatWidth } from "../format.ts"
 import { useLiveStatus, useNow, useSettledHz } from "../hooks.ts"
 import { showOnMap } from "../map/focus.ts"
 import { messageView } from "../messages/card.ts"
+import { useActivityRecord } from "../messages/record.ts"
 import { groupName } from "../tuner/band.ts"
 import { modeSpec, modulationOf } from "../tuner/modes.ts"
 import { defaultGroup, defaultSaveName, saveInput } from "../tuner/saved.ts"
 import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { decodersAt } from "./decoders.ts"
-import { identifyView, type IdentifyView } from "./identify-view.ts"
+import { DECODE_AS, identifyView, type IdentifyView } from "./identify-view.ts"
 import { nowView, type NowView } from "./now.ts"
 import { tunedCardStore } from "./place.ts"
 import { decoderLabel, signalBars, signalPresent } from "./signal.ts"
+
+// the card's own chunk stays small: the full card (and its JSON viewer) loads when a message is first opened
+const MessageCard = lazy(() =>
+	import("../messages/MessageCard.tsx").then(m => ({ default: m.MessageCard })),
+)
 
 function IdentifyBlock({
 	view,
@@ -50,7 +58,7 @@ function IdentifyBlock({
 	return (
 		<div className="wkf-id">
 			<div className="wkf-id-eyebrow">
-				<Label className="wkf-grow">Identify</Label>
+				<Label className="wkf-grow">{view.eyebrow}</Label>
 				<IconButton
 					size="xs"
 					label={closeLabel}
@@ -193,19 +201,27 @@ interface MenuItem {
 	label: string
 	icon: IconName
 	key?: string
+	/** Quiet text after the label (the decoder a protocol runs on). */
+	hint?: string
+	/** Picking it keeps the menu open (a submenu). */
+	stay?: boolean
 	pick: () => void
 }
 
 function MoreMenu({
 	items,
+	label = "More actions",
 	onClose,
 }: {
 	items: readonly MenuItem[]
+	label?: string
 	onClose: (refocus: boolean) => void
 }) {
 	const ref = useRef<HTMLDivElement>(null)
 	useEffect(() => {
 		ref.current?.querySelector<HTMLButtonElement>("button")?.focus()
+	}, [label])
+	useEffect(() => {
 		const away = (e: PointerEvent) => {
 			if (!ref.current?.parentElement?.contains(e.target as Node))
 				onClose(false)
@@ -217,7 +233,7 @@ function MoreMenu({
 		<div
 			ref={ref}
 			role="menu"
-			aria-label="More actions"
+			aria-label={label}
 			className="wk-menu wkf-card-menu"
 			onKeyDown={e => {
 				const list = [
@@ -243,12 +259,13 @@ function MoreMenu({
 					role="menuitem"
 					className="wk-option"
 					onClick={() => {
-						onClose(true)
+						if (!m.stay) onClose(true)
 						m.pick()
 					}}
 				>
 					<Icon name={m.icon} size={16} />
 					<span className="wkf-grow">{m.label}</span>
+					{m.hint && <span className="wkf-menu-hint">{m.hint}</span>}
 					{m.key && <Kbd>{m.key}</Kbd>}
 				</button>
 			))}
@@ -291,7 +308,9 @@ export function TunedCard() {
 		id.starting || (id.job !== null && !isIdentifyFinal(id.event?.state))
 	const tick = useNow(running, 250)
 	const clock = useNow(true, 1000)
-	const [menu, setMenu] = useState(false)
+	const [menu, setMenu] = useState<false | "more" | "decode">(false)
+	// the message opened in full (its event id): closes when another message arrives or the card retunes
+	const [fullId, setFullId] = useState<string | null>(null)
 	const moreRef = useRef<HTMLButtonElement>(null)
 	const lineRef = useRef<HTMLButtonElement>(null)
 	const chevRef = useRef<HTMLButtonElement>(null)
@@ -310,6 +329,13 @@ export function TunedCard() {
 	const span = useStore(tuned.span)
 	const items = useStore(tuned.feed, s => s.items)
 	const fresh = span !== null && span.hz === hz
+	// the opened message stays while the channel's list still holds it
+	const fullItem =
+		fullId !== null && fresh
+			? (items.find(i => i.eventId === fullId) ?? null)
+			: null
+	const fullRecord = useActivityRecord(fullItem ? fullItem.eventId : null)
+	useEffect(() => setFullId(null), [hz])
 
 	// vessels or aircraft in range: the fleet store attaches only while the card counts them
 	const fleetStore =
@@ -332,13 +358,16 @@ export function TunedCard() {
 		;(want ? lineRef : chevRef).current?.focus({ preventScroll: true })
 	}, [card.minimised])
 
-	const startIdentify = () => {
+	const startIdentify = (protocols: readonly ScannerProtocol[] = []) => {
 		if (hz === null || readOnly) return
 		if (!onIt) void tuning.tune(hz)
-		const opts =
-			status && status.config.bandwidth > 0
+		const opts = {
+			...(status && status.config.bandwidth > 0
 				? { bandwidthHz: status.config.bandwidth }
-				: {}
+				: {}),
+			...(protocols.length > 0 ? { protocols: [...protocols] } : {}),
+		}
+		setFullId(null)
 		data.identify.start(hz, opts).catch(() => undefined)
 	}
 	const closeIdentify = () => data.identify.reset()
@@ -548,7 +577,28 @@ export function TunedCard() {
 		}
 	}
 	const unknown = now.kind === "plain" && here.length === 0
+	// a message reads in full as its decoded message card (calls and transmissions stay in Activity, with audio)
+	const openable =
+		now.latest !== null && (now.kind === "msg" || now.kind === "count")
+	const latestId = now.latest?.eventId ?? null
+	const openFull = () => setFullId(latestId)
+	const closeFull = () => setFullId(null)
+	const full = fullItem !== null && !idHere
 
+	const decodeItems: MenuItem[] = [
+		{
+			label: "Back",
+			icon: "chevron-left",
+			stay: true,
+			pick: () => setMenu("more"),
+		},
+		...DECODE_AS.map(p => ({
+			label: p.label,
+			icon: "scanner" as const,
+			hint: p.by,
+			pick: () => startIdentify([p.id]),
+		})),
+	]
 	const menuItems: MenuItem[] = []
 	if (!onIt)
 		menuItems.push({
@@ -556,12 +606,25 @@ export function TunedCard() {
 			icon: "tune",
 			pick: () => void tuning.tune(hz),
 		})
+	if (openable && !idHere)
+		menuItems.push(
+			full
+				? { label: "Show less", icon: "chevron-up", pick: closeFull }
+				: { label: "Open message", icon: "activity", pick: openFull },
+		)
 	if (!unknown && !idRunning)
 		menuItems.push({
 			label: "Identify",
 			icon: "scanner",
 			key: "I",
-			pick: startIdentify,
+			pick: () => startIdentify(),
+		})
+	if (!idRunning && !readOnly)
+		menuItems.push({
+			label: "Decode as…",
+			icon: "scanner",
+			stay: true,
+			pick: () => setMenu("decode"),
 		})
 	if (idRunning && !unknown)
 		menuItems.push({
@@ -686,11 +749,46 @@ export function TunedCard() {
 
 			{!minimised && (
 				<>
-					<div className="wkf-well">
+					<div className="wkf-well" data-full={full || undefined}>
 						{idHere ? (
 							<IdentifyBlock view={idView} onClose={closeIdentify} />
+						) : full ? (
+							<Suspense fallback={<NowBlock now={now} />}>
+								<div className="wkf-full-head">
+									<Label className="wkf-grow">Message</Label>
+									<IconButton
+										size="xs"
+										label="Show less"
+										title="Show less"
+										className="wkf-quiet-btn"
+										onClick={closeFull}
+									>
+										<Icon name="chevron-up" size={13} />
+									</IconButton>
+								</div>
+								<MessageCard
+									item={fullItem}
+									record={fullRecord}
+									flat
+									readOnly={readOnly}
+									jsonMaxHeight={220}
+									className="wkf-full-card"
+								/>
+							</Suspense>
 						) : now.kind !== "plain" ? (
-							<NowBlock now={now} />
+							<>
+								<NowBlock now={now} />
+								{openable && (
+									<button
+										type="button"
+										className="wkf-open-msg"
+										onClick={openFull}
+									>
+										Open message
+										<Icon name="chevron-down" size={13} />
+									</button>
+								)}
+							</>
 						) : (
 							<>
 								<Label>
@@ -715,7 +813,7 @@ export function TunedCard() {
 						)}
 					</div>
 
-					{!idHere && now.earlier.length > 0 && (
+					{!idHere && !full && now.earlier.length > 0 && (
 						<section
 							aria-label="Recent on this frequency"
 							className="wkf-earlier"
@@ -746,7 +844,8 @@ export function TunedCard() {
 					<div className="wkf-actions">
 						{menu && (
 							<MoreMenu
-								items={menuItems}
+								items={menu === "decode" ? decodeItems : menuItems}
+								label={menu === "decode" ? "Decode as" : "More actions"}
 								onClose={refocus => {
 									setMenu(false)
 									if (refocus) moreRef.current?.focus()
@@ -766,11 +865,19 @@ export function TunedCard() {
 								variant="primary"
 								className="wkf-grow"
 								disabled={readOnly}
-								title="Identify this signal  I"
-								onClick={startIdentify}
+								title={
+									idHere && id.protocols.length > 0
+										? "Try the same protocol again"
+										: "Identify this signal  I"
+								}
+								onClick={() => startIdentify(idHere ? id.protocols : [])}
 							>
 								<Icon name="scanner" size={15} />
-								{idHere ? "Identify again" : "Identify"}
+								{idHere
+									? id.protocols.length > 0
+										? "Try again"
+										: "Identify again"
+									: "Identify"}
 							</Button>
 						) : null}
 						{now.map && !idRunning && (
@@ -821,8 +928,8 @@ export function TunedCard() {
 							label="More actions"
 							title="More actions"
 							aria-haspopup="menu"
-							aria-expanded={menu}
-							onClick={() => setMenu(m => !m)}
+							aria-expanded={menu !== false}
+							onClick={() => setMenu(m => (m ? false : "more"))}
 						>
 							<Icon name="dots" size={15} />
 						</IconButton>

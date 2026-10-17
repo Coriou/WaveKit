@@ -38,6 +38,8 @@ export interface IdentifyTrialRow {
 
 export interface IdentifyView {
 	phase: IdentifyPhase
+	/** "Identify", or "Decode as DMR" when the protocols were chosen. */
+	eyebrow: string
 	/** Still listening: the close button stops, the countdown runs. */
 	running: boolean
 	title: string
@@ -84,6 +86,39 @@ const PROTOCOL: Readonly<Record<ScannerProtocol, string>> = {
 
 export function protocolLabel(protocol: ScannerProtocol): string {
 	return PROTOCOL[protocol]
+}
+
+/**
+ * "Decode as…": the protocols Identify can try on its own (the core's probe decoders). AIS, ACARS, VDL2 and LoRa
+ * are named only by a decoder already running there, so they are not offered.
+ */
+export const DECODE_AS: readonly {
+	id: ScannerProtocol
+	label: string
+	by: string
+}[] = [
+	{ id: "dmr", label: "DMR", by: "dsd-fme" },
+	{ id: "p25p1", label: "P25", by: "dsd-fme" },
+	{ id: "p25p2", label: "P25 Phase 2", by: "dsd-fme" },
+	{ id: "nxdn48", label: "NXDN", by: "dsd-fme" },
+	{ id: "nxdn96", label: "NXDN 96", by: "dsd-fme" },
+	{ id: "ysf", label: "YSF", by: "dsd-fme" },
+	{ id: "dstar", label: "D-STAR", by: "dsd-fme" },
+	{ id: "dpmr", label: "dPMR", by: "dsd-fme" },
+	{ id: "pocsag", label: "POCSAG", by: "multimon-ng" },
+	{ id: "flex", label: "FLEX", by: "multimon-ng" },
+	{ id: "aprs", label: "APRS", by: "Direwolf" },
+	{ id: "ism", label: "ISM sensors", by: "rtl_433" },
+	{ id: "analog-fm", label: "FM voice", by: "voice detection" },
+	{ id: "analog-am", label: "AM voice", by: "voice detection" },
+]
+
+/** "DMR", "POCSAG or FLEX": the protocols a Decode as… asked for. */
+export function decodeAsName(protocols: readonly ScannerProtocol[]): string {
+	const names = protocols.map(protocolLabel)
+	return names.length <= 1
+		? (names[0] ?? "")
+		: `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`
 }
 
 const CLASS: Readonly<Record<ScannerClass, string>> = {
@@ -240,6 +275,7 @@ function failureReason(trials: readonly ScannerIdentifyTrial[]): string {
 
 const EMPTY: IdentifyView = {
 	phase: "idle",
+	eyebrow: "Identify",
 	running: false,
 	title: "",
 	secs: "",
@@ -257,11 +293,21 @@ export function identifyView(
 	state: IdentifyState,
 	nowMs: number,
 ): IdentifyView {
+	const asked = decodeAsName(state.protocols)
+	const view = identifyPhaseView(state, nowMs, asked)
+	return asked ? { ...view, eyebrow: `Decode as ${asked}` } : view
+}
+
+function identifyPhaseView(
+	state: IdentifyState,
+	nowMs: number,
+	asked: string,
+): IdentifyView {
 	if (state.error !== null && state.job === null)
 		return {
 			...EMPTY,
 			phase: "error",
-			title: "Could not identify",
+			title: asked ? `Could not try ${asked}` : "Could not identify",
 			line:
 				state.errorCode === "OUT_OF_WINDOW"
 					? "This frequency is outside the receiver’s window. Tune to it first."
@@ -334,7 +380,7 @@ export function identifyView(
 				...EMPTY,
 				phase: "trying",
 				running: true,
-				title: "Trying decoders",
+				title: asked ? `Trying ${asked}` : "Trying decoders",
 				secs: n > 0 ? ` · ${Math.min(done + 1, n)} of ${n}` : "",
 				trials: rows,
 				measured,
@@ -382,12 +428,17 @@ export function identifyView(
 		}
 		case "unidentified": {
 			const looks = result ? CLASS[result.measurements.class] : ""
+			const said = looks ? `Looks like ${looks}. ` : ""
 			return {
 				...EMPTY,
 				phase: "unidentified",
-				title: "Not identified",
+				title: asked ? "Not decoded" : "Not identified",
 				big: true,
-				line: `${looks ? `Looks like ${looks}. ` : ""}No decoder synced in ${windowS} s.`,
+				line: !asked
+					? `${said}No decoder synced in ${windowS} s.`
+					: n === 0
+						? `${said}It does not look like ${asked}, so nothing was tried.`
+						: `${said}${asked} did not sync in ${windowS} s.`,
 				note,
 				trials: rows,
 				measured,
