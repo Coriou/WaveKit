@@ -624,6 +624,28 @@ export class ScannerStore extends Store<ScannerState> {
 		return d
 	}
 
+	/**
+	 * One page for `query` into `byId` only: the list, its query and cursor stay (the spectrum's discovery
+	 * tags read `byId` for the visible span). Rejects with the core's ApiError or an AbortError.
+	 */
+	async fetchDiscoveries(
+		query: DiscoveryQuery,
+		options: { signal?: AbortSignal } = {},
+	): Promise<readonly Discovery[]> {
+		const page = await this.api.get<DiscoveryPage>(
+			"/api/scanner/discoveries",
+			options.signal
+				? { query: queryParams(query), signal: options.signal }
+				: { query: queryParams(query) },
+		)
+		this.commit(s => {
+			const byId = new Map(s.discoveries.byId)
+			for (const d of page.items) byId.set(d.id, d)
+			return { ...s, discoveries: { ...s.discoveries, byId } }
+		})
+		return page.items
+	}
+
 	// ---- actions (reject with the core's ApiError)
 
 	/** POST /api/scanner/plan: a side-effect-free preview. Pass a signal to drop a stale one. */

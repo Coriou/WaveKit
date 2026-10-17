@@ -1,6 +1,7 @@
 // The tuned card (docs/web/canvas/Tuned.dc.html, TunedGallery, Identify; DESIGN.md "Tuned card reworked"):
 // header (type tile, protocol + band, state, frequency, signal bars) → the "now" block (band, channel and
-// what decodes here, or Identify while it runs) → actions. Identify never moves the receiver.
+// what decodes here, or Identify while it runs) → actions. Identify never moves the receiver. While a sweep moves the
+// receiver the card hides (the Tuner's hold row says where it is); on a hit it is that signal's card, "Held by the scan".
 import { useEffect } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -20,6 +21,8 @@ import { formatDb, formatMHz, formatWidth } from "../format.ts"
 import { useLiveStatus, useNow, useSettledHz } from "../hooks.ts"
 import { groupName } from "../tuner/band.ts"
 import { modeSpec, modulationOf } from "../tuner/modes.ts"
+import { sweepMoving } from "../tuner/scan-hold.ts"
+import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { decodersAt } from "./decoders.ts"
 import { identifyView, type IdentifyView } from "./identify-view.ts"
 import { decoderLabel, signalBars, signalPresent } from "./signal.ts"
@@ -112,7 +115,15 @@ function IdentifyBlock({
 export function TunedCard() {
 	const { data, decoders: feed, activity } = useServices()
 	const readOnly = useReadOnly()
-	const hz = useSettledHz()
+	const settledHz = useSettledHz()
+	const sweep = useSweep()
+	const sweepState = sweep?.state
+	// on a hit, the card is that signal's card (live audio follows the scan there)
+	const { heldHz, held } = useHeld(sweep)
+	const hz =
+		sweepState === "holding"
+			? (heldHz ?? held?.frequencyHz ?? settledHz)
+			: settledHz
 	const status = useLiveStatus()
 	const view = useStore(data.bandplan, s => s.view)
 	const level = useStore(data.liveAudio, s => s.level)
@@ -163,6 +174,9 @@ export function TunedCard() {
 		return () => document.removeEventListener("keydown", onKey)
 	})
 
+	if (sweepMoving(sweepState)) return null
+	const heldByScan = sweepState === "holding"
+
 	if (hz === null)
 		return (
 			<Island
@@ -199,21 +213,23 @@ export function TunedCard() {
 	const stateText =
 		idHere && idView.running
 			? "Identifying"
-			: active.length
-				? `Decoding · ${active.map(d => d.type).join(", ")}`
-				: here.length
-					? `${here[0]?.type ?? "Decoder"} paused${here[0]?.suspended ? " · off band" : ""}`
-					: squelchOpen
-						? "Signal present"
-						: live
-							? present === null
-								? "Squelch off"
-								: "Quiet"
-							: "Not decoded here"
+			: heldByScan
+				? "Held by the scan"
+				: active.length
+					? `Decoding · ${active.map(d => d.type).join(", ")}`
+					: here.length
+						? `${here[0]?.type ?? "Decoder"} paused${here[0]?.suspended ? " · off band" : ""}`
+						: squelchOpen
+							? "Signal present"
+							: live
+								? present === null
+									? "Squelch off"
+									: "Quiet"
+								: "Not decoded here"
 	const stateTone =
 		idHere && idView.running
 			? "accent"
-			: active.length || squelchOpen
+			: heldByScan || active.length || squelchOpen
 				? "accent"
 				: "quiet"
 	const tile: IconName = active.length

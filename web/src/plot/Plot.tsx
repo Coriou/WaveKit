@@ -2,7 +2,8 @@
 // by the spectrum worker, with DOM overlays updated from frame meta (≤ 10/s) and the stores, never per bin.
 // Click tunes (snapping to a signal), wheel steps, ctrl/⌘ + wheel and pinch zoom around the cursor, drag pans
 // (and retunes past the capture edge), arrows/PageUp/PageDown/+/−/0 on the focused plot. Dragging the VFO
-// tunes, its edges (once zoomed in) set the bandwidth, the dashed line sets the squelch (use-handles.ts).
+// tunes, its edges (once zoomed in) set the bandwidth, the dashed line sets the squelch (use-handles.ts). Shift-drag
+// marks a range and offers "Scan this range"; scanner discoveries tag the row under the band lanes.
 import "./plot.css"
 
 import {
@@ -48,7 +49,7 @@ import {
 	zoomLabel,
 } from "./maths.ts"
 import { PlotController, type PlotContext } from "./plot-store.ts"
-import { AXIS_CSS, LANES_CSS, plotLayout } from "./layout.ts"
+import { AXIS_CSS, DISCOVERY_ROW_CSS, LANES_CSS, plotLayout } from "./layout.ts"
 import { isReadOnly } from "../app/context.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
@@ -57,6 +58,18 @@ import { EDGE_GRAB_MIN_PX } from "./handles.ts"
 import { useHandles, type HandleFrame } from "./use-handles.ts"
 import type { SpectrumProbe } from "../spectrum/index.ts"
 import { SavedTags } from "./SavedTags.tsx"
+import {
+	DiscoveryTags,
+	useDiscoveryFetch,
+	useDiscoveryRow,
+} from "./DiscoveryTags.tsx"
+import {
+	dragRange,
+	finishRange,
+	hzAt,
+	type RangeSelection,
+} from "./range-select.ts"
+import { RANGE_OFFER_CLASS, RangeSelect } from "./RangeSelect.tsx"
 
 export interface PlotProps {
 	data: DataLayer
@@ -155,6 +168,11 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		[capStart, capEnd, plotState.view],
 	)
 	const hover = useMemo(() => new Store<Hover>(null), [])
+	const range = useMemo(() => new Store<RangeSelection | null>(null), [])
+	const viewRef = useRef(view)
+	viewRef.current = view
+	useDiscoveryFetch(data.scanner, view)
+	const discRow = useDiscoveryRow(data.scanner)
 	const tuned = tunedHz(tuner, liveStatus)
 	const vfoHz = handleState.vfoHz ?? plotState.pendingHz ?? tuned
 	const bandwidthHz =
@@ -183,7 +201,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	}
 	controller.setContext(context)
 
-	const layout = plotLayout(size.h)
+	const layout = plotLayout(size.h, discRow ? DISCOVERY_ROW_CSS : 0)
 	const unverified = shownMeta?.tuningTrust === "unverified"
 
 	const onFrameMeta = (m: SpectrumFrameMeta) => {
@@ -222,7 +240,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	handleFrame.current = frame
 	const clearHover = useMemo(() => () => hover.set(null), [hover])
 	useHandles(bodyRef, handleFrame, handles, controller, clearHover)
-	useInteraction(bodyRef, controller, hover, size.w)
+	useInteraction(bodyRef, controller, hover, size.w, range, viewRef)
 	const edgesShown =
 		bandwidthRange !== null &&
 		!readOnly &&
@@ -328,6 +346,20 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 								tunedHz={vfoHz}
 							/>
 						</div>
+						{discRow && (
+							<div
+								className="wk-plot-band wk-plot-discs"
+								data-unverified={unverified ? "" : undefined}
+								style={{ top: layout.traceCss + AXIS_CSS + LANES_CSS }}
+							>
+								<DiscoveryTags
+									data={data}
+									controller={controller}
+									view={view}
+									widthPx={size.w}
+								/>
+							</div>
+						)}
 						{vfoHz !== null &&
 							vfoHz >= view.startHz - bandwidthHz &&
 							vfoHz <= view.endHz + bandwidthHz && (
@@ -363,6 +395,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 							readOnly={readOnly}
 						/>
 						<HoverLine hover={hover} />
+						<RangeSelect range={range} view={view} />
 					</>
 				)}
 				{sourceId === null && (
@@ -648,6 +681,8 @@ function useInteraction(
 	controller: PlotController,
 	hover: Store<Hover>,
 	widthPx: number,
+	range: Store<RangeSelection | null>,
+	viewRef: RefObject<SpectrumViewSpan | null>,
 ): void {
 	const widthRef = useRef(widthPx)
 	widthRef.current = widthPx
@@ -656,6 +691,8 @@ function useInteraction(
 		if (!el) return
 		const pointers = new Map<number, number>()
 		let drag: { x: number; moved: boolean } | null = null
+		// Shift-drag: a range to scan, in Hz so it stays put while the view moves
+		let rangeDrag: { x: number; fromHz: number; moved: boolean } | null = null
 		let pinchDistance = 0
 
 		const xOf = (clientX: number) => {
@@ -675,8 +712,26 @@ function useInteraction(
 		}
 
 		const onDown = (e: PointerEvent) => {
-			// Chips and the zoom control handle their own presses.
-			if (e.button !== 0 || (e.target as Element).closest("button")) return
+			// Chips, the zoom control and the range offer handle their own presses.
+			if (
+				e.button !== 0 ||
+				(e.target as Element).closest(`button, .${RANGE_OFFER_CLASS}`)
+			)
+				return
+			const view = viewRef.current
+			if (e.shiftKey && view && pointers.size === 0) {
+				pointers.set(e.pointerId, e.clientX)
+				el.setPointerCapture(e.pointerId)
+				rangeDrag = {
+					x: e.clientX,
+					fromHz: hzAt(view, xOf(e.clientX).frac),
+					moved: false,
+				}
+				hover.set(null)
+				return
+			}
+			// any other press clears a marked range
+			if (range.get()) range.set(null)
 			pointers.set(e.pointerId, e.clientX)
 			el.setPointerCapture(e.pointerId)
 			if (pointers.size === 2) {
@@ -690,6 +745,19 @@ function useInteraction(
 			controller.beginPan()
 		}
 		const onMove = (e: PointerEvent) => {
+			if (rangeDrag) {
+				const view = viewRef.current
+				if (
+					!rangeDrag.moved &&
+					Math.abs(e.clientX - rangeDrag.x) > DRAG_THRESHOLD_PX
+				)
+					rangeDrag.moved = true
+				if (rangeDrag.moved && view)
+					range.set(
+						dragRange(rangeDrag.fromHz, hzAt(view, xOf(e.clientX).frac)),
+					)
+				return
+			}
 			if (pointers.has(e.pointerId)) pointers.set(e.pointerId, e.clientX)
 			if (pointers.size >= 2) {
 				const d = spread()
@@ -712,6 +780,17 @@ function useInteraction(
 			if (e.pointerType === "mouse") hover.set({ x: xOf(e.clientX).frac })
 		}
 		const onUp = (e: PointerEvent) => {
+			if (rangeDrag) {
+				const r = range.get()
+				const finished =
+					rangeDrag.moved && r && e.type === "pointerup" ? finishRange(r) : null
+				rangeDrag = null
+				pointers.delete(e.pointerId)
+				if (el.hasPointerCapture(e.pointerId))
+					el.releasePointerCapture(e.pointerId)
+				range.set(finished)
+				return
+			}
 			const wasPinch = pointers.size >= 2
 			pointers.delete(e.pointerId)
 			if (el.hasPointerCapture(e.pointerId))
@@ -728,7 +807,7 @@ function useInteraction(
 			}
 		}
 		const onLeave = () => {
-			if (!drag) hover.set(null)
+			if (!drag && !rangeDrag) hover.set(null)
 		}
 		const onWheel = (e: WheelEvent) => {
 			e.preventDefault()
@@ -745,6 +824,11 @@ function useInteraction(
 			}
 		}
 		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Escape" && range.get()) {
+				e.preventDefault()
+				range.set(null)
+				return
+			}
 			if (e.target !== el) return
 			const action = keyAction(e.key, {
 				shift: e.shiftKey,
@@ -771,5 +855,5 @@ function useInteraction(
 			el.removeEventListener("wheel", onWheel)
 			el.removeEventListener("keydown", onKey)
 		}
-	}, [ref, controller, hover])
+	}, [ref, controller, hover, range, viewRef])
 }

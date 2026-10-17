@@ -14,6 +14,8 @@ import { Label } from "../../ui/Label.tsx"
 import { formatDb, formatMHz, formatRate } from "../format.ts"
 import { useLiveStatus, useSettledHz } from "../hooks.ts"
 import { modeSpec } from "../tuner/modes.ts"
+import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
+import { followingText, sweepLive } from "../tuner/scan-hold.ts"
 import {
 	audioAttachKey,
 	audioSource,
@@ -96,6 +98,13 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 		void (on ? listen.stop() : listen.start())
 	}
 	const disabled = !status || (!on && readOnly && !status.running)
+	const sweep = useSweep()
+	const { heldHz, held } = useHeld(sweep)
+	// live audio follows a running sweep: say so instead of the mode and frequency
+	const follow =
+		on && sweep && sweepLive(sweep.state)
+			? followingText(sweep, heldHz, held)
+			: null
 	return (
 		<IslandHead className="wk-shell-listen-head">
 			<button
@@ -118,7 +127,14 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 			<div className="wk-shell-listen-text">
 				<div>
 					<b>{TITLE[state.phase]}</b>{" "}
-					<span className="wk-shell-sub">{sub}</span>
+					{follow ? (
+						<span className="wk-shell-sub wkf-following" title={follow.title}>
+							<Icon name="scanner" size={13} />
+							<span>{follow.text}</span>
+						</span>
+					) : (
+						<span className="wk-shell-sub">{sub}</span>
+					)}
 				</div>
 				<div className="wk-meter wkf-meter" aria-hidden="true">
 					<div

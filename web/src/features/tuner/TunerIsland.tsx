@@ -1,5 +1,5 @@
 // The Tuner island (docs/web/canvas/Tuner.dc.html): the place-value frequency display, typed entry with
-// band hints and channel suggestions, and the Tuning options panel (mode, bandwidth, step).
+// band hints and channel suggestions, the scan hold row while a sweep runs, and the Tuning options panel.
 import {
 	useEffect,
 	useRef,
@@ -43,6 +43,7 @@ import {
 	type EntrySuggestion,
 } from "./saved.ts"
 import { SavedSection, useRecall } from "./SavedFrequencies.tsx"
+import { ScanHoldRow } from "./ScanHoldRow.tsx"
 
 interface EntryState {
 	typing: boolean
@@ -599,7 +600,12 @@ export function createTunerSlot(): IslandSlot {
 	})
 	return {
 		panelLabel: "Tuning options",
-		head: ctx => <TunerHead ctx={ctx} entry={entry} />,
+		head: ctx => (
+			<>
+				<TunerHead ctx={ctx} entry={entry} />
+				<ScanHoldRow />
+			</>
+		),
 		panel: () => <TunerPanel entry={entry} />,
 	}
 }

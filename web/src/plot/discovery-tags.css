@@ -1,0 +1,103 @@
+/* Discovery tags (Spectrum board discovery row: 20 px under the lanes; 16 px chips at top 2 px, 4 px radius, 11 px
+   text, a 6 px dot, filled when decoded). Active: bright on a 12 % accent tint; heard in the last hour: dimmed accent
+   (grey when only heard); older: muted grey. Opaque ground, no blur. */
+@layer wk-app {
+	.wk-plot-discs {
+		height: 20px;
+		border-bottom: 1px solid rgba(var(--wk-line-rgb), 0.08);
+		background: var(--wk-plot-bg);
+		overflow: hidden;
+	}
+	.wk-plot-discs[data-unverified] {
+		opacity: 0.45;
+	}
+	.wk-plot-disc {
+		--disc-c: var(--wk-text-4);
+		position: absolute;
+		top: 2px;
+		height: 16px;
+		max-width: 160px;
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 5px 0 4px;
+		border: 0;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--disc-c);
+		font: inherit;
+		font-size: 11px;
+		font-weight: 400;
+		line-height: 16px;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.wk-plot-disc[data-tier="recent"] {
+		--disc-c: rgba(var(--wk-accent-rgb), 0.72);
+	}
+	.wk-plot-disc[data-tier="recent"][data-heard] {
+		--disc-c: var(--wk-text-2);
+	}
+	.wk-plot-disc[data-tier="active"] {
+		--disc-c: var(--wk-accent);
+		background: rgba(var(--wk-accent-rgb), 0.12);
+		font-weight: 700;
+	}
+	.wk-plot-disc > i {
+		width: 6px;
+		height: 6px;
+		flex: none;
+		box-sizing: border-box;
+		border-radius: 50%;
+		border: 1.25px solid var(--disc-c);
+	}
+	.wk-plot-disc > i[data-solid] {
+		background: var(--disc-c);
+	}
+	.wk-plot-disc > span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wk-plot-disc:hover {
+		background: rgba(var(--wk-accent-rgb), 0.16);
+		color: var(--wk-text);
+	}
+	.wk-plot-disc:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 2px rgba(var(--wk-accent-rgb), 0.55);
+	}
+
+	/* Shift-drag range: dashed edges over trace and waterfall, then the "Scan this range" offer (solid, no blur) */
+	.wk-plot-rsel {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		box-sizing: border-box;
+		background: rgba(var(--wk-accent-rgb), 0.08);
+		border-left: 1px dashed rgba(var(--wk-accent-rgb), 0.7);
+		border-right: 1px dashed rgba(var(--wk-accent-rgb), 0.7);
+		pointer-events: none;
+		z-index: 25;
+	}
+	.wk-plot-rsel-offer {
+		position: absolute;
+		top: 10px;
+		transform: translateX(-50%);
+		z-index: 30;
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		padding: 3px;
+		border-radius: 8px;
+		background: var(--wk-glass-strong);
+		border: 1px solid var(--wk-line-18);
+		box-shadow: var(--wk-e2);
+		white-space: nowrap;
+	}
+	.wk-plot-rsel-offer .wk-btn {
+		font-variant-numeric: tabular-nums;
+	}
+	.wk-plot-rsel-offer .wk-btn > span {
+		font-weight: 400;
+	}
+}

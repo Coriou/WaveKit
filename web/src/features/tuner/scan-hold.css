@@ -1,0 +1,192 @@
+/* The Tuner's scan hold row (docs/web/canvas/Tuner.dc.html `hold`): 40 px under the head, an island outline on a solid
+   ground (no backdrop blur), accent while live, amber when paused; a 2 px pass-progress line moved by transform. */
+@layer wk-app {
+	/* the Tuner widens to the board's 472 px while a scan holds the receiver, and the plot starts under the row */
+	.wk-shell-island[data-island="tuner"]:has(.wkf-hold) {
+		width: 472px;
+	}
+	.wk-shell:has(.wkf-hold) {
+		--wk-plot-inset-top: 132px;
+	}
+	.wk-shell-island-head:has(.wkf-hold) {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+
+	.wkf-hold {
+		--hold-c: var(--wk-accent);
+		--hold-rgb: var(--wk-accent-rgb);
+		position: relative;
+		overflow: hidden;
+		height: 40px;
+		box-sizing: border-box;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 0 5px 0 12px;
+		border-radius: var(--wk-r-5);
+		background: var(--wk-glass-strong);
+		border: 1px solid var(--wk-line-14);
+		box-shadow: var(--wk-e1);
+		color: var(--wk-text-2);
+		font-size: var(--wk-fs-sm);
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.wkf-hold[data-tone="paused"] {
+		--hold-c: var(--wk-amber);
+		--hold-rgb: var(--wk-amber-rgb);
+		background:
+			linear-gradient(
+				rgba(var(--wk-amber-rgb), 0.1),
+				rgba(var(--wk-amber-rgb), 0.1)
+			),
+			var(--wk-glass-strong);
+		border-color: rgba(var(--wk-amber-rgb), 0.18);
+	}
+	.wkf-hold-glyph {
+		flex: none;
+		color: var(--hold-c);
+	}
+	.wkf-hold-pulse {
+		margin-right: 2px;
+	}
+	.wkf-hold-open {
+		flex: 1;
+		min-width: 0;
+		height: var(--wk-h-sm);
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 0;
+		border: 0;
+		background: none;
+		border-radius: var(--wk-r-3);
+		overflow: hidden;
+		color: var(--wk-text-2);
+		font: inherit;
+		font-size: var(--wk-fs-sm);
+		font-variant-numeric: tabular-nums;
+		text-align: left;
+		cursor: inherit;
+	}
+	.wkf-hold-open:focus-visible {
+		outline: 2px solid var(--wk-focus);
+		outline-offset: 0;
+	}
+	.wkf-hold-words {
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkf-hold-words > b {
+		color: var(--hold-c);
+	}
+	.wkf-hold-err {
+		color: var(--wk-amber);
+	}
+	.wkf-hold-freq {
+		flex: none;
+		color: var(--wk-text);
+		font-weight: 700;
+	}
+	.wkf-hold-btn {
+		flex: none;
+		height: var(--wk-h-sm);
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 9px;
+		border: 0;
+		border-radius: var(--wk-r-3);
+		background: transparent;
+		color: var(--wk-text-2);
+		font: inherit;
+		font-size: var(--wk-fs-xs);
+		font-weight: 700;
+		cursor: pointer;
+		transition: background-color var(--wk-dur-2);
+	}
+	.wkf-hold-btn:has(> svg):not([data-icon-only]) {
+		padding-left: 7px;
+	}
+	.wkf-hold-btn[data-icon-only] {
+		padding: 0 8px;
+	}
+	.wkf-hold-btn[data-kind="primary"] {
+		background: rgba(var(--hold-rgb), 0.14);
+		color: var(--hold-c);
+	}
+	.wkf-hold-btn[data-kind="chip"] {
+		background: var(--wk-chip);
+	}
+	.wkf-hold-btn[data-pressed] {
+		color: var(--wk-accent);
+	}
+	.wkf-hold-btn:hover:not(:disabled) {
+		background: rgba(var(--hold-rgb), 0.2);
+	}
+	.wkf-hold-btn[data-kind="ghost"]:hover:not(:disabled) {
+		background: var(--wk-chip);
+		color: var(--wk-text);
+	}
+	.wkf-hold-btn:disabled {
+		opacity: 0.45;
+		cursor: default;
+	}
+	.wkf-hold-btn:focus-visible {
+		outline: 2px solid var(--wk-focus);
+		outline-offset: 0;
+	}
+	.wkf-hold-bar {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 2px;
+		background: rgba(var(--hold-rgb), 0.16);
+		pointer-events: none;
+	}
+	.wkf-hold-bar > span {
+		position: absolute;
+		inset: 0;
+		background: var(--hold-c);
+		transform-origin: 0 50%;
+		transition: transform 0.4s var(--wk-ease-out);
+	}
+	/* phones: Skip and Ignore keep their glyphs, the words keep the room (labels stay in aria-label and title) */
+	@media (max-width: 520px) {
+		.wkf-hold-btn[data-kind="chip"] > .wkf-hold-label {
+			display: none;
+		}
+		.wkf-hold-btn[data-kind="chip"] {
+			padding: 0 8px;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.wkf-hold-bar > span {
+			transition: none;
+		}
+	}
+
+	/* Listen: "Following the scan" in the subtitle's place (Listen board `following`) */
+	.wkf-following {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		max-width: calc(100% - 80px);
+		vertical-align: bottom;
+		color: var(--wk-accent);
+	}
+	.wkf-following > svg {
+		flex: none;
+		stroke-width: 2;
+	}
+	.wkf-following > span {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+}
