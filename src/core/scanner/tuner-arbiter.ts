@@ -838,6 +838,8 @@ export class TunerArbiter extends EventEmitter {
 		origin?: TunerCommandOrigin,
 	): void => {
 		if (origin === "scanner") return
+		// WG11: configured tuning written on connect is neither an operator nor a preemption.
+		if (origin === "config") return
 		if (origin === "replay") {
 			this.emit("replay", sourceId)
 			return
