@@ -703,11 +703,22 @@ recording Keep protects one recording independently.
       scanner retention, discovery removal and analog retention consult (fail
       closed: an unusable keep store protects everything). Inventory items carry
       `kept`. Bounds 2 000 entries and 512 MiB kept.
-- [ ] Recording follow-ups from WG9: delete scanner recordings (409
-      `RECORDING_DELETE_UNSUPPORTED` today); discovery merge and capacity eviction
-      can leave orphan recording folders; a crash between delete's rename and
-      unlink leaves a `.wavekit-delete-*` directory that nothing sweeps (it may hold
-      a displaced foreign file); a failed keep store stops all recording pruning,
+- [x] Recording follow-ups (WG10, protected mode): delete scanner digital voice
+      recordings (`scan:` ids) with the scanner bookkeeping updated; merge aliases
+      keep a dropped discovery's folders protected and removable with the survivor;
+      a capacity eviction removes the evicted folders; keep totals in the storage
+      report (`kept`); a startup sweep of interrupted-delete directories (protected
+      mode only); the capture store no longer warns about its staging directory.
+- [ ] Recording follow-ups still open after WG10: analog scanner recordings cannot be
+      deleted (409); merges and evictions made before WG10 keep their orphan
+      folders; aliases are released only after the owner's removal succeeded (a
+      failed removal keeps them for the retry), but a deleted or evicted owner's
+      alias list is not journaled, so a crash before its removal finished can orphan
+      alias folders (kept files stay protected by their keys); WG9-format delete leftovers
+      (`recording` entries) are left and counted; deleting a recording of an owner
+      already dropped but not yet fenced answers 404 rather than 409
+      `RECORDING_BUSY` (nothing is touched); the scanner delete's lstat count is
+      6 plus twice the directory depth, above the design's 6; a failed keep store stops all recording pruning,
       so the disk can fill until it is fixed; kept scanner recordings can block
       discovery capacity eviction, so new discoveries are refused while every
       evictable one holds a kept recording (one warn with a count). A symlinked

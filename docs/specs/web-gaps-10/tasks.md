@@ -18,12 +18,12 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
 
 ## Lane RK2: recording follow-ups
 
-- [ ] RK2.1 Scanner recording delete through the coordinator (keep service `scannerDeleter`,
+- [x] RK2.1 Scanner recording delete through the coordinator (keep service `scannerDeleter`,
       `recording-delete.ts`, shared verified unlink with progress names); exact diffs for the
       evidence store, discovery store (`forgetRecording`) and scanner service, with tests.
   - _Requirements: 1.1–1.4, 1.11_
   - **Property 1: No scanner delete of a kept or unverified file**
-- [ ] RK2.2 Merge aliases and eviction removal (exact store, evidence and scanner-service diffs);
+- [x] RK2.2 Merge aliases and eviction removal (exact store, evidence and scanner-service diffs);
       kept totals and `keptSummaryOf` with the reporter diff; startup delete leftover sweep;
       capture store staging cleanup.
   - _Requirements: 1.5–1.10_
@@ -55,11 +55,11 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
 
 ## Main
 
-- [ ] MA.1 Merge the lanes; wiring in `src/index.ts` (scanner deleter, sweep, kept summary,
+- [x] MA.1 Merge the lanes; wiring in `src/index.ts` (scanner deleter, sweep, kept summary,
       analog evidence); apply the lanes' scanner-service, store and reporter diffs with their
       tests; contract test updates.
   - _Requirements: 1.1, 1.5, 1.6, 1.8, 1.9, 3.1, 4.2, 5.1_
-- [ ] MA.2 Docs (API.md: scanner recording delete, kept totals, identify analog result and
+- [x] MA.2 Docs (API.md: scanner recording delete, kept totals, identify analog result and
       `decodersUnavailable`, warning fields, operator rate write, live audio continuity; ROADMAP;
       SCANNER; coordination note for the CLI and the web session) and the CLI grep.
   - _Requirements: 5.2_

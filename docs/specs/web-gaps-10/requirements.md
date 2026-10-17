@@ -97,7 +97,8 @@ before its final check. The delete records its progress in the private directory
 moved entry keeps the recording's own file name until the identity check passed, and is renamed
 to the fixed name `verified` before its unlink. At startup (before any pruner or retention
 runs), a sweep inspects the private directories in the recording directories it knows (every
-dsd-fme recording directory and its `WAV` folder, every scanner `recordings/dv/<discovery>`
+dsd-fme recording directory and its `WAV` and `wav` folders (one directory listed once),
+every scanner `recordings/dv/<discovery>`
 folder), bounded, and acts only on a directory that is provably ours: name
 `.wavekit-delete-` plus the six `mkdtemp` characters, a real directory (no symbolic link
 anywhere on the way), owned by this process's uid, mode exactly 0700, inside a configured
@@ -113,8 +114,9 @@ staging directory `captures/.tmp` is not a torn write (the warn "Path is a direc
 boot disappears), entries inside it that are not regular files are left and counted, and a
 `.tmp` that is a symbolic link or not a directory is not swept (fixed-text warn).
 1.11 With no keep service, the legacy mode and the shipped config, every pruner, retention run,
-route and log line is byte-identical to the WG10 base except 1.6 (evicted folders now removed)
-and 1.10 (no EISDIR warn).
+route and log line is byte-identical to the WG10 base except 1.5 (merge aliases are recorded
+and honoured in legacy mode too; amended at Main merge), 1.6 (evicted folders now removed) and
+1.10 (no EISDIR warn). The 1.9 startup sweep runs in protected mode only.
 
 ## 2. Smooth live audio, squelch and tuning trust
 

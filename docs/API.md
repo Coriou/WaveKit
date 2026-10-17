@@ -3754,8 +3754,11 @@ bytes, 0 files and the same reason. The first reason wins. A permission error is
 path is `exists: false` and not partial. A partial area's `bytes` and `files` are
 lower bounds.
 
-`kept` is always null: kept bytes (recording Keep, WG9) are not reported here
-yet. `lowSpace` describes the only automatic low-space behaviour:
+`kept` (WG10) reports the recording keep store in protected mode:
+`{ "state": "ready", "recordings", "bytes", "maxRecordings": 2000, "maxBytes": 536870912 }`
+(each file counted at its size when kept; no filesystem access), `{ "state": "loading" }`
+or `{ "state": "failed" }` (every recording protected, no counts). Legacy mode reports
+`null`; read null as "not reported". `lowSpace` describes the only automatic low-space behaviour:
 `policy` is `scanner-evidence-stops-writing` (scanner evidence stops writing when
 the available space is below `scanner.storage.minFreeDiskMb`), `minFreeBytes` is
 that threshold in bytes (null without a scanner) and `state` is `low` when
@@ -3901,9 +3904,18 @@ Keep protects one recording from every WaveKit deletion owner (the dsd-fme call
 pruner, scanner evidence retention, discovery removal and analog retention)
 until it is unkept. `PUT` keeps, `DELETE` on `/keep` unkeeps; both are
 idempotent and answer 200 `{ "id", "kept", "changed" }` (`changed: false` when it
-already was so). `DELETE /api/recordings/:id` removes a dsd-fme call recording:
-200 `{ "id", "deleted": true }`. Scanner recordings can be kept and unkept but
-not deleted here (409 `RECORDING_DELETE_UNSUPPORTED`). Unkeeping is allowed after
+already was so). `DELETE /api/recordings/:id` removes a dsd-fme call recording
+or (WG10) a scanner digital voice recording (`scan:` id, a file under
+`recordings/dv/<discovery>/`): 200 `{ "id", "deleted": true }`. A scanner delete
+follows the same rules and also updates the scanner's bookkeeping: the id leaves its
+observation, the discovery's `evidence.recordings` drops by one (never below zero),
+the change is journaled and a `scanner:discovery` `updated` event is sent. The file is
+unlinked first; if the bookkeeping then fails the answer is still 200 (a count is
+logged) and the dangling id resolves to no file. An analog scanner recording
+(`analog-<uuid>.wav`) or a scanner that is not running answers 409
+`RECORDING_DELETE_UNSUPPORTED`; a recording whose discovery is being removed 409
+`RECORDING_BUSY`; a file the scanner no longer owns, a symbolic link on the way or a
+folder swapped during the delete 404 with nothing deleted. Unkeeping is allowed after
 the file is gone.
 
 Protected mode only: the routes are mounted with the inventory while
@@ -3925,8 +3937,31 @@ other users may write (group or other write without the sticky bit) refuses
 delete with 500 `RECORDING_DELETE_FAILED` (logged once per refusal, no path):
 another user could rebind the private directory's name. Fix the directory mode,
 for example `chmod go-w <dir>` (or `chmod +t <dir>` for a shared directory), then
-retry. A crash between the rename and the unlink leaves a `.wavekit-delete-*`
-directory that is neither listed nor swept.
+retry. The delete records its progress by name inside the private directory: the
+moved file keeps its own name until its identity check passed, then is renamed
+`verified` just before the unlink. A crash leaves a `.wavekit-delete-*` directory
+that is never listed; at the next start in protected mode (WG10), before any
+decoder or the scanner runs, a bounded sweep (at most 64 directories) visits the
+dsd-fme recording directories with their `WAV`/`wav` folders and every scanner
+`recordings/dv/<discovery>` folder. It acts only on a directory that is provably
+WaveKit's (the exact name pattern, a real directory with no symbolic link from the
+configured root, owned by the core's user, mode exactly `0700`): a lone `verified`
+file is unlinked while the keep store is ready; a lone entry named like a recording
+is put back under its name, never replacing a file; an empty directory is removed;
+anything else (including WG9-format `recording` entries) is left and counted. One
+info line with counts, never a name or path. Legacy mode does not sweep.
+
+Discovery merges (WG10, both modes): the dropped discovery's recording and evidence
+folders stay where they are and the survivor adopts them as aliases (persisted, at
+most 64 per discovery; past that the oldest is released and its folder becomes an
+orphan, warned as a count). Alias folders count as the survivor's: its Keep protects
+them in retention, their recording ids keep resolving, a kept file in any alias makes
+the survivor hold kept recordings (409 on its removal), and removing the survivor
+removes the alias folders too, file by file through the keep decision. A capacity
+eviction now removes the evicted discovery's folders and aliases like an inactive
+prune (a discovery holding kept recordings is still never evicted, and kept files
+stay). Merges and evictions made before WG10 keep their orphan folders, which follow
+the normal age and size caps.
 
 A configured recording root that is itself a symbolic link (a dsd-fme recording
 directory such as `data/recordings -> /Volumes/usb/recs`, or the scanner storage
@@ -3957,7 +3992,7 @@ While the store loads every answer is "kept" too.
 | `RECORDING_KEPT`               | 409    | Delete of a kept recording (unkeep first)                 |
 | `RECORDING_BUSY`               | 409    | A Keep and a delete of the same recording overlapped      |
 | `RECORDING_KEEP_LIMIT`         | 409    | Keep would pass 2 000 entries or 512 MiB                  |
-| `RECORDING_DELETE_UNSUPPORTED` | 409    | Delete of a scanner recording                             |
+| `RECORDING_DELETE_UNSUPPORTED` | 409    | Delete of an analog scanner recording, or no scanner      |
 | `RECORDING_KEEP_FAILED`        | 500    | Keep or unkeep failed otherwise (fixed text per action)   |
 | `RECORDING_DELETE_FAILED`      | 500    | Delete failed otherwise, or a shared writable directory   |
 | `RECORDING_KEEPS_UNAVAILABLE`  | 503    | The keep store is loading, failed or cannot be written    |
