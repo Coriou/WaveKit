@@ -51,3 +51,29 @@ export function passiveProbationDue(input: {
 		sinceDisabledMs >= PASSIVE_PROBATION_MS
 	)
 }
+
+/** The cumulative `idle` / `active` milliseconds of an event-loop sample (`EventLoopUtilization`). */
+export interface EluSample {
+	idle: number
+	active: number
+}
+
+/**
+ * WG11 (Main decision on review M1): utilization over the window between two cumulative samples of
+ * the same worker; with no previous sample, or one from an earlier worker (counters went back), the
+ * window is the worker's whole life so far. Null for an empty or non-finite window.
+ */
+export function windowedUtilization(
+	current: EluSample,
+	previous: EluSample | null,
+): number | null {
+	const fresh =
+		previous === null ||
+		current.idle < previous.idle ||
+		current.active < previous.active
+	const active = fresh ? current.active : current.active - previous.active
+	const idle = fresh ? current.idle : current.idle - previous.idle
+	const total = active + idle
+	if (!Number.isFinite(total) || total <= 0) return null
+	return active / total
+}

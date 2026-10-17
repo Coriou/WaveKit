@@ -4,6 +4,7 @@ import {
 	PASSIVE_PROBATION_MS,
 	passiveCostDecision,
 	passiveProbationDue,
+	windowedUtilization,
 } from "../../../../src/core/scanner/passive-cost.js"
 import {
 	PASSIVE_COST_CLEAR_RATIO,
@@ -222,5 +223,29 @@ describe("passiveProbationDue (WG11 SC, Main decision M2)", () => {
 			),
 			{ numRuns: 200 },
 		)
+	})
+})
+
+describe("windowedUtilization (WG11 review M1)", () => {
+	it("measures the window between two samples of the same worker", () => {
+		expect(
+			windowedUtilization({ idle: 360, active: 84 }, { idle: 6, active: 54 }),
+		).toBeCloseTo(30 / 384)
+	})
+
+	it("uses the whole life without a previous sample or after a worker restart", () => {
+		expect(windowedUtilization({ idle: 6, active: 54 }, null)).toBeCloseTo(0.9)
+		expect(
+			windowedUtilization({ idle: 1, active: 1 }, { idle: 6, active: 54 }),
+		).toBe(0.5)
+	})
+
+	it("is null for an empty or non-finite window", () => {
+		expect(
+			windowedUtilization({ idle: 5, active: 5 }, { idle: 5, active: 5 }),
+		).toBeNull()
+		expect(
+			windowedUtilization({ idle: Number.NaN, active: 1 }, null),
+		).toBeNull()
 	})
 })
