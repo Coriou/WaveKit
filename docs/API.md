@@ -1173,6 +1173,11 @@ curl http://localhost:9000/api/live-audio/status
 }
 ```
 
+`httpUrl` and `wavUrl` use `http://localhost:<httpPort>` unless an origin is configured: in
+protected mode `access.publicOrigins.analogAudio`, in legacy mode `liveDemod.publicOrigin`
+(`WAVEKIT_LIVE_DEMOD__PUBLIC_ORIGIN`, a plain `scheme://host[:port]`). Set it when browsers reach
+the core from another machine.
+
 Fields:
 
 - `effectiveSampleRate` — demodulation and audio sample rate in Hz (source rate /
