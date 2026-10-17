@@ -106,6 +106,8 @@ export type MainToWorker =
 	| { type: "recycle"; buffer: ArrayBuffer }
 	/** The newest row's level over [startHz, endHz] (the hover readout); answered with a `probe`. */
 	| { type: "probe"; id: number; startHz: number; endHz: number }
+	/** Covered by an opaque view (Map, Messages): rows still land in the history, nothing is drawn. */
+	| { type: "paused"; paused: boolean }
 	| { type: "dispose" }
 
 export type WorkerToMain =

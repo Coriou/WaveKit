@@ -107,6 +107,7 @@ export class SpectrumPipeline {
 	private scene: SpectrumScene | null = null
 	private renderer: SceneRenderer | null = null
 	private scheduler: RenderScheduler | null = null
+	private paused = false
 	private readonly meta: Throttle<SpectrumFrameEventData>
 	private subscription: SpectrumSubscription | null = null
 	private readonly pool: ArrayBuffer[] = []
@@ -181,6 +182,10 @@ export class SpectrumPipeline {
 					this.pool.length < MAX_ROWS_IN_FLIGHT
 				)
 					this.pool.push(msg.buffer)
+				return
+			case "paused":
+				this.paused = msg.paused
+				if (!msg.paused) this.scheduler?.invalidate()
 				return
 			case "probe":
 				this.deps.post({
@@ -301,7 +306,9 @@ export class SpectrumPipeline {
 			layout: state.layout,
 			levels: state.levels,
 			size: state.size,
-			invalidate: () => scheduler.invalidate(),
+			invalidate: () => {
+				if (!this.paused) scheduler.invalidate()
+			},
 		})
 		scene.setRamp(state.ramp)
 		scene.setView(state.view)

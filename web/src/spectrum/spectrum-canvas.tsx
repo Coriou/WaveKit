@@ -33,6 +33,8 @@ export interface SpectrumCanvasProps {
 	ramp?: Uint8Array
 	onFrameMeta?: (meta: SpectrumFrameMeta) => void
 	onStatus?: (status: SpectrumEngineStatus) => void
+	/** Covered by an opaque view: stop drawing, keep the waterfall history. */
+	paused?: boolean
 	/** Filled with the engine's level probe while mounted (hover readout); null otherwise. */
 	probeRef?: RefObject<SpectrumProbe | null>
 	className?: string
@@ -192,6 +194,11 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 		peakDecayDbPerSec,
 		traceAlpha,
 	])
+
+	const paused = props.paused ?? false
+	useEffect(() => {
+		engineRef.current?.setPaused(paused)
+	}, [paused])
 
 	const { ramp } = props
 	useEffect(() => {

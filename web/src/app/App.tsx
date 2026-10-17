@@ -1,6 +1,6 @@
 import "../features/features.css"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useSyncExternalStore } from "react"
 
 import {
 	AudioOutput,
@@ -15,13 +15,20 @@ import { PaletteKeys } from "../features/palette/PaletteKeys.tsx"
 import { Plot } from "../plot/index.ts"
 import { Shell } from "../shell/Shell.tsx"
 import { followDeepLinks } from "../shell/deep-link-sync.ts"
+import { shellStore } from "../shell/store.ts"
 import { ServicesContext } from "./context.ts"
 import { createServices, type AppServices } from "./services.ts"
 
-/** The plot with the app's one tuning step: the Tuner's chosen step, else the band plan's (Plot's default). */
+const coveredNow = () => shellStore.getState().view !== "spectrum"
+
+/**
+ * The plot with the app's one tuning step: the Tuner's chosen step, else the band plan's (Plot's default). The Map and
+ * Messages views cover it with an opaque surface, so it stops drawing under them.
+ */
 function AppPlot({ services }: { services: AppServices }) {
 	const stepHz = useStore(services.prefs, s => s.stepHz)
-	return <Plot data={services.data} stepHz={stepHz} />
+	const covered = useSyncExternalStore(shellStore.subscribe, coveredNow)
+	return <Plot data={services.data} stepHz={stepHz} paused={covered} />
 }
 
 // One Tuner slot for the page: it holds the typed-entry state.

@@ -85,6 +85,7 @@ export class SpectrumEngine {
 	private layout: SpectrumLayout
 	private latestMeta: SpectrumFrameMeta | null = null
 	private disposed = false
+	private paused = false
 	private probeSeq = 0
 	private readonly probes = new Map<number, (db: number | null) => void>()
 
@@ -142,7 +143,9 @@ export class SpectrumEngine {
 				layout: this.layout,
 				levels,
 				size,
-				invalidate: () => scheduler.invalidate(),
+				invalidate: () => {
+					if (!this.paused) scheduler.invalidate()
+				},
 			})
 			this.scene.setRamp(ramp)
 		} else {
@@ -182,6 +185,15 @@ export class SpectrumEngine {
 		const size: SpectrumSize = { widthCss, heightCss, dpr }
 		if (this.scene) this.scene.setSize(size)
 		else this.post({ type: "resize", size })
+	}
+
+	/** Stops drawing while the plot is covered (rows keep landing in the history); a resume draws once. */
+	setPaused(paused: boolean): void {
+		if (paused === this.paused) return
+		this.paused = paused
+		if (this.scene) {
+			if (!paused) this.scheduler?.invalidate()
+		} else this.post({ type: "paused", paused })
 	}
 
 	/** The newest row's peak dBFS over [startHz, endHz] (hover readout); null when nothing is there. */

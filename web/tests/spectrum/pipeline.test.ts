@@ -88,6 +88,25 @@ describe("SpectrumPipeline (OffscreenCanvas path)", () => {
 		expect(t.ofType("row")).toEqual([])
 	})
 
+	it("keeps uploading rows but draws nothing while paused, then draws once on resume", () => {
+		const t = setup(true)
+		t.frames.tick()
+		const before = t.renderer.draws.length
+		t.pipeline.handle({ type: "paused", paused: true })
+		for (let i = 0; i < 3; i++) {
+			t.pipeline.onServer({
+				type: "spectrum:frame",
+				data: frame({ bytes: [i + 1, 2, 3] }),
+			})
+			t.frames.tick()
+		}
+		expect(t.renderer.rows.length).toBe(3)
+		expect(t.renderer.draws.length).toBe(before)
+		t.pipeline.handle({ type: "paused", paused: false })
+		t.frames.tick()
+		expect(t.renderer.draws.length).toBe(before + 1)
+	})
+
 	it("takes rows as wide as the texture it was given (FFT size above 2048)", () => {
 		const t = setup(true, 8192)
 		expect(t.widths).toEqual([8192])

@@ -111,6 +111,8 @@ export interface PlotProps {
 	className?: string
 	/** The user's chosen tuning step (wheel, keys, click snap); null or absent: the band plan's step. */
 	stepHz?: number | null
+	/** Covered by an opaque view (Map, Messages): the spectrum stops drawing, its history keeps filling. */
+	paused?: boolean
 }
 
 /** Frames per second and bins asked of the core. */
@@ -121,7 +123,7 @@ const SPECTRUM_BACKFILL_MS = 10_000
 const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
 
-export function Plot({ data, className, stepHz }: PlotProps) {
+export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const sourceId = useStore(data.sources, s => firstConnected(s.sources))
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
@@ -373,6 +375,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 					}}
 					onFrameMeta={onFrameMeta}
 					onStatus={onStatus}
+					paused={paused ?? false}
 					probeRef={probeRef}
 				/>
 				{size.w > 0 && view && (
