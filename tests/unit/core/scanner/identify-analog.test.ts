@@ -3,6 +3,7 @@
  * port returns every transmission it holds unfiltered (a naive or hostile port), so these tests also
  * prove identify's own fail-closed re-check of source, tolerance, window and modulation.
  */
+import { EventEmitter } from "node:events"
 import fc from "fast-check"
 import pino from "pino"
 import { describe, expect, it, vi } from "vitest"
@@ -28,6 +29,10 @@ import type {
 } from "../../../../src/core/scanner/identify-analog-contract.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import type { Logger } from "../../../../src/utils/logger.js"
+import {
+	feedAnalogEvidence,
+	identifyAnalogEvidence,
+} from "../../../../src/index.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import {
 	TARGET_HZ,
@@ -689,4 +694,86 @@ describe("property 9", () => {
 			{ numRuns: 200 },
 		)
 	})
+})
+
+describe("Main wiring: live demodulator transmissions feed identify (WG10 MA.1)", () => {
+	const at = (ms: number) => new Date(ms).toISOString()
+	function wired(opts: {
+		liveSource?: string
+		running?: boolean
+		frequencyUnknown?: boolean
+	}) {
+		const liveDemod = {
+			getStatus: () => ({
+				running: opts.running ?? true,
+				sourceConnected: true,
+				sourceId: opts.liveSource ?? "rtl",
+				config: { offsetHz: 0 },
+			}),
+		} as unknown as Parameters<typeof identifyAnalogEvidence>[0]["liveDemod"]
+		const tuner = {
+			getState: () => ({
+				frequency: TARGET_HZ,
+				unknownFields: opts.frequencyUnknown ? ["frequency"] : [],
+			}),
+		} as unknown as Parameters<typeof identifyAnalogEvidence>[0]["tuner"]
+		const log = identifyAnalogEvidence({ liveDemod, tuner })
+		const tracker = new EventEmitter()
+		feedAnalogEvidence(
+			tracker as unknown as Parameters<typeof feedAnalogEvidence>[0],
+			log,
+		)
+		return { log, tracker }
+	}
+
+	it("a closed transmission near the target with CTCSS names analog-fm", async () => {
+		const { log, tracker } = wired({})
+		tracker.emit("transmission", {
+			transmissionId: "w1",
+			sourceId: "rtl",
+			state: "closed",
+			startedAt: at(START - 4000),
+			endedAt: at(START - 2000),
+			durationMs: 2000,
+			frequency: { hz: TARGET_HZ + 300, tuningTrust: "commanded" },
+			modulation: "nfm",
+			bandwidthHz: 12_500,
+			squelchMode: "auto",
+			thresholdDbfs: -40,
+			peakChannelPowerDbfs: -30,
+			meanChannelPowerDbfs: -31,
+			closeReason: "squelch",
+			tone: { ctcssHz: 88.5, dtmf: null, dcs: null },
+		})
+		const h = harness({ port: log })
+		await h.start()
+		await h.settle()
+		expect(h.last()?.state).toBe("identified")
+		expect(h.last()?.result).toMatchObject({
+			protocol: "analog-fm",
+			analog: { transmissionId: "w1", ctcssHz: 88.5 },
+		})
+	})
+
+	it("live audio on the target without a transmission: no-sync", async () => {
+		const { log } = wired({})
+		const h = harness({ port: log })
+		await h.start()
+		await h.settle()
+		expect(h.trials()["analog-fm"]).toBe("no-sync")
+	})
+
+	for (const [label, opts] of [
+		["on another source", { liveSource: "other" }],
+		["stopped", { running: false }],
+		["with an unknown tuner frequency", { frequencyUnknown: true }],
+	] as const) {
+		it(`live audio ${label} is not monitoring: no-live-audio`, async () => {
+			const { log } = wired(opts)
+			const h = harness({ port: log })
+			await h.start()
+			await h.settle()
+			expect(h.trials()["analog-fm"]).toBe("unsupported/no-live-audio")
+		})
+	}
 })

@@ -223,9 +223,12 @@ import { extractChannelFeatures } from "./classify/channel-features.js"
 import { refineChannelClassification } from "./classify/channel-tier.js"
 import { updateChannelAdmission } from "./plan/resource-admission.js"
 import type { AnalogCut } from "./store/analog-operations.js"
+import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
+	/** WG10 req 3: the live demodulator's transmission evidence for identify; absent keeps today's behaviour. */
+	readonly analogEvidence?: IdentifyAnalogEvidence
 	/** WG9 req 2.5-2.6: the recording deletion decision; absent keeps today's behaviour. */
 	readonly recordingProtection?: RecordingProtection
 	readonly construction?: ScannerLifecycleOwner
@@ -3573,6 +3576,9 @@ export class ScannerService extends EventEmitter {
 							this.ambient.coverageAt(sourceId, hz, toleranceHz),
 					}
 				: {}),
+			...(this.deps.analogEvidence
+				? { analogEvidence: this.deps.analogEvidence }
+				: {}),
 			settings: () => this.settings(),
 			emit: data => this.emit("identify", data),
 			logger: this.deps.logger,
@@ -3919,6 +3925,15 @@ export class ScannerService extends EventEmitter {
 				continue
 			}
 			if (!eligible || existing) continue
+			// WG10 req 4.2: without caps (boot, ahead of `connected`) the engine cannot start; the
+			// `connected` event rebuilds the job.
+			if (this.deps.sources.getCaps(cfg.id) === undefined) {
+				this.log.debug(
+					{ sourceId: cfg.id },
+					"Passive job skipped until the source has caps",
+				)
+				continue
+			}
 			const rawSpec: ScanJobSpec = {
 				name: `Passive ${cfg.id}`,
 				sourceId: cfg.id,

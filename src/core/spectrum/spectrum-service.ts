@@ -1613,6 +1613,10 @@ export class SpectrumService extends EventEmitter {
 				code: w.code,
 				deltaHz: w.deltaHz,
 				at: new Date(w.at).toISOString(),
+				...(w.suspected !== undefined ? { suspected: w.suspected } : {}),
+				...(w.lastCommandAgeMs !== undefined
+					? { lastCommandAgeMs: w.lastCommandAgeMs }
+					: {}),
 			})),
 			summaryBinCount: summary?.bins.length ?? null,
 			summaryBinHz: summary?.binHz ?? null,

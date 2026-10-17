@@ -158,6 +158,12 @@ import {
 	tunerFrequencyAt,
 	wireAnalogTransmissions,
 } from "./core/analog-transmission.js"
+import type { AnalogTransmissionTracker } from "./core/analog-transmission.js"
+import {
+	createAnalogEvidenceLog,
+	liveAudioMonitoring,
+} from "./core/scanner/analog-evidence.js"
+import type { AnalogEvidenceLog } from "./core/scanner/analog-evidence.js"
 import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder, DecoderConfig } from "./decoders/types.js"
@@ -357,6 +363,53 @@ export function analogFrequencyAt(
 		id => tuner.getState(id),
 		id => tuner.tuningWrittenOnConnection(id),
 	)
+}
+
+/**
+ * WG10 req 3.1-3.2: the analog evidence log identify reads. `monitoring` reads the live
+ * demodulator status and the tuner state lazily at call time, checks the target's own source and
+ * treats a tuner frequency the controller does not know as not monitoring (fail closed).
+ */
+export function identifyAnalogEvidence(deps: {
+	liveDemod: Pick<LiveDemodulator, "getStatus">
+	tuner: Pick<TunerController, "getState">
+	logger?: Logger
+}): AnalogEvidenceLog {
+	return createAnalogEvidenceLog({
+		...(deps.logger
+			? { logger: createComponentLogger(deps.logger, "AnalogEvidence") }
+			: {}),
+		monitoring: (sourceId, hz, toleranceHz) => {
+			const state = deps.tuner.getState(sourceId)
+			const tunerHz =
+				state === undefined ||
+				(Array.isArray(state.unknownFields) &&
+					state.unknownFields.includes("frequency"))
+					? null
+					: state.frequency
+			return liveAudioMonitoring(
+				deps.liveDemod.getStatus(),
+				tunerHz,
+				hz,
+				toleranceHz,
+				sourceId,
+			)
+		},
+	})
+}
+
+/**
+ * WG10 req 3.1: feeds the tracker's open and closed events into the evidence log. The tracker is
+ * built after the scanner service, so the log handed to the scanner stays empty until then
+ * (identify answers `no-sync`/`no-live-audio`, never a false positive).
+ */
+export function feedAnalogEvidence(
+	tracker: Pick<AnalogTransmissionTracker, "on">,
+	log: Pick<AnalogEvidenceLog, "record">,
+): void {
+	tracker.on("transmission", event => {
+		log.record(event)
+	})
 }
 
 /**
@@ -836,6 +889,12 @@ async function main(): Promise<void> {
 		)
 		admissionGates.push(() => liveDemod.shutdownAdmission())
 		own(50, () => liveDemod.stop())
+		// WG10 req 3: identify's analog evidence; fed by the transmission tracker once it exists.
+		const analogEvidence = identifyAnalogEvidence({
+			liveDemod,
+			tuner: tunerController,
+			logger,
+		})
 		const digitalVoiceConfig = DigitalVoiceConfigSchema.parse(
 			config.digitalVoice ?? {},
 		)
@@ -1144,6 +1203,7 @@ async function main(): Promise<void> {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				analogEvidence,
 				recordingProtection: keeps,
 				construction: scannerConstruction,
 				channels,
@@ -1864,6 +1924,7 @@ async function main(): Promise<void> {
 			},
 			sink: () => activity.transmissionSink(),
 		})
+		feedAnalogEvidence(transmissions, analogEvidence)
 		own(7, () => transmissions.stop())
 		shutdown.register({
 			name: "analog-transmissions",
