@@ -69,6 +69,10 @@ import {
 	type Bandplan,
 	type BandRegionCode,
 } from "./bandplan/index.js"
+import {
+	createBandRangeCache,
+	withBandBurstPrior,
+} from "./band-scan-burst-prior.js"
 import { classifySpectral, leakOrIntermod } from "./classify/classifier.js"
 import { ScannerApiError } from "./errors.js"
 import {
@@ -77,6 +81,8 @@ import {
 } from "./evidence/capture-recorder.js"
 import { CaptureStore } from "./evidence/capture-store.js"
 import { ulid } from "./ids.js"
+import { createKnownProtocolMemory } from "./known-protocol.js"
+import { narrowRasterAt } from "./narrow-digital.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
@@ -449,6 +455,15 @@ export class ScannerService extends EventEmitter {
 		{ startHz: number; binHz: number; bins: number[]; snrDb: number }
 	>()
 	private readonly lastConfirm = new Map<string, number>()
+	/** WG11 req 1.7: the known protocol is the store's decoded protocol (`get` clones: no cheaper read). */
+	private readonly knownProtocols = createKnownProtocolMemory({
+		discovery: id => {
+			const d = this.store.get(id)
+			return d ? { protocol: d.protocol, confidence: d.confidence } : undefined
+		},
+	})
+	/** WG11 req 1.4: the band-plan ranges of the sweep ISM fill, rebuilt only when the plans change. */
+	private readonly bandBurstRanges = createBandRangeCache()
 	private readonly persistedLeases = new Map<string, PersistedLease>()
 	private readonly bootResume = new Map<string, string[]>()
 	private readonly passiveDisabled = new Map<string, string>()
@@ -2439,7 +2454,27 @@ export class ScannerService extends EventEmitter {
 		}
 		if (!all)
 			for (const p of probeProtocols) if (!protocols.includes(p)) priors[p] = 0
-		return { priors, protocols }
+		// WG11 req 1.4: a sweep silent at this frequency takes the band plan's ISM prior, so a young
+		// land-mobile track is not an ISM burst (no probe) at the sweep's dwell decision.
+		return {
+			priors: withBandBurstPrior(
+				{
+					hz: centreHz,
+					priors,
+					protocols,
+					rangesListProtocols: bandProtocols.length > 0,
+					sweep: specs.some(s => s.mode === "sweep"),
+				},
+				() =>
+					priorsFor(
+						this.bandBurstRanges(
+							this.deps.bandplans?.() ?? bandplansFor(this.deps.region),
+						),
+						centreHz,
+					),
+			),
+			protocols,
+		}
 	}
 
 	private classify(track: TrackSnapshot, sourceId: string): Classification {
@@ -3525,6 +3560,7 @@ export class ScannerService extends EventEmitter {
 		return new JobRunner({
 			record,
 			autoResumeReady: () => this.autoResumeReady(record),
+			knownProtocols: this.knownProtocols,
 			arbiter: this.arbiter,
 			probes: this.probes,
 			decoders: this.deps.decoders,
@@ -3603,6 +3639,8 @@ export class ScannerService extends EventEmitter {
 				return id ? this.store.get(id) : undefined
 			},
 			priorsAt: hz => priorsFor(ranges, hz),
+			narrowRasterAt: hz => narrowRasterAt(ranges, hz),
+			knownProtocols: this.knownProtocols,
 			format: sourceId =>
 				this.identifyEngine(sourceId)?.format ??
 				this.deps.sources.getCaps(sourceId)?.format ??
@@ -3683,6 +3721,11 @@ export class ScannerService extends EventEmitter {
 		e: Parameters<JobDriver["dispatch"]>[0],
 	): Promise<ScanJob> {
 		const record = this.requireJob(id)
+		// WG11 req 1.6: cancelling an ended job changes nothing, so it skips arbitration and masks.
+		if (e.type === "cancel" && isTerminal(record.state)) {
+			this.requireDriver(id)
+			return this.toDto(record)
+		}
 		await this.requireDriver(id).dispatch(e)
 		await this.arbitrate(record.spec.sourceId)
 		this.updateMasks(record.spec.sourceId)
@@ -4516,6 +4559,7 @@ export class ScannerService extends EventEmitter {
 	private readonly onStoreEvicted = (evicted: Discovery[]): void => {
 		for (const discovery of evicted) {
 			this.lastConfirm.delete(discovery.id)
+			this.knownProtocols.forget(discovery.id)
 			this.emit("discovery", {
 				change: "deleted",
 				discovery,
@@ -4537,6 +4581,9 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onStoreChange = (id: string, change: StoreChange): void => {
+		// WG11 req 1.7: a deleted discovery drops its known-protocol miss count. A merge reports
+		// the merged-away discovery as `deleted` and the survivor (which keeps its count) as `merged`.
+		if (change === "deleted") this.knownProtocols.forget(id)
 		// WG2 R1 #8 / R2: eviction and age pruning never remove a lockout, and operator deletion
 		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a
 		// locked survivor schedules a replan (no-op when no job's lockout list changes).

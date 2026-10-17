@@ -32,6 +32,15 @@ import {
 const AIS_A = 161_975_000
 const AIS_B = 162_025_000
 /** Source centre 100 kHz below AIS channel A: both AIS channels lie in the 1.024 Msps window. */
+// WG11 req 1.3: the 446/162 MHz test band plans list 6.25 kHz rasters, so identify first adds the
+// narrow digital trials (nxdn48, dpmr, dstar) ahead of the ambient one. Their outcome is timing
+// dependent (pending, running, no-sync), so only their identity is asserted.
+const NARROW_TRIALS = [
+	expect.objectContaining({ protocol: "nxdn48", transport: "offset" }),
+	expect.objectContaining({ protocol: "dpmr", transport: "offset" }),
+	expect.objectContaining({ protocol: "dstar", transport: "offset" }),
+]
+
 const CENTRE_AIS = AIS_A - 100_000
 
 const aisConfig = (id = "ais"): DecoderConfig => ({
@@ -160,6 +169,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 				),
 			)
 			expect(firstTarget(r, jobId).trials).toEqual([
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					decoder: "ais-catcher",
@@ -173,6 +183,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			const target = firstTarget(r, jobId)
 			expect(target.state).toBe("identified")
 			expect(target.trials).toEqual([
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",
@@ -225,6 +236,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			const target = firstTarget(r, jobId)
 			expect(target.state).not.toBe("identified")
 			expect(target.trials).toEqual([
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",
@@ -249,7 +261,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			expect(evidence).toEqual([])
 			const target = firstTarget(r, jobId)
 			expect(target.state).toBe("candidate")
-			expect(target.trials).toEqual([])
+			expect(target.trials).toEqual(NARROW_TRIALS)
 		} finally {
 			await r.h.service.stop()
 		}
@@ -367,6 +379,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 			const target = firstTarget(r, job.id)
 			expect(target.state).not.toBe("identified")
 			expect(target.trials).toEqual([
+				...NARROW_TRIALS,
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",

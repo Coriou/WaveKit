@@ -190,7 +190,7 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		await h.service.stop()
 	}, 60_000)
 
-	it("identifies a carrier from the spectrum without a trial, and never persists the identify job", async () => {
+	it("identifies a carrier from the spectrum after the narrow digital trials, and never persists the identify job", async () => {
 		const h = serviceHarness(noPassive)
 		const events: ScannerIdentifyEventData[] = []
 		h.service.on("identify", (d: ScannerIdentifyEventData) => events.push(d))
@@ -202,21 +202,46 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		})
 		expect(job.spec.kind).toBe("identify")
 		feedTone(h.fanout, 2, 100_000)
-		await until(() => h.service.getJob(job.id)?.state === "completed")
+		// WG11 req 1.3: the test band plans list a 6.25 kHz raster here, so the carrier first gets
+		// the three narrow digital trials (one run each, IDENTIFY_MIN_HOLD_MS 1800 or the mode's
+		// 2000 ms plus start latency); the golden before WG11 was `trials: []`.
+		await until(() => events.at(-1)?.state === "trying")
+		expect(events.at(-1)?.trials).toEqual([
+			expect.objectContaining({
+				protocol: "nxdn48",
+				decoder: "dsd-fme",
+				mode: "nxdn48",
+			}),
+			expect.objectContaining({
+				protocol: "dpmr",
+				decoder: "dsd-fme",
+				mode: "dpmr",
+			}),
+			expect.objectContaining({
+				protocol: "dstar",
+				decoder: "dsd-fme",
+				mode: "auto",
+			}),
+		])
+		// Three runs one after another take about 7 s of real time: cancel after the plan is pinned.
+		await h.service.cancelJob(job.id)
+		await until(() => h.service.getJob(job.id)?.state === "cancelled")
 		const [target] = h.service.getJob(job.id)!.identify!.targets
 		expect(target).toMatchObject({
 			state: "candidate",
-			trials: [],
 			result: {
 				protocol: "carrier",
 				measurements: { source: "track", class: "carrier" },
 			},
 		})
+		expect(target!.trials.map(t => [t.protocol, t.outcome])).toEqual([
+			["nxdn48", "cancelled"],
+			["dpmr", "cancelled"],
+			["dstar", "cancelled"],
+		])
 		expect(
 			Math.abs(target!.result!.measurements.centreHz - (CENTRE + 100_000)),
 		).toBeLessThan(1000)
-		expect(events.at(-1)?.state).toBe("candidate")
-		expect(h.decoders.created.size).toBe(0)
 		await h.service.stop()
 		expect(readFileSync(join(h.dir, "jobs.json"), "utf8")).not.toContain(job.id)
 	}, 20_000)
