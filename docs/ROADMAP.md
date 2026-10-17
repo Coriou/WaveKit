@@ -709,6 +709,10 @@ recording Keep protects one recording independently.
       a capacity eviction removes the evicted folders; keep totals in the storage
       report (`kept`); a startup sweep of interrupted-delete directories (protected
       mode only); the capture store no longer warns about its staging directory.
+      Downgrade note: merge `aliases` were added to the strict scanner snapshot and
+      journal schemas without a file-version bump, so a pre-WG10 build started on
+      scanner state written after any merge fails strict parsing and loads an
+      empty scanner state. Back up the scanner state directory before rolling back.
 - [ ] Recording follow-ups still open after WG10: analog scanner recordings cannot be
       deleted (409); merges and evictions made before WG10 keep their orphan
       folders; aliases are released only after the owner's removal succeeded (a

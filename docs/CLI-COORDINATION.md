@@ -1371,3 +1371,5 @@ For the web session (web app on `claude/project-thread-afdtom`):
 4. Optionally show the spectrum warning's `suspected` and `lastCommandAgeMs` next to an untracked-retune notice (for example "another client retuned the receiver" for `external-control`).
 5. Recordings: offer delete for `scan:` items that are not kept as well (not for analog ones); refresh the discovery on its `updated` event. Show the keep totals from `GET /api/storage` `kept` against `maxRecordings` / `maxBytes`; treat `null` as "not reported" and `loading` / `failed` as "every recording protected".
 6. `docs/web/CORE-GAPS.md` on the web branch can tick: live audio continuity on click-to-tune, identify for analog voice with tones, unavailable decoders reported, scanner recording delete, keep totals.
+
+Downgrade note: merge `aliases` were added to the strict scanner snapshot and journal schemas without a file-version bump, so a pre-WG10 build started on scanner state written after any merge fails strict parsing and loads an empty scanner state. Back up the scanner state directory before rolling a core back past WG10.
