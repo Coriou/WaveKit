@@ -287,10 +287,11 @@ retain their original scope. Backend verification is recorded below.
       acceptance test, preflight cache, pairing DTOs and contract); deployment acceptance stays
       open here.
       _Requirements: 1.1–1.3, 3.6, 4.8, 6.2–6.5_
-- [ ] 15. (WG2 lane D) Device names, kinds and coarse last-seen: snapshot version 2
+- [x] 15. (WG2 lane D) Device names, kinds and coarse last-seen: snapshot version 2
       migration, `POST /api/access/devices/label`, hour-aligned last-seen on
       authenticated admission through the mutation queue, projections; Property 7.
-      See docs/specs/web-gaps-2.
+      See docs/specs/web-gaps-2. Done in web-gaps-2 lane D (2397656a, 00441240, 670d9952);
+      documented in docs/API.md (protected runtime, devices and label).
       _Requirements: 4.9–4.12_
 
 ### Backend implementation checkpoint — 2026-10-11
@@ -344,3 +345,18 @@ static exposure checks of the reference profile; the stack was not started.
 Live TLS, proxy, private-volume and browser acceptance stay with task 14, and
 task 9 remains the connected-client release gate. No receiver, deployment,
 image build or production-binding acceptance follows from this checkpoint.
+
+## Web origin on another port: local evidence — 2026-10-17
+
+[web-gaps-9](../web-gaps-9/requirements.md) requirement 1 records the local evidence for a
+web app on another port of the API hostname. `tests/unit/access/web-origin-acceptance.test.ts`
+runs an actual protected server with the API origin, a web origin and a foreign origin, over
+http and in the tls-termination form (plaintext listener behind a terminator stand-in): pair
+with and without a label, session read, refresh, CSRF-guarded mutation, preflight, WebSocket,
+cross-port audio and logout; foreign, `localhost` and `null` origins are refused, and legacy
+mode mounts no access route. `tests/unit/access/preflight-max-age.test.ts` (Property 1) holds
+`Access-Control-Max-Age: 600` to the allowed preflight only, and the Fastify and Node HTTP
+adapter tests hold it off shutdown 503 preflights. `tests/unit/access/pair-label.test.ts`
+(Property 2) covers the strict pair body and the single committed write. The contract and
+example flow are in [API.md](../../API.md#browser-pairing-for-a-web-origin-wg9). No real TLS,
+proxy, browser or deployment acceptance follows: task 14 stays open.

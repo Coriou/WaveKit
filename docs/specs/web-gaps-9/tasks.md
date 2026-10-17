@@ -1,10 +1,10 @@
 # Web gaps 9 tasks (WG9)
 
-Status: frozen; lanes not started. See [requirements](requirements.md) and
-[design](design.md). Lanes work against the frozen contract and touch only their own paths; Main
-(MA.\*) owns the composition files (`src/index.ts`, `src/api/server.ts`, barrels,
-`src/config.ts`, `config/*`), the frozen contract files (`packages/**`,
-`src/core/recordings/contract.ts`), `src/core/scanner/scanner-service.ts`,
+Status: in progress; lanes PA and MN merged with their Main wiring, RK, TT and ZM pending. See
+[requirements](requirements.md) and [design](design.md). Lanes work against the frozen contract
+and touch only their own paths; Main (MA.\*) owns the composition files (`src/index.ts`,
+`src/api/server.ts`, barrels, `src/config.ts`, `config/*`), the frozen contract files
+(`packages/**`, `src/core/recordings/contract.ts`), `src/core/scanner/scanner-service.ts`,
 `src/core/scanner/store/**`, `src/core/scanner/types.ts`, `src/core/digital-voice.ts`, the
 storage report, the isolation and contract tests and the docs. No lane edits the pinned
 band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests,
@@ -17,10 +17,10 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
 
 ## Lane PA: browser pairing
 
-- [ ] PA.1 Preflight `Access-Control-Max-Age`; pair with optional `name` and `kind`.
+- [x] PA.1 Preflight `Access-Control-Max-Age`; pair with optional `name` and `kind`.
   - _Requirements: 1.2, 1.5, 1.9_
   - **Property 1: Preflight cache only on success**, **Property 2: Pair body fails closed**
-- [ ] PA.2 Separate-web-origin acceptance test (REST, CSRF, preflight, WebSocket, audio, foreign
+- [x] PA.2 Separate-web-origin acceptance test (REST, CSRF, preflight, WebSocket, audio, foreign
       origin); Caddy profile example; pairing contract and example flow draft for Main.
   - _Requirements: 1.1, 1.3, 1.6–1.8_
 
@@ -53,11 +53,11 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
 
 ## Lane MN: minor defects
 
-- [ ] MN.1 Startup port conflicts (audio output, tuner relay); stored shadowed keys dropped;
+- [x] MN.1 Startup port conflicts (audio output, tuner relay); stored shadowed keys dropped;
       live-audio PATCH 400 code.
   - _Requirements: 5.1–5.3_
   - **Property 10: Shadowed keys dropped**
-- [ ] MN.2 Identify `decoder-unavailable`; legacy audio host derivation (route option); auto
+- [x] MN.2 Identify `decoder-unavailable`; legacy audio host derivation (route option); auto
       squelch re-seed after a retune.
   - _Requirements: 5.4–5.6_
   - **Property 9: Host derivation is inert**

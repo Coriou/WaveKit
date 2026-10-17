@@ -208,6 +208,98 @@ kept and to run `devices list` after restart. It prints no credential. Restart t
 core before the new credential is used. A running server's old persistence hook
 cannot write the previous binding.
 
+### Browser pairing for a web origin (WG9)
+
+A web app served on the same scheme and hostname as `access.publicOrigins.api`, on
+another port, pairs and uses the API directly. Add its exact origin to
+`access.allowedOrigins`; there is no other key. Request and response shapes, route
+names, the cookie name, the CSRF header and the preflight bound are shared in
+`@wavekit/api-types` (`access-pairing.ts`).
+
+```yaml
+access:
+  mode: protected
+  listenerScheme: https
+  exposure: tls-termination
+  allowedOrigins:
+    - https://receiver.example:9443 # API
+    - https://receiver.example:9446 # web app
+  publicOrigins: { api: "https://receiver.example:9443", ... }
+```
+
+Another hostname or site is unsupported by design. The session cookie is host-only
+and `SameSite=Strict`, so a cross-site request never carries it; `SameSite=None`
+would depend on third-party cookies, which browsers block; an https page cannot
+call an http API (mixed content); and the access design binds browser, API and
+audio to one hostname. `localhost` and `127.0.0.1` are different sites.
+
+Routes (JSON bodies; every access error body is `{ "code" }` only):
+
+- `POST /api/access/pairing-codes` (machine credential only): 201
+  `{ "code": "ABCDE-FGHIJ", "expiresInSeconds": 600 }`. A code lasts 10 minutes;
+  at most 4 are pending (429 `PAIRING_CAPACITY`).
+- `POST /api/access/pair` (allowed `Origin` required): strict body
+  `{ "code", "name"?, "kind"? }`. The hyphen in the code is optional. `name` and
+  `kind` follow the device label rules above and are committed with the session in
+  one write. 201 `{ "deviceId", "expiresAt", "csrfToken" }` with `Set-Cookie`.
+  Errors: 400 `MALFORMED_REQUEST` (an unknown key, a bad code shape, name or kind;
+  the code is not consumed), 403 `ORIGIN_FORBIDDEN` / `HOST_FORBIDDEN`, 401
+  `PAIRING_INVALID` (unknown, used or expired code), 429 `PAIRING_RATE_LIMITED`
+  with `Retry-After: 60` (5 attempts a minute per address, 60 globally), 429
+  `SESSION_CAPACITY`, 503 `ACCESS_UNAVAILABLE`.
+- `GET /api/access/session`: 200 with the same DTO; 401 `AUTH_REQUIRED` without a
+  valid cookie.
+- `POST /api/access/session/refresh` (cookie and CSRF): 200 DTO with a new
+  `expiresAt` and `Set-Cookie`.
+- `POST /api/access/session/logout` (cookie and CSRF): 200 `{ "revoked": true }`;
+  the cookie is cleared and the session's WebSocket and audio streams close.
+- `GET`/`HEAD /api/access/devices`, `POST /api/access/devices/label`,
+  `/revoke` and `/revoke-all`: as described above.
+
+Cookie: `wavekit_session=<token>; Path=/; HttpOnly; SameSite=Strict; Max-Age=<at
+most 2592000>`, plus `; Secure` when `listenerScheme` is `https`. No `Domain`, so
+the cookie is host-only and shared by every port of the hostname.
+
+CORS: only an exactly allowed `Origin` is echoed, with
+`Access-Control-Allow-Credentials: true`. `Origin: null` and foreign origins get
+403 `ORIGIN_FORBIDDEN` with no `Access-Control-Allow-*` header. An allowed
+preflight answers 204 with methods `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS`,
+headers `Authorization, Content-Type, X-WaveKit-CSRF, X-Correlation-Id, Range` and
+`Access-Control-Max-Age: 600` (below every browser's own ceiling, so at most one
+preflight per origin, URL, method and header set every 10 minutes). No other
+outcome carries `Access-Control-Max-Age`: a denied preflight does not, and neither
+does a 503 `ACCESS_UNAVAILABLE` preflight while the API or an audio listener shuts
+down. `Retry-After` is an exposed response header.
+
+CSRF: every unsafe cookie request needs an allowed `Origin` and
+`X-WaveKit-CSRF: <csrfToken>`, otherwise 403 `CSRF_REQUIRED`. Keep the token in
+memory only; after a reload, `GET /api/access/session` returns it again. WebSocket
+upgrades need the cookie and an allowed `Origin`.
+
+```js
+const api = "https://receiver.example:9443"
+await fetch(`${api}/api/access/bootstrap`, { credentials: "include" })
+let s = await (
+	await fetch(`${api}/api/access/pair`, {
+		method: "POST",
+		credentials: "include",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ code, name: "Kitchen tablet", kind: "browser" }),
+	})
+).json() // { deviceId, expiresAt, csrfToken }: keep in memory
+const call = (path, init = {}) =>
+	fetch(`${api}${path}`, {
+		...init,
+		credentials: "include",
+		headers: { ...init.headers, "X-WaveKit-CSRF": s.csrfToken },
+	})
+// renew before expiresAt
+s = await (await call("/api/access/session/refresh", { method: "POST" })).json()
+// 401 AUTH_REQUIRED: the session is gone; ask the operator for a new code and pair again
+// 403 CSRF_REQUIRED (the token was lost): GET /api/access/session reads it again
+await call("/api/access/session/logout", { method: "POST" })
+```
+
 ## REST Endpoints
 
 ### Health & Status
@@ -1178,6 +1270,14 @@ Fields:
 - `effectiveSampleRate` — demodulation and audio sample rate in Hz (source rate /
   `decimationFactor`; usually fractional).
 - `wavUrl` — the audio stream behind a streaming WAV header.
+- `httpUrl`, `wavUrl` host (WG9) — with `access.publicOrigins.analogAudio` set
+  they use that origin. Otherwise the stored value is
+  `http://localhost:<httpPort>/...`; in legacy mode this route rewrites that host
+  per response from the request's own `Host` header (an ASCII DNS name, a dotted
+  IPv4 address or a bracketed IPv6 address; its port is ignored and `httpPort` is
+  kept), and adds `Cache-Control: no-store`. A missing, repeated or invalid `Host`
+  keeps `localhost`. `X-Forwarded-*` is never read. Protected mode, the WebSocket
+  status events and the stored status are unchanged.
 - `pipelineHealth` — `running`, `starting`, `stopped` or `error`. A crashed CSDR
   pipeline restarts automatically with exponential backoff (1 s doubling to 30 s,
   10 consecutive attempts; a run of 30 s resets the count). `pipelineRestarts`
@@ -1211,7 +1311,13 @@ Configuration notes:
   60 s, while a signal 20 dB above a stable floor stays open for at least 20 s.
   Long continuous signals can eventually enter the floor estimate. Pipeline
   rebuilds, source capability changes (including retained-pipeline retunes), and
-  mode changes reset the estimate. This is not calibrated noise measurement.
+  mode changes reset the estimate. After a retained-pipeline retune
+  the first block seeds the floor at the lower of the previous floor and its own
+  power (WG9), so a carrier already on the new frequency does not become its own
+  floor; a retune onto a noisier band then opens on noise until the open rise
+  (0.4 dB/s) catches up, about 15 s for a 10 dB step with margin 6 dB. Cold
+  starts, rebuilds and mode changes seed from the first block alone. This is not
+  calibrated noise measurement.
 - `squelchMode: "noise"` (WG7, NFM and WFM only) — an FM quieting squelch. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
   (above voice: a high-pass at 0.6 of the channel's audio Nyquist) and compares it
@@ -1386,6 +1492,11 @@ Update live demodulator configuration. DSP changes restart the pipeline; `squelc
 `squelchMode`, `autoMarginDb`, `noiseQuietingDb` and `toneSquelch` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
+The 400 body (WG9) is `{ "error": "Bad Request", "code", "message" }`: `code` is
+`VALIDATION_ERROR` for a value the configuration schema refuses and
+`CHANNEL_OFFSET_OUT_OF_RANGE` for an offset outside the capture. The submitted
+value is never echoed. With access configured, `message` is `Request failed`, as for
+the other protected errors.
 
 `agc` takes `off`, `slow`, `fast` or `null`; `null` deletes the key and returns to
 the per-modulation default. Setting, changing or deleting the key is a DSP change
@@ -2140,6 +2251,11 @@ curl http://localhost:9000/api/digital-voice/status
 
 `call` is the first active call on any decoder (else `null`); each decoder also
 reports `lastCall` once a call has ended. Counters are cumulative since startup.
+
+The top-level and per-decoder `httpUrl` and `wavUrl` follow the same host rule as
+[`GET /api/live-audio/status`](#get-apilive-audiostatus) (WG9): with
+`access.publicOrigins.digitalAudio` unset, legacy mode rewrites the `localhost`
+fallback per response from the request's `Host`.
 
 #### POST /api/digital-voice/start
 
@@ -2902,6 +3018,10 @@ audio if it was idle.
 }
 ```
 
+`httpUrl` and `wavUrl` here are the stored live-audio URLs; the legacy `Host`
+rewrite applies only to `GET /api/live-audio/status`, so read that route for a
+reachable stream URL.
+
 409 `OUT_OF_WINDOW` with `details` saying why:
 
 - live audio runs on another source: `{ liveSourceId, sourceId }`;
@@ -3028,6 +3148,11 @@ engine epoch before the deadline. Otherwise it ends `timeout`, `not-needed` or
 `cancelled` like other trials. A protocol named in `protocols` with no covering
 decoder is `unsupported` with reason `no-ambient-decoder`. An accepted ambient
 identity makes the target `identified`, with the same rule as a probe decode.
+
+A probe trial whose decoder cannot run (WG9) ends `unsupported` with reason
+`decoder-unavailable`: the binary fails to spawn (`ENOENT` or `EACCES`) or exits
+with code 126 or 127, without a signal, before any output. Every other exit keeps
+its previous outcome. No outcome value was added; `reason` is free text.
 
 A decode counts only when all of these hold (fail closed):
 
