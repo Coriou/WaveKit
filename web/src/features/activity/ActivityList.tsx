@@ -1,6 +1,7 @@
 // The Activity list: windowed rows (only what is on screen is mounted, heights measured once), grouped
 // by minute, arrows to move, Enter to open. Arrivals are held while the list is scrolled away from the
-// top and announced by the "N new" pill, so rows never jump under the pointer.
+// top and announced by the "N new" pill, so rows never jump under the pointer. In the Cards layout each event is
+// its decoded message card (Messages board, feed variant), windowed the same way.
 import type { ActivitySummary } from "@wavekit/api-types"
 import { WaveKitIcon } from "@wavekit/brand/react"
 import {
@@ -16,10 +17,19 @@ import type { KeyboardEvent as ReactKeyboardEvent, Ref } from "react"
 
 import type { ActivityFeed } from "../../data/activity-feed.ts"
 import { compareSeq } from "../../data/activity-feed.ts"
+import { useReadOnly } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
 import { useNow } from "../hooks.ts"
+import { MessageCard } from "../messages/MessageCard.tsx"
+import { activityLayout } from "./layout.ts"
 import type { ListEntry } from "./rows.ts"
-import { estimateHeight, listEntries, rowView, timeText } from "./rows.ts"
+import {
+	estimateCardHeight,
+	estimateHeight,
+	listEntries,
+	rowView,
+	timeText,
+} from "./rows.ts"
 import { prefixOffsets, virtualWindow } from "./virtual.ts"
 
 const HOLD_PX = 8
@@ -60,14 +70,28 @@ export function ActivityList({
 	const [viewport, setViewport] = useState(600)
 	const [cursor, setCursor] = useState<string | null>(null)
 	const seen = useRef<string | null>(null)
+	const cards = useStore(activityLayout, s => s.layout === "cards")
+	const readOnly = useReadOnly()
+	const estimate = cards ? estimateCardHeight : estimateHeight
+
+	// Rows and cards measure differently: a layout switch starts from fresh guesses, at the top.
+	const lastLayout = useRef(cards)
+	if (lastLayout.current !== cards) {
+		lastLayout.current = cards
+		heights.current = new Map()
+	}
+	useEffect(() => {
+		if (scroller.current) scroller.current.scrollTop = 0
+		setScrollTop(0)
+	}, [cards])
 
 	const entries = useMemo(() => listEntries(items, now), [items, now])
 	const offsets = useMemo(() => {
 		void version
 		return prefixOffsets(
-			entries.map(e => heights.current.get(e.key) ?? estimateHeight(e)),
+			entries.map(e => heights.current.get(e.key) ?? estimate(e)),
 		)
-	}, [entries, version])
+	}, [entries, version, estimate])
 	const win = virtualWindow(offsets, scrollTop, viewport)
 
 	// Rows that arrive live (newer than the newest row so far) flash once; older pages do not.
@@ -191,6 +215,8 @@ export function ActivityList({
 			e.key !== "End"
 		)
 			return
+		// A card holds its own buttons: Enter on one of them is that button's, not "open".
+		if (e.key === "Enter" && cards && e.target !== e.currentTarget) return
 		const rows = entries.filter(
 			(x): x is Extract<ListEntry, { type: "row" }> => x.type === "row",
 		)
@@ -232,6 +258,7 @@ export function ActivityList({
 			<div
 				ref={setRefs}
 				className="wka-list wk-scroll"
+				data-layout={cards ? "cards" : undefined}
 				role="list"
 				aria-label={label}
 				tabIndex={0}
@@ -255,6 +282,17 @@ export function ActivityList({
 								>
 									{e.label}
 								</div>
+							) : cards ? (
+								<ActivityCard
+									key={e.key}
+									item={e.item}
+									measure={measure}
+									cursor={cursor === e.key}
+									current={openId === e.key}
+									fresh={fresh.has(e.key)}
+									readOnly={readOnly}
+									onOpen={onOpen}
+								/>
 							) : (
 								<ActivityRow
 									key={e.key}
@@ -350,6 +388,34 @@ export const ActivityRow = memo(function ActivityRow({
 					)}
 				</span>
 			</button>
+		</div>
+	)
+})
+
+export const ActivityCard = memo(function ActivityCard({
+	item,
+	measure,
+	cursor,
+	current,
+	fresh,
+	readOnly,
+	onOpen,
+}: RowProps & { readOnly: boolean }) {
+	return (
+		<div
+			role="listitem"
+			data-key={item.eventId}
+			ref={measure}
+			className="wka-item wka-carditem"
+			data-kb-cursor={cursor || undefined}
+			data-fresh={fresh || undefined}
+			aria-current={current || undefined}
+		>
+			<MessageCard
+				item={item}
+				readOnly={readOnly}
+				onOpen={() => onOpen(item.eventId)}
+			/>
 		</div>
 	)
 })

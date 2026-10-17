@@ -26,6 +26,8 @@ export interface MessageCardProps {
 	/** The JSON starts open. */
 	jsonOpen?: boolean
 	jsonMaxHeight?: number
+	/** In a feed of cards: a Details button that opens the event's detail. */
+	onOpen?: () => void
 	className?: string
 }
 
@@ -36,6 +38,7 @@ export function MessageCard({
 	readOnly = false,
 	jsonOpen = false,
 	jsonMaxHeight = 280,
+	onOpen,
 	className,
 }: MessageCardProps) {
 	const { data, tuning } = useServices()
@@ -185,6 +188,16 @@ export function MessageCard({
 						onClick={() => setRaw(!raw)}
 					>
 						{raw ? "Hide JSON" : "JSON"}
+					</Button>
+				)}
+				{onOpen && (
+					<Button
+						variant="ghost"
+						size="sm"
+						className="wkd-open"
+						onClick={onOpen}
+					>
+						Details
 					</Button>
 				)}
 			</footer>

@@ -175,6 +175,29 @@
 	.wka-item {
 		padding-bottom: 2px;
 	}
+	/* Cards layout: each event is its message card */
+	.wka-list[data-layout="cards"] {
+		padding: 8px;
+	}
+	.wka-carditem {
+		padding-bottom: 8px;
+	}
+	.wka-carditem > .wkd-card {
+		transition: box-shadow var(--wk-dur-2);
+	}
+	.wka-carditem[aria-current="true"] > .wkd-card {
+		background: rgba(var(--wk-accent-rgb), 0.08);
+	}
+	.wka-carditem[data-kb-cursor] > .wkd-card {
+		box-shadow: inset 0 0 0 1.5px var(--wk-focus);
+	}
+	.wka-carditem[data-fresh] > .wkd-card {
+		animation: wk-row-flash var(--wk-dur-flash) var(--wk-ease-out);
+	}
+	.wka-layout {
+		flex: none;
+		margin-left: auto;
+	}
 	.wka-row {
 		width: 100%;
 		align-items: flex-start;

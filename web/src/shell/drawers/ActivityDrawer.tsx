@@ -17,6 +17,10 @@ import {
 	takeActivitySearchFocus,
 } from "../../features/activity/focus.ts"
 import {
+	activityLayout,
+	setActivityLayout,
+} from "../../features/activity/layout.ts"
+import {
 	activityPane,
 	setActivityPaneOpen,
 } from "../../features/activity/pane.ts"
@@ -26,6 +30,7 @@ import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
 import { Drawer } from "../../ui/Drawer.tsx"
 import { Icon } from "../../ui/Icon.tsx"
+import { Seg } from "../../ui/Seg.tsx"
 import { showAppToast } from "../toast.ts"
 import type { DrawerContentProps } from "./types.ts"
 
@@ -401,7 +406,25 @@ function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 				{count}
 				{more ? "+" : ""}
 			</span>
+			<LayoutSwitch />
 		</div>
+	)
+}
+
+// Rows or message cards, for the drawer and every column alike.
+function LayoutSwitch() {
+	const layout = useStore(activityLayout, s => s.layout)
+	return (
+		<Seg
+			label="Show events as"
+			className="wka-layout"
+			value={layout}
+			onChange={setActivityLayout}
+			options={[
+				{ value: "list", label: "List" },
+				{ value: "cards", label: "Cards" },
+			]}
+		/>
 	)
 }
 

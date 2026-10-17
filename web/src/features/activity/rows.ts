@@ -272,3 +272,14 @@ export function estimateHeight(entry: ListEntry): number {
 	if (v.readings !== null) h += 19
 	return h
 }
+
+/** A first height guess for an event shown as its message card (Cards layout), refined by measurement. */
+export function estimateCardHeight(entry: ListEntry): number {
+	if (entry.type === "group") return 28
+	const v = rowView(entry.item)
+	let h = 150
+	if (v.message !== null) h += Math.ceil(v.message.length / 40) * 22
+	if (entry.item.fields.length > 0)
+		h += Math.ceil(entry.item.fields.length / 3) * 44
+	return h + 8
+}
