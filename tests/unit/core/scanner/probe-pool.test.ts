@@ -322,7 +322,10 @@ describe("ProbePool", () => {
 			await vi.advanceTimersByTimeAsync(10)
 			expect(h.pool.status()[0]?.decoderType).toBe("dsd-fme")
 			const firstDecoder = [...h.decoders.created.keys()][0]!
-			await vi.advanceTimersByTimeAsync(700)
+			// WG11 req 1.4: the DMR (auto) mode keeps its 1800 ms late entry (was 600 ms)
+			await vi.advanceTimersByTimeAsync(1780)
+			expect(h.pool.status()[0]?.decoderId).toBe(firstDecoder)
+			await vi.advanceTimersByTimeAsync(40)
 			const [current] = h.pool.status()
 			expect(current?.decoderId).not.toBe(firstDecoder)
 			expect(

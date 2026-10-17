@@ -236,6 +236,8 @@ interface ProbeRecord {
 	decoderAttempted: boolean
 	dvAttempted: boolean
 	allocatedPorts: number[]
+	/** WG11 1.8: covers of this probe's modes that ran their full mode hold unconfirmed (carried across steps). */
+	fullHoldCovers: ScannerProtocol[]
 }
 
 /** Stream events of one engine, watched once a request names its source. */
@@ -293,6 +295,13 @@ const ADMISSION_RANK = {
 	undecoded: 1,
 	reconfirm: 2,
 } as const
+/**
+ * Hold of the dsd-fme `auto` mode that decodes DMR: the DMR late entry (1337 + 360 + 100 ms,
+ * `DEFAULT_CONFIRM_HOLD_MS["tdma-ms"]`, identify's `IDENTIFY_MIN_HOLD_MS`). WG11 req 1.4: it was
+ * 600 ms, so a `tdma-ms` request (class hold 1800 ms) left the DMR mode max(600, 1800 − 2000 for
+ * the nxdn step) = 600 ms, too short for any DMR sync.
+ */
+export const DSD_AUTO_HOLD_MS = 1800
 const DSD_AUTO_COVERS: ScannerProtocol[] = [
 	"dmr",
 	"p25p1",
@@ -337,7 +346,7 @@ export function probeModesFor(
 		case "tdma-ms":
 		case "fsk4-12k5":
 			modes = [
-				dsd("auto", "dmr", DSD_AUTO_COVERS, 600),
+				dsd("auto", "dmr", DSD_AUTO_COVERS, DSD_AUTO_HOLD_MS),
 				dsd("nxdn", "nxdn96", ["nxdn96"], 2000),
 			]
 			break
@@ -721,6 +730,14 @@ export class ProbePool extends EventEmitter {
 		}))
 	}
 
+	/**
+	 * WG11 req 1.8: the protocols covered by the probe's modes that ran their full mode hold without
+	 * a confirmation (the mode timer fired while confirming). Unknown probe: none.
+	 */
+	fullHoldCovers(probeId: string): readonly ScannerProtocol[] {
+		return this.records.get(probeId)?.fullHoldCovers ?? []
+	}
+
 	startLatencyMs(
 		decoderType: ProbeDecoderType,
 		transport: ProbeTransport,
@@ -1075,7 +1092,11 @@ export class ProbePool extends EventEmitter {
 		transport: TransportStrategy,
 		ctx: TransportContext,
 		probeIdOverride: string | null,
-		carry: { calls: ProbeCall[]; recordDir: string | null } | null = null,
+		carry: {
+			calls: ProbeCall[]
+			recordDir: string | null
+			fullHoldCovers?: ScannerProtocol[]
+		} | null = null,
 	): string {
 		const mode = modes[modeIndex]!
 		this.seq += 1
@@ -1130,6 +1151,7 @@ export class ProbePool extends EventEmitter {
 			decoderAttempted: false,
 			dvAttempted: false,
 			allocatedPorts: [],
+			fullHoldCovers: carry?.fullHoldCovers ?? [],
 		}
 		if (mode.decoderType === "multimon-ng") {
 			rec.capcodes = new CapcodeWindows(mode.holdMs, () =>
@@ -1408,6 +1430,8 @@ export class ProbePool extends EventEmitter {
 	private async onModeTimeout(rec: ProbeRecord): Promise<void> {
 		if (this.isStopping(rec) || rec.confirmed || rec.state !== "confirming")
 			return
+		for (const p of rec.mode.covers)
+			if (!rec.fullHoldCovers.includes(p)) rec.fullHoldCovers.push(p)
 		const next = rec.modeIndex + 1
 		if (next >= rec.modes.length) return
 		const engine = this.deps.engines(rec.req.sourceId)
@@ -1431,6 +1455,7 @@ export class ProbePool extends EventEmitter {
 		this.start(rec.req, rec.modes, next, rec.transport, ctx, rec.probeId, {
 			calls: rec.calls,
 			recordDir: rec.recordDir,
+			fullHoldCovers: rec.fullHoldCovers,
 		})
 	}
 

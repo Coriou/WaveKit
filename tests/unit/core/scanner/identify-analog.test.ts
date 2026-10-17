@@ -292,7 +292,7 @@ describe("identify analog trials (WG10 3.2)", () => {
 		await h.settle()
 		expect(h.trials()).toEqual({
 			"analog-fm": "not-needed",
-			"analog-am": "decoded",
+			"analog-am": "heard", // WG11 req 1.1: AM without a tone
 		})
 		expect(h.last()?.result?.protocol).toBe("analog-am")
 	})
@@ -458,7 +458,7 @@ describe("identify analog trials (WG10 3.2)", () => {
 		]
 		await h.start()
 		await h.settle()
-		expect(h.trials()["analog-fm"]).toBe("decoded")
+		expect(h.trials()["analog-fm"]).toBe("heard") // WG11 req 1.1: no standard tone or code
 		expect(h.last()?.state).toBe("candidate")
 		expect(h.last()?.result?.analog).toMatchObject({ ctcssHz: null, dcs: null })
 		expect(h.last()?.result?.metadata).not.toHaveProperty("ctcssHz")

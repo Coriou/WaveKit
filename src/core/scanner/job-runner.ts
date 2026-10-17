@@ -18,6 +18,7 @@ import {
 } from "./job-state.js"
 import { DEFAULT_CONFIRM_HOLD_MS } from "./plan/plan-preview.js"
 import type { ProbePool, ProbeRequest } from "./probes/probe-pool.js"
+import type { KnownProtocolMemory } from "./known-protocol-contract.js"
 import { SweepScheduler, type SchedulerAction } from "./scheduler.js"
 import type {
 	EngineEpoch,
@@ -251,7 +252,9 @@ export interface JobRunnerDeps {
 		| "follow"
 		| "status"
 		| "startLatencyMs"
-	>
+	> &
+		/** WG11 1.8: the pool's per-mode full-hold record; absent (a fake): no miss is counted. */
+		Partial<Pick<ProbePool, "fullHoldCovers">>
 	decoders: Pick<DecoderManager, "holdSource" | "releaseSource">
 	settings: () => ScannerSettings
 	openEngine: (sourceId: string) => Promise<SpectrumEngine>
@@ -283,6 +286,11 @@ export interface JobRunnerDeps {
 	changed: (kind: "state" | "progress") => void
 	logger: Logger
 	now: () => number
+	/**
+	 * WG11 requirements 1.7 and 1.8: the known-protocol memory. Absent: no miss or decode is
+	 * counted (behaviour as before WG11).
+	 */
+	knownProtocols?: KnownProtocolMemory
 }
 
 /** Acquire refusals that clear by themselves: an operator-paused resume stays `paused(operator)` (R4). */
@@ -348,7 +356,13 @@ export class JobRunner implements JobDriver {
 	>()
 	private readonly windowHolds = new Map<
 		string,
-		{ probeId: string; timer: NodeJS.Timeout | null; following: boolean }
+		{
+			probeId: string
+			timer: NodeJS.Timeout | null
+			following: boolean
+			/** WG11 1.8: the observation's accepted identity when the probe started. */
+			identityAtStart?: LiveObservation["acceptedIdentity"]
+		}
 	>()
 
 	constructor(private readonly deps: JobRunnerDeps) {
@@ -376,7 +390,14 @@ export class JobRunner implements JobDriver {
 	}
 
 	dispatch(e: JobEvent): Promise<void> {
-		const run = this.chain.then(() => this.apply(e))
+		// WG11 requirement 1.6: a cancel of an ended job is a no-op (no transition, action, event or
+		// persistence write). Checked on the chain, so a cancel queued behind the event that ends
+		// the job sees the terminal state and the job ends exactly once.
+		const run = this.chain.then(() =>
+			e.type === "cancel" && isTerminal(this.record.state)
+				? undefined
+				: this.apply(e),
+		)
 		this.chain = run.catch(() => undefined)
 		return run
 	}
@@ -591,6 +612,7 @@ export class JobRunner implements JobDriver {
 			const hold = this.windowHolds.get(track.trackId)
 			if (hold && !hold.following) {
 				this.windowHolds.delete(track.trackId)
+				this.recordFullHoldMiss(live, hold)
 				this.releaseProbe(hold.probeId)
 			}
 		}, holdMs)
@@ -599,6 +621,9 @@ export class JobRunner implements JobDriver {
 			probeId: res.started,
 			timer,
 			following: false,
+			...(this.deps.knownProtocols
+				? { identityAtStart: live.acceptedIdentity }
+				: {}),
 		})
 	}
 
@@ -622,6 +647,7 @@ export class JobRunner implements JobDriver {
 		const probe = this.deps.probes
 			.status()
 			.find(p => p.probeId === probeId && p.jobId === this.record.id)
+		if (probe && ev.identity) this.recordAcceptedDecode(probe.trackId)
 		if (probe) {
 			const { spec } = this.record
 			const follow = spec.hold.policy === "hold" && spec.record.voice
@@ -662,6 +688,58 @@ export class JobRunner implements JobDriver {
 	}
 
 	// === internals ===
+
+	/**
+	 * WG11 1.8: an identity on a probe of this job resets the discovery's miss count when the
+	 * observation accepted it (ScannerService applies the evidence before the drivers see it).
+	 * The passive job's reconfirm probes take this path too.
+	 */
+	private recordAcceptedDecode(trackId: string): void {
+		const memory = this.deps.knownProtocols
+		if (!memory) return
+		const live = this.tracks.get(trackId)?.live
+		if (live?.discoveryId && live.acceptedIdentity)
+			try {
+				memory.recordDecode(live.discoveryId)
+			} catch {
+				// The memory never throws by contract; a broken one changes nothing here.
+			}
+	}
+
+	/**
+	 * WG11 1.8: the confirm hold timer of a window probe expired without a confirmation. It counts
+	 * a miss of the discovery's known protocol only when one of the probe's modes covering it ran
+	 * its full mode hold (the pool's per-mode record: the probe's current mode says nothing, it
+	 * may already have stepped on, or be stopping for the step), the probe is still this job's,
+	 * the observation has a discovery and accepted no new identity during the hold. A mode cut
+	 * short by the job hold, an unavailable or never-confirming mode, a track that closed, a
+	 * cancel, a pause or a sweep hop (they release the probe elsewhere) is never a miss.
+	 */
+	private recordFullHoldMiss(
+		live: LiveObservation,
+		hold: {
+			probeId: string
+			identityAtStart?: LiveObservation["acceptedIdentity"]
+		},
+	): void {
+		const memory = this.deps.knownProtocols
+		if (!memory || !this.driving || live.discoveryId === null) return
+		if (live.acceptedIdentity !== hold.identityAtStart) return
+		try {
+			const probes = this.deps.probes
+			const probe = probes
+				.status()
+				.find(p => p.probeId === hold.probeId && p.jobId === this.record.id)
+			if (!probe) return
+			const known = memory.known(live.discoveryId)
+			if (known === null) return
+			const covers = probes.fullHoldCovers?.(hold.probeId) ?? []
+			if (!covers.includes(known)) return
+			memory.recordMiss(live.discoveryId, known)
+		} catch {
+			// As above: a throwing memory or pool must not escape the hold timer.
+		}
+	}
 
 	/**
 	 * The epoch of a retune still in flight. The engine can start it before `retune()` resolves

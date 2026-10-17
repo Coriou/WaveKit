@@ -55,6 +55,7 @@ import {
 	type JobRecord,
 } from "./job-runner.js"
 import type { JobEvent } from "./job-state.js"
+import type { KnownProtocolMemory } from "./known-protocol-contract.js"
 import { PROTOCOL_DECODER, probeTransportFor } from "./plan/plan-preview.js"
 import {
 	probeModesFor,
@@ -90,6 +91,18 @@ export const IDENTIFY_CANDIDATE_SCORE = 0.5
 export const IDENTIFY_ALT_CLASS_WEIGHT = 0.5
 /** Relative slack on each class's OBW window (below 20 dB SNR the OBW is the on-bin width). */
 export const IDENTIFY_OBW_SLACK = 0.25
+/**
+ * WG11 req 1.3: the floor score of the narrow digital trials (`nxdn48`, `dpmr`, `dstar`) on a target inside a
+ * band plan range listing a raster of at most 6 250 Hz, before the bandplan prior.
+ */
+export const IDENTIFY_NARROW_DIGITAL_MIN_SCORE = 0.3
+/** WG11 req 1.3: the classes whose hypotheses a narrow raster adds, and the protocols taken from them. */
+const NARROW_DIGITAL_CLASSES: readonly ScannerClass[] = [
+	"fsk4-6k25",
+	"gmsk-narrow",
+]
+const NARROW_DIGITAL_PROTOCOLS: ReadonlySet<ScannerProtocol> =
+	new Set<ScannerProtocol>(["nxdn48", "dpmr", "dstar"])
 /** Ended identify jobs kept listed (they are never persisted). */
 export const IDENTIFY_KEEP_JOBS = 50
 /** The classifier's burst limit (Task 11): a track this short may be an OOK burst. */
@@ -265,13 +278,16 @@ export function compatibleClasses(track: TrackSnapshot): ScannerClass[] {
 /**
  * § 10.8 plausible decoders: every identify protocol some compatible class lists, scored
  * hypothesis × class weight × bandplan prior (missing = 1), cut to the request's protocols,
- * best first (ties by name). A prior of 0 removes a protocol.
+ * best first (ties by name). A prior of 0 removes a protocol. WG11 req 1.3: with `narrow` (the target lies on a
+ * <= 6.25 kHz raster) `nxdn48`, `dpmr` and `dstar` are scored at least IDENTIFY_NARROW_DIGITAL_MIN_SCORE before the
+ * prior, whatever the track's width; absent or false: today's scores.
  */
 export function identifyScores(
 	track: TrackSnapshot,
 	ctx: {
 		priors: Partial<Record<ScannerProtocol, number>>
 		protocols: readonly ScannerProtocol[]
+		narrow?: boolean
 	},
 ): Hypothesis[] {
 	const classes = compatibleClasses(track)
@@ -292,6 +308,27 @@ export function identifyScores(
 				Math.max(0, h.score * weight * (ctx.priors[h.protocol] ?? 1)),
 			)
 			if (score > (best.get(h.protocol) ?? 0)) best.set(h.protocol, score)
+		}
+	}
+	if (ctx.narrow === true) {
+		for (const cls of NARROW_DIGITAL_CLASSES) {
+			const weight = cls === own ? 1 : IDENTIFY_ALT_CLASS_WEIGHT
+			for (const h of CLASS_HYPOTHESES[cls]) {
+				if (
+					!NARROW_DIGITAL_PROTOCOLS.has(h.protocol) ||
+					(only && !only.has(h.protocol))
+				)
+					continue
+				const base = Math.max(
+					h.score * weight,
+					IDENTIFY_NARROW_DIGITAL_MIN_SCORE,
+				)
+				const score = Math.min(
+					1,
+					Math.max(0, base * (ctx.priors[h.protocol] ?? 1)),
+				)
+				if (score > (best.get(h.protocol) ?? 0)) best.set(h.protocol, score)
+			}
 		}
 	}
 	return [...best]
@@ -366,6 +403,31 @@ export function planIdentifyTrials(
 		})
 	}
 	return { trials, runs }
+}
+
+/**
+ * WG11 req 1.7 (pure): `scores` with the known protocol first (stable order otherwise, never a removal), so its
+ * probe mode's run is the plan's first. Added at its own score (0 when the track did not suggest it) unless it
+ * has no probe mode, the request's protocol list excludes it or its prior is not above 0 (a prior of 0 removes).
+ */
+export function knownFirst(
+	scores: readonly Hypothesis[],
+	known: ScannerProtocol,
+	priors: Partial<Record<ScannerProtocol, number>>,
+	protocols: readonly ScannerProtocol[],
+): Hypothesis[] {
+	const prior = priors[known] ?? 1
+	if (
+		identifyModeFor(known) === null ||
+		(protocols.length > 0 && !protocols.includes(known)) ||
+		!(prior > 0)
+	)
+		return [...scores]
+	const own = scores.find(h => h.protocol === known) ?? {
+		protocol: known,
+		score: 0,
+	}
+	return [own, ...scores.filter(h => h.protocol !== known)]
 }
 
 /**
@@ -793,6 +855,15 @@ export interface IdentifyDeps {
 	ambient?: IdentifyAmbientLookup
 	/** WG10 req 3.1: the live demodulator's transmissions. Absent: analog trials stay `unsupported`/`no-decoder`. */
 	analogEvidence?: IdentifyAnalogEvidence
+	/**
+	 * WG11 req 1.3: true when a band plan range of the active region containing `hz` lists a raster of at most
+	 * 6 250 Hz. Absent (or throwing): no narrow digital trials are added, today's plan.
+	 */
+	narrowRasterAt?: (hz: number) => boolean
+	/**
+	 * WG11 req 1.7/1.8: the known-protocol memory. Absent: today's order and no miss or decode counting.
+	 */
+	knownProtocols?: KnownProtocolMemory
 }
 
 /**
@@ -853,6 +924,8 @@ interface TargetState {
 	/** WG10 req 3.5: plan runs not requested because the memo names their decoder type. */
 	memoSkip: Set<number>
 	analog: AnalogState
+	/** WG11 req 1.7: the resolved discovery's known protocol at plan time (its run is first); null: none. */
+	known: { discoveryId: string; protocol: ScannerProtocol } | null
 }
 
 const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
@@ -864,6 +937,8 @@ const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
 /** Trial outcomes a decoder actually produced (kept across an in-window epoch change). */
 const COMPLETED: ReadonlySet<ScannerTrialOutcome> = new Set([
 	"decoded",
+	// WG11 req 1.1: final like `decoded` (a live-audio match without a tone or code).
+	"heard",
 	"no-sync",
 	"crc-errors",
 	"timeout",
@@ -1156,6 +1231,7 @@ export class IdentifyRunner implements JobDriver {
 				result: null,
 				resultProtocol: null,
 			},
+			known: null,
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -1239,10 +1315,21 @@ export class IdentifyRunner implements JobDriver {
 	private plan(t: TargetState): void {
 		const view = t.view
 		if (!view) return
-		const scores = identifyScores(view.track, {
-			priors: this.deps.priorsAt(view.track.centreHz),
+		const priors = this.deps.priorsAt(view.track.centreHz)
+		const narrow = this.narrowAt(t.targetHz)
+		let scores = identifyScores(view.track, {
+			priors,
 			protocols: this.deps.identify.protocols,
+			...(narrow ? { narrow } : {}),
 		})
+		t.known = this.knownOf(view)
+		if (t.known)
+			scores = knownFirst(
+				scores,
+				t.known.protocol,
+				priors,
+				this.deps.identify.protocols,
+			)
 		const plan = planIdentifyTrials(scores, {
 			format: this.deps.format(this.sourceId),
 			channelizer: this.deps.channelizer(),
@@ -1497,6 +1584,7 @@ export class IdentifyRunner implements JobDriver {
 			why === "stopped" &&
 			r.unavailable &&
 			![...r.seen.values()].some(seen => seen.output)
+		this.countKnownMiss(t, r, why, unavailable)
 		this.setTrials(t, r.runIndex, (protocol, trial) => {
 			if (unavailable) {
 				if (PROBE_DECODER_TYPES.has(r.run.mode.decoderType))
@@ -1783,6 +1871,7 @@ export class IdentifyRunner implements JobDriver {
 		if (ev.identity) seen.identity = ev.identity
 		hit.r.seen.set(ev.protocol, seen)
 		if (!ev.identity) return
+		this.countDecode(hit.t)
 		hit.t.decoded ??= { protocol: ev.protocol, identity: ev.identity }
 		if (!this.deps.identify.exhaustive) this.endRun(hit.t, hit.r, "decoded")
 	}
@@ -1817,6 +1906,7 @@ export class IdentifyRunner implements JobDriver {
 			)
 			if (!trial) continue
 			trial.outcome = "decoded"
+			this.countDecode(t)
 			t.decoded ??= { protocol: ev.protocol, identity }
 			if (!this.deps.identify.exhaustive) {
 				// § 10.8 (3) like a probe decode: every other trial is not needed.
@@ -1931,9 +2021,12 @@ export class IdentifyRunner implements JobDriver {
 		for (const trial of running) {
 			const m = analogMatches(list, target, trial.protocol)
 			const analog = analogResultOf(m.closed)
-			// A closed match (ended at or before the deadline) decodes even when first seen on the deadline tick.
+			// A closed match (ended at or before the deadline) decides even when first seen on the deadline tick.
+			// WG11 req 1.1: `decoded` only when that newest match carried a (standard) CTCSS tone or DCS code,
+			// else `heard` (a squelch opening is no decode).
 			if (analog) {
-				trial.outcome = "decoded"
+				trial.outcome =
+					analog.ctcssHz !== null || analog.dcs !== null ? "decoded" : "heard"
 				trial.mode = analog.modulation
 				decoded = true
 				changed = true
@@ -1962,11 +2055,109 @@ export class IdentifyRunner implements JobDriver {
 			t.analog.result = best.analog
 			t.analog.resultProtocol = best.protocol
 		}
-		// Req 3.3: a match stops the waiting trials unless exhaustive. Probe runs keep going so a digital decode
-		// still wins (a digital signal heard through live audio also opens the squelch).
+		// WG11 req 1.2 (WG10 3.3 amended): a match ends only the other live-audio trials still running (they
+		// cannot add evidence) unless exhaustive. Probe runs and ambient trials of other decoders keep going to
+		// their own end, so a digital decode still wins (a digital signal also opens the squelch).
 		if (decoded && !this.deps.identify.exhaustive)
-			this.endAmbient(t, "not-needed")
+			this.endAmbient(t, "not-needed", x => x.decoder === "live-audio")
 		return changed
+	}
+
+	// === WG11: narrow rasters and the known-protocol memory ===
+
+	/** `deps.narrowRasterAt` at the target; absent, throwing or not `true`: false (today's plan). */
+	private narrowAt(hz: number): boolean {
+		const at = this.deps.narrowRasterAt
+		if (!at) return false
+		try {
+			return at(hz) === true
+		} catch {
+			return false
+		}
+	}
+
+	/** The discovery id of a resolved view (the store's), or null. */
+	private discoveryIdOf(view: IdentifyTrackView | null): string | null {
+		if (!view) return null
+		try {
+			const id = this.deps.discoveryOf(view.observationId)?.id
+			return typeof id === "string" ? id : null
+		} catch {
+			return null
+		}
+	}
+
+	/** Req 1.7: the resolved discovery's known protocol, when it names an identify protocol; never throws. */
+	private knownOf(
+		view: IdentifyTrackView,
+	): { discoveryId: string; protocol: ScannerProtocol } | null {
+		const memory = this.deps.knownProtocols
+		if (!memory) return null
+		const discoveryId = this.discoveryIdOf(view)
+		if (discoveryId === null) return null
+		try {
+			const protocol = memory.known(discoveryId)
+			return typeof protocol === "string" &&
+				IDENTIFY_PROTOCOLS.includes(protocol)
+				? { discoveryId, protocol }
+				: null
+		} catch {
+			return null
+		}
+	}
+
+	/**
+	 * Req 1.8: the run of the known protocol ran its full hold (ended by the hold, or stopped by the pool at or
+	 * after its end) and decoded nothing: one miss. A run cut short, unavailable, never begun or cancelled is
+	 * no miss; a decode is counted by countDecode.
+	 */
+	private countKnownMiss(
+		t: TargetState,
+		r: RunState,
+		why: "hold" | "stopped" | "decoded",
+		unavailable: boolean,
+	): void {
+		const memory = this.deps.knownProtocols
+		const known = t.known
+		if (!memory || !known || !r.run.protocols.includes(known.protocol)) return
+		if (why === "decoded" || unavailable || r.endsAt === null) return
+		if (why === "stopped" && this.deps.now() < r.endsAt) return
+		if ([...r.seen.values()].some(seen => seen.identity !== null)) return
+		// Review m2: the transmission must cover the whole known hold. A track that closed before
+		// the run (trials on its last snapshot) or during it is no longer live at the hold's end.
+		if (!this.trackLive(t)) return
+		try {
+			memory.recordMiss(known.discoveryId, known.protocol)
+		} catch {
+			// The memory never throws by contract; a broken one changes nothing here.
+		}
+	}
+
+	/** The target's resolved track is still live in the current epoch (never throws: false). */
+	private trackLive(t: TargetState): boolean {
+		const view = t.view
+		if (!view || t.gone) return false
+		try {
+			return this.currentTracks().some(
+				v => v.trackId === view.trackId && v.epoch === view.epoch,
+			)
+		} catch {
+			return false
+		}
+	}
+
+	/** Req 1.8: an accepted (H2) decode on the target's discovery resets its miss count. */
+	private countDecode(t: TargetState): void {
+		const memory = this.deps.knownProtocols
+		if (!memory) return
+		const discoveryId =
+			this.discoveryIdOf(t.view) ?? t.known?.discoveryId ?? null
+		if (discoveryId === null) return
+		try {
+			memory.recordDecode(discoveryId)
+		} catch {
+			// As above.
+		}
 	}
 
 	/** Fixed message, no exception payload; once per job. */
