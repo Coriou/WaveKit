@@ -137,6 +137,14 @@ export class AudioClientRegistry extends EventEmitter {
 		this.remainder = Buffer.alloc(0)
 	}
 
+	/**
+	 * Drops a held partial sample (WG10 req 2.2: at silence arm and disarm,
+	 * so silence and the new run's audio both start on a sample boundary).
+	 */
+	clearRemainder(): void {
+		this.remainder = Buffer.alloc(0)
+	}
+
 	register(
 		response: http.ServerResponse,
 		remoteAddress: string,
