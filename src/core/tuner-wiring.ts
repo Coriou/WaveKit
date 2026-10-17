@@ -26,6 +26,8 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 	sourceManager.on("connected", sourceId => {
 		if (!sourceManager.isRtlTcpSource(sourceId)) return
 		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
+		// WG11 req 4.2: a new connection; its first payload writes the configured gain.
+		tunerController.noteSourceConnected(sourceId)
 		tunerRelay.handleSourceConnected(sourceId)
 	})
 

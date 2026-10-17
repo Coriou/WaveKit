@@ -13,6 +13,8 @@ import type {
 	SourceConfig,
 	SourceManager,
 } from "./source-manager.js"
+import type { SourceTunerConfig } from "../config.js"
+import { configuredTuningFrames } from "./tuner-config-gain.js"
 import type {
 	TunerState,
 	TunerStateField,
@@ -422,6 +424,28 @@ export class TunerController extends EventEmitter {
 	private rateProofEpoch: Map<string, number> = new Map()
 	/** Caps metadata as first registered, before any accepted command. */
 	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
+	/**
+	 * WG11 req 4.1, 4.2: configured gain/AGC per source (`sources[].tuner`), with its
+	 * frames in write order. The source's baseline for gainMode, gain and agcMode.
+	 */
+	private configuredTuning: Map<
+		string,
+		{
+			tuner: SourceTunerConfig
+			frames: ReadonlyArray<readonly [number, number]>
+		}
+	> = new Map()
+	/**
+	 * WG11 req 4.2: sources whose current connection has not had its configured
+	 * frames considered yet. Set on `connected`, consumed by the next
+	 * synchronizeOnConnect, so a repeated payload-started writes them once.
+	 */
+	private configWriteDue: Set<string> = new Set()
+	/**
+	 * WG11 req 4.5: gain fields whose configured value was written (every frame of
+	 * the set succeeded) on the current connection. Known while it lasts.
+	 */
+	private configProvenFields: Map<string, Set<TunerStateField>> = new Map()
 
 	constructor(
 		logger: Logger,
@@ -498,8 +522,50 @@ export class TunerController extends EventEmitter {
 			(this.rateProofEpoch.get(sourceId) ?? 0) + 1,
 		)
 		this.baselineCaps.delete(sourceId)
+		this.configWriteDue.delete(sourceId)
+		this.configProvenFields.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
 		this.emit("source-removed", sourceId)
+	}
+
+	// === Configured gain and AGC (WG11 req 4) ===
+
+	/**
+	 * Stores the configured gain/AGC of a source (undefined clears it). The values
+	 * become the source's baseline: gain fields not accepted or observed in this
+	 * process take them now (still unknown until written), the `reset` policy
+	 * returns to them, and each new connection writes them (synchronizeOnConnect).
+	 * Writes nothing itself.
+	 */
+	setConfiguredTuning(
+		sourceId: string,
+		tuner: SourceTunerConfig | undefined,
+	): void {
+		if (tuner === undefined) this.configuredTuning.delete(sourceId)
+		else
+			this.configuredTuning.set(sourceId, {
+				tuner: { ...tuner },
+				frames: configuredTuningFrames(tuner),
+			})
+		// A changed configuration is not what was written on this connection.
+		this.configProvenFields.delete(sourceId)
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return
+		const baseline = this.gainBaseline(sourceId)
+		const held = (field: TunerStateField) =>
+			this.isOperatorHeld(sourceId, field)
+		if (!held("gainMode")) state.gainMode = baseline.gainMode
+		if (!held("gain")) state.gain = baseline.gain
+		if (!held("agcMode")) state.agcMode = baseline.agcMode
+		this.emitStateChanged(sourceId)
+	}
+
+	/**
+	 * A new connection of the source opened (wired to SourceManager `connected`):
+	 * its first synchronizeOnConnect writes the configured frames. Writes nothing.
+	 */
+	noteSourceConnected(sourceId: string): void {
+		this.configWriteDue.add(sourceId)
 	}
 
 	// === Control Mode ===
@@ -1233,6 +1299,9 @@ export class TunerController extends EventEmitter {
 			sourceId,
 			(this.rateProofEpoch.get(sourceId) ?? 0) + 1,
 		)
+		// WG11 req 4.2: the configured frames are considered once per connection.
+		const configDue = this.configWriteDue.delete(sourceId)
+		if (configDue) this.configProvenFields.delete(sourceId)
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
@@ -1253,15 +1322,40 @@ export class TunerController extends EventEmitter {
 					"Source reconnected: discarded accepted tuner state (reconnectPolicy=reset); receiver state unconfirmed",
 				)
 			}
+			// Accepted fields are gone, so every configured field is written.
+			const configured = configDue
+				? this.writeConfiguredTuning(sourceId, state)
+				: undefined
 			const capsChanged = this.reconcileCaps(sourceId, state)
-			if (reset || forgot || capsChanged) this.emitStateChanged(sourceId)
-			return { policy, commands: [], reset }
+			if (reset || forgot || capsChanged || configured?.attempted === true)
+				this.emitStateChanged(sourceId)
+			const commands = configured?.commands ?? []
+			return configured?.error !== undefined
+				? { policy, commands, reset, error: configured.error }
+				: { policy, commands, reset }
 		}
 
 		// An inferred (written, not accepted) centre or rate is never replayed, so after a
 		// reconnect the receiver may be elsewhere: drop its proof and, unless an accepted
 		// value is replayed below, return it to the baseline (WG5 R2).
 		const forgotTuning = this.forgetInferredTuning(sourceId, state, desired)
+
+		// WG11 req 4.2, 4.3: configured fields not held by the operator, before the
+		// restore; a failed configured write stops the restore too (today's failure).
+		const configured = configDue
+			? this.writeConfiguredTuning(sourceId, state)
+			: undefined
+		if (configured?.error !== undefined) {
+			const capsChanged = this.reconcileCaps(sourceId, state)
+			if (configured.attempted || capsChanged || forgotTuning)
+				this.emitStateChanged(sourceId)
+			return {
+				policy,
+				commands: configured.commands,
+				reset: false,
+				error: configured.error,
+			}
+		}
 
 		const written: Array<{ value: number; name: string }> = []
 		let failure: Error | undefined
@@ -1295,21 +1389,30 @@ export class TunerController extends EventEmitter {
 
 		const capsChanged = this.reconcileCaps(sourceId, state)
 
-		const commands = written.map(entry => entry.name)
+		const replayed = written.map(entry => entry.name)
+		const commands = [...(configured?.commands ?? []), ...replayed]
 		if (failure) {
 			this.log.warn(
-				{ sourceId, commands, err: failure.message },
+				{ sourceId, commands: replayed, err: failure.message },
 				"Tuner state restore interrupted; will retry on next connection",
 			)
-		} else if (commands.length > 0) {
-			this.log.info({ sourceId, commands }, "Restored desired tuner state")
+		} else if (replayed.length > 0) {
+			this.log.info(
+				{ sourceId, commands: replayed },
+				"Restored desired tuner state",
+			)
 		}
 
 		for (const { name, value } of written) {
 			this.emit("command-sent", sourceId, name, value, "replay")
 		}
 		if (failure) this.emit("error", sourceId, failure)
-		if (plan.length > 0 || capsChanged || forgotTuning)
+		if (
+			plan.length > 0 ||
+			capsChanged ||
+			forgotTuning ||
+			configured?.attempted === true
+		)
 			this.emitStateChanged(sourceId)
 
 		return failure
@@ -1361,6 +1464,126 @@ export class TunerController extends EventEmitter {
 			return false
 		}
 		return true
+	}
+
+	/**
+	 * WG11 req 4.2-4.5: writes the configured frames of a new connection, in order
+	 * gain mode, gain, AGC, skipping each field the operator holds (accepted or
+	 * observed in this process; a gain is also skipped when the gain mode is held,
+	 * since an rtl_tcp gain write switches the tuner to manual). Internal control
+	 * only. The written fields are known (and state shows the configured values)
+	 * only when every frame of the set was written; a failure claims none, warns,
+	 * sets lastError and is retried on the next connection. Emits `command-sent`
+	 * with origin `config`. `attempted` is false when nothing was tried.
+	 */
+	private writeConfiguredTuning(
+		sourceId: string,
+		state: TunerState,
+	): { attempted: boolean; commands: string[]; error?: string } {
+		const configured = this.configuredTuning.get(sourceId)
+		if (!configured || state.controlMode !== "internal")
+			return { attempted: false, commands: [] }
+		const held = (field: TunerStateField) =>
+			this.isOperatorHeld(sourceId, field)
+		const frames = configured.frames.filter(([cmd]) => {
+			if (cmd === RTL_TCP_COMMANDS.SET_GAIN)
+				return !held("gain") && !held("gainMode")
+			const field = stateFieldOf(cmd)
+			return field !== undefined && !held(field)
+		})
+		if (frames.length === 0) return { attempted: false, commands: [] }
+
+		const written: Array<{ cmd: number; value: number; name: string }> = []
+		let failure: Error | undefined
+		for (const [cmd, value] of frames) {
+			try {
+				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+			} catch (err) {
+				failure =
+					err instanceof Error
+						? err
+						: new WaveKitError(String(err), "TUNER_RESTORE_FAILED")
+				break
+			}
+			written.push({
+				cmd,
+				value,
+				name: COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`,
+			})
+		}
+		const commands = written.map(entry => entry.name)
+		if (written.length > 0) {
+			state.commandCount += written.length
+			state.lastCommandAt = new Date().toISOString()
+		}
+
+		if (failure) {
+			state.lastError = `Tuner state restore failed: ${failure.message}`
+			this.log.warn(
+				{ sourceId, commands, err: failure.message },
+				"Tuner state restore interrupted; will retry on next connection",
+			)
+		} else {
+			const proven = new Set<TunerStateField>()
+			for (const { cmd, value } of written) {
+				if (cmd === RTL_TCP_COMMANDS.SET_GAIN_MODE) {
+					state.gainMode = value === 1 ? "manual" : "agc"
+					proven.add("gainMode")
+				} else if (cmd === RTL_TCP_COMMANDS.SET_GAIN) {
+					state.gain = value
+					proven.add("gain")
+				} else if (cmd === RTL_TCP_COMMANDS.SET_AGC_MODE) {
+					state.agcMode = value !== 0
+					proven.add("agcMode")
+				}
+			}
+			this.configProvenFields.set(sourceId, proven)
+			delete state.lastError
+			this.log.info(
+				{ sourceId, commands },
+				"Wrote configured tuner gain on connect",
+			)
+		}
+
+		for (const { name, value } of written)
+			this.emit("command-sent", sourceId, name, value, "config")
+		if (failure) {
+			this.emit("error", sourceId, failure)
+			return {
+				attempted: true,
+				commands,
+				error: state.lastError ?? failure.message,
+			}
+		}
+		return { attempted: true, commands }
+	}
+
+	/** A gain field accepted (REST or relay) or observed (inferred) in this process. */
+	private isOperatorHeld(sourceId: string, field: TunerStateField): boolean {
+		const desired: ReadonlyMap<string, number> | undefined =
+			this.desiredFields.get(sourceId)
+		return (
+			desired?.has(field) === true ||
+			this.inferredFields.get(sourceId)?.has(field) === true
+		)
+	}
+
+	/** gainMode, gain and agcMode of the baseline: configured, else the built-in. */
+	private gainBaseline(sourceId: string): {
+		gainMode: TunerGainMode
+		gain: number
+		agcMode: boolean
+	} {
+		const tuner = this.configuredTuning.get(sourceId)?.tuner
+		if (!tuner) return { gainMode: "agc", gain: 0, agcMode: true }
+		return {
+			gainMode: tuner.gainMode,
+			gain:
+				tuner.gainMode === "manual" && tuner.gainDb !== undefined
+					? Math.round(tuner.gainDb * 10)
+					: 0,
+			agcMode: tuner.agcMode ?? true,
+		}
 	}
 
 	// === State Accessors ===
@@ -1564,10 +1787,11 @@ export class TunerController extends EventEmitter {
 			this.config.defaultFrequency ?? caps?.centerFreq ?? DEFAULT_FREQUENCY
 		state.sampleRate =
 			this.config.defaultSampleRate ?? caps?.sampleRate ?? DEFAULT_SAMPLE_RATE
-		state.gainMode = "agc"
-		state.gain = 0
+		const gain = this.gainBaseline(state.sourceId)
+		state.gainMode = gain.gainMode
+		state.gain = gain.gain
 		state.ppm = 0
-		state.agcMode = true
+		state.agcMode = gain.agcMode
 		state.biasTee = false
 		state.directSampling = "off"
 		state.offsetTuning = false
@@ -1812,8 +2036,11 @@ export class TunerController extends EventEmitter {
 			baseline?.sampleRate !== undefined
 		)
 			declared.add("sampleRate")
+		const configWritten = this.configProvenFields.get(sourceId)
 		const proven = (field: TunerStateField): boolean =>
-			accepted?.has(field) === true || inferred?.has(field) === true
+			accepted?.has(field) === true ||
+			inferred?.has(field) === true ||
+			configWritten?.has(field) === true
 		return {
 			unknownFields: STATE_FIELDS.filter(
 				field =>
