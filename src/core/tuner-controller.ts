@@ -508,6 +508,11 @@ export class TunerController extends EventEmitter {
 	}
 
 	removeSource(sourceId: string): void {
+		// WG11: configured tuning belongs to the removed source's config; a source
+		// re-added under the same id brings its own (resolved on `connected`).
+		this.configuredTuning.delete(sourceId)
+		this.configWriteDue.delete(sourceId)
+		this.configProvenFields.delete(sourceId)
 		if (!this.tunerStates.has(sourceId)) return
 		this.tunerStates.delete(sourceId)
 		this.controlModeOrigins.delete(sourceId)
@@ -558,6 +563,22 @@ export class TunerController extends EventEmitter {
 		if (!held("gain")) state.gain = baseline.gain
 		if (!held("agcMode")) state.agcMode = baseline.agcMode
 		this.emitStateChanged(sourceId)
+	}
+
+	/**
+	 * Applies the source's current configured tuning (from its live config, so a
+	 * source added or replaced at runtime is followed) only when it differs from
+	 * the stored one, so an unchanged config does not churn state or proof.
+	 */
+	syncConfiguredTuning(
+		sourceId: string,
+		tuner: SourceTunerConfig | undefined,
+	): void {
+		const current = this.configuredTuning.get(sourceId)?.tuner
+		const key = (t: SourceTunerConfig | undefined) =>
+			t === undefined ? "" : JSON.stringify([t.gainMode, t.gainDb, t.agcMode])
+		if (key(current) === key(tuner)) return
+		this.setConfiguredTuning(sourceId, tuner)
 	}
 
 	/**
@@ -1488,13 +1509,18 @@ export class TunerController extends EventEmitter {
 			return { attempted: false, commands: [] }
 		const held = (field: TunerStateField) =>
 			this.isOperatorHeld(sourceId, field)
+		// A held tuner gain index is replayed after the configured frames and sets
+		// the tuner gain itself: a configured gain or gain mode would be claimed
+		// (and proven) but overridden.
+		const indexHeld =
+			this.desiredFields.get(sourceId)?.has("tunerGainIndex") === true
 		const frames = configured.frames.filter(([cmd]) => {
 			if (cmd === RTL_TCP_COMMANDS.SET_GAIN)
-				return !held("gain") && !held("gainMode")
+				return !held("gain") && !held("gainMode") && !indexHeld
 			// A held gain is replayed as SET_GAIN, which switches the tuner to
 			// manual: a configured gain mode would be claimed but overridden.
 			if (cmd === RTL_TCP_COMMANDS.SET_GAIN_MODE)
-				return !held("gainMode") && !held("gain")
+				return !held("gainMode") && !held("gain") && !indexHeld
 			const field = stateFieldOf(cmd)
 			return field !== undefined && !held(field)
 		})

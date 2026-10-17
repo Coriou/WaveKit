@@ -25,6 +25,14 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 
 	sourceManager.on("connected", sourceId => {
 		if (!sourceManager.isRtlTcpSource(sourceId)) return
+		// WG11 req 4.1: the configured gain follows the source's live config, so a
+		// source re-added at runtime (with or without tuner) is honoured. Fakes
+		// without getConfig keep whatever was set directly.
+		if (typeof sourceManager.getConfig === "function")
+			tunerController.syncConfiguredTuning(
+				sourceId,
+				sourceManager.getConfig(sourceId)?.tuner,
+			)
 		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
 		// WG11 req 4.2: a new connection; its first payload writes the configured gain.
 		tunerController.noteSourceConnected(sourceId)

@@ -612,3 +612,94 @@ describe("configured gain review fixes", () => {
 		expect(h.snapshot().state.unknownFields ?? []).not.toContain("gain")
 	})
 })
+
+describe("configured gain review round 1 (M1, M2)", () => {
+	/** Gives the fake SourceManager a live config (getConfig), as the real one has. */
+	function withLiveConfig(
+		h: ReturnType<typeof harness>,
+		tuner: () => SourceTunerConfig | undefined,
+	) {
+		Object.assign(h.sources, {
+			getConfig: vi.fn((id: string) => {
+				const t = tuner()
+				return {
+					id,
+					type: "rtl_tcp",
+					host: "fake",
+					port: 1,
+					...(t ? { tuner: t } : {}),
+				}
+			}),
+		})
+	}
+
+	it("M1: DELETE then re-add the same id without tuner writes no configured gain", () => {
+		const h = harness()
+		let live: SourceTunerConfig | undefined = MANUAL_496
+		withLiveConfig(h, () => live)
+		h.connect()
+		expect(h.snapshot().sent.filter(c => c[2] === "config")).toHaveLength(3)
+		h.sources.emit("removed", SRC)
+		live = undefined
+		h.connect()
+		const s = h.snapshot()
+		expect(s.sent.filter(c => c[2] === "config")).toEqual([])
+		expect(s.frames).toEqual([])
+		expect(s.state.gainMode).toBe("agc")
+		expect(s.state.gain).toBe(0)
+	})
+
+	it("M1: re-add with tuner (none at startup) writes the configured gain", () => {
+		const h = harness()
+		let live: SourceTunerConfig | undefined
+		withLiveConfig(h, () => live)
+		h.connect()
+		expect(h.snapshot().frames).toEqual([])
+		h.sources.emit("removed", SRC)
+		live = MANUAL_496
+		h.connect()
+		const s = h.snapshot()
+		expect(s.frames).toEqual(["0300000001", "04000001f0", "0800000000"])
+		expect(s.state.unknownFields ?? []).not.toContain("gain")
+	})
+
+	it("M1: removeSource clears the configured tuning set directly", () => {
+		const h = configured(MANUAL_496)
+		h.sources.emit("removed", SRC)
+		h.connect()
+		expect(h.snapshot().frames).toEqual([])
+	})
+
+	it("M1: an unchanged live config does not churn state or proof", () => {
+		const h = harness()
+		withLiveConfig(h, () => MANUAL_496)
+		h.connect()
+		h.snapshot()
+		const spy = vi.spyOn(h.controller, "setConfiguredTuning")
+		h.connect()
+		expect(spy).not.toHaveBeenCalled()
+		expect(h.snapshot().frames).toEqual([
+			"0300000001",
+			"04000001f0",
+			"0800000000",
+		])
+	})
+
+	it("M2: a held REST tunerGainIndex suppresses the configured gain and gain mode and their proof", async () => {
+		const h = configured(MANUAL_496)
+		h.sources.emit("payload-started", SRC)
+		await h.controller.setTunerGainIndex(SRC, 5, { origin: "rest" })
+		h.snapshot()
+		h.connect()
+		const s = h.snapshot()
+		expect(s.sent.filter(c => c[2] === "config")).toEqual([
+			["set-agc-mode", 0, "config"],
+		])
+		expect(s.frames).not.toContain("0300000001")
+		expect(s.frames).not.toContain("04000001f0")
+		expect(s.frames.at(-1)).toBe("0d00000005")
+		expect(s.state.unknownFields ?? []).toEqual(
+			expect.arrayContaining(["gainMode", "gain"]),
+		)
+	})
+})
