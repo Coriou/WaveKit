@@ -118,6 +118,45 @@ try {
 	await new Promise<void>(resolve => setTimeout(resolve, 20))
 	delay.disable()
 
+	// Steady state: the first writeSnapshotOf seeds the worker's mirror on the main thread; later
+	// ones see only the journal lines. Feed 1 000 more hits through the journal, then time one.
+	let steady: { mainMs: number; totalMs: number; p99Ms: number } | null = null
+	if (hasOf) {
+		store.on("mutation", (entry: Parameters<typeof persistence.append>[0]) => {
+			persistence.append(entry).catch(() => undefined)
+		})
+		for (let i = 0; i < 1_000; i++)
+			store.ingest(
+				makeObs({
+					id: `s-${i}`,
+					centreHz: 100_000_000 + (i % DISCOVERIES) * 12_500,
+					startedAt: T0 + (OBSERVATIONS + i) * 1_000,
+					cls: "fsk4-12k5",
+					hypotheses: [["dmr", 0.6]],
+					jobIds: [JOB],
+				}),
+			)
+		const steadyDelay = monitorEventLoopDelay({ resolution: 1 })
+		steadyDelay.enable()
+		const t1 = performance.now()
+		const next = (
+			persistence as unknown as Required<SnapshotOfPersistence>
+		).writeSnapshotOf(store)
+		const steadyMain = performance.now() - t1
+		await next
+		const steadyTotal = performance.now() - t1
+		await new Promise<void>(resolve => setTimeout(resolve, 20))
+		steadyDelay.disable()
+		steady = {
+			mainMs: steadyMain,
+			totalMs: steadyTotal,
+			p99Ms: steadyDelay.percentile(99) / 1e6,
+		}
+		await (
+			persistence as unknown as { closeSnapshotWorker?: () => Promise<void> }
+		).closeSnapshotWorker?.()
+	}
+
 	const [l1] = os.loadavg()
 	console.log(
 		`scanner-store bench (${hasCounts ? "countsByJob" : "list() recount"}, ${hasOf ? "writeSnapshotOf" : "writeSnapshot(snapshot())"})`,
@@ -135,6 +174,11 @@ try {
 	console.log(
 		`  event-loop delay p99        ${f(delay.percentile(99) / 1e6, 1)} ms (max ${f(delay.max / 1e6, 1)} ms)`,
 	)
+	if (steady !== null) {
+		console.log(
+			`  steady snapshot main-thread ${f(steady.mainMs, 2)} ms (until durable ${f(steady.totalMs, 1)} ms, loop p99 ${f(steady.p99Ms, 1)} ms)`,
+		)
+	}
 	console.log(`  load average (1 min)        ${f(l1 ?? 0)}`)
 } finally {
 	await rm(dir, { recursive: true, force: true })
