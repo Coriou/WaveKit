@@ -51,6 +51,10 @@ import type {
 	PreparedRecordingMetadata,
 	RecordingBinding,
 } from "./recording-operation.js"
+import { CentreIndex } from "./frequency-index.js"
+import { JobCounts } from "./job-counts.js"
+import type { ConfidenceCounts } from "./job-counts.js"
+import type { StoreMirrorRemoval } from "./mirror-sink.js"
 
 export type StoreChange =
 	| "created"
@@ -145,7 +149,8 @@ type Ingested = {
 
 const METADATA_MAX = 64
 const LINKS_MAX = 64
-const OBSERVATIONS_PER_DISCOVERY = 256
+/** Per-discovery observation window (WG11: exported for the snapshot mirror). */
+export const OBSERVATIONS_PER_DISCOVERY = 256
 const OBSERVATION_DECODE_MAX = 16
 const MEDIAN_WINDOW = 64
 const SINGLE_BLOCK_HITS = 3
@@ -214,6 +219,81 @@ const compareText = (a: string, b: string): number =>
 const compareObs = (a: Observation, b: Observation): number =>
 	compareText(a.startedAt, b.startedAt) || compareText(a.id, b.id)
 const clone = <T>(value: T): T => structuredClone(value)
+/**
+ * WG11 req 3.4: a detached deep copy of plain record data (objects, arrays, scalars), members
+ * holding `undefined` left out, so its JSON text is the original's. About 5× cheaper than
+ * `structuredClone` and 2.5× cheaper than a JSON round trip on a journal payload.
+ */
+function plainCopy<T>(value: T): T {
+	if (typeof value !== "object" || value === null) return value
+	if (Array.isArray(value)) {
+		const out: unknown[] = new Array<unknown>(value.length)
+		for (let i = 0; i < value.length; i++)
+			out[i] = plainCopy(value[i] as unknown)
+		return out as T
+	}
+	const out: Record<string, unknown> = {}
+	const record = value as Record<string, unknown>
+	for (const k in record) {
+		if (!Object.hasOwn(record, k)) continue
+		const v = record[k]
+		if (v !== undefined) out[k] = plainCopy(v)
+	}
+	return out as T
+}
+
+/** A value as `JSON.stringify` writes it inside an array: non-finite numbers and nothing become null. */
+function jsonValue(v: unknown): unknown {
+	if (typeof v === "number") return Number.isFinite(v) ? v : null
+	if (v === undefined || typeof v === "function" || typeof v === "symbol")
+		return null
+	return v
+}
+
+/** Keys `JSON.stringify` writes, in order. */
+function jsonKeys(o: object): string[] {
+	const out: string[] = []
+	for (const [k, v] of Object.entries(o))
+		if (v !== undefined && typeof v !== "function" && typeof v !== "symbol")
+			out.push(k)
+	return out
+}
+
+/**
+ * WG11 req 3.4: `JSON.stringify(a) === JSON.stringify(b)` for plain data (records, evidence), without
+ * building either string: same key order, undefined members skipped, non-finite numbers as null.
+ */
+function jsonEqual(a: unknown, b: unknown): boolean {
+	const x = jsonValue(a)
+	const y = jsonValue(b)
+	if (x === y) return true
+	if (
+		typeof x !== "object" ||
+		typeof y !== "object" ||
+		x === null ||
+		y === null
+	)
+		return false
+	if (Array.isArray(x) || Array.isArray(y)) {
+		if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length)
+			return false
+		for (let i = 0; i < x.length; i++) if (!jsonEqual(x[i], y[i])) return false
+		return true
+	}
+	const kx = jsonKeys(x)
+	const ky = jsonKeys(y)
+	if (kx.length !== ky.length) return false
+	const ox = x as Record<string, unknown>
+	const oy = y as Record<string, unknown>
+	for (let i = 0; i < kx.length; i++) {
+		const k = kx[i] as string
+		if (k !== ky[i] || !jsonEqual(ox[k], oy[k])) return false
+	}
+	return true
+}
+
+const sameList = <T>(a: readonly T[], b: readonly T[]): boolean =>
+	a.length === b.length && a.every((v, i) => v === b[i])
 
 function median(values: readonly number[]): number {
 	const sorted = [...values].sort((a, b) => a - b)
@@ -378,6 +458,28 @@ export class DiscoveryStore extends EventEmitter {
 	private keptBlockedWarned = 0
 	/** WG10 req 1.5: merge aliases (O(1) owner lookup). */
 	private readonly aliasTable = new RecordingAliasTable()
+	/**
+	 * WG11 req 3.1-3.4 (lane SC). `revisions`: bumped by the mutating helpers only when a value the
+	 * record's JSON holds changes, so "no change" needs no before/after stringify. `members` mirrors
+	 * `bySource` membership per discovery; the centre and key indexes hold exactly the existing
+	 * discoveries under those sources. Helpers mark ids dirty; the indexes and counts catch up at
+	 * their next read and at the end of every journal entry, replay and restore, so the dirty sets
+	 * stay small.
+	 */
+	private readonly revisions = new WeakMap<Discovery, number>()
+	/** Median centre and OBW over a discovery's last 64 observations (only while it has one). */
+	private readonly medians = new Map<string, { centre: number; obw: number }>()
+	private readonly members = new Map<string, Set<string>>()
+	private readonly centres = new CentreIndex()
+	private readonly byKey = new Map<string, Set<string>>()
+	private readonly indexed = new Map<
+		string,
+		{ family: ProtocolFamily; centre: number; key: string; sources: string[] }
+	>()
+	private readonly indexDirty = new Set<string>()
+	private readonly countsDirty = new Set<string>()
+	private readonly jobCounts = new JobCounts()
+	private removal: StoreMirrorRemoval = { discoveries: [], observations: [] }
 
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
@@ -479,11 +581,11 @@ export class DiscoveryStore extends EventEmitter {
 			d.family !== "unknown"
 		)
 			return null
-		const before = JSON.stringify(d)
+		const before = this.revision(d)
 		const beforeRank = rank(d.confidence)
 		this.capInto(d, opts.cap)
 		this.decodeInto(d, ev)
-		if (JSON.stringify(d) === before) return null
+		if (this.revision(d) === before) return null
 		const op = newOp()
 		op.discoveries.add(d.id)
 		mark(op, d.id, rank(d.confidence) > beforeRank ? "upgraded" : "updated")
@@ -498,10 +600,10 @@ export class DiscoveryStore extends EventEmitter {
 	): StoreChange | null {
 		const d = this.discoveries.get(discoveryId)
 		if (d === undefined) return null
-		const before = JSON.stringify(d)
+		const before = this.revision(d)
 		const beforeRank = rank(d.confidence)
 		this.applyClassificationTo(d, c)
-		if (JSON.stringify(d) === before) return null
+		if (this.revision(d) === before) return null
 		const op = newOp()
 		op.discoveries.add(d.id)
 		mark(op, d.id, rank(d.confidence) > beforeRank ? "upgraded" : "updated")
@@ -513,6 +615,22 @@ export class DiscoveryStore extends EventEmitter {
 	/** Surviving discovery id of an in-memory observation (after any settle merge); undefined when unknown or trimmed. */
 	discoveryIdOf(observationId: string): string | undefined {
 		return this.observationIndex.get(observationId)?.discoveryId
+	}
+
+	/**
+	 * WG11 (Main's identity accessor): protocol and confidence of a live discovery, O(1), as a fresh
+	 * object built from its scalars (no clone of the discovery); undefined when unknown. Pair with
+	 * `discoveryIdOf` to follow an observation to its surviving discovery after a merge.
+	 */
+	identityOf(
+		discoveryId: string,
+	):
+		| { id: string; protocol: ScannerProtocol; confidence: ScannerConfidence }
+		| undefined {
+		const d = this.discoveries.get(discoveryId)
+		return d === undefined
+			? undefined
+			: { id: d.id, protocol: d.protocol, confidence: d.confidence }
 	}
 
 	/** WG6 req 2.1: duration of an in-memory observation that has ended; undefined while open or unknown. */
@@ -540,9 +658,8 @@ export class DiscoveryStore extends EventEmitter {
 		if (epochEnded && o.endedAt !== undefined && ev.at >= Date.parse(o.endedAt))
 			return false
 		const list = o.decode ?? []
-		const text = JSON.stringify(ev)
-		if (list.some(x => JSON.stringify(x) === text)) return false
-		const added = clone(ev)
+		if (list.some(x => jsonEqual(x, ev))) return false
+		const added = plainCopy(ev)
 		const sorted = [...list, added].sort((a, b) => a.at - b.at)
 		const kept =
 			sorted.length > OBSERVATION_DECODE_MAX
@@ -1031,6 +1148,7 @@ export class DiscoveryStore extends EventEmitter {
 
 	/** Everything replay cannot rebuild without the pruned journal: records plus per-source corrections (P13). */
 	snapshot(): StoreSnapshot {
+		const parts = this.snapshotParts()
 		return {
 			discoveries: [...this.discoveries.values()]
 				.sort((a, b) => compareText(a.id, b.id))
@@ -1038,12 +1156,25 @@ export class DiscoveryStore extends EventEmitter {
 			observations: [...this.observationIndex.values()]
 				.sort(compareObs)
 				.map(clone),
+			...(parts.recordingOperations !== undefined
+				? { recordingOperations: parts.recordingOperations }
+				: {}),
+			...(parts.aliases !== undefined ? { aliases: parts.aliases } : {}),
+			corrections: parts.corrections,
+		}
+	}
+
+	/** WG11 req 3.5: the non-record fields of `snapshot()` (same presence rules, copies, no record clones). */
+	snapshotParts(): Pick<
+		StoreSnapshot,
+		"corrections" | "recordingOperations" | "aliases"
+	> {
+		const aliases = this.aliasTable.entries()
+		return {
 			...(this.recordingOperations.size > 0
 				? { recordingOperations: this.preparedRecordingOperations() }
 				: {}),
-			...(this.aliasTable.entries().length > 0
-				? { aliases: this.aliasTable.entries() }
-				: {}),
+			...(aliases.length > 0 ? { aliases } : {}),
 			corrections: [...this.corrections]
 				.sort(([a], [b]) => compareText(a, b))
 				.map(([sourceId, hz]) => ({ sourceId, hz })),
@@ -1076,11 +1207,22 @@ export class DiscoveryStore extends EventEmitter {
 		this.flaggedIds.clear()
 		this.corrections.clear()
 		this.appliedSeq = 0
+		this.medians.clear()
+		this.members.clear()
+		this.centres.clear()
+		this.byKey.clear()
+		this.indexed.clear()
+		this.indexDirty.clear()
+		this.countsDirty.clear()
+		this.jobCounts.clear()
 		for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
 		for (const d of s.discoveries) this.insertDiscovery(clone(d))
 		for (const o of [...s.observations].sort(compareObs))
 			if (this.discoveries.has(o.discoveryId)) this.putObservation(clone(o))
 		this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
+		// the set was replaced, not trimmed: a mirror resets from the snapshot itself
+		this.removal = { discoveries: [], observations: [] }
+		this.catchUp()
 	}
 
 	replay(entry: JournalEntry): void {
@@ -1093,6 +1235,22 @@ export class DiscoveryStore extends EventEmitter {
 			)
 		this.applyMutation(m)
 		this.appliedSeq = entry.seq
+		this.catchUp()
+		this.flushRemoval()
+	}
+
+	/** WG11 req 3.3: discoveries carrying `jobId` by confidence (as a `list({ jobId })` recount), a copy. */
+	countsByJob(jobId: string): ConfidenceCounts {
+		this.syncCounts()
+		return this.jobCounts.get(jobId)
+	}
+
+	/** WG11 req 3.5: what `snapshot()` would hold, O(1). */
+	recordCounts(): { discoveries: number; observations: number } {
+		return {
+			discoveries: this.discoveries.size,
+			observations: this.observationIndex.size,
+		}
 	}
 
 	// ── association ──────────────────────────────────────────────────────
@@ -1110,22 +1268,34 @@ export class DiscoveryStore extends EventEmitter {
 		)
 		let best: Discovery | undefined
 		let bestDist = Number.POSITIVE_INFINITY
-		for (const id of ids) {
-			const d = this.discoveries.get(id)
-			if (d === undefined || d.family !== family) continue
-			const dist = Math.abs(this.medianCentre(d) - obs.track.centreHz)
-			if (dist > tol) continue
-			const better =
-				best === undefined ||
-				dist < bestDist ||
-				(dist === bestDist &&
-					(d.lastSeenAt > best.lastSeenAt ||
-						(d.lastSeenAt === best.lastSeenAt && d.id < best.id)))
-			if (better) {
-				best = d
-				bestDist = dist
-			}
-		}
+		const centre = obs.track.centreHz
+		// review m6: a non-finite centre never matched today's distance test; the index holds none
+		if (!Number.isFinite(centre)) return undefined
+		this.syncIndex()
+		// WG11 req 3.1: the window is widened by 1 Hz so float rounding of centre ± tol cannot drop a
+		// hit; the exact distance test below is today's.
+		this.centres.range(
+			obs.sourceId,
+			family,
+			centre - tol - 1,
+			centre + tol + 1,
+			e => {
+				const d = this.discoveries.get(e.id)
+				if (d === undefined) return
+				const dist = Math.abs(e.centreHz - centre)
+				if (dist > tol) return
+				const better =
+					best === undefined ||
+					dist < bestDist ||
+					(dist === bestDist &&
+						(d.lastSeenAt > best.lastSeenAt ||
+							(d.lastSeenAt === best.lastSeenAt && d.id < best.id)))
+				if (better) {
+					best = d
+					bestDist = dist
+				}
+			},
+		)
 		return best
 	}
 
@@ -1300,28 +1470,31 @@ export class DiscoveryStore extends EventEmitter {
 	private reingest(known: Observation, obs: ObservationInput): Ingested {
 		const d = this.discoveries.get(known.discoveryId)
 		if (d === undefined) return TRANSIENT
-		const beforeD = JSON.stringify(d)
-		const beforeO = JSON.stringify(known)
+		const beforeD = this.revision(d)
 		const beforeRank = rank(d.confidence)
 		const record = this.toRecord(obs, d.id)
 		record.jobIds = appendMissing(known.jobIds, obs.jobIds) // a job that ended while the track was open keeps its credit
 		record.recordingIds = known.recordingIds
 		if (known.recording !== undefined) record.recording = known.recording
 		if (known.decode !== undefined) record.decode = known.decode
-		d.airtimeMs = Math.max(
+		const airtimeMs = Math.max(
 			0,
 			d.airtimeMs + durationOf(obs) - recordDuration(known),
 		)
+		if (airtimeMs !== d.airtimeMs) this.touch(d)
+		d.airtimeMs = airtimeMs
 		this.unlinkObservation(known)
 		this.putObservation(record)
 		const sameClassification =
-			JSON.stringify(record.hypotheses) === JSON.stringify(known.hypotheses) &&
+			jsonEqual(record.hypotheses, known.hypotheses) &&
 			record.flags.adjacentLeak === known.flags.adjacentLeak &&
 			record.flags.suspectedIntermod === known.flags.suspectedIntermod
 		this.absorbStats(d, obs, !sameClassification)
 		this.refresh(d)
-		if (JSON.stringify(d) === beforeD && JSON.stringify(record) === beforeO)
+		if (this.revision(d) === beforeD && jsonEqual(record, known)) {
+			this.flushRemoval()
 			return { discoveryId: d.id, change: "updated" }
+		}
 		const joined = record.jobIds.filter(j => !known.jobIds.includes(j))
 		return this.commit("observation", op => {
 			op.discoveries.add(d.id)
@@ -1414,38 +1587,73 @@ export class DiscoveryStore extends EventEmitter {
 		obs: ObservationInput,
 		applyClassification: boolean,
 	): void {
+		this.markDirty(d.id)
 		const startedAt = iso(obs.startedAt)
 		const endedAt = iso(obs.endedAt ?? obs.startedAt)
-		if (startedAt < d.firstSeenAt) d.firstSeenAt = startedAt
+		if (startedAt < d.firstSeenAt) {
+			d.firstSeenAt = startedAt
+			this.touch(d)
+		}
 		const stats = statsOf(obs.track)
 		if (endedAt >= d.lastSeenAt) {
+			if (
+				endedAt !== d.lastSeenAt ||
+				!jsonEqual(d.signal.last, stats) ||
+				d.tuningTrust !== obs.track.tuningTrust
+			)
+				this.touch(d)
 			d.lastSeenAt = endedAt
 			d.signal.last = stats
 			d.tuningTrust = obs.track.tuningTrust
 		}
-		if (stats.snrDb > d.signal.best.snrDb) d.signal.best = { ...stats }
-		d.jobIds = appendMissing(d.jobIds, obs.jobIds)
-		d.sourceIds = appendMissing(d.sourceIds, [obs.sourceId])
+		if (stats.snrDb > d.signal.best.snrDb) {
+			d.signal.best = { ...stats }
+			this.touch(d)
+		}
+		const jobIds = appendMissing(d.jobIds, obs.jobIds)
+		const sourceIds = appendMissing(d.sourceIds, [obs.sourceId])
+		if (!sameList(jobIds, d.jobIds) || !sameList(sourceIds, d.sourceIds))
+			this.touch(d)
+		d.jobIds = jobIds
+		d.sourceIds = sourceIds
 		if (applyClassification && !obs.track.flags.edge)
 			this.applyClassificationTo(d, obs.classification)
 	}
 
 	private applyClassificationTo(d: Discovery, c: Classification): void {
+		this.markDirty(d.id)
 		const decoded = d.confidence === "decoded"
-		if (c.cap !== undefined && !decoded) d.confidenceCap = c.cap
+		if (c.cap !== undefined && !decoded) {
+			if (d.confidenceCap !== c.cap) this.touch(d)
+			d.confidenceCap = c.cap
+		}
 		const p = observedProtocol(c)
 		if (!decoded && moreSpecific(d.protocol, p)) {
+			// moreSpecific(x, p) implies p !== x
 			d.protocol = p
 			d.family = familyOf(p)
+			this.touch(d)
 		}
-		if (!decoded && c.class !== "unknown") d.class = c.class
-		d.confidence = maxConfidence(d.confidence, ladderOf(c))
-		this.clampToCap(d)
+		if (!decoded && c.class !== "unknown") {
+			if (d.class !== c.class) this.touch(d)
+			d.class = c.class
+		}
+		// raise then clamp, decided before the write: a raise the cap undoes is no change
+		let confidence = maxConfidence(d.confidence, ladderOf(c))
+		if (
+			d.confidenceCap !== undefined &&
+			confidence !== "decoded" &&
+			rank(confidence) > rank("candidate")
+		)
+			confidence = "candidate"
+		if (confidence !== d.confidence) this.touch(d)
+		d.confidence = confidence
 	}
 
 	private decodeInto(d: Discovery, ev: DecodeEvidence): void {
 		// evidence without an identity is no confirm (§ 6.6): it may only refine the protocol, never switch the
 		// family, or settle() could merge an analog discovery into its co-channel digital twin irreversibly
+		this.markDirty(d.id)
 		const adopt =
 			ev.identity !== undefined
 				? d.protocol !== ev.protocol
@@ -1453,36 +1661,56 @@ export class DiscoveryStore extends EventEmitter {
 		if (adopt) {
 			d.protocol = ev.protocol
 			d.family = familyOf(ev.protocol)
+			this.touch(d)
 		}
-		if (d.identity === undefined && ev.identity !== undefined)
+		if (d.identity === undefined && ev.identity !== undefined) {
 			d.identity = { kind: ev.identity.kind, value: ev.identity.value }
-		if (ev.encrypted === true) d.encrypted = true
+			this.touch(d)
+		}
+		if (ev.encrypted === true) {
+			if (!d.encrypted) this.touch(d)
+			d.encrypted = true
+		}
 		const m = ev.metadata
+		const md = d.metadata
+		const merge = <T>(current: T[], values: readonly T[]): T[] => {
+			const next = lruMerge(current, values)
+			if (!sameList(next, current)) this.touch(d)
+			return next
+		}
 		if (m.talkgroups !== undefined)
-			d.metadata.talkgroups = lruMerge(d.metadata.talkgroups, m.talkgroups)
-		if (m.sources !== undefined)
-			d.metadata.sources = lruMerge(d.metadata.sources, m.sources)
-		if (m.slots !== undefined)
-			d.metadata.slots = lruMerge(d.metadata.slots, m.slots)
+			md.talkgroups = merge(md.talkgroups, m.talkgroups)
+		if (m.sources !== undefined) md.sources = merge(md.sources, m.sources)
+		if (m.slots !== undefined) md.slots = merge(md.slots, m.slots)
 		if (m.callsigns !== undefined)
-			d.metadata.callsigns = lruMerge(d.metadata.callsigns, m.callsigns)
-		if (m.capcodes !== undefined)
-			d.metadata.capcodes = lruMerge(d.metadata.capcodes, m.capcodes)
+			md.callsigns = merge(md.callsigns, m.callsigns)
+		if (m.capcodes !== undefined) md.capcodes = merge(md.capcodes, m.capcodes)
 		if (m.ismModels !== undefined)
-			d.metadata.ismModels = lruMerge(d.metadata.ismModels, m.ismModels)
-		if (m.ctcssHz !== undefined) d.metadata.ctcssHz = m.ctcssHz
+			md.ismModels = merge(md.ismModels, m.ismModels)
+		if (m.ctcssHz !== undefined) {
+			if (!jsonEqual(md.ctcssHz, m.ctcssHz)) this.touch(d)
+			md.ctcssHz = m.ctcssHz
+		}
 		// § 6.6: a confirm is the first accepted identity; evidence without one (accepted TG/SRC/encrypted only) is recorded but confirms nothing
-		if (ev.identity !== undefined)
-			d.confidence = maxConfidence(
+		if (ev.identity !== undefined) {
+			const confidence = maxConfidence(
 				d.confidence,
 				d.confidenceCap !== undefined ? "candidate" : "decoded",
 			)
+			if (confidence !== d.confidence) this.touch(d)
+			d.confidence = confidence
+		}
 		if (d.confidence === "decoded") {
+			if (d.confidenceCap !== undefined || d.undecodedReason !== undefined)
+				this.touch(d)
 			delete d.confidenceCap
 			delete d.undecodedReason
 		}
 		const at = iso(ev.at)
-		if (at > d.lastSeenAt) d.lastSeenAt = at
+		if (at > d.lastSeenAt) {
+			d.lastSeenAt = at
+			this.touch(d)
+		}
 	}
 
 	private coChannelEvidence(
@@ -1520,7 +1748,7 @@ export class DiscoveryStore extends EventEmitter {
 			lastSeenAt: at,
 			observationCount: 0,
 			airtimeMs: 0,
-			signal: clone(d.signal),
+			signal: plainCopy(d.signal),
 			metadata: emptyMetadata(),
 			sourceIds: [...d.sourceIds],
 			jobIds: [...d.jobIds],
@@ -1547,17 +1775,13 @@ export class DiscoveryStore extends EventEmitter {
 	/** Records a leak/intermod cap that arrives with a decode, before the decode is applied (§ 6.2, P8). */
 	private capInto(d: Discovery, cap: ConfidenceCap | undefined): void {
 		if (cap === undefined || d.confidence === "decoded") return
+		this.markDirty(d.id)
+		if (d.confidenceCap !== cap) this.touch(d)
 		d.confidenceCap = cap
-		this.clampToCap(d)
-	}
-
-	private clampToCap(d: Discovery): void {
-		if (
-			d.confidenceCap !== undefined &&
-			d.confidence !== "decoded" &&
-			rank(d.confidence) > rank("candidate")
-		)
+		if (rank(d.confidence) > rank("candidate")) {
 			d.confidence = "candidate"
+			this.touch(d)
+		}
 	}
 
 	// ── keys, medians and collisions ─────────────────────────────────────
@@ -1590,33 +1814,55 @@ export class DiscoveryStore extends EventEmitter {
 		}
 	}
 
+	/**
+	 * WG11 req 3.2: medians over the last 64 observations, cached until that discovery's observation
+	 * list changes (`putObservation`, `unlinkObservation`, `removeDiscovery` drop the entry).
+	 */
+	private mediansOf(id: string): { centre: number; obw: number } | undefined {
+		const cached = this.medians.get(id)
+		if (cached !== undefined) return cached
+		const recent = (this.byDiscovery.get(id) ?? []).slice(-MEDIAN_WINDOW)
+		if (recent.length === 0) return undefined
+		const fresh = {
+			centre: median(recent.map(o => o.centerHz)),
+			obw: median(recent.map(o => o.obwHz)),
+		}
+		this.medians.set(id, fresh)
+		return fresh
+	}
+
 	private medianCentre(d: Discovery): number {
-		const recent = (this.byDiscovery.get(d.id) ?? []).slice(-MEDIAN_WINDOW)
-		return recent.length > 0
-			? median(recent.map(o => o.centerHz))
-			: d.frequencyHz + d.measuredOffsetHz
+		return this.mediansOf(d.id)?.centre ?? d.frequencyHz + d.measuredOffsetHz
 	}
 
 	/** Recomputes frequency, key, offset and bandwidth from the last 64 observations. */
 	private refresh(d: Discovery): void {
-		const recent = (this.byDiscovery.get(d.id) ?? []).slice(-MEDIAN_WINDOW)
-		const centre =
-			recent.length > 0
-				? median(recent.map(o => o.centerHz))
-				: d.frequencyHz + d.measuredOffsetHz
-		const obw =
-			recent.length > 0 ? median(recent.map(o => o.obwHz)) : d.bandwidthHz
+		this.markDirty(d.id)
+		const m = this.mediansOf(d.id)
+		const centre = m?.centre ?? d.frequencyHz + d.measuredOffsetHz
+		const obw = m?.obw ?? d.bandwidthHz
 		const place = this.placement(d.sourceIds[0] ?? "", centre, obw)
-		d.frequencyHz = Math.round(place.frequencyHz)
-		d.frequencyKey = place.key
+		const frequencyHz = Math.round(place.frequencyHz)
 		// `|| 0`: a median centre 0.5 Hz below the raster rounds to -0, which JSON persists as 0 (P13).
-		d.measuredOffsetHz = Math.round(centre - place.frequencyHz) || 0
-		d.bandwidthHz = Math.round(obw)
+		const measuredOffsetHz = Math.round(centre - place.frequencyHz) || 0
+		const bandwidthHz = Math.round(obw)
+		if (
+			frequencyHz !== d.frequencyHz ||
+			place.key !== d.frequencyKey ||
+			measuredOffsetHz !== d.measuredOffsetHz ||
+			bandwidthHz !== d.bandwidthHz
+		)
+			this.touch(d)
+		d.frequencyHz = frequencyHz
+		d.frequencyKey = place.key
+		d.measuredOffsetHz = measuredOffsetHz
+		d.bandwidthHz = bandwidthHz
 	}
 
 	private atKey(sourceId: string, key: string): Discovery[] {
 		const out: Discovery[] = []
-		for (const id of this.bySource.get(sourceId) ?? []) {
+		this.syncIndex()
+		for (const id of this.byKey.get(`${sourceId}\u0000${key}`) ?? []) {
 			const d = this.discoveries.get(id)
 			if (d !== undefined && d.frequencyKey === key) out.push(d)
 		}
@@ -1648,6 +1894,8 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	private absorb(op: Op, keep: Discovery, drop: Discovery): void {
+		this.markDirty(keep.id)
+		this.markDirty(drop.id)
 		for (const o of [...(this.byDiscovery.get(drop.id) ?? [])]) {
 			this.unlinkObservation(o)
 			o.discoveryId = keep.id
@@ -1774,7 +2022,7 @@ export class DiscoveryStore extends EventEmitter {
 				fits = false
 				break
 			}
-			evicted.push(clone(victim))
+			evicted.push(plainCopy(victim)) // a copy for listeners, no structuredClone (req 3.4)
 			this.deleteInto(op, victim)
 		}
 		this.finish("evict", op)
@@ -1903,8 +2151,16 @@ export class DiscoveryStore extends EventEmitter {
 
 	private insertDiscovery(d: Discovery): void {
 		const previous = this.discoveries.get(d.id)
+		let members = this.members.get(d.id)
+		if (members === undefined) {
+			members = new Set()
+			this.members.set(d.id, members)
+		}
 		if (previous !== undefined)
-			for (const s of previous.sourceIds) this.bySource.get(s)?.delete(d.id)
+			for (const s of previous.sourceIds) {
+				this.bySource.get(s)?.delete(d.id)
+				members.delete(s)
+			}
 		this.discoveries.set(d.id, d)
 		for (const s of d.sourceIds) {
 			let set = this.bySource.get(s)
@@ -1913,18 +2169,30 @@ export class DiscoveryStore extends EventEmitter {
 				this.bySource.set(s, set)
 			}
 			set.add(d.id)
+			members.add(s)
 		}
+		this.markDirty(d.id)
 	}
 
 	private removeDiscovery(id: string): void {
 		const d = this.discoveries.get(id)
 		if (d === undefined) return
 		this.discoveries.delete(id)
-		for (const s of d.sourceIds) this.bySource.get(s)?.delete(id)
-		for (const o of this.byDiscovery.get(id) ?? [])
+		const members = this.members.get(id)
+		for (const s of d.sourceIds) {
+			this.bySource.get(s)?.delete(id)
+			members?.delete(s)
+		}
+		// stale `bySource` entries of sources trimmed from `sourceIds` stay, as there
+		if (members?.size === 0) this.members.delete(id)
+		for (const o of this.byDiscovery.get(id) ?? []) {
 			this.observationIndex.delete(o.id)
+			this.removal.observations.push(o.id)
+		}
 		this.byDiscovery.delete(id)
+		this.medians.delete(id)
 		this.aliasTable.detach(id)
+		this.markDirty(id)
 	}
 
 	/** Inserts an unlinked observation in canonical order and trims the per-discovery window. */
@@ -1944,8 +2212,12 @@ export class DiscoveryStore extends EventEmitter {
 		list.splice(i, 0, o)
 		while (list.length > OBSERVATIONS_PER_DISCOVERY) {
 			const dropped = list.shift()
-			if (dropped !== undefined) this.observationIndex.delete(dropped.id)
+			if (dropped === undefined) continue
+			this.observationIndex.delete(dropped.id)
+			this.removal.observations.push(dropped.id) // no journal entry names it (WG11 req 3.5)
 		}
+		this.medians.delete(o.discoveryId)
+		this.markDirty(o.discoveryId)
 	}
 
 	private unlinkObservation(o: Observation): void {
@@ -1955,6 +2227,8 @@ export class DiscoveryStore extends EventEmitter {
 			if (i >= 0) list.splice(i, 1)
 		}
 		this.observationIndex.delete(o.id)
+		this.medians.delete(o.discoveryId)
+		this.markDirty(o.discoveryId)
 	}
 
 	private applyMutation(m: StoreMutation): void {
@@ -2047,16 +2321,23 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	private finish(kind: JournalEntry["op"], op: Op): void {
-		const discoveries = [...op.discoveries]
-			.map(id => this.discoveries.get(id))
-			.filter((d): d is Discovery => d !== undefined)
-			.sort((a, b) => compareText(a.id, b.id))
-			.map(clone)
-		const observations = [...op.observations]
-			.map(id => this.observationIndex.get(id))
-			.filter((o): o is Observation => o !== undefined)
-			.sort(compareObs)
-			.map(clone)
+		for (const id of op.discoveries) this.markDirty(id)
+		for (const id of op.deleted) this.markDirty(id)
+		this.catchUp()
+		// WG11 req 3.4: no structuredClone; the payload is one plain copy of the changed records
+		// (detached, so a listener may keep it); persistence stringifies it once into the journal line
+		const discoveries = plainCopy(
+			[...op.discoveries]
+				.map(id => this.discoveries.get(id))
+				.filter((d): d is Discovery => d !== undefined)
+				.sort((a, b) => compareText(a.id, b.id)),
+		)
+		const observations = plainCopy(
+			[...op.observations]
+				.map(id => this.observationIndex.get(id))
+				.filter((o): o is Observation => o !== undefined)
+				.sort(compareObs),
+		)
 		const removed = op.removedObservations.filter(
 			id => !this.observationIndex.has(id),
 		)
@@ -2067,8 +2348,10 @@ export class DiscoveryStore extends EventEmitter {
 			removed.length === 0 &&
 			op.correction === undefined &&
 			op.aliases.size === 0
-		)
+		) {
+			this.flushRemoval()
 			return
+		}
 		const payload: StoreMutation = {
 			discoveries,
 			observations,
@@ -2086,7 +2369,107 @@ export class DiscoveryStore extends EventEmitter {
 			payload,
 		}
 		this.emit("mutation", entry)
+		this.flushRemoval()
 		for (const [id, change] of op.changes) this.emit("change", id, change)
+	}
+
+	// ── WG11 lane SC: revisions, indexes, counts, mirror removals ────────
+
+	private revision(d: Discovery): number {
+		return this.revisions.get(d) ?? 0
+	}
+
+	/** A value in `d`'s JSON changed: bump its revision (and catch the indexes up). */
+	private touch(d: Discovery): void {
+		this.revisions.set(d, this.revision(d) + 1)
+		this.markDirty(d.id)
+	}
+
+	private markDirty(id: string): void {
+		this.indexDirty.add(id)
+		this.countsDirty.add(id)
+	}
+
+	private catchUp(): void {
+		this.syncIndex()
+		this.syncCounts()
+	}
+
+	private syncCounts(): void {
+		for (const id of this.countsDirty)
+			this.jobCounts.sync(id, this.discoveries.get(id))
+		this.countsDirty.clear()
+	}
+
+	/** Brings the centre and key indexes of every dirty id up to date. */
+	private syncIndex(): void {
+		for (const id of this.indexDirty) this.reindex(id)
+		this.indexDirty.clear()
+	}
+
+	private reindex(id: string): void {
+		const prev = this.indexed.get(id)
+		const d = this.discoveries.get(id)
+		const members = this.members.get(id)
+		if (d === undefined || members === undefined || members.size === 0) {
+			if (prev !== undefined) this.unindex(id, prev)
+			return
+		}
+		const centre = this.medianCentre(d)
+		if (
+			prev !== undefined &&
+			prev.family === d.family &&
+			Object.is(prev.centre, centre) &&
+			prev.key === d.frequencyKey &&
+			prev.sources.length === members.size &&
+			prev.sources.every(s => members.has(s))
+		)
+			return
+		if (prev !== undefined) this.unindex(id, prev)
+		const next = {
+			family: d.family,
+			centre,
+			key: d.frequencyKey,
+			sources: [...members],
+		}
+		for (const s of next.sources) {
+			this.centres.add(s, next.family, centre, id)
+			const k = `${s}\u0000${next.key}`
+			let set = this.byKey.get(k)
+			if (set === undefined) {
+				set = new Set()
+				this.byKey.set(k, set)
+			}
+			set.add(id)
+		}
+		this.indexed.set(id, next)
+	}
+
+	private unindex(
+		id: string,
+		prev: {
+			family: ProtocolFamily
+			centre: number
+			key: string
+			sources: string[]
+		},
+	): void {
+		for (const s of prev.sources) {
+			this.centres.remove(s, prev.family, prev.centre, id)
+			const k = `${s}\u0000${prev.key}`
+			const set = this.byKey.get(k)
+			set?.delete(id)
+			if (set?.size === 0) this.byKey.delete(k)
+		}
+		this.indexed.delete(id)
+	}
+
+	/** WG11 req 3.5: records that left the snapshot set with no journal payload naming them. */
+	private flushRemoval(): void {
+		const r = this.removal
+		if (r.discoveries.length === 0 && r.observations.length === 0) return
+		this.removal = { discoveries: [], observations: [] }
+		this.emit("mirror-removal", r)
 	}
 }
 
