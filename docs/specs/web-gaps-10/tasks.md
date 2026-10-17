@@ -31,24 +31,24 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
 
 ## Lane SM: smooth live audio, squelch and tuning trust
 
-- [ ] SM.1 Clients survive restarts; silence fill; offset change by front swap with fallback;
+- [x] SM.1 Clients survive restarts; silence fill; offset change by front swap with fallback;
       stand-in harness with before and after gap numbers.
   - _Requirements: 2.1–2.5_
   - **Property 4: Clients stay, time stays filled**, **Property 5: Offset swap keeps the back**
-- [ ] SM.2 Carrier-aware auto floor (quieting observer, auto nfm/wfm only); overload check.
+- [x] SM.2 Carrier-aware auto floor (quieting observer, auto nfm/wfm only); overload check.
   - _Requirements: 2.6, 2.7_
   - **Property 6: A carrier never seeds the floor**
-- [ ] SM.3 Operator frequency proves the rate once per connection; untracked-retune root cause,
+- [x] SM.3 Operator frequency proves the rate once per connection; untracked-retune root cause,
       in-core fixes, classifiers, warning fields and log rate limit.
   - _Requirements: 2.8–2.10_
   - **Property 7: Rate written once, only when unproven**, **Property 8: Alarm classification**
 
 ## Lane ID: identify for analog voice
 
-- [ ] ID.1 Analog evidence log and identify analog trials, verdict and result fields.
+- [x] ID.1 Analog evidence log and identify analog trials, verdict and result fields.
   - _Requirements: 3.1–3.4, 3.6_
   - **Property 9: Analog evidence fails closed**
-- [ ] ID.2 Unavailable decoder memo and `decodersUnavailable`; startup pre-connect log minors
+- [x] ID.2 Unavailable decoder memo and `decodersUnavailable`; startup pre-connect log minors
       (spectrum service; scanner service as an exact diff).
   - _Requirements: 3.5, 4.2_
   - **Property 10: Memo is honest**
