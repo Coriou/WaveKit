@@ -48,6 +48,7 @@ import {
 	TunerController,
 	TUNER_REST_COMMAND_POLICY,
 } from "./core/tuner-controller.js"
+import { applyConfiguredTuning } from "./core/tuner-config-gain.js"
 import { createRegionalRegistry } from "./core/regional/registry.js"
 import { createRegionalRegistration } from "./core/regional/data.js"
 import { createReceiverCapabilitiesProvider } from "./core/tuner-capabilities/provider.js"
@@ -986,6 +987,14 @@ async function main(): Promise<void> {
 				)
 			}
 		}
+
+		// WG11 req 4.1: configured gain and AGC, written on connect (rtl_tcp only)
+		applyConfiguredTuning(config.sources, tunerController, sourceId =>
+			log.warn(
+				{ sourceId },
+				"Source tuner config ignored: only rtl_tcp sources support it",
+			),
+		)
 
 		wireTunerControl({
 			log,

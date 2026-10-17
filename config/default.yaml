@@ -83,6 +83,13 @@
 #       format: "S16LE"
 #       exclusive: false
 
+# Optional per-source gain on connect (rtl_tcp only; unset by default):
+#   - id: "rtl"
+#     type: "rtl_tcp"
+#     tuner: { gainMode: manual, gainDb: 49.6, agcMode: false }
+#   gainMode: manual needs gainDb (0 to 50, 0.1 dB steps); agc refuses gainDb.
+#   Every core (re)connect rewrites this gain, overwriting a gain another client
+#   (e.g. SDR++) set on a shared rtlmux; a gain set via the WaveKit API still wins.
 sources: []
 
 # -----------------------------------------------------------------------------
