@@ -408,6 +408,11 @@ export class TunerController extends EventEmitter {
 	 * re-sent on this one never backs a `commanded` or `relay` label.
 	 */
 	private connectionTuningWrites: Map<string, Set<TunerStateField>> = new Map()
+	/**
+	 * WG10 req 2.8: sources whose held sample rate an operator frequency write already
+	 * proved on the current connection. Reset with `connectionTuningWrites`.
+	 */
+	private rateProvedOnConnection: Set<string> = new Set()
 	/** Caps metadata as first registered, before any accepted command. */
 	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
 
@@ -479,6 +484,7 @@ export class TunerController extends EventEmitter {
 		this.inferredFields.delete(sourceId)
 		this.ignoredRelayFields.delete(sourceId)
 		this.connectionTuningWrites.delete(sourceId)
+		this.rateProvedOnConnection.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
 		this.emit("source-removed", sourceId)
@@ -772,6 +778,56 @@ export class TunerController extends EventEmitter {
 		this.emitStateChanged(sourceId)
 	}
 
+	/**
+	 * WG10 req 2.8: before an operator frequency write, writes the sample rate the core
+	 * already holds (value unchanged, origin from `opts`, normally `rest`), so the trust
+	 * label can become `commanded`. Writes only in internal control, when the held rate is
+	 * known (not unknown/placeholder, not an ignored relay value, a valid RTL rate) and
+	 * unproven on this connection (declared only, or not written on it), and at most once
+	 * per connection epoch. Returns true when it wrote. A failed write throws the tuner
+	 * error of `setSampleRate` (the caller then writes no frequency) and leaves the
+	 * epoch unproven. The scanner path never calls this (WG9 hop rule unchanged).
+	 * `frequencyHz`, when given, is the frequency about to be written: outside the
+	 * frequency range nothing is written (the frequency write then fails as today).
+	 */
+	async proveSampleRateForFrequency(
+		sourceId: string,
+		opts: TunerWriteOptions = {},
+		frequencyHz?: number,
+	): Promise<boolean> {
+		const state = this.tunerStates.get(sourceId)
+		if (!state || state.controlMode !== "internal") return false
+		if (
+			frequencyHz !== undefined &&
+			!(
+				Number.isInteger(frequencyHz) &&
+				frequencyHz >= VALIDATION.frequency.min &&
+				frequencyHz <= VALIDATION.frequency.max
+			)
+		)
+			return false
+		if (this.rateProvedOnConnection.has(sourceId)) return false
+		const proof = this.fieldProof(sourceId)
+		if (proof.unknownFields.includes("sampleRate")) return false
+		const hz = state.sampleRate
+		if (
+			!Number.isInteger(hz) ||
+			hz < VALIDATION.sampleRate.min ||
+			hz > VALIDATION.sampleRate.max ||
+			!isValidRtlSampleRate(hz)
+		)
+			return false
+		const writtenHere =
+			this.connectionTuningWrites.get(sourceId)?.has("sampleRate") === true
+		if (!proof.declaredOnlyFields.includes("sampleRate") && writtenHere) {
+			this.rateProvedOnConnection.add(sourceId)
+			return false
+		}
+		await this.setSampleRate(sourceId, hz, opts)
+		this.rateProvedOnConnection.add(sourceId)
+		return true
+	}
+
 	async setSampleRate(
 		sourceId: string,
 		hz: number,
@@ -1022,6 +1078,10 @@ export class TunerController extends EventEmitter {
 
 		// A declared-only or unknown centre/rate equal to the request is still written, so
 		// a bulk PUT can prove it (WG5 R2); a proven equal value is skipped as before.
+		// WG10 req 2.8: an operator frequency without a rate proves the held rate first.
+		if (updates.frequency !== undefined && updates.sampleRate === undefined)
+			await this.proveSampleRateForFrequency(sourceId, opts, updates.frequency)
+
 		const proof = this.fieldProof(sourceId)
 		const unproven = new Set<TunerStateField>([
 			...proof.declaredOnlyFields,
@@ -1134,6 +1194,7 @@ export class TunerController extends EventEmitter {
 		const desired = this.desiredFields.get(sourceId)
 		// A new connection: nothing is written on it yet (WG9 req 3.2).
 		this.connectionTuningWrites.delete(sourceId)
+		this.rateProvedOnConnection.delete(sourceId)
 
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0

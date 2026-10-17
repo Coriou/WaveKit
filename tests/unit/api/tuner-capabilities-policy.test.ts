@@ -171,6 +171,7 @@ describe("actual Fastify tuner REST enum/boolean policy parity", () => {
 					"TUNER_VALIDATION_ERROR",
 				)
 		}
-		expect(write).toHaveBeenCalledTimes(2)
+		// WG10 req 2.8: the first accepted frequency also proves the declared rate once.
+		expect(write).toHaveBeenCalledTimes(3)
 	})
 })
