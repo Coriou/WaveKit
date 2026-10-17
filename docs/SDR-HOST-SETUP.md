@@ -274,6 +274,28 @@ sudo nmcli connection up "<wired connection>"
 # undo: set both metrics back to -1 (the default) and bring it up again
 ```
 
+### Finding the receiver and its addresses
+
+`GET /api/status` lists every address a client may dial in `endpoints`, best
+first: a wired link with carrier, then other links, then Wi-Fi. Within a kind,
+the lower route metric comes first, and IPv4 comes before IPv6. Link-local and
+loopback addresses are left out. Each entry names its interface, its kind, the
+wired speed or the Wi-Fi signal. Reachability depends on the client, so the
+list never claims it. `endpoints` is `null` when the container cannot see the
+host network. `receiverId` is a random ID for the running sdr-host process,
+the same on every address it serves, so a client can confirm that two addresses
+lead to the same receiver. It changes when sdr-host restarts.
+
+Dedicated images also announce the receiver over DNS-SD through the Pi's
+avahi-daemon (`/etc/avahi/services/wavekit-sdr-host.service`). The announcement
+is `_wavekit-sdr._tcp` on port 8080 with TXT `v=1`, `iq=5555` and
+`path=/api/status`, plus `_http._tcp` on port 80 for the status page. Browse it
+with `dns-sd -B _wavekit-sdr._tcp` on a Mac or `avahi-browse -r _wavekit-sdr._tcp`
+on Linux. The file carries the image's default ports, so a compose override of
+`SDR_HOST_RTLMUX__PORT` or `SDR_HOST_API__PORT` is not reflected there. mDNS
+reaches only the subnet it is sent on, so use it to find the receiver and use
+`endpoints` to choose the address.
+
 ## Troubleshooting
 
 ### DVB Driver Conflict

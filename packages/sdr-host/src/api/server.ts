@@ -10,6 +10,7 @@ import { registerStatusRoutes } from "./routes/status.js"
 import { registerFixRoutes } from "./routes/fix.js"
 import { registerHostRoutes } from "./routes/host.js"
 import { registerUiRoutes } from "./routes/ui.js"
+import { createReceiverId } from "../telemetry/endpoints.js"
 
 /** The part of HostCollector the API reads; requests never trigger I/O. */
 export interface HostTelemetrySource {
@@ -24,6 +25,8 @@ export interface ApiServerDependencies {
 	hostTelemetry: HostTelemetrySource
 	/** Operator page asset directory; defaults to the package's ui/. */
 	uiRoot?: string
+	/** Identifies this sdr-host process on every address; random when omitted. */
+	receiverId?: string
 }
 
 /**
@@ -62,6 +65,7 @@ export async function createApiServer(
 	fastify.decorate("startTime", startTime)
 	fastify.decorate("appLogger", logger)
 	fastify.decorate("hostTelemetry", hostTelemetry)
+	fastify.decorate("receiverId", deps.receiverId ?? createReceiverId())
 
 	// Register routes
 	registerHealthRoutes(fastify)
@@ -99,5 +103,6 @@ declare module "fastify" {
 		startTime: number
 		appLogger: Logger
 		hostTelemetry: HostTelemetrySource
+		receiverId: string
 	}
 }

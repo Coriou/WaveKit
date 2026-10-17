@@ -1,6 +1,6 @@
 # Receiver endpoints design
 
-Status: design. See [requirements](requirements.md), [design](design.md) and [tasks](tasks.md).
+Status: Pi side implemented (user stories 1–2); core and bridge design only. See [requirements](requirements.md), [design](design.md) and [tasks](tasks.md).
 
 ## Pi side (sdr-host and image)
 
@@ -30,11 +30,10 @@ export interface SdrHostEndpoints {
 // SdrHostStatus gains: receiverId: string; endpoints: SdrHostEndpoints | null
 ```
 
-`receiverId`: the first 16 hex characters of an HMAC-SHA256 of `/etc/machine-id`, keyed
-by the constant `wavekit-receiver-id-v1`. That means a read-only bind mount of
-`/etc/machine-id` in the compose file. Without the mount it is a random ID persisted
-under the existing status directory, or per-process when that directory is read-only.
-That last case is still correct for 3.2 within one sdr-host run.
+`receiverId`: `randomBytes(16)` as hex, generated once when sdr-host starts. Core only
+compares the ID behind the current address with the ID behind a candidate during a
+single probe, so stability across restarts is not needed. A restart in between yields a
+mismatch, and core skips that round (fail closed). No host files are mounted for it.
 
 Image: add `wavekit-avahi.service` to `IMAGE_SUPPORT` in
 `packages/sdr-host/scripts/build-pi-image.py` at
@@ -66,9 +65,14 @@ candidateBackoff}`. On each poll:
 3. Two consecutive connect failures on a non-configured active host make the selector
    retarget back to `configuredHost` and mark the candidate's backoff.
 
-`config.ts`: `sdrHost.endpointSelection: z.enum(["auto", "off"]).default("auto")`.
-Source status DTO gains `endpoint: { configuredHost, activeHost, reason, at } | null`.
-That is a contract change: announce it to the web and CLI owners.
+`config.ts`: `sdrHost.endpointSelection: z.enum(["auto", "off"]).default("off")`
+(additive; with `off` no selector is created and output is byte-identical). Source
+status DTO gains an optional `endpoint?: { configuredHost, activeHost, reason, at }`,
+omitted while selection is off. That is a contract change: extend the CLI guards in
+`cli/source/data/*guards*.ts` and announce it to the web owner.
+
+Sequencing: the core part lands after WG10 is published, rebased onto the new main.
+WG10 owns `src/index.ts`, `src/config.ts` and `packages/api-types` until then.
 
 The bridge (`scripts/pi-lan-bridge.mjs --auto`) reuses the same probe logic. The probe
 lives in a small dependency-free module that the script can import.

@@ -1,8 +1,9 @@
 # Receiver endpoints requirements
 
-Status: design. Per-interface link speed and default-route metric in `GET /api/host`
-and the status-page Wi-Fi hint are implemented (precursor, not numbered here). Nothing
-below is implemented yet.
+Status: user stories 1 and 2 implemented and software-tested on the Pi side, not
+deployed. User stories 3 and 4 are design only, sequenced after WG10. The precursor,
+per-interface link speed and default-route metric in `GET /api/host` plus the
+status-page Wi-Fi hint, is implemented and not numbered here.
 
 See [requirements](requirements.md), [design](design.md) and [tasks](tasks.md).
 
@@ -25,8 +26,10 @@ loopback, container and virtual interface addresses are never listed.
 its wired speed or null, and its Wi-Fi signal or null. It never claims that the address
 is reachable from any particular client.
 
-1.4 `GET /api/status` carries a stable `receiverId` that identifies this receiver host
-across sdr-host restarts and address changes, without exposing the machine ID.
+1.4 `GET /api/status` carries a `receiverId`: 128 random bits that identify one
+running sdr-host process and are the same on every address it serves. It changes when
+sdr-host restarts, which makes a comparison across a restart fail closed. It reveals
+nothing about the host.
 
 ## User story 2: on a home network, the receiver can be found without typing an address.
 
@@ -43,8 +46,8 @@ from 1.1, never from the multicast answer alone.
 ## User story 3: WaveKit moves its IQ connection to the best reachable endpoint and back.
 
 3.1 For an `rtl_tcp` source that has an sdr-host API, `sdrHost.endpointSelection: auto`
-(the default) lets core switch its active host to a better-ranked endpoint. `off` keeps
-the configured host.
+lets core switch its active host to a better-ranked endpoint. The default is `off`,
+which keeps the configured host, and behaviour and output stay byte-identical to today.
 
 3.2 Core switches only after the candidate has passed two checks. First, its API returns
 the same `receiverId` as the current receiver. Second, a TCP connection to its IQ port
@@ -61,8 +64,15 @@ It is never rewritten in config.
 3.5 Source status reports the configured host, the active host, the reason for the last
 switch or fallback, and when it happened.
 
-3.6 Endpoint data is validated with Zod at the boundary. A candidate must be a literal IP
-address taken from the receiver's own list. Core never dials hostnames from it.
+3.6 Fail closed. Endpoint data is validated with Zod at the boundary. A candidate is
+only ever a literal IP address that the configured sdr-host itself listed in its
+`endpoints`, fetched through the configured (or currently verified) API. Core never
+dials hostnames from that list. It never takes candidates from mDNS answers or any
+other source. Any failed check, timeout, parse error or ID mismatch leaves the active
+host unchanged.
+
+3.7 The CLI and web source-status guards accept the new `endpoint` field.
+The field is omitted, never null, while selection is `off`.
 
 ## User story 4: the Mac loopback bridge can use the best endpoint.
 

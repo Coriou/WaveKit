@@ -229,6 +229,79 @@ describe("sdr-host API", () => {
 		expect(payload.rtlmux.statsUrl).toBe("http://pi.local:5556/stats.json")
 	})
 
+	it("names this receiver and lists its endpoints best first on /api/status", async () => {
+		const config = SdrHostConfigSchema.parse({})
+		const network: SdrHostTelemetry["network"] = {
+			state: "ok",
+			scope: "host",
+			observedAt: null,
+			ageMs: 0,
+			reason: null,
+			value: [
+				{
+					name: "wlan0",
+					kind: "wireless",
+					operstate: "up",
+					addresses: ["198.51.100.23"],
+					rxBytesPerSec: 0,
+					txBytesPerSec: 0,
+					wireless: { linkQuality: 40, signalDbm: -70 },
+					speedMbps: null,
+					defaultRouteMetric: 600,
+				},
+				{
+					name: "eth0",
+					kind: "ethernet",
+					operstate: "up",
+					addresses: ["192.0.2.69"],
+					rxBytesPerSec: 0,
+					txBytesPerSec: 0,
+					wireless: null,
+					speedMbps: 100,
+					defaultRouteMetric: 100,
+				},
+			],
+		}
+		fastify = await createApiServer({
+			hostTelemetry: { snapshot: () => ({ ...emptyHost.snapshot(), network }) },
+			config,
+			logger,
+			processManager: createProcessManager(),
+			preflightResult: createPreflightResult(),
+			receiverId: "0123456789abcdef0123456789abcdef",
+		})
+		await fastify.ready()
+		const payload = (
+			await fastify.inject({ method: "GET", url: "/api/status" })
+		).json() as { receiverId: string; endpoints: unknown }
+		expect(payload.receiverId).toBe("0123456789abcdef0123456789abcdef")
+		expect(payload.endpoints).toEqual({
+			iqPort: 5555,
+			apiPort: 8080,
+			addresses: [
+				expect.objectContaining({ address: "192.0.2.69", kind: "ethernet" }),
+				expect.objectContaining({ address: "198.51.100.23", signalDbm: -70 }),
+			],
+		})
+	})
+
+	it("reports null endpoints and a random receiver ID without host networking", async () => {
+		const config = SdrHostConfigSchema.parse({})
+		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
+			config,
+			logger,
+			processManager: createProcessManager(),
+			preflightResult: createPreflightResult(),
+		})
+		await fastify.ready()
+		const payload = (
+			await fastify.inject({ method: "GET", url: "/api/status" })
+		).json() as { receiverId: string; endpoints: unknown }
+		expect(payload.receiverId).toMatch(/^[0-9a-f]{32}$/)
+		expect(payload.endpoints).toBeNull()
+	})
+
 	it("returns fix instructions for driver conflict", async () => {
 		const config = SdrHostConfigSchema.parse({})
 		fastify = await createApiServer({

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify"
 import type { SdrHostSamplingHistory } from "@wavekit/api-types"
 import type { SdrHostConfig } from "../../config.js"
+import { endpointsFromTelemetry } from "../../telemetry/endpoints.js"
 
 export const SDR_HOST_VERSION = "1.0.0"
 
@@ -36,6 +37,7 @@ export function registerStatusRoutes(
 
 		return reply.send({
 			version: SDR_HOST_VERSION,
+			receiverId: fastify.receiverId,
 			uptime,
 			dongle: preflightResult.dongle,
 			rtlTcp: {
@@ -70,6 +72,15 @@ export function registerStatusRoutes(
 				windowMs: 5 * 60_000,
 				points: processManager.getSamplingHistory(),
 			} satisfies SdrHostSamplingHistory,
+			// Every address a client may dial, best first; null while the host
+			// network is not visible (receiver-endpoints 1.1-1.3).
+			endpoints: endpointsFromTelemetry(
+				fastify.hostTelemetry.snapshot().network,
+				{
+					iqPort: config.rtlmux.port,
+					apiPort: config.api.port,
+				},
+			),
 			warnings,
 			errors,
 		})

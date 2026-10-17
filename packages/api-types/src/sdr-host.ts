@@ -107,6 +107,23 @@ export interface SdrHostNetworkInterface {
 	defaultRouteMetric: number | null
 }
 
+/** One address a client may dial for this receiver (receiver-endpoints 1.3). */
+export interface SdrHostEndpoint {
+	address: string
+	family: "IPv4" | "IPv6"
+	interface: string
+	kind: "ethernet" | "wireless" | "other"
+	speedMbps: number | null
+	signalDbm: number | null
+}
+
+/** `GET /api/status` `endpoints`: ports and addresses, best first. */
+export interface SdrHostEndpoints {
+	iqPort: number
+	apiPort: number
+	addresses: SdrHostEndpoint[]
+}
+
 export interface SdrHostTelemetry {
 	generatedAt: string
 	uptime: Reading<{
