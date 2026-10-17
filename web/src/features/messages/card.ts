@@ -155,6 +155,56 @@ export function recordFields(record: ActivityRecord): DecodeField[] {
 	}
 }
 
+/** A summary rebuilt from the stored record (an event opened by its id, with no list row to come from). */
+export function summaryOfRecord(record: ActivityRecord): ActivitySummary {
+	const base = {
+		eventId: record.eventId,
+		commitSeq: record.commitSeq,
+		kind: record.kind,
+		producedAt: record.producedAt,
+		receivedAt: record.receivedAt,
+		fields: recordFields(record),
+	}
+	switch (record.kind) {
+		case "decoder-reception": {
+			const p = record.payload
+			return {
+				...base,
+				decoderId: p.decoderId,
+				sourceId: p.provenance.sourceId,
+				protocol: p.protocol,
+				category: p.category,
+				frequencyHz: p.provenance.frequency?.hz ?? null,
+				entityKey: p.entityKey,
+				title: p.title,
+				...(p.position ? { position: p.position } : {}),
+			}
+		}
+		case "analog-transmission":
+			return {
+				...base,
+				decoderId: null,
+				sourceId: record.payload.sourceId,
+				protocol: "analog",
+				category: "voice",
+				frequencyHz: record.payload.frequency?.hz ?? null,
+				entityKey: null,
+				title: null,
+			}
+		default:
+			return {
+				...base,
+				decoderId: null,
+				sourceId: null,
+				protocol: null,
+				category: "other",
+				frequencyHz: null,
+				entityKey: null,
+				title: null,
+			}
+	}
+}
+
 /** The decoded JSON behind the card: decodedData for a reception, the payload otherwise. */
 export function rawOf(record: ActivityRecord | null): JsonValue | null {
 	if (!record) return null

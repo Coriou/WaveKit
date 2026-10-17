@@ -1,7 +1,7 @@
 // One Activity event, pushed in over the list with Back: the decoded message card (every field, position, the stored
 // JSON), where and when it was heard, and earlier events from the same sender.
 import type { ActivityRecord, ActivitySummary } from "@wavekit/api-types"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { fetchActivityRecord, queryParams } from "../../data/activity-feed.ts"
@@ -10,6 +10,7 @@ import { Button } from "../../ui/Button.tsx"
 import { Label } from "../../ui/Label.tsx"
 import { clockText, dateText, useDisplay } from "../display.ts"
 import { formatMHz } from "../format.ts"
+import { summaryOfRecord } from "../messages/card.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { ActivityRow } from "./ActivityList.tsx"
 import { rowView } from "./rows.ts"
@@ -28,7 +29,11 @@ export interface ActivityDetailProps {
 	onBack: () => void
 }
 
-export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
+export function ActivityDetail({
+	item: listed,
+	eventId,
+	onBack,
+}: ActivityDetailProps) {
 	const { data, activity } = useServices()
 	const readOnly = useReadOnly()
 	useDisplay() // times and units follow Settings › Display
@@ -61,6 +66,11 @@ export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 		return () => abort.abort()
 	}, [data.api, eventId])
 
+	// opened by its id (a link): the row is rebuilt from the stored record
+	const item = useMemo(
+		() => listed ?? (record ? summaryOfRecord(record) : null),
+		[listed, record],
+	)
 	const entityKey = item?.entityKey ?? null
 	useEffect(() => {
 		setRelated([])

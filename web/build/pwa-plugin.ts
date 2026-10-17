@@ -44,6 +44,20 @@ export function webManifest(): Record<string, unknown> {
 		categories: ["utilities"],
 		// A second launch (dock icon, link) brings the open window forward instead of a second spectrum stream.
 		launch_handler: { client_mode: ["focus-existing", "auto"] },
+		// Deep links (src/shell/deep-link.ts): a shortcut opens its drawer or view; in the open window via launchQueue.
+		shortcuts: [
+			{ name: "Activity", url: "./#/activity", description: "What was heard" },
+			{
+				name: "Scanner",
+				url: "./#/scanner",
+				description: "What the scanner found",
+			},
+			{
+				name: "Map",
+				url: "./#/map",
+				description: "Aircraft, ships and stations",
+			},
+		],
 		icons: PWA_ICONS.filter(i => i.purpose !== null).map(i => ({
 			src: `icons/${i.file}`,
 			sizes: i.sizes,

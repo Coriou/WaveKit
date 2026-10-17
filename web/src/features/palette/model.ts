@@ -248,6 +248,8 @@ export type PaletteAction =
 	| { readonly kind: "discovery"; readonly id: string }
 	| { readonly kind: "setting"; readonly entry: SettingEntry }
 	| { readonly kind: "copy"; readonly text: string; readonly label: string }
+	/** The address bar's link to what is on screen (deep-link.ts keeps it current). */
+	| { readonly kind: "copyLink" }
 	| { readonly kind: "install" }
 
 /** One line of the effect bar: `Gain 28.0 dB → 32.8 dB`. */
@@ -1554,6 +1556,15 @@ export class PaletteModel {
 						},
 						does: `Copies “${mhz(c.tunedHz)}” to the clipboard`,
 					},
+			{
+				id: "copy:link",
+				title: "Copy link to this view",
+				sub: "Opens WaveKit on the same drawer, search or discovery",
+				glyph: "copy",
+				keys: ["link", "share", "url", "address", "deep link", "bookmark"],
+				action: { kind: "copyLink" },
+				does: "Copies this view's address to the clipboard",
+			},
 			this.installItem(),
 			{
 				id: "scope:set",

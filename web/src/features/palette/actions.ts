@@ -327,6 +327,9 @@ export async function runAction(
 			case "copy":
 				await navigator.clipboard.writeText(action.text)
 				return { text: action.label }
+			case "copyLink":
+				await navigator.clipboard.writeText(location.href)
+				return { text: "Copied the link" }
 			case "install":
 				return (await promptInstall())
 					? { text: "Installing WaveKit" }

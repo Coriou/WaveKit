@@ -14,6 +14,7 @@ import { useStore } from "../data/index.ts"
 import { PaletteKeys } from "../features/palette/PaletteKeys.tsx"
 import { Plot } from "../plot/index.ts"
 import { Shell } from "../shell/Shell.tsx"
+import { followDeepLinks } from "../shell/deep-link-sync.ts"
 import { ServicesContext } from "./context.ts"
 import { createServices, type AppServices } from "./services.ts"
 
@@ -37,11 +38,13 @@ export function App() {
 		const s = createServices()
 		let disposed = false
 		setServices(s)
+		const offLinks = followDeepLinks(s)
 		queueMicrotask(() => {
 			if (!disposed) void s.start()
 		})
 		return () => {
 			disposed = true
+			offLinks()
 			s.dispose()
 			setServices(null)
 		}
