@@ -915,7 +915,11 @@ export class PaletteModel {
 		return {
 			id: `scan:${p.id}`,
 			title: p.label,
-			sub: [range, p.name !== p.label ? p.name : null]
+			sub: [
+				p.user ? "Your preset" : null,
+				range,
+				p.name !== p.label ? p.name : null,
+			]
 				.filter(Boolean)
 				.join(" · "),
 			glyph: "scan",

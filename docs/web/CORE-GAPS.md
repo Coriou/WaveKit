@@ -125,6 +125,11 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   combinations), read-only; operator presets with create / replace / delete
   (`/api/bandplans/presets`, `/:presetId`), and `GET …/presets/:id/job` turns one into a job spec
   (BP1 §7). Writes are protected mode only.
+- [ ] Scan presets keep the whole plan (web app, 2026-10-17): the closed preset job has no range
+  names (the app names a saved range after the band it lies in, else its edges), no Hold, Record,
+  Stop after, "Just find signals" or "Skip what decodes elsewhere", and no per-range dwell or
+  sensitivity, so "Save as preset" drops them. Wanted: `name` on preset ranges and those options in
+  the job (null = default), still closed and validated.
 
 **Tuner**
 - [ ] `GET /api/tuner/:sourceId/capabilities`: `gainsTenthsDb[]` (or `null` with

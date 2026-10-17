@@ -20,6 +20,7 @@ import { PreferencesStore } from "./preferences-store.ts"
 import { ReceiverStore } from "./receiver-store.ts"
 import { RecordingsStore } from "./recordings-store.ts"
 import { SavedFrequenciesStore } from "./saved-frequencies-store.ts"
+import { ScanPresetsStore } from "./scan-presets-store.ts"
 import { ScannerStore } from "./scanner-store.ts"
 import { SourcesStore } from "./sources-store.ts"
 import { StationStore } from "./station-store.ts"
@@ -46,6 +47,7 @@ export interface DataLayer {
 	bandplan: BandplanStore
 	/** Settings › Band plans: the stack, packs and writes. */
 	bandplanStack: BandplanStackStore
+	scanPresets: ScanPresetsStore
 	identify: IdentifyStore
 	/** Saved frequencies (core operator data; protected mode only). */
 	savedFrequencies: SavedFrequenciesStore
@@ -118,6 +120,10 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		bandplanStack: new BandplanStackStore(api, events, () => {
 			void layer.bandplan.load()
 			void layer.scanner.loadBandplans()
+			void layer.scanPresets.load()
+		}),
+		scanPresets: new ScanPresetsStore(api, events, () => {
+			if (layer.bandplanStack.get().loaded) void layer.bandplanStack.load()
 		}),
 		identify: new IdentifyStore(api, events),
 		savedFrequencies,
@@ -156,6 +162,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.liveAudio.dispose()
 			layer.bandplan.dispose()
 			layer.bandplanStack.dispose()
+			layer.scanPresets.dispose()
 			layer.identify.dispose()
 			layer.savedFrequencies.dispose()
 			layer.scanner.dispose()

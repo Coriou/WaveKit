@@ -11,7 +11,7 @@ import { requestActivitySearchFocus } from "../activity/focus.ts"
 import { frequencyToken, token, type SearchToken } from "../activity/search.ts"
 import { squelchForModulation } from "../listen/audio.ts"
 import { discoveryMode } from "../scanner/drawer/actions.ts"
-import { presetOn, presetsOf, togglePreset } from "../scanner/planner/plan.ts"
+import { presetOn, presetsFrom, togglePreset } from "../scanner/planner/plan.ts"
 import { updateDraft } from "../scanner/planner/draft-store.ts"
 import { openPlan } from "../scanner/ui-store.ts"
 import { focusSetting } from "../settings/registry.ts"
@@ -295,9 +295,10 @@ export async function runAction(
 				shellStore.openDrawer("scanner")
 				openPlan()
 				if (action.presetId !== null) {
-					const preset = presetsOf(s.data.scanner.get().bandplans).find(
-						p => p.id === action.presetId,
-					)
+					const preset = presetsFrom(
+						s.data.scanPresets.get().view?.presets ?? null,
+						s.data.scanner.get().bandplans,
+					).find(p => p.id === action.presetId)
 					if (preset)
 						updateDraft(d =>
 							presetOn(preset, d.ranges) ? d : togglePreset(d, preset),

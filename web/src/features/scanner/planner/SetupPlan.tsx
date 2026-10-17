@@ -11,6 +11,7 @@ import type {
 
 import { useReadOnly, useServices } from "../../../app/context.ts"
 import { errorMessage } from "../../../data/api-client.ts"
+import { presetWriteError } from "../../../data/scan-presets-store.ts"
 import { planIssues, takeoverImpact } from "../../../data/scanner-store.ts"
 import { useStore } from "../../../data/store.ts"
 import { Button } from "../../../ui/Button.tsx"
@@ -39,12 +40,15 @@ import {
 	customRange,
 	DEFAULT_OPTIONS,
 	draftValid,
+	edgesText,
 	impactDisturbs,
 	kHz,
 	optionsChanged,
 	parseMHz,
+	planName,
+	presetJobOf,
 	presetOn,
-	presetsOf,
+	presetsFrom,
 	previewSummary,
 	rangeError,
 	removeRange,
@@ -53,8 +57,10 @@ import {
 	sentence,
 	skipsIn,
 	spacingText,
+	tagRanges,
 	togglePreset,
 	updateRange,
+	userPresetOf,
 	type BandHint,
 	type PlanDraft,
 	type Preset,
@@ -87,7 +93,7 @@ interface RowPop {
 	anchor: PopAnchor
 }
 
-type Pop = RowPop | { kind: "options"; anchor: PopAnchor }
+type Pop = RowPop | { kind: "options" | "save"; anchor: PopAnchor }
 
 interface Toast {
 	text: string
@@ -160,6 +166,33 @@ function bandHint(
 	return b ? { stepHz: b.band.stepHz, group: b.band.group } : {}
 }
 
+/** The name of the narrowest band holding a stretch (a saved range's name), else undefined. */
+function bandName(
+	lo: number,
+	hi: number,
+	bands: readonly ResolvedBand[],
+): string | undefined {
+	return bands
+		.filter(x => x.band.startHz <= lo && x.band.endHz >= hi)
+		.sort(
+			(x, y) => x.band.endHz - x.band.startHz - (y.band.endHz - y.band.startHz),
+		)[0]?.band.name
+}
+
+/** Why presets cannot be saved here, or undefined. */
+function usePresetLock(): string | undefined {
+	const readOnly = useReadOnly()
+	const writable = useStore(
+		useServices().data.bandplanStack,
+		s => s.view?.capabilities.writable,
+	)
+	if (readOnly)
+		return "Read-only access: sign in on this WaveKit to save presets"
+	if (writable === false)
+		return "This WaveKit keeps presets read-only (open access mode)"
+	return undefined
+}
+
 export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 	const { data } = useServices()
 	const readOnly = useReadOnly()
@@ -169,8 +202,22 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 	const bands = useStore(data.bandplan, s => s.view?.bands ?? NO_BANDS)
 	const decoderName = useDecoderName()
 
+	const presetList = useStore(data.scanPresets, s => s.view?.presets ?? null)
+	const presetLock = usePresetLock()
+	useEffect(() => {
+		void data.scanPresets.ensure()
+		if (!data.bandplanStack.get().loaded) void data.bandplanStack.load()
+	}, [data])
+
 	const lanes = useMemo(() => lanesOf(bands), [bands])
-	const presets = useMemo(() => presetsOf(bandplans), [bandplans])
+	const presets = useMemo(
+		() =>
+			presetsFrom(presetList, bandplans, (lo, hi) => bandName(lo, hi, bands)),
+		[presetList, bandplans, bands],
+	)
+	const userCount = presets.filter(p => p.user).length
+	const presetRow = useRef<HTMLDivElement>(null)
+	const fromUser = userPresetOf(presets, draft.ranges)
 
 	const [tool, setTool] = useState<DrawKind>("add")
 	const [pop, setPop] = useState<Pop | null>(null)
@@ -373,6 +420,51 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 			undo: () => updateDraft(() => before),
 		})
 	}
+	// ---- Save as preset (stored in core, first in the presets)
+	const savePreset = async (name: string, replaceId: string | null) => {
+		const d = setupStore.get().draft
+		const preset = { name, job: presetJobOf(d, presets) }
+		if (replaceId) {
+			await data.scanPresets.replace(replaceId, preset)
+			set(x => tagRanges(x, replaceId))
+			setToast({ text: `Updated “${name}”` })
+		} else {
+			const id = await data.scanPresets.create(preset)
+			if (id) set(x => tagRanges(x, id))
+			setToast({ text: `Saved “${name}” · first in the presets` })
+			presetRow.current?.scrollTo({ left: 0, behavior: "smooth" })
+		}
+		setPop(null)
+	}
+	const deletePreset = async (p: Preset) => {
+		const job = p.job
+		await data.scanPresets.remove(p.id)
+		setPop(null)
+		setToast({
+			text: `Deleted “${p.name}”`,
+			...(job
+				? {
+						undo: () => {
+							void data.scanPresets
+								.create({ name: p.name, job })
+								.then(id => {
+									if (id)
+										updateDraft(x => ({
+											...x,
+											ranges: x.ranges.map(r =>
+												r.preset === p.id ? { ...r, preset: id } : r,
+											),
+										}))
+								})
+								.catch((error: unknown) =>
+									setToast({ text: presetWriteError(error) }),
+								)
+						},
+					}
+				: {}),
+		})
+	}
+
 	const fit = () => {
 		const v = fitView([...draft.ranges]) ?? bandsView(bands.map(b => b.band))
 		setView(v)
@@ -434,7 +526,7 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 
 	const anchorOf = (el: HTMLElement): PopAnchor => ({ el })
 	const popRange =
-		pop && pop.kind !== "options"
+		pop && "key" in pop
 			? (draft.ranges.find(r => r.key === pop.key) ?? null)
 			: null
 
@@ -461,6 +553,7 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 					<h2 className="wk-h2 wk-pl-ellipsis">Scan a band</h2>
 				</div>
 				<div
+					ref={presetRow}
 					role="group"
 					aria-label="Presets"
 					className="wk-pl-presets wk-hscroll"
@@ -472,20 +565,52 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 								: "No presets for this region"}
 						</span>
 					)}
-					{presets.map(p => {
+					{presets.map((p, i) => {
 						const on = presetOn(p, draft.ranges)
+						const where = p.ranges
+							.map(r => edgesText(r.startHz, r.endHz))
+							.join(", ")
+						const missing = p.missing?.length
+							? ` · not on this WaveKit: ${p.missing.join(", ")}`
+							: ""
 						return (
-							<Chip
-								key={p.id}
-								pressed={on}
-								title={p.name}
-								onClick={() => pickPreset(p)}
-							>
-								{p.label}
-							</Chip>
+							<span key={p.id} className="wk-pl-chipwrap">
+								{i === userCount && i > 0 && (
+									<span className="wk-pl-vsep" aria-hidden="true" />
+								)}
+								<Chip
+									pressed={on}
+									title={`${p.user ? "Your preset · " : ""}${p.name} · ${where} MHz${missing}`}
+									aria-label={`${p.name}${p.user ? ", your preset" : ""}, ${where} MHz`}
+									onClick={() => pickPreset(p)}
+								>
+									{p.user && !on && <Glyph name="bookmark" size={15} />}
+									{p.label}
+								</Chip>
+							</span>
 						)
 					})}
 				</div>
+				<Button
+					variant="ghost"
+					size="lg"
+					className="wk-pl-save"
+					disabled={!valid || presetLock !== undefined}
+					aria-haspopup="dialog"
+					aria-expanded={pop?.kind === "save"}
+					title={
+						presetLock ??
+						(valid
+							? "Save these ranges, spacing, protocols and skips as a preset"
+							: "Add a range to save a preset")
+					}
+					onClick={e =>
+						setPop({ kind: "save", anchor: anchorOf(e.currentTarget) })
+					}
+				>
+					<Glyph name="save" size={15} />
+					{size === "narrow" ? "Save" : "Save as preset"}
+				</Button>
 				{mode === "pane" && (
 					<Button
 						variant="ghost"
@@ -741,18 +866,29 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 								: 320
 					}
 					label={
-						pop.kind === "options"
-							? "Options"
-							: pop.kind === "spacing"
-								? `Channel spacing for ${popRange?.name ?? ""}`
-								: pop.kind === "protos"
-									? `Protocols for ${popRange?.name ?? ""}`
-									: pop.kind === "skips"
-										? `Skips in ${popRange?.name ?? ""}`
-										: (popRange?.name ?? "")
+						pop.kind === "save"
+							? "Save as preset"
+							: pop.kind === "options"
+								? "Options"
+								: pop.kind === "spacing"
+									? `Channel spacing for ${popRange?.name ?? ""}`
+									: pop.kind === "protos"
+										? `Protocols for ${popRange?.name ?? ""}`
+										: pop.kind === "skips"
+											? `Skips in ${popRange?.name ?? ""}`
+											: (popRange?.name ?? "")
 					}
 					onClose={() => setPop(null)}
 				>
+					{pop.kind === "save" && (
+						<SaveBody
+							from={fromUser}
+							suggested={fromUser?.name ?? planName(draft.ranges)}
+							onSave={savePreset}
+							onDelete={deletePreset}
+							onCancel={() => setPop(null)}
+						/>
+					)}
 					{pop.kind === "options" && (
 						<OptionsBody
 							options={draft.options}
@@ -820,6 +956,126 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 				</Popover>
 			)}
 		</>
+	)
+}
+
+// ---- Save as preset
+
+function SaveBody({
+	from,
+	suggested,
+	onSave,
+	onDelete,
+	onCancel,
+}: {
+	/** The operator preset the plan comes from: Update replaces it. */
+	from: Preset | null
+	suggested: string
+	onSave: (name: string, replaceId: string | null) => Promise<void>
+	onDelete: (preset: Preset) => Promise<void>
+	onCancel: () => void
+}) {
+	const [name, setName] = useState(suggested)
+	const [busy, setBusy] = useState(false)
+	const [error, setError] = useState<string | null>(null)
+	const ref = useRef<HTMLInputElement>(null)
+	useEffect(() => {
+		ref.current?.focus()
+		ref.current?.select()
+	}, [])
+	const trimmed = name.trim()
+	const run = (fn: () => Promise<void>) => {
+		if (busy) return
+		setBusy(true)
+		setError(null)
+		fn().then(
+			() => setBusy(false),
+			(e: unknown) => {
+				setBusy(false)
+				setError(presetWriteError(e))
+			},
+		)
+	}
+	const save = (replace: boolean) => {
+		if (!trimmed) return
+		run(() => onSave(trimmed, replace && from ? from.id : null))
+	}
+	return (
+		<div className="wk-pl-savepop">
+			<label htmlFor="wk-pl-save-name" className="wk-label" data-strong="">
+				Preset name
+			</label>
+			<input
+				id="wk-pl-save-name"
+				ref={ref}
+				className="wk-pl-box wk-pl-savename"
+				value={name}
+				maxLength={80}
+				spellCheck={false}
+				autoComplete="off"
+				onChange={e => setName(e.target.value)}
+				onKeyDown={e => {
+					if (e.key === "Enter") {
+						e.preventDefault()
+						save(from !== null)
+					}
+				}}
+			/>
+			{from && (
+				<p className="wk-pl-note">
+					From your preset “{from.name}”. Update keeps its place, Save as new
+					adds another.
+				</p>
+			)}
+			{error && (
+				<p role="alert" className="wk-pl-note" data-tone="danger">
+					{error}
+				</p>
+			)}
+			<div className="wk-pl-saveacts">
+				{from ? (
+					<>
+						<Button
+							variant="ghost"
+							className="wk-pl-danger"
+							disabled={busy}
+							onClick={() => run(() => onDelete(from))}
+						>
+							Delete
+						</Button>
+						<span className="wk-pl-spring" />
+						<Button
+							variant="ghost"
+							disabled={busy || !trimmed}
+							onClick={() => save(false)}
+						>
+							Save as new
+						</Button>
+						<Button
+							variant="primary"
+							disabled={busy || !trimmed}
+							onClick={() => save(true)}
+						>
+							{busy ? "Saving…" : "Update"}
+						</Button>
+					</>
+				) : (
+					<>
+						<span className="wk-pl-spring" />
+						<Button variant="ghost" onClick={onCancel}>
+							Cancel
+						</Button>
+						<Button
+							variant="primary"
+							disabled={busy || !trimmed}
+							onClick={() => save(false)}
+						>
+							{busy ? "Saving…" : "Save"}
+						</Button>
+					</>
+				)}
+			</div>
+		</div>
 	)
 }
 

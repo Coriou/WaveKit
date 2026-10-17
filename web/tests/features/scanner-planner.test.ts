@@ -1,13 +1,17 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
+import { scanPresetJobSchema } from "@wavekit/api-types"
 import type {
 	Bandplan,
 	Impact,
 	ResolvedBand,
 	ScanJob,
+	ScanPresetJob,
 } from "@wavekit/api-types"
 
 import {
+	addRange,
+	addSkip,
 	buildSpec,
 	consentText,
 	customRange,
@@ -17,7 +21,9 @@ import {
 	impactDisturbs,
 	optionsChanged,
 	parseMHz,
+	presetJobOf,
 	presetOn,
+	presetsFrom,
 	presetsOf,
 	passPhrase,
 	previewSummary,
@@ -27,8 +33,11 @@ import {
 	scanRangeOf,
 	shortPlanName,
 	spacingText,
+	tagRanges,
 	toggleChoice,
 	togglePreset,
+	updateRange,
+	userPresetOf,
 	PROTOCOL_CHOICES,
 	type PlanDraft,
 } from "../../src/features/scanner/planner/plan.ts"
@@ -663,5 +672,213 @@ describe("planner: running edits", () => {
 			startHz: MHZ(156),
 		})
 		expect(body.exclusions).toEqual(job.spec.exclusions)
+	})
+})
+
+describe("planner: scan presets from the core", () => {
+	const at = (n: number) => `2026-10-17T10:0${n}:00.000Z`
+	const job = (over: Partial<ScanPresetJob> = {}): ScanPresetJob => ({
+		mode: null,
+		bandplans: [],
+		ranges: [],
+		exclusions: [],
+		protocols: [],
+		sensitivity: null,
+		thresholdDb: null,
+		fftSize: null,
+		integrationMs: null,
+		dwellMs: null,
+		settleMs: null,
+		...over,
+	})
+	const builtin = (id: string, name: string, plans: string[]) => ({
+		preset: {
+			kind: "builtin" as const,
+			id,
+			name,
+			region: "EU" as const,
+			job: job({ bandplans: plans }),
+		},
+		applicable: true,
+		issues: [],
+	})
+	const operator = (
+		id: string,
+		name: string,
+		j: ScanPresetJob,
+		created: number,
+	) => ({
+		preset: {
+			kind: "operator" as const,
+			id,
+			name,
+			job: j,
+			createdAt: at(created),
+			updatedAt: at(created),
+		},
+		applicable: true,
+		issues: [],
+	})
+	const HARBOUR = job({
+		mode: "sweep",
+		ranges: [
+			{
+				startHz: MHZ(156.5),
+				endHz: MHZ(157.45),
+				rasters: [{ spacingHz: 25_000, firstChannelHz: MHZ(156.5) }],
+				obwHz: [],
+				protocols: ["analog-fm"],
+			},
+		],
+		exclusions: [{ startHz: MHZ(156.8), endHz: MHZ(156.81), reason: "Ch 16" }],
+		sensitivity: "high",
+	})
+	const LIST = [
+		builtin("builtin-airband", "Airband (8.33 / 25 kHz)", ["airband"]),
+		builtin("builtin-pmr446", "PMR446", ["pmr446"]),
+		builtin("builtin-combo-x", "Land mobile + PMR", [
+			"vhf-land-mobile",
+			"pmr446",
+		]),
+		operator("u-old", "Old one", job({ bandplans: ["airband", "gone"] }), 1),
+		operator("u-harbour", "Harbour", HARBOUR, 2),
+	]
+	const named = (lo: number, hi: number) =>
+		lo >= MHZ(156) && hi <= MHZ(158) ? "Harbour channels" : undefined
+	const presets = presetsFrom(LIST, BANDPLANS, named)
+	const byId = (id: string) => {
+		const p = presets.find(x => x.id === id)
+		if (!p) throw new Error(id)
+		return p
+	}
+
+	it("lists yours first (newest first), then the built-ins in the core's order", () => {
+		expect(presets.map(p => p.id)).toEqual([
+			"u-harbour",
+			"u-old",
+			"builtin-airband",
+			"builtin-pmr446",
+			"builtin-combo-x",
+		])
+		expect(presets.filter(p => p.user)).toHaveLength(2)
+		expect(byId("builtin-airband").label).toBe("Airband")
+		expect(byId("u-old").missing).toEqual(["gone"])
+		// without the core's list, one preset per scanner band plan
+		expect(presetsFrom(null, BANDPLANS).map(p => p.id)).toEqual(
+			presetsOf(BANDPLANS).map(p => p.id),
+		)
+	})
+
+	it("a combination repeats its plans' ranges, so a plan already on is not added twice", () => {
+		const pmr = byId("builtin-pmr446")
+		const combo = byId("builtin-combo-x")
+		let d = togglePreset(EMPTY_DRAFT, pmr)
+		d = togglePreset(d, combo)
+		expect(d.ranges.map(r => [r.name, r.preset])).toEqual([
+			["VHF land mobile", "builtin-combo-x"],
+			["PMR446", "builtin-pmr446"],
+		])
+		expect(presetOn(combo, d.ranges)).toBe(true)
+		expect(presetOn(pmr, d.ranges)).toBe(true)
+		d = togglePreset(d, combo)
+		expect(d.ranges.map(r => r.preset)).toEqual(["builtin-pmr446"])
+		expect(presetOn(pmr, d.ranges)).toBe(true)
+	})
+
+	it("your preset brings its ranges, skips and sensitivity, and takes its skips back out", () => {
+		const harbour = byId("u-harbour")
+		const on = togglePreset(EMPTY_DRAFT, harbour)
+		expect(on.ranges[0]).toMatchObject({
+			name: "Harbour channels",
+			spacingHz: [25_000],
+			protocols: ["analog-fm"],
+			preset: "u-harbour",
+		})
+		expect(on.skips).toMatchObject([
+			{ startHz: MHZ(156.8), endHz: MHZ(156.81), reason: "Ch 16" },
+		])
+		expect(on.options.sensitivity).toBe("high")
+		expect(userPresetOf(presets, on.ranges)?.id).toBe("u-harbour")
+		const off = togglePreset(on, harbour)
+		expect(off.ranges).toHaveLength(0)
+		expect(off.skips).toHaveLength(0)
+		// mixed with a built-in, the plan is no longer "from" your preset
+		const mixed = togglePreset(on, byId("builtin-airband"))
+		expect(userPresetOf(presets, mixed.ranges)).toBeNull()
+	})
+
+	it("saving keeps an untouched built-in by id and stores every other range", () => {
+		let d = togglePreset(EMPTY_DRAFT, byId("builtin-airband"))
+		d = togglePreset(d, byId("builtin-pmr446"))
+		d = addRange(d, customRange(MHZ(433), MHZ(435), BANDPLANS))
+		d = { ...d, options: { ...d.options, sensitivity: "low" } }
+		const pmrKey = d.ranges.find(r => r.preset === "builtin-pmr446")?.key ?? ""
+		d = updateRange(d, pmrKey, { spacingHz: [6250] })
+		const j = presetJobOf(d, presets)
+		expect(scanPresetJobSchema.safeParse(j).success).toBe(true)
+		expect(j.bandplans).toEqual(["airband"])
+		expect(j.ranges.map(r => [r.startHz, r.endHz])).toEqual([
+			[MHZ(433), MHZ(435)],
+			[MHZ(446), MHZ(446.2)],
+		])
+		expect(j.ranges[1]?.rasters).toEqual([
+			{ spacingHz: 6250, firstChannelHz: MHZ(446) },
+		])
+		expect(j).toMatchObject({ mode: "sweep", sensitivity: "low" })
+	})
+
+	it("a saved plan loads back as the same ranges, spacing, protocols and skips", () => {
+		// Feature: web-app, Property: Save as preset round trip
+		// Validates: canvas ScanPlanner "Save as preset"
+		const arbRange = fc
+			.record({
+				lo: fc.integer({ min: 30_000, max: 1_700_000 }),
+				span: fc.integer({ min: 10, max: 20_000 }),
+				spacing: fc.constantFrom(6250, 12_500, 25_000),
+				protos: fc.subarray(["analog-fm", "dmr", "pocsag"] as const, {
+					minLength: 1,
+				}),
+			})
+			.map(x => ({ ...x, lo: x.lo * 1000, hi: (x.lo + x.span) * 1000 }))
+		fc.assert(
+			fc.property(
+				fc.array(arbRange, { minLength: 1, maxLength: 6 }),
+				ranges => {
+					let d: PlanDraft = EMPTY_DRAFT
+					for (const r of ranges)
+						d = addRange(d, {
+							...customRange(r.lo, r.hi, null),
+							spacingHz: [r.spacing],
+							protocols: [...r.protos],
+						})
+					d = addSkip(d, ranges[0]?.lo ?? 0, (ranges[0]?.lo ?? 0) + 5000)
+					const j = presetJobOf(d, presets)
+					expect(scanPresetJobSchema.safeParse(j).success).toBe(true)
+					const [back] = presetsFrom(
+						[operator("u-new", "Mine", j, 9)],
+						BANDPLANS,
+					)
+					if (!back) throw new Error("no preset")
+					const loaded = togglePreset(EMPTY_DRAFT, back)
+					const shape = (x: PlanDraft) =>
+						x.ranges.map(r => [
+							r.startHz,
+							r.endHz,
+							r.spacingHz.join(),
+							[...r.protocols].sort().join(),
+						])
+					expect(shape(loaded)).toEqual(shape(d))
+					expect(loaded.skips.map(s => [s.startHz, s.endHz])).toEqual(
+						d.skips.map(s => [s.startHz, s.endHz]),
+					)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("tags the plan with a preset just saved", () => {
+		const d = addRange(EMPTY_DRAFT, customRange(MHZ(433), MHZ(435), null))
+		expect(tagRanges(d, "u-new").ranges.map(r => r.preset)).toEqual(["u-new"])
 	})
 })

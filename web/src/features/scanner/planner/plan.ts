@@ -3,15 +3,19 @@
  * presets from the core's scanner band plans, ranges from a band or a dragged stretch, channel spacing from the
  * band-plan rasters, skips, options, and the job spec sent to POST /api/scanner/plan and /api/scanner/jobs.
  */
+import { BANDPLANS_LIMITS } from "@wavekit/api-types"
 import type {
 	Bandplan,
 	DisplayGroup,
 	Impact,
 	PlanPreview,
+	PresetRange,
 	Raster,
 	ScanExclusion,
 	ScanJobSpec,
 	ScannerProtocol,
+	ScanPresetJob,
+	ScanPresetView,
 	ScanRange,
 } from "@wavekit/api-types"
 
@@ -210,7 +214,7 @@ export function planName(ranges: readonly PlanRange[]): string {
 	return `${names[0] ?? ""} + ${names.length - 1} more`
 }
 
-// ---- presets (the core's scanner band plans; operator presets are not in the data layer yet: CORE-GAPS)
+// ---- presets (the core's scan presets: yours first, then the region's built-ins; the scanner band plans without it)
 
 export interface Preset {
 	readonly id: string
@@ -219,6 +223,18 @@ export interface Preset {
 	/** Full name (tooltip). */
 	readonly name: string
 	readonly ranges: readonly ScanRange[]
+	/** An operator preset (stored in core, yours to update or delete). */
+	readonly user?: true
+	/** The scanner band plans it scans by id (a built-in, or a saved preset that kept a plan whole). */
+	readonly bandplans: readonly string[]
+	/** Skips it adds (operator presets). */
+	readonly skips?: readonly ScanExclusion[]
+	/** Sensitivity it sets (operator presets), when not the default. */
+	readonly sensitivity?: Sensitivity
+	/** What the core keeps of it, to update it with the same job (operator presets). */
+	readonly job?: ScanPresetJob
+	/** Band plans it names that this WaveKit does not scan. */
+	readonly missing?: readonly string[]
 }
 
 /** Pieces of one plan closer than this read as one range (CB's 40 channels, paging around 169 MHz). */
@@ -236,7 +252,7 @@ function joinRanges(ranges: readonly ScanRange[]): ScanRange[] {
 	return out
 }
 
-/** One preset per scanner band plan, in the core's order. */
+/** One preset per scanner band plan, in the core's order (the fallback when the core lists no presets). */
 export function presetsOf(bandplans: readonly Bandplan[] | null): Preset[] {
 	return (bandplans ?? [])
 		.filter(p => p.ranges.length > 0)
@@ -245,7 +261,98 @@ export function presetsOf(bandplans: readonly Bandplan[] | null): Preset[] {
 			label: shortPlanName(p.name),
 			name: p.name,
 			ranges: joinRanges(p.ranges),
+			bandplans: [p.id],
 		}))
+}
+
+/** The ranges of some scanner band plans (each plan joined on its own, so a combination repeats its plans' ranges). */
+function planRanges(
+	ids: readonly string[],
+	bandplans: readonly Bandplan[],
+): { ranges: ScanRange[]; missing: string[] } {
+	const ranges: ScanRange[] = []
+	const missing: string[] = []
+	for (const id of ids) {
+		const plan = bandplans.find(p => p.id === id)
+		if (!plan || plan.ranges.length === 0) missing.push(id)
+		else
+			ranges.push(
+				...joinRanges(plan.ranges).map(r => ({
+					...r,
+					name: shortPlanName(plan.name),
+				})),
+			)
+	}
+	return { ranges, missing }
+}
+
+/** A saved range's name: the band it lies in, else its edges (the core keeps no range names: CORE-GAPS). */
+export type RangeNamer = (startHz: number, endHz: number) => string | undefined
+
+/**
+ * The preset list of "Scan a band": operator presets first (newest first), then the built-ins in the core's order.
+ * Without the core's list, one preset per scanner band plan.
+ */
+export function presetsFrom(
+	list: readonly ScanPresetView[] | null,
+	bandplans: readonly Bandplan[] | null,
+	nameOf: RangeNamer = () => undefined,
+): Preset[] {
+	if (list === null) return presetsOf(bandplans)
+	const plans = bandplans ?? []
+	const out: Preset[] = []
+	const users = list
+		.flatMap(v => (v.preset.kind === "operator" ? [v.preset] : []))
+		.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+	for (const p of users) {
+		const fromPlans = planRanges(p.job.bandplans, plans)
+		const own = p.job.ranges.map(
+			(r): ScanRange => ({
+				startHz: r.startHz,
+				endHz: r.endHz,
+				name: nameOf(r.startHz, r.endHz) ?? edgesText(r.startHz, r.endHz),
+				rasters: r.rasters.map(x => ({ ...x })),
+				...(r.obwHz.length > 0 ? { obwHz: [...r.obwHz] } : {}),
+				protocols: [
+					...(r.protocols.length > 0 ? r.protocols : p.job.protocols),
+				],
+			}),
+		)
+		out.push({
+			id: p.id,
+			label: p.name,
+			name: p.name,
+			user: true,
+			ranges: [...fromPlans.ranges, ...own].sort(
+				(a, b) => a.startHz - b.startHz,
+			),
+			bandplans: [...p.job.bandplans],
+			skips: p.job.exclusions.map(x => ({
+				startHz: x.startHz,
+				endHz: x.endHz,
+				...(x.reason !== null ? { reason: x.reason } : {}),
+			})),
+			...(p.job.sensitivity !== null && p.job.sensitivity !== "normal"
+				? { sensitivity: p.job.sensitivity }
+				: {}),
+			job: p.job,
+			...(fromPlans.missing.length > 0 ? { missing: fromPlans.missing } : {}),
+		})
+	}
+	for (const v of list) {
+		const p = v.preset
+		if (p.kind !== "builtin") continue
+		const { ranges } = planRanges(p.job.bandplans, plans)
+		if (ranges.length === 0) continue
+		out.push({
+			id: p.id,
+			label: shortPlanName(p.name),
+			name: p.name,
+			ranges,
+			bandplans: [...p.job.bandplans],
+		})
+	}
+	return out
 }
 
 function spacingsOf(rasters: readonly Raster[] | undefined): number[] {
@@ -283,10 +390,17 @@ function fromScanRange(
 
 /** The ranges a preset adds (one row per joined piece). */
 export function rangesOfPreset(preset: Preset): PlanRange[] {
-	return preset.ranges.map((r, i, all) =>
+	const many = preset.ranges.length > 1 && preset.bandplans.length === 1
+	return preset.ranges.map((r, i) =>
 		fromScanRange(
 			r,
-			all.length > 1 ? `${preset.label} ${i + 1}` : preset.label,
+			preset.user
+				? (r.name ?? preset.label)
+				: many
+					? `${preset.label} ${i + 1}`
+					: preset.bandplans.length > 1
+						? (r.name ?? preset.label)
+						: preset.label,
 			preset.id,
 		),
 	)
@@ -299,24 +413,155 @@ export function sortRanges(ranges: readonly PlanRange[]): PlanRange[] {
 	)
 }
 
-/** A preset is on while every one of its ranges is in the plan. */
+const sameEdges = (
+	a: { startHz: number; endHz: number },
+	b: { startHz: number; endHz: number },
+) => a.startHz === b.startHz && a.endHz === b.endHz
+
+const sameList = (a: readonly string[], b: readonly string[]) =>
+	a.length === b.length && [...a].sort().join() === [...b].sort().join()
+
+/** A plan range that is a preset's range as the band plan has it: same edges, spacing and protocols. */
+function sameRange(r: PlanRange, pr: ScanRange): boolean {
+	return (
+		sameEdges(r, pr) &&
+		sameSpacing(r.spacingHz, spacingsOf(pr.rasters)) &&
+		sameList(r.protocols, pr.protocols ?? [])
+	)
+}
+
+/**
+ * A preset is on while each of its ranges is in the plan: one it added (edited or not), or the same range another
+ * preset brought (PMR446 inside Personal radio).
+ */
 export function presetOn(
 	preset: Preset,
 	ranges: readonly PlanRange[],
 ): boolean {
-	const mine = ranges.filter(r => r.preset === preset.id)
-	return mine.length > 0 && mine.length >= preset.ranges.length
+	const mine = ranges.filter(r => r.preset === preset.id).length
+	const shared = preset.ranges.filter(pr =>
+		ranges.some(r => r.preset !== preset.id && sameRange(r, pr)),
+	).length
+	return mine > 0 || shared > 0 ? mine + shared >= preset.ranges.length : false
 }
 
-/** Adds a preset's ranges, or takes them out when it is on. */
+/**
+ * Adds a preset's ranges (a range already in the plan as is, from another preset, is not added twice; an overlap
+ * with other protocols is, and the scan combines them), its skips and its sensitivity; or takes out what it added
+ * when it is on.
+ */
 export function togglePreset(draft: PlanDraft, preset: Preset): PlanDraft {
+	const skipsOf = preset.skips ?? []
 	if (presetOn(preset, draft.ranges))
 		return {
 			...draft,
 			ranges: draft.ranges.filter(r => r.preset !== preset.id),
+			skips: draft.skips.filter(x => !skipsOf.some(p => sameEdges(p, x))),
 		}
 	const kept = draft.ranges.filter(r => r.preset !== preset.id)
-	return { ...draft, ranges: sortRanges([...kept, ...rangesOfPreset(preset)]) }
+	const added = rangesOfPreset(preset).filter((_, i) => {
+		const pr = preset.ranges[i]
+		return !pr || !kept.some(k => sameRange(k, pr))
+	})
+	const skips = [
+		...draft.skips,
+		...skipsOf
+			.filter(p => !draft.skips.some(x => sameEdges(p, x)))
+			.map(
+				(p): PlanSkip => ({
+					key: newKey("x"),
+					startHz: p.startHz,
+					endHz: p.endHz,
+					...(p.reason ? { reason: p.reason } : {}),
+				}),
+			),
+	].sort((x, y) => x.startHz - y.startHz)
+	return {
+		...draft,
+		ranges: sortRanges([...kept, ...added]),
+		skips,
+		options: preset.sensitivity
+			? { ...draft.options, sensitivity: preset.sensitivity }
+			: draft.options,
+	}
+}
+
+/** The operator preset the whole plan comes from (Save then offers Update), else null. */
+export function userPresetOf(
+	presets: readonly Preset[],
+	ranges: readonly PlanRange[],
+): Preset | null {
+	if (ranges.length === 0) return null
+	const ids = new Set(ranges.map(r => r.preset))
+	if (ids.size !== 1) return null
+	const p = presets.find(x => x.user && ids.has(x.id))
+	return p && presetOn(p, ranges) ? p : null
+}
+
+/** A built-in preset whose ranges are all in the plan as the band plan has them (saved by id, so it follows the plan). */
+function presetIntact(preset: Preset, ranges: readonly PlanRange[]): boolean {
+	return preset.ranges.every(pr => ranges.some(r => sameRange(r, pr)))
+}
+
+/**
+ * What "Save as preset" stores (the core's closed preset job): band plans kept whole by id, every other range with its
+ * spacing and protocols, the skips and the sensitivity. Range names, Hold, Record, Stop after and the trial options
+ * have no place in it (CORE-GAPS).
+ */
+export function presetJobOf(
+	draft: PlanDraft,
+	presets: readonly Preset[],
+): ScanPresetJob {
+	const whole = presets.filter(
+		p =>
+			!p.user &&
+			draft.ranges.some(r => r.preset === p.id) &&
+			presetIntact(p, draft.ranges),
+	)
+	const covered = (r: PlanRange) =>
+		whole.some(p => p.ranges.some(pr => sameRange(r, pr)))
+	const bandplans = [...new Set(whole.flatMap(p => p.bandplans))].slice(
+		0,
+		BANDPLANS_LIMITS.presetBandplans,
+	)
+	const ranges: PresetRange[] = draft.ranges
+		.filter(r => !covered(r))
+		.slice(0, BANDPLANS_LIMITS.presetRanges)
+		.map(r => ({
+			startHz: Math.round(r.startHz),
+			endHz: Math.round(r.endHz),
+			rasters: rastersOf(r).slice(0, 8),
+			obwHz: [...(r.obwHz ?? [])].slice(0, 8),
+			protocols: [...r.protocols],
+		}))
+	return {
+		mode: "sweep",
+		bandplans,
+		ranges,
+		exclusions: draft.skips
+			.slice(0, BANDPLANS_LIMITS.presetExclusions)
+			.map(x => ({
+				startHz: Math.round(x.startHz),
+				endHz: Math.round(x.endHz),
+				reason: x.reason?.slice(0, 200) ?? null,
+			})),
+		protocols: [],
+		sensitivity:
+			draft.options.sensitivity === "normal" ? null : draft.options.sensitivity,
+		thresholdDb: null,
+		fftSize: null,
+		integrationMs: null,
+		dwellMs: null,
+		settleMs: null,
+	}
+}
+
+/** Tags the plan's ranges with a preset just saved (its chip reads on). */
+export function tagRanges(draft: PlanDraft, presetId: string): PlanDraft {
+	return {
+		...draft,
+		ranges: draft.ranges.map(r => ({ ...r, preset: presetId })),
+	}
 }
 
 /**

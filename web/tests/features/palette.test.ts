@@ -474,6 +474,7 @@ describe("palette: running rows", async () => {
 					),
 				},
 				scanner: { get: () => ({ bandplans: SCANNER_BANDPLANS, sweep: null }) },
+				scanPresets: { get: () => ({ view: null }) },
 			},
 			tuning: {
 				displayHz: () => 161_150_000,

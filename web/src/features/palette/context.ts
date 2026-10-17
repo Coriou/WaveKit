@@ -8,7 +8,7 @@ import { browserStorage } from "../../shell/theme.ts"
 import { useTunedHz, useTunerState } from "../hooks.ts"
 import { receiverLock, sampleRateOptions } from "../receiver/controls.ts"
 import { gainSteps } from "../receiver/gain.ts"
-import { presetsOf } from "../scanner/planner/plan.ts"
+import { presetsFrom } from "../scanner/planner/plan.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
 import type { PaletteContext, ReceiverContext } from "./model.ts"
 import { RecentList } from "./rank.ts"
@@ -29,6 +29,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	const savedState = useStore(data.savedFrequencies)
 	const byId = useStore(data.scanner, s => s.discoveries.byId)
 	const bandplans = useStore(data.scanner, s => s.bandplans)
+	const presetList = useStore(data.scanPresets, s => s.view?.presets ?? null)
 	const sweep = useStore(data.scanner, s => s.sweep)
 	const shell = useShell()
 	const theme = useTheme()
@@ -44,6 +45,7 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	// scan presets and receiver capabilities, once
 	useEffect(() => {
 		void data.scanner.loadBandplans()
+		void data.scanPresets.ensure()
 		void data.receiver.loadRelay()
 		if (sourceId !== null) void data.receiver.loadCaps(sourceId)
 	}, [data, sourceId])
@@ -64,7 +66,10 @@ export function usePaletteContext(recentVersion: number): PaletteContext {
 	}, [tuner, source, readOnly, relay, caps])
 
 	const discoveries = useMemo(() => [...byId.values()], [byId])
-	const presets = useMemo(() => presetsOf(bandplans), [bandplans])
+	const presets = useMemo(
+		() => presetsFrom(presetList, bandplans),
+		[presetList, bandplans],
+	)
 	const saved =
 		savedState.status === "unavailable" ||
 		(savedState.status === "idle" && savedState.items.length === 0)

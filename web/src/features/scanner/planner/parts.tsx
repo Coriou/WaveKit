@@ -38,6 +38,8 @@ const GLYPHS = {
 	pause: "M6 5h4v14h-4zM14 5h4v14h-4z",
 	scan: "M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9M16 9a5 5 0 1 0 -7 7M20.486 9a9 9 0 1 0 -11.482 11.495",
 	pencil: "M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4",
+	bookmark: "M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z",
+	save: "M6 4h10l4 4v10a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2M10 14a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M14 4v4h-6v-4",
 } as const
 
 export type GlyphName = keyof typeof GLYPHS

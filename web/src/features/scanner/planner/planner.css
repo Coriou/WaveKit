@@ -34,8 +34,8 @@
 	.wk-pl-head {
 		flex: none;
 		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
-		grid-template-areas: "title presets close";
+		grid-template-columns: auto minmax(0, 1fr) auto auto;
+		grid-template-areas: "title presets save close";
 		align-items: center;
 		column-gap: 12px;
 		row-gap: 8px;
@@ -47,7 +47,7 @@
 	}
 	.wk-pl:not([data-size="wide"]) .wk-pl-head[data-composing] {
 		grid-template-columns: minmax(0, 1fr) auto;
-		grid-template-areas: "title close" "presets presets";
+		grid-template-areas: "title close" "presets save";
 	}
 	.wk-pl[data-size="narrow"] .wk-pl-head {
 		padding: 10px 10px 8px 14px;
@@ -83,8 +83,46 @@
 		gap: 6px;
 		mask-image: linear-gradient(90deg, #000 calc(100% - 24px), transparent);
 	}
-	.wk-pl-presets > .wk-chip {
+	.wk-pl-chipwrap {
 		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.wk-pl-chipwrap > .wk-pl-vsep {
+		margin: 0 4px;
+	}
+	.wk-pl-chipwrap .wk-chip svg {
+		opacity: 0.8;
+	}
+	.wk-pl-save {
+		grid-area: save;
+		padding: 0 10px 0 8px;
+		font-weight: 400;
+	}
+	.wk-pl-savepop {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.wk-pl-savepop .wk-pl-note {
+		white-space: normal;
+	}
+	.wk-pl-savepop .wk-pl-note[data-tone="danger"] {
+		color: var(--wk-danger);
+	}
+	.wk-pl-savename {
+		height: 36px;
+		padding: 0 10px;
+		font-size: 14px;
+	}
+	.wk-pl-saveacts {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.wk-pl-saveacts .wk-btn {
+		padding: 0 10px;
 	}
 	.wk-pl-hide {
 		grid-area: close;
