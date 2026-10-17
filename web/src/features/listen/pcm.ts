@@ -253,3 +253,6 @@ export type ToWorklet =
 export type FromWorklet = { type: "stats" } & RingStats
 
 export const WORKLET_NAME = "wavekit-pcm"
+
+/** Stats cadence while playing (and on every playing change), seconds. */
+export const STATS_EVERY_S = 0.25

@@ -1,13 +1,17 @@
 // Low-latency live audio in the browser: fetch(status.httpUrl) as a stream of raw PCM, decode to Float32
 // and feed the AudioWorklet ring (pcm-worklet.ts); volume through a GainNode. The AudioContext is created
-// and resumed inside the Listen gesture (autoplay rules). The <audio> WAV path in controller.ts is the
-// fallback where AudioWorklet is missing.
+// and resumed inside the Listen gesture (autoplay rules). AudioWorklet is secure-context only: on a
+// plain-http page outside localhost (http://pi.local:5173) the same ring renders from a
+// ScriptProcessorNode on the main thread instead. The <audio> WAV path in controller.ts is the fallback
+// where Web Audio or fetch streaming is missing.
 import workletUrl from "./pcm-worklet.ts?worker&url"
 import {
 	parsePcmFormat,
 	parsePositiveInt,
 	parsePositiveRate,
 	PcmDecoder,
+	PcmRing,
+	STATS_EVERY_S,
 	WORKLET_NAME,
 } from "./pcm.ts"
 import type { FromWorklet, PcmFormat, RingStats, ToWorklet } from "./pcm.ts"
@@ -30,14 +34,98 @@ export interface PcmPlayerEvents {
 	onBlocked(): void
 }
 
-/** True where this player can run (AudioWorklet and fetch streaming). */
+/** True where this player can run (Web Audio and fetch streaming). */
 export function pcmPlayerSupported(): boolean {
 	return (
 		typeof AudioContext !== "undefined" &&
-		typeof AudioWorkletNode !== "undefined" &&
 		typeof ReadableStream !== "undefined" &&
 		typeof fetch === "function"
 	)
+}
+
+/**
+ * AudioWorklet is usable: secure contexts only. On a plain-http page outside localhost
+ * AudioWorkletNode still exists but `audioWorklet` does not (addModule would throw).
+ */
+function workletUsable(ctx: AudioContext): boolean {
+	return (
+		globalThis.isSecureContext !== false &&
+		typeof AudioWorkletNode !== "undefined" &&
+		typeof ctx.audioWorklet?.addModule === "function"
+	)
+}
+
+/** Where the decoded PCM goes: the worklet, or the main-thread ring of a ScriptProcessorNode. */
+interface PcmSink {
+	post(msg: ToWorklet, transfer?: Transferable[]): void
+	/** What the sink itself adds, ms (the ScriptProcessor's block). */
+	latencyMs: number
+	disconnect(): void
+}
+
+async function workletSink(
+	ctx: AudioContext,
+	out: AudioNode,
+	onStats: (stats: RingStats) => void,
+): Promise<PcmSink> {
+	await ctx.audioWorklet.addModule(workletUrl)
+	const node = new AudioWorkletNode(ctx, WORKLET_NAME, {
+		numberOfInputs: 0,
+		numberOfOutputs: 1,
+		outputChannelCount: [1],
+	})
+	node.port.onmessage = (event: MessageEvent<FromWorklet>) => {
+		if (event.data.type === "stats") onStats(event.data)
+	}
+	node.connect(out)
+	return {
+		post: (msg, transfer = []) => node.port.postMessage(msg, transfer),
+		latencyMs: 0,
+		disconnect: () => node.disconnect(),
+	}
+}
+
+/** Block size of the ScriptProcessor fallback: about 43 ms at 48 kHz, well under the ring's target. */
+const SCRIPT_BLOCK = 2048
+
+function scriptSink(
+	ctx: AudioContext,
+	out: AudioNode,
+	onStats: (stats: RingStats) => void,
+): PcmSink {
+	const ring = new PcmRing({ rate: ctx.sampleRate })
+	const node = ctx.createScriptProcessor(SCRIPT_BLOCK, 1, 1)
+	let wasPlaying = false
+	let lastStats = 0
+	node.onaudioprocess = event => {
+		const buffer = event.outputBuffer
+		const ch0 = buffer.getChannelData(0)
+		ring.render(ch0, ring.sampleRate / ctx.sampleRate)
+		for (let c = 1; c < buffer.numberOfChannels; c++)
+			buffer.getChannelData(c).set(ch0)
+		const playing = ring.playing
+		if (
+			playing !== wasPlaying ||
+			ctx.currentTime - lastStats >= STATS_EVERY_S
+		) {
+			wasPlaying = playing
+			lastStats = ctx.currentTime
+			onStats(ring.stats())
+		}
+	}
+	node.connect(out)
+	return {
+		post: msg => {
+			if (msg.type === "pcm") ring.push(msg.samples)
+			else if (msg.type === "format") ring.setRate(msg.rate)
+			else ring.reset()
+		},
+		latencyMs: (SCRIPT_BLOCK / ctx.sampleRate) * 1000,
+		disconnect: () => {
+			node.onaudioprocess = null
+			node.disconnect()
+		},
+	}
 }
 
 function makeContext(rate: number | null): AudioContext {
@@ -54,9 +142,9 @@ function makeContext(rate: number | null): AudioContext {
 
 export class PcmPlayer {
 	private ctx: AudioContext | null = null
-	private node: AudioWorkletNode | null = null
+	private sink: PcmSink | null = null
 	private gain: GainNode | null = null
-	private ready: Promise<AudioWorkletNode> | null = null
+	private ready: Promise<PcmSink> | null = null
 	private abort: AbortController | null = null
 	private volume = 1
 	private tap: ((samples: Float32Array, rate: number) => void) | null = null
@@ -78,18 +166,13 @@ export class PcmPlayer {
 			gain.gain.value = this.volume
 			gain.connect(ctx.destination)
 			this.gain = gain
-			this.ready = ctx.audioWorklet.addModule(workletUrl).then(() => {
-				const node = new AudioWorkletNode(ctx, WORKLET_NAME, {
-					numberOfInputs: 0,
-					numberOfOutputs: 1,
-					outputChannelCount: [1],
-				})
-				node.port.onmessage = (event: MessageEvent<FromWorklet>) => {
-					if (event.data.type === "stats") this.events.onStats(event.data)
-				}
-				node.connect(gain)
-				this.node = node
-				return node
+			const onStats = (stats: RingStats) => this.events.onStats(stats)
+			const sink = workletUsable(ctx)
+				? workletSink(ctx, gain, onStats)
+				: Promise.resolve(scriptSink(ctx, gain, onStats))
+			this.ready = sink.then(made => {
+				this.sink = made
+				return made
 			})
 			// a failed load surfaces through play()
 			this.ready.catch(() => undefined)
@@ -127,7 +210,10 @@ export class PcmPlayer {
 	outputLatencyMs(): number {
 		const ctx = this.ctx
 		if (!ctx) return 0
-		return ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000
+		return (
+			((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000 +
+			(this.sink?.latencyMs ?? 0)
+		)
 	}
 
 	setVolume(volume: number): void {
@@ -140,8 +226,8 @@ export class PcmPlayer {
 	dispose(): void {
 		this.abort?.abort()
 		this.abort = null
-		this.node?.disconnect()
-		this.node = null
+		this.sink?.disconnect()
+		this.sink = null
 		const ctx = this.ctx
 		this.ctx = null
 		this.ready = null
@@ -149,7 +235,7 @@ export class PcmPlayer {
 	}
 
 	private post(msg: ToWorklet, transfer: Transferable[] = []): void {
-		this.node?.port.postMessage(msg, transfer)
+		this.sink?.post(msg, transfer)
 	}
 
 	private async pump(source: PcmSource, signal: AbortSignal): Promise<void> {
@@ -167,9 +253,9 @@ export class PcmPlayer {
 			parsePcmFormat(headers.get("X-Audio-Format")) ?? source.format
 		const rate = parsePositiveRate(headers.get("X-Sample-Rate")) ?? source.rate
 		const channels = parsePositiveInt(headers.get("X-Channels")) ?? 1
-		const node = await ready
+		const sink = await ready
 		if (signal.aborted) return
-		node.port.postMessage({ type: "format", rate } satisfies ToWorklet)
+		sink.post({ type: "format", rate })
 		if (this.ctx?.state === "suspended") this.events.onBlocked()
 		const decoder = new PcmDecoder(format, channels)
 		const reader = response.body.getReader()
@@ -180,9 +266,7 @@ export class PcmPlayer {
 				const samples = decoder.push(value)
 				if (samples.length > 0 && this.tap) this.tap(samples.slice(), rate)
 				if (samples.length > 0)
-					node.port.postMessage({ type: "pcm", samples } satisfies ToWorklet, [
-						samples.buffer,
-					])
+					sink.post({ type: "pcm", samples }, [samples.buffer])
 			}
 		} finally {
 			reader.releaseLock()

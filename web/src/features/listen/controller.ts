@@ -171,7 +171,13 @@ export class ListenController extends Store<ListenState> {
 		this.retries = 0
 		// unlock audio inside the gesture so the browser allows sound later on
 		const status = this.liveAudio.get().status
-		this.player?.unlock(status?.effectiveSampleRate ?? null)
+		try {
+			this.player?.unlock(status?.effectiveSampleRate ?? null)
+		} catch (error) {
+			// a player that cannot start would otherwise leave Listen on "Connecting…" for good
+			this.set({ ...this.get(), phase: "error", error: errorMessage(error) })
+			return
+		}
 		if (this.source) this.attach()
 		if (!status?.running) {
 			try {

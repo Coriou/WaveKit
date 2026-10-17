@@ -1,6 +1,6 @@
 // The live-audio AudioWorklet: plays Float32 PCM posted by pcm-player.ts out of a PcmRing, resampling
 // from the stream rate to the context rate. Bundled by Vite (`?worker&url`) and loaded with addModule.
-import { PcmRing, WORKLET_NAME } from "./pcm.ts"
+import { PcmRing, STATS_EVERY_S, WORKLET_NAME } from "./pcm.ts"
 import type { FromWorklet, ToWorklet } from "./pcm.ts"
 
 // AudioWorkletGlobalScope (not in the DOM lib)
@@ -15,8 +15,6 @@ declare function registerProcessor(
 		process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean
 	},
 ): void
-
-const STATS_EVERY_S = 0.25
 
 class PcmProcessor extends AudioWorkletProcessor {
 	private readonly ring = new PcmRing({ rate: sampleRate })

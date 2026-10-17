@@ -75,6 +75,17 @@ describe("ListenController (Web Audio path)", () => {
 		expect(c.get().phase).toBe("connecting")
 	})
 
+	it("shows an error instead of connecting forever when the player cannot start", async () => {
+		const { c } = setup(status())
+		const failing = c as unknown as { player: ListenPlayer }
+		failing.player.unlock = () => {
+			throw new Error("Audio output is not available")
+		}
+		await c.start()
+		expect(c.get().phase).toBe("error")
+		expect(c.get().error).toBe("Audio output is not available")
+	})
+
 	it("sends the session cookie to the audio port on a protected core", async () => {
 		const { c, calls } = setup(status(), true)
 		await c.start()
