@@ -39,3 +39,18 @@ https://{$WAVEKIT_PUBLIC_HOST}:9445 {
 		flush_interval -1
 	}
 }
+
+# Optional web app origin (example, disabled). The web app is supported on its
+# own port of the API hostname only (same scheme and host, so same site: the
+# host-only SameSite=Strict session cookie is sent). Another hostname or site is
+# unsupported by design. To enable: uncomment, publish 9446, serve the built web
+# app from the root below, and add "https://<host>:9446" to
+# access.allowedOrigins (see protected-runtime.yaml). The web app calls the API
+# origin (9443) with credentials: "include"; no proxy to the API is needed here.
+# https://{$WAVEKIT_PUBLIC_HOST}:9446 {
+# 	bind 0.0.0.0
+# 	tls internal
+# 	root * /srv/wavekit-web
+# 	try_files {path} /index.html
+# 	file_server
+# }
