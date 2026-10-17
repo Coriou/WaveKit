@@ -884,7 +884,14 @@ and measured limits belong to that session's delta/review.
   FFT, memory, rate and DSP-profile limits.
 - [ ] Measure coalesced REST drag-to-tune and accepted-state latency; then decide
   WS tuning. Any transport reuses authorization, ordering, scanner preemption
-  and tuner origin semantics.
+  and tuner origin semantics. WG9 measured the operator retune to first frame at
+  the new centre offline (fake rtl_tcp on loopback, 50 retunes per injected delay,
+  network settle 1000 ms): p90 1148 ms before, 264 ms after at zero delay (280 ms
+  at 100 ms, 383 ms at 250 ms, 611 ms at 500 ms, where some old-centre blocks show
+  but are labelled `unverified`). The 150 ms operator display settle replaces the
+  1 s network settle for display; frames stay `unverified` until the network
+  settle. Revisit WS tuning with these numbers; a real-receiver measurement is
+  open.
 - [ ] Implement source/channel DC removal, IQ correction and IQ swap as measured
   sample-processing controls. Existing DC/image/spur masks only affect detection
   and display; the ignored legacy IQ DC-block flag must not imply correction.

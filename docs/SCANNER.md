@@ -16,7 +16,7 @@ Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-des
 
 ### In-window
 
-The job watches the current window of the source and never sends tuner commands. If an operator or an SDR++ relay client retunes, the job follows the new window: open observations end with `retune` and detection resumes after the settle time.
+The job watches the current window of the source and never sends tuner commands. If an operator or an SDR++ relay client retunes, the job follows the new window: open observations end with `retune` and detection resumes after the settle time. Operator (non-scanner) retunes use their own 150 ms display settle and stale-content cap (WG9); spectrum frames published before `scanner.sweep.settleMs.network` has elapsed after such a retune are labelled `unverified`. The scanner's own hops are unchanged.
 
 ### Sweep
 

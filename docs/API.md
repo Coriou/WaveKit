@@ -3018,9 +3018,9 @@ audio if it was idle.
 }
 ```
 
-`httpUrl` and `wavUrl` here are the stored live-audio URLs; the legacy `Host`
-rewrite applies only to `GET /api/live-audio/status`, so read that route for a
-reachable stream URL.
+`httpUrl` and `wavUrl` are the live-audio stream URLs, with the same host rule as
+[`GET /api/live-audio/status`](#get-apilive-audiostatus) (WG9): in legacy mode the
+`localhost` fallback follows the request's `Host` per response.
 
 409 `OUT_OF_WINDOW` with `details` saying why:
 
@@ -5163,8 +5163,11 @@ ready, each closed transmission is also stored as an `analog-transmission`
 
 - `frequency`: the tuned centre of the demodulator's source plus `offsetHz`
   when the transmission opened. `tuningTrust` is `commanded` under WaveKit
-  control and `relay` under external (SDR++) control. Null when the source
-  has no tuner state or its centre is an unconfirmed placeholder.
+  control and `relay` under external (SDR++) control, with the same strict rule
+  as spectrum frames (WG9): both the centre and the sample rate must have been
+  written or relayed on the current connection, else `unverified` (declared-only
+  values, a failed reconnect replay). Null when the source has no tuner state or
+  its centre is an unconfirmed placeholder.
 - `endedAt`: for a `squelch` close, the last above-threshold block (in noise mode
   the last quieted block; the close time minus the squelch hang, 250 ms, never
   before `startedAt`); for every other reason, the close time. Since the WG7 noise
@@ -5450,7 +5453,17 @@ One frame per source and profile:
   upper bound across sweep settles and gaps.
 - The max-hold restarts when the epoch changes, so a frame never mixes two
   centres. `tuningTrust: "unverified"` means the frequency axis may be wrong
-  (grey it out). `masks` are RF ranges: the DC spike (`dcHz ± dcGuardHz`) and
+  (grey it out). From WG9 the label follows the same strict rule as receptions:
+  `commanded` (internal control) or `relay` (external control) only when both the
+  centre and the sample rate were written by WaveKit or seen in an accepted relay
+  command on the current connection. A value only declared by the configuration or
+  the source caps, a failed reconnect replay or a `reconnectPolicy: reset`
+  reconnect gives `unverified`. One retune is one epoch, centred on the commanded
+  frequency. After an operator (non-scanner) retune the display settles for 150 ms
+  (blocks still at the old centre are discarded for at most 150 ms) instead of
+  `scanner.sweep.settleMs.network`, and frames published before the network settle
+  (1000 ms by default) has elapsed since the command are `unverified`. Scanner
+  hops are unchanged. `masks` are RF ranges: the DC spike (`dcHz ± dcGuardHz`) and
   every masked spur line.
 - `snapshot: true` marks the current-state frame sent right after an ack (the
   latest block of the current epoch at the client's profile; none while a
