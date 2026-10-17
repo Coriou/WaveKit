@@ -20,11 +20,24 @@ import {
 } from "react"
 
 import { useStore } from "../data/store.ts"
+import { CardAnnouncer, CardPlaceContext } from "./CardHandle.tsx"
+import {
+	cardPlace as defaultCardPlace,
+	type CardPlaceStore,
+} from "./card-place.ts"
 import { Drawer } from "../ui/Drawer.tsx"
 import { Icon } from "../ui/Icon.tsx"
 import type { DrawerContentProps } from "./drawers/types.ts"
 import { useShell } from "./hooks.ts"
-import { DEFAULT_GEOMETRY, shellLayout, type ShellGeometry } from "./layout.ts"
+import {
+	CARD_W,
+	DEFAULT_GEOMETRY,
+	nearestAnchor,
+	shellLayout,
+	type CardAnchor,
+	type Point,
+	type ShellGeometry,
+} from "./layout.ts"
 import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
@@ -62,9 +75,12 @@ export interface ShellProps {
 	tuner: IslandSlot
 	receiver: IslandSlot
 	listen: IslandSlot
-	/** The tuned card's content (a floating Island), shown at its home above Listen on wide windows. */
+	/** The tuned card's content (a floating Island), shown on its anchor (above Listen by default) on wide windows.
+	 * Its type tile goes in a CardHandle to make it movable. */
 	card?: ReactNode
 	store?: ShellStore
+	/** Where the tuned card sits (wanted anchor, remembered per browser, and the live drag). */
+	cardStore?: CardPlaceStore
 }
 
 const keyOf = (c: Closed): string =>
@@ -81,6 +97,11 @@ function sameGeometry(a: ShellGeometry, b: ShellGeometry): boolean {
 		a.listen.w === b.listen.w &&
 		a.listen.h === b.listen.h &&
 		a.listenLiveH === b.listenLiveH &&
+		a.listenLiveW === b.listenLiveW &&
+		a.tunerLive.w === b.tunerLive.w &&
+		a.tunerLive.h === b.tunerLive.h &&
+		a.rxLive.w === b.rxLive.w &&
+		a.rxLive.h === b.rxLive.h &&
 		a.dockW === b.dockW &&
 		a.cardH === b.cardH
 	)
@@ -93,8 +114,12 @@ export function Shell({
 	listen,
 	card,
 	store = shellStore,
+	cardStore = defaultCardPlace,
 }: ShellProps) {
 	const state = useShell(store)
+	// the shell re-renders when the wanted anchor changes or a drag starts or ends, never on pointer moves
+	const cardAt = useStore(cardStore, s => s.at)
+	const dragging = useStore(cardStore, s => s.drag !== null)
 
 	// ---- focus return: each panel, drawer and the palette remembers the control that opens it
 	const triggers = useRef(new Map<string, HTMLElement>())
@@ -124,7 +149,9 @@ export function Shell({
 	)
 	const refs = useRef({
 		tunerHead: elRef("tunerHead"),
+		tunerBox: elRef("tunerBox"),
 		rxHead: elRef("rxHead"),
+		rxBox: elRef("rxBox"),
 		listenHead: elRef("listenHead"),
 		listenBox: elRef("listenBox"),
 		dock: elRef("dock"),
@@ -143,14 +170,21 @@ export function Shell({
 				? { w: el.offsetWidth, h: el.offsetHeight }
 				: d
 		setGeo(prev => {
+			const tunerHead = sz(e["tunerHead"], DEFAULT_GEOMETRY.tuner)
+			const rxHead = sz(e["rxHead"], DEFAULT_GEOMETRY.rx)
+			const listenHead = sz(e["listenHead"], DEFAULT_GEOMETRY.listen)
 			const next: ShellGeometry = {
 				W: r.clientWidth,
 				H: r.clientHeight,
-				tuner: sz(e["tunerHead"], DEFAULT_GEOMETRY.tuner),
-				rx: sz(e["rxHead"], DEFAULT_GEOMETRY.rx),
-				listen: sz(e["listenHead"], DEFAULT_GEOMETRY.listen),
+				tuner: tunerHead,
+				rx: rxHead,
+				listen: listenHead,
 				listenLiveH:
 					e["listenBox"]?.offsetHeight || DEFAULT_GEOMETRY.listenLiveH,
+				listenLiveW: e["listenBox"]?.offsetWidth || listenHead.w,
+				// live sizes, open panel included: the card keeps clear of these
+				tunerLive: sz(e["tunerBox"], tunerHead),
+				rxLive: sz(e["rxBox"], rxHead),
 				dockW: e["dock"]?.offsetWidth ?? 0,
 				// a hidden card keeps its last height: falling back to the default would show it again when it is
 				// taller than the default, and the card would flip between shown and hidden
@@ -171,7 +205,19 @@ export function Shell({
 		geo,
 		state.drawer,
 		pane ? { want: paneWanted, pushIn: pane.pushIn } : null,
+		{ at: cardAt, rxOpen: state.panel === "receiver" },
 	)
+	// the card's handle reads this frame on pointer and key events
+	useLayoutEffect(() => {
+		cardStore.frame = {
+			anchors: L.anchors,
+			card: L.card,
+			freeW: L.freeW,
+			H: geo.H,
+			cardH: geo.cardH,
+		}
+		if (!L.card && cardStore.dragging) cardStore.cancelDrag()
+	})
 	useLayoutEffect(() => {
 		measure()
 		if (typeof ResizeObserver === "undefined") {
@@ -334,19 +380,28 @@ export function Shell({
 				</Suspense>
 			)}
 
-			{island("tuner", tuner, refs.tunerHead, undefined, { top: 16, left: 16 })}
-			{island("receiver", receiver, refs.rxHead, undefined, {
+			{island("tuner", tuner, refs.tunerHead, refs.tunerBox, {
+				top: 16,
+				left: 16,
+			})}
+			{island("receiver", receiver, refs.rxHead, refs.rxBox, {
 				top: L.rxTop,
 				right: L.rxRight,
 			})}
+			{card && L.card && dragging && (
+				<CardTargets
+					store={cardStore}
+					anchors={L.anchors}
+					home={L.card}
+					cardH={geo.cardH}
+				/>
+			)}
 			{card && L.card && (
-				<div
-					ref={refs.card}
-					className="wk-shell-cardslot"
-					style={{ transform: `translate(${L.card.x}px, ${L.card.y}px)` }}
-				>
-					{card}
-				</div>
+				<CardPlaceContext.Provider value={cardStore}>
+					<CardSlot store={cardStore} at={L.card} slotRef={refs.card}>
+						{card}
+					</CardSlot>
+				</CardPlaceContext.Provider>
 			)}
 			{island(
 				"listen",
@@ -440,6 +495,10 @@ export function Shell({
 				</button>
 			)}
 
+			<CardPlaceContext.Provider value={cardStore}>
+				<CardAnnouncer />
+			</CardPlaceContext.Provider>
+
 			{!state.palette && <ShellToast lifted={!L.dockHidden} />}
 
 			{state.palette && (
@@ -447,6 +506,72 @@ export function Shell({
 					<Palette onClose={closePalette} />
 				</Suspense>
 			)}
+		</div>
+	)
+}
+
+/** The tuned card's slot: on its anchor (gliding there), or under the pointer while dragged. Only this re-renders
+ * on pointer moves; the card element itself is the same and React skips it. */
+function CardSlot({
+	store,
+	at,
+	slotRef,
+	children,
+}: {
+	store: CardPlaceStore
+	at: Point
+	slotRef: Ref<HTMLDivElement>
+	children: ReactNode
+}) {
+	const drag = useStore(store, s => s.drag)
+	const p = drag ?? at
+	return (
+		<div
+			ref={slotRef}
+			className="wk-shell-cardslot"
+			data-dragging={drag ? "" : undefined}
+			style={{
+				transform: `translate(${p.x}px, ${p.y}px)${drag ? " scale(1.02)" : ""}`,
+			}}
+		>
+			{children}
+		</div>
+	)
+}
+
+/** While the card is dragged: a quiet dot on each free anchor (the one it will snap to stronger) and a dashed
+ * outline where it lands. No blur (glass budget). */
+function CardTargets({
+	store,
+	anchors,
+	home,
+	cardH,
+}: {
+	store: CardPlaceStore
+	anchors: readonly CardAnchor[]
+	home: Point
+	cardH: number
+}) {
+	const drag = useStore(store, s => s.drag)
+	const snap = (drag && nearestAnchor(anchors, drag.x, drag.y)) ?? null
+	const land = snap ?? home
+	return (
+		<div className="wk-shell-targets" aria-hidden="true">
+			{anchors.map(a => (
+				<span
+					key={a.id}
+					className="wk-shell-target"
+					data-on={snap?.id === a.id || undefined}
+					style={{ left: a.x + CARD_W / 2, top: a.y + cardH / 2 }}
+				/>
+			))}
+			<span
+				className="wk-shell-target-ghost"
+				style={{
+					height: cardH,
+					transform: `translate(${land.x}px, ${land.y}px)`,
+				}}
+			/>
 		</div>
 	)
 }

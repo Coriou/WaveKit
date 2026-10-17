@@ -350,9 +350,226 @@
 		line-height: 1.4;
 	}
 	.wkf-actions {
+		position: relative;
 		display: flex;
 		gap: 6px;
 		min-width: 0;
+	}
+	.wkf-actions > .wk-btn {
+		min-width: 0;
+		padding-inline: 10px;
+	}
+	/* icon-only actions: 36 px, chip-filled, pressed = selected fill and accent (board: wk-tc-act) */
+	.wkf-act-icon {
+		width: 36px;
+		height: 36px;
+		flex: none;
+		border-radius: 6px;
+		background: var(--wk-chip);
+		color: var(--wk-text-2);
+	}
+	.wkf-act-icon:hover {
+		background: var(--wk-fill);
+		color: var(--wk-text);
+	}
+	.wkf-act-icon[aria-pressed="true"],
+	.wkf-act-icon[aria-expanded="true"] {
+		background: var(--wk-sel);
+		color: var(--wk-accent);
+	}
+	.wkf-card-menu {
+		position: absolute;
+		right: 0;
+		bottom: 42px;
+		z-index: 5;
+		min-width: 200px;
+		display: flex;
+		flex-direction: column;
+	}
+	.wkf-card-menu .wk-option {
+		white-space: nowrap;
+	}
+
+	/* Tuned card: minimise (one line: frequency, protocol and identity, a live dot) */
+	.wkf-card[data-min] {
+		padding: 8px 10px;
+	}
+	.wkf-card-chev {
+		margin: -4px -6px -4px -4px;
+	}
+	.wkf-card-line {
+		flex: 1;
+		min-width: 0;
+		height: 36px;
+		margin: -1px -4px -1px -2px;
+		padding: 0 6px 0 4px;
+		border-radius: var(--wk-r-3);
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		text-align: left;
+	}
+	.wkf-card-line:hover {
+		background: rgba(var(--wk-accent-rgb), 0.06);
+	}
+	.wkf-card-line-text {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		white-space: nowrap;
+		font-size: var(--wk-fs-md);
+	}
+	.wkf-card-line-id {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		color: var(--wk-text-2);
+	}
+	.wkf-card-freq-row {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.wkf-pin-mark {
+		color: var(--wk-accent);
+		stroke-width: 2;
+	}
+	.wkf-state[data-tone="amber"] {
+		color: var(--wk-amber);
+	}
+	.wkf-dot[data-pulse] {
+		animation: wkf-pulse 1.1s steps(1, end) infinite;
+	}
+	@keyframes wkf-pulse {
+		0%,
+		60% {
+			opacity: 1;
+		}
+		61%,
+		100% {
+			opacity: 0.35;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.wkf-dot[data-pulse] {
+			animation: none;
+		}
+	}
+
+	/* Tuned card: the now block by kind */
+	.wkf-now-title {
+		font-weight: 700;
+		font-size: var(--wk-fs-lg);
+		line-height: 1.35;
+		overflow-wrap: anywhere;
+	}
+	.wkf-big[data-count] {
+		font-size: 40px;
+	}
+	.wkf-lock {
+		flex: none;
+		align-self: center;
+		color: var(--wk-amber);
+		stroke-width: 2;
+	}
+	.wkf-now-body {
+		margin: 2px 0 0;
+		font-size: var(--wk-fs-md);
+		line-height: 1.45;
+		color: var(--wk-text-soft);
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+		overflow-wrap: anywhere;
+	}
+	.wkf-now-body[data-msg] {
+		font-size: var(--wk-fs-xl);
+		color: var(--wk-text);
+	}
+	.wkf-now-body[data-mono] {
+		font-family: var(--wk-font-mono);
+		font-size: var(--wk-fs-md);
+	}
+	.wkf-now-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 2px;
+	}
+	.wkf-now-chip {
+		height: 24px;
+		box-sizing: border-box;
+		padding: 0 8px;
+		border-radius: var(--wk-r-2);
+		background: var(--wk-fill);
+		font-size: var(--wk-fs-sm);
+		line-height: 24px;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.wkf-rate {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+		margin-top: 4px;
+	}
+	.wkf-rate-bars {
+		flex: 1;
+		display: flex;
+		align-items: flex-end;
+		gap: 2px;
+		height: 22px;
+	}
+	.wkf-rate-bars > span {
+		flex: 1;
+		min-height: 2px;
+		border-radius: 1px;
+		background: rgba(var(--wk-accent-rgb), 0.35);
+	}
+	.wkf-rate-bars > span[data-last] {
+		background: var(--wk-accent);
+	}
+	.wkf-rate-text {
+		flex: none;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* Tuned card: earlier on this frequency */
+	.wkf-earlier {
+		display: flex;
+		flex-direction: column;
+	}
+	.wkf-earlier > h3 {
+		margin: 0 0 2px;
+	}
+	.wkf-earlier-row {
+		margin: 0 -8px;
+		font-size: var(--wk-fs-md);
+	}
+	.wkf-earlier-t {
+		width: 40px;
+		flex: none;
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wkf-earlier-a {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		text-align: left;
+	}
+	.wkf-earlier-b {
+		flex: none;
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
 	}
 
 	/* Tuned card: identify */

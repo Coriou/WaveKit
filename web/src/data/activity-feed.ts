@@ -29,7 +29,7 @@ export type ActivityResetReason =
 export interface ActivityFeedState {
 	query: ActivityQuery | null
 	status: "idle" | "loading" | "live" | "error"
-	/** Newest first, deduplicated by eventId, at most MAX_ITEMS. */
+	/** Newest first, deduplicated by eventId, at most `maxItems` (MAX_ITEMS by default). */
 	items: readonly ActivitySummary[]
 	/** Live records held while paused or scrolled away (newest first). */
 	pending: readonly ActivitySummary[]
@@ -146,6 +146,8 @@ export interface ActivityFeedOptions {
 	/** Delay that batches live records into one update; default 120 ms. */
 	flushMs?: number
 	pageSize?: number
+	/** Most items kept in the list; default MAX_ITEMS. */
+	maxItems?: number
 	/** Subscription id prefix; each feed instance needs its own. */
 	id?: string
 }
@@ -157,6 +159,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	private readonly events: EventsClient
 	private readonly flushMs: number
 	private readonly pageSize: number
+	private readonly maxItems: number
 	private readonly id: string
 	private readonly cleanup: (() => void)[]
 	private unsubscribe: (() => void) | null = null
@@ -175,6 +178,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		this.events = events
 		this.flushMs = options.flushMs ?? 120
 		this.pageSize = options.pageSize ?? PAGE
+		this.maxItems = options.maxItems ?? MAX_ITEMS
 		feedCount += 1
 		this.id = options.id ?? `activity-${feedCount}`
 		this.cleanup = [
@@ -220,7 +224,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			this.update(s => ({
 				...s,
 				status: "live",
-				items: [...page.items].sort(newestFirst).slice(0, MAX_ITEMS),
+				items: [...page.items].sort(newestFirst).slice(0, this.maxItems),
 				pending: [],
 				nextPageToken: page.nextPageToken,
 				available: true,
@@ -255,7 +259,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			this.update(v => ({
 				...v,
 				loadingMore: false,
-				items: mergeNewest(v.items, page.items),
+				items: mergeNewest(v.items, page.items, this.maxItems),
 				nextPageToken: page.nextPageToken,
 			}))
 		} catch (error) {
@@ -283,7 +287,11 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	release(): void {
 		const s = this.get()
 		if (s.pending.length === 0) return
-		this.set({ ...s, items: mergeNewest(s.items, s.pending), pending: [] })
+		this.set({
+			...s,
+			items: mergeNewest(s.items, s.pending, this.maxItems),
+			pending: [],
+		})
 	}
 
 	/** Stops the live feed and pending flushes; the store keeps its last state. */
@@ -326,8 +334,8 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		if (batch.length === 0) return
 		const s = this.get()
 		if (s.paused || s.holding)
-			this.set({ ...s, pending: mergeNewest(s.pending, batch) })
-		else this.set({ ...s, items: mergeNewest(s.items, batch) })
+			this.set({ ...s, pending: mergeNewest(s.pending, batch, this.maxItems) })
+		else this.set({ ...s, items: mergeNewest(s.items, batch, this.maxItems) })
 	}
 
 	private stopLive(): void {
