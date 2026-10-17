@@ -7,7 +7,12 @@
  */
 import { EventEmitter } from "node:events"
 import type { Readable } from "node:stream"
-import type { TunerCommandOrigin, TunerState } from "@wavekit/api-types"
+import { SPECTRUM_WARNING_LOG_INTERVAL_MS } from "@wavekit/api-types"
+import type {
+	SpectrumWarningSuspect,
+	TunerCommandOrigin,
+	TunerState,
+} from "@wavekit/api-types"
 import type { SourceCaps } from "../../config.js"
 import type { BranchTelemetry, FanoutManager } from "../fanout-manager.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
@@ -120,6 +125,10 @@ export interface EngineWarning {
 	code: "untracked-retune" | "host-centre-mismatch"
 	deltaHz: number | null
 	at: number
+	/** WG10 req 2.9: untracked-retune only. */
+	suspected?: SpectrumWarningSuspect
+	/** WG10 req 2.9: untracked-retune only; ms since this engine saw a command on the source, null when none. */
+	lastCommandAgeMs?: number | null
 }
 
 const MAX_WARNINGS = 16
@@ -194,6 +203,8 @@ export interface SpectrumEngineDeps {
 	batchBytes?: number
 	hostCentre?: HostCentreReader
 	hostCentrePollMs?: number
+	/** WG10 req 2.9: clock for warning times, command ages and the warn-log interval (default Date.now). */
+	now?: () => number
 }
 
 export function isScannerIqFormat(
@@ -373,6 +384,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private spectrumFeed = false
 	private lastStats: PipelineStats | null = null
 	private readonly warningList: EngineWarning[] = []
+	/** WG10 req 2.9: when this engine last saw a tuner command on its source (any origin). */
+	private lastCommandAt: number | null = null
+	/** WG10 req 2.9: warn-log rate limit (one line per interval, suppressed lines counted). */
+	private warnLoggedAt: number | null = null
+	private warnSuppressed = 0
 	private centreOverride: number | null = null
 	private hostTimer: NodeJS.Timeout | null = null
 
@@ -1151,6 +1167,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.currentVerifiedEpoch = ev.epoch
 				this.statusWindowOpen = this.currentVerifiedFrom !== null
 				this.verifiedFrom.delete(ev.epoch)
+			} else if (ev.kind === "untracked-retune" && ev.newEpoch === false) {
+				// WG10 req 2.9: a strong transmission ended: no epoch, warn only; not forwarded
+				// (the scanner would re-send its hop for a retune that did not happen).
+				this.warn(
+					"untracked-retune",
+					ev.deltaHz,
+					ev.suspected ?? "signal-change",
+				)
+				continue
 			} else if (ev.kind === "untracked-retune") {
 				// § 4.7: the pipeline already started an unverified epoch (Task 10b); record it, post nothing.
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
@@ -1164,7 +1189,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					tuningTrust: "unverified",
 					settleMode: null,
 				})
-				this.warn("untracked-retune", ev.deltaHz)
+				if (ev.realign === true && this.fmt === "U8_IQ") {
+					// WG10 req 2.9: a mirror over two blocks: drop one byte to swap I and Q back.
+					this.skipBytes += 1
+				}
+				this.warn(
+					"untracked-retune",
+					ev.deltaHz,
+					ev.suspected ?? "external-control",
+				)
 			} else if (ev.kind === "stats") {
 				this.lastStats = ev.stats
 				if (ev.stats.stuckTestMode) this.marker = false
@@ -1265,6 +1298,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		value: number,
 		origin?: TunerCommandOrigin,
 	): void => {
+		if (sourceId === this.sourceId) this.lastCommandAt = this.now()
 		if (
 			sourceId !== this.sourceId ||
 			this.suppressed > 0 ||
@@ -1340,10 +1374,43 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			: null
 	}
 
-	private warn(code: EngineWarning["code"], deltaHz: number | null): void {
-		this.warningList.push({ code, deltaHz, at: Date.now() })
+	private now(): number {
+		return this.deps.now?.() ?? Date.now()
+	}
+
+	private warn(
+		code: EngineWarning["code"],
+		deltaHz: number | null,
+		suspected?: SpectrumWarningSuspect,
+	): void {
+		const at = this.now()
+		const warning: EngineWarning = { code, deltaHz, at }
+		if (suspected !== undefined) {
+			warning.suspected = suspected
+			warning.lastCommandAgeMs =
+				this.lastCommandAt === null
+					? null
+					: Math.max(0, at - this.lastCommandAt)
+		}
+		this.warningList.push(warning)
 		if (this.warningList.length > MAX_WARNINGS) this.warningList.shift()
-		this.log.warn({ code, deltaHz }, "Spectrum engine trust warning")
+		// WG10 req 2.9: one line per source per interval; the list above keeps every warning.
+		if (
+			this.warnLoggedAt !== null &&
+			at - this.warnLoggedAt < SPECTRUM_WARNING_LOG_INTERVAL_MS
+		) {
+			this.warnSuppressed++
+		} else {
+			const fields: Record<string, unknown> = { code, deltaHz }
+			if (suspected !== undefined) {
+				fields["suspected"] = suspected
+				fields["lastCommandAgeMs"] = warning.lastCommandAgeMs
+			}
+			if (this.warnSuppressed > 0) fields["suppressed"] = this.warnSuppressed
+			this.log.warn(fields, "Spectrum engine trust warning")
+			this.warnLoggedAt = at
+			this.warnSuppressed = 0
+		}
 		this.emit("warning", code, deltaHz)
 	}
 
