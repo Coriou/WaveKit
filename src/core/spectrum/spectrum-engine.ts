@@ -39,6 +39,7 @@ import { IqRing } from "./iq-ring.js"
 import {
 	blockSamplesOf,
 	frameTrust,
+	mergeTrust,
 	operatorRetuneTiming,
 } from "./retune-settle.js"
 import {
@@ -71,13 +72,6 @@ const EPOCH_COMMANDS: ReadonlySet<string> = new Set([
 	"set-tuner-gain-index",
 	"set-tuner-if-gain",
 ])
-
-/** The weaker of two labels: `unverified` beats `relay`, which beats `commanded`. */
-function mergeTrust(a: TuningTrust, b: TuningTrust): TuningTrust {
-	if (a === "unverified" || b === "unverified") return "unverified"
-	if (a === "relay" || b === "relay") return "relay"
-	return "commanded"
-}
 
 const IQ_FORMATS: ReadonlySet<string> = new Set([
 	"U8_IQ",
@@ -360,7 +354,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private currentVerifiedFrom: number | null = null
 	/** The epoch `currentVerifiedFrom` belongs to. */
 	private currentVerifiedEpoch: number | null = null
-	/** Status reads `unverified` until the first block at or past the current epoch's settle. */
+	/** Status reads `unverified` until the first data-bound event at or past the current epoch's settle. */
 	private statusWindowOpen = false
 	/**
 	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
@@ -587,7 +581,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/**
 	 * WG9 (tt minor): status agrees with the frames: while a non-scanner retune's unverified
-	 * window is open (no block at or past the network settle yet), the epoch reads `unverified`.
+	 * window is open (no block, track or transient at or past the network settle yet), the
+	 * epoch reads `unverified`.
 	 */
 	currentEpoch(): EngineEpoch {
 		if (
@@ -1137,6 +1132,10 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 						for (const [epoch, m] of this.pendingMeta) {
 							if (m.stream < stream) this.pendingMeta.delete(epoch)
 						}
+						// WG9 R3: and their network-settle entries (every live entry has its meta).
+						for (const epoch of this.verifiedFrom.keys()) {
+							if (!this.pendingMeta.has(epoch)) this.verifiedFrom.delete(epoch)
+						}
 					}
 				}
 				// Late old-stream events keep the old stream's labels (thread host).
@@ -1188,10 +1187,10 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (from === null || this.currentVerifiedEpoch !== epoch.epoch) return epoch
 		const start = this.eventStart(ev, epoch.epoch)
 		if (start === null) return epoch
-		// The first block at or past the settle closes the window for status (frames,
-		// tracks and transients keep their own data-start rule).
-		if (ev.kind === "block-summary" && start >= from)
-			this.statusWindowOpen = false
+		// The first block, track or transient whose data starts at or past the settle closes
+		// the window for status (the pipeline emits a block's tracks before its summary).
+		// Each event keeps its own data-start label.
+		if (start >= from) this.statusWindowOpen = false
 		return { ...epoch, tuningTrust: frameTrust(epoch.tuningTrust, start, from) }
 	}
 

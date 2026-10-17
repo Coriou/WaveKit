@@ -71,3 +71,10 @@ export function frameTrust(
 	if (verifiedFromSample === null) return trust
 	return blockStartSample < verifiedFromSample ? "unverified" : trust
 }
+
+/** The weaker of two labels: `unverified` beats `relay`, which beats `commanded`. */
+export function mergeTrust(a: TuningTrust, b: TuningTrust): TuningTrust {
+	if (a === "unverified" || b === "unverified") return "unverified"
+	if (a === "relay" || b === "relay") return "relay"
+	return "commanded"
+}
