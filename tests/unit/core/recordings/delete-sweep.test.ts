@@ -106,6 +106,33 @@ describe("sweepRecordingDeleteLeftovers (WG10 req 1.9)", () => {
 		expect(fs.has(`/s/probe-1/${P}/verified`)).toBe(true)
 	})
 
+	it("sweeps a lowercase wav folder too (Main, rk2 review minor 4)", async () => {
+		const fs = new FakeFs()
+		fs.dir("/r/wav")
+		fs.priv("/r/wav", P, ["verified"])
+		const res = await run(fs).p
+		expect(res).toMatchObject({ found: 1, deleted: 1 })
+		expect(fs.has(`/r/wav/${P}`)).toBe(false)
+	})
+
+	it("WAV and wav naming one directory (case-insensitive disk) are listed once", async () => {
+		class CaseFs extends FakeFs {
+			private fold = (p: string): string => p.replace("/r/wav", "/r/WAV")
+			override lstat(path: string) {
+				return super.lstat(this.fold(path))
+			}
+			override readdir(path: string, limit: number) {
+				return super.readdir(this.fold(path), limit)
+			}
+		}
+		const fs = new CaseFs()
+		fs.dir("/r/WAV")
+		fs.priv("/r/WAV", P, ["verified"])
+		const res = await run(fs).p
+		expect(res).toMatchObject({ found: 1, deleted: 1, left: 0 })
+		expect(fs.ops).toEqual([`unlink /r/WAV/${P}/verified`, `rmdir /r/WAV/${P}`])
+	})
+
 	describe("refusals leave everything in place and count left", () => {
 		const cases: Array<[string, (fs: FakeFs) => void]> = [
 			[

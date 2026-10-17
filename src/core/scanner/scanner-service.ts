@@ -46,7 +46,12 @@ import {
 	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
 	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 } from "@wavekit/api-types"
-import type { RecordingProtection } from "../recordings/contract.js"
+import type {
+	RecordingProtection,
+	ScannerRecordingDeleter,
+} from "../recordings/contract.js"
+import { createScannerRecordingDeleter } from "./recording-delete.js"
+import { holdsKeptWithAliases } from "./recording-aliases.js"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -417,6 +422,8 @@ export class ScannerService extends EventEmitter {
 	private readonly persistence: ScannerPersistence
 	private readonly store: DiscoveryStore
 	private readonly evidence: EvidenceStore
+	/** WG10 req 1.1: the scanner side of a `scan:` recording delete. */
+	private readonly recordingDeleter: ScannerRecordingDeleter
 	private readonly arbiter: TunerArbiter
 	private readonly probes: ProbePool
 	private readonly ambient: AmbientEvidence
@@ -637,7 +644,13 @@ export class ScannerService extends EventEmitter {
 				...(deps.recordingProtection
 					? {
 							discoveryHoldsKept: (id: string) =>
-								deps.recordingProtection?.discoveryHoldsKept(id) ?? true,
+								deps.recordingProtection
+									? holdsKeptWithAliases(
+											deps.recordingProtection,
+											alias => this.store.aliasesOf(alias),
+											id,
+										)
+									: true,
 						}
 					: {}),
 			})
@@ -647,9 +660,21 @@ export class ScannerService extends EventEmitter {
 				logger: deps.logger,
 				now: this.now,
 				isDiscoveryLive: id => this.store.get(id) !== undefined,
+				aliases: {
+					aliasOwner: id => this.store.aliasOwner(id),
+					aliasesOf: id => this.store.aliasesOf(id),
+					releaseAliases: id => this.store.releaseAliases(id),
+				},
 				...(deps.recordingProtection
 					? { protection: deps.recordingProtection }
 					: {}),
+			})
+			// WG10 req 1.6: a capacity eviction removes the evicted folders like an inactive prune.
+			this.store.on("evicted", this.onStoreEvicted)
+			this.recordingDeleter = createScannerRecordingDeleter({
+				evidence: this.evidence,
+				discovery: this.store,
+				logger: deps.logger,
 			})
 			this.evidence.configureAnalog({
 				authorityHealthy: () =>
@@ -884,6 +909,7 @@ export class ScannerService extends EventEmitter {
 			discoveries: loaded.discoveries,
 			observations: loaded.observations,
 			corrections: loaded.corrections,
+			...(loaded.aliases ? { aliases: loaded.aliases } : {}),
 		}
 		try {
 			this.store.restore({
@@ -1838,6 +1864,11 @@ export class ScannerService extends EventEmitter {
 			throw err
 		}
 		return true
+	}
+
+	/** WG10 req 1.1: what Main passes to the keep service as `scannerDeleter`. */
+	scannerRecordingDeleter(): ScannerRecordingDeleter {
+		return this.recordingDeleter
 	}
 
 	recordingPath(recordingId: string): string | null {
@@ -4431,12 +4462,8 @@ export class ScannerService extends EventEmitter {
 	private refuseIfHoldsKept(id: string): void {
 		const port = this.deps.recordingProtection
 		if (!port) return
-		let holds = true
-		try {
-			holds = port.discoveryHoldsKept(id) !== false
-		} catch {
-			holds = true
-		}
+		// WG10 req 1.5: any merge alias holding a kept key counts (fail closed).
+		const holds = holdsKeptWithAliases(port, a => this.store.aliasesOf(a), id)
 		if (holds)
 			throw new ScannerApiError(
 				"Discovery holds kept recordings",
@@ -4458,6 +4485,30 @@ export class ScannerService extends EventEmitter {
 			"Scanner recording evidence is unavailable",
 			"SCANNER_EVIDENCE_UNAVAILABLE",
 			503,
+		)
+	}
+
+	/** WG10 req 1.6: as `maintenance` does for pruned ids (kept holders are never evicted). */
+	private readonly onStoreEvicted = (evicted: Discovery[]): void => {
+		for (const discovery of evicted) {
+			this.lastConfirm.delete(discovery.id)
+			this.emit("discovery", {
+				change: "deleted",
+				discovery,
+			} satisfies ScannerDiscoveryEventData)
+		}
+		this.dirty = true
+		this.track(
+			(async () => {
+				let failed = 0
+				for (const discovery of evicted)
+					await this.evidence.removeDiscovery(discovery.id).catch(() => {
+						failed++
+					})
+				if (failed > 0)
+					this.log.warn({ failed }, "Removing evicted evidence failed")
+			})(),
+			"Removing evicted evidence failed",
 		)
 	}
 

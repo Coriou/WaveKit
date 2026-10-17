@@ -10,6 +10,7 @@ import {
 	MAX_RECOVERY_OPERATIONS,
 } from "./recording-operation.js"
 import type { PreparedRecordingMetadata } from "./recording-operation.js"
+import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../recordings/contract.js"
 import type {
 	DecodeEvidence,
 	Discovery,
@@ -256,7 +257,27 @@ export interface StoreMutation {
 		add: PreparedRecordingMetadata[]
 		remove: string[]
 	}
+	/** WG10 req 1.5: each changed owner's merge alias list as written (empty: none left). */
+	aliases?: { id: string; aliases: string[] }[]
 }
+
+/** WG10 req 1.5: one owner's merge aliases (bounded; absent in state written before WG10). */
+export const DiscoveryAliasEntrySchema = z
+	.object({
+		id: z
+			.string()
+			.max(64)
+			.regex(/^d_[0-9A-Za-z]+$/),
+		aliases: z
+			.array(
+				z
+					.string()
+					.max(64)
+					.regex(/^d_[0-9A-Za-z]+$/),
+			)
+			.max(DISCOVERY_RECORDING_ALIASES_MAX),
+	})
+	.strict()
 export const StoreMutationSchema = z
 	.object({
 		discoveries: z.array(DiscoverySchema),
@@ -281,6 +302,7 @@ export const StoreMutationSchema = z
 					})
 			})
 			.optional(),
+		aliases: z.array(DiscoveryAliasEntrySchema).optional(),
 	})
 	.strict()
 export type StoreMutationCheck = Assert<

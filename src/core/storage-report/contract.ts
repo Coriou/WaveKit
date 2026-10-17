@@ -5,6 +5,7 @@
 import type {
 	StorageActivityRetention,
 	StorageAreaId,
+	StorageKeptSummary,
 	StorageReport,
 } from "@wavekit/api-types"
 
@@ -37,6 +38,8 @@ export interface StorageReportOptions {
 	 * A function is evaluated at each scan, like `areas`.
 	 */
 	minFreeBytes: number | null | (() => number | null)
+	/** WG10 req 1.8: the keep store summary; omitted or throwing means `kept: null`. */
+	kept?: () => StorageKeptSummary | null
 	now?: () => number
 }
 

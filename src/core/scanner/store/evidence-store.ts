@@ -8,11 +8,17 @@
  * from the last 10 s and files of `keep` discoveries are never deleted. Writes stop while free disk
  * is below `minFreeDiskMb`.
  */
-import { existsSync, lstatSync, realpathSync } from "node:fs"
+import {
+	constants as fsConstants,
+	existsSync,
+	lstatSync,
+	realpathSync,
+} from "node:fs"
 import {
 	copyFile,
 	lstat,
 	mkdir,
+	open,
 	readdir,
 	readFile,
 	realpath,
@@ -27,12 +33,21 @@ import { join, relative, resolve } from "node:path"
 import { z } from "zod"
 import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
 import type { RecordingProtection } from "../../recordings/contract.js"
+import { RecordingKeepError } from "../../recordings/contract.js"
+import {
+	RECORDING_BUSY_TEXT,
+	RECORDING_DELETE_UNSUPPORTED_TEXT,
+	verifiedUnlink,
+} from "../../recordings/verified-unlink.js"
+import type { RecordingDeleteFs } from "../../recordings/verified-unlink.js"
 import { RECORDING_IN_PROGRESS_MS } from "../../../decoders/builtin/call-recordings.js"
 import { ScannerApiError } from "../errors.js"
 import { WaveKitError } from "../../../utils/errors.js"
 import { createComponentLogger } from "../../../utils/logger.js"
 import type { Logger } from "../../../utils/logger.js"
 import { atomicWrite } from "./persistence.js"
+import { holdsKeptWithAliases, withAliasFolders } from "../recording-aliases.js"
+import type { DiscoveryAliasLookup } from "../recording-aliases.js"
 import {
 	AnalogOperations,
 	type AnalogHandle,
@@ -252,6 +267,10 @@ export class EvidenceStore {
 	private readonly keepLog: Logger
 	/** WG9 R2: the identity of a symlinked configured root's real directory; null otherwise. */
 	private readonly rootPin: { dev: number; ino: number } | null
+	/** WG10 req 1.1: test seam of the scanner delete's verified unlink. */
+	private readonly recordingDeleteFs: RecordingDeleteFs | undefined
+	/** WG10 req 1.5: merge aliases (none without the lookup). */
+	private readonly aliases: DiscoveryAliasLookup | undefined
 
 	constructor(opts: {
 		dir: string
@@ -264,6 +283,10 @@ export class EvidenceStore {
 		analogIo?: AnalogOperationIo
 		/** WG9 req 2.5: kept recordings survive retention and block discovery removal. */
 		protection?: RecordingProtection
+		/** WG10 req 1.1: test seam of the scanner delete's verified unlink. */
+		recordingDeleteFs?: RecordingDeleteFs
+		/** WG10 req 1.5: the discovery store's merge aliases. */
+		aliases?: DiscoveryAliasLookup
 	}) {
 		// WG9 R2: a symlinked configured root is followed once; its real directory is the base,
 		// so symlinks below it stay refused and a later re-pointed link has no effect.
@@ -279,7 +302,20 @@ export class EvidenceStore {
 		this.isDiscoveryLive = opts.isDiscoveryLive ?? (() => true)
 		this.analogIo = opts.analogIo
 		this.protection = opts.protection
+		this.recordingDeleteFs = opts.recordingDeleteFs
+		this.aliases = opts.aliases
 	}
+
+	/** WG10 req 1.5: fail closed (a throwing lookup answers no owner / no aliases). */
+	private aliasOwner(id: string): string | undefined {
+		try {
+			return this.aliases?.aliasOwner(id)
+		} catch {
+			return undefined
+		}
+	}
+	private readonly aliasesOf = (id: string): readonly string[] =>
+		this.aliases?.aliasesOf(id) ?? []
 
 	/**
 	 * WG9 R2 (pinned root only): true while the real root is still the directory first resolved.
@@ -297,14 +333,10 @@ export class EvidenceStore {
 		return false
 	}
 
-	/** Fail closed: a throwing port answers protected. */
+	/** Fail closed: a throwing port answers protected. WG10 req 1.5: any alias holding counts. */
 	private holdsKept(discoveryId: string): boolean {
 		if (!this.protection) return false
-		try {
-			return this.protection.discoveryHoldsKept(discoveryId) !== false
-		} catch {
-			return true
-		}
+		return holdsKeptWithAliases(this.protection, this.aliasesOf, discoveryId)
 	}
 
 	private keptFile(f: StoredFile): boolean {
@@ -377,7 +409,16 @@ export class EvidenceStore {
 	}
 
 	private admits(id: string): boolean {
-		return !this.removals.has(id) && this.isDiscoveryLive(id)
+		if (this.removals.has(id)) return false
+		if (this.isDiscoveryLive(id)) return true
+		// WG10 req 1.5: an alias folder is admitted while its owner is live and not being removed.
+		const owner = this.aliasOwner(id)
+		return (
+			owner !== undefined &&
+			owner !== id &&
+			!this.removals.has(owner) &&
+			this.isDiscoveryLive(owner)
+		)
 	}
 
 	setCaps(caps: StorageCaps): void {
@@ -640,6 +681,80 @@ export class EvidenceStore {
 		return null
 	}
 
+	/**
+	 * WG10 req 1.1-1.3: deletes one `recordings/dv/<discovery>/<file>` recording, serialised with
+	 * the discovery's other evidence work. Refuses an analog name (UNSUPPORTED) and a discovery
+	 * being removed (BUSY); a missing or not admitted discovery, a changed pinned root, a symlinked
+	 * or non-directory ancestor, or a file that is not the verified one answers `not-found` with
+	 * nothing deleted. `stillDeletable()` runs in the unlink's turn (verified unlink helper).
+	 */
+	async deleteRecording(
+		recordingId: string,
+		stillDeletable: () => boolean,
+	): Promise<"deleted" | "not-found"> {
+		const m = RECORDING_ID.exec(recordingId)
+		const discoveryId = m?.[1]
+		const file = m?.[2]
+		if (discoveryId === undefined || file === undefined) return "not-found"
+		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))
+			throw new RecordingKeepError(
+				"RECORDING_DELETE_UNSUPPORTED",
+				RECORDING_DELETE_UNSUPPORTED_TEXT,
+			)
+		if (file.includes("..")) return "not-found"
+		const busy = (): RecordingKeepError =>
+			new RecordingKeepError("RECORDING_BUSY", RECORDING_BUSY_TEXT)
+		const removing = (): boolean => {
+			if (this.removals.has(discoveryId)) return true
+			const owner = this.aliasOwner(discoveryId)
+			return owner !== undefined && this.removals.has(owner)
+		}
+		if (removing()) throw busy()
+		return this.serialise(discoveryId, async () => {
+			if (removing()) throw busy()
+			if (!this.admits(discoveryId)) return "not-found"
+			if (!(await this.rootIntact())) return "not-found"
+			const recordings = join(this.root, "recordings")
+			const kindDir = join(recordings, "dv")
+			const dir = join(kindDir, discoveryId)
+			const chain: DirIdentity[] = []
+			for (const path of [recordings, kindDir, dir]) {
+				const id = await realDirectory(path)
+				if (id === null) return "not-found"
+				chain.push({ path, ...id })
+			}
+			const filePath = join(dir, file)
+			let handle
+			try {
+				handle = await open(
+					filePath,
+					fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+				)
+			} catch (err) {
+				const code = errorCode(err)
+				if (code === "ENOENT" || code === "ELOOP" || code === "ENOTDIR")
+					return "not-found"
+				throw err
+			}
+			try {
+				const st = await handle.stat()
+				if (!st.isFile()) return "not-found"
+				// The open resolved through the listed directories: a swap since answers no file.
+				if (!(await chainIntact(chain))) return "not-found"
+				const outcome = await verifiedUnlink({
+					filePath,
+					handleStat: { dev: st.dev, ino: st.ino },
+					stillDeletable,
+					log: this.keepLog,
+					...(this.recordingDeleteFs ? { fs: this.recordingDeleteFs } : {}),
+				})
+				return outcome === "deleted" ? "deleted" : "not-found"
+			} finally {
+				await handle.close().catch(() => undefined)
+			}
+		})
+	}
+
 	evidencePath(discoveryId: string, name: string): string | null {
 		if (
 			!DISCOVERY_ID.test(discoveryId) ||
@@ -662,6 +777,10 @@ export class EvidenceStore {
 				SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 				409,
 			)
+		// WG10 req 1.5: the aliases as of the request (a deleted owner's stay listed until released).
+		const aliases = this.aliasesOf(discoveryId).filter(
+			alias => alias !== discoveryId && DISCOVERY_ID.test(alias),
+		)
 		// Fence admission synchronously and drain accepted writes/moves before removal.
 		const removal = Promise.resolve()
 			.then(async () => {
@@ -672,26 +791,37 @@ export class EvidenceStore {
 						"SCANNER_EVIDENCE_CLEANUP_PENDING",
 					)
 				// Long analog settlement drains outside the publication queue it may itself need.
-				if (this.analog) await this.analog.deleteDiscovery(discoveryId)
-				await this.serialise(discoveryId, async () => {
+				if (this.analog) {
+					await this.analog.deleteDiscovery(discoveryId)
+					for (const alias of aliases) await this.analog.deleteDiscovery(alias)
+				}
+				const removeFolders = async (id: string): Promise<void> => {
 					if (!(await this.rootIntact()))
 						throw new WaveKitError(
 							"Scanner storage root changed",
 							"SCANNER_EVIDENCE_CLEANUP_PENDING",
 						)
 					if (this.protection) {
-						await this.removeGuarded(discoveryId)
+						await this.removeGuarded(id)
 						return
 					}
-					await rm(join(this.root, "evidence", discoveryId), {
+					await rm(join(this.root, "evidence", id), {
 						recursive: true,
 						force: true,
 					})
 					for (const kind of RECORDING_KINDS)
-						await rm(join(this.root, "recordings", kind, discoveryId), {
+						await rm(join(this.root, "recordings", kind, id), {
 							recursive: true,
 							force: true,
 						})
+				}
+				await this.serialise(discoveryId, async () => {
+					await removeFolders(discoveryId)
+					// WG10 req 1.5: the alias folders go in the same removal, each through the
+					// per-file decision (a kept file refuses); a folder already gone is harmless.
+					for (const alias of aliases) {
+						await this.serialise(alias, () => removeFolders(alias))
+					}
 				})
 			})
 			.catch((cause: unknown) => {
@@ -706,11 +836,17 @@ export class EvidenceStore {
 		// Fence existing handles before caller can enqueue another PCM chunk.
 		const drain = this.analog?.cancelDiscovery(discoveryId)
 		if (drain) void drain.catch(() => undefined)
+		let removed = false
 		try {
 			await removal
+			removed = true
 		} finally {
-			if (this.removals.get(discoveryId) === removal)
+			if (this.removals.get(discoveryId) === removal) {
 				this.removals.delete(discoveryId)
+				// WG10 (Main, rk2 review minor 2): the aliases are released only after the owner's
+				// removal succeeded; a failed removal keeps them so a retry still reaches the folders.
+				if (removed) this.aliases?.releaseAliases?.(discoveryId)
+			}
 		}
 	}
 
@@ -840,6 +976,8 @@ export class EvidenceStore {
 		if (!(await this.rootIntact())) return { deleted: [] }
 		const now = this.now()
 		const files = await this.collect()
+		// WG10 req 1.5: an operator keep of a survivor protects its alias folders.
+		keepDiscoveryIds = withAliasFolders(keepDiscoveryIds, this.aliasesOf)
 		const isProtected = (f: StoredFile): boolean =>
 			f.probe ||
 			now - f.mtimeMs < RECORDING_IN_PROGRESS_MS ||

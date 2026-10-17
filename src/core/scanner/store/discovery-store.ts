@@ -38,6 +38,8 @@ import type {
 import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
 import type { StoreMutation } from "./schemas.js"
+import { RecordingAliasTable } from "../recording-aliases.js"
+import type { DiscoveryAliasEntry } from "../recording-aliases.js"
 import {
 	PreparedRecordingMetadataSchema,
 	PreparedRecordingOperationsSchema,
@@ -106,6 +108,8 @@ export interface StoreSnapshot {
 	observations: Observation[]
 	corrections: { sourceId: string; hz: number }[]
 	recordingOperations?: PreparedRecordingMetadata[]
+	/** WG10 req 1.5: merge aliases per survivor (absent in state written before WG10). */
+	aliases?: DiscoveryAliasEntry[]
 }
 
 /** Construct after the last await. References are existing plain internal objects. */
@@ -171,6 +175,8 @@ interface Op {
 	merged: [string, string][]
 	removedObservations: string[]
 	correction?: { sourceId: string; hz: number }
+	/** WG10 req 1.5: owners whose alias list this op changed (journaled as written). */
+	aliases: Set<string>
 	/**
 	 * Observation id → the discovery it was placed in and the job ids newly credited (WG2 req 13.1).
 	 * Recorded at placement, so neither observation retention nor a later listener can lose it.
@@ -186,6 +192,7 @@ function newOp(): Op {
 		changes: new Map(),
 		merged: [],
 		removedObservations: [],
+		aliases: new Set(),
 		credited: new Map(),
 	}
 }
@@ -369,6 +376,8 @@ export class DiscoveryStore extends EventEmitter {
 	private readonly injectedLog: Logger | undefined
 	/** The kept-blocked count last warned, so a full store does not warn on every ingest. */
 	private keptBlockedWarned = 0
+	/** WG10 req 1.5: merge aliases (O(1) owner lookup). */
+	private readonly aliasTable = new RecordingAliasTable()
 
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
@@ -839,6 +848,43 @@ export class DiscoveryStore extends EventEmitter {
 		return true
 	}
 
+	/**
+	 * WG10 req 1.2: after a scanner recording delete, the id leaves the observation holding it and
+	 * that discovery's `evidence.recordings` drops by one (floor zero); journaled as `evidence`,
+	 * change `updated`. False when no observation holds the id (nothing changes).
+	 */
+	forgetRecording(recordingId: string): boolean {
+		for (const o of this.observationIndex.values()) {
+			if (!o.recordingIds.includes(recordingId)) continue
+			const d = this.discoveries.get(o.discoveryId)
+			if (d === undefined) return false
+			o.recordingIds = o.recordingIds.filter(r => r !== recordingId)
+			d.evidence.recordings = Math.max(0, d.evidence.recordings - 1)
+			const op = newOp()
+			op.discoveries.add(d.id)
+			op.observations.add(o.id)
+			mark(op, d.id, "updated")
+			this.finish("evidence", op)
+			return true
+		}
+		return false
+	}
+
+	/** WG10 req 1.5: the live discovery that adopted `discoveryId`'s folder in a merge. */
+	aliasOwner(discoveryId: string): string | undefined {
+		return this.aliasTable.aliasOwner(discoveryId)
+	}
+
+	/** WG10 req 1.5: the folder ids `discoveryId` adopted, oldest first (a deleted owner's until released). */
+	aliasesOf(discoveryId: string): readonly string[] {
+		return this.aliasTable.aliasesOf(discoveryId)
+	}
+
+	/** WG10 req 1.5: forgets a deleted owner's aliases once its evidence removal settled. */
+	releaseAliases(discoveryId: string): void {
+		if (!this.discoveries.has(discoveryId)) this.aliasTable.release(discoveryId)
+	}
+
 	setEvidenceFlags(
 		discoveryId: string,
 		patch: Partial<Discovery["evidence"]>,
@@ -995,6 +1041,9 @@ export class DiscoveryStore extends EventEmitter {
 			...(this.recordingOperations.size > 0
 				? { recordingOperations: this.preparedRecordingOperations() }
 				: {}),
+			...(this.aliasTable.entries().length > 0
+				? { aliases: this.aliasTable.entries() }
+				: {}),
 			corrections: [...this.corrections]
 				.sort(([a], [b]) => compareText(a, b))
 				.map(([sourceId, hz]) => ({ sourceId, hz })),
@@ -1031,6 +1080,7 @@ export class DiscoveryStore extends EventEmitter {
 		for (const d of s.discoveries) this.insertDiscovery(clone(d))
 		for (const o of [...s.observations].sort(compareObs))
 			if (this.discoveries.has(o.discoveryId)) this.putObservation(clone(o))
+		this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
 	}
 
 	replay(entry: JournalEntry): void {
@@ -1677,6 +1727,7 @@ export class DiscoveryStore extends EventEmitter {
 			op.discoveries.add(partner.id)
 			mark(op, partner.id, "updated")
 		}
+		this.adoptAliases(op, keep.id, drop.id)
 		this.removeDiscovery(drop.id)
 		op.discoveries.delete(drop.id)
 		op.deleted.push(drop.id)
@@ -1687,20 +1738,47 @@ export class DiscoveryStore extends EventEmitter {
 		this.refresh(keep)
 	}
 
-	/** Evicts until one more discovery fits (several after `setLimits` lowered the bound); one "evict" entry. */
+	/**
+	 * WG10 req 1.5: `drop`'s folder (and its own aliases) become `keep`'s aliases, journaled with
+	 * the merge; past the bound the oldest is released (an orphan folder), warned as a count.
+	 */
+	private adoptAliases(op: Op, keep: string, drop: string): void {
+		const released = this.aliasTable.adopt(keep, drop)
+		op.aliases.add(keep)
+		op.aliases.add(drop)
+		if (released === 0) return
+		const log =
+			this.injectedLog ??
+			(fallbackLog ??= createComponentLogger(
+				createLogger({ level: "info" }),
+				"DiscoveryStore",
+			))
+		log.warn(
+			{ released },
+			"Discovery merge aliases over the bound; the oldest were released",
+		)
+	}
+
+	/**
+	 * Evicts until one more discovery fits (several after `setLimits` lowered the bound); one "evict"
+	 * entry. WG10 req 1.6: the evicted discoveries are reported (`evicted`) after the entry.
+	 */
 	private makeRoom(): boolean {
 		if (this.discoveries.size < this.maxDiscoveries) return true
 		const op = newOp()
 		let fits = true
+		const evicted: Discovery[] = []
 		while (this.discoveries.size >= this.maxDiscoveries) {
 			const victim = this.evictionVictim()
 			if (victim === undefined) {
 				fits = false
 				break
 			}
+			evicted.push(clone(victim))
 			this.deleteInto(op, victim)
 		}
 		this.finish("evict", op)
+		if (evicted.length > 0) this.emit("evicted", evicted)
 		if (fits) this.keptBlockedWarned = 0
 		else this.warnKeptBlocked()
 		return fits
@@ -1846,6 +1924,7 @@ export class DiscoveryStore extends EventEmitter {
 		for (const o of this.byDiscovery.get(id) ?? [])
 			this.observationIndex.delete(o.id)
 		this.byDiscovery.delete(id)
+		this.aliasTable.detach(id)
 	}
 
 	/** Inserts an unlinked observation in canonical order and trims the per-discovery window. */
@@ -1917,6 +1996,11 @@ export class DiscoveryStore extends EventEmitter {
 			if (previous !== undefined) this.unlinkObservation(previous)
 		}
 		for (const id of m.deleted) this.removeDiscovery(id)
+		for (const a of m.aliases ?? []) {
+			this.aliasTable.release(a.id)
+			if (this.discoveries.has(a.id) || a.aliases.length === 0)
+				this.aliasTable.set(a.id, a.aliases, id => this.discoveries.has(id))
+		}
 	}
 
 	// ── journal ──────────────────────────────────────────────────────────
@@ -1976,7 +2060,8 @@ export class DiscoveryStore extends EventEmitter {
 			observations.length === 0 &&
 			op.deleted.length === 0 &&
 			removed.length === 0 &&
-			op.correction === undefined
+			op.correction === undefined &&
+			op.aliases.size === 0
 		)
 			return
 		const payload: StoreMutation = {
@@ -1986,6 +2071,10 @@ export class DiscoveryStore extends EventEmitter {
 		}
 		if (removed.length > 0) payload.removedObservations = removed
 		if (op.correction !== undefined) payload.correction = { ...op.correction }
+		if (op.aliases.size > 0)
+			payload.aliases = [...op.aliases]
+				.sort(compareText)
+				.map(id => this.aliasTable.entryOf(id))
 		const entry: Omit<JournalEntry, "seq"> = {
 			at: iso(this.now()),
 			op: kind,

@@ -124,16 +124,27 @@ export async function sweepRecordingDeleteLeftovers(
 		}
 		const ready = storeReady(options.protection)
 
-		/** True when every level from the root to `dir` is a real directory (root included). */
-		const intact = async (root: string, parts: string[]): Promise<boolean> => {
+		/**
+		 * The last level's stat when every level from the root to `dir` is a real directory (root
+		 * included); null otherwise.
+		 */
+		const intactStat = async (
+			root: string,
+			parts: string[],
+		): Promise<SweepStat | null> => {
 			let cur = root
+			let st: SweepStat | null = null
 			for (let i = 0; i <= parts.length; i++) {
 				if (i > 0) cur = join(cur, parts[i - 1] ?? "")
-				const st = await fs.lstat(cur)
-				if (st.isSymbolicLink() || !st.isDirectory()) return false
+				st = await fs.lstat(cur)
+				if (st.isSymbolicLink() || !st.isDirectory()) return null
 			}
-			return true
+			return st
 		}
+		const intact = async (root: string, parts: string[]): Promise<boolean> =>
+			(await intactStat(root, parts)) !== null
+		/** Directories already listed (by identity): `WAV` and `wav` on a case-insensitive disk are one. */
+		const listed = new Set<string>()
 
 		const act = async (parent: string, name: string): Promise<void> => {
 			const dir = join(parent, name)
@@ -210,7 +221,13 @@ export async function sweepRecordingDeleteLeftovers(
 			for (const p of parts) parent = join(parent, p)
 			let names: string[]
 			try {
-				if (!(await intact(root, parts))) return
+				const st = await intactStat(root, parts)
+				if (st === null) return
+				if (st.dev !== undefined && st.ino !== undefined) {
+					const key = `${st.dev}:${st.ino}`
+					if (listed.has(key)) return
+					listed.add(key)
+				}
 				names = await fs.readdir(parent, DELETE_SWEEP_MAX_LIST_ENTRIES)
 			} catch (err) {
 				// A missing folder (no WAV subfolder yet) is normal, not an error.
@@ -234,7 +251,9 @@ export async function sweepRecordingDeleteLeftovers(
 
 		for (const d of options.dsdFmeDirs) {
 			await list(d, [])
+			// dsd-fme writes `WAV`; a lowercase `wav` folder is swept too (Main, rk2 review minor 4).
 			await list(d, ["WAV"])
+			await list(d, ["wav"])
 		}
 		if (options.scannerRecordingsDir !== null) {
 			const root = options.scannerRecordingsDir
