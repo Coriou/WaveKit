@@ -194,6 +194,14 @@ describe("device labels", () => {
 		[{ deviceId: `device_${"A".repeat(43)}`, name: "a\u0085b" }, "C1"],
 		[{ deviceId: `device_${"A".repeat(43)}`, name: "a\u202eb" }, "bidi"],
 		[{ deviceId: `device_${"A".repeat(43)}`, name: "a\u2066b" }, "isolate"],
+		[
+			{ deviceId: `device_${"A".repeat(43)}`, name: "a\ud800b" },
+			"lone high surrogate",
+		],
+		[
+			{ deviceId: `device_${"A".repeat(43)}`, name: "\udc00" },
+			"lone low surrogate",
+		],
 		[{ deviceId: `device_${"A".repeat(43)}`, kind: "laptop" }, "kind"],
 		[{ deviceId: "device_short", name: "Radio" }, "device id"],
 	] as const)("rejects a %s body before persistence", async (body, _label) => {

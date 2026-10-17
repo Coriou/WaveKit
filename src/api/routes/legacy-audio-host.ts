@@ -25,8 +25,11 @@ const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
 const IPV4_OCTET = /^(?:0|[1-9]\d{0,2})$/
 const HOST_CHARS = /^[A-Za-z0-9.:[\]-]+$/
 const PORT = /^\d{1,5}$/
-/** Inside of an IPv6 literal: hex, colons and dots (embedded IPv4) only. */
-const IPV6_CHARS = /^[0-9a-f:.]+$/
+/**
+ * Inside of an IPv6 literal: hex, colons and dots (embedded IPv4) only. Either case: the
+ * caller lowercases first today, but the check must not depend on that ordering.
+ */
+const IPV6_CHARS = /^[0-9A-Fa-f:.]+$/
 
 function isIPv4DottedQuad(value: string): boolean {
 	const parts = value.split(".")
