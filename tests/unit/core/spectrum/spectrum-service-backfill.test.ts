@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
 import type {
@@ -28,9 +29,11 @@ import {
 	FakeFanout,
 	FakeSources,
 	FakeTuner,
+	settle,
 	testSettings,
 } from "../../../mocks/scanner/engine-fakes.js"
 import { CENTRE, FS } from "../../../mocks/scanner/service-fakes.js"
+import { blockSamplesOf } from "../../../../src/core/spectrum/retune-settle.js"
 
 const BINS = 16
 
@@ -169,7 +172,7 @@ function make(patch?: (s: ScannerSettings) => void) {
 			frames.push({ frame, clientIds: [...clientIds] }),
 	)
 	const host = () => hosts.at(-1)!
-	return { service, settings, host, profiles, frames }
+	return { service, settings, host, profiles, frames, sources, tuner, fanout }
 }
 
 const of = (h: ReturnType<typeof make>, clientId: string) =>
@@ -435,6 +438,180 @@ describe("spectrum service backfill and averaging", () => {
 		expect(ack.backfillFrames).toBe(3)
 		expect(backfill.map(f => f.bins)).toEqual(live.slice(0, 3))
 		expect(snapshots[0]!.bins).toBe(live[3])
+		await h.service.stop()
+	})
+})
+
+/** One summary of `epoch` ending at `endSample` with its peak at `peak` (WG9 R3). */
+function summaryAt(
+	host: FakeHost,
+	epoch: number,
+	peak: number,
+	endSample: number,
+): void {
+	host.emit({
+		kind: "block-summary",
+		summary: { ...blockSummary(host.cfg, epoch, peak), endSample },
+	})
+}
+
+describe("multi-block frames carry the worst trust (WG9 R3 minor 1)", () => {
+	/** An operator retune with a 1 s network settle: blocks before it are unverified. */
+	async function retuned() {
+		const h = make(s => {
+			s.sweep.settleMs.network = 1000
+		})
+		await h.service.start()
+		await h.service.acquire("rtl", "job:a")
+		h.host().epoch(1, true)
+		h.fanout.write(Buffer.alloc(4000, 7))
+		await settle()
+		h.tuner.emit(
+			"command-sent",
+			"rtl",
+			"set-frequency",
+			CENTRE + 200_000,
+			"rest",
+		)
+		h.sources.setCaps("rtl", { centerFreq: CENTRE + 200_000 })
+		await settle()
+		const p = h
+			.host()
+			.inputs.flatMap(i => (i.kind === "pending-epoch" ? [i.pending] : []))
+			.at(-1)!
+		expect(p.verifiedFromSample).toBeDefined()
+		const cfg = h.host().cfg
+		const block = blockSamplesOf(
+			cfg.integrationMs,
+			cfg.sampleRateHz,
+			cfg.fftSize,
+		)
+		const from = p.verifiedFromSample!
+		h.host().emit({
+			kind: "epoch-started",
+			epoch: p.epoch,
+			startSample: p.commandSample + p.bufferedSamples + p.settleSamples,
+			settleMode: "timer",
+		})
+		return { h, epoch: p.epoch, block, from }
+	}
+
+	it("labels a live max-hold or averaged frame unverified when any of its blocks is, and restarts the average at the first trusted frame", async () => {
+		const { h, epoch, block, from } = await retuned()
+		// 10 Hz on 20 Hz blocks: two blocks per frame
+		await h.service.subscribe("c1", { sourceId: "rtl", hz: 10, bins: 2048 })
+		await h.service.subscribe("c2", {
+			sourceId: "rtl",
+			hz: 10,
+			bins: 2048,
+			averaging: 4,
+		})
+		const at = h.frames.length
+		summaryAt(h.host(), epoch, 3, from + block - 1) // straddles the settle
+		summaryAt(h.host(), epoch, 9, from + block) // first trusted block
+		const first = h.frames.slice(at)
+		expect(first.map(f => [f.frame.profile, f.frame.tuningTrust])).toEqual([
+			["10:2048", "unverified"],
+			["10:2048:a4", "unverified"],
+		])
+		summaryAt(h.host(), epoch, 9, from + 2 * block)
+		// an averaged snapshot now is the unverified frame's average
+		await h.service.subscribe("c3", {
+			sourceId: "rtl",
+			hz: 10,
+			bins: 2048,
+			averaging: 4,
+		})
+		expect(of(h, "c3")[0]!.snapshots[0]).toMatchObject({
+			profile: "10:2048:a4",
+			tuningTrust: "unverified",
+		})
+		const next = h.frames.length
+		summaryAt(h.host(), epoch, 9, from + 3 * block)
+		const second = h.frames.slice(next)
+		expect(second.map(f => [f.frame.profile, f.frame.tuningTrust])).toEqual([
+			["10:2048", "commanded"],
+			["10:2048:a4", "commanded"],
+		])
+		// the first trusted averaged frame holds trusted data only
+		const avg = decodeBins(second[1]!.frame.bins)
+		expect(avg[3]).toBe(-80)
+		expect(avg).toEqual(decodeBins(second[0]!.frame.bins))
+		await h.service.stop()
+	})
+
+	it("labels a backfill run unverified when any of its blocks is, and restarts its average", async () => {
+		const { h, epoch, block, from } = await retuned()
+		summaryAt(h.host(), epoch, 3, from + block - 1)
+		summaryAt(h.host(), epoch, 9, from + block)
+		summaryAt(h.host(), epoch, 9, from + 2 * block)
+		summaryAt(h.host(), epoch, 9, from + 3 * block)
+		summaryAt(h.host(), epoch, 9, from + 4 * block)
+		for (const averaging of [1, 4]) {
+			const client = `b${averaging}`
+			await h.service.subscribe(client, {
+				sourceId: "rtl",
+				hz: 10,
+				bins: 2048,
+				averaging,
+				backfillMs: 10_000,
+			})
+			const { backfill } = of(h, client)[0]!
+			expect(backfill.map(f => f.tuningTrust)).toEqual([
+				"unverified",
+				"commanded",
+			])
+			const trusted = decodeBins(backfill[1]!.bins)
+			expect(trusted[3]).toBe(-80)
+		}
+		await h.service.stop()
+	})
+})
+
+describe("frames without an unverified window are byte-identical (WG9 R3 golden)", () => {
+	it("live, snapshot and backfill frames of a commanded and an unverified epoch match the pre-R3 bytes", async () => {
+		const h = make()
+		await h.service.start()
+		await h.service.acquire("rtl", "job:a")
+		const profiles = [
+			{ hz: 10, bins: 2048 },
+			{ hz: 10, bins: 2048, averaging: 4 },
+			{ hz: 25, bins: 2048, averaging: 2 },
+		]
+		for (const [i, p] of profiles.entries())
+			await h.service.subscribe(`live${i}`, { sourceId: "rtl", ...p })
+		const out: unknown[] = []
+		const late = async (tag: string) => {
+			for (const [i, p] of profiles.entries()) {
+				const client = `${tag}${i}`
+				await h.service.subscribe(client, {
+					sourceId: "rtl",
+					...p,
+					backfillMs: 10_000,
+				})
+				const { snapshots, backfill } = of(h, client)[0]!
+				out.push(snapshots, backfill)
+			}
+		}
+		h.host().epoch(1, true)
+		for (let i = 0; i < 7; i++) h.host().summary(1, i % 16)
+		await late("a")
+		// § 4.7: an untracked retune is unverified for its whole epoch (no window)
+		h.host().emit(
+			{ kind: "untracked-retune", epoch: 5, startSample: 0, deltaHz: 20_000 },
+			{ kind: "epoch-started", epoch: 5, startSample: 0, settleMode: "timer" },
+		)
+		for (let i = 0; i < 7; i++) h.host().summary(5, (i * 5) % 16)
+		await late("b")
+		out.push(h.frames)
+		expect(
+			out.filter(o => Array.isArray(o) && o.length > 0).length,
+		).toBeGreaterThanOrEqual(10)
+		const json = JSON.stringify(out)
+		expect(json).toContain('"tuningTrust":"unverified"')
+		expect(createHash("sha256").update(json).digest("hex")).toBe(
+			"9c6d1404b05a272432f964e2291bd49fc189270a75786798544a762b785078fe",
+		)
 		await h.service.stop()
 	})
 })

@@ -393,7 +393,10 @@ describe("SpectrumEngine operator retune window (WG9 R3 minors)", () => {
 				settleMode: "timer",
 			},
 			{ kind: "track-open", track: early },
-			{ kind: "block-summary", summary: summary(p.epoch, verifiedFrom + block) },
+			{
+				kind: "block-summary",
+				summary: summary(p.epoch, verifiedFrom + block),
+			},
 			{ kind: "track-update", track: early },
 			{ kind: "track-close", track: early, endReason: "quiet" },
 		])
@@ -410,8 +413,7 @@ describe("SpectrumEngine operator retune window (WG9 R3 minors)", () => {
 	it("prunes the network-settle entry of an older stream's pending epoch at the new stream's start", async () => {
 		const { engine, sources, fanout, hosts, p } = await retuned()
 		const verifiedFrom = (): Map<number, number> =>
-			(engine as unknown as { verifiedFrom: Map<number, number> })
-				.verifiedFrom
+			(engine as unknown as { verifiedFrom: Map<number, number> }).verifiedFrom
 		// the first stream's own start, then the retune is pending
 		hosts[0]!.handlers.events([
 			{

@@ -43,8 +43,10 @@ import type {
 	PipelineConfig,
 	PipelineEvent,
 	SpectrumSettings,
+	TuningTrust,
 } from "./types.js"
 import type { PipelineHostMode } from "./pipeline-host.js"
+import { mergeTrust } from "./retune-settle.js"
 import {
 	BACKFILL_LIMITS,
 	PROFILE_BINS_CEILING,
@@ -245,6 +247,10 @@ export interface SpectrumHold {
 	avg: Float32Array | null
 	/** Summary stream the bins came from. A change clears `avg`. */
 	stream?: number
+	/** WG9 R3: the worst label of the summaries in `bins` (absent: none given). */
+	trust?: TuningTrust
+	/** WG9 R3: the worst label of the frames in `avg` (absent with `avg`). */
+	avgTrust?: TuningTrust
 }
 
 /**
@@ -257,6 +263,7 @@ export function accumulateHold(
 	reduced: { bins: Float32Array; factor: number },
 	epoch: number,
 	stream?: number,
+	trust?: TuningTrust,
 ): SpectrumHold {
 	const h: SpectrumHold = hold ?? {
 		bins: null,
@@ -276,14 +283,45 @@ export function accumulateHold(
 	if (h.bins && sameLayout && !streamChanged) {
 		for (let i = 0; i < h.bins.length; i++)
 			h.bins[i] = Math.max(h.bins[i]!, reduced.bins[i]!)
+		// WG9 R3: fail closed, the held frame is as trusted as its worst summary.
+		if (trust !== undefined)
+			h.trust = h.trust === undefined ? trust : mergeTrust(h.trust, trust)
 	} else {
-		if (!sameLayout || streamChanged) h.avg = null
+		if (!sameLayout || streamChanged) {
+			h.avg = null
+			delete h.avgTrust
+		}
 		h.bins = reduced.bins
 		h.factor = reduced.factor
 		h.epoch = epoch
+		if (trust !== undefined) h.trust = trust
+		else delete h.trust
 	}
 	if (stream !== undefined) h.stream = stream
 	return h
+}
+
+/**
+ * WG9 R3: one averaging step and its label. An average holding `unverified` frames restarts
+ * at the first trusted frame, so a trusted frame never carries pre-settle bins; otherwise
+ * the label is the worse of the average's and the frame's. A uniformly labelled epoch (the
+ * scanner's, or any without an unverified window) never restarts: the bytes are unchanged.
+ */
+export function averageTrusted(
+	avg: Float32Array | null,
+	avgTrust: TuningTrust | undefined,
+	frame: Float32Array,
+	frameTrust: TuningTrust,
+	n: number,
+): { avg: Float32Array; trust: TuningTrust } {
+	const seed =
+		avg === null ||
+		avg.length !== frame.length ||
+		(avgTrust === "unverified" && frameTrust !== "unverified")
+	return {
+		avg: applyAverage(seed ? null : avg, frame, n),
+		trust: seed ? frameTrust : mergeTrust(avgTrust ?? frameTrust, frameTrust),
+	}
 }
 
 /** Diagnostics (status and logs only); a fresh copy. */
@@ -1426,7 +1464,7 @@ export class SpectrumService extends EventEmitter {
 		profile: SpectrumProfile,
 		summary: BlockSummary,
 		cur: { stream: number; epoch: number },
-	): { bins: Float32Array; factor: number } {
+	): { bins: Float32Array; factor: number; trust?: TuningTrust } {
 		if (averagingOf(profile) > 1) {
 			const hold = entry.holds.get(profile.key)
 			if (
@@ -1434,7 +1472,12 @@ export class SpectrumService extends EventEmitter {
 				hold.epoch === cur.epoch &&
 				(hold.stream === undefined || hold.stream === cur.stream)
 			)
-				return { bins: hold.avg, factor: hold.factor }
+				// WG9 R3: the average's own label, not the newest summary's.
+				return {
+					bins: hold.avg,
+					factor: hold.factor,
+					...(hold.avgTrust !== undefined ? { trust: hold.avgTrust } : {}),
+				}
 		}
 		return reduceMaxHold(summary.bins, profile.bins)
 	}
@@ -1460,6 +1503,7 @@ export class SpectrumService extends EventEmitter {
 				reduceMaxHold(summary.bins, g.profile.bins),
 				summary.epoch,
 				summary.stream,
+				epoch.tuningTrust,
 			)
 			entry.holds.set(key, hold)
 			hold.count += 1
@@ -1467,15 +1511,27 @@ export class SpectrumService extends EventEmitter {
 			if (hold.count < n || peak === null) continue
 			const averaging = averagingOf(g.profile)
 			let bins: Float32Array = peak
+			// WG9 R3: the worst label across the held (and averaged) summaries.
+			let trust = hold.trust ?? epoch.tuningTrust
 			if (averaging > 1) {
-				hold.avg = applyAverage(hold.avg, peak, averaging)
-				bins = hold.avg
+				const next = averageTrusted(
+					hold.avg,
+					hold.avgTrust,
+					peak,
+					trust,
+					averaging,
+				)
+				hold.avg = next.avg
+				hold.avgTrust = next.trust
+				bins = next.avg
+				trust = next.trust
 			}
 			this.emit(
 				"frame",
 				this.frame(sourceId, summary, epoch, g.profile, cfg, {
 					bins,
 					factor: hold.factor,
+					trust,
 				}),
 				g.clients,
 			)
@@ -1490,13 +1546,13 @@ export class SpectrumService extends EventEmitter {
 		epoch: EngineEpoch,
 		profile: SpectrumProfile,
 		cfg: PipelineConfig,
-		reduced: { bins: Float32Array; factor: number },
+		reduced: { bins: Float32Array; factor: number; trust?: TuningTrust },
 	): SpectrumFrameEventData {
 		return {
 			sourceId,
 			profile: profile.key,
 			epoch: summary.epoch,
-			tuningTrust: epoch.tuningTrust,
+			tuningTrust: reduced.trust ?? epoch.tuningTrust,
 			centerHz: summary.centreHz,
 			sampleRateHz: summary.sampleRateHz,
 			binHz: summary.binHz * reduced.factor,
