@@ -1,4 +1,5 @@
-/* The band ruler under the band lanes (BandRuler.tsx). Flat, no glass: it is part of the plot's furniture. */
+/* The band ruler under the band lanes (BandRuler.tsx), drawn like the Scan planner's overview strip
+   (planner.css .wk-pl-ov): a well with a hairline, the view as an ink window. Flat, no glass. */
 @layer wk-app {
 	.wk-ruler {
 		position: absolute;
@@ -8,94 +9,155 @@
 		right: 0;
 		height: 26px;
 		box-sizing: border-box;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 0 6px 0 8px;
 		border-bottom: 1px solid rgba(var(--wk-line-rgb), 0.08);
 		background: var(--wk-plot-bg);
+	}
+	.wk-ruler-edge {
+		flex: none;
+		width: 44px;
+		font-size: 11px;
+		color: var(--wk-text-4);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.wk-ruler-edge-end {
+		width: 58px;
+		text-align: left;
+	}
+	.wk-ruler-track {
+		position: relative;
+		flex: 1;
+		min-width: 40px;
+		height: 18px;
+		border-radius: 4px;
+		background: var(--wk-well);
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb), 0.08);
 		overflow: hidden;
 		cursor: pointer;
 		touch-action: none;
-		isolation: isolate;
+		outline: none;
 	}
-	.wk-ruler[data-pressed] {
+	.wk-ruler-track:focus-visible {
+		box-shadow:
+			inset 0 0 0 1px rgba(var(--wk-line-rgb), 0.08),
+			0 0 0 2px var(--wk-focus);
+	}
+	.wk-ruler[data-pressed] .wk-ruler-track {
 		cursor: grabbing;
 	}
-	.wk-ruler > i {
+	.wk-ruler-track > i {
 		position: absolute;
 		display: block;
 		pointer-events: none;
 	}
-	.wk-ruler > i[title] {
-		pointer-events: auto;
-	}
+	/* The band plan as quiet colour over the whole height; a nested band a little stronger. */
 	.wk-ruler-band {
-		bottom: 3px;
-		height: 3px;
-		border-radius: 1px;
-		opacity: 0.55;
+		top: 0;
+		bottom: 0;
+		opacity: 0.14;
 	}
 	.wk-ruler-band[data-depth="1"] {
-		bottom: 7px;
-		opacity: 0.8;
+		opacity: 0.24;
 	}
-	.wk-ruler-tick {
+	/* Where the scanner has heard things: a density strip from the foot. */
+	.wk-ruler-heard {
+		bottom: 2px;
+		border-radius: 1px 1px 0 0;
+		background: rgba(var(--wk-ink-3-rgb), 0.55);
+	}
+	.wk-ruler-saved {
+		top: 3px;
+		width: 4px;
+		height: 4px;
+		margin-left: -2px;
+		border-radius: 50%;
+		background: var(--wk-accent);
+	}
+	.wk-ruler-window {
+		top: 1px;
+		bottom: 1px;
+		min-width: 4px;
+		border-radius: 3px;
+		background: rgba(var(--wk-ink-rgb), 0.12);
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-rgb), 0.32);
+	}
+	.wk-ruler-tuned {
+		top: 4px;
+		bottom: 4px;
+		width: 2px;
+		margin-left: -1px;
+		border-radius: 1px;
+		background: var(--wk-text);
+	}
+	/* Hover readout: frequency and band under the pointer, on a solid chip inside the track. */
+	.wk-ruler-read {
 		position: absolute;
-		top: 2px;
-		transform: translateX(-50%);
-		font-size: 10px;
-		line-height: 12px;
-		color: var(--wk-text-4);
+		top: 1px;
+		height: 16px;
+		width: 120px;
+		box-sizing: border-box;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 4px;
+		padding: 0 6px;
+		border-radius: 3px;
+		background: var(--wk-glass-strong);
+		font-size: 10.5px;
+		color: var(--wk-text);
 		font-variant-numeric: tabular-nums;
 		white-space: nowrap;
 		pointer-events: none;
 	}
-	.wk-ruler-found,
-	.wk-ruler-saved {
-		bottom: 3px;
-		width: 2px;
-		margin-left: -1px;
-		border-radius: 1px;
+	.wk-ruler-read > em {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		font-style: normal;
+		color: var(--wk-text-3);
 	}
-	.wk-ruler-found {
-		height: 7px;
-		background: rgba(var(--wk-ink-3-rgb), 0.7);
+	.wk-ruler-zoom {
+		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 1px;
+		padding: 1px;
+		border-radius: 6px;
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb), 0.1);
 	}
-	.wk-ruler-saved {
-		height: 11px;
-		background: var(--wk-accent);
+	.wk-ruler-zoom > button {
+		width: 22px;
+		height: 20px;
+		padding: 0;
+		border: 0;
+		border-radius: 4px;
+		background: transparent;
+		color: var(--wk-text-3);
+		font: inherit;
+		font-size: 13px;
+		line-height: 20px;
+		cursor: pointer;
 	}
-	.wk-ruler-capture {
-		top: 1px;
-		bottom: 1px;
-		min-width: 2px;
-		box-sizing: border-box;
-		border: 1px dashed rgba(var(--wk-line-rgb), 0.35);
-		border-radius: 3px;
+	.wk-ruler-zoom > button:hover:not(:disabled) {
+		background: var(--wk-chip);
+		color: var(--wk-text);
 	}
-	.wk-ruler-view {
-		top: 1px;
-		bottom: 1px;
-		min-width: 3px;
-		box-sizing: border-box;
-		border: 1px solid rgba(var(--wk-accent-rgb), 0.75);
-		border-radius: 3px;
-		background: rgba(var(--wk-accent-rgb), 0.14);
+	.wk-ruler-zoom > .wk-ruler-fit {
+		width: auto;
+		min-width: 40px;
+		padding: 0 6px;
+		font-size: 11px;
+		font-variant-numeric: tabular-nums;
 	}
-	.wk-ruler-tuned {
-		top: 0;
-		bottom: 0;
-		width: 1px;
-		background: var(--wk-text);
-		opacity: 0.7;
+	.wk-ruler-zoom > button:disabled {
+		opacity: 0.35;
+		cursor: default;
 	}
-	.wk-ruler-span {
-		position: absolute;
-		right: 6px;
-		top: 2px;
-		padding: 0 4px;
-		font-size: 10px;
-		line-height: 12px;
-		color: var(--wk-text-4);
-		background: var(--wk-plot-bg);
-		border-radius: 3px;
-		z-index: 1;
+	.wk-ruler-zoom > button:focus-visible {
+		outline: 2px solid var(--wk-focus);
+		outline-offset: 1px;
 	}
 }

@@ -150,49 +150,6 @@
 	}
 
 	/* Zoom control: solid */
-	.wk-plot-zoom {
-		position: absolute;
-		right: 12px;
-		bottom: 10px;
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		height: 32px;
-		padding: 0 4px;
-		border-radius: 8px;
-		background: var(--wk-glass-strong);
-		border: 1px solid var(--wk-line-14);
-		box-shadow: inset 0 1px 0 var(--wk-glass-hi);
-	}
-	[data-wk-theme="light"] .wk-plot-zoom {
-		background: var(--wk-surface);
-		border-color: rgba(var(--wk-line-rgb), 0.22);
-		box-shadow: var(--wk-e2);
-	}
-	.wk-plot-zoom-ov {
-		position: relative;
-		width: 84px;
-		height: 6px;
-		border-radius: 3px;
-		background: var(--wk-line-solid);
-	}
-	.wk-plot-zoom-ov > span {
-		position: absolute;
-		top: 0;
-		bottom: 0;
-		min-width: 3px;
-		border-radius: 3px;
-		background: var(--wk-accent);
-	}
-	.wk-plot-zoom-fit {
-		padding: 0 7px;
-		min-width: 44px;
-		color: var(--wk-text-3);
-		font-size: 12px;
-		font-weight: 400;
-		font-variant-numeric: tabular-nums;
-	}
-
 	/* Frequency axis */
 	.wk-plot-axis {
 		height: 30px;

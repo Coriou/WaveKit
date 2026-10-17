@@ -8,7 +8,8 @@ import {
 	rulerBands,
 	rulerMarks,
 	rulerSpan,
-	rulerTicks,
+	activityBins,
+	bandNameAt,
 	rulerXToHz,
 } from "../../src/plot/band-ruler.ts"
 import { TUNER_RANGE } from "../../src/features/tuner/frequency.ts"
@@ -85,11 +86,31 @@ describe("band ruler", () => {
 		expect(marks.map(m => m.key)).toEqual(["a", "c"])
 	})
 
-	it("labels round MHz", () => {
-		const ticks = rulerTicks({ startHz: 150e6, endHz: 170e6 }, 1400)
-		expect(ticks.length).toBeGreaterThanOrEqual(5)
-		expect(ticks.every(t => Number.isInteger(t.hz / 1e6))).toBe(true)
-		expect(ticks[0]?.text).toBe(String(ticks[0]!.hz / 1e6))
+	it("counts discoveries per column on a log scale", () => {
+		const span = { startHz: 0, endHz: 1000 }
+		const bins = activityBins(
+			[10, 11, 12, 13, 14, 15, 16, 500, 2000],
+			span,
+			100,
+			10,
+		)
+		expect(bins.map(b => b.x)).toEqual([0, 0.5])
+		expect(bins[0]?.level).toBe(1)
+		expect(bins[1]?.level).toBeCloseTo(Math.log(2) / Math.log(8), 9)
+		expect(activityBins([], span, 100)).toEqual([])
+	})
+
+	it("names the narrowest band under the pointer", () => {
+		const plan = {
+			bands: [
+				band("marine", "Marine VHF", 156e6, 162.025e6, null, "marine"),
+				band("ais", "AIS", 161.95e6, 162.05e6, "marine", "marine"),
+			],
+		} as unknown as ResolvedBandPlanView
+		expect(bandNameAt(plan, 161.975e6)).toBe("AIS")
+		expect(bandNameAt(plan, 157e6)).toBe("Marine VHF")
+		expect(bandNameAt(plan, 300e6)).toBeNull()
+		expect(bandNameAt(null, 157e6)).toBeNull()
 	})
 })
 

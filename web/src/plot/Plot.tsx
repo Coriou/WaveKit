@@ -27,7 +27,6 @@ import {
 	type SpectrumLevels,
 	type SpectrumViewSpan,
 } from "../spectrum/index.ts"
-import { IconButton } from "../ui/index.ts"
 import {
 	type PlacedLabel,
 	type Track,
@@ -48,7 +47,6 @@ import {
 	tuningStep,
 	wheelPixels,
 	wheelZoomFactor,
-	zoomLabel,
 } from "./maths.ts"
 import {
 	autoLevelsNow,
@@ -391,13 +389,6 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 								tunedHz={vfoHz}
 								onPick={hz => void controller.tuneTo(hz)}
 							/>
-							{layout.traceCss >= 90 && capture && (
-								<ZoomControl
-									view={view}
-									capture={capture}
-									controller={controller}
-								/>
-							)}
 						</div>
 						<div
 							className="wk-plot-band wk-plot-axis"
@@ -780,8 +771,6 @@ function SignalLabels({
 				traceCss,
 				levels,
 				tunedHz: tuned,
-				// Keep clear of the zoom control.
-				taken: [[widthPx - 230, traceCss - 46, widthPx, traceCss]],
 			}),
 		[signals, view.startHz, view.endHz, widthPx, traceCss, levels, tuned],
 	)
@@ -839,54 +828,6 @@ function SignalLabels({
 				</div>
 			))}
 		</>
-	)
-}
-
-function ZoomControl({
-	view,
-	capture,
-	controller,
-}: {
-	view: SpectrumViewSpan
-	capture: SpectrumViewSpan
-	controller: PlotController
-}) {
-	const width = spanWidth(capture)
-	return (
-		<div className="wk-plot-zoom">
-			<IconButton
-				label="Zoom out"
-				size="sm"
-				onClick={() => controller.zoomCentred(0.5)}
-			>
-				−
-			</IconButton>
-			<div className="wk-plot-zoom-ov" aria-hidden="true">
-				<span
-					style={{
-						left: `${((view.startHz - capture.startHz) / width) * 100}%`,
-						width: `${(spanWidth(view) / width) * 100}%`,
-					}}
-				/>
-			</div>
-			<IconButton
-				label="Zoom in"
-				size="sm"
-				onClick={() => controller.zoomCentred(2)}
-			>
-				+
-			</IconButton>
-			<button
-				type="button"
-				className="wk-btn wk-plot-zoom-fit"
-				data-variant="ghost"
-				data-size="sm"
-				aria-label="Show the whole capture"
-				onClick={() => controller.fit()}
-			>
-				{zoomLabel(view, capture)}
-			</button>
-		</div>
 	)
 }
 

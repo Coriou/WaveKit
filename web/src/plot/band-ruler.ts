@@ -138,33 +138,56 @@ export function rulerMarks(
 	return out
 }
 
-/** Ruler labels: a round step giving about one label per 140 px. */
-export function rulerTicks(
-	span: SpectrumViewSpan,
-	widthPx: number,
-): { hz: number; x: number; text: string }[] {
-	const width = spanWidth(span)
-	if (!(width > 0) || !(widthPx > 0)) return []
-	const want = Math.max(2, Math.floor(widthPx / 140))
-	const step =
-		RULER_STEPS.find(s => width / s <= want) ??
-		RULER_STEPS[RULER_STEPS.length - 1] ??
-		100e6
-	const out: { hz: number; x: number; text: string }[] = []
-	for (let i = Math.ceil(span.startHz / step); i * step <= span.endHz; i++) {
-		const hz = i * step
-		const mhz = hz / 1e6
-		out.push({
-			hz,
-			x: (hz - span.startHz) / width,
-			text:
-				step >= 1e6 ? `${Math.round(mhz)}` : mhz.toFixed(step >= 100e3 ? 1 : 2),
-		})
-	}
-	return out
+export interface ActivityBin {
+	/** 0–1 across the ruler. */
+	x: number
+	width: number
+	/** 0–1, log-scaled against the busiest bin. */
+	level: number
 }
 
-const RULER_STEPS = [
-	50e3, 100e3, 250e3, 500e3, 1e6, 2e6, 5e6, 10e6, 25e6, 50e6, 100e6, 200e6,
-	500e6,
-]
+/**
+ * Where the scanner has heard things, as a quiet density strip: discoveries counted per `binPx` column,
+ * heights on a log scale so one busy repeater does not flatten the rest.
+ */
+export function activityBins(
+	hzs: readonly number[],
+	span: SpectrumViewSpan,
+	widthPx: number,
+	binPx = 3,
+): ActivityBin[] {
+	const width = spanWidth(span)
+	if (!(width > 0) || !(widthPx > 0) || !(binPx > 0)) return []
+	const n = Math.max(1, Math.floor(widthPx / binPx))
+	const counts = new Map<number, number>()
+	for (const hz of hzs) {
+		if (hz < span.startHz || hz > span.endHz) continue
+		const i = Math.min(n - 1, Math.floor(((hz - span.startHz) / width) * n))
+		counts.set(i, (counts.get(i) ?? 0) + 1)
+	}
+	let max = 0
+	for (const c of counts.values()) max = Math.max(max, c)
+	if (max === 0) return []
+	return [...counts.entries()]
+		.sort((a, b) => a[0] - b[0])
+		.map(([i, c]) => ({
+			x: i / n,
+			width: 1 / n,
+			level: Math.log1p(c) / Math.log1p(max),
+		}))
+}
+
+/** The narrowest band-plan band holding `hz`, for the ruler's hover readout. */
+export function bandNameAt(
+	plan: ResolvedBandPlanView | null,
+	hz: number,
+): string | null {
+	let best: { name: string; width: number } | null = null
+	for (const b of plan?.bands ?? [])
+		for (const s of b.segments)
+			if (hz >= s.startHz && hz <= s.endHz) {
+				const w = s.endHz - s.startHz
+				if (!best || w < best.width) best = { name: b.band.name, width: w }
+			}
+	return best?.name ?? null
+}
