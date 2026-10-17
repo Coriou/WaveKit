@@ -8,12 +8,19 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
 import {
 	RECORDING_INVENTORY_ID,
 	RECORDINGS_FILE_ROUTE,
+	RECORDING_DELETE_ROUTE,
+	RECORDING_ERROR_STATUS,
+	RECORDING_KEEP_ROUTE,
 	RECORDINGS_ROUTE,
 } from "@wavekit/api-types"
 import type {
 	RecordingInventoryErrorBody,
 	RecordingInventoryErrorCode,
+	RecordingKeepErrorBody,
+	RecordingKeepErrorCode,
 } from "@wavekit/api-types"
+import { RecordingKeepError } from "../../core/recordings/contract.js"
+import type { RecordingKeepService } from "../../core/recordings/contract.js"
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 import type { DeniedAdmission } from "../../access/types.js"
 import {
@@ -30,7 +37,61 @@ export interface RecordingRoutesOptions {
 	inventory: RecordingInventory
 	authorize: (request: FastifyRequest) => DeniedAdmission | undefined
 	access: Pick<FastifyAccessController, "leaseDownload">
+	/** WG9: Keep and delete routes are registered only when both of these are present. */
+	keeps?: RecordingKeepService
+	authorizeMutation?: (request: FastifyRequest) => DeniedAdmission | undefined
 }
+
+type MutationErrorCode = RecordingKeepErrorCode | "RECORDING_NOT_FOUND"
+const MUTATION_MESSAGES: Record<MutationErrorCode, string> = {
+	RECORDING_NOT_FOUND: "Recording not found",
+	RECORDING_KEPT: "Recording is kept; unkeep it first",
+	RECORDING_BUSY: "Recording is busy; try again",
+	RECORDING_KEEP_LIMIT: "Keep limit reached",
+	RECORDING_DELETE_UNSUPPORTED: "This recording cannot be deleted",
+	RECORDING_KEEPS_UNAVAILABLE: "Keeping recordings is unavailable",
+}
+const MUTATION_ERRORS: Record<number, string> = {
+	404: "Not Found",
+	409: "Conflict",
+	503: "Service Unavailable",
+}
+type MutationOp = "keep" | "unkeep" | "remove"
+/**
+ * 500 bodies, fixed text per operation. Both 500 codes are proposed contract additions:
+ * `RECORDING_KEEP_FAILED` (Keep and unkeep) and `RECORDING_DELETE_FAILED` (delete).
+ */
+const FAILED_BODIES: Record<
+	MutationOp,
+	{ error: string; code: string; message: string }
+> = {
+	keep: {
+		error: "Internal Server Error",
+		code: "RECORDING_KEEP_FAILED",
+		message: "Recording could not be kept",
+	},
+	unkeep: {
+		error: "Internal Server Error",
+		code: "RECORDING_KEEP_FAILED",
+		message: "Recording could not be unkept",
+	},
+	remove: {
+		error: "Internal Server Error",
+		code: "RECORDING_DELETE_FAILED",
+		message: "Recording could not be deleted",
+	},
+}
+const FAILED_LOGS: Record<MutationOp, string> = {
+	keep: "Recording keep failed",
+	unkeep: "Recording unkeep failed",
+	remove: "Recording delete failed",
+}
+const TOO_LARGE_BODY = {
+	error: "Payload Too Large",
+	code: "FST_ERR_CTP_BODY_TOO_LARGE",
+	message: "Request body is too large",
+}
+const MUTATION_BODY_LIMIT = 1024
 
 const SAFE_BASENAME = /^[A-Za-z0-9_.-]+$/
 
@@ -71,7 +132,90 @@ export async function recordingRoutes(
 	fastify: FastifyInstance,
 	options: RecordingRoutesOptions,
 ): Promise<void> {
-	const { inventory, authorize, access } = options
+	const { inventory, authorize, access, keeps, authorizeMutation } = options
+
+	if (keeps && authorizeMutation) {
+		const svc = keeps
+		const authorizeM = authorizeMutation
+		// An encapsulated child: its hooks and its body parser apply to these three routes only.
+		await fastify.register(async child => {
+			// Authorize, then the id check, then the size check: all before any body is read, so a
+			// denial wins over a malformed or oversized body.
+			child.addHook(
+				"onRequest",
+				async (request: FastifyRequest, reply: FastifyReply) => {
+					const denied = authorizeM(request)
+					if (denied) return sendDenial(reply, denied)
+					const id = (request.params as { id?: unknown } | undefined)?.id
+					if (
+						typeof id !== "string" ||
+						id.length > RECORDINGS_ID_MAX_LENGTH ||
+						!RECORDING_INVENTORY_ID.test(id)
+					)
+						return sendError(reply, 404, "RECORDING_NOT_FOUND")
+					const length = Number(request.headers["content-length"] ?? 0)
+					if (!Number.isFinite(length) || length > MUTATION_BODY_LIMIT)
+						return reply
+							.code(413)
+							.header("Cache-Control", "no-store")
+							.send(TOO_LARGE_BODY)
+					return undefined
+				},
+			)
+			// The body is never parsed: any content type is read up to the limit (413 past it,
+			// chunked included) and discarded.
+			child.removeAllContentTypeParsers()
+			child.addContentTypeParser(
+				"*",
+				{ parseAs: "buffer", bodyLimit: MUTATION_BODY_LIMIT },
+				(_request, _body, done) => {
+					done(null, undefined)
+				},
+			)
+			const mutate =
+				(op: MutationOp) =>
+				async (
+					request: FastifyRequest<{ Params: { id: string } }>,
+					reply: FastifyReply,
+				) => {
+					const id = request.params.id
+					try {
+						const result = await svc[op](id)
+						return await reply.header("Cache-Control", "no-store").send(result)
+					} catch (err) {
+						reply.header("Cache-Control", "no-store")
+						if (err instanceof RecordingKeepError) {
+							const code = err.code
+							const status = RECORDING_ERROR_STATUS[code] ?? err.status
+							const body: RecordingKeepErrorBody = {
+								error: MUTATION_ERRORS[status] ?? "Error",
+								code: code as RecordingKeepErrorCode,
+								message: MUTATION_MESSAGES[code],
+							}
+							return reply.code(status).send(body)
+						}
+						request.log.warn({ err: safeErrorFields(err) }, FAILED_LOGS[op])
+						return reply.code(500).send(FAILED_BODIES[op])
+					}
+				}
+			const opts = { bodyLimit: MUTATION_BODY_LIMIT }
+			child.put<{ Params: { id: string } }>(
+				RECORDING_KEEP_ROUTE,
+				opts,
+				mutate("keep"),
+			)
+			child.delete<{ Params: { id: string } }>(
+				RECORDING_KEEP_ROUTE,
+				opts,
+				mutate("unkeep"),
+			)
+			child.delete<{ Params: { id: string } }>(
+				RECORDING_DELETE_ROUTE,
+				opts,
+				mutate("remove"),
+			)
+		})
+	}
 
 	fastify.get(RECORDINGS_ROUTE, async (request, reply) => {
 		const denied = authorize(request)
