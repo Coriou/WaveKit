@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest"
-import type { SdrHostSampling, SdrHostTelemetry } from "@wavekit/api-types"
+import type {
+	SdrHostNetworkInterface,
+	SdrHostSampling,
+	SdrHostTelemetry,
+} from "@wavekit/api-types"
 import { HostCollector } from "../../src/telemetry/host.js"
 import { SamplingMonitor } from "../../src/telemetry/sampling.js"
 import {
@@ -449,6 +453,8 @@ describe("operator page host readouts", () => {
 					rxBytesPerSec: 0,
 					txBytesPerSec: 4_500_000,
 					wireless: { linkQuality: 60, signalDbm: -47 },
+					speedMbps: null,
+					defaultRouteMetric: 600,
 				},
 			],
 		}
@@ -457,6 +463,72 @@ describe("operator page host readouts", () => {
 			value: "Wi-Fi · Excellent",
 			sub: "\u221247 dBm · 4.50 MB/s out",
 			bars: 4,
+		})
+	})
+
+	it("shows wired link speed and points Wi-Fi clients at a connected Ethernet address", () => {
+		const iface = (
+			name: string,
+			fields: Partial<SdrHostNetworkInterface>,
+		): SdrHostNetworkInterface => ({
+			name,
+			kind: "ethernet",
+			operstate: "up",
+			addresses: [],
+			rxBytesPerSec: 0,
+			txBytesPerSec: 0,
+			wireless: null,
+			speedMbps: null,
+			defaultRouteMetric: null,
+			...fields,
+		})
+		const host = emptyHost()
+		const reading = (value: SdrHostNetworkInterface[]) => ({
+			state: "ok" as const,
+			scope: "host" as const,
+			observedAt: null,
+			ageMs: 0,
+			reason: null,
+			value,
+		})
+		const eth = iface("eth0", {
+			addresses: ["192.0.2.69", "2001:db8::1"],
+			speedMbps: 100,
+			defaultRouteMetric: 100,
+		})
+		const wlan = iface("wlan0", {
+			kind: "wireless",
+			addresses: ["198.51.100.23"],
+			wireless: { linkQuality: 40, signalDbm: -50 },
+			defaultRouteMetric: 600,
+		})
+
+		host.network = reading([
+			{ ...eth, txBytesPerSec: 4_100_000 },
+			{ ...wlan, txBytesPerSec: 2_000 },
+		])
+		expect(readouts(host)?.network).toMatchObject({
+			state: "ok",
+			value: "Ethernet",
+			sub: "100 Mb/s link · 4.10 MB/s out",
+		})
+
+		// IQ leaves over Wi-Fi although a wired link is up: say where to connect.
+		host.network = reading([eth, { ...wlan, txBytesPerSec: 1_900_000 }])
+		expect(readouts(host)?.network).toMatchObject({
+			state: "warn",
+			value: "Wi-Fi · Excellent",
+			sub: "\u221250 dBm · 1.90 MB/s out · Ethernet up at 192.0.2.69: connect clients there",
+		})
+
+		// A wired port without carrier changes nothing.
+		host.network = reading([
+			{ ...eth, operstate: "down", speedMbps: null, defaultRouteMetric: null },
+			{ ...wlan, txBytesPerSec: 1_900_000 },
+		])
+		expect(readouts(host)?.network).toMatchObject({
+			state: "ok",
+			sub: "\u221250 dBm · 1.90 MB/s out",
 		})
 	})
 

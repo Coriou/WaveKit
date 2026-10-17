@@ -544,17 +544,21 @@ export function readouts(host) {
 	else {
 		const signal = link.wireless?.signalDbm
 		const wifi = signal === undefined ? null : wifiBars(signal)
+		const wired = idleWiredLink(network, link)
 		const facts = [
 			signal === undefined
 				? null
 				: `${String(signal).replace("-", "\u2212")} dBm`,
+			link.speedMbps ? `${link.speedMbps} Mb/s link` : null,
 			link.txBytesPerSec === null
 				? null
 				: `${formatRateText(link.txBytesPerSec)} out`,
-			// The address lives in diagnostics; the row keeps to what can change.
+			// The address lives in diagnostics; the row keeps to what can change,
+			// except when a client should move to the wired one.
+			wired ? `Ethernet up at ${wired}: connect clients there` : null,
 		]
 		out.network = {
-			state: tone(network, wifi?.warn ?? false),
+			state: tone(network, (wifi?.warn ?? false) || wired !== null),
 			value:
 				link.kind === "wireless"
 					? `Wi-Fi${wifi ? ` · ${wifi.word}` : ""}`
@@ -638,6 +642,19 @@ export function primaryInterface(network) {
 				b.addresses.length - a.addresses.length,
 		)
 	return ranked[0] ?? null
+}
+
+/**
+ * The IPv4 address of a connected Ethernet port while traffic leaves over
+ * Wi-Fi. Clients pick the address they connect to, so a Pi on both links
+ * streams over Wi-Fi whenever a client dialled its Wi-Fi address.
+ */
+function idleWiredLink(network, primary) {
+	if (primary.kind !== "wireless") return null
+	const wired = network.value.find(
+		i => i.kind === "ethernet" && i.operstate === "up" && i.speedMbps,
+	)
+	return wired?.addresses.find(a => !a.includes(":")) ?? null
 }
 
 export function setupLine(reading) {

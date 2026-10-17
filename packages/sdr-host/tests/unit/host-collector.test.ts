@@ -43,6 +43,8 @@ function piTree(): { proc: string; sys: string } {
 		"self/cgroup": "0::/\n",
 		"net/dev": netDev(1000, 1000),
 		"net/wireless": "h1\nh2\n wlan0: 0000   58.  -52.  -256 0 0 0 0 0 0\n",
+		"net/route":
+			"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\nwlan0\t00000000\t0102000C\t0003\t0\t0\t600\t00000000\t0\t0\t0\n",
 		"sys/kernel/random/boot_id": "boot-b\n",
 	})
 	const sys = tree({
@@ -123,6 +125,8 @@ describe("HostCollector", () => {
 				rxBytesPerSec: 2000,
 				txBytesPerSec: 4_096_000,
 				wireless: { linkQuality: 58, signalDbm: -52 },
+				speedMbps: null,
+				defaultRouteMetric: 600,
 			},
 		])
 		expect(t.power.throttling).toMatchObject({
@@ -265,6 +269,63 @@ describe("HostCollector", () => {
 		})
 		// Disk is sampled every 30 s, so it stays fresh longer.
 		expect(collector.snapshot().disk.state).toBe("ok")
+	})
+
+	it("reports wired link speed and which interface carries the preferred default route", () => {
+		const { proc, sys } = piTree()
+		for (const [file, content] of Object.entries({
+			"class/net/eth0/device/uevent": "",
+			"class/net/eth0/operstate": "up\n",
+			"class/net/eth0/type": "1\n",
+			"class/net/eth0/speed": "100\n",
+			// Wi-Fi drivers expose no meaningful speed; never trust one.
+			"class/net/wlan0/speed": "65\n",
+		})) {
+			fs.mkdirSync(path.dirname(path.join(sys, file)), { recursive: true })
+			write(sys, file, content)
+		}
+		write(
+			proc,
+			"net/route",
+			"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\neth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\nwlan0\t00000000\t0102000C\t0003\t0\t0\t600\t00000000\t0\t0\t0\n",
+		)
+		const collector = new HostCollector({
+			procRoot: proc,
+			sysRoot: sys,
+			statusDir: proc,
+			statfsPath: os.tmpdir(),
+			networkInterfaces: () => ({}),
+		})
+		collector.collectAll()
+		expect(collector.snapshot().network.value).toMatchObject([
+			{
+				name: "eth0",
+				kind: "ethernet",
+				speedMbps: 100,
+				defaultRouteMetric: 100,
+			},
+			{
+				name: "wlan0",
+				kind: "wireless",
+				speedMbps: null,
+				defaultRouteMetric: 600,
+			},
+		])
+
+		// No carrier: the kernel reports -1 (or the read fails) and the route goes away.
+		write(sys, "class/net/eth0/speed", "-1\n")
+		write(sys, "class/net/eth0/operstate", "down\n")
+		write(
+			proc,
+			"net/route",
+			"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n",
+		)
+		collector.collectAll()
+		expect(collector.snapshot().network.value?.[0]).toMatchObject({
+			name: "eth0",
+			speedMbps: null,
+			defaultRouteMetric: null,
+		})
 	})
 
 	it("resets network rates when interface counters go backwards", () => {
