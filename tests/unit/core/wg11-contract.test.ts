@@ -33,14 +33,23 @@ import {
 	IQ_CAPTURE_PER_SOURCE_PER_MINUTE,
 	IQ_CAPTURE_PREROLL_MAX_MS,
 	IQ_CAPTURE_RATE_HZ,
-	IQ_CAPTURE_RETENTION_MS,
+	IQ_CAPTURE_ORPHAN_TTL_MS,
 	IQ_CAPTURE_TOTAL_MAX_BYTES,
 	IQ_REPLAY_MAX_PROBES,
+	IQ_REPLAY_MAX_TRIALS,
 	IQ_REPLAY_PROBE_CORES,
 	type IqCapturePort,
 	type IqCaptureRefusal,
 	type IqCaptureView,
+	type IqCaptureDiscardReason,
+	type IqReplayPlanner,
+	type IqReplayResult,
+	type IqReplaySink,
 } from "../../../src/core/scanner/iq-capture-contract.js"
+import {
+	KNOWN_PROTOCOL_MAX_MISSES,
+	type KnownProtocolMemory,
+} from "../../../src/core/scanner/known-protocol-contract.js"
 import type { ProbeTransport } from "../../../src/core/scanner/probes/probe-pool.js"
 import type { SpectrumTrackIdentityLookup } from "../../../src/core/spectrum/track-identity-contract.js"
 import {
@@ -379,7 +388,15 @@ describe("WG11 contract: IQ capture bounds and port", () => {
 		)
 		// The native ring: 2 s of CU8 at 2.048 Msps is 8 192 000 B (2 B per sample).
 		expect((IQ_CAPTURE_PREROLL_MAX_MS / 1000) * 2_048_000 * 2).toBe(8_192_000)
-		expect(IQ_CAPTURE_RETENTION_MS).toBe(24 * 60 * 60 * 1000)
+		// Discarded at its result; an orphan (no result) after 10 minutes. At 6 per minute per
+		// source a full orphan backlog is 60 captures (92 MB), inside the 256 MiB cap.
+		expect(IQ_CAPTURE_ORPHAN_TTL_MS).toBe(10 * 60 * 1000)
+		expect(
+			(IQ_CAPTURE_ORPHAN_TTL_MS / 60_000) *
+				IQ_CAPTURE_PER_SOURCE_PER_MINUTE *
+				IQ_CAPTURE_MAX_BYTES,
+		).toBeLessThan(IQ_CAPTURE_TOTAL_MAX_BYTES)
+		expect(IQ_REPLAY_MAX_TRIALS).toBe(8)
 		expect(IQ_CAPTURE_MAX_CONCURRENT).toBe(2)
 		expect(IQ_CAPTURE_DIR).toBe("iq-captures")
 		expect(IQ_CAPTURE_CONTROL_LINE_MAX_BYTES).toBe(4096)
@@ -433,8 +450,9 @@ describe("WG11 contract: IQ capture bounds and port", () => {
 			near: () => [view],
 			capture: () => ({ refused: "disabled" }),
 			end: () => undefined,
-			retain: () => false,
-			release: () => undefined,
+			claim: () => false,
+			settle: () => undefined,
+			confirmLive: () => 0,
 			openReplay: (): Readable | null => null,
 		}
 		expect(
@@ -453,5 +471,87 @@ describe("WG11 contract: IQ capture bounds and port", () => {
 		).toEqual({ refused: "disabled" })
 		expect(port.openReplay(view.captureId, "dsd-fme")).toBeNull()
 		expect(refusals).toHaveLength(8)
+		const reasons: IqCaptureDiscardReason[] = [
+			"result",
+			"confirmed-live",
+			"orphan-ttl",
+			"invalid",
+			"shutdown",
+		]
+		expect(reasons).toHaveLength(5)
+	})
+
+	it("types the replay queue planner and result sink (capture → queue → trials → result → discard)", () => {
+		const planner: IqReplayPlanner = input =>
+			input.knownProtocol === "dmr"
+				? [
+						{
+							protocol: "dmr",
+							mode: {
+								decoderType: "dsd-fme",
+								protocol: "dmr",
+								options: { mode: "auto" },
+								covers: ["dmr"],
+								holdMs: 1800,
+							},
+							known: true,
+						},
+					]
+				: []
+		const trials = planner({
+			capture: {
+				captureId: "00000000-0000-4000-8000-000000000000",
+				sourceId: "rtl",
+				observationId: "o1",
+				epoch: 1,
+				rfHz: 446_006_250,
+				tuningTrust: "commanded",
+				capturedAtMs: 0,
+				durationMs: 4000,
+				gapSamples: 0,
+			},
+			track: null,
+			knownProtocol: "dmr",
+			priors: {},
+			narrowRaster: true,
+		})
+		expect(trials[0]?.known).toBe(true)
+		const results: IqReplayResult[] = []
+		const sink: IqReplaySink = r => results.push(r)
+		sink({
+			captureId: "00000000-0000-4000-8000-000000000000",
+			sourceId: "rtl",
+			observationId: "o1",
+			epoch: 1,
+			trials: [
+				{
+					protocol: "dmr",
+					decoderType: "dsd-fme",
+					known: true,
+					outcome: "no-sync",
+				},
+			],
+			decoded: null,
+		})
+		expect(results).toHaveLength(1)
+	})
+
+	it("pins the known-protocol memory", () => {
+		// Two consecutive full-hold misses: one bad transmission never drops the prior, two do.
+		expect(KNOWN_PROTOCOL_MAX_MISSES).toBe(2)
+		const misses = new Map<string, number>()
+		const memory: KnownProtocolMemory = {
+			known: id =>
+				(misses.get(id) ?? 0) < KNOWN_PROTOCOL_MAX_MISSES ? "dmr" : null,
+			recordMiss: id => void misses.set(id, (misses.get(id) ?? 0) + 1),
+			recordDecode: id => void misses.delete(id),
+			forget: id => void misses.delete(id),
+		}
+		memory.recordMiss("d1", "dmr")
+		expect(memory.known("d1")).toBe("dmr")
+		memory.recordMiss("d1", "dmr")
+		expect(memory.known("d1")).toBeNull()
+		memory.recordDecode("d1")
+		expect(memory.known("d1")).toBe("dmr")
 	})
 })

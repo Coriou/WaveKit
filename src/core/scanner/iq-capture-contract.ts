@@ -1,12 +1,16 @@
 /**
  * WG11 frozen contract (docs/specs/web-gaps-11, requirement 6): narrowband IQ capture on
- * detection, replayed into identify. Lane IQ implements the port (`src/core/iq-capture/service.ts`)
- * with the native `wavekit-iqcap` tool and the `replay` probe transport; Main wires it into the
- * scanner service, identify and the probe pool. Constants and types only.
+ * detection, replayed into the probe decoders after the transmission ended. Queue order:
+ * capture → queue → replay trials → result → discard. Lane IQ implements the port and the queue
+ * (`src/core/iq-capture/**`) with the native `wavekit-iqcap` tool and the `replay` probe
+ * transport; lane ID implements the planner (`planReplayTrials`); Main wires the result sink into
+ * the scanner service, identify and the probe pool. Constants and types only.
  */
 import type { Readable } from "node:stream"
 import type { TuningTrust } from "@wavekit/api-types"
-import type { ProbeDecoderType } from "./probes/probe-pool.js"
+import type { TrackSnapshot } from "../spectrum/types.js"
+import type { ProbeDecoderType, ProbeMode } from "./probes/probe-pool.js"
+import type { Identity, ScannerProtocol } from "./types.js"
 
 /** Capture output rate: the probe decoders' channel rate (48 kHz audio family). */
 export const IQ_CAPTURE_RATE_HZ = 48_000
@@ -19,8 +23,11 @@ export const IQ_CAPTURE_MAX_BYTES =
 	(IQ_CAPTURE_MAX_MS / 1000) * IQ_CAPTURE_RATE_HZ * IQ_CAPTURE_BYTES_PER_SAMPLE
 /** 256 MiB in total (174 full captures). */
 export const IQ_CAPTURE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
-/** A capture is deleted at the latest this long after it was taken. */
-export const IQ_CAPTURE_RETENTION_MS = 86_400_000
+/**
+ * A capture is discarded as soon as its result exists; one that never got a result (backlog,
+ * decoders unavailable) is discarded this long after it finished (10 minutes).
+ */
+export const IQ_CAPTURE_ORPHAN_TTL_MS = 600_000
 /** The native full-rate ring: 2 s × fs × 2 B (8.2 MB at 2.048 Msps). */
 export const IQ_CAPTURE_PREROLL_MAX_MS = 2_000
 /** Captures being written at once (per core). */
@@ -40,6 +47,8 @@ export const IQ_REPLAY_MAX_PROBES = 1
 export const IQ_REPLAY_PROBE_CORES = 0.15
 /** Captures replayed per identify target at most (newest first). */
 export const IDENTIFY_REPLAY_MAX_CAPTURES = 2
+/** Replay trials per capture at most (known protocol first). */
+export const IQ_REPLAY_MAX_TRIALS = 8
 
 /** A finished capture as identify and the replay transport see it. */
 export interface IqCaptureView {
@@ -80,6 +89,14 @@ export type IqCaptureRefusal =
 	| "epoch-changed"
 	| "invalid"
 
+/** Why a capture left the store (counted). */
+export type IqCaptureDiscardReason =
+	| "result"
+	| "confirmed-live"
+	| "orphan-ttl"
+	| "invalid"
+	| "shutdown"
+
 export interface IqCapturePort {
 	/** Finished, verified captures near `hz` (newest first, at most `limit`). Never throws. */
 	near(
@@ -94,13 +111,71 @@ export interface IqCapturePort {
 	): { captureId: string } | { refused: IqCaptureRefusal }
 	/** The captured track closed: finish the capture early (no-op when already finished). */
 	end(captureId: string): void
-	/** Holds a capture for `holder` (an identify job id); false when it is gone or not ready. */
-	retain(captureId: string, holder: string): boolean
-	/** Releases a hold; the last release after `retain` deletes the capture. */
-	release(captureId: string, holder: string): void
+	/**
+	 * An identify job takes a queued capture over from the replay queue (`holder` = the job id);
+	 * false when it is gone, not ready, already replaying or held by another job.
+	 */
+	claim(captureId: string, holder: string): boolean
+	/** The holder reached its result (or ended): the capture is discarded at once. */
+	settle(captureId: string, holder: string): void
+	/**
+	 * A live probe or identify run decoded the observation: its captures whose replay has not
+	 * started are discarded (`confirmed-live`). Returns how many were discarded.
+	 */
+	confirmLive(sourceId: string, observationId: string): number
 	/**
 	 * A fresh replay stream of the capture filtered to the decoder type's probe channel shape
 	 * (cf32 at the shape's rate), or null when the capture is gone, unverified or `rtl433`.
 	 */
 	openReplay(captureId: string, decoderType: ProbeDecoderType): Readable | null
 }
+
+/** What `planReplayTrials` (lane ID) gets for one capture (Main composes it from the scanner). */
+export interface IqReplayPlanInput {
+	capture: IqCaptureView
+	/** The captured track's last snapshot; null when the scanner no longer holds it. */
+	track: TrackSnapshot | null
+	/** The discovery's known protocol (requirement 1.7); null when none or decayed. */
+	knownProtocol: ScannerProtocol | null
+	priors: Partial<Record<ScannerProtocol, number>>
+	/** `narrowRasterAt(ranges, capture.rfHz)` (requirement 1.3). */
+	narrowRaster: boolean
+}
+
+/** One replay trial; at most IQ_REPLAY_MAX_TRIALS per capture, `known` ones first. */
+export interface IqReplayTrial {
+	protocol: ScannerProtocol
+	mode: ProbeMode
+	/** The trial of the discovery's known protocol (a miss counts per requirement 1.8). */
+	known: boolean
+}
+
+export type IqReplayPlanner = (
+	input: IqReplayPlanInput,
+) => readonly IqReplayTrial[]
+
+export type IqReplayTrialOutcome =
+	| "decoded"
+	| "no-sync"
+	| "crc-errors"
+	| "timeout"
+	| "cancelled"
+
+/** The result of one capture's queue entry, delivered once, before the capture is discarded. */
+export interface IqReplayResult {
+	captureId: string
+	sourceId: string
+	observationId: string | null
+	epoch: number
+	trials: readonly {
+		protocol: ScannerProtocol
+		decoderType: ProbeDecoderType
+		known: boolean
+		outcome: IqReplayTrialOutcome
+	}[]
+	/** The first accepted (H2) decode; null when no trial decoded. */
+	decoded: { protocol: ScannerProtocol; identity: Identity } | null
+}
+
+/** Main's scanner side: decode evidence or undecoded reason, and the known-protocol memory. */
+export type IqReplaySink = (result: IqReplayResult) => void
