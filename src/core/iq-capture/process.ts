@@ -90,8 +90,9 @@ export function buildRunArgs(o: IqToolProcessOptions): string[] {
 }
 
 /**
- * Events: "ready", "event" (IqToolEvent other than ready), "exit" (failed: boolean, errno code
- * or null) exactly once after a spawn attempt, whether the child ran or not.
+ * Events: "ready", "event" (IqToolEvent other than ready), "gap" (samples were lost before the
+ * tool: declared with the next accepted chunk), "exit" (failed: boolean, errno code or null)
+ * exactly once after a spawn attempt, whether the child ran or not.
  */
 export class IqToolProcess extends EventEmitter {
 	readonly counters: IqToolCounters = {
@@ -269,6 +270,9 @@ export class IqToolProcess extends EventEmitter {
 	private addGap(samples: number): void {
 		this.pendingGapSamples += samples
 		this.ringStart = this.submittedSamples()
+		// Review m1: the gap line on fd 3 may overtake samples still queued on stdin, so the tool
+		// cannot place it exactly inside an open capture: the service aborts those captures.
+		this.emit("gap")
 	}
 
 	private sendPendingGap(): void {

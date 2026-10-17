@@ -127,6 +127,14 @@ export interface IqCaptureServiceCounters extends IqCaptureCounters {
 }
 
 export interface IqCaptureService extends IqCapturePort {
+	/**
+	 * Review M2: `capture`, the capture held by `holder` from the start (an identify job), so the
+	 * replay queue never takes it over when it finishes; `claim(id, holder)` then returns true.
+	 */
+	captureFor(
+		req: IqCaptureRequest,
+		holder: string,
+	): { captureId: string } | { refused: IqCaptureRefusal }
 	start(): Promise<void>
 	stop(): Promise<void>
 	/** Ensures the directory and removes leftovers of an earlier run (idempotent; off → no-op). */
@@ -229,6 +237,15 @@ class Service implements IqCaptureService {
 	private readonly unlinks = new Set<Promise<void>>()
 	/** Recently removed capture ids (bounded, oldest evicted): their late tool events are not hostile. */
 	private readonly forgotten = new Set<string>()
+	/**
+	 * Review m2/m4: captures Node removed while the tool still writes them. Their bytes stay held and
+	 * their concurrency slot taken until the tool's final event for them or its exit; then the files
+	 * (`.cf32`, `.cf32.tmp`) are unlinked and the bytes released. At most one per open tool capture.
+	 */
+	private readonly zombies = new Map<
+		string,
+		{ bytes: number; proc: IqToolProcess }
+	>()
 	private toolTotals: IqToolCounters = {
 		droppedBytes: 0,
 		gapCommands: 0,
@@ -298,6 +315,7 @@ class Service implements IqCaptureService {
 			maxCaptureMs: Math.min(IQ_CAPTURE_MAX_MS, this.cfg.maxCaptureMs),
 			now: this.now,
 			onRemove: (entry, reason) => this.onRemove(entry, reason),
+			openInTool: () => this.openInTool(),
 		})
 		this.st = "on"
 		for (const slot of this.slots.values()) this.spawnTool(slot)
@@ -489,7 +507,7 @@ class Service implements IqCaptureService {
 		if (!e || !this.store) return false
 		if (e.holder !== null && e.holder !== holder) return false
 		if (e.state === "capturing") {
-			this.endCapture(e)
+			// Ended in the tool by onRemove (the capture stays counted until the tool's final event).
 			this.store.fail(captureId)
 			return true
 		}
@@ -566,13 +584,23 @@ class Service implements IqCaptureService {
 
 	capture(
 		req: IqCaptureRequest,
+		holder: string | null = null,
 	): { captureId: string } | { refused: IqCaptureRefusal } {
 		try {
-			return this.doCapture(req)
+			return this.doCapture(req, holder)
 		} catch (err: unknown) {
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
 			return this.refuse("invalid")
 		}
+	}
+
+	captureFor(
+		req: IqCaptureRequest,
+		holder: string,
+	): { captureId: string } | { refused: IqCaptureRefusal } {
+		if (typeof holder !== "string" || holder.length === 0)
+			return this.refuse("invalid")
+		return this.capture(req, holder)
 	}
 
 	private refuse(reason: IqCaptureRefusal): { refused: IqCaptureRefusal } {
@@ -583,6 +611,7 @@ class Service implements IqCaptureService {
 
 	private doCapture(
 		req: IqCaptureRequest,
+		holder: string | null,
 	): { captureId: string } | { refused: IqCaptureRefusal } {
 		if (!this.cfg) return this.refuse("disabled")
 		if (!this.o.protectedMode) return this.refuse("not-protected")
@@ -634,6 +663,8 @@ class Service implements IqCaptureService {
 		if (!isCaptureId(captureId)) return this.refuse("invalid")
 		const admitted = store.admit(req, captureId, slot.epoch)
 		if ("refused" in admitted) return admitted
+		// Held before the tool can answer: the queue never sees it unheld.
+		if (holder !== null) store.reserve(captureId, holder)
 		const maxMs = Math.min(IQ_CAPTURE_MAX_MS, this.cfg.maxCaptureMs)
 		slot.ids.add(captureId)
 		const sent = proc.send({
@@ -676,7 +707,11 @@ class Service implements IqCaptureService {
 	}
 
 	settle(captureId: string, holder: string): void {
-		this.store?.settle(captureId, holder)
+		const e = this.store?.get(captureId)
+		// A reserved capture still being written: ended in the tool, dropped (onRemove).
+		if (e?.state === "capturing" && e.holder === holder)
+			this.store?.fail(captureId)
+		else this.store?.settle(captureId, holder)
 	}
 
 	confirmLive(sourceId: string, observationId: string): number {
@@ -839,6 +874,16 @@ class Service implements IqCaptureService {
 			if (slot.proc !== proc) return
 			this.onToolEvent(slot, ev)
 		})
+		// Review m1: a gap cannot be placed exactly inside an open capture: those captures are aborted.
+		proc.on("gap", () => {
+			if (slot.proc !== proc) return
+			for (const id of [...slot.ids]) this.store?.fail(id)
+		})
+		// Whatever ended it, the tool wrote nothing more: its remaining zombies are released.
+		proc.once("exit", () => {
+			for (const [id, z] of [...this.zombies])
+				if (z.proc === proc) this.reap(id)
+		})
 		proc.once("exit", (failed: boolean, code: string | null) => {
 			if (slot.proc !== proc) return
 			slot.proc = null
@@ -912,8 +957,18 @@ class Service implements IqCaptureService {
 			return
 		}
 		if (!slot.ids.has(ev.id)) {
-			// A late answer for a capture Node already ended (timeout, flush, discard) is expected.
-			if (this.forgotten.has(ev.id)) return
+			const z = this.zombies.get(ev.id)
+			// The tool's final event for a capture Node already removed: its files and bytes go now.
+			if (z && z.proc === slot.proc) {
+				this.reap(ev.id)
+				return
+			}
+			// A late answer for a capture Node already ended (timeout, flush, discard) is expected;
+			// a late file is never kept (review m2).
+			if (this.forgotten.has(ev.id)) {
+				if (ev.type === "captured") this.unlinkFiles(ev.id, false)
+				return
+			}
 			store.countHostile()
 			return
 		}
@@ -1023,22 +1078,57 @@ class Service implements IqCaptureService {
 		)
 	}
 
+	/** Zombies of a tool still running for its source (they hold its open-capture slots). */
+	private openInTool(): number {
+		let n = 0
+		for (const z of this.zombies.values())
+			for (const slot of this.slots.values()) if (slot.proc === z.proc) n++
+		return n
+	}
+
 	private onRemove(
 		entry: IqCaptureEntry,
 		_reason: IqCaptureDiscardReason | "failed",
 	): void {
-		for (const slot of this.slots.values()) slot.ids.delete(entry.captureId)
+		let writer: IqToolProcess | null = null
+		for (const slot of this.slots.values())
+			if (slot.ids.delete(entry.captureId) && slot.proc) writer = slot.proc
 		this.forget(entry.captureId)
 		this.clearCaptureTimer(entry.captureId)
-		const dir = this.dir
-		if (!dir || !isCaptureId(entry.captureId)) {
+		if (!this.dir || !isCaptureId(entry.captureId)) {
 			this.store?.released(entry.bytes)
 			return
 		}
-		const base = path.join(dir, `${entry.captureId}.cf32`)
-		const p = Promise.allSettled([fsp.unlink(base), fsp.unlink(`${base}.tmp`)])
+		if (entry.state === "capturing" && writer) {
+			// Review m2/m4: the tool still writes it. Ended now; files and bytes go at its final event.
+			this.zombies.set(entry.captureId, { bytes: entry.bytes, proc: writer })
+			if (writer.ready) writer.send({ type: "end", id: entry.captureId })
+			return
+		}
+		this.unlinkFiles(entry.captureId, true, entry.bytes)
+	}
+
+	private reap(captureId: string): void {
+		const z = this.zombies.get(captureId)
+		if (!z) return
+		this.zombies.delete(captureId)
+		this.unlinkFiles(captureId, true, z.bytes)
+	}
+
+	/** Unlinks `<id>.cf32` (and `.tmp`), then releases `bytes` against the cap. */
+	private unlinkFiles(captureId: string, tmp: boolean, bytes = 0): void {
+		const dir = this.dir
+		if (!dir || !isCaptureId(captureId)) {
+			if (bytes > 0) this.store?.released(bytes)
+			return
+		}
+		const base = path.join(dir, `${captureId}.cf32`)
+		const p = Promise.allSettled([
+			fsp.unlink(base),
+			...(tmp ? [fsp.unlink(`${base}.tmp`)] : []),
+		])
 			.then(() => {
-				this.store?.released(entry.bytes)
+				if (bytes > 0) this.store?.released(bytes)
 			})
 			.finally(() => this.unlinks.delete(p))
 		this.unlinks.add(p)

@@ -68,6 +68,11 @@ export interface IqCaptureStoreOptions {
 		entry: IqCaptureEntry,
 		reason: IqCaptureDiscardReason | "failed",
 	) => void
+	/**
+	 * Review m4: captures removed here that the tool still writes (no final event yet). They keep
+	 * their concurrency slot, or the tool would answer the next request `busy`.
+	 */
+	openInTool?: () => number
 }
 
 function zeroRecord<K extends string>(keys: readonly K[]): Record<K, number> {
@@ -163,7 +168,10 @@ export class IqCaptureStore {
 		currentEpoch: number,
 	): { captureId: string } | { refused: IqCaptureRefusal } {
 		if (req.epoch !== currentEpoch) return this.refuse("epoch-changed")
-		if (this.capturing() >= IQ_CAPTURE_MAX_CONCURRENT)
+		if (
+			this.capturing() + (this.o.openInTool?.() ?? 0) >=
+			IQ_CAPTURE_MAX_CONCURRENT
+		)
 			return this.refuse("busy")
 		const now = this.o.now()
 		const stamps = (this.rate.get(req.sourceId) ?? []).filter(
@@ -270,11 +278,23 @@ export class IqCaptureStore {
 		return true
 	}
 
+	/** A ready, unreplayed capture held by nobody (taken now) or already by `holder` (reserved). */
 	claim(captureId: string, holder: string): boolean {
 		const e = this.entries.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return false
 		if (e.replayStarted || e.replays > 0) return false
-		if (e.holder !== null) return false
+		if (e.holder !== null) return e.holder === holder
+		e.holder = holder
+		return true
+	}
+
+	/**
+	 * Review M2: a capture being written is held for its requester from the start, so the replay
+	 * queue never takes it over when it finishes. False when gone, finished or held.
+	 */
+	reserve(captureId: string, holder: string): boolean {
+		const e = this.entries.get(captureId)
+		if (!e || e.state !== "capturing" || e.holder !== null) return false
 		e.holder = holder
 		return true
 	}

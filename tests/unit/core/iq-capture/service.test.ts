@@ -734,3 +734,131 @@ describe("IqCaptureService openReplay", () => {
 		await s.svc.stop()
 	})
 })
+
+describe("IqCaptureService Main review 1 (m1, m2, m4, M2)", () => {
+	const PER_CAPTURE = 4000 * 48 * 8
+
+	it("m4: a capture Node timed out keeps its concurrency slot until the tool's final event", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const a = s.svc.capture(req())
+		const b = s.svc.capture(req())
+		expect("captureId" in a && "captureId" in b).toBe(true)
+		s.timers.advance(4000 + 10_000)
+		expect(s.svc.counters().failed).toBe(2)
+		// The tool still holds both: a third request would be answered `busy` by the tool.
+		expect(s.svc.capture(req())).toEqual({ refused: "busy" })
+		child.event({
+			type: "aborted",
+			id: "captureId" in a ? a.captureId : "",
+			reason: "bound",
+		})
+		await flush(10)
+		expect(s.svc.capture(req())).toHaveProperty("captureId")
+		await s.svc.stop()
+	})
+
+	it("m2: cap bytes stay held until the tool's final event; a late `captured` file is unlinked", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const got = s.svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		s.timers.advance(4000 + 10_000)
+		await flush(10)
+		expect(s.svc.heldBytes()).toBe(PER_CAPTURE)
+		const file = path.join(s.root, "iq-captures", `${id}.cf32`)
+		fs.writeFileSync(file, Buffer.alloc(4800 * 8), { mode: 0o600 })
+		child.event({ type: "captured", id, samples: 4800, gapSamples: 0 })
+		await flush(10)
+		expect(fs.existsSync(file)).toBe(false)
+		expect(s.svc.heldBytes()).toBe(0)
+		expect(s.svc.counters().hostileEvents).toBe(0)
+		await s.svc.stop()
+	})
+
+	it("m2: a late `captured` for a forgotten id whose bytes were already released is unlinked", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const got = s.svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		s.timers.advance(4000 + 10_000)
+		child.event({ type: "aborted", id, reason: "io" })
+		await flush(10)
+		expect(s.svc.heldBytes()).toBe(0)
+		const file = path.join(s.root, "iq-captures", `${id}.cf32`)
+		fs.writeFileSync(file, Buffer.alloc(4800 * 8), { mode: 0o600 })
+		child.event({ type: "captured", id, samples: 4800, gapSamples: 0 })
+		await flush(10)
+		expect(fs.existsSync(file)).toBe(false)
+		await s.svc.stop()
+	})
+
+	it("m2: bytes of captures dropped by a flush are released when the old tool exits", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		child.autoExit = false
+		s.svc.capture(req())
+		s.svc.flush("src", { epoch: 4 })
+		await flush(10)
+		expect(s.svc.heldBytes()).toBe(PER_CAPTURE)
+		child.exit(0)
+		await flush(10)
+		expect(s.svc.heldBytes()).toBe(0)
+		await s.svc.stop()
+	})
+
+	it("m1: a gap aborts the open captures (ended in the tool, never queued)", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const got = s.svc.capture(req())
+		const id = "captureId" in got ? got.captureId : ""
+		const finished: string[] = []
+		s.svc.onFinished(v => finished.push(v.captureId))
+		// 1000 samples lost upstream, then the stream goes on.
+		s.engine.edge += 1000
+		s.engine.push(100)
+		await flush(10)
+		expect(s.svc.counters().failed).toBe(1)
+		expect(child.commands()).toContainEqual({ type: "end", id })
+		const file = path.join(s.root, "iq-captures", `${id}.cf32`)
+		fs.writeFileSync(file, Buffer.alloc(4800 * 8), { mode: 0o600 })
+		child.event({ type: "captured", id, samples: 4800, gapSamples: 1000 })
+		await flush(10)
+		expect(finished).toEqual([])
+		expect(fs.existsSync(file)).toBe(false)
+		await s.svc.stop()
+	})
+
+	it("M2: captureFor reserves the capture for its requester: held when finished, claim idempotent, hidden from near", async () => {
+		const s = await setup()
+		await running(s)
+		const finished: string[] = []
+		s.svc.onFinished(v => finished.push(v.captureId))
+		const got = s.svc.captureFor(req({ reason: "identify" }), "job-1")
+		const id = "captureId" in got ? got.captureId : ""
+		await flush(10)
+		expect(finished).toEqual([id])
+		expect(s.svc.holderOf(id)).toBe("job-1")
+		expect(s.svc.view(id)).not.toBeNull()
+		expect(s.svc.claim(id, "iq-replay-queue")).toBe(false)
+		expect(s.svc.claim(id, "job-1")).toBe(true)
+		expect(
+			s.svc.near("src", RF, 1000, { observationId: "obs", limit: 2 }),
+		).toEqual([])
+		s.svc.settle(id, "job-1")
+		await flush(10)
+		expect(s.svc.holderOf(id)).toBeUndefined()
+		await s.svc.stop()
+	})
+
+	it("M2: settling a reserved capture still being written ends it in the tool", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const got = s.svc.captureFor(req({ reason: "identify" }), "job-1")
+		const id = "captureId" in got ? got.captureId : ""
+		s.svc.settle(id, "job-1")
+		expect(child.commands()).toContainEqual({ type: "end", id })
+		expect(s.svc.holderOf(id)).toBeUndefined()
+		await s.svc.stop()
+	})
+})

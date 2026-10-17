@@ -632,3 +632,73 @@ describe("Property 15: queue order holds", () => {
 		)
 	}, 30_000)
 })
+
+describe("IqReplayQueue leaves identify's captures alone (Main review M2)", () => {
+	function withSkip(skip: (v: IqCaptureView) => boolean) {
+		const port = new FakePort()
+		const p = makeProbes(() => miss)
+		const results: IqReplayResult[] = []
+		const q = createIqReplayQueue({
+			port,
+			probes: p.probes,
+			planner: () => [trial("dmr")],
+			sink: r => results.push(r),
+			planInput: capture => ({
+				capture,
+				track: null,
+				knownProtocol: null,
+				priors: {},
+				narrowRaster: false,
+			}),
+			skip,
+			logger: spyLogger().logger,
+			timers: new Timers(),
+		})
+		q.start()
+		return { q, port, p, results }
+	}
+
+	it("a capture whose observation has an active identify target is skipped unclaimed", async () => {
+		const s = withSkip(v => v.captureId === id(1))
+		s.port.add(id(1))
+		s.port.add(id(2))
+		await flush()
+		expect(s.port.holderOf(id(1))).toBeNull()
+		expect(s.results.map(r => r.captureId)).toEqual([id(2)])
+		expect(s.q.counters().skipped).toBe(1)
+	})
+
+	it("a throwing predicate fails closed: the capture is skipped", async () => {
+		const s = withSkip(() => {
+			throw new Error("boom")
+		})
+		s.port.add(id(1))
+		await flush()
+		expect(s.p.requests).toEqual([])
+		expect(s.port.holderOf(id(1))).toBeNull()
+	})
+
+	it("a capture reserved for an identify job (held at capture) is never replayed", async () => {
+		const s = withSkip(() => false)
+		const view: IqCaptureView = {
+			captureId: id(3),
+			sourceId: "s",
+			observationId: "o",
+			epoch: 1,
+			rfHz: 1e8,
+			tuningTrust: "commanded",
+			capturedAtMs: 0,
+			durationMs: 1000,
+			gapSamples: 0,
+		}
+		s.port.entries.set(id(3), {
+			view,
+			holder: "identify-job",
+			replayed: false,
+		})
+		s.q.enqueue(view)
+		await flush()
+		expect(s.p.requests).toEqual([])
+		expect(s.port.holderOf(id(3))).toBe("identify-job")
+	})
+})

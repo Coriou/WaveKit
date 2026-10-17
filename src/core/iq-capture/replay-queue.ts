@@ -3,9 +3,10 @@
  * discard, off-air and without a user identify job.
  *
  * FIFO of finished captures. For the head entry the queue takes the capture over (`claim` as
- * IQ_REPLAY_QUEUE_HOLDER; a capture already claimed by an identify job, discarded, expired or
- * confirmed live is skipped), asks the injected planner for its trials (known protocol first, at
- * most IQ_REPLAY_MAX_TRIALS), and runs them one replay probe at a time through the injected
+ * IQ_REPLAY_QUEUE_HOLDER; a capture already claimed or reserved by an identify job, one whose
+ * observation an identify target works on (`skip`), discarded, expired or confirmed live is
+ * skipped), asks the injected planner for its trials (known protocol first, at most
+ * IQ_REPLAY_MAX_TRIALS), and runs them one replay probe at a time through the injected
  * `probes`. The first accepted decode ends the trials. Exactly one `sink(result)` per capture that
  * reached its trials, then `settle` discards it. A probe request deferred for a transient reason
  * (IQ_REPLAY_RETRIABLE_DEFERRALS) waits in place: it is retried on the pool's next slot release or
@@ -107,6 +108,11 @@ export interface IqReplayQueueDeps {
 	probes: IqReplayProbes
 	planner: IqReplayPlanner
 	sink: IqReplaySink
+	/**
+	 * Review M2: true when another holder works on the capture's observation (an identify target):
+	 * the capture is skipped unclaimed, for that job to claim. A throw counts as true (fail closed).
+	 */
+	skip?: (capture: IqCaptureView) => boolean
 	/** Composes the planner input from the scanner; null when it cannot (no trials then). */
 	planInput: (capture: IqCaptureView) => IqReplayPlanInput | null
 	now?: () => number
@@ -274,6 +280,7 @@ class Queue implements IqReplayQueue {
 			if (
 				!view ||
 				this.d.port.holderOf(id) !== null ||
+				this.isSkipped(view) ||
 				!this.d.port.claim(id, IQ_REPLAY_QUEUE_HOLDER)
 			) {
 				this.c.skipped++
@@ -290,6 +297,15 @@ class Queue implements IqReplayQueue {
 				deferSince: null,
 			}
 			this.next()
+		}
+	}
+
+	private isSkipped(view: IqCaptureView): boolean {
+		if (!this.d.skip) return false
+		try {
+			return this.d.skip(view)
+		} catch {
+			return true
 		}
 	}
 
