@@ -660,7 +660,22 @@ function TextControl({
 	const [draft, setDraft] = useState<string | null>(null)
 	const [bad, setBad] = useState(false)
 	const [reveal, setReveal] = useState(false)
+	const [filling, setFilling] = useState(false)
 	const shown = widget.format(value)
+	const fill = async () => {
+		if (!widget.fill || filling) return
+		setFilling(true)
+		const got = await widget.fill.run()
+		setFilling(false)
+		if ("error" in got) {
+			onInvalid(got.error)
+			return
+		}
+		setBad(false)
+		onInvalid(null)
+		setDraft(null)
+		if (widget.format(got.value) !== shown) onCommit(got.value)
+	}
 	const commit = () => {
 		if (draft === null) return
 		const parsed = widget.parse(draft)
@@ -707,6 +722,25 @@ function TextControl({
 					onClick={() => setReveal(r => !r)}
 				>
 					{reveal ? "Hide" : "Reveal"}
+				</button>
+			)}
+			{widget.fill && !disabled && (
+				<button
+					type="button"
+					className="wk-btn wkf-set-fill"
+					data-variant="outline"
+					aria-busy={filling || undefined}
+					disabled={filling}
+					onClick={() => void fill()}
+				>
+					{filling ? (
+						<span className="wk-spinner" aria-hidden="true" />
+					) : (
+						<SetIcon name="locate" size={15} />
+					)}
+					<span className="wkf-set-fill-text">
+						{filling ? widget.fill.busyLabel : widget.fill.label}
+					</span>
 				</button>
 			)}
 		</span>

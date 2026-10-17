@@ -133,6 +133,8 @@ export interface SettingsActions {
 	openShortcuts(): void
 	openBandPlans(): void
 	openDevices(): void
+	/** The browser's position as a Location value; absent where the browser has no geolocation. */
+	locate?: () => Promise<{ value: string } | { error: string }>
 }
 
 const OK: SettingWriteResult = { ok: true }
@@ -337,7 +339,19 @@ function stationRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			label: "Location",
 			help: "Latitude, longitude. Used by ADS-B and the map, never shared.",
 			keys: words("position latitude longitude coordinates gps qth lat lon"),
-			widget: textWidget("48.727, -3.985", parseLocation, "decimal"),
+			widget: {
+				...textWidget("48.727, -3.985", parseLocation, "decimal"),
+				...optional(
+					"fill",
+					a.locate && writable && !locLock
+						? {
+								label: "Use my location",
+								busyLabel: "Locating…",
+								run: a.locate,
+							}
+						: undefined,
+				),
+			},
 			value: lat === null || lon === null ? null : `${lat}, ${lon}`,
 			text: formatLocation(lat, lon),
 			def: { value: null, text: "Not set" },

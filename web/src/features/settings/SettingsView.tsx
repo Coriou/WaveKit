@@ -30,6 +30,7 @@ import { openPalette } from "../palette/request.ts"
 import { decoderLabel } from "../tuned/signal.ts"
 import { BandPlansPage } from "./bandplans/BandPlansPage.tsx"
 import { DevicesPage } from "./DevicesPage.tsx"
+import { canLocate, locate } from "./geolocate.ts"
 import { DecoderPageHead, DecoderStatus } from "./DecoderPage.tsx"
 import { SetIcon, type SetIconName } from "./icons.tsx"
 import { groupSummary, settingsItems, type SettingsItem } from "./items.ts"
@@ -239,6 +240,7 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 			openShortcuts: () => openPalette("keys"),
 			openBandPlans: () => openPage(BANDPLANS),
 			openDevices: () => openPage(DEVICES),
+			...(canLocate() ? { locate: () => locate() } : {}),
 		}
 	}, [services, cards, openPage])
 }

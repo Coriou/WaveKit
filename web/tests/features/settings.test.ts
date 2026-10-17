@@ -353,6 +353,30 @@ describe("Settings rows", () => {
 		expect(byId(rows, "station.location").effect?.kind).toBe("restart")
 	})
 
+	it("offers Use my location on a writable Location when the browser can locate", () => {
+		const a = actions()
+		const located = { ...a, locate: () => Promise.resolve({ value: "1, 2" }) }
+		const fill = (row: SettingRow) =>
+			row.widget.kind === "text" ? row.widget.fill : undefined
+		expect(
+			fill(byId(buildRows(snapshot(), located), "station.location"))?.label,
+		).toBe("Use my location")
+		expect(fill(byId(buildRows(snapshot(), a), "station.location"))).toBe(
+			undefined,
+		)
+		expect(
+			fill(
+				byId(
+					buildRows(
+						snapshot({ station: { ...STATION, writable: false } }),
+						located,
+					),
+					"station.location",
+				),
+			),
+		).toBe(undefined)
+	})
+
 	it("opens Signed-in devices when paired, and says to pair first when not", () => {
 		const a = actions()
 		const devices = [

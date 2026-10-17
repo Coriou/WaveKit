@@ -116,6 +116,12 @@ export interface TextWidget {
 	/** Value to the field's text. */
 	readonly format: (value: SettingValue) => string
 	readonly secret?: boolean
+	/** A button beside the field that fills it from elsewhere (Location: the browser's position). */
+	readonly fill?: {
+		readonly label: string
+		readonly busyLabel: string
+		readonly run: () => Promise<{ value: SettingValue } | { error: string }>
+	}
 }
 export interface ChipsWidget {
 	readonly kind: "chips"

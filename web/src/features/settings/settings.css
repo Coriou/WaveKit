@@ -413,6 +413,30 @@
 		width: 100%;
 		max-width: 440px;
 	}
+	.wkf-set-fill {
+		flex: none;
+		gap: 6px;
+		color: var(--wk-accent);
+	}
+	.wkf-set-fill .wk-spinner {
+		width: 13px;
+		height: 13px;
+	}
+	@media (max-width: 460px) {
+		/* a phone keeps the field wide: the button shows its glyph, the words stay for screen readers */
+		.wkf-set-fill {
+			width: var(--wk-h-touch);
+			padding: 0;
+		}
+		.wkf-set-fill-text {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+	}
 	.wkf-set-box {
 		flex: 1;
 		min-width: 0;
