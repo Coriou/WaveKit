@@ -62,7 +62,10 @@ function memoryFor(protocol: ScannerProtocol) {
 	return { memory, log }
 }
 
-async function inWindow(memory: KnownProtocolMemory) {
+async function inWindow(
+	memory: KnownProtocolMemory,
+	confirmHoldMs: Partial<Record<ScannerClass, number>> = {},
+) {
 	const settings = testSettings()
 	const h = poolHarness({
 		settings,
@@ -81,7 +84,7 @@ async function inWindow(memory: KnownProtocolMemory) {
 		mode: "in-window",
 		hold: {
 			policy: "hold",
-			confirmHoldMs: {},
+			confirmHoldMs,
 			maxHoldMs: 60_000,
 			hangMs: 2000,
 		},
@@ -267,5 +270,26 @@ describe("job driver miss counting with the real probe pool mode stepping (revie
 		await s.runner.dispatch({ type: "cancel" })
 		for (let at = 0; at < 6000; at += 100) await s.advance(100)
 		expect(log).toEqual([])
+	})
+
+	// Review minor 3: the last mode (nxdn, 2000 ms) against the job's confirm hold. The job hold and
+	// the probe request carry the same class total, and the pool gives the first mode the slack
+	// (auto = max(1800, total - 2000)), so the last mode's timer is due when the job hold ends,
+	// plus the step's relaunch time: the job hold always releases the probe first. A job driver
+	// never counts a miss of a last-mode-only protocol (nxdn96 here); identify's own nxdn run does.
+	it("last mode: the job hold ends before the nxdn mode's full hold at the default and at a longer hold: no miss", async () => {
+		const run = async (holdMs: number) => {
+			const { memory, log } = memoryFor("nxdn96")
+			const s = await inWindow(memory, { "fsk4-12k5": holdMs })
+			await s.transmit("fsk4-12k5")
+			for (let at = 0; at < holdMs + 2 * LATENCY + 3000; at += 100)
+				await s.advance(100)
+			expect(s.modes()).toEqual(["auto", "nxdn"])
+			return log
+		}
+		// Default 3800 (+ 2 x 400): nxdn gets 2000 ms but the job hold ends first.
+		expect(await run(DEFAULT_CONFIRM_HOLD_MS["fsk4-12k5"])).toEqual([])
+		// 6000 (+ 800): auto grows to 4800 ms, nxdn still ends after the 6800 ms job hold.
+		expect(await run(6000)).toEqual([])
 	})
 })

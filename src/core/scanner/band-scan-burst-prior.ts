@@ -4,6 +4,34 @@ import type { ScannerProtocol, ScanRange } from "./types.js"
 type Priors = Partial<Record<ScannerProtocol, number>>
 
 /**
+ * WG11 req 1.4 (review round 2): licence-exempt allocations where OOK/ASK short-range devices
+ * (remotes, sensors, the rtl_433 corpus) transmit in some region. Inside one the fill never
+ * applies, whatever the region's plans list, so a young OOK burst stays `ook-burst` (the region
+ * filter alone missed 433.92 MHz in the US, where only land-mobile and amateur plans cover it).
+ * Bounds inclusive, like `priorsFor`. Sources:
+ * - 314-316 MHz: US/CA 47 CFR 15.231 periodic remotes at 315 MHz (no built-in plan).
+ * - 433.05-434.79 MHz: ITU-R RR 5.138 ISM band, ERC/REC 70-03 annex 1; equals the built-in
+ *   `ism-433` plan (bandplan/builtin.ts).
+ * - 863-870 MHz: ERC/REC 70-03 SRD band; equals the built-in `ism-868` plan.
+ * - 902-928 MHz: ITU-R RR 5.150 region 2 ISM band, 47 CFR 15.247/15.249 (no built-in plan).
+ * Frozen: changing it changes sweep classification.
+ */
+export const OOK_SRD_ALLOCATIONS_HZ: readonly (readonly [number, number])[] =
+	Object.freeze([
+		Object.freeze([314_000_000, 316_000_000] as const),
+		Object.freeze([433_050_000, 434_790_000] as const),
+		Object.freeze([863_000_000, 870_000_000] as const),
+		Object.freeze([902_000_000, 928_000_000] as const),
+	])
+
+/** True when `hz` lies inside an OOK/ASK short-range-device allocation (bounds inclusive). */
+export function inOokSrdAllocation(hz: number): boolean {
+	for (const [lo, hi] of OOK_SRD_ALLOCATIONS_HZ)
+		if (hz >= lo && hz <= hi) return true
+	return false
+}
+
+/**
  * WG11 req 1.4: the ISM prior of the live classifier context at a sweep's dwell decision.
  *
  * `classifySpectral` calls a track of at most 4 blocks an ISM burst (`ook-burst`, no probe mode)
@@ -17,11 +45,14 @@ type Priors = Partial<Record<ScannerProtocol, number>>
  * at the frequency (the priors identify uses) fill it. A context with no sweep covering the
  * frequency (passive, in-window, identify, nothing) keeps today's priors, so an OOK burst there
  * stays `ook-burst` whatever the region's plans list. Every other prior and every job-set prior
- * is unchanged, and so is the result when the band plan says nothing there. `ism` is read by the
+ * is unchanged, and so is the result when the band plan says nothing there or the frequency is in
+ * an OOK short-range-device allocation (OOK_SRD_ALLOCATIONS_HZ). `ism` is read by the
  * burst rule and the `ook-burst` hypotheses only, so no other class or hypothesis score changes.
  */
 export function withBandBurstPrior(
 	ctx: {
+		/** The track's centre frequency. */
+		readonly hz: number
 		readonly priors: Priors
 		/** The job's effective protocols at the frequency (empty: every protocol). */
 		readonly protocols: readonly ScannerProtocol[]
@@ -36,7 +67,8 @@ export function withBandBurstPrior(
 		!ctx.sweep ||
 		ctx.rangesListProtocols ||
 		ctx.protocols.length > 0 ||
-		ctx.priors.ism !== undefined
+		ctx.priors.ism !== undefined ||
+		inOokSrdAllocation(ctx.hz)
 	)
 		return ctx.priors
 	const ism = bandPriorsAt().ism

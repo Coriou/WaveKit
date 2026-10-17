@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
+	OOK_SRD_ALLOCATIONS_HZ,
 	createBandRangeCache,
+	inOokSrdAllocation,
 	withBandBurstPrior,
 } from "../../../../src/core/scanner/band-scan-burst-prior.js"
 import {
@@ -63,7 +65,7 @@ const bandPriors = () =>
 	)
 const FIXED = {
 	priors: withBandBurstPrior(
-		{ ...EMPTY, rangesListProtocols: false, sweep: true },
+		{ ...EMPTY, hz: VHF_HZ, rangesListProtocols: false, sweep: true },
 		bandPriors,
 	),
 	protocols: [] as ScannerProtocol[],
@@ -116,6 +118,7 @@ describe("band-scan DMR: spectral class at the sweep's decision (1.4 d)", () => 
 
 describe("withBandBurstPrior", () => {
 	const empty = {
+		hz: VHF_HZ,
 		priors: {},
 		protocols: [],
 		rangesListProtocols: false,
@@ -210,7 +213,8 @@ describe("withBandBurstPrior: sweep only (review M1)", () => {
 		startedAt: 0,
 		blocks: 3,
 	})
-	const ctx = (sweep: boolean) => ({
+	const ctx = (sweep: boolean, hz = OOK_HZ) => ({
+		hz,
 		priors: {},
 		protocols: [] as ScannerProtocol[],
 		rangesListProtocols: false,
@@ -258,7 +262,9 @@ describe("withBandBurstPrior: sweep only (review M1)", () => {
 		})
 		for (const ranges of [US_RANGES, EU_RANGES]) {
 			const c = classifySpectral(young, {
-				priors: withBandBurstPrior(ctx(true), () => priorsFor(ranges, VHF_HZ)),
+				priors: withBandBurstPrior(ctx(true, VHF_HZ), () =>
+					priorsFor(ranges, VHF_HZ),
+				),
 				protocols: [],
 			})
 			expect(probeModesFor(c.class, [])[0]?.covers).toContain("dmr")
@@ -292,6 +298,69 @@ describe("createBandRangeCache (review m3)", () => {
 				expect(priorsFor(cache(bandplansFor(region)), hz)).toEqual(
 					priorsFor(full, hz),
 				)
+		}
+	})
+})
+
+describe("withBandBurstPrior: OOK short-range-device allocations (review round 2)", () => {
+	const US_RANGES = bandplansFor("US").flatMap(b => b.ranges)
+	const sweepCtx = (hz: number) => ({
+		hz,
+		priors: {},
+		protocols: [] as ScannerProtocol[],
+		rangesListProtocols: false,
+		sweep: true,
+	})
+	const fill = (hz: number) =>
+		withBandBurstPrior(sweepCtx(hz), () => ({ ism: 0.25 })).ism
+
+	it("US sweep at 433.92 MHz: no fill, a young OOK burst stays ook-burst", () => {
+		expect(priorsFor(US_RANGES, 433_920_000).ism).toBe(0.25)
+		const priors = withBandBurstPrior(sweepCtx(433_920_000), () =>
+			priorsFor(US_RANGES, 433_920_000),
+		)
+		expect(priors).toEqual({})
+		const ook = makeTrack({
+			id: "ook",
+			centreHz: 433_920_000,
+			startedAt: 0,
+			blocks: 3,
+		})
+		expect(classifySpectral(ook, { priors, protocols: [] }).class).toBe(
+			"ook-burst",
+		)
+	})
+
+	it.each(OOK_SRD_ALLOCATIONS_HZ.map(([lo, hi]) => [lo, hi]))(
+		"allocation %d-%d Hz: no fill at both edges, fill 1 Hz outside",
+		(lo, hi) => {
+			expect(inOokSrdAllocation(lo)).toBe(true)
+			expect(inOokSrdAllocation(hi)).toBe(true)
+			expect(fill(lo)).toBeUndefined()
+			expect(fill(hi)).toBeUndefined()
+			expect(inOokSrdAllocation(lo - 1)).toBe(false)
+			expect(inOokSrdAllocation(hi + 1)).toBe(false)
+			expect(fill(lo - 1)).toBe(0.25)
+			expect(fill(hi + 1)).toBe(0.25)
+		},
+	)
+
+	it("the 433 and 868 MHz entries equal the built-in ism-433 and ism-868 plans", () => {
+		const builtIn = bandplansFor("EU")
+			.filter(p => p.id === "ism-433" || p.id === "ism-868")
+			.flatMap(p => p.ranges)
+			.map(r => [r.startHz, r.endHz])
+		expect(builtIn).toEqual([
+			[433_050_000, 434_790_000],
+			[863_000_000, 870_000_000],
+		])
+		for (const r of builtIn) expect(OOK_SRD_ALLOCATIONS_HZ).toContainEqual(r)
+	})
+
+	it("sweep DMR 135-174 MHz still fills", () => {
+		for (const hz of [135_000_000, VHF_HZ, 174_000_000]) {
+			expect(inOokSrdAllocation(hz)).toBe(false)
+			expect(fill(hz)).toBe(0.25)
 		}
 	})
 })
