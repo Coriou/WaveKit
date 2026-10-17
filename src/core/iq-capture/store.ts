@@ -24,6 +24,8 @@ import {
 } from "../scanner/iq-capture-contract.js"
 
 const RATE_WINDOW_MS = 60_000
+/** Shortest usable capture: 100 ms at 48 kHz. A shorter file is removed as invalid, never replayed. */
+export const IQ_CAPTURE_MIN_SAMPLES = IQ_CAPTURE_RATE_HZ / 10
 
 export type IqCaptureState = "capturing" | "verifying" | "ready"
 
@@ -223,6 +225,10 @@ export class IqCaptureStore {
 			bytes > this.perCaptureBytes
 		) {
 			this.countHostile()
+			this.remove(e, "invalid")
+			return false
+		}
+		if (samples < IQ_CAPTURE_MIN_SAMPLES) {
 			this.remove(e, "invalid")
 			return false
 		}

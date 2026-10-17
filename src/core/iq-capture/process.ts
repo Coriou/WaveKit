@@ -116,6 +116,8 @@ export class IqToolProcess extends EventEmitter {
 	/** Engine sample matching tool count 0; null until the first chunk after spawn or flush. */
 	private base: number | null = null
 	private expectedEngine = 0
+	/** Oldest tool sample the tool's ring can hold: a gap clears its ring, so it moves to the gap's end. */
+	private ringStart = 0
 
 	constructor(private readonly o: IqToolProcessOptions) {
 		super()
@@ -133,6 +135,11 @@ export class IqToolProcess extends EventEmitter {
 	/** The tool's sample count as far as the bridge knows (an upper bound of what it read). */
 	submittedSamples(): number {
 		return this.toolCount + this.pendingGapSamples
+	}
+
+	/** The oldest tool sample still in the tool's ring (0, or the end of the latest gap). */
+	oldestSample(): number {
+		return this.ringStart
 	}
 
 	queuedBytes(): number {
@@ -210,6 +217,7 @@ export class IqToolProcess extends EventEmitter {
 			return
 		}
 		this.sendPendingGap()
+		// Zero-copy: relies on the engine never reusing or mutating a tap chunk after delivering it.
 		const view = Buffer.from(
 			data.buffer,
 			data.byteOffset,
@@ -260,6 +268,7 @@ export class IqToolProcess extends EventEmitter {
 
 	private addGap(samples: number): void {
 		this.pendingGapSamples += samples
+		this.ringStart = this.submittedSamples()
 	}
 
 	private sendPendingGap(): void {

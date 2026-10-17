@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	IQ_CAPTURE_MIN_SAMPLES,
 	IqCaptureStore,
 	type IqCaptureEntry,
 } from "../../../../src/core/iq-capture/store.js"
@@ -45,7 +46,7 @@ function makeStore(capBytes = 256 * MiB, maxCaptureMs = 4000) {
 	}
 }
 
-function finish(store: IqCaptureStore, cid: string, samples = 1000) {
+function finish(store: IqCaptureStore, cid: string, samples = 4800) {
 	expect(store.captured(cid, samples, 0)).toBe(true)
 	expect(store.ready(cid)).not.toBeNull()
 }
@@ -200,6 +201,20 @@ describe("IqCaptureStore ownership and discard", () => {
 		])
 		expect(store.counters().discarded["confirmed-live"]).toBe(2)
 		expect(store.counters().failed).toBe(0)
+	})
+
+	it("a capture below 100 ms is removed as invalid (4 799 refused, 4 800 kept), not hostile", () => {
+		const { store, removed } = makeStore()
+		expect(IQ_CAPTURE_MIN_SAMPLES).toBe(4800)
+		store.admit(req(), id(1), 1)
+		expect(store.captured(id(1), 4799, 0)).toBe(false)
+		expect(removed.map(r => [r[0].captureId, r[1]])).toEqual([
+			[id(1), "invalid"],
+		])
+		store.admit(req(), id(2), 1)
+		expect(store.captured(id(2), 4800, 0)).toBe(true)
+		expect(store.ready(id(2))).not.toBeNull()
+		expect(store.counters().hostileEvents).toBe(0)
 	})
 
 	it("nextExpiryAt is the earliest finish plus the TTL, skipping deferred discards", () => {

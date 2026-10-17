@@ -52,6 +52,7 @@ import {
 	IqCaptureStore,
 	type IqCaptureCounters,
 	type IqCaptureEntry,
+	viewOf,
 } from "./store.js"
 import { sweepCaptureDir, type SweepResult } from "./sweep.js"
 
@@ -173,6 +174,8 @@ const GIVE_UP_WINDOW_MS = 600_000
 /** A capture without `captured`/`aborted` this long after its bound is dropped. */
 const CAPTURE_GRACE_MS = 10_000
 const REPLAY_TIMEOUT_MS = 30_000
+/** Removed capture ids remembered for late tool events (2 open × a few minutes of captures). */
+const FORGOTTEN_IDS_MAX = 64
 /** Safety margin inside the tool's ring and below its current count (seconds). */
 const RING_MARGIN_S = 0.25
 /** The kernel pipe buffer the tool may not have read yet (bytes; Linux and macOS default). */
@@ -224,6 +227,8 @@ class Service implements IqCaptureService {
 	private expireTimer: unknown = null
 	private expireAt: number | null = null
 	private readonly unlinks = new Set<Promise<void>>()
+	/** Recently removed capture ids (bounded, oldest evicted): their late tool events are not hostile. */
+	private readonly forgotten = new Set<string>()
 	private toolTotals: IqToolCounters = {
 		droppedBytes: 0,
 		gapCommands: 0,
@@ -302,7 +307,9 @@ class Service implements IqCaptureService {
 	async sweep(): Promise<SweepResult> {
 		const zero: SweepResult = { removed: 0, left: 0, failed: 0 }
 		if (!this.cfg || !this.o.protectedMode) return zero
-		if (this.st === "stopped" || this.st === "unavailable") return zero
+		// Never while running: a file being written or replayed is not a leftover.
+		if (this.st === "stopped" || this.st === "unavailable" || this.st === "on")
+			return zero
 		if (!this.dir) {
 			const ensured = await ensureCaptureDir(this.root, this.uid)
 			if ("refused" in ensured) {
@@ -465,17 +472,7 @@ class Service implements IqCaptureService {
 	view(captureId: string): IqCaptureView | null {
 		const e = this.store?.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
-		return {
-			captureId: e.captureId,
-			sourceId: e.sourceId,
-			observationId: e.observationId,
-			epoch: e.epoch,
-			rfHz: e.rfHz,
-			tuningTrust: e.tuningTrust,
-			capturedAtMs: e.finishedAtMs ?? e.requestedAtMs,
-			durationMs: Math.round((e.samples * 1000) / 48_000),
-			gapSamples: e.gapSamples,
-		}
+		return viewOf(e)
 	}
 
 	holderOf(captureId: string): string | null | undefined {
@@ -620,14 +617,19 @@ class Service implements IqCaptureService {
 		const submitted = proc.submittedSamples()
 		const margin = Math.ceil(RING_MARGIN_S * fs_)
 		const ringSamples = Math.floor((IQ_CAPTURE_PREROLL_MAX_MS * fs_) / 1000)
-		const lo = Math.max(0, submitted - ringSamples + margin)
+		// After a gap the tool's ring restarts at the gap's end: nothing older is there.
+		const lo = Math.max(
+			0,
+			proc.oldestSample(),
+			submitted - ringSamples + margin,
+		)
 		const hi = Math.max(
 			0,
 			submitted -
 				Math.ceil((proc.queuedBytes() + PIPE_BUFFER_BYTES) / 2) -
 				margin,
 		)
-		const fromSample = Math.min(hi, Math.max(lo, wanted))
+		const fromSample = Math.max(lo, Math.min(hi, wanted))
 		const captureId = this.uuid()
 		if (!isCaptureId(captureId)) return this.refuse("invalid")
 		const admitted = store.admit(req, captureId, slot.epoch)
@@ -910,6 +912,8 @@ class Service implements IqCaptureService {
 			return
 		}
 		if (!slot.ids.has(ev.id)) {
+			// A late answer for a capture Node already ended (timeout, flush, discard) is expected.
+			if (this.forgotten.has(ev.id)) return
 			store.countHostile()
 			return
 		}
@@ -976,6 +980,16 @@ class Service implements IqCaptureService {
 		slot.ids.clear()
 	}
 
+	private forget(captureId: string): void {
+		this.forgotten.delete(captureId)
+		this.forgotten.add(captureId)
+		while (this.forgotten.size > FORGOTTEN_IDS_MAX) {
+			const oldest = this.forgotten.values().next().value
+			if (oldest === undefined) break
+			this.forgotten.delete(oldest)
+		}
+	}
+
 	private addToolCounters(proc: IqToolProcess): void {
 		for (const k of Object.keys(this.toolTotals) as (keyof IqToolCounters)[])
 			this.toolTotals[k] += proc.counters[k]
@@ -1014,6 +1028,7 @@ class Service implements IqCaptureService {
 		_reason: IqCaptureDiscardReason | "failed",
 	): void {
 		for (const slot of this.slots.values()) slot.ids.delete(entry.captureId)
+		this.forget(entry.captureId)
 		this.clearCaptureTimer(entry.captureId)
 		const dir = this.dir
 		if (!dir || !isCaptureId(entry.captureId)) {

@@ -7,8 +7,12 @@
  * confirmed live is skipped), asks the injected planner for its trials (known protocol first, at
  * most IQ_REPLAY_MAX_TRIALS), and runs them one replay probe at a time through the injected
  * `probes`. The first accepted decode ends the trials. Exactly one `sink(result)` per capture that
- * reached its trials, then `settle` discards it. A deferred probe request waits in place: it is
- * retried on the pool's next slot release or after 1 s, never in a loop. `stop()` cancels the
+ * reached its trials, then `settle` discards it. A probe request deferred for a transient reason
+ * (IQ_REPLAY_RETRIABLE_DEFERRALS) waits in place: it is retried on the pool's next slot release or
+ * after 1 s, never in a loop, and for at most IQ_REPLAY_DEFER_MAX_MS per capture, after which its
+ * remaining trials end `cancelled`. Any other deferral (no transport, format, stale epoch, a thrown
+ * request, an unknown reason: fail closed) ends that trial `cancelled` at once, so a head that can
+ * never run does not hold the captures of other sources behind it. `stop()` cancels the
  * running replay and discards every queued capture without a result.
  */
 import type { Logger } from "../../utils/logger.js"
@@ -32,6 +36,18 @@ import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 export const IQ_REPLAY_QUEUE_HOLDER = "iq-replay-queue"
 /** Retry delay of a deferred replay request when no slot release arrives first. */
 export const IQ_REPLAY_DEFER_RETRY_MS = 1_000
+/**
+ * Longest a capture's trials wait on transient deferrals (from its first one). Arithmetic: a head
+ * is held by deferrals at most 60 s + one 1 s retry = 61 s, a tenth of the 600 s orphan TTL, so the
+ * capture behind it is not expired by one blocked head.
+ */
+export const IQ_REPLAY_DEFER_MAX_MS = 60_000
+/** The probe pool's transient deferrals (probe-pool.ts `Deferral`): a slot, the budget or the CPU guard frees up. */
+export const IQ_REPLAY_RETRIABLE_DEFERRALS: ReadonlySet<string> = new Set([
+	"max-probes",
+	"budget",
+	"cpu",
+])
 
 /** One replay probe the queue asks the probe pool for (Main maps it to `ProbeRequest.replay`). */
 export interface IqReplayProbeRequest {
@@ -105,6 +121,8 @@ export interface IqReplayQueueCounters {
 	decoded: number
 	trials: number
 	deferrals: number
+	/** Captures whose trials gave up on transient deferrals after IQ_REPLAY_DEFER_MAX_MS. */
+	deferGiveUps: number
 	sinkErrors: number
 	plannerErrors: number
 }
@@ -147,6 +165,8 @@ interface Current {
 	run: IqReplayProbeRun | null
 	waitTimer: unknown
 	waitOff: (() => void) | null
+	/** Clock ms of the capture's first transient deferral, null before any. */
+	deferSince: number | null
 }
 
 export function createIqReplayQueue(deps: IqReplayQueueDeps): IqReplayQueue {
@@ -156,6 +176,7 @@ export function createIqReplayQueue(deps: IqReplayQueueDeps): IqReplayQueue {
 class Queue implements IqReplayQueue {
 	private readonly log: Logger
 	private readonly timers: IqReplayQueueTimers
+	private readonly now: () => number
 	private readonly fifo: string[] = []
 	private readonly known = new Set<string>()
 	private current: Current | null = null
@@ -170,6 +191,7 @@ class Queue implements IqReplayQueue {
 		decoded: 0,
 		trials: 0,
 		deferrals: 0,
+		deferGiveUps: 0,
 		sinkErrors: 0,
 		plannerErrors: 0,
 	}
@@ -177,6 +199,7 @@ class Queue implements IqReplayQueue {
 	constructor(private readonly d: IqReplayQueueDeps) {
 		this.log = createComponentLogger(d.logger, "IqReplayQueue")
 		this.timers = d.timers ?? defaultTimers
+		this.now = d.now ?? Date.now
 	}
 
 	start(): void {
@@ -264,6 +287,7 @@ class Queue implements IqReplayQueue {
 				run: null,
 				waitTimer: null,
 				waitOff: null,
+				deferSince: null,
 			}
 			this.next()
 		}
@@ -326,6 +350,18 @@ class Queue implements IqReplayQueue {
 		}
 		if ("deferred" in answer) {
 			this.c.deferrals++
+			if (!IQ_REPLAY_RETRIABLE_DEFERRALS.has(answer.deferred)) {
+				// Fail closed: this trial cannot run; the next one (or the next capture) goes.
+				this.cancelTrials(cur, cur.index + 1)
+				return
+			}
+			const now = this.now()
+			cur.deferSince ??= now
+			if (now - cur.deferSince >= IQ_REPLAY_DEFER_MAX_MS) {
+				this.c.deferGiveUps++
+				this.cancelTrials(cur, cur.trials.length)
+				return
+			}
 			this.waitForSlot(cur)
 			return
 		}
@@ -335,6 +371,21 @@ class Queue implements IqReplayQueue {
 			a => this.onAnswer(cur, trial, a),
 			() => this.onAnswer(cur, trial, { outcome: "cancelled", decoded: null }),
 		)
+	}
+
+	/** Records the trials from the current one up to `end` (exclusive) as `cancelled` and moves on. */
+	private cancelTrials(cur: Current, end: number): void {
+		for (; cur.index < end; cur.index++) {
+			const t = cur.trials[cur.index]
+			if (t)
+				cur.done.push({
+					protocol: t.protocol,
+					decoderType: t.mode.decoderType,
+					known: t.known,
+					outcome: "cancelled",
+				})
+		}
+		this.next()
 	}
 
 	private waitForSlot(cur: Current): void {

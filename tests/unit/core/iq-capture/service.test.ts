@@ -362,11 +362,11 @@ describe("IqCaptureService capture flow", () => {
 		).toEqual([])
 		expect(s.svc.counters().discarded.invalid).toBe(1)
 		expect(fs.readdirSync(path.join(s.root, "iq-captures"))).toEqual([])
-		// A second captured for the same id is hostile too.
+		// A late repeat for the id Node just removed is expected, not hostile.
 		child.event({ type: "captured", id, samples: 1, gapSamples: 0 })
 		await flush()
-		// 2 unknown ids + the out-of-bound count + the repeat.
-		expect(s.svc.counters().hostileEvents).toBe(4)
+		// 2 unknown ids + the out-of-bound count.
+		expect(s.svc.counters().hostileEvents).toBe(3)
 		await s.svc.stop()
 	})
 
@@ -382,7 +382,7 @@ describe("IqCaptureService capture flow", () => {
 				mode: 0o600,
 			},
 		)
-		child.event({ type: "captured", id, samples: 11, gapSamples: 0 })
+		child.event({ type: "captured", id, samples: 4801, gapSamples: 0 })
 		await flush(10)
 		expect(s.svc.counters().discarded.invalid).toBe(1)
 		await s.svc.stop()
@@ -502,6 +502,71 @@ describe("IqCaptureService capture flow", () => {
 		expect(none.svc.state()).toBe("unavailable")
 		expect(none.sp.children).toEqual([])
 		await none.svc.stop()
+	})
+
+	it("a capture shorter than 100 ms (4 799 samples) is invalid and never queued; 4 800 is kept", async () => {
+		for (const [samples, kept] of [
+			[4799, false],
+			[4800, true],
+		] as const) {
+			const s = await setup({}, { samples })
+			await running(s)
+			const finished: string[] = []
+			s.svc.onFinished(v => finished.push(v.captureId))
+			const got = s.svc.capture(req())
+			await flush(10)
+			const cid = "captureId" in got ? got.captureId : ""
+			expect(finished).toEqual(kept ? [cid] : [])
+			expect(s.svc.view(cid) !== null).toBe(kept)
+			expect(s.svc.counters().discarded.invalid).toBe(kept ? 0 : 1)
+			expect(s.svc.counters().hostileEvents).toBe(0)
+			await s.svc.stop()
+		}
+	})
+
+	it("late events for a capture Node already ended are not hostile; unknown ids still are", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const got = s.svc.capture(req())
+		const cid = "captureId" in got ? got.captureId : ""
+		s.timers.advance(4000 + 10_000) // dropped after bound plus grace
+		expect(s.svc.counters().failed).toBe(1)
+		child.event({ type: "captured", id: cid, samples: 4800, gapSamples: 0 })
+		child.event({ type: "aborted", id: cid, reason: "bound" })
+		child.event({
+			type: "aborted",
+			id: "bbbbbbbb-0000-4000-8000-000000000001",
+			reason: "io",
+		})
+		await flush()
+		expect(s.svc.counters().hostileEvents).toBe(1)
+		expect(s.svc.counters().failed).toBe(1)
+		await s.svc.stop()
+	})
+
+	it("after a gap the capture start is never older than the gap's end", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s) // tool samples 0 .. FS
+		s.engine.edge += 1000 // 1000 engine samples lost
+		s.engine.push(FS / 10)
+		const got = s.svc.capture(req({ fromSample: 0 }))
+		expect(got).toHaveProperty("captureId")
+		const cmd = child.commands().find(c => c["type"] === "capture")
+		expect(child.commands()).toContainEqual({ type: "gap", samples: 1000 })
+		expect(cmd?.["fromSample"]).toBe(FS + 1000)
+		await s.svc.stop()
+	})
+
+	it("sweep refuses while capture is on (a live file is no leftover)", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		await running(s)
+		const got = s.svc.capture(req())
+		const cid = "captureId" in got ? got.captureId : ""
+		const file = path.join(s.root, "iq-captures", `${cid}.cf32.tmp`)
+		fs.writeFileSync(file, Buffer.alloc(8), { mode: 0o600 })
+		expect(await s.svc.sweep()).toEqual({ removed: 0, left: 0, failed: 0 })
+		expect(fs.existsSync(file)).toBe(true)
+		await s.svc.stop()
 	})
 
 	it("a capture with no tool answer is dropped after its bound plus grace", async () => {

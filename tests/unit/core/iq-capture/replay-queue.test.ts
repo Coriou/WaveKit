@@ -2,6 +2,7 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	createIqReplayQueue,
+	IQ_REPLAY_DEFER_MAX_MS,
 	IQ_REPLAY_DEFER_RETRY_MS,
 	IQ_REPLAY_QUEUE_HOLDER,
 	type IqReplayProbeAnswer,
@@ -40,10 +41,10 @@ class FakePort implements IqReplayQueuePort {
 	>()
 	discarded: [string, IqCaptureDiscardReason][] = []
 	private listeners = new Set<(v: IqCaptureView) => void>()
-	add(id: string): IqCaptureView {
+	add(id: string, sourceId = "s"): IqCaptureView {
 		const view: IqCaptureView = {
 			captureId: id,
-			sourceId: "s",
+			sourceId,
 			observationId: "o",
 			epoch: 1,
 			rfHz: 1e8,
@@ -161,6 +162,7 @@ const id = (n: number) =>
 function make(
 	script: Script,
 	trials: readonly IqReplayTrial[] = [trial("dmr", true), trial("pocsag")],
+	now?: () => number,
 ) {
 	const port = new FakePort()
 	const p = makeProbes(script)
@@ -180,6 +182,7 @@ function make(
 		}),
 		logger: spyLogger().logger,
 		timers,
+		...(now ? { now } : {}),
 	})
 	q.start()
 	return { q, port, p, results, timers }
@@ -296,6 +299,91 @@ describe("IqReplayQueue", () => {
 		expect(results).toHaveLength(1)
 		expect(p.listeners()).toBe(0)
 		expect(IQ_REPLAY_DEFER_RETRY_MS).toBe(1000)
+	})
+
+	it("a non-retriable deferral (no-transport, format, stale-epoch, thrown, unknown) cancels the trial at once", async () => {
+		for (const reason of [
+			"no-transport",
+			"format",
+			"stale-epoch",
+			"weird",
+			"throw",
+		]) {
+			const { port, p, results, timers } = make((_r, n) => {
+				if (n === 1) {
+					if (reason === "throw") throw new Error("boom")
+					return { deferred: reason }
+				}
+				return miss
+			})
+			port.add(id(1))
+			await flush()
+			expect(timers.q.size).toBe(0)
+			expect(p.listeners()).toBe(0)
+			expect(p.requests.map(r => r.protocol)).toEqual(["dmr", "pocsag"])
+			expect(results).toHaveLength(1)
+			expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+				"cancelled",
+				"no-sync",
+			])
+			expect(port.discarded).toEqual([[id(1), "result"]])
+		}
+	})
+
+	it("a head whose source has no transport does not hold another source's capture", async () => {
+		const { port, results, timers } = make(r =>
+			r.sourceId === "s" ? { deferred: "no-transport" } : hit,
+		)
+		port.add(id(1))
+		port.add(id(2), "s2")
+		await flush()
+		expect(timers.q.size).toBe(0)
+		expect(results.map(r => [r.captureId, r.decoded !== null])).toEqual([
+			[id(1), false],
+			[id(2), true],
+		])
+	})
+
+	it("transient deferrals are retried up to IQ_REPLAY_DEFER_MAX_MS, then the remaining trials end cancelled", async () => {
+		let t = 0
+		const { port, p, results, timers, q } = make(
+			() => ({ deferred: "max-probes" }),
+			[trial("dmr", true), trial("pocsag")],
+			() => t,
+		)
+		port.add(id(1))
+		port.add(id(2))
+		await flush()
+		expect(IQ_REPLAY_DEFER_MAX_MS).toBe(60_000)
+		t = IQ_REPLAY_DEFER_MAX_MS - 1
+		timers.fireAll()
+		await flush()
+		// 59 999 ms: still waiting on the head.
+		expect(p.requests).toHaveLength(2)
+		expect(results).toHaveLength(0)
+		expect(timers.q.size).toBe(1)
+		t = IQ_REPLAY_DEFER_MAX_MS
+		timers.fireAll()
+		await flush()
+		// 60 000 ms: the head gives up; both trials cancelled, one result, the next capture runs.
+		expect(results).toHaveLength(1)
+		expect(results[0]?.captureId).toBe(id(1))
+		expect(results[0]?.trials.map(x => x.outcome)).toEqual([
+			"cancelled",
+			"cancelled",
+		])
+		expect(q.counters().deferGiveUps).toBe(1)
+		expect(p.requests.at(-1)?.captureId).toBe(id(2))
+		// The second capture's window starts at its own first deferral.
+		t += IQ_REPLAY_DEFER_MAX_MS - 1
+		timers.fireAll()
+		await flush()
+		expect(results).toHaveLength(1)
+		t += 1
+		timers.fireAll()
+		await flush()
+		expect(results).toHaveLength(2)
+		expect(q.size()).toBe(0)
 	})
 
 	it("stop cancels the running replay and discards everything without a result", async () => {
