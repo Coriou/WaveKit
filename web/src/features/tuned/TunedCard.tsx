@@ -25,6 +25,7 @@ import { Icon, type IconName } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { Island } from "../../ui/Island.tsx"
 import { Label } from "../../ui/Label.tsx"
+import { Switch } from "../../ui/Switch.tsx"
 import { ActionMenu, type ActionMenuItem } from "../ActionMenu.tsx"
 import { formatDb, formatMHz, formatWidth } from "../format.ts"
 import { useLiveStatus, useNow, useSettledHz } from "../hooks.ts"
@@ -51,9 +52,15 @@ const MessageCard = lazy(() =>
 function IdentifyBlock({
 	view,
 	onClose,
+	untilSignal,
+	onUntilSignal,
+	readOnly,
 }: {
 	view: IdentifyView
 	onClose: () => void
+	untilSignal: boolean
+	onUntilSignal: (on: boolean) => void
+	readOnly: boolean
 }) {
 	const closeLabel = view.running ? "Stop identifying" : "Close"
 	return (
@@ -105,6 +112,20 @@ function IdentifyBlock({
 				</div>
 			)}
 			{view.line && <span className="wkf-id-line">{view.line}</span>}
+			{view.untilSignal && (
+				<label
+					className="wkf-id-wait"
+					title="Each listen lasts 2 min at most on the receiver; the next one starts until a transmission comes or you stop."
+				>
+					<span className="wkf-grow">Wait until a transmission</span>
+					<Switch
+						checked={untilSignal}
+						disabled={readOnly}
+						aria-label="Wait until a transmission"
+						onChange={onUntilSignal}
+					/>
+				</label>
+			)}
 			{view.trials.length > 0 && (
 				<ol aria-label="Decoders tried" className="wkf-id-trials">
 					{view.trials.map(r => (
@@ -387,6 +408,11 @@ export function TunedCard() {
 			? "Signal level shows while listening"
 			: "Pinned. Tune to it for the signal level."
 	const idRunning = idHere && idView.running
+	// on after "Nothing heard": listen again straight away, this time until a transmission comes
+	const setUntilSignal = (on: boolean) => {
+		data.identify.setUntilSignal(on)
+		if (on && !idRunning && idHere) startIdentify(id.protocols)
+	}
 	const stateText = idRunning
 		? "Identifying"
 		: heldByScan
@@ -677,7 +703,13 @@ export function TunedCard() {
 				<>
 					<div className="wkf-well" data-full={full || undefined}>
 						{idHere ? (
-							<IdentifyBlock view={idView} onClose={closeIdentify} />
+							<IdentifyBlock
+								view={idView}
+								onClose={closeIdentify}
+								untilSignal={id.untilSignal}
+								onUntilSignal={setUntilSignal}
+								readOnly={readOnly}
+							/>
 						) : full ? (
 							<Suspense fallback={<NowBlock now={now} />}>
 								<div className="wkf-full-head">

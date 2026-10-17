@@ -8,7 +8,7 @@ import type {
 	ScannerClass,
 	ScannerTrialOutcome,
 } from "@wavekit/api-types"
-import type { IdentifyState } from "../../data/index.ts"
+import { endedWithNothingHeard, type IdentifyState } from "../../data/index.ts"
 import { formatDb, formatWidth } from "../format.ts"
 
 export type IdentifyPhase =
@@ -56,6 +56,8 @@ export interface IdentifyView {
 	measured: string | null
 	/** Countdown to the listening timeout while waiting or trying. */
 	bar: { fraction: number; leftS: number; windowS: number } | null
+	/** The "Until a transmission" switch shows: while waiting for one, or after a wait where nothing came. */
+	untilSignal: boolean
 }
 
 const DEFAULT_WINDOW_MS = 15_000
@@ -286,6 +288,16 @@ const EMPTY: IdentifyView = {
 	trials: [],
 	measured: null,
 	bar: null,
+	untilSignal: false,
+}
+
+/** "8 s", "2 min 05 s", "1 h 04 min": how long a wait until a transmission has lasted. */
+export function formatWaited(ms: number): string {
+	const s = Math.max(0, Math.floor(ms / 1000))
+	if (s < 60) return `${s} s`
+	const m = Math.floor(s / 60)
+	if (m < 60) return `${m} min ${String(s % 60).padStart(2, "0")} s`
+	return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min`
 }
 
 /** What the card shows for an identify state at `nowMs`. */
@@ -312,6 +324,22 @@ function identifyPhaseView(
 				state.errorCode === "OUT_OF_WINDOW"
 					? "This frequency is outside the receiver’s window. Tune to it first."
 					: state.error,
+		}
+	// waiting until a transmission: one wait across the jobs it takes, counted up, no countdown
+	if (
+		state.waitSince !== null &&
+		(state.starting ||
+			(state.job !== null &&
+				(state.event?.state ?? "waiting-for-signal") === "waiting-for-signal"))
+	)
+		return {
+			...EMPTY,
+			phase: "waiting",
+			running: true,
+			title: "Waiting for a transmission",
+			secs: ` · ${formatWaited(nowMs - state.waitSince)}`,
+			line: "Listening until one comes.",
+			untilSignal: true,
 		}
 	if (state.starting || (state.targetHz !== null && !state.job))
 		return state.starting
@@ -374,6 +402,7 @@ function identifyPhaseView(
 				title: "Waiting for a transmission",
 				secs: ` · ${bar.leftS} s`,
 				bar,
+				untilSignal: true,
 			}
 		case "trying":
 			return {
@@ -429,6 +458,17 @@ function identifyPhaseView(
 		case "unidentified": {
 			const looks = result ? CLASS[result.measurements.class] : ""
 			const said = looks ? `Looks like ${looks}. ` : ""
+			if (endedWithNothingHeard(event))
+				return {
+					...EMPTY,
+					phase: "unidentified",
+					title: "Nothing heard",
+					big: true,
+					line: `No transmission in ${windowS} s.`,
+					note,
+					measured,
+					untilSignal: true,
+				}
 			return {
 				...EMPTY,
 				phase: "unidentified",

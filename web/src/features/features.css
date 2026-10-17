@@ -223,7 +223,7 @@
 		padding: 0;
 	}
 
-	/* ---- Tuned card (board: 320 px, 16 px padding, header → well → actions) */
+	/* ---- Tuned card (340 px like Listen below it, Ben 2026-10-17; board 320; 16 px padding, header → well → actions) */
 	.wkf-card {
 		gap: 14px;
 		font-size: var(--wk-fs-lg);
@@ -684,6 +684,16 @@
 		-webkit-line-clamp: 3;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
+	}
+	/* "Wait until a transmission": a quiet row under the line, the switch at the right edge */
+	.wkf-id-wait {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		min-height: 32px;
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-2);
+		cursor: pointer;
 	}
 	.wkf-id-trials {
 		list-style: none;

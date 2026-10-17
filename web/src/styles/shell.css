@@ -193,12 +193,12 @@
 		background: var(--wk-fill);
 	}
 
-	/* tuned card home (above Listen); hidden on narrow windows like the board's .wk-float */
+	/* tuned card home (above Listen, as wide as Listen's 340 px head); hidden on narrow windows like the board's .wk-float */
 	.wk-shell-cardslot {
 		position: absolute;
 		left: 0;
 		top: 0;
-		width: 320px;
+		width: 340px;
 		z-index: 1;
 		transition: transform var(--wk-dur-4) var(--wk-ease-spring);
 	}
@@ -236,7 +236,7 @@
 		position: absolute;
 		left: 0;
 		top: 0;
-		width: 320px;
+		width: 340px;
 		box-sizing: border-box;
 		border-radius: var(--wk-r-5);
 		border: 1.5px dashed rgba(var(--wk-accent-rgb), 0.55);

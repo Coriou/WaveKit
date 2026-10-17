@@ -5,7 +5,7 @@ import type { DrawerId } from "./store.ts"
 
 export const G = 16
 export const DOCK_H = 64
-export const CARD_W = 320
+export const CARD_W = 340
 /** From this width a drawer floats over the plot's right side at full height. */
 export const FULL_MIN_VW = 1100
 /** Dock width with the active label showing, and without it, for the collision checks. */

@@ -5,6 +5,7 @@ import {
 	CardPlaceStore,
 	loadCardAnchor,
 } from "../../src/shell/card-place.ts"
+import { CARD_W } from "../../src/shell/layout.ts"
 import type { KeyValueStorage } from "../../src/shell/theme.ts"
 
 const memory = (init: Record<string, string> = {}) => {
@@ -52,7 +53,7 @@ describe("CardPlaceStore", () => {
 		expect(p.startDrag(100, 600)).toBe(true)
 		expect(p.get().drag).toEqual({ x: 16, y: 504 })
 		p.moveDrag(5000, -5000)
-		expect(p.get().drag).toEqual({ x: 1440 - 320, y: 0 })
+		expect(p.get().drag).toEqual({ x: 1440 - CARD_W, y: 0 })
 		const a = p.endDrag()
 		expect(a?.id).toBe("tr")
 		expect(p.get()).toMatchObject({

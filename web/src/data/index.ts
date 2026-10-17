@@ -110,6 +110,15 @@ export interface DataLayerOptions {
 	createSocket?: SocketFactory
 }
 
+/** The browser's localStorage, or null (no window, or storage blocked). */
+function localStorageOrNull(): Storage | null {
+	try {
+		return typeof window === "undefined" ? null : window.localStorage
+	} catch {
+		return null
+	}
+}
+
 export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 	const apiOptions: ApiClientOptions = {}
 	if (options.baseUrl !== undefined) apiOptions.baseUrl = options.baseUrl
@@ -183,7 +192,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		scanPresets: new ScanPresetsStore(api, events, () => {
 			if (layer.bandplanStack.get().loaded) void layer.bandplanStack.load()
 		}),
-		identify: new IdentifyStore(api, events),
+		identify: new IdentifyStore(api, events, localStorageOrNull()),
 		savedFrequencies,
 		scanner: new ScannerStore(api, events),
 		station: new StationStore(api),
@@ -357,7 +366,11 @@ export type {
 	ImportCommit,
 	ImportFile,
 } from "./bandplan-stack-store.ts"
-export { IdentifyStore, isIdentifyFinal } from "./identify-store.ts"
+export {
+	endedWithNothingHeard,
+	IdentifyStore,
+	isIdentifyFinal,
+} from "./identify-store.ts"
 export {
 	SavedFrequenciesStore,
 	applyOps,

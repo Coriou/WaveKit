@@ -9,6 +9,7 @@ import type { IdentifyState } from "../../src/data/index.ts"
 import {
 	DECODE_AS,
 	decodeAsName,
+	formatWaited,
 	identifyView,
 	measuredLine,
 	resultDetails,
@@ -83,6 +84,8 @@ const state = (
 	error: null,
 	errorCode: null,
 	protocols: [],
+	untilSignal: false,
+	waitSince: null,
 	...over,
 })
 
@@ -94,6 +97,8 @@ const IDLE: IdentifyState = {
 	error: null,
 	errorCode: null,
 	protocols: [],
+	untilSignal: false,
+	waitSince: null,
 }
 
 describe("identifyView", () => {
@@ -482,5 +487,77 @@ describe("identifyView", () => {
 				result({ identity: { kind: "pocsag-capcode", value: "1234567" } }),
 			),
 		).toBe("capcode 1234567")
+	})
+
+	it("says nothing was heard when no transmission came, and offers to wait for one", () => {
+		const nothing = result({
+			confidence: "activity",
+			measurements: {
+				source: "spectrum",
+				centreHz: HZ,
+				obwHz: null,
+				peakDbfs: -63,
+				snrDb: 1,
+				floorDbfs: -64,
+				dutyCycle: null,
+				class: "unknown",
+			},
+		})
+		const v = identifyView(
+			state({ state: "unidentified", result: nothing }),
+			T0 + 16_000,
+		)
+		expect(v).toMatchObject({
+			phase: "unidentified",
+			title: "Nothing heard",
+			line: "No transmission in 15 s.",
+			untilSignal: true,
+		})
+		// a transmission that did not decode is still "Not identified", without the switch
+		const heard = identifyView(
+			state({
+				state: "unidentified",
+				trials: [trial("dmr", "no-sync")],
+				result: result(),
+			}),
+			T0 + 16_000,
+		)
+		expect(heard).toMatchObject({ title: "Not identified", untilSignal: false })
+	})
+
+	it("counts a wait until a transmission up across its jobs, without a countdown", () => {
+		const waiting = state(
+			{ state: "waiting-for-signal" },
+			{ untilSignal: true, waitSince: T0 - 125_000 },
+		)
+		expect(identifyView(waiting, T0)).toMatchObject({
+			phase: "waiting",
+			running: true,
+			title: "Waiting for a transmission",
+			secs: " · 2 min 05 s",
+			bar: null,
+			untilSignal: true,
+		})
+		// between two jobs (the next one starting) it still reads as the same wait
+		const between = state(null, {
+			job: null,
+			starting: true,
+			untilSignal: true,
+			waitSince: T0 - 5_000,
+		})
+		expect(identifyView(between, T0)).toMatchObject({
+			phase: "waiting",
+			secs: " · 5 s",
+		})
+		// the 15 s countdown also shows the switch
+		expect(
+			identifyView(state({ state: "waiting-for-signal" }), T0 + 3000),
+		).toMatchObject({ phase: "waiting", untilSignal: true })
+	})
+
+	it("formats how long a wait lasted", () => {
+		expect(formatWaited(8_400)).toBe("8 s")
+		expect(formatWaited(125_000)).toBe("2 min 05 s")
+		expect(formatWaited(3_840_000)).toBe("1 h 04 min")
 	})
 })

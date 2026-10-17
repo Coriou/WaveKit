@@ -289,6 +289,13 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 - [x] `preemptedBy: {jobId, name}` on `paused(preempted-job)` (SF1 §4).
 - [ ] Optional `discoveryId` on saved frequencies; the discovery DTO lists
   `savedFrequencyIds`.
+- [ ] Identify until a transmission (web app, 2026-10-17): an open wait for a signal on
+  `POST /api/scanner/identify` (`timeoutMs: null` or `waitUntilSignal: true`, ended by
+  `DELETE` or a retune), and an explicit `result.ended: "no-signal"` when the wait ran out with
+  nothing heard. Today `timeoutMs` stops at 120 s, so the tuned card's "Wait until a
+  transmission" chains 120 s jobs and reads "nothing heard" from an `unidentified` result with
+  no trials and spectrum measurements (`web/src/data/identify-store.ts`); each round leaves a
+  job in the scanner history.
 - [ ] S2 enabled (parallel identify trials, "Likely", CTCSS, analog recordings) and S3
   listen-scan ("Scan a list") for the later Scanner mode.
 - [x] Decoder IDs in a sweep's impact (`Impact.runningDecoders`, `pinnedDecoders`); the UI

@@ -194,4 +194,134 @@ describe("IdentifyStore", () => {
 		})
 		expect(identify.get().event?.state).toBe("identified")
 	})
+
+	it("waits until a transmission: a job that heard nothing is followed by the next", async () => {
+		vi.useFakeTimers()
+		try {
+			const { factory, last } = fakeSockets()
+			const events = new EventsClient({
+				createSocket: factory,
+				url: "ws://x/ws",
+			})
+			events.connect()
+			last().open()
+			const bodies: unknown[] = []
+			const api = new ApiClient({
+				fetch: async (_url, init) => {
+					bodies.push(JSON.parse(String(init?.body)))
+					return json(201, {
+						id: `j_${bodies.length}`,
+						state: "running",
+						createdAt: new Date().toISOString(),
+						identify: { timeoutMs: 120_000, targets: [] },
+					} as unknown as ScanJob)
+				},
+			})
+			const kept = new Map<string, string>()
+			const storage = {
+				getItem: (k: string) => kept.get(k) ?? null,
+				setItem: (k: string, v: string) => void kept.set(k, v),
+			}
+			const identify = new IdentifyStore(api, events, storage)
+			identify.setUntilSignal(true)
+			expect(kept.get("wk.identify.untilSignal")).toBe("1")
+			await identify.start(446_925_000)
+			expect(bodies[0]).toMatchObject({ timeoutMs: 120_000 })
+			const since = identify.get().waitSince
+			expect(since).not.toBeNull()
+			const nothing = {
+				targetHz: 446_925_000,
+				state: "unidentified",
+				trials: [],
+				result: {
+					confidence: "activity",
+					metadata: {},
+					measurements: { source: "spectrum", class: "unknown" },
+				},
+			}
+			last().receive({
+				type: "scanner:identify",
+				channel: "scanner",
+				data: { ...nothing, jobId: "j_1" },
+			})
+			expect(identify.active).toBe(true)
+			expect(identify.get().waitSince).toBe(since)
+			await vi.advanceTimersByTimeAsync(600)
+			expect(bodies).toHaveLength(2)
+			expect(identify.get().job?.id).toBe("j_2")
+			// a transmission came: the answer shows and the wait is over
+			last().receive({
+				type: "scanner:identify",
+				channel: "scanner",
+				data: {
+					jobId: "j_2",
+					targetHz: 446_925_000,
+					state: "identified",
+					trials: [],
+				},
+			})
+			expect(identify.get().event?.state).toBe("identified")
+			expect(identify.get().waitSince).toBeNull()
+			await vi.advanceTimersByTimeAsync(2_000)
+			expect(bodies).toHaveLength(2)
+			// the choice is remembered for the next store (another page load)
+			expect(new IdentifyStore(api, events, storage).get().untilSignal).toBe(
+				true,
+			)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("stops the wait on Stop: no next job", async () => {
+		vi.useFakeTimers()
+		try {
+			const { factory, last } = fakeSockets()
+			const events = new EventsClient({
+				createSocket: factory,
+				url: "ws://x/ws",
+			})
+			events.connect()
+			last().open()
+			let posts = 0
+			const urls: string[] = []
+			const api = new ApiClient({
+				fetch: async url => {
+					urls.push(url)
+					if (url.endsWith("/cancel")) return json(200, {})
+					posts += 1
+					return json(201, {
+						id: `j_${posts}`,
+						state: "running",
+						createdAt: new Date().toISOString(),
+						identify: { targets: [] },
+					} as unknown as ScanJob)
+				},
+			})
+			const identify = new IdentifyStore(api, events)
+			identify.setUntilSignal(true)
+			await identify.start(446_925_000)
+			last().receive({
+				type: "scanner:identify",
+				channel: "scanner",
+				data: {
+					jobId: "j_1",
+					targetHz: 446_925_000,
+					state: "unidentified",
+					trials: [],
+				},
+			})
+			// the next job is waiting: Stop cancels it and starts no other
+			await vi.advanceTimersByTimeAsync(600)
+			expect(posts).toBe(2)
+			identify.reset()
+			await vi.advanceTimersByTimeAsync(3_000)
+			expect(posts).toBe(2)
+			expect(urls.at(-1)).toMatch(/\/api\/scanner\/jobs\/j_2\/cancel$/)
+			expect(identify.get().untilSignal).toBe(true)
+			expect(identify.active).toBe(false)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 })
