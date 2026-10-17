@@ -109,6 +109,8 @@ export interface PlotContext {
 	tracks: readonly Track[]
 	/** The operator's sweep has the receiver: a tune recentres the hardware so the scan pauses. */
 	scanHasReceiver?: boolean
+	/** Display › Click to tune "centre": every tune recentres the receiver on the frequency. */
+	centreTuning?: boolean
 }
 
 export interface PlotActions {
@@ -269,7 +271,8 @@ export class PlotController {
 		const centreHz = this.centreHz()
 		const hardware = this.hardwareCapture()
 		if (!capture || !hardware || centreHz === null) return Promise.resolve()
-		const action: ReturnType<typeof tuneAction> = this.ctx.scanHasReceiver
+		const action: ReturnType<typeof tuneAction> =
+			this.ctx.scanHasReceiver || this.ctx.centreTuning
 			? { kind: "retune", centreHz: Math.round(hz) }
 			: tuneAction(
 					hz,

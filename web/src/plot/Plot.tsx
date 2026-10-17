@@ -244,6 +244,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 		stepHz: step,
 		tracks,
 		scanHasReceiver,
+		centreTuning: device.clickTuning === "centre",
 	}
 	controller.setContext(context)
 	const tunerCentre = context.centreHz
@@ -522,6 +523,7 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 						LANES_CSS +
 						(discRow ? DISCOVERY_ROW_CSS : 0)
 					}
+					discoveries={device.discoveryTags}
 					tunedHz={vfoHz}
 				/>
 			)}

@@ -203,6 +203,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.tune",
+		"Display",
+		"Click to tune",
+		"click tuning free centre center recentre sdr++",
+		SETTINGS,
+	),
+	row(
 		"dev.card",
 		"Display",
 		"Tuned card position",

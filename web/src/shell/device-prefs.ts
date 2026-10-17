@@ -44,6 +44,13 @@ export function fftBins(size: FftSize, binsMax: number | null): number {
 export const DISCOVERY_TAG_MODES = ["all", "decoded", "off"] as const
 export type DiscoveryTagMode = (typeof DISCOVERY_TAG_MODES)[number]
 
+/**
+ * Display › Click to tune (SDR++'s Normal / Center tuning, SDR#'s Free / Center): the click moves the listening
+ * channel and the display stays, or every tune recentres the receiver on it.
+ */
+export const CLICK_TUNINGS = ["free", "centre"] as const
+export type ClickTuning = (typeof CLICK_TUNINGS)[number]
+
 /** Map › Beyond the offline map: OpenFreeMap's tiles, or a blank ground that asks nothing of anyone. */
 export const MAP_TILES = ["online", "blank"] as const
 export type MapTiles = (typeof MAP_TILES)[number]
@@ -76,6 +83,8 @@ export interface DevicePrefs {
 	readonly signalLabels: SignalLabelsMode
 	/** Which scanner discoveries tag the spectrum (plot/discovery-tags.ts). */
 	readonly discoveryTags: DiscoveryTagMode
+	/** What a click on the spectrum moves (plot/plot-store.ts tuneTo). */
+	readonly clickTuning: ClickTuning
 	readonly mapTiles: MapTiles
 	readonly mapTrail: MapTrail
 	readonly mapLabels: MapLabels
@@ -90,6 +99,7 @@ export const DEFAULT_DEVICE: DevicePrefs = {
 	fftSize: 8192,
 	signalLabels: "clear",
 	discoveryTags: "all",
+	clickTuning: "free",
 	mapTiles: "online",
 	mapTrail: 15,
 	mapLabels: "normal",
@@ -156,6 +166,11 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 			DISCOVERY_TAG_MODES,
 			o["discoveryTags"],
 			DEFAULT_DEVICE.discoveryTags,
+		),
+		clickTuning: pick(
+			CLICK_TUNINGS,
+			o["clickTuning"],
+			DEFAULT_DEVICE.clickTuning,
 		),
 		mapTiles: pick(MAP_TILES, o["mapTiles"], DEFAULT_DEVICE.mapTiles),
 		mapTrail: (MAP_TRAILS as readonly unknown[]).includes(o["mapTrail"])
@@ -246,6 +261,7 @@ export class DevicePrefsStore {
 			next.fftSize === prev.fftSize &&
 			next.signalLabels === prev.signalLabels &&
 			next.discoveryTags === prev.discoveryTags &&
+			next.clickTuning === prev.clickTuning &&
 			next.mapTiles === prev.mapTiles &&
 			next.mapTrail === prev.mapTrail &&
 			next.mapLabels === prev.mapLabels

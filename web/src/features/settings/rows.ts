@@ -32,6 +32,7 @@ import type { CardAnchorId } from "../../shell/layout.ts"
 import type {
 	Averaging,
 	Density,
+	ClickTuning,
 	DevicePrefs,
 	DiscoveryTagMode,
 	MapLabels,
@@ -1059,6 +1060,14 @@ const DISCOVERY_TAG_HELP: Readonly<Record<DiscoveryTagMode, string>> = {
 	decoded: "Only what the scanner decoded",
 	off: "The spectrum shows no discoveries",
 }
+const CLICK_TUNING_OPTS = opts([
+	["free", "Free"],
+	["centre", "Centre"],
+])
+const CLICK_TUNING_HELP: Readonly<Record<ClickTuning, string>> = {
+	free: "A click moves the listening channel; the receiver recentres only past the capture's edge",
+	centre: "Every tune recentres the receiver on the signal, so it stays in the middle",
+}
 const AVERAGING_OPTS = opts([
 	["off", "Off"],
 	["low", "Low"],
@@ -1305,6 +1314,21 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			def: { value: "all", text: "All" },
 			write: v =>
 				local(() => a.setDevice({ discoveryTags: v as DiscoveryTagMode })),
+		},
+		{
+			id: "dp.tune",
+			group: "display",
+			label: "Click to tune",
+			help: CLICK_TUNING_HELP[d.clickTuning],
+			keys: words(
+				"click tune tuning free centre center recentre sdr++ sdr# spectrum vfo",
+			),
+			device: true,
+			widget: { kind: "seg", options: CLICK_TUNING_OPTS },
+			value: d.clickTuning,
+			text: optionText(CLICK_TUNING_OPTS, d.clickTuning),
+			def: { value: "free", text: "Free" },
+			write: v => local(() => a.setDevice({ clickTuning: v as ClickTuning })),
 		},
 	)
 	rows.push({

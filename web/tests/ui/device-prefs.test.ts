@@ -52,6 +52,7 @@ describe("device prefs", () => {
 			fftSize: 8192,
 			signalLabels: "clear",
 			discoveryTags: "all",
+			clickTuning: "free",
 			mapTiles: "online",
 			mapTrail: 15,
 			mapLabels: "normal",

@@ -20,6 +20,7 @@ import {
 import type { ResolvedBandPlanView } from "@wavekit/api-types"
 
 import type { DataLayer } from "../data/index.ts"
+import type { DiscoveryTagMode } from "../shell/device-prefs.ts"
 import { useStore } from "../data/index.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import {
@@ -48,6 +49,8 @@ export interface BandRulerProps {
 	/** Top, CSS px from the top of the plot body. */
 	top: number
 	tunedHz: number | null
+	/** Display › Discoveries on the spectrum: which ones the heard strip counts (Off: none). */
+	discoveries?: DiscoveryTagMode
 }
 
 /** Wheel travel (px) per ruler level. */
@@ -94,6 +97,7 @@ export const BandRuler = memo(function BandRuler({
 	widthPx,
 	top,
 	tunedHz,
+	discoveries: mode = "all",
 }: BandRulerProps) {
 	const level = useStore(controller.store, s => s.ruler)
 	const zoomedIn = useStore(
@@ -114,7 +118,7 @@ export const BandRuler = memo(function BandRuler({
 		// the view only seeds the first centre (followCentre keeps it after)
 		[centre, captureWidth, level],
 	)
-	useDiscoveryFetch(data.scanner, span)
+	useDiscoveryFetch(data.scanner, mode === "off" ? null : span)
 	const trackPx = Math.max(40, widthPx - START_PX - END_PX)
 
 	const savedItems = useStore(data.savedFrequencies, s => s.items)
@@ -139,12 +143,16 @@ export const BandRuler = memo(function BandRuler({
 	)
 	const heard = useMemo(
 		() =>
-			activityBins(
-				[...discoveries.values()].map(d => d.frequencyHz),
-				span,
-				trackPx,
-			),
-		[discoveries, span, trackPx],
+			mode === "off"
+				? []
+				: activityBins(
+						[...discoveries.values()]
+							.filter(d => mode === "all" || d.confidence === "decoded")
+							.map(d => d.frequencyHz),
+						span,
+						trackPx,
+					),
+		[discoveries, span, trackPx, mode],
 	)
 
 	const trackRef = useRef<HTMLDivElement>(null)

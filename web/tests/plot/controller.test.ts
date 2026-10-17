@@ -164,6 +164,14 @@ describe("PlotController", () => {
 		void done
 	})
 
+	it("with Click to tune on Centre, a click inside the capture recentres the receiver on it", async () => {
+		const { c, calls } = setup({ ...context, centreTuning: true })
+		const done = c.clickAt((161_000_000 - capture.startHz) / 2_400_000, 1000)
+		await flush()
+		expect(calls).toEqual(["retune rtl0 161000000", "offset 0"])
+		void done
+	})
+
 	it("wheel notches step from the pending frequency, so fast scrolling accumulates", () => {
 		const { c, calls } = setup()
 		void c.wheelStep(-100) // a notch: one step up
