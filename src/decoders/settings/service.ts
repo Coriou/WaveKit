@@ -96,7 +96,12 @@ export async function openDecoderSettingsService(
 			retyped += 1
 			continue
 		}
-		const sanitized = sanitizeStoredOptions(entry.type, entry.options)
+		const sanitized = sanitizeStoredOptions(
+			entry.type,
+			entry.options,
+			config.frequencies,
+			config.options,
+		)
 		dropped += sanitized.dropped
 		applied.set(id, { ...entry, options: sanitized.options })
 	}

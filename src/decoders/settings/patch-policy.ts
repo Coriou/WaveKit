@@ -456,10 +456,15 @@ export function validateDecoderPatch(
 /**
  * Load-time re-check of a stored entry's options: keeps only keys that are patchable now
  * and whose value passes the per-key schema; returns kept options and the dropped count.
+ * WG9 5.2: a frequency key the configuration shadows (`isFrequencyKeyShadowed`) is dropped
+ * too: `frequencies` first (top-level `frequencies`), then `frequency` (top-level
+ * `frequencies`, the configured `options.frequencies` or a kept stored `frequencies`).
  */
 export function sanitizeStoredOptions(
 	type: string,
 	options: Readonly<Record<string, unknown>>,
+	topLevelFrequencies?: unknown,
+	configOptions?: Readonly<Record<string, unknown>>,
 ): { options: Record<string, DecoderSettingValue>; dropped: number } {
 	const kept: Record<string, DecoderSettingValue> = {}
 	let dropped = 0
@@ -477,6 +482,21 @@ export function sanitizeStoredOptions(
 			continue
 		}
 		kept[key] = copyValue(value)
+	}
+	const shadowOptions: Record<string, unknown> = {}
+	if (configOptions !== undefined && isPlainObject(configOptions)) {
+		for (const key of Object.keys(configOptions))
+			shadowOptions[key] = configOptions[key]
+	}
+	for (const key of ["frequencies", "frequency"] as const) {
+		if (!Object.hasOwn(kept, key)) continue
+		if (isFrequencyKeyShadowed(key, topLevelFrequencies, shadowOptions)) {
+			delete kept[key]
+			dropped += 1
+		} else if (key === "frequencies") {
+			// A kept stored `frequencies` takes effect and shadows a stored `frequency`.
+			shadowOptions["frequencies"] = kept[key]
+		}
 	}
 	return { options: kept, dropped }
 }
