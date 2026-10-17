@@ -22,6 +22,9 @@ import {
 	type WavHandle,
 	type WavIo,
 } from "../channel/wav-writer.js"
+import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
+import type { RecordingProtection } from "../../recordings/contract.js"
+import { ScannerApiError } from "../errors.js"
 import type { RecordingCommitPlan } from "./discovery-store.js"
 import {
 	MAX_OPERATION_METADATA_BYTES,
@@ -246,6 +249,10 @@ interface Context {
 	limits(): { maxBytes: number; minFreeBytes: number }
 	freeBytes(): Promise<number>
 	io?: AnalogOperationIo
+	/** WG9 req 2.5: a kept artifact survives retention; absent keeps today's behaviour. */
+	protection?: RecordingProtection
+	/** Fixed-text count log of kept artifacts a deleter left in place. */
+	keptSkipped?: (count: number) => void
 }
 interface Inventory {
 	bytes: number
@@ -1498,7 +1505,8 @@ export class AnalogOperations {
 					return result("quarantined", "recovery-incomplete")
 				await this.cleanupOwned(intent, true, true)
 				return { ...result("cleaned", null), residueBytes: 0 }
-			} catch {
+			} catch (cause) {
+				if (cause instanceof ScannerApiError) this.context.keptSkipped?.(1)
 				return result("quarantined", "cleanup-failed")
 			}
 		}
@@ -1664,13 +1672,16 @@ export class AnalogOperations {
 			try {
 				await this.safeTarget(path)
 				this.requireCleanupClosure(intent.operationId)
+				// WG9 req 2.5: the deletion decision runs in the same turn as the media unlink.
+				if (path === final && this.keptArtifact(intent)) throw keptRefusal()
 				await this.io.unlink(path)
 			} catch (cause) {
 				if (nativeCode(cause) !== "ENOENT") throw cause
 			}
 		}
+		const final = this.finalPath(intent)
 		// Transfer strict cleanup authority before removing the directory's last file.
-		if (ownedMedia) await remove(this.finalPath(intent))
+		if (ownedMedia) await remove(final)
 		const dir = this.opDir(intent.operationId)
 		for (const name of [
 			"payload.wav.part",
@@ -1740,6 +1751,21 @@ export class AnalogOperations {
 			[...this.active.values()].some(op => op.intent.artifact === relativePath)
 		)
 	}
+	/** Fail closed: a throwing port answers protected. */
+	private keptArtifact(intent: Intent): boolean {
+		const port = this.context.protection
+		if (!port) return false
+		try {
+			return (
+				port.isScannerFileProtected(
+					intent.discoveryId,
+					intent.artifact.split("/").at(-1) ?? "",
+				) !== false
+			)
+		} catch {
+			return true
+		}
+	}
 	async retained(
 		keep: ReadonlySet<string>,
 		maxAgeMs: number,
@@ -1747,11 +1773,13 @@ export class AnalogOperations {
 	): Promise<string[]> {
 		if (!this.ready) return []
 		const deleted: string[] = []
+		let skipped = 0
 		for (const intent of [...this.inventory.intents.values()]) {
 			if (
 				keep.has(intent.discoveryId) ||
 				this.closureUncertain(intent.operationId) ||
-				this.protectedDiscovery(intent.discoveryId)
+				this.protectedDiscovery(intent.discoveryId) ||
+				this.keptArtifact(intent)
 			)
 				continue
 			let old = false
@@ -1766,23 +1794,46 @@ export class AnalogOperations {
 					this.context.limits().maxBytes
 			)
 				continue
-			await this.context.serialise(intent.discoveryId, async () => {
-				if (
-					this.protectedDiscovery(intent.discoveryId) ||
-					this.closureUncertain(intent.operationId)
-				)
-					return
-				await this.exclusive(async () => {
-					if (this.closureUncertain(intent.operationId)) return
-					await this.validateCleanupMarker(intent)
-					await this.context.adapter.inverse(intent.operationId)
-					await this.cleanupOwned(intent, true, true)
-					this.available.delete(intent.alias)
-					deleted.push(intent.artifact)
-					await this.scanInventory()
-				})
-			})
+			try {
+				await this.retire(intent, deleted)
+			} catch (cause) {
+				if (!(cause instanceof ScannerApiError)) throw cause
+				skipped++
+			}
 		}
+		if (skipped > 0) this.context.keptSkipped?.(skipped)
 		return deleted
 	}
+	private async retire(intent: Intent, deleted: string[]): Promise<void> {
+		await this.context.serialise(intent.discoveryId, async () => {
+			if (
+				this.protectedDiscovery(intent.discoveryId) ||
+				this.closureUncertain(intent.operationId) ||
+				this.keptArtifact(intent)
+			)
+				return
+			await this.exclusive(async () => {
+				if (
+					this.closureUncertain(intent.operationId) ||
+					this.keptArtifact(intent)
+				)
+					return
+				await this.validateCleanupMarker(intent)
+				await this.context.adapter.inverse(intent.operationId)
+				await this.cleanupOwned(intent, true, true)
+				this.available.delete(intent.alias)
+				deleted.push(intent.artifact)
+				await this.scanInventory()
+			})
+		})
+	}
+}
+
+/** Sentinel: the media unlink met a kept artifact; the file is left in place. */
+function keptRefusal(): ScannerApiError {
+	return new ScannerApiError(
+		"Discovery holds kept recordings",
+		SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
+		409,
+	)
 }

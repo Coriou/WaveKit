@@ -90,6 +90,8 @@ export interface DiscoveryStoreOptions {
 	newId: () => string
 	minSurfaceBlocks?: number
 	rasters?: (sourceId: string, centreHz: number) => Raster[]
+	/** WG9 req 2.6: inactive prune and capacity eviction skip a discovery holding kept recordings. */
+	discoveryHoldsKept?: (discoveryId: string) => boolean
 }
 export type RecordingLinkState = "linked" | "cut" | "encrypted-dropped" | "none"
 export interface StoreSnapshot {
@@ -356,6 +358,8 @@ export class DiscoveryStore extends EventEmitter {
 	>()
 	private appliedSeq = 0
 
+	private readonly holdsKept: (discoveryId: string) => boolean
+
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
 		this.maxDiscoveries = opts.maxDiscoveries
@@ -363,6 +367,17 @@ export class DiscoveryStore extends EventEmitter {
 		this.newId = opts.newId
 		this.minSurfaceBlocks = opts.minSurfaceBlocks ?? 2
 		this.rastersFor = opts.rasters ?? (() => [])
+		const holds = opts.discoveryHoldsKept
+		// Fail closed: a throwing port answers "holds kept".
+		this.holdsKept = holds
+			? id => {
+					try {
+						return holds(id) !== false
+					} catch {
+						return true
+					}
+				}
+			: () => false
 	}
 
 	ingest(input: ObservationInput): Ingested {
@@ -856,7 +871,8 @@ export class DiscoveryStore extends EventEmitter {
 			if (
 				d.operator?.keep === true ||
 				d.operator?.lockout === true ||
-				d.lastSeenAt >= cutoff
+				d.lastSeenAt >= cutoff ||
+				this.holdsKept(d.id)
 			)
 				continue
 			removed.push(d.id)
@@ -1685,7 +1701,8 @@ export class DiscoveryStore extends EventEmitter {
 			if (
 				d.confidence === "decoded" ||
 				d.operator?.keep === true ||
-				d.operator?.lockout === true
+				d.operator?.lockout === true ||
+				this.holdsKept(d.id)
 			)
 				continue
 			if (
