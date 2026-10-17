@@ -32,7 +32,55 @@ export const BUDGETS = {
 	missedDeadlines: 0,
 	/** RSS high-water growth allowed in the second half of a cell. */
 	rssGrowthBytes: 16 * 1024 * 1024,
+	/** Owned zoom memory ceiling per source (viewed-slice-spectrum design.md, 32 MiB). */
+	ownedBytesPerSource: 32 * 1024 * 1024,
+	/** RSS high-water allowed above the baseline cell: owned ceiling plus this margin (GC slack, code). */
+	rssOverBaselineMarginBytes: 32 * 1024 * 1024,
 } as const
+
+/**
+ * A chunk misses its deadline when processing (detector plus zoom) starts or
+ * finishes after due + DEADLINE_MS; one miss per chunk at most.
+ */
+export function chunkMissed(
+	dueMs: number,
+	startMs: number,
+	endMs: number,
+): boolean {
+	return Math.max(startMs, endMs) > dueMs + DEADLINE_MS
+}
+
+/**
+ * Persistent typed-array bytes owned by the zoom slices of one source, from
+ * the ZoomSlice layout: CU8 ring 2N, re/im 8N, window 4N, FFT twiddles 8N and
+ * bit-reverse table 4N, slice power 4·bins; ddc adds the decimator taps and
+ * its two FIR delay lines (3 Float32Arrays of the tap count).
+ */
+export function ownedSliceBytes(opts: {
+	n: number
+	slices: number
+	variant: Variant
+	fs: number
+	spanHz: number
+}): number {
+	const { n } = opts
+	let perSlice = 2 * n + 8 * n + 4 * n + 8 * n + 4 * n
+	if (opts.variant === "ddc") {
+		const d = new ChannelDecimator({
+			inputRateHz: opts.fs,
+			offsetHz: 0,
+			targetRateHz: opts.spanHz,
+		})
+		const rate = d.plan.outputRateHz
+		const taps = Math.max(3, 6 * d.plan.decimation) | 1
+		const b = sliceBins(n, rate, 0, Math.min(rate, opts.spanHz))
+		perSlice += 4 * (b.end - b.start) + 3 * 4 * taps
+	} else {
+		const b = sliceBins(n, opts.fs, 0, opts.spanHz)
+		perSlice += 4 * (b.end - b.start)
+	}
+	return perSlice * opts.slices
+}
 
 export const DEADLINE_MS = 250
 export const CHUNK_MS = 50
@@ -365,6 +413,8 @@ export class ZoomSlice {
 	private readonly im: Float32Array
 	private readonly power: Float32Array
 	private readonly ddc: ChannelDecimator | null
+	/** Rate of the samples the FFT sees (fs, or the decimator's output rate). */
+	readonly fftRateHz: number
 
 	constructor(opts: {
 		n: number
@@ -386,9 +436,11 @@ export class ZoomSlice {
 				targetRateHz: opts.spanHz,
 			})
 			const rate = this.ddc.plan.outputRateHz
+			this.fftRateHz = rate
 			this.bins = sliceBins(opts.n, rate, 0, Math.min(rate, opts.spanHz))
 		} else {
 			this.ddc = null
+			this.fftRateHz = opts.fs
 			this.bins = sliceBins(opts.n, opts.fs, opts.offsetHz, opts.spanHz)
 		}
 		this.power = new Float32Array(this.bins.end - this.bins.start)
@@ -461,6 +513,10 @@ export interface CellMetrics {
 	eventLoopP99IncreaseMs: number
 	missedDeadlines: number
 	rssGrowthBytes: number
+	/** ownedSliceBytes of the cell. */
+	ownedBytes: number
+	/** RSS high-water minus the baseline cell's RSS high-water. */
+	rssOverBaselineBytes: number
 }
 
 /**
@@ -493,6 +549,18 @@ export function evaluateCell(m: CellMetrics): {
 	if (!(m.rssGrowthBytes <= BUDGETS.rssGrowthBytes)) {
 		reasons.push(
 			`RSS grew ${(m.rssGrowthBytes / 1048576).toFixed(1)} MiB in the second half`,
+		)
+	}
+	if (!(m.ownedBytes <= BUDGETS.ownedBytesPerSource)) {
+		reasons.push(
+			`owned zoom memory ${(m.ownedBytes / 1048576).toFixed(1)} MiB > 32 MiB per source`,
+		)
+	}
+	const rssCap =
+		BUDGETS.ownedBytesPerSource + BUDGETS.rssOverBaselineMarginBytes
+	if (!(m.rssOverBaselineBytes <= rssCap)) {
+		reasons.push(
+			`RSS high-water ${(m.rssOverBaselineBytes / 1048576).toFixed(1)} MiB over baseline > ${rssCap / 1048576} MiB`,
 		)
 	}
 	return { pass: reasons.length === 0, reasons }

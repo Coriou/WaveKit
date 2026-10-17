@@ -6,7 +6,10 @@ import { join } from "node:path"
 import {
 	Cu8Ring,
 	ZoomSlice,
+	BUDGETS,
+	chunkMissed,
 	evaluateCell,
+	ownedSliceBytes,
 	makeCu8Signal,
 	parseArgs,
 	percentile,
@@ -20,7 +23,10 @@ const ok = {
 	eventLoopP99IncreaseMs: 0.5,
 	missedDeadlines: 0,
 	rssGrowthBytes: 0,
+	ownedBytes: 0,
+	rssOverBaselineBytes: 0,
 }
+const MiB = 1024 * 1024
 
 describe("zoom workload parseArgs", () => {
 	it("expands ranges and lists", () => {
@@ -139,6 +145,75 @@ describe("zoom workload pass rule", () => {
 	})
 })
 
+describe("zoom workload memory and deadline accounting", () => {
+	it("bounds owned memory at 32 MiB per source", () => {
+		expect(BUDGETS.ownedBytesPerSource).toBe(32 * MiB)
+		expect(evaluateCell({ ...ok, ownedBytes: 32 * MiB }).pass).toBe(true)
+		expect(evaluateCell({ ...ok, ownedBytes: 32 * MiB + 1 }).pass).toBe(false)
+	})
+
+	it("bounds RSS high-water over baseline at cap plus margin", () => {
+		const cap = 64 * MiB
+		expect(evaluateCell({ ...ok, rssOverBaselineBytes: cap }).pass).toBe(true)
+		const r = evaluateCell({ ...ok, rssOverBaselineBytes: cap + 1 })
+		expect(r.pass).toBe(false)
+		expect(r.reasons.join()).toMatch(/over baseline/)
+		expect(evaluateCell({ ...ok, rssGrowthBytes: 16 * MiB }).pass).toBe(true)
+		expect(evaluateCell({ ...ok, rssGrowthBytes: 16 * MiB + 1 }).pass).toBe(
+			false,
+		)
+	})
+
+	it("computes owned slice bytes structurally", () => {
+		const fs = 2_048_000
+		const one = ownedSliceBytes({
+			n: 65_536,
+			slices: 1,
+			variant: "fft",
+			fs,
+			spanHz: 128_000,
+		})
+		expect(one).toBe(26 * 65_536 + 4 * 4096)
+		expect(
+			ownedSliceBytes({
+				n: 65_536,
+				slices: 4,
+				variant: "fft",
+				fs,
+				spanHz: 128_000,
+			}),
+		).toBe(4 * one)
+		// 262144 x 8 slices is far past the per-source ceiling.
+		const big = ownedSliceBytes({
+			n: 262_144,
+			slices: 8,
+			variant: "fft",
+			fs,
+			spanHz: 128_000,
+		})
+		expect(evaluateCell({ ...ok, ownedBytes: big }).pass).toBe(false)
+	})
+
+	it("counts a chunk that starts or finishes late, at the bound and past it", () => {
+		expect(chunkMissed(1000, 1000, 1250)).toBe(false)
+		expect(chunkMissed(1000, 1000, 1250.001)).toBe(true)
+		expect(chunkMissed(1000, 1250.001, 1250.001)).toBe(true)
+		expect(chunkMissed(1000, 1100, 1200)).toBe(false)
+	})
+
+	it("uses the decimator output rate for ddc bin spacing", () => {
+		const s = new ZoomSlice({
+			n: 8192,
+			fs: 2_400_000,
+			offsetHz: 0,
+			spanHz: 128_000,
+			variant: "ddc",
+		})
+		// floor(2.4e6/128e3) = 18 is not exact; chooseDecimation picks D = 16, 150 kHz (the old reconstruction gave 133 333).
+		expect(s.fftRateHz).toBe(150_000)
+	})
+})
+
 describe("zoom workload DSP helpers", () => {
 	it("generates deterministic seeded CU8", () => {
 		const a = makeCu8Signal(7, 48_000, 0.1)
@@ -216,6 +291,8 @@ describe("zoom workload smoke run", () => {
 				"missedDeadlines",
 				"pass",
 				"reasons",
+				"ownedBytes",
+				"rssOverBaselineBytes",
 			]) {
 				expect(zoom).toHaveProperty(k)
 			}

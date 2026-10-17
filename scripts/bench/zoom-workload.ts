@@ -10,16 +10,18 @@
  * Writes samples.jsonl, summary.json and meta.json, then prints a table.
  */
 import { execFileSync } from "node:child_process"
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import { join, resolve } from "node:path"
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
 import process from "node:process"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 import {
 	CHUNK_MS,
 	DEADLINE_MS,
 	DetectorProxy,
+	chunkMissed,
+	ownedSliceBytes,
 	ZoomSlice,
 	evaluateCell,
 	makeCu8Signal,
@@ -51,6 +53,8 @@ export interface CellResult extends CellSpec {
 	rssHighWaterBytes: number
 	heapUsedHighWaterBytes: number
 	rssGrowthSecondHalfBytes: number
+	ownedBytes: number
+	rssOverBaselineBytes: number
 	missedDeadlines: number
 	missedChunks: number
 	missedTransforms: number
@@ -161,7 +165,6 @@ async function runCell(a: RunCellArgs): Promise<CellResult> {
 		if (wait > 0) await sleep(wait)
 		else await tick() // late: catch up one chunk per tick, never a burst
 		const start = performance.now()
-		if (start > due + DEADLINE_MS) missedChunks++
 		for (let off = 0; off < chunkBytes; ) {
 			const n = Math.min(chunkBytes - off, signal.length - readPos)
 			chunk.set(signal.subarray(readPos, readPos + n), off)
@@ -186,6 +189,7 @@ async function runCell(a: RunCellArgs): Promise<CellResult> {
 				nextSlot++
 			}
 		}
+		if (chunkMissed(due, start, performance.now())) missedChunks++
 		const mem = process.memoryUsage()
 		if (mem.rss > rssHw) rssHw = mem.rss
 		if (mem.heapUsed > heapHw) heapHw = mem.heapUsed
@@ -225,10 +229,18 @@ async function runCell(a: RunCellArgs): Promise<CellResult> {
 		? eventLoopP99Ms - base.eventLoopP99Ms
 		: null
 	const first = slices[0]
-	const binFs =
-		spec.kind === "zoom" && spec.variant === "ddc"
-			? Math.round(spec.fs / Math.floor(spec.fs / o.spanHz))
-			: spec.fs
+	const binFs = first ? first.fftRateHz : spec.fs
+	const ownedBytes =
+		spec.kind === "zoom"
+			? ownedSliceBytes({
+					n: spec.fft!,
+					slices: spec.slices!,
+					variant: spec.variant!,
+					fs: spec.fs,
+					spanHz: o.spanHz,
+				})
+			: 0
+	const rssOverBaselineBytes = base ? rssHw - base.rssHighWaterBytes : 0
 	let pass: boolean | null = null
 	let reasons: string[] = []
 	if (spec.kind === "zoom") {
@@ -237,6 +249,8 @@ async function runCell(a: RunCellArgs): Promise<CellResult> {
 			eventLoopP99IncreaseMs: eventLoopP99IncreaseMs ?? Number.NaN,
 			missedDeadlines,
 			rssGrowthBytes: rssGrowth,
+			ownedBytes,
+			rssOverBaselineBytes,
 		})
 		pass = ev.pass
 		reasons = ev.reasons
@@ -265,6 +279,8 @@ async function runCell(a: RunCellArgs): Promise<CellResult> {
 		rssHighWaterBytes: rssHw,
 		heapUsedHighWaterBytes: heapHw,
 		rssGrowthSecondHalfBytes: rssGrowth,
+		ownedBytes,
+		rssOverBaselineBytes,
 		missedDeadlines,
 		missedChunks,
 		missedTransforms,
@@ -371,8 +387,17 @@ export async function runBenchmark(
 	return { outDir, cells }
 }
 
-const entry = process.argv[1]
-if (entry && import.meta.url === pathToFileURL(entry).href) {
+function isMainModule(): boolean {
+	const entry = process.argv[1]
+	if (!entry) return false
+	try {
+		return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))
+	} catch {
+		return false
+	}
+}
+
+if (isMainModule()) {
 	const argv = process.argv.slice(2)
 	let options: BenchOptions | null = null
 	try {
