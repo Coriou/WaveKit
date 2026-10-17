@@ -185,8 +185,6 @@ export interface UntrackedRetuneEvent {
 	 * label and `epoch` is the current one). Absent: a new unverified epoch started.
 	 */
 	newEpoch?: false
-	/** WG10 req 2.9: U8 mirror seen over two consecutive blocks: the engine re-aligns by one byte. */
-	realign?: true
 }
 
 // prettier-ignore

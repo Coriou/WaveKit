@@ -18,6 +18,7 @@ import type {
 } from "../../../../src/core/spectrum/types.js"
 import {
 	addInto,
+	analogFm,
 	gaussianNoise,
 	mulberry32,
 	packCu8,
@@ -113,30 +114,26 @@ describe("cause 1: I/Q byte slip", () => {
 		expect(play("U8_IQ", [a, b.subarray(1)]).of("untracked-retune")).toEqual([])
 	}, 30_000)
 
-	it("a full U8 mirror is iq-byte-slip only on its second block, with a one-byte re-align (2.9; frozen: fired on the first block, Δ ≈ −50 kHz)", () => {
+	it("review WG10 R1 M1: a full U8 mirror is a frozen unverified epoch on its first block, only labelled iq-byte-slip (no re-align)", () => {
 		const h = play("U8_IQ", [
 			u8(scene(1, SCENE, 10.6)),
 			u8(scene(2, mirrored(SCENE), 1)),
 		])
 		// frozen: [{ epoch: 2, startSample: 2726400, deltaHz: -49997.98462638259 }]: a mirror has no
-		// common shift, Δ was a coincidental pair match.
-		const alarms = h.of("untracked-retune")
-		expect(alarms).toHaveLength(1)
-		expect(alarms[0]).toMatchObject({
-			epoch: 2,
-			startSample: 2_726_400 + 12_800,
-			suspected: "iq-byte-slip",
-			realign: true,
-		})
-	}, 30_000)
-
-	it("a one-block U8 mirror that goes away raises nothing", () => {
-		const h = play("U8_IQ", [
-			u8(scene(1, SCENE, 10.6)),
-			u8(scene(2, mirrored(SCENE), 0.05)),
-			u8(scene(3, SCENE, 0.5)),
+		// common shift, Δ was a coincidental pair match. A dense-band retune can look mirrored, so
+		// the alarm never asks the engine to drop a byte (that would swap I/Q on an aligned stream).
+		expect(h.of("untracked-retune")).toEqual([
+			{
+				kind: "untracked-retune",
+				epoch: 2,
+				startSample: 2_726_400,
+				deltaHz: -49997.98462638259,
+				suspected: "iq-byte-slip",
+			},
 		])
-		expect(h.of("untracked-retune")).toEqual([])
+		expect(
+			h.of("epoch-started").map(e => [e.epoch, e.startSample]),
+		).toContainEqual([2, 2_726_400])
 	}, 30_000)
 
 	it("a FLOAT32 mirror is classified at once and never re-aligned", () => {
@@ -216,26 +213,25 @@ describe("cause 1: I/Q byte slip", () => {
 		expect(inputs.some(i => i.kind === "gap")).toBe(true)
 	})
 
-	it("a realign request on U8 drops exactly one byte before the next sample", async () => {
+	it("review WG10 R1 M1: an iq-byte-slip alarm (even one carrying the retired realign flag) drops no byte", async () => {
 		const { engine, sources, fanout, inputs, handlers } = fakeEngine()
 		await engine.start()
 		fanout.write(Buffer.from([1, 2, 3, 4]))
 		await settle()
-		handlers()!.events([
-			{
-				kind: "untracked-retune",
-				epoch: 9,
-				startSample: 2,
-				deltaHz: null,
-				suspected: "iq-byte-slip",
-				realign: true,
-			},
-		])
-		fanout.write(Buffer.from([0xaa, 5, 6, 7, 8]))
+		const legacy = {
+			kind: "untracked-retune" as const,
+			epoch: 9,
+			startSample: 2,
+			deltaHz: null,
+			suspected: "iq-byte-slip" as const,
+			realign: true,
+		}
+		handlers()!.events([legacy])
+		fanout.write(Buffer.from([0xaa, 5, 6, 7, 8, 9]))
 		await settle()
 		await new Promise(resolve => setTimeout(resolve, 40))
 		const bytes = inputs.flatMap(i => (i.kind === "bytes" ? [...i.bytes] : []))
-		expect(bytes).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+		expect(bytes).toEqual([1, 2, 3, 4, 0xaa, 5, 6, 7, 8, 9])
 		expect(engine.warnings().at(-1)?.suspected).toBe("iq-byte-slip")
 		await engine.stop()
 		void sources
@@ -317,6 +313,67 @@ describe("cause 2: a strong transmitter with its images and IM lines ending toge
 		expect(h.of("epoch-started").some(e => e.epoch === alarms[0]!.epoch)).toBe(
 			true,
 		)
+	}, 60_000)
+
+	it("review WG10 R1 M2 regression: a strong open carrier with two wide persistent signals, retuned so a wide occupancy covers the old positions (Δ null), is a new unverified epoch", () => {
+		// Two wide FM signals from the start; a strong carrier and two lines keyed together at 2 s
+		// (past the startup window). The receiver then moves: one wide occupancy covers both old
+		// wide positions, the carrier and its lines are gone. Before the fix: signal-change (the
+		// open carrier counted as ended, the wide segment counted as both survivors).
+		const wide = (seed: number, n: number): Iq => {
+			const iq = analogFm(mulberry32(seed), n, FS, 20_000, 0.1, {
+				rmsDeviationHz: 3000,
+				ctcssHz: null,
+			})
+			addInto(
+				iq,
+				analogFm(mulberry32(seed + 1), n, FS, 45_000, 0.1, {
+					rmsDeviationHz: 3000,
+					ctcssHz: null,
+				}),
+			)
+			return iq
+		}
+		const withWide = (seed: number, tones: Tone[], seconds: number): Iq => {
+			const iq = scene(seed, tones, seconds)
+			return addInto(iq, wide(seed + 100, iq.re.length))
+		}
+		// The new occupancy: random-phase tones every 1 kHz over 0..65 kHz (no impulse train); only
+		// one line's mirror (+34 kHz) lands in it, so this is no I/Q mirror.
+		const covered = (seed: number, seconds: number): Iq => {
+			const iq = scene(seed, [], seconds)
+			const rng = mulberry32(seed + 7)
+			for (let o = 0; o <= 65_000; o += 1000)
+				addInto(iq, tone(iq.re.length, FS, o, 0.03, 2 * Math.PI * rng()))
+			return iq
+		}
+		const h = play("U8_IQ", [
+			u8(withWide(20, [], 2)),
+			u8(
+				withWide(
+					21,
+					[
+						[-34_000, 0.5],
+						[-68_000, 0.05],
+						[-90_000, 0.05],
+					],
+					10.6,
+				),
+			),
+			u8(covered(22, 1)),
+		])
+		const alarms = h.of("untracked-retune")
+		expect(alarms).toHaveLength(1)
+		expect(alarms[0]).toMatchObject({
+			deltaHz: null,
+			suspected: "external-control",
+		})
+		expect(alarms[0]).not.toHaveProperty("newEpoch")
+		expect(h.of("epoch-started").some(e => e.epoch === alarms[0]!.epoch)).toBe(
+			true,
+		)
+		const late = h.tracks().filter(t => t.startSample > alarms[0]!.startSample)
+		expect(late.every(t => t.tuningTrust === "unverified")).toBe(true)
 	}, 60_000)
 
 	it("everything vanishing (no bystander left) stays external-control with a new epoch (fail safe)", () => {

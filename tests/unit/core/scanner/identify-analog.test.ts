@@ -28,6 +28,7 @@ import type {
 	IdentifyAnalogEvidence,
 } from "../../../../src/core/scanner/identify-analog-contract.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
+import type { Discovery } from "../../../../src/core/scanner/types.js"
 import type { Logger } from "../../../../src/utils/logger.js"
 import {
 	feedAnalogEvidence,
@@ -96,6 +97,7 @@ function harness(
 		request?: Partial<ScannerIdentifyRequest>
 		port?: IdentifyAnalogEvidence | null
 		logger?: Logger
+		discovery?: Discovery
 	} = {},
 ) {
 	const settings = testSettings()
@@ -119,7 +121,7 @@ function harness(
 		artefactAt: () => Promise.resolve(null),
 		liveTracks: () => tracks,
 		lastSummary: () => summaryOf(),
-		discoveryOf: () => undefined,
+		discoveryOf: () => opts.discovery,
 		priorsAt: () => ({}),
 		format: () => "U8_IQ",
 		channelizer: () => false,
@@ -542,6 +544,56 @@ describe("digital decode keeps priority (WG10 3.3)", () => {
 			expect(e.trials.find(t => t.protocol === "dmr")?.outcome).toBe("decoded")
 		})
 	}
+
+	it("review WG10 R1 m3: analog evidence never replaces a classified DMR discovery without a decode (golden: the result without analog evidence)", async () => {
+		// The founding identify case: DMR classified on the waterfall, no decode this time, and the
+		// NFM squelch heard the bursts (with a tone, on a commanded frequency).
+		const dmr = {
+			id: "d_dmr",
+			protocol: "dmr",
+			confidence: "classified",
+			identity: { colorCode: 1 },
+			metadata: { colorCode: 1 },
+		} as unknown as Discovery
+		const run = async (port: FakePort | null) => {
+			const h = harness({
+				request: { protocols: [] },
+				port,
+				discovery: dmr,
+			})
+			if (port) port.list = [tx()]
+			h.engine.push(1_100_000)
+			await h.start(dmrTrack())
+			await h.settle(1000, 80)
+			return h.last()!
+		}
+		const withAnalog = await run(new FakePort())
+		const golden = await run(null)
+		// Golden (no analog evidence, as before WG10): the classified digital candidate.
+		expect(golden.state).toBe("candidate")
+		expect(golden.result).toMatchObject({
+			protocol: "dmr",
+			confidence: "classified",
+			identity: { colorCode: 1 },
+			metadata: { colorCode: 1 },
+			discoveryId: "d_dmr",
+		})
+		expect(withAnalog.state).toBe(golden.state)
+		const { analog, ...rest } = withAnalog.result!
+		const { analog: none, ...goldenRest } = golden.result!
+		expect(none).toBeUndefined()
+		expect(rest).toEqual(goldenRest)
+		// Analog only as supplementary evidence.
+		expect(analog).toMatchObject({
+			source: "live-audio",
+			modulation: "nfm",
+			ctcssHz: 88.5,
+		})
+		expect(rest.metadata).not.toHaveProperty("ctcssHz")
+		expect(
+			withAnalog.trials.find(t => t.protocol === "analog-fm")?.outcome,
+		).toBe("decoded")
+	})
 
 	it("a digital-only target gets no analog trials", async () => {
 		const h = harness({ request: { protocols: ["dmr"] } })

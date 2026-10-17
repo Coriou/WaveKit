@@ -774,9 +774,11 @@ export class LiveDemodulator extends EventEmitter {
 		squelch: ChannelSquelch,
 		sampleRate: number,
 		measured: () => void,
+		frontMeasured: () => void,
 	): Transform {
 		const blockBytes = Math.max(1, Math.round(sampleRate * 0.01)) * 8
 		let remainder = Buffer.alloc(0)
+		let awaitingFront = false
 		return new Transform({
 			transform(chunk: Buffer, _encoding, callback) {
 				if (chunk === SQUELCH_ALIGNMENT_RESET) {
@@ -784,6 +786,10 @@ export class LiveDemodulator extends EventEmitter {
 					const whole = remainder.length - (remainder.length % 8)
 					if (whole !== remainder.length)
 						remainder = Buffer.from(remainder.subarray(0, whole))
+					// WG10 R1 m1: in stream order (after the old front's last bytes), the gate,
+					// hang and carrier observer start afresh for the new channel.
+					squelch.resetGate()
+					awaitingFront = true
 					callback()
 					return
 				}
@@ -797,6 +803,10 @@ export class LiveDemodulator extends EventEmitter {
 					)
 					offset += blockBytes
 					measured()
+					if (awaitingFront) {
+						awaitingFront = false
+						frontMeasured()
+					}
 					for (const block of output) this.push(block)
 				}
 				remainder = Buffer.from(data.subarray(offset))
@@ -1112,6 +1122,7 @@ export class LiveDemodulator extends EventEmitter {
 				squelch,
 				plan.channelSampleRate,
 				() => this.measureRun(run),
+				() => this.releaseSwapHold(run),
 			),
 			noiseFloorDbfs: null,
 			retuneFloorDbfs: null,
@@ -1294,8 +1305,17 @@ export class LiveDemodulator extends EventEmitter {
 		swap.aligner.pipe(run.squelchStream)
 		this.resetFloorForRetune(run)
 		this.discardFront(old, oldAligner)
-		run.gateHeld = false
+		// WG10 R1 m1: the gate stays held until the squelch has measured the first block of
+		// the new front (releaseSwapHold), so the old channel's open gate or hang never
+		// publishes a transmission on the new offset.
 		this.log.debug("Live demodulation front swapped")
+	}
+
+	/** WG10 R1 m1: the first block of the new front was measured; the gate is live again. */
+	private releaseSwapHold(run: PipelineRun): void {
+		if (this.run !== run || run.stopping || run.swap !== null) return
+		if (!run.gateHeld) return
+		run.gateHeld = false
 		this.publishSquelchChange()
 	}
 

@@ -1189,10 +1189,6 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					tuningTrust: "unverified",
 					settleMode: null,
 				})
-				if (ev.realign === true && this.fmt === "U8_IQ") {
-					// WG10 req 2.9: a mirror over two blocks: drop one byte to swap I and Q back.
-					this.skipBytes += 1
-				}
 				this.warn(
 					"untracked-retune",
 					ev.deltaHz,

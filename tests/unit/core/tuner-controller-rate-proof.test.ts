@@ -293,3 +293,56 @@ describe("Property 7", () => {
 		)
 	})
 })
+
+describe("configure validates every field before the first write (review WG10 R1 m2)", () => {
+	it("an invalid field writes nothing: no rate proof, no frequency, no mode change", async () => {
+		const t = make()
+		await expect(
+			t.controller.configure(
+				"rtl-1",
+				{ frequency: 145_000_000, gain: 9999 },
+				REST,
+			),
+		).rejects.toMatchObject({ name: "TunerValidationError" })
+		await expect(
+			t.controller.configure(
+				"rtl-1",
+				{ sampleRate: 2_400_000, tunerIfGain: { stage: 70_000, gain: 1 } },
+				REST,
+			),
+		).rejects.toMatchObject({ name: "TunerValidationError" })
+		await expect(
+			t.controller.configure(
+				"rtl-1",
+				{ frequency: 145_000_000, sampleRate: 1_000 },
+				REST,
+			),
+		).rejects.toMatchObject({ name: "TunerValidationError" })
+		expect(t.frames).toEqual([])
+		expect(t.controller.getState("rtl-1")!.frequency).toBe(100_000_000)
+
+		t.controller.setControlMode("rtl-1", "external")
+		await expect(
+			t.controller.configure(
+				"rtl-1",
+				{ controlMode: "internal", frequency: 145_000_000, ppm: 9999 },
+				REST,
+			),
+		).rejects.toMatchObject({ name: "TunerValidationError" })
+		expect(t.frames).toEqual([])
+		expect(t.controller.getState("rtl-1")!.controlMode).toBe("external")
+
+		// A valid bulk update still proves the rate, then writes the frequency.
+		t.controller.setControlMode("rtl-1", "internal")
+		await t.controller.configure(
+			"rtl-1",
+			{ frequency: 145_000_000, gain: 200 },
+			REST,
+		)
+		expect(t.frames.map(f => f[0])).toEqual([
+			SET_SAMPLE_RATE,
+			SET_FREQUENCY,
+			0x04,
+		])
+	})
+})

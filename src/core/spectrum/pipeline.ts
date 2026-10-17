@@ -187,8 +187,12 @@ export class SpectrumPipeline {
 	>()
 	/** WG10 req 2.9: blocks finished (monotonic; ages trackInfo closes). */
 	private blocksSeen = 0
-	/** WG10 req 2.9: the previous block's alarm was a U8 mirror (a byte slip needs two in a row). */
-	private mirrorPending = false
+	/**
+	 * WG10 R1 M2: consecutive alarm blocks held while a strong track that would explain them is
+	 * still open (in its hang). Past alarmWaitBlocks the alarm is external-control.
+	 */
+	private alarmWaitedBlocks = 0
+	private readonly alarmWaitBlocks: number
 	private exclusionEdges: number[] = []
 	private rasterEdges: number[] = []
 	private masks: MasksInput = {
@@ -276,6 +280,8 @@ export class SpectrumPipeline {
 		this.maxStaleBlocks = Math.ceil(STALE_MAX_MS / this.blockMs)
 		const hangBlocks = Math.max(1, Math.round(cfg.trackHangMs / this.blockMs))
 		this.hangSamples = hangBlocks * this.blockSamples
+		// The strong track closes one hang after it vanished; its close is visible a block later.
+		this.alarmWaitBlocks = hangBlocks + 2
 		this.fft = new Fft(this.n)
 		this.frames = new FrameSource({
 			format: cfg.format,
@@ -650,6 +656,7 @@ export class SpectrumPipeline {
 		this.resetArtefacts()
 		this.floorReady = false
 		this.prevPersistent = []
+		this.alarmWaitedBlocks = 0
 		this.floor.useKey(ep.absKey)
 		this.applyMasks()
 	}
@@ -915,13 +922,23 @@ export class SpectrumPipeline {
 				toleranceHz: this.binHz,
 				visible: hz => this.visibleRf(hz, ep),
 			})
-			if (alarm) {
-				const suspected = this.classify(ep, segRanges, alarm.deltaHz)
-				if (suspected === "signal-change") {
+			if (!alarm) this.alarmWaitedBlocks = 0
+			else {
+				let suspected = this.classify(ep, segRanges, alarm.deltaHz)
+				if (suspected === "pending") {
+					this.alarmWaitedBlocks++
+					if (this.alarmWaitedBlocks > this.alarmWaitBlocks)
+						suspected = "external-control"
+				}
+				if (suspected !== "pending") this.alarmWaitedBlocks = 0
+				if (suspected === "pending") {
+					// WG10 R1 M2: wait for the strong track's close (positive end evidence); the old
+					// features stay the reference so the next block is judged against them.
+					holdPersistent = true
+				} else if (suspected === "signal-change") {
 					// No new epoch: the ended transmission's features leave the persistent set
 					// (held through this block so its trailing edge does not fire again).
 					holdPersistent = true
-					this.mirrorPending = false
 					const gone = new Set(
 						vanishedFeatures(this.prevPersistent, segRanges, {
 							toleranceHz: this.binHz,
@@ -937,28 +954,14 @@ export class SpectrumPipeline {
 						suspected,
 						newEpoch: false,
 					})
-				} else if (
-					suspected === "iq-byte-slip" &&
-					this.cfg.format === "U8_IQ" &&
-					!this.mirrorPending
-				) {
-					// First mirrored block: keep the old features and look again next block.
-					this.mirrorPending = true
-					holdPersistent = true
 				} else {
-					const realign =
-						suspected === "iq-byte-slip" && this.cfg.format === "U8_IQ"
-					this.mirrorPending = false
-					this.startUntrackedEpoch(
-						ep,
-						blockEnd,
-						alarm.deltaHz,
-						suspected,
-						realign,
-					)
+					// WG10 R1 M1: a suspected byte slip is only a label. A dense-band retune can look
+					// mirrored, and an automatic one-byte re-align on an aligned stream would swap
+					// I/Q for good: every alarm but signal-change is the frozen untracked epoch.
+					this.startUntrackedEpoch(ep, blockEnd, alarm.deltaHz, suspected)
 					return
 				}
-			} else this.mirrorPending = false
+			}
 		}
 
 		const learn = !gap && !overload
@@ -1147,14 +1150,16 @@ export class SpectrumPipeline {
 
 	/**
 	 * WG10 req 2.9: classify a fired alarm. A vanished feature "ended" when it is a strong track
-	 * (open, or closed in the previous block) or a track born within ALARM_CO_BIRTH_S of one
-	 * (its images and intermodulation lines). Features without a track (RF carriers) never count.
+	 * that closed (WG10 R1 M2: an open track is no end evidence) or a track born within
+	 * ALARM_CO_BIRTH_S of one (its images and intermodulation lines). Features without a track
+	 * (RF carriers) never count. `pending`: signal-change once the open strong tracks near the
+	 * vanished features close; the caller waits (bounded) for that close.
 	 */
 	private classify(
 		ep: EpochState,
 		segRanges: SegmentRange[],
 		deltaHz: number | null,
-	): AlarmSuspect {
+	): AlarmSuspect | "pending" {
 		const tol = this.binHz
 		const visible = (hz: number): boolean => this.visibleRf(hz, ep)
 		const vanished = vanishedFeatures(this.prevPersistent, segRanges, {
@@ -1165,37 +1170,46 @@ export class SpectrumPipeline {
 			[...this.trackInfo.values()].filter(
 				t => Math.abs(t.centreHz - f.rfHz) <= Math.max(tol, t.obwHz / 2),
 			)
-		const strong = [...this.trackInfo.values()].filter(
+		const tracks = [...this.trackInfo.values()]
+		const closed = tracks.filter(
+			t => t.maxSnrDb >= ALARM_STRONG_SNR_DB && t.closedBlock !== null,
+		)
+		const open = tracks.filter(
 			t =>
 				t.maxSnrDb >= ALARM_STRONG_SNR_DB &&
-				(t.closedBlock !== null || vanished.some(f => near(f).includes(t))),
+				t.closedBlock === null &&
+				vanished.some(f => near(f).includes(t)),
 		)
 		const coBirth = ALARM_CO_BIRTH_S * this.fs
-		// Co-birth is measured from the strong track's own start, and gives no credit to a strong
-		// track born in the epoch's first ALARM_CO_BIRTH_S (everything opens then) unless it has
-		// already closed (positive end evidence).
+		// Co-birth is measured from the strong track's own start. A closed strong track always
+		// credits its co-born tracks; an open one (only for `pending`) never when it was born in
+		// the epoch's first ALARM_CO_BIRTH_S (everything opens then).
 		const startup = (ep.settledStart ?? 0) + coBirth
-		const credits = (s: (typeof strong)[number]): boolean =>
+		const credits = (s: (typeof tracks)[number]): boolean =>
 			s.closedBlock !== null || s.startSample > startup
-		return classifyAlarm({
-			features: this.prevPersistent,
-			segments: segRanges,
-			centreHz: ep.centreHz,
-			toleranceHz: tol,
-			visible,
-			deltaHz,
-			ended: f =>
-				near(f).some(
-					t =>
-						strong.includes(t) ||
-						strong.some(
-							s =>
-								credits(s) &&
-								t.startSample >= s.startSample - coBirth &&
-								t.startSample <= s.startSample + coBirth,
-						),
-				),
-		})
+		const judge = (strong: typeof tracks): AlarmSuspect =>
+			classifyAlarm({
+				features: this.prevPersistent,
+				segments: segRanges,
+				centreHz: ep.centreHz,
+				toleranceHz: tol,
+				visible,
+				deltaHz,
+				ended: f =>
+					near(f).some(
+						t =>
+							strong.includes(t) ||
+							strong.some(
+								s =>
+									credits(s) &&
+									t.startSample >= s.startSample - coBirth &&
+									t.startSample <= s.startSample + coBirth,
+							),
+					),
+			})
+		const now = judge(closed)
+		if (now !== "external-control" || open.length === 0) return now
+		return judge([...closed, ...open]) === "signal-change" ? "pending" : now
 	}
 
 	/** Long-lived tracks and RF-fixed carriers present in this block (spec § 4.7). */
@@ -1231,7 +1245,6 @@ export class SpectrumPipeline {
 		startSample: number,
 		deltaHz: number | null,
 		suspected: AlarmSuspect,
-		realign: boolean,
 	): void {
 		const epoch = ++this.epochCounter
 		const info = {
@@ -1261,7 +1274,6 @@ export class SpectrumPipeline {
 			startSample,
 			deltaHz,
 			suspected,
-			...(realign ? { realign: true as const } : {}),
 		})
 		this.out.push({
 			kind: "epoch-started",

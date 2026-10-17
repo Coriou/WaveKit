@@ -23,6 +23,30 @@ export const ALARM_FRACTION = 0.6
 /** WG10 req 2.9: signal-change needs this many eligible features still in place (fail closed). */
 export const ALARM_MIN_SURVIVORS = 2
 const MIN_SHIFT_MATCHES = 2
+/**
+ * WG10 R1 M2: a signal-change survivor must still be the same emission: a segment whose centroid
+ * is within max(tolerance, width / 4) of the feature and whose width is within a factor of two
+ * of the feature's (± 2·tolerance for narrow features). A wide new occupancy that merely covers
+ * an old position is no evidence that the old scene is still there.
+ */
+export const SURVIVOR_CENTRE_FRACTION = 0.25
+export const SURVIVOR_WIDTH_RATIO = 2
+
+export function survivorMatches(
+	f: PersistentFeature,
+	segments: readonly SegmentRange[],
+	toleranceHz: number,
+): boolean {
+	const centreTol = Math.max(toleranceHz, SURVIVOR_CENTRE_FRACTION * f.widthHz)
+	return segments.some(s => {
+		const w = s.endHz - s.startHz
+		return (
+			Math.abs(s.centreHz - f.rfHz) <= centreTol &&
+			w <= SURVIVOR_WIDTH_RATIO * f.widthHz + 2 * toleranceHz &&
+			w >= f.widthHz / SURVIVOR_WIDTH_RATIO - 2 * toleranceHz
+		)
+	})
+}
 const EPS = 1e-9
 
 function median(xs: number[]): number {
@@ -108,11 +132,14 @@ export type AlarmSuspect = SpectrumWarningSuspect
  *
  * - `iq-byte-slip`: at least MIN_SHIFT_MATCHES vanished features off the centre, and at least
  *   ALARM_FRACTION of those whose mirror `2·centre − f` is visible, reappear in a segment at the
- *   mirror (an I/Q swap mirrors the spectrum about the centre).
+ *   mirror (an I/Q swap mirrors the spectrum about the centre). A label only: the caller starts
+ *   the same unverified epoch as external-control and never re-aligns the stream (WG10 R1 M1).
  * - `signal-change`: no common shift (Δ null), every vanished feature belongs to a strong
- *   transmission that ended (the caller's `ended`), and eligible features are still
- *   present (at least ALARM_MIN_SURVIVORS: a scene that moved and left one coincidental
- *   match, or vanished entirely, is never explained away: fail closed).
+ *   transmission that ended (the caller's `ended`, which must rest on positive end evidence),
+ *   and eligible features are still present (at least ALARM_MIN_SURVIVORS, and every survivor
+ *   matches a segment of similar width at its old centre (survivorMatches): a scene that moved
+ *   and left coincidental or covering matches, or vanished entirely, is never explained away:
+ *   fail closed).
  * - `external-control` otherwise (the safe answer: a new unverified epoch).
  */
 export function classifyAlarm(input: {
@@ -147,10 +174,13 @@ export function classifyAlarm(input: {
 	)
 		return "iq-byte-slip"
 
+	const gone = new Set(vanished)
+	const survivors = eligible.filter(f => !gone.has(f))
 	if (
 		input.deltaHz === null &&
 		vanished.length > 0 &&
-		eligible.length - vanished.length >= ALARM_MIN_SURVIVORS &&
+		survivors.length >= ALARM_MIN_SURVIVORS &&
+		survivors.every(f => survivorMatches(f, input.segments, tol)) &&
 		vanished.every(f => input.ended(f))
 	)
 		return "signal-change"
