@@ -347,7 +347,8 @@ describe("IqCaptureService capture flow", () => {
 		child.event({ type: "aborted", id: other, reason: "io" })
 		child.event({ type: "error", code: "io", id: other })
 		await flush()
-		expect(s.svc.counters().hostileEvents).toBe(2)
+		// Astra r7 B2: every event naming an id this process was not asked for (3) is hostile.
+		expect(s.svc.counters().hostileEvents).toBe(3)
 		expect(s.svc.counters().tool.oversizeLines).toBe(1)
 		expect(s.svc.counters().tool.invalidLines).toBe(3)
 		// Samples beyond the bound: removed as invalid, the file never queued.
@@ -362,11 +363,11 @@ describe("IqCaptureService capture flow", () => {
 		).toEqual([])
 		expect(s.svc.counters().discarded.invalid).toBe(1)
 		expect(fs.readdirSync(path.join(s.root, "iq-captures"))).toEqual([])
-		// A late repeat for the id Node just removed is expected, not hostile.
+		// A repeat after the tool's final event for the id is hostile too (r7 B2), and ignored.
 		child.event({ type: "captured", id, samples: 1, gapSamples: 0 })
 		await flush()
-		// 2 unknown ids + the out-of-bound count.
-		expect(s.svc.counters().hostileEvents).toBe(3)
+		// 3 foreign ids + the out-of-bound count + the repeat.
+		expect(s.svc.counters().hostileEvents).toBe(5)
 		await s.svc.stop()
 	})
 
@@ -524,7 +525,7 @@ describe("IqCaptureService capture flow", () => {
 		}
 	})
 
-	it("late events for a capture Node already ended are not hostile; unknown ids still are", async () => {
+	it("the tool's late final event for a capture Node already ended is not hostile; a repeat and unknown ids are", async () => {
 		const s = await setup({}, { behaviour: "silent" })
 		const child = await running(s)
 		const got = s.svc.capture(req())
@@ -539,7 +540,8 @@ describe("IqCaptureService capture flow", () => {
 			reason: "io",
 		})
 		await flush()
-		expect(s.svc.counters().hostileEvents).toBe(1)
+		// The repeat (aborted after captured) and the unknown id (r7 B2).
+		expect(s.svc.counters().hostileEvents).toBe(2)
 		expect(s.svc.counters().failed).toBe(1)
 		await s.svc.stop()
 	})
@@ -776,7 +778,7 @@ describe("IqCaptureService Main review 1 (m1, m2, m4, M2)", () => {
 		await s.svc.stop()
 	})
 
-	it("m2: a late `captured` for a forgotten id whose bytes were already released is unlinked", async () => {
+	it("m2 / r7 B2: a `captured` after the tool's final event for the id is hostile and touches nothing", async () => {
 		const s = await setup({}, { behaviour: "silent" })
 		const child = await running(s)
 		const got = s.svc.capture(req())
@@ -787,9 +789,14 @@ describe("IqCaptureService Main review 1 (m1, m2, m4, M2)", () => {
 		expect(s.svc.heldBytes()).toBe(0)
 		const file = path.join(s.root, "iq-captures", `${id}.cf32`)
 		fs.writeFileSync(file, Buffer.alloc(4800 * 8), { mode: 0o600 })
+		const hostile = s.svc.counters().hostileEvents
 		child.event({ type: "captured", id, samples: 4800, gapSamples: 0 })
 		await flush(10)
-		expect(fs.existsSync(file)).toBe(false)
+		// Not this process's own open or abandoned capture any more: ignored (the startup sweep
+		// removes such a leftover); the store and the cap are untouched.
+		expect(fs.existsSync(file)).toBe(true)
+		expect(s.svc.counters().hostileEvents).toBe(hostile + 1)
+		expect(s.svc.heldBytes()).toBe(0)
 		await s.svc.stop()
 	})
 
@@ -1075,5 +1082,115 @@ describe("IqCaptureService canonical storage root (Astra re-review 3, #1)", () =
 		expect(fs.existsSync(victim)).toBe(true)
 		expect(svc.state()).toBe("unavailable")
 		await svc.stop()
+	})
+})
+
+describe("IqCaptureService re-proves the anchored chain before commands and spawns (Astra r7 B1)", () => {
+	it("root swapped for a symlink to the moved root: no capture command is sent, capture off", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const child = await running(s)
+		const moved = `${s.root}-moved`
+		await fsp.rename(s.root, moved)
+		await fsp.symlink(moved, s.root)
+		const got = s.svc.capture(req())
+		const sent = child.commands().filter(c => c["type"] === "capture")
+		const state = s.svc.state()
+		await s.svc.stop()
+		expect(got).toEqual({ refused: "unavailable" })
+		expect(sent).toEqual([])
+		expect(state).toBe("unavailable")
+	})
+
+	it("passes the canonical anchor to the tool", async () => {
+		const s = await setup()
+		const child = await running(s)
+		const args = child.args
+		expect(args[args.indexOf("--anchor") + 1]).toBe(s.root)
+		await s.svc.stop()
+	})
+
+	it("a tool restart after the root was swapped is refused (no spawn)", async () => {
+		const s = await setup()
+		const child = await running(s)
+		const runs = () => s.sp.children.filter(c => c.args[0] === "run").length
+		const moved = `${s.root}-moved`
+		await fsp.rename(s.root, moved)
+		await fsp.symlink(moved, s.root)
+		child.exit(101)
+		await flush()
+		s.timers.advance(1000)
+		const n = runs()
+		await s.svc.stop()
+		expect(n).toBe(1)
+	})
+})
+
+describe("IqCaptureService: a process speaks only for its own captures (Astra r7 B2)", () => {
+	it("a detached source's live tool naming another source's capture touches nothing (hostile)", async () => {
+		const s = await setup({}, { behaviour: "silent" })
+		const childA = await running(s)
+		childA.autoExit = false
+		const engineB = new (s.engine.constructor as new () => typeof s.engine)()
+		s.svc.attachSource("srcB", {
+			sampleRateHz: FS,
+			centerHz: CENTER,
+			epoch: 3,
+			engine: engineB,
+		})
+		await flush()
+		const childB = s.sp.children.filter(c => c.args[0] === "run").at(-1)!
+		expect(childB).not.toBe(childA)
+		engineB.push(FS)
+		const got = s.svc.capture(req({ sourceId: "srcB" }))
+		const idB = "captureId" in got ? got.captureId : ""
+		const fileB = path.join(s.root, "iq-captures", `${idB}.cf32`)
+		fs.writeFileSync(fileB, Buffer.alloc(4800 * 8), { mode: 0o600 })
+		childB.event({ type: "captured", id: idB, samples: 4800, gapSamples: 0 })
+		await flush(10)
+		expect(s.svc.view(idB)).not.toBeNull()
+		const hostile = s.svc.counters().hostileEvents
+		s.svc.detachSource("src")
+		await flush()
+		childA.event({ type: "captured", id: idB, samples: 4800, gapSamples: 0 })
+		childA.event({ type: "aborted", id: idB, reason: "io" })
+		await flush(10)
+		const kept = fs.existsSync(fileB)
+		const view = s.svc.view(idB)
+		const hostileAfter = s.svc.counters().hostileEvents
+		childA.exit(0)
+		await s.svc.stop()
+		expect(kept).toBe(true)
+		expect(view).not.toBeNull()
+		expect(hostileAfter - hostile).toBe(2)
+	})
+})
+
+describe("IqCaptureService removal events (Astra r7 B4)", () => {
+	it("every removal (settle, discard, failure) is announced once with the capture's observation", async () => {
+		const s = await setup()
+		await running(s)
+		const removed: [string, string | null][] = []
+		const off = s.svc.onRemoved((id, observationId) =>
+			removed.push([id, observationId]),
+		)
+		const a = s.svc.capture(req({ observationId: "o_a" }))
+		const b = s.svc.capture(req({ observationId: "o_b", reason: "identify" }))
+		await flush(10)
+		const ida = "captureId" in a ? a.captureId : ""
+		const idb = "captureId" in b ? b.captureId : ""
+		s.svc.claim(ida, "j")
+		s.svc.settle(ida, "j")
+		s.svc.discard(idb, "result")
+		await flush(10)
+		off()
+		const c = s.svc.capture(req({ observationId: "o_c", reason: "identify" }))
+		const idc = "captureId" in c ? c.captureId : ""
+		await flush(10)
+		s.svc.discard(idc, "result")
+		await s.svc.stop()
+		expect(removed).toEqual([
+			[ida, "o_a"],
+			[idb, "o_b"],
+		])
 	})
 })

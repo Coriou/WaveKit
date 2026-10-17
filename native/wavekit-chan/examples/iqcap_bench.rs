@@ -21,6 +21,7 @@ fn bench(fs: u64, captures: usize, bw: f64) -> f64 {
         sample_rate: fs,
         ring_ms: 2000,
         out_dir: dir.clone(),
+        anchor: dir.clone(),
         max_ms: 4000,
         bandwidth_hz: bw,
     })

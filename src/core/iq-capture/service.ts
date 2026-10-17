@@ -160,6 +160,13 @@ export interface IqCaptureService extends IqCapturePort {
 	): void
 	/** A capture finished and was proven; it is queued (returns the unsubscribe). */
 	onFinished(listener: (view: IqCaptureView) => void): () => void
+	/**
+	 * Astra r7 B4: a capture left the store (any reason), announced once with its observation
+	 * (returns the unsubscribe).
+	 */
+	onRemoved(
+		listener: (captureId: string, observationId: string | null) => void,
+	): () => void
 	/** The capture's view while it is ready, else null. */
 	view(captureId: string): IqCaptureView | null
 	/** Holder of a capture (null = queued / unheld); undefined when gone. */
@@ -263,6 +270,12 @@ class Service implements IqCaptureService {
 	 * for the id or its exit.
 	 */
 	private readonly writers = new Map<string, IqToolProcess>()
+	/**
+	 * Astra r7 B2: the capture ids each process was asked for and has not given its final event for
+	 * yet (open or abandoned by Node). At most the captures sent to it and still unanswered; the
+	 * entry goes with the process (exit).
+	 */
+	private readonly issued = new Map<IqToolProcess, Set<string>>()
 	/** Review BLOCKING: the proven directory's identity, re-checked before every file operation. */
 	private dirId: DirIdentity | null = null
 	/** Inode of each proven capture file (checked again before its unlink). */
@@ -537,6 +550,13 @@ class Service implements IqCaptureService {
 		return () => this.events.off("finished", listener)
 	}
 
+	onRemoved(
+		listener: (captureId: string, observationId: string | null) => void,
+	): () => void {
+		this.events.on("removed", listener)
+		return () => this.events.off("removed", listener)
+	}
+
 	view(captureId: string): IqCaptureView | null {
 		const e = this.store?.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
@@ -685,6 +705,8 @@ class Service implements IqCaptureService {
 		const slot = this.slots.get(req.sourceId)
 		const proc = slot?.proc
 		if (!slot || slot.givenUp || !proc?.ready) return this.refuse("unavailable")
+		// Astra r7 B1: the whole anchored chain, root and directory re-proven before any command.
+		if (!this.dirOk()) return this.refuse("unavailable")
 		const fs_ = slot.sampleRateHz
 		const offsetHz = req.rfHz - slot.centerHz
 		if (Math.abs(offsetHz) > fs_ / 2 - this.bandwidthHz / 2)
@@ -718,6 +740,14 @@ class Service implements IqCaptureService {
 		if (holder !== null) store.reserve(captureId, holder)
 		const maxMs = Math.min(IQ_CAPTURE_MAX_MS, this.cfg.maxCaptureMs)
 		slot.ids.add(captureId)
+		// Registered before the command: the tool may answer at once.
+		this.writers.set(captureId, proc)
+		let own = this.issued.get(proc)
+		if (!own) {
+			own = new Set()
+			this.issued.set(proc, own)
+		}
+		own.add(captureId)
 		const sent = proc.send({
 			type: "capture",
 			id: captureId,
@@ -727,10 +757,12 @@ class Service implements IqCaptureService {
 		})
 		if (!sent) {
 			slot.ids.delete(captureId)
+			own.delete(captureId)
+			this.writers.delete(captureId)
 			store.fail(captureId)
 			return this.refuse("unavailable")
 		}
-		this.writers.set(captureId, proc)
+
 		this.captureTimers.set(
 			captureId,
 			this.timers.setTimeout(() => {
@@ -911,11 +943,15 @@ class Service implements IqCaptureService {
 		const cfg = this.cfg
 		if (!cfg || this.st !== "on" || !this.dir || slot.givenUp) return
 		if (this.slots.get(slot.sourceId) !== slot) return
+		const anchor = this.anchor
+		// Astra r7 B1: no tool starts on a directory that is not the proven one.
+		if (!anchor || !this.dirOk()) return
 		const proc = new IqToolProcess({
 			binaryPath: cfg.binaryPath,
 			sampleRateHz: slot.sampleRateHz,
 			ringMs: IQ_CAPTURE_PREROLL_MAX_MS,
 			outDir: this.dir,
+			anchor,
 			maxMs: Math.min(IQ_CAPTURE_MAX_MS, cfg.maxCaptureMs),
 			bandwidthHz: this.bandwidthHz,
 			spawn: this.spawn,
@@ -927,6 +963,16 @@ class Service implements IqCaptureService {
 			// Per process, whatever the slot holds now: the end of this process's own captures.
 			if (ev.type !== "ready" && ev.id !== undefined) {
 				const id = ev.id
+				// Astra r7 B2: a process speaks only for the captures it was asked for. Any other id
+				// (another process's, a duplicate after its final event) is hostile: ignored, nothing
+				// in the store or on disk is touched.
+				const own = this.issued.get(proc)
+				if (!own?.has(id)) {
+					this.store?.countHostile()
+					return
+				}
+				// captured / aborted / error naming the id: the tool's final word on it.
+				own.delete(id)
 				if (this.writers.get(id) === proc) this.writers.delete(id)
 				const z = this.zombies.get(id)
 				if (z && z.proc === proc) {
@@ -934,8 +980,8 @@ class Service implements IqCaptureService {
 					this.reap(id)
 					return
 				}
-				if (slot.proc !== proc) {
-					// A late file of a replaced process is never kept (review m2, MAJOR d).
+				if (slot.proc !== proc || !this.store?.get(id)) {
+					// This process's own capture, abandoned by Node: a late file is never kept.
 					if (ev.type === "captured") this.unlinkFiles(id, false)
 					return
 				}
@@ -954,6 +1000,7 @@ class Service implements IqCaptureService {
 		proc.once("exit", () => {
 			for (const [id, w] of [...this.writers])
 				if (w === proc) this.writers.delete(id)
+			this.issued.delete(proc)
 			for (const [id, z] of [...this.zombies])
 				if (z.proc === proc) this.reap(id)
 		})
@@ -1267,6 +1314,18 @@ class Service implements IqCaptureService {
 		entry: IqCaptureEntry,
 		_reason: IqCaptureDiscardReason | "failed",
 	): void {
+		for (const listener of this.events.listeners("removed")) {
+			try {
+				;(
+					listener as (captureId: string, observationId: string | null) => void
+				)(entry.captureId, entry.observationId)
+			} catch (err: unknown) {
+				this.log.warn(
+					{ err: safeErrorFields(err) },
+					"IQ capture listener failed",
+				)
+			}
+		}
 		for (const slot of this.slots.values()) slot.ids.delete(entry.captureId)
 		const writer = this.writers.get(entry.captureId) ?? null
 		this.writers.delete(entry.captureId)

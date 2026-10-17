@@ -95,6 +95,7 @@ fn engine_bytes(fs: u64, input: &[u8], pre: usize, cuts: &[usize]) -> Vec<u8> {
             sample_rate: fs,
             ring_ms: 50,
             out_dir: dir.clone(),
+            anchor: dir.clone(),
             max_ms: 4000,
             bandwidth_hz: BW,
         },

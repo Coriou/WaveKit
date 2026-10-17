@@ -24,7 +24,7 @@ use std::thread;
 
 pub const VERSION_LINE: &str = concat!("wavekit-iqcap ", env!("CARGO_PKG_VERSION"));
 
-const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> | replay --in <abs file> --bandwidth <hz> --transition <hz>";
+const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> --anchor <abs dir above out-dir> | replay --in <abs file> --bandwidth <hz> --transition <hz>";
 
 /// Process entry; returns the exit code.
 pub fn main_entry(argv: &[String]) -> i32 {
@@ -87,7 +87,14 @@ fn hz(s: &str, name: &str) -> Result<f64, String> {
 pub fn parse_run(args: &[String]) -> Result<Config, String> {
     let v = flags(
         args,
-        &["sample-rate", "ring-ms", "out-dir", "max-ms", "bandwidth"],
+        &[
+            "sample-rate",
+            "ring-ms",
+            "out-dir",
+            "max-ms",
+            "bandwidth",
+            "anchor",
+        ],
     )?;
     Ok(Config {
         sample_rate: num(v[0], "sample-rate")?,
@@ -95,6 +102,7 @@ pub fn parse_run(args: &[String]) -> Result<Config, String> {
         out_dir: PathBuf::from(v[2]),
         max_ms: num(v[3], "max-ms")?,
         bandwidth_hz: hz(v[4], "bandwidth")?,
+        anchor: PathBuf::from(v[5]),
     })
 }
 

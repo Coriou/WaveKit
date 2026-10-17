@@ -17,6 +17,7 @@ function make(drainStdin = true) {
 		sampleRateHz: 2_048_000,
 		ringMs: 2000,
 		outDir: "/state/iq-captures",
+		anchor: "/state",
 		maxMs: 4000,
 		bandwidthHz: 12_500,
 		spawn: sp.spawn,
@@ -52,6 +53,8 @@ describe("IqToolProcess", () => {
 			"4000",
 			"--bandwidth",
 			"12500",
+			"--anchor",
+			"/state",
 		])
 		expect(opts?.stdio).toEqual(["pipe", "pipe", "pipe", "pipe"])
 		expect(opts?.detached).toBe(process.platform !== "win32")
@@ -159,6 +162,7 @@ describe("IqToolProcess", () => {
 			sampleRateHz: 1,
 			ringMs: 1,
 			outDir: "/x",
+			anchor: "/",
 			maxMs: 500,
 			bandwidthHz: 1,
 			spawn: sp.spawn,

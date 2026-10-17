@@ -28,11 +28,18 @@ impl TempDir {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(p.join("out")).unwrap();
+        std::fs::create_dir_all(p.join("root").join("out")).unwrap();
         TempDir(p)
     }
+    /// The anchor (canonical, real) of the chain anchor → root → out.
+    fn anchor(&self) -> PathBuf {
+        self.0.clone()
+    }
+    fn root(&self) -> PathBuf {
+        self.0.join("root")
+    }
     fn out(&self) -> PathBuf {
-        self.0.join("out")
+        self.root().join("out")
     }
 }
 impl Drop for TempDir {
@@ -65,6 +72,8 @@ impl Proc {
             .args(["run", "--sample-rate", &FS.to_string(), "--ring-ms", "500"])
             .arg("--out-dir")
             .arg(dir.out())
+            .arg("--anchor")
+            .arg(dir.anchor())
             .args(["--max-ms", &max_ms.to_string(), "--bandwidth", "25000"])
             .env("WK_CTL", &fifo)
             .stdin(Stdio::piped())
@@ -473,7 +482,7 @@ fn swap_out_dir(p: &Proc, id: &str) -> PathBuf {
     let foreign = p.dir.0.join("foreign");
     std::fs::create_dir_all(&foreign).unwrap();
     std::fs::write(foreign.join(format!("{id}.cf32.tmp")), b"sentinel").unwrap();
-    std::fs::rename(p.dir.out(), p.dir.0.join("out.old")).unwrap();
+    std::fs::rename(p.dir.out(), p.dir.root().join("out.old")).unwrap();
     std::os::unix::fs::symlink(&foreign, p.dir.out()).unwrap();
     foreign
 }
@@ -534,4 +543,67 @@ fn swapped_out_dir_completion_publishes_nothing_there() {
         b"sentinel"
     );
     assert!(!foreign.join(format!("{ID1}.cf32")).exists());
+}
+
+/// Astra r7 B1: the canonical root is renamed away and replaced by a symlink to the moved
+/// directory. The out-dir's own inode is unchanged (it moved with the root), so only the full
+/// chain from the anchor shows the swap. The tool must create, link and remove nothing there.
+fn swap_root_for_link(p: &Proc) -> PathBuf {
+    let moved = PathBuf::from(format!("{}-moved", p.dir.0.display()));
+    let _ = std::fs::remove_dir_all(&moved);
+    std::fs::rename(p.dir.root(), &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, p.dir.root()).unwrap();
+    moved
+}
+
+fn files_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .map(|r| {
+            r.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+#[test]
+fn root_swapped_for_a_link_refuses_a_new_capture() {
+    let mut p = Proc::spawn(1000);
+    p.feed(1000);
+    let moved = swap_root_for_link(&p);
+    p.capture(ID1, 0, 1000);
+    let e = p.next();
+    assert_eq!(
+        (e["type"].as_str(), e["code"].as_str()),
+        (Some("error"), Some("io")),
+        "{e}"
+    );
+    let left = files_in(&moved.join("out"));
+    let _ = std::fs::remove_dir_all(&moved);
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn root_swapped_for_a_link_publishes_nothing_at_completion() {
+    let mut p = Proc::spawn(1000);
+    p.feed(1000);
+    p.capture(ID1, 0, 1000);
+    p.sync();
+    let moved = swap_root_for_link(&p);
+    p.send(&format!(r#"{{"type":"end","id":"{ID1}"}}"#));
+    let e = p.next();
+    let left = files_in(&moved.join("out"));
+    let tmp_len = std::fs::metadata(moved.join("out").join(format!("{ID1}.cf32.tmp")))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let _ = std::fs::remove_dir_all(&moved);
+    assert_eq!(
+        (e["type"].as_str(), e["reason"].as_str()),
+        (Some("aborted"), Some("io")),
+        "{e}"
+    );
+    // Not published, and no captured byte left behind outside (the tmp was truncated via its handle).
+    assert!(!left.iter().any(|f| f.ends_with(".cf32")), "{left:?}");
+    assert_eq!(tmp_len, 0);
 }

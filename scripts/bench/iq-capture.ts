@@ -120,6 +120,7 @@ async function tapFeed(): Promise<void> {
 		sampleRateHz: FS,
 		ringMs: 2000,
 		outDir: dir,
+		anchor: dir,
 		maxMs: 4000,
 		bandwidthHz: 12_500,
 		spawn: spawnFn ?? (spawn as SpawnFn),

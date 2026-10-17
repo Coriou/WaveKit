@@ -56,6 +56,8 @@ export interface IqToolProcessOptions {
 	sampleRateHz: number
 	ringMs: number
 	outDir: string
+	/** The canonical anchor above outDir (the tool proves the whole chain from it, Astra r7 B1). */
+	anchor: string
 	maxMs: number
 	bandwidthHz: number
 	spawn: SpawnFn
@@ -86,6 +88,8 @@ export function buildRunArgs(o: IqToolProcessOptions): string[] {
 		String(o.maxMs),
 		"--bandwidth",
 		String(o.bandwidthHz),
+		"--anchor",
+		o.anchor,
 	]
 }
 

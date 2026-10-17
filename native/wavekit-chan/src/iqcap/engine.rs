@@ -25,6 +25,9 @@ pub struct Config {
     pub sample_rate: u64,
     pub ring_ms: u64,
     pub out_dir: PathBuf,
+    /// The canonical anchor: out-dir is below it, and every component from it down to out-dir
+    /// (inclusive) is a real directory whose dev/ino is recorded at start (Astra r7 B1).
+    pub anchor: PathBuf,
     pub max_ms: u64,
     pub bandwidth_hz: f64,
 }
@@ -98,11 +101,55 @@ struct FsId {
     ino: u64,
 }
 
-/// Astra BLOCKING: `path` must still be the out-dir proven at start: a real directory (no link),
-/// same device and inode.
+/// Astra BLOCKING: `path` must still be the directory proven at start: a real directory (no
+/// link), same device and inode.
 fn dir_still(path: &Path, id: FsId) -> bool {
     matches!(std::fs::symlink_metadata(path), Ok(m)
         if m.file_type().is_dir() && m.dev() == id.dev && m.ino() == id.ino)
+}
+
+/// The proven chain from the anchor down to the out-dir: each component's path and identity.
+type DirChain = Vec<(PathBuf, FsId)>;
+
+/// Astra r7 B1: records every component from `anchor` (inclusive) to `out_dir` (inclusive); each
+/// must be a real directory (symlink_metadata, never followed). Out-dir must lie below the anchor.
+fn record_chain(anchor: &Path, out_dir: &Path) -> Result<DirChain, String> {
+    let rel = out_dir
+        .strip_prefix(anchor)
+        .map_err(|_| "out-dir must be below the anchor".to_string())?;
+    let mut cur = anchor.to_path_buf();
+    let mut chain = Vec::new();
+    let mut push = |p: &Path| -> Result<(), String> {
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if m.file_type().is_dir() => {
+                chain.push((
+                    p.to_path_buf(),
+                    FsId {
+                        dev: m.dev(),
+                        ino: m.ino(),
+                    },
+                ));
+                Ok(())
+            }
+            _ => Err("out-dir chain must be real directories (no symlink)".into()),
+        }
+    };
+    push(&cur)?;
+    for part in rel.components() {
+        match part {
+            std::path::Component::Normal(name) => cur.push(name),
+            _ => return Err("out-dir must be a plain path below the anchor".into()),
+        }
+        push(&cur)?;
+    }
+    Ok(chain)
+}
+
+/// Re-walks the recorded chain right before a filesystem operation: every component still a real
+/// directory with its recorded dev/ino. (Residual: a swap between this walk and the following
+/// syscall cannot be excluded without descriptor-relative calls, i.e. libc; the walk is sync.)
+fn chain_still(chain: &DirChain) -> bool {
+    !chain.is_empty() && chain.iter().all(|(p, id)| dir_still(p, *id))
 }
 
 /// `path` must be the very file we hold: a regular file (no link) with the handle's dev/ino.
@@ -113,8 +160,8 @@ fn file_still(path: &Path, id: FsId) -> bool {
 
 struct Capture {
     id: String,
-    /// The out-dir's and the tmp file's identity: every remove/link re-proves both first.
-    dir_id: FsId,
+    /// The anchor → out-dir chain and the tmp file's identity: every remove/link re-proves both.
+    chain: DirChain,
     file_id: FsId,
     offset_hz: f64,
     dsp: CaptureDsp,
@@ -160,10 +207,7 @@ impl Capture {
 
     /// The out-dir and `<id>.cf32.tmp` are still the proven directory and our own file.
     fn proven(&self) -> bool {
-        self.tmp
-            .parent()
-            .is_some_and(|dir| dir_still(dir, self.dir_id))
-            && file_still(&self.tmp, self.file_id)
+        chain_still(&self.chain) && file_still(&self.tmp, self.file_id)
     }
 
     /// Astra BLOCKING: drops the capture. The data goes through our own handle first (truncated,
@@ -211,8 +255,8 @@ pub struct Engine {
     carry: Option<u8>,
     caps: Vec<Capture>,
     used: HashSet<String>,
-    /// The out-dir's identity at start (Astra BLOCKING).
-    dir_id: FsId,
+    /// The anchor → out-dir chain proven at start (Astra BLOCKING, r7 B1).
+    chain: DirChain,
 }
 
 /// Whether the process keeps running after a control line.
@@ -249,13 +293,10 @@ impl Engine {
         if !cfg.out_dir.is_absolute() {
             return Err("out-dir must be absolute".into());
         }
-        let dir_id = match std::fs::symlink_metadata(&cfg.out_dir) {
-            Ok(m) if m.file_type().is_dir() => FsId {
-                dev: m.dev(),
-                ino: m.ino(),
-            },
-            _ => return Err("out-dir must be an existing directory (not a symlink)".into()),
-        };
+        if !cfg.anchor.is_absolute() {
+            return Err("anchor must be absolute".into());
+        }
+        let chain = record_chain(&cfg.anchor, &cfg.out_dir)?;
         let ring_samples = (cfg.sample_rate * cfg.ring_ms).div_ceil(1000) as usize;
         Ok(Engine {
             ring: Ring::new(ring_samples),
@@ -265,7 +306,7 @@ impl Engine {
             carry: None,
             caps: Vec::new(),
             used: HashSet::new(),
-            dir_id,
+            chain,
         })
     }
 
@@ -445,7 +486,7 @@ impl Engine {
         {
             return Err("out-of-range");
         }
-        if !dir_still(&self.cfg.out_dir, self.dir_id) {
+        if !chain_still(&self.chain) {
             return Err("io");
         }
         let tmp = self.cfg.out_dir.join(format!("{id}.cf32.tmp"));
@@ -471,7 +512,7 @@ impl Engine {
             Err(_) => return Err("io"),
         };
         // Created in the proven directory (a swap between the check and the open shows here).
-        if !dir_still(&self.cfg.out_dir, self.dir_id) || !file_still(&tmp, file_id) {
+        if !chain_still(&self.chain) || !file_still(&tmp, file_id) {
             let _ = file.set_len(0);
             return Err("io");
         }
@@ -481,7 +522,7 @@ impl Engine {
         let max_out = (max_ms * CAPTURE_RATE_HZ / 1000).min(MAX_FILE_BYTES / 8);
         let mut c = Capture {
             id: id.to_owned(),
-            dir_id: self.dir_id,
+            chain: self.chain.clone(),
             file_id,
             offset_hz,
             dsp: CaptureDsp::new(&self.design, offset_hz),
