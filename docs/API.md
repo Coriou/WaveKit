@@ -2976,7 +2976,14 @@ curl -X PATCH http://localhost:9000/api/scanner/discoveries/d_01JA2T7B9S0KQ4M3XZ
 #### DELETE /api/scanner/discoveries/:id
 
 Deletes the discovery with its evidence and recordings (`scanner:discovery`
-`change: "deleted"`). **204**; 404 `SCANNER_NOT_FOUND`.
+`change: "deleted"`). **204**; 404 `SCANNER_NOT_FOUND`; 409
+`SCANNER_DISCOVERY_HOLDS_KEPT_RECORDINGS` (WG9) when one of its recordings is kept
+(see [Recordings](#recordings)): nothing changes; unkeep first. The check runs
+before any change and again before each recording file is unlinked: if a Keep
+commits while the delete runs, the discovery is already gone but the kept file and
+its folder stay (files removed before it stay removed) and the request answers
+409. Inactive pruning and capacity eviction skip a discovery that holds a kept
+recording.
 
 Success waits for accepted evidence writes and recording moves to drain and
 for the discovery's evidence/recording folders to be removed. Live and recent
@@ -3293,7 +3300,9 @@ curl http://localhost:9000/api/spectrum
 `profiles[].key` carries the `:a<n>` suffix for an averaged profile.
 `SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
 (`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
-floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
+floor, `k` per range, `settleMode`, `tuningTrust` (WG9: `unverified` while an
+operator retune's frames are still `unverified`, until the first block at or past
+the network settle), `warnings`
 (`untracked-retune` | `host-centre-mismatch`, with `deltaHz`), the summary
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile) and `lastError?`.
@@ -3621,7 +3630,7 @@ area with no path, such as `digital-voice-wav` without a recording dsd-fme, repo
 | `scanner-evidence`  | `automatic` | Scanner evidence (`scanner.storage.dir`, default `<stateDir>/scanner`), minus any dsd-fme WAV directory inside it | `scanner.storage.maxRecordingsMb`        |
 | `digital-voice-wav` | `other`     | Per-call WAV directories of the dsd-fme decoders that record                                                      | null                                     |
 | `bandplans`         | `state`     | Band-plan state                                                                                                   | null                                     |
-| `operator-data`     | `state`     | Operator data                                                                                                     | null                                     |
+| `operator-data`     | `state`     | Operator data and the recording keep store (`recording-keeps.json`)                                               | null                                     |
 | `access`            | `state`     | Private access state (protected mode only)                                                                        | null                                     |
 | `decoder-overrides` | `state`     | Decoder band overrides and decoder settings (`decoder-settings.json`)                                             | null                                     |
 | `station`           | `state`     | The station UI layer (`station.json`)                                                                             | null                                     |
@@ -3655,8 +3664,8 @@ bytes, 0 files and the same reason. The first reason wins. A permission error is
 path is `exists: false` and not partial. A partial area's `bytes` and `files` are
 lower bounds.
 
-`kept` is always null: recordings protected by Keep are scanner-internal and not
-reported yet. `lowSpace` describes the only automatic low-space behaviour:
+`kept` is always null: kept bytes (recording Keep, WG9) are not reported here
+yet. `lowSpace` describes the only automatic low-space behaviour:
 `policy` is `scanner-evidence-stops-writing` (scanner evidence stops writing when
 the available space is below `scanner.storage.minFreeDiskMb`), `minFreeBytes` is
 that threshold in bytes (null without a scanner) and `state` is `low` when
@@ -3716,8 +3725,9 @@ dsd-fme decoders that record, and the scanner recordings
 none when no scanner runs). DTOs in `packages/api-types/src/recordings.ts`.
 While `RECORDINGS_REQUIRES_ACCESS` is true both routes exist only in protected
 mode; nothing is mounted in legacy mode (404). The inventory never writes,
-renames, deletes or trims a file. Keep, delete and trim belong to the
-recording catalog, which stays gated.
+renames, deletes or trims a file. Keep, unkeep and delete (WG9,
+[spec](specs/web-gaps-9/requirements.md)) are described below; trim and export
+belong to the recording catalog, which stays gated.
 
 #### GET /api/recordings
 
@@ -3755,6 +3765,9 @@ keys, `limit=10abc` or a malformed cursor answer 400
 
 - Order: newest `modifiedAt` first, ties by id; follow `nextCursor` (null on
   the last page). Each item appears exactly once across pages.
+- `kept` (WG9, optional in `@wavekit/api-types`; older cores omit it): true when
+  the recording is kept, a delete of it is in progress, or the keep store is not
+  usable (fail closed); read at list time.
 - `id` is opaque and never a path: `dsd:<n>~<basename>` (n = the position of
   the recording directory in the inventory's source list, dsd-fme decoders
   sorted by id) or `scan:<recordingId>`. A configuration change can renumber
@@ -3791,6 +3804,67 @@ unknown, malformed or no longer eligible id is 404 `RECORDING_NOT_FOUND`.
 Errors: `{ error, code, message }` with `RECORDINGS_QUERY_INVALID` (400),
 `RECORDING_NOT_FOUND` (404) or `RECORDINGS_UNAVAILABLE` (503). Error bodies and
 log lines name no path, file name, directory or decoder option.
+
+#### PUT and DELETE /api/recordings/:id/keep, DELETE /api/recordings/:id
+
+Keep protects one recording from every WaveKit deletion owner (the dsd-fme call
+pruner, scanner evidence retention, discovery removal and analog retention)
+until it is unkept. `PUT` keeps, `DELETE` on `/keep` unkeeps; both are
+idempotent and answer 200 `{ "id", "kept", "changed" }` (`changed: false` when it
+already was so). `DELETE /api/recordings/:id` removes a dsd-fme call recording:
+200 `{ "id", "deleted": true }`. Scanner recordings can be kept and unkept but
+not deleted here (409 `RECORDING_DELETE_UNSUPPORTED`). Unkeeping is allowed after
+the file is gone.
+
+Protected mode only: the routes are mounted with the inventory while
+`RECORDING_KEEPS_REQUIRES_ACCESS` is true and the access controller is present
+(legacy: 404). They take the same mutation admission as the other protected
+operator writes (cookie and CSRF, or the machine credential), checked before the
+body is read; a body is ignored and at most 1 KiB (413). `Cache-Control:
+no-store`.
+
+Keys are never paths: a dsd-fme call is kept by its call name (in every dsd-fme
+directory), a scanner recording by its recording id. Keep re-opens and verifies
+the file through the inventory and protects it before that check, so a pruner
+running at the same moment never removes it. Delete renames the verified file
+into a private `0700` directory next to it, checks it is still the same file,
+then unlinks it; a file that changed answers 404. A recording directory that
+other users may write (group or other write without the sticky bit) refuses
+delete with 500 `RECORDING_DELETE_FAILED`. A crash between the rename and the
+unlink leaves a `.wavekit-delete-*` directory that is neither listed nor swept.
+
+The keep store is `<stateDir>/recording-keeps.json` (`RECORDING_KEEPS_FILE_NAME`,
+counted in the `operator-data` storage area): written to a temporary file,
+synced, renamed and the directory synced. It opens before any decoder in both
+access modes, so a keep made in protected mode also protects in legacy mode.
+Bounds: 2 000 entries, 512 MiB of kept bytes (the default dsd-fme call cap, each
+file counted at its size when kept) and a 1 MiB file; past an entry or byte bound
+Keep answers 409 `RECORDING_KEEP_LIMIT`. Kept dsd-fme bytes still count toward the
+pruner's size cap. A missing file is an empty store. An unreadable, malformed or
+over-bound file is left in place and the store is `failed`: every recording
+counts as kept, nothing is pruned or deleted, and Keep, unkeep and delete answer
+503 `RECORDING_KEEPS_UNAVAILABLE` until the file is fixed and the core restarts.
+While the store loads every answer is "kept" too.
+
+| Code                           | Status | When                                                      |
+| ------------------------------ | ------ | --------------------------------------------------------- |
+| `RECORDING_NOT_FOUND`          | 404    | Unknown, malformed or no longer eligible id; file changed |
+| `RECORDING_KEPT`               | 409    | Delete of a kept recording (unkeep first)                 |
+| `RECORDING_BUSY`               | 409    | A Keep and a delete of the same recording overlapped      |
+| `RECORDING_KEEP_LIMIT`         | 409    | Keep would pass 2 000 entries or 512 MiB                  |
+| `RECORDING_DELETE_UNSUPPORTED` | 409    | Delete of a scanner recording                             |
+| `RECORDING_KEEP_FAILED`        | 500    | Keep or unkeep failed otherwise (fixed text per action)   |
+| `RECORDING_DELETE_FAILED`      | 500    | Delete failed otherwise, or a shared writable directory   |
+| `RECORDING_KEEPS_UNAVAILABLE`  | 503    | The keep store is loading, failed or cannot be written    |
+
+Bodies are `{ error, code, message }` with fixed text; no path, file name or
+submitted value. Statuses are pinned in `RECORDING_ERROR_STATUS`.
+
+```bash
+# <id> URL-encoded, as listed by GET /api/recordings
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  http://localhost:9000/api/recordings/<id>/keep
+```
 
 ## Activity
 
@@ -5463,7 +5537,11 @@ One frame per source and profile:
   (blocks still at the old centre are discarded for at most 150 ms) instead of
   `scanner.sweep.settleMs.network`, and frames published before the network settle
   (1000 ms by default) has elapsed since the command are `unverified`. Scanner
-  hops are unchanged. `masks` are RF ranges: the DC spike (`dcHz ± dcGuardHz`) and
+  hops keep their own settle and take the same strict rule: a hop also commands
+  the sample rate when it is only declared or was not written on the current
+  connection (the job's rate, else the declared one), so a normal sweep stays
+  `commanded`; an unknown rate without a job rate leaves the hop `unverified`.
+  `masks` are RF ranges: the DC spike (`dcHz ± dcGuardHz`) and
   every masked spur line.
 - `snapshot: true` marks the current-state frame sent right after an ack (the
   latest block of the current epoch at the client's profile; none while a

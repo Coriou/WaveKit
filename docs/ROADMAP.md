@@ -671,9 +671,25 @@ recording Keep protects one recording independently.
       opaque ids, time, talkgroup, duration and size (frequency only when
       known), and `GET /api/recordings/:id/file` downloads the whole file (no
       `Range`). WaveKit changes no file; the catalog below stays open.
-- [ ] Keep/star individual recordings across clients; un-keeping restores normal
-      retention. Define disk reserve/low-space behavior and coordinate the
-      digital WAV pruner with scanner/catalog retention before enabling this.
+- [x] Keep individual recordings (WG9, protected mode only): `PUT`/`DELETE
+      /api/recordings/:id/keep` and `DELETE /api/recordings/:id` for dsd-fme
+      calls, behind one synchronous deletion decision that the dsd-fme pruner,
+      scanner retention, discovery removal and analog retention consult (fail
+      closed: an unusable keep store protects everything). Inventory items carry
+      `kept`. Bounds 2 000 entries and 512 MiB kept.
+- [ ] Recording follow-ups from WG9: delete scanner recordings (409
+      `RECORDING_DELETE_UNSUPPORTED` today); discovery merge and capacity eviction
+      can leave orphan recording folders; a crash between delete's rename and
+      unlink leaves a `.wavekit-delete-*` directory that nothing sweeps (it may hold
+      a displaced foreign file); a failed keep store stops all recording pruning,
+      so the disk can fill until it is fixed; with Keep wired, a symlinked dsd-fme
+      or scanner recording directory is not pruned (logged count). Accepted
+      residual: Node has no `unlinkat`/`fstatat`, so a process of the same user that
+      rebinds the private delete directory, or a retention folder, between the last
+      identity check and the unlink can redirect that unlink; another user is
+      refused by the shared-writable-directory check, and the same user could
+      delete the file directly anyway. Disk reserve and low-space behaviour, and
+      catalog ids, leases and the generation-fenced scanner handshake, stay open.
 - [ ] Support manual recording with name/note and non-destructive in/out trim;
       apply trim to playback and exported downloads.
 - [ ] Capture the viewed IQ span and export SigMF; play captures as a source for
@@ -882,6 +898,17 @@ and measured limits belong to that session's delta/review.
   Implementation waits for reviewed Task 37a contracts/summary measurements and
   the 35a/38 shared-file window; sustained zoom workload measurements then choose
   FFT, memory, rate and DSP-profile limits.
+  WG9 measured the sustained zoom workload on the Mac (`scripts/bench/zoom-workload.ts`,
+  2.048 Msps, 128 kHz span, 60 s cells, a loaded machine, so indicative only): the
+  event-loop rule (+2 ms p99), not CPU, is the binding limit while the zoom FFT runs
+  on the main thread. One transform takes about 2.3 ms at N 32 768, 7 ms at 65 536
+  and 18 ms at 131 072, so above about N 16 384 almost any main-thread placement
+  fails; incremental CPU alone would allow N 65 536 at 5/s with 1-2 slices (0.015 to
+  0.058 core). Decision: the zoom transform belongs in a worker (the spectrum worker
+  or its own). Proposed Mac caps in a worker: N ≤ 65 536 (31.25 Hz bins), at most
+  5 transforms a second, at most 2 slices per source, 0.20 core in total; N 131 072
+  and above fail CPU or memory. Until the Pi run (pending), the Pi proposal is
+  N ≤ 32 768, 5/s, 1 slice per source and 2 in total, in a worker; Pi 3 N ≤ 16 384.
 - [ ] Measure coalesced REST drag-to-tune and accepted-state latency; then decide
   WS tuning. Any transport reuses authorization, ordering, scanner preemption
   and tuner origin semantics. WG9 measured the operator retune to first frame at

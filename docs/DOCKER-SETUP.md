@@ -413,6 +413,18 @@ loopback upstream. Each site sets `Host` from the incoming host and port
 The core image is the existing `final-core` build (`WAVEKIT_APP_IMAGE`,
 default `wavekit:local-core`). The sidecar image is `caddy:2`.
 
+A web app can run on its own port of the same hostname (WG9). The Caddyfile has
+a commented `https://<host>:9446` site that serves a built web app as static
+files, and `protected-runtime.yaml` has the matching commented
+`https://receiver.example:9446` entry under `access.allowedOrigins`. To use it,
+uncomment both, publish `9446` on `wavekit-protected` and mount the built app
+at the site's root. The web app calls the API origin (`9443`) directly with
+credentials, so the site needs no proxy to the API. The scheme and hostname must
+match the API origin: the session cookie is host-only and `SameSite=Strict`, so
+another hostname or site is unsupported, and the configuration check refuses
+it. The pairing flow and the CORS rules are in
+[API.md](API.md#browser-pairing-for-a-web-origin-wg9).
+
 Behind this proxy, per-address limits collapse to one shared loopback bucket.
 Caddy dials `127.0.0.1` in the shared network namespace, and the core ignores
 forwarded headers, so every LAN client shares that bucket.

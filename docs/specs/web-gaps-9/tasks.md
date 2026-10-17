@@ -26,11 +26,11 @@ band-plan files or `docs/CLI-COORDINATION.md`. Every lane runs its touched tests
 
 ## Lane RK: recording Keep and deletion
 
-- [ ] RK.1 Keep store, protection coordinator and keep service; inventory `kept` and
+- [x] RK.1 Keep store, protection coordinator and keep service; inventory `kept` and
       `invalidate()`.
   - _Requirements: 2.2–2.4, 2.7, 2.10_
   - **Property 3: Keep store round trip and fail closed**, **Property 5: Keys are never paths**
-- [ ] RK.2 Keep, unkeep and delete routes; dsd-fme pruner hook; exact diffs and tests for the
+- [x] RK.2 Keep, unkeep and delete routes; dsd-fme pruner hook; exact diffs and tests for the
       scanner-side deleters (Main applies them).
   - _Requirements: 2.1, 2.5, 2.6, 2.8, 2.9, 2.11_
   - **Property 4: No owner deletes a kept file**
