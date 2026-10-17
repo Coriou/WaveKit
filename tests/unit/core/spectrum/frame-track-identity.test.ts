@@ -56,6 +56,8 @@ async function run(
 
 const trackedIds = (summaries: readonly BlockSummary[]) =>
 	new Set(summaries.flatMap(s => s.tracks.flatMap(t => t.trackId ?? [])))
+/** The full tracker id the service rebuilds for the lookup: `${frame.sourceId}-${frame trackId}`. */
+const full = (sourceId: string, trackId: string) => `${sourceId}-${trackId}`
 
 describe("frame track scanner identity (req 5.1-5.3)", () => {
 	it("attaches the lookup's identity to tracked tracks only, asked with the frame's source", async () => {
@@ -64,11 +66,14 @@ describe("frame track scanner identity (req 5.1-5.3)", () => {
 		const known = [...ids][0]!
 		const { h, all, sent } = await run((sourceId, trackId) => {
 			asked.push([sourceId, trackId])
-			return sourceId === "rtl" && trackId === known ? IDENTITY : null
+			return sourceId === "rtl" && trackId === full("rtl", known)
+				? IDENTITY
+				: null
 		})
 		expect(asked.length).toBeGreaterThan(0)
 		expect(asked.every(([s]) => s === "rtl")).toBe(true)
-		expect(asked.every(([, t]) => ids.has(t))).toBe(true)
+		expect(asked.every(([, t]) => t.startsWith("rtl-"))).toBe(true)
+		expect(asked.every(([, t]) => ids.has(t.slice("rtl-".length)))).toBe(true)
 		let attached = 0
 		for (const f of all)
 			for (const t of f.tracks) {
@@ -238,13 +243,15 @@ describe("track ids across epochs (req 5.3)", () => {
 		for (const s of summaries)
 			for (const t of s.tracks)
 				if (t.trackId !== undefined)
-					expect(epochOf.get(t.trackId)).toBe(s.epoch)
+					expect(
+						epochOf.get(full(SCENARIO.harness.config.sourceId, t.trackId)),
+					).toBe(s.epoch)
 	})
 
 	it("an identity known for an epoch-1 track never lands on an epoch-2 frame", async () => {
 		const one = trackedIds(RICH.filter(s => s.epoch === 1))
-		const { h, all } = await run((_s, trackId) =>
-			one.has(trackId) ? IDENTITY : null,
+		const { h, all } = await run((sourceId, trackId) =>
+			[...one].some(id => full(sourceId, id) === trackId) ? IDENTITY : null,
 		)
 		for (const f of all.filter(x => x.epoch === 2))
 			expect(f.tracks.every(t => t.scanner === undefined)).toBe(true)
@@ -253,6 +260,49 @@ describe("track ids across epochs (req 5.3)", () => {
 				f => f.epoch === 1 && f.tracks.some(t => t.scanner !== undefined),
 			),
 		).toBe(true)
+		await h.service.stop()
+	})
+})
+
+describe("two sources with equal track id suffixes (req 5.2)", () => {
+	it("the lookup gets each frame's own full id; A's identity never lands on B's frame", async () => {
+		const h = makeService({ extraSourceIds: ["b"] })
+		const asked: [string, string][] = []
+		h.service.setTrackIdentityLookup((sourceId, trackId) => {
+			asked.push([sourceId, trackId])
+			// the scanner contract: keyed on the full id, same-source only
+			return trackId.startsWith(`${sourceId}-`) && sourceId === "rtl"
+				? IDENTITY
+				: null
+		})
+		await h.service.start()
+		await h.service.acquire("rtl", "job:a")
+		await h.service.acquire("b", "job:b")
+		await h.service.subscribe("c-default", undefined)
+		const tracked = RICH.find(
+			s => s.epoch === 1 && s.tracks.some(t => t.trackId !== undefined),
+		)!
+		const suffixes = trackedIds([tracked])
+		for (const id of ["rtl", "b"]) {
+			h.hostOf(id).epoch(1, true)
+			h.hostOf(id).summary({ ...tracked, sourceId: id, stream: 0 })
+		}
+		const frameOf = (id: string) =>
+			h.service.status().sources.find(s => s.sourceId === id)?.latestFrame
+		const a = frameOf("rtl")
+		const b = frameOf("b")
+		// both frames carry the same suffixes
+		expect(trackedIds([a as unknown as BlockSummary])).toEqual(suffixes)
+		expect(trackedIds([b as unknown as BlockSummary])).toEqual(suffixes)
+		expect(asked.length).toBeGreaterThan(0)
+		for (const [sourceId, trackId] of asked) {
+			expect(["rtl", "b"]).toContain(sourceId)
+			expect(suffixes.has(trackId.slice(sourceId.length + 1))).toBe(true)
+			expect(trackId.startsWith(`${sourceId}-`)).toBe(true)
+		}
+		expect(asked.some(([s]) => s === "b")).toBe(true)
+		expect(a?.tracks.some(t => t.scanner !== undefined)).toBe(true)
+		expect(JSON.stringify(b)).not.toContain('"scanner"')
 		await h.service.stop()
 	})
 })

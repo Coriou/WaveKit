@@ -4,6 +4,7 @@ import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
 import { Tracker } from "./emissions/tracker.js"
 import type { TrackerBlock } from "./emissions/tracker.js"
 import { blockTrackOf, isFrameTrackId } from "./frame-tracks.js"
+import type { TrackAssociation } from "./frame-tracks.js"
 import { createComponentLogger, createLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
 import { flagIqImages } from "./emissions/iq-image.js"
@@ -1575,9 +1576,7 @@ export class SpectrumPipeline {
 			thresholdDb: k,
 			// WG11 req 5.1: the tracker's own association of each segment in this block (no geometry).
 			tracks: segs.map(s => {
-				const assoc = this.tracker.associationOf(s)
-				if (assoc && !this.warnedTrackId && !isFrameTrackId(assoc.trackId))
-					this.warnTrackIdBound()
+				const assoc = this.frameAssociation(s)
 				// Surfaced rule uses the spectrum detection config's minSurfaceBlocks (the scanner may use runtime settings).
 				return blockTrackOf(
 					this.rfLow(ep, s.startBin),
@@ -1602,7 +1601,24 @@ export class SpectrumPipeline {
 		}
 	}
 
-	/** One fixed-text warning per pipeline; never echoes the id or the sourceId. */
+	/**
+	 * The tracker's association of a segment with the frame `trackId`: the tracker id without
+	 * this pipeline's own `${sourceId}-` prefix (ids are `${sourceId}-${ms base36}-${seq base36}`,
+	 * trackIdPrefixes), cut by its known length, never by a search in the id. The rest is
+	 * `<8 base36>-<seq base36>` (8 chars until 2059), ≤ FRAME_TRACK_ID_MAX_CHARS = 30 while
+	 * seq < 36^21, in the frame id charset. The spectrum service rebuilds the full id as
+	 * `${frame.sourceId}-${trackId}` for the identity lookup.
+	 */
+	private frameAssociation(s: Segment): TrackAssociation | null {
+		const a = this.tracker.associationOf(s)
+		if (a === null) return null
+		a.trackId = a.trackId.slice(this.cfg.sourceId.length + 1)
+		if (!this.warnedTrackId && !isFrameTrackId(a.trackId))
+			this.warnTrackIdBound()
+		return a
+	}
+
+	/** One fixed-text warning per pipeline (unreachable by the bound above); never echoes the id. */
 	private warnTrackIdBound(): void {
 		this.warnedTrackId = true
 		this.logger ??= createComponentLogger(
@@ -1610,7 +1626,7 @@ export class SpectrumPipeline {
 			"SpectrumPipeline",
 		)
 		this.logger.warn(
-			"track ids exceed the frame track id bound; frame track fields omitted (shorten or simplify the source id)",
+			"track id suffixes exceed the frame track id bound; frame track fields omitted",
 		)
 	}
 

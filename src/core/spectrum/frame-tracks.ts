@@ -18,7 +18,10 @@ import {
 } from "@wavekit/api-types"
 import type { BlockTrack } from "./types.js"
 
-/** Longest frame `trackId` (tracker ids are `<sourceId>-<base36 ms>-<base36 seq>`, ≤ 30 for a sourceId of ≤ 16). */
+/**
+ * Longest frame `trackId`: the tracker id `<sourceId>-<base36 ms>-<base36 seq>` without its
+ * `<sourceId>-` prefix, so `<8 base36>-<seq>` ≤ 30 while seq < 36^21, whatever the sourceId.
+ */
 export const FRAME_TRACK_ID_MAX_CHARS = 30
 /** Longest scanner `discoveryId` on a frame (store ids are `d_` + a 26-char ULID; a UUID fits too). */
 export const FRAME_TRACK_DISCOVERY_ID_MAX_CHARS = 36

@@ -62,7 +62,11 @@ export class Harness {
 
 	constructor(
 		over: Partial<PipelineConfig> = {},
-		deps: { provisionalWindowMs?: number; logger?: Logger } = {},
+		deps: {
+			provisionalWindowMs?: number
+			logger?: Logger
+			now?: () => number
+		} = {},
 	) {
 		this.config = pipelineConfig(over)
 		this.pipeline = new SpectrumPipeline(this.config, { now: () => 0, ...deps })

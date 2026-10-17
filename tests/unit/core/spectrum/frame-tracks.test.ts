@@ -22,7 +22,7 @@ const FLAGS = { burst: false, iqImage: false, edge: false }
 
 function assoc(over: Partial<TrackAssociation> = {}): TrackAssociation {
 	return {
-		trackId: "rtl-mguu1x2s-1",
+		trackId: "mguu1x2s-1",
 		snrDb: 12.26,
 		peakDbfs: -40.74,
 		blocks: 3,
@@ -101,7 +101,7 @@ describe("blockTrackOf", () => {
 			startHz: 1,
 			endHz: 2,
 			flags: { ...FLAGS, spur: false },
-			trackId: "rtl-mguu1x2s-1",
+			trackId: "mguu1x2s-1",
 			snrDb: 12.5,
 			peakDbfs: -40.5,
 			blocks: 3,
@@ -169,7 +169,7 @@ describe("blockTrackOf", () => {
 		)
 		expect(t.snrDb).toBeUndefined()
 		expect(t.peakDbfs).toBeUndefined()
-		expect(t.trackId).toBe("rtl-mguu1x2s-1")
+		expect(t.trackId).toBe("mguu1x2s-1")
 		const old = blockTrackOf(
 			1,
 			2,
@@ -193,7 +193,7 @@ describe("blockTrackOf", () => {
 
 describe("isFrameTrackId", () => {
 	it("accepts the tracker's id form and rejects non-strings", () => {
-		expect(isFrameTrackId("rtl-mguu1x2s-1")).toBe(true)
+		expect(isFrameTrackId("mguu1x2s-1")).toBe(true)
 		expect(isFrameTrackId("rtl-mguu1x2s-w-1")).toBe(true)
 		for (const v of [1, null, undefined, {}, ["a"]])
 			expect(isFrameTrackId(v)).toBe(false)

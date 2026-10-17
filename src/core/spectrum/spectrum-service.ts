@@ -1499,7 +1499,9 @@ export class SpectrumService extends EventEmitter {
 			if (t.trackId === undefined) return t
 			let answer: unknown
 			try {
-				answer = lookup(sourceId, t.trackId)
+				// The frame id is the tracker id without `${sourceId}-` (pipeline frameAssociation): the
+				// lookup gets the full tracker id of this frame's own source, never another source's.
+				answer = lookup(sourceId, `${sourceId}-${t.trackId}`)
 			} catch (err: unknown) {
 				this.logTrackIdentity("Spectrum track identity lookup failed", err)
 				return t

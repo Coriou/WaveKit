@@ -52,12 +52,14 @@ function expectedFields(
 	segmentImage: boolean,
 	fs: number,
 	minSurfaceBlocks: number,
+	/** The pipeline's own `${sourceId}-`: a frame id is the tracker id without it. */
+	framePrefix = "",
 ) {
 	const snap = tracker.snapshotOf(t.id)
 	if (!snap) throw new Error("open track without a snapshot")
 	return {
 		flags: { spur: snap.flags.spur },
-		trackId: t.id,
+		trackId: t.id.slice(framePrefix.length),
 		snrDb: roundHalfDb(snap.snrDb) ?? undefined,
 		peakDbfs: roundHalfDb(snap.peakDbfs) ?? undefined,
 		blocks: snap.blocks,
@@ -266,7 +268,8 @@ function checkBlock(h: Harness, summary: BlockSummary): number {
 			continue
 		}
 		tracked++
-		expect(owner?.id).toBe(t.trackId)
+		// the frame id is the tracker id without the pipeline's own `${sourceId}-` prefix
+		expect(owner?.id).toBe(`${h.config.sourceId}-${t.trackId}`)
 		expectTracked(
 			t,
 			expectedFields(
@@ -275,6 +278,7 @@ function checkBlock(h: Harness, summary: BlockSummary): number {
 				t.flags.iqImage,
 				FS,
 				h.config.minSurfaceBlocks,
+				`${h.config.sourceId}-`,
 			),
 		)
 	}

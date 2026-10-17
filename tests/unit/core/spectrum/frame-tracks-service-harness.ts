@@ -2,6 +2,7 @@
  * WG11 lane TR: a SpectrumService over a fake pipeline host, for frame-track goldens and the
  * identity lookup tests (same shape as spectrum-service-backfill.test.ts).
  */
+import { PassThrough } from "node:stream"
 import pino from "pino"
 import type {
 	SpectrumFrameEventData,
@@ -79,8 +80,17 @@ export interface ProfileLog {
 	backfill: SpectrumFrameEventData[]
 }
 
-export function makeService(opts: { logLines?: string[] } = {}) {
+export function makeService(
+	opts: { logLines?: string[]; extraSourceIds?: readonly string[] } = {},
+) {
 	const sources = new FakeSources("rtl", { sampleRate: FS, centerFreq: CENTRE })
+	const tuner = new FakeTuner()
+	const extra = opts.extraSourceIds ?? []
+	for (const id of extra) {
+		sources.caps.set(id, { ...sources.getCaps("rtl")! })
+		sources.streams.set(id, new PassThrough())
+		tuner.states.set(id, { ...tuner.getState("rtl")!, sourceId: id })
+	}
 	const engines = new Map<string, EngineState>()
 	const occupancy = new Map<string, OccupancyState>()
 	const persistence: SpectrumPersistence = {
@@ -105,18 +115,19 @@ export function makeService(opts: { logLines?: string[] } = {}) {
 			getFanout: () => new FakeFanout(),
 			releaseUnused: () => undefined,
 		} as never,
-		tuner: new FakeTuner() as never,
-		sourceConfigs: [
-			{
-				id: "rtl",
-				type: "rtl_tcp",
-				host: "127.0.0.1",
-				port: 1234,
-				loop: false,
-				playbackSpeed: 1,
-				caps: sources.getCaps("rtl")!,
-			} as SourceConfig,
-		],
+		tuner: tuner as never,
+		sourceConfigs: ["rtl", ...extra].map(
+			id =>
+				({
+					id,
+					type: "rtl_tcp",
+					host: "127.0.0.1",
+					port: 1234,
+					loop: false,
+					playbackSpeed: 1,
+					caps: sources.getCaps(id)!,
+				}) as SourceConfig,
+		),
 		settings: () => settings,
 		tuning: () => DEFAULT_TUNING,
 		persistence,
@@ -148,6 +159,9 @@ export function makeService(opts: { logLines?: string[] } = {}) {
 	return {
 		service,
 		host: () => hosts.at(-1)!,
+		/** The latest host of one source (several sources run side by side). */
+		hostOf: (sourceId: string) =>
+			hosts.filter(h => h.cfg.sourceId === sourceId).at(-1)!,
 		profiles,
 		frames,
 		advance: (ms: number) => {

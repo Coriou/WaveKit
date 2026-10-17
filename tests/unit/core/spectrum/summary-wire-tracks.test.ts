@@ -23,7 +23,7 @@ const TRACKED: BlockTrack = {
 	startHz: 1,
 	endHz: 2,
 	flags: { ...FLAGS, spur: false },
-	trackId: "rtl-mguu1x2s-1",
+	trackId: "mguu1x2s-1",
 	snrDb: 12.5,
 	peakDbfs: -40.5,
 	blocks: 3,

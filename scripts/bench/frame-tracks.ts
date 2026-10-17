@@ -42,7 +42,7 @@ function association(i: number, worst: boolean): TrackAssociation {
 	return {
 		trackId: worst
 			? "t".repeat(FRAME_TRACK_ID_MAX_CHARS)
-			: `rtl-mguu1x2s-${(i + 1).toString(36)}`,
+			: `mguu1x2s-${(i + 1).toString(36)}`, // the frame id: no `rtl-`
 		snrDb: worst ? -999.5 : 12.26 + i,
 		peakDbfs: worst ? -999.5 : -40.74 + i / 3,
 		blocks: worst ? FRAME_TRACK_BLOCKS_MAX : 3 + i,
@@ -128,7 +128,10 @@ const out: Record<string, unknown> = {}
 for (const n of [20, 64]) {
 	const plain = before(n)
 	const typical = after(n)
-	const ids = new Map(typical.map(t => [t.trackId ?? "", identity(false)]))
+	// keyed on the full tracker id the service rebuilds (`${sourceId}-${trackId}`)
+	const ids = new Map(
+		typical.map(t => [`rtl-${t.trackId ?? ""}`, identity(false)]),
+	)
 	const worker = {
 		beforeUs: time(() => {
 			sink += before(n).length
