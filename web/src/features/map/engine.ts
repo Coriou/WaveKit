@@ -73,9 +73,10 @@ import {
 	themedPaint,
 } from "./style.ts"
 import type { MapUi, MapUiState } from "./ui-store.ts"
-import { devicePrefsStore } from "../../shell/device-prefs.ts"
+import { devicePrefsStore, type MapTiles } from "../../shell/device-prefs.ts"
 
-export type BasemapState = "loading" | "online" | "unavailable"
+/** "blank": Map › Blank asked for no tiles. */
+export type BasemapState = "loading" | "online" | "unavailable" | "blank"
 
 export interface EngineView {
 	readonly basemap: BasemapState
@@ -99,6 +100,8 @@ export interface EngineDeps {
 	readonly themeKey: () => ThemeKey
 	/** Rects (container px) labels keep clear of: the shell's islands and the map's own controls. */
 	readonly uiRects: () => Rect[]
+	/** Map › Beyond the offline map; a change makes a new engine (the style's sources differ). */
+	readonly tiles: MapTiles
 }
 
 const INITIAL_ZOOM = 7.6
@@ -127,6 +130,8 @@ export class MapEngine {
 	private trailsDirty = true
 	private lastTrailPush = 0
 	private trailEnds = new Map<string, LatLon>()
+	private trailMin = devicePrefsStore.getState().mapTrail
+	private labels = devicePrefsStore.getState().mapLabels
 	private raf = 0
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private drawn: { it: MapItem; at: LatLon }[] = []
@@ -146,7 +151,7 @@ export class MapEngine {
 		this.deps = deps
 		this.pal = mapPalette(deps.themeKey(), readTokens(deps.themeScope))
 		this.view = new Store<EngineView>({
-			basemap: "loading",
+			basemap: deps.tiles === "blank" ? "blank" : "loading",
 			zoom: INITIAL_ZOOM,
 			lat: 48,
 			counts: { aircraft: 0, vessels: 0, aprs: 0, mesh: 0 },
@@ -159,7 +164,7 @@ export class MapEngine {
 		this.placedCamera = start !== null
 		this.map = new MapLibreMap({
 			container: deps.container,
-			style: buildStyle(this.pal),
+			style: buildStyle(this.pal, deps.tiles === "blank" ? null : BASEMAP),
 			center: start ? [start.lon, start.lat + NORTH_BIAS_DEG] : [2, 47],
 			zoom: start ? INITIAL_ZOOM : 4.2,
 			minZoom: 2.5,
@@ -201,9 +206,11 @@ export class MapEngine {
 			this.dragging = false
 		})
 		this.map.on("click", e => this.onClick(e))
-		this.basemapTimer = setTimeout(() => {
-			if (this.view.get().basemap === "loading") this.setBasemap("unavailable")
-		}, BASEMAP_TIMEOUT_MS)
+		if (deps.tiles === "online")
+			this.basemapTimer = setTimeout(() => {
+				if (this.view.get().basemap === "loading")
+					this.setBasemap("unavailable")
+			}, BASEMAP_TIMEOUT_MS)
 
 		const f = deps.fleets
 		const dirtyItems = () => {
@@ -220,6 +227,17 @@ export class MapEngine {
 			deps.station.subscribe(dirtyItems),
 			deps.ui.subscribe((next, prev) => this.onUi(next, prev)),
 			// units: rings, labels and the hover line are drawn in them
+			// Map › Trail length and Labels
+			devicePrefsStore.subscribe(() => {
+				const d = devicePrefsStore.getState()
+				if (d.mapTrail === this.trailMin && d.mapLabels === this.labels) return
+				if (d.mapTrail !== this.trailMin) this.trailsDirty = true
+				this.trailMin = d.mapTrail
+				this.labels = d.mapLabels
+				this.dynamicDirty = true
+				this.kick()
+				this.map.triggerRepaint()
+			}),
 			displayStore.subscribe(() => {
 				this.staticDirty = true
 				this.itemsDirty = true
@@ -366,6 +384,7 @@ export class MapEngine {
 	}
 
 	private onError(e: { error?: unknown; sourceId?: string }): void {
+		if (this.deps.tiles === "blank") return
 		const text =
 			e.error instanceof Error ? e.error.message : String(e.error ?? "")
 		if (
@@ -646,9 +665,17 @@ export class MapEngine {
 			const bodies: Feature[] = []
 			if (on)
 				for (const d of drawn) {
-					const end = trailEnd(d.it, now)
+					const end = trailEnd(d.it, now, this.trailMin)
 					if (!end) continue
-					bodies.push(...trailSegments(d.it, null, now, this.colourOf(d.it)))
+					bodies.push(
+						...trailSegments(
+							d.it,
+							null,
+							now,
+							this.colourOf(d.it),
+							this.trailMin,
+						),
+					)
 					this.trailEnds.set(d.it.id, end)
 				}
 			this.setData(SRC.trails, collection(bodies))
@@ -762,7 +789,7 @@ export class MapEngine {
 			if (
 				!selected &&
 				!hovered &&
-				!(ui.overlays.labels && wantsLabel(d.it.kind, zoom))
+				!(ui.overlays.labels && wantsLabel(d.it.kind, zoom, this.labels))
 			)
 				continue
 			requests.push({

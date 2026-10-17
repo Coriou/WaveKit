@@ -1,4 +1,5 @@
-// Display › On this device: density, motion and the spectrum's range, averaging and FFT size, persisted in localStorage and applied as data-wk-density /
+// Display › On this device: density, motion, the spectrum's range, averaging and FFT size, and the Map's tiles,
+// trail length and labels (Settings › Map), persisted in localStorage and applied as data-wk-density /
 // data-wk-motion on <html>. Motion "system" resolves through prefers-reduced-motion, so CSS and code only ever
 // test data-wk-motion="reduce". Pure apart from the storage, element and media query passed in (tests use fakes).
 
@@ -38,6 +39,18 @@ export function fftBins(size: FftSize, binsMax: number | null): number {
 	return Math.max(128, Math.min(size, binsMax ?? FFT_FALLBACK_MAX))
 }
 
+/** Map › Beyond the offline map: OpenFreeMap's tiles, or a blank ground that asks nothing of anyone. */
+export const MAP_TILES = ["online", "blank"] as const
+export type MapTiles = (typeof MAP_TILES)[number]
+
+/** Map › Trail length in minutes (the board's choices). */
+export const MAP_TRAILS = [5, 15, 60] as const
+export type MapTrail = (typeof MAP_TRAILS)[number]
+
+/** Map › Labels: how soon, zooming in, items get their names. */
+export const MAP_LABELS = ["few", "normal", "many"] as const
+export type MapLabels = (typeof MAP_LABELS)[number]
+
 /** A spectrum scale in dBFS, bottom and top. */
 export interface FixedLevels {
 	readonly minDb: number
@@ -54,6 +67,9 @@ export interface DevicePrefs {
 	readonly averaging: Averaging
 	/** Bins asked of the core; the core serves at most its limit (fftBins). */
 	readonly fftSize: FftSize
+	readonly mapTiles: MapTiles
+	readonly mapTrail: MapTrail
+	readonly mapLabels: MapLabels
 }
 
 export const DEFAULT_DEVICE: DevicePrefs = {
@@ -63,6 +79,9 @@ export const DEFAULT_DEVICE: DevicePrefs = {
 	fixedLevels: null,
 	averaging: "low",
 	fftSize: 8192,
+	mapTiles: "online",
+	mapTrail: 15,
+	mapLabels: "normal",
 }
 export const DEVICE_STORAGE_KEY = "wavekit.web.device"
 
@@ -117,6 +136,11 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 		fftSize: (FFT_SIZES as readonly unknown[]).includes(o["fftSize"])
 			? (o["fftSize"] as FftSize)
 			: DEFAULT_DEVICE.fftSize,
+		mapTiles: pick(MAP_TILES, o["mapTiles"], DEFAULT_DEVICE.mapTiles),
+		mapTrail: (MAP_TRAILS as readonly unknown[]).includes(o["mapTrail"])
+			? (o["mapTrail"] as MapTrail)
+			: DEFAULT_DEVICE.mapTrail,
+		mapLabels: pick(MAP_LABELS, o["mapLabels"], DEFAULT_DEVICE.mapLabels),
 	}
 }
 
@@ -198,7 +222,10 @@ export class DevicePrefsStore {
 			next.spectrumRange === prev.spectrumRange &&
 			sameLevels(next.fixedLevels, prev.fixedLevels) &&
 			next.averaging === prev.averaging &&
-			next.fftSize === prev.fftSize
+			next.fftSize === prev.fftSize &&
+			next.mapTiles === prev.mapTiles &&
+			next.mapTrail === prev.mapTrail &&
+			next.mapLabels === prev.mapLabels
 		)
 			return
 		this.#prefs = next

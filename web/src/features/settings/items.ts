@@ -68,7 +68,6 @@ export interface ItemsInput {
 
 /** Groups with nothing the app can set yet say so instead of showing an empty heading. */
 const NOTHING: Partial<Record<SettingGroupId, string>> = {
-	map: "Nothing to set yet: the map is not in this app yet.",
 	storage: "Nothing to set yet: recording is not in this app yet.",
 }
 

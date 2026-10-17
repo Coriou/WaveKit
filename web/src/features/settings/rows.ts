@@ -32,10 +32,12 @@ import type {
 	Averaging,
 	Density,
 	DevicePrefs,
+	MapLabels,
+	MapTiles,
 	Motion,
 	SpectrumRange,
 } from "../../shell/device-prefs.ts"
-import { FFT_SIZES, fftBins } from "../../shell/device-prefs.ts"
+import { FFT_SIZES, MAP_TRAILS, fftBins } from "../../shell/device-prefs.ts"
 import type { DisplayPrefs, TimeFormat, Units } from "../display.ts"
 import { DEFAULT_DISPLAY } from "../display.ts"
 import type { ThemePrefs } from "../../shell/theme.ts"
@@ -1300,6 +1302,76 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	return rows
 }
 
+// ---- map (this browser: the core keeps no map settings yet)
+
+const TILE_OPTS = opts([
+	["online", "Online tiles"],
+	["blank", "Blank"],
+])
+const TRAIL_OPTS = opts([
+	["5", "5 min"],
+	["15", "15 min"],
+	["60", "1 hour"],
+])
+const LABEL_OPTS = opts([
+	["few", "Few"],
+	["normal", "Normal"],
+	["many", "Many"],
+])
+
+function mapRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
+	const d = s.device
+	return [
+		{
+			id: "map.online",
+			group: "map",
+			label: "Beyond the offline map",
+			help:
+				d.mapTiles === "online"
+					? "Online tiles come from OpenFreeMap, which then sees the area you look at"
+					: "No tiles are fetched: aircraft, vessels and stations on a plain ground",
+			keys: words("tiles openfreemap offline online blank basemap privacy"),
+			device: true,
+			widget: { kind: "seg", options: TILE_OPTS },
+			value: d.mapTiles,
+			text: optionText(TILE_OPTS, d.mapTiles),
+			def: { value: "online", text: "Online tiles" },
+			write: v => local(() => a.setDevice({ mapTiles: v as MapTiles })),
+		},
+		{
+			id: "map.trails",
+			group: "map",
+			label: "Trail length",
+			help: "Aircraft trails are a fifth of it: they cover more ground",
+			keys: words("trail trails history track tail path length"),
+			device: true,
+			widget: { kind: "select", options: TRAIL_OPTS },
+			value: String(d.mapTrail),
+			text: optionText(TRAIL_OPTS, String(d.mapTrail)),
+			def: { value: "15", text: "15 min" },
+			write: v => {
+				const min = MAP_TRAILS.find(m => String(m) === v)
+				return local(() => {
+					if (min !== undefined) a.setDevice({ mapTrail: min })
+				})
+			},
+		},
+		{
+			id: "map.labels",
+			group: "map",
+			label: "Labels",
+			help: "Many names aircraft and vessels sooner as you zoom in",
+			keys: words("labels names callsigns text clutter"),
+			device: true,
+			widget: { kind: "seg", options: LABEL_OPTS },
+			value: d.mapLabels,
+			text: optionText(LABEL_OPTS, d.mapLabels),
+			def: { value: "normal", text: "Normal" },
+			write: v => local(() => a.setDevice({ mapLabels: v as MapLabels })),
+		},
+	]
+}
+
 // ---- system
 
 function systemRows(s: SettingsSnapshot): SettingRow[] {
@@ -1358,6 +1430,7 @@ export function buildRows(
 		...audioRows(s, a),
 		...decoderRows(s, a),
 		...storageRows(s),
+		...mapRows(s, a),
 		...displayRows(s, a),
 		...systemRows(s),
 	]

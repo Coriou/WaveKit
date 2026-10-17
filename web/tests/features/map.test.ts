@@ -24,6 +24,7 @@ import {
 	trailEnd,
 	trailHead,
 	trailSegments,
+	trailSpanMs,
 } from "../../src/features/map/features.ts"
 import {
 	bearing,
@@ -195,6 +196,24 @@ describe("style", () => {
 			themedPaint(pal, up).find(([l]) => l === LAYER.bg)?.[2]
 		expect(bg(false)).toBe(pal.sea)
 		expect(bg(true)).toBe(pal.land)
+	})
+
+	it("asks nothing of the tile server when Map › Blank is picked", () => {
+		const pal = mapPalette(
+			{ theme: "dark", ground: "black", accent: "mono" },
+			FALLBACK_TOKENS,
+		)
+		const style = buildStyle(pal, null)
+		expect(style.glyphs).toBeUndefined()
+		expect(Object.keys(style.sources)).not.toContain("base")
+		expect(Object.values(style.sources).every(s => s.type === "geojson")).toBe(
+			true,
+		)
+		expect(style.layers.some(l => "source" in l && l.source === "base")).toBe(
+			false,
+		)
+		expect(style.layers.map(l => l.id)).toContain(LAYER.trails)
+		expect(style.layers.at(-1)?.id).toBe(LAYER.items)
 	})
 })
 
@@ -425,6 +444,11 @@ describe("dead reckoning and freshness", () => {
 		expect(wantsLabel("vessel", 7.6)).toBe(false)
 		expect(wantsLabel("vessel", 9)).toBe(true)
 		expect(wantsLabel("aton", 9)).toBe(false)
+		// Map › Labels: Few waits for a closer zoom, Many names them sooner
+		expect(wantsLabel("aircraft", 7, "few")).toBe(false)
+		expect(wantsLabel("aircraft", 8, "few")).toBe(true)
+		expect(wantsLabel("vessel", 7.6, "many")).toBe(true)
+		expect(wantsLabel("vessel", 6, "many")).toBe(false)
 		const it0 = item()
 		expect(labelText(it0)).toBe("AFR1234  FL360")
 		const sel = labelPriority(it0, {
@@ -635,6 +659,25 @@ describe("features", () => {
 		expect(trailSegments(item({ trail: old }), STATION, NOW, "#fff")).toEqual(
 			[],
 		)
+	})
+
+	it("follows Map › Trail length: the whole length for vessels, a fifth of it for aircraft", () => {
+		expect(trailSpanMs("vessel")).toBe(15 * 60_000)
+		expect(trailSpanMs("aircraft")).toBe(3 * 60_000)
+		expect(trailSpanMs("aprs", 60)).toBe(3_600_000)
+		expect(trailSpanMs("aircraft", 5)).toBe(60_000)
+		expect(trailSpanMs("aton", 60)).toBe(0)
+		// points 2 to 8 minutes old: past a 1 min aircraft trail, inside a 12 min one
+		const trail = Array.from({ length: 7 }, (_, k) => {
+			const at = NOW - (8 - k) * 60_000
+			const p = destination(STATION, 270, (8 - k) * 10)
+			return { lat: p.lat, lon: p.lon, at }
+		})
+		const it = item({ trail })
+		expect(trailSegments(it, null, NOW, "#fff", 5)).toEqual([])
+		expect(trailEnd(it, NOW, 5)).toBeNull()
+		expect(trailSegments(it, null, NOW, "#fff", 60).length).toBeGreaterThan(0)
+		expect(trailEnd(it, NOW, 60)).not.toBeNull()
 	})
 
 	it("draws a body without its head, and the head from the body's end to the marker", () => {

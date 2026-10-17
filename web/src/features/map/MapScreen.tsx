@@ -18,6 +18,7 @@ import {
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/store.ts"
+import { useDevicePrefs } from "../../shell/hooks.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { buildQuery } from "../activity/search.ts"
@@ -182,6 +183,11 @@ function openStationSettings(): void {
 	shellStore.openDrawer("settings")
 }
 
+function openTileSettings(): void {
+	focusSetting("map.online")
+	shellStore.openDrawer("settings")
+}
+
 /** Rects (relative to `box`) of what sits over the map: the shell's islands and the map's own controls. */
 function uiRectsOf(box: HTMLElement): Rect[] {
 	const b = box.getBoundingClientRect()
@@ -219,6 +225,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 		themeStore.getState,
 	)
 	const [themeRev, setThemeRev] = useState(0)
+	const tiles = useDevicePrefs().mapTiles
 
 	// ---- data: attached while the Map is open
 	useEffect(() => {
@@ -252,13 +259,14 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			themeScope: el,
 			themeKey: () => themeStore.getState(),
 			uiRects: () => uiRectsOf(b),
+			tiles,
 		})
 		setEngine(e)
 		return () => {
 			e.dispose()
 			setEngine(null)
 		}
-	}, [data, ui])
+	}, [data, ui, tiles])
 
 	// "Open on map" from a message card: select and follow, now or when the request arrives
 	useEffect(() => {
@@ -1051,7 +1059,16 @@ function Footer({
 				{stationText}
 			</button>
 			<span>·</span>
-			{v.basemap === "unavailable" ? (
+			{v.basemap === "blank" ? (
+				<button
+					type="button"
+					className="wkm-link"
+					onClick={openTileSettings}
+					title="Settings › Map"
+				>
+					Blank map · no online tiles
+				</button>
+			) : v.basemap === "unavailable" ? (
 				<span>Basemap unavailable · data only</span>
 			) : v.basemap === "loading" ? (
 				<span>Loading the map…</span>

@@ -504,9 +504,7 @@ describe("Settings items", () => {
 			false,
 		)
 		expect(items.some(i => i.kind === "device")).toBe(true)
-		expect(items.some(i => i.kind === "nothing" && i.group === "map")).toBe(
-			true,
-		)
+		expect(items.some(i => i.kind === "device" && i.group === "map")).toBe(true)
 		const opened = settingsItems({ ...base, open: new Set(["receiver"]) })
 		expect(opened.some(i => i.kind === "row" && i.row.id === "rx.direct")).toBe(
 			true,
@@ -627,6 +625,32 @@ describe("Settings items", () => {
 		expect(held.help).toBe(
 			"Holds −105 to −5 dBFS, where Auto stood when you picked Fixed",
 		)
+	})
+
+	it("keeps the Map's tiles, trail length and labels on this device", async () => {
+		const a = actions()
+		const list = buildRows(snapshot(), a)
+		const map = list.filter(r => r.group === "map")
+		expect(map.map(r => [r.id, r.device, r.text])).toEqual([
+			["map.online", true, "Online tiles"],
+			["map.trails", true, "15 min"],
+			["map.labels", true, "Normal"],
+		])
+		expect(byId(list, "map.online").help).toContain("OpenFreeMap")
+		await byId(list, "map.online").write?.("blank")
+		await byId(list, "map.trails").write?.("60")
+		await byId(list, "map.trails").write?.("30")
+		await byId(list, "map.labels").write?.("few")
+		expect(a.calls.filter(c => c[0] === "device")).toEqual([
+			["device", { mapTiles: "blank" }],
+			["device", { mapTrail: 60 }],
+			["device", { mapLabels: "few" }],
+		])
+		const blank = buildRows(
+			snapshot({ device: { ...DEFAULT_DEVICE, mapTiles: "blank" } }),
+			a,
+		)
+		expect(byId(blank, "map.online").help).toContain("No tiles are fetched")
 	})
 
 	it("offers FFT sizes up to what this core serves, saying why the others cannot be picked", async () => {

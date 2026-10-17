@@ -1,6 +1,7 @@
 // GeoJSON for the Map's own sources (pure): graticule, range rings, coverage, the approximate-station area, mesh
 // links, trails (three fading segments, as the board) and the item markers.
 import type { Coverage } from "../../data/index.ts"
+import type { MapTrail } from "../../shell/device-prefs.ts"
 import { circle, ringDistances, type LatLon } from "./geo.ts"
 import type { MapItem } from "./items.ts"
 import { glyphOf } from "./items.ts"
@@ -118,13 +119,16 @@ export function links(
 	)
 }
 
-/** How far back a trail reaches: aircraft 3 min, the rest 15 min (the board). */
-export const TRAIL_SPAN_MS: Readonly<Record<MapItem["kind"], number>> = {
-	aircraft: 3 * 60_000,
-	vessel: 15 * 60_000,
-	aton: 0,
-	aprs: 15 * 60_000,
-	mesh: 15 * 60_000,
+/**
+ * How far back a trail reaches for Map › Trail length (minutes): vessels, APRS and mesh the whole length,
+ * aircraft a fifth of it (they cover far more ground; 3 min at the default 15, as on the board), AtoNs none.
+ */
+export function trailSpanMs(
+	kind: MapItem["kind"],
+	minutes: MapTrail = 15,
+): number {
+	if (kind === "aton") return 0
+	return (kind === "aircraft" ? minutes / 5 : minutes) * 60_000
 }
 
 const TRAIL_ALPHA = [0.5, 0.28, 0.1] as const
@@ -139,8 +143,9 @@ export function trailSegments(
 	head: LatLon | null,
 	now: number,
 	colour: string,
+	minutes: MapTrail = 15,
 ): Feature[] {
-	const span = TRAIL_SPAN_MS[it.kind]
+	const span = trailSpanMs(it.kind, minutes)
 	if (span === 0 || it.trail.length === 0) return []
 	const from = now - span
 	const pts = it.trail.filter(p => p.at >= from)
@@ -168,8 +173,12 @@ export function trailSegments(
 }
 
 /** The trail's newest point within its span, where a body drawn without a head ends; null without one. */
-export function trailEnd(it: MapItem, now: number): LatLon | null {
-	const span = TRAIL_SPAN_MS[it.kind]
+export function trailEnd(
+	it: MapItem,
+	now: number,
+	minutes: MapTrail = 15,
+): LatLon | null {
+	const span = trailSpanMs(it.kind, minutes)
 	const last = it.trail[it.trail.length - 1]
 	return span > 0 && last && last.at >= now - span
 		? { lat: last.lat, lon: last.lon }

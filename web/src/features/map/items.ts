@@ -1,5 +1,6 @@
 // The Map's items: every fleet entry with a position, normalised (pure). Glyph choice, dead reckoning between
 // reports, labels and their priority, the hover line, the selection panel's fields and the Activity token.
+import type { MapLabels } from "../../shell/device-prefs.ts"
 import type {
 	Aircraft,
 	Aprs,
@@ -311,9 +312,20 @@ export function labelText(it: MapItem): string {
 	return it.name
 }
 
+/** Map › Labels: zoom levels added to the view's before the thresholds below (Many names items sooner). */
+export const LABEL_ZOOM_BIAS: Readonly<Record<MapLabels, number>> = {
+	few: -1.5,
+	normal: 0,
+	many: 1.5,
+}
+
 /** Which kinds get a label at a zoom (MapLibre zoom: one less than the board's 256 px zoom). */
-export function wantsLabel(kind: ItemKind, zoom: number): boolean {
-	const z = zoom + 1
+export function wantsLabel(
+	kind: ItemKind,
+	zoom: number,
+	labels: MapLabels = "normal",
+): boolean {
+	const z = zoom + 1 + LABEL_ZOOM_BIAS[labels]
 	switch (kind) {
 		case "aircraft":
 			return z >= 7.5

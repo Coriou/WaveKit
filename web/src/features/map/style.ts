@@ -148,9 +148,10 @@ export function themedPaint(
 	]
 }
 
+/** The Map's style; a null basemap (Map › Blank) leaves out every layer drawn from tiles, and the glyphs. */
 export function buildStyle(
 	pal: MapPalette,
-	basemap: Basemap = BASEMAP,
+	basemap: Basemap | null = BASEMAP,
 ): StyleSpecification {
 	const layers: LayerSpecification[] = [
 		{
@@ -277,7 +278,7 @@ export function buildStyle(
 			],
 			layout: {
 				"text-field": ["coalesce", ["get", "name:latin"], ["get", "name"]],
-				"text-font": [basemap.font],
+				"text-font": [basemap?.font ?? ""],
 				"text-size": 11.5,
 				"text-anchor": "left",
 				"text-offset": [0.5, 0],
@@ -321,20 +322,33 @@ export function buildStyle(
 			},
 		},
 	]
+	if (!basemap)
+		return {
+			version: 8,
+			sources: ownSources(),
+			layers: layers.filter(l => !("source" in l) || l.source !== SRC.base),
+		}
 	return {
 		version: 8,
 		glyphs: basemap.glyphs,
 		sources: {
 			[SRC.base]: { type: "vector", url: basemap.tileJson },
-			[SRC.grid]: { type: "geojson", data: EMPTY },
-			[SRC.coverage]: { type: "geojson", data: EMPTY },
-			[SRC.rings]: { type: "geojson", data: EMPTY },
-			[SRC.approx]: { type: "geojson", data: EMPTY },
-			[SRC.links]: { type: "geojson", data: EMPTY },
-			[SRC.trails]: { type: "geojson", data: EMPTY },
-			[SRC.trailHeads]: { type: "geojson", data: EMPTY },
-			[SRC.items]: { type: "geojson", data: EMPTY },
+			...ownSources(),
 		},
 		layers,
+	}
+}
+
+/** The GeoJSON sources the Map feeds, empty until it does. */
+function ownSources(): StyleSpecification["sources"] {
+	return {
+		[SRC.grid]: { type: "geojson", data: EMPTY },
+		[SRC.coverage]: { type: "geojson", data: EMPTY },
+		[SRC.rings]: { type: "geojson", data: EMPTY },
+		[SRC.approx]: { type: "geojson", data: EMPTY },
+		[SRC.links]: { type: "geojson", data: EMPTY },
+		[SRC.trails]: { type: "geojson", data: EMPTY },
+		[SRC.trailHeads]: { type: "geojson", data: EMPTY },
+		[SRC.items]: { type: "geojson", data: EMPTY },
 	}
 }

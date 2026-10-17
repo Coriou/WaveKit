@@ -157,6 +157,15 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"map.online",
+		"Map",
+		"Beyond the offline map",
+		"tiles openfreemap online blank basemap privacy",
+		SETTINGS,
+	),
+	row("map.trails", "Map", "Trail length", "history track", SETTINGS),
+	row("map.labels", "Map", "Labels", "names callsigns clutter", SETTINGS),
+	row(
 		"dp.range",
 		"Display",
 		"Spectrum range",

@@ -50,12 +50,30 @@ describe("device prefs", () => {
 			fixedLevels: null,
 			averaging: "low",
 			fftSize: 8192,
+			mapTiles: "online",
+			mapTrail: 15,
+			mapLabels: "normal",
 		})
 		expect(parseDevicePrefs(null)).toEqual(DEFAULT_DEVICE)
 		expect(parseDevicePrefs("{bad")).toEqual(DEFAULT_DEVICE)
 		expect(
 			parseDevicePrefs(JSON.stringify({ density: "compact", motion: "fast" })),
 		).toEqual({ ...DEFAULT_DEVICE, density: "compact" })
+		expect(
+			parseDevicePrefs(
+				JSON.stringify({ mapTiles: "blank", mapTrail: 60, mapLabels: "many" }),
+			),
+		).toEqual({
+			...DEFAULT_DEVICE,
+			mapTiles: "blank",
+			mapTrail: 60,
+			mapLabels: "many",
+		})
+		expect(
+			parseDevicePrefs(
+				JSON.stringify({ mapTiles: "sat", mapTrail: 30, mapLabels: 2 }),
+			),
+		).toEqual(DEFAULT_DEVICE)
 	})
 
 	it("keeps an FFT size from the list and asks the core for no more than it serves", () => {
