@@ -171,6 +171,20 @@ describe("sweepRecordingDeleteLeftovers (WG10 req 1.9)", () => {
 				},
 			],
 			["a WG9 recording entry", fs => void fs.priv("/r", P, ["recording"])],
+			[
+				"a group-writable parent without the sticky bit",
+				fs => {
+					fs.dir("/r", ME, 0o775)
+					fs.priv("/r", P, ["verified"])
+				},
+			],
+			[
+				"an other-writable parent without the sticky bit",
+				fs => {
+					fs.dir("/r", ME, 0o757)
+					fs.priv("/r", P, ["a.wav"])
+				},
+			],
 			["another name", fs => void fs.priv("/r", P, ["notes.txt"])],
 			[
 				"a directory entry",
@@ -200,6 +214,15 @@ describe("sweepRecordingDeleteLeftovers (WG10 req 1.9)", () => {
 				removedEmpty: 0,
 				left: 1,
 			})
+		})
+
+		it("a writable parent is counted left; a sticky one is swept", async () => {
+			const fs = new FakeFs()
+			fs.dir("/r", ME, 0o777)
+			fs.priv("/r", P, ["verified"])
+			expect(await run(fs).p).toMatchObject({ found: 1, deleted: 0, left: 1 })
+			fs.dir("/r", ME, 0o1777)
+			expect(await run(fs).p).toMatchObject({ found: 1, deleted: 1, left: 0 })
 		})
 
 		it("a symlinked WAV folder is not entered", async () => {

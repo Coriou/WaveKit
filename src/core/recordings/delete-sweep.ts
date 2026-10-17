@@ -3,9 +3,10 @@
  *
  * Acts only on a directory that is provably ours: a name matching RECORDING_DELETE_PRIVATE_DIR,
  * a real directory with no symbolic link from the configured root down, owned by this process,
- * mode exactly 0700. Inside one: only `verified` (a regular file) is unlinked, a single entry
- * named like a recording is hard-linked back under its name (never replacing) and unlinked, an
- * empty directory is removed; anything else is left and counted. While the keep store is not
+ * mode exactly 0700, in a parent not writable by group or other unless sticky. Inside one: only
+ * `verified` (a regular file) is unlinked, a single entry named like a recording is hard-linked
+ * back under its name (never replacing) and unlinked, an empty directory is removed; anything
+ * else is left and counted. While the keep store is not
  * `ready` nothing is deleted or restored. Logs counts only, never a name or path. Never rejects.
  */
 import { link, lstat, opendir, rmdir, unlink } from "node:fs/promises"
@@ -156,6 +157,13 @@ export async function sweepRecordingDeleteLeftovers(
 				(st.mode & 0o7777) !== 0o700 ||
 				!ready
 			) {
+				result.left += 1
+				return
+			}
+			// Another uid able to write the parent (group or other write without the sticky bit)
+			// could rebind the private directory's name: touch nothing (as verified-unlink does).
+			const ps = await fs.lstat(parent)
+			if ((ps.mode & 0o022) !== 0 && (ps.mode & 0o1000) === 0) {
 				result.left += 1
 				return
 			}
