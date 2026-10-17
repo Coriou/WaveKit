@@ -83,6 +83,11 @@ export interface SegWidget {
 	readonly kind: "seg"
 	readonly options: readonly SettingOption[]
 }
+/** Waterfall colours: one tile per ramp, a strip from weak to strong signal over the current ground. */
+export interface RampWidget {
+	readonly kind: "ramp"
+	readonly options: readonly SettingOption[]
+}
 export interface SelectWidget {
 	readonly kind: "select"
 	readonly options: readonly SettingOption[]
@@ -144,6 +149,7 @@ export type SettingWidget =
 	| PageWidget
 	| SwitchWidget
 	| SegWidget
+	| RampWidget
 	| SelectWidget
 	| StepperWidget
 	| SliderWidget
@@ -276,7 +282,10 @@ const fold = (s: string) =>
 export function haystack(row: SettingRow, crumb: string): string {
 	const w = row.widget
 	const opts =
-		w.kind === "seg" || w.kind === "select" || w.kind === "chips"
+		w.kind === "seg" ||
+		w.kind === "ramp" ||
+		w.kind === "select" ||
+		w.kind === "chips"
 			? w.options.map(o => o.label).join(" ")
 			: ""
 	return fold(

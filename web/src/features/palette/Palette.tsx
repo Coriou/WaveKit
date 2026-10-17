@@ -17,6 +17,7 @@ import {
 
 import { useServices } from "../../app/context.ts"
 import { themeStore, type ThemePrefs } from "../../shell/theme.ts"
+import { rampGradient, themeColors } from "../../spectrum/ramp.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { Icon } from "../../ui/Icon.tsx"
 import { applyPreview, runAction } from "./actions.ts"
@@ -123,7 +124,19 @@ function Row({
 					data-wk-ground={sw.ground}
 					data-wk-accent={sw.accent}
 				>
-					<span className="wkp-swatch-dot" />
+					{sw.ramp ? (
+						<span
+							className="wkp-swatch-ramp"
+							style={{
+								background: rampGradient(
+									sw.ramp,
+									themeColors(document.documentElement),
+								),
+							}}
+						/>
+					) : (
+						<span className="wkp-swatch-dot" />
+					)}
 				</span>
 			) : (
 				<span className="wk-tile wkp-tile" data-info={item.info || undefined}>

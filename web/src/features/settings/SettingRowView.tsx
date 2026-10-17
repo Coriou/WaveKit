@@ -3,6 +3,11 @@
 // for waiting, error, warning and locked values.
 import { useEffect, useId, useRef, useState, type CSSProperties } from "react"
 
+import {
+	rampGradient,
+	themeColors,
+	type WaterfallName,
+} from "../../spectrum/ramp.ts"
 import { Chip } from "../../ui/Chip.tsx"
 import { Seg } from "../../ui/Seg.tsx"
 import { Switch } from "../../ui/Switch.tsx"
@@ -34,7 +39,12 @@ const WIDE_SEG_CHARS = 22
 /** Wide rows put their control under the label: text, chips, sliders and long segmented controls. */
 function isWide(row: SettingRow, phone: boolean): boolean {
 	const w = row.widget
-	if (w.kind === "text" || w.kind === "chips" || w.kind === "slider")
+	if (
+		w.kind === "text" ||
+		w.kind === "chips" ||
+		w.kind === "slider" ||
+		w.kind === "ramp"
+	)
 		return true
 	// a phone keeps labels on one line: steppers and selects go under them
 	if (phone && (w.kind === "stepper" || w.kind === "select")) return true
@@ -309,6 +319,93 @@ function Control({
 					{...(phone ? { size: "lg" as const } : {})}
 				/>
 			)
+		case "ramp": {
+			// strips drawn from the scope's own ground and accent (the row re-renders on a theme change)
+			const colors =
+				typeof document === "undefined"
+					? null
+					: themeColors(document.documentElement)
+			return (
+				<div
+					role="radiogroup"
+					{...aria}
+					className="wkf-set-ramps"
+					onKeyDown={e => {
+						const keys: Record<string, number> = {
+							ArrowRight: 1,
+							ArrowDown: 1,
+							ArrowLeft: -1,
+							ArrowUp: -1,
+						}
+						const d = keys[e.key]
+						if (d === undefined || disabled) return
+						e.preventDefault()
+						const i = w.options.findIndex(o => o.value === value)
+						const n = w.options.length
+						const next = w.options[(i + d + n) % n]
+						if (!next) return
+						onChange(next.value)
+						const host = e.currentTarget
+						requestAnimationFrame(() =>
+							host
+								.querySelector<HTMLElement>(`[data-value="${next.value}"]`)
+								?.focus(),
+						)
+					}}
+				>
+					{w.options.map(o => {
+						const on = o.value === value
+						return (
+							<button
+								key={o.value}
+								type="button"
+								role="radio"
+								aria-checked={on}
+								data-value={o.value}
+								tabIndex={on ? 0 : -1}
+								className="wkf-set-ramp"
+								disabled={disabled || o.disabled !== undefined}
+								onClick={() => onChange(o.value)}
+							>
+								<span className="wkf-set-ramp-ring">
+									<span
+										aria-hidden="true"
+										className="wkf-set-ramp-strip"
+										style={
+											colors
+												? {
+														background: rampGradient(
+															o.value as WaterfallName,
+															colors,
+														),
+													}
+												: undefined
+										}
+									/>
+								</span>
+								<span className="wkf-set-ramp-label">
+									<svg
+										width="11"
+										height="11"
+										viewBox="0 0 24 24"
+										fill="none"
+										stroke="currentColor"
+										strokeWidth="3"
+										strokeLinecap="round"
+										strokeLinejoin="round"
+										aria-hidden="true"
+										style={{ opacity: on ? 1 : 0 }}
+									>
+										<path d="M5 12l5 5l10 -10" />
+									</svg>
+									<span>{o.label}</span>
+								</span>
+							</button>
+						)
+					})}
+				</div>
+			)
+		}
 		case "select":
 			return (
 				<select

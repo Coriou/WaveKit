@@ -120,6 +120,11 @@
 		border-radius: 50%;
 		background: var(--wk-accent);
 	}
+	.wkp-swatch-ramp {
+		position: absolute;
+		inset: 9px 4px;
+		border-radius: 3px;
+	}
 	.wkp-text {
 		flex: 1;
 		min-width: 0;

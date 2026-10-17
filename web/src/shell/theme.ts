@@ -1,4 +1,5 @@
-// Theme controller: data-wk-theme / data-wk-ground / data-wk-accent on <html>, persisted in localStorage.
+// Theme controller: data-wk-theme / data-wk-ground / data-wk-accent / data-wk-waterfall on <html>, persisted in
+// localStorage.
 // Pure apart from the storage and element passed in, so the persistence logic tests in node with fakes.
 
 export const THEMES = ["dark", "light"] as const
@@ -11,16 +12,22 @@ export type Ground = (typeof GROUNDS)[number]
 export const ACCENTS = ["phosphor", "ice", "violet", "coral", "mono"] as const
 export type Accent = (typeof ACCENTS)[number]
 
+/** Waterfall colours (DESIGN.md "Waterfall colours"): Match accent builds the ramp from the ground and accent. */
+export const WATERFALLS = ["match", "amber", "mono", "classic"] as const
+export type Waterfall = (typeof WATERFALLS)[number]
+
 export interface ThemePrefs {
 	readonly theme: ThemeName
 	readonly ground: Ground
 	readonly accent: Accent
+	readonly waterfall: Waterfall
 }
 
 export const DEFAULT_THEME: ThemePrefs = {
 	theme: "dark",
 	ground: "black",
 	accent: "mono",
+	waterfall: "match",
 }
 export const THEME_STORAGE_KEY = "wavekit.web.theme"
 
@@ -59,6 +66,7 @@ export function parseThemePrefs(raw: string | null): ThemePrefs {
 		theme: pick(THEMES, o["theme"], DEFAULT_THEME.theme),
 		ground: pick(GROUNDS, o["ground"], DEFAULT_THEME.ground),
 		accent: pick(ACCENTS, o["accent"], DEFAULT_THEME.accent),
+		waterfall: pick(WATERFALLS, o["waterfall"], DEFAULT_THEME.waterfall),
 	}
 }
 
@@ -86,16 +94,21 @@ export function saveThemePrefs(
 	}
 }
 
+export type ThemeAttribute =
+	| "data-wk-theme"
+	| "data-wk-ground"
+	| "data-wk-accent"
+	| "data-wk-waterfall"
+
 /** The scope attributes for prefs. Light always renders on the paper ground; the dark ground is still remembered. */
 export function themeAttributes(
 	prefs: ThemePrefs,
-): Readonly<
-	Record<"data-wk-theme" | "data-wk-ground" | "data-wk-accent", string>
-> {
+): Readonly<Record<ThemeAttribute, string>> {
 	return {
 		"data-wk-theme": prefs.theme,
 		"data-wk-ground": prefs.theme === "light" ? "paper" : prefs.ground,
 		"data-wk-accent": prefs.accent,
+		"data-wk-waterfall": prefs.waterfall,
 	}
 }
 
@@ -131,7 +144,8 @@ export class ThemeStore {
 		if (
 			next.theme === this.#prefs.theme &&
 			next.ground === this.#prefs.ground &&
-			next.accent === this.#prefs.accent
+			next.accent === this.#prefs.accent &&
+			next.waterfall === this.#prefs.waterfall
 		)
 			return
 		this.#prefs = next

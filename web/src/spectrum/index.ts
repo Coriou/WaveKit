@@ -22,7 +22,12 @@ export {
 export {
 	rampFromTheme,
 	matchAccentRamp,
+	rampGradient,
 	themeColors,
+	waterfallRamp,
+	waterfallStops,
+	WATERFALL_NAMES,
+	type WaterfallName,
 	parseCssColor,
 } from "./ramp.ts"
 export { byteToDb, dbToByte } from "./codec.ts"

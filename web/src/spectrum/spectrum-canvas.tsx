@@ -45,6 +45,7 @@ const THEME_ATTRIBUTES = [
 	"data-wk-theme",
 	"data-wk-accent",
 	"data-wk-ground",
+	"data-wk-waterfall",
 	"class",
 	"style",
 ]

@@ -16,10 +16,12 @@ import type { DrawerId, ShellState, ViewId } from "../../shell/store.ts"
 import {
 	ACCENTS,
 	GROUNDS,
+	WATERFALLS,
 	type Accent,
 	type Ground,
 	type ThemeName,
 	type ThemePrefs,
+	type Waterfall,
 } from "../../shell/theme.ts"
 import { formatDb, formatMHz, formatRate, formatWidth } from "../format.ts"
 import type { Preset } from "../scanner/planner/plan.ts"
@@ -98,6 +100,7 @@ export type ScopeId =
 	| "theme"
 	| "ground"
 	| "accent"
+	| "waterfall"
 	| "saved"
 	| "save"
 	| "go"
@@ -151,6 +154,10 @@ export const SCOPES: Readonly<Record<ScopeId, ScopeMeta>> = {
 	theme: { title: "Theme", placeholder: "Choose a theme" },
 	ground: { title: "Dark ground", placeholder: "Choose the dark ground" },
 	accent: { title: "Accent", placeholder: "Choose an accent" },
+	waterfall: {
+		title: "Waterfall colours",
+		placeholder: "Choose the waterfall colours",
+	},
 	saved: { title: "Saved frequencies", placeholder: "Find a saved frequency" },
 	save: { title: "Save", placeholder: "Name it, then pick a group", raw: true },
 	go: { title: "Go to", placeholder: "Choose a view" },
@@ -161,7 +168,14 @@ export const SCOPES: Readonly<Record<ScopeId, ScopeMeta>> = {
 }
 
 /** Scopes whose values are found from the root ("amber" → Accent › …, "graphite" → Dark ground › Graphite). */
-const DEEP: readonly ScopeId[] = ["mode", "step", "theme", "ground", "accent"]
+const DEEP: readonly ScopeId[] = [
+	"mode",
+	"step",
+	"theme",
+	"ground",
+	"accent",
+	"waterfall",
+]
 
 /** Applied while the row is highlighted; Enter keeps it, Esc reverts. Only local, side-effect-free state. */
 export type Preview =
@@ -244,6 +258,8 @@ export interface Swatch {
 	readonly accent: Accent
 	/** System: half dark, half paper. */
 	readonly split?: boolean
+	/** A waterfall ramp strip instead of the accent dot. */
+	readonly ramp?: Waterfall
 }
 
 export interface PaletteItem {
@@ -324,6 +340,12 @@ const GROUND_OPTS: Readonly<Record<Ground, readonly [string, string]>> = {
 	ink: ["Ink", "Tinted by the accent"],
 	graphite: ["Graphite", "Neutral grey"],
 	black: ["True black", "Pure black plot, for OLED screens"],
+}
+const WATERFALL_OPTS: Readonly<Record<Waterfall, readonly [string, string]>> = {
+	match: ["Match accent", "Built from the ground and the accent"],
+	amber: ["Amber", "Warm, from violet to gold"],
+	mono: ["Mono", "Greyscale"],
+	classic: ["Classic", "Blue to red heat, like SDR++"],
 }
 const ACCENT_LABEL: Readonly<Record<Accent, string>> = {
 	phosphor: "Phosphor",
@@ -741,7 +763,7 @@ export class PaletteModel {
 	}
 
 	#themeItem(
-		key: "theme" | "ground" | "accent",
+		key: "theme" | "ground" | "accent" | "waterfall",
 		value: string,
 		title: string,
 		sub: string,
@@ -750,19 +772,33 @@ export class PaletteModel {
 		const t = this.#c.theme
 		const patch = { [key]: value } as Partial<ThemePrefs>
 		const label =
-			key === "theme" ? "Theme" : key === "ground" ? "Dark ground" : "Accent"
+			key === "theme"
+				? "Theme"
+				: key === "ground"
+					? "Dark ground"
+					: key === "waterfall"
+						? "Waterfall colours"
+						: "Accent"
 		const from =
 			key === "theme"
 				? (THEME_OPTS.find(o => o[0] === t.theme)?.[1] ?? t.theme)
 				: key === "ground"
 					? GROUND_OPTS[t.ground][0]
-					: ACCENT_LABEL[t.accent]
+					: key === "waterfall"
+						? WATERFALL_OPTS[t.waterfall][0]
+						: ACCENT_LABEL[t.accent]
 		return {
 			id: `${key}:${value}`,
 			title,
 			sub,
 			glyph:
-				key === "accent" ? "palette" : key === "ground" ? "ground" : "theme",
+				key === "accent"
+					? "palette"
+					: key === "ground"
+						? "ground"
+						: key === "waterfall"
+							? "waterfall"
+							: "theme",
 			swatch,
 			cur: t[key] === value,
 			action: { kind: "theme", patch },
@@ -806,6 +842,24 @@ export class PaletteModel {
 				ground: t.theme === "light" ? "paper" : t.ground,
 				accent: a,
 			}),
+		)
+	}
+
+	waterfallItems(): PaletteItem[] {
+		const t = this.#c.theme
+		return WATERFALLS.map(w =>
+			this.#themeItem(
+				"waterfall",
+				w,
+				WATERFALL_OPTS[w][0],
+				WATERFALL_OPTS[w][1],
+				{
+					theme: t.theme,
+					ground: t.theme === "light" ? "paper" : t.ground,
+					accent: t.accent,
+					ramp: w,
+				},
+			),
 		)
 	}
 
@@ -898,6 +952,8 @@ export class PaletteModel {
 				return this.groundItems()
 			case "accent":
 				return this.accentItems()
+			case "waterfall":
+				return this.waterfallItems()
 			case "saved": {
 				const here = this.savedHere()
 				return [
@@ -1414,6 +1470,14 @@ export class PaletteModel {
 				keys: ["colour", "color", "highlight", "tint"],
 				scope: "accent",
 			},
+			{
+				id: "scope:waterfall",
+				title: "Waterfall colours",
+				glyph: "waterfall",
+				value: WATERFALL_OPTS[c.theme.waterfall][0],
+				keys: ["palette", "colours", "colors", "heat", "ramp", "classic"],
+				scope: "waterfall",
+			},
 			this.activityItem(
 				[],
 				"activity",
@@ -1854,6 +1918,7 @@ const SETTING_LINK: Readonly<Record<string, string>> = {
 	"dev.theme": "scope:theme",
 	"dev.ground": "scope:ground",
 	"dev.accent": "scope:accent",
+	"dev.waterfall": "scope:waterfall",
 	"rx.gain": "scope:gain",
 	"rx.rate": "scope:rate",
 	"rx.biasT": "tog:biasT",
@@ -1881,6 +1946,7 @@ const VALUE_SCOPES: ReadonlySet<ScopeId> = new Set<ScopeId>([
 	"theme",
 	"ground",
 	"accent",
+	"waterfall",
 ])
 
 /** Where the cursor starts in a scope: on the current value of a value scope, else on the first row. */

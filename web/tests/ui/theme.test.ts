@@ -43,6 +43,7 @@ describe("theme prefs", () => {
 			theme: "dark",
 			ground: "black",
 			accent: "mono",
+			waterfall: "match",
 		})
 		expect(loadThemePrefs(null)).toEqual(DEFAULT_THEME)
 		expect(loadThemePrefs(new FakeStorage())).toEqual(DEFAULT_THEME)
@@ -55,7 +56,12 @@ describe("theme prefs", () => {
 			parseThemePrefs(
 				JSON.stringify({ theme: "light", ground: "neon", accent: 3 }),
 			),
-		).toEqual({ theme: "light", ground: "black", accent: "mono" })
+		).toEqual({
+			theme: "light",
+			ground: "black",
+			accent: "mono",
+			waterfall: "match",
+		})
 	})
 
 	it("survives a storage that throws", () => {
@@ -73,6 +79,7 @@ describe("theme prefs", () => {
 				theme: "dark",
 				ground: "graphite",
 				accent: "violet",
+				waterfall: "classic",
 			}),
 		).toBe(true)
 		expect(st.data.has(THEME_STORAGE_KEY)).toBe(true)
@@ -80,16 +87,23 @@ describe("theme prefs", () => {
 			theme: "dark",
 			ground: "graphite",
 			accent: "violet",
+			waterfall: "classic",
 		})
 	})
 
 	it("light renders on paper but remembers the dark ground", () => {
 		expect(
-			themeAttributes({ theme: "light", ground: "ink", accent: "coral" }),
+			themeAttributes({
+				theme: "light",
+				ground: "ink",
+				accent: "coral",
+				waterfall: "amber",
+			}),
 		).toEqual({
 			"data-wk-theme": "light",
 			"data-wk-ground": "paper",
 			"data-wk-accent": "coral",
+			"data-wk-waterfall": "amber",
 		})
 	})
 })
@@ -107,6 +121,7 @@ describe("ThemeStore", () => {
 			"data-wk-theme": "dark",
 			"data-wk-ground": "ink",
 			"data-wk-accent": "phosphor",
+			"data-wk-waterfall": "match",
 		})
 
 		let calls = 0
@@ -118,6 +133,7 @@ describe("ThemeStore", () => {
 			theme: "light",
 			ground: "ink",
 			accent: "phosphor",
+			waterfall: "match",
 		})
 
 		store.set({ theme: "light" })
