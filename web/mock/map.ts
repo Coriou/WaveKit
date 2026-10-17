@@ -688,6 +688,8 @@ export interface MapMockContext {
 	tickMs?: number
 	/** Fleet multiplier for load tests (WAVEKIT_MOCK_LOAD): each entity gets `load - 1` seeded copies. Default 1. */
 	load?: number
+	/** Aircraft updates per aircraft per step, spread over the step (the core sends one per SBS message). Default 1. */
+	adsbRate?: number
 }
 
 /** `items` plus `load - 1` copies of each, made distinct by `copy(item, k)` (k from 1). */
@@ -724,6 +726,7 @@ export function registerMapMock(
 	const t = () => (now() - startedAt) / 1000
 
 	const load = ctx.load ?? 1
+	const adsbRate = Math.max(1, Math.floor(ctx.adsbRate ?? 1))
 	const aircraft = multiplyFleet(makeAircraft(), load, (a, k) => ({
 		...a,
 		icao: hexSuffix(a.icao, k),
@@ -1254,6 +1257,19 @@ export function registerMapMock(
 			}
 			bump(key, at)
 			ctx.broadcast("aircraft", "aircraft:update", aircraftState(a, at))
+			for (let j = 1; j < adsbRate; j++)
+				setTimeout(
+					() => {
+						const later = now()
+						bump(key, later)
+						ctx.broadcast(
+							"aircraft",
+							"aircraft:update",
+							aircraftState(a, later),
+						)
+					},
+					(j * (ctx.tickMs ?? 1000)) / adsbRate,
+				).unref()
 		}
 		if (step % 10 === 0)
 			ctx.broadcast("aircraft", "aircraft:stats", aircraftStats(allAircraft()))

@@ -6,6 +6,8 @@ import type { AccessState, ApiClientOptions, FetchLike } from "./api-client.ts"
 import { ApiClient, errorMessage } from "./api-client.ts"
 import type { ConnectionState, SocketFactory } from "./events-client.ts"
 import { EventsClient } from "./events-client.ts"
+import type { WorkerLike } from "./events-relay.ts"
+import { workerSocketFactory } from "./events-relay.ts"
 import type { Fleets } from "./fleets.ts"
 import { createFleets } from "./fleets.ts"
 import { BandplanStore } from "./bandplan-store.ts"
@@ -77,11 +79,19 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 	if (options.baseUrl !== undefined) apiOptions.baseUrl = options.baseUrl
 	if (options.fetch !== undefined) apiOptions.fetch = options.fetch
 	const api = new ApiClient(apiOptions)
+	// the /ws socket lives in a worker that coalesces fleet updates (events-relay.ts)
+	const createSocket =
+		options.createSocket ??
+		workerSocketFactory(
+			() =>
+				new Worker(new URL("./events.worker.ts", import.meta.url), {
+					type: "module",
+					name: "wavekit-events",
+				}) as unknown as WorkerLike,
+		)
 	const events = new EventsClient({
 		...(options.wsUrl !== undefined ? { url: options.wsUrl } : {}),
-		...(options.createSocket !== undefined
-			? { createSocket: options.createSocket }
-			: {}),
+		...(createSocket !== null ? { createSocket } : {}),
 	})
 	const access = new Store<AccessStoreState>({ access: null, error: null })
 	const connection = new Store<ConnectionState>(events.state)

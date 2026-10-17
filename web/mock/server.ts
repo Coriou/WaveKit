@@ -87,6 +87,8 @@ export interface MockServerOptions {
 	messageIntervalMs?: number
 	/** Load multiplier for performance work: fleets × load, decoder messages × load. Default 1. */
 	load?: number
+	/** Aircraft updates per aircraft per second (WAVEKIT_MOCK_ADSB_RATE). Default 1. */
+	adsbRate?: number
 }
 
 export interface MockServer {
@@ -1218,6 +1220,7 @@ export async function buildMockServer(
 	// --- Map (./map.ts): aircraft, vessels, APRS, mesh and coverage around the Settings station.
 	const map = registerMapMock(app, {
 		load,
+		...(options.adsbRate !== undefined ? { adsbRate: options.adsbRate } : {}),
 		broadcast: (channel, type, data) => broadcast(channel, type, data),
 		station: () => {
 			const st = settings.station()
@@ -1990,12 +1993,14 @@ async function main(): Promise<void> {
 	const audioPortEnv = env["WAVEKIT_MOCK_AUDIO_PORT"]
 	const audioOrigin = env["WAVEKIT_MOCK_AUDIO_ORIGIN"]
 	const loadEnv = env["WAVEKIT_MOCK_LOAD"]
+	const adsbEnv = env["WAVEKIT_MOCK_ADSB_RATE"]
 	const server = await buildMockServer({
 		host: env["WAVEKIT_MOCK_HOST"] ?? "127.0.0.1",
 		port,
 		...(audioPortEnv !== undefined ? { audioPort: Number(audioPortEnv) } : {}),
 		...(audioOrigin !== undefined ? { audioOrigin } : {}),
 		...(loadEnv !== undefined ? { load: Number(loadEnv) } : {}),
+		...(adsbEnv !== undefined ? { adsbRate: Number(adsbEnv) } : {}),
 	})
 	const { apiUrl, audioUrl } = await server.listen()
 	// WAVEKIT_MOCK_RELAY_CLIENT=1: an SDR++ client on the relay holds the tuner (Receiver lock state)

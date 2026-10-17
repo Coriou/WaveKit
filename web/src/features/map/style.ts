@@ -48,6 +48,7 @@ export const SRC = {
 	approx: "wk-approx",
 	links: "wk-links",
 	trails: "wk-trails",
+	trailHeads: "wk-trail-heads",
 	items: "wk-items",
 } as const
 
@@ -66,8 +67,24 @@ export const LAYER = {
 	places: "wk-places",
 	links: "wk-links",
 	trails: "wk-trails",
+	trailHeads: "wk-trail-heads",
 	items: "wk-items",
 } as const
+
+/** Trail lines (bodies and heads share the look). */
+function trailLayer(id: string, source: string): LayerSpecification {
+	return {
+		id,
+		type: "line",
+		source,
+		layout: { "line-cap": "round", "line-join": "round" },
+		paint: {
+			"line-color": ["get", "c"],
+			"line-opacity": ["get", "a"],
+			"line-width": 1.5,
+		},
+	}
+}
 
 const EMPTY = { type: "FeatureCollection", features: [] } as const
 
@@ -288,17 +305,8 @@ export function buildStyle(
 				"line-dasharray": [3, 3],
 			},
 		},
-		{
-			id: LAYER.trails,
-			type: "line",
-			source: SRC.trails,
-			layout: { "line-cap": "round", "line-join": "round" },
-			paint: {
-				"line-color": ["get", "c"],
-				"line-opacity": ["get", "a"],
-				"line-width": 1.5,
-			},
-		},
+		trailLayer(LAYER.trails, SRC.trails),
+		trailLayer(LAYER.trailHeads, SRC.trailHeads),
 		{
 			id: LAYER.items,
 			type: "symbol",
@@ -324,6 +332,7 @@ export function buildStyle(
 			[SRC.approx]: { type: "geojson", data: EMPTY },
 			[SRC.links]: { type: "geojson", data: EMPTY },
 			[SRC.trails]: { type: "geojson", data: EMPTY },
+			[SRC.trailHeads]: { type: "geojson", data: EMPTY },
 			[SRC.items]: { type: "geojson", data: EMPTY },
 		},
 		layers,

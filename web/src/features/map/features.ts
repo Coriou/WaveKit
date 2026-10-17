@@ -133,11 +133,12 @@ const TRAIL_ALPHA = [0.5, 0.28, 0.1] as const
 
 /**
  * A trail as three segments from the predicted head back over the span (newest the most opaque). Points come
- * from the item's trail (core track or positions seen since the page opened).
+ * from the item's trail (core track or positions seen since the page opened). Without a head the trail ends at
+ * its newest point; trailHead() then draws the rest, so the body can be pushed less often than the markers.
  */
 export function trailSegments(
 	it: MapItem,
-	head: LatLon,
+	head: LatLon | null,
 	now: number,
 	colour: string,
 ): Feature[] {
@@ -146,10 +147,9 @@ export function trailSegments(
 	const from = now - span
 	const pts = it.trail.filter(p => p.at >= from)
 	if (pts.length === 0) return []
-	const line: { lon: number; lat: number; at: number }[] = [
-		...pts,
-		{ lat: head.lat, lon: head.lon, at: now },
-	]
+	const line: { lon: number; lat: number; at: number }[] = head
+		? [...pts, { lat: head.lat, lon: head.lon, at: now }]
+		: pts
 	const out: Feature[] = []
 	for (let k = 0; k < 3; k++) {
 		const t1 = now - (span * k) / 3
@@ -167,6 +167,30 @@ export function trailSegments(
 		})
 	}
 	return out
+}
+
+/** The trail's newest point within its span, where a body drawn without a head ends; null without one. */
+export function trailEnd(it: MapItem, now: number): LatLon | null {
+	const span = TRAIL_SPAN_MS[it.kind]
+	const last = it.trail[it.trail.length - 1]
+	return span > 0 && last && last.at >= now - span
+		? { lat: last.lat, lon: last.lon }
+		: null
+}
+
+/** The stretch from a trail body's end to the predicted head, drawn like the newest segment. */
+export function trailHead(from: LatLon, head: LatLon, colour: string): Feature {
+	return {
+		type: "Feature",
+		properties: { c: colour, a: TRAIL_ALPHA[0] },
+		geometry: {
+			type: "LineString",
+			coordinates: [
+				[from.lon, from.lat],
+				[head.lon, head.lat],
+			],
+		},
+	}
 }
 
 const DRAW_ORDER: Readonly<Record<MapItem["kind"], number>> = {
