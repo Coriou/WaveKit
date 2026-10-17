@@ -94,7 +94,10 @@ async function holdPorts(count: number): Promise<Server[]> {
 	const held: Server[] = []
 	const ports = new Set<number>()
 	for (let attempt = 0; held.length < count; attempt += 1) {
-		if (attempt >= 200) throw new Error("No free test port after 200 attempts")
+		if (attempt >= 200) {
+			await Promise.all(held.map(closeServer))
+			throw new Error("No free test port after 200 attempts")
+		}
 		const port = 24000 + Math.floor(Math.random() * 6000)
 		if (ports.has(port)) continue
 		const server = createServer((_request, response) => {
