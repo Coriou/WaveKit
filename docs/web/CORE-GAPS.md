@@ -29,6 +29,9 @@ batches 1–2, scanner follow-ups batch 1, browser access batch 1): 19 ticked, 1
 texts rewritten, 27 still open with no core work; both owner decisions are settled; a new section at
 the end lists what core now provides that the canvas does not draw. Default deployment still runs
 `access.mode: legacy`, so band-plan writes, operator presets and operator data stay *protected mode only*.
+Re-checked 2026-10-17 (evening) against `origin/main@2c7f0a3`: since `221c0a3` main only added the
+urgent coordination note on the session CSRF token, now applied in the web app (Access, below). Nothing to
+tick: the recording id on events, map tiles from core and batched `aircraft` frames are still open.
 
 **Owner to decide first** (core specs on main lock these; the web design differs)
 - Resolved 2026-10-12: activity categories. The decode-envelope spec was amended (req 4.4) to
@@ -210,6 +213,10 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   Partly (browser access batch 1, `docs/specs/core-access-policy/browser-access-batch1.md`):
   server-side pairing to renewal and revocation, `access.exposure: tls-termination`, an opt-in Caddy
   TLS compose profile, `make dev-protected`, machine-credential device list and revoke.
+  Web app (2026-10-17): reads `GET /api/access/session` at start, pairs with a one-time code from the
+  connection chip, renews at half the time left, keeps the CSRF token in memory and drops it on a 401;
+  checked against `make dev-protected` (pair 201, a preferences PATCH 200 with the token after a reload).
+  Still the gap: TLS / proxy acceptance and a default deployment with operator data.
 - [x] Device `name` / `kind` and `lastSeenAt` (hour resolution), set with
   `POST /api/access/devices/label` (WG2 §11).
 - [ ] A read-only access role (view spectrum, activity and scanner results; no receiver
