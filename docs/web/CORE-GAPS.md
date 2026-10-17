@@ -194,6 +194,16 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   the passive job (on by default, off on Pi 4-class hosts); ADS-B, AIS, ACARS, VDL2 and LoRa
   decodes never become discoveries. Activity rows now carry frequency and provenance, but no
   per-bucket summary exists.
+- [ ] Stable signal tracks on spectrum frames (web app, 2026-10-17): `spectrum:frame.tracks` are the
+  block's raw segments (`pipeline.ts`, `segs.map`): no id, no level, no age, so every flicker of
+  noise is a new "signal" and the app cannot keep a label on the same emission from one frame to
+  the next. The tracker already knows all of it (`TrackSnapshot`). Wanted per frame track: the
+  tracker's `trackId` (stable while the emission lasts, including across burst gaps), `snrDb` and
+  `peakDbfs` against the core's own floor and threshold, `firstSeenAt` (or `blocks`) and whether
+  the track has *surfaced* (passed the tracker's confirmation rules); `spur` alongside `iqImage`;
+  and, when the scanner has one, its identity (discovery id, best protocol and confidence level).
+  The app then labels the tuned and named signals, plus surfaced unknowns above a level, without
+  guessing from one frame (today it filters on its own: about 10 dB over the floor for about 1 s).
 
 **Event contract** (one replay contract, ROADMAP §4)
 - [ ] Live push with replay from a cursor for scanner events (scanner WS has none; clients
