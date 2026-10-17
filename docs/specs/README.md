@@ -60,6 +60,9 @@ Whichever skill or tool helps you write a design, save the result in the paths a
   folder protection, kept totals and delete leftover sweep; live audio that survives
   click-to-tune, a carrier-aware auto squelch, operator rate proof and the untracked-retune root
   cause; identify for analog voice and unavailable decoders (WG10)
+- [web-gaps-11](web-gaps-11/requirements.md): heard versus decoded, narrow digital trials and a
+  clean scan stop; passive guard recheck and scanner store CPU; configured gain on connect;
+  stable tracks on spectrum frames; IQ capture on detection replayed into identify (WG11)
 
 ## The three files
 
