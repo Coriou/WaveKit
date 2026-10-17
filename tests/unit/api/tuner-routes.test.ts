@@ -39,6 +39,8 @@ function createMockTunerController(state: TunerState) {
 			.mockImplementation((sourceId: string) =>
 				sourceId === state.sourceId ? state : undefined,
 			),
+		// WG10 req 2.8: the frequency route proves the held rate first.
+		proveSampleRateForFrequency: vi.fn().mockResolvedValue(false),
 		setFrequency: vi
 			.fn()
 			.mockImplementation((_sourceId: string, hz: number) => {

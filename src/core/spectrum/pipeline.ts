@@ -14,6 +14,7 @@ import type {
 	PipelineInput,
 	PipelineStats,
 	SettleMode,
+	TrackSnapshot,
 	TuningTrust,
 } from "./types.js"
 import { dcGuardBins, Detector, shortK, usableEdgeBins } from "./detector.js"
@@ -28,7 +29,12 @@ import type { ArtefactMasks, ArtefactSpurLine } from "./artefacts.js"
 import { ImpulseBlanker } from "./impulse-blanker.js"
 import { PROVISIONAL_WINDOW_MS, ProvisionalSpurs } from "./provisional-spurs.js"
 import type { BinRange } from "./provisional-spurs.js"
-import { untrackedRetuneAlarm } from "./retune-alarm.js"
+import {
+	classifyAlarm,
+	untrackedRetuneAlarm,
+	vanishedFeatures,
+} from "./retune-alarm.js"
+import type { AlarmSuspect } from "./retune-alarm.js"
 import type { PersistentFeature, SegmentRange } from "./retune-alarm.js"
 
 /**
@@ -61,6 +67,10 @@ const BURST_MAX_ON_MS = 15 // a burst block has the short path on for at most th
 const SPEC_PAD_BINS = 2
 const OVERLAP_EDOF_GAIN = 1.89 // Welch equivalent independent frames, Hann at 50 % overlap
 const PERSISTENT_TRACK_S = 10
+/** WG10 req 2.9: a track this far above the floor (best block SNR) is a strong transmission. */
+export const ALARM_STRONG_SNR_DB = 30
+/** WG10 req 2.9: tracks starting within this of a strong track's start are its images/IM lines. */
+export const ALARM_CO_BIRTH_S = 1
 const IMAGE_TOLERANCE_HZ = 1000
 const IMAGE_MIN_REJECTION_DB = 20
 const IMAGE_MAX_REJECTION_DB = 65
@@ -164,6 +174,21 @@ export class SpectrumPipeline {
 	private readonly mergedDb: Float32Array
 	private floorReady = false
 	private prevPersistent: PersistentFeature[] = []
+	/** WG10 req 2.9: open and just-closed tracks for the transmission-end classifier. */
+	private readonly trackInfo = new Map<
+		string,
+		{
+			centreHz: number
+			obwHz: number
+			startSample: number
+			maxSnrDb: number
+			closedBlock: number | null
+		}
+	>()
+	/** WG10 req 2.9: blocks finished (monotonic; ages trackInfo closes). */
+	private blocksSeen = 0
+	/** WG10 req 2.9: the previous block's alarm was a U8 mirror (a byte slip needs two in a row). */
+	private mirrorPending = false
 	private exclusionEdges: number[] = []
 	private rasterEdges: number[] = []
 	private masks: MasksInput = {
@@ -807,6 +832,11 @@ export class SpectrumPipeline {
 		}
 		const blockStart = s0 + this.blockIndex * this.blockSamples
 		const blockEnd = blockStart + this.blockSamples
+		this.blocksSeen++
+		for (const [id, t] of this.trackInfo) {
+			if (t.closedBlock !== null && t.closedBlock < this.blocksSeen - 1)
+				this.trackInfo.delete(id)
+		}
 		const gap =
 			frames < this.expectedFrames ||
 			this.gaps.some(g => g.start < blockEnd && g.end > blockStart)
@@ -874,6 +904,7 @@ export class SpectrumPipeline {
 		}
 
 		const segRanges = segs.map(s => this.segmentRf(s, ep))
+		let holdPersistent = false
 		if (
 			!gap &&
 			!overload &&
@@ -885,9 +916,49 @@ export class SpectrumPipeline {
 				visible: hz => this.visibleRf(hz, ep),
 			})
 			if (alarm) {
-				this.startUntrackedEpoch(ep, blockEnd, alarm.deltaHz)
-				return
-			}
+				const suspected = this.classify(ep, segRanges, alarm.deltaHz)
+				if (suspected === "signal-change") {
+					// No new epoch: the ended transmission's features leave the persistent set
+					// (held through this block so its trailing edge does not fire again).
+					holdPersistent = true
+					this.mirrorPending = false
+					const gone = new Set(
+						vanishedFeatures(this.prevPersistent, segRanges, {
+							toleranceHz: this.binHz,
+							visible: hz => this.visibleRf(hz, ep),
+						}),
+					)
+					this.prevPersistent = this.prevPersistent.filter(f => !gone.has(f))
+					this.out.push({
+						kind: "untracked-retune",
+						epoch: ep.epoch,
+						startSample: blockEnd,
+						deltaHz: null,
+						suspected,
+						newEpoch: false,
+					})
+				} else if (
+					suspected === "iq-byte-slip" &&
+					this.cfg.format === "U8_IQ" &&
+					!this.mirrorPending
+				) {
+					// First mirrored block: keep the old features and look again next block.
+					this.mirrorPending = true
+					holdPersistent = true
+				} else {
+					const realign =
+						suspected === "iq-byte-slip" && this.cfg.format === "U8_IQ"
+					this.mirrorPending = false
+					this.startUntrackedEpoch(
+						ep,
+						blockEnd,
+						alarm.deltaHz,
+						suspected,
+						realign,
+					)
+					return
+				}
+			} else this.mirrorPending = false
 		}
 
 		const learn = !gap && !overload
@@ -929,7 +1000,7 @@ export class SpectrumPipeline {
 			}),
 		)
 		this.tracker.trackBinsMask(this.lastTrackBins, 1)
-		if (!gap && !overload && !blanking.excluded)
+		if (!gap && !overload && !blanking.excluded && !holdPersistent)
 			this.prevPersistent = this.persistentFeatures(segRanges, ep)
 		if (learn) {
 			this.tracker.trackBinsMask(this.joined, 2)
@@ -1062,6 +1133,71 @@ export class SpectrumPipeline {
 		return this.detector.unmasked()[bin] === 1 && this.lineMask[bin] !== 1
 	}
 
+	/** WG10 req 2.9: remembers each track's start and best SNR; closes age out after two blocks. */
+	private noteTrack(t: TrackSnapshot, closed: boolean): void {
+		const prev = this.trackInfo.get(t.trackId)
+		this.trackInfo.set(t.trackId, {
+			centreHz: t.centreHz,
+			obwHz: t.obwHz,
+			startSample: t.startSample,
+			maxSnrDb: Math.max(prev?.maxSnrDb ?? -Infinity, t.maxBlockSnrDb),
+			closedBlock: closed ? this.blocksSeen : null,
+		})
+	}
+
+	/**
+	 * WG10 req 2.9: classify a fired alarm. A vanished feature "ended" when it is a strong track
+	 * (open, or closed in the previous block) or a track born within ALARM_CO_BIRTH_S of one
+	 * (its images and intermodulation lines). Features without a track (RF carriers) never count.
+	 */
+	private classify(
+		ep: EpochState,
+		segRanges: SegmentRange[],
+		deltaHz: number | null,
+	): AlarmSuspect {
+		const tol = this.binHz
+		const visible = (hz: number): boolean => this.visibleRf(hz, ep)
+		const vanished = vanishedFeatures(this.prevPersistent, segRanges, {
+			toleranceHz: tol,
+			visible,
+		})
+		const near = (f: PersistentFeature) =>
+			[...this.trackInfo.values()].filter(
+				t => Math.abs(t.centreHz - f.rfHz) <= Math.max(tol, t.obwHz / 2),
+			)
+		const strong = [...this.trackInfo.values()].filter(
+			t =>
+				t.maxSnrDb >= ALARM_STRONG_SNR_DB &&
+				(t.closedBlock !== null || vanished.some(f => near(f).includes(t))),
+		)
+		const coBirth = ALARM_CO_BIRTH_S * this.fs
+		// Co-birth is measured from the strong track's own start, and gives no credit to a strong
+		// track born in the epoch's first ALARM_CO_BIRTH_S (everything opens then) unless it has
+		// already closed (positive end evidence).
+		const startup = (ep.settledStart ?? 0) + coBirth
+		const credits = (s: (typeof strong)[number]): boolean =>
+			s.closedBlock !== null || s.startSample > startup
+		return classifyAlarm({
+			features: this.prevPersistent,
+			segments: segRanges,
+			centreHz: ep.centreHz,
+			toleranceHz: tol,
+			visible,
+			deltaHz,
+			ended: f =>
+				near(f).some(
+					t =>
+						strong.includes(t) ||
+						strong.some(
+							s =>
+								credits(s) &&
+								t.startSample >= s.startSample - coBirth &&
+								t.startSample <= s.startSample + coBirth,
+						),
+				),
+		})
+	}
+
 	/** Long-lived tracks and RF-fixed carriers present in this block (spec § 4.7). */
 	private persistentFeatures(
 		segRanges: SegmentRange[],
@@ -1094,6 +1230,8 @@ export class SpectrumPipeline {
 		ep: EpochState,
 		startSample: number,
 		deltaHz: number | null,
+		suspected: AlarmSuspect,
+		realign: boolean,
 	): void {
 		const epoch = ++this.epochCounter
 		const info = {
@@ -1117,7 +1255,14 @@ export class SpectrumPipeline {
 		this.noiseEdgeBlock = -1
 		this.lastTrackBins.fill(0)
 		this.startEpochState()
-		this.out.push({ kind: "untracked-retune", epoch, startSample, deltaHz })
+		this.out.push({
+			kind: "untracked-retune",
+			epoch,
+			startSample,
+			deltaHz,
+			suspected,
+			...(realign ? { realign: true as const } : {}),
+		})
 		this.out.push({
 			kind: "epoch-started",
 			epoch,
@@ -1234,6 +1379,7 @@ export class SpectrumPipeline {
 					: this.detector.kFor(Math.min(this.n - 1, Math.max(0, bin)))
 				if (Math.abs(t.centreHz - ep.centreHz) - t.obwHz / 2 < this.dcGuardHz)
 					t.flags.obwBiased = true
+				this.noteTrack(t, e.kind === "track-close")
 				if (e.kind === "track-close" && t.blocks >= 2) {
 					this.knownRf.push({ rfHz: t.centreHz, obwHz: t.obwHz })
 					if (this.knownRf.length > KNOWN_RF_MAX) this.knownRf.shift()

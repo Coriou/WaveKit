@@ -63,7 +63,8 @@ describe("tuner REST writes carry origin rest (spec § 10.3)", () => {
 			payload,
 		})
 		expect(response.statusCode).toBe(200)
-		expect(origins).toEqual(["rest"])
+		// WG10 req 2.8: the first frequency also proves the declared rate (origin rest).
+		expect(origins).toEqual(path === "frequency" ? ["rest", "rest"] : ["rest"])
 	})
 
 	it("PATCH /api/tuner/rtl-1/config tags every command", async () => {

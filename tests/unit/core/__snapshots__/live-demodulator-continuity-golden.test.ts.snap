@@ -1,0 +1,399 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > keeps clients on an offset, gain or squelch change and closes them on a rate or format change 1`] = `
+[
+  "after keep-changes 1",
+  "closed client-1",
+  "after format 0 ended=true",
+  "closed client-2",
+  "after rate 0 ended=true",
+]
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: am bandwidth 1`] = `
+[
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr convert -i char -o float | csdr firdecimate 120 0.002083 --cutoff 0.3750",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr amdemod | csdr agc -f float -p fast -r 0.4 | csdr dcblock | csdr gain 2 | csdr limit | csdr convert -i float -o s16",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+]
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: default 1`] = `
+[
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr convert -i char -o float | csdr firdecimate 96 0.002604 --cutoff 0.3750",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr fmdemod | csdr dcblock | csdr gain 2 | csdr limit | csdr convert -i float -o s16",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+]
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: offset 1`] = `
+[
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr convert -i char -o float | csdr shift -0.0025000000 | csdr firdecimate 96 0.002604 --cutoff 0.3750",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr fmdemod | csdr dcblock | csdr gain 2 | csdr limit | csdr convert -i float -o s16",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+]
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: usb gain 1`] = `
+[
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr convert -i char -o float | csdr firdecimate 96 0.001562 --cutoff 0.5000",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr bandpass --fft --low 0.0000 --high 0.5000 0.05 | csdr realpart | csdr agc -f float -p fast -r 0.4 | csdr dcblock | csdr gain 5 | csdr limit | csdr convert -i float -o s16",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+]
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: wfm f32le 1`] = `
+[
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr convert -i char -o float | csdr firdecimate 96 0.002604 --cutoff 0.3750",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+  [
+    "/bin/sh",
+    [
+      "-c",
+      "csdr fmdemod | csdr dcblock | csdr gain 2 | csdr limit",
+    ],
+    [
+      "pipe",
+      "pipe",
+      "pipe",
+    ],
+    true,
+  ],
+]
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > served stream headers on /stream and /stream.wav 1`] = `
+{
+  "raw": {
+    "headers": {
+      "access-control-allow-origin": "*",
+      "access-control-expose-headers": "X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
+      "cache-control": "no-cache, no-store",
+      "connection": "keep-alive",
+      "content-type": "application/octet-stream",
+      "transfer-encoding": "chunked",
+      "x-audio-format": "s16le",
+      "x-channels": "1",
+      "x-sample-rate": "25000",
+    },
+    "status": 200,
+  },
+  "wav": {
+    "headers": {
+      "access-control-allow-origin": "*",
+      "access-control-expose-headers": "X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
+      "cache-control": "no-cache, no-store",
+      "connection": "keep-alive",
+      "content-type": "audio/wav",
+      "transfer-encoding": "chunked",
+      "x-audio-format": "s16le",
+      "x-channels": "1",
+      "x-sample-rate": "25000",
+    },
+    "status": 200,
+  },
+}
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > start, full restart and stop logs 1`] = `
+{
+  "restart": [
+    {
+      "component": "LiveDemodulator",
+      "level": 30,
+      "msg": "Restarting live demodulation pipeline",
+      "reason": "configuration changed",
+    },
+    {
+      "back": "csdr fmdemod | csdr dcblock | csdr gain 5 | csdr limit | csdr convert -i float -o s16",
+      "component": "LiveDemodulator",
+      "decimation": 96,
+      "effectiveSampleRate": 25000,
+      "front": "csdr convert -i char -o float | csdr firdecimate 96 0.002604 --cutoff 0.3750",
+      "level": 30,
+      "msg": "Starting live demodulation pipeline",
+      "offsetHz": 0,
+      "sourceId": "rtl-pi",
+    },
+  ],
+  "start": [
+    {
+      "back": "csdr fmdemod | csdr dcblock | csdr gain 2 | csdr limit | csdr convert -i float -o s16",
+      "component": "LiveDemodulator",
+      "decimation": 96,
+      "effectiveSampleRate": 25000,
+      "front": "csdr convert -i char -o float | csdr firdecimate 96 0.002604 --cutoff 0.3750",
+      "level": 30,
+      "msg": "Starting live demodulation pipeline",
+      "offsetHz": 0,
+      "sourceId": "rtl-pi",
+    },
+    {
+      "component": "LiveDemodulator",
+      "httpPort": 45678,
+      "level": 30,
+      "msg": "Live demodulator started",
+      "sourceId": "rtl-pi",
+    },
+  ],
+  "stop": [
+    {
+      "component": "LiveDemodulator",
+      "level": 30,
+      "msg": "Live demodulator stopped",
+    },
+  ],
+}
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while running and after stop 1`] = `
+{
+  "afterOffset": {
+    "agc": "off",
+    "bytesStreamed": 0,
+    "clientCount": 0,
+    "config": {
+      "audioFormat": "s16le",
+      "autoMarginDb": 6,
+      "bandwidth": 12500,
+      "deEmphasis": false,
+      "deEmphasisTau": 50,
+      "enabled": true,
+      "gain": 2,
+      "highPass": 0,
+      "httpPort": 45678,
+      "iqDcBlock": false,
+      "lowPass": 0,
+      "modulation": "nfm",
+      "noiseQuietingDb": 6,
+      "noiseReduction": "off",
+      "offsetHz": 6000,
+      "sourceId": "rtl-pi",
+      "squelch": 0,
+      "squelchMode": "manual",
+    },
+    "decimationFactor": 96,
+    "effectiveSampleRate": 25000,
+    "enabled": true,
+    "httpUrl": "http://localhost:45678/stream",
+    "pipelineHealth": "running",
+    "pipelineRestarts": 0,
+    "running": true,
+    "sourceConnected": true,
+    "sourceId": "rtl-pi",
+    "sourceIqSampleRate": 2400000,
+    "squelchOpen": true,
+    "thresholdDbfs": 0,
+    "toneSquelch": {
+      "state": "off",
+    },
+    "wavUrl": "http://localhost:45678/stream.wav",
+  },
+  "running": {
+    "agc": "off",
+    "bytesStreamed": 0,
+    "clientCount": 0,
+    "config": {
+      "audioFormat": "s16le",
+      "autoMarginDb": 6,
+      "bandwidth": 12500,
+      "deEmphasis": false,
+      "deEmphasisTau": 50,
+      "enabled": true,
+      "gain": 2,
+      "highPass": 0,
+      "httpPort": 45678,
+      "iqDcBlock": false,
+      "lowPass": 0,
+      "modulation": "nfm",
+      "noiseQuietingDb": 6,
+      "noiseReduction": "off",
+      "offsetHz": 0,
+      "sourceId": "rtl-pi",
+      "squelch": 0,
+      "squelchMode": "manual",
+    },
+    "decimationFactor": 96,
+    "effectiveSampleRate": 25000,
+    "enabled": true,
+    "httpUrl": "http://localhost:45678/stream",
+    "pipelineHealth": "running",
+    "pipelineRestarts": 0,
+    "running": true,
+    "sourceConnected": true,
+    "sourceId": "rtl-pi",
+    "sourceIqSampleRate": 2400000,
+    "squelchOpen": true,
+    "thresholdDbfs": 0,
+    "toneSquelch": {
+      "state": "off",
+    },
+    "wavUrl": "http://localhost:45678/stream.wav",
+  },
+  "stopped": {
+    "agc": "off",
+    "bytesStreamed": 0,
+    "clientCount": 0,
+    "config": {
+      "audioFormat": "s16le",
+      "autoMarginDb": 6,
+      "bandwidth": 12500,
+      "deEmphasis": false,
+      "deEmphasisTau": 50,
+      "enabled": true,
+      "gain": 2,
+      "highPass": 0,
+      "httpPort": 45678,
+      "iqDcBlock": false,
+      "lowPass": 0,
+      "modulation": "nfm",
+      "noiseQuietingDb": 6,
+      "noiseReduction": "off",
+      "offsetHz": 6000,
+      "sourceId": "rtl-pi",
+      "squelch": 0,
+      "squelchMode": "manual",
+    },
+    "decimationFactor": 96,
+    "effectiveSampleRate": 25000,
+    "enabled": true,
+    "httpUrl": "http://localhost:45678/stream",
+    "pipelineHealth": "stopped",
+    "pipelineRestarts": 0,
+    "running": false,
+    "sourceConnected": true,
+    "sourceId": "rtl-pi",
+    "sourceIqSampleRate": 2400000,
+    "wavUrl": "http://localhost:45678/stream.wav",
+  },
+}
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > stream headers and WAV header 1`] = `
+{
+  "headers": {
+    "Access-Control-Expose-Headers": "X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
+    "Cache-Control": "no-cache, no-store",
+    "X-Audio-Format": "s16le",
+    "X-Channels": "1",
+    "X-Sample-Rate": "25000",
+  },
+  "wav": "52494646ffffffff57415645666d74201000000001000100a861000050c300000200100064617461ffffffff",
+}
+`;
+
+exports[`LiveDemodulator WG10 goldens (frozen behaviour) > stream headers and WAV header 2`] = `
+{
+  "headers": {
+    "Access-Control-Expose-Headers": "X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
+    "Cache-Control": "no-cache, no-store",
+    "X-Audio-Format": "f32le",
+    "X-Channels": "1",
+    "X-Sample-Rate": "48000",
+  },
+  "wav": "52494646ffffffff57415645666d7420100000000300010080bb000000ee02000400200064617461ffffffff",
+}
+`;

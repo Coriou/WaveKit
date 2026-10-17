@@ -8,6 +8,7 @@
  * full scale |z| = 1), sample indices are absolute per source stream (§ 4.1).
  */
 import type { z } from "zod"
+import type { SpectrumWarningSuspect } from "@wavekit/api-types"
 
 export type TuningTrust = "commanded" | "relay" | "unverified"
 export type SettleMode = "marker" | "timer" | "none"
@@ -171,6 +172,23 @@ export type ObservationEndReason =
 	| "max-duration"
 	| "gap"
 
+/** Spec § 4.7: the scene moved without an observed command (WG10 req 2.9 fields optional). */
+export interface UntrackedRetuneEvent {
+	kind: "untracked-retune"
+	epoch: number
+	startSample: number
+	deltaHz: number | null
+	/** WG10 req 2.9: the alarm's classification (absent: `external-control`). */
+	suspected?: SpectrumWarningSuspect
+	/**
+	 * WG10 req 2.9: `false` for `signal-change` (no new epoch: the current epoch keeps its
+	 * label and `epoch` is the current one). Absent: a new unverified epoch started.
+	 */
+	newEpoch?: false
+	/** WG10 req 2.9: U8 mirror seen over two consecutive blocks: the engine re-aligns by one byte. */
+	realign?: true
+}
+
 // prettier-ignore
 export type PipelineEvent =
 	| { kind: "epoch-started"; epoch: number; startSample: number; settleMode: SettleMode; markerRunSamples?: number }
@@ -182,7 +200,7 @@ export type PipelineEvent =
 	| { kind: "block-summary"; summary: BlockSummary }
 	| { kind: "stats"; stats: PipelineStats }
 	/** Spec § 4.7: the scene moved without an observed command; a new unverified epoch starts at startSample. */
-	| { kind: "untracked-retune"; epoch: number; startSample: number; deltaHz: number | null }
+	| UntrackedRetuneEvent
 
 export interface PipelineConfig {
 	sourceId: string
