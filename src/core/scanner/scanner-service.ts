@@ -498,6 +498,8 @@ export class ScannerService extends EventEmitter {
 	private lastSnapshotAt = 0
 	/** The periodic snapshot still being written: no second clone + stringify while it lags. */
 	private snapshotInFlight = false
+	/** Maintenance still running behind a slow disk: the next one waits for it. */
+	private maintenanceInFlight = false
 	private lastMaintenanceAt = 0
 	private lastStatusAt = 0
 	private lastStatusJson = ""
@@ -4429,11 +4431,15 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		this.dirty = true
 		if (!this.stateLoaded) return
-		const appended = this.persistence.append(entry)
-		if (this.recordingAppends.has(entry))
-			this.recordingAppends.set(entry, appended)
+		// Recording operations (at most 16 in flight) are reserved: never refused by the byte cap.
+		const recording = this.recordingAppends.has(entry)
+		const appended = this.persistence.append(
+			entry,
+			recording ? { reserved: true } : {},
+		)
+		if (recording) this.recordingAppends.set(entry, appended)
 		void appended.catch((err: unknown) => {
-			// A full backlog is logged once by the persistence; the next snapshot carries the mutation.
+			// A full backlog is logged once per episode by the persistence; a later snapshot carries the mutation.
 			if (
 				err instanceof WaveKitError &&
 				err.code === SCANNER_JOURNAL_BACKLOG_CODE
@@ -4621,16 +4627,27 @@ export class ScannerService extends EventEmitter {
 			this.snapshotInFlight = true
 			this.persistence
 				.writeSnapshot(this.store.snapshot())
-				.catch((err: unknown) =>
-					this.log.warn({ err }, "Snapshot write failed"),
-				)
+				.catch((err: unknown) => {
+					// Refused journal lines rely on a later snapshot: retry at the next interval.
+					this.dirty = true
+					this.log.warn({ err }, "Snapshot write failed")
+				})
 				.finally(() => {
 					this.snapshotInFlight = false
 				})
 		}
-		if (now - this.lastMaintenanceAt >= MAINTENANCE_EVERY_MS) {
+		if (
+			!this.maintenanceInFlight &&
+			now - this.lastMaintenanceAt >= MAINTENANCE_EVERY_MS
+		) {
 			this.lastMaintenanceAt = now
-			this.track(this.maintenance(), "Scanner maintenance failed")
+			this.maintenanceInFlight = true
+			this.track(
+				this.maintenance().finally(() => {
+					this.maintenanceInFlight = false
+				}),
+				"Scanner maintenance failed",
+			)
 		}
 	}
 

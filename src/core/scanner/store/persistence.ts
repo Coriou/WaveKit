@@ -457,6 +457,7 @@ interface JournalBatch {
 	name: string
 	lines: string[]
 	bytes: number
+	minSeq: number
 	maxSeq: number
 	written: Promise<void>
 }
@@ -484,7 +485,12 @@ export class ScannerPersistence {
 	/** Journal lines and their bytes enqueued but not yet written or failed (`backlog()`). */
 	private queuedLines = 0
 	private queuedBytes = 0
-	private backlogFull = false
+	/** Highest and lowest refused seq not yet covered by a durable snapshot; lines above `holeFrom` are not written. */
+	private refusedMax: number | null = null
+	private holeFrom: number | null = null
+	private refusedCount = 0
+	/** lastSeq of the newest snapshot queued or written (null after it failed). */
+	private coverSeq: number | null = null
 	private readonly maxJournalBacklogBytes: number
 	private nextSeq = 1
 	private durableLastSeq = 0
@@ -587,28 +593,26 @@ export class ScannerPersistence {
 	/**
 	 * Group commit: lines appended while the chain is busy join one batch, written by a single
 	 * append when its turn comes, so a slow disk or a busy event loop cannot queue one chain step
-	 * per line. Fail closed past `maxJournalBacklogBytes`: the append is refused (the next snapshot
-	 * still carries the mutation) instead of growing the heap without bound.
+	 * per line. Fail closed past `maxJournalBacklogBytes`: the append is refused instead of growing
+	 * the heap without bound. A refused seq is a hole replay must never step over, so from then on
+	 * no later line is written, and appends stay refused, until a snapshot covering every refused
+	 * seq is queued (later lines then follow it) and written. `reserved` appends (recording
+	 * operations, at most 16 at a time) skip the byte cap but not the hole rule.
 	 */
-	append(entry: Omit<JournalEntry, "seq">): Promise<number> {
+	append(
+		entry: Omit<JournalEntry, "seq">,
+		opts: { reserved?: boolean } = {},
+	): Promise<number> {
 		if (!this.loaded) return Promise.reject(notLoaded())
 		const seq = this.nextSeq++
 		const line = `${JSON.stringify({ seq, at: entry.at, op: entry.op, payload: entry.payload })}\n`
-		if (this.queuedBytes + line.length > this.maxJournalBacklogBytes) {
-			if (!this.backlogFull) {
-				this.backlogFull = true
-				this.log.warn(
-					{ queuedBytes: this.queuedBytes, seq },
-					"Journal backlog full; refusing appends until it drains",
-				)
-			}
-			return Promise.reject(
-				new WaveKitError(
-					"Scanner journal backlog full",
-					SCANNER_JOURNAL_BACKLOG_CODE,
-				),
-			)
-		}
+		const overCap =
+			opts.reserved !== true &&
+			this.queuedBytes + line.length > this.maxJournalBacklogBytes
+		const uncovered =
+			this.refusedMax !== null &&
+			(this.coverSeq === null || this.coverSeq < this.refusedMax)
+		if (overCap || uncovered) return this.refuse(seq)
 		const name = journalName(this.now())
 		let batch = this.openBatch
 		if (batch === null || batch.name !== name) {
@@ -616,7 +620,8 @@ export class ScannerPersistence {
 				name,
 				lines: [],
 				bytes: 0,
-				maxSeq: 0,
+				minSeq: seq,
+				maxSeq: seq,
 				written: Promise.resolve(),
 			}
 			fresh.written = this.enqueue(() => this.writeBatch(fresh))
@@ -632,10 +637,55 @@ export class ScannerPersistence {
 		return batch.written.then(() => seq)
 	}
 
+	private refuse(seq: number): Promise<number> {
+		this.refusedMax = seq
+		this.holeFrom ??= seq
+		this.refusedCount += 1
+		this.openBatch = null // no batch spans a hole
+		if (this.refusedCount === 1)
+			this.log.warn(
+				{ seq, queuedBytes: this.queuedBytes },
+				"Journal backlog full; refusing appends until a snapshot covers them",
+			)
+		return Promise.reject(
+			new WaveKitError(
+				"Scanner journal backlog full",
+				SCANNER_JOURNAL_BACKLOG_CODE,
+			),
+		)
+	}
+
+	/** A durable snapshot up to `lastSeq` closes the hole it covers. */
+	private snapshotDurable(lastSeq: number): void {
+		this.durableLastSeq = Math.max(this.durableLastSeq, lastSeq)
+		if (this.refusedMax === null) return
+		if (lastSeq >= this.refusedMax) {
+			this.log.info(
+				{ refused: this.refusedCount, lastSeq },
+				"Journal hole covered by a snapshot; appends accepted again",
+			)
+			this.refusedMax = null
+			this.holeFrom = null
+			this.refusedCount = 0
+		} else if (this.holeFrom !== null && lastSeq >= this.holeFrom) {
+			// Some refused seq above lastSeq is still uncovered; stay conservative.
+			this.holeFrom = lastSeq + 1
+		}
+	}
+
 	private async writeBatch(batch: JournalBatch): Promise<void> {
 		if (this.openBatch === batch) this.openBatch = null
-		const text = batch.lines.join("")
 		this.queuedLines -= batch.lines.length
+		if (this.holeFrom !== null && batch.minSeq > this.holeFrom) {
+			// Behind an uncovered hole: never written (a later snapshot carries these mutations).
+			batch.lines = []
+			this.queuedBytes -= batch.bytes
+			throw new WaveKitError(
+				"Scanner journal backlog full",
+				SCANNER_JOURNAL_BACKLOG_CODE,
+			)
+		}
+		const text = batch.lines.join("")
 		batch.lines = []
 		const dir = join(this.root, JOURNAL_DIR)
 		const path = join(dir, batch.name)
@@ -657,10 +707,6 @@ export class ScannerPersistence {
 			)
 		} finally {
 			this.queuedBytes -= batch.bytes
-			if (this.backlogFull && this.queuedBytes === 0) {
-				this.backlogFull = false
-				this.log.info("Journal backlog drained; appends accepted again")
-			}
 		}
 		this.fileMaxSeq.set(
 			batch.name,
@@ -698,13 +744,20 @@ export class ScannerPersistence {
 		const slot: SnapshotSlot = { text, lastSeq, successor: null }
 		const superseded = this.queuedSnapshot
 		this.queuedSnapshot = slot
+		this.coverSeq = lastSeq
 		const own = this.enqueue(async () => {
 			if (this.queuedSnapshot === slot) this.queuedSnapshot = null
 			const body = slot.text
 			if (body === null) return
 			slot.text = null
-			await atomicWrite(join(this.root, SNAPSHOT_FILE), body)
-			this.durableLastSeq = Math.max(this.durableLastSeq, slot.lastSeq)
+			try {
+				await atomicWrite(join(this.root, SNAPSHOT_FILE), body)
+			} catch (err) {
+				// Lines queued after this snapshot no longer follow a covering one.
+				if (this.coverSeq === slot.lastSeq) this.coverSeq = null
+				throw err
+			}
+			this.snapshotDurable(slot.lastSeq)
 		})
 		const done = own.then(() => slot.successor ?? undefined)
 		if (superseded) {
@@ -720,6 +773,7 @@ export class ScannerPersistence {
 		snapshotBytes: number
 		journalLines: number
 		journalBytes: number
+		refusedLines: number
 	} {
 		const text = this.queuedSnapshot?.text ?? null
 		return {
@@ -727,6 +781,7 @@ export class ScannerPersistence {
 			snapshotBytes: text === null ? 0 : text.length,
 			journalLines: this.queuedLines,
 			journalBytes: this.queuedBytes,
+			refusedLines: this.refusedCount,
 		}
 	}
 

@@ -96,6 +96,7 @@ describe("ScannerPersistence bounded backlog", () => {
 				snapshotBytes: 0,
 				journalLines: 0,
 				journalBytes: 0,
+				refusedLines: 0,
 			})
 			const loaded = await new ScannerPersistence({
 				dir,
@@ -138,7 +139,7 @@ describe("ScannerPersistence bounded backlog", () => {
 		})
 	})
 
-	it("refuses appends past the backlog cap (fail closed) and accepts again once drained", async () => {
+	it("refuses appends past the backlog cap and keeps refusing until a snapshot covers the hole", async () => {
 		await withDir(async dir => {
 			const stall = stalledAppend()
 			const cap = 4_000
@@ -172,16 +173,71 @@ describe("ScannerPersistence bounded backlog", () => {
 				}
 			}
 			expect(refused).toBeGreaterThan(150)
-			expect(seqs.length).toBeGreaterThan(1)
-			expect(p.backlog().journalBytes).toBe(0)
-			const after = await p.append(entry())
-			expect(after).toBe(202)
+			// Only the lines before the first refusal were written: no line past the hole.
+			expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, i) => i + 1))
+			expect(p.backlog()).toMatchObject({
+				journalBytes: 0,
+				refusedLines: refused,
+			})
+			// Drained, but the hole is still uncovered: refused until a snapshot covers it.
+			await expect(p.append(entry())).rejects.toMatchObject({
+				code: SCANNER_JOURNAL_BACKLOG_CODE,
+			})
+			const covered = p.writeSnapshot(snapshot(7))
+			const after = p.append(entry())
+			await covered
+			expect(await after).toBe(203)
+			expect(p.backlog().refusedLines).toBe(0)
 			const loaded = await new ScannerPersistence({
 				dir,
 				logger,
 				now: () => T0,
 			}).load()
-			expect(loaded.entries.map(e => e.seq)).toEqual([...seqs, 202])
+			expect(loaded.lastSeq).toBe(202)
+			expect(loaded.entries.map(e => e.seq)).toEqual([203])
+		})
+	})
+
+	it("never writes a line queued behind a superseded covering snapshot", async () => {
+		await withDir(async dir => {
+			const stall = stalledAppend()
+			const p = new ScannerPersistence({
+				dir,
+				logger,
+				now: () => T0,
+				appendFile: stall.fn,
+				maxJournalBacklogBytes: 1,
+			})
+			await p.load()
+			// A reserved (recording) append skips the byte cap; the next plain one is refused.
+			const first = p.append(entry(), { reserved: true })
+			await until(stall.calls, 1)
+			await expect(p.append(entry())).rejects.toMatchObject({
+				code: SCANNER_JOURNAL_BACKLOG_CODE,
+			})
+			const s1 = p.writeSnapshot(snapshot(1))
+			const behind = p.append(entry(), { reserved: true }) // after s1, before s2
+			const s2 = p.writeSnapshot(snapshot(2)) // supersedes s1
+			const tail = p.append(entry(), { reserved: true })
+			const behindOutcome = behind.then(
+				() => "written",
+				(err: unknown) => err,
+			)
+			stall.release()
+			expect(await first).toBe(1)
+			await Promise.all([s1, s2])
+			expect(await behindOutcome).toMatchObject({
+				code: SCANNER_JOURNAL_BACKLOG_CODE,
+			})
+			expect(await tail).toBe(4)
+			const loaded = await new ScannerPersistence({
+				dir,
+				logger,
+				now: () => T0,
+			}).load()
+			expect(loaded.lastSeq).toBe(3)
+			expect(loaded.corrections).toEqual([{ sourceId: "src-1", hz: 2 }])
+			expect(loaded.entries.map(e => e.seq)).toEqual([4])
 		})
 	})
 
@@ -244,7 +300,8 @@ describe("ScannerPersistence bounded backlog", () => {
 					),
 					{ minLength: 1, maxLength: 60 },
 				),
-				async ops => {
+				fc.integer({ min: 200, max: 2_000 }),
+				async (ops, cap) => {
 					await withDir(async dir => {
 						let release: (() => void) | null = null
 						const stalled = (): Promise<void> =>
@@ -256,6 +313,7 @@ describe("ScannerPersistence bounded backlog", () => {
 							dir,
 							logger,
 							now: () => T0,
+							maxJournalBacklogBytes: cap,
 							appendFile: async (path, data) => {
 								if (stallNext) {
 									stallNext = false
@@ -266,11 +324,17 @@ describe("ScannerPersistence bounded backlog", () => {
 						})
 						await p.load()
 						const pending: Promise<unknown>[] = []
+						const accepted: number[] = []
 						let lastSnapshotHz: number | null = null
 						let appended = 0
 						for (const op of ops) {
 							if (op === "append") {
-								pending.push(p.append(entry()))
+								pending.push(
+									p.append(entry()).then(
+										seq => accepted.push(seq),
+										() => undefined,
+									),
+								)
 								appended += 1
 							} else if (op === "snapshot") {
 								lastSnapshotHz = appended
@@ -292,13 +356,14 @@ describe("ScannerPersistence bounded backlog", () => {
 							now: () => T0,
 						}).load()
 						const replayed = loaded.entries.map(e => e.seq)
-						const covered = Array.from(
-							{ length: loaded.lastSeq },
-							(_, i) => i + 1,
+						// Replay never steps over a hole: contiguous from the snapshot on.
+						expect(replayed).toEqual(
+							replayed.map((_, i) => loaded.lastSeq + 1 + i),
 						)
-						expect([...covered, ...replayed]).toEqual(
-							Array.from({ length: appended }, (_, i) => i + 1),
-						)
+						// Every acknowledged append survives: covered by the snapshot or replayed.
+						for (const seq of accepted)
+							expect(seq <= loaded.lastSeq || replayed.includes(seq)).toBe(true)
+						expect(appended).toBeGreaterThanOrEqual(accepted.length)
 						if (lastSnapshotHz !== null)
 							expect(loaded.corrections).toEqual([
 								{ sourceId: "src-1", hz: lastSnapshotHz },
@@ -308,5 +373,5 @@ describe("ScannerPersistence bounded backlog", () => {
 			),
 			{ numRuns: 100 },
 		)
-	})
+	}, 120_000)
 })

@@ -24,6 +24,10 @@ type Internals = {
 	store: DiscoveryStore
 	persistence: ScannerPersistence
 	onStoreMutation(entry: Parameters<ScannerPersistence["append"]>[0]): void
+	recordingAppends: Map<
+		Parameters<ScannerPersistence["append"]>[0],
+		Promise<number> | null
+	>
 }
 
 const SNAPSHOT_EVERY_MS = 10_000
@@ -76,6 +80,46 @@ describe("ScannerService snapshot backlog", () => {
 		expect(write).toHaveBeenCalledTimes(2)
 	})
 
+	it("retries after a failed snapshot: dirty again, in-flight flag cleared", async () => {
+		const { internals, clock } = harness()
+		const write = vi
+			.spyOn(internals.persistence, "writeSnapshot")
+			.mockImplementationOnce(() =>
+				Promise.reject(new WaveKitError("disk", "SCANNER_PERSIST_FAILED")),
+			)
+			.mockImplementation(() => Promise.resolve())
+		internals.dirty = true
+		clock.t += SNAPSHOT_EVERY_MS
+		internals.tick()
+		expect(internals.dirty).toBe(false)
+		await new Promise<void>(resolve => setImmediate(resolve))
+		expect(internals.dirty).toBe(true)
+		clock.t += SNAPSHOT_EVERY_MS
+		internals.tick() // no new mutation: the failed state still gets written
+		expect(write).toHaveBeenCalledTimes(2)
+	})
+
+	it("appends recording operations as reserved and other mutations as plain", () => {
+		const { internals } = harness()
+		const append = vi
+			.spyOn(internals.persistence, "append")
+			.mockImplementation(() => Promise.resolve(1))
+		const plain = {
+			at: new Date(0).toISOString(),
+			op: "observation" as const,
+			payload: { discoveries: [], observations: [], deleted: [] },
+		}
+		const recording = { ...plain }
+		internals.recordingAppends.set(recording, null)
+		internals.onStoreMutation(plain)
+		internals.onStoreMutation(recording)
+		expect(append.mock.calls).toEqual([
+			[plain, {}],
+			[recording, { reserved: true }],
+		])
+		expect(internals.recordingAppends.get(recording)).toBeInstanceOf(Promise)
+	})
+
 	it("still snapshots every interval while writes keep up", async () => {
 		const { internals, clock } = harness()
 		const write = vi
@@ -110,7 +154,6 @@ describe("ScannerService snapshot backlog", () => {
 		for (let i = 0; i < 50; i++) internals.onStoreMutation(entry)
 		await new Promise<void>(resolve => setImmediate(resolve))
 		expect(warn).not.toHaveBeenCalled()
-		expect(internals.dirty).toBe(true)
 		append.mockImplementation(() =>
 			Promise.reject(new WaveKitError("disk", "SCANNER_PERSIST_FAILED")),
 		)
