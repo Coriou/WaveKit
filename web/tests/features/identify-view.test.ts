@@ -365,6 +365,50 @@ describe("identifyView", () => {
 		])
 	})
 
+	it("names WG7 ambient trials and identities (AIS, ACARS, VDL2, LoRa)", () => {
+		const ais = trialRow(
+			trial("ais", "decoded", {
+				decoder: "ais-catcher",
+				transport: "ambient",
+				mode: null,
+			}),
+			0,
+		)
+		expect(ais.protocol).toBe("AIS")
+		expect(ais.decoder).toBe("running ais-catcher")
+		expect(ais.title).toBe("AIS with running ais-catcher: Decoded")
+		const none = trialRow(
+			trial("lora", "unsupported", {
+				decoder: null,
+				transport: null,
+				mode: null,
+				reason: "no-ambient-decoder",
+			}),
+			1,
+		)
+		expect(none.protocol).toBe("LoRa")
+		expect(none.title).toBe(
+			"LoRa with no decoder: Not available yet (no decoder running here)",
+		)
+		expect(trialRow(trial("acars", "timeout"), 2).protocol).toBe("ACARS")
+		expect(trialRow(trial("vdl2", "no-sync"), 3).protocol).toBe("VDL2")
+		expect(
+			resultDetails(
+				result({ identity: { kind: "ais-mmsi", value: "227006760" } }),
+			),
+		).toBe("MMSI 227006760")
+		expect(
+			resultDetails(
+				result({ identity: { kind: "acars-reg", value: "F-GKXA" } }),
+			),
+		).toBe("F-GKXA")
+		expect(
+			resultDetails(
+				result({ identity: { kind: "lora-node", value: "!a1b2c3d4" } }),
+			),
+		).toBe("node !a1b2c3d4")
+	})
+
 	it("formats measurements and details defensively", () => {
 		expect(
 			measuredLine({

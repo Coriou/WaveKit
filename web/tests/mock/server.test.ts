@@ -171,6 +171,34 @@ describe("mock server REST", () => {
 		})
 	})
 
+	it("takes the WG7 noise squelch on FM only, as the core", async () => {
+		const ok = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "noise",
+			noiseQuietingDb: 9,
+		})
+		expect(ok.statusCode).toBe(200)
+		expect(ok.json<LiveAudioStatus>().config).toMatchObject({
+			squelchMode: "noise",
+			noiseQuietingDb: 9,
+		})
+		const am = await inject("PATCH", "/api/live-audio/config", {
+			modulation: "am",
+		})
+		expect(am.statusCode).toBe(400)
+		expect(am.json()).toMatchObject({ error: "Bad Request" })
+		const out = await inject("PATCH", "/api/live-audio/config", {
+			noiseQuietingDb: 31,
+		})
+		expect(out.statusCode).toBe(400)
+		const back = await inject("PATCH", "/api/live-audio/config", {
+			modulation: "am",
+			squelchMode: "auto",
+			noiseQuietingDb: 6,
+		})
+		expect(back.statusCode).toBe(200)
+		await inject("PATCH", "/api/live-audio/config", { modulation: "nfm" })
+	})
+
 	it("serves the resolved band plan", async () => {
 		const view = (
 			await inject("GET", "/api/bandplans/resolved")
@@ -516,8 +544,9 @@ describe("mock server WebSocket and audio", () => {
 		})
 		expect(res.status).toBe(200)
 		expect(res.headers.get("x-sample-rate")).toBe("16000")
-		// like the core: headers exposed, but no Access-Control-Allow-Origin (the dev server proxies it)
-		expect(res.headers.get("access-control-allow-origin")).toBeNull()
+		// like a legacy core since WG7: wildcard CORS, headers exposed, no credentials
+		expect(res.headers.get("access-control-allow-origin")).toBe("*")
+		expect(res.headers.get("access-control-allow-credentials")).toBeNull()
 		expect(res.headers.get("access-control-expose-headers")).toContain(
 			"X-Sample-Rate",
 		)
@@ -528,5 +557,17 @@ describe("mock server WebSocket and audio", () => {
 		expect(head.readUInt32LE(24)).toBe(16_000)
 		controller.abort()
 		await fetch(`${api}/api/live-audio/stop`, { method: "POST" })
+	})
+
+	it("answers a CORS preflight on stream paths only, as a legacy core", async () => {
+		const pre = await fetch(`${audio}/stream`, { method: "OPTIONS" })
+		expect(pre.status).toBe(204)
+		expect(pre.headers.get("access-control-allow-origin")).toBe("*")
+		expect(pre.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS")
+		expect(pre.headers.get("access-control-allow-headers")).toBe("Range")
+		expect(pre.headers.get("access-control-max-age")).toBe("600")
+		const other = await fetch(`${audio}/other`, { method: "OPTIONS" })
+		expect(other.status).toBe(404)
+		expect(other.headers.get("access-control-allow-origin")).toBe("*")
 	})
 })

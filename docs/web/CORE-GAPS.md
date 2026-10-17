@@ -351,17 +351,29 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   (`/api/access/machine/devices`, `…/revoke`, `…/revoke-all`), so Settings › Devices should
   point to it.
 
-**Found by the web app against a real core** (2026-10-16, main@23388b9, legacy mode, fake rtl_tcp)
+**Found by the web app against a real core** (2026-10-16, main@23388b9, legacy mode, fake rtl_tcp;
+re-checked 2026-10-17 on the branch after merging main 1da448e1)
 
-- [ ] Live audio has no `Access-Control-Allow-Origin` (`src/core/audio-stream-server.ts:59-67`), so a
-  page on the API origin cannot fetch the stream on the audio port. The web dev server proxies it.
-- [ ] `status.httpUrl` is hard-coded to `http://localhost:<port>` (`src/core/live-demodulator.ts:464`),
-  wrong for a remote browser.
-- [ ] The noise floor restarts from the first block after a retune (`src/core/live-demodulator.ts:534-535`,
-  `:856`): tuning onto a carrier already up sets the floor to the carrier, so auto squelch stays closed.
+- [x] Live audio has no `Access-Control-Allow-Origin` (`src/core/audio-stream-server.ts:59-67`), so a
+  page on the API origin cannot fetch the stream on the audio port. Fixed on main by 88bfc6b7 (WG7
+  req 8.1-8.3): legacy answers `Access-Control-Allow-Origin: *` on every response and a 204 GET/OPTIONS
+  preflight on stream paths (`src/core/audio-stream-server.ts:468-492`); checked with curl and the
+  browser. The web dev server's audio proxy is removed.
+- [x] `status.httpUrl` is hard-coded to `http://localhost:<port>` (`src/core/live-demodulator.ts:464`),
+  wrong for a remote browser. Protected mode advertises `access.publicOrigins.analogAudio` on main
+  (16d6df7e, `src/index.ts:814`); legacy fixed by 01d796a1: optional `liveDemod.publicOrigin`
+  (`WAVEKIT_LIVE_DEMOD__PUBLIC_ORIGIN`, canonical origin, config only). Unset it stays localhost; the
+  web app then swaps a loopback stream host for the page's host when the page is not on loopback.
+  Digital voice streams in legacy mode still advertise localhost; `docs/API.md` does not list the key yet.
+- [ ] The noise floor restarts from the first block after a retune (`src/core/live-demodulator.ts:768`,
+  `:623`): tuning onto a carrier already up sets the floor to the carrier, so auto squelch stays closed.
+  Still so on main. Workaround on WG7 cores: `squelchMode: "noise"` (NFM, WFM), offered by the web app.
 - [ ] `PATCH /api/live-audio/config` out-of-range offset 400 has no `code`
-  (`src/api/routes/live-audio.ts:339-345`); while stopped the same PATCH is accepted and the next start
-  fails with `CHANNEL_OFFSET_OUT_OF_RANGE`.
-- [ ] Identify reports decoders whose binary is missing as `no-sync` (`src/core/scanner/identify.ts:359`,
-  `job-runner.ts:218`); one job went `candidate` then back to `trying` (`identify.ts:1384`).
-- [ ] With passive scanning off, a new spectrum subscriber gets no snapshot or backfill.
+  (`src/api/routes/live-audio.ts:389-395`); while stopped the same PATCH is accepted and the next start
+  fails with `CHANNEL_OFFSET_OUT_OF_RANGE`. Both still so on main (checked with curl).
+- [ ] Identify reports decoders whose binary is missing as `no-sync` (`src/core/scanner/identify.ts:461`,
+  `job-runner.ts:229`); one job went `candidate` then back to `trying` (`identify.ts:1384`). The first
+  is still so on main (every dsd-fme trial "No sync" here); the bounce did not recur in the re-check.
+- [ ] With passive scanning off, a new spectrum subscriber gets no snapshot or backfill. Still so: with
+  `scanner.passive.enabled: false` and nothing else using the source the engine is idle, the ack says
+  `backfillFrames: 0` and the first live frame follows about 170 ms later.

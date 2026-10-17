@@ -4,6 +4,8 @@ import {
 	audioAttachKey,
 	audioSource,
 	levelFraction,
+	noiseSquelchFits,
+	squelchForModulation,
 	squelchSetting,
 	squelchThreshold,
 } from "../../src/features/listen/audio.ts"
@@ -58,12 +60,10 @@ describe("audio follows tuning", () => {
 		)
 		expect(rel?.httpUrl).toBe("http://localhost:5173/stream")
 		expect(rel?.wavUrl).toBe("http://localhost:5173/stream.wav")
+		expect(audioSource(status({ httpUrl: "", wavUrl: "" }), BASE)).toBeNull()
 		expect(
-			audioSource(status({ httpUrl: "", wavUrl: "" }), BASE),
-		).toBeNull()
-		expect(audioSource(status({}, { audioFormat: "f32le" }), BASE)?.format).toBe(
-			"f32le",
-		)
+			audioSource(status({}, { audioFormat: "f32le" }), BASE)?.format,
+		).toBe("f32le")
 	})
 
 	it("has nothing to attach while live audio is stopped", () => {
@@ -112,5 +112,55 @@ describe("squelch", () => {
 		)
 		expect(squelchThreshold({ kind: "auto", marginDb: 6 }, -88)).toBe(-88)
 		expect(squelchThreshold({ kind: "auto", marginDb: 6 }, null)).toBeNull()
+	})
+})
+
+describe("WG7 noise squelch", () => {
+	it("reads noise mode with its quieting threshold and draws no power line", () => {
+		const noise = squelchSetting(
+			status({}, { squelchMode: "noise", noiseQuietingDb: 9, squelch: -40 }),
+		)
+		expect(noise).toEqual({ kind: "noise", quietingDb: 9 })
+		expect(squelchSetting(status({}, { squelchMode: "noise" }))).toEqual({
+			kind: "noise",
+			quietingDb: 6,
+		})
+		// the core reports the stored squelch as thresholdDbfs in noise mode: not a gate
+		expect(squelchThreshold(noise, 0)).toBeNull()
+	})
+
+	it("fits FM only", () => {
+		expect(noiseSquelchFits("nfm")).toBe(true)
+		expect(noiseSquelchFits("wfm")).toBe(true)
+		expect(noiseSquelchFits("am")).toBe(false)
+		expect(noiseSquelchFits("usb")).toBe(false)
+	})
+
+	it("falls back to Auto and clears a tone gate on a modulation the core would refuse", () => {
+		const cfg = (over: Partial<LiveAudioConfig>) =>
+			({ ...status().config, ...over }) as LiveAudioConfig
+		expect(
+			squelchForModulation(
+				cfg({ squelchMode: "noise", autoMarginDb: 8 }),
+				"am",
+			),
+		).toEqual({ squelchMode: "auto", autoMarginDb: 8 })
+		expect(squelchForModulation(cfg({ squelchMode: "noise" }), "wfm")).toEqual(
+			{},
+		)
+		expect(
+			squelchForModulation(
+				cfg({ toneSquelch: { kind: "ctcss", frequencyTenthsHz: 885 } }),
+				"wfm",
+			),
+		).toEqual({ toneSquelch: { kind: "none" } })
+		expect(
+			squelchForModulation(
+				cfg({ toneSquelch: { kind: "ctcss", frequencyTenthsHz: 885 } }),
+				"nfm",
+			),
+		).toEqual({})
+		expect(squelchForModulation(cfg({ squelchMode: "auto" }), "am")).toEqual({})
+		expect(squelchForModulation(undefined, "am")).toEqual({})
 	})
 })

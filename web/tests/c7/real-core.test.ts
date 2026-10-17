@@ -11,12 +11,10 @@ import { ApiClient } from "../../src/data/api-client.ts"
 import { EventsClient } from "../../src/data/events-client.ts"
 import { IdentifyStore } from "../../src/data/identify-store.ts"
 import { identifyView } from "../../src/features/tuned/identify-view.ts"
-import { audioSource } from "../../src/features/listen/audio.ts"
 import {
-	AUDIO_PROXY_PREFIX,
-	parseAudioProxyPath,
-	proxiedAudioUrl,
-} from "../../src/features/listen/audio-proxy.ts"
+	audioSource,
+	reachableAudioUrl,
+} from "../../src/features/listen/audio.ts"
 import { parsePositiveRate } from "../../src/features/listen/pcm.ts"
 import {
 	gainText,
@@ -42,7 +40,8 @@ const PAGE = "http://localhost:5173/"
 
 describe("live audio from a real core", () => {
 	// GET /api/live-audio/status of a legacy core: the audio server is on its own port, advertised on
-	// localhost, and sends no Access-Control-Allow-Origin, so the page's fetch() is blocked by CORS.
+	// localhost unless liveDemod.publicOrigin is set. Since WG7 (88bfc6b7) it answers CORS with `*`, so
+	// the page fetches it cross-origin directly, without a dev proxy.
 	const status = {
 		running: true,
 		sourceId: "local-iq",
@@ -52,47 +51,48 @@ describe("live audio from a real core", () => {
 		config: { audioFormat: "s16le" },
 	} as LiveAudioStatus
 
-	it("goes through the dev server's audio proxy when cross-origin", () => {
-		expect(proxiedAudioUrl(status.httpUrl, PAGE, AUDIO_PROXY_PREFIX)).toBe(
-			"http://localhost:5173/__wk-audio/8081/stream",
-		)
-		expect(audioSource(status, PAGE, AUDIO_PROXY_PREFIX)).toEqual({
-			httpUrl: "http://localhost:5173/__wk-audio/8081/stream",
-			wavUrl: "http://localhost:5173/__wk-audio/8081/stream.wav",
+	it("fetches the advertised URL directly on the core's machine", () => {
+		expect(audioSource(status, PAGE)).toEqual({
+			httpUrl: "http://localhost:8081/stream",
+			wavUrl: "http://localhost:8081/stream.wav",
 			format: "s16le",
 			rate: 24975.60975609756,
 		})
-	})
-
-	it("keeps same-origin, non-http and production URLs as they are", () => {
-		expect(proxiedAudioUrl("/stream", PAGE, AUDIO_PROXY_PREFIX)).toBe(
-			"http://localhost:5173/stream",
+		expect(audioSource(status, "http://127.0.0.1:9000/")?.httpUrl).toBe(
+			"http://localhost:8081/stream",
 		)
-		expect(proxiedAudioUrl("blob:x", PAGE, AUDIO_PROXY_PREFIX)).toBe("blob:x")
-		expect(proxiedAudioUrl(status.httpUrl, PAGE, null)).toBe(status.httpUrl)
-		expect(audioSource(status, PAGE)?.httpUrl).toBe(status.httpUrl)
-		expect(
-			proxiedAudioUrl("https://pi.local/stream?x=1", PAGE, AUDIO_PROXY_PREFIX),
-		).toBe("http://localhost:5173/__wk-audio/443/stream?x=1")
 	})
 
-	it("parses proxy paths on the server side and refuses anything else", () => {
-		expect(parseAudioProxyPath("/__wk-audio/8081/stream")).toEqual({
-			port: 8081,
-			path: "/stream",
-		})
-		expect(parseAudioProxyPath("/__wk-audio/3102/stream.wav?t=1")).toEqual({
-			port: 3102,
-			path: "/stream.wav?t=1",
-		})
-		expect(parseAudioProxyPath("/__wk-audio/8081")).toEqual({
-			port: 8081,
-			path: "/",
-		})
-		expect(parseAudioProxyPath("/__wk-audio/0/stream")).toBeNull()
-		expect(parseAudioProxyPath("/__wk-audio/70000/stream")).toBeNull()
-		expect(parseAudioProxyPath("/__wk-audio/x/stream")).toBeNull()
-		expect(parseAudioProxyPath("/api/stream")).toBeNull()
+	it("swaps a loopback stream host for the page's host when the page is remote", () => {
+		expect(
+			audioSource(status, "http://receiver.lan:9000/listen")?.httpUrl,
+		).toBe("http://receiver.lan:8081/stream")
+		expect(
+			reachableAudioUrl(
+				"http://127.0.0.1:8081/stream.wav",
+				"http://192.168.1.20:5173/",
+			),
+		).toBe("http://192.168.1.20:8081/stream.wav")
+		expect(
+			reachableAudioUrl("http://[::1]:8081/stream", "http://[fd00::2]:9000/"),
+		).toBe("http://[fd00::2]:8081/stream")
+	})
+
+	it("keeps a configured public origin, paths and non-http URLs as they are", () => {
+		const remote = "http://receiver.lan:9000/"
+		expect(reachableAudioUrl("http://pi.local:8081/stream", remote)).toBe(
+			"http://pi.local:8081/stream",
+		)
+		expect(reachableAudioUrl("https://radio.example.org/stream", remote)).toBe(
+			"https://radio.example.org/stream",
+		)
+		expect(reachableAudioUrl("/stream", remote)).toBe(
+			"http://receiver.lan:9000/stream",
+		)
+		expect(reachableAudioUrl("blob:x", remote)).toBe("blob:x")
+		expect(reachableAudioUrl("", remote)).toBeNull()
+		expect(reachableAudioUrl(undefined, remote)).toBeNull()
+		expect(reachableAudioUrl("http://", remote)).toBeNull()
 	})
 
 	it("reads the core's fractional X-Sample-Rate", () => {

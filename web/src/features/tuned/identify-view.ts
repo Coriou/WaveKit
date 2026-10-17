@@ -73,6 +73,10 @@ const PROTOCOL: Readonly<Record<ScannerProtocol, string>> = {
 	flex: "FLEX",
 	aprs: "APRS",
 	ism: "ISM",
+	ais: "AIS",
+	acars: "ACARS",
+	vdl2: "VDL2",
+	lora: "LoRa",
 	"digital-unknown": "digital",
 	carrier: "carrier",
 	unknown: "unknown",
@@ -128,6 +132,7 @@ const REASON: Readonly<
 	"no-decoder": "no decoder installed",
 	"needs-channelizer": "needs the channelizer",
 	"unsupported-format": "unsupported format",
+	"no-ambient-decoder": "no decoder running here",
 }
 
 export function trialRow(
@@ -135,7 +140,11 @@ export function trialRow(
 	index: number,
 ): IdentifyTrialRow {
 	const protocol = protocolLabel(trial.protocol)
-	const decoder = trial.decoder ?? "no decoder"
+	// WG7 ambient trials read a decoder already running there (AIS, ACARS, VDL2, LoRa): no probe
+	const decoder =
+		trial.transport === "ambient"
+			? `running ${trial.decoder ?? "decoder"}`
+			: (trial.decoder ?? "no decoder")
 	const word = WORD[trial.outcome]
 	const why = trial.reason ? REASON[trial.reason] : null
 	return {
@@ -203,6 +212,10 @@ export function resultDetails(result: ScannerIdentifyResult): string {
 			"pocsag-capcode": "capcode",
 			"aprs-call": "",
 			"ism-model": "",
+			"ais-mmsi": "MMSI",
+			"acars-reg": "",
+			"vdl2-addr": "address",
+			"lora-node": "node",
 		}
 		parts.push(`${prefix[id.kind]} ${id.value}`.trim())
 	}

@@ -20,10 +20,10 @@ import {
 	LEVEL_MAX_DBFS,
 	LEVEL_MIN_DBFS,
 	levelFraction,
+	noiseSquelchFits,
 	squelchSetting,
 	squelchThreshold,
 } from "./audio.ts"
-import { AUDIO_PROXY_PREFIX } from "./audio-proxy.ts"
 import type { ListenPhase } from "./controller.ts"
 
 /** The page's audio output, bound to the listen controller; reattaches when the stream itself changes. */
@@ -32,12 +32,7 @@ export function AudioOutput() {
 	const status = useLiveStatus()
 	const base =
 		typeof location === "undefined" ? "http://localhost/" : location.href
-	// The dev server proxies the core's audio port (a legacy core sends no CORS header for it).
-	const source = audioSource(
-		status,
-		base,
-		import.meta.env.DEV ? AUDIO_PROXY_PREFIX : null,
-	)
+	const source = audioSource(status, base)
 	const key = audioAttachKey(source)
 	// the source object is rebuilt every render; the key says when it really changed
 	useEffect(() => listen.setSource(key, source), [listen, key])
@@ -168,12 +163,17 @@ function ListenPanel() {
 		drag ??
 		threshold ??
 		(setting.kind === "manual" ? setting.thresholdDbfs : LEVEL_MIN_DBFS)
-	const sqPct =
-		setting.kind === "off" && drag === null ? 0 : levelFraction(sq) * 100
+	// off and noise squelch draw no power threshold
+	const noLine =
+		(setting.kind === "off" || setting.kind === "noise") && drag === null
+	const sqPct = noLine ? 0 : levelFraction(sq) * 100
 	const sqText =
-		setting.kind === "off" && drag === null
-			? "Squelch off"
-			: `${setting.kind === "auto" && drag === null ? "Auto · " : ""}Threshold ${formatDb(sq, 0)} dBFS`
+		setting.kind === "noise" && drag === null
+			? `Noise squelch · opens ${formatDb(setting.quietingDb, 0)} dB below the noise`
+			: setting.kind === "off" && drag === null
+				? "Squelch off"
+				: `${setting.kind === "auto" && drag === null ? "Auto · " : ""}Threshold ${formatDb(sq, 0)} dBFS`
+	const noiseFits = status ? noiseSquelchFits(status.config.modulation) : false
 	const apply = (patch: Parameters<typeof data.liveAudio.setConfig>[0]) =>
 		void data.liveAudio.setConfig(patch).catch(() => undefined)
 	const canEdit = !readOnly && status !== null
@@ -199,6 +199,19 @@ function ListenPanel() {
 						onClick={() => apply({ squelchMode: "auto", autoMarginDb: 6 })}
 					>
 						Auto
+					</Chip>
+					<Chip
+						size="sm"
+						pressed={setting.kind === "noise"}
+						disabled={!canEdit || !noiseFits}
+						title={
+							noiseFits
+								? "Opens on FM quieting: works on a carrier already up when tuned"
+								: "FM only (NFM, WFM)"
+						}
+						onClick={() => apply({ squelchMode: "noise" })}
+					>
+						Noise
 					</Chip>
 					<Button
 						variant="outline"
@@ -250,7 +263,8 @@ function ListenPanel() {
 				</div>
 				<span className="wkf-quiet wkf-small">
 					Drag the line just above the noise to silence it. Auto keeps it 6 dB
-					over the noise floor as conditions change.
+					over the noise floor as conditions change. Noise (FM) opens when a
+					carrier quiets the receiver noise.
 				</span>
 			</div>
 

@@ -24,6 +24,7 @@ import { Kbd } from "../../ui/Kbd.tsx"
 import { Label } from "../../ui/Label.tsx"
 import { formatMHz, formatStep, formatWidth } from "../format.ts"
 import { useLiveStatus, useTunedHz } from "../hooks.ts"
+import { squelchForModulation } from "../listen/audio.ts"
 import {
 	channelSuggestions,
 	groupColour,
@@ -397,9 +398,10 @@ function TuningOptions() {
 	const setMode = (id: Modulation) => {
 		const def = modeSpec(id).bw
 		void data.liveAudio
-			.setConfig(
-				def ? { modulation: id, bandwidth: def[3] } : { modulation: id },
-			)
+			.setConfig({
+				...squelchForModulation(config, id),
+				...(def ? { modulation: id, bandwidth: def[3] } : { modulation: id }),
+			})
 			.catch(() => undefined)
 	}
 	const bandMode = modulationOf(band?.band.mode)

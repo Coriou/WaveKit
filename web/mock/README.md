@@ -7,10 +7,10 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   audio on port + 1 (`WAVEKIT_MOCK_AUDIO_PORT`, advertised as `WAVEKIT_MOCK_AUDIO_ORIGIN`,
   default `http://localhost:3102`) at `/stream.wav` and `/stream`.
 - Legacy core: `GET /api/access/bootstrap` is not mounted (404).
-- `/stream` sends the core's `X-Audio-Format` / `X-Sample-Rate` / `X-Channels` headers and, like the
-  core, no `Access-Control-Allow-Origin`: the page reaches it through the Vite dev server's
-  `/__wk-audio/<port>/…` proxy (`web/vite.config.ts`). While live audio is stopped the connection is
-  dropped, as the core's audio server is then not listening.
+- `/stream` sends the core's `X-Audio-Format` / `X-Sample-Rate` / `X-Channels` headers and, like a
+  legacy core since WG7, `Access-Control-Allow-Origin: *` on every answer and a 204 preflight on the
+  stream paths: the page fetches it cross-origin directly. While live audio is stopped the connection
+  is dropped, as the core's audio server is then not listening.
 - Matched against a real core (lot C7): frames cover only the usable 80 % of the capture (`binCount`
   below the bins asked for, track edges on the summary bin grid), error bodies are the core's
   (`{ error, code, message, correlationId }`, `VALIDATION_ERROR` with `details`, route 404

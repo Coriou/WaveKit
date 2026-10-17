@@ -13,6 +13,10 @@ import fastifyWebsocket from "@fastify/websocket"
 import Fastify from "fastify"
 import type { FastifyError, FastifyInstance, FastifyReply } from "fastify"
 import type { WebSocket } from "ws"
+import {
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
+} from "@wavekit/api-types"
 import type {
 	ActivityQuery,
 	ActivitySearchPage,
@@ -313,6 +317,7 @@ export async function buildMockServer(
 			squelch: -60,
 			squelchMode: "auto",
 			autoMarginDb: 6,
+			noiseQuietingDb: LIVE_AUDIO_NOISE_QUIETING_DB.default,
 			noiseReduction: "off",
 			lowPass: 0,
 			highPass: 0,
@@ -370,11 +375,13 @@ export async function buildMockServer(
 			live.config.squelchMode === "auto"
 				? floor + (live.config.autoMarginDb ?? 6)
 				: live.config.squelch
+		// WG7 noise mode: FM quieting opens on any carrier; thresholdDbfs reports the stored squelch
+		const open = live.config.squelchMode === "noise" ? keyed : power > threshold
 		return {
 			sourceId: MOCK_SOURCE_ID,
 			channelPowerDbfs: Math.round(power * 10) / 10,
 			noiseFloorDbfs: floor,
-			squelchOpen: power > threshold,
+			squelchOpen: open,
 			thresholdDbfs: threshold,
 		}
 	}
@@ -408,6 +415,8 @@ export async function buildMockServer(
 				(["am", "cw", "dsb", "usb", "lsb"].includes(live.config.modulation)
 					? "fast"
 					: "off")
+			// WG7 req 3.4: the mock never sets a tone gate
+			status.toneSquelch = { state: "off" }
 		}
 		return status
 	}
@@ -1131,6 +1140,11 @@ export async function buildMockServer(
 				["bandwidth", 0, 250_000],
 				["squelch", -150, 0],
 				["autoMarginDb", 0, 40],
+				[
+					"noiseQuietingDb",
+					LIVE_AUDIO_NOISE_QUIETING_DB.min,
+					LIVE_AUDIO_NOISE_QUIETING_DB.max,
+				],
 				["lowPass", 0, 24_000],
 				["highPass", 0, 24_000],
 				["gain", 0, 100],
@@ -1148,10 +1162,24 @@ export async function buildMockServer(
 			}
 			const squelchMode = body["squelchMode"]
 			if (squelchMode !== undefined) {
-				if (squelchMode !== "manual" && squelchMode !== "auto")
+				if (
+					squelchMode !== "manual" &&
+					squelchMode !== "auto" &&
+					squelchMode !== "noise"
+				)
 					return bad("squelchMode: invalid value")
 				next.squelchMode = squelchMode
 			}
+			// WG7 req 2.3: noise squelch is FM-only (also when a PATCH moves a noise config off FM)
+			if (
+				next.squelchMode === "noise" &&
+				!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(next.modulation)
+			)
+				return reply.code(400).send({
+					error: "Bad Request",
+					message:
+						"Configuration validation failed:\n  - squelchMode: noise squelch requires nfm or wfm modulation",
+				})
 			const agc = body["agc"]
 			if (agc !== undefined) {
 				if (agc === null) delete next.agc

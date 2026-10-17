@@ -48,8 +48,8 @@ function stream(
 		req.socket.destroy()
 		return
 	}
-	// As the core (src/core/audio-stream-server.ts streamHeaders): no Access-Control-Allow-Origin, so a
-	// page on another origin cannot fetch() it; the Vite dev server proxies it (web/vite.config.ts).
+	// As a legacy core (src/core/audio-stream-server.ts, WG7 req 8.1): `Access-Control-Allow-Origin: *`
+	// on every answer (set in createAudioServer), so a page on another origin fetch()es it directly.
 	res.writeHead(200, {
 		"Content-Type": wav ? "audio/wav" : "application/octet-stream",
 		"Cache-Control": "no-cache, no-store",
@@ -100,6 +100,18 @@ function stream(
 export function createAudioServer(source: AudioSource): Server {
 	return createServer((req, res) => {
 		const path = (req.url ?? "/").split("?")[0]
+		const known = path === "/stream" || path === "/stream.wav"
+		res.setHeader("Access-Control-Allow-Origin", "*")
+		// WG7 req 8.2: a legacy core answers a preflight on a stream path, 404 elsewhere
+		if (req.method === "OPTIONS" && known) {
+			res.writeHead(204, {
+				"Access-Control-Allow-Methods": "GET, OPTIONS",
+				"Access-Control-Allow-Headers": "Range",
+				"Access-Control-Max-Age": "600",
+			})
+			res.end()
+			return
+		}
 		if (req.method === "GET" && path === "/stream.wav")
 			return stream(source, req, res, true)
 		if (req.method === "GET" && path === "/stream")
