@@ -191,11 +191,14 @@ describe("analog transmission wiring", () => {
 		const broadcaster = new WebSocketEventBroadcaster(logger)
 		const messages = liveAudioClient(broadcaster)
 		const demod = new FakeDemod()
+		// WG10 activity hygiene: published only from ANALOG_TRANSMISSION_MIN_MS on.
+		let now = 1_760_000_000_000
 		const tracker = wireAnalogTransmissions({
 			source: demod,
 			frequencyAt: tuner({}),
 			broadcast: e => broadcaster.broadcastLiveAudioTransmission(e),
 			sink: () => runtime.transmissionSink(),
+			now: () => now,
 		})
 		const shutdown = new GracefulShutdown({ logger })
 		shutdown.register({
@@ -218,6 +221,7 @@ describe("analog transmission wiring", () => {
 			timeout: 1000,
 		})
 		demod.gate(true)
+		now += 3_000
 		await shutdown.shutdown()
 
 		const tx = messages.filter(m => m.type === "live-audio:transmission")
@@ -248,13 +252,17 @@ describe("analog transmission wiring", () => {
 		const broadcaster = new WebSocketEventBroadcaster(logger)
 		const messages = liveAudioClient(broadcaster)
 		const demod = new FakeDemod()
+		// WG10 activity hygiene: published only from ANALOG_TRANSMISSION_MIN_MS on.
+		let now = 1_760_000_000_000
 		const tracker = wireAnalogTransmissions({
 			source: demod,
 			frequencyAt: tuner({}),
 			broadcast: e => broadcaster.broadcastLiveAudioTransmission(e),
 			sink: () => runtime.transmissionSink(),
+			now: () => now,
 		})
 		demod.gate(true)
+		now += 3_000
 		tracker.stop()
 		const tx = messages.filter(m => m.type === "live-audio:transmission")
 		expect(tx.map(m => (m.data as { state: string }).state)).toEqual([

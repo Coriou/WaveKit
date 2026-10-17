@@ -322,6 +322,8 @@ export class LiveDemodulator extends EventEmitter {
 	private lastRunStream: StreamFormat | null = null
 	private levelTimer: ReturnType<typeof setInterval> | null = null
 	private reportedSquelchOpen = false
+	/** WG10 activity hygiene: blocks with carrier evidence, monotonic (see carrierBlocks()). */
+	private carrierBlockCount = 0
 	/**
 	 * Set only while `stop()` or a transmission-closing `reconfigure()` is in
 	 * progress. `stopRun` emits `squelch-changed(false)` before `stopped` or
@@ -646,6 +648,19 @@ export class LiveDemodulator extends EventEmitter {
 		)
 	}
 
+	/**
+	 * WG10 activity hygiene: monotonic count of measured blocks that carried an FM carrier
+	 * (`ChannelSquelch.blockCarrier`), or null when the running pipeline has no carrier
+	 * evidence (not nfm/wfm, or not running). The analog transmission tracker takes the
+	 * difference across a transmission; the count never affects audio.
+	 */
+	carrierBlocks(): number | null {
+		const run = this.run
+		if (run === null || run.stopping || !run.squelch.hasCarrierEvidence)
+			return null
+		return this.carrierBlockCount
+	}
+
 	/** Channel-squelch hang in use, in milliseconds. */
 	squelchHangMs(): number {
 		return SQUELCH_HANG_MS
@@ -694,6 +709,10 @@ export class LiveDemodulator extends EventEmitter {
 		run.squelch.setCarrierObserver(
 			this.config.squelchMode === "auto" &&
 				LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation),
+		)
+		// WG10 activity hygiene: carrier evidence for transmissions, every squelch mode.
+		run.squelch.setCarrierEvidence(
+			LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation),
 		)
 	}
 
@@ -768,6 +787,9 @@ export class LiveDemodulator extends EventEmitter {
 		run.squelch.setNoiseFloorDbfs(run.noiseFloorDbfs)
 		this.applySquelchThreshold(run)
 		this.publishSquelchChange()
+		// WG10 activity hygiene: counted after the edge, so a transmission opened by this
+		// block (its tracker snapshot taken inside publishSquelchChange) includes it.
+		if (run.squelch.blockCarrier()) this.carrierBlockCount += 1
 	}
 
 	private measuredSquelchStream(
@@ -1106,6 +1128,10 @@ export class LiveDemodulator extends EventEmitter {
 			...(this.config.squelchMode === "auto" &&
 			LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation)
 				? { carrierObserver: true }
+				: {}),
+			// WG10 activity hygiene: carrier evidence for transmissions (never gates).
+			...(LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation)
+				? { carrierEvidence: true }
 				: {}),
 		})
 		const run: PipelineRun = {

@@ -22,6 +22,7 @@ interface FakeSquelch {
 	open: boolean
 	floors: Array<number | null>
 	blockQuieted(): boolean
+	blockCarrier(): boolean
 	setNoiseFloorDbfs(value: number | null): void
 	setThreshold(value: number | null): void
 }
@@ -34,6 +35,9 @@ function fakeSquelch(): FakeSquelch {
 		floors: [],
 		blockQuieted() {
 			return this.quieted
+		},
+		blockCarrier() {
+			return false
 		},
 		setNoiseFloorDbfs(value) {
 			this.floors.push(value)

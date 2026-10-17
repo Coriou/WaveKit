@@ -5,6 +5,27 @@
  * is sampled when the transmission opens and is never rewritten. Activity
  * storage is a separate sink on the "closed" payload; this module does not
  * touch the store.
+ *
+ * Activity hygiene (WG10). A weak far signal or noise flapping across the squelch used
+ * to become one transmission per crossing. Three rules now shape what is published
+ * (the "transmission" and "closed" events, so WS, Activity and identify's analog
+ * evidence all see the same stream). Live audio gating is untouched.
+ *  1. Merge: a squelch close only ends a segment. The audio end is `endMs = max(segment
+ *     start, close - hang)`; a re-open at `t` with `t - endMs <= ANALOG_TRANSMISSION_MERGE_GAP_MS`
+ *     on the same source, config identity and frequency continues the transmission (same
+ *     id, start, power and tone state). Otherwise, or at `endMs + gap` (a timer, also
+ *     checked on level samples), the transmission is final with `endedAt = endMs`.
+ *     Stop, config, retune and max-duration closes are final at once, never merged.
+ *  2. Minimum duration: a final transmission with `durationMs < ANALOG_TRANSMISSION_MIN_MS`
+ *     is suppressed (`suppressed().short`).
+ *  3. Carrier evidence: when the source reports `carrierBlocks()` (nfm/wfm in every squelch
+ *     mode), a transmission needs at least ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS blocks
+ *     with FM quieting while its segments were open, else it is suppressed
+ *     (`suppressed().noCarrier`). A null count (am, ssb, ...) or a failing source skips the rule.
+ * The open event is held back until the transmission qualifies: on a level sample once
+ * `now - hang - start >= ANALOG_TRANSMISSION_MIN_MS` (so the final duration is at least
+ * the minimum) and the carrier rule holds, or at finalisation. An announced transmission
+ * is always published closed; a suppressed one emits nothing.
  */
 import { randomUUID } from "node:crypto"
 import { EventEmitter } from "node:events"
@@ -41,6 +62,33 @@ import type {
 
 const DEFAULT_MAX_DURATION_MS = 600_000
 
+/** WG10 activity hygiene: a re-open within this gap after the audio end continues the transmission. */
+export const ANALOG_TRANSMISSION_MERGE_GAP_MS = 1500
+/** WG10 activity hygiene: shorter final transmissions are not published. */
+export const ANALOG_TRANSMISSION_MIN_MS = 500
+/** WG10 activity hygiene: 10 ms blocks with FM quieting a nfm/wfm transmission needs. */
+export const ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS = 3
+
+/** Hygiene knobs (tests; production uses the constants). */
+export interface AnalogTransmissionHygiene {
+	mergeGapMs: number
+	minDurationMs: number
+	minCarrierBlocks: number
+}
+
+export const ANALOG_TRANSMISSION_HYGIENE: Readonly<AnalogTransmissionHygiene> =
+	Object.freeze({
+		mergeGapMs: ANALOG_TRANSMISSION_MERGE_GAP_MS,
+		minDurationMs: ANALOG_TRANSMISSION_MIN_MS,
+		minCarrierBlocks: ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS,
+	})
+
+/** Transmissions the hygiene rules kept out of every output since construction. */
+export interface AnalogTransmissionSuppressed {
+	short: number
+	noCarrier: number
+}
+
 export interface AnalogTransmissionSource {
 	getStatus(): LiveDemodStatus
 	isSquelchOpen(): boolean
@@ -50,6 +98,11 @@ export interface AnalogTransmissionSource {
 	 * reconfigure() emits squelch-changed(false) ahead of stopped/config-changed.
 	 */
 	transmissionCloseOverride?(): "stopped" | "config" | null
+	/**
+	 * WG10 activity hygiene: monotonic count of blocks with FM carrier evidence, or null
+	 * when the pipeline has none (absent: the carrier rule is skipped).
+	 */
+	carrierBlocks?(): number | null
 	on(event: "squelch-changed", listener: (open: boolean) => void): unknown
 	on(event: "level", listener: (level: LiveAudioLevel) => void): unknown
 	on(
@@ -92,6 +145,15 @@ export interface AnalogTransmissionTrackerOptions {
 	 * uses {@link ToneDetector}.
 	 */
 	createToneDetector?: () => ToneDetectorPort
+	/** WG10 activity hygiene; default {@link ANALOG_TRANSMISSION_HYGIENE}. */
+	hygiene?: Partial<AnalogTransmissionHygiene>
+	/** Merge-gap timer (tests inject); default an unref'd setTimeout. Returns a cancel. */
+	setTimer?: (fn: () => void, ms: number) => () => void
+	/** Called once per suppressed transmission (Main logs it at debug). */
+	onSuppressed?: (
+		reason: keyof AnalogTransmissionSuppressed,
+		event: AnalogTransmissionEventData,
+	) => void
 }
 
 /** The slice of {@link ToneDetector} the tracker drives. */
@@ -127,6 +189,20 @@ interface OpenTransmission {
 	audioSeconds: number
 	/** Trailing bytes that do not yet form a sample. */
 	audioRemainder: number
+	/** WG10 hygiene: a squelch segment is open (false in the merge gap). */
+	segmentOpen: boolean
+	segmentStartMs: number
+	/** Audio end of the last closed segment (valid in the merge gap). */
+	gapEndMs: number
+	/** The open event was published. */
+	announced: boolean
+	/** Carrier blocks of closed segments. */
+	carrierBlocks: number
+	/** Source count at the open segment's start; null when the rule does not apply. */
+	carrierBase: number | null
+	/** The carrier rule applies (the source reported a count at the first open). */
+	carrierRequired: boolean
+	cancelTimer: (() => void) | null
 }
 
 type AssertExtends<T extends U, U> = T
@@ -245,6 +321,13 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private pcmAttached = false
 	private toneErrorCount = 0
 	private toneBroken = false
+	private readonly hygiene: AnalogTransmissionHygiene
+	private readonly setTimer: (fn: () => void, ms: number) => () => void
+	private readonly onSuppressed: AnalogTransmissionTrackerOptions["onSuppressed"]
+	private readonly suppressedCounts: AnalogTransmissionSuppressed = {
+		short: 0,
+		noCarrier: 0,
+	}
 
 	constructor(options: AnalogTransmissionTrackerOptions) {
 		super()
@@ -257,6 +340,27 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const max = options.maxDurationMs ?? DEFAULT_MAX_DURATION_MS
 		this.maxDurationMs =
 			Number.isFinite(max) && max >= 0 ? max : DEFAULT_MAX_DURATION_MS
+		this.hygiene = {
+			mergeGapMs: knob(
+				options.hygiene?.mergeGapMs,
+				ANALOG_TRANSMISSION_MERGE_GAP_MS,
+			),
+			minDurationMs: knob(
+				options.hygiene?.minDurationMs,
+				ANALOG_TRANSMISSION_MIN_MS,
+			),
+			minCarrierBlocks: knob(
+				options.hygiene?.minCarrierBlocks,
+				ANALOG_TRANSMISSION_MIN_CARRIER_BLOCKS,
+			),
+		}
+		this.setTimer = options.setTimer ?? defaultTimer
+		this.onSuppressed = options.onSuppressed
+	}
+
+	/** WG10 activity hygiene: transmissions suppressed (short, no carrier) since construction. */
+	suppressed(): AnalogTransmissionSuppressed {
+		return { ...this.suppressedCounts }
 	}
 
 	/** Detector failures since this tracker was constructed. Each forces a null tone. */
@@ -273,7 +377,7 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.source.on("stopped", this.handleStopped)
 	}
 
-	/** Closes an open transmission with "stopped", then detaches. */
+	/** Closes an open transmission with "stopped" (a merge-gap one at its end), then detaches. */
 	stop(): void {
 		try {
 			if (this.transmission)
@@ -285,9 +389,10 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		}
 	}
 
+	/** The announced transmission (also while in its merge gap), else null. */
 	current(): AnalogTransmissionEventData | null {
 		const open = this.transmission
-		if (!open) return null
+		if (!open || !open.announced) return null
 		return this.openEvent(open)
 	}
 
@@ -295,12 +400,27 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.guard(() => {
 			const now = this.clock()
 			if (open) {
-				if (this.transmission || !this.canOpen()) return
+				const held = this.transmission
+				if (held && held.segmentOpen) return
+				if (!this.canOpen()) return
+				if (held) {
+					if (this.canMerge(held, now)) {
+						this.resumeSegment(held, now)
+						return
+					}
+					this.close("squelch", now)
+				}
 				this.openTransmission(now)
 				return
 			}
-			if (!this.transmission) return
-			this.close(this.squelchCloseReason(), now)
+			const held = this.transmission
+			if (!held || !held.segmentOpen) return
+			const reason = this.squelchCloseReason()
+			if (reason !== "squelch") {
+				this.close(reason, now)
+				return
+			}
+			this.endSegment(held, now)
 		})
 	}
 
@@ -308,8 +428,14 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		this.guard(() => {
 			const open = this.transmission
 			if (!open) return
-			this.notePower(open, level.channelPowerDbfs)
 			const now = this.clock()
+			if (!open.segmentOpen) {
+				if (now - open.gapEndMs > this.hygiene.mergeGapMs)
+					this.close("squelch", now)
+				return
+			}
+			this.notePower(open, level.channelPowerDbfs)
+			this.announceIfQualified(open, now)
 			if (now - open.startedAtMs >= this.maxDurationMs) {
 				this.close("max-duration", now)
 				this.reopenIfHeld(now)
@@ -327,13 +453,13 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			const open = this.transmission
 			if (!open) return
 			if (!this.configClosesTransmission(open, config)) return
-			this.close("config", this.clock())
+			this.close(open.segmentOpen ? "config" : "squelch", this.clock())
 		})
 	}
 
 	private readonly handlePcm = (chunk: Buffer, format: TonePcmFormat): void => {
 		const open = this.transmission
-		if (!open || this.toneBroken) return
+		if (!open || !open.segmentOpen || this.toneBroken) return
 		this.noteAudio(open, chunk, format)
 		try {
 			open.detector.push(chunk, format)
@@ -345,13 +471,20 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 
 	private readonly handleStopped = (): void => {
 		this.guard(() => {
-			if (!this.transmission) return
-			this.close("stopped", this.clock())
+			const open = this.transmission
+			if (!open) return
+			this.close(open.segmentOpen ? "stopped" : "squelch", this.clock())
 		})
 	}
 
 	private detach(): void {
 		this.detachPcm()
+		const held = this.transmission
+		if (held) {
+			// Detached while a transmission is held: drop it without output (stop() closed it first).
+			this.transmission = null
+			this.cancelGapTimer(held)
+		}
 		if (!this.attached) return
 		this.attached = false
 		this.source.off("squelch-changed", this.handleSquelch)
@@ -437,25 +570,195 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 			detector,
 			audioSeconds: 0,
 			audioRemainder: 0,
+			segmentOpen: true,
+			segmentStartMs: now,
+			gapEndMs: now,
+			announced: false,
+			carrierBlocks: 0,
+			carrierBase: null,
+			carrierRequired: false,
+			cancelTimer: null,
 		}
+		const base = this.readCarrierBlocks()
+		this.transmission.carrierBase = base
+		this.transmission.carrierRequired = base !== null
 		this.attachPcm()
-		this.publish(this.openEvent(this.transmission))
+		this.announceIfQualified(this.transmission, now)
 	}
 
-	private close(reason: AnalogTransmissionCloseReason, closeAt: number): void {
+	/**
+	 * Final close. In the merge gap the transmission ended at its last segment's audio end
+	 * with reason "squelch", whatever `reason` asked. Publishes only a qualified transmission.
+	 */
+	private close(asked: AnalogTransmissionCloseReason, closeAt: number): void {
+		let reason = asked
 		const open = this.transmission
 		if (!open) return
 		this.transmission = null
+		this.cancelGapTimer(open)
 		this.detachPcm()
+		let endedMs: number
+		if (open.segmentOpen) {
+			this.collectCarrier(open)
+			// Only a squelch close happens a hang after the last above-threshold
+			// block; retune, max-duration, stop and config end at the close itself.
+			endedMs =
+				reason === "squelch"
+					? Math.max(open.segmentStartMs, closeAt - this.hangMs())
+					: closeAt
+		} else {
+			reason = "squelch"
+			endedMs = open.gapEndMs
+		}
 		const tone = this.finishTone(open)
-		// Only a squelch close happens a hang after the last above-threshold
-		// block; retune, max-duration, stop and config end at the close itself.
-		const endedMs =
-			reason === "squelch"
-				? Math.max(open.startedAtMs, closeAt - this.hangMs())
-				: closeAt
 		const event = this.closedEvent(open, reason, endedMs, tone)
+		const rejected = open.announced ? null : this.rejection(open, endedMs)
+		if (rejected !== null) {
+			this.suppressedCounts[rejected] += 1
+			try {
+				this.onSuppressed?.(rejected, event)
+			} catch {
+				// A broken observer never blocks the tracker.
+			}
+			return
+		}
+		if (!open.announced) {
+			open.announced = true
+			this.publish(this.openEvent(open))
+		}
 		this.publish(event)
+	}
+
+	/** Ends the open segment on a squelch close and waits a merge gap for a re-open. */
+	private endSegment(open: OpenTransmission, closeAt: number): void {
+		this.collectCarrier(open)
+		open.segmentOpen = false
+		open.gapEndMs = Math.max(open.segmentStartMs, closeAt - this.hangMs())
+		this.detachPcm()
+		if (this.hygiene.mergeGapMs <= 0) {
+			this.close("squelch", closeAt)
+			return
+		}
+		// +1 ms: a re-open exactly at the gap still merges (the bound is inclusive).
+		const delay = Math.max(
+			0,
+			open.gapEndMs + this.hygiene.mergeGapMs + 1 - closeAt,
+		)
+		try {
+			open.cancelTimer = this.setTimer(() => {
+				this.guard(() => {
+					if (this.transmission !== open || open.segmentOpen) return
+					open.cancelTimer = null
+					this.close("squelch", this.clock())
+				})
+			}, delay)
+		} catch {
+			// No timer: level samples, the next open, stop or config still finalise it.
+			open.cancelTimer = null
+		}
+	}
+
+	/** Same source, config identity and frequency, and the re-open within the merge gap. */
+	private canMerge(open: OpenTransmission, now: number): boolean {
+		if (now - open.gapEndMs > this.hygiene.mergeGapMs) return false
+		let status: LiveDemodStatus
+		try {
+			status = this.source.getStatus()
+		} catch {
+			return false
+		}
+		if (status.sourceId !== open.sourceId) return false
+		if (
+			liveDemodTransmissionConfigChanged(
+				open.config,
+				status.config,
+				open.sourceId,
+			)
+		)
+			return false
+		return !this.frequencyDrifted(open)
+	}
+
+	private resumeSegment(open: OpenTransmission, now: number): void {
+		this.cancelGapTimer(open)
+		open.segmentOpen = true
+		open.segmentStartMs = now
+		open.carrierBase = open.carrierRequired ? this.readCarrierBlocks() : null
+		this.attachPcm()
+		this.announceIfQualified(open, now)
+	}
+
+	private cancelGapTimer(open: OpenTransmission): void {
+		const cancel = open.cancelTimer
+		open.cancelTimer = null
+		if (cancel === null) return
+		try {
+			cancel()
+		} catch {
+			// The timer callback re-checks the state anyway.
+		}
+	}
+
+	/** Adds the open segment's carrier blocks (a failing or reset count adds none). */
+	private collectCarrier(open: OpenTransmission): void {
+		if (!open.carrierRequired || open.carrierBase === null) return
+		const nowCount = this.readCarrierBlocks()
+		if (nowCount !== null && nowCount >= open.carrierBase)
+			open.carrierBlocks += nowCount - open.carrierBase
+		open.carrierBase = nowCount
+	}
+
+	private carrierSoFar(open: OpenTransmission): number {
+		let total = open.carrierBlocks
+		if (open.segmentOpen && open.carrierBase !== null) {
+			const nowCount = this.readCarrierBlocks()
+			if (nowCount !== null && nowCount >= open.carrierBase)
+				total += nowCount - open.carrierBase
+		}
+		return total
+	}
+
+	private readCarrierBlocks(): number | null {
+		try {
+			const count = this.source.carrierBlocks?.() ?? null
+			return typeof count === "number" && Number.isFinite(count) ? count : null
+		} catch {
+			return null
+		}
+	}
+
+	/** Why a final transmission is not published, or null when it qualifies. */
+	private rejection(
+		open: OpenTransmission,
+		endedMs: number,
+	): keyof AnalogTransmissionSuppressed | null {
+		if (endedMs - open.startedAtMs < this.hygiene.minDurationMs) return "short"
+		if (
+			open.carrierRequired &&
+			open.carrierBlocks < this.hygiene.minCarrierBlocks
+		)
+			return "noCarrier"
+		return null
+	}
+
+	/**
+	 * Publishes the open event once the final duration is bound to reach the minimum (the
+	 * audio end is at least `now - hang` while a segment is open) and the carrier rule holds.
+	 */
+	private announceIfQualified(open: OpenTransmission, now: number): void {
+		if (open.announced || !open.segmentOpen) return
+		if (
+			this.hygiene.minDurationMs > 0 &&
+			now - this.hangMs() - open.startedAtMs < this.hygiene.minDurationMs
+		)
+			return
+		if (
+			open.carrierRequired &&
+			this.carrierSoFar(open) < this.hygiene.minCarrierBlocks
+		)
+			return
+		open.announced = true
+		this.publish(this.openEvent(open))
 	}
 
 	private reopenIfHeld(now: number): void {
@@ -663,6 +966,21 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	}
 }
 
+/** A finite non-negative override, else the default. */
+function knob(value: number | undefined, fallback: number): number {
+	return value !== undefined && Number.isFinite(value) && value >= 0
+		? value
+		: fallback
+}
+
+function defaultTimer(fn: () => void, ms: number): () => void {
+	const handle = setTimeout(fn, ms)
+	handle.unref()
+	return () => {
+		clearTimeout(handle)
+	}
+}
+
 function meanOf(open: OpenTransmission): number | null {
 	if (open.powerCount === 0) return null
 	return open.powerSum / open.powerCount
@@ -699,6 +1017,8 @@ export interface AnalogTransmissionWiring {
 	sink: () => ((payload: AnalogTransmissionPayload) => void) | null
 	now?: () => number
 	randomUUID?: () => string
+	/** WG10 activity hygiene: one call per suppressed transmission (Main logs at debug). */
+	onSuppressed?: AnalogTransmissionTrackerOptions["onSuppressed"]
 }
 
 /**
@@ -714,6 +1034,7 @@ export function wireAnalogTransmissions(
 		frequencyAt: wiring.frequencyAt,
 		...(wiring.now ? { now: wiring.now } : {}),
 		...(wiring.randomUUID ? { randomUUID: wiring.randomUUID } : {}),
+		...(wiring.onSuppressed ? { onSuppressed: wiring.onSuppressed } : {}),
 	})
 	tracker.on("transmission", event => {
 		wiring.broadcast(event)

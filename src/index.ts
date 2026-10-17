@@ -1995,6 +1995,18 @@ async function main(): Promise<void> {
 				wsBroadcaster.broadcastLiveAudioTransmission(event)
 			},
 			sink: () => activity.transmissionSink(),
+			// WG10 activity hygiene: short or carrier-less squelch openings are not published.
+			onSuppressed: (reason, event) => {
+				log.debug(
+					{
+						reason,
+						transmissionId: event.transmissionId,
+						durationMs: event.durationMs,
+						suppressed: transmissions.suppressed(),
+					},
+					"Analog transmission suppressed (activity hygiene)",
+				)
+			},
 		})
 		feedAnalogEvidence(transmissions, analogEvidence)
 		own(7, () => transmissions.stop())

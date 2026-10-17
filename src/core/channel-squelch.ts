@@ -66,6 +66,14 @@
  * owner callback run after `process()` for that block (the live
  * demodulator's `measureRun`) sees `blockQuieted()` of that same block.
  * Without the option nothing of this runs (byte-identical traces).
+ *
+ * Carrier evidence (WG10 activity hygiene, `carrierEvidence: true`, built by the owner
+ * for nfm/wfm in every squelch mode): `blockCarrier()` tells whether the last measured
+ * block carried a carrier, for the analog transmission tracker only. It reads the
+ * observer when one exists (auto), the noise gate's own quieting against its threshold
+ * in noise mode, and otherwise (manual) a passive `NoiseSquelch` meter at
+ * `LIVE_AUDIO_NOISE_QUIETING_DB.default`. The meter never drives the gate, the floor or
+ * `blockQuieted()`: audio gating is identical with and without it.
  */
 
 import { Transform, type TransformCallback } from "node:stream"
@@ -99,6 +107,11 @@ export interface ChannelSquelchOptions {
 	 * Default false: no observer, `blockQuieted()` always false.
 	 */
 	carrierObserver?: boolean
+	/**
+	 * WG10 activity hygiene: measures `blockCarrier()` (nfm/wfm). Never changes the gate.
+	 * Default false: `blockCarrier()` always false, `hasCarrierEvidence` false.
+	 */
+	carrierEvidence?: boolean
 }
 
 /** Reported floor for an all-zero channel (matches the config minimum). */
@@ -148,6 +161,12 @@ export class ChannelSquelch {
 	private lastBlockQuieted = false
 	/** The owner's last floor estimate was finite (a floor exists). */
 	private ownerFloorKnown = false
+	/** WG10 activity hygiene: carrier evidence wanted (nfm/wfm). */
+	private evidenceEnabled: boolean
+	/** Passive quieting meter (built lazily, only without observer in power mode). */
+	private evidenceMeter: NoiseSquelch | null = null
+	/** Last measured block carried a carrier (evidence only, never gating). */
+	private lastBlockCarrier = false
 
 	constructor(options: ChannelSquelchOptions) {
 		const blockSamples = Math.max(
@@ -173,6 +192,7 @@ export class ChannelSquelch {
 		)
 		this.observer =
 			options.carrierObserver === true ? this.createObserver() : null
+		this.evidenceEnabled = options.carrierEvidence === true
 		if (options.mode === "noise") this.setMode("noise")
 	}
 
@@ -196,6 +216,31 @@ export class ChannelSquelch {
 			hangMs: this.hangMs,
 			hysteresisDb: this.hysteresisDb,
 		})
+	}
+
+	/**
+	 * WG10 activity hygiene: turns carrier evidence on or off at runtime (the owner keeps it
+	 * on for nfm/wfm). Off clears `blockCarrier()`. Never touches the gate.
+	 */
+	setCarrierEvidence(enabled: boolean): void {
+		if (enabled === this.evidenceEnabled) return
+		this.evidenceEnabled = enabled
+		this.evidenceMeter = null
+		this.lastBlockCarrier = false
+	}
+
+	/** Whether `blockCarrier()` measures anything (WG10 activity hygiene). */
+	get hasCarrierEvidence(): boolean {
+		return this.evidenceEnabled
+	}
+
+	/**
+	 * WG10 activity hygiene: the last measured block carried a carrier (observer quieting at
+	 * the default, the noise gate's quieting at its own threshold, or the passive meter).
+	 * False without `carrierEvidence`, before the first block and for an unusable block.
+	 */
+	blockCarrier(): boolean {
+		return this.lastBlockCarrier
 	}
 
 	/** Whether the carrier observer exists (WG10 req 2.6). */
@@ -316,6 +361,8 @@ export class ChannelSquelch {
 		this.noise?.reset()
 		if (this.observer !== null) this.observer = this.createObserver()
 		this.lastBlockQuieted = false
+		this.evidenceMeter = null
+		this.lastBlockCarrier = false
 	}
 
 	/** Gates complete blocks; a partial block waits for the next chunk. */
@@ -362,8 +409,13 @@ export class ChannelSquelch {
 
 		if (this.squelchMode === "noise" && this.noise) {
 			this.gateOpen = this.noise.processBlock(block)
+			if (this.evidenceEnabled) {
+				const q = this.noise.lastQuietingDb
+				this.lastBlockCarrier = q !== null && q >= this.noise.quietingDb
+			}
 			return this.emitBlock(block)
 		}
+		if (this.evidenceEnabled) this.measureCarrierEvidence(block)
 
 		const threshold = this.thresholdDbfs
 		if (threshold === null) return this.emitBlock(block)
@@ -396,6 +448,19 @@ export class ChannelSquelch {
 			}
 		}
 		return this.emitBlock(block)
+	}
+
+	/** WG10 activity hygiene: evidence in power mode (observer, else the passive meter). */
+	private measureCarrierEvidence(block: Buffer): void {
+		if (this.observer !== null) {
+			this.lastBlockCarrier = this.lastBlockQuieted
+			return
+		}
+		this.evidenceMeter ??= this.createObserver()
+		this.evidenceMeter.processBlock(block)
+		const q = this.evidenceMeter.lastQuietingDb
+		this.lastBlockCarrier =
+			q !== null && q >= LIVE_AUDIO_NOISE_QUIETING_DB.default
 	}
 
 	/** Passes (rotated) IQ or the muted vector, keeping the phase continuous. */

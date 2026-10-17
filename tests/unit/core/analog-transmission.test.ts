@@ -123,6 +123,9 @@ function harness(options?: {
 	maxDurationMs?: number
 	createToneDetector?: () => ToneDetectorPort
 }) {
+	// WG10 activity hygiene off: this suite pins the WG1 tracker semantics (pairing, hang,
+	// reasons, frequency, tone). Merge, minimum and carrier rules are in
+	// analog-transmission-hygiene.test.ts.
 	const source = new FakeSource()
 	let now = 1_700_000_000_000
 	let seq = 0
@@ -140,6 +143,7 @@ function harness(options?: {
 		},
 		now: () => now,
 		randomUUID: () => `tx-${++seq}`,
+		hygiene: { mergeGapMs: 0, minDurationMs: 0, minCarrierBlocks: 0 },
 		...(options?.maxDurationMs === undefined
 			? {}
 			: { maxDurationMs: options.maxDurationMs }),
