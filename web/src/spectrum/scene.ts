@@ -1,11 +1,11 @@
 /**
  * Render state shared by the worker (OffscreenCanvas) and the main-thread fallback: ring position,
- * axis, view, levels, layout and peak hold. It uploads each row once and asks for a redraw only when
+ * axis, view, levels, layout, the smoothed trace row and peak hold. It uploads each row once and asks for a redraw only when
  * something visible changed; the caller coalesces redraws with a RenderScheduler.
  */
 
 import { levelsToLinear } from "./codec.ts"
-import { PeakHold, axisResetReason } from "./history.ts"
+import { PeakHold, TraceAverage, axisResetReason } from "./history.ts"
 import type {
 	ResetReason,
 	RowAxis,
@@ -16,6 +16,9 @@ import type {
 } from "./protocol.ts"
 import type { DrawParams, SceneRenderer } from "./renderer.ts"
 import { splitHeight, texMapping, visibleRows } from "./view.ts"
+
+/** Weight of each new row in the smoothed trace (the design's `avg += (row − avg) · 0.35`). */
+export const TRACE_ALPHA = 0.35
 
 export interface SceneOptions {
 	depth: number
@@ -35,6 +38,7 @@ export class SpectrumScene {
 	private readonly invalidate: () => void
 	private readonly now: () => number
 	private readonly peak: PeakHold
+	private readonly average: TraceAverage
 	private axis: RowAxis | null = null
 	private next = 0
 	private filled = 0
@@ -54,6 +58,7 @@ export class SpectrumScene {
 		this.invalidate = opts.invalidate
 		this.now = opts.now ?? (() => performance.now())
 		this.peak = new PeakHold(opts.texWidth)
+		this.average = new TraceAverage(opts.texWidth)
 		this.applySize()
 	}
 
@@ -66,6 +71,8 @@ export class SpectrumScene {
 		this.renderer.uploadRow(index, row, count)
 		this.next = (index + 1) % this.depth
 		if (this.filled < this.depth) this.filled++
+		this.average.update(row, count, TRACE_ALPHA)
+		this.renderer.uploadTrace(this.average.bytes, count)
 		if (this.layout.peakHold) {
 			const now = this.now()
 			const dt = this.lastRowAt === null ? 0 : (now - this.lastRowAt) / 1000
@@ -83,6 +90,7 @@ export class SpectrumScene {
 		this.filled = 0
 		this.lastRowAt = null
 		this.peak.reset()
+		this.average.reset()
 		this.invalidate()
 	}
 
@@ -140,7 +148,8 @@ export class SpectrumScene {
 			),
 			tracePx,
 			gapPx,
-			lineHalfWidth: 0.75 * this.size.dpr,
+			// 1.25 CSS px, as on the design board.
+			lineHalfWidth: 0.625 * this.size.dpr,
 			peakHold: this.layout.peakHold,
 		}
 	}

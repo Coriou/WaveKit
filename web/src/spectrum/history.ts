@@ -155,3 +155,41 @@ export class PeakHold {
 		this.bytes.fill(0)
 	}
 }
+
+/**
+ * Smoothed trace row in byte units: an exponential average of the rows (DESIGN.md spectrum board,
+ * `avg += (row − avg) · 0.35` per row). The trace and its fill draw from it; the waterfall keeps the
+ * raw rows, so nothing is lost there.
+ */
+export class TraceAverage {
+	readonly bytes: Uint8Array
+	private readonly level: Float32Array
+	private empty = true
+
+	constructor(width: number) {
+		this.bytes = new Uint8Array(width)
+		this.level = new Float32Array(width)
+	}
+
+	/** Folds in a row with weight `alpha` (1 shows the raw row). */
+	update(row: Uint8Array, count: number, alpha: number): void {
+		const n = Math.min(count, row.length, this.bytes.length)
+		const level = this.level
+		const out = this.bytes
+		for (let i = 0; i < n; i++) {
+			const v = row[i] as number
+			const next = this.empty
+				? v
+				: (level[i] as number) + (v - (level[i] as number)) * alpha
+			level[i] = next
+			out[i] = Math.round(next)
+		}
+		this.empty = false
+	}
+
+	reset(): void {
+		this.empty = true
+		this.level.fill(0)
+		this.bytes.fill(0)
+	}
+}

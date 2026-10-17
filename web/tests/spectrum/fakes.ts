@@ -4,6 +4,7 @@ import type { TimerApi } from "../../src/spectrum/schedule.ts"
 export class FakeRenderer implements SceneRenderer {
 	rows: { index: number; first: number; count: number }[] = []
 	peaks: number[][] = []
+	traces: number[][] = []
 	draws: DrawParams[] = []
 	size: [number, number] = [0, 0]
 	ramps = 0
@@ -16,6 +17,9 @@ export class FakeRenderer implements SceneRenderer {
 	}
 	uploadPeak(row: Uint8Array, count: number): void {
 		this.peaks.push(Array.from(row.subarray(0, count)))
+	}
+	uploadTrace(row: Uint8Array, count: number): void {
+		this.traces.push(Array.from(row.subarray(0, count)))
 	}
 	setRamp(): void {
 		this.ramps++

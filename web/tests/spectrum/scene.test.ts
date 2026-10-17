@@ -80,7 +80,18 @@ describe("SpectrumScene", () => {
 		scene.addRow(axis, Uint8Array.from([100, 100, 100, 100]), 4)
 		tick(1000)
 		scene.addRow(axis, Uint8Array.from([0, 0, 0, 0]), 4)
-		// 6 dB/s → 12 bytes after one second.
-		expect(renderer.peaks.at(-1)).toEqual([88, 88, 88, 88])
+		// 3 dB/s → 6 bytes after one second.
+		expect(renderer.peaks.at(-1)).toEqual([94, 94, 94, 94])
+	})
+
+	it("draws the trace from a smoothed row (0.35 of each new row)", () => {
+		const { renderer, scene } = setup()
+		scene.addRow(axis, Uint8Array.from([100, 100, 100, 100]), 4)
+		expect(renderer.traces.at(-1)).toEqual([100, 100, 100, 100])
+		scene.addRow(axis, Uint8Array.from([0, 200, 100, 100]), 4)
+		expect(renderer.traces.at(-1)).toEqual([65, 135, 100, 100])
+		// A new axis starts the average over.
+		scene.addRow({ ...axis, startHz: 2e8 }, Uint8Array.from([7, 7, 7, 7]), 4)
+		expect(renderer.traces.at(-1)).toEqual([7, 7, 7, 7])
 	})
 })

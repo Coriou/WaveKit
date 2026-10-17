@@ -60,6 +60,8 @@ export interface SpectrumFrameMeta {
 		startHz: number
 		endHz: number
 		flags: { burst: boolean; iqImage: boolean; edge: boolean }
+		/** Peak dBFS over the track in the newest row (web-side, rounded to 3 dB); null when unknown. */
+		peakDb?: number | null
 	}[]
 	tuningTrust: TuningTrust
 	epoch: number
@@ -125,8 +127,9 @@ export const DEFAULT_LAYOUT: SpectrumLayout = {
 	splitRatio: 0.3,
 	gapCss: 0,
 	rowHeightCss: 1,
-	peakHold: false,
-	peakDecayDbPerSec: 6,
+	// The design always draws the faint peak trace; ~3 dB/s is its 0.12 dB per row at 24 rows/s.
+	peakHold: true,
+	peakDecayDbPerSec: 3,
 }
 
 export const DEFAULT_LEVELS: SpectrumLevels = { minDb: -120, maxDb: -20 }

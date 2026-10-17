@@ -1,5 +1,7 @@
 /**
  * WebGL2 renderer for the spectrum trace (top band) and waterfall (bottom band), one full-screen pass.
+ * The trace draws the smoothed row (scene.ts TraceAverage) with the design board's fill gradient and
+ * a faint peak-hold line; the waterfall draws the raw rows.
  * Shared by the OffscreenCanvas worker path and the main-thread fallback: it only needs a
  * WebGL2RenderingContext. The waterfall is an R8 texture used as a ring (one texSubImage2D per row);
  * levels, view mapping and ring position are uniforms, so a view or level change re-uploads nothing.
@@ -33,6 +35,7 @@ export interface SceneRenderer {
 	resize(widthPx: number, heightPx: number): void
 	uploadRow(index: number, row: Uint8Array, count: number): void
 	uploadPeak(row: Uint8Array, count: number): void
+	uploadTrace(row: Uint8Array, count: number): void
 	setRamp(rgba: Uint8Array): void
 	draw(params: DrawParams): void
 	dispose(): void
@@ -53,6 +56,7 @@ precision highp int;
 
 uniform sampler2D u_wf;
 uniform sampler2D u_peak;
+uniform sampler2D u_trace;
 uniform sampler2D u_ramp;
 uniform vec2 u_size;      // canvas, device px
 uniform float u_tracePx;  // trace band height from the top, device px
@@ -163,21 +167,22 @@ void main() {
 
 	vec3 color = bg.rgb;
 	if (hasData) {
-		float index = rowIndex(0.0);
-		int row = int(index);
-		float v = (index + 0.5) / u_depth;
-		float yc = traceY(sampleSpan(u_wf, row, v, px - 0.5, px + 0.5));
+		// Trace and fill from the smoothed row (one texel row), as on the design board.
+		float yc = traceY(sampleSpan(u_trace, 0, 0.5, px - 0.5, px + 0.5));
 		vec4 lineColor = ramp(0.82);
 		if (y > yc) {
-			float depth = (y - yc) / max(u_tracePx - yc, 1.0);
-			color = mix(color, lineColor.rgb, mix(0.32, 0.04, depth));
+			// Fill under the trace: a fixed vertical gradient over the band (.30 at the top, .06 at
+			// 70 %, .02 at the foot), so a quiet floor stays dark and strong signals glow.
+			float t = y / max(u_tracePx, 1.0);
+			float a = t < 0.7 ? mix(0.30, 0.06, t / 0.7) : mix(0.06, 0.02, (t - 0.7) / 0.3);
+			color = mix(color, lineColor.rgb, a);
 		}
 		if (u_peakOn > 0.5) {
 			float pc = traceY(sampleSpan(u_peak, 0, 0.5, px - 0.5, px + 0.5));
-			float p = stroke(u_peak, 0, 0.5, px, y, pc, u_lineHalf * 0.6);
-			color = mix(color, ramp(1.0).rgb, 0.55 * p);
+			float p = stroke(u_peak, 0, 0.5, px, y, pc, u_lineHalf * 0.8);
+			color = mix(color, ramp(1.0).rgb, 0.16 * p);
 		}
-		float c = stroke(u_wf, row, v, px, y, yc, u_lineHalf);
+		float c = stroke(u_trace, 0, 0.5, px, y, yc, u_lineHalf);
 		color = mix(color, lineColor.rgb, c);
 	}
 	outColor = vec4(color, 1.0);
@@ -187,6 +192,7 @@ void main() {
 type Uniforms = Record<
 	| "u_wf"
 	| "u_peak"
+	| "u_trace"
 	| "u_ramp"
 	| "u_size"
 	| "u_tracePx"
@@ -209,6 +215,7 @@ export class SpectrumRenderer implements SceneRenderer {
 	private readonly vao: WebGLVertexArrayObject
 	private readonly wf: WebGLTexture
 	private readonly peak: WebGLTexture
+	private readonly trace: WebGLTexture
 	private readonly ramp: WebGLTexture
 	private readonly u: Uniforms
 	private readonly texWidth: number
@@ -222,10 +229,12 @@ export class SpectrumRenderer implements SceneRenderer {
 		this.vao = must(gl.createVertexArray(), "vertex array")
 		this.wf = texture(gl, gl.R8, texWidth, depth)
 		this.peak = texture(gl, gl.R8, texWidth, 1)
+		this.trace = texture(gl, gl.R8, texWidth, 1)
 		this.ramp = texture(gl, gl.RGBA8, RAMP_SIZE, 1)
 		const names = [
 			"u_wf",
 			"u_peak",
+			"u_trace",
 			"u_ramp",
 			"u_size",
 			"u_tracePx",
@@ -273,10 +282,18 @@ export class SpectrumRenderer implements SceneRenderer {
 	}
 
 	uploadPeak(row: Uint8Array, count: number): void {
+		this.uploadLine(this.peak, row, count)
+	}
+
+	uploadTrace(row: Uint8Array, count: number): void {
+		this.uploadLine(this.trace, row, count)
+	}
+
+	private uploadLine(tex: WebGLTexture, row: Uint8Array, count: number): void {
 		const gl = this.gl
 		const n = Math.min(count, this.texWidth, row.length)
 		if (n <= 0) return
-		gl.bindTexture(gl.TEXTURE_2D, this.peak)
+		gl.bindTexture(gl.TEXTURE_2D, tex)
 		gl.texSubImage2D(
 			gl.TEXTURE_2D,
 			0,
@@ -317,6 +334,7 @@ export class SpectrumRenderer implements SceneRenderer {
 		bindUnit(gl, 0, this.wf, this.u.u_wf)
 		bindUnit(gl, 1, this.peak, this.u.u_peak)
 		bindUnit(gl, 2, this.ramp, this.u.u_ramp)
+		bindUnit(gl, 3, this.trace, this.u.u_trace)
 		gl.uniform2f(this.u.u_size, w, h)
 		gl.uniform1f(this.u.u_tracePx, p.tracePx)
 		gl.uniform3f(this.u.u_map, p.map.scale, p.map.offset, p.map.limit)
@@ -336,6 +354,7 @@ export class SpectrumRenderer implements SceneRenderer {
 		const gl = this.gl
 		gl.deleteTexture(this.wf)
 		gl.deleteTexture(this.peak)
+		gl.deleteTexture(this.trace)
 		gl.deleteTexture(this.ramp)
 		gl.deleteVertexArray(this.vao)
 		gl.deleteProgram(this.program)
