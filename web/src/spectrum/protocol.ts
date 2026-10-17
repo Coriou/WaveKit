@@ -36,6 +36,8 @@ export interface SpectrumLayout {
 	peakHold: boolean
 	/** Peak-hold decay, dB per second (0 holds forever). */
 	peakDecayDbPerSec: number
+	/** The trace's exponential average: the newest row's weight (1 draws it raw; Settings › Averaging). */
+	traceAlpha: number
 }
 
 export interface SpectrumSize {
@@ -125,6 +127,8 @@ export const DEFAULT_LAYOUT: SpectrumLayout = {
 	// The design always draws the faint peak trace; ~3 dB/s is its 0.12 dB per row at 24 rows/s.
 	peakHold: true,
 	peakDecayDbPerSec: 3,
+	// the design's `avg += (row − avg) · 0.35` (Averaging: Low)
+	traceAlpha: 0.35,
 }
 
 export const DEFAULT_LEVELS: SpectrumLevels = { minDb: -120, maxDb: -20 }

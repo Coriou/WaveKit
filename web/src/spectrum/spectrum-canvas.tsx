@@ -168,6 +168,7 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 	const rowHeightCss = props.layout?.rowHeightCss
 	const peakHold = props.layout?.peakHold
 	const peakDecayDbPerSec = props.layout?.peakDecayDbPerSec
+	const traceAlpha = props.layout?.traceAlpha
 	useEffect(() => {
 		const layout: Partial<SpectrumLayout> = {}
 		if (splitRatio !== undefined) layout.splitRatio = splitRatio
@@ -176,8 +177,16 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 		if (peakHold !== undefined) layout.peakHold = peakHold
 		if (peakDecayDbPerSec !== undefined)
 			layout.peakDecayDbPerSec = peakDecayDbPerSec
+		if (traceAlpha !== undefined) layout.traceAlpha = traceAlpha
 		engineRef.current?.setLayout(layout)
-	}, [splitRatio, gapCss, rowHeightCss, peakHold, peakDecayDbPerSec])
+	}, [
+		splitRatio,
+		gapCss,
+		rowHeightCss,
+		peakHold,
+		peakDecayDbPerSec,
+		traceAlpha,
+	])
 
 	const { ramp } = props
 	useEffect(() => {

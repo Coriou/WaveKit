@@ -49,7 +49,13 @@ import {
 	wheelZoomFactor,
 	zoomLabel,
 } from "./maths.ts"
-import { PlotController, type PlotContext } from "./plot-store.ts"
+import {
+	autoLevelsNow,
+	PlotController,
+	type PlotContext,
+} from "./plot-store.ts"
+import { AVERAGING_ALPHA, spectrumLevels } from "../shell/device-prefs.ts"
+import { useDevicePrefs } from "../shell/hooks.ts"
 import { AXIS_CSS, DISCOVERY_ROW_CSS, LANES_CSS, plotLayout } from "./layout.ts"
 import { isReadOnly } from "../app/context.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
@@ -127,8 +133,11 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 	const probeRef = useRef<SpectrumProbe | null>(null)
 
 	const [meta, setMeta] = useState<SpectrumFrameMeta | null>(null)
-	// the scale follows the core's noise floor (frames carry floorDbfs)
-	const [levels, setLevels] = useState<SpectrumLevels>(DEFAULT_LEVELS)
+	// Auto follows the core's noise floor (frames carry floorDbfs); Fixed holds a scale the user set
+	const [autoScale, setLevels] = useState<SpectrumLevels>(DEFAULT_LEVELS)
+	const device = useDevicePrefs()
+	const levels = spectrumLevels(device, autoScale)
+	useEffect(() => autoLevelsNow.set(autoScale), [autoScale])
 	const [engineError, setEngineError] = useState<string | null>(null)
 	const heldRef = useRef<{ track: Track; seenAt: number }[]>([])
 	const [tracks, setTracks] = useState<readonly Track[]>([])
@@ -287,7 +296,11 @@ export function Plot({ data, className, stepHz }: PlotProps) {
 					backfillMs={SPECTRUM_BACKFILL_MS}
 					view={plotState.view.spanHz === null ? null : view}
 					levels={levels}
-					layout={{ splitRatio: layout.splitRatio, gapCss: layout.gapCss }}
+					layout={{
+						splitRatio: layout.splitRatio,
+						gapCss: layout.gapCss,
+						traceAlpha: AVERAGING_ALPHA[device.averaging],
+					}}
 					onFrameMeta={onFrameMeta}
 					onStatus={onStatus}
 					probeRef={probeRef}

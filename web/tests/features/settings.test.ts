@@ -22,6 +22,7 @@ import {
 	type SettingRow,
 } from "../../src/features/settings/model.ts"
 import { SETTINGS_REGISTRY } from "../../src/features/settings/registry.ts"
+import { DEFAULT_DEVICE } from "../../src/shell/device-prefs.ts"
 import {
 	buildRows,
 	formatLocation,
@@ -221,7 +222,7 @@ function snapshot(over: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 			waterfall: "match",
 		},
 		display: { units: "nautical", timeFormat: "local-24h" },
-		device: { density: "comfy", motion: "system" },
+		device: DEFAULT_DEVICE,
 		stepHz: null,
 		cardAt: "al",
 		volume: 0.8,
@@ -575,7 +576,7 @@ describe("Settings items", () => {
 	it("keeps Density and Motion on this device, around the card position", async () => {
 		const a = actions()
 		const list = buildRows(
-			snapshot({ device: { density: "compact", motion: "system" } }),
+			snapshot({ device: { ...DEFAULT_DEVICE, density: "compact" } }),
 			a,
 		)
 		const ids = list.filter(r => r.device).map(r => r.id)
@@ -589,6 +590,41 @@ describe("Settings items", () => {
 		await density.write?.("comfy")
 		expect(a.calls).toContainEqual(["device", { motion: "reduce" }])
 		expect(a.calls).toContainEqual(["device", { density: "comfy" }])
+	})
+
+	it("keeps Spectrum range and Averaging on this device, after the waterfall colours", async () => {
+		const a = actions()
+		const list = buildRows(snapshot(), a)
+		const ids = list.filter(r => r.device).map(r => r.id)
+		const wf = ids.indexOf("dev.waterfall")
+		expect(ids.slice(wf + 1, wf + 3)).toEqual(["dp.range", "dp.avg"])
+		const range = byId(list, "dp.range")
+		expect(range.text).toBe("Auto")
+		expect(range.help).toBe("Auto follows the noise floor")
+		await range.write?.("fixed")
+		expect(a.calls).toContainEqual(["device", { spectrumRange: "fixed" }])
+		const avg = byId(list, "dp.avg")
+		expect(avg.text).toBe("Low")
+		expect(avg.def?.value).toBe("low")
+		await avg.write?.("high")
+		expect(a.calls).toContainEqual(["device", { averaging: "high" }])
+		const held = byId(
+			buildRows(
+				snapshot({
+					device: {
+						...DEFAULT_DEVICE,
+						spectrumRange: "fixed",
+						fixedLevels: { minDb: -105, maxDb: -5 },
+					},
+				}),
+				a,
+			),
+			"dp.range",
+		)
+		expect(held.text).toBe("Fixed")
+		expect(held.help).toBe(
+			"Holds −105 to −5 dBFS, where Auto stood when you picked Fixed",
+		)
 	})
 
 	it("crumbs device rows and matches accents loosely", () => {

@@ -157,6 +157,20 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.range",
+		"Display",
+		"Spectrum range",
+		"db scale min max range levels floor fixed auto",
+		SETTINGS,
+	),
+	row(
+		"dp.avg",
+		"Display",
+		"Averaging",
+		"smoothing smooth average trace line spectrum",
+		SETTINGS,
+	),
+	row(
 		"dev.card",
 		"Display",
 		"Tuned card position",

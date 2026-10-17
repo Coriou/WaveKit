@@ -5,7 +5,8 @@
  */
 
 import { Store } from "../data/index.ts"
-import type { SpectrumViewSpan } from "../spectrum/index.ts"
+import type { SpectrumLevels, SpectrumViewSpan } from "../spectrum/index.ts"
+import { DEFAULT_LEVELS } from "../spectrum/protocol.ts"
 import {
 	FIT_VIEW,
 	type KeyAction,
@@ -23,6 +24,9 @@ import {
 	tuneAction,
 	zoomAt,
 } from "./maths.ts"
+
+/** The scale Auto has found for the shown source; Settings › Spectrum range: Fixed holds it. */
+export const autoLevelsNow = new Store<SpectrumLevels>(DEFAULT_LEVELS)
 
 export interface PlotState {
 	view: PlotView

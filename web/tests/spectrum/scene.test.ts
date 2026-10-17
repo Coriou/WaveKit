@@ -75,6 +75,16 @@ describe("SpectrumScene", () => {
 		expect(m.scale).toBeCloseTo(2 / 8, 12)
 	})
 
+	it("smooths the trace by layout.traceAlpha (Settings › Averaging), live", () => {
+		const { renderer, scene } = setup()
+		scene.addRow(axis, Uint8Array.from([0, 0, 0, 0]), 4)
+		scene.addRow(axis, Uint8Array.from([100, 100, 100, 100]), 4)
+		expect(renderer.traces.at(-1)).toEqual([35, 35, 35, 35])
+		scene.setLayout({ ...DEFAULT_LAYOUT, traceAlpha: 1 })
+		scene.addRow(axis, Uint8Array.from([200, 200, 200, 200]), 4)
+		expect(renderer.traces.at(-1)).toEqual([200, 200, 200, 200])
+	})
+
 	it("peak hold decays by peakDecayDbPerSec over the real interval", () => {
 		const { renderer, scene, tick } = setup(true)
 		scene.addRow(axis, Uint8Array.from([100, 100, 100, 100]), 4)

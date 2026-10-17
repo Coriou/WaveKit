@@ -6,6 +6,7 @@ import {
 	deviceAttributes,
 	DevicePrefsStore,
 	parseDevicePrefs,
+	spectrumLevels,
 	type MotionQuery,
 } from "../../src/shell/device-prefs.ts"
 import type { KeyValueStorage } from "../../src/shell/theme.ts"
@@ -41,16 +42,69 @@ class FakeQuery implements MotionQuery {
 
 describe("device prefs", () => {
 	it("defaults to comfortable and following the system, field by field", () => {
-		expect(DEFAULT_DEVICE).toEqual({ density: "comfy", motion: "system" })
+		expect(DEFAULT_DEVICE).toEqual({
+			density: "comfy",
+			motion: "system",
+			spectrumRange: "auto",
+			fixedLevels: null,
+			averaging: "low",
+		})
 		expect(parseDevicePrefs(null)).toEqual(DEFAULT_DEVICE)
 		expect(parseDevicePrefs("{bad")).toEqual(DEFAULT_DEVICE)
 		expect(
 			parseDevicePrefs(JSON.stringify({ density: "compact", motion: "fast" })),
-		).toEqual({ density: "compact", motion: "system" })
+		).toEqual({ ...DEFAULT_DEVICE, density: "compact" })
+	})
+
+	it("keeps the spectrum's range and averaging, dropping a scale that makes no sense", () => {
+		const raw = (o: object) => parseDevicePrefs(JSON.stringify(o))
+		expect(
+			raw({
+				spectrumRange: "fixed",
+				fixedLevels: { minDb: -80, maxDb: 0 },
+				averaging: "high",
+			}),
+		).toEqual({
+			...DEFAULT_DEVICE,
+			spectrumRange: "fixed",
+			fixedLevels: { minDb: -80, maxDb: 0 },
+			averaging: "high",
+		})
+		expect(raw({ averaging: "max" }).averaging).toBe("low")
+		for (const bad of [
+			{ minDb: -20, maxDb: -25 },
+			{ minDb: -300, maxDb: 0 },
+			{ minDb: "-80", maxDb: 0 },
+			{ minDb: null, maxDb: 0 },
+			[1, 2],
+		])
+			expect(raw({ fixedLevels: bad }).fixedLevels).toBeNull()
+	})
+
+	it("draws Fixed's scale when it has one, else Auto's", () => {
+		const auto = { minDb: -75, maxDb: 0 }
+		const held = { minDb: -110, maxDb: -10 }
+		expect(spectrumLevels(DEFAULT_DEVICE, auto)).toBe(auto)
+		expect(spectrumLevels({ ...DEFAULT_DEVICE, fixedLevels: held }, auto)).toBe(
+			auto,
+		)
+		expect(
+			spectrumLevels(
+				{ ...DEFAULT_DEVICE, spectrumRange: "fixed", fixedLevels: held },
+				auto,
+			),
+		).toBe(held)
+		expect(
+			spectrumLevels({ ...DEFAULT_DEVICE, spectrumRange: "fixed" }, auto),
+		).toBe(auto)
 	})
 
 	it("resolves motion: Reduce always reduces, Follow system follows the query", () => {
-		const comfy = { density: "comfy", motion: "system" } as const
+		const comfy = {
+			...DEFAULT_DEVICE,
+			density: "comfy",
+			motion: "system",
+		} as const
 		expect(deviceAttributes(comfy, false)["data-wk-motion"]).toBe("full")
 		expect(deviceAttributes(comfy, true)["data-wk-motion"]).toBe("reduce")
 		expect(
@@ -82,11 +136,24 @@ describe("DevicePrefsStore", () => {
 		store.set({ motion: "reduce" })
 		expect(el.attrs["data-wk-motion"]).toBe("reduce")
 		expect(parseDevicePrefs(st.getItem(DEVICE_STORAGE_KEY))).toEqual({
+			...DEFAULT_DEVICE,
 			density: "compact",
 			motion: "reduce",
 		})
 		store.set({ motion: "reduce" })
 		expect(calls).toBe(3)
+		store.set({ spectrumRange: "fixed", fixedLevels: { minDb: -90, maxDb: 0 } })
+		expect(calls).toBe(4)
+		// an equal scale is no change
+		store.set({ fixedLevels: { minDb: -90, maxDb: 0 } })
+		expect(calls).toBe(4)
+		store.set({ averaging: "off" })
+		expect(calls).toBe(5)
+		expect(parseDevicePrefs(st.getItem(DEVICE_STORAGE_KEY))).toMatchObject({
+			spectrumRange: "fixed",
+			fixedLevels: { minDb: -90, maxDb: 0 },
+			averaging: "off",
+		})
 	})
 
 	it("works without storage, element or media query", () => {

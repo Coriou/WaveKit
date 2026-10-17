@@ -26,7 +26,13 @@ import type {
 	TunerRelayView,
 } from "../../data/index.ts"
 import type { CardAnchorId } from "../../shell/layout.ts"
-import type { Density, DevicePrefs, Motion } from "../../shell/device-prefs.ts"
+import type {
+	Averaging,
+	Density,
+	DevicePrefs,
+	Motion,
+	SpectrumRange,
+} from "../../shell/device-prefs.ts"
 import type { DisplayPrefs, TimeFormat, Units } from "../display.ts"
 import { DEFAULT_DISPLAY } from "../display.ts"
 import type { ThemePrefs } from "../../shell/theme.ts"
@@ -964,6 +970,15 @@ const TIME_OPTS = opts([
 	["local-12h", "12 h"],
 	["utc", "UTC"],
 ])
+const RANGE_OPTS = opts([
+	["auto", "Auto"],
+	["fixed", "Fixed"],
+])
+const AVERAGING_OPTS = opts([
+	["off", "Off"],
+	["low", "Low"],
+	["high", "High"],
+])
 const WATERFALL_OPTS = opts([
 	["match", "Match accent"],
 	["amber", "Amber"],
@@ -1123,6 +1138,38 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 		},
 	)
 	const d = s.device
+	const fixed = d.spectrumRange === "fixed" ? d.fixedLevels : null
+	rows.push(
+		{
+			id: "dp.range",
+			group: "display",
+			label: "Spectrum range",
+			help: fixed
+				? `Holds ${formatDb(fixed.minDb, 0)} to ${formatDb(fixed.maxDb, 0)} dBFS, where Auto stood when you picked Fixed`
+				: "Auto follows the noise floor",
+			keys: words("db scale min max range levels floor fixed auto spectrum"),
+			device: true,
+			widget: { kind: "seg", options: RANGE_OPTS },
+			value: d.spectrumRange,
+			text: optionText(RANGE_OPTS, d.spectrumRange),
+			def: { value: "auto", text: "Auto" },
+			write: v =>
+				local(() => a.setDevice({ spectrumRange: v as SpectrumRange })),
+		},
+		{
+			id: "dp.avg",
+			group: "display",
+			label: "Averaging",
+			help: "Smooths the spectrum line",
+			keys: words("averaging smoothing smooth average trace line spectrum"),
+			device: true,
+			widget: { kind: "seg", options: AVERAGING_OPTS },
+			value: d.averaging,
+			text: optionText(AVERAGING_OPTS, d.averaging),
+			def: { value: "low", text: "Low" },
+			write: v => local(() => a.setDevice({ averaging: v as Averaging })),
+		},
+	)
 	rows.push({
 		id: "dev.density",
 		group: "display",

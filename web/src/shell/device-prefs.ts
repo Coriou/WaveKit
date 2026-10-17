@@ -1,4 +1,4 @@
-// Display › On this device: density and motion, persisted in localStorage and applied as data-wk-density /
+// Display › On this device: density, motion and the spectrum's range and averaging, persisted in localStorage and applied as data-wk-density /
 // data-wk-motion on <html>. Motion "system" resolves through prefers-reduced-motion, so CSS and code only ever
 // test data-wk-motion="reduce". Pure apart from the storage, element and media query passed in (tests use fakes).
 
@@ -14,14 +14,41 @@ export type Density = (typeof DENSITIES)[number]
 export const MOTIONS = ["system", "reduce"] as const
 export type Motion = (typeof MOTIONS)[number]
 
+export const SPECTRUM_RANGES = ["auto", "fixed"] as const
+export type SpectrumRange = (typeof SPECTRUM_RANGES)[number]
+
+export const AVERAGINGS = ["off", "low", "high"] as const
+export type Averaging = (typeof AVERAGINGS)[number]
+
+/** The trace's exponential average per Averaging step (weight of the newest row; 1 draws it raw). */
+export const AVERAGING_ALPHA: Readonly<Record<Averaging, number>> = {
+	off: 1,
+	low: 0.35,
+	high: 0.12,
+}
+
+/** A spectrum scale in dBFS, bottom and top. */
+export interface FixedLevels {
+	readonly minDb: number
+	readonly maxDb: number
+}
+
 export interface DevicePrefs {
 	readonly density: Density
 	readonly motion: Motion
+	/** Auto follows the noise floor; Fixed holds `fixedLevels`. */
+	readonly spectrumRange: SpectrumRange
+	/** The scale Fixed holds: where Auto stood when Fixed was picked. */
+	readonly fixedLevels: FixedLevels | null
+	readonly averaging: Averaging
 }
 
 export const DEFAULT_DEVICE: DevicePrefs = {
 	density: "comfy",
 	motion: "system",
+	spectrumRange: "auto",
+	fixedLevels: null,
+	averaging: "low",
 }
 export const DEVICE_STORAGE_KEY = "wavekit.web.device"
 
@@ -40,6 +67,18 @@ const pick = <T extends string>(
 		? (v as T)
 		: fallback
 
+/** A stored scale: two finite dBFS values, the bottom at least 10 dB under the top, within −200 … 30. */
+function parseLevels(v: unknown): FixedLevels | null {
+	if (typeof v !== "object" || v === null) return null
+	const o = v as Record<string, unknown>
+	const lo = o["minDb"]
+	const hi = o["maxDb"]
+	if (typeof lo !== "number" || typeof hi !== "number") return null
+	if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null
+	if (lo < -200 || hi > 30 || hi - lo < 10) return null
+	return { minDb: lo, maxDb: hi }
+}
+
 /** Parses stored prefs; anything missing or unknown falls back to the default, field by field. */
 export function parseDevicePrefs(raw: string | null): DevicePrefs {
 	if (!raw) return DEFAULT_DEVICE
@@ -54,8 +93,29 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 	return {
 		density: pick(DENSITIES, o["density"], DEFAULT_DEVICE.density),
 		motion: pick(MOTIONS, o["motion"], DEFAULT_DEVICE.motion),
+		spectrumRange: pick(
+			SPECTRUM_RANGES,
+			o["spectrumRange"],
+			DEFAULT_DEVICE.spectrumRange,
+		),
+		fixedLevels: parseLevels(o["fixedLevels"]),
+		averaging: pick(AVERAGINGS, o["averaging"], DEFAULT_DEVICE.averaging),
 	}
 }
+
+/** The scale the spectrum draws: Fixed's when it has one, else what Auto found (`auto`). */
+export function spectrumLevels(
+	prefs: DevicePrefs,
+	auto: FixedLevels,
+): FixedLevels {
+	return prefs.spectrumRange === "fixed" && prefs.fixedLevels
+		? prefs.fixedLevels
+		: auto
+}
+
+const sameLevels = (a: FixedLevels | null, b: FixedLevels | null): boolean =>
+	a === b ||
+	(a !== null && b !== null && a.minDb === b.minDb && a.maxDb === b.maxDb)
 
 /** The scope attributes: motion is resolved, so "system" on a reduced-motion device reads "reduce". */
 export function deviceAttributes(
@@ -114,9 +174,13 @@ export class DevicePrefsStore {
 
 	set(patch: Partial<DevicePrefs>): void {
 		const next = { ...this.#prefs, ...patch }
+		const prev = this.#prefs
 		if (
-			next.density === this.#prefs.density &&
-			next.motion === this.#prefs.motion
+			next.density === prev.density &&
+			next.motion === prev.motion &&
+			next.spectrumRange === prev.spectrumRange &&
+			sameLevels(next.fixedLevels, prev.fixedLevels) &&
+			next.averaging === prev.averaging
 		)
 			return
 		this.#prefs = next

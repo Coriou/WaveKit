@@ -17,9 +17,6 @@ import type {
 import type { DrawParams, SceneRenderer } from "./renderer.ts"
 import { splitHeight, texMapping, visibleRows } from "./view.ts"
 
-/** Weight of each new row in the smoothed trace (the design's `avg += (row − avg) · 0.35`). */
-export const TRACE_ALPHA = 0.35
-
 export interface SceneOptions {
 	depth: number
 	texWidth: number
@@ -71,7 +68,7 @@ export class SpectrumScene {
 		this.renderer.uploadRow(index, row, count)
 		this.next = (index + 1) % this.depth
 		if (this.filled < this.depth) this.filled++
-		this.average.update(row, count, TRACE_ALPHA)
+		this.average.update(row, count, this.layout.traceAlpha)
 		this.renderer.uploadTrace(this.average.bytes, count)
 		if (this.layout.peakHold) {
 			const now = this.now()

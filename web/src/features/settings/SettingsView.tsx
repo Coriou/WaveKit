@@ -21,6 +21,7 @@ import { useDevicePrefs, useTheme } from "../../shell/hooks.ts"
 import { cardAnchorName } from "../../shell/layout.ts"
 import { shellStore } from "../../shell/store.ts"
 import { devicePrefsStore } from "../../shell/device-prefs.ts"
+import { autoLevelsNow } from "../../plot/plot-store.ts"
 import { displayStore } from "../display.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { showAppToast } from "../../shell/toast.ts"
@@ -180,7 +181,14 @@ function useActions(openPage: (page: string) => void): SettingsActions {
 		}
 		return {
 			setTheme: patch => themeStore.set(patch),
-			setDevice: patch => devicePrefsStore.set(patch),
+			// Fixed holds the scale Auto stands at when it is picked
+			setDevice: patch =>
+				devicePrefsStore.set(
+					patch.spectrumRange === "fixed" &&
+						devicePrefsStore.getState().spectrumRange !== "fixed"
+						? { fixedLevels: autoLevelsNow.get(), ...patch }
+						: patch,
+				),
 			setDisplay: patch => displayStore.setLocal(patch),
 			setStep: hz => services.prefs.setStep(hz),
 			setCardAt: id => cards.setAt(id, cardAnchorName(id)),
