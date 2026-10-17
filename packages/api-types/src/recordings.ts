@@ -67,6 +67,11 @@ export interface RecordingInventoryItem {
 	source: string | null
 	/** Known only for scanner recordings (the discovery's centre); never guessed. */
 	frequencyHz: number | null
+	/**
+	 * WG9 req 2.2: the recording is kept (protected from every deletion owner). Absent from cores
+	 * before WG9 (read as not kept). While the keep store is unavailable every item reads true.
+	 */
+	kept?: boolean
 }
 
 /** WG8 req 4.4: GET /api/recordings query. */
@@ -100,3 +105,83 @@ export interface RecordingInventoryErrorBody {
 	code: RecordingInventoryErrorCode
 	message: string
 }
+
+// ------------------------------------------------------------------ WG9 Keep and delete
+
+/**
+ * WG9 req 2: per-recording Keep and deletion on the inventory above (protected only, like the
+ * inventory). Keep protects one recording from every WaveKit deletion owner (the dsd-fme call
+ * pruner, scanner evidence retention, discovery removal and analog retention) until unkept.
+ * Delete removes one dsd-fme call recording; deleting a kept recording is refused (unkeep first).
+ * Scanner recordings can be kept and unkept this batch but not deleted
+ * (`RECORDING_DELETE_UNSUPPORTED`).
+ */
+export const RECORDING_KEEPS_REQUIRES_ACCESS = true
+/** `PUT` keeps, `DELETE` unkeeps (`:id` is a RECORDING_INVENTORY_ID). Both idempotent. */
+export const RECORDING_KEEP_ROUTE = "/api/recordings/:id/keep"
+/** `DELETE` removes the recording file. */
+export const RECORDING_DELETE_ROUTE = "/api/recordings/:id"
+/** The keep store file under `stateDir`. */
+export const RECORDING_KEEPS_FILE_NAME = "recording-keeps.json"
+/**
+ * WG9 req 2.3 bounds. Entries: 2 000 (the inventory scan bound). File: 1 MiB (an entry is at
+ * most about 330 bytes of JSON with a 236-character key, so 2 000 entries fit in about 660 KB).
+ * Kept bytes: 512 MiB in total (the default dsd-fme call recording cap; about 9.3 hours of
+ * 8 kHz 16-bit mono call audio), counted with each file's size when it was kept.
+ */
+export const RECORDING_KEEPS_MAX_ENTRIES = 2000
+export const RECORDING_KEEPS_FILE_MAX_BYTES = 1_048_576
+export const RECORDING_KEEPS_MAX_BYTES = 536_870_912
+
+/** `PUT`/`DELETE /api/recordings/:id/keep` 200 body. `changed` false = it already was so. */
+export interface RecordingKeepResult {
+	id: string
+	kept: boolean
+	changed: boolean
+}
+
+/** `DELETE /api/recordings/:id` 200 body. */
+export interface RecordingDeleteResult {
+	id: string
+	deleted: true
+}
+
+export type RecordingKeepErrorCode =
+	| "RECORDING_KEPT"
+	| "RECORDING_BUSY"
+	| "RECORDING_KEEP_LIMIT"
+	| "RECORDING_DELETE_UNSUPPORTED"
+	| "RECORDING_KEEPS_UNAVAILABLE"
+
+/** WG9: status of every inventory, Keep and delete error code. */
+export const RECORDING_ERROR_STATUS: Readonly<
+	Record<RecordingInventoryErrorCode | RecordingKeepErrorCode, number>
+> = Object.freeze({
+	RECORDINGS_QUERY_INVALID: 400,
+	RECORDING_NOT_FOUND: 404,
+	RECORDINGS_UNAVAILABLE: 503,
+	/** Delete of a kept recording: unkeep it first. */
+	RECORDING_KEPT: 409,
+	/** A Keep and a delete of the same recording overlapped; the other one won. */
+	RECORDING_BUSY: 409,
+	/** Keep would pass RECORDING_KEEPS_MAX_ENTRIES or RECORDING_KEEPS_MAX_BYTES. */
+	RECORDING_KEEP_LIMIT: 409,
+	/** Delete of a scanner recording (not this batch). */
+	RECORDING_DELETE_UNSUPPORTED: 409,
+	/** The keep store is loading, unreadable or cannot be written. */
+	RECORDING_KEEPS_UNAVAILABLE: 503,
+})
+
+/** WG9 Keep/delete error body (fixed text; never a path, file name or submitted value). */
+export interface RecordingKeepErrorBody {
+	error: string
+	code: RecordingKeepErrorCode
+	message: string
+}
+
+/**
+ * WG9 req 2.6: 409 code of `DELETE /api/scanner/discoveries/:id` when the discovery holds a kept
+ * recording (no cascade to protected media; unkeep first).
+ */
+export const SCANNER_DISCOVERY_HOLDS_KEPT_CODE =
+	"SCANNER_DISCOVERY_HOLDS_KEPT_RECORDINGS"
