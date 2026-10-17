@@ -26,7 +26,8 @@ REPO_ROOT = SCRIPT_DIR.parents[2]
 SECTOR = 512
 BOOT_ASSETS = ('boot.html', 'boot.js', 'boot.css', 'app.css',
                'brand/D-DINCondensed.woff2', 'brand/D-DINCondensed-Bold.woff2',
-               'brand/NotoSans-Regular.woff2', 'brand/wavekit-wordmark-on-dark.svg',
+               'brand/NotoSans-Regular.woff2', 'brand/NotoSans-Bold.woff2',
+               'brand/ui.css', 'brand/wavekit-wordmark-on-dark.svg',
                'brand/favicon.svg', 'brand/OFL-D-DIN.txt', 'brand/FONTLOG-D-DIN.txt',
                'brand/OFL-Noto-Sans.txt',
                'brand/README.md')

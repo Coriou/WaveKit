@@ -41,6 +41,12 @@ const UI_FILES: Record<
 		type: "font/woff2",
 		immutable: true,
 	},
+	"/brand/NotoSans-Bold.woff2": {
+		file: "brand/NotoSans-Bold.woff2",
+		type: "font/woff2",
+		immutable: true,
+	},
+	"/brand/ui.css": { file: "brand/ui.css", type: "text/css; charset=utf-8" },
 	"/brand/wavekit-wordmark-on-dark.svg": {
 		file: "brand/wavekit-wordmark-on-dark.svg",
 		type: "image/svg+xml",
