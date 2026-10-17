@@ -33,8 +33,13 @@ export function DevicesPage({ onSignedOut }: { onSignedOut: () => void }) {
 
 	useEffect(() => {
 		void store.load()
-		// a sign-out still waiting for Undo goes out when Settings closes
-		return () => store.flushRevokes()
+		// a sign-out still waiting for Undo goes out when the page closes or the tab goes away
+		const flush = () => store.flushRevokes()
+		window.addEventListener("pagehide", flush)
+		return () => {
+			window.removeEventListener("pagehide", flush)
+			flush()
+		}
 	}, [store])
 
 	if (!devices)

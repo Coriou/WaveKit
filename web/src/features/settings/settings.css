@@ -415,27 +415,14 @@
 	}
 	.wkf-set-fill {
 		flex: none;
+		align-self: stretch;
+		height: auto;
 		gap: 6px;
 		color: var(--wk-accent);
 	}
 	.wkf-set-fill .wk-spinner {
 		width: 13px;
 		height: 13px;
-	}
-	@media (max-width: 460px) {
-		/* a phone keeps the field wide: the button shows its glyph, the words stay for screen readers */
-		.wkf-set-fill {
-			width: var(--wk-h-touch);
-			padding: 0;
-		}
-		.wkf-set-fill-text {
-			position: absolute;
-			width: 1px;
-			height: 1px;
-			overflow: hidden;
-			clip-path: inset(50%);
-			white-space: nowrap;
-		}
 	}
 	.wkf-set-box {
 		flex: 1;
@@ -789,6 +776,19 @@
 	.wkf-set[data-phone] .wkf-set-box {
 		height: var(--wk-h-touch);
 	}
+	/* a phone keeps the field wide: Use my location shows its glyph, the words stay for screen readers */
+	.wkf-set[data-phone] .wkf-set-fill {
+		width: var(--wk-h-touch);
+		padding: 0;
+	}
+	.wkf-set[data-phone] .wkf-set-fill-text {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+	}
 	.wkf-set[data-phone] .wkf-set-stats {
 		grid-template-columns: minmax(0, 1fr);
 	}
@@ -916,9 +916,7 @@
 		font-size: 11.5px;
 		overflow-wrap: anywhere;
 	}
-	@media (max-width: 460px) {
-		.wkf-dv-edit-line {
-			flex-direction: column;
-		}
+	.wkf-set[data-phone] .wkf-dv-edit-line {
+		flex-direction: column;
 	}
 }
