@@ -147,6 +147,7 @@ import {
 	type StorageCaps,
 } from "./store/evidence-store.js"
 import {
+	SCANNER_JOURNAL_BACKLOG_CODE,
 	ScannerPersistence,
 	type LoadedState,
 	type PersistedJob,
@@ -495,6 +496,8 @@ export class ScannerService extends EventEmitter {
 	private readonly operatorLost = new Set<string>()
 	private timer: NodeJS.Timeout | null = null
 	private lastSnapshotAt = 0
+	/** The periodic snapshot still being written: no second clone + stringify while it lags. */
+	private snapshotInFlight = false
 	private lastMaintenanceAt = 0
 	private lastStatusAt = 0
 	private lastStatusJson = ""
@@ -4429,9 +4432,15 @@ export class ScannerService extends EventEmitter {
 		const appended = this.persistence.append(entry)
 		if (this.recordingAppends.has(entry))
 			this.recordingAppends.set(entry, appended)
-		void appended.catch((err: unknown) =>
-			this.log.warn({ err }, "Journal append failed"),
-		)
+		void appended.catch((err: unknown) => {
+			// A full backlog is logged once by the persistence; the next snapshot carries the mutation.
+			if (
+				err instanceof WaveKitError &&
+				err.code === SCANNER_JOURNAL_BACKLOG_CODE
+			)
+				return
+			this.log.warn({ err }, "Journal append failed")
+		})
 	}
 
 	private async acknowledgeRecordingMutation(
@@ -4604,15 +4613,20 @@ export class ScannerService extends EventEmitter {
 		if (
 			this.stateLoaded &&
 			this.dirty &&
+			!this.snapshotInFlight &&
 			now - this.lastSnapshotAt >= SNAPSHOT_EVERY_MS
 		) {
 			this.lastSnapshotAt = now
 			this.dirty = false
+			this.snapshotInFlight = true
 			this.persistence
 				.writeSnapshot(this.store.snapshot())
 				.catch((err: unknown) =>
 					this.log.warn({ err }, "Snapshot write failed"),
 				)
+				.finally(() => {
+					this.snapshotInFlight = false
+				})
 		}
 		if (now - this.lastMaintenanceAt >= MAINTENANCE_EVERY_MS) {
 			this.lastMaintenanceAt = now
