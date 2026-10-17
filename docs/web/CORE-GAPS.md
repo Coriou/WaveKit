@@ -413,3 +413,18 @@ core source and run against the mock, not yet against a live core)
   has no play button and no "Play conversation" (see Recordings, "The recording id on the event").
 - [ ] Pinned searches are kept per browser (localStorage) until operator preferences hold them (see
   Settings, "Activity columns and pinned searches").
+
+**Found by the web app, Scanner pass** (2026-10-17, branch `claude/project-thread-afdtom`; read from the
+core source and run against the mock, not yet against a live core)
+
+- [ ] `scanner:discovery` with `change: "merged"` names only the surviving discovery, and the absorbed one's
+  `deleted` is never sent (it is emitted after the record is gone). The web app guesses the absorbed entry
+  from the merge key; a `mergedIds[]` on the event would make it exact.
+- [ ] `progress.holdingOn` is the scheduler's hold track id, not a discovery id or a frequency. The Tuner hold
+  row finds the held signal from probe targets or `scanner:activity`; a `holding: {discoveryId?, frequencyHz}`
+  on progress would name the hit at once ("Hearing DMR · CC 1").
+- [ ] Discovery queries take one value per filter (one `protocol`, one `identity`): the search cannot ask for
+  "DMR or P25", so a second chip of the same kind replaces the first.
+- [ ] A discovery's own 24 h history (hourly airtime or last transmissions) for the activity strip of the
+  opened row. Partly: `/discoveries/:id/observations` (paged) and `/api/spectrum/occupancy` (per 12.5 kHz bin).
+- [ ] Deleting a discovery cannot be undone (no restore), so the web app asks first instead of offering Undo.
