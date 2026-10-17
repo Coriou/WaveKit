@@ -17,6 +17,29 @@ body{margin:0;background:#000000}
 .cmp-cap{font-size:11px;color:var(--wk-text-3)}
 .cmp-today{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 14px;border-radius:8px;border:1px dashed var(--wk-line-18)}
 .cmp-wf{position:relative;height:150px;border-radius:8px;overflow:hidden;background:repeating-linear-gradient(180deg,rgba(var(--wk-accent-rgb),.10) 0 2px,transparent 2px 5px),linear-gradient(90deg,var(--wk-plot-bg) 0 18%,rgba(var(--wk-accent-rgb),.55) 22%,var(--wk-plot-bg) 26% 48%,rgba(var(--wk-accent-rgb),.35) 50%,var(--wk-plot-bg) 53% 74%,rgba(var(--wk-ink-rgb),.6) 77%,var(--wk-plot-bg) 80%)}
+/* wk-explore: drawer skeleton (the web app's ui/Skeleton.tsx, styles in web/src/styles/ui.css; not in the kit yet).
+   While a drawer's code or first page loads: the shape of its rows in the kit's fill, a slow wave down them (opacity
+   only), a late fade-in so a fast load never flashes it, and after a second a quiet caption. */
+.wk-skel{display:flex;flex-direction:column;gap:2px;animation:wk-skel-in var(--wk-dur-3) var(--wk-ease-out) 120ms both}
+.wk-skel-bar{display:flex;flex-direction:column;gap:10px;padding:2px 0 10px}
+.wk-skel-field{height:var(--wk-h-md);border-radius:var(--wk-r-3);background:var(--wk-fill)}
+.wk-skel-chips{display:flex;gap:6px}
+.wk-skel-chips span{width:64px;height:24px;border-radius:var(--wk-r-pill);background:var(--wk-fill)}
+.wk-skel-chips span:nth-child(2){width:52px}
+.wk-skel-chips span:nth-child(3){width:76px}
+.wk-skel-caption{margin:0;padding:0 2px 6px;font-size:var(--wk-fs-xs);line-height:16px;color:var(--wk-text-4);animation:wk-skel-in var(--wk-dur-3) var(--wk-ease-out) 1s both}
+.wk-skel-row{display:flex;align-items:center;gap:12px;min-height:52px;padding:0 6px 0 10px;animation:wk-skel-wave 1.6s var(--wk-ease-inout) calc(var(--i, 0) * 90ms) infinite}
+.wk-skel[data-shape="settings"] .wk-skel-row{min-height:56px;padding:0 4px;border-bottom:1px solid var(--wk-line-08)}
+.wk-skel-tile{width:32px;height:32px;flex:none;border-radius:var(--wk-r-3);background:var(--wk-fill)}
+.wk-skel-tile[data-round="true"]{border-radius:50%}
+.wk-skel-lines{flex:1;min-width:0;display:flex;flex-direction:column;gap:7px}
+.wk-skel-lines span{height:9px;border-radius:var(--wk-r-pill);background:var(--wk-fill)}
+.wk-skel-lines span+span{height:7px;opacity:.7}
+.wk-skel-end{width:34px;height:8px;flex:none;border-radius:var(--wk-r-pill);background:var(--wk-fill);opacity:.7}
+.wk-skel[data-shape="settings"] .wk-skel-end{width:72px;height:24px;border-radius:var(--wk-r-3);opacity:1}
+@keyframes wk-skel-in{from{opacity:0}}
+@keyframes wk-skel-wave{50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.wk-skel-row{animation:none}}
 </style>
 </helmet>
 <div data-wk-theme="dark" data-wk-ground="black" data-wk-accent="mono" style="box-sizing: border-box; min-height: 100vh; padding: 48px; background: var(--wk-bg); color: var(--wk-text); font-family: var(--wk-font-ui); display: flex; flex-direction: column; gap: 56px">
@@ -333,6 +356,39 @@ body{margin:0;background:#000000}
 		</div>
 	</section>
 
+	<!-- Loading skeleton (2026-10-17, from the web app; wk-explore until promoted into ui.css) -->
+	<section style="display: flex; flex-direction: column; gap: 16px">
+		<div style="display: flex; align-items: baseline; gap: 12px"><h2 class="wk-h2">Loading skeleton</h2><span style="font-family: var(--wk-font-mono); font-size: 12px; color: var(--wk-text-3)">.wk-skel · list / round / settings · explore</span></div>
+		<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px">
+			<sc-for list="{{scopes}}" as="s" hint-placeholder-count="3">
+				<div class="cmp-panel" data-wk-theme="{{s.theme}}" data-wk-ground="{{s.ground}}" data-wk-accent="{{s.accent}}">
+					<span class="cmp-cap">{{s.name}} · a list drawer with its toolbar, Recordings (round tile), Settings rows</span>
+					<div class="wk-drawer" style="padding: 12px 14px 14px; gap: 8px">
+						<h3 class="wk-h3" style="font-size: 20px">Activity</h3>
+						<div class="wk-skel" data-shape="list" role="status" aria-label="Loading Activity">
+							<div class="wk-skel-bar" aria-hidden="true"><span class="wk-skel-field"></span><span class="wk-skel-chips"><span></span><span></span><span></span></span></div>
+							<p class="wk-skel-caption">Loading Activity…</p>
+							<sc-for list="{{skel}}" as="k" hint-placeholder-count="3"><div class="wk-skel-row" aria-hidden="true" style="--i: {{k.i}}"><span class="wk-skel-tile"></span><span class="wk-skel-lines"><span style="width: {{k.w1}}%"></span><span style="width: {{k.w2}}%"></span></span><span class="wk-skel-end"></span></div></sc-for>
+						</div>
+					</div>
+					<div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px">
+						<div class="wk-skel" data-shape="list" role="status" aria-label="Loading recordings">
+							<sc-for list="{{skel}}" as="k" hint-placeholder-count="3"><div class="wk-skel-row" aria-hidden="true" style="--i: {{k.i}}"><span class="wk-skel-tile" data-round="true"></span><span class="wk-skel-lines"><span style="width: {{k.w1}}%"></span><span style="width: {{k.w2}}%"></span></span></div></sc-for>
+						</div>
+						<div class="wk-skel" data-shape="settings" role="status" aria-label="Loading settings">
+							<sc-for list="{{skel}}" as="k" hint-placeholder-count="3"><div class="wk-skel-row" aria-hidden="true" style="--i: {{k.i}}"><span class="wk-skel-lines"><span style="width: {{k.w1}}%"></span><span style="width: {{k.w2}}%"></span></span><span class="wk-skel-end"></span></div></sc-for>
+						</div>
+					</div>
+					<span class="cmp-cap">Fades in after 120 ms (a fast load never flashes it), the caption after 1 s; the wave is opacity only, 1.6 s, 90 ms per row, and it stops under reduced motion.</span>
+				</div>
+			</sc-for>
+		</div>
+		<div class="cmp-today">
+			<span class="wk-label">Today</span>
+			<span class="cmp-cap">Activity, Scanner, Recordings, Settings and the attached pane showed one spinner in an empty drawer while their code or first page loaded (Settings › Signed-in devices too). → the shape of the rows that come, in the kit's fill; the boards draw it with the Immersive loading tweak.</span>
+		</div>
+	</section>
+
 	<!-- Inventory -->
 	<section style="display: flex; flex-direction: column; gap: 16px; max-width: 1200px">
 		<h2 class="wk-h2">Inventory</h2>
@@ -352,7 +408,7 @@ body{margin:0;background:#000000}
 	</section>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":5200}}'>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":6800}}'>
 class Component extends DCLogic {
 	constructor(props) {
 		super(props);
@@ -394,6 +450,8 @@ class Component extends DCLogic {
 				{ title: 'AFR1234 · A320', meta: 'ADS-B · FL340 · 82 km', tag: 'New', tagv: 'accent' },
 				{ title: 'Capcode 1234567', meta: 'POCSAG 1200 · 2 min ago', tag: 'Paging', tagv: 'outline' }
 			].map((r, i) => Object.assign(r, { sel: s.row === i, kb: i === 2 ? 'true' : null, pick: () => this.setState({ row: i }) })),
+			// skeleton specimen rows: uneven widths, as ui/Skeleton.tsx
+			skel: [[68, 42], [54, 30], [76, 36]].map((w, i) => ({ i: String(i), w1: w[0], w2: w[1] })),
 			vol: s.vol, volPct: Math.round(s.vol * 100),
 			setVol: e => this.setState({ vol: Number(e.target.value) / 100 }),
 			inventory: [
@@ -415,7 +473,8 @@ class Component extends DCLogic {
 				{ recipe: '.wk-tag, .wk-count', boards: 'Messages, Activity, Scanner, Tuned, TunedGallery, Map' },
 				{ recipe: '.wk-label, .wk-h2, .wk-h3', boards: 'every board' },
 				{ recipe: '.wk-live, .wk-spinner', boards: 'Immersive, Scanner, Identify, Activity' },
-				{ recipe: '.wk-scroll, .wk-hscroll', boards: 'Recordings, Palette, Activity' }
+				{ recipe: '.wk-scroll, .wk-hscroll', boards: 'Recordings, Palette, Activity' },
+				{ recipe: '.wk-skel (explore)', boards: 'Immersive (drawers and pane, loading tweak), Components' }
 			]
 		};
 	}

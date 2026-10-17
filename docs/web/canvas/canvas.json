@@ -87,7 +87,7 @@
     "Settings.dc.html": {
       "h": 820,
       "is_interactive": true,
-      "title": "Settings — one registry: search, groups, decoder pages, Apply for disruptive changes",
+      "title": "Settings — one registry: search, groups, decoder pages, Apply for disruptive changes; Band plans and Signed-in devices pages",
       "w": 560,
       "x": 2660,
       "y": 5700
@@ -169,7 +169,7 @@
       "x": 0,
       "y": 10300,
       "w": 1440,
-      "h": 5200,
+      "h": 6800,
       "is_interactive": true,
       "title": "Components — design system v1: foundations and every recipe in three scopes, with what each replaces today"
     }

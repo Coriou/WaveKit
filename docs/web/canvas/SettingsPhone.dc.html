@@ -15,10 +15,10 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 </helmet>
 <div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: relative; width: 390px; height: 844px; overflow: hidden; background: var(--wk-bg)">
 	<dc-import name="Kit" hint-size="0px,0px" style="position: absolute"></dc-import>
-	<dc-import name="Settings" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{vals}}" on-set="{{set}}" layout="phone" scenario="{{scenario}}" storage="{{storage}}" open-at="{{openAt}}" country="{{country}}" hint-size="390px,844px"></dc-import>
+	<dc-import name="Settings" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{vals}}" on-set="{{set}}" layout="phone" scenario="{{scenario}}" storage="{{storage}}" open-at="{{openAt}}" country="{{country}}" access="{{access}}" geo="{{geo}}" hint-size="390px,844px"></dc-import>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","dec:mesh","station.country","bandplans","bandplans:pmr446","bandplans:import"],"default":"none"},"country":{"editor":"enum","options":["location","none","locked"],"default":"location"},"$preview":{"width":390,"height":844}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","dec:mesh","station.country","bandplans","bandplans:pmr446","bandplans:import","station.location","devices","devices:rename","devices:signout-all"],"default":"none"},"country":{"editor":"enum","options":["location","none","locked"],"default":"location"},"access":{"editor":"enum","options":["protected","open"],"default":"protected"},"geo":{"editor":"enum","options":["ok","denied","unavailable","timeout","insecure"],"default":"ok"},"$preview":{"width":390,"height":844}}'>
 class Component extends DCLogic {
 	constructor(props) {
 		super(props);
@@ -39,7 +39,7 @@ class Component extends DCLogic {
 			wkTheme, wkAccent: s.accent || this.props.accent || 'mono', wkGround: wkTheme === 'light' ? 'paper' : ground,
 			// the dark ground always goes down, so Dark ground shows the pick while the theme is light
 			vals: Object.assign({ ground }, s.theme ? { theme: s.theme } : null, s.accent ? { accent: s.accent } : null, s.waterfall ? { waterfall: s.waterfall } : null), set: this.set,
-			scenario: this.props.scenario || 'normal', storage: this.props.storage || 'ok', openAt: this.props.openAt || 'none', country: this.props.country || 'location' };
+			scenario: this.props.scenario || 'normal', storage: this.props.storage || 'ok', openAt: this.props.openAt || 'none', country: this.props.country || 'location', access: this.props.access || 'protected', geo: this.props.geo || 'ok' };
 	}
 }
 </script>
