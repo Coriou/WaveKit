@@ -190,3 +190,88 @@ describe("sanitizeHostVersion property", () => {
 		)
 	})
 })
+
+describe("SdrHostPoller receiver endpoints (receiver-endpoints 1.1, 3.6)", () => {
+	const base = {
+		uptime: 1,
+		rtlmux: { running: true, stats: { bytesPerSec: 1, clients: 1 } },
+	}
+	const fields = {
+		receiverId: "0123456789abcdef0123456789abcdef",
+		endpoints: {
+			iqPort: 5555,
+			apiPort: 8080,
+			addresses: [
+				{
+					address: "192.0.2.69",
+					family: "IPv4",
+					interface: "eth0",
+					kind: "ethernet",
+					speedMbps: 100,
+					signalDbm: null,
+				},
+				{
+					address: "198.51.100.23",
+					family: "IPv4",
+					interface: "wlan0",
+					kind: "wireless",
+					speedMbps: null,
+					signalDbm: -70,
+				},
+			],
+		},
+	}
+
+	it("keeps the emitted status byte-identical when the receiver adds the endpoint fields", async () => {
+		const strip = (s: SdrHostStatus) =>
+			JSON.stringify({ ...s, lastFetchedAt: null })
+		const without = await pollResponse(base)
+		const withFields = await pollResponse({ ...base, ...fields })
+		expect(strip(withFields)).toBe(strip(without))
+		expect(Object.keys(withFields)).not.toContain("receiverId")
+		expect(Object.keys(withFields)).not.toContain("endpoints")
+	})
+
+	it("emits the parsed report beside the status, or null when absent or invalid", async () => {
+		const reportFor = async (payload: unknown) => {
+			const poller = new SdrHostPoller(
+				logger,
+				[{ sourceId: "pi", apiUrl: "http://192.0.2.1:8080" }],
+				{
+					fetchFn: vi
+						.fn<typeof fetch>()
+						.mockResolvedValue(Response.json(payload)),
+				},
+			)
+			const report = new Promise<unknown>(resolve =>
+				poller.once("receiver-endpoints", (sourceId, value) => {
+					expect(sourceId).toBe("pi")
+					resolve(value)
+				}),
+			)
+			poller.start()
+			try {
+				return await report
+			} finally {
+				poller.stop()
+			}
+		}
+		expect(await reportFor({ ...base, ...fields })).toEqual({
+			receiverId: fields.receiverId,
+			endpoints: {
+				iqPort: 5555,
+				apiPort: 8080,
+				addresses: [
+					{ address: "192.0.2.69", kind: "ethernet" },
+					{ address: "198.51.100.23", kind: "wireless" },
+				],
+			},
+		})
+		expect(await reportFor(base)).toBeNull()
+		// A hostname anywhere in the list drops the whole report (fail closed).
+		const hostname = structuredClone(fields)
+		hostname.endpoints.addresses[1]!.address = "wavekit-pi.local"
+		expect(await reportFor({ ...base, ...hostname })).toBeNull()
+		expect(await reportFor({ ...base, ...fields, endpoints: null })).toBeNull()
+	})
+})

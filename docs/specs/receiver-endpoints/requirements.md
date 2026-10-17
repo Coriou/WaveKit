@@ -1,9 +1,6 @@
 # Receiver endpoints requirements
 
-Status: user stories 1 and 2 implemented and software-tested on the Pi side, not
-deployed. User stories 3 and 4 are design only, sequenced after WG10. The precursor,
-per-interface link speed and default-route metric in `GET /api/host` plus the
-status-page Wi-Fi hint, is implemented and not numbered here.
+Status: user stories 1–4 implemented and software-tested; not deployed to a Pi.
 
 See [requirements](requirements.md), [design](design.md) and [tasks](tasks.md).
 

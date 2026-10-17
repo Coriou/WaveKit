@@ -127,6 +127,11 @@ import {
 } from "./decoders/builtin/lora-meshtastic.js"
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
+import {
+	EndpointSelector,
+	type EndpointSelectionTarget,
+} from "./core/endpoint-selector.js"
+import { createEndpointProbe } from "./core/endpoint-probe.js"
 import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
 import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
@@ -1395,6 +1400,7 @@ async function main(): Promise<void> {
 		let resourceAggregator: ResourceAggregator | undefined
 		let containerMonitor: ContainerMonitor | undefined
 		let sdrHostPoller: SdrHostPoller | undefined
+		let endpointSelector: EndpointSelector | undefined
 		let backpressureTracker: SourceBackpressureTracker | undefined
 
 		if (config.resources.enabled) {
@@ -1447,6 +1453,35 @@ async function main(): Promise<void> {
 				)
 			}
 
+			// Receiver endpoint selection (receiver-endpoints 3.1): opt-in per source.
+			const endpointTargets: EndpointSelectionTarget[] = config.sources.flatMap(
+				s =>
+					s.type === "rtl_tcp" &&
+					s.host &&
+					s.port &&
+					s.sdrHost?.endpointSelection === "auto"
+						? [{ sourceId: s.id, configuredHost: s.host, port: s.port }]
+						: [],
+			)
+			if (endpointTargets.length > 0 && sdrHostPoller) {
+				const selector = new EndpointSelector(
+					logger,
+					sourceManager,
+					createEndpointProbe(),
+					endpointTargets,
+				)
+				endpointSelector = selector
+				sdrHostPoller.on("receiver-endpoints", (sourceId, report) => {
+					selector.onReport(sourceId, report).catch((err: unknown) => {
+						log.warn({ err, sourceId }, "Endpoint selection failed")
+					})
+				})
+				log.info(
+					{ sources: endpointTargets.map(t => t.sourceId) },
+					"Receiver endpoint selection enabled",
+				)
+			}
+
 			// Create backpressure tracker
 			backpressureTracker = new SourceBackpressureTracker(
 				logger,
@@ -1478,7 +1513,15 @@ async function main(): Promise<void> {
 			)
 		}
 
+		if (
+			!endpointSelector &&
+			config.sources.some(s => s.sdrHost?.endpointSelection === "auto")
+		)
+			log.warn(
+				"Receiver endpoint selection needs resource monitoring and the SDR host poller; it stays off",
+			)
 		own(20, () => {
+			endpointSelector?.stop()
 			resourceAggregator?.stop()
 			sdrHostPoller?.stop()
 			containerMonitor?.stop()

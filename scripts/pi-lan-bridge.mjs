@@ -1,11 +1,23 @@
 #!/usr/bin/env node
 // Temporary Mac loopback path when a container cannot reach a LAN receiver.
+// With --auto, bridges to the receiver's best verified address instead.
 import net from "node:net"
+import { chooseEndpoint } from "./pi-lan-bridge-select.mjs"
 
-const host = process.argv[2]
-if (!host || !/^[a-zA-Z0-9.:-]+$/.test(host)) {
-	console.error("Usage: node scripts/pi-lan-bridge.mjs <receiver-host>")
+const args = process.argv.slice(2)
+const auto = args[0] === "--auto"
+const given = auto ? args[1] : args[0]
+if (!given || !/^[a-zA-Z0-9.:-]+$/.test(given)) {
+	console.error(
+		"Usage: node scripts/pi-lan-bridge.mjs [--auto] <receiver-host>",
+	)
 	process.exit(1)
+}
+let host = given
+if (auto) {
+	const choice = await chooseEndpoint(given)
+	host = choice.host
+	console.log(`Receiver ${host} (${choice.reason})`)
 }
 const sockets = new Set()
 const servers = []

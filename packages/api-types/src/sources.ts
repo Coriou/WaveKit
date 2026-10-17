@@ -88,6 +88,32 @@ export const sourceSignalFlatSchema = {
 	required: ["levelDbfs", "thresholdDbfs", "since"],
 } as const
 
+/**
+ * Receiver endpoint selection (docs/specs/receiver-endpoints 3.5). Present only
+ * on sources with `sdrHost.endpointSelection: auto`; omitted otherwise.
+ */
+export interface SourceEndpoint {
+	/** The host from config; the anchor that selection falls back to. */
+	configuredHost: string
+	/** The host the next and current IQ connection uses. */
+	activeHost: string
+	/** Why the active host is what it is ("configured" until a switch). */
+	reason: string
+	/** ISO-8601 time of the last switch or fallback; null before any. */
+	at: string | null
+}
+
+export const sourceEndpointSchema = {
+	type: "object",
+	properties: {
+		configuredHost: { type: "string" },
+		activeHost: { type: "string" },
+		reason: { type: "string" },
+		at: { type: ["string", "null"] },
+	},
+	required: ["configuredHost", "activeHost", "reason", "at"],
+} as const
+
 export interface SourceCaps {
 	kind: SourceKind
 	sampleRate: number
@@ -116,6 +142,8 @@ export interface SourceStatus {
 	signalFlat?: SourceSignalFlat
 	/** Latest measured IQ level (dBFS, 5 s mean); IQ network sources with data only. */
 	signalLevelDbfs?: number
+	/** Receiver endpoint selection; only with `sdrHost.endpointSelection: auto`. */
+	endpoint?: SourceEndpoint
 }
 
 export interface DecoderAssignment {

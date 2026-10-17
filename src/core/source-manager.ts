@@ -27,7 +27,7 @@ import * as fs from "node:fs"
 import { types as utilTypes } from "node:util"
 import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
-import type { SourceActivity } from "@wavekit/api-types"
+import type { SourceActivity, SourceEndpoint } from "@wavekit/api-types"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
@@ -63,6 +63,9 @@ export const SOURCE_STALL_TIMEOUT_MS = 15_000
 // every 1 s, 10 probes). It cannot detect a live rtlmux whose upstream dongle /
 // rtl_tcp is gone: that socket stays healthy but silent, hence the watchdog.
 export const SOURCE_KEEPALIVE_DELAY_MS = 5000
+
+/** Reconnect delay after a deliberate endpoint switch (not a failure). */
+export const SOURCE_RETARGET_RECONNECT_MS = 250
 
 // Re-export types from config for convenience
 export type { SourceConfig, SourceCaps } from "../config.js"
@@ -107,6 +110,8 @@ export interface SourceStatus {
 	signalFlat?: SignalFlat | undefined
 	/** Latest measured IQ level (dBFS); IQ network sources with data only. */
 	signalLevelDbfs?: number | undefined
+	/** Receiver endpoint selection; only for sources it tracks. */
+	endpoint?: SourceEndpoint | undefined
 }
 
 export interface SourceManagerOptions {
@@ -235,6 +240,12 @@ interface SourceState {
 	lastError?: string | undefined
 	reconnectAttempts: number
 	reconnectTimer: ReturnType<typeof setTimeout> | null
+	/** Host override from endpoint selection; null uses config.host. */
+	activeHost: string | null
+	/** Endpoint selection status; null when selection does not track the source. */
+	endpoint: SourceEndpoint | null
+	/** The next reconnect follows a deliberate switch: short delay, no backoff step. */
+	retargetPending: boolean
 
 	metricsTimer: ReturnType<typeof setInterval> | null
 	stallTimer: ReturnType<typeof setInterval> | null
@@ -717,6 +728,9 @@ export class SourceManager extends EventEmitter {
 			dataRate: 0,
 			reconnectAttempts: 0,
 			reconnectTimer: null,
+			activeHost: null,
+			endpoint: null,
+			retargetPending: false,
 			metricsTimer: null,
 			stallTimer: null,
 			stopping: false,
@@ -1277,6 +1291,7 @@ export class SourceManager extends EventEmitter {
 		if (state.attempt && this.isActiveAttempt(state, state.attempt))
 			return Promise.resolve()
 		const { config } = state
+		const host = state.activeHost ?? config.host!
 		return new Promise<void>((resolve, reject) => {
 			const socket = new net.Socket()
 			if (!this.isCurrent(state)) {
@@ -1372,7 +1387,7 @@ export class SourceManager extends EventEmitter {
 					this.resetSignalLevel(id, state)
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.logger.info(
-						{ sourceId: id, host: config.host, port: config.port },
+						{ sourceId: id, host, port: config.port },
 						"Connected to source",
 					)
 					if (!this.isActiveAttempt(state, attempt)) return
@@ -1552,9 +1567,7 @@ export class SourceManager extends EventEmitter {
 					if (current) this.handleConnectionError(id, err, state, attempt)
 				} finally {
 					if (isInitialAttempt && !hadConnected)
-						safeReject(
-							new SourceConnectionError(config.host!, config.port!, err),
-						)
+						safeReject(new SourceConnectionError(host, config.port!, err))
 					else safeResolve()
 					try {
 						socket.destroy()
@@ -1607,7 +1620,7 @@ export class SourceManager extends EventEmitter {
 					if (!wasConnected && isInitialAttempt)
 						safeReject(
 							new SourceConnectionError(
-								config.host!,
+								host,
 								config.port!,
 								new WaveKitError(
 									state.lastError ??
@@ -1641,7 +1654,7 @@ export class SourceManager extends EventEmitter {
 			})
 			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
 			if (this.isActiveAttempt(state, attempt))
-				socket.connect(config.port!, config.host!)
+				socket.connect(config.port!, host)
 			else safeResolve()
 		})
 	}
@@ -1791,11 +1804,18 @@ export class SourceManager extends EventEmitter {
 		if (!current()) return
 		if (state.reconnectTimer) return
 
-		state.reconnectAttempts++
-		const baseDelay = calculateBackoffDelay(state.reconnectAttempts)
-		// Add small jitter to avoid thundering herd when multiple sources restart.
-		// Equal-jitter: base/2 + rand*(base/2)
-		const delay = Math.round(baseDelay / 2 + Math.random() * (baseDelay / 2))
+		let delay: number
+		if (state.retargetPending) {
+			// A deliberate endpoint switch is not a failure: no backoff step.
+			state.retargetPending = false
+			delay = SOURCE_RETARGET_RECONNECT_MS
+		} else {
+			state.reconnectAttempts++
+			const baseDelay = calculateBackoffDelay(state.reconnectAttempts)
+			// Add small jitter to avoid thundering herd when multiple sources restart.
+			// Equal-jitter: base/2 + rand*(base/2)
+			delay = Math.round(baseDelay / 2 + Math.random() * (baseDelay / 2))
+		}
 
 		this.logger.info(
 			{
@@ -2065,6 +2085,70 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
+	 * Starts reporting endpoint selection for a network source (receiver-endpoints
+	 * 3.5). Idempotent; returns false for unknown or recording sources.
+	 */
+	trackEndpoint(id: string): boolean {
+		const state = this.sources.get(id)
+		if (!state || state.config.type === "recording" || !state.config.host)
+			return false
+		state.endpoint ??= {
+			configuredHost: state.config.host,
+			activeHost: state.activeHost ?? state.config.host,
+			reason: "configured",
+			at: null,
+		}
+		return true
+	}
+
+	/** The host the current or next connection attempt of a network source uses. */
+	getActiveHost(id: string): string | undefined {
+		const state = this.sources.get(id)
+		if (!state || state.config.type === "recording") return undefined
+		return state.activeHost ?? state.config.host
+	}
+
+	/**
+	 * Moves a network source to another host of the same receiver (receiver-endpoints
+	 * 3.3). The registration, its stream and its decoder assignments stay; only the
+	 * transport changes. A connected or connecting session is closed and the normal
+	 * reconnect path dials the new host after a short delay, with tuning restored as
+	 * on any reconnect. A pending backoff simply dials the new host when it fires.
+	 * The caller verifies the host; the config is never rewritten.
+	 */
+	retarget(id: string, host: string, reason: string): boolean {
+		const state = this.sources.get(id)
+		if (!state || state.config.type === "recording" || !state.config.host)
+			return false
+		const current = state.activeHost ?? state.config.host
+		if (host === current) return true
+		state.activeHost = host === state.config.host ? null : host
+		state.endpoint = {
+			configuredHost: state.config.host,
+			activeHost: host,
+			reason,
+			at: new Date().toISOString(),
+		}
+		this.logger.info(
+			{ sourceId: id, from: current, to: host, reason },
+			"Source endpoint switched",
+		)
+		const attempt = state.attempt
+		// The initial attempt settles connect(); let it finish and switch afterwards.
+		const initial = state.reconnectAttempts === 0 && !state.connected
+		if (
+			attempt &&
+			this.isActiveAttempt(state, attempt) &&
+			(attempt.phase === "connected" ||
+				(attempt.phase === "connecting" && !initial))
+		) {
+			state.retargetPending = true
+			attempt.socket.destroy()
+		}
+		return true
+	}
+
+	/**
 	 * Gets the status of a specific source (Requirements 1.7, 15.4).
 	 *
 	 * @param id - Source ID
@@ -2092,6 +2176,7 @@ export class SourceManager extends EventEmitter {
 			...(state.signalLevel.levelDbfs !== undefined
 				? { signalLevelDbfs: state.signalLevel.levelDbfs }
 				: {}),
+			...(state.endpoint ? { endpoint: { ...state.endpoint } } : {}),
 		}
 	}
 

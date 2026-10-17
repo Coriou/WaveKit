@@ -24,7 +24,7 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [operator-data](operator-data/requirements.md)
 - [receiver-capabilities](receiver-capabilities/requirements.md)
 - [receiver-endpoints](receiver-endpoints/requirements.md): a receiver's ranked addresses and
-  DNS-SD advertisement; core moves IQ to the best verified endpoint (design)
+  DNS-SD advertisement; core moves IQ to the best verified endpoint (opt-in)
 - [regional-display-registry](regional-display-registry/requirements.md)
 - [scanner-followups](scanner-followups/requirements.md): running-job range edits,
   per-range fields, signals only, preempting job, identity search (SF1)

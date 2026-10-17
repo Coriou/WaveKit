@@ -12,6 +12,8 @@
  */
 
 import { EventEmitter } from "node:events"
+import { isIP } from "node:net"
+import { z } from "zod"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { SdrHostStatus } from "@wavekit/api-types"
 
@@ -31,6 +33,40 @@ export function sanitizeHostVersion(value: unknown): string | null {
 		: null
 }
 
+/**
+ * The receiver's own address list (sdr-host `GET /api/status` `receiverId` and
+ * `endpoints`; docs/specs/receiver-endpoints 1.1-1.4). Only literal IP addresses
+ * survive; anything malformed drops the whole report, so selection fails closed.
+ */
+const ReceiverEndpointsSchema = z.object({
+	receiverId: z.string().regex(/^[0-9a-f]{32}$/),
+	endpoints: z.object({
+		iqPort: z.number().int().min(1).max(65535),
+		apiPort: z.number().int().min(1).max(65535),
+		addresses: z
+			.array(
+				z.object({
+					address: z
+						.string()
+						.max(64)
+						.refine(value => isIP(value) !== 0, "not a literal IP"),
+					kind: z.enum(["ethernet", "wireless", "other"]),
+				}),
+			)
+			.max(32),
+	}),
+})
+
+export type ReceiverEndpointsReport = z.infer<typeof ReceiverEndpointsSchema>
+
+/** Parses a status body's endpoint fields; null when absent or invalid. */
+export function parseReceiverEndpoints(
+	body: unknown,
+): ReceiverEndpointsReport | null {
+	const result = ReceiverEndpointsSchema.safeParse(body)
+	return result.success ? result.data : null
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -43,6 +79,11 @@ export interface SdrHostConfig {
 
 export interface SdrHostPollerEvents {
 	status: (status: SdrHostStatus) => void
+	/** After each successful poll: the receiver's own endpoints, or null. */
+	"receiver-endpoints": (
+		sourceId: string,
+		report: ReceiverEndpointsReport | null,
+	) => void
 	error: (sourceId: string, error: Error) => void
 	recovered: (sourceId: string) => void
 }
@@ -235,7 +276,7 @@ export class SdrHostPoller extends EventEmitter {
 		}
 
 		try {
-			const status = await this.fetchStatus(state.config)
+			const { status, endpoints } = await this.fetchStatus(state.config)
 
 			// Track recovery
 			if (state.consecutiveFailures > 0) {
@@ -247,6 +288,8 @@ export class SdrHostPoller extends EventEmitter {
 			state.consecutiveFailures = 0
 
 			this.emit("status", status)
+			if (this.pollers.get(sourceId) === state)
+				this.emit("receiver-endpoints", sourceId, endpoints)
 
 			// Schedule next poll at normal interval
 			this.scheduleNextPoll(sourceId, this.pollIntervalMs)
@@ -280,7 +323,10 @@ export class SdrHostPoller extends EventEmitter {
 		}
 	}
 
-	private async fetchStatus(config: SdrHostConfig): Promise<SdrHostStatus> {
+	private async fetchStatus(config: SdrHostConfig): Promise<{
+		status: SdrHostStatus
+		endpoints: ReceiverEndpointsReport | null
+	}> {
 		const controller = new AbortController()
 		const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
 
@@ -396,7 +442,7 @@ export class SdrHostPoller extends EventEmitter {
 				}
 			}
 
-			return {
+			const status: SdrHostStatus = {
 				available: true,
 				sourceId: config.sourceId,
 				apiUrl: config.apiUrl,
@@ -443,6 +489,7 @@ export class SdrHostPoller extends EventEmitter {
 				lastFetchedAt: new Date().toISOString(),
 				fetchError: null,
 			}
+			return { status, endpoints: parseReceiverEndpoints(body) }
 		} finally {
 			clearTimeout(timeoutId)
 		}
