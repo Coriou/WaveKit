@@ -1101,6 +1101,10 @@ export class TunerController extends EventEmitter {
 			}
 		}
 
+		// WG10 R1 m2: every field is validated before anything is written (the rate proof
+		// below included), so an invalid field writes nothing and changes no mode.
+		this.validateUpdates(updates)
+
 		if (updates.controlMode === "internal") {
 			this.setControlMode(sourceId, "internal")
 		}
@@ -1442,6 +1446,39 @@ export class TunerController extends EventEmitter {
 			throw new TunerControlModeError(sourceId)
 		}
 		return state
+	}
+
+	/** The setters' own value checks, for a bulk update before its first write. */
+	private validateUpdates(updates: Partial<TunerState>): void {
+		if (updates.frequency !== undefined)
+			this.validateRange("frequency", updates.frequency, VALIDATION.frequency)
+		if (updates.sampleRate !== undefined) {
+			this.validateRange(
+				"sampleRate",
+				updates.sampleRate,
+				VALIDATION.sampleRate,
+			)
+			if (!isValidRtlSampleRate(updates.sampleRate))
+				throw new TunerValidationError(
+					`sampleRate ${updates.sampleRate} is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
+				)
+		}
+		if (updates.gain !== undefined)
+			this.validateRange("gain", updates.gain, VALIDATION.gain)
+		if (updates.ppm !== undefined)
+			this.validateRange("ppm", updates.ppm, VALIDATION.ppm)
+		if (updates.ifGain !== undefined)
+			this.validateUint32("ifGain", updates.ifGain)
+		if (updates.rtlXtal !== undefined)
+			this.validateUint32("rtlXtal", updates.rtlXtal)
+		if (updates.tunerXtal !== undefined)
+			this.validateUint32("tunerXtal", updates.tunerXtal)
+		if (updates.tunerGainIndex !== undefined)
+			this.validateUint32("tunerGainIndex", updates.tunerGainIndex)
+		if (updates.tunerIfGain !== undefined && updates.tunerIfGain !== null) {
+			this.validateUint16("tunerIfGain.stage", updates.tunerIfGain.stage)
+			this.validateUint16("tunerIfGain.gain", updates.tunerIfGain.gain)
+		}
 	}
 
 	private validateRange(
