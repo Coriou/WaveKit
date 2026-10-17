@@ -6,6 +6,8 @@ export interface AppToast {
 	readonly id: number
 	readonly text: string
 	readonly undo?: () => void
+	/** A labelled button instead of Undo ("Reload"). */
+	readonly action?: { readonly label: string; readonly run: () => void }
 	readonly tone?: "warn"
 }
 
@@ -17,16 +19,25 @@ export const TOAST_MS = 6000
 
 export function showAppToast(
 	text: string,
-	options: { undo?: () => void; tone?: "warn" } = {},
+	options: {
+		undo?: () => void
+		action?: AppToast["action"]
+		tone?: "warn"
+		/** Stays until dismissed (an update waiting for Reload). */
+		persist?: boolean
+	} = {},
 ): void {
 	const t: AppToast = {
 		id: ++seq,
 		text,
 		...(options.undo ? { undo: options.undo } : {}),
+		...(options.action ? { action: options.action } : {}),
 		...(options.tone ? { tone: options.tone } : {}),
 	}
 	appToast.set(t)
 	if (timer) clearTimeout(timer)
+	timer = null
+	if (options.persist) return
 	timer = setTimeout(() => {
 		timer = null
 		if (appToast.get()?.id === t.id) appToast.set(null)

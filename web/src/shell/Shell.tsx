@@ -671,18 +671,19 @@ function ShellToast({
 			style={centre === null ? undefined : { left: centre }}
 		>
 			<span className="wk-shell-toast-text">{toast.text}</span>
-			{toast.undo ? (
+			{toast.action || toast.undo ? (
 				<button
 					type="button"
 					className="wk-btn"
 					data-variant="tonal"
 					data-size="sm"
 					onClick={() => {
-						toast.undo?.()
+						if (toast.action) toast.action.run()
+						else toast.undo?.()
 						dismissAppToast()
 					}}
 				>
-					Undo
+					{toast.action?.label ?? "Undo"}
 				</button>
 			) : (
 				<button

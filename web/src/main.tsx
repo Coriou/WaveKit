@@ -7,6 +7,9 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 
 import { App } from "./app/App.tsx"
+import { startPwa } from "./pwa/pwa.ts"
+
+startPwa()
 
 const root = document.getElementById("root")
 if (root) {
