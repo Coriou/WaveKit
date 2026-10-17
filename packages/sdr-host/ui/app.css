@@ -1,7 +1,13 @@
-/* WaveKit brand faces, vendored in brand/ (see brand/README.md). The Repli
-   faces are the brand's metric-matched fallbacks while the woff2 loads.
-   D-DIN has no tabular figures, so live numbers are set in Noto Sans. Values
-   follow packages/brand/tokens/typography.css; colours follow brand.css. */
+/* The Pi pages on the WaveKit UI kit. brand/ui.css (vendored, see
+   brand/README.md) supplies the tokens, base rules (focus, selection,
+   reduced motion) and recipes; this file holds only what is the Pi's own:
+   the faces, the instrument (verdict, rate, scope, lamps, rows) and the page
+   layout. Mapping and reasons: docs/superpowers/specs/2026-10-17-pi-pages-kit-design.md. */
+
+/* Brand faces, vendored in brand/. The Repli faces are the brand's
+   metric-matched fallbacks (packages/brand/tokens/typography.css), so text
+   keeps its size while the woff2 loads. D-DIN has no tabular figures, so
+   live numbers are set in Noto Sans. */
 @font-face {
 	font-family: "D-DIN Condensed";
 	font-weight: 400;
@@ -19,6 +25,12 @@
 	font-weight: 400;
 	font-display: fallback;
 	src: url("brand/NotoSans-Regular.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Noto Sans";
+	font-weight: 700;
+	font-display: fallback;
+	src: url("brand/NotoSans-Bold.woff2") format("woff2");
 }
 @font-face {
 	font-family: "D-DIN Condensed Repli";
@@ -49,41 +61,28 @@
 	descent-override: 28%;
 	line-gap-override: 0%;
 }
+@font-face {
+	font-family: "Noto Sans Repli";
+	src: local("Arial Bold");
+	font-weight: 700;
+	size-adjust: 104.5%;
+	ascent-override: 102.3%;
+	descent-override: 28%;
+	line-gap-override: 0%;
+}
 
-:root {
-	/* Brand dark theme: ink field, paper text, phosphor for live signal. */
-	--ink: #111c19;
-	--well: #0b1512;
-	--surface: #192b24;
-	--rule: #2c443b;
-	--rule-strong: #8ba598;
-	--paper: #f4f7f5;
-	--paper-2: #b9cac1;
-	--paper-3: #8ba598;
-	--phosphor: #7becc7;
-	--grat: rgb(123 236 199 / 0.07);
-	--grat-major: rgb(123 236 199 / 0.16);
-
-	/* Status hues are not brand colours; tuned to sit beside phosphor. */
-	--ok: var(--phosphor);
-	--warn: #f2b84b;
-	--fault: #ff7a6b;
-	--lamp-off: #52645d;
-
-	--display:
+[data-wk-theme] {
+	/* The kit's families with the brand's metric-matched fallbacks added. */
+	--wk-font-head:
 		"D-DIN Condensed", "D-DIN Condensed Repli", "Noto Sans", sans-serif;
-	--body: "Noto Sans", "Noto Sans Repli", -apple-system, "Segoe UI", sans-serif;
-	--mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+	--wk-font-ui: "Noto Sans", "Noto Sans Repli", system-ui, sans-serif;
 
-	/* One 4 px spacing scale. Groups are made by these gaps, not by lines. */
-	--space-1: 4px;
-	--space-2: 8px;
-	--space-3: 12px;
-	--space-4: 16px;
-	--space-5: 24px;
-	--space-6: 32px;
-	--space-7: 48px;
-	--gutter: 16px;
+	/* Page rhythm beyond the kit's control spacing (which stops at 24). */
+	--pi-gap-group: 32px;
+	--pi-gap-section: 40px;
+	--pi-gap-page: 48px;
+	/* The headline figure, read at arm's length from a phone by the Pi. */
+	--pi-fs-rate: 40px;
 
 	/* Fixed columns: content swaps inside them, so nothing beside them moves. */
 	--names: 6.5rem;
@@ -91,7 +90,6 @@
 	--glyph: 14px;
 	--rate-col: 12rem;
 	--slot: 2.75rem;
-	color-scheme: dark;
 }
 
 *,
@@ -107,23 +105,11 @@ html {
 
 body {
 	margin: 0;
-	background: var(--ink);
-	color: var(--paper);
-	font: 400 1rem/1.45 var(--body);
+	background: var(--wk-surface);
+	font-size: var(--wk-fs-xl);
+	line-height: 1.45;
 	font-variant-numeric: tabular-nums;
 	font-synthesis: none;
-	-webkit-font-smoothing: antialiased;
-}
-
-::selection {
-	background: var(--phosphor);
-	color: var(--ink);
-}
-
-:focus-visible {
-	outline: 2px solid var(--phosphor);
-	outline-offset: 3px;
-	border-radius: 2px;
 }
 
 h1,
@@ -153,33 +139,20 @@ ul {
 	white-space: nowrap;
 }
 
-.visually-hidden {
-	position: absolute;
-	width: 1px;
-	height: 1px;
-	margin: -1px;
-	overflow: hidden;
-	clip: rect(0 0 0 0);
-	white-space: nowrap;
-}
-
 .panel {
 	max-width: 1180px;
 	margin: 0 auto;
 	padding: max(20px, env(safe-area-inset-top))
-		max(var(--gutter), env(safe-area-inset-right))
-		max(var(--space-7), env(safe-area-inset-bottom))
-		max(var(--gutter), env(safe-area-inset-left));
+		max(var(--wk-sp-7), env(safe-area-inset-right))
+		max(var(--pi-gap-page), env(safe-area-inset-bottom))
+		max(var(--wk-sp-7), env(safe-area-inset-left));
 }
 
-/* Section legends: short display-face labels. Space, not a rule, sets them
+/* Section legends are .wk-label[data-strong]; space, not a rule, sets them
    apart from what they head. */
 .legend {
-	font: 700 0.9375rem/1 var(--display);
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	color: var(--paper-2);
-	margin-bottom: var(--space-4);
+	line-height: 1;
+	margin-bottom: var(--wk-sp-7);
 }
 
 /* Nameplate: the wordmark, the page, the Pi it is served from, and contact. */
@@ -188,19 +161,19 @@ ul {
 	grid-template-columns: auto minmax(0, 1fr) auto;
 	grid-template-areas: "title host link";
 	align-items: center;
-	column-gap: var(--space-5);
-	padding-top: var(--space-1);
-	margin-bottom: var(--space-6);
+	column-gap: var(--wk-sp-9);
+	padding-top: var(--wk-sp-2);
+	margin-bottom: var(--pi-gap-group);
 }
 .nameplate__title {
 	grid-area: title;
 	display: flex;
 	align-items: center;
-	gap: var(--space-4);
-	font: 700 1.25rem/1 var(--display);
-	letter-spacing: 0.06em;
+	gap: var(--wk-sp-7);
+	font: 700 var(--wk-fs-2xl) / 1 var(--wk-font-head);
+	letter-spacing: 0.1em;
 	text-transform: uppercase;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 /* The wordmark keeps its 120 px minimum; clearspace comes from the gap. */
 .nameplate__logo {
@@ -213,27 +186,26 @@ ul {
 }
 .nameplate__host {
 	grid-area: host;
-	color: var(--paper-3);
-	font-size: 0.875rem;
+	color: var(--wk-text-3);
+	font-size: var(--wk-fs-lg);
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
-/* Contact: a word and its lamp, set right to left in a box wide enough for
-   the longest word, so a change of word never moves anything. */
+/* Contact (.wk-label[data-strong]): a word and its lamp, set right to left in
+   a box wide enough for the longest word, so a change of word never moves
+   anything. */
 .link {
 	grid-area: link;
 	display: flex;
 	align-items: center;
 	justify-content: flex-end;
-	gap: var(--space-2);
+	gap: var(--wk-sp-4);
 	min-width: 10.5rem;
-	font: 700 0.9375rem/1 var(--display);
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
+	line-height: 1;
 	white-space: nowrap;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 /* The word fills the box and sets right: its box never moves, only its text. */
 .link__text {
@@ -241,20 +213,21 @@ ul {
 	text-align: right;
 }
 .link[data-state="live"] {
-	color: var(--ok);
+	color: var(--wk-accent);
 }
 .link[data-state="stale"],
 .link[data-state="reconnecting"] {
-	color: var(--warn);
+	color: var(--wk-amber);
 }
 .link[data-state="offline"] {
-	color: var(--fault);
+	color: var(--wk-danger);
 }
 
 /* Lamps: filled when lit, a hollow ring when dark or unknown. Never alone:
-   every lamp sits beside a word. */
+   every lamp sits beside a word. (.wk-live is always filled, so it cannot
+   say unknown or stale; the lamp borrows only its pulse.) */
 .lamp {
-	--lamp: var(--lamp-off);
+	--lamp: var(--wk-text-5);
 	flex: none;
 	width: 10px;
 	height: 10px;
@@ -265,32 +238,27 @@ ul {
 [data-state="live"] > .lamp,
 [data-state="ok"] .lamp,
 [data-tone="ok"] .lamp {
-	--lamp: var(--ok);
+	--lamp: var(--wk-accent);
 	background: var(--lamp);
 }
 [data-state="warn"] .lamp,
 [data-state="stale"] > .lamp,
 [data-state="reconnecting"] > .lamp {
-	--lamp: var(--warn);
+	--lamp: var(--wk-amber);
 	background: var(--lamp);
 }
 [data-state="fault"] .lamp,
 [data-state="offline"] > .lamp {
-	--lamp: var(--fault);
+	--lamp: var(--wk-danger);
 	background: var(--lamp);
 }
 [data-state="stale"] .lamp {
-	--lamp: var(--lamp-off);
+	--lamp: var(--wk-text-5);
 	background: transparent;
 }
 [data-state="connecting"] > .lamp,
 [data-state="reconnecting"] > .lamp {
-	animation: blink 1.2s steps(2, jump-none) infinite;
-}
-@keyframes blink {
-	50% {
-		opacity: 0.25;
-	}
+	animation: wk-pulse 1.6s var(--wk-ease-inout) infinite;
 }
 
 /* Layout: the screen leads; the stream and the Pi sit beside it on wide
@@ -298,25 +266,25 @@ ul {
    so the first reading fills the page in place rather than building it. */
 .layout {
 	display: grid;
-	gap: var(--space-7) var(--space-6);
+	gap: var(--pi-gap-page) var(--pi-gap-group);
 }
 .side {
 	display: grid;
 	grid-template-columns: minmax(0, 1fr);
-	gap: 40px;
+	gap: var(--pi-gap-section);
 	align-content: start;
 	min-width: 0;
 }
 @media (min-width: 640px) and (max-width: 1199px) {
 	.side {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		column-gap: var(--space-6);
+		column-gap: var(--pi-gap-group);
 	}
 }
 @media (min-width: 1200px) {
 	.layout {
 		grid-template-columns: minmax(0, 1fr) 360px;
-		column-gap: 40px;
+		column-gap: var(--pi-gap-section);
 		align-items: start;
 	}
 	.diagnostics {
@@ -329,17 +297,17 @@ ul {
    trend on one time base. */
 .screen {
 	position: relative;
-	background: var(--well);
-	border-radius: 12px;
-	padding: var(--space-5) var(--space-5) var(--space-4);
+	background: var(--wk-well);
+	border-radius: var(--wk-r-5);
+	padding: var(--wk-sp-9) var(--wk-sp-9) var(--wk-sp-7);
 	display: grid;
-	gap: var(--space-5);
+	gap: var(--wk-sp-9);
 	min-width: 0;
 }
 .screen--status {
 	grid-template-columns: minmax(0, 1fr) var(--rate-col);
 	grid-template-areas: "verdict rate" "scope scope";
-	column-gap: var(--space-5);
+	column-gap: var(--wk-sp-9);
 }
 .screen__verdict {
 	min-width: 0;
@@ -348,8 +316,8 @@ ul {
 	grid-area: verdict;
 }
 .verdict {
-	font: 700 2rem/1 var(--display);
-	letter-spacing: 0.01em;
+	font: 700 var(--wk-fs-display-2) / 1 var(--wk-font-head);
+	letter-spacing: 0.02em;
 	text-wrap: balance;
 	min-height: 1lh;
 }
@@ -359,28 +327,28 @@ ul {
 	width: 12px;
 	height: 12px;
 	border-radius: 50%;
-	margin-right: var(--space-3);
+	margin-right: var(--wk-sp-6);
 	vertical-align: 0.12em;
-	border: 2px solid var(--lamp-off);
+	border: 2px solid var(--wk-text-5);
 }
 .screen[data-state="ok"] .verdict::before {
-	background: var(--ok);
-	border-color: var(--ok);
+	background: var(--wk-accent);
+	border-color: var(--wk-accent);
 }
 .screen[data-state="warn"] .verdict::before {
-	background: var(--warn);
-	border-color: var(--warn);
+	background: var(--wk-amber);
+	border-color: var(--wk-amber);
 }
 .screen[data-state="fault"] .verdict::before {
-	background: var(--fault);
-	border-color: var(--fault);
+	background: var(--wk-danger);
+	border-color: var(--wk-danger);
 }
 /* Two lines are reserved whatever the verdict says; the measure is the
    column's, capped near 68 characters where the column runs wider. */
 .verdict__detail {
-	margin-top: var(--space-2);
-	color: var(--paper-2);
-	font-size: 0.9375rem;
+	margin-top: var(--wk-sp-4);
+	color: var(--wk-text-2);
+	font-size: var(--wk-fs-xl);
 	line-height: 1.45;
 	min-height: 2lh;
 	max-width: 68ch;
@@ -396,11 +364,11 @@ ul {
 	min-width: 0;
 }
 .rate {
-	font: 400 2.5rem/1 var(--body);
+	font: 400 var(--pi-fs-rate) / 1 var(--wk-font-ui);
 	letter-spacing: -0.01em;
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 	white-space: nowrap;
-	margin-bottom: var(--space-2);
+	margin-bottom: var(--wk-sp-4);
 }
 /* Fixed-width figure: digits change, the box does not. */
 .rate__value {
@@ -410,13 +378,13 @@ ul {
 	text-align: end;
 }
 .screen[data-fresh="true"] .rate {
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 .screen[data-fresh="true"][data-state="ok"] .rate {
-	color: var(--phosphor);
+	color: var(--wk-accent);
 }
 .screen[data-fresh="true"][data-state="warn"] .rate {
-	color: var(--warn);
+	color: var(--wk-amber);
 }
 /* The unit gets its own box too, so neither a kB/s nor the display face
    arriving moves the figure. */
@@ -424,13 +392,13 @@ ul {
 	display: inline-block;
 	width: 2.2em;
 	text-align: left;
-	font: 400 1.25rem/1 var(--display);
+	font: 400 var(--wk-fs-2xl) / 1 var(--wk-font-head);
 	letter-spacing: 0.02em;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 .rate__sub,
 .rate__basis {
-	font-size: 0.875rem;
+	font-size: var(--wk-fs-lg);
 	line-height: 1.4;
 	min-height: 1lh;
 	white-space: nowrap;
@@ -439,10 +407,10 @@ ul {
 	max-width: 100%;
 }
 .rate__sub {
-	color: var(--paper);
+	color: var(--wk-text);
 }
 .rate__basis {
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 }
 
 /* Scope: channels share one five-minute time base, read by one cursor. The
@@ -452,7 +420,7 @@ ul {
 	grid-area: scope;
 	position: relative;
 	display: grid;
-	gap: var(--space-3);
+	gap: var(--wk-sp-6);
 	touch-action: pan-y;
 	cursor: crosshair;
 	min-width: 0;
@@ -465,38 +433,38 @@ ul {
 	grid-template-columns: var(--names) minmax(0, 1fr);
 	grid-template-areas: "name plot" "value plot";
 	grid-template-rows: auto 1fr;
-	column-gap: var(--space-4);
+	column-gap: var(--wk-sp-7);
 	align-items: start;
 }
 .channel__name {
 	grid-area: name;
-	font: 400 0.9375rem/1.1 var(--display);
-	letter-spacing: 0.06em;
+	font: 400 var(--wk-fs-lg) / 1.1 var(--wk-font-head);
+	letter-spacing: 0.1em;
 	text-transform: uppercase;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 .channel__value {
 	grid-area: value;
-	font: 400 1.0625rem/1.3 var(--body);
-	color: var(--paper);
+	font: 400 var(--wk-fs-xl) / 1.3 var(--wk-font-ui);
+	color: var(--wk-text);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 .channel--flow .channel__value {
-	font: 400 0.875rem/1.3 var(--body);
-	color: var(--paper-3);
-	margin-top: var(--space-1);
+	font: 400 var(--wk-fs-lg) / 1.3 var(--wk-font-ui);
+	color: var(--wk-text-3);
+	margin-top: var(--wk-sp-2);
 }
 .channel[data-state="warn"] .channel__value {
-	color: var(--warn);
+	color: var(--wk-amber);
 }
 .channel[data-state="fault"] .channel__value {
-	color: var(--fault);
+	color: var(--wk-danger);
 }
 .channel[data-state="stale"] .channel__value,
 .channel[data-state="unavailable"] .channel__value {
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 }
 .channel__plot,
 .channel__frame {
@@ -518,74 +486,74 @@ ul {
 	height: 16px;
 }
 .graticule line {
-	stroke: var(--grat);
+	stroke: var(--wk-line-08);
 	stroke-width: 1;
 	vector-effect: non-scaling-stroke;
 }
 .graticule line.major {
-	stroke: var(--grat-major);
+	stroke: var(--wk-line-14);
 }
 .plot__trace {
 	fill: none;
-	stroke: var(--paper-2);
+	stroke: var(--wk-text-2);
 	stroke-width: 1.5;
 	stroke-linejoin: round;
 	stroke-linecap: round;
 	vector-effect: non-scaling-stroke;
 }
 .channel--flow .plot__trace {
-	stroke: var(--phosphor);
+	stroke: var(--wk-accent);
 	stroke-width: 2;
 }
 .screen[data-state="warn"] .channel--flow .plot__trace,
 .channel[data-state="warn"] .plot__trace {
-	stroke: var(--warn);
+	stroke: var(--wk-amber);
 }
 .screen[data-state="fault"] .channel--flow .plot__trace,
 .channel[data-state="fault"] .plot__trace {
-	stroke: var(--fault);
+	stroke: var(--wk-danger);
 }
 .plot__area {
 	fill: url(#flow-fade);
 }
 .screen[data-state="warn"] .fade-top {
-	stop-color: var(--warn);
+	stop-color: var(--wk-amber);
 }
 .screen[data-state="fault"] .fade-top {
-	stop-color: var(--fault);
+	stop-color: var(--wk-danger);
 }
 .fade-top {
-	stop-color: var(--phosphor);
+	stop-color: var(--wk-accent);
 	stop-opacity: 0.16;
 }
 .fade-bottom {
-	stop-color: var(--phosphor);
+	stop-color: var(--wk-accent);
 	stop-opacity: 0;
 }
 .plot__expected {
-	stroke: var(--rule-strong);
+	stroke: var(--wk-text-3);
 	stroke-width: 1.25;
 	stroke-dasharray: 6 5;
 	vector-effect: non-scaling-stroke;
 }
 .plot__start {
-	stroke: var(--paper-3);
+	stroke: var(--wk-text-3);
 	stroke-width: 1;
 	stroke-dasharray: 2 4;
 	vector-effect: non-scaling-stroke;
 }
 .lane__ticks {
-	stroke: var(--warn);
+	stroke: var(--wk-amber);
 	stroke-width: 2;
 	vector-effect: non-scaling-stroke;
 }
 .channel--lane[data-state="fault"] .lane__ticks {
-	stroke: var(--fault);
+	stroke: var(--wk-danger);
 }
 /* A reading the page cannot confirm is drawn dim, never in signal colour. */
 .screen[data-fresh="false"] .plot__trace,
 .screen[data-fresh="false"] .lane__ticks {
-	stroke: var(--paper-3);
+	stroke: var(--wk-text-3);
 	opacity: 0.5;
 }
 .screen[data-fresh="false"] .plot__area {
@@ -595,8 +563,8 @@ ul {
 /* Reference lines are labelled where they are drawn. */
 .plot__label {
 	position: absolute;
-	font: 400 0.75rem/1 var(--body);
-	color: var(--paper-3);
+	font: 400 var(--wk-fs-xs) / 1 var(--wk-font-ui);
+	color: var(--wk-text-3);
 	pointer-events: none;
 	white-space: nowrap;
 }
@@ -606,7 +574,7 @@ ul {
 }
 .plot__label--start {
 	top: 4px;
-	padding: 0 var(--space-2);
+	padding: 0 var(--wk-sp-4);
 }
 .channel--flow[data-start="late"] .plot__label--start {
 	transform: translateX(-100%);
@@ -620,16 +588,16 @@ ul {
 .scope__axis {
 	display: flex;
 	justify-content: space-between;
-	margin-left: calc(var(--names) + var(--space-4));
-	font: 400 0.8125rem/1 var(--display);
+	margin-left: calc(var(--names) + var(--wk-sp-7));
+	font: 400 0.8125rem/1 var(--wk-font-head);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 }
 .scope__marker {
 	position: absolute;
 	width: 1px;
-	background: var(--paper);
+	background: var(--wk-text);
 	pointer-events: none;
 }
 /* The readout floats on the one raised tone; no outline needed. */
@@ -637,16 +605,16 @@ ul {
 	position: absolute;
 	display: grid;
 	gap: 2px;
-	padding: var(--space-2) var(--space-3);
+	padding: var(--wk-sp-4) var(--wk-sp-6);
 	border-radius: 8px;
-	background: var(--surface);
-	font-size: 0.8125rem;
+	background: var(--wk-fill);
+	font-size: var(--wk-fs-md);
 	line-height: 1.35;
 	white-space: nowrap;
 	pointer-events: none;
 }
 .scope__readout span:first-child {
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 
 /* IQ stream: the address to paste into WaveKit, copyable in one press. The
@@ -655,17 +623,17 @@ ul {
 	display: flex;
 	align-items: stretch;
 	gap: 2px;
-	margin-bottom: var(--space-5);
+	margin-bottom: var(--wk-sp-9);
 	min-width: 0;
 }
 .endpoint__url {
 	flex: 1;
 	min-width: 0;
-	padding: 12px var(--space-3) 12px 14px;
+	padding: 12px var(--wk-sp-6) 12px 14px;
 	border-radius: 8px 0 0 8px;
-	background: var(--surface);
-	font: 400 0.875rem/1.4 var(--mono);
-	color: var(--paper);
+	background: var(--wk-fill);
+	font: 400 0.875rem/1.4 var(--wk-font-mono);
+	color: var(--wk-text);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -675,40 +643,40 @@ ul {
 	flex: none;
 	width: 5.5rem;
 	min-height: 44px;
-	padding: 0 var(--space-3);
+	padding: 0 var(--wk-sp-6);
 	border: 0;
 	border-radius: 0 8px 8px 0;
-	background: var(--surface);
-	color: var(--phosphor);
-	font: 700 0.9375rem/1 var(--display);
+	background: var(--wk-fill);
+	color: var(--wk-accent);
+	font: 700 0.9375rem/1 var(--wk-font-head);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
 	cursor: pointer;
 }
 /* Hover and press lift the surface toward phosphor, as the old outline did. */
 .endpoint__copy:hover {
-	background: color-mix(in srgb, var(--surface), var(--phosphor) 8%);
+	background: color-mix(in srgb, var(--wk-fill), var(--wk-accent) 8%);
 }
 .endpoint__copy:active {
-	background: color-mix(in srgb, var(--surface), var(--phosphor) 14%);
+	background: color-mix(in srgb, var(--wk-fill), var(--wk-accent) 14%);
 }
 
 /* Rows: name, value, one line of context. Every row is exactly two lines;
    a glyph column (lamp, bars or nothing) keeps every value on one edge. */
 .rows {
 	display: grid;
-	gap: var(--space-3);
+	gap: var(--wk-sp-6);
 }
 .row {
 	display: grid;
 	grid-template-columns: var(--row-name) minmax(0, 1fr);
-	column-gap: var(--space-3);
+	column-gap: var(--wk-sp-6);
 }
 .row dt {
-	font: 400 0.9375rem/1.5rem var(--display);
-	letter-spacing: 0.06em;
+	font: 400 var(--wk-fs-lg) / 1.5rem var(--wk-font-head);
+	letter-spacing: 0.1em;
 	text-transform: uppercase;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 .row dd {
 	display: grid;
@@ -718,7 +686,7 @@ ul {
 .row__value {
 	display: flex;
 	align-items: center;
-	gap: var(--space-2);
+	gap: var(--wk-sp-4);
 	min-width: 0;
 	line-height: 1.5rem;
 	white-space: nowrap;
@@ -739,12 +707,12 @@ ul {
 .row__sub {
 	display: flex;
 	align-items: center;
-	gap: var(--space-2);
+	gap: var(--wk-sp-4);
 	min-height: 1lh;
-	padding-left: calc(var(--glyph) + var(--space-2));
-	font-size: 0.8125rem;
+	padding-left: calc(var(--glyph) + var(--wk-sp-4));
+	font-size: var(--wk-fs-md);
 	line-height: 1.35;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -756,15 +724,15 @@ ul {
 	text-overflow: ellipsis;
 }
 .row[data-state="warn"] .row__text {
-	color: var(--warn);
+	color: var(--wk-amber);
 }
 .row[data-state="fault"] .row__text {
-	color: var(--fault);
+	color: var(--wk-danger);
 }
 .row[data-state="stale"] :is(.row__text, .row__sub),
 .row[data-state="unavailable"] :is(.row__text, .row__sub),
 .row[data-empty="true"] .row__text {
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 }
 
 /* Wi-Fi bars: four rising bars, lit from the left by signal strength. */
@@ -781,7 +749,7 @@ ul {
 .bars span {
 	width: 3px;
 	border-radius: 1px;
-	background: var(--rule);
+	background: var(--wk-track);
 }
 .bars span:nth-child(1) {
 	height: 4px;
@@ -799,11 +767,11 @@ ul {
 .row[data-bars="2"] .bars span:nth-child(-n + 2),
 .row[data-bars="3"] .bars span:nth-child(-n + 3),
 .row[data-bars="4"] .bars span:nth-child(-n + 4) {
-	background: var(--paper);
+	background: var(--wk-text);
 }
 .row[data-state="warn"][data-bars="1"] .bars span:nth-child(-n + 1),
 .row[data-state="warn"][data-bars="2"] .bars span:nth-child(-n + 2) {
-	background: var(--warn);
+	background: var(--wk-amber);
 }
 .row[data-state="stale"] .bars {
 	opacity: 0.4;
@@ -816,18 +784,18 @@ ul {
 	width: 40px;
 	height: 4px;
 	border-radius: 2px;
-	background: var(--rule);
+	background: var(--wk-track);
 	overflow: hidden;
 }
 .meter__fill {
 	position: absolute;
 	inset: 0;
-	background: var(--paper-2);
+	background: var(--wk-text-2);
 	transform-origin: left center;
 	transform: scaleX(0);
 }
 .row[data-state="warn"] .meter__fill {
-	background: var(--warn);
+	background: var(--wk-amber);
 }
 .row[data-state="stale"] .meter,
 .row[data-state="unavailable"] .meter {
@@ -841,8 +809,8 @@ ul {
 .clients {
 	display: grid;
 	grid-auto-rows: minmax(var(--slot), auto);
-	row-gap: var(--space-2);
-	margin-top: var(--space-3);
+	row-gap: var(--wk-sp-4);
+	margin-top: var(--wk-sp-6);
 }
 .client {
 	display: grid;
@@ -858,35 +826,35 @@ ul {
 }
 .client__address {
 	grid-area: address;
-	font-size: 0.9375rem;
+	font-size: var(--wk-fs-xl);
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 .client__rate {
 	grid-area: rate;
-	font-size: 0.9375rem;
+	font-size: var(--wk-fs-xl);
 	text-align: end;
 	white-space: nowrap;
 }
 .client__detail {
 	grid-area: detail;
-	font-size: 0.8125rem;
+	font-size: var(--wk-fs-md);
 	line-height: 1.35;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 .client[data-state="warn"] .client__detail {
-	color: var(--warn);
+	color: var(--wk-amber);
 }
 .client[data-state="stale"]
 	:is(.client__address, .client__rate, .client__detail) {
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 }
 .client--more .client__address {
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 .client--more :is(.client__spark, .client__rate) {
 	visibility: hidden;
@@ -894,11 +862,11 @@ ul {
 .clients__empty {
 	align-self: start;
 	padding-left: calc(
-		var(--row-name) + var(--space-3) + var(--glyph) + var(--space-2)
+		var(--row-name) + var(--wk-sp-6) + var(--glyph) + var(--wk-sp-4)
 	);
-	font-size: 0.8125rem;
+	font-size: var(--wk-fs-md);
 	line-height: 1.45;
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 	text-wrap: pretty;
 }
 
@@ -912,26 +880,26 @@ ul {
 	overflow: visible;
 }
 .spark__base {
-	stroke: var(--grat-major);
+	stroke: var(--wk-line-14);
 	stroke-width: 1;
 	vector-effect: non-scaling-stroke;
 }
 .spark__trace {
 	fill: none;
-	stroke: var(--paper-2);
+	stroke: var(--wk-text-2);
 	stroke-width: 1.5;
 	stroke-linejoin: round;
 	stroke-linecap: round;
 	vector-effect: non-scaling-stroke;
 }
 .client[data-state="ok"] .spark__trace {
-	stroke: var(--phosphor);
+	stroke: var(--wk-accent);
 }
 .client[data-state="warn"] .spark__trace {
-	stroke: var(--warn);
+	stroke: var(--wk-amber);
 }
 .client[data-state="stale"] .spark__trace {
-	stroke: var(--paper-3);
+	stroke: var(--wk-text-3);
 	opacity: 0.5;
 }
 
@@ -940,7 +908,7 @@ ul {
    notes at the very end, where they can wrap without moving anything. */
 .diagnostics__groups {
 	display: grid;
-	gap: var(--space-6) var(--space-6);
+	gap: var(--pi-gap-group) var(--pi-gap-group);
 }
 @media (min-width: 640px) {
 	.diagnostics__groups {
@@ -954,7 +922,7 @@ ul {
 @media (min-width: 1200px) {
 	.diagnostics__groups {
 		grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.05fr) minmax(0, 1.05fr);
-		column-gap: 40px;
+		column-gap: var(--pi-gap-section);
 	}
 	.diag-group[data-key="sources"] {
 		grid-column: auto;
@@ -968,19 +936,19 @@ ul {
 	max-width: 34rem;
 }
 .diag-group__title {
-	font: 400 0.8125rem/1 var(--display);
+	font: 400 0.8125rem/1 var(--wk-font-head);
 	letter-spacing: 0.08em;
 	text-transform: uppercase;
-	color: var(--paper-3);
-	margin-bottom: var(--space-3);
+	color: var(--wk-text-3);
+	margin-bottom: var(--wk-sp-6);
 }
 /* Terms take the width of the longest term in their group; every fact shares
    the group's columns, so values line up down the group. */
 .facts {
 	display: grid;
 	grid-template-columns: max-content minmax(0, 1fr);
-	gap: 6px var(--space-4);
-	font-size: 0.875rem;
+	gap: var(--wk-sp-3) var(--wk-sp-7);
+	font-size: var(--wk-fs-lg);
 	line-height: 1.4;
 }
 /* The freshness word changes; its column does not. */
@@ -994,7 +962,7 @@ ul {
 	min-width: 0;
 }
 .fact dt {
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 	white-space: nowrap;
 }
 .fact dd {
@@ -1006,8 +974,8 @@ ul {
 .fact__word {
 	display: flex;
 	align-items: center;
-	gap: var(--space-2);
-	color: var(--paper-2);
+	gap: var(--wk-sp-4);
+	color: var(--wk-text-2);
 }
 .fact__word .lamp {
 	width: 8px;
@@ -1015,18 +983,18 @@ ul {
 	border-width: 1.5px;
 }
 .fact[data-tone="stale"] .fact__word {
-	color: var(--warn);
+	color: var(--wk-amber);
 }
 .fact[data-tone="unknown"] :is(.fact__value, .fact__word),
 .fact[data-empty="true"] .fact__value {
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 }
 .diagnostics__notes {
 	display: grid;
-	gap: var(--space-1);
-	font-size: 0.8125rem;
+	gap: var(--wk-sp-2);
+	font-size: var(--wk-fs-md);
 	line-height: 1.45;
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 	max-width: 80ch;
 	text-wrap: pretty;
 }
@@ -1039,9 +1007,9 @@ ul {
 	.nameplate {
 		grid-template-columns: auto minmax(0, 1fr) auto;
 		grid-template-areas: "logo logo link" "page host host";
-		row-gap: var(--space-3);
-		column-gap: var(--space-3);
-		margin-bottom: var(--space-5);
+		row-gap: var(--wk-sp-6);
+		column-gap: var(--wk-sp-6);
+		margin-bottom: var(--wk-sp-9);
 	}
 	.nameplate__title {
 		display: contents;
@@ -1058,8 +1026,8 @@ ul {
 		line-height: 1;
 	}
 	.screen {
-		padding: var(--space-4) 14px var(--space-3);
-		gap: var(--space-4);
+		padding: var(--wk-sp-7) 14px var(--wk-sp-6);
+		gap: var(--wk-sp-7);
 	}
 	/* Title, then the figure, then the reserved detail lines: any spare line
 	   falls before the scope, where it reads as spacing. */
@@ -1078,7 +1046,7 @@ ul {
 		margin-top: 0;
 	}
 	.verdict {
-		font-size: 1.75rem;
+		font-size: var(--wk-fs-display-1);
 	}
 	.verdict__detail {
 		min-height: 3lh;
@@ -1088,7 +1056,7 @@ ul {
 		grid-template-columns: 9.5rem minmax(0, 1fr);
 		grid-template-areas: "rate sub" "rate basis";
 		align-items: center;
-		column-gap: var(--space-4);
+		column-gap: var(--wk-sp-7);
 		text-align: left;
 	}
 	.rate {
@@ -1105,7 +1073,7 @@ ul {
 	.channel {
 		grid-template-columns: minmax(0, 1fr) 7.5rem;
 		grid-template-areas: "name value" "plot plot";
-		row-gap: var(--space-1);
+		row-gap: var(--wk-sp-2);
 	}
 	.channel__value {
 		text-align: end;
@@ -1117,15 +1085,6 @@ ul {
 		margin-left: 0;
 	}
 	.facts {
-		column-gap: var(--space-3);
-	}
-}
-
-@media (prefers-reduced-motion: reduce) {
-	*,
-	*::before,
-	*::after {
-		animation: none !important;
-		transition: none !important;
+		column-gap: var(--wk-sp-6);
 	}
 }

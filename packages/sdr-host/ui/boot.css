@@ -1,12 +1,12 @@
-/* First-boot setup: the status page's screen, reading out the current stage
-   on a three-step track. Every line of the screen is drawn in every state, so
+/* First-boot setup, on the kit (brand/ui.css) and app.css: the status
+   page's screen, reading out the current stage on a three-step track. Every line of the screen is drawn in every state, so
    moving from stage to stage changes words and bars, never the layout. */
 .boot-panel {
 	max-width: 720px;
 }
 .boot-screen {
-	gap: var(--space-6);
-	padding: var(--space-5) var(--space-5) 20px;
+	gap: var(--pi-gap-group);
+	padding: var(--wk-sp-9) var(--wk-sp-9) var(--wk-sp-8);
 }
 
 /* Steps: a bar per stage, filled when done, half-lit while running. The state
@@ -15,34 +15,34 @@
 .steps {
 	display: grid;
 	grid-template-columns: repeat(3, minmax(0, 1fr));
-	gap: var(--space-3);
+	gap: var(--wk-sp-6);
 }
 .step {
 	display: grid;
 	align-content: start;
-	gap: var(--space-1);
-	padding-top: var(--space-3);
+	gap: var(--wk-sp-2);
+	padding-top: var(--wk-sp-6);
 	position: relative;
-	color: var(--paper-3);
+	color: var(--wk-text-3);
 }
 .step::before {
 	content: "";
 	position: absolute;
 	inset: 0 0 auto;
 	height: 4px;
-	border-radius: 2px;
-	background: var(--rule);
+	border-radius: var(--wk-r-1);
+	background: var(--wk-track);
 }
 .step__name {
-	font: 700 1.0625rem/1.2 var(--display);
-	letter-spacing: 0.06em;
+	font: 700 var(--wk-fs-xl) / 1.2 var(--wk-font-head);
+	letter-spacing: 0.1em;
 	text-transform: uppercase;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 .step__word {
-	font-size: 0.875rem;
+	font-size: var(--wk-fs-lg);
 	line-height: 1.4;
 	white-space: nowrap;
 }
@@ -51,10 +51,10 @@
 	opacity: 0;
 }
 .step[data-state="ok"] {
-	color: var(--paper);
+	color: var(--wk-text);
 }
 .step[data-state="ok"]::before {
-	background: var(--phosphor);
+	background: var(--wk-accent);
 }
 /* Done: a drawn check after the name, so the name itself never moves. */
 .step[data-state="ok"]:not([aria-current]) .step__name::after {
@@ -63,100 +63,85 @@
 	width: 5px;
 	height: 10px;
 	margin-left: 10px;
-	border-right: 2px solid var(--phosphor);
-	border-bottom: 2px solid var(--phosphor);
+	border-right: 2px solid var(--wk-accent);
+	border-bottom: 2px solid var(--wk-accent);
 	transform: translateY(-2px) rotate(45deg);
 }
 .step[aria-current] {
-	color: var(--paper);
+	color: var(--wk-text);
 }
 .step[aria-current] .step__word {
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 .step[aria-current]::before {
 	background: linear-gradient(
 		to right,
-		var(--phosphor) 0 50%,
-		var(--rule) 50% 100%
+		var(--wk-accent) 0 50%,
+		var(--wk-track) 50% 100%
 	);
-	animation: running 1.6s ease-in-out infinite alternate;
-}
-@keyframes running {
-	to {
-		opacity: 0.45;
-	}
+	animation: wk-pulse 1.6s var(--wk-ease-inout) infinite;
 }
 .step[data-state="warn"],
 .step[data-state="warn"] .step__word {
-	color: var(--warn);
+	color: var(--wk-amber);
 }
 .step[data-state="warn"]::before {
-	background: var(--warn);
+	background: var(--wk-amber);
 }
 .step[data-state="fault"],
 .step[data-state="fault"] .step__word {
-	color: var(--fault);
+	color: var(--wk-danger);
 }
 .step[data-state="fault"]::before {
-	background: var(--fault);
+	background: var(--wk-danger);
 }
 
 /* The elapsed figure over its caption: the figure ticks, nothing beside it
    moves. */
 .boot-clock {
 	display: grid;
-	gap: 2px;
+	gap: var(--wk-sp-1);
 	white-space: nowrap;
 }
 .boot-clock__value {
-	font-size: 1.25rem;
+	font-size: var(--wk-fs-2xl);
 	line-height: 1.3;
-	color: var(--paper);
+	color: var(--wk-text);
 }
 .boot-clock__label {
-	font-size: 0.875rem;
+	font-size: var(--wk-fs-lg);
 	line-height: 1.4;
-	color: var(--paper-2);
+	color: var(--wk-text-2);
 }
 
 /* Under the screen, one slot holds the advice or the way on, never both. */
 .boot-after {
 	display: grid;
-	min-height: 44px;
-	margin-top: var(--space-5);
+	min-height: var(--wk-h-touch);
+	margin-top: var(--wk-sp-9);
 }
 .boot-after > * {
 	grid-area: 1 / 1;
 	align-self: start;
 }
 .boot-note {
-	font-size: 0.9375rem;
-	color: var(--paper-2);
+	font-size: var(--wk-fs-xl);
+	color: var(--wk-text-2);
 	text-wrap: balance;
 }
-.boot-open a {
-	display: inline-flex;
-	align-items: center;
-	min-height: 44px;
-	padding: 0 18px;
-	border-radius: 8px;
-	background: var(--phosphor);
-	color: var(--ink);
-	font: 700 1rem/1 var(--display);
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
+/* The way on is the kit's primary button, at touch height. */
+.boot-open .wk-btn {
+	height: var(--wk-h-touch);
+	padding: 0 var(--wk-sp-8);
 	text-decoration: none;
-}
-.boot-open a:hover {
-	background: #a3f3d9;
 }
 
 @media (max-width: 559px) {
 	.boot-screen {
-		padding: 20px var(--space-4);
-		gap: var(--space-5);
+		padding: var(--wk-sp-8) var(--wk-sp-7);
+		gap: var(--wk-sp-9);
 	}
 	.step__name {
-		font-size: 0.9375rem;
+		font-size: var(--wk-fs-lg);
 	}
 }

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-wk-theme="dark">
 	<head>
 		<meta charset="utf-8" />
 		<meta
@@ -23,6 +23,7 @@
 			type="font/woff2"
 			crossorigin
 		/>
+		<link rel="stylesheet" href="brand/ui.css" />
 		<link rel="stylesheet" href="app.css" />
 		<link rel="icon" href="brand/favicon.svg" type="image/svg+xml" />
 		<script type="module" src="app.js"></script>
@@ -41,7 +42,13 @@
 					<span class="nameplate__page">Receiver</span>
 				</h1>
 				<p class="nameplate__host" id="host-name">This Pi</p>
-				<p class="link" id="link" data-state="connecting" role="status">
+				<p
+					class="link wk-label"
+					data-strong
+					id="link"
+					data-state="connecting"
+					role="status"
+				>
 					<span class="link__text" id="link-text">Connecting</span
 					><span class="lamp" aria-hidden="true"></span>
 				</p>
@@ -77,7 +84,7 @@
 						aria-labelledby="scope-title"
 						aria-describedby="marker-readout"
 					>
-						<figcaption class="visually-hidden" id="scope-title">
+						<figcaption class="wk-sr" id="scope-title">
 							Sample flow, CPU, memory, SoC temperature and under-voltage over
 							the last five minutes. Use the arrow keys to read values.
 						</figcaption>
@@ -177,7 +184,9 @@
 
 				<div class="side">
 					<section class="group" aria-labelledby="stream-heading">
-						<h2 class="legend" id="stream-heading">IQ stream</h2>
+						<h2 class="legend wk-label" data-strong id="stream-heading">
+							IQ stream
+						</h2>
 						<div class="endpoint">
 							<code class="endpoint__url" id="endpoint">—</code>
 							<button class="endpoint__copy" id="endpoint-copy" type="button">
@@ -267,7 +276,9 @@
 					</section>
 
 					<section class="group" aria-labelledby="host-heading">
-						<h2 class="legend" id="host-heading">This Pi</h2>
+						<h2 class="legend wk-label" data-strong id="host-heading">
+							This Pi
+						</h2>
 						<dl class="rows">
 							<div class="row" id="row-power" data-state="unknown">
 								<dt>Power</dt>
@@ -328,7 +339,9 @@
 				</div>
 
 				<section class="diagnostics" aria-labelledby="diagnostics-heading">
-					<h2 class="legend" id="diagnostics-heading">Diagnostics</h2>
+					<h2 class="legend wk-label" data-strong id="diagnostics-heading">
+						Diagnostics
+					</h2>
 					<div class="diagnostics__groups" id="diagnostics"></div>
 				</section>
 			</main>
