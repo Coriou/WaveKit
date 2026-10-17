@@ -76,8 +76,12 @@ export function installAccessHooks(
 			: pair
 				? policy.validatePairingRequest(original)
 				: policy.evaluate(original)
-		for (const [name, value] of Object.entries(admission.headers))
+		// WG9 1.2: a shutdown 503 must not tell the browser to cache a preflight.
+		for (const [name, value] of Object.entries(admission.headers)) {
+			if (controller.admissionStopped && name === "Access-Control-Max-Age")
+				continue
 			reply.header(name, value)
+		}
 		if (controller.admissionStopped || admission.kind === "deny")
 			reply.serializer(value => JSON.stringify(value))
 		if (controller.admissionStopped)
