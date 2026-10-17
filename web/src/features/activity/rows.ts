@@ -99,14 +99,15 @@ export function fieldText(f: DecodeField): string {
 		: `${v} ${f.unit}`
 }
 
-/** A reading in the row: measurements as "452 kn", bare numbers with their label ("Slot 1"). */
-function readingText(f: DecodeField): string {
+/** A reading in the row: measurements as "452 kn", bare numbers with their label ("Slot 1"), flags by name. */
+function readingText(f: DecodeField): string | null {
+	if (typeof f.value === "boolean") return f.value ? f.label : null
 	return !f.unit && typeof f.value === "number"
 		? `${f.label} ${fieldText(f)}`
 		: fieldText(f)
 }
 
-function protocolText(s: ActivitySummary): string | null {
+export function protocolText(s: ActivitySummary): string | null {
 	if (s.protocol && s.protocol !== "analog")
 		return s.protocol.toUpperCase().replace(/_/g, " ")
 	return KIND_TEXT[s.kind] ?? null
@@ -165,8 +166,9 @@ export function rowView(s: ActivitySummary): RowView {
 		sub.push(`${formatMHz(s.frequencyHz)} MHz`)
 	const readings = s.fields
 		.filter(f => !used.has(f.key) && !MESSAGE_KEYS.has(f.key))
-		.slice(0, 4)
 		.map(readingText)
+		.filter((r): r is string => r !== null)
+		.slice(0, 4)
 	return {
 		icon: CATEGORY_ICON[s.category],
 		title: s.title ?? s.entityKey ?? protocolText(s) ?? "Event",

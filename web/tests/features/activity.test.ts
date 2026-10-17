@@ -264,3 +264,20 @@ describe("activity list window", () => {
 		expect(w.end - w.start).toBeLessThan(30)
 	})
 })
+
+describe("activity row flags", () => {
+	it("names true flags and drops false ones from the readings", () => {
+		const v = rowView(
+			at("2026-10-17T12:00:00.000Z", {
+				protocol: "p25p1",
+				category: "voice",
+				title: "TG 1201",
+				fields: [
+					{ key: "encrypted", label: "Encrypted", value: true },
+					{ key: "emergency", label: "Emergency", value: false },
+				],
+			}),
+		)
+		expect(v.readings).toBe("Encrypted")
+	})
+})

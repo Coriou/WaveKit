@@ -1,0 +1,363 @@
+/* Decoded message card and JSON viewer (Decode and Json boards): layout glue over the ui.css recipes (wk-tile,
+   wk-tag, wk-btn, wk-scroll). Keys recede, numbers carry the accent; amber and red stay state colours. */
+@layer wk-app {
+	.wkd-card {
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 16px;
+		border-radius: var(--wk-r-4);
+		background: var(--wk-glass-panel);
+		border: 1px solid var(--wk-line-14);
+		color: var(--wk-text);
+		font-size: var(--wk-fs-lg);
+	}
+	.wkd-card[data-flat] {
+		padding: 4px 0;
+		background: transparent;
+		border: 0;
+	}
+	.wkd-grow {
+		flex: 1;
+	}
+	.wkd-head {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		min-width: 0;
+	}
+	.wkd-tile {
+		color: var(--wk-accent);
+	}
+	.wkd-tile-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: currentColor;
+	}
+	.wkd-proto {
+		font-size: var(--wk-fs-lg);
+		font-weight: 700;
+		color: var(--wk-text-2);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+	.wkd-time {
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.wkd-who {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+	.wkd-title {
+		font-weight: 700;
+		font-size: var(--wk-fs-xl);
+		line-height: 1.15;
+		overflow-wrap: anywhere;
+	}
+	.wkd-title[data-large] {
+		font-family: var(--wk-font-head);
+		font-size: 28px;
+	}
+	.wkd-sub {
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-3);
+		overflow-wrap: anywhere;
+	}
+	.wkd-text {
+		margin: 0;
+		padding: 10px 12px;
+		border-radius: var(--wk-r-3);
+		background: var(--wk-well-glass);
+		font-size: var(--wk-fs-lg);
+		line-height: 1.5;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+	.wkd-text[data-mono] {
+		font-family: var(--wk-font-mono);
+	}
+	.wkd-note {
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-3);
+		font-style: italic;
+	}
+	/* hairlines drawn by each cell (right and bottom, clipped at the edge), so a short last row leaves no grey block */
+	.wkd-fields {
+		margin: 0;
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+		border-radius: var(--wk-r-3);
+		overflow: hidden;
+		background: var(--wk-glass-strong);
+	}
+	.wkd-field {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		padding: 8px 10px;
+		box-shadow:
+			1px 0 0 var(--wk-line-08),
+			0 1px 0 var(--wk-line-08);
+	}
+	.wkd-field dt {
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkd-field dd {
+		margin: 0;
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkd-field dd[data-state="low"] {
+		color: var(--wk-amber);
+	}
+
+	/* position preview: the station in the middle, the message on its bearing */
+	.wkd-pos {
+		position: relative;
+		height: 96px;
+		border-radius: var(--wk-r-3);
+		overflow: hidden;
+		background-color: var(--wk-plot-bg);
+		background-image:
+			linear-gradient(rgba(var(--wk-line-rgb), 0.07) 1px, transparent 1px),
+			linear-gradient(
+				90deg,
+				rgba(var(--wk-line-rgb), 0.07) 1px,
+				transparent 1px
+			);
+		background-size: 24px 24px;
+		background-position: center;
+	}
+	.wkd-pos-home,
+	.wkd-pos-dot {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		border-radius: 50%;
+	}
+	.wkd-pos-home {
+		width: 8px;
+		height: 8px;
+		margin: -5px 0 0 -5px;
+		border: 1px solid var(--wk-text-3);
+	}
+	.wkd-pos-dot {
+		width: 10px;
+		height: 10px;
+		margin: -5px 0 0 -5px;
+		background: var(--wk-accent);
+		box-shadow: 0 0 0 5px rgba(var(--wk-accent-rgb), 0.18);
+	}
+	.wkd-pos-line {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		width: 80px;
+		height: 80px;
+		margin: -40px 0 0 -40px;
+		overflow: visible;
+	}
+	.wkd-pos-line line {
+		stroke: var(--wk-text-4);
+		stroke-width: 1;
+		stroke-dasharray: 2 3;
+	}
+	.wkd-pos-text {
+		position: absolute;
+		left: 10px;
+		bottom: 8px;
+		display: flex;
+		flex-direction: column;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-2);
+		font-variant-numeric: tabular-nums;
+		white-space: pre;
+	}
+	.wkd-pos-from {
+		color: var(--wk-text-3);
+	}
+	.wkd-pos-open {
+		position: absolute;
+		right: 6px;
+		bottom: 4px;
+		height: 24px;
+		padding: 0 6px;
+		border: 0;
+		border-radius: var(--wk-r-2);
+		background: transparent;
+		color: var(--wk-accent);
+		font: inherit;
+		font-size: var(--wk-fs-xs);
+		font-weight: 700;
+		cursor: pointer;
+	}
+	.wkd-pos-open:hover {
+		background: var(--wk-sel);
+	}
+	.wkd-pos-open:focus-visible {
+		outline: 2px solid var(--wk-focus);
+		outline-offset: 1px;
+	}
+
+	.wkd-foot {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		margin: 0 -6px -6px;
+	}
+	.wkd-card[data-flat] .wkd-foot {
+		margin: 0 -6px;
+	}
+	.wkd-freq,
+	.wkd-json-toggle {
+		padding: 0 8px;
+		color: var(--wk-text-3);
+		font-weight: 400;
+		font-variant-numeric: tabular-nums;
+	}
+	.wkd-json-toggle[aria-expanded="true"] {
+		background: var(--wk-fill);
+	}
+
+	/* JSON viewer */
+	.wkd-json {
+		box-sizing: border-box;
+		width: 100%;
+		min-width: 0;
+		border-radius: var(--wk-r-3);
+		background: var(--wk-well);
+		border: 1px solid var(--wk-line-08);
+		overflow: hidden;
+	}
+	.wkd-json-bar {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		height: var(--wk-h-lg);
+		padding: 0 6px 0 12px;
+		border-bottom: 1px solid var(--wk-line-08);
+	}
+	.wkd-json-title {
+		font-size: var(--wk-fs-xs);
+		font-weight: 700;
+		color: var(--wk-text-2);
+	}
+	.wkd-json-meta {
+		margin-left: 6px;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-4);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.wkd-json-btn {
+		padding: 0 8px;
+		gap: 4px;
+		font-size: var(--wk-fs-xs);
+		font-weight: 400;
+	}
+	.wkd-json-btn > svg,
+	.wkd-copy > svg {
+		width: 13px;
+		height: 13px;
+	}
+	.wkd-json-btn[aria-pressed="false"]:not(:hover),
+	.wkd-json-btn:not([aria-pressed]):not(:hover) {
+		color: var(--wk-text-3);
+	}
+	.wkd-json-btn[aria-pressed="true"] {
+		background: var(--wk-sel);
+		color: var(--wk-accent);
+	}
+	.wkd-copy {
+		padding: 0 9px;
+		gap: 4px;
+		font-size: var(--wk-fs-xs);
+		background: var(--wk-fill);
+		color: var(--wk-text);
+	}
+	.wkd-copy[data-state="done"] {
+		background: rgba(var(--wk-accent-rgb), 0.16);
+		color: var(--wk-accent);
+	}
+	.wkd-json-body {
+		overflow: auto;
+		padding: 8px 0;
+	}
+	.wkd-json-body:focus-visible {
+		outline: 2px solid var(--wk-focus);
+		outline-offset: -2px;
+	}
+	.wkd-json-code {
+		display: block;
+		min-width: max-content;
+		font-family: var(--wk-font-mono);
+		font-size: var(--wk-fs-sm);
+		line-height: 1.6;
+		font-variant-numeric: tabular-nums;
+	}
+	.wkd-json-code[data-wrap] {
+		min-width: 0;
+	}
+	.wkd-json-line {
+		display: flex;
+		padding-right: 12px;
+	}
+	.wkd-json-n {
+		width: 34px;
+		flex: none;
+		text-align: right;
+		padding-right: 12px;
+		color: var(--wk-track);
+		user-select: none;
+	}
+	.wkd-json-text {
+		flex: 1;
+		min-width: 0;
+		white-space: pre;
+	}
+	.wkd-json-code[data-wrap] .wkd-json-text {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+	.wkd-json-text [data-k="key"] {
+		color: var(--wk-text-3);
+	}
+	.wkd-json-text [data-k="str"] {
+		color: var(--wk-text-soft);
+	}
+	.wkd-json-text [data-k="num"] {
+		color: var(--wk-accent);
+	}
+	.wkd-json-text [data-k="lit"] {
+		color: var(--wk-text-4);
+		font-style: italic;
+	}
+	.wkd-json-text [data-k="punc"] {
+		color: var(--wk-text-4);
+	}
+	.wkd-json-more {
+		padding: 4px 12px 0 46px;
+		font-family: var(--wk-font-ui);
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+	}
+}

@@ -64,3 +64,8 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `tuner:command-sent` then `tuner:state-changed`; a new sample rate bumps the spectrum epoch (the
   synthetic frames keep their 2.4 MS/s span). `WAVEKIT_MOCK_RELAY_CLIENT=1` starts with an SDR++
   client holding the tuner (`TUNER_CONTROL_EXTERNAL` until the panel takes control back).
+- Activity records: `GET /api/activity/:eventId` returns the message's full decoded JSON as
+  `decodedData` (`MockMessage.data`), so the message card can humanise what the core's fields leave
+  out (rtl_433 extras, APRS weather, an unknown `Generic-Remote` model). Entity keys follow the
+  core's formats (`talkgroup:`, `capcode:`, `callsign:`, `sensor:<model>-<id>`, `reg:`, `node:`,
+  `icao:`, `mmsi:`), and AFR1234 and F4ABC-9 sit where the Map's fleets put them.

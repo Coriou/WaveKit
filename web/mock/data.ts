@@ -15,6 +15,7 @@ import type {
 	DiscoveryMetadata,
 	DisplayGroup,
 	Identity,
+	JsonValue,
 	LiveAudioConfig,
 	PlanProvenance,
 	ResolvedBand,
@@ -1188,7 +1189,7 @@ export interface MockMessage {
 		unit?: string
 	}[]
 	position?: { lat: number; lon: number; altM?: number }
-	data: Record<string, string | number | boolean | string[] | null>
+	data: { readonly [key: string]: JsonValue }
 }
 
 export const MOCK_MESSAGES: readonly MockMessage[] = [
@@ -1199,7 +1200,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "call_end",
 		protocol: "dmr",
 		category: "voice",
-		entityKey: "dmr:tg:2081",
+		entityKey: "talkgroup:2081",
 		title: "TG 2081 · radio 2081045",
 		fields: [
 			{ key: "talkgroup", label: "Talkgroup", value: "2081" },
@@ -1224,7 +1225,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "call_end",
 		protocol: "dmr",
 		category: "voice",
-		entityKey: "dmr:tg:9",
+		entityKey: "talkgroup:9",
 		title: "TG 9 · radio 2081045",
 		fields: [
 			{ key: "talkgroup", label: "Talkgroup", value: "9" },
@@ -1249,7 +1250,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "call_end",
 		protocol: "p25p1",
 		category: "voice",
-		entityKey: "p25:tg:1201",
+		entityKey: "talkgroup:1201",
 		title: "TG 1201 · radio 4410022",
 		fields: [
 			{ key: "talkgroup", label: "Talkgroup", value: "1201" },
@@ -1319,7 +1320,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "message",
 		protocol: "pocsag",
 		category: "paging",
-		entityKey: "pocsag:1234567",
+		entityKey: "capcode:1234567",
 		title: "Capcode 1234567 · alpha",
 		fields: [
 			{ key: "address", label: "Capcode", value: "1234567" },
@@ -1344,7 +1345,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "message",
 		protocol: "pocsag",
 		category: "paging",
-		entityKey: "pocsag:1234560",
+		entityKey: "capcode:1234560",
 		title: "Capcode 1234560 · numeric",
 		fields: [
 			{ key: "address", label: "Capcode", value: "1234560" },
@@ -1365,7 +1366,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "aprs",
 		protocol: "aprs",
 		category: "aprs",
-		entityKey: "aprs:F4ABC-9",
+		entityKey: "callsign:F4ABC-9",
 		title: "F4ABC-9 · mobile",
 		fields: [
 			{ key: "from", label: "From", value: "F4ABC-9" },
@@ -1376,14 +1377,14 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 			},
 			{ key: "speed", label: "Speed", value: 52, unit: "km/h" },
 		],
-		position: { lat: 48.709, lon: -3.968 },
+		position: { lat: 48.3904, lon: -4.4861 },
 		data: {
 			from: "F4ABC-9",
 			to: "APDW16",
 			via: ["WIDE1-1"],
 			comment: "On the way home. QRV 145.500",
-			lat: 48.709,
-			lon: -3.968,
+			lat: 48.3904,
+			lon: -4.4861,
 			speedKmh: 52,
 			course: 112,
 		},
@@ -1395,7 +1396,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "aprs",
 		protocol: "aprs",
 		category: "aprs",
-		entityKey: "aprs:F6XYZ-13",
+		entityKey: "callsign:F6XYZ-13",
 		title: "F6XYZ-13 · weather",
 		fields: [
 			{ key: "from", label: "From", value: "F6XYZ-13" },
@@ -1406,10 +1407,17 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 			from: "F6XYZ-13",
 			to: "APRS",
 			via: ["WIDE2-1"],
-			comment: "WX",
 			lat: 48.684,
 			lon: -3.92,
-			temperatureC: 14.2,
+			weather: {
+				temperature_C: 14.2,
+				humidity: 78,
+				wind_avg_km_h: 18,
+				wind_dir_deg: 270,
+				wind_max_km_h: 31,
+				pressure_hPa: 1012.4,
+				rain_1h_mm: 0.3,
+			},
 		},
 	},
 	{
@@ -1419,7 +1427,46 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "decode",
 		protocol: "ism",
 		category: "sensors",
-		entityKey: "rtl433:Acurite-Tower:12345",
+		entityKey: "sensor:Generic-Remote-4128",
+		title: "Generic-Remote 4128",
+		// a model the core has no renderer for: no fields, only the JSON
+		fields: [],
+		data: {
+			time: "2026-10-17 14:00:17",
+			model: "Generic-Remote",
+			id: 4128,
+			cmd: 5,
+			tristate: "ZZX0FX10ZZ",
+		},
+	},
+	{
+		decoderId: "multimon-ng",
+		decoderType: "multimon-ng",
+		hz: 160450000,
+		outputType: "message",
+		protocol: "pocsag",
+		category: "paging",
+		entityKey: "capcode:1234567",
+		title: "Capcode 1234567",
+		fields: [
+			{ key: "address", label: "Capcode", value: "1234567" },
+			{ key: "function", label: "Function", value: 1 },
+		],
+		data: {
+			protocol: "POCSAG1200",
+			address: 1234567,
+			function: 1,
+			messageType: "tone",
+		},
+	},
+	{
+		decoderId: "rtl433-433",
+		decoderType: "rtl433",
+		hz: 433920000,
+		outputType: "decode",
+		protocol: "ism",
+		category: "sensors",
+		entityKey: "sensor:Acurite-Tower-12345",
 		title: "Acurite-Tower · ID 12345",
 		fields: [
 			{ key: "temperature_C", label: "Temperature", value: 18.4, unit: "°C" },
@@ -1442,16 +1489,21 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "decode",
 		protocol: "ism",
 		category: "sensors",
-		entityKey: "rtl433:Toyota:a1b2c3d4",
+		entityKey: "sensor:Toyota-a1b2c3d4",
 		title: "Toyota TPMS · a1b2c3d4",
+		// the core presents only the readings it knows (temperature, humidity, battery); the card humanises the rest
 		fields: [
-			{ key: "pressure_kPa", label: "Pressure", value: 232.5, unit: "kPa" },
+			{ key: "temperature_C", label: "Temperature", value: 21, unit: "°C" },
 		],
 		data: {
+			time: "2026-10-17 14:01:40",
 			model: "Toyota",
 			type: "TPMS",
 			id: "a1b2c3d4",
+			status: 128,
 			pressure_kPa: 232.5,
+			temperature_C: 21,
+			mic: "CRC",
 		},
 	},
 	{
@@ -1461,7 +1513,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "decode",
 		protocol: "ism",
 		category: "sensors",
-		entityKey: "rtl433:LaCrosse-TX29IT:47",
+		entityKey: "sensor:LaCrosse-TX29IT-47",
 		title: "LaCrosse-TX29IT · ID 47",
 		fields: [
 			{ key: "temperature_C", label: "Temperature", value: 16.9, unit: "°C" },
@@ -1481,7 +1533,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "decode",
 		protocol: "ism",
 		category: "sensors",
-		entityKey: "rtl433:Wireless-MBus:41526375",
+		entityKey: "sensor:Wireless-MBus-41526375",
 		title: "Water meter · ID 41526375",
 		fields: [
 			{ key: "total_m3", label: "Total", value: 1284.6, unit: "m³" },
@@ -1501,7 +1553,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "acars",
 		protocol: "acars",
 		category: "aviation-data",
-		entityKey: "tail:F-HBXA",
+		entityKey: "reg:F-HBXA",
 		title: "F-HBXA · XK4521 · H1",
 		fields: [
 			{ key: "tail", label: "Tail", value: "F-HBXA" },
@@ -1527,7 +1579,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "vdl2",
 		protocol: "vdl2",
 		category: "aviation-data",
-		entityKey: "tail:F-GZTB",
+		entityKey: "reg:F-GZTB",
 		title: "F-GZTB · XK8801 · CPDLC",
 		fields: [
 			{ key: "tail", label: "Tail", value: "F-GZTB" },
@@ -1548,7 +1600,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "meshtastic",
 		protocol: "meshtastic",
 		category: "mesh",
-		entityKey: "mesh:!a3f2c1",
+		entityKey: "node:!a3f2c1d4",
 		title: "Harbour relay → everyone",
 		fields: [
 			{
@@ -1561,7 +1613,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 			{ key: "snr", label: "SNR", value: 6.5, unit: "dB" },
 		],
 		data: {
-			from: "!a3f2c1",
+			from: "!a3f2c1d4",
 			to: "^all",
 			text: "Anyone on the coast tonight? Signal is great from the lighthouse.",
 			hopStart: 3,
@@ -1576,7 +1628,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		outputType: "aircraft",
 		protocol: "adsb",
 		category: "aircraft",
-		entityKey: "icao:39856A",
+		entityKey: "icao:3944EF",
 		title: "AFR1234 · A320",
 		fields: [
 			{ key: "callsign", label: "Callsign", value: "AFR1234" },
@@ -1585,7 +1637,7 @@ export const MOCK_MESSAGES: readonly MockMessage[] = [
 		],
 		position: { lat: 48.79, lon: -3.86, altM: 10973 },
 		data: {
-			icao: "39856A",
+			icao: "3944EF",
 			callsign: "AFR1234",
 			altitude: 36000,
 			speed: 452,

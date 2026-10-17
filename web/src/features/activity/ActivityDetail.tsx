@@ -1,11 +1,6 @@
-// One Activity event, pushed in over the list with Back: what it was, every decoded field, where and
-// when it was heard, earlier events from the same sender, and the stored JSON.
-import type {
-	ActivityRecord,
-	ActivitySummary,
-	DecodeField,
-} from "@wavekit/api-types"
-import { WaveKitIcon } from "@wavekit/brand/react"
+// One Activity event, pushed in over the list with Back: the decoded message card (every field, position, the stored
+// JSON), where and when it was heard, and earlier events from the same sender.
+import type { ActivityRecord, ActivitySummary } from "@wavekit/api-types"
 import { useEffect, useRef, useState } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -13,67 +8,12 @@ import { fetchActivityRecord, queryParams } from "../../data/activity-feed.ts"
 import { errorMessage } from "../../data/index.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Label } from "../../ui/Label.tsx"
-import { formatMHz, formatWidth } from "../format.ts"
+import { formatMHz } from "../format.ts"
+import { MessageCard } from "../messages/MessageCard.tsx"
 import { ActivityRow } from "./ActivityList.tsx"
-import { fieldText, rowView } from "./rows.ts"
+import { rowView } from "./rows.ts"
 
 const RELATED = 6
-
-/** Fields of the stored record (all of them, where the summary keeps only the first few). */
-export function recordFields(record: ActivityRecord): DecodeField[] {
-	switch (record.kind) {
-		case "decoder-reception":
-			return [...record.payload.fields]
-		case "analog-transmission": {
-			const p = record.payload
-			const out: DecodeField[] = [
-				{
-					key: "duration",
-					label: "Duration",
-					value: Math.round(p.durationMs / 100) / 10,
-					unit: "s",
-				},
-				{ key: "modulation", label: "Mode", value: p.modulation.toUpperCase() },
-				{ key: "bandwidth", label: "Width", value: formatWidth(p.bandwidthHz) },
-				{ key: "squelch", label: "Squelch", value: p.squelchMode },
-			]
-			if (p.peakChannelPowerDbfs !== null)
-				out.push({
-					key: "peak",
-					label: "Peak",
-					value: Math.round(p.peakChannelPowerDbfs * 10) / 10,
-					unit: "dBFS",
-				})
-			if (p.tone?.ctcssHz != null)
-				out.push({
-					key: "ctcss",
-					label: "CTCSS",
-					value: p.tone.ctcssHz,
-					unit: "Hz",
-				})
-			if (p.tone?.dcs)
-				out.push({
-					key: "dcs",
-					label: "DCS",
-					value: `${p.tone.dcs.code} ${p.tone.dcs.polarity}`,
-				})
-			if (p.tone?.dtmf)
-				out.push({ key: "dtmf", label: "DTMF", value: p.tone.dtmf })
-			out.push({ key: "closed", label: "Ended by", value: p.closeReason })
-			return out
-		}
-		case "ingestion-gap": {
-			const p = record.payload
-			return [
-				{ key: "dropped", label: "Not kept", value: p.dropped },
-				{ key: "reason", label: "Reason", value: p.reason },
-				{ key: "decoders", label: "Decoders", value: p.decoderIds.join(", ") },
-			]
-		}
-		default:
-			return []
-	}
-}
 
 function fullTime(iso: string): string {
 	const d = new Date(iso)
@@ -94,7 +34,7 @@ export interface ActivityDetailProps {
 }
 
 export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
-	const { data, activity, tuning } = useServices()
+	const { data, activity } = useServices()
 	const readOnly = useReadOnly()
 	const [record, setRecord] = useState<ActivityRecord | null>(null)
 	const [state, setState] = useState<"loading" | "ready" | "gone" | "error">(
@@ -169,15 +109,7 @@ export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 	}
 
 	const v = item ? rowView(item) : null
-	// The message is shown above the fields; do not repeat it in the grid.
-	const fields = (record ? recordFields(record) : (item?.fields ?? [])).filter(
-		f => v?.message == null || f.value !== v.message,
-	)
 	const hz = item?.frequencyHz ?? null
-	const decoded =
-		record?.kind === "decoder-reception"
-			? record.payload.decodedData
-			: record?.payload
 	const provenance =
 		record?.kind === "decoder-reception" ? record.payload.provenance : null
 
@@ -195,39 +127,13 @@ export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 				</Button>
 			</div>
 			<div className="wka-detail-body wk-scroll">
-				<header className="wka-detail-head">
-					<span className="wk-tile" aria-hidden="true">
-						{v?.icon ? (
-							<WaveKitIcon name={v.icon} size={16} />
-						) : (
-							<span className="wka-tile-dot" />
-						)}
-					</span>
-					<div className="wka-main">
-						<h3 className="wka-detail-title">{v?.title ?? "Event"}</h3>
-						{v?.subtitle && <span className="wka-sub">{v.subtitle}</span>}
-						{item && (
-							<time className="wka-sub" dateTime={item.producedAt}>
-								{fullTime(item.producedAt)}
-							</time>
-						)}
-					</div>
-				</header>
-
-				{v?.message != null && <p className="wka-detail-msg">{v.message}</p>}
-
-				<div className="wka-detail-actions">
-					{hz !== null && (
-						<Button
-							variant="primary"
-							size="sm"
-							disabled={readOnly}
-							onClick={() => void tuning.tune(hz)}
-						>
-							Tune {formatMHz(hz)}
-						</Button>
-					)}
-					{entityKey !== null && v && (
+				{item ? (
+					<MessageCard item={item} record={record} flat readOnly={readOnly} />
+				) : (
+					<h3 className="wka-detail-title">Event</h3>
+				)}
+				{entityKey !== null && v && (
+					<div className="wka-detail-actions">
 						<Button
 							variant="tonal"
 							size="sm"
@@ -235,8 +141,8 @@ export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 						>
 							Only this
 						</Button>
-					)}
-				</div>
+					</div>
+				)}
 
 				{state === "gone" && (
 					<p className="wkf-warn">
@@ -247,19 +153,18 @@ export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 					<p className="wkf-warn">Could not load the event: {error}</p>
 				)}
 
-				{fields.length > 0 && (
-					<dl className="wka-fields">
-						{fields.map(f => (
-							<div key={f.key} className="wka-field">
-								<dt>{f.label}</dt>
-								<dd>{fieldText(f)}</dd>
-							</div>
-						))}
-					</dl>
-				)}
-
 				<Label>Heard</Label>
 				<dl className="wka-fields">
+					{item && (
+						<div className="wka-field">
+							<dt>When</dt>
+							<dd>
+								<time dateTime={item.producedAt}>
+									{fullTime(item.producedAt)}
+								</time>
+							</dd>
+						</div>
+					)}
 					{hz !== null && (
 						<div className="wka-field">
 							<dt>Frequency</dt>
@@ -289,17 +194,6 @@ export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 								</dd>
 							</div>
 						)}
-					{item?.position && (
-						<div className="wka-field">
-							<dt>Position</dt>
-							<dd>
-								{item.position.lat.toFixed(4)}, {item.position.lon.toFixed(4)}
-								{item.position.altM !== undefined
-									? ` · ${Math.round(item.position.altM)} m`
-									: ""}
-							</dd>
-						</div>
-					)}
 				</dl>
 
 				{related.length > 0 && (
@@ -319,13 +213,6 @@ export function ActivityDetail({ item, eventId, onBack }: ActivityDetailProps) {
 							))}
 						</div>
 					</>
-				)}
-
-				{decoded !== undefined && (
-					<details className="wka-raw">
-						<summary>Raw event</summary>
-						<pre>{JSON.stringify(decoded, null, 2)}</pre>
-					</details>
 				)}
 			</div>
 		</section>

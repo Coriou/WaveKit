@@ -20,6 +20,7 @@ import { shellStore } from "../../shell/store.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { isTypingTarget } from "../palette/keys.ts"
 import { focusSetting } from "../settings/registry.ts"
+import { mapFocus, takeMapFocus } from "./focus.ts"
 import { MapEngine, type EngineView } from "./engine.ts"
 import { fmtLat, fmtLon, kmPerPx, scaleBar, toLocator } from "./geo.ts"
 import { legend } from "./glyphs.ts"
@@ -251,6 +252,19 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			setEngine(null)
 		}
 	}, [data, ui])
+
+	// "Open on map" from a message card: select and follow, now or when the request arrives
+	useEffect(() => {
+		if (!engine) return
+		const apply = () => {
+			const f = takeMapFocus()
+			if (!f) return
+			ui.select(f.id)
+			ui.setFollow(true)
+		}
+		apply()
+		return mapFocus.subscribe(apply)
+	}, [engine, ui])
 
 	// a theme change: the attributes are on <html> before listeners run, so the computed tokens are current here
 	const themeSeen = useRef(theme)

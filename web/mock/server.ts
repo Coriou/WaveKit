@@ -25,6 +25,7 @@ import type {
 	DecoderInfo,
 	DiscoveryMetadata,
 	ExtendedSourceStatus,
+	JsonValue,
 	LiveAudioConfig,
 	LiveAudioLevel,
 	LiveAudioStatus,
@@ -297,7 +298,7 @@ function queryFromWire(raw: unknown): ActivityQuery {
 }
 
 /** The stored record behind a mock summary (GET /api/activity/:eventId). */
-function recordOf(item: ActivitySummary): ActivityRecord {
+function recordOf(item: ActivitySummary, decoded?: JsonValue): ActivityRecord {
 	const base = {
 		version: 1 as const,
 		eventId: item.eventId,
@@ -356,8 +357,9 @@ function recordOf(item: ActivitySummary): ActivityRecord {
 			},
 		}
 	}
-	const decodedData: Record<string, string | number | boolean | null> = {}
-	for (const f of item.fields) decodedData[f.key] = f.value
+	const fromFields: Record<string, string | number | boolean | null> = {}
+	for (const f of item.fields) fromFields[f.key] = f.value
+	const decodedData: JsonValue = decoded ?? fromFields
 	const payload = {
 		version: 1 as const,
 		eventId: item.eventId,
@@ -613,6 +615,8 @@ export async function buildMockServer(
 
 	// --- Activity ---
 
+	/** The decoded JSON behind each message summary, for GET /api/activity/:eventId. */
+	const decodedById = new Map<string, JsonValue>()
 	const summaryFromMessage = (m: MockMessage, at: number): ActivitySummary => {
 		seq += 1
 		const iso = new Date(at).toISOString()
@@ -633,6 +637,11 @@ export async function buildMockServer(
 			fields: m.fields,
 		}
 		if (m.position) summary.position = m.position
+		decodedById.set(summary.eventId, m.data)
+		if (decodedById.size > 2500) {
+			const first = decodedById.keys().next().value
+			if (first !== undefined) decodedById.delete(first)
+		}
 		return summary
 	}
 
@@ -1717,7 +1726,7 @@ export async function buildMockServer(
 					code: "NOT_FOUND",
 					message: "Activity event not found",
 				})
-			return recordOf(item)
+			return recordOf(item, decodedById.get(item.eventId))
 		},
 	)
 
