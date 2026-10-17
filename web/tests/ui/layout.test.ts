@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import {
 	DEFAULT_GEOMETRY,
+	DOCK_COMPACT,
 	G,
 	shellLayout,
 	type ShellGeometry,
@@ -12,6 +13,8 @@ const at = (
 	H = 900,
 	extra: Partial<ShellGeometry> = {},
 ): ShellGeometry => ({ ...DEFAULT_GEOMETRY, W, H, dockW: 460, ...extra })
+// with the default islands the bottom row binds: Listen and a compact dock (Spectrum, Map, Messages, the drawers)
+const BOTTOM = G + 340 + G + DOCK_COMPACT + G
 
 describe("shellLayout", () => {
 	it("1440 x 900, nothing open: Receiver on the top gutter, dock centred, card above Listen", () => {
@@ -33,7 +36,7 @@ describe("shellLayout", () => {
 			width: 420,
 			full: true,
 			resizable: true,
-			maxW: 1440 - G - (G + 440 + G + 300 + G),
+			maxW: 1440 - G - BOTTOM,
 		})
 		expect(L.rxRight).toBe(G + 420 + G)
 		expect(L.dockX + 460).toBeLessThanOrEqual(1440 - 420 - G - G)
@@ -49,7 +52,7 @@ describe("shellLayout", () => {
 
 	it("a wanted width beyond the room left is capped where the Receiver would reach the Tuner", () => {
 		const L = shellLayout(at(1280), "activity", null, { drawerW: 640 })
-		const drMax = 1280 - G - (G + 440 + G + 300 + G)
+		const drMax = 1280 - G - BOTTOM
 		expect(L.drawer).toMatchObject({ width: drMax, maxW: drMax })
 	})
 
@@ -66,9 +69,9 @@ describe("shellLayout", () => {
 		expect(narrow.drawer).toMatchObject({ width: null, resizable: false })
 	})
 
-	it("the drawer gives up width before the Receiver reaches the Tuner", () => {
+	it("the drawer gives up width before the dock or the Receiver runs out of room", () => {
 		const L = shellLayout(at(1280), "settings")
-		const drMax = 1280 - G - (G + 440 + G + 300 + G)
+		const drMax = 1280 - G - BOTTOM
 		expect(L.drawer?.width).toBe(drMax)
 	})
 
@@ -107,9 +110,9 @@ describe("shellLayout", () => {
 			expect(L.card).toBeNull()
 		})
 
-		it("attaches from about 1164 px with the default islands", () => {
-			expect(shellLayout(at(1164), "scanner", want).pane).not.toBeNull()
-			const narrow = shellLayout(at(1163), "scanner", want)
+		it("attaches from about 1188 px with the default islands", () => {
+			expect(shellLayout(at(1188), "scanner", want).pane).not.toBeNull()
+			const narrow = shellLayout(at(1187), "scanner", want)
 			expect(narrow.pane).toBeNull()
 			expect(narrow.pushed).toBe(true)
 		})

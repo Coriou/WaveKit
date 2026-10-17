@@ -9,8 +9,8 @@ export const CARD_W = 320
 /** From this width a drawer floats over the plot's right side at full height. */
 export const FULL_MIN_VW = 1100
 /** Dock width with the active label showing, and without it, for the collision checks. */
-export const DOCK_WIDE = 460
-export const DOCK_COMPACT = 380
+export const DOCK_WIDE = 496
+export const DOCK_COMPACT = 424
 export const DR_MIN = 360
 export const DR_MAX = 640
 /** Below this width the dock is hidden (board media rule). */
@@ -112,6 +112,8 @@ export interface ShellLayout {
 	readonly freeW: number
 	/** Bottom of the top row (where between-rows drawers start). */
 	readonly topRow: number
+	/** Height of the bottom row (Listen and the dock), gutters included. */
+	readonly bottomRow: number
 	/** The drawer's attached pane, or null (not wanted, or no room for it). */
 	readonly pane: PaneRect | null
 	/** The pane is wanted but has no room: the drawer is full width and shows the pane's content as a screen. */
@@ -327,7 +329,7 @@ export function shellLayout(
 	const bottomRow =
 		G + (dockHidden ? g.listen.h : Math.max(g.listen.h, DOCK_H)) + G
 
-	// the pane attaches only beside a full-height drawer (the Receiver then clears the Tuner: about 1164 px with the
+	// the pane attaches only beside a full-height drawer (the Receiver then clears the Tuner: about 1188 px with the
 	// default islands, more while the Tuner shows a scan row); otherwise a push-in pane takes the full-width drawer
 	const paneWanted = drawerId !== null && paneRequest?.want === true
 	const pane: PaneRect | null =
@@ -377,7 +379,7 @@ export function shellLayout(
 	}
 
 	const compact = W < 1180 || (full && freeW - G - minX < DOCK_WIDE)
-	const dockW = g.dockW || (compact ? 400 : 500)
+	const dockW = g.dockW || (compact ? 448 : 536)
 	let dockX = Math.max((W - dockW) / 2, minX)
 	if (full && dockX + dockW > freeW - G)
 		dockX = Math.max(minX, freeW - G - dockW)
@@ -428,6 +430,7 @@ export function shellLayout(
 		anchors,
 		freeW,
 		topRow,
+		bottomRow,
 		pane,
 		pushed,
 	}

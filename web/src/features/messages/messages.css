@@ -360,4 +360,90 @@
 		font-size: var(--wk-fs-xs);
 		color: var(--wk-text-3);
 	}
+	/* Messages view (Messages board, gallery variant): full-bleed under the islands, up to three card columns */
+	.wkg {
+		position: absolute;
+		inset: 0;
+		z-index: 1;
+		box-sizing: border-box;
+		display: flex;
+		flex-direction: column;
+		background: var(--wk-bg);
+	}
+	.wkg-scroll {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		padding: 12px 24px 16px;
+	}
+	.wkg-head {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		min-width: 0;
+		margin-bottom: 14px;
+	}
+	.wkg-head .wk-h2 {
+		margin: 0;
+	}
+	.wkg-live {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-accent);
+		white-space: nowrap;
+	}
+	.wkg-live[data-paused] {
+		color: var(--wk-amber);
+	}
+	.wkg-search {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-2);
+	}
+	.wkg-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-bottom: 14px;
+	}
+	.wkg-chips .wk-chip > svg {
+		flex: none;
+	}
+	.wkg-newpill {
+		position: sticky;
+		top: 8px;
+		left: auto;
+		display: block;
+		margin: 0 auto 8px;
+		transform: none;
+	}
+	.wkg-grid {
+		display: grid;
+		gap: 14px;
+		align-items: start;
+	}
+	.wkg-col {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		min-width: 0;
+	}
+	.wkg-end {
+		height: 1px;
+	}
+	.wkg .wka-note {
+		margin: 0 0 14px;
+	}
+	@media (max-width: 760px) {
+		.wkg-scroll {
+			padding-left: 16px;
+		}
+	}
 }

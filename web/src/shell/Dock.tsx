@@ -6,6 +6,7 @@ import type { DrawerId, ShellState, ViewId } from "./store.ts"
 const VIEW_NAV: ReadonlyArray<{ id: ViewId; label: string; icon: IconName }> = [
 	{ id: "spectrum", label: "Spectrum", icon: "spectrum" },
 	{ id: "map", label: "Map", icon: "map" },
+	{ id: "messages", label: "Messages", icon: "messages" },
 ]
 const DRAWER_NAV: ReadonlyArray<{
 	id: DrawerId

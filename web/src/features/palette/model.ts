@@ -336,16 +336,26 @@ const VIEWS: readonly {
 	glyph: GlyphName
 	key?: string
 	kbd?: readonly string[]
+	/** What the row says it does, when "Shows the <label>" does not read well. */
+	does?: string
 }[] = [
 	{ id: "spectrum", label: "Spectrum", glyph: "waterfall", key: "S" },
 	{ id: "activity", label: "Activity", glyph: "activity", key: "A" },
 	{ id: "map", label: "Map", glyph: "go", key: "M" },
+	{
+		id: "messages",
+		label: "Messages",
+		glyph: "messages",
+		key: "D",
+		does: "Shows decoded messages as cards, keeps any drawer open",
+	},
 	{ id: "scanner", label: "Scanner", glyph: "scan", key: "C" },
 	{ id: "recordings", label: "Recordings", glyph: "rec", key: "R" },
 	{ id: "settings", label: "Settings", glyph: "settings", kbd: ["⌘", ","] },
 ]
 
-const isView = (id: string): id is ViewId => id === "spectrum" || id === "map"
+const isView = (id: string): id is ViewId =>
+	id === "spectrum" || id === "map" || id === "messages"
 
 // ---- the builder
 
@@ -798,9 +808,11 @@ export class PaletteModel {
 			action: isView(v.id)
 				? { kind: "view", id: v.id }
 				: { kind: "drawer", id: v.id as DrawerId },
-			does: view
-				? `Shows the ${v.label}, keeps any drawer open`
-				: `Opens ${v.label}`,
+			does:
+				v.does ??
+				(view
+					? `Shows the ${v.label}, keeps any drawer open`
+					: `Opens ${v.label}`),
 			keys: [v.label.toLowerCase(), "open", "show"],
 		}
 	}

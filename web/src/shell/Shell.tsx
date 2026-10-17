@@ -57,7 +57,7 @@ import {
 	type ShellStore,
 } from "./store.ts"
 
-// Drawers, the Map view and the palette are code-split: the first paint is the plot and the islands.
+// Drawers, the Map and Messages views and the palette are code-split: the first paint is the plot and the islands.
 const DRAWER_CONTENT: Readonly<
 	Record<DrawerId, ComponentType<DrawerContentProps>>
 > = {
@@ -73,6 +73,9 @@ const DRAWER_TITLE: Readonly<Record<DrawerId, string>> = {
 	settings: "Settings",
 }
 const MapView = lazy(() => import("./drawers/MapView.tsx"))
+const MessagesGallery = lazy(
+	() => import("../features/messages/MessagesGallery.tsx"),
+)
 const Palette = lazy(() => import("./drawers/Palette.tsx"))
 
 export interface ShellProps {
@@ -396,6 +399,13 @@ export function Shell({
 				<Suspense fallback={null}>
 					<MapView
 						insets={{ top: L.topRow, right: L.rxRight, phone: L.dockHidden }}
+					/>
+				</Suspense>
+			)}
+			{state.view === "messages" && (
+				<Suspense fallback={null}>
+					<MessagesGallery
+						insets={{ top: L.topRow, right: L.rxRight, bottom: L.bottomRow }}
 					/>
 				</Suspense>
 			)}

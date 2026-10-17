@@ -1,6 +1,6 @@
 // Single-key shortcuts (DESIGN.md "Shortcuts shown on rows"), only when no text field has the focus: `[` `]` step,
 // T tune, M mode, Q squelch, B saved, S save, L listen, / search Activity, ? the shortcut list, and G then a letter
-// for the views (S Spectrum, A Activity, M Map, C Scanner, R Recordings). I (Identify) belongs to the tuned card.
+// for the views (S Spectrum, A Activity, M Map, D Messages, C Scanner, R Recordings). I (Identify) belongs to the tuned card.
 import type { DrawerId, ViewId } from "../../shell/store.ts"
 import type { ScopeId } from "./model.ts"
 
@@ -20,6 +20,7 @@ export const GO_WINDOW_MS = 1500
 const GO: Readonly<Record<string, Shortcut>> = {
 	s: { kind: "view", id: "spectrum" },
 	m: { kind: "view", id: "map" },
+	d: { kind: "view", id: "messages" },
 	a: { kind: "drawer", id: "activity" },
 	c: { kind: "drawer", id: "scanner" },
 	r: { kind: "drawer", id: "recordings" },

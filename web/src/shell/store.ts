@@ -12,7 +12,7 @@ export const DRAWERS = [
 ] as const
 export type DrawerId = (typeof DRAWERS)[number]
 
-export const VIEWS = ["spectrum", "map"] as const
+export const VIEWS = ["spectrum", "map", "messages"] as const
 export type ViewId = (typeof VIEWS)[number]
 
 export interface ShellState {
@@ -98,7 +98,7 @@ export class ShellStore {
 		this.#set({ drawer: null })
 	}
 
-	/** Spectrum and Map change only the view; an open drawer stays. */
+	/** Spectrum, Map and Messages change only the view; an open drawer stays. */
 	setView(view: ViewId): void {
 		this.#set({ view, palette: false })
 	}
