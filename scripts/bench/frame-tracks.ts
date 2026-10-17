@@ -39,10 +39,12 @@ const FS = 2_048_000
 const FLAGS = { burst: false, iqImage: false, edge: false }
 
 function association(i: number, worst: boolean): TrackAssociation {
+	const trackId = worst
+		? "t".repeat(FRAME_TRACK_ID_MAX_CHARS)
+		: `mguu1x2s-${(i + 1).toString(36)}` // the frame id: no `rtl-`
 	return {
-		trackId: worst
-			? "t".repeat(FRAME_TRACK_ID_MAX_CHARS)
-			: `mguu1x2s-${(i + 1).toString(36)}`, // the frame id: no `rtl-`
+		trackId,
+		trackerId: trackId,
 		snrDb: worst ? -999.5 : 12.26 + i,
 		peakDbfs: worst ? -999.5 : -40.74 + i / 3,
 		blocks: worst ? FRAME_TRACK_BLOCKS_MAX : 3 + i,

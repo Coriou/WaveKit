@@ -54,12 +54,16 @@ void confidenceCompleteness
 
 /** The tracker's own state of the open track a segment was associated with, in that block. */
 export interface TrackAssociation {
+	/** The frame chain id: the first tracker id of the chain (stable across max-duration rollovers). */
 	trackId: string
+	/** The chain's current tracker id (the scanner's key); equals `trackId` before any rollover. */
+	trackerId: string
 	/** The TrackSnapshot `snrDb` (mean band over mean floor, dB). */
 	snrDb: number
 	peakDbfs: number
-	/** On-blocks so far. */
+	/** On-blocks of the chain so far. */
 	blocks: number
+	/** The chain's first sample. */
 	startSample: number
 	lastSample: number
 	maxBlockSnrDb: number
@@ -125,13 +129,16 @@ export function blockTrackOf(
 	sampleRateHz: number,
 	minSurfaceBlocks: number,
 ): BlockTrack {
-	if (a === null || !isFrameTrackId(a.trackId)) return { startHz, endHz, flags }
+	if (a === null || !isFrameTrackId(a.trackId) || !isFrameTrackId(a.trackerId))
+		return { startHz, endHz, flags }
 	const out: BlockTrack = {
 		startHz,
 		endHz,
 		flags: { ...flags, spur: a.spur },
 		trackId: a.trackId,
 	}
+	// Host-internal (the identity lookup's key), stripped from every frame by the service.
+	if (a.trackerId !== a.trackId) out.trackerId = a.trackerId
 	const snr = roundHalfDb(a.snrDb)
 	if (snr !== null) out.snrDb = snr
 	const peak = roundHalfDb(a.peakDbfs)
@@ -156,6 +163,7 @@ const WG11_KEYS = [
 	"blocks",
 	"ageMs",
 	"surfaced",
+	"trackerId",
 ] as const
 
 /**
@@ -177,6 +185,7 @@ export function sanitizeBlockTrack(t: BlockTrack): void {
 		if (flags) delete flags.spur
 		return
 	}
+	if ("trackerId" in o && !isFrameTrackId(o.trackerId)) delete o.trackerId
 	if (flags && "spur" in flags && typeof flags.spur !== "boolean")
 		delete flags.spur
 	if ("snrDb" in o && !isHalfDb(o.snrDb)) delete o.snrDb
@@ -200,6 +209,7 @@ interface LooseTrack {
 	blocks?: unknown
 	ageMs?: unknown
 	surfaced?: unknown
+	trackerId?: unknown
 	scanner?: unknown
 }
 interface LooseFlags {

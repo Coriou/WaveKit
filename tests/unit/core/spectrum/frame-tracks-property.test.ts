@@ -28,6 +28,9 @@ interface OpenTrackView {
 	lastSample: number
 	maxBlockSnrDb: number
 	thresholdDb: number
+	bandLinSum: number
+	floorLinSum: number
+	chain: unknown
 	flags: TrackFlags
 }
 interface TrackerView {
@@ -43,7 +46,107 @@ const WG11_KEYS = [
 	"blocks",
 	"ageMs",
 	"surfaced",
+	"trackerId",
 ] as const
+
+/**
+ * Test-side model of the frame chains (req 5.1): a max-duration close followed by the open of
+ * its successor in the same block continues the chain. The members are the tracker's own
+ * track objects; the rollover block (counted by both neighbours) is subtracted once per link.
+ */
+class ChainModel {
+	private readonly seen = new Map<string, OpenTrackView>()
+	private readonly chainOf = new Map<
+		string,
+		{ members: OpenTrackView[]; overlaps: { band: number; floor: number }[] }
+	>()
+	rollovers = 0
+
+	after(events: PipelineEvent[], v: TrackerView): void {
+		for (const t of v.open) this.seen.set(t.id, t)
+		for (const [i, e] of events.entries()) {
+			const next = events[i + 1]
+			if (
+				e.kind !== "track-close" ||
+				e.endReason !== "max-duration" ||
+				next?.kind !== "track-open"
+			)
+				continue
+			const prev = this.chainOf.get(e.track.trackId) ?? {
+				members: [this.seen.get(e.track.trackId)!],
+				overlaps: [],
+			}
+			const succ = this.seen.get(next.track.trackId)!
+			expect(succ.blocks).toBe(1)
+			this.chainOf.set(next.track.trackId, {
+				members: [...prev.members, succ],
+				overlaps: [
+					...prev.overlaps,
+					{ band: succ.bandLinSum, floor: succ.floorLinSum },
+				],
+			})
+			this.rollovers++
+		}
+	}
+
+	/** The chain state of `t` as of now (a lone track is a chain of one). */
+	of(t: OpenTrackView) {
+		const c = this.chainOf.get(t.id) ?? { members: [t], overlaps: [] }
+		const root = c.members[0]!
+		const sum = (f: (m: OpenTrackView) => number) =>
+			c.members.reduce((n, m) => n + f(m), 0)
+		const blocks = sum(m => m.blocks) - c.overlaps.length
+		const band =
+			sum(m => m.bandLinSum) - c.overlaps.reduce((n, o) => n + o.band, 0)
+		const floor =
+			sum(m => m.floorLinSum) - c.overlaps.reduce((n, o) => n + o.floor, 0)
+		const k = Math.max(1, blocks)
+		return {
+			id: root.id,
+			startSample: root.startSample,
+			blocks,
+			snrDb:
+				10 *
+				Math.log10(
+					Math.max(band / k - floor / k, 1e-30) / Math.max(floor / k, 1e-30),
+				),
+			peakDbfs: Math.max(...c.members.map(m => m.peakDbfs)),
+			maxBlockSnrDb: Math.max(...c.members.map(m => m.maxBlockSnrDb)),
+			spur: c.members.some(m => m.flags.spur),
+			iqImage: c.members.some(m => m.flags.iqImage),
+		}
+	}
+}
+
+/** Tracker-level expected fields: the chain state of the segment's current track. */
+function expectedChainFields(
+	chains: ChainModel,
+	t: OpenTrackView,
+	fs: number,
+	minSurfaceBlocks: number,
+) {
+	const c = chains.of(t)
+	return {
+		flags: { spur: c.spur },
+		trackId: c.id,
+		trackerId: t.id === c.id ? undefined : t.id,
+		snrDb: roundHalfDb(c.snrDb) ?? undefined,
+		peakDbfs: roundHalfDb(c.peakDbfs) ?? undefined,
+		blocks: c.blocks,
+		ageMs: Math.round(((t.lastSample - c.startSample) / fs) * 1000),
+		surfaced: surfacedOf(
+			{
+				spur: c.spur,
+				iqImage: c.iqImage,
+				burst: t.flags.burst,
+				blocks: c.blocks,
+				maxBlockSnrDb: c.maxBlockSnrDb,
+				thresholdDb: t.thresholdDb,
+			},
+			minSurfaceBlocks,
+		),
+	}
+}
 
 /** The frame fields a segment must carry, from the tracker's state of its track in this block. */
 function expectedFields(
@@ -85,10 +188,11 @@ function expectUntracked(t: BlockTrack): void {
 
 function expectTracked(
 	t: BlockTrack,
-	want: ReturnType<typeof expectedFields>,
+	want: ReturnType<typeof expectedFields> & { trackerId?: string | undefined },
 ): void {
 	expect(t.flags.spur).toBe(want.flags.spur)
 	expect(t.trackId).toBe(want.trackId)
+	expect(t.trackerId).toBe(want.trackerId)
 	expect(t.snrDb).toBe(want.snrDb)
 	expect(t.peakDbfs).toBe(want.peakDbfs)
 	expect(t.blocks).toBe(want.blocks)
@@ -150,8 +254,11 @@ describe("frame tracks are the tracker's own association", () => {
 	it("tracker level: every segment's fields are its associated track's state in that block; others carry none", () => {
 		// Feature: web-gaps-11, Property 10: Track fields are the tracker's
 		// Validates: Requirements 5.1, 5.2, 5.3
+		// The fields are the tracker's chain state: a max-duration rollover continues the chain.
 		let associated = 0
 		let untracked = 0
+		let rollovers = 0
+		let continued = 0
 		fc.assert(
 			fc.property(
 				fc.array(blockArb, { minLength: 1, maxLength: 24 }),
@@ -175,6 +282,7 @@ describe("frame tracks are the tracker's own association", () => {
 						centreHz: 0,
 						tuningTrust: "commanded",
 					})
+					const chains = new ChainModel()
 					let previous: Segment[] = []
 					for (const [i, b] of blocks.entries()) {
 						const segs = segmentsOf(b.segs)
@@ -189,7 +297,7 @@ describe("frame tracks are the tracker's own association", () => {
 						const bursts = new Set(
 							segs.filter((_, k) => b.segs[k]?.burst === true),
 						)
-						tracker.block(segs, {
+						const events = tracker.block(segs, {
 							endSample: (i + 1) * BLOCK_SAMPLES,
 							powerDb: power,
 							floorDb: new Float32Array(TN).fill(-100),
@@ -202,6 +310,7 @@ describe("frame tracks are the tracker's own association", () => {
 						if (b.image && view(tracker).open.length > 0)
 							tracker.raiseFlag(new Set([view(tracker).open[0]!.id]), "iqImage")
 						const v = view(tracker)
+						chains.after(events, v)
 						const ids = new Set<string>()
 						for (const s of segs) {
 							const owners = v.open.filter(
@@ -224,13 +333,15 @@ describe("frame tracks are the tracker's own association", () => {
 								untracked++
 								continue
 							}
-							expect(a?.trackId).toBe(owner.id)
+							expect(a?.trackerId).toBe(owner.id)
+							expect(a?.trackId).toBe(chains.of(owner).id)
+							if (a?.trackId !== owner.id) continued++
 							expect(ids.has(owner.id)).toBe(false) // one segment per track per block
 							ids.add(owner.id)
 							associated++
 							expectTracked(
 								bt,
-								expectedFields(tracker, owner, false, TFS, minSurface),
+								expectedChainFields(chains, owner, TFS, minSurface),
 							)
 						}
 						// no look-ahead or stale carry: last block's segments have no association now
@@ -238,6 +349,7 @@ describe("frame tracks are the tracker's own association", () => {
 							expect(tracker.associationOf(s)).toBeNull()
 						previous = segs
 					}
+					rollovers += chains.rollovers
 				},
 			),
 			{ numRuns: 100, seed: 11_010 },
@@ -245,6 +357,8 @@ describe("frame tracks are the tracker's own association", () => {
 		// the generator reaches both sides
 		expect(associated).toBeGreaterThan(100)
 		expect(untracked).toBeGreaterThan(10)
+		expect(rollovers).toBeGreaterThan(10)
+		expect(continued).toBeGreaterThan(10)
 	}, 30_000) // ≈ 1 s idle; the margin is for a loaded machine
 })
 
@@ -270,6 +384,8 @@ function checkBlock(h: Harness, summary: BlockSummary): number {
 		tracked++
 		// the frame id is the tracker id without the pipeline's own `${sourceId}-` prefix
 		expect(owner?.id).toBe(`${h.config.sourceId}-${t.trackId}`)
+		// these scenarios are shorter than maxTrackMs: no chain, so the snapshot is the chain state
+		expect(owner?.chain).toBeNull()
 		expectTracked(
 			t,
 			expectedFields(

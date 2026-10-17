@@ -77,6 +77,21 @@ describe("WG11 frame-track fields across the worker (req 5.1, 5.5)", () => {
 		expect(s.bins).toEqual([-90, -80.5])
 	})
 
+	it("carries the host-internal trackerId of a rolled-over chain; drops a hostile or orphan one (MAJ3)", () => {
+		const rolled = { ...TRACKED, trackerId: "mguu1x2s-5" }
+		expect(roundTrip([rolled]).tracks).toEqual([rolled])
+		for (const bad of ["x".repeat(31), "", 5, null, 'a"b', ["a"]]) {
+			const t = roundTrip([{ ...TRACKED, trackerId: bad }]).tracks[0]!
+			expect("trackerId" in t).toBe(false)
+			expect(t.trackId).toBe(TRACKED.trackId)
+		}
+		// without a valid chain id the internal id goes with every other WG11 field
+		const orphan = roundTrip([
+			{ ...TRACKED, trackId: 12, trackerId: "mguu1x2s-5" },
+		]).tracks[0]!
+		expect(orphan).toEqual(UNTRACKED_AT(1, 2))
+	})
+
 	it("drops a hostile field, never the summary or the track", () => {
 		const hostile: [string, unknown][] = [
 			["snrDb", Number.NaN],

@@ -1493,15 +1493,22 @@ export class SpectrumService extends EventEmitter {
 		tracks: BlockTrack[],
 	): SpectrumFrameTrack[] {
 		const lookup = this.trackIdentity
-		if (lookup === null || !tracks.some(t => t.trackId !== undefined))
+		const internal = tracks.some(t => t.trackerId !== undefined)
+		if (
+			!internal &&
+			(lookup === null || !tracks.some(t => t.trackId !== undefined))
+		)
 			return tracks
-		return tracks.map(t => {
-			if (t.trackId === undefined) return t
+		return tracks.map(track => {
+			// `trackerId` is host-internal (the chain's current tracker id): never on a frame.
+			const { trackerId, ...t } = track
+			if (lookup === null || t.trackId === undefined) return t
 			let answer: unknown
 			try {
-				// The frame id is the tracker id without `${sourceId}-` (pipeline frameAssociation): the
-				// lookup gets the full tracker id of this frame's own source, never another source's.
-				answer = lookup(sourceId, `${sourceId}-${t.trackId}`)
+				// The frame id is the chain id without `${sourceId}-` (pipeline frameAssociation); the
+				// lookup gets the chain's current full tracker id on this frame's own source, never
+				// another source's.
+				answer = lookup(sourceId, `${sourceId}-${trackerId ?? t.trackId}`)
 			} catch (err: unknown) {
 				this.logTrackIdentity("Spectrum track identity lookup failed", err)
 				return t

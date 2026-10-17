@@ -34,6 +34,7 @@ function assoc(over: Partial<TrackAssociation> = {}): TrackAssociation {
 		iqImage: false,
 		burst: false,
 		...over,
+		trackerId: over.trackerId ?? over.trackId ?? "mguu1x2s-1",
 	}
 }
 

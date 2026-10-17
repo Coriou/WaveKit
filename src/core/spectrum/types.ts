@@ -149,6 +149,12 @@ export interface BlockTrack {
 	ageMs?: number
 	/** Display surfacing rule (req 5.1). */
 	surfaced?: boolean
+	/**
+	 * Host-internal, never on a frame: the chain's current tracker id without the source prefix,
+	 * set only after a max-duration rollover (then it differs from `trackId`, the chain id). The
+	 * spectrum service keys the scanner identity lookup on it and strips it from every frame.
+	 */
+	trackerId?: string
 }
 
 export interface PipelineStats {

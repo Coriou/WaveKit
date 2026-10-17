@@ -131,6 +131,7 @@ const WG11_TRACK_FIELDS = [
 	"blocks",
 	"ageMs",
 	"surfaced",
+	"trackerId",
 	"scanner",
 ] as const
 

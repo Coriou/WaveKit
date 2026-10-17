@@ -143,6 +143,28 @@ interface OpenTrack {
 	flags: TrackFlags
 	flagsChanged: boolean
 	justOpened: boolean
+	/**
+	 * WG11 req 5.1: the frame chain this track continues after a max-duration rollover (null: the
+	 * track starts its chain). Frame-only state: never in a TrackSnapshot or a tracker event.
+	 */
+	chain: ChainBase | null
+}
+
+/**
+ * The part of a frame chain before its current track (WG11 req 5.1): the chain's first tracker
+ * id and start, and the predecessors' totals without the rollover block (that block is counted
+ * by the current track, which re-opens on the same segment of the same block).
+ */
+interface ChainBase {
+	id: string
+	startSample: number
+	blocks: number
+	bandLinSum: number
+	floorLinSum: number
+	peakDbfs: number
+	maxBlockSnrDb: number
+	spur: boolean
+	iqImage: boolean
 }
 
 export class Tracker {
@@ -261,6 +283,7 @@ export class Tracker {
 				events.push(this.close(t, "max-duration", n))
 				const nt = this.openTrack(seg, b, n, blockSamples)
 				nt.justOpened = false
+				nt.chain = chainBaseOf(t, nt)
 				// the segment now belongs to the successor (same block, fresh id)
 				if (this.assoc.get(seg) === t) this.assoc.set(seg, nt)
 				events.push({ kind: "track-open", track: this.snapshot(nt, n) })
@@ -286,17 +309,19 @@ export class Tracker {
 	associationOf(s: Segment): TrackAssociation | null {
 		const t = this.assoc.get(s)
 		if (t === undefined || t.lastOnBlock !== this.blockNo) return null
+		const c = chainTotalsOf(t)
 		return {
-			trackId: t.id,
-			snrDb: trackSnrDb(t),
-			peakDbfs: t.peakDbfs,
-			blocks: t.blocks,
-			startSample: t.startSample,
+			trackId: c.id,
+			trackerId: t.id,
+			snrDb: snrDbOf(c.bandLinSum, c.floorLinSum, c.blocks),
+			peakDbfs: c.peakDbfs,
+			blocks: c.blocks,
+			startSample: c.startSample,
 			lastSample: t.lastSample,
-			maxBlockSnrDb: t.maxBlockSnrDb,
+			maxBlockSnrDb: c.maxBlockSnrDb,
 			thresholdDb: t.thresholdDb,
-			spur: t.flags.spur,
-			iqImage: t.flags.iqImage,
+			spur: c.spur,
+			iqImage: c.iqImage,
 			burst: t.flags.burst,
 		}
 	}
@@ -455,6 +480,7 @@ export class Tracker {
 			},
 			flagsChanged: false,
 			justOpened: true,
+			chain: null,
 		}
 		this.open.push(t)
 		this.extend(t, s, b, n)
@@ -617,13 +643,64 @@ export class Tracker {
 
 /** The snapshot's SNR: mean band power over mean floor power across the track's blocks, dB. */
 function trackSnrDb(t: OpenTrack): number {
-	const blocks = Math.max(1, t.blocks)
-	const bandMean = t.bandLinSum / blocks
-	const floorMean = t.floorLinSum / blocks
+	return snrDbOf(t.bandLinSum, t.floorLinSum, t.blocks)
+}
+
+function snrDbOf(bandLinSum: number, floorLinSum: number, n: number): number {
+	const blocks = Math.max(1, n)
+	const bandMean = bandLinSum / blocks
+	const floorMean = floorLinSum / blocks
 	return (
 		10 *
 		Math.log10(
 			Math.max(bandMean - floorMean, 1e-30) / Math.max(floorMean, 1e-30),
 		)
 	)
+}
+
+/**
+ * WG11 req 5.1: a track's frame chain totals (its own state on top of its chain base). SNR is
+ * the chain's mean band over mean floor and the peak and best block SNR its maxima, like the
+ * lifetime mean / max of a single track; spur and image are sticky across the chain.
+ */
+function chainTotalsOf(t: OpenTrack): ChainBase {
+	const c = t.chain
+	if (c === null)
+		return {
+			id: t.id,
+			startSample: t.startSample,
+			blocks: t.blocks,
+			bandLinSum: t.bandLinSum,
+			floorLinSum: t.floorLinSum,
+			peakDbfs: t.peakDbfs,
+			maxBlockSnrDb: t.maxBlockSnrDb,
+			spur: t.flags.spur,
+			iqImage: t.flags.iqImage,
+		}
+	return {
+		id: c.id,
+		startSample: c.startSample,
+		blocks: c.blocks + t.blocks,
+		bandLinSum: c.bandLinSum + t.bandLinSum,
+		floorLinSum: c.floorLinSum + t.floorLinSum,
+		peakDbfs: Math.max(c.peakDbfs, t.peakDbfs),
+		maxBlockSnrDb: Math.max(c.maxBlockSnrDb, t.maxBlockSnrDb),
+		spur: c.spur || t.flags.spur,
+		iqImage: c.iqImage || t.flags.iqImage,
+	}
+}
+
+/**
+ * The chain base of `next`, which re-opened at max-duration on the segment and block that also
+ * extended `prev`: prev's chain totals minus next's own (that one shared block), so the block
+ * is counted once.
+ */
+function chainBaseOf(prev: OpenTrack, next: OpenTrack): ChainBase {
+	const p = chainTotalsOf(prev)
+	return {
+		...p,
+		blocks: Math.max(0, p.blocks - next.blocks),
+		bandLinSum: Math.max(0, p.bandLinSum - next.bandLinSum),
+		floorLinSum: Math.max(0, p.floorLinSum - next.floorLinSum),
+	}
 }

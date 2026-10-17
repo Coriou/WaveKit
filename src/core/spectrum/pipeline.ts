@@ -1606,14 +1606,18 @@ export class SpectrumPipeline {
 	 * this pipeline's own `${sourceId}-` prefix (ids are `${sourceId}-${ms base36}-${seq base36}`,
 	 * trackIdPrefixes), cut by its known length, never by a search in the id. The rest is
 	 * `<8 base36>-<seq base36>` (8 chars until 2059), ≤ FRAME_TRACK_ID_MAX_CHARS = 30 while
-	 * seq < 36^21, in the frame id charset. The spectrum service rebuilds the full id as
-	 * `${frame.sourceId}-${trackId}` for the identity lookup.
+	 * seq < 36^21, in the frame id charset. The spectrum service rebuilds the chain's current full id as
+	 * `${frame.sourceId}-${trackerId ?? trackId}` for the identity lookup.
 	 */
 	private frameAssociation(s: Segment): TrackAssociation | null {
 		const a = this.tracker.associationOf(s)
 		if (a === null) return null
 		a.trackId = a.trackId.slice(this.cfg.sourceId.length + 1)
-		if (!this.warnedTrackId && !isFrameTrackId(a.trackId))
+		a.trackerId = a.trackerId.slice(this.cfg.sourceId.length + 1)
+		if (
+			!this.warnedTrackId &&
+			(!isFrameTrackId(a.trackId) || !isFrameTrackId(a.trackerId))
+		)
 			this.warnTrackIdBound()
 		return a
 	}
