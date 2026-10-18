@@ -56,6 +56,22 @@ impl PowerGate {
         }
     }
 
+    /// Hysteresis in dB. A non-finite or negative value is ignored. Open state and hang
+    /// history are kept.
+    pub fn set_hysteresis_db(&mut self, hysteresis_db: f64) {
+        if hysteresis_db.is_finite() && hysteresis_db >= 0.0 {
+            self.hysteresis_db = hysteresis_db;
+        }
+    }
+
+    /// Hang in milliseconds. A non-finite or negative value is ignored. Open state and
+    /// hang history are kept.
+    pub fn set_hang_ms(&mut self, hang_ms: f64) {
+        if hang_ms.is_finite() && hang_ms >= 0.0 {
+            self.hang_ms = hang_ms;
+        }
+    }
+
     /// Floor estimate in dBFS. Applied only while the gate is closed; `None` clears it.
     pub fn set_noise_floor_dbfs(&mut self, floor_dbfs: Option<f64>) {
         match floor_dbfs {
@@ -120,6 +136,30 @@ impl NoiseGate {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// Quieting threshold in dB. A non-finite value is ignored. Open state and hang history
+    /// are kept.
+    pub fn set_quieting_db(&mut self, quieting_db: f64) {
+        if quieting_db.is_finite() {
+            self.threshold_db = quieting_db;
+        }
+    }
+
+    /// Hysteresis in dB. A non-finite or negative value is ignored. Open state and hang
+    /// history are kept.
+    pub fn set_hysteresis_db(&mut self, hysteresis_db: f64) {
+        if hysteresis_db.is_finite() && hysteresis_db >= 0.0 {
+            self.hysteresis_db = hysteresis_db;
+        }
+    }
+
+    /// Hang in milliseconds. A non-finite or negative value is ignored. Open state and
+    /// hang history are kept.
+    pub fn set_hang_ms(&mut self, hang_ms: f64) {
+        if hang_ms.is_finite() && hang_ms >= 0.0 {
+            self.hang_ms = hang_ms;
+        }
     }
 
     pub fn push(&mut self, quieting_db: f64) -> bool {

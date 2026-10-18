@@ -6,8 +6,8 @@
 
 use crate::channel::ProcessOutcome;
 use crate::demod::{
-    block_power_dbfs, Complex32, DemodConfig, DemodConfigError, Demodulator, Modulation, NoiseGate,
-    NoiseMeter, PowerGate,
+    block_power_dbfs, channel_cutoff, Complex32, DemodConfig, DemodConfigError, Demodulator,
+    Modulation, NoiseGate, NoiseMeter, PowerGate,
 };
 use crate::design::{self, kaiser_lowpass};
 use crate::plan::{plan_chain, ChainPlan};
@@ -90,6 +90,12 @@ struct RetunePlan {
     bandwidth_hz: Option<f64>,
 }
 
+struct PendingSquelch {
+    opts: SquelchOpts,
+    /// `None` leaves the floor. `Some(None)` clears it. `Some(Some(dbfs))` sets it.
+    noise_floor_dbfs: Option<Option<f64>>,
+}
+
 /// Live demod channel. Public so the protocol tests can drive it without a socket.
 pub struct DemodChannel {
     id: String,
@@ -130,8 +136,8 @@ pub struct DemodChannel {
     fill: usize,
     block_at: u64,
     audio_emitted: u64,
-    pending_retune: Vec<RetunePlan>,
-    pending_squelch: Vec<SquelchOpts>,
+    pending_retune: Option<RetunePlan>,
+    pending_squelch: Option<PendingSquelch>,
     metric_at: Option<u64>,
     power_batch: Vec<Value>,
     quiet_batch: Vec<Value>,
@@ -156,7 +162,7 @@ impl DemodChannel {
         let config = demod_config(open.modulation, &open.audio)?;
         let demod = Demodulator::new(config.clone()).map_err(demod_err)?;
         let (stages, decim_taps, decim_delay) = stages_from_plan(&plan);
-        let taps = design_channel_fir(open.bandwidth_hz, None);
+        let taps = design_channel_fir(open.bandwidth_hz);
         let (gate, gate_open) = build_gate(&open.squelch);
         let g = gcd(DEMOD_OUTPUT_RATE_HZ, input_rate);
         let offset = open.center_hz - input_center;
@@ -189,7 +195,7 @@ impl DemodChannel {
             fir_q: Vec::new(),
             config,
             demod,
-            noise: NoiseMeter::new(DEMOD_OUTPUT_RATE_HZ as f64),
+            noise: NoiseMeter::with_bandwidth(DEMOD_OUTPUT_RATE_HZ as f64, open.bandwidth_hz),
             squelch: open.squelch.clone(),
             gate,
             gate_open,
@@ -198,8 +204,8 @@ impl DemodChannel {
             fill: 0,
             block_at: 0,
             audio_emitted: 0,
-            pending_retune: Vec::new(),
-            pending_squelch: Vec::new(),
+            pending_retune: None,
+            pending_squelch: None,
             metric_at: None,
             power_batch: Vec::new(),
             quiet_batch: Vec::new(),
@@ -219,16 +225,22 @@ impl DemodChannel {
     }
 
     /// Validate and remember a retune. It is applied at the start of the next [`Self::process`].
-    /// A rejected retune does not change DSP state or the pending queue.
+    /// A rejected retune does not change DSP state or the pending retune. Repeated calls
+    /// before input fold onto that one pending retune.
     pub fn queue_retune(&mut self, req: &RetuneReq) -> Result<(), String> {
         let plan = self.plan_retune(req)?;
-        self.pending_retune.push(plan);
+        self.pending_retune = Some(plan);
         Ok(())
     }
 
     /// Validate and remember a squelch change. It is applied at the next 480-sample block.
+    /// Repeated calls before that block fold onto one pending squelch.
     pub fn queue_squelch(&mut self, req: &SquelchReq) -> Result<(), String> {
-        let base = self.pending_squelch.last().unwrap_or(&self.squelch);
+        let base = self
+            .pending_squelch
+            .as_ref()
+            .map(|pending| pending.opts.clone())
+            .unwrap_or_else(|| self.squelch.clone());
         let merged = SquelchOpts {
             mode: req.mode,
             threshold_dbfs: req.threshold_dbfs.or(base.threshold_dbfs),
@@ -237,7 +249,17 @@ impl DemodChannel {
             quieting_db: req.quieting_db.unwrap_or(base.quieting_db),
         };
         validate_squelch(&merged)?;
-        self.pending_squelch.push(merged);
+        let noise_floor_dbfs = match req.noise_floor_dbfs {
+            Some(update) => Some(update),
+            None => self
+                .pending_squelch
+                .as_ref()
+                .and_then(|pending| pending.noise_floor_dbfs),
+        };
+        self.pending_squelch = Some(PendingSquelch {
+            opts: merged,
+            noise_floor_dbfs,
+        });
         Ok(())
     }
 
@@ -254,7 +276,7 @@ impl DemodChannel {
         self.held_q.clear();
         self.fir.reset();
         self.demod.reset();
-        self.noise = NoiseMeter::new(DEMOD_OUTPUT_RATE_HZ as f64);
+        self.noise = NoiseMeter::with_bandwidth(DEMOD_OUTPUT_RATE_HZ as f64, self.bandwidth_hz);
         let (gate, open) = build_gate(&self.squelch);
         self.gate = gate;
         self.gate_open = open;
@@ -305,39 +327,55 @@ impl DemodChannel {
                 return Err("centerHz must be finite".into());
             }
         }
+        let base = self
+            .pending_retune
+            .as_ref()
+            .map(|pending| &pending.config)
+            .unwrap_or(&self.config);
         let mut audio = AudioOpts {
-            gain: self.config.gain,
-            deviation_hz: self.config.deviation_hz,
-            de_emphasis_us: self.config.de_emphasis_us,
-            low_pass_hz: self.config.low_pass_hz,
-            high_pass_hz: self.config.high_pass_hz,
+            gain: base.gain,
+            deviation_hz: base.deviation_hz,
+            de_emphasis_us: base.de_emphasis_us,
+            low_pass_hz: base.low_pass_hz,
+            high_pass_hz: base.high_pass_hz,
         };
+        let modulation = req.modulation.unwrap_or(base.modulation);
         if let Some(update) = &req.audio {
             apply_audio(&mut audio, update);
         }
-        let modulation = req.modulation.unwrap_or(self.config.modulation);
         let config = demod_config(modulation, &audio)?;
-        let offset_hz = req.center_hz.map(|center| center - self.input_center);
+        let offset_hz = match req.center_hz {
+            Some(center) => Some(center - self.input_center),
+            None => self
+                .pending_retune
+                .as_ref()
+                .and_then(|pending| pending.offset_hz),
+        };
+        let bandwidth_hz = match req.bandwidth_hz {
+            Some(bw) => Some(bw),
+            None => self
+                .pending_retune
+                .as_ref()
+                .and_then(|pending| pending.bandwidth_hz),
+        };
         Ok(RetunePlan {
             config,
             offset_hz,
-            bandwidth_hz: req.bandwidth_hz,
+            bandwidth_hz,
         })
     }
 
     fn apply_pending_retunes(&mut self, events: &mut Vec<Value>) {
-        if self.pending_retune.is_empty() {
+        let Some(plan) = self.pending_retune.take() else {
             return;
-        }
+        };
         let at = self.audio_emitted;
-        for plan in std::mem::take(&mut self.pending_retune) {
-            if self.apply_plan(plan) {
-                events.push(json!({
-                    "type": "retuned",
-                    "id": self.id,
-                    "atOutputSample": at,
-                }));
-            }
+        if self.apply_plan(plan) {
+            events.push(json!({
+                "type": "retuned",
+                "id": self.id,
+                "atOutputSample": at,
+            }));
         }
     }
 
@@ -356,32 +394,61 @@ impl DemodChannel {
         }
         if let Some(bw) = plan.bandwidth_hz {
             if bw != self.bandwidth_hz {
-                let taps = design_channel_fir(bw, Some(self.fir.taps.len()));
+                let taps = design_channel_fir(bw);
                 self.fir.set_taps(taps);
                 self.bandwidth_hz = bw;
+                self.noise = NoiseMeter::with_bandwidth(DEMOD_OUTPUT_RATE_HZ as f64, bw);
             }
         }
         true
     }
 
     fn apply_pending_squelch(&mut self, events: &mut Vec<Value>) {
-        let Some(opts) = self.pending_squelch.pop() else {
+        let Some(pending) = self.pending_squelch.take() else {
             return;
         };
-        // The latest command wins; anything queued before it is superseded.
-        self.pending_squelch.clear();
         let was = self.gate_open;
-        let (gate, open) = build_gate(&opts);
-        self.squelch = opts;
-        self.gate = gate;
-        self.gate_open = open;
-        if open != was {
+        if pending.opts.mode != self.squelch.mode {
+            let (gate, open) = build_gate(&pending.opts);
+            self.gate = gate;
+            self.gate_open = open;
+            if let (Some(floor), Gate::Power(gate)) = (pending.noise_floor_dbfs, &mut self.gate) {
+                gate.set_noise_floor_dbfs(floor);
+            }
+        } else {
+            self.retune_gate(&pending);
+        }
+        self.squelch = pending.opts;
+        if self.gate_open != was {
             events.push(json!({
                 "type": "gate",
                 "id": self.id,
-                "open": open,
+                "open": self.gate_open,
                 "atOutputSample": self.audio_emitted,
             }));
+        }
+    }
+
+    /// Parameter change inside the current mode. The gate object, its open flag and its hang
+    /// clock stay; only a mode change rebuilds them.
+    fn retune_gate(&mut self, pending: &PendingSquelch) {
+        match &mut self.gate {
+            Gate::Off => {}
+            Gate::Power(gate) => {
+                if let Some(floor) = pending.noise_floor_dbfs {
+                    gate.set_noise_floor_dbfs(floor);
+                }
+                gate.set_threshold_dbfs(pending.opts.threshold_dbfs);
+                gate.set_hysteresis_db(pending.opts.hysteresis_db);
+                gate.set_hang_ms(pending.opts.hang_ms);
+                self.gate_open = gate.is_open();
+            }
+            Gate::Noise(gate) => {
+                gate.set_quieting_db(pending.opts.quieting_db);
+                gate.set_hysteresis_db(pending.opts.hysteresis_db);
+                gate.set_hang_ms(pending.opts.hang_ms);
+                self.gate_open = gate.is_open();
+            }
         }
     }
 
@@ -670,16 +737,21 @@ fn demod_err(err: DemodConfigError) -> String {
     }
 }
 
-/// Channel lowpass at 48 kHz. Transition is `0.25 · bandwidth`, clamped so the −6 dB cutoff
-/// stays below Nyquist (bandwidths above about 38.4 kHz cannot fit that transition).
-/// `taps: Some(n)` redesigns at the same odd length so the delay line is unchanged.
-fn design_channel_fir(bandwidth_hz: f64, taps: Option<usize>) -> Vec<f32> {
-    let (cutoff, transition) = channel_edges(bandwidth_hz);
-    let n = match taps {
-        Some(n) => n.max(1) | 1,
-        None => design::kaiser_len(design::DESIGN_ATTENUATION_DB, transition).max(5) | 1,
-    };
-    kaiser_lowpass(cutoff, n, 1.0)
+/// Odd length of every channel FIR: the Kaiser estimate at [`DEMOD_MIN_BANDWIDTH_HZ`].
+/// A wider bandwidth is designed at this same length so a retune never resizes the delay line.
+fn channel_fir_len() -> usize {
+    let (_, transition) = channel_edges(DEMOD_MIN_BANDWIDTH_HZ);
+    design::kaiser_len(design::DESIGN_ATTENUATION_DB, transition).max(5) | 1
+}
+
+/// Channel lowpass at 48 kHz, [`channel_fir_len`] taps at every bandwidth.
+///
+/// The −6 dB cutoff is the noise meter's channel reference, so noise-only quieting is
+/// measured against the same bandwidth the filter passes. Tap length stays fixed so a
+/// retune keeps the delay line.
+fn design_channel_fir(bandwidth_hz: f64) -> Vec<f32> {
+    let cutoff = channel_cutoff(DEMOD_OUTPUT_RATE_HZ as f64, bandwidth_hz).clamp(1.0e-4, 0.49);
+    kaiser_lowpass(cutoff, channel_fir_len(), 1.0)
 }
 
 fn channel_edges(bandwidth_hz: f64) -> (f64, f64) {

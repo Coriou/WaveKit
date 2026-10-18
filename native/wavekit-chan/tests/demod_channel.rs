@@ -1,5 +1,7 @@
 //! Demod-channel properties and goldens. The kernel's own properties stay in `demod_properties.rs`.
 
+use std::f64::consts::TAU;
+
 use proptest::prelude::*;
 use wavekit_chan::demod::Modulation;
 use wavekit_chan::demod_channel::DemodChannel;
@@ -71,6 +73,7 @@ fn apply_live_op(ch: &mut DemodChannel, op: u8) {
                 hysteresis_db: None,
                 hang_ms: None,
                 quieting_db: None,
+                noise_floor_dbfs: None,
             })
             .unwrap(),
         4 => ch
@@ -81,6 +84,7 @@ fn apply_live_op(ch: &mut DemodChannel, op: u8) {
                 hysteresis_db: Some(2.0),
                 hang_ms: Some(20.0),
                 quieting_db: None,
+                noise_floor_dbfs: None,
             })
             .unwrap(),
         _ => ch
@@ -357,6 +361,7 @@ fn rejected_retune_and_squelch_leave_the_audio_unchanged() {
         hysteresis_db: Some(-1.0),
         hang_ms: None,
         quieting_db: None,
+        noise_floor_dbfs: None,
     });
     assert!(bad_hang.is_err(), "{bad_hang:?}");
     let n = 700usize;
@@ -485,4 +490,511 @@ fn decimated_sample_count_matches_floor_of_the_rate_ratio() {
         "{samples} vs {expect}"
     );
     assert_eq!(out.len(), samples as usize * 4);
+}
+
+fn squelch_req(
+    mode: SquelchMode,
+    threshold_dbfs: Option<f64>,
+    hysteresis_db: Option<f64>,
+    hang_ms: Option<f64>,
+    quieting_db: Option<f64>,
+    noise_floor_dbfs: Option<Option<f64>>,
+) -> SquelchReq {
+    SquelchReq {
+        id: "d".into(),
+        mode,
+        threshold_dbfs,
+        hysteresis_db,
+        hang_ms,
+        quieting_db,
+        noise_floor_dbfs,
+    }
+}
+
+fn retune_audio_bw(gain: Option<f32>, bandwidth_hz: Option<f64>) -> RetuneReq {
+    RetuneReq {
+        id: "d".into(),
+        center_hz: None,
+        bandwidth_hz,
+        modulation: None,
+        audio: gain.map(|gain| AudioUpdate {
+            gain: Some(gain),
+            deviation_hz: None,
+            de_emphasis_us: None,
+            low_pass_hz: None,
+            high_pass_hz: None,
+        }),
+    }
+}
+
+fn nfm_iq(n: usize, deviation_hz: f64, tone_hz: f64) -> (Vec<f32>, Vec<f32>) {
+    let mut i = vec![0.0f32; n];
+    let mut q = vec![0.0f32; n];
+    let mut phase = 0.0f64;
+    for k in 0..n {
+        let audio = (TAU * tone_hz * k as f64 / 48_000.0).sin();
+        phase += TAU * (deviation_hz * audio) / 48_000.0;
+        i[k] = phase.cos() as f32;
+        q[k] = phase.sin() as f32;
+    }
+    (i, q)
+}
+
+fn tone_iq(n: usize, freq_hz: f64, amp: f32) -> (Vec<f32>, Vec<f32>) {
+    let mut i = vec![0.0f32; n];
+    let mut q = vec![0.0f32; n];
+    for k in 0..n {
+        let w = TAU * freq_hz * k as f64 / 48_000.0;
+        i[k] = (w.cos() as f32) * amp;
+        q[k] = (w.sin() as f32) * amp;
+    }
+    (i, q)
+}
+
+fn constant_iq(n: usize, amp: f32) -> (Vec<f32>, Vec<f32>) {
+    (vec![amp; n], vec![0.0; n])
+}
+
+fn amp_for_dbfs(db: f64) -> f32 {
+    10.0f64.powf(db / 20.0) as f32
+}
+
+fn pcm_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
+}
+
+fn rms(samples: &[f32]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let energy: f64 = samples
+        .iter()
+        .map(|sample| {
+            let y = f64::from(*sample);
+            y * y
+        })
+        .sum();
+    (energy / samples.len() as f64).sqrt()
+}
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn unit(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        ((self.0 >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+    }
+
+    fn fill_noise(&mut self, i: &mut [f32], q: &mut [f32]) {
+        for (re, im) in i.iter_mut().zip(q.iter_mut()) {
+            let u1 = self.unit().clamp(1e-12, 1.0);
+            let u2 = self.unit();
+            let mag = (-2.0 * u1.ln()).sqrt() * 0.08;
+            let ang = TAU * u2;
+            *re = (mag * ang.cos()) as f32;
+            *im = (mag * ang.sin()) as f32;
+        }
+    }
+}
+
+struct GateRun {
+    open_blocks: usize,
+    final_open: bool,
+    quieting: Vec<f64>,
+}
+
+fn feed_blocks(
+    ch: &mut DemodChannel,
+    n: usize,
+    mut fill: impl FnMut(&mut [f32], &mut [f32]),
+    open0: bool,
+) -> GateRun {
+    let mut open = open0;
+    let mut open_blocks = 0usize;
+    let mut quieting = Vec::new();
+    let mut i = vec![0.0f32; 480];
+    let mut q = vec![0.0f32; 480];
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    for _ in 0..n {
+        fill(&mut i, &mut q);
+        events.clear();
+        out.clear();
+        ch.process(&i, &q, &mut out, &mut events);
+        for event in &events {
+            if event["type"] == "gate" {
+                open = event["open"].as_bool().expect("gate open");
+            }
+            if event["type"] == "metrics" {
+                if let Some(values) = event["quietingDb"].as_array() {
+                    for value in values {
+                        quieting.push(value.as_f64().unwrap_or(f64::NAN));
+                    }
+                }
+            }
+        }
+        if open {
+            open_blocks += 1;
+        }
+    }
+    GateRun {
+        open_blocks,
+        final_open: open,
+        quieting,
+    }
+}
+
+fn quieting_summary(values: &[f64]) -> String {
+    let finite: Vec<f64> = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect();
+    if finite.is_empty() {
+        return format!("no finite quieting (n={})", values.len());
+    }
+    let min = finite.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+    format!(
+        "n={} min={min:.2} mean={mean:.2} max={max:.2}",
+        finite.len()
+    )
+}
+
+fn noise_squelch_channel(bandwidth_hz: f64) -> DemodChannel {
+    let squelch = SquelchOpts {
+        mode: SquelchMode::Noise,
+        quieting_db: 6.0,
+        hang_ms: 0.0,
+        ..SquelchOpts::default()
+    };
+    DemodChannel::new(
+        48_000,
+        162_000_000.0,
+        &open_nfm(bandwidth_hz, squelch, true),
+    )
+    .expect("noise channel")
+}
+
+fn metric_powers(events: &[serde_json::Value]) -> Vec<f64> {
+    let mut powers = Vec::new();
+    for event in events {
+        if event["type"] == "metrics" {
+            for value in event["powerDbfs"].as_array().expect("powerDbfs") {
+                powers.push(value.as_f64().unwrap_or(f64::NAN));
+            }
+        }
+    }
+    powers
+}
+
+#[test]
+fn noise_only_stays_closed_at_narrow_bandwidths_and_a_carrier_opens() {
+    let mut rng = Lcg(0x5eed_c0de);
+    for bandwidth in [2_500.0, 12_500.0, 25_000.0] {
+        let mut ch = noise_squelch_channel(bandwidth);
+        let warm = feed_blocks(&mut ch, 8, |i, q| rng.fill_noise(i, q), false);
+        let measured = feed_blocks(&mut ch, 200, |i, q| rng.fill_noise(i, q), warm.final_open);
+        let closed = 200 - measured.open_blocks;
+        assert!(
+            closed >= 198,
+            "{bandwidth} Hz noise opened {}/200 blocks ({})",
+            measured.open_blocks,
+            quieting_summary(&measured.quieting)
+        );
+        let carrier = feed_blocks(
+            &mut ch,
+            6,
+            |i, q| {
+                let (ti, tq) = tone_iq(480, 0.0, 0.5);
+                i.copy_from_slice(&ti);
+                q.copy_from_slice(&tq);
+            },
+            measured.final_open,
+        );
+        assert!(
+            carrier.final_open,
+            "{bandwidth} Hz carrier left the gate closed ({})",
+            quieting_summary(&carrier.quieting)
+        );
+    }
+}
+
+#[test]
+fn squelch_threshold_change_on_a_carrier_does_not_zero_a_block() {
+    let squelch = SquelchOpts {
+        mode: SquelchMode::Power,
+        threshold_dbfs: Some(-40.0),
+        hang_ms: 250.0,
+        ..SquelchOpts::default()
+    };
+    let mut ch = channel(12_500.0, squelch);
+    let (i, q) = nfm_iq(480 * 4, 1_000.0, 1_000.0);
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    ch.process(&i[..480 * 2], &q[..480 * 2], &mut out, &mut events);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "gate" && event["open"] == true),
+        "carrier did not open the gate: {events:?}"
+    );
+    let before = pcm_f32(&out);
+    let live = &before[480..];
+    assert!(
+        live.iter().any(|sample| sample.abs() > 0.02),
+        "expected audible audio before the threshold change"
+    );
+    ch.queue_squelch(&squelch_req(
+        SquelchMode::Power,
+        Some(-39.0),
+        None,
+        None,
+        None,
+        None,
+    ))
+    .unwrap();
+    let mark = out.len();
+    ch.process(&i[480 * 2..], &q[480 * 2..], &mut out, &mut events);
+    let after = pcm_f32(&out[mark..]);
+    assert_eq!(after.len(), 960);
+    let zeros = after
+        .iter()
+        .take(480)
+        .filter(|sample| **sample == 0.0)
+        .count();
+    assert!(
+        zeros < 48,
+        "threshold -40 → -39 muted the next block ({zeros} exact zeros); peak {}",
+        after
+            .iter()
+            .take(480)
+            .map(|sample| sample.abs())
+            .fold(0.0f32, f32::max)
+    );
+    let before_rms = rms(live);
+    let after_rms = rms(&after[..480]);
+    assert!(
+        after_rms > before_rms * 0.5,
+        "audio dropped across the threshold change: {before_rms} → {after_rms}"
+    );
+}
+
+#[test]
+fn noise_floor_on_the_squelch_request_blocks_the_noise_tail() {
+    let squelch = SquelchOpts {
+        mode: SquelchMode::Power,
+        threshold_dbfs: Some(-30.0),
+        hysteresis_db: 10.0,
+        hang_ms: 0.0,
+        ..SquelchOpts::default()
+    };
+    let mut with_floor = channel(12_500.0, squelch.clone());
+    let mut without = channel(12_500.0, squelch);
+    with_floor
+        .queue_squelch(&squelch_req(
+            SquelchMode::Power,
+            Some(-30.0),
+            Some(10.0),
+            Some(0.0),
+            None,
+            Some(Some(-45.0)),
+        ))
+        .unwrap();
+    let (loud_i, loud_q) = constant_iq(480 * 4, amp_for_dbfs(-20.0));
+    let (tail_i, tail_q) = constant_iq(480 * 2, amp_for_dbfs(-38.0));
+    let mut out = Vec::new();
+    let mut floor_events = Vec::new();
+    let mut plain_events = Vec::new();
+    with_floor.process(&loud_i, &loud_q, &mut out, &mut floor_events);
+    without.process(&loud_i, &loud_q, &mut out, &mut plain_events);
+    assert!(
+        floor_events
+            .iter()
+            .any(|event| event["type"] == "gate" && event["open"] == true),
+        "floor channel did not open: {floor_events:?}"
+    );
+    assert!(
+        plain_events
+            .iter()
+            .any(|event| event["type"] == "gate" && event["open"] == true),
+        "plain channel did not open: {plain_events:?}"
+    );
+    floor_events.clear();
+    plain_events.clear();
+    with_floor.process(&tail_i, &tail_q, &mut out, &mut floor_events);
+    without.process(&tail_i, &tail_q, &mut out, &mut plain_events);
+    let floor_open = floor_events
+        .iter()
+        .rev()
+        .find(|event| event["type"] == "gate");
+    let plain_open = plain_events
+        .iter()
+        .rev()
+        .find(|event| event["type"] == "gate");
+    assert_eq!(
+        floor_open.map(|event| event["open"].as_bool()),
+        Some(Some(false)),
+        "hold-band tail should close once the frozen floor is in force: {floor_events:?}"
+    );
+    assert!(
+        plain_open.map(|event| event["open"].as_bool()) != Some(Some(false)),
+        "the same tail must keep refreshing the hang when no floor is set: {plain_events:?}"
+    );
+}
+
+#[test]
+fn gain_then_bandwidth_before_input_keeps_the_gain() {
+    let n = 480 * 20;
+    let (i, q) = nfm_iq(n, 800.0, 1_000.0);
+    let mut folded = channel(12_500.0, SquelchOpts::default());
+    folded
+        .queue_retune(&retune_audio_bw(Some(4.0), None))
+        .unwrap();
+    folded
+        .queue_retune(&retune_audio_bw(None, Some(2_500.0)))
+        .unwrap();
+    let mut direct = channel(2_500.0, SquelchOpts::default());
+    direct
+        .queue_retune(&retune_audio_bw(Some(4.0), None))
+        .unwrap();
+    let mut half = channel(2_500.0, SquelchOpts::default());
+    let mut out_folded = Vec::new();
+    let mut out_direct = Vec::new();
+    let mut out_half = Vec::new();
+    let mut events = Vec::new();
+    folded.process(&i, &q, &mut out_folded, &mut events);
+    direct.process(&i, &q, &mut out_direct, &mut events);
+    half.process(&i, &q, &mut out_half, &mut events);
+    let skip = 2_000usize;
+    let folded_pcm = pcm_f32(&out_folded);
+    let direct_pcm = pcm_f32(&out_direct);
+    let half_pcm = pcm_f32(&out_half);
+    let folded_rms = rms(&folded_pcm[skip..]);
+    let direct_rms = rms(&direct_pcm[skip..]);
+    let half_rms = rms(&half_pcm[skip..]);
+    let ratio = folded_rms / half_rms;
+    assert!(
+        (ratio - 2.0).abs() < 0.15,
+        "gain 4 then bandwidth-only landed at ratio {ratio} (rms {folded_rms} vs gain-2 {half_rms}, direct {direct_rms})"
+    );
+    assert!(
+        (folded_rms - direct_rms).abs() / direct_rms < 0.02,
+        "folded rms {folded_rms} diverged from a gain-4 open {direct_rms}"
+    );
+}
+
+#[test]
+fn narrowing_from_40k_to_2_5k_keeps_60_db_on_a_2_5k_interferer() {
+    let mut wide = DemodChannel::new(
+        48_000,
+        162_000_000.0,
+        &open_nfm(40_000.0, SquelchOpts::default(), true),
+    )
+    .unwrap();
+    let narrow = DemodChannel::new(
+        48_000,
+        162_000_000.0,
+        &open_nfm(2_500.0, SquelchOpts::default(), true),
+    )
+    .unwrap();
+    wide.queue_retune(&retune_audio_bw(None, Some(2_500.0)))
+        .unwrap();
+    let taps_wide = wide.filter_taps();
+    let taps_narrow = narrow.filter_taps();
+    let n = 480 * 20;
+    let (stop_i, stop_q) = tone_iq(n, 2_500.0, 1.0);
+    let (pass_i, pass_q) = tone_iq(n, 200.0, 1.0);
+    let mut out = Vec::new();
+    let mut stop_events = Vec::new();
+    let mut pass_events = Vec::new();
+    wide.process(&stop_i, &stop_q, &mut out, &mut stop_events);
+    let mut pass = DemodChannel::new(
+        48_000,
+        162_000_000.0,
+        &open_nfm(40_000.0, SquelchOpts::default(), true),
+    )
+    .unwrap();
+    pass.queue_retune(&retune_audio_bw(None, Some(2_500.0)))
+        .unwrap();
+    pass.process(&pass_i, &pass_q, &mut out, &mut pass_events);
+    let stop_power = metric_powers(&stop_events);
+    let pass_power = metric_powers(&pass_events);
+    let stop_db = stop_power.last().copied().unwrap_or(f64::NAN);
+    let pass_db = pass_power.last().copied().unwrap_or(f64::NAN);
+    assert!(
+        stop_db <= -60.0 && taps_wide == taps_narrow && pass_db > -3.0,
+        "2.5 kHz interferer {stop_db} dBFS, passband {pass_db} dBFS, taps retuned {taps_wide} fresh {taps_narrow}"
+    );
+}
+
+#[test]
+fn queued_retunes_and_squelch_collapse_before_input() {
+    let mut ch = channel(12_500.0, SquelchOpts::default());
+    for k in 0..80 {
+        ch.queue_retune(&RetuneReq {
+            id: "d".into(),
+            center_hz: Some(162_000_000.0 + (k as f64 + 1.0) * 250.0),
+            bandwidth_hz: None,
+            modulation: None,
+            audio: None,
+        })
+        .unwrap();
+        ch.queue_squelch(&squelch_req(
+            SquelchMode::Power,
+            Some(-70.0 + (k % 20) as f64),
+            Some(2.0),
+            Some(20.0),
+            None,
+            None,
+        ))
+        .unwrap();
+    }
+    ch.queue_retune(&RetuneReq {
+        id: "d".into(),
+        center_hz: Some(162_000_000.0),
+        bandwidth_hz: Some(2_500.0),
+        modulation: None,
+        audio: Some(AudioUpdate {
+            gain: Some(4.0),
+            deviation_hz: None,
+            de_emphasis_us: None,
+            low_pass_hz: None,
+            high_pass_hz: None,
+        }),
+    })
+    .unwrap();
+    ch.queue_squelch(&squelch_req(SquelchMode::Off, None, None, None, None, None))
+        .unwrap();
+    let (i, q) = nfm_iq(4_800, 800.0, 1_000.0);
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    ch.process(&i, &q, &mut out, &mut events);
+    let retuned = events
+        .iter()
+        .filter(|event| event["type"] == "retuned")
+        .count();
+    assert_eq!(retuned, 1, "pending retunes were not coalesced: {events:?}");
+    let mut direct = channel(2_500.0, SquelchOpts::default());
+    direct
+        .queue_retune(&retune_audio_bw(Some(4.0), None))
+        .unwrap();
+    let mut direct_out = Vec::new();
+    direct.process(&i, &q, &mut direct_out, &mut events);
+    let skip = 1_500usize;
+    let got = rms(&pcm_f32(&out)[skip..]);
+    let expect = rms(&pcm_f32(&direct_out)[skip..]);
+    assert!(
+        (got - expect).abs() / expect < 0.02,
+        "coalesced retune rms {got} vs final-only {expect}"
+    );
 }

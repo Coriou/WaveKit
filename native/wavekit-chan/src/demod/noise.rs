@@ -1,9 +1,10 @@
 //! FM quieting meter, a port of `NoiseSquelch`'s per-block measure (`src/core/noise-squelch.ts`).
 //!
-//! The frozen constructor takes only the sample rate. The noise-only reference uses the
-//! TypeScript default bandwidth `sample_rate / 2`, whose channel-filter cutoff is 0.375
-//! (normalised) and does not otherwise depend on the rate. The high-pass is the same RBJ
-//! section: 0.6 of the audio Nyquist, which is 0.3 of the sample rate, Q = 1/√2.
+//! [`NoiseMeter::new`] is the frozen constructor: it takes only the sample rate and calibrates
+//! the noise-only reference at bandwidth `sample_rate / 2` (normalised cutoff 0.375).
+//! [`NoiseMeter::with_bandwidth`] is additive and calibrates that reference at the channel
+//! bandwidth, matching `NoiseSquelch`. The high-pass is the same RBJ section: 0.6 of the audio
+//! Nyquist, which is 0.3 of the sample rate, Q = 1/√2.
 //!
 //! Quieting is `10·log10(R / ms)`. An unusable block (a non-finite sample, or fewer than half
 //! the samples above the magnitude floor) returns NaN. `+∞` means a silent discriminator.
@@ -88,12 +89,20 @@ pub struct NoiseMeter {
 }
 
 impl NoiseMeter {
+    /// Reference bandwidth `sample_rate_hz / 2`, the historical full-band calibration.
     pub fn new(sample_rate_hz: f64) -> Self {
+        Self::with_bandwidth(sample_rate_hz, sample_rate_hz / 2.0)
+    }
+
+    /// Reference bandwidth `bandwidth_hz`, the channel width `NoiseSquelch` simulates.
+    /// A non-finite or non-positive bandwidth uses the Nyquist default, as the TypeScript
+    /// constructor does.
+    pub fn with_bandwidth(sample_rate_hz: f64, bandwidth_hz: f64) -> Self {
         assert!(
             sample_rate_hz.is_finite() && sample_rate_hz > 0.0,
             "NoiseMeter sample_rate_hz must be finite and positive"
         );
-        let cutoff = channel_cutoff(sample_rate_hz, sample_rate_hz / 2.0);
+        let cutoff = channel_cutoff(sample_rate_hz, bandwidth_hz);
         Self {
             sample_rate_hz,
             reference: reference_mean_square(cutoff),
@@ -145,7 +154,7 @@ impl NoiseMeter {
 }
 
 /// Normalised cutoff of `channelFilterPlan(rate, 1, bandwidth, "channel")`.
-fn channel_cutoff(sample_rate: f64, bandwidth_hz: f64) -> f64 {
+pub(crate) fn channel_cutoff(sample_rate: f64, bandwidth_hz: f64) -> f64 {
     let nyquist = sample_rate / 2.0;
     let bandwidth = if bandwidth_hz.is_finite() && bandwidth_hz > 0.0 {
         bandwidth_hz

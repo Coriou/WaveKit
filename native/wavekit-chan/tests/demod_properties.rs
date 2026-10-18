@@ -2,8 +2,7 @@
 //!
 //! `process` must not allocate. The counting allocator watches this thread only
 //! (`pthread_self`), and only while a test arms it, so the rest of the suite is unaffected.
-//! A length mismatch is a `debug_assert` plus a shared-prefix process: release tests cover
-//! the no-panic path (`cargo test --release` leaves `debug_assertions` off).
+//! A length mismatch does not panic in debug or release: only the shared prefix is written.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -663,10 +662,6 @@ fn rejected_reconfigure_leaves_state_unchanged() {
 // Validates: Requirements 2.1
 #[test]
 fn mismatched_length_processes_the_shared_prefix() {
-    // `debug_assert_eq` fires only when debug assertions are on. Release tests take this path.
-    if cfg!(debug_assertions) {
-        return;
-    }
     let config = valid_nfm();
     let input = fm_body(64);
     let mut matched = Demodulator::new(config.clone()).expect("config");

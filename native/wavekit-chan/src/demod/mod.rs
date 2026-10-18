@@ -19,6 +19,7 @@ mod nfm;
 mod noise;
 mod squelch;
 
+pub(crate) use noise::channel_cutoff;
 pub use noise::NoiseMeter;
 pub use squelch::{NoiseGate, PowerGate};
 
@@ -202,19 +203,14 @@ impl Demodulator {
 
     /// Demodulate `input` into `out`.
     ///
-    /// `out.len()` must equal `input.len()` (`debug_assert`). A mismatch does not panic:
-    /// only the shared prefix `min(input.len(), out.len())` is written and the rest of `out`
-    /// is left as it was. Input longer than `max_chunk` is processed in tiles of that size
-    /// through the scratch allocated at construction, so this method does not allocate.
+    /// A length mismatch does not panic: only the shared prefix
+    /// `min(input.len(), out.len())` is written and the rest of `out` is left as it was.
+    /// Input longer than `max_chunk` is processed in tiles of that size through the scratch
+    /// allocated at construction, so this method does not allocate.
     ///
     /// Non-finite samples are replaced with `0` and counted. Every written sample is finite
     /// and in `[-1, 1]`.
     pub fn process(&mut self, input: &[Complex32], out: &mut [f32]) {
-        debug_assert_eq!(
-            input.len(),
-            out.len(),
-            "process expects out.len() == input.len(); the shorter prefix is processed"
-        );
         let n = input.len().min(out.len());
         let tile = self.scratch.len().max(1);
         let mut offset = 0;

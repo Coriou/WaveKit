@@ -16,18 +16,32 @@ const WAIT: Duration = Duration::from_secs(8);
 const INPUT_RATE: f64 = 2_048_000.0;
 const HALF: usize = 204_800;
 
+fn claim_temp_dir() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let pid = std::process::id();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0);
+    for n in 0..64u64 {
+        let mix = seed
+            .wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed))
+            .wrapping_add(n)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let path = PathBuf::from(format!("/tmp/wkd-{pid}-{mix:x}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return path,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => panic!("create {}: {err}", path.display()),
+        }
+    }
+    panic!("could not claim a unique temp dir");
+}
+
 struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let p = PathBuf::from(format!(
-            "/tmp/wkd-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
+        TempDir(claim_temp_dir())
     }
 }
 impl Drop for TempDir {
@@ -165,6 +179,41 @@ fn rounded_centibel(value: &Value) -> bool {
 }
 
 const OPEN: &str = r#"{"v":1,"type":"open","id":"dm","kind":"demod","centerHz":162000000,"bandwidthHz":12500,"modulation":"nfm","format":"f32le","queueBytes":1048576,"audio":{"gain":2,"deviationHz":5000},"squelch":{"mode":"power","thresholdDbfs":-50,"hangMs":30},"metrics":true}"#;
+
+#[test]
+fn temp_dir_does_not_remove_a_preexisting_directory() {
+    let pid = std::process::id();
+    let mut created = Vec::new();
+    for n in 0..4 {
+        let path = PathBuf::from(format!("/tmp/wkd-{pid}-{n}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                std::fs::write(path.join("keep"), b"keep").unwrap();
+                created.push(path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read(path.join("keep")).ok().as_deref() == Some(b"keep".as_slice()) {
+                    created.push(path);
+                }
+            }
+            Err(err) => panic!("create {}: {err}", path.display()),
+        }
+    }
+    assert!(!created.is_empty(), "could not claim a keeper directory");
+    let held = TempDir::new();
+    for path in &created {
+        assert!(
+            path.join("keep").is_file(),
+            "pre-existing {} was removed or replaced",
+            path.display()
+        );
+        assert_ne!(&held.0, path);
+    }
+    drop(held);
+    for path in &created {
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
 
 #[test]
 fn demod_channel_retunes_mid_stream_without_a_sample_gap() {

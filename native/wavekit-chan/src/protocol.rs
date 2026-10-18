@@ -157,6 +157,9 @@ pub struct SquelchReq {
     pub hysteresis_db: Option<f64>,
     pub hang_ms: Option<f64>,
     pub quieting_db: Option<f64>,
+    /// `None` leaves the floor unchanged. `Some(None)` clears it. `Some(Some(dbfs))`
+    /// is the WG7 noise-floor estimate, applied only while a power gate is closed.
+    pub noise_floor_dbfs: Option<Option<f64>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -577,6 +580,7 @@ fn parse_squelch(obj: &Map<String, Value>, id: String) -> Result<Request, (Strin
             "hysteresisDb",
             "hangMs",
             "quietingDb",
+            "noiseFloorDbfs",
         ],
     )
     .map_err(err)?;
@@ -592,6 +596,7 @@ fn parse_squelch(obj: &Map<String, Value>, id: String) -> Result<Request, (Strin
     let hysteresis_db = optional_db(obj, "hysteresisDb").map_err(err)?;
     let hang_ms = optional_hang(obj, "hangMs").map_err(err)?;
     let quieting_db = optional_finite(obj, "quietingDb").map_err(err)?;
+    let noise_floor_dbfs = optional_nullable_finite(obj, "noiseFloorDbfs").map_err(err)?;
     Ok(Request::Squelch(SquelchReq {
         id: id.clone(),
         mode,
@@ -599,7 +604,25 @@ fn parse_squelch(obj: &Map<String, Value>, id: String) -> Result<Request, (Strin
         hysteresis_db,
         hang_ms,
         quieting_db,
+        noise_floor_dbfs,
     }))
+}
+
+/// Absent → `None` (leave the floor). JSON null → `Some(None)` (clear). A finite number → set.
+fn optional_nullable_finite(
+    obj: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<Option<f64>>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .filter(|x| x.is_finite())
+            .map(|x| Some(Some(x)))
+            .ok_or_else(|| format!("{key} must be a finite number or null")),
+        Some(_) => Err(format!("{key} must be a finite number or null")),
+    }
 }
 
 fn modulation_of(v: Option<&Value>) -> Result<Modulation, String> {
@@ -1061,5 +1084,41 @@ mod tests {
         ] {
             assert!(parse_request(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn squelch_noise_floor_is_optional_nullable_and_finite() {
+        let absent = parse_request(r#"{"v":1,"type":"squelch","id":"d","mode":"power"}"#).unwrap();
+        let Request::Squelch(absent) = absent else {
+            panic!("squelch");
+        };
+        assert_eq!(absent.noise_floor_dbfs, None);
+
+        let clear = parse_request(
+            r#"{"v":1,"type":"squelch","id":"d","mode":"power","noiseFloorDbfs":null}"#,
+        )
+        .unwrap();
+        let Request::Squelch(clear) = clear else {
+            panic!("squelch");
+        };
+        assert_eq!(clear.noise_floor_dbfs, Some(None));
+
+        let set = parse_request(
+            r#"{"v":1,"type":"squelch","id":"d","mode":"power","noiseFloorDbfs":-45.5}"#,
+        )
+        .unwrap();
+        let Request::Squelch(set) = set else {
+            panic!("squelch");
+        };
+        assert_eq!(set.noise_floor_dbfs, Some(Some(-45.5)));
+
+        assert!(parse_request(
+            r#"{"v":1,"type":"squelch","id":"d","mode":"power","noiseFloorDbfs":"low"}"#
+        )
+        .is_err());
+        assert!(parse_request(
+            r#"{"v":1,"type":"squelch","id":"d","mode":"power","noiseFloorDbfs":1e309}"#
+        )
+        .is_err());
     }
 }
