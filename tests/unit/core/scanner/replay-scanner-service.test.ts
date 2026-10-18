@@ -1338,7 +1338,9 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 					hz: CENTRE + 50_000,
 					ev: {
 						protocol: "dmr",
-						identity: identity ? { kind: "dmr-cc", value: "1" } : null,
+						...(identity
+							? { identity: { kind: "dmr-cc" as const, value: "1" } }
+							: {}),
 						metadata: {},
 						crcClean: true,
 						at: 0,
