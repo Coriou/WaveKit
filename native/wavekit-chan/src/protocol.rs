@@ -1,7 +1,28 @@
 //! Version-1 control requests (addendum §11; fd 3 per plan A1, `mark-gap` fields per A2).
+//! Protocol 2 adds `open` with `kind: "demod"`, plus `retune` and `squelch`. A `kind`-less
+//! `open` is still the version-1 IQ request, parsed by the same arm as before.
 
 use crate::channel::Format;
+use crate::demod::Modulation;
 use serde_json::{Map, Value};
+
+/// Largest control line, including the newline. Mirrors `MAX_EVENT_LINE_BYTES` (64 KiB).
+pub const MAX_CONTROL_LINE_BYTES: usize = 64 * 1024;
+
+/// Demod audio rate. Fixed; a demod `open` has no `outputRateHz`.
+pub const DEMOD_OUTPUT_RATE_HZ: u64 = 48_000;
+
+/// 10 ms at [`DEMOD_OUTPUT_RATE_HZ`].
+pub const DEMOD_BLOCK_SAMPLES: usize = 480;
+
+pub const DEMOD_MIN_BANDWIDTH_HZ: f64 = 2_500.0;
+pub const DEMOD_MAX_BANDWIDTH_HZ: f64 = 40_000.0;
+
+pub const DEMOD_DEFAULT_GAIN: f32 = 2.0;
+pub const DEMOD_DEFAULT_DEVIATION_HZ: f64 = 5_000.0;
+pub const DEMOD_DEFAULT_HYSTERESIS_DB: f64 = 2.0;
+pub const DEMOD_DEFAULT_HANG_MS: f64 = 250.0;
+pub const DEMOD_DEFAULT_QUIETING_DB: f64 = 6.0;
 
 /// Largest `queueBytes` the process accepts. `ChannelQueue` allocates its whole capacity up front,
 /// so an absurd request must be refused here, not met with a huge allocation. 64 MiB is ~170 s
@@ -26,9 +47,146 @@ pub struct OpenReq {
     pub queue_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormat {
+    F32Le,
+    S16Le,
+}
+
+impl AudioFormat {
+    pub fn sample_bytes(self) -> usize {
+        match self {
+            AudioFormat::F32Le => 4,
+            AudioFormat::S16Le => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AudioFormat::F32Le => "f32le",
+            AudioFormat::S16Le => "s16le",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "f32le" => Some(AudioFormat::F32Le),
+            "s16le" => Some(AudioFormat::S16Le),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SquelchMode {
+    Off,
+    Power,
+    Noise,
+}
+
+impl SquelchMode {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "off" => Some(SquelchMode::Off),
+            "power" => Some(SquelchMode::Power),
+            "noise" => Some(SquelchMode::Noise),
+            _ => None,
+        }
+    }
+}
+
+/// Audio options carried by a demod `open`. Missing keys take the kernel defaults.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioOpts {
+    pub gain: f32,
+    pub deviation_hz: f64,
+    pub de_emphasis_us: Option<u32>,
+    pub low_pass_hz: Option<f64>,
+    pub high_pass_hz: Option<f64>,
+}
+
+impl Default for AudioOpts {
+    fn default() -> Self {
+        Self {
+            gain: DEMOD_DEFAULT_GAIN,
+            deviation_hz: DEMOD_DEFAULT_DEVIATION_HZ,
+            de_emphasis_us: None,
+            low_pass_hz: None,
+            high_pass_hz: None,
+        }
+    }
+}
+
+/// One `retune {audio}` object. `None` keeps the current value. `Some(None)` clears a filter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioUpdate {
+    pub gain: Option<f32>,
+    pub deviation_hz: Option<f64>,
+    pub de_emphasis_us: Option<Option<u32>>,
+    pub low_pass_hz: Option<Option<f64>>,
+    pub high_pass_hz: Option<Option<f64>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SquelchOpts {
+    pub mode: SquelchMode,
+    pub threshold_dbfs: Option<f64>,
+    pub hysteresis_db: f64,
+    pub hang_ms: f64,
+    pub quieting_db: f64,
+}
+
+impl Default for SquelchOpts {
+    fn default() -> Self {
+        Self {
+            mode: SquelchMode::Off,
+            threshold_dbfs: None,
+            hysteresis_db: DEMOD_DEFAULT_HYSTERESIS_DB,
+            hang_ms: DEMOD_DEFAULT_HANG_MS,
+            quieting_db: DEMOD_DEFAULT_QUIETING_DB,
+        }
+    }
+}
+
+/// Fields present on a `squelch` request. Omitted numeric fields keep the channel's current value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SquelchReq {
+    pub id: String,
+    pub mode: SquelchMode,
+    pub threshold_dbfs: Option<f64>,
+    pub hysteresis_db: Option<f64>,
+    pub hang_ms: Option<f64>,
+    pub quieting_db: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemodOpen {
+    pub id: String,
+    pub center_hz: f64,
+    pub bandwidth_hz: f64,
+    pub modulation: Modulation,
+    pub format: AudioFormat,
+    pub queue_bytes: usize,
+    pub audio: AudioOpts,
+    pub squelch: SquelchOpts,
+    pub metrics: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetuneReq {
+    pub id: String,
+    pub center_hz: Option<f64>,
+    pub bandwidth_hz: Option<f64>,
+    pub modulation: Option<Modulation>,
+    pub audio: Option<AudioUpdate>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     Open(OpenReq),
+    OpenDemod(DemodOpen),
+    Retune(RetuneReq),
+    Squelch(SquelchReq),
     Close {
         id: String,
     },
@@ -58,6 +216,12 @@ fn only(obj: &Map<String, Value>, keys: &[&str]) -> Result<(), String> {
 /// Parses one control line. An error carries the request's `id` when it had a string one (or
 /// "") and a detail; the runtime answers it with `rejected`, never an exit (§11).
 pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
+    if line.len() > MAX_CONTROL_LINE_BYTES {
+        return Err((
+            String::new(),
+            format!("control line exceeds {MAX_CONTROL_LINE_BYTES} bytes"),
+        ));
+    }
     let v: Value =
         serde_json::from_str(line).map_err(|e| (String::new(), format!("invalid JSON: {e}")))?;
     let obj = v
@@ -94,6 +258,7 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
         }
     };
     match obj.get("type").and_then(Value::as_str) {
+        Some("open") if obj.contains_key("kind") => parse_demod_open(obj, id),
         Some("open") => {
             only(
                 obj,
@@ -147,6 +312,8 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
                 queue_bytes: queue_bytes as usize,
             }))
         }
+        Some("retune") => parse_retune(obj, id),
+        Some("squelch") => parse_squelch(obj, id),
         Some("close") => {
             only(obj, &["v", "type", "id"]).map_err(err)?;
             Ok(Request::Close { id: checked_id()? })
@@ -266,8 +433,414 @@ pub fn parse_observed_request(line: &str) -> Result<ObservedRequest, (String, St
     match parse_request(&Value::Object(obj).to_string()) {
         Ok(Request::Open(request)) => Ok(ObservedRequest::Open { token, request }),
         Err((_, detail)) => Ok(ObservedRequest::InvalidOpen { token, id, detail }),
-        _ => unreachable!("type was replaced with open"),
+        Ok(_) => Ok(ObservedRequest::InvalidOpen {
+            token,
+            id,
+            detail: "observed open does not accept kind demod".into(),
+        }),
     }
+}
+
+fn parse_demod_open(obj: &Map<String, Value>, id: String) -> Result<Request, (String, String)> {
+    let err = |d: String| (id.clone(), d);
+    only(
+        obj,
+        &[
+            "v",
+            "type",
+            "id",
+            "kind",
+            "centerHz",
+            "bandwidthHz",
+            "modulation",
+            "format",
+            "queueBytes",
+            "audio",
+            "squelch",
+            "metrics",
+        ],
+    )
+    .map_err(err)?;
+    if obj.get("kind").and_then(Value::as_str) != Some("demod") {
+        return Err(err("kind must be \"demod\"".into()));
+    }
+    if !valid_id(&id) {
+        return Err(err("id must match [A-Za-z0-9._-]{1,64}".into()));
+    }
+    let center_hz = finite_required(obj, "centerHz").map_err(err)?;
+    let bandwidth_hz = finite_required(obj, "bandwidthHz").map_err(err)?;
+    if !(DEMOD_MIN_BANDWIDTH_HZ..=DEMOD_MAX_BANDWIDTH_HZ).contains(&bandwidth_hz) {
+        return Err(err(format!(
+            "bandwidthHz must be within {DEMOD_MIN_BANDWIDTH_HZ}..={DEMOD_MAX_BANDWIDTH_HZ}"
+        )));
+    }
+    let modulation = modulation_of(obj.get("modulation")).map_err(err)?;
+    let format = obj
+        .get("format")
+        .and_then(Value::as_str)
+        .and_then(AudioFormat::parse)
+        .ok_or_else(|| err("format must be f32le|s16le".into()))?;
+    let queue_bytes = uint_required(obj, "queueBytes").map_err(err)?;
+    if queue_bytes == 0 || queue_bytes > MAX_QUEUE_BYTES as u64 {
+        return Err(err(format!(
+            "queueBytes must be within 1..={MAX_QUEUE_BYTES}"
+        )));
+    }
+    let audio = match obj.get("audio") {
+        None => AudioOpts::default(),
+        Some(v) => parse_audio_opts(v).map_err(err)?,
+    };
+    let squelch = match obj.get("squelch") {
+        None => SquelchOpts::default(),
+        Some(v) => parse_squelch_opts(v).map_err(err)?,
+    };
+    let metrics = match obj.get("metrics") {
+        None => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(err("metrics must be a boolean".into())),
+    };
+    check_audio_vs_modulation(modulation, &audio).map_err(err)?;
+    Ok(Request::OpenDemod(DemodOpen {
+        id: id.clone(),
+        center_hz,
+        bandwidth_hz,
+        modulation,
+        format,
+        queue_bytes: queue_bytes as usize,
+        audio,
+        squelch,
+        metrics,
+    }))
+}
+
+fn parse_retune(obj: &Map<String, Value>, id: String) -> Result<Request, (String, String)> {
+    let err = |d: String| (id.clone(), d);
+    only(
+        obj,
+        &[
+            "v",
+            "type",
+            "id",
+            "centerHz",
+            "bandwidthHz",
+            "modulation",
+            "audio",
+        ],
+    )
+    .map_err(err)?;
+    if !valid_id(&id) {
+        return Err(err("id must match [A-Za-z0-9._-]{1,64}".into()));
+    }
+    let center_hz = match obj.get("centerHz") {
+        None => None,
+        Some(_) => Some(finite_required(obj, "centerHz").map_err(err)?),
+    };
+    let bandwidth_hz = match obj.get("bandwidthHz") {
+        None => None,
+        Some(_) => {
+            let bw = finite_required(obj, "bandwidthHz").map_err(err)?;
+            if !(DEMOD_MIN_BANDWIDTH_HZ..=DEMOD_MAX_BANDWIDTH_HZ).contains(&bw) {
+                return Err(err(format!(
+                    "bandwidthHz must be within {DEMOD_MIN_BANDWIDTH_HZ}..={DEMOD_MAX_BANDWIDTH_HZ}"
+                )));
+            }
+            Some(bw)
+        }
+    };
+    let modulation = match obj.get("modulation") {
+        None => None,
+        Some(v) => Some(modulation_of(Some(v)).map_err(err)?),
+    };
+    let audio = match obj.get("audio") {
+        None => None,
+        Some(v) => Some(parse_audio_update(v).map_err(err)?),
+    };
+    Ok(Request::Retune(RetuneReq {
+        id: id.clone(),
+        center_hz,
+        bandwidth_hz,
+        modulation,
+        audio,
+    }))
+}
+
+fn parse_squelch(obj: &Map<String, Value>, id: String) -> Result<Request, (String, String)> {
+    let err = |d: String| (id.clone(), d);
+    only(
+        obj,
+        &[
+            "v",
+            "type",
+            "id",
+            "mode",
+            "thresholdDbfs",
+            "hysteresisDb",
+            "hangMs",
+            "quietingDb",
+        ],
+    )
+    .map_err(err)?;
+    if !valid_id(&id) {
+        return Err(err("id must match [A-Za-z0-9._-]{1,64}".into()));
+    }
+    let mode = obj
+        .get("mode")
+        .and_then(Value::as_str)
+        .and_then(SquelchMode::parse)
+        .ok_or_else(|| err("mode must be off|power|noise".into()))?;
+    let threshold_dbfs = optional_finite(obj, "thresholdDbfs").map_err(err)?;
+    let hysteresis_db = optional_db(obj, "hysteresisDb").map_err(err)?;
+    let hang_ms = optional_hang(obj, "hangMs").map_err(err)?;
+    let quieting_db = optional_finite(obj, "quietingDb").map_err(err)?;
+    Ok(Request::Squelch(SquelchReq {
+        id: id.clone(),
+        mode,
+        threshold_dbfs,
+        hysteresis_db,
+        hang_ms,
+        quieting_db,
+    }))
+}
+
+fn modulation_of(v: Option<&Value>) -> Result<Modulation, String> {
+    match v.and_then(Value::as_str) {
+        Some("nfm") => Ok(Modulation::Nfm),
+        Some("am") => Ok(Modulation::Am),
+        _ => Err("modulation must be nfm|am".into()),
+    }
+}
+
+fn finite_required(obj: &Map<String, Value>, key: &str) -> Result<f64, String> {
+    match obj.get(key) {
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .filter(|x| x.is_finite())
+            .ok_or_else(|| format!("{key} must be a finite number")),
+        Some(_) => Err(format!("{key} must be a number")),
+        None => Err(format!("missing {key}")),
+    }
+}
+
+fn optional_finite(obj: &Map<String, Value>, key: &str) -> Result<Option<f64>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_f64()
+            .filter(|x| x.is_finite())
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be a finite number")),
+        Some(_) => Err(format!("{key} must be a number")),
+    }
+}
+
+fn optional_db(obj: &Map<String, Value>, key: &str) -> Result<Option<f64>, String> {
+    let Some(v) = optional_finite(obj, key)? else {
+        return Ok(None);
+    };
+    if (0.0..=1.0e6).contains(&v) {
+        Ok(Some(v))
+    } else {
+        Err(format!("{key} must be within 0..=1000000"))
+    }
+}
+
+fn optional_hang(obj: &Map<String, Value>, key: &str) -> Result<Option<f64>, String> {
+    let Some(v) = optional_finite(obj, key)? else {
+        return Ok(None);
+    };
+    if (0.0..=86_400_000.0).contains(&v) {
+        Ok(Some(v))
+    } else {
+        Err(format!("{key} must be within 0..=86400000"))
+    }
+}
+
+fn uint_required(obj: &Map<String, Value>, key: &str) -> Result<u64, String> {
+    obj.get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{key} must be a non-negative integer"))
+}
+
+fn check_audio_vs_modulation(modulation: Modulation, audio: &AudioOpts) -> Result<(), String> {
+    if modulation == Modulation::Am && audio.de_emphasis_us.is_some() {
+        return Err("deEmphasisUs is NFM only".into());
+    }
+    if !(audio.gain.is_finite() && audio.gain >= 0.1 && audio.gain <= 100.0) {
+        return Err("gain must be within 0.1..=100".into());
+    }
+    if !(audio.deviation_hz.is_finite()
+        && audio.deviation_hz > 0.0
+        && audio.deviation_hz < DEMOD_OUTPUT_RATE_HZ as f64 / 2.0)
+    {
+        return Err("deviationHz must be within (0, 24000)".into());
+    }
+    if let Some(low) = audio.low_pass_hz {
+        if !(low.is_finite() && low > 0.0 && low < DEMOD_OUTPUT_RATE_HZ as f64 / 2.0) {
+            return Err("lowPassHz must be within (0, 24000)".into());
+        }
+    }
+    if let Some(high) = audio.high_pass_hz {
+        if !(high.is_finite() && high > 0.0 && high < DEMOD_OUTPUT_RATE_HZ as f64 / 2.0) {
+            return Err("highPassHz must be within (0, 24000)".into());
+        }
+        if let Some(low) = audio.low_pass_hz {
+            if high >= low {
+                return Err("highPassHz must be below lowPassHz".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_audio_opts(v: &Value) -> Result<AudioOpts, String> {
+    let obj = v.as_object().ok_or("audio must be an object")?;
+    only(
+        obj,
+        &[
+            "gain",
+            "deviationHz",
+            "deEmphasisUs",
+            "lowPassHz",
+            "highPassHz",
+        ],
+    )?;
+    let mut audio = AudioOpts::default();
+    if obj.contains_key("gain") {
+        let g = finite_required(obj, "gain")?;
+        audio.gain = g as f32;
+    }
+    if obj.contains_key("deviationHz") {
+        audio.deviation_hz = finite_required(obj, "deviationHz")?;
+    }
+    if let Some(v) = obj.get("deEmphasisUs") {
+        audio.de_emphasis_us = parse_de_emphasis(v)?;
+    }
+    if obj.contains_key("lowPassHz") {
+        audio.low_pass_hz = nullable_hz(obj, "lowPassHz")?;
+    }
+    if obj.contains_key("highPassHz") {
+        audio.high_pass_hz = nullable_hz(obj, "highPassHz")?;
+    }
+    Ok(audio)
+}
+
+fn parse_audio_update(v: &Value) -> Result<AudioUpdate, String> {
+    let obj = v.as_object().ok_or("audio must be an object")?;
+    only(
+        obj,
+        &[
+            "gain",
+            "deviationHz",
+            "deEmphasisUs",
+            "lowPassHz",
+            "highPassHz",
+        ],
+    )?;
+    let gain = if obj.contains_key("gain") {
+        let g = finite_required(obj, "gain")?;
+        if !(0.1..=100.0).contains(&g) {
+            return Err("gain must be within 0.1..=100".into());
+        }
+        Some(g as f32)
+    } else {
+        None
+    };
+    let deviation_hz = if obj.contains_key("deviationHz") {
+        let d = finite_required(obj, "deviationHz")?;
+        if !(d > 0.0 && d < DEMOD_OUTPUT_RATE_HZ as f64 / 2.0) {
+            return Err("deviationHz must be within (0, 24000)".into());
+        }
+        Some(d)
+    } else {
+        None
+    };
+    let de_emphasis_us = match obj.get("deEmphasisUs") {
+        None => None,
+        Some(v) => Some(parse_de_emphasis(v)?),
+    };
+    let low_pass_hz = if obj.contains_key("lowPassHz") {
+        Some(nullable_hz(obj, "lowPassHz")?)
+    } else {
+        None
+    };
+    let high_pass_hz = if obj.contains_key("highPassHz") {
+        Some(nullable_hz(obj, "highPassHz")?)
+    } else {
+        None
+    };
+    Ok(AudioUpdate {
+        gain,
+        deviation_hz,
+        de_emphasis_us,
+        low_pass_hz,
+        high_pass_hz,
+    })
+}
+
+fn parse_de_emphasis(v: &Value) -> Result<Option<u32>, String> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Number(n) => match n.as_u64() {
+            Some(50) => Ok(Some(50)),
+            Some(75) => Ok(Some(75)),
+            _ => Err("deEmphasisUs must be 50 or 75".into()),
+        },
+        _ => Err("deEmphasisUs must be 50, 75 or null".into()),
+    }
+}
+
+fn nullable_hz(obj: &Map<String, Value>, key: &str) -> Result<Option<f64>, String> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => {
+            let x = n
+                .as_f64()
+                .filter(|x| x.is_finite())
+                .ok_or_else(|| format!("{key} must be a finite number"))?;
+            if x > 0.0 && x < DEMOD_OUTPUT_RATE_HZ as f64 / 2.0 {
+                Ok(Some(x))
+            } else {
+                Err(format!("{key} must be within (0, 24000)"))
+            }
+        }
+        Some(_) => Err(format!("{key} must be a number or null")),
+    }
+}
+
+fn parse_squelch_opts(v: &Value) -> Result<SquelchOpts, String> {
+    let obj = v.as_object().ok_or("squelch must be an object")?;
+    only(
+        obj,
+        &[
+            "mode",
+            "thresholdDbfs",
+            "hysteresisDb",
+            "hangMs",
+            "quietingDb",
+        ],
+    )?;
+    let mode = obj
+        .get("mode")
+        .and_then(Value::as_str)
+        .and_then(SquelchMode::parse)
+        .ok_or("mode must be off|power|noise")?;
+    let mut opts = SquelchOpts {
+        mode,
+        ..SquelchOpts::default()
+    };
+    if obj.contains_key("thresholdDbfs") {
+        opts.threshold_dbfs = optional_finite(obj, "thresholdDbfs")?;
+    }
+    if let Some(h) = optional_db(obj, "hysteresisDb")? {
+        opts.hysteresis_db = h;
+    }
+    if let Some(h) = optional_hang(obj, "hangMs")? {
+        opts.hang_ms = h;
+    }
+    if let Some(q) = optional_finite(obj, "quietingDb")? {
+        opts.quieting_db = q;
+    }
+    Ok(opts)
 }
 
 #[cfg(test)]
