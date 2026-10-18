@@ -58,6 +58,59 @@ export interface IdentifyView {
 	bar: { fraction: number; leftS: number; windowS: number } | null
 	/** The "Until a transmission" switch shows: while waiting for one, or after a wait where nothing came. */
 	untilSignal: boolean
+	/** Identified: the card becomes that signal's card (Tuned.dc.html), the trials fold away. */
+	found: IdentifiedCard | null
+}
+
+/** What the card says of a signal Identify named (Tuned.dc.html "identified": the card becomes its card). */
+export interface IdentifiedCard {
+	/** "DMR": the card's protocol. */
+	proto: string
+	/** "CC 1 · slot 2": said beside the band under the protocol. */
+	sub: string
+	/** What was heard on it: "TG 2081", a callsign, a capcode; null when the answer names no traffic. */
+	big: string | null
+	/** "From radio 2081107". */
+	line: string
+	/** "Identified · added to discoveries", "Decoded as DMR". */
+	banner: string
+	/** "9 kHz wide · SNR 53 dB · 54 % duty". */
+	measured: string | null
+	discoveryId: string | null
+}
+
+/** The card of a signal Identify named, or null when the answer has no protocol. */
+export function identifiedCard(
+	result: ScannerIdentifyResult,
+	asked = "",
+): IdentifiedCard | null {
+	if (!result.protocol || result.protocol === "unknown") return null
+	const proto = protocolLabel(result.protocol)
+	const md = result.metadata
+	const sub: string[] = []
+	if (result.identity) sub.push(identityText(result.identity))
+	if (md.slots.length === 1) sub.push(`slot ${md.slots[0]}`)
+	else if (md.slots.length > 1) sub.push("both slots")
+	if (md.ctcssHz !== undefined) sub.push(`CTCSS ${md.ctcssHz.toFixed(1)} Hz`)
+	const tg = md.talkgroups[0]
+	const big =
+		tg !== undefined
+			? `TG ${tg}`
+			: (md.callsigns[0] ??
+				(md.capcodes[0] !== undefined ? `Capcode ${md.capcodes[0]}` : null) ??
+				md.ismModels[0] ??
+				null)
+	const radio = md.sources[0]
+	const said = asked ? `Decoded as ${asked}` : "Identified"
+	return {
+		proto,
+		sub: sub.join(" · "),
+		big,
+		line: radio !== undefined ? `From radio ${radio}` : "",
+		banner: result.discoveryId ? `${said} · added to discoveries` : said,
+		measured: measuredLine(result.measurements),
+		discoveryId: result.discoveryId ?? null,
+	}
 }
 
 const DEFAULT_WINDOW_MS = 15_000
@@ -236,28 +289,33 @@ const ARTEFACT: Readonly<
 	},
 }
 
+type Identity = NonNullable<ScannerIdentifyResult["identity"]>
+
+/** "CC 1", "NAC 293", "F4ABC": an identity in words. */
+export function identityText(id: Identity): string {
+	const prefix: Readonly<Record<Identity["kind"], string>> = {
+		"dmr-cc": "CC",
+		"p25-nac": "NAC",
+		"nxdn-ran": "RAN",
+		"ysf-dgid": "DG-ID",
+		"dstar-call": "",
+		"dpmr-cc": "CC",
+		"pocsag-capcode": "capcode",
+		"aprs-call": "",
+		"ism-model": "",
+		"ais-mmsi": "MMSI",
+		"acars-reg": "",
+		"vdl2-addr": "address",
+		"lora-node": "node",
+	}
+	return `${prefix[id.kind]} ${id.value}`.trim()
+}
+
 /** Identity and metadata of an answer, in words: "CC 1 · TG 2081 · radio 2081107". */
 export function resultDetails(result: ScannerIdentifyResult): string {
 	const parts: string[] = []
 	const id = result.identity
-	if (id) {
-		const prefix: Record<typeof id.kind, string> = {
-			"dmr-cc": "CC",
-			"p25-nac": "NAC",
-			"nxdn-ran": "RAN",
-			"ysf-dgid": "DG-ID",
-			"dstar-call": "",
-			"dpmr-cc": "CC",
-			"pocsag-capcode": "capcode",
-			"aprs-call": "",
-			"ism-model": "",
-			"ais-mmsi": "MMSI",
-			"acars-reg": "",
-			"vdl2-addr": "address",
-			"lora-node": "node",
-		}
-		parts.push(`${prefix[id.kind]} ${id.value}`.trim())
-	}
+	if (id) parts.push(identityText(id))
 	const md = result.metadata
 	if (md.talkgroups[0]) parts.push(`TG ${md.talkgroups[0]}`)
 	if (md.sources[0]) parts.push(`radio ${md.sources[0]}`)
@@ -289,6 +347,7 @@ const EMPTY: IdentifyView = {
 	measured: null,
 	bar: null,
 	untilSignal: false,
+	found: null,
 }
 
 /** "8 s", "2 min 05 s", "1 h 04 min": how long a wait until a transmission has lasted. */
@@ -307,7 +366,12 @@ export function identifyView(
 ): IdentifyView {
 	const asked = decodeAsName(state.protocols)
 	const view = identifyPhaseView(state, nowMs, asked)
-	return asked ? { ...view, eyebrow: `Decode as ${asked}` } : view
+	return asked
+		? { ...view, eyebrow: `Decode as ${asked}` }
+		: state.auto
+			? // started on its own: it answers the transmission that started it, so no waiting on and on
+				{ ...view, eyebrow: "Identify · on its own", untilSignal: false }
+			: view
 }
 
 function identifyPhaseView(
@@ -428,6 +492,7 @@ function identifyPhaseView(
 				note: note || "Identified",
 				trials: rows,
 				measured,
+				found: result ? identifiedCard(result, asked) : null,
 			}
 		}
 		case "candidate": {

@@ -765,6 +765,21 @@
 		font-variant-numeric: tabular-nums;
 		line-height: 1.4;
 	}
+	/* Identified: the card becomes the signal's card, under a one-line banner (Tuned.dc.html idBanner) */
+	.wkf-id-banner {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-accent);
+	}
+	.wkf-id-banner > svg {
+		flex: none;
+	}
+	.wkf-id-banner .wk-icon-btn {
+		margin: -4px -6px -4px 0;
+		color: var(--wk-text-3);
+	}
 	.wkf-id-note {
 		font-size: var(--wk-fs-xs);
 		color: var(--wk-text-3);

@@ -10,6 +10,7 @@ import {
 	DECODE_AS,
 	decodeAsName,
 	formatWaited,
+	identifiedCard,
 	identifyView,
 	measuredLine,
 	resultDetails,
@@ -86,6 +87,8 @@ const state = (
 	protocols: [],
 	untilSignal: false,
 	waitSince: null,
+	auto: false,
+	known: [],
 	...over,
 })
 
@@ -99,6 +102,8 @@ const IDLE: IdentifyState = {
 	protocols: [],
 	untilSignal: false,
 	waitSince: null,
+	auto: false,
+	known: [],
 }
 
 describe("identifyView", () => {
@@ -208,6 +213,73 @@ describe("identifyView", () => {
 		})
 		expect(v.line).toBe("CC 1 · TG 2081 · radio 2081107")
 		expect(v.trials.map(r => r.tone)).toEqual(["fail", "fail", "ok"])
+		// the card becomes that signal's card (Tuned.dc.html identified)
+		expect(v.found).toEqual({
+			proto: "DMR",
+			sub: "CC 1 · slot 1",
+			big: "TG 2081",
+			line: "From radio 2081107",
+			banner: "Identified · added to discoveries",
+			measured: "6.25 kHz wide · SNR 18 dB · peak −62 dBFS · 40 % duty",
+			discoveryId: "d1",
+		})
+	})
+
+	it("makes the identified card from what the answer names, nothing more", () => {
+		// Ben's DMR on 446.926: a colour code and nothing heard on it yet
+		const bare = identifiedCard(
+			result({
+				protocol: "dmr",
+				confidence: "decoded",
+				identity: { kind: "dmr-cc", value: "0" },
+			}),
+		)
+		expect(bare).toMatchObject({
+			proto: "DMR",
+			sub: "CC 0",
+			big: null,
+			line: "",
+			banner: "Identified",
+			discoveryId: null,
+		})
+		expect(
+			identifiedCard(
+				result({
+					protocol: "pocsag",
+					metadata: {
+						talkgroups: [],
+						sources: [],
+						slots: [],
+						callsigns: [],
+						capcodes: ["1234567"],
+						ismModels: [],
+					},
+					discoveryId: "d2",
+				}),
+				"POCSAG",
+			),
+		).toMatchObject({
+			big: "Capcode 1234567",
+			banner: "Decoded as POCSAG · added to discoveries",
+		})
+		expect(identifiedCard(result({ protocol: "unknown" }))).toBeNull()
+		expect(identifiedCard(result())).toBeNull()
+	})
+
+	it("says when the card identified on its own", () => {
+		const v = identifyView(
+			state(
+				{ state: "trying", trials: [trial("dmr", "running")] },
+				{ auto: true },
+			),
+			T0 + 1000,
+		)
+		expect(v.eyebrow).toBe("Identify · on its own")
+		expect(v.found).toBeNull()
+		expect(
+			identifyView(state({ state: "waiting-for-signal" }, { auto: true }), T0)
+				.untilSignal,
+		).toBe(false)
 	})
 
 	it("answers a candidate as Maybe, with the telling failure as its tag", () => {

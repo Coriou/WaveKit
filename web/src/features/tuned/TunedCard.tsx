@@ -5,6 +5,8 @@
 // Decode as…, Pin, Copy). A message opens in full as the decoded message card (Decode board) inside the card, in a
 // scrolling well; Decode as… is Identify cut to one protocol. Identify never moves the receiver. While a sweep moves the receiver the card hides (the Tuner's hold
 // row says where it is); on a hit it is that signal's card, "Held by the scan". A pinned card keeps its frequency.
+// Identified, the card becomes that signal's card (a banner, what was heard, Save and Open in Scanner) and keeps its
+// name for the session; a transmission on a frequency nothing decodes is identified on its own (auto-identify.ts).
 import { WaveKitIcon } from "@wavekit/brand/react"
 import type { ScannerProtocol } from "@wavekit/api-types"
 import { lazy, Suspense, useEffect, useRef, useState } from "react"
@@ -15,9 +17,11 @@ import {
 	channelAt,
 	inputOf,
 	isIdentifyFinal,
+	knownAt,
 	useStore,
 } from "../../data/index.ts"
 import { CardHandle } from "../../shell/CardHandle.tsx"
+import { useDevicePrefs } from "../../shell/hooks.ts"
 import { shellStore } from "../../shell/store.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { Button } from "../../ui/Button.tsx"
@@ -38,8 +42,16 @@ import { defaultGroup, defaultSaveName, saveInput } from "../tuner/saved.ts"
 import { sweepMoving } from "../tuner/scan-hold.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
 import { decodersAt } from "./decoders.ts"
-import { DECODE_AS, identifyView, type IdentifyView } from "./identify-view.ts"
-import { useDisplay } from "../display.ts"
+import {
+	DECODE_AS,
+	identifiedCard,
+	identifyView,
+	type IdentifiedCard,
+	type IdentifyView,
+} from "./identify-view.ts"
+import { clockText, useDisplay } from "../display.ts"
+import { openDiscovery } from "../scanner/ui-store.ts"
+import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
 import { tunedCardStore } from "./place.ts"
 import { decoderLabel, signalBars, signalPresent } from "./signal.ts"
@@ -154,6 +166,47 @@ function IdentifyBlock({
 	)
 }
 
+/** Identified (Tuned.dc.html): a banner over what the signal is, the trials folded away. */
+function IdentifiedBlock({
+	found,
+	line,
+	onClose,
+}: {
+	found: IdentifiedCard
+	line: string
+	onClose: () => void
+}) {
+	return (
+		<>
+			<div role="status" aria-live="polite" className="wkf-id-banner">
+				<Icon name="check" size={14} />
+				<span className="wkf-grow wkf-ellipsis">{found.banner}</span>
+				<IconButton
+					size="xs"
+					label="Dismiss"
+					title="Dismiss"
+					className="wkf-quiet-btn"
+					onClick={onClose}
+				>
+					<Icon name="close" size={13} />
+				</IconButton>
+			</div>
+			{found.big !== null && (
+				<div className="wkf-big-row">
+					<span className="wkf-big">{found.big}</span>
+				</div>
+			)}
+			{found.line && <span className="wkf-line">{found.line}</span>}
+			<span className="wkf-line">{line}</span>
+			{found.measured && (
+				<span className="wkf-id-measured">
+					<span className="wkf-quiet">Measured</span> {found.measured}
+				</span>
+			)}
+		</>
+	)
+}
+
 function NowBlock({ now }: { now: NowView }) {
 	const msg = now.kind === "msg"
 	return (
@@ -231,6 +284,7 @@ export function TunedCard() {
 	const services = useServices()
 	const { data, decoders: feed, activity, tuning, tuned } = services
 	const readOnly = useReadOnly()
+	const device = useDevicePrefs()
 	const settledHz = useSettledHz()
 	const sweep = useSweep()
 	const sweepState = sweep?.state
@@ -262,6 +316,8 @@ export function TunedCard() {
 	const lineRef = useRef<HTMLButtonElement>(null)
 	const chevRef = useRef<HTMLButtonElement>(null)
 	const focusAfterMin = useRef<boolean | null>(null)
+	// the frequency the card last identified on its own; cleared when the receiver leaves it
+	const autoTried = useRef<number | null>(null)
 
 	const bw = status?.config.bandwidth || 12_500
 	const tolerance = Math.max(bw / 2, 3000)
@@ -305,7 +361,10 @@ export function TunedCard() {
 		;(want ? lineRef : chevRef).current?.focus({ preventScroll: true })
 	}, [card.minimised])
 
-	const startIdentify = (protocols: readonly ScannerProtocol[] = []) => {
+	const startIdentify = (
+		protocols: readonly ScannerProtocol[] = [],
+		auto = false,
+	) => {
 		if (hz === null || readOnly) return
 		if (!onIt) void tuning.tune(hz)
 		const opts = {
@@ -313,6 +372,7 @@ export function TunedCard() {
 				? { bandwidthHz: status.config.bandwidth }
 				: {}),
 			...(protocols.length > 0 ? { protocols: [...protocols] } : {}),
+			...(auto ? { auto: true } : {}),
 		}
 		setFullId(null)
 		data.identify.start(hz, opts).catch(() => undefined)
@@ -337,8 +397,40 @@ export function TunedCard() {
 		return () => document.removeEventListener("keydown", onKey)
 	})
 
-	if (sweepMoving(sweepState) && pinned === null) return null
+	// a transmission on a frequency nothing decodes: identify it on its own, once per visit
 	const heldByScan = sweepState === "holding" && onIt
+	const live = onIt && status?.running === true && level !== null
+	const present = live ? signalPresent(level) : false
+	const squelchOpen = present === true
+	const known = hz === null ? null : knownAt(id.known, hz, tolerance)
+	if (autoTried.current !== null && autoTried.current !== hz)
+		autoTried.current = null
+	const autoNow =
+		hz !== null &&
+		!sweepMoving(sweepState) &&
+		shouldAutoIdentify({
+			enabled: device.autoIdentify,
+			readOnly,
+			onIt,
+			heldByScan,
+			transmitting: squelchOpen,
+			decodersHere: here.length,
+			identifyShown: id.targetHz !== null,
+			known: known !== null,
+			triedHz: autoTried.current,
+			hz,
+		})
+	useEffect(() => {
+		if (!autoNow || hz === null) return
+		const t = setTimeout(() => {
+			autoTried.current = hz
+			startIdentify([], true)
+		}, AUTO_IDENTIFY_DELAY_MS)
+		return () => clearTimeout(t)
+		// startIdentify reads this render's state; the timer restarts only when the decision or frequency changes
+	}, [autoNow, hz])
+
+	if (sweepMoving(sweepState) && pinned === null) return null
 
 	if (hz === null)
 		return (
@@ -359,10 +451,10 @@ export function TunedCard() {
 	const idHere =
 		idView.phase !== "idle" &&
 		(id.targetHz === null || Math.abs(id.targetHz - hz) <= tolerance)
+	const found = idHere ? idView.found : null
+	// what Identify named here this session: the card keeps that name after the banner is dismissed
+	const named = found ?? (known ? identifiedCard(known.result) : null)
 
-	const live = onIt && status?.running === true && level !== null
-	const present = live ? signalPresent(level) : false
-	const squelchOpen = present === true
 	const now = nowView({
 		items: fresh ? items : [],
 		decoderTypes: types,
@@ -380,23 +472,33 @@ export function TunedCard() {
 	const bandMode = modulationOf(band?.band.mode)
 	const bandSays =
 		bandMode !== null && mode !== null && bandMode !== status?.config.modulation
+	const notLive =
+		here.length === 0
+			? "No decoder runs on this frequency, so nothing here is decoded live."
+			: ""
 	const plainLine = active.length
 		? `Decoded here by ${active.map(d => d.type).join(", ")}. Nothing heard yet.`
 		: here.length
 			? `${here.map(d => d.type).join(", ")} listens here but is not running`
-			: bandSays
-				? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
-				: "Nothing decodes this frequency. Identify finds out what it is."
+			: named && known
+				? `Identified as ${named.proto} at ${clockText(known.at)}. ${notLive}`
+				: bandSays
+					? `Nothing decodes this frequency. The band plan says ${modeSpec(bandMode).label}.`
+					: "Nothing decodes this frequency. Identify finds out what it is."
 	const proto =
 		now.protocol ??
 		(active[0]
 			? decoderLabel(active[0].type)
 			: here[0]
 				? decoderLabel(here[0].type)
-				: mode
-					? mode.label
-					: "Unknown")
-	const protoSub = [band?.band.name, channel?.name].filter(Boolean).join(" · ")
+				: named
+					? named.proto
+					: mode
+						? mode.label
+						: "Unknown")
+	const protoSub = [band?.band.name, channel?.name, named?.sub]
+		.filter(Boolean)
+		.join(" · ")
 	const snr =
 		live && level.channelPowerDbfs !== null && level.noiseFloorDbfs !== null
 			? level.channelPowerDbfs - level.noiseFloorDbfs
@@ -528,7 +630,7 @@ export function TunedCard() {
 			// clipboard blocked
 		}
 	}
-	const unknown = now.kind === "plain" && here.length === 0
+	const unknown = now.kind === "plain" && here.length === 0 && named === null
 	// a message reads in full as its decoded message card (calls and transmissions stay in Activity, with audio)
 	const openable =
 		now.latest !== null && (now.kind === "msg" || now.kind === "count")
@@ -564,9 +666,15 @@ export function TunedCard() {
 				? { label: "Show less", icon: "chevron-up", pick: closeFull }
 				: { label: "Open message", icon: "activity", pick: openFull },
 		)
+	if (found && now.kind !== "audio")
+		menuItems.push({
+			label: "Activity",
+			icon: "activity",
+			pick: openActivity,
+		})
 	if (!unknown && !idRunning)
 		menuItems.push({
-			label: "Identify",
+			label: found ? "Identify again" : "Identify",
 			icon: "scanner",
 			key: "I",
 			pick: () => startIdentify(),
@@ -702,7 +810,13 @@ export function TunedCard() {
 			{!minimised && (
 				<>
 					<div className="wkf-well" data-full={full || undefined}>
-						{idHere ? (
+						{found ? (
+							<IdentifiedBlock
+								found={found}
+								line={notLive}
+								onClose={closeIdentify}
+							/>
+						) : idHere ? (
 							<IdentifyBlock
 								view={idView}
 								onClose={closeIdentify}
@@ -810,7 +924,35 @@ export function TunedCard() {
 								}}
 							/>
 						)}
-						{idRunning ? (
+						{found ? (
+							<>
+								<Button
+									variant={savedHere ? "tonal" : "primary"}
+									className="wkf-grow"
+									title={saveTitle}
+									aria-pressed={savedHere !== null}
+									disabled={!canSave}
+									onClick={toggleSave}
+								>
+									<Icon name="bookmark" size={15} />
+									{savedHere ? "Saved" : "Save"}
+								</Button>
+								{found.discoveryId !== null && (
+									<Button
+										variant="tonal"
+										className="wkf-grow"
+										title="This signal's discovery in the Scanner"
+										onClick={() => {
+											openDiscovery(found.discoveryId)
+											shellStore.openDrawer("scanner")
+										}}
+									>
+										<Icon name="scanner" size={15} />
+										Open in Scanner
+									</Button>
+								)}
+							</>
+						) : idRunning ? (
 							<Button
 								variant="tonal"
 								className="wkf-grow"
@@ -838,13 +980,13 @@ export function TunedCard() {
 									: "Identify"}
 							</Button>
 						) : null}
-						{now.map && !idRunning && (
+						{now.map && !idRunning && !found && (
 							<Button variant="tonal" className="wkf-grow" onClick={openMap}>
 								<Icon name="map" size={15} />
 								Map
 							</Button>
 						)}
-						{!unknown && now.kind !== "audio" && (
+						{!unknown && !found && now.kind !== "audio" && (
 							<Button
 								variant="tonal"
 								className="wkf-grow"
@@ -855,16 +997,18 @@ export function TunedCard() {
 								Activity
 							</Button>
 						)}
-						<IconButton
-							className="wkf-act-icon"
-							label={savedHere ? "Saved" : "Save"}
-							title={saveTitle}
-							pressed={savedHere !== null}
-							disabled={!canSave}
-							onClick={toggleSave}
-						>
-							<Icon name="bookmark" size={15} />
-						</IconButton>
+						{!found && (
+							<IconButton
+								className="wkf-act-icon"
+								label={savedHere ? "Saved" : "Save"}
+								title={saveTitle}
+								pressed={savedHere !== null}
+								disabled={!canSave}
+								onClick={toggleSave}
+							>
+								<Icon name="bookmark" size={15} />
+							</IconButton>
+						)}
 						{unknown && (
 							<IconButton
 								className="wkf-act-icon"

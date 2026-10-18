@@ -10,6 +10,7 @@ import type {
 	ScanJob,
 	ScannerIdentifyEventData,
 	ScannerIdentifyRequest,
+	ScannerIdentifyResult,
 	ScannerIdentifyState,
 	ScannerProtocol,
 } from "@wavekit/api-types"
@@ -35,10 +36,36 @@ export interface IdentifyState {
 	untilSignal: boolean
 	/** While waiting until a transmission: when the wait began (epoch ms), across the jobs it took. */
 	waitSince: number | null
+	/** Started by the card on its own, when a transmission began on a frequency nothing decodes. */
+	auto: boolean
+	/** What was identified this session, newest first (outlives reset(), so the card keeps saying it). */
+	known: readonly KnownSignal[]
+}
+
+/** A frequency Identify answered with a protocol. */
+export interface KnownSignal {
+	hz: number
+	result: ScannerIdentifyResult
+	/** When it was identified (epoch ms). */
+	at: number
+}
+
+/** The answers kept for the session. */
+const KNOWN_MAX = 32
+
+/** The latest answer within `toleranceHz` of `hz`. */
+export function knownAt(
+	known: readonly KnownSignal[],
+	hz: number,
+	toleranceHz: number,
+): KnownSignal | null {
+	return known.find(k => Math.abs(k.hz - hz) <= toleranceHz) ?? null
 }
 
 export interface IdentifyOptions {
 	sourceId?: string
+	/** Started by the card on its own (not sent to the core). */
+	auto?: boolean
 	bandwidthHz?: number
 	timeoutMs?: number
 	protocols?: ScannerProtocol[]
@@ -99,6 +126,8 @@ const INITIAL: IdentifyState = {
 	protocols: [],
 	untilSignal: false,
 	waitSince: null,
+	auto: false,
+	known: [],
 }
 
 export class IdentifyStore extends Store<IdentifyState> {
@@ -142,14 +171,17 @@ export class IdentifyStore extends Store<IdentifyState> {
 	/** Starts identifying `hz`. Rejects with the ApiError (also kept in `error`/`errorCode`). */
 	async start(hz: number, options: IdentifyOptions = {}): Promise<ScanJob> {
 		this.asked = { hz, options }
-		const untilSignal = this.get().untilSignal
+		const { untilSignal, known } = this.get()
 		this.set({
 			...INITIAL,
 			untilSignal,
-			waitSince: untilSignal ? this.now() : null,
+			known,
+			// one started on its own answers the transmission that started it, never waits on and on
+			waitSince: untilSignal && options.auto !== true ? this.now() : null,
 			targetHz: hz,
 			starting: true,
 			protocols: options.protocols ?? [],
+			auto: options.auto === true,
 		})
 		return this.launch(hz, options, false)
 	}
@@ -203,6 +235,7 @@ export class IdentifyStore extends Store<IdentifyState> {
 			const event = this.early.get(job.id) ?? job.identify?.targets[0] ?? null
 			this.early.clear()
 			this.update(s => ({ ...s, job, event, starting: false }))
+			this.remember()
 			this.continueIfNothingHeard()
 			return job
 		} catch (error) {
@@ -247,7 +280,8 @@ export class IdentifyStore extends Store<IdentifyState> {
 		this.early.clear()
 		this.clearTimer()
 		this.asked = null
-		this.set({ ...INITIAL, untilSignal: this.get().untilSignal })
+		const { untilSignal, known } = this.get()
+		this.set({ ...INITIAL, untilSignal, known })
 	}
 
 	/** Refetches the job after a reconnect (progress sent while offline is not replayed). */
@@ -264,6 +298,7 @@ export class IdentifyStore extends Store<IdentifyState> {
 				job.identify?.targets[0] ??
 				null
 			this.update(s => ({ ...s, job, event: event ?? s.event }))
+			this.remember()
 			this.continueIfNothingHeard()
 		} catch (error) {
 			if (this.get().job?.id !== id) return
@@ -333,7 +368,23 @@ export class IdentifyStore extends Store<IdentifyState> {
 		}
 		if (event.jobId !== s.job.id) return
 		this.update(x => ({ ...x, event }))
+		this.remember()
 		this.continueIfNothingHeard()
+	}
+
+	/** Keeps an identified answer for the session, one per frequency. */
+	private remember(): void {
+		const s = this.get()
+		const result = s.event?.result
+		if (s.event?.state !== "identified" || !result?.protocol) return
+		const hz = s.event.targetHz
+		const first = s.known[0]
+		if (first && first.hz === hz && first.result === result) return
+		const known: KnownSignal[] = [
+			{ hz, result, at: this.now() },
+			...s.known.filter(k => k.hz !== hz),
+		].slice(0, KNOWN_MAX)
+		this.update(x => ({ ...x, known }))
 	}
 }
 

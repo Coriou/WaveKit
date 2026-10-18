@@ -544,3 +544,20 @@ core source, reported against a live core)
   same ramp). The web app keeps Waterfall colours per browser, as DESIGN.md's "On this device" says, and does
   not read or write the core preference. To sync it, the enum would become `match | amber | mono | classic`.
   `units` and `timeFormat` are used as they are (protected mode; in open mode each browser keeps its own).
+
+**Found by the web app, Identify on its own** (2026-10-18, branch `claude/project-thread-afdtom`; read from
+`src/core/scanner/identify.ts` and `scanner-service.ts`)
+
+- [ ] The core identifies only on request (`POST /api/scanner/identify`), so a transmission on the frequency
+  you sit on is never named unless you ask. The web app now asks by itself (Settings › Identify on its own,
+  on by default, `web/src/features/tuned/auto-identify.ts`): when the live-audio squelch opens on a frequency
+  no decoder follows, once per visit, while that browser is listening. A core-side option (identify a
+  transmission on the live-audio channel when nothing decodes it) would cover the times no browser listens
+  and would not depend on the squelch.
+- [ ] What Identify named is kept by the web app for the session only (the card keeps "DMR · CC 0" after
+  the banner is dismissed). The discovery holds it, but nothing answers "what is known at 446.925 MHz" in one
+  call; a lookup by frequency (`GET /api/scanner/discoveries?nearHz=&toleranceHz=`) would let the card name a
+  frequency identified before, from any browser.
+- [ ] An identified digital channel is not decoded afterwards: Identify's probe stops, and no decoder follows
+  the frequency, so the card says "No decoder runs on this frequency". A "Decode here" action (start the
+  protocol's decoder on that channel, or follow the live-audio channel) would turn an answer into traffic.

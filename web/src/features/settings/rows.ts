@@ -1308,6 +1308,21 @@ function displayRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			def: { value: "free", text: "Free" },
 			write: v => local(() => a.setDevice({ clickTuning: v as ClickTuning })),
 		},
+		{
+			id: "dp.identify",
+			group: "display",
+			label: "Identify on its own",
+			help: "When a transmission starts on a frequency nothing decodes, the tuned card finds out what it is",
+			keys: words(
+				"identify automatic auto identification recognise recognize detect protocol unknown signal",
+			),
+			device: true,
+			widget: { kind: "switch" },
+			value: d.autoIdentify,
+			text: d.autoIdentify ? "On" : "Off",
+			def: { value: true, text: "On" },
+			write: v => local(() => a.setDevice({ autoIdentify: v === true })),
+		},
 	)
 	rows.push({
 		id: "dev.density",

@@ -52,6 +52,7 @@ describe("device prefs", () => {
 			fftSize: 8192,
 			signalLabels: "clear",
 			clickTuning: "free",
+			autoIdentify: true,
 			mapTiles: "online",
 			mapTrail: 15,
 			mapLabels: "normal",
@@ -61,6 +62,12 @@ describe("device prefs", () => {
 		expect(
 			parseDevicePrefs(JSON.stringify({ density: "compact", motion: "fast" })),
 		).toEqual({ ...DEFAULT_DEVICE, density: "compact" })
+		expect(
+			parseDevicePrefs(JSON.stringify({ autoIdentify: false })).autoIdentify,
+		).toBe(false)
+		expect(
+			parseDevicePrefs(JSON.stringify({ autoIdentify: "no" })).autoIdentify,
+		).toBe(true)
 		expect(
 			parseDevicePrefs(
 				JSON.stringify({ mapTiles: "blank", mapTrail: 60, mapLabels: "many" }),

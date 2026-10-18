@@ -370,6 +370,7 @@ export {
 	endedWithNothingHeard,
 	IdentifyStore,
 	isIdentifyFinal,
+	knownAt,
 } from "./identify-store.ts"
 export {
 	SavedFrequenciesStore,
@@ -385,7 +386,11 @@ export type {
 	SavedFrequenciesStatus,
 	SavedFrequencyRow,
 } from "./saved-frequencies-store.ts"
-export type { IdentifyOptions, IdentifyState } from "./identify-store.ts"
+export type {
+	IdentifyOptions,
+	IdentifyState,
+	KnownSignal,
+} from "./identify-store.ts"
 export type {
 	SettingWriteError,
 	SettingWriteOk,

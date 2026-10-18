@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { ScanJob, TunerState } from "@wavekit/api-types"
 import { ApiClient, ApiError } from "../../src/data/api-client.ts"
 import { EventsClient } from "../../src/data/events-client.ts"
-import { IdentifyStore } from "../../src/data/identify-store.ts"
+import { IdentifyStore, knownAt } from "../../src/data/identify-store.ts"
 import { Store } from "../../src/data/store.ts"
 import { TunerStore } from "../../src/data/tuner-store.ts"
 import { fakeSockets } from "./fake-socket.ts"
@@ -193,6 +193,67 @@ describe("IdentifyStore", () => {
 			data: { ...event, jobId: "other", state: "trying" },
 		})
 		expect(identify.get().event?.state).toBe("identified")
+	})
+
+	it("remembers what it identified for the session, and marks a start on its own", async () => {
+		const { factory, last } = fakeSockets()
+		const events = new EventsClient({ createSocket: factory, url: "ws://x/ws" })
+		events.connect()
+		last().open()
+		const api = new ApiClient({
+			fetch: () =>
+				Promise.resolve(
+					json(201, {
+						id: "j_2",
+						state: "running",
+						identify: { targets: [] },
+					} as unknown as ScanJob),
+				),
+		})
+		const identify = new IdentifyStore(
+			api,
+			events,
+			{ getItem: () => "1", setItem: () => undefined },
+			() => 1000,
+		)
+		await identify.start(446_926_000, { auto: true })
+		// on its own: answers the transmission that started it, never waits on and on
+		expect(identify.get()).toMatchObject({ auto: true, waitSince: null })
+		const result = {
+			protocol: "dmr",
+			confidence: "decoded",
+			identity: { kind: "dmr-cc", value: "0" },
+			metadata: {
+				talkgroups: [],
+				sources: [],
+				slots: [],
+				callsigns: [],
+				capcodes: [],
+				ismModels: [],
+			},
+			measurements: { source: "track" },
+		}
+		last().receive({
+			type: "scanner:identify",
+			channel: "scanner",
+			data: {
+				jobId: "j_2",
+				targetHz: 446_926_000,
+				state: "identified",
+				trials: [],
+				result,
+			},
+		})
+		expect(identify.get().known).toEqual([
+			{ hz: 446_926_000, result, at: 1000 },
+		])
+		identify.reset()
+		expect(identify.get().known).toHaveLength(1)
+		expect(knownAt(identify.get().known, 446_930_000, 6250)?.hz).toBe(
+			446_926_000,
+		)
+		expect(knownAt(identify.get().known, 446_950_000, 6250)).toBeNull()
+		identify.dispose()
 	})
 
 	it("waits until a transmission: a job that heard nothing is followed by the next", async () => {

@@ -1,4 +1,5 @@
-// Display › On this device: density, motion, the spectrum's range, averaging, FFT size and signal labels, and the Map's tiles,
+// Display › On this device: density, motion, the spectrum's range, averaging, FFT size, signal labels, click to tune and
+// identify on its own, and the Map's tiles,
 // trail length and labels (Settings › Map), persisted in localStorage and applied as data-wk-density /
 // data-wk-motion on <html>. Motion "system" resolves through prefers-reduced-motion, so CSS and code only ever
 // test data-wk-motion="reduce". Pure apart from the storage, element and media query passed in (tests use fakes).
@@ -79,6 +80,8 @@ export interface DevicePrefs {
 	readonly signalLabels: SignalLabelsMode
 	/** What a click on the spectrum moves (plot/plot-store.ts tuneTo). */
 	readonly clickTuning: ClickTuning
+	/** The tuned card identifies a transmission on a frequency nothing decodes, on its own (tuned/auto-identify.ts). */
+	readonly autoIdentify: boolean
 	readonly mapTiles: MapTiles
 	readonly mapTrail: MapTrail
 	readonly mapLabels: MapLabels
@@ -93,6 +96,7 @@ export const DEFAULT_DEVICE: DevicePrefs = {
 	fftSize: 8192,
 	signalLabels: "clear",
 	clickTuning: "free",
+	autoIdentify: true,
 	mapTiles: "online",
 	mapTrail: 15,
 	mapLabels: "normal",
@@ -160,6 +164,10 @@ export function parseDevicePrefs(raw: string | null): DevicePrefs {
 			o["clickTuning"],
 			DEFAULT_DEVICE.clickTuning,
 		),
+		autoIdentify:
+			typeof o["autoIdentify"] === "boolean"
+				? o["autoIdentify"]
+				: DEFAULT_DEVICE.autoIdentify,
 		mapTiles: pick(MAP_TILES, o["mapTiles"], DEFAULT_DEVICE.mapTiles),
 		mapTrail: (MAP_TRAILS as readonly unknown[]).includes(o["mapTrail"])
 			? (o["mapTrail"] as MapTrail)

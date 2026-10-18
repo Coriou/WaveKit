@@ -218,6 +218,8 @@ export const MOCK_SIGNALS: readonly MockSignal[] = [
 	}),
 	sig(446.03125, 11e3, -71, "voice", { on: 4, per: 27, ph: 9 }),
 	sig(446.09375, 11e3, -77, "voice", { on: 2, per: 33, ph: 15 }),
+	// DMR on a frequency no decoder follows (Ben's 446.926, 2026-10-18): Identify names it, on its own while listening
+	sig(446.925, 9e3, -58, "tdma", { on: 5, per: 9, ph: 2 }),
 	sig(466.025, 12.5e3, -62, "burst", { on: 1.2, per: 10, ph: 3 }),
 	// SRD 868
 	sig(868.1, 125e3, -80, "burst", { on: 0.2, per: 8, ph: 5 }),
@@ -345,6 +347,15 @@ export const IDENTIFY_PLANS: Readonly<Record<number, IdentifyPlan>> = {
 		],
 		identity: { kind: "p25-nac", value: "293" },
 		metadata: { talkgroups: ["1201"], sources: ["4410022"] },
+	},
+	446925000: {
+		state: "identified",
+		class: "tdma-ms",
+		protocol: "dmr",
+		trials: [
+			{ protocol: "dmr", decoder: "dsd-fme", mode: "auto", outcome: "decoded" },
+		],
+		identity: { kind: "dmr-cc", value: "0" },
 	},
 	160450000: {
 		state: "identified",

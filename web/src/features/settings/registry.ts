@@ -203,6 +203,13 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 		SETTINGS,
 	),
 	row(
+		"dp.identify",
+		"Display",
+		"Identify on its own",
+		"identify automatic auto identification recognise detect unknown signal",
+		SETTINGS,
+	),
+	row(
 		"dev.card",
 		"Display",
 		"Tuned card position",
