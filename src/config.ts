@@ -332,6 +332,17 @@ export const LiveDemodConfigSchema = z
 		 * default: AM, CW, DSB, USB and LSB `fast`; NFM, WFM and raw none.
 		 */
 		agc: z.enum(LIVE_AUDIO_AGC_MODES_TUPLE).optional(),
+		/**
+		 * Demodulator engine. `csdr` is the shipped chain. `rust` uses one
+		 * wavekit-chan demod channel and falls back to csdr when it cannot run.
+		 */
+		engine: z.enum(["csdr", "rust"]).default("csdr"),
+		/**
+		 * wavekit-chan binary for `engine: rust`. Absent unless set: a default
+		 * string would show up in snapshots of the parsed config. The runtime
+		 * uses `wavekit-chan` when this is omitted.
+		 */
+		chanBinaryPath: z.string().min(1).optional(),
 	})
 	.superRefine((value, ctx) => {
 		if (value.modulation !== "raw" && value.bandwidth <= 0) {
@@ -895,7 +906,16 @@ export type DecoderCaps = z.infer<typeof DecoderCapsSchema>
 export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>
 export type TunerRelayConfig = z.infer<typeof TunerRelayConfigSchema>
-export type LiveDemodConfig = z.infer<typeof LiveDemodConfigSchema>
+export type LiveDemodConfig = Omit<
+	z.infer<typeof LiveDemodConfigSchema>,
+	"engine"
+> & {
+	/**
+	 * Optional on the type so existing literals keep compiling. Parsing still
+	 * defaults it to `csdr` (see `LiveDemodConfigSchema`).
+	 */
+	engine?: "csdr" | "rust"
+}
 export type DigitalVoiceConfig = z.infer<typeof DigitalVoiceConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
