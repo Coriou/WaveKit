@@ -28,6 +28,10 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [regional-display-registry](regional-display-registry/requirements.md)
 - [scanner-followups](scanner-followups/requirements.md): running-job range edits,
   per-range fields, signals only, preempting job, identity search (SF1)
+- [scanner-redesign](scanner-redesign/requirements.md): a fitting window stays tuned, a
+  channel-matched detector gate, labels only from trial evidence with a per-transmission proof,
+  replay first with an analog replay trial, identify until a transmission, scan phases, IQ
+  capture on by default in protected mode after live acceptance (WG12)
 - [viewed-slice-spectrum](viewed-slice-spectrum/requirements.md)
 - [web-gaps-1](web-gaps-1/requirements.md): waterfall backfill and averaging, analog
   transmission events, AIS vessel tracker, Activity on by default (WG1)
