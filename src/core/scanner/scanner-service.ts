@@ -82,8 +82,32 @@ import {
 } from "./evidence/capture-recorder.js"
 import { CaptureStore } from "./evidence/capture-store.js"
 import { ulid } from "./ids.js"
+import type {
+	IqCaptureDiscardReason,
+	IqCapturePort,
+	IqCaptureRefusal,
+	IqCaptureRequest,
+	IqCaptureView,
+	IqReplayPlanInput,
+	IqReplayTrial,
+	IqReplayResult,
+} from "./iq-capture-contract.js"
+import {
+	createPoolReplayProbes,
+	type ReplayPoolAdapter,
+} from "../iq-capture/pool-adapter.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { probeReplayShapes } from "../iq-capture/shapes.js"
+import type { IqReplayShapes } from "../iq-capture/service.js"
+import {
+	createIqReplayQueue,
+	IQ_REPLAY_QUEUE_HOLDER,
+	type IqReplayQueue,
+} from "../iq-capture/replay-queue.js"
+import { replayMissEligible } from "../iq-capture/replay-miss.js"
 import { createKnownProtocolMemory } from "./known-protocol.js"
 import { narrowRasterAt } from "./narrow-digital.js"
+import { planReplayTrials } from "./replay-plan.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
@@ -124,12 +148,14 @@ import {
 import { resolveAmbientTargets } from "./probes/ambient-target.js"
 import {
 	ProbePool,
+	REPLAY_PROBE_PRIORITY,
 	offsetTransport,
 	probeModesFor,
 	type ProbeRecordings,
 	type ProbeRequest,
 	type TransportStrategy,
 } from "./probes/probe-pool.js"
+import { createReplayTransport } from "./probes/replay-transport.js"
 import {
 	DEFAULT_TUNING,
 	USABLE_FRACTION,
@@ -248,8 +274,57 @@ import { updateChannelAdmission } from "./plan/resource-admission.js"
 import type { AnalogCut } from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 
+/**
+ * WG11 req 6: the IQ capture service as the scanner uses it (the port plus the epoch flush). The
+ * scanner hands it the replay shapes (from the probe channel requests) when it is constructed, so
+ * the composition root never imports the probe channel modules.
+ */
+export type ScannerIqCapture = IqCapturePort & {
+	/** Review M2: a capture held for `holder` from the start (identify's own request). */
+	captureFor(
+		req: IqCaptureRequest,
+		holder: string,
+	): { captureId: string } | { refused: IqCaptureRefusal }
+	/** A ready capture's view (any holder), else null. */
+	view(captureId: string): IqCaptureView | null
+	/** The replay queue's port (the scanner owns the queue): finished captures, holders, discard. */
+	onFinished(listener: (view: IqCaptureView) => void): () => void
+	/** Astra r7 B4: a capture left the store (any reason). */
+	onRemoved(
+		listener: (captureId: string, observationId: string | null) => void,
+	): () => void
+	holderOf(captureId: string): string | null | undefined
+	discard(
+		captureId: string,
+		reason: IqCaptureDiscardReason,
+		holder?: string,
+	): boolean
+	setShapes(shapes: IqReplayShapes): void
+	flush(
+		sourceId: string,
+		next?: { epoch?: number; centerHz?: number; sampleRateHz?: number },
+	): void
+	attachSource(
+		sourceId: string,
+		source: {
+			sampleRateHz: number
+			centerHz: number
+			epoch: number
+			engine: Pick<SpectrumEngine, "tap" | "liveEdge">
+		},
+	): void
+	detachSource(sourceId: string): void
+}
+
+/** Review m3: planned replay trials kept per capture (the queue holds one at a time; slack for races). */
+const REPLAY_PLANS_MAX = 64
+/** Re-review 2 #3: closed observation spans kept for late replay results. */
+const REPLAY_SPANS_MAX = 1024
+
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
+	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
+	readonly iqCapture?: ScannerIqCapture
 	/** WG10 req 3: the live demodulator's transmission evidence for identify; absent keeps today's behaviour. */
 	readonly analogEvidence?: IdentifyAnalogEvidence
 	/** WG9 req 2.5-2.6: the recording deletion decision; absent keeps today's behaviour. */
@@ -485,6 +560,18 @@ export class ScannerService extends EventEmitter {
 	private readonly bootResume = new Map<string, string[]>()
 	private readonly passiveDisabled = new Map<string, string>()
 	private readonly probeOutcomes = new Map<string, ProbeOutcome>()
+	/** WG11 req 6.3: observations a detection capture was tried for (once each) and their capture ids. */
+	private readonly iqTried = new Set<string>()
+	private readonly iqCaptureOf = new Map<
+		string,
+		{ captureId: string; sourceId: string }
+	>()
+	/** True while a replay result is applied: its decode is not a live confirmation. */
+	private applyingReplay = false
+	/** Review m3: each queued capture's planned trials until its result (bounded, oldest evicted). */
+	private readonly replayPlans = new Map<string, readonly IqReplayTrial[]>()
+	/** The engine each source is attached to in the capture service. */
+	private readonly iqEngines = new Map<string, SpectrumEngine>()
 	private readonly frequencyErrors = new Map<
 		string,
 		{ hz: number; ppm: number; n: number }
@@ -546,6 +633,8 @@ export class ScannerService extends EventEmitter {
 
 	constructor(private readonly deps: ScannerServiceDeps) {
 		super()
+		// WG11 req 6.7: the replay shapes come from the probe channel requests this module owns.
+		deps.iqCapture?.setShapes(probeReplayShapes())
 		if (
 			deps.construction &&
 			deps.channelOwnership &&
@@ -802,7 +891,10 @@ export class ScannerService extends EventEmitter {
 				digitalVoice: deps.digitalVoice,
 				engines: sourceId => this.spectrum.engine(sourceId),
 				settings: () => this.settings(),
-				transports: deps.transports ?? [offsetTransport],
+				transports: [
+					...(deps.transports ?? [offsetTransport]),
+					...(deps.iqCapture ? [createReplayTransport(deps.iqCapture)] : []),
+				],
 				cpu: {
 					get normalisedPercent() {
 						return deps.cpuMeter?.normalisedPercent ?? null
@@ -913,15 +1005,17 @@ export class ScannerService extends EventEmitter {
 		if (this.started) return Promise.resolve()
 		this.startupAttempted = true
 		this.started = true
-		this.startPromise = this.startUp().catch((err: unknown) => {
-			// The caller stops a scanner whose start failed, which disposes the arbiter (S1-B final
-			// review, Info 3): say plainly that no persisted lease is restored this boot (H4).
-			this.log.error(
-				{ err, pendingLeases: [...this.persistedLeases.keys()] },
-				"Scanner start failed: crash recovery of persisted tuner leases does not run this boot; a tuner may stay on a scan frequency until the next start",
-			)
-			throw err
-		})
+		this.startPromise = this.startUp()
+			.then(() => this.startReplayQueue())
+			.catch((err: unknown) => {
+				// The caller stops a scanner whose start failed, which disposes the arbiter (S1-B final
+				// review, Info 3): say plainly that no persisted lease is restored this boot (H4).
+				this.log.error(
+					{ err, pendingLeases: [...this.persistedLeases.keys()] },
+					"Scanner start failed: crash recovery of persisted tuner leases does not run this boot; a tuner may stay on a scan frequency until the next start",
+				)
+				throw err
+			})
 		return this.startPromise
 	}
 
@@ -1094,6 +1188,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	beginStop(): Readonly<ScannerStopHandle> {
+		this.replayStopped = true
 		this.sealAdmission()
 		return this.consumerLifecycle.beginStop()
 	}
@@ -1247,6 +1342,8 @@ export class ScannerService extends EventEmitter {
 
 	private drainProbeComponents(): Promise<void> {
 		this.probeComponentDrain ??= Promise.resolve().then(async () => {
+			// WG11 req 6.4: the replay queue stops (its replay cancelled) before the probes drain.
+			await this.stopReplayQueue()
 			if (this.probes) await this.probes.destroy()
 		})
 		return this.probeComponentDrain
@@ -2178,6 +2275,7 @@ export class ScannerService extends EventEmitter {
 		switch (ev.kind) {
 			case "epoch-started":
 				this.recorder.epochChanged(sourceId, ev.epoch, ev.startSample)
+				this.syncIqCapture(sourceId, epoch)
 				this.probes
 					.onEpoch(sourceId, ev.epoch, epoch.centreHz)
 					.catch((err: unknown) =>
@@ -2277,6 +2375,7 @@ export class ScannerService extends EventEmitter {
 		) {
 			this.ingest(live, track, endReason)
 		}
+		if (!synthetic && !late && !closing) this.requestIqCapture(live, track)
 		const needs = !synthetic && !late && this.needsConfirm(live, track)
 		for (const d of covering) d.onTrack(live, track, needs)
 		if (!closing) {
@@ -2293,6 +2392,7 @@ export class ScannerService extends EventEmitter {
 				endReason === "gap" ? "stream-changed" : "cancelled",
 			)
 		this.rememberClosed(track.trackId)
+		this.endIqCapture(live)
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
 		this.probes.trackClosed(track.trackId)
@@ -3103,10 +3203,38 @@ export class ScannerService extends EventEmitter {
 			if (!ev.crcClean) outcome.crcFailures += 1
 			if (ev.identity || ev.encrypted !== undefined) outcome.confirmed = true
 		}
-		const live = this.findObservation(req.observationId)
+		// WG11 req 6.4: a queue replay's decode lands once, through the queue's sink (applyReplayResult).
+		if (req.replay && req.jobId === IQ_REPLAY_QUEUE_HOLDER) return
+		const found = this.findObservation(req.observationId)
+		if (req.replay) {
+			// Astra MAJOR 3: a replay's evidence carries the capture's time, not the processing time.
+			ev = {
+				...ev,
+				at: this.replayEvidenceAt(
+					req.replay.captureId,
+					found,
+					req.observationId,
+				),
+			}
+			if (!found) {
+				// Astra MAJOR 2: the observation left live/recent: its stored discovery takes it, once.
+				const discoveryId = this.store.discoveryIdOf(req.observationId)
+				if (discoveryId)
+					this.applyStoredReplay(req.observationId, discoveryId, ev)
+				return
+			}
+		}
+		const live = found
 		if (!live || ev.epoch !== live.epoch) return
 		live.probeIds.add(probeId)
-		this.applyEvidence(live, ev)
+		// An identify replay is applied here (identify has no other path to the store) but is no live confirmation.
+		const wasReplaying = this.applyingReplay
+		if (req.replay) this.applyingReplay = true
+		try {
+			this.applyEvidence(live, ev)
+		} finally {
+			this.applyingReplay = wasReplaying
+		}
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onEvidence(probeId, ev)
 	}
@@ -3136,14 +3264,15 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	private applyEvidence(live: LiveObservation, ev: DecodeEvidence): void {
-		if (live.evidenceDeleted) return
+	/** Returns whether the observation accepted the evidence (§ 7.1; replay results count only then). */
+	private applyEvidence(live: LiveObservation, ev: DecodeEvidence): boolean {
+		if (live.evidenceDeleted) return false
 		if (ev.metadata.talkgroups?.[0]) live.talkgroup = ev.metadata.talkgroups[0]
 		if (ev.metadata.sources?.[0]) live.source = ev.metadata.sources[0]
 		if (ev.encrypted) live.encrypted = true
 		if (!live.discoveryId && live.lastTrack) this.ingest(live, live.lastTrack)
 		const discoveryId = live.discoveryId
-		if (!discoveryId) return
+		if (!discoveryId) return false
 		// § 7.1: the observation keeps its own accepted evidence (Observation.decode; A1/A3 metrics).
 		const accepted = this.store.appendObservationEvidence(
 			live.observationId,
@@ -3156,14 +3285,16 @@ export class ScannerService extends EventEmitter {
 		// § 6.2: leak/intermod caps are decided before the decode is applied, so a capped decode never reaches `decoded`.
 		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"
+		const wasLiveDecoded = live.decoded
 		this.store.applyEvidence(discoveryId, ev, cap ? { cap } : {})
 		// The decode may have merged the discovery (identity key): follow the survivor.
 		const survivor = this.store.discoveryIdOf(live.observationId) ?? discoveryId
 		live.discoveryId = survivor
 		this.dirty = true
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
-			return
+			return accepted
 		live.decoded = true
+		if (!wasLiveDecoded && !this.applyingReplay) this.confirmIqLive(live)
 		if (accepted && live.lastTrack)
 			live.acceptedIdentity = {
 				identity: ev.identity,
@@ -3173,6 +3304,7 @@ export class ScannerService extends EventEmitter {
 		this.recorder.decoded(live.observationId)
 		this.lastConfirm.set(survivor, this.now())
 		if (!wasDecoded) this.updateFrequencyError(live.sourceId, { rekey: true })
+		return accepted
 	}
 
 	private capFor(
@@ -3367,6 +3499,457 @@ export class ScannerService extends EventEmitter {
 		this.emitProgressFor(null)
 	}
 
+	// === WG11 req 6: IQ capture on detection, replay results ===
+
+	/**
+	 * Req 6.3: once per observation, when its track surfaced (it has a discovery), has no confirmed result
+	 * for this transmission, is no spur or image and lies in the usable span. The port enforces the per-source
+	 * rate, the concurrency, the cap and protected mode.
+	 */
+	private requestIqCapture(live: LiveObservation, track: TrackSnapshot): void {
+		const port = this.deps.iqCapture
+		if (
+			!port ||
+			live.discoveryId === null ||
+			live.acceptedIdentity !== undefined ||
+			track.flags.iqImage ||
+			track.flags.spur ||
+			this.iqTried.has(live.observationId)
+		)
+			return
+		const epoch = this.spectrum.engine(live.sourceId)?.currentEpoch()
+		if (
+			!epoch ||
+			epoch.epoch !== track.epoch ||
+			!inWindow(track.centreHz, track.obwHz, epoch, USABLE_FRACTION)
+		)
+			return
+		this.iqTried.add(live.observationId)
+		try {
+			const res = port.capture({
+				sourceId: live.sourceId,
+				observationId: live.observationId,
+				epoch: track.epoch,
+				rfHz: track.centreHz,
+				tuningTrust: track.tuningTrust,
+				fromSample: track.startSample,
+				reason: "detection",
+			})
+			if ("captureId" in res)
+				this.iqCaptureOf.set(live.observationId, {
+					captureId: res.captureId,
+					sourceId: live.sourceId,
+				})
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
+		}
+	}
+
+	/** The captured track closed: the capture finishes now. */
+	private endIqCapture(live: LiveObservation): void {
+		const hit = this.iqCaptureOf.get(live.observationId)
+		this.iqCaptureOf.delete(live.observationId)
+		this.iqTried.delete(live.observationId)
+		if (!hit) return
+		try {
+			this.deps.iqCapture?.end(hit.captureId)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture end failed")
+		}
+	}
+
+	/**
+	 * Epoch change: open captures end with the old epoch (the bookkeeping of the source goes with them). The
+	 * first epoch of an engine (or a recreated engine) attaches the source to the capture service; later ones
+	 * flush it with the new epoch, centre and rate. Only IQ engines are attached.
+	 */
+	private syncIqCapture(sourceId: string, epoch: EngineEpoch): void {
+		const port = this.deps.iqCapture
+		if (!port) return
+		for (const [observationId, hit] of this.iqCaptureOf)
+			if (hit.sourceId === sourceId) this.iqCaptureOf.delete(observationId)
+		try {
+			const engine = this.spectrum.engine(sourceId)
+			const next = {
+				epoch: epoch.epoch,
+				centerHz: epoch.centreHz,
+				sampleRateHz: epoch.sampleRateHz,
+			}
+			if (!engine || engine.format !== "U8_IQ") {
+				if (this.iqEngines.delete(sourceId)) port.detachSource(sourceId)
+			} else if (this.iqEngines.get(sourceId) !== engine) {
+				this.iqEngines.set(sourceId, engine)
+				port.attachSource(sourceId, { ...next, engine })
+			} else port.flush(sourceId, next)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture epoch sync failed",
+			)
+		}
+	}
+
+	/** A live decode on the observation: its captures whose replay has not started are discarded. */
+	private confirmIqLive(live: LiveObservation): void {
+		try {
+			this.deps.iqCapture?.confirmLive(live.sourceId, live.observationId)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture live confirmation failed",
+			)
+		}
+	}
+
+	/**
+	 * The replay queue's sink (requirement 6.4): decode evidence on the capture's observation in the capture's
+	 * epoch (through the normal evidence path, so H2 and the P17 rules apply), otherwise the undecoded reason.
+	 * The known-protocol memory counts the decode or the known protocol's full-hold miss (requirements 1.7, 1.8).
+	 */
+	/** WG11 req 6.4: the replay queue and its pool adapter, owned here (created at start, stopped first). */
+	private replayQueue: IqReplayQueue | null = null
+	private replayAdapter: ReplayPoolAdapter | null = null
+
+	/** Re-review 2 #4: set by stop; a start still pending then never creates the queue. */
+	private replayStopped = false
+
+	private startReplayQueue(): void {
+		const port = this.deps.iqCapture
+		if (
+			!port ||
+			this.replayQueue ||
+			this.replayStopped ||
+			this.consumerLifecycle.admissionSealed
+		)
+			return
+		const probes = this.replayProbes()
+		const queue = createIqReplayQueue({
+			port,
+			probes,
+			planner: input => this.planReplay(input),
+			sink: result => this.applyReplayResult(result),
+			planInput: capture => this.replayPlanInput(capture),
+			skip: capture => this.replaySkip(capture),
+			logger: this.deps.logger,
+		})
+		this.replayAdapter = probes
+		this.replayQueue = queue
+		const offFinished = port.onFinished(view => this.pinSpan(view))
+		const offRemoved = port.onRemoved((captureId, observationId) =>
+			this.unpinSpan(captureId, observationId),
+		)
+		this.offSpanPins = () => {
+			offFinished()
+			offRemoved()
+		}
+		this.setReplayRecheck(() => queue.recheck())
+		queue.start()
+	}
+
+	private async stopReplayQueue(): Promise<void> {
+		this.replayStopped = true
+		this.offSpanPins?.()
+		this.offSpanPins = null
+		const queue = this.replayQueue
+		const probes = this.replayAdapter
+		this.replayQueue = null
+		this.replayAdapter = null
+		this.setReplayRecheck(null)
+		try {
+			await queue?.stop()
+		} finally {
+			probes?.dispose()
+		}
+	}
+
+	/** The replay queue's view of the probe pool (WG11 req 6.4): replay probes under the queue's own job. */
+	replayProbes(): ReplayPoolAdapter {
+		return createPoolReplayProbes(this.probes, {
+			priority: REPLAY_PROBE_PRIORITY,
+			jobId: IQ_REPLAY_QUEUE_HOLDER,
+		})
+	}
+
+	/**
+	 * The replay queue's planner (WG11 req 6.4): lane ID's `planReplayTrials`, reached through the scanner so
+	 * the index bundle gains no identify/probe runtime module.
+	 */
+	planReplay(input: IqReplayPlanInput): readonly IqReplayTrial[] {
+		const trials = planReplayTrials(input)
+		const id = input.capture.captureId
+		this.replayPlans.delete(id)
+		this.replayPlans.set(id, trials)
+		while (this.replayPlans.size > REPLAY_PLANS_MAX) {
+			const oldest = this.replayPlans.keys().next().value
+			if (oldest === undefined) break
+			this.replayPlans.delete(oldest)
+		}
+		return trials
+	}
+
+	/**
+	 * Re-review 2 #3: spans of observations that left `recent`, so a replay result arriving later is
+	 * still stamped inside its observation. Bounded (oldest evicted); a replay comes within the 10 min
+	 * orphan TTL of its capture, far fewer than REPLAY_SPANS_MAX observations close in that time.
+	 */
+	private readonly replaySpans = new Map<
+		string,
+		{ startedAt: number; endedAt?: number }
+	>()
+
+	private rememberReplaySpan(o: LiveObservation): void {
+		this.replaySpans.delete(o.observationId)
+		this.replaySpans.set(o.observationId, {
+			startedAt: o.startedAt,
+			...(o.endedAt !== undefined ? { endedAt: o.endedAt } : {}),
+		})
+		// Re-review 3 #3: the oldest span no stored capture needs goes; pinned ones stay.
+		while (this.replaySpans.size > REPLAY_SPANS_MAX) {
+			let evicted = false
+			for (const id of this.replaySpans.keys())
+				if (!this.spanPinned(id)) {
+					this.replaySpans.delete(id)
+					evicted = true
+					break
+				}
+			if (!evicted) break
+		}
+	}
+
+	/**
+	 * Re-review 3 #3: observations whose finished captures are still stored (pinned by the capture
+	 * service's finished events, released by its removal events, r7 B4; `spanPinned` also drops a
+	 * pin whose capture `holderOf` no longer knows). Bound:
+	 * one pin per stored capture; a finished capture holds ≥ 4 800 samples × 8 B = 38 400 B, so at
+	 * most 256 MiB / 38 400 B = 6 990 pins at the largest cap (174 full 4 s captures); the detection
+	 * rate (6 per minute per source over the 10 min orphan TTL: 60 per source) keeps it far lower.
+	 */
+	private readonly spanPins = new Map<string, Set<string>>()
+	private offSpanPins: (() => void) | null = null
+
+	/**
+	 * r7 B4: a removed capture releases its pin at once, so pins ≤ stored captures at all times
+	 * (a pin is only taken for a capture still stored; every removal is announced).
+	 */
+	private unpinSpan(captureId: string, observationId: string | null): void {
+		if (!observationId) return
+		const set = this.spanPins.get(observationId)
+		if (!set) return
+		set.delete(captureId)
+		if (set.size === 0) this.spanPins.delete(observationId)
+	}
+
+	private pinSpan(view: IqCaptureView): void {
+		if (!view.observationId) return
+		let stored = false
+		try {
+			stored = this.deps.iqCapture?.holderOf(view.captureId) !== undefined
+		} catch {
+			stored = false
+		}
+		if (!stored) return
+		const set = this.spanPins.get(view.observationId) ?? new Set<string>()
+		set.add(view.captureId)
+		this.spanPins.set(view.observationId, set)
+	}
+
+	private spanPinned(observationId: string): boolean {
+		const set = this.spanPins.get(observationId)
+		if (!set) return false
+		for (const captureId of [...set]) {
+			let stored = false
+			try {
+				stored = this.deps.iqCapture?.holderOf(captureId) !== undefined
+			} catch {
+				stored = false
+			}
+			if (!stored) set.delete(captureId)
+		}
+		if (set.size === 0) this.spanPins.delete(observationId)
+		return set.size > 0
+	}
+
+	/** Astra MAJOR c: the replay queue's re-check of the captures it parked for identify. */
+	private replayRecheck: (() => void) | null = null
+
+	setReplayRecheck(fn: (() => void) | null): void {
+		this.replayRecheck = fn
+	}
+
+	private recheckReplays(): void {
+		try {
+			this.replayRecheck?.()
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "Replay recheck failed")
+		}
+	}
+
+	/**
+	 * Review M2: the replay queue leaves a capture alone while an identify job works on its
+	 * observation (that job claims it); a throw is answered true by the queue (fail closed).
+	 */
+	replaySkip(capture: IqCaptureView): boolean {
+		for (const d of this.drivers.values())
+			if (d instanceof IdentifyRunner && d.worksOn(capture)) return true
+		return false
+	}
+
+	/**
+	 * Review m3: a known protocol's replay trial without a decode is a miss only when the capture
+	 * holds the decoder's whole hold without a gap: gapSamples 0 and durationMs ≥ the trial mode's
+	 * holdMs (e.g. DMR on dsd-fme auto: 1 800 ms of the at most 4 000 ms capture). A shorter or
+	 * gapped capture, or a capture whose plan or view is gone, is no miss.
+	 */
+	private replayFullHold(
+		captureId: string,
+		trial: IqReplayResult["trials"][number],
+	): boolean {
+		const view = this.deps.iqCapture?.view(captureId)
+		const planned = this.replayPlans
+			.get(captureId)
+			?.find(
+				p =>
+					p.known &&
+					p.protocol === trial.protocol &&
+					p.mode.decoderType === trial.decoderType,
+			)
+		return replayMissEligible(view, planned?.mode.holdMs)
+	}
+
+	/** The planner input of a finished capture: the captured track when the scanner still holds it. */
+	replayPlanInput(capture: IqCaptureView): IqReplayPlanInput {
+		const live = capture.observationId
+			? this.findObservation(capture.observationId)
+			: undefined
+		const ranges = (
+			this.deps.bandplans?.() ?? bandplansFor(this.deps.region)
+		).flatMap(b => b.ranges)
+		// Minor: the stored discovery once the observation left live/recent.
+		const discoveryId =
+			live?.discoveryId ??
+			(capture.observationId
+				? (this.store.discoveryIdOf(capture.observationId) ?? null)
+				: null)
+		return {
+			capture,
+			track: live?.lastTrack ?? null,
+			knownProtocol: discoveryId
+				? this.knownProtocols.known(discoveryId)
+				: null,
+			priors: priorsFor(ranges, capture.rfHz),
+			narrowRaster: narrowRasterAt(ranges, capture.rfHz),
+		}
+	}
+
+	applyReplayResult(result: IqReplayResult): void {
+		const live = result.observationId
+			? this.findObservation(result.observationId)
+			: undefined
+		const discoveryId =
+			live?.discoveryId ??
+			(result.observationId
+				? this.store.discoveryIdOf(result.observationId)
+				: undefined) ??
+			null
+		if (result.decoded) {
+			const ev: DecodeEvidence = {
+				protocol: result.decoded.protocol,
+				identity: result.decoded.identity,
+				metadata: {},
+				crcClean: true,
+				at: this.now(),
+				epoch: result.epoch,
+				origin: "probe",
+			}
+			let applied = false
+			ev.at = this.replayEvidenceAt(
+				result.captureId,
+				live,
+				result.observationId,
+			)
+			if (live) {
+				if (live.epoch === result.epoch) {
+					this.applyingReplay = true
+					try {
+						// Only evidence the observation accepted counts (Astra MAJOR 3).
+						applied = this.applyEvidence(live, ev)
+					} finally {
+						this.applyingReplay = false
+					}
+				}
+			} else if (result.observationId && discoveryId)
+				// Astra MAJOR a: the observation closed and left `recent` (10 s) before its replay
+				// ended; the discovery it fed is still stored: the decode lands there.
+				applied = this.applyStoredReplay(result.observationId, discoveryId, ev)
+			// The memory counts a decode only where it was applied.
+			const counted = live?.discoveryId ?? discoveryId
+			if (applied && counted) this.knownProtocols.recordDecode(counted)
+			this.replayPlans.delete(result.captureId)
+			return
+		}
+		const ran = result.trials.filter(
+			t => t.outcome !== "cancelled" && t.outcome !== "decoded",
+		)
+		if (discoveryId)
+			for (const t of ran)
+				if (t.known && this.replayFullHold(result.captureId, t))
+					this.knownProtocols.recordMiss(discoveryId, t.protocol)
+		this.replayPlans.delete(result.captureId)
+		if (live && live.epoch === result.epoch && ran.length > 0) {
+			const reason = ran.some(t => t.outcome === "crc-errors")
+				? "crc-errors"
+				: ran.some(t => t.outcome === "timeout")
+					? "timeout"
+					: "no-sync"
+			this.markUndecoded(live, reason)
+		}
+	}
+
+	/**
+	 * A replay decode of an observation the scanner no longer holds (closed and out of `recent`): the
+	 * observation's evidence and the stored discovery take it, in the capture's epoch (carried by the
+	 * evidence). False when the discovery is gone (nothing applied).
+	 */
+	private applyStoredReplay(
+		observationId: string,
+		discoveryId: string,
+		ev: DecodeEvidence,
+	): boolean {
+		if (!this.store.get(discoveryId)) return false
+		// The observation's own rules decide (epoch, not after a retune/hop end): refused, nothing lands.
+		if (!this.store.appendObservationEvidence(observationId, ev)) return false
+		this.store.applyEvidence(discoveryId, ev, {})
+		this.dirty = true
+		return true
+	}
+
+	/**
+	 * Astra MAJOR 3: a replay decode's timestamp is the capture's: its finish (`capturedAtMs` is the
+	 * finish time, so the decoded signal lies at or before it), clamped inside the observation's span
+	 * [startedAt, endedAt) when the scanner still holds it. The processing time when the view is gone.
+	 */
+	private replayEvidenceAt(
+		captureId: string,
+		live: LiveObservation | undefined,
+		observationId: string | null,
+	): number {
+		let at = this.now()
+		try {
+			const view = this.deps.iqCapture?.view(captureId)
+			if (view && Number.isFinite(view.capturedAtMs)) at = view.capturedAtMs
+		} catch {
+			// keep the processing time
+		}
+		const span =
+			live ?? (observationId ? this.replaySpans.get(observationId) : undefined)
+		if (span) {
+			at = Math.max(at, span.startedAt)
+			// The store refuses at >= endedAt (retune/hop end, strict): the last ms inside is endedAt - 1.
+			if (span.endedAt !== undefined) at = Math.min(at, span.endedAt - 1)
+		}
+		return at
+	}
+
 	private findObservation(observationId: string): LiveObservation | undefined {
 		for (const o of this.live.values())
 			if (o.observationId === observationId) return o
@@ -3455,6 +4038,8 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onEngineFatal = (sourceId: string, err: Error): void => {
+		if (this.iqEngines.delete(sourceId))
+			this.deps.iqCapture?.detachSource(sourceId)
 		this.cancelChannelSource(sourceId, "engine-failed")
 		if (!this.started) return
 		this.lastSummaries.delete(sourceId)
@@ -3715,8 +4300,13 @@ export class ScannerService extends EventEmitter {
 			...(this.deps.analogEvidence
 				? { analogEvidence: this.deps.analogEvidence }
 				: {}),
+			...(this.deps.iqCapture ? { iqCapture: this.deps.iqCapture } : {}),
 			settings: () => this.settings(),
-			emit: data => this.emit("identify", data),
+			emit: data => {
+				this.emit("identify", data)
+				// Astra MAJOR c: a target or job that ended may release captures the queue parked.
+				this.recheckReplays()
+			},
 			logger: this.deps.logger,
 			now: this.now,
 		})
@@ -4714,9 +5304,12 @@ export class ScannerService extends EventEmitter {
 		this.resumeIdleWaiters(now)
 		// cpu- and budget-deferred probe requests start once the meter drops, not only when another probe stops
 		this.probes.pump()
-		this.recent = this.recent.filter(
-			o => (o.endedAt ?? now) > now - RECENT_KEEP_MS,
-		)
+		this.recent = this.recent.filter(o => {
+			const keep = (o.endedAt ?? now) > now - RECENT_KEEP_MS
+			// Re-review 2 #3: a late replay decode still needs the span to stamp inside it.
+			if (!keep && this.deps.iqCapture) this.rememberReplaySpan(o)
+			return keep
+		})
 		if (now - this.lastStatusAt >= STATUS_EVERY_MS) {
 			this.lastStatusAt = now
 			this.emitStatus(false)

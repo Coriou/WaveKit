@@ -1870,12 +1870,15 @@ export class DecoderManager extends EventEmitter {
 			caps = this.sourceManager.getCaps(sourceId)
 			if (caps) {
 				state.inputCaps = { ...caps }
-				decoder.updateOptions({
-					inputSampleRate: caps.sampleRate,
-					...(caps.centerFreq !== undefined
-						? { inputCenterFreq: caps.centerFreq }
-						: {}),
-				})
+				// A caller-supplied channel IQ input (WG11 replay: cf32 at the capture rate) is not the
+				// source stream: the source rate would add a spurious resample stage to the demod chain.
+				if (!(state.input && config.options["inputIqFormat"] === "cf32"))
+					decoder.updateOptions({
+						inputSampleRate: caps.sampleRate,
+						...(caps.centerFreq !== undefined
+							? { inputCenterFreq: caps.centerFreq }
+							: {}),
+					})
 			}
 			this.refreshRatePlan(state, caps ?? null)
 			this.sourceManager.assignDecoder(config.id, sourceId, {

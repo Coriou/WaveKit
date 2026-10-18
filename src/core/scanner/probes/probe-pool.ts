@@ -9,7 +9,7 @@
 import { EventEmitter } from "node:events"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
-import { PassThrough } from "node:stream"
+import { PassThrough, type Readable } from "node:stream"
 import { z } from "zod"
 import {
 	PROBE_UNAVAILABLE_MEMO_MS,
@@ -80,7 +80,24 @@ export interface ProbeRequest {
 	}
 	/** Identify (Task 35a): run exactly these modes instead of probeModesFor(cls, protocols). */
 	modes?: ProbeMode[]
+	/**
+	 * WG11 req 6.5: feed the decoder this IQ capture (replay transport) instead of the live stream. Such a
+	 * request is epoch-independent: its evidence carries `epoch`, the capture's own.
+	 */
+	replay?: { captureId: string }
 }
+
+/** WG11 req 6.4: queue-driven replay probes run just below identify and above every job's passive probes. */
+export const REPLAY_PROBE_PRIORITY = 100
+/** Settling time after a replay decoder exited cleanly, so its last output lines still count. */
+export const REPLAY_END_GRACE_MS = 250
+/**
+ * Astra r7 B3: replay evidence held per probe until its clean end. A DMR capture of at most 4 s
+ * carries a few dozen decode lines at most (one per 60 ms superframe is 67 in 4 s; H2 needs 2), so
+ * 64 bounds a genuine replay; one more ends the probe cancelled (no verdict, no miss). Held entries
+ * are small evidence objects: 64 per probe, IQ_REPLAY_MAX_PROBES = 1 at a time.
+ */
+export const REPLAY_HELD_EVIDENCE_MAX = 64
 
 export interface ProbeMode {
 	decoderType: ProbeDecoderType
@@ -114,6 +131,11 @@ export interface TransportStrategy {
 	cores(decoderType: ProbeDecoderType): number
 	supports(mode: ProbeMode, ctx: TransportContext): boolean
 	configure(base: DecoderConfig, ctx: TransportContext): DecoderConfig
+	/**
+	 * WG11 req 6.5: the decoder's input when it is not the live stream (replay). Null: the input is gone and
+	 * the probe ends without a verdict. Absent: the live tap feeds the decoder.
+	 */
+	openInput?(mode: ProbeMode, ctx: TransportContext): Readable | null
 }
 
 export interface ProbePoolDeps {
@@ -195,8 +217,16 @@ type StopReason =
 	| "error"
 	/** WG9 req 5.4: the probe's decoder program could not run. */
 	| "unavailable"
+	/** WG11: a replay decoder exited (clean end of its input, or a failure). */
+	| "replay-ended"
 
 interface ProbeRecord {
+	/** WG11 (Astra MAJOR e): the replay input failed; the run ends cancelled whatever the decoder says. */
+	replayInputFailed?: boolean
+	/** The replay input reached its EOF (a clean end needs it, Astra re-review 2 #2). */
+	replayInputEnded?: boolean
+	/** Replay evidence held until the clean end (emitted then), dropped otherwise (re-review 2 #1). */
+	heldEvidence?: DecodeEvidence[]
 	probeId: string
 	decoderId: string
 	req: ProbeRequest
@@ -330,9 +360,9 @@ function keepRequested(
 /** Identify (Task 35a) runs several explicit-mode probes on one track: each mode list is its own request. */
 function explicitModesKey(req: ProbeRequest): string {
 	return (
-		req.modes
+		(req.modes
 			?.map(m => `${m.decoderType}:${JSON.stringify(m.options)}`)
-			.join("|") ?? ""
+			.join("|") ?? "") + (req.replay ? `#${req.replay.captureId}` : "")
 	)
 }
 
@@ -612,8 +642,9 @@ export class ProbePool extends EventEmitter {
 		if (!engine) return { deferred: "no-transport" }
 		const epoch = engine.currentEpoch()
 		if (
-			epoch.epoch !== req.epoch ||
-			!this.streamCurrent(req.sourceId, engine, epoch)
+			req.replay === undefined &&
+			(epoch.epoch !== req.epoch ||
+				!this.streamCurrent(req.sourceId, engine, epoch))
 		) {
 			return { deferred: "stale-epoch" }
 		}
@@ -642,7 +673,11 @@ export class ProbePool extends EventEmitter {
 				this.enqueue(req)
 				// Under the CPU guard only identify (priority above every job's 0–100, Task 35a) preempts: a stopped
 				// decoder is the CPU the guard is waiting for. pump() retries the queue every service tick.
-				if (pick.deferred !== "cpu" || req.priority > 100) this.preemptFor(req)
+				if (pick.deferred !== "cpu" || req.priority > 100)
+					this.preemptFor(
+						req,
+						pick.deferred === "max-probes" ? this.fullKinds(first, ctx) : null,
+					)
 			}
 			return pick
 		}
@@ -688,9 +723,12 @@ export class ProbePool extends EventEmitter {
 		centreHz: number,
 	): Promise<void> {
 		const at = this.now()
-		this.dropQueued(r => r.sourceId === sourceId && r.epoch !== epoch)
+		// A replay probe reads a capture, not the live stream: an epoch change leaves it running.
+		this.dropQueued(
+			r => r.sourceId === sourceId && r.epoch !== epoch && !r.replay,
+		)
 		const stale = [...this.records.values()].filter(
-			r => r.req.sourceId === sourceId && r.epoch !== epoch,
+			r => r.req.sourceId === sourceId && r.epoch !== epoch && !r.req.replay,
 		)
 		for (const rec of stale) {
 			rec.epochEndedAt = at
@@ -975,7 +1013,10 @@ export class ProbePool extends EventEmitter {
 	): { transport: TransportStrategy } | { deferred: Deferral } {
 		const s = this.deps.settings()
 		let reason: Deferral | null = null
+		// A replay request runs on the replay transport only; a live one never on it.
+		const replaying = ctx.req.replay !== undefined
 		for (const transport of this.deps.transports) {
+			if ((transport.kind === "replay") !== replaying) continue
 			if (!transport.supports(mode, ctx)) continue
 			const running = [...this.records.values()].filter(
 				r => r.transport.kind === transport.kind,
@@ -1002,6 +1043,24 @@ export class ProbePool extends EventEmitter {
 		return { deferred: ctx.format === "U8_IQ" ? "no-transport" : "format" }
 	}
 
+	/** WG11 review M1: the live transports supporting the mode whose probe slots are all taken. */
+	private fullKinds(
+		mode: ProbeMode,
+		ctx: TransportContext,
+	): Set<TransportStrategy["kind"]> {
+		const s = this.deps.settings()
+		const kinds = new Set<TransportStrategy["kind"]>()
+		for (const transport of this.deps.transports) {
+			if (transport.kind === "replay" || !transport.supports(mode, ctx))
+				continue
+			const running = [...this.records.values()].filter(
+				r => r.transport.kind === transport.kind,
+			).length
+			if (running >= transport.maxProbes(s)) kinds.add(transport.kind)
+		}
+		return kinds
+	}
+
 	private enqueue(req: ProbeRequest): void {
 		this.dropQueued(
 			r =>
@@ -1023,10 +1082,22 @@ export class ProbePool extends EventEmitter {
 			if (match(this.queue[i]!)) this.queue.splice(i, 1)
 	}
 
-	private preemptFor(req: ProbeRequest): void {
+	/**
+	 * WG11 review M1: a replay request never preempts (its single slot is held by another replay, which
+	 * ends by itself faster than real time), and a live request never preempts a replay probe (a lost
+	 * replay trial would cascade back into the queue's retries). Live requests preempt live probes only.
+	 */
+	private preemptFor(
+		req: ProbeRequest,
+		kinds: ReadonlySet<TransportStrategy["kind"]> | null,
+	): void {
+		if (req.replay !== undefined) return
 		let victim: ProbeRecord | null = null
 		for (const r of this.records.values()) {
 			if (r.state === "stopping" || r.req.priority >= req.priority) continue
+			if (r.req.replay !== undefined) continue
+			// A max-probes deferral frees a slot only on a full transport the request could use.
+			if (kinds && !kinds.has(r.transport.kind)) continue
 			if (!victim || r.req.priority < victim.req.priority) victim = r
 		}
 		if (victim) {
@@ -1056,8 +1127,9 @@ export class ProbePool extends EventEmitter {
 			const engine = this.deps.engines(req.sourceId)
 			if (
 				!engine ||
-				engine.currentEpoch().epoch !== req.epoch ||
-				!this.streamCurrent(req.sourceId, engine, engine.currentEpoch())
+				(req.replay === undefined &&
+					(engine.currentEpoch().epoch !== req.epoch ||
+						!this.streamCurrent(req.sourceId, engine, engine.currentEpoch())))
 			) {
 				this.dropQueued(r => r === req)
 				continue
@@ -1347,6 +1419,30 @@ export class ProbePool extends EventEmitter {
 			})
 			if (this.isStopping(rec)) return
 		}
+		if (!transport.preRoll && transport.openInput) {
+			// Replay: the transport's own stream (a capture), ended by its EOF. No capture: no probe, no verdict.
+			const source = transport.openInput(mode, ctx)
+			if (!source)
+				throw new WaveKitError(
+					"Replay input is unavailable",
+					"SCANNER_REPLAY_INPUT_GONE",
+				)
+			const input = new PassThrough({ highWaterMark: PROBE_INPUT_HWM })
+			rec.input = input
+			rec.detach.push(() => source.destroy())
+			input.on("error", (err: Error) =>
+				this.log.debug({ err, probeId: rec.probeId }, "Replay input error"),
+			)
+			source.on("error", (err: Error) => {
+				this.log.debug({ err, probeId: rec.probeId }, "Replay source error")
+				rec.replayInputFailed = true
+				input.end()
+			})
+			source.once("end", () => {
+				rec.replayInputEnded = true
+			})
+			source.pipe(input)
+		}
 		if (this.isStopping(rec)) return
 		rec.decoderAttempted = true
 		const decoder = await this.deps.decoders.createEphemeralDecoder(config, {
@@ -1364,7 +1460,15 @@ export class ProbePool extends EventEmitter {
 		// output stops the probe as "decoder unavailable"; every other exit keeps
 		// today's path (the hold runs out).
 		const onExit = (code: unknown, signal: unknown): void => {
-			if (this.isStopping(rec) || rec.firstOutputAt !== null) return
+			if (this.isStopping(rec)) return
+			if (
+				rec.transport.kind === "replay" &&
+				!(rec.firstOutputAt === null && isUnavailableExit(code, signal))
+			) {
+				this.onReplayExit(rec, code === 0 && signal === null)
+				return
+			}
+			if (rec.firstOutputAt !== null) return
 			if (!isUnavailableExit(code, signal)) return
 			this.reportUnavailable(rec)
 			void this.stopProbe(rec, "unavailable").catch((err: unknown) => {
@@ -1616,6 +1720,47 @@ export class ProbePool extends EventEmitter {
 	}
 
 	/**
+	 * WG11 req 6.5: a replay decoder exited. A clean exit after its input ended (or any exit after output) is
+	 * the end of the capture: listeners get "replay-end" before the "stopped" state and read the verdict from
+	 * the evidence. A failing exit with no output ends the probe without it, so the run is cancelled, no verdict.
+	 */
+	private onReplayExit(rec: ProbeRecord, clean: boolean): void {
+		// A failed input is never a verdict: the decoder saw part of the capture at most.
+		const timer = setTimeout(() => {
+			if (this.isStopping(rec)) return
+			// Decided at emission (Astra MAJOR 1, re-review 2 #2): a clean end needs the input's own EOF
+			// without an error AND a clean decoder exit; anything else is cancelled, no verdict.
+			const complete =
+				clean && rec.replayInputEnded === true && rec.replayInputFailed !== true
+			const held = rec.heldEvidence ?? []
+			rec.heldEvidence = []
+			if (complete) {
+				try {
+					// The held evidence lands only now, right before the verdict.
+					for (const ev of held) this.emit("evidence", rec.probeId, rec.req, ev)
+					this.emit("replay-end", rec.probeId, rec.req)
+				} catch (err: unknown) {
+					this.log.warn(
+						{ err, probeId: rec.probeId },
+						"Replay-end listener failed",
+					)
+				}
+			}
+			void this.stopProbe(rec, complete ? "replay-ended" : "error").catch(
+				(err: unknown) => {
+					this.cleanupFailed = true
+					this.retainedCleanup.add(rec)
+					this.log.warn(
+						{ err, probeId: rec.probeId },
+						"Replay probe cleanup failed",
+					)
+				},
+			)
+		}, REPLAY_END_GRACE_MS)
+		rec.detach.push(() => clearTimeout(timer))
+	}
+
+	/**
 	 * WG9 req 5.4: tells listeners (identify) that this probe's decoder program
 	 * cannot run, before the probe's "stopped" state. Carries no decoder text or
 	 * paths; a listener failure is logged and never blocks the stop.
@@ -1712,6 +1857,26 @@ export class ProbePool extends EventEmitter {
 			if (ev.epoch !== rec.epoch) continue
 			if (rec.epochEndedAt !== null && ev.at >= rec.epochEndedAt) continue
 			if (ev.identity || ev.encrypted !== undefined) rec.confirmed = true
+			if (rec.transport.kind === "replay") {
+				// Re-review 2 #1: held until the replay's clean end (dropped when it never comes).
+				const held = (rec.heldEvidence ??= [])
+				if (held.length >= REPLAY_HELD_EVIDENCE_MAX) {
+					// r7 B3: past the bound the replay is no verdict: dropped, the probe ends cancelled.
+					rec.replayInputFailed = true
+					rec.heldEvidence = []
+					void this.stopProbe(rec, "error").catch((err: unknown) => {
+						this.cleanupFailed = true
+						this.retainedCleanup.add(rec)
+						this.log.warn(
+							{ err, probeId: rec.probeId },
+							"Replay probe cleanup failed",
+						)
+					})
+					return
+				}
+				held.push(ev)
+				continue
+			}
 			this.emit("evidence", rec.probeId, rec.req, ev)
 		}
 	}

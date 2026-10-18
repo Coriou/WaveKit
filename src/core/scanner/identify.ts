@@ -45,6 +45,28 @@ import {
 	classifySpectral,
 } from "./classify/classifier.js"
 import { ScannerApiError } from "./errors.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { replayMissEligible } from "../iq-capture/replay-miss.js"
+import {
+	IDENTIFY_REPLAY_MAX_CAPTURES,
+	type IqCapturePort,
+	type IqCaptureRefusal,
+	type IqCaptureRequest,
+	type IqCaptureView,
+} from "./iq-capture-contract.js"
+
+/**
+ * WG11 req 6.8 (review M2): the capture port as identify uses it. With `captureFor` and `view` (the
+ * capture service), a capture identify requests is held for the job from the start, so the replay
+ * queue never takes it over; without them, the frozen port alone (claimed once finished).
+ */
+export type IdentifyIqCapture = IqCapturePort & {
+	captureFor?(
+		req: IqCaptureRequest,
+		holder: string,
+	): { captureId: string } | { refused: IqCaptureRefusal }
+	view?(captureId: string): IqCaptureView | null
+}
 import type {
 	AnalogEvidenceTransmission,
 	IdentifyAnalogEvidence,
@@ -105,6 +127,8 @@ const NARROW_DIGITAL_PROTOCOLS: ReadonlySet<ScannerProtocol> =
 	new Set<ScannerProtocol>(["nxdn48", "dpmr", "dstar"])
 /** Ended identify jobs kept listed (they are never persisted). */
 export const IDENTIFY_KEEP_JOBS = 50
+/** WG11 req 6.8: how long a requested capture may take to finish once the live runs are over. */
+export const IDENTIFY_REPLAY_CAPTURE_WAIT_MS = 2000
 /** The classifier's burst limit (Task 11): a track this short may be an OOK burst. */
 const BURST_MAX_BLOCKS = 4
 
@@ -864,6 +888,11 @@ export interface IdentifyDeps {
 	 * WG11 req 1.7/1.8: the known-protocol memory. Absent: today's order and no miss or decode counting.
 	 */
 	knownProtocols?: KnownProtocolMemory
+	/**
+	 * WG11 req 6.8: the IQ capture port. Absent: no capture is claimed, requested or replayed, and the
+	 * flow is unchanged.
+	 */
+	iqCapture?: IdentifyIqCapture
 }
 
 /**
@@ -895,6 +924,29 @@ interface RunState {
 	seen: Map<ScannerProtocol, TrialSeen>
 	/** WG9 req 5.4: the pool reported this run's decoder program cannot run. */
 	unavailable: boolean
+	/**
+	 * WG11 req 6.5: a replay run of a claimed capture. Its `runIndex` is -1 (it owns no trial; the live
+	 * trials stay as they are unless the replay decodes or completes one); `planRun` is the plan run it repeats.
+	 */
+	replay?: { captureId: string; planRun: number }
+	/** The pool reported the replay decoder's clean end (its verdict is the evidence seen). */
+	replayDone: boolean
+}
+
+/** WG11 req 6.8: one target's IQ captures. */
+interface ReplayState {
+	/** Captures this job holds (claimed at plan, or once a requested one finished). */
+	claimed: string[]
+	/** Astra MAJOR b: each claimed capture's own epoch and observation (its replay carries them). */
+	views: Map<string, { epoch: number; observationId: string | null }>
+	/** Replay runs still to start; null until the live runs are over. */
+	queue: { captureId: string; planRun: number }[] | null
+	/** A capture requested for the resolved track (at most once per target). */
+	requested: string | null
+	/** The requested capture is held for this job from the start (captureFor). */
+	reserved: boolean
+	asked: boolean
+	waitUntil: number | null
 }
 
 interface TargetState {
@@ -924,6 +976,7 @@ interface TargetState {
 	/** WG10 req 3.5: plan runs not requested because the memo names their decoder type. */
 	memoSkip: Set<number>
 	analog: AnalogState
+	replay: ReplayState
 	/** WG11 req 1.7: the resolved discovery's known protocol at plan time (its run is first); null: none. */
 	known: { discoveryId: string; protocol: ScannerProtocol } | null
 }
@@ -969,6 +1022,8 @@ export class IdentifyRunner implements JobDriver {
 	private analogErrorLogged = false
 	/** WG10 req 3.5: probe decoder types unavailable during this job (memo at planning, or reported). */
 	private readonly unavailableTypes = new Set<ScannerProbeDecoderType>()
+	/** Cancel / source-down: captures are settled once the probes are released. */
+	private aborting = false
 
 	constructor(private readonly deps: IdentifyDeps) {
 		this.record = deps.record
@@ -976,6 +1031,7 @@ export class IdentifyRunner implements JobDriver {
 		deps.probes.on("probe-state", this.onProbeState)
 		deps.probes.on("evidence", this.onPoolEvidence)
 		deps.probes.on("decoder-unavailable", this.onDecoderUnavailable)
+		if (deps.iqCapture) deps.probes.on("replay-end", this.onReplayEnd)
 	}
 
 	private get sourceId(): string {
@@ -1225,6 +1281,15 @@ export class IdentifyRunner implements JobDriver {
 			result: null,
 			ambientUntil: Number.POSITIVE_INFINITY,
 			memoSkip: new Set(),
+			replay: {
+				claimed: [],
+				views: new Map(),
+				queue: null,
+				requested: null,
+				reserved: false,
+				asked: false,
+				waitUntil: null,
+			},
 			analog: {
 				everMonitored: false,
 				openSeen: new Set(),
@@ -1377,6 +1442,7 @@ export class IdentifyRunner implements JobDriver {
 		t.nextRun = 0
 		t.active = []
 		t.state = "trying"
+		this.claimCaptures(t, view)
 		this.emitTarget(t)
 	}
 
@@ -1411,7 +1477,8 @@ export class IdentifyRunner implements JobDriver {
 		if (
 			t.active.length === 0 &&
 			t.nextRun >= plan.runs.length &&
-			!this.ambientRunning(t)
+			!this.ambientRunning(t) &&
+			!this.replayStep(t, now)
 		)
 			this.finishTarget(t, null)
 	}
@@ -1474,6 +1541,7 @@ export class IdentifyRunner implements JobDriver {
 			endsAt: null,
 			seen: new Map(),
 			unavailable: false,
+			replayDone: false,
 		}
 		if ("started" in res) {
 			t.active.push(state)
@@ -1573,11 +1641,17 @@ export class IdentifyRunner implements JobDriver {
 		const stop = why === "decoded" && !this.deps.identify.exhaustive
 		// The pool stopped the probe before its hold (epoch change, spawn failure, shutdown) and nothing was
 		// accepted: that is no decoder verdict.
-		const cutShort =
-			why === "stopped" &&
-			r.endsAt !== null &&
-			this.deps.now() < r.endsAt &&
-			![...r.seen.values()].some(seen => seen.identity !== null)
+		// A replay run stopped without its decoder's clean end (input failed, capture gone) is cut short
+		// whatever the wall clock says (Astra MAJOR e).
+		// Re-review 3 #2: a replay run's verdict needs its clean replay-end; a hold expiry without it
+		// (a decoder that never exited) is cut short too: cancelled, no miss.
+		const cutShort = r.replay
+			? why !== "decoded" && !r.replayDone
+			: why === "stopped" &&
+				!r.replayDone &&
+				r.endsAt !== null &&
+				this.deps.now() < r.endsAt &&
+				![...r.seen.values()].some(seen => seen.identity !== null)
 		// WG9 req 5.4: a run whose decoder program could not run and that saw no
 		// output is no decoder verdict either; it is unsupported, not no-sync.
 		const unavailable =
@@ -1598,6 +1672,7 @@ export class IdentifyRunner implements JobDriver {
 			const outcome = trialOutcome(r.seen.get(protocol))
 			return stop && outcome !== "decoded" ? "not-needed" : outcome
 		})
+		if (r.replay) this.applyReplayRun(t, r, cutShort || unavailable)
 		const ended = [r]
 		if (stop) {
 			for (const other of t.active.splice(0)) {
@@ -1719,6 +1794,8 @@ export class IdentifyRunner implements JobDriver {
 				: {}),
 		}
 		t.state = state
+		// WG11 req 6.8: the result exists; its claimed captures are discarded (after the probes on abort).
+		if (!this.aborting) this.settleTarget(t)
 		this.emitTarget(t)
 	}
 
@@ -1799,6 +1876,7 @@ export class IdentifyRunner implements JobDriver {
 	private async abort(): Promise<void> {
 		if (this.phase === "finished") return
 		this.phase = "finished"
+		this.aborting = true
 		const releases: Promise<void>[] = []
 		for (const t of this.targets) {
 			for (const r of t.active.splice(0)) {
@@ -1811,6 +1889,7 @@ export class IdentifyRunner implements JobDriver {
 		await Promise.all(releases).catch((err: unknown) =>
 			this.log.warn({ err }, "Releasing identify probes failed"),
 		)
+		for (const t of this.targets) this.settleTarget(t)
 	}
 
 	// === probe pool events ===
@@ -1823,6 +1902,13 @@ export class IdentifyRunner implements JobDriver {
 		if (req.jobId !== this.record.id) return
 		const hit = this.findRun(r => r.probeId === probeId)
 		if (hit) hit.r.unavailable = true
+	}
+
+	/** WG11 req 6.5: the replay decoder ended cleanly: the evidence seen is its verdict, not a cut-short run. */
+	private readonly onReplayEnd = (probeId: string, req: ProbeRequest): void => {
+		if (req.jobId !== this.record.id) return
+		const hit = this.findRun(r => r.probeId === probeId)
+		if (hit) hit.r.replayDone = true
 	}
 
 	private readonly onProbeState = (
@@ -1873,6 +1959,8 @@ export class IdentifyRunner implements JobDriver {
 		if (!ev.identity) return
 		this.countDecode(hit.t)
 		hit.t.decoded ??= { protocol: ev.protocol, identity: ev.identity }
+		// WG11 req 6.5: a live decode discards the observation's captures that were not replayed yet.
+		if (!hit.r.replay) this.confirmLive(req.observationId)
 		if (!this.deps.identify.exhaustive) this.endRun(hit.t, hit.r, "decoded")
 	}
 
@@ -1908,6 +1996,7 @@ export class IdentifyRunner implements JobDriver {
 			trial.outcome = "decoded"
 			this.countDecode(t)
 			t.decoded ??= { protocol: ev.protocol, identity }
+			this.confirmLive(observationId)
 			if (!this.deps.identify.exhaustive) {
 				// § 10.8 (3) like a probe decode: every other trial is not needed.
 				const runs = t.active.splice(0)
@@ -2120,7 +2209,27 @@ export class IdentifyRunner implements JobDriver {
 		const memory = this.deps.knownProtocols
 		const known = t.known
 		if (!memory || !known || !r.run.protocols.includes(known.protocol)) return
-		if (why === "decoded" || unavailable || r.endsAt === null) return
+		if (why === "decoded" || unavailable) return
+		if (r.replay) {
+			// Astra MAJOR f: a replay's wall clock says nothing (faster than real time). It is a miss
+			// only after the decoder's clean end over a gap-free capture holding the whole mode hold.
+			if (!r.replayDone) return
+			if ([...r.seen.values()].some(seen => seen.identity !== null)) return
+			let capture: IqCaptureView | null = null
+			try {
+				capture = this.deps.iqCapture?.view?.(r.replay.captureId) ?? null
+			} catch {
+				capture = null
+			}
+			if (!replayMissEligible(capture, r.run.mode.holdMs)) return
+			try {
+				memory.recordMiss(known.discoveryId, known.protocol)
+			} catch {
+				// As below.
+			}
+			return
+		}
+		if (r.endsAt === null) return
 		if (why === "stopped" && this.deps.now() < r.endsAt) return
 		if ([...r.seen.values()].some(seen => seen.identity !== null)) return
 		// Review m2: the transmission must cover the whole known hold. A track that closed before
@@ -2188,6 +2297,307 @@ export class IdentifyRunner implements JobDriver {
 				ended = true
 			}
 		return ended
+	}
+
+	// === WG11 req 6.8: IQ capture claim, replay runs, settle ===
+
+	/** At plan: claim the newest captures near the target; request one for the track when none exists. */
+	private claimCaptures(t: TargetState, view: IdentifyTrackView): void {
+		const port = this.deps.iqCapture
+		if (!port) return
+		try {
+			const near = this.claimNear(t, view)
+			if (near > 0 || t.replay.asked) return
+			t.replay.asked = true
+			const req: IqCaptureRequest = {
+				sourceId: this.sourceId,
+				observationId: view.observationId,
+				epoch: view.epoch,
+				rfHz: view.track.centreHz,
+				tuningTrust: view.track.tuningTrust,
+				fromSample: view.track.startSample,
+				reason: "identify",
+			}
+			// Review M2: held for this job from the start (the queue skips held captures).
+			const reserve = port.captureFor !== undefined && port.view !== undefined
+			const res =
+				reserve && port.captureFor
+					? port.captureFor(req, this.record.id)
+					: port.capture(req)
+			if ("captureId" in res) {
+				t.replay.requested = res.captureId
+				t.replay.reserved = reserve
+			}
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture claim failed; identifying live only",
+			)
+		}
+	}
+
+	/**
+	 * Claims the newest unheld finished captures near the target (its own source; trusted tuning or
+	 * its observation) up to IDENTIFY_REPLAY_MAX_CAPTURES; returns how many were found near.
+	 */
+	private claimNear(t: TargetState, view: IdentifyTrackView): number {
+		const port = this.deps.iqCapture
+		if (!port) return 0
+		const near = port.near(this.sourceId, view.track.centreHz, t.toleranceHz, {
+			observationId: view.observationId,
+			limit: IDENTIFY_REPLAY_MAX_CAPTURES,
+		})
+		for (const c of near) {
+			if (t.replay.claimed.length >= IDENTIFY_REPLAY_MAX_CAPTURES) break
+			if (
+				c.sourceId !== this.sourceId ||
+				t.replay.claimed.includes(c.captureId) ||
+				!(
+					c.tuningTrust === "commanded" ||
+					c.tuningTrust === "relay" ||
+					c.observationId === view.observationId
+				) ||
+				// Astra MAJOR b: the target's own transmission only: its epoch, or its observation.
+				!(c.epoch === view.epoch || c.observationId === view.observationId)
+			)
+				continue
+			if (port.claim(c.captureId, this.record.id)) {
+				t.replay.claimed.push(c.captureId)
+				t.replay.views.set(c.captureId, {
+					epoch: c.epoch,
+					observationId: c.observationId,
+				})
+			}
+		}
+		return near.length
+	}
+
+	/**
+	 * After the live runs: claim the requested capture once it finished, then one replay run per claimed
+	 * capture and plan run whose protocols were not decoded live. True while the target must keep waiting.
+	 */
+	private replayStep(t: TargetState, now: number): boolean {
+		const port = this.deps.iqCapture
+		const rp = t.replay
+		if (
+			!port ||
+			this.phase !== "running" ||
+			this.record.state !== "running" ||
+			(t.decoded !== null && !this.deps.identify.exhaustive) ||
+			!t.view
+		)
+			return false
+		try {
+			if (rp.requested !== null) {
+				const id = rp.requested
+				const done =
+					rp.reserved && port.view
+						? port.view(id) !== null
+						: port
+								.near(this.sourceId, t.view.track.centreHz, t.toleranceHz, {
+									observationId: t.view.observationId,
+									limit: IDENTIFY_REPLAY_MAX_CAPTURES + 1,
+								})
+								.some(c => c.captureId === id)
+				if (done) {
+					const reserved = rp.reserved
+					rp.requested = null
+					rp.reserved = false
+					if (
+						rp.claimed.length < IDENTIFY_REPLAY_MAX_CAPTURES &&
+						port.claim(id, this.record.id)
+					) {
+						rp.claimed.push(id)
+						// Requested for the resolved track: its epoch and observation, or the capture's own.
+						const cv = port.view?.(id)
+						rp.views.set(id, {
+							epoch: cv?.epoch ?? t.view.epoch,
+							observationId: cv?.observationId ?? t.view.observationId,
+						})
+					} else if (reserved) port.settle(id, this.record.id)
+				} else if (rp.waitUntil === null) {
+					// The track may still be on air: finish the capture now, then wait a bounded time for it.
+					port.end(id)
+					rp.waitUntil = now + IDENTIFY_REPLAY_CAPTURE_WAIT_MS
+					return true
+				} else if (now < rp.waitUntil) return true
+				else this.dropRequested(t) // never finished in time
+			}
+			// Review M2: captures of the target finished meanwhile (the queue left them to this job).
+			if (rp.queue === null && rp.claimed.length < IDENTIFY_REPLAY_MAX_CAPTURES)
+				this.claimNear(t, t.view)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture lookup failed")
+			this.dropRequested(t)
+		}
+		rp.queue ??= this.replayQueue(t)
+		while (rp.queue.length > 0) {
+			const next = rp.queue.shift()!
+			if (this.startReplayRun(t, next, now)) return true
+		}
+		return false
+	}
+
+	private replayQueue(
+		t: TargetState,
+	): { captureId: string; planRun: number }[] {
+		const out: { captureId: string; planRun: number }[] = []
+		const runs = t.plan?.runs ?? []
+		for (const captureId of t.replay.claimed)
+			runs.forEach((run, planRun) => {
+				const type = run.mode.decoderType
+				const live = t.plan?.trials.flatMap((p, i) =>
+					p.run === planRun && t.trials[i] ? [t.trials[i]!] : [],
+				)
+				if (
+					type === "rtl433" ||
+					t.memoSkip.has(planRun) ||
+					this.unavailableTypes.has(type as ScannerProbeDecoderType) ||
+					(live ?? []).some(
+						x => x.outcome === "decoded" || x.outcome === "unsupported",
+					)
+				)
+					return
+				out.push({ captureId, planRun })
+			})
+		return out
+	}
+
+	/** Requests one replay run; false when it cannot run (no replay transport, stale source): skipped. */
+	private startReplayRun(
+		t: TargetState,
+		next: { captureId: string; planRun: number },
+		now: number,
+	): boolean {
+		const view = t.view
+		const run = t.plan?.runs[next.planRun]
+		if (!view || !run) return false
+		// Astra MAJOR b: the replay's evidence is the capture's: its own epoch and observation.
+		const cv = t.replay.views.get(next.captureId)
+		const observationId = cv?.observationId ?? view.observationId
+		const req: ProbeRequest = {
+			jobId: this.record.id,
+			priority: IDENTIFY_PROBE_PRIORITY,
+			sourceId: this.sourceId,
+			trackId: view.trackId,
+			observationId,
+			discoveryId: this.deps.discoveryOf(observationId)?.id ?? null,
+			targetHz: view.track.centreHz,
+			epoch: cv?.epoch ?? view.epoch,
+			cls: run.cls,
+			protocols: run.protocols,
+			modes: [run.mode],
+			preRollFromSample: null,
+			holdMs: run.holdMs,
+			record: false,
+			admission: { kind: "protocol-target", snrDb: view.track.snrDb },
+			replay: { captureId: next.captureId },
+		}
+		const res = this.request(req)
+		const state: RunState = {
+			runIndex: -1,
+			run,
+			req,
+			probeId: null,
+			queuedUntil: null,
+			endsAt: null,
+			seen: new Map(),
+			unavailable: false,
+			replayDone: false,
+			replay: { captureId: next.captureId, planRun: next.planRun },
+		}
+		if ("started" in res) {
+			t.active.push(state)
+			this.begin(t, state, res.started, now)
+		} else if (
+			res.deferred === "max-probes" ||
+			res.deferred === "budget" ||
+			res.deferred === "cpu"
+		) {
+			state.queuedUntil = now + IDENTIFY_QUEUE_WAIT_MS
+			t.active.push(state)
+		} else return false
+		this.emitTarget(t)
+		return true
+	}
+
+	/**
+	 * A finished replay run decides its plan run's trials only where it adds a verdict: a decode, or a
+	 * completed outcome over a live trial that never completed (cancelled, skipped). Transport `replay` then.
+	 */
+	private applyReplayRun(t: TargetState, r: RunState, cutShort: boolean): void {
+		const replay = r.replay
+		if (!replay || cutShort) return
+		t.plan?.trials.forEach((planned, i) => {
+			const trial = t.trials[i]
+			if (planned.run !== replay.planRun || !trial) return
+			const outcome = trialOutcome(r.seen.get(planned.protocol))
+			if (
+				outcome === "decoded" ||
+				(COMPLETED.has(outcome) && !COMPLETED.has(trial.outcome))
+			) {
+				trial.outcome = outcome
+				trial.transport = "replay"
+			}
+		})
+	}
+
+	private confirmLive(observationId: string): void {
+		try {
+			this.deps.iqCapture?.confirmLive(this.sourceId, observationId)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"IQ capture live confirmation failed",
+			)
+		}
+	}
+
+	/** A reserved capture that is no use any more is released (discarded); others are left to the TTL. */
+	private dropRequested(t: TargetState): void {
+		const id = t.replay.requested
+		const reserved = t.replay.reserved
+		t.replay.requested = null
+		t.replay.reserved = false
+		if (id === null || !reserved) return
+		try {
+			this.deps.iqCapture?.settle(id, this.record.id)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture settle failed")
+		}
+	}
+
+	/**
+	 * Review M2: whether this job works on the capture's observation (a target resolved to it that has
+	 * no result yet, or a job still collecting that covers its frequency): the replay queue leaves the
+	 * capture for this job.
+	 */
+	worksOn(capture: IqCaptureView): boolean {
+		if (this.phase === "finished" || capture.sourceId !== this.sourceId)
+			return false
+		if (this.phase === "idle" || this.phase === "collecting")
+			return this.covers(capture.sourceId, capture.rfHz)
+		return this.targets.some(
+			t =>
+				!FINAL.has(t.state) &&
+				capture.observationId !== null &&
+				t.view?.observationId === capture.observationId,
+		)
+	}
+
+	/** Discards every capture this target holds; safe to repeat. */
+	private settleTarget(t: TargetState): void {
+		const port = this.deps.iqCapture
+		this.dropRequested(t)
+		const ids = t.replay.claimed.splice(0)
+		t.replay.views.clear()
+		if (!port) return
+		for (const id of ids)
+			try {
+				port.settle(id, this.record.id)
+			} catch (err: unknown) {
+				this.log.warn({ err: safeErrorFields(err) }, "IQ capture settle failed")
+			}
 	}
 
 	private request(req: ProbeRequest): ReturnType<ProbePool["request"]> {
@@ -2258,6 +2668,10 @@ export class IdentifyRunner implements JobDriver {
 	private detach(): void {
 		if (this.detached) return
 		this.detached = true
+		// Shutdown, dispose, or any end path that did not settle: no capture stays held by a finished job.
+		for (const t of this.targets) this.settleTarget(t)
+		if (this.deps.iqCapture)
+			this.deps.probes.off("replay-end", this.onReplayEnd)
 		this.deps.probes.off("probe-state", this.onProbeState)
 		this.deps.probes.off("evidence", this.onPoolEvidence)
 		this.deps.probes.off("decoder-unavailable", this.onDecoderUnavailable)

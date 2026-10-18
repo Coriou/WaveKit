@@ -65,6 +65,10 @@ import type {
 } from "./core/channelizer/settlement-observer.js"
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
 import { ScannerService } from "./core/scanner/scanner-service.js"
+import {
+	createIqCaptureService,
+	type IqCaptureService,
+} from "./core/iq-capture/service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
 import { bandPlanSkipSources } from "./core/scanner/plan/bandplan-skips.js"
@@ -1292,10 +1296,33 @@ async function main(): Promise<void> {
 			cap: spectrumBinsCap.cap,
 			source: spectrumBinsCap.source,
 		})
+		// WG11 req 6: IQ capture on detection and replay. Protected access mode with
+		// scanner.iqCapture.enabled only; absent, disabled or legacy creates nothing. Swept and
+		// started before the scanner (which owns the replay queue and stops it with its probes),
+		// stopped after the scanner's producer phase.
+		let iqCapture: IqCaptureService | null = null
+		if (config.scanner.iqCapture?.enabled) {
+			if (protectedMode) {
+				const service = createIqCaptureService({
+					config: config.scanner.iqCapture,
+					storageRoot: resolve(
+						config.scanner.storage.dir || join(config.stateDir, "scanner"),
+					),
+					protectedMode,
+					logger,
+				})
+				iqCapture = service
+				own(45, () => service.stop())
+				await service.sweep()
+			} else {
+				log.info("IQ capture is not started in legacy access mode")
+			}
+		}
 		try {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				...(iqCapture ? { iqCapture } : {}),
 				analogEvidence,
 				recordingProtection: keeps,
 				construction: scannerConstruction,
@@ -1370,6 +1397,7 @@ async function main(): Promise<void> {
 			})
 			scannerConstructionSettled = true
 			scannerConstruction.completeConstruction({ ok: true })
+			await iqCapture?.start()
 			await scanner.start()
 			checkpoint()
 		} catch (err) {

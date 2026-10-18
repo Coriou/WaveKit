@@ -201,7 +201,7 @@ fixtures-test-local: ## Run decoder tests locally (if decoders installed)
 
 # === Channelizer ===
 
-chan-build: ## Build wavekit-chan on the host (needs a Rust toolchain)
+chan-build: ## Build wavekit-chan and wavekit-iqcap on the host (needs a Rust toolchain)
 	@cargo build --release --locked --manifest-path native/wavekit-chan/Cargo.toml
 
 chan-test: ## Run wavekit-chan unit/property tests (crate only; no benches)
