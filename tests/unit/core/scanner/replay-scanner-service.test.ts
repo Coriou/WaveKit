@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events"
 import { describe, expect, it, vi } from "vitest"
 import type {
 	IqCaptureView,
@@ -1199,5 +1200,102 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		} finally {
 			await h.service.stop()
 		}
+	})
+
+	describe("a stopped engine or removed source leaves the capture service (WG11 batch review R1 3)", () => {
+		const epochOf = (centreHz: number) => ({
+			epoch: 1,
+			centreHz,
+			sampleRateHz: 1_024_000,
+		})
+		const iqEngine = (centreHz: number) =>
+			Object.assign(new EventEmitter(), {
+				format: "U8_IQ",
+				currentEpoch: () => epochOf(centreHz),
+				tap: () => () => undefined,
+				liveEdge: () => 0,
+			})
+		type Svc = {
+			iqEngines: Map<string, unknown>
+			spectrum: {
+				engine(id: string): unknown
+				emit(event: string, ...args: unknown[]): boolean
+				deps: { engineCreated(sourceId: string, engine: unknown): void }
+			}
+			syncIqCapture(
+				sourceId: string,
+				epoch: { epoch: number; centreHz: number; sampleRateHz: number },
+			): void
+		}
+		async function started() {
+			const { h, port, internals } = setup()
+			const svc = new ScannerService({ ...internals.deps, iqCapture: port })
+			await svc.start()
+			const s = svc as unknown as Svc
+			const engines = new Map<string, ReturnType<typeof iqEngine>>()
+			s.spectrum.engine = (id: string) => engines.get(id)
+			const attach = (sourceId: string) => {
+				const engine = iqEngine(CENTRE)
+				engines.set(sourceId, engine)
+				s.spectrum.deps.engineCreated(sourceId, engine)
+				s.syncIqCapture(sourceId, epochOf(CENTRE))
+				return engine
+			}
+			return { h, port, svc, s, engines, attach }
+		}
+
+		it("an engine's own stop (display close, no job) detaches it; 50 distinct sources leave none attached", async () => {
+			const { port, svc, s, engines, attach } = await started()
+			try {
+				for (let i = 0; i < 50; i++) {
+					const engine = attach(`src-${i}`)
+					engine.emit("stream", 1, "stop")
+					engines.delete(`src-${i}`)
+				}
+				expect(port.attachSource).toHaveBeenCalledTimes(50)
+				expect(port.detachSource).toHaveBeenCalledTimes(50)
+				expect(s.iqEngines.size).toBe(0)
+			} finally {
+				await svc.stop()
+			}
+		})
+
+		it("a job release's re-emitted stop detaches the source", async () => {
+			const { port, svc, s, attach } = await started()
+			try {
+				attach("rtl")
+				s.spectrum.emit("stream", "rtl", 1, "stop")
+				expect(port.detachSource).toHaveBeenCalledWith("rtl")
+				expect(s.iqEngines.size).toBe(0)
+			} finally {
+				await svc.stop()
+			}
+		})
+
+		it("a stale engine's stop leaves its replacement attached", async () => {
+			const { port, svc, s, attach } = await started()
+			try {
+				const old = attach("rtl")
+				attach("rtl")
+				port.detachSource.mockClear()
+				old.emit("stream", 1, "stop")
+				expect(port.detachSource).not.toHaveBeenCalled()
+				expect(s.iqEngines.size).toBe(1)
+			} finally {
+				await svc.stop()
+			}
+		})
+
+		it("source removal detaches the source", async () => {
+			const { h, port, svc, s, attach } = await started()
+			try {
+				attach("rtl")
+				h.sources.emit("source-removed", "rtl")
+				expect(port.detachSource).toHaveBeenCalledWith("rtl")
+				expect(s.iqEngines.size).toBe(0)
+			} finally {
+				await svc.stop()
+			}
+		})
 	})
 })

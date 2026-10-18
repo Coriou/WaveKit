@@ -763,6 +763,12 @@ export class ScannerService extends EventEmitter {
 					this.channelEngineStarts.set(sourceId, engine)
 					this.invalidateChannelAdmission()
 					this.probes.watchEngine(sourceId, engine)
+					// WG11 batch review R1 3: any stop of this engine (job release, display close, source
+					// removal) detaches it from the capture service, not only a fatal failure.
+					if (deps.iqCapture)
+						engine.on("stream", (_stream: number, reason: string) => {
+							if (reason === "stop") this.detachIqEngine(sourceId, engine)
+						})
 				},
 			})
 			// WG11 req 5.3: frame tracks carry the scanner's identity of a live track (null-safe,
@@ -2146,6 +2152,7 @@ export class ScannerService extends EventEmitter {
 		reason: EngineStreamReason,
 	): void => {
 		this.cancelChannelSource(sourceId)
+		if (reason === "stop") this.detachIqEngine(sourceId)
 		this.streamFloor.set(sourceId, reason === "stop" ? stream + 1 : stream)
 		// A summary of an ended stream never measures for identify.
 		this.lastSummaries.delete(sourceId)
@@ -3589,6 +3596,26 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/**
+	 * WG11 batch review R1 3: the source leaves the capture service (its capture child, slot and ring go)
+	 * when its engine stops or the source is removed. With `engine`, only while that engine is the attached
+	 * one (a replacement already attached stays).
+	 */
+	private detachIqEngine(sourceId: string, engine?: SpectrumEngine): void {
+		const port = this.deps.iqCapture
+		if (!port) return
+		const attached = this.iqEngines.get(sourceId)
+		if (!attached || (engine !== undefined && attached !== engine)) return
+		this.iqEngines.delete(sourceId)
+		for (const [observationId, hit] of this.iqCaptureOf)
+			if (hit.sourceId === sourceId) this.iqCaptureOf.delete(observationId)
+		try {
+			port.detachSource(sourceId)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "IQ capture detach failed")
+		}
+	}
+
 	/** A live decode on the observation: its captures whose replay has not started are discarded. */
 	private confirmIqLive(live: LiveObservation): void {
 		try {
@@ -4140,6 +4167,7 @@ export class ScannerService extends EventEmitter {
 
 	private readonly onSourceRemoved = (sourceId: string): void => {
 		this.cancelChannelSource(sourceId)
+		this.detachIqEngine(sourceId)
 		if (!this.started) return
 		for (const d of this.driversOn(sourceId)) {
 			if (!isTerminal(d.record.state))
