@@ -26,7 +26,7 @@ pub struct Config {
     pub ring_ms: u64,
     pub out_dir: PathBuf,
     /// The canonical anchor: out-dir is below it, and every component from it down to out-dir
-    /// (inclusive) is a real directory whose dev/ino is recorded at start (Astra r7 B1).
+    /// (inclusive) is a real directory whose dev/ino is recorded at start.
     pub anchor: PathBuf,
     pub max_ms: u64,
     pub bandwidth_hz: f64,
@@ -101,7 +101,7 @@ struct FsId {
     ino: u64,
 }
 
-/// Astra BLOCKING: `path` must still be the directory proven at start: a real directory (no
+/// Safety: `path` must still be the directory proven at start: a real directory (no
 /// link), same device and inode.
 fn dir_still(path: &Path, id: FsId) -> bool {
     matches!(std::fs::symlink_metadata(path), Ok(m)
@@ -111,7 +111,7 @@ fn dir_still(path: &Path, id: FsId) -> bool {
 /// The proven chain from the anchor down to the out-dir: each component's path and identity.
 type DirChain = Vec<(PathBuf, FsId)>;
 
-/// Astra r7 B1: records every component from `anchor` (inclusive) to `out_dir` (inclusive); each
+/// Safety: records every component from `anchor` (inclusive) to `out_dir` (inclusive); each
 /// must be a real directory (symlink_metadata, never followed). Out-dir must lie below the anchor.
 fn record_chain(anchor: &Path, out_dir: &Path) -> Result<DirChain, String> {
     let rel = out_dir
@@ -210,7 +210,7 @@ impl Capture {
         chain_still(&self.chain) && file_still(&self.tmp, self.file_id)
     }
 
-    /// Astra BLOCKING: drops the capture. The data goes through our own handle first (truncated,
+    /// Safety: drops the capture. The data goes through our own handle first (truncated,
     /// buffered bytes never written), so a swapped name can never take it; the name is removed
     /// only when the directory and the file are re-proven right before, else it is left alone.
     /// False when the proof failed (nothing removed).
@@ -255,7 +255,7 @@ pub struct Engine {
     carry: Option<u8>,
     caps: Vec<Capture>,
     used: HashSet<String>,
-    /// The anchor → out-dir chain proven at start (Astra BLOCKING, r7 B1).
+    /// The anchor → out-dir chain proven at start (root-swap guard).
     chain: DirChain,
 }
 

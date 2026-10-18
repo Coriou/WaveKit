@@ -99,7 +99,7 @@ export function createPoolReplayProbes(
 	const releaseListeners = new Set<() => void>()
 
 	const outcomeOf = (a: Active): IqReplayProbeAnswer => {
-		// Astra re-review 2 #1: only a clean replay-end is a verdict; an identity seen before a
+		// only a clean replay-end is a verdict; an identity seen before a
 		// failed or cut end is discarded.
 		if (!a.complete) return { outcome: "cancelled", decoded: null }
 		if (a.decoded) return { outcome: "decoded", decoded: a.decoded }
@@ -219,7 +219,7 @@ export function createPoolReplayProbes(
 			a.probeId ??= res.started
 			byProbe.set(res.started, a)
 			// A decoder that never exits: released after its hold plus grace. Only a clean replay-end
-			// is a verdict (Astra MAJOR 1: the input may have failed): otherwise `cancelled`.
+			// is a verdict (the input may have failed): otherwise `cancelled`.
 			a.timer = timers.setTimeout(() => release(a), r.mode.holdMs + graceMs)
 			return {
 				run: {

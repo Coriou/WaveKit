@@ -143,7 +143,7 @@ describe("probe pool replay requests", () => {
 		expect(h.pool.request(h.req({ epoch: 3 }))).toHaveProperty("started")
 	})
 
-	it("a replay input that failed ends the probe cancelled, with no verdict, even after a clean decoder exit (Astra MAJOR e)", async () => {
+	it("a replay input that failed ends the probe cancelled, with no verdict, even after a clean decoder exit", async () => {
 		const stream = new PassThrough()
 		const h = harness(stream)
 		h.pool.request(h.req())
@@ -157,7 +157,7 @@ describe("probe pool replay requests", () => {
 		expect(h.pool.status()).toHaveLength(0)
 	})
 
-	it("an input error during the grace after a clean decoder exit still wins: cancelled, no verdict (Astra MAJOR 1)", async () => {
+	it("an input error during the grace after a clean decoder exit still wins: cancelled, no verdict", async () => {
 		const stream = new PassThrough()
 		const h = harness(stream)
 		h.pool.request(h.req())
@@ -171,7 +171,7 @@ describe("probe pool replay requests", () => {
 		expect(h.pool.status()).toHaveLength(0)
 	})
 
-	it("a clean decoder exit without the input's EOF is no clean end: cancelled (Astra re-review 2 #2)", async () => {
+	it("a clean decoder exit without the input's EOF is no clean end: cancelled", async () => {
 		const h = harness(new PassThrough())
 		h.pool.request(h.req())
 		await flushAsync()
@@ -182,7 +182,7 @@ describe("probe pool replay requests", () => {
 		expect(h.pool.status()).toHaveLength(0)
 	})
 
-	describe("replay evidence is held until the clean end (Astra re-review 2 #1)", () => {
+	describe("replay evidence is held until the clean end", () => {
 		const dmr = {
 			decoderType: "dsd-fme" as const,
 			protocol: "dmr" as const,
@@ -222,7 +222,7 @@ describe("probe pool replay requests", () => {
 		})
 	})
 
-	describe("held replay evidence is bounded (Astra r7 B3)", () => {
+	describe("held replay evidence is bounded", () => {
 		const dmr = {
 			decoderType: "dsd-fme" as const,
 			protocol: "dmr" as const,

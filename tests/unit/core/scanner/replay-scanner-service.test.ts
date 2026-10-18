@@ -558,7 +558,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 				}),
 			)
 			expect(applied).not.toHaveBeenCalled()
-			// Astra MAJOR a: the memory is not touched without applying the decode.
+			// the memory is not touched without applying the decode.
 			expect(known.recordDecode).not.toHaveBeenCalled()
 		} finally {
 			await h.service.stop()
@@ -633,7 +633,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		})
 	})
 
-	describe("a replay result after the closed observation left `recent` (Astra MAJOR a)", () => {
+	describe("a replay result after the closed observation left `recent`", () => {
 		async function expired(stored: boolean) {
 			const { h, known, internals, live } = setup()
 			await h.service.start()
@@ -707,7 +707,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		})
 	})
 
-	describe("Astra re-review (MAJOR 2, MAJOR 3, MINOR)", () => {
+	describe("replay evidence timing and discovery attribution", () => {
 		const decodedEv = {
 			protocol: "dmr" as const,
 			identity: { kind: "dmr-cc" as const, value: "1" },
@@ -875,7 +875,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		})
 	})
 
-	describe("the clamp follows the stored observation after `recent` expiry (Astra re-review 2 #3)", () => {
+	describe("the clamp follows the stored observation after `recent` expiry", () => {
 		// The store's rule (discovery-store appendObservationEvidence): an observation ended by retune/hop
 		// refuses evidence stamped at or after its end (strict: at < endedAt).
 		const ENDED = 5000
@@ -982,7 +982,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 			})
 	})
 
-	it("a stop during a pending start never installs the replay queue or adapter (Astra re-review 2 #4)", async () => {
+	it("a stop during a pending start never installs the replay queue or adapter", async () => {
 		const { h, port } = setup()
 		const svc = h.service as unknown as {
 			persistence: { load(): Promise<unknown> }
@@ -1017,7 +1017,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		expect(svc.replayQueue).toBeNull()
 	})
 
-	it("a span a stored capture still needs survives 1024 unrelated closed observations (Astra re-review 3 #3)", async () => {
+	it("a span a stored capture still needs survives 1024 unrelated closed observations", async () => {
 		const { h, port, known, live } = setup()
 		const finished: ((v: IqCaptureView) => void)[] = []
 		port.onFinished.mockImplementation((l: (v: IqCaptureView) => void) => {
@@ -1099,7 +1099,7 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		}
 	})
 
-	it("pins never outlive their captures: 10 000 settled captures of one open observation leave 0 pins (Astra r7 B4)", async () => {
+	it("pins never outlive their captures: 10 000 settled captures of one open observation leave 0 pins", async () => {
 		const { h, port } = setup()
 		const finished: ((v: IqCaptureView) => void)[] = []
 		const removed: ((id: string, o: string | null) => void)[] = []

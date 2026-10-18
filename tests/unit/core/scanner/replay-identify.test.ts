@@ -281,7 +281,7 @@ describe("identify with IQ captures (WG11 req 6.8)", () => {
 		expect(h.calls.at(-1)).toBe("settle:requested-1:j_ident")
 	})
 
-	it("a replay request carries the claimed capture's own epoch and observation (Astra MAJOR b)", async () => {
+	it("a replay request carries the claimed capture's own epoch and observation", async () => {
 		// An older epoch of the target's own observation: claimed, replayed in its own epoch.
 		const h = harness({ captures: [view("old", { epoch: 0 })] })
 		const requests: ProbeRequest[] = []
@@ -297,7 +297,7 @@ describe("identify with IQ captures (WG11 req 6.8)", () => {
 		expect(requests[0]).toMatchObject({ epoch: 0, observationId: "o_t1" })
 	})
 
-	it("a capture of another epoch and another observation is never claimed (Astra MAJOR b)", async () => {
+	it("a capture of another epoch and another observation is never claimed", async () => {
 		const h = harness({
 			captures: [view("other", { epoch: 0, observationId: "o_old" })],
 		})

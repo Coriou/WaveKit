@@ -93,7 +93,7 @@ export const REPLAY_PROBE_PRIORITY = 100
 /** Settling time after a replay decoder exited cleanly, so its last output lines still count. */
 export const REPLAY_END_GRACE_MS = 250
 /**
- * Astra r7 B3: replay evidence held per probe until its clean end. A DMR capture of at most 4 s
+ * Safety: replay evidence held per probe until its clean end. A DMR capture of at most 4 s
  * carries a few dozen decode lines at most (one per 60 ms superframe is 67 in 4 s; H2 needs 2), so
  * 64 bounds a genuine replay; one more ends the probe cancelled (no verdict, no miss). Held entries
  * are small evidence objects: 64 per probe, IQ_REPLAY_MAX_PROBES = 1 at a time.
@@ -222,9 +222,9 @@ type StopReason =
 	| "replay-ended"
 
 interface ProbeRecord {
-	/** WG11 (Astra MAJOR e): the replay input failed; the run ends cancelled whatever the decoder says. */
+	/** WG11: the replay input failed; the run ends cancelled whatever the decoder says. */
 	replayInputFailed?: boolean
-	/** The replay input reached its EOF (a clean end needs it, Astra re-review 2 #2). */
+	/** The replay input reached its EOF (a clean end needs it). */
 	replayInputEnded?: boolean
 	/** Replay evidence held until the clean end (emitted then), dropped otherwise (re-review 2 #1). */
 	heldEvidence?: DecodeEvidence[]
@@ -1768,7 +1768,7 @@ export class ProbePool extends EventEmitter {
 		// A failed input is never a verdict: the decoder saw part of the capture at most.
 		const timer = setTimeout(() => {
 			if (this.isStopping(rec)) return
-			// Decided at emission (Astra MAJOR 1, re-review 2 #2): a clean end needs the input's own EOF
+			// Decided at emission: a clean end needs the input's own EOF
 			// without an error AND a clean decoder exit; anything else is cancelled, no verdict.
 			const complete =
 				clean && rec.replayInputEnded === true && rec.replayInputFailed !== true

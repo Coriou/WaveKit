@@ -137,7 +137,7 @@ describe("replay pool adapter", () => {
 		await expect(run2.result).resolves.toMatchObject({ outcome: "cancelled" })
 	})
 
-	it("a probe that never exits is ended after its hold as cancelled, no verdict (Astra MAJOR 1)", async () => {
+	it("a probe that never exits is ended after its hold as cancelled, no verdict", async () => {
 		// The replay input may have failed while the decoder never exited: only a clean
 		// replay-end is a verdict.
 		const { pool, timers, start } = setup()
@@ -193,7 +193,7 @@ describe("replay pool adapter", () => {
 		expect(pool.listenerCount("probe-state")).toBe(0)
 	})
 
-	it("an accepted identity without a clean replay-end is cancelled, the identity discarded (Astra re-review 2, #1)", async () => {
+	it("an accepted identity without a clean replay-end is cancelled, the identity discarded", async () => {
 		const { pool, start } = setup()
 		const run = start()
 		pool.emit("evidence", "p1", pool.requests[0], ev(true))

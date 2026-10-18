@@ -161,7 +161,7 @@ export interface IqCaptureService extends IqCapturePort {
 	/** A capture finished and was proven; it is queued (returns the unsubscribe). */
 	onFinished(listener: (view: IqCaptureView) => void): () => void
 	/**
-	 * Astra r7 B4: a capture left the store (any reason), announced once with its observation
+	 * Safety: a capture left the store (any reason), announced once with its observation
 	 * (returns the unsubscribe).
 	 */
 	onRemoved(
@@ -238,7 +238,7 @@ class Service implements IqCaptureService {
 	/** The configured root (resolved, may run through operator symlinks above it). */
 	private readonly root: string
 	/**
-	 * Astra re-review 3 #1: the canonical root (realpath of the nearest existing ancestor plus the
+	 * the canonical root (realpath of the nearest existing ancestor plus the
 	 * missing tail, created 0700), its anchor (that realpath) and the root's identity. Every guard
 	 * check runs from the anchor, so a later swap of the root or a component below the anchor is
 	 * refused; ancestors above the anchor are operator territory (macOS /tmp → /private/tmp).
@@ -271,7 +271,7 @@ class Service implements IqCaptureService {
 	 */
 	private readonly writers = new Map<string, IqToolProcess>()
 	/**
-	 * Astra r7 B2: the capture ids each process was asked for and has not given its final event for
+	 * Safety: the capture ids each process was asked for and has not given its final event for
 	 * yet (open or abandoned by Node). At most the captures sent to it and still unanswered; the
 	 * entry goes with the process (exit).
 	 */
@@ -370,7 +370,7 @@ class Service implements IqCaptureService {
 		if (this.st === "stopped" || this.st === "unavailable" || this.st === "on")
 			return zero
 		if (!this.dir) {
-			// Astra re-review 2 #5: before the scanner created its storage root there is nothing to
+			// before the scanner created its storage root there is nothing to
 			// sweep; capture is not disabled (start creates the root and proves the directory).
 			if (!(await this.canonicalize(false))) return zero
 			const anchor = this.anchor
@@ -705,7 +705,7 @@ class Service implements IqCaptureService {
 		const slot = this.slots.get(req.sourceId)
 		const proc = slot?.proc
 		if (!slot || slot.givenUp || !proc?.ready) return this.refuse("unavailable")
-		// Astra r7 B1: the whole anchored chain, root and directory re-proven before any command.
+		// Safety: the whole anchored chain, root and directory re-proven before any command.
 		if (!this.dirOk()) return this.refuse("unavailable")
 		const fs_ = slot.sampleRateHz
 		const offsetHz = req.rfHz - slot.centerHz
@@ -944,7 +944,7 @@ class Service implements IqCaptureService {
 		if (!cfg || this.st !== "on" || !this.dir || slot.givenUp) return
 		if (this.slots.get(slot.sourceId) !== slot) return
 		const anchor = this.anchor
-		// Astra r7 B1: no tool starts on a directory that is not the proven one.
+		// Safety: no tool starts on a directory that is not the proven one.
 		if (!anchor || !this.dirOk()) return
 		const proc = new IqToolProcess({
 			binaryPath: cfg.binaryPath,
@@ -963,7 +963,7 @@ class Service implements IqCaptureService {
 			// Per process, whatever the slot holds now: the end of this process's own captures.
 			if (ev.type !== "ready" && ev.id !== undefined) {
 				const id = ev.id
-				// Astra r7 B2: a process speaks only for the captures it was asked for. Any other id
+				// Safety: a process speaks only for the captures it was asked for. Any other id
 				// (another process's, a duplicate after its final event) is hostile: ignored, nothing
 				// in the store or on disk is touched.
 				const own = this.issued.get(proc)

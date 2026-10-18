@@ -703,7 +703,7 @@ describe("IqReplayQueue leaves identify's captures alone (Main review M2)", () =
 	})
 })
 
-describe("IqReplayQueue keeps skipped captures queued (Astra MAJOR c)", () => {
+describe("IqReplayQueue keeps skipped captures queued", () => {
 	function parked() {
 		const port = new FakePort()
 		const p = makeProbes(() => miss)

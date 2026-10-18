@@ -289,7 +289,7 @@ export type ScannerIqCapture = IqCapturePort & {
 	view(captureId: string): IqCaptureView | null
 	/** The replay queue's port (the scanner owns the queue): finished captures, holders, discard. */
 	onFinished(listener: (view: IqCaptureView) => void): () => void
-	/** Astra r7 B4: a capture left the store (any reason). */
+	/** Safety: a capture left the store (any reason). */
 	onRemoved(
 		listener: (captureId: string, observationId: string | null) => void,
 	): () => void
@@ -3214,7 +3214,7 @@ export class ScannerService extends EventEmitter {
 		if (req.replay && req.jobId === IQ_REPLAY_QUEUE_HOLDER) return
 		const found = this.findObservation(req.observationId)
 		if (req.replay) {
-			// Astra MAJOR 3: a replay's evidence carries the capture's time, not the processing time.
+			// a replay's evidence carries the capture's time, not the processing time.
 			ev = {
 				...ev,
 				at: this.replayEvidenceAt(
@@ -3224,7 +3224,7 @@ export class ScannerService extends EventEmitter {
 				),
 			}
 			if (!found) {
-				// Astra MAJOR 2: the observation left live/recent: its stored discovery takes it, once.
+				// the observation left live/recent: its stored discovery takes it, once.
 				const discoveryId = this.store.discoveryIdOf(req.observationId)
 				if (discoveryId)
 					this.applyStoredReplay(req.observationId, discoveryId, ev)
@@ -3823,7 +3823,7 @@ export class ScannerService extends EventEmitter {
 		return set.size > 0
 	}
 
-	/** Astra MAJOR c: the replay queue's re-check of the captures it parked for identify. */
+	/** the replay queue's re-check of the captures it parked for identify. */
 	private replayRecheck: (() => void) | null = null
 
 	setReplayRecheck(fn: (() => void) | null): void {
@@ -3926,14 +3926,14 @@ export class ScannerService extends EventEmitter {
 				if (live.epoch === result.epoch) {
 					this.applyingReplay = true
 					try {
-						// Only evidence the observation accepted counts (Astra MAJOR 3).
+						// Only evidence the observation accepted counts.
 						applied = this.applyEvidence(live, ev)
 					} finally {
 						this.applyingReplay = false
 					}
 				}
 			} else if (result.observationId && discoveryId)
-				// Astra MAJOR a: the observation closed and left `recent` (10 s) before its replay
+				// the observation closed and left `recent` (10 s) before its replay
 				// ended; the discovery it fed is still stored: the decode lands there.
 				applied = this.applyStoredReplay(result.observationId, discoveryId, ev)
 			// The memory counts a decode only where it was applied.
@@ -3979,7 +3979,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Astra MAJOR 3: a replay decode's timestamp is the capture's: its finish (`capturedAtMs` is the
+	 * a replay decode's timestamp is the capture's: its finish (`capturedAtMs` is the
 	 * finish time, so the decoded signal lies at or before it), clamped inside the observation's span
 	 * [startedAt, endedAt) when the scanner still holds it. The processing time when the view is gone.
 	 */
@@ -4360,7 +4360,7 @@ export class ScannerService extends EventEmitter {
 			settings: () => this.settings(),
 			emit: data => {
 				this.emit("identify", data)
-				// Astra MAJOR c: a target or job that ended may release captures the queue parked.
+				// a target or job that ended may release captures the queue parked.
 				this.recheckReplays()
 			},
 			logger: this.deps.logger,

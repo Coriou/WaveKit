@@ -56,7 +56,7 @@ export interface IqToolProcessOptions {
 	sampleRateHz: number
 	ringMs: number
 	outDir: string
-	/** The canonical anchor above outDir (the tool proves the whole chain from it, Astra r7 B1). */
+	/** The canonical anchor above outDir (the tool proves the whole chain from it). */
 	anchor: string
 	maxMs: number
 	bandwidthHz: number

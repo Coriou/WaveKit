@@ -310,7 +310,7 @@ describe("identify keeps its captures from the replay queue (review M2)", () => 
 	})
 })
 
-describe("identify's replay miss needs the full hold, gap-free (Astra MAJOR f)", () => {
+describe("identify's replay miss needs the full hold, gap-free", () => {
 	async function missesDuringReplay(
 		shape: {
 			samples: number
@@ -374,14 +374,14 @@ describe("identify's replay miss needs the full hold, gap-free (Astra MAJOR f)",
 		).toMatchObject({ sawReplay: true, replayMisses: 1 })
 	})
 
-	it("a replay decoder that never exits: the hold expiry is no verdict and no miss (Astra re-review 3 #2)", async () => {
+	it("a replay decoder that never exits: the hold expiry is no verdict and no miss", async () => {
 		expect(
 			await missesDuringReplay({ samples: 4 * 48_000, gapSamples: 0 }, false),
 		).toEqual({ sawReplay: true, replayMisses: 0, replayTrials: 0 })
 	})
 })
 
-describe("a parked capture rejoins the queue when identify lets go (Astra MAJOR c)", () => {
+describe("a parked capture rejoins the queue when identify lets go", () => {
 	it("identify cancelled before it claimed the detection capture: the queue replays it", async () => {
 		const h = harness()
 		await h.runner.start()

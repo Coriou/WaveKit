@@ -1,4 +1,4 @@
-// WG11 req 6.1 (Astra minor g, Main's composition rules): the composition root only creates the
+// WG11 req 6.1: the composition root only creates the
 // capture service (protected mode, scanner.iqCapture.enabled) and passes it to the scanner, which
 // owns the replay queue. No shutdown handler is added, wrapped or replaced, and no new call path
 // from the entry point reaches the scanner service (the built-entry fixtures stub it).

@@ -475,7 +475,7 @@ fn replay_checks_files_and_keeps_length() {
     assert_eq!(o.status.code(), Some(2));
 }
 
-/// Astra BLOCKING: the out-dir is renamed away and replaced by a symlink to a foreign directory
+/// Safety: the out-dir is renamed away and replaced by a symlink to a foreign directory
 /// holding a sentinel `<id>.cf32.tmp` (and `<id>.cf32` slot). The tool must never remove, rename
 /// or link through the swapped path: the sentinel stays intact.
 fn swap_out_dir(p: &Proc, id: &str) -> PathBuf {
@@ -545,7 +545,7 @@ fn swapped_out_dir_completion_publishes_nothing_there() {
     assert!(!foreign.join(format!("{ID1}.cf32")).exists());
 }
 
-/// Astra r7 B1: the canonical root is renamed away and replaced by a symlink to the moved
+/// Safety: the canonical root is renamed away and replaced by a symlink to the moved
 /// directory. The out-dir's own inode is unchanged (it moved with the root), so only the full
 /// chain from the anchor shows the swap. The tool must create, link and remove nothing there.
 fn swap_root_for_link(p: &Proc) -> PathBuf {

@@ -937,7 +937,7 @@ interface RunState {
 interface ReplayState {
 	/** Captures this job holds (claimed at plan, or once a requested one finished). */
 	claimed: string[]
-	/** Astra MAJOR b: each claimed capture's own epoch and observation (its replay carries them). */
+	/** each claimed capture's own epoch and observation (its replay carries them). */
 	views: Map<string, { epoch: number; observationId: string | null }>
 	/** Replay runs still to start; null until the live runs are over. */
 	queue: { captureId: string; planRun: number }[] | null
@@ -1642,7 +1642,7 @@ export class IdentifyRunner implements JobDriver {
 		// The pool stopped the probe before its hold (epoch change, spawn failure, shutdown) and nothing was
 		// accepted: that is no decoder verdict.
 		// A replay run stopped without its decoder's clean end (input failed, capture gone) is cut short
-		// whatever the wall clock says (Astra MAJOR e).
+		// whatever the wall clock says.
 		// Re-review 3 #2: a replay run's verdict needs its clean replay-end; a hold expiry without it
 		// (a decoder that never exited) is cut short too: cancelled, no miss.
 		const cutShort = r.replay
@@ -2212,7 +2212,7 @@ export class IdentifyRunner implements JobDriver {
 		if (!memory || !known || !r.run.protocols.includes(known.protocol)) return
 		if (why === "decoded" || unavailable) return
 		if (r.replay) {
-			// Astra MAJOR f: a replay's wall clock says nothing (faster than real time). It is a miss
+			// a replay's wall clock says nothing (faster than real time). It is a miss
 			// only after the decoder's clean end over a gap-free capture holding the whole mode hold.
 			if (!r.replayDone) return
 			if ([...r.seen.values()].some(seen => seen.identity !== null)) return
@@ -2358,7 +2358,7 @@ export class IdentifyRunner implements JobDriver {
 					c.tuningTrust === "relay" ||
 					c.observationId === view.observationId
 				) ||
-				// Astra MAJOR b: the target's own transmission only: its epoch, or its observation.
+				// the target's own transmission only: its epoch, or its observation.
 				!(c.epoch === view.epoch || c.observationId === view.observationId)
 			)
 				continue
@@ -2473,7 +2473,7 @@ export class IdentifyRunner implements JobDriver {
 		const view = t.view
 		const run = t.plan?.runs[next.planRun]
 		if (!view || !run) return false
-		// Astra MAJOR b: the replay's evidence is the capture's: its own epoch and observation.
+		// the replay's evidence is the capture's: its own epoch and observation.
 		const cv = t.replay.views.get(next.captureId)
 		const observationId = cv?.observationId ?? view.observationId
 		const req: ProbeRequest = {

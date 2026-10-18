@@ -347,7 +347,7 @@ describe("IqCaptureService capture flow", () => {
 		child.event({ type: "aborted", id: other, reason: "io" })
 		child.event({ type: "error", code: "io", id: other })
 		await flush()
-		// Astra r7 B2: every event naming an id this process was not asked for (3) is hostile.
+		// Safety: every event naming an id this process was not asked for (3) is hostile.
 		expect(s.svc.counters().hostileEvents).toBe(3)
 		expect(s.svc.counters().tool.oversizeLines).toBe(1)
 		expect(s.svc.counters().tool.invalidLines).toBe(3)
@@ -870,7 +870,7 @@ describe("IqCaptureService Main review 1 (m1, m2, m4, M2)", () => {
 	})
 })
 
-describe("IqCaptureService Astra review (BLOCKING, MAJOR d)", () => {
+describe("IqCaptureService review", () => {
 	it("BLOCKING: discard refuses a swapped capture directory (nothing outside is unlinked, capture off)", async () => {
 		const s = await setup()
 		await running(s)
@@ -956,7 +956,7 @@ describe("IqCaptureService Astra review (BLOCKING, MAJOR d)", () => {
 	})
 })
 
-describe("IqCaptureService sweep before the storage root exists (Astra re-review 2, #5)", () => {
+describe("IqCaptureService sweep before the storage root exists", () => {
 	it("a missing root is nothing to sweep and does not disable capture; start then creates the dir", async () => {
 		const s = await setup()
 		const missing = path.join(base, `late-root-${n++}`)
@@ -983,7 +983,7 @@ describe("IqCaptureService sweep before the storage root exists (Astra re-review
 	})
 })
 
-describe("IqCaptureService canonical storage root (Astra re-review 3, #1)", () => {
+describe("IqCaptureService canonical storage root", () => {
 	async function aliased() {
 		const s = await setup()
 		const outside = path.join(base, `outside-root-${n++}`)
@@ -1085,7 +1085,7 @@ describe("IqCaptureService canonical storage root (Astra re-review 3, #1)", () =
 	})
 })
 
-describe("IqCaptureService re-proves the anchored chain before commands and spawns (Astra r7 B1)", () => {
+describe("IqCaptureService re-proves the anchored chain before commands and spawns", () => {
 	it("root swapped for a symlink to the moved root: no capture command is sent, capture off", async () => {
 		const s = await setup({}, { behaviour: "silent" })
 		const child = await running(s)
@@ -1125,7 +1125,7 @@ describe("IqCaptureService re-proves the anchored chain before commands and spaw
 	})
 })
 
-describe("IqCaptureService: a process speaks only for its own captures (Astra r7 B2)", () => {
+describe("IqCaptureService: a process speaks only for its own captures", () => {
 	it("a detached source's live tool naming another source's capture touches nothing (hostile)", async () => {
 		const s = await setup({}, { behaviour: "silent" })
 		const childA = await running(s)
@@ -1165,7 +1165,7 @@ describe("IqCaptureService: a process speaks only for its own captures (Astra r7
 	})
 })
 
-describe("IqCaptureService removal events (Astra r7 B4)", () => {
+describe("IqCaptureService removal events", () => {
 	it("every removal (settle, discard, failure) is announced once with the capture's observation", async () => {
 		const s = await setup()
 		await running(s)
