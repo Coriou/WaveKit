@@ -416,3 +416,76 @@ describe("a parked capture rejoins the queue when identify lets go (Astra MAJOR 
 		h.probes.dispose()
 	})
 })
+
+describe("off-air replay needs no live spectrum engine (WG11 batch review R1 2)", () => {
+	it("the passive CPU guard closed the source's last engine: a queued capture still replays and decodes", async () => {
+		// Real pool (no engine at all), real pool adapter, real replay queue, real capture store.
+		let port!: StorePort
+		const pool = poolHarness({
+			engines: [],
+			transports: [
+				offsetTransport,
+				createReplayTransport({ openReplay: id => port.openReplay(id) }),
+			],
+		})
+		port = new StorePort(() => pool.clock.now)
+		const sink = vi.fn((_r: IqReplayResult) => undefined)
+		const probes = createPoolReplayProbes(pool.pool as never, {
+			priority: REPLAY_PROBE_PRIORITY,
+			jobId: IQ_REPLAY_QUEUE_HOLDER,
+		})
+		const queue = createIqReplayQueue({
+			port,
+			probes,
+			planner: planReplayTrials,
+			sink,
+			planInput: capture => ({
+				capture,
+				track: null,
+				knownProtocol: "dmr",
+				priors: { dmr: 1 },
+				narrowRaster: false,
+			}),
+			skip: () => false,
+			logger: pino({ level: "silent" }),
+		})
+		queue.start()
+		try {
+			const res = port.capture({
+				sourceId: "rtl",
+				observationId: "o_1",
+				epoch: 1,
+				rfHz: TARGET_HZ,
+				tuningTrust: "commanded",
+				fromSample: 0,
+				reason: "detection",
+			})
+			const id = "captureId" in res ? res.captureId : ""
+			port.end(id)
+			await flushAsync()
+			await flushAsync()
+			const replays = [...pool.decoders.created.entries()].filter(
+				([, d]) => d.config.options["inputIqFormat"] === "cf32",
+			)
+			expect(replays).toHaveLength(1)
+			expect(sink).not.toHaveBeenCalled()
+			const [decoderId, decoder] = replays[0]!
+			pool.decoders.emitLink(decoderId, linkLine(1, pool.clock.now))
+			pool.decoders.emitLink(decoderId, linkLine(1, pool.clock.now + 30))
+			decoder.emit("exit", 0, null)
+			await new Promise(r => setTimeout(r, 300))
+			await flushAsync()
+			await flushAsync()
+			expect(sink).toHaveBeenCalledTimes(1)
+			expect(sink.mock.calls[0]![0].decoded).toMatchObject({ protocol: "dmr" })
+			expect(sink.mock.calls[0]![0].trials[0]).toMatchObject({
+				protocol: "dmr",
+				outcome: "decoded",
+			})
+			expect(port.store.all()).toEqual([])
+		} finally {
+			await queue.stop()
+			probes.dispose()
+		}
+	})
+})

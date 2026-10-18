@@ -25,6 +25,7 @@ import type {
 	VoiceCallSource,
 } from "../../digital-voice.js"
 import { probeId as buildProbeId, shortId } from "../ids.js"
+import { IQ_CAPTURE_RATE_HZ } from "../iq-capture-contract.js"
 import { CPU_COST, probeCores } from "../plan/cost.js"
 import { bytesPerSample } from "../../spectrum/frame-source.js"
 import { ConstructorListenerRegistration } from "../channel/consumer-lifecycle.js"
@@ -578,6 +579,29 @@ function protocolShort(p: ScannerProtocol): string {
 	return p.replace(/[^a-z0-9]/g, "").slice(0, 8)
 }
 
+/**
+ * WG11 batch review R1 2: a replay request reads its capture (cf32 at the capture rate, centred on its
+ * target, in the capture's epoch), not the live stream, so its context needs no live spectrum engine: the
+ * passive CPU guard closing the source's last engine leaves queued captures replayable.
+ */
+function replayContext(req: ProbeRequest): TransportContext {
+	return {
+		req,
+		epoch: {
+			stream: 0,
+			epoch: req.epoch,
+			startSample: null,
+			centreHz: req.targetHz,
+			sampleRateHz: IQ_CAPTURE_RATE_HZ,
+			gainKey: "",
+			tuningTrust: "relay",
+			settleMode: null,
+		},
+		format: "CF32",
+		sampleRateHz: IQ_CAPTURE_RATE_HZ,
+	}
+}
+
 export class ProbePool extends EventEmitter {
 	private readonly log: Logger
 	private readonly now: () => number
@@ -638,31 +662,34 @@ export class ProbePool extends EventEmitter {
 				explicitModesKey(r.req) === explicitModesKey(req),
 		)
 		if (existing) return { started: existing.probeId }
-		const engine = this.deps.engines(req.sourceId)
-		if (!engine) return { deferred: "no-transport" }
-		const epoch = engine.currentEpoch()
-		if (
-			req.replay === undefined &&
-			(epoch.epoch !== req.epoch ||
-				!this.streamCurrent(req.sourceId, engine, epoch))
-		) {
-			return { deferred: "stale-epoch" }
-		}
-		if (
-			engine.format !== "U8_IQ" &&
-			!this.deps.transports.some(t => t.kind !== "offset")
-		) {
-			return { deferred: "format" }
+		let ctx: TransportContext
+		if (req.replay !== undefined) ctx = replayContext(req)
+		else {
+			const engine = this.deps.engines(req.sourceId)
+			if (!engine) return { deferred: "no-transport" }
+			const epoch = engine.currentEpoch()
+			if (
+				epoch.epoch !== req.epoch ||
+				!this.streamCurrent(req.sourceId, engine, epoch)
+			) {
+				return { deferred: "stale-epoch" }
+			}
+			if (
+				engine.format !== "U8_IQ" &&
+				!this.deps.transports.some(t => t.kind !== "offset")
+			) {
+				return { deferred: "format" }
+			}
+			ctx = {
+				req,
+				epoch,
+				format: engine.format,
+				sampleRateHz: epoch.sampleRateHz,
+			}
 		}
 		const modes = req.modes ?? probeModesFor(req.cls, req.protocols)
 		const first = modes[0]
 		if (!first) return { deferred: "no-transport" }
-		const ctx: TransportContext = {
-			req,
-			epoch,
-			format: engine.format,
-			sampleRateHz: epoch.sampleRateHz,
-		}
 		const pick = this.pickTransport(first, ctx)
 		if ("deferred" in pick) {
 			if (
@@ -1040,7 +1067,9 @@ export class ProbePool extends EventEmitter {
 			return { transport }
 		}
 		if (reason) return { deferred: reason }
-		return { deferred: ctx.format === "U8_IQ" ? "no-transport" : "format" }
+		return {
+			deferred: ctx.format === "U8_IQ" || replaying ? "no-transport" : "format",
+		}
 	}
 
 	/** WG11 review M1: the live transports supporting the mode whose probe slots are all taken. */
@@ -1114,6 +1143,25 @@ export class ProbePool extends EventEmitter {
 		}
 	}
 
+	/** A queued request's context now: a replay's from its capture, a live one's from its current engine. */
+	private liveOrReplayContext(req: ProbeRequest): TransportContext | null {
+		if (req.replay !== undefined) return replayContext(req)
+		const engine = this.deps.engines(req.sourceId)
+		if (!engine) return null
+		const epoch = engine.currentEpoch()
+		if (
+			epoch.epoch !== req.epoch ||
+			!this.streamCurrent(req.sourceId, engine, epoch)
+		)
+			return null
+		return {
+			req,
+			epoch,
+			format: engine.format,
+			sampleRateHz: epoch.sampleRateHz,
+		}
+	}
+
 	/**
 	 * Starts queued requests that now fit. Runs after every probe stop and from `ScannerService.tick` (Task 35), so a
 	 * cpu- or budget-deferred request starts once the meter drops even when no probe stops.
@@ -1124,13 +1172,8 @@ export class ProbePool extends EventEmitter {
 			if (this.destroyed) return
 			// Dropped by an earlier iteration (an engine replacement ends its source's queue).
 			if (!this.queue.includes(req)) continue
-			const engine = this.deps.engines(req.sourceId)
-			if (
-				!engine ||
-				(req.replay === undefined &&
-					(engine.currentEpoch().epoch !== req.epoch ||
-						!this.streamCurrent(req.sourceId, engine, engine.currentEpoch())))
-			) {
+			const ctx = this.liveOrReplayContext(req)
+			if (!ctx) {
 				this.dropQueued(r => r === req)
 				continue
 			}
@@ -1139,13 +1182,6 @@ export class ProbePool extends EventEmitter {
 			if (!first) {
 				this.dropQueued(r => r === req)
 				continue
-			}
-			const epoch = engine.currentEpoch()
-			const ctx: TransportContext = {
-				req,
-				epoch,
-				format: engine.format,
-				sampleRateHz: epoch.sampleRateHz,
 			}
 			const pick = this.pickTransport(first, ctx)
 			if ("deferred" in pick) continue
@@ -1538,17 +1574,21 @@ export class ProbePool extends EventEmitter {
 			if (!rec.fullHoldCovers.includes(p)) rec.fullHoldCovers.push(p)
 		const next = rec.modeIndex + 1
 		if (next >= rec.modes.length) return
-		const engine = this.deps.engines(rec.req.sourceId)
-		if (!engine) return
-		const epoch = engine.currentEpoch()
-		if (epoch.epoch !== rec.epoch) return
-		const nextMode = rec.modes[next]!
-		const ctx: TransportContext = {
-			req: rec.req,
-			epoch,
-			format: engine.format,
-			sampleRateHz: epoch.sampleRateHz,
+		let ctx: TransportContext
+		if (rec.req.replay !== undefined) ctx = replayContext(rec.req)
+		else {
+			const engine = this.deps.engines(rec.req.sourceId)
+			if (!engine) return
+			const epoch = engine.currentEpoch()
+			if (epoch.epoch !== rec.epoch) return
+			ctx = {
+				req: rec.req,
+				epoch,
+				format: engine.format,
+				sampleRateHz: epoch.sampleRateHz,
+			}
 		}
+		const nextMode = rec.modes[next]!
 		if (!rec.transport.supports(nextMode, ctx)) return
 		rec.stepping = true
 		await this.teardown(rec)
