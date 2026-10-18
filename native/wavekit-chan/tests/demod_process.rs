@@ -183,35 +183,31 @@ const OPEN: &str = r#"{"v":1,"type":"open","id":"dm","kind":"demod","centerHz":1
 #[test]
 fn temp_dir_does_not_remove_a_preexisting_directory() {
     let pid = std::process::id();
-    let mut created = Vec::new();
-    for n in 0..4 {
-        let path = PathBuf::from(format!("/tmp/wkd-{pid}-{n}"));
-        match std::fs::create_dir(&path) {
-            Ok(()) => {
-                std::fs::write(path.join("keep"), b"keep").unwrap();
-                created.push(path);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                if std::fs::read(path.join("keep")).ok().as_deref() == Some(b"keep".as_slice()) {
-                    created.push(path);
-                }
-            }
-            Err(err) => panic!("create {}: {err}", path.display()),
+    let preexisting = PathBuf::from(format!("/tmp/wkd-{pid}-keeper"));
+    // Only a directory this invocation created may be deleted afterwards.
+    let created_here = match std::fs::create_dir(&preexisting) {
+        Ok(()) => {
+            std::fs::write(preexisting.join("keep"), b"keep").unwrap();
+            true
         }
-    }
-    assert!(!created.is_empty(), "could not claim a keeper directory");
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(err) => panic!("create {}: {err}", preexisting.display()),
+    };
     let held = TempDir::new();
-    for path in &created {
-        assert!(
-            path.join("keep").is_file(),
-            "pre-existing {} was removed or replaced",
-            path.display()
-        );
-        assert_ne!(&held.0, path);
-    }
+    assert!(
+        preexisting.exists(),
+        "pre-existing {} was removed",
+        preexisting.display()
+    );
+    assert_ne!(&held.0, &preexisting);
     drop(held);
-    for path in &created {
-        let _ = std::fs::remove_dir_all(path);
+    assert!(
+        preexisting.exists(),
+        "TempDir cleanup removed {} which this invocation did not create",
+        preexisting.display()
+    );
+    if created_here {
+        let _ = std::fs::remove_dir_all(&preexisting);
     }
 }
 

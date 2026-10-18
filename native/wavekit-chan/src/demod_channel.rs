@@ -28,53 +28,80 @@ const BLOCK_MS: f64 = (DEMOD_BLOCK_SAMPLES as f64) * 1_000.0 / (DEMOD_OUTPUT_RAT
 const DECIM_BANDWIDTH_HZ: f64 = 40_000.0;
 const DECIM_TRANSITION_HZ: f64 = 4_000.0;
 
+/// Fixed-length history so a bandwidth retune never resizes the delay line.
+/// `active` is the odd-length kernel for the current bandwidth, centred in
+/// `reserved` so the group delay stays `(reserved - 1) / 2`.
 struct ChannelFir {
-    taps: Vec<f32>,
+    reserved: usize,
+    active: Vec<f32>,
+    /// Index of `active[0]` inside the reserved window (oldest → newest).
+    offset: usize,
     hist_i: Vec<f32>,
     hist_q: Vec<f32>,
+    /// Next write index. The sample just written is the newest.
+    pos: usize,
 }
 
 impl ChannelFir {
     fn new(taps: Vec<f32>) -> Self {
-        let keep = taps.len().saturating_sub(1);
-        Self {
-            taps,
-            hist_i: vec![0.0; keep],
-            hist_q: vec![0.0; keep],
-        }
+        let reserved = channel_fir_len().max(taps.len().max(1));
+        let mut fir = Self {
+            reserved,
+            active: Vec::new(),
+            offset: 0,
+            hist_i: vec![0.0; reserved],
+            hist_q: vec![0.0; reserved],
+            pos: 0,
+        };
+        fir.set_taps(taps);
+        fir
     }
 
     fn set_taps(&mut self, taps: Vec<f32>) {
-        if taps.len() == self.taps.len() {
-            self.taps = taps;
-        }
+        assert!(
+            !taps.is_empty() && !taps.len().is_multiple_of(2) && taps.len() <= self.reserved,
+            "channel FIR active length {} does not fit the reserved {}",
+            taps.len(),
+            self.reserved
+        );
+        self.offset = (self.reserved - taps.len()) / 2;
+        self.active = taps;
     }
 
     fn reset(&mut self) {
         self.hist_i.fill(0.0);
         self.hist_q.fill(0.0);
+        self.pos = 0;
     }
 
     fn process(&mut self, i: &[f32], q: &[f32], oi: &mut Vec<f32>, oq: &mut Vec<f32>) {
-        let n = self.taps.len().max(1);
+        let n = self.reserved;
+        let offset = self.offset;
         oi.reserve(i.len());
         oq.reserve(q.len());
+        let mut pos = self.pos;
         for (&x, &y) in i.iter().zip(q) {
-            self.hist_i.push(x);
-            self.hist_q.push(y);
-            let start = self.hist_i.len() - n;
+            self.hist_i[pos] = x;
+            self.hist_q[pos] = y;
             let mut acc_i = 0.0f32;
             let mut acc_q = 0.0f32;
-            for (k, &h) in self.taps.iter().enumerate() {
-                acc_i += h * self.hist_i[start + k];
-                acc_q += h * self.hist_q[start + k];
+            let mut idx = (pos + 1 + offset) % n;
+            for &h in &self.active {
+                acc_i += h * self.hist_i[idx];
+                acc_q += h * self.hist_q[idx];
+                idx += 1;
+                if idx == n {
+                    idx = 0;
+                }
             }
             oi.push(acc_i);
             oq.push(acc_q);
-            let drop = self.hist_i.len() - (n - 1);
-            self.hist_i.drain(..drop);
-            self.hist_q.drain(..drop);
+            pos += 1;
+            if pos == n {
+                pos = 0;
+            }
         }
+        self.pos = pos;
     }
 }
 
@@ -213,11 +240,13 @@ impl DemodChannel {
     }
 
     pub fn filter_taps(&self) -> usize {
-        self.decim_taps + self.fir.taps.len()
+        self.decim_taps + self.fir.active.len()
     }
 
+    /// Group delay of the reserved history. Centring the active kernel keeps this
+    /// constant across a bandwidth retune, so output alignment does not jump.
     pub fn group_delay_samples(&self) -> f64 {
-        self.decim_delay + (self.fir.taps.len() as f64 - 1.0) / 2.0
+        self.decim_delay + (self.fir.reserved as f64 - 1.0) / 2.0
     }
 
     pub fn output_samples(&self) -> u64 {
@@ -737,21 +766,33 @@ fn demod_err(err: DemodConfigError) -> String {
     }
 }
 
-/// Odd length of every channel FIR: the Kaiser estimate at [`DEMOD_MIN_BANDWIDTH_HZ`].
-/// A wider bandwidth is designed at this same length so a retune never resizes the delay line.
+/// Odd length of the reserved channel history: the Kaiser estimate at
+/// [`DEMOD_MIN_BANDWIDTH_HZ`], the longest kernel a legal bandwidth needs.
 fn channel_fir_len() -> usize {
-    let (_, transition) = channel_edges(DEMOD_MIN_BANDWIDTH_HZ);
+    kaiser_len_for(DEMOD_MIN_BANDWIDTH_HZ)
+}
+
+/// Active taps for one bandwidth. Transition is `0.25 · bandwidth` ([`channel_edges`]),
+/// capped by the reserved history so a retune never grows the delay line.
+fn active_channel_len(bandwidth_hz: f64) -> usize {
+    // The Kaiser length at a 0.25·bandwidth transition is 65 taps at 12.5 kHz.
+    // That kernel is flat through the voice band and still fails the DCS 023
+    // decoder in the Rust A/B; 89 taps decodes it. Wider estimates stay as they
+    // are when they already exceed this floor.
+    kaiser_len_for(bandwidth_hz).max(89).min(channel_fir_len())
+}
+
+fn kaiser_len_for(bandwidth_hz: f64) -> usize {
+    let (_, transition) = channel_edges(bandwidth_hz);
     design::kaiser_len(design::DESIGN_ATTENUATION_DB, transition).max(5) | 1
 }
 
-/// Channel lowpass at 48 kHz, [`channel_fir_len`] taps at every bandwidth.
-///
-/// The −6 dB cutoff is the noise meter's channel reference, so noise-only quieting is
-/// measured against the same bandwidth the filter passes. Tap length stays fixed so a
-/// retune keeps the delay line.
-fn design_channel_fir(bandwidth_hz: f64) -> Vec<f32> {
+/// Channel lowpass at 48 kHz. The −6 dB cutoff follows [`channel_cutoff`]. A wide
+/// bandwidth uses only its own taps; those taps sit in the centre of the reserved
+/// [`channel_fir_len`] history so the group delay does not change on retune.
+pub(crate) fn design_channel_fir(bandwidth_hz: f64) -> Vec<f32> {
     let cutoff = channel_cutoff(DEMOD_OUTPUT_RATE_HZ as f64, bandwidth_hz).clamp(1.0e-4, 0.49);
-    kaiser_lowpass(cutoff, channel_fir_len(), 1.0)
+    kaiser_lowpass(cutoff, active_channel_len(bandwidth_hz), 1.0)
 }
 
 fn channel_edges(bandwidth_hz: f64) -> (f64, f64) {
@@ -805,5 +846,47 @@ fn gcd(a: u64, b: u64) -> u64 {
         a
     } else {
         gcd(b, a % b)
+    }
+}
+
+#[cfg(test)]
+mod centred_fir {
+    use super::*;
+
+    #[test]
+    fn centred_impulse_matches_the_kernel() {
+        for bandwidth in [2_500.0, 6_250.0, 12_500.0, 25_000.0, 40_000.0] {
+            let taps = design_channel_fir(bandwidth);
+            let reserved = channel_fir_len();
+            let offset = (reserved - taps.len()) / 2;
+            let mut fir = ChannelFir::new(taps.clone());
+            let n = reserved + 4;
+            let mut i = vec![0.0f32; n];
+            let q = vec![0.0f32; n];
+            i[0] = 1.0;
+            let mut oi = Vec::new();
+            let mut oq = Vec::new();
+            fir.process(&i, &q, &mut oi, &mut oq);
+            for (sample, &y) in oi.iter().enumerate() {
+                let k = sample as isize - offset as isize;
+                // The circular MAC applies taps[0] to the oldest sample, so the
+                // impulse comes out time-reversed. A symmetric kernel hides that.
+                let expect = if k >= 0 && (k as usize) < taps.len() {
+                    taps[taps.len() - 1 - k as usize]
+                } else {
+                    0.0
+                };
+                assert!(
+                    (y - expect).abs() < 1e-5,
+                    "{bandwidth} Hz sample {sample} got {y} expect {expect} taps {}",
+                    taps.len()
+                );
+            }
+            let mid = taps.len() / 2;
+            assert!(
+                (taps[mid] - taps[taps.len() - 1 - mid]).abs() < 1e-6,
+                "kernel is not symmetric"
+            );
+        }
     }
 }

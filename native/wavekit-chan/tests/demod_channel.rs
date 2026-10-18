@@ -671,10 +671,14 @@ fn quieting_summary(values: &[f64]) -> String {
 }
 
 fn noise_squelch_channel(bandwidth_hz: f64) -> DemodChannel {
+    noise_squelch_with_hang(bandwidth_hz, 0.0)
+}
+
+fn noise_squelch_with_hang(bandwidth_hz: f64, hang_ms: f64) -> DemodChannel {
     let squelch = SquelchOpts {
         mode: SquelchMode::Noise,
         quieting_db: 6.0,
-        hang_ms: 0.0,
+        hang_ms,
         ..SquelchOpts::default()
     };
     DemodChannel::new(
@@ -727,6 +731,152 @@ fn noise_only_stays_closed_at_narrow_bandwidths_and_a_carrier_opens() {
             quieting_summary(&carrier.quieting)
         );
     }
+}
+
+/// Noise-only IQ must stay closed at the default 250 ms hang. One false open holds the
+/// gate for 25 blocks, so the per-seed cap is stricter than a single spike.
+#[test]
+fn noise_only_stays_closed_across_seeds_and_a_cnr_carrier_opens() {
+    const BANDWIDTHS: [f64; 4] = [2_500.0, 6_250.0, 12_500.0, 25_000.0];
+    let mut total_open = 0usize;
+    let mut total_blocks = 0usize;
+    for bandwidth in BANDWIDTHS {
+        for seed in 1..=100u64 {
+            let mut rng = Lcg(seed);
+            let mut ch = noise_squelch_with_hang(bandwidth, 250.0);
+            let warm = feed_blocks(&mut ch, 8, |i, q| rng.fill_noise(i, q), false);
+            let measured = feed_blocks(&mut ch, 200, |i, q| rng.fill_noise(i, q), warm.final_open);
+            assert!(
+                measured.open_blocks * 100 <= 200,
+                "{bandwidth} Hz seed {seed} opened {}/200 ({})",
+                measured.open_blocks,
+                quieting_summary(&measured.quieting)
+            );
+            total_open += measured.open_blocks;
+            total_blocks += 200;
+        }
+    }
+    let overall = total_open as f64 / total_blocks as f64;
+    assert!(
+        overall <= 0.002,
+        "noise opened {total_open}/{total_blocks} blocks ({overall:.4})"
+    );
+
+    for bandwidth in BANDWIDTHS {
+        for cnr in [10.0, 20.0] {
+            assert_cnr_opens_within_one_block(bandwidth, cnr);
+        }
+    }
+}
+
+fn assert_cnr_opens_within_one_block(bandwidth: f64, cnr_db: f64) {
+    let mut rng = Lcg(1);
+    let mut ch = noise_squelch_with_hang(bandwidth, 250.0);
+    let mut i = vec![0.0f32; 480];
+    let mut q = vec![0.0f32; 480];
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    let mut powers = Vec::new();
+    let mut open = false;
+    for _ in 0..20 {
+        rng.fill_noise(&mut i, &mut q);
+        events.clear();
+        ch.process(&i, &q, &mut out, &mut events);
+        for event in &events {
+            if event["type"] == "gate" {
+                open = event["open"].as_bool().expect("gate open");
+            }
+            if event["type"] == "metrics" {
+                for value in event["powerDbfs"].as_array().expect("power") {
+                    if let Some(db) = value.as_f64() {
+                        powers.push(db);
+                    }
+                }
+            }
+        }
+    }
+    assert!(!open, "{bandwidth} Hz noise was open before the carrier");
+    assert!(
+        !powers.is_empty(),
+        "{bandwidth} Hz produced no power metric"
+    );
+    let noise_db = powers.iter().sum::<f64>() / powers.len() as f64;
+    let amp = 10.0f64.powf((noise_db + cnr_db) / 20.0) as f32;
+    let mut opened_on = None;
+    for block in 0..2 {
+        rng.fill_noise(&mut i, &mut q);
+        for sample in &mut i {
+            *sample += amp;
+        }
+        events.clear();
+        ch.process(&i, &q, &mut out, &mut events);
+        for event in &events {
+            if event["type"] == "gate" && event["open"] == true {
+                open = true;
+            }
+        }
+        if open && opened_on.is_none() {
+            opened_on = Some(block);
+        }
+    }
+    assert!(
+        opened_on.is_some_and(|block| block <= 1),
+        "{bandwidth} Hz CNR {cnr_db} dB did not open within 1 block (opened_on={opened_on:?})"
+    );
+
+    if cnr_db == 20.0 {
+        let mut closed_on = None;
+        for block in 0..40 {
+            rng.fill_noise(&mut i, &mut q);
+            events.clear();
+            ch.process(&i, &q, &mut out, &mut events);
+            for event in &events {
+                if event["type"] == "gate" && event["open"] == false {
+                    open = false;
+                }
+            }
+            if !open && closed_on.is_none() {
+                closed_on = Some(block);
+                break;
+            }
+        }
+        let hang_blocks = (250.0_f64 / 10.0).round() as usize;
+        let closed_on = closed_on.expect("gate did not close after the carrier");
+        assert!(
+            closed_on <= hang_blocks + 2,
+            "{bandwidth} Hz stayed open for {closed_on} noise blocks after hang {hang_blocks}"
+        );
+    }
+}
+
+#[test]
+fn wide_bandwidth_uses_fewer_taps_and_retune_keeps_group_delay() {
+    let mut wide = DemodChannel::new(
+        48_000,
+        162_000_000.0,
+        &open_nfm(40_000.0, SquelchOpts::default(), false),
+    )
+    .unwrap();
+    let narrow = DemodChannel::new(
+        48_000,
+        162_000_000.0,
+        &open_nfm(2_500.0, SquelchOpts::default(), false),
+    )
+    .unwrap();
+    let delay = wide.group_delay_samples();
+    assert!(
+        wide.filter_taps() + 64 < narrow.filter_taps(),
+        "40 kHz active taps {} are not below the 2.5 kHz length {}",
+        wide.filter_taps(),
+        narrow.filter_taps()
+    );
+    wide.queue_retune(&retune_audio_bw(None, Some(2_500.0)))
+        .unwrap();
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    wide.process(&[], &[], &mut out, &mut events);
+    assert_eq!(wide.group_delay_samples(), delay);
+    assert_eq!(wide.filter_taps(), narrow.filter_taps());
 }
 
 #[test]
@@ -909,15 +1059,16 @@ fn narrowing_from_40k_to_2_5k_keeps_60_db_on_a_2_5k_interferer() {
     .unwrap();
     wide.queue_retune(&retune_audio_bw(None, Some(2_500.0)))
         .unwrap();
-    let taps_wide = wide.filter_taps();
-    let taps_narrow = narrow.filter_taps();
     let n = 480 * 20;
     let (stop_i, stop_q) = tone_iq(n, 2_500.0, 1.0);
     let (pass_i, pass_q) = tone_iq(n, 200.0, 1.0);
     let mut out = Vec::new();
     let mut stop_events = Vec::new();
     let mut pass_events = Vec::new();
+    // The retune is pending until process, which is the filter the interferer sees.
     wide.process(&stop_i, &stop_q, &mut out, &mut stop_events);
+    let taps_wide = wide.filter_taps();
+    let taps_narrow = narrow.filter_taps();
     let mut pass = DemodChannel::new(
         48_000,
         162_000_000.0,
