@@ -95,16 +95,24 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 	private readonly exitOnShutdown: boolean
 	private readonly autoExit: boolean
 	private readonly rejectOpen: boolean
+	private readonly emitReady: boolean
+	private readonly readyRepeat: number
 
 	constructor(options?: {
 		exitOnShutdown?: boolean
 		autoExit?: boolean
 		rejectOpen?: boolean
+		/** When false, the fake never writes `ready` (timeout / spawn-failure tests). */
+		emitReady?: boolean
+		/** Copies of `ready` in the first stdout chunk. Default 1. */
+		readyRepeat?: number
 	}) {
 		super()
 		this.exitOnShutdown = options?.exitOnShutdown ?? true
 		this.autoExit = options?.autoExit ?? false
 		this.rejectOpen = options?.rejectOpen ?? false
+		this.emitReady = options?.emitReady ?? true
+		this.readyRepeat = Math.max(1, options?.readyRepeat ?? 1)
 		this.stdio = [this.stdin, this.stdout, this.stderr, this.control]
 		this.stdin.resume()
 		this.stderr.resume()
@@ -129,8 +137,9 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 			}
 		})
 		process.nextTick(() => {
-			if (this.exitCode !== null) return
-			this.emitLine({ v: 1, type: "ready", generation: 1, pid: this.pid })
+			if (this.exitCode !== null || !this.emitReady) return
+			const line = `${JSON.stringify({ v: 1, type: "ready", generation: 1, pid: this.pid })}\n`
+			this.stdout.write(line.repeat(this.readyRepeat))
 		})
 	}
 

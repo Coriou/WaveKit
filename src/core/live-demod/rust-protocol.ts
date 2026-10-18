@@ -326,6 +326,10 @@ function squelchRecord(update: DemodSquelch): Record<string, unknown> {
 		record["hysteresisDb"] = update.hysteresisDb
 	if (update.hangMs !== undefined) record["hangMs"] = update.hangMs
 	if (update.quietingDb !== undefined) record["quietingDb"] = update.quietingDb
+	// Tri-state: absent leaves the native floor, null clears it, a number sets it.
+	// Outgoing requests are encoded here; incoming events are the Zod boundary.
+	if (update.noiseFloorDbfs !== undefined)
+		record["noiseFloorDbfs"] = update.noiseFloorDbfs
 	return record
 }
 

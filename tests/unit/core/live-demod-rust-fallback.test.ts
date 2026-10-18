@@ -47,10 +47,12 @@ describe("live demod rust fallback and retune", () => {
 	let demod: LiveDemodulatorType | undefined
 	let killSpy: MockInstance<(pid: number, signal?: string | number) => true>
 	let versionMode: "current" | "old" | "enoent"
+	let channelSpawn: "ok" | "enoent"
 	let rejectOpen: boolean
 	let autoExitAfter: number
 	let channelCount: number
 	let format: "U8_IQ" | "S16_IQ"
+	let centerFreq: number | undefined
 	const versions: VersionFake[] = []
 	const channels: ChannelFake[] = []
 	const shells: FakeProcess[] = []
@@ -61,10 +63,12 @@ describe("live demod rust fallback and retune", () => {
 			...args: unknown[]
 		) => LiveDemodulatorType
 		versionMode = "current"
+		channelSpawn = "ok"
 		rejectOpen = false
 		autoExitAfter = 99
 		channelCount = 0
 		format = "U8_IQ"
+		centerFreq = undefined
 		versions.length = 0
 		channels.length = 0
 		shells.length = 0
@@ -84,8 +88,21 @@ describe("live demod rust fallback and retune", () => {
 				exitOnShutdown: true,
 				autoExit: channelCount > autoExitAfter,
 				rejectOpen,
+				emitReady: channelSpawn !== "enoent",
 			})
 			channels.push(proc)
+			if (channelSpawn === "enoent") {
+				process.nextTick(() => {
+					const error = new Error("spawn ENOENT") as NodeJS.ErrnoException
+					error.code = "ENOENT"
+					error.errno = -2
+					error.syscall = "spawn"
+					const loose = proc as unknown as { pid: number | undefined }
+					loose.pid = undefined
+					proc.emit("error", error)
+					proc.exit(-2, null)
+				})
+			}
 			return proc as unknown as ChildProcess
 		})
 		killSpy = vi
@@ -122,14 +139,26 @@ describe("live demod rust fallback and retune", () => {
 		const base = createFakeSourceManager()
 		return {
 			...base,
-			getCaps: () => ({ ...base.getCaps(), format }),
+			getCaps: () => ({
+				...base.getCaps(),
+				format,
+				...(centerFreq !== undefined ? { centerFreq } : {}),
+			}),
+			moveCenter(hz: number) {
+				centerFreq = hz
+				base.emitCaps({ centerFreq: hz })
+			},
 		}
 	}
 
 	async function boot(
 		overrides: Record<string, unknown> = {},
 		options: Record<string, unknown> = {},
-	): Promise<{ lines: CapturedLog[]; port: number }> {
+	): Promise<{
+		lines: CapturedLog[]
+		port: number
+		source: ReturnType<typeof source>
+	}> {
 		const port = await freePort()
 		const config = LiveDemodConfigSchema.parse({
 			enabled: true,
@@ -140,9 +169,10 @@ describe("live demod rust fallback and retune", () => {
 			...overrides,
 		})
 		const captured = capturingLogger()
+		const src = source()
 		demod = new LiveDemodulatorClass(
 			captured.logger,
-			source(),
+			src,
 			createFakeFanout(),
 			config,
 			{
@@ -153,7 +183,7 @@ describe("live demod rust fallback and retune", () => {
 			},
 		)
 		await demod.start()
-		return { lines: captured.lines, port }
+		return { lines: captured.lines, port, source: src }
 	}
 
 	function fallbacks(lines: CapturedLog[]): CapturedLog[] {
@@ -381,5 +411,132 @@ describe("live demod rust fallback and retune", () => {
 		await vi.waitFor(() => expect(Buffer.concat(chunks)).toEqual(pcm), {
 			timeout: 1000,
 		})
+	})
+
+	it("falls back when channel spawn fails after a successful version probe", async () => {
+		channelSpawn = "enoent"
+		const { lines } = await boot()
+		expect(versions).toHaveLength(1)
+		expect(channels.length).toBeGreaterThanOrEqual(1)
+		expect(shells.length).toBeGreaterThanOrEqual(2)
+		expect(fallbacks(lines)).toHaveLength(1)
+		expect(fallbacks(lines)[0]).toMatchObject({
+			reason: "binary-unavailable",
+			err: { code: "ENOENT" },
+		})
+		expect(demod?.getStatus().engine).toBe("csdr")
+		expect(demod?.getStatus().engineFallback).toBe("binary-unavailable")
+	})
+
+	it("applies offsetHz against the input center captured at process start", async () => {
+		centerFreq = 100_000_000
+		const { source: src } = await boot()
+		const open = controlMessages(channels[0]?.controlText ?? "").find(
+			message => message["type"] === "open",
+		)
+		expect(open?.["centerHz"]).toBe(100_000_000)
+		src.moveCenter(101_000_000)
+		await demod?.reconfigure({ offsetHz: 1_000 })
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toEqual([
+			expect.objectContaining({ centerHz: 100_001_000 }),
+		])
+	})
+
+	it("keeps the transmission closed until the retuned event", async () => {
+		await boot({ squelch: 0 })
+		expect(demod?.isSquelchOpen()).toBe(true)
+		await demod?.reconfigure({ offsetHz: 2_500 })
+		expect(demod?.isSquelchOpen()).toBe(false)
+		channels[0]?.emitLine(
+			demodEvent("gate", { open: true, atOutputSample: 480 }),
+		)
+		expect(demod?.isSquelchOpen()).toBe(false)
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
+		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
+	it("does not seed the auto floor from a quieted carrier and sends the floor", async () => {
+		await boot({ squelchMode: "auto", autoMarginDb: 6, modulation: "nfm" })
+		expect(demod?.carrierBlocks()).toBe(0)
+		channels[0]?.emitLine(
+			demodEvent("metrics", {
+				atOutputSample: 480,
+				powerDbfs: [-20],
+				quietingDb: [30],
+			}),
+		)
+		expect(demod?.getStatus().noiseFloorDbfs).toBeUndefined()
+		expect(demod?.getStatus().thresholdDbfs).toBeCloseTo(-0.001)
+		expect(demod?.carrierBlocks()).toBe(1)
+		channels[0]?.emitLine(
+			demodEvent("metrics", {
+				atOutputSample: 960,
+				powerDbfs: [-80],
+				quietingDb: [1],
+			}),
+		)
+		expect(demod?.getStatus().noiseFloorDbfs).toBe(-80)
+		expect(demod?.getStatus().thresholdDbfs).toBe(-74)
+		expect(demod?.carrierBlocks()).toBe(1)
+		const squelch = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "squelch",
+		)
+		expect(squelch.at(-1)).toMatchObject({
+			mode: "power",
+			thresholdDbfs: -74,
+			noiseFloorDbfs: -80,
+		})
+		await demod?.reconfigure({ offsetHz: 1_000 })
+		const cleared = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "squelch",
+		)
+		expect(cleared.at(-1)?.["noiseFloorDbfs"]).toBeNull()
+		expect(demod?.getStatus().noiseFloorDbfs).toBeUndefined()
+	})
+
+	it("counts rust carrier blocks with the channel-squelch rule", async () => {
+		await boot({
+			squelchMode: "noise",
+			noiseQuietingDb: 12,
+			modulation: "nfm",
+			squelch: -40,
+		})
+		expect(demod?.carrierBlocks()).toBe(0)
+		channels[0]?.emitLine(
+			demodEvent("metrics", {
+				atOutputSample: 480,
+				powerDbfs: [-20],
+				quietingDb: [10],
+			}),
+		)
+		expect(demod?.carrierBlocks()).toBe(0)
+		channels[0]?.emitLine(
+			demodEvent("metrics", {
+				atOutputSample: 960,
+				powerDbfs: [-20],
+				quietingDb: [12],
+			}),
+		)
+		expect(demod?.carrierBlocks()).toBe(1)
+	})
+
+	it("counts a manual rust carrier at the default quieting threshold", async () => {
+		await boot({
+			squelchMode: "manual",
+			modulation: "nfm",
+			squelch: -40,
+			noiseQuietingDb: 20,
+		})
+		channels[0]?.emitLine(
+			demodEvent("metrics", {
+				atOutputSample: 480,
+				powerDbfs: [-20],
+				quietingDb: [6],
+			}),
+		)
+		expect(demod?.carrierBlocks()).toBe(1)
 	})
 })

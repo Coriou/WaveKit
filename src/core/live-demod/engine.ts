@@ -25,6 +25,11 @@ export interface DemodSquelch {
 	hysteresisDb?: number
 	hangMs?: number
 	quietingDb?: number
+	/**
+	 * Tracked noise floor for the WG7 noise-tail rule. Absent leaves the
+	 * native floor, `null` clears it, a finite number sets it.
+	 */
+	noiseFloorDbfs?: number | null
 }
 
 export interface LiveDemodEngineStatus {

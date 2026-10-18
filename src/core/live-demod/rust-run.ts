@@ -6,7 +6,10 @@
 
 import { PassThrough, type Readable } from "node:stream"
 import type { ChildProcess } from "node:child_process"
-import { LIVE_AUDIO_NOISE_QUIETING_DB } from "@wavekit/api-types"
+import {
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
+} from "@wavekit/api-types"
 import type { SourceCaps } from "../../config.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import type { Logger } from "../../utils/logger.js"
@@ -65,7 +68,10 @@ const RUST_EXIT_REASON = "Live demodulation Rust engine exited"
 
 export interface RustPowerSample {
 	powerDbfs: number | null
+	/** FM quieting shows a carrier, matching `ChannelSquelch.blockQuieted`. */
 	quieted: boolean
+	/** Quieting of this block, or null when the engine did not report one. */
+	quietingDb: number | null
 }
 
 /**
@@ -80,7 +86,6 @@ export interface RustRunHost {
 	httpListening(): boolean
 	stableRunMs(): number
 	activeSourceId(): string | null
-	centerHz(sourceId: string): number | undefined
 	squelchHangMs(): number
 	effectiveThreshold(run: PipelineRun): number
 	currentRun(): PipelineRun | null
@@ -155,18 +160,23 @@ export class RustLiveRun {
 			this.host.resetFloorForRetune(run)
 			this.host.clearCloseOverride()
 		}
-		const sourceId = this.host.activeSourceId()
-		const center = sourceId ? this.host.centerHz(sourceId) : undefined
-		run.rust?.applyRetune(planRetune(previous, next, center))
+		// offsetHz is the shift from the tuned centre. A source-centre change
+		// keeps this process (the csdr chain does too): IQ DC is the new centre,
+		// and native still mixes `centerHz - input_center` with the centre from
+		// process start. Sending the live source centre would add that retune
+		// on top of the frozen input centre.
+		run.rust?.applyRetune(
+			planRetune(previous, next, run.rust.inputCenterHz ?? undefined),
+		)
 		this.pushSquelch(run)
 	}
 
 	pushSquelch(run: PipelineRun): void {
 		const engine = run.rust
 		if (!engine) return
-		const squelch = squelchFor(
-			this.host.config(),
-			this.host.effectiveThreshold(run),
+		const squelch = withTrackedFloor(
+			squelchFor(this.host.config(), this.host.effectiveThreshold(run)),
+			run.noiseFloorDbfs,
 		)
 		const encoded = JSON.stringify(squelch)
 		if (encoded === this.lastSentSquelch) return
@@ -206,7 +216,7 @@ export class RustLiveRun {
 			config.squelchMode === "auto"
 				? RUST_AUTO_INITIAL_THRESHOLD_DBFS
 				: config.squelch
-		const squelch = squelchFor(config, threshold)
+		const squelch = withTrackedFloor(squelchFor(config, threshold), null)
 		const engine = new RustEngine({
 			binaryPath: config.chanBinaryPath ?? "wavekit-chan",
 			logger: this.host.log,
@@ -233,6 +243,10 @@ export class RustLiveRun {
 					onGate: open => {
 						const current = slot.run
 						if (current) this.onGate(current, open)
+					},
+					onRetuned: () => {
+						const current = slot.run
+						if (current) this.onRetuned(current)
 					},
 					onMetrics: (power, quieting) => {
 						const current = slot.run
@@ -313,7 +327,16 @@ export class RustLiveRun {
 	private onGate(run: PipelineRun, open: boolean): void {
 		if (this.host.currentRun() !== run || run.stopping) return
 		run.externalGate = open
-		if (run.gateHeld) run.gateHeld = false
+		// An identity retune holds the transmission until `retuned`. Native emits
+		// `gate` only on transitions, so a gate event must not release the hold.
+		this.host.publishSquelchChange()
+	}
+
+	/** `retuned` is the atOutputSample boundary of the new tuning. */
+	private onRetuned(run: PipelineRun): void {
+		if (this.host.currentRun() !== run || run.stopping) return
+		if (!run.gateHeld) return
+		run.gateHeld = false
 		this.host.publishSquelchChange()
 	}
 
@@ -323,11 +346,17 @@ export class RustLiveRun {
 		quietingDb: Array<number | null>,
 	): void {
 		if (this.host.currentRun() !== run || run.stopping) return
+		const config = this.host.config()
 		const count = Math.max(powerDbfs.length, quietingDb.length)
 		for (let i = 0; i < count; i++) {
 			const power = powerDbfs[i] ?? null
+			const quieting = quietingDb[i] ?? null
 			if (power !== null) run.externalPowerDbfs = power
-			this.host.measureRun(run, { powerDbfs: power, quieted: false })
+			this.host.measureRun(run, {
+				powerDbfs: power,
+				quieted: metricsQuieted(config, quieting),
+				quietingDb: quieting,
+			})
 		}
 		this.pushSquelch(run)
 	}
@@ -352,6 +381,11 @@ export class RustLiveRun {
 			noiseQuietingDb:
 				config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
 			...(config.bandwidth > 0 ? { bandwidthHz: config.bandwidth } : {}),
+			// Carrier evidence matches the csdr run. Metrics supply the quieting;
+			// the IQ meter inside this squelch is not fed.
+			...(LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(config.modulation)
+				? { carrierEvidence: true }
+				: {}),
 		})
 		return {
 			front: child,
@@ -380,4 +414,29 @@ export class RustLiveRun {
 			externalGate: squelch.mode === "off",
 		}
 	}
+}
+
+/**
+ * `ChannelSquelch.blockQuieted`: auto nfm/wfm, quieting at least the observer
+ * threshold (`LIVE_AUDIO_NOISE_QUIETING_DB.default`). `noiseQuietingDb` is the
+ * noise-mode gate, not this floor predicate.
+ */
+function metricsQuieted(
+	config: LiveDemodConfig,
+	quietingDb: number | null,
+): boolean {
+	if (config.squelchMode !== "auto") return false
+	if (!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(config.modulation))
+		return false
+	return (
+		quietingDb !== null && quietingDb >= LIVE_AUDIO_NOISE_QUIETING_DB.default
+	)
+}
+
+/** Attach the tracked floor. `null` clears it on the wire; a number sets it. */
+function withTrackedFloor(
+	squelch: DemodSquelch,
+	noiseFloorDbfs: number | null,
+): DemodSquelch {
+	return { ...squelch, noiseFloorDbfs }
 }

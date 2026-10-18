@@ -41,6 +41,14 @@ const VERSION_LIMIT_BYTES = 4096
 const DEFAULT_PROBE_MS = 2000
 const DEFAULT_OPEN_MS = 2000
 const DEFAULT_STOP_KILL_MS = 2000
+/**
+ * Handshake events queued before their waiter (`ready`, `opened`, `rejected`,
+ * `retuned`). A legitimate handshake is one or two lines; the cap stops a
+ * flood from growing the queue. After the channel is open the queue is
+ * discarded and later handshake events are not retained. `retuned` is
+ * delivered to the handler instead.
+ */
+export const HANDSHAKE_EARLY_MAX = 8
 
 export interface RustEngineOptions {
 	binaryPath: string
@@ -60,6 +68,8 @@ export interface RustEngineHandlers {
 		quietingDb: Array<number | null>,
 	) => void
 	onDown: (reason: string) => void
+	/** First output sample of an applied retune (`retuned.atOutputSample`). */
+	onRetuned?: (atOutputSample: number) => void
 }
 
 export interface RustEngineStart {
@@ -108,6 +118,12 @@ export class RustEngine implements LiveDemodEngine {
 	private pendingMatch: ((event: DemodEvent) => void) | undefined
 	/** Handshake events that arrived before their waiter was installed. */
 	private early: DemodEvent[] = []
+	/** Async spawn failure (ENOENT / EACCES / no pid). Not an unexpected crash. */
+	private spawnFailure: unknown = undefined
+	/** Child exited on its own before start finished. */
+	private unexpectedExit = false
+	/** `input_center` passed to native at spawn. Null before the channel spawn. */
+	private capturedInputCenterHz: number | null = null
 
 	constructor(options: RustEngineOptions) {
 		this.binaryPath = options.binaryPath
@@ -128,6 +144,20 @@ export class RustEngine implements LiveDemodEngine {
 		return this.child
 	}
 
+	/**
+	 * Centre native was started with (`--input-center`). Retune `centerHz`
+	 * stays in this frame: native mixes `centerHz - input_center` and never
+	 * updates `input_center`.
+	 */
+	get inputCenterHz(): number | null {
+		return this.capturedInputCenterHz
+	}
+
+	/** Handshake events waiting for a matcher. Zero once the channel is open. */
+	get bufferedHandshake(): number {
+		return this.early.length
+	}
+
 	status(): { engine: "rust"; engineFallback?: EngineFallbackReason } {
 		return { engine: "rust" }
 	}
@@ -141,6 +171,9 @@ export class RustEngine implements LiveDemodEngine {
 		this.dropCount = 0
 		this.early = []
 		this.pendingMatch = undefined
+		this.spawnFailure = undefined
+		this.unexpectedExit = false
+		this.capturedInputCenterHz = null
 		const selectionConfig = {
 			engine: "rust" as const,
 			modulation: input.config.modulation,
@@ -288,6 +321,7 @@ export class RustEngine implements LiveDemodEngine {
 		}
 		this.socketDir = socketDir
 		const center = input.caps.centerFreq ?? 0
+		this.capturedInputCenterHz = center
 		const args = buildChannelizerArgs({
 			binaryPath: this.binaryPath,
 			generation: 1,
@@ -339,10 +373,11 @@ export class RustEngine implements LiveDemodEngine {
 			event.type === "ready" ? event : undefined,
 		)
 		if (ready === undefined) {
+			// Classify before stop(): cleanup kills the child, and that death
+			// is not an unexpected crash. An async ENOENT is binary-unavailable.
+			const failure = this.startupFailure(child)
 			await this.stop()
-			return this.childDied(child)
-				? { ok: false, crashed: true }
-				: { ok: false, fallback: "binary-unavailable" }
+			return failure
 		}
 		if (this.stopping) return { ok: false, crashed: true }
 		this.send(
@@ -358,9 +393,10 @@ export class RustEngine implements LiveDemodEngine {
 			return undefined
 		})
 		if (opened === undefined || opened.type === "rejected") {
+			const failure = opened === undefined ? this.startupFailure(child) : null
 			await this.stop()
-			if (opened === undefined && this.childDied(child))
-				return { ok: false, crashed: true }
+			if (failure && ("crashed" in failure || this.spawnFailure !== undefined))
+				return failure
 			return { ok: false, fallback: "open-rejected" }
 		}
 		if (opened.outputRateHz !== RUST_AUDIO_RATE_HZ) {
@@ -369,16 +405,41 @@ export class RustEngine implements LiveDemodEngine {
 		}
 		this.attachAudio(opened)
 		this.opened = true
+		this.early = []
 		return { ok: true, format: opened.format, rate: RUST_AUDIO_RATE_HZ }
 	}
 
-	private childDied(child: ChildProcess): boolean {
-		return child.exitCode !== null || child.signalCode !== null || this.exited
+	/**
+	 * Why start did not see the event it was waiting for. A spawn error and a
+	 * child this start is about to kill (ready/open timeout) are
+	 * `binary-unavailable`. An exit we did not cause is `crashed`. Call this
+	 * before `stop()`, which terminates a live child.
+	 */
+	private startupFailure(child: ChildProcess): RustStartResult {
+		if (this.spawnFailure !== undefined) {
+			return {
+				ok: false,
+				fallback: "binary-unavailable",
+				error: this.spawnFailure,
+			}
+		}
+		if (this.unexpectedExit) return { ok: false, crashed: true }
+		if (
+			!this.stopping &&
+			(child.exitCode !== null || child.signalCode !== null || this.exited)
+		)
+			return { ok: false, crashed: true }
+		if (this.stopping) return { ok: false, crashed: true }
+		return { ok: false, fallback: "binary-unavailable" }
 	}
 
 	private watchChild(child: ChildProcess): void {
 		child.once("error", (error: Error) => {
-			if (child.pid === undefined) this.exited = true
+			// Node reports a failed spawn asynchronously, after spawn() returned.
+			if (isSpawnFailure(child, error)) {
+				this.spawnFailure = error
+				this.exited = true
+			}
 			this.log.debug(
 				{ err: safeErrorFields(error) },
 				"Live demodulation Rust engine process error",
@@ -387,7 +448,8 @@ export class RustEngine implements LiveDemodEngine {
 		})
 		child.once("exit", (code, signal) => {
 			this.exited = true
-			if (this.stopping) return
+			if (this.stopping || this.spawnFailure !== undefined) return
+			this.unexpectedExit = true
 			this.fail(
 				`Live demodulation Rust engine exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
 			)
@@ -400,16 +462,31 @@ export class RustEngine implements LiveDemodEngine {
 			this.pendingMatch(event)
 			return
 		}
+		this.rememberEarly(event)
+	}
+
+	/** Retains a pre-open handshake event, dropping it once the queue is full. */
+	private rememberEarly(event: DemodEvent): void {
+		if (this.opened) return
 		if (
-			event.type === "ready" ||
-			event.type === "opened" ||
-			event.type === "rejected" ||
-			event.type === "retuned"
+			event.type !== "ready" &&
+			event.type !== "opened" &&
+			event.type !== "rejected" &&
+			event.type !== "retuned"
 		)
-			this.early.push(event)
+			return
+		if (this.early.length >= HANDSHAKE_EARLY_MAX) {
+			this.dropCount += 1
+			return
+		}
+		this.early.push(event)
 	}
 
 	private applyRuntime(event: DemodEvent): void {
+		if (event.type === "retuned" && event.id === DEMOD_CHANNEL_ID) {
+			this.handlers?.onRetuned?.(event.atOutputSample)
+			return
+		}
 		if (event.type === "gate" && event.id === DEMOD_CHANNEL_ID) {
 			this.handlers?.onGate(event.open)
 			return
@@ -490,7 +567,7 @@ export class RustEngine implements LiveDemodEngine {
 			const queued = this.early
 			this.early = []
 			for (const event of queued) {
-				if (settled) this.early.push(event)
+				if (settled) this.rememberEarly(event)
 				else onMatch(event)
 			}
 			if (settled) return
@@ -539,6 +616,12 @@ export class RustEngine implements LiveDemodEngine {
 			)
 		})
 	}
+}
+
+function isSpawnFailure(child: ChildProcess, error: Error): boolean {
+	const code =
+		"code" in error && typeof error.code === "string" ? error.code : undefined
+	return child.pid === undefined || code === "ENOENT" || code === "EACCES"
 }
 
 function writableFd(child: ChildProcess, fd: number): Writable | null {

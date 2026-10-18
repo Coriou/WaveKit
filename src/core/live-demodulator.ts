@@ -410,7 +410,6 @@ export class LiveDemodulator extends EventEmitter {
 			httpListening: () => this.http.listening,
 			stableRunMs: () => this.options.stableRunMs,
 			activeSourceId: () => this.activeSourceId,
-			centerHz: sourceId => this.sourceManager.getCaps(sourceId)?.centerFreq,
 			squelchHangMs: () => SQUELCH_HANG_MS,
 			effectiveThreshold: run => this.effectiveThreshold(run),
 			currentRun: () => this.run,
@@ -812,7 +811,11 @@ export class LiveDemodulator extends EventEmitter {
 
 	private measureRun(
 		run: PipelineRun,
-		sample?: { powerDbfs: number | null; quieted: boolean },
+		sample?: {
+			powerDbfs: number | null
+			quieted: boolean
+			quietingDb?: number | null
+		},
 	): void {
 		if (this.run !== run || run.stopping) return
 		const sampled = sample !== undefined
@@ -858,7 +861,30 @@ export class LiveDemodulator extends EventEmitter {
 		this.publishSquelchChange()
 		// WG10 activity hygiene: counted after the edge, so a transmission opened by this
 		// block (its tracker snapshot taken inside publishSquelchChange) includes it.
-		if (!sampled && run.squelch.blockCarrier()) this.carrierBlockCount += 1
+		// Rust reports quieting directly, so the sampled path uses the same rule as
+		// ChannelSquelch.blockCarrier instead of the IQ meter.
+		if (sampled) {
+			if (this.sampledBlockCarrier(run, sample.quietingDb ?? null))
+				this.carrierBlockCount += 1
+		} else if (run.squelch.blockCarrier()) this.carrierBlockCount += 1
+	}
+
+	/**
+	 * `ChannelSquelch.blockCarrier` for one Rust metrics point. Evidence is on
+	 * for nfm/wfm. Noise mode compares quieting with the configured threshold;
+	 * power mode compares it with `LIVE_AUDIO_NOISE_QUIETING_DB.default`.
+	 */
+	private sampledBlockCarrier(
+		run: PipelineRun,
+		quietingDb: number | null,
+	): boolean {
+		if (!run.squelch.hasCarrierEvidence) return false
+		if (quietingDb === null) return false
+		const threshold =
+			run.squelch.mode === "noise"
+				? run.squelch.noiseQuietingDb
+				: LIVE_AUDIO_NOISE_QUIETING_DB.default
+		return quietingDb >= threshold
 	}
 
 	private measuredSquelchStream(
