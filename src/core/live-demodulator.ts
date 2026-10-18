@@ -70,16 +70,9 @@ import {
 	planLiveDemodPipeline,
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
-import {
-	DEMOD_PROTOCOL,
-	RUST_AUDIO_RATE_HZ,
-	RUST_FALLBACK_LOG,
-	bandwidthAccepted,
-	selectEngine,
-} from "./live-demod/index.js"
+import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
 import type { EngineFallbackReason } from "./live-demod/index.js"
-import { RustEngine } from "./live-demod/rust-engine.js"
-import { planRetune, squelchFor } from "./live-demod/rust-protocol.js"
+import type { RustEngine } from "./live-demod/rust-engine.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
@@ -230,7 +223,7 @@ type FrontSwapOutcome =
 	| "superseded"
 	| "aborted"
 
-interface PipelineRun {
+export interface PipelineRun {
 	front: ChildProcess
 	back: ChildProcess
 	/**
@@ -320,26 +313,6 @@ const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"iqDcBlock",
 ])
 
-/** Pipeline keys a running Rust demod can apply with one `retune` (no restart). */
-const RUST_RETUNE_KEYS = new Set<keyof LiveDemodConfig>([
-	"offsetHz",
-	"bandwidth",
-	"modulation",
-	"gain",
-	"lowPass",
-	"highPass",
-	"noiseReduction",
-	"deEmphasis",
-	"deEmphasisTau",
-])
-
-/** Retune keys that close the open transmission, matching a csdr front swap. */
-const RUST_IDENTITY_KEYS = new Set<keyof LiveDemodConfig>([
-	"offsetHz",
-	"bandwidth",
-	"modulation",
-])
-
 const DEFAULTS: ResolvedOptions = {
 	levelHz: 10,
 	restartBaseDelayMs: 1000,
@@ -385,14 +358,7 @@ export class LiveDemodulator extends EventEmitter {
 	private activeSourceId: string | null = null
 	private consecutiveFailures = 0
 	private pipelineRestarts = 0
-	/** Consecutive Rust starts that died inside the stable-run window. */
-	private rustFailures = 0
-	/** Latched after three Rust deaths until the next restart-key change. */
-	private rustUnstable = false
-	private engineFallback: EngineFallbackReason | null = null
-	private warnedFallback: EngineFallbackReason | null = null
-	/** Last squelch JSON sent to Rust, so an unchanged threshold is not repeated. */
-	private lastSentSquelch = ""
+	private readonly rustRuns: RustLiveRun
 	private restartTimer: ReturnType<typeof setTimeout> | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
@@ -436,6 +402,34 @@ export class LiveDemodulator extends EventEmitter {
 			err => this.emitError(err),
 			options.httpAccess,
 		)
+		this.rustRuns = new RustLiveRun({
+			log: this.log,
+			clock: this.clock,
+			config: () => this.config,
+			branchStream: () => this.branchStream,
+			httpListening: () => this.http.listening,
+			stableRunMs: () => this.options.stableRunMs,
+			activeSourceId: () => this.activeSourceId,
+			centerHz: sourceId => this.sourceManager.getCaps(sourceId)?.centerFreq,
+			squelchHangMs: () => SQUELCH_HANG_MS,
+			effectiveThreshold: run => this.effectiveThreshold(run),
+			currentRun: () => this.run,
+			handleAudioData: chunk => this.handleAudioData(chunk),
+			publishSquelchChange: () => this.publishSquelchChange(),
+			handleRunFailure: (run, reason) => this.handleRunFailure(run, reason),
+			measureRun: (run, sample) => this.measureRun(run, sample),
+			resetFloorForRetune: run => this.resetFloorForRetune(run),
+			clearCloseOverride: () => {
+				this.closeOverride = null
+			},
+			adoptRun: run => this.adoptRustRun(run),
+			markStartError: reason => {
+				this.lastError = reason
+				this.pipelineHealth = "error"
+			},
+			emitError: err => this.emitError(err),
+			scheduleRestart: lastRunMs => this.scheduleRestart(lastRunMs),
+		})
 	}
 
 	async start(): Promise<void> {
@@ -616,12 +610,15 @@ export class LiveDemodulator extends EventEmitter {
 			if (restarting) {
 				this.consecutiveFailures = 0
 				const run = this.run
-				if (run?.rust && this.canRustRetune(changedPipelineKeys, validated)) {
-					this.retuneRust(run, previous, validated)
+				if (
+					run?.rust &&
+					this.rustRuns.canRetune(changedPipelineKeys, validated)
+				) {
+					this.rustRuns.retune(run, previous, validated)
 				} else if (
 					swapPlan !== null &&
 					run !== null &&
-					this.config.engine !== "rust"
+					!rustEngineRequested(this.config)
 				) {
 					// The transmission closes as "config", as on a full restart.
 					run.gateHeld = true
@@ -637,11 +634,11 @@ export class LiveDemodulator extends EventEmitter {
 							await this.restartPipeline("front swap failed")
 					}
 				} else {
-					if (this.config.engine === "rust") this.clearRustLatch()
+					if (rustEngineRequested(this.config)) this.rustRuns.clearLatch()
 					await this.restartPipeline("configuration changed")
 				}
 			}
-			if (!restarting && this.run?.rust) this.pushRustSquelch(this.run)
+			if (!restarting && this.run?.rust) this.rustRuns.pushSquelch(this.run)
 
 			if (portChanged && this.http.listening) {
 				await this.restartHttpServer()
@@ -666,6 +663,7 @@ export class LiveDemodulator extends EventEmitter {
 					effectiveSampleRate: 0,
 				}
 
+		const engineFallback = this.rustRuns.fallback()
 		const status: LiveDemodStatus = {
 			enabled: this.config.enabled,
 			running: this.http.listening,
@@ -673,9 +671,8 @@ export class LiveDemodulator extends EventEmitter {
 			sourceConnected: sourceStatus?.connected ?? false,
 			sourceIqSampleRate: rateInfo.iqSampleRate,
 			config: this.config,
-			effectiveSampleRate: this.run?.rust
-				? RUST_AUDIO_RATE_HZ
-				: rateInfo.effectiveSampleRate,
+			effectiveSampleRate:
+				this.rustRuns.audioRateHz() ?? rateInfo.effectiveSampleRate,
 			decimationFactor: rateInfo.decimation,
 			httpUrl: `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}/stream`,
 			wavUrl: `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}/stream.wav`,
@@ -684,9 +681,7 @@ export class LiveDemodulator extends EventEmitter {
 			pipelineHealth: this.pipelineHealth,
 			pipelineRestarts: this.pipelineRestarts,
 			engine: this.run?.rust ? "rust" : "csdr",
-			...(this.engineFallback !== null
-				? { engineFallback: this.engineFallback }
-				: {}),
+			...(engineFallback !== null ? { engineFallback } : {}),
 		}
 
 		const run = this.run
@@ -1153,269 +1148,16 @@ export class LiveDemodulator extends EventEmitter {
 		}
 	}
 
-	/**
-	 * Starts the Rust engine when it is configured and can run. True means the
-	 * attempt consumed this start (the engine is up, or a crash is backing off).
-	 * False continues with the csdr chain. A fallback does not throw.
-	 */
-	private async tryStartRust(planned: { caps: SourceCaps }): Promise<boolean> {
-		if (this.config.engine !== "rust") return false
-		const branch = this.branchStream
-		if (!branch) return false
-		const pre = selectEngine({
-			config: {
-				engine: "rust",
-				modulation: this.config.modulation,
-				bandwidth: this.config.bandwidth,
-			},
-			caps: { format: planned.caps.format },
-			probe: {
-				available: true,
-				protocol: DEMOD_PROTOCOL,
-				processUnstable: this.rustUnstable,
-				openRejected: !bandwidthAccepted(this.config.bandwidth),
-			},
-		})
-		if (pre.engine !== "rust") {
-			if (pre.fallback) this.noteFallback(pre.fallback)
-			return false
-		}
-		const threshold =
-			this.config.squelchMode === "auto" ? -0.001 : this.config.squelch
-		const squelch = squelchFor(this.config, threshold)
-		const engine = new RustEngine({
-			binaryPath: this.config.chanBinaryPath ?? "wavekit-chan",
-			logger: this.log,
-			clock: this.clock,
-		})
-		const slot: { run: PipelineRun | null } = { run: null }
-		let result
-		try {
-			result = await engine.start({
-				config: this.config,
-				caps: planned.caps,
-				input: branch,
-				squelch,
-				handlers: {
-					onAudio: chunk => {
-						const current = slot.run
-						if (current && this.run === current && !current.stopping)
-							this.handleAudioData(chunk)
-					},
-					onGate: open => {
-						const current = slot.run
-						if (current) this.onRustGate(current, open)
-					},
-					onMetrics: (power, quieting) => {
-						const current = slot.run
-						if (current) this.onRustMetrics(current, power, quieting)
-					},
-					onDown: () => {
-						const current = slot.run
-						if (current && this.run === current)
-							this.handleRunFailure(
-								current,
-								"Live demodulation Rust engine exited",
-							)
-					},
-				},
-			})
-		} catch (error: unknown) {
-			this.noteFallback("binary-unavailable", error)
-			await engine.stop()
-			return false
-		}
-		if (!result.ok) {
-			if ("crashed" in result) {
-				await engine.stop()
-				this.noteRustCrash(0)
-				const reason = "Live demodulation Rust engine exited"
-				if (!this.http.listening && !this.rustUnstable) {
-					this.lastError = reason
-					this.pipelineHealth = "error"
-					throw new WaveKitError(reason, "LIVE_DEMOD_PIPELINE_EXIT")
-				}
-				if (this.rustUnstable && !this.http.listening) {
-					this.noteFallback("process-unstable")
-					return false
-				}
-				this.failRustStart(reason)
-				return true
-			}
-			this.noteFallback(result.fallback, result.error)
-			return false
-		}
-		const child = engine.childProcess
-		if (!child) {
-			this.noteFallback("binary-unavailable")
-			await engine.stop()
-			return false
-		}
-		const stream = {
-			rate: RUST_AUDIO_RATE_HZ,
-			format: this.config.audioFormat,
-		}
-		const nodeSquelch = new ChannelSquelch({
-			sampleRate: RUST_AUDIO_RATE_HZ,
-			thresholdDbfs: threshold,
-			hangMs: SQUELCH_HANG_MS,
-			mode: this.config.squelchMode === "noise" ? "noise" : "power",
-			noiseQuietingDb:
-				this.config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
-			...(this.config.bandwidth > 0
-				? { bandwidthHz: this.config.bandwidth }
-				: {}),
-		})
-		const run: PipelineRun = {
-			front: child,
-			back: child,
-			frontAligner: null,
-			frontCommand: "",
-			backCommand: "",
-			detachFront: () => undefined,
-			swap: null,
-			gateHeld: false,
-			squelch: nodeSquelch,
-			squelchStream: this.measuredSquelchStream(
-				nodeSquelch,
-				RUST_AUDIO_RATE_HZ,
-				() => undefined,
-				() => undefined,
-			),
-			noiseFloorDbfs: null,
-			retuneFloorDbfs: null,
-			startedAt: Date.now(),
-			sourceSampleRate: planned.caps.sampleRate,
-			sourceFormat: planned.caps.format,
-			stream,
-			tone: null,
-			pcmPhase: 0,
-			pcmTailMuted: false,
-			stopping: false,
-			failed: false,
-			rust: engine,
-			externalGate: squelch.mode === "off",
-		}
-		slot.run = run
+	/** Installs a Rust run the controller already built. */
+	private adoptRustRun(run: PipelineRun): void {
 		this.run = run
-		this.lastRunStream = stream
-		this.engineFallback = null
-		this.warnedFallback = null
-		this.lastSentSquelch = JSON.stringify(squelch)
+		this.lastRunStream = run.stream
 		this.applyToneSquelch(run)
-		this.audio.configure(stream)
+		this.audio.configure(run.stream)
 		this.pipelineHealth = "running"
 		this.lastError = null
 		this.startLevelPublishing()
 		this.publishSquelchChange()
-		this.log.info(
-			{
-				sourceId: this.activeSourceId,
-				effectiveSampleRate: RUST_AUDIO_RATE_HZ,
-				offsetHz: this.config.offsetHz,
-			},
-			"Starting live demodulation Rust engine",
-		)
-		return true
-	}
-
-	private failRustStart(reason: string): void {
-		this.pipelineHealth = "error"
-		this.lastError = reason
-		this.log.error({ reason }, "Live demodulation pipeline failed")
-		this.emitError(new WaveKitError(reason, "LIVE_DEMOD_PIPELINE_EXIT"))
-		this.scheduleRestart(0)
-	}
-
-	private noteRustCrash(lastRunMs: number): void {
-		if (lastRunMs >= this.options.stableRunMs) this.rustFailures = 0
-		this.rustFailures += 1
-		if (this.rustFailures >= 3) this.rustUnstable = true
-	}
-
-	private clearRustLatch(): void {
-		this.rustUnstable = false
-		this.rustFailures = 0
-	}
-
-	private noteFallback(reason: EngineFallbackReason, error?: unknown): void {
-		this.engineFallback = reason
-		if (this.warnedFallback === reason) return
-		this.warnedFallback = reason
-		this.log.warn(
-			error === undefined
-				? { reason }
-				: { reason, err: safeErrorFields(error) },
-			RUST_FALLBACK_LOG,
-		)
-	}
-
-	private canRustRetune(
-		keys: Array<keyof LiveDemodConfig>,
-		next: LiveDemodConfig,
-	): boolean {
-		const run = this.run
-		if (!run?.rust || run.stopping || this.rustUnstable) return false
-		if (this.config.engine !== "rust") return false
-		if (keys.length === 0) return false
-		if (!keys.every(key => RUST_RETUNE_KEYS.has(key))) return false
-		if (next.modulation !== "nfm" && next.modulation !== "am") return false
-		if (!bandwidthAccepted(next.bandwidth)) return false
-		return true
-	}
-
-	private retuneRust(
-		run: PipelineRun,
-		previous: LiveDemodConfig,
-		next: LiveDemodConfig,
-	): void {
-		const identity = [...RUST_IDENTITY_KEYS].some(
-			key => previous[key] !== next[key],
-		)
-		if (identity) {
-			run.gateHeld = true
-			this.publishSquelchChange()
-			this.resetFloorForRetune(run)
-			this.closeOverride = null
-		}
-		const sourceId = this.activeSourceId
-		const center = sourceId
-			? this.sourceManager.getCaps(sourceId)?.centerFreq
-			: undefined
-		run.rust?.applyRetune(planRetune(previous, next, center))
-		this.pushRustSquelch(run)
-	}
-
-	private onRustGate(run: PipelineRun, open: boolean): void {
-		if (this.run !== run || run.stopping) return
-		run.externalGate = open
-		if (run.gateHeld) run.gateHeld = false
-		this.publishSquelchChange()
-	}
-
-	private onRustMetrics(
-		run: PipelineRun,
-		powerDbfs: Array<number | null>,
-		quietingDb: Array<number | null>,
-	): void {
-		if (this.run !== run || run.stopping) return
-		const count = Math.max(powerDbfs.length, quietingDb.length)
-		for (let i = 0; i < count; i++) {
-			const power = powerDbfs[i] ?? null
-			if (power !== null) run.externalPowerDbfs = power
-			this.measureRun(run, { powerDbfs: power, quieted: false })
-		}
-		this.pushRustSquelch(run)
-	}
-
-	private pushRustSquelch(run: PipelineRun): void {
-		const engine = run.rust
-		if (!engine) return
-		const squelch = squelchFor(this.config, this.effectiveThreshold(run))
-		const encoded = JSON.stringify(squelch)
-		if (encoded === this.lastSentSquelch) return
-		this.lastSentSquelch = encoded
-		engine.applySquelch(squelch)
 	}
 
 	private async startPipeline(): Promise<void> {
@@ -1431,7 +1173,7 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		const planned = this.planFor(this.activeSourceId, this.config)
-		if (await this.tryStartRust(planned)) return
+		if (await this.rustRuns.tryStart(planned)) return
 		const { caps, rateInfo, plan } = planned
 		for (const warning of plan.warnings) this.log.warn(warning)
 
@@ -1711,7 +1453,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.log.error({ reason }, "Live demodulation pipeline failed")
 		this.emitError(new WaveKitError(reason, "LIVE_DEMOD_PIPELINE_EXIT"))
 		const runtimeMs = Date.now() - run.startedAt
-		if (run.rust) this.noteRustCrash(runtimeMs)
+		if (run.rust) this.rustRuns.noteCrash(runtimeMs)
 		void this.stopRun(run).finally(() => this.scheduleRestart(runtimeMs))
 	}
 

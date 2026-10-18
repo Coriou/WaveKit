@@ -19,12 +19,14 @@ const base = {
 }
 
 describe("LiveDemodConfigSchema engine", () => {
-	it("defaults engine to csdr and omits chanBinaryPath", () => {
+	it("omits engine and chanBinaryPath from parsed config", () => {
 		const parsed = LiveDemodConfigSchema.parse({})
-		expect(parsed.engine).toBe("csdr")
+		// Absence is the csdr runtime default. A schema default would land in snapshots.
+		expect(parsed.engine).toBeUndefined()
+		expect(Object.hasOwn(parsed, "engine")).toBe(false)
 		expect(parsed.chanBinaryPath).toBeUndefined()
 		expect(Object.hasOwn(parsed, "chanBinaryPath")).toBe(false)
-		expect(parsed).toMatchObject({ ...base, engine: "csdr" })
+		expect(parsed).toMatchObject(base)
 	})
 
 	it("accepts rust and an explicit binary path", () => {

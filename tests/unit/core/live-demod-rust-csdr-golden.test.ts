@@ -1,8 +1,8 @@
 /**
  * Csdr-path goldens recorded from the live demodulator before the Rust engine
- * seam. Default `engine` stays csdr, so these argv and HTTP headers must keep
- * matching. Status keys gained `engine` (requirement 1.5); argv and headers
- * did not change.
+ * seam. Parsed config omits `engine`; the runtime default is csdr, so these
+ * argv and HTTP headers must keep matching. Status still reports `engine`
+ * (requirement 1.5); argv and headers did not change.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
