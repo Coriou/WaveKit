@@ -6,7 +6,10 @@ import {
 	HANDSHAKE_EARLY_MAX,
 	RustEngine,
 } from "../../../src/core/live-demod/rust-engine.js"
-import { encodeSquelch } from "../../../src/core/live-demod/rust-protocol.js"
+import {
+	encodeOpen,
+	encodeSquelch,
+} from "../../../src/core/live-demod/rust-protocol.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import {
 	ChannelFake,
@@ -82,6 +85,24 @@ describe("squelch noiseFloorDbfs", () => {
 				noiseFloorDbfs: -45.5,
 			})["noiseFloorDbfs"],
 		).toBe(-45.5)
+	})
+
+	it("omits noiseFloorDbfs from open even when the caller set it", () => {
+		const line = encodeOpen({
+			config: config(),
+			centerHz: 100_000_000,
+			squelch: {
+				mode: "power",
+				thresholdDbfs: -40,
+				hysteresisDb: 2,
+				hangMs: 250,
+				noiseFloorDbfs: null,
+			},
+		})
+		const open = JSON.parse(line) as { squelch: Record<string, unknown> }
+		expect(open.squelch["mode"]).toBe("power")
+		expect(open.squelch["thresholdDbfs"]).toBe(-40)
+		expect(Object.hasOwn(open.squelch, "noiseFloorDbfs")).toBe(false)
 	})
 })
 

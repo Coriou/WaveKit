@@ -279,6 +279,10 @@ export function encodeOpen(input: {
 }): string {
 	const audio = demodAudioOptions(input.config)
 	const modulation = input.config.modulation === "am" ? "am" : "nfm"
+	// Native `open.squelch` rejects `noiseFloorDbfs`. A standalone `squelch`
+	// request is the only place that field is legal.
+	const squelch = squelchRecord(input.squelch)
+	delete squelch["noiseFloorDbfs"]
 	return line({
 		v: 1,
 		type: "open",
@@ -290,7 +294,7 @@ export function encodeOpen(input: {
 		format: input.config.audioFormat,
 		queueBytes: DEMOD_QUEUE_BYTES,
 		audio: audioRecord(audio),
-		squelch: squelchRecord(input.squelch),
+		squelch,
 		metrics: true,
 	})
 }

@@ -70,6 +70,8 @@ export interface RustEngineHandlers {
 	onDown: (reason: string) => void
 	/** First output sample of an applied retune (`retuned.atOutputSample`). */
 	onRetuned?: (atOutputSample: number) => void
+	/** Control line the process refused (`rejected.reasonCode`). */
+	onRejected?: (reasonCode: string) => void
 }
 
 export interface RustEngineStart {
@@ -483,6 +485,10 @@ export class RustEngine implements LiveDemodEngine {
 	}
 
 	private applyRuntime(event: DemodEvent): void {
+		if (event.type === "rejected" && event.id === DEMOD_CHANNEL_ID) {
+			this.handlers?.onRejected?.(event.reasonCode)
+			return
+		}
 		if (event.type === "retuned" && event.id === DEMOD_CHANNEL_ID) {
 			this.handlers?.onRetuned?.(event.atOutputSample)
 			return

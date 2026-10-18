@@ -17,7 +17,7 @@ import { WaveKitError } from "../../utils/errors.js"
 import { ChannelSquelch } from "../channel-squelch.js"
 import type { SilenceFillClock } from "../live-audio-silence.js"
 import type { LiveDemodConfig, PipelineRun } from "../live-demodulator.js"
-import type { DemodSquelch } from "./engine.js"
+import type { DemodRetune, DemodSquelch } from "./engine.js"
 import { RustEngine, type RustStartResult } from "./rust-engine.js"
 import { planRetune, squelchFor } from "./rust-protocol.js"
 import {
@@ -109,6 +109,22 @@ export class RustLiveRun {
 	private warnedFallback: EngineFallbackReason | null = null
 	/** Last squelch JSON sent, so an unchanged threshold is not repeated. */
 	private lastSentSquelch = ""
+	/**
+	 * One retune is unacknowledged at a time. `retuned` carries no sequence,
+	 * and native folds every retune queued before the next input block into
+	 * a single `retuned`, so a count of writes cannot be matched to events.
+	 * The next retune is sent only after the previous `retuned`. Updates that
+	 * arrive in between fold into that next write.
+	 */
+	private inFlight = false
+	/** The in-flight retune is an identity change the hold is waiting on. */
+	private inFlightHoldsIdentity = false
+	/** An identity change has been requested and not yet applied. */
+	private identityUnacked = false
+	private sentConfig: LiveDemodConfig | null = null
+	private queuedConfig: LiveDemodConfig | null = null
+	/** Rust died during the initial start, before HTTP can arm the backoff. */
+	private deferredStartFailure: string | null = null
 
 	constructor(private readonly host: RustRunHost) {}
 
@@ -151,24 +167,21 @@ export class RustLiveRun {
 		previous: LiveDemodConfig,
 		next: LiveDemodConfig,
 	): void {
-		const identity = [...RUST_IDENTITY_KEYS].some(
-			key => previous[key] !== next[key],
-		)
-		if (identity) {
+		if (identityChanged(previous, next)) {
 			run.gateHeld = true
+			this.identityUnacked = true
 			this.host.publishSquelchChange()
 			this.host.resetFloorForRetune(run)
 			this.host.clearCloseOverride()
 		}
-		// offsetHz is the shift from the tuned centre. A source-centre change
-		// keeps this process (the csdr chain does too): IQ DC is the new centre,
-		// and native still mixes `centerHz - input_center` with the centre from
-		// process start. Sending the live source centre would add that retune
-		// on top of the frozen input centre.
-		run.rust?.applyRetune(
-			planRetune(previous, next, run.rust.inputCenterHz ?? undefined),
-		)
-		this.pushSquelch(run)
+		// A retune already on the wire may be acknowledged before this one is
+		// applied. Hold it and send it when that `retuned` arrives.
+		if (this.inFlight) {
+			this.queuedConfig = next
+			this.pushSquelch(run)
+			return
+		}
+		this.dispatchRetune(run, previous, next)
 	}
 
 	pushSquelch(run: PipelineRun): void {
@@ -185,11 +198,23 @@ export class RustLiveRun {
 	}
 
 	/**
+	 * Arms the backoff for a Rust crash that happened before HTTP was up.
+	 * `scheduleRestart` does nothing until the server is listening.
+	 */
+	flushDeferredRestart(): void {
+		const reason = this.deferredStartFailure
+		if (reason === null) return
+		this.deferredStartFailure = null
+		this.failStart(reason)
+	}
+
+	/**
 	 * True when this attempt consumed the start (the engine is up, or a crash
 	 * is backing off). False continues with the csdr chain. A fallback does
 	 * not throw.
 	 */
 	async tryStart(planned: { caps: SourceCaps }): Promise<boolean> {
+		this.resetRetuneTracking()
 		const config = this.host.config()
 		if (!rustEngineRequested(config)) return false
 		const branch = this.host.branchStream()
@@ -216,7 +241,7 @@ export class RustLiveRun {
 			config.squelchMode === "auto"
 				? RUST_AUTO_INITIAL_THRESHOLD_DBFS
 				: config.squelch
-		const squelch = withTrackedFloor(squelchFor(config, threshold), null)
+		const squelch = squelchFor(config, threshold)
 		const engine = new RustEngine({
 			binaryPath: config.chanBinaryPath ?? "wavekit-chan",
 			logger: this.host.log,
@@ -268,13 +293,17 @@ export class RustLiveRun {
 			if ("crashed" in result) {
 				await engine.stop()
 				this.noteCrash(0)
-				if (!this.host.httpListening() && !this.rustUnstable) {
+				if (!this.host.httpListening()) {
+					if (this.rustUnstable) {
+						this.noteFallback("process-unstable")
+						return false
+					}
+					// Count the death and retry under the existing backoff once
+					// HTTP is up. Falling straight through to csdr, or throwing,
+					// skips that path: the restart timer requires the server.
+					this.deferredStartFailure = RUST_EXIT_REASON
 					this.host.markStartError(RUST_EXIT_REASON)
-					throw new WaveKitError(RUST_EXIT_REASON, "LIVE_DEMOD_PIPELINE_EXIT")
-				}
-				if (this.rustUnstable && !this.host.httpListening()) {
-					this.noteFallback("process-unstable")
-					return false
+					return true
 				}
 				this.failStart(RUST_EXIT_REASON)
 				return true
@@ -332,12 +361,67 @@ export class RustLiveRun {
 		this.host.publishSquelchChange()
 	}
 
-	/** `retuned` is the atOutputSample boundary of the new tuning. */
+	/** `retuned` is the atOutputSample boundary of the in-flight retune. */
 	private onRetuned(run: PipelineRun): void {
 		if (this.host.currentRun() !== run || run.stopping) return
+		const coveredIdentity = this.inFlightHoldsIdentity
+		this.inFlight = false
+		this.inFlightHoldsIdentity = false
+		const queued = this.queuedConfig
+		const sent = this.sentConfig
+		if (queued !== null && sent !== null) {
+			this.queuedConfig = null
+			// This ack does not cover a newer identity that is still queued.
+			if (coveredIdentity && !identityChanged(sent, queued))
+				this.releaseHold(run)
+			this.dispatchRetune(run, sent, queued)
+			return
+		}
+		if (coveredIdentity) this.releaseHold(run)
+	}
+
+	private releaseHold(run: PipelineRun): void {
+		this.identityUnacked = false
 		if (!run.gateHeld) return
 		run.gateHeld = false
 		this.host.publishSquelchChange()
+	}
+
+	/**
+	 * offsetHz is the shift from the tuned centre. A source-centre change
+	 * keeps this process (the csdr chain does too): IQ DC is the new centre,
+	 * and native still mixes `centerHz - input_center` with the centre from
+	 * process start. Sending the live source centre would add that retune
+	 * on top of the frozen input centre.
+	 */
+	private dispatchRetune(
+		run: PipelineRun,
+		previous: LiveDemodConfig,
+		next: LiveDemodConfig,
+	): void {
+		const plan = planRetune(
+			previous,
+			next,
+			run.rust?.inputCenterHz ?? undefined,
+		)
+		if (hasRetunePlan(plan)) {
+			run.rust?.applyRetune(plan)
+			this.inFlight = true
+			this.inFlightHoldsIdentity =
+				identityChanged(previous, next) && this.identityUnacked
+		} else if (identityChanged(previous, next) && this.identityUnacked) {
+			this.releaseHold(run)
+		}
+		this.sentConfig = next
+		this.pushSquelch(run)
+	}
+
+	private resetRetuneTracking(): void {
+		this.inFlight = false
+		this.inFlightHoldsIdentity = false
+		this.identityUnacked = false
+		this.sentConfig = null
+		this.queuedConfig = null
 	}
 
 	private onMetrics(
@@ -430,6 +514,22 @@ function metricsQuieted(
 		return false
 	return (
 		quietingDb !== null && quietingDb >= LIVE_AUDIO_NOISE_QUIETING_DB.default
+	)
+}
+
+function identityChanged(
+	previous: LiveDemodConfig,
+	next: LiveDemodConfig,
+): boolean {
+	return [...RUST_IDENTITY_KEYS].some(key => previous[key] !== next[key])
+}
+
+function hasRetunePlan(update: DemodRetune): boolean {
+	return (
+		update.centerHz !== undefined ||
+		update.bandwidthHz !== undefined ||
+		update.modulation !== undefined ||
+		update.audio !== undefined
 	)
 }
 

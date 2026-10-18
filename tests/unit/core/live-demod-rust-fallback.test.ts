@@ -50,6 +50,7 @@ describe("live demod rust fallback and retune", () => {
 	let channelSpawn: "ok" | "enoent"
 	let rejectOpen: boolean
 	let autoExitAfter: number
+	let exitBeforeReady: boolean
 	let channelCount: number
 	let format: "U8_IQ" | "S16_IQ"
 	let centerFreq: number | undefined
@@ -66,6 +67,7 @@ describe("live demod rust fallback and retune", () => {
 		channelSpawn = "ok"
 		rejectOpen = false
 		autoExitAfter = 99
+		exitBeforeReady = false
 		channelCount = 0
 		format = "U8_IQ"
 		centerFreq = undefined
@@ -88,9 +90,10 @@ describe("live demod rust fallback and retune", () => {
 				exitOnShutdown: true,
 				autoExit: channelCount > autoExitAfter,
 				rejectOpen,
-				emitReady: channelSpawn !== "enoent",
+				emitReady: channelSpawn !== "enoent" && !exitBeforeReady,
 			})
 			channels.push(proc)
+			if (exitBeforeReady) process.nextTick(() => proc.exit(1, null))
 			if (channelSpawn === "enoent") {
 				process.nextTick(() => {
 					const error = new Error("spawn ENOENT") as NodeJS.ErrnoException
@@ -296,16 +299,23 @@ describe("live demod rust fallback and retune", () => {
 		await demod?.reconfigure({ lowPass: 3000 })
 		expect(spawnMock.mock.calls).toHaveLength(calls)
 		expect(shells).toHaveLength(0)
-		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
-			message => message["type"] === "retune",
-		)
-		expect(retunes).toHaveLength(4)
-		expect(retunes[0]).toMatchObject({ centerHz: 6000 })
-		expect(retunes[1]).toMatchObject({ modulation: "am" })
-		expect(retunes[2]).toMatchObject({ audio: { gain: 4 } })
-		expect(retunes[3]).toMatchObject({ audio: { lowPassHz: 3000 } })
+		const sent = () =>
+			controlMessages(channels[0]?.controlText ?? "").filter(
+				message => message["type"] === "retune",
+			)
+		// The offset is on the wire. Later retunes wait for its `retuned`, then
+		// fold into one write (modulation, gain, low pass).
+		expect(sent()).toEqual([expect.objectContaining({ centerHz: 6000 })])
 		expect(edges).toEqual([false])
 		expect(closes).toEqual(["config"])
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 480 }))
+		expect(demod?.isSquelchOpen()).toBe(false)
+		const flushed = sent()
+		expect(flushed).toHaveLength(2)
+		expect(flushed[1]).toMatchObject({
+			modulation: "am",
+			audio: expect.objectContaining({ gain: 4, lowPassHz: 3000 }),
+		})
 	})
 
 	it("keeps an HTTP client across a rust retune", async () => {
@@ -521,6 +531,73 @@ describe("live demod rust fallback and retune", () => {
 			}),
 		)
 		expect(demod?.carrierBlocks()).toBe(1)
+	})
+
+	it("omits noiseFloorDbfs from open and sends a known floor on squelch", async () => {
+		await boot({ squelchMode: "auto", autoMarginDb: 6 })
+		const open = controlMessages(channels[0]?.controlText ?? "").find(
+			message => message["type"] === "open",
+		)
+		const squelch = open?.["squelch"] as Record<string, unknown>
+		expect(squelch["mode"]).toBe("power")
+		expect(squelch["thresholdDbfs"]).toBeCloseTo(-0.001)
+		expect(Object.hasOwn(squelch, "noiseFloorDbfs")).toBe(false)
+	})
+
+	it("does not release an offset hold on an earlier gain retune ack", async () => {
+		await boot({ squelch: 0 })
+		expect(demod?.isSquelchOpen()).toBe(true)
+		await demod?.reconfigure({ gain: 4 })
+		await demod?.reconfigure({ offsetHz: 2_500 })
+		expect(demod?.isSquelchOpen()).toBe(false)
+		const sent = () =>
+			controlMessages(channels[0]?.controlText ?? "").filter(
+				message => message["type"] === "retune",
+			)
+		expect(sent()).toEqual([expect.objectContaining({ audio: { gain: 4 } })])
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 480 }))
+		expect(demod?.isSquelchOpen()).toBe(false)
+		expect(sent()).toEqual([
+			expect.objectContaining({ audio: { gain: 4 } }),
+			expect.objectContaining({ centerHz: 2_500 }),
+		])
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
+		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
+	it("keeps the hold until the latest queued identity retune is acknowledged", async () => {
+		await boot({ squelch: 0 })
+		await demod?.reconfigure({ offsetHz: 1_000 })
+		await demod?.reconfigure({ offsetHz: 2_000 })
+		expect(demod?.isSquelchOpen()).toBe(false)
+		const sent = () =>
+			controlMessages(channels[0]?.controlText ?? "").filter(
+				message => message["type"] === "retune",
+			)
+		expect(sent()).toEqual([expect.objectContaining({ centerHz: 1_000 })])
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 480 }))
+		expect(demod?.isSquelchOpen()).toBe(false)
+		expect(sent()).toEqual([
+			expect.objectContaining({ centerHz: 1_000 }),
+			expect.objectContaining({ centerHz: 2_000 }),
+		])
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
+		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
+	it("restarts an initial rust crash and falls back after three failed starts", async () => {
+		exitBeforeReady = true
+		await boot({}, { restartBaseDelayMs: 5, restartMaxDelayMs: 40 })
+		await vi.waitFor(
+			() => {
+				expect(demod?.getStatus().engine).toBe("csdr")
+				expect(demod?.getStatus().engineFallback).toBe("process-unstable")
+				expect(shells.length).toBeGreaterThanOrEqual(2)
+			},
+			{ timeout: 4000 },
+		)
+		expect(channelCount).toBe(3)
+		expect(versions.length).toBeGreaterThanOrEqual(1)
 	})
 
 	it("counts a manual rust carrier at the default quieting threshold", async () => {

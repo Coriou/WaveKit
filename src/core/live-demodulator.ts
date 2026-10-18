@@ -464,6 +464,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.attachBranch(sourceId)
 		await this.startPipelineOrFail()
 		await this.startHttpServer()
+		this.rustRuns.flushDeferredRestart()
 		this.subscribeToSourceCapsChanges()
 		this.emit("started")
 		this.log.info(
