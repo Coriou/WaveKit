@@ -1146,4 +1146,58 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 			await h.service.stop()
 		}
 	})
+
+	it("a capture queued past its observation's `recent` life keeps the captured track's plan (WG11 batch review R1 1)", async () => {
+		const { h, port, known, live } = setup()
+		const finished: ((v: IqCaptureView) => void)[] = []
+		port.onFinished.mockImplementation((l: (v: IqCaptureView) => void) => {
+			finished.push(l)
+			return () => undefined
+		})
+		port.holderOf.mockImplementation((id: string) =>
+			id === "cap-1" ? IQ_REPLAY_QUEUE_HOLDER : undefined,
+		)
+		const view: IqCaptureView = {
+			captureId: "cap-1",
+			sourceId: "rtl",
+			observationId: "o_1",
+			epoch: 1,
+			rfHz: CENTRE + 50_000,
+			tuningTrust: "commanded",
+			capturedAtMs: 0,
+			durationMs: 4000,
+			gapSamples: 0,
+		}
+		await h.service.start()
+		try {
+			const store = (
+				h.service as unknown as {
+					store: Record<string, (...a: unknown[]) => unknown>
+				}
+			).store
+			vi.spyOn(store, "discoveryIdOf" as never).mockReturnValue("d_1" as never)
+			known.known.mockReturnValue("dmr")
+			let clock = 0
+			const svc = h.service as unknown as {
+				now: () => number
+				recent: LiveObservation[]
+				tick(): void
+			}
+			svc.now = () => clock
+			svc.recent.push(live({ endedAt: 0 } as Partial<LiveObservation>))
+			// The capture finished while its observation was in `recent`; the plan then.
+			for (const l of finished) l(view)
+			const before = h.service.planReplay(h.service.replayPlanInput(view))
+			expect(before.length).toBeGreaterThan(1)
+			expect(before[0]).toMatchObject({ protocol: "dmr", known: true })
+			// Queued behind another replay for more than 10 s: the observation leaves `recent`.
+			clock = 10_001
+			svc.tick()
+			const input = h.service.replayPlanInput(view)
+			expect(input.track).not.toBeNull()
+			expect(h.service.planReplay(input)).toEqual(before)
+		} finally {
+			await h.service.stop()
+		}
+	})
 })

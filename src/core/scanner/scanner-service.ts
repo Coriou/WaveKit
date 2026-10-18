@@ -3650,6 +3650,7 @@ export class ScannerService extends EventEmitter {
 		this.replayStopped = true
 		this.offSpanPins?.()
 		this.offSpanPins = null
+		this.replayTracks.clear()
 		const queue = this.replayQueue
 		const probes = this.replayAdapter
 		this.replayQueue = null
@@ -3725,6 +3726,12 @@ export class ScannerService extends EventEmitter {
 	 * rate (6 per minute per source over the 10 min orphan TTL: 60 per source) keeps it far lower.
 	 */
 	private readonly spanPins = new Map<string, Set<string>>()
+	/**
+	 * WG11 batch review R1 1: the track of each stored finished capture, taken when it finished and
+	 * released with its removal (same bound as the pins), so a capture queued past its observation's
+	 * `recent` life is still planned from its track (bandplan priors, alternative trials).
+	 */
+	private readonly replayTracks = new Map<string, TrackSnapshot>()
 	private offSpanPins: (() => void) | null = null
 
 	/**
@@ -3732,6 +3739,7 @@ export class ScannerService extends EventEmitter {
 	 * (a pin is only taken for a capture still stored; every removal is announced).
 	 */
 	private unpinSpan(captureId: string, observationId: string | null): void {
+		this.replayTracks.delete(captureId)
 		if (!observationId) return
 		const set = this.spanPins.get(observationId)
 		if (!set) return
@@ -3751,6 +3759,9 @@ export class ScannerService extends EventEmitter {
 		const set = this.spanPins.get(view.observationId) ?? new Set<string>()
 		set.add(view.captureId)
 		this.spanPins.set(view.observationId, set)
+		// WG11 batch review R1 1: the captured track stays with the stored capture for its planning.
+		const track = this.findObservation(view.observationId)?.lastTrack
+		if (track) this.replayTracks.set(view.captureId, track)
 	}
 
 	private spanPinned(observationId: string): boolean {
@@ -3832,7 +3843,8 @@ export class ScannerService extends EventEmitter {
 				: null)
 		return {
 			capture,
-			track: live?.lastTrack ?? null,
+			track:
+				live?.lastTrack ?? this.replayTracks.get(capture.captureId) ?? null,
 			knownProtocol: discoveryId
 				? this.knownProtocols.known(discoveryId)
 				: null,
