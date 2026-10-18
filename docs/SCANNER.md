@@ -26,7 +26,7 @@ Worked example: 400–470 MHz at 2.048 Msps is 44 hops. With markers (about 30 m
 
 ### Passive job
 
-One per eligible source (`passive-<sourceId>`): in-window, all protocols, lowest priority. It is on by default and can be disabled per source at runtime. Before the channelizer it confirms only through ambient evidence, unless `scanner.passive.offsetProbes: true`. On hosts where the spectrum engine costs more than 25 % of a core (a Pi 4), passive scanning switches itself off and the status says why (`engines[].passive.disabledReason`).
+One per eligible source (`passive-<sourceId>`): in-window, all protocols, lowest priority. It is on by default and can be disabled per source at runtime. Before the channelizer it confirms only through ambient evidence, unless `scanner.passive.offsetProbes: true`. On hosts where the spectrum engine costs more than 25 % of a core (a Pi 4), passive scanning switches itself off and the status says why (`engines[].passive.disabledReason`). Since WG11 the limit is `scanner.passive.maxEngineUtilization` (config only, 0.05 to 1, absent = 0.25) and the guard re-checks: first 60 s after the engine opened, then every 5 min, each time over the window since its previous check (not the engine's whole life). A disabled source at or below 80 % of the limit comes back (one info log line, passive job rebuilt). A disabled source whose engine closed (nothing else holds it) is put on probation after 15 min: passive is re-enabled and the next engine open is judged again.
 
 ## Jobs
 
@@ -176,6 +176,7 @@ The `scanner:` section of `config/default.yaml` holds the defaults. "Runtime" ma
 | ------------------------------------------------------------------------------------------------- | ------------------------------------- | ------- |
 | `enabled`                                                                                         | `true`                                |         |
 | `passive.enabled`, `passive.offsetProbes`                                                         | `true`, `false`                       |         |
+| `passive.maxEngineUtilization` (WG11)                                                             | absent (= 0.25)                       |         |
 | passive per source (`passive.<sourceId>` in PATCH)                                                | `sources[i].scanner.passive` (`true`) | yes     |
 | `cpuBudgetCores`                                                                                  | 1.0                                   | yes     |
 | `cpuGuardPercent`                                                                                 | 90                                    |         |
@@ -195,6 +196,7 @@ The `scanner:` section of `config/default.yaml` holds the defaults. "Runtime" ma
 | `ws.maxMessagesPerSecond`, `spectrumHz`, `spectrumBins`                                           | 10, 10, 512                           | yes     |
 | `ws.spectrumSummaryBins`, `spectrumMaxProfiles`                                                   | 2048, 4                               |         |
 | `ws.spectrumBinsCap` (`auto`, 2048, 4096, 8192; WG8)                                              | absent (= `auto`)                     |         |
+| `iqCapture.enabled`, `maxTotalMb`, `maxCaptureMs`, `preRollMs`, `binaryPath` (WG11, protected)    | absent (off); `false`, 256, 4000, 500 |         |
 
 Env overrides: `WAVEKIT_SCANNER__CPU_BUDGET_CORES=0.5`, `WAVEKIT_SCANNER__PASSIVE__ENABLED=false`. Per source: `sources[i].scanner: { role: shared | dedicated, passive: true }`; dedicated receivers never get unsourced decoders. Example PATCH: `{"passive": {"rtl": false}, "maxProbes": {"offset": 0}}`.
 
@@ -209,9 +211,12 @@ Storage layout under `scanner.storage.dir`:
 - `discoveries.json` (snapshot), `journal/` (daily observation journals), `jobs.json`, `settings.json`;
 - `engine/` (per-source detector state) with `engine/occupancy/` (occupancy history);
 - `recordings/dv/<discoveryId>/` (digital voice WAVs), `evidence/<discoveryId>/` (`psd.json`, `iq-*.cu8`);
-- `captures/` (burst IQ captures).
+- `captures/` (burst IQ captures);
+- `iq-captures/` (WG11, protected mode with `iqCapture.enabled` only: short narrowband captures waiting for replay, deleted at their result; see [IQ capture on detection](#iq-capture-on-detection-wg11)).
 
 Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and journal files), `discoveryMaxAgeDays` (discoveries not marked `keep`) and `maxDiscoveries`. When free disk drops below `minFreeDiskMb` the status reports `disk: "disk-low"`: recording and evidence stop; discoveries keep updating. Privacy: identifiers (talkgroups, radio ids, callsigns, capcodes) stay on the host; nothing is uploaded.
+
+Store CPU (WG11): a wide sweep no longer saturates the main thread in the discovery store. Sticky association searches a per-source, per-family index ordered by each discovery's cached median centre (recomputed only when its observations change) instead of scanning every discovery; per-job counts by confidence are kept incrementally; change detection uses revision counters instead of whole-record clones and string compares; and the `discoveries.json` snapshot is written by a worker thread from a mirror fed by the journal, with the old main-thread path as the fallback (the same bytes either way). Measured at 10 000 discoveries and 50 000 observations: 41.5 µs per ingest, 1.1 µs per progress count build and 1.71 ms of main-thread time per steady snapshot; the first snapshot after boot, a mirror reset or a worker restart still runs on the main thread (about 1.2 s at that size). The worker heap limit scales with host memory (256 to 2048 MB); a host under about 6 GB writes very large snapshots on the main thread. A snapshot text above V8's maximum string length (about 512 MiB, roughly 10 000 discoveries with 256 observations each) cannot be built on either path.
 
 Merges and evictions (WG10): when a merge drops a discovery into a survivor, the dropped discovery's folders stay in place and become the survivor's aliases (persisted, at most 64 per discovery; past that the oldest becomes an orphan, warned as a count). Retention, `recordingPath`, Keep and removal treat alias folders as the survivor's, and removing the survivor removes them too, file by file through the keep decision. A `maxDiscoveries` eviction removes the evicted discovery's folders like an age prune and sends `scanner:discovery` `deleted`; a discovery holding a kept recording is never evicted. A scanner digital voice recording can be deleted with `DELETE /api/recordings/:id` in protected mode (see [API.md](API.md#put-and-delete-apirecordingsidkeep-delete-apirecordingsid)).
 
@@ -231,6 +236,24 @@ Each job counts its hits: one per observation attributed to a discovery, per dis
 
 **Identify for analog voice (WG10).** There is no probe decoder for analog FM or AM: the `analog-fm` and `analog-am` trials read the live demodulator's squelch-delimited transmissions (decoder `live-audio`, the latest 32 kept) on the job's source within the target's tolerance, back to 30 s before the job started. A CTCSS or DCS tone on a `commanded` or `relay` frequency makes the target `identified` (`classified`), anything else that matches `candidate`; the tone is only ever the one the transmission tracker reported. Identify never starts or retunes live audio, so the trials end `unsupported`/`no-live-audio` when live audio was not on the target for the whole window, and `no-sync` when it was but nothing keyed up. A digital decode keeps priority. Probe decoders whose program cannot run are listed in `result.decodersUnavailable` and are not respawned for 300 s. Details in [API.md](API.md#post-apiscanneridentify).
 
+**Heard versus decoded (WG11).** An analog trial now ends `decoded` only when the matching transmission carried a CTCSS tone or a DCS code; a squelch opening without either ends `heard` (it was heard, nothing was decoded). The verdict rule is unchanged: `identified` still needs a tone or code on a `commanded` or `relay` frequency. An analog match no longer stops the digital trials: it ends only the other analog trials, and every probe and ambient trial runs to its own end, so a digital signal heard through live audio still gets its digital decoders (an identify job with analog evidence can take until its digital trials end).
+
+**Narrow digital trials (WG11).** When the target lies in a band-plan range with a channel raster of 6.25 kHz or less (PMR446, land mobile), identify also tries `nxdn48`, `dpmr` and `dstar` even when the track's width suggests 12.5 kHz, scored at least 0.3 before the band priors (a prior of 0 still removes them). For an analog-looking track at 446 MHz the last narrow run ends about 10.6 s in, within the default 15 s.
+
+**Known protocol first (WG11).** A discovery that decoded keeps its protocol as the known protocol: identify (and replay, below) try that decoder first, then every other plausible trial in the usual order, so nothing is skipped when the known one fails. The memory decays safely: a known trial that ran its full hold on a transmission and decoded nothing counts a miss, any accepted decode resets the count, and after 2 consecutive misses the discovery is planned like an undecoded signal until it decodes again. Misses are kept in memory only and never change the stored protocol or confidence. Scan job probes count misses the same way, except sweep probes (a hop cut cannot be told from an expired hold) and a protocol only a probe's last mode covers (`nxdn96`), which only identify can decay.
+
+## IQ capture on detection (WG11)
+
+Off by default and protected access mode only (`scanner.iqCapture.enabled: true`; in legacy mode it is not started and one info line says so). It exists so a transmission can be identified after it ended, when no decoder was running in time. The flow is fixed: **capture → queue → replay trials → result → discard**.
+
+1. **Capture.** A native tool (`wavekit-iqcap`, shipped next to `wavekit-chan`) keeps a 2 s full-rate ring of the source's IQ from the spectrum engine's tap. When a track surfaces and its discovery has no confirmed result for this transmission (not decoded yet, or a known protocol not yet confirmed live on it), and it is not a spur or an image, the scanner asks for a capture: the channel shifted and decimated to 48 kHz complex float32, from the pre-roll (500 ms by default) to the track's close or 4 s. At most 6 per source per minute and 2 at once; at most 256 MiB on disk.
+2. **Queue.** A finished capture joins one first-in, first-out replay queue. An identify job near it takes it over instead (at most 2, newest first) and replays it after its live runs.
+3. **Replay trials.** Up to 8 trials: the known protocol first, then the probe modes the captured track scores (narrow digital included). They run one at a time through the `replay` probe transport (dsd-fme, multimon-ng, direwolf), faster than real time, at 0.15 cores of the probe budget, below identify and above passive. They do not need a live spectrum engine, so the queue drains even after the passive guard closed the engine.
+4. **Result.** The first accepted decode (the same acceptance rule as a live probe) is the result and ends the remaining trials; otherwise "no decode". The result lands on the capture's observation like a live decode and feeds the known-protocol memory.
+5. **Discard.** The capture is deleted as soon as its result exists, or unreplayed when a live decode came first. One that never got a result is deleted 10 min after it finished. A capture across an epoch change, with a bad file or a failed process is never replayed. Nothing survives a restart; the startup sweep removes only files that are provably captures.
+
+Cost on the reference Mac: about 0.06 to 0.14 cores for the tool with 2 captures active (0.0002 with the ring only), about 11.4 MB of memory per source outside the file cap, and no measurable event-loop cost for the tap feed. Details and bounds in [API.md](API.md#iq-capture-on-detection-wg11).
+
 ## Honesty and limits
 
 - Detection is measured on one strong DMR capture; false-alarm control adapts per range (CFAR), but a fresh dongle needs minutes to learn its spurs.
@@ -240,6 +263,10 @@ Each job counts its hits: one per observation attributed to a discovery, per dis
 - P25, NXDN, D-STAR, dPMR and DMR repeater rules are unvalidated until captures exist; those results stay `candidate` unless dsd-fme decodes them.
 - Marker settle needs the RTL2832 test mode to reach the core; over some rtlmux/Wi-Fi paths it does not, and timer settle makes sweeps about 6× slower.
 - Before the channelizer, one confirm probe runs at a time; on a Pi 4 even that may exceed the CPU budget.
+
+### Why a DMR band scan found only Heard signals (WG11)
+
+A sweep decides whether to probe a track at the end of its hop dwell, about 150 ms (3 blocks) after the settle. A track that young carries no TDMA signature yet: the envelope autocorrelation needs at least 300 ms and the first track update that has it comes after 1 s. The spectral classifier labels a track of up to 4 blocks an OOK burst unless the band's ISM prior is below 1, and in a sweep the classifier saw no band prior when no job range at that frequency named protocols (a 135 to 174 MHz range is enclosed by no single built-in plan). So every young land-mobile track became an ISM burst, which has no probe mode: no probe, no deferral, no decode, and the discovery stayed `activity` or `candidate`. Identify was not affected because it uses the band-plan priors. Fixed: a sweep over a range that names no protocols takes the band plan's ISM prior at that frequency, except inside the OOK short-range-device allocations (314 to 316, 433.05 to 434.79, 863 to 870 and 902 to 928 MHz), where a short burst stays an OOK burst. A second cause: the dsd-fme `auto` (DMR) mode held for 600 ms, below a DMR late entry (about 1.8 s); its hold is now 1 800 ms (which also lengthens P25 and other `auto` probes). Ruled out: hop dwell and the probe budget. Still conditional: the CPU guard defers probes when the container runs above 90 % of its CPU quota, and such deferrals are recorded as `budget`.
 
 ### Known limitations
 
@@ -289,6 +316,8 @@ const hzOf = i => frame.startHz + (i + 0.5) * frame.binHz
 
 Engines run while a job or a `spectrum` client needs them, also with `scanner.enabled: false`. `tuningTrust` on frames: `unverified` frames have an untrusted frequency axis (grey it out). Status warnings (`GET /api/spectrum` `sources[].warnings`): `untracked-retune` (the scene moved without a command the core saw; the shift is reported when it can be estimated) and `host-centre-mismatch` (the receiver reports another centre than the core's caps). `GET /api/spectrum/occupancy` returns hourly duty per 12.5 kHz bucket for the last 7 days.
 
+**Stable tracks (WG11).** A frame track the tracker associated with an open track also carries `trackId`, `snrDb` (lifetime mean), `peakDbfs` (lifetime max), `blocks`, `ageMs` (first seen ≈ `at` − `ageMs`), `surfaced` (recomputed every block, not sticky), `flags.spur` and, when the scanner has a discovery for it, `scanner: {discoveryId, protocol, confidence}`. Key tracks by `sourceId` and `trackId`; the id survives the tracker's 120 s rollover. A track grows by at most 260 bytes of JSON. See [API.md](API.md#spectrumframe).
+
 **Cursor tuning:** inside the window `PATCH /api/live-audio/config {"offsetHz": …}`; outside it `POST /api/tuner/:sourceId/frequency {"hz": …}`, which preempts a running sweep (`paused(preempted-operator)`).
 
 ## Burst IQ capture (fixtures)
@@ -307,6 +336,7 @@ The job option `capture: {enabled, mode: "wideband" | "channel", preMs: 1000, po
 - **`stuckTestMode: true`**: the receiver stayed in RTL2832 test mode. Send any tuner command (for example the same frequency) and check the rtlmux version.
 - **`floorOccupied: true`**: a wideband emitter fills the window, so the floor estimate is high and weak signals hide under it. Tune away or narrow the range.
 - **`overload: true`**: the ADC clips. Lower the gain, or use `tuner.overload: "reduce-gain"` on sweeps.
+- **Passive disabled on a slow host**: `engines[].passive.disabledReason` names the engine cost. Raise `scanner.passive.maxEngineUtilization` in the config if the host can afford it; the guard re-checks every 5 min and re-enables passive at or below 80 % of the limit.
 - **No probes start**: probes wait for the CPU budget (`cpuBudgetCores`), the CPU guard (`cpuGuardPercent`, see `cpuGuard.percent`) and `maxProbes.offset`; compare `budgets` in `GET /api/scanner`. Discoveries that never got a probe report `undecodedReason: "budget"`. Passive jobs get no offset probes unless `passive.offsetProbes` is on.
 - **`disk: "disk-low"`**: free disk is below `storage.minFreeDiskMb`; recordings, evidence and captures stop until space returns.
 - **503 `SCANNER_STATE_UNAVAILABLE`**: the scanner could not read its jobs or settings at boot. It runs without them (in-window jobs and the spectrum feed still work) and never overwrites the unread files; fix the files under `storage.dir` and restart.

@@ -43,25 +43,45 @@ export interface SpectrumFrameEventData {
 /**
  * One segment of the frame's block (RF). WG11 req 5.1: a segment the tracker associated with an
  * open track also carries that track's stable id and its stats from the same block; a segment
- * without a track carries none of the optional fields.
+ * without a track carries none of the optional fields. Key tracks by (sourceId, trackId).
  */
 export interface SpectrumFrameTrack {
 	startHz: number
 	endHz: number
 	/** WG11: `spur` = the track lies wholly on a spur line (never surfaced, never probed). */
 	flags: { burst: boolean; iqImage: boolean; edge: boolean; spur?: boolean }
-	/** The tracker's id: stable for the emission's life, burst gaps within the hang included. */
+	/**
+	 * The tracker's id without its `<sourceId>-` prefix (at most 30 characters), so it is unique
+	 * only per source: key tracks by (sourceId, trackId). The full tracker id, as
+	 * `ScanJobProbe.trackId` carries it, is `${sourceId}-${trackId}`. Stable for the emission's
+	 * life (burst gaps within the hang included) and across the tracker's 120 s max-duration
+	 * rollover, which keeps the chain's first id; a new epoch gives a new id. Never reused.
+	 */
 	trackId?: string
-	/** Against the core's own floor and threshold; rounded to 0.5 dB. */
+	/**
+	 * Lifetime mean over the track's chain so far (mean band power over mean floor power, against
+	 * the core's floor), rounded to 0.5 dB; not this block's instantaneous value.
+	 */
 	snrDb?: number
+	/** Lifetime maximum block peak over the track's chain so far, rounded to 0.5 dB. */
 	peakDbfs?: number
-	/** Integration blocks the track was on so far. */
+	/** Integration blocks the track's chain was on so far; saturates at 9 999 999. */
 	blocks?: number
-	/** Since the track opened, from sample counts (`at` − ageMs ≈ first seen). */
+	/**
+	 * Since the track's chain started, from sample counts; keeps growing across the 120 s
+	 * rollover and saturates at 99 999 999 ms. First seen ≈ `at` − ageMs.
+	 */
 	ageMs?: number
-	/** Display surfacing rule: not a spur or image; a burst at threshold + 3 dB, else ≥ minSurfaceBlocks blocks. */
+	/**
+	 * The display surfacing rule evaluated for this frame's block: false for a spur or an image,
+	 * or while the segment is flagged iqImage in this block (not sticky across frames); a burst at
+	 * threshold + 3 dB, else at least minSurfaceBlocks blocks. Survives the max-duration rollover.
+	 */
 	surfaced?: boolean
-	/** The scanner's discovery for this track, when it has one. */
+	/**
+	 * The scanner's discovery for this track, when it holds a live observation of it on the same
+	 * source. Absent for about 1 s after a rollover, until the new observation has its discovery.
+	 */
 	scanner?: SpectrumFrameTrackScanner
 }
 /** WG11 req 5.1: the scanner's identity of a frame track. */
@@ -70,7 +90,10 @@ export interface SpectrumFrameTrackScanner {
 	protocol: ScannerProtocol
 	confidence: ScannerConfidence
 }
-/** WG11 req 5.5: JSON bytes a frame track may grow by with every optional field present. */
+/**
+ * WG11 req 5.5: JSON bytes a frame track may grow by with every optional field present (measured
+ * typical growth: about 105 B per track without `scanner`, 217 B with it).
+ */
 export const SPECTRUM_FRAME_TRACK_MAX_EXTRA_BYTES = 260
 
 /** WG10 req 2.9: what an untracked-retune warning most likely means. */

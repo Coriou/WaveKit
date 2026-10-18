@@ -86,6 +86,73 @@ into one transmission, transmissions under 500 ms and nfm/wfm ones without FM-qu
 carrier evidence are not published (WS, Activity, identify), while live audio gating is
 unchanged. No CLI or web change required.
 
+Landed in the 2026-10-18 web-gap batch 11 (WG11, core only, [spec](specs/web-gaps-11/requirements.md)):
+
+- **Identify quality.** A squelch opening without CTCSS or DCS is now `heard`, not
+  `decoded` (new trial outcome); analog evidence no longer stops digital trials;
+  `nxdn48`, `dpmr` and `dstar` are tried on 6.25 kHz rasters (last narrow run ends
+  about 10.6 s in, inside the default 15 s); a discovery's known decoded protocol is
+  tried first and forgotten after 2 full-hold misses; a cancel of an ended job is a
+  200 no-op.
+- **Band-scan DMR root cause** (see [SCANNER.md](SCANNER.md#why-a-dmr-band-scan-found-only-heard-signals-wg11)):
+  young sweep tracks were classified as OOK bursts (no probe mode) because sweeps
+  saw no band ISM prior; the dsd-fme `auto` hold was 600 ms, under a DMR late
+  entry. Both fixed (band prior outside the OOK SRD allocations; 1 800 ms hold).
+- **Passive CPU guard.** Configurable limit (`scanner.passive.maxEngineUtilization`,
+  default 0.25), a windowed re-check every 5 min with an 80 % clear threshold, and
+  a 15 min probation for a source whose engine closed.
+- **Scanner store CPU** at 10 000 discoveries and 50 000 observations (budgets in
+  brackets): ingest 41.5 µs (≤ 50; it did not finish in over 10 min before, and grew
+  roughly with n³: 2 148 µs at 2 000 discoveries), progress counts 1.1 µs (O(1);
+  65.5 ms at 3 000 before), steady snapshot 1.71 ms of main-thread time (≤ 5 ms; a
+  worker writes it; 335.5 ms on the main thread at 3 000 before), event-loop p99
+  2.9 ms. The first snapshot after boot or a reset still runs on the main thread
+  (1.2 s at that size).
+- **Configured gain on connect.** `sources[].tuner` (`gainMode`, `gainDb`,
+  `agcMode`) is written on every new connection with tuner command origin `config`;
+  values set through the API or the relay keep precedence. At most 3 commands per
+  connection; without the key nothing changes.
+- **Stable tracks on spectrum frames.** `trackId`, `snrDb`, `peakDbfs`, `blocks`,
+  `ageMs`, `surfaced`, `flags.spur` and the scanner's discovery identity, stable
+  across the tracker's 120 s rollover; at most 260 B more JSON per track (typically
+  105 B, 217 B with the identity). Frame build plus stringify at 64 tracks went from
+  182 to 637 µs in a loaded bench; the identity lookup reads the store without a
+  clone.
+- **IQ capture on detection** (protected mode, off by default): `wavekit-iqcap`
+  keeps a 2 s ring per source and writes up to 4 s of 48 kHz cf32 per transmission
+  (≤ 1.5 MB each, 256 MiB total); a FIFO queue replays it into dsd-fme, multimon-ng
+  or direwolf after the transmission ended (68× to 384× real time), the result lands
+  on the observation and the capture is deleted at once (orphans after 10 min).
+  Tool cost 0.06 to 0.14 cores with 2 captures active at 2.048 / 2.4 Msps, about
+  11.4 MB per source; the tap feed left the event-loop p99 unchanged (2.06 ms).
+
+No CLI change: the CLI guards accept `heard` and `replay` and strip the new frame
+track fields and the `config` origin. The web outcome-label map needs a `heard`
+entry ([CLI-COORDINATION.md](CLI-COORDINATION.md)).
+
+Open after WG11:
+
+- IQ capture: the native tool and Node prove the capture directory chain before
+  every create, link and remove, but a swap between the proof and the syscall is
+  still possible; closing it needs directory-relative calls (`openat`, `unlinkat`)
+  through a libc dependency in `wavekit-iqcap`. A protocol-violating `captured`
+  event after the tool's own `aborted` for the same id leaves a stray file until the
+  next startup sweep. The replay result carries no `crcClean` and is treated as a
+  clean decode. A capture requested right after dropped samples can be refused.
+  The tool's resident memory with a full ring is arithmetic (8.2 MB), not measured.
+- Known protocol: a protocol covered only by a probe's last mode (`nxdn96` in
+  dsd-fme `auto`) never takes a miss from a scan job (safe direction: it stays
+  first, every other trial still runs); only identify decays it.
+- Scanner store: `evictionVictim()` still scans every discovery for each new one
+  once the store is full; a snapshot above V8's maximum string length (about
+  10 000 discoveries × 256 observations) cannot be built at all.
+- CLI: its guards strip the new frame track fields and the `config` tuner origin; a
+  follow-up if the CLI wants to show them.
+- Live acceptance: heard versus decoded on a PMR446 handheld with and without
+  CTCSS, a 6.25 kHz digital identify, passive coming back in a container, gain
+  after a receiver reconnect, and IQ capture identifying a short transmission
+  after it ended.
+
 ### Performance and native DSP plan (2026-10-17)
 
 A read-only performance audit of the core found that the cost is dominated by two
@@ -697,6 +764,16 @@ open. Missing proof retains ownership rather than admitting a successor.
       run (remembered 300 s, not respawned meanwhile). Open: analog identify needs
       live audio on the target (an in-process FM demodulator or a probe FM decoder
       would lift that); real-RF acceptance on PMR446 with CTCSS.
+- [x] Identify quality (WG11): `heard` for a squelch opening without a tone or code,
+      analog evidence no longer stops digital trials, narrow digital trials on
+      6.25 kHz rasters, known protocol first with decay, clean cancel of an ended
+      job, the band-scan DMR root cause fixed, the passive guard re-check, and
+      scanner store CPU off the main thread (see the WG11 summary above). Open: the
+      `nxdn96` last-mode miss in jobs and the `evictionVictim()` scan.
+- [x] IQ capture on detection replayed into identify (WG11, protected mode, off by
+      default): capture → queue → replay trials → result → discard. Open: the
+      directory-relative syscall follow-up in `wavekit-iqcap`, the stray file after
+      a protocol-violating tool event, and `crcClean` on the replay result.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 

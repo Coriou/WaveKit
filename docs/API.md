@@ -1078,6 +1078,37 @@ receiver's startup arguments). A relay rate the controller rejects never
 changes source caps. Combine with the source `connected` flag to tell sent from
 pending.
 
+**Configured gain and AGC on connect (WG11).** An `rtl_tcp` source may carry
+`tuner: { gainMode, gainDb?, agcMode? }` in its config (`sources[].tuner`, also
+accepted by `POST /api/sources`): `gainMode` `manual` needs `gainDb` (0 to 50 dB
+in 0.1 dB steps), `agc` refuses it; `agcMode` is the RTL2832 digital AGC flag. An
+invalid value fails startup with `ConfigValidationError`; on another source type
+the key is ignored with one warn at startup. On every new connection, at the
+session's first payload and before the restore above, core writes the gain mode,
+the gain and the AGC flag (at most 3 commands of 5 bytes, once per connection,
+never periodically) under internal control only; each is a `tuner:command-sent`
+with origin `config`. A value accepted from this API or the relay in this process
+wins for the rest of the process (the restore writes it instead; a held gain or
+gain mode also suppresses the other configured gain field, because a gain write
+switches the tuner to manual), until a `reset` reconnect discards it; under external control nothing is
+written. The configured values are the baseline: the state shows them, but they
+stay in `unknownFields` until written on the current connection, and `reset`
+returns to them. A failed write is a restore failure (`lastError`, retried on the
+next connection). A `config` write is not operator activity: it never preempts a
+scanner lease. Without `tuner` every connect writes exactly what it wrote before
+WG11. Through a shared rtlmux every core (re)connect rewrites the configured gain,
+overwriting a gain another client (SDR++) set there; a gain set through this API
+still wins.
+
+```yaml
+sources:
+  - id: rtl
+    type: rtl_tcp
+    host: 127.0.0.1
+    port: 1234
+    tuner: { gainMode: manual, gainDb: 40.2, agcMode: false }
+```
+
 Reconciliation is not readback. After a core-only restart nothing has been
 accepted, so nothing is written and caps show the configured baseline, while the
 hardware may still be at relay-set values (rtlmux caches client commands and
@@ -2379,7 +2410,32 @@ curl http://localhost:9000/api/scanner
 
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
-`passive.disabledReason` explains a passive job switched off by the cost rule.
+`passive.disabledReason` explains a passive job switched off by the cost rule
+(for example `engine-cpu 31 % of a core`).
+
+**Passive cost rule (WG11).** The limit is `scanner.passive.maxEngineUtilization`
+(config only, 0.05 to 1; absent means 0.25 of one core, the earlier fixed value;
+not a settings PATCH key). The first check runs 60 s after the source's spectrum
+engine opened; after it the guard re-checks every 300 s
+(`PASSIVE_COST_RECHECK_MS`). Each check measures the engine worker's utilization
+over the window since the previous check of the same engine and worker (the first
+check, or a replaced worker, uses the worker's life so far), not the engine's whole
+life. An enabled source above the limit is disabled (warn log, as before); a
+disabled source at or below `limit × 0.8` is enabled again (info log
+`Passive scanning re-enabled: spectrum engine within budget`, passive job
+rebuilt, `disabledReason` cleared). An unknown reading changes nothing and is not
+counted as a check. A source disabled by the guard whose engine then closed (no job
+or display holds it) gets probation 15 min (`PASSIVE_PROBATION_MS`, 3 × 300 s)
+after it was disabled: passive is re-enabled (info log), the engine opens again and
+the usual first check judges it. A host with headroom therefore gets passive back
+within one recheck (5 min) while a display keeps the engine open, else at the next
+probation; a host that stays too slow switches at most once per check.
+
+```yaml
+scanner:
+  passive:
+    maxEngineUtilization: 0.4
+```
 
 #### GET /api/scanner/settings
 
@@ -2728,7 +2784,11 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `preempted-relay`, `preempted-job`, `source-down`, `core-restart`,
 `resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
-carry `identify` (see `POST /api/scanner/identify`).
+carry `identify` (see `POST /api/scanner/identify`). A probe's `transport` is
+`offset`, `channel` or (WG11) `replay`: a probe fed from an IQ capture rather than
+the live stream ([IQ capture on detection](#iq-capture-on-detection-wg11)). Its
+`trackId` is the full tracker id, `<sourceId>-<suffix>`; a `spectrum:frame` track
+carries only the suffix (see [spectrum:frame](#spectrumframe)).
 
 A job in `paused(preempted-job)` carries `preemptedBy: { jobId, name }`: the job
 that holds its source lease now (`name` is null when that job has none). The field
@@ -2886,6 +2946,14 @@ from the full `resume.autoAfterIdleMs`. Recording activity does not hold it yet.
 409 `SCANNER_INVALID_TRANSITION` when the action does not apply to the
 current state, 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
 identify job.
+
+`cancel` of a job that already ended (`completed`, `cancelled` or `failed`,
+identify jobs included) answers **200** with the unchanged job (WG11): no state
+change, no end action, no event and no persistence write, so a client may cancel
+without first checking the state. (Before WG11 it answered 409
+`SCANNER_INVALID_TRANSITION`.) A cancel racing a natural completion ends in
+exactly one terminal state. An unknown id stays 404; `pause` and `resume` of an
+ended job keep the 409 `SCANNER_INVALID_TRANSITION`.
 
 ```bash
 curl -X POST http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH/resume \
@@ -3228,12 +3296,20 @@ frequency lies within the target's tolerance (`max(1 kHz, bandwidth/2)`) and it 
 open or ended no earlier than 30 s (`IDENTIFY_ANALOG_LOOKBACK_MS`) before the job
 started; the core keeps the latest 32 (`IDENTIFY_ANALOG_MAX_TRANSMISSIONS`). `nfm` or
 `wfm` answers `analog-fm`, `am` or `dsb` answers `analog-am`; other modulations are
-no evidence. Outcomes: `decoded` once a matching closed transmission exists;
+no evidence. Outcomes (WG11): `decoded` once a matching closed transmission exists
+and the newest one carried a CTCSS tone or a DCS code; `heard` when the matching
+closed transmissions carried neither (a squelch opening was heard, nothing was
+decoded; before WG11 this was `decoded`). `heard` is final and no other trial uses
+it.
 `timeout` when only a matching open one is present at the target's deadline;
 `no-sync` when live audio was on the target during the window but nothing matched;
 `unsupported` with reason `no-live-audio` when live audio was not running on the
-job's source, or not tuned within the tolerance, for the whole window. A match is a
-stop like an accepted identity unless `exhaustive`; a digital decode keeps priority
+job's source, or not tuned within the tolerance, for the whole window. Since WG11 a
+match ends only the target's other waiting `live-audio` trials: probe runs, pending
+runs and ambient trials of other decoders keep running to their own end (an analog
+match no longer marks them `not-needed`), and the target finishes when every trial
+ended, so an identify job with analog evidence can run until its digital trials
+end. A digital decode keeps priority
 and then no `analog` is reported (a classified digital discovery keeps its protocol; analog evidence
 is supplementary and only appears in `result.analog`). Identify reads the same published
 transmissions as WebSocket and Activity, so the activity hygiene rules below
@@ -3242,8 +3318,8 @@ opening is never evidence, and a closed event arrives up to the merge gap (1.5 s
 ended. A trial that sees a matching open transmission at the target's deadline, or an opening
 the tracker still holds back (under the 500 ms minimum, started by the deadline), therefore
 waits up to 1 750 ms past the deadline (`IDENTIFY_ANALOG_SETTLE_MS`: merge gap plus the 250 ms
-hang; fixed from the deadline): a closed match that ended by the deadline in that time decodes,
-otherwise the trial ends `timeout` (never `no-sync`). Tone detection runs over every merged
+hang; fixed from the deadline): a closed match that ended by the deadline in that time decides
+(`decoded` or `heard`), otherwise the trial ends `timeout` (never `no-sync`). Tone detection runs over every merged
 segment, so a merged transmission gives the detector more audio, not less; a different speaker
 with a different confirmed tone is a separate transmission. A matching transmission with a CTCSS tone or a DCS
 code on a `commanded` or `relay` frequency makes the target `identified` with
@@ -3265,8 +3341,10 @@ the transmission tracker reported are used. `result.analog`:
 ```
 
 Identify never starts or retunes live audio: to identify analog voice, listen on the
-target (or have listened in the last 30 s). The outcome and state lists are unchanged;
-`live-audio` and `no-live-audio` are new values of the free-text `decoder` and `reason`.
+target (or have listened in the last 30 s). WG10 left the outcome and state lists
+unchanged (`live-audio` and `no-live-audio` are values of the free-text `decoder` and
+`reason`); WG11 adds the trial outcome `heard`. A client with a closed outcome map must
+add it.
 
 A decode counts only when all of these hold (fail closed):
 
@@ -3287,6 +3365,106 @@ The identity is attached on its second clean decode within one engine epoch.
 Identity kinds are `ais-mmsi` (9 digits), `acars-reg` (tail), `vdl2-addr`
 (`fromaddr`, else `icao`) and `lora-node` (`from`). Without a running decoder
 of these types, or without tuning trust, identify behaves as before WG7.
+
+**Narrow digital trials (WG11).** When the target lies in a band-plan range of the
+active region that lists a channel raster of at most 6 250 Hz, the plan includes
+`nxdn48`, `dpmr` and `dstar` (unless `protocols` excludes them) even when the
+track's width does not suggest them, each scored at least 0.3
+(`IDENTIFY_NARROW_DIGITAL_MIN_SCORE`) before the band priors; a prior of 0 still
+removes a protocol. That is at most 3 more trials and 2 more runs (`dstar` shares the
+dsd-fme `auto` run). For an analog-looking 12.5 kHz track on a 6.25 kHz raster the
+last narrow run ends about 10.6 s after the start, inside the default 15 s.
+
+**Known protocol first (WG11).** A discovery's known protocol is its `protocol`
+while its confidence is `decoded` and it has fewer than 2
+(`KNOWN_PROTOCOL_MAX_MISSES`) consecutive misses. When identify resolves the target
+to such a discovery, that protocol's run goes first (added as a trial when the track
+does not suggest it, unless excluded, given a prior of 0 or without a probe mode);
+every other trial still follows in the usual order. A known trial that ran its full
+hold on a live transmission of the discovery and decoded nothing counts one miss; any
+accepted decode on the discovery (identify, a job probe, an ambient decoder or a
+replay) resets the count. After 2 misses the discovery plans as an undecoded one
+until it decodes again. Misses live in memory only: they never change the stored
+protocol or confidence, and a restart clears them. Scan job probes count misses and
+decodes the same way, except that a protocol covered only by a probe's last mode
+(`nxdn96` in dsd-fme `auto`) never takes a miss from a job, and sweep probes never
+count misses (a hop cut cannot be told from an expired hold).
+
+**Replay trials (WG11, IQ capture on).** With `scanner.iqCapture` on (see
+[IQ capture on detection](#iq-capture-on-detection-wg11) below), identify takes over
+up to 2 (`IDENTIFY_REPLAY_MAX_CAPTURES`) stored captures near the target (same
+source, frequency within the tolerance and trust `commanded` or `relay`, or the same
+observation), newest first; when the resolved track has none, it requests one and
+waits up to 2 s for it. After its live runs, every probe protocol not decoded live
+gets one replay run per capture, as trials with `transport: "replay"`, so a trial
+list can hold a live and a replay trial for one protocol. A replay decode counts
+like a live one (the same acceptance rule, in the capture's epoch). The captures are
+discarded when the target reaches its result, on every path. A live decode of the
+observation before its replay started discards the capture unreplayed.
+
+#### IQ capture on detection (WG11)
+
+Off by default; protected access mode only. A transmission is identified even when
+it ended before a decoder could run: the core keeps up to about 4 s of narrowband IQ
+of it, replays that into the probe decoders off-air, records the result and deletes
+the IQ at once. Config (`scanner.iqCapture`, config only; unknown keys are refused):
+
+```yaml
+scanner:
+  iqCapture:
+    enabled: true # default false
+    maxTotalMb: 256 # 16 to 256 (the cap, 256 MiB)
+    maxCaptureMs: 4000 # 500 to 4000, pre-roll included
+    preRollMs: 500 # 0 to 2000 (the native ring)
+    binaryPath: wavekit-iqcap
+```
+
+- **Scope.** Absent or `enabled: false`: no process, no file, no change anywhere. In
+  legacy mode the key is not acted on and one info line says so. A missing binary
+  turns capture off with one warn; identify and the scanner work as before.
+- **Capture.** One `wavekit-iqcap` process per IQ source (a second binary of the
+  `wavekit-chan` crate, in the image) reads the spectrum engine's CU8 tap (no new
+  fanout branch) into a full-rate ring of at most 2 s. The scanner requests a capture
+  when a track surfaces and its discovery has no confirmed result for this
+  transmission yet (below `decoded`, or `decoded` with a known protocol no live
+  probe has confirmed on this observation), not on a spur or an image, inside the
+  usable span; at most 6 per source per minute and 2 at once. The tool shifts the
+  channel to baseband and decimates it to 48 000 Hz complex float32 (cf32) at the
+  widest probe passband, from the pre-roll to the track's close (plus the tracker
+  hang) or `maxCaptureMs`: at most 1 536 000 B per capture (4 s × 48 000 × 8 B).
+  Gaps are counted, never filled; a capture shorter than 100 ms is discarded.
+- **Order.** capture → queue → replay trials → result → discard. A finished capture
+  joins one FIFO replay queue per core. Its trials (at most 8,
+  `IQ_REPLAY_MAX_TRIALS`) are the known protocol first, then the probe modes the
+  captured track scores (narrow digital included), deduplicated. They run one at a
+  time through the `replay` probe transport (`dsd-fme`, `multimon-ng`, `direwolf`;
+  never `rtl433`), each fed the capture filtered to that decoder's probe channel
+  shape, faster than real time (68× to 384× in the bench). At most one replay probe
+  runs at once, costing 0.15 cores of `cpuBudgetCores`, at a priority below identify
+  and above passive; it never preempts and is never preempted, and it needs no live
+  spectrum engine. The first accepted decode is the result and ends the remaining
+  trials; otherwise the result is "no decode" once every trial ended. The result is
+  applied to the capture's observation in the capture's epoch (decode evidence, or
+  the undecoded reason, and the known-protocol miss rule above), then the capture
+  is deleted. A replay deferred by the CPU budget or guard waits in place for at most
+  60 s.
+- **Discard.** At its result; unreplayed when a live probe or identify decodes the
+  observation first; 10 min (`IQ_CAPTURE_ORPHAN_TTL_MS`) after it finished when it
+  never got a result (backlog, decoders unavailable); at once when its source's
+  epoch changed during it, its file is missing, oversized or not ours, or its
+  process failed (no replay, no verdict, no miss). At `maxTotalMb` a new capture is
+  refused until the queue drains. Captures do not survive a restart.
+- **Files.** `<scanner.storage.dir>/iq-captures/` (mode 0700), files
+  `<uuid v4>.cf32` (0600), regular files only with no symbolic link on the way. The
+  startup sweep removes only files matching that name grammar, owned by this user,
+  and leaves anything else. Logs and bodies name no path, file name, capture id or
+  frequency, only counts and codes. These captures are not the burst captures below
+  and are not listed by any route.
+- **Cost (measured on the reference Mac).** The tool takes 0.0002 cores with only the
+  ring and about 0.06 to 0.14 cores with 2 captures active (2.048 and 2.4 Msps); the
+  main-thread tap feed left the event-loop p99 at 2.06 ms (2.04 ms without it). Memory
+  per source outside the file cap is about 11.4 MB at 2.048 Msps (the 8.2 MB ring,
+  native and Node queues, the pipe).
 
 #### GET /api/scanner/captures
 
@@ -5285,8 +5463,9 @@ further `source:status` or `source:disconnected` follows for that `sourceId`
 
 On the `tuner` channel after a tuner command was written to an rtl_tcp source.
 `origin` (optional) says who issued it: `"rest"` (the REST API), `"scanner"`
-(a sweep through the scanner's lease) or `"replay"` (desired state re-sent on
-reconnect). It is absent for writes whose origin is not tagged. Relay (SDR++)
+(a sweep through the scanner's lease), `"replay"` (desired state re-sent on
+reconnect) or (WG11) `"config"` (the source's configured gain mode, gain or AGC
+flag written on a new connection; see [Tuner](#tuner)). It is absent for writes whose origin is not tagged. Relay (SDR++)
 commands do not pass through here.
 
 ```json
@@ -5605,10 +5784,14 @@ most 1/s per (job, target); the latest state is always delivered.
   `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
   `decoder-unavailable` (WG9), `no-live-audio` (WG10); `mode` and `transport` null),
-  `not-needed` (an earlier trial decoded and `exhaustive` is false) and
-  `cancelled`. `transport` is `offset`, `channel` or `ambient` (WG7: an
-  already-running AIS, ACARS, VDL2 or LoRa decoder; WG10: decoder `live-audio` for
-  `analog-fm` / `analog-am`; see `POST /api/scanner/identify`).
+  `not-needed` (an earlier trial decoded and `exhaustive` is false; an analog
+  match no longer causes it, WG11), `cancelled` and (WG11) `heard` (a `live-audio`
+  trial whose matching transmission carried no CTCSS tone or DCS code; `decoded`
+  on a `live-audio` trial now means a tone or code was heard). `transport` is
+  `offset`, `channel`, `ambient` (WG7: an already-running AIS, ACARS, VDL2 or LoRa
+  decoder; WG10: decoder `live-audio` for `analog-fm` / `analog-am`) or (WG11)
+  `replay` (a probe decoder fed from an IQ capture of the target, after the
+  transmission ended); see `POST /api/scanner/identify`.
 - `result`: see `POST /api/scanner/identify`, including `artefact?`,
   `ended?: "window-moved"`, and (WG10) `analog?` and `decodersUnavailable?`.
 
@@ -5720,12 +5903,62 @@ One frame per source and profile:
 		"binEncoding": "u8-halfdb-127.5",
 		"floorDbfs": -92.5,
 		"thresholdDb": 9.2,
-		"tracks": [{ "startHz": 446051000, "endHz": 446061000, "flags": { "burst": false, "iqImage": false, "edge": false } }],
+		"tracks": [
+			{
+				"startHz": 446051000,
+				"endHz": 446061000,
+				"flags": { "burst": false, "iqImage": false, "edge": false, "spur": false },
+				"trackId": "mgv3k2a1-1f",
+				"snrDb": 41.5,
+				"peakDbfs": -38.5,
+				"blocks": 37,
+				"ageMs": 1850,
+				"surfaced": true,
+				"scanner": { "discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N", "protocol": "dmr", "confidence": "decoded" }
+			}
+		],
 		"masks": { "dcHz": 446000000, "dcGuardHz": 1500, "spurRanges": [{ "startHz": 446249500, "endHz": 446250500 }] },
 		"at": "2026-10-10T14:02:15.050Z"
 	}
 }
 ```
+
+- `tracks[]` (`SpectrumFrameTrack`, at most 256 per frame): the segments of the
+  frame's newest block summary, `{startHz, endHz, flags}`. Since WG11 a segment the
+  tracker associated with an open track also carries that track's fields, all taken
+  from the same block (no look-ahead; backfill and averaged frames carry the values
+  recorded with their block). A segment without a track carries none of them. All
+  are optional; older cores omit them.
+  - `trackId`: the tracker id without its `<sourceId>-` prefix (at most 30
+    characters). Key tracks by **(`sourceId`, `trackId`)**: two sources can show
+    the same suffix. The full tracker id is `` `${sourceId}-${trackId}` `` (the form
+    `ScanJobProbe.trackId` carries). It is stable for the emission's life, burst gaps
+    within the tracker's hang included, and survives the tracker's 120 s
+    maximum-duration rollover (the frame keeps the chain's first id; an epoch change
+    gives a new id). Ids are never reused.
+  - `snrDb`: the lifetime mean over the track's chain so far (mean band power over
+    mean floor power, against the core's floor), rounded to 0.5 dB; not this block's
+    value. `peakDbfs`: the lifetime maximum block peak so far, rounded to 0.5 dB.
+    Both continue across the rollover.
+  - `blocks`: on-blocks so far; `ageMs`: since the chain started, from sample
+    counts. Both keep growing across the rollover and saturate at 9 999 999 blocks
+    and 99 999 999 ms (about 27.8 h). First seen ≈ `at` − `ageMs`.
+  - `surfaced`: the display surfacing rule evaluated for this block: false when the
+    track is a spur or an image, or this block's segment is flagged `iqImage`; a
+    burst track at threshold + 3 dB, otherwise at least
+    `detection.minSurfaceBlocks` blocks. It is not sticky: it is recomputed every
+    block, so a surfaced track can read false in a frame where its segment is an
+    image. It survives the rollover.
+  - `flags.spur`: the track lies wholly on a spur line (never surfaced, never
+    probed).
+  - `scanner`: `{discoveryId, protocol, confidence}` when the scanner holds a live
+    observation of this track on the same source with a discovery, looked up when
+    the frame is sent. It is absent for about 1 s after each rollover, until the
+    scanner's new observation gets its discovery.
+  - Size: a track grows by at most 260 bytes of JSON
+    (`SPECTRUM_FRAME_TRACK_MAX_EXTRA_BYTES`): typically about 105 B without and
+    217 B with `scanner`, so a 64-track frame is up to about 16.6 KB larger. Tracks
+    per frame, the cadence and every other field are unchanged.
 
 - `profile` is the key `<hz>:<bins>` (the default profile or the client's),
   `<hz>:<bins>:a<n>` for an averaged profile.

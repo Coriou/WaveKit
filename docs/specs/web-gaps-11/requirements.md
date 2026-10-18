@@ -1,6 +1,7 @@
 # Web gaps 11 requirements (WG11)
 
-Status: frozen for implementation. See [design](design.md) and [tasks](tasks.md).
+Status: implemented (all lane and Main wiring tasks done; checkpoint and live acceptance open,
+see [tasks](tasks.md)). See [design](design.md) and [tasks](tasks.md).
 
 ## Scope
 

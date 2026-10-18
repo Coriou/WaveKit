@@ -1,11 +1,11 @@
 # Web gaps 11 design (WG11)
 
-Status: frozen for implementation. Requirements in [requirements](requirements.md), tasks in
-[tasks](tasks.md). Background: the WG7/WG9/WG10 identify runner (ambient trials, unavailable
-memo, analog evidence), the § 6.4 probe pool and its transports, the § 7 discovery store and its
-journal and snapshot (with the WG10 backlog bound), the § 10.7 passive cost check, the WG5/WG9
-tuner controller and reconnect restore, the spectrum pipeline tracker, and the `wavekit-chan`
-native channelizer crate.
+Status: implemented (checkpoint open, see [tasks](tasks.md)); the contract below is as frozen.
+Requirements in [requirements](requirements.md), tasks in [tasks](tasks.md). Background: the
+WG7/WG9/WG10 identify runner (ambient trials, unavailable memo, analog evidence), the § 6.4 probe
+pool and its transports, the § 7 discovery store and its journal and snapshot (with the WG10 backlog
+bound), the § 10.7 passive cost check, the WG5/WG9 tuner controller and reconnect restore, the
+spectrum pipeline tracker, and the `wavekit-chan` native channelizer crate.
 
 ## Contract (frozen)
 
