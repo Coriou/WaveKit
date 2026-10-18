@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type { ScannerIdentifyEventData } from "@wavekit/api-types"
 import fc from "fast-check"
 import {
@@ -162,6 +162,15 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 		try {
 			const evidence: AmbientEvidenceEvent[] = []
 			r.ambient().on("evidence", (e: AmbientEvidenceEvent) => evidence.push(e))
+			// WG11 batch review R1 4: the ambient decode resets the known-protocol memory exactly once.
+			const recordDecode = vi.spyOn(
+				(
+					r.h.service as unknown as {
+						knownProtocols: { recordDecode(id: string): void }
+					}
+				).knownProtocols,
+				"recordDecode",
+			)
 			const jobId = await identifyAisTarget(r, 60_000)
 			await until(() =>
 				(firstTarget(r, jobId).trials ?? []).some(
@@ -191,6 +200,7 @@ describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
 				}),
 			])
 			expect(target.result).toMatchObject({ protocol: "ais" })
+			expect(recordDecode).toHaveBeenCalledTimes(1)
 			// The trust lookup got the decode's own frequency and the target's source.
 			expect(seen).toContainEqual(["ais", AIS_A, "rtl"])
 			// Real decodes at 161.975 MHz: evidence at that frequency; the second carries the H2 identity.

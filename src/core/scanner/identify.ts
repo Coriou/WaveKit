@@ -1994,7 +1994,8 @@ export class IdentifyRunner implements JobDriver {
 			)
 			if (!trial) continue
 			trial.outcome = "decoded"
-			this.countDecode(t)
+			// WG11 batch review R1 4: the scanner's ambient path records this evidence's decode
+			// (once, only where the observation accepted it); counting here too would double it.
 			t.decoded ??= { protocol: ev.protocol, identity }
 			this.confirmLive(observationId)
 			if (!this.deps.identify.exhaustive) {

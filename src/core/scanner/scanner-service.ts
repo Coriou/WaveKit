@@ -3263,8 +3263,24 @@ export class ScannerService extends EventEmitter {
 				e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
 			)
 		})
+		// WG11 batch review R1 4 (req 1.8): an ambient identity the observation accepted on a decoded
+		// discovery resets its miss count, once per discovery for this evidence item (identify's ambient
+		// trials leave the count to this path).
+		const counted = new Set<string>()
 		for (const live of candidates) {
-			this.applyEvidence(live, e.ev)
+			const before = live.acceptedIdentity
+			const accepted = this.applyEvidence(live, e.ev)
+			const discoveryId = live.discoveryId
+			if (
+				accepted &&
+				e.ev.identity &&
+				discoveryId &&
+				live.acceptedIdentity !== before &&
+				!counted.has(discoveryId)
+			) {
+				counted.add(discoveryId)
+				this.knownProtocols.recordDecode(discoveryId)
+			}
 			// WG7 req 1.5: identify jobs pairing this observation may decode an ambient trial.
 			for (const jobId of live.jobIds)
 				this.drivers.get(jobId)?.onAmbientEvidence?.(live.observationId, e.ev)

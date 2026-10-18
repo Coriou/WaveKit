@@ -5,6 +5,7 @@ import type {
 	IqReplayResult,
 	IqReplayTrial,
 } from "../../../../src/core/scanner/iq-capture-contract.js"
+import type { AmbientEvidenceEvent } from "../../../../src/core/scanner/probes/ambient.js"
 import type { KnownProtocolMemory } from "../../../../src/core/scanner/known-protocol-contract.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import {
@@ -1295,6 +1296,81 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 				expect(s.iqEngines.size).toBe(0)
 			} finally {
 				await svc.stop()
+			}
+		})
+	})
+
+	describe("an accepted ambient identity resets the known-protocol decay (WG11 batch review R1 4, req 1.8)", () => {
+		async function decayed() {
+			const { h, known, internals, live } = setup()
+			await h.service.start()
+			const store = (
+				h.service as unknown as {
+					store: Record<string, (...a: unknown[]) => unknown>
+				}
+			).store
+			vi.spyOn(store, "get" as never).mockReturnValue({
+				id: "d_1",
+				protocol: "dmr",
+				confidence: "decoded",
+			} as never)
+			vi.spyOn(store, "discoveryIdOf" as never).mockReturnValue("d_1" as never)
+			const append = vi
+				.spyOn(store, "appendObservationEvidence" as never)
+				.mockReturnValue(true as never)
+			vi.spyOn(store, "applyEvidence" as never).mockReturnValue(
+				undefined as never,
+			)
+			internals.live.set("t1", live())
+			// Two full-hold misses: the discovery has no known protocol for planning.
+			internals.knownProtocols.recordMiss("d_1", "dmr")
+			internals.knownProtocols.recordMiss("d_1", "dmr")
+			expect(internals.knownProtocols.known("d_1")).toBeNull()
+			known.recordDecode.mockClear()
+			const ambient = (identity: boolean) =>
+				(
+					h.service as unknown as {
+						onAmbientEvidence(e: AmbientEvidenceEvent): void
+					}
+				).onAmbientEvidence({
+					decoderId: "dsd",
+					sourceId: "rtl",
+					hz: CENTRE + 50_000,
+					ev: {
+						protocol: "dmr",
+						identity: identity ? { kind: "dmr-cc", value: "1" } : null,
+						metadata: {},
+						crcClean: true,
+						at: 0,
+						epoch: 1,
+						origin: "ambient",
+					},
+				})
+			return { h, known, internals, append, ambient }
+		}
+
+		it("a configured decoder's accepted DMR identity, no identify job: known again, recorded once", async () => {
+			const { h, known, internals, ambient } = await decayed()
+			try {
+				ambient(true)
+				expect(known.recordDecode).toHaveBeenCalledTimes(1)
+				expect(known.recordDecode).toHaveBeenCalledWith("d_1")
+				expect(internals.knownProtocols.known("d_1")).toBe("dmr")
+			} finally {
+				await h.service.stop()
+			}
+		})
+
+		it("evidence without an identity, or refused by the observation, records nothing", async () => {
+			const { h, known, internals, append, ambient } = await decayed()
+			try {
+				ambient(false)
+				append.mockReturnValue(false as never)
+				ambient(true)
+				expect(known.recordDecode).not.toHaveBeenCalled()
+				expect(internals.knownProtocols.known("d_1")).toBeNull()
+			} finally {
+				await h.service.stop()
 			}
 		})
 	})
