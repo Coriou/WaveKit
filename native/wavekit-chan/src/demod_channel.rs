@@ -110,6 +110,13 @@ pub struct DemodChannel {
     baseband_emitted: u64,
     held_i: Vec<f32>,
     held_q: Vec<f32>,
+    /// Ping-pong scratch for `run_front`. Cleared and reused so a block does not allocate.
+    front_i: Vec<f32>,
+    front_q: Vec<f32>,
+    stage_i: Vec<f32>,
+    stage_q: Vec<f32>,
+    out_i: Vec<f32>,
+    out_q: Vec<f32>,
     fir_i: Vec<f32>,
     fir_q: Vec<f32>,
     config: DemodConfig,
@@ -172,6 +179,12 @@ impl DemodChannel {
             baseband_emitted: 0,
             held_i: Vec::new(),
             held_q: Vec::new(),
+            front_i: Vec::new(),
+            front_q: Vec::new(),
+            stage_i: Vec::new(),
+            stage_q: Vec::new(),
+            out_i: Vec::new(),
+            out_q: Vec::new(),
             fir_i: Vec::new(),
             fir_q: Vec::new(),
             config,
@@ -266,10 +279,11 @@ impl DemodChannel {
                 saturated: 0,
             };
         }
-        let (bi, bq) = self.run_front(i, q);
+        self.run_front(i, q);
         self.fir_i.clear();
         self.fir_q.clear();
-        self.fir.process(&bi, &bq, &mut self.fir_i, &mut self.fir_q);
+        self.fir
+            .process(&self.out_i, &self.out_q, &mut self.fir_i, &mut self.fir_q);
         let filtered_i = std::mem::take(&mut self.fir_i);
         let filtered_q = std::mem::take(&mut self.fir_q);
         let (samples, saturated) = self.consume_baseband(&filtered_i, &filtered_q, out, events);
@@ -371,28 +385,60 @@ impl DemodChannel {
         }
     }
 
-    fn run_front(&mut self, i: &[f32], q: &[f32]) -> (Vec<f32>, Vec<f32>) {
-        let (mut ai, mut aq) = (i.to_vec(), q.to_vec());
-        self.nco.mix(&mut ai, &mut aq);
-        for stage in &mut self.stages {
-            let (mut bi, mut bq) = (Vec::new(), Vec::new());
-            stage.process(&ai, &aq, &mut bi, &mut bq);
-            ai = bi;
-            aq = bq;
+    /// Mix and decimate into [`Self::out_i`] / [`Self::out_q`]. Scratch capacity is kept.
+    fn run_front(&mut self, i: &[f32], q: &[f32]) {
+        self.front_i.clear();
+        self.front_q.clear();
+        self.front_i.extend_from_slice(i);
+        self.front_q.extend_from_slice(q);
+        self.nco.mix(&mut self.front_i, &mut self.front_q);
+
+        // `stages` is taken so the loop can mutably borrow one stage and the ping-pong
+        // buffers together. `mem::take` on a Vec moves the pointer and does not allocate.
+        let mut stages = std::mem::take(&mut self.stages);
+        let mut result_in_front = true;
+        for stage in &mut stages {
+            if result_in_front {
+                self.stage_i.clear();
+                self.stage_q.clear();
+                stage.process(
+                    &self.front_i,
+                    &self.front_q,
+                    &mut self.stage_i,
+                    &mut self.stage_q,
+                );
+            } else {
+                self.front_i.clear();
+                self.front_q.clear();
+                stage.process(
+                    &self.stage_i,
+                    &self.stage_q,
+                    &mut self.front_i,
+                    &mut self.front_q,
+                );
+            }
+            result_in_front = !result_in_front;
         }
-        self.held_i.extend_from_slice(&ai);
-        self.held_q.extend_from_slice(&aq);
+        self.stages = stages;
+
+        let (dec_i, dec_q): (&[f32], &[f32]) = if result_in_front {
+            (&self.front_i, &self.front_q)
+        } else {
+            (&self.stage_i, &self.stage_q)
+        };
+        self.held_i.extend_from_slice(dec_i);
+        self.held_q.extend_from_slice(dec_q);
         self.n_in += i.len() as u64;
         let due = (self.n_in as u128 * self.num as u128 / self.den as u128) as u64;
         let want = (due - self.baseband_emitted) as usize;
         let release = want.min(self.held_i.len());
-        let rest_i = self.held_i.split_off(release);
-        let rest_q = self.held_q.split_off(release);
+        self.out_i.clear();
+        self.out_q.clear();
+        self.out_i.extend_from_slice(&self.held_i[..release]);
+        self.out_q.extend_from_slice(&self.held_q[..release]);
+        self.held_i.drain(..release);
+        self.held_q.drain(..release);
         self.baseband_emitted += release as u64;
-        (
-            std::mem::replace(&mut self.held_i, rest_i),
-            std::mem::replace(&mut self.held_q, rest_q),
-        )
     }
 
     fn consume_baseband(
