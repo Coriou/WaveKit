@@ -11,6 +11,7 @@ import {
 	undecodedForProbe,
 	type JobRecord,
 	type JobRunnerDeps,
+	type LiveObservation,
 	type ProbeOutcome,
 } from "../../../../src/core/scanner/job-runner.js"
 import type { ProbeStatus } from "../../../../src/core/scanner/probes/probe-pool.js"
@@ -20,6 +21,7 @@ import type { Impact } from "../../../../src/core/scanner/types.js"
 import type { EngineEpoch } from "../../../../src/core/spectrum/spectrum-engine.js"
 import type { PendingEpoch } from "../../../../src/core/spectrum/types.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
+import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import {
 	makeHopPlan,
 	makeNormalisedSpec,
@@ -733,5 +735,77 @@ describe("job progress phase", () => {
 		expect(progress.replayQueueDepth).toBe(0)
 		expect(logs.text()).not.toContain("446.100")
 		expect(logs.text()).not.toContain("secret")
+	})
+
+	it("a hold whose track and probe are gone does not publish 0 Hz", async () => {
+		const probes: ProbeStatus[] = []
+		const { runner } = runnerHarness(undefined, {
+			activity: quietActivity,
+			probes: {
+				request: () => ({ deferred: "budget" as const }),
+				release: () => Promise.resolve(),
+				releaseJob: () => Promise.resolve(),
+				follow: () => undefined,
+				status: () => probes,
+				startLatencyMs: () => 400,
+			},
+		})
+		await runner.start()
+		await flush()
+		runner.onEpochStarted(epochAt(11, HOP0))
+		await flush()
+		const track = trackOf({
+			trackId: "t-hold",
+			sourceId: "rtl",
+			centreHz: 450_125_000,
+		})
+		const live: LiveObservation = {
+			observationId: "o-hold",
+			sourceId: "rtl",
+			trackId: track.trackId,
+			epoch: track.epoch,
+			jobIds: ["j_test"],
+			discoveryId: "d-hold",
+			startedAt: 0,
+			classification: {
+				class: "tdma-ms",
+				hypotheses: [],
+				tier: "spectral",
+			},
+			probeIds: new Set(),
+			lastActivityAt: 0,
+			lastIngestAt: 0,
+			lastTrack: track,
+			decoded: false,
+			encrypted: false,
+		}
+		runner.onTrack(live, track, true)
+		runner.onBlock(10_000_000, false)
+		await flush()
+		expect(runner.progress()).toMatchObject({
+			phase: "holding",
+			holding: {
+				discoveryId: "d-hold",
+				frequencyHz: 450_125_000,
+				trackId: "t-hold",
+			},
+		})
+		runner.onTrackClosed(track.trackId)
+		probes.push(
+			liveProbe({
+				trackId: track.trackId,
+				targetHz: 450_118_750,
+				discoveryId: "d-probe",
+			}),
+		)
+		expect(runner.progress().holding).toEqual({
+			discoveryId: "d-probe",
+			frequencyHz: 450_118_750,
+			trackId: "t-hold",
+		})
+		probes.length = 0
+		const gone = runner.progress()
+		expect(gone.phase).toBe("watching")
+		expect(gone.holding).toBeUndefined()
 	})
 })

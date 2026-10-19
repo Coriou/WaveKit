@@ -595,9 +595,8 @@ export class JobRunner implements JobDriver {
 	}
 
 	/**
-	 * Parked when the job is in-window, or when the scheduler says so. DT.2's
-	 * `SweepScheduler.parked` getter is not on this commit; a sweep is parked only
-	 * once that getter exists and is true.
+	 * Parked when the job is in-window, or when the scheduler says so. A sweep
+	 * counts as parked only when the scheduler exposes parked === true.
 	 */
 	private jobParked(): boolean {
 		if (!this.sweep) return true
@@ -634,9 +633,12 @@ export class JobRunner implements JobDriver {
 			}
 		}
 		const probe = raw.find(s => s.trackId === trackId)
+		// The held track and its probe are both gone. A made-up centre would
+		// publish a holding phase at 0 Hz; null lets the phase fall back.
+		if (!probe) return null
 		return {
-			discoveryId: probe?.discoveryId ?? null,
-			frequencyHz: probe?.targetHz ?? 0,
+			discoveryId: probe.discoveryId ?? null,
+			frequencyHz: probe.targetHz,
 			trackId,
 		}
 	}

@@ -98,7 +98,7 @@ describe("live demodulator tone", () => {
 				capsEmitter.off(event, listener)
 				return sourceManager
 			},
-			emitCaps(update: { centerFreq?: number }) {
+			emitCaps(update: { centerFreq?: number; gainTenthsDb?: number }) {
 				Object.assign(caps, update)
 				capsEmitter.emit("caps-changed", "rtl-pi", { ...caps })
 			},
@@ -135,13 +135,20 @@ describe("live demodulator tone", () => {
 		killSpy.mockRestore()
 	})
 
-	function retuneCentre(): void {
-		const source = (
+	function capsSource(): {
+		emitCaps(update: { centerFreq?: number; gainTenthsDb?: number }): void
+	} {
+		return (
 			demod as unknown as {
-				capsSource: { emitCaps(update: { centerFreq?: number }): void }
+				capsSource: {
+					emitCaps(update: { centerFreq?: number; gainTenthsDb?: number }): void
+				}
 			}
 		).capsSource
-		source.emitCaps({ centerFreq: 446_093_750 })
+	}
+
+	function retuneCentre(): void {
+		capsSource().emitCaps({ centerFreq: 446_093_750 })
 	}
 
 	it("omits tone when none has been reported", async () => {
@@ -278,5 +285,43 @@ describe("live demodulator tone", () => {
 		demod.noteTransmissionTone({ ...stale, generation: 2 })
 		await demod.start()
 		expect("tone" in demod.getStatus()).toBe(false)
+	})
+
+	it("keeps the tone when caps change without moving the centre", async () => {
+		await demod.start()
+		const tone = {
+			ctcssHz: 88.5,
+			dcs: null,
+			at: "2026-10-17T10:00:02.000Z",
+		}
+		demod.noteTransmissionTone(tone)
+		capsSource().emitCaps({ gainTenthsDb: 200 })
+		expect(demod.getStatus().tone).toEqual(tone)
+		capsSource().emitCaps({ centerFreq: 446_093_750, gainTenthsDb: 200 })
+		expect("tone" in demod.getStatus()).toBe(false)
+	})
+
+	it("ignores a tone note whose at is not a time", async () => {
+		await demod.start()
+		demod.noteTransmissionTone({
+			ctcssHz: 88.5,
+			dcs: null,
+			at: "not-a-time",
+		})
+		expect("tone" in demod.getStatus()).toBe(false)
+		for (const at of ["0", "2026-02-30T10:00:00.000Z", "2026-10-17"]) {
+			demod.noteTransmissionTone({ ctcssHz: 88.5, dcs: null, at })
+			expect("tone" in demod.getStatus()).toBe(false)
+		}
+		demod.noteTransmissionTone({
+			ctcssHz: 103.5,
+			dcs: null,
+			at: "2026-10-17T10:00:02.000Z",
+		})
+		expect(demod.getStatus().tone).toEqual({
+			ctcssHz: 103.5,
+			dcs: null,
+			at: "2026-10-17T10:00:02.000Z",
+		})
 	})
 })

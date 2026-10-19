@@ -29,6 +29,8 @@ import {
 	DCS_STANDARD_CODES,
 	IDENTIFY_ANALOG_LOOKBACK_MS,
 	IDENTIFY_WAIT_DEFAULT_MS,
+	IDENTIFY_WAIT_MAX_MS,
+	IDENTIFY_WAIT_MIN_MS,
 	SCANNER_AMBIENT_DECODER_PROTOCOL,
 	SCANNER_AMBIENT_PROTOCOLS,
 	SCANNER_AMBIENT_TARGET_TOLERANCE_HZ,
@@ -74,9 +76,11 @@ import type {
 	AnalogEvidenceTransmission,
 	IdentifyAnalogEvidence,
 } from "./identify-analog-contract.js"
-import type {
-	AnalogTrialMode,
-	AnalogTrialRunner,
+import {
+	ANALOG_TRIAL_FRAME_MS,
+	ANALOG_TRIAL_MAX_FRAMES,
+	type AnalogTrialMode,
+	type AnalogTrialRunner,
 } from "./scanner-redesign-contract.js"
 import {
 	JOB_STARTUP_CAP_MS,
@@ -136,6 +140,16 @@ const NARROW_DIGITAL_PROTOCOLS: ReadonlySet<ScannerProtocol> =
 export const IDENTIFY_KEEP_JOBS = 50
 /** WG11 req 6.8: how long a requested capture may take to finish once the live runs are over. */
 export const IDENTIFY_REPLAY_CAPTURE_WAIT_MS = 2000
+/**
+ * Wall-clock cap for one analog replay trial.
+ * ANALOG_TRIAL_MAX_FRAMES × ANALOG_TRIAL_FRAME_MS is the longest capture
+ * (IQ_CAPTURE_MAX_MS, 4 000 ms). ANALOG_REPLAY_TRIAL_SLACK_MS bounds process
+ * startup and the tone pass after the last statistics frame.
+ * 80 × 50 + 1 000 = 5 000.
+ */
+const ANALOG_REPLAY_TRIAL_SLACK_MS = 1_000
+export const ANALOG_REPLAY_TRIAL_DEADLINE_MS =
+	ANALOG_TRIAL_MAX_FRAMES * ANALOG_TRIAL_FRAME_MS + ANALOG_REPLAY_TRIAL_SLACK_MS
 /** The classifier's burst limit (Task 11): a track this short may be an OOK burst. */
 const BURST_MAX_BLOCKS = 4
 
@@ -1115,6 +1129,8 @@ interface TargetState {
 	analogStopped: Set<string>
 	/** In-flight analog replay trials. Aborted when the target ends or replans. */
 	analogAbort: AbortController[]
+	/** Per-trial wall-clock deadline (ANALOG_REPLAY_TRIAL_DEADLINE_MS from start). */
+	analogDue: Map<AbortController, number>
 }
 
 const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
@@ -1332,7 +1348,8 @@ export class IdentifyRunner implements JobDriver {
 	private step(now: number): void {
 		if (this.phase === "finished" || this.record.state !== "running") return
 		// The window moved off a target (operator retune, sweep takeover): end it now with what it has.
-		// Checked even while a promise is in flight, so a stalled analog replay cannot hide a retune.
+		// This runs before the inflight return. Artefact checks and probe releases take that slot;
+		// an analog replay trial does not.
 		let moved = false
 		for (const x of this.targets) {
 			if (FINAL.has(x.state) || !this.windowMoved(x)) continue
@@ -1445,6 +1462,7 @@ export class IdentifyRunner implements JobDriver {
 			analogArmed: new Set(),
 			analogStopped: new Set(),
 			analogAbort: [],
+			analogDue: new Map(),
 		}
 		this.targets.push(t)
 		this.emitTarget(t)
@@ -1491,15 +1509,18 @@ export class IdentifyRunner implements JobDriver {
 			const start = this.takeGate(t)
 			const signalStarted = this.signalStarted()
 			const signalDeadline = signalStarted + this.signalWaitMs()
-			// A start before the job, or still in the future, is not a transmission this tick.
+			// A start still in the future is not a transmission this tick. One already open when
+			// the job started is: the trial timeout counts from the job start, not the earlier gate.
+			const openedAt =
+				start === null ? null : Math.max(start.atMs, signalStarted)
 			if (
 				start !== null &&
-				start.atMs >= signalStarted &&
+				openedAt !== null &&
 				start.atMs <= now &&
-				start.atMs <= signalDeadline
+				openedAt <= signalDeadline
 			) {
 				t.gate = start
-				t.deadline = start.atMs + this.deps.identify.timeoutMs
+				t.deadline = openedAt + this.deps.identify.timeoutMs
 			} else if (now >= signalDeadline) {
 				this.endNoSignal(t)
 				return
@@ -1630,9 +1651,15 @@ export class IdentifyRunner implements JobDriver {
 
 	private signalWaitMs(): number {
 		const waitMs = this.deps.identify.waitMs
-		return typeof waitMs === "number" && Number.isFinite(waitMs)
-			? waitMs
-			: IDENTIFY_WAIT_DEFAULT_MS
+		const raw =
+			typeof waitMs === "number" && Number.isFinite(waitMs)
+				? waitMs
+				: IDENTIFY_WAIT_DEFAULT_MS
+		// The route already rejects values outside this span. Clamp here so an
+		// internal caller cannot wait forever or give the signal up immediately.
+		if (raw < IDENTIFY_WAIT_MIN_MS) return IDENTIFY_WAIT_MIN_MS
+		if (raw > IDENTIFY_WAIT_MAX_MS) return IDENTIFY_WAIT_MAX_MS
+		return raw
 	}
 
 	/** One lookup. A throw or a malformed value is no start; the value itself is never logged. */
@@ -1887,10 +1914,13 @@ export class IdentifyRunner implements JobDriver {
 			)
 				trial.outcome = "cancelled"
 		t.analogArmed.clear()
+		t.analogDue.clear()
 		this.requeueAnalog(t)
 		// Keep the evidence: decoder outcomes of completed runs, and the resolved track for the verdict.
+		// An analog replay trial shares the analog-fm/analog-am protocol with live audio. Copying it
+		// would start the replanned live-audio trial as already heard, instead of running.
 		for (const trial of t.trials)
-			if (COMPLETED.has(trial.outcome))
+			if (COMPLETED.has(trial.outcome) && trial.decoder !== "analog-demod")
 				t.done.set(trial.protocol, trial.outcome)
 		t.fallback = t.view ?? t.fallback
 		t.state = "waiting-for-signal"
@@ -2623,6 +2653,14 @@ export class IdentifyRunner implements JobDriver {
 		)
 	}
 
+	/** Abort analog replay trials whose own deadline has passed. The abort marks them cancelled. */
+	private expireAnalog(t: TargetState, now: number): void {
+		for (const ac of [...t.analogAbort]) {
+			const due = t.analogDue.get(ac)
+			if (due !== undefined && now >= due) ac.abort()
+		}
+	}
+
 	/** nfm when the plan includes analog-fm (alone or with AM); am only when AM is the analog plan. */
 	private analogChoice(
 		t: TargetState,
@@ -2660,6 +2698,7 @@ export class IdentifyRunner implements JobDriver {
 		trial.outcome = "running"
 		const ac = new AbortController()
 		t.analogAbort.push(ac)
+		t.analogDue.set(ac, this.deps.now() + ANALOG_REPLAY_TRIAL_DEADLINE_MS)
 		const mode = choice.mode
 		let settled = false
 		const finish = (raw: unknown, failed: boolean): void => {
@@ -2667,6 +2706,7 @@ export class IdentifyRunner implements JobDriver {
 			settled = true
 			const index = t.analogAbort.indexOf(ac)
 			if (index >= 0) t.analogAbort.splice(index, 1)
+			t.analogDue.delete(ac)
 			if (ac.signal.aborted || this.disposed) {
 				if (
 					!this.disposed &&
@@ -2857,7 +2897,7 @@ export class IdentifyRunner implements JobDriver {
 	/**
 	 * After the live runs: claim the requested capture once it finished, then one replay step per tick
 	 * (a probe run, or the analog trial that shares the queue). True while the target must keep waiting.
-	 * A decode that stops the probes still runs analog items already queued.
+	 * A decode that stops the probes skips every remaining probe and analog item.
 	 */
 	private replayStep(t: TargetState, now: number): boolean {
 		const port = this.deps.iqCapture
@@ -2920,11 +2960,18 @@ export class IdentifyRunner implements JobDriver {
 		}
 		rp.queue ??= this.replayQueue(t)
 		// Req 5.5: one analog trial at a time, and never beside a replay probe.
-		if (this.analogReplayOpen(t)) return true
+		// Each trial's own deadline is ANALOG_REPLAY_TRIAL_DEADLINE_MS from its start.
+		// Past that, abort it: cancelled, no match and no miss, so the target can finish
+		// and release the capture.
+		if (this.analogReplayOpen(t)) {
+			this.expireAnalog(t, now)
+			if (this.analogReplayOpen(t)) return true
+		}
 		while (rp.queue.length > 0) {
 			const next = rp.queue.shift()
 			if (!next) break
 			if (next.kind === "analog") {
+				if (stopProbes) continue
 				if (this.startAnalogItem(t, next.captureId) === "running") return true
 				continue
 			}

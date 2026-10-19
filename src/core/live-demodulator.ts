@@ -371,6 +371,8 @@ export class LiveDemodulator extends EventEmitter {
 	} | null = null
 	private channelGeneration = 0
 	private channelSinceMs = 0
+	/** Centre frequency of the channel the remembered tone belongs to. */
+	private toneCentreHz: number | undefined
 	/**
 	 * `stop()` won over an in-flight `start()`. The handshake must not adopt a
 	 * run or bring HTTP up after `stop()` has begun.
@@ -658,6 +660,7 @@ export class LiveDemodulator extends EventEmitter {
 				const sourceId = this.resolveSourceId()
 				if (sourceId) {
 					this.activeSourceId = sourceId
+					this.toneCentreHz = this.sourceManager.getCaps(sourceId)?.centerFreq
 					this.attachBranch(sourceId)
 				}
 			}
@@ -766,7 +769,7 @@ export class LiveDemodulator extends EventEmitter {
 
 	/**
 	 * WG12 req 6.4: remember the current or last closed transmission's tone.
-	 * Off-table CTCSS or DCS becomes null. An empty or over-long `at` is ignored.
+	 * Off-table CTCSS or DCS becomes null. An empty, over-long, or non-time `at` is ignored.
 	 * `null` clears the remembered tone and does not start a new channel.
 	 * Stop, a centre retune, and an offset or source change do both.
 	 *
@@ -794,7 +797,8 @@ export class LiveDemodulator extends EventEmitter {
 		if (
 			typeof tone.at !== "string" ||
 			tone.at.length === 0 ||
-			tone.at.length > 64
+			tone.at.length > 64 ||
+			!isCanonicalIsoTime(tone.at)
 		)
 			return
 		if (!this.toneOnCurrentChannel(tone)) return
@@ -1170,11 +1174,19 @@ export class LiveDemodulator extends EventEmitter {
 	 */
 	private subscribeToSourceCapsChanges(): void {
 		if (this.capsChangedHandler) return
+		const sourceId = this.activeSourceId
+		this.toneCentreHz = sourceId
+			? this.sourceManager.getCaps(sourceId)?.centerFreq
+			: undefined
 
 		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
 			if (sourceId !== this.activeSourceId) return
 			// WG12 req 6.4: a centre retune leaves the channel even when the DSP stays up.
-			this.clearChannelTone()
+			// Gain, rate and format updates keep the tone of the transmission still on frequency.
+			if (caps.centerFreq !== this.toneCentreHz) {
+				this.toneCentreHz = caps.centerFreq
+				this.clearChannelTone()
+			}
 			// Retunes can retain the DSP pipeline but invalidate its floor estimate.
 			// WG9 req 5.6: the reset stays; the floor it drops is remembered so the
 			// first block after it seeds from the lower of that and the new power.
@@ -1934,6 +1946,12 @@ function copyChannelTone(tone: {
 				: { code: tone.dcs.code, polarity: tone.dcs.polarity },
 		at: tone.at,
 	}
+}
+
+/** A canonical `toISOString()` time: rejects non-ISO input and impossible calendar dates. */
+function isCanonicalIsoTime(at: string): boolean {
+	const ms = Date.parse(at)
+	return Number.isFinite(ms) && new Date(ms).toISOString() === at
 }
 
 /** An off-table or malformed DCS code is no tone (WG12 req 6.4). */

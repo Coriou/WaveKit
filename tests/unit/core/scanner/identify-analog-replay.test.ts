@@ -9,6 +9,7 @@ import type {
 } from "@wavekit/api-types"
 import type { Logger } from "../../../../src/utils/logger.js"
 import {
+	ANALOG_REPLAY_TRIAL_DEADLINE_MS,
 	IdentifyRunner,
 	identifyScores,
 	normaliseIdentify,
@@ -42,7 +43,11 @@ import {
 	trackOf,
 	viewOf,
 } from "../../../mocks/scanner/identify-fakes.js"
-import { flushAsync, poolHarness } from "../../../mocks/scanner/probe-fakes.js"
+import {
+	flushAsync,
+	linkLine,
+	poolHarness,
+} from "../../../mocks/scanner/probe-fakes.js"
 import { FakeMemory, FakePort } from "./identify-heard-fakes.js"
 
 const FINAL = new Set(["identified", "candidate", "unidentified"])
@@ -185,6 +190,7 @@ function replayHarness(opts: {
 		settle,
 		last: () => events.at(-1),
 		trials: (): ScannerIdentifyTrial[] => events.at(-1)?.trials ?? [],
+		held: (): string[] => [...claimed.keys()],
 		destroy: async () => {
 			await runner.dispose()
 			await pool.pool.destroy()
@@ -842,6 +848,164 @@ describe("IdentifyRunner analog replay trial (WG12 ID.4)", () => {
 			)
 		} finally {
 			spy.mockRestore()
+		}
+	})
+
+	it("cancels a stalled analog replay at its deadline and releases the capture", async () => {
+		let signal: AbortSignal | undefined
+		const mem = new FakeMemory(
+			new Map([["d_1", { protocol: "analog-fm", confidence: "decoded" }]]),
+		)
+		const h = replayHarness({
+			protocols: ["analog-fm"],
+			captures: [capture("cap-stall", "commanded")],
+			knownProtocols: mem,
+			discovery: {
+				id: "d_1",
+				protocol: "analog-fm",
+				confidence: "decoded",
+			} as Discovery,
+			analogTrial: {
+				run: (_captureId, _mode, next) => {
+					signal = next
+					return new Promise(() => undefined)
+				},
+			},
+		})
+		try {
+			await h.runner.start()
+			h.tracks.push(viewOf(analogTrack()))
+			let startedAt: number | null = null
+			for (let i = 0; i < 20 && startedAt === null; i++) {
+				await h.advance(100)
+				const trial = h.trials().find(t => t.decoder === "analog-demod")
+				if (trial?.outcome === "running") startedAt = h.pool.clock.now
+			}
+			expect(startedAt).not.toBeNull()
+			const start = startedAt ?? 0
+			expect(h.held()).toEqual(["cap-stall"])
+			expect(h.record.state).toBe("running")
+			h.pool.clock.now = start + ANALOG_REPLAY_TRIAL_DEADLINE_MS - 1
+			h.runner.tick(h.pool.clock.now)
+			h.pool.pool.pump()
+			await flushAsync()
+			await flushAsync()
+			expect(h.last()?.state).toBe("trying")
+			expect(h.trials().find(t => t.decoder === "analog-demod")?.outcome).toBe(
+				"running",
+			)
+			expect(signal?.aborted).toBe(false)
+			expect(h.held()).toEqual(["cap-stall"])
+			expect(h.last()?.result?.ended).not.toBe("window-moved")
+			h.pool.clock.now = start + ANALOG_REPLAY_TRIAL_DEADLINE_MS
+			h.runner.tick(h.pool.clock.now)
+			h.pool.pool.pump()
+			await flushAsync()
+			await flushAsync()
+			expect(h.trials().find(t => t.decoder === "analog-demod")?.outcome).toBe(
+				"cancelled",
+			)
+			expect(h.last()?.result?.analog).toBeUndefined()
+			expect(h.last()?.result?.ended).not.toBe("window-moved")
+			expect(FINAL.has(h.last()?.state ?? "")).toBe(true)
+			expect(signal?.aborted).toBe(true)
+			expect(h.held()).toEqual([])
+			expect(mem.calls.filter(c => c.startsWith("miss:"))).toEqual([])
+			await h.advance(100)
+			expect(h.record.state).toBe("completed")
+		} finally {
+			await h.destroy()
+		}
+	})
+
+	it("a live decode skips analog replay still queued for the same plan", async () => {
+		const calls: string[] = []
+		const h = replayHarness({
+			protocols: ["dmr", "analog-fm"],
+			captures: [capture("cap-dmr", "commanded")],
+			analogTrial: {
+				run: captureId => {
+					calls.push(captureId)
+					return new Promise(() => undefined)
+				},
+			},
+		})
+		try {
+			await h.runner.start()
+			h.tracks.push(viewOf(trackOf({ acf30: -0.94, acf60: 0.99, blocks: 20 })))
+			for (let i = 0; i < 12 && h.pool.decoders.created.size === 0; i++)
+				await h.advance(100)
+			expect(h.pool.decoders.created.size).toBeGreaterThan(0)
+			const id = [...h.pool.decoders.created.values()][0]?.id ?? ""
+			h.pool.decoders.emitLink(id, linkLine(1, h.pool.clock.now))
+			h.pool.decoders.emitLink(id, linkLine(1, h.pool.clock.now + 30))
+			await flushAsync()
+			expect(h.trials().find(t => t.protocol === "dmr")?.outcome).toBe(
+				"decoded",
+			)
+			expect(FINAL.has(h.last()?.state ?? "")).toBe(false)
+			await h.advance(100)
+			expect(calls).toEqual([])
+			expect(h.trials().some(t => t.decoder === "analog-demod")).toBe(false)
+			expect(h.last()?.result?.analog).toBeUndefined()
+			expect(h.last()?.state).toBe("identified")
+			await h.advance(100)
+			expect(h.record.state).toBe("completed")
+		} finally {
+			await h.destroy()
+		}
+	})
+
+	it("an in-window restart does not reuse an analog replay outcome as live audio", async () => {
+		const h = replayHarness({
+			protocols: ["dmr", "aprs", "analog-fm"],
+			analogEvidence: new FakePort(),
+			captures: null,
+		})
+		try {
+			await h.runner.start()
+			h.tracks.push(viewOf(trackOf({ acf30: -0.94, acf60: 0.99, blocks: 20 })))
+			for (let i = 0; i < 12 && h.pool.decoders.created.size === 0; i++)
+				await h.advance(100)
+			expect(h.trials().find(t => t.decoder === "live-audio")?.outcome).toBe(
+				"running",
+			)
+			const internal = h.runner as unknown as {
+				targets: { trials: ScannerIdentifyTrial[] }[]
+			}
+			internal.targets[0]?.trials.push({
+				protocol: "analog-fm",
+				decoder: "analog-demod",
+				mode: "nfm",
+				transport: "replay",
+				outcome: "no-sync",
+			})
+			h.pool.engine.setEpoch(2, 446_100_000)
+			await h.pool.pool.onEpoch("rtl", 2, 446_100_000)
+			await flushAsync()
+			await h.advance(100)
+			expect(h.last()?.state).toBe("waiting-for-signal")
+			h.tracks.length = 0
+			h.tracks.push(
+				viewOf(
+					trackOf({
+						trackId: "t2",
+						epoch: 2,
+						acf30: -0.94,
+						acf60: 0.99,
+						blocks: 20,
+					}),
+				),
+			)
+			await h.advance(100)
+			expect(
+				h
+					.trials()
+					.find(t => t.decoder === "live-audio" && t.protocol === "analog-fm")
+					?.outcome,
+			).toBe("running")
+		} finally {
+			await h.destroy()
 		}
 	})
 })

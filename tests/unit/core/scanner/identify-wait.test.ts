@@ -2,7 +2,11 @@
 import { Writable } from "node:stream"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
-import { IDENTIFY_WAIT_DEFAULT_MS } from "@wavekit/api-types"
+import {
+	IDENTIFY_WAIT_DEFAULT_MS,
+	IDENTIFY_WAIT_MAX_MS,
+	IDENTIFY_WAIT_MIN_MS,
+} from "@wavekit/api-types"
 import type { ScannerIdentifyEventData } from "@wavekit/api-types"
 import type { Logger } from "../../../../src/utils/logger.js"
 import {
@@ -235,6 +239,73 @@ describe("IdentifyRunner waits for a gated transmission (WG12 ID.1)", () => {
 			expect(h.clock.now).toBe(started + 1000)
 		} finally {
 			await h.destroy()
+		}
+	})
+
+	it("clamps waitMs below the minimum to IDENTIFY_WAIT_MIN_MS", async () => {
+		const h = waitHarness({
+			request: { timeoutMs: 15_000, waitUntilSignal: true, waitMs: 0 },
+			gatedAt: () => null,
+			tracks: [dmrTrack()],
+		})
+		try {
+			await h.runner.start()
+			const started = h.record.startedAt ?? 0
+			await h.advanceTo(started + 10)
+			await h.advanceTo(started + IDENTIFY_WAIT_MIN_MS - 1)
+			expect(h.last()?.state).toBe("waiting-for-signal")
+			expect(h.last()?.result?.ended).not.toBe("no-signal")
+			await h.advanceTo(started + IDENTIFY_WAIT_MIN_MS)
+			expect(h.last()?.state).toBe("unidentified")
+			expect(h.last()?.result?.ended).toBe("no-signal")
+			expect(h.clock.now).toBe(started + IDENTIFY_WAIT_MIN_MS)
+		} finally {
+			await h.destroy()
+		}
+	})
+
+	it("clamps waitMs above the maximum to IDENTIFY_WAIT_MAX_MS", async () => {
+		const h = waitHarness({
+			request: {
+				timeoutMs: 2000,
+				waitUntilSignal: true,
+				waitMs: IDENTIFY_WAIT_MAX_MS,
+			},
+			gatedAt: () => null,
+		})
+		const past = waitHarness({
+			request: {
+				timeoutMs: 2000,
+				waitUntilSignal: true,
+				waitMs: IDENTIFY_WAIT_MAX_MS + 60_000,
+			},
+			gatedAt: () => null,
+		})
+		try {
+			await h.runner.start()
+			const started = h.record.startedAt ?? 0
+			await h.advanceTo(started + 10)
+			await h.advanceTo(started + IDENTIFY_WAIT_MAX_MS - 1)
+			expect(h.last()?.state).toBe("waiting-for-signal")
+			expect(h.last()?.result?.ended).not.toBe("no-signal")
+			await h.advanceTo(started + IDENTIFY_WAIT_MAX_MS)
+			expect(h.last()?.state).toBe("unidentified")
+			expect(h.last()?.result?.ended).toBe("no-signal")
+			expect(h.clock.now).toBe(started + IDENTIFY_WAIT_MAX_MS)
+
+			await past.runner.start()
+			const began = past.record.startedAt ?? 0
+			await past.advanceTo(began + 10)
+			await past.advanceTo(began + IDENTIFY_WAIT_MAX_MS - 1)
+			expect(past.last()?.state).toBe("waiting-for-signal")
+			expect(past.last()?.result?.ended).not.toBe("no-signal")
+			await past.advanceTo(began + IDENTIFY_WAIT_MAX_MS)
+			expect(past.last()?.state).toBe("unidentified")
+			expect(past.last()?.result?.ended).toBe("no-signal")
+			expect(past.clock.now).toBe(began + IDENTIFY_WAIT_MAX_MS)
+		} finally {
+			await h.destroy()
+			await past.destroy()
 		}
 	})
 
@@ -582,30 +653,37 @@ describe("IdentifyRunner waits for a gated transmission (WG12 ID.1)", () => {
 		}
 	})
 
-	it("rejects a gate timestamp before the job start", async () => {
+	it("accepts a transmission already open when the job started and times out from the job start", async () => {
 		const cell = { started: 0 }
 		const h = waitHarness({
 			request: {
 				protocols: ["dmr"],
 				timeoutMs: 1000,
 				waitUntilSignal: true,
-				waitMs: 5000,
+				waitMs: 20_000,
 			},
 			tracks: [dmrTrack()],
-			gatedAt: () => ({ startSample: 3, atMs: cell.started - 1 }),
+			gatedAt: () => ({ startSample: 3, atMs: cell.started - 5000 }),
 		})
 		try {
 			await h.runner.start()
 			cell.started = h.record.startedAt ?? 0
 			await h.advanceTo(cell.started + 10)
+			await h.advanceTo(cell.started + 50)
+			expect(h.decoders.created.size).toBeGreaterThan(0)
+			expect(h.last()?.state).toBe("trying")
+			await h.advanceTo(cell.started + 999)
+			expect(h.last()?.state).toBe("trying")
+			expect(
+				h.last()?.trials.find(t => t.protocol === "dmr")?.outcome,
+			).not.toBe("cancelled")
 			await h.advanceTo(cell.started + 1000)
-			expect(h.last()?.state).toBe("waiting-for-signal")
-			expect(h.decoders.created.size).toBe(0)
-			expect(h.last()?.result?.ended).not.toBe("no-signal")
-			await h.advanceTo(cell.started + 5000)
-			expect(h.last()?.state).toBe("unidentified")
-			expect(h.last()?.result?.ended).toBe("no-signal")
-			expect(h.decoders.created.size).toBe(0)
+			expect(h.last()?.trials.find(t => t.protocol === "dmr")?.outcome).toBe(
+				"cancelled",
+			)
+			expect(h.last()?.state).not.toBe("trying")
+			expect(h.last()?.state).not.toBe("waiting-for-signal")
+			expect(h.clock.now).toBe(cell.started + 1000)
 		} finally {
 			await h.destroy()
 		}
