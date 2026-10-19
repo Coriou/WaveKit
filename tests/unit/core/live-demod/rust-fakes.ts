@@ -89,6 +89,8 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 	signals: NodeJS.Signals[] = []
 	controlText = ""
 	audio: Socket | null = null
+	/** Runs after the `opened` line is written, still inside that write. */
+	onOpenedWritten: (() => void) | null = null
 	private server: Server | null = null
 	private socketDir: string | null = null
 	private opening = false
@@ -212,6 +214,7 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 			}),
 		)
 		this.stdout.write(`${opened}\n${this.openedChunkSuffix}`)
+		this.onOpenedWritten?.()
 		if (this.autoExit) process.nextTick(() => this.exit(1, null))
 	}
 }

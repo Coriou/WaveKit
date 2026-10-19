@@ -41,12 +41,16 @@ const WRITE_CHUNK: usize = 1 << 16;
 /// connects costs ~20 wakeups/s, while a prompt client is still taken within a few ms.
 const ACCEPT_POLL: (Duration, Duration) = (Duration::from_millis(5), Duration::from_millis(50));
 
+/// `id`, detail, and the `rejected.reasonCode`. A squelch line that fails to parse is
+/// `squelch-rejected`; every other malformed line stays `channel-request-invalid`.
+type ControlError = (String, String, &'static str);
+
 /// Bounded main channel (≤ 2 input blocks in flight). ClientGone is NOT on it: a writer must never
 /// block on a channel the stdin thread may have filled while the main thread waits on that writer.
 enum Msg {
     Input(Vec<u8>),
     InputEof,
-    Control(Result<ObservedRequest, (String, String)>),
+    Control(Result<ObservedRequest, ControlError>),
     ControlEof,
 }
 
@@ -623,7 +627,8 @@ impl Runtime {
             },
         };
         if let Some(detail) = rejected {
-            self.reject(&id, "channel-request-invalid", detail);
+            // Not `channel-request-invalid`: the TS demod attributes that code to a retune.
+            self.reject(&id, "squelch-rejected", detail);
         }
     }
 
@@ -1038,11 +1043,31 @@ fn read_control<R: BufRead>(
     mut send: impl FnMut(Result<Request, (String, String)>) -> bool,
 ) -> std::io::Result<()> {
     read_control_mode(r, false, |req| {
-        send(req.map(|r| match r {
-            ObservedRequest::Ordinary(r) => r,
-            _ => unreachable!("default parser refuses observed envelope"),
-        }))
+        send(match req {
+            Ok(ObservedRequest::Ordinary(r)) => Ok(r),
+            Ok(_) => unreachable!("default parser refuses observed envelope"),
+            Err((id, detail, _reason)) => Err((id, detail)),
+        })
     })
+}
+
+/// Reason code for a control line that did not parse. Protocol events stay at `v: 1`.
+fn bad_line_reason(line: &str) -> &'static str {
+    match serde_json::from_str::<Value>(line) {
+        Ok(value) if value.get("type").and_then(Value::as_str) == Some("squelch") => {
+            "squelch-rejected"
+        }
+        _ => "channel-request-invalid",
+    }
+}
+
+fn parse_control_line(line: &str, observed: bool) -> Result<ObservedRequest, ControlError> {
+    let parsed = if observed {
+        parse_observed_request(line)
+    } else {
+        parse_request(line).map(ObservedRequest::Ordinary)
+    };
+    parsed.map_err(|(id, detail)| (id, detail, bad_line_reason(line)))
 }
 /// One control line, or the fact that it was longer than [`MAX_CONTROL_LINE_BYTES`].
 enum CappedLine {
@@ -1124,7 +1149,7 @@ fn discard_until_newline<R: BufRead>(r: &mut R) -> std::io::Result<()> {
 fn read_control_mode<R: BufRead>(
     mut r: R,
     observed: bool,
-    mut send: impl FnMut(Result<ObservedRequest, (String, String)>) -> bool,
+    mut send: impl FnMut(Result<ObservedRequest, ControlError>) -> bool,
 ) -> std::io::Result<()> {
     loop {
         let raw = match read_capped_line(&mut r)? {
@@ -1133,6 +1158,7 @@ fn read_control_mode<R: BufRead>(
                 let req = Err((
                     String::new(),
                     format!("control line exceeds {MAX_CONTROL_LINE_BYTES} bytes"),
+                    "channel-request-invalid",
                 ));
                 if !send(req) {
                     return Ok(());
@@ -1143,9 +1169,12 @@ fn read_control_mode<R: BufRead>(
         };
         let req = match std::str::from_utf8(&raw) {
             Ok(l) if l.trim().is_empty() => continue,
-            Ok(l) if observed => parse_observed_request(l),
-            Ok(l) => parse_request(l).map(ObservedRequest::Ordinary),
-            Err(e) => Err((String::new(), format!("invalid UTF-8: {e}"))),
+            Ok(l) => parse_control_line(l, observed),
+            Err(e) => Err((
+                String::new(),
+                format!("invalid UTF-8: {e}"),
+                "channel-request-invalid",
+            )),
         };
         if !send(req) {
             return Ok(());
@@ -1252,7 +1281,7 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
                     return code;
                 }
             }
-            Ok(Msg::Control(Err((id, detail)))) => rt.on_bad_request(&id, detail),
+            Ok(Msg::Control(Err((id, detail, reason)))) => rt.reject(&id, reason, detail),
             // The parent closed control without `shutdown` (it died, or is stopping): same as shutdown.
             Ok(Msg::ControlEof) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return rt.shutdown()
@@ -2360,11 +2389,36 @@ mod tests {
         )
         .unwrap();
         r.on_request(on_iq);
+        assert_eq!(last(&events)["reasonCode"], "squelch-rejected");
         assert_eq!(last(&events)["detail"], "not a demod channel");
         assert_eq!(r.channels["iq"].out_samples, iq_samples);
         r.on_input(&[128u8; 960]);
         assert!(r.channels["iq"].out_samples > iq_samples);
         assert!(r.channels["dm"].out_samples > dm_samples);
         r.on_eof_no_exit_for_test();
+    }
+
+    /// A squelch line that fails to parse is `squelch-rejected`, same as a squelch the
+    /// channel refuses. A retune parse failure stays `channel-request-invalid`. `v` stays 1.
+    #[test]
+    fn malformed_squelch_parse_is_squelch_rejected() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let malformed = r#"{"v":1,"type":"squelch","id":"dm","mode":"power","hangMs":-1}"#;
+        let Err((id, detail, reason)) = parse_control_line(malformed, false) else {
+            panic!("negative hangMs must fail parse");
+        };
+        assert_eq!(reason, "squelch-rejected");
+        r.reject(&id, reason, detail);
+        let rejected = last(&ev);
+        assert_eq!(rejected["v"], 1);
+        assert_eq!(rejected["type"], "rejected");
+        assert_eq!(rejected["id"], "dm");
+        assert_eq!(rejected["reasonCode"], "squelch-rejected");
+        let bad_retune = r#"{"v":1,"type":"retune","id":"dm","bandwidthHz":-5}"#;
+        let Err((_, _, retune_reason)) = parse_control_line(bad_retune, false) else {
+            panic!("out-of-range bandwidth must fail parse");
+        };
+        assert_eq!(retune_reason, "channel-request-invalid");
     }
 }

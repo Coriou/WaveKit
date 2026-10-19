@@ -273,6 +273,13 @@ function isActivityClientMessage(data: unknown): boolean {
 	return type === "activity:subscribe" || type === "activity:unsubscribe"
 }
 
+/** Live-audio clients never receive the native demod binary path. */
+function liveAudioConfigForClient(config: LiveDemodConfig): LiveDemodConfig {
+	const client = { ...config }
+	delete client.chanBinaryPath
+	return client
+}
+
 /**
  * WebSocketEventBroadcaster - Manages WebSocket connections and broadcasts events.
  *
@@ -1012,7 +1019,10 @@ export class WebSocketEventBroadcaster {
 	broadcastLiveAudioStatus(status: LiveDemodStatus): void {
 		this.broadcast("live-audio", {
 			type: "live-audio:status",
-			data: status,
+			data: {
+				...status,
+				config: liveAudioConfigForClient(status.config),
+			},
 		})
 	}
 
@@ -1063,7 +1073,7 @@ export class WebSocketEventBroadcaster {
 	broadcastLiveAudioConfig(config: LiveDemodConfig): void {
 		this.broadcast("live-audio", {
 			type: "live-audio:config",
-			data: config,
+			data: liveAudioConfigForClient(config),
 		})
 	}
 

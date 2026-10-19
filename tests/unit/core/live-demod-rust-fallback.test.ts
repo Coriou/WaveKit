@@ -3,7 +3,11 @@ import type { MockInstance } from "vitest"
 import * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
-import { RUST_RETUNE_REJECTED_LOG } from "../../../src/core/live-demod/rust-run.js"
+import { HANDSHAKE_EARLY_MAX } from "../../../src/core/live-demod/rust-engine.js"
+import {
+	RUST_RETUNE_REJECTED_LOG,
+	SQUELCH_REJECTED_REASON,
+} from "../../../src/core/live-demod/rust-run.js"
 import { RUST_FALLBACK_LOG } from "../../../src/core/live-demod/select-engine.js"
 import type { LiveDemodulator as LiveDemodulatorType } from "../../../src/core/live-demodulator.js"
 import {
@@ -720,13 +724,12 @@ describe("live demod rust fallback and retune", () => {
 		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
 			message => message["type"] === "retune",
 		)
+		expect(demod?.getStatus().config.gain).toBe(2)
 		expect(retunes).toEqual([
 			expect.objectContaining({ audio: { gain: 4 } }),
-			expect.objectContaining({
-				centerHz: 1000,
-				audio: expect.objectContaining({ gain: 4 }) as unknown,
-			}),
+			expect.objectContaining({ centerHz: 1000 }),
 		])
+		expect(retunes[1]).not.toHaveProperty("audio")
 		expect(demod?.isSquelchOpen()).toBe(false)
 		const warns = () =>
 			lines.filter(line => line["msg"] === RUST_RETUNE_REJECTED_LOG)
@@ -749,7 +752,7 @@ describe("live demod rust fallback and retune", () => {
 			message => message["type"] === "open",
 		)
 		expect(open?.["centerHz"]).toBe(1000)
-		expect(open?.["audio"]).toMatchObject({ gain: 4 })
+		expect(open?.["audio"]).toMatchObject({ gain: 2 })
 	})
 
 	it("sends the queued retune after the in-flight one is rejected", async () => {
@@ -915,6 +918,130 @@ describe("live demod rust fallback and retune", () => {
 		expect(demod?.carrierBlocks()).toBe(1)
 	})
 
+	it("does not let a startup retuned acknowledge a retune requested afterwards", async () => {
+		openedChunkSuffix = `${JSON.stringify(demodEvent("retuned", { atOutputSample: 0 }))}\n`
+		const port = await freePort()
+		const config = LiveDemodConfigSchema.parse({
+			enabled: true,
+			sourceId: "rtl-pi",
+			httpPort: port,
+			engine: "rust",
+			chanBinaryPath: "do-not-log-binary",
+			modulation: "nfm",
+			bandwidth: 12_500,
+			squelch: 0,
+			audioFormat: "s16le",
+		})
+		demod = new LiveDemodulatorClass(
+			capturingLogger().logger,
+			source(),
+			createFakeFanout(),
+			config,
+			{ httpHost: "127.0.0.1" },
+		)
+		let requested = false
+		demod.on("squelch-changed", () => {
+			if (requested) return
+			requested = true
+			void demod?.reconfigure({ offsetHz: 1000 }).catch(() => undefined)
+		})
+		await demod.start()
+		expect(requested).toBe(true)
+		expect(demod.getStatus().config.offsetHz).toBe(1000)
+		expect(demod.isSquelchOpen()).toBe(false)
+		const retunes = () =>
+			controlMessages(channels[0]?.controlText ?? "").filter(
+				message => message["type"] === "retune",
+			)
+		expect(retunes()).toEqual([expect.objectContaining({ centerHz: 1000 })])
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 480 }))
+		expect(demod.isSquelchOpen()).toBe(true)
+		expect(demod.getStatus().config.offsetHz).toBe(1000)
+		expect(retunes()).toHaveLength(1)
+	})
+
+	it("keeps only the newest startup metrics and clears them after apply", async () => {
+		const stale = -90
+		const kept = -30
+		const lines: string[] = []
+		for (let i = 0; i < 4; i++) {
+			lines.push(
+				JSON.stringify(
+					demodEvent("metrics", {
+						atOutputSample: 480 * (i + 1),
+						powerDbfs: [stale],
+						quietingDb: [null],
+					}),
+				),
+			)
+		}
+		for (let i = 0; i < HANDSHAKE_EARLY_MAX; i++) {
+			lines.push(
+				JSON.stringify(
+					demodEvent("metrics", {
+						atOutputSample: 480 * (i + 5),
+						powerDbfs: [kept],
+						quietingDb: [null],
+					}),
+				),
+			)
+		}
+		openedChunkSuffix = `${lines.join("\n")}\n`
+		await boot({
+			squelch: -40,
+			modulation: "nfm",
+			squelchMode: "manual",
+		})
+		expect(demod?.getStatus().noiseFloorDbfs).toBe(kept)
+		expect(demod?.getStatus().channelPowerDbfs).toBe(kept)
+		channels[0]?.emitLine(
+			demodEvent("metrics", {
+				atOutputSample: 480 * 40,
+				powerDbfs: [-25],
+				quietingDb: [null],
+			}),
+		)
+		const floor = demod?.getStatus().noiseFloorDbfs
+		expect(floor).toBeGreaterThan(-40)
+		expect(floor).not.toBe(stale)
+		expect(demod?.getStatus().channelPowerDbfs).toBe(-25)
+	})
+
+	it("rolls a rejected gain retune back so the same gain can be sent again", async () => {
+		await boot({ squelch: 0 })
+		const gains: number[] = []
+		demod?.on("config-changed", (...args: unknown[]) => {
+			const config = args[0]
+			if (
+				typeof config !== "object" ||
+				config === null ||
+				!("gain" in config) ||
+				typeof config.gain !== "number"
+			)
+				return
+			gains.push(config.gain)
+		})
+		await demod?.reconfigure({ gain: 4 })
+		expect(demod?.getStatus().config.gain).toBe(4)
+		expect(demod?.isSquelchOpen()).toBe(true)
+		expect(gains).toEqual([4])
+		rejectRetune()
+		expect(demod?.getStatus().config.gain).toBe(2)
+		expect(demod?.isSquelchOpen()).toBe(true)
+		expect(gains).toEqual([4, 2])
+		expect(channelCount).toBe(1)
+		await demod?.reconfigure({ gain: 4 })
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toEqual([
+			expect.objectContaining({ audio: { gain: 4 } }),
+			expect.objectContaining({ audio: { gain: 4 } }),
+		])
+		expect(demod?.getStatus().config.gain).toBe(4)
+		expect(channelCount).toBe(1)
+	})
+
 	it("rolls a lone rejected identity retune back to the acknowledged config", async () => {
 		const { lines } = await boot({ squelch: 0 })
 		await demod?.reconfigure({ offsetHz: 1000 })
@@ -939,10 +1066,103 @@ describe("live demod rust fallback and retune", () => {
 		expect(channelCount).toBe(1)
 	})
 
+	it("repairs only the squelch mode when a partial rollback would be invalid", async () => {
+		await boot({ squelch: 0, modulation: "am" })
+		await demod?.reconfigure({ modulation: "nfm" })
+		await demod?.reconfigure({ squelchMode: "noise" })
+		await demod?.reconfigure({ squelch: -30 })
+		expect(demod?.getStatus().config.modulation).toBe("nfm")
+		expect(demod?.getStatus().config.squelchMode).toBe("noise")
+		const squelchWrites = () =>
+			controlMessages(channels[0]?.controlText ?? "").filter(
+				message => message["type"] === "squelch",
+			)
+		const writesBefore = squelchWrites().length
+		rejectRetune()
+		const restored = demod?.getStatus().config
+		expect(restored?.modulation).toBe("am")
+		expect(restored?.squelchMode ?? "manual").toBe("manual")
+		expect(restored?.squelch).toBe(-30)
+		expect(squelchWrites().length).toBeGreaterThan(writesBefore)
+		expect(squelchWrites().at(-1)?.["mode"]).not.toBe("noise")
+		expect(LiveDemodConfigSchema.safeParse(restored).success).toBe(true)
+		await demod?.reconfigure({ gain: 4 })
+		expect(demod?.getStatus().config.gain).toBe(4)
+		expect(demod?.getStatus().config.modulation).toBe("am")
+		expect(channelCount).toBe(1)
+	})
+
+	it("keeps a squelch edit when an in-flight identity retune is rejected", async () => {
+		await boot({ squelch: 0 })
+		const seen: Array<{ offsetHz?: number; squelch: number }> = []
+		demod?.on("config-changed", (...args: unknown[]) => {
+			const config = args[0]
+			if (typeof config !== "object" || config === null) return
+			if (!("squelch" in config) || typeof config.squelch !== "number") return
+			const offsetHz =
+				"offsetHz" in config && typeof config.offsetHz === "number"
+					? config.offsetHz
+					: undefined
+			seen.push(
+				offsetHz === undefined
+					? { squelch: config.squelch }
+					: { offsetHz, squelch: config.squelch },
+			)
+		})
+		await demod?.reconfigure({ offsetHz: 1000 })
+		await demod?.reconfigure({ squelch: -30 })
+		expect(demod?.getStatus().config.offsetHz).toBe(1000)
+		expect(demod?.getStatus().config.squelch).toBe(-30)
+		const before = seen.length
+		rejectRetune()
+		expect(demod?.getStatus().config.offsetHz).toBe(0)
+		expect(demod?.getStatus().config.squelch).toBe(-30)
+		expect(demod?.getStatus().config.gain).toBe(2)
+		expect(demod?.getStatus().engine).toBe("rust")
+		expect(channelCount).toBe(1)
+		expect(seen.length).toBe(before + 1)
+		expect(seen.at(-1)).toEqual({ offsetHz: 0, squelch: -30 })
+	})
+
+	it("does not roll back a retune when squelch is rejected", async () => {
+		const { lines } = await boot({ squelch: 0 })
+		await demod?.reconfigure({ offsetHz: 1000 })
+		expect(demod?.isSquelchOpen()).toBe(false)
+		channels[0]?.emitLine(
+			demodEvent("rejected", {
+				reasonCode: SQUELCH_REJECTED_REASON,
+				detail: "threshold",
+			}),
+		)
+		expect(demod?.getStatus().config.offsetHz).toBe(1000)
+		expect(demod?.isSquelchOpen()).toBe(false)
+		expect(channelCount).toBe(1)
+		expect(
+			lines.filter(line => line["msg"] === RUST_RETUNE_REJECTED_LOG),
+		).toHaveLength(0)
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 480 }))
+		expect(demod?.isSquelchOpen()).toBe(true)
+		expect(demod?.getStatus().config.offsetHz).toBe(1000)
+		expect(demod?.getStatus().engine).toBe("rust")
+	})
+
 	it("clears engineFallback when the engine is explicitly csdr", async () => {
 		versionMode = "enoent"
 		await boot()
 		expect(demod?.getStatus().engine).toBe("csdr")
+		expect(demod?.getStatus().engineFallback).toBe("binary-unavailable")
+		await demod?.reconfigure({ engine: "csdr" })
+		expect(demod?.getStatus().engine).toBe("csdr")
+		expect(demod?.getStatus().engineFallback).toBeUndefined()
+	})
+
+	it("clears a stale engineFallback when stopped and set to csdr", async () => {
+		versionMode = "enoent"
+		await boot()
+		expect(demod?.getStatus().engine).toBe("csdr")
+		expect(demod?.getStatus().engineFallback).toBe("binary-unavailable")
+		await demod?.stop()
+		expect(demod?.getStatus().running).toBe(false)
 		expect(demod?.getStatus().engineFallback).toBe("binary-unavailable")
 		await demod?.reconfigure({ engine: "csdr" })
 		expect(demod?.getStatus().engine).toBe("csdr")

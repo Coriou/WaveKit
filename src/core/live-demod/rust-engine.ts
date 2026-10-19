@@ -229,7 +229,11 @@ export class RustEngine implements LiveDemodEngine {
 	}
 
 	async stop(): Promise<void> {
-		if (this.stopping && this.exited) return
+		if (this.stopping && this.exited) {
+			this.audio?.destroy()
+			this.audio = null
+			return
+		}
 		this.stopping = true
 		this.killProbe()
 		const child = this.child
@@ -323,6 +327,10 @@ export class RustEngine implements LiveDemodEngine {
 			return { ok: false, fallback: "binary-unavailable", error }
 		}
 		this.socketDir = socketDir
+		if (this.stopping) {
+			await this.removeSocketDir()
+			return { ok: false, crashed: true }
+		}
 		const center = input.caps.centerFreq ?? 0
 		this.capturedInputCenterHz = center
 		const args = buildChannelizerArgs({
@@ -382,7 +390,10 @@ export class RustEngine implements LiveDemodEngine {
 			await this.stop()
 			return failure
 		}
-		if (this.stopping) return { ok: false, crashed: true }
+		if (this.stopping) {
+			await this.stop()
+			return { ok: false, crashed: true }
+		}
 		this.send(
 			encodeOpen({
 				config: input.config,
@@ -395,6 +406,10 @@ export class RustEngine implements LiveDemodEngine {
 			if (event.type === "opened" && event.id === DEMOD_CHANNEL_ID) return event
 			return undefined
 		})
+		if (this.stopping) {
+			await this.stop()
+			return { ok: false, crashed: true }
+		}
 		if (opened === undefined || opened.type === "rejected") {
 			const failure = opened === undefined ? this.startupFailure(child) : null
 			await this.stop()

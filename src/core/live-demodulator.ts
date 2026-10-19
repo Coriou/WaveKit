@@ -451,8 +451,19 @@ export class LiveDemodulator extends EventEmitter {
 			clearCloseOverride: () => {
 				this.closeOverride = null
 			},
-			rollbackConfig: config => {
-				this.config = config
+			rollbackConfig: (candidate, acked) => {
+				// The partial rollback keeps edits made while the retune was in flight.
+				// When that mix breaks a squelch dependency (noise or tone squelch on a
+				// restored modulation that does not allow it), only the squelch mode and
+				// tone go back too, so unrelated edits (httpPort, squelch level) stay.
+				this.config = repairedRollback(candidate, acked)
+				if (this.run) {
+					this.applySquelchConfig(this.run)
+					this.applySquelchThreshold(this.run)
+					this.applyToneSquelch(this.run)
+				}
+				this.publishSquelchChange()
+				this.emit("config-changed", this.config)
 			},
 			adoptRun: run => this.adoptRustRun(run),
 			markStartError: reason => {
@@ -611,6 +622,7 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.config = validated
+		this.rustRuns.noteEngineSelection(validated)
 		// WG12 req 6.4: a centre move (offset) or a source change leaves the channel.
 		// Squelch-only changes keep the tone of the transmission still on frequency.
 		if (sourceChanged || changedPipelineKeys.includes("offsetHz"))
@@ -1944,6 +1956,23 @@ function configuredTone(config: LiveDemodConfig): ToneSquelchTone | null {
 
 function runGateOpen(run: PipelineRun): boolean {
 	return run.externalGate ?? run.squelch.open
+}
+
+/** The rollback candidate, with the squelch mode and tone from `acked` when it is invalid. */
+function repairedRollback(
+	candidate: LiveDemodConfig,
+	acked: LiveDemodConfig,
+): LiveDemodConfig {
+	if (LiveDemodRuntimeConfigSchema.safeParse(candidate).success)
+		return candidate
+	const repaired: LiveDemodConfig = { ...candidate }
+	for (const key of ["squelchMode", "toneSquelch"] as const) {
+		if (acked[key] === undefined) delete repaired[key]
+		else Object.assign(repaired, { [key]: acked[key] })
+	}
+	return LiveDemodRuntimeConfigSchema.safeParse(repaired).success
+		? repaired
+		: acked
 }
 
 function toneSquelchState(run: PipelineRun): "off" | "waiting" | "open" {

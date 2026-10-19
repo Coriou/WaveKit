@@ -1,5 +1,51 @@
 import { describe, expect, it, vi, afterEach } from "vitest"
+import type * as FsPromises from "node:fs/promises"
 import type { spawn } from "node:child_process"
+
+const mkdtempGate = vi.hoisted(() => {
+	let releaseHold: () => void = () => undefined
+	let markEntered: () => void = () => undefined
+	return {
+		armed: false,
+		dirs: [] as string[],
+		entered: new Promise<void>(resolve => {
+			markEntered = resolve
+		}),
+		hold: new Promise<void>(resolve => {
+			releaseHold = resolve
+		}),
+		arm(): void {
+			this.armed = true
+			this.dirs = []
+		},
+		disarm(): void {
+			this.armed = false
+		},
+		enteredNow(): void {
+			markEntered()
+		},
+		release(): void {
+			releaseHold()
+		},
+	}
+})
+
+vi.mock("node:fs/promises", async importOriginal => {
+	const fs = await importOriginal<typeof FsPromises>()
+	const mkdtemp = (async (prefix: string) => {
+		if (mkdtempGate.armed && prefix.includes("wkdm-")) {
+			mkdtempGate.enteredNow()
+			await mkdtempGate.hold
+			const dir = await fs.mkdtemp(prefix)
+			mkdtempGate.dirs.push(dir)
+			return dir
+		}
+		return fs.mkdtemp(prefix)
+	}) as typeof fs.mkdtemp
+	return { ...fs, default: { ...fs, mkdtemp }, mkdtemp }
+})
+
+import { stat } from "node:fs/promises"
 import { LiveDemodConfigSchema, type SourceCaps } from "../../../src/config.js"
 import type { DemodSquelch } from "../../../src/core/live-demod/engine.js"
 import {
@@ -286,6 +332,54 @@ describe("RustEngine process", () => {
 		await expect(pending).resolves.toEqual({ ok: false, crashed: true })
 	})
 
+	it("does not spawn when stop runs during mkdtemp and removes the socket dir", async () => {
+		mkdtempGate.arm()
+		const installed = install(true)
+		channels.push(...installed.channels)
+		const engine = new RustEngine({
+			binaryPath: "wavekit-chan",
+			logger: createLogger({ level: "fatal" }),
+			spawnProcess: installed.spawnProcess,
+			openTimeoutMs: 5_000,
+			probeTimeoutMs: 5_000,
+		})
+		engines.push(engine)
+		const { PassThrough } = await import("node:stream")
+		const pending = engine.start({
+			config: config(),
+			caps,
+			input: new PassThrough(),
+			squelch: { mode: "off" },
+			handlers: {
+				onAudio: () => undefined,
+				onGate: () => undefined,
+				onMetrics: () => undefined,
+				onDown: () => undefined,
+			},
+		})
+		try {
+			await Promise.race([
+				mkdtempGate.entered,
+				new Promise<never>((_resolve, reject) => {
+					setTimeout(() => reject(new Error("mkdtemp was not reached")), 1000)
+				}),
+			])
+			await engine.stop()
+			mkdtempGate.release()
+			await expect(pending).resolves.toEqual({ ok: false, crashed: true })
+			expect(installed.channels).toHaveLength(0)
+			expect(installed.versions.length).toBeGreaterThan(0)
+			expect(mkdtempGate.dirs).toHaveLength(1)
+			const dir = mkdtempGate.dirs[0]
+			expect(dir).toBeDefined()
+			if (dir === undefined) return
+			await expect(stat(dir)).rejects.toThrow()
+		} finally {
+			mkdtempGate.release()
+			mkdtempGate.disarm()
+		}
+	})
+
 	it("bounds handshake events and discards them after start", async () => {
 		const readyRepeat = HANDSHAKE_EARLY_MAX + 23
 		const installed = install(true, { readyRepeat })
@@ -344,5 +438,64 @@ describe("RustEngine process", () => {
 		expect(engine.bufferedHandshake).toBe(0)
 		expect(engine.droppedEvents).toBe(readyRepeat - 1 - HANDSHAKE_EARLY_MAX)
 		expect(retuned).toEqual([480, 960, 1440, 1920, 2400])
+	})
+
+	it("cancels startup when stop runs after opened and destroys the audio socket", async () => {
+		const installed = install(true)
+		const socketDirs: string[] = []
+		let engine: RustEngine | undefined
+		let stopping: Promise<void> | undefined
+		const spawnProcess = ((command: string, args: string[]) => {
+			const index = args.indexOf("--socket-dir")
+			const dir = index >= 0 ? args[index + 1] : undefined
+			if (typeof dir === "string") socketDirs.push(dir)
+			const proc = installed.spawnProcess(command, args)
+			const channel = installed.channels.find(
+				item => item === (proc as unknown as ChannelFake),
+			)
+			if (channel) {
+				channels.push(channel)
+				channel.onOpenedWritten = () => {
+					const current = engine
+					if (current) stopping = current.stop()
+				}
+			}
+			return proc
+		}) as typeof installed.spawnProcess
+		engine = new RustEngine({
+			binaryPath: "wavekit-chan",
+			logger: createLogger({ level: "fatal" }),
+			spawnProcess,
+			openTimeoutMs: 5_000,
+			probeTimeoutMs: 5_000,
+		})
+		engines.push(engine)
+		const { PassThrough } = await import("node:stream")
+		const pending = engine.start({
+			config: config(),
+			caps,
+			input: new PassThrough(),
+			squelch: { mode: "off" },
+			handlers: {
+				onAudio: () => undefined,
+				onGate: () => undefined,
+				onMetrics: () => undefined,
+				onDown: () => undefined,
+			},
+		})
+		const result = await pending
+		expect(stopping).toBeDefined()
+		await stopping
+		await engine.stop()
+		expect(result).toEqual({ ok: false, crashed: true })
+		const channel = installed.channels[0]
+		expect(channel).toBeDefined()
+		const audio = channel?.audio ?? null
+		expect(audio === null || audio.destroyed).toBe(true)
+		expect(socketDirs).toHaveLength(1)
+		const dir = socketDirs[0]
+		expect(dir).toBeDefined()
+		if (dir === undefined) return
+		await expect(stat(dir)).rejects.toThrow()
 	})
 })
