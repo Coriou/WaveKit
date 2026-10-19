@@ -18,7 +18,11 @@ import { ChannelSquelch } from "../channel-squelch.js"
 import type { SilenceFillClock } from "../live-audio-silence.js"
 import type { LiveDemodConfig, PipelineRun } from "../live-demodulator.js"
 import type { DemodRetune, DemodSquelch } from "./engine.js"
-import { RustEngine, type RustStartResult } from "./rust-engine.js"
+import {
+	HANDSHAKE_EARLY_MAX,
+	RustEngine,
+	type RustStartResult,
+} from "./rust-engine.js"
 import {
 	planRetune,
 	QUIETING_DB_INFINITE,
@@ -74,6 +78,13 @@ const RUST_EXIT_REASON = "Live demodulation Rust engine exited"
 /** Fixed warn/restart text for a retune the process refused. No detail. */
 export const RUST_RETUNE_REJECTED_LOG = "Live demodulation Rust retune rejected"
 
+/**
+ * `rejected.reasonCode` for a squelch write. Native uses this so a squelch
+ * failure is not counted as the in-flight retune. A retune keeps
+ * `channel-request-invalid`.
+ */
+export const SQUELCH_REJECTED_REASON = "squelch-rejected"
+
 export interface RustPowerSample {
 	powerDbfs: number | null
 	/** FM quieting shows a carrier, matching `ChannelSquelch.blockQuieted`. */
@@ -103,8 +114,12 @@ export interface RustRunHost {
 	measureRun(run: PipelineRun, sample: RustPowerSample): void
 	resetFloorForRetune(run: PipelineRun): void
 	clearCloseOverride(): void
-	/** Put config back to the last config the process acknowledged. */
-	rollbackConfig(config: LiveDemodConfig): void
+	/**
+	 * Install the config restored after a rejected retune (`candidate`, or
+	 * `acked` whole when `candidate` is not valid), re-sync the squelch and
+	 * tone state, and emit `config-changed` so status listeners publish it.
+	 */
+	rollbackConfig(candidate: LiveDemodConfig, acked: LiveDemodConfig): void
 	adoptRun(run: PipelineRun): void
 	markStartError(reason: string): void
 	emitError(error: Error): void
@@ -137,6 +152,12 @@ export class RustLiveRun {
 	private queuedConfig: LiveDemodConfig | null = null
 	/** Retune rejections since the last `retuned`. Two in a row restart. */
 	private retuneRejects = 0
+	/**
+	 * Control write the next `rejected` belongs to. A squelch write does not
+	 * replace an outstanding retune; only `SQUELCH_REJECTED_REASON` (or a
+	 * rejection whose write is the squelch) is a squelch failure.
+	 */
+	private controlWrite: "retune" | "squelch" | null = null
 	/** Rust died during the initial start, before HTTP can arm the backoff. */
 	private deferredStartFailure: string | null = null
 	/** Engine whose handshake has not finished. `stop` kills this process group. */
@@ -176,6 +197,17 @@ export class RustLiveRun {
 	clearLatch(): void {
 		this.rustUnstable = false
 		this.rustFailures = 0
+	}
+
+	/**
+	 * An explicit csdr selection is not a fallback. `tryStart` clears the
+	 * latch only when a pipeline actually starts; a stopped demodulator
+	 * never gets there.
+	 */
+	noteEngineSelection(config: { engine?: "csdr" | "rust" | undefined }): void {
+		if (rustEngineRequested(config)) return
+		this.engineFallback = null
+		this.warnedFallback = null
 	}
 
 	/** True while `tryStart` is inside the version probe or the handshake. */
@@ -249,6 +281,7 @@ export class RustLiveRun {
 		if (encoded === this.lastSentSquelch) return
 		this.lastSentSquelch = encoded
 		engine.applySquelch(squelch)
+		if (this.controlWrite !== "retune") this.controlWrite = "squelch"
 	}
 
 	/**
@@ -307,7 +340,7 @@ export class RustLiveRun {
 			clock: this.host.clock,
 		})
 		const slot: { run: PipelineRun | null } = { run: null }
-		const startup: StartupBuffer = { gate: null, metrics: [], retuned: 0 }
+		const startup: StartupBuffer = { gate: null, metrics: [] }
 		let live = false
 		const epoch = this.startEpoch
 		this.starting = engine
@@ -337,10 +370,7 @@ export class RustLiveRun {
 						if (current) this.onGate(current, open)
 					},
 					onRetuned: () => {
-						if (!live) {
-							startup.retuned += 1
-							return
-						}
+						if (!live) return
 						const current = slot.run
 						if (current) this.onRetuned(current)
 					},
@@ -352,6 +382,12 @@ export class RustLiveRun {
 						const normalized = quieting.map(asQuietingNumber)
 						if (!live) {
 							startup.metrics.push({ power, quieting: normalized })
+							if (startup.metrics.length > HANDSHAKE_EARLY_MAX) {
+								startup.metrics.splice(
+									0,
+									startup.metrics.length - HANDSHAKE_EARLY_MAX,
+								)
+							}
 							return
 						}
 						const current = slot.run
@@ -459,7 +495,9 @@ export class RustLiveRun {
 
 	/** `retuned` is the atOutputSample boundary of the in-flight retune. */
 	private onRetuned(run: PipelineRun): void {
+		if (!this.inFlight) return
 		if (this.host.currentRun() !== run || run.stopping) return
+		this.controlWrite = null
 		const coveredIdentity = this.inFlightHoldsIdentity
 		this.inFlight = false
 		this.inFlightHoldsIdentity = false
@@ -485,6 +523,13 @@ export class RustLiveRun {
 	 * is false, and the run does not exist yet).
 	 */
 	private onRetuneRejected(run: PipelineRun, reasonCode: string): void {
+		if (
+			reasonCode === SQUELCH_REJECTED_REASON ||
+			this.controlWrite === "squelch"
+		) {
+			if (this.controlWrite === "squelch") this.controlWrite = null
+			return
+		}
 		if (this.host.currentRun() !== run || run.stopping || !this.inFlight) return
 		this.host.log.warn(
 			{ err: safeErrorFields(reasonCode) },
@@ -501,19 +546,27 @@ export class RustLiveRun {
 		const acked = this.ackedConfig
 		this.inFlight = false
 		this.inFlightHoldsIdentity = false
+		this.controlWrite = null
 		this.queuedConfig = null
 		this.sentConfig = acked
 		// Nothing newer is waiting. Native still has `acked`. Advertising the
 		// rejected request would leave the hold stuck and the status lying.
-		if (
-			queued === null &&
-			desired !== null &&
-			acked !== null &&
-			identityChanged(acked, desired)
-		) {
-			this.host.rollbackConfig(acked)
-			this.releaseHold(run)
-			return
+		// Every retune key moves back, including a gain-only edit. A squelch
+		// edit made while this write was in flight stays on the current config.
+		// The transmission hold belongs to an identity change.
+		if (queued === null && desired !== null && acked !== null) {
+			if (retuneKeysChanged(acked, this.host.config())) {
+				this.host.rollbackConfig(
+					withRetuneKeys(this.host.config(), acked),
+					acked,
+				)
+				// Native keeps the squelch of the refused request until told.
+				this.pushSquelch(run)
+			}
+			if (identityChanged(acked, desired)) {
+				this.releaseHold(run)
+				return
+			}
 		}
 		if (desired !== null && acked !== null && !identityChanged(acked, desired))
 			this.releaseHold(run)
@@ -550,6 +603,7 @@ export class RustLiveRun {
 		if (hasRetunePlan(plan)) {
 			run.rust?.applyRetune(plan)
 			this.inFlight = true
+			this.controlWrite = "retune"
 			// The ack of this write leaves the process on `next`'s identity,
 			// whether it changes it or a rejected change was already undone.
 			this.inFlightHoldsIdentity = this.identityUnacked
@@ -569,18 +623,19 @@ export class RustLiveRun {
 		this.inFlight = false
 		this.inFlightHoldsIdentity = false
 		this.identityUnacked = false
+		this.controlWrite = null
 		this.sentConfig = null
 		this.ackedConfig = null
 		this.queuedConfig = null
 		this.retuneRejects = 0
 	}
 
-	/** Gate, metrics and retuned that arrived in the `opened` chunk. */
+	/** Gate and metrics that arrived in the `opened` chunk. */
 	private applyStartup(run: PipelineRun, startup: StartupBuffer): void {
 		if (startup.gate !== null) this.onGate(run, startup.gate)
 		for (const sample of startup.metrics)
 			this.onMetrics(run, sample.power, sample.quieting)
-		for (let n = 0; n < startup.retuned; n++) this.onRetuned(run)
+		startup.metrics.length = 0
 	}
 
 	private onMetrics(
@@ -665,7 +720,6 @@ interface StartupBuffer {
 		power: Array<number | null>
 		quieting: Array<number | null>
 	}>
-	retuned: number
 }
 
 /** `inf` is +∞. Everything else is already a finite number or null. */
@@ -697,6 +751,26 @@ function identityChanged(
 	next: LiveDemodConfig,
 ): boolean {
 	return [...RUST_IDENTITY_KEYS].some(key => previous[key] !== next[key])
+}
+
+function retuneKeysChanged(
+	previous: LiveDemodConfig,
+	next: LiveDemodConfig,
+): boolean {
+	return [...RUST_RETUNE_KEYS].some(key => previous[key] !== next[key])
+}
+
+/** Current config with only the retune keys taken from the last ack. */
+function withRetuneKeys(
+	current: LiveDemodConfig,
+	acked: LiveDemodConfig,
+): LiveDemodConfig {
+	const restored: Record<string, unknown> = { ...current }
+	for (const key of RUST_RETUNE_KEYS) {
+		if (acked[key] === undefined) delete restored[key]
+		else restored[key] = acked[key]
+	}
+	return restored as LiveDemodConfig
 }
 
 function hasRetunePlan(update: DemodRetune): boolean {
