@@ -476,8 +476,9 @@ export class RustLiveRun {
 		if (hasRetunePlan(plan)) {
 			run.rust?.applyRetune(plan)
 			this.inFlight = true
-			this.inFlightHoldsIdentity =
-				identityChanged(previous, next) && this.identityUnacked
+			// The ack of this write leaves the process on `next`'s identity,
+			// whether it changes it or a rejected change was already undone.
+			this.inFlightHoldsIdentity = this.identityUnacked
 		} else if (identityChanged(previous, next)) {
 			if (this.identityUnacked) this.releaseHold(run)
 		} else {

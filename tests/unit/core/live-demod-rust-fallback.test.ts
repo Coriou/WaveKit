@@ -801,6 +801,22 @@ describe("live demod rust fallback and retune", () => {
 		expect(channelCount).toBe(1)
 	})
 
+	it("releases the hold when a reverted rejected identity rides with a gain change", async () => {
+		await boot({ squelch: 0 })
+		await demod?.reconfigure({ offsetHz: 1000 })
+		rejectRetune()
+		await demod?.reconfigure({ offsetHz: 0, gain: 4 })
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toHaveLength(2)
+		expect(retunes[1]).toMatchObject({ audio: { gain: 4 } })
+		expect(retunes[1]).not.toHaveProperty("centerHz")
+		expect(demod?.isSquelchOpen()).toBe(false)
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
+		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
 	it("does not restart when retuned separates retune rejections", async () => {
 		await boot({ squelch: 0 })
 		await demod?.reconfigure({ gain: 4 })
