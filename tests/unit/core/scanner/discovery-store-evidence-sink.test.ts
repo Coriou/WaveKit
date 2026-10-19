@@ -742,8 +742,8 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(dto?.family).toBe("analog")
 		expect(dto?.confidence).toBe("candidate")
 		expect(dto?.evidenceLevel).toBe("proven")
-		expect(store.identityOf(id)?.protocol).toBe("unknown")
-		expect(store.identityOf(id)?.confidence).toBe("activity")
+		expect(store.identityOf(id)?.protocol).toBe("analog-fm")
+		expect(store.identityOf(id)?.confidence).toBe("candidate")
 		expect(store.list({ protocol: "analog-fm" }).items.map(d => d.id)).toEqual([
 			id,
 		])
@@ -821,7 +821,7 @@ describe("DiscoveryStore evidence sink", () => {
 			id,
 		])
 		expect(store.list({ protocol: "unknown" }).items).toEqual([])
-		expect(store.identityOf(id)?.protocol).toBe("unknown")
+		expect(store.identityOf(id)?.protocol).toBe("carrier")
 		expect(store.identityOf(id)?.confidence).toBe("activity")
 		const snap = store.snapshot().discoveries.find(d => d.id === id)
 		expect(snap?.protocol).toBe("unknown")
@@ -951,6 +951,10 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(commanded.store.recordAnalog(commanded.obs, tone())).toBe(true)
 		expect(commanded.store.get(commanded.id)?.protocol).toBe("analog-fm")
 		expect(commanded.store.get(commanded.id)?.confidence).toBe("classified")
+		expect(commanded.store.identityOf(commanded.id)?.protocol).toBe("analog-fm")
+		expect(commanded.store.identityOf(commanded.id)?.confidence).toBe(
+			"classified",
+		)
 		expect(commanded.store.get(commanded.id)?.proof?.kind).toBe("analog-tone")
 		expect(
 			commanded.store.applyClassification(commanded.id, {

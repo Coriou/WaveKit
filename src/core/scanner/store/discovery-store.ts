@@ -804,9 +804,10 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * WG11 (Main's identity accessor): protocol and confidence of a live discovery, O(1), as a fresh
-	 * object built from its scalars (no clone of the discovery); undefined when unknown. Pair with
-	 * `discoveryIdOf` to follow an observation to its surviving discovery after a merge.
+	 * Protocol and confidence of a live discovery, in a fresh object. Both are the
+	 * proof-implied label `get()` publishes; `id` is the stored id. Undefined when
+	 * unknown. Does not clone the discovery. Pair with `discoveryIdOf` to follow an
+	 * observation to its surviving discovery after a merge.
 	 */
 	identityOf(
 		discoveryId: string,
@@ -814,9 +815,9 @@ export class DiscoveryStore
 		| { id: string; protocol: ScannerProtocol; confidence: ScannerConfidence }
 		| undefined {
 		const d = this.discoveries.get(discoveryId)
-		return d === undefined
-			? undefined
-			: { id: d.id, protocol: d.protocol, confidence: d.confidence }
+		if (d === undefined) return undefined
+		const label = this.effectiveLabel(d)
+		return { id: d.id, protocol: label.protocol, confidence: label.confidence }
 	}
 
 	/** WG6 req 2.1: duration of an in-memory observation that has ended; undefined while open or unknown. */
@@ -2370,14 +2371,11 @@ export class DiscoveryStore
 	 */
 	private warnKeptBlocked(): void {
 		let held = 0
-		for (const d of this.discoveries.values())
-			if (
-				d.confidence !== "decoded" &&
-				d.operator?.keep !== true &&
-				d.operator?.lockout !== true &&
-				this.holdsKept(d.id)
-			)
-				held++
+		for (const d of this.discoveries.values()) {
+			if (!this.holdsKept(d.id)) continue
+			if (this.evictionRank(d) === undefined) continue
+			held++
+		}
 		if (held === 0 || held === this.keptBlockedWarned) return
 		this.keptBlockedWarned = held
 		const log =
@@ -2393,27 +2391,46 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * Lowest confidence, then oldest `lastSeenAt` (ties: smaller id); never `decoded`, `keep` or
-	 * locked out (WG2 R1 #8: evicting a lockout would silently put it back into sweeps).
+	 * Rank used to choose a capacity victim: the proof-implied confidence.
+	 * Undefined when the discovery is not a victim. A stored `decoded` record
+	 * stays (a later sink proof may show a weaker label), and so does a discovery
+	 * whose shown confidence is `decoded`. `keep` and lockout stay too. A kept
+	 * recording is a separate hold, checked by the caller.
+	 */
+	private evictionRank(d: Discovery): number | undefined {
+		if (
+			d.confidence === "decoded" ||
+			d.operator?.keep === true ||
+			d.operator?.lockout === true
+		)
+			return undefined
+		const confidence = this.effectiveLabel(d).confidence
+		if (confidence === "decoded") return undefined
+		return rank(confidence)
+	}
+
+	/**
+	 * Lowest effective confidence, then oldest `lastSeenAt` (ties: smaller id).
+	 * Never a stored or shown `decoded` discovery, `keep`, lockout, or a kept
+	 * recording (WG2 R1 #8: evicting a lockout would silently put it back into sweeps).
 	 */
 	private evictionVictim(): Discovery | undefined {
 		let victim: Discovery | undefined
+		let victimRank = Number.POSITIVE_INFINITY
 		for (const d of this.discoveries.values()) {
-			if (
-				d.confidence === "decoded" ||
-				d.operator?.keep === true ||
-				d.operator?.lockout === true ||
-				this.holdsKept(d.id)
-			)
-				continue
+			if (this.holdsKept(d.id)) continue
+			const next = this.evictionRank(d)
+			if (next === undefined) continue
 			if (
 				victim === undefined ||
-				rank(d.confidence) < rank(victim.confidence) ||
-				(rank(d.confidence) === rank(victim.confidence) &&
+				next < victimRank ||
+				(next === victimRank &&
 					(d.lastSeenAt < victim.lastSeenAt ||
 						(d.lastSeenAt === victim.lastSeenAt && d.id < victim.id)))
-			)
+			) {
 				victim = d
+				victimRank = next
+			}
 		}
 		return victim
 	}
