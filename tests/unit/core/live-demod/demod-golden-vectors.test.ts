@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest"
 import { ChannelSquelch } from "../../../../src/core/channel-squelch.js"
 import {
 	NoiseSquelch,
+	noiseReferenceCutoff,
 	noiseReferenceMeanSquare,
 } from "../../../../src/core/noise-squelch.js"
 import { FmChannelSynth, mulberry32 } from "../fm-synth.js"
@@ -439,9 +440,9 @@ function buildNoise(): {
 	}
 }
 
-function commit(name: string, value: unknown): string {
+function commit(name: string, value: unknown, maxBytes = 180 * 1024): string {
 	const text = `${JSON.stringify(value, null, "\t")}\n`
-	expect(Buffer.byteLength(text)).toBeLessThan(180 * 1024)
+	expect(Buffer.byteLength(text)).toBeLessThan(maxBytes)
 	const path = join(FIXTURE_DIR, name)
 	if (process.env["WAVEKIT_WRITE_DEMOD_VECTORS"] === "1") {
 		mkdirSync(FIXTURE_DIR, { recursive: true })
@@ -451,6 +452,251 @@ function commit(name: string, value: unknown): string {
 	return text
 }
 
+/**
+ * Channel IQ for `noise-bandwidth.json`. The Rust baseline generator in
+ * `native/wavekit-chan/tests/noise_baseline.rs` repeats these steps.
+ *
+ * 1. `mulberry32(seed)` (audio-tones/synth.ts).
+ * 2. One complex Box-Muller sample per input. FM scales each component by
+ *    `sqrt(10^(-cnr/10) / 2)`; white, coloured and DC use scale 1.
+ * 3. Coloured: `y = 0.5 y + sqrt(0.75) x` on I and on Q, starting from 0.
+ * 4. DC: add 0.01 to I.
+ * 5. FM, from input index `carrierAtSample`: `phase += 2π · 2500 · sin(2π · tone · t) / 48000`,
+ *    then add `e^{j phase}`.
+ * 6. 63-tap Blackman low-pass at `noiseReferenceCutoff`, unity DC (the reference
+ *    filter in noise-squelch.ts). Output sample n uses inputs n..n+62.
+ * 7. Float32 LE, then 480-sample blocks. `NoiseSquelch` measures each block.
+ */
+const BANDWIDTH_RATE_HZ = 48_000
+const BANDWIDTH_BLOCK_SAMPLES = 480
+const BANDWIDTH_TAPS = 63
+const BANDWIDTH_DEVIATION_HZ = 2_500
+
+function mixSeed(kind: number, bandwidthHz: number, salt: number): number {
+	const mixed =
+		(Math.imul(salt, 0x9e3779b1) ^
+			Math.imul(kind, 0x85ebca6b) ^
+			Math.imul(bandwidthHz, 0xc2b2ae35)) >>>
+		0
+	return mixed === 0 ? 1 : mixed
+}
+
+function blackmanLowPass(cutoff: number, length: number): Float64Array {
+	const taps = new Float64Array(length)
+	const mid = (length - 1) / 2
+	let sum = 0
+	for (let k = 0; k < length; k++) {
+		const x = k - mid
+		const sinc =
+			x === 0 ? 2 * cutoff : Math.sin(2 * Math.PI * cutoff * x) / (Math.PI * x)
+		const w =
+			0.42 -
+			0.5 * Math.cos((2 * Math.PI * k) / (length - 1)) +
+			0.08 * Math.cos((4 * Math.PI * k) / (length - 1))
+		taps[k] = sinc * w
+		sum += sinc * w
+	}
+	for (let k = 0; k < length; k++) taps[k] = (taps[k] ?? 0) / sum
+	return taps
+}
+
+function bandwidthIq(spec: {
+	bandwidthHz: number
+	seed: number
+	kind: "white" | "coloured" | "dc" | "fm"
+	cnrDb: number | null
+	toneHz: number | null
+	carrierAtSample: number
+	samples: number
+}): Buffer {
+	const cutoff = noiseReferenceCutoff(BANDWIDTH_RATE_HZ, spec.bandwidthHz)
+	const taps = blackmanLowPass(cutoff, BANDWIDTH_TAPS)
+	const total = spec.samples + BANDWIDTH_TAPS - 1
+	const rand = mulberry32(spec.seed)
+	const xi = new Float64Array(total)
+	const xq = new Float64Array(total)
+	let arI = 0
+	let arQ = 0
+	let phase = 0
+	const noiseScale =
+		spec.kind === "fm" ? Math.sqrt(10 ** (-(spec.cnrDb ?? 0) / 10) / 2) : 1
+	const coloured = spec.kind === "coloured"
+	const dc = spec.kind === "dc" ? 0.01 : 0
+	const sqrt075 = Math.sqrt(0.75)
+	for (let n = 0; n < total; n++) {
+		const u = Math.max(rand(), 1e-300)
+		const v = rand()
+		const radius = Math.sqrt(-2 * Math.log(u))
+		const angle = 2 * Math.PI * v
+		let i = noiseScale * radius * Math.cos(angle)
+		let q = noiseScale * radius * Math.sin(angle)
+		if (coloured) {
+			arI = 0.5 * arI + sqrt075 * i
+			arQ = 0.5 * arQ + sqrt075 * q
+			i = arI
+			q = arQ
+		}
+		i += dc
+		if (spec.kind === "fm" && n >= spec.carrierAtSample) {
+			const t = n / BANDWIDTH_RATE_HZ
+			phase +=
+				(2 *
+					Math.PI *
+					BANDWIDTH_DEVIATION_HZ *
+					Math.sin(2 * Math.PI * (spec.toneHz ?? 0) * t)) /
+				BANDWIDTH_RATE_HZ
+			i += Math.cos(phase)
+			q += Math.sin(phase)
+		}
+		xi[n] = i
+		xq[n] = q
+	}
+	const out = Buffer.alloc(spec.samples * 8)
+	for (let n = 0; n < spec.samples; n++) {
+		let i = 0
+		let q = 0
+		for (let k = 0; k < BANDWIDTH_TAPS; k++) {
+			const h = taps[k] ?? 0
+			i += h * (xi[n + k] ?? 0)
+			q += h * (xq[n + k] ?? 0)
+		}
+		out.writeFloatLE(i, n * 8)
+		out.writeFloatLE(q, n * 8 + 4)
+	}
+	return out
+}
+
+function buildBandwidthNoise() {
+	const bandwidths = [2_500, 6_250, 12_500, 25_000]
+	const kinds: {
+		kind: "white" | "coloured" | "dc" | "fm"
+		code: number
+		blocks: number
+		carrierAtBlock: number
+		cnrDb: number | null
+		toneHz: number | null
+	}[] = [
+		{
+			kind: "white",
+			code: 0,
+			blocks: 3,
+			carrierAtBlock: 0,
+			cnrDb: null,
+			toneHz: null,
+		},
+		{
+			kind: "coloured",
+			code: 1,
+			blocks: 3,
+			carrierAtBlock: 0,
+			cnrDb: null,
+			toneHz: null,
+		},
+		{
+			kind: "dc",
+			code: 2,
+			blocks: 3,
+			carrierAtBlock: 0,
+			cnrDb: null,
+			toneHz: null,
+		},
+		{
+			kind: "fm",
+			code: 3,
+			blocks: 4,
+			carrierAtBlock: 2,
+			cnrDb: 6,
+			toneHz: 1_000,
+		},
+		{
+			kind: "fm",
+			code: 4,
+			blocks: 4,
+			carrierAtBlock: 2,
+			cnrDb: 6,
+			toneHz: 2_500,
+		},
+		{
+			kind: "fm",
+			code: 5,
+			blocks: 4,
+			carrierAtBlock: 2,
+			cnrDb: 10,
+			toneHz: 1_000,
+		},
+		{
+			kind: "fm",
+			code: 6,
+			blocks: 4,
+			carrierAtBlock: 2,
+			cnrDb: 10,
+			toneHz: 2_500,
+		},
+	]
+	const scenarios: Array<
+		ReturnType<typeof runNoise> & {
+			kind: "white" | "coloured" | "dc" | "fm"
+			kindCode: number
+			seed: number
+			cnrDb: number | null
+			toneHz: number | null
+			carrierAtSample: number
+			deviationHz: number
+		}
+	> = []
+	for (const bandwidthHz of bandwidths) {
+		for (const kind of kinds) {
+			const seed = mixSeed(kind.code, bandwidthHz, 1)
+			const carrierAtSample = kind.carrierAtBlock * BANDWIDTH_BLOCK_SAMPLES
+			const iq = bandwidthIq({
+				bandwidthHz,
+				seed,
+				kind: kind.kind,
+				cnrDb: kind.cnrDb,
+				toneHz: kind.toneHz,
+				carrierAtSample,
+				samples: kind.blocks * BANDWIDTH_BLOCK_SAMPLES,
+			})
+			const blocks = []
+			const bytes = BANDWIDTH_BLOCK_SAMPLES * 8
+			for (let block = 0; block < kind.blocks; block++) {
+				blocks.push(
+					Buffer.from(iq.subarray(block * bytes, (block + 1) * bytes)),
+				)
+			}
+			const tone = kind.toneHz === null ? "" : `-tone${kind.toneHz}`
+			const cnr = kind.cnrDb === null ? "" : `-cnr${kind.cnrDb}`
+			const measured = runNoise({
+				name: `${bandwidthHz}-${kind.kind}${cnr}${tone}`,
+				sampleRate: BANDWIDTH_RATE_HZ,
+				bandwidthHz,
+				quietingDb: 6,
+				hysteresisDb: 2,
+				hangMs: 0,
+				blockMs: 10,
+				blocks,
+			})
+			scenarios.push({
+				...measured,
+				kind: kind.kind,
+				kindCode: kind.code,
+				seed,
+				cnrDb: kind.cnrDb,
+				toneHz: kind.toneHz,
+				carrierAtSample,
+				deviationHz: BANDWIDTH_DEVIATION_HZ,
+			})
+		}
+	}
+	return {
+		sampleRateHz: BANDWIDTH_RATE_HZ,
+		blockSamples: BANDWIDTH_BLOCK_SAMPLES,
+		filterTaps: BANDWIDTH_TAPS,
+		deviationHz: BANDWIDTH_DEVIATION_HZ,
+		scenarios,
+	}
+}
+
 describe("demod golden vectors", () => {
 	it("matches the committed ChannelSquelch and NoiseSquelch vectors", () => {
 		const gates = commit("gates.json", buildGates())
@@ -458,5 +704,9 @@ describe("demod golden vectors", () => {
 		expect(Buffer.byteLength(gates) + Buffer.byteLength(noise)).toBeLessThan(
 			200 * 1024,
 		)
+	})
+
+	it("matches NoiseSquelch quieting at 2.5, 6.25, 12.5 and 25 kHz", () => {
+		commit("noise-bandwidth.json", buildBandwidthNoise(), 2 * 1024 * 1024)
 	})
 })

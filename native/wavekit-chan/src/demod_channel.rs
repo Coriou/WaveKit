@@ -115,6 +115,9 @@ struct RetunePlan {
     config: DemodConfig,
     offset_hz: Option<f64>,
     bandwidth_hz: Option<f64>,
+    /// Reference for `bandwidth_hz` when that bandwidth is not already applied.
+    /// Computed in `queue_retune` so `process` does not run the noise simulation.
+    noise_reference: Option<f64>,
 }
 
 struct PendingSquelch {
@@ -305,7 +308,10 @@ impl DemodChannel {
         self.held_q.clear();
         self.fir.reset();
         self.demod.reset();
-        self.noise = NoiseMeter::with_bandwidth(DEMOD_OUTPUT_RATE_HZ as f64, self.bandwidth_hz);
+        // The reference was calibrated at construction or the last retune. Rebuilding the
+        // meter resets discriminator state and does not simulate.
+        let reference = self.noise.reference_mean_square();
+        self.noise = NoiseMeter::from_reference(DEMOD_OUTPUT_RATE_HZ as f64, reference);
         let (gate, open) = build_gate(&self.squelch);
         self.gate = gate;
         self.gate_open = open;
@@ -387,10 +393,18 @@ impl DemodChannel {
                 .as_ref()
                 .and_then(|pending| pending.bandwidth_hz),
         };
+        // Cold calibration stays on this control path. `process` only installs `noise_reference`.
+        let noise_reference = match bandwidth_hz {
+            Some(bw) if bw != self.bandwidth_hz => Some(
+                NoiseMeter::with_bandwidth(DEMOD_OUTPUT_RATE_HZ as f64, bw).reference_mean_square(),
+            ),
+            _ => None,
+        };
         Ok(RetunePlan {
             config,
             offset_hz,
             bandwidth_hz,
+            noise_reference,
         })
     }
 
@@ -426,7 +440,10 @@ impl DemodChannel {
                 let taps = design_channel_fir(bw);
                 self.fir.set_taps(taps);
                 self.bandwidth_hz = bw;
-                self.noise = NoiseMeter::with_bandwidth(DEMOD_OUTPUT_RATE_HZ as f64, bw);
+                let reference = plan.noise_reference.expect(
+                    "a bandwidth retune carries the reference computed while the retune was queued",
+                );
+                self.noise = NoiseMeter::from_reference(DEMOD_OUTPUT_RATE_HZ as f64, reference);
             }
         }
         true

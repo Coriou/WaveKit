@@ -1,24 +1,26 @@
-//! FM quieting meter, a port of `NoiseSquelch`'s per-block measure (`src/core/noise-squelch.ts`).
+//! FM quieting meter, a port of `NoiseSquelch` (`src/core/noise-squelch.ts`).
 //!
-//! [`NoiseMeter::new`] is the frozen constructor: it takes only the sample rate and calibrates
-//! the noise-only reference at bandwidth `sample_rate / 2` (normalised cutoff 0.375) with the
-//! 63-tap Blackman used by `NoiseSquelch`. Its high-pass stays at 0.3 of the sample rate.
+//! [`NoiseMeter::new`] is the frozen constructor. It takes only the sample rate and calibrates
+//! the noise-only reference at bandwidth `sample_rate / 2` (normalised cutoff 0.375).
 //!
-//! [`NoiseMeter::with_bandwidth`] is the demod-channel meter. It keeps that same high-pass and
-//! the same unbiased Blackman reference: shifting the reference to hide the skirt's tail also
-//! hid a weak modulated carrier. Below 6 kHz the 14.4 kHz corner sits on the channel skirt
-//! (about 13 degrees of freedom in a 480-sample block), so one quiet block can cross 6 dB.
-//! Those bandwidths report a 3-block mean of the noise power. A block that is already 30 dB
-//! quiet is reported as itself: noise in 20 000 blocks stays under 17 dB there, and the first
-//! settled block of a 10 dB CNR carrier is about 40 dB, which is the block the gate has to
-//! open on (the block before it is still the channel-filter transient). A block louder than
-//! the window is also reported as itself, so the hang starts when the carrier leaves. From 8
-//! to 20 kHz the skirt quieting of a weak wide-deviation tone sits just under 6 dB while the
-//! noise tail is under 2 dB, so the reference is lifted 1 dB there. The decision is still one
-//! value per block.
+//! [`NoiseMeter::with_bandwidth`] is the demod-channel meter. It is the same measurement the
+//! live path builds for a channel of bandwidth B: the RBJ high-pass at
+//! `NOISE_HIGH_PASS_NYQUIST_FRACTION / 2` (0.3 of the sample rate), the reference from
+//! `noiseReferenceCutoff` / `noiseReferenceMeanSquare` (same seed, 63 Blackman taps, 256-sample
+//! warmup, 65 536 samples), and one mean square per block. No smoothing, no sensitivity lift,
+//! no bypass. Quieting is `10·log10(R / ms)`. An unusable block (a non-finite sample, or fewer
+//! than half the samples above the magnitude floor) returns NaN. `+∞` means a silent
+//! discriminator.
 //!
-//! Quieting is `10·log10(R / ms)`. An unusable block (a non-finite sample, or fewer than half
-//! the samples above the magnitude floor) returns NaN. `+∞` means a silent discriminator.
+//! The reference simulation is cached. The `with_bandwidth` cache holds at most
+//! [`REFERENCE_CACHE_LIMIT`] entries (64, the same cap as `noise-squelch.ts`), keyed by
+//! `cutoff.toFixed(4)`, and stores the first caller's unrounded simulation. A full cache is
+//! cleared, matching that module. `new` keeps its own exact-cutoff cache of the same size so a
+//! nearby bandwidth cannot change the frozen full-band reference.
+//!
+//! A cold simulation is too slow to run inside [`crate::demod_channel::DemodChannel::process`].
+//! [`crate::demod_channel`] calls [`NoiseMeter::with_bandwidth`] while planning the retune and
+//! installs the resulting reference with [`NoiseMeter::from_reference`] on the audio path.
 
 use std::f64::consts::{PI, TAU};
 use std::sync::{Mutex, OnceLock};
@@ -32,13 +34,8 @@ const REFERENCE_TAPS: usize = 63;
 const REFERENCE_SEED: u32 = 0x5eed_2b07;
 /// `NOISE_HIGH_PASS_NYQUIST_FRACTION / 2` from `noise-squelch.ts`.
 const HIGH_PASS_FRACTION: f64 = 0.6 / 2.0;
-/// Skirt channels average this many blocks. Three keeps a single quiet block under 6 dB.
-const SKIRT_WINDOW: usize = 3;
-/// Instant open. Above the skirt's noise tail (under 17 dB across 20 000 blocks at 2.5 kHz)
-/// and below the first settled block of a 10 dB CNR carrier (about 40 dB).
-const SKIRT_FAST_OPEN_DB: f64 = 30.0;
-/// At and above this bandwidth the measurement has enough degrees of freedom unsmoothed.
-const SKIRT_SMOOTH_BELOW_HZ: f64 = 6_000.0;
+/// `REFERENCE_CACHE_LIMIT` in `noise-squelch.ts`. Each cache (keyed and exact) stops here.
+const REFERENCE_CACHE_LIMIT: usize = 64;
 
 #[derive(Clone, Debug)]
 struct Chain {
@@ -58,11 +55,7 @@ struct Chain {
 
 impl Chain {
     fn new() -> Self {
-        Self::with_fraction(HIGH_PASS_FRACTION)
-    }
-
-    fn with_fraction(corner_fraction: f64) -> Self {
-        let (b0, b1, b2, a1, a2) = high_pass_coeffs(corner_fraction);
+        let (b0, b1, b2, a1, a2) = high_pass_coeffs(HIGH_PASS_FRACTION);
         Self {
             b0,
             b1,
@@ -108,60 +101,54 @@ pub struct NoiseMeter {
     sample_rate_hz: f64,
     reference: f64,
     chain: Chain,
-    /// `1` keeps the frozen per-block measure. `SKIRT_WINDOW` averages narrow channels.
-    window: usize,
-    /// Recent block mean squares, oldest at `cursor`. Seeded with the reference.
-    window_ms: [f64; SKIRT_WINDOW],
-    cursor: usize,
 }
 
 impl NoiseMeter {
     /// Reference bandwidth `sample_rate_hz / 2`, the historical full-band calibration.
-    /// This path stays on the Blackman reference so the TypeScript golden vectors hold.
     pub fn new(sample_rate_hz: f64) -> Self {
         assert!(
             sample_rate_hz.is_finite() && sample_rate_hz > 0.0,
             "NoiseMeter sample_rate_hz must be finite and positive"
         );
         let cutoff = channel_cutoff(sample_rate_hz, sample_rate_hz / 2.0);
-        let reference = reference_mean_square(cutoff);
+        let reference = reference_mean_square_exact(cutoff);
         Self {
             sample_rate_hz,
             reference,
             chain: Chain::new(),
-            window: 1,
-            window_ms: [reference; SKIRT_WINDOW],
-            cursor: 0,
         }
     }
 
-    /// Channel meter at `bandwidth_hz`. A non-finite or non-positive bandwidth uses the
-    /// Nyquist default. The reference is the unbiased Blackman calibration at the channel
-    /// cutoff, quantised so a 1 Hz retune does not resimulate.
+    /// Channel meter at `bandwidth_hz`. A non-finite or non-positive bandwidth uses
+    /// `sample_rate_hz / 2`, matching `NoiseSquelch`. This may simulate the reference on a
+    /// cache miss (the control path). The audio path uses [`Self::from_reference`].
     pub fn with_bandwidth(sample_rate_hz: f64, bandwidth_hz: f64) -> Self {
         assert!(
             sample_rate_hz.is_finite() && sample_rate_hz > 0.0,
             "NoiseMeter sample_rate_hz must be finite and positive"
         );
-        let bandwidth = if bandwidth_hz.is_finite() && bandwidth_hz > 0.0 {
-            bandwidth_hz
-        } else {
-            sample_rate_hz / 2.0
-        };
-        let cutoff = channel_cutoff(sample_rate_hz, bandwidth);
-        let reference = channel_reference_mean_square(cutoff)
-            * 10f64.powf(sensitivity_lift_db(bandwidth) / 10.0);
+        let reference = reference_for_bandwidth(sample_rate_hz, bandwidth_hz);
         Self {
             sample_rate_hz,
             reference,
             chain: Chain::new(),
-            window: if bandwidth < SKIRT_SMOOTH_BELOW_HZ {
-                SKIRT_WINDOW
-            } else {
-                1
-            },
-            window_ms: [reference; SKIRT_WINDOW],
-            cursor: 0,
+        }
+    }
+
+    /// Meter with a reference already computed by [`Self::with_bandwidth`]. Does not simulate.
+    pub(crate) fn from_reference(sample_rate_hz: f64, reference: f64) -> Self {
+        assert!(
+            sample_rate_hz.is_finite() && sample_rate_hz > 0.0,
+            "NoiseMeter sample_rate_hz must be finite and positive"
+        );
+        assert!(
+            reference.is_finite() && reference > 0.0,
+            "NoiseMeter reference must be finite and positive"
+        );
+        Self {
+            sample_rate_hz,
+            reference,
+            chain: Chain::new(),
         }
     }
 
@@ -199,36 +186,11 @@ impl NoiseMeter {
         if !(finite && usable >= block.len().div_ceil(2)) {
             return f32::NAN;
         }
-        let ms = self.gated_mean_square(sum / usable as f64);
+        let ms = sum / usable as f64;
         if ms > 0.0 {
             (10.0 * (self.reference / ms).log10()) as f32
         } else {
             f32::INFINITY
-        }
-    }
-
-    /// Mean square the gate should see. Narrow channels average the last three blocks so one
-    /// quiet skirt block cannot cross 6 dB. A block that is already ≥ 30 dB quiet is reported
-    /// as itself, and so is a block louder than the window (the carrier has gone).
-    fn gated_mean_square(&mut self, ms: f64) -> f64 {
-        if self.window <= 1 {
-            return ms;
-        }
-        let q_inst = if ms > 0.0 {
-            10.0 * (self.reference / ms).log10()
-        } else {
-            f64::INFINITY
-        };
-        self.window_ms[self.cursor] = ms;
-        self.cursor = (self.cursor + 1) % self.window;
-        if q_inst >= SKIRT_FAST_OPEN_DB {
-            return ms;
-        }
-        let avg = self.window_ms.iter().sum::<f64>() / self.window as f64;
-        if ms >= avg {
-            ms
-        } else {
-            avg
         }
     }
 }
@@ -249,6 +211,17 @@ pub(crate) fn channel_cutoff(sample_rate: f64, bandwidth_hz: f64) -> f64 {
     ((passband + stopband) / 2.0 / sample_rate).min(0.5)
 }
 
+/// `noiseReferenceMeanSquare` for this rate and bandwidth. Simulates on a keyed-cache miss.
+pub(crate) fn reference_for_bandwidth(sample_rate_hz: f64, bandwidth_hz: f64) -> f64 {
+    let bandwidth = if bandwidth_hz.is_finite() && bandwidth_hz > 0.0 {
+        bandwidth_hz
+    } else {
+        sample_rate_hz / 2.0
+    };
+    let cutoff = channel_cutoff(sample_rate_hz, bandwidth);
+    reference_mean_square_keyed(cutoff)
+}
+
 fn high_pass_coeffs(corner_fraction: f64) -> (f64, f64, f64, f64, f64) {
     let w0 = TAU * corner_fraction;
     let cos = w0.cos();
@@ -262,33 +235,80 @@ fn high_pass_coeffs(corner_fraction: f64) -> (f64, f64, f64, f64, f64) {
     (b0, b1, b2, a1, a2)
 }
 
-/// One decibel, only where a weak ±2.5 kHz tone quiets the skirt to ~5.5 dB.
-/// The noise tail in this band stays under 2 dB, so the lift does not open it.
-fn sensitivity_lift_db(bandwidth_hz: f64) -> f64 {
-    if (8_000.0..=20_000.0).contains(&bandwidth_hz) {
-        1.0
-    } else {
-        0.0
-    }
+#[derive(Default)]
+struct ReferenceCache {
+    by_key: Vec<(i32, f64)>,
+    by_bits: Vec<(u64, f64)>,
 }
 
-/// Channel reference. The cutoff is quantised to 1e-4, matching `noise-squelch.ts`
-/// `cutoff.toFixed(4)`, so a retune of a few hertz reuses the simulation.
-fn channel_reference_mean_square(cutoff: f64) -> f64 {
-    let rounded = (cutoff * 10_000.0).round() / 10_000.0;
-    reference_mean_square(rounded)
+fn cache() -> &'static Mutex<ReferenceCache> {
+    static CACHE: OnceLock<Mutex<ReferenceCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(ReferenceCache::default()))
 }
 
-fn reference_mean_square(cutoff: f64) -> f64 {
-    static CACHE: OnceLock<Mutex<Vec<(u64, f64)>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    let mut guard = cache.lock().unwrap_or_else(|err| err.into_inner());
-    let key = cutoff.to_bits();
-    if let Some((_, value)) = guard.iter().find(|(cached, _)| *cached == key) {
-        return *value;
+fn with_cache<T>(body: impl FnOnce(&mut ReferenceCache) -> T) -> T {
+    let mut guard = cache().lock().unwrap_or_else(|err| err.into_inner());
+    body(&mut guard)
+}
+
+/// `cutoff.toFixed(4)` for a positive cutoff (round half away from zero).
+fn cutoff_key(cutoff: f64) -> i32 {
+    (cutoff * 10_000.0).round() as i32
+}
+
+/// Frozen `NoiseMeter::new` reference. Cached by the exact cutoff bits.
+fn reference_mean_square_exact(cutoff: f64) -> f64 {
+    let bits = cutoff.to_bits();
+    if let Some(value) = with_cache(|cache| {
+        cache
+            .by_bits
+            .iter()
+            .find(|(cached, _)| *cached == bits)
+            .map(|(_, value)| *value)
+    }) {
+        return value;
     }
     let value = simulate_reference(cutoff);
-    guard.push((key, value));
+    with_cache(|cache| {
+        if let Some((_, existing)) = cache.by_bits.iter().find(|(cached, _)| *cached == bits) {
+            return *existing;
+        }
+        if cache.by_bits.len() >= REFERENCE_CACHE_LIMIT {
+            cache.by_bits.clear();
+        }
+        cache.by_bits.push((bits, value));
+        value
+    })
+}
+
+/// `noiseReferenceMeanSquare`: key is `cutoff.toFixed(4)`, the simulation uses the first
+/// caller's unrounded cutoff. A full cache is dropped before the new entry, as in TS.
+fn reference_mean_square_keyed(cutoff: f64) -> f64 {
+    let key = cutoff_key(cutoff);
+    if let Some(value) = with_cache(|cache| lookup_key(cache, key)) {
+        return value;
+    }
+    let value = simulate_reference(cutoff);
+    with_cache(|cache| remember_key(cache, key, value))
+}
+
+fn lookup_key(cache: &ReferenceCache, key: i32) -> Option<f64> {
+    cache
+        .by_key
+        .iter()
+        .find(|(cached, _)| *cached == key)
+        .map(|(_, value)| *value)
+}
+
+/// First caller wins. At [`REFERENCE_CACHE_LIMIT`] the cache is cleared, then the entry is stored.
+fn remember_key(cache: &mut ReferenceCache, key: i32, value: f64) -> f64 {
+    if let Some(existing) = lookup_key(cache, key) {
+        return existing;
+    }
+    if cache.by_key.len() >= REFERENCE_CACHE_LIMIT {
+        cache.by_key.clear();
+    }
+    cache.by_key.push((key, value));
     value
 }
 
@@ -360,4 +380,59 @@ fn mix32(state: u32) -> u32 {
     let t = (state ^ (state >> 15)).wrapping_mul(1_u32 | state);
     let mixed = t.wrapping_add((t ^ (t >> 7)).wrapping_mul(61_u32 | t)) ^ t;
     mixed ^ (mixed >> 14)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn full_band_constructor_matches_half_rate_bandwidth() {
+        let frozen = NoiseMeter::new(48_000.0);
+        let channel = NoiseMeter::with_bandwidth(48_000.0, 24_000.0);
+        assert_eq!(
+            frozen.reference_mean_square().to_bits(),
+            channel.reference_mean_square().to_bits()
+        );
+    }
+
+    #[test]
+    fn calibration_cold_time_cache_hit_and_bound() {
+        let mut rows = Vec::new();
+        for bandwidth in [2_500.0, 6_250.0, 12_500.0, 25_000.0] {
+            let cutoff = channel_cutoff(48_000.0, bandwidth);
+            let started = Instant::now();
+            let simulated = simulate_reference(cutoff);
+            let cold_us = started.elapsed().as_micros();
+            let _ = reference_for_bandwidth(48_000.0, bandwidth);
+            let started = Instant::now();
+            let cached = reference_for_bandwidth(48_000.0, bandwidth);
+            let hot_us = started.elapsed().as_micros();
+            let err_db = 10.0 * (cached / simulated).abs().log10();
+            assert!(
+                err_db.abs() < 1e-6,
+                "{bandwidth} Hz cache disagrees with a fresh simulation by {err_db} dB"
+            );
+            assert!(
+                hot_us < 2_000,
+                "{bandwidth} Hz cached lookup took {hot_us} µs"
+            );
+            rows.push((bandwidth, cold_us, hot_us));
+        }
+        for (bandwidth, cold_us, hot_us) in &rows {
+            println!("calibration_us bandwidth={bandwidth} cold={cold_us} hot={hot_us}");
+        }
+
+        let mut cache = ReferenceCache::default();
+        for key in 0..REFERENCE_CACHE_LIMIT {
+            assert_eq!(remember_key(&mut cache, key as i32, 1.0), 1.0);
+        }
+        assert_eq!(cache.by_key.len(), REFERENCE_CACHE_LIMIT);
+        assert_eq!(remember_key(&mut cache, 10, 2.0), 1.0, "first caller wins");
+        assert_eq!(cache.by_key.len(), REFERENCE_CACHE_LIMIT);
+        assert_eq!(remember_key(&mut cache, 10_000, 3.0), 3.0);
+        assert_eq!(cache.by_key.len(), 1);
+        assert_eq!(lookup_key(&cache, 10_000), Some(3.0));
+    }
 }
