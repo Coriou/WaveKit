@@ -2,10 +2,11 @@
  * Discovery store (spec § 7): turns observations into deduplicated discoveries.
  *
  * Association per observation (§ 7.2): sticky (nearest same-family discovery whose median centre is
- * within the § 5.2 tolerance), then the fixed frequency key with the co-channel rules 2–4. Creation
- * passes the surfacing filter (a)–(d); anything else is a transient. Confidence follows the ladder
- * (§ 7.3): monotone, except a leak/intermod cap recorded before a decode. Every mutation emits one
- * journal entry whose payload holds the resulting records, so replay is an idempotent upsert.
+ * within the § 5.2 tolerance), then the fixed frequency key with the co-channel rules 2–4. A track
+ * creates or updates a discovery only when `track.gate` is `passed`; an absent gate is pending.
+ * Protocol and confidence come from `labelFromEvidence`, never from a hypothesis. Confidence is
+ * monotone, except a leak/intermod cap recorded before a decode. Every mutation emits one journal
+ * entry whose payload holds the resulting records, so replay is an idempotent upsert.
  */
 import { EventEmitter } from "node:events"
 import { WaveKitError } from "../../../utils/errors.js"
@@ -19,6 +20,15 @@ import {
 	snapToRaster,
 } from "../bandplan/index.js"
 import { familyOf } from "../classify/classifier.js"
+import {
+	identityFitsProtocol,
+	labelFromEvidence,
+} from "../classify/label-from-evidence.js"
+import type { EvidenceLabel } from "../classify/label-from-evidence.js"
+import type {
+	ProofDecodeInput,
+	ProofInput,
+} from "../scanner-redesign-contract.js"
 import { CONFIDENCE_RANK } from "../types.js"
 import type {
 	Classification,
@@ -55,6 +65,9 @@ import { CentreIndex } from "./frequency-index.js"
 import { JobCounts } from "./job-counts.js"
 import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
+
+export { labelFromEvidence } from "../classify/label-from-evidence.js"
+export type { EvidenceLabel } from "../classify/label-from-evidence.js"
 
 export type StoreChange =
 	| "created"
@@ -132,7 +145,7 @@ export interface RecordingCommitPlan {
 
 /**
  * WG2 req 13.1: an observation newly credited to jobs by one ingest (its first placement, or jobs
- * joining a placed observation). A promoted single-block hit credits every pending observation.
+ * joining a placed observation).
  */
 export interface Attribution {
 	observationId: string
@@ -153,11 +166,6 @@ const LINKS_MAX = 64
 export const OBSERVATIONS_PER_DISCOVERY = 256
 const OBSERVATION_DECODE_MAX = 16
 const MEDIAN_WINDOW = 64
-const SINGLE_BLOCK_HITS = 3
-const SINGLE_BLOCK_WINDOW_MS = 10 * 60_000
-const SINGLE_BLOCK_EXTRA_DB = 6
-const BURST_EXTRA_DB = 3 // spec § 4.10: k_short + 3 dB
-const MAX_PENDING_KEYS = 4096
 const MAX_FLAGGED_IDS = 4096
 const DEFAULT_LIMIT = 100
 const MAX_LIMIT = 500
@@ -337,39 +345,44 @@ function sameIdentity(
 	return a.kind === b.kind && a.value === b.value
 }
 
-function observedProtocol(c: Classification): ScannerProtocol {
-	const top = c.hypotheses[0]
-	if (top !== undefined && top.score >= 0.5) return top.protocol
-	if (c.class === "analog-fm") return "analog-fm"
-	if (c.class === "carrier") return "carrier"
-	return "unknown"
+/** No trial evidence yet. Analog and the digital plan arrive with the evidence sink. */
+function emptyProof(obs: ObservationInput): ProofInput {
+	return {
+		observationId: obs.id,
+		decodes: [],
+		trials: [],
+		analog: [],
+		unavailable: [],
+		trust: obs.track.tuningTrust,
+		digitalPlanComplete: false,
+	}
 }
 
-/** § 7.3 ladder value a classification supports on its own. */
-function ladderOf(c: Classification): ScannerConfidence {
-	const top = c.hypotheses[0]
-	const strong = top !== undefined && top.score >= 0.5
-	const known =
-		c.class !== "carrier" && c.class !== "wideband" && c.class !== "unknown"
-	if (c.tier === "channel" && c.cap === undefined && strong && known)
-		return "classified"
-	if (strong || c.class !== "unknown") return "candidate"
-	return "activity"
-}
-
-/** § 7.2 (c): a classification counts as attached when it names something real. */
-function classificationAttached(c: Classification): boolean {
-	const top = c.hypotheses[0]
-	if (
-		top !== undefined &&
-		top.score >= 0.5 &&
-		top.protocol !== "unknown" &&
-		top.protocol !== "carrier"
-	)
-		return true
-	return (
-		c.class !== "unknown" && c.class !== "carrier" && c.class !== "wideband"
-	)
+/** One decode, as the store holds it. Replay transport arrives with the evidence sink. */
+function proofOfDecode(
+	observationId: string,
+	ev: DecodeEvidence,
+	trust: TrackSnapshot["tuningTrust"],
+): ProofInput {
+	const decode: ProofDecodeInput = {
+		protocol: ev.protocol,
+		transport: ev.origin === "ambient" ? "ambient" : "live",
+		at: ev.at,
+		encrypted: ev.encrypted === true,
+	}
+	if (ev.identity !== undefined)
+		decode.identity = { kind: ev.identity.kind, value: ev.identity.value }
+	const talkgroup = ev.metadata.talkgroups?.[0]
+	if (talkgroup !== undefined) decode.talkgroup = talkgroup
+	return {
+		observationId,
+		decodes: [decode],
+		trials: [],
+		analog: [],
+		unavailable: [],
+		trust,
+		digitalPlanComplete: false,
+	}
 }
 
 function moreSpecific(
@@ -433,13 +446,13 @@ export class DiscoveryStore extends EventEmitter {
 	private maxDiscoveries: number
 	private readonly now: () => number
 	private readonly newId: () => string
+	/** Accepted for the frame display role (R 2.5). Creation follows `track.gate`. */
 	private minSurfaceBlocks: number
 	private readonly rastersFor: (sourceId: string, centreHz: number) => Raster[]
 	private readonly discoveries = new Map<string, Discovery>()
 	private readonly observationIndex = new Map<string, Observation>()
 	private readonly byDiscovery = new Map<string, Observation[]>()
 	private readonly bySource = new Map<string, Set<string>>()
-	private readonly pending = new Map<string, ObservationInput[]>()
 	/**
 	 * Observation ids seen with truncated/iqImage/spur (in-memory, newest 4096). Defence in depth: the
 	 * tracker never clears these flags, so a later snapshot always carries them; the store does not rely on it.
@@ -507,47 +520,37 @@ export class DiscoveryStore extends EventEmitter {
 	ingest(input: ObservationInput): Ingested {
 		const flagged = this.rememberStickyFlags(input) // may be raised late (P3, § 4.9)
 		const known = this.observationIndex.get(input.id)
-		if (known !== undefined)
-			return flagged ? this.retract(known) : this.reingest(known, input)
-		if (flagged) {
-			this.dropPending(input.id)
-			return TRANSIENT
+		if (known !== undefined) {
+			if (flagged) return this.retract(known)
+			if (input.track.gate !== "passed") return TRANSIENT
+			return this.reingest(known, input)
 		}
+		if (flagged) return TRANSIENT
 		if (input.jobIds.length === 0) return TRANSIENT
-		const obs = this.withPendingBurst(input)
-		const edge = obs.track.flags.edge
-		const protocol = edge ? "unknown" : observedProtocol(obs.classification)
-		const family = familyOf(protocol)
-		const sticky = this.stickyMatch(obs, family)
+		if (input.track.gate !== "passed") return TRANSIENT
+		const label = labelFromEvidence(emptyProof(input))
+		const sticky = this.stickyMatch(input, label.family)
 		if (sticky !== undefined)
 			return this.commit("observation", op =>
-				this.addObservation(op, sticky, obs),
+				this.addObservation(op, sticky, input),
 			)
 		const place = this.placement(
-			obs.sourceId,
-			obs.track.centreHz,
-			obs.track.obwHz,
+			input.sourceId,
+			input.track.centreHz,
+			input.track.obwHz,
 		)
 		const target = this.keyTarget(
-			obs.sourceId,
+			input.sourceId,
 			place.key,
-			family,
-			obs.classification.class,
+			label.family,
+			input.classification.class,
 		)
 		const into = target.merge
 		if (into !== null)
 			return this.commit("observation", op =>
-				this.addObservation(op, into, obs),
+				this.addObservation(op, into, input),
 			)
-		if (!this.surfaces(obs))
-			return this.singleBlockHit(
-				obs,
-				place.key,
-				protocol,
-				family,
-				target.coChannel,
-			)
-		return this.createFrom([obs], protocol, family, target.coChannel)
+		return this.createFrom(input, label, target.coChannel)
 	}
 
 	/**
@@ -556,7 +559,8 @@ export class DiscoveryStore extends EventEmitter {
 	 * (§ 6.2); it is ignored once the discovery is `decoded` (P8). The discovery may be merged away by
 	 * `settle()`; use `discoveryIdOf(observationId)` for the survivor. Only evidence that carries an
 	 * identity confirms (`decoded`, § 6.6); evidence without one records metadata and `encrypted` and may
-	 * only refine the protocol (as a classification does).
+	 * only refine the protocol (as a classification does). Evidence whose identity does not fit its
+	 * protocol (`identityFitsProtocol`) is ignored entirely: nothing is assigned, routed or journaled.
 	 */
 	applyEvidence(
 		discoveryId: string,
@@ -565,6 +569,11 @@ export class DiscoveryStore extends EventEmitter {
 	): StoreChange | null {
 		const d = this.discoveries.get(discoveryId)
 		if (d === undefined || !ev.crcClean) return null
+		if (
+			ev.identity !== undefined &&
+			!identityFitsProtocol(ev.protocol, ev.identity)
+		)
+			return null
 		if (
 			ev.identity !== undefined &&
 			d.identity !== undefined &&
@@ -1203,7 +1212,6 @@ export class DiscoveryStore extends EventEmitter {
 		this.observationIndex.clear()
 		this.byDiscovery.clear()
 		this.bySource.clear()
-		this.pending.clear()
 		this.flaggedIds.clear()
 		this.corrections.clear()
 		this.appliedSeq = 0
@@ -1331,74 +1339,22 @@ export class DiscoveryStore extends EventEmitter {
 		return { merge: null, coChannel: atKey.map(d => d.id) }
 	}
 
-	private surfaces(obs: ObservationInput): boolean {
-		const t = obs.track
-		if (t.flags.burst) return t.maxBlockSnrDb >= t.thresholdDb + BURST_EXTRA_DB // otherwise rule (d) repetition only
-		if (t.blocks >= this.minSurfaceBlocks) return true
-		if (
-			obs.singleBlockSurfacingAllowed &&
-			t.maxBlockSnrDb >= t.thresholdDb + SINGLE_BLOCK_EXTRA_DB
-		)
-			return true
-		// (c) needs a channel-tier class: a spectral class is derived from the same single block of energy and cannot vouch for it
-		return (
-			!t.flags.edge &&
-			obs.classification.tier === "channel" &&
-			classificationAttached(obs.classification)
-		)
-	}
-
-	private singleBlockHit(
-		obs: ObservationInput,
-		key: string,
-		protocol: ScannerProtocol,
-		family: ProtocolFamily,
-		coChannel: string[],
-	): Ingested {
-		const pendingKey = `${obs.sourceId}|${key}`
-		const hits = (this.pending.get(pendingKey) ?? []).filter(
-			h =>
-				h.id !== obs.id &&
-				Math.abs(obs.startedAt - h.startedAt) <= SINGLE_BLOCK_WINDOW_MS,
-		)
-		hits.push(obs)
-		this.pending.delete(pendingKey)
-		if (hits.length < SINGLE_BLOCK_HITS) {
-			this.pending.set(pendingKey, hits)
-			if (this.pending.size > MAX_PENDING_KEYS) {
-				const oldest = this.pending.keys().next()
-				if (oldest.done !== true) this.pending.delete(oldest.value)
-			}
-			return TRANSIENT
-		}
-		hits.sort((a, b) => a.startedAt - b.startedAt || compareText(a.id, b.id))
-		return this.createFrom(hits, protocol, family, coChannel)
-	}
-
 	private createFrom(
-		hits: ObservationInput[],
-		protocol: ScannerProtocol,
-		family: ProtocolFamily,
+		obs: ObservationInput,
+		label: EvidenceLabel,
 		coChannel: string[],
 	): Ingested {
-		const [first, ...rest] = hits
-		if (first === undefined || !this.makeRoom()) return TRANSIENT
+		if (!this.makeRoom()) return TRANSIENT
 		return this.commit("observation", op => {
-			const d = this.newDiscovery(op, first, protocol, family, coChannel)
-			let id = this.addObservation(op, d, first)
-			for (const hit of rest) {
-				const current = this.discoveries.get(id)
-				if (current !== undefined) id = this.addObservation(op, current, hit)
-			}
-			return id
+			const d = this.newDiscovery(op, obs, label, coChannel)
+			return this.addObservation(op, d, obs)
 		})
 	}
 
 	private newDiscovery(
 		op: Op,
 		obs: ObservationInput,
-		protocol: ScannerProtocol,
-		family: ProtocolFamily,
+		label: EvidenceLabel,
 		coChannel: string[],
 	): Discovery {
 		const place = this.placement(
@@ -1414,12 +1370,10 @@ export class DiscoveryStore extends EventEmitter {
 			frequencyKey: place.key,
 			measuredOffsetHz: 0,
 			bandwidthHz: Math.round(obs.track.obwHz),
-			protocol,
-			family,
+			protocol: label.protocol,
+			family: label.family,
 			class: obs.track.flags.edge ? "unknown" : obs.classification.class,
-			confidence: obs.track.flags.edge
-				? "activity"
-				: ladderOf(obs.classification),
+			confidence: label.confidence,
 			encrypted: false,
 			coChannel: coChannel
 				.filter(id => this.discoveries.has(id))
@@ -1443,7 +1397,6 @@ export class DiscoveryStore extends EventEmitter {
 			op.discoveries.add(other.id)
 			mark(op, other.id, "updated")
 		}
-		this.pending.delete(`${obs.sourceId}|${place.key}`)
 		op.discoveries.add(d.id)
 		mark(op, d.id, "created")
 		return d
@@ -1513,7 +1466,6 @@ export class DiscoveryStore extends EventEmitter {
 	 */
 	private retract(known: Observation): Ingested {
 		const d = this.discoveries.get(known.discoveryId)
-		this.dropPending(known.id)
 		if (d === undefined) return TRANSIENT
 		const op = newOp()
 		this.unlinkObservation(known)
@@ -1551,35 +1503,6 @@ export class DiscoveryStore extends EventEmitter {
 			if (oldest.done !== true) this.flaggedIds.delete(oldest.value)
 		}
 		return true
-	}
-
-	/**
-	 * Defence in depth: `burst` is the one track flag that clears, and the pipeline only moves it true →
-	 * false (Task 10a), so its latest value already is the AND over the track's snapshots. The store keeps
-	 * that AND without relying on it: a pending hit whose earlier snapshot was not a burst is never a burst
-	 * again. Only pending hits matter, because surfacing is decided at creation.
-	 */
-	private withPendingBurst(obs: ObservationInput): ObservationInput {
-		if (!obs.track.flags.burst) return obs
-		for (const hits of this.pending.values()) {
-			const earlier = hits.find(h => h.id === obs.id)
-			if (earlier === undefined) continue
-			if (earlier.track.flags.burst) return obs
-			return {
-				...obs,
-				track: { ...obs.track, flags: { ...obs.track.flags, burst: false } },
-			}
-		}
-		return obs
-	}
-
-	private dropPending(observationId: string): void {
-		for (const [key, hits] of this.pending) {
-			if (!hits.some(h => h.id === observationId)) continue
-			const rest = hits.filter(h => h.id !== observationId)
-			if (rest.length === 0) this.pending.delete(key)
-			else this.pending.set(key, rest)
-		}
 	}
 
 	private absorbStats(
@@ -1626,41 +1549,31 @@ export class DiscoveryStore extends EventEmitter {
 		if (c.cap !== undefined && !decoded) {
 			if (d.confidenceCap !== c.cap) this.touch(d)
 			d.confidenceCap = c.cap
-		}
-		const p = observedProtocol(c)
-		if (!decoded && moreSpecific(d.protocol, p)) {
-			// moreSpecific(x, p) implies p !== x
-			d.protocol = p
-			d.family = familyOf(p)
-			this.touch(d)
+			// A cap never raises the ladder. It only pulls a restored classified record down.
+			if (rank(d.confidence) > rank("candidate")) {
+				d.confidence = "candidate"
+				this.touch(d)
+			}
 		}
 		if (!decoded && c.class !== "unknown") {
 			if (d.class !== c.class) this.touch(d)
 			d.class = c.class
 		}
-		// raise then clamp, decided before the write: a raise the cap undoes is no change
-		let confidence = maxConfidence(d.confidence, ladderOf(c))
-		if (
-			d.confidenceCap !== undefined &&
-			confidence !== "decoded" &&
-			rank(confidence) > rank("candidate")
-		)
-			confidence = "candidate"
-		if (confidence !== d.confidence) this.touch(d)
-		d.confidence = confidence
 	}
 
 	private decodeInto(d: Discovery, ev: DecodeEvidence): void {
 		// evidence without an identity is no confirm (§ 6.6): it may only refine the protocol, never switch the
 		// family, or settle() could merge an analog discovery into its co-channel digital twin irreversibly
 		this.markDirty(d.id)
+		const label = labelFromEvidence(proofOfDecode(d.id, ev, d.tuningTrust))
 		const adopt =
-			ev.identity !== undefined
-				? d.protocol !== ev.protocol
-				: moreSpecific(d.protocol, ev.protocol)
+			label.protocol !== "unknown" &&
+			(ev.identity !== undefined
+				? d.protocol !== label.protocol
+				: moreSpecific(d.protocol, label.protocol))
 		if (adopt) {
-			d.protocol = ev.protocol
-			d.family = familyOf(ev.protocol)
+			d.protocol = label.protocol
+			d.family = label.family
 			this.touch(d)
 		}
 		if (d.identity === undefined && ev.identity !== undefined) {
@@ -1692,7 +1605,7 @@ export class DiscoveryStore extends EventEmitter {
 			md.ctcssHz = m.ctcssHz
 		}
 		// § 6.6: a confirm is the first accepted identity; evidence without one (accepted TG/SRC/encrypted only) is recorded but confirms nothing
-		if (ev.identity !== undefined) {
+		if (ev.identity !== undefined && label.confidence === "decoded") {
 			const confidence = maxConfidence(
 				d.confidence,
 				d.confidenceCap !== undefined ? "candidate" : "decoded",

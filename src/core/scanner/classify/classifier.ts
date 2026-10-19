@@ -150,6 +150,10 @@ export function applyPriors(
 	)
 }
 
+/**
+ * Measurement and trial order only. The result does not set a discovery's
+ * protocol, family or confidence; `labelFromEvidence` does that.
+ */
 export function classifySpectral(
 	track: TrackSnapshot,
 	ctx: {

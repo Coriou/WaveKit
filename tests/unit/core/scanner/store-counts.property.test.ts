@@ -4,6 +4,8 @@ import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-sto
 import {
 	classification,
 	counterIds,
+	dmrCc,
+	evidence,
 	makeObs,
 } from "../../../mocks/scanner/observations.js"
 import { newCtx, recount, step } from "./store-index-ops.js"
@@ -36,7 +38,7 @@ describe("discovery store job counts (WG11 SC)", () => {
 		)
 	}, 60_000)
 
-	it("returns a copy, zeros for an unknown job, and follows a cap downgrade", () => {
+	it("returns a copy, zeros for an unknown job, and follows evidence and a cap downgrade", () => {
 		const store = new DiscoveryStore({
 			maxDiscoveries: 10,
 			now: () => 0,
@@ -60,10 +62,27 @@ describe("discovery store job counts (WG11 SC)", () => {
 			}),
 		)
 		const id = r.discoveryId ?? ""
-		expect(store.get(id)?.confidence).toBe("classified")
+		// A prior-only hypothesis leaves the ladder at activity.
+		expect(store.get(id)?.protocol).toBe("unknown")
+		expect(store.get(id)?.confidence).toBe("activity")
 		const copy = store.countsByJob("j")
-		expect(copy.classified).toBe(1)
-		copy.classified = 99
+		expect(copy.activity).toBe(1)
+		copy.activity = 99
+		expect(store.countsByJob("j").activity).toBe(1)
+		store.applyEvidence(id, evidence("dmr", 2_000, { identity: dmrCc(1) }))
+		expect(store.get(id)?.confidence).toBe("decoded")
+		expect(store.countsByJob("j")).toEqual({
+			activity: 0,
+			candidate: 0,
+			classified: 0,
+			decoded: 1,
+		})
+		// A stored classified record still drops to candidate when a cap is recorded.
+		const snap = store.snapshot()
+		const saved = snap.discoveries[0]
+		expect(saved).toBeDefined()
+		if (saved !== undefined) saved.confidence = "classified"
+		store.restore(snap)
 		expect(store.countsByJob("j").classified).toBe(1)
 		store.applyClassification(
 			id,
@@ -75,6 +94,7 @@ describe("discovery store job counts (WG11 SC)", () => {
 			),
 		)
 		expect(store.get(id)?.confidence).toBe("candidate")
+		expect(store.get(id)?.confidenceCap).toBe("adjacent-leak")
 		expect(store.countsByJob("j")).toEqual({
 			activity: 0,
 			candidate: 1,

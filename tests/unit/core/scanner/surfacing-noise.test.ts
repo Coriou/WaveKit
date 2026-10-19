@@ -94,16 +94,12 @@ describe("surfacing filter on heavy-tailed noise, end to end (§ 7.2)", () => {
 		"never surfaces a single-block noise track on its spectral class alone (seed %i)",
 		seed => {
 			// 25 ms events, 60× the calibrated rate: longer than a burst (≤ 15 ms) so the long path owns them,
-			// shorter than a block so most cross k in one block only, and every such track gets a spectral class
+			// shorter than a block so most cross k in one block only, and every such track gets a spectral class.
+			// These pipeline tracks carry no gate. An absent gate is pending, so none become discoveries.
 			const run = surfaceFromNoise(seed, { eventsPerMhzMin: 60, eventMs: 25 })
 			expect(run.tracks.filter(singleBlockLongPath).length).toBeGreaterThan(0)
-			// rules (a) and the burst rule may still surface noise here (P4/P20 calibration, Task 49); rule (c) may not,
-			// and rule (d) creates only on the third hit
-			expect(
-				run.created.filter(
-					c => singleBlockLongPath(c.track) && c.observations < 3,
-				),
-			).toEqual([])
+			expect(run.discoveries).toBe(0)
+			expect(run.created).toEqual([])
 		},
 		120_000,
 	)

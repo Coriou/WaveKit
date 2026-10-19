@@ -60,21 +60,23 @@ describe("discovery store change detection (WG11 SC, req 3.4)", () => {
 		expect(before).toBeLessThanOrEqual(afterEv)
 	})
 
-	it("a raise the cap undoes in the same call is no change, as the old before/after compare", () => {
+	it("a hypothesis does not raise confidence, and a repeated classification is no change", () => {
 		const { store, entries } = setup()
 		const id =
 			store.ingest(fm("o1", 1_000, { cap: "adjacent-leak", tier: "channel" }))
 				.discoveryId ?? ""
-		expect(store.get(id)?.confidence).toBe("candidate")
+		expect(store.get(id)?.protocol).toBe("unknown")
+		expect(store.get(id)?.confidence).toBe("activity")
+		expect(store.get(id)?.confidenceCap).toBe("adjacent-leak")
 		const n = entries.length
 		expect(
 			store.applyClassification(
 				id,
-				// on its own this supports "classified"; the recorded cap clamps it back to "candidate"
 				classification("analog-fm", [["analog-fm", 0.9]], undefined, "channel"),
 			),
 		).toBeNull()
 		expect(entries.length).toBe(n)
+		expect(store.get(id)?.confidence).toBe("activity")
 	})
 
 	it("still journals a real change: a new talkgroup order, a moved centre, a joined job", () => {
