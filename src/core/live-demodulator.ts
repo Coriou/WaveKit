@@ -26,10 +26,12 @@ import type * as http from "node:http"
 import { Transform, type Readable } from "node:stream"
 import { z } from "zod"
 import {
+	DCS_STANDARD_CODES,
 	LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_SQUELCH_MODES,
+	type AnalogTransmissionDcs,
 	type LiveAudioSquelchMode,
 } from "@wavekit/api-types"
 import {
@@ -58,6 +60,7 @@ import {
 	systemSilenceClock,
 	type SilenceFillClock,
 } from "./live-audio-silence.js"
+import { isCtcssToneHz } from "./audio-tones/ctcss.js"
 import {
 	ToneSquelchGate,
 	type ToneSquelchTone,
@@ -142,6 +145,15 @@ export interface LiveDemodStatus {
 	agc?: "off" | "slow" | "fast"
 	/** WG7 req 3.4: tone squelch gate state, while running. */
 	toneSquelch?: { state: "off" | "waiting" | "open" }
+	/**
+	 * WG12 req 6.4: current or last closed transmission's tone, while running.
+	 * Absent until one is reported; cleared on retune and stop.
+	 */
+	tone?: {
+		ctcssHz: number | null
+		dcs: AnalogTransmissionDcs | null
+		at: string
+	}
 }
 
 /** reconfigure() input; `agc: null` deletes the key (modulation default). */
@@ -347,6 +359,19 @@ export class LiveDemodulator extends EventEmitter {
 	 */
 	private closeOverride: "stopped" | "config" | null = null
 	/**
+	 * WG12 req 6.4: tone of the current or last closed transmission. Shown by
+	 * getStatus() only while HTTP is listening. Cleared on retune and stop.
+	 * `channelGeneration` starts at 0 and increments on each clear.
+	 * `channelSinceMs` is that clear's time (0 before the first clear).
+	 */
+	private channelTone: {
+		ctcssHz: number | null
+		dcs: AnalogTransmissionDcs | null
+		at: string
+	} | null = null
+	private channelGeneration = 0
+	private channelSinceMs = 0
+	/**
 	 * `stop()` won over an in-flight `start()`. The handshake must not adopt a
 	 * run or bring HTTP up after `stop()` has begun.
 	 */
@@ -500,6 +525,7 @@ export class LiveDemodulator extends EventEmitter {
 
 	async stop(): Promise<void> {
 		this.stopRequested = true
+		this.clearChannelTone()
 		this.stopAdmission()
 		if (!this.http.listening && !this.run && !this.rustRuns.hasPendingStart()) {
 			this.log.warn("Live demodulator not running")
@@ -585,6 +611,10 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.config = validated
+		// WG12 req 6.4: a centre move (offset) or a source change leaves the channel.
+		// Squelch-only changes keep the tone of the transmission still on frequency.
+		if (sourceChanged || changedPipelineKeys.includes("offsetHz"))
+			this.clearChannelTone()
 		// WG1 req 3.6: any change that restarts the pipeline, or changes one of
 		// the transmission identity fields, closes an open transmission as "config".
 		const restarting = active && (pipelineChanged || sourceChanged)
@@ -716,8 +746,87 @@ export class LiveDemodulator extends EventEmitter {
 		if (this.lastError) status.lastError = this.lastError
 		status.agc = effectiveAgc(this.config.modulation, this.config.agc)
 		if (run) status.toneSquelch = { state: toneSquelchState(run) }
+		if (this.http.listening && this.channelTone !== null)
+			status.tone = copyChannelTone(this.channelTone)
 
 		return status
+	}
+
+	/**
+	 * WG12 req 6.4: remember the current or last closed transmission's tone.
+	 * Off-table CTCSS or DCS becomes null. An empty or over-long `at` is ignored.
+	 * `null` clears the remembered tone and does not start a new channel.
+	 * Stop, a centre retune, and an offset or source change do both.
+	 *
+	 * A note from the previous channel is ignored. Pass `startedAt` (ISO time
+	 * the transmission opened): a start strictly before the latest clear is
+	 * the old channel. Or pass `generation`, the value of the channel
+	 * generation when that transmission opened: any other generation is the
+	 * old channel. When both are passed, either one is enough to ignore the
+	 * note. A note with neither applies to the current channel. getStatus()
+	 * omits the tone until running.
+	 */
+	noteTransmissionTone(
+		tone: {
+			ctcssHz: number | null
+			dcs: AnalogTransmissionDcs | null
+			at: string
+			startedAt?: string
+			generation?: number
+		} | null,
+	): void {
+		if (tone === null) {
+			this.channelTone = null
+			return
+		}
+		if (
+			typeof tone.at !== "string" ||
+			tone.at.length === 0 ||
+			tone.at.length > 64
+		)
+			return
+		if (!this.toneOnCurrentChannel(tone)) return
+		this.channelTone = {
+			ctcssHz:
+				typeof tone.ctcssHz === "number" && isCtcssToneHz(tone.ctcssHz)
+					? tone.ctcssHz
+					: null,
+			dcs: standardDcs(tone.dcs),
+			at: tone.at,
+		}
+	}
+
+	/** Drop the tone and open a new channel generation (WG12 req 6.4). */
+	private clearChannelTone(): void {
+		this.channelGeneration += 1
+		this.channelSinceMs = Date.now()
+		this.channelTone = null
+	}
+
+	/**
+	 * True when the note is for the channel since the latest clear. A start
+	 * time is compared in milliseconds; a transmission that opened in the
+	 * same millisecond as the clear is kept.
+	 */
+	private toneOnCurrentChannel(tone: {
+		startedAt?: string
+		generation?: number
+	}): boolean {
+		const generation: unknown = tone.generation
+		if (generation !== undefined) {
+			if (
+				typeof generation !== "number" ||
+				!Number.isInteger(generation) ||
+				generation !== this.channelGeneration
+			)
+				return false
+		}
+		const startedAt: unknown = tone.startedAt
+		if (startedAt === undefined) return true
+		if (typeof startedAt !== "string") return false
+		const started = Date.parse(startedAt)
+		if (!Number.isFinite(started)) return false
+		return started >= this.channelSinceMs
 	}
 
 	/** Scanner activity adapter: running gate only; stopped/failed is closed. */
@@ -1052,6 +1161,8 @@ export class LiveDemodulator extends EventEmitter {
 
 		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
 			if (sourceId !== this.activeSourceId) return
+			// WG12 req 6.4: a centre retune leaves the channel even when the DSP stays up.
+			this.clearChannelTone()
 			// Retunes can retain the DSP pipeline but invalidate its floor estimate.
 			// WG9 req 5.6: the reset stays; the floor it drops is remembered so the
 			// first block after it seeds from the lower of that and the new power.
@@ -1792,6 +1903,36 @@ export class LiveDemodulator extends EventEmitter {
 
 /** Tone gate decisions apply to PCM slices of at most this length (WG7 req 3.2). */
 const TONE_SLICE_MS = 10
+const DCS_STANDARD: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
+
+function copyChannelTone(tone: {
+	ctcssHz: number | null
+	dcs: AnalogTransmissionDcs | null
+	at: string
+}): {
+	ctcssHz: number | null
+	dcs: AnalogTransmissionDcs | null
+	at: string
+} {
+	return {
+		ctcssHz: tone.ctcssHz,
+		dcs:
+			tone.dcs === null
+				? null
+				: { code: tone.dcs.code, polarity: tone.dcs.polarity },
+		at: tone.at,
+	}
+}
+
+/** An off-table or malformed DCS code is no tone (WG12 req 6.4). */
+function standardDcs(
+	dcs: AnalogTransmissionDcs | null,
+): AnalogTransmissionDcs | null {
+	if (dcs === null || typeof dcs !== "object") return null
+	if (dcs.polarity !== "normal" && dcs.polarity !== "inverted") return null
+	if (typeof dcs.code !== "string" || !DCS_STANDARD.has(dcs.code)) return null
+	return { code: dcs.code, polarity: dcs.polarity }
+}
 
 /** The configured tone of a tone squelch gate, or null (absent, `none` or not NFM). */
 function configuredTone(config: LiveDemodConfig): ToneSquelchTone | null {
