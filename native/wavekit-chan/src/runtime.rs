@@ -7,14 +7,18 @@
 use crate::{
     admission,
     args::Args,
-    channel::{ChannelDsp, ChannelSpec},
+    channel::{ChannelDsp, ChannelSpec, ProcessOutcome},
     convert::InputAssembler,
+    demod_channel::DemodChannel,
     disposal::{
         self, Admission, AttemptPermits, Disposal, PayloadPublisher, RuntimePermits,
         WriterPublisher, SLOTS,
     },
     preparation::{Planner, Prepared, SubmitError},
-    protocol::{parse_observed_request, parse_request, ObservedRequest, OpenReq, Request},
+    protocol::{
+        parse_observed_request, parse_request, DemodOpen, ObservedRequest, OpenReq, Request,
+        RetuneReq, SquelchReq, DEMOD_OUTPUT_RATE_HZ, MAX_CONTROL_LINE_BYTES,
+    },
     queue::ChannelQueue,
 };
 use serde_json::{json, Value};
@@ -59,11 +63,47 @@ struct Conn {
 }
 type ConnSlot = Arc<Mutex<Conn>>;
 
+/// IQ and demod share the main-thread DSP loop. The socket writer does not know which it is.
+/// Both engines are boxed so the channel map does not carry the larger DSP state inline.
+enum Engine {
+    Iq(Box<ChannelDsp>),
+    Demod(Box<DemodChannel>),
+}
+
+impl Engine {
+    fn reset(&mut self) {
+        match self {
+            Engine::Iq(dsp) => dsp.reset(),
+            Engine::Demod(dsp) => dsp.reset(),
+        }
+    }
+
+    fn output_rate(&self) -> u64 {
+        match self {
+            Engine::Iq(dsp) => dsp.output_rate(),
+            Engine::Demod(_) => DEMOD_OUTPUT_RATE_HZ,
+        }
+    }
+
+    fn process(
+        &mut self,
+        i: &[f32],
+        q: &[f32],
+        out: &mut Vec<u8>,
+        events: &mut Vec<Value>,
+    ) -> ProcessOutcome {
+        match self {
+            Engine::Iq(dsp) => dsp.process(i, q, out),
+            Engine::Demod(dsp) => dsp.process(i, q, out, events),
+        }
+    }
+}
+
 struct Open {
     /// Distinguishes this channel from an earlier one with the same id, so a late `client-gone`
     /// from the old writer cannot close the new channel.
     serial: u64,
-    dsp: ChannelDsp,
+    dsp: Engine,
     queue: Arc<ChannelQueue>,
     socket: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
@@ -196,6 +236,9 @@ impl Runtime {
         }
         match req {
             Request::Open(o) => self.open(o, None),
+            Request::OpenDemod(o) => self.open_demod(o),
+            Request::Retune(req) => self.retune(req),
+            Request::Squelch(req) => self.squelch(req),
             Request::Close { id } => self.close(&id, "requested"),
             Request::MarkGap {
                 at_input_byte,
@@ -448,7 +491,7 @@ impl Runtime {
             o.id.clone(),
             Open {
                 serial,
-                dsp,
+                dsp: Engine::Iq(Box::new(dsp)),
                 queue,
                 socket: socket.clone(),
                 writer: Some(writer),
@@ -471,6 +514,117 @@ impl Runtime {
             "filterTaps": taps,
             "groupDelaySamples": delay,
         }));
+    }
+
+    /// Demod opens are planned on this thread. The decimator depends only on the input rate and
+    /// is cached, so this does not take the IQ planner's worker.
+    fn open_demod(&mut self, o: DemodOpen) {
+        if self.channels.contains_key(&o.id) || self.pending.contains_key(&o.id) {
+            return self.reject(
+                &o.id,
+                "channel-request-invalid",
+                "duplicate channel id".into(),
+            );
+        }
+        let sample_bytes = o.format.sample_bytes();
+        if o.queue_bytes < sample_bytes {
+            let detail = format!("queueBytes below one {} sample", o.format.as_str());
+            return self.reject(&o.id, "channel-request-invalid", detail);
+        }
+        let serial = self.next_serial;
+        let Some(next) = serial.checked_add(1) else {
+            return self.reject(
+                &o.id,
+                "channel-request-invalid",
+                "channel serial exhausted".into(),
+            );
+        };
+        let dsp = match DemodChannel::new(self.args.input_rate, self.args.input_center, &o) {
+            Ok(dsp) => dsp,
+            Err(detail) => return self.reject(&o.id, "channel-request-invalid", detail),
+        };
+        let queue = Arc::new(ChannelQueue::new(o.queue_bytes, sample_bytes));
+        let socket = self.args.socket_dir.join(format!("{}.sock", o.id));
+        let _ = std::fs::remove_file(&socket);
+        let listener = match UnixListener::bind(&socket).and_then(|l| {
+            l.set_nonblocking(true)?;
+            Ok(l)
+        }) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = std::fs::remove_file(&socket);
+                return self.reject(
+                    &o.id,
+                    "channel-request-invalid",
+                    format!("bind {}: {e}", socket.display()),
+                );
+            }
+        };
+        let conn: ConnSlot = Arc::new(Mutex::new(Conn::default()));
+        let writer = {
+            let (q, p, c) = (queue.clone(), socket.clone(), conn.clone());
+            let gone = (self.gone_tx.clone(), o.id.clone(), serial);
+            thread::spawn(move || writer(listener, p, q, c, gone))
+        };
+        let (taps, delay) = (dsp.filter_taps(), dsp.group_delay_samples());
+        let format = o.format.as_str();
+        self.next_serial = next;
+        self.channels.insert(
+            o.id.clone(),
+            Open {
+                serial,
+                dsp: Engine::Demod(Box::new(dsp)),
+                queue,
+                socket: socket.clone(),
+                writer: Some(writer),
+                conn,
+                out_samples: 0,
+                dropped: 0,
+                saturated: 0,
+                run: None,
+                opened_at_byte: self.received_bytes(),
+                payload: None,
+                observed: None,
+            },
+        );
+        self.emit(json!({
+            "type": "opened",
+            "id": o.id,
+            "socket": socket.to_string_lossy(),
+            "outputRateHz": DEMOD_OUTPUT_RATE_HZ,
+            "format": format,
+            "kind": "demod",
+            "filterTaps": taps,
+            "groupDelaySamples": delay,
+        }));
+    }
+
+    fn retune(&mut self, req: RetuneReq) {
+        let id = req.id.clone();
+        let rejected = match self.channels.get_mut(&id) {
+            None => Some("unknown channel".to_string()),
+            Some(ch) => match &mut ch.dsp {
+                Engine::Iq(_) => Some("not a demod channel".to_string()),
+                Engine::Demod(dsp) => dsp.queue_retune(&req).err(),
+            },
+        };
+        if let Some(detail) = rejected {
+            self.reject(&id, "channel-request-invalid", detail);
+        }
+    }
+
+    fn squelch(&mut self, req: SquelchReq) {
+        let id = req.id.clone();
+        let rejected = match self.channels.get_mut(&id) {
+            None => Some("unknown channel".to_string()),
+            Some(ch) => match &mut ch.dsp {
+                Engine::Iq(_) => Some("not a demod channel".to_string()),
+                Engine::Demod(dsp) => dsp.queue_squelch(&req).err(),
+            },
+        };
+        if let Some(detail) = rejected {
+            self.reject(&id, "channel-request-invalid", detail);
+        }
     }
 
     fn close(&mut self, id: &str, reason: &str) {
@@ -642,7 +796,7 @@ impl Runtime {
         let mut out = Vec::new();
         for (id, ch) in self.channels.iter_mut() {
             out.clear();
-            let r = ch.dsp.process(i, q, &mut out);
+            let r = ch.dsp.process(i, q, &mut out, &mut events);
             ch.saturated += r.saturated;
             let first = ch.out_samples;
             ch.out_samples += r.samples;
@@ -890,20 +1044,103 @@ fn read_control<R: BufRead>(
         }))
     })
 }
+/// One control line, or the fact that it was longer than [`MAX_CONTROL_LINE_BYTES`].
+enum CappedLine {
+    Eof,
+    Line(Vec<u8>),
+    Oversized,
+}
+
+/// `read_until`, but a line longer than the protocol cap is discarded through its newline and
+/// reported as [`CappedLine::Oversized`] instead of being buffered whole. `Interrupted` retries
+/// without ending control, matching `BufRead::read_until`.
+fn read_capped_line<R: BufRead>(r: &mut R) -> std::io::Result<CappedLine> {
+    let mut raw = Vec::new();
+    loop {
+        if raw.len() >= MAX_CONTROL_LINE_BYTES {
+            discard_until_newline(r)?;
+            return Ok(CappedLine::Oversized);
+        }
+        let copied = {
+            let available = match r.fill_buf() {
+                Ok(buf) => buf,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if available.is_empty() {
+                return Ok(if raw.is_empty() {
+                    CappedLine::Eof
+                } else {
+                    CappedLine::Line(raw)
+                });
+            }
+            let room = MAX_CONTROL_LINE_BYTES - raw.len();
+            let take_from = &available[..available.len().min(room)];
+            let newline = take_from.iter().position(|&b| b == b'\n');
+            let n = newline.map(|i| i + 1).unwrap_or(take_from.len());
+            (newline.is_some(), take_from[..n].to_vec())
+        };
+        let (done, chunk) = copied;
+        r.consume(chunk.len());
+        raw.extend_from_slice(&chunk);
+        if done {
+            return Ok(CappedLine::Line(raw));
+        }
+    }
+}
+
+fn discard_until_newline<R: BufRead>(r: &mut R) -> std::io::Result<()> {
+    loop {
+        enum Step {
+            Eof,
+            More(usize),
+            Done(usize),
+        }
+        let step = {
+            let available = match r.fill_buf() {
+                Ok(buf) => buf,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if available.is_empty() {
+                Step::Eof
+            } else if let Some(i) = available.iter().position(|&b| b == b'\n') {
+                Step::Done(i + 1)
+            } else {
+                Step::More(available.len())
+            }
+        };
+        match step {
+            Step::Eof => return Ok(()),
+            Step::Done(n) => {
+                r.consume(n);
+                return Ok(());
+            }
+            Step::More(n) => r.consume(n),
+        }
+    }
+}
+
 fn read_control_mode<R: BufRead>(
     mut r: R,
     observed: bool,
     mut send: impl FnMut(Result<ObservedRequest, (String, String)>) -> bool,
 ) -> std::io::Result<()> {
-    let mut raw = Vec::new();
     loop {
-        raw.clear();
-        match r.read_until(b'\n', &mut raw) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
+        let raw = match read_capped_line(&mut r)? {
+            CappedLine::Eof => return Ok(()),
+            CappedLine::Oversized => {
+                let req = Err((
+                    String::new(),
+                    format!("control line exceeds {MAX_CONTROL_LINE_BYTES} bytes"),
+                ));
+                if !send(req) {
+                    return Ok(());
+                }
+                continue;
+            }
+            CappedLine::Line(raw) => raw,
+        };
         let req = match std::str::from_utf8(&raw) {
             Ok(l) if l.trim().is_empty() => continue,
             Ok(l) if observed => parse_observed_request(l),
@@ -1836,6 +2073,24 @@ mod tests {
         assert_eq!(got[2], Ok(Request::Shutdown));
     }
 
+    #[test]
+    fn control_reader_rejects_an_oversized_line_and_keeps_reading() {
+        let mut input = vec![b'{'; MAX_CONTROL_LINE_BYTES + 4];
+        input.push(b'\n');
+        input.extend_from_slice(b"{\"v\":1,\"type\":\"shutdown\"}\n");
+        let mut got = Vec::new();
+        read_control(std::io::Cursor::new(input), |r| {
+            got.push(r);
+            true
+        })
+        .unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        let (id, detail) = got[0].clone().unwrap_err();
+        assert_eq!(id, "");
+        assert!(detail.contains("exceeds"), "{detail}");
+        assert_eq!(got[1], Ok(Request::Shutdown));
+    }
+
     // A channel opened exactly at the marked byte has no pre-gap input, so it has no seam.
     #[test]
     fn mark_at_the_open_byte_is_not_a_gap() {
@@ -2045,5 +2300,71 @@ mod tests {
             ),
             (Some("input-eof"), Some(1), Some(1))
         );
+    }
+
+    /// A rejected retune or squelch does not close the channel or move its output count.
+    #[test]
+    fn rejected_demod_requests_leave_iq_and_demod_state() {
+        let dir = TempDir::new();
+        let events: Events = Arc::new(Mutex::new(Vec::new()));
+        let ev = events.clone();
+        let sink = Box::new(move |v: Value| ev.lock().unwrap().push(v));
+        let mut r = Runtime::new(
+            crate::args::Args {
+                generation: 3,
+                input_rate: 48_000,
+                input_center: 162e6,
+                usable_fraction: 0.8,
+                block_samples: 1024,
+                socket_dir: dir.0.clone(),
+                control_fd: 3,
+            },
+            sink,
+        );
+        let iq = parse_request(
+            r#"{"v":1,"type":"open","id":"iq","centerHz":162000000,"bandwidthHz":8000,"transitionHz":1000,"outputRateHz":48000,"format":"cf32","queueBytes":65536}"#,
+        )
+        .unwrap();
+        r.request_and_wait(iq);
+        assert_eq!(last(&events)["type"], "opened");
+        assert!(
+            last(&events).get("kind").is_none(),
+            "iq opened stays kind-less"
+        );
+        let demod = parse_request(
+            r#"{"v":1,"type":"open","id":"dm","kind":"demod","centerHz":162000000,"bandwidthHz":12500,"modulation":"nfm","format":"f32le","queueBytes":65536,"squelch":{"mode":"off"},"metrics":false}"#,
+        )
+        .unwrap();
+        r.request_and_wait(demod);
+        let opened = last(&events);
+        assert_eq!(opened["kind"], "demod");
+        assert_eq!(opened["outputRateHz"], 48_000);
+        assert_eq!(opened["format"], "f32le");
+        r.on_input(&[128u8; 960]);
+        let iq_samples = r.channels["iq"].out_samples;
+        let dm_samples = r.channels["dm"].out_samples;
+        assert!(
+            iq_samples > 0 && dm_samples > 0,
+            "{iq_samples} {dm_samples}"
+        );
+        let bad = parse_request(
+            r#"{"v":1,"type":"retune","id":"dm","audio":{"lowPassHz":1000,"highPassHz":2000}}"#,
+        )
+        .unwrap();
+        r.on_request(bad);
+        assert_eq!(last(&events)["reasonCode"], "channel-request-invalid");
+        assert_eq!(r.channels["dm"].out_samples, dm_samples);
+        assert_eq!(r.channels["iq"].out_samples, iq_samples);
+        let on_iq = parse_request(
+            r#"{"v":1,"type":"squelch","id":"iq","mode":"power","thresholdDbfs":-20}"#,
+        )
+        .unwrap();
+        r.on_request(on_iq);
+        assert_eq!(last(&events)["detail"], "not a demod channel");
+        assert_eq!(r.channels["iq"].out_samples, iq_samples);
+        r.on_input(&[128u8; 960]);
+        assert!(r.channels["iq"].out_samples > iq_samples);
+        assert!(r.channels["dm"].out_samples > dm_samples);
+        r.on_eof_no_exit_for_test();
     }
 }

@@ -332,6 +332,19 @@ export const LiveDemodConfigSchema = z
 		 * default: AM, CW, DSB, USB and LSB `fast`; NFM, WFM and raw none.
 		 */
 		agc: z.enum(LIVE_AUDIO_AGC_MODES_TUPLE).optional(),
+		/**
+		 * Demodulator engine. `csdr` is the shipped chain. `rust` uses one
+		 * wavekit-chan demod channel and falls back to csdr when it cannot run.
+		 * Optional with no schema default: absence means csdr at runtime, and
+		 * a default would show up in snapshots of the parsed config.
+		 */
+		engine: z.enum(["csdr", "rust"]).optional(),
+		/**
+		 * wavekit-chan binary for `engine: rust`. Absent unless set: a default
+		 * string would show up in snapshots of the parsed config. The runtime
+		 * uses `wavekit-chan` when this is omitted.
+		 */
+		chanBinaryPath: z.string().min(1).optional(),
 	})
 	.superRefine((value, ctx) => {
 		if (value.modulation !== "raw" && value.bandwidth <= 0) {

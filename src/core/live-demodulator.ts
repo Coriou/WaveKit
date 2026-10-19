@@ -70,6 +70,9 @@ import {
 	planLiveDemodPipeline,
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
+import { RustLiveRun, rustEngineRequested } from "./live-demod/rust-run.js"
+import type { EngineFallbackReason } from "./live-demod/index.js"
+import type { RustEngine } from "./live-demod/rust-engine.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
@@ -124,6 +127,10 @@ export interface LiveDemodStatus {
 	pipelineHealth: "running" | "starting" | "stopped" | "error"
 	/** Automatic pipeline restarts since the last manual start. */
 	pipelineRestarts: number
+	/** Demodulator that produced this run. `csdr` when Rust fell back or was not asked. */
+	engine?: "csdr" | "rust"
+	/** Why a requested Rust engine is not the one running. */
+	engineFallback?: EngineFallbackReason
 	/** Smoothed channel power before demodulation (dBFS), while running. */
 	channelPowerDbfs?: number
 	/** Squelch gate state, while running (always true with squelch off). */
@@ -216,7 +223,7 @@ type FrontSwapOutcome =
 	| "superseded"
 	| "aborted"
 
-interface PipelineRun {
+export interface PipelineRun {
 	front: ChildProcess
 	back: ChildProcess
 	/**
@@ -266,6 +273,15 @@ interface PipelineRun {
 	retuneFloorDbfs: number | null
 	stopping: boolean
 	failed: boolean
+	/**
+	 * Rust demod engine for this run. Absent on the csdr path, which keeps
+	 * gating on `squelch` alone.
+	 */
+	rust?: RustEngine
+	/** Gate mirrored from Rust `gate` events. Absent on the csdr path. */
+	externalGate?: boolean
+	/** Latest Rust metrics power. Absent on the csdr path. */
+	externalPowerDbfs?: number | null
 }
 
 /**
@@ -330,6 +346,11 @@ export class LiveDemodulator extends EventEmitter {
 	 * `config-changed`; the tracker reads this during that synchronous emit.
 	 */
 	private closeOverride: "stopped" | "config" | null = null
+	/**
+	 * `stop()` won over an in-flight `start()`. The handshake must not adopt a
+	 * run or bring HTTP up after `stop()` has begun.
+	 */
+	private stopRequested = false
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
 	private readonly audio: AudioClientRegistry
@@ -342,6 +363,7 @@ export class LiveDemodulator extends EventEmitter {
 	private activeSourceId: string | null = null
 	private consecutiveFailures = 0
 	private pipelineRestarts = 0
+	private readonly rustRuns: RustLiveRun
 	private restartTimer: ReturnType<typeof setTimeout> | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
@@ -385,9 +407,40 @@ export class LiveDemodulator extends EventEmitter {
 			err => this.emitError(err),
 			options.httpAccess,
 		)
+		this.rustRuns = new RustLiveRun({
+			log: this.log,
+			clock: this.clock,
+			config: () => this.config,
+			branchStream: () => this.branchStream,
+			httpListening: () => this.http.listening,
+			stableRunMs: () => this.options.stableRunMs,
+			activeSourceId: () => this.activeSourceId,
+			squelchHangMs: () => SQUELCH_HANG_MS,
+			effectiveThreshold: run => this.effectiveThreshold(run),
+			currentRun: () => this.run,
+			handleAudioData: chunk => this.handleAudioData(chunk),
+			publishSquelchChange: () => this.publishSquelchChange(),
+			handleRunFailure: (run, reason) => this.handleRunFailure(run, reason),
+			measureRun: (run, sample) => this.measureRun(run, sample),
+			resetFloorForRetune: run => this.resetFloorForRetune(run),
+			clearCloseOverride: () => {
+				this.closeOverride = null
+			},
+			rollbackConfig: config => {
+				this.config = config
+			},
+			adoptRun: run => this.adoptRustRun(run),
+			markStartError: reason => {
+				this.lastError = reason
+				this.pipelineHealth = "error"
+			},
+			emitError: err => this.emitError(err),
+			scheduleRestart: lastRunMs => this.scheduleRestart(lastRunMs),
+		})
 	}
 
 	async start(): Promise<void> {
+		this.stopRequested = false
 		if (this.http.listening) {
 			if (this.run) {
 				this.log.warn("Live demodulator already running")
@@ -405,6 +458,7 @@ export class LiveDemodulator extends EventEmitter {
 				this.attachBranch(sourceId)
 			}
 			await this.startPipelineOrFail()
+			if (this.stopRequested) return
 			this.emit("started")
 			this.log.info("Live demodulation pipeline restarted on request")
 			return
@@ -419,7 +473,14 @@ export class LiveDemodulator extends EventEmitter {
 		this.pipelineRestarts = 0
 		this.attachBranch(sourceId)
 		await this.startPipelineOrFail()
+		if (this.stopRequested) return
 		await this.startHttpServer()
+		if (this.stopRequested) {
+			await this.closeHttpServer()
+			return
+		}
+		this.rustRuns.flushDeferredRestart()
+		if (this.stopRequested) return
 		this.subscribeToSourceCapsChanges()
 		this.emit("started")
 		this.log.info(
@@ -438,8 +499,9 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	async stop(): Promise<void> {
+		this.stopRequested = true
 		this.stopAdmission()
-		if (!this.http.listening && !this.run) {
+		if (!this.http.listening && !this.run && !this.rustRuns.hasPendingStart()) {
 			this.log.warn("Live demodulator not running")
 			return
 		}
@@ -449,6 +511,7 @@ export class LiveDemodulator extends EventEmitter {
 			this.silence.disarm("stop")
 			this.clearRestartTimer()
 			this.unsubscribeFromSourceCapsChanges()
+			await this.rustRuns.cancelPendingStart()
 			if (this.run) await this.stopRun(this.run)
 			this.pipelineHealth = "stopped"
 			this.detachBranch()
@@ -565,7 +628,16 @@ export class LiveDemodulator extends EventEmitter {
 			if (restarting) {
 				this.consecutiveFailures = 0
 				const run = this.run
-				if (swapPlan !== null && run !== null) {
+				if (
+					run?.rust &&
+					this.rustRuns.canRetune(changedPipelineKeys, validated)
+				) {
+					this.rustRuns.retune(run, previous, validated)
+				} else if (
+					swapPlan !== null &&
+					run !== null &&
+					!rustEngineRequested(this.config)
+				) {
 					// The transmission closes as "config", as on a full restart.
 					run.gateHeld = true
 					this.publishSquelchChange()
@@ -579,8 +651,12 @@ export class LiveDemodulator extends EventEmitter {
 						if (this.run === run)
 							await this.restartPipeline("front swap failed")
 					}
-				} else await this.restartPipeline("configuration changed")
+				} else {
+					if (rustEngineRequested(this.config)) this.rustRuns.clearLatch()
+					await this.restartPipeline("configuration changed")
+				}
 			}
+			if (!restarting && this.run?.rust) this.rustRuns.pushSquelch(this.run)
 
 			if (portChanged && this.http.listening) {
 				await this.restartHttpServer()
@@ -605,6 +681,7 @@ export class LiveDemodulator extends EventEmitter {
 					effectiveSampleRate: 0,
 				}
 
+		const engineFallback = this.rustRuns.fallback()
 		const status: LiveDemodStatus = {
 			enabled: this.config.enabled,
 			running: this.http.listening,
@@ -612,7 +689,8 @@ export class LiveDemodulator extends EventEmitter {
 			sourceConnected: sourceStatus?.connected ?? false,
 			sourceIqSampleRate: rateInfo.iqSampleRate,
 			config: this.config,
-			effectiveSampleRate: rateInfo.effectiveSampleRate,
+			effectiveSampleRate:
+				this.rustRuns.audioRateHz() ?? rateInfo.effectiveSampleRate,
 			decimationFactor: rateInfo.decimation,
 			httpUrl: `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}/stream`,
 			wavUrl: `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}/stream.wav`,
@@ -620,15 +698,19 @@ export class LiveDemodulator extends EventEmitter {
 			bytesStreamed: this.audio.bytesStreamed,
 			pipelineHealth: this.pipelineHealth,
 			pipelineRestarts: this.pipelineRestarts,
+			engine: this.run?.rust ? "rust" : "csdr",
+			...(engineFallback !== null ? { engineFallback } : {}),
 		}
 
 		const run = this.run
 		if (run) {
-			status.squelchOpen = run.squelch.open
+			status.squelchOpen = runGateOpen(run)
 			status.thresholdDbfs = this.effectiveThreshold(run)
 			if (run.noiseFloorDbfs !== null)
 				status.noiseFloorDbfs = run.noiseFloorDbfs
-			const power = run.squelch.powerDbfs
+			const power = run.rust
+				? (run.externalPowerDbfs ?? null)
+				: run.squelch.powerDbfs
 			if (power !== null) status.channelPowerDbfs = Math.round(power * 10) / 10
 		}
 		if (this.lastError) status.lastError = this.lastError
@@ -644,7 +726,7 @@ export class LiveDemodulator extends EventEmitter {
 			this.run !== null &&
 			!this.run.stopping &&
 			!this.run.gateHeld &&
-			this.run.squelch.open
+			runGateOpen(this.run)
 		)
 	}
 
@@ -746,14 +828,23 @@ export class LiveDemodulator extends EventEmitter {
 		}
 	}
 
-	private measureRun(run: PipelineRun): void {
+	private measureRun(
+		run: PipelineRun,
+		sample?: {
+			powerDbfs: number | null
+			quieted: boolean
+			quietingDb?: number | null
+		},
+	): void {
 		if (this.run !== run || run.stopping) return
-		const power = run.squelch.powerDbfs
+		const sampled = sample !== undefined
+		const power = sampled ? sample.powerDbfs : run.squelch.powerDbfs
 		// WG10 req 2.6: a block whose FM quieting shows a carrier never seeds or
 		// raises the floor (always false without the auto nfm/wfm observer).
 		// A runtime switch out of auto keeps the run's observer: gate on the mode.
-		const quieted =
-			this.config.squelchMode === "auto" && run.squelch.blockQuieted()
+		const quieted = sampled
+			? sample.quieted
+			: this.config.squelchMode === "auto" && run.squelch.blockQuieted()
 		if (power !== null) {
 			// Constant-memory lower envelope: falls are immediate; a slower open
 			// rise preserves calls but eventually recovers from sustained noise steps.
@@ -772,7 +863,7 @@ export class LiveDemodulator extends EventEmitter {
 				}
 			} else if (power < run.noiseFloorDbfs) run.noiseFloorDbfs = power
 			else if (!quieted) {
-				const riseRate = run.squelch.open
+				const riseRate = (sampled ? runGateOpen(run) : run.squelch.open)
 					? AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND
 					: AUTO_FLOOR_CLOSED_RISE_DB_PER_SECOND
 				run.noiseFloorDbfs = Math.min(
@@ -789,7 +880,32 @@ export class LiveDemodulator extends EventEmitter {
 		this.publishSquelchChange()
 		// WG10 activity hygiene: counted after the edge, so a transmission opened by this
 		// block (its tracker snapshot taken inside publishSquelchChange) includes it.
-		if (run.squelch.blockCarrier()) this.carrierBlockCount += 1
+		// Rust reports quieting directly, so the sampled path uses the same rule as
+		// ChannelSquelch.blockCarrier instead of the IQ meter.
+		if (sampled) {
+			if (this.sampledBlockCarrier(run, sample.quietingDb ?? null))
+				this.carrierBlockCount += 1
+		} else if (run.squelch.blockCarrier()) this.carrierBlockCount += 1
+	}
+
+	/**
+	 * `ChannelSquelch.blockCarrier` for one Rust metrics point. Evidence is on
+	 * for nfm/wfm. Noise mode compares quieting with the configured threshold;
+	 * power mode compares it with `LIVE_AUDIO_NOISE_QUIETING_DB.default`.
+	 */
+	private sampledBlockCarrier(
+		run: PipelineRun,
+		quietingDb: number | null,
+	): boolean {
+		if (!run.squelch.hasCarrierEvidence) return false
+		if (quietingDb === null) return false
+		// The Rust bridge maps the silent-discriminator token to +∞.
+		if (quietingDb === Number.POSITIVE_INFINITY) return true
+		const threshold =
+			run.squelch.mode === "noise"
+				? run.squelch.noiseQuietingDb
+				: LIVE_AUDIO_NOISE_QUIETING_DB.default
+		return quietingDb >= threshold
 	}
 
 	private measuredSquelchStream(
@@ -850,9 +966,11 @@ export class LiveDemodulator extends EventEmitter {
 			if (!run || run.stopping) return
 			const level: LiveAudioLevel = {
 				sourceId: this.activeSourceId ?? "",
-				channelPowerDbfs: run.squelch.powerDbfs,
+				channelPowerDbfs: run.rust
+					? (run.externalPowerDbfs ?? null)
+					: run.squelch.powerDbfs,
 				noiseFloorDbfs: run.noiseFloorDbfs,
-				squelchOpen: run.squelch.open,
+				squelchOpen: runGateOpen(run),
 				thresholdDbfs: this.effectiveThreshold(run),
 			}
 			this.emit("level", level)
@@ -1032,6 +1150,11 @@ export class LiveDemodulator extends EventEmitter {
 	/** Stream format a new client is told about (current run, else planned). */
 	private plannedStream(): StreamFormat {
 		if (this.run) return this.run.stream
+		// Rust has no run during the initial crash backoff. Advertise 48 kHz
+		// until it recovers. A csdr fallback still closes mismatched clients
+		// in restartPipeline ("stream format changed").
+		const pending = this.rustRuns?.pendingStream()
+		if (pending) return pending
 		const sourceId = this.activeSourceId ?? this.config.sourceId
 		const rate = sourceId
 			? this.calculateRates(sourceId, this.config).effectiveSampleRate
@@ -1077,7 +1200,20 @@ export class LiveDemodulator extends EventEmitter {
 		}
 	}
 
+	/** Installs a Rust run the controller already built. */
+	private adoptRustRun(run: PipelineRun): void {
+		this.run = run
+		this.lastRunStream = run.stream
+		this.applyToneSquelch(run)
+		this.audio.configure(run.stream)
+		this.pipelineHealth = "running"
+		this.lastError = null
+		this.startLevelPublishing()
+		this.publishSquelchChange()
+	}
+
 	private async startPipeline(): Promise<void> {
+		if (this.stopRequested) return
 		if (this.run) {
 			this.log.warn("Live demodulation pipeline already running")
 			return
@@ -1089,10 +1225,10 @@ export class LiveDemodulator extends EventEmitter {
 			)
 		}
 
-		const { caps, rateInfo, plan } = this.planFor(
-			this.activeSourceId,
-			this.config,
-		)
+		const planned = this.planFor(this.activeSourceId, this.config)
+		if (await this.rustRuns.tryStart(planned)) return
+		if (this.stopRequested) return
+		const { caps, rateInfo, plan } = planned
 		for (const warning of plan.warnings) this.log.warn(warning)
 
 		this.pipelineHealth = "starting"
@@ -1371,6 +1507,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.log.error({ reason }, "Live demodulation pipeline failed")
 		this.emitError(new WaveKitError(reason, "LIVE_DEMOD_PIPELINE_EXIT"))
 		const runtimeMs = Date.now() - run.startedAt
+		if (run.rust) this.rustRuns.noteCrash(runtimeMs)
 		void this.stopRun(run).finally(() => this.scheduleRestart(runtimeMs))
 	}
 
@@ -1480,6 +1617,12 @@ export class LiveDemodulator extends EventEmitter {
 		const pending = run.swap
 		run.swap = null
 		pending?.finish("aborted")
+		if (run.rust) {
+			run.squelchStream.destroy()
+			await run.rust.stop()
+			if (!this.run && !run.failed) this.pipelineHealth = "stopped"
+			return
+		}
 		if (this.branchStream && run.front.stdin) {
 			this.branchStream.unpipe(run.front.stdin)
 		}
@@ -1598,7 +1741,7 @@ export class LiveDemodulator extends EventEmitter {
 		const lead = Math.min(chunk.length, (width - (phase % width)) % width)
 		const leadMuted = run.pcmTailMuted
 		const gate = tone.gate
-		if (gate === null || !run.squelch.open) {
+		if (gate === null || !runGateOpen(run)) {
 			// Without a gate, or while the squelch is closed, clients hear
 			// silence. Evidence accumulates only while the squelch is open:
 			// PCM still draining from the back chain after a close must not
@@ -1658,8 +1801,12 @@ function configuredTone(config: LiveDemodConfig): ToneSquelchTone | null {
 	return tone
 }
 
+function runGateOpen(run: PipelineRun): boolean {
+	return run.externalGate ?? run.squelch.open
+}
+
 function toneSquelchState(run: PipelineRun): "off" | "waiting" | "open" {
 	if (run.tone === null) return "off"
-	if (!run.squelch.open || run.tone.gate === null) return "waiting"
+	if (!runGateOpen(run) || run.tone.gate === null) return "waiting"
 	return run.tone.gate.state
 }

@@ -8,10 +8,13 @@ use std::f64::consts::TAU;
 /// recursive rotation cannot drift in amplitude or phase.
 const NCO_RESYNC: u64 = 4096;
 
-/// Mixes by e^{-j 2π Δf n / fs}. State depends only on the absolute sample index n.
+/// Mixes by e^{-j 2π Δf n / fs}. State depends only on the absolute sample index n,
+/// plus a cycle bias that keeps the phasor continuous across [`Nco::set_frequency`].
 #[derive(Debug, Clone)]
 pub struct Nco {
     step: f64,
+    /// Added to `n * step` before wrapping, so a frequency change does not move the phasor.
+    phase_cycles: f64,
     n: u64,
     re: f64,
     im: f64,
@@ -21,10 +24,15 @@ pub struct Nco {
 
 impl Nco {
     pub fn new(offset_hz: f64, rate_hz: f64) -> Self {
-        let step = offset_hz / rate_hz;
+        let step = if rate_hz == 0.0 {
+            0.0
+        } else {
+            offset_hz / rate_hz
+        };
         let w = -TAU * step.rem_euclid(1.0);
         Nco {
             step,
+            phase_cycles: 0.0,
             n: 0,
             re: 1.0,
             im: 0.0,
@@ -33,21 +41,49 @@ impl Nco {
         }
     }
 
+    /// Change the mixing frequency. The phase accumulator (`re`/`im` and `n`) is kept, so the
+    /// next sample continues from the current phasor and then rotates at the new step.
+    /// A non-finite offset or rate, or a zero rate, leaves the oscillator untouched.
+    pub fn set_frequency(&mut self, offset_hz: f64, rate_hz: f64) {
+        if !offset_hz.is_finite() || !rate_hz.is_finite() || rate_hz == 0.0 {
+            return;
+        }
+        let step = offset_hz / rate_hz;
+        if !step.is_finite() || step == self.step {
+            return;
+        }
+        let n = self.n as f64;
+        self.phase_cycles = (self.phase_cycles + n * (self.step - step)).rem_euclid(1.0);
+        self.step = step;
+        let w = -TAU * step.rem_euclid(1.0);
+        self.c = w.cos();
+        self.s = w.sin();
+    }
+
     pub fn reset(&mut self) {
         self.n = 0;
         self.re = 1.0;
         self.im = 0.0;
+        self.phase_cycles = 0.0;
     }
 
     pub fn mix(&mut self, i: &mut [f32], q: &mut [f32]) {
         debug_assert_eq!(i.len(), q.len());
-        if self.step == 0.0 {
+        // The zero-offset fast path is an identity only while the phasor is still 1.
+        // After a retune back to 0 Hz the accumulator is kept and must still be applied.
+        if self.step == 0.0 && self.phase_cycles == 0.0 && self.re == 1.0 && self.im == 0.0 {
             self.n += i.len() as u64;
             return;
         }
         for (si, sq) in i.iter_mut().zip(q.iter_mut()) {
             if self.n.is_multiple_of(NCO_RESYNC) {
-                let ph = -TAU * ((self.n as f64) * self.step).rem_euclid(1.0);
+                // `phase_cycles == 0` is the original absolute-index formula, bit for bit.
+                let wrapped = if self.phase_cycles == 0.0 {
+                    ((self.n as f64) * self.step).rem_euclid(1.0)
+                } else {
+                    (self.phase_cycles + (self.n as f64) * self.step).rem_euclid(1.0)
+                };
+                let ph = -TAU * wrapped;
                 self.re = ph.cos();
                 self.im = ph.sin();
             }

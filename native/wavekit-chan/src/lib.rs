@@ -2,6 +2,8 @@ pub mod admission;
 pub mod args;
 pub mod channel;
 pub mod convert;
+pub mod demod;
+pub mod demod_channel;
 pub mod design;
 pub mod disposal;
 pub mod iqcap;
