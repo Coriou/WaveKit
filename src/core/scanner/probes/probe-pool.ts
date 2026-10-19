@@ -315,6 +315,55 @@ export function isUnavailableExit(code: unknown, signal: unknown): boolean {
 		SHELL_UNAVAILABLE_EXIT_CODES.has(code)
 	)
 }
+
+/**
+ * WG12 R 4.5: the decoder program itself could not run, and nothing it printed
+ * was seen. A spawn ENOENT/EACCES, or a shell 126/127 with no signal. Any
+ * output, any other exit, or any other error stays on today's path.
+ */
+export function isDecoderUnavailableExit(exit: {
+	code: number | null
+	signal: NodeJS.Signals | null
+	outputSeen: boolean
+	spawnError?: unknown
+}): boolean {
+	if (exit.outputSeen) return false
+	if (exit.spawnError !== undefined)
+		return isSpawnUnavailableError(exit.spawnError)
+	return isUnavailableExit(exit.code, exit.signal)
+}
+
+/**
+ * Fail closed: a missing or non-string signal is not "no signal". Unknown exit
+ * info therefore never matches 126/127.
+ */
+function decoderExitView(
+	code: unknown,
+	signal: unknown,
+	outputSeen: boolean,
+): {
+	code: number | null
+	signal: NodeJS.Signals | null
+	outputSeen: boolean
+} {
+	const exitSignal =
+		signal === null
+			? null
+			: typeof signal === "string"
+				? (signal as NodeJS.Signals)
+				: "SIGKILL"
+	return {
+		code: typeof code === "number" ? code : null,
+		signal: exitSignal,
+		outputSeen,
+	}
+}
+
+/** Terminal `probe-state` payload when the decoder program could not run. No `undecodedReason`. */
+export interface ProbeUnavailableStop {
+	outcome: "unsupported"
+	reason: "decoder-unavailable"
+}
 /** Slack around a capcode's pairing window (§ 6.4 "within the hold", ± 2 s). */
 export const PAIRING_GAP_MS = 2000
 /** Hold of the multimon-ng POCSAG/FLEX mode (§ 6.4); also the ambient pairing window. */
@@ -1310,16 +1359,23 @@ export class ProbePool extends EventEmitter {
 					{ err, probeId, decoderType: mode.decoderType },
 					removed ? "Probe removed during its start" : "Probe failed to start",
 				)
-				if (rec.firstOutputAt === null && isSpawnUnavailableError(err))
-					this.reportUnavailable(rec)
-				void this.stopProbe(rec, "error").catch((cleanupError: unknown) => {
-					this.cleanupFailed = true
-					this.retainedCleanup.add(rec)
-					this.log.warn(
-						{ err: cleanupError, probeId },
-						"Failed probe cleanup failed",
-					)
+				const unavailable = isDecoderUnavailableExit({
+					code: null,
+					signal: null,
+					outputSeen: rec.firstOutputAt !== null,
+					spawnError: err,
 				})
+				if (unavailable) this.reportUnavailable(rec)
+				void this.stopProbe(rec, unavailable ? "unavailable" : "error").catch(
+					(cleanupError: unknown) => {
+						this.cleanupFailed = true
+						this.retainedCleanup.add(rec)
+						this.log.warn(
+							{ err: cleanupError, probeId },
+							"Failed probe cleanup failed",
+						)
+					},
+				)
 			},
 		)
 		return probeId
@@ -1497,15 +1553,16 @@ export class ProbePool extends EventEmitter {
 		// today's path (the hold runs out).
 		const onExit = (code: unknown, signal: unknown): void => {
 			if (this.isStopping(rec)) return
-			if (
-				rec.transport.kind === "replay" &&
-				!(rec.firstOutputAt === null && isUnavailableExit(code, signal))
-			) {
+			const unavailable = isDecoderUnavailableExit(
+				decoderExitView(code, signal, rec.firstOutputAt !== null),
+			)
+			// A missing program before output is unavailable on replay too. Every
+			// other replay exit keeps today's replay-end path.
+			if (rec.transport.kind === "replay" && !unavailable) {
 				this.onReplayExit(rec, code === 0 && signal === null)
 				return
 			}
-			if (rec.firstOutputAt !== null) return
-			if (!isUnavailableExit(code, signal)) return
+			if (!unavailable) return
 			this.reportUnavailable(rec)
 			void this.stopProbe(rec, "unavailable").catch((err: unknown) => {
 				this.cleanupFailed = true
@@ -1739,6 +1796,14 @@ export class ProbePool extends EventEmitter {
 			}
 		}
 		notify(() => {
+			if (reason === "unavailable") {
+				const terminal: ProbeUnavailableStop = {
+					outcome: "unsupported",
+					reason: "decoder-unavailable",
+				}
+				this.emit("probe-state", rec.probeId, "stopped", rec.req, terminal)
+				return
+			}
 			this.emit("probe-state", rec.probeId, "stopped", rec.req)
 		})
 		// Settlement of pre-seal owned DV artifacts is cleanup, not reopened decoder intake.
