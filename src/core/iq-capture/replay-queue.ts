@@ -6,8 +6,14 @@
  * IQ_REPLAY_QUEUE_HOLDER; a capture already claimed or reserved by an identify job, one whose
  * observation an identify target works on (`skip`: parked, kept queued and re-checked),
  * discarded, expired or confirmed live is skipped), asks the injected planner for its trials
- * (known protocol first, at most IQ_REPLAY_MAX_TRIALS), and runs them one replay probe at a time
- * through the injected `probes`. The first accepted decode ends the trials. Exactly one `sink(result)` per capture that
+ * (known protocol first, at most IQ_REPLAY_MAX_TRIALS, the analog trial counted), and runs them
+ * one at a time. A `kind: "analog"` trial calls the injected `analog` runner (holding
+ * ANALOG_TRIAL_CORES) instead of a probe; after a valid analog `decoded` or `heard` the
+ * remaining digital trials end `not-needed`. A runner value that is not a well-formed result,
+ * that carries `error`, or whose outcome disagrees with its fields (decoded without a qualified
+ * tone or DCS, heard without stats) ends `cancelled`, or `unsupported` for `unavailable` /
+ * `analyze-failed`, and the digital trials still run. The first accepted digital decode ends
+ * the trials. Exactly one `sink(result)` per capture that
  * reached its trials, then `settle` discards it. A probe request deferred for a transient reason
  * (IQ_REPLAY_RETRIABLE_DEFERRALS) waits in place: it is retried on the pool's next slot release or
  * after 1 s, never in a loop, and for at most IQ_REPLAY_DEFER_MAX_MS per capture, after which its
@@ -16,6 +22,9 @@
  * never run does not hold the captures of other sources behind it. `stop()` cancels the
  * running replay and discards every queued capture without a result.
  */
+import { DCS_STANDARD_CODES } from "@wavekit/api-types"
+import { z } from "zod"
+import { isCtcssToneHz } from "../audio-tones/ctcss.js"
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import {
@@ -30,7 +39,16 @@ import {
 	type IqReplayTrial,
 	type IqReplayTrialOutcome,
 } from "../scanner/iq-capture-contract.js"
-import type { ProbeMode } from "../scanner/probes/probe-pool.js"
+import type {
+	ProbeDecoderType,
+	ProbeMode,
+} from "../scanner/probes/probe-pool.js"
+import {
+	ANALOG_TRIAL_CORES,
+	ANALOG_TRIAL_MAX_FRAMES,
+	type AnalogTrialResult,
+	type AnalogTrialRunner,
+} from "../scanner/scanner-redesign-contract.js"
 import type { Identity, ScannerProtocol } from "../scanner/types.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 
@@ -118,6 +136,16 @@ export interface IqReplayQueueDeps {
 	now?: () => number
 	logger: Logger
 	timers?: IqReplayQueueTimers
+	/**
+	 * WG12: the analog replay trial. Absent: a `kind: "analog"` trial ends `unsupported` and the
+	 * digital trials still run (no analog dep keeps probe-only plans on today's path).
+	 */
+	analog?: AnalogTrialRunner
+	/**
+	 * WG12: reserve `ANALOG_TRIAL_CORES` for the analog trial. Null refuses it (`skipped-budget`).
+	 * Absent: the trial runs with no extra reservation. The returned function releases the cores.
+	 */
+	reserveCores?: (cores: number) => (() => void) | null
 }
 
 export interface IqReplayQueueCounters {
@@ -159,7 +187,27 @@ const OUTCOMES: ReadonlySet<string> = new Set<IqReplayTrialOutcome>([
 	"crc-errors",
 	"timeout",
 	"cancelled",
+	"heard",
+	"data-like",
+	"carrier-only",
+	"unsupported",
 ])
+
+const SPEC_OUTCOMES: ReadonlySet<string> = new Set<string>([
+	...OUTCOMES,
+	"not-needed",
+	"skipped-budget",
+])
+
+/**
+ * Narrows `outcome` to the amended `IqReplayTrialOutcome` union (`not-needed`,
+ * `skipped-budget`). A string outside that union becomes `cancelled`.
+ */
+function specOutcome(outcome: string): IqReplayTrialOutcome {
+	return (
+		SPEC_OUTCOMES.has(outcome) ? outcome : "cancelled"
+	) as IqReplayTrialOutcome
+}
 
 const defaultTimers: IqReplayQueueTimers = {
 	setTimeout: (fn, ms) => {
@@ -180,6 +228,12 @@ interface Current {
 	waitOff: (() => void) | null
 	/** Clock ms of the capture's first transient deferral, null before any. */
 	deferSince: number | null
+	/** Releases ANALOG_TRIAL_CORES, once, when the analog trial ends. */
+	analogRelease: (() => void) | null
+	/** The runner's result, when the analog trial actually returned one. */
+	analogResult: AnalogTrialResult | null
+	/** Probe decoder types that ended `unsupported`. */
+	unavailable: ProbeDecoderType[]
 }
 
 export function createIqReplayQueue(deps: IqReplayQueueDeps): IqReplayQueue {
@@ -278,6 +332,7 @@ class Queue implements IqReplayQueue {
 		if (cur) {
 			this.clearWait(cur)
 			cur.run?.cancel()
+			this.releaseAnalog(cur)
 			this.d.port.discard(
 				cur.view.captureId,
 				"shutdown",
@@ -335,6 +390,9 @@ class Queue implements IqReplayQueue {
 				waitTimer: null,
 				waitOff: null,
 				deferSince: null,
+				analogRelease: null,
+				analogResult: null,
+				unavailable: [],
 			}
 			this.next()
 		}
@@ -388,6 +446,10 @@ class Queue implements IqReplayQueue {
 		const trial = cur.trials[cur.index]
 		if (!trial) {
 			this.finish(cur, null)
+			return
+		}
+		if (trial.kind === "analog") {
+			this.startAnalog(cur, trial)
 			return
 		}
 		let answer: { run: IqReplayProbeRun } | { deferred: string }
@@ -471,6 +533,8 @@ class Queue implements IqReplayQueue {
 			known: trial.known,
 			outcome: a.outcome,
 		})
+		if (a.outcome === "unsupported")
+			this.noteUnavailable(cur, trial.mode.decoderType)
 		if (a.outcome === "decoded" && a.decoded) {
 			this.finish(cur, a.decoded)
 			return
@@ -491,6 +555,9 @@ class Queue implements IqReplayQueue {
 			trials: cur.done,
 			decoded,
 		}
+		if (cur.analogResult) result.analog = cur.analogResult
+		if (cur.unavailable.length > 0)
+			result.unavailable = [...new Set(cur.unavailable)].sort()
 		this.c.results++
 		if (decoded) this.c.decoded++
 		try {
@@ -501,6 +568,254 @@ class Queue implements IqReplayQueue {
 		}
 		this.d.port.settle(cur.view.captureId, IQ_REPLAY_QUEUE_HOLDER)
 		this.pump()
+	}
+
+	/** One analog trial: no runner → unsupported; reservation refused → skipped-budget; else `analog.run`. */
+	private startAnalog(cur: Current, trial: IqReplayTrial): void {
+		const runner = this.d.analog
+		if (!runner) {
+			this.recordAnalog(cur, trial, "unsupported", null)
+			return
+		}
+		if (this.d.reserveCores) {
+			let release: (() => void) | null
+			try {
+				release = this.d.reserveCores(ANALOG_TRIAL_CORES)
+			} catch (err: unknown) {
+				this.log.warn(
+					{ err: safeErrorFields(err) },
+					"Analog core reservation failed",
+				)
+				release = null
+			}
+			if (!release) {
+				this.recordAnalog(cur, trial, specOutcome("skipped-budget"), null)
+				return
+			}
+			cur.analogRelease = release
+		}
+		const abort = new AbortController()
+		const mode = trial.analogMode ?? "nfm"
+		let pending: Promise<AnalogTrialResult>
+		try {
+			pending = runner.run(cur.view.captureId, mode, abort.signal)
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "Analog trial failed")
+			abort.abort()
+			this.releaseAnalog(cur)
+			this.recordAnalog(cur, trial, "cancelled", null)
+			return
+		}
+		this.c.trials++
+		cur.run = {
+			result: Promise.resolve(pending).then(
+				() => ({ outcome: "cancelled", decoded: null }),
+				() => ({ outcome: "cancelled", decoded: null }),
+			),
+			cancel: () => abort.abort(),
+		}
+		void Promise.resolve(pending).then(
+			result => this.onAnalog(cur, trial, result),
+			() => this.onAnalog(cur, trial, null),
+		)
+	}
+
+	private onAnalog(cur: Current, trial: IqReplayTrial, raw: unknown): void {
+		let judged: {
+			outcome: IqReplayTrialOutcome
+			analog: AnalogTrialResult | null
+		}
+		try {
+			judged = judgeAnalog(raw)
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"Analog trial result rejected",
+			)
+			judged = { outcome: "cancelled", analog: null }
+		}
+		this.recordAnalog(cur, trial, judged.outcome, judged.analog)
+	}
+
+	private recordAnalog(
+		cur: Current,
+		trial: IqReplayTrial,
+		outcome: IqReplayTrialOutcome,
+		result: AnalogTrialResult | null,
+	): void {
+		this.releaseAnalog(cur)
+		if (this.current !== cur || this.stopped) return
+		cur.run = null
+		if (result) cur.analogResult = result
+		cur.done.push({
+			protocol: trial.protocol,
+			decoderType: trial.mode.decoderType,
+			known: trial.known,
+			outcome,
+			decoder: "analog-demod",
+			mode: trial.analogMode ?? result?.mode ?? "nfm",
+		})
+		cur.index++
+		if (outcome === "decoded" || outcome === "heard") {
+			this.markRestNotNeeded(cur)
+			this.finish(cur, null)
+			return
+		}
+		this.next()
+	}
+
+	/** Digital trials that do not run after analog `decoded` or `heard`. */
+	private markRestNotNeeded(cur: Current): void {
+		for (; cur.index < cur.trials.length; cur.index++) {
+			const t = cur.trials[cur.index]
+			if (!t) continue
+			cur.done.push({
+				protocol: t.protocol,
+				decoderType: t.mode.decoderType,
+				known: t.known,
+				outcome: specOutcome("not-needed"),
+			})
+		}
+	}
+
+	private noteUnavailable(cur: Current, type: ProbeDecoderType): void {
+		if (!cur.unavailable.includes(type)) cur.unavailable.push(type)
+	}
+
+	private releaseAnalog(cur: Current): void {
+		const release = cur.analogRelease
+		cur.analogRelease = null
+		if (!release) return
+		try {
+			release()
+		} catch (err: unknown) {
+			this.log.warn({ err: safeErrorFields(err) }, "Analog core release failed")
+		}
+	}
+}
+
+const DCS_CODES: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
+const finiteNumber = z.number().finite()
+
+const analogFrameSchema = z
+	.object({
+		carrierDb: finiteNumber,
+		hfNoiseDb: finiteNumber,
+		audioDb: finiteNumber,
+		syllabic: finiteNumber,
+		cluster: finiteNumber,
+	})
+	.strict()
+
+const analogStatsSchema = z
+	.object({
+		mode: z.enum(["nfm", "am"]),
+		frames: z.array(analogFrameSchema).max(ANALOG_TRIAL_MAX_FRAMES),
+		gapSamples: z.number().int().nonnegative(),
+		floorDb: finiteNumber,
+	})
+	.strict()
+
+const analogTonesSchema = z
+	.object({
+		ctcssHz: finiteNumber.refine(hz => isCtcssToneHz(hz)).nullable(),
+		dcs: z
+			.object({
+				code: z.string().refine(code => DCS_CODES.has(code)),
+				polarity: z.enum(["normal", "inverted"]),
+			})
+			.strict()
+			.nullable(),
+		audioSeconds: finiteNumber.nonnegative(),
+	})
+	.strict()
+
+const analogResultSchema = z
+	.object({
+		outcome: z.enum([
+			"decoded",
+			"heard",
+			"data-like",
+			"carrier-only",
+			"no-sync",
+		]),
+		mode: z.enum(["nfm", "am"]),
+		voice: z.boolean(),
+		tones: analogTonesSchema,
+		stats: analogStatsSchema.nullable(),
+		error: z
+			.enum(["capture-gone", "analyze-failed", "cancelled", "unavailable"])
+			.optional(),
+	})
+	.strict()
+
+type ParsedAnalog = z.infer<typeof analogResultSchema>
+
+const CANCELLED_ANALOG = {
+	outcome: "cancelled" as const,
+	analog: null,
+}
+
+/**
+ * The runner's value is untrusted. Malformed fields, any `error`, a `decoded`
+ * without a qualified tone or DCS, or a `heard` without stats become `cancelled`
+ * (or `unsupported` for the contract's unavailable errors). The attached result
+ * is omitted so a positive outcome cannot leak.
+ */
+function judgeAnalog(raw: unknown): {
+	outcome: IqReplayTrialOutcome
+	analog: AnalogTrialResult | null
+} {
+	let parsed: ParsedAnalog
+	try {
+		const result = analogResultSchema.safeParse(raw)
+		if (!result.success) return CANCELLED_ANALOG
+		parsed = result.data
+	} catch {
+		return CANCELLED_ANALOG
+	}
+	switch (parsed.error) {
+		case undefined:
+			break
+		case "cancelled":
+		case "capture-gone":
+			return CANCELLED_ANALOG
+		case "unavailable":
+		case "analyze-failed":
+			return { outcome: "unsupported", analog: null }
+		default:
+			return CANCELLED_ANALOG
+	}
+	if (parsed.outcome === "decoded" && !qualifiedTone(parsed))
+		return CANCELLED_ANALOG
+	if (parsed.outcome === "heard" && parsed.stats === null)
+		return CANCELLED_ANALOG
+	return { outcome: parsed.outcome, analog: copyAnalog(parsed) }
+}
+
+function qualifiedTone(parsed: ParsedAnalog): boolean {
+	return parsed.tones.ctcssHz !== null || parsed.tones.dcs !== null
+}
+
+function copyAnalog(parsed: ParsedAnalog): AnalogTrialResult {
+	const stats = parsed.stats
+	return {
+		outcome: parsed.outcome,
+		mode: parsed.mode,
+		voice: parsed.voice,
+		tones: {
+			ctcssHz: parsed.tones.ctcssHz,
+			dcs: parsed.tones.dcs,
+			audioSeconds: parsed.tones.audioSeconds,
+		},
+		stats: stats
+			? {
+					mode: stats.mode,
+					frames: stats.frames,
+					gapSamples: stats.gapSamples,
+					floorDb: stats.floorDb,
+				}
+			: null,
 	}
 }
 

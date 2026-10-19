@@ -114,7 +114,8 @@ describe("planReplayTrials", () => {
 		expect(withTrack.some(t => t.known)).toBe(false)
 	})
 
-	it("no track, no known: modes of protocols with prior > 0, by prior; never analog, ambient or rtl433", () => {
+	it("no track, no known: analog trial when its prior is above 0, then modes by prior; never ambient or rtl433", () => {
+		// Spec 5.6: analog-fm prior 3 is a replay analog trial. Ambient and rtl433 stay out.
 		const out = planReplayTrials(
 			input({
 				track: null,
@@ -129,7 +130,15 @@ describe("planReplayTrials", () => {
 				},
 			}),
 		)
-		expect(out.map(t => t.protocol)).toEqual(["dmr", "flex"])
+		expect(out.map(t => t.protocol)).toEqual(["analog-fm", "dmr", "flex"])
+		expect(out[0]).toMatchObject({
+			kind: "analog",
+			analogMode: "nfm",
+			known: false,
+		})
+		expect(out.map(t => t.mode.decoderType)).not.toContain("rtl433")
+		expect(out.map(t => t.protocol)).not.toContain("ais")
+		expect(out.map(t => t.protocol)).not.toContain("ism")
 	})
 
 	it("an unknown or analog known protocol is no trial", () => {
@@ -162,9 +171,140 @@ describe("planReplayTrials", () => {
 		expect(boundReplayTrials([mk(1), mk(1), mk(2)])).toEqual([mk(1), mk(2)])
 	})
 
+	it("known dmr first, then analog nfm, then digital by score", () => {
+		const out = planReplayTrials(
+			input({
+				knownProtocol: "dmr",
+				priors: { "analog-fm": 1, "analog-am": 1 },
+			}),
+		)
+		expect(out.map(t => [t.protocol, t.known, t.kind ?? "probe"])).toEqual([
+			["dmr", true, "probe"],
+			["analog-fm", false, "analog"],
+			["aprs", false, "probe"],
+			["pocsag", false, "probe"],
+			["nxdn96", false, "probe"],
+		])
+		expect(out[1]).toMatchObject({ analogMode: "nfm", kind: "analog" })
+	})
+
+	it("AM band plan → analogMode am", () => {
+		const out = planReplayTrials(
+			input({
+				capture: { ...capture, rfHz: 120_000_000 },
+				priors: { "analog-fm": 1, "analog-am": 1 },
+			}),
+		)
+		expect(out[0]).toMatchObject({
+			kind: "analog",
+			protocol: "analog-am",
+			analogMode: "am",
+			known: false,
+		})
+	})
+
+	it("120 MHz with analog-am prior 0 and analog-fm prior 1 → analog-fm nfm", () => {
+		const out = planReplayTrials(
+			input({
+				capture: { ...capture, rfHz: 120_000_000 },
+				priors: { "analog-am": 0, "analog-fm": 1 },
+			}),
+		)
+		const analog = out.filter(t => t.kind === "analog")
+		expect(analog).toHaveLength(1)
+		expect(analog[0]).toMatchObject({
+			protocol: "analog-fm",
+			analogMode: "nfm",
+			kind: "analog",
+		})
+	})
+
+	it("AM-only positive prior outside AM ranges → analog-am am", () => {
+		const out = planReplayTrials(
+			input({
+				capture: { ...capture, rfHz: TARGET_HZ },
+				priors: { "analog-am": 1, "analog-fm": 0 },
+			}),
+		)
+		const analog = out.filter(t => t.kind === "analog")
+		expect(analog).toHaveLength(1)
+		expect(analog[0]).toMatchObject({
+			protocol: "analog-am",
+			analogMode: "am",
+			kind: "analog",
+		})
+	})
+
+	it("Analog prior 0 → no analog trial", () => {
+		const out = planReplayTrials(input({ priors: { "analog-fm": 0 } }))
+		expect(out.some(t => t.kind === "analog")).toBe(false)
+		expect(out.map(t => t.protocol)).toEqual([
+			"dmr",
+			"aprs",
+			"pocsag",
+			"nxdn96",
+		])
+	})
+
+	it("Analog excluded by request → none", () => {
+		// The frozen plan input has no protocol allow-list. A prior of 0 is how a request
+		// removes analog-fm and analog-am (requirement 1.3, 5.6).
+		const out = planReplayTrials(
+			input({
+				knownProtocol: "dmr",
+				priors: { dmr: 1, "analog-fm": 0, "analog-am": 0 },
+			}),
+		)
+		expect(
+			out.some(
+				t =>
+					t.kind === "analog" ||
+					t.protocol === "analog-fm" ||
+					t.protocol === "analog-am",
+			),
+		).toBe(false)
+		expect(out[0]).toMatchObject({ protocol: "dmr", known: true })
+	})
+
+	it("9 candidates → exactly 8 with analog counted", () => {
+		const mk = (i: number): IqReplayTrial => ({
+			protocol: "dmr",
+			mode: {
+				decoderType: "dsd-fme",
+				protocol: "dmr",
+				covers: ["dmr"],
+				options: { mode: `m${i}` },
+				holdMs: 1000,
+			},
+			known: false,
+		})
+		const analog: IqReplayTrial = {
+			protocol: "analog-fm",
+			kind: "analog",
+			analogMode: "nfm",
+			known: false,
+			mode: {
+				decoderType: "dsd-fme",
+				protocol: "analog-fm",
+				covers: ["analog-fm"],
+				options: { analogTrial: "nfm" },
+				holdMs: 0,
+			},
+		}
+		const atBound = [analog, ...Array.from({ length: 7 }, (_, i) => mk(i))]
+		expect(atBound).toHaveLength(IQ_REPLAY_MAX_TRIALS)
+		expect(boundReplayTrials(atBound)).toEqual(atBound)
+		const past = [...atBound, mk(7)]
+		expect(past).toHaveLength(IQ_REPLAY_MAX_TRIALS + 1)
+		const capped = boundReplayTrials(past)
+		expect(capped).toHaveLength(IQ_REPLAY_MAX_TRIALS)
+		expect(capped[0]).toMatchObject({ kind: "analog" })
+		expect(capped.some(t => t.mode.options["mode"] === "m7")).toBe(false)
+	})
+
 	// Feature: web-gaps-11, Property 14: Known first, decays safely (replay planner side)
 	// Validates: Requirements 1.7, 6.4
-	it("property: at most 8, known first when replayable, unique modes, never rtl433/analog/ambient", () => {
+	it("property: at most 8, known first when replayable, unique modes, never rtl433 or ambient; analog only as the one replay trial", () => {
 		fc.assert(
 			fc.property(
 				fc.record({
@@ -191,17 +331,41 @@ describe("planReplayTrials", () => {
 					)
 					expect(out.length).toBeLessThanOrEqual(IQ_REPLAY_MAX_TRIALS)
 					expect(new Set(out.map(key)).size).toBe(out.length)
+					const fm = c.priors["analog-fm"]
+					const amPrior = c.priors["analog-am"]
+					const analogWanted =
+						(typeof fm === "number" && fm > 0) ||
+						(typeof amPrior === "number" && amPrior > 0)
+					const analogs = out.filter(t => t.kind === "analog")
+					expect(analogs).toHaveLength(analogWanted ? 1 : 0)
 					for (const t of out) {
 						expect(t.mode.decoderType).not.toBe("rtl433")
-						expect([
-							"analog-fm",
-							"analog-am",
-							"ais",
-							"acars",
-							"vdl2",
-							"lora",
-						]).not.toContain(t.protocol)
+						if (t.kind === "analog") {
+							const prior = c.priors[t.protocol]
+							expect(typeof prior === "number" && prior > 0).toBe(true)
+							expect(["analog-fm", "analog-am"]).toContain(t.protocol)
+							expect(t.known).toBe(false)
+							// TARGET_HZ is outside shipped AM ranges, so AM only when FM is excluded.
+							const fmPos = typeof fm === "number" && fm > 0
+							const amPos = typeof amPrior === "number" && amPrior > 0
+							const expectAm = amPos && !fmPos
+							expect(t.protocol).toBe(expectAm ? "analog-am" : "analog-fm")
+							expect(t.analogMode).toBe(expectAm ? "am" : "nfm")
+						} else {
+							expect([
+								"analog-fm",
+								"analog-am",
+								"ais",
+								"acars",
+								"vdl2",
+								"lora",
+							]).not.toContain(t.protocol)
+						}
 					}
+					if (analogs.length === 1)
+						expect(out.indexOf(analogs[0]!)).toBe(
+							out.filter(t => t.known).length,
+						)
 					const replayable =
 						c.known !== null &&
 						c.priors[c.known] !== 0 &&
@@ -222,7 +386,9 @@ describe("planReplayTrials", () => {
 						expect(out[0]).toMatchObject({ protocol: c.known, known: true })
 					expect(out.filter(t => t.known).length).toBe(replayable ? 1 : 0)
 					if (!c.hasTrack && c.known !== null)
-						expect(out.length).toBe(replayable ? 1 : 0)
+						expect(out.length).toBe(
+							(replayable ? 1 : 0) + (analogWanted ? 1 : 0),
+						)
 				},
 			),
 			{ numRuns: 300 },

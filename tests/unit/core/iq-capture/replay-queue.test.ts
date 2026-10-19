@@ -8,16 +8,26 @@ import {
 	type IqReplayProbeAnswer,
 	type IqReplayProbeRequest,
 	type IqReplayProbes,
+	type IqReplayQueueDeps,
 	type IqReplayQueuePort,
 	type IqReplayQueueTimers,
 } from "../../../../src/core/iq-capture/replay-queue.js"
 import type {
 	IqCaptureDiscardReason,
 	IqCaptureView,
+	IqReplayPlanInput,
 	IqReplayResult,
 	IqReplayTrial,
 } from "../../../../src/core/scanner/iq-capture-contract.js"
 import type { ProbeMode } from "../../../../src/core/scanner/probes/probe-pool.js"
+import {
+	ANALOG_TRIAL_CORES,
+	type AnalogTrialOutcome,
+	type AnalogTrialResult,
+	type AnalogTrialRunner,
+	type ObservationEvidenceSink,
+	type ProofAnalogInput,
+} from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { flush, spyLogger } from "./helpers.js"
 
@@ -791,3 +801,431 @@ describe("IqReplayQueue keeps skipped captures queued", () => {
 		expect(s.timers.q.size).toBe(0)
 	})
 })
+
+const analogTrial = (): IqReplayTrial => ({
+	protocol: "analog-fm",
+	kind: "analog",
+	analogMode: "nfm",
+	known: false,
+	mode: {
+		decoderType: "dsd-fme",
+		protocol: "analog-fm",
+		covers: ["analog-fm"],
+		options: { analogTrial: "nfm" },
+		holdMs: 0,
+	},
+})
+
+function heardStats(): NonNullable<AnalogTrialResult["stats"]> {
+	return {
+		mode: "nfm",
+		frames: [
+			{
+				carrierDb: -20,
+				hfNoiseDb: -40,
+				audioDb: -12,
+				syllabic: 0.4,
+				cluster: 0.1,
+			},
+		],
+		gapSamples: 0,
+		floorDb: -90,
+	}
+}
+
+function analogAnswer(outcome: AnalogTrialOutcome): AnalogTrialResult {
+	return {
+		outcome,
+		mode: "nfm",
+		voice: outcome === "heard" || outcome === "decoded",
+		tones: {
+			ctcssHz: outcome === "decoded" ? 88.5 : null,
+			dcs: null,
+			audioSeconds: 1,
+		},
+		stats: outcome === "heard" ? heardStats() : null,
+	}
+}
+
+function runWithAnalog(opts: {
+	trials?: readonly IqReplayTrial[]
+	analog?: AnalogTrialRunner
+	reserveCores?: (cores: number) => (() => void) | null
+	script?: Script
+	planInput?: (capture: IqCaptureView) => IqReplayPlanInput
+}) {
+	const port = new FakePort()
+	const p = makeProbes(opts.script ?? (() => miss))
+	const results: IqReplayResult[] = []
+	const q = createIqReplayQueue({
+		port,
+		probes: p.probes,
+		planner: () =>
+			opts.trials ?? [analogTrial(), trial("pocsag"), trial("dmr")],
+		sink: r => results.push(r),
+		planInput:
+			opts.planInput ??
+			(capture => ({
+				capture,
+				track: null,
+				knownProtocol: null,
+				priors: {},
+				narrowRaster: false,
+			})),
+		logger: spyLogger().logger,
+		timers: new Timers(),
+		...(opts.analog ? { analog: opts.analog } : {}),
+		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
+	})
+	q.start()
+	return { q, port, p, results }
+}
+
+describe("IqReplayQueue analog trial", () => {
+	it("analog heard → digital trials not-needed, one result, one discard", async () => {
+		const release = viRelease()
+		const { port, p, results } = runWithAnalog({
+			analog: { run: () => Promise.resolve(analogAnswer("heard")) },
+			reserveCores: cores => {
+				expect(cores).toBe(ANALOG_TRIAL_CORES)
+				return release.fn
+			},
+		})
+		port.add(id(1))
+		await flush()
+		expect(p.requests).toEqual([])
+		expect(results).toHaveLength(1)
+		expect(results[0]?.decoded).toBeNull()
+		expect(results[0]?.analog?.outcome).toBe("heard")
+		expect(results[0]?.trials.map(t => [t.protocol, t.outcome])).toEqual([
+			["analog-fm", "heard"],
+			["pocsag", "not-needed"],
+			["dmr", "not-needed"],
+		])
+		expect(results[0]?.trials[0]).toMatchObject({
+			decoder: "analog-demod",
+			mode: "nfm",
+		})
+		expect(port.discarded).toEqual([[id(1), "result"]])
+		expect(release.calls).toBe(1)
+	})
+
+	it("Analog data-like → digital trials run", async () => {
+		const { port, p, results } = runWithAnalog({
+			analog: { run: () => Promise.resolve(analogAnswer("data-like")) },
+		})
+		port.add(id(1))
+		await flush()
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+		expect(results[0]?.analog?.outcome).toBe("data-like")
+		expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+			"data-like",
+			"no-sync",
+			"no-sync",
+		])
+		expect(port.discarded).toEqual([[id(1), "result"]])
+	})
+
+	it("Analog carrier-only → digital run", async () => {
+		const { port, p, results } = runWithAnalog({
+			analog: { run: () => Promise.resolve(analogAnswer("carrier-only")) },
+		})
+		port.add(id(1))
+		await flush()
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+		expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+			"carrier-only",
+			"no-sync",
+			"no-sync",
+		])
+		expect(port.discarded).toEqual([[id(1), "result"]])
+	})
+
+	it("No analog dep → unsupported", async () => {
+		const { port, p, results } = runWithAnalog({})
+		port.add(id(1))
+		await flush()
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+		expect(results[0]?.analog).toBeUndefined()
+		expect(results[0]?.trials[0]).toMatchObject({
+			outcome: "unsupported",
+			decoder: "analog-demod",
+		})
+		expect(port.discarded).toEqual([[id(1), "result"]])
+	})
+
+	it("Budget refused → skipped-budget", async () => {
+		let ran = false
+		const reserved: number[] = []
+		const { port, p, results } = runWithAnalog({
+			analog: {
+				run: () => {
+					ran = true
+					return Promise.resolve(analogAnswer("heard"))
+				},
+			},
+			reserveCores: cores => {
+				reserved.push(cores)
+				return null
+			},
+		})
+		port.add(id(1))
+		await flush()
+		expect(reserved).toEqual([ANALOG_TRIAL_CORES])
+		expect(ran).toBe(false)
+		expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+			"skipped-budget",
+			"no-sync",
+			"no-sync",
+		])
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+		expect(results[0]?.analog).toBeUndefined()
+		expect(port.discarded).toEqual([[id(1), "result"]])
+	})
+
+	it("analog runner rejection → cancelled, digital trials continue, release once", async () => {
+		let rejectRun!: (err: unknown) => void
+		const release = viRelease()
+		const { port, p, results } = runWithAnalog({
+			analog: {
+				run: () =>
+					new Promise((_resolve, reject) => {
+						rejectRun = reject
+					}),
+			},
+			reserveCores: () => release.fn,
+		})
+		port.add(id(1))
+		await flush()
+		expect(results).toHaveLength(0)
+		rejectRun(new Error("runner failed"))
+		await flush()
+		expect(results).toHaveLength(1)
+		expect(results[0]?.analog).toBeUndefined()
+		expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+			"cancelled",
+			"no-sync",
+			"no-sync",
+		])
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+		expect(port.discarded).toEqual([[id(1), "result"]])
+		expect(release.calls).toBe(1)
+	})
+
+	it("Abort mid-analog: stop() aborts the signal; one release, one shutdown discard, no result", async () => {
+		// stop() during a pending probe discards as shutdown and delivers no result.
+		// Analog follows that policy.
+		let signal!: AbortSignal
+		const release = viRelease()
+		const { q, port, p, results } = runWithAnalog({
+			analog: {
+				run: (_id, _mode, s) =>
+					new Promise((_resolve, reject) => {
+						signal = s
+						s.addEventListener("abort", () => {
+							reject(new Error("aborted"))
+						})
+					}),
+			},
+			reserveCores: () => release.fn,
+		})
+		port.add(id(1))
+		await flush()
+		expect(results).toHaveLength(0)
+		expect(signal.aborted).toBe(false)
+		await q.stop()
+		await flush()
+		expect(signal.aborted).toBe(true)
+		expect(results).toHaveLength(0)
+		expect(p.requests).toEqual([])
+		expect(port.discarded).toEqual([[id(1), "shutdown"]])
+		expect(release.calls).toBe(1)
+	})
+
+	it.each([
+		{
+			name: "bare {outcome: heard}",
+			value: { outcome: "heard" },
+		},
+		{
+			name: "heard plus error cancelled",
+			value: { ...analogAnswer("heard"), error: "cancelled" as const },
+		},
+		{
+			name: "non-object",
+			value: 42,
+		},
+		{
+			name: "decoded without a qualified tone or DCS",
+			value: {
+				...analogAnswer("data-like"),
+				outcome: "decoded" as const,
+				voice: true,
+			},
+		},
+		{
+			name: "heard without stats",
+			value: { ...analogAnswer("heard"), stats: null },
+		},
+	])(
+		"analog runner $name fails closed: cancelled, digital trials continue, analog not positive",
+		async ({ value }) => {
+			const release = viRelease()
+			const { port, p, results } = runWithAnalog({
+				analog: {
+					run: () => Promise.resolve(value as AnalogTrialResult),
+				},
+				reserveCores: () => release.fn,
+			})
+			port.add(id(1))
+			await flush()
+			expect(results).toHaveLength(1)
+			expect(results[0]?.analog).toBeUndefined()
+			expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+				"cancelled",
+				"no-sync",
+				"no-sync",
+			])
+			expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+			expect(port.discarded).toEqual([[id(1), "result"]])
+			expect(release.calls).toBe(1)
+		},
+	)
+
+	it("analog runner throwing getter fails closed: release once, one result", async () => {
+		const release = viRelease()
+		const bad: object = {}
+		Object.defineProperty(bad, "outcome", {
+			enumerable: true,
+			get() {
+				throw new Error("analog getter")
+			},
+		})
+		const { port, p, results } = runWithAnalog({
+			analog: { run: () => Promise.resolve(bad as AnalogTrialResult) },
+			reserveCores: () => release.fn,
+		})
+		port.add(id(1))
+		await flush()
+		expect(results).toHaveLength(1)
+		expect(results[0]?.analog).toBeUndefined()
+		expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+			"cancelled",
+			"no-sync",
+			"no-sync",
+		])
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+		expect(port.discarded).toEqual([[id(1), "result"]])
+		expect(release.calls).toBe(1)
+	})
+
+	it("R 6.3: a capture of a transmission live audio already identified still runs its own analog trial; data-like runs digital, heard ends not-needed; the live entry is not a substitute", async () => {
+		const evidence = liveDecodedAnalog()
+		// The queue never reads ObservationEvidenceSink: the deps type has no evidence port.
+		const queueReadsEvidence: "evidence" extends keyof IqReplayQueueDeps
+			? true
+			: false = false
+		expect(queueReadsEvidence).toBe(false)
+		let consulted = 0
+		const seen: AnalogTrialOutcome[] = []
+		const run = async (outcome: AnalogTrialOutcome) => {
+			const { port, p, results } = runWithAnalog({
+				trials: [analogTrial(), trial("pocsag")],
+				analog: {
+					run: () => {
+						seen.push(outcome)
+						return Promise.resolve(analogAnswer(outcome))
+					},
+				},
+				planInput: capture => {
+					// Where the caller composes the plan: the seeded live decode is visible
+					// and is not a substitute for this capture's analog trial.
+					expect(evidence.sink.recordAnalog).toEqual(expect.any(Function))
+					expect(
+						evidence.entries.some(
+							e => e.transport === "live" && e.outcome === "decoded",
+						),
+					).toBe(true)
+					consulted++
+					return {
+						capture,
+						track: null,
+						knownProtocol: null,
+						priors: {},
+						narrowRaster: false,
+					}
+				},
+			})
+			port.add(id(1))
+			await flush()
+			return { p, results }
+		}
+		const dataLike = await run("data-like")
+		expect(dataLike.p.requests.map(r => r.protocol)).toEqual(["pocsag"])
+		expect(dataLike.results[0]?.analog?.tones.ctcssHz).toBeNull()
+		expect(dataLike.results[0]?.trials.map(t => t.outcome)).toEqual([
+			"data-like",
+			"no-sync",
+		])
+		const heard = await run("heard")
+		expect(heard.p.requests).toEqual([])
+		expect(heard.results[0]?.trials.map(t => t.outcome)).toEqual([
+			"heard",
+			"not-needed",
+		])
+		expect(heard.results[0]?.analog?.tones.ctcssHz).toBeNull()
+		expect(seen).toEqual(["data-like", "heard"])
+		expect(consulted).toBe(2)
+		expect(evidence.calls).toEqual(evidence.seeded)
+		expect(evidence.entries[0]?.tone.ctcssHz).toBe(88.5)
+		expect(evidence.entries[0]?.transport).toBe("live")
+	})
+})
+
+function viRelease(): { fn: () => void; calls: number } {
+	const box = { calls: 0, fn: () => {} }
+	box.fn = () => {
+		box.calls++
+	}
+	return box
+}
+
+function liveDecodedAnalog(): {
+	entries: ProofAnalogInput[]
+	seeded: { recordAnalog: number; recordTrial: number }
+	calls: { recordAnalog: number; recordTrial: number }
+	sink: ObservationEvidenceSink
+} {
+	const entries: ProofAnalogInput[] = []
+	const calls = { recordAnalog: 0, recordTrial: 0 }
+	const sink: ObservationEvidenceSink = {
+		nextTrialOrder: () => 1,
+		recordTrial: () => {
+			calls.recordTrial++
+			return true
+		},
+		recordAnalog: (_id, entry) => {
+			calls.recordAnalog++
+			entries.push(entry)
+			return true
+		},
+		recordUnavailable: () => true,
+	}
+	sink.recordAnalog("o", {
+		outcome: "decoded",
+		mode: "nfm",
+		voice: true,
+		tone: { ctcssHz: 88.5, dcs: null },
+		transport: "live",
+		at: 1,
+	})
+	return {
+		entries,
+		seeded: {
+			recordAnalog: calls.recordAnalog,
+			recordTrial: calls.recordTrial,
+		},
+		calls,
+		sink,
+	}
+}

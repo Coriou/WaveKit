@@ -8,10 +8,12 @@
  *    draining consumer. Also reports dropped bytes (counted gaps) and process RSS.
  * 2. Replay queue drain rate with fake decoders: zero-latency probes (queue overhead) and 8
  *    trials of a simulated 50 ms each.
+ * 3. `--drain` skips the tap (no native binary, no receiver) and times the WG12 design ceilings
+ *    with fake decoders: unknown digital (one analog trial plus seven probes) and known-first.
  *
  *   pnpm exec esbuild scripts/bench/iq-capture.ts --bundle --platform=node --format=esm \
  *     --packages=external --outfile=output/bench/iq-capture.mjs
- *   node output/bench/iq-capture.mjs [--seconds 10]
+ *   node output/bench/iq-capture.mjs [--seconds 10] [--drain]
  */
 import { EventEmitter } from "node:events"
 import * as fs from "node:fs"
@@ -36,7 +38,10 @@ import {
 import type {
 	IqCaptureDiscardReason,
 	IqCaptureView,
+	IqReplayTrial,
 } from "../../src/core/scanner/iq-capture-contract.js"
+import type { AnalogTrialResult } from "../../src/core/scanner/scanner-redesign-contract.js"
+import type { ScannerProtocol } from "../../src/core/scanner/types.js"
 
 const arg = (name: string, fallback: number): number => {
 	const i = process.argv.indexOf(`--${name}`)
@@ -250,7 +255,186 @@ async function drain(count: number, trialMs: number): Promise<number> {
 	return count / s
 }
 
+/**
+ * Design ceilings (replay pipeline): analog 200 ms, one probe 1500 ms (replay ≤ 1 s plus
+ * start ≈ 0.5 s). Unknown digital is one analog trial plus seven probes
+ * (200 + 7×1500 = 10 700 ms ⇒ 5.6 captures/min). Known-first is one 1500 ms decode
+ * (≈ 40/min; the plan records ≈ 37).
+ */
+const DRAIN_ANALOG_MS = 200
+const DRAIN_PROBE_MS = 1500
+const DRAIN_KNOWN_MS = 1500
+const WORST_DIGITAL: readonly ScannerProtocol[] = [
+	"dmr",
+	"p25p1",
+	"nxdn96",
+	"ysf",
+	"dstar",
+	"dpmr",
+	"pocsag",
+]
+
+function later<T>(ms: number, value: T): Promise<T> {
+	return new Promise(resolve => {
+		setTimeout(() => resolve(value), ms)
+	})
+}
+
+function probeTrial(protocol: ScannerProtocol, known: boolean): IqReplayTrial {
+	return {
+		protocol,
+		known,
+		mode: {
+			decoderType: protocol === "pocsag" ? "multimon-ng" : "dsd-fme",
+			protocol,
+			covers: [protocol],
+			options: { mode: protocol },
+			holdMs: 1000,
+		},
+	}
+}
+
+function analogNfmTrial(): IqReplayTrial {
+	return {
+		protocol: "analog-fm",
+		known: false,
+		kind: "analog",
+		analogMode: "nfm",
+		mode: {
+			decoderType: "dsd-fme",
+			protocol: "analog-fm",
+			covers: ["analog-fm"],
+			options: { analogTrial: "nfm" },
+			holdMs: 0,
+		},
+	}
+}
+
+function analogDataLike(mode: AnalogTrialResult["mode"]): AnalogTrialResult {
+	return {
+		outcome: "data-like",
+		mode,
+		voice: false,
+		tones: { ctcssHz: null, dcs: null, audioSeconds: DRAIN_ANALOG_MS / 1000 },
+		stats: null,
+	}
+}
+
+/** Captures per minute for one scripted plan. Throws when the stop rule did not hold. */
+async function drainPlanned(opts: {
+	count: number
+	trials: readonly IqReplayTrial[]
+	analogMs: number
+	probeMs: number
+	knownFirst: boolean
+}): Promise<number> {
+	const port = new BenchPort()
+	const seen = new Set<string>()
+	let probes = 0
+	let analogRuns = 0
+	const q = createIqReplayQueue({
+		port,
+		probes: {
+			request: req => {
+				probes++
+				const first = !seen.has(req.captureId)
+				seen.add(req.captureId)
+				const decode = opts.knownFirst && first
+				return {
+					run: {
+						result: later(
+							opts.probeMs,
+							decode
+								? {
+										outcome: "decoded" as const,
+										decoded: {
+											protocol: "dmr" as const,
+											identity: { kind: "dmr-cc" as const, value: "1" },
+										},
+									}
+								: { outcome: "no-sync" as const, decoded: null },
+						),
+						cancel: () => {},
+					},
+				}
+			},
+			onSlotRelease: () => () => {},
+		},
+		planner: () => opts.trials,
+		sink: () => {},
+		planInput: capture => ({
+			capture,
+			track: null,
+			knownProtocol: null,
+			priors: {},
+			narrowRaster: false,
+		}),
+		logger,
+		analog: {
+			run: (_id, mode) => {
+				analogRuns++
+				return later(opts.analogMs, analogDataLike(mode))
+			},
+		},
+	})
+	q.start()
+	const t0 = performance.now()
+	for (let i = 0; i < opts.count; i++) port.add(i)
+	await q.idle()
+	const seconds = (performance.now() - t0) / 1000
+	await q.stop()
+	const expectedProbes = opts.knownFirst ? opts.count : opts.count * 7
+	const expectedAnalog = opts.knownFirst ? 0 : opts.count
+	if (probes !== expectedProbes || analogRuns !== expectedAnalog)
+		throw new Error(
+			`drain stop rule: probes ${probes} (expected ${expectedProbes}), analog ${analogRuns} (expected ${expectedAnalog})`,
+		)
+	return (opts.count / seconds) * 60
+}
+
+async function designDrain(): Promise<void> {
+	const worst = await drainPlanned({
+		count: 2,
+		trials: [analogNfmTrial(), ...WORST_DIGITAL.map(p => probeTrial(p, false))],
+		analogMs: DRAIN_ANALOG_MS,
+		probeMs: DRAIN_PROBE_MS,
+		knownFirst: false,
+	})
+	const known = await drainPlanned({
+		count: 4,
+		trials: [
+			probeTrial("dmr", true),
+			analogNfmTrial(),
+			...WORST_DIGITAL.filter(p => p !== "dmr").map(p => probeTrial(p, false)),
+		],
+		analogMs: DRAIN_ANALOG_MS,
+		probeMs: DRAIN_KNOWN_MS,
+		knownFirst: true,
+	})
+	console.log(
+		"replay drain (design timings, fake decoders, no tap, no receiver):",
+	)
+	console.log(
+		`  worst case (analog ${DRAIN_ANALOG_MS} ms + 7 probes × ${DRAIN_PROBE_MS} ms, unknown digital): ${worst.toFixed(2)} captures/min (floor 5.6)`,
+	)
+	console.log(
+		`  known-first (decode at ${DRAIN_KNOWN_MS} ms, later trials not run): ${known.toFixed(2)} captures/min (about 37)`,
+	)
+	console.log(
+		`load average ${os
+			.loadavg()
+			.map(v => v.toFixed(2))
+			.join(
+				" ",
+			)}, ${os.cpus().length} cpus, uptime ${Math.round(os.uptime())}s`,
+	)
+}
+
 async function main(): Promise<void> {
+	if (process.argv.includes("--drain")) {
+		await designDrain()
+		return
+	}
 	await tapFeed()
 	const fast = await drain(5000, 0)
 	const slow = await drain(10, 50)
@@ -265,7 +449,9 @@ async function main(): Promise<void> {
 		`load average ${os
 			.loadavg()
 			.map(v => v.toFixed(2))
-			.join(" ")}, ${os.cpus().length} cpus`,
+			.join(
+				" ",
+			)}, ${os.cpus().length} cpus, uptime ${Math.round(os.uptime())}s`,
 	)
 }
 
