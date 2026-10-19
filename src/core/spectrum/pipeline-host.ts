@@ -5,7 +5,7 @@
  * transferred buffers handed back through `handlers.buffer`.
  */
 import { existsSync } from "node:fs"
-import type { EventLoopUtilization } from "node:perf_hooks"
+import { performance, type EventLoopUtilization } from "node:perf_hooks"
 import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
@@ -17,7 +17,7 @@ import type {
 	PipelineInput,
 } from "./types.js"
 import type { ArtefactMasks } from "./artefacts.js"
-import { SpectrumPipeline } from "./pipeline.js"
+import { SpectrumPipeline, spectrumMainSpanSink } from "./pipeline.js"
 import { decodeEventsFromWire } from "./summary-wire.js"
 import { WorkerToMainSchema, type MainToWorker } from "./worker-protocol.js"
 
@@ -79,8 +79,9 @@ export class InlinePipelineHost implements PipelineHost {
 	constructor(
 		cfg: PipelineConfig,
 		private readonly handlers: PipelineHostHandlers,
+		profile?: { sampleEvery: number },
 	) {
-		this.pipeline = new SpectrumPipeline(cfg)
+		this.pipeline = new SpectrumPipeline(cfg, profile ? { profile } : {})
 	}
 
 	send(input: PipelineInput, transfer?: ArrayBuffer): void {
@@ -163,6 +164,7 @@ export class ThreadPipelineHost implements PipelineHost {
 		private readonly handlers: PipelineHostHandlers,
 		workerUrl: URL,
 		logger: Logger,
+		private readonly profile?: { sampleEvery: number },
 	) {
 		this.log = createComponentLogger(logger, "SpectrumWorkerHost")
 		if (!existsSync(fileURLToPath(workerUrl))) {
@@ -201,7 +203,11 @@ export class ThreadPipelineHost implements PipelineHost {
 				)
 			}
 		})
-		this.post({ type: "init", config: cfg })
+		this.post(
+			this.profile
+				? { type: "init", config: cfg, profile: this.profile }
+				: { type: "init", config: cfg },
+		)
 	}
 
 	private reportFatal(err: Error): void {
@@ -310,10 +316,18 @@ export class ThreadPipelineHost implements PipelineHost {
 		}
 		const message = parsed.data
 		switch (message.type) {
-			case "events":
-				decodeEventsFromWire(message.events)
+			case "events": {
+				const sink = spectrumMainSpanSink()
+				if (sink) {
+					const t0 = performance.now()
+					decodeEventsFromWire(message.events)
+					sink("summary-decode", performance.now() - t0)
+				} else {
+					decodeEventsFromWire(message.events)
+				}
 				this.handlers.events(message.events)
 				return
+			}
 			case "buffer":
 				this.handlers.buffer(message.buffer)
 				return
@@ -346,14 +360,19 @@ export function createPipelineHost(
 	mode: PipelineHostMode,
 	cfg: PipelineConfig,
 	handlers: PipelineHostHandlers,
-	opts: { workerUrl?: URL; logger: Logger },
+	opts: {
+		workerUrl?: URL
+		logger: Logger
+		profile?: { sampleEvery: number }
+	},
 ): PipelineHost {
 	return mode === "inline"
-		? new InlinePipelineHost(cfg, handlers)
+		? new InlinePipelineHost(cfg, handlers, opts.profile)
 		: new ThreadPipelineHost(
 				cfg,
 				handlers,
 				opts.workerUrl ?? defaultWorkerUrl(),
 				opts.logger,
+				opts.profile,
 			)
 }

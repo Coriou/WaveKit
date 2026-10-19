@@ -10,6 +10,7 @@
  * full CU8 stream.
  */
 import { EventEmitter } from "node:events"
+import { performance } from "node:perf_hooks"
 import {
 	SPECTRUM_BINS_CAP_CHOICES,
 	SPECTRUM_BINS_CAP_SETTINGS,
@@ -32,6 +33,7 @@ import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { TunerController } from "../tuner-controller.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
+import { spectrumMainSpanSink } from "./pipeline.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { frameTrackScannerOf } from "./frame-tracks.js"
 import type { SpectrumTrackIdentityLookup } from "./track-identity-contract.js"
@@ -187,6 +189,8 @@ export interface SpectrumServiceDeps {
 	createHost?: SpectrumEngineDeps["createHost"]
 	/** Called for every new engine instance before it starts (the probe pool's stream watch, Task 34). */
 	engineCreated?: (sourceId: string, engine: SpectrumEngine) => void
+	/** Opt-in worker stage profile forwarded to each engine. Absent: no profile. */
+	profile?: { sampleEvery: number }
 	/**
 	 * WG8 req 5: the host bins cap, resolved once at startup (bin-cap.ts). Absent = the 2 048
 	 * floor and no `limits.binsCap` on the status. Read once at construction.
@@ -756,6 +760,7 @@ export class SpectrumService extends EventEmitter {
 			...(persisted ? { persistedEngine: persisted } : {}),
 			...(this.deps.hostCentre ? { hostCentre: this.deps.hostCentre } : {}),
 			...(this.deps.createHost ? { createHost: this.deps.createHost } : {}),
+			...(this.deps.profile ? { profile: this.deps.profile } : {}),
 		}
 		const engine = new SpectrumEngine(engineDeps)
 		const entry: Entry = {
@@ -1407,7 +1412,17 @@ export class SpectrumService extends EventEmitter {
 				atMs,
 			)
 			this.observe(sourceId, entry, summary, epoch)
-			this.frames(sourceId, entry, summary, epoch)
+			const span = spectrumMainSpanSink()
+			if (!span) {
+				this.frames(sourceId, entry, summary, epoch)
+			} else {
+				const t0 = performance.now()
+				try {
+					this.frames(sourceId, entry, summary, epoch)
+				} finally {
+					span("frame-build", performance.now() - t0)
+				}
+			}
 		}
 		this.emit("pipeline", sourceId, ev, epoch)
 	}

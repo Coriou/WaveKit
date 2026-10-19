@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks"
 import { WaveKitError } from "../../utils/errors.js"
 import { segment } from "./emissions/segmenter.js"
 import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
@@ -78,6 +79,44 @@ export const ALARM_CO_BIRTH_S = 1
 const IMAGE_TOLERANCE_HZ = 1000
 const IMAGE_MIN_REJECTION_DB = 20
 const IMAGE_MAX_REJECTION_DB = 65
+
+/** Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel gate exists. */
+export const PIPELINE_PROFILE_STAGES = [
+	"window",
+	"fft",
+	"power",
+	"floor",
+	"detector",
+	"gate",
+	"tracker",
+	"wire",
+] as const
+
+export type PipelineProfileStage = (typeof PIPELINE_PROFILE_STAGES)[number]
+
+/** Aggregated `performance.now()` spans for blocks sampled one in `sampleEvery`. */
+export interface PipelineProfile {
+	blocks: number
+	busyMs: number
+	stages: Record<PipelineProfileStage, number>
+}
+
+/** Main-thread listeners a bench can time. Null sink: the hot path does not call `performance.now()`. */
+export type SpectrumMainSpan = "tap-feed" | "summary-decode" | "frame-build"
+
+type SpectrumMainSpanSink = (name: SpectrumMainSpan, ms: number) => void
+
+let spectrumMainSpan: SpectrumMainSpanSink | null = null
+
+export function installSpectrumMainSpanSink(
+	sink: SpectrumMainSpanSink | null,
+): void {
+	spectrumMainSpan = sink
+}
+
+export function spectrumMainSpanSink(): SpectrumMainSpanSink | null {
+	return spectrumMainSpan
+}
 
 interface EpochState {
 	epoch: number
@@ -243,17 +282,57 @@ export class SpectrumPipeline {
 	private out: PipelineEvent[] = []
 	private logger: Logger | null
 	private warnedTrackId = false
+	/** Opt-in stage profile. Off: no `performance.now()` and export-state has no `profile` key. */
+	private readonly profileOn: boolean
+	private readonly sampleEvery: number
+	private profileOrdinal = 0
+	private profileBlocks = 0
+	private profileBusyMs = 0
+	private sampling = false
+	private pendingWindowMs = 0
+	/** Frameless chunk time held for the next frame while the block is not sampled. */
+	private leadWindowMs = 0
+	/** Set when this handle finished a sampled block; the worker charges encode + post. */
+	private wirePending = false
+	private readonly profileClock: () => number
+	private stageWindow = 0
+	private stageFft = 0
+	private stagePower = 0
+	private stageFloor = 0
+	private stageDetector = 0
+	private stageTracker = 0
+	private stageWire = 0
 
 	constructor(
 		private readonly cfg: PipelineConfig,
-		/** `provisionalWindowMs` (default 30 s) is a test knob: P24 runs the comb property at 3 s. */
+		/**
+		 * `provisionalWindowMs` (default 30 s) is a test knob: P24 runs the comb property at 3 s.
+		 * `profile` samples one finished block in `sampleEvery` (R 9.2). Absent: no profile.
+		 */
 		deps: {
 			now?: () => number
 			provisionalWindowMs?: number
 			logger?: Logger
+			profile?: { sampleEvery: number }
+			/** Profile spans. Default `performance.now`. Not called when profiling is off. */
+			profileNow?: () => number
 		} = {},
 	) {
 		this.logger = deps.logger ?? null
+		this.profileClock = deps.profileNow ?? (() => performance.now())
+		const every = deps.profile?.sampleEvery
+		if (every === undefined) {
+			this.profileOn = false
+			this.sampleEvery = 1
+		} else if (!Number.isInteger(every) || every < 1) {
+			throw new WaveKitError(
+				`spectrum profile sampleEvery must be a positive integer, got ${String(every)}`,
+				"SCANNER_PIPELINE_PROFILE",
+			)
+		} else {
+			this.profileOn = true
+			this.sampleEvery = every
+		}
 		const now = deps.now ?? Date.now
 		this.n = cfg.fftSize
 		this.fs = cfg.sampleRateHz
@@ -403,6 +482,7 @@ export class SpectrumPipeline {
 
 	handle(input: PipelineInput): PipelineEvent[] {
 		this.out = []
+		this.wirePending = false
 		switch (input.kind) {
 			case "bytes":
 				this.onBytes(input.startSample, input.bytes)
@@ -430,7 +510,7 @@ export class SpectrumPipeline {
 	}
 
 	exportEngineState(): EngineState {
-		return {
+		const state: EngineState = {
 			version: 1,
 			absoluteFloors: this.floor.exportState().absoluteFloors,
 			spurs: this.spurs.exportState().spurs,
@@ -440,6 +520,81 @@ export class SpectrumPipeline {
 				return { startHz: r.startHz, endHz: r.endHz, k: s.k }
 			}),
 		}
+		if (!this.profileOn) return state
+		return Object.assign(state, { profile: this.profileSnapshot() })
+	}
+
+	/** `gate` is 0: this build has no channel gate yet (DT.1). */
+	private profileSnapshot(): PipelineProfile {
+		return {
+			blocks: this.profileBlocks,
+			busyMs: this.profileBusyMs,
+			stages: {
+				window: this.stageWindow,
+				fft: this.stageFft,
+				power: this.stagePower,
+				floor: this.stageFloor,
+				detector: this.stageDetector,
+				gate: 0,
+				tracker: this.stageTracker,
+				wire: this.stageWire,
+			},
+		}
+	}
+
+	private mark(sample: boolean): number {
+		return sample ? this.profileClock() : 0
+	}
+
+	private take(
+		sample: boolean,
+		stage: Exclude<PipelineProfileStage, "gate">,
+		t0: number,
+	): void {
+		if (!sample) return
+		const dt = this.profileClock() - t0
+		if (!(dt > 0)) return
+		if (stage === "window") this.stageWindow += dt
+		else if (stage === "fft") this.stageFft += dt
+		else if (stage === "power") this.stagePower += dt
+		else if (stage === "floor") this.stageFloor += dt
+		else if (stage === "detector") this.stageDetector += dt
+		else if (stage === "tracker") this.stageTracker += dt
+		else this.stageWire += dt
+	}
+
+	/** One finished block in `sampleEvery`. The window span of this frame is already in `pendingWindowMs`. */
+	private armSample(): void {
+		this.profileOrdinal++
+		this.sampling = this.profileOrdinal % this.sampleEvery === 0
+	}
+
+	/** Counts a sampled block. Busy time is charged per synchronous frame, not across chunk waits. */
+	private closeSample(): void {
+		this.profileBlocks++
+		this.sampling = false
+	}
+
+	private chargeBusy(dt: number): void {
+		if (dt > 0) this.profileBusyMs += dt
+	}
+
+	/**
+	 * True after this handle finished a sampled block. The worker times
+	 * `encodeEventsForWire` and `postMessage` only then, so profiling off
+	 * never reads the clock.
+	 */
+	wireSpanOpen(): boolean {
+		return this.wirePending
+	}
+
+	/** Charge one encode + post span. Does not read the clock. */
+	chargeWireSpan(ms: number): void {
+		if (!this.wirePending) return
+		this.wirePending = false
+		if (!(ms > 0)) return
+		this.stageWire += ms
+		this.profileBusyMs += ms
 	}
 
 	/**
@@ -712,10 +867,33 @@ export class SpectrumPipeline {
 	}
 
 	private drain(): void {
+		if (!this.profileOn) {
+			this.frames.drain(
+				f => this.onFrame(f),
+				r => this.onCounterRun(r),
+			)
+			return
+		}
+		// U8 conversion and windowing run inside FrameSource. A chunk that
+		// yields no frame still did that work; account it so chunk boundaries
+		// do not bias a sampled block.
+		let cursor = this.profileClock()
 		this.frames.drain(
-			f => this.onFrame(f),
+			f => {
+				this.pendingWindowMs =
+					this.leadWindowMs + (this.profileClock() - cursor)
+				this.leadWindowMs = 0
+				this.onFrame(f)
+				cursor = this.profileClock()
+			},
 			r => this.onCounterRun(r),
 		)
+		const tail = this.profileClock() - cursor
+		if (!(tail > 0)) return
+		if (this.sampling) {
+			this.stageWindow += tail
+			this.chargeBusy(tail)
+		} else this.leadWindowMs += tail
 	}
 
 	private onCounterRun(run: { startSample: number; endSample: number }): void {
@@ -753,23 +931,52 @@ export class SpectrumPipeline {
 				return
 			}
 			this.blockIndex = bi
+			if (this.profileOn) this.armSample()
 		}
-		this.fft.transform(f.re, f.im)
-		this.frameAcc.fill(0)
-		accumulateShiftedPower(f.re, f.im, this.frameAcc)
+		const sample = this.profileOn && this.sampling
+		const frameStart = sample ? this.profileClock() : 0
+		if (this.pendingWindowMs > 0) {
+			if (sample) {
+				this.stageWindow += this.pendingWindowMs
+				this.chargeBusy(this.pendingWindowMs)
+			}
+			this.pendingWindowMs = 0
+		}
+		if (!sample) {
+			this.fft.transform(f.re, f.im)
+			this.frameAcc.fill(0)
+			accumulateShiftedPower(f.re, f.im, this.frameAcc)
+		} else {
+			let t = this.mark(true)
+			this.fft.transform(f.re, f.im)
+			this.take(true, "fft", t)
+			t = this.mark(true)
+			this.frameAcc.fill(0)
+			accumulateShiftedPower(f.re, f.im, this.frameAcc)
+			this.take(true, "power", t)
+		}
 		this.blockClipped += f.clipped
 		this.blockFrames++
 		// § 4.9 (Task 7a): a blanked frame, or a pending one in an epoch's first block, is neither integrated,
 		// short-pathed nor enveloped; the frame after it is a seam for shortFrame, so the 5 ms window restarts
+		let ft = this.mark(sample)
 		if (this.blanker.offer(this.frameAcc, f.startSample) === "keep") {
 			for (let i = 0; i < this.n; i++)
 				this.blockAcc[i] = (this.blockAcc[i] ?? 0) + (this.frameAcc[i] ?? 0)
+			this.take(sample, "power", ft)
+			ft = this.mark(sample)
 			this.shortFrame(f.startSample)
 			if (this.tracker.openCount > 0) {
 				powerToDb(this.frameAcc, 1, this.frameDb)
 				this.tracker.frame(this.frameDb, f.startSample)
 			}
+			this.take(sample, "tracker", ft)
+		} else {
+			this.take(sample, "power", ft)
 		}
+		// Frame time stops here. Finalization charges itself, including when a
+		// later frame calls it after a gap (before that frame's clock starts).
+		if (sample) this.chargeBusy(this.profileClock() - frameStart)
 		if (f.startSample + this.hop >= blockEnd) this.finishBlock()
 	}
 
@@ -835,19 +1042,32 @@ export class SpectrumPipeline {
 	}
 
 	private discardBlock(): void {
+		if (this.sampling) this.closeSample()
 		this.resetBlock()
 		this.blockIndex = -1
 		this.noiseEdgeBlock = -1
 	}
 
+	/** Block finalization is timed once on every path, then offered to the worker as wire. */
 	private finishBlock(): void {
+		const sample = this.sampling
+		const t0 = sample ? this.profileClock() : 0
+		this.finishBlockWork()
+		if (!sample) return
+		this.wirePending = true
+		this.chargeBusy(this.profileClock() - t0)
+	}
+
+	private finishBlockWork(): void {
 		const ep = this.ep
 		const s0 = ep?.settledStart
 		const frames = this.blockFrames
 		if (!ep || s0 === null || s0 === undefined || frames === 0) {
 			this.resetBlock()
+			if (this.sampling) this.closeSample()
 			return
 		}
+		const sample = this.sampling
 		const blockStart = s0 + this.blockIndex * this.blockSamples
 		const blockEnd = blockStart + this.blockSamples
 		this.blocksSeen++
@@ -861,12 +1081,15 @@ export class SpectrumPipeline {
 		const overload =
 			this.blockClipped / (frames * this.n) > this.cfg.clipFraction
 		const blanking = this.blanker.endBlock(this.blockAcc) // § 4.9: blanked frames are not integrated
+		let t = this.mark(sample)
 		powerToDb(this.blockAcc, blanking.integrated, this.powerDb)
+		this.take(sample, "power", t)
 		this.burstCountDone.set(this.burstCount)
 		this.burstPeakDone.set(this.burstPeakDb)
 		this.resetBlock()
 		this.gaps = this.gaps.filter(g => g.end > blockEnd)
 
+		t = this.mark(sample)
 		this.extra.set(this.exclusionMask)
 		this.spurs.mask(ep.absKey, this.extra)
 		const masks = {
@@ -881,10 +1104,13 @@ export class SpectrumPipeline {
 		const effective = this.floor.effectiveFloor(blockFloor, ep.absKey)
 		this.floor.perBinFloor(this.floorDb, effective)
 		this.floorReady = true
+		this.take(sample, "floor", t)
 		// recordNoiseEdges assumes adjacent blocks: after a skipped, stale, gap, overload or excluded block, start afresh
 		if (this.blockIndex !== this.noiseEdgeBlock + 1) this.detector.reset()
+		t = this.mark(sample)
 		this.detector.detect(this.powerDb, this.floorDb, this.on)
 		const k = this.detector.kFor(this.n / 2)
+		this.take(sample, "detector", t)
 		const floorOccupied = this.floor.occupied(blockFloor, k, ep.absKey)
 		const segOpts: SegmentOptions = {
 			gapBins: this.gapBins,
@@ -900,10 +1126,12 @@ export class SpectrumPipeline {
 				dcBin: this.n / 2,
 			},
 		}
+		t = this.mark(sample)
 		const segs = this.withoutLines(
 			ep,
 			segment(this.on, this.powerDb, this.floorDb, segOpts),
 		)
+		this.take(sample, "tracker", t)
 
 		if (ep.staleLeft > 0) {
 			if (this.isStale(segs, ep)) {
@@ -915,6 +1143,7 @@ export class SpectrumPipeline {
 				// or the first accepted block opens a burst ghost at the previous hop's emitters (spec § 4.6)
 				this.resetShort()
 				this.out.push({ kind: "stale-discard", epoch: ep.epoch, blocks: 1 })
+				if (sample) this.closeSample()
 				return
 			}
 			ep.staleLeft = 0
@@ -970,6 +1199,7 @@ export class SpectrumPipeline {
 					// mirrored, and an automatic one-byte re-align on an aligned stream would swap
 					// I/Q for good: every alarm but signal-change is the frozen untracked epoch.
 					this.startUntrackedEpoch(ep, blockEnd, alarm.deltaHz, suspected)
+					if (sample) this.closeSample()
 					return
 				}
 			}
@@ -979,12 +1209,14 @@ export class SpectrumPipeline {
 		if (learn && !blanking.excluded) {
 			for (let i = 0; i < this.n; i++)
 				this.learnMask[i] = unmasked[i] === 1 && this.on[i] !== 1 ? 1 : 0
+			t = this.mark(sample)
 			this.floor.update(
 				this.powerDb,
 				this.learnMask,
 				segs.length === 0,
 				ep.absKey,
 			)
+			this.take(sample, "floor", t)
 			this.spurs.observe(
 				ep.absKey,
 				{ epoch: ep.epoch, centreHz: ep.centreHz, binHz: this.binHz },
@@ -993,6 +1225,7 @@ export class SpectrumPipeline {
 			)
 			this.observeLines(ep)
 		}
+		t = this.mark(sample)
 		const { trackSegs, burstSet } = this.mergeBursts(segs, segOpts)
 		const block: TrackerBlock = {
 			endSample: blockEnd,
@@ -1013,6 +1246,7 @@ export class SpectrumPipeline {
 				powerDb: this.powerDb,
 			}),
 		)
+		this.take(sample, "tracker", t)
 		this.tracker.trackBinsMask(this.lastTrackBins, 1)
 		if (!gap && !overload && !blanking.excluded && !holdPersistent)
 			this.prevPersistent = this.persistentFeatures(segRanges, ep)
@@ -1021,12 +1255,14 @@ export class SpectrumPipeline {
 			let usable = 0
 			for (let i = 0; i < this.n; i++) usable += unmasked[i] ?? 0
 			if (!blanking.excluded) {
+				t = this.mark(sample)
 				this.detector.recordNoiseEdges(
 					this.on,
 					this.joined,
 					this.blockMs / 60_000,
 					(usable * this.binHz) / 1e6,
 				)
+				this.take(sample, "detector", t)
 				this.noiseEdgeBlock = this.blockIndex
 			}
 			this.settledSamples += this.blockSamples
@@ -1034,20 +1270,21 @@ export class SpectrumPipeline {
 		if (overload) this.overloadedBlocks++
 		this.lastFloorDbfs = effective
 		if (this.feed) {
-			this.out.push({
-				kind: "block-summary",
-				summary: this.summary(
-					ep,
-					blockEnd,
-					effective,
-					k,
-					trackSegs,
-					floorOccupied,
-					overload,
-					burstSet,
-				),
-			})
+			t = this.mark(sample)
+			const summary = this.summary(
+				ep,
+				blockEnd,
+				effective,
+				k,
+				trackSegs,
+				floorOccupied,
+				overload,
+				burstSet,
+			)
+			this.take(sample, "wire", t)
+			this.out.push({ kind: "block-summary", summary })
 		}
+		if (sample) this.closeSample()
 	}
 
 	/**

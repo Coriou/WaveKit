@@ -98,8 +98,35 @@ export const PipelineInputSchema = z.discriminatedUnion("kind", [
 	z.object({ kind: z.literal("spectrum-feed"), enabled: z.boolean() }),
 ])
 
+/** Opt-in worker stage profile (R 9.2). Absent on init: the pipeline records nothing. */
+export const PipelineProfileOptionSchema = z.object({
+	sampleEvery: z.number().int().positive(),
+})
+
+/** Present on an export-state reply only while profiling is on. */
+const finiteMs = z.number().nonnegative().finite()
+
+export const PipelineProfileSchema = z.object({
+	blocks: z.number().int().nonnegative().finite(),
+	busyMs: finiteMs,
+	stages: z.object({
+		window: finiteMs,
+		fft: finiteMs,
+		power: finiteMs,
+		floor: finiteMs,
+		detector: finiteMs,
+		gate: finiteMs,
+		tracker: finiteMs,
+		wire: finiteMs,
+	}),
+})
+
 export const MainToWorkerSchema = z.discriminatedUnion("type", [
-	z.object({ type: z.literal("init"), config: PipelineConfigSchema }),
+	z.object({
+		type: z.literal("init"),
+		config: PipelineConfigSchema,
+		profile: PipelineProfileOptionSchema.optional(),
+	}),
 	z.object({ type: z.literal("input"), input: PipelineInputSchema }),
 	z.object({
 		type: z.literal("export-state"),
@@ -112,8 +139,14 @@ export const MainToWorkerSchema = z.discriminatedUnion("type", [
 	z.object({ type: z.literal("close") }),
 ])
 
+type WorkerInit = {
+	type: "init"
+	config: PipelineConfig
+	profile?: { sampleEvery: number }
+}
+
 export type MainToWorker =
-	| { type: "init"; config: PipelineConfig }
+	| WorkerInit
 	| { type: "input"; input: PipelineInput }
 	| { type: "export-state"; requestId: number }
 	| { type: "artefact-masks"; requestId: number }
@@ -147,7 +180,9 @@ export const WorkerToMainSchema = z.discriminatedUnion("type", [
 	z.object({
 		type: z.literal("engine-state"),
 		requestId: z.number().int().nonnegative(),
-		state: EngineStateSchema,
+		state: EngineStateSchema.extend({
+			profile: PipelineProfileSchema.optional(),
+		}),
 	}),
 	z.object({
 		type: z.literal("artefact-masks"),

@@ -3,6 +3,7 @@
  * every validated input goes to SpectrumPipeline.handle(), events go back,
  * and each transferred byte buffer is transferred back for reuse.
  */
+import { performance } from "node:perf_hooks"
 import { parentPort } from "node:worker_threads"
 import { WaveKitError } from "../../utils/errors.js"
 import type { PipelineConfig, PipelineEvent, PipelineInput } from "./types.js"
@@ -51,7 +52,10 @@ port.on("message", (raw: unknown) => {
 	const message = parsed.data
 	switch (message.type) {
 		case "init":
-			pipeline = new SpectrumPipeline(message.config as PipelineConfig)
+			pipeline = new SpectrumPipeline(
+				message.config as PipelineConfig,
+				message.profile ? { profile: message.profile } : {},
+			)
 			return
 		case "input": {
 			const input = message.input as PipelineInput
@@ -65,9 +69,13 @@ port.on("message", (raw: unknown) => {
 					post({ type: "error", message: errorMessage(err) })
 				}
 				if (events.length > 0) {
+					// Clock only when this handle finished a sampled block.
+					const span = pipeline.wireSpanOpen()
+					const t0 = span ? performance.now() : 0
 					const transfer: ArrayBuffer[] = []
 					encodeEventsForWire(events, transfer)
 					post({ type: "events", events }, transfer)
+					if (span) pipeline.chargeWireSpan(performance.now() - t0)
 				}
 			}
 			if (input.kind === "bytes") {
