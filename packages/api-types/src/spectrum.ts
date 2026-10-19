@@ -83,6 +83,13 @@ export interface SpectrumFrameTrack {
 	 * source. Absent for about 1 s after a rollover, until the new observation has its discovery.
 	 */
 	scanner?: SpectrumFrameTrackScanner
+	/**
+	 * WG12: channel-gate state for this frame. Absent on engines without a channel plan
+	 * and on cores before the redesign. `below` is not sent.
+	 */
+	gate?: "pending" | "passed"
+	/** WG12: SNR over the channel slot, not the per-bin `snrDb`. */
+	channelSnrDb?: number
 }
 /** WG11 req 5.1: the scanner's identity of a frame track. */
 export interface SpectrumFrameTrackScanner {
@@ -95,6 +102,11 @@ export interface SpectrumFrameTrackScanner {
  * typical growth: about 105 B per track without `scanner`, 217 B with it).
  */
 export const SPECTRUM_FRAME_TRACK_MAX_EXTRA_BYTES = 260
+/**
+ * WG12: JSON bytes `gate` plus `channelSnrDb` may add to one frame track
+ * (`"gate":"passed"` 15, `"channelSnrDb":12.5` 20, separators).
+ */
+export const SPECTRUM_FRAME_TRACK_GATE_MAX_EXTRA_BYTES = 40
 
 /** WG10 req 2.9: what an untracked-retune warning most likely means. */
 export type SpectrumWarningSuspect =

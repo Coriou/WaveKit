@@ -97,6 +97,8 @@ describe("WG7 contract", () => {
 				| Api.ScannerAmbientDecoderType
 				// WG10 req 3.2 widens the decoder with the live-audio analog evidence
 				| "live-audio"
+				// WG12: analog replay trial
+				| "analog-demod"
 				| null
 			>(true),
 		).toBe(true)

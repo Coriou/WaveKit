@@ -109,7 +109,7 @@ Recorded with the contract commit; requirement numbers are unchanged.
 - **A4: analyze transport.** The 4 KiB control-line protocol belongs to the long-lived `run`
   process, so `analyze` is a sibling argv subcommand of `replay`:
   `wavekit-iqcap analyze --in <abs file> --mode nfm|am`. Stdout carries s16le 8 kHz audio; the
-  single JSON event line (`AnalyzeEvent`, at most `ANALYZE_EVENT_MAX_BYTES` = 4 096, validated
+  single JSON event line (`AnalyzeEvent`, at most `ANALYZE_EVENT_MAX_BYTES`, see A6, validated
   both sides) goes on fd 4. `iq-capture-contract.ts` gains the optional port method
   `IqCapturePort.openAnalyze?(captureId: string, mode: AnalogTrialMode): { audio: Readable;
 event: Promise<AnalyzeEvent>; kill(): void } | null`, so the analog trial runner never reaches
@@ -133,6 +133,19 @@ toleranceHz: number, sourceId?: string): Discovery[]`). `DiscoveryStore` impleme
   `carrier-only` proofs are lost and those discoveries read `weak` (3.6) until new evidence
   arrives. This is designed behaviour, documented in docs/SCANNER.md; persisting trial evidence
   across a restart is an open item (tasks.md § Open items, WG13).
+- **A5: unsupported on replay.** `IqReplayTrialOutcome` gains `"unsupported"` so a replay
+  trial can carry requirement 4.5 (the decoder program was missing before any output). It is
+  internal to the capture contract, not a DTO widening: `ScannerTrialOutcome` already includes
+  `unsupported`. Each `IqReplayResult` trial also gains optional `decoder?: string`,
+  `mode?: AnalogTrialMode` and `reason?: "decoder-unavailable"`.
+- **A6: analyze event size.** `ANALYZE_EVENT_MAX_BYTES` is 16 384, not 4 096: a full 4 s
+  capture emits 80 frames, and one frame is at most 107 B of JSON (five quoted keys 50 B, five
+  numbers of at most 9 characters 45 B, separators 12 B), so 8 560 B plus the envelope.
+  `wavekit-iqcap analyze` writes every frame field finite and rounded to 0.1 (§ Analog replay
+  trial); a non-finite value is an `io` error event, never `NaN` or `Infinity` in the JSON.
+- **A7: finite query numbers.** The route validator coerces `nearHz=Infinity` (and `1e999`)
+  to `Infinity` and passes it through `maximum`, so the discovery-list handler answers 400
+  `VALIDATION_ERROR` for a non-finite `nearHz` or `toleranceHz`.
 
 ## Pipeline positions
 
@@ -329,7 +342,7 @@ statistics; the audio always comes from the kernel.
 a sibling of `replay`, not a control line of the long-lived `run` process):
 `wavekit-iqcap analyze --in <abs file> --mode nfm|am`, with the same input convention and file
 checks as `replay` (`IqCapturePort.openAnalyze` opens it). The tool writes s16le mono audio at
-8 000 Hz on stdout and exactly one bounded event line on fd 4 (4 KiB bound, validated both
+8 000 Hz on stdout and exactly one bounded event line on fd 4 (bounded by `ANALYZE_EVENT_MAX_BYTES`, A6, validated both
 sides): `{ "event": "analysis", "frames": [ … ≤ 80 ], "gapSamples": n }` per capture, each frame
 `{ carrierDb, hfNoiseDb, audioDb, syllabic, cluster }` (numbers rounded to 0.1), or
 `{ "event": "error", "code": … }` with a fixed code (`bad-args`, `open-failed`, `bad-file`,
@@ -480,7 +493,7 @@ Main appends this by hand to `docs/CLI-COORDINATION.md` (no Prettier) when the l
 
 > #### Core: WG12 scanner redesign (parking, channel gate, evidence-only labels, analog replay trial, scan phases) — <merge date, filled by Main>
 >
-> Announcement for the CLI and for the web session. Spec: [scanner-redesign](specs/scanner-redesign/requirements.md). Details in [API.md](API.md). One closed enum was widened in `@wavekit/api-types` (`ScannerTrialOutcome` gains `data-like` and `carrier-only`), `ScannerIdentifyTrial.decoder` gains `analog-demod`, and `ScannerIdentifyResult.ended` gains `no-signal`. Every new field is optional (older cores omit them). No route, WebSocket event type, state or error code was added.
+> Announcement for the CLI and for the web session. Spec: `docs/specs/scanner-redesign/requirements.md`. Details in `docs/API.md`. One closed enum was widened in `@wavekit/api-types` (`ScannerTrialOutcome` gains `data-like` and `carrier-only`), `ScannerIdentifyTrial.decoder` gains `analog-demod`, and `ScannerIdentifyResult.ended` gains `no-signal`. Every new field is optional (older cores omit them). No route, WebSocket event type, state or error code was added.
 >
 > 1. Labels come only from evidence. `Discovery.protocol` stays `unknown` until a decode or an analog trial names something; priors no longer produce "Maybe X". Show `discovery.proof.summary` (fixed English, at most 160 characters: "DMR decoded (CC1, TG 9)", "Analog FM voice, CTCSS 88.5", "Digital, not decoded (tried DMR, dPMR, NXDN)", "Carrier only"). `evidenceLevel` is `proven` or `weak`; request `GET /api/scanner/discoveries?evidence=proven` for the result list and offer "show weak activity" (`evidence=all`, today's default answer). Each observation has its own `proof` (analog or digital per transmission).
 > 2. Only real transmissions surface. A channel-matched gate (channel width from the range, 300 ms at 6 dB channel SNR by default; bursts 100 ms at 9 dB) replaces the old surfacing rules. On `spectrum:frame` tracks, `surfaced` now means "passed the gate"; new optional `gate` (`pending` | `passed`) and `channelSnrDb`. Keep keying by (`sourceId`, `trackId`).

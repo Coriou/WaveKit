@@ -105,6 +105,15 @@ export interface TrackSnapshot {
 	spectralShape: "flat" | "peaked" | "narrow"
 	flags: TrackFlags
 	tuningTrust: TuningTrust
+	/**
+	 * WG12 channel gate (`ChannelGateState` in scanner-redesign-contract.ts). Absent on
+	 * engines without a channel plan.
+	 */
+	gate?: "pending" | "passed" | "below"
+	/** WG12: SNR summed over the covering channel slots. */
+	channelSnrDb?: number
+	/** WG12: engine sample when the gate first passed. */
+	gatePassedSample?: number
 }
 
 export interface BlockSummary {
@@ -155,6 +164,13 @@ export interface BlockTrack {
 	 * spectrum service keys the scanner identity lookup on it and strips it from every frame.
 	 */
 	trackerId?: string
+	/**
+	 * WG12 channel gate on a block segment that can ride a frame. Frames carry only
+	 * `"pending" | "passed"`; `"below"` stays on `TrackSnapshot`. Absent without a channel plan.
+	 */
+	gate?: "pending" | "passed"
+	/** WG12: SNR summed over the covering channel slots. */
+	channelSnrDb?: number
 }
 
 export interface PipelineStats {

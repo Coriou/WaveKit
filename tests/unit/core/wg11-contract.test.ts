@@ -80,6 +80,9 @@ describe("WG11 contract: identify outcomes and transports", () => {
 				| "not-needed"
 				| "cancelled"
 				| "heard"
+				// WG12: analog replay trial outcomes
+				| "data-like"
+				| "carrier-only"
 			>(true),
 		).toBe(true)
 		expect(
@@ -346,6 +349,8 @@ describe("WG11 contract: passive cost and IQ capture config", () => {
 			maxCaptureMs: 4000,
 			preRollMs: 500,
 			binaryPath: "wavekit-iqcap",
+			// WG12: filled only when the object is present. Absent iqCapture stays omitted.
+			allowLegacy: false,
 		})
 		for (const bad of [
 			{ maxTotalMb: 257 },

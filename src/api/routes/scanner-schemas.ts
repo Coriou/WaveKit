@@ -1,4 +1,9 @@
 /** JSON schemas for /api/scanner (spec § 12.1). Response bodies are DTOs from @wavekit/api-types. */
+import {
+	DISCOVERY_NEAR_MAX_TOLERANCE_HZ,
+	IDENTIFY_WAIT_MAX_MS,
+	IDENTIFY_WAIT_MIN_MS,
+} from "@wavekit/api-types"
 import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
 import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
 import {
@@ -285,8 +290,24 @@ export const discoveryQuerySchema = {
 		sort: { type: "string", enum: ["lastSeen", "frequency", "confidence"] },
 		cursor: { type: "string" },
 		limit: { type: "integer", minimum: 1, maximum: 500 },
+		// WG12: accepted only. Filtering lands with lane EV.
+		evidence: { type: "string", enum: ["proven", "weak", "all"] },
+		// 100 GHz is above any receiver. The validator coerces "Infinity" and lets it through
+		// the bound, so the handler must refuse a non-finite nearHz or toleranceHz.
+		nearHz: { type: "number", exclusiveMinimum: 0, maximum: 100_000_000_000 },
+		toleranceHz: {
+			type: "number",
+			minimum: 0,
+			maximum: DISCOVERY_NEAR_MAX_TOLERANCE_HZ,
+		},
 	},
 	additionalProperties: false,
+	allOf: [
+		{
+			if: { required: ["toleranceHz"] },
+			then: { required: ["nearHz"] },
+		},
+	],
 } as const
 
 export const observationsQuerySchema = {
@@ -401,7 +422,23 @@ export const identifyBodySchema = {
 		},
 		exhaustive: { type: "boolean" },
 		record: { type: "boolean" },
+		// WG12: accepted only. The wait lands with lane ID.
+		waitUntilSignal: { type: "boolean" },
+		waitMs: {
+			type: "integer",
+			minimum: IDENTIFY_WAIT_MIN_MS,
+			maximum: IDENTIFY_WAIT_MAX_MS,
+		},
 	},
 	required: ["target"],
 	additionalProperties: false,
+	allOf: [
+		{
+			if: { required: ["waitMs"] },
+			then: {
+				required: ["waitUntilSignal"],
+				properties: { waitUntilSignal: { const: true } },
+			},
+		},
+	],
 } as const

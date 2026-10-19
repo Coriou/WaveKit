@@ -55,6 +55,8 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 				| "rtl433"
 				| Api.ScannerAmbientDecoderType
 				| "live-audio"
+				// WG12: analog replay trial
+				| "analog-demod"
 				| null
 			>(true),
 		).toBe(true)
@@ -85,6 +87,9 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 				| "cancelled"
 				// WG11 req 1.1: an analog squelch opening without a tone or code
 				| "heard"
+				// WG12: analog replay trial outcomes
+				| "data-like"
+				| "carrier-only"
 			>(true),
 		).toBe(true)
 		expect(

@@ -669,6 +669,11 @@ export const ScannerConfigSchema = z
 				/** Pre-roll before the track start (IQ_CAPTURE_PREROLL_MAX_MS, the native ring). */
 				preRollMs: z.number().int().min(0).max(2000).default(500),
 				binaryPath: z.string().min(1).default("wavekit-iqcap"),
+				/**
+				 * WG12: legacy access mode may capture only when this is true. Default false.
+				 * `enabled` stays false until the capture default flip.
+				 */
+				allowLegacy: z.boolean().default(false),
 			})
 			.strict()
 			.optional(),

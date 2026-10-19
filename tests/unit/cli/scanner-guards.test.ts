@@ -436,6 +436,64 @@ describe("strict identify attribution projection", () => {
 		expect(parsed?.progress.probes[0]?.transport).toBe("replay")
 	})
 
+	it("accepts WG12 data-like and carrier-only outcomes, analog-demod and ended no-signal", () => {
+		const target = SCAN_JOB.identify!.targets[0]!
+		const base = wire()
+		const parsed = guardScan("job", {
+			...base,
+			identify: {
+				...base.identify,
+				targets: [
+					{
+						...target,
+						state: "unidentified",
+						trials: [
+							{
+								...target.trials[0]!,
+								protocol: "dmr",
+								decoder: "analog-demod",
+								mode: "nfm",
+								transport: "replay",
+								outcome: "data-like",
+							},
+							{
+								...target.trials[0]!,
+								protocol: "unknown",
+								decoder: "analog-demod",
+								mode: "am",
+								transport: "replay",
+								outcome: "carrier-only",
+							},
+						],
+						result: { ...target.result!, ended: "no-signal" },
+					},
+				],
+			},
+		})
+		expect(parsed?.identify?.targets[0]?.trials.map(t => t.outcome)).toEqual([
+			"data-like",
+			"carrier-only",
+		])
+		expect(parsed?.identify?.targets[0]?.trials[0]?.decoder).toBe(
+			"analog-demod",
+		)
+		expect(parsed?.identify?.targets[0]?.result?.ended).toBe("no-signal")
+		expect(
+			guardScan("job", {
+				...base,
+				identify: {
+					...base.identify,
+					targets: [
+						{
+							...target,
+							result: { ...target.result!, ended: "bogus" },
+						},
+					],
+				},
+			}),
+		).toBeUndefined()
+	})
+
 	it("still refuses an unknown trial outcome or transport", () => {
 		const target = SCAN_JOB.identify!.targets[0]!
 		for (const trial of [

@@ -212,6 +212,35 @@ export interface DiscoveryMetadata {
 	ctcssHz?: number
 }
 
+/** WG12: how a proof was established. Rank is decoded > analog-tone > analog-voice > digital-undecoded > carrier-only. */
+export type ScannerProofKind =
+	| "decoded"
+	| "analog-tone"
+	| "analog-voice"
+	| "digital-undecoded"
+	| "carrier-only"
+export type ScannerProofTransport = "live" | "replay" | "ambient"
+export interface ScannerProof {
+	kind: ScannerProofKind
+	protocol: ScannerProtocol
+	transport: ScannerProofTransport
+	at: string
+	observationId: string
+	identity?: Identity
+	talkgroup?: string
+	tone?: {
+		ctcssHz: number | null
+		dcs: { code: string; polarity: "normal" | "inverted" } | null
+	}
+	voice?: boolean
+	tried: ScannerProtocol[]
+	unavailable: ("dsd-fme" | "multimon-ng" | "direwolf" | "rtl433")[]
+	encrypted: boolean
+	summary: string
+}
+/** WG12: `proven` is a discovery with a proof; `weak` is one without. */
+export type ScannerEvidenceLevel = "proven" | "weak"
+
 export type UndecodedReason =
 	| "no-sync"
 	| "crc-errors"
@@ -258,6 +287,10 @@ export interface Discovery {
 		keep?: boolean
 	}
 	evidence: { recordings: number; psd: boolean; iq: boolean }
+	/** WG12: derived from stored evidence. Absent on cores before the redesign and when nothing is proven. */
+	proof?: ScannerProof
+	/** WG12: `proven` when `proof` is set, otherwise `weak`. Absent on cores before the redesign. */
+	evidenceLevel?: ScannerEvidenceLevel
 }
 
 export interface Observation {
@@ -297,6 +330,8 @@ export interface Observation {
 	jobIds: string[]
 	hopIndex?: number
 	tuningTrust: TuningTrust
+	/** WG12: derived from this observation's evidence. Absent when nothing is proven. */
+	proof?: ScannerProof
 }
 
 // ---------------------------------------------------------------- jobs and plans (§ 10, § 5)

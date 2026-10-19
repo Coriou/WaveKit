@@ -183,6 +183,8 @@ const trial = z.object({
 		"not-needed",
 		"cancelled",
 		"heard",
+		"data-like",
+		"carrier-only",
 	]),
 	reason: text.optional(),
 })
@@ -194,7 +196,7 @@ const result = z.object({
 	discoveryId: id.optional(),
 	observationId: id.optional(),
 	artefact: z.enum(["dc", "spur", "image", "rfi"]).optional(),
-	ended: z.literal("window-moved").optional(),
+	ended: z.enum(["window-moved", "no-signal"]).optional(),
 	measurements: z.object({
 		source: z.enum(["track", "spectrum"]),
 		centreHz: hz,

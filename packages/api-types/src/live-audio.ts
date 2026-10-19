@@ -112,6 +112,15 @@ export interface LiveAudioStatus {
 	 * or the tone not heard: audio muted), `open` (tone heard: audio passes).
 	 */
 	toneSquelch?: { state: "off" | "waiting" | "open" }
+	/**
+	 * WG12: last closed or current transmission's tone. Absent until one is reported;
+	 * cleared on retune and stop.
+	 */
+	tone?: {
+		ctcssHz: number | null
+		dcs: AnalogTransmissionDcs | null
+		at: string
+	}
 }
 
 export type LiveDemodConfig = LiveAudioConfig

@@ -4,6 +4,7 @@
  * tests/unit/api/scanner-dto-contract.test.ts keeps them identical.
  */
 import type { BandRegion } from "./decoders.js"
+import type { AnalogTransmissionDcs } from "./live-audio.js"
 
 export type ScannerProtocol =
 	| "analog-fm"
@@ -205,6 +206,80 @@ export interface DecodeEvidence {
 	decoderId?: string
 }
 
+/** WG12: how a proof was established. Rank is decoded > analog-tone > analog-voice > digital-undecoded > carrier-only. */
+export type ScannerProofKind =
+	| "decoded"
+	| "analog-tone"
+	| "analog-voice"
+	| "digital-undecoded"
+	| "carrier-only"
+export type ScannerProofTransport = "live" | "replay" | "ambient"
+export interface ScannerProof {
+	kind: ScannerProofKind
+	protocol: ScannerProtocol
+	transport: ScannerProofTransport
+	at: string
+	observationId: string
+	identity?: Identity
+	talkgroup?: string
+	tone?: { ctcssHz: number | null; dcs: AnalogTransmissionDcs | null }
+	voice?: boolean
+	tried: ScannerProtocol[]
+	unavailable: ScannerProbeDecoderType[]
+	encrypted: boolean
+	summary: string
+}
+/** WG12: `proven` is a discovery with a proof; `weak` is one without. */
+export type ScannerEvidenceLevel = "proven" | "weak"
+/**
+ * WG12: the new discovery-list query fields only. `evidence` absent means both.
+ * `toleranceHz` is refused without `nearHz`.
+ */
+export interface ScannerDiscoveryQueryParams {
+	evidence?: "proven" | "weak" | "all"
+	nearHz?: number
+	toleranceHz?: number
+}
+/** WG12: how long identify waits for a gated transmission when `waitUntilSignal` is set. */
+export const IDENTIFY_WAIT_DEFAULT_MS = 300_000
+export const IDENTIFY_WAIT_MAX_MS = 600_000
+export const IDENTIFY_WAIT_MIN_MS = 1_000
+/** WG12: default and maximum `|Δf|` of `nearHz`. */
+export const DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ = 6_250
+export const DISCOVERY_NEAR_MAX_TOLERANCE_HZ = 1_000_000
+/** WG12: `ScannerProof.summary` is at most this many characters. */
+export const SCANNER_PROOF_SUMMARY_MAX_CHARS = 160
+/** WG12: `ScannerProof.tried` keeps at most this many protocols. */
+export const SCANNER_PROOF_TRIED_MAX = 16
+/** WG12: a merge event lists at most this many absorbed discovery ids. */
+export const DISCOVERY_MERGED_IDS_MAX = 64
+/** WG12: fixed English labels for proof summaries. `nxdn48` and `nxdn96` share NXDN. */
+export const SCANNER_PROOF_PROTOCOL_LABEL: Readonly<
+	Record<ScannerProtocol, string>
+> = Object.freeze({
+	"analog-fm": "Analog FM",
+	"analog-am": "Analog AM",
+	dmr: "DMR",
+	p25p1: "P25",
+	p25p2: "P25 Phase 2",
+	nxdn48: "NXDN",
+	nxdn96: "NXDN",
+	ysf: "YSF",
+	dstar: "D-STAR",
+	dpmr: "dPMR",
+	pocsag: "POCSAG",
+	flex: "FLEX",
+	aprs: "APRS",
+	ism: "ISM",
+	"digital-unknown": "Digital",
+	carrier: "Carrier",
+	unknown: "Unknown",
+	ais: "AIS",
+	acars: "ACARS",
+	vdl2: "VDL2",
+	lora: "LoRa",
+})
+
 /** Spec § 7.1; timestamps ISO 8601. */
 export interface Discovery {
 	id: string
@@ -243,6 +318,10 @@ export interface Discovery {
 		keep?: boolean
 	}
 	evidence: { recordings: number; psd: boolean; iq: boolean }
+	/** WG12: derived from stored evidence. Absent on cores before the redesign and when nothing is proven. */
+	proof?: ScannerProof
+	/** WG12: `proven` when `proof` is set, otherwise `weak`. Absent on cores before the redesign. */
+	evidenceLevel?: ScannerEvidenceLevel
 }
 
 export interface Observation {
@@ -280,6 +359,8 @@ export interface Observation {
 	jobIds: string[]
 	hopIndex?: number
 	tuningTrust: TuningTrust
+	/** WG12: derived from this observation's evidence. Absent when nothing is proven. */
+	proof?: ScannerProof
 }
 
 // --- Jobs and plans (spec § 10.1, § 5.4) ---
@@ -524,6 +605,14 @@ export interface PlanPreview {
 	bandPlanSkips?: BandPlanSkipRange[]
 }
 
+/** WG12: what a scan job is doing, at the progress cadence. */
+export type ScanJobPhase =
+	| "settling"
+	| "holding"
+	| "trialing"
+	| "replaying"
+	| "capturing"
+	| "watching"
 export interface ScanJobProbe {
 	probeId: string
 	decoderId: string
@@ -551,6 +640,21 @@ export interface ScanJobProgress {
 	}
 	/** WG2: per-job hit statistics since the job started. */
 	hitStats?: ScanJobHitStats
+	/** WG12: absent on cores before the redesign. */
+	phase?: ScanJobPhase
+	parked?: boolean
+	holding?: {
+		discoveryId: string | null
+		frequencyHz: number
+		trackId: string
+	}
+	trial?: {
+		protocol: ScannerProtocol
+		decoder: string
+		transport: "offset" | "channel" | "replay"
+		discoveryId: string | null
+	}
+	replayQueueDepth?: number
 }
 
 /** WG2 (requirement 13): one discovery's hits in one job (in memory; reset on job start). */
@@ -781,12 +885,29 @@ export interface ScannerProgressEventData {
 	/** WG2: total hits and discoveries first seen in this job. */
 	hits?: number
 	newDiscoveries?: number
+	/** WG12: absent on cores before the redesign. */
+	phase?: ScanJobPhase
+	parked?: boolean
+	holding?: {
+		discoveryId: string | null
+		frequencyHz: number
+		trackId: string
+	}
+	trial?: {
+		protocol: ScannerProtocol
+		decoder: string
+		transport: "offset" | "channel" | "replay"
+		discoveryId: string | null
+	}
+	replayQueueDepth?: number
 }
 export interface ScannerDiscoveryEventData {
 	change: "created" | "updated" | "upgraded" | "merged" | "deleted"
 	discovery: Discovery
 	/** WG2: present when a job's observation caused the event; one entry per such job. */
 	jobHits?: ScanJobHit[]
+	/** WG12: discovery ids absorbed by a merge. Absent when the change is not a merge. */
+	mergedIds?: string[]
 }
 export interface ScannerActivityEventData {
 	sourceId: string
@@ -815,6 +936,13 @@ export interface ScannerIdentifyRequest {
 	exhaustive?: boolean
 	/** Keep the trials' voice, analog and data recordings; default true. */
 	record?: boolean
+	/**
+	 * WG12: stay `waiting-for-signal` until a gated transmission, then count `timeoutMs`
+	 * from its start. Absent keeps today's path.
+	 */
+	waitUntilSignal?: boolean
+	/** WG12: give up the wait after this many ms. Refused without `waitUntilSignal`. */
+	waitMs?: number
 }
 export type ScannerIdentifyState =
 	| "waiting-for-signal"
@@ -838,6 +966,10 @@ export type ScannerTrialOutcome =
 	 * DCS code (a squelch opening was heard; nothing was decoded).
 	 */
 	| "heard"
+	/** WG12: the analog replay trial heard a data-like signal and no digital trial decoded. */
+	| "data-like"
+	/** WG12: the analog replay trial heard a carrier and neither voice nor data. */
+	| "carrier-only"
 export interface ScannerIdentifyTrial {
 	protocol: ScannerProtocol
 	/** The decoder that runs the trial or, for an `unsupported` one, would run it; null when none exists (`no-decoder`). */
@@ -849,6 +981,8 @@ export interface ScannerIdentifyTrial {
 		| ScannerAmbientDecoderType
 		/** WG10 req 3.2: analog evidence from the live demodulator's closed transmissions. */
 		| "live-audio"
+		/** WG12: the analog replay trial (`wavekit-iqcap analyze` plus CTCSS/DCS). */
+		| "analog-demod"
 		| null
 	/** dsd-fme mode (`auto`, `nxdn`, `nxdn48`, `dpmr`) or the decoder name; null for an `unsupported` trial. */
 	mode: string | null
@@ -953,8 +1087,12 @@ export interface ScannerIdentifyResult {
 	observationId?: string
 	measurements: ScannerIdentifyMeasurements
 	artefact?: ScannerArtefactKind
-	/** The target ended early: the tuned window moved off it (retune, sweep takeover); open trials are `cancelled`. */
-	ended?: "window-moved"
+	/**
+	 * The target ended early. `window-moved`: the tuned window moved off it (retune, sweep
+	 * takeover); open trials are `cancelled`. `no-signal`: `waitUntilSignal` elapsed with no
+	 * gated transmission (WG12).
+	 */
+	ended?: "window-moved" | "no-signal"
 	/** WG10 req 3.4: present when a closed live-audio transmission matched the target. */
 	analog?: ScannerIdentifyAnalog
 	/** WG10 req 3.5: probe decoder types that could not run during this job (sorted, unique); absent when none. */

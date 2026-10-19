@@ -10,6 +10,11 @@ import type { Readable } from "node:stream"
 import type { TuningTrust } from "@wavekit/api-types"
 import type { TrackSnapshot } from "../spectrum/types.js"
 import type { ProbeDecoderType, ProbeMode } from "./probes/probe-pool.js"
+import type {
+	AnalogTrialMode,
+	AnalogTrialResult,
+	AnalyzeEvent,
+} from "./scanner-redesign-contract.js"
 import type { Identity, ScannerProtocol } from "./types.js"
 
 /** Capture output rate: the probe decoders' channel rate (48 kHz audio family). */
@@ -128,6 +133,19 @@ export interface IqCapturePort {
 	 * (cf32 at the shape's rate), or null when the capture is gone, unverified or `rtl433`.
 	 */
 	openReplay(captureId: string, decoderType: ProbeDecoderType): Readable | null
+	/**
+	 * WG12: spawn `wavekit-iqcap analyze` for one capture. Stdout is s16le 8 kHz audio;
+	 * `event` is the single JSON line from fd 4. Null when the capture is gone. Absent
+	 * on a port that has no analyze child.
+	 */
+	openAnalyze?(
+		captureId: string,
+		mode: AnalogTrialMode,
+	): {
+		audio: Readable
+		event: Promise<AnalyzeEvent>
+		kill(): void
+	} | null
 }
 
 /** What `planReplayTrials` (lane ID) gets for one capture (Main composes it from the scanner). */
@@ -148,6 +166,10 @@ export interface IqReplayTrial {
 	mode: ProbeMode
 	/** The trial of the discovery's known protocol (a miss counts per requirement 1.8). */
 	known: boolean
+	/** WG12: absent means `probe`. */
+	kind?: "probe" | "analog"
+	/** WG12: set when `kind` is `analog`. */
+	analogMode?: AnalogTrialMode
 }
 
 export type IqReplayPlanner = (
@@ -160,6 +182,12 @@ export type IqReplayTrialOutcome =
 	| "crc-errors"
 	| "timeout"
 	| "cancelled"
+	/** WG12 analog replay trial. */
+	| "heard"
+	| "data-like"
+	| "carrier-only"
+	/** WG12: the decoder program was missing before any output (requirement 4.5). */
+	| "unsupported"
 
 /** The result of one capture's queue entry, delivered once, before the capture is discarded. */
 export interface IqReplayResult {
@@ -172,9 +200,19 @@ export interface IqReplayResult {
 		decoderType: ProbeDecoderType
 		known: boolean
 		outcome: IqReplayTrialOutcome
+		/** WG12: the decoder that ran, when it is not `decoderType`. */
+		decoder?: string
+		/** WG12: analog trial mode, when this trial was the analog step. */
+		mode?: AnalogTrialMode
+		/** WG12: set when the outcome is `unsupported` because the program could not run. */
+		reason?: "decoder-unavailable"
 	}[]
 	/** The first accepted (H2) decode; null when no trial decoded. */
 	decoded: { protocol: ScannerProtocol; identity: Identity } | null
+	/** WG12: the analog replay trial, when the plan included one. */
+	analog?: AnalogTrialResult
+	/** WG12: probe decoder types that could not run. Absent when none. */
+	unavailable?: ProbeDecoderType[]
 }
 
 /** Main's scanner side: decode evidence or undecoded reason, and the known-protocol memory. */
