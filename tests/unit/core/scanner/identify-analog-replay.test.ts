@@ -753,6 +753,72 @@ describe("IdentifyRunner analog replay trial (WG12 ID.4)", () => {
 		}
 	})
 
+	it("analog heard does not start a later digital replay of that capture", async () => {
+		// R4.6: after heard, the remaining digital replays of that capture are not run.
+		const replay = await captureReplayRequests({
+			protocols: ["analog-fm", "dmr"],
+			captures: [capture("cap-heard", "commanded")],
+			resultFor: () => resultOf("heard"),
+		})
+		expect(replay.analogOutcome).toBe("heard")
+		expect(digitalReplays(replay.requests, "dmr")).toEqual([])
+	})
+
+	it("analog tone does not start a later digital replay of that capture", async () => {
+		const replay = await captureReplayRequests({
+			protocols: ["analog-fm", "dmr"],
+			captures: [capture("cap-tone", "commanded")],
+			resultFor: () =>
+				resultOf("decoded", {
+					tones: { ctcssHz: 88.5, dcs: null, audioSeconds: 2 },
+				}),
+		})
+		expect(replay.analogOutcome).toBe("decoded")
+		expect(digitalReplays(replay.requests, "dmr")).toEqual([])
+	})
+
+	it("data-like still starts the digital replay of that capture", async () => {
+		const replay = await captureReplayRequests({
+			protocols: ["analog-fm", "dmr"],
+			captures: [capture("cap-data", "commanded")],
+			resultFor: () => resultOf("data-like"),
+		})
+		expect(replay.analogOutcome).toBe("data-like")
+		expect(digitalReplays(replay.requests, "dmr")).toEqual(["cap-data"])
+	})
+
+	it("only the capture that was heard skips its later digital replay", async () => {
+		const replay = await captureReplayRequests({
+			protocols: ["analog-fm", "dmr"],
+			captures: [
+				capture("cap-heard", "commanded"),
+				capture("cap-open", "commanded"),
+			],
+			resultFor: id => resultOf(id === "cap-heard" ? "heard" : "no-sync"),
+		})
+		expect(digitalReplays(replay.requests, "dmr")).toEqual(["cap-open"])
+	})
+
+	it("keeps the known-protocol replay that already ran and skips a later digital replay", async () => {
+		const mem = new FakeMemory(
+			new Map([["d_1", { protocol: "dmr", confidence: "decoded" }]]),
+		)
+		const replay = await captureReplayRequests({
+			protocols: ["analog-fm", "dmr", "aprs"],
+			captures: [capture("cap-known", "commanded")],
+			knownProtocols: mem,
+			discovery: {
+				id: "d_1",
+				protocol: "dmr",
+				confidence: "decoded",
+			} as Discovery,
+			resultFor: () => resultOf("heard"),
+		})
+		expect(replay.analogOutcome).toBe("heard")
+		expect(digitalReplays(replay.requests, "dmr")).toEqual(["cap-known"])
+		expect(digitalReplays(replay.requests, "aprs")).toEqual([])
+	})
+
 	it("runs eight mixed replay trials and does not run a ninth", async () => {
 		// The built-in probe catalog has six mode keys, so eight or nine proposed
 		// trials never occur. Each requested protocol gets its own mode key here.
@@ -779,6 +845,55 @@ describe("IdentifyRunner analog replay trial (WG12 ID.4)", () => {
 		}
 	})
 })
+
+function digitalReplays(
+	requests: readonly ProbeRequest[],
+	protocol: ScannerProtocol,
+): string[] {
+	return requests.flatMap(r =>
+		r.replay && r.protocols.includes(protocol) ? [r.replay.captureId] : [],
+	)
+}
+
+/** Drive one identify until it ends and return the replay probe requests it made. */
+async function captureReplayRequests(opts: {
+	protocols: ScannerProtocol[]
+	captures: IqCaptureView[]
+	resultFor: (captureId: string) => AnalogTrialResult
+	knownProtocols?: FakeMemory
+	discovery?: Discovery
+}): Promise<{ requests: ProbeRequest[]; analogOutcome: string | undefined }> {
+	const requests: ProbeRequest[] = []
+	const h = replayHarness({
+		protocols: opts.protocols,
+		captures: opts.captures,
+		timeoutMs: 400_000,
+		analogTrial: {
+			run: captureId => Promise.resolve(opts.resultFor(captureId)),
+		},
+		...(opts.knownProtocols ? { knownProtocols: opts.knownProtocols } : {}),
+		...(opts.discovery ? { discovery: opts.discovery } : {}),
+	})
+	const request = h.pool.pool.request.bind(h.pool.pool)
+	h.pool.pool.request = req => {
+		if (req.replay) requests.push(req)
+		return request(req)
+	}
+	try {
+		await h.runner.start()
+		h.tracks.push(viewOf(analogTrack()))
+		for (let i = 0; i < 40 && !FINAL.has(h.last()?.state ?? ""); i++)
+			await h.advance(1000)
+		expect(FINAL.has(h.last()?.state ?? "")).toBe(true)
+		return {
+			requests,
+			analogOutcome: h.trials().find(t => t.decoder === "analog-demod")
+				?.outcome,
+		}
+	} finally {
+		await h.destroy()
+	}
+}
 
 /** One dsd-fme mode per protocol, so plan runs do not collapse onto the six built-in keys. */
 function uniqueTrialMode(

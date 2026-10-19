@@ -1108,6 +1108,11 @@ interface TargetState {
 	gate: { startSample: number; atMs: number } | null
 	/** Claimed captures that already have an analog replay trial. */
 	analogArmed: Set<string>
+	/**
+	 * Captures whose analog replay decoded or was heard. R4.6: the remaining digital
+	 * replays of that capture are not run. Other captures are unaffected.
+	 */
+	analogStopped: Set<string>
 	/** In-flight analog replay trials. Aborted when the target ends or replans. */
 	analogAbort: AbortController[]
 }
@@ -1438,6 +1443,7 @@ export class IdentifyRunner implements JobDriver {
 			known: null,
 			gate: null,
 			analogArmed: new Set(),
+			analogStopped: new Set(),
 			analogAbort: [],
 		}
 		this.targets.push(t)
@@ -2749,6 +2755,9 @@ export class IdentifyRunner implements JobDriver {
 				dcs: tone.dcs,
 				tuningTrust: captureTrust(stored?.tuningTrust),
 			})
+			// R4.6: heard or a tone ends this capture's remaining digital replays.
+			// The known-protocol probe already ran (it is queued ahead of analog).
+			t.analogStopped.add(captureId)
 		} else {
 			trial.outcome = parsed.outcome
 		}
@@ -2919,6 +2928,8 @@ export class IdentifyRunner implements JobDriver {
 				if (this.startAnalogItem(t, next.captureId) === "running") return true
 				continue
 			}
+			// R4.6 is per capture. A digital decode still stops every remaining probe.
+			if (t.analogStopped.has(next.captureId)) continue
 			if (stopProbes) continue
 			if (this.startReplayRun(t, next, now)) return true
 		}

@@ -91,6 +91,8 @@ export function createLiveAudioEvidence(
 	}
 
 	const attach = (tx: AnalogEvidenceTransmission): void => {
+		const mode = analogMode(tx.modulation)
+		if (mode === null) return
 		const endedAt = tx.endedAtMs
 		if (endedAt === null) return
 		let found: ReturnType<DiscoveryNearQuery["near"]>
@@ -146,7 +148,7 @@ export function createLiveAudioEvidence(
 		const tone = standardTone(tx)
 		const analog: ProofAnalogInput = {
 			outcome: tone.ctcssHz !== null || tone.dcs !== null ? "decoded" : "heard",
-			mode: analogMode(tx.modulation),
+			mode,
 			voice: true,
 			tone,
 			transport: "live",
@@ -196,10 +198,11 @@ function trusted(trust: unknown): trust is "commanded" | "relay" {
 	return trust === "commanded" || trust === "relay"
 }
 
-function analogMode(
-	modulation: AnalogEvidenceTransmission["modulation"],
-): AnalogTrialMode {
-	return modulation === "am" || modulation === "dsb" ? "am" : "nfm"
+/** nfm/wfm and am/dsb only, matching identify's analog validation. */
+function analogMode(modulation: unknown): AnalogTrialMode | null {
+	if (modulation === "nfm" || modulation === "wfm") return "nfm"
+	if (modulation === "am" || modulation === "dsb") return "am"
+	return null
 }
 
 function standardTone(

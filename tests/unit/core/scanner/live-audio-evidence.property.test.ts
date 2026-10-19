@@ -35,17 +35,26 @@ interface Row {
 	ctcssHz: number | null
 	dcsCode: string | null
 	polarity: "normal" | "inverted"
-	modulation: AnalogEvidenceTransmission["modulation"]
+	modulation: string
 	open: boolean
 }
 
+/** Same acceptance as identify: nfm/wfm and am/dsb. Anything else is not evidence. */
+function evidenceMode(modulation: string): "am" | "nfm" | null {
+	if (modulation === "am" || modulation === "dsb") return "am"
+	if (modulation === "nfm" || modulation === "wfm") return "nfm"
+	return null
+}
+
 function expected(row: Row): ProofAnalogInput | null {
+	const mode = evidenceMode(row.modulation)
 	if (row.open) return null
 	if (row.trust !== "commanded" && row.trust !== "relay") return null
 	if (row.eventTrust !== "commanded" && row.eventTrust !== "relay") return null
 	if (!row.hasDiscovery) return null
 	if (Math.abs(row.offsetHz) > DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ) return null
 	if (!row.overlaps) return null
+	if (mode === null) return null
 	const ctcssHz =
 		row.ctcssHz !== null && CTCSS.has(row.ctcssHz) ? row.ctcssHz : null
 	const dcs =
@@ -54,7 +63,7 @@ function expected(row: Row): ProofAnalogInput | null {
 			: null
 	return {
 		outcome: ctcssHz !== null || dcs !== null ? "decoded" : "heard",
-		mode: row.modulation === "am" || row.modulation === "dsb" ? "am" : "nfm",
+		mode,
 		voice: true,
 		tone: { ctcssHz, dcs },
 		transport: "live",
@@ -80,11 +89,17 @@ const rowArb: fc.Arbitrary<Row> = fc.record({
 	),
 	polarity: fc.constantFrom("normal" as const, "inverted" as const),
 	modulation: fc.constantFrom(
-		"nfm" as const,
-		"wfm" as const,
-		"am" as const,
-		"dsb" as const,
-		"usb" as const,
+		"nfm",
+		"wfm",
+		"am",
+		"dsb",
+		"usb",
+		"lsb",
+		"cw",
+		"raw",
+		"unknown",
+		"",
+		"not-a-mode",
 	),
 	open: fc.boolean(),
 })
@@ -163,7 +178,8 @@ describe("live-audio evidence property", () => {
 					endedAtMs: row.open ? null : T0 + 2_000,
 					hz: HZ,
 					tuningTrust: row.eventTrust,
-					modulation: row.modulation,
+					modulation:
+						row.modulation as AnalogEvidenceTransmission["modulation"],
 					ctcssHz: row.ctcssHz,
 					dcs:
 						row.dcsCode === null
@@ -173,6 +189,7 @@ describe("live-audio evidence property", () => {
 				for (const listener of listeners) listener(tx)
 				const want = expected(row)
 				expect(created).toBe(0)
+				if (evidenceMode(row.modulation) === null) expect(recorded).toEqual([])
 				if (want === null) {
 					expect(recorded).toEqual([])
 					expect(calls.includes("recordAnalog")).toBe(false)

@@ -365,6 +365,30 @@ describe("live-audio evidence", () => {
 		expect(wfm.recorded[0]?.analog.mode).toBe("nfm")
 	})
 
+	it("records nothing for usb, lsb, cw, raw, unknown, or malformed modulation", () => {
+		const rejected: unknown[] = [
+			"usb",
+			"lsb",
+			"cw",
+			"raw",
+			"unknown",
+			"",
+			null,
+			3,
+		]
+		for (const modulation of rejected) {
+			const { recorded, calls } = harness({
+				closed: [
+					transmission({
+						modulation: modulation as AnalogEvidenceTransmission["modulation"],
+					}),
+				],
+			})
+			expect(recorded, String(modulation)).toEqual([])
+			expect(calls.includes("recordAnalog"), String(modulation)).toBe(false)
+		}
+	})
+
 	it("ignores an open transmission", () => {
 		const { recorded, calls } = harness({
 			closed: [transmission({ endedAtMs: null, ctcssHz: null })],
