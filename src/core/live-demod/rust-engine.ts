@@ -32,6 +32,7 @@ import {
 	parseProtocolLine,
 	type DemodEvent,
 	type OpenedDemodEvent,
+	type QuietingDb,
 } from "./rust-protocol.js"
 
 const CONTROL_FD = 3
@@ -65,7 +66,7 @@ export interface RustEngineHandlers {
 	onGate: (open: boolean) => void
 	onMetrics: (
 		powerDbfs: Array<number | null>,
-		quietingDb: Array<number | null>,
+		quietingDb: ReadonlyArray<QuietingDb>,
 	) => void
 	onDown: (reason: string) => void
 	/** First output sample of an applied retune (`retuned.atOutputSample`). */

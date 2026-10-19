@@ -7,7 +7,8 @@
 //!
 //! The 1000-seed campaign uses the same channel-IQ generator as that test. It records the
 //! false-open rate and the carrier open latency. Those rates are the csdr path's behaviour;
-//! this file prints them and does not treat them as a pass/fail bar.
+//! this file prints them and does not treat them as a pass/fail bar. That campaign is
+//! `#[ignore]` (about a minute in release). One seed of every row runs by default.
 //!
 //! Generator, in lockstep with `bandwidthIq` in the vitest file:
 //! 1. mulberry32(seed).
@@ -416,12 +417,12 @@ struct NoiseScore {
     max_db: f64,
 }
 
-fn score_noise(bandwidth_hz: f64, kind: &str, synth: &mut Synth) -> NoiseScore {
+fn score_noise(bandwidth_hz: f64, kind: &str, synth: &mut Synth, seeds: u32) -> NoiseScore {
     let samples = (WARMUP_BLOCKS + NOISE_BLOCKS) * BLOCK;
     let mut raw_open = 0usize;
     let mut held_open = 0usize;
     let mut max_db = f64::NEG_INFINITY;
-    for seed in 1..=NOISE_SEEDS {
+    for seed in 1..=seeds {
         let iq = synth.generate(
             kind,
             campaign_seed(kind_code(kind), bandwidth_hz, seed),
@@ -451,7 +452,7 @@ fn score_noise(bandwidth_hz: f64, kind: &str, synth: &mut Synth) -> NoiseScore {
     NoiseScore {
         raw_open,
         held_open,
-        blocks: NOISE_SEEDS as usize * NOISE_BLOCKS,
+        blocks: seeds as usize * NOISE_BLOCKS,
         max_db,
     }
 }
@@ -463,14 +464,20 @@ struct CarrierScore {
     latencies: Vec<usize>,
 }
 
-fn score_carrier(bandwidth_hz: f64, cnr_db: f64, tone_hz: f64, synth: &mut Synth) -> CarrierScore {
+fn score_carrier(
+    bandwidth_hz: f64,
+    cnr_db: f64,
+    tone_hz: f64,
+    synth: &mut Synth,
+    seeds: u32,
+) -> CarrierScore {
     let samples = (WARMUP_BLOCKS + CARRIER_BLOCKS) * BLOCK;
     let carrier_at = WARMUP_BLOCKS * BLOCK;
     let mut opened = 0usize;
     let mut on_first = 0usize;
     let mut never = 0usize;
     let mut latencies = Vec::new();
-    for seed in 1..=CARRIER_SEEDS {
+    for seed in 1..=seeds {
         let code = fm_code(cnr_db, tone_hz);
         let iq = synth.generate(
             "fm",
@@ -540,20 +547,17 @@ fn campaign_seed(kind: u32, bandwidth_hz: f64, salt: u32) -> u32 {
     }
 }
 
-#[test]
-fn baseline_false_opens_and_open_latency() {
-    assert_eq!(NOISE_SEEDS, 1_000);
-    assert_eq!(CARRIER_SEEDS, 1_000);
+fn run_baseline(noise_seeds: u32, carrier_seeds: u32) {
     let mut noise_rows = Vec::new();
     let mut synth = Synth::new(BANDWIDTHS[0]);
     for bandwidth in BANDWIDTHS {
         synth.retune(bandwidth);
         for kind in ["white", "coloured", "dc"] {
-            let score = score_noise(bandwidth, kind, &mut synth);
+            let score = score_noise(bandwidth, kind, &mut synth, noise_seeds);
             let raw = score.raw_open as f64 / score.blocks as f64;
             let held = score.held_open as f64 / score.blocks as f64;
             println!(
-                "noise bandwidth={bandwidth} kind={kind} seeds={NOISE_SEEDS} blocks={} raw_false_open={raw:.6} held_false_open={held:.6} max_db={:.2}",
+                "noise bandwidth={bandwidth} kind={kind} seeds={noise_seeds} blocks={} raw_false_open={raw:.6} held_false_open={held:.6} max_db={:.2}",
                 score.blocks, score.max_db
             );
             noise_rows.push((bandwidth, kind, raw, held, score.max_db));
@@ -564,8 +568,8 @@ fn baseline_false_opens_and_open_latency() {
         synth.retune(bandwidth);
         for cnr in [6.0, 10.0] {
             for tone in [1_000.0, 2_500.0] {
-                let mut score = score_carrier(bandwidth, cnr, tone, &mut synth);
-                let seeds = CARRIER_SEEDS as usize;
+                let mut score = score_carrier(bandwidth, cnr, tone, &mut synth, carrier_seeds);
+                let seeds = carrier_seeds as usize;
                 let on_first = score.on_first as f64 / seeds as f64;
                 let (median_latency, p90) = if score.latencies.is_empty() {
                     (None, None)
@@ -591,4 +595,22 @@ fn baseline_false_opens_and_open_latency() {
     assert_eq!(carrier_rows.len(), 16);
     // The campaign is the report. A finite max on every noise row means the meter ran.
     assert!(noise_rows.iter().all(|row| row.4.is_finite()));
+}
+
+/// 1000-seed false-open and open-latency campaign. About a minute in release,
+/// so it does not run by default.
+///
+/// Run: `cargo test --release -- --ignored noise_baseline`
+#[test]
+#[ignore]
+fn noise_baseline_false_opens_and_open_latency() {
+    assert_eq!(NOISE_SEEDS, 1_000);
+    assert_eq!(CARRIER_SEEDS, 1_000);
+    run_baseline(NOISE_SEEDS, CARRIER_SEEDS);
+}
+
+/// One seed of every bandwidth, noise kind, and carrier. Stays under a few seconds.
+#[test]
+fn baseline_smoke_one_seed() {
+    run_baseline(1, 1);
 }

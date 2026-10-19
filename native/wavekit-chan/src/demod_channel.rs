@@ -14,7 +14,7 @@ use crate::plan::{plan_chain, ChainPlan};
 use crate::protocol::{
     AudioFormat, AudioOpts, AudioUpdate, DemodOpen, RetuneReq, SquelchMode, SquelchOpts,
     SquelchReq, DEMOD_BLOCK_SAMPLES, DEMOD_MAX_BANDWIDTH_HZ, DEMOD_MIN_BANDWIDTH_HZ,
-    DEMOD_OUTPUT_RATE_HZ,
+    DEMOD_OUTPUT_RATE_HZ, QUIETING_DB_INFINITE,
 };
 use crate::stages::{Nco, RationalFir};
 use serde_json::{json, Value};
@@ -630,7 +630,7 @@ impl DemodChannel {
             }
             self.power_batch.push(round_db(power));
             self.quiet_batch.push(match quieting {
-                Some(q) => round_db(q),
+                Some(q) => round_quieting_db(q),
                 None => Value::Null,
             });
             if self.power_batch.len() >= 10 {
@@ -691,6 +691,18 @@ fn round_db(x: f32) -> Value {
     }
     let y = (f64::from(x) * 100.0).round() / 100.0;
     json!(y)
+}
+
+/// `+∞` (a usable, silent discriminator) is [`QUIETING_DB_INFINITE`]. Null stays
+/// NaN and −∞, which are unusable blocks.
+fn round_quieting_db(x: f32) -> Value {
+    if x.is_nan() || (x.is_infinite() && x.is_sign_negative()) {
+        return Value::Null;
+    }
+    if x.is_infinite() {
+        return json!(QUIETING_DB_INFINITE);
+    }
+    round_db(x)
 }
 
 fn build_gate(opts: &SquelchOpts) -> (Gate, bool) {

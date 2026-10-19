@@ -24,6 +24,11 @@ pub const DEMOD_DEFAULT_HYSTERESIS_DB: f64 = 2.0;
 pub const DEMOD_DEFAULT_HANG_MS: f64 = 250.0;
 pub const DEMOD_DEFAULT_QUIETING_DB: f64 = 6.0;
 
+/// `metrics.quietingDb` for a usable silent discriminator (`NoiseMeter` returns `+∞`).
+/// JSON has no infinity. `null` stays an unusable block (NaN or −∞). The TypeScript
+/// schema accepts this string and treats it as quieted carrier evidence.
+pub const QUIETING_DB_INFINITE: &str = "inf";
+
 /// Largest `queueBytes` the process accepts. `ChannelQueue` allocates its whole capacity up front,
 /// so an absurd request must be refused here, not met with a huge allocation. 64 MiB is ~170 s
 /// of 48 kHz cf32 and far above every §6 budget; Task 16's Node schema mirrors it.

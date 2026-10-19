@@ -19,7 +19,12 @@ import type { SilenceFillClock } from "../live-audio-silence.js"
 import type { LiveDemodConfig, PipelineRun } from "../live-demodulator.js"
 import type { DemodRetune, DemodSquelch } from "./engine.js"
 import { RustEngine, type RustStartResult } from "./rust-engine.js"
-import { planRetune, squelchFor } from "./rust-protocol.js"
+import {
+	planRetune,
+	QUIETING_DB_INFINITE,
+	squelchFor,
+	type QuietingDb,
+} from "./rust-protocol.js"
 import {
 	DEMOD_PROTOCOL,
 	RUST_AUDIO_RATE_HZ,
@@ -98,6 +103,8 @@ export interface RustRunHost {
 	measureRun(run: PipelineRun, sample: RustPowerSample): void
 	resetFloorForRetune(run: PipelineRun): void
 	clearCloseOverride(): void
+	/** Put config back to the last config the process acknowledged. */
+	rollbackConfig(config: LiveDemodConfig): void
 	adoptRun(run: PipelineRun): void
 	markStartError(reason: string): void
 	emitError(error: Error): void
@@ -132,6 +139,10 @@ export class RustLiveRun {
 	private retuneRejects = 0
 	/** Rust died during the initial start, before HTTP can arm the backoff. */
 	private deferredStartFailure: string | null = null
+	/** Engine whose handshake has not finished. `stop` kills this process group. */
+	private starting: RustEngine | null = null
+	/** Bumped when a start is cancelled so the late handshake is not adopted. */
+	private startEpoch = 0
 
 	constructor(private readonly host: RustRunHost) {}
 
@@ -165,6 +176,22 @@ export class RustLiveRun {
 	clearLatch(): void {
 		this.rustUnstable = false
 		this.rustFailures = 0
+	}
+
+	/** True while `tryStart` is inside the version probe or the handshake. */
+	hasPendingStart(): boolean {
+		return this.starting !== null
+	}
+
+	/**
+	 * Drop the in-flight start. The process group is signalled here, and a
+	 * handshake that arrives afterwards is not adopted.
+	 */
+	async cancelPendingStart(): Promise<void> {
+		this.startEpoch += 1
+		const engine = this.starting
+		this.starting = null
+		if (engine) await engine.stop()
 	}
 
 	noteCrash(lastRunMs: number): void {
@@ -243,7 +270,12 @@ export class RustLiveRun {
 	async tryStart(planned: { caps: SourceCaps }): Promise<boolean> {
 		this.resetRetuneTracking()
 		const config = this.host.config()
-		if (!rustEngineRequested(config)) return false
+		if (!rustEngineRequested(config)) {
+			// An explicit csdr (or an omitted engine) is not a Rust fallback.
+			this.engineFallback = null
+			this.warnedFallback = null
+			return false
+		}
 		const branch = this.host.branchStream()
 		if (!branch) return false
 		const pre = selectEngine({
@@ -275,6 +307,10 @@ export class RustLiveRun {
 			clock: this.host.clock,
 		})
 		const slot: { run: PipelineRun | null } = { run: null }
+		const startup: StartupBuffer = { gate: null, metrics: [], retuned: 0 }
+		let live = false
+		const epoch = this.startEpoch
+		this.starting = engine
 		let result: RustStartResult
 		try {
 			result = await engine.start({
@@ -293,10 +329,18 @@ export class RustLiveRun {
 							this.host.handleAudioData(chunk)
 					},
 					onGate: open => {
+						if (!live) {
+							startup.gate = open
+							return
+						}
 						const current = slot.run
 						if (current) this.onGate(current, open)
 					},
 					onRetuned: () => {
+						if (!live) {
+							startup.retuned += 1
+							return
+						}
 						const current = slot.run
 						if (current) this.onRetuned(current)
 					},
@@ -305,8 +349,13 @@ export class RustLiveRun {
 						if (current) this.onRetuneRejected(current, reasonCode)
 					},
 					onMetrics: (power, quieting) => {
+						const normalized = quieting.map(asQuietingNumber)
+						if (!live) {
+							startup.metrics.push({ power, quieting: normalized })
+							return
+						}
 						const current = slot.run
-						if (current) this.onMetrics(current, power, quieting)
+						if (current) this.onMetrics(current, power, normalized)
 					},
 					onDown: () => {
 						const current = slot.run
@@ -316,10 +365,21 @@ export class RustLiveRun {
 				},
 			})
 		} catch (error: unknown) {
+			if (this.starting === engine) this.starting = null
+			if (this.startEpoch !== epoch) {
+				await engine.stop()
+				return true
+			}
 			this.noteFallback("binary-unavailable", error)
 			await engine.stop()
 			return false
 		}
+		if (this.startEpoch !== epoch) {
+			if (this.starting === engine) this.starting = null
+			await engine.stop()
+			return true
+		}
+		if (this.starting === engine) this.starting = null
 		if (!result.ok) {
 			if ("crashed" in result) {
 				await engine.stop()
@@ -357,6 +417,8 @@ export class RustLiveRun {
 		this.sentConfig = config
 		this.retuneRejects = 0
 		this.host.adoptRun(run)
+		live = true
+		this.applyStartup(run, startup)
 		this.host.log.info(
 			{
 				sourceId: this.host.activeSourceId(),
@@ -441,6 +503,18 @@ export class RustLiveRun {
 		this.inFlightHoldsIdentity = false
 		this.queuedConfig = null
 		this.sentConfig = acked
+		// Nothing newer is waiting. Native still has `acked`. Advertising the
+		// rejected request would leave the hold stuck and the status lying.
+		if (
+			queued === null &&
+			desired !== null &&
+			acked !== null &&
+			identityChanged(acked, desired)
+		) {
+			this.host.rollbackConfig(acked)
+			this.releaseHold(run)
+			return
+		}
 		if (desired !== null && acked !== null && !identityChanged(acked, desired))
 			this.releaseHold(run)
 		// The in-flight write was refused. A newer config waiting on it still
@@ -499,6 +573,14 @@ export class RustLiveRun {
 		this.ackedConfig = null
 		this.queuedConfig = null
 		this.retuneRejects = 0
+	}
+
+	/** Gate, metrics and retuned that arrived in the `opened` chunk. */
+	private applyStartup(run: PipelineRun, startup: StartupBuffer): void {
+		if (startup.gate !== null) this.onGate(run, startup.gate)
+		for (const sample of startup.metrics)
+			this.onMetrics(run, sample.power, sample.quieting)
+		for (let n = 0; n < startup.retuned; n++) this.onRetuned(run)
 	}
 
 	private onMetrics(
@@ -577,10 +659,25 @@ export class RustLiveRun {
 	}
 }
 
+interface StartupBuffer {
+	gate: boolean | null
+	metrics: Array<{
+		power: Array<number | null>
+		quieting: Array<number | null>
+	}>
+	retuned: number
+}
+
+/** `inf` is +∞. Everything else is already a finite number or null. */
+function asQuietingNumber(quieting: QuietingDb): number | null {
+	return quieting === QUIETING_DB_INFINITE ? Number.POSITIVE_INFINITY : quieting
+}
+
 /**
  * `ChannelSquelch.blockQuieted`: auto nfm/wfm, quieting at least the observer
  * threshold (`LIVE_AUDIO_NOISE_QUIETING_DB.default`). `noiseQuietingDb` is the
- * noise-mode gate, not this floor predicate.
+ * noise-mode gate, not this floor predicate. `+∞` is the silent-discriminator
+ * token and counts as quieted.
  */
 function metricsQuieted(
 	config: LiveDemodConfig,
@@ -589,6 +686,7 @@ function metricsQuieted(
 	if (config.squelchMode !== "auto") return false
 	if (!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(config.modulation))
 		return false
+	// +∞ is the silent-discriminator token. It is quieted carrier evidence.
 	return (
 		quietingDb !== null && quietingDb >= LIVE_AUDIO_NOISE_QUIETING_DB.default
 	)

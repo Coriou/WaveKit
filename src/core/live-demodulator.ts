@@ -346,6 +346,11 @@ export class LiveDemodulator extends EventEmitter {
 	 * `config-changed`; the tracker reads this during that synchronous emit.
 	 */
 	private closeOverride: "stopped" | "config" | null = null
+	/**
+	 * `stop()` won over an in-flight `start()`. The handshake must not adopt a
+	 * run or bring HTTP up after `stop()` has begun.
+	 */
+	private stopRequested = false
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
 	private readonly audio: AudioClientRegistry
@@ -421,6 +426,9 @@ export class LiveDemodulator extends EventEmitter {
 			clearCloseOverride: () => {
 				this.closeOverride = null
 			},
+			rollbackConfig: config => {
+				this.config = config
+			},
 			adoptRun: run => this.adoptRustRun(run),
 			markStartError: reason => {
 				this.lastError = reason
@@ -432,6 +440,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	async start(): Promise<void> {
+		this.stopRequested = false
 		if (this.http.listening) {
 			if (this.run) {
 				this.log.warn("Live demodulator already running")
@@ -449,6 +458,7 @@ export class LiveDemodulator extends EventEmitter {
 				this.attachBranch(sourceId)
 			}
 			await this.startPipelineOrFail()
+			if (this.stopRequested) return
 			this.emit("started")
 			this.log.info("Live demodulation pipeline restarted on request")
 			return
@@ -463,8 +473,14 @@ export class LiveDemodulator extends EventEmitter {
 		this.pipelineRestarts = 0
 		this.attachBranch(sourceId)
 		await this.startPipelineOrFail()
+		if (this.stopRequested) return
 		await this.startHttpServer()
+		if (this.stopRequested) {
+			await this.closeHttpServer()
+			return
+		}
 		this.rustRuns.flushDeferredRestart()
+		if (this.stopRequested) return
 		this.subscribeToSourceCapsChanges()
 		this.emit("started")
 		this.log.info(
@@ -483,8 +499,9 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	async stop(): Promise<void> {
+		this.stopRequested = true
 		this.stopAdmission()
-		if (!this.http.listening && !this.run) {
+		if (!this.http.listening && !this.run && !this.rustRuns.hasPendingStart()) {
 			this.log.warn("Live demodulator not running")
 			return
 		}
@@ -494,6 +511,7 @@ export class LiveDemodulator extends EventEmitter {
 			this.silence.disarm("stop")
 			this.clearRestartTimer()
 			this.unsubscribeFromSourceCapsChanges()
+			await this.rustRuns.cancelPendingStart()
 			if (this.run) await this.stopRun(this.run)
 			this.pipelineHealth = "stopped"
 			this.detachBranch()
@@ -881,6 +899,8 @@ export class LiveDemodulator extends EventEmitter {
 	): boolean {
 		if (!run.squelch.hasCarrierEvidence) return false
 		if (quietingDb === null) return false
+		// The Rust bridge maps the silent-discriminator token to +∞.
+		if (quietingDb === Number.POSITIVE_INFINITY) return true
 		const threshold =
 			run.squelch.mode === "noise"
 				? run.squelch.noiseQuietingDb
@@ -1193,6 +1213,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private async startPipeline(): Promise<void> {
+		if (this.stopRequested) return
 		if (this.run) {
 			this.log.warn("Live demodulation pipeline already running")
 			return
@@ -1206,6 +1227,7 @@ export class LiveDemodulator extends EventEmitter {
 
 		const planned = this.planFor(this.activeSourceId, this.config)
 		if (await this.rustRuns.tryStart(planned)) return
+		if (this.stopRequested) return
 		const { caps, rateInfo, plan } = planned
 		for (const warning of plan.warnings) this.log.warn(warning)
 

@@ -23,7 +23,16 @@
 //! installs the resulting reference with [`NoiseMeter::from_reference`] on the audio path.
 
 use std::f64::consts::{PI, TAU};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+/// Times [`simulate_reference`] has run. `process` must not increment it.
+static REFERENCE_SIMULATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// How many noise-reference simulations have run in this process.
+pub fn reference_simulations() -> u64 {
+    REFERENCE_SIMULATIONS.load(Ordering::Relaxed)
+}
 
 use super::Complex32;
 
@@ -315,6 +324,7 @@ fn remember_key(cache: &mut ReferenceCache, key: i32, value: f64) -> f64 {
 /// Fixed-seed complex Gaussian through the channel FIR, then the discriminator chain.
 /// Mean square after `REFERENCE_WARMUP`, matching `simulateReference`.
 fn simulate_reference(cutoff: f64) -> f64 {
+    REFERENCE_SIMULATIONS.fetch_add(1, Ordering::Relaxed);
     let taps = blackman_lowpass(cutoff, REFERENCE_TAPS);
     let total = REFERENCE_SAMPLES + REFERENCE_TAPS;
     let mut wi = vec![0.0; total];

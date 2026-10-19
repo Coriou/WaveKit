@@ -171,6 +171,9 @@ fn synth_nfm(n: usize) -> Vec<u8> {
 }
 
 fn rounded_centibel(value: &Value) -> bool {
+    if value.as_str() == Some(wavekit_chan::protocol::QUIETING_DB_INFINITE) {
+        return true;
+    }
     let Some(x) = value.as_f64() else {
         return value.is_null();
     };

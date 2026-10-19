@@ -20,7 +20,7 @@ mod noise;
 mod squelch;
 
 pub(crate) use noise::channel_cutoff;
-pub use noise::NoiseMeter;
+pub use noise::{reference_simulations, NoiseMeter};
 pub use squelch::{NoiseGate, PowerGate};
 
 use agc::Agc;

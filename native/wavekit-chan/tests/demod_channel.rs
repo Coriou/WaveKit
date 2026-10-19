@@ -454,7 +454,8 @@ fn metrics_batch_at_most_ten_blocks_and_round_to_a_centibel() {
             "{x} is not rounded to 0.01"
         );
     }
-    // A constant carrier has no FM-noise estimate; non-finite quieting is JSON null.
+    // A constant carrier has no FM-noise estimate. +∞ is the string "inf";
+    // NaN and −∞ stay JSON null.
     for value in quiet {
         if let Some(x) = value.as_f64() {
             let scaled = x * 100.0;
@@ -462,6 +463,8 @@ fn metrics_batch_at_most_ten_blocks_and_round_to_a_centibel() {
                 (scaled - scaled.round()).abs() < 1e-6,
                 "{x} is not rounded to 0.01"
             );
+        } else if value.as_str() == Some("inf") {
+            continue;
         } else {
             assert!(value.is_null(), "{value}");
         }
@@ -696,6 +699,86 @@ fn metric_powers(events: &[serde_json::Value]) -> Vec<f64> {
     powers
 }
 
+/// Constant cu8 200/200 at 48 kHz is a usable, silent discriminator. The noise gate opens
+/// on the first block. Quieting must be the `inf` token, not JSON null, or the carrier
+/// is invisible to the TypeScript bridge.
+#[test]
+fn silent_discriminator_quieting_is_infinite_not_null() {
+    let squelch = SquelchOpts {
+        mode: SquelchMode::Noise,
+        quieting_db: 6.0,
+        hang_ms: 0.0,
+        ..SquelchOpts::default()
+    };
+    let mut ch = DemodChannel::new(48_000, 162_000_000.0, &open_nfm(12_500.0, squelch, true))
+        .expect("noise channel");
+    let sample = (200.0_f64 / 127.5 - 1.0) as f32;
+    let n = 480 * 10;
+    let i = vec![sample; n];
+    let q = vec![sample; n];
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    ch.process(&i, &q, &mut out, &mut events);
+    let gate = events
+        .iter()
+        .find(|event| event["type"] == "gate")
+        .expect("gate");
+    assert_eq!(gate["open"], true, "{events:?}");
+    assert_eq!(gate["atOutputSample"], 480, "{gate}");
+    let metrics: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "metrics")
+        .collect();
+    assert!(!metrics.is_empty(), "{events:?}");
+    for event in metrics {
+        let quiet = event["quietingDb"].as_array().expect("quietingDb");
+        assert!(!quiet.is_empty());
+        for value in quiet {
+            assert_eq!(
+                value.as_str(),
+                Some("inf"),
+                "silent quieting must not be null: {value}"
+            );
+        }
+    }
+}
+
+/// Non-finite IQ is an unusable block. Quieting stays JSON null.
+#[test]
+fn unusable_quieting_stays_null() {
+    let squelch = SquelchOpts {
+        mode: SquelchMode::Noise,
+        quieting_db: 6.0,
+        hang_ms: 0.0,
+        ..SquelchOpts::default()
+    };
+    let mut ch = DemodChannel::new(48_000, 162_000_000.0, &open_nfm(12_500.0, squelch, true))
+        .expect("noise channel");
+    let n = 480 * 10;
+    let i = vec![f32::NAN; n];
+    let q = vec![f32::NAN; n];
+    let mut out = Vec::new();
+    let mut events = Vec::new();
+    ch.process(&i, &q, &mut out, &mut events);
+    let metrics: Vec<_> = events
+        .iter()
+        .filter(|event| event["type"] == "metrics")
+        .collect();
+    assert!(!metrics.is_empty(), "{events:?}");
+    for event in metrics {
+        for value in event["quietingDb"].as_array().expect("quietingDb") {
+            assert!(value.is_null(), "{value}");
+        }
+    }
+    assert!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "gate")
+            .all(|event| event["open"] != true),
+        "unusable blocks opened the gate: {events:?}"
+    );
+}
+
 /// A constant carrier quiets the discriminator. The old ≤1 % / ≤0.2 % noise-only bars were
 /// properties of the fitted meter; `noise_baseline` reports the port's own false-open rate.
 #[test]
@@ -739,6 +822,7 @@ fn noise_reference_is_calibrated_before_the_audio_retune() {
     let mut ch = noise_squelch_channel(12_500.0);
     let mut out = Vec::new();
     let mut events = Vec::new();
+    let before_queue = wavekit_chan::demod::reference_simulations();
     let started = Instant::now();
     ch.queue_retune(&RetuneReq {
         id: "d".into(),
@@ -749,17 +833,23 @@ fn noise_reference_is_calibrated_before_the_audio_retune() {
     })
     .unwrap();
     let queue_us = started.elapsed().as_micros();
+    let after_queue = wavekit_chan::demod::reference_simulations();
     let started = Instant::now();
     ch.process(&[], &[], &mut out, &mut events);
     let apply_us = started.elapsed().as_micros();
-    println!("retune_us queue={queue_us} apply={apply_us}");
+    let after_process = wavekit_chan::demod::reference_simulations();
+    println!(
+        "retune_us queue={queue_us} apply={apply_us} simulations_queued={} simulations_in_process={}",
+        after_queue - before_queue,
+        after_process - after_queue
+    );
     assert!(
         events.iter().any(|event| event["type"] == "retuned"),
         "retune did not apply: {events:?}"
     );
-    assert!(
-        apply_us < 10_000,
-        "applying the retune took {apply_us} µs; the noise simulation belongs in queue_retune (queue was {queue_us} µs)"
+    assert_eq!(
+        after_process, after_queue,
+        "process ran the noise reference simulation"
     );
 }
 

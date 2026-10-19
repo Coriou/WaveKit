@@ -96,7 +96,9 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 	private readonly autoExit: boolean
 	private readonly rejectOpen: boolean
 	private readonly emitReady: boolean
+	private readonly holdReady: boolean
 	private readonly readyRepeat: number
+	private readonly openedChunkSuffix: string
 
 	constructor(options?: {
 		exitOnShutdown?: boolean
@@ -104,15 +106,27 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 		rejectOpen?: boolean
 		/** When false, the fake never writes `ready` (timeout / spawn-failure tests). */
 		emitReady?: boolean
+		/**
+		 * When true, `ready` waits for `writeReady()`. The handshake can be
+		 * delivered after `stop()`.
+		 */
+		holdReady?: boolean
 		/** Copies of `ready` in the first stdout chunk. Default 1. */
 		readyRepeat?: number
+		/**
+		 * Text appended to the `opened` line in the same stdout write. A gate
+		 * or metrics event here arrives before the run is adopted.
+		 */
+		openedChunkSuffix?: string
 	}) {
 		super()
 		this.exitOnShutdown = options?.exitOnShutdown ?? true
 		this.autoExit = options?.autoExit ?? false
 		this.rejectOpen = options?.rejectOpen ?? false
 		this.emitReady = options?.emitReady ?? true
+		this.holdReady = options?.holdReady ?? false
 		this.readyRepeat = Math.max(1, options?.readyRepeat ?? 1)
+		this.openedChunkSuffix = options?.openedChunkSuffix ?? ""
 		this.stdio = [this.stdin, this.stdout, this.stderr, this.control]
 		this.stdin.resume()
 		this.stderr.resume()
@@ -137,10 +151,15 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 			}
 		})
 		process.nextTick(() => {
-			if (this.exitCode !== null || !this.emitReady) return
-			const line = `${JSON.stringify({ v: 1, type: "ready", generation: 1, pid: this.pid })}\n`
-			this.stdout.write(line.repeat(this.readyRepeat))
+			if (this.exitCode !== null || !this.emitReady || this.holdReady) return
+			this.writeReady()
 		})
+	}
+
+	/** Deliver `ready`. Used when `holdReady` kept the handshake back. */
+	writeReady(): void {
+		const line = `${JSON.stringify({ v: 1, type: "ready", generation: 1, pid: this.pid })}\n`
+		this.stdout.write(line.repeat(this.readyRepeat))
 	}
 
 	emitLine(value: Record<string, unknown>): void {
@@ -181,7 +200,8 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 			server.listen(socketPath, () => resolve())
 		})
 		if (this.exitCode !== null) return
-		this.emitLine(
+		// One write: `opened` and anything trailing it are one stdout chunk.
+		const opened = JSON.stringify(
 			demodEvent("opened", {
 				socket: socketPath,
 				outputRateHz: 48000,
@@ -191,6 +211,7 @@ export class ChannelFake extends EventEmitter implements FakeExit {
 				groupDelaySamples: 0,
 			}),
 		)
+		this.stdout.write(`${opened}\n${this.openedChunkSuffix}`)
 		if (this.autoExit) process.nextTick(() => this.exit(1, null))
 	}
 }

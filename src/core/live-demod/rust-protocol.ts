@@ -9,6 +9,14 @@ import { RUST_AUDIO_RATE_HZ, bandwidthAccepted } from "./select-engine.js"
 export const MAX_DEMOD_EVENT_LINE_BYTES = 64 * 1024
 /** `metrics` batches at most this many blocks. */
 export const MAX_METRIC_POINTS = 10
+/**
+ * `metrics.quietingDb` token for a usable, silent discriminator (+∞).
+ * Native writes this string (`protocol.rs` `QUIETING_DB_INFINITE`). JSON
+ * null stays an unusable block (NaN or −∞). The run maps the token to +∞
+ * before the carrier and auto-floor rules, so it counts as quieted.
+ */
+export const QUIETING_DB_INFINITE = "inf"
+export type QuietingDb = number | typeof QUIETING_DB_INFINITE | null
 export const DEMOD_CHANNEL_ID = "live-demod"
 /** One second of 48 kHz s16, inside the process queue cap. */
 export const DEMOD_QUEUE_BYTES = 96_000
@@ -22,6 +30,11 @@ const id = z.string().regex(/^[A-Za-z0-9._-]{1,64}$/)
 const generation = z.number().int().nonnegative()
 const metricPoint = z.number().finite().nullable()
 const metricArray = z.array(metricPoint).max(MAX_METRIC_POINTS)
+/** Power is finite or null. Quieting may also be the silent-discriminator token. */
+const quietingPoint = z
+	.union([z.number().finite(), z.literal(QUIETING_DB_INFINITE)])
+	.nullable()
+const quietingArray = z.array(quietingPoint).max(MAX_METRIC_POINTS)
 
 const ReadyEventSchema = z
 	.object({
@@ -87,7 +100,7 @@ const MetricsEventSchema = z
 		generation,
 		atOutputSample: z.number().int().nonnegative(),
 		powerDbfs: metricArray,
-		quietingDb: metricArray,
+		quietingDb: quietingArray,
 	})
 	.strict()
 

@@ -3,14 +3,16 @@
 //!
 //! Run: `cargo run --release --locked --offline --example demod_bench --manifest-path native/wavekit-chan/Cargo.toml`
 //!
-//! Prints ns/input sample, real-time factor (input seconds / elapsed), and the
-//! percent of one core that real-time would use. A counting allocator is armed
-//! only around the timed loop so `run_front`'s per-call `Vec`s can be compared
-//! with the elapsed time. The allocator's `Instant` reads are included in the
-//! alloc time.
+//! Prints ns/input sample, the wall real-time factor (input seconds / elapsed),
+//! the wall percent of one core, and the CPU-time percent of one core.
+//! CPU time is `getrusage` user+system sampled around the timed loop only
+//! (warmup is excluded). A counting allocator is armed only around that loop
+//! so `run_front`'s per-call `Vec`s can be compared with the elapsed time.
+//! The allocator's `Instant` reads are included in the alloc time.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
+use std::mem::MaybeUninit;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
@@ -134,6 +136,7 @@ fn run(channels: usize, chunk: &[u8]) -> u64 {
     let blocks = (FS * SECONDS / BLOCK as u64) as usize;
     let samples = blocks * BLOCK;
     ARMED.store(true, Ordering::Relaxed);
+    let cpu_before = process_cpu_secs();
     let started = Instant::now();
     let mut checksum = 0u64;
     for _ in 0..blocks {
@@ -148,6 +151,7 @@ fn run(channels: usize, chunk: &[u8]) -> u64 {
         }
     }
     let elapsed = started.elapsed();
+    let cpu_s = process_cpu_secs() - cpu_before;
     ARMED.store(false, Ordering::Relaxed);
     black_box(checksum);
     black_box(chans.iter().map(|ch| ch.output_samples()).sum::<u64>());
@@ -155,8 +159,12 @@ fn run(channels: usize, chunk: &[u8]) -> u64 {
     let elapsed_s = elapsed.as_secs_f64();
     let input_s = SECONDS as f64;
     let ns_per = elapsed.as_nanos() as f64 / (samples * channels) as f64;
+    // Wall factor: how many input seconds one elapsed second keeps up with.
     let rtf = input_s / elapsed_s;
-    let core_pct = 100.0 * elapsed_s / input_s;
+    let wall_core_pct = 100.0 * elapsed_s / input_s;
+    // CPU factor: user+sys from getrusage, as a percent of one core over the
+    // input duration. Wall time includes sleeps and preemption; this does not.
+    let cpu_core_pct = 100.0 * cpu_s / input_s;
     let alloc_ns = ALLOC_NS.load(Ordering::Relaxed);
     let alloc_n = ALLOC_N.load(Ordering::Relaxed);
     let alloc_pct = if elapsed.as_nanos() == 0 {
@@ -166,10 +174,97 @@ fn run(channels: usize, chunk: &[u8]) -> u64 {
     };
     let calls = (blocks * channels) as f64;
     println!(
-        "channels={channels} input_samples={samples} elapsed_s={elapsed_s:.6} ns_per_input_sample={ns_per:.3} rtf={rtf:.3} one_core_pct={core_pct:.3} alloc_ns={alloc_ns} alloc_calls={alloc_n} alloc_pct_of_elapsed={alloc_pct:.3} allocs_per_process_call={:.3} checksum={checksum}",
+        "channels={channels} input_samples={samples} elapsed_s={elapsed_s:.6} cpu_s={cpu_s:.6} ns_per_input_sample={ns_per:.3} rtf={rtf:.3} wall_one_core_pct={wall_core_pct:.3} cpu_one_core_pct={cpu_core_pct:.3} alloc_ns={alloc_ns} alloc_calls={alloc_n} alloc_pct_of_elapsed={alloc_pct:.3} allocs_per_process_call={:.3} checksum={checksum}",
         alloc_n as f64 / calls
     );
     checksum
+}
+
+/// `RUSAGE_SELF`. Same value on macOS and Linux.
+const RUSAGE_SELF: i32 = 0;
+
+/// macOS `timeval` is 16 bytes: `tv_usec` is `i32` plus 4 bytes of padding.
+#[cfg(all(target_os = "macos", target_pointer_width = "64"))]
+#[repr(C)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i32,
+    _pad: i32,
+}
+
+/// Linux x86_64/aarch64 `timeval`: `tv_usec` is `i64`.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[repr(C)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+/// Two timevals plus the 14 trailing `long` fields. 144 bytes on both
+/// 64-bit macOS and 64-bit Linux. A shorter prefix would let `getrusage` write past it.
+#[cfg(any(
+    all(target_os = "macos", target_pointer_width = "64"),
+    all(target_os = "linux", target_pointer_width = "64"),
+))]
+#[repr(C)]
+struct Rusage {
+    ru_utime: Timeval,
+    ru_stime: Timeval,
+    _rest: [i64; 14],
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_pointer_width = "64"),
+    all(target_os = "linux", target_pointer_width = "64"),
+))]
+const _: () = assert!(std::mem::size_of::<Rusage>() == 144);
+#[cfg(any(
+    all(target_os = "macos", target_pointer_width = "64"),
+    all(target_os = "linux", target_pointer_width = "64"),
+))]
+const _: () = assert!(std::mem::size_of::<Timeval>() == 16);
+
+#[cfg(any(
+    all(target_os = "macos", target_pointer_width = "64"),
+    all(target_os = "linux", target_pointer_width = "64"),
+))]
+extern "C" {
+    fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_pointer_width = "64"),
+    all(target_os = "linux", target_pointer_width = "64"),
+))]
+fn process_cpu_secs() -> f64 {
+    let mut usage = MaybeUninit::<Rusage>::zeroed();
+    // SAFETY: `usage` is a zeroed, writable `Rusage` of the platform layout.
+    // `RUSAGE_SELF` asks for this process. On success the kernel fills every field.
+    let rc = unsafe { getrusage(RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return f64::NAN;
+    }
+    // SAFETY: `getrusage` returned 0 and wrote the struct. Padding left by the
+    // zeroed allocation stays zero.
+    let usage = unsafe { usage.assume_init() };
+    timeval_secs(&usage.ru_utime) + timeval_secs(&usage.ru_stime)
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", target_pointer_width = "64"),
+    all(target_os = "linux", target_pointer_width = "64"),
+)))]
+fn process_cpu_secs() -> f64 {
+    f64::NAN
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_pointer_width = "64"),
+    all(target_os = "linux", target_pointer_width = "64"),
+))]
+fn timeval_secs(tv: &Timeval) -> f64 {
+    // `tv_usec` is `i32` on macOS and `i64` on Linux. Both fit the microseconds range.
+    tv.tv_sec as f64 + (tv.tv_usec as f64) / 1_000_000.0
 }
 
 fn main() {
@@ -180,5 +275,12 @@ fn main() {
     match Command::new("uptime").output() {
         Ok(out) => print!("{}", String::from_utf8_lossy(&out.stdout)),
         Err(err) => println!("uptime failed: {err}"),
+    }
+    match Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+    {
+        Ok(out) => print!("{}", String::from_utf8_lossy(&out.stdout)),
+        Err(err) => println!("sysctl failed: {err}"),
     }
 }
