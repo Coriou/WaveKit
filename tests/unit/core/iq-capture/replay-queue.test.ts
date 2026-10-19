@@ -833,6 +833,30 @@ function heardStats(): NonNullable<AnalogTrialResult["stats"]> {
 	}
 }
 
+/** Internally consistent AM `heard`. The trial above asked for NFM. */
+function amHeard(): AnalogTrialResult {
+	return {
+		outcome: "heard",
+		mode: "am",
+		voice: true,
+		tones: { ctcssHz: null, dcs: null, audioSeconds: 1 },
+		stats: {
+			mode: "am",
+			frames: [
+				{
+					carrierDb: 0,
+					hfNoiseDb: -40,
+					audioDb: -12,
+					syllabic: 0.5,
+					cluster: 0.1,
+				},
+			],
+			gapSamples: 0,
+			floorDb: -80,
+		},
+	}
+}
+
 function analogAnswer(outcome: AnalogTrialOutcome): AnalogTrialResult {
 	return {
 		outcome,
@@ -906,6 +930,27 @@ describe("IqReplayQueue analog trial", () => {
 			decoder: "analog-demod",
 			mode: "nfm",
 		})
+		expect(port.discarded).toEqual([[id(1), "result"]])
+		expect(release.calls).toBe(1)
+	})
+
+	it("request nfm, consistent am heard → cancelled, digital trials run, nothing positive", async () => {
+		const release = viRelease()
+		const { port, p, results } = runWithAnalog({
+			analog: { run: () => Promise.resolve(amHeard()) },
+			reserveCores: () => release.fn,
+		})
+		port.add(id(1))
+		await flush()
+		expect(results).toHaveLength(1)
+		expect(results[0]?.analog).toBeUndefined()
+		expect(results[0]?.decoded).toBeNull()
+		expect(results[0]?.trials.map(t => [t.protocol, t.outcome])).toEqual([
+			["analog-fm", "cancelled"],
+			["pocsag", "no-sync"],
+			["dmr", "no-sync"],
+		])
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
 		expect(port.discarded).toEqual([[id(1), "result"]])
 		expect(release.calls).toBe(1)
 	})

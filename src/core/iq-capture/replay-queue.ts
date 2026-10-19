@@ -636,7 +636,9 @@ class Queue implements IqReplayQueue {
 			analog: AnalogTrialResult | null
 		}
 		try {
-			judged = judgeAnalogResult(raw)
+			// The mode this trial asked for, matching `startAnalog`. A result
+			// in another mode is not a positive, so digital trials still run.
+			judged = judgeAnalogResult(raw, trial.analogMode ?? "nfm")
 		} catch (err: unknown) {
 			this.log.warn(
 				{ err: safeErrorFields(err) },

@@ -249,6 +249,8 @@ struct Analyzer {
     restore_dc: bool,
     dc_prev_x: f64,
     dc_prev_y: f64,
+    /// Leaky mean of the restored deviation. Tracks carrier-offset DC.
+    dc_offset_mean: f64,
     buf: Vec<Complex32>,
     half: Option<f32>,
     accepted: usize,
@@ -278,6 +280,7 @@ impl Analyzer {
             restore_dc: mode == AnalyzeMode::Nfm,
             dc_prev_x: 0.0,
             dc_prev_y: 0.0,
+            dc_offset_mean: 0.0,
             buf: Vec::with_capacity(FRAME_SAMPLES),
             half: None,
             accepted: 0,
@@ -439,31 +442,64 @@ impl Analyzer {
     /// linear and time-invariant, so it commutes with the block and inverting
     /// here restores `lowpass(deviation)`. AM is left alone: its DC block sits
     /// before the AGC and does not commute with this inverse.
+    ///
+    /// The inverse also restores carrier-offset DC. Deviation of 5 kHz is
+    /// amplitude 0.8 before `gain / 2` (which is 1 here), and stdout clamps at
+    /// ±1, so ±1 is ±6.25 kHz. A constant offset past ±0.5 (±3.125 kHz) is
+    /// estimated with a 0.30 s leaky mean of the unbounded inverse and removed
+    /// down to that baseline before the clamp. The mean is slow next to a
+    /// 134.4 baud DCS bit and a 400 ms NRZ half, so those levels stay put when
+    /// they already fit. A +7 kHz offset is amplitude 1.12 and is brought back
+    /// inside the baseline; ±750 Hz of DCS on top of it stays off the rails.
+    /// The integrator state keeps the true inverse so the next sample is not
+    /// differentiated again.
     fn restore_nfm_subaudible(&mut self, n: usize) {
         if !self.restore_dc || n == 0 {
             return;
         }
         const DC_BLOCK_R: f64 = 0.998;
+        /// Slow against DCS bits (~7.5 ms) and the flat-NRZ half (400 ms).
+        const OFFSET_TAU_S: f64 = 0.30;
+        /// Restored baseline. See the function comment for the Hz figures.
+        const OFFSET_BASELINE: f64 = 0.5;
+        let alpha = 1.0 - (-1.0 / (INPUT_RATE_HZ * OFFSET_TAU_S)).exp();
         let mut prev_x = self.dc_prev_x;
         let mut prev_y = self.dc_prev_y;
+        let mut mean = self.dc_offset_mean;
         for sample in &mut self.scratch[..n] {
             let y = f64::from(*sample);
+            if !y.is_finite() {
+                prev_x = 0.0;
+                prev_y = 0.0;
+                mean = 0.0;
+                *sample = 0.0;
+                continue;
+            }
             let x = y - DC_BLOCK_R * prev_y + prev_x;
+            if !x.is_finite() {
+                prev_x = 0.0;
+                prev_y = 0.0;
+                mean = 0.0;
+                *sample = 0.0;
+                continue;
+            }
             prev_y = y;
             prev_x = x;
-            let clamped = x.clamp(-1.0, 1.0);
-            *sample = if clamped.is_finite() {
-                clamped as f32
+            mean += alpha * (x - mean);
+            if !mean.is_finite() {
+                mean = 0.0;
+            }
+            let baseline = mean.clamp(-OFFSET_BASELINE, OFFSET_BASELINE);
+            let corrected = (x - mean + baseline).clamp(-1.0, 1.0);
+            *sample = if corrected.is_finite() {
+                corrected as f32
             } else {
                 0.0
             };
-            if !clamped.is_finite() {
-                prev_x = 0.0;
-                prev_y = 0.0;
-            }
         }
         self.dc_prev_x = prev_x;
         self.dc_prev_y = prev_y;
+        self.dc_offset_mean = if mean.is_finite() { mean } else { 0.0 };
     }
 
     fn audio_band_power(&mut self, n: usize) -> Result<f64, AnalyzeError> {

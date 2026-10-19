@@ -19,8 +19,9 @@
  * AM quieting compares `carrierDb` with `floorDb`. The floor is not a
  * percentile of this capture's carrier: on a continuous transmission that
  * percentile is the signal, and the signal is never 6 dB above itself.
- * `floorDb` is the pure-noise carrier ({@link RECEIVER_NOISE_CARRIER_DBFS})
- * plus the median `hfNoiseDb`. See `captureFloorDb`.
+ * `hfNoiseDb` is discriminator power against full-scale noise and does not
+ * move when the capture is scaled. The noise power in dBFS is
+ * `carrierDb + hfNoiseDb`. See `captureFloorDb`.
  */
 import { setImmediate } from "node:timers"
 import type { Readable } from "node:stream"
@@ -276,33 +277,40 @@ function copyDcs(dcs: unknown): AnalogTransmissionDcs | null {
 }
 
 /**
- * Carrier dBFS of the pure-noise calibration.
+ * Carrier dBFS of complex Gaussian noise with σ = 1.
  *
  * `block_power_dbfs` is `10 log10(mean(I² + Q²))`, and `|z| = 1` is 0 dBFS.
- * Complex Gaussian noise with σ = 1 (the stream that pins
- * `HF_NOISE_REFERENCE_POWER`, where `hfNoiseDb` is 0) has mean power
- * `E[I² + Q²] = 2σ² = 2`, so its carrier sits at `10 log10(2)` dBFS.
- * A capture's discriminator is quieter than that noise by `−hfNoiseDb`,
- * which lowers the noise floor under the carrier by the same amount:
- *
- *   floorDb = 10 log10(2) + median(hfNoiseDb)
- *
- * Continuous AM holds `carrierDb` near 0 dBFS while the discriminator
- * quiets, so it clears `floorDb + 6`. Pure noise has `carrierDb ≈ floorDb`
- * and does not. No finite `hfNoiseDb` yields 0. NFM does not read `floorDb`.
+ * That noise has mean power `E[I² + Q²] = 2`, so its carrier sits at
+ * `10 log10(2)` dBFS. It is the level of the σ = 1 calibration stream, not
+ * an anchor for {@link captureFloorDb}: `hfNoiseDb` stays near 0 at every
+ * amplitude, so a fixed anchor does not follow a quieter capture.
  */
 export const RECEIVER_NOISE_CARRIER_DBFS = 10 * Math.log10(2)
 
+/**
+ * AM noise floor in dBFS. `hfNoiseDb` is `10 log10(hfPower / fullNoise)` and
+ * is about 0 when the discriminator is full noise, at every input level.
+ * Adding it to `carrierDb` is the noise power under that frame: pure noise
+ * has `floorDb ≈ carrierDb` and does not clear `floorDb + 6`; a quieted AM
+ * carrier sits above the floor by its quieting. Scaling the capture shifts
+ * every `carrierDb` by the same amount and leaves `hfNoiseDb` put, so the
+ * comparison does not change. No finite pair yields 0. NFM does not read
+ * `floorDb`. The analyze event is unchanged: both numbers are already on
+ * each frame.
+ */
 export function captureFloorDb(frames: readonly AnalogTrialFrame[]): number {
 	const values: number[] = []
 	for (const frame of frames) {
-		const db = frame?.hfNoiseDb
-		if (typeof db === "number" && Number.isFinite(db)) values.push(db)
+		const carrier = frame?.carrierDb
+		const hf = frame?.hfNoiseDb
+		if (typeof carrier !== "number" || !Number.isFinite(carrier)) continue
+		if (typeof hf !== "number" || !Number.isFinite(hf)) continue
+		const power = carrier + hf
+		if (Number.isFinite(power)) values.push(power)
 	}
 	const mid = medianOf(values)
 	if (mid === null) return 0
-	const floor = RECEIVER_NOISE_CARRIER_DBFS + mid
-	return Number.isFinite(floor) ? floor : 0
+	return Number.isFinite(mid) ? mid : 0
 }
 
 function medianOf(values: number[]): number | null {

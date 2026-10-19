@@ -469,7 +469,7 @@ describe("createAnalogTrialRunner", () => {
 		expect(killed).toBe(true)
 	})
 
-	it("AM floorDb is the receiver noise floor plus the capture HF noise", async () => {
+	it("AM floorDb is the median of carrier plus HF noise, not a fixed level", async () => {
 		const carriers = [0, 10, 20, 30, 40]
 		const frames = carriers.map(carrierDb => ({
 			carrierDb,
@@ -478,20 +478,20 @@ describe("createAnalogTrialRunner", () => {
 			syllabic: 0,
 			cluster: 0,
 		}))
-		expect(captureFloorDb(frames)).toBeCloseTo(RECEIVER_NOISE_CARRIER_DBFS, 8)
+		expect(captureFloorDb(frames)).toBeCloseTo(20, 8)
 		const { port } = scripted({
 			audio: Buffer.alloc(frames.length * 400 * 2),
 			event: analysis(frames),
 		})
 		const { runner } = runnerFor(port)
 		const result = await runner.run(CAPTURE, "am", new AbortController().signal)
-		expect(result.stats?.floorDb).toBeCloseTo(RECEIVER_NOISE_CARRIER_DBFS, 8)
+		expect(result.stats?.floorDb).toBeCloseTo(20, 8)
 		expect(result.stats?.mode).toBe("am")
 		expect(result.outcome).not.toBe("decoded")
 		expect(result.outcome).not.toBe("heard")
 	})
 
-	it("continuous AM above the absolute floor is heard", async () => {
+	it("continuous quieted AM is heard against its own floor", async () => {
 		const frames = Array.from({ length: 8 }, () => ({
 			carrierDb: 0,
 			hfNoiseDb: -40,
@@ -508,10 +508,65 @@ describe("createAnalogTrialRunner", () => {
 		expect(result.error).toBeUndefined()
 		expect(result.outcome).toBe("heard")
 		expect(result.voice).toBe(true)
-		expect(result.stats?.floorDb).toBeCloseTo(
-			RECEIVER_NOISE_CARRIER_DBFS - 40,
-			8,
-		)
+		expect(result.stats?.floorDb).toBeCloseTo(-40, 8)
+	})
+
+	it("AM outcome is the same when the level drops by 20 dB and 40 dB", async () => {
+		// ×1, ×0.1, ×0.01. hfNoiseDb is scale-free; carrierDb shifts by 20 log10.
+		const shifts = [0, -20, -40]
+		const heard: string[] = []
+		const floors: number[] = []
+		for (const shift of shifts) {
+			const frames = Array.from({ length: 8 }, () => ({
+				carrierDb: shift,
+				hfNoiseDb: -20,
+				audioDb: -12,
+				syllabic: 0.5,
+				cluster: 0.1,
+			}))
+			expect(captureFloorDb(frames)).toBeCloseTo(shift - 20, 8)
+			const { port } = scripted({
+				audio: Buffer.alloc(frames.length * 400 * 2),
+				event: analysis(frames),
+			})
+			const { runner } = runnerFor(port)
+			const result = await runner.run(
+				CAPTURE,
+				"am",
+				new AbortController().signal,
+			)
+			heard.push(result.outcome)
+			floors.push(result.stats?.floorDb ?? Number.NaN)
+		}
+		expect(heard).toEqual(["heard", "heard", "heard"])
+		expect(floors[1]! - floors[0]!).toBeCloseTo(-20, 6)
+		expect(floors[2]! - floors[0]!).toBeCloseTo(-40, 6)
+		const quiet: string[] = []
+		for (const shift of shifts) {
+			const frames = Array.from({ length: 8 }, () => ({
+				carrierDb: RECEIVER_NOISE_CARRIER_DBFS + shift,
+				hfNoiseDb: 0,
+				audioDb: -80,
+				syllabic: 0,
+				cluster: 0,
+			}))
+			const { port } = scripted({
+				audio: Buffer.alloc(frames.length * 400 * 2),
+				event: analysis(frames),
+			})
+			const { runner } = runnerFor(port)
+			const result = await runner.run(
+				CAPTURE,
+				"am",
+				new AbortController().signal,
+			)
+			quiet.push(result.outcome)
+			expect(result.stats?.floorDb).toBeCloseTo(
+				RECEIVER_NOISE_CARRIER_DBFS + shift,
+				6,
+			)
+		}
+		expect(quiet).toEqual(["no-sync", "no-sync", "no-sync"])
 	})
 
 	it("AM frames sitting on the noise floor are no-sync", async () => {

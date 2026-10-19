@@ -14,10 +14,11 @@ import {
 } from "@wavekit/api-types"
 import { z } from "zod"
 import { isCtcssToneHz } from "../audio-tones/ctcss.js"
-import { classifyAnalogTrial } from "../scanner/analog-trial.js"
+import { classifyAnalogTrial, isVoice } from "../scanner/analog-trial.js"
 import type { IqReplayTrialOutcome } from "../scanner/iq-capture-contract.js"
 import {
 	ANALOG_TRIAL_MAX_FRAMES,
+	type AnalogTrialMode,
 	type AnalogTrialOutcome,
 	type AnalogTrialResult,
 	type AnalogTrialStats,
@@ -114,8 +115,17 @@ export interface JudgedAnalog {
  * audio minimum (DCS also the three-word time). `heard` needs `voice`, a
  * non-empty frame list, `stats.mode` equal to the trial `mode`, and
  * `classifyAnalogTrial` agreeing. Anything else positive is cancelled.
+ *
+ * `voice` on the attached result is `isVoice(stats)`. A claim of `voice: true`
+ * with null stats, or with stats that are not voice, is stored as false.
+ * `requestedMode` is the mode the trial asked for. A positive result in any
+ * other mode is `cancelled` with no attached result, so digital trials still
+ * run and nothing positive is recorded.
  */
-export function judgeAnalogResult(raw: unknown): JudgedAnalog {
+export function judgeAnalogResult(
+	raw: unknown,
+	requestedMode?: AnalogTrialMode,
+): JudgedAnalog {
 	let parsed: ParsedAnalog
 	try {
 		const result = analogResultSchema.safeParse(raw)
@@ -138,6 +148,8 @@ export function judgeAnalogResult(raw: unknown): JudgedAnalog {
 	}
 	if (parsed.outcome === "decoded" || parsed.outcome === "heard") {
 		if (!positiveAgrees(parsed)) return CANCELLED_ANALOG
+		if (requestedMode !== undefined && parsed.mode !== requestedMode)
+			return CANCELLED_ANALOG
 	}
 	return { outcome: parsed.outcome, analog: copyAnalog(parsed) }
 }
@@ -152,11 +164,18 @@ function positiveAgrees(parsed: ParsedAnalog): boolean {
 	if (parsed.outcome === "decoded") return decodedTone(parsed.tones)
 	if (
 		!parsed.voice ||
+		!voiceFromStats(parsed.stats) ||
 		parsed.stats === null ||
 		parsed.stats.frames.length === 0
 	)
 		return false
 	return classified(parsed.stats, parsed.tones) === "heard"
+}
+
+/** `voice` is the statistics, not the claim. Null stats are not voice. */
+function voiceFromStats(stats: AnalogTrialStats | null): boolean {
+	if (stats === null) return false
+	return isVoice(stats)
 }
 
 function decodedTone(tones: AnalogTrialTones): boolean {
@@ -181,7 +200,7 @@ function copyAnalog(parsed: ParsedAnalog): AnalogTrialResult {
 	return {
 		outcome: parsed.outcome,
 		mode: parsed.mode,
-		voice: parsed.voice,
+		voice: voiceFromStats(stats),
 		tones: {
 			ctcssHz: parsed.tones.ctcssHz,
 			dcs: parsed.tones.dcs,

@@ -345,6 +345,54 @@ describe("replayOutcomeSummary", () => {
 		expect(summary.unsuccessful).toEqual([])
 	})
 
+	it("request nfm with a consistent am heard does not settle", () => {
+		const summary = replayOutcomeSummary(
+			replay({
+				analog: {
+					outcome: "heard",
+					mode: "am",
+					voice: true,
+					tones: { ctcssHz: null, dcs: null, audioSeconds: 1 },
+					stats: {
+						mode: "am",
+						frames: [
+							{
+								carrierDb: 0,
+								hfNoiseDb: -40,
+								audioDb: -12,
+								syllabic: 0.5,
+								cluster: 0.1,
+							},
+						],
+						gapSamples: 0,
+						floorDb: -80,
+					},
+				},
+				trials: [
+					{
+						protocol: "analog-fm",
+						decoderType: "dsd-fme",
+						known: false,
+						outcome: "heard",
+						decoder: "analog-demod",
+						mode: "nfm",
+					},
+					{
+						protocol: "pocsag",
+						decoderType: "multimon-ng",
+						known: false,
+						outcome: "no-sync",
+					},
+				],
+			}),
+		)
+		expect(summary.replayDecoded).toBe(false)
+		expect(summary.unsuccessful.map(t => t.outcome)).toEqual([
+			"heard",
+			"no-sync",
+		])
+	})
+
 	it("a digital decode settles even without an analog result", () => {
 		const summary = replayOutcomeSummary(
 			replay({

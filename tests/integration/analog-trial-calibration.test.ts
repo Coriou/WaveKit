@@ -139,6 +139,49 @@ describe.skipIf(!PRESENT)("analog trial calibration", () => {
 		expect(failures).toEqual([])
 	}, 180_000)
 
+	it("am-voice at 15 dB keeps one outcome at ×1, ×0.1 and ×0.01, and scaled AM noise stays no-sync", async () => {
+		const scales = [1, 0.1, 0.01] as const
+		const dir = await mkdtemp(path.join(tmpdir(), "wk-analog-scale-"))
+		const heard: string[] = []
+		const noise: string[] = []
+		try {
+			for (const scale of scales) {
+				const voice = synthesizeAnalogIq({
+					kind: "am-voice",
+					snrDb: 15,
+					seconds: SECONDS,
+					seed: SEED,
+				})
+				scaleIq(voice, scale)
+				const voiceFile = path.join(dir, `am-voice-${scale}.cf32`)
+				await writeFile(
+					voiceFile,
+					Buffer.from(voice.buffer, voice.byteOffset, voice.byteLength),
+				)
+				const voiceResult = await trial(voiceFile, "am")
+				heard.push(`${scale}:${voiceResult.outcome}`)
+				const quiet = synthesizeAnalogIq({
+					kind: "noise",
+					snrDb: 0,
+					seconds: SECONDS,
+					seed: SEED,
+				})
+				scaleIq(quiet, scale)
+				const noiseFile = path.join(dir, `noise-${scale}.cf32`)
+				await writeFile(
+					noiseFile,
+					Buffer.from(quiet.buffer, quiet.byteOffset, quiet.byteLength),
+				)
+				const noiseResult = await trial(noiseFile, "am")
+				noise.push(`${scale}:${noiseResult.outcome}`)
+			}
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+		expect(heard).toEqual(["1:heard", "0.1:heard", "0.01:heard"])
+		expect(noise).toEqual(["1:no-sync", "0.1:no-sync", "0.01:no-sync"])
+	}, 120_000)
+
 	it.todo(
 		"genuine GMSK (BT 0.3, h 0.5) classifies data-like. A matched-filter eye scored about 0.49/0.51/0.51 at 10/15/20 dB, under the frozen 0.6 score, and is not on the hot path; NFM voice stays under 0.6",
 	)
@@ -296,6 +339,11 @@ function formatTable(table: readonly MarginRow[]): string {
 		].join("\t"),
 	)
 	return ["analog-trial calibration", header, ...lines].join("\n")
+}
+
+function scaleIq(iq: Float32Array, scale: number): void {
+	if (scale === 1) return
+	for (let i = 0; i < iq.length; i++) iq[i] = (iq[i] ?? 0) * scale
 }
 
 function fmt(n: number | null): string {

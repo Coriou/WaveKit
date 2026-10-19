@@ -387,6 +387,79 @@ describe("replayEvidenceCalls", () => {
 		expect(sink.analog).toEqual([])
 	})
 
+	it("request nfm with a consistent am heard does not record a positive", () => {
+		const sink = new FakeSink()
+		replayEvidenceCalls(
+			result({
+				trials: [
+					{
+						protocol: "analog-fm",
+						decoderType: "dsd-fme",
+						decoder: "analog-demod",
+						mode: "nfm",
+						known: false,
+						outcome: "heard",
+					},
+					{
+						protocol: "pocsag",
+						decoderType: "multimon-ng",
+						known: false,
+						outcome: "no-sync",
+					},
+				],
+				analog: {
+					outcome: "heard",
+					mode: "am",
+					voice: true,
+					tones: { ctcssHz: null, dcs: null, audioSeconds: 1 },
+					stats: {
+						mode: "am",
+						frames: [
+							{
+								carrierDb: 0,
+								hfNoiseDb: -40,
+								audioDb: -12,
+								syllabic: 0.5,
+								cluster: 0.1,
+							},
+						],
+						gapSamples: 0,
+						floorDb: -80,
+					},
+				},
+			}),
+			"obs-1",
+			sink,
+			AT,
+		)
+		expect(sink.analog).toEqual([])
+		expect(sink.trials.map(t => t.trial.outcome)).toEqual([
+			"cancelled",
+			"no-sync",
+		])
+	})
+
+	it("decoded with voice true and null stats never records voice true", () => {
+		const sink = new FakeSink()
+		replayEvidenceCalls(
+			result({
+				analog: {
+					outcome: "decoded",
+					mode: "nfm",
+					voice: true,
+					tones: { ctcssHz: 88.5, dcs: null, audioSeconds: 1 },
+					stats: null,
+				},
+			}),
+			"obs-1",
+			sink,
+			AT,
+		)
+		expect(sink.analog).toHaveLength(1)
+		expect(sink.analog[0]?.analog.voice).toBe(false)
+		expect(sink.analog[0]?.analog.outcome).toBe("decoded")
+	})
+
 	it("a decoded analog-demod trial with a malformed analog result is recorded as cancelled", () => {
 		const sink = new FakeSink()
 		replayEvidenceCalls(

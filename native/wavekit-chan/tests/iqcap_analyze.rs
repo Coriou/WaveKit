@@ -395,6 +395,131 @@ fn nfm_subaudible_nrz_stays_flat() {
     );
 }
 
+/// +7 kHz carrier offset is amplitude 1.12 at the 5 kHz deviation setting,
+/// past the ±1 clamp. DCS 023's bits must still be recoverable on stdout,
+/// and the settled half of the audio must not sit on the rail.
+#[test]
+fn dcs_shifted_plus_7khz_still_decodes() {
+    let seconds = 2.0;
+    let n = (48_000.0 * seconds) as usize;
+    let bits = dcs_023_bits();
+    let spb = 48_000.0 / 134.4;
+    let mut hz = vec![0.0f64; n];
+    for (k, sample) in hz.iter_mut().enumerate() {
+        let bit = bits[(k as f64 / spb) as usize % bits.len()];
+        let dev = if bit == 1 { 750.0 } else { -750.0 };
+        *sample = 7_000.0 + dev;
+    }
+    let mut rng = XorShift(NOISE_SEED);
+    let audio = analyze_interleaved(&fm_iq(&hz, 40.0, &mut rng), AnalyzeMode::Nfm)
+        .unwrap()
+        .audio;
+    assert!(audio.len() > 8_000, "{}", audio.len());
+    let clips = |samples: &[i16]| -> usize {
+        samples
+            .iter()
+            .filter(|sample| **sample == i16::MAX || **sample == i16::MIN)
+            .count()
+    };
+    let whole = clips(&audio) as f64 / audio.len() as f64;
+    let late = &audio[audio.len() / 2..];
+    let late_frac = clips(late) as f64 / late.len() as f64;
+    let (agreement, separation) = dcs_bit_agreement(&audio, &bits);
+    assert!(
+        agreement > 0.9 && separation > 2_000.0 && late_frac < 0.01,
+        "agreement {agreement:.3} separation {separation:.0} clip whole {whole:.3} late {late_frac:.3}"
+    );
+}
+
+/// Best window alignment of stdout against the transmitted DCS bits, sliced
+/// around the median bit level. A +7 kHz offset leaves both NRZ levels on the
+/// same side of zero after the baseline is pulled inside ±0.5. Returns
+/// `(agreement, high_minus_low)`. Skip the first 0.5 s while the offset
+/// tracker settles.
+fn dcs_bit_agreement(audio: &[i16], bits: &[u8]) -> (f64, f64) {
+    let spb = 8_000.0 / 134.4;
+    let iq_per_bit = 48_000.0 / 134.4;
+    let skip = 4_000.0;
+    let mut best = 0.0f64;
+    let mut best_sep = 0.0f64;
+    for delay in 0..80 {
+        let mut rows: Vec<(f64, u8)> = Vec::new();
+        let mut k = 0.0f64;
+        loop {
+            let start = (skip + f64::from(delay) + k * spb) as usize;
+            let end = (skip + f64::from(delay) + (k + 1.0) * spb) as usize;
+            if end > audio.len() || end <= start {
+                break;
+            }
+            let acc: i64 = audio[start..end]
+                .iter()
+                .map(|sample| i64::from(*sample))
+                .sum();
+            let avg = acc as f64 / (end - start) as f64;
+            let mid = start + (end - start) / 2;
+            let bit = ((mid * 6) as f64 / iq_per_bit) as usize % bits.len();
+            rows.push((avg, bits[bit]));
+            k += 1.0;
+        }
+        if rows.len() < 20 {
+            continue;
+        }
+        let mean = rows.iter().map(|row| row.0).sum::<f64>() / rows.len() as f64;
+        let mut agree = 0.0f64;
+        let mut agree_inv = 0.0f64;
+        let mut low = 0.0f64;
+        let mut low_n = 0.0f64;
+        let mut high = 0.0f64;
+        let mut high_n = 0.0f64;
+        for (avg, bit) in &rows {
+            let got = u8::from(*avg >= mean);
+            if got == *bit {
+                agree += 1.0;
+            }
+            if got != *bit {
+                agree_inv += 1.0;
+            }
+            if *avg >= mean {
+                high += *avg;
+                high_n += 1.0;
+            } else {
+                low += *avg;
+                low_n += 1.0;
+            }
+        }
+        let total = rows.len() as f64;
+        let score = (agree / total).max(agree_inv / total);
+        let sep = if low_n > 0.0 && high_n > 0.0 {
+            high / high_n - low / low_n
+        } else {
+            0.0
+        };
+        // A constant waveform slices into noise. Keep the alignment whose
+        // bits match, and remember how far apart the two levels were.
+        if score > best {
+            best = score;
+            best_sep = sep;
+        }
+    }
+    (best, best_sep)
+}
+
+/// DCS 023 normal, LSB first, the same Golay order as the TS synth.
+fn dcs_023_bits() -> Vec<u8> {
+    let code = 0o023u32;
+    let data = (code & 0x1ff) | (0b100u32 << 9);
+    let mut remainder = data << 11;
+    for i in (11u32..=22).rev() {
+        if remainder & (1u32 << i) != 0 {
+            remainder ^= 0xc75u32 << (i - 11);
+        }
+    }
+    let word = ((data << 11) | remainder) & 0x7f_ffff;
+    (0..23)
+        .map(|bit| u8::from(((word >> ((11 + bit) % 23)) & 1) == 1))
+        .collect()
+}
+
 fn level_stats(samples: &[i16]) -> (f64, f64) {
     let n = samples.len() as f64;
     let mean = samples.iter().map(|s| f64::from(*s)).sum::<f64>() / n;

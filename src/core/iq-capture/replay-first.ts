@@ -5,9 +5,11 @@
  * known outcomes, finite numbers and known tones are forwarded. `not-needed`
  * trials are skipped. The analog trial is recorded as decoder `analog-demod`
  * with transport `replay`. A positive analog trial is recorded only when
- * `result.analog` judges to the same outcome and mode; otherwise that trial
- * is `cancelled`. A validated analog `decoded` or `heard` is a successful
- * replay. `not-needed` and `skipped-budget` are not unsuccessful attempts.
+ * `result.analog` judges to the same outcome and the mode that trial
+ * requested; a mode mismatch is `cancelled` and is not a successful replay.
+ * Otherwise that trial is `cancelled`. A validated analog `decoded` or
+ * `heard` is a successful replay. `not-needed` and `skipped-budget` are not
+ * unsuccessful attempts.
  * Capture state, the first gate-pass request and a capture
  * removed before its replay settles are decided here so the seam stays thin.
  */
@@ -266,8 +268,9 @@ export function captureRemovedRelease(input: {
  * per trial that is kept, in result order. Nothing else is called: no miss
  * and no undecoded mark, including for `unsupported`. A positive analog-demod
  * trial is forwarded only when `result.analog` judges to that same outcome
- * and mode. Otherwise the trial is recorded as `cancelled`. A malformed
- * positive analog result is not passed to `recordAnalog`.
+ * and the mode the trial requested. A mode mismatch is not positive:
+ * `recordAnalog` is not called and the trial is recorded as `cancelled`.
+ * A malformed positive analog result is not passed to `recordAnalog`.
  */
 export function replayEvidenceCalls(
 	result: IqReplayResult,
@@ -279,7 +282,7 @@ export function replayEvidenceCalls(
 	if (typeof observationId !== "string" || observationId.length === 0) return
 	if (!isObject(result)) return
 	const trials = Array.isArray(result.trials) ? result.trials : []
-	const judged = judgeAnalogResult(result.analog)
+	const judged = judgeAnalogResult(result.analog, requestedAnalogMode(trials))
 	for (const trial of trials)
 		recordTrial(trial, observationId, sink, at, judged)
 	const analog = judged.analog
@@ -313,7 +316,8 @@ type ReplayTrial = IqReplayResult["trials"][number]
 export interface ReplayOutcomeSummary {
 	/**
 	 * A digital decode, or an analog result `judgeAnalogResult` accepted as
-	 * `decoded` or `heard`. The seam treats this as a settled successful
+	 * `decoded` or `heard` in the mode the analog trial requested. A mode
+	 * mismatch is not a decode. The seam treats this as a settled successful
 	 * replay: no `no-sync` mark and no live re-confirm.
 	 */
 	replayDecoded: boolean
@@ -335,11 +339,14 @@ export function replayOutcomeSummary(
 	result: IqReplayResult,
 ): ReplayOutcomeSummary {
 	if (!isObject(result)) return { replayDecoded: false, unsuccessful: [] }
-	const judged = judgeAnalogResult(result["analog"])
+	const trials = Array.isArray(result["trials"]) ? result["trials"] : []
+	const judged = judgeAnalogResult(
+		result["analog"],
+		requestedAnalogMode(trials),
+	)
 	const analogPositive =
 		judged.outcome === "decoded" || judged.outcome === "heard"
 	const unsuccessful: ReplayTrial[] = []
-	const trials = Array.isArray(result["trials"]) ? result["trials"] : []
 	for (const trial of trials) {
 		if (!isObject(trial)) continue
 		const outcome = knownOutcome(trial["outcome"])
@@ -388,8 +395,23 @@ function recordTrial(
 }
 
 /**
+ * Mode the analog trial requested, when the result records one. The same
+ * value `judgeAnalogResult` uses for the queue, evidence and the summary.
+ */
+function requestedAnalogMode(
+	trials: readonly unknown[],
+): AnalogTrialMode | undefined {
+	for (const trial of trials) {
+		if (!isObject(trial) || !isAnalogTrial(trial)) continue
+		if (isAnalogMode(trial["mode"])) return trial["mode"]
+	}
+	return undefined
+}
+
+/**
  * A positive analog-demod trial agrees when the judged analog result has the
- * same outcome and the mode the trial requested.
+ * same outcome and the mode the trial requested. A mismatch was already
+ * dropped by `judgeAnalogResult`, so `analog` is null and this returns false.
  */
 function analogTrialAgrees(
 	trial: Record<string, unknown>,
