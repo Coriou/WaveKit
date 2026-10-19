@@ -32,6 +32,7 @@ import type { SourceConfig, SourceManager } from "../source-manager.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { TunerController } from "../tuner-controller.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import type { ChannelPlan } from "../scanner/scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { spectrumMainSpanSink } from "./pipeline.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
@@ -514,6 +515,10 @@ export class SpectrumService extends EventEmitter {
 
 	engine(sourceId: string): SpectrumEngine | undefined {
 		return this.entries.get(sourceId)?.engine
+	}
+
+	setChannelPlan(sourceId: string, plan: ChannelPlan | null): void {
+		this.engine(sourceId)?.setChannelPlan(plan)
 	}
 
 	openedAt(sourceId: string): number | null {

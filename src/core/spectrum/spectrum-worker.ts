@@ -6,10 +6,14 @@
 import { performance } from "node:perf_hooks"
 import { parentPort } from "node:worker_threads"
 import { WaveKitError } from "../../utils/errors.js"
-import type { PipelineConfig, PipelineEvent, PipelineInput } from "./types.js"
+import type { PipelineConfig, PipelineEvent } from "./types.js"
 import { SpectrumPipeline } from "./pipeline.js"
 import { encodeEventsForWire } from "./summary-wire.js"
-import { MainToWorkerSchema, type WorkerToMain } from "./worker-protocol.js"
+import {
+	MainToWorkerSchema,
+	type WorkerPipelineInput,
+	type WorkerToMain,
+} from "./worker-protocol.js"
 
 const port = parentPort
 if (!port) {
@@ -58,7 +62,7 @@ port.on("message", (raw: unknown) => {
 			)
 			return
 		case "input": {
-			const input = message.input as PipelineInput
+			const input = message.input as WorkerPipelineInput
 			if (!pipeline) {
 				post({ type: "error", message: "input before init" })
 			} else {

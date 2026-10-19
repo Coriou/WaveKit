@@ -154,6 +154,7 @@ describe("channel gate", () => {
 		expect(gate.gateOf(centre, WIDTH)).toMatchObject({
 			state: "pending",
 			passedSample: null,
+			runStartSample: null,
 		})
 		gate.block(
 			spectrum(bins, 7).power,
@@ -164,7 +165,27 @@ describe("channel gate", () => {
 		const got = gate.gateOf(centre, WIDTH)
 		expect(got.state).toBe("passed")
 		expect(got.passedSample).toBe(6)
+		expect(got.runStartSample).toBe(1)
 		expect(got.channelSnrDb).toBeCloseTo(7, 6)
+	})
+
+	it("gateInto writes into the caller object and matches gateOf", () => {
+		const { gate, centre, bins } = openGate({})
+		feed(gate, bins, 7, 6, 1)
+		const out = {
+			state: "below" as const,
+			channelSnrDb: 0,
+			passedSample: 1,
+			runStartSample: 1,
+			minDurationMs: 1,
+			kDb: 0,
+			marginDb: 0,
+			valid: false,
+		}
+		expect(gate.gateInto(centre, WIDTH, out)).toBe(out)
+		expect(out.state).toBe("passed")
+		expect(out.passedSample).toBe(6)
+		expect(gate.gateOf(centre, WIDTH)).toMatchObject(out)
 	})
 
 	it("one off block inside the run counts as on; two end the run", () => {
@@ -676,7 +697,7 @@ describe("channel gate", () => {
 		expect(opened.gate.stats().falseAlarms).toBe(0)
 	})
 
-	it("an invalid block ends a run without a false alarm and keeps the last finite SNR", () => {
+	it("an invalid block ends a run without a false alarm and is not a measurement", () => {
 		const { gate, centre, bins } = openGate({})
 		feed(gate, bins, 7, 3, 1)
 		expect(gate.gateOf(centre, WIDTH).channelSnrDb).toBeCloseTo(7, 5)
@@ -688,7 +709,8 @@ describe("channel gate", () => {
 		const after = gate.gateOf(centre, WIDTH)
 		expect(after.state).toBe("pending")
 		expect(after.passedSample).toBeNull()
-		expect(after.channelSnrDb).toBeCloseTo(7, 5)
+		expect(after.channelSnrDb).toBe(Number.NEGATIVE_INFINITY)
+		expect(after.valid).toBe(false)
 		expect(gate.stats().falseAlarms).toBe(0)
 		// The run ended, so one more good block does not pass.
 		feed(gate, bins, 7, 1, 5)
@@ -714,7 +736,8 @@ describe("channel gate", () => {
 		const got = gate.gateOf(centre, WIDTH)
 		expect(got.state).toBe("pending")
 		expect(got.passedSample).toBeNull()
-		expect(got.channelSnrDb).toBeCloseTo(7, 5)
+		expect(got.channelSnrDb).toBe(Number.NEGATIVE_INFINITY)
+		expect(got.valid).toBe(false)
 		expect(gate.stats().falseAlarms).toBe(alarms)
 	})
 
@@ -817,4 +840,85 @@ describe("channel gate", () => {
 		expect(distinct.stats().slots).toBe(6)
 		expect(distinct.stats().coarsened).toBeGreaterThan(0)
 	})
+
+	it("blockLinear agrees with block on the same spectrum", () => {
+		const dbGate = openGate({})
+		const linGate = openGate({})
+		const frames = 50
+		const { power, floor } = spectrum(dbGate.bins, 7)
+		const mask = new Uint8Array(dbGate.bins)
+		const acc = linearAcc(power, frames)
+		for (let i = 1; i <= 6; i++) {
+			dbGate.gate.block(power, floor, mask, i)
+			linGate.gate.blockLinear(acc, frames, floor, mask, i)
+		}
+		const fromDb = dbGate.gate.gateOf(dbGate.centre, WIDTH)
+		const fromLin = linGate.gate.gateOf(linGate.centre, WIDTH)
+		expect(fromLin.state).toBe("passed")
+		expect(fromLin.state).toBe(fromDb.state)
+		expect(fromLin.passedSample).toBe(fromDb.passedSample)
+		expect(fromLin.runStartSample).toBe(1)
+		expect(fromLin.runStartSample).toBe(fromDb.runStartSample)
+		expect(fromLin.channelSnrDb).toBeCloseTo(fromDb.channelSnrDb, 5)
+	})
+
+	it("resetRuns drops the run without a false alarm and the next blocks start over", () => {
+		const { gate, centre, bins } = openGate({})
+		feed(gate, bins, 7, 3, 1)
+		const alarms = gate.stats().falseAlarms
+		const k = gate.kFor(KEY)
+		gate.resetRuns()
+		const cleared = gate.gateOf(centre, WIDTH)
+		expect(cleared.state).toBe("pending")
+		expect(cleared.passedSample).toBeNull()
+		expect(cleared.runStartSample).toBeNull()
+		expect(cleared.channelSnrDb).toBeCloseTo(7, 5)
+		expect(gate.stats().falseAlarms).toBe(alarms)
+		expect(gate.kFor(KEY)).toBe(k)
+		// Three more on blocks do not finish the cleared run.
+		feed(gate, bins, 7, 3, 4)
+		expect(gate.gateOf(centre, WIDTH).state).toBe("pending")
+		expect(gate.stats().falseAlarms).toBe(alarms)
+		feed(gate, bins, 7, 3, 7)
+		const passed = gate.gateOf(centre, WIDTH)
+		expect(passed.state).toBe("passed")
+		expect(passed.passedSample).toBe(9)
+		expect(passed.runStartSample).toBe(4)
+		expect(gate.stats().falseAlarms).toBe(alarms)
+	})
+
+	it("resetRuns of a passed run is not a false alarm and keeps a raised kCh", () => {
+		let t = 0
+		const { gate, centre, bins } = openGate({ now: () => t })
+		gate.setFaTargets(new Map(), 1)
+		feed(gate, bins, 7, 6, 1)
+		expect(gate.gateOf(centre, WIDTH).state).toBe("passed")
+		const alarms = gate.stats().falseAlarms
+		gate.resetRuns()
+		expect(gate.gateOf(centre, WIDTH).state).toBe("pending")
+		expect(gate.gateOf(centre, WIDTH).runStartSample).toBeNull()
+		expect(gate.stats().falseAlarms).toBe(alarms)
+
+		// One unpassed run over this span in 5 min is above the target of 1 /MHz/min.
+		feed(gate, BINS, 30, 1, 20)
+		feed(gate, BINS, 0, 2, 21)
+		t += 5 * 60 * 1000
+		feed(gate, BINS, 0, 1, 23)
+		expect(gate.kFor(KEY)).toBeCloseTo(CHANNEL_GATE_K_DB + CFAR_STEP_DB, 6)
+		const raisedAlarms = gate.stats().falseAlarms
+		gate.resetRuns()
+		expect(gate.kFor(KEY)).toBeCloseTo(CHANNEL_GATE_K_DB + CFAR_STEP_DB, 6)
+		expect(gate.stats().falseAlarms).toBe(raisedAlarms)
+		expect(gate.gateOf(centre, WIDTH).state).toBe("pending")
+	})
 })
+
+/** Rebuild the linear accumulator `powerToDb` would turn back into `power`. */
+function linearAcc(power: Float32Array, frames: number): Float64Array {
+	const n = power.length
+	const scale = 1 / (Math.max(1, frames) * (n / 2) * (n / 2))
+	const acc = new Float64Array(n)
+	const ln = Math.LN10 / 10
+	for (let i = 0; i < n; i++) acc[i] = Math.exp(power[i]! * ln) / scale
+	return acc
+}

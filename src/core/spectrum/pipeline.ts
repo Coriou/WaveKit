@@ -3,7 +3,7 @@ import { WaveKitError } from "../../utils/errors.js"
 import { segment } from "./emissions/segmenter.js"
 import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
 import { Tracker } from "./emissions/tracker.js"
-import type { TrackerBlock } from "./emissions/tracker.js"
+import type { GateTrace, TrackerBlock } from "./emissions/tracker.js"
 import { blockTrackOf, isFrameTrackId } from "./frame-tracks.js"
 import type { TrackAssociation } from "./frame-tracks.js"
 import { createComponentLogger, createLogger } from "../../utils/logger.js"
@@ -22,7 +22,13 @@ import type {
 	TrackSnapshot,
 	TuningTrust,
 } from "./types.js"
-import { dcGuardBins, Detector, shortK, usableEdgeBins } from "./detector.js"
+import {
+	dcGuardBins,
+	defaultK,
+	Detector,
+	shortK,
+	usableEdgeBins,
+} from "./detector.js"
 import type { CfarRange } from "./detector.js"
 import { accumulateShiftedPower, Fft, powerToDb } from "./fft.js"
 import { bytesPerSample, FrameSource } from "./frame-source.js"
@@ -41,6 +47,15 @@ import {
 } from "./retune-alarm.js"
 import type { AlarmSuspect } from "./retune-alarm.js"
 import type { PersistentFeature, SegmentRange } from "./retune-alarm.js"
+import { createChannelGate } from "./channel-gate.js"
+import type { ChannelGate, ChannelGateReading } from "./channel-gate.js"
+import {
+	CHANNEL_GATE_K_DB,
+	CHANNEL_GATE_MARGIN_DB,
+	CHANNEL_GATE_MIN_DURATION_MS,
+	type ChannelPlan,
+} from "../scanner/scanner-redesign-contract.js"
+import type { WorkerPipelineInput } from "./worker-protocol.js"
 
 /**
  * The whole tier-1 pipeline for one source (decision D1): bytes → frames → blocks → floor →
@@ -79,8 +94,19 @@ export const ALARM_CO_BIRTH_S = 1
 const IMAGE_TOLERANCE_HZ = 1000
 const IMAGE_MIN_REJECTION_DB = 20
 const IMAGE_MAX_REJECTION_DB = 65
+/** Returned when `publishGate` asks and the gate has not been created yet. */
+const IDLE_GATE: ChannelGateReading = {
+	state: "pending",
+	channelSnrDb: Number.NEGATIVE_INFINITY,
+	passedSample: null,
+	runStartSample: null,
+	minDurationMs: CHANNEL_GATE_MIN_DURATION_MS,
+	kDb: CHANNEL_GATE_K_DB,
+	marginDb: CHANNEL_GATE_MARGIN_DB,
+	valid: false,
+}
 
-/** Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel gate exists. */
+/** Stage names recorded by an opt-in pipeline profile (R 9.2). `gate` stays 0 until a channel plan is set. */
 export const PIPELINE_PROFILE_STAGES = [
 	"window",
 	"fft",
@@ -301,7 +327,16 @@ export class SpectrumPipeline {
 	private stageFloor = 0
 	private stageDetector = 0
 	private stageTracker = 0
+	private stageGate = 0
 	private stageWire = 0
+	private gate: ChannelGate | null = null
+	/** Last block index whose gate run was continued. −1 starts a fresh run. */
+	private gateBlock = -1
+	private readonly gatePower: Float64Array
+	private readonly gateMask: Uint8Array
+	private channelPlan: ChannelPlan | null = null
+	private planActive = false
+	private readonly gateNow: (() => number) | undefined
 
 	constructor(
 		private readonly cfg: PipelineConfig,
@@ -333,6 +368,7 @@ export class SpectrumPipeline {
 			this.profileOn = true
 			this.sampleEvery = every
 		}
+		this.gateNow = deps.now
 		const now = deps.now ?? Date.now
 		this.n = cfg.fftSize
 		this.fs = cfg.sampleRateHz
@@ -433,6 +469,8 @@ export class SpectrumPipeline {
 		})
 		this.frameAcc = new Float64Array(this.n)
 		this.blockAcc = new Float64Array(this.n)
+		this.gatePower = new Float64Array(this.n)
+		this.gateMask = new Uint8Array(this.n)
 		this.frameDb = new Float32Array(this.n)
 		this.powerDb = new Float32Array(this.n)
 		this.floorDb = new Float32Array(this.n)
@@ -480,7 +518,7 @@ export class SpectrumPipeline {
 		}
 	}
 
-	handle(input: PipelineInput): PipelineEvent[] {
+	handle(input: WorkerPipelineInput): PipelineEvent[] {
 		this.out = []
 		this.wirePending = false
 		switch (input.kind) {
@@ -505,8 +543,27 @@ export class SpectrumPipeline {
 			case "spectrum-feed":
 				this.feed = input.enabled
 				break
+			case "channel-plan":
+				this.channelPlan = input.plan
+				this.planActive = input.plan !== null
+				this.tracker.setGatePlan(this.planActive)
+				this.wideband.setGatePlan(this.planActive)
+				if (this.gate) {
+					this.gate.setPlan(this.planActive ? this.channelPlan : null)
+					this.pushFaTargets()
+				}
+				break
 		}
 		return this.out
+	}
+
+	/**
+	 * Test hook for each track's own gate run. Production leaves it unset
+	 * and the tracker allocates nothing. Both trackers share the callback.
+	 */
+	setGateTrace(fn: ((e: GateTrace) => void) | null): void {
+		this.tracker.setGateTrace(fn)
+		this.wideband.setGateTrace(fn)
 	}
 
 	exportEngineState(): EngineState {
@@ -524,7 +581,7 @@ export class SpectrumPipeline {
 		return Object.assign(state, { profile: this.profileSnapshot() })
 	}
 
-	/** `gate` is 0: this build has no channel gate yet (DT.1). */
+	/** `gate` is charged only while a channel plan is set and this block is sampled. */
 	private profileSnapshot(): PipelineProfile {
 		return {
 			blocks: this.profileBlocks,
@@ -535,7 +592,7 @@ export class SpectrumPipeline {
 				power: this.stagePower,
 				floor: this.stageFloor,
 				detector: this.stageDetector,
-				gate: 0,
+				gate: this.stageGate,
 				tracker: this.stageTracker,
 				wire: this.stageWire,
 			},
@@ -546,11 +603,7 @@ export class SpectrumPipeline {
 		return sample ? this.profileClock() : 0
 	}
 
-	private take(
-		sample: boolean,
-		stage: Exclude<PipelineProfileStage, "gate">,
-		t0: number,
-	): void {
+	private take(sample: boolean, stage: PipelineProfileStage, t0: number): void {
 		if (!sample) return
 		const dt = this.profileClock() - t0
 		if (!(dt > 0)) return
@@ -559,6 +612,7 @@ export class SpectrumPipeline {
 		else if (stage === "power") this.stagePower += dt
 		else if (stage === "floor") this.stageFloor += dt
 		else if (stage === "detector") this.stageDetector += dt
+		else if (stage === "gate") this.stageGate += dt
 		else if (stage === "tracker") this.stageTracker += dt
 		else this.stageWire += dt
 	}
@@ -704,6 +758,8 @@ export class SpectrumPipeline {
 			this.emit(this.wideband.closeAll("gap"))
 		}
 		this.drain()
+		// Blocks finished above still belong to the run. Anything after the hole does not.
+		this.interruptGate()
 		this.checkMarkerTimeout(startSample + samples)
 		this.maybeStats()
 	}
@@ -825,6 +881,8 @@ export class SpectrumPipeline {
 		this.alarmWaitedBlocks = 0
 		this.floor.useKey(ep.absKey)
 		this.applyMasks()
+		this.gateBlock = -1
+		this.openGate(ep.centreHz)
 	}
 
 	private checkMarkerTimeout(atSample: number): void {
@@ -1084,6 +1142,12 @@ export class SpectrumPipeline {
 		let t = this.mark(sample)
 		powerToDb(this.blockAcc, blanking.integrated, this.powerDb)
 		this.take(sample, "power", t)
+		const integrated = blanking.integrated
+		if (this.planActive) {
+			const tCopy = this.mark(sample)
+			this.gatePower.set(this.blockAcc)
+			this.take(sample, "gate", tCopy)
+		}
 		this.burstCountDone.set(this.burstCount)
 		this.burstPeakDone.set(this.burstPeakDb)
 		this.resetBlock()
@@ -1143,6 +1207,7 @@ export class SpectrumPipeline {
 				// or the first accepted block opens a burst ghost at the previous hop's emitters (spec § 4.6)
 				this.resetShort()
 				this.out.push({ kind: "stale-discard", epoch: ep.epoch, blocks: 1 })
+				this.interruptGate()
 				if (sample) this.closeSample()
 				return
 			}
@@ -1237,8 +1302,13 @@ export class SpectrumPipeline {
 			overload,
 			burstSegments: burstSet,
 		}
+		const gateFrom = this.out.length
 		this.emit(this.tracker.flagSpurs(this.lineMask))
 		this.noteActivity(trackSegs, blockEnd)
+		// A gap, a skip or an exclusion resets in-progress runs before the
+		// tracker counts a miss as an off block. Passed state stays.
+		const holdGate = gap || blanking.excluded
+		this.prepareGate(holdGate)
 		this.emitWithImages(this.tracker.block(trackSegs, block), ep)
 		this.emit(
 			this.wideband.block(floorOccupied ? [this.widebandSegment()] : [], {
@@ -1247,6 +1317,15 @@ export class SpectrumPipeline {
 			}),
 		)
 		this.take(sample, "tracker", t)
+		this.applyChannelGate(
+			blockEnd,
+			integrated,
+			gateFrom,
+			// Overload still measures. A clipped block is the emission (a 7 dB
+			// NFM in U8 clips) and must be able to pass. A gap or an excluded
+			// block is not a measurement, so it cannot continue a run.
+			holdGate,
+		)
 		this.tracker.trackBinsMask(this.lastTrackBins, 1)
 		if (!gap && !overload && !blanking.excluded && !holdPersistent)
 			this.prevPersistent = this.persistentFeatures(segRanges, ep)
@@ -1692,6 +1771,172 @@ export class SpectrumPipeline {
 
 	// ---- masks, summaries, stats ----
 
+	/** Pinned detector k minus the table k. null keeps adaptive kCh. */
+	private pinnedOffsetDb(): number | null {
+		if (this.cfg.thresholdDb === null) return null
+		return this.cfg.thresholdDb - defaultK(this.binHz, this.cfg.integrationMs)
+	}
+
+	private openGate(centreHz: number): void {
+		const gate = createChannelGate(
+			this.gateNow
+				? {
+						binHz: this.binHz,
+						blockMs: this.blockMs,
+						centreHz,
+						bins: this.n,
+						now: this.gateNow,
+					}
+				: {
+						binHz: this.binHz,
+						blockMs: this.blockMs,
+						centreHz,
+						bins: this.n,
+					},
+		)
+		gate.setPinnedOffsetDb(this.pinnedOffsetDb())
+		gate.setPlan(this.planActive ? this.channelPlan : null)
+		this.gate = gate
+		this.pushFaTargets()
+	}
+
+	/** CFAR targets: rounded mask keys, plus a plan entry's rangeKey on the same span. */
+	private pushFaTargets(): void {
+		const gate = this.gate
+		if (!gate) return
+		const map = new Map<string, number>()
+		for (const r of this.masks.cfarRanges) {
+			if (r.faTargetPerMhzMin === undefined) continue
+			map.set(
+				`${Math.round(r.startHz)}:${Math.round(r.endHz)}`,
+				r.faTargetPerMhzMin,
+			)
+			const plan = this.channelPlan
+			if (!plan) continue
+			for (const e of plan.entries) {
+				if (e.startHz === r.startHz && e.endHz === r.endHz)
+					map.set(e.rangeKey, r.faTargetPerMhzMin)
+			}
+		}
+		gate.setFaTargets(map, this.cfg.faTargetPerMhzMin)
+	}
+
+	/**
+	 * Detector mask (unmasked inverted) plus spur/exclusion `extra` plus image
+	 * bins. Same 1e-9 edge slack as the channel gate's bin span.
+	 */
+	private fillGateMask(): void {
+		const mask = this.gateMask
+		const unmasked = this.detector.unmasked()
+		const extra = this.extra
+		const n = this.n
+		for (let i = 0; i < n; i++)
+			mask[i] = unmasked[i] === 0 || extra[i] === 1 ? 1 : 0
+		const ep = this.ep
+		if (!ep) return
+		const half = n / 2
+		const binHz = this.binHz
+		const centre = ep.centreHz
+		for (const image of this.imageTracks) {
+			const lo = image.centreHz - image.obwHz / 2
+			const hi = image.centreHz + image.obwHz / 2
+			const i0 = Math.max(0, Math.ceil((lo - centre) / binHz + half - 1e-9))
+			const i1 = Math.min(n, Math.ceil((hi - centre) / binHz + half - 1e-9))
+			for (let i = i0; i < i1; i++) mask[i] = 1
+		}
+	}
+
+	/** Reused by `readGate`. One reading per observed track, no allocation. */
+	private readonly gateScratch: ChannelGateReading = {
+		state: "pending",
+		channelSnrDb: Number.NEGATIVE_INFINITY,
+		passedSample: null,
+		runStartSample: null,
+		minDurationMs: CHANNEL_GATE_MIN_DURATION_MS,
+		kDb: CHANNEL_GATE_K_DB,
+		marginDb: CHANNEL_GATE_MARGIN_DB,
+		valid: false,
+	}
+
+	/** Bound once. `publishGate` calls it per observed track, not per block allocation. */
+	private readonly readGate = (
+		centreHz: number,
+		obwHz: number,
+	): ChannelGateReading => {
+		const gate = this.gate
+		return gate ? gate.gateInto(centreHz, obwHz, this.gateScratch) : IDLE_GATE
+	}
+
+	/**
+	 * A gap, a skipped or stale block, an exclusion, a retune or a new epoch
+	 * ends every slot run and every open track's in-progress run. A track
+	 * that already passed stays passed. kCh stays. An overload block is still
+	 * measured: clipping does not erase the emission.
+	 */
+	private interruptGate(): void {
+		this.gate?.resetRuns()
+		this.tracker.resetGateRuns()
+		this.wideband.resetGateRuns()
+		this.gateBlock = -1
+	}
+
+	/**
+	 * Runs before `tracker.block`. A miss on a reset block must not be the
+	 * tolerated off that completes a pass. `hold` is a gap or an exclusion.
+	 */
+	private prepareGate(hold: boolean): void {
+		if (!this.planActive) return
+		const jumped = this.blockIndex !== this.gateBlock + 1
+		if (!jumped && !hold) return
+		this.gate?.resetRuns()
+		this.tracker.resetGateRuns()
+		this.wideband.resetGateRuns()
+		this.tracker.noteGateBreak()
+		this.wideband.noteGateBreak()
+	}
+
+	private applyChannelGate(
+		blockEnd: number,
+		integrated: number,
+		gateFrom: number,
+		hold: boolean,
+	): void {
+		if (!this.planActive) return
+		const gate = this.gate
+		const ep = this.ep
+		if (!gate || !ep) return
+		const sample = this.sampling
+		const t0 = this.mark(sample)
+		this.gateBlock = this.blockIndex
+		if (!hold) {
+			this.fillGateMask()
+			gate.blockLinear(
+				this.gatePower,
+				integrated,
+				this.floorDb,
+				this.gateMask,
+				blockEnd,
+			)
+		}
+		// The linear-power copy is the earlier `gate` step. This span is the
+		// block measurement plus per-track geometry, run stepping and painting.
+		const mainExtra = this.tracker.publishGate(
+			this.readGate,
+			this.out,
+			gateFrom,
+			!hold,
+		)
+		const wideExtra = this.wideband.publishGate(
+			this.readGate,
+			this.out,
+			gateFrom,
+			!hold,
+		)
+		if (mainExtra.length > 0) this.emit(mainExtra)
+		if (wideExtra.length > 0) this.emit(wideExtra)
+		this.take(sample, "gate", t0)
+	}
+
 	private applyMasks(): void {
 		const ep = this.ep
 		if (!ep) return
@@ -1732,6 +1977,7 @@ export class SpectrumPipeline {
 			extra: this.exclusionMask,
 		})
 		this.detector.setCfarRanges(this.cfarRanges(c))
+		this.pushFaTargets()
 	}
 
 	/** Per-range CFAR buckets over the usable span: bandplan/job ranges first, else 2 MHz RF buckets. */

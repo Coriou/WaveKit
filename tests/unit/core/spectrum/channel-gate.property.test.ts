@@ -124,6 +124,8 @@ interface SlotRef {
 	onBlocks: number
 	best: number
 	snr: number
+	/** This block only. −Infinity when the block is invalid or skipped. */
+	blockSnr: number
 }
 
 function freshRef(s: { lo: number; hi: number; centre: number }): SlotRef {
@@ -138,6 +140,7 @@ function freshRef(s: { lo: number; hi: number; centre: number }): SlotRef {
 		onBlocks: 0,
 		best: Number.NEGATIVE_INFINITY,
 		snr: Number.NEGATIVE_INFINITY,
+		blockSnr: Number.NEGATIVE_INFINITY,
 	}
 }
 
@@ -148,6 +151,7 @@ function stepRef(
 	floor: Float32Array,
 	masked: Uint8Array,
 ): void {
+	slot.blockSnr = Number.NEGATIVE_INFINITY
 	const members = binsIn(slot.lo, slot.hi)
 	const total = members.length
 	if (total <= 0) return
@@ -206,6 +210,7 @@ function stepRef(
 		return
 	}
 	slot.snr = db
+	slot.blockSnr = db
 	const k = CHANNEL_GATE_K_DB
 	const on = slot.on ? !(db < k - CHANNEL_GATE_HYSTERESIS_DB) : db >= k
 	slot.on = on
@@ -384,7 +389,8 @@ describe("channel gate properties", () => {
 					for (const ref of refs) {
 						const got = g.gateOf(ref.centre, 1)
 						expect(got.state === "passed").toBe(ref.passed)
-						expect(closeDb(got.channelSnrDb, ref.snr)).toBe(true)
+						expect(closeDb(got.channelSnrDb, ref.blockSnr)).toBe(true)
+						expect(got.valid).toBe(Number.isFinite(ref.blockSnr))
 						expect(
 							Number.isFinite(got.channelSnrDb) ||
 								got.channelSnrDb === Number.NEGATIVE_INFINITY,
@@ -523,7 +529,10 @@ describe("channel gate properties", () => {
 						const after = oracleGate.gateOf(centre, 1)
 						expect(after.state).toBe(before.state)
 						expect(after.passedSample).toBe(before.passedSample)
-						expect(closeDb(after.channelSnrDb, before.channelSnrDb)).toBe(true)
+						// More than half masked: the slot run stays, and this
+						// block is not a measurement.
+						expect(after.channelSnrDb).toBe(Number.NEGATIVE_INFINITY)
+						expect(after.valid).toBe(false)
 					}
 				},
 			),

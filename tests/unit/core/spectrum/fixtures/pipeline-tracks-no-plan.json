@@ -1,0 +1,110 @@
+[
+	{
+		"kind": "track-open",
+		"track": {
+			"trackId": "s1-0-1",
+			"sourceId": "s1",
+			"stream": 1,
+			"epoch": 1,
+			"startSample": 25600,
+			"lastSample": 38400,
+			"centreHz": 446119999.47041005,
+			"obwHz": 3000,
+			"obwMethod": "-20dB",
+			"peakDbfs": -10.47971248626709,
+			"meanDbfs": -8.717390762966154,
+			"snrDb": 34.74186161894802,
+			"floorDbfs": -48.23192184595255,
+			"thresholdDb": 4,
+			"blocks": 1,
+			"maxBlockSnrDb": 37.75220966339111,
+			"dutyCycle": 1,
+			"spectralShape": "narrow",
+			"flags": {
+				"overload": false,
+				"gap": false,
+				"truncated": false,
+				"edge": false,
+				"skirt": false,
+				"obwBiased": false,
+				"spur": false,
+				"burst": false,
+				"iqImage": false
+			},
+			"tuningTrust": "commanded"
+		}
+	},
+	{
+		"kind": "track-update",
+		"track": {
+			"trackId": "s1-0-1",
+			"sourceId": "s1",
+			"stream": 1,
+			"epoch": 1,
+			"startSample": 25600,
+			"lastSample": 51200,
+			"centreHz": 446119999.6039361,
+			"obwHz": 3000,
+			"obwMethod": "-20dB",
+			"peakDbfs": -10.47971248626709,
+			"meanDbfs": -8.721263306852332,
+			"snrDb": 34.77621631255878,
+			"floorDbfs": -48.2703072371879,
+			"thresholdDb": 4,
+			"blocks": 2,
+			"maxBlockSnrDb": 37.82669925689697,
+			"dutyCycle": 1,
+			"spectralShape": "narrow",
+			"flags": {
+				"overload": false,
+				"gap": false,
+				"truncated": false,
+				"edge": false,
+				"skirt": false,
+				"obwBiased": false,
+				"spur": false,
+				"burst": false,
+				"iqImage": false
+			},
+			"tuningTrust": "commanded"
+		}
+	},
+	{
+		"kind": "track-close",
+		"track": {
+			"trackId": "s1-0-1",
+			"sourceId": "s1",
+			"stream": 1,
+			"epoch": 1,
+			"startSample": 25600,
+			"lastSample": 140800,
+			"centreHz": 446120000.0555767,
+			"obwHz": 3000,
+			"obwMethod": "-20dB",
+			"peakDbfs": -10.440542221069336,
+			"meanDbfs": -8.793156036803719,
+			"snrDb": 34.72927066408878,
+			"floorDbfs": -48.29566543726115,
+			"thresholdDb": 4,
+			"blocks": 9,
+			"maxBlockSnrDb": 37.96353340148926,
+			"dutyCycle": 0.389321468298109,
+			"spectralShape": "narrow",
+			"flags": {
+				"overload": false,
+				"gap": false,
+				"truncated": false,
+				"edge": false,
+				"skirt": false,
+				"obwBiased": false,
+				"spur": false,
+				"burst": false,
+				"iqImage": false
+			},
+			"tuningTrust": "commanded",
+			"acf30": 0.8928995204079212,
+			"acf60": 0.7860504775188166
+		},
+		"endReason": "quiet"
+	}
+]

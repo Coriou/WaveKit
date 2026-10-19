@@ -10,16 +10,15 @@ import { fileURLToPath } from "node:url"
 import { Worker } from "node:worker_threads"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
-import type {
-	EngineState,
-	PipelineConfig,
-	PipelineEvent,
-	PipelineInput,
-} from "./types.js"
+import type { EngineState, PipelineConfig, PipelineEvent } from "./types.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { SpectrumPipeline, spectrumMainSpanSink } from "./pipeline.js"
 import { decodeEventsFromWire } from "./summary-wire.js"
-import { WorkerToMainSchema, type MainToWorker } from "./worker-protocol.js"
+import {
+	WorkerToMainSchema,
+	type MainToWorker,
+	type WorkerPipelineInput,
+} from "./worker-protocol.js"
 
 export interface PipelineHostHandlers {
 	events(events: PipelineEvent[]): void
@@ -31,7 +30,7 @@ export interface PipelineHostHandlers {
 
 export interface PipelineHost {
 	/** Posts one input; `transfer` (the bytes' ArrayBuffer) is detached by the call. */
-	send(input: PipelineInput, transfer?: ArrayBuffer): void
+	send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void
 	exportState(): Promise<EngineState>
 	/** Current artefact masks (§ 4.9) after every input sent before the call (identify, Task 35a). Optional: test hosts need not implement it. */
 	artefactMasks?(): Promise<ArtefactMasks>
@@ -84,7 +83,7 @@ export class InlinePipelineHost implements PipelineHost {
 		this.pipeline = new SpectrumPipeline(cfg, profile ? { profile } : {})
 	}
 
-	send(input: PipelineInput, transfer?: ArrayBuffer): void {
+	send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 		if (!this.pipeline) {
 			if (transfer) this.handlers.buffer(transfer)
 			return
@@ -217,7 +216,7 @@ export class ThreadPipelineHost implements PipelineHost {
 		else this.handlers.error(err)
 	}
 
-	send(input: PipelineInput, transfer?: ArrayBuffer): void {
+	send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 		if (this.exited) {
 			if (transfer) this.handlers.buffer(transfer)
 			return

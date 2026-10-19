@@ -21,6 +21,7 @@ import type { SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
 import { tuningTrustOf } from "../tuning-trust.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import type { ChannelPlan } from "../scanner/scanner-redesign-contract.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { defaultFftSize } from "./fft.js"
 import { spectrumMainSpanSink } from "./pipeline.js"
@@ -33,7 +34,6 @@ import type {
 	PendingEpoch,
 	PipelineConfig,
 	PipelineEvent,
-	PipelineInput,
 	PipelineStats,
 	Raster,
 	SpectrumSettings,
@@ -43,6 +43,7 @@ import type {
 import { bytesPerSample } from "./frame-source.js"
 import type { ArtefactMasks } from "./artefacts.js"
 import { IqRing } from "./iq-ring.js"
+import type { WorkerPipelineInput } from "./worker-protocol.js"
 import {
 	blockSamplesOf,
 	frameTrust,
@@ -404,6 +405,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		(startSample: number, bytes: Uint8Array) => void
 	>()
 	private masks: EngineMasks | null = null
+	private channelPlan: ChannelPlan | null = null
+	private channelPlanSet = false
 	private spectrumFeed = false
 	private lastStats: PipelineStats | null = null
 	private readonly warningList: EngineWarning[] = []
@@ -686,6 +689,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.send({ kind: "masks", ...masks })
 	}
 
+	setChannelPlan(plan: ChannelPlan | null): void {
+		this.channelPlan = plan
+		this.channelPlanSet = true
+		this.send({ kind: "channel-plan", plan })
+	}
+
 	setSpectrumFeed(enabled: boolean): void {
 		if (this.spectrumFeed === enabled) return
 		this.spectrumFeed = enabled
@@ -825,6 +834,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
 			if (this.masks) this.send({ kind: "masks", ...this.masks })
+			if (this.channelPlanSet)
+				this.send({ kind: "channel-plan", plan: this.channelPlan })
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })
 			this.restarting = false
 			this.dropStaleBranchMarks()
@@ -911,7 +922,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		})
 	}
 
-	private send(input: PipelineInput, transfer?: ArrayBuffer): void {
+	private send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 		if (!this.host) {
 			if (transfer) this.onBuffer(transfer)
 			return

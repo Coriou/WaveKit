@@ -8,20 +8,33 @@
  * false-alarm target, cap +4 dB, −0.5 dB per 30 min below a quarter of the
  * target, never below 3 dB.
  *
+ * Slot runs exist only for CFAR false-alarm accounting and kCh adaptation.
  * A false alarm is a slot run that turned on and ended without passing.
  * A slot is `passed` only while that passing run continues (one off block
  * is tolerated). A second off returns the slot to idle and does not count
- * a false alarm. Stickiness of `passed` belongs to the track.
+ * a false alarm. `passedSample` is the block that first met the rule.
+ * `runStartSample` is the first block of that same run, or null while the
+ * slot is not passed. Tracks do not borrow this run: stickiness of `passed`
+ * lives on the track, which applies R 2.3/2.4 to its own measurements.
+ * `resetRuns` clears on, run, offs, best and the pass without a false
+ * alarm; kCh and its CFAR windows stay. The last measurement stays readable.
  * `block` does not allocate; scratch is sized here and in `setPlan`.
  *
+ * The reading's measurement is this block. `channelSnrDb` is finite, or
+ * `Number.NEGATIVE_INFINITY` when the block is invalid, skipped, or more
+ * than half masked. `valid` is false in those cases. `kDb` is kCh of the
+ * covering slot (pinned when a pin is set). `marginDb` is 3, or 6 when the
+ * slot is burst; `minDurationMs` is 300, or 100 when burst. A wide track
+ * (A9) sums the covering slots' power, takes the max of their k, and is
+ * burst only when every covering slot is burst. `gateOf` still returns the
+ * slot's `state` / `passedSample` / `runStartSample` for the gate's tests.
+ * It never returns NaN or +Infinity. A non-finite centre, or a non-finite
+ * or non-positive OBW, is pending with the sentinel and `valid: false`.
+ *
  * A power or floor bin that is missing or not finite (NaN, ±Infinity), or
- * whose linear value overflows, invalidates that slot's block. The block
- * does not advance on/run state. A run in progress ends without passing and
- * is not a false alarm. `channelSnrDb` stays the last finite measurement.
- * With no finite measurement yet, `gateOf` returns `Number.NEGATIVE_INFINITY`
- * (the no-measurement sentinel: the contract types the field as `number` and
- * defines no other). `gateOf` never returns NaN or +Infinity. A non-finite
- * centre, or a non-finite or non-positive OBW, is pending with that sentinel.
+ * whose linear value overflows, invalidates that slot's block. The slot run
+ * ends without passing and is not a false alarm. A masked fraction above
+ * 0.5 skips the slot: the slot run does not advance.
  *
  * Slot count is at most `CHANNEL_GATE_MAX_SLOTS`. Doubling the sliding step,
  * then the raster step, counts in `coarsened`. When that cannot get under the
@@ -36,6 +49,7 @@ import {
 	CFAR_RAISE_WINDOW_MIN,
 	CFAR_STEP_DB,
 } from "./detector.js"
+import { POWER_FLOOR_DB } from "./fft.js"
 import {
 	CHANNEL_GATE_BURST_MARGIN_DB,
 	CHANNEL_GATE_BURST_MIN_DURATION_MS,
@@ -50,6 +64,22 @@ import {
 	type ChannelPlan,
 	type ChannelPlanEntry,
 } from "../scanner/scanner-redesign-contract.js"
+
+/**
+ * One slot reading. `state` / `passedSample` / `runStartSample` describe the
+ * slot run (CFAR). The rest is this block's measurement for a track.
+ * `minDurationMs` is 300, or 100 when the measurement is burst.
+ */
+export interface ChannelGateReading {
+	state: ChannelGateState
+	channelSnrDb: number
+	passedSample: number | null
+	runStartSample: number | null
+	minDurationMs: number
+	kDb: number
+	marginDb: number
+	valid: boolean
+}
 import { WaveKitError } from "../../utils/errors.js"
 
 /** Same slack the detector uses so a rate exactly at the target does not raise. */
@@ -69,6 +99,8 @@ const DEFAULT_FA_PER_MHZ_MIN = 1
 const MARGIN_SLACK_DB = 1e-6
 /** 10^(db/10) = exp(db · ln(10) / 10). */
 const LN10_OVER_10 = Math.LN10 / 10
+/** Linear power matching `powerToDb`'s POWER_FLOOR_DB clamp. */
+const POWER_FLOOR_LIN = Math.exp(POWER_FLOOR_DB * LN10_OVER_10)
 
 export interface ChannelGate {
 	setPlan(plan: ChannelPlan | null): void
@@ -84,14 +116,33 @@ export interface ChannelGate {
 		masked: Uint8Array,
 		sample: number,
 	): void
-	gateOf(
+	/**
+	 * Same measurement as `block`. `powerAcc` is the pipeline linear sum
+	 * before `powerToDb`; `frames` is the integrated-frame count. Floors
+	 * stay in dB. Does not allocate.
+	 */
+	blockLinear(
+		powerAcc: Float64Array,
+		frames: number,
+		floorDb: Float32Array,
+		masked: Uint8Array,
+		sample: number,
+	): void
+	/**
+	 * Drops every slot's on/run/off/best and its pass. Does not count a
+	 * false alarm and does not touch kCh or the CFAR windows.
+	 */
+	resetRuns(): void
+	gateOf(centreHz: number, obwHz: number): ChannelGateReading
+	/**
+	 * Same reading as `gateOf`, written into `out`. The hot path reuses one
+	 * object per block. `out` is returned.
+	 */
+	gateInto(
 		centreHz: number,
 		obwHz: number,
-	): {
-		state: ChannelGateState
-		channelSnrDb: number
-		passedSample: number | null
-	}
+		out: ChannelGateReading,
+	): ChannelGateReading
 	kFor(rangeKey: string): number
 	stats(): {
 		slots: number
@@ -185,7 +236,15 @@ class ChannelGateImpl implements ChannelGate {
 	private slotSnr = new Float64Array(0)
 	private slotP = new Float64Array(0)
 	private slotF = new Float64Array(0)
+	/** 1 when this block produced a finite SNR for the slot. Not part of the run. */
+	private slotBlockValid = new Uint8Array(0)
 	private slotPassedSample = new Float64Array(0)
+	/** Sample of the current run's first block. NaN while no run is open. */
+	private slotRunStart = new Float64Array(0)
+	/** Layout order, so a distance tie still picks the earlier slot. */
+	private slotOrd = new Int32Array(0)
+	/** Widest slot. Bounds the contain walk after the binary search on `lo`. */
+	private maxSlotWidth = 0
 	/** Inclusive-exclusive bin span covered by any slot. Prefix sums stop here. */
 	private span0 = 0
 	private span1 = 0
@@ -286,39 +345,132 @@ class ChannelGateImpl implements ChannelGate {
 				pI[next] = accI
 			}
 		}
+		this.finishSlots(sample)
+	}
+
+	blockLinear(
+		powerAcc: Float64Array,
+		frames: number,
+		floorDb: Float32Array,
+		masked: Uint8Array,
+		sample: number,
+	): void {
+		const pP = this.prefixP
+		const pF = this.prefixF
+		const pM = this.prefixM
+		const pI = this.prefixI
+		const begin = this.span0
+		const end = this.span1
+		if (end > begin) {
+			pP[begin] = 0
+			pF[begin] = 0
+			pM[begin] = 0
+			pI[begin] = 0
+			let accP = 0
+			let accF = 0
+			let accM = 0
+			let accI = 0
+			const ln = LN10_OVER_10
+			const scale =
+				1 / (Math.max(1, frames) * (this.bins / 2) * (this.bins / 2))
+			for (let i = begin; i < end; i++) {
+				const isMasked = (masked[i] ?? 0) !== 0
+				if (isMasked) accM++
+				else {
+					const raw = powerAcc[i]
+					const fDb = floorDb[i]
+					if (
+						raw === undefined ||
+						fDb === undefined ||
+						!Number.isFinite(raw) ||
+						!Number.isFinite(fDb)
+					) {
+						accI++
+					} else {
+						const lpRaw = raw * scale
+						const lf = Math.exp(fDb * ln)
+						if (!Number.isFinite(lpRaw) || !Number.isFinite(lf)) accI++
+						else {
+							const lp =
+								!(lpRaw > 0) || lpRaw < POWER_FLOOR_LIN
+									? POWER_FLOOR_LIN
+									: lpRaw
+							accP += lp
+							accF += lf
+						}
+					}
+				}
+				const next = i + 1
+				pP[next] = accP
+				pF[next] = accF
+				pM[next] = accM
+				pI[next] = accI
+			}
+		}
+		this.finishSlots(sample)
+	}
+
+	resetRuns(): void {
+		const n = this.slotCount
+		for (let s = 0; s < n; s++) {
+			this.slotOn[s] = 0
+			this.slotRunning[s] = 0
+			this.slotOffs[s] = 0
+			this.slotOnBlocks[s] = 0
+			this.slotBest[s] = Number.NEGATIVE_INFINITY
+			this.slotPassed[s] = 0
+			this.slotPassedSample[s] = Number.NaN
+			this.slotRunStart[s] = Number.NaN
+		}
+	}
+
+	private finishSlots(sample: number): void {
 		const elapsedMin = this.pullElapsedMin()
 		const ns = this.slotCount
+		this.slotBlockValid.fill(0, 0, ns)
 		for (let s = 0; s < ns; s++) this.updateSlot(s, sample)
 		if (this.pinnedOffset === null) this.adapt(elapsedMin)
 	}
 
-	gateOf(
+	gateOf(centreHz: number, obwHz: number): ChannelGateReading {
+		return this.gateInto(centreHz, obwHz, {
+			state: "pending",
+			channelSnrDb: 0,
+			passedSample: null,
+			runStartSample: null,
+			minDurationMs: CHANNEL_GATE_MIN_DURATION_MS,
+			kDb: CHANNEL_GATE_K_DB,
+			marginDb: CHANNEL_GATE_MARGIN_DB,
+			valid: false,
+		})
+	}
+
+	gateInto(
 		centreHz: number,
 		obwHz: number,
-	): {
-		state: ChannelGateState
-		channelSnrDb: number
-		passedSample: number | null
-	} {
+		out: ChannelGateReading,
+	): ChannelGateReading {
 		// A bad query is not a measurement and must not report a passed slot.
-		if (!Number.isFinite(centreHz) || !Number.isFinite(obwHz) || !(obwHz > 0)) {
-			return {
-				state: "pending",
-				channelSnrDb: Number.NEGATIVE_INFINITY,
-				passedSample: null,
-			}
-		}
-		const n = this.slotCount
+		if (!Number.isFinite(centreHz) || !Number.isFinite(obwHz) || !(obwHz > 0))
+			return this.writeIdle(out)
 		const trackLo = centreHz - obwHz / 2
 		const trackHi = centreHz + obwHz / 2
+		const reach = this.maxSlotWidth
 		let primary = -1
 		let primaryDist = Infinity
-		for (let s = 0; s < n; s++) {
-			if (centreHz < this.slotLo[s]! || centreHz >= this.slotHi[s]!) continue
+		let primaryOrd = Infinity
+		// Slots are ordered by lo. A containing slot starts at or before the
+		// centre and no further left than its own width.
+		for (let s = this.rightmostLo(centreHz); s >= 0; s--) {
+			const slo = this.slotLo[s]!
+			if (slo <= centreHz - reach) break
+			if (centreHz >= this.slotHi[s]!) continue
 			const d = Math.abs(this.slotCentre[s]! - centreHz)
-			if (d < primaryDist) {
+			const ord = this.slotOrd[s]!
+			if (d < primaryDist || (d === primaryDist && ord < primaryOrd)) {
 				primaryDist = d
 				primary = s
+				primaryOrd = ord
 			}
 		}
 		// A track that fits in the nearest containing slot uses that slot.
@@ -327,37 +479,65 @@ class ChannelGateImpl implements ChannelGate {
 			primary >= 0 &&
 			trackLo >= this.slotLo[primary]! &&
 			trackHi <= this.slotHi[primary]!
-		) {
-			return this.oneSlot(primary)
-		}
+		)
+			return this.writeSlot(primary, out)
 		let p = 0
 		let f = 0
 		let any = false
+		let allValid = true
+		let allBurst = true
+		let maxK = Number.NEGATIVE_INFINITY
 		let passed = false
 		let passedSample = Infinity
-		for (let s = 0; s < n; s++) {
-			if (this.slotHi[s]! <= trackLo || this.slotLo[s]! >= trackHi) continue
+		let runStart = Number.NaN
+		for (let s = this.rightmostLo(trackHi); s >= 0; s--) {
+			const slo = this.slotLo[s]!
+			if (slo >= trackHi) continue
+			if (slo + reach <= trackLo) break
+			if (this.slotHi[s]! <= trackLo) continue
 			any = true
-			p += this.slotP[s]!
-			f += this.slotF[s]!
+			if (this.slotBlockValid[s] === 1) {
+				p += this.slotP[s]!
+				f += this.slotF[s]!
+			} else allValid = false
+			const k = this.kOfSlot(s)
+			if (k > maxK) maxK = k
+			if (this.slotBurst[s] !== 1) allBurst = false
 			if (this.slotPassed[s] === 1) {
 				passed = true
 				const ps = this.slotPassedSample[s]!
-				if (ps < passedSample) passedSample = ps
+				if (ps < passedSample) {
+					passedSample = ps
+					runStart = this.slotRunStart[s]!
+				}
 			}
 		}
-		if (!any) {
-			return {
-				state: "pending",
-				channelSnrDb: Number.NEGATIVE_INFINITY,
-				passedSample: null,
-			}
+		if (!any) return this.writeIdle(out)
+		const burst = allBurst
+		const snr = allValid ? finiteSnr(p, f) : null
+		out.state = passed ? "passed" : "pending"
+		out.channelSnrDb = snr ?? Number.NEGATIVE_INFINITY
+		out.passedSample = passed ? passedSample : null
+		out.runStartSample = passed && Number.isFinite(runStart) ? runStart : null
+		out.minDurationMs = burst
+			? CHANNEL_GATE_BURST_MIN_DURATION_MS
+			: CHANNEL_GATE_MIN_DURATION_MS
+		out.kDb = Number.isFinite(maxK) ? maxK : this.kFallback()
+		out.marginDb = burst ? CHANNEL_GATE_BURST_MARGIN_DB : CHANNEL_GATE_MARGIN_DB
+		out.valid = snr !== null
+		return out
+	}
+
+	/** Largest index whose lo is ≤ hz, or −1. Slots are sorted by lo. */
+	private rightmostLo(hz: number): number {
+		let lo = 0
+		let hi = this.slotCount
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1
+			if (this.slotLo[mid]! <= hz) lo = mid + 1
+			else hi = mid
 		}
-		return {
-			state: passed ? "passed" : "pending",
-			channelSnrDb: finiteSnr(p, f) ?? Number.NEGATIVE_INFINITY,
-			passedSample: passed ? passedSample : null,
-		}
+		return lo - 1
 	}
 
 	kFor(rangeKey: string): number {
@@ -398,6 +578,7 @@ class ChannelGateImpl implements ChannelGate {
 			this.coarsened = 0
 			this.span0 = 0
 			this.span1 = 0
+			this.maxSlotWidth = 0
 			this.zeroSlots(0)
 			return
 		}
@@ -440,16 +621,26 @@ class ChannelGateImpl implements ChannelGate {
 			}
 			ranges[idx]!.mhz += d.mhz
 		}
-		const n = built.drafts.length
+		const drafts = built.drafts
+		const n = drafts.length
+		// `gateInto` binary-searches `lo`. Layout order stays in `slotOrd`.
+		const order = new Array<number>(n)
+		for (let i = 0; i < n; i++) order[i] = i
+		order.sort((a, b) => drafts[a]!.lo - drafts[b]!.lo || a - b)
 		this.zeroSlots(n)
 		const used = new Uint8Array(prevSlots.length)
 		let span0 = this.bins
 		let span1 = 0
+		let maxWidth = 0
 		for (let s = 0; s < n; s++) {
-			const d = built.drafts[s]!
+			const src = order[s]!
+			const d = drafts[src]!
 			this.slotLo[s] = d.lo
 			this.slotHi[s] = d.hi
 			this.slotCentre[s] = d.centre
+			this.slotOrd[s] = src
+			const width = d.hi - d.lo
+			if (width > maxWidth) maxWidth = width
 			const [b0, b1] = this.binSpan(d.lo, d.hi)
 			this.slotBin0[s] = b0
 			this.slotBin1[s] = b1
@@ -464,6 +655,7 @@ class ChannelGateImpl implements ChannelGate {
 				if (b1 > span1) span1 = b1
 			}
 		}
+		this.maxSlotWidth = maxWidth
 		this.ranges = ranges
 		this.slotCount = n
 		this.coarsened = built.coarsened
@@ -495,6 +687,7 @@ class ChannelGateImpl implements ChannelGate {
 				p: this.slotP[s]!,
 				f: this.slotF[s]!,
 				passedSample: this.slotPassedSample[s]!,
+				runStart: this.slotRunStart[s]!,
 			})
 		}
 		return out
@@ -511,12 +704,14 @@ class ChannelGateImpl implements ChannelGate {
 		this.slotP[s] = snap.p
 		this.slotF[s] = snap.f
 		this.slotPassedSample[s] = snap.passedSample
+		this.slotRunStart[s] = snap.runStart
 	}
 
 	private clearRun(s: number): void {
 		this.slotBest[s] = Number.NEGATIVE_INFINITY
 		this.slotSnr[s] = Number.NEGATIVE_INFINITY
 		this.slotPassedSample[s] = Number.NaN
+		this.slotRunStart[s] = Number.NaN
 	}
 
 	private zeroSlots(n: number): void {
@@ -536,7 +731,10 @@ class ChannelGateImpl implements ChannelGate {
 		this.slotSnr = new Float64Array(n)
 		this.slotP = new Float64Array(n)
 		this.slotF = new Float64Array(n)
+		this.slotBlockValid = new Uint8Array(n)
 		this.slotPassedSample = new Float64Array(n)
+		this.slotRunStart = new Float64Array(n)
+		this.slotOrd = new Int32Array(n)
 	}
 
 	/** Bins whose centres lie in [lo, hi), clamped to the FFT. */
@@ -587,6 +785,7 @@ class ChannelGateImpl implements ChannelGate {
 		this.slotP[s] = pSum
 		this.slotF[s] = fSum
 		this.slotSnr[s] = snr
+		this.slotBlockValid[s] = 1
 
 		const k = this.kOfSlot(s)
 		const on = this.hysteresis(this.slotOn[s] === 1, snr, k)
@@ -597,6 +796,7 @@ class ChannelGateImpl implements ChannelGate {
 			this.slotOnBlocks[s] = 1
 			this.slotOffs[s] = 0
 			this.slotBest[s] = snr
+			this.slotRunStart[s] = sample
 		} else if (on) {
 			this.slotOnBlocks[s] = this.slotOnBlocks[s]! + 1
 			if (snr > this.slotBest[s]!) this.slotBest[s] = snr
@@ -642,6 +842,7 @@ class ChannelGateImpl implements ChannelGate {
 		this.slotBest[s] = Number.NEGATIVE_INFINITY
 		this.slotPassed[s] = 0
 		this.slotPassedSample[s] = Number.NaN
+		this.slotRunStart[s] = Number.NaN
 		if (!countFalseAlarm) return
 		this.falseAlarmCount++
 		const r = this.ranges[this.slotRange[s]!]
@@ -699,18 +900,41 @@ class ChannelGateImpl implements ChannelGate {
 		if (this.slotRunning[s] === 1) this.endRun(s, false)
 	}
 
-	private oneSlot(s: number): {
-		state: ChannelGateState
-		channelSnrDb: number
-		passedSample: number | null
-	} {
+	private writeSlot(s: number, out: ChannelGateReading): ChannelGateReading {
 		const passed = this.slotPassed[s] === 1
 		const snr = this.slotSnr[s]!
-		return {
-			state: passed ? "passed" : "pending",
-			channelSnrDb: Number.isFinite(snr) ? snr : Number.NEGATIVE_INFINITY,
-			passedSample: passed ? this.slotPassedSample[s]! : null,
-		}
+		const runStart = this.slotRunStart[s]!
+		const measured = this.slotBlockValid[s] === 1 && Number.isFinite(snr)
+		const burst = this.slotBurst[s] === 1
+		out.state = passed ? "passed" : "pending"
+		out.channelSnrDb = measured ? snr : Number.NEGATIVE_INFINITY
+		out.passedSample = passed ? this.slotPassedSample[s]! : null
+		out.runStartSample = passed && Number.isFinite(runStart) ? runStart : null
+		out.minDurationMs = burst
+			? CHANNEL_GATE_BURST_MIN_DURATION_MS
+			: CHANNEL_GATE_MIN_DURATION_MS
+		out.kDb = this.kOfSlot(s)
+		out.marginDb = burst ? CHANNEL_GATE_BURST_MARGIN_DB : CHANNEL_GATE_MARGIN_DB
+		out.valid = measured
+		return out
+	}
+
+	/** No covering slot. The slot run is not a track measurement. */
+	private writeIdle(out: ChannelGateReading): ChannelGateReading {
+		out.state = "pending"
+		out.channelSnrDb = Number.NEGATIVE_INFINITY
+		out.passedSample = null
+		out.runStartSample = null
+		out.minDurationMs = CHANNEL_GATE_MIN_DURATION_MS
+		out.kDb = this.kFallback()
+		out.marginDb = CHANNEL_GATE_MARGIN_DB
+		out.valid = false
+		return out
+	}
+
+	private kFallback(): number {
+		if (this.pinnedOffset !== null) return CHANNEL_GATE_K_DB + this.pinnedOffset
+		return CHANNEL_GATE_K_DB
 	}
 }
 
@@ -790,6 +1014,7 @@ interface SlotSnap {
 	p: number
 	f: number
 	passedSample: number
+	runStart: number
 }
 
 function takeSlot(

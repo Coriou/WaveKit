@@ -5,10 +5,10 @@ import type {
 	PendingEpoch,
 	PipelineConfig,
 	PipelineEvent,
-	PipelineInput,
 	Raster,
 	TrackSnapshot,
 } from "../../../../src/core/spectrum/types.js"
+import type { WorkerPipelineInput } from "../../../../src/core/spectrum/worker-protocol.js"
 import { packCu8, packF32 } from "../../../mocks/scanner/signals.js"
 import type { Iq } from "../../../mocks/scanner/signals.js"
 
@@ -78,7 +78,7 @@ export class Harness {
 					: 8
 	}
 
-	send(input: PipelineInput): PipelineEvent[] {
+	send(input: WorkerPipelineInput): PipelineEvent[] {
 		const ev = this.pipeline.handle(input)
 		this.events.push(...ev)
 		return ev
