@@ -10,8 +10,11 @@ import {
 	gatePassCapture,
 	needsLiveConfirm,
 	replayConfirmInput,
+	replayOutcomeSummary,
 	type GatePassCaptureInput,
 } from "../../../../src/core/iq-capture/replay-first.js"
+import type { IqReplayResult } from "../../../../src/core/scanner/iq-capture-contract.js"
+import type { AnalogTrialResult } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 
 const idle: GatePassCaptureInput = {
 	synthetic: false,
@@ -238,5 +241,169 @@ describe("captureRemovedRelease", () => {
 				settledObservationIds: new Set(["obs-1"]),
 			}),
 		).toBeNull()
+	})
+})
+
+function heardAnalog(): AnalogTrialResult {
+	return {
+		outcome: "heard",
+		mode: "nfm",
+		voice: true,
+		tones: { ctcssHz: null, dcs: null, audioSeconds: 0.5 },
+		stats: {
+			mode: "nfm",
+			frames: [
+				{
+					carrierDb: -20,
+					hfNoiseDb: -40,
+					audioDb: -12,
+					syllabic: 0.4,
+					cluster: 0.1,
+				},
+			],
+			gapSamples: 0,
+			floorDb: -90,
+		},
+	}
+}
+
+function decodedAnalog(): AnalogTrialResult {
+	return {
+		outcome: "decoded",
+		mode: "nfm",
+		voice: true,
+		tones: { ctcssHz: 88.5, dcs: null, audioSeconds: 1 },
+		stats: null,
+	}
+}
+
+function replay(patch: Partial<IqReplayResult>): IqReplayResult {
+	return {
+		captureId: "cap-1",
+		sourceId: "rtl",
+		observationId: "obs-1",
+		epoch: 1,
+		trials: [],
+		decoded: null,
+		...patch,
+	}
+}
+
+describe("replayOutcomeSummary", () => {
+	it("a validated heard result settles and drops not-needed, skipped-budget and heard", () => {
+		const summary = replayOutcomeSummary(
+			replay({
+				analog: heardAnalog(),
+				trials: [
+					{
+						protocol: "analog-fm",
+						decoderType: "dsd-fme",
+						known: false,
+						outcome: "heard",
+						mode: "nfm",
+					},
+					{
+						protocol: "pocsag",
+						decoderType: "multimon-ng",
+						known: false,
+						outcome: "not-needed" as "no-sync",
+					},
+					{
+						protocol: "dmr",
+						decoderType: "dsd-fme",
+						known: true,
+						outcome: "skipped-budget" as "no-sync",
+					},
+					{
+						protocol: "aprs",
+						decoderType: "direwolf",
+						known: true,
+						outcome: "no-sync",
+					},
+				],
+			}),
+		)
+		expect(summary.replayDecoded).toBe(true)
+		expect(summary.unsuccessful.map(t => t.protocol)).toEqual(["aprs"])
+	})
+
+	it("a validated decoded analog with only not-needed trials is a successful replay", () => {
+		const summary = replayOutcomeSummary(
+			replay({
+				analog: decodedAnalog(),
+				trials: [
+					{
+						protocol: "pocsag",
+						decoderType: "multimon-ng",
+						known: false,
+						outcome: "not-needed" as "no-sync",
+					},
+				],
+			}),
+		)
+		expect(summary.replayDecoded).toBe(true)
+		expect(summary.unsuccessful).toEqual([])
+	})
+
+	it("a digital decode settles even without an analog result", () => {
+		const summary = replayOutcomeSummary(
+			replay({
+				decoded: {
+					protocol: "dmr",
+					identity: { kind: "dmr-cc", value: "1" },
+				},
+				trials: [
+					{
+						protocol: "dmr",
+						decoderType: "dsd-fme",
+						known: true,
+						outcome: "decoded",
+					},
+					{
+						protocol: "pocsag",
+						decoderType: "multimon-ng",
+						known: false,
+						outcome: "no-sync",
+					},
+				],
+			}),
+		)
+		expect(summary.replayDecoded).toBe(true)
+		expect(summary.unsuccessful.map(t => t.outcome)).toEqual(["no-sync"])
+	})
+
+	it("a malformed analog decoded result does not settle, and heard stays unsuccessful", () => {
+		const summary = replayOutcomeSummary(
+			replay({
+				analog: { outcome: "decoded" } as AnalogTrialResult,
+				trials: [
+					{
+						protocol: "analog-fm",
+						decoderType: "dsd-fme",
+						known: false,
+						outcome: "heard",
+						mode: "nfm",
+					},
+					{
+						protocol: "dmr",
+						decoderType: "dsd-fme",
+						known: true,
+						outcome: "no-sync",
+					},
+				],
+			}),
+		)
+		expect(summary.replayDecoded).toBe(false)
+		expect(summary.unsuccessful.map(t => t.outcome)).toEqual([
+			"heard",
+			"no-sync",
+		])
+	})
+
+	it("a missing trials array is an empty unsuccessful list", () => {
+		const summary = replayOutcomeSummary({
+			decoded: null,
+		} as unknown as IqReplayResult)
+		expect(summary).toEqual({ replayDecoded: false, unsuccessful: [] })
 	})
 })

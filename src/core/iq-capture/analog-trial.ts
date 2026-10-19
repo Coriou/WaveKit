@@ -3,20 +3,24 @@
  *
  * `IqCaptureService.openAnalyze` spawns `wavekit-iqcap analyze`. This module
  * does not spawn: it reads that child's 8 kHz s16le audio and its one event,
- * runs a fresh `ToneDetector` in slices of at most 4 096 samples with a
- * `setImmediate` between slices, and classifies. A missing `openAnalyze` is
- * `unavailable`. A null open is `capture-gone`. Abort kills the child and
- * ends `cancelled`. Anything malformed or thrown fails closed (`analyze-failed`
- * or `no-sync`): never `decoded` or `heard`. The child is killed on every
- * return, including success (the service's kill is a no-op once the child
- * has exited).
+ * runs a fresh `ToneDetector` in slices of {@link ANALOG_TONE_SLICE_SAMPLES}
+ * samples. One shared queue runs a single slice per turn (`setImmediate`),
+ * so concurrent trials interleave instead of stacking their slices on one
+ * event-loop turn. A missing `openAnalyze` is `unavailable`. A null open is
+ * `capture-gone`. Abort kills the child and ends `cancelled`. Anything
+ * malformed or thrown fails closed (`analyze-failed` or `no-sync`): never
+ * `decoded` or `heard`. The child is killed on every return, including
+ * success (the service's kill is a no-op once the child has exited).
  *
- * AM quieting compares `carrierDb` with `floorDb`. The design names "the
- * capture's floor" and does not name the estimator. `floorDb` is the 10th
- * percentile of the frame `carrierDb` values (linear interpolation, rank
- * `0.1 * (n - 1)`). An empty capture uses 0, which cannot by itself pass
- * the AM carrier test. NFM does not read `floorDb`; it is still finite so a
- * later schema check can keep the result.
+ * An odd s16le length is an incomplete sample. An audio length outside
+ * `frames * 400` plus one trailing partial frame is not this analysis. Both
+ * are `analyze-failed`.
+ *
+ * AM quieting compares `carrierDb` with `floorDb`. The floor is not a
+ * percentile of this capture's carrier: on a continuous transmission that
+ * percentile is the signal, and the signal is never 6 dB above itself.
+ * `floorDb` is the pure-noise carrier ({@link RECEIVER_NOISE_CARRIER_DBFS})
+ * plus the median `hfNoiseDb`. See `captureFloorDb`.
  */
 import { setImmediate } from "node:timers"
 import type { Readable } from "node:stream"
@@ -46,11 +50,16 @@ import type {
 	AnalyzeEvent,
 } from "../scanner/scanner-redesign-contract.js"
 import { classifyAnalogTrial, isVoice } from "../scanner/analog-trial.js"
-import { parseAnalyzeEvent } from "./protocol.js"
+import { analyzeAudioMatchesFrames, parseAnalyzeEvent } from "./protocol.js"
 
-/** One turn of the tone pass. Req 5.3 and the hot-path budget. */
-const SLICE_SAMPLES = 4_096
-const SLICE_BYTES = SLICE_SAMPLES * 2
+/**
+ * One turn of the tone pass. A 4 096-sample push measured about 2 ms, and a
+ * burst of six of those on one event-loop turn was ~13.5 ms. 512 samples is
+ * about an eighth of that push. The shared queue runs one slice per turn, so
+ * the delay stays under the 1 ms budget.
+ */
+export const ANALOG_TONE_SLICE_SAMPLES = 512
+const SLICE_BYTES = ANALOG_TONE_SLICE_SAMPLES * 2
 /** One DCS word is 23 bits. Three words is the WG6 confirmation. */
 const DCS_WORD_BITS = 23
 
@@ -206,6 +215,8 @@ function decide(
 	const parsed = parseEvent(raw)
 	if (parsed === null || parsed.event === "error")
 		return failed(mode, "analyze-failed")
+	if (!analyzeAudioMatchesFrames(samples, parsed.frames.length))
+		return failed(mode, "analyze-failed")
 	const stats: AnalogTrialStats = {
 		mode,
 		frames: parsed.frames,
@@ -265,24 +276,45 @@ function copyDcs(dcs: unknown): AnalogTransmissionDcs | null {
 }
 
 /**
- * 10th percentile of finite `carrierDb`. Rank `0.1 * (n - 1)` with linear
- * interpolation. No finite carrier → 0.
+ * Carrier dBFS of the pure-noise calibration.
+ *
+ * `block_power_dbfs` is `10 log10(mean(I² + Q²))`, and `|z| = 1` is 0 dBFS.
+ * Complex Gaussian noise with σ = 1 (the stream that pins
+ * `HF_NOISE_REFERENCE_POWER`, where `hfNoiseDb` is 0) has mean power
+ * `E[I² + Q²] = 2σ² = 2`, so its carrier sits at `10 log10(2)` dBFS.
+ * A capture's discriminator is quieter than that noise by `−hfNoiseDb`,
+ * which lowers the noise floor under the carrier by the same amount:
+ *
+ *   floorDb = 10 log10(2) + median(hfNoiseDb)
+ *
+ * Continuous AM holds `carrierDb` near 0 dBFS while the discriminator
+ * quiets, so it clears `floorDb + 6`. Pure noise has `carrierDb ≈ floorDb`
+ * and does not. No finite `hfNoiseDb` yields 0. NFM does not read `floorDb`.
  */
+export const RECEIVER_NOISE_CARRIER_DBFS = 10 * Math.log10(2)
+
 export function captureFloorDb(frames: readonly AnalogTrialFrame[]): number {
 	const values: number[] = []
 	for (const frame of frames) {
-		const db = frame?.carrierDb
+		const db = frame?.hfNoiseDb
 		if (typeof db === "number" && Number.isFinite(db)) values.push(db)
 	}
-	if (values.length === 0) return 0
-	values.sort((a, b) => a - b)
-	const rank = 0.1 * (values.length - 1)
-	const lo = Math.floor(rank)
-	const hi = Math.ceil(rank)
-	const left = values[lo] ?? 0
-	const right = values[hi] ?? left
-	const floor = left + (right - left) * (rank - lo)
+	const mid = medianOf(values)
+	if (mid === null) return 0
+	const floor = RECEIVER_NOISE_CARRIER_DBFS + mid
 	return Number.isFinite(floor) ? floor : 0
+}
+
+function medianOf(values: number[]): number | null {
+	if (values.length === 0) return null
+	values.sort((a, b) => a - b)
+	const mid = values.length >> 1
+	if (values.length % 2 === 1) return values[mid] ?? null
+	const left = values[mid - 1]
+	const right = values[mid]
+	if (left === undefined || right === undefined) return null
+	const mean = (left + right) / 2
+	return Number.isFinite(mean) ? mean : null
 }
 
 function parseEvent(raw: unknown): AnalyzeEvent | null {
@@ -298,6 +330,32 @@ function parseEvent(raw: unknown): AnalyzeEvent | null {
 		return parseAnalyzeEvent(line)
 	} catch {
 		return null
+	}
+}
+
+/**
+ * One slice from every in-flight tone pass, then yield. Concurrent passes
+ * share the queue, so six trials do not run six slices before the event
+ * loop can turn.
+ */
+const sliceJobs: Array<() => void> = []
+let slicePumpScheduled = false
+
+function enqueueSlice(job: () => void): void {
+	sliceJobs.push(job)
+	if (slicePumpScheduled) return
+	slicePumpScheduled = true
+	setImmediate(runSlice)
+}
+
+function runSlice(): void {
+	slicePumpScheduled = false
+	const job = sliceJobs.shift()
+	if (!job) return
+	job()
+	if (sliceJobs.length > 0 && !slicePumpScheduled) {
+		slicePumpScheduled = true
+		setImmediate(runSlice)
 	}
 }
 
@@ -326,7 +384,7 @@ function feedAudio(
 		const schedule = (): void => {
 			if (scheduled || settled) return
 			scheduled = true
-			setImmediate(step)
+			enqueueSlice(step)
 		}
 
 		const step = (): void => {
@@ -334,6 +392,11 @@ function feedAudio(
 			if (settled) return
 			if (signal.aborted) {
 				finish(false)
+				return
+			}
+			// A finished stream with a leftover byte is not a whole sample.
+			if (ended && pending.length % 2 !== 0 && pending.length < 2) {
+				finish(true)
 				return
 			}
 			const even = pending.length - (pending.length % 2)
@@ -352,6 +415,10 @@ function feedAudio(
 				}
 				samples += n / 2
 				schedule()
+				return
+			}
+			if (ended && pending.length % 2 !== 0) {
+				finish(true)
 				return
 			}
 			if (ended) {

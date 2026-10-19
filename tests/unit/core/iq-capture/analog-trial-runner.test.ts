@@ -1,6 +1,8 @@
 import { PassThrough } from "node:stream"
 import { describe, expect, it } from "vitest"
 import {
+	ANALOG_TONE_SLICE_SAMPLES,
+	RECEIVER_NOISE_CARRIER_DBFS,
 	captureFloorDb,
 	createAnalogTrialRunner,
 } from "../../../../src/core/iq-capture/analog-trial.js"
@@ -124,7 +126,7 @@ describe("createAnalogTrialRunner", () => {
 		expect(result.mode).toBe("nfm")
 	})
 
-	it("slices never exceed 4096 samples per turn", async () => {
+	it("slices never exceed the tone-detector bound", async () => {
 		const sizes: number[] = []
 		const generations: number[] = []
 		let generation = 0
@@ -149,8 +151,9 @@ describe("createAnalogTrialRunner", () => {
 			logger,
 		})
 		await runner.run(CAPTURE, "nfm", new AbortController().signal)
+		expect(ANALOG_TONE_SLICE_SAMPLES).toBeLessThanOrEqual(1_024)
 		expect(sizes.length).toBeGreaterThanOrEqual(3)
-		expect(sizes.every(n => n <= 4_096)).toBe(true)
+		expect(sizes.every(n => n <= ANALOG_TONE_SLICE_SAMPLES)).toBe(true)
 		expect(sizes.reduce((sum, n) => sum + n, 0)).toBe(4_096 * 2 + 10)
 		expect(new Set(generations).size).toBe(sizes.length)
 	})
@@ -466,7 +469,7 @@ describe("createAnalogTrialRunner", () => {
 		expect(killed).toBe(true)
 	})
 
-	it("AM floorDb is the 10th percentile of carrierDb", async () => {
+	it("AM floorDb is the receiver noise floor plus the capture HF noise", async () => {
 		const carriers = [0, 10, 20, 30, 40]
 		const frames = carriers.map(carrierDb => ({
 			carrierDb,
@@ -475,20 +478,64 @@ describe("createAnalogTrialRunner", () => {
 			syllabic: 0,
 			cluster: 0,
 		}))
-		expect(captureFloorDb(frames)).toBeCloseTo(4, 8)
-		const { port } = scripted({ event: analysis(frames) })
+		expect(captureFloorDb(frames)).toBeCloseTo(RECEIVER_NOISE_CARRIER_DBFS, 8)
+		const { port } = scripted({
+			audio: Buffer.alloc(frames.length * 400 * 2),
+			event: analysis(frames),
+		})
 		const { runner } = runnerFor(port)
 		const result = await runner.run(CAPTURE, "am", new AbortController().signal)
-		expect(result.stats?.floorDb).toBeCloseTo(4, 8)
+		expect(result.stats?.floorDb).toBeCloseTo(RECEIVER_NOISE_CARRIER_DBFS, 8)
 		expect(result.stats?.mode).toBe("am")
 		expect(result.outcome).not.toBe("decoded")
 		expect(result.outcome).not.toBe("heard")
 	})
 
+	it("continuous AM above the absolute floor is heard", async () => {
+		const frames = Array.from({ length: 8 }, () => ({
+			carrierDb: 0,
+			hfNoiseDb: -40,
+			audioDb: -12,
+			syllabic: 0.5,
+			cluster: 0.1,
+		}))
+		const { port } = scripted({
+			audio: Buffer.alloc(frames.length * 400 * 2),
+			event: analysis(frames),
+		})
+		const { runner } = runnerFor(port)
+		const result = await runner.run(CAPTURE, "am", new AbortController().signal)
+		expect(result.error).toBeUndefined()
+		expect(result.outcome).toBe("heard")
+		expect(result.voice).toBe(true)
+		expect(result.stats?.floorDb).toBeCloseTo(
+			RECEIVER_NOISE_CARRIER_DBFS - 40,
+			8,
+		)
+	})
+
+	it("AM frames sitting on the noise floor are no-sync", async () => {
+		const frames = Array.from({ length: 8 }, () => ({
+			carrierDb: RECEIVER_NOISE_CARRIER_DBFS,
+			hfNoiseDb: 0,
+			audioDb: -80,
+			syllabic: 0,
+			cluster: 0,
+		}))
+		const { port } = scripted({
+			audio: Buffer.alloc(frames.length * 400 * 2),
+			event: analysis(frames),
+		})
+		const { runner } = runnerFor(port)
+		const result = await runner.run(CAPTURE, "am", new AbortController().signal)
+		expect(result.error).toBeUndefined()
+		expect(result.outcome).toBe("no-sync")
+	})
+
 	it("a tone shorter than 0.75 s does not decode", async () => {
 		const { port } = scripted({
 			audio: tonePcm(88.5, 0.5),
-			event: analysis(quietFrames(8)),
+			event: analysis(quietFrames(10)),
 		})
 		const { runner } = runnerFor(port)
 		const result = await runner.run(
@@ -501,7 +548,7 @@ describe("createAnalogTrialRunner", () => {
 		expect(result.error).toBeUndefined()
 	})
 
-	it("an odd trailing byte is not a sample and the child is released", async () => {
+	it("an odd trailing byte is analyze-failed and the child is released", async () => {
 		const pcm = Buffer.concat([tonePcm(88.5, 1), Buffer.from([0x01])])
 		const sizes: number[] = []
 		const detector = new ToneDetector()
@@ -510,7 +557,10 @@ describe("createAnalogTrialRunner", () => {
 			sizes.push(buf.length)
 			push(buf, format)
 		}
-		const { port, killed } = scripted({ audio: pcm, event: analysis([]) })
+		const { port, killed } = scripted({
+			audio: pcm,
+			event: analysis(quietFrames(20)),
+		})
 		const { logger } = spyLogger()
 		const runner = createAnalogTrialRunner({
 			port,
@@ -522,9 +572,65 @@ describe("createAnalogTrialRunner", () => {
 			"nfm",
 			new AbortController().signal,
 		)
-		expect(sizes.every(n => n % 2 === 0 && n / 2 <= 4_096)).toBe(true)
-		expect(result.tones.audioSeconds).toBeCloseTo(1, 5)
+		expect(
+			sizes.every(n => n % 2 === 0 && n / 2 <= ANALOG_TONE_SLICE_SAMPLES),
+		).toBe(true)
+		expect(result.error).toBe("analyze-failed")
+		expect(result.outcome).not.toBe("decoded")
+		expect(result.outcome).not.toBe("heard")
+		expect(result.tones.audioSeconds).toBe(0)
 		expect(killed()).toBe(true)
+	})
+
+	it("audio one sample short of the frame count is analyze-failed", async () => {
+		const samples = 20 * 400 - 1
+		const { port, killed } = scripted({
+			audio: Buffer.alloc(samples * 2),
+			event: analysis(quietFrames(20)),
+		})
+		const { runner } = runnerFor(port)
+		const result = await runner.run(
+			CAPTURE,
+			"nfm",
+			new AbortController().signal,
+		)
+		expect(result.error).toBe("analyze-failed")
+		expect(result.outcome).not.toBe("heard")
+		expect(killed()).toBe(true)
+	})
+
+	it("one sample past the partial frame is analyze-failed", async () => {
+		const samples = 20 * 400 + 401
+		const { port } = scripted({
+			audio: Buffer.alloc(samples * 2),
+			event: analysis(quietFrames(20)),
+		})
+		const { runner } = runnerFor(port)
+		const result = await runner.run(
+			CAPTURE,
+			"nfm",
+			new AbortController().signal,
+		)
+		expect(result.error).toBe("analyze-failed")
+		expect(result.outcome).not.toBe("decoded")
+		expect(result.outcome).not.toBe("heard")
+	})
+
+	it("a partial final frame still classifies", async () => {
+		const samples = 20 * 400 + 200
+		const { port } = scripted({
+			audio: Buffer.alloc(samples * 2),
+			event: analysis(quietFrames(20)),
+		})
+		const { runner } = runnerFor(port)
+		const result = await runner.run(
+			CAPTURE,
+			"nfm",
+			new AbortController().signal,
+		)
+		expect(result.error).toBeUndefined()
+		expect(result.outcome).toBe("heard")
+		expect(result.tones.audioSeconds).toBeCloseTo(samples / 8_000, 5)
 	})
 })
 

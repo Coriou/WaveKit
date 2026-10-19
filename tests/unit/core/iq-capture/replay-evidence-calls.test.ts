@@ -119,7 +119,7 @@ describe("replayEvidenceCalls", () => {
 					tones: {
 						ctcssHz: 88.5,
 						dcs: null,
-						audioSeconds: 1.2,
+						audioSeconds: 0.5,
 					},
 					stats: heardStats(),
 				},
@@ -344,6 +344,71 @@ describe("replayEvidenceCalls", () => {
 		)
 		expect(sink.trials).toEqual([])
 		expect(sink.order).toBe(0)
+	})
+
+	it("decoded CTCSS with audioSeconds 0 is not recorded as decoded", () => {
+		const sink = new FakeSink()
+		replayEvidenceCalls(
+			result({
+				analog: {
+					outcome: "decoded",
+					mode: "nfm",
+					voice: true,
+					tones: { ctcssHz: 88.5, dcs: null, audioSeconds: 0 },
+					stats: null,
+				},
+			}),
+			"obs-1",
+			sink,
+			AT,
+		)
+		expect(sink.analog).toEqual([])
+	})
+
+	it("heard with voice false and empty frames is not recorded as heard", () => {
+		const sink = new FakeSink()
+		replayEvidenceCalls(
+			result({
+				analog: {
+					outcome: "heard",
+					mode: "nfm",
+					voice: false,
+					tones: { ctcssHz: null, dcs: null, audioSeconds: 1 },
+					stats: {
+						...heardStats(),
+						frames: [],
+					},
+				},
+			}),
+			"obs-1",
+			sink,
+			AT,
+		)
+		expect(sink.analog).toEqual([])
+	})
+
+	it("a decoded analog-demod trial with a malformed analog result is recorded as cancelled", () => {
+		const sink = new FakeSink()
+		replayEvidenceCalls(
+			result({
+				trials: [
+					{
+						protocol: "analog-fm",
+						decoderType: "dsd-fme",
+						decoder: "analog-demod",
+						mode: "nfm",
+						known: false,
+						outcome: "decoded",
+					},
+				],
+				analog: { outcome: "decoded" } as AnalogTrialResult,
+			}),
+			"obs-1",
+			sink,
+			AT,
+		)
+		expect(sink.trials.map(t => t.trial.outcome)).toEqual(["cancelled"])
+		expect(sink.analog).toEqual([])
 	})
 
 	it("a bare heard result is not recorded as heard", () => {

@@ -242,7 +242,13 @@ struct Analyzer {
     demod: Demodulator,
     stats: StatsEngine,
     decim: RealDecim,
+    /// 300 Hz high-pass used only for the voice-band power statistic.
+    audio_hp: Biquad,
     audio_lp: Biquad,
+    /// NFM stdout undoes the demod DC block. AM keeps the kernel output.
+    restore_dc: bool,
+    dc_prev_x: f64,
+    dc_prev_y: f64,
     buf: Vec<Complex32>,
     half: Option<f32>,
     accepted: usize,
@@ -267,7 +273,11 @@ impl Analyzer {
             demod,
             stats: StatsEngine::new(),
             decim: RealDecim::new(taps),
+            audio_hp: Biquad::highpass(INPUT_RATE_HZ, 300.0),
             audio_lp: Biquad::lowpass(INPUT_RATE_HZ, 3_000.0),
+            restore_dc: mode == AnalyzeMode::Nfm,
+            dc_prev_x: 0.0,
+            dc_prev_y: 0.0,
             buf: Vec::with_capacity(FRAME_SAMPLES),
             half: None,
             accepted: 0,
@@ -394,6 +404,9 @@ impl Analyzer {
         profile_add(&mut self.cost.demod_ns, t);
         let t = profile_start(self.profile);
         let power = self.audio_band_power(n)?;
+        // After the voice-band measurement, so audioDb and syllabic stay on
+        // the DC-blocked waveform. Stdout gets the flat deviation back.
+        self.restore_nfm_subaudible(n);
         self.decim
             .process(&self.scratch[..n], &mut self.audio, &mut self.fir_buf)?;
         profile_add(&mut self.cost.audio_ns, t);
@@ -418,21 +431,71 @@ impl Analyzer {
         })
     }
 
+    /// Invert the NFM demod DC block (`y = x - x_prev + R y_prev`, `R = 0.998`,
+    /// the csdr pole in `demod/filters.rs`). That pole is private to the frozen
+    /// kernel. At 48 kHz its time constant is about 10 ms, shorter than a DCS
+    /// bit, so a ±750 Hz NRZ step leaves stdout as a spike and the tone
+    /// decoder's zero-crossing clock never confirms. The 3.4 kHz low-pass is
+    /// linear and time-invariant, so it commutes with the block and inverting
+    /// here restores `lowpass(deviation)`. AM is left alone: its DC block sits
+    /// before the AGC and does not commute with this inverse.
+    fn restore_nfm_subaudible(&mut self, n: usize) {
+        if !self.restore_dc || n == 0 {
+            return;
+        }
+        const DC_BLOCK_R: f64 = 0.998;
+        let mut prev_x = self.dc_prev_x;
+        let mut prev_y = self.dc_prev_y;
+        for sample in &mut self.scratch[..n] {
+            let y = f64::from(*sample);
+            let x = y - DC_BLOCK_R * prev_y + prev_x;
+            prev_y = y;
+            prev_x = x;
+            let clamped = x.clamp(-1.0, 1.0);
+            *sample = if clamped.is_finite() {
+                clamped as f32
+            } else {
+                0.0
+            };
+            if !clamped.is_finite() {
+                prev_x = 0.0;
+                prev_y = 0.0;
+            }
+        }
+        self.dc_prev_x = prev_x;
+        self.dc_prev_y = prev_y;
+    }
+
     fn audio_band_power(&mut self, n: usize) -> Result<f64, AnalyzeError> {
         if n == 0 {
             return Ok(0.0);
         }
-        let f = &mut self.audio_lp;
-        let (b0, b1, b2, a1, a2) = (f.b0, f.b1, f.b2, f.a1, f.a2);
-        let (mut x1, mut x2, mut y1, mut y2) = (f.x1, f.x2, f.y1, f.y2);
+        // Voice power is the 300 Hz–3 kHz band. Stdout is `scratch` after the
+        // 3.4 kHz low-pass and is not high-passed, so CTCSS and DCS stay in
+        // the tone stream. This high-pass never writes back into `scratch`.
+        let (hb0, hb1, hb2, ha1, ha2, mut hx1, mut hx2, mut hy1, mut hy2) = {
+            let hp = &self.audio_hp;
+            (
+                hp.b0, hp.b1, hp.b2, hp.a1, hp.a2, hp.x1, hp.x2, hp.y1, hp.y2,
+            )
+        };
+        let (b0, b1, b2, a1, a2, mut x1, mut x2, mut y1, mut y2) = {
+            let f = &self.audio_lp;
+            (f.b0, f.b1, f.b2, f.a1, f.a2, f.x1, f.x2, f.y1, f.y2)
+        };
         let mut acc = 0.0f64;
         for &x in &self.scratch[..n] {
             if !x.is_finite() {
                 return Err(AnalyzeError::Io);
             }
-            let y = flush_subnormal(b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2)?;
+            let high = flush_subnormal(hb0 * x + hb1 * hx1 + hb2 * hx2 - ha1 * hy1 - ha2 * hy2)?;
+            hx2 = hx1;
+            hx1 = x;
+            hy2 = hy1;
+            hy1 = high;
+            let y = flush_subnormal(b0 * high + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2)?;
             x2 = x1;
-            x1 = x;
+            x1 = high;
             y2 = y1;
             y1 = y;
             acc += f64::from(y) * f64::from(y);
@@ -440,10 +503,14 @@ impl Analyzer {
         if !acc.is_finite() {
             return Err(AnalyzeError::Io);
         }
-        f.x1 = x1;
-        f.x2 = x2;
-        f.y1 = y1;
-        f.y2 = y2;
+        self.audio_hp.x1 = hx1;
+        self.audio_hp.x2 = hx2;
+        self.audio_hp.y1 = hy1;
+        self.audio_hp.y2 = hy2;
+        self.audio_lp.x1 = x1;
+        self.audio_lp.x2 = x2;
+        self.audio_lp.y1 = y1;
+        self.audio_lp.y2 = y2;
         Ok(acc / n as f64)
     }
 
@@ -504,6 +571,7 @@ impl StatsEngine {
     fn hf_and_store(&mut self, samples: &[Complex32]) -> Result<f64, AnalyzeError> {
         let n = samples.len();
         if n == 0 {
+            self.stored = 0;
             return Ok(0.0);
         }
         let need = n.div_ceil(CLUSTER_STRIDE);
@@ -652,7 +720,9 @@ fn demod_config(mode: AnalyzeMode) -> DemodConfig {
         gain: 2.0,
         de_emphasis_us: None,
         low_pass_hz: Some(3_400.0),
-        high_pass_hz: Some(300.0),
+        // Stdout keeps the sub-audible band. Voice statistics high-pass at
+        // 300 Hz inside `audio_band_power` and do not write that back.
+        high_pass_hz: None,
         max_chunk: MAX_CHUNK,
     }
 }
@@ -734,6 +804,10 @@ fn syllabic_index(envelope: &[f64]) -> Result<f64, AnalyzeError> {
 }
 
 fn cluster_score(samples: &[f32]) -> Result<f64, AnalyzeError> {
+    cluster_levels(samples, true)
+}
+
+fn cluster_levels(samples: &[f32], four: bool) -> Result<f64, AnalyzeError> {
     if samples.len() < 4 {
         return Ok(0.0);
     }
@@ -764,7 +838,12 @@ fn cluster_score(samples: &[f32]) -> Result<f64, AnalyzeError> {
     }
     let bin_w = (max - min) / HIST_BINS as f32;
     let n = samples.len();
-    let score = kmeans_hist(&hist, min, bin_w, n, 2)?.max(kmeans_hist(&hist, min, bin_w, n, 4)?);
+    let two = kmeans_hist(&hist, min, bin_w, n, 2)?;
+    let score = if four {
+        two.max(kmeans_hist(&hist, min, bin_w, n, 4)?)
+    } else {
+        two
+    };
     if !score.is_finite() {
         return Err(AnalyzeError::Io);
     }

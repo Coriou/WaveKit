@@ -1067,6 +1067,21 @@ describe("IqReplayQueue analog trial", () => {
 			name: "heard without stats",
 			value: { ...analogAnswer("heard"), stats: null },
 		},
+		{
+			name: "decoded CTCSS with audioSeconds 0",
+			value: {
+				...analogAnswer("decoded"),
+				tones: { ctcssHz: 88.5, dcs: null, audioSeconds: 0 },
+			},
+		},
+		{
+			name: "heard with voice false and frames []",
+			value: {
+				...analogAnswer("heard"),
+				voice: false,
+				stats: { ...heardStats(), frames: [] },
+			},
+		},
 	])(
 		"analog runner $name fails closed: cancelled, digital trials continue, analog not positive",
 		async ({ value }) => {

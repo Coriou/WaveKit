@@ -2,21 +2,41 @@
  * Untrusted analog-trial result (WG12 req 4.5, 5.4). The replay queue and
  * `replayEvidenceCalls` both judge through this schema, so a malformed
  * `heard` or `decoded` cannot be stored or recorded as a positive outcome.
- * Any `error`, a `decoded` without a qualified tone or DCS, or a `heard`
- * without stats becomes `cancelled` (or `unsupported` for the contract's
- * unavailable errors). The attached result is omitted so nothing positive leaks.
+ * Any `error`, or a positive outcome the classifier would not produce,
+ * becomes `cancelled` (or `unsupported` for the contract's unavailable
+ * errors). The attached result is omitted so nothing positive leaks.
  */
-import { DCS_STANDARD_CODES } from "@wavekit/api-types"
+import {
+	DCS_BIT_RATE_BPS,
+	DCS_MIN_AUDIO_SECONDS,
+	DCS_MIN_WORDS,
+	DCS_STANDARD_CODES,
+} from "@wavekit/api-types"
 import { z } from "zod"
 import { isCtcssToneHz } from "../audio-tones/ctcss.js"
+import { classifyAnalogTrial } from "../scanner/analog-trial.js"
 import type { IqReplayTrialOutcome } from "../scanner/iq-capture-contract.js"
 import {
 	ANALOG_TRIAL_MAX_FRAMES,
+	type AnalogTrialOutcome,
 	type AnalogTrialResult,
+	type AnalogTrialStats,
+	type AnalogTrialTones,
 } from "../scanner/scanner-redesign-contract.js"
 
 const DCS_CODES: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
 const finiteNumber = z.number().finite()
+/** One DCS word is 23 bits. Three words is the WG6 confirmation. */
+const DCS_WORD_BITS = 23
+/**
+ * CTCSS needs `DCS_MIN_AUDIO_SECONDS`. DCS needs that and enough audio to
+ * have held `DCS_MIN_WORDS` words at `DCS_BIT_RATE_BPS`. The word time is
+ * shorter than 0.75 s, so both gates are 0.75 s today.
+ */
+const MIN_DCS_AUDIO_SECONDS = Math.max(
+	DCS_MIN_AUDIO_SECONDS,
+	(DCS_WORD_BITS * DCS_MIN_WORDS) / DCS_BIT_RATE_BPS,
+)
 
 const analogFrameSchema = z
 	.object({
@@ -85,11 +105,15 @@ export interface JudgedAnalog {
 }
 
 /**
- * The runner's value is untrusted. Malformed fields (missing tones or stats,
- * non-finite numbers, a throwing getter), any `error`, a `decoded` without a
- * qualified tone or DCS, or a `heard` without stats become `cancelled`, or
+ * The runner's value is untrusted. Malformed fields, any `error`, or a
+ * positive the statistics would not produce become `cancelled`, or
  * `unsupported` for `unavailable` / `analyze-failed`. `analog` is null in
  * every rejected case.
+ *
+ * `decoded` needs a qualified CTCSS tone or DCS code and at least the WG2/WG6
+ * audio minimum (DCS also the three-word time). `heard` needs `voice`, a
+ * non-empty frame list, `stats.mode` equal to the trial `mode`, and
+ * `classifyAnalogTrial` agreeing. Anything else positive is cancelled.
  */
 export function judgeAnalogResult(raw: unknown): JudgedAnalog {
 	let parsed: ParsedAnalog
@@ -112,15 +136,44 @@ export function judgeAnalogResult(raw: unknown): JudgedAnalog {
 		default:
 			return CANCELLED_ANALOG
 	}
-	if (parsed.outcome === "decoded" && !qualifiedTone(parsed))
-		return CANCELLED_ANALOG
-	if (parsed.outcome === "heard" && parsed.stats === null)
-		return CANCELLED_ANALOG
+	if (parsed.outcome === "decoded" || parsed.outcome === "heard") {
+		if (!positiveAgrees(parsed)) return CANCELLED_ANALOG
+	}
 	return { outcome: parsed.outcome, analog: copyAnalog(parsed) }
 }
 
-function qualifiedTone(parsed: ParsedAnalog): boolean {
-	return parsed.tones.ctcssHz !== null || parsed.tones.dcs !== null
+/**
+ * A positive outcome has to be one the classifier would return for these
+ * stats and tones, and the statistics' mode has to be the mode the trial
+ * asked for.
+ */
+function positiveAgrees(parsed: ParsedAnalog): boolean {
+	if (parsed.stats !== null && parsed.stats.mode !== parsed.mode) return false
+	if (parsed.outcome === "decoded") return decodedTone(parsed.tones)
+	if (
+		!parsed.voice ||
+		parsed.stats === null ||
+		parsed.stats.frames.length === 0
+	)
+		return false
+	return classified(parsed.stats, parsed.tones) === "heard"
+}
+
+function decodedTone(tones: AnalogTrialTones): boolean {
+	const seconds = tones.audioSeconds
+	if (tones.ctcssHz !== null && seconds >= DCS_MIN_AUDIO_SECONDS) return true
+	return tones.dcs !== null && seconds >= MIN_DCS_AUDIO_SECONDS
+}
+
+function classified(
+	stats: AnalogTrialStats,
+	tones: AnalogTrialTones,
+): AnalogTrialOutcome | null {
+	try {
+		return classifyAnalogTrial(stats, tones)
+	} catch {
+		return null
+	}
 }
 
 function copyAnalog(parsed: ParsedAnalog): AnalogTrialResult {

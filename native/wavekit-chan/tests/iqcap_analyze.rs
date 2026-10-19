@@ -365,6 +365,193 @@ fn nfm_tone_quiets_by_more_than_8_db() {
     );
 }
 
+/// A ±750 Hz NRZ step must stay flat on stdout. The demod DC block (about 10 ms)
+/// would otherwise turn each DCS bit into a spike.
+#[test]
+fn nfm_subaudible_nrz_stays_flat() {
+    let n = 48_000 * 4 / 5;
+    let mut hz = vec![750.0f64; n];
+    for sample in hz.iter_mut().skip(n / 2) {
+        *sample = -750.0;
+    }
+    let mut rng = XorShift(NOISE_SEED);
+    let audio = analyze_interleaved(&fm_iq(&hz, 40.0, &mut rng), AnalyzeMode::Nfm)
+        .unwrap()
+        .audio;
+    assert_eq!(audio.len(), 6_400, "{}", audio.len());
+    let pos = level_stats(&audio[800..2_400]);
+    let neg = level_stats(&audio[4_000..5_600]);
+    assert!(
+        pos.0 > 1_500.0 && pos.1 < pos.0 * 0.35,
+        "positive half mean {} std {}",
+        pos.0,
+        pos.1
+    );
+    assert!(
+        neg.0 < -1_500.0 && neg.1 < neg.0.abs() * 0.35,
+        "negative half mean {} std {}",
+        neg.0,
+        neg.1
+    );
+}
+
+fn level_stats(samples: &[i16]) -> (f64, f64) {
+    let n = samples.len() as f64;
+    let mean = samples.iter().map(|s| f64::from(*s)).sum::<f64>() / n;
+    let var = samples
+        .iter()
+        .map(|s| {
+            let d = f64::from(*s) - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n;
+    (mean, var.sqrt())
+}
+
+/// A 150 Hz FM tone sits under the old 300 Hz high-pass. Stdout must keep it.
+#[test]
+fn subaudible_fm_tone_remains_in_stdout_audio() {
+    let n = 16 * 2_400;
+    let mut iq = vec![0.0f32; n * 2];
+    let mut phase = 0.0f64;
+    for k in 0..n {
+        let t = k as f64 / 48_000.0;
+        let hz = 400.0 * (TAU * 150.0 * t).sin();
+        phase += TAU * hz / 48_000.0;
+        iq[k * 2] = phase.cos() as f32;
+        iq[k * 2 + 1] = phase.sin() as f32;
+    }
+    let analysis = analyze_interleaved(&iq, AnalyzeMode::Nfm).unwrap();
+    assert_eq!(analysis.audio.len(), 6_400, "{}", analysis.audio.len());
+    let power_150 = goertzel(&analysis.audio, 150.0, 8_000.0);
+    let power_1000 = goertzel(&analysis.audio, 1_000.0, 8_000.0);
+    assert!(
+        power_150 > power_1000 * 20.0,
+        "150 Hz {power_150} vs 1 kHz {power_1000}"
+    );
+}
+
+/// Genuine GMSK (BT 0.3, h 0.5) stays under the frozen 0.6 data score.
+/// Shipped medians, first frame skipped: 10 dB 0.356, 15 dB 0.403, 20 dB 0.439.
+/// Syllabic NFM voice at 20 dB is 0.242. A symbol-centre gaussian matched
+/// filter scored 0.492 / 0.508 / 0.508 and was not kept: the pulse
+/// autocorrelation at one symbol is 0.28 of the cursor, so about half the
+/// symbols miss the ±15 % window, and the 31-tap FIR added about 20 ms.
+#[test]
+fn gmsk_stays_under_the_data_score_and_voice_does_too() {
+    let voice = nfm_voice(48_000, 20.0, NOISE_SEED);
+    let voice_med = median_cluster(
+        &analyze_interleaved(&voice, AnalyzeMode::Nfm)
+            .unwrap()
+            .frames,
+    );
+    let mut gmsk_line = String::new();
+    for snr in [10.0, 15.0, 20.0] {
+        let gmsk = gmsk_bt03(48_000, snr, NOISE_SEED);
+        let med = median_cluster(&analyze_interleaved(&gmsk, AnalyzeMode::Nfm).unwrap().frames);
+        gmsk_line.push_str(&format!(" {snr:.0}dB={med:.3}"));
+        assert!(
+            (0.2..0.6).contains(&med),
+            "gmsk median cluster{gmsk_line} voice {voice_med:.3}"
+        );
+    }
+    assert!(
+        voice_med < 0.6,
+        "gmsk median cluster{gmsk_line} voice {voice_med:.3}"
+    );
+}
+
+fn goertzel(pcm: &[i16], freq: f64, rate: f64) -> f64 {
+    let coeff = 2.0 * (TAU * freq / rate).cos();
+    let mut s1 = 0.0f64;
+    let mut s2 = 0.0f64;
+    for &sample in pcm {
+        let s0 = f64::from(sample) + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    s1 * s1 + s2 * s2 - coeff * s1 * s2
+}
+
+fn median_cluster(frames: &[AnalyzeFrame]) -> f64 {
+    let mut values: Vec<f64> = frames.iter().skip(1).map(|frame| frame.cluster).collect();
+    assert!(values.len() > 4, "{}", values.len());
+    values.sort_by(f64::total_cmp);
+    values[values.len() / 2]
+}
+
+/// BT 0.3, h = 0.5 (±Rs/4) at 4 800 sym/s. Same gaussian as the TS synth.
+fn gmsk_bt03(n: usize, snr_db: f64, seed: u64) -> Vec<f32> {
+    let rs = 4_800.0f64;
+    let sps = 10usize;
+    let span = 3usize;
+    let taps_n = span * sps + 1;
+    let mid = (taps_n - 1) as f64 / 2.0;
+    let sigma = (sps as f64) * std::f64::consts::LN_2.sqrt() / (TAU * 0.3);
+    let mut taps = vec![0.0f64; taps_n];
+    let mut sum = 0.0f64;
+    for (i, tap) in taps.iter_mut().enumerate() {
+        let x = (i as f64 - mid) / sigma;
+        let g = (-0.5 * x * x).exp();
+        *tap = g;
+        sum += g;
+    }
+    for tap in &mut taps {
+        *tap /= sum;
+    }
+    let mut rng = XorShift(seed);
+    let mut held = vec![1.0f64; n];
+    let mut symbol = 1.0f64;
+    for (k, sample) in held.iter_mut().enumerate() {
+        if k % sps == 0 {
+            symbol = if rng.uniform() < 0.5 { -1.0 } else { 1.0 };
+        }
+        *sample = symbol;
+    }
+    let half = (taps_n - 1) / 2;
+    let mut shaped = vec![0.0f64; n];
+    for k in 0..n {
+        let mut acc = 0.0f64;
+        for (t, tap) in taps.iter().enumerate() {
+            let i = k as isize - half as isize + t as isize;
+            if i >= 0 && (i as usize) < n {
+                acc += tap * held[i as usize];
+            }
+        }
+        shaped[k] = acc * (rs / 4.0);
+    }
+    fm_iq(&shaped, snr_db, &mut rng)
+}
+
+fn nfm_voice(n: usize, snr_db: f64, seed: u64) -> Vec<f32> {
+    let mut rng = XorShift(seed ^ 0x0F0F);
+    let mut hz = vec![0.0f64; n];
+    for (k, sample) in hz.iter_mut().enumerate() {
+        let t = k as f64 / 48_000.0;
+        let env = 0.4 + 0.6 * (TAU * 4.0 * t).sin();
+        let shape = 0.5 * (TAU * 1_800.0 * t).sin()
+            + 0.35 * (TAU * 2_300.0 * t).sin()
+            + 0.25 * (TAU * 2_700.0 * t).sin()
+            + 0.15 * (TAU * 3_100.0 * t).sin();
+        *sample = 2_200.0 * env * shape;
+    }
+    fm_iq(&hz, snr_db, &mut rng)
+}
+
+fn fm_iq(hz: &[f64], snr_db: f64, rng: &mut XorShift) -> Vec<f32> {
+    let sigma = (1.0 / (2.0 * 10f64.powf(snr_db / 10.0))).sqrt();
+    let mut phase = 0.0f64;
+    let mut iq = Vec::with_capacity(hz.len() * 2);
+    for &dev in hz {
+        phase += TAU * dev / 48_000.0;
+        let (ni, nq) = rng.gauss();
+        iq.push((phase.cos() + sigma * ni) as f32);
+        iq.push((phase.sin() + sigma * nq) as f32);
+    }
+    iq
+}
+
 #[test]
 fn non_finite_samples_are_an_io_error() {
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {

@@ -8,11 +8,12 @@
  * does not use `snrDb`.
  *
  * NFM voice is a 4 Hz syllabic envelope over a multitone from 1.8 kHz.
- * Those tones sit above the CTCSS detector band, so a constant 88.5 Hz
- * deviation remains most of that band after `analyze` high-passes at
- * 300 Hz. DCS 023 (normal, LSB-first Golay) is the same waveform the
- * detector decodes on an unfiltered 8 kHz stream. 4FSK uses four tones.
- * GMSK here is gaussian 2FSK at 4 800 symbols/s, BT 1, deviation ±Rs/2.
+ * Those tones sit above the CTCSS detector band. DCS 023 (normal,
+ * LSB-first Golay) is the same waveform the detector decodes once analyze
+ * keeps the sub-audible band. 4FSK uses four tones. `gfsk-bt1` is gaussian
+ * 2FSK at 4 800 symbols/s, BT 1, deviation ±Rs/2. `gmsk` is BT 0.3 and
+ * h = 0.5 (deviation ±Rs/4). `am-voice` is a 4 Hz syllabic envelope over
+ * tones from 800 Hz, amplitude-modulated on a 0 Hz carrier.
  */
 import { DCS_BIT_RATE_BPS } from "@wavekit/api-types"
 
@@ -26,7 +27,9 @@ export type AnalogSynthKind =
 	| "nfm-dcs"
 	| "fsk4-4800"
 	| "fsk4-2400"
+	| "gfsk-bt1"
 	| "gmsk"
+	| "am-voice"
 	| "carrier"
 	| "noise"
 
@@ -44,7 +47,9 @@ const KINDS: ReadonlySet<string> = new Set<AnalogSynthKind>([
 	"nfm-dcs",
 	"fsk4-4800",
 	"fsk4-2400",
+	"gfsk-bt1",
 	"gmsk",
+	"am-voice",
 	"carrier",
 	"noise",
 ])
@@ -76,9 +81,13 @@ export function synthesizeAnalogIq(request: AnalogSynthRequest): Float32Array {
 		}
 		return iq
 	}
-	const mod = modulator(request.kind, n, rate, rng)
 	const snr = 10 ** (request.snrDb / 10)
 	const sigma = Math.sqrt(1 / (2 * snr))
+	if (request.kind === "am-voice") {
+		writeAmVoice(iq, n, rate, sigma, rng)
+		return iq
+	}
+	const mod = modulator(request.kind, n, rate, rng)
 	let phase = 0
 	for (let k = 0; k < n; k++) {
 		phase += (2 * Math.PI * (mod[k] ?? 0)) / rate
@@ -98,6 +107,7 @@ function modulator(
 	if (kind === "carrier") return filled(n, 1_000)
 	if (kind === "fsk4-4800") return fsk4(n, rate, 4_800, rng)
 	if (kind === "fsk4-2400") return fsk4(n, rate, 2_400, rng)
+	if (kind === "gfsk-bt1") return gfskBt1(n, rate, rng)
 	if (kind === "gmsk") return gmsk(n, rate, rng)
 	const voice = voiceHz(n, rate)
 	if (kind === "nfm-voice") return voice
@@ -158,15 +168,33 @@ function fsk4(
 }
 
 /**
- * Gaussian-shaped 2FSK at 4 800 symbols/s. BT 0.3 and h = 0.5 (deviation
- * ±Rs/4) measured a median cluster of 0.3–0.5 at 10–20 dB, overlapping NFM
- * voice (0.2–0.3) and short of 0.6. BT 1 with deviation ±Rs/2 opens the eye
- * (cluster about 0.7 at 10 dB) without moving that threshold.
+ * Gaussian 2FSK at 4 800 symbols/s, BT 1, deviation ±Rs/2. The wide BT
+ * opens the eye (cluster about 0.7 at 10 dB) without moving the 0.6
+ * threshold. This is not GMSK.
+ */
+function gfskBt1(n: number, rate: number, rng: () => number): Float64Array {
+	return gaussian2fsk(n, rate, rng, 1, 4, 2)
+}
+
+/**
+ * GMSK: BT 0.3, modulation index h = 0.5, so the deviation is ±Rs/4 at
+ * 4 800 symbols/s.
  */
 function gmsk(n: number, rate: number, rng: () => number): Float64Array {
+	return gaussian2fsk(n, rate, rng, 0.3, 3, 4)
+}
+
+function gaussian2fsk(
+	n: number,
+	rate: number,
+	rng: () => number,
+	bt: number,
+	span: number,
+	deviationDivisor: number,
+): Float64Array {
 	const rs = 4_800
 	const sps = Math.round(rate / rs)
-	const taps = gaussianTaps(1, sps, 4)
+	const taps = gaussianTaps(bt, sps, span)
 	const held = new Float64Array(n)
 	let symbol = 1
 	for (let k = 0; k < n; k++) {
@@ -182,9 +210,36 @@ function gmsk(n: number, rate: number, rng: () => number): Float64Array {
 			const x = i >= 0 && i < n ? (held[i] ?? 0) : 0
 			acc += (taps[t] ?? 0) * x
 		}
-		shaped[k] = acc * (rs / 2)
+		shaped[k] = acc * (rs / deviationDivisor)
 	}
 	return shaped
+}
+
+/**
+ * Continuous AM voice. The carrier is 0 Hz at mean amplitude 1 (about
+ * 0 dBFS). A 4 Hz syllabic envelope multiplies tones from 800 Hz, inside
+ * the 300–3 000 Hz voice band, and the envelope stays positive. Channel
+ * SNR uses the same `A² / (2 σ²)` definition with A = 1.
+ */
+function writeAmVoice(
+	iq: Float32Array,
+	n: number,
+	rate: number,
+	sigma: number,
+	rng: () => number,
+): void {
+	for (let k = 0; k < n; k++) {
+		const t = k / rate
+		const syllabic = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(2 * Math.PI * 4 * t))
+		const voice =
+			0.45 * Math.sin(2 * Math.PI * 800 * t) +
+			0.35 * Math.sin(2 * Math.PI * 1_300 * t) +
+			0.25 * Math.sin(2 * Math.PI * 1_900 * t)
+		const envelope = 1 + 0.8 * syllabic * (voice / 1.05)
+		const [ni, nq] = gauss(rng)
+		iq[k * 2] = envelope + sigma * ni
+		iq[k * 2 + 1] = sigma * nq
+	}
 }
 
 function gaussianTaps(bt: number, sps: number, span: number): Float64Array {

@@ -174,6 +174,31 @@ export class BoundedLineReader {
 export const ANALYZE_GAP_MAX_SAMPLES =
 	ANALOG_TRIAL_MAX_FRAMES * (IQ_CAPTURE_RATE_HZ / 1000) * ANALOG_TRIAL_FRAME_MS
 
+/**
+ * 8 kHz samples in one 50 ms statistics frame. The analyzer decimates 48 kHz
+ * by 6, so one frame of 2 400 input samples is 400 audio samples.
+ */
+export const ANALYZE_AUDIO_SAMPLES_PER_FRAME =
+	(8_000 / 1000) * ANALOG_TRIAL_FRAME_MS
+
+/**
+ * True when an s16le sample count belongs to this analysis. Each published
+ * frame contributes {@link ANALYZE_AUDIO_SAMPLES_PER_FRAME} samples. The
+ * decimator also emits the incomplete trailing frame, and a gap is shorter
+ * than one input frame, so at most one extra frame of audio is real. Fewer
+ * samples than the published frames, or more than that one partial frame,
+ * is not this capture.
+ */
+export function analyzeAudioMatchesFrames(
+	samples: number,
+	frames: number,
+): boolean {
+	if (!Number.isInteger(samples) || samples < 0) return false
+	if (!Number.isInteger(frames) || frames < 0) return false
+	const full = frames * ANALYZE_AUDIO_SAMPLES_PER_FRAME
+	return samples >= full && samples <= full + ANALYZE_AUDIO_SAMPLES_PER_FRAME
+}
+
 const ANALYZE_ERROR_CODES = [
 	"bad-args",
 	"open-failed",

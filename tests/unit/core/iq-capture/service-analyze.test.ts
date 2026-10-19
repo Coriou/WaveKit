@@ -345,13 +345,9 @@ describe("IqCaptureService openAnalyze", () => {
 		const audio = readAll(opened!.audio)
 		const event = opened!.event
 		child.stdout?.write(Buffer.alloc(AUDIO_MAX, 1))
-		child.eventFd()?.write(`${analysisLine(0, 0)}\n`)
+		child.eventFd()?.write(`${analysisLine(80, 0)}\n`)
 		child.exit(0)
-		await expect(event).resolves.toEqual({
-			event: "analysis",
-			frames: [],
-			gapSamples: 0,
-		})
+		await expect(event).resolves.toEqual(parseAnalyzeEvent(analysisLine(80, 0)))
 		expect(await audio).toEqual({ bytes: AUDIO_MAX, error: null })
 		expect(s.svc.counters().replayFailures).toBe(0)
 		await s.svc.stop()
@@ -413,7 +409,7 @@ describe("IqCaptureService openAnalyze", () => {
 		const child = analyzeChild(s.children)
 		const audio = readAll(opened.audio)
 		child.stdout?.write(Buffer.alloc(AUDIO_MAX, 2))
-		child.eventFd()?.write(`${analysisLine()}\n`)
+		child.eventFd()?.write(`${analysisLine(80)}\n`)
 		child.exit(0)
 		await expect(opened.event).resolves.toMatchObject({ event: "analysis" })
 		expect(await audio).toEqual({ bytes: AUDIO_MAX, error: null })
@@ -544,6 +540,47 @@ describe("IqCaptureService openAnalyze", () => {
 			code: "ANALYZE_FAILED",
 		})
 		expect(logText(s.lines)).not.toContain("1e309")
+		await s.svc.stop()
+	})
+
+	it("odd-length audio is analyze-failed", async () => {
+		const s = await ready()
+		const opened = openAnalyze(s.svc, s.id, "nfm")
+		const child = analyzeChild(s.children)
+		child.stdout?.write(Buffer.alloc(801, 1))
+		child.eventFd()?.write(`${analysisLine(1)}\n`)
+		child.exit(0)
+		await expect(opened!.event).rejects.toMatchObject({
+			code: "ANALYZE_FAILED",
+		})
+		await s.svc.stop()
+	})
+
+	it("audio that does not match the frame count is analyze-failed", async () => {
+		const s = await ready()
+		const opened = openAnalyze(s.svc, s.id, "nfm")
+		const child = analyzeChild(s.children)
+		// One frame is 400 samples. 200 samples is a short frame.
+		child.stdout?.write(Buffer.alloc(400, 1))
+		child.eventFd()?.write(`${analysisLine(1)}\n`)
+		child.exit(0)
+		await expect(opened!.event).rejects.toMatchObject({
+			code: "ANALYZE_FAILED",
+		})
+		await s.svc.stop()
+	})
+
+	it("a partial final frame of audio is accepted", async () => {
+		const s = await ready()
+		const opened = openAnalyze(s.svc, s.id, "nfm")
+		const child = analyzeChild(s.children)
+		const audio = readAll(opened!.audio)
+		// 400 samples for the frame plus 200 of the allowed partial frame.
+		child.stdout?.write(Buffer.alloc(1_200, 2))
+		child.eventFd()?.write(`${analysisLine(1)}\n`)
+		child.exit(0)
+		await expect(opened!.event).resolves.toMatchObject({ event: "analysis" })
+		expect(await audio).toEqual({ bytes: 1_200, error: null })
 		await s.svc.stop()
 	})
 })

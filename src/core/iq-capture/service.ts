@@ -57,6 +57,7 @@ import {
 	type SpawnFn,
 } from "./process.js"
 import {
+	analyzeAudioMatchesFrames,
 	BoundedLineReader,
 	isCaptureId,
 	parseAnalyzeEvent,
@@ -1134,7 +1135,9 @@ class Service implements IqCaptureService {
 				code === 0 &&
 				!protocolBad &&
 				!audioOver &&
-				audioBytes <= ANALYZE_AUDIO_MAX_BYTES
+				audioBytes <= ANALYZE_AUDIO_MAX_BYTES &&
+				audioBytes % 2 === 0 &&
+				analyzeAudioMatchesFrames(audioBytes / 2, parsed.frames.length)
 			) {
 				settled = true
 				audio.end()

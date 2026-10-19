@@ -4,15 +4,21 @@
  * and writes nothing else onto an observation. The result is untrusted. Only
  * known outcomes, finite numbers and known tones are forwarded. `not-needed`
  * trials are skipped. The analog trial is recorded as decoder `analog-demod`
- * with transport `replay`. A malformed `heard` or `decoded` analog result is
- * not recorded. Capture state, the first gate-pass request and a capture
+ * with transport `replay`. A positive analog trial is recorded only when
+ * `result.analog` judges to the same outcome and mode; otherwise that trial
+ * is `cancelled`. A validated analog `decoded` or `heard` is a successful
+ * replay. `not-needed` and `skipped-budget` are not unsuccessful attempts.
+ * Capture state, the first gate-pass request and a capture
  * removed before its replay settles are decided here so the seam stays thin.
  */
 import type {
 	ScannerProbeDecoderType,
 	ScannerTrialOutcome,
 } from "@wavekit/api-types"
-import type { IqReplayResult } from "../scanner/iq-capture-contract.js"
+import type {
+	IqReplayResult,
+	IqReplayTrialOutcome,
+} from "../scanner/iq-capture-contract.js"
 import type {
 	AnalogTrialMode,
 	ChannelGateState,
@@ -258,8 +264,10 @@ export function captureRemovedRelease(input: {
 /**
  * Maps one replay result onto `ObservationEvidenceSink`. One `nextTrialOrder`
  * per trial that is kept, in result order. Nothing else is called: no miss
- * and no undecoded mark, including for `unsupported`. A malformed positive
- * analog result is not recorded.
+ * and no undecoded mark, including for `unsupported`. A positive analog-demod
+ * trial is forwarded only when `result.analog` judges to that same outcome
+ * and mode. Otherwise the trial is recorded as `cancelled`. A malformed
+ * positive analog result is not passed to `recordAnalog`.
  */
 export function replayEvidenceCalls(
 	result: IqReplayResult,
@@ -271,8 +279,9 @@ export function replayEvidenceCalls(
 	if (typeof observationId !== "string" || observationId.length === 0) return
 	if (!isObject(result)) return
 	const trials = Array.isArray(result.trials) ? result.trials : []
-	for (const trial of trials) recordTrial(trial, observationId, sink, at)
 	const judged = judgeAnalogResult(result.analog)
+	for (const trial of trials)
+		recordTrial(trial, observationId, sink, at, judged)
 	const analog = judged.analog
 	if (analog)
 		sink.recordAnalog(observationId, {
@@ -290,15 +299,81 @@ export function replayEvidenceCalls(
 		sink.recordUnavailable(observationId, type)
 }
 
+/** Trials that do not count as an unsuccessful replay attempt. */
+const NOT_UNSUCCESSFUL: ReadonlySet<string> = new Set([
+	"cancelled",
+	"decoded",
+	"unsupported",
+	"not-needed",
+	"skipped-budget",
+])
+
+type ReplayTrial = IqReplayResult["trials"][number]
+
+export interface ReplayOutcomeSummary {
+	/**
+	 * A digital decode, or an analog result `judgeAnalogResult` accepted as
+	 * `decoded` or `heard`. The seam treats this as a settled successful
+	 * replay: no `no-sync` mark and no live re-confirm.
+	 */
+	replayDecoded: boolean
+	/**
+	 * Trials that count toward a miss or an undecoded reason, in result order.
+	 * `not-needed` and `skipped-budget` are absent. A `heard` trial is absent
+	 * when the analog result validated as a positive.
+	 */
+	unsuccessful: ReplayTrial[]
+}
+
+/**
+ * Whether this replay decoded, and which trials were unsuccessful attempts.
+ * Pure. The scanner-service diff calls it instead of deciding inline.
+ * `result` is untrusted: a missing or malformed analog positive is not a
+ * decode, and an unknown trial outcome is not bookkeeping.
+ */
+export function replayOutcomeSummary(
+	result: IqReplayResult,
+): ReplayOutcomeSummary {
+	if (!isObject(result)) return { replayDecoded: false, unsuccessful: [] }
+	const judged = judgeAnalogResult(result["analog"])
+	const analogPositive =
+		judged.outcome === "decoded" || judged.outcome === "heard"
+	const unsuccessful: ReplayTrial[] = []
+	const trials = Array.isArray(result["trials"]) ? result["trials"] : []
+	for (const trial of trials) {
+		if (!isObject(trial)) continue
+		const outcome = knownOutcome(trial["outcome"])
+		if (!outcome || !countsAsUnsuccessful(outcome, analogPositive)) continue
+		unsuccessful.push(trial as ReplayTrial)
+	}
+	return {
+		replayDecoded: result["decoded"] != null || analogPositive,
+		unsuccessful,
+	}
+}
+
+function countsAsUnsuccessful(
+	outcome: string,
+	analogPositive: boolean,
+): boolean {
+	if (NOT_UNSUCCESSFUL.has(outcome)) return false
+	if (outcome === "heard" && analogPositive) return false
+	return true
+}
+
 function recordTrial(
 	trial: unknown,
 	observationId: string,
 	sink: ObservationEvidenceSink,
 	at: number,
+	judged: ReturnType<typeof judgeAnalogResult>,
 ): void {
 	if (!isObject(trial)) return
-	const outcome = knownOutcome(trial["outcome"])
+	let outcome = knownOutcome(trial["outcome"])
 	if (!outcome || outcome === "not-needed") return
+	if (isAnalogTrial(trial) && (outcome === "decoded" || outcome === "heard")) {
+		if (!analogTrialAgrees(trial, outcome, judged)) outcome = "cancelled"
+	}
 	const protocol = knownProtocol(trial["protocol"])
 	const decoder = decoderOf(trial)
 	if (!protocol || !decoder) return
@@ -310,6 +385,20 @@ function recordTrial(
 		order,
 		at,
 	})
+}
+
+/**
+ * A positive analog-demod trial agrees when the judged analog result has the
+ * same outcome and the mode the trial requested.
+ */
+function analogTrialAgrees(
+	trial: Record<string, unknown>,
+	outcome: IqReplayTrialOutcome,
+	judged: ReturnType<typeof judgeAnalogResult>,
+): boolean {
+	const analog = judged.analog
+	if (!analog || judged.outcome !== outcome) return false
+	return trial["mode"] === analog.mode
 }
 
 function decoderOf(trial: Record<string, unknown>): string | null {
