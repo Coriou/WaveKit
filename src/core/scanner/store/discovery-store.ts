@@ -770,7 +770,7 @@ export class DiscoveryStore
 		this.decodeInto(d, ev)
 		// Drop the cached proof after the identity and cap are stored, so the one
 		// change below is the only publication and readers see the capped label.
-		this.proofCache.delete(d.id)
+		this.invalidateLabel(d.id)
 		if (this.revision(d) === before) return null
 		const op = newOp()
 		op.discoveries.add(d.id)
@@ -856,7 +856,7 @@ export class DiscoveryStore
 		this.armWatchers(o.discoveryId)
 		o.decode = kept
 		this.observationProofCache.delete(o.id)
-		this.proofCache.delete(o.discoveryId)
+		this.invalidateLabel(o.discoveryId)
 		this.dropWatcherCaches(o.discoveryId)
 		const discovery = this.discoveries.get(o.discoveryId)
 		const op = newOp()
@@ -1940,7 +1940,7 @@ export class DiscoveryStore
 			if (d.class !== c.class) this.touch(d)
 			d.class = c.class
 		}
-		if (labelChanged) this.proofCache.delete(d.id)
+		if (labelChanged) this.invalidateLabel(d.id)
 	}
 
 	private decodeInto(d: Discovery, ev: DecodeEvidence): void {
@@ -2085,8 +2085,8 @@ export class DiscoveryStore
 			op.discoveries.add(partner.id)
 			mark(op, partner.id, "updated")
 		}
-		this.proofCache.delete(twin.id)
-		this.proofCache.delete(d.id)
+		this.invalidateLabel(twin.id)
+		this.invalidateLabel(d.id)
 		op.discoveries.add(twin.id)
 		mark(op, twin.id, "created")
 		const id = this.settle(op, twin)
@@ -2220,8 +2220,8 @@ export class DiscoveryStore
 		this.armWatchers(keep.id)
 		this.armWatchers(drop.id)
 		this.dropReaders(readers)
-		this.proofCache.delete(keep.id)
-		this.proofCache.delete(drop.id)
+		this.invalidateLabel(keep.id)
+		this.invalidateLabel(drop.id)
 		this.markDirty(keep.id)
 		this.markDirty(drop.id)
 		for (const o of [...(this.byDiscovery.get(drop.id) ?? [])]) {
@@ -2315,7 +2315,7 @@ export class DiscoveryStore
 		op.discoveries.add(keep.id)
 		this.refresh(keep)
 		this.dropReaders(readers)
-		this.proofCache.delete(keep.id)
+		this.invalidateLabel(keep.id)
 	}
 
 	/**
@@ -2422,7 +2422,7 @@ export class DiscoveryStore
 		const readers = this.watcherIds(d.id)
 		this.armWatchers(d.id)
 		this.dropReaders(readers)
-		this.proofCache.delete(d.id)
+		this.invalidateLabel(d.id)
 		for (const partnerId of d.coChannel) {
 			const partner = this.discoveries.get(partnerId)
 			if (partner === undefined) continue
@@ -2546,13 +2546,13 @@ export class DiscoveryStore
 	}
 
 	private dropReaders(ids: readonly string[]): void {
-		for (const id of ids) this.proofCache.delete(id)
+		for (const id of ids) this.invalidateLabel(id)
 	}
 
 	private dropWatcherCaches(ownerId: string): void {
 		const watchers = this.proofWatchers.get(ownerId)
 		if (watchers === undefined || watchers.size === 0) return
-		for (const id of watchers) this.proofCache.delete(id)
+		for (const id of watchers) this.invalidateLabel(id)
 	}
 
 	/** One `updated` per armed reader whose proof or level changed, skipping ids already notified. */
@@ -2631,7 +2631,7 @@ export class DiscoveryStore
 	}
 
 	private bumpProof(discoveryId: string): void {
-		this.proofCache.delete(discoveryId)
+		this.invalidateLabel(discoveryId)
 		this.dropWatcherCaches(discoveryId)
 	}
 
@@ -2641,7 +2641,7 @@ export class DiscoveryStore
 		this.evidenceByObservation.delete(observationId)
 		this.observationProofCache.delete(observationId)
 		if (observation !== undefined) {
-			this.proofCache.delete(observation.discoveryId)
+			this.invalidateLabel(observation.discoveryId)
 			this.dropWatcherCaches(observation.discoveryId)
 		}
 	}
@@ -2774,7 +2774,7 @@ export class DiscoveryStore
 			return false
 		}
 		this.observationProofCache.delete(observationId)
-		this.proofCache.delete(discovery.id)
+		this.invalidateLabel(discovery.id)
 		this.dropWatcherCaches(discovery.id)
 		const after = this.discoveryView(discovery).proof
 		this.emitProofChange(discovery.id, before, after)
@@ -3121,7 +3121,7 @@ export class DiscoveryStore
 			this.removal.observations.push(o.id)
 		}
 		this.byDiscovery.delete(id)
-		this.proofCache.delete(id)
+		this.invalidateLabel(id)
 		this.clearProofWatch(id)
 		this.medians.delete(id)
 		this.aliasTable.detach(id)
@@ -3166,7 +3166,7 @@ export class DiscoveryStore
 		}
 		this.observationIndex.delete(o.id)
 		this.observationProofCache.delete(o.id)
-		this.proofCache.delete(o.discoveryId)
+		this.invalidateLabel(o.discoveryId)
 		this.dropWatcherCaches(o.discoveryId)
 		this.medians.delete(o.discoveryId)
 		this.markDirty(o.discoveryId)
@@ -3381,9 +3381,28 @@ export class DiscoveryStore
 		this.syncCounts()
 	}
 
+	/**
+	 * The cached proof label is stale. Job counts use that label, so the next
+	 * sync recounts this discovery from whatever `effectiveLabel` shows.
+	 */
+	private invalidateLabel(id: string): void {
+		this.proofCache.delete(id)
+		this.countsDirty.add(id)
+	}
+
 	private syncCounts(): void {
-		for (const id of this.countsDirty)
-			this.jobCounts.sync(id, this.discoveries.get(id))
+		for (const id of this.countsDirty) {
+			const discovery = this.discoveries.get(id)
+			this.jobCounts.sync(
+				id,
+				discovery === undefined
+					? undefined
+					: {
+							confidence: this.effectiveLabel(discovery).confidence,
+							jobIds: discovery.jobIds,
+						},
+			)
+		}
 		this.countsDirty.clear()
 	}
 
