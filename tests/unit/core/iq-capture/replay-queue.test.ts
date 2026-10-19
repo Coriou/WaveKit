@@ -20,6 +20,7 @@ import type {
 	IqReplayTrial,
 } from "../../../../src/core/scanner/iq-capture-contract.js"
 import type { ProbeMode } from "../../../../src/core/scanner/probes/probe-pool.js"
+import { planReplayTrials } from "../../../../src/core/scanner/replay-plan.js"
 import {
 	ANALOG_TRIAL_CORES,
 	type AnalogTrialOutcome,
@@ -29,6 +30,7 @@ import {
 	type ProofAnalogInput,
 } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
+import { TARGET_HZ, trackOf } from "../../../mocks/scanner/identify-fakes.js"
 import { flush, spyLogger } from "./helpers.js"
 
 const mode = (protocol: ScannerProtocol): ProbeMode => ({
@@ -857,17 +859,48 @@ function amHeard(): AnalogTrialResult {
 	}
 }
 
-function analogAnswer(outcome: AnalogTrialOutcome): AnalogTrialResult {
+function analogAnswer(
+	outcome: AnalogTrialOutcome,
+	mode: "nfm" | "am" = "nfm",
+): AnalogTrialResult {
+	const quiet = outcome !== "no-sync"
+	const voiceLike = outcome === "heard" || outcome === "decoded"
 	return {
 		outcome,
-		mode: "nfm",
-		voice: outcome === "heard" || outcome === "decoded",
+		mode,
+		voice: voiceLike,
 		tones: {
 			ctcssHz: outcome === "decoded" ? 88.5 : null,
 			dcs: null,
 			audioSeconds: 1,
 		},
-		stats: outcome === "heard" ? heardStats() : null,
+		stats: {
+			mode,
+			frames: [
+				{
+					carrierDb: quiet ? -20 : -100,
+					hfNoiseDb: quiet ? -40 : 0,
+					audioDb: voiceLike ? -12 : -80,
+					syllabic: voiceLike ? 0.4 : 0,
+					cluster: outcome === "data-like" ? 0.9 : 0.1,
+				},
+			],
+			gapSamples: 0,
+			floorDb: -90,
+		},
+	}
+}
+
+function failedAnalog(
+	error: NonNullable<AnalogTrialResult["error"]>,
+): AnalogTrialResult {
+	return {
+		outcome: "no-sync",
+		mode: "nfm",
+		voice: false,
+		tones: { ctcssHz: null, dcs: null, audioSeconds: 0 },
+		stats: null,
+		error,
 	}
 }
 
@@ -1113,6 +1146,18 @@ describe("IqReplayQueue analog trial", () => {
 			value: { ...analogAnswer("heard"), stats: null },
 		},
 		{
+			name: "data-like with null stats",
+			value: { ...analogAnswer("data-like"), stats: null },
+		},
+		{
+			name: "carrier-only with null stats",
+			value: { ...analogAnswer("carrier-only"), stats: null },
+		},
+		{
+			name: "no-sync whose stats classify as heard",
+			value: { ...analogAnswer("heard"), outcome: "no-sync" as const },
+		},
+		{
 			name: "decoded CTCSS with audioSeconds 0",
 			value: {
 				...analogAnswer("decoded"),
@@ -1239,6 +1284,137 @@ describe("IqReplayQueue analog trial", () => {
 		expect(evidence.calls).toEqual(evidence.seeded)
 		expect(evidence.entries[0]?.tone.ctcssHz).toBe(88.5)
 		expect(evidence.entries[0]?.transport).toBe("live")
+	})
+
+	it.each([
+		["timeout", "analyze-failed"],
+		["error event", "analyze-failed"],
+		["malformed line", "analyze-failed"],
+		["audio mismatch", "analyze-failed"],
+		["tone-detector throw", "analyze-failed"],
+		["capture-gone", "capture-gone"],
+	] as const)(
+		"%s (%s) is cancelled, not unsupported, and digital trials run",
+		async (_kind, error) => {
+			const { port, p, results } = runWithAnalog({
+				analog: { run: () => Promise.resolve(failedAnalog(error)) },
+			})
+			port.add(id(1))
+			await flush()
+			expect(results[0]?.analog).toBeUndefined()
+			expect(results[0]?.trials.map(t => t.outcome)).toEqual([
+				"cancelled",
+				"no-sync",
+				"no-sync",
+			])
+			expect(results[0]?.trials[0]?.outcome).not.toBe("unsupported")
+			expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+		},
+	)
+
+	it("a runner unavailable error is unsupported and digital trials run", async () => {
+		const { port, p, results } = runWithAnalog({
+			analog: { run: () => Promise.resolve(failedAnalog("unavailable")) },
+		})
+		port.add(id(1))
+		await flush()
+		expect(results[0]?.analog).toBeUndefined()
+		expect(results[0]?.trials[0]).toMatchObject({
+			outcome: "unsupported",
+			decoder: "analog-demod",
+		})
+		expect(p.requests.map(r => r.protocol)).toEqual(["pocsag", "dmr"])
+	})
+
+	it("known analog hit: analog trial first with known true, decoded ends digital not-needed", async () => {
+		const trials = planReplayTrials({
+			capture: {
+				captureId: id(1),
+				sourceId: "rtl",
+				observationId: "o",
+				epoch: 1,
+				rfHz: TARGET_HZ,
+				tuningTrust: "commanded",
+				capturedAtMs: 0,
+				durationMs: 2000,
+				gapSamples: 0,
+			},
+			track: trackOf({ acf30: -0.94, acf60: 0.99 }),
+			knownProtocol: "analog-fm",
+			priors: { "analog-fm": 1 },
+			narrowRaster: false,
+		})
+		expect(trials[0]).toMatchObject({
+			protocol: "analog-fm",
+			kind: "analog",
+			analogMode: "nfm",
+			known: true,
+		})
+		expect(trials.filter(t => t.kind === "analog")).toHaveLength(1)
+		expect(trials.length).toBeGreaterThan(1)
+		const { port, p, results } = runWithAnalog({
+			trials,
+			analog: { run: () => Promise.resolve(analogAnswer("decoded")) },
+		})
+		port.add(id(1))
+		await flush()
+		expect(p.requests).toEqual([])
+		expect(results[0]?.analog?.outcome).toBe("decoded")
+		expect(results[0]?.trials[0]).toMatchObject({
+			protocol: "analog-fm",
+			known: true,
+			outcome: "decoded",
+		})
+		expect(results[0]?.trials.slice(1).map(t => t.outcome)).toEqual(
+			trials.slice(1).map(() => "not-needed"),
+		)
+	})
+
+	it("known analog miss: the known trial keeps the non-positive outcome and digital trials run", async () => {
+		const trials = planReplayTrials({
+			capture: {
+				captureId: id(1),
+				sourceId: "rtl",
+				observationId: "o",
+				epoch: 1,
+				rfHz: TARGET_HZ,
+				tuningTrust: "commanded",
+				capturedAtMs: 0,
+				durationMs: 2000,
+				gapSamples: 0,
+			},
+			track: trackOf({ acf30: -0.94, acf60: 0.99 }),
+			knownProtocol: "analog-am",
+			priors: { "analog-am": 1, "analog-fm": 1 },
+			narrowRaster: false,
+		})
+		expect(trials.filter(t => t.kind === "analog")).toHaveLength(1)
+		expect(trials[0]).toMatchObject({
+			protocol: "analog-am",
+			analogMode: "am",
+			known: true,
+		})
+		const { port, p, results } = runWithAnalog({
+			trials,
+			analog: {
+				run: (_id, mode) => Promise.resolve(analogAnswer("no-sync", mode)),
+			},
+		})
+		port.add(id(1))
+		await flush()
+		expect(results[0]?.trials[0]).toMatchObject({
+			protocol: "analog-am",
+			known: true,
+			outcome: "no-sync",
+			mode: "am",
+		})
+		expect(results[0]?.analog?.outcome).toBe("no-sync")
+		expect(p.requests.map(r => r.protocol)).toEqual(
+			trials.slice(1).map(t => t.protocol),
+		)
+		expect(results[0]?.trials.slice(1).map(t => t.outcome)).toEqual(
+			trials.slice(1).map(() => "no-sync"),
+		)
 	})
 })
 

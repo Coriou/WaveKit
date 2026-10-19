@@ -196,23 +196,28 @@ describe("replay queue analog stop", () => {
 										dcs: null,
 										audioSeconds: 1,
 									},
-									stats:
-										c.analogOutcome === "heard"
-											? {
-													mode,
-													frames: [
-														{
-															carrierDb: -20,
-															hfNoiseDb: -40,
-															audioDb: -12,
-															syllabic: 0.4,
-															cluster: 0.1,
-														},
-													],
-													gapSamples: 0,
-													floorDb: -90,
-												}
-											: null,
+									stats: {
+										mode,
+										frames: [
+											{
+												carrierDb: c.analogOutcome === "no-sync" ? -100 : -20,
+												hfNoiseDb: c.analogOutcome === "no-sync" ? 0 : -40,
+												audioDb:
+													c.analogOutcome === "heard" ||
+													c.analogOutcome === "decoded"
+														? -12
+														: -80,
+												syllabic:
+													c.analogOutcome === "heard" ||
+													c.analogOutcome === "decoded"
+														? 0.4
+														: 0,
+												cluster: c.analogOutcome === "data-like" ? 0.9 : 0.1,
+											},
+										],
+										gapSamples: 0,
+										floorDb: -90,
+									},
 								})
 							},
 						},

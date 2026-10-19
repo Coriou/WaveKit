@@ -137,7 +137,7 @@ describe.skipIf(!PRESENT)("analog trial calibration", () => {
 			}
 		}
 		expect(failures).toEqual([])
-	}, 180_000)
+	}, 20_000)
 
 	it("am-voice at 15 dB keeps one outcome at ×1, ×0.1 and ×0.01, and scaled AM noise stays no-sync", async () => {
 		const scales = [1, 0.1, 0.01] as const
@@ -180,7 +180,31 @@ describe.skipIf(!PRESENT)("analog trial calibration", () => {
 		}
 		expect(heard).toEqual(["1:heard", "0.1:heard", "0.01:heard"])
 		expect(noise).toEqual(["1:no-sync", "0.1:no-sync", "0.01:no-sync"])
-	}, 120_000)
+	}, 20_000)
+
+	it("all-zero IQ is no-sync for nfm and am", async () => {
+		const dir = await mkdtemp(path.join(tmpdir(), "wk-analog-zero-"))
+		const zeroRows: MarginRow[] = []
+		try {
+			const iq = new Float32Array(48_000 * SECONDS * 2)
+			const file = path.join(dir, "zero.cf32")
+			await writeFile(
+				file,
+				Buffer.from(iq.buffer, iq.byteOffset, iq.byteLength),
+			)
+			for (const mode of ["nfm", "am"] as const) {
+				const result = await trial(file, mode)
+				zeroRows.push(
+					rowOf({ kind: "noise", mode, expected: "no-sync" }, null, result),
+				)
+				expect(result.error).toBeUndefined()
+				expect(result.outcome).toBe("no-sync")
+			}
+		} finally {
+			await rm(dir, { recursive: true, force: true })
+		}
+		console.log(formatTable(zeroRows))
+	}, 20_000)
 
 	it.todo(
 		"genuine GMSK (BT 0.3, h 0.5) classifies data-like. A matched-filter eye scored about 0.49/0.51/0.51 at 10/15/20 dB, under the frozen 0.6 score, and is not on the hot path; NFM voice stays under 0.6",

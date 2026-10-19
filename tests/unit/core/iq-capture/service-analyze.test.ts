@@ -475,6 +475,14 @@ describe("IqCaptureService openAnalyze", () => {
 		child3.eventFd()?.write(`${analysisLine()}\n`)
 		child3.exit(1)
 		await expect(third!.event).rejects.toMatchObject({ code: "ANALYZE_FAILED" })
+
+		const zero = openAnalyze(s.svc, s.id, "nfm")
+		const child4 = analyzeChild(s.children)
+		child4
+			.eventFd()
+			?.write(`${JSON.stringify({ event: "error", code: "io" })}\n`)
+		child4.exit(0)
+		await expect(zero!.event).rejects.toMatchObject({ code: "ANALYZE_FAILED" })
 		await s.svc.stop()
 	})
 
@@ -570,17 +578,44 @@ describe("IqCaptureService openAnalyze", () => {
 		await s.svc.stop()
 	})
 
-	it("a partial final frame of audio is accepted", async () => {
+	it("audio length is frames*400 + ceil(gapSamples/6), at the bound and off by one", async () => {
 		const s = await ready()
-		const opened = openAnalyze(s.svc, s.id, "nfm")
-		const child = analyzeChild(s.children)
-		const audio = readAll(opened!.audio)
-		// 400 samples for the frame plus 200 of the allowed partial frame.
-		child.stdout?.write(Buffer.alloc(1_200, 2))
-		child.eventFd()?.write(`${analysisLine(1)}\n`)
-		child.exit(0)
-		await expect(opened!.event).resolves.toMatchObject({ event: "analysis" })
-		expect(await audio).toEqual({ bytes: 1_200, error: null })
+		const accept = async (samples: number, gapSamples: number) => {
+			const opened = openAnalyze(s.svc, s.id, "nfm")
+			if (!opened) throw new Error("open")
+			const child = analyzeChild(s.children)
+			const audio = readAll(opened.audio)
+			child.stdout?.write(Buffer.alloc(samples * 2, 2))
+			child.eventFd()?.write(`${analysisLine(1, gapSamples)}\n`)
+			child.exit(0)
+			await expect(opened.event).resolves.toMatchObject({
+				event: "analysis",
+				gapSamples,
+			})
+			expect(await audio).toEqual({ bytes: samples * 2, error: null })
+		}
+		const reject = async (samples: number, gapSamples: number) => {
+			const opened = openAnalyze(s.svc, s.id, "nfm")
+			if (!opened) throw new Error("open")
+			const child = analyzeChild(s.children)
+			child.stdout?.write(Buffer.alloc(samples * 2, 2))
+			child.eventFd()?.write(`${analysisLine(1, gapSamples)}\n`)
+			child.exit(0)
+			await expect(opened.event).rejects.toMatchObject({
+				code: "ANALYZE_FAILED",
+			})
+		}
+		// One frame, no gap: 400 samples. Off by one on either side fails.
+		await accept(400, 0)
+		await reject(399, 0)
+		await reject(401, 0)
+		// ceil(6/6) = 1 and ceil(7/6) = 2.
+		await accept(401, 6)
+		await reject(400, 6)
+		await reject(402, 6)
+		await accept(402, 7)
+		await reject(401, 7)
+		await reject(403, 7)
 		await s.svc.stop()
 	})
 })

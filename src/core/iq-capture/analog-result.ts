@@ -2,16 +2,11 @@
  * Untrusted analog-trial result (WG12 req 4.5, 5.4). The replay queue and
  * `replayEvidenceCalls` both judge through this schema, so a malformed
  * `heard` or `decoded` cannot be stored or recorded as a positive outcome.
- * Any `error`, or a positive outcome the classifier would not produce,
- * becomes `cancelled` (or `unsupported` for the contract's unavailable
- * errors). The attached result is omitted so nothing positive leaks.
+ * Any `error`, or an outcome the classifier would not produce, becomes
+ * `cancelled`. `unavailable` is the one error that becomes `unsupported`.
+ * The attached result is omitted so nothing positive leaks.
  */
-import {
-	DCS_BIT_RATE_BPS,
-	DCS_MIN_AUDIO_SECONDS,
-	DCS_MIN_WORDS,
-	DCS_STANDARD_CODES,
-} from "@wavekit/api-types"
+import { DCS_STANDARD_CODES } from "@wavekit/api-types"
 import { z } from "zod"
 import { isCtcssToneHz } from "../audio-tones/ctcss.js"
 import { classifyAnalogTrial, isVoice } from "../scanner/analog-trial.js"
@@ -27,17 +22,6 @@ import {
 
 const DCS_CODES: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
 const finiteNumber = z.number().finite()
-/** One DCS word is 23 bits. Three words is the WG6 confirmation. */
-const DCS_WORD_BITS = 23
-/**
- * CTCSS needs `DCS_MIN_AUDIO_SECONDS`. DCS needs that and enough audio to
- * have held `DCS_MIN_WORDS` words at `DCS_BIT_RATE_BPS`. The word time is
- * shorter than 0.75 s, so both gates are 0.75 s today.
- */
-const MIN_DCS_AUDIO_SECONDS = Math.max(
-	DCS_MIN_AUDIO_SECONDS,
-	(DCS_WORD_BITS * DCS_MIN_WORDS) / DCS_BIT_RATE_BPS,
-)
 
 const analogFrameSchema = z
 	.object({
@@ -106,21 +90,18 @@ export interface JudgedAnalog {
 }
 
 /**
- * The runner's value is untrusted. Malformed fields, any `error`, or a
- * positive the statistics would not produce become `cancelled`, or
- * `unsupported` for `unavailable` / `analyze-failed`. `analog` is null in
- * every rejected case.
+ * The runner's value is untrusted. Any `error` becomes `cancelled`, except
+ * `unavailable` (no `openAnalyze`, or no runner), which is `unsupported`.
+ * `analyze-failed` (timeout, error event, malformed line, audio mismatch,
+ * tone-detector throw) and `capture-gone` are `cancelled`. `analog` is null
+ * in every rejected case.
  *
- * `decoded` needs a qualified CTCSS tone or DCS code and at least the WG2/WG6
- * audio minimum (DCS also the three-word time). `heard` needs `voice`, a
- * non-empty frame list, `stats.mode` equal to the trial `mode`, and
- * `classifyAnalogTrial` agreeing. Anything else positive is cancelled.
+ * Every other outcome needs non-null stats, `stats.mode` equal to the result
+ * mode, that mode equal to `requestedMode` when the trial named one, and
+ * `classifyAnalogTrial` agreeing. Otherwise `cancelled`, so digital trials
+ * still run and nothing positive is recorded.
  *
- * `voice` on the attached result is `isVoice(stats)`. A claim of `voice: true`
- * with null stats, or with stats that are not voice, is stored as false.
- * `requestedMode` is the mode the trial asked for. A positive result in any
- * other mode is `cancelled` with no attached result, so digital trials still
- * run and nothing positive is recorded.
+ * `voice` on the attached result is `isVoice(stats)`.
  */
 export function judgeAnalogResult(
 	raw: unknown,
@@ -137,51 +118,38 @@ export function judgeAnalogResult(
 	switch (parsed.error) {
 		case undefined:
 			break
+		case "unavailable":
+			return { outcome: "unsupported", analog: null }
 		case "cancelled":
 		case "capture-gone":
-			return CANCELLED_ANALOG
-		case "unavailable":
 		case "analyze-failed":
-			return { outcome: "unsupported", analog: null }
+			return CANCELLED_ANALOG
 		default:
 			return CANCELLED_ANALOG
 	}
-	if (parsed.outcome === "decoded" || parsed.outcome === "heard") {
-		if (!positiveAgrees(parsed)) return CANCELLED_ANALOG
-		if (requestedMode !== undefined && parsed.mode !== requestedMode)
-			return CANCELLED_ANALOG
-	}
+	if (!outcomeAgrees(parsed, requestedMode)) return CANCELLED_ANALOG
 	return { outcome: parsed.outcome, analog: copyAnalog(parsed) }
 }
 
 /**
- * A positive outcome has to be one the classifier would return for these
- * stats and tones, and the statistics' mode has to be the mode the trial
- * asked for.
+ * A stored outcome has to be the one the classifier would return, in the
+ * mode the trial asked for. Null stats agree with nothing.
  */
-function positiveAgrees(parsed: ParsedAnalog): boolean {
-	if (parsed.stats !== null && parsed.stats.mode !== parsed.mode) return false
-	if (parsed.outcome === "decoded") return decodedTone(parsed.tones)
-	if (
-		!parsed.voice ||
-		!voiceFromStats(parsed.stats) ||
-		parsed.stats === null ||
-		parsed.stats.frames.length === 0
-	)
-		return false
-	return classified(parsed.stats, parsed.tones) === "heard"
+function outcomeAgrees(
+	parsed: ParsedAnalog,
+	requestedMode: AnalogTrialMode | undefined,
+): boolean {
+	const stats = parsed.stats
+	if (stats === null) return false
+	if (stats.mode !== parsed.mode) return false
+	if (requestedMode !== undefined && parsed.mode !== requestedMode) return false
+	return classified(stats, parsed.tones) === parsed.outcome
 }
 
 /** `voice` is the statistics, not the claim. Null stats are not voice. */
 function voiceFromStats(stats: AnalogTrialStats | null): boolean {
 	if (stats === null) return false
 	return isVoice(stats)
-}
-
-function decodedTone(tones: AnalogTrialTones): boolean {
-	const seconds = tones.audioSeconds
-	if (tones.ctcssHz !== null && seconds >= DCS_MIN_AUDIO_SECONDS) return true
-	return tones.dcs !== null && seconds >= MIN_DCS_AUDIO_SECONDS
 }
 
 function classified(

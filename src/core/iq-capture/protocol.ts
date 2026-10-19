@@ -182,21 +182,25 @@ export const ANALYZE_AUDIO_SAMPLES_PER_FRAME =
 	(8_000 / 1000) * ANALOG_TRIAL_FRAME_MS
 
 /**
- * True when an s16le sample count belongs to this analysis. Each published
- * frame contributes {@link ANALYZE_AUDIO_SAMPLES_PER_FRAME} samples. The
- * decimator also emits the incomplete trailing frame, and a gap is shorter
- * than one input frame, so at most one extra frame of audio is real. Fewer
- * samples than the published frames, or more than that one partial frame,
- * is not this capture.
+ * True when an s16le sample count is the audio `wavekit-iqcap analyze`
+ * writes for this event. Each published frame is 2 400 complex samples.
+ * `RealDecim` steps by 6, and 2 400 is divisible by 6, so a frame is
+ * {@link ANALYZE_AUDIO_SAMPLES_PER_FRAME} audio samples. `finish` still
+ * renders the incomplete tail and reports it as `gapSamples`, which adds
+ * `ceil(gapSamples / 6)`. The count is exact:
+ * `frames * 400 + ceil(gapSamples / 6)`.
  */
 export function analyzeAudioMatchesFrames(
 	samples: number,
 	frames: number,
+	gapSamples: number,
 ): boolean {
 	if (!Number.isInteger(samples) || samples < 0) return false
 	if (!Number.isInteger(frames) || frames < 0) return false
-	const full = frames * ANALYZE_AUDIO_SAMPLES_PER_FRAME
-	return samples >= full && samples <= full + ANALYZE_AUDIO_SAMPLES_PER_FRAME
+	if (!Number.isInteger(gapSamples) || gapSamples < 0) return false
+	const expected =
+		frames * ANALYZE_AUDIO_SAMPLES_PER_FRAME + Math.ceil(gapSamples / 6)
+	return samples === expected
 }
 
 const ANALYZE_ERROR_CODES = [

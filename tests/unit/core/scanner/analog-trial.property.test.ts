@@ -151,11 +151,14 @@ function referenceOutcome(
 	if (frames.length === 0) return "no-sync"
 	let quiet = 0
 	for (const frame of frames) {
+		// Zero power is −160 dB. At or below −159.9 the frame is silence.
+		const silence = frame.carrierDb <= -159.9 || frame.hfNoiseDb <= -159.9
 		const passed =
-			stats.mode === "am"
+			!silence &&
+			(stats.mode === "am"
 				? finite(stats.floorDb) &&
 					frame.carrierDb >= stats.floorDb + ANALOG_TRIAL_AM_CARRIER_DB
-				: -frame.hfNoiseDb >= ANALOG_TRIAL_QUIETING_DB
+				: -frame.hfNoiseDb >= ANALOG_TRIAL_QUIETING_DB)
 		if (passed) quiet += 1
 	}
 	if (quiet < frames.length * ANALOG_TRIAL_MIN_QUIET_FRACTION) return "no-sync"

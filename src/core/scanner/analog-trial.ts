@@ -83,10 +83,21 @@ function quietEnough(
 	return quiet >= frames.length * ANALOG_TRIAL_MIN_QUIET_FRACTION
 }
 
+/**
+ * `db_over` reports −160 for zero power. A frame at or below this floor is
+ * silence (or an underflowed product), not quieting and not a carrier.
+ */
+const ANALOG_SILENCE_DB = -159.9
+
 function frameQuieted(
 	stats: AnalogTrialStats,
 	frame: AnalogTrialFrame,
 ): boolean {
+	if (
+		frame.carrierDb <= ANALOG_SILENCE_DB ||
+		frame.hfNoiseDb <= ANALOG_SILENCE_DB
+	)
+		return false
 	if (stats.mode === "am") {
 		if (!Number.isFinite(stats.floorDb) || !Number.isFinite(frame.carrierDb))
 			return false

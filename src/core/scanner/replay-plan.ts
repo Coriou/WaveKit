@@ -1,11 +1,14 @@
 /**
  * WG11 req 6.4 / 1.7 and WG12 req 4.4, 4.6, 5.5, 5.6 (pure): the replay trials of one IQ
- * capture. The discovery's known protocol's probe mode first (`known: true`), then one analog
+ * capture. The discovery's known protocol first (`known: true`). When that protocol is
+ * analog-fm or analog-am and its prior is not 0, it is the one analog trial (nfm or am) with
+ * `known: true`; a missing prior still plans it, an explicit 0 does not. Otherwise one analog
  * trial when an analog prior above 0 selects one (a prior of 0 excludes that protocol; a missing
- * prior does not count), then the digital probe modes `identifyScores` gives the captured track
- * (bandplan priors, narrow raster per req 1.3), deduplicated by mode key, at most
- * IQ_REPLAY_MAX_TRIALS with the analog trial counted. Without a track: the known protocol, the
- * analog trial, else the probe modes of the protocols the capture's priors name above 0.
+ * prior does not count). Never a second analog trial. Then the digital probe modes
+ * `identifyScores` gives the captured track (bandplan priors, narrow raster per req 1.3),
+ * deduplicated by mode key, at most IQ_REPLAY_MAX_TRIALS with the analog trial counted. Without
+ * a track: the known protocol (the analog trial, when that protocol is analog), else the probe
+ * modes of the protocols the capture's priors name above 0.
  * The analog protocol is `analog-am` when a shipped band plan at `capture.rfHz` lists it and its
  * prior is above 0, else `analog-fm` when its prior is above 0, else `analog-am` when its prior
  * is above 0, else none. Modulation follows the protocol (`am` or `nfm`). Never a protocol whose
@@ -107,7 +110,10 @@ function bandplanListsAm(hz: number): boolean {
 	return false
 }
 
-function analogTrial(analogMode: AnalogTrialMode): IqReplayTrial {
+function analogTrial(
+	analogMode: AnalogTrialMode,
+	known = false,
+): IqReplayTrial {
 	const protocol = analogMode === "am" ? "analog-am" : "analog-fm"
 	const mode: ProbeMode = {
 		decoderType: "dsd-fme",
@@ -119,7 +125,7 @@ function analogTrial(analogMode: AnalogTrialMode): IqReplayTrial {
 	return {
 		protocol,
 		mode,
-		known: false,
+		known,
 		kind: "analog",
 		analogMode,
 	}
@@ -151,10 +157,21 @@ export function planReplayTrials(input: IqReplayPlanInput): IqReplayTrial[] {
 		if (mode) candidates.push({ protocol, mode, known })
 	}
 	// A prior of 0 removes a protocol (requirement 1.3), the known one included.
-	if (input.knownProtocol !== null && input.priors[input.knownProtocol] !== 0)
-		add(input.knownProtocol, true)
-	const analog = chooseAnalogTrial(input)
-	if (analog) candidates.push(analog)
+	// A known analog protocol is the one analog trial, placed first.
+	let knownAnalog = false
+	if (input.knownProtocol !== null && input.priors[input.knownProtocol] !== 0) {
+		const knownProtocol = input.knownProtocol
+		if (knownProtocol === "analog-am" || knownProtocol === "analog-fm") {
+			candidates.push(
+				analogTrial(knownProtocol === "analog-am" ? "am" : "nfm", true),
+			)
+			knownAnalog = true
+		} else add(knownProtocol, true)
+	}
+	if (!knownAnalog) {
+		const analog = chooseAnalogTrial(input)
+		if (analog) candidates.push(analog)
+	}
 	if (input.track) {
 		for (const h of identifyScores(input.track, {
 			priors: input.priors,

@@ -59,6 +59,70 @@ describe("classifyAnalogTrial", () => {
 		).toBe("no-sync")
 	})
 
+	it("a frame at or below -159.9 dB is not quieted and not a carrier", () => {
+		const silent = { ctcssHz: null, dcs: null, audioSeconds: 0 } as const
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ hfNoiseDb: -160 })], { mode: "nfm" }),
+				silent,
+			),
+		).toBe("no-sync")
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ hfNoiseDb: -159.9 })], { mode: "nfm" }),
+				silent,
+			),
+		).toBe("no-sync")
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ carrierDb: -160, hfNoiseDb: -20 })], { mode: "nfm" }),
+				silent,
+			),
+		).toBe("no-sync")
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ hfNoiseDb: -159.89 })], { mode: "nfm" }),
+				silent,
+			),
+		).toBe("carrier-only")
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ carrierDb: -160, hfNoiseDb: -160 })], {
+					mode: "am",
+					floorDb: -320,
+				}),
+				silent,
+			),
+		).toBe("no-sync")
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ carrierDb: -159.9, hfNoiseDb: -20 })], {
+					mode: "am",
+					floorDb: -200,
+				}),
+				silent,
+			),
+		).toBe("no-sync")
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ carrierDb: -20, hfNoiseDb: -160 })], {
+					mode: "am",
+					floorDb: -90,
+				}),
+				silent,
+			),
+		).toBe("no-sync")
+		expect(
+			classifyAnalogTrial(
+				stats([frame({ carrierDb: -20, hfNoiseDb: -20 })], {
+					mode: "am",
+					floorDb: -90,
+				}),
+				silent,
+			),
+		).toBe("carrier-only")
+	})
+
 	it("cluster 0.6 is data-like and 0.59 falls through to the next rule", () => {
 		const voice = frame({
 			cluster: 0.6,

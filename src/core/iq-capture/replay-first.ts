@@ -267,10 +267,12 @@ export function captureRemovedRelease(input: {
  * Maps one replay result onto `ObservationEvidenceSink`. One `nextTrialOrder`
  * per trial that is kept, in result order. Nothing else is called: no miss
  * and no undecoded mark, including for `unsupported`. A positive analog-demod
- * trial is forwarded only when `result.analog` judges to that same outcome
- * and the mode the trial requested. A mode mismatch is not positive:
- * `recordAnalog` is not called and the trial is recorded as `cancelled`.
- * A malformed positive analog result is not passed to `recordAnalog`.
+ * trial is forwarded only when `result.analog` judges to that same outcome,
+ * the analog-demod trial's own outcome equals that judged outcome, and the
+ * mode the trial requested. A cancelled trial beside a valid decoded analog
+ * is not positive: `recordAnalog` is not called. A mode mismatch is not
+ * positive either, and the trial is recorded as `cancelled`. A malformed
+ * positive analog result is not passed to `recordAnalog`.
  */
 export function replayEvidenceCalls(
 	result: IqReplayResult,
@@ -286,7 +288,7 @@ export function replayEvidenceCalls(
 	for (const trial of trials)
 		recordTrial(trial, observationId, sink, at, judged)
 	const analog = judged.analog
-	if (analog)
+	if (analog && analogTrialOutcome(trials) === judged.outcome)
 		sink.recordAnalog(observationId, {
 			outcome: analog.outcome,
 			mode: analog.mode,
@@ -316,9 +318,11 @@ type ReplayTrial = IqReplayResult["trials"][number]
 export interface ReplayOutcomeSummary {
 	/**
 	 * A digital decode, or an analog result `judgeAnalogResult` accepted as
-	 * `decoded` or `heard` in the mode the analog trial requested. A mode
-	 * mismatch is not a decode. The seam treats this as a settled successful
-	 * replay: no `no-sync` mark and no live re-confirm.
+	 * `decoded` or `heard` whose outcome equals the analog-demod trial's own
+	 * outcome, in the mode that trial requested. A mode mismatch, or a
+	 * cancelled trial beside a valid decoded analog, is not a decode. The
+	 * seam treats this as a settled successful replay: no `no-sync` mark and
+	 * no live re-confirm.
 	 */
 	replayDecoded: boolean
 	/**
@@ -345,7 +349,8 @@ export function replayOutcomeSummary(
 		requestedAnalogMode(trials),
 	)
 	const analogPositive =
-		judged.outcome === "decoded" || judged.outcome === "heard"
+		(judged.outcome === "decoded" || judged.outcome === "heard") &&
+		analogTrialOutcome(trials) === judged.outcome
 	const unsuccessful: ReplayTrial[] = []
 	for (const trial of trials) {
 		if (!isObject(trial)) continue
@@ -398,6 +403,16 @@ function recordTrial(
  * Mode the analog trial requested, when the result records one. The same
  * value `judgeAnalogResult` uses for the queue, evidence and the summary.
  */
+/** Outcome stored on the analog-demod trial, when the result has one. */
+function analogTrialOutcome(trials: readonly unknown[]): string | undefined {
+	for (const trial of trials) {
+		if (!isObject(trial) || !isAnalogTrial(trial)) continue
+		const outcome = trial["outcome"]
+		return typeof outcome === "string" ? outcome : undefined
+	}
+	return undefined
+}
+
 function requestedAnalogMode(
 	trials: readonly unknown[],
 ): AnalogTrialMode | undefined {

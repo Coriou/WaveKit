@@ -143,7 +143,11 @@ describe("planReplayTrials analog order", () => {
 					const analogs = out.filter(t => t.kind === "analog")
 					const fm = c.priors["analog-fm"]
 					const amPrior = c.priors["analog-am"]
+					const knownAnalog =
+						(c.known === "analog-fm" || c.known === "analog-am") &&
+						c.priors[c.known] !== 0
 					const wanted =
+						knownAnalog ||
 						(typeof fm === "number" && fm > 0) ||
 						(typeof amPrior === "number" && amPrior > 0)
 					expect(analogs).toHaveLength(wanted ? 1 : 0)
@@ -151,21 +155,31 @@ describe("planReplayTrials analog order", () => {
 						c.known !== null &&
 						c.priors[c.known] !== 0 &&
 						REPLAYABLE.has(c.known)
-					if (replayable)
+					const knownPlanned = replayable || knownAnalog
+					if (knownPlanned)
 						expect(out[0]).toMatchObject({ protocol: c.known, known: true })
-					expect(out.filter(t => t.known)).toHaveLength(replayable ? 1 : 0)
-					if (wanted) {
+					expect(out.filter(t => t.known)).toHaveLength(knownPlanned ? 1 : 0)
+					if (analogs.length === 1) {
 						const analog = analogs[0]!
-						expect(out.indexOf(analog)).toBe(out.filter(t => t.known).length)
-						const amBand = listsAm(rfHz)
-						const fmPos = typeof fm === "number" && fm > 0
-						const amPos = typeof amPrior === "number" && amPrior > 0
-						const expectAm = amPos && (amBand || !fmPos)
-						expect(analog.analogMode).toBe(expectAm ? "am" : "nfm")
-						expect(analog.protocol).toBe(expectAm ? "analog-am" : "analog-fm")
-						expect(analog.known).toBe(false)
-						const chosen = c.priors[analog.protocol]
-						expect(typeof chosen === "number" && chosen > 0).toBe(true)
+						if (knownAnalog) {
+							expect(analog.known).toBe(true)
+							expect(out.indexOf(analog)).toBe(0)
+							expect(analog.protocol).toBe(c.known)
+							expect(analog.analogMode).toBe(
+								c.known === "analog-am" ? "am" : "nfm",
+							)
+						} else {
+							expect(out.indexOf(analog)).toBe(out.filter(t => t.known).length)
+							const amBand = listsAm(rfHz)
+							const fmPos = typeof fm === "number" && fm > 0
+							const amPos = typeof amPrior === "number" && amPrior > 0
+							const expectAm = amPos && (amBand || !fmPos)
+							expect(analog.analogMode).toBe(expectAm ? "am" : "nfm")
+							expect(analog.protocol).toBe(expectAm ? "analog-am" : "analog-fm")
+							expect(analog.known).toBe(false)
+							const chosen = c.priors[analog.protocol]
+							expect(typeof chosen === "number" && chosen > 0).toBe(true)
+						}
 					}
 					const scores = scoresOf(input)
 					const digital = out.filter(t => t.kind !== "analog" && !t.known)

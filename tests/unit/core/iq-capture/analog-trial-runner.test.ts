@@ -637,7 +637,7 @@ describe("createAnalogTrialRunner", () => {
 		expect(killed()).toBe(true)
 	})
 
-	it("audio one sample short of the frame count is analyze-failed", async () => {
+	it("audio one sample short of the exact count is analyze-failed", async () => {
 		const samples = 20 * 400 - 1
 		const { port, killed } = scripted({
 			audio: Buffer.alloc(samples * 2),
@@ -654,8 +654,8 @@ describe("createAnalogTrialRunner", () => {
 		expect(killed()).toBe(true)
 	})
 
-	it("one sample past the partial frame is analyze-failed", async () => {
-		const samples = 20 * 400 + 401
+	it("audio one sample past the exact count is analyze-failed", async () => {
+		const samples = 20 * 400 + 1
 		const { port } = scripted({
 			audio: Buffer.alloc(samples * 2),
 			event: analysis(quietFrames(20)),
@@ -671,21 +671,28 @@ describe("createAnalogTrialRunner", () => {
 		expect(result.outcome).not.toBe("heard")
 	})
 
-	it("a partial final frame still classifies", async () => {
-		const samples = 20 * 400 + 200
-		const { port } = scripted({
-			audio: Buffer.alloc(samples * 2),
-			event: analysis(quietFrames(20)),
-		})
-		const { runner } = runnerFor(port)
-		const result = await runner.run(
-			CAPTURE,
-			"nfm",
-			new AbortController().signal,
-		)
-		expect(result.error).toBeUndefined()
-		expect(result.outcome).toBe("heard")
-		expect(result.tones.audioSeconds).toBeCloseTo(samples / 8_000, 5)
+	it("gap audio of exactly ceil(gapSamples/6) still classifies, and one sample off does not", async () => {
+		const frames = quietFrames(20)
+		const gapSamples = 7
+		const exact = frames.length * 400 + Math.ceil(gapSamples / 6)
+		const run = async (samples: number) => {
+			const { port } = scripted({
+				audio: Buffer.alloc(samples * 2),
+				event: analysis(frames, gapSamples),
+			})
+			const { runner } = runnerFor(port)
+			return runner.run(CAPTURE, "nfm", new AbortController().signal)
+		}
+		const matched = await run(exact)
+		expect(matched.error).toBeUndefined()
+		expect(matched.outcome).toBe("heard")
+		expect(matched.tones.audioSeconds).toBeCloseTo(exact / 8_000, 5)
+		const short = await run(exact - 1)
+		const long = await run(exact + 1)
+		expect(short.error).toBe("analyze-failed")
+		expect(long.error).toBe("analyze-failed")
+		expect(short.outcome).not.toBe("heard")
+		expect(long.outcome).not.toBe("heard")
 	})
 })
 

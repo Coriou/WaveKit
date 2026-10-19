@@ -12,9 +12,9 @@
  * `decoded` or `heard`. The child is killed on every return, including
  * success (the service's kill is a no-op once the child has exited).
  *
- * An odd s16le length is an incomplete sample. An audio length outside
- * `frames * 400` plus one trailing partial frame is not this analysis. Both
- * are `analyze-failed`.
+ * An odd s16le length is an incomplete sample. Audio must be exactly
+ * `frames * 400 + ceil(gapSamples / 6)` samples, the length `analyze`
+ * writes. Anything else is `analyze-failed`.
  *
  * AM quieting compares `carrierDb` with `floorDb`. The floor is not a
  * percentile of this capture's carrier: on a continuous transmission that
@@ -56,8 +56,9 @@ import { analyzeAudioMatchesFrames, parseAnalyzeEvent } from "./protocol.js"
 /**
  * One turn of the tone pass. A 4 096-sample push measured about 2 ms, and a
  * burst of six of those on one event-loop turn was ~13.5 ms. 512 samples is
- * about an eighth of that push. The shared queue runs one slice per turn, so
- * the delay stays under the 1 ms budget.
+ * about an eighth of that push. The shared queue runs one slice per turn.
+ * Measured cost: analyze 14-22 ms CPU per 4 s capture, tone pass 21-33 ms,
+ * burst-of-6 event-loop p99 about 2 ms.
  */
 export const ANALOG_TONE_SLICE_SAMPLES = 512
 const SLICE_BYTES = ANALOG_TONE_SLICE_SAMPLES * 2
@@ -216,7 +217,9 @@ function decide(
 	const parsed = parseEvent(raw)
 	if (parsed === null || parsed.event === "error")
 		return failed(mode, "analyze-failed")
-	if (!analyzeAudioMatchesFrames(samples, parsed.frames.length))
+	if (
+		!analyzeAudioMatchesFrames(samples, parsed.frames.length, parsed.gapSamples)
+	)
 		return failed(mode, "analyze-failed")
 	const stats: AnalogTrialStats = {
 		mode,

@@ -1124,7 +1124,14 @@ class Service implements IqCaptureService {
 				rejectFailed(false)
 				return
 			}
-			if (parsed?.event === "error" && !protocolBad) {
+			// An error event is the child's own failure only when it exited
+			// non-zero. Exit 0 with an error line is not that event.
+			if (
+				parsed?.event === "error" &&
+				code !== null &&
+				code !== 0 &&
+				!protocolBad
+			) {
 				settled = true
 				audio.end()
 				resolveEvent(parsed)
@@ -1137,7 +1144,11 @@ class Service implements IqCaptureService {
 				!audioOver &&
 				audioBytes <= ANALYZE_AUDIO_MAX_BYTES &&
 				audioBytes % 2 === 0 &&
-				analyzeAudioMatchesFrames(audioBytes / 2, parsed.frames.length)
+				analyzeAudioMatchesFrames(
+					audioBytes / 2,
+					parsed.frames.length,
+					parsed.gapSamples,
+				)
 			) {
 				settled = true
 				audio.end()

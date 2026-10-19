@@ -273,7 +273,20 @@ function decodedAnalog(): AnalogTrialResult {
 		mode: "nfm",
 		voice: true,
 		tones: { ctcssHz: 88.5, dcs: null, audioSeconds: 1 },
-		stats: null,
+		stats: {
+			mode: "nfm",
+			frames: [
+				{
+					carrierDb: -20,
+					hfNoiseDb: -40,
+					audioDb: -12,
+					syllabic: 0.4,
+					cluster: 0.1,
+				},
+			],
+			gapSamples: 0,
+			floorDb: -90,
+		},
 	}
 }
 
@@ -327,11 +340,19 @@ describe("replayOutcomeSummary", () => {
 		expect(summary.unsuccessful.map(t => t.protocol)).toEqual(["aprs"])
 	})
 
-	it("a validated decoded analog with only not-needed trials is a successful replay", () => {
+	it("a validated decoded analog trial with not-needed digitals is a successful replay", () => {
 		const summary = replayOutcomeSummary(
 			replay({
 				analog: decodedAnalog(),
 				trials: [
+					{
+						protocol: "analog-fm",
+						decoderType: "dsd-fme",
+						decoder: "analog-demod",
+						known: true,
+						outcome: "decoded",
+						mode: "nfm",
+					},
 					{
 						protocol: "pocsag",
 						decoderType: "multimon-ng",
@@ -343,6 +364,32 @@ describe("replayOutcomeSummary", () => {
 		)
 		expect(summary.replayDecoded).toBe(true)
 		expect(summary.unsuccessful).toEqual([])
+	})
+
+	it("a cancelled analog trial beside a valid decoded analog is not a decode", () => {
+		const summary = replayOutcomeSummary(
+			replay({
+				analog: decodedAnalog(),
+				trials: [
+					{
+						protocol: "analog-fm",
+						decoderType: "dsd-fme",
+						decoder: "analog-demod",
+						known: true,
+						outcome: "cancelled",
+						mode: "nfm",
+					},
+					{
+						protocol: "pocsag",
+						decoderType: "multimon-ng",
+						known: false,
+						outcome: "no-sync",
+					},
+				],
+			}),
+		)
+		expect(summary.replayDecoded).toBe(false)
+		expect(summary.unsuccessful.map(t => t.outcome)).toEqual(["no-sync"])
 	})
 
 	it("request nfm with a consistent am heard does not settle", () => {
