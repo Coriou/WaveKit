@@ -118,6 +118,9 @@ interface DiscoveryQuery {
 	sort?: "lastSeen" | "frequency" | "confidence"
 	cursor?: string
 	limit?: number
+	evidence?: "proven" | "weak" | "all"
+	nearHz?: number
+	toleranceHz?: number
 }
 
 function sendError(reply: FastifyReply, err: unknown): FastifyReply {
@@ -266,6 +269,33 @@ function identityFromQuery(raw: string): Identity {
 	return { kind, value }
 }
 
+/**
+ * Ajv skips numeric bounds once coercion has produced a non-finite value
+ * (`Infinity`, `-Infinity`, `1e999`). Those queries are still invalid.
+ */
+function assertFiniteDiscoveryQuery(q: DiscoveryQuery): void {
+	const issues = []
+	if (q.nearHz !== undefined && !Number.isFinite(q.nearHz))
+		issues.push({
+			code: ZodIssueCode.custom,
+			path: ["nearHz"],
+			message: "Expected a finite number",
+		})
+	if (q.toleranceHz !== undefined && !Number.isFinite(q.toleranceHz))
+		issues.push({
+			code: ZodIssueCode.custom,
+			path: ["toleranceHz"],
+			message: "Expected a finite number",
+		})
+	if (q.toleranceHz !== undefined && q.nearHz === undefined)
+		issues.push({
+			code: ZodIssueCode.custom,
+			path: ["toleranceHz"],
+			message: "toleranceHz requires nearHz",
+		})
+	if (issues.length > 0) throw new ZodError(issues)
+}
+
 function toFilter(q: DiscoveryQuery): DiscoveryFilter {
 	return {
 		...(q.jobId !== undefined ? { jobId: q.jobId } : {}),
@@ -285,6 +315,9 @@ function toFilter(q: DiscoveryQuery): DiscoveryFilter {
 		...(q.sort !== undefined ? { sort: q.sort } : {}),
 		...(q.cursor !== undefined ? { cursor: q.cursor } : {}),
 		...(q.limit !== undefined ? { limit: q.limit } : {}),
+		...(q.evidence !== undefined ? { evidence: q.evidence } : {}),
+		...(q.nearHz !== undefined ? { nearHz: q.nearHz } : {}),
+		...(q.toleranceHz !== undefined ? { toleranceHz: q.toleranceHz } : {}),
 	}
 }
 
@@ -580,6 +613,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		},
 		async (request, reply) => {
 			try {
+				assertFiniteDiscoveryQuery(request.query)
 				return scanner.listDiscoveries(toFilter(request.query))
 			} catch (err) {
 				return sendError(reply, err)

@@ -980,6 +980,95 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(snap?.protocol).toBe("unknown")
 		expect(snap?.confidence).toBe("activity")
 	})
+
+	it("keeps the evidence filter and the DTO together after the proof cache drops", () => {
+		const { store, id, obs } = planted()
+		expect(store.recordAnalog(obs, tone())).toBe(true)
+		expect(store.list({ evidence: "proven" }).items.map(d => d.id)).toEqual([
+			id,
+		])
+		const agree = (
+			rows: { id: string; evidenceLevel?: string }[],
+			dto: ReturnType<DiscoveryStore["get"]>,
+		): void => {
+			expect(rows.map(d => d.id)).toEqual([id])
+			const listed = rows[0]
+			expect(listed?.evidenceLevel).toBe(dto?.evidenceLevel)
+			expect(listed).toMatchObject({
+				protocol: dto?.protocol,
+				family: dto?.family,
+				confidence: dto?.confidence,
+				evidenceLevel: dto?.evidenceLevel,
+			})
+		}
+
+		expect(
+			store.applyClassification(id, {
+				class: "unknown",
+				hypotheses: [],
+				tier: "channel",
+				cap: "adjacent-leak",
+			}),
+		).toBe("updated")
+		const capped = store.get(id)
+		expect(capped?.evidenceLevel).toBe("proven")
+		expect(capped?.protocol).toBe("analog-fm")
+		expect(capped?.confidence).toBe("candidate")
+		agree(store.list({ evidence: "proven" }).items, capped)
+		agree(
+			store.list({ evidence: "proven", protocol: "analog-fm" }).items,
+			capped,
+		)
+		expect(store.list({ evidence: "weak" }).items).toEqual([])
+		expect(
+			store.list({ evidence: "proven", minConfidence: "classified" }).items,
+		).toEqual([])
+		expect(
+			store
+				.list({ evidence: "proven", minConfidence: "candidate" })
+				.items.map(d => d.id),
+		).toEqual([id])
+
+		const restored = newStore({ rasters: PMR })
+		restored.store.restore(store.snapshot())
+		const weak = restored.store.get(id)
+		expect(weak?.evidenceLevel).toBe("weak")
+		expect(weak?.proof).toBeUndefined()
+		expect(weak?.protocol).toBe("unknown")
+		expect(restored.store.list({ evidence: "proven" }).items).toEqual([])
+		agree(restored.store.list({ evidence: "weak" }).items, weak)
+		agree(
+			restored.store.list({ evidence: "weak", protocol: "unknown" }).items,
+			weak,
+		)
+		expect(restored.store.list({ protocol: "analog-fm" }).items).toEqual([])
+
+		const decode = evidence("dmr", T0 + 1, { identity: dmrCc(1) })
+		expect(restored.store.appendObservationEvidence(obs, decode)).toBe(true)
+		expect(restored.store.applyEvidence(id, decode)).toBe("upgraded")
+		const proven = restored.store.get(id)
+		expect(proven?.evidenceLevel).toBe("proven")
+		expect(proven?.protocol).toBe("dmr")
+		expect(proven?.confidence).toBe("candidate")
+		expect(proven?.confidenceCap).toBe("adjacent-leak")
+		expect(proven?.proof?.kind).toBe("decoded")
+		agree(restored.store.list({ evidence: "proven" }).items, proven)
+		agree(
+			restored.store.list({ evidence: "proven", protocol: "dmr" }).items,
+			proven,
+		)
+		expect(
+			restored.store.list({ evidence: "proven", minConfidence: "decoded" })
+				.items,
+		).toEqual([])
+		expect(
+			restored.store
+				.list({ evidence: "proven", minConfidence: "candidate" })
+				.items.map(d => d.id),
+		).toEqual([id])
+		expect(restored.store.list({ evidence: "weak" }).items).toEqual([])
+		expect(restored.store.list({ protocol: "unknown" }).items).toEqual([])
+	})
 })
 
 function coChannelPair(): {

@@ -1,4 +1,5 @@
 // WG10 req 1.5: merge aliases through the real DiscoveryStore, EvidenceStore and ScannerPersistence.
+import { DISCOVERY_MERGED_IDS_MAX } from "@wavekit/api-types"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
@@ -356,6 +357,101 @@ describe("merge aliases in the discovery store (WG10 req 1.5)", () => {
 			live.store.replay(JSON.parse(JSON.stringify(e)) as JournalEntry)
 		expect(live.store.aliasesOf(kept.survivor)).toEqual([kept.dropped])
 		expect(live.store.aliasOwner(kept.dropped)).toBe(kept.survivor)
+	})
+
+	it("a merged change carries the absorbed id", () => {
+		const b = newStore()
+		const events: {
+			id: string
+			change: string
+			mergedIds?: readonly string[]
+		}[] = []
+		b.store.on(
+			"change",
+			(id: string, change: string, mergedIds?: readonly string[]) => {
+				events.push(
+					mergedIds === undefined
+						? { id, change }
+						: { id, change, mergedIds: [...mergedIds] },
+				)
+			},
+		)
+		const { survivor, dropped } = mergedPair(b)
+		expect(events.filter(e => e.change === "merged")).toEqual([
+			{ id: survivor, change: "merged", mergedIds: [dropped] },
+		])
+		for (const event of events)
+			if (event.change !== "merged") expect(event.mergedIds).toBeUndefined()
+	})
+
+	it("caps mergedIds at 64 after sorting, and keeps 64", () => {
+		for (const count of [
+			DISCOVERY_MERGED_IDS_MAX,
+			DISCOVERY_MERGED_IDS_MAX + 1,
+		]) {
+			const b = newStore()
+			const survivor =
+				b.store.ingest(dmrObs("o-keep", CH, T0)).discoveryId ?? ""
+			expect(survivor).not.toBe("")
+			let snap = b.store.snapshot()
+			const absorbed: string[] = []
+			for (let i = 0; i < count; i++) {
+				const id = `a${String(i).padStart(2, "0")}`
+				absorbed.push(id)
+				const from = snap.discoveries.find(d => d.id === survivor)
+				if (from === undefined) throw new Error("survivor left the snapshot")
+				const at = new Date(T0 + (i + 1) * 1_000).toISOString()
+				const obs = snap.observations
+					.filter(o => o.discoveryId === survivor)
+					.map((o, n) => ({
+						...structuredClone(o),
+						id: `${id}-o${n}`,
+						discoveryId: id,
+					}))
+				snap = {
+					...snap,
+					discoveries: [
+						...snap.discoveries,
+						{
+							...structuredClone(from),
+							id,
+							firstSeenAt: at,
+							lastSeenAt: at,
+							coChannel: [],
+						},
+					],
+					observations: [...snap.observations, ...obs],
+				}
+			}
+			b.store.restore(snap)
+			const events: {
+				id: string
+				change: string
+				mergedIds?: readonly string[]
+			}[] = []
+			b.store.on(
+				"change",
+				(id: string, change: string, mergedIds?: readonly string[]) => {
+					events.push(
+						mergedIds === undefined
+							? { id, change }
+							: { id, change, mergedIds: [...mergedIds] },
+					)
+				},
+			)
+			expect(b.store.rekey("src-1", 0).merged).toHaveLength(count)
+			const merged = events.filter(e => e.change === "merged")
+			const sorted = [...absorbed].sort((a, c) => (a < c ? -1 : a > c ? 1 : 0))
+			expect(merged).toEqual([
+				{
+					id: survivor,
+					change: "merged",
+					mergedIds: sorted.slice(0, DISCOVERY_MERGED_IDS_MAX),
+				},
+			])
+			for (const event of events)
+				if (event.change !== "merged") expect(event.mergedIds).toBeUndefined()
+		}
 	})
 })
 

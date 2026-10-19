@@ -114,3 +114,135 @@ export class CentreIndex {
 		this.lists.clear()
 	}
 }
+
+/**
+ * Discoveries sorted by `frequencyHz` (ties by id). One global list answers a
+ * cross-source window in one binary search; each source has its own list.
+ * This is not the median-centre index: a measured offset can separate
+ * `frequencyHz` from the sticky centre, and near matches `frequencyHz`.
+ */
+export interface IndexedFrequency {
+	readonly frequencyHz: number
+	readonly id: string
+}
+
+const frequencyBefore = (
+	a: IndexedFrequency,
+	frequencyHz: number,
+	id: string,
+): boolean =>
+	a.frequencyHz < frequencyHz || (a.frequencyHz === frequencyHz && a.id < id)
+
+export class FrequencyIndex {
+	private readonly all: IndexedFrequency[] = []
+	private readonly bySource = new Map<string, IndexedFrequency[]>()
+	/** Non-finite frequencies refused by `add`. A NaN sorts nowhere. */
+	private refused = 0
+
+	/** First position whose entry is not before (frequencyHz, id). */
+	private static lowerBound(
+		list: readonly IndexedFrequency[],
+		frequencyHz: number,
+		id: string,
+	): number {
+		let lo = 0
+		let hi = list.length
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1
+			const e = list[mid]
+			if (e !== undefined && frequencyBefore(e, frequencyHz, id)) lo = mid + 1
+			else hi = mid
+		}
+		return lo
+	}
+
+	private static insert(
+		list: IndexedFrequency[],
+		frequencyHz: number,
+		id: string,
+	): void {
+		const i = FrequencyIndex.lowerBound(list, frequencyHz, id)
+		const e = list[i]
+		if (e !== undefined && e.frequencyHz === frequencyHz && e.id === id) return
+		list.splice(i, 0, { frequencyHz, id })
+	}
+
+	private static extract(
+		list: IndexedFrequency[],
+		frequencyHz: number,
+		id: string,
+	): void {
+		const i = FrequencyIndex.lowerBound(list, frequencyHz, id)
+		const e = list[i]
+		if (e !== undefined && e.id === id && e.frequencyHz === frequencyHz)
+			list.splice(i, 1)
+		else {
+			const j = list.findIndex(x => x.id === id)
+			if (j >= 0) list.splice(j, 1)
+		}
+	}
+
+	add(sourceIds: readonly string[], frequencyHz: number, id: string): void {
+		if (!Number.isFinite(frequencyHz)) {
+			this.refused += 1
+			return
+		}
+		FrequencyIndex.insert(this.all, frequencyHz, id)
+		for (const sourceId of sourceIds) {
+			let list = this.bySource.get(sourceId)
+			if (list === undefined) {
+				list = []
+				this.bySource.set(sourceId, list)
+			}
+			FrequencyIndex.insert(list, frequencyHz, id)
+		}
+	}
+
+	remove(sourceIds: readonly string[], frequencyHz: number, id: string): void {
+		if (!Number.isFinite(frequencyHz)) return
+		FrequencyIndex.extract(this.all, frequencyHz, id)
+		for (const sourceId of sourceIds) {
+			const list = this.bySource.get(sourceId)
+			if (list === undefined) continue
+			FrequencyIndex.extract(list, frequencyHz, id)
+			if (list.length === 0) this.bySource.delete(sourceId)
+		}
+	}
+
+	/**
+	 * Entries with lowHz ≤ frequencyHz ≤ highHz, in (frequency, id) order.
+	 * `sourceId` omitted searches every source. Callers pass finite bounds.
+	 */
+	range(lowHz: number, highHz: number, sourceId?: string): IndexedFrequency[] {
+		if (!Number.isFinite(lowHz) || !Number.isFinite(highHz) || highHz < lowHz)
+			return []
+		const list = sourceId === undefined ? this.all : this.bySource.get(sourceId)
+		if (list === undefined) return []
+		const out: IndexedFrequency[] = []
+		for (
+			let i = FrequencyIndex.lowerBound(list, lowHz, "");
+			i < list.length;
+			i++
+		) {
+			const e = list[i]
+			if (e === undefined || e.frequencyHz > highHz) break
+			out.push(e)
+		}
+		return out
+	}
+
+	/** Non-finite frequencies refused since construction. */
+	refusedNonFinite(): number {
+		return this.refused
+	}
+
+	/** Discoveries in the global list. */
+	size(): number {
+		return this.all.length
+	}
+
+	clear(): void {
+		this.all.length = 0
+		this.bySource.clear()
+	}
+}

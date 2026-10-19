@@ -19,7 +19,11 @@ import {
 	rasterToleranceHz,
 	snapToRaster,
 } from "../bandplan/index.js"
-import type { ScannerProbeDecoderType } from "@wavekit/api-types"
+import {
+	DISCOVERY_MERGED_IDS_MAX,
+	DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
+	type ScannerProbeDecoderType,
+} from "@wavekit/api-types"
 import { familyOf } from "../classify/classifier.js"
 import {
 	UNKNOWN_LABEL,
@@ -39,6 +43,7 @@ import {
 	strongestKnownProof,
 } from "../proof.js"
 import type {
+	DiscoveryNearQuery,
 	ObservationEvidenceSink,
 	ProofAnalogInput,
 	ProofDecodeInput,
@@ -62,6 +67,7 @@ import type {
 	ProtocolFamily,
 	ScannerClass,
 	ScannerConfidence,
+	ScannerEvidenceLevel,
 	ScannerProof,
 	ScannerProtocol,
 	SignalStats,
@@ -82,7 +88,7 @@ import type {
 	PreparedRecordingMetadata,
 	RecordingBinding,
 } from "./recording-operation.js"
-import { CentreIndex } from "./frequency-index.js"
+import { CentreIndex, FrequencyIndex } from "./frequency-index.js"
 import { JobCounts } from "./job-counts.js"
 import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
@@ -125,6 +131,11 @@ export interface DiscoveryFilter {
 	sort?: "lastSeen" | "frequency" | "confidence"
 	cursor?: string | null
 	limit?: number
+	/** `proven` / `weak` keep that DTO level; `all` and absent keep both. */
+	evidence?: "proven" | "weak" | "all"
+	/** Inclusive |Δf| window. `toleranceHz` defaults to 6 250 and is ignored without this. */
+	nearHz?: number
+	toleranceHz?: number
 }
 export interface DiscoveryStoreOptions {
 	maxDiscoveries: number
@@ -533,6 +544,16 @@ function emptyMetadata(): DiscoveryMetadata {
 	}
 }
 
+/**
+ * Derived discovery proof plus the level and DTO label published from it.
+ * All three are filled in one validation and dropped with this entry.
+ */
+interface DiscoveryProofView {
+	proof: ScannerProof | null
+	evidence: ScannerEvidenceLevel
+	label: EvidenceLabel
+}
+
 /** Anything only a decode brings; a retracted observation never deletes a discovery that holds it. */
 function hasDecodeEvidence(d: Discovery): boolean {
 	const m = d.metadata
@@ -559,9 +580,17 @@ const recordDuration = (o: Observation): number =>
 		? 0
 		: Math.max(0, Date.parse(o.endedAt) - Date.parse(o.startedAt))
 
+interface IndexedDiscovery {
+	family: ProtocolFamily
+	centre: number
+	frequencyHz: number
+	key: string
+	sources: string[]
+}
+
 export class DiscoveryStore
 	extends EventEmitter
-	implements ObservationEvidenceSink
+	implements ObservationEvidenceSink, DiscoveryNearQuery
 {
 	private maxDiscoveries: number
 	private readonly now: () => number
@@ -604,11 +633,10 @@ export class DiscoveryStore
 	private readonly medians = new Map<string, { centre: number; obw: number }>()
 	private readonly members = new Map<string, Set<string>>()
 	private readonly centres = new CentreIndex()
+	/** `frequencyHz` spans. Near reads this; the centre index stays the sticky median. */
+	private readonly frequencies = new FrequencyIndex()
 	private readonly byKey = new Map<string, Set<string>>()
-	private readonly indexed = new Map<
-		string,
-		{ family: ProtocolFamily; centre: number; key: string; sources: string[] }
-	>()
+	private readonly indexed = new Map<string, IndexedDiscovery>()
 	private readonly indexDirty = new Set<string>()
 	private readonly countsDirty = new Set<string>()
 	private readonly jobCounts = new JobCounts()
@@ -622,11 +650,12 @@ export class DiscoveryStore
 		string,
 		{ proof: ScannerProof | null; label: EvidenceLabel }
 	>()
-	/** Strongest attributed proof. Also dropped for co-channel readers of a changed source. */
-	private readonly proofCache = new Map<
-		string,
-		{ proof: ScannerProof | null }
-	>()
+	/**
+	 * Strongest attributed proof, the level validated for it, and the DTO label
+	 * that level publishes. Dropped for co-channel readers of a changed source.
+	 * A derived proof is validated once, when the entry is cached.
+	 */
+	private readonly proofCache = new Map<string, DiscoveryProofView>()
 	/**
 	 * Discoveries whose proof reads this discovery's observations: they list it
 	 * in `coChannel`. Bounded by the co-channel cap and cleared on removal.
@@ -1319,6 +1348,20 @@ export class DiscoveryStore
 			Math.max(1, Math.floor(filter.limit ?? DEFAULT_LIMIT)),
 		)
 		const offset = parseCursor(filter.cursor ?? null)
+		const nearHz = filter.nearHz
+		const toleranceHz =
+			filter.toleranceHz ?? DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ
+		const useNear =
+			nearHz !== undefined &&
+			Number.isFinite(nearHz) &&
+			Number.isFinite(toleranceHz) &&
+			toleranceHz >= 0
+		const base =
+			nearHz === undefined
+				? [...this.discoveries.values()]
+				: useNear
+					? this.discoveriesNear(nearHz, toleranceHz, filter.sourceId)
+					: []
 		// q is lower-cased once. It matches the operator label or the identity value;
 		// metadata lists (talkgroups, callsigns, capcodes) are not searched.
 		const q = filter.q?.toLowerCase()
@@ -1326,40 +1369,86 @@ export class DiscoveryStore
 		const identityValue = identity?.value.trim().toLowerCase()
 		const min = filter.minConfidence
 		const labelFilter = filter.protocol !== undefined || min !== undefined
-		const items = [...this.discoveries.values()].filter(d => {
-			const label = labelFilter ? this.effectiveLabel(d) : undefined
-			return (
-				(filter.jobId === undefined || d.jobIds.includes(filter.jobId)) &&
-				(filter.sourceId === undefined ||
-					d.sourceIds.includes(filter.sourceId)) &&
-				(filter.protocol === undefined ||
-					label?.protocol === filter.protocol) &&
-				(min === undefined ||
-					(label !== undefined && rank(label.confidence) >= rank(min))) &&
-				(filter.freqMinHz === undefined || d.frequencyHz >= filter.freqMinHz) &&
-				(filter.freqMaxHz === undefined || d.frequencyHz <= filter.freqMaxHz) &&
-				(filter.since === undefined ||
-					Date.parse(d.lastSeenAt) >= filter.since) &&
-				(filter.encrypted === undefined || d.encrypted === filter.encrypted) &&
-				(identity === undefined ||
-					(d.identity?.kind === identity.kind &&
-						d.identity.value.trim().toLowerCase() === identityValue)) &&
-				(q === undefined ||
-					(d.operator?.label ?? "").toLowerCase().includes(q) ||
-					(d.identity?.value ?? "").toLowerCase().includes(q))
+		const evidence = filter.evidence
+		const evidenceOn = evidence === "proven" || evidence === "weak"
+		// Source, job, frequency and the near window (already the `base`) do not
+		// read the proof. Protocol and confidence use the stored record only while
+		// no retained evidence can name a proof; a proof's label is cached with it.
+		const items = base.filter(d => {
+			if (filter.jobId !== undefined && !d.jobIds.includes(filter.jobId))
+				return false
+			if (
+				filter.sourceId !== undefined &&
+				!d.sourceIds.includes(filter.sourceId)
 			)
+				return false
+			if (filter.freqMinHz !== undefined && d.frequencyHz < filter.freqMinHz)
+				return false
+			if (filter.freqMaxHz !== undefined && d.frequencyHz > filter.freqMaxHz)
+				return false
+			if (filter.since !== undefined && Date.parse(d.lastSeenAt) < filter.since)
+				return false
+			if (filter.encrypted !== undefined && d.encrypted !== filter.encrypted)
+				return false
+			if (
+				identity !== undefined &&
+				(d.identity?.kind !== identity.kind ||
+					d.identity.value.trim().toLowerCase() !== identityValue)
+			)
+				return false
+			if (
+				q !== undefined &&
+				!(d.operator?.label ?? "").toLowerCase().includes(q) &&
+				!(d.identity?.value ?? "").toLowerCase().includes(q)
+			)
+				return false
+			if (!evidenceOn && !labelFilter) return true
+			const cached = this.proofCache.get(d.id)
+			if (cached !== undefined) {
+				if (evidenceOn && cached.evidence !== evidence) return false
+				if (
+					filter.protocol !== undefined &&
+					cached.label.protocol !== filter.protocol
+				)
+					return false
+				if (min !== undefined && rank(cached.label.confidence) < rank(min))
+					return false
+				return true
+			}
+			// No proof inputs: the stored record is the DTO, and the level is weak.
+			if (!this.evidenceCanNameProof(d)) {
+				if (filter.protocol !== undefined && d.protocol !== filter.protocol)
+					return false
+				if (min !== undefined && rank(d.confidence) < rank(min)) return false
+				return !evidenceOn || evidence === "weak"
+			}
+			const view = this.discoveryView(d)
+			if (evidenceOn && view.evidence !== evidence) return false
+			if (
+				filter.protocol !== undefined &&
+				view.label.protocol !== filter.protocol
+			)
+				return false
+			if (min !== undefined && rank(view.label.confidence) < rank(min))
+				return false
+			return true
 		})
 		const byLastSeen = (a: Discovery, b: Discovery): number =>
 			compareText(b.lastSeenAt, a.lastSeenAt) || compareText(a.id, b.id)
+		const byDistance = (a: Discovery, b: Discovery): number =>
+			Math.abs(a.frequencyHz - (nearHz ?? 0)) -
+				Math.abs(b.frequencyHz - (nearHz ?? 0)) || compareText(a.id, b.id)
 		const sort = filter.sort ?? "lastSeen"
 		items.sort(
-			sort === "frequency"
-				? (a, b) => a.frequencyHz - b.frequencyHz || compareText(a.id, b.id)
-				: sort === "confidence"
-					? (a, b) =>
-							rank(this.effectiveLabel(b).confidence) -
-								rank(this.effectiveLabel(a).confidence) || byLastSeen(a, b)
-					: byLastSeen,
+			useNear
+				? byDistance
+				: sort === "frequency"
+					? (a, b) => a.frequencyHz - b.frequencyHz || compareText(a.id, b.id)
+					: sort === "confidence"
+						? (a, b) =>
+								rank(this.effectiveLabel(b).confidence) -
+									rank(this.effectiveLabel(a).confidence) || byLastSeen(a, b)
+						: byLastSeen,
 		)
 		const page = items
 			.slice(offset, offset + limit)
@@ -1368,6 +1457,45 @@ export class DiscoveryStore
 			items: page,
 			nextCursor: offset + limit < items.length ? String(offset + limit) : null,
 		}
+	}
+
+	near(hz: number, toleranceHz: number, sourceId?: string): Discovery[] {
+		if (
+			!Number.isFinite(hz) ||
+			!Number.isFinite(toleranceHz) ||
+			toleranceHz < 0
+		)
+			return []
+		return this.discoveriesNear(hz, toleranceHz, sourceId).map(d =>
+			this.presentDiscovery(d),
+		)
+	}
+
+	/** Inclusive window on `frequencyHz`, sorted by |Δf| then id. */
+	private discoveriesNear(
+		hz: number,
+		toleranceHz: number,
+		sourceId?: string,
+	): Discovery[] {
+		this.syncIndex()
+		const out: Discovery[] = []
+		for (const hit of this.frequencies.range(
+			hz - toleranceHz,
+			hz + toleranceHz,
+			sourceId,
+		)) {
+			const d = this.discoveries.get(hit.id)
+			if (d === undefined) continue
+			if (Math.abs(d.frequencyHz - hz) > toleranceHz) continue
+			if (sourceId !== undefined && !d.sourceIds.includes(sourceId)) continue
+			out.push(d)
+		}
+		out.sort(
+			(a, b) =>
+				Math.abs(a.frequencyHz - hz) - Math.abs(b.frequencyHz - hz) ||
+				compareText(a.id, b.id),
+		)
+		return out
 	}
 
 	observations(
@@ -1453,6 +1581,7 @@ export class DiscoveryStore
 		this.medians.clear()
 		this.members.clear()
 		this.centres.clear()
+		this.frequencies.clear()
 		this.byKey.clear()
 		this.indexed.clear()
 		this.indexDirty.clear()
@@ -1791,19 +1920,27 @@ export class DiscoveryStore
 	private applyClassificationTo(d: Discovery, c: Classification): void {
 		this.markDirty(d.id)
 		const decoded = d.confidence === "decoded"
+		// The cached DTO label ceilings confidence from this cap. Drop it with the
+		// proof cache when the cap or the stored confidence changes.
+		let labelChanged = false
 		if (c.cap !== undefined && !decoded) {
-			if (d.confidenceCap !== c.cap) this.touch(d)
+			if (d.confidenceCap !== c.cap) {
+				this.touch(d)
+				labelChanged = true
+			}
 			d.confidenceCap = c.cap
 			// A cap never raises the ladder. It only pulls a restored classified record down.
 			if (rank(d.confidence) > rank("candidate")) {
 				d.confidence = "candidate"
 				this.touch(d)
+				labelChanged = true
 			}
 		}
 		if (!decoded && c.class !== "unknown") {
 			if (d.class !== c.class) this.touch(d)
 			d.class = c.class
 		}
+		if (labelChanged) this.proofCache.delete(d.id)
 	}
 
 	private decodeInto(d: Discovery, ev: DecodeEvidence): void {
@@ -2614,10 +2751,12 @@ export class DiscoveryStore
 		before: ScannerProof | null,
 		after: ScannerProof | null,
 	): void {
-		const beforeLevel = evidenceLevelOf(
-			before === null ? {} : { proof: before },
-		)
-		const afterLevel = evidenceLevelOf(after === null ? {} : { proof: after })
+		const cached = this.proofCache.get(id)
+		const afterLevel =
+			cached !== undefined && cached.proof === after
+				? cached.evidence
+				: this.proofLevel(after)
+		const beforeLevel = this.proofLevel(before)
 		if (jsonEqual(before, after) && beforeLevel === afterLevel) return
 		this.emit("change", id, "updated")
 	}
@@ -2853,10 +2992,46 @@ export class DiscoveryStore
 		return strongestKnownProof(proofs)
 	}
 
-	private discoveryView(d: Discovery): { proof: ScannerProof | null } {
+	/** Grammar check for a proof that is not already in the discovery cache. */
+	private proofLevel(proof: ScannerProof | null): ScannerEvidenceLevel {
+		if (proof === null) return "weak"
+		return evidenceLevelOf({ proof }) === "proven" ? "proven" : "weak"
+	}
+
+	/**
+	 * True when a retained decode or sink bag can produce a proof, including a
+	 * co-channel observation. The stored protocol is then not the DTO protocol.
+	 */
+	private evidenceCanNameProof(d: Discovery): boolean {
+		const carries = (id: string): boolean => {
+			for (const observation of this.byDiscovery.get(id) ?? []) {
+				if ((observation.decode?.length ?? 0) > 0) return true
+				if (this.evidenceByObservation.has(observation.id)) return true
+			}
+			return false
+		}
+		if (carries(d.id)) return true
+		if (!Array.isArray(d.coChannel)) return false
+		for (const partnerId of d.coChannel) {
+			if (partnerId !== d.id && carries(partnerId)) return true
+		}
+		return false
+	}
+
+	private discoveryView(d: Discovery): DiscoveryProofView {
 		const hit = this.proofCache.get(d.id)
 		if (hit !== undefined) return hit
-		const view = { proof: this.deriveDiscovery(d) }
+		const proof = this.deriveDiscovery(d)
+		const evidence = this.proofLevel(proof)
+		const label =
+			evidence === "proven" && proof !== null
+				? this.labelOfProof(d, proof)
+				: {
+						protocol: d.protocol,
+						family: d.family,
+						confidence: d.confidence,
+					}
+		const view: DiscoveryProofView = { proof, evidence, label }
 		this.proofCache.set(d.id, view)
 		return view
 	}
@@ -2905,28 +3080,19 @@ export class DiscoveryStore
 
 	/** Proof label when a proof is shown; otherwise the stored record. */
 	private effectiveLabel(d: Discovery): EvidenceLabel {
-		const proof = this.discoveryView(d).proof
-		if (proof !== null && evidenceLevelOf({ proof }) === "proven")
-			return this.labelOfProof(d, proof)
-		return {
-			protocol: d.protocol,
-			family: d.family,
-			confidence: d.confidence,
-		}
+		return this.discoveryView(d).label
 	}
 
 	private presentDiscovery(d: Discovery): Discovery {
 		const copy = clone(d)
-		const proof = this.discoveryView(d).proof
-		const proven = proof !== null && evidenceLevelOf({ proof }) === "proven"
-		if (proven && proof !== null) {
-			copy.proof = clone(proof)
-			const label = this.labelOfProof(d, proof)
-			copy.protocol = label.protocol
-			copy.family = label.family
-			copy.confidence = label.confidence
+		const view = this.discoveryView(d)
+		if (view.evidence === "proven" && view.proof !== null) {
+			copy.proof = clone(view.proof)
+			copy.protocol = view.label.protocol
+			copy.family = view.label.family
+			copy.confidence = view.label.confidence
 		} else delete copy.proof
-		copy.evidenceLevel = proven ? "proven" : "weak"
+		copy.evidenceLevel = view.evidence
 		return copy
 	}
 
@@ -3162,8 +3328,35 @@ export class DiscoveryStore
 		}
 		this.emit("mutation", entry)
 		this.flushRemoval()
-		for (const [id, change] of op.changes) this.emit("change", id, change)
+		for (const [id, change] of op.changes) {
+			if (change === "merged")
+				this.emit("change", id, change, this.absorbedIds(op, id))
+			else this.emit("change", id, change)
+		}
 		this.emitPending(pending, notified)
+	}
+
+	/** Ids absorbed into `survivor` by this operation, sorted, at most 64. */
+	private absorbedIds(op: Op, survivor: string): string[] {
+		const parent = new Map<string, string>()
+		for (const [keep, drop] of op.merged) parent.set(drop, keep)
+		const rootOf = (id: string): string => {
+			let at = id
+			const seen = new Set<string>()
+			for (;;) {
+				const next = parent.get(at)
+				if (next === undefined || seen.has(at)) return at
+				seen.add(at)
+				at = next
+			}
+		}
+		const ids: string[] = []
+		for (const drop of parent.keys())
+			if (rootOf(drop) === survivor) ids.push(drop)
+		ids.sort(compareText)
+		if (ids.length > DISCOVERY_MERGED_IDS_MAX)
+			ids.length = DISCOVERY_MERGED_IDS_MAX
+		return ids
 	}
 
 	// ── WG11 lane SC: revisions, indexes, counts, mirror removals ────────
@@ -3194,7 +3387,7 @@ export class DiscoveryStore
 		this.countsDirty.clear()
 	}
 
-	/** Brings the centre and key indexes of every dirty id up to date. */
+	/** Brings the centre, key and frequency indexes of every dirty id up to date. */
 	private syncIndex(): void {
 		for (const id of this.indexDirty) this.reindex(id)
 		this.indexDirty.clear()
@@ -3213,15 +3406,17 @@ export class DiscoveryStore
 			prev !== undefined &&
 			prev.family === d.family &&
 			Object.is(prev.centre, centre) &&
+			Object.is(prev.frequencyHz, d.frequencyHz) &&
 			prev.key === d.frequencyKey &&
 			prev.sources.length === members.size &&
 			prev.sources.every(s => members.has(s))
 		)
 			return
 		if (prev !== undefined) this.unindex(id, prev)
-		const next = {
+		const next: IndexedDiscovery = {
 			family: d.family,
 			centre,
+			frequencyHz: d.frequencyHz,
 			key: d.frequencyKey,
 			sources: [...members],
 		}
@@ -3235,18 +3430,11 @@ export class DiscoveryStore
 			}
 			set.add(id)
 		}
+		this.frequencies.add(next.sources, d.frequencyHz, id)
 		this.indexed.set(id, next)
 	}
 
-	private unindex(
-		id: string,
-		prev: {
-			family: ProtocolFamily
-			centre: number
-			key: string
-			sources: string[]
-		},
-	): void {
+	private unindex(id: string, prev: IndexedDiscovery): void {
 		for (const s of prev.sources) {
 			this.centres.remove(s, prev.family, prev.centre, id)
 			const k = `${s}\u0000${prev.key}`
@@ -3254,6 +3442,7 @@ export class DiscoveryStore
 			set?.delete(id)
 			if (set?.size === 0) this.byKey.delete(k)
 		}
+		this.frequencies.remove(prev.sources, prev.frequencyHz, id)
 		this.indexed.delete(id)
 	}
 
