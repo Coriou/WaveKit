@@ -87,7 +87,7 @@ fn event_value(ran: &Ran) -> Value {
         ran.stderr
     );
     assert_eq!(line.lines().count(), 1, "fd 4 must be one line");
-    assert!(line.len() + 1 <= ANALYZE_EVENT_MAX_BYTES);
+    assert!(line.len() < ANALYZE_EVENT_MAX_BYTES);
     serde_json::from_str(line).expect("event json")
 }
 
@@ -304,7 +304,7 @@ fn analyze_event_line_under_16384_bytes() {
     };
     let frames = vec![frame; 80];
     let line = analysis_line(&frames, 192_000).unwrap();
-    assert!(line.len() + 1 <= ANALYZE_EVENT_MAX_BYTES, "{}", line.len());
+    assert!(line.len() < ANALYZE_EVENT_MAX_BYTES, "{}", line.len());
     assert!(!line.contains("NaN") && !line.contains("Infinity"));
     let nan = AnalyzeFrame {
         carrier_db: f64::NAN,
@@ -636,7 +636,7 @@ fn gmsk_bt03(n: usize, snr_db: f64, seed: u64) -> Vec<f32> {
     }
     let half = (taps_n - 1) / 2;
     let mut shaped = vec![0.0f64; n];
-    for k in 0..n {
+    for (k, out) in shaped.iter_mut().enumerate() {
         let mut acc = 0.0f64;
         for (t, tap) in taps.iter().enumerate() {
             let i = k as isize - half as isize + t as isize;
@@ -644,7 +644,7 @@ fn gmsk_bt03(n: usize, snr_db: f64, seed: u64) -> Vec<f32> {
                 acc += tap * held[i as usize];
             }
         }
-        shaped[k] = acc * (rs / 4.0);
+        *out = acc * (rs / 4.0);
     }
     fm_iq(&shaped, snr_db, &mut rng)
 }
@@ -762,7 +762,13 @@ fn analyze_event_fd_accepts_a_socketpair() {
     // installs the socket as fd 4, which is what Node's stdio "pipe" is.
     unsafe {
         cmd.pre_exec(move || {
-            if dup2(child_fd, 4) < 0 {
+            // When the socket already is fd 4, `dup2` is a no-op and leaves
+            // close-on-exec set, so clear it explicitly.
+            if child_fd == 4 {
+                if fcntl(4, F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if dup2(child_fd, 4) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -779,8 +785,12 @@ fn analyze_event_fd_accepts_a_socketpair() {
     assert_eq!(ev["event"], "analysis");
 }
 
+/// `F_SETFD` is 2 on both Linux and macOS.
+const F_SETFD: i32 = 2;
+
 unsafe extern "C" {
     fn dup2(oldfd: i32, newfd: i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
 }
 
 proptest! {
