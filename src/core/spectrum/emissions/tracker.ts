@@ -598,7 +598,7 @@ export class Tracker {
 		const t = this.assoc.get(s)
 		if (t === undefined || t.lastOnBlock !== this.blockNo) return null
 		const c = chainTotalsOf(t)
-		return {
+		const out: TrackAssociation = {
 			trackId: c.id,
 			trackerId: t.id,
 			snrDb: snrDbOf(c.bandLinSum, c.floorLinSum, c.blocks),
@@ -612,6 +612,12 @@ export class Tracker {
 			iqImage: c.iqImage,
 			burst: t.flags.burst,
 		}
+		// Frames carry the open-track gate only (R 2.6). `below` is a close state
+		// and stays on the snapshot. No plan: both keys stay absent.
+		if (t.gate === "pending" || t.gate === "passed") out.gate = t.gate
+		if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
+			out.channelSnrDb = t.channelSnrDb
+		return out
 	}
 
 	closeAll(reason: ObservationEndReason): PipelineEvent[] {

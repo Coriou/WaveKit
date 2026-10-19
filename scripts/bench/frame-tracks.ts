@@ -57,6 +57,9 @@ function association(i: number, worst: boolean): TrackAssociation {
 		spur: false,
 		iqImage: false,
 		burst: i % 3 === 0,
+		// WG12 R 2.6. Worst uses the longest accepted gate number (`-999.5`).
+		gate: worst ? "passed" : i % 4 === 0 ? "pending" : "passed",
+		channelSnrDb: worst ? -999.5 : 8.26,
 	}
 }
 const range = (i: number) => ({

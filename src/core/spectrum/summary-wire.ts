@@ -92,9 +92,14 @@ export function decodeEventsFromWire(events: PipelineEvent[]): void {
 }
 
 /**
- * WG11 req 5.1/5.5: the frame-track fields of a summary from the worker, bounded in place
- * (frame-tracks.ts `sanitizeBlockTrack`): a malformed field is dropped, never the summary.
- * O(tracks); non-object tracks are left to the frame guard as today.
+ * WG11 req 5.1/5.5 and WG12 R 2.6: the frame-track fields of a summary from the worker,
+ * bounded in place (frame-tracks.ts `sanitizeBlockTrack`). A malformed field is dropped,
+ * never the summary. `gate` is kept only for `"pending"` | `"passed"`; `channelSnrDb` only
+ * when it is finite, on the 0.5 dB grid, and within ±999.5. A present `gate` key, even one
+ * that is then removed, forces a boolean `surfaced` to false unless the surviving gate is
+ * `"passed"` and the segment is not a spur or an image. Absent gate fields stay absent,
+ * so a summary with no channel plan is byte-identical. O(tracks); non-object tracks are
+ * left to the frame guard as today.
  */
 export function sanitizeSummaryTracks(summary: BlockSummary | undefined): void {
 	const tracks = (summary as { tracks?: unknown } | undefined)?.tracks
