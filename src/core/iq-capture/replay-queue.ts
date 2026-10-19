@@ -22,9 +22,6 @@
  * never run does not hold the captures of other sources behind it. `stop()` cancels the
  * running replay and discards every queued capture without a result.
  */
-import { DCS_STANDARD_CODES } from "@wavekit/api-types"
-import { z } from "zod"
-import { isCtcssToneHz } from "../audio-tones/ctcss.js"
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import {
@@ -45,12 +42,12 @@ import type {
 } from "../scanner/probes/probe-pool.js"
 import {
 	ANALOG_TRIAL_CORES,
-	ANALOG_TRIAL_MAX_FRAMES,
 	type AnalogTrialResult,
 	type AnalogTrialRunner,
 } from "../scanner/scanner-redesign-contract.js"
 import type { Identity, ScannerProtocol } from "../scanner/types.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
+import { judgeAnalogResult } from "./analog-result.js"
 
 export const IQ_REPLAY_QUEUE_HOLDER = "iq-replay-queue"
 /** Retry delay of a deferred replay request when no slot release arrives first. */
@@ -83,6 +80,16 @@ export interface IqReplayProbeAnswer {
 	outcome: IqReplayTrialOutcome
 	/** The accepted (H2) decode of this run, or null. */
 	decoded: { protocol: ScannerProtocol; identity: Identity } | null
+	/**
+	 * WG12 req 4.5: the decoder program could not run before any output.
+	 * Set only together with outcome `unsupported`.
+	 */
+	reason?: "decoder-unavailable"
+	/**
+	 * WG12 req 4.5: the probe decoder type that could not run.
+	 * Set only together with outcome `unsupported`.
+	 */
+	unavailable?: ProbeDecoderType[]
 }
 
 export interface IqReplayProbeRun {
@@ -527,12 +534,15 @@ class Queue implements IqReplayQueue {
 		if (this.current !== cur || this.stopped) return
 		cur.run = null
 		const a = sanitize(raw)
-		cur.done.push({
+		const done: IqReplayResult["trials"][number] = {
 			protocol: trial.protocol,
 			decoderType: trial.mode.decoderType,
 			known: trial.known,
 			outcome: a.outcome,
-		})
+		}
+		if (a.outcome === "unsupported" && a.reason === "decoder-unavailable")
+			done.reason = "decoder-unavailable"
+		cur.done.push(done)
 		if (a.outcome === "unsupported")
 			this.noteUnavailable(cur, trial.mode.decoderType)
 		if (a.outcome === "decoded" && a.decoded) {
@@ -626,7 +636,7 @@ class Queue implements IqReplayQueue {
 			analog: AnalogTrialResult | null
 		}
 		try {
-			judged = judgeAnalog(raw)
+			judged = judgeAnalogResult(raw)
 		} catch (err: unknown) {
 			this.log.warn(
 				{ err: safeErrorFields(err) },
@@ -694,136 +704,11 @@ class Queue implements IqReplayQueue {
 	}
 }
 
-const DCS_CODES: ReadonlySet<string> = new Set(DCS_STANDARD_CODES)
-const finiteNumber = z.number().finite()
-
-const analogFrameSchema = z
-	.object({
-		carrierDb: finiteNumber,
-		hfNoiseDb: finiteNumber,
-		audioDb: finiteNumber,
-		syllabic: finiteNumber,
-		cluster: finiteNumber,
-	})
-	.strict()
-
-const analogStatsSchema = z
-	.object({
-		mode: z.enum(["nfm", "am"]),
-		frames: z.array(analogFrameSchema).max(ANALOG_TRIAL_MAX_FRAMES),
-		gapSamples: z.number().int().nonnegative(),
-		floorDb: finiteNumber,
-	})
-	.strict()
-
-const analogTonesSchema = z
-	.object({
-		ctcssHz: finiteNumber.refine(hz => isCtcssToneHz(hz)).nullable(),
-		dcs: z
-			.object({
-				code: z.string().refine(code => DCS_CODES.has(code)),
-				polarity: z.enum(["normal", "inverted"]),
-			})
-			.strict()
-			.nullable(),
-		audioSeconds: finiteNumber.nonnegative(),
-	})
-	.strict()
-
-const analogResultSchema = z
-	.object({
-		outcome: z.enum([
-			"decoded",
-			"heard",
-			"data-like",
-			"carrier-only",
-			"no-sync",
-		]),
-		mode: z.enum(["nfm", "am"]),
-		voice: z.boolean(),
-		tones: analogTonesSchema,
-		stats: analogStatsSchema.nullable(),
-		error: z
-			.enum(["capture-gone", "analyze-failed", "cancelled", "unavailable"])
-			.optional(),
-	})
-	.strict()
-
-type ParsedAnalog = z.infer<typeof analogResultSchema>
-
-const CANCELLED_ANALOG = {
-	outcome: "cancelled" as const,
-	analog: null,
-}
-
-/**
- * The runner's value is untrusted. Malformed fields, any `error`, a `decoded`
- * without a qualified tone or DCS, or a `heard` without stats become `cancelled`
- * (or `unsupported` for the contract's unavailable errors). The attached result
- * is omitted so a positive outcome cannot leak.
- */
-function judgeAnalog(raw: unknown): {
-	outcome: IqReplayTrialOutcome
-	analog: AnalogTrialResult | null
-} {
-	let parsed: ParsedAnalog
-	try {
-		const result = analogResultSchema.safeParse(raw)
-		if (!result.success) return CANCELLED_ANALOG
-		parsed = result.data
-	} catch {
-		return CANCELLED_ANALOG
-	}
-	switch (parsed.error) {
-		case undefined:
-			break
-		case "cancelled":
-		case "capture-gone":
-			return CANCELLED_ANALOG
-		case "unavailable":
-		case "analyze-failed":
-			return { outcome: "unsupported", analog: null }
-		default:
-			return CANCELLED_ANALOG
-	}
-	if (parsed.outcome === "decoded" && !qualifiedTone(parsed))
-		return CANCELLED_ANALOG
-	if (parsed.outcome === "heard" && parsed.stats === null)
-		return CANCELLED_ANALOG
-	return { outcome: parsed.outcome, analog: copyAnalog(parsed) }
-}
-
-function qualifiedTone(parsed: ParsedAnalog): boolean {
-	return parsed.tones.ctcssHz !== null || parsed.tones.dcs !== null
-}
-
-function copyAnalog(parsed: ParsedAnalog): AnalogTrialResult {
-	const stats = parsed.stats
-	return {
-		outcome: parsed.outcome,
-		mode: parsed.mode,
-		voice: parsed.voice,
-		tones: {
-			ctcssHz: parsed.tones.ctcssHz,
-			dcs: parsed.tones.dcs,
-			audioSeconds: parsed.tones.audioSeconds,
-		},
-		stats: stats
-			? {
-					mode: stats.mode,
-					frames: stats.frames,
-					gapSamples: stats.gapSamples,
-					floorDb: stats.floorDb,
-				}
-			: null,
-	}
-}
-
 /** A probe answer is untrusted: an unknown outcome is `cancelled`, a decode needs `decoded`. */
 function sanitize(raw: unknown): IqReplayProbeAnswer {
 	if (typeof raw !== "object" || raw === null)
 		return { outcome: "cancelled", decoded: null }
-	const r = raw as { outcome?: unknown; decoded?: unknown }
+	const r = raw as { outcome?: unknown; decoded?: unknown; reason?: unknown }
 	const outcome =
 		typeof r.outcome === "string" && OUTCOMES.has(r.outcome)
 			? (r.outcome as IqReplayTrialOutcome)
@@ -841,8 +726,11 @@ function sanitize(raw: unknown): IqReplayProbeAnswer {
 		typeof d.identity.value === "string"
 			? (d as IqReplayProbeAnswer["decoded"])
 			: null
-	return {
+	const answer: IqReplayProbeAnswer = {
 		outcome: outcome === "decoded" && !decoded ? "no-sync" : outcome,
 		decoded,
 	}
+	if (answer.outcome === "unsupported" && r.reason === "decoder-unavailable")
+		answer.reason = "decoder-unavailable"
+	return answer
 }
