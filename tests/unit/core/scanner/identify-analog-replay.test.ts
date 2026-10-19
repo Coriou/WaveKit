@@ -1,7 +1,7 @@
 /** WG12 ID.4: a claimed capture whose plan includes analog runs the replay trial. */
 import { Writable } from "node:stream"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type {
 	ScannerIdentifyEventData,
 	ScannerIdentifyTrial,
@@ -10,9 +10,16 @@ import type {
 import type { Logger } from "../../../../src/utils/logger.js"
 import {
 	IdentifyRunner,
+	identifyScores,
 	normaliseIdentify,
+	planIdentifyTrials,
 	type IdentifyTrackView,
 } from "../../../../src/core/scanner/identify.js"
+import * as probePool from "../../../../src/core/scanner/probes/probe-pool.js"
+import type {
+	ProbeMode,
+	ProbeRequest,
+} from "../../../../src/core/scanner/probes/probe-pool.js"
 import type { IdentifyAnalogEvidence } from "../../../../src/core/scanner/identify-analog-contract.js"
 import type { IqCaptureView } from "../../../../src/core/scanner/iq-capture-contract.js"
 import type {
@@ -99,6 +106,7 @@ function replayHarness(opts: {
 	logger?: Logger
 	timeoutMs?: number
 	patch?: (s: ScannerSettings) => void
+	narrowRasterAt?: (hz: number) => boolean
 }) {
 	const captures = opts.captures ?? []
 	const claimed = new Map<string, string>()
@@ -149,6 +157,7 @@ function replayHarness(opts: {
 		...(opts.analogTrial ? { analogTrial: opts.analogTrial } : {}),
 		...(opts.analogEvidence ? { analogEvidence: opts.analogEvidence } : {}),
 		...(opts.knownProtocols ? { knownProtocols: opts.knownProtocols } : {}),
+		...(opts.narrowRasterAt ? { narrowRasterAt: opts.narrowRasterAt } : {}),
 	})
 	const advance = async (ms: number): Promise<void> => {
 		pool.clock.now += ms
@@ -743,4 +752,105 @@ describe("IdentifyRunner analog replay trial (WG12 ID.4)", () => {
 			await h.pool.pool.destroy()
 		}
 	})
+
+	it("runs eight mixed replay trials and does not run a ninth", async () => {
+		// The built-in probe catalog has six mode keys, so eight or nine proposed
+		// trials never occur. Each requested protocol gets its own mode key here.
+		// The cap under test is still identify's slice(0, IQ_REPLAY_MAX_TRIALS):
+		// analog is first, and the last probe is the one a ninth trial drops.
+		const original = probePool.probeModesFor
+		const spy = vi
+			.spyOn(probePool, "probeModesFor")
+			.mockImplementation((cls, protocols) => {
+				const unique = uniqueTrialMode(protocols)
+				return unique ?? original(cls, protocols)
+			})
+		try {
+			await expectReplayBound(
+				["dmr", "ysf", "p25p1", "nxdn96", "pocsag", "flex", "aprs"],
+				8,
+			)
+			await expectReplayBound(
+				["dmr", "ysf", "p25p1", "nxdn96", "pocsag", "flex", "aprs", "nxdn48"],
+				9,
+			)
+		} finally {
+			spy.mockRestore()
+		}
+	})
 })
+
+/** One dsd-fme mode per protocol, so plan runs do not collapse onto the six built-in keys. */
+function uniqueTrialMode(
+	protocols: readonly ScannerProtocol[],
+): ProbeMode[] | null {
+	if (protocols.length !== 1) return null
+	const protocol = protocols[0]
+	if (!protocol) return null
+	return [
+		{
+			decoderType: "dsd-fme",
+			protocol,
+			covers: [protocol],
+			options: { mode: `trial-${protocol}` },
+			holdMs: 1800,
+		},
+	]
+}
+
+async function expectReplayBound(
+	probeProtocols: ScannerProtocol[],
+	proposed: number,
+): Promise<void> {
+	const protocols: ScannerProtocol[] = [...probeProtocols, "analog-fm"]
+	const calls: string[] = []
+	const replayAsked: ProbeRequest[] = []
+	const h = replayHarness({
+		protocols,
+		captures: [capture("cap-bound", "commanded")],
+		timeoutMs: 400_000,
+		narrowRasterAt: () => true,
+		analogTrial: {
+			run: captureId => {
+				calls.push(captureId)
+				return Promise.resolve(resultOf("no-sync"))
+			},
+		},
+	})
+	const request = h.pool.pool.request.bind(h.pool.pool)
+	h.pool.pool.request = req => {
+		if (req.replay) replayAsked.push(req)
+		return request(req)
+	}
+	const track = analogTrack()
+	const plan = planIdentifyTrials(
+		identifyScores(track, { priors: {}, protocols, narrow: true }),
+		{ format: "U8_IQ", channelizer: false },
+	)
+	try {
+		expect(plan.runs.length).toBe(probeProtocols.length)
+		expect(plan.trials.some(t => t.protocol === "analog-fm")).toBe(true)
+		expect(plan.runs.length + 1).toBe(proposed)
+		await h.runner.start()
+		h.tracks.push(viewOf(track))
+		for (let i = 0; i < 40 && !FINAL.has(h.last()?.state ?? ""); i++)
+			await h.advance(4000)
+		expect(FINAL.has(h.last()?.state ?? "")).toBe(true)
+		const kept = Math.min(plan.runs.length, IQ_REPLAY_MAX_TRIALS - 1)
+		expect(calls).toEqual(["cap-bound"])
+		expect(replayAsked).toHaveLength(kept)
+		expect(replayAsked.map(r => r.protocols)).toEqual(
+			plan.runs.slice(0, kept).map(r => r.protocols),
+		)
+		expect(calls.length + replayAsked.length).toBe(
+			Math.min(proposed, IQ_REPLAY_MAX_TRIALS),
+		)
+		if (proposed > IQ_REPLAY_MAX_TRIALS) {
+			const dropped = plan.runs[plan.runs.length - 1]?.protocols[0]
+			expect(dropped).toBeDefined()
+			expect(replayAsked.flatMap(r => r.protocols)).not.toContain(dropped)
+		}
+	} finally {
+		await h.destroy()
+	}
+}

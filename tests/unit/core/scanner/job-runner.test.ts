@@ -1,6 +1,8 @@
+import { Writable } from "node:stream"
 import fc from "fast-check"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
+import type { ScanJobProgress } from "@wavekit/api-types"
 import {
 	JobRunner,
 	chooseLeaseHolder,
@@ -8,8 +10,11 @@ import {
 	undecodedForDeferral,
 	undecodedForProbe,
 	type JobRecord,
+	type JobRunnerDeps,
 	type ProbeOutcome,
 } from "../../../../src/core/scanner/job-runner.js"
+import type { ProbeStatus } from "../../../../src/core/scanner/probes/probe-pool.js"
+import type { JobActivityView } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import type { Lease } from "../../../../src/core/scanner/tuner-arbiter.js"
 import type { Impact } from "../../../../src/core/scanner/types.js"
 import type { EngineEpoch } from "../../../../src/core/spectrum/spectrum-engine.js"
@@ -202,7 +207,10 @@ const pendingFor = (epoch: number, centreHz: number): PendingEpoch => ({
 })
 const flush = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
 
-function runnerHarness(autoResumeReady?: () => boolean) {
+function runnerHarness(
+	autoResumeReady?: () => boolean,
+	extra?: Partial<JobRunnerDeps>,
+) {
 	const arbiter = new RunnerArbiter()
 	const record: JobRecord = {
 		id: "j_test",
@@ -264,8 +272,67 @@ function runnerHarness(autoResumeReady?: () => boolean) {
 		changed: () => undefined,
 		logger: pino({ level: "silent" }),
 		now: () => 0,
+		...extra,
 	})
 	return { runner, arbiter, record, engineCfg }
+}
+
+/** Unstarted harness progress at the commit this field set was added. Coverage is NaN: the fake reports observed samples and no settled samples. */
+const BASE_PROGRESS: ScanJobProgress = {
+	sweepIndex: 0,
+	hopIndex: 0,
+	hopCount: 2,
+	sweepPeriodMs: null,
+	coverage: Number.NaN,
+	holdingOn: null,
+	settleMode: "none",
+	probes: [],
+	counts: {
+		observations: 0,
+		transients: 0,
+		discoveries: { activity: 0, candidate: 0, classified: 0, decoded: 0 },
+	},
+}
+
+const quietActivity = (): JobActivityView => ({
+	capturing: 0,
+	replaying: null,
+	replayQueueDepth: 0,
+})
+
+function captureLogger(): { logger: pino.Logger; text: () => string } {
+	const chunks: string[] = []
+	const logger = pino(
+		{ level: "warn" },
+		new Writable({
+			write(chunk, _enc, cb) {
+				chunks.push(String(chunk))
+				cb()
+			},
+		}),
+	)
+	return { logger, text: () => chunks.join("") }
+}
+
+function liveProbe(over: Partial<ProbeStatus> = {}): ProbeStatus {
+	return {
+		probeId: "p1",
+		decoderId: "dec-1",
+		jobId: "j_test",
+		sourceId: "rtl",
+		trackId: "t1",
+		observationId: "o1",
+		discoveryId: "d1",
+		targetHz: 450_100_000,
+		epoch: 1,
+		protocol: "dmr",
+		decoderType: "dsd-fme",
+		transport: "offset",
+		state: "confirming",
+		startedAt: 10,
+		cores: 0.2,
+		...over,
+	}
 }
 
 describe("JobRunner own epochs", () => {
@@ -514,5 +581,157 @@ describe("automatic resume reentry", () => {
 		expect(h.record.state).toBe("paused")
 		expect(h.arbiter.holder()).toBeUndefined()
 		expect(h.arbiter.retunes).toHaveLength(0)
+	})
+})
+
+describe("job progress phase", () => {
+	it("No activity dep → progress deep-equal to base", () => {
+		const { runner, record } = runnerHarness()
+		expect(runner.progress()).toEqual(BASE_PROGRESS)
+		record.spec.mode = "in-window"
+		expect(runner.progress()).toEqual(BASE_PROGRESS)
+		expect(runner.progress()).not.toHaveProperty("phase")
+		expect(runner.progress()).not.toHaveProperty("parked")
+		expect(runner.progress()).not.toHaveProperty("holding")
+		expect(runner.progress()).not.toHaveProperty("trial")
+		expect(runner.progress()).not.toHaveProperty("replayQueueDepth")
+	})
+
+	it("In-window job → parked true", () => {
+		const { runner, record } = runnerHarness(undefined, {
+			activity: quietActivity,
+		})
+		record.spec.mode = "in-window"
+		const progress = runner.progress()
+		expect(progress.parked).toBe(true)
+		expect(progress.phase).toBe("watching")
+		expect(progress.holding).toBeUndefined()
+		expect(progress.trial).toBeUndefined()
+		expect(progress.replayQueueDepth).toBe(0)
+		expect(progress.sweepPeriodMs).toBeNull()
+	})
+
+	it("a sweep is settling until its own epoch, then watching", async () => {
+		const { runner } = runnerHarness(undefined, { activity: quietActivity })
+		await runner.start()
+		await flush()
+		expect(runner.progress()).toMatchObject({
+			phase: "settling",
+			parked: false,
+		})
+		runner.onEpochStarted(epochAt(11, HOP0))
+		await flush()
+		expect(runner.progress().phase).toBe("watching")
+		expect(runner.progress().parked).toBe(false)
+	})
+
+	it("throwing activity", () => {
+		const logs = captureLogger()
+		let next: () => unknown = () => {
+			throw new Error("tune 446.100 secret payload")
+		}
+		const { runner, record } = runnerHarness(undefined, {
+			logger: logs.logger,
+			activity: () => next() as JobActivityView,
+		})
+		record.spec.mode = "in-window"
+		expect(() => runner.progress()).not.toThrow()
+		expect(runner.progress()).toMatchObject({
+			phase: "watching",
+			parked: true,
+			replayQueueDepth: 0,
+		})
+		expect(runner.progress().trial).toBeUndefined()
+		const logged = logs.text()
+		expect(logged).toContain("Scan job activity view failed")
+		expect(logged).not.toContain("446.100")
+		expect(logged).not.toContain("secret")
+		const once = logs.text()
+		runner.progress()
+		expect(logs.text()).toBe(once)
+
+		next = () => ({
+			capturing: 1,
+			replaying: {
+				protocol: "dmr",
+				decoder: "446.100 secret",
+				discoveryId: null,
+			},
+			replayQueueDepth: -5,
+		})
+		expect(runner.progress().phase).toBe("watching")
+		expect(logs.text()).toBe(once)
+		expect(logs.text()).not.toContain("secret")
+
+		next = () => ({ capturing: 2, replaying: null, replayQueueDepth: 3 })
+		expect(runner.progress()).toMatchObject({
+			phase: "capturing",
+			replayQueueDepth: 3,
+		})
+		expect(logs.text()).toBe(once)
+
+		const malformed = captureLogger()
+		const bad = runnerHarness(undefined, {
+			logger: malformed.logger,
+			activity: () =>
+				({
+					capturing: Number.NaN,
+					replaying: { decoder: "446.100 secret payload" },
+					replayQueueDepth: 1,
+				}) as JobActivityView,
+		})
+		expect(() => bad.runner.progress()).not.toThrow()
+		expect(bad.runner.progress()).toMatchObject({
+			phase: "watching",
+			replayQueueDepth: 0,
+		})
+		const line = malformed.text()
+		expect(line).toContain("Scan job activity view failed")
+		expect(line).toContain("SCANNER_ACTIVITY_VIEW")
+		expect(line).not.toContain("446.100")
+		expect(line).not.toContain("secret")
+		expect(line).not.toContain("payload")
+		bad.runner.progress()
+		expect(malformed.text()).toBe(line)
+	})
+
+	it("an in-window live probe stays trialing when activity throws", () => {
+		const logs = captureLogger()
+		const { runner, record } = runnerHarness(undefined, {
+			logger: logs.logger,
+			activity: () => {
+				throw new Error("446.100 secret")
+			},
+			probes: {
+				request: () => ({ deferred: "budget" as const }),
+				release: () => Promise.resolve(),
+				releaseJob: () => Promise.resolve(),
+				follow: () => undefined,
+				status: () => [
+					liveProbe({ probeId: "later", startedAt: 50, protocol: "aprs" }),
+					liveProbe(),
+					liveProbe({ probeId: "replay", transport: "replay", startedAt: 1 }),
+				],
+				startLatencyMs: () => 400,
+			},
+		})
+		record.spec.mode = "in-window"
+		const progress = runner.progress()
+		expect(progress.phase).toBe("trialing")
+		expect(progress.parked).toBe(true)
+		expect(progress.holding).toEqual({
+			discoveryId: "d1",
+			frequencyHz: 450_100_000,
+			trackId: "t1",
+		})
+		expect(progress.trial).toEqual({
+			protocol: "dmr",
+			decoder: "dsd-fme",
+			transport: "offset",
+			discoveryId: "d1",
+		})
+		expect(progress.replayQueueDepth).toBe(0)
+		expect(logs.text()).not.toContain("446.100")
+		expect(logs.text()).not.toContain("secret")
 	})
 })

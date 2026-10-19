@@ -6,6 +6,7 @@ import { protocolsForFrequency } from "./plan/protocols.js"
  */
 import type { ScanJobProgress, ScanJobProbe } from "@wavekit/api-types"
 import type { DecoderManager } from "../../decoders/manager.js"
+import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { ScannerApiError } from "./errors.js"
@@ -17,7 +18,17 @@ import {
 	type JobEvent,
 } from "./job-state.js"
 import { DEFAULT_CONFIRM_HOLD_MS } from "./plan/plan-preview.js"
-import type { ProbePool, ProbeRequest } from "./probes/probe-pool.js"
+import type {
+	ProbePool,
+	ProbeRequest,
+	ProbeStatus,
+} from "./probes/probe-pool.js"
+import { jobProgressFields } from "./job-phase.js"
+import type {
+	JobActivityView,
+	JobPhaseInput,
+} from "./scanner-redesign-contract.js"
+import { ScannerProtocolSchema } from "./store/schemas.js"
 import type { KnownProtocolMemory } from "./known-protocol-contract.js"
 import { SweepScheduler, type SchedulerAction } from "./scheduler.js"
 import type {
@@ -291,6 +302,12 @@ export interface JobRunnerDeps {
 	 * counted (behaviour as before WG11).
 	 */
 	knownProtocols?: KnownProtocolMemory
+	/**
+	 * WG12 req 7: captures and replays of this job. Absent: `progress()` stays the
+	 * pre-redesign object (no phase, parked, holding, trial or replayQueueDepth).
+	 * The plan calls this `JobDriverDeps`; the runner's dependency bag is `JobRunnerDeps`.
+	 */
+	activity?: (jobId: string) => JobActivityView
 }
 
 /** Acquire refusals that clear by themselves: an operator-paused resume stays `paused(operator)` (R4). */
@@ -311,6 +328,13 @@ const LOST_EVENTS: ReadonlySet<JobEvent["type"]> = new Set([
 	"preempted-job",
 ])
 
+const ACTIVITY_LIMIT = 1_000_000
+const EMPTY_ACTIVITY: JobActivityView = {
+	capturing: 0,
+	replaying: null,
+	replayQueueDepth: 0,
+}
+
 function inRange(hz: number, r: { startHz: number; endHz: number }): boolean {
 	return hz >= r.startHz && hz <= r.endHz
 }
@@ -326,6 +350,66 @@ function blockSamplesOf(cfg: {
 		Math.round((cfg.integrationMs * cfg.sampleRateHz) / (cfg.fftSize * 1000)),
 	)
 	return frames * cfg.fftSize
+}
+
+function countOf(value: unknown): number | null {
+	if (typeof value !== "number" || !Number.isInteger(value)) return null
+	if (value < 0 || value > ACTIVITY_LIMIT) return null
+	return value
+}
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+	if (value === null || typeof value !== "object" || Array.isArray(value))
+		return null
+	return value as Record<string, unknown>
+}
+
+/** Null is a valid "not replaying". Undefined means the view is malformed. */
+function replayOf(value: unknown): JobActivityView["replaying"] | undefined {
+	if (value === null) return null
+	const row = recordOf(value)
+	if (!row) return undefined
+	const protocol = ScannerProtocolSchema.safeParse(row["protocol"])
+	if (!protocol.success) return undefined
+	const decoder = row["decoder"]
+	if (typeof decoder !== "string" || decoder.length === 0) return undefined
+	const discoveryId = row["discoveryId"]
+	if (discoveryId !== null && typeof discoveryId !== "string") return undefined
+	return { protocol: protocol.data, decoder, discoveryId }
+}
+
+function parseActivity(value: unknown): JobActivityView | null {
+	const row = recordOf(value)
+	if (!row) return null
+	const capturing = countOf(row["capturing"])
+	const replayQueueDepth = countOf(row["replayQueueDepth"])
+	if (capturing === null || replayQueueDepth === null) return null
+	const replaying = replayOf(row["replaying"])
+	if (replaying === undefined) return null
+	return { capturing, replaying, replayQueueDepth }
+}
+
+function liveProbeView(
+	raw: readonly ProbeStatus[],
+): JobPhaseInput["liveProbe"] {
+	const live = raw
+		.filter(
+			(s): s is ProbeStatus & { transport: "offset" | "channel" } =>
+				s.transport === "offset" || s.transport === "channel",
+		)
+		.sort(
+			(a, b) => a.startedAt - b.startedAt || a.probeId.localeCompare(b.probeId),
+		)
+	const s = live[0]
+	if (!s) return null
+	return {
+		protocol: s.protocol,
+		decoder: s.decoderType,
+		transport: s.transport,
+		discoveryId: s.discoveryId,
+		frequencyHz: s.targetHz,
+		trackId: s.trackId,
+	}
 }
 
 export class JobRunner implements JobDriver {
@@ -375,6 +459,8 @@ export class JobRunner implements JobDriver {
 	}
 
 	private autoResumeGuardActive = false
+	/** One log for a thrown or malformed activity view, for the life of the runner. */
+	private activityFaultLogged = false
 
 	private get sourceId(): string {
 		return this.record.spec.sourceId
@@ -448,20 +534,20 @@ export class JobRunner implements JobDriver {
 		const engine = this.deps.engine(this.sourceId)
 		const p = this.scheduler?.progress()
 		const stats = engine?.stats()
-		const probes: ScanJobProbe[] = this.deps.probes
+		const raw = this.deps.probes
 			.status()
 			.filter(s => s.jobId === this.record.id)
-			.map(s => ({
-				probeId: s.probeId,
-				decoderId: s.decoderId,
-				trackId: s.trackId,
-				targetHz: s.targetHz,
-				protocol: s.protocol,
-				transport: s.transport,
-				state: s.state === "starting" ? "confirming" : s.state,
-				startedAt: new Date(s.startedAt).toISOString(),
-			}))
-		return {
+		const probes: ScanJobProbe[] = raw.map(s => ({
+			probeId: s.probeId,
+			decoderId: s.decoderId,
+			trackId: s.trackId,
+			targetHz: s.targetHz,
+			protocol: s.protocol,
+			transport: s.transport,
+			state: s.state === "starting" ? "confirming" : s.state,
+			startedAt: new Date(s.startedAt).toISOString(),
+		}))
+		const base: ScanJobProgress = {
 			sweepIndex: p?.sweepIndex ?? 0,
 			hopIndex: p?.hopIndex ?? 0,
 			hopCount: p?.hopCount ?? this.record.plan.hops.length,
@@ -479,6 +565,107 @@ export class JobRunner implements JobDriver {
 				discoveries: this.deps.discoveryCounts(this.record.id),
 			},
 		}
+		// Req 1.3: a parked sweep reports no period. In-window already has none.
+		const parked = this.jobParked()
+		const sweepPeriodMs = parked ? null : base.sweepPeriodMs
+		if (!this.deps.activity) {
+			return sweepPeriodMs === base.sweepPeriodMs
+				? base
+				: { ...base, sweepPeriodMs }
+		}
+		const fields = jobProgressFields(
+			{
+				schedulerPhase: this.schedulerPhase(),
+				parked,
+				liveProbe: liveProbeView(raw),
+				hold: this.holdView(raw),
+				activity: this.readActivity(),
+			},
+			base.sweepPeriodMs,
+		)
+		return {
+			...base,
+			sweepPeriodMs: fields.sweepPeriodMs,
+			phase: fields.phase,
+			parked: fields.parked,
+			replayQueueDepth: fields.replayQueueDepth,
+			...(fields.holding ? { holding: fields.holding } : {}),
+			...(fields.trial ? { trial: fields.trial } : {}),
+		}
+	}
+
+	/**
+	 * Parked when the job is in-window, or when the scheduler says so. DT.2's
+	 * `SweepScheduler.parked` getter is not on this commit; a sweep is parked only
+	 * once that getter exists and is true.
+	 */
+	private jobParked(): boolean {
+		if (!this.sweep) return true
+		const scheduler = this.scheduler
+		if (!scheduler) return false
+		const parked = (scheduler as { parked?: unknown }).parked
+		return parked === true
+	}
+
+	/**
+	 * `holdingOn` is set only while the scheduler phase is hold. Before this job's
+	 * own epoch the hop is still tuning. Engine `settleMode` stays `"timer"` after
+	 * the hop has settled, so it is not this phase. The contract's `"settling"` is
+	 * accepted by `jobPhase` when a caller passes it; this runner has no separate
+	 * settling signal yet.
+	 */
+	private schedulerPhase(): JobPhaseInput["schedulerPhase"] {
+		if (!this.sweep || !this.scheduler) return null
+		if (this.scheduler.progress().holdingOn !== null) return "hold"
+		if (!this.epochOwn) return "tuning"
+		return "dwell"
+	}
+
+	private holdView(raw: readonly ProbeStatus[]): JobPhaseInput["hold"] {
+		if (!this.sweep || !this.scheduler) return null
+		const trackId = this.scheduler.progress().holdingOn
+		if (trackId === null) return null
+		const held = this.tracks.get(trackId)
+		if (held) {
+			return {
+				discoveryId: held.live.discoveryId,
+				frequencyHz: held.track.centreHz,
+				trackId,
+			}
+		}
+		const probe = raw.find(s => s.trackId === trackId)
+		return {
+			discoveryId: probe?.discoveryId ?? null,
+			frequencyHz: probe?.targetHz ?? 0,
+			trackId,
+		}
+	}
+
+	private readActivity(): JobActivityView {
+		const read = this.deps.activity
+		if (!read) return EMPTY_ACTIVITY
+		try {
+			const parsed = parseActivity(read(this.record.id))
+			if (parsed) return parsed
+			this.logActivityFault(
+				new WaveKitError(
+					"Job activity view is malformed",
+					"SCANNER_ACTIVITY_VIEW",
+				),
+			)
+		} catch (err: unknown) {
+			this.logActivityFault(err)
+		}
+		return EMPTY_ACTIVITY
+	}
+
+	private logActivityFault(err: unknown): void {
+		if (this.activityFaultLogged) return
+		this.activityFaultLogged = true
+		this.log.warn(
+			{ err: safeErrorFields(err) },
+			"Scan job activity view failed",
+		)
 	}
 
 	tick(now: number): void {
