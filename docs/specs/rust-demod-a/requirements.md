@@ -157,3 +157,28 @@ quietingDb?}` changes take effect at the next block, without a retune or restart
 2. 9.2 The report states the slowest consumer with numbers and an exact proposal for the
    decoder branches (decimation in `wavekit-chan` before the decoder, channelizer routing or
    a threshold change), as a diff for Main where outside this lane's allocation.
+
+## Requirement 10: amendments after implementation review
+
+Appended during implementation (WG12); earlier criteria keep their numbers.
+
+1. 10.1 (amends 4.3, 4.6) Audio streams out as it is demodulated; the gate decision for a
+   10 ms block is taken at the end of that block and applies from the next block. The
+   first block of a transmission is muted and one block of tail follows a close, inside the
+   one-block latency bound of 4.6.
+2. 10.2 (amends 5.2) An `audioFormat` change restarts the Rust run, as it does the csdr
+   chain, because HTTP clients were admitted with the old format. All other keys listed in
+   5.2 retune in place.
+3. 10.3 (amends 8.1) One deliberate default change: `getStatus()` always carries `engine`
+   (`"csdr"` with the shipped config), as 1.5 requires. `engineFallback` appears only after
+   a fallback and is cleared when `csdr` is requested explicitly. `liveDemod.engine` and
+   `chanBinaryPath` are optional in the schema (absence means `csdr` and `wavekit-chan` at
+   runtime), so the parsed default config is unchanged.
+4. 10.4 (amends 4.1) The channel noise meter is a straight port of `NoiseSquelch` as the
+   csdr path constructs it for the channel bandwidth, equal within 0.1 dB on shared vectors
+   at 2.5, 6.25, 12.5 and 25 kHz. It inherits the existing detector's behaviour, recorded
+   as a baseline (narrow-channel false opens, no open at 25 kHz with 6 dB CNR). Improving
+   the noise detector is a follow-up for both engines, not part of phase A.
+5. 10.5 (amends 6.1) The 4 % budget is not met: one channel measured about 6 % of one core
+   on the development host. The figure is reported with the host CPU and load average;
+   the csdr comparison is part of the live test plan.

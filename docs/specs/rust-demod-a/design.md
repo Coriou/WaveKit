@@ -160,3 +160,28 @@ No deliberate default change: `engine: "csdr"`.
 
 The image already installs `wavekit-chan`; no Dockerfile change unless a new bin is added
 (none planned).
+
+## Contract amendments (additive)
+
+Recorded after implementation; no frozen name, argument type or semantic changed.
+
+- `Complex32 { re, im }` is defined in `wavekit_chan::demod` (the crate had no complex
+  sample type).
+- `process` with `out.len() != input.len()` writes the shared prefix and never panics.
+- Added: `NoiseMeter::with_bandwidth(sample_rate_hz, bandwidth_hz)` (the channel path;
+  `new` keeps the full-band reference), `PowerGate` and `NoiseGate` with in-place setters
+  for threshold, hysteresis, hang and quieting, and `PowerGate::set_noise_floor_dbfs`.
+- AM fast AGC is a peak follower (reference 0.4, 5 ms attack, 300 ms decay); de-emphasis
+  is one pole; audio high and low pass are biquads.
+
+## Protocol amendments
+
+- The JSON envelope `v` stays 1; protocol 2 is the `--version` line plus the demod
+  vocabulary.
+- `squelch` accepts `noiseFloorDbfs` (absent leaves the floor, `null` clears it, a number
+  sets it); `open.squelch` does not.
+- At most one pending retune and one pending squelch are kept; later requests fold into
+  them. One `retuned` is emitted per applied plan, so the client sends identity retunes one
+  at a time and folds edits made meanwhile into the next request.
+- The channel FIR keeps a 313-sample history across retunes and runs the tap count of the
+  current bandwidth (at least 89), centred so the group delay stays 156 samples.
