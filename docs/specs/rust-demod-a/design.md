@@ -185,3 +185,6 @@ Recorded after implementation; no frozen name, argument type or semantic changed
   at a time and folds edits made meanwhile into the next request.
 - The channel FIR keeps a 313-sample history across retunes and runs the tap count of the
   current bandwidth (at least 89), centred so the group delay stays 156 samples.
+- `metrics.quietingDb[]` entries are a number (dB, rounded to 0.01), the string `"inf"`
+  for a usable but silent discriminator (a quieted carrier), or `null` for an unusable
+  block (no FM-quieting figure, e.g. AM or non-finite input). `powerDbfs[]` stays numeric.
