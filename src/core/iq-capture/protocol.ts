@@ -5,7 +5,15 @@
  * only counted, never acted on.
  */
 import { z } from "zod"
-import { IQ_CAPTURE_CONTROL_LINE_MAX_BYTES } from "../scanner/iq-capture-contract.js"
+import {
+	IQ_CAPTURE_CONTROL_LINE_MAX_BYTES,
+	IQ_CAPTURE_RATE_HZ,
+} from "../scanner/iq-capture-contract.js"
+import {
+	ANALOG_TRIAL_FRAME_MS,
+	ANALOG_TRIAL_MAX_FRAMES,
+	type AnalyzeEvent,
+} from "../scanner/scanner-redesign-contract.js"
 
 /** A capture id: lowercase uuid v4 (the file grammar without `.cf32`). */
 export const IQ_CAPTURE_ID_PATTERN =
@@ -98,8 +106,8 @@ export function encodeToolCommand(cmd: IqToolCommand): string | null {
 /**
  * Splits a byte stream into `\n`-terminated lines of at most `maxBytes` bytes including the
  * newline. A longer line is discarded up to its next newline and reported once through
- * `onOversize`; memory stays below `maxBytes` per reader whatever the input. An unterminated last
- * line is dropped at the end (the tool always terminates its lines).
+ * `onOversize`; memory stays below `maxBytes` per reader whatever the input. An unterminated
+ * tail stays buffered: the capture tool ignores it, and analyze rejects it via `hasPending`.
  */
 export class BoundedLineReader {
 	private pending: Buffer[] = []
@@ -149,4 +157,67 @@ export class BoundedLineReader {
 			this.onLine(line.toString("utf8"))
 		}
 	}
+
+	/**
+	 * True when bytes remain after the last newline, or an oversize line has not
+	 * reached its newline. Analyze treats that tail as a protocol failure.
+	 */
+	hasPending(): boolean {
+		return this.pendingBytes > 0 || this.skipping
+	}
+}
+
+/**
+ * Largest `gapSamples` an analyze event may carry: the processed prefix, 80 frames of
+ * 2 400 samples. Samples past that cap are not a gap.
+ */
+export const ANALYZE_GAP_MAX_SAMPLES =
+	ANALOG_TRIAL_MAX_FRAMES * (IQ_CAPTURE_RATE_HZ / 1000) * ANALOG_TRIAL_FRAME_MS
+
+const ANALYZE_ERROR_CODES = [
+	"bad-args",
+	"open-failed",
+	"bad-file",
+	"kernel-config",
+	"io",
+] as const
+
+const analyzeNumber = z.number().finite()
+
+const AnalyzeFrameSchema = z
+	.object({
+		carrierDb: analyzeNumber,
+		hfNoiseDb: analyzeNumber,
+		audioDb: analyzeNumber,
+		syllabic: analyzeNumber,
+		cluster: analyzeNumber,
+	})
+	.strict()
+
+const AnalyzeEventSchema = z.discriminatedUnion("event", [
+	z
+		.object({
+			event: z.literal("analysis"),
+			frames: z.array(AnalyzeFrameSchema).max(ANALOG_TRIAL_MAX_FRAMES),
+			gapSamples: z.number().int().nonnegative().max(ANALYZE_GAP_MAX_SAMPLES),
+		})
+		.strict(),
+	z
+		.object({
+			event: z.literal("error"),
+			code: z.enum(ANALYZE_ERROR_CODES),
+		})
+		.strict(),
+])
+
+/** One fd-4 line; null when it is not exactly an [`AnalyzeEvent`]. */
+export function parseAnalyzeEvent(line: string): AnalyzeEvent | null {
+	let value: unknown
+	try {
+		value = JSON.parse(line)
+	} catch {
+		return null
+	}
+	const parsed = AnalyzeEventSchema.safeParse(value)
+	return parsed.success ? parsed.data : null
 }

@@ -53,6 +53,23 @@ describe("BoundedLineReader", () => {
 		expect(lines).toEqual(['{"type":"ready"}', '{"type":"ready"}'])
 	})
 
+	it("reports an unterminated tail and clears it when the newline arrives", () => {
+		const { r, lines } = reader()
+		expect(r.hasPending()).toBe(false)
+		r.push(Buffer.from("abc"))
+		expect(r.hasPending()).toBe(true)
+		expect(lines).toEqual([])
+		r.push(Buffer.from("\n"))
+		expect(r.hasPending()).toBe(false)
+		expect(lines).toEqual(["abc"])
+	})
+
+	it("reports a skipped oversize line that never reaches a newline", () => {
+		const { r } = reader()
+		r.push(Buffer.alloc(5_000, 0x41))
+		expect(r.hasPending()).toBe(true)
+	})
+
 	it("stays bounded on an endless line", () => {
 		const { r, lines, oversize } = reader()
 		for (let i = 0; i < 1000; i++) r.push(Buffer.alloc(65_536, 0x41))

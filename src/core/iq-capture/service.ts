@@ -36,6 +36,11 @@ import {
 	type IqCaptureView,
 } from "../scanner/iq-capture-contract.js"
 import {
+	ANALYZE_EVENT_MAX_BYTES,
+	type AnalogTrialMode,
+	type AnalyzeEvent,
+} from "../scanner/scanner-redesign-contract.js"
+import {
 	ensureCaptureDir,
 	captureDirIdentitySync,
 	dirStillProvenSync,
@@ -51,7 +56,12 @@ import {
 	type IqToolTimers,
 	type SpawnFn,
 } from "./process.js"
-import { isCaptureId, type IqToolEvent } from "./protocol.js"
+import {
+	BoundedLineReader,
+	isCaptureId,
+	parseAnalyzeEvent,
+	type IqToolEvent,
+} from "./protocol.js"
 import {
 	IqCaptureStore,
 	type IqCaptureCounters,
@@ -195,6 +205,8 @@ const GIVE_UP_WINDOW_MS = 600_000
 /** A capture without `captured`/`aborted` this long after its bound is dropped. */
 const CAPTURE_GRACE_MS = 10_000
 const REPLAY_TIMEOUT_MS = 30_000
+/** s16le mono at 8 kHz for at most 4 s (32 000 samples). */
+const ANALYZE_AUDIO_MAX_BYTES = 32_000 * 2
 /** Removed capture ids remembered for late tool events (2 open × a few minutes of captures). */
 const FORGOTTEN_IDS_MAX = 64
 /** Safety margin inside the tool's ring and below its current count (seconds). */
@@ -937,6 +949,203 @@ class Service implements IqCaptureService {
 		return out
 	}
 
+	openAnalyze(
+		captureId: string,
+		mode: AnalogTrialMode,
+	): {
+		audio: Readable
+		event: Promise<AnalyzeEvent>
+		kill(): void
+	} | null {
+		try {
+			return this.doOpenAnalyze(captureId, mode)
+		} catch (err: unknown) {
+			this.replayFailures++
+			this.log.warn({ err: safeErrorFields(err) }, "IQ analyze could not start")
+			return null
+		}
+	}
+
+	private doOpenAnalyze(
+		captureId: string,
+		mode: AnalogTrialMode,
+	): {
+		audio: Readable
+		event: Promise<AnalyzeEvent>
+		kill(): void
+	} | null {
+		if (mode !== "nfm" && mode !== "am") return null
+		const store = this.store
+		const cfg = this.cfg
+		if (!store || !cfg || this.st !== "on" || !this.dir) return null
+		const e = store.get(captureId)
+		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
+		const file = path.join(this.dir, `${captureId}.cf32`)
+		if (!this.dirOk()) return null
+		const verified = this.openProven(captureId, file, e.bytes)
+		if (!verified) {
+			store.discard(captureId, "invalid")
+			return null
+		}
+		if (!store.beginReplay(captureId)) {
+			fs.closeSync(verified.fd)
+			return null
+		}
+		let child: ChildProcess
+		try {
+			child = this.spawn(
+				cfg.binaryPath,
+				["analyze", "--in", "/dev/fd/3", "--mode", mode],
+				{
+					env: this.o.env ?? childAccessEnvironment(process.env),
+					detached: process.platform !== "win32",
+					stdio: ["ignore", "pipe", "pipe", verified.fd, "pipe"],
+				},
+			)
+		} catch (err: unknown) {
+			fs.closeSync(verified.fd)
+			store.endReplay(captureId)
+			throw err
+		}
+		// The child holds its own copy of the descriptor.
+		fs.closeSync(verified.fd)
+		let set = this.replays.get(captureId)
+		if (!set) {
+			set = new Set()
+			this.replays.set(captureId, set)
+		}
+		set.add(child)
+		const replays = set
+		const audio = new PassThrough()
+		audio.on("error", () => {})
+		let settled = false
+		let aborted = false
+		let protocolBad = false
+		let audioOver = false
+		let parsed: AnalyzeEvent | null = null
+		let lines = 0
+		let audioBytes = 0
+		let resolveEvent: (ev: AnalyzeEvent) => void = () => {}
+		let rejectEvent: (err: unknown) => void = () => {}
+		const event = new Promise<AnalyzeEvent>((resolve, reject) => {
+			resolveEvent = resolve
+			rejectEvent = reject
+		})
+		void event.catch(() => {})
+		const rejectFailed = (count: boolean) => {
+			if (settled) return
+			settled = true
+			if (count) {
+				this.replayFailures++
+				const err = new WaveKitError("IQ analyze failed", "ANALYZE_FAILED")
+				this.log.warn({ err: safeErrorFields(err) }, "IQ analyze failed")
+				audio.destroy(err)
+				rejectEvent(err)
+				return
+			}
+			const err = new WaveKitError("IQ analyze failed", "ANALYZE_FAILED")
+			audio.destroy(err)
+			rejectEvent(err)
+		}
+		const timer = this.timers.setTimeout(() => {
+			killGroup(child, "SIGKILL")
+		}, REPLAY_TIMEOUT_MS)
+		const kill = () => {
+			if (settled || aborted) return
+			aborted = true
+			killGroup(child, "SIGKILL")
+		}
+		child.on("error", () => {
+			protocolBad = true
+		})
+		child.stderr?.on("error", () => {})
+		child.stderr?.resume()
+		const stdout = child.stdout
+		if (!stdout) protocolBad = true
+		stdout?.on("error", () => {
+			protocolBad = true
+		})
+		stdout?.on("data", (chunk: Buffer) => {
+			if (settled || aborted) return
+			audioBytes += chunk.length
+			if (audioBytes > ANALYZE_AUDIO_MAX_BYTES) {
+				audioOver = true
+				return
+			}
+			if (!audio.write(chunk)) {
+				stdout.pause()
+				audio.once("drain", () => stdout.resume())
+			}
+		})
+		const eventStream = (child.stdio as readonly unknown[])[4]
+		let markEventTail = (): void => {}
+		if (!isReadableStream(eventStream)) protocolBad = true
+		else {
+			eventStream.on("error", () => {
+				protocolBad = true
+			})
+			const reader = new BoundedLineReader(
+				ANALYZE_EVENT_MAX_BYTES,
+				line => {
+					lines += 1
+					if (lines > 1 || parsed !== null) {
+						protocolBad = true
+						return
+					}
+					const ev = parseAnalyzeEvent(line)
+					if (!ev) protocolBad = true
+					else parsed = ev
+				},
+				() => {
+					protocolBad = true
+				},
+			)
+			// Exactly one finished line. Bytes with no newline after it, or a
+			// line that never ended, are not a successful analysis.
+			markEventTail = () => {
+				if (reader.hasPending()) protocolBad = true
+			}
+			eventStream.on("data", (chunk: Buffer) => reader.push(chunk))
+			eventStream.on("end", markEventTail)
+		}
+		audio.on("close", () => {
+			if (child.exitCode === null && child.signalCode === null)
+				killGroup(child, "SIGKILL")
+		})
+		child.once("close", (code: number | null) => {
+			this.timers.clearTimeout(timer)
+			replays.delete(child)
+			if (replays.size === 0) this.replays.delete(captureId)
+			store.endReplay(captureId)
+			markEventTail()
+			if (settled) return
+			if (aborted) {
+				rejectFailed(false)
+				return
+			}
+			if (parsed?.event === "error" && !protocolBad) {
+				settled = true
+				audio.end()
+				resolveEvent(parsed)
+				return
+			}
+			if (
+				parsed?.event === "analysis" &&
+				code === 0 &&
+				!protocolBad &&
+				!audioOver &&
+				audioBytes <= ANALYZE_AUDIO_MAX_BYTES
+			) {
+				settled = true
+				audio.end()
+				resolveEvent(parsed)
+				return
+			}
+			rejectFailed(true)
+		})
+		return { audio, event, kill }
+	}
+
 	// === Tool supervision ===
 
 	private spawnTool(slot: SourceSlot): void {
@@ -1400,6 +1609,15 @@ async function pathExists(p: string): Promise<boolean> {
 	} catch (err: unknown) {
 		return (err as NodeJS.ErrnoException).code !== "ENOENT"
 	}
+}
+
+function isReadableStream(value: unknown): value is Readable {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"on" in value &&
+		typeof (value as { on: unknown }).on === "function"
+	)
 }
 
 function killGroup(child: ChildProcess, sig: NodeJS.Signals): void {
