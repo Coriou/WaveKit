@@ -66,6 +66,9 @@ const RUST_IDENTITY_KEYS = new Set<keyof LiveDemodConfig>([
 
 const RUST_EXIT_REASON = "Live demodulation Rust engine exited"
 
+/** Fixed warn/restart text for a retune the process refused. No detail. */
+export const RUST_RETUNE_REJECTED_LOG = "Live demodulation Rust retune rejected"
+
 export interface RustPowerSample {
 	powerDbfs: number | null
 	/** FM quieting shows a carrier, matching `ChannelSquelch.blockQuieted`. */
@@ -122,7 +125,11 @@ export class RustLiveRun {
 	/** An identity change has been requested and not yet applied. */
 	private identityUnacked = false
 	private sentConfig: LiveDemodConfig | null = null
+	/** Last config the process has applied (`open`, or a `retuned`). */
+	private ackedConfig: LiveDemodConfig | null = null
 	private queuedConfig: LiveDemodConfig | null = null
+	/** Retune rejections since the last `retuned`. Two in a row restart. */
+	private retuneRejects = 0
 	/** Rust died during the initial start, before HTTP can arm the backoff. */
 	private deferredStartFailure: string | null = null
 
@@ -135,6 +142,24 @@ export class RustLiveRun {
 	/** 48 kHz while Rust owns the run; null on the csdr path. */
 	audioRateHz(): number | null {
 		return this.host.currentRun()?.rust ? RUST_AUDIO_RATE_HZ : null
+	}
+
+	/**
+	 * Format to advertise while Rust is requested and has not fallen back,
+	 * and no run is up yet (the initial start, or a crash backoff). Callers
+	 * that already have a run use that run's stream instead.
+	 */
+	pendingStream(): {
+		rate: number
+		format: LiveDemodConfig["audioFormat"]
+	} | null {
+		if (this.host.currentRun() !== null) return null
+		if (!rustEngineRequested(this.host.config())) return null
+		if (this.engineFallback !== null) return null
+		return {
+			rate: RUST_AUDIO_RATE_HZ,
+			format: this.host.config().audioFormat,
+		}
 	}
 
 	clearLatch(): void {
@@ -181,7 +206,9 @@ export class RustLiveRun {
 			this.pushSquelch(run)
 			return
 		}
-		this.dispatchRetune(run, previous, next)
+		// Diff from the config the process actually has. A rejected retune
+		// leaves `sentConfig` on that ack, which may be older than `previous`.
+		this.dispatchRetune(run, this.sentConfig ?? previous, next)
 	}
 
 	pushSquelch(run: PipelineRun): void {
@@ -273,6 +300,10 @@ export class RustLiveRun {
 						const current = slot.run
 						if (current) this.onRetuned(current)
 					},
+					onRejected: reasonCode => {
+						const current = slot.run
+						if (current) this.onRetuneRejected(current, reasonCode)
+					},
 					onMetrics: (power, quieting) => {
 						const current = slot.run
 						if (current) this.onMetrics(current, power, quieting)
@@ -322,6 +353,9 @@ export class RustLiveRun {
 		this.engineFallback = null
 		this.warnedFallback = null
 		this.lastSentSquelch = JSON.stringify(squelch)
+		this.ackedConfig = config
+		this.sentConfig = config
+		this.retuneRejects = 0
 		this.host.adoptRun(run)
 		this.host.log.info(
 			{
@@ -367,17 +401,52 @@ export class RustLiveRun {
 		const coveredIdentity = this.inFlightHoldsIdentity
 		this.inFlight = false
 		this.inFlightHoldsIdentity = false
+		this.retuneRejects = 0
+		if (this.sentConfig !== null) this.ackedConfig = this.sentConfig
 		const queued = this.queuedConfig
 		const sent = this.sentConfig
 		if (queued !== null && sent !== null) {
 			this.queuedConfig = null
-			// This ack does not cover a newer identity that is still queued.
-			if (coveredIdentity && !identityChanged(sent, queued))
-				this.releaseHold(run)
+			// `sent` is applied. Release when that identity is still the latest
+			// request, including a queue whose identity edits cancelled out.
+			if (!identityChanged(sent, queued)) this.releaseHold(run)
 			this.dispatchRetune(run, sent, queued)
 			return
 		}
 		if (coveredIdentity) this.releaseHold(run)
+	}
+
+	/**
+	 * A `rejected` for the in-flight retune is not a `retuned`: the process
+	 * still has `ackedConfig`. One rejection frees the slot; a second in a
+	 * row restarts the run. Open-time rejection never reaches here (`inFlight`
+	 * is false, and the run does not exist yet).
+	 */
+	private onRetuneRejected(run: PipelineRun, reasonCode: string): void {
+		if (this.host.currentRun() !== run || run.stopping || !this.inFlight) return
+		this.host.log.warn(
+			{ err: safeErrorFields(reasonCode) },
+			RUST_RETUNE_REJECTED_LOG,
+		)
+		this.retuneRejects += 1
+		if (this.retuneRejects >= 2) {
+			this.resetRetuneTracking()
+			this.host.handleRunFailure(run, RUST_RETUNE_REJECTED_LOG)
+			return
+		}
+		const queued = this.queuedConfig
+		const desired = queued ?? this.sentConfig
+		const acked = this.ackedConfig
+		this.inFlight = false
+		this.inFlightHoldsIdentity = false
+		this.queuedConfig = null
+		this.sentConfig = acked
+		if (desired !== null && acked !== null && !identityChanged(acked, desired))
+			this.releaseHold(run)
+		// The in-flight write was refused. A newer config waiting on it still
+		// has to go out, diffed from the config the process kept.
+		if (queued !== null && acked !== null)
+			this.dispatchRetune(run, acked, queued)
 	}
 
 	private releaseHold(run: PipelineRun): void {
@@ -409,8 +478,13 @@ export class RustLiveRun {
 			this.inFlight = true
 			this.inFlightHoldsIdentity =
 				identityChanged(previous, next) && this.identityUnacked
-		} else if (identityChanged(previous, next) && this.identityUnacked) {
-			this.releaseHold(run)
+		} else if (identityChanged(previous, next)) {
+			if (this.identityUnacked) this.releaseHold(run)
+		} else {
+			// Nothing new went out. The process already has this identity,
+			// including when a queued identity change cancelled itself.
+			this.ackedConfig = next
+			if (this.identityUnacked) this.releaseHold(run)
 		}
 		this.sentConfig = next
 		this.pushSquelch(run)
@@ -421,7 +495,9 @@ export class RustLiveRun {
 		this.inFlightHoldsIdentity = false
 		this.identityUnacked = false
 		this.sentConfig = null
+		this.ackedConfig = null
 		this.queuedConfig = null
+		this.retuneRejects = 0
 	}
 
 	private onMetrics(

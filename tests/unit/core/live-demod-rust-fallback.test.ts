@@ -3,6 +3,7 @@ import type { MockInstance } from "vitest"
 import * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
+import { RUST_RETUNE_REJECTED_LOG } from "../../../src/core/live-demod/rust-run.js"
 import { RUST_FALLBACK_LOG } from "../../../src/core/live-demod/select-engine.js"
 import type { LiveDemodulator as LiveDemodulatorType } from "../../../src/core/live-demodulator.js"
 import {
@@ -598,6 +599,220 @@ describe("live demod rust fallback and retune", () => {
 		)
 		expect(channelCount).toBe(3)
 		expect(versions.length).toBeGreaterThanOrEqual(1)
+	})
+
+	it("releases the squelch hold when queued identity changes cancel", async () => {
+		await boot({ squelch: 0 })
+		expect(demod?.isSquelchOpen()).toBe(true)
+		await demod?.reconfigure({ gain: 4 })
+		await demod?.reconfigure({ offsetHz: 1000 })
+		await demod?.reconfigure({ offsetHz: 0 })
+		expect(demod?.isSquelchOpen()).toBe(false)
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 480 }))
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toHaveLength(1)
+		expect(retunes[0]).toMatchObject({ audio: { gain: 4 } })
+		expect(retunes[0]).not.toHaveProperty("centerHz")
+		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
+	async function streamResponse(port: number): Promise<http.IncomingMessage> {
+		return await new Promise((resolve, reject) => {
+			const req = http.get(
+				{ host: "127.0.0.1", port, path: "/stream" },
+				resolve,
+			)
+			req.on("error", reject)
+		})
+	}
+
+	it("advertises the rust stream format while a rust start is backing off", async () => {
+		exitBeforeReady = true
+		const { port, lines } = await boot(
+			{ audioFormat: "f32le" },
+			{ restartBaseDelayMs: 400, restartMaxDelayMs: 400 },
+		)
+		exitBeforeReady = false
+		const res = await streamResponse(port)
+		expect(res.headers["x-sample-rate"]).toBe("48000")
+		expect(res.headers["x-audio-format"]).toBe("f32le")
+		res.resume()
+		let closed = false
+		res.on("close", () => {
+			closed = true
+		})
+		res.on("error", () => undefined)
+		try {
+			await vi.waitFor(() => expect(demod?.getStatus().engine).toBe("rust"), {
+				timeout: 2000,
+			})
+			await new Promise(resolve => setTimeout(resolve, 30))
+			expect(closed).toBe(false)
+			expect(demod?.getStatus().clientCount).toBe(1)
+			expect(demod?.getStatus().effectiveSampleRate).toBe(48_000)
+			expect(
+				lines.some(line => line["reason"] === "stream format changed"),
+			).toBe(false)
+		} finally {
+			res.destroy()
+		}
+	})
+
+	it("closes a backoff client when rust falls back to csdr", async () => {
+		exitBeforeReady = true
+		const { port, lines } = await boot(
+			{},
+			{ restartBaseDelayMs: 30, restartMaxDelayMs: 40 },
+		)
+		const res = await streamResponse(port)
+		expect(res.headers["x-sample-rate"]).toBe("48000")
+		expect(res.headers["x-audio-format"]).toBe("s16le")
+		res.resume()
+		let closed = false
+		res.on("close", () => {
+			closed = true
+		})
+		res.on("error", () => undefined)
+		try {
+			await vi.waitFor(
+				() => {
+					expect(demod?.getStatus().engine).toBe("csdr")
+					expect(demod?.getStatus().engineFallback).toBe("process-unstable")
+					expect(closed).toBe(true)
+				},
+				{ timeout: 4000 },
+			)
+			expect(
+				lines.some(line => line["reason"] === "stream format changed"),
+			).toBe(true)
+			expect(demod?.getStatus().clientCount).toBe(0)
+		} finally {
+			res.destroy()
+		}
+	})
+
+	function rejectRetune(canary = "CANARY-DETAIL"): void {
+		channels[0]?.emitLine(
+			demodEvent("rejected", {
+				reasonCode: "CANARY-REASON",
+				detail: canary,
+			}),
+		)
+	}
+
+	it("recovers a rejected retune and restarts after a second rejection", async () => {
+		const { lines } = await boot({ squelch: 0 })
+		await demod?.reconfigure({ gain: 4 })
+		rejectRetune()
+		expect(demod?.isSquelchOpen()).toBe(true)
+		expect(channelCount).toBe(1)
+		await demod?.reconfigure({ offsetHz: 1000 })
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toEqual([
+			expect.objectContaining({ audio: { gain: 4 } }),
+			expect.objectContaining({
+				centerHz: 1000,
+				audio: expect.objectContaining({ gain: 4 }) as unknown,
+			}),
+		])
+		expect(demod?.isSquelchOpen()).toBe(false)
+		const warns = () =>
+			lines.filter(line => line["msg"] === RUST_RETUNE_REJECTED_LOG)
+		expect(warns()).toEqual([
+			expect.objectContaining({ err: { type: "string" } }),
+		])
+		expect(JSON.stringify(lines)).not.toContain("CANARY")
+		rejectRetune("CANARY-DETAIL-2")
+		expect(warns()).toHaveLength(2)
+		expect(JSON.stringify(lines)).not.toContain("CANARY")
+		await vi.waitFor(
+			() => {
+				expect(channelCount).toBe(2)
+				expect(demod?.getStatus().engine).toBe("rust")
+				expect(demod?.getStatus().engineFallback).toBeUndefined()
+			},
+			{ timeout: 2000 },
+		)
+		const open = controlMessages(channels[1]?.controlText ?? "").find(
+			message => message["type"] === "open",
+		)
+		expect(open?.["centerHz"]).toBe(1000)
+		expect(open?.["audio"]).toMatchObject({ gain: 4 })
+	})
+
+	it("sends the queued retune after the in-flight one is rejected", async () => {
+		await boot({ squelch: 0 })
+		await demod?.reconfigure({ gain: 4 })
+		await demod?.reconfigure({ offsetHz: 1000 })
+		expect(demod?.isSquelchOpen()).toBe(false)
+		rejectRetune()
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toEqual([
+			expect.objectContaining({ audio: { gain: 4 } }),
+			expect.objectContaining({
+				centerHz: 1000,
+				audio: expect.objectContaining({ gain: 4 }) as unknown,
+			}),
+		])
+		expect(demod?.isSquelchOpen()).toBe(false)
+		expect(channelCount).toBe(1)
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
+		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
+	it("keeps the gate hold when a rejected identity retune is still outstanding", async () => {
+		await boot({ squelch: 0 })
+		await demod?.reconfigure({ offsetHz: 1000 })
+		expect(demod?.isSquelchOpen()).toBe(false)
+		rejectRetune()
+		expect(demod?.isSquelchOpen()).toBe(false)
+		expect(channelCount).toBe(1)
+		await demod?.reconfigure({ gain: 4 })
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toHaveLength(2)
+		expect(retunes[1]).toMatchObject({
+			centerHz: 1000,
+			audio: expect.objectContaining({ gain: 4 }) as unknown,
+		})
+		expect(demod?.isSquelchOpen()).toBe(false)
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 960 }))
+		expect(demod?.isSquelchOpen()).toBe(true)
+	})
+
+	it("releases the hold when a rejected identity change is reverted", async () => {
+		await boot({ squelch: 0 })
+		await demod?.reconfigure({ offsetHz: 1000 })
+		rejectRetune()
+		expect(demod?.isSquelchOpen()).toBe(false)
+		await demod?.reconfigure({ offsetHz: 0 })
+		expect(demod?.isSquelchOpen()).toBe(true)
+		const retunes = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "retune",
+		)
+		expect(retunes).toHaveLength(1)
+		expect(channelCount).toBe(1)
+	})
+
+	it("does not restart when retuned separates retune rejections", async () => {
+		await boot({ squelch: 0 })
+		await demod?.reconfigure({ gain: 4 })
+		rejectRetune()
+		await demod?.reconfigure({ gain: 5 })
+		channels[0]?.emitLine(demodEvent("retuned", { atOutputSample: 480 }))
+		await demod?.reconfigure({ gain: 6 })
+		rejectRetune()
+		await new Promise(resolve => setTimeout(resolve, 40))
+		expect(channelCount).toBe(1)
+		expect(demod?.getStatus().engine).toBe("rust")
+		expect(demod?.isSquelchOpen()).toBe(true)
 	})
 
 	it("counts a manual rust carrier at the default quieting threshold", async () => {

@@ -1130,6 +1130,11 @@ export class LiveDemodulator extends EventEmitter {
 	/** Stream format a new client is told about (current run, else planned). */
 	private plannedStream(): StreamFormat {
 		if (this.run) return this.run.stream
+		// Rust has no run during the initial crash backoff. Advertise 48 kHz
+		// until it recovers. A csdr fallback still closes mismatched clients
+		// in restartPipeline ("stream format changed").
+		const pending = this.rustRuns?.pendingStream()
+		if (pending) return pending
 		const sourceId = this.activeSourceId ?? this.config.sourceId
 		const rate = sourceId
 			? this.calculateRates(sourceId, this.config).effectiveSampleRate
