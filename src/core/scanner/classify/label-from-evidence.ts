@@ -3,9 +3,12 @@ import type {
 	ProofInput,
 } from "../scanner-redesign-contract.js"
 import type {
+	Identity,
 	IdentityKind,
 	ProtocolFamily,
 	ScannerConfidence,
+	ScannerProofKind,
+	ScannerProofTransport,
 	ScannerProtocol,
 } from "../types.js"
 import { familyOf } from "./classifier.js"
@@ -130,6 +133,11 @@ function isProtocol(v: unknown): v is ScannerProtocol {
 	return typeof v === "string" && PROTOCOLS.has(v)
 }
 
+/** A known scanner protocol, including `unknown`. Anything else proves nothing. */
+export function knownProtocol(v: unknown): v is ScannerProtocol {
+	return isProtocol(v)
+}
+
 /**
  * True when `identity` may confirm `protocol` as `decoded`: its kind is the one
  * that protocol's confirm interpreter stores, and its value is a non-empty string
@@ -159,6 +167,11 @@ export function identityFitsProtocol(
 	}
 }
 
+/** A protocol whose confirm interpreter stores an identity. Analog, carrier and unknown are not. */
+export function decodableProtocol(protocol: ScannerProtocol): boolean {
+	return IDENTITY_KIND_FOR[protocol] !== undefined
+}
+
 function named(
 	protocol: ScannerProtocol,
 	confidence: ScannerConfidence,
@@ -166,10 +179,26 @@ function named(
 	return { protocol, family: familyOf(protocol), confidence }
 }
 
+/** The naming outcome a proof is allowed to claim. Null when the label is not proof-worthy. */
+export interface ProofFacts {
+	readonly kind: ScannerProofKind
+	readonly protocol: ScannerProtocol
+	readonly transport: ScannerProofTransport
+	readonly at: number
+	readonly encrypted: boolean
+	readonly identity?: Identity
+	readonly talkgroup?: string
+	readonly tone?: ProofAnalogInput["tone"]
+	readonly voice?: boolean
+}
+
 interface AcceptedDecode {
 	readonly protocol: ScannerProtocol
+	readonly transport: ScannerProofTransport
 	readonly at: number
-	readonly identity: boolean
+	readonly encrypted: boolean
+	readonly identity?: Identity
+	readonly talkgroup?: string
 }
 
 function acceptDecode(item: unknown): AcceptedDecode | undefined {
@@ -188,13 +217,31 @@ function acceptDecode(item: unknown): AcceptedDecode | undefined {
 	if (identity !== undefined && !identityFitsProtocol(protocol, identity))
 		return undefined
 	if (talkgroup !== undefined && typeof talkgroup !== "string") return undefined
-	return { protocol, at, identity: identity !== undefined }
+	let copied: Identity | undefined
+	if (identity !== undefined) {
+		if (!isRecord(identity)) return undefined
+		const kind = prop(identity, "kind")
+		const value = prop(identity, "value")
+		if (typeof kind !== "string" || typeof value !== "string") return undefined
+		copied = { kind: kind as IdentityKind, value }
+	}
+	return {
+		protocol,
+		transport: transport as ScannerProofTransport,
+		at,
+		encrypted,
+		...(copied !== undefined ? { identity: copied } : {}),
+		...(typeof talkgroup === "string" && talkgroup.length > 0
+			? { talkgroup }
+			: {}),
+	}
 }
 
 interface ToneFacts {
 	readonly present: boolean
 	/** ctcssHz null or 0, and no DCS code. */
 	readonly quiet: boolean
+	readonly tone: ProofAnalogInput["tone"]
 }
 
 function toneFacts(tone: unknown): ToneFacts | undefined {
@@ -215,17 +262,34 @@ function toneFacts(tone: unknown): ToneFacts | undefined {
 		dcsPresent = true
 	}
 	const ctcssPresent = typeof hz === "number" && hz > 0
+	let copiedDcs: ProofAnalogInput["tone"]["dcs"] = null
+	if (dcsPresent && isRecord(dcs)) {
+		const code = prop(dcs, "code")
+		const polarity = prop(dcs, "polarity")
+		if (
+			typeof code === "string" &&
+			(polarity === "normal" || polarity === "inverted")
+		)
+			copiedDcs = { code, polarity }
+	}
 	return {
 		present: ctcssPresent || dcsPresent,
 		quiet: (hz === null || hz === 0) && !dcsPresent,
+		tone: {
+			ctcssHz: typeof hz === "number" ? hz : null,
+			dcs: copiedDcs,
+		},
 	}
 }
 
 interface AcceptedAnalog {
 	readonly outcome: ProofAnalogInput["outcome"]
 	readonly mode: ProofAnalogInput["mode"]
+	readonly transport: ScannerProofTransport
 	readonly at: number
-	readonly tone: boolean
+	readonly voice: boolean
+	readonly toneOn: boolean
+	readonly tone: ProofAnalogInput["tone"]
 }
 
 /**
@@ -266,8 +330,38 @@ function acceptAnalog(item: unknown): AcceptedAnalog | undefined {
 	return {
 		outcome: outcome as ProofAnalogInput["outcome"],
 		mode,
+		transport: transport as ScannerProofTransport,
 		at,
-		tone: tone.present,
+		voice,
+		toneOn: tone.present,
+		tone: tone.tone,
+	}
+}
+
+/** A validated analog row, copied so the caller cannot alias the stored tone. */
+export function acceptedAnalogEvidence(
+	item: unknown,
+): ProofAnalogInput | undefined {
+	try {
+		const row = acceptAnalog(item)
+		if (row === undefined) return undefined
+		const tone: ProofAnalogInput["tone"] = {
+			ctcssHz: row.tone.ctcssHz,
+			dcs:
+				row.tone.dcs === null
+					? null
+					: { code: row.tone.dcs.code, polarity: row.tone.dcs.polarity },
+		}
+		return {
+			outcome: row.outcome,
+			mode: row.mode,
+			voice: row.voice,
+			tone,
+			transport: row.transport,
+			at: row.at,
+		}
+	} catch {
+		return undefined
 	}
 }
 
@@ -321,46 +415,128 @@ function shapeOf(value: unknown): Shaped | undefined {
 	return { decodes, analog, trust: knownTrust, digitalPlanComplete }
 }
 
+interface Decision {
+	readonly label: EvidenceLabel
+	readonly facts: ProofFacts | null
+}
+
+function decodeFacts(row: AcceptedDecode): ProofFacts {
+	return {
+		kind: "decoded",
+		protocol: row.protocol,
+		transport: row.transport,
+		at: row.at,
+		encrypted: row.encrypted,
+		...(row.identity !== undefined ? { identity: row.identity } : {}),
+		...(row.talkgroup !== undefined ? { talkgroup: row.talkgroup } : {}),
+	}
+}
+
+function toneProof(row: AcceptedAnalog): ProofFacts {
+	const dcs = row.tone.dcs
+	return {
+		kind: "analog-tone",
+		protocol: analogProtocol(row.mode),
+		transport: row.transport,
+		at: row.at,
+		encrypted: false,
+		voice: row.voice,
+		tone: {
+			ctcssHz: row.tone.ctcssHz,
+			dcs: dcs === null ? null : { code: dcs.code, polarity: dcs.polarity },
+		},
+	}
+}
+
+function rowFacts(
+	kind: "analog-voice" | "digital-undecoded" | "carrier-only",
+	protocol: ScannerProtocol,
+	row: AcceptedAnalog,
+): ProofFacts {
+	const facts: ProofFacts = {
+		kind,
+		protocol,
+		transport: row.transport,
+		at: row.at,
+		encrypted: false,
+	}
+	return kind === "analog-voice" ? { ...facts, voice: true } : facts
+}
+
 /**
  * One winning outcome, strongest first: accepted identity, any other decode,
  * analog tone or code, analog voice, completed digital plan, carrier.
  * An identity-less decode names its protocol at `activity` (requirement 3.2:
- * `decoded` is the first accepted identity). DMR's two CRC-clean lines stay
- * in the confirm interpreters; a decode that reaches this function is already
- * accepted.
+ * `decoded` is the first accepted identity) and is not a proof. DMR's two
+ * CRC-clean lines stay in the confirm interpreters; a decode that reaches
+ * this function is already accepted.
  */
-export function labelFromEvidence(e: ProofInput): EvidenceLabel {
-	try {
-		const input = shapeOf(e as unknown)
-		if (input === undefined) return UNKNOWN_LABEL
-		const identified = newest(input.decodes.filter(d => d.identity))
-		if (identified !== undefined) return named(identified.protocol, "decoded")
-		const namedDecode = newest(input.decodes)
-		if (namedDecode !== undefined)
-			return named(namedDecode.protocol, "activity")
-		const trustKnown = input.trust !== "unknown"
-		if (trustKnown) {
-			const tone = newest(
-				input.analog.filter(a => a.outcome === "decoded" && a.tone),
-			)
-			if (tone !== undefined) {
-				const confidence =
-					input.trust === "unverified" ? "candidate" : "classified"
-				return named(analogProtocol(tone.mode), confidence)
-			}
-			const heard = newest(input.analog.filter(a => a.outcome === "heard"))
-			if (heard !== undefined)
-				return named(analogProtocol(heard.mode), "candidate")
+function decide(e: ProofInput): Decision {
+	const input = shapeOf(e as unknown)
+	if (input === undefined) return { label: UNKNOWN_LABEL, facts: null }
+	const identified = newest(input.decodes.filter(d => d.identity !== undefined))
+	if (identified !== undefined)
+		return {
+			label: named(identified.protocol, "decoded"),
+			facts: decodeFacts(identified),
 		}
-		if (
-			input.digitalPlanComplete &&
-			input.analog.some(a => a.outcome === "data-like")
+	const activity = newest(input.decodes)
+	if (activity !== undefined)
+		return { label: named(activity.protocol, "activity"), facts: null }
+	const trustKnown = input.trust !== "unknown"
+	if (trustKnown) {
+		const tone = newest(
+			input.analog.filter(a => a.outcome === "decoded" && a.toneOn),
 		)
-			return named("digital-unknown", "candidate")
-		if (input.analog.some(a => a.outcome === "carrier-only"))
-			return named("carrier", "activity")
-		return UNKNOWN_LABEL
-	} catch {
-		return UNKNOWN_LABEL
+		if (tone !== undefined) {
+			const confidence =
+				input.trust === "unverified" ? "candidate" : "classified"
+			return {
+				label: named(analogProtocol(tone.mode), confidence),
+				facts: toneProof(tone),
+			}
+		}
+		const heard = newest(input.analog.filter(a => a.outcome === "heard"))
+		if (heard !== undefined)
+			return {
+				label: named(analogProtocol(heard.mode), "candidate"),
+				facts: rowFacts("analog-voice", analogProtocol(heard.mode), heard),
+			}
 	}
+	if (input.digitalPlanComplete) {
+		const data = newest(input.analog.filter(a => a.outcome === "data-like"))
+		if (data !== undefined)
+			return {
+				label: named("digital-unknown", "candidate"),
+				facts: rowFacts("digital-undecoded", "digital-unknown", data),
+			}
+	}
+	const carrier = newest(input.analog.filter(a => a.outcome === "carrier-only"))
+	if (carrier !== undefined)
+		return {
+			label: named("carrier", "activity"),
+			facts: rowFacts("carrier-only", "carrier", carrier),
+		}
+	return { label: UNKNOWN_LABEL, facts: null }
+}
+
+/** One decision for both the label and the proof facts. A throw yields the safe label. */
+export function labelAndFacts(e: ProofInput): {
+	label: EvidenceLabel
+	facts: ProofFacts | null
+} {
+	try {
+		return decide(e)
+	} catch {
+		return { label: UNKNOWN_LABEL, facts: null }
+	}
+}
+
+/** Naming facts for `deriveProof`. A missing, malformed or throwing input is null. */
+export function proofFacts(e: ProofInput): ProofFacts | null {
+	return labelAndFacts(e).facts
+}
+
+export function labelFromEvidence(e: ProofInput): EvidenceLabel {
+	return labelAndFacts(e).label
 }

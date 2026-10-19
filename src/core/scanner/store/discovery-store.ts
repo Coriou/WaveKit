@@ -19,15 +19,35 @@ import {
 	rasterToleranceHz,
 	snapToRaster,
 } from "../bandplan/index.js"
+import type { ScannerProbeDecoderType } from "@wavekit/api-types"
 import { familyOf } from "../classify/classifier.js"
 import {
+	UNKNOWN_LABEL,
+	acceptedAnalogEvidence,
 	identityFitsProtocol,
+	knownProtocol,
+	labelAndFacts,
 	labelFromEvidence,
 } from "../classify/label-from-evidence.js"
-import type { EvidenceLabel } from "../classify/label-from-evidence.js"
 import type {
+	EvidenceLabel,
+	ProofFacts,
+} from "../classify/label-from-evidence.js"
+import {
+	evidenceLevelOf,
+	proofFromFacts,
+	strongestKnownProof,
+} from "../proof.js"
+import type {
+	ObservationEvidenceSink,
+	ProofAnalogInput,
 	ProofDecodeInput,
 	ProofInput,
+	ProofTrialInput,
+} from "../scanner-redesign-contract.js"
+import {
+	PROOF_ANALOG_MAX_PER_OBSERVATION,
+	PROOF_TRIALS_MAX_PER_OBSERVATION,
 } from "../scanner-redesign-contract.js"
 import { CONFIDENCE_RANK } from "../types.js"
 import type {
@@ -42,6 +62,7 @@ import type {
 	ProtocolFamily,
 	ScannerClass,
 	ScannerConfidence,
+	ScannerProof,
 	ScannerProtocol,
 	SignalStats,
 } from "../types.js"
@@ -162,6 +183,7 @@ type Ingested = {
 
 const METADATA_MAX = 64
 const LINKS_MAX = 64
+const NO_LINKS: readonly string[] = []
 /** Per-discovery observation window (WG11: exported for the snapshot mirror). */
 export const OBSERVATIONS_PER_DISCOVERY = 256
 const OBSERVATION_DECODE_MAX = 16
@@ -358,30 +380,125 @@ function emptyProof(obs: ObservationInput): ProofInput {
 	}
 }
 
-/** One decode, as the store holds it. Replay transport arrives with the evidence sink. */
-function proofOfDecode(
-	observationId: string,
-	ev: DecodeEvidence,
-	trust: TrackSnapshot["tuningTrust"],
-): ProofInput {
-	const decode: ProofDecodeInput = {
-		protocol: ev.protocol,
-		transport: ev.origin === "ambient" ? "ambient" : "live",
-		at: ev.at,
-		encrypted: ev.encrypted === true,
+const TRIAL_OUTCOMES = new Set<string>([
+	"pending",
+	"running",
+	"decoded",
+	"no-sync",
+	"crc-errors",
+	"timeout",
+	"skipped-budget",
+	"unsupported",
+	"not-needed",
+	"cancelled",
+	"heard",
+	"data-like",
+	"carrier-only",
+])
+
+const PROBE_DECODERS = new Set<string>([
+	"direwolf",
+	"dsd-fme",
+	"multimon-ng",
+	"rtl433",
+])
+
+interface EvidenceBag {
+	trials: ProofTrialInput[]
+	analog: ProofAnalogInput[]
+	unavailable: ScannerProbeDecoderType[]
+}
+
+/**
+ * Persisted decode → proof input. Ambient origin stays ambient. Every other
+ * stored decode is live. A replay decode is persisted with the same origin
+ * (`probe`) and no other marker, so this store cannot tell it from a live
+ * probe. Its proof transport stays live.
+ */
+function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
+	try {
+		if (ev.crcClean !== true) return undefined
+		if (!knownProtocol(ev.protocol) || ev.protocol === "unknown")
+			return undefined
+		if (typeof ev.at !== "number" || !Number.isFinite(ev.at)) return undefined
+		const row: ProofDecodeInput = {
+			protocol: ev.protocol,
+			transport: ev.origin === "ambient" ? "ambient" : "live",
+			at: ev.at,
+			encrypted: ev.encrypted === true,
+		}
+		if (ev.identity !== undefined)
+			row.identity = { kind: ev.identity.kind, value: ev.identity.value }
+		const talkgroup = ev.metadata.talkgroups?.[0]
+		if (typeof talkgroup === "string") row.talkgroup = talkgroup
+		return row
+	} catch {
+		return undefined
 	}
-	if (ev.identity !== undefined)
-		decode.identity = { kind: ev.identity.kind, value: ev.identity.value }
-	const talkgroup = ev.metadata.talkgroups?.[0]
-	if (talkgroup !== undefined) decode.talkgroup = talkgroup
-	return {
-		observationId,
-		decodes: [decode],
-		trials: [],
-		analog: [],
-		unavailable: [],
-		trust,
-		digitalPlanComplete: false,
+}
+
+const DIGITAL_FAILURE = new Set<string>(["no-sync", "crc-errors", "timeout"])
+
+function isAnalogDecoder(decoder: string): boolean {
+	return decoder === "analog-demod" || decoder === "live-audio"
+}
+
+/**
+ * A data-like analog outcome, no decoded digital trial, and every digital
+ * trial either ran and failed (`no-sync`, `crc-errors`, `timeout`) or is
+ * `unsupported` because its decoder is in `unavailable`. Pending, running,
+ * skipped-budget and cancelled trials are not finished failures. No digital
+ * trial and no unavailable decoder is not a completed plan. No digital trial
+ * with at least one unavailable decoder is the no-decoder case.
+ */
+function digitalPlanCompleteOf(
+	analog: readonly ProofAnalogInput[],
+	trials: readonly ProofTrialInput[],
+	unavailable: readonly string[],
+): boolean {
+	let dataLike = false
+	for (const row of analog) {
+		if (row.outcome === "data-like") dataLike = true
+	}
+	if (!dataLike) return false
+	const missing = new Set(unavailable)
+	let digital = 0
+	for (const trial of trials) {
+		if (isAnalogDecoder(trial.decoder)) continue
+		digital += 1
+		const outcome = trial.outcome
+		if (outcome === "decoded") return false
+		if (
+			outcome === "pending" ||
+			outcome === "running" ||
+			outcome === "skipped-budget" ||
+			outcome === "cancelled"
+		)
+			return false
+		if (DIGITAL_FAILURE.has(outcome)) continue
+		if (outcome === "unsupported" && missing.has(trial.decoder)) continue
+		return false
+	}
+	if (digital === 0 && missing.size === 0) return false
+	return true
+}
+
+function acceptTrial(row: ProofTrialInput): ProofTrialInput | undefined {
+	try {
+		const protocol = row.protocol
+		const decoder = row.decoder
+		const outcome = row.outcome
+		const order = row.order
+		const at = row.at
+		if (!knownProtocol(protocol) || protocol === "unknown") return undefined
+		if (typeof decoder !== "string" || decoder.length === 0) return undefined
+		if (typeof outcome !== "string" || !TRIAL_OUTCOMES.has(outcome))
+			return undefined
+		if (typeof order !== "number" || !Number.isFinite(order)) return undefined
+		if (typeof at !== "number" || !Number.isFinite(at)) return undefined
+		return { protocol, decoder, outcome, order, at }
+	} catch {
+		return undefined
 	}
 }
 
@@ -442,7 +559,10 @@ const recordDuration = (o: Observation): number =>
 		? 0
 		: Math.max(0, Date.parse(o.endedAt) - Date.parse(o.startedAt))
 
-export class DiscoveryStore extends EventEmitter {
+export class DiscoveryStore
+	extends EventEmitter
+	implements ObservationEvidenceSink
+{
 	private maxDiscoveries: number
 	private readonly now: () => number
 	private readonly newId: () => string
@@ -493,6 +613,31 @@ export class DiscoveryStore extends EventEmitter {
 	private readonly countsDirty = new Set<string>()
 	private readonly jobCounts = new JobCounts()
 	private removal: StoreMirrorRemoval = { discoveries: [], observations: [] }
+	/** Monotonic trial order. Not cleared on restore and not written to disk. */
+	private trialOrder = 0
+	/** Trial, analog and unavailable evidence. Memory only, keyed by observation id. */
+	private readonly evidenceByObservation = new Map<string, EvidenceBag>()
+	/** Derived observation proof. Dropped when that observation's evidence changes. */
+	private readonly observationProofCache = new Map<
+		string,
+		{ proof: ScannerProof | null; label: EvidenceLabel }
+	>()
+	/** Strongest attributed proof. Also dropped for co-channel readers of a changed source. */
+	private readonly proofCache = new Map<
+		string,
+		{ proof: ScannerProof | null }
+	>()
+	/**
+	 * Discoveries whose proof reads this discovery's observations: they list it
+	 * in `coChannel`. Bounded by the co-channel cap and cleared on removal.
+	 */
+	private readonly proofWatchers = new Map<string, Set<string>>()
+	/** Partner ids last indexed for a discovery, so a co-channel edit can unlink them. */
+	private readonly proofWatched = new Map<string, readonly string[]>()
+	/** Co-channel proofs captured before a source changed, emitted once if the result differs. */
+	private pendingProof = new Map<string, ScannerProof | null>()
+	/** Replay and restore drop caches without publishing a sink change. */
+	private proofQuiet = 0
 
 	constructor(opts: DiscoveryStoreOptions) {
 		super()
@@ -594,6 +739,9 @@ export class DiscoveryStore extends EventEmitter {
 		const beforeRank = rank(d.confidence)
 		this.capInto(d, opts.cap)
 		this.decodeInto(d, ev)
+		// Drop the cached proof after the identity and cap are stored, so the one
+		// change below is the only publication and readers see the capped label.
+		this.proofCache.delete(d.id)
 		if (this.revision(d) === before) return null
 		const op = newOp()
 		op.discoveries.add(d.id)
@@ -675,11 +823,84 @@ export class DiscoveryStore extends EventEmitter {
 				? sorted.slice(sorted.length - OBSERVATION_DECODE_MAX)
 				: sorted
 		if (!kept.includes(added)) return false // older than the 16 kept
+		const before = this.peekProof(o.id)
+		this.armWatchers(o.discoveryId)
 		o.decode = kept
+		this.observationProofCache.delete(o.id)
+		this.proofCache.delete(o.discoveryId)
+		this.dropWatcherCaches(o.discoveryId)
+		const discovery = this.discoveries.get(o.discoveryId)
 		const op = newOp()
 		op.observations.add(o.id)
 		this.finish("evidence", op)
+		if (discovery !== undefined)
+			this.emitProofChange(
+				discovery.id,
+				before,
+				this.discoveryView(discovery).proof,
+			)
 		return true
+	}
+
+	nextTrialOrder(): number {
+		this.trialOrder += 1
+		return this.trialOrder
+	}
+
+	recordTrial(observationId: string, row: ProofTrialInput): boolean {
+		try {
+			const known = this.observationIndex.get(observationId)
+			if (known === undefined) return false
+			const accepted = acceptTrial(row)
+			if (accepted === undefined) return false
+			const armed = this.armWatchers(known.discoveryId)
+			const before = this.peekProof(observationId)
+			if (!this.rememberTrial(observationId, accepted)) {
+				this.disarm(armed)
+				return false
+			}
+			return this.publishEvidence(observationId, before)
+		} catch {
+			return false
+		}
+	}
+
+	recordAnalog(observationId: string, row: ProofAnalogInput): boolean {
+		try {
+			const known = this.observationIndex.get(observationId)
+			if (known === undefined) return false
+			const accepted = acceptedAnalogEvidence(row)
+			if (accepted === undefined) return false
+			const armed = this.armWatchers(known.discoveryId)
+			const before = this.peekProof(observationId)
+			if (!this.rememberAnalog(observationId, accepted)) {
+				this.disarm(armed)
+				return false
+			}
+			return this.publishEvidence(observationId, before)
+		} catch {
+			return false
+		}
+	}
+
+	recordUnavailable(
+		observationId: string,
+		type: ScannerProbeDecoderType,
+	): boolean {
+		try {
+			const known = this.observationIndex.get(observationId)
+			if (known === undefined) return false
+			if (typeof type !== "string" || !PROBE_DECODERS.has(type)) return false
+			const armed = this.armWatchers(known.discoveryId)
+			const before = this.peekProof(observationId)
+			if (!this.rememberUnavailable(observationId, type)) {
+				this.disarm(armed)
+				return false
+			}
+			return this.publishEvidence(observationId, before)
+		} catch {
+			return false
+		}
 	}
 
 	/** Runtime settings change (Task 35): the new bounds apply from the next ingest/eviction pass. */
@@ -710,7 +931,7 @@ export class DiscoveryStore extends EventEmitter {
 		op.discoveries.add(id)
 		mark(op, id, "updated")
 		this.finish("operator", op)
-		return clone(d)
+		return this.presentDiscovery(d)
 	}
 
 	delete(id: string): boolean {
@@ -1086,7 +1307,7 @@ export class DiscoveryStore extends EventEmitter {
 
 	get(id: string): Discovery | undefined {
 		const d = this.discoveries.get(id)
-		return d === undefined ? undefined : clone(d)
+		return d === undefined ? undefined : this.presentDiscovery(d)
 	}
 
 	list(filter: DiscoveryFilter): {
@@ -1104,13 +1325,17 @@ export class DiscoveryStore extends EventEmitter {
 		const identity = filter.identity
 		const identityValue = identity?.value.trim().toLowerCase()
 		const min = filter.minConfidence
-		const items = [...this.discoveries.values()].filter(
-			d =>
+		const labelFilter = filter.protocol !== undefined || min !== undefined
+		const items = [...this.discoveries.values()].filter(d => {
+			const label = labelFilter ? this.effectiveLabel(d) : undefined
+			return (
 				(filter.jobId === undefined || d.jobIds.includes(filter.jobId)) &&
 				(filter.sourceId === undefined ||
 					d.sourceIds.includes(filter.sourceId)) &&
-				(filter.protocol === undefined || d.protocol === filter.protocol) &&
-				(min === undefined || rank(d.confidence) >= rank(min)) &&
+				(filter.protocol === undefined ||
+					label?.protocol === filter.protocol) &&
+				(min === undefined ||
+					(label !== undefined && rank(label.confidence) >= rank(min))) &&
 				(filter.freqMinHz === undefined || d.frequencyHz >= filter.freqMinHz) &&
 				(filter.freqMaxHz === undefined || d.frequencyHz <= filter.freqMaxHz) &&
 				(filter.since === undefined ||
@@ -1121,8 +1346,9 @@ export class DiscoveryStore extends EventEmitter {
 						d.identity.value.trim().toLowerCase() === identityValue)) &&
 				(q === undefined ||
 					(d.operator?.label ?? "").toLowerCase().includes(q) ||
-					(d.identity?.value ?? "").toLowerCase().includes(q)),
-		)
+					(d.identity?.value ?? "").toLowerCase().includes(q))
+			)
+		})
 		const byLastSeen = (a: Discovery, b: Discovery): number =>
 			compareText(b.lastSeenAt, a.lastSeenAt) || compareText(a.id, b.id)
 		const sort = filter.sort ?? "lastSeen"
@@ -1131,10 +1357,13 @@ export class DiscoveryStore extends EventEmitter {
 				? (a, b) => a.frequencyHz - b.frequencyHz || compareText(a.id, b.id)
 				: sort === "confidence"
 					? (a, b) =>
-							rank(b.confidence) - rank(a.confidence) || byLastSeen(a, b)
+							rank(this.effectiveLabel(b).confidence) -
+								rank(this.effectiveLabel(a).confidence) || byLastSeen(a, b)
 					: byLastSeen,
 		)
-		const page = items.slice(offset, offset + limit).map(clone)
+		const page = items
+			.slice(offset, offset + limit)
+			.map(d => this.presentDiscovery(d))
 		return {
 			items: page,
 			nextCursor: offset + limit < items.length ? String(offset + limit) : null,
@@ -1150,7 +1379,9 @@ export class DiscoveryStore extends EventEmitter {
 		const offset = parseCursor(cursor)
 		const size = Math.min(MAX_LIMIT, Math.max(1, Math.floor(limit)))
 		return {
-			items: all.slice(offset, offset + size).map(clone),
+			items: all
+				.slice(offset, offset + size)
+				.map(o => this.presentObservation(o)),
 			nextCursor: offset + size < all.length ? String(offset + size) : null,
 		}
 	}
@@ -1208,6 +1439,10 @@ export class DiscoveryStore extends EventEmitter {
 				Object.freeze(recording),
 			)
 		}
+		this.evidenceByObservation.clear()
+		this.observationProofCache.clear()
+		this.proofCache.clear()
+		this.clearProofIndexes()
 		this.discoveries.clear()
 		this.observationIndex.clear()
 		this.byDiscovery.clear()
@@ -1223,14 +1458,20 @@ export class DiscoveryStore extends EventEmitter {
 		this.indexDirty.clear()
 		this.countsDirty.clear()
 		this.jobCounts.clear()
-		for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
-		for (const d of s.discoveries) this.insertDiscovery(clone(d))
-		for (const o of [...s.observations].sort(compareObs))
-			if (this.discoveries.has(o.discoveryId)) this.putObservation(clone(o))
-		this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
-		// the set was replaced, not trimmed: a mirror resets from the snapshot itself
-		this.removal = { discoveries: [], observations: [] }
-		this.catchUp()
+		this.proofQuiet++
+		try {
+			for (const c of s.corrections) this.corrections.set(c.sourceId, c.hz)
+			for (const d of s.discoveries) this.insertDiscovery(clone(d))
+			for (const o of [...s.observations].sort(compareObs))
+				if (this.discoveries.has(o.discoveryId)) this.putObservation(clone(o))
+			this.aliasTable.restore(s.aliases ?? [], id => this.discoveries.has(id))
+			// the set was replaced, not trimmed: a mirror resets from the snapshot itself
+			this.removal = { discoveries: [], observations: [] }
+			this.catchUp()
+		} finally {
+			this.proofQuiet--
+			this.pendingProof.clear()
+		}
 	}
 
 	replay(entry: JournalEntry): void {
@@ -1394,6 +1635,7 @@ export class DiscoveryStore extends EventEmitter {
 			const other = this.discoveries.get(otherId)
 			if (other === undefined) continue
 			other.coChannel = appendMissing(other.coChannel, [d.id])
+			this.syncProofWatch(other)
 			op.discoveries.add(other.id)
 			mark(op, other.id, "updated")
 		}
@@ -1446,6 +1688,7 @@ export class DiscoveryStore extends EventEmitter {
 		this.refresh(d)
 		if (this.revision(d) === beforeD && jsonEqual(record, known)) {
 			this.flushRemoval()
+			this.flushPending(new Set())
 			return { discoveryId: d.id, change: "updated" }
 		}
 		const joined = record.jobIds.filter(j => !known.jobIds.includes(j))
@@ -1468,6 +1711,8 @@ export class DiscoveryStore extends EventEmitter {
 		const d = this.discoveries.get(known.discoveryId)
 		if (d === undefined) return TRANSIENT
 		const op = newOp()
+		this.forgetEvidence(known.id)
+		this.bumpProof(known.discoveryId)
 		this.unlinkObservation(known)
 		op.removedObservations.push(known.id)
 		d.observationCount = Math.max(0, d.observationCount - 1)
@@ -1565,19 +1810,42 @@ export class DiscoveryStore extends EventEmitter {
 		// evidence without an identity is no confirm (§ 6.6): it may only refine the protocol, never switch the
 		// family, or settle() could merge an analog discovery into its co-channel digital twin irreversibly
 		this.markDirty(d.id)
-		const label = labelFromEvidence(proofOfDecode(d.id, ev, d.tuningTrust))
-		const adopt =
+		const decided = this.decidedLabel(d, ev)
+		const label = decided.label
+		const facts = decided.facts
+		const winnerIdentity = facts?.identity
+		const winnerProtocol = facts?.protocol
+		// Protocol and identity come from the decode that won the label. An
+		// incoming decode that lost does not replace an identity already stored.
+		const takeWinner =
+			facts?.kind === "decoded" &&
+			winnerIdentity !== undefined &&
+			winnerProtocol !== undefined &&
+			(d.identity === undefined ||
+				(ev.identity !== undefined &&
+					ev.protocol === winnerProtocol &&
+					sameIdentity(ev.identity, winnerIdentity)))
+		if (
+			takeWinner &&
+			winnerIdentity !== undefined &&
+			winnerProtocol !== undefined
+		) {
+			if (d.protocol !== winnerProtocol) {
+				d.protocol = winnerProtocol
+				d.family = label.family
+				this.touch(d)
+			}
+			if (!sameIdentity(d.identity, winnerIdentity)) {
+				d.identity = { kind: winnerIdentity.kind, value: winnerIdentity.value }
+				this.touch(d)
+			}
+		} else if (
+			facts?.kind !== "decoded" &&
 			label.protocol !== "unknown" &&
-			(ev.identity !== undefined
-				? d.protocol !== label.protocol
-				: moreSpecific(d.protocol, label.protocol))
-		if (adopt) {
+			moreSpecific(d.protocol, label.protocol)
+		) {
 			d.protocol = label.protocol
 			d.family = label.family
-			this.touch(d)
-		}
-		if (d.identity === undefined && ev.identity !== undefined) {
-			d.identity = { kind: ev.identity.kind, value: ev.identity.value }
 			this.touch(d)
 		}
 		if (ev.encrypted === true) {
@@ -1675,9 +1943,13 @@ export class DiscoveryStore extends EventEmitter {
 		if (partner !== undefined) {
 			twin.coChannel = [partner.id]
 			partner.coChannel = appendMissing(partner.coChannel, [twin.id])
+			this.syncProofWatch(twin)
+			this.syncProofWatch(partner)
 			op.discoveries.add(partner.id)
 			mark(op, partner.id, "updated")
 		}
+		this.proofCache.delete(twin.id)
+		this.proofCache.delete(d.id)
 		op.discoveries.add(twin.id)
 		mark(op, twin.id, "created")
 		const id = this.settle(op, twin)
@@ -1807,6 +2079,12 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	private absorb(op: Op, keep: Discovery, drop: Discovery): void {
+		const readers = [...this.watcherIds(keep.id), ...this.watcherIds(drop.id)]
+		this.armWatchers(keep.id)
+		this.armWatchers(drop.id)
+		this.dropReaders(readers)
+		this.proofCache.delete(keep.id)
+		this.proofCache.delete(drop.id)
 		this.markDirty(keep.id)
 		this.markDirty(drop.id)
 		for (const o of [...(this.byDiscovery.get(drop.id) ?? [])]) {
@@ -1878,6 +2156,7 @@ export class DiscoveryStore extends EventEmitter {
 		keep.coChannel = appendMissing(keep.coChannel, drop.coChannel).filter(
 			id => id !== keep.id && id !== drop.id,
 		)
+		this.syncProofWatch(keep)
 		for (const partnerId of drop.coChannel) {
 			const partner = this.discoveries.get(partnerId)
 			if (partner === undefined || partner.id === keep.id) continue
@@ -1885,6 +2164,7 @@ export class DiscoveryStore extends EventEmitter {
 				partner.coChannel.filter(id => id !== drop.id),
 				[keep.id],
 			)
+			this.syncProofWatch(partner)
 			op.discoveries.add(partner.id)
 			mark(op, partner.id, "updated")
 		}
@@ -1897,6 +2177,8 @@ export class DiscoveryStore extends EventEmitter {
 		mark(op, keep.id, "merged")
 		op.discoveries.add(keep.id)
 		this.refresh(keep)
+		this.dropReaders(readers)
+		this.proofCache.delete(keep.id)
 	}
 
 	/**
@@ -2000,14 +2282,20 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	private deleteInto(op: Op, d: Discovery): void {
+		const readers = this.watcherIds(d.id)
+		this.armWatchers(d.id)
+		this.dropReaders(readers)
+		this.proofCache.delete(d.id)
 		for (const partnerId of d.coChannel) {
 			const partner = this.discoveries.get(partnerId)
 			if (partner === undefined) continue
 			partner.coChannel = partner.coChannel.filter(id => id !== d.id)
+			this.syncProofWatch(partner)
 			op.discoveries.add(partner.id)
 			mark(op, partner.id, "updated")
 		}
 		this.removeDiscovery(d.id)
+		this.dropReaders(readers)
 		op.discoveries.delete(d.id)
 		op.deleted.push(d.id)
 		mark(op, d.id, "deleted")
@@ -2085,6 +2373,569 @@ export class DiscoveryStore extends EventEmitter {
 			members.add(s)
 		}
 		this.markDirty(d.id)
+		this.syncProofWatch(d)
+	}
+
+	private coChannelIds(d: Discovery): readonly string[] {
+		const links = d.coChannel
+		if (!Array.isArray(links) || links.length === 0) return NO_LINKS
+		return links.includes(d.id) ? links.filter(id => id !== d.id) : links
+	}
+
+	private watcherIds(ownerId: string): readonly string[] {
+		const watchers = this.proofWatchers.get(ownerId)
+		if (watchers === undefined || watchers.size === 0) return NO_LINKS
+		return [...watchers]
+	}
+
+	/** Records each co-channel reader's current proof. Returns ids newly armed. */
+	private armWatchers(ownerId: string): string[] {
+		if (this.proofQuiet > 0) return []
+		const watchers = this.proofWatchers.get(ownerId)
+		if (watchers === undefined || watchers.size === 0) return []
+		const added: string[] = []
+		for (const id of watchers) {
+			if (id === ownerId || this.pendingProof.has(id)) continue
+			const discovery = this.discoveries.get(id)
+			if (discovery === undefined) continue
+			this.pendingProof.set(id, this.discoveryView(discovery).proof)
+			added.push(id)
+		}
+		return added
+	}
+
+	private disarm(ids: readonly string[]): void {
+		for (const id of ids) this.pendingProof.delete(id)
+	}
+
+	private dropReaders(ids: readonly string[]): void {
+		for (const id of ids) this.proofCache.delete(id)
+	}
+
+	private dropWatcherCaches(ownerId: string): void {
+		const watchers = this.proofWatchers.get(ownerId)
+		if (watchers === undefined || watchers.size === 0) return
+		for (const id of watchers) this.proofCache.delete(id)
+	}
+
+	/** One `updated` per armed reader whose proof or level changed, skipping ids already notified. */
+	private emitPending(
+		pending: ReadonlyMap<string, ScannerProof | null>,
+		skip: ReadonlySet<string>,
+	): void {
+		for (const [id, prev] of pending) {
+			if (skip.has(id)) continue
+			const discovery = this.discoveries.get(id)
+			if (discovery === undefined) continue
+			this.emitProofChange(id, prev, this.discoveryView(discovery).proof)
+		}
+	}
+
+	private flushPending(skip: ReadonlySet<string>): void {
+		if (this.pendingProof.size === 0) return
+		const pending = this.pendingProof
+		this.pendingProof = new Map()
+		this.emitPending(pending, skip)
+	}
+
+	private watchProof(watcher: string, partner: string): void {
+		let set = this.proofWatchers.get(partner)
+		if (set === undefined) {
+			set = new Set()
+			this.proofWatchers.set(partner, set)
+		}
+		set.add(watcher)
+	}
+
+	private unwatchProof(watcher: string, partner: string): void {
+		const set = this.proofWatchers.get(partner)
+		if (set === undefined) return
+		set.delete(watcher)
+		if (set.size === 0) this.proofWatchers.delete(partner)
+	}
+
+	/** Rebuilds reverse links for `d` from its current co-channel list. */
+	private syncProofWatch(d: Discovery): void {
+		const next = this.coChannelIds(d)
+		const prev = this.proofWatched.get(d.id) ?? NO_LINKS
+		if (sameList(prev, next)) return
+		const nextSet = new Set(next)
+		for (const id of prev) if (!nextSet.has(id)) this.unwatchProof(d.id, id)
+		const prevSet = new Set(prev)
+		for (const id of next) if (!prevSet.has(id)) this.watchProof(d.id, id)
+		if (next.length === 0) this.proofWatched.delete(d.id)
+		else this.proofWatched.set(d.id, next)
+	}
+
+	private clearProofWatch(id: string): void {
+		const prev = this.proofWatched.get(id)
+		if (prev !== undefined) {
+			for (const partner of prev) this.unwatchProof(id, partner)
+			this.proofWatched.delete(id)
+		}
+		const watchers = this.proofWatchers.get(id)
+		if (watchers !== undefined) {
+			for (const watcher of [...watchers]) {
+				const list = this.proofWatched.get(watcher)
+				if (list === undefined) continue
+				const filtered = list.filter(partner => partner !== id)
+				if (filtered.length === 0) this.proofWatched.delete(watcher)
+				else this.proofWatched.set(watcher, filtered)
+			}
+			this.proofWatchers.delete(id)
+		}
+		this.pendingProof.delete(id)
+	}
+
+	private clearProofIndexes(): void {
+		this.proofWatchers.clear()
+		this.proofWatched.clear()
+		this.pendingProof.clear()
+	}
+
+	private bumpProof(discoveryId: string): void {
+		this.proofCache.delete(discoveryId)
+		this.dropWatcherCaches(discoveryId)
+	}
+
+	private forgetEvidence(observationId: string): void {
+		const observation = this.observationIndex.get(observationId)
+		if (observation !== undefined) this.armWatchers(observation.discoveryId)
+		this.evidenceByObservation.delete(observationId)
+		this.observationProofCache.delete(observationId)
+		if (observation !== undefined) {
+			this.proofCache.delete(observation.discoveryId)
+			this.dropWatcherCaches(observation.discoveryId)
+		}
+	}
+
+	private evidenceBag(observationId: string): EvidenceBag {
+		let bag = this.evidenceByObservation.get(observationId)
+		if (bag === undefined) {
+			bag = { trials: [], analog: [], unavailable: [] }
+			this.evidenceByObservation.set(observationId, bag)
+		}
+		return bag
+	}
+
+	private rememberTrial(observationId: string, row: ProofTrialInput): boolean {
+		const trials = this.evidenceBag(observationId).trials
+		const found = trials.findIndex(
+			item =>
+				item.protocol === row.protocol &&
+				item.decoder === row.decoder &&
+				item.order === row.order,
+		)
+		if (found >= 0) {
+			const previous = trials[found]
+			if (
+				previous !== undefined &&
+				previous.outcome === row.outcome &&
+				previous.at === row.at
+			)
+				return false
+			trials[found] = row
+			return true
+		}
+		trials.push(row)
+		if (trials.length <= PROOF_TRIALS_MAX_PER_OBSERVATION) return true
+		let drop = 0
+		for (let index = 1; index < trials.length; index++) {
+			const candidate = trials[index]
+			const current = trials[drop]
+			if (
+				candidate !== undefined &&
+				current !== undefined &&
+				candidate.order < current.order
+			)
+				drop = index
+		}
+		const dropped = trials.splice(drop, 1)[0]
+		return dropped !== row
+	}
+
+	private rememberAnalog(
+		observationId: string,
+		row: ProofAnalogInput,
+	): boolean {
+		const analog = this.evidenceBag(observationId).analog
+		for (const previous of analog) {
+			if (
+				previous.outcome === row.outcome &&
+				previous.mode === row.mode &&
+				previous.transport === row.transport &&
+				previous.at === row.at
+			)
+				return false
+		}
+		analog.push(row)
+		if (analog.length <= PROOF_ANALOG_MAX_PER_OBSERVATION) return true
+		let drop = 0
+		for (let index = 1; index < analog.length; index++) {
+			const candidate = analog[index]
+			const current = analog[drop]
+			if (
+				candidate !== undefined &&
+				current !== undefined &&
+				candidate.at < current.at
+			)
+				drop = index
+		}
+		const dropped = analog.splice(drop, 1)[0]
+		return dropped !== row
+	}
+
+	private rememberUnavailable(
+		observationId: string,
+		type: ScannerProbeDecoderType,
+	): boolean {
+		const unavailable = this.evidenceBag(observationId).unavailable
+		if (unavailable.includes(type)) return false
+		unavailable.push(type)
+		unavailable.sort()
+		return true
+	}
+
+	/** Proof as a reader would see it now. Does not copy; callers must not mutate it. */
+	private peekProof(observationId: string): ScannerProof | null {
+		const observation = this.observationIndex.get(observationId)
+		if (observation === undefined) return null
+		const discovery = this.discoveries.get(observation.discoveryId)
+		if (discovery === undefined) return null
+		return this.discoveryView(discovery).proof
+	}
+
+	/**
+	 * One `updated` change when the derived proof, or the level it implies, changed.
+	 * A sink write journals nothing; a persisted decode journals only the observation.
+	 */
+	private emitProofChange(
+		id: string,
+		before: ScannerProof | null,
+		after: ScannerProof | null,
+	): void {
+		const beforeLevel = evidenceLevelOf(
+			before === null ? {} : { proof: before },
+		)
+		const afterLevel = evidenceLevelOf(after === null ? {} : { proof: after })
+		if (jsonEqual(before, after) && beforeLevel === afterLevel) return
+		this.emit("change", id, "updated")
+	}
+
+	/** Drops the touched observation's proof and tells listeners when a reader's result changed. */
+	private publishEvidence(
+		observationId: string,
+		before: ScannerProof | null,
+	): boolean {
+		const observation = this.observationIndex.get(observationId)
+		if (observation === undefined) return false
+		const discovery = this.discoveries.get(observation.discoveryId)
+		if (discovery === undefined) {
+			this.disarm(this.watcherIds(observation.discoveryId))
+			return false
+		}
+		this.observationProofCache.delete(observationId)
+		this.proofCache.delete(discovery.id)
+		this.dropWatcherCaches(discovery.id)
+		const after = this.discoveryView(discovery).proof
+		this.emitProofChange(discovery.id, before, after)
+		this.flushPending(new Set([discovery.id]))
+		return true
+	}
+
+	/**
+	 * Winning decode for the stored record. Identified winners come from each
+	 * observation's cached proof plus `extra`, so the raw decode lists are read
+	 * only when nothing identified is cached. The later timestamp wins.
+	 */
+	private decidedLabel(
+		d: Discovery,
+		extra: DecodeEvidence,
+	): { label: EvidenceLabel; facts: ProofFacts | null } {
+		let bestProtocol: ScannerProtocol | undefined
+		let bestIdentity: Identity | undefined
+		let bestAt = Number.NEGATIVE_INFINITY
+		const considerIdentified = (
+			protocol: ScannerProtocol,
+			identity: Identity | undefined,
+			at: number,
+		): void => {
+			if (identity === undefined) return
+			if (!identityFitsProtocol(protocol, identity)) return
+			if (!Number.isFinite(at)) return
+			if (bestIdentity !== undefined && at < bestAt) return
+			bestProtocol = protocol
+			bestIdentity = { kind: identity.kind, value: identity.value }
+			bestAt = at
+		}
+		for (const observation of this.byDiscovery.get(d.id) ?? []) {
+			const proof = this.observationAssessment(observation).proof
+			if (proof === null || proof.kind !== "decoded") continue
+			considerIdentified(proof.protocol, proof.identity, Date.parse(proof.at))
+		}
+		considerIdentified(extra.protocol, extra.identity, extra.at)
+		if (bestProtocol !== undefined && bestIdentity !== undefined) {
+			return {
+				label: {
+					protocol: bestProtocol,
+					family: familyOf(bestProtocol),
+					confidence: "decoded",
+				},
+				facts: {
+					kind: "decoded",
+					protocol: bestProtocol,
+					transport: "live",
+					at: bestAt,
+					encrypted: false,
+					identity: bestIdentity,
+				},
+			}
+		}
+		let looseProtocol: ScannerProtocol | undefined
+		let looseAt = Number.NEGATIVE_INFINITY
+		const considerLoose = (
+			protocol: ScannerProtocol,
+			identity: Identity | undefined,
+			at: number,
+		): void => {
+			if (identity !== undefined) return
+			if (!knownProtocol(protocol) || protocol === "unknown") return
+			if (!Number.isFinite(at)) return
+			if (looseProtocol !== undefined && at < looseAt) return
+			looseProtocol = protocol
+			looseAt = at
+		}
+		for (const observation of this.byDiscovery.get(d.id) ?? []) {
+			for (const ev of observation.decode ?? [])
+				considerLoose(ev.protocol, ev.identity, ev.at)
+		}
+		considerLoose(extra.protocol, extra.identity, extra.at)
+		if (looseProtocol !== undefined) {
+			return {
+				label: {
+					protocol: looseProtocol,
+					family: familyOf(looseProtocol),
+					confidence: "activity",
+				},
+				facts: null,
+			}
+		}
+		return { label: UNKNOWN_LABEL, facts: null }
+	}
+
+	private proofInputOf(observation: Observation): ProofInput | null {
+		const bag = this.evidenceByObservation.get(observation.id)
+		const decodes: ProofDecodeInput[] = []
+		for (const ev of observation.decode ?? []) {
+			const row = decodeRow(ev)
+			if (row !== undefined) decodes.push(row)
+		}
+		const trials = bag?.trials ?? []
+		const analog = bag?.analog ?? []
+		const unavailable = bag?.unavailable ?? []
+		if (
+			decodes.length === 0 &&
+			trials.length === 0 &&
+			analog.length === 0 &&
+			unavailable.length === 0
+		)
+			return null
+		return {
+			observationId: observation.id,
+			decodes,
+			trials,
+			analog,
+			unavailable,
+			trust: observation.tuningTrust,
+			digitalPlanComplete: digitalPlanCompleteOf(analog, trials, unavailable),
+		}
+	}
+
+	private observationAssessment(observation: Observation): {
+		proof: ScannerProof | null
+		label: EvidenceLabel
+	} {
+		const hit = this.observationProofCache.get(observation.id)
+		if (hit !== undefined) return hit
+		const input = this.proofInputOf(observation)
+		if (input === null) {
+			const empty = { proof: null, label: UNKNOWN_LABEL }
+			this.observationProofCache.set(observation.id, empty)
+			return empty
+		}
+		const decided = labelAndFacts(input)
+		const proof =
+			decided.facts === null ? null : proofFromFacts(input, decided.facts)
+		const row = { proof, label: decided.label }
+		this.observationProofCache.set(observation.id, row)
+		return row
+	}
+
+	/** An identified decode counts only for the discovery that already stores it. */
+	private decodeCounts(d: Discovery, row: ProofDecodeInput): boolean {
+		if (row.identity !== undefined) {
+			if (d.identity === undefined) return false
+			return (
+				d.protocol === row.protocol && sameIdentity(d.identity, row.identity)
+			)
+		}
+		if (d.identity === undefined) return true
+		return row.protocol === d.protocol
+	}
+
+	private proofCounts(d: Discovery, proof: ScannerProof): boolean {
+		if (proof.kind !== "decoded") return true
+		if (proof.identity === undefined || d.identity === undefined) return false
+		return (
+			d.protocol === proof.protocol && sameIdentity(d.identity, proof.identity)
+		)
+	}
+
+	/** Proof of one observation after decodes that do not belong to `d` are removed. */
+	private filteredProof(
+		d: Discovery,
+		observation: Observation,
+		decodedOnly: boolean,
+	): ScannerProof | null {
+		const input = this.proofInputOf(observation)
+		if (input === null) return null
+		const decodes = input.decodes.filter(row => this.decodeCounts(d, row))
+		if (decodedOnly && decodes.length === 0) return null
+		const filtered: ProofInput = { ...input, decodes }
+		const decided = labelAndFacts(filtered)
+		if (decided.facts === null) return null
+		if (decodedOnly && decided.facts.kind !== "decoded") return null
+		return proofFromFacts(filtered, decided.facts)
+	}
+
+	private attributedProof(
+		d: Discovery,
+		observation: Observation,
+		foreign: boolean,
+	): ScannerProof | null {
+		const cached = this.observationAssessment(observation).proof
+		if (cached !== null && this.proofCounts(d, cached)) {
+			if (foreign && cached.kind !== "decoded") return null
+			return cached
+		}
+		if (foreign) return this.filteredProof(d, observation, true)
+		if (cached !== null && cached.kind === "decoded")
+			return this.filteredProof(d, observation, false)
+		return cached
+	}
+
+	private proofSources(
+		d: Discovery,
+	): { observation: Observation; foreign: boolean }[] {
+		const out: { observation: Observation; foreign: boolean }[] = []
+		const seen = new Set<string>()
+		for (const observation of this.byDiscovery.get(d.id) ?? []) {
+			seen.add(observation.id)
+			out.push({ observation, foreign: false })
+		}
+		const partners = Array.isArray(d.coChannel) ? d.coChannel : []
+		for (const partnerId of partners) {
+			for (const observation of this.byDiscovery.get(partnerId) ?? []) {
+				if (seen.has(observation.id)) continue
+				seen.add(observation.id)
+				out.push({ observation, foreign: true })
+			}
+		}
+		return out
+	}
+
+	private deriveDiscovery(d: Discovery): ScannerProof | null {
+		const proofs: ScannerProof[] = []
+		for (const source of this.proofSources(d)) {
+			const proof = this.attributedProof(d, source.observation, source.foreign)
+			if (proof !== null) proofs.push(proof)
+		}
+		return strongestKnownProof(proofs)
+	}
+
+	private discoveryView(d: Discovery): { proof: ScannerProof | null } {
+		const hit = this.proofCache.get(d.id)
+		if (hit !== undefined) return hit
+		const view = { proof: this.deriveDiscovery(d) }
+		this.proofCache.set(d.id, view)
+		return view
+	}
+
+	private toneConfidence(d: Discovery, proof: ScannerProof): ScannerConfidence {
+		const trust =
+			this.observationIndex.get(proof.observationId)?.tuningTrust ??
+			d.tuningTrust
+		return trust === "unverified" ? "candidate" : "classified"
+	}
+
+	/**
+	 * Label implied by a proof. A recorded leak or intermod cap ceilings every
+	 * confidence above `candidate`, including a decoded proof, while the cap
+	 * remains. Nothing here is written back onto the record.
+	 */
+	private labelOfProof(d: Discovery, proof: ScannerProof): EvidenceLabel {
+		let protocol: ScannerProtocol
+		let confidence: ScannerConfidence
+		switch (proof.kind) {
+			case "decoded":
+				protocol = proof.protocol
+				confidence = "decoded"
+				break
+			case "analog-tone":
+				protocol = proof.protocol
+				confidence = this.toneConfidence(d, proof)
+				break
+			case "analog-voice":
+				protocol = proof.protocol
+				confidence = "candidate"
+				break
+			case "digital-undecoded":
+				protocol = "digital-unknown"
+				confidence = "candidate"
+				break
+			case "carrier-only":
+				protocol = "carrier"
+				confidence = "activity"
+				break
+		}
+		if (d.confidenceCap !== undefined && rank(confidence) > rank("candidate"))
+			confidence = "candidate"
+		return { protocol, family: familyOf(protocol), confidence }
+	}
+
+	/** Proof label when a proof is shown; otherwise the stored record. */
+	private effectiveLabel(d: Discovery): EvidenceLabel {
+		const proof = this.discoveryView(d).proof
+		if (proof !== null && evidenceLevelOf({ proof }) === "proven")
+			return this.labelOfProof(d, proof)
+		return {
+			protocol: d.protocol,
+			family: d.family,
+			confidence: d.confidence,
+		}
+	}
+
+	private presentDiscovery(d: Discovery): Discovery {
+		const copy = clone(d)
+		const proof = this.discoveryView(d).proof
+		const proven = proof !== null && evidenceLevelOf({ proof }) === "proven"
+		if (proven && proof !== null) {
+			copy.proof = clone(proof)
+			const label = this.labelOfProof(d, proof)
+			copy.protocol = label.protocol
+			copy.family = label.family
+			copy.confidence = label.confidence
+		} else delete copy.proof
+		copy.evidenceLevel = proven ? "proven" : "weak"
+		return copy
+	}
+
+	private presentObservation(observation: Observation): Observation {
+		const copy = clone(observation)
+		const proof = this.observationAssessment(observation).proof
+		if (proof !== null) copy.proof = clone(proof)
+		else delete copy.proof
+		return copy
 	}
 
 	private removeDiscovery(id: string): void {
@@ -2099,10 +2950,13 @@ export class DiscoveryStore extends EventEmitter {
 		// stale `bySource` entries of sources trimmed from `sourceIds` stay, as there
 		if (members?.size === 0) this.members.delete(id)
 		for (const o of this.byDiscovery.get(id) ?? []) {
+			this.forgetEvidence(o.id)
 			this.observationIndex.delete(o.id)
 			this.removal.observations.push(o.id)
 		}
 		this.byDiscovery.delete(id)
+		this.proofCache.delete(id)
+		this.clearProofWatch(id)
 		this.medians.delete(id)
 		this.aliasTable.detach(id)
 		this.markDirty(id)
@@ -2110,6 +2964,7 @@ export class DiscoveryStore extends EventEmitter {
 
 	/** Inserts an unlinked observation in canonical order and trims the per-discovery window. */
 	private putObservation(o: Observation): void {
+		this.armWatchers(o.discoveryId)
 		this.observationIndex.set(o.id, o)
 		let list = this.byDiscovery.get(o.discoveryId)
 		if (list === undefined) {
@@ -2126,25 +2981,42 @@ export class DiscoveryStore extends EventEmitter {
 		while (list.length > OBSERVATIONS_PER_DISCOVERY) {
 			const dropped = list.shift()
 			if (dropped === undefined) continue
+			this.forgetEvidence(dropped.id)
 			this.observationIndex.delete(dropped.id)
 			this.removal.observations.push(dropped.id) // no journal entry names it (WG11 req 3.5)
 		}
+		this.observationProofCache.delete(o.id)
+		this.bumpProof(o.discoveryId)
 		this.medians.delete(o.discoveryId)
 		this.markDirty(o.discoveryId)
 	}
 
 	private unlinkObservation(o: Observation): void {
+		this.armWatchers(o.discoveryId)
 		const list = this.byDiscovery.get(o.discoveryId)
 		if (list !== undefined) {
 			const i = list.findIndex(x => x.id === o.id)
 			if (i >= 0) list.splice(i, 1)
 		}
 		this.observationIndex.delete(o.id)
+		this.observationProofCache.delete(o.id)
+		this.proofCache.delete(o.discoveryId)
+		this.dropWatcherCaches(o.discoveryId)
 		this.medians.delete(o.discoveryId)
 		this.markDirty(o.discoveryId)
 	}
 
 	private applyMutation(m: StoreMutation): void {
+		this.proofQuiet++
+		try {
+			this.applyStoredMutation(m)
+		} finally {
+			this.proofQuiet--
+			this.pendingProof.clear()
+		}
+	}
+
+	private applyStoredMutation(m: StoreMutation): void {
 		const patch = m.preparedRecordingOperations
 		if (patch !== undefined) {
 			const next = new Map(this.recordingOperations)
@@ -2179,9 +3051,12 @@ export class DiscoveryStore extends EventEmitter {
 			this.putObservation(clone(o))
 		}
 		for (const id of m.removedObservations ?? []) {
+			this.forgetEvidence(id)
 			const previous = this.observationIndex.get(id)
 			if (previous !== undefined) this.unlinkObservation(previous)
 		}
+		this.observationProofCache.clear()
+		this.proofCache.clear()
 		for (const id of m.deleted) {
 			this.removeDiscovery(id)
 			// Replay only (no evidence removal follows): a deleted owner's aliases are released,
@@ -2234,6 +3109,9 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	private finish(kind: JournalEntry["op"], op: Op): void {
+		const pending = this.pendingProof
+		this.pendingProof = new Map()
+		const notified = new Set(op.changes.keys())
 		for (const id of op.discoveries) this.markDirty(id)
 		for (const id of op.deleted) this.markDirty(id)
 		this.catchUp()
@@ -2263,6 +3141,7 @@ export class DiscoveryStore extends EventEmitter {
 			op.aliases.size === 0
 		) {
 			this.flushRemoval()
+			this.emitPending(pending, notified)
 			return
 		}
 		const payload: StoreMutation = {
@@ -2284,6 +3163,7 @@ export class DiscoveryStore extends EventEmitter {
 		this.emit("mutation", entry)
 		this.flushRemoval()
 		for (const [id, change] of op.changes) this.emit("change", id, change)
+		this.emitPending(pending, notified)
 	}
 
 	// ── WG11 lane SC: revisions, indexes, counts, mirror removals ────────

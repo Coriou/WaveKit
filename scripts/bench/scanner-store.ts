@@ -15,7 +15,12 @@ import os from "node:os"
 import { join } from "node:path"
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
 import process from "node:process"
-import { DiscoveryStore } from "../../src/core/scanner/store/discovery-store.js"
+import { deriveProof } from "../../src/core/scanner/proof.js"
+import type { ProofInput } from "../../src/core/scanner/scanner-redesign-contract.js"
+import {
+	DiscoveryStore,
+	OBSERVATIONS_PER_DISCOVERY,
+} from "../../src/core/scanner/store/discovery-store.js"
 import { ScannerPersistence } from "../../src/core/scanner/store/persistence.js"
 import type { ScannerConfidence } from "../../src/core/scanner/types.js"
 import { createLogger } from "../../src/utils/logger.js"
@@ -157,7 +162,219 @@ try {
 		).closeSnapshotWorker?.()
 	}
 
-	const [l1] = os.loadavg()
+	const proofInput: ProofInput = {
+		observationId: "bench-obs",
+		decodes: [
+			{
+				protocol: "dmr",
+				transport: "live",
+				at: T0,
+				encrypted: false,
+				identity: { kind: "dmr-cc", value: "1" },
+				talkgroup: "9",
+			},
+		],
+		trials: Array.from({ length: 32 }, (_, index) => ({
+			protocol: index % 2 === 0 ? "dmr" : "dpmr",
+			decoder: "dsd-fme",
+			outcome: "no-sync" as const,
+			order: index + 1,
+			at: T0 + index,
+		})),
+		analog: Array.from({ length: 8 }, (_, index) => ({
+			outcome: "no-sync" as const,
+			mode: "nfm" as const,
+			voice: false,
+			tone: { ctcssHz: null, dcs: null },
+			transport: "live" as const,
+			at: T0 + index,
+		})),
+		unavailable: ["dsd-fme"],
+		trust: "commanded",
+		digitalPlanComplete: true,
+	}
+	for (let i = 0; i < 50; i++) deriveProof(proofInput)
+	const proofSamples: number[] = []
+	for (let i = 0; i < 1000; i++) {
+		const started = performance.now()
+		deriveProof(proofInput)
+		proofSamples.push(performance.now() - started)
+	}
+	proofSamples.sort((a, b) => a - b)
+	const proofAt = (fraction: number): number =>
+		proofSamples[
+			Math.min(
+				proofSamples.length - 1,
+				Math.ceil(proofSamples.length * fraction) - 1,
+			)
+		] ?? 0
+	const proofP50Ms = proofAt(0.5)
+	const proofP99Ms = proofAt(0.99)
+
+	// Worst case the store actually serves: 256 observations, each with a full
+	// decode, trial and analog bag. One trial is invalidated, then get() rebuilds
+	// only that observation and compares the cached rest.
+	const DECODE_MAX = 16
+	const TRIAL_MAX = 32
+	const ANALOG_MAX = 8
+	const proofCentreHz = 446_006_250
+	const proofStore = new DiscoveryStore({
+		maxDiscoveries: 4,
+		now: () => T0,
+		newId: (() => {
+			let n = 0
+			return () => `proof-${++n}`
+		})(),
+		rasters: () => [{ spacingHz: 12_500, firstChannelHz: proofCentreHz }],
+	})
+	for (let i = 0; i < OBSERVATIONS_PER_DISCOVERY; i++) {
+		proofStore.ingest(
+			makeObs({
+				id: `proof-obs-${i}`,
+				centreHz: proofCentreHz,
+				startedAt: T0 + i * 1_000,
+			}),
+		)
+	}
+	const proofPage = proofStore.list({ limit: 5 }).items
+	if (proofPage.length !== 1)
+		throw new Error(`proof bench expected 1 discovery, saw ${proofPage.length}`)
+	const proofDiscoveryId = proofPage[0]?.id
+	if (proofDiscoveryId === undefined)
+		throw new Error("proof bench missing discovery")
+	if (
+		proofStore.observations(proofDiscoveryId, null, 500).items.length !==
+		OBSERVATIONS_PER_DISCOVERY
+	)
+		throw new Error("proof bench did not retain every observation")
+	for (let i = 0; i < OBSERVATIONS_PER_DISCOVERY; i++) {
+		const id = `proof-obs-${i}`
+		for (let decode = 0; decode < DECODE_MAX; decode++) {
+			const kept = proofStore.appendObservationEvidence(id, {
+				protocol: "dmr",
+				metadata: {},
+				crcClean: true,
+				at: T0 + i * 1_000 + decode,
+				epoch: 1,
+				origin: "probe",
+				identity: { kind: "dmr-cc", value: "1" },
+			})
+			if (!kept) throw new Error(`decode ${i}:${decode} was not retained`)
+		}
+		for (let order = 1; order <= TRIAL_MAX; order++) {
+			const kept = proofStore.recordTrial(id, {
+				protocol: "dmr",
+				decoder: "dsd-fme",
+				outcome: "no-sync",
+				order,
+				at: T0 + order,
+			})
+			if (!kept) throw new Error(`trial ${i}:${order} was not retained`)
+		}
+		for (let analog = 0; analog < ANALOG_MAX; analog++) {
+			const kept = proofStore.recordAnalog(id, {
+				outcome: "no-sync",
+				mode: "nfm",
+				voice: false,
+				tone: { ctcssHz: null, dcs: null },
+				transport: "live",
+				at: T0 + analog,
+			})
+			if (!kept) throw new Error(`analog ${i}:${analog} was not retained`)
+		}
+	}
+	const applied = proofStore.applyEvidence(proofDiscoveryId, {
+		protocol: "dmr",
+		metadata: {},
+		crcClean: true,
+		at: T0,
+		epoch: 1,
+		origin: "probe",
+		identity: { kind: "dmr-cc", value: "1" },
+	})
+	if (applied === null)
+		throw new Error("proof bench did not apply the identity")
+	if (proofStore.get(proofDiscoveryId)?.proof?.kind !== "decoded")
+		throw new Error("proof bench identity did not produce a decoded proof")
+	const touched = "proof-obs-0"
+	const caches = proofStore as unknown as {
+		observationProofCache?: Map<string, unknown>
+		proofCache?: Map<string, unknown>
+	}
+	if (
+		!(caches.observationProofCache instanceof Map) ||
+		!(caches.proofCache instanceof Map)
+	)
+		throw new Error("proof caches are not on the store")
+	let flip: "no-sync" | "crc-errors" = "crc-errors"
+	const getSamples: number[] = []
+	for (let i = 0; i < 220; i++) {
+		const wrote = proofStore.recordTrial(touched, {
+			protocol: "dmr",
+			decoder: "dsd-fme",
+			outcome: flip,
+			order: 1,
+			at: T0 + 1,
+		})
+		if (!wrote) throw new Error("trial invalidation did not apply")
+		if (!caches.observationProofCache.has(touched))
+			throw new Error("observation proof was not cached after recordTrial")
+		caches.observationProofCache.delete(touched)
+		caches.proofCache.delete(proofDiscoveryId)
+		const started = performance.now()
+		const got = proofStore.get(proofDiscoveryId)
+		const elapsed = performance.now() - started
+		if (got?.proof?.observationId === undefined)
+			throw new Error("get() lost the derived proof")
+		if (i >= 20) getSamples.push(elapsed)
+		flip = flip === "no-sync" ? "crc-errors" : "no-sync"
+	}
+	getSamples.sort((a, b) => a - b)
+	const getAt = (fraction: number): number =>
+		getSamples[
+			Math.min(
+				getSamples.length - 1,
+				Math.ceil(getSamples.length * fraction) - 1,
+			)
+		] ?? 0
+	const getP50Ms = getAt(0.5)
+	const getP99Ms = getAt(0.99)
+	const mutateSamples: number[] = []
+	for (let i = 0; i < 220; i++) {
+		const at = T0 + 1_000_000 + i
+		const ev = {
+			protocol: "dmr" as const,
+			metadata: {},
+			crcClean: true,
+			at,
+			epoch: 1,
+			origin: "probe" as const,
+			identity: { kind: "dmr-cc" as const, value: "1" },
+		}
+		const started = performance.now()
+		const appended = proofStore.appendObservationEvidence(touched, ev)
+		proofStore.applyEvidence(proofDiscoveryId, ev)
+		const got = proofStore.get(proofDiscoveryId)
+		const elapsed = performance.now() - started
+		if (!appended) throw new Error("evidence append was not retained")
+		if (
+			got?.proof?.kind !== "decoded" ||
+			got.proof.at !== new Date(at).toISOString()
+		)
+			throw new Error("append+apply+get did not publish the new proof")
+		if (i >= 20) mutateSamples.push(elapsed)
+	}
+	mutateSamples.sort((a, b) => a - b)
+	const mutateAt = (fraction: number): number =>
+		mutateSamples[
+			Math.min(
+				mutateSamples.length - 1,
+				Math.ceil(mutateSamples.length * fraction) - 1,
+			)
+		] ?? 0
+	const mutateP50Ms = mutateAt(0.5)
+	const mutateP99Ms = mutateAt(0.99)
+	const [l1, l5, l15] = os.loadavg()
 	console.log(
 		`scanner-store bench (${hasCounts ? "countsByJob" : "list() recount"}, ${hasOf ? "writeSnapshotOf" : "writeSnapshot(snapshot())"})`,
 	)
@@ -179,7 +396,19 @@ try {
 			`  steady snapshot main-thread ${f(steady.mainMs, 2)} ms (until durable ${f(steady.totalMs, 1)} ms, loop p99 ${f(steady.p99Ms, 1)} ms)`,
 		)
 	}
-	console.log(`  load average (1 min)        ${f(l1 ?? 0)}`)
+	console.log(`  proof derive p50            ${f(proofP50Ms, 4)} ms`)
+	console.log(`  proof derive p99            ${f(proofP99Ms, 4)} ms`)
+	console.log(
+		`  proof get p50               ${f(getP50Ms, 4)} ms (one trial invalidated, ${OBSERVATIONS_PER_DISCOVERY} observations)`,
+	)
+	console.log(
+		`  proof get p99               ${f(getP99Ms, 4)} ms (${OBSERVATIONS_PER_DISCOVERY} × ${DECODE_MAX} decodes × ${TRIAL_MAX} trials × ${ANALOG_MAX} analog)`,
+	)
+	console.log(`  proof append+apply+get p50  ${f(mutateP50Ms, 4)} ms`)
+	console.log(`  proof append+apply+get p99  ${f(mutateP99Ms, 4)} ms`)
+	console.log(
+		`  load average (uptime)       ${f(l1 ?? 0)} ${f(l5 ?? 0)} ${f(l15 ?? 0)}`,
+	)
 } finally {
 	await rm(dir, { recursive: true, force: true })
 }
