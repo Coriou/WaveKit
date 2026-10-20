@@ -37,6 +37,13 @@ export interface AnalogEvidenceLog extends IdentifyAnalogEvidence {
 		hz: number,
 		toleranceHz: number,
 	): readonly AnalogEvidenceTransmission[]
+	/**
+	 * Closed transmissions, after they are kept. Returns unsubscribe.
+	 * A throwing listener does not break the log or later listeners.
+	 */
+	subscribe(
+		listener: (transmission: AnalogEvidenceTransmission) => void,
+	): () => void
 }
 
 export interface AnalogEvidenceLogOptions {
@@ -150,11 +157,29 @@ export function createAnalogEvidenceLog(
 	const now = options.now ?? Date.now
 	/** Insertion order = age: the first entry is the oldest. */
 	const ring = new Map<string, AnalogEvidenceTransmission>()
+	const listeners = new Set<
+		(transmission: AnalogEvidenceTransmission) => void
+	>()
 	let lastWarnAt = Number.NEGATIVE_INFINITY
 	let pending = options.pending ?? null
+	const notify = (t: AnalogEvidenceTransmission): void => {
+		for (const listener of [...listeners]) {
+			try {
+				listener(copyOf(t))
+			} catch {
+				// A listener must not break the log or the other listeners.
+			}
+		}
+	}
 	return {
 		setPending(next) {
 			pending = next
+		},
+		subscribe(listener) {
+			listeners.add(listener)
+			return () => {
+				listeners.delete(listener)
+			}
 		},
 		pendingNear(sourceId, hz, toleranceHz) {
 			try {
@@ -189,6 +214,7 @@ export function createAnalogEvidenceLog(
 					if (known.endedAtMs !== null || t.endedAtMs === null) return
 					if (known.sourceId !== t.sourceId) return
 					ring.set(t.transmissionId, t)
+					notify(t)
 					return
 				}
 				ring.set(t.transmissionId, t)
@@ -197,6 +223,7 @@ export function createAnalogEvidenceLog(
 					if (oldest === undefined) break
 					ring.delete(oldest)
 				}
+				if (t.endedAtMs !== null) notify(t)
 			} catch {
 				// A hostile getter on the event: dropped.
 			}

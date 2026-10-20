@@ -1,0 +1,73 @@
+{
+	"dmr": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "pending"
+				}
+			]
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "trying",
+			"trials": [
+				{
+					"protocol": "dmr",
+					"decoder": "dsd-fme",
+					"mode": "auto",
+					"transport": "offset",
+					"outcome": "running"
+				}
+			]
+		}
+	],
+	"quiet": [
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "waiting-for-signal",
+			"trials": []
+		},
+		{
+			"jobId": "j_ident",
+			"targetHz": 446125000,
+			"state": "unidentified",
+			"trials": [],
+			"result": {
+				"confidence": "activity",
+				"metadata": {
+					"talkgroups": [],
+					"sources": [],
+					"slots": [],
+					"callsigns": [],
+					"capcodes": [],
+					"ismModels": []
+				},
+				"measurements": {
+					"source": "spectrum",
+					"centreHz": 446125000,
+					"obwHz": null,
+					"peakDbfs": -50,
+					"snrDb": 30,
+					"floorDbfs": -80,
+					"dutyCycle": null,
+					"class": "unknown"
+				}
+			}
+		}
+	]
+}
