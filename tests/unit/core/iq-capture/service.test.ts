@@ -617,6 +617,45 @@ describe("IqCaptureService supervision", () => {
 		await s.svc.stop()
 	})
 
+	it("reports one bounded diagnostic per failed spawn and preserves startup arguments", async () => {
+		const s = await setup()
+		try {
+			const child = await running(s)
+			expect(child.args).toEqual([
+				"run",
+				"--sample-rate",
+				"2048000",
+				"--ring-ms",
+				"2000",
+				"--out-dir",
+				path.join(s.root, "iq-captures"),
+				"--max-ms",
+				"4000",
+				"--bandwidth",
+				"16000",
+				"--anchor",
+				s.root,
+			])
+			child.stderr.write("control fd 3 is not open; secret-native-output")
+			await flush()
+			child.exit(2)
+			child.emit("close", 2, null)
+			expect(s.svc.counters().toolFailures).toBe(1)
+			expect(s.svc.counters().lastToolFailure).toEqual({
+				exitCode: 2,
+				signal: null,
+				phase: "exit-after-ready",
+				reason: "control-fd",
+			})
+			expect(
+				s.lines.filter(line => line.args[1] === "IQ capture tool failed"),
+			).toHaveLength(1)
+			expect(logText(s.lines)).not.toContain("secret-native-output")
+		} finally {
+			await s.svc.stop()
+		}
+	})
+
 	it("stop shuts the tools down and discards everything", async () => {
 		const s = await setup()
 		const child = await running(s)
