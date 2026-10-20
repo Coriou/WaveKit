@@ -1,9 +1,8 @@
 import { ToneDetector } from "../../../../src/core/audio-tones/tone-detector.js"
 
-const RATE = 48_000
-
-/** Independent 48 kHz complex FM generator and reference quadrature discriminator. */
+/** Independent complex FM generator and reference quadrature discriminator. */
 export function syntheticTone(opts: {
+	rate?: 24000 | 48000
 	kind: "ctcss" | "dcs" | "fsk4"
 	deviation: number
 	snr: number
@@ -12,6 +11,8 @@ export function syntheticTone(opts: {
 	baud?: number
 	offset?: number
 }) {
+	const RATE = opts.rate ?? 48000
+	const decimation = RATE / 8000
 	let seed = opts.seed | 0
 	const random = () => {
 		seed = (Math.imul(seed, 1664525) + 1013904223) | 0
@@ -20,7 +21,7 @@ export function syntheticTone(opts: {
 	const gaussian = () =>
 		Math.sqrt(-2 * Math.log(random())) * Math.cos(2 * Math.PI * random())
 	const sigma = Math.sqrt(0.5 * 10 ** (-opts.snr / 10))
-	const seconds = opts.kind === "dcs" ? 1.2 : 0.8
+	const seconds = opts.kind === "dcs" ? 0.9 : 0.8
 	const count = RATE * seconds
 	const iq = new Float32Array(count * 2)
 	const data = 0o25 | (0b100 << 9)
@@ -62,7 +63,7 @@ export function syntheticTone(opts: {
 		iq[2 * i] = Math.cos(phase) + sigma * gaussian()
 		iq[2 * i + 1] = Math.sin(phase) + sigma * gaussian()
 	}
-	const pcm = Buffer.alloc((count / 6) * 4)
+	const pcm = Buffer.alloc((count / decimation) * 4)
 	const disc: number[] = []
 	let previousI = iq[0] ?? 0
 	let previousQ = iq[1] ?? 0
@@ -81,10 +82,10 @@ export function syntheticTone(opts: {
 		previousI = re
 		previousQ = im
 		sum += frequency
-		if (i % 6 === 5) {
-			const value = sum / 6
+		if (i % decimation === decimation - 1) {
+			const value = sum / decimation
 			disc.push(value)
-			pcm.writeFloatLE(value / 5000, Math.floor(i / 6) * 4)
+			pcm.writeFloatLE(value / 5000, Math.floor(i / decimation) * 4)
 			sum = 0
 		}
 	}
@@ -92,6 +93,7 @@ export function syntheticTone(opts: {
 	detector.push(pcm, { rate: 8000, format: "f32le" })
 	const tone = detector.result()
 	return {
+		iq,
 		tones: {
 			ctcssHz: tone.ctcssHz,
 			dcs: tone.dcs ?? null,

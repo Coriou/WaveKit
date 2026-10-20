@@ -246,6 +246,7 @@ export function undecodedForProbe(
 }
 
 export interface JobRunnerDeps {
+	leaseAnalogSession?: (sourceId: string) => (() => void) | undefined
 	/** Rechecked on the serial dispatch chain before an automatic acquisition. */
 	autoResumeReady?: () => boolean
 	record: JobRecord
@@ -417,6 +418,7 @@ function liveProbeView(
 }
 
 export class JobRunner implements JobDriver {
+	private releaseAnalogSession: (() => void) | undefined
 	readonly record: JobRecord
 	private readonly log: Logger
 	private scheduler: SweepScheduler | null = null
@@ -476,7 +478,14 @@ export class JobRunner implements JobDriver {
 	}
 
 	async start(): Promise<void> {
-		await this.dispatch({ type: "start" })
+		this.releaseAnalogSession ??= this.deps.leaseAnalogSession?.(this.sourceId)
+		try {
+			await this.dispatch({ type: "start" })
+		} catch (error) {
+			this.releaseAnalogSession?.()
+			this.releaseAnalogSession = undefined
+			throw error
+		}
 	}
 
 	dispatch(e: JobEvent): Promise<void> {
@@ -877,6 +886,8 @@ export class JobRunner implements JobDriver {
 	}
 
 	async dispose(): Promise<void> {
+		this.releaseAnalogSession?.()
+		this.releaseAnalogSession = undefined
 		await this.idle()
 		await this.teardown()
 	}
@@ -1214,6 +1225,8 @@ export class JobRunner implements JobDriver {
 		}
 		if (!this.driving) this.epochOwn = false
 		if (isTerminal(t.state)) {
+			this.releaseAnalogSession?.()
+			this.releaseAnalogSession = undefined
 			record.endedAt = now
 			await this.teardown()
 		}

@@ -9,6 +9,7 @@ import type {
 	ScannerProofTransport,
 	ScannerTrialOutcome,
 } from "@wavekit/api-types"
+import type { IqCaptureRequest } from "./iq-capture-contract.js"
 import type { TuningTrust } from "../spectrum/types.js"
 import type { Discovery, Identity, ScannerProtocol } from "./types.js"
 
@@ -99,10 +100,21 @@ export interface AnalogTrialResult {
 	voice: boolean
 	tones: AnalogTrialTones
 	stats: AnalogTrialStats | null
-	error?: "capture-gone" | "analyze-failed" | "cancelled" | "unavailable"
+	error?:
+		| "capture-gone"
+		| "analyze-failed"
+		| "cancelled"
+		| "unavailable"
+		| "not-protected"
 }
 
 export interface AnalogTrialRunner {
+	leaseSession?(sourceId: string): () => void
+	runLive?(
+		req: IqCaptureRequest,
+		mode: AnalogTrialMode,
+		signal: AbortSignal,
+	): Promise<AnalogTrialResult>
 	run(
 		captureId: string,
 		mode: AnalogTrialMode,

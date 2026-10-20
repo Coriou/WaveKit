@@ -43,6 +43,7 @@ describe("identify evidence and unrestricted planning", () => {
 				fc.boolean(),
 				(kind, deviation, snr, seed, inverted) => {
 					const { tones } = syntheticTone({
+						rate: 24000,
 						kind,
 						offset: seed % 1001,
 						deviation,

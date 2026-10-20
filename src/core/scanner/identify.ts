@@ -1760,7 +1760,7 @@ export class IdentifyRunner implements JobDriver {
 				},
 			),
 		)
-		if (this.deps.analogEvidence)
+		if (this.deps.analogEvidence || this.deps.analogTrial?.runLive)
 			plan.trials = planAnalogTrials(plan.trials, bounds)
 		t.memoSkip = this.applyMemo(plan)
 		t.plan = plan
@@ -1786,6 +1786,8 @@ export class IdentifyRunner implements JobDriver {
 		t.active = []
 		t.state = "trying"
 		this.claimCaptures(t, view)
+		if (this.deps.analogTrial?.runLive && this.analogChoice(t))
+			this.startAnalogItem(t, "", view)
 		this.emitTarget(t)
 	}
 
@@ -1890,7 +1892,9 @@ export class IdentifyRunner implements JobDriver {
 			this.endAmbient(
 				t,
 				"timeout",
-				x => !(this.deps.analogEvidence && x.decoder === "live-audio"),
+				x =>
+					x.decoder !== "analog-demod" &&
+					!(this.deps.analogEvidence && x.decoder === "live-audio"),
 			)
 		)
 			this.emitTarget(t)
@@ -2612,6 +2616,7 @@ export class IdentifyRunner implements JobDriver {
 			changed = true
 			if (t.analog.openSeen.has(trial.protocol)) trial.outcome = "timeout"
 			else if (t.analog.everMonitored) trial.outcome = "no-sync"
+			else if (this.deps.analogTrial?.runLive) trial.outcome = "not-needed"
 			else {
 				trial.outcome = "unsupported"
 				trial.mode = null
@@ -2822,8 +2827,10 @@ export class IdentifyRunner implements JobDriver {
 	private startAnalogItem(
 		t: TargetState,
 		captureId: string,
+		live?: IdentifyTrackView,
 	): "running" | "skipped" {
-		if (t.analogArmed.has(captureId) || captureId.length === 0) return "skipped"
+		if (t.analogArmed.has(captureId) || (captureId.length === 0 && !live))
+			return "skipped"
 		const runner = this.deps.analogTrial
 		const choice = this.analogChoice(t)
 		if (!runner || !choice) return "skipped"
@@ -2832,14 +2839,17 @@ export class IdentifyRunner implements JobDriver {
 			protocol: choice.protocol,
 			decoder: "analog-demod",
 			mode: choice.mode,
-			transport: "replay",
+			transport: live ? "ambient" : "replay",
 			outcome: "pending",
 		}
 		t.trials.push(trial)
 		trial.outcome = "running"
 		const ac = new AbortController()
 		t.analogAbort.push(ac)
-		t.analogDue.set(ac, this.deps.now() + ANALOG_REPLAY_TRIAL_DEADLINE_MS)
+		t.analogDue.set(
+			ac,
+			this.deps.now() + ANALOG_REPLAY_TRIAL_DEADLINE_MS + (live ? 2000 : 0),
+		)
 		const mode = choice.mode
 		let settled = false
 		const finish = (raw: unknown, failed: boolean): void => {
@@ -2870,7 +2880,23 @@ export class IdentifyRunner implements JobDriver {
 			finish(null, false)
 		})
 		void Promise.resolve()
-			.then(() => runner.run(captureId, mode, ac.signal))
+			.then(() =>
+				live && runner.runLive
+					? runner.runLive(
+							{
+								sourceId: this.sourceId,
+								observationId: live.observationId,
+								epoch: live.epoch,
+								rfHz: live.track.centreHz,
+								tuningTrust: live.track.tuningTrust,
+								fromSample: live.track.startSample,
+								reason: "identify",
+							},
+							mode,
+							ac.signal,
+						)
+					: runner.run(captureId, mode, ac.signal),
+			)
 			.then(result => {
 				finish(result, false)
 			})
@@ -2911,7 +2937,14 @@ export class IdentifyRunner implements JobDriver {
 		const parsed = parseAnalogTrial(raw)
 		// A verdict for a different mode than the one requested is no match.
 		if (!parsed || parsed.mode !== trial.mode) {
-			trial.outcome = "cancelled"
+			if (
+				raw !== null &&
+				typeof raw === "object" &&
+				(raw as { error?: unknown }).error === "not-protected"
+			) {
+				trial.outcome = "unsupported"
+				trial.reason = "decoder-unavailable"
+			} else trial.outcome = "cancelled"
 			this.emitTarget(t)
 			return
 		}
@@ -2923,7 +2956,15 @@ export class IdentifyRunner implements JobDriver {
 			const noTone = tone.ctcssHz === null && tone.dcs === null
 			trial.outcome =
 				parsed.outcome === "decoded" && noTone ? "heard" : parsed.outcome
-			const stored = t.replay.views.get(captureId)
+			const stored =
+				captureId === ""
+					? t.view
+						? {
+								observationId: t.view.observationId,
+								tuningTrust: t.view.track.tuningTrust,
+							}
+						: undefined
+					: t.replay.views.get(captureId)
 			this.keepAnalog(t, trial.protocol, {
 				source: "live-audio",
 				modulation: trial.mode === "am" ? "am" : "nfm",

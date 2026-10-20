@@ -809,3 +809,40 @@ describe("job progress phase", () => {
 		expect(gone.holding).toBeUndefined()
 	})
 })
+
+it.each(["cancel", "throw", "dispose"] as const)(
+	"releases the analog session lease on %s",
+	async terminal => {
+		let leased = false
+		let releases = 0
+		const h = runnerHarness(undefined, {
+			leaseAnalogSession: sourceId => {
+				expect(sourceId).toBe("rtl")
+				leased = true
+				return () => {
+					leased = false
+					releases++
+				}
+			},
+			...(terminal === "throw"
+				? {
+						openEngine: async () => {
+							expect(leased).toBe(true)
+							throw new TypeError("startup failed")
+						},
+					}
+				: {}),
+		})
+		if (terminal === "throw") await expect(h.runner.start()).rejects.toThrow()
+		else {
+			await h.runner.start()
+			await flush()
+			h.arbiter.retunes[0]?.resolve(pendingFor(11, HOP0))
+			await h.runner.idle()
+			if (terminal === "cancel") await h.runner.dispatch({ type: "cancel" })
+		}
+		await h.runner.dispose()
+		expect(leased).toBe(false)
+		expect(releases).toBe(1)
+	},
+)
