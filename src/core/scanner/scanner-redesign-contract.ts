@@ -177,7 +177,7 @@ export interface ProofInput {
 
 /**
  * The only way trial, analog and unavailable evidence reaches an observation's
- * ProofInput. DiscoveryStore implements it (EV.2). The evidence lives only in
+ * ProofInput. DiscoveryStore implements it. The evidence lives only in
  * memory: not on the Observation record, not in the snapshot, the journal or
  * any persistence payload.
  */
@@ -198,7 +198,7 @@ export interface ObservationEvidenceSink {
 	): boolean
 }
 
-/** Discoveries within toleranceHz of hz (inclusive), sorted by |Δf| then id. Implemented by DiscoveryStore (EV.3). */
+/** Discoveries within toleranceHz of hz (inclusive), sorted by |Δf| then id. Implemented by DiscoveryStore. */
 export interface DiscoveryNearQuery {
 	near(hz: number, toleranceHz: number, sourceId?: string): Discovery[]
 }

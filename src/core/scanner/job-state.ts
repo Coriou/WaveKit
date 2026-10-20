@@ -103,7 +103,7 @@ function endActions(s: From): JobAction[] {
 }
 
 /**
- * A lease lost while paused (Task 35 fix round): the operator's pause never auto-resumes (it stays
+ * A lease lost while paused: the operator's pause never auto-resumes (it stays
  * `paused(operator)` without the lease); a source-down pause becomes the preemption. Probes are
  * already stopped in both.
  */
@@ -120,7 +120,7 @@ function pausedLeaseLost(
 }
 
 /**
- * Runner context the table cannot see (Task 35 fix round). `leaseHeld: false` marks a sweep whose
+ * Runner context the table cannot see. `leaseHeld: false` marks a sweep whose
  * lease was revoked while it stayed `paused(operator)`: its resume re-acquires the lease.
  */
 export interface TransitionContext {
@@ -235,7 +235,7 @@ export function transition(
 					"open-engine",
 					"resend-hop",
 				])
-			// Explicit resume of a preempted job (Task 35 fix round 2): ScannerService lets it through
+			// Explicit resume of a preempted job: ScannerService lets it through
 			// only when the lease is free and the job is the best waiter; a refused acquire changes nothing.
 			if (preempted)
 				return to("running", ["acquire-lease", "hold-decoders", "resend-hop"])

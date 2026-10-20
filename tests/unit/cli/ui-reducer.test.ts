@@ -144,7 +144,7 @@ describe("applyUiAction", () => {
 		).toEqual({ text: "x", at: 9 })
 	})
 
-	describe("fix round 1", () => {
+	describe("G from the Messages detail closes the detail with the selection", () => {
 		const m = { rowIds: ["42", "41", "40"], pageSize: 5 }
 		const openDetail = () => {
 			const paused = applyUiAction(
@@ -187,7 +187,7 @@ describe("applyUiAction", () => {
 	})
 })
 
-describe("R73: detail scroll and empty pause (T40 fix round 1 M3/M4)", () => {
+describe("R73: detail scroll and empty pause", () => {
 	const open = (view: "messages" | "decoders") => {
 		const ui = initialUi(view)
 		return {

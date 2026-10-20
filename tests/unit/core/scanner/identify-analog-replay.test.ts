@@ -1,5 +1,5 @@
 import { AnalogAdmission } from "../../../../src/core/scanner/analog-admission.js"
-/** WG12 ID.4: a claimed capture whose plan includes analog runs the replay trial. */
+/** WG12: a claimed capture whose plan includes analog runs the replay trial. */
 import { Writable } from "node:stream"
 import pino from "pino"
 import { describe, expect, it, vi } from "vitest"
@@ -199,7 +199,7 @@ function replayHarness(opts: {
 	}
 }
 
-describe("IdentifyRunner analog replay trial (WG12 ID.4)", () => {
+describe("IdentifyRunner analog replay trial (WG12)", () => {
 	it("identify waits while replay holds the shared analog slot and core reservation", async () => {
 		let calls = 0
 		let releases = 0

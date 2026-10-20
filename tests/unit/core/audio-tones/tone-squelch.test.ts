@@ -277,7 +277,7 @@ describe("ToneSquelchGate fails closed (review fixes)", () => {
 	})
 })
 
-describe("ToneSquelchGate framing across a closed squelch (review round 2)", () => {
+describe("ToneSquelchGate framing across a closed squelch", () => {
 	for (const format of ["f32le", "s16le"] as const) {
 		const width = format === "s16le" ? 2 : 4
 		for (let split = 0; split < width; split++) {

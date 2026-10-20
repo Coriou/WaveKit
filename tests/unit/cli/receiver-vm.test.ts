@@ -471,7 +471,7 @@ describe("receiver view-model (spec §6.4)", () => {
 		)
 	})
 
-	describe("C3 fix round 1", () => {
+	describe("says '?' for a rate 'now' on an old lane and keeps 'lifetime' when narrow", () => {
 		const live = scenarioState("live")
 		const at = (st: AppState, w = 119, h = 35) =>
 			receiverLines(st, initialUi("receiver"), w, h, true).map(lineText)
@@ -617,7 +617,7 @@ describe("receiver view-model (spec §6.4)", () => {
 		})
 	})
 
-	describe("C3 fix round 2", () => {
+	describe("an upstream entry without rtlmux stats is ? with a host, — without (never 0 B)", () => {
 		const live = scenarioState("live")
 		const at = (st: AppState) =>
 			receiverLines(st, initialUi("receiver"), 119, 35, true).map(lineText)
@@ -730,7 +730,7 @@ describe("receiver view-model (spec §6.4)", () => {
 		})
 	})
 
-	describe("C3 fix round 3", () => {
+	describe("fits the relay compatibility row to the width and dims it on an old lane", () => {
 		const live = scenarioState("live")
 		it("fits the relay compatibility row to the width and dims it on an old lane", () => {
 			const relay = {

@@ -57,7 +57,7 @@ describe("resolveExplicit", () => {
 	})
 })
 
-describe("A1 fix round 1: URL validation", () => {
+describe("URL validation", () => {
 	it("refuses a URL without an http(s) or ws(s) scheme, with safe guidance", () => {
 		expect(() => resolveExplicit("localhost:9000", {})).toThrow(CliUsageError)
 		expect(() => resolveExplicit("localhost:9000", {})).toThrow(/use http/)
@@ -83,7 +83,7 @@ describe("A1 fix round 1: URL validation", () => {
 	})
 })
 
-describe("A1 fix round 1: WS env scheme", () => {
+describe("WS env scheme", () => {
 	it("maps an http(s) WAVEKIT_WS_URL to ws(s) and keeps https for REST", () => {
 		expect(
 			resolveExplicit(undefined, { WAVEKIT_WS_URL: "https://192.0.2.4/ws" }),
@@ -102,7 +102,7 @@ describe("A1 fix round 1: WS env scheme", () => {
 	})
 })
 
-describe("A2 fix round 1: fragments", () => {
+describe("fragments", () => {
 	it("refuses a URL with a fragment (ws throws on it)", () => {
 		expect(() => resolveExplicit("http://192.0.2.4:9000/#x", {})).toThrow(
 			CliUsageError,
@@ -139,7 +139,7 @@ describe("discover", () => {
 		expect(r.target?.base).toBe("http://127.0.0.1:9000")
 		expect(fetchFn).toHaveBeenCalledTimes(1)
 	})
-	it("skips a different service answering HTML (review focus 1)", async () => {
+	it("skips a different service answering HTML", async () => {
 		const fetchFn = vi.fn<FetchLike>(url =>
 			url.includes(":9000")
 				? Promise.reject(new TypeError("fetch failed"))

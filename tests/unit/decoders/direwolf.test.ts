@@ -386,7 +386,7 @@ describe("APRS objects and items (WG2 req 3.2)", () => {
 		expect(result.lat).toBeCloseTo(49.05833333333333)
 	})
 
-	it("accepts a local day-hour-minute object timestamp (R1 #10)", () => {
+	it("accepts a local day-hour-minute object timestamp", () => {
 		const result = parseAprsInfo(
 			"N0CALL",
 			"APRS",

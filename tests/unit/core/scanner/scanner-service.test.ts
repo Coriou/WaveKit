@@ -705,7 +705,7 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	// ---- Task 35 fix round 1 ----
+	// Lifecycle regression coverage.
 
 	const noPassive = (s: { passive: { enabled: boolean } }): void => {
 		s.passive.enabled = false
@@ -934,9 +934,9 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	// ---- Task 35 fix round 2: explicit resume of a preempted sweep ----
+	// ---- explicit resume of a preempted sweep ----
 
-	it("resumes a sweep preempted by an operator write at once (fix round 2)", async () => {
+	it("resumes a sweep preempted by an operator write at once", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		await h.service.start()
 		const job = await h.service.createJob(sweep(50))
@@ -950,7 +950,7 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	it("refuses the resume of a relay-preempted sweep while the relay holds control (fix round 2)", async () => {
+	it("refuses the resume of a relay-preempted sweep while the relay holds control", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		await h.service.start()
 		const job = await h.service.createJob(sweep(50))
@@ -992,7 +992,7 @@ describe("ScannerService", () => {
 		return { h, low, mid, high }
 	}
 
-	it("resumes only the best preempted-job waiter on a free lease (fix round 2, P16)", async () => {
+	it("resumes only the best preempted-job waiter on a free lease (P16)", async () => {
 		const { h, low, mid } = await twoWaiters()
 		await expect(
 			h.service.resumeJob(low.id, { takeover: true }),

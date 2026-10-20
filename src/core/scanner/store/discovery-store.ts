@@ -2845,7 +2845,7 @@ export class DiscoveryStore
 	/**
 	 * Lowest effective confidence, then oldest `lastSeenAt` (ties: smaller id).
 	 * Never a stored or shown `decoded` discovery, `keep`, lockout, or a kept
-	 * recording (WG2 R1 #8: evicting a lockout would silently put it back into sweeps).
+	 * WG2: recording (evicting a lockout would silently put it back into sweeps).
 	 */
 	private evictionVictim(protect?: ReadonlySet<string>): Discovery | undefined {
 		let victim: Discovery | undefined

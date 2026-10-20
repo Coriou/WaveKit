@@ -1,6 +1,6 @@
 // Feature: web-gaps-7, Property 12: Refresh bounds
 // Validates: Requirements 7.1, 7.2
-// Main decision (WG7 MA.1): a max-wait (default 30 s) from the first un-served notify, so
+// WG7: Main decision: a max-wait (default 30 s) from the first un-served notify, so
 // notifies closer than the debounce cannot postpone a refresh forever.
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"

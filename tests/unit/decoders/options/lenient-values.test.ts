@@ -120,7 +120,7 @@ describe("null frequencies are not absent", () => {
 	})
 })
 
-describe("round 3 review fixes", () => {
+describe("accepts integer text for multimon-ng verbosity, which the adapter compares", () => {
 	it("accepts integer text for multimon-ng verbosity, which the adapter compares", () => {
 		expect(validateDecoderOptions("multimon-ng", { verbosity: "2" })).toEqual(
 			[],

@@ -1,4 +1,4 @@
-/** WG12 ID.1 property: a waiting identify ends no-signal only when nothing gated in time. */
+/** WG12 property: a waiting identify ends no-signal only when nothing gated in time. */
 import fc from "fast-check"
 import pino from "pino"
 import { describe, expect, it } from "vitest"

@@ -177,7 +177,7 @@ describe("ScannerService WG11 identify wiring", () => {
 		)
 	})
 
-	it("433.92 MHz OOK stays ook-burst: US outside and inside a sweep, EU in a sweep (review M1, round 2)", async () => {
+	it("433.92 MHz OOK stays ook-burst: US outside and inside a sweep, EU in a sweep", async () => {
 		const OOK = 433_920_000
 		const ook = makeTrack({ id: "ook", centreHz: OOK, startedAt: 0, blocks: 3 })
 		const us = harness({ bandplans: () => bandplansFor("US") })
@@ -187,7 +187,7 @@ describe("ScannerService WG11 identify wiring", () => {
 		coveredBy(us, "in-window")
 		const usWindow = internals(us).classifierContext("rtl", OOK)
 		expect(classifySpectral(ook, usWindow).class).toBe("ook-burst")
-		// Review round 2: a US sweep across 433.92 MHz (inside 433.05-434.79 MHz) never fills either.
+		// A US sweep across 433.92 MHz (inside 433.05-434.79 MHz) never fills either.
 		coveredBy(us, "sweep")
 		const usSweep = internals(us).classifierContext("rtl", OOK)
 		expect(usSweep.priors["ism"]).toBe(undefined)

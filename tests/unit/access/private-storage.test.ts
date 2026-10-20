@@ -727,7 +727,7 @@ describe("private single-operator persistence", () => {
 	})
 })
 
-describe("last-seen persistence (WG2 req 11.6, R1 #6)", () => {
+describe("last-seen persistence (WG2 req 11.6)", () => {
 	const failNextTempOpen = () => {
 		const open = fs.open.bind(fs)
 		let armed = true

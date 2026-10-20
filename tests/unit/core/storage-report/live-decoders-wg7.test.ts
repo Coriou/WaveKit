@@ -1,5 +1,5 @@
 /**
- * WG7 MA.1: the storage report's decoder list is the decoder manager's current
+ * WG7: the storage report's decoder list is the decoder manager's current
  * config-owned decoders, so a dsd-fme decoder created after startup adds its WAV
  * directory to the next report, and scanner probes never do.
  */
@@ -49,7 +49,7 @@ function wavPaths(): readonly string[] | undefined {
 		.find((a: StorageAreaSource) => a.id === "digital-voice-wav")?.paths
 }
 
-describe("storage report decoder list (WG7 MA.1)", () => {
+describe("storage report decoder list (WG7)", () => {
 	it("lists a decoder created after startup and drops it once removed", async () => {
 		expect(wavPaths()).toEqual([])
 		manager.createDecoder({

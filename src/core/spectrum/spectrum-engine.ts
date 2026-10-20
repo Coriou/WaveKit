@@ -1405,7 +1405,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	/**
 	 * A write that landed inside the scanner's suppression window (a REST write during a retune)
 	 * posted no epoch: when the window closes, a caps centre other than the latest submitted one
-	 * (or the current epoch's) gets an external epoch (Task 35 fix round, review finding 14).
+	 * (or the current epoch's) gets an external epoch.
 	 */
 	private checkSuppressedCentre(): void {
 		if (!this.running || this.restarting) return

@@ -75,7 +75,7 @@ describe("strip input", () => {
 			lineText(stripLine(stripInput(scenarioState("api-down")), 79)),
 		).toMatch(/^api × .*decoders \?.*drops \?/)
 	})
-	it("summarises two sources with the worst state (review focus 5)", () => {
+	it("summarises two sources with the worst state", () => {
 		const s = scenarioState("live")
 		const src = s.sources.value![0]!
 		const stale: ExtendedSourceStatus = {

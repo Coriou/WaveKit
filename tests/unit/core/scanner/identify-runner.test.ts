@@ -554,7 +554,7 @@ async function dmrTrial(h: Harness): Promise<void> {
 	expect(outcomes(h)["dmr"]).toBe("running")
 }
 
-describe("IdentifyRunner window moves, cut-short runs and endings (Task 35a fix round 1)", () => {
+describe("IdentifyRunner window moves, cut-short runs and endings", () => {
 	it("ends the target within one tick when the window moves far mid-trial: trials cancelled, no further probe", async () => {
 		const h = identifyHarness()
 		const order = decoderOrder(h)
@@ -605,7 +605,7 @@ describe("IdentifyRunner window moves, cut-short runs and endings (Task 35a fix 
 		expect(h.record.state).toBe("completed")
 		// the deadline is the original start + 2 s (+ one tick to finish), not 2 s after the epoch change
 		expect(h.clock.now - startedAt).toBeLessThanOrEqual(2300)
-		// the evidence survives the restart: the DMR track it resolved still gives candidate/dmr (fix round 2, R1)
+		// the evidence survives the restart: the DMR track it resolved still gives candidate/dmr
 		expect(h.last()).toMatchObject({
 			state: "candidate",
 			result: {

@@ -1993,7 +1993,7 @@ export class ProbePool extends EventEmitter {
 			if (rec.epochEndedAt !== null && ev.at >= rec.epochEndedAt) continue
 			if (ev.identity || ev.encrypted !== undefined) rec.confirmed = true
 			if (rec.transport.kind === "replay") {
-				// Re-review 2 #1: held until the replay's clean end (dropped when it never comes).
+				// held until the replay's clean end (dropped when it never comes).
 				const held = (rec.heldEvidence ??= [])
 				if (held.length >= REPLAY_HELD_EVIDENCE_MAX) {
 					// r7 B3: past the bound the replay is no verdict: dropped, the probe ends cancelled.

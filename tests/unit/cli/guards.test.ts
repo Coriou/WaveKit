@@ -409,7 +409,7 @@ describe("R15: status events", () => {
 	})
 })
 
-describe("A1 fix round 1", () => {
+describe("R13 at compile time: DecoderRow has no rateAssessment", () => {
 	it("R13 at compile time: DecoderRow has no rateAssessment", () => {
 		const row: DecoderRow | undefined = guardDecoder(decoder)
 		// @ts-expect-error DecoderRow omits rateAssessment (spec §2, R13)

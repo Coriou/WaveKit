@@ -9,7 +9,7 @@ import type {
 	BandPlanUrlFetcher,
 } from "../../../../src/core/bandplans/contract.js"
 
-// WG6 MA.1 (U): the barrel wires the update diff; src/index.ts passes the fetcher and the
+// WG6 (U): the barrel wires the update diff; src/index.ts passes the fetcher and the
 // allowlist to both services, and only the writable (protected) one advertises hosts.
 const dirs: string[] = []
 const services: BandPlanService[] = []
@@ -38,7 +38,7 @@ async function open(writable: boolean): Promise<{
 	return { service, fetch }
 }
 
-describe("band-plan URL import wiring (WG6 MA.1 U)", () => {
+describe("band-plan URL import wiring (WG6)", () => {
 	it("the legacy (read-only) service advertises no URL hosts and refuses URL work", async () => {
 		const { service, fetch } = await open(false)
 		expect(service.view().capabilities.urlImportHosts).toEqual([])

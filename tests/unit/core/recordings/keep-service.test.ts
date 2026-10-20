@@ -784,7 +784,7 @@ describe("recording keep service", () => {
 			expect(await privateNames(f)).toEqual([])
 		})
 
-		it("round 2: mkdtemp failing answers 500 RECORDING_DELETE_FAILED with nothing renamed", async () => {
+		it("mkdtemp failing answers 500 RECORDING_DELETE_FAILED with nothing renamed", async () => {
 			const f = await fixture()
 			let renames = 0
 			const fsx = realDeleteFs({
@@ -805,7 +805,7 @@ describe("recording keep service", () => {
 			expect(await privateNames(f)).toEqual([])
 		})
 
-		it("round 2: a shared-directory swap of the private entry after the inner lstat is not unlinked", async () => {
+		it("a shared-directory swap of the private entry after the inner lstat is not unlinked", async () => {
 			const f = await fixture()
 			const foreign = path.join(f.root, "foreign.wav")
 			await writeFile(foreign, "FOREIGN")
@@ -878,7 +878,7 @@ describe("recording keep service", () => {
 			})
 		})
 
-		it("round 3: renaming the private directory and planting a symlink at its name does not redirect the unlink", async () => {
+		it("renaming the private directory and planting a symlink at its name does not redirect the unlink", async () => {
 			const f = await fixture()
 			const outside = path.join(f.root, "outside")
 			await mkdir(outside)
@@ -910,7 +910,7 @@ describe("recording keep service", () => {
 			noSecretsLogged(f)
 		})
 
-		it("round 3: a group-writable recording directory without the sticky bit refuses the delete (500)", async () => {
+		it("a group-writable recording directory without the sticky bit refuses the delete (500)", async () => {
 			const f = await fixture()
 			await nodeFs.chmod(f.dsd, 0o775)
 			const fsx = realDeleteFs()
@@ -928,7 +928,7 @@ describe("recording keep service", () => {
 			noSecretsLogged(f)
 		})
 
-		it("round 3: a world-writable recording directory with the sticky bit still deletes", async () => {
+		it("a world-writable recording directory with the sticky bit still deletes", async () => {
 			const f = await fixture()
 			await nodeFs.chmod(f.dsd, 0o1777)
 			const svc = await f.open({ deleteFs: realDeleteFs() })

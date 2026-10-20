@@ -27,7 +27,7 @@ import {
 	packCu8,
 } from "../../../mocks/scanner/signals.js"
 
-// WG7 MA.1 AMB: the scanner service wires ambient targets, trust and coverage into identify.
+// WG7 AMB: the scanner service wires ambient targets, trust and coverage into identify.
 
 const AIS_A = 161_975_000
 const AIS_B = 162_025_000
@@ -137,7 +137,7 @@ const firstTarget = (r: Rig, jobId: string): ScannerIdentifyEventData =>
 	r.h.service.getJob(jobId)?.identify?.targets[0] ??
 	({ trials: [] } as unknown as ScannerIdentifyEventData)
 
-describe("ScannerService ambient identify (WG7 MA.1 AMB)", () => {
+describe("ScannerService ambient identify (WG7)", () => {
 	it("identifies an AIS target from a config-owned AIS decoder on the same source with commanded trust", async () => {
 		const seen: [string, number, string][] = []
 		const r = rig({

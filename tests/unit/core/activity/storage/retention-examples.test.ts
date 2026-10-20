@@ -419,7 +419,7 @@ async function waitFor(check: () => boolean): Promise<void> {
 	expect(check()).toBe(true)
 }
 
-// Review round 1 (WG3 F): one regression per finding.
+// Regression coverage (WG3 F): one regression per finding.
 describe("fair-share retention regressions", () => {
 	it("deletes by actual record bytes and keeps the byte floor (finding 1)", async () => {
 		const db = await openSqliteFile(":memory:")
@@ -590,8 +590,8 @@ describe("fair-share retention regressions", () => {
 	})
 })
 
-// Review round 2 (WG3 F).
-describe("fair-share retention regressions, round 2", () => {
+// Regression coverage (WG3 F).
+describe("fair-share retention regressions", () => {
 	it("never takes a share below its byte floor, not even for one row", async () => {
 		const db = await openSqliteFile(":memory:")
 		try {
@@ -696,8 +696,8 @@ describe("fair-share retention regressions, round 2", () => {
 	})
 })
 
-// Review round 3 (WG3 F).
-describe("fair-share retention regressions, round 3", () => {
+// Regression coverage (WG3 F).
+describe("fair-share retention regressions", () => {
 	it("tries over-level shares the budget left out before an indivisible step", async () => {
 		const db = await openSqliteFile(":memory:")
 		openActivityDatabase(db)

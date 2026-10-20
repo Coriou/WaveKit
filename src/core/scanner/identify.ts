@@ -1971,7 +1971,7 @@ export class IdentifyRunner implements JobDriver {
 		// A gated deadline that arrives before the full hold is the same kind of cut.
 		// A replay run stopped without its decoder's clean end (input failed, capture gone) is cut short
 		// whatever the wall clock says.
-		// Re-review 3 #2: a replay run's verdict needs its clean replay-end; a hold expiry without it
+		// a replay run's verdict needs its clean replay-end; a hold expiry without it
 		// (a decoder that never exited) is cut short too: cancelled, no miss.
 		const sawIdentity = [...r.seen.values()].some(
 			seen => seen.identity !== null,

@@ -98,7 +98,7 @@ function config(): Config {
 	})
 }
 
-describe("config export through the API server (WG6 MA.1 CE)", () => {
+describe("config export through the API server (WG6)", () => {
 	const cleanup: Array<() => Promise<void> | void> = []
 
 	afterEach(async () => {

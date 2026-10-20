@@ -613,7 +613,7 @@ describe("configured gain review fixes", () => {
 	})
 })
 
-describe("configured gain review round 1 (M1, M2)", () => {
+describe("configured gain (M1, M2)", () => {
 	/** Gives the fake SourceManager a live config (getConfig), as the real one has. */
 	function withLiveConfig(
 		h: ReturnType<typeof harness>,

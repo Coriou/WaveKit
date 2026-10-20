@@ -155,7 +155,7 @@ describe("window", () => {
 			),
 		).toBe("?")
 	})
-	it("handles two sources with decoders split between them (review focus 5)", () => {
+	it("handles two sources with decoders split between them", () => {
 		const sources = [
 			src("a", 433_920_000, ["rtl433"]),
 			src("b", 1_090_000_000, ["readsb", "ais-catcher"]),

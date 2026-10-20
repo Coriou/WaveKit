@@ -629,7 +629,7 @@ export class ScannerPersistence {
 
 	/**
 	 * Jobs, runtime settings and engine state alone, independent of the snapshot and the journal:
-	 * ScannerService's fallback when load() rejects (Task 35 fix round). The readers never throw.
+	 * ScannerService's fallback when load() rejects. The readers never throw.
 	 * Never marks the state loaded, so journal and snapshot writes stay refused.
 	 */
 	async loadConfig(): Promise<

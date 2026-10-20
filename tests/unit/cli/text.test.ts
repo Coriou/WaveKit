@@ -189,7 +189,7 @@ describe("line helpers", () => {
 	})
 })
 
-describe("fix round 1: non-positive widths", () => {
+describe("non-positive widths", () => {
 	afterEach(() => setGlyphMode("utf8"))
 	const line = [
 		{ text: "api ", role: "label" as const },
@@ -206,7 +206,7 @@ describe("fix round 1: non-positive widths", () => {
 	}
 })
 
-describe("fix round 1: ellipsis span", () => {
+describe("ellipsis span", () => {
 	it("keeps the role and bold of the span it continues", () => {
 		const cut = truncateLine(
 			[{ text: "readsb-long", role: "selected", bold: true }],
@@ -221,7 +221,7 @@ describe("fix round 1: ellipsis span", () => {
 	})
 })
 
-describe("fix round 1: wide, zero-width and hostile characters", () => {
+describe("wide, zero-width and hostile characters", () => {
 	it("counts emoji outside the old ranges as 2 columns", () => {
 		expect(cellWidth("🚀")).toBe(2) // U+1F680
 		expect(cellWidth("🛸")).toBe(2) // U+1F6F8

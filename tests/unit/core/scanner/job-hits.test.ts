@@ -48,7 +48,7 @@ describe("JobHits (WG2 req 13)", () => {
 		expect(h.entry("d_x")).toBeUndefined()
 	})
 
-	it("counts a discovery promoted from several observations as one new discovery (R1 #1)", () => {
+	it("counts a discovery promoted from several observations as one new discovery", () => {
 		const h = new JobHits("j_1")
 		for (const o of ["o_1", "o_2", "o_3"]) h.record(o, "d_p", T0, true)
 		expect(h.stats()).toEqual({

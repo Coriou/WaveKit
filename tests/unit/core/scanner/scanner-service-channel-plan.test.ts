@@ -18,7 +18,7 @@ import {
 	settled,
 } from "../../../mocks/scanner/service-fakes.js"
 
-// WG12 scanner redesign, task DT.3: the scanner's channel plan and gate-aware ingest
+// WG12 scanner redesign: the scanner's channel plan and gate-aware ingest
 // (requirements 2.1, 2.5, 4.1). Runs against the patched scanner service.
 
 type Harness = ReturnType<typeof serviceHarness>

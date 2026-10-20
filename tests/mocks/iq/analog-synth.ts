@@ -1,5 +1,5 @@
 /**
- * Deterministic cf32 captures for the analog replay trial (RP.3b).
+ * Deterministic cf32 captures for the analog replay trial.
  *
  * 48 kHz interleaved little-endian float32, the capture file layout. Every
  * sample comes from `seed` (taken as a uint32) and the kind. Channel SNR is

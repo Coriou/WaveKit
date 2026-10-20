@@ -237,7 +237,7 @@ describe("ScannerService per-job hit statistics (WG2 req 13)", () => {
 				{},
 			)
 			expect(h.service.jobHits(a.id, 10)).toMatchObject({
-				// One new discovery, two of its observations: newDiscoveries counts it once (R1 #1).
+				// One new discovery, two of its observations: newDiscoveries counts it once.
 				stats: { discoveries: 1, hits: 2, newDiscoveries: 1, truncated: false },
 				hits: [{ discoveryId: "d_p", hits: 2, firstSeenInJob: true }],
 			})

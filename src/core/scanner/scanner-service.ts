@@ -355,7 +355,7 @@ export type ScannerIqCapture = IqCapturePort & {
 
 /** Review m3: planned replay trials kept per capture (the queue holds one at a time; slack for races). */
 const REPLAY_PLANS_MAX = 64
-/** Re-review 2 #3: closed observation spans kept for late replay results. */
+/** closed observation spans kept for late replay results. */
 const REPLAY_SPANS_MAX = 1024
 
 export interface ScannerServiceDeps {
@@ -4003,7 +4003,7 @@ export class ScannerService extends EventEmitter {
 	/** WG12 req 6.3: closed live-audio transmissions recorded onto nearby discoveries. */
 	private liveAudio: LiveAudioEvidence | null = null
 
-	/** Re-review 2 #4: set by stop; a start still pending then never creates the queue. */
+	/** set by stop; a start still pending then never creates the queue. */
 	private replayStopped = false
 
 	private startReplayQueue(): void {
@@ -4140,7 +4140,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Re-review 2 #3: spans of observations that left `recent`, so a replay result arriving later is
+	 * spans of observations that left `recent`, so a replay result arriving later is
 	 * still stamped inside its observation. Bounded (oldest evicted); a replay comes within the 10 min
 	 * orphan TTL of its capture, far fewer than REPLAY_SPANS_MAX observations close in that time.
 	 */
@@ -4155,7 +4155,7 @@ export class ScannerService extends EventEmitter {
 			startedAt: o.startedAt,
 			...(o.endedAt !== undefined ? { endedAt: o.endedAt } : {}),
 		})
-		// Re-review 3 #3: the oldest span no stored capture needs goes; pinned ones stay.
+		// the oldest span no stored capture needs goes; pinned ones stay.
 		while (this.replaySpans.size > REPLAY_SPANS_MAX) {
 			let evicted = false
 			for (const id of this.replaySpans.keys())
@@ -4169,7 +4169,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Re-review 3 #3: observations whose finished captures are still stored (pinned by the capture
+	 * observations whose finished captures are still stored (pinned by the capture
 	 * service's finished events, released by its removal events, r7 B4; `spanPinned` also drops a
 	 * pin whose capture `holderOf` no longer knows). Bound:
 	 * one pin per stored capture; a finished capture holds ≥ 4 800 samples × 8 B = 38 400 B, so at
@@ -5185,7 +5185,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	/**
-	 * Explicit resume of a preempted sweep (fix round 2): on the arbitration chain, at once (no idle
+	 * Explicit resume of a preempted sweep: on the arbitration chain, at once (no idle
 	 * wait; the resume is the consent). It gets the lease only when no job holds it and it is the
 	 * best waiter (`chooseLeaseHolder`, P16); otherwise 409 with its state unchanged.
 	 */
@@ -5990,7 +5990,7 @@ export class ScannerService extends EventEmitter {
 		// WG11 req 1.7: a deleted discovery drops its known-protocol miss count. A merge reports
 		// the merged-away discovery as `deleted` and the survivor (which keeps its count) as `merged`.
 		if (change === "deleted") this.knownProtocols.forget(id)
-		// WG2 R1 #8 / R2: eviction and age pruning never remove a lockout, and operator deletion
+		// WG2: eviction and age pruning never remove a lockout, and operator deletion
 		// replans itself; a merge can move one (the survivor inherits `lockout`), so only a
 		// locked survivor schedules a replan (no-op when no job's lockout list changes).
 		if (change === "merged" && this.store.get(id)?.operator?.lockout === true)
@@ -6076,7 +6076,7 @@ export class ScannerService extends EventEmitter {
 		this.probes.pump()
 		this.recent = this.recent.filter(o => {
 			const keep = (o.endedAt ?? now) > now - RECENT_KEEP_MS
-			// Re-review 2 #3: a late replay decode still needs the span to stamp inside it.
+			// a late replay decode still needs the span to stamp inside it.
 			if (!keep && this.deps.iqCapture) this.rememberReplaySpan(o)
 			return keep
 		})

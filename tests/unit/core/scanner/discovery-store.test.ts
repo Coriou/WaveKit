@@ -782,7 +782,7 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 		expect(small.store.snapshot().discoveries).toHaveLength(2)
 	})
 
-	it("never evicts a locked-out discovery (WG2 R1 #8)", () => {
+	it("never evicts a locked-out discovery (WG2)", () => {
 		const { store } = newStore({ max: 2 })
 		const locked =
 			store.ingest(

@@ -1,5 +1,5 @@
 /**
- * scripts/rf-window (WG7 MA.4): the pure helpers (argument parsing, statistics, PCM noise
+ * WG7: scripts/rf-window: the pure helpers (argument parsing, statistics, PCM noise
  * tails, tone matching, restore plans, retune sequences), their parity with the frozen
  * contract, and each script's dry run (no network) and usage errors.
  */

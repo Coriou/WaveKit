@@ -130,7 +130,7 @@ const ROWS: [string[], string, string, string[]][] = [
 		"paused(preempted-job)",
 		["release-lease"],
 	],
-	// a lease lost while paused (Task 35 fix round): the operator's pause stays, a source-down pause is preempted
+	// a lease lost while paused: the operator's pause stays, a source-down pause is preempted
 	[
 		["paused(operator)"],
 		"rest-write",
@@ -183,7 +183,7 @@ const ROWS: [string[], string, string, string[]][] = [
 		"paused(resume-blocked)",
 		["report-impact", "release-decoders"],
 	],
-	// explicit resume of a preempted job (fix round 2; the service admits only the best waiter on a free lease)
+	// explicit resume of a preempted job (the service admits only the best waiter on a free lease)
 	[
 		PREEMPTED,
 		"resume:plain",

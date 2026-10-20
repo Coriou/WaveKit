@@ -302,7 +302,7 @@ describe("createBandRangeCache (review m3)", () => {
 	})
 })
 
-describe("withBandBurstPrior: OOK short-range-device allocations (review round 2)", () => {
+describe("withBandBurstPrior: OOK short-range-device allocations", () => {
 	const US_RANGES = bandplansFor("US").flatMap(b => b.ranges)
 	const sweepCtx = (hz: number) => ({
 		hz,

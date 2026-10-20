@@ -193,7 +193,7 @@ describe("NoiseSquelch allocation (review fix)", () => {
 	})
 })
 
-describe("NoiseSquelch tiles (review round 2)", () => {
+describe("NoiseSquelch tiles", () => {
 	it("blocks longer than the scratch reuse it and equal a single-pass reference", () => {
 		const squelch = new NoiseSquelch(NFM)
 		const reference = new NoiseSquelch(NFM)

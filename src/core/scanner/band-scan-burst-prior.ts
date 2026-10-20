@@ -4,7 +4,7 @@ import type { ScannerProtocol, ScanRange } from "./types.js"
 type Priors = Partial<Record<ScannerProtocol, number>>
 
 /**
- * WG11 req 1.4 (review round 2): licence-exempt allocations where OOK/ASK short-range devices
+ * WG11 req 1.4: licence-exempt allocations where OOK/ASK short-range devices
  * (remotes, sensors, the rtl_433 corpus) transmit in some region. Inside one the fill never
  * applies, whatever the region's plans list, so a young OOK burst stays `ook-burst` (the region
  * filter alone missed 433.92 MHz in the US, where only land-mobile and amateur plans cover it).

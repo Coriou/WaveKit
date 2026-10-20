@@ -817,7 +817,7 @@ describe("property 9", () => {
 	})
 })
 
-describe("Main wiring: live demodulator transmissions feed identify (WG10 MA.1)", () => {
+describe("Main wiring: live demodulator transmissions feed identify (WG10)", () => {
 	const at = (ms: number) => new Date(ms).toISOString()
 	function wired(opts: {
 		liveSource?: string

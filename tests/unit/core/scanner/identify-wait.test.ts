@@ -1,4 +1,4 @@
-/** WG12 ID.1: identify waits for a gated transmission, then times the trial from its start. */
+/** WG12: identify waits for a gated transmission, then times the trial from its start. */
 import { Writable } from "node:stream"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
@@ -133,7 +133,7 @@ function captureLogger(): { logger: Logger; text: () => string } {
 	return { logger, text: () => chunks.join("") }
 }
 
-describe("IdentifyRunner waits for a gated transmission (WG12 ID.1)", () => {
+describe("IdentifyRunner waits for a gated transmission (WG12)", () => {
 	it("waits, then timeoutMs counts from the gated start", async () => {
 		const cell = { gateAt: Number.POSITIVE_INFINITY, now: () => 0 }
 		const h = waitHarness({
