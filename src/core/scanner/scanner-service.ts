@@ -298,6 +298,13 @@ import { refineChannelClassification } from "./classify/channel-tier.js"
 import { updateChannelAdmission } from "./plan/resource-admission.js"
 import type { AnalogCut } from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
+import {
+	CHANNEL_GATE_DEFAULT_WIDTH_HZ,
+	CHANNEL_GATE_MAX_WIDTH_HZ,
+	CHANNEL_GATE_MIN_WIDTH_HZ,
+	type ChannelPlan,
+	type ChannelPlanEntry,
+} from "./scanner-redesign-contract.js"
 
 /**
  * WG11 req 6: the IQ capture service as the scanner uses it (the port plus the epoch flush). The
@@ -2271,7 +2278,44 @@ export class ScannerService extends EventEmitter {
 			// § 6.2: in-window while no sweep lease holds the source (truncated segments → `edge`).
 			inWindow: this.arbiter.holder(sourceId) === undefined,
 		})
+		// WG12 R 2.1: the channel gate follows every mask change (start, stop, range edit, lease).
+		this.spectrum.setChannelPlan(sourceId, this.channelPlanOf(sourceId))
 		this.updateRing(sourceId)
+	}
+
+	/**
+	 * WG12 R 2.1: one channel-plan entry per enabled range of the source's running jobs, plus
+	 * the band-plan view's ranges while the source's passive job runs (the gate clips entries
+	 * to the tuned window). Null when no job runs on the source.
+	 */
+	channelPlanOf(sourceId: string): ChannelPlan | null {
+		const records = [...this.jobs.values()].filter(
+			j => j.spec.sourceId === sourceId && !isTerminal(j.state),
+		)
+		if (records.length === 0) return null
+		const ranges = records.flatMap(j => j.spec.ranges.filter(isRangeEnabled))
+		if (records.some(j => j.passive))
+			for (const b of this.deps.bandplans?.() ?? bandplansFor(this.deps.region))
+				ranges.push(...b.ranges.filter(isRangeEnabled))
+		const entries = ranges.map((r): ChannelPlanEntry => {
+			const raster = r.rasters?.[0]
+			const width =
+				r.obwHz?.[0] ?? raster?.spacingHz ?? CHANNEL_GATE_DEFAULT_WIDTH_HZ
+			return {
+				startHz: r.startHz,
+				endHz: r.endHz,
+				widthHz: Math.min(
+					CHANNEL_GATE_MAX_WIDTH_HZ,
+					Math.max(CHANNEL_GATE_MIN_WIDTH_HZ, width),
+				),
+				rasterHz: raster?.spacingHz ?? null,
+				firstChannelHz: raster?.firstChannelHz ?? null,
+				// A11: the same burst rule as the masks' burstRanges.
+				burst: (r.protocols ?? []).some(p => BURST_PROTOCOLS.has(p)),
+				rangeKey: `${Math.round(r.startHz)}:${Math.round(r.endHz)}`,
+			}
+		})
+		return { sourceId, entries, defaultWidthHz: CHANNEL_GATE_DEFAULT_WIDTH_HZ }
 	}
 
 	/**
@@ -2357,6 +2401,8 @@ export class ScannerService extends EventEmitter {
 			case "untracked-retune":
 				// § 4.7: the engine already marked the epoch unverified; sweeps re-send their hop,
 				// in-window jobs continue with unverified observations.
+				// DT (R 1.2): the holder's next same-centre retune must write, not no-op.
+				this.arbiter.distrust(sourceId)
 				for (const d of drivers) d.onUntrackedRetune()
 				return
 			case "stats":
@@ -2387,6 +2433,13 @@ export class ScannerService extends EventEmitter {
 		const opened = !live
 		if (!live) {
 			if (covering.length === 0) return
+			// WG12 R 2.5, 4.1: a track still pending opens nothing; one that closes `below` is a
+			// transient only (no observation, store ingest, capture, probe or activity event).
+			if (track.gate !== undefined && track.gate !== "passed") {
+				if (ev.kind === "track-close" && track.gate === "below")
+					for (const d of covering) d.record.counts.transients += 1
+				return
+			}
 			live = {
 				observationId: `o_${ulid(now)}`,
 				sourceId,
@@ -3097,6 +3150,8 @@ export class ScannerService extends EventEmitter {
 			)
 		})
 		if (identifying) return false
+		// WG12 R 4.1: confirm candidates are gated tracks only (absent gate: no plan, today's rule).
+		if (track.gate !== undefined && track.gate !== "passed") return false
 		if (
 			track.flags.truncated ||
 			track.flags.edge ||

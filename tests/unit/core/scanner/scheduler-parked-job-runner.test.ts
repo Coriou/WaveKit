@@ -37,9 +37,13 @@ class Arbiter {
 		}
 		return { ok: true as const, lease: this.lease }
 	}
-	retune(_lease: Lease, target: { centreHz: number }): Promise<PendingEpoch> {
+	retune(
+		_lease: Lease,
+		target: { centreHz: number },
+	): Promise<PendingEpoch & { skipped?: true }> {
 		this.retunes.push(target)
 		return Promise.resolve({
+			...(this.retunes.length > 1 ? { skipped: true as const } : {}),
 			epoch: 11,
 			commandSample: 0,
 			bufferedSamples: 0,
@@ -175,8 +179,8 @@ describe("JobRunner with a parked scheduler", () => {
 			const start = runner.progress().sweepIndex
 			let sample = 0
 			if (paused) {
-				// Requires DT.2's Main seam: JobRunner calls onTuneSkipped after
-				// the arbiter returns the same epoch, without an epoch-started event.
+				// A same-centre no-op explicitly resumes the parked visit without
+				// an epoch-started event (R 1.2).
 				for (let block = 0; block < 19; block++) {
 					sample += BLOCK
 					clock += 50

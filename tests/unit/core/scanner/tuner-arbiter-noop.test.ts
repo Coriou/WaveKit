@@ -59,6 +59,7 @@ describe("TunerArbiter same-centre no-op (R 1.2)", () => {
 		expect(m.writes).toEqual([])
 		expect(m.newEpochs).toBe(0)
 		expect(m.pending.epoch).toBe(first.epoch)
+		expect(m.pending.skipped).toBe(true)
 		expect(m.pending.settleSamples).toBe(0)
 		expect(m.pending.expectMarker).toBe(false)
 		expect(m.pending.centreChanged).toBe(false)
@@ -72,6 +73,7 @@ describe("TunerArbiter same-centre no-op (R 1.2)", () => {
 		const { lease } = await verifiedLease(h)
 		const m = await measure(h, lease, target({ gainTenthsDb: 300 }))
 		expect(m.writes).toContain("set-gain")
+		expect(m.pending.skipped).toBeUndefined()
 		expect(m.newEpochs).toBe(1)
 	})
 

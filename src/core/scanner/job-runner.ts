@@ -862,7 +862,8 @@ export class JobRunner implements JobDriver {
 	replan(spec: NormalisedJobSpec, plan: HopPlan): void {
 		this.record.spec = spec
 		this.record.plan = plan
-		this.scheduler?.replan(plan, spec)
+		// DT (R 1.1): a parked one-hop plan that moves returns its stop-probes and one tune.
+		if (this.scheduler) this.exec(this.scheduler.replan(plan, spec))
 		for (const p of this.deps.probes.status()) {
 			if (
 				p.jobId === this.record.id &&
@@ -1451,7 +1452,13 @@ export class JobRunner implements JobDriver {
 					: undefined,
 			)
 			this.autoResumeGuardActive = false
+			// R 1.2: only an explicit no-op has no epoch-started event to resume the visit.
+			// A real retune can emit that event before its promise resolves.
 			this.addOwnEpoch(pending.epoch)
+			if (pending.skipped === true && this.driving && this.scheduler) {
+				this.epochOwn = true
+				this.exec(this.scheduler.onTuneSkipped())
+			}
 		} catch (err) {
 			if (err instanceof WaveKitError && err.code === "SCANNER_RESUME_HELD") {
 				this.queueEvent({ type: "rest-write" })

@@ -262,12 +262,11 @@ describe("ScannerService gate-aware ingest (WG12 R 2.5, 4.1)", () => {
 		const live = internals.live.get("t-p")!
 		expect(internals.needsConfirm(live, track("p", "pending"))).toBe(false)
 		expect(internals.needsConfirm(live, track("p", "below"))).toBe(false)
-		expect(internals.needsConfirm(live, track("p", "passed"))).toBe(
-			internals.needsConfirm(live, track("p", undefined)),
-		)
+		expect(internals.needsConfirm(live, track("p", "passed"))).toBe(true)
+		expect(internals.needsConfirm(live, track("p", undefined))).toBe(false)
 	})
 
-	it("a track with no gate keeps today's candidate behaviour", async () => {
+	it("a track with no gate surfaces activity without a confirm candidate", async () => {
 		const { h, internals } = setup()
 		const id = await startJob(h, [R0])
 		const driver = internals.drivers.get(id)!
@@ -282,8 +281,7 @@ describe("ScannerService gate-aware ingest (WG12 R 2.5, 4.1)", () => {
 		expect(onTrack).toHaveBeenCalledTimes(1)
 		expect(activity).toHaveBeenCalled()
 		const live = internals.live.get("t-n")!
-		expect(internals.needsConfirm(live, track("n", undefined))).toBe(
-			internals.needsConfirm(live, track("n", "passed")),
-		)
+		expect(internals.needsConfirm(live, track("n", undefined))).toBe(false)
+		expect(internals.needsConfirm(live, track("n", "passed"))).toBe(true)
 	})
 })

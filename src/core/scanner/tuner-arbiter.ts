@@ -422,7 +422,7 @@ export class TunerArbiter extends EventEmitter {
 			sampleRateHz: number | null
 		},
 		allowed?: () => boolean,
-	): Promise<PendingEpoch> {
+	): Promise<PendingEpoch & { skipped?: true }> {
 		// Once a command starts, finish the retune; activity cannot leave a partial tuning.
 		let writesStarted = false
 		const guard = () => {
@@ -435,7 +435,7 @@ export class TunerArbiter extends EventEmitter {
 		guard()
 		this.assertHeld(lease)
 		const skipped = this.sameCentreNoOp(lease, target)
-		if (skipped !== null) return skipped
+		if (skipped !== null) return { ...skipped, skipped: true }
 		// A real write drops the previous acceptance. A throw leaves it clear so the retry writes.
 		this.clearVerified(lease)
 		const { sourceId } = lease
