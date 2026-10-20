@@ -96,6 +96,10 @@ export interface HarnessOpts {
 	discovery?: Discovery
 	ambient?: IdentifyAmbientLookup
 	narrowRasterAt?: (hz: number) => boolean
+	rangeProtocolsAt?: (hz: number) => {
+		protocols: readonly ScannerProtocol[]
+		explicit: boolean
+	}
 	knownProtocols?: KnownProtocolMemory
 	priors?: Partial<Record<ScannerProtocol, number>>
 }
@@ -131,6 +135,9 @@ export function harness(opts: HarnessOpts = {}) {
 		now: () => pool.clock.now,
 		...(port ? { analogEvidence: port } : {}),
 		...(opts.ambient ? { ambient: opts.ambient } : {}),
+		...(opts.rangeProtocolsAt
+			? { rangeProtocolsAt: opts.rangeProtocolsAt }
+			: {}),
 		...(opts.narrowRasterAt ? { narrowRasterAt: opts.narrowRasterAt } : {}),
 		...(opts.knownProtocols ? { knownProtocols: opts.knownProtocols } : {}),
 	})

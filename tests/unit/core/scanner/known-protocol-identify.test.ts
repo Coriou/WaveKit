@@ -86,12 +86,12 @@ describe("known protocol first (WG11 1.7)", () => {
 			"dmr",
 			"ysf",
 		])
-		// Not scored: added first at score 0, unless excluded, prior 0 or no probe mode.
+		// Not scored: added first at score 0, unless explicitly excluded or no probe mode.
 		expect(knownFirst(s, "dpmr", {}, [])[0]).toEqual({
 			protocol: "dpmr",
 			score: 0,
 		})
-		expect(knownFirst(s, "dpmr", { dpmr: 0 }, [])).toEqual(s)
+		expect(knownFirst(s, "dpmr", { dpmr: 0 }, [])[0]?.protocol).toBe("dpmr")
 		expect(knownFirst(s, "dpmr", {}, ["dmr"])).toEqual(s)
 		expect(knownFirst(s, "analog-fm", {}, [])).toEqual(s)
 	})

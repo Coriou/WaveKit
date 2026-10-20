@@ -107,8 +107,12 @@ describe("IdentifyRunner (spec § 10.8)", () => {
 			"dsd-fme:nxdn",
 		])
 		expect(h.last()).toMatchObject({
-			state: "candidate",
-			result: { protocol: "pocsag", confidence: "activity" },
+			state: "unidentified",
+			result: { confidence: "activity" },
+		})
+		expect(h.last()?.result).not.toHaveProperty("protocol")
+		expect(h.last()?.result).toMatchObject({
+			proof: { kind: "digital-undecoded" },
 		})
 		expect(outcomes(h)).toEqual({
 			pocsag: "no-sync",
@@ -363,15 +367,15 @@ describe("IdentifyRunner (spec § 10.8)", () => {
 		expect(h.events).toEqual([])
 	})
 
-	it("reports skipped-budget while the CPU stays above the guard, and still classifies from the spectrum", async () => {
+	it("reports skipped-budget while the CPU stays above the guard, and keeps spectral classification as a hint", async () => {
 		const h = identifyHarness({ cpuPercent: 99 })
 		await h.runner.start()
 		h.tracks.push(viewOf(dmrTrack()))
 		await settle(h, 1000, 30)
 		expect(h.decoders.created.size + h.decoders.removed.length).toBe(0)
 		expect(h.last()).toMatchObject({
-			state: "candidate",
-			result: { protocol: "dmr" },
+			state: "unidentified",
+			result: { hint: "tdma-ms" },
 		})
 		expect(h.last()!.result!.identity).toBeUndefined()
 		expect(new Set(Object.values(outcomes(h)))).toEqual(
@@ -432,15 +436,17 @@ describe("IdentifyRunner (spec § 10.8)", () => {
 				null,
 			),
 		)
-		await settle(h, 100, 10)
+		await settle(h, 1000, 40)
 		const view = h.runner.view()
 		expect(view.targets.map(t => [t.targetHz, t.state])).toEqual([
-			[446_300_000, "candidate"],
-			[446_125_000, "candidate"],
+			[446_300_000, "unidentified"],
+			[446_125_000, "unidentified"],
 		])
 		expect(
 			view.targets.every(
-				t => t.result?.protocol === "carrier" && t.trials.length === 0,
+				t =>
+					t.result?.protocol === undefined &&
+					t.trials.some(trial => trial.protocol === "analog-fm"),
 			),
 		).toBe(true)
 		expect(h.record.state).toBe("completed")
@@ -566,9 +572,8 @@ describe("IdentifyRunner window moves, cut-short runs and endings", () => {
 		await h.advance(100)
 		// it ends with what it has: the spectral class still speaks (the TDMA ACF), no decoder verdict
 		expect(h.last()).toMatchObject({
-			state: "candidate",
+			state: "unidentified",
 			result: {
-				protocol: "dmr",
 				ended: "window-moved",
 				measurements: { source: "track", centreHz: TARGET_HZ },
 			},
@@ -605,11 +610,10 @@ describe("IdentifyRunner window moves, cut-short runs and endings", () => {
 		expect(h.record.state).toBe("completed")
 		// the deadline is the original start + 2 s (+ one tick to finish), not 2 s after the epoch change
 		expect(h.clock.now - startedAt).toBeLessThanOrEqual(2300)
-		// the evidence survives the restart: the DMR track it resolved still gives candidate/dmr
+		// the evidence survives the restart: the resolved track still gives a class hint without a protocol
 		expect(h.last()).toMatchObject({
-			state: "candidate",
+			state: "unidentified",
 			result: {
-				protocol: "dmr",
 				observationId: "o_t1",
 				measurements: { source: "track", class: "tdma-ms" },
 			},
@@ -690,8 +694,8 @@ describe("IdentifyRunner window moves, cut-short runs and endings", () => {
 		expect(h.record.state).toBe("completed")
 		expect(h.decoders.created.size).toBe(0)
 		expect(h.last()).toMatchObject({
-			state: "candidate",
-			result: { protocol: "dmr", measurements: { source: "track" } },
+			state: "unidentified",
+			result: { measurements: { source: "track" } },
 		})
 		expect(outcomes(h)["dmr"]).toBe("cancelled")
 	})

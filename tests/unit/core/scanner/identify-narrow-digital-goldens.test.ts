@@ -1,8 +1,7 @@
 /**
- * WG11 req 1.3 / 1.7 "absent dep: today's plan". Every case below was run on the frozen identify
- * code (14f2feaa) and its `identifyScores` + `planIdentifyTrials` output recorded to
- * identify-narrow-digital-goldens.json (`WAVEKIT_WRITE_IDENTIFY_GOLDENS=1` rewrites it; never in
- * CI). Without `narrow` (and with `narrow: false`) the output must stay equal.
+ * Identify regression snapshots, updated for scanner redesign 6.7/6.9:
+ * narrow analog eligibility, nonzero priors, explicit requests, and evidence-only labels.
+ * WAVEKIT_WRITE_IDENTIFY_GOLDENS=1 refreshes the snapshots locally.
  */
 import { readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -59,24 +58,6 @@ function cases() {
 	return out
 }
 
-/**
- * Lane ID's 1.4 fix (probe-pool `DSD_AUTO_HOLD_MS`, 600 -> 1800 ms) changes the dsd-fme `auto` mode's own
- * `holdMs` inside each run's mode; the run hold (max with IDENTIFY_MIN_HOLD_MS 1800) is unchanged. That one
- * field is compared normalised to the frozen 600 so this golden pins the 1.3/1.7 absent-dep behaviour only.
- */
-function normalise(value: unknown): unknown {
-	return JSON.parse(JSON.stringify(value), (k, v: unknown) =>
-		k === "mode" &&
-		typeof v === "object" &&
-		v !== null &&
-		(v as { decoderType?: unknown }).decoderType === "dsd-fme" &&
-		(v as { protocol?: unknown }).protocol === "dmr" &&
-		JSON.stringify((v as { options?: unknown }).options) === '{"mode":"auto"}'
-			? { ...v, holdMs: 600 }
-			: v,
-	)
-}
-
 function compute(narrow: boolean | undefined): Record<string, unknown> {
 	const out: Record<string, unknown> = {}
 	for (const c of cases()) {
@@ -98,7 +79,7 @@ function compute(narrow: boolean | undefined): Record<string, unknown> {
 
 describe("identify plan goldens (WG11 1.3/1.7 absent dep)", () => {
 	if (process.env["WAVEKIT_WRITE_IDENTIFY_GOLDENS"] === "1") {
-		it("records the frozen plans", () => {
+		it("records the plans", () => {
 			writeFileSync(FIXTURE, `${JSON.stringify(compute(undefined))}\n`)
 		})
 		return
@@ -110,10 +91,10 @@ describe("identify plan goldens (WG11 1.3/1.7 absent dep)", () => {
 	it("covers every case", () => {
 		expect(Object.keys(golden)).toHaveLength(cases().length)
 	})
-	it("no narrow flag: byte-identical scores and plans", () => {
-		expect(normalise(compute(undefined))).toEqual(golden)
+	it("no narrow flag: matches evidence-bound scores and plans", () => {
+		expect(compute(undefined)).toEqual(golden)
 	})
-	it("narrow false: byte-identical scores and plans", () => {
-		expect(normalise(compute(false))).toEqual(golden)
+	it("narrow false: matches evidence-bound scores and plans", () => {
+		expect(compute(false)).toEqual(golden)
 	})
 })

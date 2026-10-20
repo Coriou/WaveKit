@@ -470,7 +470,7 @@ describe("IdentifyRunner analog replay trial (WG12)", () => {
 		}
 	})
 
-	it("a throwing analog runner stays a candidate and logs no capture path", async () => {
+	it("a throwing analog runner stays unidentified and logs no capture path", async () => {
 		const log = captureLogger()
 		const h = replayHarness({
 			protocols: ["analog-fm"],
@@ -485,7 +485,7 @@ describe("IdentifyRunner analog replay trial (WG12)", () => {
 		try {
 			await h.settle()
 			expect(h.last()?.state).not.toBe("identified")
-			expect(h.last()?.state).toBe("candidate")
+			expect(h.last()?.state).toBe("unidentified")
 			expect(h.trials().find(t => t.decoder === "analog-demod")?.outcome).toBe(
 				"cancelled",
 			)
@@ -701,7 +701,7 @@ describe("IdentifyRunner analog replay trial (WG12)", () => {
 				transport: "replay",
 				outcome: "cancelled",
 			})
-			expect(h.last()?.state).toBe("candidate")
+			expect(h.last()?.state).toBe("unidentified")
 			expect(h.last()?.result?.analog).toBeUndefined()
 			expect(h.last()?.result?.confidence).toBe("activity")
 		} finally {
