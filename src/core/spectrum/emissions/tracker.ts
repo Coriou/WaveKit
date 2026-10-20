@@ -636,8 +636,16 @@ export class Tracker {
 	}
 
 	/** Open, non-burst tracks that were on in the last block and have been open ≥ minSamples (spec § 4.7). */
-	longLived(minSamples: number): PersistentFeature[] {
-		const out: PersistentFeature[] = []
+	longLived(minSamples: number): (Pick<
+		PersistentFeature,
+		"rfHz" | "widthHz"
+	> & {
+		trackId: string
+		startBin: number
+		endBin: number
+		ageSamples: number
+	})[] {
+		const out: ReturnType<Tracker["longLived"]> = []
 		for (const t of this.open) {
 			if (
 				t.misses > 0 ||
@@ -647,6 +655,10 @@ export class Tracker {
 			)
 				continue
 			out.push({
+				trackId: t.id,
+				startBin: t.lastSeg.startBin,
+				endBin: t.lastSeg.endBin,
+				ageSamples: t.lastSample - t.startSample,
 				rfHz: this.rf(this.centroidBin(t), this.n, t.epoch.centreHz),
 				widthHz: (t.endBin - t.startBin) * this.opts.binHz,
 			})

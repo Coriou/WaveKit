@@ -41,6 +41,7 @@ import { ImpulseBlanker } from "./impulse-blanker.js"
 import { PROVISIONAL_WINDOW_MS, ProvisionalSpurs } from "./provisional-spurs.js"
 import type { BinRange } from "./provisional-spurs.js"
 import {
+	ALARM_FEATURE_MARGIN_DB,
 	classifyAlarm,
 	untrackedRetuneAlarm,
 	vanishedFeatures,
@@ -87,6 +88,8 @@ const BURST_MAX_ON_MS = 15 // a burst block has the short path on for at most th
 const SPEC_PAD_BINS = 2
 const OVERLAP_EDOF_GAIN = 1.89 // Welch equivalent independent frames, Hann at 50 % overlap
 const PERSISTENT_TRACK_S = 10
+/** Require sustained strength before a disappearance can imply receiver motion. */
+const ALARM_FEATURE_WINDOW_MS = 1000
 /** WG10 req 2.9: a track this far above the floor (best block SNR) is a strong transmission. */
 export const ALARM_STRONG_SNR_DB = 30
 /** WG10 req 2.9: tracks starting within this of a strong track's start are its images/IM lines. */
@@ -244,6 +247,7 @@ export class SpectrumPipeline {
 	private readonly mergedDb: Float32Array
 	private floorReady = false
 	private prevPersistent: PersistentFeature[] = []
+	private readonly alarmStrength = new Map<string, number>()
 	/** WG10 req 2.9: open and just-closed tracks for the transmission-end classifier. */
 	private readonly trackInfo = new Map<
 		string,
@@ -763,6 +767,8 @@ export class SpectrumPipeline {
 		}
 		this.drain()
 		// Blocks finished above still belong to the run. Anything after the hole does not.
+		this.prevPersistent = []
+		this.alarmStrength.clear()
 		this.interruptGate()
 		this.checkMarkerTimeout(startSample + samples)
 		this.maybeStats()
@@ -882,6 +888,7 @@ export class SpectrumPipeline {
 		this.resetArtefacts()
 		this.floorReady = false
 		this.prevPersistent = []
+		this.alarmStrength.clear()
 		this.alarmWaitedBlocks = 0
 		this.floor.useKey(ep.absKey)
 		this.applyMasks()
@@ -1214,6 +1221,8 @@ export class SpectrumPipeline {
 				// the sliding short window spans blocks and frames stay contiguous through a stale discard: restart it,
 				// or the first accepted block opens a burst ghost at the previous hop's emitters (spec § 4.6)
 				this.resetShort()
+				this.prevPersistent = []
+				this.alarmStrength.clear()
 				this.out.push({ kind: "stale-discard", epoch: ep.epoch, blocks: 1 })
 				this.interruptGate()
 				if (sample) this.closeSample()
@@ -1223,6 +1232,10 @@ export class SpectrumPipeline {
 			ep.staleRef = null
 		}
 
+		if (gap || overload || blanking.excluded) {
+			this.prevPersistent = []
+			this.alarmStrength.clear()
+		}
 		const segRanges = segs.map(s => this.segmentRf(s, ep))
 		let holdPersistent = false
 		if (
@@ -1335,8 +1348,12 @@ export class SpectrumPipeline {
 			holdGate,
 		)
 		this.tracker.trackBinsMask(this.lastTrackBins, 1)
-		if (!gap && !overload && !blanking.excluded && !holdPersistent)
-			this.prevPersistent = this.persistentFeatures(segRanges, ep)
+		if (!gap && !overload && !blanking.excluded) {
+			// Qualification follows every valid block, even while classification holds
+			// the old reference scene. A returning feature must earn a fresh window.
+			const currentPersistent = this.persistentFeatures(trackSegs, ep)
+			if (!holdPersistent) this.prevPersistent = currentPersistent
+		}
 		if (learn) {
 			this.tracker.trackBinsMask(this.joined, 2)
 			let usable = 0
@@ -1547,26 +1564,71 @@ export class SpectrumPipeline {
 		return judge([...closed, ...open]) === "signal-change" ? "pending" : now
 	}
 
-	/** Long-lived tracks and RF-fixed carriers present in this block (spec § 4.7). */
+	/** Minimum margin over a full second of consecutive present, strong blocks. */
 	private persistentFeatures(
-		segRanges: SegmentRange[],
+		segs: Segment[],
 		ep: EpochState,
 	): PersistentFeature[] {
-		const tol = this.binHz
-		const out: PersistentFeature[] = this.tracker.longLived(
-			PERSISTENT_TRACK_S * this.fs,
-		)
+		const candidates = this.tracker.longLived(0)
 		for (const c of this.spurs.rfCarriers()) {
 			if (!this.visibleRf(c.rfHz, ep)) continue
+			const bin = (c.rfHz - ep.centreHz) / this.binHz + this.n / 2
+			const segment = segs.find(s => bin >= s.startBin && bin < s.endBin)
+			if (!segment) continue
 			if (
-				!segRanges.some(
-					s => c.rfHz >= s.startHz - tol && c.rfHz <= s.endHz + tol,
+				candidates.some(
+					f =>
+						f.ageSamples >= PERSISTENT_TRACK_S * this.fs &&
+						Math.abs(f.rfHz - c.rfHz) <= this.binHz,
 				)
 			)
 				continue
-			if (out.some(f => Math.abs(f.rfHz - c.rfHz) <= tol)) continue
-			out.push({ rfHz: c.rfHz, widthHz: c.widthBins * this.binHz })
+			candidates.push({
+				trackId: `rf:${c.rfHz}`,
+				rfHz: c.rfHz,
+				widthHz: c.widthBins * this.binHz,
+				startBin: segment.startBin,
+				endBin: segment.endBin,
+				ageSamples: Infinity,
+			})
 		}
+		const present = new Set<string>()
+		const out: PersistentFeature[] = []
+		for (const f of candidates) {
+			present.add(f.trackId)
+			let marginDb = -Infinity
+			for (let bin = f.startBin; bin < f.endBin; bin++) {
+				if (this.detector.unmasked()[bin] !== 1 || this.lineMask[bin] === 1)
+					continue
+				marginDb = Math.max(
+					marginDb,
+					(this.powerDb[bin] ?? -Infinity) -
+						(this.floorDb[bin] ?? Infinity) -
+						this.detector.kFor(bin),
+				)
+			}
+			// A consecutive threshold run is equivalent to requiring the window minimum
+			// to meet the margin, without storing or rescanning a ring of measurements.
+			const blocks =
+				marginDb >= ALARM_FEATURE_MARGIN_DB
+					? Math.min(
+							(this.alarmStrength.get(f.trackId) ?? 0) + 1,
+							Math.ceil(ALARM_FEATURE_WINDOW_MS / this.blockMs),
+						)
+					: 0
+			this.alarmStrength.set(f.trackId, blocks)
+			if (
+				blocks * this.blockMs >= ALARM_FEATURE_WINDOW_MS &&
+				f.ageSamples >= PERSISTENT_TRACK_S * this.fs
+			)
+				out.push({
+					rfHz: f.rfHz,
+					widthHz: f.widthHz,
+					marginDb: ALARM_FEATURE_MARGIN_DB,
+				})
+		}
+		for (const key of this.alarmStrength.keys())
+			if (!present.has(key)) this.alarmStrength.delete(key)
 		return out
 	}
 

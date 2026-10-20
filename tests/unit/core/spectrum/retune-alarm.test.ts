@@ -6,7 +6,7 @@ import type {
 } from "../../../../src/core/spectrum/retune-alarm.js"
 
 const F: PersistentFeature[] = [100_000, 200_000, 300_000, 400_000].map(
-	rfHz => ({ rfHz, widthHz: 2000 }),
+	rfHz => ({ rfHz, widthHz: 2000, marginDb: 20 }),
 )
 const seg = (hz: number, half = 1000): SegmentRange => ({
 	startHz: hz - half,
@@ -16,6 +16,19 @@ const seg = (hz: number, half = 1000): SegmentRange => ({
 const all = { toleranceHz: 1000, visible: () => true }
 
 describe("untrackedRetuneAlarm", () => {
+	it("ignores weak flicker and a strong unkey in a sparse strong scene", () => {
+		const weak = F.slice(0, 3).map(f => ({ ...f, marginDb: 1 }))
+		expect(untrackedRetuneAlarm(weak, [seg(weak[0]!.rfHz)], all)).toBeNull()
+		expect(
+			untrackedRetuneAlarm([...weak.slice(0, 2), F[3]!], [], all),
+		).toBeNull()
+	})
+	it("requires the full strength margin, including at the boundary", () => {
+		const features = F.slice(0, 3).map(f => ({ ...f, marginDb: 10 }))
+		expect(untrackedRetuneAlarm(features, [], all)).toEqual({ deltaHz: null })
+		features[0]!.marginDb = 9.99
+		expect(untrackedRetuneAlarm(features, [], all)).toBeNull()
+	})
 	it("stays quiet while the features are where they were", () => {
 		expect(
 			untrackedRetuneAlarm(

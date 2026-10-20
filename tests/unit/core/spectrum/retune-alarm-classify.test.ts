@@ -35,9 +35,26 @@ const offsets = fc
 			),
 	)
 const feats = (os: number[]): PersistentFeature[] =>
-	os.map(o => ({ rfHz: C + o, widthHz: 1000 }))
+	os.map(o => ({ rfHz: C + o, widthHz: 1000, marginDb: 20 }))
 
 describe("classifyAlarm (WG10 req 2.9)", () => {
+	it("weak disappearances do not override positive strong transmission end evidence", () => {
+		const strong = feats([20_000, 40_000, 60_000, 80_000, 100_000])
+		const weak = feats([-30_000, -70_000]).map(f => ({ ...f, marginDb: 1 }))
+		const features = [...strong, ...weak]
+		const segments = strong.slice(0, 2).map(f => seg(f.rfHz))
+		const alarm = untrackedRetuneAlarm(features, segments, base)
+		expect(alarm).toEqual({ deltaHz: null })
+		expect(
+			classifyAlarm({
+				...base,
+				features,
+				segments,
+				deltaHz: null,
+				ended: f => strong.slice(2).includes(f),
+			}),
+		).toBe("signal-change")
+	})
 	// Feature: web-gaps-10, Property 8: Alarm classification
 	// Validates: Requirements 2.9
 	it("a mirrored scene is iq-byte-slip; a genuine shift is external-control with its Δ; signal-change never explains a moved or emptied scene", () => {
@@ -136,11 +153,11 @@ describe("classifyAlarm (WG10 req 2.9)", () => {
 
 	it("review WG10 R1 M2: survivors covered only by a wide new occupancy are no evidence (external-control); similar-width survivors are", () => {
 		const features: PersistentFeature[] = [
-			{ rfHz: C + 20_000, widthHz: 17_000 },
-			{ rfHz: C + 45_000, widthHz: 17_000 },
-			{ rfHz: C - 34_000, widthHz: 3000 },
-			{ rfHz: C - 68_000, widthHz: 3000 },
-			{ rfHz: C - 90_000, widthHz: 3000 },
+			{ rfHz: C + 20_000, widthHz: 17_000, marginDb: 20 },
+			{ rfHz: C + 45_000, widthHz: 17_000, marginDb: 20 },
+			{ rfHz: C - 34_000, widthHz: 3000, marginDb: 20 },
+			{ rfHz: C - 68_000, widthHz: 3000, marginDb: 20 },
+			{ rfHz: C - 90_000, widthHz: 3000, marginDb: 20 },
 		]
 		const input = { ...base, features, deltaHz: null, ended: always }
 		const cover = [{ startHz: C, endHz: C + 65_000, centreHz: C + 32_500 }]
@@ -158,9 +175,9 @@ describe("classifyAlarm (WG10 req 2.9)", () => {
 
 	it("features on the centre or with an invisible mirror never count toward a mirror", () => {
 		const features: PersistentFeature[] = [
-			{ rfHz: C, widthHz: 1000 },
-			{ rfHz: C + 900_000, widthHz: 1000 },
-			{ rfHz: C - 950_000, widthHz: 1000 },
+			{ rfHz: C, widthHz: 1000, marginDb: 20 },
+			{ rfHz: C + 900_000, widthHz: 1000, marginDb: 20 },
+			{ rfHz: C - 950_000, widthHz: 1000, marginDb: 20 },
 		]
 		// Only one usable mirror (900 kHz) is present: below MIN_SHIFT_MATCHES.
 		const segments = [seg(C - 900_000)]

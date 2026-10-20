@@ -159,6 +159,23 @@ toleranceHz: number, sourceId?: string): Discovery[]`). `DiscoveryStore` impleme
 - **A15: GMSK proof.** GMSK may classify as `carrier-only`. This is a proof label only:
   digital trials still run. Calibration on a real corpus is a follow-up.
 
+- **A16: strong discontinuity evidence.** The untracked-retune alarm counts only persistent
+  features whose recent level is at least 10 dB above the local detection threshold, including
+  RF-fixed carriers. Strength must stay at least 10 dB above threshold for
+  1 s of consecutive present blocks (the window minimum, never a one-block maximum).
+  A weak or absent block resets qualification; epoch changes, gaps, overload and stale
+  discards clear it. Measure only the current segment's half-open bin span, skipping
+  detector masks (including DC and exclusions) and spur-line bins. RF carriers require
+  a current matching segment. The 1 s window rejects brief spikes while retaining
+  sustained scene-loss evidence. Weak features disappearing is not evidence of a retune; fewer than three
+  eligible features cannot arm the alarm. About 50 false external-control alarms per hour were
+  measured on a busy band, each aborting decoder trials. Strong scene loss, common shifts and
+  I/Q mirror evidence retain the fail-closed rule once features qualify.
+  After an epoch start or a reset, a real retune before features qualify is not
+  detected by this alarm: RF carriers need 1 s of sustained strength, and ordinary
+  tracks additionally need the existing 10 s age. A vanished scene cannot qualify
+  retrospectively. This is the accepted trade-off against false alarms.
+
 ## Pipeline positions
 
 ```
