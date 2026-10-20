@@ -1,3 +1,4 @@
+import type { ObservationEndReason } from "../spectrum/types.js"
 import { protocolsForFrequency } from "./plan/protocols.js"
 /**
  * One discovery job (spec § 10.1–§ 10.5): the transition table, the sweep
@@ -97,6 +98,7 @@ export interface LiveObservation {
 	discoveryId: string | null
 	startedAt: number
 	endedAt?: number
+	endReason?: ObservationEndReason
 	classification: Classification
 	probeIds: Set<string>
 	hopIndex?: number

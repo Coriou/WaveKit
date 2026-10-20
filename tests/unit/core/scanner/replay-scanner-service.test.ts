@@ -7,6 +7,13 @@ import type {
 } from "../../../../src/core/scanner/iq-capture-contract.js"
 import type { AmbientEvidenceEvent } from "../../../../src/core/scanner/probes/ambient.js"
 import type { KnownProtocolMemory } from "../../../../src/core/scanner/known-protocol-contract.js"
+import type { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
+import type {
+	AnalogTrialResult,
+	AnalogTrialRunner,
+	JobActivityView,
+} from "../../../../src/core/scanner/scanner-redesign-contract.js"
+import { makeObs } from "../../../mocks/scanner/observations.js"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import {
 	ScannerService,
@@ -1375,5 +1382,235 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 				await h.service.stop()
 			}
 		})
+	})
+})
+
+describe("replay job activity", () => {
+	it.each([false, true])(
+		"removal releases live confirmation while the gated track stays open, finished=%s",
+		async finishedFirst => {
+			const { h, port, internals, track, live } = setup()
+			const finished: ((view: IqCaptureView) => void)[] = []
+			const removed: ((id: string, observationId: string | null) => void)[] = []
+			port.onFinished.mockImplementation(listener => {
+				finished.push(listener)
+				return () => undefined
+			})
+			port.onRemoved.mockImplementation(listener => {
+				removed.push(listener)
+				return () => undefined
+			})
+			port.holderOf.mockReturnValue("identify")
+			internals.deps = {
+				...internals.deps,
+				iqCapture: { ...port, state: () => "on" },
+			}
+			await h.service.start()
+			try {
+				internals.spectrum.engine = () => ({
+					currentEpoch: () => ({
+						epoch: 1,
+						centreHz: CENTRE,
+						sampleRateHz: 1_024_000,
+					}),
+				})
+				const state = h.service as unknown as {
+					store: DiscoveryStore
+					iqCaptureOf: Map<string, unknown>
+					iqCaptureLifecycle: Map<string, unknown>
+					needsConfirm(live: LiveObservation, track: TrackSnapshot): boolean
+				}
+				const ingested = state.store.ingest(
+					makeObs({
+						id: "o_1",
+						centreHz: track.centreHz,
+						startedAt: Date.now(),
+					}),
+				)
+				const l = live({ discoveryId: ingested.discoveryId })
+				l.classification = { ...l.classification, class: "tdma-ms" }
+				track.gate = "passed"
+				internals.live.set("o_1", l)
+				internals.requestIqCapture(l, track)
+				expect(port.capture).toHaveBeenCalledOnce()
+				expect(state.needsConfirm(l, track)).toBe(false)
+				if (finishedFirst) {
+					for (const listener of finished) listener(port.view("cap-1")!)
+					expect(state.iqCaptureOf.has("o_1")).toBe(false)
+					expect(state.iqCaptureLifecycle.has("o_1")).toBe(true)
+					expect(state.needsConfirm(l, track)).toBe(false)
+				}
+				for (const listener of removed) listener("cap-1", "o_1")
+				expect(l.endedAt).toBeUndefined()
+				expect(state.iqCaptureLifecycle.has("o_1")).toBe(false)
+				expect(state.needsConfirm(l, track)).toBe(true)
+			} finally {
+				await h.service.stop()
+			}
+		},
+	)
+
+	it("records the whole replay plan pending and replaces orders together at each step", () => {
+		const { h, port, track } = setup()
+		const state = h.service as unknown as {
+			store: DiscoveryStore
+			recordReplayProgress(
+				capture: IqCaptureView,
+				trials: readonly IqReplayTrial[],
+				done: IqReplayResult["trials"],
+				running: number | null,
+			): void
+		}
+		state.store.ingest(
+			makeObs({ id: "o_1", centreHz: CENTRE + 50_000, startedAt: Date.now() }),
+		)
+		const record = vi.spyOn(state.store, "recordTrials")
+		const capture = port.view("cap-1")!
+		const trials = h.service.planReplay({
+			capture,
+			track,
+			knownProtocol: "dmr",
+			priors: {},
+			narrowRaster: false,
+		})
+		expect(trials.length).toBeGreaterThan(1)
+		expect(record).toHaveBeenCalledOnce()
+		const pending = record.mock.calls[0]![1]
+		expect(pending).toHaveLength(trials.length)
+		expect(pending.every(row => row.outcome === "pending")).toBe(true)
+		expect(new Set(pending.map(row => row.order)).size).toBe(trials.length)
+		record.mockClear()
+		state.recordReplayProgress(
+			capture,
+			trials,
+			[
+				{
+					protocol: trials[0]!.protocol,
+					decoderType: trials[0]!.mode.decoderType,
+					known: true,
+					outcome: "no-sync",
+				},
+			],
+			1,
+		)
+		expect(record).toHaveBeenCalledOnce()
+		const step = record.mock.calls[0]![1]
+		expect(step.map(row => row.order)).toEqual(pending.map(row => row.order))
+		expect(step[0]?.outcome).toBe("no-sync")
+		expect(step[1]?.outcome).toBe("running")
+		record.mockClear()
+		state.recordReplayProgress(capture, trials, [], null)
+		expect(
+			record.mock.calls[0]![1].every(row => row.outcome === "cancelled"),
+		).toBe(true)
+	})
+
+	it("lowers capturing on completion and removal and shows queued, active and released analog replay", async () => {
+		const { h, port, internals, live } = setup()
+		const finished: ((view: IqCaptureView) => void)[] = []
+		const removed: ((id: string, observationId: string | null) => void)[] = []
+		port.onFinished.mockImplementation(listener => {
+			finished.push(listener)
+			return () => undefined
+		})
+		port.onRemoved.mockImplementation(listener => {
+			removed.push(listener)
+			return () => undefined
+		})
+		let resolve!: (result: AnalogTrialResult) => void
+		const run = vi.fn(
+			() =>
+				new Promise<AnalogTrialResult>(done => {
+					resolve = done
+				}),
+		)
+		internals.deps = { ...internals.deps, analogTrial: { run } }
+		const state = h.service as unknown as {
+			store: DiscoveryStore
+			iqCaptureOf: Map<string, { captureId: string; sourceId: string }>
+			admittedAnalog(): AnalogTrialRunner
+			jobActivity(id: string): JobActivityView
+		}
+		let holder: string | null | undefined = "identify"
+		port.holderOf.mockImplementation(() => holder)
+		port.claim.mockImplementation(() => {
+			holder = IQ_REPLAY_QUEUE_HOLDER
+			return true
+		})
+		port.settle.mockImplementation(() => {
+			holder = undefined
+		})
+		vi.spyOn(h.service, "planReplay").mockReturnValue([
+			{
+				...plan[0]!,
+				protocol: "analog-fm",
+				known: false,
+				kind: "analog",
+				analogMode: "nfm",
+			},
+		])
+		await h.service.start()
+		try {
+			const ingested = state.store.ingest(
+				makeObs({
+					id: "o_1",
+					centreHz: CENTRE + 50_000,
+					startedAt: Date.now(),
+					jobIds: ["job"],
+				}),
+			)
+			internals.live.set(
+				"o_1",
+				live({ discoveryId: ingested.discoveryId, jobIds: ["job"] }),
+			)
+			state.iqCaptureOf.set("o_1", { captureId: "cap-1", sourceId: "rtl" })
+			expect(state.jobActivity("job").capturing).toBe(1)
+			const view = port.view("cap-1")!
+			for (const listener of finished) listener(view)
+			expect(state.jobActivity("job").capturing).toBe(0)
+			holder = null
+			expect(state.jobActivity("job")).toMatchObject({
+				replaying: null,
+				replayQueueDepth: 1,
+			})
+			// Re-publish after the other holder releases the capture.
+			for (const listener of finished) listener(view)
+			await Promise.resolve()
+			expect(run).toHaveBeenCalledOnce()
+			expect(state.jobActivity("job")).toMatchObject({
+				replaying: {
+					decoder: "analog-demod",
+					discoveryId: ingested.discoveryId,
+				},
+				replayQueueDepth: 1,
+			})
+			const identifyAbort = new AbortController()
+			const identifying = state
+				.admittedAnalog()
+				.run("identify-capture", "nfm", identifyAbort.signal)
+			await Promise.resolve()
+			expect(run).toHaveBeenCalledTimes(1)
+			resolve({
+				outcome: "carrier-only",
+				mode: "nfm",
+				voice: false,
+				tones: { ctcssHz: null, dcs: null, audioSeconds: 1 },
+				stats: null,
+			})
+			for (let i = 0; i < 10; i++) await Promise.resolve()
+			expect(state.jobActivity("job")).toMatchObject({
+				replaying: null,
+				replayQueueDepth: 0,
+			})
+			await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2))
+			identifyAbort.abort()
+			await identifying
+			state.iqCaptureOf.set("o_1", { captureId: "cap-2", sourceId: "rtl" })
+			expect(state.jobActivity("job").capturing).toBe(1)
+			for (const listener of removed) listener("cap-2", "o_1")
+			expect(state.jobActivity("job").capturing).toBe(0)
+		} finally {
+			await h.service.stop()
+		}
 	})
 })

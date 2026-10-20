@@ -214,6 +214,7 @@ function liveStatus() {
 		bytesStreamed: 5,
 		pipelineHealth: "running",
 		pipelineRestarts: 0,
+		tone: { ctcssHz: 88.5, dcs: null, at: "2026-10-20T00:00:00.000Z" },
 	}
 }
 
@@ -260,8 +261,9 @@ function dvStatus() {
 
 // Recorded from the frozen code (5669c187) before the change. The live status later gained the
 // additive `engine` field (defaults to "csdr"), appended here.
+// The additive `tone` field carries the current tone observation.
 const LIVE_GOLDEN =
-	'{"enabled":true,"running":true,"sourceId":"s","sourceConnected":true,"sourceIqSampleRate":2400000,"config":{"enabled":true,"httpPort":8081,"modulation":"nfm","bandwidth":12500,"squelch":0,"noiseReduction":"off","lowPass":0,"highPass":0,"gain":10,"deEmphasis":false,"deEmphasisTau":50,"audioFormat":"s16le","iqDcBlock":true,"sourceId":"s","squelchMode":"manual","autoMarginDb":6,"noiseQuietingDb":6,"offsetHz":0},"effectiveSampleRate":25000,"decimationFactor":96,"httpUrl":"http://localhost:8081/stream","clientCount":1,"bytesStreamed":5,"pipelineHealth":"running","wavUrl":"http://localhost:8081/stream.wav","pipelineRestarts":0,"engine":"csdr"}'
+	'{"enabled":true,"running":true,"sourceId":"s","sourceConnected":true,"sourceIqSampleRate":2400000,"config":{"enabled":true,"httpPort":8081,"modulation":"nfm","bandwidth":12500,"squelch":0,"noiseReduction":"off","lowPass":0,"highPass":0,"gain":10,"deEmphasis":false,"deEmphasisTau":50,"audioFormat":"s16le","iqDcBlock":true,"sourceId":"s","squelchMode":"manual","autoMarginDb":6,"noiseQuietingDb":6,"offsetHz":0},"effectiveSampleRate":25000,"decimationFactor":96,"httpUrl":"http://localhost:8081/stream","clientCount":1,"bytesStreamed":5,"pipelineHealth":"running","wavUrl":"http://localhost:8081/stream.wav","pipelineRestarts":0,"tone":{"ctcssHz":88.5,"dcs":null,"at":"2026-10-20T00:00:00.000Z"},"engine":"csdr"}'
 const DV_GOLDEN =
 	'{"enabled":true,"running":true,"config":{"enabled":true,"httpPort":8082,"voiceSlot":"both","jitterBufferMs":250,"maxBufferMs":1000},"sampleRate":8000,"audioFormat":"s16le","channels":1,"httpUrl":"http://localhost:8082/decoders/dsd%20x/stream","wavUrl":"http://localhost:8082/decoders/dsd%20x/stream.wav","clientCount":0,"bytesStreamed":0,"decoders":[{"decoderId":"dsd x","mode":"auto","udpPort":41234,"httpUrl":"http://localhost:8082/decoders/dsd%20x/stream","wavUrl":"http://localhost:8082/decoders/dsd%20x/stream.wav","clientCount":0,"bytesStreamed":0,"datagramsReceived":0,"datagramsRejected":0,"encryptedDatagramsDropped":0,"droppedSamples":0,"underruns":0,"bufferedMs":0,"call":null}],"call":null}'
 

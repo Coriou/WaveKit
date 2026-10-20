@@ -139,6 +139,7 @@ export const DecodeEvidenceSchema = z.object({
 	origin: z.enum(["probe", "ambient"]),
 	probeId: z.string().optional(),
 	decoderId: z.string().optional(),
+	transport: z.enum(["live", "replay"]).optional(),
 })
 export type DecodeEvidenceCheck = Assert<
 	SchemaMatches<DecodeEvidence, typeof DecodeEvidenceSchema>

@@ -175,6 +175,7 @@ function make(
 	script: Script,
 	trials: readonly IqReplayTrial[] = [trial("dmr", true), trial("pocsag")],
 	now?: () => number,
+	progress?: IqReplayQueueDeps["progress"],
 ) {
 	const port = new FakePort()
 	const p = makeProbes(script)
@@ -184,6 +185,7 @@ function make(
 		port,
 		probes: p.probes,
 		planner: () => trials,
+		...(progress ? { progress } : {}),
 		sink: r => results.push(r),
 		planInput: capture => ({
 			capture,
@@ -207,6 +209,37 @@ const hit: IqReplayProbeAnswer = {
 }
 
 describe("IqReplayQueue", () => {
+	it("publishes completed and newly running trials in one transition and cancels the remainder on stop", async () => {
+		const steps: { done: string[]; running: number | null }[] = []
+		const { q, port, p } = make(
+			() => miss,
+			[trial("dmr"), trial("pocsag")],
+			undefined,
+			(_capture, _trials, done, running) =>
+				steps.push({ done: done.map(row => row.outcome), running }),
+		)
+		port.add(id(1))
+		await flush()
+		expect(steps).toEqual([
+			{ done: [], running: 0 },
+			{ done: ["no-sync"], running: 1 },
+			{ done: ["no-sync", "no-sync"], running: null },
+		])
+		expect(q.active()).toBeNull()
+		const waiting: (number | null)[] = []
+		const deferred = make(
+			() => ({ deferred: "cpu" }),
+			[trial("dmr"), trial("pocsag")],
+			undefined,
+			(_capture, _trials, _done, running) => waiting.push(running),
+		)
+		deferred.port.add(id(2))
+		expect(waiting).toEqual([-1])
+		await deferred.q.stop()
+		expect(waiting).toEqual([-1, null])
+		expect(p.requests).toHaveLength(2)
+	})
+
 	it("runs trials in order, stops at the first decode, one result then discard", async () => {
 		const { port, p, results } = make(() => hit)
 		port.add(id(1))

@@ -199,6 +199,38 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(store.get(id)?.proof?.kind).toBe("digital-undecoded")
 	})
 
+	it("publishes a batch once with the last row winning and no completed proof between steps", () => {
+		const { store, id, obs } = planted()
+		store.recordAnalog(obs, dataLike())
+		const published: (string | undefined)[] = []
+		store.on("change", () => published.push(store.get(id)?.proof?.kind))
+		expect(
+			store.recordTrials(obs, [
+				trial("dmr", 1, "pending"),
+				trial("pocsag", 2, "pending"),
+			]),
+		).toBe(true)
+		expect(store.recordTrials(obs, [trial("dmr", 1, "running")])).toBe(true)
+		expect(
+			store.recordTrials(obs, [
+				trial("dmr", 1, "no-sync"),
+				trial("pocsag", 2, "running"),
+			]),
+		).toBe(true)
+		expect(published).not.toContain("digital-undecoded")
+		published.length = 0
+		expect(
+			store.recordTrials(obs, [
+				trial("pocsag", 2, "running"),
+				trial("pocsag", 2, "no-sync"),
+			]),
+		).toBe(true)
+		expect(published).toEqual(["digital-undecoded"])
+		expect(store.get(id)?.proof?.tried).toEqual(["dmr", "pocsag"])
+		expect(store.recordTrials(obs, [trial("pocsag", 2, "no-sync")])).toBe(false)
+		expect(store.recordTrials("missing", [trial("dmr", 1)])).toBe(false)
+	})
+
 	it("nextTrialOrder is strictly increasing", () => {
 		const { store } = planted()
 		expect(store.nextTrialOrder()).toBe(1)
@@ -536,6 +568,12 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(
 			floor.store.recordTrial(floor.obs, trial("dmr", 6, "no-sync", 80)),
 		).toBe(true)
+		expect(floor.store.get(floor.id)?.proof).toBeUndefined()
+		// A planned analog trial also withholds a completed digital proof.
+		floor.store.recordTrial(floor.obs, {
+			...trial("analog-fm", 5, "data-like", 50),
+			decoder: "analog-demod",
+		})
 		expect(floor.store.get(floor.id)?.proof?.kind).toBe("digital-undecoded")
 		expect(
 			floor.store.recordTrial(floor.obs, trial("p25p1", 7, "running", 90)),

@@ -147,6 +147,19 @@ toleranceHz: number, sourceId?: string): Discovery[]`). `DiscoveryStore` impleme
   to `Infinity` and passes it through `maximum`, so the discovery-list handler answers 400
   `VALIDATION_ERROR` for a non-finite `nearHz` or `toleranceHz`.
 
+- **A8: decode an open track.** "Decode here" accepts a transmission track already open
+  when the job starts; an older nearest track never hides a newer gate-passed one.
+- **A9: short identity bursts.** For requirement 2.5, an accepted identity decode for an
+  observation places it even when its track's gate has not passed (AIS, VDL2, LoRa).
+- **A10: decode transport.** `DecodeEvidence.transport?: "live" | "replay"` is a persisted,
+  additive field.
+- **A13: AM trial rule.** The AM analog trial requires discriminator quieting of at least
+  6 dB (level-invariant), replacing "carrier above the capture floor".
+- **A14: measured analog CPU budget.** Analyze costs 14–22 ms per capture, the tone pass
+  21–33 ms, event-loop p99 about 2 ms: about 0.03 core in total. A Rust tone pass is a follow-up.
+- **A15: GMSK proof.** GMSK may classify as `carrier-only`. This is a proof label only:
+  digital trials still run. Calibration on a real corpus is a follow-up.
+
 ## Pipeline positions
 
 ```

@@ -461,10 +461,9 @@ interface EvidenceBag {
 }
 
 /**
- * Persisted decode → proof input. Ambient origin stays ambient. Every other
- * stored decode is live. A replay decode is persisted with the same origin
- * (`probe`) and no other marker, so this store cannot tell it from a live
- * probe. Its proof transport stays live.
+ * Persisted decode → proof input. Ambient origin stays ambient. A probe
+ * decode marked `transport: "replay"` is replay. Every other probe decode,
+ * including a legacy row with no transport, is live.
  */
 function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
 	try {
@@ -474,7 +473,12 @@ function decodeRow(ev: DecodeEvidence): ProofDecodeInput | undefined {
 		if (typeof ev.at !== "number" || !Number.isFinite(ev.at)) return undefined
 		const row: ProofDecodeInput = {
 			protocol: ev.protocol,
-			transport: ev.origin === "ambient" ? "ambient" : "live",
+			transport:
+				ev.origin === "ambient"
+					? "ambient"
+					: ev.transport === "replay"
+						? "replay"
+						: "live",
 			at: ev.at,
 			encrypted: ev.encrypted === true,
 		}
@@ -515,17 +519,12 @@ function digitalPlanCompleteOf(
 	const missing = new Set(unavailable)
 	let digital = 0
 	for (const trial of trials) {
+		if (trial.outcome === "pending" || trial.outcome === "running") return false
 		if (isAnalogDecoder(trial.decoder)) continue
 		digital += 1
 		const outcome = trial.outcome
 		if (outcome === "decoded") return false
-		if (
-			outcome === "pending" ||
-			outcome === "running" ||
-			outcome === "skipped-budget" ||
-			outcome === "cancelled"
-		)
-			return false
+		if (outcome === "skipped-budget" || outcome === "cancelled") return false
 		if (DIGITAL_FAILURE.has(outcome)) continue
 		if (outcome === "unsupported" && missing.has(trial.decoder)) continue
 		return false
@@ -994,18 +993,33 @@ export class DiscoveryStore
 	}
 
 	recordTrial(observationId: string, row: ProofTrialInput): boolean {
+		return this.recordTrials(observationId, [row])
+	}
+
+	recordTrials(
+		observationId: string,
+		rows: readonly ProofTrialInput[],
+	): boolean {
 		try {
 			const known = this.observationIndex.get(observationId)
 			if (known === undefined) return false
-			const accepted = acceptTrial(row)
-			if (accepted === undefined) return false
 			const armed = this.armWatchers(known.discoveryId)
 			const before = this.peekProof(observationId)
-			if (!this.rememberTrial(observationId, accepted)) {
+			let changed = false
+			for (const row of rows) {
+				const accepted = acceptTrial(row)
+				if (
+					accepted !== undefined &&
+					this.rememberTrial(observationId, accepted)
+				)
+					changed = true
+			}
+			if (!changed) {
 				this.disarm(armed)
 				return false
 			}
-			return this.publishEvidence(observationId, before)
+			this.publishEvidence(observationId, before)
+			return true
 		} catch {
 			return false
 		}

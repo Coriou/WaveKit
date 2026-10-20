@@ -667,6 +667,8 @@ export class ProbePool extends EventEmitter {
 	private readonly retainedCleanup = new Set<ProbeRecord>()
 	private cleanupFailed = false
 	private destroyed = false
+	/** Cores held by reserveExternal, counted in estimatedCores. */
+	private externalCores = 0
 	private readonly outputRegistration: ConstructorListenerRegistration
 
 	constructor(private readonly deps: ProbePoolDeps) {
@@ -1077,8 +1079,36 @@ export class ProbePool extends EventEmitter {
 
 	// === admission ===
 
+	/**
+	 * Hold `cores` against the same budget probe admission uses. Null when
+	 * the pool is destroyed, `cores` is not a finite non-negative number,
+	 * `settings()` throws or has a non-finite budget, or the reservation
+	 * would exceed `cpuBudgetCores`. Zero returns a no-op release. Release is
+	 * idempotent and never drives the counter negative.
+	 */
+	reserveExternal(cores: number): (() => void) | null {
+		if (this.destroyed) return null
+		if (!Number.isFinite(cores) || cores < 0) return null
+		if (cores === 0) return () => {}
+		let budget: number
+		try {
+			budget = this.deps.settings().cpuBudgetCores
+		} catch {
+			return null
+		}
+		if (!Number.isFinite(budget)) return null
+		if (this.estimatedCores() + cores > budget + 1e-9) return null
+		this.externalCores += cores
+		let released = false
+		return () => {
+			if (released) return
+			released = true
+			this.externalCores = Math.max(0, this.externalCores - cores)
+		}
+	}
+
 	private estimatedCores(): number {
-		let cores = this.deps.engineCount() * CPU_COST.engine
+		let cores = this.deps.engineCount() * CPU_COST.engine + this.externalCores
 		for (const r of this.records.values()) cores += r.cores
 		return cores
 	}

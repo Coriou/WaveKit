@@ -69,6 +69,9 @@ import {
 	createIqCaptureService,
 	type IqCaptureService,
 } from "./core/iq-capture/service.js"
+import { createAnalogTrialRunner } from "./core/iq-capture/analog-trial.js"
+import { ToneDetector } from "./core/audio-tones/tone-detector.js"
+import type { AnalogTrialRunner } from "./core/scanner/scanner-redesign-contract.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
 import { bandPlanSkipSources } from "./core/scanner/plan/bandplan-skips.js"
@@ -437,6 +440,29 @@ export function feedAnalogEvidence(
 	// WG10 R2: identify counts a not yet published opening at its deadline as `timeout`.
 	if (typeof tracker.pending === "function")
 		log.setPending?.(() => tracker.pending?.() ?? null)
+}
+
+/**
+ * WG12 req 6.4: the detected CTCSS/DCS tone of a current or closed
+ * transmission, on the live-audio status. Open events omit the tone until it
+ * is known; a closed event always carries the detected result. `startedAt`
+ * is the transmission's open time, so a config-close that arrives after a
+ * retune or stop does not put the old channel's tone back.
+ */
+export function feedLiveChannelTone(
+	tracker: Pick<AnalogTransmissionTracker, "on">,
+	liveDemod: Pick<LiveDemodulator, "noteTransmissionTone">,
+): void {
+	tracker.on("transmission", event => {
+		const detected = event.tone
+		if (detected === undefined) return
+		liveDemod.noteTransmissionTone({
+			ctcssHz: detected.ctcssHz,
+			dcs: detected.dcs ?? null,
+			at: event.endedAt ?? event.startedAt,
+			startedAt: event.startedAt,
+		})
+	})
 }
 
 /**
@@ -1301,6 +1327,8 @@ async function main(): Promise<void> {
 		// started before the scanner (which owns the replay queue and stops it with its probes),
 		// stopped after the scanner's producer phase.
 		let iqCapture: IqCaptureService | null = null
+		// Shared by replay admission and identify; created with the capture service.
+		let analogTrial: AnalogTrialRunner | undefined
 		if (config.scanner.iqCapture?.enabled) {
 			if (protectedMode) {
 				const service = createIqCaptureService({
@@ -1312,6 +1340,11 @@ async function main(): Promise<void> {
 					logger,
 				})
 				iqCapture = service
+				analogTrial = createAnalogTrialRunner({
+					port: service,
+					tones: () => new ToneDetector(),
+					logger,
+				})
 				own(45, () => service.stop())
 				await service.sweep()
 			} else {
@@ -1323,6 +1356,7 @@ async function main(): Promise<void> {
 			scanner = new ScannerService({
 				settings: scannerSettings,
 				...(iqCapture ? { iqCapture } : {}),
+				...(analogTrial ? { analogTrial } : {}),
 				analogEvidence,
 				recordingProtection: keeps,
 				construction: scannerConstruction,
@@ -2118,6 +2152,7 @@ async function main(): Promise<void> {
 			},
 		})
 		feedAnalogEvidence(transmissions, analogEvidence)
+		feedLiveChannelTone(transmissions, liveDemod)
 		own(7, () => transmissions.stop())
 		shutdown.register({
 			name: "analog-transmissions",

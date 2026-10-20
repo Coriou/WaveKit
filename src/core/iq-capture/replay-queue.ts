@@ -131,6 +131,13 @@ export interface IqReplayQueueTimers {
 export interface IqReplayQueueDeps {
 	port: IqReplayQueuePort
 	probes: IqReplayProbes
+	/** Completed rows plus the active index, -1 while waiting, or null on termination. */
+	progress?: (
+		capture: IqCaptureView,
+		trials: readonly IqReplayTrial[],
+		done: IqReplayResult["trials"],
+		running: number | null,
+	) => void
 	planner: IqReplayPlanner
 	sink: IqReplaySink
 	/**
@@ -183,6 +190,11 @@ export interface IqReplayQueue {
 	 */
 	recheck(): void
 	size(): number
+	active(): {
+		observationId: string | null
+		protocol: IqReplayTrial["protocol"]
+		decoder: string
+	} | null
 	counters(): IqReplayQueueCounters
 	/** Resolves when the queue is empty and idle (tests, bench). */
 	idle(): Promise<void>
@@ -199,22 +211,6 @@ const OUTCOMES: ReadonlySet<string> = new Set<IqReplayTrialOutcome>([
 	"carrier-only",
 	"unsupported",
 ])
-
-const SPEC_OUTCOMES: ReadonlySet<string> = new Set<string>([
-	...OUTCOMES,
-	"not-needed",
-	"skipped-budget",
-])
-
-/**
- * Narrows `outcome` to the amended `IqReplayTrialOutcome` union (`not-needed`,
- * `skipped-budget`). A string outside that union becomes `cancelled`.
- */
-function specOutcome(outcome: string): IqReplayTrialOutcome {
-	return (
-		SPEC_OUTCOMES.has(outcome) ? outcome : "cancelled"
-	) as IqReplayTrialOutcome
-}
 
 const defaultTimers: IqReplayQueueTimers = {
 	setTimeout: (fn, ms) => {
@@ -294,6 +290,22 @@ class Queue implements IqReplayQueue {
 		this.pump()
 	}
 
+	active(): {
+		observationId: string | null
+		protocol: IqReplayTrial["protocol"]
+		decoder: string
+	} | null {
+		const cur = this.current
+		const trial = cur?.trials[cur.index]
+		if (!cur?.run || !trial) return null
+		return {
+			observationId: cur.view.observationId,
+			protocol: trial.protocol,
+			decoder:
+				trial.kind === "analog" ? "analog-demod" : trial.mode.decoderType,
+		}
+	}
+
 	size(): number {
 		return this.fifo.length + this.parked.length + (this.current ? 1 : 0)
 	}
@@ -337,6 +349,7 @@ class Queue implements IqReplayQueue {
 		const cur = this.current
 		this.current = null
 		if (cur) {
+			this.d.progress?.(cur.view, cur.trials, cur.done, null)
 			this.clearWait(cur)
 			cur.run?.cancel()
 			this.releaseAnalog(cur)
@@ -435,6 +448,7 @@ class Queue implements IqReplayQueue {
 		const cur = this.current
 		if (!cur || this.stopped) return
 		if (!this.d.port.view(cur.view.captureId) && cur.done.length === 0) {
+			this.d.progress?.(cur.view, cur.trials, cur.done, null)
 			// Gone before any trial ran (live confirmation, orphan TTL, invalid): no result.
 			this.clearWait(cur)
 			this.current = null
@@ -487,9 +501,11 @@ class Queue implements IqReplayQueue {
 				this.cancelTrials(cur, cur.trials.length)
 				return
 			}
+			this.d.progress?.(cur.view, cur.trials, cur.done, -1)
 			this.waitForSlot(cur)
 			return
 		}
+		this.d.progress?.(cur.view, cur.trials, cur.done, cur.index)
 		cur.run = answer.run
 		this.c.trials++
 		answer.run.result.then(
@@ -557,6 +573,7 @@ class Queue implements IqReplayQueue {
 		if (this.current !== cur) return
 		this.clearWait(cur)
 		this.current = null
+		this.d.progress?.(cur.view, cur.trials, cur.done, null)
 		const result: IqReplayResult = {
 			captureId: cur.view.captureId,
 			sourceId: cur.view.sourceId,
@@ -599,11 +616,12 @@ class Queue implements IqReplayQueue {
 				release = null
 			}
 			if (!release) {
-				this.recordAnalog(cur, trial, specOutcome("skipped-budget"), null)
+				this.recordAnalog(cur, trial, "skipped-budget", null)
 				return
 			}
 			cur.analogRelease = release
 		}
+		this.d.progress?.(cur.view, cur.trials, cur.done, cur.index)
 		const abort = new AbortController()
 		const mode = trial.analogMode ?? "nfm"
 		let pending: Promise<AnalogTrialResult>
@@ -685,7 +703,7 @@ class Queue implements IqReplayQueue {
 				protocol: t.protocol,
 				decoderType: t.mode.decoderType,
 				known: t.known,
-				outcome: specOutcome("not-needed"),
+				outcome: "not-needed",
 			})
 		}
 	}

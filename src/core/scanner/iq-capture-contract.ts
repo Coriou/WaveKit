@@ -188,6 +188,10 @@ export type IqReplayTrialOutcome =
 	| "carrier-only"
 	/** WG12: the decoder program was missing before any output (requirement 4.5). */
 	| "unsupported"
+	/** WG12 req 4.6: a later digital trial did not run after analog decoded or heard. */
+	| "not-needed"
+	/** WG12: the analog trial's core reservation was refused. */
+	| "skipped-budget"
 
 /** The result of one capture's queue entry, delivered once, before the capture is discarded. */
 export interface IqReplayResult {

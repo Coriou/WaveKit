@@ -1,3 +1,4 @@
+import { AnalogAdmission } from "../../../../src/core/scanner/analog-admission.js"
 /** WG12 ID.4: a claimed capture whose plan includes analog runs the replay trial. */
 import { Writable } from "node:stream"
 import pino from "pino"
@@ -199,6 +200,44 @@ function replayHarness(opts: {
 }
 
 describe("IdentifyRunner analog replay trial (WG12 ID.4)", () => {
+	it("identify waits while replay holds the shared analog slot and core reservation", async () => {
+		let calls = 0
+		let releases = 0
+		const admission = new AnalogAdmission(
+			{
+				run: () => {
+					calls++
+					return Promise.resolve(resultOf("heard"))
+				},
+			},
+			() => () => {
+				releases++
+			},
+		)
+		const releaseReplay = admission.reserve(0.05)!
+		const h = replayHarness({
+			protocols: ["analog-fm"],
+			captures: [capture("cap-shared", "commanded")],
+			analogTrial: admission,
+		})
+		try {
+			await h.settle()
+			expect(h.trials().some(trial => trial.decoder === "analog-demod")).toBe(
+				true,
+			)
+			expect(calls).toBe(0)
+			expect(releases).toBe(0)
+			releaseReplay()
+			await new Promise(resolve => setTimeout(resolve, 40))
+			await h.advance(100)
+			expect(calls).toBe(1)
+			expect(releases).toBe(2)
+		} finally {
+			admission.stop()
+			await h.destroy()
+		}
+	})
+
 	it("Claimed capture + CTCSS decoded on commanded → identified, trial decoder analog-demod transport replay", async () => {
 		const calls: { captureId: string; mode: AnalogTrialMode }[] = []
 		const h = replayHarness({

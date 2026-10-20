@@ -176,6 +176,11 @@ export interface DecodeEvidence {
 	origin: "probe" | "ambient"
 	probeId?: string
 	decoderId?: string
+	/**
+	 * How a persisted probe decode was produced. Absent on a legacy journal
+	 * row, and absent means live. Ambient origin still wins over this field.
+	 */
+	transport?: "live" | "replay"
 }
 
 export interface ObservationInput {
