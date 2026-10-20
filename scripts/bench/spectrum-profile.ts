@@ -564,6 +564,7 @@ interface RateReport {
 	jobsAtEnd: JobView[]
 	profile: PipelineProfile | null
 	stageFractionOfBusy: Record<string, number> | null
+	hotOverBusyWithFrameDb: number | null
 	hotOverBusy: number | null
 	passiveGuardUtilization: number | null
 	engineUtilization: number | null
@@ -650,7 +651,7 @@ async function openStack(rate: number, iq: Uint8Array): Promise<Stack> {
 		// The passive guard's first check is 60 s after the engine opens, so a
 		// 120 s run would otherwise measure two workloads. 1 is the schema max
 		// and is above any single-thread utilization, so the guard cannot
-		// disable the passive job. The verdict still uses PASSIVE_COST_LIMIT_DEFAULT.
+		// disable the passive job. The report still uses PASSIVE_COST_LIMIT_DEFAULT.
 		passive: { enabled: true, maxEngineUtilization: 1 },
 	}) as ScannerSettings
 	const scanner = new ScannerService({
@@ -793,6 +794,7 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 				profile: null,
 				stageFractionOfBusy: null,
 				hotOverBusy: null,
+				hotOverBusyWithFrameDb: null,
 				passiveGuardUtilization: null,
 				engineUtilization: null,
 				measurementWindowUtilization: null,
@@ -825,6 +827,7 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 		const delta = deltaProfile(profileStart, profileEnd)
 		const profile = delta.ok ? delta.profile : null
 		const busy = profile ? profile.busyMs : null
+		let hotOverBusyWithFrameDb: number | null = null
 		let hotOverBusy: number | null = null
 		if (profile && busy !== null && busy > 0) {
 			const hot =
@@ -834,6 +837,8 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 				profile.stages.wire
 			const ratio = hot / busy
 			hotOverBusy = Number.isFinite(ratio) ? ratio : null
+			const withFrameDb = (hot + profile.stages.frameDb) / busy
+			hotOverBusyWithFrameDb = Number.isFinite(withFrameDb) ? withFrameDb : null
 		}
 		const stageFractionOfBusy =
 			profile && busy !== null && busy > 0
@@ -914,8 +919,11 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 			)
 			pushIfNotFinite(problems, "measurementWindowUtilization", windowSample)
 			pushIfNotFinite(problems, "engineUtilization", engineUtilization)
-			if (profile && hotOverBusy === null) {
-				problems.push("hotOverBusy is missing or not finite")
+			if (
+				profile &&
+				(hotOverBusy === null || hotOverBusyWithFrameDb === null)
+			) {
+				problems.push("a hot/busy ratio is missing or not finite")
 			}
 		}
 		if (!jobsRunning(jobsAtStart) || !jobsRunning(jobViews(stack.scanner))) {
@@ -943,6 +951,7 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 			profile,
 			stageFractionOfBusy,
 			hotOverBusy,
+			hotOverBusyWithFrameDb,
 			passiveGuardUtilization,
 			engineUtilization,
 			measurementWindowUtilization: windowSample,
@@ -979,6 +988,7 @@ async function runRate(rate: number, iq: Uint8Array): Promise<RateReport> {
 			profile: null,
 			stageFractionOfBusy: null,
 			hotOverBusy: null,
+			hotOverBusyWithFrameDb: null,
 			passiveGuardUtilization: null,
 			engineUtilization: null,
 			measurementWindowUtilization: null,
@@ -1052,25 +1062,19 @@ async function main(): Promise<number> {
 		)
 	}
 	const failure = rateErrors.join("; ")
-	// A verdict exists only for a complete measurement. Missing inputs are not
-	// coerced to 0, and a failed measurement does not report met, deferred, or fail.
-	const verdict =
-		failure.length === 0 && hot !== null && util !== null
-			? hot >= 0.5 && util > PASSIVE_COST_LIMIT_DEFAULT
-				? "met"
-				: "deferred"
-			: null
 	const report = {
 		seconds: SECONDS,
 		sampleEvery: SAMPLE_EVERY,
 		passiveCostLimit: PASSIVE_COST_LIMIT_DEFAULT,
 		centreHz: CENTRE,
 		scopeHz: SCOPE_HZ * 2,
-		...(verdict ? { rustDetectorGate: verdict } : {}),
 		...(failure ? { error: failure } : {}),
-		rustDetectorGateInputs: {
+		r93Measurements: {
 			sampleRateHz: 2_048_000,
 			hotOverBusy: hot,
+			hotOverBusyWithFrameDb: finiteCounter(at2048?.hotOverBusyWithFrameDb),
+			utilizationOverLimit:
+				util === null ? null : util / PASSIVE_COST_LIMIT_DEFAULT,
 			passiveGuardUtilization: util,
 			limit: PASSIVE_COST_LIMIT_DEFAULT,
 		},
@@ -1079,6 +1083,8 @@ async function main(): Promise<number> {
 		rates,
 		snapshotWorker,
 		notes: [
+			"Main decides R 9.3 from an idle-host run; both hot ratios and utilization are measurements only.",
+			"hotOverBusy counts window + fft + power + wire. hotOverBusyWithFrameDb also counts per-frame dB conversion as front-end power; stageFractionOfBusy.frameDb reports its share.",
 			"Parking (DT.2) is not implemented. The 200 kHz job is mode in-window on the tuned centre, the parked-job equivalent on this base.",
 			"signalsOnly is set, so the operator job does not request decoder trials. offsetProbes stays at its default false.",
 			"Frame build is SpectrumService.frames with one subscribed client at 10 Hz and 512 bins.",
@@ -1086,8 +1092,7 @@ async function main(): Promise<number> {
 			"tapFeed, summaryDecode and frameBuild are spans around the real engine tap, the host summary decode and frames().",
 			"Worker stages are the measurement-window delta, sampled one finished block in ten. gate is 0 when no channel plan is set.",
 			"busyMs sums synchronous time on sampled blocks: windowing (including a chunk that yields no frame), each sampled frame, block finalization on every path, and the worker's encodeEventsForWire plus postMessage. Waits between rtl_tcp chunks are not included.",
-			"scanner.passive.maxEngineUtilization is 1 in this bench only, so the passive CPU guard cannot disable the passive job at its 60 s check. The verdict still compares utilization with PASSIVE_COST_LIMIT_DEFAULT (0.25). Both jobs are required to be running at the start and end of the measurement.",
-			"A measurement needs a start profile and an end profile from the same worker generation, a positive block delta and busy delta with no counter reset, and finite utilization. A missing profile, a generation change, a counter reset, a non-positive delta, a non-finite utilization, a stale dist/spectrum-worker.js (no profile on export-state), jobs that are not running, or an unattributed share above 0.05 exits non-zero with an error and no rustDetectorGate verdict. deferred is only a complete measurement that misses the hot-path criterion. Missing inputs are not coerced to 0.",
+			"scanner.passive.maxEngineUtilization is 1 in this bench only, so the passive CPU guard cannot disable the passive job at its 60 s check. The report still compares utilization with PASSIVE_COST_LIMIT_DEFAULT (0.25). Both jobs are required to be running at the start and end of the measurement.",
 			"passiveGuardUtilization is windowedUtilization of the worker ELU sample with no previous sample: the worker's whole life, which is how the passive guard reads its first check.",
 			"measurementWindowUtilization is the same pair of samples differenced across the measurement window.",
 			"monitorEventLoopDelay is process-wide at 1 ms resolution. Per-listener p50/p99 are callback durations.",
@@ -1096,7 +1101,7 @@ async function main(): Promise<number> {
 		],
 	}
 	process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
-	return verdict === null ? 1 : 0
+	return failure ? 1 : 0
 }
 
 void main()

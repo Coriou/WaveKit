@@ -111,6 +111,7 @@ export const PIPELINE_PROFILE_STAGES = [
 	"window",
 	"fft",
 	"power",
+	"frameDb",
 	"floor",
 	"detector",
 	"gate",
@@ -324,6 +325,7 @@ export class SpectrumPipeline {
 	private stageWindow = 0
 	private stageFft = 0
 	private stagePower = 0
+	private stageFrameDb = 0
 	private stageFloor = 0
 	private stageDetector = 0
 	private stageTracker = 0
@@ -590,6 +592,7 @@ export class SpectrumPipeline {
 				window: this.stageWindow,
 				fft: this.stageFft,
 				power: this.stagePower,
+				frameDb: this.stageFrameDb,
 				floor: this.stageFloor,
 				detector: this.stageDetector,
 				gate: this.stageGate,
@@ -610,6 +613,7 @@ export class SpectrumPipeline {
 		if (stage === "window") this.stageWindow += dt
 		else if (stage === "fft") this.stageFft += dt
 		else if (stage === "power") this.stagePower += dt
+		else if (stage === "frameDb") this.stageFrameDb += dt
 		else if (stage === "floor") this.stageFloor += dt
 		else if (stage === "detector") this.stageDetector += dt
 		else if (stage === "gate") this.stageGate += dt
@@ -1024,11 +1028,15 @@ export class SpectrumPipeline {
 			this.take(sample, "power", ft)
 			ft = this.mark(sample)
 			this.shortFrame(f.startSample)
-			if (this.tracker.openCount > 0) {
-				powerToDb(this.frameAcc, 1, this.frameDb)
-				this.tracker.frame(this.frameDb, f.startSample)
-			}
 			this.take(sample, "tracker", ft)
+			if (this.tracker.openCount > 0) {
+				ft = this.mark(sample)
+				powerToDb(this.frameAcc, 1, this.frameDb)
+				this.take(sample, "frameDb", ft)
+				ft = this.mark(sample)
+				this.tracker.frame(this.frameDb, f.startSample)
+				this.take(sample, "tracker", ft)
+			}
 		} else {
 			this.take(sample, "power", ft)
 		}

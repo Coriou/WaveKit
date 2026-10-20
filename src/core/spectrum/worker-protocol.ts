@@ -159,6 +159,7 @@ export const PipelineProfileSchema = z.object({
 		window: finiteMs,
 		fft: finiteMs,
 		power: finiteMs,
+		frameDb: finiteMs,
 		floor: finiteMs,
 		detector: finiteMs,
 		gate: finiteMs,

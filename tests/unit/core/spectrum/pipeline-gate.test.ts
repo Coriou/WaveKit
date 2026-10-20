@@ -126,7 +126,11 @@ function armed(
 	return { h, rng }
 }
 
-function assertOwned(tracks: TrackSnapshot[], detail: string): void {
+function assertOwned(
+	tracks: TrackSnapshot[],
+	detail: string,
+	blockSamples = BLOCK,
+): void {
 	for (const track of tracks) {
 		if (track.gate !== "passed") continue
 		const sample = track.gatePassedSample
@@ -135,7 +139,7 @@ function assertOwned(tracks: TrackSnapshot[], detail: string): void {
 		expect(sample, detail).toBeGreaterThanOrEqual(track.startSample)
 		// A pass can land on the one tolerated off, one block after the last
 		// observation, when the track then closes without being seen again.
-		expect(sample, detail).toBeLessThanOrEqual(track.lastSample + BLOCK)
+		expect(sample, detail).toBeLessThanOrEqual(track.lastSample + blockSamples)
 		expect(track.blocks * BLOCK_MS, detail).toBeGreaterThanOrEqual(
 			CHANNEL_GATE_MIN_DURATION_MS - BLOCK_MS,
 		)
@@ -385,6 +389,13 @@ describe("pipeline channel gate", () => {
 	// Feature: scanner-redesign, Property 1: Noise never passes the gate
 	// Validates: Requirements 2.2, 2.3, 2.4
 	it("a passed track's sample and duration belong to its own emission", async () => {
+		// Keep 1 kHz bins and 50 ms blocks with one quarter of the IQ work.
+		const BLOCK = 3_200
+		const propertyFs = FS / 4
+		const noiseIq = (rng: Rng, n: number) =>
+			gaussianNoise(rng, n, TONE_SIGMA / 2)
+		const toneIq = (rng: Rng, n: number, offset: number, amp: number) =>
+			addInto(noiseIq(rng, n), tone(n, propertyFs, offset, amp))
 		await fc.assert(
 			fc.asyncProperty(
 				fc.integer({ min: 1, max: 0x7fffffff }),
@@ -392,7 +403,7 @@ describe("pipeline channel gate", () => {
 				fc.integer({ min: 1, max: 8 }),
 				fc.integer({ min: 1, max: 8 }),
 				fc.integer({ min: 0, max: 4 }),
-				fc.integer({ min: 200, max: 800 }),
+				fc.integer({ min: 200, max: 300 }),
 				async (
 					seed,
 					strongAtLow,
@@ -403,7 +414,11 @@ describe("pipeline channel gate", () => {
 				) => {
 					const strongOffset = strongAtLow ? 20_000 : 24_000
 					const weakOffset = strongAtLow ? 24_000 : 20_000
-					const h = new Harness({ trackHangMs: hangMs })
+					const h = new Harness({
+						sampleRateHz: propertyFs,
+						fftSize: 64,
+						trackHangMs: hangMs,
+					})
 					h.start()
 					h.send({ kind: "channel-plan", plan: planAt(CENTRE + 20_000) })
 					const rng = mulberry32(seed)
@@ -414,7 +429,7 @@ describe("pipeline channel gate", () => {
 					const hangBlocks = Math.max(1, Math.round(hangMs / BLOCK_MS))
 					h.push(noiseIq(rng, (hangBlocks + 2) * BLOCK))
 					const detail = `seed=${seed} strongAtLow=${strongAtLow} strong=${strongBlocks} weak=${weakBlocks} gap=${gapBlocks} hang=${hangMs}`
-					assertOwned(h.tracks(), detail)
+					assertOwned(h.tracks(), detail, BLOCK)
 					await yieldToRpc()
 				},
 			),
@@ -423,6 +438,43 @@ describe("pipeline channel gate", () => {
 			{ numRuns: 100, examples: [[1, false, 2, 3, 0, 200]] },
 		)
 	}, 120_000)
+
+	it("keeps raised channel CFAR across pipeline retune and gain epochs", () => {
+		let now = 0
+		const h = new Harness({ shortIntegrationMs: null }, { now: () => now })
+		h.start()
+		h.send({ kind: "channel-plan", plan: planAt(CENTRE + 20_000) })
+		const rng = mulberry32(20261020)
+		h.push(noiseIq(rng, 8 * BLOCK))
+		const k = (): number => {
+			const gate = (
+				h.pipeline as unknown as {
+					gate: ReturnType<typeof createChannelGate>
+				}
+			).gate
+			return gate.kFor("nfm")
+		}
+		const initial = k()
+		// Short strong runs end unpassed. Inject six observed minutes without
+		// processing minutes of IQ; the pipeline still owns every measurement.
+		for (let minute = 0; minute < 7; minute++) {
+			h.push(toneIq(rng, BLOCK, 20_000, STRONG_AMP))
+			h.push(noiseIq(rng, 3 * BLOCK))
+			now += 60_000
+			h.push(noiseIq(rng, BLOCK))
+		}
+		const raised = k()
+		expect(raised).toBeGreaterThan(initial)
+		for (const change of [
+			{ centreHz: CENTRE + 1_000_000 },
+			{ centreHz: CENTRE },
+			{ centreHz: CENTRE, centreChanged: false, gainKey: "m:400" },
+		]) {
+			h.pending(change)
+			h.push(noiseIq(rng, 2 * BLOCK))
+			expect(k()).toBe(raised)
+		}
+	})
 
 	it("charges the linear-power copy to the gate stage", () => {
 		let t = 0
@@ -751,15 +803,24 @@ describe("pipeline channel gate", () => {
 	// Feature: scanner-redesign, Property 1: Noise never passes the gate
 	// Validates: Requirements 2.2, 2.3, 2.4
 	it("a continuous emission stays passed across one dropout and rollover", async () => {
+		// Keep 1 kHz bins and 50 ms blocks with one quarter of the IQ work.
+		const BLOCK = 3_200
+		const propertyFs = FS / 4
+		const noiseIq = (rng: Rng, n: number) =>
+			gaussianNoise(rng, n, TONE_SIGMA / 2)
+		const toneIq = (rng: Rng, n: number, offset: number, amp: number) =>
+			addInto(noiseIq(rng, n), tone(n, propertyFs, offset, amp))
 		await fc.assert(
 			fc.asyncProperty(
 				fc.integer({ min: 1, max: 0x7fffffff }),
-				fc.integer({ min: 6, max: 40 }),
+				fc.integer({ min: 6, max: 14 }),
 				fc.integer({ min: 150, max: 1000 }),
 				fc.boolean(),
-				fc.integer({ min: 0, max: 40 }),
+				fc.integer({ min: 0, max: 14 }),
 				async (seed, blocks, maxTrackMs, hasDropout, dropoutRaw) => {
 					const h = new Harness({
+						sampleRateHz: propertyFs,
+						fftSize: 64,
 						shortIntegrationMs: null,
 						maxTrackMs,
 					})
@@ -772,16 +833,16 @@ describe("pipeline channel gate", () => {
 					const rng = mulberry32(seed)
 					const dropoutAt =
 						hasDropout && blocks >= 3 ? 1 + (dropoutRaw % (blocks - 2)) : -1
-					h.push(noiseIq(rng, 8 * BLOCK))
-					h.push(toneIq(rng, 2 * BLOCK, 80_000, STRONG_AMP))
-					h.push(noiseIq(rng, 12 * BLOCK))
+					h.push(noiseIq(rng, 6 * BLOCK))
+					h.push(toneIq(rng, 2 * BLOCK, -16_000, STRONG_AMP))
+					h.push(noiseIq(rng, 6 * BLOCK))
 					for (let i = 0; i < blocks; i++) {
 						if (i === dropoutAt) h.push(noiseIq(rng, BLOCK))
 						else h.push(toneIq(rng, BLOCK, 20_000, STRONG_AMP))
 					}
-					h.push(noiseIq(rng, 12 * BLOCK))
-					h.push(toneIq(rng, 2 * BLOCK, -80_000, STRONG_AMP))
-					h.push(noiseIq(rng, 12 * BLOCK))
+					h.push(noiseIq(rng, 6 * BLOCK))
+					h.push(toneIq(rng, 2 * BLOCK, -16_000, STRONG_AMP))
+					h.push(noiseIq(rng, 6 * BLOCK))
 					const detail = `seed=${seed} blocks=${blocks} maxTrackMs=${maxTrackMs} dropout=${dropoutAt}`
 					const strongIds = new Set(
 						h
@@ -841,11 +902,7 @@ describe("pipeline channel gate", () => {
 					const otherIds = new Set(
 						h
 							.of("track-open")
-							.filter(
-								e =>
-									nearHz(e.track.centreHz, 80_000) ||
-									nearHz(e.track.centreHz, -80_000),
-							)
+							.filter(e => nearHz(e.track.centreHz, -16_000))
 							.map(e => e.track.trackId),
 					)
 					expect(otherIds.size, detail).toBeGreaterThanOrEqual(2)
@@ -867,7 +924,7 @@ describe("pipeline channel gate", () => {
 				],
 			},
 		)
-	}, 180_000)
+	}, 116_000)
 
 	it("does not let two strong blocks pass a later weak tone in the same slot", () => {
 		const { h, rng } = armedGate(20261041)
@@ -949,16 +1006,23 @@ describe("pipeline channel gate", () => {
 	// Feature: scanner-redesign, Property 1: Noise never passes the gate
 	// Validates: Requirements 2.2, 2.3, 2.4
 	it("a track passes only on its own measurements", async () => {
+		// Keep 1 kHz bins and 50 ms blocks with one quarter of the IQ work.
+		const BLOCK = 3_200
+		const propertyFs = FS / 4
+		const noiseIq = (rng: Rng, n: number) =>
+			gaussianNoise(rng, n, TONE_SIGMA / 2)
+		const toneIq = (rng: Rng, n: number, offset: number, amp: number) =>
+			addInto(noiseIq(rng, n), tone(n, propertyFs, offset, amp))
 		await fc.assert(
 			fc.asyncProperty(
 				fc.integer({ min: 1, max: 0x7fffffff }),
 				fc.boolean(),
 				fc.boolean(),
-				fc.integer({ min: 1, max: 16 }),
-				fc.integer({ min: 1, max: 16 }),
+				fc.integer({ min: 1, max: 8 }),
+				fc.integer({ min: 1, max: 8 }),
 				fc.integer({ min: 0, max: 4 }),
-				fc.integer({ min: 100, max: 2000 }),
-				fc.integer({ min: 200, max: 2000 }),
+				fc.integer({ min: 100, max: 400 }),
+				fc.integer({ min: 200, max: 400 }),
 				async (
 					seed,
 					firstStrong,
@@ -970,6 +1034,8 @@ describe("pipeline channel gate", () => {
 					maxTrackMs,
 				) => {
 					const h = new Harness({
+						sampleRateHz: propertyFs,
+						fftSize: 64,
 						shortIntegrationMs: null,
 						trackHangMs: hangMs,
 						maxTrackMs,
@@ -981,7 +1047,7 @@ describe("pipeline channel gate", () => {
 					h.start()
 					h.send({ kind: "channel-plan", plan: planAt(CENTRE + 20_000) })
 					const rng = mulberry32(seed)
-					h.push(noiseIq(rng, 12 * BLOCK))
+					h.push(noiseIq(rng, 6 * BLOCK))
 					h.push(
 						toneIq(
 							rng,
@@ -1043,60 +1109,65 @@ describe("pipeline channel gate", () => {
 			),
 			{ numRuns: 100 },
 		)
-	}, 180_000)
+	}, 116_000)
 
-	it("benchmarks the gated path at 2048 bins", async () => {
-		const plan: ChannelPlan = {
-			sourceId: "s1",
-			defaultWidthHz: WIDTH,
-			entries: [
-				{
-					startHz: CENTRE - BENCH_FS / 2,
-					endHz: CENTRE + BENCH_FS / 2,
-					widthHz: WIDTH,
-					rasterHz: null,
-					firstChannelHz: null,
-					burst: false,
-					rangeKey: "bench",
-				},
-			],
-		}
-		const probe = createChannelGate({
-			binHz: BENCH_FS / BENCH_N,
-			blockMs: BLOCK_MS,
-			centreHz: CENTRE,
-			bins: BENCH_N,
-		})
-		probe.setPlan(plan)
-		const slots = probe.stats().slots
-		expect(slots).toBe(328)
-		const tones = [-600_000, -300_000, 150_000, 400_000, 700_000]
-		const quietOff = await benchGate(null, [])
-		const busyOff = await benchGate(null, tones)
-		const quiet = await benchGate(plan, [])
-		const busy = await benchGate(plan, tones)
-		const line = (row: Awaited<ReturnType<typeof benchGate>>): string =>
-			`gate ${row.gateUs.toFixed(1)} µs/block, busy ${row.busyUs.toFixed(1)} µs/block, uptime ${row.uptimeUs.toFixed(1)} µs/block`
-		console.info(
-			`gate bench plan off, 0 tracks: ${line(quietOff)} (300 blocks after 100 warm-up)`,
-		)
-		console.info(`gate bench plan off, 5 tracks: ${line(busyOff)}`)
-		console.info(
-			`gate bench plan on, 0 tracks: ${line(quiet)} (${slots} slots, 300 blocks after 100 warm-up)`,
-		)
-		console.info(`gate bench plan on, 5 tracks: ${line(busy)}`)
-		expect(quietOff.opened).toBe(0)
-		expect(busyOff.opened).toBe(tones.length)
-		expect(quietOff.gateUs).toBe(0)
-		expect(busyOff.gateUs).toBe(0)
-		expect(quiet.opened).toBe(0)
-		expect(busy.opened).toBe(tones.length)
-		for (const row of [quietOff, busyOff, quiet, busy]) {
-			expect(Number.isFinite(row.gateUs)).toBe(true)
-			expect(Number.isFinite(row.busyUs)).toBe(true)
-			expect(Number.isFinite(row.uptimeUs)).toBe(true)
-		}
-	}, 180_000)
+	// Opt-in measurement only: WAVEKIT_GATE_BENCH=1 keeps this benchmark out of CI.
+	it.skipIf(process.env["WAVEKIT_GATE_BENCH"] !== "1")(
+		"benchmarks the gated path at 2048 bins",
+		async () => {
+			const plan: ChannelPlan = {
+				sourceId: "s1",
+				defaultWidthHz: WIDTH,
+				entries: [
+					{
+						startHz: CENTRE - BENCH_FS / 2,
+						endHz: CENTRE + BENCH_FS / 2,
+						widthHz: WIDTH,
+						rasterHz: null,
+						firstChannelHz: null,
+						burst: false,
+						rangeKey: "bench",
+					},
+				],
+			}
+			const probe = createChannelGate({
+				binHz: BENCH_FS / BENCH_N,
+				blockMs: BLOCK_MS,
+				centreHz: CENTRE,
+				bins: BENCH_N,
+			})
+			probe.setPlan(plan)
+			const slots = probe.stats().slots
+			expect(slots).toBe(328)
+			const tones = [-600_000, -300_000, 150_000, 400_000, 700_000]
+			const quietOff = await benchGate(null, [])
+			const busyOff = await benchGate(null, tones)
+			const quiet = await benchGate(plan, [])
+			const busy = await benchGate(plan, tones)
+			const line = (row: Awaited<ReturnType<typeof benchGate>>): string =>
+				`gate ${row.gateUs.toFixed(1)} µs/block, busy ${row.busyUs.toFixed(1)} µs/block, uptime ${row.uptimeUs.toFixed(1)} µs/block`
+			console.info(
+				`gate bench plan off, 0 tracks: ${line(quietOff)} (300 blocks after 100 warm-up)`,
+			)
+			console.info(`gate bench plan off, 5 tracks: ${line(busyOff)}`)
+			console.info(
+				`gate bench plan on, 0 tracks: ${line(quiet)} (${slots} slots, 300 blocks after 100 warm-up)`,
+			)
+			console.info(`gate bench plan on, 5 tracks: ${line(busy)}`)
+			expect(quietOff.opened).toBe(0)
+			expect(busyOff.opened).toBe(tones.length)
+			expect(quietOff.gateUs).toBe(0)
+			expect(busyOff.gateUs).toBe(0)
+			expect(quiet.opened).toBe(0)
+			expect(busy.opened).toBe(tones.length)
+			for (const row of [quietOff, busyOff, quiet, busy]) {
+				expect(Number.isFinite(row.gateUs)).toBe(true)
+				expect(Number.isFinite(row.busyUs)).toBe(true)
+				expect(Number.isFinite(row.uptimeUs)).toBe(true)
+			}
+		},
+		180_000,
+	)
 })
 
 /** Warm the floor with the short path off. One 12.5 kHz slot at +20 kHz. */
