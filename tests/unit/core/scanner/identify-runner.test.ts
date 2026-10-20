@@ -1,5 +1,5 @@
 import fc from "fast-check"
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import type { ArtefactKind } from "../../../../src/core/spectrum/artefacts.js"
 import {
 	FLAGS,
@@ -299,11 +299,9 @@ describe("IdentifyRunner (spec § 10.8)", () => {
 		})
 	})
 
-	it("starts a run once the CPU drops below the guard, preempting a passive probe meanwhile", async () => {
-		// a free offset slot and budget, so the CPU guard is the only reason the run is deferred
+	it("starts identify under the CPU guard by immediately preempting a passive probe", async () => {
 		const h = identifyHarness({
 			patch: s => {
-				s.maxProbes.offset = 2
 				s.cpuBudgetCores = 4
 			},
 		})
@@ -321,18 +319,9 @@ describe("IdentifyRunner (spec § 10.8)", () => {
 		await h.runner.start()
 		h.tracks.push(viewOf(dmrTrack()))
 		await h.advance(100)
-		await h.advance(100) // deferred: identify preempts the passive probe even under the guard (spec § 10.8 (3))
-		await vi.waitFor(() => expect(h.pool.status()).toEqual([]))
-		expect(h.last()!.trials[0]).toMatchObject({
-			protocol: "dmr",
-			outcome: "pending",
-		})
-		h.cpu.normalisedPercent = 20
-		await h.advance(100) // the next pump starts the queued run
+		await h.advance(100)
 		await flushAsync()
-		expect([...h.decoders.created.values()].map(d => d.config.type)).toEqual([
-			"dsd-fme",
-		])
+		expect(h.pool.status().some(p => p.jobId === "passive-rtl")).toBe(false)
 		expect(h.last()!.trials[0]).toMatchObject({
 			protocol: "dmr",
 			outcome: "running",
@@ -367,20 +356,20 @@ describe("IdentifyRunner (spec § 10.8)", () => {
 		expect(h.events).toEqual([])
 	})
 
-	it("reports skipped-budget while the CPU stays above the guard, and keeps spectral classification as a hint", async () => {
+	it("runs trials while the CPU stays above the guard, and keeps spectral classification as a hint", async () => {
 		const h = identifyHarness({ cpuPercent: 99 })
 		await h.runner.start()
 		h.tracks.push(viewOf(dmrTrack()))
 		await settle(h, 1000, 30)
-		expect(h.decoders.created.size + h.decoders.removed.length).toBe(0)
+		expect(h.decoders.created.size + h.decoders.removed.length).toBeGreaterThan(
+			0,
+		)
 		expect(h.last()).toMatchObject({
 			state: "unidentified",
 			result: { hint: "tdma-ms" },
 		})
 		expect(h.last()!.result!.identity).toBeUndefined()
-		expect(new Set(Object.values(outcomes(h)))).toEqual(
-			new Set(["skipped-budget", "unsupported"]),
-		)
+		expect(Object.values(outcomes(h))).not.toContain("skipped-budget")
 	})
 
 	it("refuses pause, and cancels with every probe released and open trials marked cancelled", async () => {

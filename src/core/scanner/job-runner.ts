@@ -1500,6 +1500,9 @@ export class JobRunner implements JobDriver {
 		const req: ProbeRequest = {
 			jobId: this.record.id,
 			priority: this.record.spec.priority,
+			...(live.gatePassedAt !== undefined
+				? { gatePassedAt: live.gatePassedAt }
+				: {}),
 			sourceId: this.sourceId,
 			trackId: track.trackId,
 			observationId: live.observationId,
