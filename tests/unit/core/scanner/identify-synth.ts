@@ -104,20 +104,20 @@ export function syntheticTone(opts: {
 /** Reference statistics from discriminator audio; no native process or receiver. */
 export function referenceStats(disc: readonly number[]) {
 	const frames = []
-	for (
-		let start = 0;
-		start + 400 <= Math.min(disc.length, 1600);
-		start += 400
-	) {
+	const envelope: number[] = []
+	for (let start = 0; start + 400 <= disc.length; start += 400) {
 		const values = disc.slice(start, start + 400)
-		const sorted = [...values].sort((a, b) => a - b)
+		// Sample 80 evenly spaced values for clustering; envelope power below
+		// still uses every sample in the full 50 ms frame.
+		const clustered = values.filter((_, i) => i % 5 === 0)
+		const sorted = [...clustered].sort((a, b) => a - b)
 		let centroids = [0.125, 0.375, 0.625, 0.875].map(
 			q => sorted[Math.floor(q * sorted.length)] ?? 0,
 		)
 		for (let iteration = 0; iteration < 8; iteration++) {
 			const sums = [0, 0, 0, 0]
 			const counts = [0, 0, 0, 0]
-			for (const value of values) {
+			for (const value of clustered) {
 				let nearest = 0
 				for (let i = 1; i < 4; i++)
 					if (
@@ -137,23 +137,34 @@ export function referenceStats(disc: readonly number[]) {
 			...centroids.slice(1).map((value, i) => value - (centroids[i] ?? 0)),
 		)
 		const cluster =
-			values.filter(value =>
+			clustered.filter(value =>
 				centroids.some(c => Math.abs(c - value) <= spacing * 0.15),
-			).length / values.length
-		const powers = Array.from(
-			{ length: 5 },
-			(_, i) =>
-				values.slice(i * 80, (i + 1) * 80).reduce((sum, v) => sum + v * v, 0) /
-				80,
-		)
-		const mean = powers.reduce((sum, v) => sum + v, 0) / powers.length
-		const variance =
-			powers.reduce((sum, v) => sum + (v - mean) ** 2, 0) / powers.length
+			).length / clustered.length
+		const mean =
+			values.reduce((sum, value) => sum + value * value, 0) / values.length
+		envelope.push(mean)
+		if (envelope.length > 20) envelope.shift()
+		// Measure the 2–10 Hz envelope at 20 Hz, as analyze does. Variation
+		// between 10 ms blocks measures random data/noise, not syllables.
+		const alpha = Math.exp((-2 * Math.PI * 2) / 20)
+		let previous = envelope[0] ?? 0
+		let highPassed = 0
+		let energy = 0
+		let total = 0
+		for (const power of envelope) {
+			highPassed = alpha * (highPassed + power - previous)
+			previous = power
+			energy += highPassed * highPassed
+			total += power
+		}
+		const syllabic =
+			Math.sqrt(energy / envelope.length) /
+			Math.max(total / envelope.length, 1e-12)
 		frames.push({
 			carrierDb: -10,
 			hfNoiseDb: -12,
 			audioDb: 10 * Math.log10(Math.max(1e-12, mean / 25_000_000)),
-			syllabic: Math.sqrt(variance) / Math.max(mean, 1e-12),
+			syllabic,
 			cluster,
 		})
 	}

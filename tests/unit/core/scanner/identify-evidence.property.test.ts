@@ -1,6 +1,9 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import { classifyAnalogTrial } from "../../../../src/core/scanner/analog-trial.js"
+import {
+	classifyAnalogTrial,
+	isVoice,
+} from "../../../../src/core/scanner/analog-trial.js"
 import {
 	identifyDigitalProof,
 	identifyScores,
@@ -58,7 +61,8 @@ describe("identify evidence and unrestricted planning", () => {
 
 	// Feature: scanner-redesign, Property 31: Four-level FM does not invent a tone
 	// Validates: Requirements 6.7, 6.9
-	it("rejects shaped 4FSK tone evidence across SNRs and deviations", () => {
+	// Covers ToneDetector + classifyAnalogTrial with a reference demod model.
+	it("rejects shaped 4FSK tone and analog trial evidence across SNRs and deviations", () => {
 		fc.assert(
 			fc.property(
 				fc.constantFrom(1050, 1500, 2500),
@@ -81,6 +85,36 @@ describe("identify evidence and unrestricted planning", () => {
 			),
 			{ numRuns: 100 },
 		)
+	})
+
+	it("does not hear voice in the low-SNR shaped 4FSK counterexample", () => {
+		const { tones, disc } = syntheticTone({
+			kind: "fsk4",
+			deviation: 1050,
+			snr: 6,
+			baud: 4800,
+			seed: -2055092332,
+		})
+		const evidence = referenceStats(disc)
+		expect(tones.ctcssHz).toBeNull()
+		expect(tones.dcs).toBeNull()
+		expect(evidence.frames.every(frame => frame.syllabic < 0.3)).toBe(true)
+		expect(["decoded", "heard"]).not.toContain(
+			classifyAnalogTrial(evidence, tones),
+		)
+	})
+
+	it("retains syllabic voice evidence but rejects a steady audio envelope", () => {
+		const audio = (syllabic: boolean) =>
+			Array.from({ length: 8000 }, (_, i) => {
+				const t = i / 8000
+				const envelope = syllabic
+					? 0.5 + 0.5 * Math.sin(2 * Math.PI * 4 * t)
+					: 1
+				return 2500 * envelope * Math.sin(2 * Math.PI * 700 * t)
+			})
+		expect(isVoice(referenceStats(audio(true)))).toBe(true)
+		expect(isVoice(referenceStats(audio(false)))).toBe(false)
 	})
 
 	// Feature: scanner-redesign, Property 32: Defaults and priors only order trials
