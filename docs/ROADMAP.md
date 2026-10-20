@@ -10,13 +10,44 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 
 Landed in the scanner redesign batch (WG12): parked sweeps, a channel-matched gate,
 evidence-only labels and transmission proofs, replay-first analog trials, waiting
-identify and activity phases ([spec](specs/scanner-redesign/requirements.md)). Live
-acceptance is pending; IQ capture remains off by default. The
+identify and activity phases ([spec](specs/scanner-redesign/requirements.md)). The
+untracked-retune alarm now counts only sustained strong features (amendment A16).
+IQ capture remains off by default. The
 [Rust live demodulator phase A](specs/rust-demod-a/requirements.md) also landed:
-NFM/AM is opt-in through `liveDemod.engine: rust`, with csdr the default and fallback.
+NFM/AM is opt-in through `liveDemod.engine: rust`, with csdr the default and fallback
+(in a live A/B on one receiver it used more CPU than csdr).
 
-Follow-ups:
+Live acceptance (2026-10-20, one RTL-SDR on a Wi-Fi-linked receiver host) is
+partial. Passing: no false retune alarm while parked, POCSAG decoded, a DMR
+transmission identified with talkgroup, source and slot. Open, in priority order:
 
+- Enable every decoder the image ships (rtl433, AIS, ACARS, VDL2, direwolf, readsb)
+  in a supported default setup, gated on drop-free fanout; ADS-B needs 1090 MHz at
+  2.4 Msps, so decide between a second tuner and time-sharing one.
+- Identify analog FM, CTCSS and DCS without a live-audio listener: an analog trial
+  must run its own demodulator. Analog FM with a sub-audible tone is measured as a
+  narrow 4FSK signal today and gets only digital trials.
+- Fair decoder-slot scheduling: a trial on one ambient signal can hold the slot for
+  minutes while a user's transmission is never tried; "decode here" must outrank
+  background trials.
+- IQ capture: the capture tool can fail repeatedly at startup and turn capture off
+  without a logged reason; log the tool's failure cause, then run the capture-on
+  acceptance before the default flips.
+- Detection quality: broadband impulses and interference create many weak
+  discoveries at once; a discovery can sit on the hop centre spanning the window;
+  one emitter can split into several discoveries; strong close transmissions widen
+  their tracks and attach to a neighbouring discovery; APRS packets merge into a
+  wide track whose centre falls outside the job range.
+- Proofs: an undecoded digital discovery must carry "Digital, not decoded (tried
+  ...)"; identify must not report a protocol without a decode; a probe whose decoder
+  never connected must not report `no-sync`; a range's protocol list must bound its
+  trials; legacy discoveries keep prior-derived labels.
+- Low-bandwidth links: halving the source rate removed upstream drops on Wi-Fi.
+  Design pass weighing a source jitter buffer, larger fanout branch buffers, a relay
+  buffer on the receiver host, link-quality reporting, and decimation or
+  channelization on the receiver host.
+- Remove the core's port-forwarder sidecar from the protected Docker setup (review
+  against the access policy).
 - Persist trial, analog and unavailable evidence across restart (amendment A12).
 - Add band-aware decoder auto-start, toward all decoders running at once once no
   branch drops samples.
