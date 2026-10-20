@@ -30,12 +30,26 @@ export type LeaseLostReason =
 	| "preempted-relay"
 	| "preempted-job"
 
+/**
+ * Centre, rate and gain of a retune this lease has written and accepted, plus the
+ * epoch that retune posted. Null after any trust break (R 1.2). Same-centre no-op
+ * compares the three target fields; `epoch` is checked against the live clock.
+ */
+export interface VerifiedTune {
+	centreHz: number
+	sampleRateHz: number | null
+	gainTenthsDb: number | null
+	epoch: number
+}
+
 export interface Lease {
 	sourceId: string
 	jobId: string
 	acquiredAt: number
 	snapshot: Partial<TunerFieldValues>
 	changedFields: Set<keyof TunerFieldValues>
+	/** Set only after a retune that finished writing. Absent on leases built outside the arbiter. */
+	verified?: VerifiedTune | null
 }
 
 /**
@@ -159,6 +173,19 @@ export class TunerArbiter extends EventEmitter {
 	private readonly lastOperatorAt = new Map<string, number>()
 	/** Sources with TEST_MODE 1 sent and no successful TEST_MODE 0 since. */
 	private readonly markerOpen = new Set<string>()
+	/**
+	 * Tuner fields actually on the device after the lease's last successful retune.
+	 * A drift from these (or from `lease.verified`) means the next retune writes.
+	 */
+	private readonly accepted = new WeakMap<
+		Lease,
+		{
+			frequency: number
+			sampleRate: number
+			gain: number
+			gainMode: TunerState["gainMode"]
+		}
+	>()
 
 	constructor(private readonly deps: ArbiterDeps) {
 		super()
@@ -340,12 +367,15 @@ export class TunerArbiter extends EventEmitter {
 				}
 			}
 			// Hand-over: the new job keeps the snapshot (§ 10.1 preempted-job row).
+			// The verified tune does not carry over: the new holder writes its own hop.
+			this.clearVerified(current)
 			const lease: Lease = {
 				sourceId,
 				jobId,
 				acquiredAt: this.now(),
 				snapshot: { ...current.snapshot },
 				changedFields: new Set(current.changedFields),
+				verified: null,
 			}
 			if (this.adopted.has(current)) this.adopted.add(lease)
 			this.lost.add(current)
@@ -404,6 +434,10 @@ export class TunerArbiter extends EventEmitter {
 		}
 		guard()
 		this.assertHeld(lease)
+		const skipped = this.sameCentreNoOp(lease, target)
+		if (skipped !== null) return skipped
+		// A real write drops the previous acceptance. A throw leaves it clear so the retry writes.
+		this.clearVerified(lease)
 		const { sourceId } = lease
 		const clock = this.deps.epochs(sourceId)
 		if (!clock)
@@ -542,6 +576,19 @@ export class TunerArbiter extends EventEmitter {
 				toError(failure),
 			)
 		}
+		const written = this.requireState(sourceId)
+		lease.verified = {
+			centreHz: target.centreHz,
+			sampleRateHz: target.sampleRateHz,
+			gainTenthsDb: target.gainTenthsDb,
+			epoch: pending.epoch,
+		}
+		this.accepted.set(lease, {
+			frequency: written.frequency,
+			sampleRate: written.sampleRate,
+			gain: written.gain,
+			gainMode: written.gainMode,
+		})
 		return pending
 	}
 
@@ -561,6 +608,7 @@ export class TunerArbiter extends EventEmitter {
 	): Promise<{ restored: string[]; unrestorable: string[] }> {
 		const held =
 			this.leases.get(lease.sourceId) === lease && !this.lost.has(lease)
+		this.clearVerified(lease)
 		this.lost.add(lease)
 		if (!held) return { restored: [], unrestorable: [] }
 		this.leases.delete(lease.sourceId)
@@ -680,7 +728,123 @@ export class TunerArbiter extends EventEmitter {
 		}
 	}
 
+	/**
+	 * The source's tuning is no longer trusted (an untracked retune or a host-centre mismatch):
+	 * the holder's next retune writes, even for the same centre (R 1.2).
+	 */
+	distrust(sourceId: string): void {
+		this.clearVerified(sourceId)
+	}
+
 	// === internals ===
+
+	/**
+	 * The current epoch's pending record, with no settle and no new epoch. Used when a
+	 * same-centre retune writes nothing (R 1.2).
+	 */
+	private pendingOfCurrent(epoch: {
+		epoch: number
+		startSample: number | null
+		centreHz: number
+		sampleRateHz: number
+		gainKey: string
+		tuningTrust: PendingEpoch["tuningTrust"]
+	}): PendingEpoch {
+		return {
+			epoch: epoch.epoch,
+			commandSample: epoch.startSample ?? 0,
+			bufferedSamples: 0,
+			settleSamples: 0,
+			expectMarker: false,
+			markerTimeoutSamples: 0,
+			pllSettleSamples: 0,
+			centreHz: epoch.centreHz,
+			sampleRateHz: epoch.sampleRateHz,
+			gainKey: epoch.gainKey,
+			tuningTrust: epoch.tuningTrust,
+			centreChanged: false,
+		}
+	}
+
+	/** Frequency, rate, gain and gain mode must be known and not declared-only, or we write. */
+	private listsBlockSkip(state: TunerState): boolean {
+		const watched = ["frequency", "sampleRate", "gain", "gainMode"] as const
+		for (const list of [state.unknownFields, state.declaredOnlyFields]) {
+			if (list === undefined) continue
+			if (!Array.isArray(list)) return true
+			for (const field of watched) if (list.includes(field)) return true
+		}
+		return false
+	}
+
+	/**
+	 * Same-centre no-op (R 1.2). Returns the current epoch only when every acceptance check
+	 * holds. Any missing, throwing, stale or mismatched input returns null so the caller
+	 * takes today's write path.
+	 */
+	private sameCentreNoOp(
+		lease: Lease,
+		target: {
+			centreHz: number
+			gainTenthsDb: number | null
+			sampleRateHz: number | null
+		},
+	): PendingEpoch | null {
+		try {
+			const verified = lease.verified ?? null
+			if (verified === null) return null
+			if (
+				verified.centreHz !== target.centreHz ||
+				verified.sampleRateHz !== target.sampleRateHz ||
+				verified.gainTenthsDb !== target.gainTenthsDb
+			)
+				return null
+			const clock = this.deps.epochs(lease.sourceId)
+			if (!clock) return null
+			const epoch = clock.currentEpoch()
+			if (epoch.epoch !== verified.epoch) return null
+			if (epoch.tuningTrust !== "commanded") return null
+			if (epoch.startSample === null) return null
+			if (epoch.centreHz !== verified.centreHz) return null
+			const writtenOnConnection = this.deps.tuner.tuningWrittenOnConnection
+			if (writtenOnConnection === undefined) return null
+			if (writtenOnConnection.call(this.deps.tuner, lease.sourceId) !== true)
+				return null
+			const state = this.deps.tuner.getState(lease.sourceId)
+			if (!state) return null
+			if (state.controlMode !== "internal") return null
+			if (this.listsBlockSkip(state)) return null
+			if (state.frequency !== verified.centreHz) return null
+			if (
+				target.sampleRateHz !== null &&
+				state.sampleRate !== target.sampleRateHz
+			)
+				return null
+			if (target.gainTenthsDb !== null && state.gain !== target.gainTenthsDb)
+				return null
+			if (target.gainTenthsDb !== null && state.gainMode !== "manual")
+				return null
+			const accepted = this.accepted.get(lease)
+			if (accepted === undefined) return null
+			if (state.frequency !== accepted.frequency) return null
+			if (state.sampleRate !== accepted.sampleRate) return null
+			if (state.gain !== accepted.gain) return null
+			if (state.gainMode !== accepted.gainMode) return null
+			return this.pendingOfCurrent(epoch)
+		} catch {
+			return null
+		}
+	}
+
+	private clearVerified(leaseOrSource: Lease | string): void {
+		const lease =
+			typeof leaseOrSource === "string"
+				? this.leases.get(leaseOrSource)
+				: leaseOrSource
+		if (lease === undefined) return
+		lease.verified = null
+		this.accepted.delete(lease)
+	}
 
 	private requireState(sourceId: string): TunerState {
 		const state = this.deps.tuner.getState(sourceId)
@@ -815,6 +979,7 @@ export class TunerArbiter extends EventEmitter {
 
 	private lose(lease: Lease, reason: LeaseLostReason): void {
 		if (this.leases.get(lease.sourceId) !== lease) return
+		this.clearVerified(lease)
 		this.leases.delete(lease.sourceId)
 		this.priorities.delete(lease.sourceId)
 		this.lost.add(lease)
@@ -838,6 +1003,8 @@ export class TunerArbiter extends EventEmitter {
 		origin?: TunerCommandOrigin,
 	): void => {
 		if (origin === "scanner") return
+		// Any write the scanner did not make (operator, config, replay) ends the acceptance (R 1.2).
+		this.clearVerified(sourceId)
 		// WG11: configured tuning written on connect is neither an operator nor a preemption.
 		if (origin === "config") return
 		if (origin === "replay") {
@@ -853,6 +1020,8 @@ export class TunerArbiter extends EventEmitter {
 		sourceId: string,
 		mode: TunerControlMode,
 	): void => {
+		// Any control-mode change, including the return to internal, drops acceptance.
+		this.clearVerified(sourceId)
 		this.lastOperatorAt.set(sourceId, this.now())
 		if (mode === "internal") {
 			// Control is back: retry a recovery the relay blocked and close a marker it kept open.
@@ -872,16 +1041,20 @@ export class TunerArbiter extends EventEmitter {
 	}
 
 	private readonly onDisconnected = (sourceId: string): void => {
+		this.clearVerified(sourceId)
 		this.connected.delete(sourceId)
 		this.emit("source-down", sourceId)
 	}
 
 	/** "removed" (teardown, also on reconnect) and "source-removed" (gone for good): no longer connected. */
 	private readonly onRemoved = (sourceId: string): void => {
+		this.clearVerified(sourceId)
 		this.connected.delete(sourceId)
 	}
 
 	private readonly onPayloadStarted = (sourceId: string): void => {
+		// A payload restart is a new connection: the previous acceptance is stale.
+		this.clearVerified(sourceId)
 		this.connected.add(sourceId)
 		// recover() sends TEST_MODE 0 as its first step.
 		if (

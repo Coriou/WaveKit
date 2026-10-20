@@ -49,6 +49,8 @@ interface Visit {
 	overloaded: boolean
 	tracks: Map<string, TrackInfo>
 	holdStartedAt: number | null
+	/** Gain the visit was tuned with. A continued visit (no tune) needs the same gain. */
+	gainTenthsDb: number | null
 }
 
 interface Hold {
@@ -95,6 +97,12 @@ export class SweepScheduler {
 	private sweepPeriodMs: number | null = null
 	private visited = new Set<number>()
 	private lastCoverage: number | null = null
+	/** True once a one-hop plan's first visit has settled (R 1.1). */
+	private parkedVisit = false
+	/** Wall time of the last parked sweep count. Each count advances it by `dwellMs` (R 1.3). */
+	private lastSweepCountAt: number | null = null
+	/** End sample of the last block seen on the current stream; continued visits dwell from it. */
+	private lastBlockEnd: number | null = null
 
 	constructor(
 		plan: HopPlan,
@@ -122,6 +130,11 @@ export class SweepScheduler {
 		this.minSurfaceBlocks = opts.minSurfaceBlocks ?? 2
 		this.activitySeed = opts.activitySeed
 		this.hops = plan.hops.map(hop => this.freshHop(hop))
+	}
+
+	/** One-hop plan whose first visit has settled. Stays true across same-centre replans. */
+	get parked(): boolean {
+		return this.parkedVisit
 	}
 
 	start(): SchedulerAction[] {
@@ -153,18 +166,37 @@ export class SweepScheduler {
 		if (v === null || this.phase === "idle") return []
 		const actions: SchedulerAction[] =
 			this.phase === "hold" ? [{ type: "stop-probes" }] : []
-		v.dwellEnd = startSample + this.dwellSamples()
+		this.lastBlockEnd = startSample
+		v.dwellEnd = startSample + this.dwellSamples(this.parkedVisit)
 		v.tracks.clear()
 		v.holdStartedAt = null
 		this.hold = null
 		this.phase = "dwell"
+		// A re-sent window (reconnect, resume) counts sweeps from now: time without data is no dwell.
+		if (this.parkedVisit) this.lastSweepCountAt = this.now()
+		this.parkIfOneHop()
 		return actions
+	}
+
+	/**
+	 * The arbiter answered the visit's tune without a write (R 1.2: same centre, rate and gain on
+	 * a verified epoch), so no new epoch will start. The visit opens its dwell from the last block
+	 * instead of waiting in `tuning`. No-op unless tuning.
+	 */
+	onTuneSkipped(): SchedulerAction[] {
+		const v = this.visit
+		if (v === null || this.phase !== "tuning") return []
+		v.dwellEnd = (this.lastBlockEnd ?? 0) + this.dwellSamples(true)
+		this.phase = "dwell"
+		this.parkIfOneHop()
+		return []
 	}
 
 	onBlock(endSample: number): SchedulerAction[] {
 		const v = this.visit
 		if (v === null || (this.phase !== "dwell" && this.phase !== "hold"))
 			return []
+		this.lastBlockEnd = endSample
 		v.blocks++
 		for (const t of v.tracks.values())
 			if (t.open) {
@@ -307,18 +339,34 @@ export class SweepScheduler {
 		return { blockSamples: this.blockSamples, sampleRateHz: this.sampleRateHz }
 	}
 
-	replan(plan: HopPlan, spec: NormalisedJobSpec): void {
+	/**
+	 * Swaps the plan. A multi-hop or unparked plan swaps at the next hop boundary (returns no
+	 * action). While parked (R 1.1): a one-hop plan at the same centre, rate and gain keeps the
+	 * park, the visit and any open hold; a one-hop plan that moves ends an open hold and returns
+	 * exactly one tune; a multi-hop plan leaves the park and swaps at the boundary.
+	 */
+	replan(plan: HopPlan, spec: NormalisedJobSpec): SchedulerAction[] {
 		if (plan.hops.length === 0)
 			throw new WaveKitError(
 				"A sweep needs at least one hop",
 				"SCANNER_EMPTY_PLAN",
 			)
+		if (this.parkedVisit && plan.hops.length === 1) {
+			if (this.keepsPark(plan, spec)) {
+				this.plan = plan
+				this.spec = spec
+				return []
+			}
+			return this.leaveParkFor(plan, spec)
+		}
+		if (this.parkedVisit) this.unpark()
 		this.pendingReplan = { plan, spec }
 		// The plan still swaps at the hop boundary. signalsOnly is a track decision,
 		// so the next confirm sees it before that boundary.
 		if (spec.signalsOnly !== undefined) this.spec.signalsOnly = spec.signalsOnly
 		else delete this.spec.signalsOnly
 		if (this.phase === "idle") this.applyReplan()
+		return []
 	}
 
 	progress(): {
@@ -329,6 +377,15 @@ export class SweepScheduler {
 		holdingOn: string | null
 		coverage: number
 	} {
+		if (this.parkedVisit)
+			return {
+				sweepIndex: this.sweepIndex,
+				hopIndex: 0,
+				hopCount: 1,
+				sweepPeriodMs: null,
+				holdingOn: this.phase === "hold" ? (this.hold?.trackId ?? null) : null,
+				coverage: 1,
+			}
 		return {
 			sweepIndex: this.sweepIndex,
 			hopIndex:
@@ -360,12 +417,13 @@ export class SweepScheduler {
 		}
 	}
 
-	private dwellSamples(): number {
+	/** `untuned`: a window that follows without a retune has no settle to leave out. */
+	private dwellSamples(untuned = false): number {
 		const blocks = (this.minSurfaceBlocks + 1) * this.blockSamples
-		const current = this.visit?.hopIndex ?? 0
-		const dwellMs = this.plan.hops[current]?.dwellMs ?? this.spec.dwellMs
+		const dwellMs = this.currentDwellMs()
 		const operator = Math.round(
-			((dwellMs - this.spec.settleMs) * this.sampleRateHz) / 1000,
+			((dwellMs - (untuned ? 0 : this.spec.settleMs)) * this.sampleRateHz) /
+				1000,
 		)
 		return Math.max(blocks, operator)
 	}
@@ -377,6 +435,7 @@ export class SweepScheduler {
 				`Hop ${hopIndex} is outside the plan`,
 				"SCANNER_HOP_RANGE",
 			)
+		const gainTenthsDb = this.gainOf(hopIndex)
 		this.visit = {
 			hopIndex,
 			revisit,
@@ -386,18 +445,11 @@ export class SweepScheduler {
 			overloaded: false,
 			tracks: new Map(),
 			holdStartedAt: null,
+			gainTenthsDb,
 		}
 		this.hold = null
 		this.phase = "tuning"
-		return [
-			{
-				type: "tune",
-				hopIndex,
-				centreHz: hop.centreHz,
-				gainTenthsDb:
-					this.hops[hopIndex]?.gainTenthsDb ?? this.spec.tuner.gainTenthsDb,
-			},
-		]
+		return [{ type: "tune", hopIndex, centreHz: hop.centreHz, gainTenthsDb }]
 	}
 
 	private decide(): SchedulerAction[] {
@@ -461,7 +513,15 @@ export class SweepScheduler {
 
 	private leaveHop(prefix: SchedulerAction[]): SchedulerAction[] {
 		const now = this.now()
-		const wasRevisit = this.visit?.revisit ?? false
+		// Parked one-hop (R 1.1, 1.3): no tune, the sweep counts from elapsed dwell.
+		if (this.parkedVisit) return this.continueParked(prefix, now)
+		const v = this.visit
+		const wasRevisit = v?.revisit ?? false
+		// Read before applyReplan: the centre this visit is tuned to under the plan it was tuned for.
+		const fromCentre =
+			v === null ? undefined : this.plan.hops[v.hopIndex]?.centreHz
+		const carried = this.openTracks()
+		const base = this.continuedBase()
 		this.endVisit(now)
 		this.applyReplan()
 		const actions = [...prefix]
@@ -484,11 +544,149 @@ export class SweepScheduler {
 			this.sweepStartedAt = now
 		}
 		const revisit = this.pickRevisit(now, wasRevisit)
-		if (revisit !== null) {
-			this.coarseSinceRevisit = 0
-			return [...actions, ...this.tuneTo(revisit, true)]
+		if (revisit !== null) this.coarseSinceRevisit = 0
+		const target = revisit ?? this.coarseIndex
+		// R 1.4: the picked hop is the one being visited (same centre, same gain): continue the
+		// visit instead of re-tuning it.
+		if (
+			v !== null &&
+			fromCentre !== undefined &&
+			this.plan.hops[target]?.centreHz === fromCentre &&
+			this.gainOf(target) === v.gainTenthsDb
+		) {
+			this.continueVisit(target, revisit !== null, carried, base, v)
+			if (this.plan.hops.length === 1) this.parkIfOneHop()
+			return actions
 		}
-		return [...actions, ...this.tuneTo(this.coarseIndex, false)]
+		return [...actions, ...this.tuneTo(target, revisit !== null)]
+	}
+
+	private gainOf(hopIndex: number): number | null {
+		return this.hops[hopIndex]?.gainTenthsDb ?? this.spec.tuner.gainTenthsDb
+	}
+
+	private currentDwellMs(): number {
+		const current = this.visit?.hopIndex ?? 0
+		return this.plan.hops[current]?.dwellMs ?? this.spec.dwellMs
+	}
+
+	/** Open tracks of the visit, with their tried flags: a continued window keeps them (R 1.4, 1.5). */
+	private openTracks(): Map<string, TrackInfo> {
+		const out = new Map<string, TrackInfo>()
+		for (const [id, t] of this.visit?.tracks ?? []) if (t.open) out.set(id, t)
+		return out
+	}
+
+	/** Sample a continued visit's next dwell is measured from. */
+	private continuedBase(): number {
+		return Math.max(this.visit?.dwellEnd ?? 0, this.lastBlockEnd ?? 0)
+	}
+
+	/** A new visit record on the tuned window, without a tune action. */
+	private continueVisit(
+		hopIndex: number,
+		revisit: boolean,
+		tracks: Map<string, TrackInfo>,
+		base: number,
+		from: Visit,
+	): void {
+		this.visit = {
+			hopIndex,
+			revisit,
+			dwellEnd: null,
+			blocks: 0,
+			activeBlocks: 0,
+			overloaded: false,
+			tracks,
+			holdStartedAt: null,
+			gainTenthsDb: from.gainTenthsDb,
+		}
+		this.visit.dwellEnd = base + this.dwellSamples(true)
+		this.hold = null
+		this.phase = "dwell"
+	}
+
+	/** Parks when the visit settled on a one-hop plan with no replan pending (R 1.1). */
+	private parkIfOneHop(): void {
+		if (
+			this.parkedVisit ||
+			this.plan.hops.length !== 1 ||
+			this.pendingReplan !== null
+		)
+			return
+		this.parkedVisit = true
+		this.lastSweepCountAt = this.now()
+		this.sweepPeriodMs = null
+	}
+
+	/** Leaves the park without a tune; sweep timing restarts (the park had no sweep period). */
+	private unpark(): void {
+		this.parkedVisit = false
+		this.lastSweepCountAt = null
+		this.sweepPeriodMs = null
+		this.sweepStartedAt = this.now()
+		this.lastCoverage = null
+		this.visited.clear()
+	}
+
+	/** Same centre, sample rate and gain: the parked window stays as it is. */
+	private keepsPark(plan: HopPlan, spec: NormalisedJobSpec): boolean {
+		const v = this.visit
+		if (v === null || this.phase === "idle" || this.phase === "tuning")
+			return false
+		return (
+			plan.hops[0]?.centreHz === this.plan.hops[v.hopIndex]?.centreHz &&
+			spec.tuner.sampleRateHz === this.spec.tuner.sampleRateHz &&
+			spec.tuner.gainTenthsDb === this.spec.tuner.gainTenthsDb
+		)
+	}
+
+	/** A parked one-hop plan moved. Ends an open hold, leaves the park, and tunes once. */
+	private leaveParkFor(
+		plan: HopPlan,
+		spec: NormalisedJobSpec,
+	): SchedulerAction[] {
+		const prefix: SchedulerAction[] =
+			this.phase === "hold" ? [{ type: "stop-probes" }] : []
+		this.endVisit(this.now())
+		this.unpark()
+		this.pendingReplan = null
+		this.plan = plan
+		this.spec = spec
+		this.hops = [this.freshHop(plan.hops[0])]
+		this.coarseIndex = 0
+		this.coarseSinceRevisit = 0
+		return [...prefix, ...this.tuneTo(0, false)]
+	}
+
+	/**
+	 * Parked leave: ends the visit's accounting, emits one `sweep-complete` per full `dwellMs`
+	 * elapsed since the last count, and continues on hop 0 without a tune. A gain the overload
+	 * rule changed must reach the tuner, so that case re-tunes (today's write path).
+	 */
+	private continueParked(
+		prefix: SchedulerAction[],
+		now: number,
+	): SchedulerAction[] {
+		const v = this.visit
+		const carried = this.openTracks()
+		const base = this.continuedBase()
+		const dwellMs = this.currentDwellMs()
+		this.endVisit(now)
+		const actions = [...prefix]
+		if (dwellMs > 0 && this.lastSweepCountAt !== null) {
+			const due = Math.floor((now - this.lastSweepCountAt) / dwellMs)
+			for (let i = 0; i < due; i++) {
+				actions.push({ type: "sweep-complete", sweepIndex: this.sweepIndex })
+				this.sweepIndex++
+			}
+			if (due > 0) this.lastSweepCountAt += due * dwellMs
+		}
+		this.coarseIndex = 0
+		if (v === null || this.gainOf(0) !== v.gainTenthsDb)
+			return [...actions, ...this.tuneTo(0, false)]
+		this.continueVisit(0, false, carried, base, v)
+		return actions
 	}
 
 	private endVisit(now: number): void {
