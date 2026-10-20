@@ -20,6 +20,10 @@ Whichever skill or tool helps you write a design, save the result in the paths a
 - [build-devx-overhaul](build-devx-overhaul/requirements.md)
 - [core-access-policy](core-access-policy/requirements.md)
 - [decode-envelope](decode-envelope/requirements.md)
+- [decoder-enablement](decoder-enablement/requirements.md): every shipped decoder built in with
+  an auto/always/off mode, off-centre placements on channelizer channels (VFO and band-plan
+  channels for dsd-fme and multimon-ng), a drop-free efficiency gate, the 1090 MHz rate raise
+  with a link advisory, multi-source binding rules (WG13)
 - [lora-decoder](lora-decoder/requirements.md)
 - [operator-data](operator-data/requirements.md)
 - [receiver-capabilities](receiver-capabilities/requirements.md)
