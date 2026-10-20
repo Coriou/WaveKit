@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
-import type { Discovery } from "../../../../src/core/scanner/types.js"
+import type {
+	DecodeEvidence,
+	Discovery,
+} from "../../../../src/core/scanner/types.js"
 import {
 	classification,
 	counterIds,
@@ -236,5 +239,157 @@ describe("DiscoveryStore gated surfacing", () => {
 		expect(d?.confidence).toBe("decoded")
 		expect(d?.identity).toEqual({ kind: "ais-mmsi", value: "211234567" })
 		expect(d?.proof).toBeUndefined()
+	})
+})
+
+describe("DiscoveryStore decode-proven placement", () => {
+	const AIS_HZ = 162_025_000
+	const mmsi = { kind: "ais-mmsi" as const, value: "211234567" }
+	const aisDecode = (extra: Partial<DecodeEvidence> = {}): DecodeEvidence => ({
+		...evidence("ais", T0 + 10, { identity: mmsi }),
+		origin: "ambient",
+		...extra,
+	})
+	const burst = (gate: "pending" | "below" | "absent", id = "o1") =>
+		makeObs({
+			id,
+			centreHz: AIS_HZ,
+			startedAt: T0,
+			durationMs: 27,
+			blocks: 1,
+			burst: true,
+			gate,
+		})
+
+	/** The service's evidence path: place with the decode, then append and apply it. */
+	function applyAmbient(
+		store: DiscoveryStore,
+		gate: "pending" | "below" | "absent",
+		ev: DecodeEvidence,
+	): string | null {
+		const placed = store.ingest(burst(gate), { decode: ev })
+		if (placed.discoveryId === null) return null
+		expect(store.appendObservationEvidence("o1", ev)).toBe(true)
+		store.applyEvidence(placed.discoveryId, ev)
+		return store.discoveryIdOf("o1") ?? null
+	}
+
+	it("an accepted AIS decode on a pending-gate 27 ms burst creates a decoded, proven discovery", () => {
+		const store = newStore()
+		const id = applyAmbient(store, "pending", aisDecode())
+		expect(id).not.toBeNull()
+		const d = store.get(id ?? "")
+		expect(d?.protocol).toBe("ais")
+		expect(d?.confidence).toBe("decoded")
+		expect(d?.identity).toEqual(mmsi)
+		expect(d?.evidenceLevel).toBe("proven")
+		expect(d?.proof?.kind).toBe("decoded")
+	})
+
+	it("an absent gate with an accepted decode also creates", () => {
+		const store = newStore()
+		expect(applyAmbient(store, "absent", aisDecode())).not.toBeNull()
+		expect(store.snapshot().discoveries).toHaveLength(1)
+	})
+
+	// A decode proves the burst is not noise, so a below gate does not veto it.
+	it("a below gate with an accepted decode also creates", () => {
+		const store = newStore()
+		const id = applyAmbient(store, "below", aisDecode())
+		expect(store.get(id ?? "")?.confidence).toBe("decoded")
+	})
+
+	it("the same burst without a decode creates nothing", () => {
+		for (const gate of ["pending", "below", "absent"] as const) {
+			const store = newStore()
+			expect(store.ingest(burst(gate))).toEqual({
+				discoveryId: null,
+				change: "transient",
+			})
+			expect(store.snapshot().discoveries).toEqual([])
+		}
+	})
+
+	it("a decode that is not an accepted identity decode creates nothing", () => {
+		const rejected: DecodeEvidence[] = [
+			aisDecode({ identity: { kind: "dmr-cc", value: "1" } }),
+			aisDecode({ identity: { kind: "ais-mmsi", value: "" } }),
+			aisDecode({ crcClean: false }),
+			aisDecode({ epoch: 2 }),
+			(() => {
+				const ev = aisDecode()
+				delete ev.identity
+				return ev
+			})(),
+		]
+		for (const ev of rejected) {
+			const store = newStore()
+			expect(store.ingest(burst("pending"), { decode: ev })).toEqual({
+				discoveryId: null,
+				change: "transient",
+			})
+			expect(store.snapshot().discoveries).toEqual([])
+		}
+	})
+
+	it("a flagged track stays transient even with a decode", () => {
+		const store = newStore()
+		const obs = makeObs({
+			id: "o1",
+			centreHz: AIS_HZ,
+			startedAt: T0,
+			durationMs: 27,
+			iqImage: true,
+			gate: "pending",
+		})
+		expect(store.ingest(obs, { decode: aisDecode() }).change).toBe("transient")
+	})
+})
+
+describe("DiscoveryStore re-ingest after placement", () => {
+	it("a placed observation keeps re-ingesting when a later gate is not passed", () => {
+		for (const gate of ["pending", "below", "absent"] as const) {
+			const store = newStore()
+			const placed = store.ingest(
+				makeObs({
+					id: "o1",
+					centreHz: CH,
+					startedAt: T0,
+					open: true,
+					gate: "passed",
+				}),
+			)
+			const id = placed.discoveryId ?? ""
+			const again = store.ingest(
+				makeObs({
+					id: "o1",
+					centreHz: CH,
+					startedAt: T0,
+					durationMs: 4_000,
+					gate,
+				}),
+			)
+			expect(again.discoveryId).toBe(id)
+			expect(again.change).not.toBe("transient")
+			expect(store.discoveryIdOf("o1")).toBe(id)
+			expect(store.get(id)?.airtimeMs).toBe(4_000)
+		}
+	})
+
+	it("a new observation with the same non-passed gate is still transient", () => {
+		const store = newStore()
+		store.ingest(
+			makeObs({ id: "o1", centreHz: CH, startedAt: T0, gate: "passed" }),
+		)
+		expect(
+			store.ingest(
+				makeObs({
+					id: "o2",
+					centreHz: CH,
+					startedAt: T0 + 2_000,
+					gate: "pending",
+				}),
+			).change,
+		).toBe("transient")
 	})
 })

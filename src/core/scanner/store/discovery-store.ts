@@ -1,9 +1,12 @@
 /**
  * Discovery store (spec § 7): turns observations into deduplicated discoveries.
  *
- * Association per observation (§ 7.2): sticky (nearest same-family discovery whose median centre is
- * within the § 5.2 tolerance), then the fixed frequency key with the co-channel rules 2–4. A track
- * creates or updates a discovery only when `track.gate` is `passed`; an absent gate is pending.
+ * Association per observation (§ 7.2): sticky (nearest discovery in tolerance whose effective
+ * family matches; an observation with no evidence yet also matches a decoded discovery), then the
+ * fixed frequency key with the co-channel rules 2–4. A track is first placed only when
+ * `track.gate` is `passed` (an absent gate is pending), or when an accepted identity decode for
+ * it is being applied: a short burst (AIS, VDL2, LoRa) never passes the burst gate, and a decode
+ * proves it is not noise. A placed observation keeps re-ingesting whatever a later gate says.
  * Protocol and confidence come from `labelFromEvidence`, never from a hypothesis. Confidence is
  * monotone, except a leak/intermod cap recorded before a decode. Every mutation emits one journal
  * entry whose payload holds the resulting records, so replay is an idempotent upsert.
@@ -89,6 +92,7 @@ import type {
 	RecordingBinding,
 } from "./recording-operation.js"
 import { CentreIndex, FrequencyIndex } from "./frequency-index.js"
+import type { IndexedCentre } from "./frequency-index.js"
 import { JobCounts } from "./job-counts.js"
 import type { ConfidenceCounts } from "./job-counts.js"
 import type { StoreMirrorRemoval } from "./mirror-sink.js"
@@ -137,6 +141,35 @@ export interface DiscoveryFilter {
 	nearHz?: number
 	toleranceHz?: number
 }
+/** Optional context for `ingest`. */
+export interface IngestOptions {
+	/**
+	 * Accepted decode the caller is about to append to this observation. With
+	 * a CRC-clean identity that fits its protocol, in the track's epoch, it
+	 * places a track whose gate has not passed.
+	 */
+	decode?: DecodeEvidence
+}
+
+/** True when `ev` is an accepted identity decode for this track (it is not noise). */
+function decodeProvesSignal(
+	input: ObservationInput,
+	ev: DecodeEvidence | undefined,
+): boolean {
+	try {
+		return (
+			ev !== undefined &&
+			ev.crcClean === true &&
+			ev.identity !== undefined &&
+			ev.epoch === input.track.epoch &&
+			identityFitsProtocol(ev.protocol, ev.identity)
+		)
+	} catch {
+		// A throwing getter or proxy proves nothing.
+		return false
+	}
+}
+
 export interface DiscoveryStoreOptions {
 	maxDiscoveries: number
 	now: () => number
@@ -220,6 +253,12 @@ interface Op {
 	changes: Map<string, StoreChange>
 	merged: [string, string][]
 	removedObservations: string[]
+	/**
+	 * Moved observations the destination window trimmed before `finish`. They
+	 * are not in the index, so the journal has to carry the moved record itself
+	 * and name the removal.
+	 */
+	trimmedMoves: Observation[]
 	correction?: { sourceId: string; hz: number }
 	/** WG10 req 1.5: owners whose alias list this op changed (journaled as written). */
 	aliases: Set<string>
@@ -238,6 +277,7 @@ function newOp(): Op {
 		changes: new Map(),
 		merged: [],
 		removedObservations: [],
+		trimmedMoves: [],
 		aliases: new Set(),
 		credited: new Map(),
 	}
@@ -513,6 +553,24 @@ function acceptTrial(row: ProofTrialInput): ProofTrialInput | undefined {
 	}
 }
 
+function digitalFamily(family: ProtocolFamily): boolean {
+	return (
+		family === "digital-voice" ||
+		family === "pager" ||
+		family === "packet" ||
+		family === "ism"
+	)
+}
+
+/** Analog and a digital family cannot share one discovery. Unknown and carrier can. */
+function familiesIncompatible(a: ProtocolFamily, b: ProtocolFamily): boolean {
+	if (a === "unknown" || b === "unknown" || a === "carrier" || b === "carrier")
+		return false
+	return (
+		(a === "analog" && digitalFamily(b)) || (b === "analog" && digitalFamily(a))
+	)
+}
+
 function moreSpecific(
 	current: ScannerProtocol,
 	next: ScannerProtocol,
@@ -530,6 +588,15 @@ function statsOf(t: TrackSnapshot): SignalStats {
 		meanDbfs: t.meanDbfs,
 		snrDb: t.snrDb,
 		floorDbfs: t.floorDbfs,
+	}
+}
+
+function signalOf(o: Observation): SignalStats {
+	return {
+		peakDbfs: o.peakDbfs,
+		meanDbfs: o.meanDbfs,
+		snrDb: o.snrDb,
+		floorDbfs: o.floorDbfs,
 	}
 }
 
@@ -581,12 +648,22 @@ const recordDuration = (o: Observation): number =>
 		: Math.max(0, Date.parse(o.endedAt) - Date.parse(o.startedAt))
 
 interface IndexedDiscovery {
+	/** Effective family. A sink proof can move this without writing `Discovery.family`. */
 	family: ProtocolFamily
+	/** Effective confidence is `decoded`, so an evidence-less observation can stick to it. */
+	decoded: boolean
 	centre: number
 	frequencyHz: number
 	key: string
 	sources: string[]
 }
+
+/**
+ * Centre-index family for decoded discoveries of every effective family.
+ * Not a `ProtocolFamily`. An evidence-less observation searches this list
+ * as well as the `unknown` list.
+ */
+const DECODED_CENTRE_FAMILY = "\u0001"
 
 export class DiscoveryStore
 	extends EventEmitter
@@ -633,8 +710,18 @@ export class DiscoveryStore
 	private readonly medians = new Map<string, { centre: number; obw: number }>()
 	private readonly members = new Map<string, Set<string>>()
 	private readonly centres = new CentreIndex()
+	/**
+	 * Decoded discoveries, every effective family, keyed by source. Sticky
+	 * association of an evidence-less observation reads this in one window.
+	 */
+	private readonly decodedCentres = new CentreIndex()
 	/** `frequencyHz` spans. Near reads this; the centre index stays the sticky median. */
 	private readonly frequencies = new FrequencyIndex()
+	/**
+	 * Discoveries with a retained decode or sink bag on one of their own
+	 * observations. Co-channel partners consult this instead of scanning.
+	 */
+	private readonly proofBearing = new Set<string>()
 	private readonly byKey = new Map<string, Set<string>>()
 	private readonly indexed = new Map<string, IndexedDiscovery>()
 	private readonly indexDirty = new Set<string>()
@@ -691,17 +778,25 @@ export class DiscoveryStore
 			: () => false
 	}
 
-	ingest(input: ObservationInput): Ingested {
+	/**
+	 * `passed` (or `opts.decode`, see `IngestOptions`) is required only on first
+	 * placement. A known observation re-ingests whatever a later snapshot's gate
+	 * says, so evidence that follows still finds its discovery.
+	 */
+	ingest(input: ObservationInput, opts: IngestOptions = {}): Ingested {
 		const flagged = this.rememberStickyFlags(input) // may be raised late (P3, § 4.9)
 		const known = this.observationIndex.get(input.id)
 		if (known !== undefined) {
 			if (flagged) return this.retract(known)
-			if (input.track.gate !== "passed") return TRANSIENT
 			return this.reingest(known, input)
 		}
 		if (flagged) return TRANSIENT
 		if (input.jobIds.length === 0) return TRANSIENT
-		if (input.track.gate !== "passed") return TRANSIENT
+		if (
+			input.track.gate !== "passed" &&
+			!decodeProvesSignal(input, opts.decode)
+		)
+			return TRANSIENT
 		const label = labelFromEvidence(emptyProof(input))
 		const sticky = this.stickyMatch(input, label.family)
 		if (sticky !== undefined)
@@ -752,16 +847,36 @@ export class DiscoveryStore
 			ev.identity !== undefined &&
 			d.identity !== undefined &&
 			!sameIdentity(ev.identity, d.identity)
-		)
-			return this.coChannelEvidence(d, ev, opts.cap)
+		) {
+			const carry = this.observationToMove(d, ev)
+			return carry === undefined
+				? this.coChannelEvidence(d, ev, opts.cap)
+				: this.coChannelEvidence(d, ev, opts.cap, carry)
+		}
 		if (d.confidence === "decoded" && ev.protocol !== d.protocol) return null
+		const shown = this.effectiveLabel(d)
+		// A proof on this discovery already named a family this decode cannot share.
+		// The observation that carries it moves onto the linked twin when its own
+		// proof is the incompatible one; the sink rows stay memory-only. A family
+		// only stored (an identity-less decode, no proof) does not split: the
+		// identity decode outranks it, as labelFromEvidence ranks them.
+		if (
+			ev.identity !== undefined &&
+			familiesIncompatible(familyOf(ev.protocol), shown.family) &&
+			this.discoveryView(d).proof !== null
+		) {
+			const carry = this.observationToSplit(d, ev)
+			return carry === undefined
+				? this.coChannelEvidence(d, ev, opts.cap)
+				: this.coChannelEvidence(d, ev, opts.cap, carry)
+		}
 		// identity-less evidence it does not adopt from another family belongs to a co-channel emitter: its
 		// talkgroups or encrypted flag would land on, e.g., an analog discovery
 		if (
 			ev.identity === undefined &&
-			!moreSpecific(d.protocol, ev.protocol) &&
-			familyOf(ev.protocol) !== d.family &&
-			d.family !== "unknown"
+			!moreSpecific(shown.protocol, ev.protocol) &&
+			familyOf(ev.protocol) !== shown.family &&
+			shown.family !== "unknown"
 		)
 			return null
 		const before = this.revision(d)
@@ -856,6 +971,7 @@ export class DiscoveryStore
 		const before = this.peekProof(o.id)
 		this.armWatchers(o.discoveryId)
 		o.decode = kept
+		this.proofBearing.add(o.discoveryId)
 		this.observationProofCache.delete(o.id)
 		this.invalidateLabel(o.discoveryId)
 		this.dropWatcherCaches(o.discoveryId)
@@ -1582,6 +1698,8 @@ export class DiscoveryStore
 		this.medians.clear()
 		this.members.clear()
 		this.centres.clear()
+		this.decodedCentres.clear()
+		this.proofBearing.clear()
 		this.frequencies.clear()
 		this.byKey.clear()
 		this.indexed.clear()
@@ -1652,29 +1770,36 @@ export class DiscoveryStore
 		if (!Number.isFinite(centre)) return undefined
 		this.syncIndex()
 		// WG11 req 3.1: the window is widened by 1 Hz so float rounding of centre ± tol cannot drop a
-		// hit; the exact distance test below is today's.
-		this.centres.range(
-			obs.sourceId,
-			family,
-			centre - tol - 1,
-			centre + tol + 1,
-			e => {
-				const d = this.discoveries.get(e.id)
-				if (d === undefined) return
-				const dist = Math.abs(e.centreHz - centre)
-				if (dist > tol) return
-				const better =
-					best === undefined ||
-					dist < bestDist ||
-					(dist === bestDist &&
-						(d.lastSeenAt > best.lastSeenAt ||
-							(d.lastSeenAt === best.lastSeenAt && d.id < best.id)))
-				if (better) {
-					best = d
-					bestDist = dist
-				}
-			},
-		)
+		// hit; the exact distance test below is today's. The centre lists are the effective family,
+		// so a hit needs no proof read. An evidence-less observation also sticks to a decoded
+		// discovery of any family; those sit in one extra list.
+		const lowHz = centre - tol - 1
+		const highHz = centre + tol + 1
+		const consider = (e: IndexedCentre): void => {
+			const d = this.discoveries.get(e.id)
+			if (d === undefined) return
+			const dist = Math.abs(e.centreHz - centre)
+			if (dist > tol) return
+			const better =
+				best === undefined ||
+				dist < bestDist ||
+				(dist === bestDist &&
+					(d.lastSeenAt > best.lastSeenAt ||
+						(d.lastSeenAt === best.lastSeenAt && d.id < best.id)))
+			if (better) {
+				best = d
+				bestDist = dist
+			}
+		}
+		this.centres.range(obs.sourceId, family, lowHz, highHz, consider)
+		if (family === "unknown")
+			this.decodedCentres.range(
+				obs.sourceId,
+				DECODED_CENTRE_FAMILY,
+				lowHz,
+				highHz,
+				consider,
+			)
 		return best
 	}
 
@@ -1685,7 +1810,9 @@ export class DiscoveryStore
 		cls: ScannerClass,
 	): { merge: Discovery | null; coChannel: string[] } {
 		const atKey = this.atKey(sourceId, key)
-		const same = atKey.filter(d => d.family === family)
+		const familyOfDiscovery = (d: Discovery): ProtocolFamily =>
+			this.effectiveLabel(d).family
+		const same = atKey.filter(d => familyOfDiscovery(d) === family)
 		const [only] = same
 		if (same.length === 1 && only !== undefined)
 			return { merge: only, coChannel: [] }
@@ -1698,13 +1825,17 @@ export class DiscoveryStore
 				: { merge: null, coChannel: same.map(d => d.id) }
 		}
 		if (family === "unknown") {
-			const others = atKey.filter(d => d.family !== "carrier")
+			const others = atKey.filter(d => familyOfDiscovery(d) !== "carrier")
 			const [single] = others
 			if (others.length === 1 && single !== undefined)
 				return { merge: single, coChannel: [] }
 		} else {
 			const [lone] = atKey
-			if (atKey.length === 1 && lone !== undefined && lone.family === "unknown")
+			if (
+				atKey.length === 1 &&
+				lone !== undefined &&
+				familyOfDiscovery(lone) === "unknown"
+			)
 				return { merge: lone, coChannel: [] }
 		}
 		return { merge: null, coChannel: atKey.map(d => d.id) }
@@ -2036,63 +2167,348 @@ export class DiscoveryStore
 		d: Discovery,
 		ev: DecodeEvidence,
 		cap: ConfidenceCap | undefined,
+		carry?: Observation,
 	): StoreChange | null {
 		const family = familyOf(ev.protocol)
 		const sourceId = d.sourceIds[0] ?? ""
 		const existing = this.atKey(sourceId, d.frequencyKey).find(
-			o => o.family === family && sameIdentity(o.identity, ev.identity),
+			o =>
+				this.effectiveLabel(o).family === family &&
+				sameIdentity(o.identity, ev.identity),
 		)
-		if (existing !== undefined)
+		if (existing !== undefined) {
+			if (carry !== undefined && carry.discoveryId !== existing.id) {
+				const from = this.discoveries.get(carry.discoveryId)
+				if (from !== undefined) {
+					const move = newOp()
+					this.rehome(move, from, existing, carry)
+					this.settle(move, existing)
+					this.finish("evidence", move)
+				}
+			}
 			return this.applyEvidence(
 				existing.id,
 				ev,
 				cap === undefined ? {} : { cap },
 			)
-		if (!this.makeRoom()) return null
+		}
+		const protect = new Set<string>([d.id])
+		if (carry !== undefined) protect.add(carry.discoveryId)
+		// The source (and the observation moving with it) stays for this split.
+		// Evicting it first would drop the decode before the transfer.
+		if (!this.makeRoom(protect)) return null
 		const op = newOp()
-		const at = iso(ev.at)
+		const twin = this.linkBeside(
+			op,
+			d,
+			{
+				protocol: ev.protocol,
+				family,
+				confidence: "activity",
+			},
+			iso(ev.at),
+		)
+		this.capInto(twin, cap)
+		this.decodeInto(twin, ev)
+		if (carry !== undefined) {
+			const from = this.discoveries.get(carry.discoveryId)
+			if (from !== undefined && from.id !== twin.id)
+				this.rehome(op, from, twin, carry)
+		}
+		this.invalidateLabel(twin.id)
+		this.invalidateLabel(d.id)
+		const id = this.settle(op, twin)
+		this.finish("evidence", op)
+		return op.changes.get(id) ?? "created"
+	}
+
+	/**
+	 * A co-channel discovery beside `partner`. The persisted label is `label`
+	 * (a decode persists its protocol; a sink split persists nothing and passes
+	 * the unknown label). Journaled as a create plus the partner link.
+	 */
+	private linkBeside(
+		op: Op,
+		partner: Discovery,
+		label: EvidenceLabel,
+		at: string,
+	): Discovery {
 		const twin: Discovery = {
 			id: `d_${this.newId()}`,
-			frequencyHz: d.frequencyHz,
-			frequencyKey: d.frequencyKey,
-			measuredOffsetHz: d.measuredOffsetHz,
-			bandwidthHz: d.bandwidthHz,
-			protocol: ev.protocol,
-			family,
-			class: d.class,
-			confidence: "activity",
+			frequencyHz: partner.frequencyHz,
+			frequencyKey: partner.frequencyKey,
+			measuredOffsetHz: partner.measuredOffsetHz,
+			bandwidthHz: partner.bandwidthHz,
+			protocol: label.protocol,
+			family: label.family,
+			class: partner.class,
+			confidence: label.confidence,
 			encrypted: false,
 			coChannel: [],
 			firstSeenAt: at,
 			lastSeenAt: at,
 			observationCount: 0,
 			airtimeMs: 0,
-			signal: plainCopy(d.signal),
+			signal: plainCopy(partner.signal),
 			metadata: emptyMetadata(),
-			sourceIds: [...d.sourceIds],
-			jobIds: [...d.jobIds],
-			tuningTrust: d.tuningTrust,
+			sourceIds: [...partner.sourceIds],
+			jobIds: [...partner.jobIds],
+			tuningTrust: partner.tuningTrust,
 			evidence: { recordings: 0, psd: false, iq: false },
 		}
 		this.insertDiscovery(twin)
-		this.capInto(twin, cap)
-		this.decodeInto(twin, ev)
-		const partner = this.discoveries.get(d.id)
-		if (partner !== undefined) {
-			twin.coChannel = [partner.id]
-			partner.coChannel = appendMissing(partner.coChannel, [twin.id])
+		const live = this.discoveries.get(partner.id)
+		if (live !== undefined) {
+			twin.coChannel = [live.id]
+			live.coChannel = appendMissing(live.coChannel, [twin.id])
 			this.syncProofWatch(twin)
-			this.syncProofWatch(partner)
-			op.discoveries.add(partner.id)
-			mark(op, partner.id, "updated")
+			this.syncProofWatch(live)
+			op.discoveries.add(live.id)
+			mark(op, live.id, "updated")
 		}
-		this.invalidateLabel(twin.id)
-		this.invalidateLabel(d.id)
 		op.discoveries.add(twin.id)
 		mark(op, twin.id, "created")
-		const id = this.settle(op, twin)
+		return twin
+	}
+
+	/**
+	 * Moves one observation onto `to`. Count, airtime and the sighting move
+	 * with it: the destination follows the same chronological rules as a new
+	 * observation, and the source's sighting is rebuilt from what remains.
+	 * A move the destination window trims in this op is still journaled, plus
+	 * an explicit removal, because `finish` only copies indexed observations.
+	 */
+	private rehome(op: Op, from: Discovery, to: Discovery, o: Observation): void {
+		if (o.discoveryId !== from.id || from.id === to.id) return
+		const air = recordDuration(o)
+		this.unlinkObservation(o)
+		from.observationCount = Math.max(0, from.observationCount - 1)
+		from.airtimeMs = Math.max(0, from.airtimeMs - air)
+		this.releaseSeen(from, o)
+		this.touch(from)
+		o.discoveryId = to.id
+		this.putObservation(o)
+		to.observationCount += 1
+		to.airtimeMs += air
+		to.jobIds = appendMissing(to.jobIds, o.jobIds)
+		to.sourceIds = appendMissing(to.sourceIds, [o.sourceId])
+		this.applyObservationSeen(to, o)
+		this.touch(to)
+		this.refresh(from)
+		this.refresh(to)
+		if (!this.observationIndex.has(o.id)) {
+			op.removedObservations.push(o.id)
+			op.trimmedMoves.push(plainCopy(o))
+		}
+		op.observations.add(o.id)
+		op.discoveries.add(from.id)
+		op.discoveries.add(to.id)
+		mark(op, from.id, "updated")
+		mark(op, to.id, "updated")
+	}
+
+	/** Sighting rules for one stored observation, matching `absorbStats`. */
+	private applyObservationSeen(d: Discovery, o: Observation): void {
+		this.markDirty(d.id)
+		if (o.startedAt < d.firstSeenAt) {
+			d.firstSeenAt = o.startedAt
+			this.touch(d)
+		}
+		const endedAt = o.endedAt ?? o.startedAt
+		const stats = signalOf(o)
+		if (endedAt >= d.lastSeenAt) {
+			if (
+				endedAt !== d.lastSeenAt ||
+				!jsonEqual(d.signal.last, stats) ||
+				d.tuningTrust !== o.tuningTrust
+			)
+				this.touch(d)
+			d.lastSeenAt = endedAt
+			d.signal.last = stats
+			d.tuningTrust = o.tuningTrust
+		}
+		if (stats.snrDb > d.signal.best.snrDb) {
+			d.signal.best = { ...stats }
+			this.touch(d)
+		}
+	}
+
+	/**
+	 * Drops `moved` from the source's sighting. Count and airtime are already
+	 * transferred. Fields the moved observation was not holding stay, including
+	 * a last-seen time a later decode set on its own.
+	 */
+	private releaseSeen(d: Discovery, moved: Observation): void {
+		const list = this.byDiscovery.get(d.id)
+		if (list === undefined || list.length === 0) return
+		const movedEnd = moved.endedAt ?? moved.startedAt
+		const movedStats = signalOf(moved)
+		let first = ""
+		let lastAt = ""
+		let last: Observation | undefined
+		let best: SignalStats | undefined
+		for (const o of list) {
+			if (first === "" || o.startedAt < first) first = o.startedAt
+			const end = o.endedAt ?? o.startedAt
+			if (last === undefined || end >= lastAt) {
+				lastAt = end
+				last = o
+			}
+			const stats = signalOf(o)
+			if (best === undefined || stats.snrDb > best.snrDb) best = stats
+		}
+		if (last === undefined || best === undefined) return
+		if (d.firstSeenAt === moved.startedAt && first !== d.firstSeenAt) {
+			d.firstSeenAt = first
+			this.touch(d)
+		}
+		if (d.lastSeenAt === movedEnd) {
+			const lastStats = signalOf(last)
+			if (
+				d.lastSeenAt !== lastAt ||
+				!jsonEqual(d.signal.last, lastStats) ||
+				d.tuningTrust !== last.tuningTrust
+			) {
+				d.lastSeenAt = lastAt
+				d.signal.last = lastStats
+				d.tuningTrust = last.tuningTrust
+				this.touch(d)
+			}
+		}
+		if (
+			jsonEqual(d.signal.best, movedStats) &&
+			!jsonEqual(d.signal.best, best)
+		) {
+			d.signal.best = best
+			this.touch(d)
+		}
+	}
+
+	/** Newest observation on `d` whose stored decode is this evidence. */
+	private carryingObservation(
+		d: Discovery,
+		ev: DecodeEvidence,
+	): Observation | undefined {
+		let found: Observation | undefined
+		for (const o of this.byDiscovery.get(d.id) ?? []) {
+			for (const row of o.decode ?? []) {
+				if (
+					row.protocol === ev.protocol &&
+					row.at === ev.at &&
+					sameIdentity(row.identity, ev.identity)
+				)
+					found = o
+			}
+		}
+		return found
+	}
+
+	/**
+	 * The observation to move when its own proof, not a sibling's, is the
+	 * family `d` cannot keep. A lone observation stays: its proof is the
+	 * discovery's proof.
+	 */
+	private observationToSplit(
+		d: Discovery,
+		ev: DecodeEvidence,
+	): Observation | undefined {
+		const carry = this.carryingObservation(d, ev)
+		if (carry === undefined) return undefined
+		const obsFamily = this.observationAssessment(carry).label.family
+		const rest = this.establishedFamily(d, carry.id)
+		return familiesIncompatible(obsFamily, rest) ? carry : undefined
+	}
+
+	/**
+	 * Observation to move onto a co-channel twin. A family split moves the
+	 * observation whose own proof this discovery cannot keep. An accepted
+	 * identity that conflicts with the discovery's identity moves too, unless
+	 * that same observation still confirms the discovery.
+	 */
+	private observationToMove(
+		d: Discovery,
+		ev: DecodeEvidence,
+	): Observation | undefined {
+		const split = this.observationToSplit(d, ev)
+		if (split !== undefined) return split
+		if (d.identity === undefined || ev.identity === undefined) return undefined
+		if (sameIdentity(ev.identity, d.identity) && ev.protocol === d.protocol)
+			return undefined
+		const carry = this.carryingObservation(d, ev)
+		if (carry === undefined || this.holdsMatchingIdentity(d, carry))
+			return undefined
+		return carry
+	}
+
+	/**
+	 * Family the rest of `d` already established, ignoring `skipId`. A sibling
+	 * observation's own proof counts, including a decode stored for another
+	 * identity. When no sibling names one, a co-channel decode this discovery
+	 * claims does. Unknown when nothing does, so a lone observation is not split.
+	 */
+	private establishedFamily(d: Discovery, skipId: string): ProtocolFamily {
+		const own: ScannerProof[] = []
+		for (const observation of this.byDiscovery.get(d.id) ?? []) {
+			if (observation.id === skipId) continue
+			const proof = this.observationAssessment(observation).proof
+			if (proof !== null) own.push(proof)
+		}
+		const bestOwn = strongestKnownProof(own)
+		if (bestOwn !== null) return this.labelOfProof(d, bestOwn).family
+		const foreign: ScannerProof[] = []
+		for (const source of this.proofSources(d)) {
+			if (!source.foreign || source.observation.id === skipId) continue
+			const proof = this.observationAssessment(source.observation).proof
+			if (proof !== null && this.proofCounts(d, proof)) foreign.push(proof)
+		}
+		const bestForeign = strongestKnownProof(foreign)
+		if (bestForeign === null) return "unknown"
+		return this.labelOfProof(d, bestForeign).family
+	}
+
+	/**
+	 * A sink proof named a family the rest of the discovery cannot share.
+	 * The observation moves to a linked discovery. Trial rows are not journaled.
+	 * Returns false when nothing moved, so the caller publishes in place.
+	 */
+	private relocateIncompatible(observation: Observation): boolean {
+		const d = this.discoveries.get(observation.discoveryId)
+		if (d === undefined) return false
+		const assessed = this.observationAssessment(observation)
+		if (assessed.proof === null) return false
+		const rest = this.establishedFamily(d, observation.id)
+		if (!familiesIncompatible(assessed.label.family, rest)) return false
+		const family = assessed.label.family
+		const sourceId = d.sourceIds[0] ?? ""
+		const existing = this.atKey(sourceId, d.frequencyKey).find(
+			o =>
+				o.id !== d.id &&
+				this.effectiveLabel(o).family === family &&
+				o.identity === undefined,
+		)
+		if (existing !== undefined) {
+			const op = newOp()
+			this.rehome(op, d, existing, observation)
+			this.settle(op, existing)
+			this.finish("evidence", op)
+			return true
+		}
+		// Same protection as a decode split: do not evict the card being split.
+		if (!this.makeRoom(new Set([d.id]))) return false
+		const from = this.discoveries.get(d.id)
+		if (
+			from === undefined ||
+			this.observationIndex.get(observation.id) === undefined
+		)
+			return false
+		const op = newOp()
+		const twin = this.linkBeside(op, from, UNKNOWN_LABEL, observation.startedAt)
+		this.rehome(op, from, twin, observation)
+		this.invalidateLabel(twin.id)
+		this.invalidateLabel(from.id)
+		this.settle(op, twin)
 		this.finish("evidence", op)
-		return op.changes.get(id) ?? "created"
+		return true
 	}
 
 	/** Records a leak/intermod cap that arrives with a decode, before the decode is applied (§ 6.2, P8). */
@@ -2202,7 +2618,7 @@ export class DiscoveryStore
 			const other = this.atKey(d.sourceIds[0] ?? "", d.frequencyKey).find(
 				o =>
 					o.id !== d.id &&
-					o.family === d.family &&
+					this.effectiveLabel(o).family === this.effectiveLabel(d).family &&
 					sameIdentity(o.identity, d.identity),
 			)
 			if (other === undefined) return d.id
@@ -2343,14 +2759,17 @@ export class DiscoveryStore
 	/**
 	 * Evicts until one more discovery fits (several after `setLimits` lowered the bound); one "evict"
 	 * entry. WG10 req 1.6: the evicted discoveries are reported (`evicted`) after the entry.
+	 * `protect` is the discovery being split and the card that holds the moving
+	 * observation. They are not victims for this call. When nothing else can
+	 * go, the caller keeps the observation where it is.
 	 */
-	private makeRoom(): boolean {
+	private makeRoom(protect?: ReadonlySet<string>): boolean {
 		if (this.discoveries.size < this.maxDiscoveries) return true
 		const op = newOp()
 		let fits = true
 		const evicted: Discovery[] = []
 		while (this.discoveries.size >= this.maxDiscoveries) {
-			const victim = this.evictionVictim()
+			const victim = this.evictionVictim(protect)
 			if (victim === undefined) {
 				fits = false
 				break
@@ -2414,10 +2833,11 @@ export class DiscoveryStore
 	 * Never a stored or shown `decoded` discovery, `keep`, lockout, or a kept
 	 * recording (WG2 R1 #8: evicting a lockout would silently put it back into sweeps).
 	 */
-	private evictionVictim(): Discovery | undefined {
+	private evictionVictim(protect?: ReadonlySet<string>): Discovery | undefined {
 		let victim: Discovery | undefined
 		let victimRank = Number.POSITIVE_INFINITY
 		for (const d of this.discoveries.values()) {
+			if (protect !== undefined && protect.has(d.id)) continue
 			if (this.holdsKept(d.id)) continue
 			const next = this.evictionRank(d)
 			if (next === undefined) continue
@@ -2660,6 +3080,7 @@ export class DiscoveryStore
 		if (observation !== undefined) {
 			this.invalidateLabel(observation.discoveryId)
 			this.dropWatcherCaches(observation.discoveryId)
+			this.refreshProofBearing(observation.discoveryId)
 		}
 	}
 
@@ -2668,6 +3089,8 @@ export class DiscoveryStore
 		if (bag === undefined) {
 			bag = { trials: [], analog: [], unavailable: [] }
 			this.evidenceByObservation.set(observationId, bag)
+			const discoveryId = this.observationIndex.get(observationId)?.discoveryId
+			if (discoveryId !== undefined) this.proofBearing.add(discoveryId)
 		}
 		return bag
 	}
@@ -2793,6 +3216,7 @@ export class DiscoveryStore
 		this.observationProofCache.delete(observationId)
 		this.invalidateLabel(discovery.id)
 		this.dropWatcherCaches(discovery.id)
+		if (this.relocateIncompatible(observation)) return true
 		const after = this.discoveryView(discovery).proof
 		this.emitProofChange(discovery.id, before, after)
 		this.flushPending(new Set([discovery.id]))
@@ -3018,26 +3442,54 @@ export class DiscoveryStore
 	/**
 	 * True when a retained decode or sink bag can produce a proof, including a
 	 * co-channel observation. The stored protocol is then not the DTO protocol.
+	 * `proofBearing` is that fact for the discovery's own observations.
 	 */
 	private evidenceCanNameProof(d: Discovery): boolean {
-		const carries = (id: string): boolean => {
-			for (const observation of this.byDiscovery.get(id) ?? []) {
-				if ((observation.decode?.length ?? 0) > 0) return true
-				if (this.evidenceByObservation.has(observation.id)) return true
-			}
-			return false
-		}
-		if (carries(d.id)) return true
+		if (this.proofBearing.has(d.id)) return true
 		if (!Array.isArray(d.coChannel)) return false
 		for (const partnerId of d.coChannel) {
-			if (partnerId !== d.id && carries(partnerId)) return true
+			if (partnerId !== d.id && this.proofBearing.has(partnerId)) return true
 		}
 		return false
+	}
+
+	private carriesProofInput(observation: Observation): boolean {
+		return (
+			(observation.decode?.length ?? 0) > 0 ||
+			this.evidenceByObservation.has(observation.id)
+		)
+	}
+
+	/** Drops the id when none of its current observations can name a proof. */
+	private refreshProofBearing(discoveryId: string): void {
+		const list = this.byDiscovery.get(discoveryId)
+		if (list !== undefined) {
+			for (const observation of list) {
+				if (!this.carriesProofInput(observation)) continue
+				this.proofBearing.add(discoveryId)
+				return
+			}
+		}
+		this.proofBearing.delete(discoveryId)
 	}
 
 	private discoveryView(d: Discovery): DiscoveryProofView {
 		const hit = this.proofCache.get(d.id)
 		if (hit !== undefined) return hit
+		// No sink or decode input: the stored record is the label.
+		if (!this.evidenceCanNameProof(d)) {
+			const view: DiscoveryProofView = {
+				proof: null,
+				evidence: "weak",
+				label: {
+					protocol: d.protocol,
+					family: d.family,
+					confidence: d.confidence,
+				},
+			}
+			this.proofCache.set(d.id, view)
+			return view
+		}
 		const proof = this.deriveDiscovery(d)
 		const evidence = this.proofLevel(proof)
 		const label =
@@ -3138,6 +3590,7 @@ export class DiscoveryStore
 			this.removal.observations.push(o.id)
 		}
 		this.byDiscovery.delete(id)
+		this.proofBearing.delete(id)
 		this.invalidateLabel(id)
 		this.clearProofWatch(id)
 		this.medians.delete(id)
@@ -3161,17 +3614,137 @@ export class DiscoveryStore
 			i--
 		}
 		list.splice(i, 0, o)
+		this.trimObservations(list)
+		this.observationProofCache.delete(o.id)
+		// Trim may have dropped `o` itself. Bearing follows only what is still stored.
+		if (this.observationIndex.has(o.id) && this.carriesProofInput(o))
+			this.proofBearing.add(o.discoveryId)
+		// An observation with no decode or sink bag cannot change a proof, here
+		// or on a co-channel partner. A trimmed row that held one already
+		// dropped the caches through `forgetEvidence`.
+		if (this.carriesProofInput(o)) this.bumpProof(o.discoveryId)
+		this.medians.delete(o.discoveryId)
+		this.markDirty(o.discoveryId)
+	}
+
+	/**
+	 * Keeps the window at exactly 256. Pinned rows stay and the oldest
+	 * unpinned row goes, so a decoded proof cannot age out of the window.
+	 *
+	 * Pins are the discovery's own identity anchor plus at most one newest
+	 * proof source per linked co-channel discovery. The link list is capped
+	 * at LINKS_MAX, so the pin set is at most 1 + LINKS_MAX = 65. The window
+	 * is 256, which leaves 256 - 65 = 191 rows that can still be evicted, and
+	 * trim can always return the list to 256.
+	 */
+	private trimObservations(list: Observation[]): void {
+		if (list.length <= OBSERVATIONS_PER_DISCOVERY) return
+		const pinned = this.pinnedIndexes(list)
 		while (list.length > OBSERVATIONS_PER_DISCOVERY) {
-			const dropped = list.shift()
-			if (dropped === undefined) continue
-			this.forgetEvidence(dropped.id)
+			let dropAt = -1
+			for (let i = 0; i < list.length; i++) {
+				if (!pinned.has(i)) {
+					dropAt = i
+					break
+				}
+			}
+			// 65 pins cannot cover a 256-row window. Stop rather than drop a pin.
+			if (dropAt < 0) break
+			const dropped = list[dropAt]
+			if (dropped === undefined) break
+			list.splice(dropAt, 1)
+			const next = new Set<number>()
+			for (const index of pinned) {
+				if (index === dropAt) continue
+				next.add(index > dropAt ? index - 1 : index)
+			}
+			pinned.clear()
+			for (const index of next) pinned.add(index)
+			if (this.carriesProofInput(dropped)) this.forgetEvidence(dropped.id)
+			else this.observationProofCache.delete(dropped.id)
 			this.observationIndex.delete(dropped.id)
 			this.removal.observations.push(dropped.id) // no journal entry names it (WG11 req 3.5)
 		}
-		this.observationProofCache.delete(o.id)
-		this.bumpProof(o.discoveryId)
-		this.medians.delete(o.discoveryId)
-		this.markDirty(o.discoveryId)
+	}
+
+	/** Indexes that trim must keep: own identity, then linked proof sources. */
+	private pinnedIndexes(list: readonly Observation[]): Set<number> {
+		const pinned = new Set<number>()
+		const anchor = this.identityAnchor(list)
+		if (anchor >= 0) pinned.add(anchor)
+		const discoveryId = list[0]?.discoveryId
+		if (discoveryId === undefined) return pinned
+		const d = this.discoveries.get(discoveryId)
+		const links = d === undefined ? undefined : d.coChannel
+		if (!Array.isArray(links) || links.length === 0) return pinned
+		const cap = Math.min(links.length, LINKS_MAX)
+		for (let n = 0; n < cap; n++) {
+			const partnerId = links[n]
+			if (partnerId === undefined || partnerId === d?.id) continue
+			const partner = this.discoveries.get(partnerId)
+			if (partner === undefined) continue
+			const index = this.linkedProofPin(list, partner)
+			if (index >= 0) pinned.add(index)
+		}
+		return pinned
+	}
+
+	/**
+	 * Index of the newest observation on `list` that proves `partner`, when
+	 * that observation is newer than any proof `partner` holds itself.
+	 */
+	private linkedProofPin(
+		list: readonly Observation[],
+		partner: Discovery,
+	): number {
+		let ownNewest: Observation | undefined
+		const own = this.byDiscovery.get(partner.id)
+		if (own !== undefined) {
+			for (let i = own.length - 1; i >= 0; i--) {
+				const o = own[i]
+				if (o === undefined || !this.carriesProofInput(o)) continue
+				// Only a persisted decoded proof counts here: memory-only sink rows would
+				// make live and journal replay pin different observations.
+				if (this.filteredProof(partner, o, true) === null) continue
+				ownNewest = o
+				break
+			}
+		}
+		for (let i = list.length - 1; i >= 0; i--) {
+			const o = list[i]
+			if (o === undefined) continue
+			if (ownNewest !== undefined && compareObs(o, ownNewest) <= 0) return -1
+			if (!this.carriesProofInput(o)) continue
+			if (this.attributedProof(partner, o, true) === null) continue
+			return i
+		}
+		return -1
+	}
+
+	/** Index of the newest observation whose decode confirms `d`'s identity, or -1. */
+	private identityAnchor(list: readonly Observation[]): number {
+		const discoveryId = list[0]?.discoveryId
+		if (discoveryId === undefined) return -1
+		const d = this.discoveries.get(discoveryId)
+		if (d?.identity === undefined) return -1
+		for (let i = list.length - 1; i >= 0; i--) {
+			const o = list[i]
+			if (o !== undefined && this.holdsMatchingIdentity(d, o)) return i
+		}
+		return -1
+	}
+
+	private holdsMatchingIdentity(d: Discovery, o: Observation): boolean {
+		const identity = d.identity
+		if (identity === undefined) return false
+		for (const ev of o.decode ?? []) {
+			if (ev.crcClean !== true || ev.identity === undefined) continue
+			if (ev.protocol !== d.protocol) continue
+			if (!sameIdentity(ev.identity, identity)) continue
+			if (!identityFitsProtocol(ev.protocol, ev.identity)) continue
+			return true
+		}
+		return false
 	}
 
 	private unlinkObservation(o: Observation): void {
@@ -3185,6 +3758,7 @@ export class DiscoveryStore
 		this.observationProofCache.delete(o.id)
 		this.invalidateLabel(o.discoveryId)
 		this.dropWatcherCaches(o.discoveryId)
+		this.refreshProofBearing(o.discoveryId)
 		this.medians.delete(o.discoveryId)
 		this.markDirty(o.discoveryId)
 	}
@@ -3306,12 +3880,12 @@ export class DiscoveryStore
 				.filter((d): d is Discovery => d !== undefined)
 				.sort((a, b) => compareText(a.id, b.id)),
 		)
-		const observations = plainCopy(
-			[...op.observations]
-				.map(id => this.observationIndex.get(id))
-				.filter((o): o is Observation => o !== undefined)
-				.sort(compareObs),
-		)
+		const indexed = [...op.observations]
+			.map(id => this.observationIndex.get(id))
+			.filter((o): o is Observation => o !== undefined)
+		const seen = new Set(indexed.map(o => o.id))
+		const moved = op.trimmedMoves.filter(o => !seen.has(o.id))
+		const observations = plainCopy([...indexed, ...moved].sort(compareObs))
 		const removed = op.removedObservations.filter(
 			id => !this.observationIndex.has(id),
 		)
@@ -3405,6 +3979,8 @@ export class DiscoveryStore
 	private invalidateLabel(id: string): void {
 		this.proofCache.delete(id)
 		this.countsDirty.add(id)
+		// The centre list is keyed by the effective family, so a new label moves it.
+		this.indexDirty.add(id)
 	}
 
 	private syncCounts(): void {
@@ -3438,9 +4014,15 @@ export class DiscoveryStore
 			return
 		}
 		const centre = this.medianCentre(d)
+		const named = this.evidenceCanNameProof(d)
+		const family = named ? this.effectiveLabel(d).family : d.family
+		const decoded = named
+			? this.effectiveLabel(d).confidence === "decoded"
+			: d.confidence === "decoded"
 		if (
 			prev !== undefined &&
-			prev.family === d.family &&
+			prev.family === family &&
+			prev.decoded === decoded &&
 			Object.is(prev.centre, centre) &&
 			Object.is(prev.frequencyHz, d.frequencyHz) &&
 			prev.key === d.frequencyKey &&
@@ -3450,7 +4032,8 @@ export class DiscoveryStore
 			return
 		if (prev !== undefined) this.unindex(id, prev)
 		const next: IndexedDiscovery = {
-			family: d.family,
+			family,
+			decoded,
 			centre,
 			frequencyHz: d.frequencyHz,
 			key: d.frequencyKey,
@@ -3458,6 +4041,8 @@ export class DiscoveryStore
 		}
 		for (const s of next.sources) {
 			this.centres.add(s, next.family, centre, id)
+			if (next.decoded)
+				this.decodedCentres.add(s, DECODED_CENTRE_FAMILY, centre, id)
 			const k = `${s}\u0000${next.key}`
 			let set = this.byKey.get(k)
 			if (set === undefined) {
@@ -3473,6 +4058,8 @@ export class DiscoveryStore
 	private unindex(id: string, prev: IndexedDiscovery): void {
 		for (const s of prev.sources) {
 			this.centres.remove(s, prev.family, prev.centre, id)
+			if (prev.decoded)
+				this.decodedCentres.remove(s, DECODED_CENTRE_FAMILY, prev.centre, id)
 			const k = `${s}\u0000${prev.key}`
 			const set = this.byKey.get(k)
 			set?.delete(id)

@@ -237,9 +237,10 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 		const id =
 			store.ingest(dmrObs("o1", CH, T0, { open: true, jobIds: ["job-1"] }))
 				.discoveryId ?? ""
-		expect(store.ingest(dmrObs("o1", CH, T0, { jobIds: [] })).change).toBe(
-			"transient",
-		)
+		// A placed observation re-ingests without a passed gate; its credits stay.
+		const again = store.ingest(dmrObs("o1", CH, T0, { jobIds: [] }))
+		expect(again.change).not.toBe("transient")
+		expect(again.discoveryId).toBe(id)
 		expect(store.discoveryIdOf("o1")).toBe(id)
 		expect(store.observations(id, null, 10).items[0]?.jobIds).toEqual(["job-1"])
 	})

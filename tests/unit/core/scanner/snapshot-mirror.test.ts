@@ -2,7 +2,16 @@
  * WG11 req 3.5/3.6: the snapshot mirror builds the text today's writeSnapshot builds.
  * Seeded op sequences, fixed clocks, sha256 of discoveries.json. Seed 1 is the empty store.
  * Seeds 2-6 were refreshed when protocol and confidence stopped following hypotheses and a
- * discovery required a passed gate (requirements 2.5, 3.1, 3.2). This file has no record flag.
+ * discovery required a passed gate (requirements 2.5, 3.1, 3.2). Seeds 3-5 were refreshed
+ * again when association and splitting started to follow the evidence-established family.
+ * Association: an evidence-less observation can sticky-match a decoded discovery. Split: an
+ * identity decode whose family cannot share a proof-established family (DMR beside a
+ * CTCSS-proven analog card) goes to a linked co-channel discovery, and an identity decode
+ * that conflicts with the discovery's identity moves its observation to the matching twin.
+ * A family stored only from an identity-less decode does not split. Each of seeds 3-5
+ * first diverges on an observation entry (a sticky join: entries 329, 492 and 358), and
+ * the split rules change later entries. Seeds 1, 2 and 6 did not change. This file has no
+ * record flag.
  */
 import { createHash } from "node:crypto"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
@@ -56,24 +65,24 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		400,
 		40,
 		false,
-		40333,
-		"11bfb1515079b103d83ec2905f0189e68acb8c83dc7eb691fbc64bd94b7299c4",
+		38639,
+		"80cbd879621005f655bdaf7bb38eaba4e987f6f6d4b4d46b68f1b626556b669b",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		44213,
-		"c58848be03362177513ad5d2004185fe745c0640e98f2dc1d69e8ce1a1fb88de",
+		62239,
+		"a685e257d2642314ec49b38946b367efe76766f54aa767293d6840a4c7875235",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		64205,
-		"4beda4cebe5c911b8df01f425212bb32c93df2ab34434dd61d9df85efc89cd38",
+		70343,
+		"529cc556c1d68254a8e57efb2c0c1e1c43e18889887babac80d38dc634cf1e4f",
 	],
 	[
 		6,

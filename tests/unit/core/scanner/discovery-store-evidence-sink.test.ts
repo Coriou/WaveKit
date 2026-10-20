@@ -270,7 +270,7 @@ describe("DiscoveryStore evidence sink", () => {
 			store.get(store.discoveryIdOf(obs) ?? "")?.proof?.unavailable,
 		).toEqual(["direwolf", "dsd-fme", "multimon-ng", "rtl433"])
 		expect(store.get(store.discoveryIdOf(obs) ?? "")?.proof?.summary).toBe(
-			"Digital, not decoded (direwolf, dsd-fme, multimon-ng, rtl433 unavailable)",
+			"Digital, not decoded (no decoder available)",
 		)
 	})
 
@@ -671,8 +671,23 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(missing.store.recordUnavailable(missing.obs, "dsd-fme")).toBe(true)
 		expect(missing.store.recordAnalog(missing.obs, dataLike())).toBe(true)
 		expect(missing.store.get(missing.id)?.proof?.kind).toBe("digital-undecoded")
+		// Nothing was tried and the planned decoder is unavailable: the none-tried
+		// sentence; the missing decoder stays listed in proof.unavailable.
 		expect(missing.store.get(missing.id)?.proof?.summary).toBe(
-			"Digital, not decoded (dsd-fme unavailable)",
+			"Digital, not decoded (no decoder available)",
+		)
+		expect(missing.store.get(missing.id)?.proof?.unavailable).toEqual([
+			"dsd-fme",
+		])
+
+		const both = planted()
+		expect(
+			both.store.recordTrial(both.obs, trial("dmr", 1, "unsupported")),
+		).toBe(true)
+		expect(both.store.recordUnavailable(both.obs, "dsd-fme")).toBe(true)
+		expect(both.store.recordAnalog(both.obs, dataLike())).toBe(true)
+		expect(both.store.get(both.id)?.proof?.summary).toBe(
+			"Digital, not decoded (no decoder available)",
 		)
 	})
 
@@ -829,17 +844,11 @@ describe("DiscoveryStore evidence sink", () => {
 		expect(snap?.proof).toBeUndefined()
 	})
 
-	it("shows the analog-voice proof after a decoded observation is trimmed", () => {
+	it("keeps a decoded discovery proven after later observations fill the window", () => {
 		const { store, id, obs } = planted()
-		expect(
-			store.appendObservationEvidence(
-				obs,
-				evidence("dmr", T0 + 1, { identity: dmrCc(1) }),
-			),
-		).toBe(true)
-		expect(
-			store.applyEvidence(id, evidence("dmr", T0 + 1, { identity: dmrCc(1) })),
-		).toBe("upgraded")
+		const decoded = evidence("dmr", T0 + 1, { identity: dmrCc(1) })
+		expect(store.appendObservationEvidence(obs, decoded)).toBe(true)
+		expect(store.applyEvidence(id, decoded)).toBe("upgraded")
 		expect(store.get(id)?.protocol).toBe("dmr")
 		expect(store.get(id)?.confidence).toBe("decoded")
 		for (let i = 1; i <= OBSERVATIONS_PER_DISCOVERY; i++) {
@@ -851,23 +860,70 @@ describe("DiscoveryStore evidence sink", () => {
 				}),
 			)
 		}
-		expect(store.discoveryIdOf(obs)).toBeUndefined()
-		expect(store.recordAnalog("n1", heard(T0 + 1))).toBe(true)
+		expect(store.discoveryIdOf(obs)).toBe(id)
+		expect(store.recordCounts().observations).toBe(OBSERVATIONS_PER_DISCOVERY)
+		const newest = `n${OBSERVATIONS_PER_DISCOVERY}`
+		expect(
+			store.recordAnalog(newest, carrierOnly(T0 + OBSERVATIONS_PER_DISCOVERY)),
+		).toBe(true)
+		expect(
+			store.recordAnalog(newest, heard(T0 + OBSERVATIONS_PER_DISCOVERY + 1)),
+		).toBe(true)
 		const dto = store.get(id)
-		expect(dto?.protocol).toBe("analog-fm")
-		expect(dto?.family).toBe("analog")
-		expect(dto?.confidence).toBe("candidate")
+		expect(dto?.protocol).toBe("dmr")
+		expect(dto?.family).toBe("digital-voice")
+		expect(dto?.confidence).toBe("decoded")
 		expect(dto?.evidenceLevel).toBe("proven")
-		expect(dto?.proof?.kind).toBe("analog-voice")
-		expect(dto?.proof?.summary).toBe("Analog FM voice")
-		expect(store.list({ protocol: "analog-fm" }).items.map(d => d.id)).toEqual([
+		expect(dto?.proof?.kind).toBe("decoded")
+		expect(dto?.proof?.summary).toBe("DMR decoded (CC1)")
+		expect(dto?.identity).toEqual(dmrCc(1))
+		expect(store.list({ evidence: "proven" }).items.map(d => d.id)).toContain(
 			id,
-		])
-		expect(store.list({ protocol: "dmr" }).items).toEqual([])
+		)
+		expect(store.list({ protocol: "dmr" }).items.map(d => d.id)).toContain(id)
 		const snap = store.snapshot().discoveries.find(d => d.id === id)
 		expect(snap?.protocol).toBe("dmr")
 		expect(snap?.confidence).toBe("decoded")
 		expect(snap?.proof).toBeUndefined()
+	})
+
+	it("pins the accepted identity decode at the observation window and past it", () => {
+		const { store, id, obs } = planted()
+		const decoded = evidence("dmr", T0 + 1, { identity: dmrCc(1) })
+		expect(store.appendObservationEvidence(obs, decoded)).toBe(true)
+		expect(store.applyEvidence(id, decoded)).toBe("upgraded")
+		const ingest = (n: number): void => {
+			store.ingest(
+				makeObs({
+					id: `n${n}`,
+					centreHz: CH,
+					startedAt: T0 + n,
+				}),
+			)
+		}
+		for (let i = 1; i < OBSERVATIONS_PER_DISCOVERY; i++) ingest(i)
+		expect(store.recordCounts().observations).toBe(OBSERVATIONS_PER_DISCOVERY)
+		expect(store.discoveryIdOf(obs)).toBe(id)
+		expect(store.get(id)?.confidence).toBe("decoded")
+		expect(store.get(id)?.evidenceLevel).toBe("proven")
+
+		ingest(OBSERVATIONS_PER_DISCOVERY)
+		expect(store.recordCounts().observations).toBe(OBSERVATIONS_PER_DISCOVERY)
+		expect(store.discoveryIdOf(obs)).toBe(id)
+		expect(store.discoveryIdOf("n1")).toBeUndefined()
+		expect(store.get(id)?.proof?.kind).toBe("decoded")
+		expect(store.get(id)?.evidenceLevel).toBe("proven")
+
+		for (let i = OBSERVATIONS_PER_DISCOVERY + 1; i < 600; i++) ingest(i)
+		expect(store.recordCounts().observations).toBe(OBSERVATIONS_PER_DISCOVERY)
+		expect(store.discoveryIdOf(obs)).toBe(id)
+		expect(store.get(id)?.protocol).toBe("dmr")
+		expect(store.get(id)?.confidence).toBe("decoded")
+		expect(store.get(id)?.evidenceLevel).toBe("proven")
+		expect(store.get(id)?.proof?.summary).toBe("DMR decoded (CC1)")
+		expect(store.list({ evidence: "proven" }).items.map(d => d.id)).toEqual([
+			id,
+		])
 	})
 
 	it("attributes a newer co-channel decode to the discovery that stores its identity", () => {
@@ -1162,7 +1218,7 @@ describe("co-channel proof invalidation", () => {
 		expect(again.store.get(twinId)?.proof).toBeUndefined()
 	})
 
-	it("drops the twin proof when the source observation is trimmed", () => {
+	it("keeps the twin proof when the owner window would trim its only source", () => {
 		const { store, entries } = newStore({ rasters: PMR })
 		const ownerId =
 			store.ingest(makeObs({ id: "o1", centreHz: CH, startedAt: T0 }))
@@ -1200,10 +1256,11 @@ describe("co-channel proof invalidation", () => {
 		expect(store.appendObservationEvidence("extra", later)).toBe(true)
 		expect(store.applyEvidence(otherId, later)).toBe("upgraded")
 		expect(store.rekey("src-1", 3_000).merged.length).toBeGreaterThan(0)
-		expect(store.discoveryIdOf("o1")).toBeUndefined()
-		expect(store.get(twinId)?.evidenceLevel).toBe("weak")
-		expect(store.get(twinId)?.proof).toBeUndefined()
-		expect(seen).toEqual(["updated:weak"])
+		// o1 is the newest proof source of the linked twin, so the trim pins it.
+		expect(store.discoveryIdOf("o1")).toBe(ownerId)
+		expect(store.get(twinId)?.evidenceLevel).toBe("proven")
+		expect(store.get(twinId)?.proof?.observationId).toBe("o1")
+		expect(seen).toEqual([])
 		for (const entry of entries)
 			expect(JSON.stringify(entry.payload)).not.toContain('"proof"')
 	})
