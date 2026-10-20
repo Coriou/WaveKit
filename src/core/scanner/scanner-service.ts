@@ -2459,6 +2459,12 @@ export class ScannerService extends EventEmitter {
 			this.live.set(track.trackId, live)
 			this.emitActivity(live, track, true)
 		}
+		if (
+			track.gate === "passed" &&
+			live.epoch === track.epoch &&
+			live.gatePassedAt === undefined
+		)
+			live.gatePassedAt = now
 		for (const d of covering)
 			if (!live.jobIds.includes(d.record.id)) live.jobIds.push(d.record.id)
 		// After the job ids: the capture-enabled covering job decides (Task 34a).
@@ -4914,8 +4920,7 @@ export class ScannerService extends EventEmitter {
 	 * transmission that opened with this job. Within that set the nearest centre
 	 * wins, and a distance tie breaks toward the smaller track id. At most 256
 	 * open tracks of this source are scanned. `startSample` is the gate-passed
-	 * sample. `atMs` is that sample on the observation's clock when the track's
-	 * epoch is the engine's and the rate is known, otherwise the observation's start.
+	 * sample. `atMs` is the wall-clock receipt of the first gate pass.
 	 */
 	private gatedTransmission(
 		sourceId: string,
@@ -4929,9 +4934,6 @@ export class ScannerService extends EventEmitter {
 			toleranceHz < 0
 		)
 			return null
-		const epoch = this.spectrum.engine(sourceId)?.currentEpoch()
-		const rate =
-			epoch !== undefined && epoch.sampleRateHz > 0 ? epoch.sampleRateHz : 0
 		let scanned = 0
 		const jobStart = Number.isFinite(jobStartedMs) ? jobStartedMs : null
 		let best: {
@@ -4954,15 +4956,8 @@ export class ScannerService extends EventEmitter {
 			if (!Number.isFinite(track.centreHz)) continue
 			const distance = Math.abs(track.centreHz - hz)
 			if (distance > toleranceHz) continue
-			let atMs = live.startedAt
-			if (
-				rate > 0 &&
-				epoch !== undefined &&
-				track.epoch === epoch.epoch &&
-				Number.isFinite(track.startSample) &&
-				sample >= track.startSample
-			)
-				atMs = live.startedAt + ((sample - track.startSample) / rate) * 1000
+			const atMs = live.gatePassedAt
+			if (atMs === undefined || live.epoch !== track.epoch) continue
 			if (!Number.isFinite(atMs)) continue
 			const fresh = jobStart !== null && atMs >= jobStart
 			const nearer =

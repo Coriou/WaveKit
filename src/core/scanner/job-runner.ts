@@ -97,6 +97,8 @@ export interface LiveObservation {
 	jobIds: string[]
 	discoveryId: string | null
 	startedAt: number
+	/** Wall-clock receipt of the first gate pass for this track and epoch. */
+	gatePassedAt?: number
 	endedAt?: number
 	endReason?: ObservationEndReason
 	classification: Classification
