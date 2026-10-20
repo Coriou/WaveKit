@@ -402,5 +402,5 @@ an older nearest track cannot hide a newer eligible one. The trial timeout start
 at the transmission start. No signal ends honestly with `ended: "no-signal"`.
 Progress reports settling, holding, trialing, replaying, capturing or watching,
 with the current hold/trial and replay queue depth; see [API details](API.md#scanner-evidence-and-activity-wg12).
-Capture remains off by default pending live acceptance; legacy mode additionally
-requires `scanner.iqCapture.allowLegacy: true`.
+Capture remains off by default pending live acceptance, and runs only in protected
+access mode (`scanner.iqCapture.allowLegacy` is reserved for legacy mode later).

@@ -6531,8 +6531,9 @@ without decoded tone), `data-like` and `carrier-only`, alongside `pending`,
 Missing decoder programs report `unsupported` with `reason: "decoder-unavailable"`,
 never a failed synchronization, and appear in `proof.unavailable`.
 
-`scanner.iqCapture.allowLegacy` defaults to false: legacy access mode needs this
-explicit permission as well as `enabled: true`. Capture remains off by default
+`scanner.iqCapture.allowLegacy` (default false) is reserved: today IQ capture runs
+only in protected access mode, whatever this flag says. It is meant to permit capture
+in legacy mode once capture is turned on by default. Capture remains off by default
 pending live acceptance. Trial, analog and unavailable evidence is currently
 in memory; persisted decode evidence can rebuild decoded proofs after restart.
 
