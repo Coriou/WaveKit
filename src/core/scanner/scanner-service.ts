@@ -331,6 +331,7 @@ export type ScannerIqCapture = IqCapturePort & {
 		reason: IqCaptureDiscardReason,
 		holder?: string,
 	): boolean
+	counters?(): NonNullable<ScannerStatus["iqCapture"]>
 	setShapes(shapes: IqReplayShapes): void
 	flush(
 		sourceId: string,
@@ -1411,6 +1412,7 @@ export class ScannerService extends EventEmitter {
 	// === status and settings ===
 
 	status(): ScannerStatus {
+		const captureCounters = this.deps.iqCapture?.counters?.()
 		const s = this.settings()
 		const probes = this.probes.status()
 		const spectrum = this.spectrum.status().sources
@@ -1421,6 +1423,14 @@ export class ScannerService extends EventEmitter {
 			),
 		)
 		return {
+			...(captureCounters
+				? {
+						iqCapture: {
+							toolFailures: captureCounters.toolFailures,
+							lastToolFailure: captureCounters.lastToolFailure,
+						},
+					}
+				: {}),
 			enabled: s.enabled,
 			channelizerAvailable: false,
 			engines,

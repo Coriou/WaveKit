@@ -2,15 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
 	IQ_TOOL_MAX_QUEUED_BYTES,
 	IQ_TOOL_READY_TIMEOUT_MS,
+	IQ_TOOL_STDERR_MAX_BYTES,
 	IqToolProcess,
 	realTimers,
+	type IqToolTimers,
 } from "../../../../src/core/iq-capture/process.js"
 import type { IqToolEvent } from "../../../../src/core/iq-capture/protocol.js"
 import { fakeSpawner, flush, type FakeChild } from "./helpers.js"
 
 const ID = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
-function make(drainStdin = true) {
+function make(drainStdin = true, timers: IqToolTimers = realTimers) {
 	const sp = fakeSpawner({ drainStdin })
 	const proc = new IqToolProcess({
 		binaryPath: "/opt/wavekit-iqcap",
@@ -22,7 +24,7 @@ function make(drainStdin = true) {
 		bandwidthHz: 12_500,
 		spawn: sp.spawn,
 		env: {},
-		timers: realTimers,
+		timers,
 	})
 	const events: IqToolEvent[] = []
 	proc.on("event", (e: IqToolEvent) => events.push(e))
@@ -155,6 +157,107 @@ describe("IqToolProcess", () => {
 		expect(proc.ready).toBe(false)
 	})
 
+	it.each([IQ_TOOL_STDERR_MAX_BYTES, IQ_TOOL_STDERR_MAX_BYTES + 1])(
+		"bounds stderr inspection at %i bytes and never exposes native text",
+		async length => {
+			const { proc, child } = make()
+			child.stderr.write(Buffer.alloc(length, 120))
+			child.stderr.write("control fd 3 is not open; private text")
+			await flush()
+			child.exit(2)
+			expect(proc.lastFailure).toEqual({
+				exitCode: 2,
+				signal: null,
+				phase: "exit-before-ready",
+				reason: "other",
+			})
+		},
+	)
+
+	it.each([
+		[
+			"sample rate must be within 96000..=20000000 Hz with a small rational ratio to 48 kHz",
+			"sample-rate",
+		],
+		["--bandwidth: must be positive", "bandwidth"],
+		["bandwidth must be within 1000..=47500 Hz", "bandwidth"],
+		["out-dir must be below the anchor", "out-dir"],
+		["out-dir chain must be real directories (no symlink)", "out-dir"],
+		["out-dir must be a plain path below the anchor", "out-dir"],
+		["out-dir must be absolute", "out-dir"],
+		["anchor must be absolute", "anchor"],
+		["ring-ms must be within 1..=2000", "usage"],
+		["max-ms must be within 500..=4000", "usage"],
+		["unknown command", "usage"],
+		["unknown flag", "usage"],
+		["control fd 3 is not open", "control-fd"],
+		["stdin read failed", "other"],
+		["control read failed", "other"],
+		["design rate mismatch", "other"],
+		...[
+			"sample-rate",
+			"ring-ms",
+			"out-dir",
+			"max-ms",
+			"bandwidth",
+			"anchor",
+		].flatMap(flag =>
+			["needs a value", "given twice", "is required"].map(message => [
+				`--${flag} ${message}`,
+				flag === "ring-ms" || flag === "max-ms" ? "usage" : flag,
+			]),
+		),
+		...["sample-rate", "ring-ms", "max-ms", "bandwidth"].map(flag => [
+			`--${flag}: not a number`,
+			flag === "ring-ms" || flag === "max-ms" ? "usage" : flag,
+		]),
+	])("classifies native diagnostic %s as %s", async (diagnostic, reason) => {
+		const { proc, child } = make()
+		child.stderr.write(
+			`wavekit-iqcap: ${diagnostic}\nusage: wavekit-iqcap --version | run --sample-rate <hz> --bandwidth <hz> --anchor <abs dir above out-dir>`,
+		)
+		await flush()
+		child.exit(2)
+		expect(proc.lastFailure?.reason).toBe(reason)
+	})
+
+	it("clears injected readiness timer on intentional stop before ready", async () => {
+		const callbacks = new Map<unknown, () => void>()
+		const timers: IqToolTimers = {
+			setTimeout: (fn, ms) => {
+				callbacks.set(ms, fn)
+				return ms
+			},
+			clearTimeout: handle => {
+				callbacks.delete(handle)
+			},
+		}
+		const { proc, child } = make(true, timers)
+		child.autoExit = false
+		const exits: boolean[] = []
+		proc.on("exit", (failed: boolean) => exits.push(failed))
+		const stopped = proc.stop()
+		expect(callbacks.has(IQ_TOOL_READY_TIMEOUT_MS)).toBe(false)
+		// A delayed close after the original readiness deadline remains intentional.
+		callbacks.get(IQ_TOOL_READY_TIMEOUT_MS)?.()
+		child.exit(null, "SIGKILL")
+		await stopped
+		expect(exits).toEqual([false])
+		expect(proc.lastFailure).toBeNull()
+	})
+
+	it("records a signal after readiness", async () => {
+		const { proc, child } = make()
+		await ready(child)
+		child.exit(null, "SIGTERM")
+		expect(proc.lastFailure).toEqual({
+			exitCode: null,
+			signal: "SIGTERM",
+			phase: "exit-after-ready",
+			reason: "other",
+		})
+	})
+
 	it("reports ENOENT", async () => {
 		const sp = fakeSpawner({ enoent: true })
 		const proc = new IqToolProcess({
@@ -176,6 +279,7 @@ describe("IqToolProcess", () => {
 		proc.start()
 		await flush()
 		expect(exits).toEqual([[true, "ENOENT"]])
+		expect(proc.lastFailure?.phase).toBe("spawn-error")
 	})
 })
 
@@ -191,5 +295,6 @@ describe("IqToolProcess ready timeout", () => {
 		expect(child.commands()).toEqual([{ type: "shutdown" }])
 		child.exit(0)
 		expect(exits).toEqual([true])
+		expect(proc.lastFailure?.phase).toBe("ready-timeout")
 	})
 })

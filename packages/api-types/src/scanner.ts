@@ -755,7 +755,29 @@ export interface ScannerEngineStatus {
 	frequencyError: { hz: number; ppm: number; discoveries: number } | null
 	lastError?: string
 }
+export interface ScannerIqCaptureStatus {
+	toolFailures: number
+	lastToolFailure: {
+		exitCode: number | null
+		signal: string | null
+		phase:
+			| "spawn-error"
+			| "ready-timeout"
+			| "exit-before-ready"
+			| "exit-after-ready"
+		reason:
+			| "usage"
+			| "sample-rate"
+			| "bandwidth"
+			| "anchor"
+			| "out-dir"
+			| "control-fd"
+			| "other"
+	} | null
+}
+
 export interface ScannerStatus {
+	iqCapture?: ScannerIqCaptureStatus | undefined
 	enabled: boolean
 	channelizerAvailable: boolean
 	engines: ScannerEngineStatus[]

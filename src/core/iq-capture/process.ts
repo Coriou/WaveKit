@@ -27,6 +27,25 @@ export const IQ_TOOL_MAX_QUEUED_BYTES = 1024 * 1024
 export const IQ_TOOL_READY_TIMEOUT_MS = 5_000
 export const IQ_TOOL_STOP_TIMEOUT_MS = 2_000
 export const IQ_TOOL_KILL_AFTER_MS = 3_000
+/** Inspect at most 4 KiB per spawn; all subsequent stderr bytes are drained only. */
+export const IQ_TOOL_STDERR_MAX_BYTES = 4 * 1024
+export interface IqToolFailure {
+	exitCode: number | null
+	signal: NodeJS.Signals | null
+	phase:
+		| "spawn-error"
+		| "ready-timeout"
+		| "exit-before-ready"
+		| "exit-after-ready"
+	reason:
+		| "usage"
+		| "sample-rate"
+		| "bandwidth"
+		| "anchor"
+		| "out-dir"
+		| "control-fd"
+		| "other"
+}
 const CONTROL_FD = 3
 /** CU8: one I and one Q byte per sample. */
 const CU8_BYTES_PER_SAMPLE = 2
@@ -106,6 +125,9 @@ export class IqToolProcess extends EventEmitter {
 		invalidLines: 0,
 		unsentCommands: 0,
 	}
+	lastFailure: IqToolFailure | null = null
+	private readonly stderrPrefix = Buffer.alloc(IQ_TOOL_STDERR_MAX_BYTES)
+	private stderrBytes = 0
 	private child: ChildProcess | null = null
 	private control: Writable | null = null
 	private stdin: Writable | null = null
@@ -160,7 +182,7 @@ export class IqToolProcess extends EventEmitter {
 				stdio: ["pipe", "pipe", "pipe", "pipe"],
 			})
 		} catch (err: unknown) {
-			this.finish(true, errnoCode(err))
+			this.finish(true, errnoCode(err), null, null, true)
 			return
 		}
 		this.child = child
@@ -171,7 +193,16 @@ export class IqToolProcess extends EventEmitter {
 		child.stdout?.on("error", () => {})
 		child.stderr?.on("error", () => {})
 		// Diagnostics are free text from a native tool: drained, never echoed.
-		child.stderr?.resume()
+		child.stderr?.on("data", (chunk: Buffer) => {
+			const n = Math.min(
+				chunk.length,
+				IQ_TOOL_STDERR_MAX_BYTES - this.stderrBytes,
+			)
+			if (n > 0) {
+				chunk.copy(this.stderrPrefix, this.stderrBytes, 0, n)
+				this.stderrBytes += n
+			}
+		})
 		const reader = new BoundedLineReader(
 			IQ_CAPTURE_CONTROL_LINE_MAX_BYTES,
 			line => this.onLine(line),
@@ -180,14 +211,20 @@ export class IqToolProcess extends EventEmitter {
 		const stdout: Readable | null = child.stdout
 		stdout?.on("data", (chunk: Buffer) => reader.push(chunk))
 		child.on("error", (err: Error) => {
-			if (child.pid === undefined) this.finish(true, errnoCode(err))
+			if (child.pid === undefined)
+				this.finish(true, errnoCode(err), null, null, true)
 		})
-		child.once("close", (code: number | null) => {
-			this.finish(
-				this.timedOut || !(this.stopping && (code === 0 || code === null)),
-				null,
-			)
-		})
+		child.once(
+			"close",
+			(code: number | null, signal: NodeJS.Signals | null) => {
+				this.finish(
+					this.timedOut || !(this.stopping && (code === 0 || code === null)),
+					null,
+					code,
+					signal,
+				)
+			},
+		)
 		this.readyTimer = this.o.timers.setTimeout(() => {
 			this.readyTimer = null
 			if (this.isReady) return
@@ -254,6 +291,8 @@ export class IqToolProcess extends EventEmitter {
 		)
 		if (this.stopping) return done
 		this.stopping = true
+		if (this.readyTimer !== null) this.o.timers.clearTimeout(this.readyTimer)
+		this.readyTimer = null
 		this.send({ type: "shutdown" })
 		this.control?.end()
 		this.stdin?.end()
@@ -327,9 +366,56 @@ export class IqToolProcess extends EventEmitter {
 		}
 	}
 
-	private finish(failed: boolean, code: string | null): void {
+	private finish(
+		failed: boolean,
+		code: string | null,
+		exitCode: number | null = null,
+		signal: NodeJS.Signals | null = null,
+		spawnError = false,
+	): void {
 		if (this.exited) return
 		this.exited = true
+		if (failed) {
+			const prefix = this.stderrPrefix
+				.toString("utf8", 0, this.stderrBytes)
+				.toLowerCase()
+			// Only the first diagnostic counts; the usage footer names every flag.
+			const diagnostic = (prefix.split("\n", 1)[0] ?? "").replace(
+				/^wavekit-iqcap: /,
+				"",
+			)
+			const argumentError =
+				/^(usage:|unknown command$|unknown flag$|--(?:ring-ms|max-ms)\b|(?:ring-ms|max-ms) must be within )/.test(
+					diagnostic,
+				)
+			const reason: IqToolFailure["reason"] = diagnostic.startsWith(
+				"control fd 3 is not open",
+			)
+				? "control-fd"
+				: /^(--sample-rate\b|sample rate must be within )/.test(diagnostic)
+					? "sample-rate"
+					: /^(--bandwidth\b|bandwidth\b)/.test(diagnostic)
+						? "bandwidth"
+						: /^(--out-dir\b|out-dir\b)/.test(diagnostic)
+							? "out-dir"
+							: /^(--anchor\b|anchor\b)/.test(diagnostic)
+								? "anchor"
+								: argumentError
+									? "usage"
+									: "other"
+			this.lastFailure = {
+				exitCode,
+				signal: signal ?? null,
+				phase: spawnError
+					? "spawn-error"
+					: this.timedOut
+						? "ready-timeout"
+						: this.isReady
+							? "exit-after-ready"
+							: "exit-before-ready",
+				reason,
+			}
+		}
 		this.isReady = false
 		if (this.readyTimer !== null) this.o.timers.clearTimeout(this.readyTimer)
 		for (const t of this.killTimers) this.o.timers.clearTimeout(t)

@@ -1,6 +1,6 @@
 //! `wavekit-iqcap`: IQ capture on detection and replay (web-gaps-11 requirement 6.2).
 //!
-//! `run`: raw CU8 on stdin, JSON-line control on fd 3 (opened as `/dev/fd/3`, no `unsafe`),
+//! `run`: raw CU8 on stdin, JSON-line control on fd 3 (the inherited pipe or socketpair),
 //! JSON-line events on stdout, free-text diagnostics on stderr (never ids or paths).
 //! `replay`: one 48 kHz cf32 capture file in, the same number of low-passed samples out.
 //!
@@ -220,12 +220,29 @@ fn emit(events: &mut Vec<Value>) {
     let _ = l.flush();
 }
 
+/// Node supplies a socketpair: reopening /dev/fd/3 fails with ENXIO on Linux.
+/// Own the inherited descriptor instead, before starting any reader threads.
+fn open_control_fd() -> Result<std::fs::File, ()> {
+    use std::os::fd::FromRawFd;
+    unsafe extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    // F_GETFD is 1 on Linux and macOS. Validate before taking ownership.
+    if unsafe { fcntl(3, 1) } < 0 {
+        return Err(());
+    }
+    // SAFETY: fd 3 is open, owned by this process and has no other Rust owner.
+    // No reader threads exist yet. File closes it when the control reader exits.
+    let file = unsafe { std::fs::File::from_raw_fd(3) };
+    file.metadata().map(|_| file).map_err(|_| ())
+}
+
 pub fn run(cfg: Config) -> i32 {
     let mut engine = match Engine::new(cfg) {
         Ok(e) => e,
         Err(e) => return usage_error(&e),
     };
-    let control = match std::fs::File::open("/dev/fd/3") {
+    let control = match open_control_fd() {
         Ok(f) => f,
         Err(_) => {
             eprintln!("wavekit-iqcap: control fd 3 is not open");

@@ -53,6 +53,7 @@ import {
 	IqToolProcess,
 	realTimers,
 	type IqToolCounters,
+	type IqToolFailure,
 	type IqToolTimers,
 	type SpawnFn,
 } from "./process.js"
@@ -135,6 +136,8 @@ export type IqCaptureServiceState =
 
 export interface IqCaptureServiceCounters extends IqCaptureCounters {
 	tool: IqToolCounters
+	toolFailures: number
+	lastToolFailure: IqToolFailure | null
 	toolRestarts: number
 	toolGiveUps: number
 	replayFailures: number
@@ -306,6 +309,8 @@ class Service implements IqCaptureService {
 		invalidLines: 0,
 		unsentCommands: 0,
 	}
+	private toolFailures = 0
+	private lastToolFailure: IqToolFailure | null = null
 	private toolRestarts = 0
 	private toolGiveUps = 0
 	private replayFailures = 0
@@ -640,6 +645,10 @@ class Service implements IqCaptureService {
 			...base,
 			refused: { ...base.refused, ...this.offRefusals },
 			tool,
+			toolFailures: this.toolFailures,
+			lastToolFailure: this.lastToolFailure
+				? { ...this.lastToolFailure }
+				: null,
 			toolRestarts: this.toolRestarts,
 			toolGiveUps: this.toolGiveUps,
 			replayFailures: this.replayFailures,
@@ -1228,6 +1237,11 @@ class Service implements IqCaptureService {
 				if (z.proc === proc) this.reap(id)
 		})
 		proc.once("exit", (failed: boolean, code: string | null) => {
+			if (failed && proc.lastFailure) {
+				this.toolFailures++
+				this.lastToolFailure = proc.lastFailure
+				this.log.debug({ ...proc.lastFailure }, "IQ capture tool failed")
+			}
 			if (slot.proc !== proc) return
 			slot.proc = null
 			this.addToolCounters(proc)
