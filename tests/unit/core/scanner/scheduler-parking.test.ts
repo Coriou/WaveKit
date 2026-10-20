@@ -1,7 +1,7 @@
 // tests/unit/core/scanner/scheduler-parking.test.ts
 /**
  * Scanner redesign R 1.1, 1.3, 1.4: a one-hop plan tunes once and parks; parked dwells count
- * sweeps from elapsed `dwellMs`; a multi-hop sweep never re-tunes the window it is on.
+ * sweeps from received samples; a multi-hop sweep never re-tunes the window it is on.
  * Injected clock and sample counts only.
  */
 import { describe, expect, it } from "vitest"
@@ -89,30 +89,77 @@ describe("SweepScheduler parking (R 1.1, 1.3)", () => {
 		expect(h.s.parked).toBe(true)
 	})
 
-	it("sweep-complete once per elapsed dwellMs, not on an early hold end", () => {
+	it("counts sample dwells during a hold even when the clock stands still", () => {
 		const h = parked({ dwellMs: 1_000 })
 		h.s.onTrack(track("t1"), true, 1_000)
-		// the stream runs ahead of the wall clock: the dwell ends at clock 0
-		const probe = h.untilActions(200, false)
-		expect(probe).toEqual([
-			{ type: "start-probe", trackId: "t1", holdMs: 1_300 },
-		])
-		h.clock = 300
-		// the probe confirms early: the hold ends, but no dwellMs has elapsed since parking
+		for (let i = 0; i < 20; i++) h.block(false)
+		expect(h.sweeps()).toHaveLength(1)
+		expect(h.s.progress().holdingOn).toBe("t1")
 		expect(h.s.onConfirmed("t1", false)).toEqual([{ type: "stop-probes" }])
-		expect(h.sweeps()).toHaveLength(0)
-		h.clock = 999
-		expect(h.untilActions(200, false)).toEqual([])
-		h.clock = 1_000
-		// the next window ends with a full dwellMs elapsed since parking: one count
-		const out = h.untilActions(200, false)
-		expect(out).toEqual([{ type: "sweep-complete", sweepIndex: 0 }])
-		h.clock = 3_500
-		expect(h.untilActions(200, false)).toEqual([
-			{ type: "sweep-complete", sweepIndex: 1 },
-			{ type: "sweep-complete", sweepIndex: 2 },
-		])
+		for (let i = 0; i < 19; i++) h.block(false)
+		expect(h.sweeps()).toHaveLength(1)
+		h.block(false)
+		expect(h.sweeps()).toHaveLength(2)
 		expect(h.tunes()).toHaveLength(1)
+	})
+
+	it("a ten-minute pause and skipped resume count only new sample dwells", () => {
+		const h = parked({
+			dwellMs: 1_000,
+			stop: { afterSweeps: 3, afterMs: null, onFirstDecoded: false },
+		})
+		for (let i = 0; i < 19; i++) h.block()
+		h.clock += 600_000
+		h.sample += 600 * FS
+		expect(h.s.onTuneSkipped()).toEqual([])
+		for (let dwell = 0; dwell < 3; dwell++) {
+			for (let i = 0; i < 19; i++) {
+				h.block()
+				expect(h.sweeps()).toHaveLength(dwell)
+			}
+			expect(h.block().filter(a => a.type === "sweep-complete")).toHaveLength(1)
+			expect(h.sweeps()).toHaveLength(dwell + 1)
+		}
+	})
+
+	it.each([false, true])(
+		"a ten-second data stall excludes missing samples (sample hole: %s)",
+		hole => {
+			const h = parked({ dwellMs: 1_000 })
+			for (let i = 0; i < 10; i++) h.block()
+			h.clock += 10_000
+			if (hole) h.sample += 10 * FS
+			for (let i = 0; i < 9; i++) {
+				h.block()
+				expect(h.sweeps()).toHaveLength(0)
+			}
+			expect(h.block().filter(a => a.type === "sweep-complete")).toHaveLength(1)
+			for (let i = 0; i < 19; i++) h.block()
+			expect(h.sweeps()).toHaveLength(1)
+			h.block()
+			expect(h.sweeps()).toHaveLength(2)
+		},
+	)
+
+	it("a multi-hop skipped resume dwells on the current hop before leaving", () => {
+		const h = harness(
+			makeHopPlan([A, A + 3 * MHZ]),
+			makeNormalisedSpec({ revisit: noRevisit, dwellMs: 1_000 }),
+		)
+		h.s.start()
+		h.settle()
+		h.block()
+		h.clock += 600_000
+		h.sample += 600 * FS
+		expect(h.s.onTuneSkipped()).toEqual([])
+		for (let i = 0; i < 19; i++) expect(h.block()).toEqual([])
+		expect(h.s.progress().hopIndex).toBe(0)
+		expect(h.block()).toContainEqual({
+			type: "tune",
+			hopIndex: 1,
+			centreHz: A + 3 * MHZ,
+			gainTenthsDb: 496,
+		})
 	})
 
 	it("sweepPeriodMs null and parked true after the first settle", () => {
@@ -138,12 +185,16 @@ describe("SweepScheduler parking (R 1.1, 1.3)", () => {
 	it("a hold while parked ends without a tune action", () => {
 		const h = parked()
 		h.s.onTrack(track("t1"), true, 1_000)
-		expect(h.untilActions()).toEqual([
-			{ type: "start-probe", trackId: "t1", holdMs: 1_300 },
-		])
+		expect(h.untilActions()).toContainEqual({
+			type: "start-probe",
+			trackId: "t1",
+			holdMs: 1_300,
+		})
 		expect(h.s.progress().holdingOn).toBe("t1")
-		const end = h.untilActions()
-		expect(end[0]).toEqual({ type: "stop-probes" })
+		let end: SchedulerAction[] = []
+		for (let i = 0; i < 40 && !end.some(a => a.type === "stop-probes"); i++)
+			end = h.block()
+		expect(end).toContainEqual({ type: "stop-probes" })
 		expect(end.some(a => a.type === "tune")).toBe(false)
 		expect(h.s.progress().holdingOn).toBeNull()
 		// the open, already tried track is not probed again on the next parked window

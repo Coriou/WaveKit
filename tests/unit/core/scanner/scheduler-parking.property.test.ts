@@ -63,7 +63,7 @@ const track = (id: number, centreHz: number): TrackSnapshot => ({
 describe("SweepScheduler parking properties", () => {
 	// Feature: scanner-redesign, Property 3: A fitting window stays tuned
 	// Validates: Requirements 1.1, 1.3, 1.4
-	it("one-hop plans tune once and count floor(elapsed / dwellMs) sweeps; multi-hop never re-tunes the visited hop", () => {
+	it("one-hop plans tune once and count floor(dwelled samples / dwell samples) sweeps; multi-hop never re-tunes the visited hop", () => {
 		fc.assert(
 			fc.property(
 				fc.integer({ min: 400, max: 470 }),
@@ -100,7 +100,6 @@ describe("SweepScheduler parking properties", () => {
 					})
 					const all: SchedulerAction[] = [...s.start()]
 					all.push(...s.onEpochStarted(sample))
-					const parkedAt = clock
 					expect(s.parked).toBe(true)
 					for (const ev of events) {
 						const out: SchedulerAction[] = []
@@ -134,11 +133,9 @@ describe("SweepScheduler parking properties", () => {
 						}
 						all.push(...out)
 						const sweeps = all.filter(a => a.type === "sweep-complete").length
-						const due = Math.floor((clock - parkedAt) / dwellMs)
-						// never ahead of the elapsed dwell; exact whenever a count is emitted
-						expect(sweeps).toBeLessThanOrEqual(due)
-						if (out.some(a => a.type === "sweep-complete"))
-							expect(sweeps).toBe(due)
+						const due = Math.floor(sample / ((dwellMs * FS) / 1000))
+						// every received block counts, including during holds
+						expect(sweeps).toBe(due)
 						expect(s.parked).toBe(true)
 						expect(s.progress().sweepPeriodMs).toBeNull()
 						expect(s.progress().hopCount).toBe(1)

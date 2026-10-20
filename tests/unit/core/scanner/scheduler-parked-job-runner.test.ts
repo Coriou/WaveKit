@@ -1,6 +1,6 @@
 // tests/unit/core/scanner/scheduler-parked-job-runner.test.ts
 /**
- * Review focus 1 (R 1.1, 1.3): a parked job's runner never waits for a tune that never comes.
+ * Parking (R 1.1, 1.3): a parked job's runner never waits for a tune that never comes.
  * The real JobRunner drives a one-hop plan with a fake arbiter and an injected clock: it keeps
  * dwelling and counting sweeps after the only tune.
  */
@@ -84,96 +84,119 @@ const epoch: EngineEpoch = {
 }
 
 describe("JobRunner with a parked scheduler", () => {
-	it("10 dwells advance sweepIndex by 10 with one retune and a null sweep period", async () => {
-		let clock = 0
-		const arbiter = new Arbiter()
-		const record: JobRecord = {
-			id: "j_park",
-			name: null,
-			passive: false,
-			rawSpec: { sourceId: "rtl", mode: "sweep" },
-			// 200 ms dwell = 4 blocks of 50 ms on a parked window
-			spec: makeNormalisedSpec({ sourceId: "rtl", dwellMs: 200 }),
-			plan: makeHopPlan([HOP]),
-			issues: [],
-			impact: null,
-			consentedImpact: null,
-			state: "pending",
-			createdAt: 0,
-			updatedAt: 0,
-			unrestorable: [],
-			counts: { observations: 0, transients: 0 },
-		}
-		const engine = {
-			currentEpoch: () => epoch,
-			config: () => ({ integrationMs: 50, sampleRateHz: FS, fftSize: 2048 }),
-			stats: () => ({ observedSamples: 1 }),
-		}
-		const runner = new JobRunner({
-			record,
-			arbiter: arbiter as never,
-			probes: {
-				request: () => ({ deferred: "budget" as const }),
-				release: () => Promise.resolve(),
-				releaseJob: () => Promise.resolve(),
-				follow: () => undefined,
-				status: () => [],
-				startLatencyMs: () => 400,
-			},
-			decoders: {
-				holdSource: () => Promise.resolve(),
-				releaseSource: () => Promise.resolve(),
-			},
-			settings: () => testSettings(),
-			openEngine: () => Promise.resolve(engine as never),
-			closeEngine: () => Promise.resolve(),
-			engine: () => engine as never,
-			refreshTuning: () => Promise.resolve(),
-			impact: () => ({
-				liveAudioClients: 0,
-				digitalVoiceListeners: 0,
-				runningDecoders: [],
-				pinnedDecoders: [],
-				scannerJobs: [],
+	it.each([false, true])(
+		"counts received dwells with one tune (stalled: %s)",
+		async stalled => {
+			let clock = 0
+			const arbiter = new Arbiter()
+			const record: JobRecord = {
+				id: "j_park",
+				name: null,
+				passive: false,
+				rawSpec: { sourceId: "rtl", mode: "sweep" },
+				// Each parked dwell counts received 50 ms blocks, including after a stall
+				spec: makeNormalisedSpec({
+					sourceId: "rtl",
+					dwellMs: stalled ? 1_000 : 200,
+					stop: {
+						afterSweeps: stalled ? 3 : null,
+						afterMs: null,
+						onFirstDecoded: false,
+					},
+				}),
+				plan: makeHopPlan([HOP]),
+				issues: [],
+				impact: null,
+				consentedImpact: null,
+				state: "pending",
+				createdAt: 0,
+				updatedAt: 0,
 				unrestorable: [],
-			}),
-			undecoded: () => undefined,
-			discoveryCounts: () => ({
-				activity: 0,
-				candidate: 0,
-				classified: 0,
-				decoded: 0,
-			}),
-			awaitRestoredCaps: () => Promise.resolve(),
-			persist: () => undefined,
-			changed: () => undefined,
-			logger: pino({ level: "silent" }),
-			now: () => clock,
-		})
-		await runner.start()
-		await flush()
-		expect(arbiter.retunes).toEqual([
-			{ centreHz: HOP, gainTenthsDb: 496, sampleRateHz: null },
-		])
-		runner.onEpochStarted(epoch)
-		await flush()
-		expect(record.state).toBe("running")
-		const start = runner.progress().sweepIndex
-		let sample = 0
-		for (let block = 0; block < 10 * 4; block++) {
-			sample += BLOCK
-			clock += 50
-			runner.onBlock(sample, false)
-			runner.tick(clock)
+				counts: { observations: 0, transients: 0 },
+			}
+			const engine = {
+				currentEpoch: () => epoch,
+				config: () => ({ integrationMs: 50, sampleRateHz: FS, fftSize: 2048 }),
+				stats: () => ({ observedSamples: 1 }),
+			}
+			const runner = new JobRunner({
+				record,
+				arbiter: arbiter as never,
+				probes: {
+					request: () => ({ deferred: "budget" as const }),
+					release: () => Promise.resolve(),
+					releaseJob: () => Promise.resolve(),
+					follow: () => undefined,
+					status: () => [],
+					startLatencyMs: () => 400,
+				},
+				decoders: {
+					holdSource: () => Promise.resolve(),
+					releaseSource: () => Promise.resolve(),
+				},
+				settings: () => testSettings(),
+				openEngine: () => Promise.resolve(engine as never),
+				closeEngine: () => Promise.resolve(),
+				engine: () => engine as never,
+				refreshTuning: () => Promise.resolve(),
+				impact: () => ({
+					liveAudioClients: 0,
+					digitalVoiceListeners: 0,
+					runningDecoders: [],
+					pinnedDecoders: [],
+					scannerJobs: [],
+					unrestorable: [],
+				}),
+				undecoded: () => undefined,
+				discoveryCounts: () => ({
+					activity: 0,
+					candidate: 0,
+					classified: 0,
+					decoded: 0,
+				}),
+				awaitRestoredCaps: () => Promise.resolve(),
+				persist: () => undefined,
+				changed: () => undefined,
+				logger: pino({ level: "silent" }),
+				now: () => clock,
+			})
+			await runner.start()
 			await flush()
-		}
-		await runner.idle()
-		const p = runner.progress()
-		expect(p.sweepIndex - start).toBe(10)
-		expect(p.sweepPeriodMs).toBeNull()
-		expect(p.hopCount).toBe(1)
-		expect(p.coverage).toBe(1)
-		expect(arbiter.retunes).toHaveLength(1)
-		expect(record.state).toBe("running")
-	})
+			expect(arbiter.retunes).toEqual([
+				{ centreHz: HOP, gainTenthsDb: 496, sampleRateHz: null },
+			])
+			runner.onEpochStarted(epoch)
+			await flush()
+			expect(record.state).toBe("running")
+			const start = runner.progress().sweepIndex
+			let sample = 0
+			const blocksPerDwell = stalled ? 20 : 4
+			const dwells = stalled ? 3 : 10
+			for (let block = 0; block < dwells * blocksPerDwell; block++) {
+				if (stalled && block === 10) {
+					clock += 10_000
+					sample += 10 * FS
+				}
+				sample += BLOCK
+				clock += 50
+				runner.onBlock(sample, false)
+				runner.tick(clock)
+				await flush()
+				if (stalled && block < dwells * blocksPerDwell - 1) {
+					expect(record.state).toBe("running")
+					expect(runner.progress().sweepIndex - start).toBe(
+						Math.floor((block + 1) / blocksPerDwell),
+					)
+				}
+			}
+			await runner.idle()
+			const p = runner.progress()
+			expect(p.sweepIndex - start).toBe(dwells)
+			expect(p.sweepPeriodMs).toBeNull()
+			expect(p.hopCount).toBe(1)
+			expect(p.coverage).toBe(1)
+			expect(arbiter.retunes).toHaveLength(1)
+			expect(record.state).toBe(stalled ? "completed" : "running")
+		},
+	)
 })

@@ -99,8 +99,8 @@ export class SweepScheduler {
 	private lastCoverage: number | null = null
 	/** True once a one-hop plan's first visit has settled (R 1.1). */
 	private parkedVisit = false
-	/** Wall time of the last parked sweep count. Each count advances it by `dwellMs` (R 1.3). */
-	private lastSweepCountAt: number | null = null
+	/** Received samples toward the next parked sweep; gaps contribute at most one block. */
+	private parkedSweepSamples = 0
 	/** End sample of the last block seen on the current stream; continued visits dwell from it. */
 	private lastBlockEnd: number | null = null
 
@@ -172,31 +172,52 @@ export class SweepScheduler {
 		v.holdStartedAt = null
 		this.hold = null
 		this.phase = "dwell"
-		// A re-sent window (reconnect, resume) counts sweeps from now: time without data is no dwell.
-		if (this.parkedVisit) this.lastSweepCountAt = this.now()
+		// A re-sent window starts fresh: time without data is no dwell.
+		this.parkedSweepSamples = 0
 		this.parkIfOneHop()
 		return actions
 	}
 
 	/**
-	 * The arbiter answered the visit's tune without a write (R 1.2: same centre, rate and gain on
-	 * a verified epoch), so no new epoch will start. The visit opens its dwell from the last block
-	 * instead of waiting in `tuning`. No-op unless tuning.
+	 * A skipped tune has no new epoch. Restart even during dwell/hold, anchoring the resumed
+	 * dwell to the next received block because the stream may have advanced while paused.
 	 */
 	onTuneSkipped(): SchedulerAction[] {
-		const v = this.visit
-		if (v === null || this.phase !== "tuning") return []
-		v.dwellEnd = (this.lastBlockEnd ?? 0) + this.dwellSamples(true)
-		this.phase = "dwell"
-		this.parkIfOneHop()
-		return []
+		this.parkedSweepSamples = 0
+		const actions = this.restartVisit(0)
+		this.lastBlockEnd = null
+		if (this.visit !== null && this.phase !== "idle") this.visit.dwellEnd = null
+		return actions
 	}
 
 	onBlock(endSample: number): SchedulerAction[] {
 		const v = this.visit
 		if (v === null || (this.phase !== "dwell" && this.phase !== "hold"))
 			return []
+		const samples = Math.max(
+			0,
+			Math.min(
+				this.blockSamples,
+				endSample - (this.lastBlockEnd ?? endSample - this.blockSamples),
+			),
+		)
+		if (v.dwellEnd === null)
+			v.dwellEnd = endSample - samples + this.dwellSamples(true)
 		this.lastBlockEnd = endSample
+		const actions: SchedulerAction[] = []
+		if (this.parkedVisit) {
+			this.parkedSweepSamples += samples
+			const dwell = (this.currentDwellMs() * this.sampleRateHz) / 1000
+			if (dwell > 0) {
+				const due = Math.floor(this.parkedSweepSamples / dwell)
+				this.parkedSweepSamples -= due * dwell
+				for (let i = 0; i < due; i++)
+					actions.push({
+						type: "sweep-complete",
+						sweepIndex: this.sweepIndex++,
+					})
+			}
+		}
 		v.blocks++
 		for (const t of v.tracks.values())
 			if (t.open) {
@@ -208,8 +229,8 @@ export class SweepScheduler {
 			v.dwellEnd !== null &&
 			endSample >= v.dwellEnd
 		)
-			return this.decide()
-		return []
+			return [...actions, ...this.decide()]
+		return actions
 	}
 
 	onStale(blocks: number): void {
@@ -513,7 +534,7 @@ export class SweepScheduler {
 
 	private leaveHop(prefix: SchedulerAction[]): SchedulerAction[] {
 		const now = this.now()
-		// Parked one-hop (R 1.1, 1.3): no tune, the sweep counts from elapsed dwell.
+		// Parked one-hop (R 1.1, 1.3): no tune, the sweep counts received samples.
 		if (this.parkedVisit) return this.continueParked(prefix, now)
 		const v = this.visit
 		const wasRevisit = v?.revisit ?? false
@@ -615,14 +636,14 @@ export class SweepScheduler {
 		)
 			return
 		this.parkedVisit = true
-		this.lastSweepCountAt = this.now()
+		this.parkedSweepSamples = 0
 		this.sweepPeriodMs = null
 	}
 
 	/** Leaves the park without a tune; sweep timing restarts (the park had no sweep period). */
 	private unpark(): void {
 		this.parkedVisit = false
-		this.lastSweepCountAt = null
+		this.parkedSweepSamples = 0
 		this.sweepPeriodMs = null
 		this.sweepStartedAt = this.now()
 		this.lastCoverage = null
@@ -660,8 +681,8 @@ export class SweepScheduler {
 	}
 
 	/**
-	 * Parked leave: ends the visit's accounting, emits one `sweep-complete` per full `dwellMs`
-	 * elapsed since the last count, and continues on hop 0 without a tune. A gain the overload
+	 * Parked leave: ends the visit's accounting and continues on hop 0 without a tune.
+	 * Sweep counts come from received blocks. A gain the overload
 	 * rule changed must reach the tuner, so that case re-tunes (today's write path).
 	 */
 	private continueParked(
@@ -671,17 +692,8 @@ export class SweepScheduler {
 		const v = this.visit
 		const carried = this.openTracks()
 		const base = this.continuedBase()
-		const dwellMs = this.currentDwellMs()
 		this.endVisit(now)
 		const actions = [...prefix]
-		if (dwellMs > 0 && this.lastSweepCountAt !== null) {
-			const due = Math.floor((now - this.lastSweepCountAt) / dwellMs)
-			for (let i = 0; i < due; i++) {
-				actions.push({ type: "sweep-complete", sweepIndex: this.sweepIndex })
-				this.sweepIndex++
-			}
-			if (due > 0) this.lastSweepCountAt += due * dwellMs
-		}
 		this.coarseIndex = 0
 		if (v === null || this.gainOf(0) !== v.gainTenthsDb)
 			return [...actions, ...this.tuneTo(0, false)]
