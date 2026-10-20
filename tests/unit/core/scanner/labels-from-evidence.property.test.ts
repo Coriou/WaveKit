@@ -295,12 +295,13 @@ describe("labelFromEvidence", () => {
 				{ protocol: "carrier", family: "carrier", confidence: "activity" },
 			],
 			[proof({ analog: [analog("no-sync", "nfm", 5)] }), SAFE],
+			// An identity-less decode ranks below an analog tone proof.
 			[
 				proof({
 					decodes: [decode("dmr", 1)],
 					analog: [analog("decoded", "nfm", 9, tone)],
 				}),
-				{ protocol: "dmr", family: "digital-voice", confidence: "activity" },
+				{ protocol: "analog-fm", family: "analog", confidence: "classified" },
 			],
 			[
 				proof({

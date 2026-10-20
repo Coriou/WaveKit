@@ -464,8 +464,8 @@ function rowFacts(
 }
 
 /**
- * One winning outcome, strongest first: accepted identity, any other decode,
- * analog tone or code, analog voice, completed digital plan, carrier.
+ * One winning outcome, strongest first: accepted identity, analog tone or
+ * code, analog voice, any other decode, completed digital plan, carrier.
  * An identity-less decode names its protocol at `activity` (requirement 3.2:
  * `decoded` is the first accepted identity) and is not a proof. DMR's two
  * CRC-clean lines stay in the confirm interpreters; a decode that reaches
@@ -480,9 +480,6 @@ function decide(e: ProofInput): Decision {
 			label: named(identified.protocol, "decoded"),
 			facts: decodeFacts(identified),
 		}
-	const activity = newest(input.decodes)
-	if (activity !== undefined)
-		return { label: named(activity.protocol, "activity"), facts: null }
 	const trustKnown = input.trust !== "unknown"
 	if (trustKnown) {
 		const tone = newest(
@@ -503,6 +500,11 @@ function decide(e: ProofInput): Decision {
 				facts: rowFacts("analog-voice", analogProtocol(heard.mode), heard),
 			}
 	}
+	// Below tone and voice: a stray identity-less decode must not unprove an
+	// analog proof on the same observation.
+	const activity = newest(input.decodes)
+	if (activity !== undefined)
+		return { label: named(activity.protocol, "activity"), facts: null }
 	if (input.digitalPlanComplete) {
 		const data = newest(input.analog.filter(a => a.outcome === "data-like"))
 		if (data !== undefined)

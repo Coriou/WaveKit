@@ -31,7 +31,7 @@ const T0 = Date.UTC(2026, 9, 9, 12, 0, 0)
 const NEAR_HZ_MAX = 100_000_000_000
 
 const finiteMessage = (path: string): string =>
-	`Configuration validation failed:\n  - ${path}: Expected a finite number`
+	`Invalid query parameter: ${path} must be a finite number`
 
 /** Fixed discoveries used for the byte-identical base response. */
 function fixtureStore(): DiscoveryStore {
@@ -246,7 +246,7 @@ describe("GET /api/scanner/discoveries evidence, nearHz and toleranceHz", () => 
 			error: "ValidationError",
 			code: "VALIDATION_ERROR",
 			message:
-				"Configuration validation failed:\n  - nearHz: Expected a finite number\n  - toleranceHz: Expected a finite number",
+				"Invalid query parameter: nearHz must be a finite number; toleranceHz must be a finite number",
 		})
 		expect(listDiscoveries).not.toHaveBeenCalled()
 	})

@@ -271,29 +271,20 @@ function identityFromQuery(raw: string): Identity {
 
 /**
  * Ajv skips numeric bounds once coercion has produced a non-finite value
- * (`Infinity`, `-Infinity`, `1e999`). Those queries are still invalid.
+ * (`Infinity`, `-Infinity`, `1e999`). Those queries are still invalid. Returns
+ * the 400 message for the query parameters, naming each one and never its
+ * value, or null when the query is fine.
  */
-function assertFiniteDiscoveryQuery(q: DiscoveryQuery): void {
-	const issues = []
+function nonFiniteDiscoveryQuery(q: DiscoveryQuery): string | null {
+	const problems: string[] = []
 	if (q.nearHz !== undefined && !Number.isFinite(q.nearHz))
-		issues.push({
-			code: ZodIssueCode.custom,
-			path: ["nearHz"],
-			message: "Expected a finite number",
-		})
+		problems.push("nearHz must be a finite number")
 	if (q.toleranceHz !== undefined && !Number.isFinite(q.toleranceHz))
-		issues.push({
-			code: ZodIssueCode.custom,
-			path: ["toleranceHz"],
-			message: "Expected a finite number",
-		})
+		problems.push("toleranceHz must be a finite number")
 	if (q.toleranceHz !== undefined && q.nearHz === undefined)
-		issues.push({
-			code: ZodIssueCode.custom,
-			path: ["toleranceHz"],
-			message: "toleranceHz requires nearHz",
-		})
-	if (issues.length > 0) throw new ZodError(issues)
+		problems.push("toleranceHz requires nearHz")
+	if (problems.length === 0) return null
+	return `Invalid query parameter: ${problems.join("; ")}`
 }
 
 function toFilter(q: DiscoveryQuery): DiscoveryFilter {
@@ -612,8 +603,14 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			},
 		},
 		async (request, reply) => {
+			const invalid = nonFiniteDiscoveryQuery(request.query)
+			if (invalid !== null)
+				return reply.code(400).send({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: invalid,
+				})
 			try {
-				assertFiniteDiscoveryQuery(request.query)
 				return scanner.listDiscoveries(toFilter(request.query))
 			} catch (err) {
 				return sendError(reply, err)

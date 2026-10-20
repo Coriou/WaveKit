@@ -229,8 +229,7 @@ function digitalSentence(
 	labels: readonly string[],
 	unavailable: readonly string[] = [],
 ): string {
-	if (labels.length === 0 && unavailable.length === 0)
-		return "Digital, not decoded (no decoder available)"
+	if (labels.length === 0) return "Digital, not decoded (no decoder available)"
 	const parts: string[] = []
 	if (labels.length > 0) parts.push(`tried ${labels.join(", ")}`)
 	if (unavailable.length > 0)
@@ -321,7 +320,7 @@ describe("proofSummary", () => {
 			"Digital, not decoded (no decoder available)",
 		)
 		expect(proofSummary(undecoded([], ["rtl433", "direwolf"]))).toBe(
-			"Digital, not decoded (direwolf, rtl433 unavailable)",
+			"Digital, not decoded (no decoder available)",
 		)
 		expect(proofSummary(carrier())).toBe("Carrier only")
 		expect(proofSummary(dmr({ encrypted: true }))).toBe(
@@ -714,6 +713,53 @@ describe("deriveProof", () => {
 		toneRow.tone.ctcssHz = 100
 		expect(named?.summary).toBe("Analog FM voice, CTCSS 88.5")
 		expect(named?.tone?.ctcssHz).toBe(88.5)
+	})
+})
+
+describe("identity-less decode rank", () => {
+	it("ranks an identity-less decode below an analog tone and voice proof", () => {
+		const stray = decode("dmr", AT + 5, { talkgroup: "9" })
+		const toned = proof({
+			decodes: [stray],
+			analog: [analog("decoded", AT, { voice: true })],
+		})
+		expect(labelFromEvidence(toned)).toEqual({
+			protocol: "analog-fm",
+			family: "analog",
+			confidence: "classified",
+		})
+		expect(deriveProof(toned)?.kind).toBe("analog-tone")
+		expect(deriveProof(toned)?.summary).toBe("Analog FM voice, CTCSS 88.5")
+		const heard = proof({ decodes: [stray], analog: [analog("heard", AT)] })
+		expect(labelFromEvidence(heard).confidence).toBe("candidate")
+		expect(deriveProof(heard)?.kind).toBe("analog-voice")
+	})
+
+	it("still names its protocol at activity, above a completed digital plan and a carrier", () => {
+		const stray = decode("dmr", AT + 5, { talkgroup: "9" })
+		const input = proof({
+			decodes: [stray],
+			analog: [analog("data-like", AT), analog("carrier-only", AT + 1)],
+			trials: [trial("dmr", 1)],
+			digitalPlanComplete: true,
+		})
+		expect(labelFromEvidence(input)).toEqual({
+			protocol: "dmr",
+			family: "digital-voice",
+			confidence: "activity",
+		})
+		expect(deriveProof(input)).toBeNull()
+	})
+
+	it("an identity decode still beats a tone", () => {
+		const input = proof({
+			decodes: [
+				decode("dmr", AT + 5, { identity: { kind: "dmr-cc", value: "1" } }),
+			],
+			analog: [analog("decoded", AT, { voice: true })],
+		})
+		expect(labelFromEvidence(input).confidence).toBe("decoded")
+		expect(deriveProof(input)?.kind).toBe("decoded")
 	})
 })
 

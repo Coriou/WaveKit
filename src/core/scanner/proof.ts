@@ -134,8 +134,9 @@ function digitalSentence(
 	labels: readonly string[],
 	unavailable: readonly string[],
 ): string {
-	if (labels.length === 0 && unavailable.length === 0)
-		return "Digital, not decoded (no decoder available)"
+	// Frozen grammar: nothing tried reads the same whether or not the plan named
+	// unavailable decoders.
+	if (labels.length === 0) return "Digital, not decoded (no decoder available)"
 	const parts: string[] = []
 	if (labels.length > 0) parts.push(`tried ${labels.join(", ")}`)
 	if (unavailable.length > 0)
