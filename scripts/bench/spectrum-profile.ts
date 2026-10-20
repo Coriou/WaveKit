@@ -1,6 +1,8 @@
 /**
  * DT.0 spectrum profile bench (measure only, not CI).
  *
+ *   pnpm run build-file ./src/core/spectrum/spectrum-worker.ts \
+ *     ./src/core/scanner/store/snapshot-worker.ts   (fresh dist workers first)
  *   pnpm exec esbuild scripts/bench/spectrum-profile.ts --bundle \
  *     --platform=node --format=esm --packages=external \
  *     --outfile=output/bench/spectrum-profile.mjs
@@ -8,8 +10,7 @@
  *
  * In-process core: a fake rtl_tcp on 127.0.0.1:0 streams one precomputed second of
  * U8 noise plus 3 NFM and 2 4FSK channels, paced at 2.048 Msps and then 2.4 Msps.
- * One in-window job covers a 200 kHz scope on the tuned centre (parking, DT.2, is
- * not on this base) plus the passive job. The report is one JSON object on stdout.
+ * One in-window job covers a 200 kHz scope on the tuned centre plus the passive job. The report is one JSON object on stdout.
  * Logs go to stderr. Nothing is written outside the esbuild outfile.
  */
 import { copyFileSync, mkdtempSync, rmSync, existsSync } from "node:fs"
