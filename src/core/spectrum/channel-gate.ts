@@ -104,6 +104,7 @@ const POWER_FLOOR_LIN = Math.exp(POWER_FLOOR_DB * LN10_OVER_10)
 
 export interface ChannelGate {
 	setPlan(plan: ChannelPlan | null): void
+	recentre(centreHz: number): void
 	setFaTargets(
 		byRangeKey: ReadonlyMap<string, number>,
 		defaultPerMhzMin: number,
@@ -201,7 +202,7 @@ export function createChannelGate(opts: {
 class ChannelGateImpl implements ChannelGate {
 	private readonly binHz: number
 	private readonly blockMs: number
-	private readonly centreHz: number
+	private centreHz: number
 	private readonly bins: number
 	private readonly nowFn: (() => number) | null
 	private readonly prefixP: Float64Array
@@ -211,6 +212,11 @@ class ChannelGateImpl implements ChannelGate {
 	private readonly prefixI: Uint32Array
 
 	private ranges: RangeState[] = []
+	private plan: ChannelPlan | null = null
+	/** Planned keys survive away windows; only active ranges below accrue exposure. */
+	private readonly retained = new Map<string, RangeState>()
+	private readonly floorCached: Float32Array
+	private readonly floorLinear: Float64Array
 	private slotCount = 0
 	private coarsened = 0
 	private maskedSkipped = 0
@@ -232,6 +238,7 @@ class ChannelGateImpl implements ChannelGate {
 	private slotPassed = new Uint8Array(0)
 	private slotOffs = new Uint8Array(0)
 	private slotOnBlocks = new Int32Array(0)
+	/** Best linear power/floor ratio in the run; convert only queried readings. */
 	private slotBest = new Float64Array(0)
 	private slotSnr = new Float64Array(0)
 	private slotP = new Float64Array(0)
@@ -256,6 +263,8 @@ class ChannelGateImpl implements ChannelGate {
 		bins: number
 		now?: () => number
 	}) {
+		this.floorCached = new Float32Array(opts.bins).fill(Number.NaN)
+		this.floorLinear = new Float64Array(opts.bins)
 		this.binHz = opts.binHz
 		this.blockMs = opts.blockMs
 		this.centreHz = opts.centreHz
@@ -265,6 +274,12 @@ class ChannelGateImpl implements ChannelGate {
 		this.prefixF = new Float64Array(opts.bins + 1)
 		this.prefixM = new Uint32Array(opts.bins + 1)
 		this.prefixI = new Uint32Array(opts.bins + 1)
+		for (
+			let k = CHANNEL_GATE_K_DB;
+			k <= CHANNEL_GATE_K_DB + CFAR_MAX_RAISE_DB;
+			k += CFAR_STEP_DB
+		)
+			this.cacheThresholds(k)
 	}
 
 	setPlan(plan: ChannelPlan | null): void {
@@ -272,8 +287,41 @@ class ChannelGateImpl implements ChannelGate {
 		// Each rangeKey keeps k and its CFAR windows. A slot keeps its run when
 		// (lo, hi, rangeKey, burst) is unchanged, so a re-sent plan does not
 		// wipe adaptation or a run already in progress.
+		this.plan = plan
+		this.lastNow = null
+		const keys = new Set(plan?.entries.map(e => e.rangeKey))
+		keys.add(DEFAULT_RANGE_KEY)
+		for (const key of this.retained.keys()) {
+			if (plan === null || !keys.has(key)) this.retained.delete(key)
+		}
 		const built = plan === null ? null : layoutPlan(plan, this.window())
 		this.install(built)
+	}
+
+	recentre(centreHz: number): void {
+		if (!Number.isFinite(centreHz))
+			throw new WaveKitError(
+				"channel gate needs finite centreHz",
+				"CHANNEL_GATE_CONFIG",
+			)
+		this.centreHz = centreHz
+		// Exposure is received block time (or intervals between injected clock reads
+		// within one epoch). Away time never counts; the injected clock starts
+		// fresh on the first block after a retune or gain change. Windows survive.
+		this.lastNow = null
+		this.install(
+			this.plan === null ? null : layoutPlan(this.plan, this.window()),
+		)
+		this.resetRuns()
+		this.slotBlockValid.fill(0)
+	}
+
+	private linearFloor(i: number, db: number): number {
+		if (this.floorCached[i] !== db) {
+			this.floorCached[i] = db
+			this.floorLinear[i] = Math.exp(db * LN10_OVER_10)
+		}
+		return this.floorLinear[i]!
 	}
 
 	setFaTargets(
@@ -287,6 +335,7 @@ class ChannelGateImpl implements ChannelGate {
 
 	setPinnedOffsetDb(offsetDb: number | null): void {
 		this.pinnedOffset = offsetDb
+		if (offsetDb !== null) this.cacheThresholds(CHANNEL_GATE_K_DB + offsetDb)
 	}
 
 	block(
@@ -330,7 +379,7 @@ class ChannelGateImpl implements ChannelGate {
 						accI++
 					} else {
 						const lp = Math.exp(pDb * ln)
-						const lf = Math.exp(fDb * ln)
+						const lf = this.linearFloor(i, fDb)
 						if (!Number.isFinite(lp) || !Number.isFinite(lf)) accI++
 						else {
 							accP += lp
@@ -370,7 +419,6 @@ class ChannelGateImpl implements ChannelGate {
 			let accF = 0
 			let accM = 0
 			let accI = 0
-			const ln = LN10_OVER_10
 			const scale =
 				1 / (Math.max(1, frames) * (this.bins / 2) * (this.bins / 2))
 			for (let i = begin; i < end; i++) {
@@ -388,7 +436,7 @@ class ChannelGateImpl implements ChannelGate {
 						accI++
 					} else {
 						const lpRaw = raw * scale
-						const lf = Math.exp(fDb * ln)
+						const lf = this.linearFloor(i, fDb)
 						if (!Number.isFinite(lpRaw) || !Number.isFinite(lf)) accI++
 						else {
 							const lp =
@@ -543,10 +591,8 @@ class ChannelGateImpl implements ChannelGate {
 	kFor(rangeKey: string): number {
 		// Pinned: kCh = 3 dB + offset, for every range, with no adaptation.
 		if (this.pinnedOffset !== null) return CHANNEL_GATE_K_DB + this.pinnedOffset
-		for (let i = 0; i < this.ranges.length; i++) {
-			const r = this.ranges[i]!
-			if (r.key === rangeKey) return r.k
-		}
+		const retained = this.retained.get(rangeKey)
+		if (retained) return retained.k
 		return CHANNEL_GATE_K_DB
 	}
 
@@ -582,8 +628,7 @@ class ChannelGateImpl implements ChannelGate {
 			this.zeroSlots(0)
 			return
 		}
-		const prevRanges = new Map<string, RangeState>()
-		for (const r of this.ranges) prevRanges.set(r.key, r)
+		const prevRanges = this.retained
 		const prevSlots = this.snapshotSlots()
 		const byKey = new Map<string, number>()
 		const ranges: RangeState[] = []
@@ -621,6 +666,7 @@ class ChannelGateImpl implements ChannelGate {
 			}
 			ranges[idx]!.mhz += d.mhz
 		}
+		for (const r of ranges) this.retained.set(r.key, r)
 		const drafts = built.drafts
 		const n = drafts.length
 		// `gateInto` binary-searches `lo`. Layout order stays in `slotOrd`.
@@ -777,8 +823,8 @@ class ChannelGateImpl implements ChannelGate {
 		}
 		const pSum = this.prefixP[i1]! - this.prefixP[i0]!
 		const fSum = this.prefixF[i1]! - this.prefixF[i0]!
-		const snr = finiteSnr(pSum, fSum)
-		if (snr === null) {
+		const snr = pSum / fSum
+		if (!(pSum > 0) || !(fSum > 0) || !(snr > 0) || !Number.isFinite(snr)) {
 			this.invalidateSlot(s)
 			return
 		}
@@ -812,10 +858,34 @@ class ChannelGateImpl implements ChannelGate {
 		this.maybePass(s, sample, k)
 	}
 
+	private readonly thresholds = new Map<number, number>()
+
+	private cacheThresholds(k: number): void {
+		for (const db of [
+			k,
+			k - CHANNEL_GATE_HYSTERESIS_DB,
+			k + CHANNEL_GATE_MARGIN_DB - MARGIN_SLACK_DB,
+			k + CHANNEL_GATE_BURST_MARGIN_DB - MARGIN_SLACK_DB,
+		])
+			this.thresholds.set(db, Math.pow(10, db / 10))
+	}
+
+	private threshold(db: number): number {
+		return this.thresholds.get(db)!
+	}
+
+	private atLeast(ratio: number, db: number, slackDb = 0): boolean {
+		const threshold = this.threshold(db - slackDb)
+		// Preserve the original log-domain decision at floating-point boundaries.
+		// Elsewhere a linear comparison avoids log10 for slots no track reads.
+		if (Math.abs(ratio - threshold) <= threshold * 1e-12)
+			return 10 * Math.log10(ratio) + slackDb >= db
+		return ratio >= threshold
+	}
+
 	private hysteresis(wasOn: boolean, snr: number, k: number): boolean {
 		// On at snr ≥ kCh. Off below kCh − 1.5. The band in between holds.
-		if (wasOn) return !(snr < k - CHANNEL_GATE_HYSTERESIS_DB)
-		return snr >= k
+		return this.atLeast(snr, wasOn ? k - CHANNEL_GATE_HYSTERESIS_DB : k)
 	}
 
 	private maybePass(s: number, sample: number, k: number): void {
@@ -830,7 +900,7 @@ class ChannelGateImpl implements ChannelGate {
 		// Margin 3 dB → pass at 6 dB; burst margin 6 dB → pass at 9 dB.
 		const margin = burst ? CHANNEL_GATE_BURST_MARGIN_DB : CHANNEL_GATE_MARGIN_DB
 		if (this.slotOnBlocks[s]! * this.blockMs < minMs) return
-		if (this.slotBest[s]! + MARGIN_SLACK_DB < k + margin) return
+		if (!this.atLeast(this.slotBest[s]!, k + margin, MARGIN_SLACK_DB)) return
 		this.slotPassed[s] = 1
 		this.slotPassedSample[s] = sample
 	}
@@ -902,7 +972,8 @@ class ChannelGateImpl implements ChannelGate {
 
 	private writeSlot(s: number, out: ChannelGateReading): ChannelGateReading {
 		const passed = this.slotPassed[s] === 1
-		const snr = this.slotSnr[s]!
+		const snr =
+			finiteSnr(this.slotP[s]!, this.slotF[s]!) ?? Number.NEGATIVE_INFINITY
 		const runStart = this.slotRunStart[s]!
 		const measured = this.slotBlockValid[s] === 1 && Number.isFinite(snr)
 		const burst = this.slotBurst[s] === 1

@@ -322,6 +322,104 @@ describe("channel gate", () => {
 		})
 	})
 
+	it("accumulates observed CFAR minutes across retunes and gain epochs, excluding away time", () => {
+		let t = 0
+		const plan = oneChannel({ centre: TUNE, widthHz: WIDTH })
+		const { gate } = openGate({ now: () => t, plan })
+		const quiet = (): void => feed(gate, BINS, 0, 1, 10)
+		feed(gate, BINS, 30, 1, 1)
+		feed(gate, BINS, 0, 2, 2)
+		t += 2 * 60_000
+		quiet()
+		gate.recentre(TUNE + 1_000_000)
+		quiet()
+		t += 60 * 60_000
+		quiet()
+		expect(gate.kFor(KEY)).toBe(3)
+		gate.recentre(TUNE)
+		quiet()
+		t += 2 * 60_000
+		quiet()
+		// Same centre, new gain epoch: windows stay, slot runs break.
+		gate.recentre(TUNE)
+		quiet()
+		t += 60_000
+		quiet()
+		expect(gate.kFor(KEY)).toBe(3.5)
+		gate.recentre(TUNE + 1_000_000)
+		t += 60 * 60_000
+		quiet()
+		gate.recentre(TUNE)
+		quiet()
+		expect(gate.kFor(KEY)).toBe(3.5)
+		for (let i = 0; i < 3; i++) {
+			t += 10 * 60_000
+			quiet()
+			gate.recentre(TUNE)
+			quiet()
+		}
+		expect(gate.kFor(KEY)).toBe(3)
+		// Removing an inactive range forgets its windows too.
+		gate.recentre(TUNE + 1_000_000)
+		gate.setPlan({ ...plan, entries: [] })
+		gate.setPlan(plan)
+		gate.recentre(TUNE)
+		expect(gate.kFor(KEY)).toBe(3)
+	})
+
+	it("keeps independent raise windows across alternating planned ranges and forgets a removed inactive range", () => {
+		let t = 0
+		const other = TUNE + 1_000_000
+		const plan = oneChannel({ centre: TUNE, widthHz: WIDTH })
+		plan.entries.push(
+			...oneChannel({
+				tune: other,
+				centre: other,
+				widthHz: WIDTH,
+				rangeKey: "other",
+			}).entries,
+		)
+		const { gate } = openGate({ now: () => t, plan })
+		for (let visit = 0; visit < 10; visit++) {
+			gate.recentre(visit % 2 === 0 ? TUNE : other)
+			if (visit < 2) {
+				feed(gate, BINS, 30, 1, 1)
+				feed(gate, BINS, 0, 2, 2)
+			} else feed(gate, BINS, 0, 1, 1)
+			t += 60_000
+			feed(gate, BINS, 0, 1, 3)
+		}
+		expect(gate.kFor(KEY)).toBe(3.5)
+		expect(gate.kFor("other")).toBe(3.5)
+		// KEY is away from the current window; deleting it must forget it anyway.
+		gate.setPlan({
+			...plan,
+			entries: plan.entries.filter(e => e.rangeKey !== KEY),
+		})
+		expect(gate.kFor(KEY)).toBe(3)
+		gate.setPlan(plan)
+		gate.recentre(TUNE)
+		expect(gate.kFor(KEY)).toBe(3)
+		expect(gate.kFor("other")).toBe(3.5)
+	})
+
+	it("invalidates cached floors on in-place changes and mask changes", () => {
+		const { gate, centre } = openGate({})
+		const { power, floor } = spectrum(BINS, 7)
+		const mask = new Uint8Array(BINS)
+		gate.block(power, floor, mask, 1)
+		expect(gate.gateOf(centre, WIDTH).channelSnrDb).toBeCloseTo(7)
+		floor.fill(FLOOR + 4)
+		gate.block(power, floor, mask, 2)
+		expect(gate.gateOf(centre, WIDTH).channelSnrDb).toBeCloseTo(3)
+		mask.fill(1, 0, 16)
+		floor.fill(FLOOR + 6)
+		gate.block(power, floor, mask, 3)
+		mask.fill(0)
+		gate.block(power, floor, mask, 4)
+		expect(gate.gateOf(centre, WIDTH).channelSnrDb).toBeCloseTo(1)
+	})
+
 	it("kCh survives a re-sent identical plan", () => {
 		let t = 0
 		const plan = oneChannel({ centre: TUNE, widthHz: WIDTH })

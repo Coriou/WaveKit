@@ -84,9 +84,13 @@ const epoch: EngineEpoch = {
 }
 
 describe("JobRunner with a parked scheduler", () => {
-	it.each([false, true])(
-		"counts received dwells with one tune (stalled: %s)",
-		async stalled => {
+	it.each([
+		[false, false],
+		[true, false],
+		[true, true],
+	])(
+		"counts received dwells (stalled: %s, pause/resume: %s)",
+		async (stalled, paused) => {
 			let clock = 0
 			const arbiter = new Arbiter()
 			const record: JobRecord = {
@@ -170,10 +174,30 @@ describe("JobRunner with a parked scheduler", () => {
 			expect(record.state).toBe("running")
 			const start = runner.progress().sweepIndex
 			let sample = 0
+			if (paused) {
+				// Requires DT.2's Main seam: JobRunner calls onTuneSkipped after
+				// the arbiter returns the same epoch, without an epoch-started event.
+				for (let block = 0; block < 19; block++) {
+					sample += BLOCK
+					clock += 50
+					runner.onBlock(sample, false)
+					await flush()
+				}
+				expect(runner.progress().sweepIndex - start).toBe(0)
+				await runner.dispatch({ type: "pause" })
+				clock += 600_000
+				sample += 600 * FS
+				runner.tick(clock)
+				expect(record.state).toBe("paused")
+				await runner.dispatch({ type: "resume", takeover: false })
+				await runner.idle()
+				expect(record.state).toBe("running")
+				expect(arbiter.retunes).toHaveLength(2)
+			}
 			const blocksPerDwell = stalled ? 20 : 4
 			const dwells = stalled ? 3 : 10
 			for (let block = 0; block < dwells * blocksPerDwell; block++) {
-				if (stalled && block === 10) {
+				if (stalled && !paused && block === 10) {
 					clock += 10_000
 					sample += 10 * FS
 				}
@@ -195,7 +219,7 @@ describe("JobRunner with a parked scheduler", () => {
 			expect(p.sweepPeriodMs).toBeNull()
 			expect(p.hopCount).toBe(1)
 			expect(p.coverage).toBe(1)
-			expect(arbiter.retunes).toHaveLength(1)
+			expect(arbiter.retunes).toHaveLength(paused ? 2 : 1)
 			expect(record.state).toBe(stalled ? "completed" : "running")
 		},
 	)

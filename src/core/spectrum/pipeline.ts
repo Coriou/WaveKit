@@ -1778,6 +1778,12 @@ export class SpectrumPipeline {
 	}
 
 	private openGate(centreHz: number): void {
+		if (this.gate) {
+			this.gate.recentre(centreHz)
+			this.gate.setPinnedOffsetDb(this.pinnedOffsetDb())
+			this.pushFaTargets()
+			return
+		}
 		const gate = createChannelGate(
 			this.gateNow
 				? {
