@@ -16,6 +16,7 @@ import type { PersistentFeature } from "../retune-alarm.js"
 import { frameTrust } from "../retune-settle.js"
 import type { ImageCandidate } from "./iq-image.js"
 import type { TrackAssociation } from "../frame-tracks.js"
+import { CHANNEL_GATE_HYSTERESIS_DB } from "../../scanner/scanner-redesign-contract.js"
 
 /**
  * Per-epoch emission tracks (spec §4.2, §6.2): matches each block's segments to open tracks by bin
@@ -65,6 +66,7 @@ class SpectrumAccumulator {
 	hi = 0
 	private sum = new Float64Array(0)
 	private count = new Uint32Array(0)
+	private mean = new Float32Array(0)
 
 	add(powerDb: Float32Array, lo: number, hi: number): void {
 		if (this.hi === this.lo) {
@@ -91,10 +93,12 @@ class SpectrumAccumulator {
 		}
 	}
 
-	/** Mean PSD in dB over the window; index 0 is bin `lo`. */
+	/** Mean PSD in dB over the window; index 0 is bin `lo`. Reuses one buffer. */
 	meanDb(): Float32Array {
-		const out = new Float32Array(this.hi - this.lo)
-		for (let j = 0; j < out.length; j++) {
+		const n = this.hi - this.lo
+		if (this.mean.length !== n) this.mean = new Float32Array(n)
+		const out = this.mean
+		for (let j = 0; j < n; j++) {
 			const c = this.count[j] ?? 0
 			out[j] =
 				c > 0 ? 10 * Math.log10(Math.max((this.sum[j] ?? 0) / c, 1e-20)) : -200
@@ -103,10 +107,45 @@ class SpectrumAccumulator {
 	}
 }
 
+const NO_GATE_EVENTS: PipelineEvent[] = []
+
 interface Features {
 	acf30?: number
 	acf60?: number
 	duty: number | null
+}
+
+/**
+ * This block's channel measurement. The track runs R 2.3/2.4 on its own
+ * sequence of these. `valid` false (invalid, skipped, or masked) ends the
+ * run without passing. `channelSnrDb` is −Infinity in that case.
+ */
+interface GateReading {
+	channelSnrDb: number
+	kDb: number
+	marginDb: number
+	minDurationMs: number
+	valid: boolean
+}
+
+/** One step of a track's own gate run, for the property oracle. No hot-path alloc when unset. */
+export interface GateTrace {
+	trackId: string
+	kind: "measure" | "off" | "invalid" | "reset" | "inherit"
+	snr: number
+	kDb: number
+	marginDb: number
+	minMs: number
+	endSample: number
+	gate: "pending" | "passed" | "below"
+	passedSample: number | null
+	on: boolean
+	run: boolean
+	offUsed: boolean
+	onBlocks: number
+	best: number
+	/** Set on `inherit`. Null for every other step. */
+	fromTrackId: string | null
 }
 
 interface OpenTrack {
@@ -148,6 +187,40 @@ interface OpenTrack {
 	 * track starts its chain). Frame-only state: never in a TrackSnapshot or a tracker event.
 	 */
 	chain: ChainBase | null
+	/**
+	 * Sticky verdict. `passed` stays for this track's life. Separate from the run.
+	 */
+	gate?: "pending" | "passed" | "below"
+	channelSnrDb?: number
+	gatePassedSample?: number
+	/** Last measured step was on. The next on-test uses `gateRun`, not this. */
+	gateOn: boolean
+	/** The run is in progress. Stepped on every block, including after a pass. */
+	gateRun: boolean
+	/** Tolerated offs in this run. The next off ends it. */
+	gateOffs: number
+	gateOnBlocks: number
+	gateBest: number
+	/** Latched once this run meets duration and margin. Cleared when the run ends. */
+	gateQualified: boolean
+	/** Block end on which `gateQualified` became true. NaN until then. */
+	gateQualifiedSample: number
+	gateK: number
+	gateMargin: number
+	gateMinMs: number
+	/** This block's step already moved `gate` to `passed`. */
+	gateJustPassed: boolean
+	/** Block number `geomCentre` / `geomObw` were computed for. −1: none. */
+	geomBlock: number
+	geomCentre: number
+	geomObw: number
+	/** `blockNo` of the last gate step applied to this track. 0: none. */
+	gateStamp: number
+	/**
+	 * The predecessor this track re-opened from on a max-duration rollover.
+	 * Cleared once that predecessor's run has been considered. Never a new detection.
+	 */
+	rolloverFrom: OpenTrack | null
 }
 
 /**
@@ -185,6 +258,37 @@ export class Tracker {
 	 * max-duration). Rebuilt by every `block()`; read by the pipeline's summary of that block.
 	 */
 	private readonly assoc = new Map<Segment, OpenTrack>()
+	/** Gate fields are copied onto snapshots only while this is set. */
+	private planActive = false
+	/** Ids closed by the current `block()`, so their close events can be painted. */
+	private readonly closedThisBlock = new Set<string>()
+	/**
+	 * Closed this block while observed, before this block's measurement.
+	 * `publishGate` steps the run, then paints the close.
+	 */
+	private readonly closedObserved = new Map<string, OpenTrack>()
+	/**
+	 * Open tracks not observed this block. Stepped in `publishGate` once the
+	 * block's measurement is known. An invalid measurement ends the run; a
+	 * valid one is the tolerated off. Reused, not allocated per block.
+	 */
+	private readonly pendingOff: OpenTrack[] = []
+	/** `endSample` of the block in progress. Off steps use it, not `lastSample`. */
+	private blockEndSample = 0
+	/** Reused by `obwWindow`. Callers read `a` and `e` before the next call. */
+	private readonly obwSpan = { a: 0, e: 0 }
+	private readonly gateReported = new Set<string>()
+	private readonly gateExtra: PipelineEvent[] = []
+	/** Set only by tests. Production leaves it null and allocates nothing. */
+	private gateTrace: ((e: GateTrace) => void) | null = null
+	/**
+	 * The block about to run does not continue a run (a gap, a skipped block,
+	 * an exclusion). Taken at the start of `block` so the rollover decision,
+	 * which waits until that block is measured, still sees it.
+	 */
+	private gateBroken = false
+	/** `gateBroken` as of the start of the current block. */
+	private blockGateBreak = false
 
 	constructor(private readonly opts: TrackerOptions) {
 		this.updateEvery = Math.max(1, Math.round(1000 / opts.blockMs))
@@ -229,7 +333,184 @@ export class Tracker {
 		}
 	}
 
+	/** Turns gate fields on or off. Clearing the plan drops them from open tracks. */
+	setGatePlan(active: boolean): void {
+		if (this.planActive && !active) {
+			for (const t of this.open) {
+				delete t.gate
+				delete t.channelSnrDb
+				delete t.gatePassedSample
+				this.clearGateRun(t)
+				t.rolloverFrom = null
+			}
+			this.closedObserved.clear()
+			this.pendingOff.length = 0
+		}
+		this.planActive = active
+	}
+
+	/** Test hook. `null` restores the production path, which does not allocate. */
+	setGateTrace(fn: ((e: GateTrace) => void) | null): void {
+		this.gateTrace = fn
+	}
+
+	/**
+	 * The next `block` does not continue a run across a gap or a skipped
+	 * block. A max-duration successor on that block starts fresh.
+	 */
+	noteGateBreak(): void {
+		this.gateBroken = true
+	}
+
+	/**
+	 * Drops every open track's in-progress run. A track that already passed
+	 * stays passed. kCh is not here; the channel gate keeps that.
+	 */
+	resetGateRuns(): void {
+		if (!this.planActive) return
+		for (const t of this.open) {
+			this.clearGateRun(t)
+			this.trace(
+				t,
+				"reset",
+				Number.NEGATIVE_INFINITY,
+				t.gateK,
+				t.gateMargin,
+				t.gateMinMs,
+				t.lastSample,
+			)
+		}
+	}
+
+	/** Applies one measurement to an open track. A no-op until a plan is set. */
+	setGate(id: string, reading: GateReading): void {
+		if (!this.planActive) return
+		const t = this.open.find(o => o.id === id)
+		if (t === undefined) return
+		this.stepReading(t, reading, t.lastSample)
+	}
+
+	/**
+	 * Steps every track observed this block on its own measurement, then paints
+	 * the block's events. A miss waits until that measurement is known: invalid
+	 * ends the run, valid counts as off. `from` is the first event index that
+	 * belongs to this block. Returns a track-update for each track that became
+	 * `passed` without one yet.
+	 */
+	publishGate(
+		gateOf: (centreHz: number, obwHz: number) => GateReading,
+		events: PipelineEvent[],
+		from: number,
+		measure = true,
+	): PipelineEvent[] {
+		if (!this.planActive) return NO_GATE_EVENTS
+		if (
+			this.open.length === 0 &&
+			this.closedThisBlock.size === 0 &&
+			this.pendingOff.length === 0
+		)
+			return NO_GATE_EVENTS
+		this.gateReported.clear()
+		this.gateExtra.length = 0
+		// The close snapshot was built before this measurement. Step misses
+		// now that the block is known, then tracks that were on. A rollover
+		// copies the predecessor's run only after that step, and only while
+		// the run is still alive. A gap or a fully excluded block does not
+		// measure (`measure` false): the run was reset and the miss is not an off.
+		const end = this.blockEndSample
+		for (const t of this.pendingOff) {
+			if (t.gateStamp === this.blockNo) continue
+			if (measure) this.stepDeferredOff(t, gateOf, end)
+			else this.stepOff(t, end)
+		}
+		if (measure) {
+			for (const t of this.closedObserved.values()) {
+				if (t.lastOnBlock !== this.blockNo || t.gateStamp === this.blockNo)
+					continue
+				this.stepObserved(t, gateOf)
+			}
+		}
+		for (const t of this.open) {
+			const prev = t.rolloverFrom
+			if (prev === null) continue
+			// The predecessor was stepped above. Copy the run only if that
+			// step left it alive and this block is not a gate break. The
+			// sticky verdict is never copied.
+			// The successor's own channel must also measure valid on this block:
+			// its geometry can differ from the predecessor's cumulative one.
+			if (
+				prev.gateRun &&
+				!this.blockGateBreak &&
+				measure &&
+				this.measuresValid(t, gateOf)
+			)
+				this.inheritRun(prev, t)
+			else if (
+				measure &&
+				t.lastOnBlock === this.blockNo &&
+				t.gateStamp !== this.blockNo
+			)
+				this.stepObserved(t, gateOf)
+			t.rolloverFrom = null
+		}
+		if (measure) {
+			for (const t of this.assoc.values()) {
+				if (t.lastOnBlock !== this.blockNo || t.gateStamp === this.blockNo)
+					continue
+				this.stepObserved(t, gateOf)
+			}
+		}
+		for (const t of this.closedObserved.values()) {
+			if (t.gate !== "passed") t.gate = "below"
+		}
+		for (let i = from; i < events.length; i++) {
+			const e = events[i]
+			if (
+				e === undefined ||
+				(e.kind !== "track-open" &&
+					e.kind !== "track-update" &&
+					e.kind !== "track-close")
+			)
+				continue
+			const live = this.liveById(e.track.trackId)
+			if (live !== undefined) {
+				this.paintLive(e.track, live)
+				this.gateReported.add(live.id)
+				continue
+			}
+			if (
+				e.kind === "track-close" &&
+				this.closedThisBlock.has(e.track.trackId)
+			) {
+				const remembered = this.closedObserved.get(e.track.trackId)
+				if (remembered !== undefined) this.paintLive(e.track, remembered)
+				else {
+					const missed = this.pendingOffById(e.track.trackId)
+					if (missed !== undefined) {
+						if (missed.gate !== "passed") missed.gate = "below"
+						this.paintLive(e.track, missed)
+					} else this.paintStoredClose(e.track)
+				}
+			}
+		}
+		for (const t of this.open) {
+			if (!t.gateJustPassed) continue
+			t.gateJustPassed = false
+			if (this.gateReported.has(t.id)) continue
+			const track = this.snapshotOf(t.id)
+			if (track) this.gateExtra.push({ kind: "track-update", track })
+		}
+		for (const t of this.closedObserved.values()) t.gateJustPassed = false
+		return this.gateExtra
+	}
+
 	block(segments: Segment[], b: TrackerBlock): PipelineEvent[] {
+		this.closedThisBlock.clear()
+		this.closedObserved.clear()
+		this.pendingOff.length = 0
+		this.blockEndSample = b.endSample
+		this.blockGateBreak = this.gateBroken
+		this.gateBroken = false
 		this.blockNo++
 		this.n = b.floorDb.length
 		const n = b.floorDb.length
@@ -270,6 +551,9 @@ export class Tracker {
 		for (const t of [...this.open]) {
 			if (matched.has(t)) continue
 			t.misses++
+			// Not observed. The off waits for this block's measurement: a masked
+			// or non-finite block ends the run, and only a valid one can pass.
+			if (this.planActive) this.pendingOff.push(t)
 			if (t.misses >= this.opts.hangBlocks)
 				events.push(this.close(t, b.gap ? "gap" : "quiet", n))
 		}
@@ -284,6 +568,10 @@ export class Tracker {
 				const nt = this.openTrack(seg, b, n, blockSamples)
 				nt.justOpened = false
 				nt.chain = chainBaseOf(t, nt)
+				// `publishGate` steps this block on the predecessor, then copies
+				// the run only if it is still alive.
+				// Only gating reads the predecessor; without a plan keep no reference.
+				if (this.planActive) nt.rolloverFrom = t
 				// the segment now belongs to the successor (same block, fresh id)
 				if (this.assoc.get(seg) === t) this.assoc.set(seg, nt)
 				events.push({ kind: "track-open", track: this.snapshot(nt, n) })
@@ -310,7 +598,7 @@ export class Tracker {
 		const t = this.assoc.get(s)
 		if (t === undefined || t.lastOnBlock !== this.blockNo) return null
 		const c = chainTotalsOf(t)
-		return {
+		const out: TrackAssociation = {
 			trackId: c.id,
 			trackerId: t.id,
 			snrDb: snrDbOf(c.bandLinSum, c.floorLinSum, c.blocks),
@@ -324,6 +612,12 @@ export class Tracker {
 			iqImage: c.iqImage,
 			burst: t.flags.burst,
 		}
+		// Frames carry the open-track gate only (R 2.6). `below` is a close state
+		// and stays on the snapshot. No plan: both keys stay absent.
+		if (t.gate === "pending" || t.gate === "passed") out.gate = t.gate
+		if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
+			out.channelSnrDb = t.channelSnrDb
+		return out
 	}
 
 	closeAll(reason: ObservationEndReason): PipelineEvent[] {
@@ -481,9 +775,26 @@ export class Tracker {
 			flagsChanged: false,
 			justOpened: true,
 			chain: null,
+			geomBlock: -1,
+			geomCentre: 0,
+			geomObw: 0,
+			gateOn: false,
+			gateRun: false,
+			gateOffs: 0,
+			gateOnBlocks: 0,
+			gateBest: Number.NEGATIVE_INFINITY,
+			gateQualified: false,
+			gateQualifiedSample: Number.NaN,
+			gateK: 0,
+			gateMargin: 0,
+			gateMinMs: 0,
+			gateJustPassed: false,
+			gateStamp: 0,
+			rolloverFrom: null,
 		}
 		this.open.push(t)
 		this.extend(t, s, b, n)
+		if (this.planActive) t.gate = "pending"
 		t.flagsChanged = false
 		return t
 	}
@@ -581,10 +892,10 @@ export class Tracker {
 		t: OpenTrack,
 		mean: Float32Array,
 	): { a: number; e: number } {
-		return {
-			a: Math.max(0, t.onMin - 1 - t.spectrum.lo),
-			e: Math.min(mean.length, t.onMax + 1 - t.spectrum.lo),
-		}
+		const span = this.obwSpan
+		span.a = Math.max(0, t.onMin - 1 - t.spectrum.lo)
+		span.e = Math.min(mean.length, t.onMax + 1 - t.spectrum.lo)
+		return span
 	}
 
 	private close(
@@ -592,12 +903,338 @@ export class Tracker {
 		reason: ObservationEndReason,
 		n: number,
 	): PipelineEvent {
+		if (this.planActive) {
+			this.closedThisBlock.add(t.id)
+			// Still on this block and not yet measured: `publishGate` steps it,
+			// then paints over this snapshot. A miss is stepped there too, once
+			// the measurement is known. Never-passed is `below` on the snapshot
+			// now, so a close that never reaches `publishGate` (gap, retune,
+			// plan-less epoch) still reports below. A later pass overwrites it.
+			if (t.lastOnBlock === this.blockNo && t.gateStamp !== this.blockNo)
+				this.closedObserved.set(t.id, t)
+			if (t.gate !== "passed") t.gate = "below"
+		}
 		this.open = this.open.filter(o => o !== t)
 		return {
 			kind: "track-close",
 			track: this.snapshot(t, n),
 			endReason: reason,
 		}
+	}
+
+	/** 1e-6 dB so an exact margin still passes, matching the slot run. */
+	private static readonly MARGIN_SLACK_DB = 1e-6
+
+	private clearGateRun(t: OpenTrack): void {
+		t.gateOn = false
+		t.gateRun = false
+		t.gateOffs = 0
+		t.gateOnBlocks = 0
+		t.gateBest = Number.NEGATIVE_INFINITY
+		t.gateQualified = false
+		t.gateQualifiedSample = Number.NaN
+	}
+
+	/** On at snr ≥ k, or at snr ≥ k − 1.5 while the run is alive. */
+	private isOn(alive: boolean, snr: number, k: number): boolean {
+		if (snr >= k) return true
+		return alive && snr >= k - CHANNEL_GATE_HYSTERESIS_DB
+	}
+
+	/**
+	 * One observed measurement. Copies the reading's scalars before return:
+	 * the caller reuses the reading object.
+	 */
+	private measuresValid(
+		t: OpenTrack,
+		gateOf: (centreHz: number, obwHz: number) => GateReading,
+	): boolean {
+		this.ensureGeometry(t)
+		const reading = gateOf(t.geomCentre, t.geomObw)
+		return reading.valid && Number.isFinite(reading.channelSnrDb)
+	}
+
+	private stepObserved(
+		t: OpenTrack,
+		gateOf: (centreHz: number, obwHz: number) => GateReading,
+	): void {
+		this.ensureGeometry(t)
+		const reading = gateOf(t.geomCentre, t.geomObw)
+		this.stepReading(t, reading, t.lastSample)
+	}
+
+	/**
+	 * One measurement. Copies the reading's scalars before return: the caller
+	 * reuses the reading object.
+	 */
+	private stepReading(
+		t: OpenTrack,
+		reading: GateReading,
+		endSample: number,
+	): void {
+		const snr = reading.channelSnrDb
+		const k = reading.kDb
+		const margin = reading.marginDb
+		const minMs = reading.minDurationMs
+		const valid = reading.valid && Number.isFinite(snr)
+		t.gateStamp = this.blockNo
+		if (!valid) {
+			this.clearGateRun(t)
+			if (t.gate !== "passed") t.gate = "pending"
+			this.trace(t, "invalid", snr, k, margin, minMs, endSample)
+			return
+		}
+		t.channelSnrDb = snr
+		if (t.gate === undefined) t.gate = "pending"
+		this.stepAlive(t, snr, k, margin, minMs, true, endSample)
+	}
+
+	/**
+	 * A block this track was not observed on, once its measurement is known.
+	 * Invalid ends the run without passing. Valid counts as off, and only
+	 * that off can complete a pass.
+	 */
+	private stepDeferredOff(
+		t: OpenTrack,
+		gateOf: (centreHz: number, obwHz: number) => GateReading,
+		endSample: number,
+	): void {
+		this.ensureGeometry(t)
+		const reading = gateOf(t.geomCentre, t.geomObw)
+		const snr = reading.channelSnrDb
+		const k = reading.kDb
+		const margin = reading.marginDb
+		const minMs = reading.minDurationMs
+		const valid = reading.valid && Number.isFinite(snr)
+		if (!valid) {
+			t.gateStamp = this.blockNo
+			this.clearGateRun(t)
+			if (t.gate !== "passed") t.gate = "pending"
+			this.trace(t, "invalid", snr, k, margin, minMs, endSample)
+			return
+		}
+		this.stepOff(t, endSample)
+	}
+
+	/**
+	 * Counts as off. `stepDeferredOff` uses it for a valid miss. A block that
+	 * was not measured calls it too; a reset has usually already ended the run.
+	 */
+	private stepOff(t: OpenTrack, endSample: number): void {
+		t.gateStamp = this.blockNo
+		if (t.gate === undefined) t.gate = "pending"
+		this.stepAlive(
+			t,
+			Number.NEGATIVE_INFINITY,
+			t.gateK,
+			t.gateMargin,
+			t.gateMinMs,
+			false,
+			endSample,
+		)
+	}
+
+	/**
+	 * One step of the run. An observed block is on at snr ≥ k, or at
+	 * snr ≥ k − 1.5 while the run is alive. Anything else valid is off: the
+	 * first off in a living run is tolerated, the next ends it. An unobserved
+	 * block is an off even when its SNR would have been on. Passing does not
+	 * stop the run; `qualified` clears only when the run ends.
+	 */
+	private stepAlive(
+		t: OpenTrack,
+		snr: number,
+		k: number,
+		margin: number,
+		minMs: number,
+		observed: boolean,
+		endSample: number,
+	): void {
+		const on = observed && this.isOn(t.gateRun, snr, k)
+		if (on) {
+			if (!t.gateRun) {
+				t.gateRun = true
+				t.gateOffs = 0
+				t.gateOnBlocks = 0
+				t.gateBest = Number.NEGATIVE_INFINITY
+				t.gateQualified = false
+				t.gateQualifiedSample = Number.NaN
+			}
+			t.gateOn = true
+			t.gateOnBlocks++
+			if (snr > t.gateBest) t.gateBest = snr
+			t.gateK = k
+			t.gateMargin = margin
+			t.gateMinMs = minMs
+		} else if (t.gateRun && t.gateOffs === 0) {
+			t.gateOn = false
+			t.gateOffs = 1
+			t.gateOnBlocks++
+		} else {
+			this.clearGateRun(t)
+			if (t.gate !== "passed") t.gate = "pending"
+			this.trace(
+				t,
+				observed ? "measure" : "off",
+				observed ? snr : Number.NEGATIVE_INFINITY,
+				k,
+				margin,
+				minMs,
+				endSample,
+			)
+			return
+		}
+		this.noteQualified(t, endSample)
+		this.grantPass(t, endSample)
+		this.trace(
+			t,
+			observed ? "measure" : "off",
+			observed ? snr : Number.NEGATIVE_INFINITY,
+			k,
+			margin,
+			minMs,
+			endSample,
+		)
+	}
+
+	/** Latches `gateQualified` for this run. A later block does not clear it. */
+	private noteQualified(t: OpenTrack, endSample: number): void {
+		if (!t.gateRun || t.gateQualified) return
+		if (t.gateOnBlocks * this.opts.blockMs < t.gateMinMs) return
+		if (t.gateBest + Tracker.MARGIN_SLACK_DB < t.gateK + t.gateMargin) return
+		t.gateQualified = true
+		t.gateQualifiedSample = endSample
+	}
+
+	/** The sticky verdict. The first qualified block of this track passes it. */
+	private grantPass(t: OpenTrack, endSample: number): void {
+		if (t.gate === "passed") return
+		if (!t.gateQualified) {
+			t.gate = "pending"
+			return
+		}
+		t.gate = "passed"
+		t.gatePassedSample = endSample
+		t.gateJustPassed = true
+	}
+
+	/**
+	 * Copies the predecessor's run after the rollover block's step. The
+	 * successor passes only when that run is qualified, at the later of its
+	 * own start and the block that qualified the run.
+	 */
+	private inheritRun(prev: OpenTrack, next: OpenTrack): void {
+		if (!this.planActive) return
+		next.gateOn = prev.gateOn
+		next.gateRun = prev.gateRun
+		next.gateOffs = prev.gateOffs
+		next.gateOnBlocks = prev.gateOnBlocks
+		next.gateBest = prev.gateBest
+		next.gateK = prev.gateK
+		next.gateMargin = prev.gateMargin
+		next.gateMinMs = prev.gateMinMs
+		next.gateQualified = prev.gateQualified
+		next.gateQualifiedSample = prev.gateQualifiedSample
+		next.gateStamp = this.blockNo
+		if (prev.channelSnrDb !== undefined && Number.isFinite(prev.channelSnrDb))
+			next.channelSnrDb = prev.channelSnrDb
+		if (next.gateQualified) {
+			const qualifiedAt = next.gateQualifiedSample
+			const end = Number.isFinite(qualifiedAt) ? qualifiedAt : next.lastSample
+			this.grantPass(next, Math.max(next.startSample, end))
+		}
+		this.trace(
+			next,
+			"inherit",
+			next.channelSnrDb ?? Number.NEGATIVE_INFINITY,
+			next.gateK,
+			next.gateMargin,
+			next.gateMinMs,
+			next.startSample,
+			prev.id,
+		)
+	}
+
+	private trace(
+		t: OpenTrack,
+		kind: GateTrace["kind"],
+		snr: number,
+		kDb: number,
+		marginDb: number,
+		minMs: number,
+		endSample: number,
+		fromTrackId: string | null = null,
+	): void {
+		const fn = this.gateTrace
+		if (fn === null) return
+		fn({
+			trackId: t.id,
+			kind,
+			snr,
+			kDb,
+			marginDb,
+			minMs,
+			endSample,
+			gate: t.gate ?? "pending",
+			passedSample: t.gatePassedSample ?? null,
+			on: t.gateOn,
+			run: t.gateRun,
+			offUsed: t.gateOffs > 0,
+			onBlocks: t.gateOnBlocks,
+			best: t.gateBest,
+			fromTrackId,
+		})
+	}
+
+	private liveById(id: string): OpenTrack | undefined {
+		for (const t of this.open) if (t.id === id) return t
+		return undefined
+	}
+
+	private pendingOffById(id: string): OpenTrack | undefined {
+		for (const t of this.pendingOff) if (t.id === id) return t
+		return undefined
+	}
+
+	private paintLive(track: TrackSnapshot, t: OpenTrack): void {
+		if (t.gate !== undefined) track.gate = t.gate
+		if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
+			track.channelSnrDb = t.channelSnrDb
+		else delete track.channelSnrDb
+		if (t.gate === "passed" && t.gatePassedSample !== undefined)
+			track.gatePassedSample = t.gatePassedSample
+		else delete track.gatePassedSample
+	}
+
+	/**
+	 * A close built before its measurement, or a close that never passed.
+	 * A pass sample may sit one block past `lastSample` when the run met the
+	 * rule on a hang block the track was not observed on.
+	 */
+	private paintStoredClose(track: TrackSnapshot): void {
+		if (
+			track.gate === "passed" &&
+			track.gatePassedSample !== undefined &&
+			Number.isFinite(track.gatePassedSample)
+		)
+			return
+		track.gate = "below"
+		delete track.gatePassedSample
+	}
+
+	/** Centre and OBW for this block, computed once and reused by `snapshot`. */
+	private ensureGeometry(t: OpenTrack): void {
+		if (t.geomBlock === this.blockNo) return
+		const centreHz = this.rf(this.centroidBin(t), this.n, t.epoch.centreHz)
+		const mean = t.spectrum.meanDb()
+		const { a, e } = this.obwWindow(t, mean)
+		const obwHz =
+			t.maxBlockSnrDb >= OBW_MIN_SNR_DB
+				? obwAtDb(mean, a, e, this.opts.binHz, 20)
+				: t.maxWidthBins * this.opts.binHz
+		t.geomBlock = this.blockNo
+		t.geomCentre = centreHz
+		t.geomObw = obwHz
 	}
 
 	private snapshot(t: OpenTrack, n: number): TrackSnapshot {
@@ -608,6 +1245,13 @@ export class Tracker {
 		const f = this.features(t)
 		const blocks = Math.max(1, t.blocks)
 		const bandMean = t.bandLinSum / blocks
+		const centreHz = this.rf(this.centroidBin(t), n, t.epoch.centreHz)
+		const obwHz = useDb
+			? obwAtDb(mean, a, e, binHz, 20)
+			: t.maxWidthBins * binHz
+		t.geomBlock = this.blockNo
+		t.geomCentre = centreHz
+		t.geomObw = obwHz
 		const snap: TrackSnapshot = {
 			trackId: t.id,
 			sourceId: this.opts.sourceId,
@@ -615,8 +1259,8 @@ export class Tracker {
 			epoch: t.epoch.epoch,
 			startSample: t.startSample,
 			lastSample: t.lastSample,
-			centreHz: this.rf(this.centroidBin(t), n, t.epoch.centreHz),
-			obwHz: useDb ? obwAtDb(mean, a, e, binHz, 20) : t.maxWidthBins * binHz,
+			centreHz,
+			obwHz,
 			obwMethod: useDb ? "-20dB" : "on-bins",
 			peakDbfs: t.peakDbfs,
 			meanDbfs: 10 * Math.log10(Math.max(bandMean, 1e-30)),
@@ -634,6 +1278,17 @@ export class Tracker {
 				t.startSample,
 				t.epoch.verifiedFromSample,
 			),
+		}
+		if (this.planActive && t.gate !== undefined) {
+			snap.gate = t.gate
+			if (t.channelSnrDb !== undefined && Number.isFinite(t.channelSnrDb))
+				snap.channelSnrDb = t.channelSnrDb
+			if (
+				t.gate === "passed" &&
+				t.gatePassedSample !== undefined &&
+				Number.isFinite(t.gatePassedSample)
+			)
+				snap.gatePassedSample = t.gatePassedSample
 		}
 		if (f.acf30 !== undefined) snap.acf30 = f.acf30
 		if (f.acf60 !== undefined) snap.acf60 = f.acf60

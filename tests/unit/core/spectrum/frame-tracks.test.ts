@@ -87,6 +87,54 @@ describe("surfacedOf (req 5.1 display rule)", () => {
 		expect(surfacedOf({ ...strong, burst: true, spur: true }, 2)).toBe(false)
 		expect(surfacedOf({ ...strong, burst: true, iqImage: true }, 2)).toBe(false)
 	})
+	it("surfaced equals gate passed when gate is present", () => {
+		// Below minSurfaceBlocks, and a burst under its old +3 dB line: the gate wins.
+		expect(surfacedOf({ ...base, blocks: 1, gate: "passed" }, 2)).toBe(true)
+		expect(
+			surfacedOf(
+				{ ...base, burst: true, blocks: 1, maxBlockSnrDb: 0, gate: "passed" },
+				2,
+			),
+		).toBe(true)
+		expect(
+			surfacedOf(
+				{ ...base, blocks: 50, maxBlockSnrDb: 90, gate: "pending" },
+				2,
+			),
+		).toBe(false)
+		expect(
+			surfacedOf(
+				{
+					...base,
+					burst: true,
+					blocks: 50,
+					maxBlockSnrDb: 90,
+					gate: "pending",
+				},
+				2,
+			),
+		).toBe(false)
+	})
+	it("absent gate keeps the minSurfaceBlocks display rule", () => {
+		expect(surfacedOf({ ...base, blocks: 2 }, 2)).toBe(true)
+		expect(surfacedOf({ ...base, blocks: 1 }, 2)).toBe(false)
+		const burst = { ...base, burst: true, blocks: 1 }
+		expect(surfacedOf({ ...burst, maxBlockSnrDb: 13 }, 2)).toBe(true)
+		expect(surfacedOf({ ...burst, maxBlockSnrDb: 12.99 }, 2)).toBe(false)
+		expect("gate" in base).toBe(false)
+	})
+	it("a passed spur is not surfaced", () => {
+		const passed = {
+			...base,
+			blocks: 1,
+			maxBlockSnrDb: 90,
+			gate: "passed" as const,
+		}
+		expect(surfacedOf({ ...passed, spur: true }, 2)).toBe(false)
+		expect(surfacedOf({ ...passed, iqImage: true }, 2)).toBe(false)
+		expect(surfacedOf({ ...passed, burst: true, spur: true }, 2)).toBe(false)
+		expect(surfacedOf({ ...passed, burst: true, iqImage: true }, 2)).toBe(false)
+	})
 })
 
 describe("blockTrackOf", () => {
@@ -147,6 +195,43 @@ describe("blockTrackOf", () => {
 		expect(
 			blockTrackOf(1, 2, FLAGS, assoc({ blocks: 1 }), FS, 2).surfaced,
 		).toBe(false)
+	})
+	it("copies a present gate and rounds channelSnrDb; a non-finite SNR is omitted", () => {
+		const passed = blockTrackOf(
+			1,
+			2,
+			FLAGS,
+			assoc({ gate: "passed", channelSnrDb: 12.26, blocks: 1 }),
+			FS,
+			2,
+		)
+		expect(passed.gate).toBe("passed")
+		expect(passed.channelSnrDb).toBe(12.5)
+		expect(passed.surfaced).toBe(true)
+		const pending = blockTrackOf(
+			1,
+			2,
+			FLAGS,
+			assoc({ gate: "pending", channelSnrDb: Number.NaN, blocks: 20 }),
+			FS,
+			2,
+		)
+		expect(pending.gate).toBe("pending")
+		expect("channelSnrDb" in pending).toBe(false)
+		expect(pending.surfaced).toBe(false)
+		const spur = blockTrackOf(
+			1,
+			2,
+			FLAGS,
+			assoc({ gate: "passed", spur: true, blocks: 1 }),
+			FS,
+			2,
+		)
+		expect(spur.gate).toBe("passed")
+		expect(spur.surfaced).toBe(false)
+		const none = blockTrackOf(1, 2, FLAGS, assoc(), FS, 2)
+		expect("gate" in none).toBe(false)
+		expect("channelSnrDb" in none).toBe(false)
 	})
 	it("a track id at the bound is carried; one past it (or off the charset) carries no field", () => {
 		const at = "a".repeat(FRAME_TRACK_ID_MAX_CHARS)
@@ -323,6 +408,32 @@ describe("sanitizeBlockTrack (worker boundary, hostile values)", () => {
 		const t = { startHz: 1, endHz: 2 } as unknown as BlockTrack
 		sanitizeBlockTrack(t)
 		expect(t).toEqual({ startHz: 1, endHz: 2 })
+	})
+	it("a present gate forces surfaced false unless it is passed and clean", () => {
+		const pending = loose({ gate: "pending", surfaced: true })
+		sanitizeBlockTrack(pending)
+		expect(pending.gate).toBe("pending")
+		expect(pending.surfaced).toBe(false)
+		const below = loose({ gate: "below", surfaced: true })
+		sanitizeBlockTrack(below)
+		expect("gate" in below).toBe(false)
+		expect(below.surfaced).toBe(false)
+		const passed = loose({ gate: "passed", surfaced: true })
+		sanitizeBlockTrack(passed)
+		expect(passed.gate).toBe("passed")
+		expect(passed.surfaced).toBe(true)
+		const spur = loose({
+			gate: "passed",
+			surfaced: true,
+			flags: { ...FLAGS, spur: true },
+		})
+		sanitizeBlockTrack(spur)
+		expect(spur.gate).toBe("passed")
+		expect(spur.surfaced).toBe(false)
+		const absent = loose({ surfaced: true })
+		sanitizeBlockTrack(absent)
+		expect("gate" in absent).toBe(false)
+		expect(absent.surfaced).toBe(true)
 	})
 })
 

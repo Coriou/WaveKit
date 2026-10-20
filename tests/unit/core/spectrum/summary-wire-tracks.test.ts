@@ -140,6 +140,164 @@ describe("WG11 frame-track fields across the worker (req 5.1, 5.5)", () => {
 		const s = roundTrip([42, null, TRACKED])
 		expect(s.tracks).toEqual([42, null, TRACKED])
 	})
+
+	it("gate below or a non-finite channelSnrDb is stripped by sanitizeBlockTrack", () => {
+		const kept = { ...TRACKED, gate: "passed" as const, channelSnrDb: -123.5 }
+		expect(roundTrip([kept]).tracks[0]).toEqual(kept)
+		const pending = { ...TRACKED, gate: "pending" as const, channelSnrDb: 0 }
+		// pending + surfaced true is a contradiction: the gate owns surfacing.
+		expect(roundTrip([pending]).tracks[0]).toEqual({
+			...pending,
+			surfaced: false,
+		})
+		const below = roundTrip([{ ...TRACKED, gate: "below", channelSnrDb: 6 }])
+			.tracks[0]!
+		expect("gate" in below).toBe(false)
+		expect(below.surfaced).toBe(false)
+		expect(below.channelSnrDb).toBe(6)
+		expect(below.trackId).toBe(TRACKED.trackId)
+		expect(below.startHz).toBe(1)
+		for (const value of [Number.NaN, Infinity, -Infinity]) {
+			const t = roundTrip([{ ...TRACKED, gate: "passed", channelSnrDb: value }])
+				.tracks[0]!
+			expect("channelSnrDb" in t, String(value)).toBe(false)
+			expect(t.gate).toBe("passed")
+			expect(t.trackId).toBe(TRACKED.trackId)
+		}
+		// No plan: the keys are absent and the bytes match the pre-gate track.
+		const absent = roundTrip([TRACKED]).tracks[0]!
+		expect(absent).toEqual(TRACKED)
+		expect("gate" in absent).toBe(false)
+		expect("channelSnrDb" in absent).toBe(false)
+		expect(JSON.stringify(absent)).toBe(JSON.stringify(TRACKED))
+	})
+
+	it("drops hostile gate and channelSnrDb values without throwing", () => {
+		const gates: unknown[] = [
+			"below",
+			"PASSED",
+			"passed ",
+			"",
+			1,
+			true,
+			null,
+			{},
+			[],
+			"pending\n",
+		]
+		for (const gate of gates) {
+			const t = roundTrip([{ ...TRACKED, gate, channelSnrDb: 6.5 }]).tracks[0]!
+			expect("gate" in t, JSON.stringify(gate)).toBe(false)
+			expect(t.surfaced, JSON.stringify(gate)).toBe(false)
+			expect(t.channelSnrDb).toBe(6.5)
+			expect(t.trackId).toBe(TRACKED.trackId)
+		}
+		// Off the 0.5 dB grid or past ±999.5: not a frame value (R 2.6), so a
+		// hostile finite cannot grow the track past the 40-byte gate budget.
+		const snrs: unknown[] = [
+			"12.5",
+			"NaN",
+			null,
+			{},
+			[],
+			true,
+			1e20,
+			1e308,
+			Number.MAX_VALUE,
+			1000,
+			-1000,
+			12.2,
+			-999.75,
+			Number.NaN,
+		]
+		for (const channelSnrDb of snrs) {
+			const t = roundTrip([{ ...TRACKED, gate: "pending", channelSnrDb }])
+				.tracks[0]!
+			expect("channelSnrDb" in t, String(channelSnrDb)).toBe(false)
+			expect(t.gate).toBe("pending")
+			expect(t.surfaced).toBe(false)
+			expect(t.startHz).toBe(1)
+		}
+		const both = roundTrip([
+			{ ...TRACKED, gate: "below", channelSnrDb: "nope" },
+		]).tracks[0]!
+		expect("gate" in both).toBe(false)
+		expect("channelSnrDb" in both).toBe(false)
+		expect(both.surfaced).toBe(false)
+		expect(both.trackId).toBe(TRACKED.trackId)
+	})
+
+	it("a passed gate with unknown mask flags cannot leave surfaced true", () => {
+		const cases: { flags: unknown; label: string }[] = [
+			{ flags: { ...FLAGS, spur: "true" }, label: "string spur" },
+			{
+				flags: { ...FLAGS, spur: false, iqImage: "no" },
+				label: "string iqImage",
+			},
+			{
+				flags: { burst: false, edge: false, spur: false },
+				label: "missing iqImage",
+			},
+			{
+				flags: { burst: false, iqImage: false, edge: false },
+				label: "missing spur",
+			},
+			{ flags: null, label: "null flags" },
+		]
+		for (const c of cases) {
+			const t = roundTrip([
+				{ ...TRACKED, gate: "passed", surfaced: true, flags: c.flags },
+			]).tracks[0]
+			if (t === undefined) continue
+			expect(t.surfaced === true, c.label).toBe(false)
+		}
+	})
+
+	it("a present gate cannot leave surfaced true unless it survived as passed", () => {
+		// Hostile worker, through WorkerToMainSchema and decodeEventsFromWire.
+		// False-safe: the surfaced key stays, and the value is false.
+		const hostile: { gate: unknown; label: string }[] = [
+			{ gate: "pending", label: "pending" },
+			{ gate: "below", label: "below" },
+			{ gate: null, label: "null" },
+			{ gate: "nope", label: "string" },
+			{ gate: 3, label: "number" },
+		]
+		for (const c of hostile) {
+			const t = roundTrip([{ ...TRACKED, gate: c.gate, surfaced: true }])
+				.tracks[0]!
+			if (c.gate === "pending") expect(t.gate, c.label).toBe("pending")
+			else expect("gate" in t, c.label).toBe(false)
+			expect(t.surfaced, c.label).toBe(false)
+		}
+		const passed = roundTrip([{ ...TRACKED, gate: "passed", surfaced: true }])
+			.tracks[0]!
+		expect(passed.gate).toBe("passed")
+		expect(passed.surfaced).toBe(true)
+		const spur = roundTrip([
+			{
+				...TRACKED,
+				gate: "passed",
+				surfaced: true,
+				flags: { ...FLAGS, spur: true },
+			},
+		]).tracks[0]!
+		expect(spur.gate).toBe("passed")
+		expect(spur.surfaced).toBe(false)
+		const image = roundTrip([
+			{
+				...TRACKED,
+				gate: "passed",
+				surfaced: true,
+				flags: { ...FLAGS, iqImage: true },
+			},
+		]).tracks[0]!
+		expect(image.gate).toBe("passed")
+		expect(image.surfaced).toBe(false)
+		const absent = roundTrip([TRACKED]).tracks[0]!
+		expect("gate" in absent).toBe(false)
+		expect(absent.surfaced).toBe(true)
+	})
 })
 
 function UNTRACKED_AT(startHz: number, endHz: number): BlockTrack {

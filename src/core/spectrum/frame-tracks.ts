@@ -10,6 +10,10 @@
  *   + `,"peakDbfs":-999.5` 18 + `,"blocks":9999999` 17 + `,"ageMs":99999999` 17
  *   + `,"surfaced":false` 17 + `,"scanner":{"discoveryId":"","protocol":"digital-unknown",`
  *   `"confidence":"classified"}` 84 + 36 id = 260 bytes (ids are ASCII by the charset below).
+ *
+ * WG12 R 2.6 adds at most `SPECTRUM_FRAME_TRACK_GATE_MAX_EXTRA_BYTES` (40) on top:
+ *   `,"gate":"passed"` 16 + `,"channelSnrDb":-123.5` 22 = 38. `channelSnrDb` uses the same
+ *   ±999.5 half-dB grid, so the number is at most six characters (`-999.5`).
  */
 import {
 	BANDPLAN_SCANNER_PROTOCOLS,
@@ -71,6 +75,14 @@ export interface TrackAssociation {
 	spur: boolean
 	iqImage: boolean
 	burst: boolean
+	/**
+	 * WG12 channel gate for this block. Absent when no channel plan is set (A8):
+	 * frames then keep the minSurfaceBlocks display rule. `"below"` is a close
+	 * state and is not a frame value.
+	 */
+	gate?: "pending" | "passed"
+	/** This block's channel SNR, before half-dB rounding. */
+	channelSnrDb?: number
 }
 
 /** Half-dB rounding (the summary bins' grid); null when not finite or beyond ±999.5. */
@@ -82,16 +94,20 @@ export function roundHalfDb(x: number): number | null {
 }
 
 /**
- * Req 5.1 display surfacing rule: never a spur or an image; a burst track at its threshold
- * + 3 dB (best per-bin block SNR); any other track at ≥ minSurfaceBlocks on-blocks.
+ * Display surfacing. When `gate` is present (R 2.6) `surfaced` is
+ * `gate === "passed"` and the segment is not a spur or an image. When `gate`
+ * is absent (A8, no channel plan) the WG11 rule remains: never a spur or an
+ * image; a burst track at its threshold + 3 dB; any other track at
+ * ≥ minSurfaceBlocks on-blocks.
  */
 export function surfacedOf(
 	t: Pick<
 		TrackAssociation,
 		"spur" | "iqImage" | "burst" | "blocks" | "maxBlockSnrDb" | "thresholdDb"
-	>,
+	> & { gate?: "pending" | "passed" },
 	minSurfaceBlocks: number,
 ): boolean {
+	if (t.gate !== undefined) return t.gate === "passed" && !t.spur && !t.iqImage
 	if (t.spur || t.iqImage) return false
 	if (t.burst) return t.maxBlockSnrDb >= t.thresholdDb + BURST_SURFACE_EXTRA_DB
 	return t.blocks >= minSurfaceBlocks
@@ -151,10 +167,24 @@ export function blockTrackOf(
 			: Number.NaN
 	if (isCount(age, Number.MAX_SAFE_INTEGER))
 		out.ageMs = Math.min(age, FRAME_TRACK_AGE_MS_MAX)
+	const gate = a.gate
 	out.surfaced = surfacedOf(
-		{ ...a, iqImage: a.iqImage || flags.iqImage },
+		{
+			spur: a.spur,
+			iqImage: a.iqImage || flags.iqImage,
+			burst: a.burst,
+			blocks: a.blocks,
+			maxBlockSnrDb: a.maxBlockSnrDb,
+			thresholdDb: a.thresholdDb,
+			...(gate !== undefined ? { gate } : {}),
+		},
 		minSurfaceBlocks,
 	)
+	if (gate !== undefined) out.gate = gate
+	if (a.channelSnrDb !== undefined) {
+		const channel = roundHalfDb(a.channelSnrDb)
+		if (channel !== null) out.channelSnrDb = channel
+	}
 	return out
 }
 
@@ -171,9 +201,11 @@ const WG11_KEYS = [
 /**
  * Host side, after the worker boundary (req 5.5, bounded decode): drops every malformed WG11
  * field of a block track in place, never the track or the frame. Without a valid `trackId`
- * the track keeps none of them (`flags.spur` included). `surfaced` true next to a spur or an
- * image is a contradiction and is dropped. A `scanner` field never crosses the worker and is
- * dropped. O(1) per track.
+ * the track keeps none of them (`flags.spur` included). When `gate` is absent (A8),
+ * `surfaced` true next to a spur or an image is dropped. When `gate` is present, `surfaced`
+ * may stay true only for a surviving `"passed"` that is not a spur or an image; any other
+ * boolean is forced false (the key stays, so the frame cannot be read as a pass). A
+ * `scanner` field never crosses the worker and is dropped. O(1) per track.
  */
 export function sanitizeBlockTrack(t: BlockTrack): void {
 	const o = t as unknown as LooseTrack
@@ -184,10 +216,18 @@ export function sanitizeBlockTrack(t: BlockTrack): void {
 	delete o.scanner
 	if (!isFrameTrackId(o.trackId)) {
 		for (const k of WG11_KEYS) delete o[k]
+		delete o.gate
+		delete o.channelSnrDb
 		if (flags) delete flags.spur
 		return
 	}
 	if ("trackerId" in o && !isFrameTrackId(o.trackerId)) delete o.trackerId
+	// A gated track is built with boolean spur and iqImage flags. Unknown mask
+	// flags cannot vouch for a surfaced gate pass (checked before the drop below).
+	const masksKnown =
+		flags !== null &&
+		typeof flags.spur === "boolean" &&
+		typeof flags.iqImage === "boolean"
 	if (flags && "spur" in flags && typeof flags.spur !== "boolean")
 		delete flags.spur
 	if ("snrDb" in o && !isHalfDb(o.snrDb)) delete o.snrDb
@@ -195,10 +235,21 @@ export function sanitizeBlockTrack(t: BlockTrack): void {
 	if ("blocks" in o && !isCount(o.blocks, FRAME_TRACK_BLOCKS_MAX))
 		delete o.blocks
 	if ("ageMs" in o && !isCount(o.ageMs, FRAME_TRACK_AGE_MS_MAX)) delete o.ageMs
+	// R 2.6: frames carry pending|passed only, and channelSnrDb on the same
+	// half-dB grid as snrDb. Anything else (below, null, a string, a number)
+	// is dropped. Absent keys stay absent. A present `gate` key is remembered
+	// before that drop: it owns surfacing even when the value does not survive.
+	const gatePresent = "gate" in o
+	if (gatePresent && o.gate !== "pending" && o.gate !== "passed") delete o.gate
+	if ("channelSnrDb" in o && !isHalfDb(o.channelSnrDb)) delete o.channelSnrDb
 	if ("surfaced" in o) {
-		const contradicts =
-			o.surfaced === true && (flags?.spur === true || flags?.iqImage === true)
-		if (typeof o.surfaced !== "boolean" || contradicts) delete o.surfaced
+		const spurOrImage = flags?.spur === true || flags?.iqImage === true
+		if (typeof o.surfaced !== "boolean") delete o.surfaced
+		else if (gatePresent) {
+			// False-safe: pending, a removed gate, a spur, an image or unknown
+			// mask flags cannot leave `surfaced` true. The key stays, with value false.
+			if (o.gate !== "passed" || spurOrImage || !masksKnown) o.surfaced = false
+		} else if (o.surfaced === true && spurOrImage) delete o.surfaced
 	}
 }
 
@@ -213,6 +264,8 @@ interface LooseTrack {
 	surfaced?: unknown
 	trackerId?: unknown
 	scanner?: unknown
+	gate?: unknown
+	channelSnrDb?: unknown
 }
 interface LooseFlags {
 	spur?: unknown

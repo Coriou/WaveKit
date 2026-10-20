@@ -24,8 +24,8 @@ import type {
 	EngineState,
 	PipelineEvent,
 	PendingEpoch,
-	PipelineInput,
 } from "../../../../src/core/spectrum/types.js"
+import type { WorkerPipelineInput } from "../../../../src/core/spectrum/worker-protocol.js"
 import {
 	addInto,
 	gaussianNoise,
@@ -52,9 +52,9 @@ const EMPTY_STATE: EngineState = {
 
 /** Records every input the engine posts; bytes are copied because buffers are recycled. */
 class RecordingHost implements PipelineHost {
-	readonly inputs: PipelineInput[] = []
+	readonly inputs: WorkerPipelineInput[] = []
 	constructor(readonly handlers: PipelineHostHandlers) {}
-	send(input: PipelineInput, transfer?: ArrayBuffer): void {
+	send(input: WorkerPipelineInput, transfer?: ArrayBuffer): void {
 		this.inputs.push(
 			input.kind === "bytes"
 				? { ...input, bytes: Uint8Array.from(input.bytes) }
@@ -104,7 +104,7 @@ function makeEngine(extra: Partial<SpectrumEngineDeps> = {}) {
 
 /** Rebuilds each stream's sample bytes from posted inputs; gaps stay `null`. */
 function rebuild(
-	inputs: PipelineInput[],
+	inputs: WorkerPipelineInput[],
 ): { stream: number; bytes: (number | null)[] }[] {
 	const streams: { stream: number; bytes: (number | null)[] }[] = []
 	for (const input of inputs) {
@@ -368,6 +368,34 @@ describe("SpectrumEngine sample accounting", () => {
 			stream: 1,
 			sampleRateHz: 2_048_000,
 		})
+		await engine.stop()
+	})
+
+	it("replays setChannelPlan after a worker restart", async () => {
+		const { engine, sources, hosts } = makeEngine()
+		await engine.start()
+		const plan = {
+			sourceId: "rtl",
+			defaultWidthHz: 12_500,
+			entries: [
+				{
+					startHz: 100,
+					endHz: 200,
+					widthHz: 12_500,
+					rasterHz: null,
+					firstChannelHz: null,
+					burst: false,
+					rangeKey: "nfm",
+				},
+			],
+		}
+		engine.setChannelPlan(plan)
+		expect(hosts[0]!.inputs).toContainEqual({ kind: "channel-plan", plan })
+		sources.setCaps("rtl", { sampleRate: 2_048_000 })
+		await settle()
+		await settle()
+		expect(hosts).toHaveLength(2)
+		expect(hosts[1]!.inputs).toContainEqual({ kind: "channel-plan", plan })
 		await engine.stop()
 	})
 })

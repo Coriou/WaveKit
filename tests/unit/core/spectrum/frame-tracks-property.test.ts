@@ -47,6 +47,8 @@ const WG11_KEYS = [
 	"ageMs",
 	"surfaced",
 	"trackerId",
+	"gate",
+	"channelSnrDb",
 ] as const
 
 /**

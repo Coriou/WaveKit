@@ -1227,9 +1227,9 @@ describe("ScannerService", () => {
 			ranges: [{ startHz: 446_000_000, endHz: 446_400_000 }],
 		})
 		feedTones(h.fanout, 2, [
-			{ offsetHz: 100_000, amp: 0.4 },
-			{ offsetHz: 150_000, amp: 0.4 },
-			{ offsetHz: 50_000, amp: 0.08 }, // 2 × 100 kHz − 150 kHz
+			{ offsetHz: 106_250, amp: 0.4 },
+			{ offsetHz: 156_250, amp: 0.4 },
+			{ offsetHz: 56_250, amp: 0.08 }, // 2 × 106.25 kHz − 156.25 kHz, all on the 12.5 kHz raster
 		])
 		await tick(50)
 		const internals = h.service as unknown as {
@@ -1239,7 +1239,7 @@ describe("ScannerService", () => {
 				{ epoch: number; lastTrack: { centreHz: number } | null }
 			>
 		}
-		const hz = CENTRE + 50_000
+		const hz = CENTRE + 56_250
 		const im = [...internals.live.values()].find(
 			o => Math.abs((o.lastTrack?.centreHz ?? 0) - hz) < 2_000,
 		)

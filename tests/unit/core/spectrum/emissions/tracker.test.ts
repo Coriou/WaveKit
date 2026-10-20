@@ -246,3 +246,443 @@ describe("Tracker", () => {
 		expect(m[140]).toBe(1)
 	})
 })
+
+describe("tracker channel gate", () => {
+	/** One block's measurement. Non-finite SNR is not a measurement. */
+	const meas = (channelSnrDb: number, minDurationMs = 300) => ({
+		channelSnrDb,
+		kDb: 3,
+		marginDb: 3,
+		minDurationMs,
+		valid: Number.isFinite(channelSnrDb),
+	})
+
+	it("stays pending until the track's own blocks meet 300 ms", () => {
+		const t = tracker()
+		t.setGatePlan(true)
+		const first = run(t, 0, [[140, 149, -20]])
+		const id = tracksOf(first, "track-open")[0]!.trackId
+		t.publishGate(() => meas(20), first, 0)
+		expect(t.snapshotOf(id)?.gate).toBe("pending")
+		for (let i = 1; i < 4; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(20), ev, 0)
+		}
+		// 4 × 50 ms is 200 ms. One block of the slot's history does not count.
+		const snap = t.snapshotOf(id)
+		expect(snap?.gate).toBe("pending")
+		expect(snap?.gatePassedSample).toBeUndefined()
+	})
+
+	it("omits gate fields when no plan is set", () => {
+		const t = tracker()
+		const open = tracksOf(run(t, 0, [[100, 110, -40]]), "track-open")[0]!
+		expect("gate" in open).toBe(false)
+		expect("channelSnrDb" in open).toBe(false)
+		expect("gatePassedSample" in open).toBe(false)
+	})
+
+	it("ignores setGate until a plan is set", () => {
+		const t = tracker()
+		const open = tracksOf(run(t, 0, [[100, 110, -40]]), "track-open")[0]!
+		t.setGate(open.trackId, meas(9))
+		const snap = t.snapshotOf(open.trackId)!
+		expect("gate" in snap).toBe(false)
+	})
+
+	it("keeps passed sticky and reports the latest finite measurement", () => {
+		const t = tracker()
+		t.setGatePlan(true)
+		let id = ""
+		for (let i = 0; i < 6; i++) {
+			const ev = run(t, i, [[100, 110, -40]])
+			if (i === 0) id = tracksOf(ev, "track-open")[0]!.trackId
+			t.publishGate(() => meas(7.5), ev, 0)
+		}
+		const ev = run(t, 6, [[100, 110, -40]])
+		t.publishGate(() => meas(1.2), ev, 0)
+		expect(t.snapshotOf(id)).toMatchObject({
+			gate: "passed",
+			channelSnrDb: 1.2,
+			gatePassedSample: 6 * BLOCK,
+		})
+	})
+
+	it("omits a non-finite channel SNR and closes a never-passed track below", () => {
+		const t = tracker()
+		t.setGatePlan(true)
+		const open = tracksOf(run(t, 0, [[100, 110, -40]]), "track-open")[0]!
+		for (const snr of [
+			Number.NEGATIVE_INFINITY,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+		])
+			t.setGate(open.trackId, meas(snr))
+		const pending = t.snapshotOf(open.trackId)!
+		expect(pending.gate).toBe("pending")
+		expect("channelSnrDb" in pending).toBe(false)
+		const closed = [...run(t, 1, []), ...run(t, 2, []), ...run(t, 3, [])]
+		const close = tracksOf(closed, "track-close")[0]!
+		expect(close.gate).toBe("below")
+		expect("channelSnrDb" in close).toBe(false)
+		expect("gatePassedSample" in close).toBe(false)
+	})
+
+	it("closes a passed track still passed, with the original sample", () => {
+		const t = tracker()
+		t.setGatePlan(true)
+		let id = ""
+		for (let i = 0; i < 6; i++) {
+			const ev = run(t, i, [[100, 110, -40]])
+			if (i === 0) id = tracksOf(ev, "track-open")[0]!.trackId
+			t.publishGate(() => meas(8), ev, 0)
+		}
+		expect(t.snapshotOf(id)?.gatePassedSample).toBe(6 * BLOCK)
+		const closed = [...run(t, 6, []), ...run(t, 7, []), ...run(t, 8, [])]
+		const close = tracksOf(closed, "track-close")[0]!
+		expect(close.gate).toBe("passed")
+		expect(close.gatePassedSample).toBe(6 * BLOCK)
+		expect(close.channelSnrDb).toBe(8)
+	})
+
+	it("a second off ends the run, so later on blocks start again", () => {
+		const t = tracker({ hangBlocks: 6 })
+		t.setGatePlan(true)
+		let id = ""
+		const step = (i: number, on: boolean) => {
+			const ev = run(t, i, on ? [[140, 149, -20]] : [])
+			if (i === 0) id = tracksOf(ev, "track-open")[0]!.trackId
+			t.publishGate(() => meas(20), ev, 0)
+		}
+		for (let i = 0; i < 2; i++) step(i, true)
+		step(2, false)
+		step(3, false)
+		for (let i = 4; i < 8; i++) step(i, true)
+		expect(t.snapshotOf(id)?.gate).toBe("pending")
+		expect(t.snapshotOf(id)?.gatePassedSample).toBeUndefined()
+	})
+
+	it("does not give a new track the pass of an earlier emission in the slot", () => {
+		const t = tracker({ hangBlocks: 12 })
+		t.setGatePlan(true)
+		const at = (hz: number) => meas(hz < CENTRE + 25_000 ? 20 : 2.6)
+		let strongId = ""
+		for (let i = 0; i < 8; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(hz => at(hz), ev, 0)
+			if (i === 0) strongId = tracksOf(ev, "track-open")[0]!.trackId
+			if (i === 5) {
+				expect(t.snapshotOf(strongId)).toMatchObject({
+					gate: "passed",
+					gatePassedSample: 6 * BLOCK,
+				})
+			}
+		}
+		const ev = run(t, 8, [[160, 169, -45]])
+		const extra = t.publishGate(hz => at(hz), ev, 0)
+		const opened = tracksOf(ev, "track-open")
+		expect(opened).toHaveLength(1)
+		const neu = opened[0]!
+		expect(neu.blocks).toBe(1)
+		expect(neu.gate).toBe("pending")
+		expect(neu.channelSnrDb).toBe(2.6)
+		expect("gatePassedSample" in neu).toBe(false)
+		expect(neu.startSample).toBeGreaterThan(6 * BLOCK)
+		expect(
+			[...tracksOf(extra, "track-update"), neu].some(
+				u => u.trackId === neu.trackId && u.gate === "passed",
+			),
+		).toBe(false)
+		expect(t.snapshotOf(strongId)?.gate).toBe("passed")
+	})
+
+	it("does not paint a hanging or closed track with a later emission's pass", () => {
+		const t = tracker({ hangBlocks: 10 })
+		t.setGatePlan(true)
+		const opened = run(t, 0, [[140, 149, -20]])
+		t.publishGate(() => meas(4), opened, 0)
+		const aId = tracksOf(opened, "track-open")[0]!.trackId
+		for (let i = 1; i <= 4; i++) {
+			const ev = run(t, i, [])
+			t.publishGate(() => meas(18), ev, 0)
+			const hanging = t.snapshotOf(aId)
+			expect(hanging?.gate).toBe("pending")
+			expect("gatePassedSample" in (hanging ?? {})).toBe(false)
+		}
+		let bId = ""
+		for (let i = 5; i <= 10; i++) {
+			const ev = run(t, i, [[180, 189, -20]])
+			const extra = t.publishGate(() => meas(18), ev, 0)
+			if (i === 5) bId = tracksOf(ev, "track-open")[0]!.trackId
+			if (i < 10) expect(t.snapshotOf(aId)?.gate).toBe("pending")
+			if (i !== 10) continue
+			const closed = tracksOf(ev, "track-close")
+			expect(closed).toHaveLength(1)
+			const a = closed[0]!
+			expect(a.trackId).toBe(aId)
+			expect(a.gate).toBe("below")
+			expect(a.lastSample).toBe(BLOCK)
+			expect("gatePassedSample" in a).toBe(false)
+			const b = t.snapshotOf(bId)
+			expect(b?.gate).toBe("passed")
+			expect(b?.gatePassedSample).toBe(11 * BLOCK)
+			expect(b?.startSample).toBe(5 * BLOCK)
+			expect(b!.gatePassedSample).toBeGreaterThanOrEqual(b!.startSample)
+			expect(b!.gatePassedSample).toBeLessThanOrEqual(b!.lastSample)
+			expect(
+				tracksOf(extra, "track-update").some(
+					u => u.trackId === aId && u.gate === "passed",
+				),
+			).toBe(false)
+		}
+	})
+
+	it("a tolerated off block can complete the pass", () => {
+		const t = tracker({ hangBlocks: 4 })
+		t.setGatePlan(true)
+		let id = ""
+		for (let i = 0; i < 5; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			if (i === 0) id = tracksOf(ev, "track-open")[0]!.trackId
+			t.publishGate(() => meas(20), ev, 0)
+		}
+		expect(t.snapshotOf(id)?.gate).toBe("pending")
+		// 5 × 50 ms is 250 ms. The miss is the one tolerated off and reaches 300 ms.
+		// The off reads the measurement first: a valid block can complete the pass.
+		const off = run(t, 5, [])
+		let calls = 0
+		t.publishGate(
+			() => {
+				calls++
+				return meas(20)
+			},
+			off,
+			0,
+		)
+		expect(calls).toBe(1)
+		expect(t.snapshotOf(id)).toMatchObject({
+			gate: "passed",
+			gatePassedSample: 6 * BLOCK,
+		})
+	})
+
+	it("a passed rollover successor starts passed at its first sample", () => {
+		const t = tracker({ maxTrackBlocks: 8 })
+		t.setGatePlan(true)
+		let opened: TrackSnapshot | undefined
+		let closed: TrackSnapshot | undefined
+		for (let i = 0; i < 8; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(20), ev, 0)
+			if (i !== 7) continue
+			closed = tracksOf(ev, "track-close")[0]
+			opened = tracksOf(ev, "track-open")[0]
+		}
+		expect(closed?.gate).toBe("passed")
+		expect(opened?.gate).toBe("passed")
+		expect(opened?.gatePassedSample).toBe(opened?.startSample)
+		expect(opened?.startSample).toBe(7 * BLOCK)
+	})
+
+	it("a continuous rollover keeps the emission's observed blocks", () => {
+		const t = tracker({ maxTrackBlocks: 4 })
+		t.setGatePlan(true)
+		let successor = ""
+		for (let i = 0; i < 6; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(20), ev, 0)
+			if (i === 3) {
+				const neu = tracksOf(ev, "track-open")[0]!
+				successor = neu.trackId
+				expect(neu.gate).not.toBe("passed")
+				expect(neu.blocks).toBe(1)
+			}
+		}
+		// Three of its own blocks. The predecessor's count is what meets 300 ms.
+		const snap = t.snapshotOf(successor)
+		expect(snap?.blocks).toBe(3)
+		expect(snap?.gate).toBe("passed")
+		expect(snap?.gatePassedSample).toBe(6 * BLOCK)
+	})
+
+	it("a rollover across a gap starts a fresh run", () => {
+		const t = tracker({ maxTrackBlocks: 4 })
+		t.setGatePlan(true)
+		for (let i = 0; i < 3; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(20), ev, 0)
+		}
+		t.noteGateBreak()
+		let successor = ""
+		for (let i = 3; i < 6; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(20), ev, 0)
+			if (i !== 3) continue
+			successor = tracksOf(ev, "track-open")[0]!.trackId
+		}
+		expect(t.snapshotOf(successor)?.blocks).toBe(3)
+		expect(t.snapshotOf(successor)?.gate).toBe("pending")
+		expect(t.snapshotOf(successor)?.gatePassedSample).toBeUndefined()
+	})
+
+	it("a second off before rollover does not hand the pass to the successor", () => {
+		const t = tracker({ maxTrackBlocks: 10 })
+		t.setGatePlan(true)
+		let closed: TrackSnapshot | undefined
+		let opened: TrackSnapshot | undefined
+		for (let i = 0; i < 10; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(i < 6 ? 8 : 1), ev, 0)
+			if (i !== 9) continue
+			closed = tracksOf(ev, "track-close")[0]
+			opened = tracksOf(ev, "track-open")[0]
+		}
+		expect(closed?.gate).toBe("passed")
+		expect(closed?.gatePassedSample).toBe(6 * BLOCK)
+		expect(opened?.gate).toBe("pending")
+		expect(opened?.gatePassedSample).toBeUndefined()
+		expect(opened?.startSample).toBe(9 * BLOCK)
+	})
+
+	it("a fresh run after an invalid block qualifies the successor on its own", () => {
+		const t = tracker({ maxTrackBlocks: 10, hangBlocks: 4 })
+		t.setGatePlan(true)
+		let predecessor = ""
+		let successor = ""
+		let pred: TrackSnapshot | undefined
+		const invalid = {
+			channelSnrDb: Number.NaN,
+			kDb: 3,
+			marginDb: 3,
+			minDurationMs: 300,
+			valid: false,
+		}
+		for (let i = 0; i < 13; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			if (i === 0) predecessor = tracksOf(ev, "track-open")[0]!.trackId
+			t.publishGate(() => (i === 6 ? invalid : meas(8)), ev, 0)
+			if (i !== 9) continue
+			pred = tracksOf(ev, "track-close")[0]
+			const neu = tracksOf(ev, "track-open")[0]!
+			successor = neu.trackId
+			expect(neu.gate).toBe("pending")
+			expect(neu.gatePassedSample).toBeUndefined()
+		}
+		expect(pred?.trackId).toBe(predecessor)
+		expect(pred?.gate).toBe("passed")
+		expect(pred?.gatePassedSample).toBe(6 * BLOCK)
+		const snap = t.snapshotOf(successor)
+		expect(snap?.gate).toBe("passed")
+		// The invalid block ended the passed run. The fresh run's sixth on-block
+		// is this successor's third, at the end of block 13.
+		expect(snap?.gatePassedSample).toBe(13 * BLOCK)
+		expect(snap?.gatePassedSample).toBeGreaterThan(snap?.startSample ?? 0)
+		const quiet = [
+			...run(t, 13, []),
+			...run(t, 14, []),
+			...run(t, 15, []),
+			...run(t, 16, []),
+		]
+		const succClose = tracksOf(quiet, "track-close").find(
+			c => c.trackId === successor,
+		)
+		expect(succClose?.gate).toBe("passed")
+		expect(succClose?.gatePassedSample).toBe(13 * BLOCK)
+	})
+
+	it("an invalid rollover block opens the successor on a fresh run", () => {
+		const t = tracker({ maxTrackBlocks: 8 })
+		t.setGatePlan(true)
+		const invalid = {
+			channelSnrDb: Number.NaN,
+			kDb: 3,
+			marginDb: 3,
+			minDurationMs: 300,
+			valid: false,
+		}
+		let opened: TrackSnapshot | undefined
+		let closed: TrackSnapshot | undefined
+		for (let i = 0; i < 8; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => (i === 7 ? invalid : meas(8)), ev, 0)
+			if (i !== 7) continue
+			closed = tracksOf(ev, "track-close")[0]
+			opened = tracksOf(ev, "track-open")[0]
+		}
+		expect(closed?.gate).toBe("passed")
+		expect(closed?.gatePassedSample).toBe(6 * BLOCK)
+		expect(opened?.gate).toBe("pending")
+		expect(opened?.gatePassedSample).toBeUndefined()
+		for (let i = 8; i < 13; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(8), ev, 0)
+		}
+		expect(t.snapshotOf(opened?.trackId ?? "")?.gate).toBe("pending")
+		const ev = run(t, 13, [[140, 149, -20]])
+		t.publishGate(() => meas(8), ev, 0)
+		const snap = t.snapshotOf(opened?.trackId ?? "")
+		expect(snap?.gate).toBe("passed")
+		expect(snap?.gatePassedSample).toBe(14 * BLOCK)
+	})
+
+	it("a successor whose own channel measures invalid does not inherit the run", () => {
+		const t = tracker({ maxTrackBlocks: 8 })
+		t.setGatePlan(true)
+		const invalid = {
+			channelSnrDb: Number.NaN,
+			kDb: 3,
+			marginDb: 3,
+			minDurationMs: 300,
+			valid: false,
+		}
+		let first: number | null = null
+		// Valid near the predecessor's centre, invalid (masked) a few bins away.
+		const gateOf = (centreHz: number) => {
+			first ??= centreHz
+			return Math.abs(centreHz - first) > 3 * BIN_HZ ? invalid : meas(8)
+		}
+		let opened: TrackSnapshot | undefined
+		let closed: TrackSnapshot | undefined
+		for (let i = 0; i < 8; i++) {
+			// On the rollover block the emission shifts so the successor's own
+			// geometry lands on the masked channel.
+			const ev = run(t, i, [i === 7 ? [146, 152, -20] : [140, 149, -20]])
+			t.publishGate(gateOf, ev, 0)
+			if (i !== 7) continue
+			closed = tracksOf(ev, "track-close")[0]
+			opened = tracksOf(ev, "track-open")[0]
+		}
+		expect(closed?.gate).toBe("passed")
+		expect(opened).toBeDefined()
+		expect(t.snapshotOf(opened?.trackId ?? "")?.gate).toBe("pending")
+	})
+
+	it("keeps no predecessor reference across rollovers without a plan", () => {
+		const t = tracker({ maxTrackBlocks: 3 })
+		for (let i = 0; i < 101; i++) run(t, i, [[140, 149, -20]])
+		const open = (t as unknown as { open: { rolloverFrom: unknown }[] }).open
+		expect(open.length).toBe(1)
+		expect(open[0]?.rolloverFrom).toBeNull()
+	})
+
+	it("paints a pass that lands on the block a track closes", () => {
+		const t = tracker({ maxTrackBlocks: 6 })
+		t.setGatePlan(true)
+		let close: TrackSnapshot | undefined
+		let opened: TrackSnapshot | undefined
+		for (let i = 0; i < 6; i++) {
+			const ev = run(t, i, [[140, 149, -20]])
+			t.publishGate(() => meas(20), ev, 0)
+			if (i !== 5) continue
+			close = tracksOf(ev, "track-close")[0]
+			opened = tracksOf(ev, "track-open")[0]
+		}
+		expect(close?.blocks).toBe(6)
+		expect(close?.gate).toBe("passed")
+		expect(close?.gatePassedSample).toBe(6 * BLOCK)
+		expect(opened?.gate).toBe("passed")
+		// The pass landed on this shared block, after the successor opened.
+		expect(opened?.gatePassedSample).toBe(6 * BLOCK)
+		expect(opened?.gatePassedSample).toBeGreaterThan(opened?.startSample ?? 0)
+	})
+})

@@ -5,10 +5,10 @@ import type {
 	PendingEpoch,
 	PipelineConfig,
 	PipelineEvent,
-	PipelineInput,
 	Raster,
 	TrackSnapshot,
 } from "../../../../src/core/spectrum/types.js"
+import type { WorkerPipelineInput } from "../../../../src/core/spectrum/worker-protocol.js"
 import { packCu8, packF32 } from "../../../mocks/scanner/signals.js"
 import type { Iq } from "../../../mocks/scanner/signals.js"
 
@@ -78,7 +78,7 @@ export class Harness {
 					: 8
 	}
 
-	send(input: PipelineInput): PipelineEvent[] {
+	send(input: WorkerPipelineInput): PipelineEvent[] {
 		const ev = this.pipeline.handle(input)
 		this.events.push(...ev)
 		return ev
@@ -108,7 +108,7 @@ export class Harness {
 			kind: "new-stream",
 			stream: 1,
 			centreHz: opts.centreHz ?? CENTRE,
-			sampleRateHz: FS,
+			sampleRateHz: this.config.sampleRateHz,
 			gainKey: "m:496",
 			tuningTrust: "commanded",
 		})
@@ -145,9 +145,9 @@ export class Harness {
 				bufferedSamples: 0,
 				settleSamples: 0,
 				expectMarker: false,
-				markerTimeoutSamples: 2 * FS,
+				markerTimeoutSamples: 2 * this.config.sampleRateHz,
 				pllSettleSamples: 0,
-				sampleRateHz: FS,
+				sampleRateHz: this.config.sampleRateHz,
 				gainKey: "m:496",
 				tuningTrust: "commanded",
 				centreChanged: true,
