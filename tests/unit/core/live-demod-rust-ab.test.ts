@@ -12,6 +12,7 @@
  */
 import { existsSync } from "node:fs"
 import { join } from "node:path"
+import type { Socket } from "node:net"
 import { PassThrough } from "node:stream"
 import { afterEach, describe, expect, it } from "vitest"
 import { LiveDemodConfigSchema, type SourceCaps } from "../../../src/config.js"
@@ -58,7 +59,7 @@ describe.skipIf(binaryMissing)(
 				const score = bestNormalizedCorrelation(rust, reference)
 				expect(
 					score.corr,
-					`normalised correlation ${score.corr} at lag ${score.lag} samples`,
+					`normalised correlation ${score.corr} at lag ${score.lag} samples (rust ${rust.length}, reference ${reference.length} samples)`,
 				).toBeGreaterThanOrEqual(0.98)
 				const detected = detect(rust)
 				expect(detected.ctcssHz).toBe(tone)
@@ -145,15 +146,22 @@ async function rustAudio(
 		}
 		child.once("exit", () => resolve())
 	})
+	// The audio socket closes after the process has written its last sample. Waiting for the close
+	// (not for a quiet spell) keeps a loaded host from truncating the audio.
+	const audioSocket = (engine as unknown as { audio: Socket | null }).audio
+	const audioClosed = new Promise<void>(resolve => {
+		if (!audioSocket || audioSocket.destroyed) {
+			resolve()
+			return
+		}
+		audioSocket.once("close", () => resolve())
+	})
 	input.end(cu8)
 	await exited
-	let last = -1
-	for (let spin = 0; spin < 15; spin++) {
-		const bytes = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-		if (bytes > 0 && bytes === last) break
-		last = bytes
-		await new Promise(resolve => setTimeout(resolve, 10))
-	}
+	await Promise.race([
+		audioClosed,
+		new Promise(resolve => setTimeout(resolve, 5000)),
+	])
 	const audio = Buffer.concat(chunks)
 	const n = Math.floor(audio.length / 4)
 	const copy = Buffer.from(audio.subarray(0, n * 4))
