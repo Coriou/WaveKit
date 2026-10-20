@@ -254,6 +254,23 @@ export function freshMedian(s: DiscoveryStore, d: Discovery): number {
 		: d.frequencyHz + d.measuredOffsetHz
 }
 
+function acceptsFamily(
+	s: DiscoveryStore,
+	d: Discovery,
+	family: ProtocolFamily,
+): boolean {
+	const label = (
+		s as unknown as {
+			effectiveLabel(discovery: Discovery): {
+				family: ProtocolFamily
+				confidence: ScannerConfidence
+			}
+		}
+	).effectiveLabel(d)
+	if (label.family === family) return true
+	return family === "unknown" && label.confidence === "decoded"
+}
+
 export function linearSticky(
 	s: DiscoveryStore,
 	obs: ObservationInput,
@@ -267,7 +284,7 @@ export function linearSticky(
 	let bestDist = Number.POSITIVE_INFINITY
 	for (const id of set) {
 		const d = i.discoveries.get(id)
-		if (d === undefined || d.family !== family) continue
+		if (d === undefined || !acceptsFamily(s, d, family)) continue
 		const dist = Math.abs(freshMedian(s, d) - obs.track.centreHz)
 		if (dist > tol) continue
 		if (

@@ -48,6 +48,7 @@ export function inOokSrdAllocation(hz: number): boolean {
  * is unchanged, and so is the result when the band plan says nothing there or the frequency is in
  * an OOK short-range-device allocation (OOK_SRD_ALLOCATIONS_HZ). `ism` is read by the
  * burst rule and the `ook-burst` hypotheses only, so no other class or hypothesis score changes.
+ * The prior orders trials. It does not set a discovery's protocol, family or confidence.
  */
 export function withBandBurstPrior(
 	ctx: {

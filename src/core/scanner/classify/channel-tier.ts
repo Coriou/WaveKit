@@ -35,7 +35,10 @@ interface ChannelTierRefinement {
 }
 export type ChannelTierResult = ChannelTierFallback | ChannelTierRefinement
 
-/** Conservative waveform refinement; hypotheses remain hypotheses, never decoded identity. */
+/**
+ * Conservative waveform refinement; hypotheses remain hypotheses and order trials.
+ * They do not set a discovery's protocol, family or confidence.
+ */
 export function refineChannelClassification(
 	spectral: Classification,
 	features: ChannelFeatureResult,

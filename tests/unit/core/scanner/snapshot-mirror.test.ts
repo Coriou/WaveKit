@@ -1,7 +1,17 @@
 /**
  * WG11 req 3.5/3.6: the snapshot mirror builds the text today's writeSnapshot builds.
- * Goldens were recorded from the frozen WG11 base (persistence.ts and discovery-store.ts at
- * 14f2feaa, before any SC change): seeded op sequences, fixed clocks, sha256 of discoveries.json.
+ * Seeded op sequences, fixed clocks, sha256 of discoveries.json. Seed 1 is the empty store.
+ * Seeds 2-6 were refreshed when protocol and confidence stopped following hypotheses and a
+ * discovery required a passed gate (requirements 2.5, 3.1, 3.2). Seeds 3-5 were refreshed
+ * again when association and splitting started to follow the evidence-established family.
+ * Association: an evidence-less observation can sticky-match a decoded discovery. Split: an
+ * identity decode whose family cannot share a proof-established family (DMR beside a
+ * CTCSS-proven analog card) goes to a linked co-channel discovery, and an identity decode
+ * that conflicts with the discovery's identity moves its observation to the matching twin.
+ * A family stored only from an identity-less decode does not split. Each of seeds 3-5
+ * first diverges on an observation entry (a sticky join: entries 329, 492 and 358), and
+ * the split rules change later entries. Seeds 1, 2 and 6 did not change. This file has no
+ * record flag.
  */
 import { createHash } from "node:crypto"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
@@ -47,40 +57,40 @@ const GOLDENS: [number, number, number, boolean, number, string][] = [
 		40,
 		40,
 		false,
-		21605,
-		"247138462b3410c64033fc45f8f92b115206ea47043a2dd76c298f3ceb3da43f",
+		19206,
+		"3808cd5a0780ce380aeff91c73439657d4635fc012325ec23177e60161a09e6f",
 	],
 	[
 		3,
 		400,
 		40,
 		false,
-		35744,
-		"f4c3ce14b41fbf5617d04117a9b3f89e5e220c39772fafe0a2e1008f4d86beb8",
+		38639,
+		"80cbd879621005f655bdaf7bb38eaba4e987f6f6d4b4d46b68f1b626556b669b",
 	],
 	[
 		4,
 		1500,
 		12,
 		false,
-		38270,
-		"0d43089e22fea6b236f9f063144e074281ad2c8a3482ff8ffa2633c16b1b0930",
+		62239,
+		"a685e257d2642314ec49b38946b367efe76766f54aa767293d6840a4c7875235",
 	],
 	[
 		5,
 		1200,
 		200,
 		false,
-		68712,
-		"5ec493568b75fd4849a3befd8ca47df7e55cc6c947f29584dbbdacf958fc6d48",
+		70343,
+		"529cc556c1d68254a8e57efb2c0c1e1c43e18889887babac80d38dc634cf1e4f",
 	],
 	[
 		6,
 		700,
 		40,
 		true,
-		390051,
-		"bf50c6466c9335f37fcf80d99d6216b22f1ee66074b0af9d681823833473a0f4",
+		334528,
+		"54bd406ee10982e82367375235bcca6924d878e652b23af47cb9306e27406950",
 	],
 ]
 

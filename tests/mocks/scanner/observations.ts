@@ -32,6 +32,41 @@ export interface ObsSpec {
 	iqImage?: boolean // IQ mirror image (Task 11a)
 	spur?: boolean // on a spur line (Task 7a)
 	sweep?: boolean // singleBlockSurfacingAllowed
+	/**
+	 * Track gate. Omit to follow the pre-gate surfacing rule (blocks, sweep, burst,
+	 * channel tier). `"absent"` leaves the field off the track.
+	 */
+	gate?: "pending" | "passed" | "below" | "absent"
+}
+
+/**
+ * The stateless half of the old surfacing filter. Repetition is not reproduced:
+ * a single block with no other reason stays pending.
+ */
+function legacyGate(s: ObsSpec): "passed" | undefined {
+	if (s.truncated === true || s.iqImage === true || s.spur === true)
+		return undefined
+	if ((s.jobIds ?? ["job-1"]).length === 0) return undefined
+	const blocks = s.blocks ?? 4
+	const snr = s.maxBlockSnrDb ?? s.snrDb ?? 20
+	const threshold = s.thresholdDb ?? 9
+	if (s.burst === true) return snr >= threshold + 3 ? "passed" : undefined
+	if (blocks >= 2) return "passed"
+	if (s.sweep === true && snr >= threshold + 6) return "passed"
+	if (s.edge === true) return undefined
+	if ((s.tier ?? "spectral") !== "channel") return undefined
+	const top = [...(s.hypotheses ?? [])].sort((a, b) => b[1] - a[1])[0]
+	if (
+		top !== undefined &&
+		top[1] >= 0.5 &&
+		top[0] !== "unknown" &&
+		top[0] !== "carrier"
+	)
+		return "passed"
+	const cls = s.cls ?? "unknown"
+	if (cls !== "unknown" && cls !== "carrier" && cls !== "wideband")
+		return "passed"
+	return undefined
 }
 
 export function classification(
@@ -88,11 +123,18 @@ export function makeTrack(s: ObsSpec): TrackSnapshot {
 }
 
 export function makeObs(s: ObsSpec): ObservationInput {
+	const track = makeTrack(s)
+	if (s.gate === "passed" || s.gate === "pending" || s.gate === "below")
+		track.gate = s.gate
+	else if (s.gate !== "absent") {
+		const legacy = legacyGate(s)
+		if (legacy !== undefined) track.gate = legacy
+	}
 	const obs: ObservationInput = {
 		id: s.id,
 		sourceId: s.sourceId ?? "src-1",
 		jobIds: s.jobIds ?? ["job-1"],
-		track: makeTrack(s),
+		track,
 		classification: classification(
 			s.cls ?? "unknown",
 			s.hypotheses ?? [],

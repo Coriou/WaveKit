@@ -119,8 +119,8 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 		const { store } = newStore()
 		const r = store.ingest(dmrObs("o1", CH, T0, { blocks: 1, tier: "channel" }))
 		expect(r.change).toBe("created")
-		expect(store.get(r.discoveryId ?? "")?.confidence).toBe("classified")
-		expect(store.get(r.discoveryId ?? "")?.protocol).toBe("dmr")
+		expect(store.get(r.discoveryId ?? "")?.confidence).toBe("activity")
+		expect(store.get(r.discoveryId ?? "")?.protocol).toBe("unknown")
 	})
 
 	it("(c) never surfaces a single block on a spectral-tier classification alone", () => {
@@ -145,22 +145,31 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 		expect(entries).toHaveLength(0)
 	})
 
-	it("(d) merges three single-block hits on one key within 10 minutes, and not when spread wider", () => {
+	it("does not create a discovery from repeated single-block tracks unless a gate has passed", () => {
 		const { store } = newStore()
 		const hit = (id: string, t: number, hz = CH) =>
-			makeObs({ id, centreHz: hz, startedAt: t, blocks: 1 })
+			makeObs({ id, centreHz: hz, startedAt: t, blocks: 1, gate: "absent" })
 		expect(store.ingest(hit("a1", T0)).change).toBe("transient")
 		expect(store.ingest(hit("a2", T0 + 120_000)).change).toBe("transient")
-		const third = store.ingest(hit("a3", T0 + 590_000))
-		expect(third.change).toBe("created")
-		expect(store.get(third.discoveryId ?? "")?.observationCount).toBe(3)
-
+		expect(store.ingest(hit("a3", T0 + 590_000)).change).toBe("transient")
 		const far = CH + 500_000
-		store.ingest(hit("b1", T0, far))
-		store.ingest(hit("b2", T0 + 610_000, far))
+		expect(store.ingest(hit("b1", T0, far)).change).toBe("transient")
+		expect(store.ingest(hit("b2", T0 + 610_000, far)).change).toBe("transient")
 		expect(store.ingest(hit("b3", T0 + 1_300_000, far)).change).toBe(
 			"transient",
 		)
+		const passed = store.ingest(
+			makeObs({
+				id: "a4",
+				centreHz: CH,
+				startedAt: T0 + 600_000,
+				blocks: 1,
+				gate: "passed",
+			}),
+		)
+		expect(passed.change).toBe("created")
+		expect(store.get(passed.discoveryId ?? "")?.observationCount).toBe(1)
+		expect(store.snapshot().observations.map(o => o.id)).toEqual(["a4"])
 	})
 
 	it("never stores an observation that no job covers or that is truncated (P3, store part)", () => {
@@ -223,31 +232,50 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 		expect(replica.snapshot()).toEqual(store.snapshot())
 	})
 
-	it("keeps the earlier job credits when a re-ingest has no covering job", () => {
+	it("leaves stored job credits unchanged when a re-ingest has no passed gate", () => {
 		const { store } = newStore()
 		const id =
 			store.ingest(dmrObs("o1", CH, T0, { open: true, jobIds: ["job-1"] }))
 				.discoveryId ?? ""
-		expect(store.ingest(dmrObs("o1", CH, T0, { jobIds: [] })).discoveryId).toBe(
-			id,
-		)
+		// A placed observation re-ingests without a passed gate; its credits stay.
+		const again = store.ingest(dmrObs("o1", CH, T0, { jobIds: [] }))
+		expect(again.change).not.toBe("transient")
+		expect(again.discoveryId).toBe(id)
+		expect(store.discoveryIdOf("o1")).toBe(id)
 		expect(store.observations(id, null, 10).items[0]?.jobIds).toEqual(["job-1"])
 	})
 
-	it("drops a pending single-block hit once its track is flagged, so rule (d) never counts it", () => {
+	it("a flagged track stays transient, and a later passed gate creates one observation", () => {
 		const { store } = newStore()
-		const hit = (id: string, t: number, extra: { iqImage?: boolean } = {}) =>
-			makeObs({ id, centreHz: CH, startedAt: t, blocks: 1, ...extra })
-		store.ingest(hit("a1", T0))
-		store.ingest(hit("a2", T0 + 1_000))
+		const hit = (
+			id: string,
+			t: number,
+			extra: { iqImage?: boolean; gate?: "passed" | "absent" } = {},
+		) =>
+			makeObs({
+				id,
+				centreHz: CH,
+				startedAt: t,
+				blocks: 1,
+				gate: "absent",
+				...extra,
+			})
+		expect(store.ingest(hit("a1", T0)).change).toBe("transient")
+		expect(store.ingest(hit("a2", T0 + 1_000)).change).toBe("transient")
 		expect(store.ingest(hit("a2", T0 + 1_000, { iqImage: true })).change).toBe(
 			"transient",
 		)
+		expect(store.ingest(hit("a2", T0 + 1_500, { gate: "passed" })).change).toBe(
+			"transient",
+		)
 		expect(store.ingest(hit("a3", T0 + 2_000)).change).toBe("transient")
-		expect(store.ingest(hit("a4", T0 + 3_000)).change).toBe("created")
+		const created = store.ingest(hit("a4", T0 + 3_000, { gate: "passed" }))
+		expect(created.change).toBe("created")
+		expect(store.get(created.discoveryId ?? "")?.observationCount).toBe(1)
+		expect(store.snapshot().observations.map(o => o.id)).toEqual(["a4"])
 	})
 
-	it("treats IQ-image tracks like truncated ones and surfaces bursts only at k_short + 3 dB or by repetition", () => {
+	it("treats IQ-image tracks as transient and surfaces a burst only when its gate passed", () => {
 		const { store } = newStore()
 		expect(store.ingest(dmrObs("img", CH, T0, { iqImage: true })).change).toBe(
 			"transient",
@@ -265,19 +293,20 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 				}),
 			).change,
 		).toBe("transient")
-		expect(
-			store.ingest(
-				makeObs({
-					id: "bs",
-					centreHz: CH + 75_000,
-					startedAt: T0,
-					burst: true,
-					blocks: 1,
-					thresholdDb: 8.5,
-					maxBlockSnrDb: 11.5,
-				}),
-			).change,
-		).toBe("created")
+		const strong = store.ingest(
+			makeObs({
+				id: "bs",
+				centreHz: CH + 75_000,
+				startedAt: T0,
+				burst: true,
+				blocks: 1,
+				thresholdDb: 8.5,
+				maxBlockSnrDb: 11.5,
+			}),
+		)
+		expect(strong.change).toBe("created")
+		expect(store.get(strong.discoveryId ?? "")?.protocol).toBe("unknown")
+		expect(store.get(strong.discoveryId ?? "")?.confidence).toBe("activity")
 	})
 
 	it("keeps truncated, iqImage and spur sticky per observation id: a later snapshot without the flag stays a transient (P3)", () => {
@@ -297,7 +326,7 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 		expect(store.snapshot().discoveries).toEqual([])
 	})
 
-	it("merges a track's burst flag with AND across its snapshots: once cleared, it never surfaces as a burst (§ 4.10)", () => {
+	it("creates a burst only from a passed gate, including after a weak snapshot of the same id", () => {
 		const { store } = newStore()
 		const snap = (burst: boolean, maxBlockSnrDb: number, blocks = 1) =>
 			makeObs({
@@ -311,9 +340,9 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 			})
 		expect(store.ingest(snap(true, 9)).change).toBe("transient")
 		expect(store.ingest(snap(false, 9)).change).toBe("transient")
-		// defensive: the pipeline never turns burst false → true (Task 10a); the store keeps the AND anyway
-		expect(store.ingest(snap(true, 30)).change).toBe("transient")
-		expect(store.ingest(snap(false, 9, 2)).change).toBe("created")
+		expect(store.ingest(snap(true, 30)).change).toBe("created")
+		expect(store.ingest(snap(false, 9, 2)).change).toBe("updated")
+		expect(store.snapshot().observations).toHaveLength(1)
 	})
 
 	it("treats in-window edge tracks as activity only", () => {
@@ -360,7 +389,7 @@ describe("DiscoveryStore association and keys (§ 5.2, § 7.2)", () => {
 		expect(replica.snapshot()).toEqual(store.snapshot())
 	})
 
-	it("keeps analog FM and DMR on one channel as two cross-linked discoveries (rule 3)", () => {
+	it("merges unlabeled analog-FM and DMR hypotheses at one key into one discovery", () => {
 		const { store } = newStore({ rasters: PMR })
 		const fm = store.ingest(
 			makeObs({
@@ -372,13 +401,12 @@ describe("DiscoveryStore association and keys (§ 5.2, § 7.2)", () => {
 			}),
 		)
 		const dmr = store.ingest(dmrObs("o2", CH + 200, T0 + 1_000))
-		expect(dmr.discoveryId).not.toBe(fm.discoveryId)
-		expect(store.get(fm.discoveryId ?? "")?.coChannel).toEqual([
-			dmr.discoveryId,
-		])
-		expect(store.get(dmr.discoveryId ?? "")?.coChannel).toEqual([
-			fm.discoveryId,
-		])
+		expect(dmr.discoveryId).toBe(fm.discoveryId)
+		const d = store.get(fm.discoveryId ?? "")
+		expect(d?.protocol).toBe("unknown")
+		expect(d?.confidence).toBe("activity")
+		expect(d?.observationCount).toBe(2)
+		expect(d?.coChannel).toEqual([])
 	})
 
 	it("merges an unknown-family observation into the single non-carrier discovery at the key (rule 4)", () => {
@@ -441,21 +469,21 @@ describe("DiscoveryStore association and keys (§ 5.2, § 7.2)", () => {
 })
 
 describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
-	it("makes the protocol more specific but never changes a decoded protocol", () => {
+	it("makes the protocol more specific from evidence but never changes a decoded protocol", () => {
 		const { store } = newStore()
 		const r = store.ingest(
 			makeObs({ id: "o1", centreHz: CH, startedAt: T0, cls: "fsk4-12k5" }),
 		)
 		const id = r.discoveryId ?? ""
 		expect(store.get(id)?.protocol).toBe("unknown")
-		expect(store.get(id)?.confidence).toBe("candidate")
+		expect(store.get(id)?.confidence).toBe("activity")
 		store.applyClassification(id, classification("fsk4-12k5", [["dmr", 0.7]]))
-		expect(store.get(id)?.protocol).toBe("dmr")
 		store.applyClassification(
 			id,
 			classification("fsk4-12k5", [["nxdn96", 0.9]]),
 		)
-		expect(store.get(id)?.protocol).toBe("dmr")
+		expect(store.get(id)?.protocol).toBe("unknown")
+		expect(store.get(id)?.confidence).toBe("activity")
 		expect(
 			store.applyEvidence(id, evidence("dmr", T0 + 10, { identity: dmrCc(1) })),
 		).toBe("upgraded")
@@ -488,7 +516,8 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			),
 		).toBe("updated")
 		const d = store.get(id)
-		expect(d?.confidence).toBe("candidate")
+		expect(d?.protocol).toBe("dmr")
+		expect(d?.confidence).toBe("activity")
 		expect(d?.identity).toBeUndefined()
 		expect(d?.metadata.talkgroups).toEqual(["9"])
 		expect(d?.encrypted).toBe(true)
@@ -498,7 +527,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 		expect(store.get(id)?.confidence).toBe("decoded")
 	})
 
-	it("lets evidence without an identity only refine the protocol: an analog discovery keeps its family and is not merged into its DMR twin", () => {
+	it("lets evidence without an identity only refine the protocol: an analog discovery keeps its family", () => {
 		const { store } = newStore({ rasters: PMR })
 		const fm =
 			store.ingest(
@@ -506,21 +535,22 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 					id: "o1",
 					centreHz: CH,
 					startedAt: T0,
-					cls: "analog-fm",
-					hypotheses: [["analog-fm", 0.8]],
 				}),
 			).discoveryId ?? ""
-		const dmr = store.ingest(dmrObs("o2", CH, T0 + 1_000)).discoveryId ?? ""
-		store.applyEvidence(fm, evidence("dmr", T0 + 2_000, { talkgroups: ["9"] }))
+		expect(store.applyEvidence(fm, evidence("analog-fm", T0 + 100))).toBe(
+			"updated",
+		)
 		expect(store.get(fm)?.protocol).toBe("analog-fm")
 		expect(store.get(fm)?.family).toBe("analog")
-		expect(store.get(fm)?.confidence).not.toBe("decoded")
+		expect(store.get(fm)?.confidence).toBe("activity")
 		expect(
-			store
-				.snapshot()
-				.discoveries.map(d => d.id)
-				.sort(),
-		).toEqual([fm, dmr].sort())
+			store.applyEvidence(
+				fm,
+				evidence("dmr", T0 + 2_000, { talkgroups: ["9"] }),
+			),
+		).toBeNull()
+		expect(store.get(fm)?.protocol).toBe("analog-fm")
+		expect(store.get(fm)?.family).toBe("analog")
 		expect(store.discoveryIdOf("o1")).toBe(fm)
 
 		const unk =
@@ -533,7 +563,8 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 				}),
 			).discoveryId ?? ""
 		store.applyEvidence(unk, evidence("dmr", T0 + 2_000, { talkgroups: ["9"] }))
-		expect(store.get(unk)?.protocol).toBe("dmr") // unknown → dmr is a refinement
+		expect(store.get(unk)?.protocol).toBe("dmr")
+		expect(store.get(unk)?.confidence).toBe("activity")
 	})
 
 	it("applies nothing from identity-less evidence of another family: no metadata, no encrypted flag", () => {
@@ -544,10 +575,11 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 					id: "o1",
 					centreHz: CH,
 					startedAt: T0,
-					cls: "analog-fm",
-					hypotheses: [["analog-fm", 0.8]],
 				}),
 			).discoveryId ?? ""
+		expect(store.applyEvidence(fm, evidence("analog-fm", T0 + 100))).toBe(
+			"updated",
+		)
 		const before = store.get(fm)
 		expect(
 			store.applyEvidence(
@@ -561,6 +593,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 	it("still applies identity-less evidence it does not adopt within the same family, or onto an unknown family", () => {
 		const { store } = newStore()
 		const dmr = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
+		expect(store.applyEvidence(dmr, evidence("dmr", T0 + 100))).toBe("updated")
 		expect(
 			store.applyEvidence(
 				dmr,
@@ -568,6 +601,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			),
 		).toBe("updated")
 		expect(store.get(dmr)?.protocol).toBe("dmr")
+		expect(store.get(dmr)?.confidence).toBe("activity")
 		expect(store.get(dmr)?.metadata.talkgroups).toEqual(["9"])
 		expect(store.get(dmr)?.encrypted).toBe(true)
 
@@ -580,6 +614,10 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 					hypotheses: [["digital-unknown", 0.8]],
 				}),
 			).discoveryId ?? ""
+		expect(store.get(unk)?.protocol).toBe("unknown")
+		expect(
+			store.applyEvidence(unk, evidence("digital-unknown", T0 + 100)),
+		).toBe("updated")
 		expect(store.get(unk)?.protocol).toBe("digital-unknown")
 		expect(store.get(unk)?.family).toBe("unknown")
 		expect(
@@ -611,12 +649,13 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			a,
 			classification("fsk4-12k5", [["dmr", 0.8]], undefined, "channel"),
 		)
-		expect(store.get(a)?.confidence).toBe("classified")
+		expect(store.get(a)?.protocol).toBe("unknown")
+		expect(store.get(a)?.confidence).toBe("activity")
 		store.applyClassification(
 			a,
 			classification("fsk4-12k5", [["dmr", 0.8]], "adjacent-leak", "channel"),
 		)
-		expect(store.get(a)?.confidence).toBe("candidate")
+		expect(store.get(a)?.confidence).toBe("activity")
 		expect(store.get(a)?.confidenceCap).toBe("adjacent-leak")
 		store.applyEvidence(a, evidence("dmr", T0 + 10, { identity: dmrCc(1) }))
 		expect(store.get(a)?.confidence).toBe("candidate")
@@ -641,7 +680,7 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 				evidence("dmr", T0 + 10, { identity: dmrCc(1), talkgroups: ["9"] }),
 				{ cap: "suspected-intermod" },
 			),
-		).toBe("updated")
+		).toBe("upgraded")
 		const d = store.get(id)
 		expect(d?.confidence).toBe("candidate")
 		expect(d?.confidenceCap).toBe("suspected-intermod")
@@ -711,6 +750,9 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 	it("evicts activity before candidate, never decoded or keep, and refuses when nothing is evictable", () => {
 		const { store } = newStore({ max: 3 })
 		const cand = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
+		store.applyEvidence(cand, evidence("dmr", T0, { identity: dmrCc(1) }), {
+			cap: "adjacent-leak",
+		})
 		const act =
 			store.ingest(
 				makeObs({ id: "o2", centreHz: CH + 100_000, startedAt: T0 + 1_000 }),
@@ -826,7 +868,7 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 		expect(store.discoveryIdOf("missing")).toBeUndefined()
 	})
 
-	it("applies new limits at runtime: a lower maxDiscoveries evicts down to it on the next creation, a higher minSurfaceBlocks stops surfacing", () => {
+	it("applies a lower maxDiscoveries on the next creation; minSurfaceBlocks does not gate a passed track", () => {
 		const { store, entries } = newStore({ max: 10 })
 		for (let i = 0; i < 4; i++)
 			store.ingest(
@@ -858,7 +900,7 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 					blocks: 2,
 				}),
 			).change,
-		).toBe("transient")
+		).toBe("created")
 		expect(
 			store.ingest(
 				makeObs({
@@ -871,22 +913,21 @@ describe("DiscoveryStore eviction, operator, re-key", () => {
 		).toBe("created")
 	})
 
-	it("deletes a discovery with its observations and co-channel links", () => {
+	it("deletes a co-channel twin and clears the link on the original", () => {
 		const { store } = newStore({ rasters: PMR })
-		const fm =
-			store.ingest(
-				makeObs({
-					id: "o1",
-					centreHz: CH,
-					startedAt: T0,
-					cls: "analog-fm",
-					hypotheses: [["analog-fm", 0.8]],
-				}),
-			).discoveryId ?? ""
-		const dmr = store.ingest(dmrObs("o2", CH, T0)).discoveryId ?? ""
-		expect(store.delete(dmr)).toBe(true)
-		expect(store.delete(dmr)).toBe(false)
-		expect(store.get(fm)?.coChannel).toEqual([])
+		const id = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
+		store.applyEvidence(id, evidence("dmr", T0 + 10, { identity: dmrCc(1) }))
+		expect(
+			store.applyEvidence(id, evidence("dmr", T0 + 20, { identity: dmrCc(5) })),
+		).toBe("created")
+		const twin = store
+			.snapshot()
+			.discoveries.find(d => d.identity?.value === "5")
+		expect(twin).toBeDefined()
+		expect(store.delete(twin?.id ?? "")).toBe(true)
+		expect(store.delete(twin?.id ?? "")).toBe(false)
+		expect(store.get(id)?.coChannel).toEqual([])
+		expect(store.get(id)?.identity).toEqual(dmrCc(1))
 		expect(store.snapshot().observations.map(o => o.id)).toEqual(["o1"])
 	})
 
@@ -906,8 +947,11 @@ describe("DiscoveryStore queries and replay", () => {
 	it("filters, sorts and paginates with an opaque cursor", () => {
 		const { store } = newStore()
 		store.ingest(makeObs({ id: "o1", centreHz: CH + 200_000, startedAt: T0 }))
-		store.ingest(dmrObs("o2", CH, T0 + 1_000))
-		store.ingest(dmrObs("o3", CH + 100_000, T0 + 2_000))
+		const o2 = store.ingest(dmrObs("o2", CH, T0 + 1_000)).discoveryId ?? ""
+		const o3 =
+			store.ingest(dmrObs("o3", CH + 100_000, T0 + 2_000)).discoveryId ?? ""
+		store.applyEvidence(o2, evidence("dmr", T0 + 1_000, { identity: dmrCc(1) }))
+		store.applyEvidence(o3, evidence("dmr", T0 + 2_000, { identity: dmrCc(2) }))
 		const page1 = store.list({
 			minConfidence: "candidate",
 			sort: "frequency",

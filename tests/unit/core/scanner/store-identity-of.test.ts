@@ -1,6 +1,6 @@
 /**
- * WG11 lane SC (Main's identity accessor): DiscoveryStore.identityOf returns a fresh
- * { id, protocol, confidence } built from the stored discovery's scalars (no clone), resolves the
+ * DiscoveryStore.identityOf returns a fresh { id, protocol, confidence }. Protocol and
+ * confidence match get() (the proof-implied label). id is the stored id. It resolves the
  * survivor after a merge through discoveryIdOf, and is undefined for an unknown id.
  */
 import { describe, expect, it } from "vitest"
@@ -30,7 +30,7 @@ const dmrObs = (id: string, centreHz: number, startedAt: number) =>
 	})
 
 describe("DiscoveryStore.identityOf (WG11 SC)", () => {
-	it("returns the stored scalars in a fresh object; mutating it leaves the store alone", () => {
+	it("returns the proof-implied label in a fresh object; mutating it leaves the store alone", () => {
 		const store = newStore()
 		const id = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
 		const d = store.get(id)
