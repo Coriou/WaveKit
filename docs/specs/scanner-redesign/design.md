@@ -1,12 +1,11 @@
 # Scanner redesign design (WG12)
 
-Status: reviewed design, not implemented (2026-10-18); the contract below is frozen when Main's
-task 0.1 lands. Requirements in [requirements](requirements.md), tasks in [tasks](tasks.md).
+Status: implemented; live acceptance pending. The contract below is frozen. Requirements in [requirements](requirements.md), tasks in [tasks](tasks.md).
 Background: the spectrum worker pipeline (per-bin detector, segmenter, tracker, summary wire),
 the scheduler and tuner arbiter of the master design § 10.2–10.3, the discovery store and
 ladder (§ 7), the WG7–WG11 identify runner, the probe pool and its transports, the WG11 IQ
 capture service, replay queue and `wavekit-iqcap`, the WG2/WG6 CTCSS and DCS detectors, and the
-rust-demod-a NFM/AM kernel (separate spec, in progress; dependency of section 5).
+rust-demod-a NFM/AM kernel (separate implemented spec; dependency of section 5).
 
 ## Design summary
 

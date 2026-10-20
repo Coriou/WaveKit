@@ -1,6 +1,6 @@
 # Scanner redesign requirements (WG12)
 
-Status: reviewed design, not implemented (2026-10-18). See [design](design.md) and
+Status: implemented; live acceptance pending. See [design](design.md) and
 [tasks](tasks.md).
 
 ## Scope

@@ -1,6 +1,6 @@
 # Scanner redesign tasks (WG12)
 
-Status: not started (2026-10-18). See [requirements](requirements.md) and [design](design.md).
+Status: implemented; live acceptance pending. See [requirements](requirements.md) and [design](design.md).
 
 Lanes DT, EV, RP and ID run in parallel against the frozen contract (task 0.1) and touch only
 their own paths; the four allocations below are pairwise disjoint. Main (0.1, MA.\*) owns the
@@ -57,7 +57,7 @@ tests using fakes; the scanner-service tests against the real store run at Main'
 (MA.1), after EV merges. Main merges and applies the scanner-service diffs in the order DT, EV,
 RP, ID.
 
-- [ ] 0.1 (Main) Freeze the contract: the api-types additions and widenings (outcomes, decoder,
+- [x] 0.1 (Main) Freeze the contract: the api-types additions and widenings (outcomes, decoder,
       `ended`, proof, evidence level, progress fields, `mergedIds`, query and identify fields,
       frame track `gate`/`channelSnrDb`, live-audio `tone`), the `types.ts` copies, the
       `TrackSnapshot` gate fields, `scanner-redesign-contract.ts` (with the store interfaces
@@ -71,64 +71,64 @@ RP, ID.
 
 ## Lane DT: parking, channel gate, profiling
 
-- [ ] DT.0 Profile first: `scripts/bench/spectrum-profile.ts` with an in-process fake rtl_tcp on
+- [x] DT.0 Profile first: `scripts/bench/spectrum-profile.ts` with an in-process fake rtl_tcp on
       port 0 at 2.048 and 2.4 Msps, on the base; worker stage split, engine utilization,
       main-thread ELU and delay split, load average; the Rust detector gate verdict (9.3) in
       the report, numbers for `docs/engineering/scanner-profile.md` (Main commits). Re-run after
       DT.1.
   - _Requirements: 9.1–9.3_
-- [ ] DT.1 Channel gate in the worker: `createChannelGate`, the `set-channel-plan` worker
+- [x] DT.1 Channel gate in the worker: `createChannelGate`, the `set-channel-plan` worker
       message, `SpectrumService.setChannelPlan`, per-track gate state on `TrackSnapshot`, CFAR
       per range counting unpassed runs, summary wire and frame fields (`gate`, `channelSnrDb`,
       `surfaced` = passed); size test; synthetic false-alarm and detection report; goldens.
   - _Requirements: 2.1–2.4, 2.6–2.8_
   - **Property 1: Noise never passes the gate**, **Property 2: The gate is channel-matched**
-- [ ] DT.2 Parking: scheduler `parked`, dwell-counted sweeps, null `sweepPeriodMs`, no same-hop
+- [x] DT.2 Parking: scheduler `parked`, dwell-counted sweeps, null `sweepPeriodMs`, no same-hop
       retune in multi-hop plans; the arbiter's same-centre no-op; tracker ids under a parked job.
   - _Requirements: 1.1–1.6_
   - **Property 3: A fitting window stays tuned**, **Property 4: Same-centre retune writes
     nothing**, **Property 5: Track ids survive parking**
-- [ ] DT.3 Exact scanner-service diff: `channelPlanOf`, plan updates on job start, stop and range
+- [x] DT.3 Exact scanner-service diff: `channelPlanOf`, plan updates on job start, stop and range
       edit, gate-aware ingest (transient only for `below`), gate in `nextCandidate` input.
   - _Requirements: 2.1, 2.5, 4.1_
 
 ## Lane EV: evidence labels, store, proof and API
 
-- [ ] EV.1 Evidence-only labels: replace the prior-to-protocol step and the prior-only ladder
+- [x] EV.1 Evidence-only labels: replace the prior-to-protocol step and the prior-only ladder
       step (`labelFromEvidence`), keep classes and hypotheses as measurements and trial-order
       inputs; the new ladder; only gated observations create or update discoveries; no
       migration; goldens, including the shared identify goldens (EV.1 owns them).
   - _Requirements: 2.5, 3.1–3.3, 3.9_
   - **Property 6: Only gated tracks surface**, **Property 7: Labels only from evidence**
-- [ ] EV.2 `proof.ts` (`deriveProof`, `proofSummary`, `evidenceLevelOf`), discovery proof
+- [x] EV.2 `proof.ts` (`deriveProof`, `proofSummary`, `evidenceLevelOf`), discovery proof
       selection, cached per discovery version, encrypted wording; store bench with proof.
   - _Requirements: 3.4–3.6, 3.8, 6.5_
   - **Property 8: Proof is a function of the evidence**
-- [ ] EV.3 API: `evidence` filter, `nearHz`/`toleranceHz` (`DiscoveryStore.near`), `mergedIds` on
+- [x] EV.3 API: `evidence` filter, `nearHz`/`toleranceHz` (`DiscoveryStore.near`), `mergedIds` on
       merges, route DTOs carry `proof` and `evidenceLevel`; route tests with absent
       parameters byte-identical.
   - _Requirements: 3.7, 7.5, 7.6_
   - **Property 9: The filter partitions**
-- [ ] EV.4 Missing decoder program on the probe path → `unsupported`/`decoder-unavailable`,
+- [x] EV.4 Missing decoder program on the probe path → `unsupported`/`decoder-unavailable`,
       memo, no miss, no `no-sync`, listed in `unavailable`; exact scanner-service diff for EV.
   - _Requirements: 4.5, 3.4_
 
 ## Lane RP: replay first, analog replay trial, capture readiness
 
-- [ ] RP.1 Replay first: capture trigger at gate pass and the replay-first `needsConfirm` rule
+- [x] RP.1 Replay first: capture trigger at gate pass and the replay-first `needsConfirm` rule
       as an exact scanner-service diff; `planReplayTrials` with the analog step, AM/NFM choice
       and the stop rule; the replay queue's `analog` dep and result fields (`analog`,
       `unavailable`); queue drain arithmetic re-measured with fake decoders.
   - _Requirements: 4.2–4.4, 4.6, 5.5, 5.6_
   - **Property 12: Replay order and stop**, **Property 13: Replay before live in scans**
-- [ ] RP.2 (after the rust-demod-a kernel merges) `wavekit-iqcap analyze`: argv subcommand
+- [x] RP.2 (after the rust-demod-a kernel merges) `wavekit-iqcap analyze`: argv subcommand
       `analyze --in <abs file> --mode nfm|am` (a sibling of `replay`; amendment A4), kernel
       demod, discriminator statistics, 8 kHz s16le audio on stdout, one bounded event line on
       fd 4, fixed error codes; `IqCapturePort.openAnalyze`; crate tests and an `iqcap_bench`
       case at 4 s captures.
   - _Requirements: 5.1, 5.2, 5.7_
   - **Property 11: Analyze is chunk-invariant**
-- [ ] RP.3 (after RP.2) `classifyAnalogTrial` with calibrated thresholds (amendment diff with
+- [x] RP.3 (after RP.2) `classifyAnalogTrial` with calibrated thresholds (amendment diff with
       margins if they move), `createAnalogTrialRunner` (sliced TS CTCSS/DCS pass),
       `scripts/bench/analog-trial.ts` (wall time, CPU, event-loop p99 during a burst of 6);
       exact `src/index.ts` diff for the runner.
@@ -137,32 +137,32 @@ RP, ID.
 
 ## Lane ID: identify, live audio and the phase contract
 
-- [ ] ID.1 `waitUntilSignal` and `waitMs` through `IdentifyDeps.gatedAt`; `ended: "no-signal"`;
+- [x] ID.1 `waitUntilSignal` and `waitMs` through `IdentifyDeps.gatedAt`; `ended: "no-signal"`;
       timeout from the gated start; the docs text for "Decode here" in the report (Main pastes).
   - _Requirements: 6.1, 6.2_
   - **Property 14: Waiting identify ends honestly**
-- [ ] ID.2 `jobPhase`, `JobDriverDeps.activity`, `parked`/`holding`/`trial`/`replayQueueDepth` on
+- [x] ID.2 `jobPhase`, `JobDriverDeps.activity`, `parked`/`holding`/`trial`/`replayQueueDepth` on
       `ScanJobProgress`; exact scanner-service diff for the `scanner:progress` fields.
   - _Requirements: 7.1–7.4, 7.7, 1.3_
   - **Property 15: Phase follows the precedence**
-- [ ] ID.3 `createLiveAudioEvidence` (closed transmissions → observation analog evidence on
+- [x] ID.3 `createLiveAudioEvidence` (closed transmissions → observation analog evidence on
       `commanded`/`relay` frequencies, through `DiscoveryNearQuery` and
       `ObservationEvidenceSink.recordAnalog`, in memory only); exact `src/core/live-demodulator.ts` diff for
       `LiveAudioStatus.tone` (applied by Main after rust-demod-a merges).
   - _Requirements: 6.3–6.5_
   - **Property 16: Live-audio evidence attaches only where it belongs**
-- [ ] ID.4 Analog replay trial in identify for claimed captures (`IdentifyDeps.analogTrial`),
+- [x] ID.4 Analog replay trial in identify for claimed captures (`IdentifyDeps.analogTrial`),
       feeding the WG10 verdict; trial shape `analog-demod`/`replay`.
   - _Requirements: 6.6, 5.5_
 
 ## Main
 
-- [ ] MA.1 Merge the lanes; apply the scanner-service diffs (DT, EV, RP, ID), the `src/index.ts`
+- [x] MA.1 Merge the lanes; apply the scanner-service diffs (DT, EV, RP, ID), the `src/index.ts`
       wiring (analog trial runner into the replay queue and identify, `gatedAt`, live-audio
       evidence, activity view), the live-demodulator tone diff after rust-demod-a; contract test
       updates; if DT.0 met the gate, amend this spec with the Rust detector engine task first.
   - _Requirements: 10.2, 9.3_
-- [ ] MA.2 Docs: API.md, SCANNER.md (parking, gate, evidence labels, proof grammar, analog trial,
+- [x] MA.2 Docs: API.md, SCANNER.md (parking, gate, evidence labels, proof grammar, analog trial,
       replay first, phases, Decode here), ROADMAP, `docs/engineering/scanner-profile.md`;
       coordination note (design § Coordination note text) appended by hand; CLI grep for every
       changed contract.

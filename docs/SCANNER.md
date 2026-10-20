@@ -10,7 +10,7 @@ Design: [scanner spec](superpowers/specs/2026-10-09-signal-discovery-scanner-des
 - Classifies emissions from their spectrum (bandwidth, shape, TDMA envelope) and confirms them with dsd-fme, multimon-ng or direwolf.
 - Never decrypts and never handles keys. Encrypted traffic is reported as `encrypted: true` and no audio is kept.
 - Confidence is honest: `activity` (energy only) → `candidate` (spectral hypothesis) → `classified` (channel features; after the channelizer) → `decoded` (the confirm rule of the protocol was met: for DMR, the same colour code on two CRC-clean link lines). `decoded` means the first **accepted** identity, not any identity-bearing evidence.
-- Before the channelizer: one confirm probe at a time (each costs about half a core), no analog characterisation, no listen-scan, ISM only through configured rtl_433 decoders (ambient evidence).
+- Before the channelizer: one confirm probe at a time (each costs about half a core), analog replay characterisation when IQ capture is enabled, no listen-scan, ISM only through configured rtl_433 decoders (ambient evidence).
 
 ## Modes
 
@@ -202,7 +202,7 @@ Env overrides: `WAVEKIT_SCANNER__CPU_BUDGET_CORES=0.5`, `WAVEKIT_SCANNER__PASSIV
 
 ## Discoveries, evidence and storage
 
-One discovery per emitter: same frequency key, protocol family and identity. Two DMR networks on one channel are two discoveries, cross-linked as co-channel. An observation surfaces as a discovery only when (a) it lasted at least `minSurfaceBlocks` blocks, (b) in a sweep, one block was at least 6 dB over the threshold, (c) a channel-tier classification or a decode is attached (the spectral tier alone never surfaces), or (d) it repeated three times as single blocks. Observations are kept per transmission with signal statistics and the decode evidence.
+One discovery per emitter: same frequency key, protocol family and identity. Two DMR networks on one channel are two discoveries, cross-linked as co-channel. An observation surfaces after its channel gate passes, or after an accepted identity decode places a short burst. Observations are kept per transmission with signal statistics and the decode evidence.
 
 To find discoveries by what a decoder reported, `GET /api/scanner/discoveries?identity=<kind>:<value>` (for example `identity=dmr-cc:1` or `identity=pocsag-capcode:1234567`) keeps those whose identity has that kind and value, ignoring case and surrounding spaces. The free-text `q` matches the operator label or the identity value; talkgroups, callsigns and other metadata are not searched. See [API.md](API.md#get-apiscannerdiscoveries).
 
@@ -236,7 +236,7 @@ Each job counts its hits: one per observation attributed to a discovery, per dis
 
 **Identify for analog voice (WG10).** There is no probe decoder for analog FM or AM: the `analog-fm` and `analog-am` trials read the live demodulator's squelch-delimited transmissions (decoder `live-audio`, the latest 32 kept) on the job's source within the target's tolerance, back to 30 s before the job started. A CTCSS or DCS tone on a `commanded` or `relay` frequency makes the target `identified` (`classified`), anything else that matches `candidate`; the tone is only ever the one the transmission tracker reported. Identify never starts or retunes live audio, so the trials end `unsupported`/`no-live-audio` when live audio was not on the target for the whole window, and `no-sync` when it was but nothing keyed up. A digital decode keeps priority. Probe decoders whose program cannot run are listed in `result.decodersUnavailable` and are not respawned for 300 s. Details in [API.md](API.md#post-apiscanneridentify).
 
-**Heard versus decoded (WG11).** An analog trial now ends `decoded` only when the matching transmission carried a CTCSS tone or a DCS code; a squelch opening without either ends `heard` (it was heard, nothing was decoded). The verdict rule is unchanged: `identified` still needs a tone or code on a `commanded` or `relay` frequency. An analog match no longer stops the digital trials: it ends only the other analog trials, and every probe and ambient trial runs to its own end, so a digital signal heard through live audio still gets its digital decoders (an identify job with analog evidence can take until its digital trials end).
+**Heard versus decoded (WG11, updated WG12).** An analog trial now ends `decoded` only when the matching transmission carried a CTCSS tone or a DCS code; a squelch opening without either ends `heard` (it was heard, nothing was decoded). The verdict rule is unchanged: `identified` still needs a tone or code on a `commanded` or `relay` frequency. A live-audio analog match does not stop the digital trials (a successful analog replay does stop the remaining replay trials): it ends only the other analog trials, and every probe and ambient trial runs to its own end, so a digital signal heard through live audio still gets its digital decoders (an identify job with analog evidence can take until its digital trials end).
 
 **Narrow digital trials (WG11).** When the target lies in a band-plan range with a channel raster of 6.25 kHz or less (PMR446, land mobile), identify also tries `nxdn48`, `dpmr` and `dstar` even when the track's width suggests 12.5 kHz, scored at least 0.3 before the band priors (a prior of 0 still removes them). For an analog-looking track at 446 MHz the last narrow run ends about 10.6 s in, within the default 15 s.
 
@@ -340,3 +340,67 @@ The job option `capture: {enabled, mode: "wideband" | "channel", preMs: 1000, po
 - **No probes start**: probes wait for the CPU budget (`cpuBudgetCores`), the CPU guard (`cpuGuardPercent`, see `cpuGuard.percent`) and `maxProbes.offset`; compare `budgets` in `GET /api/scanner`. Discoveries that never got a probe report `undecodedReason: "budget"`. Passive jobs get no offset probes unless `passive.offsetProbes` is on.
 - **`disk: "disk-low"`**: free disk is below `storage.minFreeDiskMb`; recordings, evidence and captures stop until space returns.
 - **503 `SCANNER_STATE_UNAVAILABLE`**: the scanner could not read its jobs or settings at boot. It runs without them (in-window jobs and the spectrum feed still work) and never overwrites the unread files; fix the files under `storage.dir` and restart.
+
+## Channel-gated discovery and replay (WG12)
+
+A fitting one-hop sweep parks after settling: it stays tuned and keeps the epoch
+and track ids. Sweeps are counted from received samples covering the dwell,
+not elapsed wall time; `sweepPeriodMs` is null while parked. Resuming at the same
+verified centre, rate and gain skips the tuner write. Multi-hop revisits that
+choose the same centre likewise avoid an unnecessary retune.
+
+The channel-matched gate integrates power and floor across the channel width
+(from occupied bandwidth, raster, or the default), rather than judging one bin.
+Its threshold `kCh` adapts to false alarms per range: runs ending without a pass
+count toward adaptation. That adaptation persists across epochs, while slot runs
+reset. Defaults require 300 ms at 6 dB channel SNR, or 100 ms at 9 dB for bursts.
+Only passed tracks create discoveries, with one exception: an accepted identity
+decode places a short burst even before its gate passes (for example AIS, VDL2
+or LoRa), retaining the original observation close.
+
+Labels now come only from evidence. Spectral classes and band priors order trials;
+they do not name protocols. Show `proof.summary`, with these forms:
+
+- `DMR decoded (CC1, TG 9)`; decoded identities, talkgroup and encryption are
+  included when present.
+- `Analog FM voice, CTCSS 88.5` or `Analog FM voice, DCS 023N` (`I` for inverted);
+  without voice, omit `voice`; AM uses `Analog AM`.
+- `Analog FM voice` or `Analog AM voice` without a tone.
+- `Digital, not decoded (tried DMR, dPMR, NXDN)`; unavailable programs are named,
+  for example `Digital, not decoded (tried dPMR; dsd-fme unavailable)`.
+  With none tried: `Digital, not decoded (no decoder available)`.
+- `Carrier only`.
+
+Proofs belong to individual transmissions. A discovery selects its strongest
+proof, newest on ties: decoded, analog tone, analog voice, digital undecoded,
+carrier only. Summaries are at most 160 characters, abbreviating long trial lists
+with `+<n> more`. `evidence=proven` lists proofs; `weak` lists unproven activity;
+`all` is the default. Trial, analog and unavailable evidence is in memory only.
+After restart, only persisted decode evidence rebuilds proofs; other discoveries
+read `weak` until new evidence arrives.
+
+Capture starts at gate pass. Scans replay captured IQ before taking a live hold.
+Every planned trial is recorded as `pending` first, so skipped or unavailable
+work remains visible. A known protocol runs first; otherwise one analog trial
+precedes digital probes. Qualified CTCSS or DCS produces `decoded`; voice without
+a tone is `heard`. FM requires at least 8 dB discriminator quieting in at least
+half the frames; AM requires at least 6 dB quieting. Data clustering is checked
+before voice. Outcomes also include `data-like`, `carrier-only` and `no-sync`.
+An analog decode or heard voice ends that capture's remaining digital replay;
+data-like and carrier-only outcomes still allow digital trials. GMSK can currently
+read carrier-only; real-corpus calibration remains open.
+
+Replay and identify share one analog admission slot and the probe pool's core
+budget, reserving 0.05 core per analog trial. Measured analyze cost was 14–22 ms
+per capture, with 21–33 ms for the sliced tone pass and about 2 ms event-loop p99:
+about 0.03 core total in that benchmark (amendment A14). This is not a live-host
+capacity guarantee; a Rust tone pass remains a follow-up.
+
+“Decode here” uses `waitUntilSignal: true` with optional `waitMs` (default five
+minutes, at most ten). A gate-passed transmission already on air qualifies;
+an older nearest track cannot hide a newer eligible one. The trial timeout starts
+at the transmission start. No signal ends honestly with `ended: "no-signal"`.
+Progress reports settling, holding, trialing, replaying, capturing or watching,
+with the current hold/trial and replay queue depth; see [API details](API.md#scanner-evidence-and-activity-wg12).
+Capture remains off by default pending live acceptance; legacy mode additionally
+requires `scanner.iqCapture.allowLegacy: true`.

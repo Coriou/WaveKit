@@ -8,6 +8,25 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 
 ## Immediate priorities (re-ordered 2026-10-12)
 
+Landed in the scanner redesign batch (WG12): parked sweeps, a channel-matched gate,
+evidence-only labels and transmission proofs, replay-first analog trials, waiting
+identify and activity phases ([spec](specs/scanner-redesign/requirements.md)). Live
+acceptance is pending; IQ capture remains off by default. The
+[Rust live demodulator phase A](specs/rust-demod-a/requirements.md) also landed:
+NFM/AM is opt-in through `liveDemod.engine: rust`, with csdr the default and fallback.
+
+Follow-ups:
+
+- Persist trial, analog and unavailable evidence across restart (amendment A12).
+- Add band-aware decoder auto-start, toward all decoders running at once once no
+  branch drops samples.
+- Move the analog tone pass to Rust (amendment A14).
+- Calibrate GMSK labelling on a real corpus (amendment A15).
+- Decide requirement 9.3's Rust detector engine after an idle-host profile; the
+  per-frame dB conversion determines the front-end share used for that decision.
+- Make `protected-runtime-process` tolerate Node 25's SQLite ExperimentalWarning.
+- Route dsd-fme and multimon-ng through the channelizer by default.
+
 Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
 and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
 reversible suspension, `restarting`/crash-loop `faulted` health); bounded CSDR
