@@ -7,6 +7,9 @@
  * `decoded`; the decoder reached its clean end (pool event `replay-end`) → `no-sync` (no output), `crc-errors` (CRC failures) or
  * `timeout` (output, no identity); anything else (cancel, failure, preemption, a decoder that never
  * exited within its hold plus grace) → `cancelled`.
+ * A probe the pool stops as unavailable (`decoder-unavailable`, or probe-state `unavailable`) before any
+ * output is `unsupported` with reason `decoder-unavailable`, and its decoder type is listed on
+ * `unavailable`. That path never becomes `no-sync`. Output already seen keeps today's verdict.
  * A request the pool could not start is withdrawn from the pool's own queue (the replay queue retries).
  */
 import type { EventEmitter } from "node:events"
@@ -67,9 +70,12 @@ interface Active {
 	req: ReplayPoolRequest
 	probeId: string | null
 	output: boolean
+	/** The pool reported the decoder program missing. Decided against `output` at the stop. */
+	unavailable: boolean
 	crcFailures: number
 	decoded: IqReplayProbeAnswer["decoded"]
 	complete: boolean
+	finished: boolean
 	timer: unknown
 	settle: (a: IqReplayProbeAnswer) => void
 }
@@ -99,6 +105,17 @@ export function createPoolReplayProbes(
 	const releaseListeners = new Set<() => void>()
 
 	const outcomeOf = (a: Active): IqReplayProbeAnswer => {
+		// Req 4.5: a missing program before any output is unsupported, never no-sync.
+		// Output already seen keeps today's verdict (the program did run).
+		if (a.unavailable && !a.output) {
+			const type = a.req.modes[0]?.decoderType
+			return {
+				outcome: "unsupported",
+				decoded: null,
+				reason: "decoder-unavailable",
+				...(type ? { unavailable: [type] } : {}),
+			}
+		}
 		// only a clean replay-end is a verdict; an identity seen before a
 		// failed or cut end is discarded.
 		if (!a.complete) return { outcome: "cancelled", decoded: null }
@@ -113,6 +130,8 @@ export function createPoolReplayProbes(
 		}
 	}
 	const finish = (a: Active): void => {
+		if (a.finished) return
+		a.finished = true
 		timers.clearTimeout(a.timer)
 		byReq.delete(a.req)
 		if (a.probeId) byProbe.delete(a.probeId)
@@ -135,8 +154,9 @@ export function createPoolReplayProbes(
 			}
 			return
 		}
-		if (state !== "stopped") return
+		if (state !== "stopped" && state !== "unavailable") return
 		const a = byProbe.get(probeId)
+		if (a && state === "unavailable") a.unavailable = true
 		if (a) finish(a)
 		for (const l of [...releaseListeners]) {
 			try {
@@ -162,9 +182,14 @@ export function createPoolReplayProbes(
 		const a = byProbe.get(probeId)
 		if (a) a.complete = true
 	}
+	const onUnavailable = (probeId: string): void => {
+		const a = byProbe.get(probeId)
+		if (a) a.unavailable = true
+	}
 	pool.on("probe-state", onState)
 	pool.on("evidence", onEvidence)
 	pool.on("replay-end", onReplayEnd)
+	pool.on("decoder-unavailable", onUnavailable)
 
 	return {
 		request(
@@ -196,9 +221,11 @@ export function createPoolReplayProbes(
 				req,
 				probeId: null,
 				output: false,
+				unavailable: false,
 				crcFailures: 0,
 				decoded: null,
 				complete: false,
+				finished: false,
 				timer: null,
 				settle,
 			}
@@ -239,6 +266,7 @@ export function createPoolReplayProbes(
 			pool.off("probe-state", onState)
 			pool.off("evidence", onEvidence)
 			pool.off("replay-end", onReplayEnd)
+			pool.off("decoder-unavailable", onUnavailable)
 			for (const a of [...byReq.values()]) {
 				a.complete = false
 				release(a)

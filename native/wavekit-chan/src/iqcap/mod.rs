@@ -10,6 +10,7 @@
 //! `<id>.cf32.tmp` files, which the Node store's startup sweep removes. A finished `<id>.cf32`
 //! is only ever published by a hard link of a fully written, synced `.tmp`.
 
+pub mod analyze;
 pub mod command;
 pub mod dsp;
 pub mod engine;
@@ -24,7 +25,7 @@ use std::thread;
 
 pub const VERSION_LINE: &str = concat!("wavekit-iqcap ", env!("CARGO_PKG_VERSION"));
 
-const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> --anchor <abs dir above out-dir> | replay --in <abs file> --bandwidth <hz> --transition <hz>";
+const USAGE: &str = "usage: wavekit-iqcap --version | run --sample-rate <hz> --ring-ms <1..2000> --out-dir <abs dir> --max-ms <500..4000> --bandwidth <hz> --anchor <abs dir above out-dir> | replay --in <abs file> --bandwidth <hz> --transition <hz> | analyze --in <abs file> --mode nfm|am";
 
 /// Process entry; returns the exit code.
 pub fn main_entry(argv: &[String]) -> i32 {
@@ -40,6 +41,10 @@ pub fn main_entry(argv: &[String]) -> i32 {
         Some("replay") => match parse_replay(&argv[1..]) {
             Ok(r) => replay(&r),
             Err(e) => usage_error(&e),
+        },
+        Some("analyze") => match parse_analyze(&argv[1..]) {
+            Ok(args) => analyze::run(&args),
+            Err(_) => analyze::reject("bad-args"),
         },
         _ => usage_error("unknown command"),
     }
@@ -110,6 +115,20 @@ pub struct ReplayArgs {
     pub input: PathBuf,
     pub bandwidth_hz: f64,
     pub transition_hz: f64,
+}
+
+pub fn parse_analyze(args: &[String]) -> Result<analyze::AnalyzeArgs, String> {
+    let v = flags(args, &["in", "mode"])?;
+    let input = PathBuf::from(v[0]);
+    if !input.is_absolute() {
+        return Err("in".into());
+    }
+    let mode = match v[1] {
+        "nfm" => analyze::AnalyzeMode::Nfm,
+        "am" => analyze::AnalyzeMode::Am,
+        _ => return Err("mode".into()),
+    };
+    Ok(analyze::AnalyzeArgs { input, mode })
 }
 
 pub fn parse_replay(args: &[String]) -> Result<ReplayArgs, String> {

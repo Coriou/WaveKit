@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+	ANALYZE_AUDIO_SAMPLES_PER_FRAME,
+	analyzeAudioMatchesFrames,
 	BoundedLineReader,
 	encodeToolCommand,
 	isCaptureId,
@@ -51,6 +53,23 @@ describe("BoundedLineReader", () => {
 		r.push(Buffer.from('"ready"}\n{"t'))
 		r.push(Buffer.from('ype":"ready"}\n'))
 		expect(lines).toEqual(['{"type":"ready"}', '{"type":"ready"}'])
+	})
+
+	it("reports an unterminated tail and clears it when the newline arrives", () => {
+		const { r, lines } = reader()
+		expect(r.hasPending()).toBe(false)
+		r.push(Buffer.from("abc"))
+		expect(r.hasPending()).toBe(true)
+		expect(lines).toEqual([])
+		r.push(Buffer.from("\n"))
+		expect(r.hasPending()).toBe(false)
+		expect(lines).toEqual(["abc"])
+	})
+
+	it("reports a skipped oversize line that never reaches a newline", () => {
+		const { r } = reader()
+		r.push(Buffer.alloc(5_000, 0x41))
+		expect(r.hasPending()).toBe(true)
 	})
 
 	it("stays bounded on an endless line", () => {
@@ -115,10 +134,40 @@ describe("parseToolEvent", () => {
 	})
 })
 
+describe("analyzeAudioMatchesFrames", () => {
+	it("is frames*400 + ceil(gapSamples/6), at the bound and off by one", () => {
+		const per = ANALYZE_AUDIO_SAMPLES_PER_FRAME
+		expect(per).toBe(400)
+		expect(analyzeAudioMatchesFrames(0, 0, 0)).toBe(true)
+		expect(analyzeAudioMatchesFrames(1, 0, 1)).toBe(true)
+		expect(analyzeAudioMatchesFrames(1, 0, 6)).toBe(true)
+		expect(analyzeAudioMatchesFrames(2, 0, 7)).toBe(true)
+		expect(analyzeAudioMatchesFrames(per, 1, 0)).toBe(true)
+		expect(analyzeAudioMatchesFrames(per - 1, 1, 0)).toBe(false)
+		expect(analyzeAudioMatchesFrames(per + 1, 1, 0)).toBe(false)
+		expect(analyzeAudioMatchesFrames(80 * per, 80, 0)).toBe(true)
+		// ceil(6/6) = 1 and ceil(7/6) = 2, the two sides of a gap boundary.
+		expect(analyzeAudioMatchesFrames(per + 1, 1, 6)).toBe(true)
+		expect(analyzeAudioMatchesFrames(per, 1, 6)).toBe(false)
+		expect(analyzeAudioMatchesFrames(per + 2, 1, 6)).toBe(false)
+		expect(analyzeAudioMatchesFrames(per + 2, 1, 7)).toBe(true)
+		expect(analyzeAudioMatchesFrames(per + 1, 1, 7)).toBe(false)
+		expect(analyzeAudioMatchesFrames(per + 3, 1, 7)).toBe(false)
+		// 1 194 / 6 = 199 exactly; 1 195 rounds up to 200.
+		expect(analyzeAudioMatchesFrames(2 * per + 199, 2, 1194)).toBe(true)
+		expect(analyzeAudioMatchesFrames(2 * per + 200, 2, 1194)).toBe(false)
+		expect(analyzeAudioMatchesFrames(2 * per + 200, 2, 1195)).toBe(true)
+		expect(analyzeAudioMatchesFrames(2 * per + 199, 2, 1195)).toBe(false)
+		expect(analyzeAudioMatchesFrames(per, 1, 1.5)).toBe(false)
+		expect(analyzeAudioMatchesFrames(per + 0.5, 1, 0)).toBe(false)
+	})
+})
+
 describe("encodeToolCommand and ids", () => {
 	it("encodes newline-terminated JSON within the bound", () => {
 		expect(encodeToolCommand({ type: "flush" })).toBe('{"type":"flush"}\n')
 	})
+
 	it("accepts only lowercase uuid v4", () => {
 		expect(isCaptureId(ID)).toBe(true)
 		expect(isCaptureId(ID.toUpperCase())).toBe(false)

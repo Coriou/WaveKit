@@ -193,6 +193,84 @@ describe("replay pool adapter", () => {
 		expect(pool.listenerCount("probe-state")).toBe(0)
 	})
 
+	it("exit 127 before output maps to unsupported and lists the type", async () => {
+		const { pool, start } = setup()
+		const run = start()
+		pool.emit("decoder-unavailable", "p1", pool.requests[0])
+		pool.emit("probe-state", "p1", "stopped", pool.requests[0])
+		await expect(run.result).resolves.toEqual({
+			outcome: "unsupported",
+			decoded: null,
+			reason: "decoder-unavailable",
+			unavailable: ["dsd-fme"],
+		})
+	})
+
+	it("a clean exit without decode stays no-sync", async () => {
+		const { pool, start } = setup()
+		const run = start()
+		pool.emit("replay-end", "p1")
+		pool.emit("probe-state", "p1", "stopped", pool.requests[0])
+		await expect(run.result).resolves.toEqual({
+			outcome: "no-sync",
+			decoded: null,
+		})
+	})
+
+	it("an unavailable signal before output is unsupported even after a clean end", async () => {
+		// outcomeOf must not fall through to no-sync when the program never ran,
+		// including when a clean replay-end arrives before the stop.
+		const { pool, start } = setup()
+		const run = start()
+		pool.emit("decoder-unavailable", "p1", pool.requests[0])
+		pool.emit("replay-end", "p1")
+		pool.emit("probe-state", "p1", "stopped", pool.requests[0])
+		await expect(run.result).resolves.toEqual({
+			outcome: "unsupported",
+			decoded: null,
+			reason: "decoder-unavailable",
+			unavailable: ["dsd-fme"],
+		})
+		const stopped = setup()
+		const run2 = stopped.start()
+		stopped.pool.emit(
+			"probe-state",
+			"p1",
+			"unavailable",
+			stopped.pool.requests[0],
+		)
+		await expect(run2.result).resolves.toEqual({
+			outcome: "unsupported",
+			decoded: null,
+			reason: "decoder-unavailable",
+			unavailable: ["dsd-fme"],
+		})
+	})
+
+	it("output before an unavailable stop keeps today's verdict", async () => {
+		// Req 4.5 is only before any output. After output, a clean end stays the
+		// evidence verdict and a cut end stays cancelled. Neither is unsupported
+		// and neither is no-sync caused by the unavailable signal.
+		const clean = setup()
+		const run = clean.start()
+		clean.pool.emit("evidence", "p1", clean.pool.requests[0], ev(false))
+		clean.pool.emit("decoder-unavailable", "p1", clean.pool.requests[0])
+		clean.pool.emit("replay-end", "p1")
+		clean.pool.emit("probe-state", "p1", "stopped", clean.pool.requests[0])
+		await expect(run.result).resolves.toEqual({
+			outcome: "timeout",
+			decoded: null,
+		})
+		const cut = setup()
+		const run2 = cut.start()
+		cut.pool.emit("evidence", "p1", cut.pool.requests[0], ev(false))
+		cut.pool.emit("probe-state", "p1", "unavailable", cut.pool.requests[0])
+		await expect(run2.result).resolves.toEqual({
+			outcome: "cancelled",
+			decoded: null,
+		})
+	})
+
 	it("an accepted identity without a clean replay-end is cancelled, the identity discarded", async () => {
 		const { pool, start } = setup()
 		const run = start()
