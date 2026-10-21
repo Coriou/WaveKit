@@ -273,6 +273,13 @@ function sameJsonValue(a: unknown, b: unknown): boolean {
 	return false
 }
 
+/** A parent placement start failed (fixed text, no cause). */
+export class DecoderPlacementStartError extends WaveKitError {
+	constructor() {
+		super("Decoder placement start failed", "DECODER_PLACEMENT_START_FAILED")
+	}
+}
+
 /** The rebuild of a decoder with staged options failed (fixed text, no cause). */
 export class DecoderRebuildError extends WaveKitError {
 	constructor() {
@@ -1674,10 +1681,72 @@ export class DecoderManager extends EventEmitter {
 				)
 			if (running && !restart && placement.lifecycle) placement.lifecycle.kick()
 		}
-		const operation = work(current).catch((error: unknown) => {
-			if (state.parentIntent === request) throw error
+		const placements = () =>
+			[...this.decoders.values()].filter(
+				candidate =>
+					candidate === state || candidate.parentId === state.config.id,
+			)
+		const failure = (candidate: DecoderState) => {
+			const error = new DecoderPlacementStartError()
+			candidate.lastError = createDecoderLastError(error, "error")
+			this.updateDecoderHealth(candidate, "faulted")
+			this.emitStatusChanged(candidate)
+			if (candidate !== state) {
+				state.lastError = createDecoderLastError(error, "error")
+				this.emitStatusChanged(state)
+			}
+			return error
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const deadline = new Promise<void>((_resolve, reject) => {
+			if (!running) return
+			timer = setTimeout(() => {
+				if (!current()) return
+				const pending = placements().filter(
+					candidate => candidate.lifecycle?.pending,
+				)
+				for (const candidate of pending) failure(candidate)
+				reject(new DecoderPlacementStartError())
+			}, PLACEMENT_STOP_TIMEOUT_MS)
 		})
-		return Promise.race([operation, superseded])
+		const operation = (async () => {
+			await work(current)
+			if (!running || !current()) return
+			for (;;) {
+				const snapshot = placements()
+				await Promise.all(
+					snapshot.flatMap(candidate =>
+						candidate.lifecycle ? [candidate.lifecycle.settled()] : [],
+					),
+				)
+				if (!current()) return
+				if (
+					placements().some(
+						candidate =>
+							!snapshot.includes(candidate) || candidate.lifecycle?.pending,
+					)
+				)
+					continue
+				const failed = snapshot.find(
+					candidate =>
+						candidate.lifecycle?.error ||
+						(candidate.lifecycle?.desired === "running" &&
+							!candidate.decoder.getStatus().running &&
+							!candidate.suspension &&
+							!candidate.unplaced),
+				)
+				if (failed) throw failure(failed)
+				return
+			}
+		})().catch((error: unknown) => {
+			if (!current()) return
+			const failed = placements().find(candidate => candidate.lifecycle?.error)
+			if (running && failed) throw failure(failed)
+			throw error
+		})
+		return Promise.race([operation, superseded, deadline]).finally(() =>
+			clearTimeout(timer),
+		)
 	}
 
 	/**
@@ -2727,6 +2796,14 @@ export class DecoderManager extends EventEmitter {
 	): void {
 		const { decoder } = state
 		if (state.lifecycle && decoder.getStatus().running) return
+		const actor = state.lifecycle
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		const parentGeneration = parent?.parentIntent?.generation ?? 0
+		const currentCrash =
+			!actor ||
+			(parent?.desiredRunning === true &&
+				!parent.intentionallyStopped &&
+				actor.runDecoderGeneration === parentGeneration)
 		state.lifecycle?.exited()
 		if (!decoder.getStatus().running && !state.lifecycle?.pending) {
 			delete state.stopping
@@ -2778,7 +2855,7 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		// Don't restart if intentionally stopped
-		if (state.intentionallyStopped) {
+		if (state.intentionallyStopped || !currentCrash) {
 			this.log.debug(
 				{ decoderId: decoder.id },
 				"Decoder stopped intentionally, not restarting",
@@ -2843,12 +2920,37 @@ export class DecoderManager extends EventEmitter {
 		this.emitStatusChanged(state)
 		this.emit("decoder:restarting", decoder.id, state.restartCount, delay)
 
+		const placementGeneration = actor?.generation
+		const retryCurrent = () =>
+			this.decoders.get(state.config.id) === state &&
+			!state.intentionallyStopped &&
+			(!actor ||
+				(parent?.desiredRunning === true &&
+					parent.parentIntent?.generation === parentGeneration &&
+					actor.generation === placementGeneration &&
+					actor.runDecoderGeneration === parentGeneration))
 		state.restartTimer = setTimeout(() => {
+			if (!retryCurrent()) return
 			state.restartTimer = null
 			state.nextRestartAt = null
 
 			// Use void to handle the promise without blocking
 			const restart = async () => {
+				if (!retryCurrent()) return
+				if (actor) {
+					actor.record("running", parentGeneration)
+					actor.kick()
+					await actor.settled()
+					if (actor.error) {
+						state.lastError = createDecoderLastError(
+							new DecoderPlacementStartError(),
+							"error",
+						)
+						this.updateDecoderHealth(state, "faulted")
+						this.emitStatusChanged(state)
+					}
+					return
+				}
 				try {
 					// Wire to fanout and start
 					if (
@@ -4281,14 +4383,24 @@ export class DecoderManager extends EventEmitter {
 					await this.suspend(state, eligibility)
 					return false
 				}
-				const outcome = await this.startPlacementNow(
-					state,
-					() =>
-						state.lifecycle?.generation === generation &&
-						state.lifecycle.desired === "running",
-				)
-				state.placementOutcome = outcome
-				return outcome.wired
+				try {
+					const outcome = await this.startPlacementNow(
+						state,
+						() =>
+							state.lifecycle?.generation === generation &&
+							state.lifecycle.desired === "running",
+					)
+					state.placementOutcome = outcome
+					return outcome.wired
+				} catch {
+					const error = new DecoderPlacementStartError()
+					if (state.lifecycle?.generation === generation) {
+						state.lastError = createDecoderLastError(error, "error")
+						this.updateDecoderHealth(state, "faulted")
+						this.emitStatusChanged(state)
+					}
+					throw error
+				}
 			},
 			stop: async signal => {
 				const decoder = state.decoder

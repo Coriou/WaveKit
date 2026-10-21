@@ -697,12 +697,12 @@ it.each(
 			: primary
 		f.plan(worker ? [primary, placement] : [placement])
 		const internal = f.manager as unknown as {
-			startPlacement: (
+			startPlacementNow: (
 				state: unknown,
 				canStart?: () => boolean,
 			) => Promise<unknown>
 		}
-		const original = internal.startPlacement.bind(f.manager)
+		const original = internal.startPlacementNow.bind(f.manager)
 		let inside = false
 		let starts = 0
 		f.onStart(() => {
@@ -710,7 +710,7 @@ it.each(
 			expect(gate.admit).toHaveBeenCalled()
 			starts++
 		})
-		vi.spyOn(internal, "startPlacement").mockImplementation(
+		vi.spyOn(internal, "startPlacementNow").mockImplementation(
 			async (state, canStart) => {
 				inside = true
 				try {

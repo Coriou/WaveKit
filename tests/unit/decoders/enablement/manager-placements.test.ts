@@ -680,7 +680,7 @@ it.each(["start", "stop", "restart-start", "restart-stop", "error-start"])(
 it("parent generations preserve the last call across deferred worker completion", async () => {
 	await fc.assert(
 		fc.asyncProperty(
-			fc.array(fc.constantFrom("start", "stop", "restart", "mode"), {
+			fc.array(fc.constantFrom("start", "stop", "restart", "mode", "crash"), {
 				maxLength: 12,
 			}),
 			fc.boolean(),
@@ -711,6 +711,19 @@ it("parent generations preserve the last call across deferred worker completion"
 				await vi.advanceTimersByTimeAsync(0)
 				calls.push(f.manager.startDecoder("dec"))
 				for (const command of commands) {
+					if (command === "crash") {
+						const internal = f.manager as unknown as {
+							decoders: Map<string, { lifecycle?: { actual: string } }>
+						}
+						for (const [id, placement] of f.instances)
+							if (
+								placement.running &&
+								internal.decoders.get(id)?.lifecycle?.actual === "running"
+							)
+								placement.crash()
+						await vi.advanceTimersByTimeAsync(0)
+						continue
+					}
 					calls.push(
 						command === "stop"
 							? f.manager.stopDecoder("dec")
@@ -808,3 +821,130 @@ it("a newer parent start applies staged settings after the captured stop exits",
 	expect(f.manager.getDecoder("dec")).not.toBe(decoder)
 	expect(f.manager.isRestartPending("dec")).toBe(false)
 })
+
+it.each(["failure", "timeout", "ok"])(
+	"parent start aggregates a deferred worker: %s",
+	async result => {
+		const f = setup()
+		f.create("dec")
+		const worker = f.place("dec", 162_025_000, false)
+		f.plan([f.place("dec", 162_000_000), worker])
+		await f.manager.startAll()
+		const decoder = f.instances.get(worker.key)!
+		const stop = decoder.stop.bind(decoder)
+		let release!: () => void
+		const pending = new Promise<void>(resolve => {
+			release = resolve
+		})
+		vi.spyOn(decoder, "stop").mockImplementationOnce(async () => {
+			await pending
+			await stop()
+		})
+		const stopping = f.manager.stopDecoder("dec")
+		await vi.advanceTimersByTimeAsync(0)
+		if (result === "failure")
+			vi.spyOn(decoder, "start").mockRejectedValueOnce(
+				new Error("private adapter failure"),
+			)
+		let releaseStart: (() => void) | undefined
+		if (result === "timeout")
+			vi.spyOn(decoder, "start").mockImplementationOnce(
+				() =>
+					new Promise<void>(resolve => {
+						releaseStart = resolve
+					}),
+			)
+		let settled = false
+		const starting = f.manager.startDecoder("dec").finally(() => {
+			settled = true
+		})
+		const outcome =
+			result === "ok"
+				? expect(starting).resolves.toBeUndefined()
+				: expect(starting).rejects.toMatchObject({
+						code: "DECODER_PLACEMENT_START_FAILED",
+						message: "Decoder placement start failed",
+					})
+		await vi.advanceTimersByTimeAsync(1)
+		expect(settled).toBe(false)
+		release()
+		if (result === "timeout") {
+			await vi.advanceTimersByTimeAsync(4998)
+			expect(settled).toBe(false)
+		}
+		await vi.advanceTimersByTimeAsync(1)
+		await outcome
+		await stopping
+		expect(f.manager.getStatus("dec")?.running).toBe(true)
+		if (result !== "ok") {
+			expect(f.manager.getStatus(worker.key)?.lastError?.message).toBe(
+				"Decoder placement start failed",
+			)
+			expect(f.manager.getStatus(worker.key)?.health).toBe("faulted")
+			expect(f.manager.getStatus("dec")?.lastError?.message).toBe(
+				"Decoder placement start failed",
+			)
+			expect(
+				f.manager
+					.getStatus("dec")
+					?.placements?.find(placement => !placement.primary)?.running,
+			).toBe(false)
+		}
+		releaseStart?.()
+		await vi.advanceTimersByTimeAsync(0)
+	},
+)
+
+it.each(["stop", "restart", "queued restart", "normal", "superseded"])(
+	"crash retry obeys parent generations: %s",
+	async action => {
+		const gate: EfficiencyGate = {
+			record: vi.fn(),
+			admit: vi.fn(() => ({ admit: true as const })),
+			probation: () => [],
+			noteSuspended: vi.fn(),
+			forget: vi.fn(),
+			view: () => ({ budgetCores: 1, cpuGuardPercent: 90, sources: [] }),
+		}
+		const f = setup("rate-test", gate)
+		f.create("dec")
+		const worker = f.place("dec", 162_025_000, false)
+		f.plan([f.place("dec", 162_000_000), worker])
+		await f.manager.startAll()
+		const decoder = f.instances.get(worker.key)!
+		const starts = vi.spyOn(decoder, "start")
+		const admissions = vi.mocked(gate.admit).mock.calls.length
+		if (action === "superseded") {
+			const internal = f.manager as unknown as {
+				decoders: Map<string, { lifecycle: { runDecoderGeneration: number } }>
+			}
+			internal.decoders.get(worker.key)!.lifecycle.runDecoderGeneration--
+		}
+		let releaseQueue: (() => void) | undefined
+		if (action === "queued restart") {
+			const internal = f.manager as unknown as { capsWork: Promise<void> }
+			internal.capsWork = new Promise<void>(resolve => {
+				releaseQueue = resolve
+			})
+		}
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(action === "queued restart" ? 1000 : 0)
+		if (action === "stop") await f.manager.stopDecoder("dec")
+		if (action.includes("restart")) {
+			const restarting = f.manager.restartDecoder("dec")
+			releaseQueue?.()
+			await vi.advanceTimersByTimeAsync(0)
+			await restarting
+		}
+		await vi.advanceTimersByTimeAsync(6000)
+		expect(starts).toHaveBeenCalledTimes(action === "normal" ? 1 : 0)
+		if (action === "normal")
+			expect(vi.mocked(gate.admit).mock.calls.length).toBeGreaterThan(
+				admissions,
+			)
+		if (action === "stop")
+			expect(f.manager.getStatus("dec")?.running).toBe(false)
+		if (action.includes("restart"))
+			expect(f.manager.getStatus("dec")?.running).toBe(true)
+	},
+)

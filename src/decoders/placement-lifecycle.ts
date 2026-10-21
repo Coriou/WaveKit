@@ -23,6 +23,7 @@ export class PlacementLifecycle {
 	generation = 0
 	decoderGeneration = 0
 	runGeneration = 0
+	runDecoderGeneration = 0
 	error: unknown = null
 	actual: PlacementActual = "idle"
 	private operation: Promise<void> | undefined
@@ -108,6 +109,18 @@ export class PlacementLifecycle {
 		this.kick()
 	}
 
+	settled(): Promise<void> {
+		return new Promise(resolve => {
+			const check = () => {
+				if (this.pending) return
+				this.waiters.delete(check)
+				resolve()
+			}
+			this.waiters.add(check)
+			check()
+		})
+	}
+
 	private notify(): void {
 		for (const waiter of this.waiters) waiter()
 	}
@@ -148,6 +161,7 @@ export class PlacementLifecycle {
 		if (!start) this.options.invalidate()
 		if (start) {
 			this.runGeneration = generation
+			this.runDecoderGeneration = this.decoderGeneration
 			this.starting = true
 			this.error = null
 		}
