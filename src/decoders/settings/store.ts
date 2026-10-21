@@ -13,7 +13,7 @@ import {
 	DECODER_SETTINGS_MAX_DECODERS,
 	DECODER_SETTINGS_MAX_KEYS,
 } from "@wavekit/api-types"
-import type { DecoderSettingValue } from "@wavekit/api-types"
+import type { DecoderMode, DecoderSettingValue } from "@wavekit/api-types"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
@@ -22,7 +22,18 @@ import {
 	DECODER_SETTINGS_SCHEMA_VERSION,
 	DecoderSettingsError,
 } from "./contract.js"
-import type { DecoderOverride, DecoderSettingsFile } from "./contract.js"
+import type {
+	DecoderOverride as BaseDecoderOverride,
+	DecoderSettingsFile as BaseDecoderSettingsFile,
+} from "./contract.js"
+
+// The frozen override type lacks the optional mode field.
+export type DecoderOverride = BaseDecoderOverride & {
+	readonly mode?: DecoderMode
+}
+export type DecoderSettingsFile = Omit<BaseDecoderSettingsFile, "decoders"> & {
+	decoders: Record<string, DecoderOverride>
+}
 
 /**
  * Per-value bounds. The file cap (256 KiB) is the global bound; these keep one value from
@@ -117,6 +128,7 @@ const OverrideSchema = z
 	.object({
 		type: BoundedString(DECODER_SETTINGS_TYPE_MAX_LENGTH),
 		enabled: z.boolean().optional(),
+		mode: z.enum(["auto", "always", "off"]).optional(),
 		options: z.record(
 			BoundedString(DECODER_SETTINGS_KEY_MAX_LENGTH),
 			ValueSchema,
@@ -200,7 +212,10 @@ function toFile(data: z.infer<typeof FileSchema>): DecoderSettingsFile {
 						options,
 						updatedAt: entry.updatedAt,
 					}
-		decoders[id] = override
+		decoders[id] = {
+			...override,
+			...(entry.mode !== undefined ? { mode: entry.mode } : {}),
+		}
 	}
 	return {
 		schemaVersion: DECODER_SETTINGS_SCHEMA_VERSION,

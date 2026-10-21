@@ -3,6 +3,7 @@
  * design "Decoder settings (lane ST)", Service).
  */
 import type {
+	DecoderMode,
 	DecoderSettingValue,
 	DecoderSettingsUpdateResult,
 	DecoderSettingsView,
@@ -11,6 +12,8 @@ import {
 	DECODER_SETTINGS_MAX_DECODERS,
 	DECODER_SETTINGS_MAX_KEYS,
 } from "@wavekit/api-types"
+import { safeErrorFields } from "../safe-error-fields.js"
+import type { DecoderOverride, DecoderSettingsFile } from "./store.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import { decoderOptionDescriptors } from "../options/index.js"
 import type { DecoderConfig } from "../types.js"
@@ -19,13 +22,16 @@ import {
 	DecoderSettingsError,
 } from "./contract.js"
 import type {
-	DecoderOverride,
-	DecoderSettingsFile,
 	DecoderSettingsManagerPort,
 	DecoderSettingsService,
 	DecoderSettingsServiceOptions,
 } from "./contract.js"
-import { buildDecoderSettingsView, effectiveDecoderConfig } from "./layers.js"
+import type { ModeDecoderConfig } from "./layers.js"
+import {
+	buildDecoderSettingsView,
+	effectiveDecoderConfig,
+	resolveLayeredDecoderMode,
+} from "./layers.js"
 import { sanitizeStoredOptions, validateDecoderPatch } from "./patch-policy.js"
 import {
 	isForbiddenDecoderSettingsKey,
@@ -62,7 +68,10 @@ function optionValue(
 }
 
 export async function openDecoderSettingsService(
-	options: DecoderSettingsServiceOptions,
+	// The frozen service options type lacks the live applyDecoderMode dependency.
+	options: DecoderSettingsServiceOptions & {
+		applyDecoderMode?: (id: string, mode: DecoderMode) => Promise<void>
+	},
 ): Promise<OpenedDecoderSettingsService> {
 	const log = createComponentLogger(options.logger, "DecoderSettings")
 	const now = options.now ?? Date.now
@@ -74,7 +83,7 @@ export async function openDecoderSettingsService(
 	let manager = options.manager
 
 	// Configured entries by id; the first entry of a repeated id wins (the manager does the same).
-	const configured = new Map<string, DecoderConfig>()
+	const configured = new Map<string, ModeDecoderConfig>()
 	for (const config of options.configs)
 		if (!configured.has(config.id)) configured.set(config.id, config)
 
@@ -186,6 +195,9 @@ export async function openDecoderSettingsService(
 		if (previous !== undefined)
 			for (const key of Object.keys(previous.options))
 				nextOptions[key] = previous.options[key] as DecoderSettingValue
+		let nextMode = previous?.mode
+		if (patch.mode !== undefined)
+			nextMode = patch.mode === null ? undefined : patch.mode
 		let nextEnabled = previous?.enabled
 		if (patch.enabled !== undefined)
 			nextEnabled = patch.enabled === null ? undefined : patch.enabled
@@ -205,11 +217,16 @@ export async function openDecoderSettingsService(
 			if (stored === undefined) continue
 			decoders[other] = applied.get(other) ?? stored
 		}
-		if (Object.keys(nextOptions).length === 0 && nextEnabled === undefined) {
+		if (
+			Object.keys(nextOptions).length === 0 &&
+			nextEnabled === undefined &&
+			nextMode === undefined
+		) {
 			delete decoders[id]
 		} else {
 			decoders[id] = {
 				type: config.type,
+				...(nextMode !== undefined ? { mode: nextMode } : {}),
 				...(nextEnabled !== undefined ? { enabled: nextEnabled } : {}),
 				options: nextOptions,
 				updatedAt: new Date(now()).toISOString(),
@@ -254,6 +271,18 @@ export async function openDecoderSettingsService(
 		}
 
 		const changed: string[] = []
+		if (previous?.mode !== committed?.mode) {
+			changed.push("mode")
+			const resolved = resolveLayeredDecoderMode(config, committed)
+			try {
+				await options.applyDecoderMode?.(id, resolved.mode)
+			} catch (err) {
+				log.warn(
+					{ err: safeErrorFields(err) },
+					"Decoder mode apply failed after persist",
+				)
+			}
+		}
 		if (before.enabled !== after.enabled) changed.push("enabled")
 		const order = (decoderOptionDescriptors(config.type) ?? []).map(d => d.key)
 		const touched = new Set(patchKeys)

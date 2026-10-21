@@ -63,6 +63,8 @@ export const dsdFmeOptionsSchema = z
 			.max(DSD_FME_DURATION_MS_MAX)
 			.nullable()
 			.optional(),
+		// Bound each decoder to at most 16 explicit channel placements.
+		channelsHz: z.array(z.number().finite().positive()).max(16).optional(),
 		channelHz: z.number().finite().positive().nullable().optional(),
 		debugRecordPath: z.string().nullable().optional(),
 		debugRecordStages: z.enum(DEBUG_STAGE_VALUES).nullable().optional(),
@@ -138,6 +140,17 @@ export const dsdFmeOptionsSchema = z
 	.strict()
 
 export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
+	{
+		key: "channelsHz",
+		patchable: true,
+		type: "number-list",
+		unit: "Hz",
+		default: null,
+		secret: false,
+		effect: "restart",
+		description:
+			"Absolute RF channel centres (positive Hz), at most 16 entries.",
+	},
 	{
 		key: "callStartDelayMs",
 		patchable: true,

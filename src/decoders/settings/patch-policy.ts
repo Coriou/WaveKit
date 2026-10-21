@@ -10,6 +10,7 @@ import {
 	DECODER_OPTION_ISSUES_MAX,
 	DECODER_SETTINGS_MAX_KEYS,
 	DECODER_SETTINGS_PATCHABLE_TYPES,
+	type DecoderMode,
 	type DecoderOptionDescriptor,
 	type DecoderOptionIssue,
 	type DecoderSettingValue,
@@ -69,9 +70,10 @@ function deniedByMeaning(type: string, key: string): boolean {
 
 const INVALID_MESSAGE = "Decoder options are invalid"
 const NOT_PATCHABLE_MESSAGE = "Option not patchable"
-const BODY_KEYS: ReadonlySet<string> = new Set(["enabled", "options"])
+const BODY_KEYS: ReadonlySet<string> = new Set(["enabled", "options", "mode"])
 
 export interface DecoderPatch {
+	mode?: DecoderMode | null
 	enabled?: boolean | null
 	options: Record<string, DecoderSettingValue | null>
 }
@@ -325,11 +327,21 @@ export function validateDecoderPatch(
 		throw invalid(shapeIssue("", "body must be a JSON object"))
 	const bodyKeys = Object.keys(body)
 	if (bodyKeys.length === 0)
-		throw invalid(shapeIssue("", "body must set enabled or options"))
+		throw invalid(shapeIssue("", "body must set enabled, options or mode"))
 	if (bodyKeys.some(k => !BODY_KEYS.has(k)))
-		throw invalid(shapeIssue("", "body may only contain enabled and options"))
+		throw invalid(
+			shapeIssue("", "body may only contain enabled, options and mode"),
+		)
 
 	const result: DecoderPatch = { options: {} }
+	if (Object.hasOwn(body, "mode")) {
+		const mode = body["mode"]
+		if (mode !== null && mode !== "auto" && mode !== "always" && mode !== "off")
+			throw invalid(
+				shapeIssue("mode", "mode must be auto, always, off or null"),
+			)
+		result.mode = mode
+	}
 	if (Object.hasOwn(body, "enabled")) {
 		const enabled = body["enabled"]
 		if (enabled !== null && typeof enabled !== "boolean")
