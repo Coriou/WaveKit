@@ -681,6 +681,7 @@ export function identifyDigitalProof(
 		])
 		const transports = new Set(["offset", "channel", "ambient", "replay", null])
 		const outcomes = new Set([
+			"not-needed",
 			"pending",
 			"running",
 			"decoded",
@@ -712,7 +713,8 @@ export function identifyDigitalProof(
 				t.decoder !== "live-audio" &&
 				t.decoder !== "analog-demod" &&
 				t.decoder !== null &&
-				t.outcome !== "unsupported",
+				t.outcome !== "unsupported" &&
+				t.outcome !== "not-needed",
 		)
 		const dataLike = trials.filter(
 			t =>

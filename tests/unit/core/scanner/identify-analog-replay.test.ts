@@ -1185,10 +1185,46 @@ async function expectReplayBound(
 }
 
 describe("identify without live audio", () => {
+	it("proves failed digital trials with zero live-audio clients", async () => {
+		const port = new FakePort()
+		port.live = false
+		const h = replayHarness({
+			protocols: ["dmr", "analog-fm"],
+			captures: null,
+			analogEvidence: port,
+			timeoutMs: 30_000,
+			analogTrial: {
+				run: () => Promise.resolve(resultOf("no-sync")),
+				runLive: () => Promise.resolve(resultOf("no-sync")),
+			},
+		})
+		try {
+			await h.runner.start()
+			h.tracks.push(viewOf(analogTrack()))
+			for (let i = 0; i < 30 && !FINAL.has(h.last()?.state ?? ""); i++)
+				await h.advance(1000)
+			expect(h.trials().find(t => t.decoder === "live-audio")).toMatchObject({
+				outcome: "not-needed",
+			})
+			expect(h.trials().find(t => t.decoder === "dsd-fme")).toMatchObject({
+				outcome: "no-sync",
+			})
+			expect(h.last()?.result).toMatchObject({
+				proof: {
+					kind: "digital-undecoded",
+					summary: "Digital, not decoded (tried DMR)",
+				},
+			})
+		} finally {
+			await h.destroy()
+		}
+	})
+
 	it.each(["ctcss", "dcs"] as const)(
 		"decodes synthetic %s through a private cold-ring capture and analyze",
 		async kind => {
 			const synthetic = syntheticTone({
+				rate: 24000,
 				kind,
 				deviation: 2500,
 				snr: 40,
@@ -1247,9 +1283,9 @@ describe("identify without live audio", () => {
 						const fd = Array.isArray(spec) ? spec[3] : null
 						if (typeof fd !== "number")
 							throw new TypeError("missing proven descriptor")
-						expect(fs.readFileSync(fd)).toEqual(
-							Buffer.from(synthetic.iq.buffer),
-						)
+						expect(
+							fs.readFileSync(fd).equals(Buffer.from(synthetic.iq.buffer)),
+						).toBe(true)
 						analyzed = true
 						queueMicrotask(() => {
 							const pcm = Buffer.alloc(synthetic.disc.length * 2)
