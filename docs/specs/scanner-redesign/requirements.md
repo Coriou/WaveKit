@@ -329,6 +329,16 @@ exact diff to `src/core/live-demodulator.ts`, applied by Main after the rust-dem
 `digital-undecoded`) or carrier for that transmission.
 6.6 Identify's `trials` include the analog replay trial (5.5) when a claimed capture replays;
 `ended: "window-moved"` and every WG7–WG11 identify rule are unchanged.
+6.7 **Identify regardless of listening (A17-A19).** Analog FM, CTCSS and DCS are identified
+with no live-audio client: each analog trial owns its demodulation, runs on every
+narrow channel unless a user-explicit protocol list excludes it, and a standard tone outranks
+any 4FSK class prior.
+6.8 **Fair decoder slots (A20).** No trial holds a slot for minutes: a 6 s cap per turn, aging
+across candidates, pre-emption by a fresh strong transmission, and identify always served.
+6.9 **Evidence-bound labels (A21, A22).** Identify works on any signal anywhere; only a
+user-explicit protocol list bounds trials, band plans and priors only order them; identify
+names a protocol only from a decode or tone evidence; failed digital trials produce
+"Digital, not decoded (tried ...)".
 
 ## 7. Scan UX contract
 

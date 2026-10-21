@@ -15,6 +15,7 @@
 import "./bootstrap.js"
 
 import { openAccessRuntime } from "./access/runtime-context.js"
+import { createAnalogLiveRunner } from "./core/iq-capture/analog-live.js"
 import type { NamedAccessRuntimeContext } from "./access/runtime-context.js"
 import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
 import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
@@ -1322,34 +1323,32 @@ async function main(): Promise<void> {
 			cap: spectrumBinsCap.cap,
 			source: spectrumBinsCap.source,
 		})
-		// WG11 req 6: IQ capture on detection and replay. Protected access mode with
-		// scanner.iqCapture.enabled only; absent, disabled or legacy creates nothing. Swept and
-		// started before the scanner (which owns the replay queue and stops it with its probes),
-		// stopped after the scanner's producer phase.
+		// Persistent replay and private analog trials share one guarded capture service.
+		// With capture disabled its native ring runs only for an active trial lease.
 		let iqCapture: IqCaptureService | null = null
 		// Shared by replay admission and identify; created with the capture service.
 		let analogTrial: AnalogTrialRunner | undefined
-		if (config.scanner.iqCapture?.enabled) {
-			if (protectedMode) {
-				const service = createIqCaptureService({
-					config: config.scanner.iqCapture,
-					storageRoot: resolve(
-						config.scanner.storage.dir || join(config.stateDir, "scanner"),
-					),
-					protectedMode,
-					logger,
-				})
-				iqCapture = service
-				analogTrial = createAnalogTrialRunner({
+		{
+			const service = createIqCaptureService({
+				config: config.scanner.iqCapture,
+				trialOnly: !config.scanner.iqCapture?.enabled,
+				storageRoot: resolve(
+					config.scanner.storage.dir || join(config.stateDir, "scanner"),
+				),
+				protectedMode,
+				logger,
+			})
+			iqCapture = service
+			analogTrial = createAnalogLiveRunner(
+				service,
+				createAnalogTrialRunner({
 					port: service,
 					tones: () => new ToneDetector(),
 					logger,
-				})
-				own(45, () => service.stop())
-				await service.sweep()
-			} else {
-				log.info("IQ capture is not started in legacy access mode")
-			}
+				}),
+			)
+			own(45, () => service.stop())
+			await service.sweep()
 		}
 		try {
 			scannerConstructionStarted = true

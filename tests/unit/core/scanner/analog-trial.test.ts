@@ -199,7 +199,7 @@ describe("classifyAnalogTrial", () => {
 				dcs: null,
 				audioSeconds: 0.749,
 			}),
-		).toBe("no-sync")
+		).toBe("data-like")
 		expect(
 			classifyAnalogTrial(quiet, {
 				ctcssHz: 88.5,
@@ -213,36 +213,36 @@ describe("classifyAnalogTrial", () => {
 				dcs: null,
 				audioSeconds: 2,
 			}),
-		).toBe("no-sync")
+		).toBe("data-like")
 		expect(
 			classifyAnalogTrial(noisy, {
 				ctcssHz: 12.5,
 				dcs: null,
 				audioSeconds: 2,
 			}),
-		).toBe("no-sync")
-		expect(classifyAnalogTrial(noisy, {} as AnalogTrialTones)).toBe("no-sync")
+		).toBe("data-like")
+		expect(classifyAnalogTrial(noisy, {} as AnalogTrialTones)).toBe("data-like")
 		expect(
 			classifyAnalogTrial(noisy, {
 				ctcssHz: null,
 				dcs: {} as AnalogTrialTones["dcs"],
 				audioSeconds: 2,
 			}),
-		).toBe("no-sync")
+		).toBe("data-like")
 		expect(
 			classifyAnalogTrial(noisy, {
 				ctcssHz: null,
 				dcs: { code: "999", polarity: "normal" },
 				audioSeconds: 2,
 			}),
-		).toBe("no-sync")
+		).toBe("data-like")
 		expect(
 			classifyAnalogTrial(noisy, {
 				ctcssHz: null,
 				dcs: { code: "023", polarity: "normal" },
 				audioSeconds: Number.NaN,
 			}),
-		).toBe("no-sync")
+		).toBe("data-like")
 		expect(
 			classifyAnalogTrial(stats([]), {
 				ctcssHz: 88.5,

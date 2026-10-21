@@ -158,11 +158,19 @@ export type BandplanChannelLookup = (
 	window: { sourceId: string; minHz: number; maxHz: number },
 	protocols: readonly string[],
 ) => readonly number[]
+/** True when hz lies in an enabled scanner-plan range listing one of the protocols (3.5). */
+export type BandplanRangeLookup = (
+	sourceId: string,
+	hz: number,
+	protocols: readonly string[],
+) => boolean
 export interface PlannerInput {
 	decoders: readonly PlannerDecoder[]
 	sources: readonly PlannerSource[]
 	vfo: PlannerVfo | null
 	bandplanChannels: BandplanChannelLookup
+	/** Absent, throwing or not true: the VFO is not in a matching range. */
+	bandplanRangeContains?: BandplanRangeLookup
 	maxBandplanChannels: number
 }
 export interface WantedPlacement {

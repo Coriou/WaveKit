@@ -28,17 +28,14 @@ describe("index IQ capture wiring", () => {
 			expect(source).not.toContain(call)
 	})
 
-	it("creates the service only with scanner.iqCapture.enabled in protected mode, owned at 45", () => {
+	it("shares the guarded service with on-demand trials and owns it at 45", () => {
 		const create = source.indexOf("createIqCaptureService({")
-		const cond = source.lastIndexOf(
-			"if (config.scanner.iqCapture?.enabled)",
-			create,
-		)
-		const mode = source.lastIndexOf("if (protectedMode)", create)
-		expect(cond).toBeGreaterThan(0)
-		expect(mode).toBeGreaterThan(cond)
+		expect(create).toBeGreaterThan(0)
+		expect(source).toContain("trialOnly: !config.scanner.iqCapture?.enabled")
+		expect(source.slice(create)).toContain("protectedMode,")
 		expect(source.indexOf("own(45, () => service.stop())")).toBeGreaterThan(
 			create,
 		)
+		expect(source).toContain("createAnalogLiveRunner(")
 	})
 })

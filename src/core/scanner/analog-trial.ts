@@ -48,9 +48,8 @@ export function isVoice(stats: AnalogTrialStats): boolean {
 }
 
 /**
- * Decision order: a qualified CTCSS tone or DCS code, then FM quieting (AM:
- * carrier above the capture floor), then a discrete discriminator, then
- * voice, otherwise a bare carrier. No frames, a malformed tone, or a
+ * Decision order: a qualified CTCSS tone or DCS code, then a discrete discriminator, then FM quieting (AM:
+ * carrier above the capture floor) with voice, otherwise a bare carrier. No frames, a malformed tone, or a
  * non-finite statistic is `no-sync`.
  */
 export function classifyAnalogTrial(
@@ -63,9 +62,9 @@ export function classifyAnalogTrial(
 	if (stats.mode !== "nfm" && stats.mode !== "am") return "no-sync"
 	if (toneQualified(tones)) return "decoded"
 	if (frames.length === 0) return "no-sync"
-	if (!quietEnough(stats, frames)) return "no-sync"
 	const cluster = median(frames.map(frame => frame.cluster))
 	if (cluster !== null && cluster >= ANALOG_TRIAL_DATA_SCORE) return "data-like"
+	if (!quietEnough(stats, frames)) return "no-sync"
 	if (isVoice(stats)) return "heard"
 	return "carrier-only"
 }

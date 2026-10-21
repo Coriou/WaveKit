@@ -127,6 +127,13 @@ export function classOf(
 	return "unknown"
 }
 
+/** Priors order hypotheses; even an out-of-band protocol remains eligible. */
+export function protocolPrior(value: number | undefined): number {
+	return typeof value === "number" && Number.isFinite(value)
+		? Math.max(0.001, value)
+		: 1
+}
+
 /** Multiply by priors (missing = 1), zero everything outside a non-empty job protocol list, clamp, sort. */
 export function applyPriors(
 	h: readonly Hypothesis[],
@@ -141,7 +148,7 @@ export function applyPriors(
 		if (only && !only.has(x.protocol)) continue
 		const score = Math.min(
 			1,
-			Math.max(0, x.score * (ctx.priors[x.protocol] ?? 1)),
+			Math.max(0, x.score * protocolPrior(ctx.priors[x.protocol])),
 		)
 		if (score > 0) out.push({ protocol: x.protocol, score })
 	}
