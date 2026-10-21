@@ -1253,9 +1253,7 @@ interface TargetState {
 	nextRun: number
 	active: RunState[]
 	decoded: { protocol: ScannerProtocol; identity: Identity } | null
-	result:
-		| (ScannerIdentifyResult & { proof?: ScannerProof; hint?: ScannerClass })
-		| null
+	result: ScannerIdentifyResult | null
 	/** WG7: running ambient trials end `timeout` at this time (the wait deadline, or plan time + timeoutMs for `all`). */
 	ambientUntil: number
 	/** WG10 req 3.5: plan runs not requested because the memo names their decoder type. */

@@ -60,6 +60,16 @@ import {
 	type ObservationEvidenceSink,
 } from "../../../src/core/scanner/scanner-redesign-contract.js"
 
+import {
+	scannerRoutes,
+	type ScannerRouteService,
+} from "../../../src/api/routes/scanner.js"
+import {
+	identifyHarness,
+	trackOf,
+	viewOf,
+} from "../../mocks/scanner/identify-fakes.js"
+
 /** Absent `iqCapture` is omitted, which is the WG11 parsed output. */
 const wg11IqCaptureDefault = undefined
 
@@ -84,6 +94,60 @@ describe("WG12 scanner redesign contract", () => {
 	const getDiscoveries = (query: string) =>
 		app.inject({ method: "GET", url: `/discoveries?${query}` })
 
+	it("keeps failed digital target proof through REST and the CLI boundary", async () => {
+		const h = identifyHarness()
+		const route = Fastify({ logger: false })
+		try {
+			await h.runner.start()
+			h.tracks.push(viewOf(trackOf({ obwHz: 12_000 })))
+			for (let i = 0; i < 40 && h.record.state !== "completed"; i++)
+				await h.advance(1000)
+			const target = h.last()!
+			expect(target.result?.proof).toMatchObject({
+				kind: "digital-undecoded",
+				summary: expect.stringMatching(/^Digital, not decoded \(tried /),
+			})
+			expect(target.result?.hint).toBe("fsk2-wide")
+			const job = {
+				...SCAN_JOB,
+				identify: { ...SCAN_JOB.identify, targets: [target] },
+			}
+			await route.register(scannerRoutes, {
+				scanner: { getJob: () => job } as unknown as ScannerRouteService,
+			})
+			const response = await route.inject(`/api/scanner/jobs/${SCAN_JOB.id}`)
+			expect(response.statusCode).toBe(200)
+			const parsed = guardScan("job", response.json())
+			expect(parsed?.identify?.targets[0]?.result?.proof).toEqual(
+				target.result?.proof,
+			)
+			expect(parsed?.identify?.targets[0]?.result?.hint).toBe(
+				target.result?.hint,
+			)
+			const withResult = (result: object) => ({
+				...job,
+				identify: { ...job.identify, targets: [{ ...target, result }] },
+			})
+			const { proof, hint, ...legacy } = target.result!
+			expect(proof).toBeDefined()
+			expect(hint).toBeDefined()
+			expect(guardScan("job", withResult(legacy))).toBeDefined()
+			const malformed = guardScan(
+				"job",
+				withResult({
+					...legacy,
+					proof: { ...proof, tried: [42] },
+					hint: "decoder output",
+				}),
+			)
+			expect(malformed).toBeDefined()
+			expect(malformed?.identify?.targets[0]?.result?.proof).toBeUndefined()
+			expect(malformed?.identify?.targets[0]?.result?.hint).toBeUndefined()
+		} finally {
+			await h.runner.dispose()
+			await route.close()
+		}
+	})
 	it("pins the gate arithmetic", () => {
 		expect(CHANNEL_GATE_K_DB + CHANNEL_GATE_MARGIN_DB).toBe(6)
 		expect(CHANNEL_GATE_K_DB + CHANNEL_GATE_BURST_MARGIN_DB).toBe(9)
