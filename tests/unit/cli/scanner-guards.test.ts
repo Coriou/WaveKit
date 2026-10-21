@@ -538,3 +538,284 @@ it("keeps whole-window and optional-width identify requests inspectable, but can
 		expect(guardIdentifyJob(job, request)).toBeUndefined()
 	}
 })
+
+describe("identify proof meaning", () => {
+	const base = {
+		transport: "replay" as const,
+		at: "2026-01-01T00:00:00.000Z",
+		observationId: "o1",
+		tried: ["dmr" as const],
+		unavailable: [],
+		encrypted: false,
+	}
+	const decoded = {
+		...base,
+		kind: "decoded" as const,
+		protocol: "dmr" as const,
+		identity: { kind: "dmr-cc" as const, value: "1" },
+	}
+	const digital = {
+		...base,
+		kind: "digital-undecoded" as const,
+		protocol: "digital-unknown" as const,
+	}
+	const read = (
+		proof: unknown,
+		state = "identified",
+		confidence = "decoded",
+		resultIdentity: { kind: string; value: string } = decoded.identity,
+	) => {
+		const target = SCAN_JOB.identify.targets[0]!
+		return guardScan("job", {
+			...SCAN_JOB,
+			identify: {
+				...SCAN_JOB.identify,
+				targets: [
+					{
+						...target,
+						state,
+						result: {
+							...target.result,
+							protocol: "dmr",
+							identity: resultIdentity,
+							confidence,
+							proof,
+						},
+					},
+				],
+			},
+		})?.identify?.targets[0]?.result
+	}
+	it("drops a decoded proof on a result flagged as an artefact and keeps the result", async () => {
+		const { proofSummary } = await import("../../../src/core/scanner/proof.js")
+		const proof = { ...decoded, summary: proofSummary(decoded) }
+		expect(read(proof)?.proof).toEqual(proof)
+		const target = SCAN_JOB.identify.targets[0]!
+		const result = guardScan("job", {
+			...SCAN_JOB,
+			identify: {
+				...SCAN_JOB.identify,
+				targets: [
+					{
+						...target,
+						state: "identified",
+						result: {
+							...target.result,
+							protocol: "dmr",
+							identity: decoded.identity,
+							confidence: "decoded",
+							artefact: "dc",
+							proof,
+						},
+					},
+				],
+			},
+		})?.identify?.targets[0]?.result
+		expect(result).toBeDefined()
+		expect(result?.proof).toBeUndefined()
+	})
+	it("checks core summaries and only attaches kinds supported by the result", async () => {
+		const { proofSummary } = await import("../../../src/core/scanner/proof.js")
+		const { proofSummary: cliSummary } =
+			await import("../../../cli/source/data/scanner-proof.js")
+		const rows = [
+			decoded,
+			{ ...decoded, talkgroup: "9", encrypted: true },
+			{
+				...decoded,
+				identity: { kind: "dmr-cc" as const, value: "1".repeat(1024) },
+				talkgroup: "9".repeat(1024),
+				encrypted: true,
+			},
+			digital,
+			{ ...digital, unavailable: ["dsd-fme" as const, "rtl433" as const] },
+			{
+				...base,
+				kind: "analog-tone" as const,
+				protocol: "analog-fm" as const,
+				voice: true,
+				tone: { ctcssHz: 88.5, dcs: null },
+			},
+			{
+				...base,
+				kind: "analog-tone" as const,
+				protocol: "analog-am" as const,
+				tone: {
+					ctcssHz: null,
+					dcs: { code: "023", polarity: "inverted" as const },
+				},
+			},
+			{
+				...base,
+				kind: "analog-voice" as const,
+				protocol: "analog-am" as const,
+				voice: true,
+			},
+			{ ...base, kind: "carrier-only" as const, protocol: "carrier" as const },
+		]
+		for (const row of rows) {
+			const summary = proofSummary(row)
+			expect(cliSummary(row)).toBe(summary)
+			expect(
+				read(
+					{ ...row, summary },
+					"identified",
+					"decoded",
+					"identity" in row ? row.identity : decoded.identity,
+				)?.proof,
+			).toEqual(row.kind === "decoded" ? { ...row, summary } : undefined)
+		}
+	})
+	it("preserves real core digital proofs across compatible result contexts", async () => {
+		const { identifyDigitalProof, identifyVerdict } =
+			await import("../../../src/core/scanner/identify.js")
+		const trial = { mode: null, reason: "no-decoder" as const }
+		for (const trials of [
+			[
+				{
+					...trial,
+					protocol: "dmr" as const,
+					decoder: "dsd-fme" as const,
+					transport: "replay" as const,
+					outcome: "no-sync" as const,
+				},
+			],
+			[
+				{
+					...trial,
+					protocol: "analog-fm" as const,
+					decoder: "analog-demod" as const,
+					transport: "replay" as const,
+					outcome: "data-like" as const,
+				},
+			],
+		]) {
+			const proof = identifyDigitalProof(trials, "o1", Date.parse(base.at))
+			expect(proof).not.toBeNull()
+			if (trials[0]?.decoder === "analog-demod") {
+				expect(proof?.tried).toEqual([])
+				expect(proof?.summary).toBe(
+					"Digital, not decoded (no decoder available)",
+				)
+			}
+			for (const discoveryConfidence of [
+				null,
+				"activity",
+				"decoded",
+			] as const) {
+				const state = identifyVerdict({
+					artefact: null,
+					decoded: false,
+					heardIdentity: false,
+					discoveryConfidence,
+					topScore: 0,
+				})
+				const target = SCAN_JOB.identify.targets[0]!
+				const result = {
+					...target.result,
+					protocol: undefined,
+					identity: undefined,
+					confidence: discoveryConfidence ?? "activity",
+					proof,
+				}
+				const readResult = (patch: object = {}, targetState = state) =>
+					guardScan("job", {
+						...SCAN_JOB,
+						identify: {
+							...SCAN_JOB.identify,
+							targets: [
+								{
+									...target,
+									state: targetState,
+									trials,
+									result: { ...result, ...patch },
+								},
+							],
+						},
+					})?.identify?.targets[0]?.result
+				expect(readResult()?.proof).toEqual(proof)
+				for (const patch of [
+					{ protocol: "dmr" },
+					{ identity: decoded.identity },
+					{ artefact: "dc" },
+					{ analog: { voice: true } },
+				]) {
+					expect(readResult(patch)).toBeDefined()
+					expect(readResult(patch)?.proof).toBeUndefined()
+				}
+				expect(readResult({}, "identified")?.proof).toBeUndefined()
+			}
+		}
+	})
+
+	it("drops contradictory proofs while retaining the result", () => {
+		for (const proof of [
+			{ ...digital, summary: "Digital, not decoded (tried DMR)" },
+			{
+				...base,
+				kind: "carrier-only",
+				protocol: "carrier",
+				summary: "Carrier only",
+			},
+			{
+				...base,
+				kind: "decoded",
+				protocol: "carrier",
+				summary: "DMR decoded (CC1)",
+			},
+			{ ...base, kind: "decoded", protocol: "dmr", summary: "DMR decoded" },
+			{
+				...base,
+				kind: "analog-tone",
+				protocol: "analog-fm",
+				summary: "Analog FM",
+			},
+			{
+				...digital,
+				identity: decoded.identity,
+				summary: "Digital, not decoded (tried DMR)",
+			},
+			{ ...digital, summary: "DMR decoded (CC1)" },
+			{
+				...digital,
+				tried: ["invented"],
+				summary: "Digital, not decoded (tried invented)",
+			},
+			{
+				...digital,
+				tried: [],
+				summary: "Digital, not decoded (no decoder available)",
+			},
+			{
+				...decoded,
+				identity: { kind: "p25-nac", value: "1" },
+				summary: "DMR decoded (NAC 1)",
+			},
+		]) {
+			const result = read(proof)
+			expect(result).toBeDefined()
+			expect(result?.proof).toBeUndefined()
+		}
+		expect(
+			read(
+				{
+					...base,
+					kind: "decoded",
+					protocol: "carrier",
+					summary: "DMR decoded (CC1)",
+				},
+				"unidentified",
+				"activity",
+			)?.proof,
+		).toBeUndefined()
+		for (const [state, confidence] of [
+			["unidentified", "decoded"],
+			["identified", "activity"],
+		]) {
+			expect(
+				read({ ...decoded, summary: "DMR decoded (CC1)" }, state, confidence)
+					?.proof,
+			).toBeUndefined()
+		}
+	})
+})
