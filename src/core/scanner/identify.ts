@@ -47,7 +47,9 @@ import {
 	CLASS_HYPOTHESES,
 	classOf,
 	classifySpectral,
+	protocolPrior,
 } from "./classify/classifier.js"
+import { proofFromFacts } from "./proof.js"
 import { ScannerApiError } from "./errors.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { replayMissEligible } from "../iq-capture/replay-miss.js"
@@ -96,16 +98,16 @@ import {
 	type ProbePool,
 	type ProbeRequest,
 } from "./probes/probe-pool.js"
-import {
-	CONFIDENCE_RANK,
-	type DecodeEvidence,
-	type Discovery,
-	type Hypothesis,
-	type Identity,
-	type ScannerClass,
-	type ScannerConfidence,
-	type ScannerProtocol,
-	type ScannerSettings,
+import type {
+	DecodeEvidence,
+	Discovery,
+	Hypothesis,
+	Identity,
+	ScannerClass,
+	ScannerConfidence,
+	ScannerProtocol,
+	ScannerSettings,
+	ScannerProof,
 } from "./types.js"
 
 export const IDENTIFY_DEFAULT_TIMEOUT_MS = 15_000
@@ -122,6 +124,7 @@ export const IDENTIFY_ALL_MAX_TARGETS = 16
 export const IDENTIFY_CANDIDATE_SCORE = 0.5
 /** Weight of a class the bandwidth allows but the spectral features did not pick. */
 export const IDENTIFY_ALT_CLASS_WEIGHT = 0.5
+export const IDENTIFY_ANALOG_MIN_SCORE = 0.3
 /** Relative slack on each class's OBW window (below 20 dB SNR the OBW is the on-bin width). */
 export const IDENTIFY_OBW_SLACK = 0.25
 /**
@@ -314,14 +317,17 @@ export function inWindow(
 /** The classes the track's bandwidth and features allow, the spectral class first. */
 export function compatibleClasses(track: TrackSnapshot): ScannerClass[] {
 	const own = classOf(track)
-	if (own === "carrier" || own === "wideband") return [own]
+	if (own === "wideband") return [own]
 	const out: ScannerClass[] = [own]
+	if (track.obwHz <= 18_000 * (1 + IDENTIFY_OBW_SLACK) && own !== "analog-fm")
+		out.push("analog-fm")
+	if (own === "carrier") return out
 	const short = track.flags.burst || track.blocks <= BURST_MAX_BLOCKS
 	for (const [cls, window] of Object.entries(CLASS_OBW_HZ) as [
 		ScannerClass,
 		readonly [number, number],
 	][]) {
-		if (cls === own || (cls === "ook-burst" && !short)) continue
+		if (out.includes(cls) || (cls === "ook-burst" && !short)) continue
 		if (
 			track.obwHz >= window[0] * (1 - IDENTIFY_OBW_SLACK) &&
 			track.obwHz <= window[1] * (1 + IDENTIFY_OBW_SLACK)
@@ -333,8 +339,8 @@ export function compatibleClasses(track: TrackSnapshot): ScannerClass[] {
 
 /**
  * § 10.8 plausible decoders: every identify protocol some compatible class lists, scored
- * hypothesis × class weight × bandplan prior (missing = 1), cut to the request's protocols,
- * best first (ties by name). A prior of 0 removes a protocol. WG11 req 1.3: with `narrow` (the target lies on a
+ * hypothesis × class weight × bandplan prior (missing = 1), bounded only by explicit protocols,
+ * best first (ties by name). Priors never exclude a protocol. WG11 req 1.3: with `narrow` (the target lies on a
  * <= 6.25 kHz raster) `nxdn48`, `dpmr` and `dstar` are scored at least IDENTIFY_NARROW_DIGITAL_MIN_SCORE before the
  * prior, whatever the track's width; absent or false: today's scores.
  */
@@ -344,16 +350,22 @@ export function identifyScores(
 		priors: Partial<Record<ScannerProtocol, number>>
 		protocols: readonly ScannerProtocol[]
 		narrow?: boolean
+		/** Non-explicit defaults order trials without excluding protocols. */
+		explicit?: boolean
 	},
 ): Hypothesis[] {
 	const classes = compatibleClasses(track)
 	const own = classes[0]
-	const only = ctx.protocols.length > 0 ? new Set(ctx.protocols) : null
+	const only =
+		ctx.explicit !== false && ctx.protocols.length > 0
+			? new Set(ctx.protocols)
+			: null
 	const best = new Map<ScannerProtocol, number>()
 	for (const cls of classes) {
 		const weight = cls === own ? 1 : IDENTIFY_ALT_CLASS_WEIGHT
 		for (const h of CLASS_HYPOTHESES[cls]) {
 			if (
+				(own === "carrier" && h.protocol !== "analog-fm") ||
 				!IDENTIFY_PROTOCOLS.includes(h.protocol) ||
 				SCANNER_AMBIENT_PROTOCOLS.includes(h.protocol) ||
 				(only && !only.has(h.protocol))
@@ -361,7 +373,7 @@ export function identifyScores(
 				continue
 			const score = Math.min(
 				1,
-				Math.max(0, h.score * weight * (ctx.priors[h.protocol] ?? 1)),
+				Math.max(0, h.score * weight * protocolPrior(ctx.priors[h.protocol])),
 			)
 			if (score > (best.get(h.protocol) ?? 0)) best.set(h.protocol, score)
 		}
@@ -381,11 +393,33 @@ export function identifyScores(
 				)
 				const score = Math.min(
 					1,
-					Math.max(0, base * (ctx.priors[h.protocol] ?? 1)),
+					Math.max(0, base * protocolPrior(ctx.priors[h.protocol])),
 				)
 				if (score > (best.get(h.protocol) ?? 0)) best.set(h.protocol, score)
 			}
 		}
+	}
+	// An explicit request can try a protocol even outside its expected bandwidth.
+	for (const protocol of new Set<ScannerProtocol>([
+		"analog-fm",
+		...(only ?? []),
+	])) {
+		if (
+			SCANNER_AMBIENT_PROTOCOLS.includes(protocol) ||
+			(only && !only.has(protocol)) ||
+			(!only && protocol === "analog-fm" && !classes.includes("analog-fm"))
+		)
+			continue
+		const base =
+			protocol === "analog-fm" && classes.includes("analog-fm")
+				? IDENTIFY_ANALOG_MIN_SCORE
+				: 0.01
+		const score = Math.min(1, base * protocolPrior(ctx.priors[protocol]))
+		best.set(protocol, Math.max(best.get(protocol) ?? 0, score))
+	}
+	if (ctx.explicit === false && ctx.protocols.length > 0) {
+		for (const [protocol, score] of best)
+			if (!ctx.protocols.includes(protocol)) best.set(protocol, score * 0.5)
 	}
 	return [...best]
 		.map(([protocol, score]) => ({ protocol, score }))
@@ -464,7 +498,7 @@ export function planIdentifyTrials(
 /**
  * WG11 req 1.7 (pure): `scores` with the known protocol first (stable order otherwise, never a removal), so its
  * probe mode's run is the plan's first. Added at its own score (0 when the track did not suggest it) unless it
- * has no probe mode, the request's protocol list excludes it or its prior is not above 0 (a prior of 0 removes).
+ * has no probe mode or the request's explicit protocol list excludes it.
  */
 export function knownFirst(
 	scores: readonly Hypothesis[],
@@ -472,7 +506,7 @@ export function knownFirst(
 	priors: Partial<Record<ScannerProtocol, number>>,
 	protocols: readonly ScannerProtocol[],
 ): Hypothesis[] {
-	const prior = priors[known] ?? 1
+	const prior = protocolPrior(priors[known])
 	if (
 		identifyModeFor(known) === null ||
 		(protocols.length > 0 && !protocols.includes(known)) ||
@@ -606,18 +640,124 @@ export function identifyVerdict(v: {
 	topScore: number
 	analog?: IdentifyVerdictAnalog | null
 }): "identified" | "candidate" | "unidentified" {
-	if (v.artefact) return "unidentified"
-	if (v.decoded) return "identified"
-	if (v.heardIdentity) return "candidate" // an identity capped by a leak/intermod flag (§ 6.2)
-	// WG10 req 3.4: a digital decode wins; analog voice is identified only with a reported tone on a trusted frequency.
-	if (v.analog)
-		return v.analog.tone && v.analog.trusted ? "identified" : "candidate"
-	if (
-		v.discoveryConfidence !== null &&
-		CONFIDENCE_RANK[v.discoveryConfidence] >= CONFIDENCE_RANK.classified
-	)
-		return "candidate"
-	return v.topScore >= IDENTIFY_CANDIDATE_SCORE ? "candidate" : "unidentified"
+	try {
+		if (v.artefact) return "unidentified"
+		if (v.decoded === true) return "identified"
+		if (v.heardIdentity === true) return "candidate" // an identity capped by a leak/intermod flag (§ 6.2)
+		// WG10 req 3.4: a digital decode wins; analog voice is identified only with a reported tone on a trusted frequency.
+		if (
+			v.analog &&
+			typeof v.analog.tone === "boolean" &&
+			typeof v.analog.trusted === "boolean"
+		)
+			return v.analog.tone === true && v.analog.trusted === true
+				? "identified"
+				: "candidate"
+		return "unidentified"
+	} catch {
+		return "unidentified"
+	}
+}
+
+/** Completed unsuccessful digital trials prove the attempt, never a protocol label. */
+export function identifyDigitalProof(
+	trials: readonly ScannerIdentifyTrial[],
+	observationId: string,
+	at: number,
+): ScannerProof | null {
+	try {
+		const decoders = new Set([
+			"dsd-fme",
+			"multimon-ng",
+			"direwolf",
+			"rtl433",
+			"ais-catcher",
+			"acarsdec",
+			"dumpvdl2",
+			"lora-meshtastic",
+			"live-audio",
+			"analog-demod",
+			null,
+		])
+		const transports = new Set(["offset", "channel", "ambient", "replay", null])
+		const outcomes = new Set([
+			"not-needed",
+			"pending",
+			"running",
+			"decoded",
+			"no-sync",
+			"crc-errors",
+			"timeout",
+			"unsupported",
+			"cancelled",
+			"heard",
+			"data-like",
+			"carrier-only",
+		])
+		if (
+			!trials.every(
+				t =>
+					t !== null &&
+					IDENTIFY_PROTOCOLS.includes(t.protocol) &&
+					decoders.has(t.decoder) &&
+					transports.has(t.transport) &&
+					(t.mode === null || typeof t.mode === "string") &&
+					outcomes.has(t.outcome) &&
+					(t.outcome === "unsupported" ||
+						(t.decoder !== null && t.transport !== null)),
+			)
+		)
+			return null
+		const digital = trials.filter(
+			t =>
+				t.decoder !== "live-audio" &&
+				t.decoder !== "analog-demod" &&
+				t.decoder !== null &&
+				t.outcome !== "unsupported" &&
+				t.outcome !== "not-needed",
+		)
+		const dataLike = trials.filter(
+			t =>
+				t.decoder === "analog-demod" &&
+				IDENTIFY_ANALOG_PROTOCOLS.includes(t.protocol) &&
+				t.outcome === "data-like",
+		)
+		if (
+			(digital.length === 0 && dataLike.length === 0) ||
+			!digital.every(t => t.outcome === "no-sync" || t.outcome === "timeout") ||
+			trials.some(t => t.outcome === "decoded" || t.outcome === "heard")
+		)
+			return null
+		const supporting = [...digital, ...dataLike]
+		return proofFromFacts(
+			{
+				observationId,
+				decodes: [],
+				analog: [],
+				unavailable: [],
+				trust: "unverified",
+				digitalPlanComplete: true,
+				trials: digital.map((t, order) => ({
+					protocol: t.protocol,
+					decoder: t.decoder ?? "",
+					outcome: t.outcome,
+					order,
+					at,
+				})),
+			},
+			{
+				kind: "digital-undecoded",
+				protocol: "digital-unknown",
+				transport: supporting.every(t => t.transport === "replay")
+					? "replay"
+					: "live",
+				at,
+				encrypted: false,
+			},
+		)
+	} catch {
+		return null
+	}
 }
 
 /**
@@ -981,6 +1121,10 @@ export interface IdentifyDeps {
 	discoveryOf: (observationId: string) => Discovery | undefined
 	/** Bandplan priors at a frequency (Task 12 `priorsFor` over the region's bandplans). */
 	priorsAt: (hz: number) => Partial<Record<ScannerProtocol, number>>
+	rangeProtocolsAt?: (hz: number) => {
+		protocols: readonly ScannerProtocol[]
+		explicit: boolean
+	}
 	format: (sourceId: string) => string
 	/** True once the core channelizer serves probe channels (S2, Task 40): parallel trials. */
 	channelizer: () => boolean
@@ -1109,7 +1253,9 @@ interface TargetState {
 	nextRun: number
 	active: RunState[]
 	decoded: { protocol: ScannerProtocol; identity: Identity } | null
-	result: ScannerIdentifyResult | null
+	result:
+		| (ScannerIdentifyResult & { proof?: ScannerProof; hint?: ScannerClass })
+		| null
 	/** WG7: running ambient trials end `timeout` at this time (the wait deadline, or plan time + timeoutMs for `all`). */
 	ambientUntil: number
 	/** WG10 req 3.5: plan runs not requested because the memo names their decoder type. */
@@ -1573,19 +1719,27 @@ export class IdentifyRunner implements JobDriver {
 		if (!view) return
 		const priors = this.deps.priorsAt(view.track.centreHz)
 		const narrow = this.narrowAt(t.targetHz)
+		let range:
+			| { protocols: readonly ScannerProtocol[]; explicit: boolean }
+			| undefined
+		try {
+			range = this.deps.rangeProtocolsAt?.(t.targetHz)
+		} catch {
+			/* No range constraint. */
+		}
+		const requested = this.deps.identify.protocols
+		const protocols =
+			requested.length > 0 ? requested : (range?.protocols ?? [])
+		const explicit = requested.length > 0 || range?.explicit === true
+		const bounds = explicit ? protocols : []
 		let scores = identifyScores(view.track, {
 			priors,
-			protocols: this.deps.identify.protocols,
+			protocols,
+			explicit,
 			...(narrow ? { narrow } : {}),
 		})
 		t.known = this.knownOf(view)
-		if (t.known)
-			scores = knownFirst(
-				scores,
-				t.known.protocol,
-				priors,
-				this.deps.identify.protocols,
-			)
+		if (t.known) scores = knownFirst(scores, t.known.protocol, priors, bounds)
 		const plan = planIdentifyTrials(scores, {
 			format: this.deps.format(this.sourceId),
 			channelizer: this.deps.channelizer(),
@@ -1599,7 +1753,7 @@ export class IdentifyRunner implements JobDriver {
 					toleranceHz: t.toleranceHz,
 				},
 				this.deps.ambient,
-				this.deps.identify.protocols,
+				bounds,
 				// Fixed message, no exception payload (its text may carry decoder details); once per job.
 				() => {
 					if (this.ambientErrorLogged) return
@@ -1608,8 +1762,8 @@ export class IdentifyRunner implements JobDriver {
 				},
 			),
 		)
-		if (this.deps.analogEvidence)
-			plan.trials = planAnalogTrials(plan.trials, this.deps.identify.protocols)
+		if (this.deps.analogEvidence || this.deps.analogTrial?.runLive)
+			plan.trials = planAnalogTrials(plan.trials, bounds)
 		t.memoSkip = this.applyMemo(plan)
 		t.plan = plan
 		t.ambientUntil = Number.isFinite(t.deadline)
@@ -1634,6 +1788,8 @@ export class IdentifyRunner implements JobDriver {
 		t.active = []
 		t.state = "trying"
 		this.claimCaptures(t, view)
+		if (this.deps.analogTrial?.runLive && this.analogChoice(t))
+			this.startAnalogItem(t, "", view)
 		this.emitTarget(t)
 	}
 
@@ -1738,7 +1894,9 @@ export class IdentifyRunner implements JobDriver {
 			this.endAmbient(
 				t,
 				"timeout",
-				x => !(this.deps.analogEvidence && x.decoder === "live-audio"),
+				x =>
+					x.decoder !== "analog-demod" &&
+					!(this.deps.analogEvidence && x.decoder === "live-audio"),
 			)
 		)
 			this.emitTarget(t)
@@ -2054,17 +2212,8 @@ export class IdentifyRunner implements JobDriver {
 				}).hypotheses[0]
 			: undefined
 		const analog = t.analog.result
-		const classified =
-			discovery !== undefined &&
-			CONFIDENCE_RANK[discovery.confidence] >= CONFIDENCE_RANK.classified
-		// WG10 R1 m3: a digital signal heard through live audio also opens the squelch, so analog evidence
-		// never replaces a classified digital protocol: the digital candidate is the result (as before analog
-		// evidence existed) and `result.analog` is only supplementary.
-		const digitalClassified =
-			classified &&
-			discovery !== undefined &&
-			!IDENTIFY_ANALOG_PROTOCOLS.includes(discovery.protocol)
-		const analogVerdict = digitalClassified ? null : analogVerdictOf(analog)
+
+		const analogVerdict = analogVerdictOf(analog)
 		const state = identifyVerdict({
 			analog: analogVerdict,
 			artefact,
@@ -2077,32 +2226,30 @@ export class IdentifyRunner implements JobDriver {
 			discoveryConfidence: discovery?.confidence ?? null,
 			topScore: top?.score ?? 0,
 		})
-		// WG10 req 3.4: analog evidence names the protocol unless a digital decode (or capped identity) or a
-		// classified digital discovery did.
+		// A tone can name analog; voice alone cannot name a protocol.
 		const analogProtocol =
-			analog && t.decoded === null && !digitalClassified
+			analog && analogVerdict?.tone === true && t.decoded === null
 				? t.analog.resultProtocol
 				: null
 		const protocol =
 			state === "unidentified"
 				? undefined
-				: (t.decoded?.protocol ??
-					analogProtocol ??
-					(classified ? discovery?.protocol : top?.protocol))
-		const identity =
-			state === "unidentified"
-				? undefined
-				: (t.decoded?.identity ??
-					(analogProtocol !== null && discovery?.protocol !== analogProtocol
-						? undefined
-						: discovery?.identity))
+				: (t.decoded?.protocol ?? analogProtocol ?? undefined)
+		const identity = state === "unidentified" ? undefined : t.decoded?.identity
 		const analogIdentified = analogProtocol !== null && state === "identified"
 		const baseMetadata = discovery?.metadata ?? emptyMetadata()
 		const unavailableTypes = [...this.unavailableTypes].sort()
 		for (const trial of t.trials)
 			if (trial.outcome === "pending" || trial.outcome === "running")
 				trial.outcome = "cancelled"
+		const proof = identifyDigitalProof(
+			t.trials,
+			latest?.observationId ?? "identify",
+			this.deps.now(),
+		)
 		t.result = {
+			...(proof && !analog && !t.decoded && !artefact ? { proof } : {}),
+			...(!protocol && track && !artefact ? { hint: classOf(track) } : {}),
 			...(protocol ? { protocol } : {}),
 			confidence: analogIdentified
 				? "classified"
@@ -2471,6 +2618,7 @@ export class IdentifyRunner implements JobDriver {
 			changed = true
 			if (t.analog.openSeen.has(trial.protocol)) trial.outcome = "timeout"
 			else if (t.analog.everMonitored) trial.outcome = "no-sync"
+			else if (this.deps.analogTrial?.runLive) trial.outcome = "not-needed"
 			else {
 				trial.outcome = "unsupported"
 				trial.mode = null
@@ -2681,8 +2829,10 @@ export class IdentifyRunner implements JobDriver {
 	private startAnalogItem(
 		t: TargetState,
 		captureId: string,
+		live?: IdentifyTrackView,
 	): "running" | "skipped" {
-		if (t.analogArmed.has(captureId) || captureId.length === 0) return "skipped"
+		if (t.analogArmed.has(captureId) || (captureId.length === 0 && !live))
+			return "skipped"
 		const runner = this.deps.analogTrial
 		const choice = this.analogChoice(t)
 		if (!runner || !choice) return "skipped"
@@ -2691,14 +2841,17 @@ export class IdentifyRunner implements JobDriver {
 			protocol: choice.protocol,
 			decoder: "analog-demod",
 			mode: choice.mode,
-			transport: "replay",
+			transport: live ? "ambient" : "replay",
 			outcome: "pending",
 		}
 		t.trials.push(trial)
 		trial.outcome = "running"
 		const ac = new AbortController()
 		t.analogAbort.push(ac)
-		t.analogDue.set(ac, this.deps.now() + ANALOG_REPLAY_TRIAL_DEADLINE_MS)
+		t.analogDue.set(
+			ac,
+			this.deps.now() + ANALOG_REPLAY_TRIAL_DEADLINE_MS + (live ? 2000 : 0),
+		)
 		const mode = choice.mode
 		let settled = false
 		const finish = (raw: unknown, failed: boolean): void => {
@@ -2729,7 +2882,23 @@ export class IdentifyRunner implements JobDriver {
 			finish(null, false)
 		})
 		void Promise.resolve()
-			.then(() => runner.run(captureId, mode, ac.signal))
+			.then(() =>
+				live && runner.runLive
+					? runner.runLive(
+							{
+								sourceId: this.sourceId,
+								observationId: live.observationId,
+								epoch: live.epoch,
+								rfHz: live.track.centreHz,
+								tuningTrust: live.track.tuningTrust,
+								fromSample: live.track.startSample,
+								reason: "identify",
+							},
+							mode,
+							ac.signal,
+						)
+					: runner.run(captureId, mode, ac.signal),
+			)
 			.then(result => {
 				finish(result, false)
 			})
@@ -2770,7 +2939,14 @@ export class IdentifyRunner implements JobDriver {
 		const parsed = parseAnalogTrial(raw)
 		// A verdict for a different mode than the one requested is no match.
 		if (!parsed || parsed.mode !== trial.mode) {
-			trial.outcome = "cancelled"
+			if (
+				raw !== null &&
+				typeof raw === "object" &&
+				(raw as { error?: unknown }).error === "not-protected"
+			) {
+				trial.outcome = "unsupported"
+				trial.reason = "decoder-unavailable"
+			} else trial.outcome = "cancelled"
 			this.emitTarget(t)
 			return
 		}
@@ -2782,7 +2958,15 @@ export class IdentifyRunner implements JobDriver {
 			const noTone = tone.ctcssHz === null && tone.dcs === null
 			trial.outcome =
 				parsed.outcome === "decoded" && noTone ? "heard" : parsed.outcome
-			const stored = t.replay.views.get(captureId)
+			const stored =
+				captureId === ""
+					? t.view
+						? {
+								observationId: t.view.observationId,
+								tuningTrust: t.view.track.tuningTrust,
+							}
+						: undefined
+					: t.replay.views.get(captureId)
 			this.keepAnalog(t, trial.protocol, {
 				source: "live-audio",
 				modulation: trial.mode === "am" ? "am" : "nfm",

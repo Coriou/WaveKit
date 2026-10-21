@@ -41,7 +41,7 @@ describe("narrow digital scores (WG11 1.3)", () => {
 		expect(s.find(h => h.protocol === "nxdn48")?.score).toBe(0.5)
 	})
 
-	it("a prior of 0 removes; the protocol list excludes", () => {
+	it("an explicit protocol list excludes trials", () => {
 		const s = identifyScores(analogTrack(), {
 			priors: { dpmr: 0 },
 			protocols: ["dmr", "nxdn48"],
@@ -133,7 +133,7 @@ describe("narrow raster dep in the runner (WG11 1.3)", () => {
 
 	// Feature: web-gaps-11, Property 3: Narrow modes where the raster says so
 	// Validates: Requirements 1.3
-	it("property: narrow modes planned iff raster, not excluded and prior > 0, scored >= 0.3 x prior", () => {
+	it("property: narrow modes planned iff raster, not explicitly excluded with clamped priors, scored >= 0.3 x prior", () => {
 		const protocol = fc.constantFrom<ScannerProtocol>(
 			"dmr",
 			"nxdn48",
@@ -164,9 +164,8 @@ describe("narrow raster dep in the runner (WG11 1.3)", () => {
 						return
 					}
 					for (const p of NARROW) {
-						const prior = ctx.priors[p] ?? 1
-						const allowed =
-							(c.only.length === 0 || c.only.includes(p)) && prior > 0
+						const prior = Math.max(0.001, ctx.priors[p] ?? 1)
+						const allowed = c.only.length === 0 || c.only.includes(p)
 						const h = got.find(x => x.protocol === p)
 						if (!allowed) expect(h).toBeUndefined()
 						else {

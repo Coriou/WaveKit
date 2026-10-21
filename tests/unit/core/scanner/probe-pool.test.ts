@@ -175,7 +175,7 @@ describe("ProbePool", () => {
 		})
 	})
 
-	it("admits a queued request when the running probe stops, in admission order", async () => {
+	it("admits never-served queued requests by SNR when the running probe stops", async () => {
 		const h = poolHarness()
 		const first = h.pool.request(probeRequest({ trackId: "t1" }))
 		expect(
@@ -198,7 +198,7 @@ describe("ProbePool", () => {
 		if (!("started" in first)) throw new Error("not started")
 		await h.pool.release(first.started)
 		await flushAsync()
-		expect(h.pool.status().map(p => p.trackId)).toEqual(["t3"])
+		expect(h.pool.status().map(p => p.trackId)).toEqual(["t2"])
 	})
 
 	it("lets a higher-priority job preempt a lower-priority probe", async () => {

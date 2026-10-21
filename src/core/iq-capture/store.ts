@@ -31,6 +31,7 @@ export type IqCaptureState = "capturing" | "verifying" | "ready"
 
 export interface IqCaptureEntry {
 	readonly captureId: string
+	readonly privateTrial?: boolean
 	readonly sourceId: string
 	readonly observationId: string | null
 	readonly epoch: number
@@ -72,7 +73,7 @@ export interface IqCaptureStoreOptions {
 	 * Review m4: captures removed here that the tool still writes (no final event yet). They keep
 	 * their concurrency slot, or the tool would answer the next request `busy`.
 	 */
-	openInTool?: () => number
+	openInTool?: (sourceId?: string) => number
 }
 
 function zeroRecord<K extends string>(keys: readonly K[]): Record<K, number> {
@@ -166,10 +167,18 @@ export class IqCaptureStore {
 		req: IqCaptureRequest,
 		captureId: string,
 		currentEpoch: number,
+		privateTrial = false,
 	): { captureId: string } | { refused: IqCaptureRefusal } {
 		if (req.epoch !== currentEpoch) return this.refuse("epoch-changed")
 		if (
-			this.capturing() + (this.o.openInTool?.() ?? 0) >=
+			(privateTrial
+				? this.all().filter(
+						e =>
+							e.sourceId === req.sourceId &&
+							(e.privateTrial || e.state === "capturing"),
+					).length
+				: this.capturing()) +
+				(this.o.openInTool?.(privateTrial ? req.sourceId : undefined) ?? 0) >=
 			IQ_CAPTURE_MAX_CONCURRENT
 		)
 			return this.refuse("busy")
@@ -189,6 +198,7 @@ export class IqCaptureStore {
 		if (req.reason === "detection") stamps.push(now)
 		this.entries.set(captureId, {
 			captureId,
+			privateTrial,
 			sourceId: req.sourceId,
 			observationId: req.observationId,
 			epoch: req.epoch,

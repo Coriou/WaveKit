@@ -9,6 +9,7 @@ import type {
 	ScannerProofTransport,
 	ScannerTrialOutcome,
 } from "@wavekit/api-types"
+import type { IqCaptureRequest } from "./iq-capture-contract.js"
 import type { TuningTrust } from "../spectrum/types.js"
 import type { Discovery, Identity, ScannerProtocol } from "./types.js"
 
@@ -99,10 +100,21 @@ export interface AnalogTrialResult {
 	voice: boolean
 	tones: AnalogTrialTones
 	stats: AnalogTrialStats | null
-	error?: "capture-gone" | "analyze-failed" | "cancelled" | "unavailable"
+	error?:
+		| "capture-gone"
+		| "analyze-failed"
+		| "cancelled"
+		| "unavailable"
+		| "not-protected"
 }
 
 export interface AnalogTrialRunner {
+	leaseSession?(sourceId: string): () => void
+	runLive?(
+		req: IqCaptureRequest,
+		mode: AnalogTrialMode,
+		signal: AbortSignal,
+	): Promise<AnalogTrialResult>
 	run(
 		captureId: string,
 		mode: AnalogTrialMode,
@@ -222,3 +234,19 @@ export type AnalyzeEvent =
  * 16 KiB leaves headroom.
  */
 export const ANALYZE_EVENT_MAX_BYTES = 16_384
+
+/**
+ * Live job slot fairness from a ready holder: one slot, eight candidates,
+ * 500 ms handoff/launch allowance. Both holds below count from decoder readiness.
+ * An already-starting holder adds its remaining startup latency to these bounds.
+ */
+export const JOB_PROBE_TURN_CAP_MS = 6_000
+export const JOB_PROBE_MIN_RUN_MS = 1_800
+export const JOB_PROBE_FRESH_MS = 2_000
+export const JOB_PROBE_STRONG_SNR_DB = 20
+export const JOB_PROBE_STRONG_DELTA_DB = 10
+export const JOB_PROBE_START_ALLOWANCE_MS = 500
+export const JOB_PROBE_MAX_WAIT_MS =
+	7 * (JOB_PROBE_TURN_CAP_MS + JOB_PROBE_START_ALLOWANCE_MS)
+export const JOB_PROBE_STRONG_WAIT_MS =
+	JOB_PROBE_MIN_RUN_MS + JOB_PROBE_START_ALLOWANCE_MS

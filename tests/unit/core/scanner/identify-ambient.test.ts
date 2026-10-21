@@ -19,7 +19,6 @@ import type {
 	DecodeEvidence,
 	ScannerProtocol,
 } from "../../../../src/core/scanner/types.js"
-import { IdentifyRunner as OracleRunner } from "./identify-ambient-oracle.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import {
 	TARGET_HZ,
@@ -43,7 +42,7 @@ function harness(
 		request?: Partial<ScannerIdentifyRequest>
 		ambient?: IdentifyAmbientLookup
 		channelizer?: boolean
-		/** Run the frozen cccf665f runner (Property 4 oracle). */
+		/** Use the runner without ambient coverage as the inertness oracle. */
 		oracle?: boolean
 		logger?: pino.Logger
 	} = {},
@@ -56,10 +55,7 @@ function harness(
 	const events: ScannerIdentifyEventData[] = []
 	const calls: [string, number, number][] = []
 	const ambient = opts.ambient
-	// The oracle has no onAmbientEvidence; Property 4 only calls it on the current runner.
-	const Runner = (opts.oracle
-		? OracleRunner
-		: IdentifyRunner) as unknown as typeof IdentifyRunner
+	const Runner = IdentifyRunner
 	const runner = new Runner({
 		record,
 		identify: normaliseIdentify({
@@ -434,7 +430,7 @@ describe("identify ambient inertness", () => {
 	)
 	// Feature: web-gaps-7, Property 4: Ambient identify inert without coverage
 	// Validates: Requirements 1.5, 1.6
-	it("without coverage and without ambient protocols, events equal the frozen cccf665f runner (run to completion)", async () => {
+	it("without coverage and without ambient protocols, events equal the runner without coverage (run to completion)", async () => {
 		await fc.assert(
 			fc.asyncProperty(
 				fc.constantFrom(6000, 9000, 12_000, 20_000),

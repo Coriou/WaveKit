@@ -1,3 +1,4 @@
+import type { IqCaptureRequest } from "./iq-capture-contract.js"
 import { setTimeout as delay } from "node:timers/promises"
 import {
 	ANALOG_TRIAL_CORES,
@@ -17,18 +18,24 @@ function cancelled(mode: AnalogTrialMode): AnalogTrialResult {
 	}
 }
 
-/** One analog slot and the probe pool core budget, shared by replay and identify. */
+/** Replay retains its core reservation; private trials share the two-capture ceiling. */
 export class AnalogAdmission implements AnalogTrialRunner {
 	private busy = false
+	readonly runLive?: NonNullable<AnalogTrialRunner["runLive"]>
+	private readonly live = new Map<string, number>()
 	private readonly stopped = new AbortController()
 
 	constructor(
 		private readonly runner: AnalogTrialRunner,
 		private readonly reserveCores: (cores: number) => (() => void) | null,
-	) {}
+	) {
+		if (runner.runLive)
+			this.runLive = (req, mode, signal) => this.liveRun(req, mode, signal)
+	}
 
 	reserve(cores: number): (() => void) | null {
-		if (this.busy || this.stopped.signal.aborted) return null
+		if (this.busy || this.liveCount() >= 2 || this.stopped.signal.aborted)
+			return null
 		const release = this.reserveCores(cores)
 		if (!release) return null
 		this.busy = true
@@ -74,6 +81,34 @@ export class AnalogAdmission implements AnalogTrialRunner {
 			signal.removeEventListener("abort", onAbort)
 			release()
 		}
+	}
+
+	private async liveRun(
+		req: IqCaptureRequest,
+		mode: AnalogTrialMode,
+		caller: AbortSignal,
+	): Promise<AnalogTrialResult> {
+		const signal = AbortSignal.any([caller, this.stopped.signal])
+		while (!signal.aborted && (this.live.get(req.sourceId) ?? 0) >= 2) {
+			try {
+				await delay(25, undefined, { signal })
+			} catch {
+				return cancelled(mode)
+			}
+		}
+		if (signal.aborted || !this.runner.runLive) return cancelled(mode)
+		this.live.set(req.sourceId, (this.live.get(req.sourceId) ?? 0) + 1)
+		try {
+			return await this.runner.runLive(req, mode, signal)
+		} finally {
+			const left = (this.live.get(req.sourceId) ?? 1) - 1
+			if (left > 0) this.live.set(req.sourceId, left)
+			else this.live.delete(req.sourceId)
+		}
+	}
+
+	private liveCount(): number {
+		return [...this.live.values()].reduce((sum, count) => sum + count, 0)
 	}
 
 	stop(): void {

@@ -86,3 +86,84 @@ describe("shared analog admission", () => {
 		expect(release).toHaveBeenCalledOnce()
 	})
 })
+
+it("private trials use both slots without an offset core reservation and a third can abort while waiting", async () => {
+	const releases: (() => void)[] = []
+	const reserve = vi.fn(() => null)
+	const runLive = vi.fn(
+		() =>
+			new Promise<AnalogTrialResult>(resolve =>
+				releases.push(() => resolve(result)),
+			),
+	)
+	const gate = new AnalogAdmission(
+		{ run: () => Promise.resolve(result), runLive },
+		reserve,
+	)
+	const req = {
+		sourceId: "src",
+		observationId: null,
+		epoch: 1,
+		rfHz: 100000000,
+		fromSample: 0,
+		reason: "identify" as const,
+		tuningTrust: "commanded" as const,
+	}
+	const first = gate.runLive!(req, "nfm", new AbortController().signal)
+	const second = gate.runLive!(req, "nfm", new AbortController().signal)
+	expect(runLive).toHaveBeenCalledTimes(2)
+	const ac = new AbortController()
+	const third = gate.runLive!(req, "nfm", ac.signal)
+	expect(runLive).toHaveBeenCalledTimes(2)
+	expect(gate.reserve(0.05)).toBeNull()
+	ac.abort()
+	expect((await third).error).toBe("cancelled")
+	expect(runLive).toHaveBeenCalledTimes(2)
+	expect(reserve).not.toHaveBeenCalled()
+	releases.shift()?.()
+	releases.shift()?.()
+	await Promise.all([first, second])
+	const fourth = gate.runLive!(req, "nfm", new AbortController().signal)
+	expect(runLive).toHaveBeenCalledTimes(3)
+	releases.shift()?.()
+	await fourth
+})
+
+it("admits two private trials on each source and bounds each source independently", async () => {
+	vi.useFakeTimers()
+	const releases: (() => void)[] = []
+	const runLive = vi.fn(
+		() =>
+			new Promise<AnalogTrialResult>(resolve =>
+				releases.push(() => resolve(result)),
+			),
+	)
+	const gate = new AnalogAdmission(
+		{ run: async () => result, runLive },
+		() => null,
+	)
+	const ac = new AbortController()
+	const pending: Promise<AnalogTrialResult>[] = []
+	for (const sourceId of ["a", "b"]) {
+		const req = {
+			sourceId,
+			observationId: null,
+			epoch: 1,
+			rfHz: 100000000,
+			fromSample: 0,
+			reason: "identify" as const,
+			tuningTrust: "commanded" as const,
+		}
+		pending.push(
+			gate.runLive!(req, "nfm", ac.signal),
+			gate.runLive!(req, "nfm", ac.signal),
+		)
+		pending.push(gate.runLive!(req, "nfm", ac.signal))
+	}
+	expect(runLive).toHaveBeenCalledTimes(4)
+	await vi.advanceTimersByTimeAsync(100)
+	expect(runLive).toHaveBeenCalledTimes(4)
+	ac.abort()
+	for (const release of releases) release()
+	await Promise.all(pending)
+})

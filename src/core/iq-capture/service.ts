@@ -3,8 +3,8 @@
  * `wavekit-iqcap run` process per attached IQ source, the in-memory store and the capture
  * directory `<scanner storage>/iq-captures`.
  *
- * Off unless `scanner.iqCapture.enabled` and protected access mode: absent or disabled means no
- * process, no directory, no file and no filesystem call at all; legacy mode logs one info line.
+ * Persistent capture requires `scanner.iqCapture.enabled` and protected access mode.
+ * The optional trial-only mode starts the same native ring only while a session or trial owns a lease.
  * Logs carry fixed text and counts only (never ids, paths, frequencies or tool output).
  *
  * Replay input (`openReplay`): the file is proven (lstat chain from the configured root, regular,
@@ -38,6 +38,7 @@ import {
 import {
 	ANALYZE_EVENT_MAX_BYTES,
 	type AnalogTrialMode,
+	type AnalogTrialResult,
 	type AnalyzeEvent,
 } from "../scanner/scanner-redesign-contract.js"
 import {
@@ -105,8 +106,10 @@ export interface IqCaptureSourceAttach {
 }
 
 export interface IqCaptureServiceOptions {
-	/** `scanner.iqCapture`; undefined (absent) or `enabled: false` keeps everything off. */
+	/** `scanner.iqCapture`; undefined (absent) or `enabled: false` keeps persistent capture off. */
 	config: IqCaptureConfig | undefined
+	/** Private, ephemeral analog trials when persistent capture is disabled. */
+	trialOnly?: boolean
 	/** The scanner storage directory; captures live in `<storageRoot>/iq-captures`. */
 	storageRoot: string
 	/** True only in protected access mode. */
@@ -135,6 +138,12 @@ export type IqCaptureServiceState =
 	| "stopped"
 
 export interface IqCaptureServiceCounters extends IqCaptureCounters {
+	trialCaptures?: {
+		started: number
+		completed: number
+		failed: number
+		swept: number
+	}
 	tool: IqToolCounters
 	toolFailures: number
 	lastToolFailure: IqToolFailure | null
@@ -147,6 +156,12 @@ export interface IqCaptureServiceCounters extends IqCaptureCounters {
 }
 
 export interface IqCaptureService extends IqCapturePort {
+	leaseSession(sourceId: string): () => void
+	withTrial(
+		req: IqCaptureRequest,
+		signal: AbortSignal,
+		run: (captureId: string) => Promise<AnalogTrialResult>,
+	): Promise<AnalogTrialResult | IqCaptureRefusal>
 	/**
 	 * Review M2: `capture`, the capture held by `holder` from the start (an identify job), so the
 	 * replay queue never takes it over when it finishes; `claim(id, holder)` then returns true.
@@ -244,6 +259,15 @@ export function createIqCaptureService(
 }
 
 class Service implements IqCaptureService {
+	private readonly trials = new Set<string>()
+	private readonly activeTrials = new Map<string, number>()
+	private readonly trialUsers = new Map<string, number>()
+	private readonly trialCounts = {
+		started: 0,
+		completed: 0,
+		failed: 0,
+		swept: 0,
+	}
 	private readonly log: Logger
 	private readonly now: () => number
 	private readonly spawn: SpawnFn
@@ -300,7 +324,7 @@ class Service implements IqCaptureService {
 	private warnedDir = false
 	private readonly zombies = new Map<
 		string,
-		{ bytes: number; proc: IqToolProcess }
+		{ bytes: number; proc: IqToolProcess; sourceId: string }
 	>()
 	private toolTotals: IqToolCounters = {
 		droppedBytes: 0,
@@ -325,7 +349,19 @@ class Service implements IqCaptureService {
 		this.uuid = o.randomUUID ?? nodeRandomUUID
 		this.timers = o.timers ?? realTimers
 		this.uid = o.uid === undefined ? processUid() : o.uid
-		this.cfg = o.config?.enabled === true ? o.config : undefined
+		this.cfg =
+			o.config?.enabled === true
+				? o.config
+				: o.trialOnly
+					? {
+							enabled: false,
+							maxTotalMb: 256,
+							maxCaptureMs: 4000,
+							preRollMs: 500,
+							binaryPath: "wavekit-iqcap",
+							...o.config,
+						}
+					: undefined
 		this.root = path.resolve(o.storageRoot)
 		this.shapes = o.shapes ?? null
 		this.events.setMaxListeners(0)
@@ -374,10 +410,11 @@ class Service implements IqCaptureService {
 			maxCaptureMs: Math.min(IQ_CAPTURE_MAX_MS, this.cfg.maxCaptureMs),
 			now: this.now,
 			onRemove: (entry, reason) => this.onRemove(entry, reason),
-			openInTool: () => this.openInTool(),
+			openInTool: sourceId => this.openInTool(sourceId),
 		})
 		this.st = "on"
-		for (const slot of this.slots.values()) this.spawnTool(slot)
+		if (!this.o.trialOnly)
+			for (const slot of this.slots.values()) this.spawnTool(slot)
 		this.log.info("IQ capture started")
 	}
 
@@ -423,6 +460,7 @@ class Service implements IqCaptureService {
 			this.dirRefused()
 			this.st = "unavailable"
 		}
+		if (this.o.trialOnly) this.trialCounts.swept += result.removed
 		this.sweepTotals = {
 			removed: this.sweepTotals.removed + result.removed,
 			left: this.sweepTotals.left + result.left,
@@ -458,6 +496,7 @@ class Service implements IqCaptureService {
 			slot.proc = null
 		}
 		this.slots.clear()
+		this.trialUsers.clear()
 		for (const children of this.replays.values())
 			for (const child of children) killGroup(child, "SIGKILL")
 		if (this.store) {
@@ -505,14 +544,18 @@ class Service implements IqCaptureService {
 			givenUp: false,
 			ids: new Set(),
 		}
-		slot.untap = source.engine.tap((start, bytes) => {
+		this.slots.set(sourceId, slot)
+		if (!this.o.trialOnly || this.trialUsers.has(sourceId)) this.activate(slot)
+	}
+
+	private activate(slot: SourceSlot): void {
+		slot.untap = slot.engine.tap((start, bytes) => {
 			try {
 				slot.proc?.feed(start, bytes)
 			} catch {
-				// never break the engine's tap loop
+				// Never break the engine's tap loop.
 			}
 		})
-		this.slots.set(sourceId, slot)
 		if (this.st === "on") this.spawnTool(slot)
 	}
 
@@ -559,7 +602,12 @@ class Service implements IqCaptureService {
 			proc.send({ type: "flush" })
 			void proc.stop()
 		}
-		if (this.st === "on" && !slot.givenUp && slot.restartTimer === null)
+		if (
+			this.st === "on" &&
+			(!this.o.trialOnly || this.trialUsers.has(sourceId)) &&
+			!slot.givenUp &&
+			slot.restartTimer === null
+		)
 			this.spawnTool(slot)
 	}
 
@@ -576,6 +624,7 @@ class Service implements IqCaptureService {
 	}
 
 	view(captureId: string): IqCaptureView | null {
+		if (this.trials.has(captureId)) return null
 		const e = this.store?.get(captureId)
 		if (!e || e.state !== "ready" || e.pendingDiscard !== null) return null
 		return viewOf(e)
@@ -643,6 +692,7 @@ class Service implements IqCaptureService {
 		}
 		return {
 			...base,
+			trialCaptures: { ...this.trialCounts },
 			refused: { ...base.refused, ...this.offRefusals },
 			tool,
 			toolFailures: this.toolFailures,
@@ -669,7 +719,9 @@ class Service implements IqCaptureService {
 		opts: { observationId: string | null; limit: number },
 	): readonly IqCaptureView[] {
 		try {
-			return this.store?.near(sourceId, hz, toleranceHz, opts) ?? []
+			return (this.store?.near(sourceId, hz, toleranceHz, opts) ?? []).filter(
+				v => !this.trials.has(v.captureId),
+			)
 		} catch {
 			return []
 		}
@@ -680,6 +732,7 @@ class Service implements IqCaptureService {
 		holder: string | null = null,
 	): { captureId: string } | { refused: IqCaptureRefusal } {
 		try {
+			if (this.o.trialOnly) return this.refuse("disabled")
 			return this.doCapture(req, holder)
 		} catch (err: unknown) {
 			this.log.warn({ err: safeErrorFields(err) }, "IQ capture request failed")
@@ -696,6 +749,112 @@ class Service implements IqCaptureService {
 		return this.capture(req, holder)
 	}
 
+	leaseSession(sourceId: string): () => void {
+		if (this.st !== "on") return () => {}
+		const slot = this.slots.get(sourceId)
+		const users = this.trialUsers.get(sourceId) ?? 0
+		this.trialUsers.set(sourceId, users + 1)
+		let released = false
+		try {
+			if (slot && this.o.trialOnly && users === 0) this.activate(slot)
+		} catch (error) {
+			this.trialUsers.delete(sourceId)
+			slot?.untap()
+			throw error
+		}
+		return () => {
+			if (released) return
+			released = true
+			const remaining = (this.trialUsers.get(sourceId) ?? 1) - 1
+			if (remaining > 0) this.trialUsers.set(sourceId, remaining)
+			else {
+				this.trialUsers.delete(sourceId)
+				const slot = this.slots.get(sourceId)
+				if (!this.o.trialOnly || !slot) return
+				slot.untap()
+				slot.untap = () => {}
+				if (slot.restartTimer !== null)
+					this.timers.clearTimeout(slot.restartTimer)
+				slot.restartTimer = null
+				const proc = slot.proc
+				slot.proc = null
+				if (proc) {
+					this.addToolCounters(proc)
+					void proc.stop().catch(() => {})
+				}
+			}
+		}
+	}
+
+	async withTrial(
+		req: IqCaptureRequest,
+		signal: AbortSignal,
+		run: (captureId: string) => Promise<AnalogTrialResult>,
+	): Promise<AnalogTrialResult | IqCaptureRefusal> {
+		if (!this.o.protectedMode) return "not-protected"
+		if (this.st !== "on" || signal.aborted) return "unavailable"
+		const slot = this.slots.get(req.sourceId)
+		if (!slot) return "unavailable"
+		const active = this.activeTrials.get(req.sourceId) ?? 0
+		if (active >= 2) return "busy"
+		const release = this.leaseSession(req.sourceId)
+		this.activeTrials.set(req.sourceId, active + 1)
+		let id: string | null = null
+		let completed = false
+		try {
+			// Bound startup independently of native ready. A cold ring can only retain
+			// samples received after activation; normal capture keeps its existing pre-roll.
+			for (
+				let waited = 0;
+				!slot.proc?.ready || slot.proc.toTool(req.fromSample) === null;
+				waited += 10
+			) {
+				if (waited >= 2000 || signal.aborted || this.st !== "on")
+					return "unavailable"
+				await this.trialDelay(signal)
+			}
+			const result = this.doCapture(req, "analog-trial", true)
+			if ("refused" in result) return result.refused
+			id = result.captureId
+			this.trialCounts.started++
+			for (let waited = 0; ; waited += 10) {
+				if (signal.aborted || waited >= 15000 || this.st !== "on")
+					return "unavailable"
+				const entry = this.store?.get(id)
+				if (!entry) return "unavailable"
+				if (entry.state === "ready") break
+				await this.trialDelay(signal)
+			}
+			const outcome = await run(id)
+			completed = !signal.aborted && outcome.error === undefined
+			return outcome
+		} finally {
+			if (id !== null) {
+				this.discard(id, "result", "analog-trial")
+				if (completed) this.trialCounts.completed++
+				else this.trialCounts.failed++
+			}
+			const left = (this.activeTrials.get(req.sourceId) ?? 1) - 1
+			if (left > 0) this.activeTrials.set(req.sourceId, left)
+			else this.activeTrials.delete(req.sourceId)
+			release()
+		}
+	}
+
+	private trialDelay(signal: AbortSignal): Promise<void> {
+		return new Promise(resolve => {
+			let timer: unknown
+			const done = (): void => {
+				this.timers.clearTimeout(timer)
+				signal.removeEventListener("abort", done)
+				resolve()
+			}
+			timer = this.timers.setTimeout(done, 10)
+			signal.addEventListener("abort", done, { once: true })
+			if (signal.aborted) done()
+		})
+	}
+
 	private refuse(reason: IqCaptureRefusal): { refused: IqCaptureRefusal } {
 		if (this.store) return this.store.refuse(reason)
 		this.offRefusals[reason] = (this.offRefusals[reason] ?? 0) + 1
@@ -705,6 +864,7 @@ class Service implements IqCaptureService {
 	private doCapture(
 		req: IqCaptureRequest,
 		holder: string | null,
+		trial = false,
 	): { captureId: string } | { refused: IqCaptureRefusal } {
 		if (!this.cfg) return this.refuse("disabled")
 		if (!this.o.protectedMode) return this.refuse("not-protected")
@@ -756,10 +916,11 @@ class Service implements IqCaptureService {
 		const fromSample = Math.max(lo, Math.min(hi, wanted))
 		const captureId = this.uuid()
 		if (!isCaptureId(captureId)) return this.refuse("invalid")
-		const admitted = store.admit(req, captureId, slot.epoch)
+		const admitted = store.admit(req, captureId, slot.epoch, trial)
 		if ("refused" in admitted) return admitted
 		// Held before the tool can answer: the queue never sees it unheld.
 		if (holder !== null) store.reserve(captureId, holder)
+		if (trial) this.trials.add(captureId)
 		const maxMs = Math.min(IQ_CAPTURE_MAX_MS, this.cfg.maxCaptureMs)
 		slot.ids.add(captureId)
 		// Registered before the command: the tool may answer at once.
@@ -844,6 +1005,7 @@ class Service implements IqCaptureService {
 		decoderType: ProbeDecoderType,
 	): Readable | null {
 		try {
+			if (this.trials.has(captureId)) return null
 			return this.doOpenReplay(captureId, decoderType)
 		} catch (err: unknown) {
 			this.replayFailures++
@@ -1173,7 +1335,14 @@ class Service implements IqCaptureService {
 
 	private spawnTool(slot: SourceSlot): void {
 		const cfg = this.cfg
-		if (!cfg || this.st !== "on" || !this.dir || slot.givenUp) return
+		if (
+			!cfg ||
+			this.st !== "on" ||
+			!this.dir ||
+			slot.givenUp ||
+			(this.o.trialOnly && !this.trialUsers.has(slot.sourceId))
+		)
+			return
 		if (this.slots.get(slot.sourceId) !== slot) return
 		const anchor = this.anchor
 		// Safety: no tool starts on a directory that is not the proven one.
@@ -1273,10 +1442,8 @@ class Service implements IqCaptureService {
 		if (this.st === "on") this.turnOff()
 	}
 
-	/**
-	 * Resolves the canonical root once (see `canonical`). Without `create` a missing root is not
-	 * created (false: nothing there yet). Fixed refusals only; nothing path-like is logged.
-	 */
+	// Resolves the canonical root once (see `canonical`). Without `create` a missing root is not
+	// created (false: nothing there yet). Fixed refusals only; nothing path-like is logged.
 	private async canonicalize(create: boolean): Promise<boolean> {
 		if (this.canonical) return true
 		let existing = this.root
@@ -1470,7 +1637,7 @@ class Service implements IqCaptureService {
 			}
 			fs.closeSync(v.fd)
 			const view = store.ready(captureId)
-			if (!view) return
+			if (!view || this.trials.has(captureId)) return
 			for (const listener of this.events.listeners("finished")) {
 				try {
 					;(listener as (v: IqCaptureView) => void)(view)
@@ -1517,11 +1684,9 @@ class Service implements IqCaptureService {
 			proc.counters[k] = 0
 	}
 
-	/**
-	 * Property 11: one timer armed for the earliest orphan deadline, so a capture is discarded
-	 * exactly IQ_CAPTURE_ORPHAN_TTL_MS after its finish (no polling slack). Re-armed whenever a
-	 * capture finishes and after every expiry pass.
-	 */
+	// Property 11: one timer armed for the earliest orphan deadline, so a capture is discarded
+	// exactly IQ_CAPTURE_ORPHAN_TTL_MS after its finish (no polling slack). Re-armed whenever a
+	// capture finishes and after every expiry pass.
 	private armExpire(): void {
 		const store = this.store
 		const at = this.st === "on" && store ? store.nextExpiryAt() : null
@@ -1543,15 +1708,20 @@ class Service implements IqCaptureService {
 	}
 
 	/** Captures Node removed that some process still writes (each holds a concurrency slot). */
-	private openInTool(): number {
-		return this.zombies.size
+	private openInTool(sourceId?: string): number {
+		if (sourceId === undefined) return this.zombies.size
+		return [...this.zombies.values()].filter(
+			zombie => zombie.sourceId === sourceId,
+		).length
 	}
 
 	private onRemove(
 		entry: IqCaptureEntry,
 		_reason: IqCaptureDiscardReason | "failed",
 	): void {
-		for (const listener of this.events.listeners("removed")) {
+		for (const listener of this.trials.has(entry.captureId)
+			? []
+			: this.events.listeners("removed")) {
 			try {
 				;(
 					listener as (captureId: string, observationId: string | null) => void
@@ -1563,6 +1733,7 @@ class Service implements IqCaptureService {
 				)
 			}
 		}
+		this.trials.delete(entry.captureId)
 		for (const slot of this.slots.values()) slot.ids.delete(entry.captureId)
 		const writer = this.writers.get(entry.captureId) ?? null
 		this.writers.delete(entry.captureId)
@@ -1574,7 +1745,11 @@ class Service implements IqCaptureService {
 		}
 		if (entry.state === "capturing" && writer) {
 			// Review m2/m4: the tool still writes it. Ended now; files and bytes go at its final event.
-			this.zombies.set(entry.captureId, { bytes: entry.bytes, proc: writer })
+			this.zombies.set(entry.captureId, {
+				bytes: entry.bytes,
+				proc: writer,
+				sourceId: entry.sourceId,
+			})
 			this.writers.set(entry.captureId, writer)
 			if (writer.ready) writer.send({ type: "end", id: entry.captureId })
 			return
@@ -1589,11 +1764,9 @@ class Service implements IqCaptureService {
 		this.unlinkFiles(captureId, true, z.bytes)
 	}
 
-	/**
-	 * Unlinks `<id>.cf32` (and `.tmp`) after re-proving the directory and each file (review
-	 * BLOCKING; synchronous, so nothing interleaves), then releases `bytes` against the cap. A
-	 * failed proof unlinks nothing and turns capture off.
-	 */
+	// Unlinks `<id>.cf32` (and `.tmp`) after re-proving the directory and each file (review
+	// BLOCKING; synchronous, so nothing interleaves), then releases `bytes` against the cap. A
+	// failed proof unlinks nothing and turns capture off.
 	private unlinkFiles(captureId: string, tmp: boolean, bytes = 0): void {
 		const dir = this.dir
 		const identity = this.dirId

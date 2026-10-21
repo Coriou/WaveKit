@@ -161,9 +161,9 @@ function referenceOutcome(
 				: -frame.hfNoiseDb >= ANALOG_TRIAL_QUIETING_DB)
 		if (passed) quiet += 1
 	}
-	if (quiet < frames.length * ANALOG_TRIAL_MIN_QUIET_FRACTION) return "no-sync"
 	const cluster = median(frames.map(frame => frame.cluster))
 	if (cluster !== null && cluster >= ANALOG_TRIAL_DATA_SCORE) return "data-like"
+	if (quiet < frames.length * ANALOG_TRIAL_MIN_QUIET_FRACTION) return "no-sync"
 	const syllabic = median(frames.map(frame => frame.syllabic))
 	const audio = median(frames.map(frame => frame.audioDb))
 	if (
