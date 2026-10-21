@@ -206,6 +206,7 @@ export interface ResourceAlert {
 		| "container-memory"
 		| "container-cpu"
 		| "sdr-host-error"
+		| "link-capacity"
 	severity: "warning" | "critical"
 	sourceId?: string
 	message: string

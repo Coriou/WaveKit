@@ -22,7 +22,62 @@ export const decoderStatsSchema = {
 } as const
 
 /** Optional fields from CLI-COORDINATION requests 2-4. */
+const efficiencyDetail = {
+	type: "string",
+	enum: ["budget", "cpu", "drops", "unknown"],
+} as const
+
 export const decoderStatusExtensionProperties = {
+	mode: { type: "string", enum: ["auto", "always", "off"] },
+	modeSource: {
+		type: "string",
+		enum: ["settings", "config", "legacy-enabled", "legacy-band", "default"],
+	},
+	origin: { type: "string", enum: ["config", "catalogue"] },
+	placements: {
+		type: "array",
+		items: {
+			type: "object",
+			properties: {
+				sourceId: { type: "string" },
+				channelHz: { type: "number" },
+				reach: { type: "string", enum: ["channel", "raw", "centre"] },
+				origin: {
+					type: "string",
+					enum: ["configured", "band", "vfo", "bandplan", "fallback"],
+				},
+				primary: { type: "boolean" },
+				running: { type: "boolean" },
+				suspension: {
+					type: "object",
+					properties: {
+						reasonCode: { type: "string", enum: decoderSuspensionReasonCodes },
+						since: { type: "string", format: "date-time" },
+					},
+					required: ["reasonCode", "since"],
+				},
+				efficiencyDetail,
+				costCores: { type: "number" },
+				probation: { type: "boolean" },
+			},
+			required: [
+				"sourceId",
+				"reach",
+				"origin",
+				"primary",
+				"running",
+				"costCores",
+			],
+		},
+	},
+	efficiency: {
+		type: "object",
+		properties: {
+			detail: efficiencyDetail,
+			retryAt: { type: "string", format: "date-time" },
+		},
+		required: ["detail"],
+	},
 	rateHistory: {
 		type: "array",
 		maxItems: 15,

@@ -256,9 +256,10 @@ describe("WG11 contract: stable frame tracks", () => {
 describe("WG11 contract: tuner config and command origin", () => {
 	it("adds the config origin", () => {
 		expect(
-			same<Api.TunerCommandOrigin, "rest" | "scanner" | "replay" | "config">(
-				true,
-			),
+			same<
+				Api.TunerCommandOrigin,
+				"rest" | "scanner" | "replay" | "config" | "decoder-rate"
+			>(true),
 		).toBe(true)
 	})
 

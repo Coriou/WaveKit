@@ -191,6 +191,7 @@ export const DecoderBandOverrideSchema = z
  * Requirements: 17.1, 17.2, 17.3, 17.4
  */
 export const DecoderConfigSchema = z.object({
+	mode: z.enum(["auto", "always", "off"]).optional(),
 	id: z.string().min(1),
 	type: z.string().min(1),
 	enabled: z.boolean(),
@@ -523,6 +524,7 @@ export const CsdrConfigSchema = z.object({
  * usableFraction and blockSamples mirror the wavekit-chan argument validation.
  */
 export const ChannelizerConfigSchema = z.object({
+	auto: z.boolean().optional(),
 	enabled: z.boolean().default(false),
 	binaryPath: z.string().min(1).default("wavekit-chan"),
 	socketDir: z.string().min(1).default("/var/run/wavekit/chan"),
@@ -805,6 +807,21 @@ export const ConfigSchema = z
 	.object({
 		sources: z.array(SourceConfigSchema).default([]),
 		decoders: z.array(DecoderConfigSchema).default([]),
+		decoderPolicy: z
+			.object({
+				catalogue: z.boolean().optional(),
+				rateRaise: z.boolean().optional(),
+				efficiency: z
+					.object({
+						cpuBudgetCores: z.number().positive().max(64).optional(),
+						cpuGuardPercent: z.number().min(1).max(100).optional(),
+						maxBandplanChannels: z.number().int().min(0).max(16).optional(),
+					})
+					.strict()
+					.optional(),
+			})
+			.strict()
+			.optional(),
 		audio: AudioConfigSchema.default({}),
 		tunerRelay: TunerRelayConfigSchema.default({}),
 		tuner: TunerConfigSchema.default({}),
