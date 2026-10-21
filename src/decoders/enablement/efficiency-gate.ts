@@ -1,8 +1,6 @@
 import type { DecoderEfficiencyDetail } from "@wavekit/api-types"
 import {
 	channelizerBaseCores,
-	EFFICIENCY_CLEAR_MS,
-	EFFICIENCY_DROP_WINDOW_MS,
 	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MS,
 	EFFICIENCY_RETRY_MAX_MS,
@@ -23,17 +21,41 @@ const valid = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value) && value >= 0
 
 /** Stateful decision core; all time and observations are supplied by the caller. */
-export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
-	const sources = new Map<
-		string,
-		{
-			unknown: boolean
-			at: number
-			barrierAt: number
-			maxDropAt: number | null
-			rate: number | null
+export interface DropReader {
+	dropState(id: string): {
+		state: "ok" | "dropping" | "unknown"
+		dropBytesPerSecond: number | null
+	}
+	monoNow(): number
+	sources(): readonly string[]
+	droppedSinceMono(id: string, sinceMono: number): boolean
+	droppedWithinMs(id: string, ms: number): boolean
+}
+
+export function createEfficiencyGate(
+	inputs: EfficiencyInputs,
+	deps: { drops?: DropReader } = {},
+): EfficiencyGate {
+	const admittedMono = new Map<string, number>()
+	const monoNow = () => {
+		try {
+			return deps.drops?.monoNow() ?? NaN
+		} catch {
+			return NaN
 		}
-	>()
+	}
+	const readDrops = (id: string) => {
+		try {
+			return (
+				deps.drops?.dropState(id) ?? {
+					state: "unknown" as const,
+					dropBytesPerSecond: null,
+				}
+			)
+		} catch {
+			return { state: "unknown" as const, dropBytesPerSecond: null }
+		}
+	}
 	const retries = new Map<
 		string,
 		{
@@ -44,39 +66,10 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 		}
 	>()
 	const failures = new Set<string>()
-	let latestAt: number | null = null
 	let cpu: number | null = null
 	let maxHighCpuAt: number | null = null
 	let cpuAt: number | null = null
 
-	// A far-future sample keeps every later sample classified as reordered, so
-	// the gate stays closed (fail closed) until it is recreated. The caller's
-	// query clock is never trusted to lower ordering or evidence marks.
-
-	const dropState = (id: string, now: number) => {
-		const source = sources.get(id)
-		if (
-			!valid(now) ||
-			!source ||
-			source.unknown ||
-			source.at > now ||
-			now - source.at > EFFICIENCY_STALE_MS
-		)
-			return "unknown"
-		if (
-			now - source.barrierAt < EFFICIENCY_CLEAR_MS &&
-			source.barrierAt > (source.maxDropAt ?? -1)
-		)
-			return "unknown"
-		if (source.maxDropAt !== null) {
-			if (source.maxDropAt > now) return "dropping"
-			const age = now - source.maxDropAt
-			if (age <= EFFICIENCY_DROP_WINDOW_MS) return "dropping"
-			if (age < EFFICIENCY_CLEAR_MS) return "clearing"
-		}
-		if (now - source.barrierAt < EFFICIENCY_CLEAR_MS) return "unknown"
-		return "ok"
-	}
 	const currentCpu = (now: number) =>
 		valid(now) &&
 		cpuAt !== null &&
@@ -107,88 +100,50 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 		for (const base of bases.values()) sum += base
 		return sum
 	}
-	const onProbation = (p: RunningPlacement, now: number) =>
-		valid(p.admittedAtMs) &&
-		now >= p.admittedAtMs &&
-		now - p.admittedAtMs < EFFICIENCY_PROBATION_MS
+	// Every running key is first observed in the monotonic clock domain. Only
+	// probation() prunes: an admitted key may not be running yet when admit()
+	// or view() is called with a partial or earlier list.
+	const observeRunning = (
+		running: readonly RunningPlacement[],
+		mono: number,
+		prune = false,
+	) => {
+		if (prune) {
+			const present = new Set(running.map(p => p.key))
+			for (const key of admittedMono.keys())
+				if (!present.has(key)) admittedMono.delete(key)
+		}
+		for (const placement of running)
+			if (!admittedMono.has(placement.key))
+				admittedMono.set(placement.key, mono)
+	}
+	const onProbation = (p: RunningPlacement, mono: number) => {
+		const admitted = admittedMono.get(p.key) ?? NaN
+		return (
+			!Number.isFinite(mono) ||
+			!Number.isFinite(admitted) ||
+			mono - admitted < EFFICIENCY_PROBATION_MS
+		)
+	}
 
 	return {
 		record(sample) {
-			// Retained barriers never decrease. Unknown history must earn a
-			// complete clean window, just like a newly observed source.
-			if (!sample || !valid(sample.atMs) || !(sample.sources instanceof Map)) {
-				const barrierAt = Math.max(
-					latestAt ?? 0,
-					valid(sample?.atMs) ? sample.atMs : 0,
-				)
-				if (barrierAt !== null)
-					latestAt = Math.max(latestAt ?? barrierAt, barrierAt)
-				for (const source of sources.values()) {
-					source.unknown = true
-					source.rate = null
-					source.barrierAt = Math.max(source.barrierAt, barrierAt ?? source.at)
-				}
+			if (!sample || !valid(sample.atMs)) {
 				cpu = null
 				return
 			}
 			const at = sample.atMs
-			const reorderedTick = latestAt !== null && at <= latestAt
-			const highWater = Math.max(latestAt ?? at, at)
-			latestAt = Math.max(latestAt ?? at, at)
 			if (
 				valid(sample.cpuPercent) &&
 				sample.cpuPercent > inputs.cpuGuardPercent
 			)
-				maxHighCpuAt = Math.max(maxHighCpuAt ?? at, at)
+				maxHighCpuAt = Math.max(maxHighCpuAt ?? monoNow(), monoNow())
 			cpuAt = at
 			cpu = valid(sample.cpuPercent) ? sample.cpuPercent : null
-			for (const [id, source] of sources) {
-				if (!sample.sources.has(id)) {
-					source.unknown = true
-					source.rate = null
-					source.barrierAt = Math.max(source.barrierAt, highWater)
-					if (highWater - source.at > EFFICIENCY_CLEAR_MS) sources.delete(id)
-				}
-			}
-			for (const [id, counters] of sample.sources) {
-				const previous = sources.get(id)
-				const complete =
-					counters != null &&
-					valid(counters.droppedBytesDelta) &&
-					valid(counters.droppedChunksDelta)
-				const drop =
-					counters != null &&
-					((valid(counters.droppedBytesDelta) &&
-						counters.droppedBytesDelta > 0) ||
-						(valid(counters.droppedChunksDelta) &&
-							counters.droppedChunksDelta > 0))
-				const reordered =
-					reorderedTick || (previous !== undefined && at <= previous.at)
-				const gap =
-					previous !== undefined && at - previous.at > EFFICIENCY_STALE_MS
-				const irregular = !complete || reordered || gap
-				sources.set(id, {
-					unknown: irregular,
-					at: Math.max(previous?.at ?? at, at),
-					barrierAt:
-						!previous || irregular || drop
-							? Math.max(previous?.barrierAt ?? highWater, highWater)
-							: previous.barrierAt,
-					maxDropAt: drop
-						? Math.max(previous?.maxDropAt ?? highWater, highWater)
-						: (previous?.maxDropAt ?? null),
-					rate:
-						complete &&
-						!irregular &&
-						previous &&
-						!previous.unknown &&
-						at > previous.at
-							? (counters.droppedBytesDelta! * 1000) / (at - previous.at)
-							: null,
-				})
-			}
 		},
 		admit(newcomer, running, now): AdmissionDecision {
+			const mono = monoNow()
+			observeRunning(running, mono)
 			if (!valid(now)) return { admit: false, detail: "unknown", retryAtMs: 0 }
 			const retry = retries.get(newcomer.key)
 			if (retry?.pending) {
@@ -198,7 +153,7 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 			if (retry && now < retry.at) {
 				return { admit: false, detail: retry.detail, retryAtMs: retry.at }
 			}
-			const state = dropState(newcomer.sourceId, now)
+			const state = readDrops(newcomer.sourceId).state
 			let detail: DecoderEfficiencyDetail | null = null
 			if (!valid(now) || state === "unknown") detail = "unknown"
 			else if (state !== "ok") detail = "drops"
@@ -210,7 +165,13 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 				total([...running, newcomer]) > inputs.budgetCores
 			)
 				detail = "budget"
-			if (detail === null) return { admit: true }
+			if (detail === null) {
+				// A key already running keeps its mark; any other admission starts a
+				// fresh probation window.
+				if (!running.some(p => p.key === newcomer.key))
+					admittedMono.set(newcomer.key, mono)
+				return { admit: true }
+			}
 			const at = (valid(now) ? now : 0) + (retry?.delay ?? EFFICIENCY_RETRY_MS)
 			retries.set(newcomer.key, {
 				detail,
@@ -219,27 +180,35 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 			})
 			return { admit: false, detail, retryAtMs: at }
 		},
-		// Unknown observations close admission, but are not probation verdicts.
-		probation(running, now) {
-			const newest = new Map<string, RunningPlacement>()
-			if (!valid(now)) return []
+		// Unknown observations fail closed during probation.
+		probation(running) {
+			const mono = monoNow()
+			observeRunning(running, mono, true)
+			const newest = new Map<
+				string,
+				{ placement: RunningPlacement; admitted: number }
+			>()
 			for (const placement of running) {
-				if (!onProbation(placement, now)) continue
+				if (!onProbation(placement, mono)) continue
+				const admitted = admittedMono.get(placement.key)!
 				const previous = newest.get(placement.sourceId)
-				if (!previous || placement.admittedAtMs > previous.admittedAtMs) {
-					newest.set(placement.sourceId, placement)
+				if (!previous || admitted > previous.admitted) {
+					newest.set(placement.sourceId, { placement, admitted })
 				}
 			}
 			const verdicts: { key: string; detail: "drops" | "cpu" }[] = []
-			for (const placement of newest.values()) {
-				const maxDropAt = sources.get(placement.sourceId)?.maxDropAt
+			for (const { placement, admitted } of newest.values()) {
+				let dropped = true
+				try {
+					dropped =
+						deps.drops?.droppedSinceMono(placement.sourceId, admitted) ?? true
+				} catch {
+					/* Missing evidence fails closed during probation. */
+				}
 				let detail: "drops" | "cpu" | null = null
-				if (maxDropAt != null && maxDropAt >= placement.admittedAtMs) {
+				if (dropped) {
 					detail = "drops"
-				} else if (
-					maxHighCpuAt !== null &&
-					maxHighCpuAt >= placement.admittedAtMs
-				) {
+				} else if (maxHighCpuAt !== null && maxHighCpuAt >= admitted) {
 					detail = "cpu"
 				}
 				if (detail) {
@@ -263,12 +232,21 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 			})
 		},
 		forget(key) {
+			admittedMono.delete(key)
 			retries.delete(key)
 			failures.delete(key)
 		},
 		view(running, blocked, now) {
+			const mono = monoNow()
+			observeRunning(running, mono)
+			let membership: readonly string[] = []
+			try {
+				membership = deps.drops?.sources() ?? []
+			} catch {
+				/* Unreadable membership. */
+			}
 			const ids = new Set([
-				...sources.keys(),
+				...membership,
 				...running.map(p => p.sourceId),
 				...blocked.map(b => b.placement.sourceId),
 			])
@@ -279,11 +257,8 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 					sourceId,
 					coresInUse: total(running.filter(p => p.sourceId === sourceId)),
 					cpu: { percent: currentCpu(now), limit: inputs.cpuGuardPercent },
-					drops: dropState(sourceId, now),
-					dropBytesPerSecond:
-						dropState(sourceId, now) === "unknown"
-							? null
-							: (sources.get(sourceId)?.rate ?? null),
+					drops: readDrops(sourceId).state,
+					dropBytesPerSecond: readDrops(sourceId).dropBytesPerSecond,
 					admitted: running
 						.filter(p => p.sourceId === sourceId)
 						.map(p => {
@@ -298,7 +273,7 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 										: null,
 								reach: p.reach,
 								costCores: p.costCores,
-								probation: onProbation(p, now),
+								probation: onProbation(p, mono),
 							}
 						}),
 					blocked: blocked

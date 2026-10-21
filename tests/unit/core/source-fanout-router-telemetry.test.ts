@@ -130,13 +130,14 @@ describe("source branch drop telemetry", () => {
 			// Use real telemetry reads: mocks would dominate this small read budget.
 			for (let i = 0; i < 64; i++) primary.addBranch({ id: `branch-${i}` })
 			const expected = { droppedBytesTotal: 0, droppedChunksTotal: 0 }
-			for (let i = 0; i < 1000; i++) router.branchDropTotals("a")
+			for (let i = 0; i < 1000; i++) router.branchDropCounters("a")
 			const timings: number[] = []
 			for (let i = 0; i < 1001; i++) {
 				const start = performance.now()
-				const totals = router.branchDropTotals("a")
+				const totals = router.branchDropCounters("a")
 				timings.push(performance.now() - start)
-				expect(totals).toEqual(expected)
+				expect(totals?.size).toBe(64)
+				expect(totals?.get("branch-0")).toEqual(expected)
 			}
 			timings.sort((a, b) => a - b)
 			console.info(
@@ -158,16 +159,15 @@ describe("branch topology evidence", () => {
 				const fanout = router.getFanout(sourceId)
 				counters(fanout, "one", 100, 1)
 				counters(fanout, "two", 0, 0)
-				const gate = createEfficiencyGate({
-					budgetCores: 1.5,
-					cpuGuardPercent: 90,
-				})
+
 				let now = 0
 				let tick = () => {}
 				let last: EfficiencySample | undefined
 				const monitor = createEfficiencyMonitor({
 					sources: () => [sourceId],
-					dropTotals: id => router.branchDropTotals(id),
+					branchCounters: id => router.branchDropCounters(id),
+					topology: id => router.branchTopology(id),
+					monoNow: () => now,
 					cpu: { normalisedPercent: 20 },
 					now: () => now,
 					setInterval: fn => {
@@ -179,9 +179,13 @@ describe("branch topology evidence", () => {
 						gate.record(sample)
 					},
 				})
+				const gate = createEfficiencyGate(
+					{ budgetCores: 1.5, cpuGuardPercent: 90 },
+					{ drops: monitor },
+				)
 				monitor.start()
 				for (now = 0; now <= 64000; now += 2000) tick()
-				expect(gate.view([], [], 64000).sources[0]?.drops).toBe("ok")
+				expect(monitor.dropState(sourceId).state).toBe("ok")
 				fanout.removeBranch("one")
 				const original = fanout.getBranchTelemetry.bind(fanout)
 				vi.spyOn(fanout, "getBranchTelemetry").mockImplementation(id => {
@@ -212,7 +216,7 @@ describe("branch topology evidence", () => {
 				).toBe(false)
 				now = 68000
 				tick()
-				expect(last?.sources.get(sourceId)?.droppedBytesDelta).toBeNull()
+				expect(last?.sources.get(sourceId)?.droppedBytesDelta).toBe(0)
 				now = 70000
 				tick()
 				expect(last?.sources.get(sourceId)?.droppedBytesDelta).toBe(0)
@@ -286,4 +290,54 @@ describe("branch topology evidence", () => {
 			primary.destroy()
 		}
 	})
+})
+
+it("topology signatures are stable reads and change for same-id replacement and fanout recreation", () => {
+	const { router, primary } = setup()
+	try {
+		expect(router.branchTopology("b")).toBeNull()
+		const fanout = router.getFanout("b")
+		fanout.addBranch({ id: "one" })
+		const first = router.branchTopology("b")
+		expect(router.branchTopology("b")).toBe(first)
+		fanout.removeBranch("one")
+		fanout.addBranch({ id: "one" })
+		expect(router.branchTopology("b")).not.toBe(first)
+		fanout.removeBranch("one")
+		const empty = router.branchTopology("b")
+		router.releaseUnused("b")
+		expect(router.branchTopology("b")).toBeNull()
+		router.getFanout("b")
+		expect(router.branchTopology("b")).not.toBe(empty)
+	} finally {
+		router.destroy()
+		primary.destroy()
+	}
+})
+
+it("per-branch snapshots are copied and preserve invalid entries", () => {
+	const { router, primary } = setup()
+	try {
+		expect(router.branchDropCounters("missing")).toBeNull()
+		counters(primary, "one", 100, 100)
+		primary.addBranch({ id: "bad" })
+		const original = primary.getBranchTelemetry.bind(primary)
+		vi.spyOn(primary, "getBranchTelemetry").mockImplementation(id =>
+			id === "bad" ? undefined : original(id),
+		)
+		const first = router.branchDropCounters("a")
+		expect(first?.get("one")).toEqual({
+			droppedBytesTotal: 100,
+			droppedChunksTotal: 100,
+		})
+		expect(first?.get("bad")?.droppedBytesTotal).toBeNaN()
+		const value = first?.get("one")
+		if (value) value.droppedBytesTotal = 0
+		expect(router.branchDropCounters("a")?.get("one")?.droppedBytesTotal).toBe(
+			100,
+		)
+	} finally {
+		router.destroy()
+		primary.destroy()
+	}
 })

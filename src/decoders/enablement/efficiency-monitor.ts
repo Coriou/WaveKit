@@ -1,308 +1,279 @@
-import { WaveKitError } from "../../utils/errors.js"
-import { EFFICIENCY_SAMPLE_MS } from "./contract.js"
+import { performance } from "node:perf_hooks"
+import { EFFICIENCY_CLEAR_MS, EFFICIENCY_SAMPLE_MS } from "./contract.js"
 import type { EfficiencySample, SourceDropSample } from "./contract.js"
+import type { DropReader } from "./efficiency-gate.js"
 
-type DropTotals = { droppedBytesTotal: number; droppedChunksTotal: number }
+export const EFFICIENCY_STALE_MS = 3 * EFFICIENCY_SAMPLE_MS
+type Counters = { droppedBytesTotal: number; droppedChunksTotal: number }
 type Baseline = {
-	droppedBytesTotal: number | null
-	droppedChunksTotal: number | null
+	branches: ReadonlyMap<string, Counters>
+	topologySignature: string
 }
+type SourceState = {
+	baseline: Baseline | null
+	lastTickMono: number | null
+	cleanSinceMono: number | null
+	lastDropMono: number | null
+	faultMono: number | null
+	rate: number | null
+}
+const validTotal = (n: unknown): n is number =>
+	typeof n === "number" && Number.isSafeInteger(n) && n >= 0
 
-const validTotal = (value: unknown): value is number =>
-	typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-
-/** Samples cumulative counters without adding work to the source stream. */
+/** Polling owns evidence; display callbacks cannot acknowledge or alter it. */
 export function createEfficiencyMonitor(deps: {
 	sources: () => readonly string[]
-	dropTotals: (sourceId: string) => DropTotals | null
+	branchCounters: (id: string) => ReadonlyMap<string, Counters> | null
+	topology?: (id: string) => string | null
 	cpu: { readonly normalisedPercent: number | null }
 	now: () => number
+	monoNow?: () => number
 	setInterval: (fn: () => void, ms: number) => { cancel(): void }
-	onSample: (s: EfficiencySample) => void
-}): { start(): void; stop(): void; sampleNow(): EfficiencySample } {
-	let baselines = new Map<string, Baseline>()
-	let generation = 0
-	let delivering = false
-	const pendingUnknown = new Map<string, number>()
-	// Positive deltas a read observed but no successful delivery has carried yet.
-	// Delivery acknowledges only its captured generation, never later reentrant reads.
-	const pendingDrops = new Map<
-		string,
-		{ bytes: number; chunks: number; generation: number }
-	>()
-	let lastAtMs = -1
-	let knownSources = new Set<string>()
+	onSample?: (sample: EfficiencySample) => void
+}): DropReader & {
+	start(): void
+	stop(): void
+	sampleNow(): EfficiencySample
+} {
+	const states = new Map<string, SourceState>()
+	const monoNow = deps.monoNow ?? (() => performance.now())
+	let lastMono: number | null = null
 	let interval: { cancel(): void } | undefined
-	const unknown = (): SourceDropSample => ({
-		droppedBytesDelta: null,
-		droppedChunksDelta: null,
-	})
-
-	const candidate = () => {
-		let atMs = NaN
+	const clock = () => {
 		try {
-			atMs = deps.now()
-			if (!Number.isFinite(atMs) || atMs < 0 || atMs < lastAtMs) atMs = NaN
+			return monoNow()
 		} catch {
-			// Invalid clocks leave cumulative evidence untouched.
+			return NaN
 		}
-		if (Number.isNaN(atMs)) {
-			for (const id of knownSources) pendingUnknown.set(id, ++generation)
-			return {
-				sample: {
-					atMs: NaN,
-					cpuPercent: null,
-					sources: new Map([...knownSources].map(id => [id, unknown()])),
-				},
-				commit: () => {},
-			}
+	}
+	const fresh = (): SourceState => ({
+		baseline: null,
+		lastTickMono: null,
+		cleanSinceMono: null,
+		lastDropMono: null,
+		faultMono: null,
+		rate: null,
+	})
+	const fault = (s: SourceState, at: number | null) => {
+		s.cleanSinceMono = null
+		s.faultMono = at
+		s.rate = null
+	}
+	const sampleNow = (): EfficiencySample => {
+		const at = clock()
+		const validClock =
+			Number.isFinite(at) && (lastMono === null || at >= lastMono)
+		// Reset the clock reference after a fault so backwards clocks can recover.
+		lastMono = Number.isFinite(at) ? at : null
+		let ids: readonly string[] = []
+		let readable = true
+		try {
+			ids = Array.from(deps.sources())
+			if (ids.some(id => typeof id !== "string" || !id)) readable = false
+		} catch {
+			readable = false
 		}
-		const nextBaselines = new Map(baselines)
-		let nextSources = knownSources
-		const deliveredUnknown = new Set<string>()
-		const deliveredDrops = new Map<string, number>()
-		const unknownGenerations = new Map<string, number>()
-		const commit = () => {
-			baselines = nextBaselines
-			knownSources = nextSources
-			lastAtMs = atMs
-			for (const id of deliveredUnknown) {
-				if (
-					(pendingUnknown.get(id) ?? Infinity) <=
-					(unknownGenerations.get(id) ?? -1)
-				)
-					pendingUnknown.delete(id)
+		if (!readable) {
+			for (const s of states.values()) {
+				fault(s, Number.isFinite(at) ? at : null)
+				s.baseline = null
+				s.lastTickMono = Number.isFinite(at) ? at : null
 			}
-			for (const [id, ack] of deliveredDrops) {
-				if ((pendingDrops.get(id)?.generation ?? Infinity) <= ack)
-					pendingDrops.delete(id)
-			}
-			for (const id of pendingUnknown.keys())
-				if (!nextSources.has(id) && !pendingDrops.has(id))
-					pendingUnknown.delete(id)
+		} else {
+			const present = new Set(ids)
+			for (const id of states.keys()) if (!present.has(id)) states.delete(id)
 		}
 		const sources = new Map<string, SourceDropSample>()
-		let cpuPercent: number | null = null
-		let ids: readonly string[]
-		try {
-			const result = deps.sources()
-			if (
-				typeof result === "string" ||
-				result == null ||
-				typeof result[Symbol.iterator] !== "function"
-			)
-				throw new WaveKitError("Invalid sources", "EFFICIENCY_SOURCES_INVALID")
-			ids = Array.from(result)
-			if (ids.some(id => typeof id !== "string" || id.length === 0))
-				throw new WaveKitError(
-					"Invalid source id",
-					"EFFICIENCY_SOURCES_INVALID",
-				)
-			const cpu = deps.cpu.normalisedPercent
-			cpuPercent =
-				typeof cpu === "number" &&
-				Number.isFinite(cpu) &&
-				cpu >= 0 &&
-				cpu <= 100
-					? cpu
-					: null
-		} catch {
-			nextBaselines.clear()
-			for (const id of new Set([
-				...knownSources,
-				...pendingDrops.keys(),
-				...pendingUnknown.keys(),
-			])) {
-				pendingUnknown.set(id, ++generation)
-				sources.set(id, withHeldDrops(id, unknown(), deliveredUnknown))
-			}
-			for (const id of sources.keys()) {
-				const held = pendingDrops.get(id)
-				if (held) deliveredDrops.set(id, held.generation)
-				const uncertain = pendingUnknown.get(id)
-				if (uncertain !== undefined) unknownGenerations.set(id, uncertain)
-			}
-			return { sample: { atMs, cpuPercent, sources }, commit }
-		}
-
-		nextSources = new Set(ids)
-		for (const id of nextBaselines.keys()) {
-			if (!nextSources.has(id)) {
-				pendingUnknown.set(id, ++generation)
-				nextBaselines.delete(id)
-			}
-		}
-		for (const id of nextSources) {
-			let deltas = unknown()
+		for (const id of readable ? new Set(ids) : states.keys()) {
+			const s = states.get(id) ?? fresh()
+			states.set(id, s)
+			// A clock discontinuity ends the old clock domain. The fault and new
+			// clean window replace timestamps that could otherwise remain future.
+			if (!validClock) s.lastDropMono = null
+			let baseline: Baseline | null = null
 			try {
-				const totals = deps.dropTotals(id)
-				// Copy once: a provider may reuse its object between reads.
-				const bytes = totals?.droppedBytesTotal
-				const chunks = totals?.droppedChunksTotal
-				const previous = nextBaselines.get(id)
-				const delta = (value: unknown, before: number | null | undefined) =>
-					validTotal(value) && before != null && value >= before
-						? value - before
-						: null
-				deltas = {
-					droppedBytesDelta: delta(bytes, previous?.droppedBytesTotal),
-					droppedChunksDelta: delta(chunks, previous?.droppedChunksTotal),
+				const counters = deps.branchCounters(id)
+				const topologySignature = deps.topology?.(id) ?? null
+				if (counters !== null && topologySignature !== null) {
+					const branches = new Map<string, Counters>()
+					let readableBranches = true
+					for (const [key, value] of counters) {
+						const bytes = value.droppedBytesTotal
+						const chunks = value.droppedChunksTotal
+						const previous = s.baseline?.branches.get(key)
+						if (
+							validClock &&
+							previous &&
+							((validTotal(bytes) && bytes > previous.droppedBytesTotal) ||
+								(validTotal(chunks) && chunks > previous.droppedChunksTotal))
+						)
+							s.lastDropMono = at
+						if (!validTotal(bytes) || !validTotal(chunks))
+							readableBranches = false
+						branches.set(key, {
+							droppedBytesTotal: bytes,
+							droppedChunksTotal: chunks,
+						})
+					}
+					if (readableBranches) baseline = { branches, topologySignature }
 				}
-				if (
-					!validTotal(bytes) ||
-					!validTotal(chunks) ||
-					deltas.droppedBytesDelta === null ||
-					deltas.droppedChunksDelta === null
-				)
-					pendingUnknown.set(id, ++generation)
-				if (!validTotal(bytes) || !validTotal(chunks)) {
-					baselines.set(id, {
-						droppedBytesTotal: validTotal(bytes)
-							? (previous?.droppedBytesTotal ?? null)
-							: null,
-						droppedChunksTotal: validTotal(chunks)
-							? (previous?.droppedChunksTotal ?? null)
-							: null,
-					})
-				}
-				nextBaselines.set(id, {
-					droppedBytesTotal: validTotal(bytes) ? bytes : null,
-					droppedChunksTotal: validTotal(chunks) ? chunks : null,
-				})
 			} catch {
-				pendingUnknown.set(id, ++generation)
-				nextBaselines.delete(id)
+				/* Unreadable counters invalidate the whole interval. */
 			}
-			if (
-				(deltas.droppedBytesDelta ?? 0) > 0 ||
-				(deltas.droppedChunksDelta ?? 0) > 0
-			) {
-				const held = pendingDrops.get(id)
-				pendingDrops.set(id, {
-					bytes: Math.max(held?.bytes ?? 0, deltas.droppedBytesDelta ?? 0),
-					chunks: Math.max(held?.chunks ?? 0, deltas.droppedChunksDelta ?? 0),
-					generation: ++generation,
-				})
+			const before = s.baseline
+			const gap = s.lastTickMono === null ? NaN : at - s.lastTickMono
+			let bytes = 0
+			let chunks = 0
+			let comparable =
+				readable &&
+				validClock &&
+				baseline !== null &&
+				before !== null &&
+				baseline.topologySignature === before.topologySignature &&
+				baseline.branches.size === before.branches.size
+			if (baseline && before) {
+				for (const [key, value] of baseline.branches) {
+					const previous = before.branches.get(key)
+					if (
+						!previous ||
+						value.droppedBytesTotal < previous.droppedBytesTotal ||
+						value.droppedChunksTotal < previous.droppedChunksTotal
+					) {
+						comparable = false
+						continue
+					}
+					bytes += value.droppedBytesTotal - previous.droppedBytesTotal
+					chunks += value.droppedChunksTotal - previous.droppedChunksTotal
+				}
 			}
-			sources.set(id, withHeldDrops(id, deltas, deliveredUnknown))
-		}
-		for (const id of pendingDrops.keys()) {
-			if (!sources.has(id))
-				sources.set(id, withHeldDrops(id, unknown(), deliveredUnknown))
-		}
-		for (const id of sources.keys()) {
-			const held = pendingDrops.get(id)
-			if (held) deliveredDrops.set(id, held.generation)
-			const uncertain = pendingUnknown.get(id)
-			if (uncertain !== undefined) unknownGenerations.set(id, uncertain)
-		}
-		return { sample: { atMs, cpuPercent, sources }, commit }
-	}
 
-	// Every positive held counter is carried together; only zero/zero is clean.
-	const withHeldDrops = (
-		id: string,
-		deltas: SourceDropSample,
-		deliveredUnknown: Set<string>,
-	): SourceDropSample => {
-		const held = pendingDrops.get(id)
+			const clean =
+				comparable &&
+				bytes === 0 &&
+				chunks === 0 &&
+				gap >= 0 &&
+				gap <= 1.5 * EFFICIENCY_SAMPLE_MS
+			if (clean) s.cleanSinceMono ??= at
+			else fault(s, Number.isFinite(at) ? at : null)
+			s.rate = comparable && gap > 0 ? (bytes * 1000) / gap : null
+			s.baseline = readable ? baseline : null
+			s.lastTickMono = Number.isFinite(at) ? at : null
+			sources.set(id, {
+				droppedBytesDelta: comparable ? bytes : null,
+				droppedChunksDelta: comparable ? chunks : null,
+			})
+		}
+		let atMs = NaN
+		let cpuPercent: number | null = null
+		try {
+			atMs = deps.now()
+		} catch {
+			/* Display only. */
+		}
+		try {
+			const cpu = deps.cpu.normalisedPercent
+			if (cpu !== null && Number.isFinite(cpu) && cpu >= 0 && cpu <= 100)
+				cpuPercent = cpu
+		} catch {
+			/* Display only. */
+		}
+		return { atMs, cpuPercent, sources }
+	}
+	const dropState: DropReader["dropState"] = id => {
+		const at = clock()
+		const s = states.get(id)
 		if (
-			deltas.droppedBytesDelta === null ||
-			deltas.droppedChunksDelta === null ||
-			pendingUnknown.has(id)
-		) {
-			deliveredUnknown.add(id)
-			if (!held)
-				return deltas.droppedBytesDelta === null ||
-					deltas.droppedChunksDelta === null
-					? deltas
-					: unknown()
-			return {
-				droppedBytesDelta: held.bytes > 0 ? held.bytes : null,
-				droppedChunksDelta: held.chunks > 0 ? held.chunks : null,
-			}
-		}
-		if (!held) return deltas
+			!s ||
+			!Number.isFinite(at) ||
+			s.lastTickMono === null ||
+			at < s.lastTickMono
+		)
+			return { state: "unknown", dropBytesPerSecond: null }
+		let state: "ok" | "dropping" | "unknown" = "unknown"
+		if (
+			s.cleanSinceMono !== null &&
+			at - s.cleanSinceMono >= EFFICIENCY_CLEAR_MS &&
+			at - s.lastTickMono <= EFFICIENCY_STALE_MS
+		)
+			state = "ok"
+		else if (
+			s.lastDropMono !== null &&
+			at >= s.lastDropMono &&
+			at - s.lastDropMono < EFFICIENCY_CLEAR_MS
+		)
+			state = "dropping"
 		return {
-			droppedBytesDelta: Math.max(held.bytes, deltas.droppedBytesDelta),
-			droppedChunksDelta: Math.max(held.chunks, deltas.droppedChunksDelta),
+			state,
+			dropBytesPerSecond:
+				at - s.lastTickMono <= EFFICIENCY_STALE_MS ? s.rate : null,
 		}
 	}
-
-	// Peeks retain timer-delivery baselines and pending uncertainty.
-	const sampleNow = (): EfficiencySample => {
-		const result = candidate().sample
-		if (delivering) {
-			for (const id of result.sources.keys())
-				pendingUnknown.set(id, ++generation)
-			return {
-				...result,
-				sources: new Map(
-					[...result.sources.keys()].map(id => [
-						id,
-						withHeldDrops(id, unknown(), new Set<string>()),
-					]),
-				),
-			}
-		}
-		return result
+	const droppedSinceMono = (id: string, since: number): boolean => {
+		const at = clock()
+		const s = states.get(id)
+		if (
+			!s ||
+			!Number.isFinite(at) ||
+			!Number.isFinite(since) ||
+			since > at ||
+			s.lastTickMono === null ||
+			at < s.lastTickMono ||
+			at - s.lastTickMono > EFFICIENCY_STALE_MS
+		)
+			return true
+		return (
+			[s.lastDropMono, s.faultMono].some(
+				t => t !== null && (t >= since || t > at),
+			) ||
+			s.cleanSinceMono === null ||
+			s.cleanSinceMono + EFFICIENCY_CLEAR_MS > since
+		)
 	}
 	return {
+		monoNow: clock,
+		sources: () => [...states.keys()],
+		droppedSinceMono,
 		sampleNow,
+		dropState,
+		/** Inclusive lookback: a drop or fault at admission counts. Missing,
+		 * stale and invalid-clock evidence fails closed. An unknown interval lasts
+		 * until a full clean window is earned; any overlap with the lookback counts. */
+		droppedWithinMs(id, ms) {
+			const at = clock()
+			const s = states.get(id)
+			if (
+				!s ||
+				!Number.isFinite(at) ||
+				!Number.isFinite(ms) ||
+				ms < 0 ||
+				s.lastTickMono === null ||
+				at < s.lastTickMono ||
+				at - s.lastTickMono > EFFICIENCY_STALE_MS
+			)
+				return true
+			return (
+				[s.lastDropMono, s.faultMono].some(
+					t => t !== null && (at < t || at - t <= ms),
+				) ||
+				s.cleanSinceMono === null ||
+				at - s.cleanSinceMono < EFFICIENCY_CLEAR_MS + ms
+			)
+		},
 		start() {
 			interval ??= deps.setInterval(() => {
-				if (delivering) {
-					sampleNow()
-					return
-				}
-				const result = candidate()
-				delivering = true
-				const before = generation
+				const sample = sampleNow()
 				try {
-					deps.onSample(result.sample)
-					result.commit()
+					deps.onSample?.(sample)
 				} catch {
-					// A failed delivery is an unknown interval even if its counters were clean.
-					for (const id of result.sample.sources.keys())
-						pendingUnknown.set(id, ++generation)
+					/* Display delivery is irrelevant to evidence. */
 				}
-				if (generation > before) {
-					const ids = new Set([
-						...knownSources,
-						...result.sample.sources.keys(),
-						...pendingDrops.keys(),
-						...pendingUnknown.keys(),
-					])
-					const ack = generation
-					const followup: EfficiencySample = {
-						atMs: result.sample.atMs,
-						cpuPercent: null,
-						sources: new Map(
-							[...ids].map(id => [
-								id,
-								withHeldDrops(id, unknown(), new Set<string>()),
-							]),
-						),
-					}
-					try {
-						deps.onSample(followup)
-						for (const id of ids) {
-							if ((pendingUnknown.get(id) ?? Infinity) <= ack)
-								pendingUnknown.delete(id)
-							if ((pendingDrops.get(id)?.generation ?? Infinity) <= ack)
-								pendingDrops.delete(id)
-						}
-					} catch {
-						// If both deliveries fail, the gate's 6000 ms freshness limit
-						// closes admission; no synchronous consumer notification remains.
-					}
-				}
-				delivering = false
 			}, EFFICIENCY_SAMPLE_MS)
 		},
 		stop() {
 			interval?.cancel()
 			interval = undefined
+			states.clear()
+			lastMono = null
 		},
 	}
 }

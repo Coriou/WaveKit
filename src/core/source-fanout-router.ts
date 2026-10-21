@@ -23,8 +23,9 @@ export class SourceFanoutRouter extends EventEmitter {
 	private readonly fanouts = new Map<string, FanoutManager>()
 	private readonly topology = new Map<
 		FanoutManager,
-		{ changed: boolean; listener: () => void }
+		{ changed: boolean; generation: number; listener: () => void }
 	>()
+	private topologyGeneration = 0
 	private primarySourceId: string | undefined
 	private readonly connected = (sourceId: string) => {
 		this.primarySourceId ??=
@@ -96,6 +97,46 @@ export class SourceFanoutRouter extends EventEmitter {
 			}
 		}
 		return fanout
+	}
+
+	/** Stable across reads; same-id branch replacement advances the generation. */
+	branchTopology(sourceId: string): string | null {
+		const fanout =
+			sourceId === this.primarySourceId
+				? this.primary
+				: this.fanouts.get(sourceId)
+		if (!fanout) return null
+		return JSON.stringify([
+			this.topology.get(fanout)?.generation,
+			[...fanout.getBranchIds()].sort(),
+		])
+	}
+
+	/** Snapshot each branch independently so resets cannot cancel other drops. */
+	branchDropCounters(sourceId: string): ReadonlyMap<
+		string,
+		{
+			droppedBytesTotal: number
+			droppedChunksTotal: number
+		}
+	> | null {
+		const fanout =
+			sourceId === this.primarySourceId
+				? this.primary
+				: this.fanouts.get(sourceId)
+		if (!fanout) return null
+		const counters = new Map<
+			string,
+			{ droppedBytesTotal: number; droppedChunksTotal: number }
+		>()
+		for (const id of fanout.getBranchIds()) {
+			const branch = fanout.getBranchTelemetry(id)
+			counters.set(id, {
+				droppedBytesTotal: branch?.droppedBytesTotal ?? NaN,
+				droppedChunksTotal: branch?.droppedChunksTotal ?? NaN,
+			})
+		}
+		return counters
 	}
 
 	/** Read existing counters only; never creates a fanout or touches the IQ path. */
@@ -209,8 +250,10 @@ export class SourceFanoutRouter extends EventEmitter {
 	private forwardEvents(fanout: FanoutManager): void {
 		const state = {
 			changed: false,
+			generation: ++this.topologyGeneration,
 			listener: () => {
 				state.changed = true
+				state.generation = ++this.topologyGeneration
 			},
 		}
 		this.topology.set(fanout, state)
