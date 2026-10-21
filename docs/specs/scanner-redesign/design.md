@@ -176,6 +176,46 @@ toleranceHz: number, sourceId?: string): Discovery[]`). `DiscoveryStore` impleme
   tracks additionally need the existing 10 s age. A vanished scene cannot qualify
   retrospectively. This is the accepted trade-off against false alarms.
 
+- **A17: analog trials own their demodulation.** An analog trial never depends on live audio
+  or a connected client. It claims an ephemeral capture from the IQ-capture ring (pre-roll
+  included, 48 kHz cf32, at most 4 s) and runs `analyze` and the tone pass on it. With
+  `scanner.iqCapture.enabled` false the same capture service and tool run in a thin trial-only
+  mode while the source has a scanner job or identify: same directory, anchor proofs and disk
+  caps; trial captures are deleted when the trial ends and swept at startup, and are never
+  listed or exposed by any route or event. It works in protected access mode; legacy access
+  mode only where every path proof applies identically. Optional trial counters extend the
+  optional scanner status `iqCapture`. At most 2 concurrent analog trials per source, admitted
+  by the analog budget, never by the live probe slots. Budget per trial: about 0.05 core at
+  1.024 Msps and 0.085 core at 2.048 Msps on the reference host. The live-audio evidence stays
+  an additional source; without a listener it never makes the trial `unsupported`.
+- **A18: analog trial on any signal.** Occupied bandwidth does not exclude analog FM: a keyup
+  carrying only a sub-audible tone measures 3-5 kHz. Every narrow target (4FSK, GMSK, carrier
+  or analog class, OBW at most 22.5 kHz) gets one analog trial, run in parallel with its digital
+  trials, unless a user-explicit protocol list excludes `analog-fm`. Band plans and priors only
+  order trials and never exclude one; a prior never reaches 0.
+- **A19: analog decision order.** A standard CTCSS tone or DCS code held for the minimum audio
+  decides `analog-fm` and outranks every class prior. Otherwise a data-like discriminator
+  (4-level cluster score at least `ANALOG_TRIAL_DATA_SCORE`) leaves the analog trial `no-sync`
+  and the digital trials decide. Otherwise quieting with voice is `heard`.
+- **A20: fair decoder slots.** A job probe holds a live slot for at most 6 s per turn, released
+  at the cap only when another candidate is queued, whatever its state. Queued candidates are
+  served by priority, then least recently served, then channel SNR. A fresh gated track (at most
+  2 s old) at least max(20 dB, held + 10 dB) channel SNR pre-empts an equal-priority job probe
+  that has run at least 1.8 s. Bounds with one slot and at most 8 queued: a strong new candidate
+  waits at most about 2.3 s, any candidate at most about 46 s. A user identify (priority 101)
+  always gets a slot by immediate pre-emption, and its analog trial never waits for a probe
+  slot. Replay probes are still never pre-empted. Verified by an injected-clock test with a
+  continuous ambient emitter and fresh strong keyups.
+- **A21: only user-explicit lists bound trials.** Identify works on any signal at any
+  frequency. A protocol list excludes trials only when the user set it (the identify request's
+  protocols, or a job range protocol list the user set); lists auto-filled from band plans or
+  range defaults only order trials. The analog-trial rule and the narrow-raster boost follow
+  the same rule.
+- **A22: no label without evidence.** Identify reports a protocol only with a decode, an
+  accepted identity or analog tone evidence. A class prior or discovery confidence alone
+  gives no protocol. When every digital trial fails and no analog trial decoded or heard
+  the signal, the target carries "Digital, not decoded (tried ...)".
+
 ## Pipeline positions
 
 ```

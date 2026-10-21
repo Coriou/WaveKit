@@ -437,3 +437,28 @@ describe("Property 11: capture store bounds", () => {
 		)
 	})
 })
+
+it("bounds private trials per source while retaining the persistent ceiling and shared cap", () => {
+	const { store } = makeStore()
+	for (const [i, sourceId] of ["a", "a", "b", "b"].entries())
+		expect(
+			store.admit(req({ sourceId, reason: "identify" }), id(i), 1, true),
+		).toEqual({ captureId: id(i) })
+	for (const sourceId of ["a", "b"])
+		expect(
+			store.admit(req({ sourceId, reason: "identify" }), id(5), 1, true),
+		).toEqual({ refused: "busy" })
+	expect(store.admit(req({ sourceId: "c" }), id(6), 1)).toEqual({
+		refused: "busy",
+	})
+	const capped = makeStore(IQ_CAPTURE_MAX_BYTES * 2).store
+	expect(capped.admit(req({ sourceId: "a" }), id(1), 1, true)).toHaveProperty(
+		"captureId",
+	)
+	expect(capped.admit(req({ sourceId: "b" }), id(2), 1, true)).toHaveProperty(
+		"captureId",
+	)
+	expect(capped.admit(req({ sourceId: "c" }), id(3), 1, true)).toEqual({
+		refused: "full",
+	})
+})

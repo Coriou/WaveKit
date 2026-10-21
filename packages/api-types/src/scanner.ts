@@ -756,6 +756,12 @@ export interface ScannerEngineStatus {
 	lastError?: string
 }
 export interface ScannerIqCaptureStatus {
+	trialCaptures?: {
+		started: number
+		completed: number
+		failed: number
+		swept: number
+	}
 	toolFailures: number
 	lastToolFailure: {
 		exitCode: number | null

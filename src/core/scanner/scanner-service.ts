@@ -1426,6 +1426,9 @@ export class ScannerService extends EventEmitter {
 			...(captureCounters
 				? {
 						iqCapture: {
+							...(captureCounters.trialCaptures
+								? { trialCaptures: captureCounters.trialCaptures }
+								: {}),
 							toolFailures: captureCounters.toolFailures,
 							lastToolFailure: captureCounters.lastToolFailure,
 						},
@@ -4716,6 +4719,8 @@ export class ScannerService extends EventEmitter {
 	private createDriver(record: JobRecord): JobDriver {
 		return new JobRunner({
 			record,
+			leaseAnalogSession: sourceId =>
+				this.deps.analogTrial?.leaseSession?.(sourceId),
 			autoResumeReady: () => this.autoResumeReady(record),
 			knownProtocols: this.knownProtocols,
 			arbiter: this.arbiter,

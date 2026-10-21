@@ -1,3 +1,5 @@
+import { ToneDetector } from "../../../../src/core/audio-tones/tone-detector.js"
+import { syntheticTone } from "../scanner/identify-synth.js"
 import * as fs from "node:fs"
 import * as fsp from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -1232,4 +1234,327 @@ describe("IqCaptureService removal events", () => {
 			[idb, "o_b"],
 		])
 	})
+})
+
+const trialResult = {
+	outcome: "carrier-only" as const,
+	mode: "nfm" as const,
+	voice: false,
+	tones: { ctcssHz: null, dcs: null, audioSeconds: 1 },
+	stats: null,
+}
+
+async function trialTicks(s: Awaited<ReturnType<typeof setup>>, count = 5) {
+	for (let i = 0; i < count; i++) {
+		await flush(1)
+		s.engine.push(FS / 100)
+		s.timers.advance(10)
+	}
+	await flush()
+}
+
+describe("private analog capture leases", () => {
+	it.each(["success", "failure", "abort", "throw"])(
+		"deletes private files and stops the cold ring on %s",
+		async end => {
+			const s = await setup({
+				config: { ...CFG, enabled: false },
+				trialOnly: true,
+			})
+			await running(s)
+			expect(s.sp.children).toHaveLength(0)
+			expect(s.engine.listeners.size).toBe(0)
+			expect(s.svc.capture(req())).toEqual({ refused: "disabled" })
+			const events: string[] = []
+			s.svc.onFinished(v => events.push(v.captureId))
+			s.svc.onRemoved(id => events.push(id))
+			const ac = new AbortController()
+			let called = false
+			const pending = s.svc
+				.withTrial(req({ reason: "identify" }), ac.signal, async id => {
+					called = true
+					expect(
+						fs.existsSync(path.join(s.root, "iq-captures", `${id}.cf32`)),
+					).toBe(true)
+					expect(s.svc.view(id)).toBeNull()
+					expect(
+						s.svc.near("src", RF, 1000, { observationId: "obs", limit: 10 }),
+					).toEqual([])
+					expect(s.svc.openReplay(id, "dsd-fme")).toBeNull()
+					if (end === "throw") throw new TypeError("private trial failed")
+					if (end === "abort") ac.abort()
+					return end === "failure"
+						? { ...trialResult, error: "analyze-failed" as const }
+						: trialResult
+				})
+				.catch(() => null)
+			await trialTicks(s)
+			await pending
+			expect(called).toBe(true)
+			expect(events).toEqual([])
+			expect(await fsp.readdir(path.join(s.root, "iq-captures"))).toEqual([])
+			expect(s.svc.heldBytes()).toBe(0)
+			expect(s.engine.listeners.size).toBe(0)
+			expect(s.svc.counters().trialCaptures).toMatchObject({
+				started: 1,
+				completed: end === "success" ? 1 : 0,
+				failed: end === "success" ? 0 : 1,
+			})
+			await s.svc.stop()
+		},
+	)
+
+	it("sweeps private leftovers at startup with the usual file proofs", async () => {
+		const s = await setup({
+			config: { ...CFG, enabled: false },
+			trialOnly: true,
+		})
+		const dir = path.join(s.root, "iq-captures")
+		await fsp.mkdir(dir, { mode: 0o700 })
+		await fsp.writeFile(
+			path.join(dir, "aaaaaaaa-0000-4000-8000-000000000001.cf32"),
+			Buffer.alloc(8),
+			{ mode: 0o600 },
+		)
+		await s.svc.start()
+		expect(await fsp.readdir(dir)).toEqual([])
+		expect(s.svc.counters().trialCaptures?.swept).toBe(1)
+		expect(s.sp.children).toHaveLength(0)
+		await s.svc.stop()
+	})
+
+	it("fails closed in legacy mode without creating a tool or directory", async () => {
+		const s = await setup({
+			config: { ...CFG, enabled: false },
+			trialOnly: true,
+			protectedMode: false,
+		})
+		await running(s)
+		expect(
+			await s.svc.withTrial(req(), new AbortController().signal, () =>
+				Promise.resolve(trialResult),
+			),
+		).toBe("not-protected")
+		expect(s.sp.children).toHaveLength(0)
+		expect(await fsp.readdir(s.root)).toEqual([])
+		await s.svc.stop()
+	})
+
+	it("admits two per source and declines a third until a lease ends", async () => {
+		const s = await setup({
+			trialOnly: true,
+			config: { ...CFG, enabled: false },
+		})
+		await running(s)
+		const releases: (() => void)[] = []
+		const run = () =>
+			new Promise<typeof trialResult>(resolve =>
+				releases.push(() => resolve(trialResult)),
+			)
+		const one = s.svc.withTrial(req(), new AbortController().signal, run)
+		const two = s.svc.withTrial(req(), new AbortController().signal, run)
+		await trialTicks(s)
+		expect(releases).toHaveLength(2)
+		expect(
+			await s.svc.withTrial(req(), new AbortController().signal, run),
+		).toBe("busy")
+		await trialTicks(s, 10)
+		expect(
+			await s.svc.withTrial(req(), new AbortController().signal, run),
+		).toBe("busy")
+		releases.shift()?.()
+		await one
+		const three = s.svc.withTrial(req(), new AbortController().signal, () =>
+			Promise.resolve(trialResult),
+		)
+		await trialTicks(s)
+		expect(await three).toEqual(trialResult)
+		releases.shift()?.()
+		await two
+		expect(s.engine.listeners.size).toBe(0)
+		await s.svc.stop()
+	})
+
+	it("a swapped directory refuses a private lease", async () => {
+		const s = await setup({
+			trialOnly: true,
+			config: { ...CFG, enabled: false },
+		})
+		await running(s)
+		const dir = path.join(s.root, "iq-captures")
+		await fsp.rename(dir, `${dir}-old`)
+		await fsp.mkdir(dir, { mode: 0o700 })
+		let called = false
+		const pending = s.svc.withTrial(req(), new AbortController().signal, () => {
+			called = true
+			return Promise.resolve(trialResult)
+		})
+		await trialTicks(s)
+		expect(await pending).toBe("unavailable")
+		expect(called).toBe(false)
+		expect(await fsp.readdir(dir)).toEqual([])
+		await s.svc.stop()
+	})
+})
+
+describe("private capture resource failures", () => {
+	it("applies the same disk cap while normal captures occupy it", async () => {
+		const s = await setup({}, { samples: 192000 })
+		await running(s)
+		for (let i = 0; i < 10; i++) {
+			expect(s.svc.capture(req({ reason: "identify" }))).toHaveProperty(
+				"captureId",
+			)
+			await flush()
+		}
+		let called = false
+		expect(
+			await s.svc.withTrial(
+				req({ reason: "identify" }),
+				new AbortController().signal,
+				() => {
+					called = true
+					return Promise.resolve(trialResult)
+				},
+			),
+		).toBe("full")
+		expect(called).toBe(false)
+		await s.svc.stop()
+	})
+
+	it("abort during capture reaps the unfinished writer and its files", async () => {
+		const s = await setup(
+			{ trialOnly: true, config: { ...CFG, enabled: false } },
+			{ behaviour: "silent" },
+		)
+		await running(s)
+		const ac = new AbortController()
+		let called = false
+		const pending = s.svc.withTrial(req(), ac.signal, () => {
+			called = true
+			return Promise.resolve(trialResult)
+		})
+		await trialTicks(s)
+		ac.abort()
+		await pending
+		expect(called).toBe(false)
+		expect(s.svc.heldBytes()).toBe(0)
+		expect(await fsp.readdir(path.join(s.root, "iq-captures"))).toEqual([])
+		expect(s.engine.listeners.size).toBe(0)
+		await s.svc.stop()
+	})
+})
+
+it("retains a short DCS keyup before gate, admission and trial startup delays", async () => {
+	const s = await setup({ trialOnly: true, config: { ...CFG, enabled: false } })
+	await running(s)
+	s.svc.detachSource("src")
+	s.engine.edge = 0
+	s.svc.attachSource("src", {
+		sampleRateHz: 24000,
+		centerHz: RF,
+		epoch: 3,
+		engine: s.engine,
+	})
+	const release = s.svc.leaseSession("src")
+	await flush()
+	// Native startup completes before the next keyup, while the session is listening.
+	s.timers.advance(150)
+	const child = s.sp.children[0]!
+	const { iq } = syntheticTone({
+		kind: "dcs",
+		rate: 24000,
+		deviation: 2500,
+		snr: 40,
+		seed: 42,
+	})
+	const samples = iq.length / 2
+	const transmission = Buffer.alloc(samples * 2)
+	for (let i = 0; i < transmission.length; i++)
+		transmission[i] = Math.max(
+			0,
+			Math.min(255, Math.round(127.5 + 80 * (iq[i] ?? 0))),
+		)
+	// Feed the source tap, not the capture file stub. Model the tool's two-second ring
+	// from only the bytes that actually reached its stdin.
+	for (const listener of s.engine.listeners)
+		listener(s.engine.edge, transmission)
+	s.engine.edge += samples
+	s.timers.advance(250) // detector gate
+	s.engine.push(24000 / 4)
+	s.timers.advance(250) // admission delay
+	s.engine.push(24000 / 4)
+	s.timers.advance(150) // trial setup
+	s.engine.push(24000 * 0.15)
+	await flush()
+	const retained = Buffer.concat(child.stdinBytes).subarray(-24000 * 2 * 2)
+	expect(retained.indexOf(transmission)).toBeGreaterThanOrEqual(0)
+	const offset = retained.indexOf(transmission)
+	const saved = retained.subarray(offset, offset + transmission.length)
+	const pcm = Buffer.alloc(Math.floor(samples / 3) * 4)
+	let sum = 0
+	for (let i = 1; i < samples; i++) {
+		const re = (saved[i * 2] ?? 0) - 127.5
+		const im = (saved[i * 2 + 1] ?? 0) - 127.5
+		const prevRe = (saved[(i - 1) * 2] ?? 0) - 127.5
+		const prevIm = (saved[(i - 1) * 2 + 1] ?? 0) - 127.5
+		sum += Math.atan2(im * prevRe - re * prevIm, re * prevRe + im * prevIm)
+		if (i % 3 === 2) {
+			pcm.writeFloatLE(
+				(sum * 24000) / (3 * 2 * Math.PI * 5000),
+				Math.floor(i / 3) * 4,
+			)
+			sum = 0
+		}
+	}
+	const detector = new ToneDetector()
+	detector.push(pcm, { rate: 8000, format: "f32le" })
+	expect(detector.result().dcs).toMatchObject({ code: "025" })
+	expect(saved.length / 2 / 24000).toBeGreaterThanOrEqual(0.75)
+	const pending = s.svc.withTrial(
+		req({ reason: "identify" }),
+		new AbortController().signal,
+		async () => trialResult,
+	)
+	await trialTicks(s)
+	await pending
+	expect(s.engine.listeners.size).toBe(1)
+	release()
+	release()
+	expect(s.engine.listeners.size).toBe(0)
+	await s.svc.stop()
+})
+
+it("refcounts session leases and clears them at shutdown", async () => {
+	const s = await setup({ trialOnly: true, config: { ...CFG, enabled: false } })
+	await running(s)
+	const first = s.svc.leaseSession("src")
+	const second = s.svc.leaseSession("src")
+	expect(s.sp.children).toHaveLength(1)
+	first()
+	expect(s.engine.listeners.size).toBe(1)
+	await s.svc.stop()
+	second()
+	second()
+	expect(s.engine.listeners.size).toBe(0)
+	expect(s.svc.leaseSession("src")()).toBeUndefined()
+})
+
+it("starts the session ring when its source attaches after session admission", async () => {
+	const s = await setup({ trialOnly: true, config: { ...CFG, enabled: false } })
+	await s.svc.start()
+	const release = s.svc.leaseSession("src")
+	expect(s.sp.children).toHaveLength(0)
+	s.svc.attachSource("src", {
+		sampleRateHz: FS,
+		centerHz: CENTER,
+		epoch: 3,
+		engine: s.engine,
+	})
+	await flush()
+	expect(s.sp.children).toHaveLength(1)
+	expect(s.engine.listeners.size).toBe(1)
+	release()
+	expect(s.engine.listeners.size).toBe(0)
+	await s.svc.stop()
 })
