@@ -27,7 +27,7 @@ import {
 } from "../../../src/api/routes/decoders.js"
 import {
 	channelizerComposition,
-	CHANNELIZER_AUTO_ACCEPTED,
+	channelizerAutoAccepted,
 	CATALOGUE_TYPES,
 } from "../../../src/decoders/enablement/contract.js"
 import type {
@@ -527,14 +527,26 @@ describe("decoder enablement composition", () => {
 	})
 	it("uses gated lazy channelizer composition and auto-only idle linger", async () => {
 		const config = await shipped()
-		expect(CHANNELIZER_AUTO_ACCEPTED).toBe(false)
-		expect(channelizerComposition(config.channelizer, false)).toBeNull()
-		expect(channelizerComposition(config.channelizer, true)).toBe("auto")
+		// Shipped config: auto (lazy, idle-linger) on x86-64; nothing on arm64.
+		expect(
+			channelizerComposition(
+				config.channelizer,
+				channelizerAutoAccepted("x64"),
+			),
+		).toBe("auto")
+		expect(
+			channelizerComposition(
+				config.channelizer,
+				channelizerAutoAccepted("arm64"),
+			),
+		).toBeNull()
 		expect(
 			channelizerComposition({ ...config.channelizer, enabled: true }, false),
 		).toBe("enabled")
 		const source = await entry()
 		expect(source.includes("if (chanMode === null)")).toBe(true)
+		// The composition passes the host architecture to the acceptance.
+		expect(source.includes("channelizerAutoAccepted(arch())")).toBe(true)
 		expect(source.includes('chanMode === "auto"')).toBe(true)
 		expect(source.includes("idleStopMs: CHANNELIZER_IDLE_STOP_MS")).toBe(true)
 		expect(source.includes("decoderManager.setChannelizer(channels)")).toBe(

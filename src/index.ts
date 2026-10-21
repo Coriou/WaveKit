@@ -38,7 +38,7 @@ import {
 import { createEfficiencyGate } from "./decoders/enablement/efficiency-gate.js"
 import { createEfficiencyMonitor } from "./decoders/enablement/efficiency-monitor.js"
 import {
-	CHANNELIZER_AUTO_ACCEPTED,
+	channelizerAutoAccepted,
 	CHANNELIZER_IDLE_STOP_MS,
 	DECODER_MAX_BANDPLAN_CHANNELS,
 	EFFICIENCY_SAMPLE_MS,
@@ -546,7 +546,7 @@ export function composeDecoderChannelizer(
 		) => void
 	},
 	constructionCleanup: () => Promise<CleanupOutcome>,
-	accepted: boolean = CHANNELIZER_AUTO_ACCEPTED,
+	accepted: boolean = channelizerAutoAccepted(arch()),
 	createManager: (deps: ChannelizerManagerDeps) => ChannelizerManager = deps =>
 		new ChannelizerManager(deps),
 ) {
@@ -1430,8 +1430,9 @@ async function main(): Promise<void> {
 		// Wire DecoderManager to SourceManager for dynamic sample rate handling
 		decoderManager.setSourceManager(sourceManager, sourceRouting)
 
-		// Opt-in core channelizer (addendum §4): one wavekit-chan per source, spawned
-		// on the first channel request. Off by default, so no manager exists.
+		// Core channelizer (addendum §4): one wavekit-chan per source, spawned on the
+		// first channel request. Without `channelizer.enabled` it is composed only
+		// where automatic composition is accepted for this host's architecture.
 		const composedChannels = composeDecoderChannelizer(
 			{
 				sourceManager,
@@ -1455,6 +1456,8 @@ async function main(): Promise<void> {
 					}
 				}
 			},
+			// Requirement 5.4: auto composition is accepted on x86-64 hosts only.
+			channelizerAutoAccepted(arch()),
 		)
 		const { channelizer, channels } = composedChannels
 		providerLifetime = composedChannels.lifetime

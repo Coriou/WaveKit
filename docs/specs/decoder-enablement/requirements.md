@@ -72,9 +72,14 @@ changes:
 - 1.1: nine built-in decoder instances exist (ids equal to their type names): `GET /api/decoders`,
   `decoder:created` at boot, the settings views and the decoder logs list them.
 - 3.x, 5.2: the built-in decoders that support channels read channelizer channels, and the
-  channelizer starts for a source when one of them needs a channel there. Until Main records
-  the capacity acceptance (5.4), these decoders report `channelizer-unavailable` instead of
-  running; readsb and lora-meshtastic run on their raw branch as today's YAML decoders do.
+  channelizer starts for a source when one of them needs a channel there. The capacity
+  acceptance (5.4) is recorded for x86-64 hosts
+  ([capacity record](../../engineering/CAPACITY-2026-10-21-DECODER-ENABLEMENT.md)): there the
+  channelizer starts only when a built-in channel placement needs it and stops after
+  `CHANNELIZER_IDLE_STOP_MS` without a channel. On arm64 hosts, until a Pi 4-class host is
+  measured, these decoders report `channelizer-unavailable` instead of running. readsb and
+  lora-meshtastic run on their raw branch as today's YAML decoders do. A built-in decoder with
+  no placement and no connected source waits (`source-rate-unknown`) instead of starting.
 - An installed catalogue dsd-fme brings up the digital-voice service as a YAML dsd-fme does.
   When its binary is unavailable, no digital-voice socket or server is started.
   Availability is decided at boot: a dsd-fme installed while the core runs decodes after an
@@ -266,19 +271,27 @@ after it was proven not to drop samples.
 `direwolf`, `dsd-fme`, `multimon-ng`) read channelizer channels; they never add a full-rate raw
 branch (PERFORMANCE rule 6).
 5.2 The channelizer starts for a source when a placement there needs a channel and
-`channelizer.auto` is not false and `CHANNELIZER_AUTO_ACCEPTED` is true; `channelizer.enabled:
+`channelizer.auto` is not false and `channelizerAutoAccepted(arch)` is true for the host
+architecture (5.4); `channelizer.enabled:
 true` keeps today's behaviour. The channelizer stops for a source when no decoder or scanner
 channel remains there for 60 s.
 5.3 Without a channelizer (binary missing, `channelizer.auto: false`, not yet accepted, or the
 process unavailable) catalogue channel decoders are suspended with `channelizer-unavailable`; a
 YAML decoder of a channel type keeps reading its raw branch at the centre as today.
-5.4 Capacity acceptance (Main, live) precedes setting `CHANNELIZER_AUTO_ACCEPTED` to true: at
+5.4 Capacity acceptance (live) precedes accepting automatic composition for a host
+architecture (`channelizerAutoAccepted`): at
 2.048 and 2.4 Msps, with every placement the default budget admits in design "Worst windows" C
 (three channels plus the LoRa raw branch) and A (three channels), every branch including the
 channelizer input branch drops 0.00 % of bytes over 10 minutes, on the desktop reference and on
 a Pi 4-class core host, unthrottled; and with the budget raised to admit window C+ (seven
 channels), either no branch drops or the gate suspends the newest probationer before a second
-drop window. Results go in `docs/engineering/` with the commit that flips the constant.
+drop window. Results go in `docs/engineering/` with the commit that changes the acceptance.
+Status: accepted for x86-64 at the default budget on 2026-10-21 (windows A and C pass at both
+rates; [capacity record](../../engineering/CAPACITY-2026-10-21-DECODER-ENABLEMENT.md)); arm64
+stays unaccepted until a Pi 4-class host is measured. The C+ clause is open: drops that begin
+after every placement has graduated (0.04 % at 2.048 Msps, 0.07 % at 2.4 Msps with seven
+channels) are accepted for now and deferred to a later design for link- and host-burst
+attribution; the gate is not changed for them.
 5.5 The per-source engine gains an in-place channel retune; a VFO change then moves a channel
 without closing it or restarting its decoder. Until it lands, a VFO move closes and reopens the
 channel and restarts the placement after `VFO_SETTLE_MS`.

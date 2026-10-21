@@ -51,7 +51,7 @@ Constants (with arithmetic, pinned by `tests/unit/decoders/decoder-enablement-co
 
 | Constant                           | Value                    | Why                                                                                                       |
 | ---------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `CHANNELIZER_AUTO_ACCEPTED`        | `false`                  | flipped by Main only with the capacity record (requirement 5.4)                                           |
+| `channelizerAutoAccepted(arch)`    | `arch === "x64"`         | x86-64 accepted by the 2026-10-21 capacity record; arm64 pending a Pi 4-class run (requirement 5.4)       |
 | `DECODER_MAX_BANDPLAN_CHANNELS`    | 4                        | 4 × (0.11 + 0.045) = 0.62 cores for dsd-fme band-plan channels, under half the 1.5 desktop budget         |
 | `VFO_SETTLE_MS`                    | 1 000                    | a click-to-tune or drag settles before a channel moves; ≤ 1 channel move per second per decoder           |
 | `EFFICIENCY_SAMPLE_MS`             | 2 000                    | counters sampled 5 times per drop window                                                                  |
@@ -224,8 +224,10 @@ decision core) and `createEfficiencyMonitor(deps)` (`efficiency-monitor.ts`, the
 ## Channelizer routing and retune (lanes MG, CH)
 
 `channelizer.auto` (absent means true) lets the manager ask the channelizer manager to start a
-source's engine when a planned placement needs a channel there and `CHANNELIZER_AUTO_ACCEPTED`
-is true; the engine stops after `CHANNELIZER_IDLE_STOP_MS` with no channel. `channelizer.enabled:
+source's engine when a planned placement needs a channel there and `channelizerAutoAccepted`
+holds for the host architecture (x86-64 accepted per
+[the capacity record](../../engineering/CAPACITY-2026-10-21-DECODER-ENABLEMENT.md); arm64
+pending; the C+ late-drop clause is deferred to the link-burst attribution design); the engine stops after `CHANNELIZER_IDLE_STOP_MS` with no channel. `channelizer.enabled:
 true` keeps today's behaviour. Lane CH adds a `retune` request to the engine protocol
 (`src/core/channelizer/protocol.ts`, `native/wavekit-chan`): new channel centre for an open
 channel, phase-continuous NCO change, same output rate and taps (PERFORMANCE rule 5); a retune

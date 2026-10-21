@@ -4898,6 +4898,28 @@ export class DecoderManager extends EventEmitter {
 					(CHANNEL_CAPABLE_TYPES as readonly string[]).includes(
 						state.config.type,
 					)))
+		// A built-in decoder runs only through placements: a built-in parent
+		// with no placement is never eligible to start, whatever the source
+		// state. It waits for its source (unknown rate or centre, or not
+		// connected) or reports the planner's reason. Own-device and external
+		// built-ins are never planned and keep running as before.
+		const builtinUnplaced =
+			!state.placement &&
+			!state.parentId &&
+			state.owner === "config" &&
+			state.decoder.caps.input !== "external" &&
+			state.decoder.getBandDeclaration?.().ownSource !== true &&
+			this.config.enablement?.isCatalogue(
+				state.originalConfig ?? state.config,
+			) === true
+		const sourceId = this.selectedSourceId(state)
+		const sourceCaps =
+			caps ?? (sourceId ? this.sourceManager?.getCaps(sourceId) : undefined)
+		const sourceKnown =
+			rate.reasonCode !== "source-rate-unknown" &&
+			sourceId !== undefined &&
+			this.sourceManager?.getStatus(sourceId)?.connected === true &&
+			sourceCaps?.centerFreq !== undefined
 		const blockedBy =
 			this.heldReason(state) ??
 			(this.isUnavailable(state) ? "decoder-unavailable" : null) ??
@@ -4905,14 +4927,18 @@ export class DecoderManager extends EventEmitter {
 				? (rate.reasonCode ?? "unsupported-sample-rate")
 				: !state.placement && channelizerUnavailable
 					? "channelizer-unavailable"
-					: bandSuspends && band.verdict === "out-of-band"
-						? "frequency-out-of-band"
-						: (unplaced ??
-							(channelizerUnavailable
-								? "channelizer-unavailable"
-								: state.admission?.admit === false
-									? "efficiency-budget"
-									: null)))
+					: builtinUnplaced
+						? sourceKnown
+							? (unplaced ?? "frequency-out-of-band")
+							: "source-rate-unknown"
+						: bandSuspends && band.verdict === "out-of-band"
+							? "frequency-out-of-band"
+							: (unplaced ??
+								(channelizerUnavailable
+									? "channelizer-unavailable"
+									: state.admission?.admit === false
+										? "efficiency-budget"
+										: null)))
 		return { rate, band, blockedBy }
 	}
 

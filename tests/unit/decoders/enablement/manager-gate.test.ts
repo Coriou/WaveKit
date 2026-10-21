@@ -1853,3 +1853,63 @@ it.each([
 		})
 	},
 )
+
+it("a built-in decoder without a placement never starts, whatever its source state", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	// A configured source that failed to connect keeps its configured caps
+	// (known rate, no centre); reservations are still accepted.
+	let connected = false
+	f.sources.caps.set("rtl", iqCaps(2_400_000))
+	f.sources.getStatus = (id: string) =>
+		f.sources.caps.has(id) ? { id, connected } : undefined
+	f.sources.assignDecoder = () => {}
+	f.yamlDecoder("yaml")
+	f.create("dec")
+	void f.manager.createDecoder({
+		id: "yaml",
+		type: "rate-test",
+		enabled: true,
+		options: {},
+		sourceId: "rtl",
+	})
+	f.plan([])
+	await f.manager.startAll()
+	expect(f.instances.get("dec")?.running).toBe(false)
+	expect(f.manager.getStatus("dec")?.suspension?.reasonCode).toBe(
+		"source-rate-unknown",
+	)
+	// YAML decoders keep today's behaviour.
+	expect(f.instances.get("yaml")?.running).toBe(true)
+	// Connected with a centre but still unplaced: the planner's reason, no start.
+	connected = true
+	f.sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 162_000_000 })
+	f.unplaced(new Map([["dec", "frequency-out-of-band"]]))
+	await f.settle()
+	expect(f.instances.get("dec")?.running).toBe(false)
+	expect(f.manager.getStatus("dec")?.suspension?.reasonCode).toBe(
+		"frequency-out-of-band",
+	)
+	// Placed in band: admitted through the gate and started.
+	f.unplaced(new Map())
+	f.plan([f.place("dec", 162_000_000)])
+	await f.settle()
+	expect(vi.mocked(gate.admit)).toHaveBeenCalled()
+	expect(f.instances.get("dec")?.running).toBe(true)
+})
+
+it("without a channelizer an unplaced built-in channel decoder still reports channelizer-unavailable", async () => {
+	const f = setup("dsd-fme", fakeGate())
+	f.manager.setChannelizer(null)
+	f.sources.caps.set("rtl", iqCaps(2_400_000))
+	f.sources.getStatus = (id: string) =>
+		f.sources.caps.has(id) ? { id, connected: false } : undefined
+	f.sources.assignDecoder = () => {}
+	f.create("dec")
+	f.plan([])
+	await f.manager.startAll()
+	expect(f.instances.get("dec")?.running).toBe(false)
+	expect(f.manager.getStatus("dec")?.suspension?.reasonCode).toBe(
+		"channelizer-unavailable",
+	)
+})

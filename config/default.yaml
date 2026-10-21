@@ -733,9 +733,15 @@ csdr:
 #   idleTimeout: 30000
 # ---
 
-# Core channelizer (opt-in prototype; docs/superpowers/specs/2026-10-09-core-channelizer-prototype-addendum.md).
-# Off by default. When on, decoders with `useChannelizer: true` get exact-rate IQ
-# from one wavekit-chan process per source; raw fanout is unchanged.
+# Core channelizer: one wavekit-chan process per source gives decoders exact-rate
+# IQ channels; raw fanout is unchanged.
+# With channelizer.enabled absent or false it is composed automatically on x86-64
+# hosts (capacity record docs/engineering/CAPACITY-2026-10-21-DECODER-ENABLEMENT.md):
+# it starts for a source only when a built-in decoder's channel placement needs
+# it, and stops after 60 s without a channel. On arm64 hosts it stays off until
+# a Pi 4-class host is measured. channelizer.auto: false disables automatic
+# composition; channelizer.enabled: true always composes it (and YAML decoders
+# with `useChannelizer: true` use it).
 # channelizer:
 #   enabled: false
 #   binaryPath: wavekit-chan
@@ -804,4 +810,5 @@ access:
 # decoderPolicy.catalogue: false disables derived built-in decoder instances.
 # decoderPolicy.rateRaise: false disables the operator ADS-B rate policy.
 # decoderPolicy.efficiency: cpuBudgetCores, cpuGuardPercent, maxBandplanChannels.
-# channelizer.auto defaults to true, gated by recorded capacity acceptance.
+# channelizer.auto defaults to true; automatic composition is accepted on x86-64
+# hosts only (see the channelizer section above).

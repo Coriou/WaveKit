@@ -170,7 +170,10 @@ const baseConfig = {
 
 describe("decoder enablement contract", () => {
 	it("pins constants with their arithmetic", () => {
-		expect(c.CHANNELIZER_AUTO_ACCEPTED).toBe(false)
+		// Capacity record 2026-10-21: accepted on x86-64, arm64 pending.
+		expect(c.channelizerAutoAccepted("x64")).toBe(true)
+		expect(c.channelizerAutoAccepted("arm64")).toBe(false)
+		expect(c.channelizerAutoAccepted("arm")).toBe(false)
 		expect(c.DECODER_MAX_BANDPLAN_CHANNELS).toBe(4)
 		expect(c.VFO_SETTLE_MS).toBe(1000)
 		expect(c.EFFICIENCY_SAMPLE_MS).toBe(2000)
@@ -325,7 +328,7 @@ describe("decoder enablement contract", () => {
 			expect(
 				c.channelizerComposition(
 					{ enabled: false, auto },
-					c.CHANNELIZER_AUTO_ACCEPTED,
+					c.channelizerAutoAccepted("arm64"),
 				),
 			).toBeNull()
 			expect(c.channelizerComposition({ enabled: true, auto }, false)).toBe(
@@ -338,10 +341,17 @@ describe("decoder enablement contract", () => {
 				auto === false ? null : "auto",
 			)
 		}
+		// Shipped config: lazy auto composition on x86-64, none on arm64.
 		expect(
 			c.channelizerComposition(
 				shipped().channelizer,
-				c.CHANNELIZER_AUTO_ACCEPTED,
+				c.channelizerAutoAccepted("x64"),
+			),
+		).toBe("auto")
+		expect(
+			c.channelizerComposition(
+				shipped().channelizer,
+				c.channelizerAutoAccepted("arm64"),
 			),
 		).toBeNull()
 	})

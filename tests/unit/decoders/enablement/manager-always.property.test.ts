@@ -51,20 +51,20 @@ it("always skips only the band", async () => {
 					{
 						validateVersions: false,
 						enablement: {
+							// Built-ins run only through placements; `gate` decides
+							// whether the gate admits them.
 							planner: () => ({
-								wanted: facts.gate
-									? ["always", "auto"].map(id => ({
-											key: id + "#raw@rtl",
-											decoderId: id,
-											sourceId: "rtl",
-											channelHz: null,
-											reach: "raw" as const,
-											origin: "configured" as const,
-											primary: true,
-											costCores: 0.1,
-											sampleRateHz: facts.rate,
-										}))
-									: [],
+								wanted: ["always", "auto"].map(id => ({
+									key: id + "#raw@rtl",
+									decoderId: id,
+									sourceId: "rtl",
+									channelHz: null,
+									reach: "raw" as const,
+									origin: "configured" as const,
+									primary: true,
+									costCores: 0.1,
+									sampleRateHz: facts.rate,
+								})),
 								unplaced: new Map(),
 							}),
 							gate: {
@@ -77,11 +77,14 @@ it("always skips only the band", async () => {
 									cpuGuardPercent: 90,
 									sources: [],
 								}),
-								admit: () => ({
-									admit: false,
-									detail: "budget",
-									retryAtMs: Date.now() + 300_000,
-								}),
+								admit: () =>
+									facts.gate
+										? {
+												admit: false as const,
+												detail: "budget" as const,
+												retryAtMs: Date.now() + 300_000,
+											}
+										: { admit: true as const },
 							},
 							resolveMode: id => ({
 								mode: id === "always" ? "always" : "auto",
@@ -120,7 +123,7 @@ it("always skips only the band", async () => {
 						)
 					if (facts.held)
 						expect(always.suspension?.reasonCode).toBe("tuner-scanning")
-					else if (facts.unavailable && (facts.gate || facts.rate >= 48_000))
+					else if (facts.unavailable)
 						expect(always.suspension?.reasonCode).toBe("decoder-unavailable")
 					else if (facts.rate < 48_000)
 						expect(always.suspension?.reasonCode).toBe(

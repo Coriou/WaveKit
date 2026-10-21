@@ -28,7 +28,23 @@ function setup(unavailable = false, enabled = true) {
 	registry.register("rate-test", () => decoder, decoder.caps)
 	const recheck = vi.fn(async () => !unavailable)
 	const enablement: DecoderEnablementOptions = {
-		planner: () => ({ wanted: [], unplaced: new Map() }),
+		// Built-ins run only through placements: plan a raw placement for "dec".
+		planner: () => ({
+			wanted: [
+				{
+					key: "dec#raw@rtl",
+					decoderId: "dec",
+					sourceId: "rtl",
+					channelHz: null,
+					reach: "raw",
+					origin: "configured",
+					primary: true,
+					costCores: 0.1,
+					sampleRateHz: 2_400_000,
+				},
+			],
+			unplaced: new Map(),
+		}),
 		resolveMode: () => ({ mode, source: "settings" }),
 		isCatalogue: () => true,
 		unavailable: () => unavailable,

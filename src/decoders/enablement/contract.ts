@@ -10,7 +10,15 @@ import type {
 } from "@wavekit/api-types"
 import type { DecoderBandRequirements } from "../band-resolver.js"
 
-export const CHANNELIZER_AUTO_ACCEPTED = false
+/**
+ * Requirement 5.4: automatic channelizer composition is accepted per host
+ * architecture. The capacity record of 2026-10-21
+ * (docs/engineering/CAPACITY-2026-10-21-DECODER-ENABLEMENT.md) accepts x86-64;
+ * arm64 stays unaccepted until a Pi 4-class host is measured.
+ */
+export function channelizerAutoAccepted(arch: string): boolean {
+	return arch === "x64"
+}
 export const DECODER_MAX_BANDPLAN_CHANNELS = 4
 export const VFO_SETTLE_MS = 1_000
 export const EFFICIENCY_SAMPLE_MS = 2_000
