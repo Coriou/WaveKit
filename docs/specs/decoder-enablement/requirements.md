@@ -75,6 +75,10 @@ changes:
   channelizer starts for a source when one of them needs a channel there. Until Main records
   the capacity acceptance (5.4), these decoders report `channelizer-unavailable` instead of
   running; readsb and lora-meshtastic run on their raw branch as today's YAML decoders do.
+- An installed catalogue dsd-fme brings up the digital-voice service as a YAML dsd-fme does.
+  When its binary is unavailable, no digital-voice socket or server is started.
+  Availability is decided at boot: a dsd-fme installed while the core runs decodes after an
+  operator start, but its digital-voice audio output needs a core restart.
 - 4.x: every configured decoder is admitted through the efficiency gate; the suspension reason
   union gains `efficiency-budget` and `decoder-unavailable`.
 - 6.1: an operator retune (REST) that puts 1090 MHz inside readsb's reach while readsb is not

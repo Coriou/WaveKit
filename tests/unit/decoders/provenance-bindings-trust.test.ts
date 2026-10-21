@@ -2,6 +2,8 @@
  * WG5 req 6: verified tuning trust from the observed tuner state, over structural fakes.
  */
 
+import { createActivityIngress } from "../../../src/core/activity/ingress.js"
+import type { DecodeEnvelope } from "../../../src/core/activity/types.js"
 import { EventEmitter } from "node:events"
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
@@ -568,3 +570,52 @@ describe("trust from a real TunerController (WG5 R1)", () => {
 		expect(trust()).toBe("relay")
 	})
 })
+
+it.each(["internal", "external"] as const)(
+	"placement context preserves payload carriers and %s tuning trust",
+	controlMode => {
+		const { decoders, tuner, index } = setup(tuned(162_000_000, controlMode))
+		decoders.add("parent", { targets: [162_000_000] })
+		const envelopes: DecodeEnvelope[] = []
+		const ingress = createActivityIngress({
+			logger: createLogger({ level: "error" }),
+			resolveProvenance: index.lookup,
+			sink: envelope => {
+				envelopes.push(envelope)
+			},
+		})
+		const publish = (
+			type: "ship" | "message",
+			data: unknown,
+			channelHz: number | null,
+		) => {
+			ingress.publish("parent", "ais-catcher", {
+				decoder: "parent",
+				timestamp: new Date(),
+				type,
+				data,
+				provenanceBinding: { sourceId: MAIN, channelHz },
+			})
+		}
+		publish("ship", { channel: "A" }, 162_000_000)
+		publish("ship", { channel: "B" }, 162_000_000)
+		publish("message", {}, null)
+		publish("message", {}, 162_025_000)
+		expect(
+			envelopes.map(envelope => envelope.provenance.frequency?.hz),
+		).toEqual([161_975_000, 162_025_000, 162_000_000, 162_025_000])
+		expect(
+			envelopes.every(
+				envelope =>
+					envelope.provenance.frequency?.tuningTrust ===
+					(controlMode === "internal" ? "commanded" : "relay"),
+			),
+		).toBe(true)
+		tuner.set(MAIN, tuned(163_000_000, controlMode))
+		publish("message", {}, 162_025_000)
+		expect(envelopes.at(-1)?.provenance.frequency?.tuningTrust).toBe(
+			"unverified",
+		)
+		index.dispose()
+	},
+)

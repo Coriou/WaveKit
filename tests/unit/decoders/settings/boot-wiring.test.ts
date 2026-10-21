@@ -105,9 +105,7 @@ describe("boot decoder configs with the settings store", () => {
 		const effective = source.indexOf(
 			"const effectiveDecoders = effectiveDecoderConfigs(",
 		)
-		const prepare = source.indexOf(
-			"digitalVoice.prepareDecoderConfigs(effectiveDecoders)",
-		)
+		const prepare = source.indexOf("await prepareDecoderVoice(")
 		expect(effective).toBeGreaterThan(0)
 		expect(prepare).toBeGreaterThan(effective)
 		expect(source).not.toContain(

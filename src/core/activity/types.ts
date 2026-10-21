@@ -41,6 +41,7 @@ export interface ActivityDecoderBinding {
  */
 export type ActivityProvenanceLookup = (
 	decoderId: string,
+	context?: { sourceId: string; channelHz: number | null },
 ) => ActivityDecoderBinding | null
 
 export interface DecodeReferences {
