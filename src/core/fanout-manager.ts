@@ -82,6 +82,12 @@ interface BranchState {
 	stream: PassThrough
 	/** False while a deferred branch waits for its consumer. */
 	active: boolean
+	/** Larger congestion mark while a just-started consumer gets going. */
+	startupHighWaterMark?: number | undefined
+	/** Ends the startup period; unref'd, cleared on removal. */
+	startupTimer?: ReturnType<typeof setTimeout> | undefined
+	/** The startup mark ended with a backlog that must drain first. */
+	startupDraining?: boolean | undefined
 	highWaterMark: number
 	backpressure: boolean
 	bufferedBytes: number
@@ -204,11 +210,38 @@ export class FanoutManager extends EventEmitter {
 		return stream
 	}
 
-	/** Starts delivering data to a deferred branch; every later drop counts. */
-	activateBranch(id: string): void {
+	/**
+	 * Starts delivering data to a deferred branch; every later drop counts.
+	 * With `startup`, the branch buffers up to `highWaterMark` bytes for
+	 * `durationMs` (a consumer's first reads after spawn are slow), then returns
+	 * to its normal mark: a larger backlog is left to drain, and new data is not
+	 * accepted beyond the normal mark until it has.
+	 */
+	activateBranch(
+		id: string,
+		startup?: { highWaterMark: number; durationMs: number },
+	): void {
 		const branch = this.branches.get(id)
 		if (!branch || branch.active) return
 		branch.active = true
+		if (
+			startup &&
+			Number.isFinite(startup.highWaterMark) &&
+			startup.highWaterMark > branch.highWaterMark &&
+			Number.isFinite(startup.durationMs) &&
+			startup.durationMs > 0
+		) {
+			branch.startupHighWaterMark = startup.highWaterMark
+			// One timer per activation ends the period: no clock read per chunk.
+			branch.startupTimer = setTimeout(() => {
+				branch.startupTimer = undefined
+				branch.startupHighWaterMark = undefined
+				// A backlog at or above the normal mark drains before new data.
+				branch.startupDraining =
+					branch.stream.writableLength >= branch.highWaterMark
+			}, startup.durationMs)
+			branch.startupTimer.unref?.()
+		}
 		this.log.debug({ branchId: id }, "Branch activated")
 	}
 
@@ -223,6 +256,8 @@ export class FanoutManager extends EventEmitter {
 			return
 		}
 
+		clearTimeout(branch.startupTimer)
+		branch.startupTimer = undefined
 		// End the stream gracefully
 		branch.stream.end()
 		// Destroy to release resources
@@ -283,6 +318,25 @@ export class FanoutManager extends EventEmitter {
 			// Track total bytes attempted to be written (before dropping)
 			branch.totalBytesWritten += chunkLength
 
+			// Startup-only refusal: the startup period ended with a writable
+			// backlog at or above the normal mark. It ends on any chunk once the
+			// stream is writable and its writable backlog is below the mark; a
+			// destroyed or ended stream stays refused and every chunk counts.
+			if (branch.startupDraining) {
+				const stream = branch.stream
+				if (
+					!stream.destroyed &&
+					!stream.writableEnded &&
+					stream.writableLength < branch.highWaterMark
+				)
+					branch.startupDraining = false
+				else {
+					branch.droppedBytesTotal += chunkLength
+					branch.droppedChunksTotal++
+					continue
+				}
+			}
+
 			if (branch.backpressure) {
 				// Already in backpressure state, drop packet and track metrics
 				branch.droppedBytesTotal += chunkLength
@@ -295,6 +349,12 @@ export class FanoutManager extends EventEmitter {
 				if (!branch.stream.destroyed) {
 					canWrite = branch.stream.write(chunk)
 					branch.bufferedBytes = this.getBufferedBytes(branch)
+					// While the startup mark lasts, only a writable backlog beyond it
+					// is congestion. Beyond it the writable side is above the normal
+					// mark, so the stream has a pending 'drain' to end the episode.
+					if (branch.startupHighWaterMark !== undefined)
+						canWrite =
+							branch.stream.writableLength <= branch.startupHighWaterMark
 				}
 			} catch (err) {
 				this.log.error(

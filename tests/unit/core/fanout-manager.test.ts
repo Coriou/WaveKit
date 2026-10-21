@@ -5,7 +5,7 @@
  * Requirements: 2.2, 2.3, 2.4, 2.5
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import * as fc from "fast-check"
 import { PassThrough } from "node:stream"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
@@ -597,4 +597,304 @@ it("a deferred branch counts nothing until its consumer is ready; afterwards eve
 		0,
 	)
 	fanout.destroy()
+})
+
+describe("decoder branch startup buffer", () => {
+	const KiB = 1024
+	const MiB = 1024 * KiB
+	// 2.048 Msps CU8: 4 MiB/s; 1.5 s of it is the startup mark.
+	const startup = { highWaterMark: 6 * MiB, durationMs: 5000 }
+	const chunk = Buffer.alloc(64 * KiB)
+	const setup = () => {
+		const fanout = new FanoutManager(testLogger)
+		const source = createMockSource()
+		fanout.attachSource(source)
+		const branch = fanout.addBranch({
+			id: "startup",
+			highWaterMark: 512 * KiB,
+			deferred: true,
+		})
+		fanout.activateBranch("startup", startup)
+		const send = (bytes: number) => {
+			for (let sent = 0; sent < bytes; sent += chunk.length) source.write(chunk)
+		}
+		const dropped = () =>
+			fanout.getBranchTelemetry("startup")?.droppedBytesTotal ?? 0
+		return { fanout, branch, send, dropped }
+	}
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("a consumer that waits 300 ms and then keeps up loses nothing", async () => {
+		vi.useFakeTimers()
+		const f = setup()
+		// 300 ms at 4 MiB/s without reading: 1.2 MiB, over the normal mark.
+		// The write path reads no clock while the startup mark applies.
+		const clock = vi.spyOn(Date, "now")
+		f.send(1.2 * MiB)
+		expect(clock).not.toHaveBeenCalled()
+		clock.mockRestore()
+		await vi.advanceTimersByTimeAsync(300)
+		expect(f.dropped()).toBe(0)
+		// Then it reads whatever arrives, through and past the startup period.
+		f.branch.resume()
+		for (let i = 0; i < 80; i++) {
+			f.send(400 * KiB)
+			await vi.advanceTimersByTimeAsync(100)
+		}
+		expect(f.dropped()).toBe(0)
+		f.fanout.destroy()
+	})
+
+	it("a consumer that never reads loses data once the startup mark is full", () => {
+		vi.useFakeTimers()
+		const f = setup()
+		f.send(6 * MiB)
+		expect(f.dropped()).toBe(0)
+		f.send(1 * MiB)
+		expect(f.dropped()).toBeGreaterThan(0)
+		f.fanout.destroy()
+	})
+
+	it("returns to the normal mark after the startup period and lets a backlog drain", async () => {
+		vi.useFakeTimers()
+		const f = setup()
+		f.send(2 * MiB)
+		expect(f.dropped()).toBe(0)
+		vi.advanceTimersByTime(5000)
+		// Backlog above the normal mark: nothing new is accepted, nothing is shed.
+		f.send(64 * KiB)
+		expect(f.dropped()).toBe(64 * KiB)
+		const backlog = f.branch.readableLength + f.branch.writableLength
+		expect(backlog).toBeGreaterThanOrEqual(2 * MiB - 64 * KiB)
+		// Once drained, the normal 512 KiB mark applies.
+		f.branch.resume()
+		await vi.advanceTimersByTimeAsync(0)
+		const before = f.dropped()
+		f.branch.pause()
+		f.send(512 * KiB)
+		expect(f.dropped()).toBe(before)
+		f.send(512 * KiB)
+		expect(f.dropped()).toBeGreaterThan(before)
+		f.fanout.destroy()
+	})
+})
+
+describe("startup refusal never stalls", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("write 512, read 1, write 1, expire startup, write: resuming the consumer clears the refusal", async () => {
+		vi.useFakeTimers()
+		const fanout = new FanoutManager(testLogger)
+		const source = createMockSource()
+		fanout.attachSource(source)
+		const branch = fanout.addBranch({
+			id: "b",
+			highWaterMark: 512,
+			deferred: true,
+		})
+		fanout.activateBranch("b", { highWaterMark: 4096, durationMs: 1000 })
+		source.write(Buffer.alloc(512))
+		branch.read(1)
+		source.write(Buffer.alloc(1))
+		await vi.advanceTimersByTimeAsync(1000)
+		source.write(Buffer.alloc(1))
+		// The consumer resumes and empties the buffer.
+		branch.resume()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(branch.readableLength + branch.writableLength).toBe(0)
+		const before = fanout.getBranchTelemetry("b")?.droppedBytesTotal ?? 0
+		for (let i = 0; i < 8; i++) {
+			source.write(Buffer.alloc(16))
+			await vi.advanceTimersByTimeAsync(0)
+		}
+		expect(fanout.getBranchStatus("b")?.backpressure).toBe(false)
+		expect(fanout.getBranchTelemetry("b")?.droppedBytesTotal).toBe(before)
+		fanout.destroy()
+	})
+
+	// Feature: decoder-enablement, Property 16: A branch never stays refusing below its mark
+	// Validates: Requirements 4.6
+	it("random write/read/expire interleavings never leave a branch refusing below its mark", async () => {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.record({
+						kind: fc.constantFrom("write", "read", "expire", "resume", "pause"),
+						n: fc.integer({ min: 1, max: 700 }),
+					}),
+					{ maxLength: 40 },
+				),
+				async events => {
+					vi.useFakeTimers()
+					const fanout = new FanoutManager(testLogger)
+					const source = createMockSource()
+					fanout.attachSource(source)
+					const branch = fanout.addBranch({
+						id: "b",
+						highWaterMark: 512,
+						deferred: true,
+					})
+					fanout.activateBranch("b", { highWaterMark: 2048, durationMs: 1000 })
+					try {
+						for (const { kind, n } of events) {
+							if (kind === "write") source.write(Buffer.alloc(n))
+							else if (kind === "read") branch.read(Math.min(n, 512))
+							else if (kind === "expire")
+								await vi.advanceTimersByTimeAsync(1000)
+							else if (kind === "resume") branch.resume()
+							else branch.pause()
+							await vi.advanceTimersByTimeAsync(0)
+						}
+						// Whatever happened, once the writable backlog is below the
+						// mark the next chunk is accepted.
+						branch.resume()
+						await vi.advanceTimersByTimeAsync(1000)
+						expect(branch.writableLength).toBeLessThan(512)
+						const before = fanout.getBranchTelemetry("b")!.droppedBytesTotal
+						source.write(Buffer.alloc(1))
+						await vi.advanceTimersByTimeAsync(0)
+						expect(fanout.getBranchTelemetry("b")!.droppedBytesTotal).toBe(
+							before,
+						)
+						expect(fanout.getBranchStatus("b")?.backpressure).toBe(false)
+					} finally {
+						fanout.destroy()
+						vi.useRealTimers()
+					}
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+})
+
+describe("startup buffering leaves normal congestion accounting unchanged", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it.each([false, true])(
+		"a destroyed empty branch: 64 attempted, 48 dropped, 1 episode (startup %s)",
+		withStartup => {
+			const fanout = new FanoutManager(testLogger)
+			const source = createMockSource()
+			fanout.attachSource(source)
+			const branch = fanout.addBranch({
+				id: "b",
+				highWaterMark: 512,
+				deferred: true,
+			})
+			fanout.activateBranch(
+				"b",
+				withStartup ? { highWaterMark: 4096, durationMs: 1000 } : undefined,
+			)
+			branch.destroy()
+			for (let i = 0; i < 4; i++) source.write(Buffer.alloc(16))
+			expect(fanout.getBranchTelemetry("b")).toMatchObject({
+				totalBytesWritten: 64,
+				droppedBytesTotal: 48,
+				droppedChunksTotal: 3,
+				backpressureEnterCount: 1,
+			})
+			fanout.destroy()
+		},
+	)
+
+	/** The congestion accounting of the fanout before startup buffering existed. */
+	const reference = (highWaterMark: number) => {
+		const stream = new PassThrough({ highWaterMark })
+		stream.on("error", () => {})
+		const t = {
+			backpressure: false,
+			totalBytesWritten: 0,
+			droppedBytesTotal: 0,
+			droppedChunksTotal: 0,
+			backpressureEnterCount: 0,
+		}
+		return {
+			stream,
+			t,
+			write(chunk: Buffer) {
+				t.totalBytesWritten += chunk.length
+				if (t.backpressure) {
+					t.droppedBytesTotal += chunk.length
+					t.droppedChunksTotal++
+					return
+				}
+				let canWrite = false
+				try {
+					if (!stream.destroyed) canWrite = stream.write(chunk)
+				} catch {
+					return
+				}
+				if (!canWrite) {
+					t.backpressure = true
+					t.backpressureEnterCount++
+					stream.once("drain", () => {
+						t.backpressure = false
+					})
+				}
+			},
+		}
+	}
+
+	// Feature: decoder-enablement, Property 17: Unbuffered branches keep their drop accounting
+	// Validates: Requirements 4.6
+	it("a branch without startup buffering accounts drops exactly as before", async () => {
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.record({
+						kind: fc.constantFrom(
+							"write",
+							"write",
+							"read",
+							"pause",
+							"resume",
+							"destroy",
+						),
+						n: fc.integer({ min: 1, max: 700 }),
+					}),
+					{ maxLength: 40 },
+				),
+				async events => {
+					const fanout = new FanoutManager(testLogger)
+					const source = createMockSource()
+					fanout.attachSource(source)
+					const branch = fanout.addBranch({ id: "b", highWaterMark: 512 })
+					branch.on("error", () => {})
+					const ref = reference(512)
+					try {
+						for (const { kind, n } of events) {
+							if (kind === "write") {
+								const chunk = Buffer.alloc(n)
+								source.write(chunk)
+								ref.write(chunk)
+							} else
+								for (const stream of [branch, ref.stream]) {
+									if (kind === "read") stream.read(Math.min(n, 512))
+									else if (kind === "pause") stream.pause()
+									else if (kind === "resume") stream.resume()
+									else stream.destroy()
+								}
+							await new Promise(resolve => setImmediate(resolve))
+							const { backpressure, ...expected } = ref.t
+							expect(fanout.getBranchTelemetry("b")).toMatchObject(expected)
+							expect(fanout.getBranchStatus("b")?.backpressure).toBe(
+								backpressure,
+							)
+						}
+					} finally {
+						fanout.destroy()
+						ref.stream.destroy()
+					}
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
 })

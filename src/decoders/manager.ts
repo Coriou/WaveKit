@@ -39,6 +39,8 @@ import {
 	EFFICIENCY_RETRY_MAX_MS,
 	EFFICIENCY_PROBATION_MS,
 	CHANNEL_CAPABLE_TYPES,
+	DECODER_BRANCH_STARTUP_BUFFER_S,
+	DECODER_BRANCH_STARTUP_MS,
 	DECODER_PROTOCOLS,
 } from "./enablement/contract.js"
 import {
@@ -105,6 +107,7 @@ import { channelisedRatePlan } from "../core/channelizer/rate-plan.js"
 import { isValidRtlSampleRate } from "../core/tuner-controller.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import type { SourceManager, SourceCaps } from "../core/source-manager.js"
+import { iqFrameBytes } from "../core/source-manager.js"
 import {
 	decoderOptionDescriptors,
 	validateDecoderOptions,
@@ -437,6 +440,33 @@ export interface DecoderStartIntent {
 	 * a scanner sweep holds the source (REST routes only, spec § 10.4).
 	 */
 	refuseIfHeld?: boolean
+}
+
+/**
+ * A just-spawned decoder reads slowly for its first moments: its raw branch
+ * may buffer DECODER_BRANCH_STARTUP_BUFFER_S of the source's byte rate for
+ * DECODER_BRANCH_STARTUP_MS before congestion counts as drops.
+ */
+export function startupBuffer(
+	caps: SourceCaps | null | undefined,
+): { highWaterMark: number; durationMs: number } | undefined {
+	if (!caps || !Number.isFinite(caps.sampleRate) || caps.sampleRate <= 0)
+		return undefined
+	const channels = caps.channels ?? 1
+	// IQ frames use the source's own frame size; audio frames are per channel.
+	const bytesPerFrame =
+		iqFrameBytes(caps) ??
+		(caps.format === "S16LE"
+			? 2 * channels
+			: caps.format === "FLOAT32LE"
+				? 4 * channels
+				: 2) // "auto" and unknown: CU8
+	return {
+		highWaterMark: Math.ceil(
+			caps.sampleRate * bytesPerFrame * DECODER_BRANCH_STARTUP_BUFFER_S,
+		),
+		durationMs: DECODER_BRANCH_STARTUP_MS,
+	}
 }
 
 /**
@@ -3296,7 +3326,7 @@ export class DecoderManager extends EventEmitter {
 			delete state.branchReady
 			decoder.off("started", activate)
 			if (state.branchFanout === fanout && state.branchId === branchId)
-				fanout.activateBranch(branchId)
+				fanout.activateBranch(branchId, startupBuffer(caps))
 		}
 		state.branchReady = activate
 		if (decoder.getStatus().running) activate()

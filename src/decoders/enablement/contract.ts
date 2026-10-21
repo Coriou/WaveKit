@@ -29,6 +29,10 @@ export const CHANNEL_MARGINAL_CORES = 0.11
 export const CHANNELIZER_BASE_CORES_2048K = 0.22
 export const CHANNELIZER_BASE_CORES_2400K = 0.26
 export const DECODER_COST_UNKNOWN_CORES = 0.6
+/** A decoder's raw fanout branch buffers more for this long after it activates. */
+export const DECODER_BRANCH_STARTUP_MS = 5_000
+/** Startup buffer: this many seconds of the source's byte rate (at least the normal mark). */
+export const DECODER_BRANCH_STARTUP_BUFFER_S = 1.5
 
 /** A8: how src/index.ts composes the channelizer. "enabled": today's opt-in (immediate retire);
  *  "auto": constructed lazily with the idle linger; null: nothing constructed, setChannelizer(null). */

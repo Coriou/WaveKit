@@ -5,7 +5,10 @@ import pino from "pino"
 import fc from "fast-check"
 import type { PlacementLifecycle } from "../../../../src/decoders/placement-lifecycle.js"
 import { checkAllDecodersHealth } from "../../../../src/utils/health-check.js"
-import { DecoderManager } from "../../../../src/decoders/manager.js"
+import {
+	DecoderManager,
+	startupBuffer,
+} from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../../src/core/source-manager.js"
@@ -1801,6 +1804,7 @@ it("a raw branch receives and counts nothing until its decoder has started", asy
 		}
 	).decoders.get("yaml")!
 	const fanout = state.branchFanout!
+	const activate = vi.spyOn(fanout, "activateBranch")
 	const source = new PassThrough()
 	fanout.attachSource(source)
 	const burst = () => {
@@ -1816,10 +1820,36 @@ it("a raw branch receives and counts nothing until its decoder has started", asy
 	ready.resolve()
 	await starting
 	expect(decoder.running).toBe(true)
-	// Ready but not reading: overflow now counts as drops.
+	// Startup mark: 1.5 s of 2.4 Msps CU8 for 5 s.
+	expect(activate).toHaveBeenCalledWith(state.branchId, {
+		highWaterMark: 7_200_000,
+		durationMs: 5000,
+	})
+	// Ready but not reading: within the startup mark nothing is lost (4 MiB),
+	// beyond it the overflow counts as drops.
+	burst()
+	expect(fanout.getBranchTelemetry(state.branchId!)?.droppedBytesTotal).toBe(0)
 	burst()
 	expect(
 		fanout.getBranchTelemetry(state.branchId!)?.droppedBytesTotal,
 	).toBeGreaterThan(0)
 	fanout.detachSource()
 })
+
+it.each([
+	[{ kind: "iq", format: "U8_IQ" }, 2],
+	[{ kind: "iq", format: "S16_IQ" }, 4],
+	[{ kind: "iq", format: "FLOAT32LE" }, 8],
+	[{ kind: "audio_pcm", format: "FLOAT32LE" }, 4],
+	[{ kind: "audio_pcm", format: "S16LE", channels: 2 }, 4],
+] as const)(
+	"the startup buffer holds 1.5 s of %o (%i bytes per sample)",
+	(caps, bytes) => {
+		expect(
+			startupBuffer({ ...caps, sampleRate: 2_048_000, exclusive: false }),
+		).toEqual({
+			highWaterMark: Math.ceil(2_048_000 * bytes * 1.5),
+			durationMs: 5000,
+		})
+	},
+)

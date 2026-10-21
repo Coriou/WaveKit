@@ -190,6 +190,21 @@ decision core) and `createEfficiencyMonitor(deps)` (`efficiency-monitor.ts`, the
   admission order is unchanged. A placement's raw fanout branch is created deferred and receives
   data (and counts drops) only once its decoder has started and connected its input; the
   channelizer's input branch is already added only after `wavekit-chan` reports ready.
+- Startup buffer: for `DECODER_BRANCH_STARTUP_MS` (5 s) after activation (one unref'd timer per
+  activation, no clock read per chunk) a decoder's raw branch counts congestion only when its
+  writable backlog exceeds max(normal mark, `DECODER_BRANCH_STARTUP_BUFFER_S` (1.5 s) of the
+  source's byte rate); overflow beyond that still counts as drops. Frame size: the source's IQ
+  frame (CU8 2, S16 IQ 4, float32 IQ 8 bytes) or 2 / 4 bytes per audio channel. When the period
+  ends with a writable backlog at or above the normal mark, a startup-only refusal drops (and
+  counts) new chunks until the stream is writable again with its writable backlog below the normal
+  mark, checked on every chunk; a destroyed or ended stream stays refused. Normal backpressure and
+  its accounting are unchanged for every branch. Memory bound per starting branch: the startup
+  mark plus the normal mark on the readable side plus one source chunk and stream bookkeeping
+  (CU8: 6.1 MB + 0.5 MiB at 2.048 Msps, 7.2 MB + 0.5 MiB at 2.4 Msps), held while its consumer
+  lags; a consumer that stalls can keep that backlog beyond the 5 s, never more. One gated
+  probationer per source means at most one catalogue startup branch per source at a time; YAML
+  decoders also get the buffer at their start, so the worst case per source is (1 + YAML decoders
+  starting together) such branches.
   An `unknown` admission records no backoff and returns the source's clear-window time
   (`cleanAtMono`, or one clear window from now without a clean run) as its retry.
 - `admit(newcomer, running, sample, now): AdmissionDecision` implements requirement 4.1 to 4.4:
