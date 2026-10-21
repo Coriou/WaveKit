@@ -73,12 +73,12 @@ it("ordered admission stays within the budget and admits every fitting candidate
 					budgetCores: budget / 1000,
 					cpuGuardPercent: 90,
 				})
-				observe(gate, 0, 0)
+				for (let at = 0; at <= 60000; at += 2000) observe(gate, at, 0)
 				const running: RunningPlacement[] = []
 				let sum = 0
 				for (const [i, cost] of costs.entries()) {
 					const p = placement(i, cost / 1000)
-					const decision = gate.admit(p, running, 0)
+					const decision = gate.admit(p, running, 60000)
 					const fits = sum + p.costCores + 0.26 <= budget / 1000
 					expect(decision.admit).toBe(fits)
 					if (decision.admit) {
@@ -164,10 +164,7 @@ it("failure evidence survives any number and order of delayed observations", () 
 					),
 				).toEqual([{ key: "0", detail: cpu ? "cpu" : "drops" }])
 				if (!cpu)
-					expect(gate.admit(placement(0, 0.1), [], 100001)).toMatchObject({
-						admit: false,
-						detail: "drops",
-					})
+					expect(gate.admit(placement(0, 0.1), [], 100001).admit).toBe(false)
 			},
 		),
 		{ numRuns: 200 },

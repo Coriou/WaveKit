@@ -29,6 +29,7 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 		{
 			unknown: boolean
 			at: number
+			barrierAt: number
 			maxDropAt: number | null
 			rate: number | null
 		}
@@ -43,9 +44,14 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 		}
 	>()
 	const failures = new Set<string>()
+	let latestAt: number | null = null
 	let cpu: number | null = null
 	let maxHighCpuAt: number | null = null
 	let cpuAt: number | null = null
+
+	// A far-future sample keeps every later sample classified as reordered, so
+	// the gate stays closed (fail closed) until it is recreated. The caller's
+	// query clock is never trusted to lower ordering or evidence marks.
 
 	const dropState = (id: string, now: number) => {
 		const source = sources.get(id)
@@ -57,12 +63,18 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 			now - source.at > EFFICIENCY_STALE_MS
 		)
 			return "unknown"
+		if (
+			now - source.barrierAt < EFFICIENCY_CLEAR_MS &&
+			source.barrierAt > (source.maxDropAt ?? -1)
+		)
+			return "unknown"
 		if (source.maxDropAt !== null) {
 			if (source.maxDropAt > now) return "dropping"
 			const age = now - source.maxDropAt
 			if (age <= EFFICIENCY_DROP_WINDOW_MS) return "dropping"
 			if (age < EFFICIENCY_CLEAR_MS) return "clearing"
 		}
+		if (now - source.barrierAt < EFFICIENCY_CLEAR_MS) return "unknown"
 		return "ok"
 	}
 	const currentCpu = (now: number) =>
@@ -102,61 +114,76 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 
 	return {
 		record(sample) {
-			// Malformed observations invalidate every baseline until valid samples arrive.
+			// Retained barriers never decrease. Unknown history must earn a
+			// complete clean window, just like a newly observed source.
 			if (!sample || !valid(sample.atMs) || !(sample.sources instanceof Map)) {
-				for (const source of sources.values()) source.unknown = true
+				const barrierAt = Math.max(
+					latestAt ?? 0,
+					valid(sample?.atMs) ? sample.atMs : 0,
+				)
+				if (barrierAt !== null)
+					latestAt = Math.max(latestAt ?? barrierAt, barrierAt)
+				for (const source of sources.values()) {
+					source.unknown = true
+					source.rate = null
+					source.barrierAt = Math.max(source.barrierAt, barrierAt ?? source.at)
+				}
 				cpu = null
 				return
 			}
-			// Failure evidence never decreases, regardless of arrival order.
+			const at = sample.atMs
+			const reorderedTick = latestAt !== null && at <= latestAt
+			const highWater = Math.max(latestAt ?? at, at)
+			latestAt = Math.max(latestAt ?? at, at)
 			if (
 				valid(sample.cpuPercent) &&
 				sample.cpuPercent > inputs.cpuGuardPercent
 			)
-				maxHighCpuAt = Math.max(maxHighCpuAt ?? sample.atMs, sample.atMs)
+				maxHighCpuAt = Math.max(maxHighCpuAt ?? at, at)
+			cpuAt = at
+			cpu = valid(sample.cpuPercent) ? sample.cpuPercent : null
+			for (const [id, source] of sources) {
+				if (!sample.sources.has(id)) {
+					source.unknown = true
+					source.rate = null
+					source.barrierAt = Math.max(source.barrierAt, highWater)
+					if (highWater - source.at > EFFICIENCY_CLEAR_MS) sources.delete(id)
+				}
+			}
 			for (const [id, counters] of sample.sources) {
-				if (
+				const previous = sources.get(id)
+				const complete =
+					counters != null &&
+					valid(counters.droppedBytesDelta) &&
+					valid(counters.droppedChunksDelta)
+				const drop =
 					counters != null &&
 					((valid(counters.droppedBytesDelta) &&
 						counters.droppedBytesDelta > 0) ||
 						(valid(counters.droppedChunksDelta) &&
 							counters.droppedChunksDelta > 0))
-				) {
-					let source = sources.get(id)
-					if (!source) {
-						source = {
-							unknown: true,
-							at: sample.atMs,
-							maxDropAt: null,
-							rate: null,
-						}
-						sources.set(id, source)
-					}
-					source.maxDropAt = Math.max(
-						source.maxDropAt ?? sample.atMs,
-						sample.atMs,
-					)
-				}
-			}
-			cpuAt = sample.atMs
-			cpu = valid(sample.cpuPercent) ? sample.cpuPercent : null
-			for (const [id, source] of sources) {
-				if (!sample.sources.has(id)) source.unknown = true
-			}
-			for (const [id, counters] of sample.sources) {
-				const previous = sources.get(id)
-				const known =
-					counters != null &&
-					valid(counters.droppedBytesDelta) &&
-					valid(counters.droppedChunksDelta)
+				const reordered =
+					reorderedTick || (previous !== undefined && at <= previous.at)
+				const gap =
+					previous !== undefined && at - previous.at > EFFICIENCY_STALE_MS
+				const irregular = !complete || reordered || gap
 				sources.set(id, {
-					unknown: !known,
-					at: sample.atMs,
-					maxDropAt: previous?.maxDropAt ?? null,
+					unknown: irregular,
+					at: Math.max(previous?.at ?? at, at),
+					barrierAt:
+						!previous || irregular || drop
+							? Math.max(previous?.barrierAt ?? highWater, highWater)
+							: previous.barrierAt,
+					maxDropAt: drop
+						? Math.max(previous?.maxDropAt ?? highWater, highWater)
+						: (previous?.maxDropAt ?? null),
 					rate:
-						known && previous && !previous.unknown && sample.atMs > previous.at
-							? (counters.droppedBytesDelta! * 1000) /
-								(sample.atMs - previous.at)
+						complete &&
+						!irregular &&
+						previous &&
+						!previous.unknown &&
+						at > previous.at
+							? (counters.droppedBytesDelta! * 1000) / (at - previous.at)
 							: null,
 				})
 			}
@@ -192,6 +219,7 @@ export function createEfficiencyGate(inputs: EfficiencyInputs): EfficiencyGate {
 			})
 			return { admit: false, detail, retryAtMs: at }
 		},
+		// Unknown observations close admission, but are not probation verdicts.
 		probation(running, now) {
 			const newest = new Map<string, RunningPlacement>()
 			if (!valid(now)) return []

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
 import { placementCostCores } from "../../../../src/decoders/enablement/contract.js"
 import type {
+	EfficiencyGate,
 	EfficiencySample,
 	RunningPlacement,
 	WantedPlacement,
@@ -35,10 +36,41 @@ const sample = (
 		["s", { droppedBytesDelta: bytes, droppedChunksDelta: chunks }],
 	]),
 })
-const setup = (budgetCores = 1.5) => {
+// Test times are relative to the end of an explicitly earned clean window.
+const setup = (budgetCores = 1.5): EfficiencyGate => {
 	const gate = createEfficiencyGate({ budgetCores, cpuGuardPercent: 90 })
-	gate.record(sample())
-	return gate
+	for (let at = 0; at <= 60000; at += 2000) gate.record(sample(at))
+	const time = (at: number) =>
+		typeof at === "number" && Number.isFinite(at) && at >= 0 ? at + 60000 : at
+	const active = (ps: readonly RunningPlacement[]) =>
+		ps.map(p => ({ ...p, admittedAtMs: time(p.admittedAtMs) }))
+	const decision = (d: ReturnType<EfficiencyGate["admit"]>) =>
+		d.admit ? d : { ...d, retryAtMs: d.retryAtMs - 60000 }
+	return {
+		record: s => gate.record(s && { ...s, atMs: time(s.atMs) }),
+		admit: (p, ps, at) => decision(gate.admit(p, active(ps), time(at))),
+		probation: (ps, at) => gate.probation(active(ps), time(at)),
+		noteSuspended: (key, detail, at) =>
+			gate.noteSuspended(key, detail, time(at)),
+		forget: key => gate.forget(key),
+		view: (ps, blocked, at) => {
+			const view = gate.view(
+				active(ps),
+				blocked.map(b => ({
+					...b,
+					decision: b.decision.admit
+						? b.decision
+						: { ...b.decision, retryAtMs: time(b.decision.retryAtMs) },
+				})),
+				time(at),
+			)
+			for (const source of view.sources)
+				for (const p of source.blocked)
+					if (p.retryAt)
+						p.retryAt = new Date(Date.parse(p.retryAt) - 60000).toISOString()
+			return view
+		},
+	}
 }
 const running = (p: WantedPlacement, admittedAtMs = 0): RunningPlacement => ({
 	...p,
@@ -109,6 +141,7 @@ describe("efficiency gate", () => {
 		for (const age of [9900, 10100, 60100]) {
 			const gate = setup()
 			gate.record(sample(1, null, 1))
+			for (let at = 2001; at < age + 1; at += 2000) gate.record(sample(at))
 			gate.record(sample(age + 1))
 			expect(gate.admit(placement(), [], age + 1)).toMatchObject(
 				age < 60000 ? { admit: false, detail: "drops" } : { admit: true },
@@ -156,6 +189,7 @@ describe("efficiency gate", () => {
 		gate.noteSuspended(p.key, "budget", 0)
 		let now = 300000
 		for (const delay of [600000, 1200000, 1800000, 1800000]) {
+			for (let at = now - 62000; at < now; at += 2000) gate.record(sample(at))
 			gate.record(sample(now))
 			expect(gate.admit(p, [], now).admit).toBe(true)
 			gate.record(sample(now + 1, null, 1))
@@ -174,15 +208,16 @@ describe("efficiency gate", () => {
 		expect(gate.admit(placement("b"), [running(placement("a"))], 0).admit).toBe(
 			true,
 		)
-		gate.record({
-			...sample(1),
-			sources: new Map([
-				["s", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
-				["t", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
-			]),
-		})
+		for (let at = 1; at <= 60001; at += 2000)
+			gate.record({
+				...sample(at),
+				sources: new Map([
+					["s", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
+					["t", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
+				]),
+			})
 		expectDetail(
-			gate.admit(placement("b", 0.1, "t"), [running(placement("a"))], 1),
+			gate.admit(placement("b", 0.1, "t"), [running(placement("a"))], 60001),
 			"budget",
 		)
 	})
@@ -260,7 +295,7 @@ describe("efficiency gate", () => {
 		gate.forget("p")
 		expect(gate.admit(placement(), [], 0).admit).toBe(true)
 		gate.record(sample(0))
-		expect(gate.admit(placement(), [], 0)).toEqual({ admit: true })
+		expectDetail(gate.admit(placement(), [], 0), "unknown")
 	})
 })
 
@@ -300,8 +335,8 @@ it.each([undefined, null, "0", {}])(
 			budgetCores: value as number,
 			cpuGuardPercent: 90,
 		})
-		gate.record(sample())
-		expectDetail(gate.admit(placement(), [], 0), "budget")
+		for (let at = 0; at <= 60000; at += 2000) gate.record(sample(at))
+		expectDetail(gate.admit(placement(), [], 60000), "budget")
 		expectDetail(
 			setup().admit(
 				{ ...placement(), costCores: value } as WantedPlacement,
@@ -318,7 +353,7 @@ it("unknown, drops, CPU and budget have fixed precedence", () => {
 	expectDetail(gate.admit(placement("unknown"), [], 1), "unknown")
 	gate.record(sample(2, 95, 1))
 	expectDetail(gate.admit(placement("drops"), [], 2), "drops")
-	gate.record(sample(60002, 95))
+	for (let at = 2002; at <= 60002; at += 2000) gate.record(sample(at, 95))
 	expectDetail(gate.admit(placement("cpu"), [], 60002), "cpu")
 })
 it("probation returns at most one verdict per source and never selects a future admission", () => {
@@ -376,11 +411,11 @@ it.each([6000, 6001, 598000])("expires clean drops and CPU at age %i", age => {
 	)
 })
 
-it("stale CPU follows the null CPU rule when drops are fresh", () => {
+it("a stale sample gap requires another clean window even with null CPU", () => {
 	const gate = setup()
 	gate.record(sample(2000, 95))
 	gate.record(sample(8001, null))
-	expect(gate.admit(placement(), [], 8001)).toEqual({ admit: true })
+	expectDetail(gate.admit(placement(), [], 8001), "unknown")
 	expect(gate.view([], [], 8001).sources[0]?.cpu.percent).toBeNull()
 })
 
@@ -411,7 +446,7 @@ it.each(["drops", "cpu"] as const)(
 			expect(gate.probation([running(placement())], 20)).toEqual([
 				{ key: "p", detail },
 			])
-			expectDetail(gate.admit(placement(), [], 20), detail)
+			expectDetail(gate.admit(placement(), [], 20), "unknown")
 		}
 		const gate = setup()
 		gate.record(
@@ -471,7 +506,10 @@ it.each(["drops", "cpu"] as const)(
 			for (let at = 1; at <= 8; at++)
 				gate.record(event(future ? 200000 + at : at))
 			gate.record(sample(100001, detail === "cpu" ? 95 : 10))
-			expectDetail(gate.admit(placement(), [], 100001), detail)
+			expectDetail(
+				gate.admit(placement(), [], 100001),
+				future ? "unknown" : detail === "drops" ? "drops" : "unknown",
+			)
 			expect(gate.probation([running(placement(), 99999)], 100001)).toEqual([
 				{ key: "p", detail },
 			])
@@ -484,15 +522,15 @@ it("future drop evidence blocks a fresh baseline and fails a probationer", () =>
 	const gate = setup()
 	gate.record(sample(Number.MAX_VALUE, 10, 1))
 	gate.record(sample(100001, 10))
-	expectDetail(gate.admit(placement(), [], 100001), "drops")
-	expect(gate.view([], [], 100001).sources[0]?.drops).toBe("dropping")
+	expectDetail(gate.admit(placement(), [], 100001), "unknown")
+	expect(gate.view([], [], 100001).sources[0]?.drops).toBe("unknown")
 	expect(gate.probation([running(placement(), 99999)], 100001)).toEqual([
 		{ key: "p", detail: "drops" },
 	])
 })
 
 it.each([false, true])(
-	"recovers clean baselines after a far-future sample with prior drops %j",
+	"a monotone barrier survives a far-future sample with prior drops %j",
 	dropped => {
 		const gate = setup()
 		if (dropped) gate.record(sample(100000, 10, 1))
@@ -504,12 +542,13 @@ it.each([false, true])(
 			cpu: { percent: 10 },
 			dropBytesPerSecond: null,
 		})
-		expect(gate.admit(placement(), [], 100001)).toMatchObject(
-			dropped ? { admit: false, detail: "drops" } : { admit: true },
-		)
+		expect(gate.admit(placement(), [], 100001)).toMatchObject({
+			admit: false,
+			detail: "unknown",
+		})
 		gate.forget("p")
 		gate.record(sample(160000, 10))
-		expect(gate.admit(placement(), [], 160000)).toEqual({ admit: true })
+		expectDetail(gate.admit(placement(), [], 160000), "unknown")
 	},
 )
 
@@ -518,7 +557,7 @@ it("uses arrival order and each baseline's timestamp for freshness and rates", (
 	gate.record(sample(100000, 95))
 	gate.record(sample(99999, 10))
 	expect(gate.view([], [], 100000).sources[0]).toMatchObject({
-		drops: "ok",
+		drops: "unknown",
 		dropBytesPerSecond: null,
 		cpu: { percent: 10 },
 	})
@@ -527,5 +566,130 @@ it("uses arrival order and each baseline's timestamp for freshness and rates", (
 	expect(gate.view([], [], 100000).sources[0]?.cpu.percent).toBeNull()
 	gate.forget("p")
 	gate.record(sample(100001, 10))
-	expect(gate.admit(placement(), [], 100001)).toEqual({ admit: true })
+	expectDetail(gate.admit(placement(), [], 100001), "unknown")
 })
+
+it("reordered observations invalidate rate continuity until two ordered samples", () => {
+	const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+	for (let at = 0; at <= 60000; at += 2000) gate.record(sample(at))
+	gate.record(sample(62000, null, 100))
+	gate.record(sample(61000))
+	expect(gate.view([], [], 62000).sources[0]?.dropBytesPerSecond).toBeNull()
+	gate.record(sample(64000))
+	expect(gate.view([], [], 64000).sources[0]?.dropBytesPerSecond).toBeNull()
+	gate.record(sample(66000, null, 100))
+	expect(gate.view([], [], 66000).sources[0]?.dropBytesPerSecond).toBe(50)
+})
+
+it("uses a valid malformed observation timestamp for the clear-window barrier", () => {
+	const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+	for (let at = 0; at <= 60000; at += 2000) gate.record(sample(at))
+	gate.record({
+		atMs: 65000,
+		cpuPercent: null,
+		sources: {},
+	} as EfficiencySample)
+	for (let at = 66000; at <= 124000; at += 2000) gate.record(sample(at))
+	expect(gate.view([], [], 124000).sources[0]?.drops).toBe("unknown")
+	gate.record(sample(126000))
+	expect(gate.admit(placement(), [], 126000)).toEqual({ admit: true })
+})
+
+it.each(["malformed", "missing", "reordered"] as const)(
+	"anchors a backdated %s barrier at the high-water timestamp",
+	kind => {
+		const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+		for (let at = 0; at <= 60000; at += 2000) gate.record(sample(at))
+		expect(gate.admit(placement(), [], 60000)).toEqual({ admit: true })
+		gate.record(
+			kind === "reordered"
+				? sample(56000)
+				: {
+						atMs: 0,
+						cpuPercent: 10,
+						sources:
+							kind === "missing"
+								? new Map()
+								: ({} as unknown as EfficiencySample["sources"]),
+					},
+		)
+		for (let at = 62000; at <= 118000; at += 2000) {
+			gate.record(sample(at))
+			gate.forget("p")
+			expect(gate.admit(placement(), [], at).admit).toBe(false)
+			expect(gate.view([], [], at).sources[0]?.drops).not.toBe("ok")
+		}
+		gate.record(sample(120000))
+		gate.forget("p")
+		expect(gate.admit(placement(), [], 120000)).toEqual({ admit: true })
+	},
+)
+
+it("retires absent source history after a clear window under churn", () => {
+	const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+	for (let i = 0; i < 1000; i++) {
+		gate.record({
+			atMs: i * 2000,
+			cpuPercent: 10,
+			sources: new Map([
+				[String(i), { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
+			]),
+		})
+		expect(gate.view([], [], i * 2000).sources.length).toBeLessThanOrEqual(31)
+	}
+	gate.record({
+		atMs: 2000000,
+		cpuPercent: 10,
+		sources: new Map([["0", { droppedBytesDelta: 0, droppedChunksDelta: 0 }]]),
+	})
+	expect(
+		gate.view([], [], 2000000).sources.find(s => s.sourceId === "0")?.drops,
+	).toBe("unknown")
+})
+
+it.each(["admit", "view", "probation"] as const)(
+	"a far-future sample keeps the gate closed and a %s query never lowers it",
+	query => {
+		const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+		for (let at = 0; at <= 60000; at += 2000) gate.record(sample(at))
+		expect(gate.admit(placement(), [], 60000).admit).toBe(true)
+		gate.record(sample(Number.MAX_VALUE))
+		gate.record(sample(62000))
+		if (query === "admit") gate.admit(placement(), [], 62000)
+		else if (query === "view") gate.view([], [], 62000)
+		else gate.probation([], 62000)
+		for (let at = 64000; at <= 182000; at += 2000) {
+			gate.record(sample(at))
+			gate.forget("p")
+			expect(gate.admit(placement(), [], at).admit).toBe(false)
+		}
+	},
+)
+
+it.each(["admit", "view", "probation"] as const)(
+	"a stale %s query never erases ordering or drop evidence",
+	query => {
+		const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+		for (let at = 0; at <= 60000; at += 2000) gate.record(sample(at))
+		gate.record(sample(62000, 10, 1))
+		for (let cycle = 0; cycle < 3; cycle++) {
+			if (query === "admit") gate.admit(placement(), [], 0)
+			else if (query === "view") gate.view([], [], 0)
+			else gate.probation([], 0)
+			for (let at = 2000; at <= 62000; at += 2000) gate.record(sample(at))
+			gate.forget("p")
+			expect(gate.admit(placement(), [], 62000).admit).toBe(false)
+		}
+		expect(
+			gate.probation(
+				[
+					{
+						...placement(),
+						admittedAtMs: 60000,
+					},
+				],
+				62000,
+			),
+		).toEqual([{ key: "p", detail: "drops" }])
+	},
+)

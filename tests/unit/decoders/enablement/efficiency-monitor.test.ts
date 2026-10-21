@@ -126,8 +126,14 @@ describe("efficiency monitor", () => {
 				droppedChunksTotal: 2,
 				[field]: 1,
 			})
-			expect(h.monitor.sampleNow().sources.get("a")).toEqual(unknown)
-			expect(h.monitor.sampleNow().sources.get("a")).toEqual(unknown)
+			expect(h.monitor.sampleNow().sources.get("a")).toEqual({
+				droppedBytesDelta: field === "droppedBytesTotal" ? null : 0,
+				droppedChunksDelta: field === "droppedChunksTotal" ? null : 0,
+			})
+			expect(h.monitor.sampleNow().sources.get("a")).toEqual({
+				droppedBytesDelta: field === "droppedBytesTotal" ? null : 0,
+				droppedChunksDelta: field === "droppedChunksTotal" ? null : 0,
+			})
 			h.tick()
 			expect(h.monitor.sampleNow().sources.get("a")).toEqual(zero)
 		},
@@ -159,8 +165,22 @@ describe("efficiency monitor", () => {
 							droppedChunksTotal: number
 						}),
 			)
-			expect(h.monitor.sampleNow().sources.get("a")).toEqual(unknown)
-			expect(h.monitor.sampleNow().sources.get("a")).toEqual(unknown)
+			expect(h.monitor.sampleNow().sources.get("a")).toEqual(
+				value === null
+					? unknown
+					: {
+							droppedBytesDelta: field === "droppedBytesTotal" ? null : 0,
+							droppedChunksDelta: field === "droppedChunksTotal" ? null : 0,
+						},
+			)
+			expect(h.monitor.sampleNow().sources.get("a")).toEqual(
+				value === null
+					? unknown
+					: {
+							droppedBytesDelta: field === "droppedBytesTotal" ? null : 0,
+							droppedChunksDelta: field === "droppedChunksTotal" ? null : 0,
+						},
+			)
 			h.tick()
 			expect(h.monitor.sampleNow().sources.get("a")).toEqual(zero)
 		}
@@ -282,7 +302,7 @@ describe("efficiency monitor", () => {
 			h.tick()
 			h.tick()
 		}).not.toThrow()
-		expect(h.onSample).toHaveBeenCalledTimes(2)
+		expect(h.onSample).toHaveBeenCalledTimes(4)
 		expect(h.onSample.mock.calls[1]![0].sources.get("a")).toEqual(unknown)
 	})
 })
@@ -298,7 +318,7 @@ describe("efficiency evidence retention", () => {
 			h.dropTotals.mockClear()
 			h.setNow(clock)
 			expect(() => h.tick()).not.toThrow()
-			expect(h.onSample).toHaveBeenCalledTimes(1)
+			expect(h.onSample).toHaveBeenCalledTimes(2)
 			expect(h.dropTotals).not.toHaveBeenCalled()
 			const bad = h.monitor.sampleNow()
 			expect(bad.atMs).toBeNaN()
@@ -324,6 +344,9 @@ describe("efficiency evidence retention", () => {
 		})
 		h.setNow(3000)
 		h.tick()
+		expect(
+			h.onSample.mock.calls.at(-1)![0].sources.get("a")?.droppedBytesDelta,
+		).toBe(100)
 		h.setNow(5000)
 		h.tick()
 		expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual({
@@ -488,15 +511,14 @@ describe("peek evidence retention", () => {
 			else h.dropTotals.mockReturnValueOnce(null)
 			h.setNow(3234)
 			h.tick()
-			// A reset back to the committed totals reads as a clean delta, so the held
-			// drop is merged in; an unreadable read keeps one counter null (unknown).
+			// Every positive held counter survives resets and unreadable reads.
 			expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual({
 				droppedBytesDelta: 100,
-				droppedChunksDelta: change === "counter reset" ? 1 : null,
+				droppedChunksDelta: 1,
 			})
 			expect(
 				gate.view([], [], 3234).sources.find(s => s.sourceId === "a")?.drops,
-			).toBe(change === "counter reset" ? "dropping" : "unknown")
+			).toBe("dropping")
 			// Fresh clean ticks: the held drop still enforces the clear window.
 			for (let t = 5234; t <= 13234; t += 2000) {
 				h.setNow(t)
@@ -504,7 +526,7 @@ describe("peek evidence retention", () => {
 			}
 			expect(
 				gate.view([], [], 13234).sources.find(s => s.sourceId === "a")?.drops,
-			).toBe("dropping")
+			).toBe(change === "counter reset" ? "dropping" : "unknown")
 			expect(gate.admit(placement, [], 13234).admit).toBe(false)
 		},
 	)
@@ -528,4 +550,264 @@ describe("peek evidence retention", () => {
 		expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual(zero)
 		expect(h.onSample.mock.calls.at(-1)![0].sources.get("b")).toEqual(zero)
 	})
+})
+
+describe("earned drop-free history regressions", () => {
+	const placement = {
+		key: "new#raw@a",
+		decoderId: "new",
+		sourceId: "a",
+		channelHz: null,
+		reach: "raw" as const,
+		origin: "band" as const,
+		primary: true,
+		costCores: 0.1,
+		sampleRateHz: 2400000,
+	}
+	const harness = () => {
+		const h = setup()
+		const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+		h.onSample.mockImplementation(s => gate.record(s))
+		h.setIds(["a"])
+		h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+		h.monitor.start()
+		const tick = (at: number) => {
+			h.setNow(at)
+			h.tick()
+		}
+		const blocked = (at: number) => {
+			gate.forget(placement.key)
+			expect(gate.admit(placement, [], at).admit).toBe(false)
+			expect(gate.view([], [], at).sources[0]?.drops).not.toBe("ok")
+		}
+		return { ...h, gate, tick, blocked }
+	}
+
+	it("re-baselining after an unreadable tick cannot establish drop-free history", () => {
+		const h = harness()
+		h.tick(2000)
+		h.totals.set("a", { droppedBytesTotal: 100, droppedChunksTotal: 1 })
+		h.dropTotals.mockReturnValueOnce(null)
+		h.tick(4000)
+		h.tick(6000)
+		h.tick(8000)
+		h.blocked(8000)
+		for (let at = 10000; at <= 64000; at += 2000) {
+			h.tick(at)
+			h.blocked(at)
+		}
+		h.tick(66000)
+		h.gate.forget(placement.key)
+		expect(h.gate.admit(placement, [], 66000)).toEqual({ admit: true })
+	})
+
+	it("delivers held drops once when the source is pruned, before acknowledging them", () => {
+		const h = harness()
+		h.tick(2000)
+		h.totals.set("a", { droppedBytesTotal: 100, droppedChunksTotal: 1 })
+		h.monitor.sampleNow()
+		h.setIds([])
+		h.tick(4000)
+		expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual({
+			droppedBytesDelta: 100,
+			droppedChunksDelta: 1,
+		})
+		expect(
+			h.gate.probation([{ ...placement, admittedAtMs: 2000 }], 4000),
+		).toEqual([{ key: placement.key, detail: "drops" }])
+		h.tick(6000)
+		expect(h.onSample.mock.calls.at(-1)![0].sources.has("a")).toBe(false)
+		h.setIds(["a"])
+		h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+		h.tick(8000)
+		h.tick(10000)
+		h.blocked(10000)
+	})
+
+	it.each(["peek", "tick"] as const)(
+		"acks only captured generations when a reentrant %s observes a drop",
+		reentry => {
+			const h = harness()
+			h.tick(2000)
+			h.onSample.mockImplementationOnce(s => {
+				h.gate.record(s)
+				h.totals.set("a", { droppedBytesTotal: 100, droppedChunksTotal: 1 })
+				if (reentry === "peek") h.monitor.sampleNow()
+				else h.tick(4000)
+				h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+			})
+			h.tick(4000)
+			expect(h.onSample).toHaveBeenCalledTimes(3)
+			expect(
+				h.onSample.mock.calls.at(-1)![0].sources.get("a")?.droppedBytesDelta,
+			).toBe(100)
+			h.tick(6000)
+			expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual({
+				droppedBytesDelta: 0,
+				droppedChunksDelta: 0,
+			})
+			expect(
+				h.gate.probation([{ ...placement, admittedAtMs: 2000 }], 6000),
+			).toEqual([{ key: placement.key, detail: "drops" }])
+			h.tick(8000)
+			h.blocked(8000)
+		},
+	)
+
+	it("retains a valid positive delta when the other counter is malformed", () => {
+		const h = harness()
+		h.tick(2000)
+		h.totals.set("a", { droppedBytesTotal: 100, droppedChunksTotal: NaN })
+		h.tick(4000)
+		expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual({
+			droppedBytesDelta: 100,
+			droppedChunksDelta: null,
+		})
+		expect(
+			h.gate.probation([{ ...placement, admittedAtMs: 2000 }], 4000),
+		).toEqual([{ key: placement.key, detail: "drops" }])
+		h.totals.set("a", { droppedBytesTotal: 100, droppedChunksTotal: 1 })
+		h.tick(6000)
+		h.tick(8000)
+		h.blocked(8000)
+	})
+})
+
+it("a peek-only prune invalidates a re-added source baseline", () => {
+	const h = setup()
+	h.monitor.start()
+	h.tick()
+	h.setIds(["b"])
+	h.monitor.sampleNow()
+	h.setIds(["a", "b"])
+	expect(h.monitor.sampleNow().sources.get("a")).toEqual(unknown)
+	h.setNow(3234)
+	h.tick()
+	expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual(unknown)
+	h.setNow(5234)
+	h.tick()
+	expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual(zero)
+})
+
+it("keeps independent baselines throughout repeated partial failures", () => {
+	const h = setup()
+	h.setIds(["a"])
+	h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+	h.monitor.start()
+	h.tick()
+	for (const [bytes, chunks, expectedBytes, expectedChunks] of [
+		[100, NaN, 100, null],
+		[200, NaN, 100, null],
+		[300, NaN, 100, null],
+		[300, 5, 0, null],
+		[300, 5, 0, 0],
+	]) {
+		h.totals.set("a", {
+			droppedBytesTotal: bytes!,
+			droppedChunksTotal: chunks!,
+		})
+		h.tick()
+		expect(h.onSample.mock.calls.at(-1)![0].sources.get("a")).toEqual({
+			droppedBytesDelta: expectedBytes,
+			droppedChunksDelta: expectedChunks,
+		})
+	}
+})
+
+it.each(["reentrant", "throw once", "throw twice"] as const)(
+	"closes an earned gate after %s delivery",
+	event => {
+		const h = setup()
+		h.setIds(["a"])
+		h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+		const gate = createEfficiencyGate({ budgetCores: 1.5, cpuGuardPercent: 90 })
+		h.onSample.mockImplementation(s => gate.record(s))
+		h.monitor.start()
+		for (let at = 0; at <= 60000; at += 2000) {
+			h.setNow(at)
+			h.tick()
+		}
+		expect(gate.view([], [], 60000).sources[0]?.drops).toBe("ok")
+		if (event === "reentrant")
+			h.onSample.mockImplementationOnce(s => {
+				gate.record(s)
+				h.totals.set("a", { droppedBytesTotal: 100, droppedChunksTotal: 1 })
+				h.monitor.sampleNow()
+				h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+			})
+		else {
+			h.onSample.mockImplementationOnce(() => {
+				throw new TypeError("delivery")
+			})
+			if (event === "throw twice")
+				h.onSample.mockImplementationOnce(() => {
+					throw new TypeError("delivery")
+				})
+		}
+		h.setNow(62000)
+		h.tick()
+		expect(
+			gate.view([], [], event === "throw twice" ? 66001 : 62000).sources[0]
+				?.drops,
+		).not.toBe("ok")
+	},
+)
+
+it("bounds every monitor map while 1000 fresh source ids are pruned", () => {
+	const maps: Map<unknown, unknown>[] = []
+	const NativeMap = Map
+	class TrackedMap<K, V> extends NativeMap<K, V> {
+		constructor(entries?: Iterable<readonly [K, V]> | null) {
+			super(entries)
+			maps.push(this)
+		}
+	}
+	vi.stubGlobal("Map", TrackedMap)
+	try {
+		let id = "0"
+		let at = 0
+		let tick: () => void = () => {}
+		const monitor = createEfficiencyMonitor({
+			sources: () => [id],
+			dropTotals: () => ({ droppedBytesTotal: 0, droppedChunksTotal: 0 }),
+			cpu: { normalisedPercent: 10 },
+			now: () => at,
+			setInterval: fn => {
+				tick = fn
+				return { cancel() {} }
+			},
+			onSample: () => {},
+		})
+		monitor.start()
+		for (let i = 0; i < 1000; i++) {
+			id = String(i)
+			at = i * 2000
+			tick()
+		}
+		expect(maps.every(map => map.size <= 1)).toBe(true)
+		monitor.stop()
+	} finally {
+		vi.unstubAllGlobals()
+	}
+})
+
+it("delivers chunk-only peek evidence after a throwing peek and reset", () => {
+	const h = setup()
+	h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+	h.monitor.start()
+	h.tick()
+	h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 1 })
+	expect(h.monitor.sampleNow().sources.get("a")?.droppedChunksDelta).toBe(1)
+	h.dropTotals.mockImplementationOnce(() => {
+		throw new TypeError("unreadable")
+	})
+	h.monitor.sampleNow()
+	h.totals.set("a", { droppedBytesTotal: 0, droppedChunksTotal: 0 })
+	h.setNow(3234)
+	h.tick()
+	h.setNow(5234)
+	h.tick()
+	expect(
+		h.onSample.mock.calls.slice(1).map(([s]) => s.sources.get("a")),
+	).toEqual([{ droppedBytesDelta: null, droppedChunksDelta: 1 }, zero])
 })
