@@ -5,6 +5,8 @@
  * releasing control to external tuner clients (e.g., SDR++ via TunerRelay).
  */
 
+import type { RatePolicy } from "./rate-policy-contract.js"
+import { safeErrorFields } from "../decoders/safe-error-fields.js"
 import { EventEmitter } from "node:events"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import { WaveKitError } from "../utils/errors.js"
@@ -22,6 +24,7 @@ import type {
 	TunerDirectSampling,
 	TunerControlMode,
 	TunerCommandOrigin,
+	TunerRatePolicyEventData,
 } from "@wavekit/api-types"
 
 /**
@@ -317,6 +320,7 @@ export interface TunerConnectSyncResult {
 }
 
 export interface TunerControllerEvents {
+	"rate-policy": (event: TunerRatePolicyEventData) => void
 	"state-changed": (sourceId: string, state: TunerState) => void
 	"command-sent": (
 		sourceId: string,
@@ -387,6 +391,39 @@ function stateFieldOf(cmd: number): TunerStateField | undefined {
 }
 
 export class TunerController extends EventEmitter {
+	private beforeOperatorRetune: RatePolicy["beforeOperatorRetune"] | null = null
+	private onOperatorSampleRate: RatePolicy["onOperatorSampleRate"] | null = null
+	private onRelayRetune: RatePolicy["onRelayRetune"] | null = null
+	private ratePolicyRecordFor: RatePolicy["recordFor"] | null = null
+
+	setBeforeOperatorRetune(
+		hook: RatePolicy["beforeOperatorRetune"] | null,
+	): void {
+		this.beforeOperatorRetune = hook
+	}
+
+	hasBeforeOperatorRetune(): boolean {
+		return this.beforeOperatorRetune !== null
+	}
+
+	setOnOperatorSampleRate(
+		hook: RatePolicy["onOperatorSampleRate"] | null,
+	): void {
+		this.onOperatorSampleRate = hook
+	}
+
+	setOnRelayRetune(hook: RatePolicy["onRelayRetune"] | null): void {
+		this.onRelayRetune = hook
+	}
+
+	setRatePolicyRecordFor(hook: RatePolicy["recordFor"] | null): void {
+		this.ratePolicyRecordFor = hook
+	}
+
+	emitRatePolicy(event: TunerRatePolicyEventData): void {
+		this.emit("rate-policy", event)
+	}
+
 	private readonly log: Logger
 	private readonly sourceManager: SourceManager
 	private readonly config: TunerControllerConfig
@@ -606,6 +643,16 @@ export class TunerController extends EventEmitter {
 		}
 
 		state.controlMode = mode
+		if (mode === "internal" && this.onRelayRetune) {
+			try {
+				this.onRelayRetune(sourceId, state.frequency)
+			} catch (err) {
+				this.log.warn(
+					{ sourceId, err: safeErrorFields(err) },
+					"Relay rate policy hook failed",
+				)
+			}
+		}
 		this.controlModeOrigins.set(sourceId, origin)
 		this.log.info({ sourceId, mode }, "Control mode changed")
 		this.emit("control-mode-changed", sourceId, mode)
@@ -842,6 +889,17 @@ export class TunerController extends EventEmitter {
 		state.lastCommandAt = now
 
 		if (updated) {
+			try {
+				if (command === RTL_TCP_COMMANDS.SET_FREQUENCY)
+					this.onRelayRetune?.(sourceId, value)
+				if (command === RTL_TCP_COMMANDS.SET_SAMPLE_RATE)
+					this.onOperatorSampleRate?.(sourceId)
+			} catch (err) {
+				this.log.warn(
+					{ sourceId, err: safeErrorFields(err) },
+					"Relay rate policy hook failed",
+				)
+			}
 			if (command === RTL_TCP_COMMANDS.SET_TEST_MODE) {
 				this.markWrittenNotAccepted(sourceId, command)
 			} else {
@@ -874,6 +932,19 @@ export class TunerController extends EventEmitter {
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("frequency", hz, VALIDATION.frequency)
+		if (opts.origin === "rest" && this.beforeOperatorRetune) {
+			await this.beforeOperatorRetune(sourceId, hz, opts)
+			await this.proveSampleRateForFrequency(sourceId, opts, hz)
+		}
+		await this.writeFrequency(sourceId, hz, opts, state)
+	}
+
+	private async writeFrequency(
+		sourceId: string,
+		hz: number,
+		opts: TunerWriteOptions,
+		state: TunerState,
+	): Promise<void> {
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz, opts)
 		state.frequency = hz
 		this.sourceManager.updateSourceCaps(sourceId, { centerFreq: hz })
@@ -961,6 +1032,7 @@ export class TunerController extends EventEmitter {
 		}
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz, opts)
 		state.sampleRate = hz
+		if (opts.origin === "rest") this.onOperatorSampleRate?.(sourceId)
 		try {
 			this.sourceManager.updateSourceCaps(sourceId, { sampleRate: hz })
 		} catch (err) {
@@ -1199,11 +1271,15 @@ export class TunerController extends EventEmitter {
 			this.setControlMode(sourceId, "internal")
 		}
 
-		// A declared-only or unknown centre/rate equal to the request is still written, so
-		// a bulk PUT can prove it (WG5 R2); a proven equal value is skipped as before.
-		// WG10 req 2.8: an operator frequency without a rate proves the held rate first.
-		if (updates.frequency !== undefined && updates.sampleRate === undefined)
+		const policyBulk =
+			opts.origin === "rest" && this.beforeOperatorRetune !== null
+		if (updates.frequency !== undefined && updates.sampleRate === undefined) {
+			if (policyBulk) {
+				await this.beforeOperatorRetune?.(sourceId, updates.frequency, opts)
+				this.emitStateChanged(sourceId)
+			}
 			await this.proveSampleRateForFrequency(sourceId, opts, updates.frequency)
+		}
 
 		const proof = this.fieldProof(sourceId)
 		const unproven = new Set<TunerStateField>([
@@ -1214,13 +1290,22 @@ export class TunerController extends EventEmitter {
 			updates.frequency !== undefined &&
 			(updates.frequency !== state.frequency || unproven.has("frequency"))
 		) {
-			await this.setFrequency(sourceId, updates.frequency, opts)
+			if (policyBulk)
+				await this.writeFrequency(sourceId, updates.frequency, opts, state)
+			else await this.setFrequency(sourceId, updates.frequency, opts)
 		}
 		if (
 			updates.sampleRate !== undefined &&
 			(updates.sampleRate !== state.sampleRate || unproven.has("sampleRate"))
 		) {
 			await this.setSampleRate(sourceId, updates.sampleRate, opts)
+		} else if (
+			updates.sampleRate !== undefined &&
+			opts.origin === "rest" &&
+			this.onOperatorSampleRate
+		) {
+			this.onOperatorSampleRate(sourceId)
+			this.emitStateChanged(sourceId)
 		}
 		if (updates.gainMode !== undefined && updates.gainMode !== state.gainMode) {
 			await this.setGainMode(sourceId, updates.gainMode, opts)
@@ -2030,8 +2115,10 @@ export class TunerController extends EventEmitter {
 		const { unknownFields, declaredOnlyFields } = this.fieldProof(
 			state.sourceId,
 		)
+		const ratePolicy = this.ratePolicyRecordFor?.(state.sourceId)
 		return {
 			...fields,
+			...(ratePolicy ? { ratePolicy } : {}),
 			tunerIfGain: state.tunerIfGain
 				? { ...state.tunerIfGain }
 				: state.tunerIfGain,
