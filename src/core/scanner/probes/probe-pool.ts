@@ -1237,10 +1237,14 @@ export class ProbePool extends EventEmitter {
 	}
 
 	private isStrong(req: ProbeRequest, holder: ProbeRecord): boolean {
+		const candidateSnr = req.admission.snrDb
+		const heldSnr = holder.req.admission.snrDb
+		// Unknown strength cannot establish the margin needed for early pre-emption.
 		return (
-			req.admission.snrDb >= JOB_PROBE_STRONG_SNR_DB ||
-			req.admission.snrDb >=
-				holder.req.admission.snrDb + JOB_PROBE_STRONG_DELTA_DB
+			Number.isFinite(candidateSnr) &&
+			Number.isFinite(heldSnr) &&
+			candidateSnr >=
+				Math.max(JOB_PROBE_STRONG_SNR_DB, heldSnr + JOB_PROBE_STRONG_DELTA_DB)
 		)
 	}
 

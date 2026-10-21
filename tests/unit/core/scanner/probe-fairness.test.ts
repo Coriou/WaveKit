@@ -51,10 +51,20 @@ describe("live job slot fairness", () => {
 	})
 
 	it.each([
-		[20, 19, true],
-		[19.999, 19, false],
-		[15, 5, true],
-		[14.999, 5, false],
+		[20, 19, false],
+		[15, 5, false],
+		[20, 5, true],
+		[19.9, 5, false],
+		[25, 15, true],
+		[24.9, 15, false],
+		[20, 40, false],
+		[50, 40, true],
+		[54, 5, true],
+		[58, 5, true],
+		[NaN, 5, false],
+		[Infinity, 5, false],
+		[58, NaN, false],
+		[58, undefined as unknown as number, false],
 	])(
 		"strong keyup %i dB against %i dB respects late entry",
 		async (snrDb, held, preempts) => {
@@ -108,7 +118,7 @@ describe("live job slot fairness", () => {
 					probeRequest({
 						trackId: "waiter",
 						gatePassedAt: began,
-						admission: { kind: "undecoded", snrDb: 15 },
+						admission: { kind: "undecoded", snrDb: 20 },
 					}),
 				)
 				h.clock.now = began + 1800
@@ -207,7 +217,7 @@ describe("live job slot fairness", () => {
 				probeRequest({
 					trackId: "waiter",
 					gatePassedAt: began + 500,
-					admission: { kind: "undecoded", snrDb: kind === "strong" ? 15 : 6 },
+					admission: { kind: "undecoded", snrDb: kind === "strong" ? 20 : 6 },
 				}),
 			)
 			const hold = kind === "strong" ? 1800 : 6000
@@ -314,7 +324,7 @@ describe("live job slot fairness", () => {
 	it("reserves the strong keyup handoff ahead of an older louder waiter", async () => {
 		await fc.assert(
 			fc.asyncProperty(
-				fc.integer({ min: 0, max: 9 }),
+				fc.integer({ min: 0, max: 48 }),
 				fc.integer({ min: 1, max: 9 }),
 				async (held, extra) => {
 					const h = poolHarness()
@@ -329,14 +339,17 @@ describe("live job slot fairness", () => {
 					h.pool.request(
 						probeRequest({
 							trackId: "older",
-							admission: { kind: "undecoded", snrDb: held + 10 + extra },
+							admission: {
+								kind: "undecoded",
+								snrDb: Math.max(20, held + 10) + extra,
+							},
 						}),
 					)
 					h.pool.request(
 						probeRequest({
 							trackId: "keyup",
 							gatePassedAt: began,
-							admission: { kind: "undecoded", snrDb: held + 10 },
+							admission: { kind: "undecoded", snrDb: Math.max(20, held + 10) },
 						}),
 					)
 					h.clock.now = began + 1800
