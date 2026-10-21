@@ -229,6 +229,8 @@ interface DecoderState {
 	stopping?: boolean
 	workerStop?: Promise<void>
 	workerStart?: Promise<void>
+	workerTermination?: Promise<void>
+	workerGeneration?: number
 	removalPending?: boolean
 	admittedAtMs?: number
 	admission?: AdmissionDecision
@@ -1666,6 +1668,8 @@ export class DecoderManager extends EventEmitter {
 		const keepFailureAccounting = state.keepFailureAccounting
 		state.keepFailureAccounting = false
 
+		if (state.owner === "placement" && state.workerTermination)
+			await state.workerTermination.catch(() => {})
 		if (state.decoder.getStatus().running) {
 			this.log.warn({ decoderId: id }, "Decoder already running")
 			return
@@ -2291,7 +2295,10 @@ export class DecoderManager extends EventEmitter {
 			stopFailed = true
 			stopError = err
 		}
-		if (state.owner === "placement" && state.decoder.getStatus().running)
+		if (
+			state.owner === "placement" &&
+			(state.decoder.getStatus().running || state.workerStart || state.stopping)
+		)
 			throw (
 				stopError ??
 				new WaveKitError(
@@ -2484,7 +2491,7 @@ export class DecoderManager extends EventEmitter {
 		// Handle stopped event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("stopped", () => {
-			if (!decoder.getStatus().running) {
+			if (!decoder.getStatus().running && !state.workerStart) {
 				delete state.stopping
 				if (state.removalPending) this.finalizeRemoval(state)
 			}
@@ -2538,7 +2545,7 @@ export class DecoderManager extends EventEmitter {
 		signal: string | null,
 	): void {
 		const { decoder } = state
-		if (!decoder.getStatus().running) {
+		if (!decoder.getStatus().running && !state.workerStart) {
 			delete state.stopping
 			if (state.removalPending) this.finalizeRemoval(state)
 		}
@@ -4070,37 +4077,90 @@ export class DecoderManager extends EventEmitter {
 	private stopPlacement(state: DecoderState): Promise<void> {
 		if (state.owner !== "placement") return state.decoder.stop()
 		if (state.workerStop) return state.workerStop
-		// Install the shared promise before invoking adapter code or event handlers.
-		state.workerStop = Promise.resolve().then(async () => {
-			// Startup may create a process after cancellation; stop that same run.
-			await state.workerStart?.catch(() => {})
-			if (!state.decoder.getStatus().running) return
-			try {
-				await state.decoder.stop()
-			} catch (error) {
-				if (state.decoder.getStatus().running) {
-					state.stopping = true
-					try {
-						if (state.decoder instanceof BaseDecoder)
-							await BaseDecoder.prototype.stop.call(state.decoder)
-						else if (state.decoder instanceof NetworkProducerDecoder)
-							await NetworkProducerDecoder.prototype.stop.call(state.decoder)
-						else if (state.decoder instanceof ExternalSdrDecoder)
-							await ExternalSdrDecoder.prototype.stop.call(state.decoder)
-						else await state.decoder.stop()
-					} catch (escalationError) {
-						this.log.warn(
-							{
-								decoderId: state.config.id,
-								err: safeErrorFields(escalationError),
-							},
-							"Placement worker escalation failed",
-						)
+		const generation = state.workerGeneration ?? 0
+		const starting = state.workerStart
+		const current = () => (state.workerGeneration ?? 0) === generation
+		let stoppedPid: number | undefined
+		let stopAttempt: Promise<void> | undefined
+		const stopProcess = (): Promise<void> => {
+			if (!current() || !state.decoder.getStatus().running)
+				return Promise.resolve()
+			const pid = state.decoder.getStatus().pid
+			if (stopAttempt && stoppedPid === pid) return stopAttempt
+			stoppedPid = pid
+			stopAttempt = Promise.resolve().then(async () => {
+				if (!current()) return
+				try {
+					await state.decoder.stop()
+				} catch (error) {
+					if (current() && state.decoder.getStatus().running) {
+						state.stopping = true
+						try {
+							if (state.decoder instanceof BaseDecoder)
+								await BaseDecoder.prototype.stop.call(state.decoder)
+							else if (state.decoder instanceof NetworkProducerDecoder)
+								await NetworkProducerDecoder.prototype.stop.call(state.decoder)
+							else if (state.decoder instanceof ExternalSdrDecoder)
+								await ExternalSdrDecoder.prototype.stop.call(state.decoder)
+							else await state.decoder.stop()
+						} catch (escalationError) {
+							this.log.warn(
+								{
+									decoderId: state.config.id,
+									err: safeErrorFields(escalationError),
+								},
+								"Placement worker escalation failed",
+							)
+						}
 					}
+					throw error
 				}
-				throw error
-			}
+			})
+			return stopAttempt
+		}
+		// Install ownership before adapter code can emit events.
+		const termination = Promise.resolve().then(async () => {
+			const immediate = stopProcess()
+			const late = Promise.resolve(starting)
+				.catch(() => {})
+				.then(stopProcess)
+			const results = await Promise.allSettled([immediate, late])
+			for (const result of results)
+				if (result.status === "rejected") throw result.reason
 		})
+		state.workerTermination = termination
+		let timer: ReturnType<typeof setTimeout>
+		const bounded = new Promise<void>(resolve => {
+			// Match GRACEFUL_STOP_TIMEOUT in base-decoder.ts and the other process bases.
+			timer = setTimeout(() => {
+				if (current()) {
+					state.stopping = true
+					this.log.warn(
+						{
+							decoderId: state.parentId ?? state.config.id,
+							placementKey: state.placement?.key,
+							reasonCode: "worker-shutdown-incomplete",
+						},
+						"Placement worker shutdown incomplete",
+					)
+				}
+				resolve()
+			}, 5000)
+		})
+		state.workerStop = Promise.race([termination, bounded]).finally(() => {
+			clearTimeout(timer)
+		})
+		void termination
+			.finally(() => {
+				if (!current()) return
+				if (!state.decoder.getStatus().running && !state.workerStart) {
+					delete state.stopping
+					delete state.workerStop
+					delete state.workerTermination
+					if (state.removalPending) this.finalizeRemoval(state)
+				}
+			})
+			.catch(() => {})
 		return state.workerStop
 	}
 
@@ -4113,6 +4173,8 @@ export class DecoderManager extends EventEmitter {
 		state: DecoderState,
 		canStart: () => boolean = () => true,
 	): Promise<WireOutcome> {
+		if (state.owner === "placement" && state.workerTermination)
+			await state.workerTermination.catch(() => {})
 		if (state.stopping) return { wired: false, superseded: true }
 		const gate = this.config.enablement?.gate
 		const generation = state.rateGeneration
@@ -4158,8 +4220,17 @@ export class DecoderManager extends EventEmitter {
 				}
 				state.admittedAtMs = now
 			}
-			delete state.workerStop
 			if (state.owner === "placement") {
+				// Wiring can yield while a stop takes ownership of the preceding run.
+				if (state.workerTermination)
+					await state.workerTermination.catch(() => {})
+				if (
+					state.stopping ||
+					!canStart() ||
+					(gate && state.placement && !this.stillWanted(state, generation))
+				)
+					return { wired: false, superseded: true }
+				state.workerGeneration = (state.workerGeneration ?? 0) + 1
 				const starting = Promise.resolve().then(() => state.decoder.start())
 				state.workerStart = starting
 				try {

@@ -26,7 +26,10 @@ it.each([
 	"concurrent",
 	"pending stop",
 	"pending concurrent",
+	"pending timeout stop",
+	"pending timeout destroy",
 	"restart",
+	"queued restart",
 	"scanner hold",
 	"probation",
 	"exit only",
@@ -176,28 +179,53 @@ it.each([
 	}
 	const attempts = vi.spyOn(decoder, "stop")
 	const operations =
-		path === "scanner hold"
-			? [manager.holdSource("rtl", "tuner-scanning", "scan")]
-			: path === "probation" && instances.get(worker.key)?.failStop
-				? []
-				: path === "concurrent" || path === "pending concurrent"
-					? [
-							manager.stopDecoder("dec"),
-							manager.removeDecoder(worker.key),
-							manager.destroy(),
-						]
-					: [manager.stopDecoder(path === "restart" ? worker.key : "dec")]
+		path === "pending timeout destroy"
+			? [manager.destroy()]
+			: path === "scanner hold"
+				? [manager.holdSource("rtl", "tuner-scanning", "scan")]
+				: path === "probation" && instances.get(worker.key)?.failStop
+					? []
+					: path === "concurrent" || path === "pending concurrent"
+						? [
+								manager.stopDecoder("dec"),
+								manager.removeDecoder(worker.key),
+								manager.destroy(),
+							]
+						: [
+								manager.stopDecoder(
+									path.includes("restart") ? worker.key : "dec",
+								),
+							]
 	let settled = false
 	const stopping = Promise.allSettled(operations).then(results => {
 		settled = true
 		return results
 	})
+	let restarting: Promise<void> | undefined
+	if (path === "queued restart") {
+		restarting = manager.startDecoder(worker.key)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(decoder.getStatus().pid).toBe(workerPid)
+	}
 	if (path.startsWith("pending")) {
 		await vi.advanceTimersByTimeAsync(1)
 		expect(settled).toBe(false)
 		expect(attempts).not.toHaveBeenCalled()
 		expect(manager.getDecoder(worker.key)).toBe(decoder)
 		expect(decoder.listenerCount("exit")).toBeGreaterThan(0)
+		if (path.includes("timeout")) {
+			await vi.advanceTimersByTimeAsync(5000)
+			expect(settled).toBe(true)
+			expect(manager.getDecoder(worker.key)).toBe(decoder)
+			expect(decoder.listenerCount("exit")).toBeGreaterThan(0)
+			expect(
+				(
+					manager as unknown as {
+						decoders: Map<string, { stopping?: boolean }>
+					}
+				).decoders.get(worker.key)?.stopping,
+			).toBe(true)
+		}
 		releaseStart()
 		await vi.advanceTimersByTimeAsync(1)
 	}
@@ -215,6 +243,14 @@ it.each([
 	await vi.advanceTimersByTimeAsync(5000)
 	await stopping
 	await starting
+	if (path === "queued restart") {
+		await restarting
+		const newPid = decoder.getStatus().pid!
+		expect(newPid).not.toBe(workerPid)
+		expect(kill.mock.calls.some(([pid]) => pid === -newPid)).toBe(false)
+		decoder.failStop = false
+		await manager.stopDecoder(worker.key)
+	}
 	if (path === "exit only") {
 		expect(manager.getDecoder(worker.key)).toBe(decoder)
 		const child = children.get(workerPid)!
@@ -226,14 +262,18 @@ it.each([
 	if (path !== "exit only")
 		expect(kill).toHaveBeenCalledWith(-workerPid, "SIGKILL")
 	expect(decoder.getStatus().running).toBe(false)
-	if (path !== "scanner hold" && path !== "probation" && path !== "restart")
+	if (
+		path !== "scanner hold" &&
+		path !== "probation" &&
+		!path.includes("restart")
+	)
 		expect(manager.getDecoder(worker.key)).toBeUndefined()
 	for (let evaluation = 0; evaluation < 3; evaluation++) {
 		manager.notifyBandplansChanged()
 		await vi.advanceTimersByTimeAsync(1)
 	}
 	await vi.advanceTimersByTimeAsync(5000)
-	expect(attempts).toHaveBeenCalledTimes(1)
+	expect(attempts).toHaveBeenCalledTimes(path === "queued restart" ? 2 : 1)
 	expect(
 		kill.mock.calls.filter(
 			([pid, signal]) => pid === -workerPid && signal === "SIGTERM",
