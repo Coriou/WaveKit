@@ -67,6 +67,10 @@ it.each([
 			Object.defineProperty(child, "pid", { value: ++nextPid })
 			children.set(nextPid, child)
 			this.process = child
+			child.on("exit", (code, signal) => {
+				if (this.process === child) this.process = null
+				this.emit("exit", code, signal)
+			})
 			this.emit("started")
 		}
 		override async stop() {
@@ -168,15 +172,7 @@ it.each([
 		}
 		return true
 	})
-	if (path === "exit only") {
-		const original = BaseDecoder.prototype.stop
-		vi.spyOn(BaseDecoder.prototype, "stop").mockImplementation(async function (
-			this: BaseDecoder,
-		) {
-			if (this === decoder) throw new Error("escalation failed")
-			await original.call(this)
-		})
-	}
+
 	const attempts = vi.spyOn(decoder, "stop")
 	const operations =
 		path === "pending timeout destroy"
@@ -231,8 +227,7 @@ it.each([
 	}
 	if (path === "probation") await vi.advanceTimersByTimeAsync(2500)
 	await vi.advanceTimersByTimeAsync(1)
-	if (path !== "exit only")
-		expect(kill).toHaveBeenCalledWith(-workerPid, "SIGTERM")
+	expect(kill).toHaveBeenCalledWith(-workerPid, "SIGTERM")
 	expect(decoder.getStatus().running).toBe(true)
 	expect(manager.getDecoder(worker.key)).toBe(decoder)
 	expect(decoder.listenerCount("exit")).toBeGreaterThan(0)
@@ -255,7 +250,7 @@ it.each([
 		expect(manager.getDecoder(worker.key)).toBe(decoder)
 		const child = children.get(workerPid)!
 		Object.defineProperty(child, "signalCode", { value: "SIGKILL" })
-		// Only the adapter exit is delivered after both stop attempts failed.
+		// The adapter confirms exit after the signal did not stop its process.
 		Object.defineProperty(decoder, "process", { value: null, writable: true })
 		decoder.emit("exit", null, "SIGKILL")
 	}
@@ -278,12 +273,12 @@ it.each([
 		kill.mock.calls.filter(
 			([pid, signal]) => pid === -workerPid && signal === "SIGTERM",
 		),
-	).toHaveLength(path === "exit only" ? 0 : 1)
+	).toHaveLength(1)
 	expect(
 		kill.mock.calls.filter(
 			([pid, signal]) => pid === -workerPid && signal === "SIGKILL",
 		),
-	).toHaveLength(path === "exit only" ? 0 : 1)
+	).toHaveLength(1)
 	if (path === "restart") {
 		decoder.failStop = false
 		await manager.startDecoder(worker.key)

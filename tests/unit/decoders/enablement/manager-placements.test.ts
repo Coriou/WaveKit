@@ -556,10 +556,15 @@ it("a failing worker stop still stops the other workers and the primary", async 
 	const [failing, other] = workers.map(([, decoder]) => decoder)
 	if (!failing || !other) throw new Error("workers missing")
 	vi.spyOn(failing, "stop").mockRejectedValueOnce(new Error("stop failed"))
-	await expect(f.manager.stopDecoder("dec")).rejects.toThrow("stop failed")
-	expect(failing.running).toBe(false)
-	expect(failing.stop).toHaveBeenCalledTimes(2)
-	expect(f.manager.getDecoder(workers[0]![0])).toBeUndefined()
+	const stopping = expect(f.manager.stopDecoder("dec")).rejects.toThrow(
+		"stop failed",
+	)
+	await vi.advanceTimersByTimeAsync(5000)
+	await stopping
+	expect(failing.running).toBe(true)
+	expect(failing.stop).toHaveBeenCalledTimes(1)
+	expect(f.manager.getDecoder(workers[0]![0])).toBe(failing)
+	failing.crash()
 	expect(other.running).toBe(false)
 	expect(f.instances.get("dec")?.running).toBe(false)
 	expect(f.manager.getStatus("dec")?.desiredRunning).toBe(false)
@@ -589,7 +594,11 @@ it("a worker still alive after failed escalation stays tracked until exit", asyn
 		.spyOn(decoder, "stop")
 		.mockRejectedValueOnce(new Error("first stop"))
 		.mockRejectedValueOnce(new Error("second stop"))
-	await expect(f.manager.stopDecoder("dec")).rejects.toThrow("first stop")
+	const stopping = expect(f.manager.stopDecoder("dec")).rejects.toThrow(
+		"first stop",
+	)
+	await vi.advanceTimersByTimeAsync(5000)
+	await stopping
 	expect(decoder.running).toBe(true)
 	expect(f.manager.getDecoder(worker.key)).toBe(decoder)
 	expect(decoder.listenerCount("exit")).toBeGreaterThan(0)
@@ -597,7 +606,11 @@ it("a worker still alive after failed escalation stays tracked until exit", asyn
 	expect(view.mock.calls.at(-1)?.[0].map(item => item.key)).toContain(
 		worker.key,
 	)
-	await expect(f.manager.destroy()).rejects.toThrow("first stop")
+	const destroying = expect(f.manager.destroy()).rejects.toThrow(
+		"Placement worker is still running",
+	)
+	await vi.advanceTimersByTimeAsync(5000)
+	await destroying
 	expect(stop).toHaveBeenCalledTimes(2)
 	decoder.crash()
 	await f.manager.destroy()

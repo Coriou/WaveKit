@@ -3,6 +3,7 @@ import { PassThrough } from "node:stream"
 import { afterEach, expect, it, vi } from "vitest"
 import pino from "pino"
 import fc from "fast-check"
+import type { PlacementLifecycle } from "../../../../src/decoders/placement-lifecycle.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
@@ -832,4 +833,343 @@ it("operator stop during placement startup cannot leave a late process running",
 	pending.resolve()
 	await starting
 	expect(decoder.running).toBe(false)
+})
+
+it("pending adapter starts retain their budget after desire changes", async () => {
+	const gate = sampledGate(0.14)
+	const f = setup("rate-test", gate)
+	f.create("a")
+	f.create("b")
+	f.plan([f.place("a", 162_000_000), f.place("b", 162_025_000)])
+	const pending = deferred()
+	f.instances.get("a")!.startGate = pending
+	const starting = f.manager.startDecoder("a")
+	await vi.advanceTimersByTimeAsync(1)
+	await f.manager.stopDecoder("a")
+	const internal = f.manager as unknown as {
+		decoders: Map<
+			string,
+			{
+				lifecycle: PlacementLifecycle
+				placement: WantedPlacement
+				desiredRunning: boolean
+				intentionallyStopped: boolean
+			}
+		>
+		startPlacement: (state: unknown) => Promise<unknown>
+	}
+	const restarting = internal.decoders.get("a")!.lifecycle.request("running")
+	await vi.advanceTimersByTimeAsync(1)
+	const b = internal.decoders.get("b")!
+	b.placement = f.place("b", 162_025_000)
+	b.desiredRunning = true
+	await internal.startPlacement(b)
+	expect(f.instances.get("b")!.starts).toBe(0)
+	expect(
+		vi
+			.mocked(gate.admit)
+			.mock.calls.at(-1)![1]
+			.map(p => p.key),
+	).toContain(f.place("a", 162_000_000).key)
+	pending.resolve()
+	await vi.advanceTimersByTimeAsync(1)
+	await Promise.allSettled([starting, restarting])
+})
+
+it.each(["resolve", "never"] as const)(
+	"bounds a %s stop and accounts for its late exit",
+	async result => {
+		const gate = fakeGate()
+		const f = setup("rate-test", gate)
+		f.create("a")
+		f.plan([f.place("a", 162_000_000)])
+		await f.manager.startAll()
+		const decoder = f.instances.get("a")!
+		const kill = vi.spyOn(process, "kill").mockReturnValue(true)
+		const status = decoder.getStatus.bind(decoder)
+		vi.spyOn(decoder, "getStatus").mockImplementation(() => ({
+			...status(),
+			pid: 123456,
+		}))
+		vi.spyOn(decoder, "stop").mockImplementation(() =>
+			result === "resolve" ? Promise.resolve() : new Promise(() => {}),
+		)
+		const internal = f.manager as unknown as {
+			decoders: Map<
+				string,
+				{
+					lifecycle: PlacementLifecycle
+				}
+			>
+			runningPlacements: () => unknown[]
+		}
+		try {
+			const stopping = f.manager.stopDecoder("a").catch(() => {})
+			await vi.advanceTimersByTimeAsync(5000)
+			await stopping
+			const actor = internal.decoders.get("a")!.lifecycle
+			expect(actor.pending).toBe(false)
+			expect(actor.actual).toBe("stopping-failed")
+			expect(kill).toHaveBeenCalledExactlyOnceWith(-123456, "SIGKILL")
+			expect(internal.runningPlacements()).toHaveLength(1)
+			const retry = f.manager.stopDecoder("a").catch(() => {})
+			await vi.advanceTimersByTimeAsync(5000)
+			await retry
+			expect(decoder.stop).toHaveBeenCalledTimes(2)
+			expect(kill).toHaveBeenCalledTimes(2)
+			decoder.running = false
+			decoder.emit("exit", 0, "SIGKILL")
+			await vi.advanceTimersByTimeAsync(0)
+			expect(actor.actual).toBe("idle")
+			expect(internal.runningPlacements()).toHaveLength(0)
+		} finally {
+			kill.mockRestore()
+		}
+	},
+)
+
+it.each([false, true])(
+	"confirmed exit cancels a hanging stop deadline during destroy: %s",
+	async destroying => {
+		const f = setup("rate-test", fakeGate())
+		f.create("a")
+		f.plan([f.place("a", 162_000_000)])
+		await f.manager.startAll()
+		const decoder = f.instances.get("a")!
+		vi.spyOn(decoder, "stop").mockImplementation(() => new Promise(() => {}))
+		const baselineTimers = vi.getTimerCount()
+		const stopping = destroying
+			? f.manager.destroy()
+			: f.manager.stopDecoder("a")
+		await vi.advanceTimersByTimeAsync(0)
+		decoder.running = false
+		decoder.emit("exit", 0, "SIGTERM")
+		await vi.advanceTimersByTimeAsync(0)
+		await stopping
+		expect(vi.getTimerCount()).toBe(destroying ? 0 : baselineTimers)
+		await f.manager.destroy()
+		expect(vi.getTimerCount()).toBe(0)
+	},
+)
+
+// Feature: decoder-enablement, Property 12: Placement lifecycle is serial
+// Validates: Requirements 2.5, 3.7, 4.1, 4.2, 4.3, 11.3
+it("manager serializes generated desires with independent adapter events", async () => {
+	await fc.assert(
+		fc.asyncProperty(
+			fc.record({
+				admit: fc.boolean(),
+				desires: fc.array(
+					fc.record({
+						running: fc.boolean(),
+						appearance: fc.boolean(),
+						start: fc.constantFrom("resolve", "reject", "never"),
+						stop: fc.constantFrom("resolve", "reject", "never"),
+						exit: fc.boolean(),
+						lateExit: fc.boolean(),
+						elapsed: fc.integer({ min: 0, max: 5100 }),
+					}),
+					{ minLength: 1, maxLength: 20 },
+				),
+				appearance: fc.boolean(),
+				startResult: fc.constantFrom("resolve", "reject", "never"),
+				stopResult: fc.constantFrom("resolve", "reject", "never"),
+				exit: fc.boolean(),
+				remove: fc.boolean(),
+				delay: fc.integer({ min: 0, max: 6000 }),
+			}),
+			async scenario => {
+				const gate = fakeGate()
+				const f = setup("rate-test", gate)
+				f.create("a")
+				const placement = f.place("a", 162_000_000)
+				f.plan([placement])
+				const decoder = f.instances.get("a")!
+				const internal = f.manager as unknown as {
+					decoders: Map<
+						string,
+						{
+							lifecycle: PlacementLifecycle
+							placement: WantedPlacement
+							desiredRunning: boolean
+							intentionallyStopped: boolean
+						}
+					>
+					startPlacement: (state: unknown) => Promise<unknown>
+					stopPlacement: (state: unknown) => Promise<void>
+					runningPlacements: () => Array<{ key: string }>
+				}
+				const state = internal.decoders.get("a")!
+				state.placement = placement
+				state.desiredRunning = true
+				const processes = new Set<number>()
+				const appearances: number[] = []
+				const exits: number[] = []
+				const admissionGenerations: number[] = []
+				let nextProcess = 0
+				const appear = () => {
+					const process = appearances.shift()
+					if (process === undefined) return
+					processes.add(process)
+					exits.push(process)
+					decoder.running = processes.size > 0
+					decoder.emit("started")
+				}
+				const exit = (late: boolean) => {
+					const process = late ? exits[0] : exits.pop()
+					if (process === undefined) return
+					processes.delete(process)
+					decoder.running = processes.size > 0
+					decoder.emit("exit", 0, "SIGTERM")
+				}
+				const starts: Array<ReturnType<typeof deferred> & { process: number }> =
+					[]
+				const stops: ReturnType<typeof deferred>[] = []
+				const settleStart = (result: string) => {
+					if (result === "never") return
+					const pending = starts.shift()
+					if (!pending) return
+					// A settled spawn with no process confirms that attempt has ended.
+					const queued = appearances.indexOf(pending.process)
+					if (queued >= 0) appearances.splice(queued, 1)
+					if (result === "resolve") pending.resolve()
+					else pending.reject(new Error("start failed"))
+				}
+
+				vi.mocked(gate.admit).mockImplementation((_p, _running, now) => {
+					if (scenario.admit) {
+						admissionGenerations.push(state.lifecycle.runGeneration)
+						return { admit: true }
+					}
+					return { admit: false, detail: "budget", retryAtMs: now + 300000 }
+				})
+				vi.spyOn(decoder, "start").mockImplementation(() => {
+					expect(vi.mocked(gate.admit).mock.results.at(-1)?.value).toEqual({
+						admit: true,
+					})
+					expect(admissionGenerations).toContain(state.lifecycle.runGeneration)
+					appearances.push(++nextProcess)
+					const pending = deferred()
+					starts.push({ ...pending, process: nextProcess })
+					return pending.promise
+				})
+				vi.spyOn(decoder, "stop").mockImplementation(() => {
+					const pending = deferred()
+					stops.push(pending)
+					return pending.promise
+				})
+				const requests: Promise<unknown>[] = []
+				let settled = 0
+				const track = (promise: Promise<unknown>) => {
+					requests.push(
+						promise
+							.catch(() => {})
+							.finally(() => {
+								settled++
+							}),
+					)
+				}
+				track(internal.startPlacement(state))
+				await vi.advanceTimersByTimeAsync(1)
+				for (const command of scenario.desires) {
+					const running = command.running
+					state.desiredRunning = running
+					state.intentionallyStopped = !running
+					track(
+						running
+							? internal.startPlacement(state)
+							: internal.stopPlacement(state),
+					)
+					await vi.advanceTimersByTimeAsync(0)
+					if (command.appearance) appear()
+					settleStart(command.start)
+					if (command.stop === "resolve") stops.shift()?.resolve()
+					if (command.stop === "reject")
+						stops.shift()?.reject(new Error("stop failed"))
+					if (command.exit) exit(command.lateExit)
+					await vi.advanceTimersByTimeAsync(command.elapsed)
+					expect(processes.size).toBeLessThanOrEqual(1)
+					if (starts.length && !decoder.running)
+						expect(internal.runningPlacements().map(p => p.key)).toContain(
+							placement.key,
+						)
+				}
+				const lastDesired = scenario.remove
+					? "stopped"
+					: scenario.desires.at(-1)?.running
+						? "running"
+						: "stopped"
+				if (scenario.remove) track(f.manager.removeDecoder("a"))
+				await vi.advanceTimersByTimeAsync(scenario.delay)
+				if (scenario.appearance) appear()
+				settleStart(scenario.startResult)
+				await vi.advanceTimersByTimeAsync(0)
+				if (scenario.stopResult === "resolve") stops.shift()?.resolve()
+				if (scenario.stopResult === "reject")
+					stops.shift()?.reject(new Error("stop failed"))
+				if (scenario.exit) exit(false)
+				await vi.advanceTimersByTimeAsync(5001)
+				expect(settled).toBe(requests.length)
+				await Promise.all(requests)
+				expect(processes.size).toBeLessThanOrEqual(1)
+				if (scenario.admit) expect(state.lifecycle.desired).toBe(lastDesired)
+				else expect(decoder.running).toBe(false)
+				if (processes.size || starts.length)
+					expect(internal.runningPlacements().map(p => p.key)).toContain(
+						placement.key,
+					)
+				if (lastDesired === "stopped" && processes.size)
+					expect(state.lifecycle.actual).toBe("stopping-failed")
+				if (
+					lastDesired === "running" &&
+					processes.size &&
+					!state.lifecycle.pending
+				)
+					expect(["running", "stopping-failed"]).toContain(
+						state.lifecycle.actual,
+					)
+				if (!processes.size && !starts.length)
+					expect(state.lifecycle.actual).toBe("idle")
+				// Complete every retained and future operation without changing the last desire.
+				vi.mocked(gate.admit).mockImplementation(() => {
+					admissionGenerations.push(state.lifecycle.runGeneration)
+					return { admit: true }
+				})
+				delete (state as typeof state & { admission?: unknown }).admission
+				track(
+					lastDesired === "running"
+						? internal.startPlacement(state)
+						: internal.stopPlacement(state),
+				)
+				for (let turn = 0; turn < 12; turn++) {
+					await vi.advanceTimersByTimeAsync(2500)
+					while (appearances.length) appear()
+					while (starts.length) settleStart("resolve")
+					if (stops.length) {
+						processes.clear()
+						decoder.running = false
+						decoder.emit("exit", 0, "SIGTERM")
+						while (stops.length) stops.shift()!.resolve()
+					}
+				}
+				await vi.advanceTimersByTimeAsync(0)
+				expect(state.lifecycle.desired).toBe(lastDesired)
+				expect(state.lifecycle.actual).toBe(
+					lastDesired === "running" ? "running" : "idle",
+				)
+				expect(processes.size).toBe(lastDesired === "running" ? 1 : 0)
+				expect(starts).toHaveLength(0)
+				vi.mocked(decoder.stop).mockImplementation(async () => {
+					processes.clear()
+					decoder.running = false
+					decoder.emit("exit", 0, "SIGTERM")
+				})
+				const destroying = f.manager.destroy().catch(() => {})
+				await vi.advanceTimersByTimeAsync(5001)
+				await destroying
+				manager = undefined
+			},
+		),
+		{ numRuns: 200 },
+	)
 })
