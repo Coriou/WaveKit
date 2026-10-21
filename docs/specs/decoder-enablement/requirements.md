@@ -79,8 +79,8 @@ changes:
   When its binary is unavailable, no digital-voice socket or server is started.
   Availability is decided at boot: a dsd-fme installed while the core runs decodes after an
   operator start, but its digital-voice audio output needs a core restart.
-- 4.x: every configured decoder is admitted through the efficiency gate; the suspension reason
-  union gains `efficiency-budget` and `decoder-unavailable`.
+- 4.x: every built-in (catalogue) decoder is admitted through the efficiency gate; the
+  suspension reason union gains `efficiency-budget` and `decoder-unavailable`.
 - 6.1: an operator retune (REST) that puts 1090 MHz inside readsb's reach while readsb is not
   `off` writes 2.4 Msps first when the rate is lower; retuning away restores the previous rate.
   The tuner command origin union gains `decoder-rate`; the `tuner` channel gains
@@ -92,7 +92,10 @@ changes:
 Configurations that already define decoders in YAML see these further changes: an entry of a
 catalogue type gains VFO and band-plan channels (3.4, 3.5) only when it sets `useChannelizer:
 true` (the schema default is `false`, so absence and an explicit `false` both keep today's single
-raw placement); the efficiency gate (4.x) applies; `band.bandSuspension: false` reads as `mode: always`
+raw placement); the efficiency gate (4.x) does not admit, block or suspend YAML decoders, whatever
+mode an operator sets for them in settings: they start and run as today, while their declared cost
+is counted in the budget catalogue decoders are admitted against and they are listed in the
+efficiency view as admitted with detail `configured` (4.9); `band.bandSuspension: false` reads as `mode: always`
 and `enabled: false` as `mode: off` (2.3), with unchanged behaviour. A YAML decoder that reads the
 raw branch today keeps reading it when the channelizer is unavailable (5.3).
 
@@ -208,7 +211,7 @@ starts or stops audio, scan jobs or any other decoder.
 As an operator I want as many decoders as the host can carry without any stream losing samples,
 and I want to see which ones did not fit and why.
 
-4.1 Every placement of a configuration-owned decoder is admitted through one gate per core with
+4.1 Every placement of a built-in (catalogue) decoder is admitted through one gate per core with
 three terms, all required: (a) the declared cost of the running placements plus the newcomer is
 at most `cpuBudgetCores`; (b) the normalised host CPU (the meter the scanner's CPU guard reads) is
 at most `cpuGuardPercent` (90); (c) no fanout branch on the newcomer's source, including the
@@ -235,6 +238,10 @@ budget and drop terms and is reported as `cpu.percent: null`, never as a low val
 CPU percent and limit, drop state and rate, and the ordered admitted and blocked placements.
 4.8 The gate never retunes, changes a rate, or stops a decoder the operator started outside of
 probation.
+4.9 YAML decoders (origin `config`) are outside the gate whatever their mode: their placements
+are admitted without a verdict and are never on probation, so drops, CPU or budget never block or
+suspend them. Their declared cost still counts in 4.1 (a) for catalogue newcomers, and the view
+lists them as admitted with `probation: false` and detail `configured`.
 
 ## 5. Channelizer routing and capacity gate
 

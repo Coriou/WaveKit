@@ -21,6 +21,7 @@ import type {
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
 import {
+	channelizerBaseCores,
 	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MS,
 	placementKey,
@@ -85,6 +86,7 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 		{ input: "iq", output: "text", integrationPattern: "pure_consumer" },
 	)
 	let catalogue = true
+	const yamlIds = new Set<string>()
 	let unavailable = false
 	let wanted: WantedPlacement[] = []
 	let unplaced: PlacementPlan["unplaced"] = new Map()
@@ -104,7 +106,7 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 			planner,
 			...(gate ? { gate } : {}),
 			resolveMode: () => ({ mode: "auto", source: "default" }),
-			isCatalogue: () => catalogue,
+			isCatalogue: config => catalogue && !yamlIds.has(config.id),
 			unavailable: () => unavailable,
 			recheckAvailable: async () => true,
 			vfo: () => null,
@@ -171,6 +173,9 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 		},
 		yaml: () => {
 			catalogue = false
+		},
+		yamlDecoder: (id: string) => {
+			yamlIds.add(id)
 		},
 		planner,
 		info,
@@ -1507,4 +1512,68 @@ it("a call joining an in-flight probation pass gets exactly one follow-up pass",
 		expect.any(Number),
 	)
 	expect(gate.noteSuspended).toHaveBeenCalledTimes(2)
+})
+
+it.each(["dropping", "unknown"] as const)(
+	"YAML decoders start at boot and stay running through the real gate while drops are %s",
+	async state => {
+		const { drops, gate } = realGate()
+		drops.state = state
+		const f = setup("rate-test", gate)
+		f.yamlDecoder("yaml")
+		f.create("yaml")
+		f.create("cat")
+		const yaml = f.place("yaml", 162_000_000)
+		const cat = f.place("cat", 162_050_000)
+		f.plan([yaml, cat])
+		await f.manager.startAll()
+		expect(f.instances.get("yaml")?.running).toBe(true)
+		expect(f.manager.getStatus("yaml")?.suspension).toBeUndefined()
+		expect(f.manager.getStatus("yaml")?.origin).toBe("config")
+		expect(f.instances.get("cat")?.running).toBe(false)
+		expect(f.manager.getStatus("cat")?.efficiency?.detail).toBe(
+			state === "dropping" ? "drops" : "unknown",
+		)
+		const view = f.manager.efficiencyView()
+		expect(view.sources[0]?.admitted).toEqual([
+			{
+				decoderId: "yaml",
+				sourceId: "rtl",
+				channelHz: 162_000_000,
+				reach: "channel",
+				costCores: 0.14,
+				probation: false,
+				detail: "configured",
+			},
+		])
+		expect(view.sources[0]?.blocked.map(item => item.decoderId)).toEqual([
+			"cat",
+		])
+		// Probation verdicts never suspend a YAML placement, even after an
+		// operator sets its mode explicitly.
+		drops.droppedSince = true
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(f.instances.get("yaml")?.running).toBe(true)
+		await f.manager.applyDecoderMode("yaml", "always")
+		await vi.advanceTimersByTimeAsync(10_000)
+		expect(f.instances.get("yaml")?.running).toBe(true)
+		expect(f.manager.getStatus("yaml")?.suspension).toBeUndefined()
+	},
+)
+
+it("a YAML decoder's cost counts in the budget catalogue decoders are admitted against", async () => {
+	const base = channelizerBaseCores(2_400_000)
+	const { gate } = realGate(base + 0.2)
+	const f = setup("rate-test", gate)
+	f.yamlDecoder("yaml")
+	f.create("yaml")
+	f.create("cat")
+	f.plan([f.place("yaml", 162_000_000), f.place("cat", 162_050_000)])
+	await f.manager.startAll()
+	expect(f.instances.get("yaml")?.running).toBe(true)
+	expect(f.instances.get("cat")?.running).toBe(false)
+	expect(f.manager.getStatus("cat")?.efficiency?.detail).toBe("budget")
+	expect(f.manager.efficiencyView().sources[0]?.coresInUse).toBeCloseTo(
+		base + 0.14,
+	)
 })

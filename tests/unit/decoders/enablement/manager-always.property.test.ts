@@ -87,7 +87,8 @@ it("always skips only the band", async () => {
 								mode: id === "always" ? "always" : "auto",
 								source: "settings",
 							}),
-							isCatalogue: () => false,
+							// The gate governs catalogue decoders only (requirement 4.9).
+							isCatalogue: () => true,
 							unavailable: () => facts.unavailable,
 							recheckAvailable: async () => false,
 							vfo: () => null,

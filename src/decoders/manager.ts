@@ -585,6 +585,28 @@ export class DecoderManager extends EventEmitter {
 		return null
 	}
 
+	/**
+	 * The efficiency gate governs built-in catalogue decoders only. A YAML
+	 * decoder's placements (origin "config", whatever mode an operator set) are
+	 * admitted without a gate verdict and never suspended by probation; their
+	 * declared cost still counts in the budget and the efficiency view.
+	 */
+	private gateExempt(state: DecoderState): boolean {
+		const enablement = this.config.enablement
+		if (!enablement || !state.placement) return false
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		return (
+			parent?.owner === "config" &&
+			!enablement.isCatalogue(parent.originalConfig ?? parent.config)
+		)
+	}
+
+	private gateExemptKey(key: string): boolean {
+		for (const state of this.decoders.values())
+			if (state.placement?.key === key) return this.gateExempt(state)
+		return false
+	}
+
 	private runningPlacements(): RunningPlacement[] {
 		return [...this.decoders.values()].flatMap(state =>
 			state.placement &&
@@ -621,10 +643,24 @@ export class DecoderManager extends EventEmitter {
 			),
 			performance.now(),
 		)
+		const configured = (decoderId: string) => {
+			const parent = this.decoders.get(decoderId)
+			return (
+				parent?.owner === "config" &&
+				!this.config.enablement!.isCatalogue(
+					parent.originalConfig ?? parent.config,
+				)
+			)
+		}
 		return {
 			...view,
 			sources: view.sources.map(source => ({
 				...source,
+				admitted: source.admitted.map(placement =>
+					configured(placement.decoderId)
+						? { ...placement, probation: false, detail: "configured" as const }
+						: placement,
+				),
 				blocked: source.blocked.map(placement => ({
 					...placement,
 					...(placement.retryAt
@@ -712,7 +748,12 @@ export class DecoderManager extends EventEmitter {
 		const now = performance.now()
 		const running = this.runningPlacements()
 		// Admission, probation and retry bookkeeping share the monotonic clock.
-		const verdicts = gate.probation(running, now)
+		// YAML placements are never on probation; their cost still counts for
+		// admission through runningPlacements().
+		const verdicts = gate.probation(
+			running.filter(item => !this.gateExemptKey(item.key)),
+			now,
+		)
 		const condemned = new Set(verdicts.map(verdict => verdict.key))
 		for (const state of this.decoders.values()) {
 			if (
@@ -746,6 +787,7 @@ export class DecoderManager extends EventEmitter {
 		for (const { verdict, state, admission, admittedAtMs, run } of judged) {
 			if (
 				this.destroying ||
+				this.gateExempt(state) ||
 				this.decoders.get(state.config.id) !== state ||
 				state.placement?.key !== verdict.key ||
 				!state.decoder.getStatus().running ||
@@ -4677,14 +4719,18 @@ export class DecoderManager extends EventEmitter {
 		if (state.stopping || !canStart()) return { wired: false, superseded: true }
 		const gate = this.config.enablement?.gate
 		const generation = state.rateGeneration
+		// YAML placements keep today's behaviour: admitted without a verdict.
+		const exempt = this.gateExempt(state)
 		if (gate && state.placement) {
 			delete state.admission
 			delete state.admittedAtMs
-			state.admission = gate.admit(
-				state.placement,
-				this.runningPlacements(),
-				performance.now(),
-			)
+			state.admission = exempt
+				? { admit: true }
+				: gate.admit(
+						state.placement,
+						this.runningPlacements(),
+						performance.now(),
+					)
 			if (!state.admission.admit) {
 				await this.suspend(state, this.assessEligibility(state))
 				this.scheduleEfficiencyEvaluation()
@@ -4706,11 +4752,9 @@ export class DecoderManager extends EventEmitter {
 				delete state.admission
 				delete state.admittedAtMs
 				const now = performance.now()
-				state.admission = gate.admit(
-					state.placement,
-					this.runningPlacements(),
-					now,
-				)
+				state.admission = exempt
+					? { admit: true }
+					: gate.admit(state.placement, this.runningPlacements(), now)
 				if (!state.admission.admit) {
 					this.unwireDecoderFromFanout(state)
 					await this.suspend(state, this.assessEligibility(state))

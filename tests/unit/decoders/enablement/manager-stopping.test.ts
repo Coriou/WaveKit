@@ -136,7 +136,8 @@ it.each([
 		enablement: {
 			planner: () => ({ wanted: [primary, worker], unplaced: new Map() }),
 			resolveMode: () => ({ mode: "always", source: "default" }),
-			isCatalogue: () => false,
+			// The efficiency gate governs catalogue decoders only (requirement 4.9).
+			isCatalogue: () => true,
 			unavailable: () => false,
 			recheckAvailable: async () => true,
 			vfo: () => null,

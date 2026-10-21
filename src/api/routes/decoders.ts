@@ -421,7 +421,10 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			reach: { type: "string", enum: ["channel", "raw", "centre"] },
 			costCores: { type: "number" },
 			probation: { type: "boolean" },
-			detail: { type: "string", enum: ["budget", "cpu", "drops", "unknown"] },
+			detail: {
+				type: "string",
+				enum: ["budget", "cpu", "drops", "unknown", "configured"],
+			},
 			retryAt: { type: "string" },
 		},
 	} as const
