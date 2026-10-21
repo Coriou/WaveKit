@@ -16,8 +16,13 @@
  */
 
 import type { EventEmitter } from "node:events"
+import type { DecoderReach } from "./enablement/contract.js"
 import type { Readable } from "node:stream"
 import type {
+	DecoderMode,
+	DecoderModeSource,
+	DecoderPlacementView,
+	DecoderEfficiencyDetail,
 	DecoderBandAssessment,
 	DecoderOptionIssue,
 	DecoderRateAssessment,
@@ -271,6 +276,8 @@ export type DecoderOutputType =
  * All decoder output is normalized to this format.
  */
 export interface DecoderOutput {
+	/** Placement context for the RF binding resolver; payload frequencies still win. */
+	provenanceBinding?: { sourceId: string; channelHz: number | null }
 	/** Timestamp when the output was produced */
 	timestamp: Date
 	/** ID of the decoder that produced this output */
@@ -297,6 +304,11 @@ export interface DecoderStats {
  * Status information for a decoder (Requirements 4.5, 20.1, 20.2, 20.3).
  */
 export interface DecoderStatus {
+	mode?: DecoderMode
+	modeSource?: DecoderModeSource
+	origin?: "config" | "catalogue"
+	placements?: DecoderPlacementView[]
+	efficiency?: { detail: DecoderEfficiencyDetail; retryAt?: string }
 	rateHistory?: number[]
 	/** Unique identifier for this decoder */
 	id: string
@@ -345,7 +357,7 @@ export interface DecoderStatus {
 	/** Who started the decoder; set by the manager while desiredRunning. */
 	startMode?: DecoderStartMode | undefined
 	/** "scanner" for probes created by the scanner; set by the manager. */
-	owner?: "config" | "scanner" | undefined
+	owner?: "config" | "scanner" | "placement" | undefined
 	/** Owning scanner job of a probe. */
 	scannerJobId?: string | undefined
 	/** True only for scanner probes (runtime-only). */
@@ -403,6 +415,7 @@ export interface Decoder extends EventEmitter {
 	readonly type: string
 	/** Capabilities of this decoder (Requirement 17.1) */
 	readonly caps: DecoderCaps
+	reach?(): DecoderReach
 
 	/**
 	 * Starts the decoder process.
