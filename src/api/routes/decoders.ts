@@ -182,7 +182,7 @@ export interface DecoderRoutesOptions {
 
 /** WG8 req 2.2: `W/"n"`, `"n"` or bare `n` (station rules plus the weak form). */
 const IF_MATCH = /^(?:(?:W\/)?"(\d{1,19})"|(\d{1,19}))$/
-const PATCH_BODY_KEYS = new Set(["enabled", "options"])
+const PATCH_BODY_KEYS = new Set(["enabled", "options", "mode"])
 
 function sendJson(reply: FastifyReply, status: number, body: unknown) {
 	return reply
@@ -259,6 +259,9 @@ function isSettingsPatchShape(body: unknown): boolean {
 		enabled !== null &&
 		typeof enabled !== "boolean"
 	)
+		return false
+	const mode: unknown = Reflect.get(body, "mode")
+	if (Object.hasOwn(body, "mode") && mode !== null && typeof mode !== "string")
 		return false
 	const opts: unknown = Reflect.get(body, "options")
 	if (
@@ -825,7 +828,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				tags: ["decoders"],
 				summary: "Update decoder settings",
 				description:
-					"JSON merge patch of the decoder override ({ enabled?: boolean | null, options?: object }); applies when the decoder next starts",
+					"JSON merge patch of the decoder override ({ enabled?: boolean | null, options?: object, mode?: string | null }); enabled and options apply when the decoder next starts; mode applies immediately",
 				params: {
 					type: "object",
 					properties: { id: { type: "string", minLength: 1 } },
@@ -837,6 +840,10 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					properties: {
 						enabled: { type: ["boolean", "null"] },
 						options: { type: "object", additionalProperties: true },
+						mode: {
+							type: ["string", "null"],
+							enum: ["auto", "always", "off", null],
+						},
 					},
 					additionalProperties: false,
 				},
@@ -907,7 +914,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				if (!isSettingsPatchShape(body)) {
 					const err = settingsError(
 						"DECODER_OPTIONS_INVALID",
-						"Body must be a JSON object with only enabled (boolean or null) and options (object)",
+						"Body must be a JSON object with only enabled (boolean or null), options (object) and mode (string or null)",
 					)
 					return sendJson(reply, err.statusCode, err.toBody())
 				}
