@@ -20,6 +20,41 @@ import type { NamedAccessRuntimeContext } from "./access/runtime-context.js"
 import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
 import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
 import { WaveKitError } from "./utils/errors.js"
+import { arch, cpus } from "node:os"
+import { performance } from "node:perf_hooks"
+import {
+	buildDecoderCatalogue,
+	isCatalogueConfig,
+} from "./decoders/enablement/catalogue.js"
+import { resolveDecoderBinary } from "./decoders/enablement/binary.js"
+import { resolveDecoderMode } from "./decoders/enablement/mode.js"
+import { planPlacements } from "./decoders/enablement/placement.js"
+import {
+	createBandplanChannelLookup,
+	createBandplanRangeLookup,
+	createVfoTracker,
+	vfoFromLiveDemod,
+} from "./decoders/enablement/channel-sources.js"
+import { createEfficiencyGate } from "./decoders/enablement/efficiency-gate.js"
+import { createEfficiencyMonitor } from "./decoders/enablement/efficiency-monitor.js"
+import {
+	CHANNELIZER_AUTO_ACCEPTED,
+	CHANNELIZER_IDLE_STOP_MS,
+	DECODER_MAX_BANDPLAN_CHANNELS,
+	EFFICIENCY_SAMPLE_MS,
+	EFFICIENCY_CPU_GUARD_PERCENT,
+	channelizerComposition,
+	defaultCpuBudgetCores,
+} from "./decoders/enablement/contract.js"
+import { createRatePolicy } from "./core/rate-policy.js"
+import { createLinkAdvisor } from "./core/link-advisory.js"
+import type { DropReader } from "./decoders/enablement/efficiency-gate.js"
+import type {
+	EfficiencyGate,
+	EfficiencyInputs,
+	ResolvedMode,
+} from "./decoders/enablement/contract.js"
+import type { LinkAdvisor, RatePolicy } from "./core/rate-policy-contract.js"
 import { PassThrough } from "node:stream"
 import { realpath } from "node:fs/promises"
 import { join, resolve } from "node:path"
@@ -57,6 +92,7 @@ import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { liveDemodOperatorActivity } from "./core/live-demod-activity.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
+import type { ChannelizerManagerDeps } from "./core/channelizer/channelizer-manager.js"
 import { ChannelizerManager } from "./core/channelizer/channelizer-manager.js"
 import { SettlementRegistry } from "./core/channelizer/settlement-observer.js"
 import type {
@@ -354,6 +390,203 @@ export function followRebuiltVoiceDecoders(
 		digitalVoice.attachDecoder(decoderId, decoder)
 		attached.set(decoderId, decoder)
 	})
+}
+
+/** Derived instances are runtime-only; the parsed configuration remains exportable verbatim. */
+export async function prepareDecoderCatalogue(
+	config: Pick<Config, "decoders" | "decoderPolicy">,
+	region: Parameters<typeof buildDecoderCatalogue>[1]["region"],
+	resolveBinary: typeof resolveDecoderBinary = resolveDecoderBinary,
+) {
+	const catalogue = buildDecoderCatalogue(config.decoders, {
+		enabled: config.decoderPolicy?.catalogue !== false,
+		region,
+	})
+	const catalogueIds = new Set(
+		catalogue.filter(isCatalogueConfig).map(c => c.id),
+	)
+	const unavailable = new Set<string>()
+	const recheckAvailable = async (id: string) => {
+		const decoder = catalogue.find(c => c.id === id)
+		if (!decoder || !catalogueIds.has(id)) return true
+		const { available } = await resolveBinary(decoder.type, process.env)
+		if (available) unavailable.delete(id)
+		else unavailable.add(id)
+		return available
+	}
+	await Promise.all(
+		catalogue
+			.filter(c => catalogueIds.has(c.id))
+			.map(c => recheckAvailable(c.id)),
+	)
+	return { catalogue, catalogueIds, unavailable, recheckAvailable }
+}
+
+/** Metrics are KiB/s; link advice uses bytes/s and reconnect-local evidence. */
+export function wireDecoderLinkFeed(
+	sources: Pick<SourceManager, "on" | "off">,
+	tuner: Pick<TunerController, "getState">,
+	link: LinkAdvisor,
+	policy: Pick<RatePolicy, "reset">,
+	now: () => number = Date.now,
+): () => void {
+	const metrics = (id: string, value: { dataRate: number }) =>
+		link.observe(
+			id,
+			value.dataRate * 1024,
+			tuner.getState(id)?.sampleRate ?? null,
+			now(),
+		)
+	const connected = (id: string) => {
+		link.reset(id)
+		policy.reset(id)
+	}
+	sources.on("metrics", metrics)
+	sources.on("connected", connected)
+	return () => {
+		sources.off("metrics", metrics)
+		sources.off("connected", connected)
+	}
+}
+
+export function wireDecoderRatePolicy(
+	tuner: Pick<
+		TunerController,
+		| "setBeforeOperatorRetune"
+		| "setOnOperatorSampleRate"
+		| "setOnRelayRetune"
+		| "setRatePolicyRecordFor"
+	>,
+	policy: RatePolicy,
+): () => void {
+	tuner.setBeforeOperatorRetune((...args) =>
+		policy.beforeOperatorRetune(...args),
+	)
+	tuner.setOnOperatorSampleRate(id => policy.onOperatorSampleRate(id))
+	tuner.setOnRelayRetune((id, hz) => policy.onRelayRetune(id, hz))
+	tuner.setRatePolicyRecordFor(id => policy.recordFor(id))
+	return () => {
+		policy.dispose()
+		tuner.setBeforeOperatorRetune(null)
+		tuner.setOnOperatorSampleRate(null)
+		tuner.setOnRelayRetune(null)
+		tuner.setRatePolicyRecordFor(null)
+	}
+}
+
+/** One cleanup owns the link feed and every installed policy hook. */
+export function composeDecoderRatePolicyLifetime(
+	sources: Parameters<typeof wireDecoderLinkFeed>[0],
+	tuner: Parameters<typeof wireDecoderRatePolicy>[0] &
+		Parameters<typeof wireDecoderLinkFeed>[1],
+	link: LinkAdvisor,
+	policy: RatePolicy,
+): () => void {
+	const unhook = wireDecoderRatePolicy(tuner, policy)
+	const closeFeed = wireDecoderLinkFeed(sources, tuner, link, policy)
+	return () => {
+		closeFeed()
+		unhook()
+	}
+}
+
+/** Admission deadlines stay monotonic through the manager; only views use epoch time. */
+export function composeDecoderEfficiencyGate(
+	inputs: EfficiencyInputs,
+	drops: DropReader,
+): EfficiencyGate {
+	const gate = createEfficiencyGate(inputs, { drops })
+	return {
+		...gate,
+		record: sample => gate.record({ ...sample, atMs: drops.monoNow() }),
+	}
+}
+
+export function composeDecoderModes(
+	read: () => (id: string) => ResolvedMode,
+	manager: () => Pick<DecoderManager, "applyDecoderMode">,
+) {
+	const resolvedModes = new Map<string, ResolvedMode>()
+	return {
+		resolvedModes,
+		applyDecoderMode: (id: string, mode: ResolvedMode["mode"]) => {
+			resolvedModes.set(id, read()(id))
+			return manager().applyDecoderMode(id, mode)
+		},
+	}
+}
+
+export function decoderLinkReporter(
+	aggregator: () => Pick<ResourceAggregator, "reportLinkAdvisory"> | undefined,
+): NonNullable<Parameters<typeof createRatePolicy>[0]["reportLink"]> {
+	return (id, advisory) => aggregator()?.reportLinkAdvisory(id, advisory)
+}
+
+export async function prepareDecoderVoice(
+	voice: Pick<DigitalVoiceService, "prepareDecoderConfigs">,
+	configs: DecoderConfig[],
+	catalogueIds: ReadonlySet<string>,
+	unavailable: ReadonlySet<string>,
+): Promise<DecoderConfig[]> {
+	const eligible = configs.filter(
+		c => !catalogueIds.has(c.id) || !unavailable.has(c.id),
+	)
+	const prepared = new Map(
+		(await voice.prepareDecoderConfigs(eligible)).map(c => [c.id, c]),
+	)
+	return configs.map(c => prepared.get(c.id) ?? c)
+}
+
+/** Construct observation and provider together, leaving native acquisition lazy. */
+export function composeDecoderChannelizer(
+	deps: Omit<ChannelizerManagerDeps, "settlementObserver" | "idleStopMs"> & {
+		ownObservation?: (
+			observer: ChannelSettlementObserver,
+			lifetime: ProviderLifetime,
+		) => void
+	},
+	constructionCleanup: () => Promise<CleanupOutcome>,
+	accepted: boolean = CHANNELIZER_AUTO_ACCEPTED,
+	createManager: (deps: ChannelizerManagerDeps) => ChannelizerManager = deps =>
+		new ChannelizerManager(deps),
+) {
+	const chanMode = channelizerComposition(deps.config, accepted)
+	if (chanMode === null)
+		return {
+			channelizer: null,
+			channels: null,
+			observer: undefined,
+			lifetime: undefined,
+		}
+	const registry = new SettlementRegistry()
+	const lifetime = registry.registerProviderLifetime()
+	if (!lifetime)
+		throw new WaveKitError("Scanner lifetime unavailable", "ACCESS_UNAVAILABLE")
+	if (!lifetime.ownCleanup("construction", constructionCleanup))
+		throw new WaveKitError("Scanner owner unavailable", "ACCESS_UNAVAILABLE")
+	const observer = registry.createObserver(lifetime)
+	const { ownObservation, ...managerDeps } = deps
+	ownObservation?.(observer, lifetime)
+	const channelizer = createManager({
+		...managerDeps,
+		settlementObserver: observer,
+		...(chanMode === "auto" ? { idleStopMs: CHANNELIZER_IDLE_STOP_MS } : {}),
+	})
+	const channels = observer.bindProvider(channelizer)
+	// Preserve the optional in-place retune port across the settlement adapter.
+	Object.assign(channels, {
+		retuneChannel: channelizer.retuneChannel.bind(channelizer),
+	})
+	return { channelizer, channels, observer, lifetime }
+}
+
+export function decoderPolicyTimer(
+	fn: () => void,
+	ms: number,
+): { cancel(): void } {
+	const timer = setTimeout(fn, ms)
+	timer.unref()
+	return { cancel: () => clearTimeout(timer) }
 }
 
 /**
@@ -1068,19 +1301,125 @@ async function main(): Promise<void> {
 		checkpoint()
 		// WG8 req 1-3: decoder settings overrides (<stateDir>/decoder-settings.json), loaded in
 		// both modes; read-only until the manager port is set. Export stays YAML-only.
+		const { catalogue, catalogueIds, unavailable, recheckAvailable } =
+			await prepareDecoderCatalogue(config, bandRegion.code)
+		checkpoint()
+		let bandPlanService: BandPlanService | undefined
+		const scannerBandplans = createScannerBandplanProvider(
+			() => bandPlanService?.view(),
+			bandRegion.code,
+		)
+		const bandplanChannels = createBandplanChannelLookup({
+			getResolved: () => bandPlanService?.resolved(),
+			scannerPlans: scannerBandplans,
+		})
+		const bandplanRangeContains = createBandplanRangeLookup({
+			scannerPlans: scannerBandplans,
+		})
+		const efficiencyCpu = new CpuMeter({ sampleMs: EFFICIENCY_SAMPLE_MS })
+		efficiencyCpu.start()
+		own(20, () => efficiencyCpu.stop())
+		const monitor = createEfficiencyMonitor({
+			sources: () => sourceManager.getAllStatus().map(source => source.id),
+			branchCounters: id => sourceRouting.branchDropCounters(id),
+			topology: id => sourceRouting.branchTopology(id),
+			cpu: efficiencyCpu,
+			now: Date.now,
+			onSample: sample => gate.record(sample),
+			setInterval: (fn, ms) => {
+				const timer = setInterval(fn, ms)
+				timer.unref()
+				return { cancel: () => clearInterval(timer) }
+			},
+		})
+		monitor.start()
+		own(20, () => monitor.stop())
+		const gate = composeDecoderEfficiencyGate(
+			{
+				budgetCores:
+					config.decoderPolicy?.efficiency?.cpuBudgetCores ??
+					defaultCpuBudgetCores(arch(), cpus().length),
+				cpuGuardPercent:
+					config.decoderPolicy?.efficiency?.cpuGuardPercent ??
+					EFFICIENCY_CPU_GUARD_PERCENT,
+			},
+			monitor,
+		)
+		const vfo = createVfoTracker({
+			now: () => performance.now(),
+			setTimer: decoderPolicyTimer,
+			onSettled: value => decoderManager.notifyVfoSettled(value),
+		})
+		const updateVfo = () =>
+			vfo.update(
+				vfoFromLiveDemod({
+					sourceId: () =>
+						liveDemod.getStatus().sourceId ||
+						defaultSourceIdFor(config.sources) ||
+						null,
+					offsetHz: () => liveDemod.getStatus().config.offsetHz,
+					centreHz: id => sourceManager.getCaps(id)?.centerFreq ?? null,
+				}),
+			)
+		liveDemod.on("config-changed", updateVfo)
+		sourceManager.on("caps-changed", updateVfo)
+		sourceManager.on("connected", updateVfo)
+		const closeVfo = () => {
+			vfo.dispose()
+			liveDemod.off("config-changed", updateVfo)
+			sourceManager.off("caps-changed", updateVfo)
+			sourceManager.off("connected", updateVfo)
+		}
+		own(20, closeVfo)
+		const modeBinding = composeDecoderModes(
+			() => readResolvedMode,
+			() => decoderManager,
+		)
+		const resolvedModes = modeBinding.resolvedModes
 		const decoderSettings = await openDecoderSettingsService({
-			configs: config.decoders,
+			configs: catalogue,
 			stateDir: config.stateDir,
 			logger,
+			applyDecoderMode: modeBinding.applyDecoderMode,
 		})
 		own(12, () => decoderSettings.close())
 		checkpoint()
+		const readResolvedMode = (id: string): ResolvedMode => {
+			const original = catalogue.find(c => c.id === id)
+			if (!original) return { mode: "off", source: "default" }
+			const mode = decoderSettings.view(id)?.mode
+			return resolveDecoderMode({
+				settingsMode: mode?.source === "override" ? mode.value : undefined,
+				configMode: original.mode,
+				configEnabled: decoderSettings.effectiveConfig(original).enabled,
+				configBandSuspension: original.band?.bandSuspension,
+			})
+		}
+		// Read views before installing the status port: views consult manager status.
+		for (const config of catalogue)
+			resolvedModes.set(config.id, readResolvedMode(config.id))
 		const decoderRegistry = new DecoderRegistry()
 		const decoderManager = new DecoderManager(
 			decoderRegistry,
 			fanoutManager,
 			logger,
-			createDecoderManagerOptions(config.health, bandRegion),
+			{
+				...createDecoderManagerOptions(config.health, bandRegion),
+				enablement: {
+					planner: input => planPlacements({ ...input, bandplanRangeContains }),
+					resolveMode: id =>
+						resolvedModes.get(id) ?? { mode: "off", source: "default" },
+					isCatalogue: value => catalogueIds.has(value.id),
+					unavailable: id => unavailable.has(id),
+					recheckAvailable,
+					vfo: () => vfo.current(),
+					bandplanChannels,
+					maxBandplanChannels:
+						config.decoderPolicy?.efficiency?.maxBandplanChannels ??
+						DECODER_MAX_BANDPLAN_CHANNELS,
+					gate,
+				},
+			},
 			bandOverrides,
 		)
 
@@ -1093,50 +1432,34 @@ async function main(): Promise<void> {
 
 		// Opt-in core channelizer (addendum §4): one wavekit-chan per source, spawned
 		// on the first channel request. Off by default, so no manager exists.
-		if (config.channelizer.enabled) {
-			const registry = new SettlementRegistry()
-			providerLifetime = registry.registerProviderLifetime()
-			if (!providerLifetime)
-				throw new WaveKitError(
-					"Scanner lifetime unavailable",
-					"ACCESS_UNAVAILABLE",
-				)
-			const constructionCleanup = providerLifetime.ownCleanup(
-				"construction",
-				async () => {
-					try {
-						await scannerPhases.producerSettled()
-						return { ok: true }
-					} catch {
-						return {
-							ok: false,
-							state: "unknown",
-							detail: "Scanner construction cleanup incomplete",
-						}
-					}
+		const composedChannels = composeDecoderChannelizer(
+			{
+				sourceManager,
+				routing: sourceRouting,
+				config: config.channelizer,
+				logger,
+				ownObservation: (observer, lifetime) => {
+					settlementObserver = observer
+					providerLifetime = lifetime
 				},
-			)
-			if (!constructionCleanup)
-				throw new WaveKitError(
-					"Scanner owner unavailable",
-					"ACCESS_UNAVAILABLE",
-				)
-			settlementObserver = registry.createObserver(providerLifetime)
-		}
-		const channelizer = config.channelizer.enabled
-			? new ChannelizerManager({
-					sourceManager,
-					routing: sourceRouting,
-					config: config.channelizer,
-					logger,
-					...(settlementObserver ? { settlementObserver } : {}),
-				})
-			: null
+			},
+			async () => {
+				try {
+					await scannerPhases.producerSettled()
+					return { ok: true }
+				} catch {
+					return {
+						ok: false,
+						state: "unknown",
+						detail: "Scanner construction cleanup incomplete",
+					}
+				}
+			},
+		)
+		const { channelizer, channels } = composedChannels
+		providerLifetime = composedChannels.lifetime
+		settlementObserver = composedChannels.observer
 		runtimeChannelizer = channelizer
-		const channels =
-			channelizer && settlementObserver
-				? settlementObserver.bindProvider(channelizer)
-				: channelizer
 		decoderManager.setChannelizer(channels)
 
 		// Step 6: Register built-in decoders with capabilities
@@ -1215,12 +1538,16 @@ async function main(): Promise<void> {
 		// Overrides apply BEFORE the digital-voice preparation, which rewrites dsd-fme output.
 		const effectiveDecoders = effectiveDecoderConfigs(
 			decoderSettings,
-			config.decoders,
+			catalogue,
 		)
 		let decoderConfigs: DecoderConfig[] = effectiveDecoders
 		try {
-			decoderConfigs =
-				await digitalVoice.prepareDecoderConfigs(effectiveDecoders)
+			decoderConfigs = await prepareDecoderVoice(
+				digitalVoice,
+				effectiveDecoders,
+				catalogueIds,
+				unavailable,
+			)
 			checkpoint()
 		} catch (err) {
 			if (stopping) throw err
@@ -1286,24 +1613,8 @@ async function main(): Promise<void> {
 		// Read per call: a committed stack applies to the next job create, patch or
 		// preview; a resumed or running job keeps the plans it was admitted with.
 		const bandPlanLog = createComponentLogger(logger, "BandPlans")
-		let bandPlanService: BandPlanService | undefined
-		let bandPlanViewWarned = false
 		let bandPlanSkipsWarned = false
-		// WG7 req 1.3: the decoder provenance index is built after the scanner starts; until then
-		// ambient AIS/ACARS/VDL2/LoRa decodes have no trust and are no evidence (fail closed).
 		let ambientProvenance: ActivityProvenanceLookup | null = null
-		const scannerBandplans = createScannerBandplanProvider(
-			() => bandPlanService?.view(),
-			bandRegion.code,
-			err => {
-				if (bandPlanViewWarned) return
-				bandPlanViewWarned = true
-				bandPlanLog.warn(
-					{ err },
-					"Band-plan view unavailable; scanner uses built-in plans",
-				)
-			},
-		)
 		const { channelTier, ...scannerSettings } = config.scanner
 		// WG8 req 5.2: the host bins cap, resolved once (bounded bench, or the configured value)
 		const spectrumBinsCap = resolveSpectrumBinsCap(
@@ -1426,7 +1737,7 @@ async function main(): Promise<void> {
 				liveDemod,
 				operatorActivity: liveDemodOperatorActivity(liveDemod),
 				logger,
-				cpuMeter: new CpuMeter({ sampleMs: 5000 }),
+				cpuMeter: efficiencyCpu,
 			})
 			scannerConstructionSettled = true
 			scannerConstruction.completeConstruction({ ok: true })
@@ -1470,6 +1781,8 @@ async function main(): Promise<void> {
 
 		checkpoint()
 
+		// Scanner construction failure may have stopped the shared meter.
+		efficiencyCpu.start()
 		// Step 8: Initialize resource monitoring (if enabled)
 		let resourceAggregator: ResourceAggregator | undefined
 		let containerMonitor: ContainerMonitor | undefined
@@ -1620,6 +1933,42 @@ async function main(): Promise<void> {
 			sdrHostPoller?.stop()
 			containerMonitor?.stop()
 		})
+		const linkAdvisor = createLinkAdvisor({ now: Date.now })
+		const ratePolicy = createRatePolicy({
+			port: { readsbOn: id => decoderManager.readsbRateFacts(id) },
+			tuner: {
+				sampleRateOf: id => tunerController.getState(id)?.sampleRate ?? null,
+				controlModeOf: id => tunerController.getState(id)?.controlMode ?? null,
+				setSampleRate: (id, hz, opts) =>
+					tunerController.setSampleRate(id, hz, opts),
+			},
+			link: linkAdvisor,
+			linkInput: id => {
+				const source = sourceManager.getConfig(id)
+				const rate = tunerController.getState(id)?.sampleRate
+				return source?.host && rate
+					? { sourceId: id, host: source.host, sampleRateHz: rate }
+					: null
+			},
+			upstreamDropsOf: id => {
+				const value = backpressureTracker?.getBackpressure(id)
+				return value?.available ? value.dropRate : null
+			},
+			reportLink: decoderLinkReporter(() => resourceAggregator),
+			setTimer: decoderPolicyTimer,
+			emit: event => tunerController.emitRatePolicy(event),
+			now: () => new Date(),
+			log: logger,
+			enabled: config.decoderPolicy?.rateRaise !== false,
+		})
+		const closeRatePolicy = composeDecoderRatePolicyLifetime(
+			sourceManager,
+			tunerController,
+			linkAdvisor,
+			ratePolicy,
+		)
+
+		own(20, closeRatePolicy)
 		// Step 8b: Initialize aircraft tracking (ADS-B specific)
 		const aircraftTrackingManager = new AircraftTrackingManager(
 			decoderManager,
@@ -1803,12 +2152,17 @@ async function main(): Promise<void> {
 				logger,
 			}),
 			urlImportHosts: BANDPLAN_URL_IMPORT_HOSTS,
-			onCommit: event => publishBandPlans?.(event),
+			onCommit: event => {
+				decoderManager.notifyBandplansChanged()
+				publishBandPlans?.(event)
+			},
 			onStoreUnavailable: reason => {
 				bandPlanLog.warn({ reason }, "Band-plan store unavailable")
 			},
 		})
 		bandPlanService = bandPlans
+		decoderManager.notifyBandplansChanged()
+		updateVfo()
 		closeBandPlans = () => bandPlans.close()
 		own(11, closeBandPlans)
 		checkpoint()
@@ -1917,6 +2271,15 @@ async function main(): Promise<void> {
 		}
 
 		// Step 9: Register shutdown handlers (in reverse order of startup)
+		shutdown.register({
+			name: "decoder-enablement",
+			handler: async () => {
+				closeRatePolicy()
+				closeVfo()
+				monitor.stop()
+				efficiencyCpu.stop()
+			},
+		})
 		// Handlers are called in LIFO order, so register in reverse dependency order
 
 		// Last to shutdown: Source connections

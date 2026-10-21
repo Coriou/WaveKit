@@ -163,6 +163,23 @@ export function checkDecoderHealth(
  * @param decoderManager - The DecoderManager instance
  * @returns Record of decoder ID to ComponentHealth
  */
+function intentionallyStoppedCatalogue(
+	status: ReturnType<DecoderManager["getAllStatus"]>[number],
+	health: DecoderHealth | undefined,
+	manager: DecoderManager,
+): boolean {
+	return (
+		status.origin === "catalogue" &&
+		manager.isDecoderConfirmedStopped(status.id) &&
+		!status.running &&
+		status.pid === undefined &&
+		status.transition === undefined &&
+		health !== "faulted" &&
+		status.health !== "faulted" &&
+		(!status.desiredRunning || status.suspended === true)
+	)
+}
+
 export function checkAllDecodersHealth(
 	decoderManager: DecoderManager,
 ): Record<string, ComponentHealth> {
@@ -171,6 +188,15 @@ export function checkAllDecodersHealth(
 	const allStatus = decoderManager.getAllStatus()
 
 	for (const status of allStatus) {
+		// Derived instances may be intentionally unavailable or outside their listening window.
+		if (
+			intentionallyStoppedCatalogue(
+				status,
+				allHealth.get(status.id),
+				decoderManager,
+			)
+		)
+			continue
 		const health = allHealth.get(status.id) ?? "running"
 		decoderHealthMap[status.id] = checkDecoderHealth(
 			status.id,
@@ -390,7 +416,16 @@ export function isReady(
 	}
 
 	// At least one decoder should be running (or no decoders configured is OK)
-	const decoderStatuses = decoderManager.getAllStatus()
+	const decoderStatuses = decoderManager
+		.getAllStatus()
+		.filter(
+			status =>
+				!intentionallyStoppedCatalogue(
+					status,
+					decoderManager.getAllHealth().get(status.id),
+					decoderManager,
+				),
+		)
 	if (decoderStatuses.length > 0) {
 		const hasRunningDecoder = decoderStatuses.some(d => d.running)
 		if (!hasRunningDecoder) {

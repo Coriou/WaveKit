@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest"
 import pino from "pino"
 import fc from "fast-check"
 import type { PlacementLifecycle } from "../../../../src/decoders/placement-lifecycle.js"
+import { checkAllDecodersHealth } from "../../../../src/utils/health-check.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
@@ -263,6 +264,53 @@ it("blocked placement is retried no more than once per retry period", async () =
 	expect(f.provider.requestChannel).not.toHaveBeenCalled()
 })
 
+it("reconsiders a five-minute rejection after five monotonic minutes when wall time moves back an hour", async () => {
+	const gate = fakeGate()
+	gate.admit = vi.fn<EfficiencyGate["admit"]>((_placement, _running, now) => ({
+		admit: false,
+		detail: "budget",
+		retryAtMs: now + 300_000,
+	}))
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	f.plan([f.place("dec", 162_000_000)])
+	await f.manager.startAll()
+	expect(gate.admit).toHaveBeenCalledTimes(1)
+	vi.setSystemTime(Date.now() - 3_600_000)
+	await vi.advanceTimersByTimeAsync(303_000)
+	expect(gate.admit).toHaveBeenCalledTimes(2)
+})
+
+it.each(["stop", "suspend"])(
+	"failed %s keeps the catalogue process in health until confirmed stopped",
+	async action => {
+		const f = setup("rate-test", fakeGate())
+		f.create("dec")
+		f.plan([f.place("dec", 162_000_000)])
+		await f.manager.startAll()
+		const decoder = f.instances.get("dec")!
+		const stop = vi
+			.spyOn(decoder, "stop")
+			.mockRejectedValue(new Error("stop failed"))
+		if (action === "stop") {
+			const stopping = f.manager.stopDecoder("dec").catch(() => undefined)
+			await vi.advanceTimersByTimeAsync(5001)
+			await stopping
+		} else {
+			f.plan([])
+			f.unplaced(new Map([["dec", "frequency-out-of-band"]]))
+			await f.settle()
+			await vi.advanceTimersByTimeAsync(5001)
+		}
+		expect(f.manager.isDecoderConfirmedStopped("dec")).toBe(false)
+		expect(checkAllDecodersHealth(f.manager)).toHaveProperty("dec")
+		stop.mockRestore()
+		await f.manager.stopDecoder("dec")
+		expect(f.manager.isDecoderConfirmedStopped("dec")).toBe(true)
+		expect(checkAllDecodersHealth(f.manager)).not.toHaveProperty("dec")
+	},
+)
+
 it("probation drop suspends only the newest probationer", async () => {
 	const gate = fakeGate()
 	const f = setup("rate-test", gate)
@@ -483,11 +531,13 @@ it("probation failures back off five, ten, twenty, thirty and thirty minutes", a
 		const calls = vi.mocked(gate.admit).mock.calls.length
 		const [, , suspendedAt] = vi.mocked(gate.noteSuspended).mock.calls.at(-1)!
 		expect(f.manager.getStatus("dec")?.efficiency?.retryAt).toBe(
-			new Date(suspendedAt + minutes * 60_000).toISOString(),
+			new Date(
+				Date.now() + suspendedAt + minutes * 60_000 - performance.now(),
+			).toISOString(),
 		)
 		gate.probation = () => []
 		await vi.advanceTimersByTimeAsync(
-			suspendedAt + minutes * 60_000 - Date.now() - 1,
+			suspendedAt + minutes * 60_000 - performance.now() - 1,
 		)
 		expect(gate.admit).toHaveBeenCalledTimes(calls)
 		await vi.advanceTimersByTimeAsync(2501)
@@ -500,7 +550,9 @@ it("probation failures back off five, ten, twenty, thirty and thirty minutes", a
 	await vi.advanceTimersByTimeAsync(2000)
 	const [, , suspendedAt] = vi.mocked(gate.noteSuspended).mock.calls.at(-1)!
 	expect(f.manager.getStatus("dec")?.efficiency?.retryAt).toBe(
-		new Date(suspendedAt + 300_000).toISOString(),
+		new Date(
+			Date.now() + suspendedAt + 300_000 - performance.now(),
+		).toISOString(),
 	)
 })
 
@@ -801,7 +853,7 @@ it("channel acquisition delay cannot consume the new run's probation window", as
 	expect(f.instances.get("a")?.starts).toBe(0)
 	release()
 	await starting
-	const startedAt = Date.now()
+	const startedAt = performance.now()
 	vi.mocked(gate.probation).mockImplementation(running => {
 		expect(running[0]?.admittedAtMs).toBe(startedAt)
 		return running.map(item => ({ key: item.key, detail: "cpu" as const }))
@@ -1198,7 +1250,7 @@ function realGate(budgetCores = 1) {
 	}
 	const reader: DropReader = {
 		dropState: () => ({ state: drops.state, dropBytesPerSecond: 0 }),
-		monoNow: () => Date.now(),
+		monoNow: () => performance.now(),
 		sources: () => ["rtl"],
 		droppedSinceMono: () => drops.droppedSince,
 		droppedWithinMs: () => drops.droppedSince,

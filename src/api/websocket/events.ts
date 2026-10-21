@@ -149,6 +149,7 @@ interface ExistingServerMessage {
 		| "tuner:command-sent"
 		| "tuner:control-mode-changed"
 		| "tuner:error"
+		| "tuner:rate-policy"
 		| "aircraft:new"
 		| "aircraft:update"
 		| "aircraft:lost"

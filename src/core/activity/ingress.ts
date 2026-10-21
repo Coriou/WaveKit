@@ -138,7 +138,7 @@ export function createActivityIngress(
 			try {
 				provenance = resolveProvenance(
 					output,
-					lookup === null ? null : lookup(decoderId),
+					lookup === null ? null : lookup(decoderId, output.provenanceBinding),
 				)
 				if (provenance.sourceId === null && provenance.frequency === null)
 					provenance = null

@@ -804,6 +804,35 @@ describe("built protected runtime process", () => {
 		expect((await http(env.api, "/api/status")).status).toBe(401)
 		const machine = { Authorization: `Bearer ${token}` }
 		expect((await http(env.api, "/api/status", machine)).status).toBe(200)
+		const inventory = await http(env.api, "/api/decoders", machine)
+		expect(inventory.status).toBe(200)
+		const decoders = z
+			.array(
+				z.object({
+					id: z.string(),
+					running: z.boolean(),
+					origin: z.literal("catalogue"),
+				}),
+			)
+			.parse(JSON.parse(inventory.body))
+		expect(decoders.map(decoder => decoder.id)).toEqual([
+			"readsb",
+			"ais-catcher",
+			"acarsdec",
+			"dumpvdl2",
+			"rtl433",
+			"direwolf",
+			"multimon-ng",
+			"dsd-fme",
+			"lora-meshtastic",
+		])
+		expect(decoders.every(decoder => !decoder.running)).toBe(true)
+		expect(
+			(await http(env.api, "/api/decoders/efficiency", machine)).status,
+		).toBe(200)
+		expect(
+			(await http(env.api, "/api/decoders/readsb/settings", machine)).status,
+		).toBe(200)
 		const operator = await http(env.api, "/api/operator-data", machine)
 		expect(operator.status).toBe(200)
 		expect(JSON.parse(operator.body)).toMatchObject({

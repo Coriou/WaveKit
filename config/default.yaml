@@ -798,3 +798,10 @@ access:
 #   altM: 35
 #   callsign: F1ABC
 #   country: FR # uppercase ISO 3166-1 alpha-2; WAVEKIT_COUNTRY locks this value
+
+# Decoder modes: auto follows the band, always skips band suspension, off stops.
+# Set decoders[].mode to override the legacy enabled/band settings.
+# decoderPolicy.catalogue: false disables derived built-in decoder instances.
+# decoderPolicy.rateRaise: false disables the operator ADS-B rate policy.
+# decoderPolicy.efficiency: cpuBudgetCores, cpuGuardPercent, maxBandplanChannels.
+# channelizer.auto defaults to true, gated by recorded capacity acceptance.

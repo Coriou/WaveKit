@@ -285,6 +285,7 @@ export function createDecodeEnvelope(
 		// Payload budgets start at its own root; wrappers must not spend depth/nodes.
 		const decodedData = projectDecodedData(producer["data"])
 		delete producer["data"]
+		delete producer["provenanceBinding"]
 		const parsedProducer = outputSchema.safeParse(
 			projectJson(producer, false, true),
 		)

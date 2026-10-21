@@ -599,8 +599,8 @@ export class DecoderManager extends EventEmitter {
 							costCores: state.placement.costCores,
 							sampleRateHz: state.placement.sampleRateHz,
 							admittedAtMs: state.stopping
-								? Date.now() - EFFICIENCY_PROBATION_MS
-								: (state.admittedAtMs ?? Date.now()),
+								? performance.now() - EFFICIENCY_PROBATION_MS
+								: (state.admittedAtMs ?? performance.now()),
 						},
 					]
 				: [],
@@ -610,15 +610,33 @@ export class DecoderManager extends EventEmitter {
 	efficiencyView(): DecoderEfficiencyView {
 		const gate = this.config.enablement?.gate
 		if (!gate) return { budgetCores: 0, cpuGuardPercent: 90, sources: [] }
-		return gate.view(
+		const mono = performance.now()
+		const epoch = Date.now()
+		const view = gate.view(
 			this.runningPlacements(),
 			[...this.decoders.values()].flatMap(state =>
 				state.placement && state.admission?.admit === false
 					? [{ placement: state.placement, decision: state.admission }]
 					: [],
 			),
-			Date.now(),
+			performance.now(),
 		)
+		return {
+			...view,
+			sources: view.sources.map(source => ({
+				...source,
+				blocked: source.blocked.map(placement => ({
+					...placement,
+					...(placement.retryAt
+						? {
+								retryAt: new Date(
+									epoch + Date.parse(placement.retryAt) - mono,
+								).toISOString(),
+							}
+						: {}),
+				})),
+			})),
+		}
 	}
 
 	private scheduleEfficiencyEvaluation(): void {
@@ -647,7 +665,7 @@ export class DecoderManager extends EventEmitter {
 						state =>
 							state.desiredRunning &&
 							state.admission?.admit === false &&
-							state.admission.retryAtMs <= Date.now(),
+							state.admission.retryAtMs <= performance.now(),
 					)
 				)
 					this.notifyBandplansChanged()
@@ -691,10 +709,9 @@ export class DecoderManager extends EventEmitter {
 	private async applyProbationNow(): Promise<void> {
 		const gate = this.config.enablement?.gate
 		if (!gate) return
-		const now = Date.now()
+		const now = performance.now()
 		const running = this.runningPlacements()
-		// The gate alone decides probation; wall-clock time here only keeps the
-		// retry bookkeeping and never vetoes a verdict.
+		// Admission, probation and retry bookkeeping share the monotonic clock.
 		const verdicts = gate.probation(running, now)
 		const condemned = new Set(verdicts.map(verdict => verdict.key))
 		for (const state of this.decoders.values()) {
@@ -2507,7 +2524,11 @@ export class DecoderManager extends EventEmitter {
 							? {
 									efficiency: {
 										detail: state.admission.detail,
-										retryAt: new Date(state.admission.retryAtMs).toISOString(),
+										retryAt: new Date(
+											Date.now() +
+												state.admission.retryAtMs -
+												performance.now(),
+										).toISOString(),
 									},
 								}
 							: {}),
@@ -4457,7 +4478,7 @@ export class DecoderManager extends EventEmitter {
 	private clearExpiredAdmission(state: DecoderState): void {
 		if (
 			state.admission?.admit === false &&
-			state.admission.retryAtMs <= Date.now()
+			state.admission.retryAtMs <= performance.now()
 		)
 			delete state.admission
 	}
@@ -4662,7 +4683,7 @@ export class DecoderManager extends EventEmitter {
 			state.admission = gate.admit(
 				state.placement,
 				this.runningPlacements(),
-				Date.now(),
+				performance.now(),
 			)
 			if (!state.admission.admit) {
 				await this.suspend(state, this.assessEligibility(state))
@@ -4684,7 +4705,7 @@ export class DecoderManager extends EventEmitter {
 			if (gate && state.placement) {
 				delete state.admission
 				delete state.admittedAtMs
-				const now = Date.now()
+				const now = performance.now()
 				state.admission = gate.admit(
 					state.placement,
 					this.runningPlacements(),
@@ -5025,6 +5046,31 @@ export class DecoderManager extends EventEmitter {
 			return undefined
 		}
 		return state.lastHealth
+	}
+
+	/** True only after every process belonging to this decoder has stopped cleanly. */
+	isDecoderConfirmedStopped(id: string): boolean {
+		const states = [...this.decoders.values()].filter(
+			state => state.config.id === id || state.parentId === id,
+		)
+		return (
+			states.length > 0 &&
+			states.every(state => {
+				const status = state.decoder.getStatus()
+				return (
+					!status.running &&
+					status.pid === undefined &&
+					!state.stopping &&
+					!state.processStartPending &&
+					!state.lifecycle?.pending &&
+					status.health !== "faulted" &&
+					!state.transition &&
+					state.lifecycle?.actual !== "stopping" &&
+					state.lifecycle?.actual !== "stopping-failed" &&
+					state.lastHealth !== "faulted"
+				)
+			})
+		)
 	}
 
 	/**
