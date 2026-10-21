@@ -186,6 +186,7 @@ export type DecoderSuspensionReasonCode =
 	| "tuner-scanning"
 	| "efficiency-budget"
 	| "decoder-unavailable"
+	| "channelizer-unavailable"
 
 export interface DecoderCaps {
 	input: DecoderInputType

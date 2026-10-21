@@ -102,6 +102,7 @@ const SUSPENSION_REASON: Readonly<Record<string, string>> = {
 	"frequency-out-of-band": "out of band",
 	"efficiency-budget": "over the efficiency budget",
 	"decoder-unavailable": "not installed",
+	"channelizer-unavailable": "channelizer not available",
 }
 
 /** R84: why core cannot place a decoder in or out of the window. */
