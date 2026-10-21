@@ -832,6 +832,7 @@ it("operator stop during placement startup cannot leave a late process running",
 	await f.manager.stopDecoder("a")
 	pending.resolve()
 	await starting
+	await vi.advanceTimersByTimeAsync(0)
 	expect(decoder.running).toBe(false)
 })
 
@@ -962,6 +963,7 @@ it("manager serializes generated desires with independent adapter events", async
 				desires: fc.array(
 					fc.record({
 						running: fc.boolean(),
+						restart: fc.boolean(),
 						appearance: fc.boolean(),
 						start: fc.constantFrom("resolve", "reject", "never"),
 						stop: fc.constantFrom("resolve", "reject", "never"),
@@ -1073,12 +1075,12 @@ it("manager serializes generated desires with independent adapter events", async
 				await vi.advanceTimersByTimeAsync(1)
 				for (const command of scenario.desires) {
 					const running = command.running
-					state.desiredRunning = running
-					state.intentionallyStopped = !running
 					track(
 						running
-							? internal.startPlacement(state)
-							: internal.stopPlacement(state),
+							? command.restart
+								? f.manager.restartDecoder("a")
+								: f.manager.startDecoder("a")
+							: f.manager.stopDecoder("a"),
 					)
 					await vi.advanceTimersByTimeAsync(0)
 					if (command.appearance) appear()
@@ -1109,8 +1111,6 @@ it("manager serializes generated desires with independent adapter events", async
 					stops.shift()?.reject(new Error("stop failed"))
 				if (scenario.exit) exit(false)
 				await vi.advanceTimersByTimeAsync(5001)
-				expect(settled).toBe(requests.length)
-				await Promise.all(requests)
 				expect(processes.size).toBeLessThanOrEqual(1)
 				if (scenario.admit) expect(state.lifecycle.desired).toBe(lastDesired)
 				else expect(decoder.running).toBe(false)
@@ -1142,6 +1142,12 @@ it("manager serializes generated desires with independent adapter events", async
 						: internal.stopPlacement(state),
 				)
 				for (let turn = 0; turn < 12; turn++) {
+					if (turn === 6)
+						track(
+							lastDesired === "running"
+								? internal.startPlacement(state)
+								: internal.stopPlacement(state),
+						)
 					await vi.advanceTimersByTimeAsync(2500)
 					while (appearances.length) appear()
 					while (starts.length) settleStart("resolve")
@@ -1159,6 +1165,8 @@ it("manager serializes generated desires with independent adapter events", async
 				)
 				expect(processes.size).toBe(lastDesired === "running" ? 1 : 0)
 				expect(starts).toHaveLength(0)
+				await Promise.all(requests)
+				expect(settled).toBe(requests.length)
 				vi.mocked(decoder.stop).mockImplementation(async () => {
 					processes.clear()
 					decoder.running = false

@@ -197,6 +197,14 @@ it("uses the process bases graceful stop deadline and one placement start choke 
 	)
 	expect(choke.match(/await state.decoder.start\(\)/g)).toHaveLength(1)
 	expect(manager.match(/await state.decoder.start\(\)/g)).toHaveLength(1)
+	const parentMethods = manager.slice(
+		manager.indexOf("startDecoder(id: string"),
+		manager.indexOf("async startAll()"),
+	)
+	expect(parentMethods).not.toMatch(/\.decoder\.(start|stop|restart)\(/)
+	expect(manager).not.toMatch(/state\.decoder\.restart\(/)
+	expect(manager.match(/return state.decoder.stop\(\)/g)).toHaveLength(1)
+
 	expect(manager).not.toMatch(
 		/workerStop|workerStart|workerTermination|workerGeneration/,
 	)

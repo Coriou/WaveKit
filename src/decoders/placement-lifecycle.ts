@@ -21,11 +21,14 @@ interface PlacementLifecycleOptions {
 export class PlacementLifecycle {
 	desired: "running" | "stopped" = "stopped"
 	generation = 0
+	decoderGeneration = 0
 	runGeneration = 0
 	error: unknown = null
 	actual: PlacementActual = "idle"
 	private operation: Promise<void> | undefined
 	private starting = false
+	/** A restart keeps running intent while its parent prepares the stopped placements. */
+	private holdRunning = false
 	private cancelStart: (() => void) | undefined
 	private confirmStop: (() => void) | undefined
 	private failedGeneration = -1
@@ -37,14 +40,27 @@ export class PlacementLifecycle {
 		return this.operation !== undefined || this.starting
 	}
 
-	request(desired: "running" | "stopped"): Promise<void> {
+	record(
+		desired: "running" | "stopped",
+		decoderGeneration = this.decoderGeneration,
+	): void {
+		this.decoderGeneration = decoderGeneration
 		this.desired = desired
+		this.holdRunning = false
 		this.error = null
-		const generation = ++this.generation
+		++this.generation
 		if (desired === "stopped") {
 			this.options.invalidate()
 			this.cancelStart?.()
 		}
+		this.notify()
+	}
+
+	request(desired: "running" | "stopped", restart = false): Promise<void> {
+		if (restart && this.options.running()) this.actual = "stopping-failed"
+		this.record(desired)
+		this.holdRunning = restart
+		const generation = this.generation
 		this.kick()
 		return new Promise(resolve => {
 			let timer: ReturnType<typeof setTimeout> | undefined
@@ -55,6 +71,7 @@ export class PlacementLifecycle {
 			}
 			const check = () => {
 				if (
+					generation !== this.generation ||
 					!this.pending ||
 					(desired === "stopped" && this.actual === "stopping-failed")
 				)
@@ -119,6 +136,12 @@ export class PlacementLifecycle {
 		}
 		if (this.desired === "running" && this.starting) return
 		if (this.failedGeneration === this.generation) return
+		if (
+			this.desired === "running" &&
+			this.holdRunning &&
+			!this.options.running()
+		)
+			return
 		const generation = this.generation
 		const start = this.desired === "running" && !this.options.running()
 		this.actual = start ? "starting" : "stopping"

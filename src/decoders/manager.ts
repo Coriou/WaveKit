@@ -196,6 +196,7 @@ interface DecoderState {
 	bandPlan: DecoderBandAssessment | undefined
 	/** Operator intent: set by start, cleared by stop/remove */
 	desiredRunning: boolean
+	parentIntent?: { generation: number; supersede: () => void }
 	/** Set while the source rate or band makes the instance unusable (reversible) */
 	suspension: DecoderSuspension | null
 	/** An in-flight suspend (stop pending or failed) or resume */
@@ -526,15 +527,25 @@ export class DecoderManager extends EventEmitter {
 		}
 		if (previousMode !== mode)
 			this.log.info({ decoderId: id, reasonCode: mode }, "Decoder mode changed")
-		if (mode === "off") await this.stopDecoder(id)
-		else if (!state.desiredRunning)
-			await this.startDecoder(id, { startMode: "auto" })
-		else {
-			state.startMode = "auto"
-			this.notifyBandplansChanged()
-			await this.drainCapsChanges()
+		if (!this.usesPlacementPlanning(state)) {
+			if (mode === "off") await this.stopDecoder(id)
+			else if (!state.desiredRunning)
+				await this.startDecoder(id, { startMode: "auto" })
+			else {
+				state.startMode = "auto"
+				this.notifyBandplansChanged()
+				await this.drainCapsChanges()
+			}
+			this.emitStatusChanged(state)
+			return
 		}
-		this.emitStatusChanged(state)
+		const applying =
+			mode === "off"
+				? this.stopDecoder(id)
+				: this.startDecoder(id, { startMode: "auto" })
+		const request = state.parentIntent
+		await applying
+		if (state.parentIntent === request) this.emitStatusChanged(state)
 	}
 
 	notifyVfoSettled(vfo: PlannerVfo | null): void {
@@ -946,6 +957,7 @@ export class DecoderManager extends EventEmitter {
 			}
 			for (const parent of [...this.decoders.values()]) {
 				if (parent.owner !== "config") continue
+				const parentIntent = parent.parentIntent
 				const primary = wanted.find(
 					placement =>
 						placement.decoderId === parent.config.id && placement.primary,
@@ -960,6 +972,7 @@ export class DecoderManager extends EventEmitter {
 				) {
 					if (parent.decoder.getStatus().running || parent.lifecycle?.pending) {
 						await this.stopPlacement(parent)
+						if (parent.parentIntent !== parentIntent) continue
 						if (parent.decoder.getStatus().running || parent.lifecycle?.pending)
 							continue
 					}
@@ -979,6 +992,7 @@ export class DecoderManager extends EventEmitter {
 			for (const placement of wanted) {
 				const parent = this.decoders.get(placement.decoderId)
 				if (!parent || this.modeFor(parent).mode === "off") continue
+				const parentIntent = parent.parentIntent
 				let state = placement.primary
 					? parent
 					: [...this.decoders.values()].find(
@@ -1007,6 +1021,8 @@ export class DecoderManager extends EventEmitter {
 						parent.config.id,
 					)
 					state = this.decoders.get(placement.key)!
+					state.desiredRunning = parent.desiredRunning
+					state.intentionallyStopped = parent.intentionallyStopped
 				}
 				const moved =
 					state.placement !== undefined && state.placement.key !== placement.key
@@ -1020,6 +1036,7 @@ export class DecoderManager extends EventEmitter {
 				if (moved && state.decoder.getStatus().running) {
 					state.intentionallyStopped = true
 					await this.stopPlacement(state)
+					if (parent.parentIntent !== parentIntent) continue
 					this.unwireDecoderFromFanout(state)
 					state.intentionallyStopped = false
 				}
@@ -1050,10 +1067,16 @@ export class DecoderManager extends EventEmitter {
 					!parent.intentionallyStopped
 				) {
 					this.clearExpiredAdmission(state)
-					if ((state.owner === "placement" && !wasWanted) || moved)
-						await this.startDecoder(state.config.id, {
-							startMode: parent.startMode,
-						})
+					if (
+						(state.owner === "placement" && (!wasWanted || !state.lifecycle)) ||
+						moved
+					)
+						await this.startDecoderNow(
+							state.config.id,
+							{ startMode: parent.startMode },
+							() =>
+								parent.parentIntent === parentIntent && parent.desiredRunning,
+						)
 				}
 			}
 		} finally {
@@ -1604,6 +1627,59 @@ export class DecoderManager extends EventEmitter {
 		)
 	}
 
+	private usesPlacementPlanning(state: DecoderState | undefined): boolean {
+		return (
+			this.config.enablement !== undefined &&
+			state !== undefined &&
+			state.owner === "config" &&
+			state.decoder.caps.input !== "external" &&
+			state.decoder.getBandDeclaration?.().ownSource !== true
+		)
+	}
+
+	/** Public parent intent is recorded before any asynchronous placement work. */
+	private parentRequest(
+		state: DecoderState,
+		running: boolean,
+		work: (current: () => boolean) => Promise<void>,
+		restart = false,
+	): Promise<void> {
+		const previous = state.parentIntent
+		let supersede!: () => void
+		const superseded = new Promise<void>(resolve => {
+			supersede = resolve
+		})
+		const request = { generation: (previous?.generation ?? 0) + 1, supersede }
+		state.parentIntent = request
+		previous?.supersede()
+		state.desiredRunning = running
+		state.intentionallyStopped = !running
+		state.stopRevision++
+		state.rateGeneration++
+		const current = () => state.parentIntent === request
+		for (const placement of this.decoders.values()) {
+			if (placement !== state && placement.parentId !== state.config.id)
+				continue
+			placement.desiredRunning = running
+			placement.intentionallyStopped = !running
+			this.cancelScheduledRestart(placement)
+			if (!running) {
+				placement.startMode = "auto"
+				this.clearChannelRetry(this.selectedSourceId(placement), true)
+			}
+			if (placement.placement)
+				placement.lifecycle?.record(
+					running ? "running" : "stopped",
+					request.generation,
+				)
+			if (running && !restart && placement.lifecycle) placement.lifecycle.kick()
+		}
+		const operation = work(current).catch((error: unknown) => {
+			if (state.parentIntent === request) throw error
+		})
+		return Promise.race([operation, superseded])
+	}
+
 	/**
 	 * Starts a decoder by ID.
 	 * Wires the decoder to a fanout branch for audio input.
@@ -1614,6 +1690,14 @@ export class DecoderManager extends EventEmitter {
 	 * @throws Error if decoder not found
 	 */
 	startDecoder(id: string, intent?: DecoderStartIntent): Promise<void> {
+		const parent = this.decoders.get(id)
+		if (parent && this.usesPlacementPlanning(parent))
+			return this.parentRequest(
+				parent,
+				this.modeFor(parent).mode !== "off",
+				current => this.startDecoderNow(id, intent, current),
+			)
+
 		if (
 			this.decoders.get(id)?.lifecycle ||
 			!this.config.enablement ||
@@ -1640,6 +1724,7 @@ export class DecoderManager extends EventEmitter {
 	private async startDecoderNow(
 		id: string,
 		intent?: DecoderStartIntent,
+		current: () => boolean = () => true,
 	): Promise<void> {
 		const state = this.decoders.get(id)
 		if (!state) {
@@ -1651,8 +1736,11 @@ export class DecoderManager extends EventEmitter {
 			if (this.modeFor(state).mode === "off") return
 			if (intent?.startMode === "operator" && this.isUnavailable(state)) {
 				try {
-					state.available = await this.config.enablement.recheckAvailable(id)
+					const available = await this.config.enablement.recheckAvailable(id)
+					if (!current()) return
+					state.available = available
 				} catch (error) {
+					if (!current()) return
 					state.available = false
 					this.log.warn(
 						{ err: safeErrorFields(error) },
@@ -1660,16 +1748,19 @@ export class DecoderManager extends EventEmitter {
 					)
 				}
 			}
+			if (!current()) return
 			if (intent) state.startMode = intent.startMode
 			if (
 				this.decoders.get(id) !== state ||
-				state.stopRevision !== stopRevision
+				state.stopRevision !== stopRevision ||
+				!current()
 			)
 				return
 			if (!this.reconcilingPlacements) await this.reconcilePlacements()
 			if (
 				this.decoders.get(id) !== state ||
-				state.stopRevision !== stopRevision
+				state.stopRevision !== stopRevision ||
+				!current()
 			)
 				return
 		}
@@ -1754,12 +1845,14 @@ export class DecoderManager extends EventEmitter {
 		state.transition = null
 
 		try {
-			const outcome = await this.startPlacement(state)
+			const outcome = await this.startPlacement(state, current)
+			if (!current()) return
 			if (!outcome.wired) {
 				if (!outcome.superseded) this.holdForChannel(state, outcome)
 				return
 			}
 		} catch (err) {
+			if (!current()) return
 			state.lastError = createDecoderLastError(err, "error")
 			if (state.admission?.admit) delete state.admission
 			delete state.admittedAtMs
@@ -1783,7 +1876,37 @@ export class DecoderManager extends EventEmitter {
 	 * @param id - The decoder ID to stop
 	 * @throws Error if decoder not found
 	 */
-	async stopDecoder(id: string): Promise<void> {
+	stopDecoder(id: string): Promise<void> {
+		const state = this.decoders.get(id)
+		if (state && this.usesPlacementPlanning(state))
+			return this.parentRequest(state, false, async current => {
+				const placements = [...this.decoders.values()].filter(
+					candidate => candidate === state || candidate.parentId === id,
+				)
+				const results = await Promise.allSettled(
+					placements.map(candidate => this.stopPlacement(candidate)),
+				)
+				if (!current()) return
+				for (const worker of placements) {
+					if (worker === state) continue
+					if (worker.decoder.getStatus().running || worker.lifecycle?.pending) {
+						worker.removalPending = true
+						continue
+					}
+					this.finalizeRemoval(worker)
+				}
+				state.suspension = null
+				state.transition = null
+				this.cancelScheduledRestart(state)
+				this.unwireDecoderFromFanout(state)
+				this.emitStatusChanged(state)
+				for (const result of results)
+					if (result.status === "rejected") throw result.reason
+			})
+		return this.stopDecoderNow(id)
+	}
+
+	private async stopDecoderNow(id: string): Promise<void> {
 		const state = this.decoders.get(id)
 		if (!state) {
 			throw new Error(`Decoder not found: ${id}`)
@@ -1861,6 +1984,37 @@ export class DecoderManager extends EventEmitter {
 			throw new Error(`Decoder not found: ${id}`)
 		}
 		if (opts.refuseIfHeld === true) this.assertNotHeld(state)
+		if (this.usesPlacementPlanning(state) && this.modeFor(state).mode === "off")
+			return this.stopDecoder(id)
+		if (this.usesPlacementPlanning(state))
+			return this.parentRequest(
+				state,
+				true,
+				async current => {
+					const placements = [...this.decoders.values()].filter(
+						candidate => candidate === state || candidate.parentId === id,
+					)
+					await Promise.all(
+						placements.map(candidate => this.stopPlacement(candidate, true)),
+					)
+					if (!current()) return
+					for (const worker of placements) {
+						if (worker === state) continue
+						if (worker.decoder.getStatus().running || worker.lifecycle?.pending)
+							throw new WaveKitError(
+								"Placement worker is still running",
+								"DECODER_STOP_PENDING",
+							)
+						this.finalizeRemoval(worker)
+					}
+					await this.startDecoderNow(
+						id,
+						{ startMode: state.startMode },
+						current,
+					)
+				},
+				true,
+			)
 
 		this.log.info({ decoderId: id }, "Restarting decoder")
 
@@ -2011,13 +2165,17 @@ export class DecoderManager extends EventEmitter {
 	private rebuildIfPending(
 		state: DecoderState,
 		keepFailureAccounting = false,
+		actorStarting = false,
 	): boolean {
 		if (state.owner !== "config" || !state.stagedOptions) return false
 		if (!this.stagedDiffers(state)) {
 			state.stagedOptions = null
 			return false
 		}
-		if (state.decoder.getStatus().running || state.lifecycle?.pending)
+		if (
+			state.decoder.getStatus().running ||
+			(state.lifecycle?.pending && !actorStarting)
+		)
 			return false
 		const id = state.config.id
 		const options: Record<string, unknown> = { ...(state.config.options ?? {}) }
@@ -4106,8 +4264,23 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	private placementLifecycle(state: DecoderState): PlacementLifecycle {
-		return (state.lifecycle ??= new PlacementLifecycle({
+		const actor = (state.lifecycle ??= new PlacementLifecycle({
 			start: async generation => {
+				if (
+					state.lifecycle?.generation !== generation ||
+					state.lifecycle.desired !== "running"
+				)
+					return false
+				// The actor has finished its previous stop before entering this start.
+				if (state.stagedOptions) this.rebuildIfPending(state, false, true)
+				const eligibility = this.assessEligibility(state)
+				if (
+					eligibility.blockedBy &&
+					eligibility.blockedBy !== "efficiency-budget"
+				) {
+					await this.suspend(state, eligibility)
+					return false
+				}
 				const outcome = await this.startPlacementNow(
 					state,
 					() =>
@@ -4223,12 +4396,18 @@ export class DecoderManager extends EventEmitter {
 				if (state.removalPending) this.finalizeRemoval(state)
 			},
 		}))
+		const parent = state.parentId ? this.decoders.get(state.parentId) : state
+		actor.decoderGeneration = parent?.parentIntent?.generation ?? 0
+		return actor
 	}
 
-	private async stopPlacement(state: DecoderState): Promise<void> {
+	private async stopPlacement(
+		state: DecoderState,
+		restart = false,
+	): Promise<void> {
 		if (!this.config.enablement || !state.placement) return state.decoder.stop()
 		const actor = this.placementLifecycle(state)
-		const stopping = actor.request("stopped")
+		const stopping = actor.request(restart ? "running" : "stopped", restart)
 		if (
 			state.owner === "config" &&
 			actor.pending &&

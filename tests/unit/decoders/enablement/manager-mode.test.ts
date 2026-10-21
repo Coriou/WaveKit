@@ -120,3 +120,13 @@ it("without enablement options, existing manager tests are unchanged", async () 
 	expect(manager.getStatus("dec")?.mode).toBeUndefined()
 	expect(manager.getAllStatus()).toHaveLength(1)
 })
+
+it("restart in off mode preserves stopped parent intent", async () => {
+	const { manager, decoder, mode } = setup()
+	await manager.startDecoder("dec")
+	mode("off")
+	await manager.applyDecoderMode("dec", "off")
+	await manager.restartDecoder("dec")
+	expect(manager.getStatus("dec")?.desiredRunning).toBe(false)
+	expect(decoder.running).toBe(false)
+})

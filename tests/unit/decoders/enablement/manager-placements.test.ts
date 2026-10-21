@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
 import { afterEach, expect, it, vi } from "vitest"
 import pino from "pino"
+import fc from "fast-check"
 import { createActivityIngress } from "../../../../src/core/activity/ingress.js"
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
@@ -616,4 +617,194 @@ it("a worker still alive after failed escalation stays tracked until exit", asyn
 	await f.manager.destroy()
 	expect(decoder.running).toBe(false)
 	expect(f.manager.getDecoder(worker.key)).toBeUndefined()
+})
+
+it.each(["start", "stop", "restart-start", "restart-stop", "error-start"])(
+	"the last parent call wins while a worker stop is deferred: %s",
+	async last => {
+		const f = setup()
+		f.create("dec")
+		const primary = f.place("dec", 162_000_000)
+		const worker = f.place("dec", 162_025_000, false)
+		f.plan([primary, worker])
+		await f.manager.startAll()
+		const decoder = f.instances.get(worker.key)!
+		const originalStop = decoder.stop.bind(decoder)
+		let release!: () => void
+		const pending = new Promise<void>(resolve => {
+			release = resolve
+		})
+		vi.spyOn(decoder, "stop").mockImplementationOnce(async () => {
+			await pending
+			await originalStop()
+			if (last === "error-start") throw new Error("private adapter failure")
+		})
+		const stopping = f.manager.stopDecoder("dec")
+		await vi.advanceTimersByTimeAsync(0)
+		const calls: Promise<void>[] = [stopping]
+		if (last.startsWith("restart")) calls.push(f.manager.restartDecoder("dec"))
+		calls.push(f.manager.startDecoder("dec"))
+		if (last.endsWith("stop")) calls.push(f.manager.stopDecoder("dec"))
+		release()
+		await vi.advanceTimersByTimeAsync(1)
+		await expect(stopping).resolves.toBeUndefined()
+		await Promise.all(calls)
+		const running = !last.endsWith("stop")
+		expect(f.manager.getStatus("dec")?.desiredRunning).toBe(running)
+		expect(f.manager.getStatus("dec")?.running).toBe(running)
+		const states = (
+			f.manager as unknown as {
+				decoders: Map<
+					string,
+					{
+						lifecycle?: { desired: string; decoderGeneration: number }
+						parentId?: string
+						parentIntent?: { generation: number }
+					}
+				>
+			}
+		).decoders
+		expect(states.get("dec")?.lifecycle?.desired).toBe(
+			running ? "running" : "stopped",
+		)
+		for (const [id, state] of states) {
+			if (state.parentId !== "dec") continue
+			expect(state.lifecycle?.desired).toBe(running ? "running" : "stopped")
+			expect(f.instances.get(id)?.running).toBe(running)
+		}
+	},
+)
+
+// Feature: decoder-enablement, Property 12: Placement lifecycle is serial
+// Validates: Requirements 2.5, 3.7, 4.1, 4.2, 4.3, 11.3
+it("parent generations preserve the last call across deferred worker completion", async () => {
+	await fc.assert(
+		fc.asyncProperty(
+			fc.array(fc.constantFrom("start", "stop", "restart", "mode"), {
+				maxLength: 12,
+			}),
+			fc.boolean(),
+			async (commands, running) => {
+				const f = setup()
+				f.create("dec")
+				const worker = f.place("dec", 162_025_000, false)
+				f.plan([f.place("dec", 162_000_000), worker])
+				await f.manager.startAll()
+				for (const decoder of f.instances.values()) {
+					const start = decoder.start.bind(decoder)
+					vi.spyOn(decoder, "start").mockImplementation(async () => {
+						expect(decoder.running).toBe(false)
+						await start()
+					})
+				}
+				const decoder = f.instances.get(worker.key)!
+				const stop = decoder.stop.bind(decoder)
+				let release!: () => void
+				const pending = new Promise<void>(resolve => {
+					release = resolve
+				})
+				vi.spyOn(decoder, "stop").mockImplementationOnce(async () => {
+					await pending
+					await stop()
+				})
+				const calls: Promise<void>[] = [f.manager.stopDecoder("dec")]
+				await vi.advanceTimersByTimeAsync(0)
+				calls.push(f.manager.startDecoder("dec"))
+				for (const command of commands) {
+					calls.push(
+						command === "stop"
+							? f.manager.stopDecoder("dec")
+							: command === "restart"
+								? f.manager.restartDecoder("dec")
+								: command === "mode"
+									? f.manager.applyDecoderMode("dec", "always")
+									: f.manager.startDecoder("dec"),
+					)
+					await vi.advanceTimersByTimeAsync(0)
+				}
+				calls.push(
+					running
+						? f.manager.startDecoder("dec")
+						: f.manager.stopDecoder("dec"),
+				)
+				release()
+				await vi.advanceTimersByTimeAsync(5001)
+				await Promise.all(calls)
+				expect(f.manager.getStatus("dec")?.desiredRunning).toBe(running)
+				expect(f.manager.getStatus("dec")?.running).toBe(running)
+				const states = (
+					f.manager as unknown as {
+						decoders: Map<
+							string,
+							{
+								lifecycle?: { desired: string; decoderGeneration: number }
+								parentId?: string
+								parentIntent?: { generation: number }
+							}
+						>
+					}
+				).decoders
+				for (const [id, state] of states) {
+					if (id !== "dec" && state.parentId !== "dec") continue
+					expect(state.lifecycle?.desired).toBe(running ? "running" : "stopped")
+					expect(state.lifecycle?.decoderGeneration).toBe(
+						states.get("dec")?.parentIntent?.generation,
+					)
+					expect(f.instances.get(id)?.running).toBe(running)
+				}
+				await f.manager.destroy()
+				manager = undefined
+			},
+		),
+		{ numRuns: 200 },
+	)
+})
+
+it("a superseded parent start resolves without its late adapter failure", async () => {
+	const f = setup()
+	f.create("dec")
+	f.plan([f.place("dec", 162_000_000)])
+	const decoder = f.instances.get("dec")!
+	let reject!: (error: Error) => void
+	const pending = new Promise<void>((_resolve, rejectStart) => {
+		reject = rejectStart
+	})
+	vi.spyOn(decoder, "start").mockImplementationOnce(() => pending)
+	const starting = f.manager.startDecoder("dec")
+	await vi.advanceTimersByTimeAsync(0)
+	const stopping = f.manager.stopDecoder("dec")
+	await expect(starting).resolves.toBeUndefined()
+	reject(new Error("private late adapter failure"))
+	await vi.advanceTimersByTimeAsync(5001)
+	await stopping
+	expect(f.manager.getStatus("dec")?.desiredRunning).toBe(false)
+	expect(decoder.running).toBe(false)
+})
+
+it("a newer parent start applies staged settings after the captured stop exits", async () => {
+	const f = setup()
+	f.create("dec", { gain: 1 })
+	f.plan([f.place("dec", 162_000_000)])
+	await f.manager.startAll()
+	const decoder = f.instances.get("dec")!
+	const stop = decoder.stop.bind(decoder)
+	let release!: () => void
+	const pending = new Promise<void>(resolve => {
+		release = resolve
+	})
+	vi.spyOn(decoder, "stop").mockImplementationOnce(async () => {
+		await pending
+		await stop()
+	})
+	f.manager.stageDecoderOptions("dec", { gain: 2 })
+	const restarting = f.manager.restartDecoder("dec")
+	await vi.advanceTimersByTimeAsync(0)
+	const starting = f.manager.startDecoder("dec")
+	release()
+	await vi.advanceTimersByTimeAsync(1)
+	await Promise.all([restarting, starting])
+	expect(f.manager.getStatus("dec")?.running).toBe(true)
+	expect(f.configs.get("dec")?.["gain"]).toBe(2)
+	expect(f.manager.getDecoder("dec")).not.toBe(decoder)
+	expect(f.manager.isRestartPending("dec")).toBe(false)
 })
