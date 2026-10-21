@@ -137,7 +137,8 @@ export class PlacementLifecycle {
 			this.options.running() &&
 			this.actual === "running"
 		) {
-			this.actual = "running"
+			// A newer parent request adopts the live run, so its crash is current.
+			this.runDecoderGeneration = this.decoderGeneration
 			return
 		}
 		if (this.desired === "stopped" && !this.options.running()) {

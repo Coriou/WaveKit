@@ -9,6 +9,8 @@ import {
 import { installAccessHooks } from "../../../src/access/fastify-adapter.js"
 import { AccessPolicy } from "../../../src/access/policy.js"
 import { SessionStore } from "../../../src/access/sessions.js"
+import { createEfficiencyGate } from "../../../src/decoders/enablement/efficiency-gate.js"
+import { placementKey } from "../../../src/decoders/enablement/contract.js"
 import {
 	digestMachineToken,
 	generateMachineToken,
@@ -119,6 +121,70 @@ it("protected reads use identical admission for decoder inventory and efficiency
 			if (efficiency.statusCode === 200) expect(efficiency.json()).toEqual(view)
 			else expect(efficiency.json()).toEqual(inventory.json())
 		}
+	} finally {
+		await app.close()
+	}
+})
+
+it("the route serves the real efficiency gate's view unchanged", async () => {
+	const now = Date.parse("2026-10-21T12:00:00.000Z")
+	let drops: "ok" | "dropping" | "unknown" = "ok"
+	const gate = createEfficiencyGate(
+		{ budgetCores: 0.5, cpuGuardPercent: 90 },
+		{
+			drops: {
+				dropState: () => ({ state: drops, dropBytesPerSecond: 12.5 }),
+				monoNow: () => 1_000,
+				sources: () => ["rtl", "spare"],
+				droppedSinceMono: () => false,
+				droppedWithinMs: () => false,
+			},
+		},
+	)
+	gate.record({ atMs: now, cpuPercent: 42.5, sources: new Map() })
+	const placement = (decoderId: string, channelHz: number | null) => ({
+		key: placementKey(
+			decoderId,
+			"rtl",
+			channelHz === null ? "raw" : "channel",
+			channelHz,
+		),
+		decoderId,
+		sourceId: "rtl",
+		channelHz,
+		reach: channelHz === null ? ("raw" as const) : ("channel" as const),
+		origin: "configured" as const,
+		primary: true,
+		costCores: 0.1,
+		sampleRateHz: 2_400_000,
+	})
+	const running = [{ ...placement("dec", 162_000_000), admittedAtMs: now }]
+	const raw = placement("raw", null)
+	expect(gate.admit(raw, running, now).admit).toBe(true)
+	drops = "unknown"
+	const blocked = placement("blocked", 162_025_000)
+	const decision = gate.admit(blocked, running, now)
+	expect(decision.admit).toBe(false)
+	const real = gate.view(running, [{ placement: blocked, decision }], now)
+	const app = Fastify()
+	await app.register(decoderRoutes, {
+		decoderManager: {
+			efficiencyView: () => real,
+		} as unknown as DecoderRoutesOptions["decoderManager"],
+	})
+	try {
+		const response = await app.inject("/api/decoders/efficiency")
+		expect(response.statusCode).toBe(200)
+		expect(response.json()).toEqual(real)
+		expect(real.sources.map(source => source.sourceId)).toEqual([
+			"rtl",
+			"spare",
+		])
+		expect(real.sources[0]?.blocked[0]).toMatchObject({
+			decoderId: "blocked",
+			detail: "unknown",
+			retryAt: "2026-10-21T12:05:00.000Z",
+		})
 	} finally {
 		await app.close()
 	}

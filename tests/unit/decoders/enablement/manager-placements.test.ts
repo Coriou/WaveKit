@@ -6,6 +6,7 @@ import fc from "fast-check"
 import { createActivityIngress } from "../../../../src/core/activity/ingress.js"
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
 import { DecoderManager } from "../../../../src/decoders/manager.js"
+import type { DecoderManagerConfig } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../../src/core/source-manager.js"
@@ -19,7 +20,12 @@ import type {
 } from "../../../../src/decoders/enablement/contract.js"
 import { placementKey } from "../../../../src/decoders/enablement/contract.js"
 import type { Decoder } from "../../../../src/decoders/types.js"
-import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
+import {
+	FakeSources,
+	RateDecoder,
+	deferred,
+	iqCaps,
+} from "../../../mocks/rate-fakes.js"
 
 let manager: DecoderManager | undefined
 afterEach(async () => {
@@ -27,7 +33,11 @@ afterEach(async () => {
 	vi.useRealTimers()
 })
 
-function setup(type = "rate-test", gate?: EfficiencyGate) {
+function setup(
+	type = "rate-test",
+	gate?: EfficiencyGate,
+	config: Partial<DecoderManagerConfig> = {},
+) {
 	vi.useFakeTimers()
 	const sources = new FakeSources()
 	sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 162_000_000 })
@@ -74,6 +84,7 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 		},
 	})
 	manager = new DecoderManager(registry, new FanoutManager(logger), logger, {
+		...config,
 		validateVersions: false,
 		enablement: {
 			planner,
@@ -680,9 +691,18 @@ it.each(["start", "stop", "restart-start", "restart-stop", "error-start"])(
 it("parent generations preserve the last call across deferred worker completion", async () => {
 	await fc.assert(
 		fc.asyncProperty(
-			fc.array(fc.constantFrom("start", "stop", "restart", "mode", "crash"), {
-				maxLength: 12,
-			}),
+			fc.array(
+				fc.constantFrom(
+					"start",
+					"stop",
+					"restart",
+					"mode",
+					"crash",
+					"crash-fail",
+					"crash-hang",
+				),
+				{ maxLength: 12 },
+			),
 			fc.boolean(),
 			async (commands, running) => {
 				const f = setup()
@@ -707,24 +727,46 @@ it("parent generations preserve the last call across deferred worker completion"
 					await pending
 					await stop()
 				})
-				const calls: Promise<void>[] = [f.manager.stopDecoder("dec")]
+				const calls: Promise<void>[] = []
+				// Rejections are observed at the end; mark them handled meanwhile.
+				const add = (call: Promise<void>) => {
+					call.catch(() => undefined)
+					calls.push(call)
+				}
+				add(f.manager.stopDecoder("dec"))
 				await vi.advanceTimersByTimeAsync(0)
-				calls.push(f.manager.startDecoder("dec"))
+				add(f.manager.startDecoder("dec"))
+				// Crash restarts that fail or hang past the request bound may fail
+				// intermediate calls; the final state must still converge.
+				const strict = commands.every(command => !command.startsWith("crash-"))
+				let hangs = 0
 				for (const command of commands) {
-					if (command === "crash") {
+					if (command.startsWith("crash")) {
 						const internal = f.manager as unknown as {
 							decoders: Map<string, { lifecycle?: { actual: string } }>
 						}
+						const crashed: RateDecoder[] = []
 						for (const [id, placement] of f.instances)
 							if (
 								placement.running &&
 								internal.decoders.get(id)?.lifecycle?.actual === "running"
-							)
+							) {
+								crashed.push(placement)
+								if (command === "crash-fail") placement.failStart = true
+								if (command === "crash-hang") {
+									const gate = deferred()
+									placement.startGate = gate
+									setTimeout(gate.resolve, 6000)
+									hangs++
+								}
 								placement.crash()
-						await vi.advanceTimersByTimeAsync(0)
+							}
+						// Let the 2000 ms backoff fire so its restart meets the fault.
+						await vi.advanceTimersByTimeAsync(command === "crash" ? 0 : 2000)
+						for (const placement of crashed) placement.failStart = false
 						continue
 					}
-					calls.push(
+					add(
 						command === "stop"
 							? f.manager.stopDecoder("dec")
 							: command === "restart"
@@ -735,14 +777,15 @@ it("parent generations preserve the last call across deferred worker completion"
 					)
 					await vi.advanceTimersByTimeAsync(0)
 				}
-				calls.push(
+				add(
 					running
 						? f.manager.startDecoder("dec")
 						: f.manager.stopDecoder("dec"),
 				)
 				release()
-				await vi.advanceTimersByTimeAsync(5001)
-				await Promise.all(calls)
+				await vi.advanceTimersByTimeAsync(hangs > 0 ? 11_002 : 5001)
+				if (strict) await Promise.all(calls)
+				else await Promise.allSettled(calls)
 				expect(f.manager.getStatus("dec")?.desiredRunning).toBe(running)
 				expect(f.manager.getStatus("dec")?.running).toBe(running)
 				const states = (
@@ -895,17 +938,21 @@ it.each(["failure", "timeout", "ok"])(
 	},
 )
 
-it.each(["stop", "restart", "queued restart", "normal", "superseded"])(
+function crashGate(): EfficiencyGate {
+	return {
+		record: vi.fn(),
+		admit: vi.fn(() => ({ admit: true as const })),
+		probation: () => [],
+		noteSuspended: vi.fn(),
+		forget: vi.fn(),
+		view: () => ({ budgetCores: 1, cpuGuardPercent: 90, sources: [] }),
+	}
+}
+
+it.each(["stop", "restart", "normal", "superseded"])(
 	"crash retry obeys parent generations: %s",
 	async action => {
-		const gate: EfficiencyGate = {
-			record: vi.fn(),
-			admit: vi.fn(() => ({ admit: true as const })),
-			probation: () => [],
-			noteSuspended: vi.fn(),
-			forget: vi.fn(),
-			view: () => ({ budgetCores: 1, cpuGuardPercent: 90, sources: [] }),
-		}
+		const gate = crashGate()
 		const f = setup("rate-test", gate)
 		f.create("dec")
 		const worker = f.place("dec", 162_025_000, false)
@@ -920,22 +967,10 @@ it.each(["stop", "restart", "queued restart", "normal", "superseded"])(
 			}
 			internal.decoders.get(worker.key)!.lifecycle.runDecoderGeneration--
 		}
-		let releaseQueue: (() => void) | undefined
-		if (action === "queued restart") {
-			const internal = f.manager as unknown as { capsWork: Promise<void> }
-			internal.capsWork = new Promise<void>(resolve => {
-				releaseQueue = resolve
-			})
-		}
 		decoder.crash()
-		await vi.advanceTimersByTimeAsync(action === "queued restart" ? 1000 : 0)
+		await vi.advanceTimersByTimeAsync(0)
 		if (action === "stop") await f.manager.stopDecoder("dec")
-		if (action.includes("restart")) {
-			const restarting = f.manager.restartDecoder("dec")
-			releaseQueue?.()
-			await vi.advanceTimersByTimeAsync(0)
-			await restarting
-		}
+		if (action === "restart") await f.manager.restartDecoder("dec")
 		await vi.advanceTimersByTimeAsync(6000)
 		expect(starts).toHaveBeenCalledTimes(action === "normal" ? 1 : 0)
 		if (action === "normal")
@@ -944,7 +979,175 @@ it.each(["stop", "restart", "queued restart", "normal", "superseded"])(
 			)
 		if (action === "stop")
 			expect(f.manager.getStatus("dec")?.running).toBe(false)
-		if (action.includes("restart"))
+		if (action === "restart")
 			expect(f.manager.getStatus("dec")?.running).toBe(true)
 	},
 )
+
+it("a queued crash retry does not start a worker a newer restart holds", async () => {
+	const f = setup("rate-test", crashGate())
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	const decoder = f.instances.get(worker.key)!
+	const starts = vi.spyOn(decoder, "start")
+	const internal = f.manager as unknown as { capsWork: Promise<void> }
+	const queue = deferred()
+	internal.capsWork = queue.promise
+	decoder.crash()
+	// The 2000 ms backoff fires and its retry queues behind the held caps work.
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(starts).not.toHaveBeenCalled()
+	const primary = f.instances.get("dec")!
+	const stop = primary.stop.bind(primary)
+	const primaryStop = deferred()
+	vi.spyOn(primary, "stop").mockImplementationOnce(async () => {
+		await primaryStop.promise
+		await stop()
+	})
+	const restarting = f.manager.restartDecoder("dec")
+	await vi.advanceTimersByTimeAsync(0)
+	// The queued retry runs while the restart still awaits the primary stop.
+	queue.resolve()
+	await vi.advanceTimersByTimeAsync(0)
+	primaryStop.resolve()
+	await vi.advanceTimersByTimeAsync(1)
+	await expect(restarting).resolves.toBeUndefined()
+	await vi.advanceTimersByTimeAsync(6000)
+	expect(starts).not.toHaveBeenCalled()
+	expect(f.manager.getStatus("dec")?.running).toBe(true)
+	expect(f.instances.get(worker.key)?.running).toBe(true)
+})
+
+it("a hung crash restart releases the caps queue within the request bound", async () => {
+	const f = setup("rate-test", crashGate())
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	const decoder = f.instances.get(worker.key)!
+	const start = deferred()
+	decoder.startGate = start
+	decoder.crash()
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(decoder.starts).toBe(2)
+	const internal = f.manager as unknown as {
+		capsWork: Promise<void>
+		drainCapsChanges(): Promise<void>
+	}
+	let released = false
+	void internal.capsWork.then(() => {
+		released = true
+	})
+	await vi.advanceTimersByTimeAsync(4999)
+	expect(released).toBe(false)
+	await vi.advanceTimersByTimeAsync(1)
+	expect(released).toBe(true)
+	expect(f.manager.getStatus(worker.key)?.lastError?.message).toBe(
+		"Decoder placement start failed",
+	)
+	expect(f.manager.getStatus(worker.key)?.health).toBe("faulted")
+	let drained = false
+	void internal.drainCapsChanges().then(() => {
+		drained = true
+	})
+	await vi.advanceTimersByTimeAsync(0)
+	expect(drained).toBe(true)
+	// The actor still owns the unfinished start: a stop accounts for it and a
+	// late process is stopped once it arrives.
+	const stopping = f.manager.stopDecoder("dec").catch(() => undefined)
+	await vi.advanceTimersByTimeAsync(5001)
+	await stopping
+	expect(f.manager.getDecoder(worker.key)).toBe(decoder)
+	const stops = decoder.stops
+	start.resolve()
+	await vi.advanceTimersByTimeAsync(5001)
+	expect(decoder.stops).toBeGreaterThan(stops)
+	expect(decoder.running).toBe(false)
+	expect(decoder.starts).toBe(2)
+})
+
+it.each(["retry", "stop in backoff", "restart in backoff", "stop in start"])(
+	"a failed crash restart keeps the retry accounting: %s",
+	async action => {
+		const f = setup("rate-test", crashGate(), {
+			maxRestarts: 3,
+			faultAfterFailures: 3,
+		})
+		f.create("dec")
+		const worker = f.place("dec", 162_025_000, false)
+		f.plan([f.place("dec", 162_000_000), worker])
+		await f.manager.startAll()
+		const decoder = f.instances.get(worker.key)!
+		const maxRestarts = vi.fn()
+		f.manager.on("decoder:max-restarts", maxRestarts)
+		decoder.failStart = true
+		const start = deferred()
+		if (action === "stop in start") decoder.startGate = start
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(2000)
+		expect(decoder.starts).toBe(2)
+		if (action === "stop in start") {
+			const stopping = f.manager.stopDecoder("dec")
+			start.resolve()
+			await vi.advanceTimersByTimeAsync(0)
+			await stopping
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(decoder.starts).toBe(2)
+			expect(f.manager.getStatus("dec")?.desiredRunning).toBe(false)
+			return
+		}
+		expect(f.manager.getStatus(worker.key)?.lastError?.message).toBe(
+			"Decoder placement start failed",
+		)
+		expect(f.manager.getStatus(worker.key)?.health).toBe("restarting")
+		if (action === "stop in backoff") {
+			await f.manager.stopDecoder("dec")
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(decoder.starts).toBe(2)
+			return
+		}
+		if (action === "restart in backoff") {
+			decoder.failStart = false
+			await f.manager.restartDecoder("dec")
+			const current = f.instances.get(worker.key)!
+			const before = current.starts
+			await vi.advanceTimersByTimeAsync(60_000)
+			expect(decoder.starts).toBe(2)
+			expect(current.starts).toBe(before)
+			expect(current.running).toBe(true)
+			return
+		}
+		// Backoff doubles: the second attempt comes 4000 ms after the first.
+		await vi.advanceTimersByTimeAsync(3999)
+		expect(decoder.starts).toBe(2)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(decoder.starts).toBe(3)
+		await vi.advanceTimersByTimeAsync(8000)
+		expect(decoder.starts).toBe(4)
+		expect(maxRestarts).toHaveBeenCalledTimes(1)
+		expect(f.manager.getStatus(worker.key)?.health).toBe("faulted")
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(decoder.starts).toBe(4)
+		expect(decoder.running).toBe(false)
+	},
+)
+
+it("a crash of a run adopted by a newer parent start is retried", async () => {
+	const f = setup()
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	const decoder = f.instances.get(worker.key)!
+	await f.manager.startDecoder("dec")
+	expect(decoder.running).toBe(true)
+	// The newer start adopts the live worker run instead of restarting it.
+	await f.manager.startDecoder("dec")
+	expect(decoder.starts).toBe(1)
+	decoder.crash()
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(decoder.starts).toBe(2)
+	expect(decoder.running).toBe(true)
+})

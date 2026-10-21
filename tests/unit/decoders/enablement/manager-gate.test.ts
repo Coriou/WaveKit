@@ -19,8 +19,16 @@ import type {
 	PlacementPlanner,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
-import { placementKey } from "../../../../src/decoders/enablement/contract.js"
+import {
+	EFFICIENCY_PROBATION_MS,
+	EFFICIENCY_RETRY_MS,
+	placementKey,
+} from "../../../../src/decoders/enablement/contract.js"
 import type { Decoder } from "../../../../src/decoders/types.js"
+import {
+	createEfficiencyGate,
+	type DropReader,
+} from "../../../../src/decoders/enablement/efficiency-gate.js"
 import {
 	FakeSources,
 	RateDecoder,
@@ -305,15 +313,16 @@ it("budget 0.5 at 869.525 MHz: LoRa and dsd-fme efficiency-budget (budget), noth
 	expect(gate.admit).toHaveBeenCalledTimes(4)
 })
 
+// The gate alone decides probation, so this runs against the real gate.
 it("operator-started decoder outside probation is never stopped by the gate", async () => {
-	const gate = fakeGate()
+	const { drops, gate } = realGate()
 	const f = setup("rate-test", gate)
 	f.create("dec")
-	const placement = f.place("dec", 162_000_000)
-	f.plan([placement])
+	f.plan([f.place("dec", 162_000_000)])
 	await f.manager.startDecoder("dec", { startMode: "operator" })
 	await vi.advanceTimersByTimeAsync(31_000)
-	gate.probation = () => [{ key: placement.key, detail: "cpu" }]
+	drops.droppedSince = true
+	gate.record({ atMs: Date.now(), cpuPercent: 100, sources: new Map() })
 	await vi.advanceTimersByTimeAsync(2500)
 	expect(f.instances.get("dec")?.running).toBe(true)
 })
@@ -1180,4 +1189,270 @@ it("manager serializes generated desires with independent adapter events", async
 		),
 		{ numRuns: 200 },
 	)
+})
+
+function realGate(budgetCores = 1) {
+	const drops = {
+		state: "ok" as "ok" | "dropping" | "unknown",
+		droppedSince: false,
+	}
+	const reader: DropReader = {
+		dropState: () => ({ state: drops.state, dropBytesPerSecond: 0 }),
+		monoNow: () => Date.now(),
+		sources: () => ["rtl"],
+		droppedSinceMono: () => drops.droppedSince,
+		droppedWithinMs: () => drops.droppedSince,
+	}
+	return {
+		drops,
+		gate: createEfficiencyGate(
+			{ budgetCores, cpuGuardPercent: 90 },
+			{ drops: reader },
+		),
+	}
+}
+
+it("the manager admits, reports and probation-suspends through the real efficiency gate", async () => {
+	const { drops, gate } = realGate()
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	const placement = f.place("dec", 162_000_000)
+	f.plan([placement])
+	await f.manager.startAll()
+	expect(f.instances.get("dec")?.running).toBe(true)
+	let view = f.manager.efficiencyView()
+	expect(view.sources[0]?.admitted).toEqual([
+		{
+			decoderId: "dec",
+			sourceId: "rtl",
+			channelHz: 162_000_000,
+			reach: "channel",
+			costCores: 0.14,
+			probation: true,
+		},
+	])
+	// Unknown drop evidence fails closed for a newcomer.
+	drops.state = "unknown"
+	const worker = f.place("dec", 162_050_000, false)
+	f.plan([placement, worker])
+	const before = Date.now()
+	await f.settle()
+	expect(f.instances.get(worker.key)?.running).toBe(false)
+	expect(
+		f.manager.getStatus("dec")?.placements?.find(item => !item.primary)
+			?.efficiencyDetail,
+	).toBe("unknown")
+	view = f.manager.efficiencyView()
+	expect(view.sources[0]?.blocked).toEqual([
+		{
+			decoderId: "dec",
+			sourceId: "rtl",
+			channelHz: 162_050_000,
+			reach: "channel",
+			costCores: 0.14,
+			probation: false,
+			detail: "unknown",
+			retryAt: expect.any(String),
+		},
+	])
+	const retryAt = Date.parse(view.sources[0]?.blocked[0]?.retryAt ?? "")
+	expect(retryAt).toBeGreaterThanOrEqual(before + EFFICIENCY_RETRY_MS)
+	expect(retryAt).toBeLessThanOrEqual(Date.now() + EFFICIENCY_RETRY_MS)
+	// Drops during probation suspend the newest running placement.
+	drops.state = "ok"
+	drops.droppedSince = true
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(f.instances.get("dec")?.running).toBe(false)
+	expect(f.manager.getStatus("dec")?.efficiency?.detail).toBe("drops")
+	expect(f.manager.getStatus("dec")?.suspension?.reasonCode).toBe(
+		"efficiency-budget",
+	)
+})
+
+it("a placement past probation is never suspended by the real gate", async () => {
+	const { drops, gate } = realGate()
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	f.plan([f.place("dec", 162_000_000)])
+	await f.manager.startAll()
+	await vi.advanceTimersByTimeAsync(30_000)
+	expect(f.manager.efficiencyView().sources[0]?.admitted[0]?.probation).toBe(
+		false,
+	)
+	drops.droppedSince = true
+	await vi.advanceTimersByTimeAsync(4000)
+	expect(f.instances.get("dec")?.running).toBe(true)
+})
+
+it("a gate verdict suspends a placement whose wall-clock admission is past probation", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	const placement = f.place("dec", 162_000_000)
+	f.plan([placement])
+	await f.manager.startAll()
+	// A forward wall-clock jump puts the admission outside the probation window.
+	vi.setSystemTime(Date.now() + EFFICIENCY_PROBATION_MS + 60_000)
+	gate.probation = vi.fn<EfficiencyGate["probation"]>(() => [
+		{ key: placement.key, detail: "drops" },
+	])
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(gate.noteSuspended).toHaveBeenCalledWith(
+		placement.key,
+		"drops",
+		expect.any(Number),
+	)
+	expect(f.instances.get("dec")?.running).toBe(false)
+	expect(f.manager.getStatus("dec")?.efficiency?.detail).toBe("drops")
+})
+
+it("the real gate's monotonic probation survives a forward wall-clock jump", async () => {
+	const drops = { droppedSince: false }
+	let mono = 0
+	const f = setup(
+		"rate-test",
+		createEfficiencyGate(
+			{ budgetCores: 1, cpuGuardPercent: 90 },
+			{
+				drops: {
+					dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+					monoNow: () => mono,
+					sources: () => ["rtl"],
+					droppedSinceMono: () => drops.droppedSince,
+					droppedWithinMs: () => drops.droppedSince,
+				},
+			},
+		),
+	)
+	f.create("dec")
+	f.plan([f.place("dec", 162_000_000)])
+	await f.manager.startAll()
+	vi.setSystemTime(Date.now() + EFFICIENCY_PROBATION_MS + 60_000)
+	mono += 1000
+	drops.droppedSince = true
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(f.instances.get("dec")?.running).toBe(false)
+	expect(f.manager.getStatus("dec")?.efficiency?.detail).toBe("drops")
+})
+
+it("a probation verdict is not applied to a run that restarted while an earlier suspension was pending", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("a")
+	f.create("b")
+	const first = f.place("a", 162_000_000)
+	const second = f.place("b", 162_050_000)
+	f.plan([first, second])
+	await f.manager.startAll()
+	const a = f.instances.get("a")!
+	const b = f.instances.get("b")!
+	expect(a.running && b.running).toBe(true)
+	const stop = a.stop.bind(a)
+	const release = deferred()
+	vi.spyOn(a, "stop").mockImplementationOnce(async () => {
+		await release.promise
+		await stop()
+	})
+	vi.mocked(gate.probation).mockReturnValueOnce([
+		{ key: first.key, detail: "drops" },
+		{ key: second.key, detail: "drops" },
+	])
+	await vi.advanceTimersByTimeAsync(2000)
+	expect(gate.noteSuspended).toHaveBeenCalledTimes(1)
+	// While the first suspension waits, the second placement starts a new run.
+	await f.manager.restartDecoder("b")
+	expect(b.starts).toBe(2)
+	release.resolve()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(a.running).toBe(false)
+	expect(gate.noteSuspended).toHaveBeenCalledTimes(1)
+	expect(gate.noteSuspended).not.toHaveBeenCalledWith(
+		second.key,
+		expect.anything(),
+		expect.anything(),
+	)
+	expect(b.running).toBe(true)
+	expect(f.manager.getStatus("b")?.efficiency).toBeUndefined()
+})
+
+it("overlapping probation passes do not apply a verdict twice", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("a")
+	const first = f.place("a", 162_000_000)
+	f.plan([first])
+	await f.manager.startAll()
+	const a = f.instances.get("a")!
+	const stop = a.stop.bind(a)
+	const release = deferred()
+	vi.spyOn(a, "stop").mockImplementationOnce(async () => {
+		await release.promise
+		await stop()
+	})
+	vi.mocked(gate.probation).mockReturnValue([
+		{ key: first.key, detail: "drops" },
+	])
+	const internal = f.manager as unknown as {
+		applyProbation(): Promise<void>
+	}
+	const before = vi.mocked(gate.probation).mock.calls.length
+	const passes = [internal.applyProbation(), internal.applyProbation()]
+	await vi.advanceTimersByTimeAsync(0)
+	const probations = vi.mocked(gate.probation).mock.calls.length - before
+	const suspensions = vi.mocked(gate.noteSuspended).mock.calls.length
+	release.resolve()
+	// The second caller joined the pass still awaiting its suspension.
+	expect(probations).toBe(1)
+	expect(suspensions).toBe(1)
+	await vi.advanceTimersByTimeAsync(1)
+	await Promise.all(passes)
+	expect(gate.noteSuspended).toHaveBeenCalledTimes(1)
+	expect(a.running).toBe(false)
+})
+
+it("a call joining an in-flight probation pass gets exactly one follow-up pass", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("a")
+	f.create("b")
+	const first = f.place("a", 162_000_000)
+	const second = f.place("b", 162_050_000)
+	f.plan([first, second])
+	await f.manager.startAll()
+	const a = f.instances.get("a")!
+	const b = f.instances.get("b")!
+	const stop = a.stop.bind(a)
+	const release = deferred()
+	vi.spyOn(a, "stop").mockImplementationOnce(async () => {
+		await release.promise
+		await stop()
+	})
+	const internal = f.manager as unknown as {
+		applyProbation(): Promise<void>
+	}
+	const before = vi.mocked(gate.probation).mock.calls.length
+	vi.mocked(gate.probation).mockReturnValueOnce([
+		{ key: first.key, detail: "drops" },
+	])
+	const pass = internal.applyProbation()
+	await Promise.resolve()
+	expect(vi.mocked(gate.probation).mock.calls.length - before).toBe(1)
+	// Evidence for the second probationer arrives after the pass asked the gate.
+	vi.mocked(gate.probation).mockImplementation(running =>
+		running.some(item => item.key === second.key)
+			? [{ key: second.key, detail: "drops" }]
+			: [],
+	)
+	const joins = Array.from({ length: 5 }, () => internal.applyProbation())
+	release.resolve()
+	await Promise.all([pass, ...joins])
+	expect(vi.mocked(gate.probation).mock.calls.length - before).toBe(2)
+	expect(a.running).toBe(false)
+	expect(b.running).toBe(false)
+	expect(gate.noteSuspended).toHaveBeenCalledWith(
+		second.key,
+		"drops",
+		expect.any(Number),
+	)
+	expect(gate.noteSuspended).toHaveBeenCalledTimes(2)
 })

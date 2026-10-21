@@ -470,6 +470,8 @@ export class DecoderManager extends EventEmitter {
 	private capsWork: Promise<void> = Promise.resolve()
 	private efficiencyTimer: ReturnType<typeof setTimeout> | null = null
 	private lastEfficiencyWarningMs = -Infinity
+	private probationPass: Promise<void> | undefined
+	private probationRerun = false
 	private destroying = false
 	private readonly pendingCapsChanges = new Map<
 		string,
@@ -661,28 +663,81 @@ export class DecoderManager extends EventEmitter {
 		this.efficiencyTimer.unref()
 	}
 
-	private async applyProbation(): Promise<void> {
+	/**
+	 * One probation pass at a time. A caller arriving during a pass marks it
+	 * dirty and shares its promise, which settles only after one follow-up pass
+	 * has read the evidence available at that call; any number of joins during
+	 * a pass coalesce into a single rerun.
+	 */
+	private applyProbation(): Promise<void> {
+		if (this.probationPass) {
+			this.probationRerun = true
+			return this.probationPass
+		}
+		this.probationPass = (async () => {
+			try {
+				do {
+					this.probationRerun = false
+					await this.applyProbationNow()
+				} while (this.probationRerun && !this.destroying)
+			} finally {
+				this.probationPass = undefined
+				this.probationRerun = false
+			}
+		})()
+		return this.probationPass
+	}
+
+	private async applyProbationNow(): Promise<void> {
 		const gate = this.config.enablement?.gate
 		if (!gate) return
 		const now = Date.now()
 		const running = this.runningPlacements()
+		// The gate alone decides probation; wall-clock time here only keeps the
+		// retry bookkeeping and never vetoes a verdict.
+		const verdicts = gate.probation(running, now)
+		const condemned = new Set(verdicts.map(verdict => verdict.key))
 		for (const state of this.decoders.values()) {
 			if (
 				state.decoder.getStatus().running &&
 				state.admittedAtMs !== undefined &&
+				!(state.placement && condemned.has(state.placement.key)) &&
 				now - state.admittedAtMs >= EFFICIENCY_PROBATION_MS
 			)
 				delete state.efficiencyBackoffMs
 		}
-		const verdicts = gate.probation(running, now)
-		for (const verdict of verdicts) {
-			const placement = running.find(item => item.key === verdict.key)
-			if (!placement || now - placement.admittedAtMs >= EFFICIENCY_PROBATION_MS)
-				continue
+		// Each verdict belongs to the run the gate judged; a suspension awaited
+		// below may let another placement stop or restart, so its verdict is
+		// applied only while that same run is still live.
+		const judged = verdicts.flatMap(verdict => {
+			if (!running.some(item => item.key === verdict.key)) return []
 			const state = [...this.decoders.values()].find(
 				item => item.placement?.key === verdict.key,
 			)
-			if (!state) continue
+			return state
+				? [
+						{
+							verdict,
+							state,
+							admission: state.admission,
+							admittedAtMs: state.admittedAtMs,
+							run: state.lifecycle?.runGeneration,
+						},
+					]
+				: []
+		})
+		for (const { verdict, state, admission, admittedAtMs, run } of judged) {
+			if (
+				this.destroying ||
+				this.decoders.get(state.config.id) !== state ||
+				state.placement?.key !== verdict.key ||
+				!state.decoder.getStatus().running ||
+				state.suspension !== null ||
+				state.admission !== admission ||
+				state.admittedAtMs !== admittedAtMs ||
+				state.lifecycle?.runGeneration !== run
+			)
+				continue
 			gate.noteSuspended(verdict.key, verdict.detail, now)
 			state.efficiencyBackoffMs = Math.min(
 				state.efficiencyBackoffMs === undefined
@@ -2940,15 +2995,57 @@ export class DecoderManager extends EventEmitter {
 				if (actor) {
 					actor.record("running", parentGeneration)
 					actor.kick()
-					await actor.settled()
-					if (actor.error) {
+					const restartGeneration = actor.generation
+					const restartCurrent = () =>
+						this.decoders.get(state.config.id) === state &&
+						!state.intentionallyStopped &&
+						parent?.desiredRunning === true &&
+						parent.parentIntent?.generation === parentGeneration &&
+						actor.generation === restartGeneration
+					// A failed start is one more unstable run: the exit path applies
+					// the crash-loop accounting and schedules the next backoff.
+					const conclude = () => {
+						if (!actor.error || !restartCurrent() || state.restartTimer) return
+						state.lastError = createDecoderLastError(
+							new DecoderPlacementStartError(),
+							"error",
+						)
+						this.log.error(
+							{ decoderId: decoder.id },
+							"Failed to restart decoder placement - other decoders continue operating",
+						)
+						this.handleDecoderExit(state, null, null)
+					}
+					const settled = actor.settled()
+					let timer: ReturnType<typeof setTimeout> | undefined
+					const bounded = await Promise.race([
+						settled.then(() => true),
+						new Promise<false>(resolve => {
+							timer = setTimeout(
+								() => resolve(false),
+								PLACEMENT_STOP_TIMEOUT_MS,
+							)
+						}),
+					])
+					clearTimeout(timer)
+					if (bounded) {
+						conclude()
+						return
+					}
+					// The actor keeps the unfinished start; the shared queue moves on.
+					if (restartCurrent() && actor.pending) {
 						state.lastError = createDecoderLastError(
 							new DecoderPlacementStartError(),
 							"error",
 						)
 						this.updateDecoderHealth(state, "faulted")
 						this.emitStatusChanged(state)
+						this.log.warn(
+							{ decoderId: decoder.id },
+							"Decoder placement restart did not settle in time - other decoders continue operating",
+						)
 					}
+					void settled.then(conclude)
 					return
 				}
 				try {
