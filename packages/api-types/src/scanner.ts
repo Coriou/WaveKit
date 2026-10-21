@@ -1112,6 +1112,10 @@ export interface ScannerIdentifyAnalog {
 	tuningTrust: TuningTrust
 }
 export interface ScannerIdentifyResult {
+	/** Fixed summary of the target evidence. Absent on older cores. */
+	proof?: ScannerProof
+	/** Spectral class derived from target measurements, never decoder text. */
+	hint?: string
 	protocol?: ScannerProtocol
 	confidence: ScannerConfidence
 	identity?: Identity
