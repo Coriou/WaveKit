@@ -75,6 +75,8 @@ export interface ChannelizerManagerDeps {
 	now?: () => number
 	/** How long a request waits for `opened`/`rejected` (default 5 s; tests). */
 	openTimeoutMs?: number
+	/** Optional per-source idle linger; absent or zero retires immediately. */
+	idleStopMs?: number
 	/** Monotonic acquisition clock; separate from the crash-window wall clock. */
 	openNow?: () => number
 	/** Internal composition opt-in; public configured providers remain unchanged. */
@@ -127,6 +129,8 @@ interface SourceChannelizer {
 	interruptions: Set<() => void>
 	/** Requests between `open` and attaching (or failing); the process is not idle while any is in flight. */
 	pending: number
+	idleTimer?: ReturnType<typeof setTimeout>
+	idleCause?: string
 	gapAtByte: number | null
 	droppedAtGap: number
 	invalidated: boolean
@@ -556,13 +560,34 @@ export class ChannelizerManager
 		const channelId = `${sanitize(decoderId)}-g${generation}`
 		const closing = s?.closing.get(channelId)
 		if (s && closing) {
-			const settled = await this.wait(s, ctx, done => {
-				void closing.promise.then(() => done("closed"))
-				return () => {}
-			})
-			if (settled === "cancelled") return unavailable(this.cancellationDetail())
-			if (settled === null) return this.timeout()
-			return this.request(sourceId, decoderId, req, inputCaps, ctx, retried)
+			const protectIdle = (this.deps.idleStopMs ?? 0) > 0
+			const idleCause = s.idleCause ?? "no-channels"
+			if (protectIdle) {
+				this.clearIdleTimer(s)
+				s.pending++
+			}
+			try {
+				const settled = await this.wait(s, ctx, done => {
+					void closing.promise.then(() => done("closed"))
+					return () => {}
+				})
+				if (settled === "cancelled")
+					return unavailable(this.cancellationDetail())
+				if (settled === null) return this.timeout()
+				return await this.request(
+					sourceId,
+					decoderId,
+					req,
+					inputCaps,
+					ctx,
+					retried,
+				)
+			} finally {
+				if (protectIdle) {
+					s.pending--
+					this.stopIfIdle(s, idleCause)
+				}
+			}
 		}
 		// The process rejects a duplicate id; refusing it here keeps the open channel's socket untouched.
 		if (s?.channels.has(channelId))
@@ -663,6 +688,7 @@ export class ChannelizerManager
 		superseded: () => Promise<ChannelRequestResult>,
 	): Promise<ChannelRequestResult> {
 		const channelId = open.id
+		this.clearIdleTimer(s)
 		s.pending++
 		let ownedAttempt: OpenAttempt | undefined
 		try {
@@ -1466,8 +1492,33 @@ export class ChannelizerManager
 		this.stopIfIdle(s, "last-channel-died")
 	}
 
+	private clearIdleTimer(s: SourceChannelizer): void {
+		if (s.idleTimer === undefined) return
+		clearTimeout(s.idleTimer)
+		delete s.idleTimer
+		delete s.idleCause
+	}
+
 	private stopIfIdle(s: SourceChannelizer, cause: string): void {
 		if (!s.invalidated && s.channels.size === 0 && s.pending === 0) {
+			const idleStopMs = this.deps.idleStopMs ?? 0
+			if (
+				idleStopMs > 0 &&
+				(cause === "last-channel-released" ||
+					cause === "last-channel-died" ||
+					cause === "no-channels")
+			) {
+				if (s.idleTimer === undefined) {
+					s.idleCause = cause
+					s.idleTimer = setTimeout(() => {
+						delete s.idleTimer
+						delete s.idleCause
+						this.stopIfIdle(s, "idle-timeout")
+					}, idleStopMs)
+					s.idleTimer.unref()
+				}
+				return
+			}
 			if (this.active.get(s.sourceId) === s) this.active.delete(s.sourceId)
 			this.retire(s, cause)
 		}
@@ -1475,6 +1526,7 @@ export class ChannelizerManager
 
 	/** Synchronous on purpose (called from event listeners); `destroy()` awaits the tracked stop. */
 	private retire(s: SourceChannelizer, cause: string): void {
+		this.clearIdleTimer(s)
 		s.invalidated = true
 		for (const wake of [...s.interruptions]) wake()
 		for (const closing of [...s.closing.values()]) closing.finish()
