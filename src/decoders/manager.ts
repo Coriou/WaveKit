@@ -18,6 +18,9 @@
  */
 
 import { EventEmitter } from "node:events"
+import { BaseDecoder } from "./base-decoder.js"
+import { NetworkProducerDecoder } from "./network-producer-decoder.js"
+import { ExternalSdrDecoder } from "./external-sdr-decoder.js"
 import type { DecoderEnablementOptions } from "./manager-options.js"
 import type {
 	PlannerInput,
@@ -223,6 +226,10 @@ interface DecoderState {
 	unplaced?: DecoderSuspensionReasonCode
 	available?: boolean
 	modeOverride?: ResolvedMode
+	stopping?: boolean
+	workerStop?: Promise<void>
+	workerStart?: Promise<void>
+	removalPending?: boolean
 	admittedAtMs?: number
 	admission?: AdmissionDecision
 	efficiencyBackoffMs?: number
@@ -566,7 +573,9 @@ export class DecoderManager extends EventEmitter {
 							reach: state.placement.reach,
 							costCores: state.placement.costCores,
 							sampleRateHz: state.placement.sampleRateHz,
-							admittedAtMs: state.admittedAtMs ?? Date.now(),
+							admittedAtMs: state.stopping
+								? Date.now() - EFFICIENCY_PROBATION_MS
+								: (state.admittedAtMs ?? Date.now()),
 						},
 					]
 				: [],
@@ -999,7 +1008,7 @@ export class DecoderManager extends EventEmitter {
 				}
 				if (moved && state.decoder.getStatus().running) {
 					state.intentionallyStopped = true
-					await state.decoder.stop()
+					await this.stopPlacement(state)
 					this.unwireDecoderFromFanout(state)
 					state.intentionallyStopped = false
 				}
@@ -1029,8 +1038,7 @@ export class DecoderManager extends EventEmitter {
 					parent.desiredRunning &&
 					!parent.intentionallyStopped
 				) {
-					this.admitPlacement(state)
-					state.admittedAtMs ??= Date.now()
+					this.clearExpiredAdmission(state)
 					if ((state.owner === "placement" && !wasWanted) || moved)
 						await this.startDecoder(state.config.id, {
 							startMode: parent.startMode,
@@ -1692,7 +1700,7 @@ export class DecoderManager extends EventEmitter {
 		// instead of spawning a pipeline that cannot decode.
 		if (state.decoder.caps.input !== "external" || this.config.enablement) {
 			const sourceId = this.selectedSourceId(state)
-			this.admitPlacement(state)
+			this.clearExpiredAdmission(state)
 			this.scheduleEfficiencyEvaluation()
 			const eligibility = this.assessEligibility(
 				state,
@@ -1734,12 +1742,11 @@ export class DecoderManager extends EventEmitter {
 		state.transition = null
 
 		try {
-			const outcome = await this.wireDecoderToFanout(state)
+			const outcome = await this.startPlacement(state)
 			if (!outcome.wired) {
 				if (!outcome.superseded) this.holdForChannel(state, outcome)
 				return
 			}
-			await state.decoder.start()
 		} catch (err) {
 			state.lastError = createDecoderLastError(err, "error")
 			if (state.admission?.admit) delete state.admission
@@ -1811,7 +1818,9 @@ export class DecoderManager extends EventEmitter {
 
 		// Stop the decoder process
 		try {
-			await state.decoder.stop()
+			await this.stopPlacement(state)
+		} catch (error) {
+			workerStopError ??= error
 		} finally {
 			if (
 				state.owner !== "scanner" ||
@@ -2272,10 +2281,7 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		this.log.info({ decoderId: id }, "Removing decoder")
-
-		// Also cancel pending restarts when the process has already exited.
-		// A probe is removed even when its stop fails: the probe pool cannot
-		// retry a removal that would fail the same way (spec § 6.5).
+		if (state.owner === "placement") state.removalPending = true
 		let stopFailed = false
 		let stopError: unknown
 		try {
@@ -2285,6 +2291,23 @@ export class DecoderManager extends EventEmitter {
 			stopFailed = true
 			stopError = err
 		}
+		if (state.owner === "placement" && state.decoder.getStatus().running)
+			throw (
+				stopError ??
+				new WaveKitError(
+					"Placement worker is still running",
+					"DECODER_STOP_PENDING",
+				)
+			)
+		this.finalizeRemoval(state)
+		if (stopFailed) throw stopError
+	}
+
+	private finalizeRemoval(state: DecoderState): void {
+		const id = state.config.id
+		if (this.decoders.get(id) !== state) return
+		delete state.stopping
+		delete state.removalPending
 
 		if (state.placement)
 			this.config.enablement?.gate?.forget(state.placement.key)
@@ -2308,7 +2331,6 @@ export class DecoderManager extends EventEmitter {
 			this.decoders.delete(id)
 			if (state.owner !== "placement") this.emit("decoder:removed", id)
 		}
-		if (stopFailed) throw stopError
 	}
 
 	/**
@@ -2462,6 +2484,10 @@ export class DecoderManager extends EventEmitter {
 		// Handle stopped event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("stopped", () => {
+			if (!decoder.getStatus().running) {
+				delete state.stopping
+				if (state.removalPending) this.finalizeRemoval(state)
+			}
 			if (state.admission?.admit) delete state.admission
 			delete state.admittedAtMs
 			try {
@@ -2512,6 +2538,10 @@ export class DecoderManager extends EventEmitter {
 		signal: string | null,
 	): void {
 		const { decoder } = state
+		if (!decoder.getStatus().running) {
+			delete state.stopping
+			if (state.removalPending) this.finalizeRemoval(state)
+		}
 		if (state.admission?.admit) delete state.admission
 		delete state.admittedAtMs
 		const now = Date.now()
@@ -2637,7 +2667,7 @@ export class DecoderManager extends EventEmitter {
 					)
 						return
 					if (this.config.enablement) {
-						this.admitPlacement(state)
+						this.clearExpiredAdmission(state)
 						this.scheduleEfficiencyEvaluation()
 						const eligibility = this.assessEligibility(state)
 						if (eligibility.blockedBy) {
@@ -2652,7 +2682,10 @@ export class DecoderManager extends EventEmitter {
 							return
 						}
 					}
-					const outcome = await this.wireDecoderToFanout(state)
+					const outcome = await this.startPlacement(
+						state,
+						() => !state.intentionallyStopped,
+					)
 					if (state.intentionallyStopped) {
 						this.unwireDecoderFromFanout(state)
 						return
@@ -2661,7 +2694,6 @@ export class DecoderManager extends EventEmitter {
 						if (!outcome.superseded) this.holdForChannel(state, outcome)
 						return
 					}
-					await state.decoder.start()
 					if (this.config.enablement) this.scheduleEfficiencyEvaluation()
 					this.recheckStaleChannel(this.selectedSourceId(state), state)
 				} catch (err) {
@@ -3141,6 +3173,8 @@ export class DecoderManager extends EventEmitter {
 		outcome: ChannelHold,
 		heldSince?: Date,
 	): void {
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		state.suspension = {
 			reasonCode: outcome.reasonCode,
 			since: state.suspension?.since ?? heldSince ?? new Date(),
@@ -3612,7 +3646,7 @@ export class DecoderManager extends EventEmitter {
 		caps: SourceCaps | null,
 	): Promise<boolean> {
 		const before = this.rateKey(state)
-		this.admitPlacement(state)
+		this.clearExpiredAdmission(state)
 		const eligibility = this.assessEligibility(state, caps)
 		const plan = eligibility.rate
 		state.bandPlan = eligibility.band
@@ -3690,7 +3724,7 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * Stops the process and detaches its branch but keeps the source
 	 * reservation and intent. A failed stop leaves transition "suspending"
-	 * (the process may still run); the next evaluation retries.
+	 * until the process exits.
 	 */
 	private async suspend(
 		state: DecoderState,
@@ -3718,11 +3752,11 @@ export class DecoderManager extends EventEmitter {
 		this.emitStatusChanged(state)
 
 		try {
-			if (state.decoder.getStatus().running) await state.decoder.stop()
+			if (state.decoder.getStatus().running) await this.stopPlacement(state)
 		} catch (err) {
 			this.log.error(
 				{ err: safeErrorFields(err), decoderId: id },
-				"Failed to stop decoder for rate suspension; will retry",
+				"Failed to stop decoder for rate suspension",
 			)
 			this.emitStatusChanged(state)
 			return
@@ -3762,7 +3796,7 @@ export class DecoderManager extends EventEmitter {
 		// not treated as a crash, then start a fresh pipeline.
 		if (state.decoder.getStatus().running) {
 			try {
-				await state.decoder.stop()
+				await this.stopPlacement(state)
 			} catch (err) {
 				this.log.error(
 					{ err: safeErrorFields(err), decoderId: id },
@@ -3799,7 +3833,7 @@ export class DecoderManager extends EventEmitter {
 			if (this.decoders.get(id) !== state) return
 			if (startedProcess) {
 				try {
-					await state.decoder.stop()
+					await this.stopPlacement(state)
 				} catch (err) {
 					this.log.error(
 						{ err: safeErrorFields(err), decoderId: id },
@@ -3825,14 +3859,16 @@ export class DecoderManager extends EventEmitter {
 					return
 				}
 			}
-			const outcome = await this.wireDecoderToFanout(state)
-			if (!this.stillWanted(state, generation)) return await abandon(false)
+			const outcome = await this.startPlacement(state, () =>
+				this.stillWanted(state, generation),
+			)
+			if (!this.stillWanted(state, generation))
+				return await abandon(outcome.wired)
 			if (!outcome.wired) {
 				if (outcome.superseded) return await abandon(false)
 				this.holdForChannel(state, outcome, prior?.since)
 				return
 			}
-			await state.decoder.start()
 		} catch (err) {
 			if (err instanceof DecoderRebuildError) return await abandon(false)
 			if (!this.stillWanted(state, generation)) return await abandon(false)
@@ -4023,43 +4059,129 @@ export class DecoderManager extends EventEmitter {
 		return request && !("invalid" in request) ? request : undefined
 	}
 
-	/**
-	 * Scanner hold first (spec § 10.4), then rate, then band. Rate and band are
-	 * still assessed for reporting while held.
-	 */
-	private admitPlacement(state: DecoderState): void {
-		const gate = this.config.enablement?.gate
-		if (
-			!gate ||
-			!state.desiredRunning ||
-			state.intentionallyStopped ||
-			!state.placement ||
-			state.decoder.getStatus().running ||
-			state.admission?.admit === true
-		)
-			return
+	private clearExpiredAdmission(state: DecoderState): void {
 		if (
 			state.admission?.admit === false &&
-			state.admission.retryAtMs > Date.now()
+			state.admission.retryAtMs <= Date.now()
 		)
-			return
-		const previous = state.admission
-		delete state.admission
-		if (this.assessEligibility(state).blockedBy !== null) {
-			if (previous) state.admission = previous
-			return
-		}
-		state.admission = gate.admit(
-			state.placement,
-			this.runningPlacements(),
-			Date.now(),
-		)
-		if (state.admission.admit) state.admittedAtMs = Date.now()
-		else if (previous?.admit === false)
-			state.admission.retryAtMs = Math.max(
-				previous.retryAtMs,
-				state.admission.retryAtMs,
+			delete state.admission
+	}
+
+	private stopPlacement(state: DecoderState): Promise<void> {
+		if (state.owner !== "placement") return state.decoder.stop()
+		if (state.workerStop) return state.workerStop
+		// Install the shared promise before invoking adapter code or event handlers.
+		state.workerStop = Promise.resolve().then(async () => {
+			// Startup may create a process after cancellation; stop that same run.
+			await state.workerStart?.catch(() => {})
+			if (!state.decoder.getStatus().running) return
+			try {
+				await state.decoder.stop()
+			} catch (error) {
+				if (state.decoder.getStatus().running) {
+					state.stopping = true
+					try {
+						if (state.decoder instanceof BaseDecoder)
+							await BaseDecoder.prototype.stop.call(state.decoder)
+						else if (state.decoder instanceof NetworkProducerDecoder)
+							await NetworkProducerDecoder.prototype.stop.call(state.decoder)
+						else if (state.decoder instanceof ExternalSdrDecoder)
+							await ExternalSdrDecoder.prototype.stop.call(state.decoder)
+						else await state.decoder.stop()
+					} catch (escalationError) {
+						this.log.warn(
+							{
+								decoderId: state.config.id,
+								err: safeErrorFields(escalationError),
+							},
+							"Placement worker escalation failed",
+						)
+					}
+				}
+				throw error
+			}
+		})
+		return state.workerStop
+	}
+
+	/**
+	 * Preflight admission avoids allocating a channel for a blocked placement.
+	 * Wiring can await a channel, so only the fresh decision immediately before
+	 * start establishes the run's admission and probation clock.
+	 */
+	private async startPlacement(
+		state: DecoderState,
+		canStart: () => boolean = () => true,
+	): Promise<WireOutcome> {
+		if (state.stopping) return { wired: false, superseded: true }
+		const gate = this.config.enablement?.gate
+		const generation = state.rateGeneration
+		if (gate && state.placement) {
+			delete state.admission
+			delete state.admittedAtMs
+			state.admission = gate.admit(
+				state.placement,
+				this.runningPlacements(),
+				Date.now(),
 			)
+			if (!state.admission.admit) {
+				await this.suspend(state, this.assessEligibility(state))
+				this.scheduleEfficiencyEvaluation()
+				return { wired: false, superseded: true }
+			}
+		}
+		try {
+			const outcome = await this.wireDecoderToFanout(state)
+			if (
+				!outcome.wired ||
+				!canStart() ||
+				(gate && state.placement && !this.stillWanted(state, generation))
+			) {
+				if (state.admission?.admit) delete state.admission
+				delete state.admittedAtMs
+				return outcome.wired ? { wired: false, superseded: true } : outcome
+			}
+			if (gate && state.placement) {
+				delete state.admission
+				delete state.admittedAtMs
+				const now = Date.now()
+				state.admission = gate.admit(
+					state.placement,
+					this.runningPlacements(),
+					now,
+				)
+				if (!state.admission.admit) {
+					this.unwireDecoderFromFanout(state)
+					await this.suspend(state, this.assessEligibility(state))
+					this.scheduleEfficiencyEvaluation()
+					return { wired: false, superseded: true }
+				}
+				state.admittedAtMs = now
+			}
+			delete state.workerStop
+			if (state.owner === "placement") {
+				const starting = Promise.resolve().then(() => state.decoder.start())
+				state.workerStart = starting
+				try {
+					await starting
+				} finally {
+					if (state.workerStart === starting) delete state.workerStart
+				}
+			} else await state.decoder.start()
+			if (gate && state.placement && !this.stillWanted(state, generation)) {
+				if (state.admission?.admit) delete state.admission
+				delete state.admittedAtMs
+				await this.stopPlacement(state)
+				this.unwireDecoderFromFanout(state)
+				return { wired: false, superseded: true }
+			}
+			this.scheduleEfficiencyEvaluation()
+			return outcome
+		} catch (error) {
+			if (state.admission?.admit) delete state.admission
+			delete state.admittedAtMs
+			throw error
+		}
 	}
 
 	private assessEligibility(

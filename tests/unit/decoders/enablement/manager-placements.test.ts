@@ -557,7 +557,50 @@ it("a failing worker stop still stops the other workers and the primary", async 
 	if (!failing || !other) throw new Error("workers missing")
 	vi.spyOn(failing, "stop").mockRejectedValueOnce(new Error("stop failed"))
 	await expect(f.manager.stopDecoder("dec")).rejects.toThrow("stop failed")
+	expect(failing.running).toBe(false)
+	expect(failing.stop).toHaveBeenCalledTimes(2)
+	expect(f.manager.getDecoder(workers[0]![0])).toBeUndefined()
 	expect(other.running).toBe(false)
 	expect(f.instances.get("dec")?.running).toBe(false)
 	expect(f.manager.getStatus("dec")?.desiredRunning).toBe(false)
+})
+
+it("a worker still alive after failed escalation stays tracked until exit", async () => {
+	const view = vi.fn<EfficiencyGate["view"]>(() => ({
+		budgetCores: 1,
+		cpuGuardPercent: 90,
+		sources: [],
+	}))
+	const gate: EfficiencyGate = {
+		record: vi.fn(),
+		admit: () => ({ admit: true }),
+		probation: () => [],
+		noteSuspended: vi.fn(),
+		forget: vi.fn(),
+		view,
+	}
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	const worker = f.place("dec", 162_025_000, false)
+	f.plan([f.place("dec", 162_000_000), worker])
+	await f.manager.startAll()
+	const decoder = f.instances.get(worker.key)!
+	const stop = vi
+		.spyOn(decoder, "stop")
+		.mockRejectedValueOnce(new Error("first stop"))
+		.mockRejectedValueOnce(new Error("second stop"))
+	await expect(f.manager.stopDecoder("dec")).rejects.toThrow("first stop")
+	expect(decoder.running).toBe(true)
+	expect(f.manager.getDecoder(worker.key)).toBe(decoder)
+	expect(decoder.listenerCount("exit")).toBeGreaterThan(0)
+	f.manager.efficiencyView()
+	expect(view.mock.calls.at(-1)?.[0].map(item => item.key)).toContain(
+		worker.key,
+	)
+	await expect(f.manager.destroy()).rejects.toThrow("first stop")
+	expect(stop).toHaveBeenCalledTimes(2)
+	decoder.crash()
+	await f.manager.destroy()
+	expect(decoder.running).toBe(false)
+	expect(f.manager.getDecoder(worker.key)).toBeUndefined()
 })

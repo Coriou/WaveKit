@@ -7,7 +7,10 @@ import { DecoderManager } from "../../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../../src/core/source-manager.js"
-import type { ChannelProvider } from "../../../../src/core/channelizer/types.js"
+import type {
+	ChannelRequestResult,
+	ChannelProvider,
+} from "../../../../src/core/channelizer/types.js"
 import type {
 	EfficiencyGate,
 	EfficiencySample,
@@ -17,7 +20,12 @@ import type {
 } from "../../../../src/decoders/enablement/contract.js"
 import { placementKey } from "../../../../src/decoders/enablement/contract.js"
 import type { Decoder } from "../../../../src/decoders/types.js"
-import { FakeSources, RateDecoder, iqCaps } from "../../../mocks/rate-fakes.js"
+import {
+	FakeSources,
+	RateDecoder,
+	iqCaps,
+	deferred,
+} from "../../../mocks/rate-fakes.js"
 
 let manager: DecoderManager | undefined
 afterEach(async () => {
@@ -30,6 +38,7 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 	const sources = new FakeSources()
 	sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: 162_000_000 })
 	const instances = new Map<string, RateDecoder>()
+	let beforeStart: (() => void) | undefined
 	const configs = new Map<string, Record<string, unknown>>()
 	const registry = new DecoderRegistry()
 	registry.register(
@@ -40,6 +49,11 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 				config.id,
 				{ input: "iq", output: "text", integrationPattern: "pure_consumer" },
 			)
+			const start = decoder.start.bind(decoder)
+			vi.spyOn(decoder, "start").mockImplementation(async () => {
+				beforeStart?.()
+				await start()
+			})
 			let options = { ...config.options }
 			configs.set(config.id, options)
 			decoder.updateOptions = updates => {
@@ -90,17 +104,19 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 	})
 	manager.setSourceManager(sources as unknown as SourceManager)
 	const provider = Object.assign(new EventEmitter(), {
-		requestChannel: vi.fn(async () => ({
-			ok: true as const,
-			stream: new PassThrough(),
-			channelId: String(++channel),
-			generation: 1,
-			realised: {
-				outputRateHz: 48_000,
-				format: "cu8" as const,
-				groupDelaySamples: 0,
-			},
-		})),
+		requestChannel: vi.fn(
+			async (): Promise<ChannelRequestResult> => ({
+				ok: true as const,
+				stream: new PassThrough(),
+				channelId: String(++channel),
+				generation: 1,
+				realised: {
+					outputRateHz: 48_000,
+					format: "cu8" as const,
+					groupDelaySamples: 0,
+				},
+			}),
+		),
 		releaseChannel: vi.fn(async () => {}),
 		currentGeneration: () => 1,
 		retuneChannel: vi.fn(async () => "retuned" as "retuned" | "refused"),
@@ -140,6 +156,9 @@ function setup(type = "rate-test", gate?: EfficiencyGate) {
 	}
 	return {
 		manager,
+		onStart: (callback: () => void) => {
+			beforeStart = callback
+		},
 		yaml: () => {
 			catalogue = false
 		},
@@ -462,7 +481,7 @@ it("probation failures back off five, ten, twenty, thirty and thirty minutes", a
 		)
 		expect(gate.admit).toHaveBeenCalledTimes(calls)
 		await vi.advanceTimersByTimeAsync(2501)
-		expect(gate.admit).toHaveBeenCalledTimes(calls + 1)
+		expect(gate.admit).toHaveBeenCalledTimes(calls + 2)
 	}
 	await vi.advanceTimersByTimeAsync(31_000)
 	await f.manager.stopDecoder("dec")
@@ -550,7 +569,7 @@ it.each(["budget", "cpu", "drops", null] as const)(
 		)
 		decoder.crash()
 		await vi.advanceTimersByTimeAsync(2_001)
-		expect(gate.admit).toHaveBeenCalledTimes(calls + 1)
+		expect(gate.admit).toHaveBeenCalledTimes(calls + (detail ? 1 : 2))
 		expect(decoder.starts).toBe(detail ? 1 : 2)
 		expect(f.provider.requestChannel).toHaveBeenCalledTimes(detail ? 1 : 2)
 		expect(decoder.running).toBe(detail === null)
@@ -585,4 +604,232 @@ it("a restarted placement stays under probation sampling after downtime", async 
 	expect(f.manager.getAllStatus()[0]?.suspension?.reasonCode).toBe(
 		"efficiency-budget",
 	)
+})
+
+it.each(["scanner hold", "unusable rate"])(
+	"resuming the sole placement after %s re-arms probation sampling",
+	async reason => {
+		const gate = fakeGate()
+		const f = setup("rate-test", gate)
+		f.create("a")
+		f.plan([f.place("a", 162_000_000)])
+		await f.manager.startAll()
+		if (reason === "scanner hold")
+			await f.manager.holdSource("rtl", "tuner-scanning", "scan")
+		else {
+			f.sources.setRate("rtl", 1)
+			await f.settle()
+		}
+		expect(f.instances.get("a")?.running).toBe(false)
+		await vi.advanceTimersByTimeAsync(35_000)
+		const calls = vi.mocked(gate.admit).mock.calls.length
+		if (reason === "scanner hold") await f.manager.releaseSource("rtl", "scan")
+		else f.sources.setRate("rtl", 2_400_000)
+		await f.settle()
+		expect(gate.admit).toHaveBeenCalledTimes(calls + 2)
+		expect(f.instances.get("a")?.running).toBe(true)
+		vi.mocked(gate.probation).mockImplementation(running =>
+			running.map(item => ({ key: item.key, detail: "cpu" as const })),
+		)
+		await vi.advanceTimersByTimeAsync(2500)
+		expect(f.instances.get("a")?.running).toBe(false)
+	},
+)
+
+it("channel failure discards approval and restarts with a fresh probation window", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("a")
+	f.plan([f.place("a", 162_000_000)])
+	const available = f.provider.requestChannel.getMockImplementation()!
+	f.provider.requestChannel.mockResolvedValue({
+		ok: false,
+		reasonCode: "channelizer-unavailable",
+		detail: "offline",
+	})
+	await f.manager.startAll()
+	expect(f.instances.get("a")?.running).toBe(false)
+	await vi.advanceTimersByTimeAsync(35_000)
+	const calls = vi.mocked(gate.admit).mock.calls.length
+	vi.mocked(gate.admit).mockImplementation((_placement, _running, now) => ({
+		admit: false,
+		detail: "cpu",
+		retryAtMs: now + 300_000,
+	}))
+	f.provider.requestChannel.mockImplementation(available)
+	await vi.advanceTimersByTimeAsync(16_000)
+	expect(gate.admit).toHaveBeenCalledTimes(calls + 1)
+	expect(f.instances.get("a")?.starts).toBe(0)
+	vi.mocked(gate.admit).mockReturnValue({ admit: true })
+	await vi.advanceTimersByTimeAsync(303_000)
+	expect(f.instances.get("a")?.running).toBe(true)
+	vi.mocked(gate.probation).mockImplementation(running =>
+		running.map(item => ({ key: item.key, detail: "drops" as const })),
+	)
+	await vi.advanceTimersByTimeAsync(2500)
+	expect(f.instances.get("a")?.running).toBe(false)
+})
+
+it.each(
+	[
+		"boot",
+		"mode",
+		"operator start",
+		"operator restart",
+		"crash restart",
+		"scanner hold",
+		"unusable rate",
+		"caps change",
+		"source reconnect",
+		"channel available",
+		"settings rebuild",
+	].flatMap(path => [false, true].map(worker => ({ path, worker }))),
+)(
+	"placement start uses admission and sampling through one routine: $path, worker=$worker",
+	async ({ path, worker }) => {
+		const gate = fakeGate()
+		const f = setup("rate-test", gate)
+		f.create("a")
+		const primary = f.place("a", 162_000_000)
+		const placement = worker
+			? { ...f.place("a", 162_025_000), primary: false }
+			: primary
+		f.plan(worker ? [primary, placement] : [placement])
+		const internal = f.manager as unknown as {
+			startPlacement: (
+				state: unknown,
+				canStart?: () => boolean,
+			) => Promise<unknown>
+		}
+		const original = internal.startPlacement.bind(f.manager)
+		let inside = false
+		let starts = 0
+		f.onStart(() => {
+			expect(inside).toBe(true)
+			expect(gate.admit).toHaveBeenCalled()
+			starts++
+		})
+		vi.spyOn(internal, "startPlacement").mockImplementation(
+			async (state, canStart) => {
+				inside = true
+				try {
+					return await original(state, canStart)
+				} finally {
+					inside = false
+				}
+			},
+		)
+		if (path !== "boot" && path !== "operator start" && path !== "mode")
+			await f.manager.startAll()
+		const calls = vi.mocked(gate.admit).mock.calls.length
+		if (path === "boot") await f.manager.startAll()
+		else if (path === "mode") await f.manager.applyDecoderMode("a", "always")
+		else if (path === "operator start")
+			await f.manager.startDecoder("a", { startMode: "operator" })
+		else if (path === "operator restart") await f.manager.restartDecoder("a")
+		else if (path === "crash restart")
+			f.instances
+				.get(placement.key === primary.key ? "a" : placement.key)!
+				.crash()
+		else if (path === "settings rebuild") {
+			f.manager.stageDecoderOptions("a", { channelHz: 162_000_001 })
+			await f.manager.restartDecoder("a")
+		} else if (path === "scanner hold") {
+			await f.manager.holdSource("rtl", "tuner-scanning", "scan")
+			await f.manager.releaseSource("rtl", "scan")
+		} else if (path === "source reconnect") {
+			f.sources.remove("rtl")
+			await f.settle()
+			f.sources.reconnect("rtl", 2_400_000)
+			f.sources.setCenter("rtl", 162_000_000)
+		} else if (path === "channel available") {
+			await f.manager.holdSource("rtl", "tuner-scanning", "scan")
+			f.manager.setChannelizer(null)
+			await f.manager.releaseSource("rtl", "scan")
+			f.manager.setChannelizer(f.provider as unknown as ChannelProvider)
+			await f.settle()
+		} else {
+			f.sources.setRate("rtl", path === "unusable rate" ? 1 : 1_024_000)
+			await f.settle()
+			f.sources.setRate("rtl", 2_400_000)
+		}
+		await vi.advanceTimersByTimeAsync(2500)
+		expect(gate.admit).toHaveBeenCalledTimes(
+			calls +
+				(worker && path === "caps change"
+					? 12
+					: worker && path === "source reconnect"
+						? 6
+						: (path === "caps change" ? 4 : 2) *
+							(worker && path !== "crash restart" ? 2 : 1)),
+		)
+		expect(f.instances.get("a")?.running).toBe(true)
+		if (worker) expect(f.instances.get(placement.key)?.running).toBe(true)
+		expect(gate.admit).toHaveBeenCalledTimes(starts * 2)
+		const samples = vi.mocked(gate.probation).mock.calls.length
+		await vi.advanceTimersByTimeAsync(2500)
+		expect(vi.mocked(gate.probation).mock.calls.length).toBeGreaterThan(samples)
+	},
+)
+
+it("channel acquisition delay cannot consume the new run's probation window", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("a")
+	f.plan([f.place("a", 162_000_000)])
+	const available = f.provider.requestChannel.getMockImplementation()!
+	let release!: () => void
+	const pending = new Promise<void>(resolve => {
+		release = resolve
+	})
+	f.provider.requestChannel.mockImplementation(async () => {
+		await pending
+		return available()
+	})
+	const starting = f.manager.startAll()
+	await vi.advanceTimersByTimeAsync(35_000)
+	expect(f.instances.get("a")?.starts).toBe(0)
+	release()
+	await starting
+	const startedAt = Date.now()
+	vi.mocked(gate.probation).mockImplementation(running => {
+		expect(running[0]?.admittedAtMs).toBe(startedAt)
+		return running.map(item => ({ key: item.key, detail: "cpu" as const }))
+	})
+	await vi.advanceTimersByTimeAsync(2500)
+	expect(f.instances.get("a")?.running).toBe(false)
+})
+
+it("a gate denial after channel acquisition prevents the process start and releases the channel", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("a")
+	f.plan([f.place("a", 162_000_000)])
+	vi.mocked(gate.admit)
+		.mockReturnValueOnce({ admit: true })
+		.mockImplementation((_placement, _running, now) => ({
+			admit: false,
+			detail: "cpu",
+			retryAtMs: now + 300_000,
+		}))
+	await f.manager.startAll()
+	expect(f.provider.requestChannel).toHaveBeenCalledTimes(1)
+	expect(f.provider.releaseChannel).toHaveBeenCalledTimes(1)
+	expect(f.instances.get("a")?.starts).toBe(0)
+})
+
+it("operator stop during placement startup cannot leave a late process running", async () => {
+	const f = setup("rate-test", fakeGate())
+	f.create("a")
+	f.plan([f.place("a", 162_000_000)])
+	const decoder = f.instances.get("a")!
+	const pending = deferred()
+	decoder.startGate = pending
+	const starting = f.manager.startAll()
+	await vi.advanceTimersByTimeAsync(1)
+	expect(decoder.starts).toBe(1)
+	await f.manager.stopDecoder("a")
+	pending.resolve()
+	await starting
+	expect(decoder.running).toBe(false)
 })

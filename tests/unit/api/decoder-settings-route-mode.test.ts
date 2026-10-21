@@ -181,31 +181,30 @@ it("mode of a non-string type is rejected by the shape gate", async () => {
 	expect(settings.revision()).toBe(0)
 })
 it("enabled and options patches are byte-identical to before", async () => {
-	const baselineDir = await mkdtemp(join(tmpdir(), "decoder-route-baseline-"))
-	const baseline = await openDecoderSettingsService({
-		configs: [config],
-		stateDir: baselineDir,
-		logger: pino({ level: "silent" }),
-		manager: {
-			getStatus: () => undefined,
-			stageDecoderOptions: () => false,
-			isRestartPending: () => false,
-		},
-	})
-	try {
-		for (const body of [
-			{ enabled: false },
-			{ options: { frequency: 868_000_000 } },
-		]) {
-			const expected = await baseline.update("ism", body)
-			const response = await patch(body)
-			expect(response.statusCode).toBe(200)
-			expect(response.body).toBe(JSON.stringify(expected))
-			expect(response.headers["cache-control"]).toBe("no-store")
+	// Captured using Fastify inject against e470f6f6.
+	const expected = [
+		'{"settings":{"decoderId":"ism","type":"rtl433","revision":1,"enabled":{"value":false,"source":"override"},"options":[{"key":"analyze","source":"default","patchable":true,"secret":false,"present":false,"value":null},{"key":"channelHz","source":"default","patchable":false,"secret":false,"present":false},{"key":"extraArgs","source":"default","patchable":false,"secret":false,"present":false},{"key":"frequencies","source":"default","patchable":true,"secret":false,"present":false,"value":null},{"key":"frequency","source":"config","patchable":true,"secret":false,"present":true,"value":433920000},{"key":"inputSampleRate","source":"default","patchable":false,"secret":false,"present":false},{"key":"outputFormat","source":"default","patchable":false,"secret":false,"present":false},{"key":"protocols","source":"default","patchable":true,"secret":false,"present":false,"value":null},{"key":"targetSampleRate","source":"default","patchable":false,"secret":false,"present":false}],"undocumentedKeys":0,"pendingRestart":false},"revision":1,"changed":["enabled"],"pendingRestart":false}',
+		'{"settings":{"decoderId":"ism","type":"rtl433","revision":2,"enabled":{"value":false,"source":"override"},"options":[{"key":"analyze","source":"default","patchable":true,"secret":false,"present":false,"value":null},{"key":"channelHz","source":"default","patchable":false,"secret":false,"present":false},{"key":"extraArgs","source":"default","patchable":false,"secret":false,"present":false},{"key":"frequencies","source":"default","patchable":true,"secret":false,"present":false,"value":null},{"key":"frequency","source":"override","patchable":true,"secret":false,"present":true,"value":868000000},{"key":"inputSampleRate","source":"default","patchable":false,"secret":false,"present":false},{"key":"outputFormat","source":"default","patchable":false,"secret":false,"present":false},{"key":"protocols","source":"default","patchable":true,"secret":false,"present":false,"value":null},{"key":"targetSampleRate","source":"default","patchable":false,"secret":false,"present":false}],"undocumentedKeys":0,"pendingRestart":false},"revision":2,"changed":["frequency"],"pendingRestart":false}',
+	]
+	const patches = [{ enabled: false }, { options: { frequency: 868_000_000 } }]
+	for (const [index, body] of patches.entries()) {
+		const response = await patch(body)
+		expect(response.statusCode).toBe(200)
+		const current = response.json<{
+			settings: { mode?: unknown; modeSource?: unknown }
+		}>()
+		let legacyBody = response.body
+		for (const key of ["mode", "modeSource"] as const) {
+			if (current.settings[key] !== undefined)
+				legacyBody = legacyBody
+					.replace(`,"${key}":${JSON.stringify(current.settings[key])}`, "")
+					.replace(
+						`"settings":{"${key}":${JSON.stringify(current.settings[key])},`,
+						'"settings":{',
+					)
 		}
-		expect(applyDecoderMode).not.toHaveBeenCalled()
-	} finally {
-		await baseline.close()
-		await rm(baselineDir, { recursive: true, force: true })
+		expect(legacyBody).toBe(expected[index])
+		expect(response.headers["cache-control"]).toBe("no-store")
 	}
+	expect(applyDecoderMode).not.toHaveBeenCalled()
 })
