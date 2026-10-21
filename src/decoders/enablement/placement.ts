@@ -216,8 +216,28 @@ export const planPlacements: PlacementPlanner = input => {
 				add(null, "band")
 			} else {
 				const configured = d.configuredChannelsHz.filter(positive)
-				if (d.type === "ais-catcher") add(162_000_000, "band")
-				else if (d.type === "dumpvdl2" && configured.length)
+				if (d.type === "ais-catcher") {
+					// One channel decodes both AIS frequencies: it fits the band when
+					// every target lies inside its passband (and fitsReach keeps the
+					// whole channel inside the usable window). Without targets the
+					// band check is unchanged.
+					const hz = 162_000_000
+					const targets = (
+						Array.isArray(d.band?.targetsHz) ? d.band.targetsHz : []
+					).filter(positive)
+					// `always` and operator starts skip the band policy (as bandFits
+					// does) and keep the 162.000 MHz channel.
+					if (
+						d.mode === "always" ||
+						d.startMode === "operator" ||
+						targets.length === 0
+					)
+						add(hz, "band")
+					else if (
+						targets.every(f => Math.abs(f - hz) <= d.channelBandwidthHz / 2)
+					)
+						add(hz, "band", 0, targets)
+				} else if (d.type === "dumpvdl2" && configured.length)
 					add(
 						(Math.min(...configured) + Math.max(...configured)) / 2,
 						"configured",

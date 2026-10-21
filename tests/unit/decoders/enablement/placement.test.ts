@@ -679,3 +679,78 @@ it("pager range lookup fails closed unless exactly true and preserves overrides"
 			).toMatchObject([{ origin: "vfo", channelHz: 100_000_000 }])
 	}
 })
+
+describe("AIS covers both frequencies with one channel", () => {
+	// ais-catcher: 384 kHz output, 5 % transition → 364.8 kHz passband.
+	const ais = (targetsHz: number[]) =>
+		decoder({
+			id: "ais",
+			type: "ais-catcher",
+			band: { basis: "protocol", targetsHz },
+			configuredChannelsHz: [],
+			channelBandwidthHz: 364_800,
+			channelTransitionHz: 9_600,
+		})
+	const pair = [161_975_000, 162_025_000]
+	// Usable half-window 960 kHz − 182.4 kHz − 9.6 kHz: 768 kHz either side.
+	it.each([162_000_000, 162_768_000, 161_232_000])(
+		"places the 162.000 MHz channel on a source centred at %i Hz",
+		centreHz => {
+			const plan = planPlacements(input(ais(pair), [source({ centreHz })]))
+			expect(plan.wanted.map(p => p.channelHz)).toEqual([162_000_000])
+			expect(plan.unplaced.size).toBe(0)
+		},
+	)
+	it.each([162_768_001, 161_231_999])(
+		"does not place the channel past the window edge at %i Hz",
+		centreHz => {
+			expect(
+				planPlacements(input(ais(pair), [source({ centreHz })])).wanted,
+			).toEqual([])
+		},
+	)
+	it("does not place it when one target falls outside the passband", () => {
+		const plan = planPlacements(
+			input(ais([161_975_000, 162_182_401]), [
+				source({ centreHz: 162_000_000 }),
+			]),
+		)
+		expect(plan.wanted).toEqual([])
+		expect(plan.unplaced.get("ais")).toBe("frequency-out-of-band")
+		expect(
+			planPlacements(
+				input(ais([161_975_000, 162_182_400]), [
+					source({ centreHz: 162_000_000 }),
+				]),
+			).wanted.map(p => p.channelHz),
+		).toEqual([162_000_000])
+	})
+	it("a single-target decoder still needs the target on its channel", () => {
+		const d = decoder({
+			band: { basis: "configured", targetsHz: [100_000_000] },
+			configuredChannelsHz: [100_005_000],
+		})
+		expect(planPlacements(input(d)).wanted).toEqual([])
+	})
+})
+
+it.each([
+	{ mode: "always" as const, startMode: "auto" as const },
+	{ mode: "auto" as const, startMode: "operator" as const },
+])(
+	"AIS with an outlying band override keeps the 162.000 MHz channel for $mode/$startMode",
+	({ mode, startMode }) => {
+		const d = decoder({
+			id: "ais",
+			type: "ais-catcher",
+			mode,
+			startMode,
+			band: { basis: "configured", targetsHz: [161_500_000, 163_000_000] },
+			configuredChannelsHz: [],
+			channelBandwidthHz: 364_800,
+			channelTransitionHz: 9_600,
+		})
+		const plan = planPlacements(input(d, [source({ centreHz: 161_500_000 })]))
+		expect(plan.wanted.map(p => p.channelHz)).toEqual([162_000_000])
+	},
+)
