@@ -21,6 +21,10 @@ export function defaultSourceIdFor(
 /** Keeps each source's bytes in its own fanout while preserving the primary consumers. */
 export class SourceFanoutRouter extends EventEmitter {
 	private readonly fanouts = new Map<string, FanoutManager>()
+	private readonly topology = new Map<
+		FanoutManager,
+		{ changed: boolean; listener: () => void }
+	>()
 	private primarySourceId: string | undefined
 	private readonly connected = (sourceId: string) => {
 		this.primarySourceId ??=
@@ -94,9 +98,50 @@ export class SourceFanoutRouter extends EventEmitter {
 		return fanout
 	}
 
+	/** Read existing counters only; never creates a fanout or touches the IQ path. */
+	branchDropTotals(sourceId: string): {
+		droppedBytesTotal: number
+		droppedChunksTotal: number
+	} | null {
+		const fanout =
+			sourceId === this.primarySourceId
+				? this.primary
+				: this.fanouts.get(sourceId)
+		if (!fanout) return null
+		const topology = this.topology.get(fanout)
+		if (topology?.changed) {
+			// Drops a removed branch suffered after the last read are not observable;
+			// report the tick unknown instead.
+			topology.changed = false
+			return null
+		}
+		let droppedBytesTotal = 0
+		let droppedChunksTotal = 0
+		for (const id of fanout.getBranchIds()) {
+			const branch = fanout.getBranchTelemetry(id)
+			if (
+				!branch ||
+				!Number.isSafeInteger(branch.droppedBytesTotal) ||
+				branch.droppedBytesTotal < 0 ||
+				!Number.isSafeInteger(branch.droppedChunksTotal) ||
+				branch.droppedChunksTotal < 0
+			)
+				return null
+			droppedBytesTotal += branch.droppedBytesTotal
+			droppedChunksTotal += branch.droppedChunksTotal
+			if (
+				!Number.isSafeInteger(droppedBytesTotal) ||
+				!Number.isSafeInteger(droppedChunksTotal)
+			)
+				return null
+		}
+		return { droppedBytesTotal, droppedChunksTotal }
+	}
+
 	releaseUnused(sourceId: string): void {
 		const fanout = this.fanouts.get(sourceId)
 		if (fanout && fanout.getBranchIds().length === 0) {
+			this.forgetTopology(fanout)
 			fanout.destroy()
 			fanout.removeAllListeners()
 			this.fanouts.delete(sourceId)
@@ -153,7 +198,24 @@ export class SourceFanoutRouter extends EventEmitter {
 		this.emit("backpressure", id, bytes)
 	private readonly drain = (id: string, duration: number) =>
 		this.emit("drain", id, duration)
+	private forgetTopology(fanout: FanoutManager): void {
+		const state = this.topology.get(fanout)
+		if (!state) return
+		fanout.off("branch-added", state.listener)
+		fanout.off("branch-removed", state.listener)
+		this.topology.delete(fanout)
+	}
+
 	private forwardEvents(fanout: FanoutManager): void {
+		const state = {
+			changed: false,
+			listener: () => {
+				state.changed = true
+			},
+		}
+		this.topology.set(fanout, state)
+		fanout.on("branch-added", state.listener)
+		fanout.on("branch-removed", state.listener)
 		fanout.on("backpressure", this.backpressure)
 		fanout.on("drain", this.drain)
 	}
@@ -164,8 +226,10 @@ export class SourceFanoutRouter extends EventEmitter {
 		this.sources.off("removed", this.removed)
 		this.primary.off("backpressure", this.backpressure)
 		this.primary.off("drain", this.drain)
+		this.forgetTopology(this.primary)
 		this.primary.detachSource()
 		for (const fanout of this.fanouts.values()) {
+			this.forgetTopology(fanout)
 			fanout.destroy()
 			fanout.removeAllListeners()
 		}
