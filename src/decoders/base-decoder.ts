@@ -1,3 +1,4 @@
+import type { DecoderReach } from "./enablement/contract.js"
 /**
  * Base Decoder - Abstract base class for decoder implementations
  *
@@ -56,6 +57,10 @@ const GRACEFUL_STOP_TIMEOUT = 5000
  * - Health state tracking (running, idle, faulted)
  */
 export abstract class BaseDecoder extends EventEmitter implements Decoder {
+	reach(): DecoderReach {
+		return "raw"
+	}
+
 	readonly id: string
 	readonly type: string
 

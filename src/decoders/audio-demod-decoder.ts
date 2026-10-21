@@ -1,3 +1,4 @@
+import type { DecoderReach } from "./enablement/contract.js"
 /**
  * Audio Demod Decoder - Abstract base class for decoders that consume IQ and demodulate to audio
  *
@@ -310,6 +311,10 @@ function getDebugFilename(
  * - Optional debug recording of audio at pipeline stages
  */
 export abstract class AudioDemodDecoder extends BaseDecoder {
+	override reach(): DecoderReach {
+		return this.channelizerSupported() ? "channel" : "raw"
+	}
+
 	/** Debug recording options if enabled */
 	protected debugRecording?: DebugRecordingOptions
 	private channelOverridesOffsetLogged = false
