@@ -240,7 +240,7 @@ export interface WsCommandSentEvent {
 	sourceId: string
 	command: string
 	value: unknown
-	origin?: "rest" | "scanner" | "replay"
+	origin?: "rest" | "scanner" | "replay" | "decoder-rate"
 }
 export interface WsControlModeEvent {
 	type: "tuner:control-mode-changed"

@@ -1463,3 +1463,21 @@ Announcement for the CLI and for the web session. Spec: `docs/specs/scanner-rede
 11. Live audio engine (opt-in): `LiveAudioConfig.engine` and `PATCH /api/live-audio/config` accept `csdr` (default) or `rust`; `LiveAudioStatus` carries `engine` and, after a failed start of the Rust engine, `engineFallback`. Nothing changes unless `rust` is chosen. The CLI live-audio guards (`cli/source/data/guards.ts`) copy known fields only, so `engine`, `engineFallback` and `tone` are ignored there.
 
 For the web session: result list = `evidence=proven` with `proof.summary`; "show weak activity" toggles `evidence=all`; a scan header from `phase`, `parked`, `holding`, `trial` and `replayQueueDepth`; "Decode here" = identify with `waitUntilSignal`; `docs/web/CORE-GAPS.md` can tick identify until a transmission, `nearHz`, `mergedIds`, `progress.holding`, missing decoder reported as unavailable, analog versus digital per transmission, tone on live status, the CTCSS trial, and the automatic identify of the live-audio channel.
+
+## Main → CLI / Web: decoder enablement contract — 2026-10-21
+
+Spec: `docs/specs/decoder-enablement/`. Contract only; no runtime producer is wired yet, the shipped config parses
+identically and channelizer auto start stays off until its capacity acceptance. Every new field is optional (older
+cores omit them).
+
+1. `DecoderInfo` gains optional `mode` (`auto` | `always` | `off`), `modeSource`, `origin` (built-in catalogue or
+   YAML), `placements[]` and `efficiency`. Settings views and `PATCH` gain an optional `mode`.
+2. Suspension reasons widen with `efficiency-budget` ("over the efficiency budget") and `decoder-unavailable`
+   ("not installed"). Exhaustive switches over the reason union must add both.
+3. `tuner:command-sent` `origin` widens with `decoder-rate` (a rate write made by the 1090 MHz rate policy).
+   `TunerState` gains optional `ratePolicy`; a new `tuner:rate-policy` event reports raises, restores and skips.
+4. Resources: `LinkAdvisory` and a `link-capacity` resource alert (advisory, `critical` when samples go missing after
+   a raise).
+5. CLI: `cli/source/data/guards.ts` accepts `link-capacity`, the new reason words and the `decoder-rate` origin; it
+   strips the other new fields. Web: label the two reasons and the `decoder-rate` origin; show `mode` as a three-way
+   switch once the core ships the producer (a follow-up note announces it).

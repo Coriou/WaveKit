@@ -184,6 +184,8 @@ export type DecoderSuspensionReasonCode =
 	| NonNullable<DecoderRateAssessment["reasonCode"]>
 	| "frequency-out-of-band"
 	| "tuner-scanning"
+	| "efficiency-budget"
+	| "decoder-unavailable"
 
 export interface DecoderCaps {
 	input: DecoderInputType
@@ -225,6 +227,11 @@ export interface DecoderLog {
 }
 
 export interface DecoderStatus {
+	mode?: DecoderMode
+	modeSource?: DecoderModeSource
+	origin?: "config" | "catalogue"
+	placements?: DecoderPlacementView[]
+	efficiency?: { detail: DecoderEfficiencyDetail; retryAt?: string }
 	/** Messages per wall-clock minute, oldest first, last 15 including the current partial minute. */
 	rateHistory?: number[]
 	id: string
@@ -368,4 +375,50 @@ export interface DecoderOutput {
 	decoder: string
 	timestamp: string
 	data: unknown
+}
+
+export type DecoderMode = "auto" | "always" | "off"
+export type DecoderModeSource =
+	| "settings"
+	| "config"
+	| "legacy-enabled"
+	| "legacy-band"
+	| "default"
+export type DecoderReachKind = "channel" | "raw" | "centre"
+export type DecoderEfficiencyDetail = "budget" | "cpu" | "drops" | "unknown"
+export interface DecoderPlacementView {
+	sourceId: string
+	channelHz?: number
+	reach: DecoderReachKind
+	origin: "configured" | "band" | "vfo" | "bandplan" | "fallback"
+	primary: boolean
+	running: boolean
+	suspension?: DecoderSuspension
+	efficiencyDetail?: DecoderEfficiencyDetail
+	costCores: number
+	probation?: boolean
+}
+export interface DecoderEfficiencyPlacement {
+	decoderId: string
+	sourceId: string
+	channelHz: number | null
+	reach: DecoderReachKind
+	costCores: number
+	probation: boolean
+	detail?: DecoderEfficiencyDetail
+	retryAt?: string
+}
+export interface DecoderEfficiencySourceView {
+	sourceId: string
+	coresInUse: number
+	cpu: { percent: number | null; limit: number }
+	drops: "ok" | "dropping" | "clearing" | "unknown"
+	dropBytesPerSecond: number | null
+	admitted: DecoderEfficiencyPlacement[]
+	blocked: DecoderEfficiencyPlacement[]
+}
+export interface DecoderEfficiencyView {
+	budgetCores: number
+	cpuGuardPercent: number
+	sources: DecoderEfficiencySourceView[]
 }

@@ -85,6 +85,7 @@ export type TunerStateField =
 	| "testMode"
 
 export interface TunerState {
+	ratePolicy?: TunerRatePolicy
 	sourceId: string
 	frequency: number // Hz
 	sampleRate: number // Hz
@@ -174,7 +175,12 @@ export interface TunerConfigUpdate extends Partial<
  * Who issued a tuner write: the REST API, the scanner, or reconnect replay. WG11 req 4.2:
  * `config` = the source's configured gain, gain mode or AGC written on a new connection.
  */
-export type TunerCommandOrigin = "rest" | "scanner" | "replay" | "config"
+export type TunerCommandOrigin =
+	| "rest"
+	| "scanner"
+	| "replay"
+	| "config"
+	| "decoder-rate"
 
 /** `tuner:command-sent` on the `tuner` channel. */
 export interface TunerCommandSentEventData {
@@ -183,4 +189,26 @@ export interface TunerCommandSentEventData {
 	value: number
 	/** Absent for writes whose origin is not tagged. */
 	origin?: TunerCommandOrigin
+}
+
+export interface TunerRatePolicy {
+	raisedFromHz: number
+	since: string
+}
+export interface LinkAdvisory {
+	level: "none" | "unproven" | "dropping"
+	transport: "loopback" | "network"
+	payloadBytesPerSecond: number
+	sustainedBytesPerSecond: number | null
+	shortfallPercent: number | null
+	upstreamDropBytesPerSecond: number | null
+}
+export interface TunerRatePolicyEventData {
+	sourceId: string
+	action: "raised" | "restored" | "skipped"
+	reason: "adsb-1090"
+	fromHz: number
+	toHz: number
+	skipped?: "external-control" | "rate-above" | "write-failed"
+	link?: LinkAdvisory
 }
