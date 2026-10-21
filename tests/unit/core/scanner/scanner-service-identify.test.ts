@@ -190,7 +190,7 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		await h.service.stop()
 	}, 60_000)
 
-	it("identifies a carrier from the spectrum after the narrow digital trials, and never persists the identify job", async () => {
+	it("keeps a carrier unlabelled without trial evidence, and never persists the identify job", async () => {
 		const h = serviceHarness(noPassive)
 		const events: ScannerIdentifyEventData[] = []
 		h.service.on("identify", (d: ScannerIdentifyEventData) => events.push(d))
@@ -207,6 +207,10 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		// 2000 ms plus start latency); the golden before WG11 was `trials: []`.
 		await until(() => events.at(-1)?.state === "trying")
 		expect(events.at(-1)?.trials).toEqual([
+			expect.objectContaining({
+				protocol: "analog-fm",
+				outcome: "unsupported",
+			}),
 			expect.objectContaining({
 				protocol: "nxdn48",
 				decoder: "dsd-fme",
@@ -228,13 +232,14 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		await until(() => h.service.getJob(job.id)?.state === "cancelled")
 		const [target] = h.service.getJob(job.id)!.identify!.targets
 		expect(target).toMatchObject({
-			state: "candidate",
+			state: "unidentified",
 			result: {
-				protocol: "carrier",
+				hint: "carrier",
 				measurements: { source: "track", class: "carrier" },
 			},
 		})
 		expect(target!.trials.map(t => [t.protocol, t.outcome])).toEqual([
+			["analog-fm", "unsupported"],
 			["nxdn48", "cancelled"],
 			["dpmr", "cancelled"],
 			["dstar", "cancelled"],

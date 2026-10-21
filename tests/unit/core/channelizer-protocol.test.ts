@@ -308,3 +308,35 @@ describe("private observed protocol compatibility", () => {
 		expect(parseObservedEventLine(rejected)).toEqual(parseEventLine(rejected))
 	})
 })
+
+it("encodes IQ retunes and accepts retuned and admission refusal replies", () => {
+	const request = {
+		v: 1,
+		type: "retune",
+		channelId: "a",
+		centerHz: 162e6,
+	} as const
+	expect(JSON.parse(encodeRequest(request))).toEqual(request)
+	for (const event of [
+		{ v: 1, generation: 1, type: "retuned", channelId: "a", centerHz: 162e6 },
+		{
+			v: 1,
+			generation: 1,
+			type: "refused",
+			channelId: "a",
+			reason: "admission",
+		},
+	])
+		expect(parseEventLine(JSON.stringify(event))).toEqual({ ok: true, event })
+	expect(
+		parseEventLine(
+			JSON.stringify({
+				v: 1,
+				generation: 1,
+				type: "refused",
+				channelId: "a",
+				reason: "other",
+			}),
+		).ok,
+	).toBe(false)
+})

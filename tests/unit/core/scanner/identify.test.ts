@@ -70,7 +70,7 @@ const priorsArb = fc
 describe("identify planning (spec § 10.8)", () => {
 	// Feature: signal-discovery-scanner, Property 25: Identify trials
 	// Validates: spec § 10.8
-	it("plans exactly the protocols with a prior > 0 (minus the restriction), in score order, one run per probe mode", () => {
+	it("plans compatible or explicitly requested protocols with positive clamped priors, in score order, one run per probe mode", () => {
 		fc.assert(
 			fc.property(
 				trackArb,
@@ -86,11 +86,15 @@ describe("identify planning (spec § 10.8)", () => {
 					expect(classes[0]).toBe(classOf(track))
 					const expected = IDENTIFY_PROTOCOLS.filter(
 						p =>
-							(priors[p] ?? 1) > 0 &&
+							!["ais", "acars", "vdl2", "lora"].includes(p) &&
+							(protocols.length > 0 ||
+								classes[0] !== "carrier" ||
+								p === "analog-fm") &&
 							(protocols.length === 0 || protocols.includes(p)) &&
-							classes.some(c =>
-								CLASS_HYPOTHESES[c].some(h => h.protocol === p),
-							),
+							(protocols.length > 0 ||
+								classes.some(c =>
+									CLASS_HYPOTHESES[c].some(h => h.protocol === p),
+								)),
 					)
 					const planned = plan.trials.map(t => t.protocol)
 					expect(new Set(planned).size).toBe(planned.length)
@@ -147,7 +151,7 @@ describe("identify planning (spec § 10.8)", () => {
 		expect(plan.trials.some(t => t.protocol === "ism")).toBe(false)
 	})
 
-	it("applies the request's protocol restriction and drops a protocol whose prior is 0", () => {
+	it("applies the request's protocol restriction and retains a protocol whose prior is 0", () => {
 		expect(
 			identifyScores(dmrTrack(), { priors: {}, protocols: ["pocsag"] }).map(
 				h => h.protocol,
@@ -157,7 +161,7 @@ describe("identify planning (spec § 10.8)", () => {
 			priors: { dmr: 0 },
 			protocols: [],
 		})
-		expect(noDmr.map(h => h.protocol)).not.toContain("dmr")
+		expect(noDmr.find(h => h.protocol === "dmr")?.score).toBeGreaterThan(0)
 		expect(noDmr[0]?.protocol).toBe("aprs")
 	})
 
@@ -238,9 +242,9 @@ describe("identify planning (spec § 10.8)", () => {
 		expect(identifyVerdict({ ...v, decoded: true })).toBe("identified")
 		expect(identifyVerdict({ ...v, heardIdentity: true })).toBe("candidate")
 		expect(identifyVerdict({ ...v, discoveryConfidence: "classified" })).toBe(
-			"candidate",
+			"unidentified",
 		)
-		expect(identifyVerdict({ ...v, topScore: 0.5 })).toBe("candidate")
+		expect(identifyVerdict({ ...v, topScore: 0.5 })).toBe("unidentified")
 		expect(
 			identifyVerdict({
 				...v,

@@ -85,7 +85,7 @@ describe("classifySpectral", () => {
 		expect(c.hypotheses[0]).toEqual({ protocol: "dmr", score: 0.9 })
 		expect(c.cap).toBeUndefined()
 	})
-	it("multiplies by priors and removes protocols whose prior is 0", () => {
+	it("multiplies by priors and retains protocols whose prior is 0", () => {
 		const c = classifySpectral(snap(), {
 			priors: { dmr: 1, ysf: 0, p25p1: 0.5 },
 			protocols: [],
@@ -94,6 +94,7 @@ describe("classifySpectral", () => {
 			"dmr",
 			"nxdn96",
 			"p25p1",
+			"ysf",
 		])
 		expect(c.hypotheses.find(h => h.protocol === "p25p1")?.score).toBeCloseTo(
 			0.2,

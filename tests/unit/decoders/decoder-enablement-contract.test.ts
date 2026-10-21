@@ -354,11 +354,12 @@ describe("decoder enablement contract", () => {
 		const reasons: DecoderSuspensionReasonCode[] = [
 			"efficiency-budget",
 			"decoder-unavailable",
+			"channelizer-unavailable",
 		]
 		const origin: TunerCommandOrigin = "decoder-rate"
 		const alert: ResourceAlert["type"] = "link-capacity"
 		expect([reasons, origin, alert]).toEqual([
-			["efficiency-budget", "decoder-unavailable"],
+			["efficiency-budget", "decoder-unavailable", "channelizer-unavailable"],
 			"decoder-rate",
 			"link-capacity",
 		])
@@ -418,6 +419,7 @@ describe("decoder enablement contract", () => {
 		for (const [reasonCode, words] of [
 			["efficiency-budget", "over the efficiency budget"],
 			["decoder-unavailable", "not installed"],
+			["channelizer-unavailable", "channelizer not available"],
 		]) {
 			const state = scenarioState("live")
 			const fact = decoderFacts(state)[0]

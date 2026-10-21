@@ -88,6 +88,8 @@ export const multimonNgOptionsSchema = z
 		// At most the decoder's channel limit of target frequencies.
 		frequencies: z.array(frequencyHz).max(MULTIMON_FREQUENCIES_MAX).optional(),
 		frequency: frequencyHz.optional(),
+		// Bound each decoder to at most 16 explicit channel placements.
+		channelsHz: z.array(frequencyHz).max(16).optional(),
 		channelHz: frequencyHz.nullable().optional(),
 		offsetHz: z.number().finite().optional(),
 		debugRecordPath: z.string().nullable().optional(),
@@ -97,6 +99,17 @@ export const multimonNgOptionsSchema = z
 	.strict()
 
 export const multimonNgOptionDescriptors: DecoderOptionDescriptor[] = [
+	{
+		key: "channelsHz",
+		patchable: true,
+		type: "number-list",
+		unit: "Hz",
+		default: null,
+		secret: false,
+		effect: "restart",
+		description:
+			"Absolute RF channel centres (positive Hz), at most 16 entries.",
+	},
 	{
 		key: "channelHz",
 		type: "number",

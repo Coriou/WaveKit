@@ -194,6 +194,10 @@ pub enum Request {
     Open(OpenReq),
     OpenDemod(DemodOpen),
     Retune(RetuneReq),
+    RetuneIq {
+        channel_id: String,
+        center_hz: f64,
+    },
     Squelch(SquelchReq),
     Close {
         id: String,
@@ -319,6 +323,22 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
                 gain,
                 queue_bytes: queue_bytes as usize,
             }))
+        }
+        Some("retune") if obj.contains_key("channelId") => {
+            only(obj, &["v", "type", "channelId", "centerHz"]).map_err(err)?;
+            let channel_id = obj
+                .get("channelId")
+                .and_then(Value::as_str)
+                .filter(|id| valid_id(id))
+                .ok_or_else(|| err("invalid channel id".into()))?;
+            let center_hz = num("centerHz")?;
+            if !center_hz.is_finite() {
+                return Err(err("non-finite centre".into()));
+            }
+            Ok(Request::RetuneIq {
+                channel_id: channel_id.into(),
+                center_hz,
+            })
         }
         Some("retune") => parse_retune(obj, id),
         Some("squelch") => parse_squelch(obj, id),
@@ -874,6 +894,25 @@ fn parse_squelch_opts(v: &Value) -> Result<SquelchOpts, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iq_retune_schema_is_distinct_from_demod_retune() {
+        assert_eq!(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"a","centerHz":123}"#),
+            Ok(Request::RetuneIq {
+                channel_id: "a".into(),
+                center_hz: 123.0
+            })
+        );
+        for line in [
+            r#"{"v":1,"type":"retune","channelId":"bad id","centerHz":123}"#,
+            r#"{"v":1,"type":"retune","channelId":"a"}"#,
+            r#"{"v":1,"type":"retune","channelId":"a","centerHz":123,"bandwidthHz":12000}"#,
+            r#"{"v":1,"type":"retune","channelId":"a","id":"a","centerHz":123}"#,
+        ] {
+            assert!(parse_request(line).is_err());
+        }
+    }
 
     const OPEN: &str = r#""v":1,"type":"open","id":"ais-g1","centerHz":162000000,"bandwidthHz":364800,"transitionHz":9600,"outputRateHz":384000"#;
 

@@ -20,6 +20,7 @@ import type {
 	SdrHostStatus,
 	SourceBackpressure,
 	ResourceAlert,
+	LinkAdvisory,
 } from "@wavekit/api-types"
 import type { ContainerMonitor } from "./container-monitor.js"
 import type { SdrHostPoller } from "./sdr-host-poller.js"
@@ -159,9 +160,19 @@ export class ResourceAggregator extends EventEmitter {
 		return snapshot
 	}
 
-	/**
-	 * Gets container resources only.
-	 */
+	/** Report numeric link-capacity evidence without receiver addresses. */
+	reportLinkAdvisory(sourceId: string, advisory: LinkAdvisory): void {
+		if (advisory.level === "none") return
+		this.emit("alert", {
+			type: "link-capacity",
+			severity: advisory.level === "dropping" ? "critical" : "warning",
+			sourceId,
+			message: `Link capacity: payload ${advisory.payloadBytesPerSecond} B/s, sustained ${advisory.sustainedBytesPerSecond ?? "unknown"} B/s, shortfall ${advisory.shortfallPercent ?? "unknown"}%, upstream drops ${advisory.upstreamDropBytesPerSecond ?? "unknown"} B/s`,
+			timestamp: new Date().toISOString(),
+		} satisfies ResourceAlert)
+	}
+
+	/** Gets container resources only. */
 	getContainerResources(): ContainerResources {
 		if (!this.containerMonitor) {
 			return {

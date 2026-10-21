@@ -1,3 +1,14 @@
+import * as fs from "node:fs"
+import * as fsp from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
+import { PassThrough } from "node:stream"
+import { createIqCaptureService } from "../../../../src/core/iq-capture/service.js"
+import { createAnalogLiveRunner } from "../../../../src/core/iq-capture/analog-live.js"
+import { createAnalogTrialRunner } from "../../../../src/core/iq-capture/analog-trial.js"
+import { ToneDetector } from "../../../../src/core/audio-tones/tone-detector.js"
+import { fakeSpawner, spyLogger } from "../iq-capture/helpers.js"
+import { syntheticTone, referenceStats } from "./identify-synth.js"
 import { AnalogAdmission } from "../../../../src/core/scanner/analog-admission.js"
 /** WG12: a claimed capture whose plan includes analog runs the replay trial. */
 import { Writable } from "node:stream"
@@ -470,7 +481,7 @@ describe("IdentifyRunner analog replay trial (WG12)", () => {
 		}
 	})
 
-	it("a throwing analog runner stays a candidate and logs no capture path", async () => {
+	it("a throwing analog runner stays unidentified and logs no capture path", async () => {
 		const log = captureLogger()
 		const h = replayHarness({
 			protocols: ["analog-fm"],
@@ -485,7 +496,7 @@ describe("IdentifyRunner analog replay trial (WG12)", () => {
 		try {
 			await h.settle()
 			expect(h.last()?.state).not.toBe("identified")
-			expect(h.last()?.state).toBe("candidate")
+			expect(h.last()?.state).toBe("unidentified")
 			expect(h.trials().find(t => t.decoder === "analog-demod")?.outcome).toBe(
 				"cancelled",
 			)
@@ -701,7 +712,7 @@ describe("IdentifyRunner analog replay trial (WG12)", () => {
 				transport: "replay",
 				outcome: "cancelled",
 			})
-			expect(h.last()?.state).toBe("candidate")
+			expect(h.last()?.state).toBe("unidentified")
 			expect(h.last()?.result?.analog).toBeUndefined()
 			expect(h.last()?.result?.confidence).toBe("activity")
 		} finally {
@@ -1172,3 +1183,209 @@ async function expectReplayBound(
 		await h.destroy()
 	}
 }
+
+describe("identify without live audio", () => {
+	it("proves failed digital trials with zero live-audio clients", async () => {
+		const port = new FakePort()
+		port.live = false
+		const h = replayHarness({
+			protocols: ["dmr", "analog-fm"],
+			captures: null,
+			analogEvidence: port,
+			timeoutMs: 30_000,
+			analogTrial: {
+				run: () => Promise.resolve(resultOf("no-sync")),
+				runLive: () => Promise.resolve(resultOf("no-sync")),
+			},
+		})
+		try {
+			await h.runner.start()
+			h.tracks.push(viewOf(analogTrack()))
+			for (let i = 0; i < 30 && !FINAL.has(h.last()?.state ?? ""); i++)
+				await h.advance(1000)
+			expect(h.trials().find(t => t.decoder === "live-audio")).toMatchObject({
+				outcome: "not-needed",
+			})
+			expect(h.trials().find(t => t.decoder === "dsd-fme")).toMatchObject({
+				outcome: "no-sync",
+			})
+			expect(h.last()?.result).toMatchObject({
+				proof: {
+					kind: "digital-undecoded",
+					summary: "Digital, not decoded (tried DMR)",
+				},
+			})
+		} finally {
+			await h.destroy()
+		}
+	})
+
+	it.each(["ctcss", "dcs"] as const)(
+		"decodes synthetic %s through a private cold-ring capture and analyze",
+		async kind => {
+			const synthetic = syntheticTone({
+				rate: 24000,
+				kind,
+				deviation: 2500,
+				snr: 40,
+				seed: 41,
+			})
+			const root = await fsp.mkdtemp(path.join(tmpdir(), "analog-identify-"))
+			const { logger } = spyLogger()
+			const listeners = new Set<(start: number, bytes: Uint8Array) => void>()
+			let sample = 0
+			let analyzed = false
+			let now = 0
+			let timerId = 0
+			const timers = new Map<number, { at: number; fn: () => void }>()
+			const clock = {
+				setTimeout(fn: () => void, ms: number): unknown {
+					const id = ++timerId
+					timers.set(id, { at: now + ms, fn })
+					return id
+				},
+				clearTimeout(id: unknown): void {
+					timers.delete(id as number)
+				},
+			}
+			const spawner = fakeSpawner({
+				onSpawn: child => {
+					if (child.args[0] === "run") {
+						queueMicrotask(() => {
+							child.event({ type: "ready" })
+							for (const listener of listeners)
+								listener(sample, new Uint8Array(48000))
+							sample += 24000
+						})
+						child.control.on("data", (chunk: Buffer) => {
+							for (const line of chunk.toString().trim().split("\n")) {
+								const cmd = JSON.parse(line) as { type: string; id: string }
+								if (cmd.type !== "capture") continue
+								const dir =
+									child.args[child.args.indexOf("--out-dir") + 1] ?? ""
+								fs.writeFileSync(
+									path.join(dir, `${cmd.id}.cf32`),
+									Buffer.from(synthetic.iq.buffer),
+									{ mode: 0o600 },
+								)
+								child.event({
+									type: "captured",
+									id: cmd.id,
+									samples: synthetic.iq.length / 2,
+									gapSamples: 0,
+								})
+							}
+						})
+					} else if (child.args[0] === "analyze") {
+						const events = new PassThrough()
+						child.stdio[4] = events
+						const spec = child.options.stdio
+						const fd = Array.isArray(spec) ? spec[3] : null
+						if (typeof fd !== "number")
+							throw new TypeError("missing proven descriptor")
+						expect(
+							fs.readFileSync(fd).equals(Buffer.from(synthetic.iq.buffer)),
+						).toBe(true)
+						analyzed = true
+						queueMicrotask(() => {
+							const pcm = Buffer.alloc(synthetic.disc.length * 2)
+							for (let i = 0; i < synthetic.disc.length; i++)
+								pcm.writeInt16LE(
+									Math.round(
+										Math.max(-1, Math.min(1, (synthetic.disc[i] ?? 0) / 5000)) *
+											32767,
+									),
+									i * 2,
+								)
+							child.stdout.write(pcm)
+							events.end(
+								JSON.stringify({
+									event: "analysis",
+									frames: referenceStats(synthetic.disc).frames,
+									gapSamples: 0,
+								}) + "\n",
+							)
+							child.exit(0)
+						})
+					}
+				},
+			})
+			const service = createIqCaptureService({
+				config: undefined,
+				trialOnly: true,
+				protectedMode: true,
+				storageRoot: root,
+				logger,
+				spawn: spawner.spawn,
+				timers: clock,
+				now: () => now,
+				shapes: {
+					"dsd-fme": { bandwidthHz: 12500, transitionHz: 2500 },
+					"multimon-ng": { bandwidthHz: 16000, transitionHz: 576 },
+					direwolf: { bandwidthHz: 16000, transitionHz: 576 },
+				},
+			})
+			await service.start()
+			service.attachSource("rtl", {
+				sampleRateHz: 1024000,
+				centerHz: TARGET_HZ,
+				epoch: 1,
+				engine: {
+					liveEdge: () => sample,
+					tap(listener) {
+						listeners.add(listener)
+						return () => listeners.delete(listener)
+					},
+				},
+			})
+			const h = replayHarness({
+				protocols: ["analog-fm"],
+				captures: null,
+				analogEvidence: null,
+				analogTrial: createAnalogLiveRunner(
+					service,
+					createAnalogTrialRunner({
+						port: service,
+						tones: () => new ToneDetector(),
+						logger,
+					}),
+				),
+			})
+			try {
+				await h.runner.start()
+				h.tracks.push(viewOf(analogTrack()))
+				for (let i = 0; i < 5; i++) await h.advance(1)
+				// Drive native startup/capture polling with an injected clock.
+				for (let i = 0; i < 40 && !analyzed; i++) {
+					await flushAsync()
+					now += 10
+					for (const [id, timer] of timers)
+						if (timer.at <= now) {
+							timers.delete(id)
+							timer.fn()
+						}
+				}
+				for (let i = 0; i < 20; i++) await h.advance(100)
+				expect(analyzed).toBe(true)
+				expect(
+					h.trials().find(t => t.decoder === "analog-demod"),
+				).toMatchObject({ outcome: "decoded" })
+				expect(h.last()?.result?.protocol).toBe("analog-fm")
+				if (kind === "ctcss")
+					expect(h.last()?.result?.analog?.ctcssHz).toBe(74.4)
+				else expect(h.last()?.result?.analog?.dcs?.code).toBe("025")
+				expect(
+					service.near("rtl", TARGET_HZ, 1000, {
+						observationId: null,
+						limit: 10,
+					}),
+				).toEqual([])
+				expect(await fsp.readdir(path.join(root, "iq-captures"))).toEqual([])
+			} finally {
+				await h.destroy()
+				await service.stop()
+				await fsp.rm(root, { recursive: true, force: true })
+			}
+		},
+	)
+})

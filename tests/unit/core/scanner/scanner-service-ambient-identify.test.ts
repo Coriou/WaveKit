@@ -36,6 +36,7 @@ const AIS_B = 162_025_000
 // narrow digital trials (nxdn48, dpmr, dstar) ahead of the ambient one. Their outcome is timing
 // dependent (pending, running, no-sync), so only their identity is asserted.
 const NARROW_TRIALS = [
+	expect.objectContaining({ protocol: "analog-fm", outcome: "unsupported" }),
 	expect.objectContaining({ protocol: "nxdn48", transport: "offset" }),
 	expect.objectContaining({ protocol: "dpmr", transport: "offset" }),
 	expect.objectContaining({ protocol: "dstar", transport: "offset" }),
@@ -270,7 +271,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 			await until(() => r.h.service.getJob(jobId)?.state === "completed")
 			expect(evidence).toEqual([])
 			const target = firstTarget(r, jobId)
-			expect(target.state).toBe("candidate")
+			expect(target.state).toBe("unidentified")
 			expect(target.trials).toEqual(NARROW_TRIALS)
 		} finally {
 			await r.h.service.stop()
@@ -389,7 +390,7 @@ describe("ScannerService ambient identify (WG7)", () => {
 			const target = firstTarget(r, job.id)
 			expect(target.state).not.toBe("identified")
 			expect(target.trials).toEqual([
-				...NARROW_TRIALS,
+				...NARROW_TRIALS.slice(1),
 				expect.objectContaining({
 					protocol: "ais",
 					transport: "ambient",

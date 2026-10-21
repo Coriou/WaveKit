@@ -1,10 +1,7 @@
 /**
- * WG10 req 3.1 / 3.5 "Absent port: today's behaviour byte-identical". Every scenario below was run
- * on the frozen identify code (1e5b4c1f) and its full `scanner:identify` event stream recorded to
- * identify-analog-goldens.json (`WAVEKIT_WRITE_IDENTIFY_GOLDENS=1` rewrites it; never in CI).
- * Without the analog port and with an empty unavailable memo the streams must stay equal. The one
- * scenario a WG10 requirement changes on purpose (3.5: a job whose decoder reported unavailable
- * now lists it in `decodersUnavailable`) is asserted as golden + that field only.
+ * Identify regression snapshots, updated for scanner redesign 6.7/6.9:
+ * narrow analog eligibility, nonzero priors, explicit requests, and evidence-only labels.
+ * WAVEKIT_WRITE_IDENTIFY_GOLDENS=1 refreshes the snapshots locally.
  */
 import { readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -287,7 +284,7 @@ describe("identify goldens without the analog port (WG10 3.1, 3.5)", () => {
 		ScannerIdentifyEventData[]
 	>
 	for (const s of SCENARIOS) {
-		it(`${s.name} matches the frozen stream`, async () => {
+		it(`${s.name} matches the evidence-bound stream`, async () => {
 			const recorded = goldens[s.name]
 			expect(recorded).toBeDefined()
 			const events = await s.run()

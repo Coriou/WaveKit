@@ -53,6 +53,8 @@ export const direwolfOptionsSchema = z
 			.optional(),
 		frequencies: z.array(frequencyHz).optional(),
 		frequency: frequencyHz.optional(),
+		// Bound each decoder to at most 16 explicit channel placements.
+		channelsHz: z.array(frequencyHz).max(16).optional(),
 		channelHz: frequencyHz.nullable().optional(),
 		offsetHz: z.number().finite().optional(),
 		debugRecordPath: z.string().nullable().optional(),
@@ -64,6 +66,17 @@ export const direwolfOptionsSchema = z
 const base = { secret: false, effect: "restart" } as const
 
 export const direwolfOptionDescriptors: DecoderOptionDescriptor[] = [
+	{
+		key: "channelsHz",
+		patchable: true,
+		type: "number-list",
+		unit: "Hz",
+		default: null,
+		secret: false,
+		effect: "restart",
+		description:
+			"Absolute RF channel centres (positive Hz), at most 16 entries.",
+	},
 	{
 		...base,
 		key: "agwPort",
