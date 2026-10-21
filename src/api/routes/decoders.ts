@@ -23,6 +23,7 @@ import { z } from "zod"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
+	DecoderEfficiencyView,
 	DecoderInfo as ApiDecoderInfo,
 	DecoderRatePreviewItem,
 	DecoderTypeInfo,
@@ -401,6 +402,87 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			const statuses = decoderManager.getAllStatus()
 			return statuses.map(enrichWithCaps)
 		},
+	)
+
+	const efficiencyPlacementSchema = {
+		type: "object",
+		required: [
+			"decoderId",
+			"sourceId",
+			"channelHz",
+			"reach",
+			"costCores",
+			"probation",
+		],
+		properties: {
+			decoderId: { type: "string" },
+			sourceId: { type: "string" },
+			channelHz: { type: ["number", "null"] },
+			reach: { type: "string", enum: ["channel", "raw", "centre"] },
+			costCores: { type: "number" },
+			probation: { type: "boolean" },
+			detail: { type: "string", enum: ["budget", "cpu", "drops", "unknown"] },
+			retryAt: { type: "string" },
+		},
+	} as const
+	fastify.get<{ Reply: DecoderEfficiencyView }>(
+		"/api/decoders/efficiency",
+		{
+			schema: {
+				tags: ["decoders"],
+				response: {
+					200: {
+						type: "object",
+						required: ["budgetCores", "cpuGuardPercent", "sources"],
+						properties: {
+							budgetCores: { type: "number" },
+							cpuGuardPercent: { type: "number" },
+							sources: {
+								type: "array",
+								items: {
+									type: "object",
+									required: [
+										"sourceId",
+										"coresInUse",
+										"cpu",
+										"drops",
+										"dropBytesPerSecond",
+										"admitted",
+										"blocked",
+									],
+									properties: {
+										sourceId: { type: "string" },
+										coresInUse: { type: "number" },
+										cpu: {
+											type: "object",
+											required: ["percent", "limit"],
+											properties: {
+												percent: { type: ["number", "null"] },
+												limit: { type: "number" },
+											},
+										},
+										drops: {
+											type: "string",
+											enum: ["ok", "dropping", "clearing", "unknown"],
+										},
+										dropBytesPerSecond: { type: ["number", "null"] },
+										admitted: {
+											type: "array",
+											items: efficiencyPlacementSchema,
+										},
+										blocked: {
+											type: "array",
+											items: efficiencyPlacementSchema,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		async () => decoderManager.efficiencyView(),
 	)
 
 	/**

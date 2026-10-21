@@ -28,6 +28,10 @@ import type {
 	AdmissionDecision,
 } from "./enablement/contract.js"
 import {
+	EFFICIENCY_SAMPLE_MS,
+	EFFICIENCY_RETRY_MS,
+	EFFICIENCY_RETRY_MAX_MS,
+	EFFICIENCY_PROBATION_MS,
 	CHANNEL_CAPABLE_TYPES,
 	DECODER_PROTOCOLS,
 } from "./enablement/contract.js"
@@ -221,6 +225,7 @@ interface DecoderState {
 	modeOverride?: ResolvedMode
 	admittedAtMs?: number
 	admission?: AdmissionDecision
+	efficiencyBackoffMs?: number
 	/** Owning scanner job of a probe; null for configured decoders. */
 	scannerJobId: string | null
 	/** Scanner-provided input used instead of a fanout branch (probes only). */
@@ -444,6 +449,8 @@ export class DecoderManager extends EventEmitter {
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
 	/** Tail of the serial caps worker; each drain runs after the previous one. */
 	private capsWork: Promise<void> = Promise.resolve()
+	private efficiencyTimer: ReturnType<typeof setTimeout> | null = null
+	private lastEfficiencyWarningMs = -Infinity
 	private destroying = false
 	private readonly pendingCapsChanges = new Map<
 		string,
@@ -549,7 +556,9 @@ export class DecoderManager extends EventEmitter {
 
 	private runningPlacements(): RunningPlacement[] {
 		return [...this.decoders.values()].flatMap(state =>
-			state.placement && state.decoder.getStatus().running
+			state.placement &&
+			(state.decoder.getStatus().running ||
+				(state.admission?.admit === true && state.desiredRunning))
 				? [
 						{
 							key: state.placement.key,
@@ -576,6 +585,109 @@ export class DecoderManager extends EventEmitter {
 			),
 			Date.now(),
 		)
+	}
+
+	private scheduleEfficiencyEvaluation(): void {
+		if (
+			this.efficiencyTimer ||
+			this.destroying ||
+			!this.config.enablement?.gate
+		)
+			return
+		if (
+			![...this.decoders.values()].some(
+				state =>
+					state.placement &&
+					(state.decoder.getStatus().running ||
+						(state.desiredRunning && state.admission?.admit === false)),
+			)
+		)
+			return
+		this.efficiencyTimer = setTimeout(() => {
+			this.efficiencyTimer = null
+			const work = this.capsWork.then(async () => {
+				if (this.destroying) return
+				await this.applyProbation()
+				if (
+					[...this.decoders.values()].some(
+						state =>
+							state.desiredRunning &&
+							state.admission?.admit === false &&
+							state.admission.retryAtMs <= Date.now(),
+					)
+				)
+					this.notifyBandplansChanged()
+				this.scheduleEfficiencyEvaluation()
+			})
+			this.capsWork = work.catch(error => {
+				this.log.warn(
+					{ err: safeErrorFields(error) },
+					"Efficiency sampling failed",
+				)
+			})
+		}, EFFICIENCY_SAMPLE_MS)
+		this.efficiencyTimer.unref()
+	}
+
+	private async applyProbation(): Promise<void> {
+		const gate = this.config.enablement?.gate
+		if (!gate) return
+		const now = Date.now()
+		const running = this.runningPlacements()
+		for (const state of this.decoders.values()) {
+			if (
+				state.decoder.getStatus().running &&
+				state.admittedAtMs !== undefined &&
+				now - state.admittedAtMs >= EFFICIENCY_PROBATION_MS
+			)
+				delete state.efficiencyBackoffMs
+		}
+		const verdicts = gate.probation(running, now)
+		for (const verdict of verdicts) {
+			const placement = running.find(item => item.key === verdict.key)
+			if (!placement || now - placement.admittedAtMs >= EFFICIENCY_PROBATION_MS)
+				continue
+			const state = [...this.decoders.values()].find(
+				item => item.placement?.key === verdict.key,
+			)
+			if (!state) continue
+			gate.noteSuspended(verdict.key, verdict.detail, now)
+			state.efficiencyBackoffMs = Math.min(
+				state.efficiencyBackoffMs === undefined
+					? EFFICIENCY_RETRY_MS
+					: state.efficiencyBackoffMs * 2,
+				EFFICIENCY_RETRY_MAX_MS,
+			)
+			state.admission = {
+				admit: false,
+				detail: verdict.detail,
+				retryAtMs: now + state.efficiencyBackoffMs,
+			}
+			delete state.admittedAtMs
+			await this.suspend(state, this.assessEligibility(state))
+		}
+		if (verdicts.length === 0 && now - this.lastEfficiencyWarningMs >= 60_000) {
+			const view = this.efficiencyView()
+			if (
+				view.sources.some(
+					source =>
+						!running.some(
+							placement =>
+								placement.sourceId === source.sourceId &&
+								now - placement.admittedAtMs < EFFICIENCY_PROBATION_MS,
+						) &&
+						(source.drops === "dropping" ||
+							(source.cpu.percent !== null &&
+								source.cpu.percent > source.cpu.limit)),
+				)
+			) {
+				this.lastEfficiencyWarningMs = now
+				this.log.warn(
+					{ reasonCode: "efficiency-budget" },
+					"Decoder efficiency drops or CPU limit exceeded",
+				)
+			}
+		}
 	}
 
 	private placementViews(parent: DecoderState): DecoderPlacementView[] {
@@ -753,6 +865,7 @@ export class DecoderManager extends EventEmitter {
 		if (!enablement || this.reconcilingPlacements || this.destroying) return
 		this.reconcilingPlacements = true
 		try {
+			await this.applyProbation()
 			const plan = enablement.planner(this.plannerInput())
 			const wanted = plan.wanted.filter(placement => {
 				const parent = this.decoders.get(placement.decoderId)
@@ -833,6 +946,7 @@ export class DecoderManager extends EventEmitter {
 				) {
 					enablement.gate?.forget(parent.placement.key)
 					this.logPlacement(parent.placement, "removed")
+					delete parent.efficiencyBackoffMs
 					delete parent.admission
 					delete parent.admittedAtMs
 					delete parent.placement
@@ -879,6 +993,7 @@ export class DecoderManager extends EventEmitter {
 				const wasWanted = state.desiredRunning
 				if (moved && state.placement) {
 					enablement.gate?.forget(state.placement.key)
+					delete state.efficiencyBackoffMs
 					delete state.admission
 					delete state.admittedAtMs
 				}
@@ -924,6 +1039,7 @@ export class DecoderManager extends EventEmitter {
 			}
 		} finally {
 			this.reconcilingPlacements = false
+			this.scheduleEfficiencyEvaluation()
 		}
 	}
 
@@ -1577,6 +1693,7 @@ export class DecoderManager extends EventEmitter {
 		if (state.decoder.caps.input !== "external" || this.config.enablement) {
 			const sourceId = this.selectedSourceId(state)
 			this.admitPlacement(state)
+			this.scheduleEfficiencyEvaluation()
 			const eligibility = this.assessEligibility(
 				state,
 				(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined) ?? null,
@@ -1625,6 +1742,8 @@ export class DecoderManager extends EventEmitter {
 			await state.decoder.start()
 		} catch (err) {
 			state.lastError = createDecoderLastError(err, "error")
+			if (state.admission?.admit) delete state.admission
+			delete state.admittedAtMs
 			this.unwireDecoderFromFanout(state)
 			this.updateDecoderHealth(state, "faulted")
 			throw err
@@ -1657,6 +1776,8 @@ export class DecoderManager extends EventEmitter {
 		state.intentionallyStopped = true
 		state.stopRevision++
 		state.desiredRunning = false
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		state.startMode = "auto"
 		state.rateGeneration++
 		const stopGeneration = state.rateGeneration
@@ -1747,8 +1868,22 @@ export class DecoderManager extends EventEmitter {
 		this.log.info("Starting all enabled decoders")
 
 		const startPromises: Promise<void>[] = []
+		const states = new Map(this.decoders)
+		const enablement = this.config.enablement
+		const order = enablement
+			? [
+					...new Set([
+						...enablement
+							.planner(this.plannerInput())
+							.wanted.map(placement => placement.decoderId),
+						...states.keys(),
+					]),
+				]
+			: [...states.keys()]
 
-		for (const [id, state] of this.decoders) {
+		for (const id of order) {
+			const state = states.get(id)
+			if (!state) continue
 			// Probes are started and owned by the scanner's probe pool (spec § 6.5).
 			if (state.owner !== "config") continue
 			if (
@@ -2181,6 +2316,8 @@ export class DecoderManager extends EventEmitter {
 	 */
 	async destroy(): Promise<void> {
 		this.destroying = true
+		if (this.efficiencyTimer) clearTimeout(this.efficiencyTimer)
+		this.efficiencyTimer = null
 		for (const state of this.pendingScannerChannels.keys())
 			this.cancelScannerChannelAttempt(state)
 		this.log.info("Destroying DecoderManager")
@@ -2325,6 +2462,8 @@ export class DecoderManager extends EventEmitter {
 		// Handle stopped event
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("stopped", () => {
+			if (state.admission?.admit) delete state.admission
+			delete state.admittedAtMs
 			try {
 				this.emit("decoder:stopped", decoder.id)
 			} catch (err) {
@@ -2373,6 +2512,8 @@ export class DecoderManager extends EventEmitter {
 		signal: string | null,
 	): void {
 		const { decoder } = state
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		const now = Date.now()
 
 		// A suspension stop is not a failure: keep the reservation, record no
@@ -2487,7 +2628,7 @@ export class DecoderManager extends EventEmitter {
 			state.nextRestartAt = null
 
 			// Use void to handle the promise without blocking
-			void (async () => {
+			const restart = async () => {
 				try {
 					// Wire to fanout and start
 					if (
@@ -2496,6 +2637,8 @@ export class DecoderManager extends EventEmitter {
 					)
 						return
 					if (this.config.enablement) {
+						this.admitPlacement(state)
+						this.scheduleEfficiencyEvaluation()
 						const eligibility = this.assessEligibility(state)
 						if (eligibility.blockedBy) {
 							await this.suspend(state, eligibility)
@@ -2519,6 +2662,7 @@ export class DecoderManager extends EventEmitter {
 						return
 					}
 					await state.decoder.start()
+					if (this.config.enablement) this.scheduleEfficiencyEvaluation()
 					this.recheckStaleChannel(this.selectedSourceId(state), state)
 				} catch (err) {
 					// A failed rebuild already left the decoder stopped with its error.
@@ -2534,7 +2678,13 @@ export class DecoderManager extends EventEmitter {
 						this.handleDecoderExit(state, null, null)
 					}
 				}
-			})()
+			}
+			if (state.placement && this.config.enablement?.gate) {
+				this.capsWork = this.capsWork.then(restart)
+				void this.capsWork
+			} else {
+				void restart()
+			}
 		}, delay)
 
 		// Calculate next delay with exponential backoff (Requirement 4.2)
@@ -3547,6 +3697,8 @@ export class DecoderManager extends EventEmitter {
 		eligibility: Eligibility,
 	): Promise<void> {
 		const id = state.config.id
+		if (state.admission?.admit) delete state.admission
+		delete state.admittedAtMs
 		state.rateGeneration++
 		state.suspension = {
 			reasonCode: eligibility.blockedBy ?? "unsupported-sample-rate",
@@ -3877,7 +4029,15 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private admitPlacement(state: DecoderState): void {
 		const gate = this.config.enablement?.gate
-		if (!gate || !state.placement || state.decoder.getStatus().running) return
+		if (
+			!gate ||
+			!state.desiredRunning ||
+			state.intentionallyStopped ||
+			!state.placement ||
+			state.decoder.getStatus().running ||
+			state.admission?.admit === true
+		)
+			return
 		if (
 			state.admission?.admit === false &&
 			state.admission.retryAtMs > Date.now()
@@ -3895,6 +4055,11 @@ export class DecoderManager extends EventEmitter {
 			Date.now(),
 		)
 		if (state.admission.admit) state.admittedAtMs = Date.now()
+		else if (previous?.admit === false)
+			state.admission.retryAtMs = Math.max(
+				previous.retryAtMs,
+				state.admission.retryAtMs,
+			)
 	}
 
 	private assessEligibility(
