@@ -1,9 +1,12 @@
 import { performance } from "node:perf_hooks"
-import { EFFICIENCY_CLEAR_MS, EFFICIENCY_SAMPLE_MS } from "./contract.js"
+import {
+	EFFICIENCY_CLEAR_MS,
+	EFFICIENCY_SAMPLE_MS,
+	EFFICIENCY_STALE_MS,
+} from "./contract.js"
 import type { EfficiencySample, SourceDropSample } from "./contract.js"
 import type { DropReader } from "./efficiency-gate.js"
 
-export const EFFICIENCY_STALE_MS = 3 * EFFICIENCY_SAMPLE_MS
 type Counters = { droppedBytesTotal: number; droppedChunksTotal: number }
 type Baseline = {
 	branches: ReadonlyMap<string, Counters>

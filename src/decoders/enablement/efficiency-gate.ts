@@ -4,7 +4,7 @@ import {
 	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MS,
 	EFFICIENCY_RETRY_MAX_MS,
-	EFFICIENCY_SAMPLE_MS,
+	EFFICIENCY_STALE_MS,
 } from "./contract.js"
 import type {
 	AdmissionDecision,
@@ -13,9 +13,6 @@ import type {
 	RunningPlacement,
 	WantedPlacement,
 } from "./contract.js"
-
-// 3 × 2000 ms = 6000 ms: tolerates one missed tick plus jitter.
-const EFFICIENCY_STALE_MS = 3 * EFFICIENCY_SAMPLE_MS
 
 const valid = (value: unknown): value is number =>
 	typeof value === "number" && Number.isFinite(value) && value >= 0
