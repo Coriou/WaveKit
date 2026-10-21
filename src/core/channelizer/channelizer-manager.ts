@@ -123,6 +123,7 @@ interface SourceChannelizer {
 	channels: Map<string, OpenChannel>
 	waiters: Map<string, OpenAttempt>
 	closing: Map<string, Closing>
+	retuning: Set<string>
 	interruptions: Set<() => void>
 	/** Requests between `open` and attaching (or failing); the process is not idle while any is in flight. */
 	pending: number
@@ -351,6 +352,85 @@ export class ChannelizerManager
 					reject(err)
 				},
 			)
+		})
+	}
+
+	/** Keeps the existing stream; callers close and reopen on refusal or transport failure. */
+	async retuneChannel(
+		sourceId: string,
+		channelId: string,
+		centerHz: number,
+	): Promise<"retuned" | "refused"> {
+		const s = this.active.get(sourceId)
+		const ch = s?.channels.get(channelId)
+		if (
+			!s ||
+			!ch ||
+			s.invalidated ||
+			this.channelOwner.get(channelId) !== sourceId
+		)
+			throw new WaveKitError("unknown channel", "CHANNELIZER_REQUEST_INVALID")
+		if (!Number.isFinite(centerHz))
+			throw new WaveKitError(
+				"invalid channel centre",
+				"CHANNELIZER_REQUEST_INVALID",
+			)
+		if (s.retuning.has(channelId))
+			throw new WaveKitError(
+				"channel retune already pending",
+				"CHANNELIZER_REQUEST_INVALID",
+			)
+		return new Promise((resolve, reject) => {
+			let settled = false
+			const fail = () =>
+				finish(
+					new WaveKitError(
+						"channel retune transport unavailable",
+						"CHANNELIZER_UNAVAILABLE",
+					),
+				)
+			const onEvent = (e: ChannelizerEvent) => {
+				if (e.generation !== s.generation) return
+				if (
+					(e.type === "retuned" || e.type === "refused") &&
+					e.channelId === channelId
+				) {
+					const live =
+						this.active.get(sourceId) === s &&
+						!s.invalidated &&
+						s.channels.get(channelId) === ch &&
+						this.channelOwner.get(channelId) === sourceId &&
+						!ch.stream.destroyed
+					if (!live || (e.type === "retuned" && e.centerHz !== centerHz)) {
+						fail()
+						return
+					}
+					finish(e.type)
+				} else if (e.type === "closed" && e.id === channelId) fail()
+			}
+			const finish = (result: "retuned" | "refused" | WaveKitError) => {
+				if (settled) return
+				settled = true
+				clearTimeout(timer)
+				s.process.off("event", onEvent)
+				s.process.off("protocol-error", fail)
+				ch.stream.off("close", fail)
+				s.interruptions.delete(fail)
+				s.retuning.delete(channelId)
+				if (result instanceof WaveKitError) reject(result)
+				else resolve(result)
+			}
+			const timer = setTimeout(fail, this.deps.openTimeoutMs ?? OPEN_TIMEOUT_MS)
+			s.retuning.add(channelId)
+			s.interruptions.add(fail)
+			s.process.on("event", onEvent)
+			s.process.on("protocol-error", fail)
+			ch.stream.once("close", fail)
+			try {
+				s.process.send({ v: 1, type: "retune", channelId, centerHz })
+			} catch {
+				fail()
+			}
 		})
 	}
 
@@ -1133,6 +1213,7 @@ export class ChannelizerManager
 			waiters: new Map(),
 			closing: new Map(),
 			interruptions: new Set(),
+			retuning: new Set(),
 			pending: 0,
 			gapAtByte: null,
 			droppedAtGap: 0,

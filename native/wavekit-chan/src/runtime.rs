@@ -242,6 +242,10 @@ impl Runtime {
             Request::Open(o) => self.open(o, None),
             Request::OpenDemod(o) => self.open_demod(o),
             Request::Retune(req) => self.retune(req),
+            Request::RetuneIq {
+                channel_id,
+                center_hz,
+            } => self.retune_iq(channel_id, center_hz),
             Request::Squelch(req) => self.squelch(req),
             Request::Close { id } => self.close(&id, "requested"),
             Request::MarkGap {
@@ -601,6 +605,25 @@ impl Runtime {
             "filterTaps": taps,
             "groupDelaySamples": delay,
         }));
+    }
+
+    fn retune_iq(&mut self, channel_id: String, center_hz: f64) {
+        let admitted = self.channels.get_mut(&channel_id).is_some_and(|ch| {
+            if let Engine::Iq(dsp) = &mut ch.dsp {
+                if let Ok(offset) =
+                    dsp.admit_retune(center_hz, self.args.input_center, self.args.usable_fraction)
+                {
+                    dsp.retune(offset);
+                    return true;
+                }
+            }
+            false
+        });
+        if admitted {
+            self.emit(json!({"type": "retuned", "channelId": channel_id, "centerHz": center_hz}));
+        } else {
+            self.emit(json!({"type": "refused", "channelId": channel_id, "reason": "admission"}));
+        }
     }
 
     fn retune(&mut self, req: RetuneReq) {
@@ -1368,6 +1391,44 @@ mod tests {
     fn open(id: &str, center: f64, queue: usize) -> Request {
         parse_request(&format!(r#"{{"v":1,"type":"open","id":"{id}","centerHz":{center},"bandwidthHz":45600,"transitionHz":1200,"outputRateHz":48000,"format":"cf32","queueBytes":{queue}}}"#)).unwrap()
     }
+    #[test]
+    fn retune_outside_admission_is_refused() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("a", 162e6, 4096));
+        r.request_and_wait(open("reference", 162e6, 4096));
+        let (i, q) = (vec![0.25; 2048], vec![0.5; 2048]);
+        for id in ["a", "reference"] {
+            if let Engine::Iq(dsp) = &mut r.channels.get_mut(id).unwrap().dsp {
+                dsp.process_f32(&i, &q);
+            }
+        }
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"a","centerHz":163000000}"#)
+                .unwrap(),
+        );
+        assert_eq!(last(&ev)["type"], "refused");
+        assert_eq!(last(&ev)["reason"], "admission");
+        assert!(r.channels.contains_key("a"));
+        // A refusal must leave the oscillator, filter history and sample schedule untouched.
+        let outputs: Vec<_> = ["a", "reference"]
+            .iter()
+            .map(|id| match &mut r.channels.get_mut(*id).unwrap().dsp {
+                Engine::Iq(dsp) => dsp.process_f32(&i, &q),
+                Engine::Demod(_) => unreachable!(),
+            })
+            .collect();
+        assert!(!outputs[0].0.is_empty());
+        assert_eq!(outputs[0], outputs[1]);
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"a","centerHz":162010000}"#)
+                .unwrap(),
+        );
+        assert_eq!(last(&ev)["type"], "retuned");
+        assert_eq!(last(&ev)["centerHz"], 162010000.0);
+        r.shutdown();
+    }
+
     fn last(ev: &Events) -> Value {
         ev.lock().unwrap().last().unwrap().clone()
     }

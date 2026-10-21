@@ -46,6 +46,14 @@ export const ChannelizerRequestSchema = z
 		z
 			.object({
 				v,
+				type: z.literal("retune"),
+				channelId: id,
+				centerHz: z.number().finite(),
+			})
+			.strict(),
+		z
+			.object({
+				v,
 				type: z.literal("mark-gap"),
 				atInputByte: count.optional(),
 				droppedInputBytes: count.optional(),
@@ -96,6 +104,24 @@ const RejectedEventSchema = z
 	})
 	.strict()
 export const ChannelizerEventSchema = z.discriminatedUnion("type", [
+	z
+		.object({
+			v,
+			type: z.literal("retuned"),
+			channelId: id,
+			generation,
+			centerHz: z.number().finite(),
+		})
+		.strict(),
+	z
+		.object({
+			v,
+			type: z.literal("refused"),
+			channelId: id,
+			generation,
+			reason: z.literal("admission"),
+		})
+		.strict(),
 	z
 		.object({
 			v,

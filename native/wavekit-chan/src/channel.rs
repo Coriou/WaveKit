@@ -115,6 +115,30 @@ impl ChannelDsp {
         }
     }
 
+    /// Changes only the NCO step, preserving its phase, FIR histories and output schedule.
+    pub fn retune(&mut self, offset_hz: f64) {
+        self.nco
+            .set_frequency(offset_hz, self.spec.input_rate as f64);
+        self.spec.offset_hz = offset_hz;
+    }
+
+    pub(crate) fn admit_retune(
+        &self,
+        center: f64,
+        capture: f64,
+        fraction: f64,
+    ) -> Result<f64, crate::admission::Reject> {
+        crate::admission::admit(
+            center,
+            self.spec.bandwidth_hz,
+            self.spec.transition_hz,
+            self.spec.output_rate,
+            self.spec.input_rate,
+            capture,
+            fraction,
+        )
+    }
+
     /// Total prototype taps across the chain.
     pub fn filter_taps(&self) -> usize {
         self.filter_taps
@@ -253,6 +277,98 @@ mod tests {
                 )
             })
             .unzip()
+    }
+
+    #[test]
+    fn retune_keeps_output_rate_and_taps() {
+        let mut dsp = ChannelDsp::new(spec(48_000, 24_000, 1000.0, Format::Cf32, 1.0)).unwrap();
+        let before = (
+            dsp.output_rate(),
+            dsp.filter_taps(),
+            dsp.group_delay_samples(),
+        );
+        dsp.retune(2000.0);
+        assert_eq!(
+            before,
+            (
+                dsp.output_rate(),
+                dsp.filter_taps(),
+                dsp.group_delay_samples()
+            )
+        );
+    }
+
+    #[test]
+    fn retune_is_phase_continuous() {
+        let mut dsp = ChannelDsp::new(spec(48_000, 48_000, 1000.0, Format::Cf32, 1.0)).unwrap();
+        let (a, b) = dsp.process_f32(&[1.0; 101], &[0.0; 101]);
+        dsp.retune(3000.0);
+        let (c, d) = dsp.process_f32(&[1.0; 2], &[0.0; 2]);
+        let phase = |x: f32, y: f32| (y as f64).atan2(x as f64);
+        let wrap = |v: f64| {
+            (v + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+        };
+        assert!(
+            wrap(phase(c[0], d[0]) - phase(a[100], b[100]) + std::f64::consts::TAU / 48.0).abs()
+                < 1e-6
+        );
+        assert!(
+            wrap(phase(c[1], d[1]) - phase(c[0], d[0]) + std::f64::consts::TAU / 16.0).abs() < 1e-6
+        );
+    }
+
+    // Feature: decoder-enablement, Property 13: VFO follows
+    // Validates: Requirements 3.5, 5.5
+    #[test]
+    fn retune_equivalence() {
+        // An integer number of old and new NCO turns before the boundary aligns the
+        // fresh reference's phase; the FIR histories converge after settling.
+        let s = spec(48_000, 24_000, 1000.0, Format::Cf32, 1.0);
+        let mut moved = ChannelDsp::new(s.clone()).unwrap();
+        moved.process_f32(&[1.0; 480], &[0.0; 480]);
+        moved.retune(3000.0);
+        let mut fresh = ChannelDsp::new(ChannelSpec {
+            offset_hz: 3000.0,
+            ..s
+        })
+        .unwrap();
+        let (i, q) = ramp(8192);
+        let a = moved.process_f32(&i, &q);
+        let b = fresh.process_f32(&i, &q);
+        let error: f64 =
+            a.0.iter()
+                .zip(&a.1)
+                .zip(b.0.iter().zip(&b.1))
+                .skip(1024)
+                .map(|((x, y), (u, v))| ((x - u) as f64).powi(2) + ((y - v) as f64).powi(2))
+                .sum();
+        assert!((error / (a.0.len() - 1024) as f64).sqrt() < 1e-4);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(100))]
+        // Feature: decoder-enablement, Property 13: VFO follows
+        // Validates: Requirements 3.5, 5.5
+        #[test]
+        fn chunk_split_invariance_across_retune(split in 1usize..4096, chunk in 1usize..300, offset in -10000i32..10000) {
+            let s = spec(48_000, 24_000, 1000.0, Format::Cf32, 1.0);
+            let (i,q) = ramp(8192);
+            let mut whole = ChannelDsp::new(s.clone()).unwrap();
+            let mut parts = ChannelDsp::new(s).unwrap();
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            for (start,end) in [(0,split),(split,i.len())] {
+                whole.process(&i[start..end], &q[start..end], &mut a);
+                for (ci,cq) in i[start..end].chunks(chunk).zip(q[start..end].chunks(chunk)) {
+                    parts.process(ci,cq,&mut b);
+                }
+                if end == split {
+                    whole.retune(offset as f64);
+                    parts.retune(offset as f64);
+                }
+            }
+            proptest::prop_assert_eq!(a,b);
+        }
     }
 
     #[test]
