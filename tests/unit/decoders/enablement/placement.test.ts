@@ -315,7 +315,7 @@ describe("placement planner", () => {
 		).toMatchObject([{ sourceId: "raw", reach: "raw", channelHz: null }])
 	})
 
-	it("auto pager VFO requires a listed band-plan channel, not a declared band", () => {
+	it("auto pager VFO accepts a listed channel but not a declared band alone", () => {
 		const d = decoder({
 			type: "multimon-ng",
 			configuredChannelsHz: [],
@@ -615,4 +615,67 @@ describe("placement planner", () => {
 			0.1,
 		)
 	})
+})
+
+it("auto pager range eligibility is independent of listed channels and their cap", () => {
+	const d = decoder({
+		type: "multimon-ng",
+		configuredChannelsHz: [],
+		protocols: ["pocsag", "flex"],
+	})
+	for (const maxBandplanChannels of [0, 4]) {
+		const fixture = {
+			...input(d),
+			maxBandplanChannels,
+			vfo: { sourceId: "s", frequencyHz: 100_000_000 },
+			bandplanRangeContains: (
+				sourceId: string,
+				hz: number,
+				protocols: readonly string[],
+			) => {
+				expect([sourceId, hz, protocols]).toEqual([
+					"s",
+					100_000_000,
+					["pocsag", "flex"],
+				])
+				return true
+			},
+		}
+		expect(planPlacements(fixture).wanted).toMatchObject([
+			{ origin: "vfo", channelHz: 100_000_000 },
+		])
+	}
+	for (const frequencyHz of [100_940_001, 0, NaN])
+		expect(
+			planPlacements({
+				...input(d),
+				vfo: { sourceId: "s", frequencyHz },
+				bandplanRangeContains: () => true,
+			}).wanted,
+		).toEqual([])
+})
+it("pager range lookup fails closed unless exactly true and preserves overrides", () => {
+	const d = decoder({ type: "multimon-ng", configuredChannelsHz: [] })
+	for (const lookup of [
+		() => false,
+		() => 1,
+		() => {
+			throw "private"
+		},
+	]) {
+		const fixture = {
+			...input(d),
+			vfo: { sourceId: "s", frequencyHz: 100_000_000 },
+			bandplanRangeContains: lookup,
+		} as unknown as PlannerInput
+		expect(planPlacements(fixture).wanted).toEqual([])
+		for (const overrides of [
+			{ mode: "always" as const },
+			{ startMode: "operator" as const },
+		])
+			expect(
+				planPlacements({ ...fixture, decoders: [{ ...d, ...overrides }] })
+					.wanted,
+			).toMatchObject([{ origin: "vfo", channelHz: 100_000_000 }])
+	}
 })

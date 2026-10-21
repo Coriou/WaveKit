@@ -1,3 +1,4 @@
+import type { DecoderReach } from "../enablement/contract.js"
 /**
  * LoRa/Meshtastic Decoder.
  *
@@ -318,6 +319,10 @@ export function buildDecoderArgs(options: LoraMeshtasticOptions): string[] {
 
 /** LoRa/Meshtastic pure-consumer decoder. */
 export class LoraMeshtasticDecoder extends IqDecimateDecoder {
+	override reach(): DecoderReach {
+		return "centre"
+	}
+
 	private options: LoraMeshtasticOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {

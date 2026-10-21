@@ -272,14 +272,26 @@ export const planPlacements: PlacementPlanner = input => {
 						)
 					if (input.vfo?.sourceId === s.id) {
 						const hz = input.vfo.frequencyHz
-						// The lookup exposes channels, not scanner-range bounds, and a
-						// declared band is no proof of a pager range: auto pager VFOs need
-						// an exact listed-channel match.
+						let inRange = false
+						if (
+							d.type === "multimon-ng" &&
+							d.mode !== "always" &&
+							d.startMode !== "operator" &&
+							!channels.includes(hz)
+						) {
+							try {
+								inRange =
+									input.bandplanRangeContains?.(s.id, hz, d.protocols) === true
+							} catch {
+								inRange = false
+							}
+						}
 						if (
 							d.type !== "multimon-ng" ||
 							d.mode === "always" ||
 							d.startMode === "operator" ||
-							channels.includes(hz)
+							channels.includes(hz) ||
+							inRange
 						)
 							add(hz, "vfo")
 					}

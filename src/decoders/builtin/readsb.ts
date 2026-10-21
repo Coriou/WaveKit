@@ -1,3 +1,4 @@
+import type { DecoderReach } from "../enablement/contract.js"
 /**
  * Readsb ADS-B Decoder - Aircraft transponder signal decoder
  *
@@ -169,6 +170,10 @@ export type ReadsbStationSource =
 	| (() => ReadsbStationLocation | null)
 
 export class ReadsbDecoder extends NetworkProducerDecoder {
+	reach(): DecoderReach {
+		return "raw"
+	}
+
 	private options: ReadsbOptions
 	private lineBuffer: string = ""
 	private readonly station: ReadsbStationSource
